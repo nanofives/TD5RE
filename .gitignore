@@ -1,0 +1,17 @@
+*.exe
+*.dll
+*.obj
+*.o
+*.log
+*.dmp
+*.bak
+*.lock
+*.lock~
+build/
+_organization/
+ghidra_*/
+ghidra-headless-mcp/
+TD5.gpr
+TD5.rep/
+data/
+tmp_ar_check*/

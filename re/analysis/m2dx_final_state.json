@@ -1,0 +1,2116 @@
+{
+  "dead": [
+    {
+      "addr": "0x10002470",
+      "name": "DEAD_UNMAPPED_10002470",
+      "size": 1121
+    },
+    {
+      "addr": "0x10002920",
+      "name": "DEAD_UNMAPPED_10002920",
+      "size": 433
+    },
+    {
+      "addr": "0x10002ae0",
+      "name": "DEAD_FUN_00402950",
+      "size": 295
+    },
+    {
+      "addr": "0x10002c90",
+      "name": "DEAD_FUN_00402ad0_part_2c90",
+      "size": 1230
+    },
+    {
+      "addr": "0x10003320",
+      "name": "DEAD_FUN_00402e60_part_3320",
+      "size": 204
+    },
+    {
+      "addr": "0x100034d0",
+      "name": "DEAD_FUN_00402e60_part_34d0",
+      "size": 1005
+    },
+    {
+      "addr": "0x10003940",
+      "name": "DEAD_FUN_00403720_part_3940",
+      "size": 706
+    },
+    {
+      "addr": "0x10003c10",
+      "name": "DEAD_FUN_00403a20_part_3c10",
+      "size": 570
+    },
+    {
+      "addr": "0x10003e50",
+      "name": "DEAD_FUN_00403d90_part_3e50",
+      "size": 419
+    },
+    {
+      "addr": "0x10004000",
+      "name": "DEAD_FUN_00403eb0_part_4000",
+      "size": 1018
+    },
+    {
+      "addr": "0x10004410",
+      "name": "DEAD_FUN_00404030_part_4410",
+      "size": 368
+    },
+    {
+      "addr": "0x100048e0",
+      "name": "DEAD_FUN_00404030_part_48e0",
+      "size": 686
+    },
+    {
+      "addr": "0x10004bc0",
+      "name": "DEAD_FUN_00404030_part_4bc0",
+      "size": 874
+    },
+    {
+      "addr": "0x10004f30",
+      "name": "DEAD_FUN_00404ec0_part_4f30",
+      "size": 635
+    },
+    {
+      "addr": "0x10006090",
+      "name": "DEAD_IntegrateVehiclePoseAndContacts_part_00006090",
+      "size": 330
+    },
+    {
+      "addr": "0x100072b0",
+      "name": "DEAD_FUN_00407270_part_72b0",
+      "size": 102
+    },
+    {
+      "addr": "0x10007320",
+      "name": "DEAD_FUN_00407270_part_7320",
+      "size": 859
+    },
+    {
+      "addr": "0x10007680",
+      "name": "DEAD_FUN_00407390_part_7680",
+      "size": 69
+    },
+    {
+      "addr": "0x100078a0",
+      "name": "DEAD_FUN_00407840_part_78a0",
+      "size": 181
+    },
+    {
+      "addr": "0x10007960",
+      "name": "DEAD_FUN_00407840_part_7960",
+      "size": 374
+    },
+    {
+      "addr": "0x10007ec0",
+      "name": "DEAD_FUN_004079c0_part_7ec0",
+      "size": 344
+    },
+    {
+      "addr": "0x10008130",
+      "name": "DEAD_FUN_004079c0_part_8130",
+      "size": 456
+    },
+    {
+      "addr": "0x10008300",
+      "name": "DEAD_FUN_004079c0_part_8300",
+      "size": 357
+    },
+    {
+      "addr": "0x10008470",
+      "name": "DEAD_FUN_004079c0_part_8470",
+      "size": 671
+    },
+    {
+      "addr": "0x10008740",
+      "name": "DEAD_FUN_00408570_part_8740",
+      "size": 537
+    },
+    {
+      "addr": "0x10008e50",
+      "name": "DEAD_FUN_00408a60_part_8e50",
+      "size": 115
+    },
+    {
+      "addr": "0x10008ed0",
+      "name": "DEAD_UNMAPPED_10008ed0",
+      "size": 136
+    },
+    {
+      "addr": "0x10008f60",
+      "name": "DEAD_UNMAPPED_10008f60",
+      "size": 224
+    },
+    {
+      "addr": "0x10009040",
+      "name": "DEAD_FUN_00408f70_part_9040",
+      "size": 53
+    },
+    {
+      "addr": "0x10009080",
+      "name": "DEAD_FUN_00408f70_part_9080",
+      "size": 240
+    },
+    {
+      "addr": "0x10009170",
+      "name": "DEAD_FUN_00409150_part_9170",
+      "size": 120
+    },
+    {
+      "addr": "0x1000bd10",
+      "name": "DEAD_FUN_0040bb70_part_bd10",
+      "size": 663
+    },
+    {
+      "addr": "0x1000bfb0",
+      "name": "DEAD_FUN_0040bd20_part_bfb0",
+      "size": 145
+    },
+    {
+      "addr": "0x1000c050",
+      "name": "DEAD_FUN_0040bd20_part_c050",
+      "size": 234
+    },
+    {
+      "addr": "0x1000c4d0",
+      "name": "DEAD_FUN_0040c120_part_c4d0",
+      "size": 1165
+    },
+    {
+      "addr": "0x1000c9a0",
+      "name": "DEAD_FUN_0040c7e0_part_c9a0",
+      "size": 744
+    },
+    {
+      "addr": "0x1000dfd0",
+      "name": "DEAD_UNMAPPED_1000dfd0",
+      "size": 451
+    },
+    {
+      "addr": "0x1000e1a0",
+      "name": "DEAD_UNMAPPED_1000e1a0",
+      "size": 373
+    },
+    {
+      "addr": "0x1000e320",
+      "name": "DEAD_UNMAPPED_1000e320",
+      "size": 234
+    },
+    {
+      "addr": "0x1000ea80",
+      "name": "DEAD_UNMAPPED_1000ea80",
+      "size": 36
+    },
+    {
+      "addr": "0x1000eab0",
+      "name": "DEAD_UNMAPPED_1000eab0",
+      "size": 300
+    },
+    {
+      "addr": "0x1000f270",
+      "name": "DEAD_UNMAPPED_1000f270",
+      "size": 415
+    },
+    {
+      "addr": "0x1000f410",
+      "name": "DEAD_UNMAPPED_1000f410",
+      "size": 282
+    },
+    {
+      "addr": "0x1000f530",
+      "name": "DEAD_UNMAPPED_1000f530",
+      "size": 214
+    },
+    {
+      "addr": "0x1000f610",
+      "name": "DEAD_UNMAPPED_1000f610",
+      "size": 166
+    },
+    {
+      "addr": "0x1000f6c0",
+      "name": "DEAD_UNMAPPED_1000f6c0",
+      "size": 403
+    },
+    {
+      "addr": "0x1000f860",
+      "name": "DEAD_UNMAPPED_1000f860",
+      "size": 786
+    },
+    {
+      "addr": "0x1000fb80",
+      "name": "DEAD_FUN_0040fb60_part_fb80",
+      "size": 701
+    },
+    {
+      "addr": "0x1000fe40",
+      "name": "DEAD_UNMAPPED_1000fe40",
+      "size": 698
+    },
+    {
+      "addr": "0x10010100",
+      "name": "DEAD_UNMAPPED_10010100",
+      "size": 397
+    },
+    {
+      "addr": "0x10010290",
+      "name": "DEAD_UNMAPPED_10010290",
+      "size": 393
+    },
+    {
+      "addr": "0x10010420",
+      "name": "DEAD_UNMAPPED_10010420",
+      "size": 420
+    },
+    {
+      "addr": "0x100105d0",
+      "name": "DEAD_UNMAPPED_100105d0",
+      "size": 513
+    },
+    {
+      "addr": "0x100107e0",
+      "name": "DEAD_UNMAPPED_100107e0",
+      "size": 332
+    },
+    {
+      "addr": "0x10010930",
+      "name": "DEAD_UNMAPPED_10010930",
+      "size": 573
+    },
+    {
+      "addr": "0x10010b70",
+      "name": "DEAD_UNMAPPED_10010b70",
+      "size": 265
+    },
+    {
+      "addr": "0x10011320",
+      "name": "DEAD_FUN_004112c0_part_1320",
+      "size": 113
+    },
+    {
+      "addr": "0x10012540",
+      "name": "DEAD_FUN_004122f0_part_2540",
+      "size": 317
+    },
+    {
+      "addr": "0x10012680",
+      "name": "DEAD_FUN_004125b0_part_2680",
+      "size": 195
+    },
+    {
+      "addr": "0x10012750",
+      "name": "DEAD_FUN_004125b0_part_2750",
+      "size": 596
+    },
+    {
+      "addr": "0x10012cd0",
+      "name": "DEAD_FUN_00412b90_part_2cd0",
+      "size": 443
+    },
+    {
+      "addr": "0x10012eb0",
+      "name": "DEAD_FUN_00412e30_part_2eb0",
+      "size": 429
+    },
+    {
+      "addr": "0x10013060",
+      "name": "DEAD_FUN_00413010_part_3060",
+      "size": 108
+    },
+    {
+      "addr": "0x100130d0",
+      "name": "DEAD_FUN_00413010_part_30d0",
+      "size": 202
+    },
+    {
+      "addr": "0x100131a0",
+      "name": "DEAD_FUN_00413010_part_31a0",
+      "size": 162
+    },
+    {
+      "addr": "0x100132f0",
+      "name": "DEAD_FUN_00413010_part_32f0",
+      "size": 102
+    },
+    {
+      "addr": "0x10013390",
+      "name": "DEAD_FUN_00413010_part_3390",
+      "size": 92
+    },
+    {
+      "addr": "0x10013be0",
+      "name": "DEAD_caseD_1",
+      "size": 34
+    },
+    {
+      "addr": "0x10013c10",
+      "name": "DEAD_UNMAPPED_10013c10",
+      "size": 33
+    },
+    {
+      "addr": "0x10013c40",
+      "name": "DEAD_UNMAPPED_10013c40",
+      "size": 3
+    },
+    {
+      "addr": "0x10013c50",
+      "name": "DEAD_UNMAPPED_10013c50",
+      "size": 63
+    },
+    {
+      "addr": "0x10013c90",
+      "name": "DEAD_UNMAPPED_10013c90",
+      "size": 50
+    },
+    {
+      "addr": "0x10013d10",
+      "name": "DEAD_UNMAPPED_10013d10",
+      "size": 34
+    },
+    {
+      "addr": "0x100150e8",
+      "name": "DEAD_caseD_6",
+      "size": 23
+    },
+    {
+      "addr": "0x10015100",
+      "name": "DEAD_caseD_3_part_00005100",
+      "size": 56
+    },
+    {
+      "addr": "0x10015138",
+      "name": "DEAD_UNMAPPED_10015138",
+      "size": 67
+    },
+    {
+      "addr": "0x1001517b",
+      "name": "DEAD_UNMAPPED_1001517b",
+      "size": 53
+    },
+    {
+      "addr": "0x100151d7",
+      "name": "DEAD_UNMAPPED_100151d7",
+      "size": 340
+    },
+    {
+      "addr": "0x1001532b",
+      "name": "DEAD_UNMAPPED_1001532b",
+      "size": 78
+    },
+    {
+      "addr": "0x10015379",
+      "name": "DEAD_FUN_004317c0",
+      "size": 44
+    },
+    {
+      "addr": "0x100153b0",
+      "name": "DEAD_FUN_00449200",
+      "size": 173
+    },
+    {
+      "addr": "0x1001545d",
+      "name": "DEAD_caseD_4_part_0000545d",
+      "size": 32
+    },
+    {
+      "addr": "0x1001547d",
+      "name": "DEAD_FUN_0044867c",
+      "size": 19
+    },
+    {
+      "addr": "0x10015490",
+      "name": "DEAD_MainMenuHandler",
+      "size": 86
+    },
+    {
+      "addr": "0x100154e6",
+      "name": "DEAD_FUN_004486be",
+      "size": 232
+    },
+    {
+      "addr": "0x100155ce",
+      "name": "DEAD_FUN_00448541",
+      "size": 266
+    },
+    {
+      "addr": "0x100156d8",
+      "name": "DEAD_FUN_00448d30",
+      "size": 344
+    },
+    {
+      "addr": "0x10015830",
+      "name": "DEAD_FUN_00448ebd",
+      "size": 140
+    },
+    {
+      "addr": "0x100158fa",
+      "name": "DEAD_MainMenuHandler_part_000058fa",
+      "size": 54
+    },
+    {
+      "addr": "0x10015930",
+      "name": "DEAD_MainMenuHandler_part_00005930",
+      "size": 47
+    },
+    {
+      "addr": "0x1001595f",
+      "name": "DEAD_MainMenuHandler_part_0000595f",
+      "size": 50
+    },
+    {
+      "addr": "0x1001599f",
+      "name": "DEAD_caseD_3_part_0000599f",
+      "size": 11
+    },
+    {
+      "addr": "0x100159aa",
+      "name": "DEAD_caseD_3_part_000059aa",
+      "size": 45
+    },
+    {
+      "addr": "0x100159de",
+      "name": "DEAD_caseD_3_part_000059de",
+      "size": 7
+    },
+    {
+      "addr": "0x100159e5",
+      "name": "DEAD_caseD_3_part_000059e5",
+      "size": 7
+    },
+    {
+      "addr": "0x100159ec",
+      "name": "DEAD_caseD_3_part_000059ec",
+      "size": 79
+    },
+    {
+      "addr": "0x10015a3b",
+      "name": "DEAD_caseD_3_part_00005a3b",
+      "size": 54
+    },
+    {
+      "addr": "0x10015a71",
+      "name": "DEAD_caseD_3_part_00005a71",
+      "size": 84
+    },
+    {
+      "addr": "0x10015ac5",
+      "name": "DEAD_caseD_3_part_00005ac5",
+      "size": 37
+    },
+    {
+      "addr": "0x10015aea",
+      "name": "DEAD_caseD_3_part_00005aea",
+      "size": 180
+    },
+    {
+      "addr": "0x10015b9e",
+      "name": "DEAD_caseD_4_part_00005b9e",
+      "size": 114
+    },
+    {
+      "addr": "0x10015c13",
+      "name": "DEAD_caseD_3",
+      "size": 123
+    },
+    {
+      "addr": "0x10015d66",
+      "name": "DEAD_FUN_00415e77",
+      "size": 24
+    },
+    {
+      "addr": "0x10015d90",
+      "name": "DEAD__strchr",
+      "size": 193
+    },
+    {
+      "addr": "0x10015e4c",
+      "name": "DEAD_caseD_6_part_00005e4c",
+      "size": 184
+    },
+    {
+      "addr": "0x10015fd4",
+      "name": "DEAD_FUN_00449531",
+      "size": 18
+    },
+    {
+      "addr": "0x10015fe6",
+      "name": "DEAD_FUN_00449543",
+      "size": 62
+    },
+    {
+      "addr": "0x10016024",
+      "name": "DEAD_FUN_00414610",
+      "size": 41
+    },
+    {
+      "addr": "0x1001604d",
+      "name": "DEAD_FUN_004495aa",
+      "size": 90
+    },
+    {
+      "addr": "0x1001614b",
+      "name": "DEAD_caseD_9_part_0000614b",
+      "size": 260
+    },
+    {
+      "addr": "0x1001624f",
+      "name": "DEAD_caseD_a_part_0000624f",
+      "size": 222
+    },
+    {
+      "addr": "0x1001632d",
+      "name": "DEAD_caseD_14",
+      "size": 155
+    },
+    {
+      "addr": "0x100163c8",
+      "name": "DEAD_caseD_c_part_000063c8",
+      "size": 39
+    },
+    {
+      "addr": "0x100163ef",
+      "name": "DEAD_caseD_c_part_000063ef",
+      "size": 35
+    },
+    {
+      "addr": "0x10016463",
+      "name": "DEAD_FUN_004499ab",
+      "size": 37
+    },
+    {
+      "addr": "0x10016534",
+      "name": "DEAD_FUN_0044e61d",
+      "size": 203
+    },
+    {
+      "addr": "0x100165ff",
+      "name": "DEAD_FUN_0044c005",
+      "size": 368
+    },
+    {
+      "addr": "0x1001676f",
+      "name": "DEAD_caseD_17_part_0000676f",
+      "size": 120
+    },
+    {
+      "addr": "0x100167e7",
+      "name": "DEAD_caseD_17_part_000067e7",
+      "size": 179
+    },
+    {
+      "addr": "0x100168c5",
+      "name": "DEAD_UNMAPPED_100168c5",
+      "size": 59
+    },
+    {
+      "addr": "0x10016900",
+      "name": "DEAD_FUN_0044b9cb",
+      "size": 92
+    },
+    {
+      "addr": "0x100169d2",
+      "name": "DEAD_FUN_0044c23d",
+      "size": 217
+    },
+    {
+      "addr": "0x10016aab",
+      "name": "DEAD_MainMenu_AnimateIntro_part_00006aab",
+      "size": 502
+    },
+    {
+      "addr": "0x10016cb0",
+      "name": "DEAD_caseD_3_part_00006cb0",
+      "size": 664
+    },
+    {
+      "addr": "0x10016fe5",
+      "name": "DEAD_FUN_0044ae10",
+      "size": 277
+    },
+    {
+      "addr": "0x100170fa",
+      "name": "DEAD_UNMAPPED_100170fa",
+      "size": 429
+    },
+    {
+      "addr": "0x100172a7",
+      "name": "DEAD_FUN_0044e6e8",
+      "size": 45
+    },
+    {
+      "addr": "0x100172e5",
+      "name": "DEAD_ScreenChampionshipMenu_part_000072e5",
+      "size": 15
+    },
+    {
+      "addr": "0x100172f4",
+      "name": "DEAD_ScreenChampionshipMenu_part_000072f4",
+      "size": 153
+    },
+    {
+      "addr": "0x1001738d",
+      "name": "DEAD_FUN_0044e7ee",
+      "size": 26
+    },
+    {
+      "addr": "0x100173a7",
+      "name": "DEAD_ScreenChampionshipMenu_part_000073a7",
+      "size": 427
+    },
+    {
+      "addr": "0x10017552",
+      "name": "DEAD_ChampionshipMenu_HandleInput_part_00007552",
+      "size": 35
+    },
+    {
+      "addr": "0x10017575",
+      "name": "DEAD_ChampionshipMenu_HandleInput_part_00007575",
+      "size": 154
+    },
+    {
+      "addr": "0x1001760f",
+      "name": "DEAD_FUN_00449b3e",
+      "size": 27
+    },
+    {
+      "addr": "0x1001762a",
+      "name": "DEAD_caseD_9_part_0000762a",
+      "size": 60
+    },
+    {
+      "addr": "0x10017666",
+      "name": "DEAD_FUN_00416cca",
+      "size": 117
+    },
+    {
+      "addr": "0x100176db",
+      "name": "DEAD_caseD_9_part_000076db",
+      "size": 62
+    },
+    {
+      "addr": "0x10017719",
+      "name": "DEAD_FUN_00449d73",
+      "size": 43
+    },
+    {
+      "addr": "0x10017744",
+      "name": "DEAD_caseD_a_part_00007744",
+      "size": 811
+    },
+    {
+      "addr": "0x10017a6f",
+      "name": "DEAD_FUN_0044a0c7",
+      "size": 777
+    },
+    {
+      "addr": "0x10017d78",
+      "name": "DEAD_FUN_0044a3d0",
+      "size": 177
+    },
+    {
+      "addr": "0x10017e29",
+      "name": "DEAD_FUN_0044a481",
+      "size": 251
+    },
+    {
+      "addr": "0x10017f24",
+      "name": "DEAD_FUN_0044c557",
+      "size": 141
+    },
+    {
+      "addr": "0x10017fb1",
+      "name": "DEAD_FUN_0044c5e4",
+      "size": 61
+    },
+    {
+      "addr": "0x10017fee",
+      "name": "DEAD_FUN_0044af28",
+      "size": 1825
+    },
+    {
+      "addr": "0x1001872f",
+      "name": "DEAD_FUN_0044b669",
+      "size": 53
+    },
+    {
+      "addr": "0x10018764",
+      "name": "DEAD_FUN_0044b69e",
+      "size": 49
+    },
+    {
+      "addr": "0x10018795",
+      "name": "DEAD_FUN_0044b6cf",
+      "size": 56
+    },
+    {
+      "addr": "0x100187cd",
+      "name": "DEAD_FUN_00418380",
+      "size": 13
+    },
+    {
+      "addr": "0x100187da",
+      "name": "DEAD_FUN_0044b714",
+      "size": 16
+    },
+    {
+      "addr": "0x100187ea",
+      "name": "DEAD_caseD_2",
+      "size": 14
+    },
+    {
+      "addr": "0x100187f8",
+      "name": "DEAD_UNMAPPED_100187f8",
+      "size": 155
+    },
+    {
+      "addr": "0x10018893",
+      "name": "DEAD_UNMAPPED_10018893",
+      "size": 423
+    },
+    {
+      "addr": "0x10018a3a",
+      "name": "DEAD_UNMAPPED_10018a3a",
+      "size": 168
+    },
+    {
+      "addr": "0x10018ae2",
+      "name": "DEAD_UNMAPPED_10018ae2",
+      "size": 93
+    },
+    {
+      "addr": "0x10018b3f",
+      "name": "DEAD_FUN_0045c03f",
+      "size": 132
+    },
+    {
+      "addr": "0x10018bf3",
+      "name": "DEAD_UNMAPPED_10018bf3",
+      "size": 123
+    },
+    {
+      "addr": "0x10018c6e",
+      "name": "DEAD_FUN_00418c60_part_8c6e",
+      "size": 156
+    },
+    {
+      "addr": "0x10018d34",
+      "name": "DEAD_FUN_00418c60_part_8d34",
+      "size": 70
+    },
+    {
+      "addr": "0x10018da4",
+      "name": "DEAD_FUN_0044c700",
+      "size": 440
+    },
+    {
+      "addr": "0x10018f68",
+      "name": "DEAD_UNMAPPED_10018f68",
+      "size": 86
+    },
+    {
+      "addr": "0x10018fcf",
+      "name": "DEAD_UNMAPPED_10018fcf",
+      "size": 35
+    },
+    {
+      "addr": "0x1001904c",
+      "name": "DEAD_UNMAPPED_1001904c",
+      "size": 79
+    },
+    {
+      "addr": "0x100190a2",
+      "name": "DEAD_UNMAPPED_100190a2",
+      "size": 79
+    },
+    {
+      "addr": "0x100190f8",
+      "name": "DEAD_FUN_0044e9d8",
+      "size": 185
+    },
+    {
+      "addr": "0x100191b1",
+      "name": "DEAD_FUN_0044ea91",
+      "size": 153
+    },
+    {
+      "addr": "0x1001924a",
+      "name": "DEAD_FUN_0044eb2a",
+      "size": 436
+    },
+    {
+      "addr": "0x100193fe",
+      "name": "DEAD_FUN_0044ecde",
+      "size": 306
+    },
+    {
+      "addr": "0x10019530",
+      "name": "DEAD_UNMAPPED_10019530",
+      "size": 32
+    },
+    {
+      "addr": "0x10019550",
+      "name": "DEAD_FUN_0044ee10",
+      "size": 57
+    },
+    {
+      "addr": "0x10019589",
+      "name": "DEAD_FUN_0044ee49",
+      "size": 339
+    },
+    {
+      "addr": "0x100196dc",
+      "name": "DEAD_FUN_004482dd",
+      "size": 53
+    },
+    {
+      "addr": "0x10019711",
+      "name": "DEAD_FUN_00448312",
+      "size": 22
+    },
+    {
+      "addr": "0x10019727",
+      "name": "DEAD_FUN_00448328",
+      "size": 146
+    },
+    {
+      "addr": "0x100197b9",
+      "name": "DEAD_FUN_004483ba",
+      "size": 137
+    },
+    {
+      "addr": "0x10019842",
+      "name": "DEAD_FUN_0044c94f",
+      "size": 117
+    },
+    {
+      "addr": "0x100198b7",
+      "name": "DEAD_FUN_0044ef9c",
+      "size": 73
+    },
+    {
+      "addr": "0x10019900",
+      "name": "DEAD_FUN_0044efe5",
+      "size": 86
+    },
+    {
+      "addr": "0x10019956",
+      "name": "DEAD_FUN_0044f03b",
+      "size": 140
+    },
+    {
+      "addr": "0x100199e2",
+      "name": "DEAD_FUN_0044f0c7",
+      "size": 27
+    },
+    {
+      "addr": "0x100199fd",
+      "name": "DEAD_FUN_0044f0e2",
+      "size": 12
+    },
+    {
+      "addr": "0x10019a09",
+      "name": "DEAD_FUN_0044f0ee",
+      "size": 27
+    },
+    {
+      "addr": "0x10019a24",
+      "name": "DEAD_FUN_0044f109",
+      "size": 141
+    },
+    {
+      "addr": "0x10019ab1",
+      "name": "DEAD_FUN_0044f196",
+      "size": 364
+    },
+    {
+      "addr": "0x10019c1d",
+      "name": "DEAD_FUN_0044f302",
+      "size": 22
+    },
+    {
+      "addr": "0x10019c33",
+      "name": "DEAD_FUN_0044f318",
+      "size": 22
+    },
+    {
+      "addr": "0x10019c49",
+      "name": "DEAD_FUN_00419b30_part_9c49",
+      "size": 45
+    },
+    {
+      "addr": "0x10019c76",
+      "name": "DEAD_FUN_00419b30_part_9c76",
+      "size": 45
+    },
+    {
+      "addr": "0x10019cb0",
+      "name": "DEAD_FUN_0044c610",
+      "size": 7
+    },
+    {
+      "addr": "0x10019cc0",
+      "name": "DEAD_FUN_0044c620",
+      "size": 224
+    },
+    {
+      "addr": "0x10019da0",
+      "name": "DEAD_FUN_0044f388",
+      "size": 119
+    },
+    {
+      "addr": "0x10019e17",
+      "name": "DEAD_FUN_0044f3ff",
+      "size": 100
+    },
+    {
+      "addr": "0x10019e7b",
+      "name": "DEAD_FUN_0044f45b",
+      "size": 182
+    },
+    {
+      "addr": "0x10019fa0",
+      "name": "DEAD_UNMAPPED_10019fa0",
+      "size": 664
+    },
+    {
+      "addr": "0x1001a364",
+      "name": "DEAD_FUN_0044c700",
+      "size": 511
+    },
+    {
+      "addr": "0x1001a588",
+      "name": "DEAD_FUN_0044c924",
+      "size": 43
+    },
+    {
+      "addr": "0x1001a66c",
+      "name": "DEAD_FUN_0045037a",
+      "size": 697
+    },
+    {
+      "addr": "0x1001a925",
+      "name": "DEAD_UNMAPPED_1001a925",
+      "size": 103
+    },
+    {
+      "addr": "0x1001a98c",
+      "name": "DEAD_UNMAPPED_1001a98c",
+      "size": 149
+    },
+    {
+      "addr": "0x1001aa21",
+      "name": "DEAD_UNMAPPED_1001aa21",
+      "size": 119
+    },
+    {
+      "addr": "0x1001aa98",
+      "name": "DEAD_UNMAPPED_1001aa98",
+      "size": 122
+    },
+    {
+      "addr": "0x1001ab12",
+      "name": "DEAD_UNMAPPED_1001ab12",
+      "size": 61
+    },
+    {
+      "addr": "0x1001ab4f",
+      "name": "DEAD_UNMAPPED_1001ab4f",
+      "size": 87
+    },
+    {
+      "addr": "0x1001aba6",
+      "name": "DEAD_FUN_0044fd70",
+      "size": 68
+    },
+    {
+      "addr": "0x1001abea",
+      "name": "DEAD_FUN_0041c564",
+      "size": 38
+    },
+    {
+      "addr": "0x1001ac10",
+      "name": "DEAD_FUN_0044fe36",
+      "size": 104
+    },
+    {
+      "addr": "0x1001acf5",
+      "name": "DEAD_UNMAPPED_1001acf5",
+      "size": 70
+    },
+    {
+      "addr": "0x1001ad59",
+      "name": "DEAD_UNMAPPED_1001ad59",
+      "size": 28
+    },
+    {
+      "addr": "0x1001ad75",
+      "name": "DEAD_UNMAPPED_1001ad75",
+      "size": 28
+    },
+    {
+      "addr": "0x1001ad91",
+      "name": "DEAD_UNMAPPED_1001ad91",
+      "size": 24
+    },
+    {
+      "addr": "0x1001aef9",
+      "name": "DEAD___seh_longjmp_unwind@4",
+      "size": 27
+    },
+    {
+      "addr": "0x1001af14",
+      "name": "DEAD_UNMAPPED_1001af14",
+      "size": 23
+    },
+    {
+      "addr": "0x1001af2b",
+      "name": "DEAD_FUN_0044d57b",
+      "size": 409
+    },
+    {
+      "addr": "0x1001b0c4",
+      "name": "DEAD_FUN_0044da29",
+      "size": 74
+    },
+    {
+      "addr": "0x1001b10e",
+      "name": "DEAD_FUN_0044da73",
+      "size": 51
+    },
+    {
+      "addr": "0x1001b141",
+      "name": "DEAD_FUN_0044daa6",
+      "size": 41
+    },
+    {
+      "addr": "0x1001b16a",
+      "name": "DEAD_FUN_0044dacf",
+      "size": 389
+    },
+    {
+      "addr": "0x1001b2ef",
+      "name": "DEAD_UNMAPPED_1001b2ef",
+      "size": 28
+    },
+    {
+      "addr": "0x1001b30b",
+      "name": "DEAD_FUN_0041b390",
+      "size": 137
+    },
+    {
+      "addr": "0x1001b49e",
+      "name": "DEAD_FUN_0045085a",
+      "size": 318
+    },
+    {
+      "addr": "0x1001b5e7",
+      "name": "DEAD_FUN_00450c5b",
+      "size": 33
+    },
+    {
+      "addr": "0x1001b666",
+      "name": "DEAD_FUN_00450cda",
+      "size": 46
+    },
+    {
+      "addr": "0x1001b694",
+      "name": "DEAD_FUN_00450d08",
+      "size": 45
+    },
+    {
+      "addr": "0x1001b6c1",
+      "name": "DEAD_FUN_00450d35",
+      "size": 199
+    },
+    {
+      "addr": "0x1001b788",
+      "name": "DEAD_FUN_00450dfc",
+      "size": 1185
+    },
+    {
+      "addr": "0x1001bc59",
+      "name": "DEAD_FUN_004512cd",
+      "size": 659
+    },
+    {
+      "addr": "0x1001bef0",
+      "name": "DEAD_FUN_004487b0",
+      "size": 47
+    },
+    {
+      "addr": "0x1001bf1f",
+      "name": "DEAD_FUN_0041bd00_part_bf1f",
+      "size": 125
+    },
+    {
+      "addr": "0x1001bff4",
+      "name": "DEAD_FUN_0041bd00_part_bff4",
+      "size": 326
+    },
+    {
+      "addr": "0x1001c13a",
+      "name": "DEAD_FUN_0041c030_part_c13a",
+      "size": 301
+    },
+    {
+      "addr": "0x1001c267",
+      "name": "DEAD_FUN_0041c030_part_c267",
+      "size": 69
+    },
+    {
+      "addr": "0x1001c2ac",
+      "name": "DEAD_FUN_00451685",
+      "size": 544
+    },
+    {
+      "addr": "0x1001c4cc",
+      "name": "DEAD_FUN_004518a5",
+      "size": 124
+    },
+    {
+      "addr": "0x1001c548",
+      "name": "DEAD_MultiplayerLobby_InitUI_part_0000c548",
+      "size": 118
+    }
+  ],
+  "active": [
+    {
+      "addr": "0x10001000",
+      "name": "Environment",
+      "size": 165
+    },
+    {
+      "addr": "0x100010b0",
+      "name": "Create",
+      "size": 309
+    },
+    {
+      "addr": "0x100011f0",
+      "name": "Destroy",
+      "size": 114
+    },
+    {
+      "addr": "0x10001270",
+      "name": "InitializeMemoryManagement",
+      "size": 773
+    },
+    {
+      "addr": "0x10001580",
+      "name": "CanFog",
+      "size": 19
+    },
+    {
+      "addr": "0x100015a0",
+      "name": "BeginScene",
+      "size": 267
+    },
+    {
+      "addr": "0x100016b0",
+      "name": "EndScene",
+      "size": 67
+    },
+    {
+      "addr": "0x10001700",
+      "name": "TextureClamp",
+      "size": 97
+    },
+    {
+      "addr": "0x10001770",
+      "name": "SetRenderState",
+      "size": 819
+    },
+    {
+      "addr": "0x10001ab0",
+      "name": "GetStats",
+      "size": 17
+    },
+    {
+      "addr": "0x10001ad0",
+      "name": "ChangeDriver",
+      "size": 482
+    },
+    {
+      "addr": "0x10001d40",
+      "name": "GetMaxTextures",
+      "size": 1063
+    },
+    {
+      "addr": "0x10002170",
+      "name": "FullScreen",
+      "size": 766
+    },
+    {
+      "addr": "0x100051b0",
+      "name": "Environment",
+      "size": 22
+    },
+    {
+      "addr": "0x100051d0",
+      "name": "Create",
+      "size": 100
+    },
+    {
+      "addr": "0x10005240",
+      "name": "Destroy",
+      "size": 42
+    },
+    {
+      "addr": "0x10005270",
+      "name": "Load",
+      "size": 368
+    },
+    {
+      "addr": "0x100053e0",
+      "name": "LoadRGB",
+      "size": 145
+    },
+    {
+      "addr": "0x10005480",
+      "name": "LoadRGBS24",
+      "size": 87
+    },
+    {
+      "addr": "0x100054e0",
+      "name": "LoadRGBS32",
+      "size": 105
+    },
+    {
+      "addr": "0x10005550",
+      "name": "Manage",
+      "size": 1608
+    },
+    {
+      "addr": "0x10005ba0",
+      "name": "GetMask",
+      "size": 149
+    },
+    {
+      "addr": "0x10005ea0",
+      "name": "LoseAll",
+      "size": 108
+    },
+    {
+      "addr": "0x10005f10",
+      "name": "RestoreAll",
+      "size": 251
+    },
+    {
+      "addr": "0x10006010",
+      "name": "ClearAll",
+      "size": 125
+    },
+    {
+      "addr": "0x100061e0",
+      "name": "Environment",
+      "size": 181
+    },
+    {
+      "addr": "0x100062a0",
+      "name": "Create",
+      "size": 1431
+    },
+    {
+      "addr": "0x10006840",
+      "name": "Destroy",
+      "size": 239
+    },
+    {
+      "addr": "0x10006930",
+      "name": "ResetFrameRate",
+      "size": 63
+    },
+    {
+      "addr": "0x10006970",
+      "name": "Pause",
+      "size": 103
+    },
+    {
+      "addr": "0x100069e0",
+      "name": "CalculateFrameRate",
+      "size": 267
+    },
+    {
+      "addr": "0x10006af0",
+      "name": "Print",
+      "size": 241
+    },
+    {
+      "addr": "0x10006bf0",
+      "name": "PrintTGA",
+      "size": 741
+    },
+    {
+      "addr": "0x10006ee0",
+      "name": "GammaControl",
+      "size": 256
+    },
+    {
+      "addr": "0x10006fe0",
+      "name": "Flip",
+      "size": 706
+    },
+    {
+      "addr": "0x100076d0",
+      "name": "ClearBuffers",
+      "size": 376
+    },
+    {
+      "addr": "0x10007850",
+      "name": "GetDDSurfaceDesc",
+      "size": 72
+    },
+    {
+      "addr": "0x10008710",
+      "name": "CreateDDSurface",
+      "size": 45
+    },
+    {
+      "addr": "0x10008960",
+      "name": "CreateSurfaces",
+      "size": 1164
+    },
+    {
+      "addr": "0x10008df0",
+      "name": "DestroySurfaces",
+      "size": 94
+    },
+    {
+      "addr": "0x10009380",
+      "name": "ConfirmDX6",
+      "size": 145
+    },
+    {
+      "addr": "0x10009420",
+      "name": "GetDDObject",
+      "size": 41
+    },
+    {
+      "addr": "0x10009450",
+      "name": "GetKB",
+      "size": 54
+    },
+    {
+      "addr": "0x10009490",
+      "name": "CheckKey",
+      "size": 18
+    },
+    {
+      "addr": "0x100094b0",
+      "name": "DXInputGetJS",
+      "size": 14
+    },
+    {
+      "addr": "0x100094c0",
+      "name": "DXInputGetKBStick",
+      "size": 14
+    },
+    {
+      "addr": "0x100094d0",
+      "name": "DXInputGetJoystickC",
+      "size": 6
+    },
+    {
+      "addr": "0x100094e0",
+      "name": "Environment",
+      "size": 80
+    },
+    {
+      "addr": "0x10009530",
+      "name": "Create",
+      "size": 386
+    },
+    {
+      "addr": "0x100096c0",
+      "name": "Destroy",
+      "size": 193
+    },
+    {
+      "addr": "0x10009790",
+      "name": "GetMouse",
+      "size": 315
+    },
+    {
+      "addr": "0x100098d0",
+      "name": "Pause",
+      "size": 29
+    },
+    {
+      "addr": "0x100098f0",
+      "name": "SetConfiguration",
+      "size": 504
+    },
+    {
+      "addr": "0x10009af0",
+      "name": "SetConfiguration",
+      "size": 11
+    },
+    {
+      "addr": "0x10009b00",
+      "name": "ResetConfiguration",
+      "size": 16
+    },
+    {
+      "addr": "0x10009b10",
+      "name": "PlayEffect",
+      "size": 153
+    },
+    {
+      "addr": "0x10009bb0",
+      "name": "PlayEffect",
+      "size": 161
+    },
+    {
+      "addr": "0x10009c60",
+      "name": "StopEffects",
+      "size": 61
+    },
+    {
+      "addr": "0x10009ca0",
+      "name": "SetEffect",
+      "size": 123
+    },
+    {
+      "addr": "0x10009d20",
+      "name": "EnumerateEffects",
+      "size": 69
+    },
+    {
+      "addr": "0x1000a1e0",
+      "name": "GetJS",
+      "size": 539
+    },
+    {
+      "addr": "0x1000a400",
+      "name": "GetKBStick",
+      "size": 446
+    },
+    {
+      "addr": "0x1000a5c0",
+      "name": "GetKBCursorKey",
+      "size": 119
+    },
+    {
+      "addr": "0x1000a640",
+      "name": "WriteOpen",
+      "size": 27
+    },
+    {
+      "addr": "0x1000a660",
+      "name": "Write",
+      "size": 212
+    },
+    {
+      "addr": "0x1000a740",
+      "name": "WriteClose",
+      "size": 17
+    },
+    {
+      "addr": "0x1000a760",
+      "name": "ReadOpen",
+      "size": 18
+    },
+    {
+      "addr": "0x1000a780",
+      "name": "Read",
+      "size": 177
+    },
+    {
+      "addr": "0x1000a840",
+      "name": "GetString",
+      "size": 633
+    },
+    {
+      "addr": "0x1000aac0",
+      "name": "SetAnsi",
+      "size": 41
+    },
+    {
+      "addr": "0x1000aaf0",
+      "name": "GetAnsiKey",
+      "size": 46
+    },
+    {
+      "addr": "0x1000ab20",
+      "name": "Environment",
+      "size": 44
+    },
+    {
+      "addr": "0x1000ab50",
+      "name": "Create",
+      "size": 115
+    },
+    {
+      "addr": "0x1000abd0",
+      "name": "Destroy",
+      "size": 24
+    },
+    {
+      "addr": "0x1000abf0",
+      "name": "CanDo3D",
+      "size": 3
+    },
+    {
+      "addr": "0x1000ac00",
+      "name": "ConnectionEnumerate",
+      "size": 460
+    },
+    {
+      "addr": "0x1000add0",
+      "name": "ConnectionPick",
+      "size": 244
+    },
+    {
+      "addr": "0x1000aed0",
+      "name": "NewSession",
+      "size": 511
+    },
+    {
+      "addr": "0x1000b0d0",
+      "name": "JoinSession",
+      "size": 464
+    },
+    {
+      "addr": "0x1000b2a0",
+      "name": "SendMessageA",
+      "size": 677
+    },
+    {
+      "addr": "0x1000b580",
+      "name": "ReceiveMessage",
+      "size": 236
+    },
+    {
+      "addr": "0x1000b680",
+      "name": "HandlePadHost",
+      "size": 555
+    },
+    {
+      "addr": "0x1000b8b0",
+      "name": "HandlePadClient",
+      "size": 647
+    },
+    {
+      "addr": "0x1000bb40",
+      "name": "EnumerateSessions",
+      "size": 254
+    },
+    {
+      "addr": "0x1000bc40",
+      "name": "SealSession",
+      "size": 90
+    },
+    {
+      "addr": "0x1000bca0",
+      "name": "EnumSessionTimer",
+      "size": 90
+    },
+    {
+      "addr": "0x1000bd00",
+      "name": "UnSync",
+      "size": 16
+    },
+    {
+      "addr": "0x1000cda0",
+      "name": "Environment",
+      "size": 131
+    },
+    {
+      "addr": "0x1000ce30",
+      "name": "Create",
+      "size": 401
+    },
+    {
+      "addr": "0x1000cfd0",
+      "name": "Destroy",
+      "size": 152
+    },
+    {
+      "addr": "0x1000d070",
+      "name": "GetDSObject",
+      "size": 29
+    },
+    {
+      "addr": "0x1000d090",
+      "name": "SetPlayback",
+      "size": 15
+    },
+    {
+      "addr": "0x1000d0a0",
+      "name": "Load",
+      "size": 26
+    },
+    {
+      "addr": "0x1000d0c0",
+      "name": "Load",
+      "size": 373
+    },
+    {
+      "addr": "0x1000d240",
+      "name": "LoadBuffer",
+      "size": 26
+    },
+    {
+      "addr": "0x1000d260",
+      "name": "LoadBuffer",
+      "size": 260
+    },
+    {
+      "addr": "0x1000d370",
+      "name": "LoadComplete",
+      "size": 6
+    },
+    {
+      "addr": "0x1000d380",
+      "name": "Play",
+      "size": 240
+    },
+    {
+      "addr": "0x1000d470",
+      "name": "Play",
+      "size": 227
+    },
+    {
+      "addr": "0x1000d560",
+      "name": "ModifyOveride",
+      "size": 140
+    },
+    {
+      "addr": "0x1000d5f0",
+      "name": "Modify",
+      "size": 149
+    },
+    {
+      "addr": "0x1000d690",
+      "name": "Remove",
+      "size": 147
+    },
+    {
+      "addr": "0x1000d730",
+      "name": "Stop",
+      "size": 59
+    },
+    {
+      "addr": "0x1000d770",
+      "name": "Status",
+      "size": 71
+    },
+    {
+      "addr": "0x1000d7c0",
+      "name": "MuteAll",
+      "size": 61
+    },
+    {
+      "addr": "0x1000d800",
+      "name": "UnMuteAll",
+      "size": 72
+    },
+    {
+      "addr": "0x1000d850",
+      "name": "SetVolume",
+      "size": 61
+    },
+    {
+      "addr": "0x1000d890",
+      "name": "GetVolume",
+      "size": 6
+    },
+    {
+      "addr": "0x1000d8a0",
+      "name": "CDPlay",
+      "size": 561
+    },
+    {
+      "addr": "0x1000dae0",
+      "name": "CDStop",
+      "size": 298
+    },
+    {
+      "addr": "0x1000dc10",
+      "name": "CDReplay",
+      "size": 24
+    },
+    {
+      "addr": "0x1000dc30",
+      "name": "CDSetVolume",
+      "size": 130
+    },
+    {
+      "addr": "0x1000dcc0",
+      "name": "CDGetVolume",
+      "size": 6
+    },
+    {
+      "addr": "0x1000dcd0",
+      "name": "CDPause",
+      "size": 58
+    },
+    {
+      "addr": "0x1000dd10",
+      "name": "CDResume",
+      "size": 56
+    },
+    {
+      "addr": "0x1000dd50",
+      "name": "PlayStream",
+      "size": 283
+    },
+    {
+      "addr": "0x1000de70",
+      "name": "StopStream",
+      "size": 91
+    },
+    {
+      "addr": "0x1000ded0",
+      "name": "Refresh",
+      "size": 244
+    },
+    {
+      "addr": "0x1000e410",
+      "name": "DXGethWndMain",
+      "size": 6
+    },
+    {
+      "addr": "0x1000e420",
+      "name": "ExtractSystemInfo",
+      "size": 1503
+    },
+    {
+      "addr": "0x1000ea00",
+      "name": "ExtractScreenInfo",
+      "size": 128
+    },
+    {
+      "addr": "0x1000ebe0",
+      "name": "ImageProBMP",
+      "size": 154
+    },
+    {
+      "addr": "0x1000ec80",
+      "name": "ImageProRGB",
+      "size": 265
+    },
+    {
+      "addr": "0x1000edb0",
+      "name": "ImageProRGBS",
+      "size": 128
+    },
+    {
+      "addr": "0x1000ee30",
+      "name": "ImageProRGBS24",
+      "size": 65
+    },
+    {
+      "addr": "0x1000ee80",
+      "name": "ImageProRGBS32",
+      "size": 65
+    },
+    {
+      "addr": "0x1000eed0",
+      "name": "ImageProTGA",
+      "size": 826
+    },
+    {
+      "addr": "0x10010c80",
+      "name": "BitCount",
+      "size": 39
+    },
+    {
+      "addr": "0x10010cb0",
+      "name": "TGACompress",
+      "size": 218
+    },
+    {
+      "addr": "0x10010d90",
+      "name": "GetSubString",
+      "size": 299
+    },
+    {
+      "addr": "0x10010ec0",
+      "name": "FOpen",
+      "size": 124
+    },
+    {
+      "addr": "0x10010f40",
+      "name": "FClose",
+      "size": 29
+    },
+    {
+      "addr": "0x10010f60",
+      "name": "FRead",
+      "size": 26
+    },
+    {
+      "addr": "0x10010f80",
+      "name": "FWrite",
+      "size": 44
+    },
+    {
+      "addr": "0x10010fb0",
+      "name": "FSeek",
+      "size": 84
+    },
+    {
+      "addr": "0x10011010",
+      "name": "FSize",
+      "size": 65
+    },
+    {
+      "addr": "0x10011060",
+      "name": "Allocate",
+      "size": 14
+    },
+    {
+      "addr": "0x10011070",
+      "name": "DeAllocate",
+      "size": 12
+    },
+    {
+      "addr": "0x10011080",
+      "name": "DXHex",
+      "size": 30
+    },
+    {
+      "addr": "0x100110a0",
+      "name": "DXDecimal",
+      "size": 30
+    },
+    {
+      "addr": "0x100110c0",
+      "name": "DXFDecimal",
+      "size": 71
+    },
+    {
+      "addr": "0x10011110",
+      "name": "Report",
+      "size": 1
+    },
+    {
+      "addr": "0x10011120",
+      "name": "Msg",
+      "size": 93
+    },
+    {
+      "addr": "0x10011180",
+      "name": "ReleaseMsg",
+      "size": 153
+    },
+    {
+      "addr": "0x10011220",
+      "name": "LogReport",
+      "size": 177
+    },
+    {
+      "addr": "0x100112e0",
+      "name": "GetStateString",
+      "size": 49
+    },
+    {
+      "addr": "0x100113a0",
+      "name": "DXErrorToString",
+      "size": 2301
+    },
+    {
+      "addr": "0x100124b0",
+      "name": "Environment",
+      "size": 132
+    },
+    {
+      "addr": "0x10012a10",
+      "name": "Initialize",
+      "size": 435
+    },
+    {
+      "addr": "0x10012bd0",
+      "name": "Uninitialize",
+      "size": 91
+    },
+    {
+      "addr": "0x10012c30",
+      "name": "DXInitialize",
+      "size": 59
+    },
+    {
+      "addr": "0x10012c70",
+      "name": "CleanUpAndPostQuit",
+      "size": 86
+    },
+    {
+      "addr": "0x10012e90",
+      "name": "Pause",
+      "size": 28
+    },
+    {
+      "addr": "0x10013d40",
+      "name": "DirectDrawCreate",
+      "size": 6
+    },
+    {
+      "addr": "0x10013d46",
+      "name": "DirectDrawEnumerateA",
+      "size": 6
+    },
+    {
+      "addr": "0x10013d4c",
+      "name": "DirectDrawEnumerateExA",
+      "size": 6
+    },
+    {
+      "addr": "0x10014e08",
+      "name": "DirectInputCreateA",
+      "size": 6
+    },
+    {
+      "addr": "0x100151b0",
+      "name": "__ftol",
+      "size": 39
+    },
+    {
+      "addr": "0x100158bc",
+      "name": "_malloc",
+      "size": 18
+    },
+    {
+      "addr": "0x100158ce",
+      "name": "__nh_malloc",
+      "size": 44
+    },
+    {
+      "addr": "0x10015991",
+      "name": "operator_new",
+      "size": 14
+    },
+    {
+      "addr": "0x10015c90",
+      "name": "__global_unwind2",
+      "size": 32
+    },
+    {
+      "addr": "0x10015cd2",
+      "name": "__local_unwind2",
+      "size": 104
+    },
+    {
+      "addr": "0x10015d3a",
+      "name": "__abnormal_termination",
+      "size": 35
+    },
+    {
+      "addr": "0x10015d5d",
+      "name": "__NLG_Notify1",
+      "size": 9
+    },
+    {
+      "addr": "0x10015f04",
+      "name": "entry",
+      "size": 157
+    },
+    {
+      "addr": "0x10015fa1",
+      "name": "__amsg_exit",
+      "size": 48
+    },
+    {
+      "addr": "0x1001610d",
+      "name": "__fassign",
+      "size": 62
+    },
+    {
+      "addr": "0x10016412",
+      "name": "__cfltcvt",
+      "size": 81
+    },
+    {
+      "addr": "0x10016490",
+      "name": "__aulldiv",
+      "size": 104
+    },
+    {
+      "addr": "0x10016500",
+      "name": "__allmul",
+      "size": 52
+    },
+    {
+      "addr": "0x1001689a",
+      "name": "__freebuf",
+      "size": 43
+    },
+    {
+      "addr": "0x10016965",
+      "name": "flsall",
+      "size": 109
+    },
+    {
+      "addr": "0x100172d4",
+      "name": "__exit",
+      "size": 17
+    },
+    {
+      "addr": "0x10019000",
+      "name": "__CallSettingFrame@12",
+      "size": 76
+    },
+    {
+      "addr": "0x10019f40",
+      "name": "_memset",
+      "size": 88
+    },
+    {
+      "addr": "0x1001a2e0",
+      "name": "_strlen",
+      "size": 123
+    },
+    {
+      "addr": "0x1001a35b",
+      "name": "__fptrap",
+      "size": 9
+    },
+    {
+      "addr": "0x1001ac80",
+      "name": "__aullrem",
+      "size": 117
+    },
+    {
+      "addr": "0x1001adb0",
+      "name": "_strcmp",
+      "size": 129
+    },
+    {
+      "addr": "0x1001b3a0",
+      "name": "_strncpy",
+      "size": 254
+    },
+    {
+      "addr": "0x1001b608",
+      "name": "___add_12",
+      "size": 94
+    },
+    {
+      "addr": "0x1001c5be",
+      "name": "DirectSoundCreate",
+      "size": 6
+    },
+    {
+      "addr": "0x1001c5c4",
+      "name": "VerQueryValueA",
+      "size": 6
+    },
+    {
+      "addr": "0x1001c5ca",
+      "name": "GetFileVersionInfoA",
+      "size": 6
+    },
+    {
+      "addr": "0x1001c5d0",
+      "name": "GetFileVersionInfoSizeA",
+      "size": 6
+    },
+    {
+      "addr": "0x1001c5d6",
+      "name": "RtlUnwind",
+      "size": 6
+    },
+    {
+      "addr": "0x1001c5e0",
+      "name": "Unwind@1001c5e0",
+      "size": 11
+    }
+  ]
+}

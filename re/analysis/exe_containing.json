@@ -1,0 +1,707 @@
+{
+  "4203632": {
+    "type": "none",
+    "name": null,
+    "addr": null
+  },
+  "4204832": {
+    "type": "none",
+    "name": null,
+    "addr": null
+  },
+  "4205712": {
+    "type": "containing",
+    "name": "FUN_00402ad0",
+    "addr": 4205264
+  },
+  "4207392": {
+    "type": "containing",
+    "name": "FUN_00402e60",
+    "addr": 4206176
+  },
+  "4207824": {
+    "type": "containing",
+    "name": "FUN_00402e60",
+    "addr": 4206176
+  },
+  "4208960": {
+    "type": "containing",
+    "name": "FUN_00403720",
+    "addr": 4208416
+  },
+  "4209680": {
+    "type": "containing",
+    "name": "FUN_00403a20",
+    "addr": 4209184
+  },
+  "4210256": {
+    "type": "containing",
+    "name": "FUN_00403d90",
+    "addr": 4210064
+  },
+  "4210688": {
+    "type": "containing",
+    "name": "FUN_00403eb0",
+    "addr": 4210352
+  },
+  "4211728": {
+    "type": "containing",
+    "name": "FUN_00404030",
+    "addr": 4210736
+  },
+  "4212960": {
+    "type": "containing",
+    "name": "FUN_00404030",
+    "addr": 4210736
+  },
+  "4213696": {
+    "type": "containing",
+    "name": "FUN_00404030",
+    "addr": 4210736
+  },
+  "4214576": {
+    "type": "containing",
+    "name": "FUN_00404ec0",
+    "addr": 4214464
+  },
+  "4219024": {
+    "type": "containing",
+    "name": "IntegrateVehiclePoseAndContacts",
+    "addr": 4218496
+  },
+  "4223664": {
+    "type": "containing",
+    "name": "FUN_00407270",
+    "addr": 4223600
+  },
+  "4223776": {
+    "type": "containing",
+    "name": "FUN_00407270",
+    "addr": 4223600
+  },
+  "4224640": {
+    "type": "containing",
+    "name": "FUN_00407390",
+    "addr": 4223888
+  },
+  "4225184": {
+    "type": "containing",
+    "name": "FUN_00407840",
+    "addr": 4225088
+  },
+  "4225376": {
+    "type": "containing",
+    "name": "FUN_00407840",
+    "addr": 4225088
+  },
+  "4226752": {
+    "type": "containing",
+    "name": "FUN_004079c0",
+    "addr": 4225472
+  },
+  "4227376": {
+    "type": "containing",
+    "name": "FUN_004079c0",
+    "addr": 4225472
+  },
+  "4227840": {
+    "type": "containing",
+    "name": "FUN_004079c0",
+    "addr": 4225472
+  },
+  "4228208": {
+    "type": "containing",
+    "name": "FUN_004079c0",
+    "addr": 4225472
+  },
+  "4228928": {
+    "type": "containing",
+    "name": "FUN_00408570",
+    "addr": 4228464
+  },
+  "4230736": {
+    "type": "containing",
+    "name": "FUN_00408a60",
+    "addr": 4229728
+  },
+  "4230864": {
+    "type": "none",
+    "name": null,
+    "addr": null
+  },
+  "4231008": {
+    "type": "none",
+    "name": null,
+    "addr": null
+  },
+  "4231232": {
+    "type": "containing",
+    "name": "FUN_00408f70",
+    "addr": 4231024
+  },
+  "4231296": {
+    "type": "containing",
+    "name": "FUN_00408f70",
+    "addr": 4231024
+  },
+  "4231536": {
+    "type": "containing",
+    "name": "FUN_00409150",
+    "addr": 4231504
+  },
+  "4242704": {
+    "type": "containing",
+    "name": "FUN_0040bb70",
+    "addr": 4242288
+  },
+  "4243376": {
+    "type": "containing",
+    "name": "FUN_0040bd20",
+    "addr": 4242720
+  },
+  "4243536": {
+    "type": "containing",
+    "name": "FUN_0040bd20",
+    "addr": 4242720
+  },
+  "4244688": {
+    "type": "containing",
+    "name": "FUN_0040c120",
+    "addr": 4243744
+  },
+  "4245920": {
+    "type": "containing",
+    "name": "FUN_0040c7e0",
+    "addr": 4245472
+  },
+  "4251600": {
+    "type": "none",
+    "name": null,
+    "addr": null
+  },
+  "4252064": {
+    "type": "none",
+    "name": null,
+    "addr": null
+  },
+  "4252448": {
+    "type": "none",
+    "name": null,
+    "addr": null
+  },
+  "4254336": {
+    "type": "none",
+    "name": null,
+    "addr": null
+  },
+  "4254384": {
+    "type": "none",
+    "name": null,
+    "addr": null
+  },
+  "4256368": {
+    "type": "none",
+    "name": null,
+    "addr": null
+  },
+  "4256784": {
+    "type": "none",
+    "name": null,
+    "addr": null
+  },
+  "4257072": {
+    "type": "none",
+    "name": null,
+    "addr": null
+  },
+  "4257296": {
+    "type": "none",
+    "name": null,
+    "addr": null
+  },
+  "4257472": {
+    "type": "none",
+    "name": null,
+    "addr": null
+  },
+  "4257888": {
+    "type": "none",
+    "name": null,
+    "addr": null
+  },
+  "4258688": {
+    "type": "containing",
+    "name": "FUN_0040fb60",
+    "addr": 4258656
+  },
+  "4259392": {
+    "type": "none",
+    "name": null,
+    "addr": null
+  },
+  "4260096": {
+    "type": "none",
+    "name": null,
+    "addr": null
+  },
+  "4260496": {
+    "type": "none",
+    "name": null,
+    "addr": null
+  },
+  "4260896": {
+    "type": "none",
+    "name": null,
+    "addr": null
+  },
+  "4261328": {
+    "type": "none",
+    "name": null,
+    "addr": null
+  },
+  "4261856": {
+    "type": "none",
+    "name": null,
+    "addr": null
+  },
+  "4262192": {
+    "type": "none",
+    "name": null,
+    "addr": null
+  },
+  "4262768": {
+    "type": "none",
+    "name": null,
+    "addr": null
+  },
+  "4264736": {
+    "type": "containing",
+    "name": "FUN_004112c0",
+    "addr": 4264640
+  },
+  "4269376": {
+    "type": "containing",
+    "name": "FUN_004122f0",
+    "addr": 4268784
+  },
+  "4269696": {
+    "type": "containing",
+    "name": "FUN_004125b0",
+    "addr": 4269488
+  },
+  "4269904": {
+    "type": "containing",
+    "name": "FUN_004125b0",
+    "addr": 4269488
+  },
+  "4271312": {
+    "type": "containing",
+    "name": "FUN_00412b90",
+    "addr": 4270992
+  },
+  "4271792": {
+    "type": "containing",
+    "name": "FUN_00412e30",
+    "addr": 4271664
+  },
+  "4272224": {
+    "type": "containing",
+    "name": "FUN_00413010",
+    "addr": 4272144
+  },
+  "4272336": {
+    "type": "containing",
+    "name": "FUN_00413010",
+    "addr": 4272144
+  },
+  "4272544": {
+    "type": "containing",
+    "name": "FUN_00413010",
+    "addr": 4272144
+  },
+  "4272880": {
+    "type": "containing",
+    "name": "FUN_00413010",
+    "addr": 4272144
+  },
+  "4273040": {
+    "type": "containing",
+    "name": "FUN_00413010",
+    "addr": 4272144
+  },
+  "4275216": {
+    "type": "none",
+    "name": null,
+    "addr": null
+  },
+  "4275264": {
+    "type": "none",
+    "name": null,
+    "addr": null
+  },
+  "4275280": {
+    "type": "none",
+    "name": null,
+    "addr": null
+  },
+  "4275344": {
+    "type": "none",
+    "name": null,
+    "addr": null
+  },
+  "4275472": {
+    "type": "none",
+    "name": null,
+    "addr": null
+  },
+  "4280576": {
+    "type": "containing",
+    "name": "caseD_3",
+    "addr": 4280564
+  },
+  "4280632": {
+    "type": "none",
+    "name": null,
+    "addr": null
+  },
+  "4280699": {
+    "type": "none",
+    "name": null,
+    "addr": null
+  },
+  "4280791": {
+    "type": "none",
+    "name": null,
+    "addr": null
+  },
+  "4281131": {
+    "type": "none",
+    "name": null,
+    "addr": null
+  },
+  "4281437": {
+    "type": "containing",
+    "name": "caseD_4",
+    "addr": 4281391
+  },
+  "4282618": {
+    "type": "containing",
+    "name": "MainMenuHandler",
+    "addr": 4281488
+  },
+  "4282672": {
+    "type": "containing",
+    "name": "MainMenuHandler",
+    "addr": 4281488
+  },
+  "4282719": {
+    "type": "containing",
+    "name": "MainMenuHandler",
+    "addr": 4281488
+  },
+  "4282783": {
+    "type": "containing",
+    "name": "caseD_3",
+    "addr": 4282776
+  },
+  "4282794": {
+    "type": "containing",
+    "name": "caseD_3",
+    "addr": 4282776
+  },
+  "4282846": {
+    "type": "containing",
+    "name": "caseD_3",
+    "addr": 4282776
+  },
+  "4282853": {
+    "type": "containing",
+    "name": "caseD_3",
+    "addr": 4282776
+  },
+  "4282860": {
+    "type": "containing",
+    "name": "caseD_3",
+    "addr": 4282776
+  },
+  "4282939": {
+    "type": "containing",
+    "name": "caseD_3",
+    "addr": 4282776
+  },
+  "4282993": {
+    "type": "containing",
+    "name": "caseD_3",
+    "addr": 4282776
+  },
+  "4283077": {
+    "type": "containing",
+    "name": "caseD_3",
+    "addr": 4282776
+  },
+  "4283114": {
+    "type": "containing",
+    "name": "caseD_3",
+    "addr": 4282776
+  },
+  "4283294": {
+    "type": "containing",
+    "name": "caseD_4",
+    "addr": 4283129
+  },
+  "4283980": {
+    "type": "containing",
+    "name": "caseD_6",
+    "addr": 4283805
+  },
+  "4284747": {
+    "type": "containing",
+    "name": "caseD_9",
+    "addr": 4284348
+  },
+  "4285007": {
+    "type": "containing",
+    "name": "caseD_a",
+    "addr": 4284914
+  },
+  "4285384": {
+    "type": "containing",
+    "name": "caseD_c",
+    "addr": 4285328
+  },
+  "4285423": {
+    "type": "containing",
+    "name": "caseD_c",
+    "addr": 4285328
+  },
+  "4286319": {
+    "type": "containing",
+    "name": "caseD_17",
+    "addr": 4286257
+  },
+  "4286439": {
+    "type": "containing",
+    "name": "caseD_17",
+    "addr": 4286257
+  },
+  "4286661": {
+    "type": "none",
+    "name": null,
+    "addr": null
+  },
+  "4287147": {
+    "type": "containing",
+    "name": "MainMenu_AnimateIntro",
+    "addr": 4287124
+  },
+  "4287664": {
+    "type": "containing",
+    "name": "caseD_3",
+    "addr": 4287563
+  },
+  "4288762": {
+    "type": "none",
+    "name": null,
+    "addr": null
+  },
+  "4289253": {
+    "type": "containing",
+    "name": "ScreenChampionshipMenu",
+    "addr": 4288801
+  },
+  "4289268": {
+    "type": "containing",
+    "name": "ScreenChampionshipMenu",
+    "addr": 4288801
+  },
+  "4289447": {
+    "type": "containing",
+    "name": "ScreenChampionshipMenu",
+    "addr": 4288801
+  },
+  "4289874": {
+    "type": "containing",
+    "name": "ChampionshipMenu_HandleInput",
+    "addr": 4289869
+  },
+  "4289909": {
+    "type": "containing",
+    "name": "ChampionshipMenu_HandleInput",
+    "addr": 4289869
+  },
+  "4290090": {
+    "type": "containing",
+    "name": "caseD_9",
+    "addr": 4289980
+  },
+  "4290267": {
+    "type": "containing",
+    "name": "caseD_9",
+    "addr": 4289980
+  },
+  "4290372": {
+    "type": "containing",
+    "name": "caseD_a",
+    "addr": 4290304
+  },
+  "4294648": {
+    "type": "none",
+    "name": null,
+    "addr": null
+  },
+  "4294803": {
+    "type": "none",
+    "name": null,
+    "addr": null
+  },
+  "4295226": {
+    "type": "none",
+    "name": null,
+    "addr": null
+  },
+  "4295394": {
+    "type": "none",
+    "name": null,
+    "addr": null
+  },
+  "4295667": {
+    "type": "none",
+    "name": null,
+    "addr": null
+  },
+  "4295790": {
+    "type": "containing",
+    "name": "FUN_00418c60",
+    "addr": 4295776
+  },
+  "4295988": {
+    "type": "containing",
+    "name": "FUN_00418c60",
+    "addr": 4295776
+  },
+  "4296552": {
+    "type": "none",
+    "name": null,
+    "addr": null
+  },
+  "4296655": {
+    "type": "none",
+    "name": null,
+    "addr": null
+  },
+  "4296780": {
+    "type": "none",
+    "name": null,
+    "addr": null
+  },
+  "4296866": {
+    "type": "none",
+    "name": null,
+    "addr": null
+  },
+  "4298032": {
+    "type": "none",
+    "name": null,
+    "addr": null
+  },
+  "4299849": {
+    "type": "containing",
+    "name": "FUN_00419b30",
+    "addr": 4299568
+  },
+  "4299894": {
+    "type": "containing",
+    "name": "FUN_00419b30",
+    "addr": 4299568
+  },
+  "4300704": {
+    "type": "none",
+    "name": null,
+    "addr": null
+  },
+  "4303141": {
+    "type": "none",
+    "name": null,
+    "addr": null
+  },
+  "4303244": {
+    "type": "none",
+    "name": null,
+    "addr": null
+  },
+  "4303393": {
+    "type": "none",
+    "name": null,
+    "addr": null
+  },
+  "4303512": {
+    "type": "none",
+    "name": null,
+    "addr": null
+  },
+  "4303634": {
+    "type": "none",
+    "name": null,
+    "addr": null
+  },
+  "4303695": {
+    "type": "none",
+    "name": null,
+    "addr": null
+  },
+  "4304117": {
+    "type": "none",
+    "name": null,
+    "addr": null
+  },
+  "4304217": {
+    "type": "none",
+    "name": null,
+    "addr": null
+  },
+  "4304245": {
+    "type": "none",
+    "name": null,
+    "addr": null
+  },
+  "4304273": {
+    "type": "none",
+    "name": null,
+    "addr": null
+  },
+  "4304660": {
+    "type": "none",
+    "name": null,
+    "addr": null
+  },
+  "4305647": {
+    "type": "none",
+    "name": null,
+    "addr": null
+  },
+  "4308767": {
+    "type": "containing",
+    "name": "FUN_0041bd00",
+    "addr": 4308224
+  },
+  "4308980": {
+    "type": "containing",
+    "name": "FUN_0041bd00",
+    "addr": 4308224
+  },
+  "4309306": {
+    "type": "containing",
+    "name": "FUN_0041c030",
+    "addr": 4309040
+  },
+  "4309607": {
+    "type": "containing",
+    "name": "FUN_0041c030",
+    "addr": 4309040
+  },
+  "4310344": {
+    "type": "containing",
+    "name": "MultiplayerLobby_InitUI",
+    "addr": 4309997
+  }
+}

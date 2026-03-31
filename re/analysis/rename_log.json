@@ -1,0 +1,468 @@
+{
+  "renamed": 66,
+  "errors": [],
+  "log": [
+    {
+      "m2dx_addr": "0x10015c13",
+      "old_name": "FUN_10015c13",
+      "new_name": "DEAD_caseD_3",
+      "exe_addr": "0x00415c13",
+      "method": "addr_map"
+    },
+    {
+      "m2dx_addr": "0x10015379",
+      "old_name": "FUN_10015379",
+      "new_name": "DEAD_FUN_004317c0",
+      "exe_addr": "0x004317c0",
+      "method": "bytes_size"
+    },
+    {
+      "m2dx_addr": "0x1001547d",
+      "old_name": "FUN_1001547d",
+      "new_name": "DEAD_FUN_0044867c",
+      "exe_addr": "0x0044867c",
+      "method": "bytes_size"
+    },
+    {
+      "m2dx_addr": "0x100154e6",
+      "old_name": "FUN_100154e6",
+      "new_name": "DEAD_FUN_004486be",
+      "exe_addr": "0x004486be",
+      "method": "bytes_size"
+    },
+    {
+      "m2dx_addr": "0x100155ce",
+      "old_name": "FUN_100155ce",
+      "new_name": "DEAD_FUN_00448541",
+      "exe_addr": "0x00448541",
+      "method": "bytes_size"
+    },
+    {
+      "m2dx_addr": "0x10015830",
+      "old_name": "FUN_10015830",
+      "new_name": "DEAD_FUN_00448ebd",
+      "exe_addr": "0x00448ebd",
+      "method": "bytes_size"
+    },
+    {
+      "m2dx_addr": "0x10015d90",
+      "old_name": "FUN_10015d90",
+      "new_name": "DEAD__strchr",
+      "exe_addr": "0x0044fc30",
+      "method": "bytes_size"
+    },
+    {
+      "m2dx_addr": "0x10015fd4",
+      "old_name": "FUN_10015fd4",
+      "new_name": "DEAD_FUN_00449531",
+      "exe_addr": "0x00449531",
+      "method": "bytes_size"
+    },
+    {
+      "m2dx_addr": "0x10015fe6",
+      "old_name": "FUN_10015fe6",
+      "new_name": "DEAD_FUN_00449543",
+      "exe_addr": "0x00449543",
+      "method": "bytes_size"
+    },
+    {
+      "m2dx_addr": "0x1001604d",
+      "old_name": "FUN_1001604d",
+      "new_name": "DEAD_FUN_004495aa",
+      "exe_addr": "0x004495aa",
+      "method": "bytes_size"
+    },
+    {
+      "m2dx_addr": "0x10016463",
+      "old_name": "FUN_10016463",
+      "new_name": "DEAD_FUN_004499ab",
+      "exe_addr": "0x004499ab",
+      "method": "bytes_size"
+    },
+    {
+      "m2dx_addr": "0x100165ff",
+      "old_name": "FUN_100165ff",
+      "new_name": "DEAD_FUN_0044c005",
+      "exe_addr": "0x0044c005",
+      "method": "bytes_size"
+    },
+    {
+      "m2dx_addr": "0x10016900",
+      "old_name": "FUN_10016900",
+      "new_name": "DEAD_FUN_0044b9cb",
+      "exe_addr": "0x0044b9cb",
+      "method": "bytes_size"
+    },
+    {
+      "m2dx_addr": "0x100169d2",
+      "old_name": "FUN_100169d2",
+      "new_name": "DEAD_FUN_0044c23d",
+      "exe_addr": "0x0044c23d",
+      "method": "bytes_size"
+    },
+    {
+      "m2dx_addr": "0x10016fe5",
+      "old_name": "FUN_10016fe5",
+      "new_name": "DEAD_FUN_0044ae10",
+      "exe_addr": "0x0044ae10",
+      "method": "bytes_size"
+    },
+    {
+      "m2dx_addr": "0x1001738d",
+      "old_name": "FUN_1001738d",
+      "new_name": "DEAD_FUN_0044e7ee",
+      "exe_addr": "0x0044e7ee",
+      "method": "bytes_size"
+    },
+    {
+      "m2dx_addr": "0x10017e29",
+      "old_name": "FUN_10017e29",
+      "new_name": "DEAD_FUN_0044a481",
+      "exe_addr": "0x0044a481",
+      "method": "bytes_size"
+    },
+    {
+      "m2dx_addr": "0x10017f24",
+      "old_name": "FUN_10017f24",
+      "new_name": "DEAD_FUN_0044c557",
+      "exe_addr": "0x0044c557",
+      "method": "bytes_size"
+    },
+    {
+      "m2dx_addr": "0x10017fee",
+      "old_name": "FUN_10017fee",
+      "new_name": "DEAD_FUN_0044af28",
+      "exe_addr": "0x0044af28",
+      "method": "bytes_size"
+    },
+    {
+      "m2dx_addr": "0x1001872f",
+      "old_name": "FUN_1001872f",
+      "new_name": "DEAD_FUN_0044b669",
+      "exe_addr": "0x0044b669",
+      "method": "bytes_size"
+    },
+    {
+      "m2dx_addr": "0x10018764",
+      "old_name": "FUN_10018764",
+      "new_name": "DEAD_FUN_0044b69e",
+      "exe_addr": "0x0044b69e",
+      "method": "bytes_size"
+    },
+    {
+      "m2dx_addr": "0x10018795",
+      "old_name": "FUN_10018795",
+      "new_name": "DEAD_FUN_0044b6cf",
+      "exe_addr": "0x0044b6cf",
+      "method": "bytes_size"
+    },
+    {
+      "m2dx_addr": "0x100187da",
+      "old_name": "FUN_100187da",
+      "new_name": "DEAD_FUN_0044b714",
+      "exe_addr": "0x0044b714",
+      "method": "bytes_size"
+    },
+    {
+      "m2dx_addr": "0x100191b1",
+      "old_name": "FUN_100191b1",
+      "new_name": "DEAD_FUN_0044ea91",
+      "exe_addr": "0x0044ea91",
+      "method": "bytes_size"
+    },
+    {
+      "m2dx_addr": "0x1001924a",
+      "old_name": "FUN_1001924a",
+      "new_name": "DEAD_FUN_0044eb2a",
+      "exe_addr": "0x0044eb2a",
+      "method": "bytes_size"
+    },
+    {
+      "m2dx_addr": "0x10019589",
+      "old_name": "FUN_10019589",
+      "new_name": "DEAD_FUN_0044ee49",
+      "exe_addr": "0x0044ee49",
+      "method": "bytes_size"
+    },
+    {
+      "m2dx_addr": "0x100196dc",
+      "old_name": "FUN_100196dc",
+      "new_name": "DEAD_FUN_004482dd",
+      "exe_addr": "0x004482dd",
+      "method": "bytes_size"
+    },
+    {
+      "m2dx_addr": "0x10019711",
+      "old_name": "FUN_10019711",
+      "new_name": "DEAD_FUN_00448312",
+      "exe_addr": "0x00448312",
+      "method": "bytes_size"
+    },
+    {
+      "m2dx_addr": "0x10019727",
+      "old_name": "FUN_10019727",
+      "new_name": "DEAD_FUN_00448328",
+      "exe_addr": "0x00448328",
+      "method": "bytes_size"
+    },
+    {
+      "m2dx_addr": "0x100197b9",
+      "old_name": "FUN_100197b9",
+      "new_name": "DEAD_FUN_004483ba",
+      "exe_addr": "0x004483ba",
+      "method": "bytes_size"
+    },
+    {
+      "m2dx_addr": "0x10019842",
+      "old_name": "FUN_10019842",
+      "new_name": "DEAD_FUN_0044c94f",
+      "exe_addr": "0x0044c94f",
+      "method": "bytes_size"
+    },
+    {
+      "m2dx_addr": "0x100198b7",
+      "old_name": "FUN_100198b7",
+      "new_name": "DEAD_FUN_0044ef9c",
+      "exe_addr": "0x0044ef9c",
+      "method": "bytes_size"
+    },
+    {
+      "m2dx_addr": "0x10019900",
+      "old_name": "FUN_10019900",
+      "new_name": "DEAD_FUN_0044efe5",
+      "exe_addr": "0x0044efe5",
+      "method": "bytes_size"
+    },
+    {
+      "m2dx_addr": "0x10019956",
+      "old_name": "FUN_10019956",
+      "new_name": "DEAD_FUN_0044f03b",
+      "exe_addr": "0x0044f03b",
+      "method": "bytes_size"
+    },
+    {
+      "m2dx_addr": "0x100199fd",
+      "old_name": "FUN_100199fd",
+      "new_name": "DEAD_FUN_0044f0e2",
+      "exe_addr": "0x0044f0e2",
+      "method": "bytes_size"
+    },
+    {
+      "m2dx_addr": "0x10019a09",
+      "old_name": "FUN_10019a09",
+      "new_name": "DEAD_FUN_0044f0ee",
+      "exe_addr": "0x0044f0ee",
+      "method": "bytes_size"
+    },
+    {
+      "m2dx_addr": "0x10019a24",
+      "old_name": "FUN_10019a24",
+      "new_name": "DEAD_FUN_0044f109",
+      "exe_addr": "0x0044f109",
+      "method": "bytes_size"
+    },
+    {
+      "m2dx_addr": "0x10019ab1",
+      "old_name": "FUN_10019ab1",
+      "new_name": "DEAD_FUN_0044f196",
+      "exe_addr": "0x0044f196",
+      "method": "bytes_size"
+    },
+    {
+      "m2dx_addr": "0x10019cc0",
+      "old_name": "FUN_10019cc0",
+      "new_name": "DEAD_FUN_0044c620",
+      "exe_addr": "0x0044c620",
+      "method": "bytes_size"
+    },
+    {
+      "m2dx_addr": "0x10019da0",
+      "old_name": "FUN_10019da0",
+      "new_name": "DEAD_FUN_0044f388",
+      "exe_addr": "0x0044f388",
+      "method": "bytes_size"
+    },
+    {
+      "m2dx_addr": "0x10019e7b",
+      "old_name": "FUN_10019e7b",
+      "new_name": "DEAD_FUN_0044f45b",
+      "exe_addr": "0x0044f45b",
+      "method": "bytes_size"
+    },
+    {
+      "m2dx_addr": "0x1001a588",
+      "old_name": "FUN_1001a588",
+      "new_name": "DEAD_FUN_0044c924",
+      "exe_addr": "0x0044c924",
+      "method": "bytes_size"
+    },
+    {
+      "m2dx_addr": "0x1001ac10",
+      "old_name": "FUN_1001ac10",
+      "new_name": "DEAD_FUN_0044fe36",
+      "exe_addr": "0x0044fe36",
+      "method": "bytes_size"
+    },
+    {
+      "m2dx_addr": "0x1001aef9",
+      "old_name": "FUN_1001aef9",
+      "new_name": "DEAD___seh_longjmp_unwind@4",
+      "exe_addr": "0x0044adf5",
+      "method": "bytes_size"
+    },
+    {
+      "m2dx_addr": "0x1001b10e",
+      "old_name": "FUN_1001b10e",
+      "new_name": "DEAD_FUN_0044da73",
+      "exe_addr": "0x0044da73",
+      "method": "bytes_size"
+    },
+    {
+      "m2dx_addr": "0x1001b16a",
+      "old_name": "FUN_1001b16a",
+      "new_name": "DEAD_FUN_0044dacf",
+      "exe_addr": "0x0044dacf",
+      "method": "bytes_size"
+    },
+    {
+      "m2dx_addr": "0x1001b5e7",
+      "old_name": "FUN_1001b5e7",
+      "new_name": "DEAD_FUN_00450c5b",
+      "exe_addr": "0x00450c5b",
+      "method": "bytes_size"
+    },
+    {
+      "m2dx_addr": "0x1001b666",
+      "old_name": "FUN_1001b666",
+      "new_name": "DEAD_FUN_00450cda",
+      "exe_addr": "0x00450cda",
+      "method": "bytes_size"
+    },
+    {
+      "m2dx_addr": "0x1001b694",
+      "old_name": "FUN_1001b694",
+      "new_name": "DEAD_FUN_00450d08",
+      "exe_addr": "0x00450d08",
+      "method": "bytes_size"
+    },
+    {
+      "m2dx_addr": "0x1001b6c1",
+      "old_name": "FUN_1001b6c1",
+      "new_name": "DEAD_FUN_00450d35",
+      "exe_addr": "0x00450d35",
+      "method": "bytes_size"
+    },
+    {
+      "m2dx_addr": "0x1001b788",
+      "old_name": "FUN_1001b788",
+      "new_name": "DEAD_FUN_00450dfc",
+      "exe_addr": "0x00450dfc",
+      "method": "bytes_size"
+    },
+    {
+      "m2dx_addr": "0x1001bc59",
+      "old_name": "FUN_1001bc59",
+      "new_name": "DEAD_FUN_004512cd",
+      "exe_addr": "0x004512cd",
+      "method": "bytes_size"
+    },
+    {
+      "m2dx_addr": "0x1001bef0",
+      "old_name": "FUN_1001bef0",
+      "new_name": "DEAD_FUN_004487b0",
+      "exe_addr": "0x004487b0",
+      "method": "bytes_size"
+    },
+    {
+      "m2dx_addr": "0x1001c2ac",
+      "old_name": "FUN_1001c2ac",
+      "new_name": "DEAD_FUN_00451685",
+      "exe_addr": "0x00451685",
+      "method": "bytes_size"
+    },
+    {
+      "m2dx_addr": "0x1001c4cc",
+      "old_name": "FUN_1001c4cc",
+      "new_name": "DEAD_FUN_004518a5",
+      "exe_addr": "0x004518a5",
+      "method": "bytes_size"
+    },
+    {
+      "m2dx_addr": "0x10002ae0",
+      "old_name": "FUN_10002ae0",
+      "new_name": "DEAD_FUN_00402950",
+      "exe_addr": "0x00402950",
+      "method": "size_nearby"
+    },
+    {
+      "m2dx_addr": "0x10013be0",
+      "old_name": "FUN_10013be0",
+      "new_name": "DEAD_caseD_1",
+      "exe_addr": "0x00415976",
+      "method": "size_nearby"
+    },
+    {
+      "m2dx_addr": "0x100150e8",
+      "old_name": "FUN_100150e8",
+      "new_name": "DEAD_caseD_6",
+      "exe_addr": "0x00416d2a",
+      "method": "size_nearby"
+    },
+    {
+      "m2dx_addr": "0x10015d66",
+      "old_name": "FUN_10015d66",
+      "new_name": "DEAD_FUN_00415e77",
+      "exe_addr": "0x00415e77",
+      "method": "size_nearby"
+    },
+    {
+      "m2dx_addr": "0x10016024",
+      "old_name": "FUN_10016024",
+      "new_name": "DEAD_FUN_00414610",
+      "exe_addr": "0x00414610",
+      "method": "size_nearby"
+    },
+    {
+      "m2dx_addr": "0x1001632d",
+      "old_name": "FUN_1001632d",
+      "new_name": "DEAD_caseD_14",
+      "exe_addr": "0x004164f5",
+      "method": "size_nearby"
+    },
+    {
+      "m2dx_addr": "0x10017666",
+      "old_name": "FUN_10017666",
+      "new_name": "DEAD_FUN_00416cca",
+      "exe_addr": "0x00416cca",
+      "method": "size_nearby"
+    },
+    {
+      "m2dx_addr": "0x100187cd",
+      "old_name": "FUN_100187cd",
+      "new_name": "DEAD_FUN_00418380",
+      "exe_addr": "0x00418380",
+      "method": "size_nearby"
+    },
+    {
+      "m2dx_addr": "0x100187ea",
+      "old_name": "FUN_100187ea",
+      "new_name": "DEAD_caseD_2",
+      "exe_addr": "0x0041807f",
+      "method": "size_nearby"
+    },
+    {
+      "m2dx_addr": "0x1001abea",
+      "old_name": "FUN_1001abea",
+      "new_name": "DEAD_FUN_0041c564",
+      "exe_addr": "0x0041c564",
+      "method": "size_nearby"
+    },
+    {
+      "m2dx_addr": "0x1001b30b",
+      "old_name": "FUN_1001b30b",
+      "new_name": "DEAD_FUN_0041b390",
+      "exe_addr": "0x0041b390",
+      "method": "size_nearby"
+    }
+  ]
+}
