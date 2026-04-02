@@ -13,5 +13,41 @@ ghidra_*/
 ghidra-headless-mcp/
 TD5.gpr
 TD5.rep/
+TD5_tmp.gpr
+TD5_tmp.rep/
 data/
 tmp_ar_check*/
+
+# Original game files (copyrighted — do not distribute)
+original/
+
+# Extracted / derived game assets (copyrighted data)
+re/assets/
+re/td5_dump/
+re/td5_png/
+re/td5_png_clean/
+
+# Large RE tools / cloned repos (not project source)
+pyghidra_projects/
+tools/
+
+# MinGW toolchain (753 MB — install via MSYS2 or deps/mingw-i686.7z)
+td5mod/deps/mingw/
+td5mod/deps/mingw-i686.7z
+td5mod/deps/minhook-1.3.4.zip
+td5mod/deps/winmm-Win32.zip
+
+# Built ASI mod outputs
+*.asi
+dist/
+
+# ASI mod runtime assets (not source)
+scripts/td5_dump/
+
+# Machine-specific local config (absolute paths, per-machine permissions)
+.mcp.json
+.claude/settings.local.json
+
+# Scratch files
+ck.txt
+step19.txt

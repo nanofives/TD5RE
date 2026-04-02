@@ -8,11 +8,21 @@
 
 #include "td5_camera.h"
 #include "td5_track.h"
+#include "td5_game.h"
+#include "td5_platform.h"
 #include "td5re.h"
+
+#define LOG_TAG "camera"
 
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
+
+#define LOG_TAG "camera"
+
+static const char *trackside_behavior_name(int btype);
+
+extern int g_replay_mode;
 
 /* ========================================================================
  * External functions (defined in other modules, linked at build time)
@@ -130,6 +140,7 @@ extern int    g_cameraTransitionActive;  /* 0x4AAEF0 -- transition timer */
 extern int    g_camTransitionGate;       /* 0x4AAF8C -- nonzero while blocking input */
 extern int    g_actorSlotForView[2];     /* 0x466EA0, stride 4 -- actor index per view */
 extern int    g_actorBaseAddr;           /* 0x4AB310 -- base of actor table (offset form) */
+extern uint8_t *g_actor_table_base;
 extern int    g_trackType;               /* 0x466E94 -- 0=circuit, 1=point-to-point */
 extern unsigned char g_actorAliveTable[12]; /* 0x4AADF5, stride 4 -- per-actor alive flag */
 extern int    g_lookLeftRight[2];        /* 0x466F88, stride 4 */
@@ -448,8 +459,11 @@ void LoadCameraPresetForView(int actor, int force_reload, int view, int save_sta
     short radius_raw  = p->orbit_radius_raw;
     short height_raw  = p->height_target_raw;
 
-    float radius_f = (float)(int)radius_raw * g_const256;
-    float height_f = (float)(int)height_raw * g_const256;
+    /* radius_raw and height_raw are already in world-space units (24.8 fixed-point).
+     * Do NOT multiply by g_const256 (256.0) — that would place the camera 2100
+     * render-units (~2100 m) behind the car instead of the intended ~8 m. */
+    float radius_f = (float)(int)radius_raw;
+    float height_f = (float)(int)height_raw;
 
     /* Store offset vector from preset */
     g_camOffsetVec[view][0] = (short)(p->extra_param_1 & 0xFFFF);
@@ -683,6 +697,23 @@ after_flyin:
     /* --- Height smoothing --- */
     g_camSmoothedHeight[v] = g_camSmoothedHeight[v] +
         (g_camTargetHeight[v] - g_camSmoothedHeight[v]) * g_dampWeight;
+
+    /* --- Set camera world position from actor + orbit offset --- */
+    {
+        int smoothed_h = (int)(g_camSmoothedHeight[v] + 0.5f);
+        int target[3];
+
+        g_camWorldPos[v][0] = *(int *)(actor + 0x1FC) + g_camOrbitOffset[v][0];
+        g_camWorldPos[v][1] = g_camOrbitOffset[v][1] + *(int *)(actor + 0x200);
+        g_camWorldPos[v][2] = *(int *)(actor + 0x204) + g_camOrbitOffset[v][2];
+
+        target[0] = *(int *)(actor + 0x1FC);
+        target[1] = *(int *)(actor + 0x200) + smoothed_h;
+        target[2] = *(int *)(actor + 0x204);
+
+        SetCameraWorldPosition(g_camWorldPos[v]);
+        OrientCameraTowardTarget(target, g_tracksideYawOffset[v]);
+    }
 }
 
 /* ========================================================================
@@ -796,6 +827,17 @@ void UpdateTracksideOrbitCamera(int actor, int is_active, int view)
 
         SetCameraWorldPosition(g_camWorldPos[v]);
         OrientCameraTowardTarget(target, g_tracksideYawOffset[v]);
+    }
+
+    {
+        static uint32_t s_chase_log_ctr;
+        if ((s_chase_log_ctr++ % 30u) == 0u) {
+            TD5_LOG_D(LOG_TAG,
+                      "chase view %d: pos=(%.2f, %.2f, %.2f) orbit_radius=%.2f target_actor=%d",
+                      v,
+                      g_cameraPos[0], g_cameraPos[1], g_cameraPos[2],
+                      g_camCurrentRadius[v], g_actorSlotForView[v]);
+        }
     }
 }
 
@@ -1313,6 +1355,11 @@ void UpdateSplineTracksideCamera(int actor, int view, int spline_type)
 
     g_depthFovFactor = g_cameraProjScaleComp[v];
     RecomputeTracksideProjectionScale();
+
+    TD5_LOG_I(LOG_TAG,
+              "trackside view %d: profile=%d anchor=%u behavior=%d",
+              v, g_cameraProfileIndex[v],
+              (unsigned int)g_camAnchorSpan[v], g_camBehaviorType[v]);
 }
 
 /* ========================================================================
@@ -1325,6 +1372,10 @@ void UpdateTracksideCamera(int actor, int view)
 {
     int v = view;
     int btype = g_camBehaviorType[v];
+
+    TD5_LOG_D(LOG_TAG,
+              "trackside update view %d: profile=%d behavior=%d(%s)",
+              view, g_cameraProfileIndex[v], btype, trackside_behavior_name(btype));
 
     switch (btype) {
     case 0: {
@@ -1490,6 +1541,40 @@ int CycleRaceCameraPreset(int view, int delta)
 
 static int s_active_preset;
 
+static const char *camera_mode_name_for_view(int view, int has_actor)
+{
+    if (!has_actor) return "debug";
+    if (g_replay_mode) return "trackside";
+
+    switch (g_raceCameraPresetMode[view & 1]) {
+    case 5:
+    case 6:
+        return "bumper";
+    case 1:
+        return "trackside";
+    default:
+        return "chase";
+    }
+}
+
+static const char *trackside_behavior_name(int btype)
+{
+    switch (btype) {
+    case 0: return "static_fov";
+    case 1: return "offset_left";
+    case 2: return "offset_right";
+    case 3: return "static_orbit";
+    case 4: return "anchor_height";
+    case 5: return "anchor_pan";
+    case 6: return "spline";
+    case 7: return "vehicle_relative";
+    case 8: return "vehicle_relative_alt";
+    case 9: return "anchor_height_alt";
+    case 10: return "anchor_pan_alt";
+    default: return "unknown";
+    }
+}
+
 static void sample_span_center_world(int span_index, int *out_pos)
 {
     TD5_StripSpan *sp;
@@ -1601,7 +1686,6 @@ static int resolve_view_actor_ptr(int view, int *out_actor)
 static void update_debug_race_camera(int view)
 {
     int v = (view & 1);
-    (void)s_debug_camera_frame[v]++;
 
     update_debug_track_camera();
 
@@ -1617,6 +1701,8 @@ int td5_camera_init(void)
 {
     s_active_preset = 0;
     memset(s_debug_camera_frame, 0, sizeof(s_debug_camera_frame));
+    TD5_LOG_I(LOG_TAG, "camera init: active_mode=%s preset=%d",
+              camera_mode_name_for_view(0, 0), s_active_preset);
     return 1;
 }
 
@@ -1624,9 +1710,15 @@ void td5_camera_shutdown(void) {}
 
 void td5_camera_tick(void)
 {
-    /* Always use the debug track camera for now.
-     * The actor-based camera requires fully populated actor structs. */
-    update_debug_track_camera();
+    /* Use debug track camera only if no actors are populated */
+    if (td5_game_get_total_actor_count() <= 0) {
+        update_debug_track_camera();
+        TD5_LOG_D(LOG_TAG, "camera tick: active_mode=debug");
+    } else {
+        TD5_LOG_D(LOG_TAG, "camera tick: active_mode=%s",
+                  camera_mode_name_for_view(0, 1));
+    }
+    /* Otherwise camera is driven per-view by td5_camera_update_transition_state */
 }
 
 void td5_camera_update_chase(TD5_Actor *a, int p, int vi)
@@ -1649,10 +1741,53 @@ void td5_camera_update_trackside(TD5_Actor *a, int vi)
 
 void td5_camera_update_transition_state(int p, int vi)
 {
-    (void)p;
+    TD5_Actor *actor = td5_game_get_actor(g_actorSlotForView[vi]);
+    int v = vi & 1;
 
-    /* Force debug camera until actor data is fully populated */
-    update_debug_race_camera(vi);
+    if (!actor && g_actor_table_base) {
+        int slot = g_actorSlotForView[vi];
+        int total = td5_game_get_total_actor_count();
+        if (slot >= 0 && slot < total) {
+            actor = (TD5_Actor *)(g_actor_table_base + (size_t)slot * TD5_ACTOR_STRIDE);
+        }
+    }
+
+    s_debug_camera_frame[v]++;
+
+    if (!actor) {
+        /* No actor data yet — fall back to debug camera */
+        TD5_LOG_I(LOG_TAG, "transition view %d: path=debug preset=%d", vi, p);
+        update_debug_race_camera(vi);
+        TD5_LOG_D(LOG_TAG,
+                  "camera update view %d: pos=(%.2f, %.2f, %.2f) forward=(%.3f, %.3f, %.3f)",
+                  vi, g_cameraPos[0], g_cameraPos[1], g_cameraPos[2],
+                  g_cameraBasis[6], g_cameraBasis[7], g_cameraBasis[8]);
+        return;
+    }
+
+    /* Route to appropriate camera based on mode */
+    if (g_replay_mode) {
+        TD5_LOG_I(LOG_TAG, "transition view %d: path=trackside actor_slot=%d", vi, g_actorSlotForView[vi]);
+        UpdateTracksideCamera((int)actor, vi);
+    } else {
+        int preset = g_raceCameraPresetMode[vi];
+        if (preset == 6 || preset == 5) {
+            /* Bumper / in-car camera */
+            TD5_LOG_I(LOG_TAG, "transition view %d: path=bumper actor_slot=%d preset=%d",
+                      vi, g_actorSlotForView[vi], preset);
+            UpdateVehicleRelativeCamera((int)actor, vi);
+        } else {
+            /* Chase camera (default) */
+            TD5_LOG_I(LOG_TAG, "transition view %d: path=chase actor_slot=%d preset=%d",
+                      vi, g_actorSlotForView[vi], preset);
+            UpdateChaseCamera((int)actor, p, vi);
+        }
+    }
+
+    TD5_LOG_D(LOG_TAG,
+              "camera update view %d: pos=(%.2f, %.2f, %.2f) forward=(%.3f, %.3f, %.3f)",
+              vi, g_cameraPos[0], g_cameraPos[1], g_cameraPos[2],
+              g_cameraBasis[6], g_cameraBasis[7], g_cameraBasis[8]);
 }
 
 void td5_camera_update_transition_timer(void)

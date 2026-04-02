@@ -15,6 +15,8 @@
 #include "td5_platform.h"
 #include <string.h>
 
+#define LOG_TAG "save"
+
 /* ========================================================================
  * Constants
  * ======================================================================== */
@@ -394,6 +396,7 @@ int td5_save_write_config(const char *path)
 {
     const char *filepath = path ? path : TD5_CONFIG_FILENAME;
     TD5_ConfigBuffer *buf = (TD5_ConfigBuffer *)s_config_buf;
+    int ok;
 
     /* Step 1: Serialize all fields into the buffer. */
     config_serialize_to_buffer();
@@ -409,12 +412,17 @@ int td5_save_write_config(const char *path)
     /* Step 4: Write to file. */
     TD5_File *f = td5_plat_file_open(filepath, "wb");
     if (!f) {
+        TD5_LOG_W(LOG_TAG, "Write config failed: path=%s crc=0x%08X size=%u",
+                  filepath, (unsigned int)crc, (unsigned int)TD5_CONFIG_FILE_SIZE);
         return 0;
     }
     size_t written = td5_plat_file_write(f, s_config_buf, TD5_CONFIG_FILE_SIZE);
     td5_plat_file_close(f);
 
-    return (written == TD5_CONFIG_FILE_SIZE) ? 1 : 0;
+    ok = (written == TD5_CONFIG_FILE_SIZE) ? 1 : 0;
+    TD5_LOG_I(LOG_TAG, "Write config %s: path=%s crc=0x%08X size=%u",
+              ok ? "ok" : "failed", filepath, (unsigned int)crc, (unsigned int)written);
+    return ok;
 }
 
 /* ========================================================================
@@ -496,6 +504,7 @@ int td5_save_load_config(const char *path)
     /* Step 1: Open and read the file. */
     TD5_File *f = td5_plat_file_open(filepath, "rb");
     if (!f) {
+        TD5_LOG_W(LOG_TAG, "Load config failed: path=%s reason=open", filepath);
         return 0;
     }
 
@@ -504,6 +513,7 @@ int td5_save_load_config(const char *path)
     td5_plat_file_close(f);
 
     if (bytes_read == 0) {
+        TD5_LOG_W(LOG_TAG, "Load config failed: path=%s reason=empty", filepath);
         return 0;
     }
 
@@ -517,12 +527,17 @@ int td5_save_load_config(const char *path)
     uint32_t computed_crc = td5_save_crc32(read_buf, bytes_read);
 
     if (computed_crc != stored_crc) {
+        TD5_LOG_W(LOG_TAG, "Load config failed: path=%s crc=0x%08X expected=0x%08X size=%u",
+                  filepath, (unsigned int)computed_crc, (unsigned int)stored_crc,
+                  (unsigned int)bytes_read);
         return 0;
     }
 
     /* Step 4: Copy into our working buffer and deserialize. */
     memcpy(s_config_buf, read_buf, TD5_CONFIG_FILE_SIZE < bytes_read ? TD5_CONFIG_FILE_SIZE : bytes_read);
     config_deserialize_from_buffer();
+    TD5_LOG_I(LOG_TAG, "Load config ok: path=%s crc=0x%08X size=%u",
+              filepath, (unsigned int)stored_crc, (unsigned int)bytes_read);
 
     return 1;
 }
@@ -763,11 +778,13 @@ static int cup_deserialize_from_buffer(void)
 int td5_save_write_cup_data(const char *path)
 {
     const char *filepath = path ? path : TD5_CUPDATA_FILENAME;
+    int ok;
 
     /* Step 1: Serialize the cup state into the snapshot buffer. */
     cup_serialize_to_buffer();
 
     if (s_cup_buf_size == 0) {
+        TD5_LOG_W(LOG_TAG, "Write cup data failed: path=%s reason=empty", filepath);
         return 0;
     }
 
@@ -779,12 +796,16 @@ int td5_save_write_cup_data(const char *path)
     /* Step 3: Write to file. */
     TD5_File *f = td5_plat_file_open(filepath, "wb");
     if (!f) {
+        TD5_LOG_W(LOG_TAG, "Write cup data failed: path=%s reason=open", filepath);
         return 0;
     }
     size_t written = td5_plat_file_write(f, enc_buf, s_cup_buf_size);
     td5_plat_file_close(f);
 
-    return (written == s_cup_buf_size) ? 1 : 0;
+    ok = (written == s_cup_buf_size) ? 1 : 0;
+    TD5_LOG_I(LOG_TAG, "Write cup data %s: path=%s size=%u",
+              ok ? "ok" : "failed", filepath, (unsigned int)written);
+    return ok;
 }
 
 /* ========================================================================
@@ -798,10 +819,12 @@ int td5_save_write_cup_data(const char *path)
 int td5_save_load_cup_data(const char *path)
 {
     const char *filepath = path ? path : TD5_CUPDATA_FILENAME;
+    int ok;
 
     /* Step 1: Open and read the file into a temporary stack buffer. */
     TD5_File *f = td5_plat_file_open(filepath, "rb");
     if (!f) {
+        TD5_LOG_W(LOG_TAG, "Load cup data failed: path=%s reason=open", filepath);
         return 0;
     }
 
@@ -810,6 +833,7 @@ int td5_save_load_cup_data(const char *path)
     td5_plat_file_close(f);
 
     if (bytes_read == 0) {
+        TD5_LOG_W(LOG_TAG, "Load cup data failed: path=%s reason=empty", filepath);
         return 0;
     }
 
@@ -823,7 +847,10 @@ int td5_save_load_cup_data(const char *path)
     s_cup_buf_size = (uint32_t)bytes_read;
 
     /* Step 4: Validate CRC and restore globals. */
-    return cup_deserialize_from_buffer();
+    ok = cup_deserialize_from_buffer();
+    TD5_LOG_I(LOG_TAG, "Load cup data %s: path=%s size=%u",
+              ok ? "ok" : "failed", filepath, (unsigned int)bytes_read);
+    return ok;
 }
 
 /* ========================================================================

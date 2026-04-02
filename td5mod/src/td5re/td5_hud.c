@@ -33,6 +33,8 @@
 #include <stdarg.h>
 #include <math.h>
 
+#define LOG_TAG "hud"
+
 /* ========================================================================
  * Forward declarations for external functions not yet in headers
  * (These correspond to original binary functions called by the HUD)
@@ -206,6 +208,15 @@ static TD5_AtlasEntry *s_pause_slider_atlas; /* 0x4B1358 */
 static uint8_t *s_pause_sel_box;          /* 0x4BCB70 */
 static void *s_pause_slider_ptrs[3];      /* 0x4B11D8..0x4B11E4 */
 
+/* Pause overlay dimmer state */
+#define HUD_WHITE_TEX_PAGE 898
+static int s_hud_white_tex_uploaded;
+
+static void hud_log_atlas_status(const char *name, const TD5_AtlasEntry *entry)
+{
+    TD5_LOG_I(LOG_TAG, "atlas %s: %s", name, entry ? "found" : "missing");
+}
+
 /* ASCII -> glyph index remap table (128 bytes) */
 static const uint8_t s_char_remap[128] = {
     /* 0x00-0x0F: control chars -> space (0x1F) */
@@ -313,12 +324,15 @@ static void hud_submit_quad(void *quad_data)
     td5_render_submit_translucent((uint16_t *)quad_data);
 }
 
-/* Depth constant for HUD overlay quads (just behind camera near plane) */
-#define HUD_DEPTH  128.1f
-/* Depth constant for slightly different overlay priority */
-#define HUD_DEPTH2 128.5f
-#define HUD_DEPTH3 129.0f
-#define HUD_DEPTH4 130.0f
+/* Depth constant for HUD overlay quads.
+ * Must be in [0,1] range for D3D11: the vertex shader applies saturate()
+ * to the Z component, so values outside [0,1] get clamped to 1.0 (far
+ * plane) and fail the LESS_EQUAL depth test against scene geometry.
+ * Use values near 0 so HUD always passes depth test. */
+#define HUD_DEPTH  0.0f
+#define HUD_DEPTH2 0.0f
+#define HUD_DEPTH3 0.0f
+#define HUD_DEPTH4 0.0f
 
 /* ========================================================================
  * Actor field accessors
@@ -442,6 +456,38 @@ void td5_hud_init_font_atlas(void)
     }
 
     s_queued_glyph_count = 0;
+
+    /* Upload 1x1 white texture for solid-color overlays (pause dimmer) */
+    if (!s_hud_white_tex_uploaded) {
+        static const uint32_t k_white = 0xFFFFFFFF;
+        s_hud_white_tex_uploaded = td5_plat_render_upload_texture(
+            HUD_WHITE_TEX_PAGE, &k_white, 1, 1, 2);
+    }
+}
+
+/* ========================================================================
+ * Draw a full-screen semi-transparent dimmer overlay (for pause menu).
+ * Uses a 1x1 white texture modulated by vertex color.
+ * ======================================================================== */
+
+void td5_hud_draw_pause_overlay(void)
+{
+    static uint8_t s_dimmer_quad[0xB8];
+
+    if (!s_hud_white_tex_uploaded) return;
+
+    hud_build_quad(
+        s_dimmer_quad,
+        0,
+        HUD_WHITE_TEX_PAGE,
+        0.0f, 0.0f,
+        (float)g_render_width, (float)g_render_height,
+        0.0f, 0.0f,
+        0.5f, 0.5f,
+        0xA0000000,   /* semi-transparent black (BGRA) */
+        HUD_DEPTH
+    );
+    hud_submit_quad(s_dimmer_quad);
 }
 
 /* ========================================================================
@@ -608,6 +654,7 @@ void td5_hud_init_overlay_resources(int race_mode, int string_table_offset)
 
     /* Load FADEWHT sprite for screen-fade overlays */
     s_fadewht_atlas = td5_asset_find_atlas_entry(NULL, "FADEWHT");
+    hud_log_atlas_status("FADEWHT", s_fadewht_atlas);
 
     float fu0 = (float)s_fadewht_atlas->atlas_x + 0.5f;
     float fv0 = (float)s_fadewht_atlas->atlas_y + 0.5f;
@@ -630,6 +677,7 @@ void td5_hud_init_overlay_resources(int race_mode, int string_table_offset)
     /* Split-screen divider bars */
     if (g_split_screen_mode != 0) {
         TD5_AtlasEntry *colours = td5_asset_find_atlas_entry(NULL, "COLOURS");
+        hud_log_atlas_status("COLOURS", colours);
         float cu0 = (float)colours->atlas_x + 0.5f;
         float cv0 = (float)colours->atlas_y + 0.5f;
         int   ctex = colours->texture_page;
@@ -667,6 +715,7 @@ void td5_hud_init_layout(int viewport_mode)
 {
     /* Load numbers atlas (used by metric display) */
     s_numbers_atlas = td5_asset_find_atlas_entry(NULL, "numbers");
+    hud_log_atlas_status("numbers", s_numbers_atlas);
 
     /* Compute base scale factors */
     s_scale_x = g_render_width_f * (1.0f / 640.0f);
@@ -749,6 +798,7 @@ void td5_hud_init_layout(int viewport_mode)
 
     /* Load semicolon atlas */
     s_semicol_atlas = td5_asset_find_atlas_entry(NULL, "SEMICOL");
+    hud_log_atlas_status("SEMICOL", s_semicol_atlas);
 
     /* Build per-view HUD element quads */
     s_cur_view = 0;
@@ -765,6 +815,9 @@ void td5_hud_init_layout(int viewport_mode)
 
         /* --- Speedometer dial --- */
         TD5_AtlasEntry *speedo = td5_asset_find_atlas_entry(NULL, "SPEEDO");
+        if (v == 0) {
+            hud_log_atlas_status("SPEEDO", speedo);
+        }
         float speedo_x = vp_r - sx * 96.0f - sx * 16.0f;
         float speedo_y = vp_b - sy * 96.0f - sy * 8.0f;
 
@@ -783,6 +836,9 @@ void td5_hud_init_layout(int viewport_mode)
 
         /* --- Speed digit font (SPEEDOFONT) --- */
         s_speedofont_atlas = td5_asset_find_atlas_entry(NULL, "SPEEDOFONT");
+        if (v == 0) {
+            hud_log_atlas_status("SPEEDOFONT", s_speedofont_atlas);
+        }
 
         float font_glyph_w = sx * 16.0f;
         float font_x_start = vp_r - font_glyph_w * 3.5f;
@@ -803,6 +859,9 @@ void td5_hud_init_layout(int viewport_mode)
 
         /* --- Gear indicator (GEARNUMBERS) --- */
         s_gearnumbers_atlas = td5_asset_find_atlas_entry(NULL, "GEARNUMBERS");
+        if (v == 0) {
+            hud_log_atlas_status("GEARNUMBERS", s_gearnumbers_atlas);
+        }
 
         float gear_x = vp_r - sx * 32.0f;
         float gear_y = vp_b - sy * 16.0f - sy * 20.0f;
@@ -848,6 +907,9 @@ void td5_hud_init_layout(int viewport_mode)
 
         /* --- U-turn warning icon (UTURN, centered) --- */
         TD5_AtlasEntry *uturn = td5_asset_find_atlas_entry(NULL, "UTURN");
+        if (v == 0) {
+            hud_log_atlas_status("UTURN", uturn);
+        }
         float uturn_half_x = sx * 64.0f * 0.5f;
         float uturn_half_y = sy * 64.0f * 0.5f;
         float uturn_cx = s_view_layout[v].center_x;
@@ -867,6 +929,9 @@ void td5_hud_init_layout(int viewport_mode)
 
         /* --- Replay banner (REPLAY, top-left) --- */
         TD5_AtlasEntry *replay = td5_asset_find_atlas_entry(NULL, "REPLAY");
+        if (v == 0) {
+            hud_log_atlas_status("REPLAY", replay);
+        }
         float replay_x = sx * 16.0f + vp_l;
         float replay_y = sy * 16.0f + vp_t;
 
@@ -1112,6 +1177,17 @@ void td5_hud_draw_status_text(int player_slot, int view_index)
             }
         }
     }
+
+    {
+        static int s_hud_layout_logged = 0;
+        if (!s_hud_layout_logged) {
+            TD5_LOG_I(LOG_TAG,
+                      "hud layout: scale=(%.3f, %.3f) viewport=%dx%d views=%d",
+                      s_scale_x, s_scale_y,
+                      g_render_width, g_render_height, s_view_count);
+            s_hud_layout_logged = 1;
+        }
+    }
 }
 
 /* ========================================================================
@@ -1136,6 +1212,12 @@ void td5_hud_render_overlays(float dt)
         float sx = vl->scale_x;
         float sy = vl->scale_y;
         uint32_t flags = *s_cur_flags;
+
+        if ((g_tick_counter % 60u) == 0u) {
+            TD5_LOG_D(LOG_TAG,
+                      "overlay view %d: visible_mask=0x%08X",
+                      v, (unsigned int)flags);
+        }
 
         uint8_t *view_base = s_hud_prim_storage;
 
@@ -1501,6 +1583,7 @@ void td5_hud_render_minimap(int actor_slot)
     uint8_t *span_base = (uint8_t *)g_strip_span_base;
     uint8_t *vert_base = (uint8_t *)g_strip_vertex_base;
     int seg_idx = 0;
+    int dot_count = 0;
     TD5_SpriteQuad map_quad;
 
     for (int i = 0; i < 0x30 && (int)(start_span + i * 5) < g_strip_span_count - 2; i++) {
@@ -1580,8 +1663,15 @@ void td5_hud_render_minimap(int actor_slot)
                 HUD_DEPTH
             );
             hud_submit_quad(&map_quad);
+            dot_count++;
         }
     }
+
+    TD5_LOG_D(LOG_TAG,
+              "minimap: actor=%d span_range=[%d,%d] dots=%d",
+              actor_slot, start_span,
+              (start_span + 0x30 * 5 < g_strip_span_count) ? (start_span + 0x30 * 5) : g_strip_span_count,
+              dot_count);
 }
 
 /* ========================================================================
@@ -1770,6 +1860,7 @@ void td5_hud_init_pause_menu(int page_index)
 
     /* Build BLACKBOX (background panel) */
     TD5_AtlasEntry *blackbox = td5_asset_find_atlas_entry(NULL, "BLACKBOX");
+    hud_log_atlas_status("BLACKBOX", blackbox);
 
     TD5_SpriteQuad panel_quad;
     hud_build_quad(
@@ -1787,6 +1878,7 @@ void td5_hud_init_pause_menu(int page_index)
 
     /* Build SELBOX (selection highlight) */
     TD5_AtlasEntry *selbox = td5_asset_find_atlas_entry(NULL, "SELBOX");
+    hud_log_atlas_status("SELBOX", selbox);
     s_pause_sel_box = NULL; /* pointer set during page setup */
 
     TD5_SpriteQuad sel_quad;
@@ -1809,6 +1901,8 @@ void td5_hud_init_pause_menu(int page_index)
     /* Build SLIDER and BLACKBAR rows for each menu option */
     s_pause_slider_atlas = td5_asset_find_atlas_entry(NULL, "SLIDER");
     TD5_AtlasEntry *blackbar = td5_asset_find_atlas_entry(NULL, "BLACKBAR");
+    hud_log_atlas_status("SLIDER", s_pause_slider_atlas);
+    hud_log_atlas_status("BLACKBAR", blackbar);
 
     for (int row = 0; row < 3; row++) {
         float row_y = (float)row * 16.0f;
@@ -1847,6 +1941,7 @@ void td5_hud_init_pause_menu(int page_index)
 
     /* Build text glyphs from PAUSETXT atlas */
     TD5_AtlasEntry *pausetxt = td5_asset_find_atlas_entry(NULL, "PAUSETXT");
+    hud_log_atlas_status("PAUSETXT", pausetxt);
 
     /* Iterate string table entries for this page */
     float text_y = -52.0f;
@@ -1905,6 +2000,10 @@ void td5_hud_init_pause_menu(int page_index)
 
         if (string_offset > 0x2F) break;
     }
+
+    TD5_LOG_I(LOG_TAG,
+              "pause menu: page=%d item_count=%d theme=page_%d",
+              page_index, string_offset / 8, page_index);
 }
 
 /* ========================================================================

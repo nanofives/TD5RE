@@ -15,6 +15,7 @@
 #include "td5_input.h"
 #include "td5_ai.h"
 #include "td5_asset.h"
+#include "td5_physics.h"
 #include "td5_render.h"
 #include "td5_camera.h"
 #include "td5_frontend.h"
@@ -32,6 +33,13 @@ extern int g_actorBaseAddr;
 extern void *g_actor_pool;
 extern void *g_actor_base;
 extern uint8_t *g_actor_table_base;
+extern int g_actor_slot_map[2];
+extern int g_racer_count;
+extern int g_game_type;
+extern int g_split_screen_mode;
+extern int g_track_is_circuit;
+extern int g_track_type_mode;
+extern int g_replay_mode;
 
 /* Win32-based checkpoint log -- bypasses broken CRT fopen in -mwindows builds */
 static void ck_write(const char *path, const char *msg) {
@@ -186,6 +194,8 @@ static uint32_t s_race_end_timer_start;
 static int      s_replay_mode;
 static int      s_race_countdown_ticks;
 static int      s_race_countdown_state;
+static int      s_pause_menu_active;
+static int      s_pause_menu_cursor;   /* 0=Resume, 1=Options, 2=Quit */
 
 /* ========================================================================
  * Forward declarations (internal helpers)
@@ -204,6 +214,7 @@ static void adjust_checkpoint_timers(int slot);
 static void display_loading_screen_tga(void);
 static void reset_race_countdown(void);
 static void tick_race_countdown(void);
+static const char *td5_game_state_name(TD5_GameState state);
 
 TD5_Actor *td5_game_get_actor(int slot)
 {
@@ -219,6 +230,16 @@ TD5_Actor *td5_game_get_actor(int slot)
 int td5_game_get_total_actor_count(void)
 {
     int total = g_td5.total_actor_count;
+
+    if (total <= 0 && g_actor_table_base) {
+        if (g_td5.time_trial_enabled) {
+            total = 2;
+        } else if (g_td5.traffic_enabled) {
+            total = TD5_MAX_TOTAL_ACTORS;
+        } else {
+            total = TD5_MAX_RACER_SLOTS;
+        }
+    }
 
     if (total < 0) {
         return 0;
@@ -255,6 +276,7 @@ int td5_game_init(void) {
     memset(s_metrics, 0, sizeof(s_metrics));
     memset(s_results, 0, sizeof(s_results));
     memset(s_viewports, 0, sizeof(s_viewports));
+    g_td5.total_actor_count = 0;
 
     for (int i = 0; i < TD5_MAX_RACER_SLOTS; i++)
         s_race_order[i] = (uint8_t)i;
@@ -301,6 +323,9 @@ int td5_game_tick(void) {
         td5_game_show_legal_screens();
 
         /* Step 4: Transition to MENU (fallthrough) */
+        TD5_LOG_I(LOG_TAG, "State transition: %s -> %s",
+                  td5_game_state_name(TD5_GAMESTATE_INTRO),
+                  td5_game_state_name(TD5_GAMESTATE_MENU));
         g_td5.game_state = TD5_GAMESTATE_MENU;
         /* FALLTHROUGH */
 
@@ -327,6 +352,9 @@ int td5_game_tick(void) {
             /* Heavy synchronous race session init (loading screen shown inside) */
             td5_game_init_race_session();
 
+            TD5_LOG_I(LOG_TAG, "State transition: %s -> %s",
+                      td5_game_state_name(TD5_GAMESTATE_MENU),
+                      td5_game_state_name(TD5_GAMESTATE_RACE));
             g_td5.game_state = TD5_GAMESTATE_RACE;
             return 0;
         }
@@ -341,9 +369,17 @@ int td5_game_tick(void) {
         if (result != 0) {
             /* Race is over. Determine next state. */
             if (g_td5.benchmark_active) {
+                TD5_LOG_I(LOG_TAG, "State transition: %s -> %s",
+                          td5_game_state_name(TD5_GAMESTATE_RACE),
+                          td5_game_state_name(TD5_GAMESTATE_BENCHMARK));
                 g_td5.game_state = TD5_GAMESTATE_BENCHMARK;
             } else {
+                TD5_LOG_I(LOG_TAG, "State transition: %s -> %s",
+                          td5_game_state_name(TD5_GAMESTATE_RACE),
+                          td5_game_state_name(TD5_GAMESTATE_MENU));
                 g_td5.game_state = TD5_GAMESTATE_MENU;
+                /* Always return to main menu (screen 5), never attract demo (screen 2) */
+                td5_frontend_set_screen(TD5_SCREEN_MAIN_MENU);
             }
             return 0;
         }
@@ -392,6 +428,9 @@ int td5_game_tick(void) {
                 if (kb[k]) {
                     /* Keypress detected: return to MENU */
                     s_benchmark_image_load_pending = 1;
+                    TD5_LOG_I(LOG_TAG, "State transition: %s -> %s",
+                              td5_game_state_name(TD5_GAMESTATE_BENCHMARK),
+                              td5_game_state_name(TD5_GAMESTATE_MENU));
                     g_td5.game_state = TD5_GAMESTATE_MENU;
                     break;
                 }
@@ -435,10 +474,13 @@ int td5_game_init_race_session(void) {
 
     /* ---- Step 1: Display random loading screen TGA (rand()%20) ---- */
     display_loading_screen_tga();
+    TD5_LOG_I(LOG_TAG, "InitRace step 1/19: loading screen displayed for track=%d",
+              g_td5.track_index);
     CK("ck1_after_loading_screen");
 
     /* ---- Step 2: Reset game heap (0x430CB0, 24 MB pool) ---- */
     td5_plat_heap_reset();
+    TD5_LOG_I(LOG_TAG, "InitRace step 2/19: heap reset complete");
     CK("ck2_after_heap_reset");
 
     /* ---- Step 3: Configure race slot states (player/AI/disabled) ---- */
@@ -459,29 +501,46 @@ int td5_game_init_race_session(void) {
             s_slot_state[i].state = 3;  /* disabled */
         }
     }
+    TD5_LOG_I(LOG_TAG,
+              "InitRace step 3/19: race slots configured split=%d time_trial=%d traffic=%d",
+              g_td5.split_screen_mode, g_td5.time_trial_enabled, g_td5.traffic_enabled);
+    g_game_type = g_td5.game_type;
+    g_split_screen_mode = g_td5.split_screen_mode;
+    g_track_is_circuit = (g_td5.track_type == TD5_TRACK_CIRCUIT);
+    g_track_type_mode = g_track_is_circuit ? 1 : 0;
+    g_replay_mode = s_replay_mode;
+    g_racer_count = g_td5.time_trial_enabled ? 2 : TD5_MAX_RACER_SLOTS;
 
     /* ---- Step 4: Load track runtime data ---- */
     td5_asset_load_level(g_td5.track_index);
+    TD5_LOG_I(LOG_TAG, "InitRace step 4/19: level runtime loaded track=%d", g_td5.track_index);
     CK("ck4_after_load_level");
 
     /* ---- Step 5: Load vehicle assets for all active slots ---- */
     for (int i = 0; i < TD5_MAX_RACER_SLOTS; i++) {
         if (s_slot_state[i].state != 3) {
             td5_asset_load_vehicle(0 /* car_index from slot config */, i);
+            TD5_LOG_I(LOG_TAG, "InitRace step 5/19: vehicle asset loaded slot=%d car_index=%d",
+                      i, 0);
         }
     }
 
     /* ---- Step 6: Bind track strip runtime pointers ---- */
     /* (Internal to td5_asset_load_level -- strip data is patched in place) */
+    TD5_LOG_I(LOG_TAG, "InitRace step 6/19: track strip runtime pointers bound");
 
     /* ---- Step 7: Parse MODELS.DAT from level ZIP ---- */
     /* (Loaded as part of td5_asset_load_level) */
+    TD5_LOG_I(LOG_TAG, "InitRace step 7/19: MODELS.DAT parsed from level assets");
 
     /* ---- Step 8: Load track textures ---- */
     td5_asset_load_track_textures(g_td5.track_index);
+    TD5_LOG_I(LOG_TAG, "InitRace step 8/19: track textures loaded for track=%d",
+              g_td5.track_index);
 
     /* ---- Step 9: Load sky mesh (SKY.PRR from STATIC.ZIP) ---- */
     /* (Loaded as part of td5_asset_load_track_textures static resource pass) */
+    TD5_LOG_I(LOG_TAG, "InitRace step 9/19: sky mesh/static resources prepared");
 
     /* ---- Step 10: Initialize race vehicle runtime ---- */
     /* Initialize per-actor race metrics */
@@ -490,6 +549,7 @@ int td5_game_init_race_session(void) {
         s_metrics[i].display_position = (int16_t)i;
         s_race_order[i] = (uint8_t)i;
     }
+    TD5_LOG_I(LOG_TAG, "InitRace step 10/19: race metrics/runtime arrays reset");
 
     /* ---- Step 11: Position actors on grid ---- */
     {
@@ -508,6 +568,9 @@ int td5_game_init_race_session(void) {
         for (int slot = 0; slot < spawn_count; ++slot) {
             uint8_t *actor = s_actor_memory + slot * TD5_ACTOR_STRIDE;
             int span_index = 1 + slot * 2;
+            int world_x = 0;
+            int world_y = 0;
+            int world_z = 0;
             TD5_StripSpan *sp = td5_track_get_span(span_index);
             int sub_lane = slot % 4;
 
@@ -521,22 +584,37 @@ int td5_game_init_race_session(void) {
 
             *(int16_t *)(actor + 0x080) = (int16_t)span_index;
             *(int16_t *)(actor + 0x082) = (int16_t)span_index;
+            *(int16_t *)(actor + 0x084) = (int16_t)span_index;
+            *(int16_t *)(actor + 0x086) = (int16_t)span_index;
             actor[0x08C] = (uint8_t)sub_lane;
 
-            {
-                int32_t *actor_pos = (int32_t *)(actor + 0x1FC);
-                actor_pos[0] = sp->origin_x;
-                actor_pos[1] = sp->pad_10;
-                actor_pos[2] = sp->origin_z;
+            if (!td5_track_get_span_center_world(span_index, &world_x, &world_y, &world_z)) {
+                world_x = sp->origin_x;
+                world_y = sp->pad_10;
+                world_z = sp->origin_z;
             }
+
+            *(int32_t *)(actor + 0x1FC) = world_x;
+            *(int32_t *)(actor + 0x200) = world_y;
+            *(int32_t *)(actor + 0x204) = world_z;
 
             actor[0x375] = (uint8_t)slot;
             actor[0x37B] = 1;
             td5_track_compute_heading((TD5_Actor *)actor);
+            TD5_LOG_I(LOG_TAG,
+                      "Actor spawn: slot=%d span=%d pos=(%d,%d,%d) state=%d lane=%d",
+                      slot, span_index,
+                      *(int32_t *)(actor + 0x1FC),
+                      *(int32_t *)(actor + 0x200),
+                      *(int32_t *)(actor + 0x204),
+                      (slot < TD5_MAX_RACER_SLOTS) ? s_slot_state[slot].state : -1,
+                      sub_lane);
         }
 
         td5_physics_init_vehicle_runtime();
         td5_ai_init_race_actor_runtime();
+        TD5_LOG_I(LOG_TAG, "InitRace step 11/19: actors spawned and runtime bound count=%d",
+                  spawn_count);
 
         TD5_LOG_I(LOG_TAG, "Actors spawned: base=%p count=%d",
                   (void *)s_actor_memory, g_td5.total_actor_count);
@@ -550,22 +628,29 @@ int td5_game_init_race_session(void) {
         td5_input_write_open("replay.td5");
         td5_input_set_playback_active(0);
     }
+    TD5_LOG_I(LOG_TAG, "InitRace step 12/19: input %s initialized",
+              s_replay_mode ? "playback" : "recording");
 
     CK("ck13_before_ambient");
     /* ---- Step 13: Load ambient sounds ---- */
     td5_sound_load_ambient();
+    TD5_LOG_I(LOG_TAG, "InitRace step 13/19: ambient sounds loaded");
     CK("ck13_after_ambient");
 
     /* ---- Step 14: Initialize particles, smoke, tire tracks, weather ---- */
     td5_vfx_init();
+    TD5_LOG_I(LOG_TAG, "InitRace step 14/19: VFX systems initialized");
 
     /* ---- Step 15: Configure force feedback + input mapping ---- */
     td5_input_ff_init();
     td5_input_reset_accumulators();
     td5_input_reset_buffers();
+    TD5_LOG_I(LOG_TAG, "InitRace step 15/19: force feedback and input buffers initialized");
 
     /* ---- Step 16: Start CD audio track ---- */
     td5_sound_cd_play(g_td5.track_index % 10 + 1);
+    TD5_LOG_I(LOG_TAG, "InitRace step 16/19: CD audio started track=%d",
+              g_td5.track_index % 10 + 1);
 
     CK("ck17_before_viewport");
     /* ---- Step 17: Initialize 3D render state + viewport layout ---- */
@@ -573,16 +658,21 @@ int td5_game_init_race_session(void) {
     td5_game_init_viewport_layout();
     g_actorSlotForView[0] = 0;
     g_actorSlotForView[1] = (g_td5.split_screen_mode > 0 && g_td5.total_actor_count > 1) ? 1 : 0;
+    g_actor_slot_map[0] = g_actorSlotForView[0];
+    g_actor_slot_map[1] = g_actorSlotForView[1];
     td5_camera_set_preset(0);
+    TD5_LOG_I(LOG_TAG, "InitRace step 17/19: render state and viewport layout initialized views=%d",
+              g_td5.viewport_count);
     CK("ck17_after_viewport");
 
     /* ---- Step 18: Upload race texture pages to GPU ---- */
     td5_asset_load_race_texture_pages();
+    TD5_LOG_I(LOG_TAG, "InitRace step 18/19: race texture pages uploaded");
 
     /* ---- Step 19: Initialize HUD, pause menu overlay ---- */
     #define DBG_WRITE(msg) ck_write("../step19.txt", msg)
     DBG_WRITE("19a_before_overlay");
-    td5_hud_init_overlay_resources(g_td5.game_type, 0);
+    td5_hud_init_overlay_resources(1, 0);
     DBG_WRITE("19b_before_layout");
     td5_hud_init_layout(g_td5.split_screen_mode);
     DBG_WRITE("19c_before_minimap");
@@ -593,14 +683,14 @@ int td5_game_init_race_session(void) {
     td5_hud_init_pause_menu(0);
     DBG_WRITE("19f_complete");
     #undef DBG_WRITE
-    TD5_LOG_I(LOG_TAG, "Step19 complete");
+    TD5_LOG_I(LOG_TAG, "InitRace step 19/19: HUD and pause menu initialized");
 
     /* ---- Load sky texture ---- */
     {
         char sky_path[256];
         int level_num = td5_asset_level_number(g_td5.track_index);
         snprintf(sky_path, sizeof(sky_path),
-                 "assets/levels/level%03d/forwsky.tga", level_num);
+                 "../re/assets/levels/level%03d/forwsky.tga", level_num);
         td5_render_load_sky(sky_path);
     }
 
@@ -644,8 +734,6 @@ int td5_game_init_race_session(void) {
 
 int td5_game_run_race_frame(void) {
     int i;
-    static int s_race_frame_log_count = 0;
-
     /* ---- Update frame timing ---- */
     td5_game_update_frame_timing();
 
@@ -695,6 +783,50 @@ int td5_game_run_race_frame(void) {
         /* td5_camera_cache_vehicle_angles for primary and secondary players */
         td5_camera_tick();
 
+        /* --- Pause menu (ESC toggles) --- */
+        static int s_prev_esc_state = 0;
+        int esc_now = td5_plat_input_key_pressed(0x01);
+        int esc_edge = (esc_now && !s_prev_esc_state);
+        int pause_menu_was_active = s_pause_menu_active;
+        s_prev_esc_state = esc_now;
+        if (esc_edge && !s_pause_menu_active) {
+            s_pause_menu_active = 1;
+            s_pause_menu_cursor = 0;
+        }
+        if (s_pause_menu_active) {
+            /* Navigation: 2 items (Resume / Quit) */
+            if (td5_plat_input_key_pressed(0xD0) || td5_plat_input_key_pressed(0xC8))
+                s_pause_menu_cursor = 1 - s_pause_menu_cursor;
+            /* Confirm */
+            if (td5_plat_input_key_pressed(0x1C)) { /* enter */
+                if (s_pause_menu_cursor == 0) {
+                    /* Resume */
+                    s_pause_menu_active = 0;
+                } else {
+                    /* Quit race → return to menu immediately */
+                    s_pause_menu_active = 0;
+                    td5_game_release_race_resources();
+                    td5_game_set_state(TD5_GAMESTATE_MENU);
+                    return 1;
+                }
+            }
+            /* ESC again = resume */
+            if (esc_edge && pause_menu_was_active) {
+                s_pause_menu_active = 0;
+            }
+
+            /* Draw pause menu text via HUD */
+            td5_hud_queue_text(0, 280, 180, 1, "PAUSED");
+            td5_hud_queue_text(0, 280, 220, 1,
+                s_pause_menu_cursor == 0 ? "> RESUME" : "  RESUME");
+            td5_hud_queue_text(0, 280, 260, 1,
+                s_pause_menu_cursor == 1 ? "> QUIT" : "  QUIT");
+
+            g_td5.sim_time_accumulator -= TD5_TICK_ACCUMULATOR_ONE;
+            ticks_this_frame++;
+            continue;
+        }
+
         if (g_td5.paused) {
             tick_race_countdown();
             if (g_td5.paused) {
@@ -703,6 +835,8 @@ int td5_game_run_race_frame(void) {
                 continue;
             }
         }
+
+        /* Input record/playback is handled inside td5_input_poll_race_session(). */
 
         /* --- Per-slot player control update --- */
         for (i = 0; i < TD5_MAX_RACER_SLOTS; i++) {
@@ -740,7 +874,34 @@ int td5_game_run_race_frame(void) {
         ticks_this_frame++;
     }
 
+    if ((g_td5.simulation_tick_counter % 60u) == 0u) {
+        TD5_LOG_D(LOG_TAG,
+                  "Race frame timing: dt=%.3f fps=%.2f ticks_this_frame=%d paused=%d pause_menu=%d countdown_state=%d countdown_ticks=%d fade=%d",
+                  g_td5.normalized_frame_dt,
+                  g_td5.instant_fps,
+                  ticks_this_frame,
+                  g_td5.paused,
+                  s_pause_menu_active,
+                  s_race_countdown_state,
+                  s_race_countdown_ticks,
+                  g_td5.race_end_fade_state);
+        {
+            TD5_Actor *actor0 = td5_game_get_actor(0);
+            if (actor0) {
+                uint8_t *a0 = (uint8_t *)actor0;
+                TD5_LOG_D(LOG_TAG,
+                          "Race actor0: pos=(%d,%d,%d) speed=%d gear=%d",
+                          *(int32_t *)(a0 + 0x1CC),
+                          *(int32_t *)(a0 + 0x1D0),
+                          *(int32_t *)(a0 + 0x1D4),
+                          *(int32_t *)(a0 + 0x208),
+                          *(int32_t *)(a0 + 0x224));
+            }
+        }
+    }
+
     /* ---- Rendering pipeline ---- */
+    /* ---- Rendering pipeline ----*/
 
     /* Begin scene */
     td5_render_begin_scene();
@@ -753,44 +914,62 @@ int td5_game_run_race_frame(void) {
             s_viewports[vp].w, s_viewports[vp].h);
 
         /* Camera transition state */
+        {
+            static int s_cam_debug_logged = 0;
+            TD5_Actor *actor = td5_game_get_actor(g_actorSlotForView[vp]);
+
+            if (!actor && g_actor_table_base) {
+                int slot = g_actorSlotForView[vp];
+                int total = td5_game_get_total_actor_count();
+
+                if (slot >= 0 && slot < total) {
+                    actor = (TD5_Actor *)(g_actor_table_base + (size_t)slot * TD5_ACTOR_STRIDE);
+                }
+            }
+
+            if (!s_cam_debug_logged) {
+                TD5_LOG_I(LOG_TAG,
+                          "Camera first frame: actor=%p base=%p count=%d slot=%d",
+                          (void *)actor,
+                          (void *)g_actor_table_base,
+                          td5_game_get_total_actor_count(),
+                          g_actorSlotForView[vp]);
+                s_cam_debug_logged = 1;
+            }
+        }
         td5_camera_update_transition_state(vp, vp);
 
         /* Configure projection for this viewport */
         td5_render_configure_projection(s_viewports[vp].w, s_viewports[vp].h);
-        ck_write("../rframe.txt", "A_sky");
 
         /* Sky dome */
         td5_render_advance_sky_rotation();
         td5_render_advance_billboard_anims();
-        ck_write("../rframe.txt", "B_actors");
-
         /* Track spans from display list */
         /* (td5_render_span_display_list called internally by render_frame) */
 
         /* Render race actors for this view */
         td5_render_actors_for_view(vp);
-        ck_write("../rframe.txt", "C_flush_translucent");
 
         /* VFX: tire tracks, particles */
         /* (Rendered as part of translucent pipeline) */
         td5_render_flush_translucent();
-        ck_write("../rframe.txt", "D_flush_projected");
         td5_render_flush_projected_buckets();
-        ck_write("../rframe.txt", "E_hud_status");
 
         /* HUD overlay for this viewport */
         td5_hud_draw_status_text(vp, vp);
-        ck_write("../rframe.txt", "F_minimap");
         td5_hud_render_minimap(vp);
-        ck_write("../rframe.txt", "G_vp_done");
     }
 
-    ck_write("../rframe.txt", "H_hud_overlays");
     /* Full-screen HUD overlay (speedometer, lap counter, etc.) */
     td5_hud_render_overlays(g_td5.sim_tick_budget);
-    ck_write("../rframe.txt", "I_hud_flush_text");
+
+    /* Pause overlay: darken screen before drawing pause text */
+    if (s_pause_menu_active) {
+        td5_hud_draw_pause_overlay();
+    }
+
     td5_hud_flush_text();
-    ck_write("../rframe.txt", "J_audio");
 
     /* ---- Audio tick ---- */
     for (i = 0; i < TD5_MAX_RACER_SLOTS; i++) {
@@ -803,16 +982,6 @@ int td5_game_run_race_frame(void) {
 
     /* End scene and present */
     td5_render_end_scene();
-    if (s_race_frame_log_count < 120) {
-        TD5_LOG_I(LOG_TAG,
-                  "race frame: viewports=%d ticks=%d sim_ticks=%u fade=%d dt=%.3f",
-                  g_td5.viewport_count,
-                  ticks_this_frame,
-                  g_td5.simulation_tick_counter,
-                  g_td5.race_end_fade_state,
-                  g_td5.normalized_frame_dt);
-        s_race_frame_log_count++;
-    }
     td5_plat_present(1);
 
     return 0;  /* race continues */
@@ -839,6 +1008,8 @@ static void reset_race_countdown(void)
     s_race_countdown_ticks = TD5_COUNTDOWN_STEPS * TD5_COUNTDOWN_TICKS_PER_STEP;
     s_race_countdown_state = TD5_COUNTDOWN_STEPS;
     set_countdown_indicator_state(s_race_countdown_state);
+    TD5_LOG_I(LOG_TAG, "Race countdown reset: state=%d ticks=%d",
+              s_race_countdown_state, s_race_countdown_ticks);
 }
 
 static void tick_race_countdown(void)
@@ -856,6 +1027,8 @@ static void tick_race_countdown(void)
     if (next_state != s_race_countdown_state) {
         s_race_countdown_state = next_state;
         set_countdown_indicator_state(next_state);
+        TD5_LOG_I(LOG_TAG, "Race countdown advanced: state=%d ticks_remaining=%d",
+                  next_state, s_race_countdown_ticks);
 
         if (next_state == 0) {
             g_td5.paused = 0;
@@ -917,6 +1090,7 @@ static int check_race_completion(uint32_t sim_delta) {
         s_post_finish_cooldown += sim_delta;
         if (s_post_finish_cooldown > 0x3FFFFF) {
             /* Cooldown expired: build results and signal completion */
+            TD5_LOG_I(LOG_TAG, "Race completion cooldown expired: building results");
             s_post_finish_cooldown = 0;
             build_results_table();
             return 1;
@@ -955,6 +1129,14 @@ static int check_race_completion(uint32_t sim_delta) {
         /* Latch the cooldown accumulator to begin phase 2 */
         s_post_finish_cooldown = 1;
         s_race_end_timer_start = td5_plat_time_ms();
+        TD5_LOG_I(LOG_TAG,
+                  "Race completion triggered: slot0=%d slot1=%d slot2=%d slot3=%d slot4=%d slot5=%d",
+                  s_slot_state[0].companion_1,
+                  s_slot_state[1].companion_1,
+                  s_slot_state[2].companion_1,
+                  s_slot_state[3].companion_1,
+                  s_slot_state[4].companion_1,
+                  s_slot_state[5].companion_1);
     }
 
     return 0;
@@ -1011,6 +1193,9 @@ static void advance_pending_finish_state(int slot, uint32_t sim_delta) {
                 s_slot_state[slot].companion_1 = 1;
                 s_slot_state[slot].companion_2 = 1;
                 s_slot_state[slot].state = 2;  /* completed */
+                TD5_LOG_I(LOG_TAG,
+                          "Actor finish: slot=%d mode=circuit lap=%d timer=%d span=%d",
+                          slot, m->checkpoint_index, m->cumulative_timer, m->normalized_span);
             }
         }
     } else {
@@ -1041,6 +1226,9 @@ static void advance_pending_finish_state(int slot, uint32_t sim_delta) {
             s_slot_state[slot].companion_1 = 1;
             s_slot_state[slot].companion_2 = 1;
             s_slot_state[slot].state = 2;
+            TD5_LOG_I(LOG_TAG,
+                      "Actor finish: slot=%d mode=checkpoint checkpoints=%d timer=%d span=%d",
+                      slot, m->checkpoint_index, m->cumulative_timer, m->normalized_span);
         }
     }
 }
@@ -1329,6 +1517,19 @@ void td5_game_begin_fade_out(int param) {
     default:
         g_td5.fade_direction = 0;
         break;
+    }
+
+    TD5_LOG_I(LOG_TAG, "Fade out begin: param=%d direction=%d", param, g_td5.fade_direction);
+}
+
+static const char *td5_game_state_name(TD5_GameState state)
+{
+    switch (state) {
+    case TD5_GAMESTATE_INTRO: return "INTRO";
+    case TD5_GAMESTATE_MENU: return "MENU";
+    case TD5_GAMESTATE_RACE: return "RACE";
+    case TD5_GAMESTATE_BENCHMARK: return "BENCHMARK";
+    default: return "UNKNOWN";
     }
 }
 

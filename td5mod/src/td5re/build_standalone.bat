@@ -9,9 +9,11 @@ cd /d "%~dp0"
 
 set GCC=..\..\deps\mingw\mingw32\bin\gcc.exe
 set AR=..\..\deps\mingw\mingw32\bin\ar.exe
+set WINDRES=..\..\deps\mingw\mingw32\bin\windres.exe
 set SRCDIR=.
 set WRAPPER_SRCDIR=..\..\ddraw_wrapper\src
 set WRAPPER_BUILDDIR=..\..\ddraw_wrapper\build
+set ZLIB_INC=..\..\deps\mingw\mingw32\i686-w64-mingw32\include
 set BUILDDIR=build
 set PROJECT_ROOT=..\..\..
 
@@ -29,7 +31,7 @@ REM ---------------------------------------------------------------------------
 REM Compile td5re modules
 REM ---------------------------------------------------------------------------
 
-set CFLAGS=-c -O2 -Wall -Wextra -Wpedantic -DWIN32 -m32 -I%SRCDIR% -I%WRAPPER_SRCDIR%
+set CFLAGS=-c -O2 -Wall -Wextra -Wpedantic -DWIN32 -m32 -I%SRCDIR% -I%WRAPPER_SRCDIR% -I%ZLIB_INC% -DTD5_INFLATE_USE_ZLIB
 set TD5RE_SRCS=td5re.c td5_game.c td5_physics.c td5_track.c td5_ai.c td5_render.c td5_frontend.c td5_hud.c td5_sound.c td5_input.c td5_asset.c td5_inflate.c td5_save.c td5_net.c td5_camera.c td5_vfx.c td5_fmv.c td5_platform_win32.c td5re_stubs.c main.c
 
 echo === TD5RE Standalone Build ===
@@ -53,6 +55,19 @@ REM ---------------------------------------------------------------------------
 REM Build static archive from all td5re .o files (excluding main.o)
 REM ---------------------------------------------------------------------------
 
+REM ---------------------------------------------------------------------------
+REM Compile resource file (icon)
+REM ---------------------------------------------------------------------------
+
+echo Compiling td5re.rc...
+"%WINDRES%" -F pe-i386 -i %SRCDIR%\td5re.rc -o %BUILDDIR%\td5re_res.o
+if errorlevel 1 (
+    echo WARNING: windres failed, icon will not be embedded
+    set "RESOBJ="
+) else (
+    set "RESOBJ=%BUILDDIR%\td5re_res.o"
+)
+
 echo Creating libtd5re.a...
 set ARCHIVE_OBJS=
 for %%F in (%TD5RE_SRCS%) do (
@@ -73,13 +88,14 @@ REM ---------------------------------------------------------------------------
 
 echo Linking td5re.exe...
 "%GCC%" -m32 -static -o %BUILDDIR%\td5re.exe ^
-    %BUILDDIR%\main.o ^
+    %BUILDDIR%\main.o %RESOBJ% ^
     -L%BUILDDIR% -Wl,--whole-archive -ltd5re -Wl,--no-whole-archive ^
     -L%WRAPPER_BUILDDIR% -lddraw_wrapper ^
     -ld3d11 -ldxgi -lkernel32 -luser32 -lgdi32 -luuid -lole32 ^
-    -lwinmm -ldinput8 -ldsound -ldxguid -lz ^
+    -lwinmm -ldinput8 -ldsound -ldxguid -lz -lws2_32 ^
     -Wl,-Map=%BUILDDIR%\td5re.map ^
-    -Wl,--enable-stdcall-fixup
+    -Wl,--enable-stdcall-fixup ^
+    -Wl,--allow-multiple-definition
 
 if errorlevel 1 goto :fail
 

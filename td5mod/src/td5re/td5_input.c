@@ -21,11 +21,19 @@
 #include "td5_input.h"
 #include "td5_platform.h"
 #include "td5re.h"
+#include "td5_game.h"
+
+/* Defined in td5re_stubs.c -- not yet in td5_game.h */
+extern int td5_game_is_wanted_mode(void);
 
 #include <string.h>
 #include <stdlib.h>
 
-#define LOG_MOD "input"
+#define LOG_TAG "input"
+
+static uint32_t s_poll_log_counter = 0;
+static uint32_t s_control_log_counter = 0;
+static char s_replay_log_path[260];
 
 /* ========================================================================
  * Terrain FF Coefficient Table (from 0x466AFC)
@@ -130,7 +138,7 @@ static TD5_InputRecordBuffer s_rec;
  * Internal State -- Force Feedback
  * ======================================================================== */
 
-static TD5_FFState s_ff;
+static TD5_FFGameState s_ff;
 
 /* ========================================================================
  * Internal State -- Escape / Fade
@@ -158,6 +166,9 @@ static inline int clamp_i(int v, int lo, int hi)
 
 int td5_input_init(void)
 {
+    int ok;
+    int device_count;
+
     memset(s_control_bits, 0, sizeof(s_control_bits));
     memset(s_analog_x, 0, sizeof(s_analog_x));
     memset(s_analog_y, 0, sizeof(s_analog_y));
@@ -175,11 +186,16 @@ int td5_input_init(void)
     memset(s_rear_view, 0, sizeof(s_rear_view));
     memset(&s_rec, 0, sizeof(s_rec));
     memset(&s_ff, 0, sizeof(s_ff));
+    memset(s_replay_log_path, 0, sizeof(s_replay_log_path));
 
     s_escape_muted = 0;
     s_escape_fade_active = 0;
 
-    return td5_plat_input_init();
+    ok = td5_plat_input_init();
+    device_count = td5_plat_input_enumerate_devices();
+    TD5_LOG_I(LOG_TAG, "Input init: result=%d devices=%d active_players=%d",
+              ok, device_count, s_active_players);
+    return ok;
 }
 
 void td5_input_shutdown(void)
@@ -291,6 +307,12 @@ void td5_input_poll_race_session(void)
     td5_input_write_frame(s_control_bits[0], s_control_bits[1], 1);
 
 post_poll:
+    s_poll_log_counter++;
+    if ((s_poll_log_counter % 30u) == 0u) {
+        TD5_LOG_D(LOG_TAG, "Race session poll p0: raw_bits=0x%08X",
+                  (unsigned int)s_control_bits[0]);
+    }
+
     /* Check F3 key for keyboard camera cycling (scan code 0x3D) */
     if (td5_plat_input_key_pressed(0x3D)) {
         /* Camera cycle logic placeholder -- original toggles a flag */
@@ -362,11 +384,25 @@ void td5_input_update_player_control(int slot)
      * with speed=0 which gives maximum steering authority.
      */
 
-    /* Placeholder: will be replaced with actual actor queries */
-    int speed = 0;        /* abs(velocity >> 8) */
-    int speed_sq = 0;     /* (velocity >> 8)^2 */
+    /* Read live speed from actor physics state */
+    int speed = 0;
+    int speed_sq = 0;
     int vehicle_stopped = 1;
     int encounter_active = 0;
+    {
+        TD5_Actor *actor = td5_game_get_actor(slot);
+        if (actor) {
+            uint8_t *abytes = (uint8_t *)actor;
+            /* +0x314 = lateral_speed (int32), same field the original reads */
+            int32_t raw_speed = *(int32_t *)(abytes + 0x314);
+            speed = (raw_speed < 0 ? -raw_speed : raw_speed) >> 8;
+            /* +0x31C = velocity_sq (int32), pre-computed by physics */
+            speed_sq = *(int32_t *)(abytes + 0x31C) >> 8;
+            /* Vehicle is stopped if speed is below threshold */
+            vehicle_stopped = (speed < 100) ? 1 : 0;
+        }
+        encounter_active = td5_game_is_wanted_mode();
+    }
 
     int steer_rate_denom;
     if (vehicle_stopped) {
@@ -491,7 +527,7 @@ void td5_input_update_player_control(int slot)
             s_reverse_req[slot] = 0;
         } else {
             /* Negative Y = accelerate */
-            s_throttle[slot] = 1;  /* placeholder scaled value */
+            s_throttle[slot] = 0x60;  /* full digital throttle */
             s_brake[slot] = 0;
             s_reverse_req[slot] = 0;
         }
@@ -515,11 +551,11 @@ void td5_input_update_player_control(int slot)
         } else if (encounter_active) {
             /* Encounter steering override -- placeholder */
         } else {
-            s_brake[slot] = 1;
+            s_brake[slot] = 0;
             s_reverse_req[slot] = 0;
 
             if (bits & TD5_INPUT_THROTTLE) {
-                s_throttle[slot] = 1;  /* will be scaled by steering weight */
+                s_throttle[slot] = 0x60;  /* full digital throttle */
             } else {
                 s_throttle[slot] = 0;
             }
@@ -574,6 +610,30 @@ void td5_input_update_player_control(int slot)
         }
     } else {
         s_gear_debounce[slot]--;
+    }
+
+    /* ---- Write back to actor struct for physics ---- */
+    {
+        TD5_Actor *actor = td5_game_get_actor(slot);
+        if (actor) {
+            uint8_t *a = (uint8_t *)actor;
+            /* 0x30C: steering_command (int32) */
+            *(int32_t *)(a + 0x30C) = s_steering_cmd[slot];
+            /* 0x33E: encounter_steering_cmd (int16) — used as throttle by physics */
+            *(int16_t *)(a + 0x33E) = s_throttle[slot];
+            /* 0x36D: brake_flag (byte) */
+            a[0x36D] = s_brake[slot];
+        }
+    }
+
+    if (slot == 0) {
+        s_control_log_counter++;
+        if ((s_control_log_counter % 30u) == 0u) {
+            TD5_LOG_D(LOG_TAG,
+                      "Player control p0: steering=%d throttle=%d brake=%u gear=%u",
+                      (int)s_steering_cmd[0], (int)s_throttle[0],
+                      (unsigned int)s_brake[0], (unsigned int)s_gear[0]);
+        }
     }
 }
 
@@ -677,16 +737,17 @@ int td5_input_get_rear_view(int slot)
 
 int td5_input_write_open(const char *path)
 {
-    (void)path; /* recording is in-memory only, path unused */
-
     memset(&s_rec, 0, sizeof(s_rec));
+    strncpy(s_replay_log_path, path ? path : "<memory>", sizeof(s_replay_log_path) - 1);
+    s_replay_log_path[sizeof(s_replay_log_path) - 1] = '\0';
     s_rec.track_index = g_td5.track_index;
     s_rec.entry_count = 0;
     s_rec.frame_cursor = 0;
     s_rec.last_word0 = 0;
     s_rec.last_word1 = 0;
 
-    TD5_LOG_D(LOG_MOD, "Recording opened for track %d", s_rec.track_index);
+    TD5_LOG_I(LOG_TAG, "Replay write open: path=%s track=%d",
+              s_replay_log_path, s_rec.track_index);
     return 1;
 }
 
@@ -695,8 +756,8 @@ void td5_input_write_close(void)
     if (s_rec.frame_cursor > 0) {
         s_rec.last_frame_index = (int32_t)(s_rec.frame_cursor - 1);
     }
-    TD5_LOG_D(LOG_MOD, "Recording closed: %d entries, %u frames",
-              s_rec.entry_count, s_rec.frame_cursor);
+    TD5_LOG_I(LOG_TAG, "Replay write close: path=%s entries=%d frames=%u",
+              s_replay_log_path, s_rec.entry_count, s_rec.frame_cursor);
 }
 
 void td5_input_write_frame(uint32_t word0, uint32_t word1, int strip_mode)
@@ -754,21 +815,24 @@ void td5_input_write_frame(uint32_t word0, uint32_t word1, int strip_mode)
 
 int td5_input_read_open(const char *path)
 {
-    (void)path;
-
     /* Reset read cursor; the buffer already contains recorded data */
+    strncpy(s_replay_log_path, path ? path : "<memory>", sizeof(s_replay_log_path) - 1);
+    s_replay_log_path[sizeof(s_replay_log_path) - 1] = '\0';
     s_rec.frame_cursor = 0;
     s_rec.read_index = 0;
     s_rec.replay_word0 = 0;
     s_rec.replay_word1 = 0;
 
-    TD5_LOG_D(LOG_MOD, "Playback opened: %d entries", s_rec.entry_count);
+    TD5_LOG_I(LOG_TAG, "Replay open: path=%s entries=%d frames=%d",
+              s_replay_log_path, s_rec.entry_count, s_rec.last_frame_index + 1);
     return 1;
 }
 
 void td5_input_read_close(void)
 {
     /* No-op, matching original DXInput::ReadClose */
+    TD5_LOG_I(LOG_TAG, "Replay close: path=%s frames=%d",
+              s_replay_log_path, s_rec.last_frame_index + 1);
 }
 
 int td5_input_read_frame(uint32_t *word0, uint32_t *word1)
@@ -834,9 +898,9 @@ int td5_input_ff_init(void)
      * DirectInput effect creation.  We just request initialization. */
     int ok = td5_plat_ff_init(0);
     if (ok) {
-        TD5_LOG_I(LOG_MOD, "Force feedback initialized on device 0");
+        TD5_LOG_I(LOG_TAG, "Force feedback initialized on device 0");
     } else {
-        TD5_LOG_W(LOG_MOD, "Force feedback not available");
+        TD5_LOG_W(LOG_TAG, "Force feedback not available");
     }
     return ok;
 }
@@ -852,12 +916,14 @@ void td5_input_ff_shutdown(void)
 
 void td5_input_ff_update(int magnitude)
 {
+    TD5_LOG_I(LOG_TAG, "FF start: slot=0 magnitude=%d", magnitude);
     td5_plat_ff_constant(0, magnitude);
 }
 
 void td5_input_ff_stop(void)
 {
     for (int slot = 0; slot < 4; slot++) {
+        TD5_LOG_I(LOG_TAG, "FF stop: slot=%d", slot);
         td5_plat_ff_stop(slot);
     }
     for (int i = 0; i < 2; i++) {
@@ -986,6 +1052,8 @@ void td5_input_ff_play_effect(int slot, int effect_slot, int magnitude,
 
     if (effect_slot < 0) effect_slot = 0;
     if (effect_slot > 3) effect_slot = 3;
+    TD5_LOG_I(LOG_TAG, "FF start: player=%d slot=%d magnitude=%d repeat=%d",
+              slot, effect_slot, magnitude, repeat_count);
     td5_plat_ff_constant(effect_slot, magnitude);
 }
 

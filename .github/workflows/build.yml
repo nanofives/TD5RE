@@ -1,0 +1,149 @@
+name: Build
+
+on:
+  push:
+    branches: [main, master]
+    paths:
+      - 'td5mod/**'
+      - '.github/workflows/build.yml'
+  pull_request:
+    branches: [main, master]
+    paths:
+      - 'td5mod/**'
+
+jobs:
+  build:
+    name: Build (MinGW i686)
+    runs-on: windows-latest
+
+    defaults:
+      run:
+        shell: msys2 {0}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up MSYS2 (MinGW i686)
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW32
+          update: false
+          install: >-
+            mingw-w64-i686-gcc
+            mingw-w64-i686-zlib
+
+      # -----------------------------------------------------------------------
+      # ddraw_wrapper — D3D11 translation layer, built as a static archive
+      # that gets linked into td5re.exe. Shaders are pre-compiled to _bytes.h
+      # so no HLSL toolchain is needed.
+      # -----------------------------------------------------------------------
+      - name: Build ddraw_wrapper (static library)
+        run: |
+          cd td5mod/ddraw_wrapper
+          mkdir -p build
+          CFLAGS="-c -O2 -Wall -DWIN32 -m32"
+
+          for name in ddraw_main ddraw4 surface4 d3d3 device3 viewport3 texture2 d3d11_backend; do
+            echo "Compiling $name.c..."
+            gcc $CFLAGS "src/$name.c" -o "build/$name.o"
+          done
+          gcc $CFLAGS -Wno-unused-function "src/png_loader.c" -o "build/png_loader.o"
+
+          ar rcs build/libddraw_wrapper.a \
+            build/ddraw_main.o build/ddraw4.o build/surface4.o \
+            build/d3d3.o build/device3.o build/viewport3.o \
+            build/texture2.o build/d3d11_backend.o build/png_loader.o
+
+          echo "ddraw_wrapper archive: $(ls -lh build/libddraw_wrapper.a | awk '{print $5}')"
+
+      # -----------------------------------------------------------------------
+      # td5re.exe — standalone source port
+      # -----------------------------------------------------------------------
+      - name: Build td5re.exe (source port)
+        run: |
+          cd td5mod/src/td5re
+          mkdir -p build
+
+          WRAPPER_SRCDIR=../../ddraw_wrapper/src
+          WRAPPER_BUILDDIR=../../ddraw_wrapper/build
+          CFLAGS="-c -O2 -Wall -Wextra -m32 -std=c11 -I. -I$WRAPPER_SRCDIR -DTD5_INFLATE_USE_ZLIB"
+
+          SRCS="td5re.c td5_game.c td5_physics.c td5_track.c td5_ai.c \
+                td5_render.c td5_frontend.c td5_hud.c td5_sound.c td5_input.c \
+                td5_asset.c td5_inflate.c td5_save.c td5_net.c td5_camera.c \
+                td5_vfx.c td5_fmv.c td5_platform_win32.c td5re_stubs.c main.c"
+
+          for src in $SRCS; do
+            name="${src%.c}"
+            echo "Compiling $src..."
+            gcc $CFLAGS "$src" -o "build/$name.o"
+          done
+
+          # Resource (icon) — non-fatal if windres fails
+          if windres -F pe-i386 -i td5re.rc -o build/td5re_res.o 2>/dev/null; then
+            RES_OBJ="build/td5re_res.o"
+          else
+            echo "WARNING: windres failed, icon will not be embedded"
+            RES_OBJ=""
+          fi
+
+          # Static archive (all modules except main)
+          ARCHIVE_OBJS=$(ls build/*.o | grep -v '/main\.o' | grep -v '_res\.o')
+          ar rcs build/libtd5re.a $ARCHIVE_OBJS
+
+          # Link
+          gcc -m32 -static -o build/td5re.exe \
+            build/main.o $RES_OBJ \
+            -Lbuild -Wl,--whole-archive -ltd5re -Wl,--no-whole-archive \
+            -L"$WRAPPER_BUILDDIR" -lddraw_wrapper \
+            -ld3d11 -ldxgi -lkernel32 -luser32 -lgdi32 -luuid -lole32 \
+            -lwinmm -ldinput8 -ldsound -ldxguid -lz -lws2_32 \
+            -Wl,--enable-stdcall-fixup \
+            -Wl,--allow-multiple-definition
+
+          ls -lh build/td5re.exe
+
+      # -----------------------------------------------------------------------
+      # td5_mod.asi — ASI mod that injects into the original TD5_d3d.exe
+      # -----------------------------------------------------------------------
+      - name: Build td5_mod.asi
+        run: |
+          cd td5mod
+          MINHOOK=deps/minhook-1.3.4
+          mkdir -p build build/scripts
+          CFLAGS="-c -O2 -Wall -DWIN32 -m32"
+
+          # MinHook
+          gcc $CFLAGS -I"$MINHOOK/include" -I"$MINHOOK/src"     "$MINHOOK/src/hook.c"          -o build/hook.o
+          gcc $CFLAGS -I"$MINHOOK/include" -I"$MINHOOK/src"     "$MINHOOK/src/buffer.c"        -o build/buffer.o
+          gcc $CFLAGS -I"$MINHOOK/include" -I"$MINHOOK/src"     "$MINHOOK/src/trampoline.c"    -o build/trampoline.o
+          gcc $CFLAGS -I"$MINHOOK/include" -I"$MINHOOK/src/hde" "$MINHOOK/src/hde/hde32.c"     -o build/hde32.o
+
+          # Mod sources
+          gcc $CFLAGS -I"$MINHOOK/include" -Isrc                 src/td5_mod.c                  -o build/td5_mod.o
+          gcc $CFLAGS -I"$MINHOOK/include" -Isrc                 src/td5_tuning.c               -o build/td5_tuning.o
+          gcc $CFLAGS                      -Isrc                 src/td5_asset_dump.c            -o build/td5_asset_dump.o
+          gcc $CFLAGS -Wno-unused-function -Isrc -Iddraw_wrapper/src src/td5_png_replace.c      -o build/td5_png_replace.o
+
+          # Link
+          gcc -m32 -shared -static -o build/scripts/td5_mod.asi \
+            build/td5_mod.o build/td5_tuning.o build/td5_asset_dump.o \
+            build/td5_png_replace.o \
+            build/hook.o build/buffer.o build/trampoline.o build/hde32.o \
+            -lkernel32 -luser32 -lgdi32 -s
+
+          ls -lh build/scripts/td5_mod.asi
+
+      - name: Upload td5re.exe
+        uses: actions/upload-artifact@v4
+        with:
+          name: td5re-${{ github.sha }}
+          path: td5mod/src/td5re/build/td5re.exe
+          if-no-files-found: error
+
+      - name: Upload td5_mod.asi
+        uses: actions/upload-artifact@v4
+        with:
+          name: td5-mod-${{ github.sha }}
+          path: td5mod/build/scripts/td5_mod.asi
+          if-no-files-found: error

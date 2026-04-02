@@ -20,21 +20,72 @@
 #define WIN32_LEAN_AND_MEAN
 #define COBJMACROS
 #include <windows.h>
+#include <mmsystem.h>
 #include <d3d11.h>
 #include <stdio.h>
+#include <stdlib.h>
+#include <stdarg.h>
+#include <string.h>
 
-/* Debug log to file + OutputDebugString */
-static FILE *s_logfile = NULL;
+/* Debug log to file + OutputDebugString (Win32 API for share-compatible writes) */
+static char s_main_log_path[512];
+static int  s_main_log_init = 0;
+static HANDLE s_main_log_handle = INVALID_HANDLE_VALUE;
+static unsigned int s_main_log_line_count = 0;
+
+static void dbglog_flush_close(void) {
+    if (s_main_log_handle != INVALID_HANDLE_VALUE) {
+        FlushFileBuffers(s_main_log_handle);
+        CloseHandle(s_main_log_handle);
+        s_main_log_handle = INVALID_HANDLE_VALUE;
+    }
+}
+
 static void dbglog(const char *fmt, ...) {
     char buf[512];
     va_list ap;
+    DWORD written;
+
     va_start(ap, fmt);
     vsnprintf(buf, sizeof(buf), fmt, ap);
     va_end(ap);
     OutputDebugStringA(buf);
     OutputDebugStringA("\n");
-    if (!s_logfile) s_logfile = fopen("td5re_debug.log", "w");
-    if (s_logfile) { fprintf(s_logfile, "%s\n", buf); fflush(s_logfile); }
+    printf("%s\n", buf);   /* also emit to attached console (if any) */
+
+    if (!s_main_log_init) {
+        DWORD n = GetModuleFileNameA(NULL, s_main_log_path, sizeof(s_main_log_path) - 32);
+        if (n > 0) {
+            char *sl = s_main_log_path + n;
+            while (sl > s_main_log_path && *sl != '\\' && *sl != '/') sl--;
+            if (sl > s_main_log_path) sl[1] = '\0';
+            strcat(s_main_log_path, "td5re_debug.log");
+        } else {
+            strcpy(s_main_log_path, "td5re_debug.log");
+        }
+        /* Truncate on first call */
+        s_main_log_handle = CreateFileA(s_main_log_path, GENERIC_WRITE,
+                                        FILE_SHARE_READ | FILE_SHARE_WRITE,
+                                        NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+        if (s_main_log_handle != INVALID_HANDLE_VALUE) {
+            atexit(dbglog_flush_close);
+        }
+        s_main_log_init = 1;
+    }
+
+    {
+        size_t len = strlen(buf);
+        if (len > 0 && len < sizeof(buf) - 2 && buf[len-1] != '\n') {
+            buf[len] = '\n'; buf[len+1] = '\0';
+        }
+    }
+    if (s_main_log_handle != INVALID_HANDLE_VALUE) {
+        WriteFile(s_main_log_handle, buf, (DWORD)strlen(buf), &written, NULL);
+        s_main_log_line_count++;
+        if ((s_main_log_line_count % 100u) == 0u) {
+            FlushFileBuffers(s_main_log_handle);
+        }
+    }
 }
 
 /* TD5RE headers */
@@ -86,6 +137,19 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     (void)lpCmdLine;
     (void)nCmdShow;
 
+    /* Set Windows timer resolution to 1ms so Sleep() and GetTickCount()
+     * are accurate. Without this, Sleep(16) may sleep ~30ms (15.6ms default). */
+    timeBeginPeriod(1);
+
+    /* Attach to parent console if launched from CMD, otherwise create a new
+     * console window so warnings/errors are always visible. */
+    if (!AttachConsole(ATTACH_PARENT_PROCESS)) {
+        AllocConsole();
+        SetConsoleTitleA("TD5RE Debug Output");
+    }
+    freopen("CONOUT$", "w", stdout);
+    freopen("CONOUT$", "w", stderr);
+
     /* ---------------------------------------------------------------
      * Step 1: Initialize backend (display mode enumeration, PNG init)
      * --------------------------------------------------------------- */
@@ -108,7 +172,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
      * --------------------------------------------------------------- */
     dbglog("Step 1: Backend_Init OK");
     dbglog("Step 2: Backend_CreateDevice(%d x %d, bpp=%d, windowed=%d)...", width, height, bpp, windowed);
-    fflush(s_logfile);  /* ensure log is written before potential crash */
+    /* Win32 API logging auto-flushes on each CloseHandle */
     if (!Backend_CreateDevice(NULL, width, height, bpp, windowed)) {
         MessageBoxA(NULL, "Backend_CreateDevice failed.\n\n"
                     "Could not create D3D11 device and swap chain.",
@@ -212,10 +276,14 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
      * track, ai, render, frontend, hud, sound, input, asset, save,
      * net, camera, vfx, fmv.
      * --------------------------------------------------------------- */
-    /* Change working directory to data/ so all relative asset paths
-     * (LOADING.ZIP, LEGALS.ZIP, SOUND\SOUND.ZIP, etc.) resolve correctly. */
-    SetCurrentDirectoryA("data");
-    dbglog("Working directory changed to data/");
+    /* Change working directory to original/ so all relative asset paths
+     * (LOADING.ZIP, LEGALS.ZIP, SOUND\SOUND.ZIP, etc.) resolve correctly.
+     * The original game files live in original/ (clean, unmodified). */
+    if (!SetCurrentDirectoryA("original")) {
+        /* Fallback: try plain data/ in case exe is run from original/ directly */
+        SetCurrentDirectoryA("data");
+    }
+    dbglog("Working directory changed to original (or data)");
 
     /* Update global state with actual render dimensions */
     g_td5.render_width  = width;
@@ -248,12 +316,20 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
                 running = 0;
                 break;
             }
-            /* DEBUG: F5 triggers a race start to test loading screen */
+            /* DEBUG: F5 triggers a race start to test loading screen.
+             * Scans for the first available levelXXX.zip and uses that track. */
             if (msg.message == WM_KEYDOWN && msg.wParam == VK_F5
                     && g_td5.game_state == 1 /* MENU */) {
+                int f5_track = 0;
+                { char zippath[64]; int t;
+                  for (t = 0; t < 40; t++) {
+                      snprintf(zippath, sizeof(zippath), "level%03d.zip", t + 1);
+                      if (td5_plat_file_exists(zippath)) { f5_track = t; break; }
+                  }
+                }
                 g_td5.race_requested = 1;
-                g_td5.track_index = 0;
-                dbglog("DEBUG: F5 pressed -- triggering race start");
+                g_td5.track_index = f5_track;
+                dbglog("DEBUG: F5 pressed -- race start on track_index=%d", f5_track);
             }
             TranslateMessage(&msg);
             DispatchMessageA(&msg);
@@ -270,7 +346,6 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
          * and calls td5_plat_present() internally at the end of each frame. */
         td5re_frame();
 
-        Sleep(16); /* ~60fps cap */
 
         /* Also check the global quit flag */
         if (g_td5.quit_requested) {
@@ -283,6 +358,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
      * --------------------------------------------------------------- */
     td5re_shutdown();
     Backend_Shutdown();
+    timeEndPeriod(1);
+    dbglog_flush_close();
 
     return 0;
 }

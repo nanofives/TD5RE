@@ -1,0 +1,71 @@
+=== GHIDRA DECOMPILATION REFERENCE: Frontend Screens 0-9 ===
+=== Session: 32fe917e541847cf8421e202fbb593f2 ===
+=== These are the original binary functions to reimplement in td5_frontend.c ===
+
+All functions use a state machine pattern driven by DAT_00495204 (s_inner_state).
+Key globals:
+  DAT_00495204 = s_inner_state (screen-local state counter)
+  DAT_0049522c = s_anim_tick (animation frame counter)
+  DAT_00495228 = render width
+  DAT_00495200 = render height
+  DAT_004951e8 = s_input_ready (button pressed)
+  DAT_00495240 = s_button_index (which button)
+  DAT_004951f8 = input flags bitmask
+  DAT_0049b690 = arrow input direction
+  DAT_004962cc = vertical scroll offset
+  DAT_004962c4/c8 = background tile dimensions
+  DAT_00496358 = background surface pointer
+  DAT_0049628c = info panel surface pointer
+  DAT_00496270/74 = font surface handles
+  DAT_00496350 = s_return_screen (next screen to navigate to)
+  DAT_004654a0 = button count for current screen
+
+Key helper functions:
+  FUN_00414610(screen_id) = td5_frontend_set_screen()
+  FUN_00412e30(bg_id) = load background TGA, returns surface
+  FUN_00411f00(w,h) = allocate offscreen surface
+  FUN_004125b0(file,zip) = load UI overlay TGA
+  FUN_00424b30() = init button positions
+  FUN_00425de0(text,x,y,w,h,flags) = create menu button
+  FUN_004260e0(text,x,y,w,h,flags) = create DISABLED menu button
+  FUN_004258c0() = begin screen transition (fade in)
+  FUN_004258e0() = end screen transition (prepare fade out)
+  FUN_004259b0() = check if transition complete, returns bool
+  FUN_004259d0(button_idx,x,y) = position button at (x,y)
+  FUN_00425660(x,y,sx,sy,w,h,color,surf) = blit surface to screen
+  FUN_00424af0() = tick fade/transition animation
+  FUN_00424c50(x,y,w,h) = begin clip rect
+  FUN_00424c10(x,y,w,h) = end clip rect
+  FUN_00426390() = release button surfaces
+  FUN_00426540() = release extra surfaces
+  FUN_00418430() = clear button array
+  FUN_004183b0(music_track,a,b) = set music track
+  FUN_004129b0(font) = select font
+  FUN_00412b00(font,color) = set font color
+  FUN_00411e30(surf) = release surface, returns NULL
+  FUN_00424050(color,x,y,w,h,surf) = clear surface region
+  FUN_00424560(text,x,y,surf) = render text to surface
+  FUN_00424a50(text,x,w) = measure text width
+  FUN_00424740(text,x,y,surf,w) = render text with highlight
+  FUN_00448443(buf,fmt,...) = sprintf
+  FUN_0040dac0() = start race
+  FUN_00414a90() = cleanup and exit frontend
+  FUN_00410ca0() = init car roster for game type
+  FUN_00411630() = check if cup save data exists
+  FUN_00411590() = load cup continue data
+  FUN_00424890(text,x,w) = measure small text width
+  FUN_00424660(text,w,y,surf) = render small text to surface
+  FUN_00418450() = process list navigation input
+  FUN_0040fb60() = init joystick configuration
+
+DXSound::Play(id) = play frontend SFX
+DXSound::Stop(id) = stop SFX
+DXSound::SetVolume(v) = set master volume
+DXSound::CDSetVolume(v) = set CD music volume
+DXSound::GetVolume() = get master volume
+DXSound::CDGetVolume() = get CD music volume
+DXPlay::ConnectionEnumerate() = enumerate network connections
+DXPlay::ConnectionPick(idx) = select network connection
+DXPlay::EnumSessionTimer(t) = stop session enumeration
+
+SNK_*_exref = localized string pointers from Language.dll

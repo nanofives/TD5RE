@@ -28,6 +28,9 @@
 #include "td5_asset.h"
 #include "td5_track.h"
 #include "td5_platform.h"
+#include "td5re.h"
+#include "td5_render.h"
+#include "td5_hud.h"    /* for TD5_AtlasEntry */
 
 #include <stdlib.h>
 #include <string.h>
@@ -114,8 +117,8 @@ static int build_extracted_level_path(char *out_path, size_t out_size,
     int level_num;
     const char *base;
     static const char *k_roots[] = {
-        "assets/levels",
-        "td5_dump/levels"
+        "../re/assets/levels",
+        "../re/td5_dump/levels"
     };
 
     if (!out_path || out_size == 0 || !entry_name || !zip_path)
@@ -147,9 +150,178 @@ static int build_extracted_level_path(char *out_path, size_t out_size,
 
 static int s_initialized = 0;
 
+/* ========================================================================
+ * Static Sprite Atlas
+ *
+ * Parsed from assets/static/static.hed at module init.
+ *
+ * File layout (little-endian):
+ *   int32  page_count    -- number of tpageN.dat pages (e.g. 17)
+ *   int32  entry_count   -- number of named sprite entries (e.g. 51)
+ *   entry_count × 64-byte TD5_StaticHedEntry records:
+ *     char[44]  name          (offset  0, null-terminated)
+ *     int32     atlas_x       (offset 44)
+ *     int32     atlas_y       (offset 48)
+ *     int32     width         (offset 52)
+ *     int32     height        (offset 56)
+ *     int32     texture_slot  (offset 60, raw tpage index 0..N)
+ *
+ * We map texture_slot → D3D page (STATIC_ATLAS_BASE + texture_slot).
+ * tpage0-2.dat exist on disk as 256×512 R5G6B5 images and are uploaded.
+ * Higher-index pages get a magenta 2×2 placeholder.
+ * ======================================================================== */
+
+#define STATIC_ATLAS_MAX   64
+#define STATIC_ATLAS_BASE  700   /* first D3D page reserved for static atlas */
+
+typedef struct {
+    char           name[44];
+    TD5_AtlasEntry entry;
+} S_AtlasRec;
+
+static S_AtlasRec     s_atlas_table[STATIC_ATLAS_MAX];
+static int            s_atlas_count = 0;
+static TD5_AtlasEntry s_atlas_fallback = {0};   /* returned for unknown names */
+static uint8_t        s_static_page_done[32];   /* per-slot: 0=none,1=real,2=placeholder */
+
+/** Convert tpageN.dat (R5G6B5, 256×512) → BGRA32 and upload to GPU. */
+static int load_static_r5g6b5_tpage(int slot)
+{
+    char path[128];
+    int w = 256, h = 512, npx = w * h;
+    uint16_t *r16;
+    uint8_t  *bgra;
+    FILE *f;
+    int i;
+
+    snprintf(path, sizeof(path), "../re/assets/static/tpage%d.dat", slot);
+    f = fopen(path, "rb");
+    if (!f) return 0;
+
+    r16 = (uint16_t *)malloc((size_t)npx * 2);
+    if (!r16) { fclose(f); return 0; }
+
+    if ((int)fread(r16, 2, (size_t)npx, f) < npx) {
+        free(r16); fclose(f); return 0;
+    }
+    fclose(f);
+
+    bgra = (uint8_t *)malloc((size_t)npx * 4);
+    if (!bgra) { free(r16); return 0; }
+
+    for (i = 0; i < npx; i++) {
+        uint16_t p  = r16[i];
+        uint8_t  r5 = (uint8_t)((p >> 11) & 0x1F);
+        uint8_t  g6 = (uint8_t)((p >>  5) & 0x3F);
+        uint8_t  b5 = (uint8_t)((p >>  0) & 0x1F);
+        bgra[i*4+0] = (uint8_t)((b5 << 3) | (b5 >> 2));
+        bgra[i*4+1] = (uint8_t)((g6 << 2) | (g6 >> 4));
+        bgra[i*4+2] = (uint8_t)((r5 << 3) | (r5 >> 2));
+        bgra[i*4+3] = 0xFF;
+    }
+
+    td5_plat_render_upload_texture(STATIC_ATLAS_BASE + slot, bgra, w, h, 2);
+    free(bgra);
+    free(r16);
+    TD5_LOG_D(LOG_TAG, "static atlas: uploaded tpage%d.dat → D3D page %d",
+              slot, STATIC_ATLAS_BASE + slot);
+    return 1;
+}
+
+/** Upload a 2×2 magenta placeholder for tpage slots without on-disk art. */
+static void upload_atlas_placeholder(int slot)
+{
+    static const uint8_t k_ph[16] = {
+        0xFF, 0x00, 0xFF, 0xFF,  0xFF, 0x00, 0xFF, 0xFF,
+        0xFF, 0x00, 0xFF, 0xFF,  0xFF, 0x00, 0xFF, 0xFF
+    };
+    td5_plat_render_upload_texture(STATIC_ATLAS_BASE + slot, k_ph, 2, 2, 2);
+}
+
+static void td5_asset_init_static_atlas(void)
+{
+    const char *hed_path = "../re/assets/static/static.hed";
+    int32_t page_count = 0, entry_count = 0;
+    FILE *f;
+    int i;
+
+    f = fopen(hed_path, "rb");
+    if (!f) {
+        TD5_LOG_W(LOG_TAG, "static atlas: %s not found", hed_path);
+        return;
+    }
+
+    if (fread(&page_count,  4, 1, f) != 1 ||
+        fread(&entry_count, 4, 1, f) != 1 ||
+        entry_count <= 0 || entry_count > 256) {
+        TD5_LOG_W(LOG_TAG, "static atlas: bad header (pages=%d entries=%d)",
+                  page_count, entry_count);
+        fclose(f);
+        return;
+    }
+
+    for (i = 0; i < entry_count; i++) {
+        uint8_t  rec[64];
+        int32_t  pos_x, pos_y, w, h, tex_slot;
+        S_AtlasRec *ar;
+
+        if (fread(rec, 1, 64, f) != 64) break;
+
+        /* TD5_StaticHedEntry: name[44] at 0, then pos_x/y/w/h/slot at 44..63 */
+        if (rec[0] == '\0') continue;           /* skip blank entries */
+        memcpy(&pos_x,    rec + 44, 4);
+        memcpy(&pos_y,    rec + 48, 4);
+        memcpy(&w,        rec + 52, 4);
+        memcpy(&h,        rec + 56, 4);
+        memcpy(&tex_slot, rec + 60, 4);
+
+        if (tex_slot < 0 || tex_slot >= 32) continue;
+        if (s_atlas_count >= STATIC_ATLAS_MAX)  continue;
+
+        ar = &s_atlas_table[s_atlas_count++];
+        memcpy(ar->name, rec, 43);
+        ar->name[43] = '\0';
+        ar->entry.atlas_x      = pos_x;
+        ar->entry.atlas_y      = pos_y;
+        ar->entry.width        = w;
+        ar->entry.height       = h;
+        ar->entry.texture_page = STATIC_ATLAS_BASE + tex_slot;
+
+        /* Upload the page the first time we encounter this slot */
+        if (!s_static_page_done[tex_slot]) {
+            if (tex_slot <= 2 && load_static_r5g6b5_tpage(tex_slot)) {
+                s_static_page_done[tex_slot] = 1;
+            } else {
+                upload_atlas_placeholder(tex_slot);
+                s_static_page_done[tex_slot] = 2;
+            }
+        }
+    }
+
+    fclose(f);
+    TD5_LOG_I(LOG_TAG,
+              "static atlas: %d entries loaded from %s (D3D pages %d..%d)",
+              s_atlas_count, hed_path, STATIC_ATLAS_BASE, STATIC_ATLAS_BASE + 31);
+}
+
+TD5_AtlasEntry *td5_asset_find_atlas_entry(void *context, const char *name)
+{
+    int i;
+    (void)context;
+    if (!name) return &s_atlas_fallback;
+
+    for (i = 0; i < s_atlas_count; i++) {
+        if (td5_stricmp(s_atlas_table[i].name, name) == 0)
+            return &s_atlas_table[i].entry;
+    }
+    /* Always return non-NULL: HUD code dereferences without null checks */
+    return &s_atlas_fallback;
+}
+
 int td5_asset_init(void)
 {
     crc32_init_table();
+    td5_asset_init_static_atlas();
     s_initialized = 1;
     TD5_LOG_I(LOG_TAG, "asset module initialized");
     return 1;
@@ -251,10 +423,30 @@ TD5_Archive *td5_asset_open_archive(const char *path)
     uint16_t total_entries = read_u16(eocd + 10);
     uint32_t cd_size       = read_u32(eocd + 12);
     uint32_t cd_offset     = read_u32(eocd + 16);
+    int64_t file_size      = td5_plat_file_size(f);
+
+    if (file_size < 0) {
+        TD5_LOG_E(LOG_TAG, "failed to query archive size: %s", path);
+        td5_plat_file_close(f);
+        return NULL;
+    }
 
     if (total_entries == 0 || total_entries > TD5_ZIP_MAX_ENTRIES) {
         TD5_LOG_E(LOG_TAG, "invalid entry count %u in: %s",
                   (unsigned)total_entries, path);
+        td5_plat_file_close(f);
+        return NULL;
+    }
+
+    if ((int64_t)cd_offset > file_size ||
+        (int64_t)cd_size > file_size ||
+        ((int64_t)cd_offset + (int64_t)cd_size) > file_size) {
+        TD5_LOG_E(LOG_TAG,
+                  "central directory out of range: path=%s offset=%u size=%u file=%lld",
+                  path,
+                  (unsigned int)cd_offset,
+                  (unsigned int)cd_size,
+                  (long long)file_size);
         td5_plat_file_close(f);
         return NULL;
     }
@@ -390,6 +582,22 @@ static TD5_ZipEntry *find_entry(TD5_Archive *arc, const char *name)
 static int decompress_entry(TD5_File *f, TD5_ZipEntry *entry,
                             void *out_buf, int out_buf_size)
 {
+    int64_t file_size;
+    int64_t data_offset;
+    int64_t data_end;
+
+    if (!f || !entry || !out_buf || out_buf_size <= 0) {
+        TD5_LOG_E(LOG_TAG, "decompress_entry invalid args: f=%p entry=%p out=%p size=%d",
+                  (void *)f, (void *)entry, out_buf, out_buf_size);
+        return 0;
+    }
+
+    file_size = td5_plat_file_size(f);
+    if (file_size <= 0) {
+        TD5_LOG_E(LOG_TAG, "decompress_entry invalid file size for %s", entry->name);
+        return 0;
+    }
+
     /* Read local file header (30 bytes) */
     uint8_t lhdr[30];
     if (td5_plat_file_read(f, lhdr, 30) != 30) return 0;
@@ -413,7 +621,26 @@ static int decompress_entry(TD5_File *f, TD5_ZipEntry *entry,
     if (exp_crc == 0)   exp_crc   = entry->crc32;
 
     /* Skip filename and extra field */
-    td5_plat_file_seek(f, (int64_t)(fname_len + extra_len), 1);
+    if (td5_plat_file_seek(f, (int64_t)(fname_len + extra_len), 1) != 0) {
+        TD5_LOG_E(LOG_TAG, "failed to skip local header payload: %s", entry->name);
+        return 0;
+    }
+
+    data_offset = td5_plat_file_tell(f);
+    if (data_offset < 0) {
+        TD5_LOG_E(LOG_TAG, "failed to query data offset: %s", entry->name);
+        return 0;
+    }
+    data_end = data_offset + (int64_t)comp_sz;
+    if (data_end > file_size) {
+        TD5_LOG_E(LOG_TAG,
+                  "entry overruns archive: %s data_offset=%lld comp=%u file=%lld",
+                  entry->name,
+                  (long long)data_offset,
+                  (unsigned int)comp_sz,
+                  (long long)file_size);
+        return 0;
+    }
 
     if ((int)uncomp_sz > out_buf_size) {
         TD5_LOG_E(LOG_TAG, "output buffer too small: need %u, have %d",
@@ -580,6 +807,14 @@ int td5_asset_read_entry(TD5_Archive *arc, const char *name,
     TD5_File *f = td5_plat_file_open(arc->path, "rb");
     if (!f) return -1;
 
+    if ((int64_t)e->local_header_offset < 0 ||
+        (int64_t)e->local_header_offset >= td5_plat_file_size(f)) {
+        TD5_LOG_E(LOG_TAG, "entry local header out of range: %s in %s offset=%u",
+                  name, arc->path, (unsigned int)e->local_header_offset);
+        td5_plat_file_close(f);
+        return -1;
+    }
+
     td5_plat_file_seek(f, e->local_header_offset, 0);
 
     int result = decompress_entry(f, e, buf, max_size);
@@ -642,6 +877,13 @@ void *td5_asset_open_and_read(const char *entry_name,
                               const char *zip_path,
                               int *out_size)
 {
+    if (!entry_name || !zip_path) {
+        TD5_LOG_E(LOG_TAG, "open_and_read invalid args: entry=%p zip=%p",
+                  (const void *)entry_name, (const void *)zip_path);
+        if (out_size) *out_size = 0;
+        return NULL;
+    }
+
     if (out_size) *out_size = 0;
 
     /* Loose file override */
@@ -685,6 +927,8 @@ void *td5_asset_open_and_read(const char *entry_name,
     td5_asset_close_archive(arc);
 
     if (result <= 0) {
+        TD5_LOG_E(LOG_TAG, "open_and_read read failed: entry=%s zip=%s size=%d result=%d",
+                  entry_name, zip_path, size, result);
         free(buf);
         return NULL;
     }
@@ -747,7 +991,8 @@ void td5_asset_decode_tga_to_rgb24(const void *tga_data, void *rgb_out)
     uint8_t  cmap_type     = src[1];
     uint8_t  image_type    = src[2];
     uint16_t cmap_length   = read_u16(src + 5);
-    /* uint8_t  cmap_depth = src[7]; -- used implicitly via cmap_type */
+    uint8_t  cmap_depth    = src[7]; /* bits per palette entry (0, 15, 16, 24, or 32) */
+    int      cmap_entry_bytes = (cmap_depth >= 8) ? (cmap_depth + 7) / 8 : 3; /* default 3 */
     uint16_t width         = read_u16(src + 12);
     uint16_t height        = read_u16(src + 14);
     uint8_t  bpp           = src[16];
@@ -759,7 +1004,7 @@ void td5_asset_decode_tga_to_rgb24(const void *tga_data, void *rgb_out)
 
     if (cmap_type != 0) {
         palette = src + pixel_data_offset;
-        pixel_data_offset += cmap_length * 3;
+        pixel_data_offset += cmap_length * cmap_entry_bytes;
     }
 
     const uint8_t *pixel_data = src + pixel_data_offset;
@@ -772,7 +1017,7 @@ void td5_asset_decode_tga_to_rgb24(const void *tga_data, void *rgb_out)
         const uint8_t *idx = pixel_data;
         uint8_t *out = dst;
         for (int i = 0; i < total_bytes; i += 3) {
-            int ci = (*idx++) * 3;
+            int ci = (*idx++) * cmap_entry_bytes;
             out[0] = palette[ci + 2]; /* R -> B */
             out[1] = palette[ci + 1]; /* G */
             out[2] = palette[ci + 0]; /* B -> R */
@@ -829,7 +1074,7 @@ void td5_asset_decode_tga_to_rgb24(const void *tga_data, void *rgb_out)
                 /* Raw run: (packet + 1) pixels */
                 int count = (int)(packet + 1);
                 for (int j = 0; j < count && remaining > 0; j++) {
-                    int ci = (*in++) * 3;
+                    int ci = (*in++) * cmap_entry_bytes;
                     out[0] = palette[ci + 2];
                     out[1] = palette[ci + 1];
                     out[2] = palette[ci + 0];
@@ -839,7 +1084,7 @@ void td5_asset_decode_tga_to_rgb24(const void *tga_data, void *rgb_out)
             } else {
                 /* RLE run: (packet - 127) pixels of the same index */
                 int count = (int)(packet - 127);
-                int ci = (*in++) * 3;
+                int ci = (*in++) * cmap_entry_bytes;
                 uint8_t r = palette[ci + 2];
                 uint8_t g = palette[ci + 1];
                 uint8_t b = palette[ci + 0];
@@ -990,15 +1235,15 @@ int td5_asset_decode_tga(const void *data, size_t size, void **pixels_out,
 
     td5_asset_decode_tga_to_rgb24(data, rgb);
 
-    /* Convert BGR24 to RGBA32 */
+    /* Convert RGB24 to BGRA32 (D3D11 B8G8R8A8_UNORM native format) */
     size_t rgba_size = (size_t)w * (size_t)h * 4;
     uint8_t *rgba = (uint8_t *)malloc(rgba_size);
     if (!rgba) { free(rgb); return 0; }
 
     for (int i = 0; i < w * h; i++) {
-        rgba[i * 4 + 0] = rgb[i * 3 + 0]; /* R */
+        rgba[i * 4 + 0] = rgb[i * 3 + 2]; /* B */
         rgba[i * 4 + 1] = rgb[i * 3 + 1]; /* G */
-        rgba[i * 4 + 2] = rgb[i * 3 + 2]; /* B */
+        rgba[i * 4 + 2] = rgb[i * 3 + 0]; /* R */
         rgba[i * 4 + 3] = 0xFF;            /* A */
     }
 
@@ -1052,13 +1297,13 @@ static int td5_asset_build_track_texture_png_path(int track_index,
         return 0;
 
     n = snprintf(out_path, out_size,
-                 "td5_png_clean/levels/level%03d/textures/tex_%03d.png",
+                 "../re/td5_png_clean/levels/level%03d/textures/tex_%03d.png",
                  level_number, page_index);
     if (n > 0 && (size_t)n < out_size && td5_plat_file_exists(out_path))
         return 1;
 
     n = snprintf(out_path, out_size,
-                 "assets/levels/level%03d/textures/tex_%03d.png",
+                 "../re/assets/levels/level%03d/textures/tex_%03d.png",
                  level_number, page_index);
     if (n > 0 && (size_t)n < out_size && td5_plat_file_exists(out_path))
         return 1;
@@ -1154,7 +1399,7 @@ static void td5_asset_build_level_loose_path(int track_index,
                                              size_t out_size)
 {
     int level_number = td5_asset_level_number(track_index);
-    snprintf(out_path, out_size, "assets/levels/level%03d/%s",
+    snprintf(out_path, out_size, "../re/assets/levels/level%03d/%s",
              level_number, entry_name ? entry_name : "");
 }
 
@@ -1347,32 +1592,123 @@ int td5_asset_load_track_textures(int track_index)
 
 int td5_asset_load_race_texture_pages(void)
 {
-    /* Full texture page upload pipeline.
-     * This orchestrates loading tpage%d.dat, sky TGA, car skins, wheel hubs,
-     * traffic skins, and environment maps. The actual implementation requires
-     * the render module (td5_render) for texture upload, so we provide the
-     * I/O framework here.
-     *
-     * Each step follows the pattern:
-     *   1. Read raw data from ZIP via td5_asset_read_entry
-     *   2. Decode TGA if needed via td5_asset_decode_tga_to_rgb24
-     *   3. Upload via td5_plat_render_upload_texture
+    /*
+     * Load raw 256x256 R5G6B5 texture pages from the level ZIP archive.
+     * Original function at 0x441E40.  Each "tpage%d.dat" inside the level
+     * ZIP is 256*256*2 = 131072 bytes of raw 16-bit pixel data.
      */
     static const uint32_t k_white_tex[4] = {
         0xFF5D544Cu, 0xFF6E655Cu,
         0xFF4A433Du, 0xFF5B534Cu
     };
 
+    /* Ensure fallback texture is always available */
     if (!s_fallback_texture_uploaded) {
         s_fallback_texture_uploaded = td5_plat_render_upload_texture(
             TD5_FALLBACK_TEXTURE_PAGE, k_white_tex, 2, 2, 2);
     }
 
-    TD5_LOG_I(LOG_TAG, "race texture page loading (framework ready, fallback=%d)",
-              s_fallback_texture_uploaded);
-    return 1;
-}
+    /* Load textures.dat from level ZIP.
+     * Format (from Ghidra FUN_0040b1d0):
+     *   uint32 page_count
+     *   uint32 offsets[page_count]  — byte offsets from file start to each page
+     *   Each page at offset:
+     *     byte[3] padding
+     *     byte    type (0=opaque, 1=alpha-keyed, 2=semi-transparent, 3=opaque-alt)
+     *     int32   palette_entry_count
+     *     byte[count*3] palette (BGR, 3 bytes per entry)
+     *     byte[4096]    pixel indices (64x64, 1 byte per pixel)
+     *   Output: BGRA32 at 64x64 per page.
+     */
+    char zip_path[256];
+    int level_number = td5_asset_level_number(g_td5.track_index);
+    snprintf(zip_path, sizeof(zip_path), "level%03d.zip", level_number);
 
+    int tex_size = 0;
+    uint8_t *tex_data = (uint8_t *)td5_asset_open_and_read("TEXTURES.DAT", zip_path, &tex_size);
+    if (!tex_data || tex_size < 8) {
+        TD5_LOG_W(LOG_TAG, "TEXTURES.DAT not found or too small in %s", zip_path);
+        if (tex_data) free(tex_data);
+        return s_fallback_texture_uploaded;
+    }
+
+    uint32_t page_count = *(uint32_t *)tex_data;
+    if (page_count == 0 || page_count > 1024 ||
+        (uint32_t)tex_size < 4 + page_count * 4) {
+        TD5_LOG_W(LOG_TAG, "TEXTURES.DAT invalid page_count=%u size=%d", page_count, tex_size);
+        free(tex_data);
+        return s_fallback_texture_uploaded;
+    }
+
+    uint32_t *offsets = (uint32_t *)(tex_data + 4);
+    int loaded_count = 0;
+
+    /* Temp BGRA buffer for one 64x64 page */
+    uint8_t *rgba = (uint8_t *)malloc(64 * 64 * 4);
+    if (!rgba) { free(tex_data); return 0; }
+
+    for (uint32_t pg = 0; pg < page_count; pg++) {
+        uint32_t off = offsets[pg];
+        if (off + 8 > (uint32_t)tex_size) continue;
+
+        uint8_t *page_ptr = tex_data + off;
+        uint8_t  page_type = page_ptr[3];
+        int32_t  pal_count = *(int32_t *)(page_ptr + 4);
+        if (pal_count < 0 || pal_count > 256) continue;
+
+        uint8_t *palette = page_ptr + 8;
+        uint8_t *indices = palette + pal_count * 3;
+
+        if (indices + 4096 > tex_data + tex_size) continue;
+
+        /* Decode 4096 palette-indexed pixels to BGRA32 */
+        for (int px = 0; px < 4096; px++) {
+            int idx = indices[px];
+            int ci = idx * 3;
+            uint8_t alpha;
+            uint8_t b_val, g_val, r_val;
+
+            if (ci + 2 < pal_count * 3) {
+                /* Palette is BGR: pal[0]=B, pal[1]=G, pal[2]=R */
+                b_val = palette[ci + 0];
+                g_val = palette[ci + 1];
+                r_val = palette[ci + 2];
+            } else {
+                b_val = g_val = r_val = 0;
+            }
+
+            switch (page_type) {
+            case 1: /* Alpha-keyed: index 0 = transparent */
+                alpha = (idx == 0) ? 0x00 : 0xFF;
+                break;
+            case 2: /* Semi-transparent */
+                alpha = 0x80;
+                break;
+            default: /* 0, 3: opaque */
+                alpha = 0xFF; /* Note: type 0 originally uses alpha=0 but
+                               * D3D11 alpha blend treats 0 as invisible.
+                               * Force opaque for correct rendering. */
+                break;
+            }
+
+            /* BGRA byte order for D3D11 B8G8R8A8_UNORM */
+            rgba[px * 4 + 0] = b_val;
+            rgba[px * 4 + 1] = g_val;
+            rgba[px * 4 + 2] = r_val;
+            rgba[px * 4 + 3] = alpha;
+        }
+
+        td5_plat_render_upload_texture((int)pg, rgba, 64, 64, 2);
+        loaded_count++;
+    }
+
+    free(rgba);
+    free(tex_data);
+
+    TD5_LOG_I(LOG_TAG, "race texture pages: level=%03d loaded=%d/%u fallback=%d",
+              level_number, loaded_count, page_count, s_fallback_texture_uploaded);
+    return loaded_count > 0 || s_fallback_texture_uploaded;
+}
 /* ========================================================================
  * Vehicle Asset Loading -- LoadRaceVehicleAssets (0x443280)
  *
@@ -1382,50 +1718,83 @@ int td5_asset_load_race_texture_pages(void)
  * Phase 4: Load traffic models from traffic.zip.
  * ======================================================================== */
 
+/* Car ZIP archive paths indexed by car_index (matches frontend table) */
+static const char *s_car_zip_paths[37] = {
+    "cars/128.zip", "cars/69v.zip", "cars/97c.zip", "cars/atp.zip", "cars/c21.zip",
+    "cars/cam.zip", "cars/cat.zip", "cars/chv.zip", "cars/cob.zip", "cars/cop.zip",
+    "cars/crg.zip", "cars/cud.zip", "cars/day.zip", "cars/fhm.zip", "cars/frd.zip",
+    "cars/gto.zip", "cars/gtr.zip", "cars/hot.zip", "cars/jag.zip", "cars/mus.zip",
+    "cars/nis.zip", "cars/pit.zip", "cars/sky.zip", "cars/sp1.zip", "cars/sp2.zip",
+    "cars/sp3.zip", "cars/sp4.zip", "cars/sp5.zip", "cars/sp6.zip", "cars/sp7.zip",
+    "cars/sp8.zip", "cars/ss1.zip", "cars/tvr.zip", "cars/van.zip", "cars/vet.zip",
+    "cars/vip.zip", "cars/xkr.zip"
+};
+
 int td5_asset_load_vehicle(int car_index, int slot)
 {
-    /* This function demonstrates loading a single vehicle's assets.
-     * The full LoadRaceVehicleAssets loads all 6 slots in a batch with
-     * a single heap allocation. This per-slot version is provided for
-     * the incremental source port approach. */
+    char zip_path[256];
+    if (car_index >= 0 && car_index < 37) {
+        snprintf(zip_path, sizeof(zip_path), "%s", s_car_zip_paths[car_index]);
+    } else {
+        snprintf(zip_path, sizeof(zip_path), "cars/car%02d.zip", car_index);
+    }
 
-    (void)car_index;
-    (void)slot;
+    /* --- Load himodel.dat ------------------------------------------------ */
+    int mesh_size = 0;
+    void *mesh_data = td5_asset_open_and_read("himodel.dat", zip_path, &mesh_size);
+    if (!mesh_data) {
+        TD5_LOG_W(LOG_TAG, "vehicle slot=%d car=%d: himodel.dat not found in %s",
+                  slot, car_index, zip_path);
+        return 0;
+    }
 
-    /*
-     * Full implementation outline (from 0x443280 decompilation):
-     *
-     * 1. For each racer slot:
-     *    - size = GetArchiveEntrySize("himodel.dat", carZipPath[slot])
-     *    - size = ALIGN_32(size)
-     *    - Accumulate total
-     *
-     * 2. Single HeapAllocTracked(total + 0x1F), 32-byte align base
-     *
-     * 3. Per slot:
-     *    a. ReadArchiveEntry("himodel.dat", carZip, buffer[slot], size[slot])
-     *    b. ReadArchiveEntry("carparam.dat", carZip, tmpBuf, 0x10C)
-     *    c. Copy tuning data (0x8C bytes) to gVehicleTuningTable[slot]
-     *    d. Copy physics data (0x80 bytes) to gVehiclePhysicsTable[slot]
-     *    e. LoadVehicleSoundBank(carZip, slot, isLocal)
-     *    f. Patch UV: u = u * 0.5 + (slot & 1) * 0.5
-     *    g. Set texture page: cmd[+2] = slot/2 + chassis.texture_slot
-     *    h. PatchModelUVCoordsForTrackLighting(model)
-     *    i. PrepareMeshResource(model)
-     *
-     * 4. If cop mode (DAT_004c3d44 == 2):
-     *    - Extra copy of slot 0 model with damage UV (left half only)
-     *    - Texture page set to 0x0404
-     *
-     * 5. Traffic models (if enabled):
-     *    - For each traffic type (0..5):
-     *      - Load model%d.prr from traffic.zip
-     *      - Copy default tuning from slot 0
-     *      - Set texture page from TRAF%d entry
-     *      - PrepareMeshResource
-     */
+    if (mesh_size < (int)sizeof(TD5_MeshHeader)) {
+        TD5_LOG_W(LOG_TAG, "vehicle slot=%d car=%d: himodel.dat too small (%d bytes)",
+                  slot, car_index, mesh_size);
+        free(mesh_data);
+        return 0;
+    }
 
-    TD5_LOG_I(LOG_TAG, "vehicle loading (framework ready, slot=%d)", slot);
+    /* The buffer is kept alive -- the render system holds a pointer to it. */
+    TD5_MeshHeader *mesh = (TD5_MeshHeader *)mesh_data;
+
+    /* Relocate internal offsets (commands, vertices, normals) to absolute ptrs */
+    td5_track_prepare_mesh_resource(mesh);
+
+    /* Scale from integer coordinate system (256 units = 1 world unit) to the
+     * 1/256 render scale, matching td5_track_parse_models_dat processing. */
+    {
+        const float inv256 = 1.0f / 256.0f;
+        mesh->origin_x          *= inv256;
+        mesh->origin_y          *= inv256;
+        mesh->origin_z          *= inv256;
+        mesh->bounding_center_x *= inv256;
+        mesh->bounding_center_y *= inv256;
+        mesh->bounding_center_z *= inv256;
+        mesh->bounding_radius   *= inv256;
+
+        TD5_MeshVertex *verts = (TD5_MeshVertex *)(uintptr_t)mesh->vertices_offset;
+        if (verts && mesh->total_vertex_count > 0) {
+            for (int v = 0; v < mesh->total_vertex_count; v++) {
+                verts[v].pos_x *= inv256;
+                verts[v].pos_y *= inv256;
+                verts[v].pos_z *= inv256;
+            }
+        }
+    }
+
+    /* Register mesh with render system */
+    td5_render_set_vehicle_mesh(slot, mesh);
+
+    TD5_LOG_I(LOG_TAG,
+              "vehicle slot=%d car=%d: himodel.dat loaded (%d bytes, %d verts, %d cmds)",
+              slot, car_index, mesh_size,
+              mesh->total_vertex_count, mesh->command_count);
+
+    /* --- carparam.dat (deferred) ----------------------------------------- */
+    TD5_LOG_I(LOG_TAG, "vehicle slot=%d car=%d: carparam.dat loading deferred (using defaults)",
+              slot, car_index);
+
     return 1;
 }
 

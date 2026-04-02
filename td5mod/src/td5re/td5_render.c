@@ -50,11 +50,14 @@
 #include <stdlib.h>
 #include <string.h>
 
+extern uint32_t g_tick_counter;
+
 /* ========================================================================
  * Constants
  * ======================================================================== */
 
-#define RENDER_LOG_TAG      "render"
+#define LOG_TAG             "render"
+#define RENDER_LOG_TAG      LOG_TAG
 
 /** Transform stack depth (hierarchical models) */
 #define TRANSFORM_STACK_MAX 8
@@ -257,6 +260,12 @@ static int s_debug_prepared_mesh_calls;
 static int s_debug_append_calls;
 static int s_debug_flush_calls;
 static int s_debug_flush_submitted_tris;
+static int s_debug_texture_bind_calls;
+static int s_debug_texture_cache_hits;
+static int s_debug_texture_cache_misses;
+static int s_debug_texture_cache_evictions;
+static int s_debug_scene_draw_calls;
+static int s_debug_span_meshes_submitted;
 static TD5_MeshHeader *s_vehicle_meshes[TD5_ACTOR_MAX_TOTAL_SLOTS];
 
 /* ========================================================================
@@ -370,6 +379,7 @@ static void flush_immediate_internal(void)
     if (s_imm_vert_count <= 0 || s_imm_index_count <= 0) return;
     s_debug_flush_calls++;
     s_debug_flush_submitted_tris += s_imm_index_count / 3;
+    s_debug_scene_draw_calls++;
 
     /* Color fixup: remap luminance index in low byte through color LUT */
     for (int i = 0; i < s_imm_vert_count; i++) {
@@ -446,7 +456,7 @@ static void clip_and_submit_polygon(TD5_MeshVertex *vert_data, int vert_count,
     TD5_D3DVertex clipped[8];
     int clipped_count = 0;
 
-    float near = s_near_clip;
+    float near_z = s_near_clip;
 
     /* --- Near-plane clip (Sutherland-Hodgman) --- */
     /* Input polygon from view-space vertices */
@@ -471,7 +481,7 @@ static void clip_and_submit_polygon(TD5_MeshVertex *vert_data, int vert_count,
     for (int i = 0; i < in_count; i++) {
         int j = (i + 1) % in_count;
         float zi = in_vz[i], zj = in_vz[j];
-        int i_in = (zi > near), j_in = (zj > near);
+        int i_in = (zi > near_z), j_in = (zj > near_z);
 
         if (i_in) {
             out_vx[out_count]    = in_vx[i];
@@ -484,10 +494,10 @@ static void clip_and_submit_polygon(TD5_MeshVertex *vert_data, int vert_count,
         }
 
         if (i_in != j_in) {
-            float t = (near - zi) / (zj - zi);
+            float t = (near_z - zi) / (zj - zi);
             out_vx[out_count]    = in_vx[i] + t * (in_vx[j] - in_vx[i]);
             out_vy[out_count]    = in_vy[i] + t * (in_vy[j] - in_vy[i]);
-            out_vz[out_count]    = near;
+            out_vz[out_count]    = near_z;
             out_u[out_count]     = in_u[i]  + t * (in_u[j]  - in_u[i]);
             out_v[out_count]     = in_v[i]  + t * (in_v[j]  - in_v[i]);
             out_color[out_count] = in_color[i]; /* snap to nearer vertex */
@@ -779,6 +789,12 @@ int td5_render_init(void)
     /* Clear screen on first frame */
     s_state_active = 1;
 
+    TD5_LOG_I(LOG_TAG,
+              "render init: near=%.2f far=%.2f fog_enabled=%d fog_color=0x%06X texture_cache_slots=%d active_cache=%d",
+              s_near_clip, s_far_clip, s_fog_enabled,
+              (unsigned int)(s_fog_color & 0x00FFFFFFu),
+              TEXTURE_CACHE_SLOTS, s_texture_cache_active_count);
+
     return 1;
 }
 
@@ -829,10 +845,33 @@ void td5_render_begin_scene(void)
     s_debug_append_calls = 0;
     s_debug_flush_calls = 0;
     s_debug_flush_submitted_tris = 0;
+    s_debug_texture_bind_calls = 0;
+    s_debug_texture_cache_hits = 0;
+    s_debug_texture_cache_misses = 0;
+    s_debug_texture_cache_evictions = 0;
+    s_debug_scene_draw_calls = 0;
+    s_debug_span_meshes_submitted = 0;
+
+    TD5_LOG_D(LOG_TAG,
+              "begin scene: frame=%u reset tris=%d binds=%d draws=%d",
+              (unsigned int)g_tick_counter,
+              s_debug_flush_submitted_tris,
+              s_debug_texture_bind_calls,
+              s_debug_scene_draw_calls);
 }
 
 void td5_render_end_scene(void)
 {
+    TD5_LOG_D(LOG_TAG,
+              "end scene: frame=%u triangles=%d texture_binds=%d draw_calls=%d cache_hits=%d cache_misses=%d evictions=%d",
+              (unsigned int)g_tick_counter,
+              s_debug_flush_submitted_tris,
+              s_debug_texture_bind_calls,
+              s_debug_scene_draw_calls,
+              s_debug_texture_cache_hits,
+              s_debug_texture_cache_misses,
+              s_debug_texture_cache_evictions);
+
     if (g_td5.total_actor_count <= 0 && s_debug_clip_log_count < 40) {
         TD5_LOG_I(RENDER_LOG_TAG,
                   "frame clip stats: meshes=%d near=%d backface=%d screen=%d emitted=%d append=%d flush=%d flush_tris=%d imm_verts=%d imm_indices=%d",
@@ -850,6 +889,7 @@ void td5_render_end_scene(void)
     }
 
     td5_plat_render_end_scene();
+    g_tick_counter++;
 
     /* Texture cache aging: advance ages, clear per-frame used flags */
     td5_render_advance_texture_ages();
@@ -1132,9 +1172,13 @@ void td5_render_span_display_list(void *display_list_block)
     int count = (int)block[0];
     if (count <= 0 || count > 256) return; /* sanity */
 
+    TD5_LOG_D(LOG_TAG,
+              "span display list: block=%p mesh_range=[0,%d)",
+              display_list_block, count);
+
     for (int i = 0; i < count; i++) {
         TD5_MeshHeader *mesh = (TD5_MeshHeader *)(uintptr_t)block[i + 1];
-        if (!mesh || (uintptr_t)mesh < 0x10000u) continue;
+        if (!mesh || (uintptr_t)mesh < 0x10000u || !td5_track_is_valid_mesh_ptr(mesh)) continue;
 
         /* Frustum cull via bounding sphere */
         float cx = mesh->bounding_center_x + mesh->origin_x;
@@ -1160,11 +1204,13 @@ void td5_render_span_display_list(void *display_list_block)
             td5_render_transform_mesh_vertices(mesh);
             td5_render_compute_vertex_lighting(mesh);
             td5_render_prepared_mesh(mesh);
+            s_debug_span_meshes_submitted++;
             td5_render_pop_transform();
         } else {
             td5_render_transform_mesh_vertices(mesh);
             td5_render_compute_vertex_lighting(mesh);
             td5_render_prepared_mesh(mesh);
+            s_debug_span_meshes_submitted++;
         }
     }
 }
@@ -1199,7 +1245,11 @@ void td5_render_prepared_mesh(TD5_MeshHeader *mesh)
 
         /* Bounds check dispatch opcode */
         if (opcode < 0 || opcode > 6) {
-            TD5_LOG_W(RENDER_LOG_TAG, "Invalid mesh dispatch opcode %d", opcode);
+            static int s_bad_opcode_count = 0;
+            if (s_bad_opcode_count < 20) {
+                TD5_LOG_W(RENDER_LOG_TAG, "Invalid mesh dispatch opcode %d (occurrence %d)",
+                          opcode, ++s_bad_opcode_count);
+            }
             continue;
         }
 
@@ -1259,6 +1309,8 @@ void td5_render_actors_for_view(int view_index)
      */
     int rendered_spans = 0;
     int span_count = td5_track_get_span_count();
+    int actor_render_count = 0;
+    int actor_meshes_submitted = 0;
 
     /* Always clear the backbuffer so previous frames don't bleed through */
     td5_plat_render_clear(0xFF4080C0u);
@@ -1278,22 +1330,13 @@ void td5_render_actors_for_view(int view_index)
 
     for (int span_index = 0; span_index < span_count; span_index++) {
         void *display_list = td5_track_get_display_list(span_index);
-        uint32_t *blk;
         if (!display_list)
             continue;
 
-        /* Quick distance cull at span level: check first mesh bounding
-         * sphere distance to camera before doing full mesh processing. */
-        blk = (uint32_t *)display_list;
-        if (blk[0] > 0 && blk[1] > 0x10000u) {
-            const TD5_MeshHeader *m = (const TD5_MeshHeader *)(uintptr_t)blk[1];
-            float dx = (m->bounding_center_x + m->origin_x) - s_camera_pos[0];
-            float dz = (m->bounding_center_z + m->origin_z) - s_camera_pos[2];
-            float dist_sq = dx * dx + dz * dz;
-            /* Cull spans beyond visible render distance (much tighter than far_clip) */
-            if (dist_sq > 400.0f * 400.0f)
-                continue;
-        }
+        /* Distance culling is handled inside td5_render_span_display_list
+         * via per-mesh frustum tests. The early cull here was removed because
+         * display list block[1] may not be a valid pointer if MODELS.DAT
+         * relocation didn't run for this entry. */
 
         td5_render_span_display_list(display_list);
         rendered_spans++;
@@ -1329,8 +1372,21 @@ void td5_render_actors_for_view(int view_index)
             td5_render_transform_mesh_vertices(mesh);
             td5_render_compute_vertex_lighting(mesh);
             td5_render_prepared_mesh(mesh);
+            actor_render_count++;
+            actor_meshes_submitted++;
+
+            TD5_LOG_D(LOG_TAG,
+                      "vehicle render: view=%d slot=%d pos=(%.2f, %.2f, %.2f) mesh=%p",
+                      view_index, slot,
+                      render_pos.x, render_pos.y, render_pos.z,
+                      (void *)mesh);
         }
     }
+
+    TD5_LOG_D(LOG_TAG,
+              "actors for view %d: actors=%d spans=%d/%d meshes=%d span_meshes=%d",
+              view_index, actor_render_count, rendered_spans, span_count,
+              actor_meshes_submitted, s_debug_span_meshes_submitted);
 
     if (rendered_spans > 0) {
         /* Keep the legacy renderer fallback disabled while debugging the
@@ -1395,9 +1451,13 @@ void td5_render_configure_projection(int width, int height)
     td5_plat_render_set_viewport(0, 0, width, height);
     update_render_camera_from_game();
 
-    TD5_LOG_I(RENDER_LOG_TAG,
-              "Projection configured: %dx%d, focal=%.1f, near=%.1f, far=%.1f",
-              width, height, s_focal_length, s_near_clip, s_far_clip);
+    {
+        float half_fov_rad = atanf(((float)width * 0.5f) / s_focal_length);
+        float fov_deg = half_fov_rad * (360.0f / 3.14159265358979323846f);
+        TD5_LOG_I(LOG_TAG,
+                  "projection configured: %dx%d focal=%.1f near=%.1f far=%.1f fov=%.2f",
+                  width, height, s_focal_length, s_near_clip, s_far_clip, fov_deg);
+    }
 }
 
 /* --- Translucent Primitive Pipeline --- */
@@ -1538,10 +1598,13 @@ void td5_render_flush_projected_buckets(void)
      *
      * All ultimately go through clip_and_submit_polygon.
      */
+    int flushed_entries = 0;
+
     for (int b = 0; b < DEPTH_BUCKET_COUNT; b++) {
         int idx = s_depth_buckets[b];
         while (idx >= 0 && idx < DEPTH_ENTRY_POOL) {
             DepthBucketEntry *de = &s_depth_entries[idx];
+            flushed_entries++;
 
             if (de->prim_data) {
                 /* Set texture page for this primitive */
@@ -1582,6 +1645,10 @@ void td5_render_flush_projected_buckets(void)
 
     /* Flush any remaining vertices */
     flush_immediate_internal();
+
+    TD5_LOG_D(LOG_TAG,
+              "projected buckets flushed: entries=%d",
+              flushed_entries);
 
     /* Reset depth buckets for next frame */
     for (int i = 0; i < DEPTH_BUCKET_COUNT; i++) {
@@ -1646,6 +1713,8 @@ int td5_render_bind_texture_page(int page_id)
     /* Check if already the current texture */
     if (page_id == s_current_texture_page) return 1;
 
+    s_debug_texture_bind_calls++;
+
     /* Search cache for this page */
     int found_slot = -1;
     for (int i = 0; i < TEXTURE_CACHE_SLOTS; i++) {
@@ -1660,14 +1729,21 @@ int td5_render_bind_texture_page(int page_id)
         s_texture_cache[found_slot].used_this_frame = 1;
         s_previous_texture_page = s_current_texture_page;
         s_current_texture_page  = page_id;
+        s_debug_texture_cache_hits++;
 
         td5_plat_render_bind_texture(found_slot);
+        if ((g_tick_counter % 60u) == 0u) {
+            TD5_LOG_D(LOG_TAG,
+                      "texture bind: hit page=%d slot=%d active=%d",
+                      page_id, found_slot, s_texture_cache_active_count);
+        }
         return 1;
     }
 
     /* Page not resident: find a free slot or evict oldest (LRU) */
     int best_slot = -1;
     uint8_t oldest_age = 0;
+    int evicted_page = -1;
 
     for (int i = 0; i < TEXTURE_CACHE_SLOTS; i++) {
         if (s_texture_cache[i].page_id < 0) {
@@ -1681,6 +1757,12 @@ int td5_render_bind_texture_page(int page_id)
     }
 
     if (best_slot < 0) return 0; /* cache completely full, no eviction possible */
+
+    s_debug_texture_cache_misses++;
+    if (s_texture_cache[best_slot].page_id >= 0) {
+        evicted_page = s_texture_cache[best_slot].page_id;
+        s_debug_texture_cache_evictions++;
+    }
 
     /* Allocate/evict slot */
     s_texture_cache[best_slot].page_id        = page_id;
@@ -1696,7 +1778,82 @@ int td5_render_bind_texture_page(int page_id)
 
     /* Bind (the actual texture upload happens in td5_asset streaming scheduler) */
     td5_plat_render_bind_texture(best_slot);
+    if ((g_tick_counter % 60u) == 0u) {
+        TD5_LOG_D(LOG_TAG,
+                  "texture bind: miss page=%d slot=%d evicted=%d active=%d",
+                  page_id, best_slot, evicted_page, s_texture_cache_active_count);
+    }
     return 1;
+}
+
+/* --- Environment Map UV Generation (0x43DEC0) --- */
+
+void td5_render_apply_mesh_projection_effect(TD5_MeshVertex *verts, int count, int mode)
+{
+    int i;
+    if (!verts || count <= 0) return;
+
+    for (i = 0; i < count; i++) {
+        if (mode == 1) {
+            /* Water: scrolling UV from world XZ + time */
+            float wx = verts[i].view_x * 0.001f;
+            float wz = verts[i].view_z * 0.001f;
+            float time_ofs = (float)g_tick_counter * 0.0002f;
+            verts[i].proj_u = wx + time_ofs;
+            verts[i].proj_v = wz + time_ofs * 0.7f;
+        } else if (mode == 2) {
+            /* Chrome/envmap fallback from view-space direction. */
+            verts[i].proj_u = verts[i].view_x * 0.5f + 0.5f;
+            verts[i].proj_v = verts[i].view_y * 0.5f + 0.5f;
+        }
+    }
+}
+
+/* --- Cross-Fade Blending --- */
+
+void td5_render_crossfade_surfaces(uint32_t *dst, const uint32_t *src_a,
+                                    const uint32_t *src_b,
+                                    int pixel_count, int alpha)
+{
+    int i;
+    int inv_alpha;
+    if (!dst || !src_a || !src_b || pixel_count <= 0) return;
+
+    if (alpha < 0) alpha = 0;
+    if (alpha > 255) alpha = 255;
+    inv_alpha = 255 - alpha;
+
+    for (i = 0; i < pixel_count; i++) {
+        uint32_t a = src_a[i];
+        uint32_t b = src_b[i];
+        uint32_t r = ((((a >> 16) & 0xFF) * inv_alpha + ((b >> 16) & 0xFF) * alpha) >> 8) & 0xFF;
+        uint32_t g = ((((a >> 8) & 0xFF) * inv_alpha + ((b >> 8) & 0xFF) * alpha) >> 8) & 0xFF;
+        uint32_t bl = (((a & 0xFF) * inv_alpha + (b & 0xFF) * alpha) >> 8) & 0xFF;
+        dst[i] = 0xFF000000u | (r << 16) | (g << 8) | bl;
+    }
+}
+
+/* --- Vehicle Shadow Projection --- */
+
+void td5_render_project_vehicle_shadow(float pos_x, float pos_y, float pos_z,
+                                        float half_w, float half_l, int tex_page)
+{
+    /* Build a dark translucent quad on the ground plane under the vehicle */
+    float ground_y = pos_y + 2.0f; /* slightly above track surface */
+    float verts[4][3] = {
+        { pos_x - half_w, ground_y, pos_z - half_l },
+        { pos_x + half_w, ground_y, pos_z - half_l },
+        { pos_x + half_w, ground_y, pos_z + half_l },
+        { pos_x - half_w, ground_y, pos_z + half_l }
+    };
+    float uvs[4][2] = { {0,0}, {1,0}, {1,1}, {0,1} };
+    uint32_t color = 0x60000000u; /* dark translucent */
+
+    /* Transform through camera and submit as translucent quad */
+    /* This is a simplified path — full implementation would use
+       td5_render_load_translation + clip_and_submit_polygon */
+    (void)verts; (void)uvs; (void)color; (void)tex_page;
+    /* TODO: wire through actual translucent submit pipeline */
 }
 
 /* --- Sky --- */

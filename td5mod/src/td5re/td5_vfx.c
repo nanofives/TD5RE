@@ -17,6 +17,7 @@
 #include "td5_render.h"
 #include "td5_asset.h"
 #include "td5_camera.h"
+#include "td5_game.h"
 #include "td5_platform.h"
 #include "td5re.h"
 
@@ -24,6 +25,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+
+#define LOG_TAG "vfx"
 
 /* ========================================================================
  * External globals from other modules
@@ -171,6 +174,7 @@ static uint8_t  s_particle_banks[2][TD5_VFX_PARTICLE_BANK_SIZE]; /* 2 views */
 static uint8_t  s_sprite_render_flags[2][TD5_VFX_SPRITE_BATCH_COUNT];
 static VfxSpriteQuad s_sprite_batches[2 * TD5_VFX_SPRITE_BATCH_COUNT];
 static int      s_current_view_index;
+static unsigned int s_vfx_debug_frame;
 
 /* Sprite UV data from archive entries */
 static float    s_rainspl_u0, s_rainspl_v0, s_rainspl_u1, s_rainspl_v1;
@@ -225,6 +229,15 @@ static const int16_t s_taillight_offsets[4][3] = {
 /* --- Billboard animation --- */
 static int32_t *s_billboard_phase_table;
 static int      s_billboard_count;
+
+static const char *vfx_weather_type_name(TD5_WeatherType type)
+{
+    switch (type) {
+    case TD5_WEATHER_RAIN: return "rain";
+    case TD5_WEATHER_SNOW: return "snow";
+    default: return "none";
+    }
+}
 
 /* --- Constants matching original binary --- */
 static const float FP_TO_FLOAT = 1.0f / 256.0f; /* DAT_004749d0 */
@@ -347,8 +360,9 @@ int td5_vfx_init(void) {
     s_billboard_count = 0;
 
     s_current_view_index = 0;
+    s_vfx_debug_frame = 0;
 
-    TD5_LOG_I("vfx", "VFX system initialized");
+    TD5_LOG_I(LOG_TAG, "VFX system initialized");
     return 1;
 }
 
@@ -377,6 +391,7 @@ void td5_vfx_shutdown(void) {
 }
 
 void td5_vfx_tick(void) {
+    s_vfx_debug_frame++;
     td5_vfx_update_tire_tracks();
     td5_vfx_advance_billboard_anims();
 }
@@ -453,6 +468,11 @@ void td5_vfx_init_race_particles(void) {
         s_smoke_variant_uv[i][3] = half_h;   /* height */
         s_smoke_variant_uv[i][4] = s_smoke_page;
     }
+
+    TD5_LOG_I(LOG_TAG,
+              "race particles init: particle_bank_bytes=%zu sprite_batches=%d sprite_flags=%d",
+              sizeof(s_particle_banks), 2 * TD5_VFX_SPRITE_BATCH_COUNT,
+              2 * TD5_VFX_SPRITE_BATCH_COUNT);
 }
 
 /**
@@ -607,6 +627,7 @@ void td5_vfx_draw_particles(int view_index) {
 void td5_vfx_update_particles(int view_index) {
     s_current_view_index = view_index;
     int vi = view_index & 1;
+    int active_particles = 0;
 
     uint8_t *bank = s_particle_banks[vi];
     for (int i = 0; i < TD5_VFX_PARTICLE_SLOTS_PER_VIEW; i++) {
@@ -615,6 +636,7 @@ void td5_vfx_update_particles(int view_index) {
 
         /* Original checks flags & 0x80 (active bit) */
         if ((flags & 0x80) != 0) {
+            active_particles++;
             /* Dispatch by particle type byte at slot[1].
              * Type 0 = smoke puff: apply gravity + drag, decrement lifetime.
              * Type 1 = rain splash: expand + fade, short lifetime. */
@@ -638,6 +660,12 @@ void td5_vfx_update_particles(int view_index) {
                 }
             }
         }
+    }
+
+    if ((s_vfx_debug_frame % 60u) == 0u) {
+        TD5_LOG_D(LOG_TAG,
+                  "particle update view %d: active_particles=%d",
+                  view_index, active_particles);
     }
 }
 
@@ -719,8 +747,8 @@ void td5_vfx_init_weather(TD5_WeatherType type) {
             }
         }
 
-        TD5_LOG_I("vfx", "Weather initialized: rain (%d particles/view)",
-                  TD5_VFX_MAX_WEATHER_PARTICLES);
+        TD5_LOG_I(LOG_TAG, "weather init: type=%s particles=%d",
+                  vfx_weather_type_name(type), TD5_VFX_MAX_WEATHER_PARTICLES);
 
     } else if (type == TD5_WEATHER_SNOW) {
         /* Snow: CUT FEATURE. Allocates buffers and seeds positions, but
@@ -749,11 +777,13 @@ void td5_vfx_init_weather(TD5_WeatherType type) {
             }
         }
 
-        TD5_LOG_I("vfx", "Weather initialized: snow (CUT FEATURE, no rendering)");
+        TD5_LOG_I(LOG_TAG, "weather init: type=%s particles=%d",
+                  vfx_weather_type_name(type), TD5_VFX_MAX_WEATHER_PARTICLES);
 
     } else {
         /* Clear weather -- no particles, no audio */
-        TD5_LOG_I("vfx", "Weather initialized: clear (no particles)");
+        TD5_LOG_I(LOG_TAG, "weather init: type=%s particles=0",
+                  vfx_weather_type_name(type));
     }
 
     memset(s_weather_prev_cam, 0, sizeof(s_weather_prev_cam));
@@ -1193,10 +1223,13 @@ static void vfx_set_emitter_anchor_from_wheel(TD5_Actor *actor, int wheel_index,
 void td5_vfx_update_tire_tracks(void) {
     if (!s_tire_track_pool) return;
 
+    int active_emitters = 0;
+
     for (int d = 0; d < (int)(sizeof(s_emitter_descs) / sizeof(s_emitter_descs[0]));
          d++) {
         VfxEmitterDesc *desc = &s_emitter_descs[d];
         if (!desc->active) continue;
+        active_emitters++;
 
         int slot_idx = (int)desc->pool_slot;
         if (slot_idx < 0 || slot_idx >= TD5_VFX_TIRE_TRACK_POOL_SIZE) continue;
@@ -1254,6 +1287,10 @@ void td5_vfx_update_tire_tracks(void) {
              * on the next emitter update cycle. */
             slot->direction_hash = new_hash;
         }
+    }
+
+    if ((s_vfx_debug_frame % 60u) == 0u) {
+        TD5_LOG_D(LOG_TAG, "tire tracks: active_emitters=%d", active_emitters);
     }
 }
 
@@ -1391,6 +1428,11 @@ static void vfx_spawn_smoke_at_position(TD5_Actor *actor, float wx, float wy,
 {
     int vi = view_index & 1;
     uint8_t *bank = s_particle_banks[vi];
+    (void)actor;
+
+    TD5_LOG_D(LOG_TAG,
+              "smoke spawn: pos=(%.2f, %.2f, %.2f) variant=%d view=%d",
+              wx, wy, wz, variant & 3, view_index);
 
     /* Find a free particle slot */
     for (int s = 0; s < TD5_VFX_PARTICLE_SLOTS_PER_VIEW; s++) {
@@ -2031,6 +2073,10 @@ void td5_vfx_render_taillights(int actor_index) {
     }
     s_taillight_brightness[actor_index] = brightness;
 
+    TD5_LOG_D(LOG_TAG,
+              "taillights actor=%d brake=%d brightness=%u",
+              actor_index, brake_active, (unsigned int)brightness);
+
     if (brightness == 0) return; /* fully faded, nothing to render */
 
     /* Render 2 tail lights (offsets 0x60 and 0x68 in vehicle config) */
@@ -2123,5 +2169,39 @@ void td5_vfx_advance_billboard_anims(void) {
 
     for (int i = 0; i < s_billboard_count; i++) {
         s_billboard_phase_table[i] += TD5_VFX_BILLBOARD_PHASE_INC;
+    }
+}
+
+/* --- Wheel Billboards (0x446F00) --- */
+
+void td5_vfx_render_wheel_billboards(int view_index)
+{
+    int total = td5_game_get_total_actor_count();
+    int slot;
+
+    for (slot = 0; slot < total && slot < TD5_MAX_TOTAL_ACTORS; slot++) {
+        TD5_Actor *actor = td5_game_get_actor(slot);
+        int wheel;
+        uint8_t *base;
+
+        if (!actor) continue;
+        base = (uint8_t *)actor;
+        /* car_definition_ptr at offset 0x04 */
+        if (!*(uint32_t *)(base + 0x04)) continue;
+
+        /* Render a camera-facing billboard at each of 4 wheel positions */
+        for (wheel = 0; wheel < 4; wheel++) {
+            /* Read wheel world position from actor struct.
+             * Wheel positions at offsets 0x2B0 + wheel*12 (X,Y,Z int triplets) */
+            int32_t wx = *(int32_t *)(base + 0x2B0 + wheel * 12);
+            int32_t wy = *(int32_t *)(base + 0x2B4 + wheel * 12);
+            int32_t wz = *(int32_t *)(base + 0x2B8 + wheel * 12);
+
+            /* Build billboard quad centered at wheel position.
+             * Full implementation would look up wheel radius from carparam
+             * and submit via the translucent sprite pipeline. */
+            (void)wx; (void)wy; (void)wz; (void)view_index;
+            /* TODO: build quad from wheel atlas, submit as translucent */
+        }
     }
 }

@@ -36,6 +36,8 @@
  */
 
 #include "td5_physics.h"
+#include "td5_track.h"
+#include "td5_platform.h"
 #include "td5re.h"
 
 /* Include the full actor struct for field-level access.
@@ -44,11 +46,15 @@
 
 #include <string.h>  /* memset, memcpy */
 
+#define LOG_TAG "physics"
+
 extern void *g_actor_pool;
 extern void *g_actor_base;
 extern uint8_t *g_actor_table_base;
 
 int td5_game_get_total_actor_count(void);
+
+static void resolve_collision_pair(TD5_Actor *a, TD5_Actor *b);
 
 /* ========================================================================
  * Key globals
@@ -163,6 +169,8 @@ static inline int16_t *get_cardef(TD5_Actor *a)
 #define PHYS_I(a, off) (*(int32_t*)((uint8_t*)get_phys(a) + (off)))
 /* Read a short from the car definition at byte offset */
 #define CDEF_S(a, off) (*(int16_t*)((uint8_t*)get_cardef(a) + (off)))
+#define ACTOR_I16(base, off) (*(int16_t *)((uint8_t *)(base) + (off)))
+#define ACTOR_I32(base, off) (*(int32_t *)((uint8_t *)(base) + (off)))
 
 /* ========================================================================
  * Module lifecycle
@@ -193,6 +201,11 @@ int td5_physics_init(void)
     for (int i = 0; i < 16; i++)
         s_gear_torque[i] = (int16_t)(0x100 - i * 0x10);
 
+    for (int i = 0; i < 5; ++i) {
+        TD5_LOG_I(LOG_TAG, "Surface table[%d]: friction=%d grip=%d",
+                  i, s_surface_friction[i], s_surface_grip[i]);
+    }
+
     return 1;
 }
 
@@ -204,6 +217,7 @@ void td5_physics_shutdown(void)
 void td5_physics_tick(void)
 {
     int total;
+    static uint32_t s_physics_tick_counter;
 
     if (!g_actor_table_base) {
         return;
@@ -215,6 +229,11 @@ void td5_physics_tick(void)
     }
     if (total > TD5_MAX_TOTAL_ACTORS) {
         total = TD5_MAX_TOTAL_ACTORS;
+    }
+
+    s_physics_tick_counter++;
+    if ((s_physics_tick_counter % 60u) == 0u) {
+        TD5_LOG_D(LOG_TAG, "Physics tick: actor_count=%d", total);
     }
 
     for (int slot = 0; slot < total; ++slot) {
@@ -285,6 +304,15 @@ void td5_physics_update_vehicle_actor(TD5_Actor *actor)
 
     /* 7. Integrate pose and contacts */
     td5_physics_integrate_pose(actor);
+
+    if (actor->slot_index == 0 && (actor->frame_counter % 60u) == 0u) {
+        TD5_LOG_D(LOG_TAG,
+                  "Vehicle actor0: speed=%d rpm=%d gear=%d surface=%u",
+                  actor->longitudinal_speed,
+                  actor->engine_speed_accum,
+                  actor->current_gear,
+                  actor->surface_type_chassis);
+    }
 }
 
 /* ========================================================================
@@ -955,7 +983,56 @@ void td5_physics_resolve_vehicle_contacts(void)
                 continue;
             }
 
+            TD5_LOG_D(LOG_TAG, "Collision pair detected: slot_a=%d slot_b=%d", i, j);
             resolve_collision_pair(a, b);
+        }
+    }
+
+    /* --- V2W: Vehicle-to-Wall collision --- */
+    for (int i = 0; i < total; ++i) {
+        TD5_Actor *a = (TD5_Actor *)(g_actor_table_base + (size_t)i * TD5_ACTOR_STRIDE);
+        int32_t ax, az, radius;
+        int span_idx, edge;
+
+        if (!a->car_definition_ptr) continue;
+
+        ax = a->world_pos.x >> 8;
+        az = a->world_pos.z >> 8;
+        radius = (int32_t)CDEF_S(a, 0x80);
+        span_idx = ACTOR_I16(a, ACTOR_OFF_SPAN_INDEX);
+
+        /* Check actor bounding circle against track span edges.
+         * Query the track for left/right boundary at this span. */
+        {
+            int left_x, left_z, right_x, right_z;
+            int pen_left, pen_right;
+            int nx, nz, nmag;
+
+            td5_track_get_span_edges(span_idx, &left_x, &left_z, &right_x, &right_z);
+
+            /* Simplified: check perpendicular distance to each edge */
+            /* Left edge penetration */
+            pen_left = radius - (ax - left_x);
+            if (pen_left > 0) {
+                /* Push right, apply impulse */
+                int impulse = (pen_left * V2W_INERTIA_K) >> 12;
+                ACTOR_I32(a, ACTOR_OFF_LIN_VEL_X) += impulse >> 4;
+                ACTOR_I32(a, ACTOR_OFF_ANG_VEL_YAW) += impulse >> 8;
+                TD5_LOG_D(LOG_TAG,
+                          "Wall impulse: actor=%d side=left penetration=%d impulse=%d",
+                          a->slot_index, pen_left, impulse);
+            }
+
+            /* Right edge penetration */
+            pen_right = radius - (right_x - ax);
+            if (pen_right > 0) {
+                int impulse = (pen_right * V2W_INERTIA_K) >> 12;
+                ACTOR_I32(a, ACTOR_OFF_LIN_VEL_X) -= impulse >> 4;
+                ACTOR_I32(a, ACTOR_OFF_ANG_VEL_YAW) -= impulse >> 8;
+                TD5_LOG_D(LOG_TAG,
+                          "Wall impulse: actor=%d side=right penetration=%d impulse=%d",
+                          a->slot_index, pen_right, impulse);
+            }
         }
     }
 }
@@ -1292,6 +1369,13 @@ void td5_physics_integrate_pose(TD5_Actor *actor)
 
     /* 9. Update suspension response */
     td5_physics_update_suspension_response(actor);
+
+    if (actor->slot_index == 0 && (actor->frame_counter % 60u) == 0u) {
+        TD5_LOG_D(LOG_TAG, "Integrate actor0: pos=(%d,%d,%d)",
+                  actor->world_pos.x,
+                  actor->world_pos.y,
+                  actor->world_pos.z);
+    }
 }
 
 /* ========================================================================
@@ -2008,6 +2092,13 @@ void td5_physics_init_vehicle_runtime(void)
         actor->race_position = (uint8_t)slot;
         actor->max_gear_index = 6;
         update_vehicle_pose_from_physics(actor);
+        TD5_LOG_I(LOG_TAG,
+                  "Init vehicle runtime: slot=%d gear=%d rpm=%d grip=%u race_pos=%u",
+                  slot,
+                  actor->current_gear,
+                  actor->engine_speed_accum,
+                  actor->grip_reduction,
+                  actor->race_position);
     }
 }
 

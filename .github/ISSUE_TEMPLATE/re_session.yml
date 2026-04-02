@@ -1,0 +1,56 @@
+name: RE Session Notes
+description: Log findings from a reverse engineering session
+labels: [re-analysis]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this to record non-obvious RE findings that should be tracked.
+        Detailed write-ups go in `re/analysis/` and `re/sessions/`.
+
+  - type: input
+    id: target_area
+    attributes:
+      label: Target area
+      description: System or module being analyzed (e.g. "frontend FSM", "physics tick", "M2DX zip loader")
+    validations:
+      required: true
+
+  - type: textarea
+    id: functions
+    attributes:
+      label: Functions analyzed
+      description: Ghidra addresses and assigned names
+      placeholder: |
+        0x00401234 → td5_frontend_init_screen_table
+        0x00402abc → td5_physics_integrate_player
+    validations:
+      required: true
+
+  - type: textarea
+    id: findings
+    attributes:
+      label: Key findings
+      description: Non-obvious behavior, data layout discoveries, calling conventions, etc.
+    validations:
+      required: true
+
+  - type: textarea
+    id: structs
+    attributes:
+      label: Struct / type changes
+      description: New fields found, size confirmations, offset corrections
+      placeholder: |
+        Actor+0x1c4 = float wheel_contact[4]  (confirmed via 0x388 stride)
+
+  - type: textarea
+    id: open_questions
+    attributes:
+      label: Open questions
+      description: Things still unknown or needing verification
+
+  - type: textarea
+    id: next_steps
+    attributes:
+      label: Next steps
+      description: What to RE or implement next based on these findings

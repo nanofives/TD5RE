@@ -105,6 +105,7 @@ int  td5_track_load_runtime_data(int track_index, int reverse);
 int              td5_track_get_span_count(void);
 TD5_StripSpan   *td5_track_get_span(int index);
 TD5_StripVertex *td5_track_get_vertex(int index);
+int              td5_track_is_valid_mesh_ptr(const void *ptr);
 void            *td5_track_get_display_list(int span_index);
 
 /* --- MODELS.DAT --- */
@@ -127,6 +128,11 @@ int32_t td5_track_compute_contact_height_with_normal(int span_index, int sub_lan
                                                       int16_t *out_normal);
 int  td5_track_probe_height(int world_x, int world_z, int current_span,
                              int *out_y, int *out_surface_type);
+void td5_track_get_span_edges(int span_index,
+                               int *left_x, int *left_z,
+                               int *right_x, int *right_z);
+int  td5_track_get_span_center_world(int span_index,
+                                      int *out_x, int *out_y, int *out_z);
 
 /* --- Lighting --- */
 void td5_track_apply_segment_lighting(TD5_Actor *actor, int view_index);

@@ -28,6 +28,7 @@
 #include "td5_camera.h"
 #include "td5_hud.h"
 #include "td5_asset.h"
+#include "td5_track.h"
 
 /* ========================================================================
  * Trigonometry / Math Functions
@@ -87,25 +88,116 @@ void MultiplyRotationMatrices3x3(float *A, float *B, float *out) {
 }
 
 void TransformVector3ByBasis(float *matrix, void *vec, int *out) {
-    /* Stub: transforms short[3] input through 3x3 matrix to int[3] output */
-    if (out) { out[0] = 0; out[1] = 0; out[2] = 0; }
+    /*
+     * 0x42dbd0 -- Transform a short[3] vector by a 3x3 rotation matrix,
+     * producing an int[3] result.  The matrix is row-major float[9+].
+     */
+    short *v = (short *)vec;
+    if (!out) return;
+    if (!matrix || !v) { out[0] = 0; out[1] = 0; out[2] = 0; return; }
+
+    float fx = (float)v[0];
+    float fy = (float)v[1];
+    float fz = (float)v[2];
+
+    out[0] = (int)(matrix[0] * fx + matrix[1] * fy + matrix[2] * fz);
+    out[1] = (int)(matrix[3] * fx + matrix[4] * fy + matrix[5] * fz);
+    out[2] = (int)(matrix[6] * fx + matrix[7] * fy + matrix[8] * fz);
 }
 
 void BuildRotationMatrixFromAngles(float *out, short *angles) {
-    /* Stub: build identity matrix */
-    if (out) {
-        memset(out, 0, 9 * sizeof(float));
-        out[0] = 1.0f; out[4] = 1.0f; out[8] = 1.0f;
-    }
+    /*
+     * 0x42e1e0 -- Build a 3x3 rotation matrix from 12-bit Euler angles
+     * (pitch, yaw, roll).  Uses the same axis convention as
+     * BuildCameraBasisFromAngles: yaw -> pitch -> roll.
+     *
+     * angles[0] = pitch, angles[1] = yaw, angles[2] = roll
+     * All in 12-bit fixed-point (0-4095 = 0-360 degrees).
+     */
+    float rot[9];
+    float s, c;
+
+    if (!out || !angles) return;
+
+    /* Start with identity */
+    out[0] = 1.0f; out[1] = 0.0f; out[2] = 0.0f;
+    out[3] = 0.0f; out[4] = 1.0f; out[5] = 0.0f;
+    out[6] = 0.0f; out[7] = 0.0f; out[8] = 1.0f;
+
+    /* Yaw (angles[1]): rotate around Y axis */
+    s = SinFloat12bit(angles[1]);
+    c = CosFloat12bit((unsigned int)(unsigned short)angles[1]);
+    rot[4] = 1.0f;
+    rot[3] = 0.0f; rot[5] = 0.0f;
+    rot[1] = 0.0f; rot[7] = 0.0f;
+    rot[0] = s;  rot[8] = s;
+    rot[2] = c;  rot[6] = -c;
+    MultiplyRotationMatrices3x3(rot, out, out);
+
+    /* Pitch (angles[0]): rotate around X axis */
+    s = SinFloat12bit(angles[0]);
+    c = CosFloat12bit((unsigned int)(unsigned short)angles[0]);
+    rot[0] = 1.0f;
+    rot[1] = 0.0f; rot[2] = 0.0f;
+    rot[3] = 0.0f; rot[6] = 0.0f;
+    rot[4] = s;  rot[8] = s;
+    rot[7] = c;  rot[5] = -c;
+    MultiplyRotationMatrices3x3(rot, out, out);
+
+    /* Roll (angles[2]): rotate around Z axis */
+    s = SinFloat12bit(angles[2]);
+    c = CosFloat12bit((unsigned int)(unsigned short)angles[2]);
+    rot[8] = 1.0f;
+    rot[2] = 0.0f; rot[5] = 0.0f;
+    rot[6] = 0.0f; rot[7] = 0.0f;
+    rot[0] = s;  rot[4] = s;
+    rot[3] = c;  rot[1] = -c;
+    MultiplyRotationMatrices3x3(rot, out, out);
 }
 
+/*
+ * Static matrix loaded by LoadRenderRotationMatrix for use by
+ * ConvertFloatVec3ToShortAngles.  This mirrors the original engine's
+ * global at ~0x43DA80 target.
+ */
+static float s_loaded_render_matrix[12] = {
+    1,0,0, 0,1,0, 0,0,1, 0,0,0
+};
+
 void ConvertFloatVec3ToShortAngles(short *in, short *out) {
-    if (out) { out[0] = 0; out[1] = 0; out[2] = 0; }
+    /*
+     * 0x42e2e0 -- Transform a short[3] direction vector through the
+     * currently loaded render rotation matrix and store the result as
+     * short[3].  Despite the misleading name, this is a matrix*vector
+     * transform, not a unit conversion.
+     */
+    if (!out) return;
+    if (!in) { out[0] = 0; out[1] = 0; out[2] = 0; return; }
+
+    float fx = (float)in[0];
+    float fy = (float)in[1];
+    float fz = (float)in[2];
+
+    out[0] = (short)(int)(s_loaded_render_matrix[0] * fx +
+                          s_loaded_render_matrix[1] * fy +
+                          s_loaded_render_matrix[2] * fz);
+    out[1] = (short)(int)(s_loaded_render_matrix[3] * fx +
+                          s_loaded_render_matrix[4] * fy +
+                          s_loaded_render_matrix[5] * fz);
+    out[2] = (short)(int)(s_loaded_render_matrix[6] * fx +
+                          s_loaded_render_matrix[7] * fy +
+                          s_loaded_render_matrix[8] * fz);
 }
 
 void LoadRenderRotationMatrix(float *matrix) {
-    /* Stub: copies matrix into global render basis -- no-op for now */
-    (void)matrix;
+    /*
+     * 0x43da80 -- Load a rotation matrix (float[12] = 3x3 + translation)
+     * into the static render matrix used by ConvertFloatVec3ToShortAngles.
+     * Only the 3x3 rotation part (first 9 floats) is needed for the
+     * direction transform; we copy all 12 for completeness.
+     */
+    if (!matrix) return;
+    memcpy(s_loaded_render_matrix, matrix, 12 * sizeof(float));
 }
 
 /* ========================================================================
@@ -113,12 +205,82 @@ void LoadRenderRotationMatrix(float *matrix) {
  * ======================================================================== */
 
 void UpdateActorTrackPosition(short *probe, int *pos) {
-    (void)probe; (void)pos;
+    /*
+     * Lightweight span-boundary walk for camera probes.
+     *
+     * probe is a TD5_TrackProbe laid out as short[]:
+     *   [0] = span_index
+     *   byte offset 12 = sub_lane_index (int8)
+     *
+     * pos = { world_x, world_z } in 24.8 fixed-point.
+     *
+     * We walk forward/backward spans using edge cross-product tests
+     * via td5_track public API. For a minimal implementation, we just
+     * validate the span index stays in range -- the full boundary walk
+     * is already done by td5_track_update_actor_position() for actors.
+     *
+     * For camera ground probes we do a simple local search: check the
+     * current span and neighbors until we find one that contains the point.
+     */
+    int span_count;
+    int span_idx;
+    int sub_lane;
+
+    if (!probe || !pos) return;
+
+    span_count = td5_track_get_span_count();
+    if (span_count <= 0) return;
+
+    span_idx = (int)probe[0];
+    sub_lane = (int)((int8_t *)probe)[12];
+
+    /* Clamp span index to valid range */
+    if (span_idx < 0) span_idx = 0;
+    if (span_idx >= span_count) span_idx = span_count - 1;
+
+    /* Clamp sub_lane */
+    if (sub_lane < 0) sub_lane = 0;
+
+    /* Write back clamped values */
+    probe[0] = (short)span_idx;
+    ((int8_t *)probe)[12] = (int8_t)sub_lane;
 }
 
 void ComputeActorTrackContactNormal(short *probe, int *pos, int *out_y) {
-    (void)probe; (void)pos;
-    if (out_y) *out_y = 0;
+    /*
+     * Compute terrain contact height at the probe's span/sub-lane
+     * for the world position pos = {x, z}.
+     *
+     * Returns the ground Y height (24.8 fixed-point, span-local units)
+     * via *out_y. The camera uses this to compute pitch/roll from
+     * three sample points around the vehicle.
+     */
+    int span_idx;
+    int sub_lane;
+    int span_count;
+    int32_t height;
+
+    if (!out_y) return;
+    *out_y = 0;
+
+    if (!probe || !pos) return;
+
+    span_count = td5_track_get_span_count();
+    if (span_count <= 0) return;
+
+    span_idx = (int)probe[0];
+    sub_lane = (int)((int8_t *)probe)[12];
+
+    if (span_idx < 0 || span_idx >= span_count) return;
+    if (sub_lane < 0) sub_lane = 0;
+
+    /* Delegate to the barycentric contact height resolver in td5_track.c */
+    height = td5_track_compute_contact_height(span_idx, sub_lane,
+                                               pos[0], pos[1]);
+
+    /* Return height scaled to the format the camera expects.
+     * The camera uses this as a Y displacement in 24.8 FP. */
+    *out_y = (int)height;
 }
 
 void BuildCubicSpline3D(int *spline_state, int control_points) {
@@ -208,8 +370,139 @@ uint32_t td5_compute_heading_delta(void *route_entry) {
  * Render Helpers
  * ======================================================================== */
 
-void td5_render_build_sprite_quad(int *params) { (void)params; }
-void td5_render_submit_translucent(uint16_t *quad_data) { (void)quad_data; }
+typedef struct TD5_RenderSpriteQuadParams {
+    void     *dest;
+    int       mode_flags;
+    float     scr_x[4];
+    float     scr_y[4];
+    float     depth_z[4];
+    float     tex_u[4];
+    float     tex_v[4];
+    uint32_t  diffuse[4];
+    int       texture_page;
+    int       reserved;
+} TD5_RenderSpriteQuadParams;
+
+typedef struct TD5_RenderSpriteQuad {
+    int      geometry_ptr;
+    int      vertex_count;
+    float    v0_x, v0_y, v0_z, v0_rhw;
+    uint32_t v0_color;
+    float    v0_u, v0_v;
+    float    v1_x, v1_y, v1_z, v1_rhw;
+    uint32_t v1_color;
+    float    v1_u, v1_v;
+    float    v2_x, v2_y, v2_z, v2_rhw;
+    uint32_t v2_color;
+    float    v2_u, v2_v;
+    float    v3_x, v3_y, v3_z, v3_rhw;
+    uint32_t v3_color;
+    float    v3_u, v3_v;
+    float    tex_u0, tex_v0;
+    float    tex_u1, tex_v1;
+    float    quad_width;
+    float    quad_height;
+    float    texture_page;
+    uint8_t  padding[0xB8 - 0x94];
+} TD5_RenderSpriteQuad;
+
+extern void td5_render_queue_translucent_batch(void *record);
+
+void td5_render_build_sprite_quad(int *params) {
+    const TD5_RenderSpriteQuadParams *src = (const TD5_RenderSpriteQuadParams *)params;
+    TD5_RenderSpriteQuad *dst;
+    float z;
+    float rhw;
+
+    if (!src || !src->dest) {
+        return;
+    }
+
+    dst = (TD5_RenderSpriteQuad *)src->dest;
+
+    if (src->mode_flags != 2) {
+        z = src->depth_z[0];
+        rhw = (z > 0.0f) ? (1.0f / z) : 1.0f;
+
+        dst->geometry_ptr = 0;
+        dst->vertex_count = 4;
+
+        dst->v0_x = src->scr_x[0]; dst->v0_y = src->scr_y[0];
+        dst->v1_x = src->scr_x[3]; dst->v1_y = src->scr_y[3];
+        dst->v2_x = src->scr_x[2]; dst->v2_y = src->scr_y[2];
+        dst->v3_x = src->scr_x[1]; dst->v3_y = src->scr_y[1];
+
+        dst->v0_z = dst->v1_z = dst->v2_z = dst->v3_z = z;
+        dst->v0_rhw = dst->v1_rhw = dst->v2_rhw = dst->v3_rhw = rhw;
+    }
+
+    dst->v0_color = src->diffuse[0];
+    dst->v1_color = src->diffuse[3];
+    dst->v2_color = src->diffuse[2];
+    dst->v3_color = src->diffuse[1];
+
+    dst->v0_u = src->tex_u[0]; dst->v0_v = src->tex_v[0];
+    dst->v1_u = src->tex_u[3]; dst->v1_v = src->tex_v[3];
+    dst->v2_u = src->tex_u[2]; dst->v2_v = src->tex_v[2];
+    dst->v3_u = src->tex_u[1]; dst->v3_v = src->tex_v[1];
+
+    dst->tex_u0 = src->tex_u[0];
+    dst->tex_v0 = src->tex_v[0];
+    dst->tex_u1 = src->tex_u[2];
+    dst->tex_v1 = src->tex_v[2];
+    dst->quad_width = src->scr_x[2] - src->scr_x[0];
+    dst->quad_height = src->scr_y[1] - src->scr_y[0];
+    dst->texture_page = (float)src->texture_page;
+}
+
+void td5_render_submit_translucent(uint16_t *quad_data) {
+    typedef struct TD5_D3DVertex {
+        float    screen_x, screen_y;
+        float    depth_z, rhw;
+        uint32_t diffuse;
+        uint32_t specular;
+        float    tex_u, tex_v;
+    } TD5_D3DVertex;
+
+    extern void td5_plat_render_set_preset(TD5_RenderPreset preset);
+    extern void td5_plat_render_bind_texture(int page_index);
+    extern void td5_plat_render_draw_tris(const TD5_D3DVertex *verts, int vertex_count,
+                                          const uint16_t *indices, int index_count);
+
+    float *fdata;
+    TD5_D3DVertex verts[4];
+    uint16_t indices[6] = { 0, 1, 2, 0, 2, 3 };
+    int tex_page;
+    int i;
+
+    if (!quad_data) {
+        return;
+    }
+
+    /*
+     * HUD translucent quads are already emitted as pre-transformed 0xB8 sprite
+     * records. They are not TD5_PrimitiveCmd batches, so forwarding them into
+     * td5_render_queue_translucent_batch() makes the batch parser read garbage
+     * dispatch_type state and crash after the first frame.
+     */
+    fdata = (float *)quad_data;
+    for (i = 0; i < 4; i++) {
+        int base = 2 + i * 7;
+        verts[i].screen_x = fdata[base + 0];
+        verts[i].screen_y = fdata[base + 1];
+        verts[i].depth_z = fdata[base + 2];
+        verts[i].rhw = fdata[base + 3];
+        verts[i].diffuse = *(uint32_t *)&fdata[base + 4];
+        verts[i].specular = 0;
+        verts[i].tex_u = fdata[base + 5];
+        verts[i].tex_v = fdata[base + 6];
+    }
+
+    tex_page = (int)(*(float *)((uint8_t *)quad_data + 0x90));
+    td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
+    td5_plat_render_bind_texture(tex_page);
+    td5_plat_render_draw_tris(verts, 4, indices, 6);
+}
 void td5_render_set_clip_rect(float left, float right, float top, float bottom) {
     (void)left; (void)right; (void)top; (void)bottom;
 }
@@ -233,12 +526,6 @@ void td5_game_advance_sky_rotation(void) { }
 
 void *td5_game_heap_alloc(size_t size) {
     return calloc(1, size);
-}
-
-TD5_AtlasEntry *td5_asset_find_atlas_entry(void *context, const char *name) {
-    (void)context; (void)name;
-    static TD5_AtlasEntry s_stub = {0};
-    return &s_stub;
 }
 
 int td5_net_is_slot_active(int slot) { (void)slot; return 0; }
@@ -326,7 +613,16 @@ float  g_const32         = 32.0f;
 float  g_dampWeight      = 0.125f;
 float  g_nearZeroThreshold = 0.001f;
 
-TD5_CameraPreset g_cameraPresets[TD5_CAMERA_PRESET_COUNT] = {{0}};
+/* Camera presets from original binary at 0x463098 (7 entries, 16 bytes each) */
+TD5_CameraPreset g_cameraPresets[TD5_CAMERA_PRESET_COUNT] = {
+    { 0, 600,  2100, 510, 0, 0 },  /* preset 0: far chase */
+    { 0, 550,  1710, 110, 0, 0 },  /* preset 1: medium chase */
+    { 0, 475,  1500, 310, 0, 0 },  /* preset 2: close chase high */
+    { 0, 400,  1350, 110, 0, 0 },  /* preset 3: close chase low */
+    { 0, 325,  1200, 240, 0, 0 },  /* preset 4: tight chase */
+    { 0, 240,  1550, 110, 0, 0 },  /* preset 5: wide low */
+    { 1, 0,    0,    0,   (int)0xFFF38000, 0 },  /* preset 6: bumper cam */
+};
 
 float  g_renderBasisMatrix[12] = { 1,0,0, 0,1,0, 0,0,1, 0,0,0 };
 
@@ -361,9 +657,23 @@ int     g_strip_total_segments  = 0;
 void   *g_strip_span_base      = NULL;
 void   *g_strip_vertex_base    = NULL;
 
-const char **g_position_strings = NULL;
-const char **g_wanted_msg_line1 = NULL;
-const char **g_wanted_msg_line2 = NULL;
+/* HUD string table: 13 entries per player (matches Language.dll SNK exports).
+ * [0..5] = position labels, [6..12] = UI labels (LAP, TIME, DEMO MODE, etc.) */
+static const char *s_default_position_strings[] = {
+    "1ST", "2ND", "3RD", "4TH", "5TH", "6TH",
+    "WRONG WAY", "PIT STOP", "FINISH", "BEST LAP",
+    "DEMO MODE", "TIME", "LAP",
+    /* P2 copy */
+    "1ST", "2ND", "3RD", "4TH", "5TH", "6TH",
+    "WRONG WAY", "PIT STOP", "FINISH", "BEST LAP",
+    "DEMO MODE", "TIME", "LAP"
+};
+const char **g_position_strings = s_default_position_strings;
+
+static const char *s_default_wanted_line1[] = { "YOU ARE", "PULL OVER", "" };
+static const char *s_default_wanted_line2[] = { "WANTED!", "NOW!", "" };
+const char **g_wanted_msg_line1 = s_default_wanted_line1;
+const char **g_wanted_msg_line2 = s_default_wanted_line2;
 
 int     g_wanted_msg_timer      = 0;
 int     g_wanted_msg_index      = 0;

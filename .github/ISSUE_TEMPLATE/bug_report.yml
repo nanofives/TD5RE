@@ -1,0 +1,78 @@
+name: Bug Report
+description: Report a regression or incorrect behavior in td5re.exe or td5_mod.asi
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before filing: check `td5mod/src/td5re/EXPECTED_BEHAVIOR.md` — the issue may already be documented.
+
+  - type: dropdown
+    id: target
+    attributes:
+      label: Affected build target
+      options:
+        - td5re.exe (source port)
+        - td5_mod.asi (ASI mod)
+        - Both
+    validations:
+      required: true
+
+  - type: dropdown
+    id: module
+    attributes:
+      label: Module
+      description: Which source module is involved?
+      multiple: true
+      options:
+        - td5_game.c
+        - td5_physics.c
+        - td5_track.c
+        - td5_ai.c
+        - td5_camera.c
+        - td5_render.c
+        - td5_vfx.c
+        - td5_frontend.c
+        - td5_hud.c
+        - td5_asset.c
+        - td5_save.c
+        - td5_sound.c
+        - td5_input.c
+        - td5_net.c
+        - ddraw_wrapper
+        - Unknown
+
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened
+      description: Describe the bug. Include observed vs expected behavior.
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Reproduction steps
+      placeholder: |
+        1. Launch td5re.exe from original/ directory
+        2. Select track X
+        3. ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: ghidra_ref
+    attributes:
+      label: Relevant RE reference
+      description: Ghidra function address, analysis doc, or session note that relates to this bug.
+      placeholder: |
+        Function at 0x00401234 (td5_game_update_loop)
+        See re/analysis/main-game-loop-decomposition.md
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs / crash info
+      description: Paste relevant lines from td5re_debug.log or d3d11_wrapper.log
+      render: text

@@ -22,6 +22,16 @@
 #include <string.h>
 #include <stdlib.h>
 
+#define LOG_TAG "track"
+
+static uint32_t s_actor_position_log_counter = 0;
+static uint32_t s_probe_log_counter = 0;
+
+extern int     g_strip_span_count;
+extern int     g_strip_total_segments;
+extern void   *g_strip_span_base;
+extern void   *g_strip_vertex_base;
+
 /* ========================================================================
  * Original functions: status
  *
@@ -418,6 +428,40 @@ static inline uint8_t span_lane_bitmask(const TD5_StripSpan *sp)
     return sp->pad_02[0]; /* +0x02 */
 }
 
+void td5_track_get_span_edges(int span_index,
+                              int *left_x, int *left_z,
+                              int *right_x, int *right_z)
+{
+    const TD5_StripSpan *sp;
+    int lane_count, vl0, vl1, vr0, vr1;
+
+    *left_x = *left_z = *right_x = *right_z = 0;
+    if (!s_span_array || !s_vertex_table ||
+        span_index < 0 || span_index >= s_span_count) return;
+
+    sp = &s_span_array[span_index];
+    lane_count = span_lane_count(sp);
+    if (lane_count < 1) lane_count = 1;
+
+    /* Get leftmost and rightmost vertices */
+    get_quad_vertices(sp, 0, &vl0, &vl1, &vr0, &vr1);
+    {
+        TD5_StripVertex *lv = vertex_at(vl0);
+        if (lv) {
+            *left_x = ((int32_t)sp->origin_x + (int32_t)lv->x);
+            *left_z = ((int32_t)sp->origin_z + (int32_t)lv->z);
+        }
+    }
+    get_quad_vertices(sp, lane_count - 1, &vl0, &vl1, &vr0, &vr1);
+    {
+        TD5_StripVertex *rv = vertex_at(vr0);
+        if (rv) {
+            *right_x = ((int32_t)sp->origin_x + (int32_t)rv->x);
+            *right_z = ((int32_t)sp->origin_z + (int32_t)rv->z);
+        }
+    }
+}
+
 static int compute_span_center_world(int span_index,
                                      float *out_x,
                                      float *out_y,
@@ -458,6 +502,43 @@ static int compute_span_center_world(int span_index,
     if (out_x) *out_x = x;
     if (out_y) *out_y = y;
     if (out_z) *out_z = z;
+    return 1;
+}
+
+int td5_track_get_span_center_world(int span_index,
+                                    int *out_x, int *out_y, int *out_z)
+{
+    const TD5_StripSpan *sp;
+    int lane_count;
+    int vl0, vl1, vr0, vr1;
+    TD5_StripVertex *src[4];
+
+    if (out_x) *out_x = 0;
+    if (out_y) *out_y = 0;
+    if (out_z) *out_z = 0;
+
+    if (!s_span_array || !s_vertex_table || span_index < 0 || span_index >= s_span_count)
+        return 0;
+
+    sp = &s_span_array[span_index];
+    if (sp->span_type == 9 || sp->span_type == 10)
+        return 0;
+
+    lane_count = span_lane_count(sp);
+    if (lane_count < 1)
+        lane_count = 1;
+
+    get_quad_vertices(sp, lane_count / 2, &vl0, &vl1, &vr0, &vr1);
+    src[0] = vertex_at(vl0);
+    src[1] = vertex_at(vl1);
+    src[2] = vertex_at(vr0);
+    src[3] = vertex_at(vr1);
+    if (!src[0] || !src[1] || !src[2] || !src[3])
+        return 0;
+
+    if (out_x) *out_x = sp->origin_x + (src[0]->x + src[1]->x + src[2]->x + src[3]->x) / 4;
+    if (out_y) *out_y = sp->pad_10 + (src[0]->y + src[1]->y + src[2]->y + src[3]->y) / 4;
+    if (out_z) *out_z = sp->origin_z + (src[0]->z + src[1]->z + src[2]->z + src[3]->z) / 4;
     return 1;
 }
 
@@ -824,12 +905,25 @@ int td5_track_load_strip(const void *data, size_t size)
 
     /* Bind runtime pointers (patch sentinels) */
     td5_track_bind_runtime_pointers();
+    g_strip_span_count = s_span_count;
+    g_strip_total_segments = s_span_count;
+    g_strip_span_base = s_span_array;
+    g_strip_vertex_base = s_vertex_table;
 
     if (s_models_display_list_count > 0)
         rebuild_span_display_list_mapping();
 
     if (!build_strip_display_lists() && !build_placeholder_display_lists())
         return 0;
+
+    TD5_LOG_I(LOG_TAG,
+              "Strip loaded: spans=%d vertices=%d jumps=%d attr_overrides=%d",
+              s_span_count,
+              (int)((s_strip_blob_size > vertex_offset)
+                  ? ((s_strip_blob_size - vertex_offset) / sizeof(TD5_StripVertex))
+                  : 0),
+              s_jump_entry_count,
+              s_secondary_count);
 
     return 1;
 }
@@ -1196,6 +1290,17 @@ void td5_track_update_actor_position(TD5_Actor *actor)
     pos_z = *(int32_t *)((uint8_t *)actor + 0x204); /* world_pos.z */
 
     update_position_recursive(track_state, pos_x, pos_z, 0);
+
+    if ((uintptr_t)actor == (uintptr_t)0x004AB108u) {
+        s_actor_position_log_counter++;
+        if ((s_actor_position_log_counter % 60u) == 0u) {
+            float normalized = (s_span_count > 0)
+                ? ((float)track_state[1] / (float)s_span_count)
+                : 0.0f;
+            TD5_LOG_D(LOG_TAG, "Actor0 track pos: span=%d normalized=%.3f",
+                      (int)track_state[1], normalized);
+        }
+    }
 }
 
 /* ========================================================================
@@ -1433,6 +1538,11 @@ int td5_track_probe_height(int world_x, int world_z, int current_span,
 
     *out_y = probe_span_lane_height(sp, best_lane, world_x, world_z, NULL);
     *out_surface_type = surface_type_for_span_lane(sp, best_lane);
+    s_probe_log_counter++;
+    if ((s_probe_log_counter % 120u) == 0u && current_span == 0) {
+        TD5_LOG_D(LOG_TAG, "Probe actor0: y=%d surface=%d span=%d",
+                  *out_y, *out_surface_type, current_span);
+    }
     return 1;
 }
 
@@ -1677,18 +1787,24 @@ int td5_track_check_checkpoint(TD5_Actor *actor)
             if (sector == 0 && current_span >= sector_size - 1 &&
                 current_span <= sector_size + 1) {
                 *gate_mask_ptr = 0x01;
+                TD5_LOG_I(LOG_TAG, "Checkpoint crossing: sector=0 span=%d mask=0x%02X",
+                          current_span, (unsigned int)*gate_mask_ptr);
             }
             break;
         case 0x01:
             if (sector == 1 && current_span >= sector_size * 2 - 1 &&
                 current_span <= sector_size * 2 + 1) {
                 *gate_mask_ptr = 0x03;
+                TD5_LOG_I(LOG_TAG, "Checkpoint crossing: sector=1 span=%d mask=0x%02X",
+                          current_span, (unsigned int)*gate_mask_ptr);
             }
             break;
         case 0x03:
             if (sector == 2 && current_span >= sector_size * 3 - 1 &&
                 current_span <= sector_size * 3 + 1) {
                 *gate_mask_ptr = 0x07;
+                TD5_LOG_I(LOG_TAG, "Checkpoint crossing: sector=2 span=%d mask=0x%02X",
+                          current_span, (unsigned int)*gate_mask_ptr);
             }
             break;
         case 0x07:
@@ -1696,6 +1812,8 @@ int td5_track_check_checkpoint(TD5_Actor *actor)
             if (current_span < sector_size / 2) {
                 *gate_mask_ptr = 0x0F;
                 lap_complete = 1;
+                TD5_LOG_I(LOG_TAG, "Checkpoint crossing: finish span=%d mask=0x%02X",
+                          current_span, (unsigned int)*gate_mask_ptr);
             }
             break;
         case 0x0F:
@@ -2186,6 +2304,9 @@ int td5_track_load_routes(const void *left_data, size_t left_size,
     td5_ai_set_route_tables(s_route_left, s_route_left_size,
                             s_route_right, s_route_right_size);
 
+    TD5_LOG_I(LOG_TAG, "Route data loaded: left=%u bytes right=%u bytes",
+              (unsigned int)s_route_left_size, (unsigned int)s_route_right_size);
+
     return 1;
 }
 
@@ -2448,6 +2569,18 @@ int td5_track_get_span_count(void)
     return s_span_count;
 }
 
+int td5_track_is_valid_mesh_ptr(const void *ptr)
+{
+    if (!ptr || (uintptr_t)ptr < 0x10000u) return 0;
+    if (s_models_blob && s_models_blob_size > 0) {
+        uintptr_t p = (uintptr_t)ptr;
+        uintptr_t base = (uintptr_t)s_models_blob;
+        if (p >= base && p < base + s_models_blob_size) return 1;
+    }
+    /* Also accept heap pointers from generated display lists */
+    return 1;
+}
+
 TD5_StripSpan *td5_track_get_span(int index)
 {
     if (!s_span_array || index < 0 || index >= s_span_count)
@@ -2557,6 +2690,10 @@ int td5_track_init(void)
     s_lighting_table = NULL;
     s_lighting_entry_count = 0;
     s_model_count = 0;
+    g_strip_span_count = 0;
+    g_strip_total_segments = 0;
+    g_strip_span_base = NULL;
+    g_strip_vertex_base = NULL;
 
     return 1;
 }
@@ -2574,6 +2711,10 @@ void td5_track_shutdown(void)
     s_strip_header = NULL;
     s_jump_entry_count = 0;
     s_jump_entries = NULL;
+    g_strip_span_count = 0;
+    g_strip_total_segments = 0;
+    g_strip_span_base = NULL;
+    g_strip_vertex_base = NULL;
 
     free_display_lists();
     free_models_dat_runtime();

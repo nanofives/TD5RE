@@ -38,6 +38,8 @@
 
 #define LOG_TAG "sound"
 
+static uint32_t s_audio_mix_log_counter = 0;
+
 /* ========================================================================
  * Internal constants
  * ======================================================================== */
@@ -106,6 +108,43 @@ static const char *s_frontend_sfx_paths[TD5_SOUND_FRONTEND_SFX_COUNT] = {
 static const int s_frontend_sfx_slots[TD5_SOUND_FRONTEND_SFX_COUNT] = {
     1, 2, 3, 4, 5, 6, 7, 8, 9, 10
 };
+static int s_frontend_sfx_buffer_ids[TD5_SOUND_FRONTEND_SFX_COUNT] = {
+    -1, -1, -1, -1, -1, -1, -1, -1, -1, -1
+};
+
+/* Slot-to-buffer and slot-to-channel mapping arrays.
+ * The platform audio layer assigns sequential buffer IDs on load and returns
+ * channel handles from play(). Game logic uses logical slot numbers. */
+static int s_slot_to_buffer[TD5_SOUND_TOTAL_SLOTS];
+static int s_slot_to_channel[TD5_SOUND_TOTAL_SLOTS];
+
+static int slot_buf(int slot) {
+    if (slot < 0 || slot >= TD5_SOUND_TOTAL_SLOTS) return -1;
+    return s_slot_to_buffer[slot];
+}
+static void slot_play(int slot, int loop, int volume, int pan, int frequency) {
+    int buf_id = slot_buf(slot);
+    if (buf_id < 0) return;
+    int ch = td5_plat_audio_play(buf_id, loop, volume, pan, frequency);
+    if (slot >= 0 && slot < TD5_SOUND_TOTAL_SLOTS)
+        s_slot_to_channel[slot] = ch;
+}
+static void slot_stop(int slot) {
+    if (slot < 0 || slot >= TD5_SOUND_TOTAL_SLOTS) return;
+    int ch = s_slot_to_channel[slot];
+    if (ch >= 0) { td5_plat_audio_stop(ch); s_slot_to_channel[slot] = -1; }
+}
+static void slot_modify(int slot, int volume, int pan, int frequency) {
+    if (slot < 0 || slot >= TD5_SOUND_TOTAL_SLOTS) return;
+    int ch = s_slot_to_channel[slot];
+    if (ch >= 0) td5_plat_audio_modify(ch, volume, pan, frequency);
+}
+static int slot_is_playing(int slot) {
+    if (slot < 0 || slot >= TD5_SOUND_TOTAL_SLOTS) return 0;
+    int ch = s_slot_to_channel[slot];
+    if (ch < 0) return 0;
+    return td5_plat_audio_is_playing(ch);
+}
 
 /* ========================================================================
  * Sound state -- mirrors original globals
@@ -239,6 +278,9 @@ static int sound_load_wav_from_zip(const char *wav_name, const char *zip_path,
 
 int td5_sound_init(void)
 {
+    memset(s_frontend_sfx_buffer_ids, 0xFF, sizeof(s_frontend_sfx_buffer_ids));
+    memset(s_slot_to_buffer, 0xFF, sizeof(s_slot_to_buffer));
+    memset(s_slot_to_channel, 0xFF, sizeof(s_slot_to_channel));
     if (!td5_plat_audio_init()) {
         TD5_LOG_W(LOG_TAG, "audio init failed -- running silent");
         return 1; /* graceful degradation, same as original */
@@ -297,6 +339,11 @@ int td5_sound_init_race_resources(void)
     s_active_listener_pos   = NULL;
     s_active_listener_vel   = NULL;
 
+    memset(s_slot_to_buffer, 0xFF, sizeof(s_slot_to_buffer));
+    memset(s_slot_to_channel, 0xFF, sizeof(s_slot_to_channel));
+
+    TD5_LOG_I(LOG_TAG, "Race audio resources reset");
+
     return 1;
 }
 
@@ -310,11 +357,18 @@ void td5_sound_release_race_channels(void)
 {
     /* Stop duplicate slots 44-87 */
     for (int i = TD5_SOUND_DUP_OFFSET; i < TD5_SOUND_TOTAL_SLOTS; i++) {
-        td5_plat_audio_stop(i);
+        slot_stop(i);
     }
-    /* Free base slots 0-43 */
+    /* Stop and free base slots 0-43 */
     for (int i = 0; i < TD5_SOUND_MAX_BASE_SLOTS; i++) {
-        td5_plat_audio_free(i);
+        slot_stop(i);
+        int buf_id = s_slot_to_buffer[i];
+        if (buf_id >= 0) {
+            td5_plat_audio_free(buf_id);
+            s_slot_to_buffer[i] = -1;
+            if (i + TD5_SOUND_DUP_OFFSET < TD5_SOUND_TOTAL_SLOTS)
+                s_slot_to_buffer[i + TD5_SOUND_DUP_OFFSET] = -1;
+        }
     }
 }
 
@@ -409,7 +463,11 @@ int td5_sound_load_ambient(void)
     for (int i = 0; i < TD5_SOUND_AMBIENT_COUNT; i++) {
         int slot = TD5_SOUND_AMBIENT_SLOT_BASE + i;
         int loop = (i < 4) ? 1 : 0; /* first 4 entries are looping */
+        TD5_LOG_I(LOG_TAG, "Ambient WAV load begin: name=%s slot=%d loop=%d dup=%d",
+                  s_ambient_wav_names[i], slot, loop, 2);
         sound_load_wav_from_zip(s_ambient_wav_names[i], zip_path, slot, loop, 2);
+        TD5_LOG_I(LOG_TAG, "Ambient WAV load end: name=%s slot=%d",
+                  s_ambient_wav_names[i], slot);
     }
 
     /* Load traffic engine loops for actors 6+ */
@@ -419,8 +477,13 @@ int td5_sound_load_ambient(void)
             int variant = td5_game_get_traffic_variant(i);
             if (variant < 0 || variant > 2) variant = 0;
             int slot = TD5_SOUND_TRAFFIC_SLOT_BASE + i;
+            TD5_LOG_I(LOG_TAG,
+                      "Traffic WAV load begin: name=%s traffic_index=%d slot=%d loop=%d dup=%d",
+                      s_traffic_engine_wavs[variant], i, slot, 1, 2);
             sound_load_wav_from_zip(s_traffic_engine_wavs[variant], zip_path,
                                     slot, 1, 2);
+            TD5_LOG_I(LOG_TAG, "Traffic WAV load end: name=%s traffic_index=%d slot=%d",
+                      s_traffic_engine_wavs[variant], i, slot);
         }
     }
 
@@ -446,6 +509,8 @@ void td5_sound_update_ambient(void)
  */
 void td5_sound_update_vehicle_looping_state(int actor_index)
 {
+    int base_slot = actor_index * 3;
+
     /* Check if wanted mode is active and this is the cop */
     if (td5_game_is_wanted_mode() && actor_index == td5_game_get_cop_actor_index()) {
         if (s_siren_active_flag == 0) {
@@ -461,11 +526,12 @@ void td5_sound_update_vehicle_looping_state(int actor_index)
         return;
     }
 
-    /* Non-cop: trigger horn if not already playing */
-    if (!td5_plat_audio_is_playing(actor_index * 3 + 2)) {
-        /* Mark horn as "start pending" for both viewports */
-        s_horn_state[actor_index * 2]     = 1;
-        s_horn_state[actor_index * 2 + 1] = 1;
+    /* Keep the looping engine state latched to the existing channel rather
+     * than requesting a fresh play every frame. */
+    if (!slot_is_playing(base_slot) &&
+        !slot_is_playing(base_slot + 1)) {
+        s_engine_state[actor_index * 2] = ENGINE_STATE_STOPPED;
+        s_engine_state[actor_index * 2 + 1] = ENGINE_STATE_STOPPED;
     }
 }
 
@@ -521,6 +587,22 @@ void td5_sound_update_audio_mix(void)
         }
     }
 
+    s_audio_mix_log_counter++;
+    if ((s_audio_mix_log_counter % 60u) == 0u) {
+        int active_engine_channels = 0;
+        for (int i = 0; i < 12; i++) {
+            if (s_engine_state[i] != 0 && s_engine_state[i] != ENGINE_STATE_STOPPED) {
+                active_engine_channels++;
+            }
+        }
+        TD5_LOG_D(LOG_TAG,
+                  "Audio mix: engine_channels=%d listener0=(%d,%d,%d)",
+                  active_engine_channels,
+                  (int)s_listener_pos[0][0],
+                  (int)s_listener_pos[0][1],
+                  (int)s_listener_pos[0][2]);
+    }
+
     /* ----------------------------------------------------------------
      * B. Split-screen viewport transition detection
      *
@@ -541,7 +623,7 @@ void td5_sound_update_audio_mix(void)
         } else {
             /* Leaving split-screen: stop all duplicate-range slots */
             for (int i = TD5_SOUND_DUP_OFFSET; i < TD5_SOUND_TOTAL_SLOTS; i++) {
-                td5_plat_audio_stop(i);
+                slot_stop(i);
             }
             s_skid_playing[1] = 0;
             s_viewport_audio_state = 0;
@@ -561,10 +643,10 @@ void td5_sound_update_audio_mix(void)
         }
     } else {
         /* Active but both fade level and target are zero: stop siren */
-        td5_plat_audio_stop(0x15);
-        td5_plat_audio_stop(0x16);
-        td5_plat_audio_stop(0x41);
-        td5_plat_audio_stop(0x42);
+        slot_stop(0x15);
+        slot_stop(0x16);
+        slot_stop(0x41);
+        slot_stop(0x42);
         s_tracked_veh_active_p2 = 0;
         s_tracked_veh_active    = 0;
     }
@@ -676,10 +758,10 @@ void td5_sound_update_audio_mix(void)
 
                 /* Play or modify tracked audio */
                 if (s_tracked_audio_state[state_idx] == ENGINE_STATE_STOPPED) {
-                    td5_plat_audio_play(slot_offset + 0x13, 1, vol_atten, pan, final_pitch);
+                    slot_play(slot_offset + 0x13, 1, vol_atten, pan, final_pitch);
                     s_tracked_audio_state[state_idx] = 1;
                 } else {
-                    td5_plat_audio_modify(slot_offset + 0x14, vol_atten, pan, final_pitch);
+                    slot_modify(slot_offset + 0x14, vol_atten, pan, final_pitch);
                 }
             }
 
@@ -725,19 +807,24 @@ void td5_sound_update_audio_mix(void)
              * ---------------------------------------------------------- */
             int cur_state = s_engine_state[state_idx];
             if (cur_state != engine_target_state) {
+                int next_slot = engine_target_state + veh * 3 - 1 + slot_offset;
+
                 /* State change: stop old, start new */
                 if (cur_state == ENGINE_STATE_STOPPED) {
                     /* First time: if this is the viewer, also start the idle loop */
-                    if ((int)veh == (int)viewer_vehicle && !td5_game_is_replay_active()) {
-                        td5_plat_audio_play(veh * 3 + 1 + slot_offset, 1, 0, 0, 1000);
+                    if ((int)veh == (int)viewer_vehicle &&
+                        !td5_game_is_replay_active() &&
+                        !slot_is_playing(veh * 3 + 1 + slot_offset)) {
+                        slot_play(veh * 3 + 1 + slot_offset, 1, 0, 0, 1000);
                     }
                 } else {
                     /* Stop the previously active engine channel */
-                    td5_plat_audio_stop(cur_state + veh * 3 + slot_offset);
+                    slot_stop(cur_state + veh * 3 + slot_offset);
                 }
                 /* Start the new engine channel */
-                td5_plat_audio_play(engine_target_state + veh * 3 - 1 + slot_offset,
-                                    1, 0, 0, 1000);
+                if (!slot_is_playing(next_slot)) {
+                    slot_play(next_slot, 1, 0, 0, 1000);
+                }
                 s_engine_state[state_idx] = engine_target_state;
             }
 
@@ -754,7 +841,7 @@ void td5_sound_update_audio_mix(void)
                 }
 
                 int modify_slot = slot_offset + veh * 3;
-                td5_plat_audio_modify(modify_slot + 1, engine_vol, steer_pan, engine_pitch);
+                slot_modify(modify_slot + 1, engine_vol, steer_pan, engine_pitch);
 
                 /* Horn volume from gear state switch table */
                 int gear_idx = s_gear_state[veh];
@@ -763,23 +850,25 @@ void td5_sound_update_audio_mix(void)
                 modify_slot = modify_slot + 2;
 
                 /* Modify the horn/main engine channel */
-                td5_plat_audio_modify(modify_slot, engine_vol, steer_pan, engine_pitch);
+                slot_modify(modify_slot, engine_vol, steer_pan, engine_pitch);
 
                 /* ---- Skid sound management ---- */
                 int skid_val = s_skid_intensity[pass];
                 if (skid_val > 0 && s_skid_playing[pass] == 0 && s_race_end_flag == 0) {
                     /* Start skid loop */
-                    td5_plat_audio_play(slot_offset + 0x12, 1, 0, pan, TD5_SOUND_FREQ_22050);
+                    if (!slot_is_playing(slot_offset + 0x12)) {
+                        slot_play(slot_offset + 0x12, 1, 0, pan, TD5_SOUND_FREQ_22050);
+                    }
                     s_skid_playing[pass] = 1;
                 }
                 if (skid_val != 0 && s_race_end_flag == 0) {
                     int skid_vol = skid_val;
                     if (skid_vol > 0x7F) skid_vol = 0x7F;
-                    td5_plat_audio_modify(slot_offset + 0x13, skid_vol, pan,
+                    slot_modify(slot_offset + 0x13, skid_vol, pan,
                                           TD5_SOUND_FREQ_22050);
                 }
                 if (skid_val == 0 && s_skid_playing[pass] != 0) {
-                    td5_plat_audio_stop(slot_offset + 0x13);
+                    slot_stop(slot_offset + 0x13);
                     s_skid_playing[pass] = 0;
                 }
             } else {
@@ -815,7 +904,7 @@ void td5_sound_update_audio_mix(void)
                 }
 
                 int modify_slot = engine_target_state + veh * 3 + slot_offset;
-                td5_plat_audio_modify(modify_slot, vol_atten, spatial_pan, final_pitch);
+                slot_modify(modify_slot, vol_atten, spatial_pan, final_pitch);
             }
 
             /* ----------------------------------------------------------
@@ -823,7 +912,7 @@ void td5_sound_update_audio_mix(void)
              * ---------------------------------------------------------- */
             if (s_horn_state[state_idx] != 0) {
                 int horn_slot = veh * 3 + slot_offset + 2;
-                int horn_playing = td5_plat_audio_is_playing(horn_slot + 1);
+                int horn_playing = slot_is_playing(horn_slot + 1);
 
                 if (horn_playing == 0 && s_horn_state[state_idx] != 1) {
                     /* Horn finished playing, reset state */
@@ -839,12 +928,14 @@ void td5_sound_update_audio_mix(void)
                     if (horn_vol < 0) horn_vol = 0;
                     if (horn_vol >= 0x80) horn_vol = 0x7F;
 
-                    if (s_horn_state[state_idx] == 1) {
+                if (s_horn_state[state_idx] == 1) {
                         /* Start horn */
-                        td5_plat_audio_play(veh * 3 + 2 + slot_offset, 0,
-                                            horn_vol, pan, TD5_SOUND_FREQ_22050);
+                        if (!slot_is_playing(veh * 3 + 2 + slot_offset)) {
+                            slot_play(veh * 3 + 2 + slot_offset, 0,
+                                                horn_vol, pan, TD5_SOUND_FREQ_22050);
+                        }
                     } else {
-                        td5_plat_audio_modify(horn_slot + 1, horn_vol,
+                        slot_modify(horn_slot + 1, horn_vol,
                                               pan, TD5_SOUND_FREQ_22050);
                     }
                     s_horn_state[state_idx] = 2;
@@ -880,11 +971,15 @@ void td5_sound_update_audio_mix(void)
                                                         : s_tracked_veh_active_p2;
                 if (siren_active_for_pass == 1) {
                     /* First frame: start both siren channels */
-                    td5_plat_audio_play(slot_offset + 0x14, 1, siren_vol, pan, siren_pitch);
-                    td5_plat_audio_play(slot_offset + 0x15, 1, siren_vol, pan, siren_pitch);
+                    if (!slot_is_playing(slot_offset + 0x14)) {
+                        slot_play(slot_offset + 0x14, 1, siren_vol, pan, siren_pitch);
+                    }
+                    if (!slot_is_playing(slot_offset + 0x15)) {
+                        slot_play(slot_offset + 0x15, 1, siren_vol, pan, siren_pitch);
+                    }
                 } else {
-                    td5_plat_audio_modify(slot_offset + 0x15, siren_vol, pan, siren_pitch);
-                    td5_plat_audio_modify(slot_offset + 0x16, siren_vol, pan, siren_pitch);
+                    slot_modify(slot_offset + 0x15, siren_vol, pan, siren_pitch);
+                    slot_modify(slot_offset + 0x16, siren_vol, pan, siren_pitch);
                 }
 
                 if (pass == 0) s_tracked_veh_active = 2;
@@ -919,7 +1014,7 @@ void td5_sound_update_audio_mix(void)
 
                 /* Start the engine loop if not yet started */
                 if (s_traffic_engine_state[t_state_idx] == 0) {
-                    td5_plat_audio_play(t - 6 + 0x1F + slot_offset, 1, 0, 0, 1000);
+                    slot_play(t - 6 + 0x1F + slot_offset, 1, 0, 0, 1000);
                     s_traffic_engine_state[t_state_idx] = 1;
                 }
 
@@ -940,7 +1035,7 @@ void td5_sound_update_audio_mix(void)
                     t_final_pitch = sound_apply_doppler_pitch(t_pitch, doppler);
                 }
 
-                td5_plat_audio_modify(traffic_slot, t_vol_atten, pan, t_final_pitch);
+                slot_modify(traffic_slot, t_vol_atten, pan, t_final_pitch);
                 traffic_slot++;
             }
         }
@@ -979,10 +1074,14 @@ void td5_sound_update_audio_mix(void)
 void td5_sound_play_at_position(int base_slot, int volume, int pitch,
                                 const int32_t *pos, int num_variants)
 {
+    int logged_sound_id = base_slot;
+    float logged_distance = 0.0f;
+
     /* Random variant selection */
     if (num_variants > 1) {
         base_slot += rand() % num_variants;
     }
+    logged_sound_id = base_slot;
 
     /* Clamp volume */
     if (volume >= 0x1000) volume = 0xFFF;
@@ -1017,6 +1116,9 @@ void td5_sound_play_at_position(int base_slot, int volume, int pitch,
         } else {
             dist = sqrtf(dist_sq);
         }
+        if (pass == 0) {
+            logged_distance = dist;
+        }
 
         /* Volume attenuation */
         int vol_atten = ((0x7F - ((int)roundf(dist) >> 7)) * (volume >> 5)) / 0x7F;
@@ -1048,13 +1150,20 @@ void td5_sound_play_at_position(int base_slot, int volume, int pitch,
                 ((ratio - 1.0f) * TD5_SOUND_DOPPLER_PITCH_SCALE + 1.0f) * (float)pitch);
         }
 
-        td5_plat_audio_play(current_offset + base_slot, 0, vol_atten,
+        slot_play(current_offset + base_slot, 0, vol_atten,
                             current_pan, final_pitch);
 
         /* Second pass uses duplicate slot offset */
         current_pan    = 10000;
         current_offset = TD5_SOUND_DUP_OFFSET;
     }
+
+    TD5_LOG_I(LOG_TAG, "Positional sound: id=%d pos=(%d,%d,%d) distance=%.2f",
+              logged_sound_id,
+              pos ? (int)pos[0] : 0,
+              pos ? (int)pos[1] : 0,
+              pos ? (int)pos[2] : 0,
+              logged_distance);
 }
 
 /* ========================================================================
@@ -1073,6 +1182,26 @@ int td5_sound_load_frontend_sfx(void)
 
     for (int i = 0; i < TD5_SOUND_FRONTEND_SFX_COUNT; i++) {
         int slot = s_frontend_sfx_slots[i];
+        const char *path = s_frontend_sfx_paths[i];
+        const char *entry_name = path;
+
+        if (!path) {
+            TD5_LOG_E(LOG_TAG, "Frontend WAV load rejected: null path at index=%d slot=%d",
+                      i, slot);
+            continue;
+        }
+
+        if (s_frontend_sfx_buffer_ids[i] >= 0) {
+            continue;
+        }
+
+        {
+            const char *slash = strrchr(path, '\\');
+            if (!slash) slash = strrchr(path, '/');
+            if (slash && slash[1] != '\0') entry_name = slash + 1;
+        }
+
+        TD5_LOG_I(LOG_TAG, "Frontend WAV load begin: name=%s slot=%d", path, slot);
 
         /* Open ZIP, find entry, read WAV data */
         TD5_Archive *arc = td5_asset_open_archive(zip_path);
@@ -1081,9 +1210,9 @@ int td5_sound_load_frontend_sfx(void)
             continue;
         }
 
-        int size = td5_asset_get_entry_size(arc, s_frontend_sfx_paths[i]);
+        int size = td5_asset_get_entry_size(arc, entry_name);
         if (size <= 0) {
-            TD5_LOG_W(LOG_TAG, "No File -- %s -- %d", s_frontend_sfx_paths[i], slot);
+            TD5_LOG_W(LOG_TAG, "No File -- %s -- %d", entry_name, slot);
             td5_asset_close_archive(arc);
             continue;
         }
@@ -1094,8 +1223,14 @@ int td5_sound_load_frontend_sfx(void)
             continue;
         }
 
-        td5_asset_read_entry(arc, s_frontend_sfx_paths[i], buf, size);
+        int read_size = td5_asset_read_entry(arc, entry_name, buf, size);
         td5_asset_close_archive(arc);
+        if (read_size <= 0) {
+            TD5_LOG_E(LOG_TAG, "Frontend WAV read failed: name=%s slot=%d size=%d result=%d",
+                      entry_name, slot, size, read_size);
+            td5_asset_free(buf);
+            continue;
+        }
 
         /* Load into platform audio buffer (one-shot, no duplicates).
          * Original: DXSound::LoadBuffer(data, slot, 0) loads directly into
@@ -1104,8 +1239,15 @@ int td5_sound_load_frontend_sfx(void)
          * sound_load_wav_from_zip() used for vehicle/ambient loading.
          * The platform layer is responsible for mapping buffer IDs to the
          * correct DXSound slot indices when built against DirectSound. */
-        int buffer_id = td5_plat_audio_load_wav(buf, (size_t)size);
-        (void)buffer_id;
+        int buffer_id = td5_plat_audio_load_wav(buf, (size_t)read_size);
+        if (buffer_id < 0) {
+            TD5_LOG_E(LOG_TAG, "Frontend WAV load failed: name=%s slot=%d bytes=%d",
+                      entry_name, slot, read_size);
+        } else {
+            s_frontend_sfx_buffer_ids[i] = buffer_id;
+            TD5_LOG_I(LOG_TAG, "Frontend WAV load complete: name=%s buffer=%d slot=%d bytes=%d",
+                      entry_name, buffer_id, slot, read_size);
+        }
 
         td5_asset_free(buf);
     }
@@ -1119,17 +1261,31 @@ int td5_sound_load_frontend_sfx(void)
  */
 void td5_sound_play_frontend_sfx(int sfx_id)
 {
-    if (sfx_id < 0 || sfx_id >= TD5_SOUND_FRONTEND_SFX_COUNT) return;
-    int slot = s_frontend_sfx_slots[sfx_id];
-    td5_plat_audio_play(slot, 0, 0x7F, 0, TD5_SOUND_FREQ_22050);
+    int index = sfx_id;
+
+    /* Original frontend code uses 1-based sound IDs; accept 0-based too. */
+    if (index > 0 && index <= TD5_SOUND_FRONTEND_SFX_COUNT) {
+        index -= 1;
+    }
+
+    if (index < 0 || index >= TD5_SOUND_FRONTEND_SFX_COUNT) return;
+    if (s_frontend_sfx_buffer_ids[index] < 0) return;
+    td5_plat_audio_play(s_frontend_sfx_buffer_ids[index], 0, 0x7F, 0, TD5_SOUND_FREQ_22050);
 }
 
 /* ========================================================================
  * CD Audio Passthrough
  * ======================================================================== */
 
-void td5_sound_cd_play(int track) { td5_plat_cd_play(track); }
-void td5_sound_cd_stop(void)      { td5_plat_cd_stop(); }
+void td5_sound_cd_play(int track) {
+    TD5_LOG_I(LOG_TAG, "CD play track=%d", track);
+    td5_plat_cd_play(track);
+}
+
+void td5_sound_cd_stop(void) {
+    TD5_LOG_I(LOG_TAG, "CD stop");
+    td5_plat_cd_stop();
+}
 void td5_sound_cd_set_volume(int v) { td5_plat_cd_set_volume(v); }
 
 /* ========================================================================
@@ -1242,6 +1398,21 @@ static int sound_load_wav_from_zip(const char *wav_name, const char *zip_path,
     (void)loop;       /* Loop flag is passed through to platform layer */
     (void)duplicates; /* Duplicate count handled by platform layer */
 
+    if (!wav_name || !zip_path) {
+        TD5_LOG_E(LOG_TAG, "WAV load rejected: wav_name=%p zip_path=%p slot=%d",
+                  (const void *)wav_name, (const void *)zip_path, slot);
+        return -1;
+    }
+
+    if (slot < 0 || slot >= TD5_SOUND_MAX_BASE_SLOTS) {
+        TD5_LOG_E(LOG_TAG, "WAV load rejected: name=%s invalid slot=%d max=%d",
+                  wav_name, slot, TD5_SOUND_MAX_BASE_SLOTS);
+        return -1;
+    }
+
+    TD5_LOG_I(LOG_TAG, "WAV load attempt begin: name=%s zip=%s slot=%d loop=%d dup=%d",
+              wav_name, zip_path, slot, loop, duplicates);
+
     TD5_Archive *arc = td5_asset_open_archive(zip_path);
     if (!arc) {
         TD5_LOG_W(LOG_TAG, "cannot open archive %s for %s", zip_path, wav_name);
@@ -1262,12 +1433,27 @@ static int sound_load_wav_from_zip(const char *wav_name, const char *zip_path,
         return -1;
     }
 
-    td5_asset_read_entry(arc, wav_name, buf, size);
+    int read_size = td5_asset_read_entry(arc, wav_name, buf, size);
     td5_asset_close_archive(arc);
+    if (read_size <= 0) {
+        TD5_LOG_E(LOG_TAG, "read failed for %s from %s (size=%d result=%d)",
+                  wav_name, zip_path, size, read_size);
+        td5_asset_free(buf);
+        return -1;
+    }
 
-    int buffer_id = td5_plat_audio_load_wav(buf, (size_t)size);
+    int buffer_id = td5_plat_audio_load_wav(buf, (size_t)read_size);
     if (buffer_id < 0) {
-        TD5_LOG_E(LOG_TAG, "failed to load WAV buffer for %s (slot %d)", wav_name, slot);
+        TD5_LOG_E(LOG_TAG,
+                  "WAV load attempt failed: name=%s slot=%d bytes=%d loop=%d dup=%d",
+                  wav_name, slot, read_size, loop, duplicates);
+    } else {
+        s_slot_to_buffer[slot] = buffer_id;
+        if (duplicates > 0 && slot + TD5_SOUND_DUP_OFFSET < TD5_SOUND_TOTAL_SLOTS)
+            s_slot_to_buffer[slot + TD5_SOUND_DUP_OFFSET] = buffer_id;
+        TD5_LOG_I(LOG_TAG,
+                  "WAV load attempt complete: name=%s buffer=%d slot=%d bytes=%d loop=%d dup=%d",
+                  wav_name, buffer_id, slot, read_size, loop, duplicates);
     }
 
     td5_asset_free(buf);

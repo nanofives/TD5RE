@@ -20,8 +20,11 @@
  */
 
 #include "td5_ai.h"
+#include "td5_platform.h"
 #include "td5re.h"
 #include <string.h>
+
+#define LOG_TAG "ai"
 
 /* ========================================================================
  * Route State access macros
@@ -179,6 +182,7 @@ static const int32_t g_script_init_recovery[] = { 8, 9, 0 };
 
 /* Current script bank index per-actor for round-robin */
 static int g_script_bank_index[TD5_MAX_TOTAL_ACTORS];
+static int32_t g_last_logged_opcode[TD5_MAX_TOTAL_ACTORS];
 
 /* Special encounter globals */
 static int32_t g_encounter_tracked_handle = -1;    /* -1 = none */
@@ -251,6 +255,7 @@ int td5_ai_init(void) {
     memset(g_traffic_recovery_stage, 0, sizeof(g_traffic_recovery_stage));
     memset(g_encounter_active, 0, sizeof(g_encounter_active));
     memset(g_script_bank_index, 0, sizeof(g_script_bank_index));
+    memset(g_last_logged_opcode, 0xFF, sizeof(g_last_logged_opcode));
     g_encounter_tracked_handle = -1;
     g_encounter_cooldown = 0;
     g_encounter_enabled = 0;
@@ -364,6 +369,18 @@ static void td5_ai_refresh_route_state_slot(int slot) {
 
 void td5_ai_tick(void) {
     td5_ai_compute_rubber_band();
+    if ((g_ai_frame_counter % 60u) == 0u) {
+        int racer_count = TD5_MAX_RACER_SLOTS;
+        if (g_active_actor_count < racer_count)
+            racer_count = g_active_actor_count;
+        for (int i = 0; i < racer_count; i++) {
+            if (g_slot_state[i] == 0) {
+                TD5_LOG_D(LOG_TAG,
+                          "Rubber band: slot=%d throttle=%d steer_bias=%d",
+                          i, g_live_throttle[i], g_actor_route_steer_bias[i]);
+            }
+        }
+    }
     td5_ai_update_race_actors();
     g_ai_frame_counter++;
 }
@@ -499,6 +516,7 @@ void td5_ai_init_race_actor_runtime(void) {
         }
         rs[RS_ROUTE_TABLE_SELECTOR] = selector;
         rs[RS_ROUTE_TABLE_PTR] = (int32_t)(intptr_t)g_route_tables[selector];
+        g_last_logged_opcode[i] = -1;
     }
 
     g_slot_state[0] = 1;
@@ -675,6 +693,18 @@ void td5_ai_init_race_actor_runtime(void) {
     }
 
     td5_ai_refresh_route_state();
+
+    for (int i = 0; i < g_active_actor_count; ++i) {
+        TD5_LOG_I(LOG_TAG,
+                  "Init AI runtime: slot=%d tier=%d mode=%d rb_behind=(scale=%d range=%d) rb_ahead=(scale=%d range=%d)",
+                  i,
+                  tier,
+                  g_slot_state[i],
+                  g_rb_behind_scale,
+                  g_rb_behind_range,
+                  g_rb_ahead_scale,
+                  g_rb_ahead_range);
+    }
 }
 
 /* ========================================================================
@@ -1071,6 +1101,11 @@ int td5_ai_advance_track_script(int *rs) {
         if (!base) return 1; /* no script active */
 
         opcode = base[ip];
+        if (g_last_logged_opcode[slot] != opcode) {
+            TD5_LOG_I(LOG_TAG, "Script opcode change: slot=%d ip=%d opcode=%d flags=0x%X",
+                      slot, ip, opcode, rs[RS_SCRIPT_FLAGS]);
+            g_last_logged_opcode[slot] = opcode;
+        }
 
         switch (opcode) {
 
@@ -1377,6 +1412,7 @@ void td5_ai_recycle_traffic_actor(void) {
             int32_t *rs = route_state(best_slot);
             uint8_t q_flags = qp[2];
             uint8_t q_lane  = qp[3];
+            int16_t old_span = ACTOR_I16(a, ACTOR_SPAN_RAW);
 
             /* Set direction polarity from flags bit 0 */
             rs[RS_DIRECTION_POLARITY] = q_flags & 1;
@@ -1400,6 +1436,10 @@ void td5_ai_recycle_traffic_actor(void) {
             rs[RS_TRACK_OFFSET_BIAS] = 0;
             rs[RS_SCRIPT_FLAGS] = 0;
             rs[RS_RECOVERY_STAGE] = 0;
+
+            TD5_LOG_I(LOG_TAG,
+                      "Traffic recycled: slot=%d from_span=%d to_span=%d lane=%u flags=0x%02X",
+                      best_slot, old_span, q_span, q_lane, q_flags);
         }
 
         /* Advance queue pointer past this consumed entry */
@@ -1658,6 +1698,9 @@ void td5_ai_update_special_encounter(void) {
         /* --- SPAWN --- */
         g_encounter_tracked_handle = 0; /* target player 0 */
         g_encounter_phase_flag = 0;     /* acquisition phase */
+        TD5_LOG_I(LOG_TAG,
+                  "Encounter spawn: slot=9 target=%d player_span=%d slot9_span=%d speed=%d",
+                  g_encounter_tracked_handle, player_span, slot9_span, player_speed);
 
         /* Reset slot 9 state */
         {
@@ -1691,6 +1734,11 @@ void td5_ai_update_special_encounter(void) {
                 route_state(0)[RS_ROUTE_TABLE_SELECTOR]) {
                 g_encounter_active[g_encounter_tracked_handle] = 1;
                 g_encounter_phase_flag = 1;
+                TD5_LOG_I(LOG_TAG,
+                          "Encounter active: target=%d distance=%d route_selector=%d",
+                          g_encounter_tracked_handle,
+                          distance,
+                          slot9_rs[RS_ROUTE_TABLE_SELECTOR]);
                 /* StopTrackedVehicleAudio() -- transition from approach to active */
             }
         }
@@ -1704,6 +1752,8 @@ void td5_ai_update_special_encounter(void) {
 
 teardown:
     /* --- TEARDOWN --- */
+    TD5_LOG_I(LOG_TAG, "Encounter despawn: target=%d cooldown=%d",
+              g_encounter_tracked_handle, 300);
     g_encounter_phase_flag = 0;
     g_encounter_tracked_handle = -1;
     g_encounter_cooldown = 300; /* 300-frame cooldown */
@@ -1824,6 +1874,19 @@ void td5_ai_update_race_actors(void) {
 
     /* --- Step 1: Rubber-band already computed in td5_ai_tick --- */
     td5_ai_refresh_route_state();
+
+    if ((g_ai_frame_counter % 60u) == 0u) {
+        for (i = 0; i < g_active_actor_count; i++) {
+            char *actor = actor_ptr(i);
+            TD5_LOG_D(LOG_TAG,
+                      "AI state: slot=%d steering=%d throttle=%d route_span=%d mode=%d",
+                      i,
+                      ACTOR_I32(actor, ACTOR_STEERING_CMD),
+                      g_live_throttle[i],
+                      ACTOR_I16(actor, ACTOR_SPAN_RAW),
+                      g_slot_state[i]);
+        }
+    }
 
     /* --- Step 2: Update racers (slots 0 through min(count, 6)) --- */
     {

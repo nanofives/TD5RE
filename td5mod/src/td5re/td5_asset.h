@@ -21,6 +21,7 @@
 #define TD5_ASSET_H
 
 #include "td5_types.h"
+#include "td5_hud.h"   /* for TD5_AtlasEntry */
 #include <stdbool.h>
 
 /* ========================================================================
@@ -153,6 +154,13 @@ typedef struct TD5_PageMetadata {
  */
 TD5_StaticHedEntry *td5_asset_find_entry_by_name(
     TD5_StaticHedEntry *entries, int entry_count, const char *name);
+
+/**
+ * Look up a named HUD/UI sprite in the static atlas (loaded from static.hed).
+ * Case-insensitive. Always returns non-NULL (fallback zeroed entry on miss).
+ * Matches original FindArchiveEntryByName (0x442CF0) used by HUD module.
+ */
+TD5_AtlasEntry *td5_asset_find_atlas_entry(void *context, const char *name);
 
 /* ========================================================================
  * TGA Decoding

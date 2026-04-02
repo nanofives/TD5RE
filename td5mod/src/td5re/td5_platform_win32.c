@@ -29,6 +29,8 @@
 /* Pull in the wrapper types and backend access */
 #include "../../ddraw_wrapper/src/wrapper.h"
 
+#define LOG_TAG "platform"
+
 /* ========================================================================
  * Module-level state
  * ======================================================================== */
@@ -49,6 +51,10 @@ static int      s_fullscreen    = 0;
 static LARGE_INTEGER s_qpc_freq;
 static int           s_qpc_inited = 0;
 
+/* Window subclass */
+static WNDPROC s_original_wndproc = NULL;
+static LRESULT CALLBACK TD5_WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
+
 /* Input */
 static uint8_t  s_keyboard[256];
 static int      s_mouse_dx, s_mouse_dy;
@@ -60,6 +66,13 @@ static LPDIRECTINPUTDEVICE8A s_di_joystick   = NULL;
 static char s_device_names[16][256];
 static int  s_device_count = 0;
 
+static char   s_log_path[512];
+static int    s_log_path_init = 0;
+static HANDLE s_log_handle = INVALID_HANDLE_VALUE;
+static char   s_log_buffer[4096];
+static size_t s_log_buffer_used = 0;
+static unsigned int s_log_line_count = 0;
+
 /* Audio */
 #define MAX_AUDIO_BUFFERS  256
 #define MAX_AUDIO_CHANNELS 64
@@ -69,8 +82,9 @@ static LPDIRECTSOUNDBUFFER     s_ds_primary  = NULL;
 static LPDIRECTSOUNDBUFFER     s_ds_buffers[MAX_AUDIO_BUFFERS];
 static LPDIRECTSOUNDBUFFER     s_ds_channels[MAX_AUDIO_CHANNELS];
 static int                     s_ds_channel_buf[MAX_AUDIO_CHANNELS]; /* buffer index per channel */
+static DWORD                   s_ds_buffer_rates[MAX_AUDIO_BUFFERS];
 static int                     s_audio_buf_count = 0;
-static int                     s_master_volume   = 100;
+static int                     s_master_volume   = 40;
 
 #define TD5_STREAM_BUFFER_BYTES 0x81600u
 
@@ -94,6 +108,7 @@ static TD5_FFState          s_ff;
 
 /* Rendering: texture pages */
 #define MAX_TEXTURE_PAGES 1024
+#define TD5_SHARED_FONT_PAGE 898
 static WrapperSurface  *s_tex_surfaces[MAX_TEXTURE_PAGES];
 static WrapperTexture  *s_tex_wrappers[MAX_TEXTURE_PAGES];
 static DWORD            s_tex_handles[MAX_TEXTURE_PAGES];
@@ -125,6 +140,33 @@ void td5_platform_win32_init(void *ddraw4, void *d3ddevice3, void *primary_surfa
     s_window_bpp = g_backend.bpp;
     s_fullscreen = !g_backend.windowed;
 
+    /* Subclass the wrapper's window to handle WM_CLOSE and hide system cursor */
+    if (s_hwnd) {
+        s_original_wndproc = (WNDPROC)SetWindowLongPtrA(s_hwnd, GWLP_WNDPROC,
+                                                         (LONG_PTR)TD5_WndProc);
+
+        /* Set window icon (use first resource icon, fall back to default app icon) */
+        HICON hIcon = LoadIconA(GetModuleHandleA(NULL), MAKEINTRESOURCE(1));
+        if (!hIcon) hIcon = LoadIconA(NULL, IDI_APPLICATION);
+        if (hIcon) {
+            SendMessageA(s_hwnd, WM_SETICON, ICON_BIG,   (LPARAM)hIcon);
+            SendMessageA(s_hwnd, WM_SETICON, ICON_SMALL, (LPARAM)hIcon);
+        }
+
+        /* Windows 11 dark mode title bar */
+        typedef HRESULT (WINAPI *PFN_DwmSetWindowAttribute)(HWND, DWORD, LPCVOID, DWORD);
+        HMODULE hDwm = LoadLibraryA("dwmapi.dll");
+        if (hDwm) {
+            PFN_DwmSetWindowAttribute pDwm = (PFN_DwmSetWindowAttribute)
+                GetProcAddress(hDwm, "DwmSetWindowAttribute");
+            if (pDwm) {
+                BOOL dark = TRUE;
+                pDwm(s_hwnd, 20 /* DWMWA_USE_IMMERSIVE_DARK_MODE */, &dark, sizeof(dark));
+            }
+            /* Keep dwmapi.dll loaded for the lifetime of the app */
+        }
+    }
+
     /* Init QPC frequency */
     QueryPerformanceFrequency(&s_qpc_freq);
     s_qpc_inited = 1;
@@ -139,11 +181,14 @@ void td5_platform_win32_init(void *ddraw4, void *d3ddevice3, void *primary_surfa
     memset(s_tex_handles, 0, sizeof(s_tex_handles));
     memset(s_ds_buffers, 0, sizeof(s_ds_buffers));
     memset(s_ds_channels, 0, sizeof(s_ds_channels));
+    memset(s_ds_buffer_rates, 0, sizeof(s_ds_buffer_rates));
 }
 
 /* ========================================================================
  * Window / Display
  * ======================================================================== */
+
+static uint32_t s_mouse_click_latch = 0; /* sticky per-button click flags */
 
 static LRESULT CALLBACK TD5_WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 {
@@ -154,7 +199,26 @@ static LRESULT CALLBACK TD5_WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
     case WM_DESTROY:
         PostQuitMessage(0);
         return 0;
+    case WM_SYSKEYDOWN:
+        /* Alt+F4 — explicit handler so it always closes even if original proc drops it */
+        if (wParam == VK_F4) {
+            PostQuitMessage(0);
+            return 0;
+        }
+        break;
+    case WM_SETCURSOR:
+        if (LOWORD(lParam) == HTCLIENT) {
+            SetCursor(NULL);
+            return TRUE;
+        }
+        break;
+    /* Latch mouse clicks so a quick click released within one 33ms frame is not missed */
+    case WM_LBUTTONDOWN: s_mouse_click_latch |= 1; break;
+    case WM_RBUTTONDOWN: s_mouse_click_latch |= 2; break;
+    case WM_MBUTTONDOWN: s_mouse_click_latch |= 4; break;
     }
+    if (s_original_wndproc)
+        return CallWindowProcA(s_original_wndproc, hwnd, msg, wParam, lParam);
     return DefWindowProcA(hwnd, msg, wParam, lParam);
 }
 
@@ -219,6 +283,8 @@ int td5_plat_window_create(const char *title, const TD5_DisplayMode *mode)
             NULL, NULL, GetModuleHandleA(NULL), NULL);
 
         if (!s_hwnd) return 0;
+        ShowCursor(FALSE);
+        SetCursor(NULL);
         s_window_w = w;
         s_window_h = h;
     }
@@ -412,23 +478,32 @@ int td5_plat_enum_display_modes(TD5_DisplayMode *modes, int max_count)
 
 int td5_plat_apply_display_mode(int width, int height, int bpp)
 {
-    DEVMODEW dm;
+    /* In windowed mode, don't change the desktop resolution.
+     * Just record the desired dimensions for the render target. */
+    if (!s_fullscreen) {
+        s_window_w = width;
+        s_window_h = height;
+        s_window_bpp = bpp;
+        return 1;
+    }
 
-    ZeroMemory(&dm, sizeof(dm));
-    dm.dmSize = sizeof(dm);
-    dm.dmFields = DM_PELSWIDTH | DM_PELSHEIGHT | DM_BITSPERPEL;
-    dm.dmPelsWidth = (DWORD)width;
-    dm.dmPelsHeight = (DWORD)height;
-    dm.dmBitsPerPel = (DWORD)bpp;
+    {
+        DEVMODEW dm;
+        ZeroMemory(&dm, sizeof(dm));
+        dm.dmSize = sizeof(dm);
+        dm.dmFields = DM_PELSWIDTH | DM_PELSHEIGHT | DM_BITSPERPEL;
+        dm.dmPelsWidth = (DWORD)width;
+        dm.dmPelsHeight = (DWORD)height;
+        dm.dmBitsPerPel = (DWORD)bpp;
 
-    if (ChangeDisplaySettingsW(&dm, CDS_FULLSCREEN) != DISP_CHANGE_SUCCESSFUL) {
-        return 0;
+        if (ChangeDisplaySettingsW(&dm, CDS_FULLSCREEN) != DISP_CHANGE_SUCCESSFUL) {
+            return 0;
+        }
     }
 
     s_window_w = width;
     s_window_h = height;
     s_window_bpp = bpp;
-    s_fullscreen = 1;
     return 1;
 }
 
@@ -662,20 +737,52 @@ void td5_plat_input_shutdown(void)
 
 void td5_plat_input_poll(int slot, TD5_InputState *out)
 {
+    static POINT s_last_cursor_pos;
+    static int s_last_cursor_valid = 0;
+    HWND active_hwnd;
+    HWND target_hwnd;
+
     if (!out) return;
     memset(out, 0, sizeof(*out));
 
-    /* Keyboard: use DInput if available, else Win32 */
-    if (s_di_keyboard) {
-        HRESULT hr = IDirectInputDevice8_GetDeviceState(s_di_keyboard,
+    target_hwnd = s_hwnd ? s_hwnd : (HWND)(DWORD_PTR)Backend_GetDisplayWindow();
+    active_hwnd = GetForegroundWindow();
+    if (target_hwnd && active_hwnd != target_hwnd) {
+        memset(s_keyboard, 0, sizeof(s_keyboard));
+        s_mouse_dx = 0;
+        s_mouse_dy = 0;
+        s_mouse_buttons = 0;
+        s_last_cursor_valid = 0;
+        return;
+    }
+
+    /* Keyboard: use DInput if available AND acquired, else Win32 fallback.
+     * DInput with DISCL_FOREGROUND requires a valid hwnd + focus. If hwnd
+     * is NULL (common at startup), DInput fails silently. Always fall back
+     * to GetKeyboardState which works without a window handle. */
+    {
+        int di_ok = 0;
+        if (s_di_keyboard) {
+            HRESULT hr = IDirectInputDevice8_GetDeviceState(s_di_keyboard,
+                            sizeof(s_keyboard), s_keyboard);
+            if (hr == DIERR_INPUTLOST || hr == DIERR_NOTACQUIRED) {
+                IDirectInputDevice8_Acquire(s_di_keyboard);
+                hr = IDirectInputDevice8_GetDeviceState(s_di_keyboard,
                         sizeof(s_keyboard), s_keyboard);
-        if (hr == DIERR_INPUTLOST || hr == DIERR_NOTACQUIRED) {
-            IDirectInputDevice8_Acquire(s_di_keyboard);
-            IDirectInputDevice8_GetDeviceState(s_di_keyboard,
-                sizeof(s_keyboard), s_keyboard);
+            }
+            if (SUCCEEDED(hr)) di_ok = 1;
         }
-    } else {
-        GetKeyboardState(s_keyboard);
+        if (!di_ok) {
+            /* Win32 fallback — GetKeyboardState uses VK codes (high bit = pressed).
+             * This matches the 0x80 check in td5_plat_input_key_pressed but uses
+             * VK codes not DIK scancodes. Map via GetAsyncKeyState instead. */
+            memset(s_keyboard, 0, sizeof(s_keyboard));
+            for (int sc = 0; sc < 256; sc++) {
+                UINT vk = MapVirtualKeyA((UINT)sc, MAPVK_VSC_TO_VK);
+                if (vk && (GetAsyncKeyState(vk) & 0x8000))
+                    s_keyboard[sc] = 0x80;
+            }
+        }
     }
 
     /* Mouse */
@@ -696,11 +803,29 @@ void td5_plat_input_poll(int slot, TD5_InputState *out)
             if (ms.rgbButtons[1] & 0x80) s_mouse_buttons |= 2;
             if (ms.rgbButtons[2] & 0x80) s_mouse_buttons |= 4;
         }
+    } else {
+        POINT pt;
+        GetCursorPos(&pt);
+        if (s_last_cursor_valid) {
+            s_mouse_dx = pt.x - s_last_cursor_pos.x;
+            s_mouse_dy = pt.y - s_last_cursor_pos.y;
+        } else {
+            s_mouse_dx = 0;
+            s_mouse_dy = 0;
+            s_last_cursor_valid = 1;
+        }
+        s_last_cursor_pos = pt;
+        s_mouse_buttons = 0;
+        if (GetAsyncKeyState(VK_LBUTTON) & 0x8000) s_mouse_buttons |= 1;
+        if (GetAsyncKeyState(VK_RBUTTON) & 0x8000) s_mouse_buttons |= 2;
+        if (GetAsyncKeyState(VK_MBUTTON) & 0x8000) s_mouse_buttons |= 4;
     }
 
     out->mouse_dx      = (int16_t)s_mouse_dx;
     out->mouse_dy      = (int16_t)s_mouse_dy;
-    out->mouse_buttons = s_mouse_buttons;
+    /* OR in latched clicks so a sub-frame click is never missed; clear after reading */
+    out->mouse_buttons = s_mouse_buttons | s_mouse_click_latch;
+    s_mouse_click_latch = 0;
 
     /* Map keyboard to game buttons */
     {
@@ -782,6 +907,9 @@ int td5_plat_input_enumerate_devices(void)
             NULL,
             DIEDFL_ATTACHEDONLY);
     }
+    TD5_LOG_I(LOG_TAG, "Input devices enumerated: count=%d primary=%s",
+              s_device_count,
+              (s_device_count > 0) ? s_device_names[0] : "<none>");
     return s_device_count;
 }
 
@@ -801,12 +929,17 @@ void td5_plat_input_set_device(int slot, int device_index)
             IDirectInputDevice8_Release(s_di_joystick);
             s_di_joystick = NULL;
         }
+        TD5_LOG_I(LOG_TAG, "Input device selected: slot=%d device=%d name=%s",
+                  slot, device_index, "Keyboard");
         return;
     }
 
     /* For joystick devices, re-enumerate and create the requested one */
     /* This is simplified -- a full implementation would store GUIDs */
     (void)device_index;
+    TD5_LOG_I(LOG_TAG, "Input device selected: slot=%d device=%d name=%s",
+              slot, device_index,
+              (device_index >= 0 && device_index < s_device_count) ? s_device_names[device_index] : "<unknown>");
 }
 
 /* ========================================================================
@@ -840,6 +973,7 @@ static int td5_ff_create_constant_effect(int slot, DWORD axis, LONG direction)
 {
     DICONSTANTFORCE cf;
     DIEFFECT eff;
+    int ok;
 
     ZeroMemory(&cf, sizeof(cf));
     ZeroMemory(&eff, sizeof(eff));
@@ -855,8 +989,11 @@ static int td5_ff_create_constant_effect(int slot, DWORD axis, LONG direction)
     eff.cbTypeSpecificParams = sizeof(cf);
     eff.lpvTypeSpecificParams = &cf;
 
-    return SUCCEEDED(IDirectInputDevice8_CreateEffect(s_ff.device,
+    ok = SUCCEEDED(IDirectInputDevice8_CreateEffect(s_ff.device,
         &s_ff.effectGuid, &eff, &s_ff.effects[slot], NULL));
+    TD5_LOG_I(LOG_TAG, "FF effect create constant: slot=%d axis=%lu direction=%ld result=%s",
+              slot, (unsigned long)axis, (long)direction, ok ? "ok" : "failed");
+    return ok;
 }
 
 static int td5_ff_create_periodic_effect(int slot)
@@ -865,6 +1002,7 @@ static int td5_ff_create_periodic_effect(int slot)
     DWORD axis = DIJOFS_X;
     LONG direction = 0;
     DIEFFECT eff;
+    int ok;
 
     ZeroMemory(&periodic, sizeof(periodic));
     ZeroMemory(&eff, sizeof(eff));
@@ -885,8 +1023,11 @@ static int td5_ff_create_periodic_effect(int slot)
     eff.cbTypeSpecificParams = sizeof(periodic);
     eff.lpvTypeSpecificParams = &periodic;
 
-    return SUCCEEDED(IDirectInputDevice8_CreateEffect(s_ff.device,
+    ok = SUCCEEDED(IDirectInputDevice8_CreateEffect(s_ff.device,
         &GUID_Sine, &eff, &s_ff.effects[slot], NULL));
+    TD5_LOG_I(LOG_TAG, "FF effect create periodic: slot=%d axis=%lu result=%s",
+              slot, (unsigned long)axis, ok ? "ok" : "failed");
+    return ok;
 }
 
 int td5_plat_ff_init(int device_index)
@@ -1224,6 +1365,7 @@ int td5_plat_audio_init(void)
     }
 
     s_audio_buf_count = 0;
+    ZeroMemory(s_ds_buffer_rates, sizeof(s_ds_buffer_rates));
     return 1;
 }
 
@@ -1245,6 +1387,7 @@ void td5_plat_audio_shutdown(void)
             IDirectSoundBuffer_Release(s_ds_buffers[i]);
             s_ds_buffers[i] = NULL;
         }
+        s_ds_buffer_rates[i] = 0;
     }
     s_audio_buf_count = 0;
 
@@ -1273,8 +1416,24 @@ int td5_plat_audio_load_wav(const void *data, size_t size)
     DWORD sz1 = 0, sz2 = 0;
     int idx;
 
-    if (!s_dsound || !data || size < 44) return -1;
-    if (s_audio_buf_count >= MAX_AUDIO_BUFFERS) return -1;
+    if (!s_dsound) {
+        TD5_LOG_E(LOG_TAG, "Audio load rejected: DirectSound is NULL");
+        return -1;
+    }
+    if (!data) {
+        TD5_LOG_E(LOG_TAG, "Audio load rejected: data is NULL");
+        return -1;
+    }
+    if (size < 44) {
+        TD5_LOG_E(LOG_TAG, "Audio load rejected: WAV too small (%u bytes)",
+                  (unsigned int)size);
+        return -1;
+    }
+    if (s_audio_buf_count >= MAX_AUDIO_BUFFERS) {
+        TD5_LOG_E(LOG_TAG, "Audio load rejected: buffer pool full (%d)",
+                  s_audio_buf_count);
+        return -1;
+    }
 
     /* Parse RIFF WAV header */
     if (memcmp(p, "RIFF", 4) != 0) return -1;
@@ -1284,16 +1443,33 @@ int td5_plat_audio_load_wav(const void *data, size_t size)
     p += 12;
     while (p + 8 <= end) {
         uint32_t chunk_size = *(const uint32_t *)(p + 4);
+        const uint8_t *next = p + 8 + ((chunk_size + 1u) & ~1u);
+        if (next < p || next > end) {
+            TD5_LOG_E(LOG_TAG, "Audio load rejected: malformed WAV chunk overruns buffer");
+            return -1;
+        }
         if (memcmp(p, "fmt ", 4) == 0) {
             fmt_chunk = p + 8;
         } else if (memcmp(p, "data", 4) == 0) {
             data_chunk = p + 8;
             data_size = chunk_size;
         }
-        p += 8 + ((chunk_size + 1) & ~1); /* chunk data + padding */
+        p = next; /* chunk data + padding */
     }
 
-    if (!fmt_chunk || !data_chunk || data_size == 0) return -1;
+    if (!fmt_chunk || !data_chunk || data_size == 0) {
+        TD5_LOG_E(LOG_TAG, "Audio load rejected: missing fmt/data chunk");
+        return -1;
+    }
+    if (fmt_chunk + 16 > end) {
+        TD5_LOG_E(LOG_TAG, "Audio load rejected: truncated fmt chunk");
+        return -1;
+    }
+    if (data_chunk + data_size > end) {
+        TD5_LOG_E(LOG_TAG, "Audio load rejected: truncated data chunk size=%u file=%u",
+                  (unsigned int)data_size, (unsigned int)size);
+        return -1;
+    }
 
     /* Build WAVEFORMATEX from fmt chunk */
     ZeroMemory(&wfx, sizeof(wfx));
@@ -1313,18 +1489,33 @@ int td5_plat_audio_load_wav(const void *data, size_t size)
     desc.lpwfxFormat     = &wfx;
 
     hr = IDirectSound8_CreateSoundBuffer(s_dsound, &desc, &buf, NULL);
-    if (FAILED(hr) || !buf) return -1;
+    if (FAILED(hr) || !buf) {
+        TD5_LOG_E(LOG_TAG, "CreateSoundBuffer failed hr=0x%08lX size=%u",
+                  (unsigned long)hr, (unsigned int)data_size);
+        return -1;
+    }
 
     /* Copy WAV data into the buffer */
     hr = IDirectSoundBuffer_Lock(buf, 0, data_size, &ptr1, &sz1, &ptr2, &sz2, 0);
-    if (SUCCEEDED(hr)) {
-        if (ptr1 && sz1) memcpy(ptr1, data_chunk, sz1 < data_size ? sz1 : data_size);
-        if (ptr2 && sz2 && data_size > sz1) memcpy(ptr2, data_chunk + sz1, sz2);
-        IDirectSoundBuffer_Unlock(buf, ptr1, sz1, ptr2, sz2);
+    if (FAILED(hr)) {
+        TD5_LOG_E(LOG_TAG, "SoundBuffer lock failed hr=0x%08lX", (unsigned long)hr);
+        IDirectSoundBuffer_Release(buf);
+        return -1;
     }
+    if (ptr1 && sz1) memcpy(ptr1, data_chunk, sz1 < data_size ? sz1 : data_size);
+    if (ptr2 && sz2 && data_size > sz1) memcpy(ptr2, data_chunk + sz1, sz2);
+    IDirectSoundBuffer_Unlock(buf, ptr1, sz1, ptr2, sz2);
 
     idx = s_audio_buf_count++;
     s_ds_buffers[idx] = buf;
+    s_ds_buffer_rates[idx] = wfx.nSamplesPerSec;
+    TD5_LOG_I(LOG_TAG,
+              "Audio buffer created: id=%d fmt=%uHz/%uch/%ubit size=%u",
+              idx,
+              (unsigned int)wfx.nSamplesPerSec,
+              (unsigned int)wfx.nChannels,
+              (unsigned int)wfx.wBitsPerSample,
+              (unsigned int)data_size);
     return idx;
 }
 
@@ -1377,6 +1568,26 @@ static LONG pan_to_ds(int pan)
     return (LONG)(pan * 100);
 }
 
+static DWORD td5_audio_translate_frequency(int buffer_index, int frequency)
+{
+    DWORD native_rate = 22050;
+    double scaled;
+
+    if (frequency <= 0) {
+        return 0;
+    }
+
+    if (buffer_index >= 0 && buffer_index < MAX_AUDIO_BUFFERS &&
+        s_ds_buffer_rates[buffer_index] != 0) {
+        native_rate = s_ds_buffer_rates[buffer_index];
+    }
+
+    scaled = ((double)frequency * (double)native_rate) / 22050.0;
+    if (scaled < (double)DSBFREQUENCY_MIN) scaled = (double)DSBFREQUENCY_MIN;
+    if (scaled > (double)DSBFREQUENCY_MAX) scaled = (double)DSBFREQUENCY_MAX;
+    return (DWORD)(scaled + 0.5);
+}
+
 TD5_AudioChannel td5_plat_audio_play(int buffer_index, int loop,
                                       int volume, int pan, int frequency)
 {
@@ -1406,10 +1617,13 @@ TD5_AudioChannel td5_plat_audio_play(int buffer_index, int loop,
     }
     IDirectSoundBuffer_SetPan(dup_buf, pan_to_ds(pan));
     if (frequency > 0)
-        IDirectSoundBuffer_SetFrequency(dup_buf, (DWORD)frequency);
+        IDirectSoundBuffer_SetFrequency(dup_buf, td5_audio_translate_frequency(buffer_index, frequency));
 
     IDirectSoundBuffer_SetCurrentPosition(dup_buf, 0);
     IDirectSoundBuffer_Play(dup_buf, 0, 0, loop ? DSBPLAY_LOOPING : 0);
+
+    TD5_LOG_I(LOG_TAG, "Audio channel play: channel=%d buffer=%d loop=%d",
+              ch, buffer_index, loop);
 
     return (TD5_AudioChannel)ch;
 }
@@ -1418,6 +1632,8 @@ void td5_plat_audio_stop(TD5_AudioChannel ch)
 {
     if (ch < 0 || ch >= MAX_AUDIO_CHANNELS) return;
     if (s_ds_channels[ch]) {
+        TD5_LOG_I(LOG_TAG, "Audio channel stop: channel=%d buffer=%d",
+                  ch, s_ds_channel_buf[ch]);
         IDirectSoundBuffer_Stop(s_ds_channels[ch]);
         IDirectSoundBuffer_Release(s_ds_channels[ch]);
         s_ds_channels[ch] = NULL;
@@ -1437,7 +1653,7 @@ void td5_plat_audio_modify(TD5_AudioChannel ch, int volume, int pan, int frequen
     }
     IDirectSoundBuffer_SetPan(buf, pan_to_ds(pan));
     if (frequency > 0)
-        IDirectSoundBuffer_SetFrequency(buf, (DWORD)frequency);
+        IDirectSoundBuffer_SetFrequency(buf, td5_audio_translate_frequency(s_ds_channel_buf[ch], frequency));
 }
 
 int td5_plat_audio_is_playing(TD5_AudioChannel ch)
@@ -1509,11 +1725,18 @@ int td5_plat_audio_stream_play(const char *wav_path, int loop)
 
     IDirectSoundBuffer_SetCurrentPosition(s_audio_stream.buffer, 0);
     IDirectSoundBuffer_Play(s_audio_stream.buffer, 0, 0, DSBPLAY_LOOPING);
+    TD5_LOG_I(LOG_TAG, "Audio stream open: path=%s loop=%d size=%u",
+              wav_path, loop, (unsigned int)info.data_size);
     return 1;
 }
 
 void td5_plat_audio_stream_stop(void)
 {
+    if (s_audio_stream.active) {
+        TD5_LOG_I(LOG_TAG, "Audio stream close: size=%u cursor=%u",
+                  (unsigned int)s_audio_stream.data_size,
+                  (unsigned int)s_audio_stream.data_cursor);
+    }
     if (s_audio_stream.buffer) {
         IDirectSoundBuffer_Stop(s_audio_stream.buffer);
         IDirectSoundBuffer_Release(s_audio_stream.buffer);
@@ -1554,6 +1777,8 @@ void td5_plat_audio_stream_refresh(void)
 
     if (cur_half != prev_half) {
         td5_stream_fill_half(prev_half);
+        TD5_LOG_D(LOG_TAG, "Audio stream refresh: play_cursor=%u filled_half=%d",
+                  (unsigned int)play_cursor, prev_half);
     }
 
     s_audio_stream.last_play_cursor = play_cursor;
@@ -1590,12 +1815,14 @@ void td5_plat_cd_play(int track)
     char cmd[128];
     cd_ensure_init();
     snprintf(cmd, sizeof(cmd), "play cdaudio from %d to %d", track, track + 1);
+    TD5_LOG_I(LOG_TAG, "CD play track=%d", track);
     mciSendStringA(cmd, NULL, 0, NULL);
 }
 
 void td5_plat_cd_stop(void)
 {
     cd_ensure_init();
+    TD5_LOG_I(LOG_TAG, "CD stop");
     mciSendStringA("stop cdaudio", NULL, 0, NULL);
 }
 
@@ -1857,7 +2084,43 @@ int td5_plat_render_upload_texture(int page_index, const void *pixels,
     if (surf->sys_buffer) {
         size_t row_bytes = (size_t)width * (bpp / 8);
         size_t total = row_bytes * (size_t)height;
-        memcpy(surf->sys_buffer, pixels, total);
+        if (format == 2) {
+            const uint8_t *src32 = (const uint8_t *)pixels;
+            uint8_t *dst32 = (uint8_t *)surf->sys_buffer;
+            size_t pixel_count = (size_t)width * (size_t)height;
+            int apply_font_colorkey = 0;
+
+            /* BodyText.tga is decoded from RGB data into opaque BGRA before it
+             * reaches this upload path. Restore the original black colorkey
+             * behavior here so the font background stays transparent. */
+            if (page_index == TD5_SHARED_FONT_PAGE) {
+                apply_font_colorkey = 1;
+                for (size_t i = 0; i < pixel_count; i++) {
+                    if (src32[i * 4 + 3] != 0xFF) {
+                        apply_font_colorkey = 0;
+                        break;
+                    }
+                }
+            }
+
+            for (size_t i = 0; i < pixel_count; i++) {
+                uint8_t b = src32[i * 4 + 0];
+                uint8_t g = src32[i * 4 + 1];
+                uint8_t r = src32[i * 4 + 2];
+                uint8_t a = src32[i * 4 + 3];
+
+                if (apply_font_colorkey) {
+                    a = (((unsigned int)r + (unsigned int)g + (unsigned int)b) < 16u) ? 0 : 255;
+                }
+
+                dst32[i * 4 + 0] = b;
+                dst32[i * 4 + 1] = g;
+                dst32[i * 4 + 2] = r;
+                dst32[i * 4 + 3] = a;
+            }
+        } else {
+            memcpy(surf->sys_buffer, pixels, total);
+        }
         surf->dirty = 1;
         WrapperSurface_FlushDirty(surf);
     }
@@ -1877,6 +2140,8 @@ int td5_plat_render_upload_texture(int page_index, const void *pixels,
 
     s_tex_surfaces[page_index] = surf;
     s_tex_wrappers[page_index] = tex;
+    TD5_LOG_I(LOG_TAG, "Texture upload: page=%d size=%dx%d format=%d",
+              page_index, width, height, format);
 
     return 1;
 }
@@ -1896,6 +2161,7 @@ void td5_plat_render_set_viewport(int x, int y, int width, int height)
 
     ID3D11DeviceContext_RSSetViewports(g_backend.context, 1, &vp);
     Backend_UpdateViewportCB((float)width, (float)height);
+    TD5_LOG_I(LOG_TAG, "Viewport set: x=%d y=%d w=%d h=%d", x, y, width, height);
 }
 
 void td5_plat_render_clear(uint32_t color)
@@ -1924,6 +2190,7 @@ void td5_plat_render_clear(uint32_t color)
         ID3D11DeviceContext_ClearDepthStencilView(g_backend.context,
             g_backend.depth_dsv, D3D11_CLEAR_DEPTH, 1.0f, 0);
     }
+    TD5_LOG_D(LOG_TAG, "Render clear: color=0x%08X", (unsigned int)color);
 }
 
 /* ========================================================================
@@ -2029,13 +2296,70 @@ void td5_plat_mutex_destroy(void *mutex_handle)
 
 static const char *s_log_level_names[] = { "DBG", "INF", "WRN", "ERR" };
 
+static void td5_plat_log_flush_locked(void)
+{
+    DWORD written;
+
+    if (s_log_handle == INVALID_HANDLE_VALUE || s_log_buffer_used == 0) {
+        return;
+    }
+
+    WriteFile(s_log_handle, s_log_buffer, (DWORD)s_log_buffer_used, &written, NULL);
+    s_log_buffer_used = 0;
+}
+
+static void td5_plat_log_shutdown(void)
+{
+    if (s_log_handle != INVALID_HANDLE_VALUE) {
+        td5_plat_log_flush_locked();
+        FlushFileBuffers(s_log_handle);
+        CloseHandle(s_log_handle);
+        s_log_handle = INVALID_HANDLE_VALUE;
+    }
+}
+
+static void td5_plat_log_ensure_open(void)
+{
+    if (s_log_path_init) {
+        return;
+    }
+
+    {
+        DWORD n = GetModuleFileNameA(NULL, s_log_path, sizeof(s_log_path) - 32);
+        if (n > 0) {
+            char *slash = s_log_path + n;
+            while (slash > s_log_path && *slash != '\\' && *slash != '/') slash--;
+            if (slash > s_log_path) slash[1] = '\0';
+            strcat(s_log_path, "td5re_debug.log");
+        } else {
+            strcpy(s_log_path, "td5re_debug.log");
+        }
+    }
+
+    s_log_handle = CreateFileA(s_log_path, FILE_APPEND_DATA,
+                               FILE_SHARE_READ | FILE_SHARE_WRITE,
+                               NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (s_log_handle != INVALID_HANDLE_VALUE) {
+        const char *marker = "[platform logger active]\n";
+        DWORD written;
+        WriteFile(s_log_handle, marker, (DWORD)strlen(marker), &written, NULL);
+        atexit(td5_plat_log_shutdown);
+    }
+
+    s_log_path_init = 1;
+}
+
 void td5_plat_log(TD5_LogLevel level, const char *module, const char *fmt, ...)
 {
     char buf[2048];
     va_list ap;
     int off;
+    DWORD written;
 
     if (!fmt) return;
+
+    /* Skip DEBUG messages at runtime for performance */
+    if (level < TD5_LOG_INFO) return;
 
     off = snprintf(buf, sizeof(buf), "[%s][%s] ",
         (level >= 0 && level <= 3) ? s_log_level_names[level] : "???",
@@ -2054,18 +2378,44 @@ void td5_plat_log(TD5_LogLevel level, const char *module, const char *fmt, ...)
         }
     }
 
-    OutputDebugStringA(buf);
-
-    /* Write INFO and above to log file using Win32 API (no CRT heap) */
-    if (level >= TD5_LOG_INFO) {
-        HANDLE hf = CreateFileA("td5re_error.log",
-                                FILE_APPEND_DATA, FILE_SHARE_READ,
-                                NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
-        if (hf != INVALID_HANDLE_VALUE) {
-            DWORD written;
-            WriteFile(hf, buf, (DWORD)strlen(buf), &written, NULL);
-            CloseHandle(hf);
+    td5_plat_log_ensure_open();
+    if (s_log_handle != INVALID_HANDLE_VALUE) {
+        size_t len = strlen(buf);
+        if (len > sizeof(s_log_buffer)) {
+            td5_plat_log_flush_locked();
+            WriteFile(s_log_handle, buf, (DWORD)len, &written, NULL);
+        } else {
+            if (s_log_buffer_used + len > sizeof(s_log_buffer)) {
+                td5_plat_log_flush_locked();
+            }
+            memcpy(s_log_buffer + s_log_buffer_used, buf, len);
+            s_log_buffer_used += len;
         }
+        s_log_line_count++;
+        /* Flush to disk periodically — only on ERROR or every 256 messages.
+         * Flushing on WARN caused thousands of synchronous WriteFile calls per
+         * frame during rendering (invalid mesh opcodes, wall impulse logs),
+         * which was the root cause of the 5-10 second frame freeze in race mode. */
+        if (level >= TD5_LOG_ERROR || (s_log_line_count % 256) == 0) {
+            td5_plat_log_flush_locked();
+        }
+    }
+
+    /* Echo WARN and ERROR to the console (visible even when running from IDE) */
+    if (level >= TD5_LOG_WARN) {
+        HANDLE hcon = GetStdHandle(STD_OUTPUT_HANDLE);
+        if (hcon && hcon != INVALID_HANDLE_VALUE) {
+            DWORD written2;
+            WriteFile(hcon, buf, (DWORD)strlen(buf), &written2, NULL);
+        }
+    }
+}
+
+void td5_plat_log_flush(void)
+{
+    if (s_log_handle != INVALID_HANDLE_VALUE) {
+        td5_plat_log_flush_locked();
+        FlushFileBuffers(s_log_handle);
     }
 }
 
