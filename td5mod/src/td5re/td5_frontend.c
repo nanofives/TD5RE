@@ -883,7 +883,7 @@ static void frontend_load_selected_track_preview(void) {
     }
     if (s_selected_track < 0) return;
     snprintf(entry, sizeof(entry), "trak%04d.tga", s_selected_track);
-    /* Track preview TGAs use a black background as their color key. */
+    /* Black background is color-keyed out so the track outline floats over the scene background. */
     s_track_preview_surface = frontend_load_tga_black_key(entry, "Front End/Tracks/Tracks.zip");
 }
 
@@ -1498,8 +1498,8 @@ static void frontend_poll_input(void) {
     enter_edge = (enter_now && !s_prev_enter_state);
     if (left_now || right_now || up_now || down_now || enter_now) had_activity = 1;
 
-    if (left_now) s_arrow_input |= 1;  /* LEFT */
-    if (right_now) s_arrow_input |= 2; /* RIGHT */
+    if (left_edge) s_arrow_input |= 1;  /* LEFT — rising edge only (original: DAT_004951f8) */
+    if (right_edge) s_arrow_input |= 2; /* RIGHT — rising edge only */
     if (up_edge) s_arrow_input |= 4;   /* UP */
     if (down_edge) s_arrow_input |= 8; /* DOWN */
 
@@ -1674,6 +1674,7 @@ static int frontend_check_escape(void) {
 /* Forward declaration for text rendering (defined later in file) */
 static void fe_draw_text(float x, float y, const char *text, uint32_t color, float sx, float sy);
 static void frontend_fill_rect(int layer, int x, int y, int w, int h, uint32_t color);
+static void fe_draw_option_arrows(int btn_idx, float sx, float sy);
 
 static void frontend_begin_text_input(char *buffer, int capacity) {
     memset(&s_text_input_ctx, 0, sizeof(s_text_input_ctx));
@@ -2549,7 +2550,10 @@ static float frontend_get_button_anim_x(int button_index, float base_x) {
     t = (float)tick / (float)max_tick;
     if (t < 0.0f) t = 0.0f;
     if (t > 1.0f) t = 1.0f;
-    offscreen_x = (button_index & 1) ? 640.0f : -640.0f;
+    /* Race Type menu: all buttons slide from left (original behavior).
+     * Other screens: odd buttons from right, even from left. */
+    offscreen_x = (s_current_screen == TD5_SCREEN_RACE_TYPE_MENU) ? -640.0f :
+                  (button_index & 1) ? 640.0f : -640.0f;
 
     if (mode == FE_BUTTON_ANIM_IN) {
         return base_x + (offscreen_x - base_x) * (1.0f - t);
@@ -2577,8 +2581,8 @@ static float frontend_get_title_render_y(float sy) {
     int mode = FE_BUTTON_ANIM_NONE;
     int tick = 0;
     int max_tick = 0;
-    float base_y = 4.0f;
-    float hidden_y = -40.0f;
+    float base_y = 12.0f;   /* resting Y (matches render code) */
+    float hidden_y = -80.0f; /* above screen — title slides down from top */
     float t;
 
     if (!frontend_get_button_anim_state(&mode, &tick, &max_tick)) return base_y * sy;
@@ -2598,7 +2602,6 @@ static void frontend_render_quick_race_overlay(float sx, float sy) {
     char track_name[80];
     int car_locked;
     int track_locked;
-    float button_x, button_y, button_w;
     if (!s_anim_complete) return;
     snprintf(car_name, sizeof(car_name), "%s", frontend_get_car_display_name(s_selected_car));
     frontend_get_track_display_name(s_selected_track, 0, track_name, sizeof(track_name));
@@ -2612,21 +2615,33 @@ static void frontend_render_quick_race_overlay(float sx, float sy) {
     fe_draw_quad(120.0f * sx, 97.0f * sy, 520.0f * sx, 200.0f * sy, 0x7A0C0C18, -1, 0, 0, 1, 1);
     td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
 
-    if (s_buttons[0].active) {
-        frontend_get_button_render_rect(0, sx, sy, &button_x, &button_y, &button_w, NULL);
-        fe_draw_text(button_x + 10.0f * sx, button_y + 6.0f * sy, "<", 0xFFFFCC44, sx, sy);
-        fe_draw_text(button_x + button_w - 20.0f * sx, button_y + 6.0f * sy, ">", 0xFFFFCC44, sx, sy);
-    }
+    fe_draw_option_arrows(0, sx, sy);
     frontend_draw_value_text(sx, sy, 140, 106, car_name, 0xFFFFFFFF);
-
-    if (s_buttons[1].active) {
-        frontend_get_button_render_rect(1, sx, sy, &button_x, &button_y, &button_w, NULL);
-        fe_draw_text(button_x + 10.0f * sx, button_y + 6.0f * sy, "<", 0xFFFFCC44, sx, sy);
-        fe_draw_text(button_x + button_w - 20.0f * sx, button_y + 6.0f * sy, ">", 0xFFFFCC44, sx, sy);
-    }
+    fe_draw_option_arrows(1, sx, sy);
     frontend_draw_value_text(sx, sy, 140, 226, track_name, 0xFFFFFFFF);
     if (car_locked) frontend_draw_value_text(sx, sy, 398, 126, "LOCKED", 0xFFFF4444);
     if (track_locked) frontend_draw_value_text(sx, sy, 398, 246, "LOCKED", 0xFFFF4444);
+}
+
+static void fe_draw_option_arrows(int btn_idx, float sx, float sy) {
+    /* Render arrow sprites from ButtonBits.tga (56x100 atlas, FUN_00426260).
+     * State 0 = gold/selected, state 1 = blue/unselected.
+     * Left  arrow: (0,s*32+6)-(12,s*32+19) = 12x13 px
+     * Right arrow: (18,s*32+6)-(27,s*32+19) = 9x13 px */
+    float bx, by, bw, bh;
+    int state;
+    float aw_l = 12.0f * sx, aw_r = 9.0f * sx, ah = 13.0f * sy;
+    float v0, v1;
+    if (!s_buttons[btn_idx].active || s_buttonbits_tex_page < 0) return;
+    frontend_get_button_render_rect(btn_idx, sx, sy, &bx, &by, &bw, &bh);
+    state = (s_buttons[btn_idx].highlight_ramp > 0) ? 0 : 1;
+    v0 = (float)(state * 32 + 6)  / 100.0f;  /* BB_TEX_H = 100 */
+    v1 = (float)(state * 32 + 19) / 100.0f;
+    td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
+    fe_draw_quad(bx + 4.0f * sx,             by + (bh - ah) * 0.5f, aw_l, ah, 0xFFFFFFFF,
+                 s_buttonbits_tex_page,  0.0f / 56.0f, v0, 12.0f / 56.0f, v1);  /* BB_TEX_W = 56 */
+    fe_draw_quad(bx + bw - 4.0f*sx - aw_r,  by + (bh - ah) * 0.5f, aw_r, ah, 0xFFFFFFFF,
+                 s_buttonbits_tex_page, 18.0f / 56.0f, v0, 27.0f / 56.0f, v1);
 }
 
 static void frontend_render_game_options_overlay(float sx, float sy) {
@@ -2643,6 +2658,7 @@ static void frontend_render_game_options_overlay(float sx, float sy) {
     frontend_draw_value_text(sx, sy, 372, s_buttons[4].y + 6, difficulty[s_game_option_difficulty % 3], 0xFFFFFFFF);
     frontend_draw_value_text(sx, sy, 372, s_buttons[5].y + 6, dynamics[s_game_option_dynamics & 1], 0xFFFFFFFF);
     frontend_draw_value_text(sx, sy, 372, s_buttons[6].y + 6, on_off[s_game_option_collisions & 1], 0xFFFFFFFF);
+    for (int i = 0; i <= 6; i++) fe_draw_option_arrows(i, sx, sy);
 }
 
 static void frontend_render_display_options_overlay(float sx, float sy) {
@@ -2660,6 +2676,7 @@ static void frontend_render_display_options_overlay(float sx, float sy) {
     frontend_draw_value_text(sx, sy, 372, s_buttons[1].y + 6, on_off[s_display_fog_enabled & 1], 0xFFFFFFFF);
     frontend_draw_value_text(sx, sy, 372, s_buttons[2].y + 6, speed_read[s_display_speed_units & 1], 0xFFFFFFFF);
     frontend_draw_value_text(sx, sy, 372, s_buttons[3].y + 6, damping, 0xFFFFFFFF);
+    for (int i = 0; i <= 3; i++) fe_draw_option_arrows(i, sx, sy);
 }
 
 static void frontend_render_sound_options_overlay(float sx, float sy) {
@@ -2673,6 +2690,7 @@ static void frontend_render_sound_options_overlay(float sx, float sy) {
     frontend_draw_value_text(sx, sy, 372, s_buttons[0].y + 6, sfx_mode[s_sound_option_sfx_mode & 1], 0xFFFFFFFF);
     frontend_draw_value_text(sx, sy, 372, s_buttons[1].y + 6, sfx_volume, 0xFFFFFFFF);
     frontend_draw_value_text(sx, sy, 372, s_buttons[2].y + 6, music_volume, 0xFFFFFFFF);
+    for (int i = 0; i <= 2; i++) fe_draw_option_arrows(i, sx, sy);
 }
 
 static void frontend_render_two_player_options_overlay(float sx, float sy) {
@@ -2681,6 +2699,7 @@ static void frontend_render_two_player_options_overlay(float sx, float sy) {
     if (!s_buttons[0].active) return;
     frontend_draw_value_text(sx, sy, 372, s_buttons[0].y + 6, on_off[(s_two_player_mode & 4) ? 1 : 0], 0xFFFFFFFF);
     frontend_draw_value_text(sx, sy, 372, s_buttons[1].y + 6, on_off[(s_two_player_mode & 8) ? 1 : 0], 0xFFFFFFFF);
+    for (int i = 0; i <= 1; i++) fe_draw_option_arrows(i, sx, sy);
 }
 
 static void frontend_render_race_type_description(float sx, float sy) {
@@ -2717,17 +2736,13 @@ static void frontend_render_race_type_description(float sx, float sy) {
         lines = k_race_type_lines;
     }
 
-    /* Port adaptation: subtle translucent background (original used transparent off-screen surface) */
-    td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
-    fe_draw_quad(panel_x, panel_y, panel_w, panel_h, 0x80101824, -1, 0, 0, 1, 1);
-    td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
-
-    /* Title: y=0 inside surface, approximate original 12px small font via 0.5 scale */
-    fe_draw_text(panel_x + 14.0f * sx, panel_y +  2.0f * sy, lines[desc_index][0], 0xFFFFCC66, sx * 0.5f, sy * 0.5f);
-    /* Body lines: y=32/44/56 inside surface, 12px spacing */
-    fe_draw_text(panel_x + 14.0f * sx, panel_y + 32.0f * sy, lines[desc_index][1], 0xFFFFFFFF, sx * 0.5f, sy * 0.5f);
-    fe_draw_text(panel_x + 14.0f * sx, panel_y + 44.0f * sy, lines[desc_index][2], 0xFFFFFFFF, sx * 0.5f, sy * 0.5f);
-    fe_draw_text(panel_x + 14.0f * sx, panel_y + 56.0f * sy, lines[desc_index][3], 0xFFFFFFFF, sx * 0.5f, sy * 0.5f);
+    /* No background: original cleared surface to black with color-key transparency.
+     * Title: large font (24px, sx/sy), white, centered. Y=0 in original surface.
+     * Body:  small font (12px, 0.5 scale), white, centered. Y=32/44/56 in original surface. */
+    fe_draw_text(panel_x + (panel_w - fe_measure_text(lines[desc_index][0], sx))        * 0.5f, panel_y +  2.0f * sy, lines[desc_index][0], 0xFFFFFFFF, sx,        sy);
+    fe_draw_text(panel_x + (panel_w - fe_measure_text(lines[desc_index][1], sx * 0.5f)) * 0.5f, panel_y + 32.0f * sy, lines[desc_index][1], 0xFFFFFFFF, sx * 0.5f, sy * 0.5f);
+    fe_draw_text(panel_x + (panel_w - fe_measure_text(lines[desc_index][2], sx * 0.5f)) * 0.5f, panel_y + 44.0f * sy, lines[desc_index][2], 0xFFFFFFFF, sx * 0.5f, sy * 0.5f);
+    fe_draw_text(panel_x + (panel_w - fe_measure_text(lines[desc_index][3], sx * 0.5f)) * 0.5f, panel_y + 56.0f * sy, lines[desc_index][3], 0xFFFFFFFF, sx * 0.5f, sy * 0.5f);
 }
 
 static void frontend_render_car_selection_preview(float sx, float sy) {
@@ -2761,21 +2776,20 @@ static void frontend_render_track_selection_preview(float sx, float sy) {
     char track_name[80];
     if (!s_anim_complete) return;
     frontend_get_track_display_name(s_selected_track, 1, track_name, sizeof(track_name));
-    /* Black info-panel background (matches original DDraw info-surface behavior) */
-    fe_draw_quad(120.0f * sx, 64.0f * sy, 296.0f * sx, 184.0f * sy, 0xFF000000, -1, 0, 0, 1, 1);
+    /* Track name above the preview */
+    frontend_draw_value_text(sx, sy, 412, 113, track_name, 0xFFFFFFFF);
+    /* Track preview: 152x224 portrait, right of buttons.
+     * x=EDI+0x12E=412, y=ESI+0x36=135 (640x480) */
     if (s_track_preview_surface > 0) {
-        fe_draw_surface_rect(s_track_preview_surface, 120.0f * sx, 64.0f * sy, 296.0f * sx, 184.0f * sy, 0xFFFFFFFF);
+        fe_draw_surface_rect(s_track_preview_surface, 412.0f * sx, 135.0f * sy, 152.0f * sx, 224.0f * sy, 0xFFFFFFFF);
     }
-    fe_draw_text(120.0f * sx, 258.0f * sy, "< PREV", 0xFFFFCC44, sx * 0.85f, sy * 0.85f);
-    fe_draw_text(344.0f * sx, 258.0f * sy, "NEXT >", 0xFFFFCC44, sx * 0.85f, sy * 0.85f);
-    frontend_draw_value_text(sx, sy, 128, 262, track_name, 0xFFFFFFFF);
-    frontend_draw_value_text(sx, sy, 128, 282, s_track_direction ? "BACKWARDS" : "FORWARDS", 0xFFE0E0E0);
+    /* Direction is shown by the Forwards button — no duplicate text here */
     if (!s_cheat_unlock_all &&
         s_selected_track >= 0 &&
         s_selected_track < 26 &&
         s_track_lock_table[s_selected_track] != 0 &&
         !s_network_active) {
-        frontend_draw_value_text(sx, sy, 360, 200, "LOCKED", 0xFFFF4444);
+        frontend_draw_value_text(sx, sy, 412, 375, "LOCKED", 0xFFFF4444);
     }
 }
 
@@ -2886,7 +2900,7 @@ static void fe_draw_button_9slice(float bx, float by, float bw, float bh,
     /* Bottom: src (state*12+28, 96)-(state*12+32, 100) */
     float be_u0 = (float)(state * 12 + 28) / BB_TEX_W;
     float be_u1 = (float)(state * 12 + 32) / BB_TEX_W;
-    for (float x = bx + lw; x + rw + tw < bx + bw; x += tw)
+    for (float x = bx + lw; x + rw < bx + bw; x += tw)
         fe_draw_quad(x, by + bh - th, tw, th, 0xFFFFFFFF, tex, be_u0, te_v0, be_u1, te_v1);
 
     /* --- Vertical edge tiles (full-column width, 4px tall) ---
@@ -3031,25 +3045,18 @@ void td5_frontend_render_ui_rects(void) {
         float ramp_t = (float)s_buttons[i].highlight_ramp / 6.0f;
         if (ramp_t < 0.0f) ramp_t = 0.0f;
         if (ramp_t > 1.0f) ramp_t = 1.0f;
-        /* Interpolate bg color: deselected 0x99283858 -> selected 0xCC5080C0 */
+        /* Fallback bg color when ButtonBits is not loaded */
         uint32_t bg_color;
-        uint32_t border_color;
         if (s_buttons[i].disabled) {
             bg_color = 0x80333333;
-            border_color = 0xFF404040;
         } else if (flash_active) {
             bg_color = 0xCC2AA844;
-            border_color = 0xFF66FF88;
         } else {
             uint32_t a = (uint32_t)(0x99 + (0xCC - 0x99) * ramp_t);
             uint32_t r = (uint32_t)(0x28 + (0x50 - 0x28) * ramp_t);
             uint32_t g = (uint32_t)(0x38 + (0x80 - 0x38) * ramp_t);
             uint32_t b = (uint32_t)(0x58 + (0xC0 - 0x58) * ramp_t);
             bg_color = (a << 24) | (r << 16) | (g << 8) | b;
-            uint32_t br = (uint32_t)(0x50 + (0xAA - 0x50) * ramp_t);
-            uint32_t bg2 = (uint32_t)(0x60 + (0xBB - 0x60) * ramp_t);
-            uint32_t bb = (uint32_t)(0x80 + (0xDD - 0x80) * ramp_t);
-            border_color = 0xFF000000 | (br << 16) | (bg2 << 8) | bb;
         }
 
         /* Button background: 9-slice frame from ButtonBits.tga (56x100).
@@ -3057,62 +3064,44 @@ void td5_frontend_render_ui_rects(void) {
          * with SRCCOLORKEY. We draw live each frame.
          * State 0 = gold/selected, 1 = blue/unselected, 2 = disabled. */
         if (s_buttonbits_tex_page >= 0 && s_buttonbits_w > 0 && s_buttonbits_h > 0) {
-            /* Base fill: black (unselected) → green-teal 0x1C8A (selected).
-             * Original RGB565 0x1C8A ≈ (R=25, G=146, B=82). */
-            uint32_t base_fill;
+            /* No opaque fill — original blits button surface to screen with
+             * DDBLT_KEYSRC (black = transparent). We draw only the 9-slice
+             * frame with alpha blending; background shows through naturally. */
             int bb_state;
-            if (s_buttons[i].disabled) {
-                base_fill = 0xFF000000;
-                bb_state = 2;
-            } else if (flash_active) {
-                base_fill = 0xFF1A5828;
-                bb_state = 0;
-            } else {
-                uint32_t fr = (uint32_t)(0x19 * ramp_t);
-                uint32_t fg = (uint32_t)(0x92 * ramp_t);
-                uint32_t fb = (uint32_t)(0x52 * ramp_t);
-                base_fill = 0xFF000000 | (fr << 16) | (fg << 8) | fb;
-                bb_state = (ramp_t >= 0.5f) ? 0 : 1;
-            }
-            fe_draw_quad(bx, by, bw, bh, base_fill, -1, 0, 0, 1, 1);
+            if (s_buttons[i].disabled)               bb_state = 2;
+            else if (flash_active || ramp_t >= 0.5f) bb_state = 0;
+            else                                     bb_state = 1;
 
             td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
             fe_draw_button_9slice(bx, by, bw, bh, bb_state, sx, sy);
             td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
+
+            /* Green highlight border (RenderFrontendDisplayModeHighlight 0x4263e0).
+             * 2px outline, mouse-hover only. Inset 20/22/4/6 px from edges.
+             * Color 0xC000 → pure green ≈ (0,128,0). */
+            if (i == s_selected_button && s_selection_from_mouse &&
+                !s_buttons[i].disabled && ramp_t > 0.01f) {
+                uint32_t gc = 0xFF008000;
+                float inL = 20.0f * sx, inR = 22.0f * sx;
+                float inT = 4.0f * sy,  inB = 6.0f * sy;
+                float barV = 2.0f * sy, barH = 2.0f * sx;
+                fe_draw_quad(bx+inL, by+inT, bw-inL-inR, barV, gc, -1,0,0,1,1);
+                fe_draw_quad(bx+inL, by+bh-inB-barV, bw-inL-inR, barV, gc, -1,0,0,1,1);
+                fe_draw_quad(bx+inL, by+inT, barH, bh-inT-inB, gc, -1,0,0,1,1);
+                fe_draw_quad(bx+bw-inR-barH, by+inT, barH, bh-inT-inB, gc, -1,0,0,1,1);
+            }
         } else {
             fe_draw_quad(bx, by, bw, bh, bg_color, -1, 0, 0, 1, 1);
         }
 
-        /* Selection indicator light (ButtonLights.tga).
-         * Original draws a red dot on the left edge of the selected button.
-         * 16x32 texture: top half = dim (V 0.0-0.5), bottom half = bright (V 0.5-1.0). */
-        if (s_buttonlights_tex_page >= 0 && !s_buttons[i].disabled && ramp_t > 0.01f) {
-            float light_sz = 16.0f * sx;
-            float light_x = bx - light_sz - 2.0f * sx;
-            float light_y = by + (bh - light_sz) * 0.5f;
-            /* Blend between dim and bright based on ramp; use alpha for fade */
-            float lv0 = 0.5f - 0.5f * ramp_t;
-            float lv1 = 1.0f - 0.5f * ramp_t;
-            uint32_t light_alpha = (uint32_t)(128 + 127 * ramp_t);
-            uint32_t light_color = (light_alpha << 24) | 0x00FFFFFF;
-            td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
-            fe_draw_quad(light_x, light_y, light_sz, light_sz, light_color,
-                         s_buttonlights_tex_page, 0.0f, lv0, 1.0f, lv1);
-            td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
-        }
-
-        /* Button border */
-        fe_draw_quad(bx, by - 1, bw, 1, border_color, -1, 0, 0, 1, 1);
-        fe_draw_quad(bx, by + bh, bw, 1, 0xFF202030, -1, 0, 0, 1, 1);
-
-        /* Button label text */
+        /* Button label text — original draws into cached surface at Y=0,
+         * horizontally centered. Font: BodyText.tga, 24x24 cells,
+         * red colorkey → alpha=0 for transparent background. */
         if (s_buttons[i].label[0] && s_font_page >= 0) {
             float text_w = fe_measure_text(s_buttons[i].label, sx);
             float tx = bx + (bw - text_w) * 0.5f;
-            float ty = by + (bh - 20.0f * sy) * 0.5f;
-            /* Interpolate text brightness with highlight ramp */
-            uint32_t tc = (uint32_t)(0xCC + (0xFF - 0xCC) * ramp_t);
-            uint32_t text_color = 0xFF000000 | (tc << 16) | (tc << 8) | tc;
+            float ty = by + (bh - (float)FONT_CELL * sy) * 0.5f;
+            uint32_t text_color = 0xFFFFFFFF;
             if (s_buttons[i].disabled) text_color = 0xFF888888;
             fe_draw_text(tx, ty, s_buttons[i].label, text_color, sx, sy);
         }
@@ -3126,7 +3115,7 @@ void td5_frontend_render_ui_rects(void) {
         int title_h = s_title_tex_h[s_current_screen];
         if (page > 0 && title_w > 0 && title_h > 0) {
             float title_x = ((640.0f - (float)title_w) * 0.5f) * sx;
-            float title_y = 12.0f * sy;
+            float title_y = frontend_get_title_render_y(sy);
             td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
             fe_draw_quad(title_x, title_y, (float)title_w * sx, (float)title_h * sy,
                          0xFFFFFFFF, page, 0.0f, 0.0f, 1.0f, 1.0f);
@@ -3670,8 +3659,8 @@ static void Screen_MainMenu(void) {
         frontend_post_quit();
         break;
 
-    case 8: /* Slide-out prep: blit secondary surface, restore state */
-        frontend_set_cursor_visible(1);
+    case 8: /* Slide-out prep: keep the software cursor visible for the next frontend screen */
+        frontend_set_cursor_visible(0);
         frontend_play_sfx(5);
         s_anim_tick = 0;
         s_inner_state = 9;
@@ -3875,9 +3864,9 @@ static void Screen_RaceTypeCategory(void) {
         s_inner_state = 7;
         break;
 
-    case 7: /* Cup sub-menu slide-in */
+    case 7: /* Cup sub-menu slide-in: 32 frames (original 0x20) */
         s_anim_tick++;
-        if (s_anim_tick >= 0x10) {
+        if (s_anim_tick >= 0x20) {
             s_inner_state = 8;
         }
         break;
@@ -4640,7 +4629,7 @@ static void Screen_OptionsHub(void) {
         frontend_create_button("Sound Options",     -0x130, 0, 0x130, 0x20);
         frontend_create_button("Graphics Options",  -0x130, 0, 0x130, 0x20);
         frontend_create_button("Two Player Options",-0x130, 0, 0x130, 0x20);
-        frontend_create_button("OK",                -0x60,  0, 0x60,  0x20);
+        frontend_create_button("OK",                -0x130, 0, 0x130, 0x20);
 
         frontend_begin_timed_animation();
         s_inner_state = 1;
@@ -5312,8 +5301,8 @@ static void Screen_CarSelection(void) {
         s_inner_state = 5;
         break;
 
-    case 5: /* Button slide-in: 24 frames, 32px/frame from right */
-        if (frontend_update_timed_animation(12, 400) >= 1.0f) {
+    case 5: /* Button slide-in: 24 frames (original 0x18) */
+        if (frontend_update_timed_animation(24, 400) >= 1.0f) {
             s_inner_state = 6;
         }
         break;
