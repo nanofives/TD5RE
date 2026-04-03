@@ -1369,7 +1369,7 @@ void td5_hud_render_overlays(float dt)
         /* --- Bit 9: Circuit lap count --- */
         if (flags & TD5_HUD_CIRCUIT_LAPS) {
             int cur_lap = td5_game_get_player_lap(actor_slot) + 1;
-            int total_laps = td5_save_get_circuit_lap_count();
+            int total_laps = g_td5.circuit_lap_count;
             td5_hud_queue_text(0,
                 (int)(vl->vp_int_left + 8.0f),
                 (int)(vl->vp_int_top + 40.0f),

@@ -485,6 +485,13 @@ static const uint8_t s_track_schedule_to_name_index[20] = {
      8, 10, 12,  9,  6,  3,  4,  5, 13, 11,
     19, 18, 17, 16, 15, 14,  7,  1,  2,  0
 };
+/* Original binary gScheduleToPoolIndex (DAT_00466894): maps schedule slot →
+ * Language.dll pool index, which equals the trak TGA file number.
+ * Derived from listing at 0x466894 in TD5_d3d.exe. */
+static const uint8_t s_track_schedule_to_tga_index[20] = {
+    11,  9,  7, 10, 13, 16, 15, 14,  6,  8,
+     0,  1,  2,  3,  4,  5, 12, 18, 17, 19
+};
 
 static char s_car_display_names[37][64];
 static uint8_t s_car_display_names_loaded[37];
@@ -938,12 +945,18 @@ static void frontend_load_selected_car_preview(void) {
 
 static void frontend_load_selected_track_preview(void) {
     char entry[32];
+    int tga_idx;
     if (s_track_preview_surface > 0) {
         frontend_release_surface(s_track_preview_surface);
         s_track_preview_surface = 0;
     }
     if (s_selected_track < 0) return;
-    snprintf(entry, sizeof(entry), "trak%04d.tga", s_selected_track);
+    /* Use the original binary's gScheduleToPoolIndex table (DAT_00466894):
+     * pool_index == trak TGA file number, NOT the schedule slot. */
+    tga_idx = (s_selected_track < (int)(sizeof(s_track_schedule_to_tga_index)))
+              ? s_track_schedule_to_tga_index[s_selected_track]
+              : s_selected_track;
+    snprintf(entry, sizeof(entry), "trak%04d.tga", tga_idx);
     /* Black background is color-keyed out so the track outline floats over the scene background. */
     s_track_preview_surface = frontend_load_tga_black_key(entry, "Front End/Tracks/Tracks.zip");
 }
@@ -1995,6 +2008,7 @@ static int ConfigureGameTypeFlags(void) {
 
     switch (s_selected_game_type) {
     case 0: /* Single Race -- user preferences apply */
+        g_td5.circuit_lap_count = (s_game_option_laps + 1) * 2;
         break;
 
     case 1: /* Championship */
@@ -3039,8 +3053,8 @@ static void frontend_render_car_selection_preview(float sx, float sy) {
             fe_draw_surface_rect(s_carsel_curve_surface,  36.0f * sx, 408.0f * sy,  80.0f * sx,  56.0f * sy, 0xFFFFFFFF);
     }
 
-    /* Car preview area: dark backing then carpic image (408x280 at x=232, y=124) */
-    fe_draw_quad(232.0f * sx, 124.0f * sy, 408.0f * sx, 280.0f * sy, 0xC0101020, -1, 0, 0, 1, 1);
+    /* Car preview area: fully opaque dark backing over background, then car image */
+    fe_draw_quad(232.0f * sx, 124.0f * sy, 408.0f * sx, 280.0f * sy, 0xFF101020, -1, 0, 0, 1, 1);
 
     if (s_inner_state == 11 && s_car_preview_prev_surface > 0) {
         /* Old car slides out to the right (state 11, ~433ms) — animPhase 0x0B: offset = counter*0x20 */
@@ -3054,7 +3068,8 @@ static void frontend_render_car_selection_preview(float sx, float sy) {
         float t = frontend_clamp01((float)(td5_plat_time_ms() - s_anim_start_ms) / 620.0f);
         float x = 1424.0f - 1192.0f * t;  /* 1424 → 232 */
         fe_draw_surface_rect(s_car_preview_surface, x * sx, 124.0f * sy, 408.0f * sx, 280.0f * sy, 0xFFFFFFFF);
-    } else if (s_car_preview_surface > 0) {
+    } else if (s_inner_state != 12 && s_inner_state != 13 && s_car_preview_surface > 0) {
+        /* Static: states 12/13 are pass-through transition ticks — skip to avoid 1-frame flash */
         fe_draw_surface_rect(s_car_preview_surface, 232.0f * sx, 124.0f * sy, 408.0f * sx, 280.0f * sy, 0xFFFFFFFF);
     }
 
@@ -3428,9 +3443,11 @@ void td5_frontend_render_ui_rects(void) {
 
     /* Background gallery slideshow (UpdateExtrasGalleryDisplay 0x40D830) --
      * drawn before screen-specific overlays and buttons so it stays behind all UI;
-     * skip EXTRAS_GALLERY (fills full viewport) and CAR_SELECTION (dark bg, overlays bleed) */
+     * skip EXTRAS_GALLERY (fills full viewport), CAR_SELECTION (dark bg, overlays bleed),
+     * and TRACK_SELECTION (dedicated dark-blue preview panel, slideshow bleeds through). */
     if (s_current_screen != TD5_SCREEN_EXTRAS_GALLERY &&
-        s_current_screen != TD5_SCREEN_CAR_SELECTION)
+        s_current_screen != TD5_SCREEN_CAR_SELECTION &&
+        s_current_screen != TD5_SCREEN_TRACK_SELECTION)
         frontend_render_bg_gallery(sx, sy);
 
     switch (s_current_screen) {
