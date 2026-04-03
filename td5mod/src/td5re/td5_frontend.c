@@ -2987,11 +2987,8 @@ static void frontend_render_display_options_overlay(float sx, float sy) {
 static void frontend_render_sound_options_overlay(float sx, float sy) {
     if (!s_buttons[0].active) return;
     if (!s_anim_complete) return;
-    /* SFX Mode button shows STEREO/MONO text; volume buttons use bars only */
-    {
-        const char *sfx_mode_str[] = { "STEREO", "MONO" };
-        frontend_draw_value_text(sx, sy, 344, s_buttons[0].y + 6, sfx_mode_str[s_sound_option_sfx_mode & 1], 0xFFFFFFFF);
-    }
+    /* SFX Mode is indicated by the Stereo/Mono icon; no extra text needed.
+     * Volume levels are indicated by bar fill only; no numbers. */
     for (int i = 0; i <= 2; i++) fe_draw_option_arrows(i, sx, sy);
 
     /* Image positions from FUN_0041EA90 (640x480 absolute):
