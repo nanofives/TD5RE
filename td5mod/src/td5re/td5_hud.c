@@ -383,20 +383,22 @@ static inline uint8_t actor_gear(int slot)
     return a[0x36B]; /* current gear */
 }
 
-static inline int32_t actor_speed_fp(int slot)
+/* engine_speed_accum: smoothed RPM counter, drives the tachometer needle.
+ * Original formula: (engine_speed * 0xA5A) / max_rpm + 0x400 */
+static inline int32_t actor_engine_speed(int slot)
 {
     uint8_t *a = (uint8_t *)actor_ptr(slot);
-    return *(int32_t *)(a + 0x314); /* longitudinal_speed 24.8 fixed-point */
+    return *(int32_t *)(a + 0x310); /* engine_speed_accum */
 }
 
-/* Returns the top speed in the same fixed-point units as longitudinal_speed.
- * tuning+0x74 is the speed_limiter raw value; physics uses it as << 8. */
-static inline int32_t actor_max_speed_fp(int slot)
+/* max_rpm from carparam+0x72: raw integer engine redline (e.g. 6000).
+ * Used as the divisor in the needle formula — no fixed-point shift. */
+static inline int16_t actor_max_rpm(int slot)
 {
     uint8_t *a = (uint8_t *)actor_ptr(slot);
     void *tuning = *(void **)(a + 0x1BC);
-    if (!tuning) return 0x8000;
-    return (int32_t)(*(int16_t *)((uint8_t *)tuning + 0x74)) << 8;
+    if (!tuning) return 6000;
+    return *(int16_t *)((uint8_t *)tuning + 0x72);
 }
 
 static inline int16_t actor_span_index(int slot)
@@ -1423,12 +1425,12 @@ void td5_hud_render_overlays(float dt)
 
         /* --- Bit 2: Speedometer (needle + gear + digits) --- */
         if (flags & TD5_HUD_SPEEDOMETER) {
-            int32_t speed_fp = actor_speed_fp(actor_slot);
-            int32_t max_speed = actor_max_speed_fp(actor_slot);
+            int32_t engine_speed = actor_engine_speed(actor_slot);
+            int16_t max_rpm     = actor_max_rpm(actor_slot);
 
             uint32_t needle_angle;
-            if (max_speed > 0) {
-                needle_angle = (uint32_t)((speed_fp * 0xA5A) / max_speed) + 0x400;
+            if (max_rpm > 0) {
+                needle_angle = (uint32_t)((engine_speed * 0xA5A) / (int32_t)max_rpm) + 0x400;
             } else {
                 needle_angle = 0x400;
             }
@@ -1486,8 +1488,9 @@ void td5_hud_render_overlays(float dt)
             float gear_u = (float)gear * sx * 16.0f + (float)s_gearnumbers_atlas->atlas_x;
             float gear_v = (float)s_gearnumbers_atlas->atlas_y;
 
-            /* Compute speed value and convert to MPH or KPH */
-            int32_t speed_raw = speed_fp;
+            /* Compute speed value from longitudinal_speed (24.8 fp) for digit display */
+            uint8_t *_actor_a = (uint8_t *)actor_ptr(actor_slot);
+            int32_t speed_raw = *(int32_t *)(_actor_a + 0x314);
             if (speed_raw < 0) speed_raw = 0;
             speed_raw >>= 8;
 
