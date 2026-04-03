@@ -3106,19 +3106,33 @@ static void frontend_render_track_selection_preview(float sx, float sy) {
 
 static void frontend_render_control_options_overlay(float sx, float sy) {
     if (!s_anim_complete || s_control_options_surface <= 0) return;
-    fe_draw_text(300.0f * sx, 90.0f * sy, "Controller Type", 0xFFFFCC66, sx * 0.85f, sy * 0.85f);
-    {
-        int slot = s_control_options_surface - 1;
-        if (slot >= 0 && slot < FE_MAX_SURFACES && s_surfaces[slot].in_use) {
-            fe_draw_surface_rect(s_control_options_surface,
-                                 (300.0f - (float)s_surfaces[slot].width * 0.5f) * sx,
-                                 100.0f * sy,
-                                 (float)s_surfaces[slot].width * sx,
-                                 (float)s_surfaces[slot].height * sy,
-                                 0xFFFFFFFF);
-        }
-    }
-    fe_draw_text(300.0f * sx, 250.0f * sy, "Keyboard", 0xFFFFFFFF, sx * 0.85f, sy * 0.85f);
+    int slot = s_control_options_surface - 1;
+    if (slot < 0 || slot >= FE_MAX_SURFACES || !s_surfaces[slot].in_use) return;
+
+    /* Controllers.tga: sprite sheet, 64x32 per controller-type icon, rows stacked vertically.
+     * Icon x = 0x11C = 284 (right panel), y = button_y + 16 (original: FUN_0041DF20 caseD_4).
+     * Row = controller_type_index * 32.  Source port currently only has type 0 (keyboard). */
+    int sh = s_surfaces[slot].height;
+    if (sh <= 0) return;
+
+    float icon_x = 284.0f * sx;
+    float icon_w = 64.0f * sx;
+    float icon_h = 32.0f * sy;
+    float v_row  = 32.0f / (float)sh;   /* height of one icon row in UV space */
+
+    /* type 0 for both players (keyboard — only type currently supported) */
+    float v0 = 0.0f, v1 = v_row;
+
+    td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
+    /* Player 1 icon next to button 0 */
+    if (s_buttons[0].active)
+        fe_draw_quad(icon_x, ((float)s_buttons[0].y + 16.0f) * sy, icon_w, icon_h,
+                     0xFFFFFFFF, s_surfaces[slot].tex_page, 0.0f, v0, 1.0f, v1);
+    /* Player 2 icon next to button 2 */
+    if (s_buttons[2].active)
+        fe_draw_quad(icon_x, ((float)s_buttons[2].y + 16.0f) * sy, icon_w, icon_h,
+                     0xFFFFFFFF, s_surfaces[slot].tex_page, 0.0f, v0, 1.0f, v1);
+    td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
 }
 
 static void frontend_format_score_time(char *buf, size_t cap, int raw_ticks, int type) {
@@ -5273,8 +5287,13 @@ static void Screen_ControlOptions(void) {
         frontend_init_return_screen(TD5_SCREEN_CONTROL_OPTIONS);
         TD5_LOG_D(LOG_TAG, "ControlOptions: init");
         frontend_load_tga("Front_End/MainMenu.tga", "Front_End/FrontEnd.zip");
-        frontend_create_button("Configure", -0xE0, 0, 0xE0, 0x20);
-        frontend_create_button("OK", -0xE0, 0, 0xE0, 0x20);
+        s_control_options_surface = frontend_load_tga("Controllers.TGA", "Front End/frontend.zip");
+        /* Original layout: Player 1 label, Configure P1, Player 2 label, Configure P2, OK */
+        frontend_create_preview_button("Player 1",  -0xE0, 0, 0xE0, 0x20);
+        frontend_create_button("Configure",         -0xE0, 0, 0xE0, 0x20);
+        frontend_create_preview_button("Player 2",  -0xE0, 0, 0xE0, 0x20);
+        frontend_create_button("Configure",         -0xE0, 0, 0xE0, 0x20);
+        frontend_create_button("OK",                -0x60, 0, 0x60, 0x20);
         s_anim_complete = 0;
         frontend_begin_timed_animation();
         s_inner_state = 1;
@@ -5293,20 +5312,18 @@ static void Screen_ControlOptions(void) {
         s_inner_state = 5;
         break;
     case 5:
-        if (s_control_options_surface <= 0) {
-            s_control_options_surface = frontend_load_tga("Controllers.TGA", "Front End/frontend.zip");
-        }
         s_inner_state = 6;
         break;
     case 6:
         if (s_input_ready) {
-            /* "Configure" -> Screen_ControllerBinding */
-            /* "OK" -> OptionsHub */
-            if (s_button_index == 0) {
+            /* btn 0 = "Player 1" (disabled label), btn 1 = Configure P1
+             * btn 2 = "Player 2" (disabled label), btn 3 = Configure P2
+             * btn 4 = OK */
+            if (s_button_index == 1 || s_button_index == 3) {
                 s_return_screen = TD5_SCREEN_CONTROLLER_BINDING;
                 s_inner_state = 7;
             }
-            if (s_button_index == 1) {
+            if (s_button_index == 4) {
                 s_return_screen = TD5_SCREEN_OPTIONS_HUB;
                 s_inner_state = 7;
             }
@@ -5416,11 +5433,11 @@ static void Screen_DisplayOptions(void) {
         TD5_LOG_D(LOG_TAG, "DisplayOptions: init");
         frontend_load_tga("Front_End/MainMenu.tga", "Front_End/FrontEnd.zip");
         frontend_init_display_mode_state();
-        frontend_create_button("Resolution", -0xE0, 0, 0xE0, 0x20);
-        frontend_create_button("Fogging", -0xE0, 0, 0xE0, 0x20);
-        frontend_create_button("Speed Readout", -0xE0, 0, 0xE0, 0x20);
-        frontend_create_button("Camera Damping", -0xE0, 0, 0xE0, 0x20);
-        frontend_create_button("OK", -0xE0, 0, 0xE0, 0x20);
+        frontend_create_button("Resolution",    -0x120, 0, 0x120, 0x20);
+        frontend_create_button("Fogging",       -0x120, 0, 0x120, 0x20);
+        frontend_create_button("Speed Readout", -0x120, 0, 0x120, 0x20);
+        frontend_create_button("Camera Damping",-0x120, 0, 0x120, 0x20);
+        frontend_create_button("OK",            -0x60,  0, 0x60,  0x20);
         frontend_refresh_display_option_labels();
         s_anim_tick = 0;
         s_inner_state = 1;
