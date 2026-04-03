@@ -283,9 +283,10 @@ static int   s_bg_gal_blend;
 static float s_bg_gal_x, s_bg_gal_y;
 
 static int  s_control_options_surface;
-static int  s_sound_icon_surface = 0;       /* Controllers.tga (speaker icon, Sound Options) */
-static int  s_sound_volumebox_surface = 0;  /* VolumeBox.tga   (volume bar background)       */
-static int  s_sound_volumefill_surface = 0; /* VolumeFill.tga  (volume bar fill)              */
+static int  s_sound_icon_surface = 0;       /* Stereo.tga (stereo icon, Sound Options) */
+static int  s_sound_icon_mono_surface = 0;  /* Mono.tga   (mono icon,   Sound Options) */
+static int  s_sound_volumebox_surface = 0;  /* VolumeBox.tga   (volume bar background) */
+static int  s_sound_volumefill_surface = 0; /* VolumeFill.tga  (volume bar fill)       */
 static int  s_split_screen_surface = 0;     /* SplitScreen.tga (Two Player layout preview)    */
 static int  s_car_preview_prev_surface;
 static int  s_car_preview_next_surface;
@@ -2984,39 +2985,31 @@ static void frontend_render_display_options_overlay(float sx, float sy) {
 }
 
 static void frontend_render_sound_options_overlay(float sx, float sy) {
-    const char *sfx_mode[] = { "STEREO", "MONO" };
-    char sfx_volume[16];
-    char music_volume[16];
-
     if (!s_buttons[0].active) return;
     if (!s_anim_complete) return;
-    snprintf(sfx_volume, sizeof(sfx_volume), "%d", s_sound_option_sfx_volume);
-    snprintf(music_volume, sizeof(music_volume), "%d", s_sound_option_music_volume);
-    frontend_draw_value_text(sx, sy, 344, s_buttons[0].y + 6, sfx_mode[s_sound_option_sfx_mode & 1], 0xFFFFFFFF);
-    frontend_draw_value_text(sx, sy, 344, s_buttons[1].y + 6, sfx_volume, 0xFFFFFFFF);
-    frontend_draw_value_text(sx, sy, 344, s_buttons[2].y + 6, music_volume, 0xFFFFFFFF);
+    /* SFX Mode button shows STEREO/MONO text; volume buttons use bars only */
+    {
+        const char *sfx_mode_str[] = { "STEREO", "MONO" };
+        frontend_draw_value_text(sx, sy, 344, s_buttons[0].y + 6, sfx_mode_str[s_sound_option_sfx_mode & 1], 0xFFFFFFFF);
+    }
     for (int i = 0; i <= 2; i++) fe_draw_option_arrows(i, sx, sy);
 
-    /* All image positions from FUN_0041EA90 case6 steady-state (640x480 absolute):
-     *   EDI_base=110, ESI_base=81, EBP=EDI+0x11c=394
-     *
-     * Controllers.tga speaker icon: x=394, y=97, w=64, h=32
-     *   src_y = (ctrl_type+4)*32; default ctrl_type=0 → src_y=128 (row 4 of sheet)
-     * VolumeBox Music bg:  x=394, y=185, w=224, h=12  (ESI+0x68)
-     * VolumeFill Music:    x=395, y=186, w=0-222,h=10
-     * VolumeBox SFX bg:    x=394, y=225, w=224, h=12  (ESI+0x90)
-     * VolumeFill SFX:      x=395, y=226, w=0-222,h=10 */
+    /* Image positions from FUN_0041EA90 (640x480 absolute):
+     * Stereo/Mono icon: x=394, y=97, w=64, h=32
+     * VolumeBox SFX:  x=394, y=185, w=224, h=12
+     * VolumeFill SFX: x=395, y=186, w=0-222, h=10
+     * VolumeBox Mus:  x=394, y=225, w=224, h=12
+     * VolumeFill Mus: x=395, y=226, w=0-222, h=10 */
     td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
 
-    /* Speaker icon: 64x32 sprite sheet crop (row 4, src_y=128) */
-    if (s_sound_icon_surface > 0) {
-        int slot = s_sound_icon_surface - 1;
-        if (slot >= 0 && slot < FE_MAX_SURFACES && s_surfaces[slot].in_use && s_surfaces[slot].height > 0) {
-            float sh  = (float)s_surfaces[slot].height;
-            float v0  = 128.0f / sh;
-            float v1  = 160.0f / sh;
-            fe_draw_quad(394.0f * sx, 97.0f * sy, 64.0f * sx, 32.0f * sy,
-                         0xFFFFFFFF, s_surfaces[slot].tex_page, 0.0f, v0, 1.0f, v1);
+    /* Stereo or Mono icon based on current mode */
+    {
+        int icon_surface = (s_sound_option_sfx_mode & 1) ? s_sound_icon_mono_surface : s_sound_icon_surface;
+        if (icon_surface > 0) {
+            int slot = icon_surface - 1;
+            if (slot >= 0 && slot < FE_MAX_SURFACES && s_surfaces[slot].in_use)
+                fe_draw_quad(394.0f * sx, 97.0f * sy, 64.0f * sx, 32.0f * sy,
+                             0xFFFFFFFF, s_surfaces[slot].tex_page, 0.0f, 0.0f, 1.0f, 1.0f);
         }
     }
 
@@ -5588,9 +5581,10 @@ static void Screen_SoundOptions(void) {
         frontend_init_return_screen(TD5_SCREEN_SOUND_OPTIONS);
         TD5_LOG_D(LOG_TAG, "SoundOptions: init");
         frontend_load_tga("Front_End/MainMenu.tga", "Front_End/FrontEnd.zip");
-        s_sound_icon_surface      = frontend_load_tga("Controllers.tga", "Front End/frontend.zip");
-        s_sound_volumebox_surface  = frontend_load_tga("VolumeBox.tga",   "Front End/frontend.zip");
-        s_sound_volumefill_surface = frontend_load_tga("VolumeFill.tga",  "Front End/frontend.zip");
+        s_sound_icon_surface       = frontend_load_tga("Stereo.tga",    "Front End/frontend.zip");
+        s_sound_icon_mono_surface  = frontend_load_tga("Mono.tga",      "Front End/frontend.zip");
+        s_sound_volumebox_surface  = frontend_load_tga("VolumeBox.tga", "Front End/frontend.zip");
+        s_sound_volumefill_surface = frontend_load_tga("VolumeFill.tga","Front End/frontend.zip");
         frontend_create_button("SFX Mode",     -0xE0, 0, 0xE0, 0x20);
         frontend_create_button("SFX Volume",   -0xE0, 0, 0xE0, 0x20);
         frontend_create_button("Music Volume", -0xE0, 0, 0xE0, 0x20);

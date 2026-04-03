@@ -1231,10 +1231,14 @@ int td5_asset_decode_tga(const void *data, size_t size, void **pixels_out,
     if (!rgba) { free(rgb); return 0; }
 
     for (int i = 0; i < w * h; i++) {
-        rgba[i * 4 + 0] = rgb[i * 3 + 2]; /* B */
-        rgba[i * 4 + 1] = rgb[i * 3 + 1]; /* G */
-        rgba[i * 4 + 2] = rgb[i * 3 + 0]; /* R */
-        rgba[i * 4 + 3] = 0xFF;            /* A */
+        uint8_t r = rgb[i * 3 + 0];
+        uint8_t g = rgb[i * 3 + 1];
+        uint8_t b = rgb[i * 3 + 2];
+        rgba[i * 4 + 0] = b;
+        rgba[i * 4 + 1] = g;
+        rgba[i * 4 + 2] = r;
+        /* Black (0,0,0) is the color key for all frontend TGA sprites */
+        rgba[i * 4 + 3] = (r == 0 && g == 0 && b == 0) ? 0 : 0xFF;
     }
 
     free(rgb);
