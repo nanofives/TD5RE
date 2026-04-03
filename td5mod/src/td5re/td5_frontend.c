@@ -2533,16 +2533,25 @@ int td5_frontend_init_resources(void) {
     td5_plat_cd_set_volume(80);
     td5_sound_load_frontend_sfx();
 
-    /* Initialize lock tables with defaults:
-     * Cars 0-35 unlocked (includes Viper at index 35), 36 unlocked */
-    /* Lock table: binary 0x00463e4c - indices 0-15 unlocked, 16-36 locked */
+    /* Car lock table: DAT_00463e4c (original binary).
+     * Selector shows 23 cars (positions 0-22) in regular mode; DAT_00463e0c = 23.
+     * Positions 0-20: unlocked (21 cars visible + selectable).
+     *   Note: atp(16), ss1(17), 128(18), gtr(19), jag(20) are UNLOCKED in original.
+     * Positions 21-22: visible but locked (cat=SUPER7, sp4=R390).
+     * Positions 23-36: invisible in regular mode (cop-chase / cup unlock only). */
     memset(s_car_lock_table, 0, sizeof(s_car_lock_table));
-    for (int _li = 16; _li < 37; _li++) s_car_lock_table[_li] = 1;
-    s_total_unlocked_cars = 16; /* 16 unlocked cars: indices 0-15 */
+    for (int _li = 21; _li < 37; _li++) s_car_lock_table[_li] = 1;
+    s_total_unlocked_cars = 23; /* 23 visible in selector (21 unlocked + 2 locked-visible) */
 
-    /* Tracks 0-17 unlocked (Moscow=8 is unlocked), 18+ unlocked */
+    /* Track lock table: DAT_004668b0 (original binary).
+     * Selector shows 16 tracks in regular mode (DAT_00466840 = 16).
+     * Slots 0-7: unlocked (Moscow, Edinburgh, Sydney, Blue Ridge, Jarash,
+     *                       Newcastle, Maui, Courmayeur).
+     * Slots 8-15: visible but locked.
+     * Slots 16+: championship-only (not shown in regular selector). */
     memset(s_track_lock_table, 0, sizeof(s_track_lock_table));
-    s_total_unlocked_tracks = 18;
+    for (int _ti = 8; _ti < 26; _ti++) s_track_lock_table[_ti] = 1;
+    s_total_unlocked_tracks = 16; /* 16 visible tracks (8 unlocked + 8 locked-visible) */
 
     /* Background gallery slideshow (LoadExtrasGalleryImageSurfaces 0x40D590) */
     frontend_load_bg_gallery();
@@ -2995,6 +3004,13 @@ static void frontend_render_car_selection_preview(float sx, float sy) {
 
     if (s_anim_complete) {
         frontend_draw_value_text(sx, sy, 232, 106, frontend_get_car_display_name(actual_car), 0xFFFFFFFF);
+        /* LOCKED indicator: Ghidra Screen_CarSelection case 0xc:
+         * FUN_004242b0(SNK_LockedTxt, uVar8-0xea, uVar10-0x77) = (86, 121) in 640x480 */
+        if (!s_cheat_unlock_all && !s_network_active &&
+            actual_car >= 0 && actual_car < 37 &&
+            s_car_lock_table[actual_car] != 0) {
+            frontend_draw_value_text(sx, sy, 86, 121, "LOCKED", 0xFFFF4444);
+        }
         if (s_graphbars_surface > 0 && s_inner_state == 7) {
             fe_draw_surface_rect(s_graphbars_surface, 20.0f * sx, 310.0f * sy, 180.0f * sx, 120.0f * sy, 0xFFFFFFFF);
         }
@@ -3267,9 +3283,9 @@ static void fe_draw_button_9slice(float bx, float by, float bw, float bh,
     for (float x = bx + lw; x + rw < bx + bw; x += tw)
         fe_draw_quad(x, by, tw, th, 0xFFFFFFFF, tex, te_u0, te_v0, te_u1, te_v1);
 
-    /* Bottom: src (state*12+28, 96)-(state*12+32, 100) */
-    float be_u0 = (float)(state * 12 + 28) / BB_TEX_W;
-    float be_u1 = (float)(state * 12 + 32) / BB_TEX_W;
+    /* Bottom: src (28, 96)-(32, 100) — fixed, no state offset (Ghidra 0x425d37) */
+    float be_u0 = 28.0f / BB_TEX_W;
+    float be_u1 = 32.0f / BB_TEX_W;
     for (float x = bx + lw; x + rw < bx + bw; x += tw)
         fe_draw_quad(x, by + bh - th, tw, th, 0xFFFFFFFF, tex, be_u0, te_v0, be_u1, te_v1);
 
@@ -3279,14 +3295,14 @@ static void fe_draw_button_9slice(float bx, float by, float bw, float bh,
     /* Left: src (0, yb)-(26, yb+4) */
     float le_v0 = yb / BB_TEX_H;
     float le_v1 = (yb + 4.0f) / BB_TEX_H;
-    for (float y = by + 22.0f * sy; y < by + bh; y += th)
+    for (float y = by + 13.0f * sy; y < by + bh; y += th)
         fe_draw_quad(bx, y, lw, th, 0xFFFFFFFF, tex,
                      0.0f, le_v0, (float)BB_LW / BB_TEX_W, le_v1);
 
     /* Right: src (28, yb)-(56, yb+4) */
     float re_v0 = yb / BB_TEX_H;
     float re_v1 = (yb + 4.0f) / BB_TEX_H;
-    for (float y = by + 22.0f * sy; y < by + bh; y += th)
+    for (float y = by + 9.0f * sy; y < by + bh; y += th)
         fe_draw_quad(bx + bw - rw, y, rw, th, 0xFFFFFFFF, tex,
                      (float)BB_RX / BB_TEX_W, re_v0, 1.0f, re_v1);
 
@@ -3462,7 +3478,7 @@ void td5_frontend_render_ui_rects(void) {
         if (s_buttons[i].label[0] && s_font_page >= 0) {
             float text_w = fe_measure_text(s_buttons[i].label, sx);
             float tx = bx + (bw - text_w) * 0.5f;
-            float ty = by + (bh - (float)FONT_CELL * sy) * 0.5f;
+            float ty = by;  /* original draws label at Y=0 on pre-baked surface (FUN_00424560) */
             uint32_t text_color = 0xFFFFFFFF;
             if (s_buttons[i].disabled) text_color = 0xFF888888;
             fe_draw_text(tx, ty, s_buttons[i].label, text_color, sx, sy);
@@ -4125,7 +4141,7 @@ static void Screen_RaceTypeCategory(void) {
         break;
 
     case 1: /* Slide-in: 32 frames */
-        if (frontend_update_timed_animation(0x20, 1000) >= 1.0f) {
+        if (frontend_update_timed_animation(0x20, 533) >= 1.0f) {
             s_inner_state = 2;
         }
         break;
@@ -4241,7 +4257,7 @@ static void Screen_RaceTypeCategory(void) {
         break;
 
     case 7: /* Cup sub-menu slide-in: ~1000ms */
-        if (frontend_update_timed_animation(0x20, 1000) >= 1.0f) {
+        if (frontend_update_timed_animation(0x20, 533) >= 1.0f) {
             s_inner_state = 8;
         }
         break;
@@ -4463,7 +4479,7 @@ static void Screen_ConnectionBrowser(void) {
         break;
 
     case 2: /* Slide-in (~500ms) */
-        if (frontend_update_timed_animation(0x10, 500) >= 1.0f) {
+        if (frontend_update_timed_animation(0x10, 267) >= 1.0f) {
             s_anim_complete = 1;
             s_inner_state = 3;
         }
@@ -4538,7 +4554,7 @@ static void Screen_SessionPicker(void) {
         break;
 
     case 2: /* Slide-in (~500ms) */
-        if (frontend_update_timed_animation(0x10, 500) >= 1.0f) {
+        if (frontend_update_timed_animation(0x10, 267) >= 1.0f) {
             s_anim_complete = 1;
             s_inner_state = 3;
         }
@@ -4602,7 +4618,7 @@ static void Screen_CreateSession(void) {
         break;
 
     case 1: /* Slide-in (~500ms) */
-        if (frontend_update_timed_animation(0x10, 500) >= 1.0f) {
+        if (frontend_update_timed_animation(0x10, 267) >= 1.0f) {
             s_anim_complete = 1;
             s_inner_state = 2;
         }
@@ -4687,7 +4703,7 @@ static void Screen_NetworkLobby(void) {
 
     case 1: /* ANIMATE IN (~600ms) */
         /* Animate buttons sliding into position */
-        if (frontend_update_timed_animation(0x14, 600) >= 1.0f) {
+        if (frontend_update_timed_animation(0x14, 333) >= 1.0f) {
             frontend_play_sfx(4);
             s_anim_complete = 1;
             s_inner_state = 2;
@@ -5825,7 +5841,7 @@ static void Screen_CarSelection(void) {
             s_car_preview_next_surface = frontend_load_car_preview_surface(actual_car, s_selected_paint);
             frontend_begin_timed_animation();
         }
-        if (frontend_update_timed_animation(8, 150) >= 1.0f) {
+        if (frontend_update_timed_animation(8, 133) >= 1.0f) {
             if (s_car_preview_prev_surface > 0 && s_car_preview_prev_surface != s_car_preview_next_surface) {
                 frontend_release_surface(s_car_preview_prev_surface);
             }
@@ -5842,9 +5858,8 @@ static void Screen_CarSelection(void) {
         s_inner_state = 14;
         break;
 
-    case 14: /* Car preview slide-in from right, 25 frames */
-        s_anim_tick++;
-        if (s_anim_tick >= 0x19) {
+    case 14: /* Car preview slide-in from right, 25 frames (~417ms) */
+        if (frontend_update_timed_animation(0x19, 417) >= 1.0f) {
             s_inner_state = 7; /* return to interaction */
         }
         break;
@@ -5876,13 +5891,14 @@ static void Screen_CarSelection(void) {
     case 0x14: /* Prep slide-out */
         frontend_set_cursor_visible(0);
         frontend_play_sfx(5);
-        s_anim_tick = 0;
+        frontend_begin_timed_animation();
         s_inner_state = 0x15;
         break;
 
-    case 0x15: /* Cross-fade */
-        s_anim_tick++;
-        if (s_anim_tick >= 8) s_inner_state = 0x16;
+    case 0x15: /* Cross-fade (~133ms) */
+        if (frontend_update_timed_animation(8, 133) >= 1.0f) {
+            s_inner_state = 0x16;
+        }
         break;
 
     case 0x16: /* Release car surface */
@@ -5892,15 +5908,15 @@ static void Screen_CarSelection(void) {
         s_inner_state = 0x18;
         break;
 
-    case 0x18: /* Button slide-out (~750ms) */
-        if (frontend_update_timed_animation(0x18, 750) >= 1.0f) {
+    case 0x18: /* Button slide-out (~400ms) */
+        if (frontend_update_timed_animation(0x18, 400) >= 1.0f) {
+            frontend_begin_timed_animation();
             s_inner_state = 0x19;
         }
         break;
 
-    case 0x19: /* Screen wipe: vertical bar sweep */
-        s_anim_tick++;
-        if (s_anim_tick >= 16) {
+    case 0x19: /* Screen wipe: vertical bar sweep (~267ms) */
+        if (frontend_update_timed_animation(16, 267) >= 1.0f) {
             s_inner_state = 0x1A;
         }
         break;
