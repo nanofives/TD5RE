@@ -11,6 +11,7 @@
 #include "td5_frontend.h"
 #include "td5_asset.h"
 #include "td5_platform.h"
+#include "td5_save.h"
 #include "td5_sound.h"
 #include "td5re.h"
 #include "../../ddraw_wrapper/src/wrapper.h"
@@ -132,6 +133,7 @@ static uint32_t s_screen_entry_timestamp;
 static uint32_t s_anim_start_ms = 0;
 static uint32_t s_anim_elapsed_ms = 0;
 static int  s_anim_complete = 0;
+static float s_anim_t = 0.0f;          /* continuous 0..1 for smooth button position */
 static TD5_ScreenIndex s_previous_screen = (TD5_ScreenIndex)-1;
 
 /* Context / flow tracking (DAT_004962d4) */
@@ -163,6 +165,7 @@ static int  s_p2_transmission;
 static int  s_selected_track;           /* DAT_004a2c90            */
 static int  s_track_direction;          /* DAT_004a2c98: 0=fwd, 1=bwd */
 static int  s_track_max;               /* max track index for current mode */
+static int  s_score_category_index;    /* DAT_00497a68: current track in score table */
 
 #define FE_MAX_DISPLAY_MODES 64
 static TD5_DisplayMode s_display_modes[FE_MAX_DISPLAY_MODES];
@@ -444,6 +447,7 @@ static void frontend_begin_timed_animation(void) {
     s_anim_start_ms = td5_plat_time_ms();
     s_anim_elapsed_ms = s_anim_start_ms - s_screen_entry_timestamp;
     s_anim_tick = 0;
+    s_anim_t = 0.0f;
 }
 
 static float frontend_update_timed_animation(int max_tick, uint32_t duration_ms) {
@@ -461,6 +465,7 @@ static float frontend_update_timed_animation(int max_tick, uint32_t duration_ms)
     t = frontend_clamp01((float)(now - s_anim_start_ms) / (float)duration_ms);
     s_anim_tick = (int)(t * (float)max_tick + 0.5f);
     if (s_anim_tick > max_tick) s_anim_tick = max_tick;
+    s_anim_t = t;
     return t;
 }
 
@@ -647,6 +652,10 @@ static int frontend_load_tga_colorkey(const char *name, const char *archive,
         for (int ci = 0; ci < count; ci++) {
             uint8_t b_val = p[0], g_val = p[1], r_val = p[2];
             if (r_val == 255 && g_val == 0 && b_val == 0) {
+                p[3] = 0;
+            }
+            if (dest_page == SHARED_PAGE_FONT &&
+                b_val < 8 && g_val < 8 && r_val < 8) {
                 p[3] = 0;
             }
             p += 4;
@@ -2074,6 +2083,7 @@ void td5_frontend_set_screen(TD5_ScreenIndex index) {
     s_current_screen = index;
     s_inner_state = 0;
     s_anim_tick = 0;
+    s_anim_t = 0.0f;
     s_anim_start_ms = 0;
     s_anim_elapsed_ms = 0;
     s_anim_complete = 0;
@@ -2165,8 +2175,9 @@ int td5_frontend_display_loop(void) {
     /* 5. Presentation (flip / software blit) */
     td5_plat_present(1);
 
-    /* 7. Escape key handling -- return to parent screen from sub-menus */
-    if (frontend_check_escape()) {
+    /* 7. Escape key handling -- only when intro animation is complete (original
+     *    behavior: ESC is ignored during slide-in animations) */
+    if (s_anim_complete && frontend_check_escape()) {
         if (s_current_screen == TD5_SCREEN_MAIN_MENU) {
             if (s_inner_state == 4) {
                 s_inner_state = 5;
@@ -2538,23 +2549,53 @@ static int frontend_get_button_anim_state(int *out_mode, int *out_tick, int *out
     return (mode != FE_BUTTON_ANIM_NONE && max_tick > 0) ? 1 : 0;
 }
 
+/* Returns 1 if the current screen has timed button slide-in/out animations. */
+static int frontend_screen_has_button_anim(void) {
+    switch (s_current_screen) {
+    case TD5_SCREEN_MAIN_MENU:
+    case TD5_SCREEN_RACE_TYPE_MENU:
+    case TD5_SCREEN_QUICK_RACE:
+    case TD5_SCREEN_CONNECTION_BROWSER:
+    case TD5_SCREEN_SESSION_PICKER:
+    case TD5_SCREEN_NETWORK_LOBBY:
+    case TD5_SCREEN_OPTIONS_HUB:
+    case TD5_SCREEN_GAME_OPTIONS:
+    case TD5_SCREEN_CONTROL_OPTIONS:
+    case TD5_SCREEN_SOUND_OPTIONS:
+    case TD5_SCREEN_DISPLAY_OPTIONS:
+    case TD5_SCREEN_TWO_PLAYER_OPTIONS:
+    case TD5_SCREEN_MUSIC_TEST:
+    case TD5_SCREEN_CAR_SELECTION:
+    case TD5_SCREEN_TRACK_SELECTION:
+    case TD5_SCREEN_HIGH_SCORE:
+        return 1;
+    default:
+        return 0;
+    }
+}
+
 static float frontend_get_button_anim_x(int button_index, float base_x) {
     int mode = FE_BUTTON_ANIM_NONE;
     int tick = 0;
     int max_tick = 0;
     float t;
-    float offscreen_x;
-
-    if (!frontend_get_button_anim_state(&mode, &tick, &max_tick)) return base_x;
-
-    t = (float)tick / (float)max_tick;
-    if (t < 0.0f) t = 0.0f;
-    if (t > 1.0f) t = 1.0f;
     /* Race Type menu: all buttons slide from left (original behavior).
      * Other screens: odd buttons from right, even from left. */
-    offscreen_x = (s_current_screen == TD5_SCREEN_RACE_TYPE_MENU) ? -640.0f :
-                  (button_index & 1) ? 640.0f : -640.0f;
+    float offscreen_x = (s_current_screen == TD5_SCREEN_RACE_TYPE_MENU) ? -640.0f :
+                        (button_index & 1) ? 640.0f : -640.0f;
 
+    if (!frontend_get_button_anim_state(&mode, &tick, &max_tick)) {
+        /* Before the intro animation completes, keep buttons at their off-screen
+         * starting position. This prevents a one-frame flash of the final button
+         * layout before the slide-in animation begins. */
+        if (!s_anim_complete && frontend_screen_has_button_anim())
+            return offscreen_x;
+        return base_x;
+    }
+
+    /* Use continuous s_anim_t for smooth sub-frame motion at any frame rate.
+     * The integer s_anim_tick is only kept for game-logic compatibility. */
+    t = s_anim_t;
     if (mode == FE_BUTTON_ANIM_IN) {
         return base_x + (offscreen_x - base_x) * (1.0f - t);
     }
@@ -2810,11 +2851,152 @@ static void frontend_render_control_options_overlay(float sx, float sy) {
     fe_draw_text(300.0f * sx, 250.0f * sy, "Keyboard", 0xFFFFFFFF, sx * 0.85f, sy * 0.85f);
 }
 
+static void frontend_format_score_time(char *buf, size_t cap, int raw_ticks, int type) {
+    /* Convert from game ticks (30fps) to displayable time.
+     * Type 0/1: MM:SS.cc   Type 4: MM:SS.mmm */
+    if (type == 2) {
+        /* Points mode — raw value IS the point count */
+        snprintf(buf, cap, "%d", raw_ticks);
+        return;
+    }
+    int centiseconds = (raw_ticks * 100) / 30;
+    int total_sec = centiseconds / 100;
+    int frac = centiseconds % 100;
+    int minutes = total_sec / 60;
+    int seconds = total_sec % 60;
+    if (type == 4) {
+        int ms = (raw_ticks * 1000) / 30;
+        minutes = (ms / 1000) / 60;
+        seconds = (ms / 1000) % 60;
+        snprintf(buf, cap, "%02d:%02d.%03d", minutes, seconds, ms % 1000);
+    } else {
+        snprintf(buf, cap, "%02d:%02d.%02d", minutes, seconds, frac);
+    }
+}
+
+static int frontend_convert_speed(int raw, int kph_mode) {
+    /* Same conversion as HUD speedometer (td5_hud.c) */
+    if (kph_mode)
+        return (raw * 256 + 389) / 778;   /* KPH */
+    else
+        return (raw * 256 + 625) / 1252;  /* MPH */
+}
+
 static void frontend_render_high_score_overlay(float sx, float sy) {
-    float text_w;
     if (!s_anim_complete || s_inner_state < 6) return;
-    text_w = fe_measure_text("NO SCORES YET", sx);
-    fe_draw_text((320.0f * sx) - text_w * 0.5f, 220.0f * sy, "NO SCORES YET", 0xFFCCCCCC, sx, sy);
+
+    const TD5_NpcGroup *grp = td5_save_get_npc_group(s_score_category_index);
+    int speed_kph = td5_save_get_speed_units();
+    const char *speed_suffix = speed_kph ? "KPH" : "MPH";
+
+    /* Panel geometry (matches original 0x208 x 0x90 surface at center) */
+    float panel_w = 520.0f * sx;
+    float panel_h = 144.0f * sy;
+    float panel_x = (320.0f * sx) - panel_w * 0.5f;
+    float panel_y = (240.0f * sy) - panel_h * 0.5f + 20.0f * sy; /* slight offset below center */
+
+    /* Dark panel background */
+    td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
+    fe_draw_quad(panel_x, panel_y, panel_w, panel_h, 0xD0101020, -1, 0, 0, 1, 1);
+    td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
+
+    /* Column X positions (in 520px panel space, scaled to screen) */
+    float col_name  = panel_x + 16.0f  * sx;
+    float col_score = panel_x + 140.0f * sx;
+    float col_car   = panel_x + 228.0f * sx;
+    float col_avg   = panel_x + 352.0f * sx;
+    float col_top   = panel_x + 444.0f * sx;
+
+    /* Scale for small text within the panel */
+    float ts = 0.55f;  /* text scale relative to screen scale */
+
+    /* Track name header */
+    {
+        char track_name[80];
+        frontend_get_track_display_name(s_score_category_index, 1, track_name, sizeof(track_name));
+        float tnw = fe_measure_text(track_name, sx * 0.7f);
+        fe_draw_text((320.0f * sx) - tnw * 0.5f, panel_y - 22.0f * sy,
+                     track_name, 0xFFFFCC44, sx * 0.7f, sy * 0.7f);
+    }
+
+    if (!grp) {
+        float tw = fe_measure_text("NO SCORES YET", sx * ts);
+        fe_draw_text((320.0f * sx) - tw * 0.5f, panel_y + 60.0f * sy,
+                     "NO SCORES YET", 0xFFCCCCCC, sx * ts, sy * ts);
+        return;
+    }
+
+    int score_type = grp->header & 0xFF;
+
+    /* Column headers */
+    float hdr_y = panel_y + 4.0f * sy;
+    uint32_t hdr_color = 0xFFFFCC44;
+    fe_draw_text(col_name,  hdr_y, "NAME",  hdr_color, sx * ts, sy * ts);
+    {
+        const char *score_hdr = "TIME";
+        if (score_type == 1) score_hdr = "LAP";
+        else if (score_type == 2) score_hdr = "PTS";
+        fe_draw_text(col_score, hdr_y, score_hdr, hdr_color, sx * ts, sy * ts);
+    }
+    fe_draw_text(col_car,   hdr_y, "CAR",       hdr_color, sx * ts, sy * ts);
+    {
+        char avg_hdr[16], top_hdr[16];
+        snprintf(avg_hdr, sizeof(avg_hdr), "AVG %s", speed_suffix);
+        snprintf(top_hdr, sizeof(top_hdr), "TOP %s", speed_suffix);
+        fe_draw_text(col_avg, hdr_y, avg_hdr, hdr_color, sx * ts, sy * ts);
+        fe_draw_text(col_top, hdr_y, top_hdr, hdr_color, sx * ts, sy * ts);
+    }
+
+    /* 5 entry rows */
+    float row_y = panel_y + 22.0f * sy;
+    float row_h = 22.0f * sy;
+    for (int i = 0; i < 5; i++) {
+        const TD5_NpcEntry *e = &grp->entries[i];
+        float y = row_y + (float)i * row_h;
+        uint32_t row_color = 0xFFE0E0E0;
+        char buf[64];
+
+        /* Check if entry is empty (no name) */
+        if (e->name[0] == '\0') {
+            fe_draw_text(col_name, y, "---", 0xFF888888, sx * ts, sy * ts);
+            continue;
+        }
+
+        /* Rank */
+        snprintf(buf, sizeof(buf), "%d", i + 1);
+        fe_draw_text(panel_x + 2.0f * sx, y, buf, row_color, sx * ts, sy * ts);
+
+        /* Name (clipped to 13 chars max from struct) */
+        {
+            char name_buf[14];
+            memcpy(name_buf, e->name, 13);
+            name_buf[13] = '\0';
+            fe_draw_text(col_name, y, name_buf, row_color, sx * ts, sy * ts);
+        }
+
+        /* Score / Time */
+        frontend_format_score_time(buf, sizeof(buf), e->score, score_type);
+        fe_draw_text(col_score, y, buf, row_color, sx * ts, sy * ts);
+
+        /* Car name */
+        {
+            int cid = e->car_id & 0xFF;
+            const char *cname = frontend_get_car_display_name(cid);
+            /* Truncate long car names for column fit */
+            char cname_buf[20];
+            strncpy(cname_buf, cname, sizeof(cname_buf) - 1);
+            cname_buf[sizeof(cname_buf) - 1] = '\0';
+            fe_draw_text(col_car, y, cname_buf, row_color, sx * ts, sy * ts);
+        }
+
+        /* Average speed */
+        snprintf(buf, sizeof(buf), "%d", frontend_convert_speed(e->avg_speed, speed_kph));
+        fe_draw_text(col_avg, y, buf, row_color, sx * ts, sy * ts);
+
+        /* Top speed */
+        snprintf(buf, sizeof(buf), "%d", frontend_convert_speed(e->top_speed, speed_kph));
+        fe_draw_text(col_top, y, buf, row_color, sx * ts, sy * ts);
+    }
 }
 
 static void frontend_render_extras_gallery_overlay(float sx, float sy) {
@@ -2909,14 +3091,14 @@ static void fe_draw_button_9slice(float bx, float by, float bw, float bh,
     /* Left: src (0, yb)-(26, yb+4) */
     float le_v0 = yb / BB_TEX_H;
     float le_v1 = (yb + 4.0f) / BB_TEX_H;
-    for (float y = by + tl_h; y < by + bh; y += th)
+    for (float y = by + 22.0f * sy; y < by + bh; y += th)
         fe_draw_quad(bx, y, lw, th, 0xFFFFFFFF, tex,
                      0.0f, le_v0, (float)BB_LW / BB_TEX_W, le_v1);
 
     /* Right: src (28, yb)-(56, yb+4) */
     float re_v0 = yb / BB_TEX_H;
     float re_v1 = (yb + 4.0f) / BB_TEX_H;
-    for (float y = by + tr_h; y < by + bh; y += th)
+    for (float y = by + 22.0f * sy; y < by + bh; y += th)
         fe_draw_quad(bx + bw - rw, y, rw, th, 0xFFFFFFFF, tex,
                      (float)BB_RX / BB_TEX_W, re_v0, 1.0f, re_v1);
 
@@ -3076,20 +3258,6 @@ void td5_frontend_render_ui_rects(void) {
             fe_draw_button_9slice(bx, by, bw, bh, bb_state, sx, sy);
             td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
 
-            /* Green highlight border (RenderFrontendDisplayModeHighlight 0x4263e0).
-             * 2px outline, mouse-hover only. Inset 20/22/4/6 px from edges.
-             * Color 0xC000 → pure green ≈ (0,128,0). */
-            if (i == s_selected_button && s_selection_from_mouse &&
-                !s_buttons[i].disabled && ramp_t > 0.01f) {
-                uint32_t gc = 0xFF008000;
-                float inL = 20.0f * sx, inR = 22.0f * sx;
-                float inT = 4.0f * sy,  inB = 6.0f * sy;
-                float barV = 2.0f * sy, barH = 2.0f * sx;
-                fe_draw_quad(bx+inL, by+inT, bw-inL-inR, barV, gc, -1,0,0,1,1);
-                fe_draw_quad(bx+inL, by+bh-inB-barV, bw-inL-inR, barV, gc, -1,0,0,1,1);
-                fe_draw_quad(bx+inL, by+inT, barH, bh-inT-inB, gc, -1,0,0,1,1);
-                fe_draw_quad(bx+bw-inR-barH, by+inT, barH, bh-inT-inB, gc, -1,0,0,1,1);
-            }
         } else {
             fe_draw_quad(bx, by, bw, bh, bg_color, -1, 0, 0, 1, 1);
         }
@@ -3104,6 +3272,21 @@ void td5_frontend_render_ui_rects(void) {
             uint32_t text_color = 0xFFFFFFFF;
             if (s_buttons[i].disabled) text_color = 0xFF888888;
             fe_draw_text(tx, ty, s_buttons[i].label, text_color, sx, sy);
+        }
+
+        /* Green highlight border (RenderFrontendDisplayModeHighlight 0x4263e0).
+         * 2px outline, mouse-hover only. Inset 20/22/4/6 px from edges.
+         * Color 0xC000 → pure green ≈ (0,128,0). */
+        if (i == s_selected_button && s_selection_from_mouse &&
+            !s_buttons[i].disabled && ramp_t > 0.01f) {
+            uint32_t gc = 0xFF008000;
+            float inL = 20.0f * sx, inR = 22.0f * sx;
+            float inT = 4.0f * sy,  inB = 6.0f * sy;
+            float barV = 2.0f * sy, barH = 2.0f * sx;
+            fe_draw_quad(bx+inL, by+inT, bw-inL-inR, barV, gc, -1,0,0,1,1);
+            fe_draw_quad(bx+inL, by+bh-inB-barV, bw-inL-inR, barV, gc, -1,0,0,1,1);
+            fe_draw_quad(bx+inL, by+inT, barH, bh-inT-inB, gc, -1,0,0,1,1);
+            fe_draw_quad(bx+bw-inR-barH, by+inT, barH, bh-inT-inB, gc, -1,0,0,1,1);
         }
     }
 
@@ -3662,13 +3845,12 @@ static void Screen_MainMenu(void) {
     case 8: /* Slide-out prep: keep the software cursor visible for the next frontend screen */
         frontend_set_cursor_visible(0);
         frontend_play_sfx(5);
-        s_anim_tick = 0;
+        frontend_begin_timed_animation();
         s_inner_state = 9;
         break;
 
-    case 9: /* Slide-out animation: buttons scatter, 16 frames */
-        s_anim_tick++;
-        if (s_anim_tick >= 16) {
+    case 9: /* Slide-out animation: buttons scatter, ~500ms */
+        if (frontend_update_timed_animation(16, 500) >= 1.0f) {
             /* Controller validation: check joystick assignment */
             /* 1P modes (context 1,2,4): check P1 input source */
             /* 2P mode (context 3): also check P2 input source */
@@ -5764,8 +5946,6 @@ static void Screen_ExtrasGallery(void) {
  * States: 9
  * ======================================================================== */
 
-static int s_score_category_index;
-
 static void Screen_PostRaceHighScore(void) {
     switch (s_inner_state) {
     case 0: /* Init: load BG, create surfaces, buttons */
@@ -5808,15 +5988,28 @@ static void Screen_PostRaceHighScore(void) {
             int delta = frontend_option_delta();
             if (delta != 0) {
                 s_score_category_index += delta;
-                /* Wrap range: locked mode [0x13, DAT_00466840], unlocked [0, 0x19] */
+                /* Original wrap logic (0x4138A0-0x413921):
+                 * Two track ranges: [0 .. s_total_unlocked_tracks-1] and [0x13 .. 0x19].
+                 * In normal mode, tracks between s_total_unlocked_tracks and 0x13 are skipped.
+                 * In cheat mode (all unlocked), full range [0 .. 0x19] wraps seamlessly. */
                 if (s_cheat_unlock_all) {
-                    if (s_score_category_index < 0) s_score_category_index = 0x19;
                     if (s_score_category_index > 0x19) s_score_category_index = 0;
+                    if (s_score_category_index < 0)    s_score_category_index = 0x19;
                 } else {
-                    if (s_score_category_index < 0) s_score_category_index = s_total_unlocked_tracks - 1;
-                    if (s_score_category_index >= s_total_unlocked_tracks) s_score_category_index = 0;
+                    if (delta > 0) {
+                        /* Going right */
+                        if (s_score_category_index == s_total_unlocked_tracks)
+                            s_score_category_index = 0x13; /* skip gap → bonus tracks */
+                        else if (s_score_category_index > 0x19)
+                            s_score_category_index = 0;    /* wrap from end */
+                    } else {
+                        /* Going left */
+                        if (s_score_category_index < 0)
+                            s_score_category_index = 0x19; /* wrap to end */
+                        else if (s_score_category_index == 0x12)
+                            s_score_category_index = s_total_unlocked_tracks - 1; /* skip gap back */
+                    }
                 }
-                /* Redraw score panel */
             }
             if (s_button_index == 1) { /* OK */
                 s_inner_state = 7;
