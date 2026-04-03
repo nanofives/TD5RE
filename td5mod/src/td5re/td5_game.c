@@ -523,20 +523,22 @@ int td5_game_init_race_session(void) {
               g_td5.split_screen_mode, g_td5.time_trial_enabled, g_td5.traffic_enabled);
     g_game_type = g_td5.game_type;
     g_split_screen_mode = g_td5.split_screen_mode;
-    g_track_is_circuit = (g_td5.track_type == TD5_TRACK_CIRCUIT);
-    g_track_type_mode = g_track_is_circuit ? 1 : 0;
     g_replay_mode = s_replay_mode;
     g_racer_count = g_td5.time_trial_enabled ? 2 : TD5_MAX_RACER_SLOTS;
 
     /* ---- Step 4: Load track runtime data ---- */
+    /* NOTE: td5_asset_load_level sets g_td5.track_type from LEVELINF.DAT,
+     * so g_track_is_circuit / g_track_type_mode must be derived after this call. */
     td5_asset_load_level(g_td5.track_index);
-    TD5_LOG_I(LOG_TAG, "InitRace step 4/19: level runtime loaded track=%d", g_td5.track_index);
+    g_track_is_circuit = (g_td5.track_type == TD5_TRACK_CIRCUIT);
+    g_track_type_mode = g_track_is_circuit ? 1 : 0;
+    TD5_LOG_I(LOG_TAG, "InitRace step 4/19: level runtime loaded track=%d is_circuit=%d", g_td5.track_index, g_track_is_circuit);
     CK("ck4_after_load_level");
 
     /* ---- Step 5: Load vehicle assets for all active slots ---- */
     for (int i = 0; i < TD5_MAX_RACER_SLOTS; i++) {
         if (s_slot_state[i].state != 3) {
-            int car_for_slot = (i == 0) ? g_td5.car_index : 0;
+            int car_for_slot = (i == 0) ? g_td5.car_index : g_td5.ai_car_indices[i];
             td5_asset_load_vehicle(car_for_slot, i);
             TD5_LOG_I(LOG_TAG, "InitRace step 5/19: vehicle asset loaded slot=%d car_index=%d",
                       i, car_for_slot);
