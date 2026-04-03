@@ -903,6 +903,31 @@ TD5_GameOptions *td5_save_get_game_options(void)
 }
 
 /* ========================================================================
+ * High-score (NPC) table access
+ * ======================================================================== */
+
+const uint8_t *td5_save_get_npc_table(void)
+{
+    return s_npc_group_table;
+}
+
+const TD5_NpcGroup *td5_save_get_npc_group(int group_index)
+{
+    if (group_index < 0 || group_index >= TD5_CONFIG_NPC_GROUPS) return NULL;
+    return (const TD5_NpcGroup *)(s_npc_group_table + group_index * TD5_CONFIG_NPC_GROUP_SIZE);
+}
+
+int td5_save_get_speed_units(void)
+{
+    return (int)s_speed_units;
+}
+
+int td5_save_get_circuit_lap_count(void)
+{
+    return (int)s_circuit_lap_count;
+}
+
+/* ========================================================================
  * Unlock System
  *
  * Car lock table: 37 bytes, 0 = unlocked, 1 = locked.

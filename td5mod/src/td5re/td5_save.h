@@ -90,6 +90,26 @@ uint32_t td5_save_crc32(const uint8_t *data, size_t size);
 TD5_GameOptions *td5_save_get_game_options(void);
 
 /* ========================================================================
+ * High-score (NPC) table access
+ *
+ * 26 groups (one per track), 164 bytes each, 5 entries per group.
+ * Cast the returned pointer: ((const TD5_NpcGroup *)ptr)[group_index]
+ * ======================================================================== */
+
+/** Returns read-only pointer to the 4264-byte NPC group table (0x4643B8).
+ *  Returns NULL only if the save module is not initialized. */
+const uint8_t *td5_save_get_npc_table(void);
+
+/** Returns pointer to a specific NPC group (0-25). NULL if out of range. */
+const TD5_NpcGroup *td5_save_get_npc_group(int group_index);
+
+/** Returns the speed-units setting (0=MPH, 1=KPH). */
+int td5_save_get_speed_units(void);
+
+/** Returns the configured circuit lap count (2/4/6/8). */
+int td5_save_get_circuit_lap_count(void);
+
+/* ========================================================================
  * Unlock system
  *
  * Car lock table:   37 entries, 0=unlocked, 1=locked.
