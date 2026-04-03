@@ -3120,13 +3120,11 @@ static void frontend_render_high_score_overlay(float sx, float sy) {
     /* Panel geometry (matches original 0x208 x 0x90 surface at center) */
     float panel_w = 520.0f * sx;
     float panel_h = 144.0f * sy;
-    float panel_x = (320.0f * sx) - panel_w * 0.5f;
-    float panel_y = (240.0f * sy) - panel_h * 0.5f + 20.0f * sy; /* slight offset below center */
+    float panel_x = 115.0f * sx;
+    float panel_y = 177.0f * sy;
 
-    /* Dark panel background */
-    td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
-    fe_draw_quad(panel_x, panel_y, panel_w, panel_h, 0xD0101020, -1, 0, 0, 1, 1);
-    td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
+    /* Opaque black panel background (original: BltColorFillToSurface with 0) */
+    fe_draw_quad(panel_x, panel_y, panel_w, panel_h, 0xFF000000, -1, 0, 0, 1, 1);
 
     /* Column X positions (in 520px panel space, scaled to screen) */
     float col_name  = panel_x + 16.0f  * sx;
@@ -3138,15 +3136,6 @@ static void frontend_render_high_score_overlay(float sx, float sy) {
     /* Scale for small text within the panel */
     float ts = 0.55f;  /* text scale relative to screen scale */
 
-    /* Track name header */
-    {
-        char track_name[80];
-        frontend_get_track_display_name(s_score_category_index, 1, track_name, sizeof(track_name));
-        float tnw = fe_measure_text(track_name, sx * 0.7f);
-        fe_draw_text((320.0f * sx) - tnw * 0.5f, panel_y - 22.0f * sy,
-                     track_name, 0xFFFFCC44, sx * 0.7f, sy * 0.7f);
-    }
-
     if (!grp) {
         float tw = fe_measure_text("NO SCORES YET", sx * ts);
         fe_draw_text((320.0f * sx) - tw * 0.5f, panel_y + 60.0f * sy,
@@ -3157,7 +3146,7 @@ static void frontend_render_high_score_overlay(float sx, float sy) {
     int score_type = grp->header & 0xFF;
 
     /* Column headers */
-    float hdr_y = panel_y + 4.0f * sy;
+    float hdr_y = panel_y + 7.0f * sy;
     uint32_t hdr_color = 0xFFFFCC44;
     fe_draw_text(col_name,  hdr_y, "NAME",  hdr_color, sx * ts, sy * ts);
     {
@@ -3176,8 +3165,8 @@ static void frontend_render_high_score_overlay(float sx, float sy) {
     }
 
     /* 5 entry rows */
-    float row_y = panel_y + 22.0f * sy;
-    float row_h = 22.0f * sy;
+    float row_y = panel_y + 48.0f * sy;
+    float row_h = 16.0f * sy;
     for (int i = 0; i < 5; i++) {
         const TD5_NpcEntry *e = &grp->entries[i];
         float y = row_y + (float)i * row_h;
@@ -6242,8 +6231,8 @@ static void Screen_PostRaceHighScore(void) {
         s_anim_complete = 0;
         /* Create 0x208 x 0x90 score panel surface (black fill) */
         /* Create nav button + OK button */
-        frontend_create_button("Navigate", -100, 0, 100, 0x20);
-        frontend_create_button("OK",       -100, 0, 100, 0x20);
+        frontend_create_button(NULL,  -0x208, 0, 0x208, 0x20);
+        frontend_create_button("OK",  -0x130, 0, 0x60,  0x20);
         frontend_set_cursor_visible(1);
         frontend_play_sfx(5);
         s_score_category_index = 0;
