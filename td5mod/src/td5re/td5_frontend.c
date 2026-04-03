@@ -1105,7 +1105,7 @@ static int frontend_create_button(const char *label, int x, int y, int w, int h)
 
             /* Auto-layout: negative x (or both zero) triggers center-relative placement */
             if ((x < 0 || (x == 0 && y == 0)) && s_auto_button_idx < 9) {
-                s_buttons[i].x = FE_CENTER_X - FE_BTN_LEFT_OFFSET;
+                s_buttons[i].x = FE_CENTER_X - s_buttons[i].w;
                 s_buttons[i].y = FE_CENTER_Y + s_auto_button_y_offset[s_auto_button_idx];
                 s_auto_button_idx++;
             } else {
@@ -1259,9 +1259,12 @@ static void frontend_init_font_metrics_from_pixels(const uint8_t *pixels, int w,
         for (int x = 0; x < FONT_CELL; x++) {
             for (int y = 0; y < FONT_CELL; y++) {
                 const uint8_t *px = pixels + (((origin_y + y) * w + (origin_x + x)) * 4);
-                /* Decoded font pixels are in BGRA order; look for the last
-                 * non-black column rather than relying on alpha. */
-                if (px[0] != 0 || px[1] != 0 || px[2] != 0) {
+                /* After colorkey processing, transparent pixels have alpha=0
+                 * and glyph pixels have alpha=255.  Check alpha, not BGR —
+                 * the red colorkey leaves R=255 on background pixels, so
+                 * checking BGR channels fires on transparent background pixels
+                 * and produces advance=24 (full cell) for every glyph. */
+                if (px[3] != 0) {
                     last_nonblack_col = x;
                     break;
                 }
@@ -3401,6 +3404,12 @@ void td5_frontend_render_ui_rects(void) {
         }
     }
 
+    /* Background gallery slideshow (UpdateExtrasGalleryDisplay 0x40D830) --
+     * drawn before screen-specific overlays and buttons so it stays behind all UI;
+     * skip only EXTRAS_GALLERY which fills the full viewport */
+    if (s_current_screen != TD5_SCREEN_EXTRAS_GALLERY)
+        frontend_render_bg_gallery(sx, sy);
+
     switch (s_current_screen) {
     case TD5_SCREEN_RACE_TYPE_MENU:
         frontend_render_race_type_description(sx, sy);
@@ -3438,12 +3447,6 @@ void td5_frontend_render_ui_rects(void) {
     default:
         break;
     }
-
-    /* Background gallery slideshow (UpdateExtrasGalleryDisplay 0x40D830) --
-     * FlushFrontendSpriteBlits calls this unconditionally on every screen;
-     * skip only EXTRAS_GALLERY which fills the full viewport */
-    if (s_current_screen != TD5_SCREEN_EXTRAS_GALLERY)
-        frontend_render_bg_gallery(sx, sy);
 
     /* Draw buttons */
     for (int i = 0; i < FE_MAX_BUTTONS; i++) {
@@ -3487,6 +3490,13 @@ void td5_frontend_render_ui_rects(void) {
             else                                                     bb_state = 1;
 
             td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
+            /* Gold/selected state: fill button interior with dark purple (R=57,G=33,B=82).
+             * Original CreateFrontendDisplayModeButton (0x425DE0) applied COLORFILL with
+             * RGB565 0x390A ≈ this color before BltFasting the ButtonBits frame columns.
+             * Blue/unselected center is black = transparent via SRCCOLORKEY = correct. */
+            if (bb_state == 0) {
+                fe_draw_quad(bx, by, bw, bh, 0xFF392152u, -1, 0.0f, 0.0f, 1.0f, 1.0f);
+            }
             fe_draw_button_9slice(bx, by, bw, bh, bb_state, sx, sy);
             td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
 
