@@ -1798,11 +1798,25 @@ void td5_hud_render_minimap(int actor_slot)
 
             float half_dot = s_minimap_dot_size * 0.5f;
 
+            /* Clamp dot center to minimap boundary so it never escapes
+             * (td5_render_set_clip_rect is a no-op stub; hardware scissor
+             * is not active). */
+            float dot_x = mm_cx + dmx;
+            float dot_y = mm_cy + dmy;
+            float mm_left  = s_minimap_x + half_dot;
+            float mm_right = s_minimap_x + s_minimap_width  - half_dot;
+            float mm_top   = s_minimap_y + half_dot;
+            float mm_bot   = s_minimap_y + s_minimap_height - half_dot;
+            if (dot_x < mm_left)  dot_x = mm_left;
+            if (dot_x > mm_right) dot_x = mm_right;
+            if (dot_y < mm_top)   dot_y = mm_top;
+            if (dot_y > mm_bot)   dot_y = mm_bot;
+
             hud_build_quad(
                 &map_quad,
                 1, 0,
-                mm_cx + dmx - half_dot, mm_cy + dmy - half_dot,
-                mm_cx + dmx + half_dot, mm_cy + dmy + half_dot,
+                dot_x - half_dot, dot_y - half_dot,
+                dot_x + half_dot, dot_y + half_dot,
                 0.0f, 0.0f, 0.0f, 0.0f,
                 (r == g_actor_slot_map[0]) ? 0xFFFF0000 : 0xFFFFFF00,
                 HUD_DEPTH
@@ -1918,13 +1932,15 @@ void td5_hud_init_minimap_layout(void)
 
         int off = 0x4500 + (int)t * TD5_HUD_GLYPH_QUAD_SIZE;
         if (off + TD5_HUD_GLYPH_QUAD_SIZE <= TD5_HUD_MINIMAP_BUF_SIZE) {
+            /* tpage4.dat (scanback) is not extracted; draw solid dark background
+             * instead of the missing scanline texture to avoid magenta artifact. */
             hud_build_quad(
                 s_minimap_quad_buf + off,
-                0, scanback->texture_page,
+                1, 0,
                 tx0, ty0,
                 tx0 + tile_w, ty0 + tile_h,
-                bg_u0, bg_v0, bg_u1, bg_v1,
-                0xFFFFFFFF, HUD_DEPTH4
+                0.0f, 0.0f, 0.0f, 0.0f,
+                0xB0000000, HUD_DEPTH4
             );
         }
     }
