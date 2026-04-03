@@ -163,6 +163,7 @@ static int  s_p2_transmission;
 
 /* Track selection state */
 static int  s_selected_track;           /* DAT_004a2c90            */
+static int  s_attract_track;            /* random track for attract demo; never overwrites s_selected_track */
 static int  s_track_direction;          /* DAT_004a2c98: 0=fwd, 1=bwd */
 static int  s_track_max;               /* max track index for current mode */
 static int  s_score_category_index;    /* DAT_00497a68: current track in score table */
@@ -1336,9 +1337,12 @@ static int frontend_render_fade(void) {
 
 static void frontend_init_race_schedule(void) {
     g_td5.race_requested = 1;
-    g_td5.track_index = s_selected_track;
-    TD5_LOG_I(LOG_TAG, "InitializeRaceSeriesSchedule: car=%d track=%d type=%d",
-              s_selected_car, s_selected_track, s_selected_game_type);
+    g_td5.car_index   = frontend_current_car_index();
+    g_td5.track_index = (s_current_screen == TD5_SCREEN_ATTRACT_MODE)
+                        ? s_attract_track
+                        : s_selected_track;
+    TD5_LOG_I(LOG_TAG, "InitializeRaceSeriesSchedule: car=%d (resolved=%d) track=%d type=%d",
+              s_selected_car, g_td5.car_index, g_td5.track_index, s_selected_game_type);
 }
 
 static int frontend_find_display_mode_index(int width, int height, int bpp) {
@@ -2260,8 +2264,8 @@ int td5_frontend_display_loop(void) {
     if (s_current_screen == TD5_SCREEN_MAIN_MENU) {
         uint32_t now = td5_plat_time_ms();
         if ((now - s_attract_idle_timestamp) >= 60000) {
-            /* Pick a random track for the demo */
-            s_selected_track = rand() % 8;
+            /* Pick a random track for the demo without corrupting the player's selection */
+            s_attract_track = rand() % 8;
             td5_frontend_set_screen(TD5_SCREEN_ATTRACT_MODE);
         }
     }
@@ -3022,11 +3026,17 @@ static void frontend_render_car_selection_preview(float sx, float sy) {
     fe_draw_quad(232.0f * sx, 124.0f * sy, 408.0f * sx, 280.0f * sy, 0xC0101020, -1, 0, 0, 1, 1);
 
     if (s_inner_state == 11 && s_car_preview_prev_surface > 0 && s_car_preview_next_surface > 0) {
+        /* Cross-fade old -> new car image (state 11, ~133ms) */
         float t = frontend_clamp01((float)(td5_plat_time_ms() - s_anim_start_ms) / 150.0f);
         uint32_t old_alpha = ((uint32_t)((1.0f - t) * 255.0f) << 24) | 0x00FFFFFF;
         uint32_t new_alpha = ((uint32_t)(t * 255.0f) << 24) | 0x00FFFFFF;
         fe_draw_surface_rect(s_car_preview_prev_surface, 232.0f * sx, 124.0f * sy, 408.0f * sx, 280.0f * sy, old_alpha);
         fe_draw_surface_rect(s_car_preview_next_surface, 232.0f * sx, 124.0f * sy, 408.0f * sx, 280.0f * sy, new_alpha);
+    } else if (s_inner_state == 14 && s_car_preview_surface > 0) {
+        /* Slide-in from right: 0x19 (25) frames (~417ms) — 0x40DFC0 state 14 */
+        float t = frontend_clamp01((float)(td5_plat_time_ms() - s_anim_start_ms) / 417.0f);
+        float x = 640.0f + (232.0f - 640.0f) * t;
+        fe_draw_surface_rect(s_car_preview_surface, x * sx, 124.0f * sy, 408.0f * sx, 280.0f * sy, 0xFFFFFFFF);
     } else if (s_car_preview_surface > 0) {
         fe_draw_surface_rect(s_car_preview_surface, 232.0f * sx, 124.0f * sy, 408.0f * sx, 280.0f * sy, 0xFFFFFFFF);
     }
@@ -3395,8 +3405,9 @@ void td5_frontend_render_ui_rects(void) {
 
     /* Background gallery slideshow (UpdateExtrasGalleryDisplay 0x40D830) --
      * drawn before screen-specific overlays and buttons so it stays behind all UI;
-     * skip only EXTRAS_GALLERY which fills the full viewport */
-    if (s_current_screen != TD5_SCREEN_EXTRAS_GALLERY)
+     * skip EXTRAS_GALLERY (fills full viewport) and CAR_SELECTION (dark bg, overlays bleed) */
+    if (s_current_screen != TD5_SCREEN_EXTRAS_GALLERY &&
+        s_current_screen != TD5_SCREEN_CAR_SELECTION)
         frontend_render_bg_gallery(sx, sy);
 
     switch (s_current_screen) {
@@ -5876,12 +5887,16 @@ static void Screen_CarSelection(void) {
     }
         break;
 
-    case 12:
+    case 12: /* Reset timer so state 14 slide-in starts from t=0 */
+        frontend_begin_timed_animation();
+        s_inner_state = 14;
+        break;
+
     case 13:
         s_inner_state = 14;
         break;
 
-    case 14: /* Car preview slide-in from right, 25 frames (~417ms) */
+    case 14: /* Car preview slide-in from right, 25 frames (~417ms) — 0x40DFC0 state 14 */
         if (frontend_update_timed_animation(0x19, 417) >= 1.0f) {
             s_inner_state = 7; /* return to interaction */
         }
