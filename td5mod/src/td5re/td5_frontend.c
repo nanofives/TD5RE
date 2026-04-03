@@ -3793,7 +3793,7 @@ void td5_frontend_render_ui_rects(void) {
      * draw the track name and arrows on top.) */
     if (s_current_screen == TD5_SCREEN_HIGH_SCORE && s_anim_complete && s_inner_state >= 6) {
         char track_name[80];
-        frontend_get_track_display_name(s_score_category_index, 1, track_name, sizeof(track_name));
+        frontend_get_track_display_name(s_score_category_index, 0, track_name, sizeof(track_name));
         float nav_bx, nav_by, nav_bw, nav_bh;
         frontend_get_button_render_rect(0, sx, sy, &nav_bx, &nav_by, &nav_bw, &nav_bh);
         float tnw = fe_measure_text(track_name, sx);
@@ -6556,28 +6556,10 @@ static void Screen_PostRaceHighScore(void) {
             int delta = frontend_option_delta();
             if (delta != 0) {
                 s_score_category_index += delta;
-                /* Original wrap logic (0x4138A0-0x413921):
-                 * Two track ranges: [0 .. s_total_unlocked_tracks-1] and [0x13 .. 0x19].
-                 * In normal mode, tracks between s_total_unlocked_tracks and 0x13 are skipped.
-                 * In cheat mode (all unlocked), full range [0 .. 0x19] wraps seamlessly. */
-                if (s_cheat_unlock_all) {
-                    if (s_score_category_index > 0x19) s_score_category_index = 0;
-                    if (s_score_category_index < 0)    s_score_category_index = 0x19;
-                } else {
-                    if (delta > 0) {
-                        /* Going right */
-                        if (s_score_category_index == s_total_unlocked_tracks)
-                            s_score_category_index = 0x13; /* skip gap → bonus tracks */
-                        else if (s_score_category_index > 0x19)
-                            s_score_category_index = 0;    /* wrap from end */
-                    } else {
-                        /* Going left */
-                        if (s_score_category_index < 0)
-                            s_score_category_index = 0x19; /* wrap to end */
-                        else if (s_score_category_index == 0x12)
-                            s_score_category_index = s_total_unlocked_tracks - 1; /* skip gap back */
-                    }
-                }
+                /* High score screen: all 26 tracks+cups accessible regardless of lock state.
+                 * Simple wrap [0..0x19]. */
+                if (s_score_category_index > 0x19) s_score_category_index = 0;
+                if (s_score_category_index < 0)    s_score_category_index = 0x19;
             }
             if (s_button_index == 1) { /* OK */
                 s_inner_state = 7;
