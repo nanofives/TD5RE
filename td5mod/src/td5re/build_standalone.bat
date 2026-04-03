@@ -87,7 +87,7 @@ REM preventing the static-library symbol pruning problem.
 REM ---------------------------------------------------------------------------
 
 echo Linking td5re.exe...
-"%GCC%" -m32 -static -o %BUILDDIR%\td5re.exe ^
+"%GCC%" -m32 -mwindows -static -o %BUILDDIR%\td5re.exe ^
     %BUILDDIR%\main.o %RESOBJ% ^
     -L%BUILDDIR% -Wl,--whole-archive -ltd5re -Wl,--no-whole-archive ^
     -L%WRAPPER_BUILDDIR% -lddraw_wrapper ^
