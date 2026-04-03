@@ -2574,11 +2574,13 @@ static void frontend_advance_bg_gallery(void) {
     do { next = rand() % 5; } while (next == s_bg_gal_current && ++n < 8);
     s_bg_gal_current = next;
 
-    /* Random display position: X in [140, 500-w], Y in [84, 420] */
+    /* Random display position, clamped to keep the image fully on screen (640x480) */
     int iw = s_bg_gallery[next].width;
-    int range_x = 500 - iw;
-    s_bg_gal_x = (float)((range_x > 0 ? rand() % range_x : 0) + 140);
-    s_bg_gal_y = (float)(rand() % 336 + 84);
+    int ih = s_bg_gallery[next].height;
+    int range_x = 640 - iw;
+    int range_y = 480 - ih;
+    s_bg_gal_x = (float)((range_x > 0 ? rand() % range_x : 0));
+    s_bg_gal_y = (float)((range_y > 0 ? rand() % range_y : 0));
     s_bg_gal_blend = 0x100;
 }
 
@@ -3438,8 +3440,8 @@ void td5_frontend_render_ui_rects(void) {
     }
 
     /* Background gallery slideshow (UpdateExtrasGalleryDisplay 0x40D830) --
-     * skip on the credits gallery screen which fills the whole viewport */
-    if (s_current_screen != TD5_SCREEN_EXTRAS_GALLERY)
+     * original only runs on the Extras/Music Test screen (ScreenMusicTestExtras 0x418460) */
+    if (s_current_screen == TD5_SCREEN_MUSIC_TEST)
         frontend_render_bg_gallery(sx, sy);
 
     /* Draw buttons */
