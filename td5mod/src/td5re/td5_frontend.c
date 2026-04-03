@@ -326,6 +326,8 @@ static int s_carsel_curve_surface = 0;
 static int s_carsel_topbar_surface = 0;
 static int s_graphbars_surface = 0;
 static int s_car_preview_surface = 0;
+static char s_car_spec[17][48]; /* config.nfo fields (0-16) for stats sub-screen */
+static int  s_car_spec_car = -1; /* which car index is currently cached */
 static int s_track_preview_surface = 0;
 static int s_font_page = -1;
 static int s_cursor_tex_page = -1;  /* page 896: snkmouse.tga cursor */
@@ -3026,6 +3028,123 @@ static void frontend_render_race_type_description(float sx, float sy) {
     fe_draw_text(panel_x + (panel_w - fe_measure_text(lines[desc_index][3], sx * 0.5f)) * 0.5f, panel_y + 56.0f * sy, lines[desc_index][3], 0xFFFFFFFF, sx * 0.5f, sy * 0.5f);
 }
 
+/* --- Car stats sub-screen (0x40DFC0 state 0xF) ------------------------------------ */
+
+/* SNK_Layout_Types (Language.dll 0x10006ED0): char - 'A' = index */
+static const char *k_stat_layout_types[] = {
+    "FRONT/REAR", "FRONT/4-WHEEL", "FRONT/FRONT",
+    "MID/4-WHEEL", "MID/REAR", "UNKNOWN"
+};
+/* SNK_Engine_Types (Language.dll 0x10006EE8): char - 'A' = index */
+static const char *k_stat_engine_types[] = {
+    "V10 ALUMINIUM", "V8 ALUMINIUM BLOCK", "V8 SUPERCHARGED",
+    "V8 ALUMINIUM", "DOHC TWIN TURBO", "V8",
+    "FORD IRON BLOCK", "PONTIAC IRON BLOCK", "V8 IRON BLOCK",
+    "V8 IRON BLOCK HEMI", "V12", "ALUMINIUM BLOCK",
+    "4 CYLINDER", "V6 SUPERCHARGED", "V10 SUPERCHARGED",
+    "V8 DOHC", "V8 TWIN TURBO", "V12 IRON BLOCK", "UNKNOWN"
+};
+
+static void frontend_load_car_spec_fields(int car_index) {
+    int sz = 0, field;
+    size_t i;
+    char *data;
+    if (car_index == s_car_spec_car) return;
+    s_car_spec_car = car_index;
+    for (field = 0; field < 17; field++) s_car_spec[field][0] = '\0';
+    if (car_index < 0 || car_index >= 37) return;
+    data = (char *)td5_asset_open_and_read("config.nfo", s_car_zip_paths[car_index], &sz);
+    if (!data || sz <= 0) return;
+    field = 0; i = 0;
+    while (field < 17 && i < (size_t)sz) {
+        size_t j = 0;
+        while (i < (size_t)sz && data[i] != '\n' && data[i] != '\r') {
+            if (j + 1 < sizeof(s_car_spec[0]))
+                s_car_spec[field][j++] = data[i];
+            i++;
+        }
+        s_car_spec[field][j] = '\0';
+        while (i < (size_t)sz && (data[i] == '\n' || data[i] == '\r')) i++;
+        field++;
+    }
+    free(data);
+}
+
+static void frontend_fmt_spec(char *out, size_t cap, const char *raw) {
+    size_t i;
+    for (i = 0; raw[i] && i + 1 < cap; i++)
+        out[i] = (raw[i] == '_') ? ' ' : raw[i];
+    out[i] = '\0';
+}
+
+static void frontend_render_car_stats_overlay(float sx, float sy) {
+    /* 14 rows: SNK_Config_Hdrs + config.nfo fields 2-16.
+     * Rendered in the car preview area (x=232, y=124, 408x280).
+     * Headers dim gray on left, values white on right. */
+    static const struct { const char *hdr; int fi; int exp; } k_rows[] = {
+        /* exp: 0=raw value, 1=layout type, 2=engine type, 3=tire pair (fi + fi+1) */
+        { "LAYOUT:",     2,  1 },
+        { "GEARS:",      3,  0 },
+        { "PRICE:",      4,  0 },
+        { "TIRES:",      5,  3 },
+        { "TOP SPEED:",  7,  0 },
+        { "0-60 MPH:",   8,  0 },
+        { "60-0 MPH:",   9,  0 },
+        { "1/4 MILE:",  10,  0 },
+        { "ENGINE:",    11,  2 },
+        { "COMPRESS:",  12,  0 },
+        { "DISPLAC:",   13,  0 },
+        { "LAT. ACC:",  14,  0 },
+        { "TORQUE:",    15,  0 },
+        { "HP:",        16,  0 },
+    };
+    int n_layout = (int)(sizeof(k_stat_layout_types)/sizeof(k_stat_layout_types[0]));
+    int n_engine = (int)(sizeof(k_stat_engine_types)/sizeof(k_stat_engine_types[0]));
+    float tsc = 0.5f;
+    float hx = 234.0f * sx;   /* header column x */
+    float vx = 430.0f * sx;   /* value column x */
+    float y0 = 130.0f * sy;   /* first row y */
+    float dy = 11.5f * sy;    /* row spacing */
+    char val[64];
+    int i;
+
+    for (i = 0; i < 14; i++) {
+        float y = y0 + (float)i * dy;
+        const char *raw = (k_rows[i].fi < 17) ? s_car_spec[k_rows[i].fi] : "";
+        int idx;
+
+        fe_draw_text(hx, y, k_rows[i].hdr, 0xFFBBBBBB, tsc * sx, tsc * sy);
+
+        switch (k_rows[i].exp) {
+        case 1: /* layout type: char - 'A' */
+            idx = (raw[0] >= 'A' && raw[0] <= 'Z') ? raw[0] - 'A' : -1;
+            fe_draw_text(vx, y,
+                         (idx >= 0 && idx < n_layout) ? k_stat_layout_types[idx] : raw,
+                         0xFFFFFFFF, tsc * sx, tsc * sy);
+            break;
+        case 2: /* engine type: char - 'A' */
+            idx = (raw[0] >= 'A' && raw[0] <= 'Z') ? raw[0] - 'A' : -1;
+            fe_draw_text(vx, y,
+                         (idx >= 0 && idx < n_engine) ? k_stat_engine_types[idx] : raw,
+                         0xFFFFFFFF, tsc * sx, tsc * sy);
+            break;
+        case 3: /* front/rear tire combined */
+        {
+            char f[24], r[24];
+            frontend_fmt_spec(f, sizeof(f), raw);
+            frontend_fmt_spec(r, sizeof(r), (k_rows[i].fi+1 < 17) ? s_car_spec[k_rows[i].fi+1] : "");
+            snprintf(val, sizeof(val), "%s/%s", f, r);
+            fe_draw_text(vx, y, val, 0xFFFFFFFF, tsc * sx, tsc * sy);
+            break;
+        }
+        default:
+            frontend_fmt_spec(val, sizeof(val), raw);
+            fe_draw_text(vx, y, val, 0xFFFFFFFF, tsc * sx, tsc * sy);
+            break;
+        }
+    }
+}
+
 static void frontend_render_car_selection_preview(float sx, float sy) {
     int actual_car = frontend_current_car_index();
 
@@ -3068,6 +3187,9 @@ static void frontend_render_car_selection_preview(float sx, float sy) {
         float t = frontend_clamp01((float)(td5_plat_time_ms() - s_anim_start_ms) / 620.0f);
         float x = 1424.0f - 1192.0f * t;  /* 1424 → 232 */
         fe_draw_surface_rect(s_car_preview_surface, x * sx, 124.0f * sy, 408.0f * sx, 280.0f * sy, 0xFFFFFFFF);
+    } else if (s_inner_state == 15) {
+        /* Stats sub-screen (state 0xF): show spec sheet text, not the car image */
+        frontend_render_car_stats_overlay(sx, sy);
     } else if (s_inner_state != 12 && s_inner_state != 13 && s_car_preview_surface > 0) {
         /* Static: states 12/13 are pass-through transition ticks — skip to avoid 1-frame flash */
         fe_draw_surface_rect(s_car_preview_surface, 232.0f * sx, 124.0f * sy, 408.0f * sx, 280.0f * sy, 0xFFFFFFFF);
@@ -5926,6 +6048,7 @@ static void Screen_CarSelection(void) {
         break;
 
     case 10: /* Clear car preview area, prep for new image load */
+        s_car_spec_car = -1; /* invalidate spec cache on car/paint change */
         s_anim_complete = 1;
         s_inner_state = 11;
         break;
@@ -5965,12 +6088,9 @@ static void Screen_CarSelection(void) {
         }
         break;
 
-    case 15: /* Stats/Config sub-screen: show GraphBars panel, wait for input */
-        /* Original (0x40DFC0 state 0xf): renders SNK_Config_Hdrs + stat values from
-         * DAT_0049b6fc (runtime buffer, 17 entries * 0x30 bytes per car).
-         * In the source port, stat data is not loaded, so display GraphBars only. */
+    case 15: /* Stats sub-screen (0x40DFC0 state 0xF): SNK_Config_Hdrs + config.nfo values */
+        frontend_load_car_spec_fields(frontend_current_car_index());
         if (s_input_ready && s_button_index >= 0) {
-            /* Any tab or OK/Back press exits the stats view */
             s_car_preview_overlay = 2;
             s_inner_state = 7;
         }
