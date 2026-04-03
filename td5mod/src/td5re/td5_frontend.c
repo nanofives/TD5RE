@@ -3013,29 +3013,34 @@ static void frontend_render_sound_options_overlay(float sx, float sy) {
         }
     }
 
-    /* Volume bars: Music first (y=185), then SFX (y=225) */
-    static const float k_bar_y[2]  = { 185.0f, 225.0f };
-    static const float k_fill_y[2] = { 186.0f, 226.0f };
-    int vols[2] = { s_sound_option_music_volume, s_sound_option_sfx_volume };
+    /* Volume bars: SFX = button[1], Music = button[2]
+     * Each bar sits to the right of its button at x=344, vertically
+     * centred in the button height (32px). Bar=12px tall, fill=10px. */
+    {
+        int bar_btns[2]  = { 1, 2 }; /* SFX Volume, Music Volume */
+        int vols[2]      = { s_sound_option_sfx_volume, s_sound_option_music_volume };
 
-    for (int vi = 0; vi < 2; vi++) {
-        float bar_y  = k_bar_y[vi]  * sy;
-        float fill_y = k_fill_y[vi] * sy;
-        int   vol    = vols[vi];
-        float fill_w = (float)vol / 100.0f * 222.0f * sx;
+        for (int vi = 0; vi < 2; vi++) {
+            int   btn    = bar_btns[vi];
+            float bar_x  = 344.0f * sx;
+            float bar_y  = ((float)s_buttons[btn].y + 10.0f) * sy; /* centre 12px in 32px */
+            float fill_y = ((float)s_buttons[btn].y + 11.0f) * sy; /* centre 10px in 32px */
+            int   vol    = vols[vi];
+            float fill_w = (float)vol / 100.0f * 222.0f * sx;
 
-        if (s_sound_volumebox_surface > 0) {
-            int slot = s_sound_volumebox_surface - 1;
-            if (slot >= 0 && slot < FE_MAX_SURFACES && s_surfaces[slot].in_use)
-                fe_draw_quad(394.0f * sx, bar_y, 224.0f * sx, 12.0f * sy,
-                             0xFFFFFFFF, s_surfaces[slot].tex_page, 0.0f, 0.0f, 1.0f, 1.0f);
-        }
-        if (fill_w > 0.0f && s_sound_volumefill_surface > 0) {
-            int slot = s_sound_volumefill_surface - 1;
-            if (slot >= 0 && slot < FE_MAX_SURFACES && s_surfaces[slot].in_use) {
-                float u1 = (float)vol / 100.0f;
-                fe_draw_quad(395.0f * sx, fill_y, fill_w, 10.0f * sy,
-                             0xFFFFFFFF, s_surfaces[slot].tex_page, 0.0f, 0.0f, u1, 1.0f);
+            if (s_sound_volumebox_surface > 0) {
+                int slot = s_sound_volumebox_surface - 1;
+                if (slot >= 0 && slot < FE_MAX_SURFACES && s_surfaces[slot].in_use)
+                    fe_draw_quad(bar_x, bar_y, 224.0f * sx, 12.0f * sy,
+                                 0xFFFFFFFF, s_surfaces[slot].tex_page, 0.0f, 0.0f, 1.0f, 1.0f);
+            }
+            if (fill_w > 0.0f && s_sound_volumefill_surface > 0) {
+                int slot = s_sound_volumefill_surface - 1;
+                if (slot >= 0 && slot < FE_MAX_SURFACES && s_surfaces[slot].in_use) {
+                    float u1 = (float)vol / 100.0f;
+                    fe_draw_quad(bar_x + 1.0f * sx, fill_y, fill_w, 10.0f * sy,
+                                 0xFFFFFFFF, s_surfaces[slot].tex_page, 0.0f, 0.0f, u1, 1.0f);
+                }
             }
         }
     }
