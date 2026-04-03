@@ -3273,16 +3273,15 @@ static void frontend_render_car_selection_preview(float sx, float sy) {
             fe_draw_surface_rect(s_carsel_curve_surface,  36.0f * sx, 408.0f * sy,  80.0f * sx,  56.0f * sy, 0xFFFFFFFF);
     }
 
-    /* Car preview area backing and car image */
+    /* Car preview area: no opaque backing — original preserved the primary surface (MainMenu.tga
+     * car art) which shows through here; CarPic TGAs are fully opaque and cover the area. */
     if (s_inner_state == 15) {
-        /* Stats sub-screen: draw car behind a semi-transparent dark quad, then spec text on top */
+        /* Stats sub-screen: draw car, then semi-transparent dark quad, then spec text */
         if (s_car_preview_surface > 0)
             fe_draw_surface_rect(s_car_preview_surface, 232.0f * sx, 124.0f * sy, 408.0f * sx, 280.0f * sy, 0xFFFFFFFF);
         fe_draw_quad(232.0f * sx, 124.0f * sy, 408.0f * sx, 280.0f * sy, 0xB0101020, -1, 0, 0, 1, 1);
         frontend_render_car_stats_overlay(sx, sy);
     } else {
-        /* All other states: opaque dark backing, then car animation */
-        fe_draw_quad(232.0f * sx, 124.0f * sy, 408.0f * sx, 280.0f * sy, 0xFF101020, -1, 0, 0, 1, 1);
         if (s_inner_state == 11 && s_car_preview_prev_surface > 0) {
             /* Old car slides out to the right (state 11, ~433ms) — animPhase 0x0B: offset = counter*0x20 */
             float t = frontend_clamp01((float)(td5_plat_time_ms() - s_anim_start_ms) * 2.0f / 433.0f);
