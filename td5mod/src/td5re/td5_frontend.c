@@ -271,6 +271,16 @@ static int  s_fade_table_index;
 static int  s_gallery_pic_index;
 static int  s_gallery_pic_surface;
 static int  s_gallery_visited_mask;
+
+/* Background gallery slideshow (LoadExtrasGalleryImageSurfaces / UpdateExtrasGalleryDisplay)
+ * pic1-5.tga from Extras.zip cycle as a semi-transparent overlay during frontend navigation. */
+typedef struct { int width; int height; } BgGalImg;
+static BgGalImg s_bg_gallery[5];
+static int   s_bg_gal_loaded;
+static int   s_bg_gal_current;
+static int   s_bg_gal_blend;
+static float s_bg_gal_x, s_bg_gal_y;
+
 static int  s_control_options_surface;
 static int  s_car_preview_prev_surface;
 static int  s_car_preview_next_surface;
@@ -368,7 +378,8 @@ static const uint8_t k_font_glyph_advance_default[96] = {
 #define SHARED_PAGE_CURSOR    896
 #define SHARED_PAGE_BTNLIGHTS 895
 #define SHARED_PAGE_ARROWBTNZ 894  /* ArrowButtonz.tga 12x36 sprite sheet */
-#define SHARED_PAGE_MIN       893  /* lowest shared page -- don't clear below this */
+#define SHARED_PAGE_BG_GALLERY 888 /* 5 pages 888-892: background slideshow pic1-5.tga */
+#define SHARED_PAGE_MIN       888  /* lowest shared page -- don't clear below this */
 #define FE_TITLE_PAGE_BASE    931
 
 static void frontend_note_activity(void) {
@@ -945,6 +956,7 @@ typedef struct {
     int x, y, w, h;
     int disabled;
     int highlight_ramp;     /* 0-6: smooth highlight fade (original uses 6-step ramp) */
+    int is_selector;        /* 1 = left/right selector widget; always uses blue 9-slice */
     char label[64];
 } FE_Button;
 
@@ -1080,6 +1092,7 @@ static int frontend_create_button(const char *label, int x, int y, int w, int h)
             s_buttons[i].active = 1;
             s_buttons[i].disabled = 0;
             s_buttons[i].highlight_ramp = 0;
+            s_buttons[i].is_selector = 0;
 
             /* Determine width: if negative x, the absolute value is the width
              * (original convention). Otherwise use explicit w, defaulting to 224. */
@@ -1724,6 +1737,7 @@ static int frontend_check_escape(void) {
 static void fe_draw_text(float x, float y, const char *text, uint32_t color, float sx, float sy);
 static void frontend_fill_rect(int layer, int x, int y, int w, int h, uint32_t color);
 static void fe_draw_option_arrows(int btn_idx, float sx, float sy);
+static void frontend_load_bg_gallery(void);
 
 static void frontend_begin_text_input(char *buffer, int capacity) {
     memset(&s_text_input_ctx, 0, sizeof(s_text_input_ctx));
@@ -2530,7 +2544,96 @@ int td5_frontend_init_resources(void) {
     memset(s_track_lock_table, 0, sizeof(s_track_lock_table));
     s_total_unlocked_tracks = 18;
 
+    /* Background gallery slideshow (LoadExtrasGalleryImageSurfaces 0x40D590) */
+    frontend_load_bg_gallery();
+
     return 1;
+}
+
+/* ========================================================================
+ * Background Gallery Slideshow (0x40D590 / 0x40D750 / 0x40D830)
+ *
+ * pic1-5.tga from Extras.zip are cross-faded at random positions over the
+ * main menu background.  Called from td5_frontend_init_resources (load) and
+ * td5_frontend_render_ui_rects (update + draw) every frame.
+ * ======================================================================== */
+
+static void frontend_advance_bg_gallery(void) {
+    /* Pick a different random image (0x40D750: AdvanceExtrasGallerySlideshow) */
+    int next = s_bg_gal_current;
+    int n = 0;
+    do { next = rand() % 5; } while (next == s_bg_gal_current && ++n < 8);
+    s_bg_gal_current = next;
+
+    /* Random display position: X in [140, 500-w], Y in [84, 420] */
+    int iw = s_bg_gallery[next].width;
+    int range_x = 500 - iw;
+    s_bg_gal_x = (float)((range_x > 0 ? rand() % range_x : 0) + 140);
+    s_bg_gal_y = (float)(rand() % 336 + 84);
+    s_bg_gal_blend = 0x100;
+}
+
+static void frontend_load_bg_gallery(void) {
+    static const char * const names[5] = {
+        "pic1.tga", "pic2.tga", "pic3.tga", "pic4.tga", "pic5.tga"
+    };
+    if (s_bg_gal_loaded) return;
+    for (int i = 0; i < 5; i++) {
+        int page = SHARED_PAGE_BG_GALLERY + i;
+        int sz = 0;
+        void *data = td5_asset_open_and_read(names[i], "Front End/Extras/Extras.zip", &sz);
+        if (!data || sz <= 0) {
+            TD5_LOG_W(LOG_TAG, "BgGallery: failed to load %s", names[i]);
+            continue;
+        }
+        void *pixels = NULL; int w = 0, h = 0;
+        if (!td5_asset_decode_tga(data, (size_t)sz, &pixels, &w, &h) || !pixels) {
+            free(data); continue;
+        }
+        free(data);
+        if (td5_plat_render_upload_texture(page, pixels, w, h, 2)) {
+            s_bg_gallery[i].width  = w;
+            s_bg_gallery[i].height = h;
+            TD5_LOG_I(LOG_TAG, "BgGallery[%d]: %s %dx%d page=%d", i, names[i], w, h, page);
+        }
+        free(pixels);
+    }
+    s_bg_gal_current = 0;
+    s_bg_gal_blend   = 0x100;
+    s_bg_gal_x       = 140.0f;
+    s_bg_gal_y       = 84.0f;
+    s_bg_gal_loaded  = 1;
+}
+
+static void frontend_render_bg_gallery(float sx, float sy) {
+    if (!s_bg_gal_loaded) return;
+    int i = s_bg_gal_current;
+    if (s_bg_gallery[i].width <= 0) return;
+
+    /* Update blend weight each frame: halve then decrement (0x40D9B0) */
+    s_bg_gal_blend = s_bg_gal_blend / 2 - 1;
+    if (s_bg_gal_blend <= -24) {
+        frontend_advance_bg_gallery();
+        i = s_bg_gal_current;
+    }
+
+    /* Alpha: stable ~60% while blend > 0, linear fade-out as blend 0 → -24 */
+    float alpha = 0.6f;
+    if (s_bg_gal_blend < 0)
+        alpha = 0.6f * (1.0f + (float)s_bg_gal_blend / 24.0f);
+    if (alpha <= 0.0f) return;
+
+    uint32_t a     = (uint32_t)(alpha * 255.0f);
+    uint32_t color = (a << 24) | 0x00FFFFFF;
+
+    float x = s_bg_gal_x * sx;
+    float y = s_bg_gal_y * sy;
+    float w = (float)s_bg_gallery[i].width  * sx;
+    float h = (float)s_bg_gallery[i].height * sy;
+
+    td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
+    fe_draw_quad(x, y, w, h, color, SHARED_PAGE_BG_GALLERY + i, 0.0f, 0.0f, 1.0f, 1.0f);
+    td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
 }
 
 void td5_frontend_release_resources(void) {
@@ -3299,6 +3402,11 @@ void td5_frontend_render_ui_rects(void) {
         break;
     }
 
+    /* Background gallery slideshow (UpdateExtrasGalleryDisplay 0x40D830) --
+     * skip on the credits gallery screen which fills the whole viewport */
+    if (s_current_screen != TD5_SCREEN_EXTRAS_GALLERY)
+        frontend_render_bg_gallery(sx, sy);
+
     /* Draw buttons */
     for (int i = 0; i < FE_MAX_BUTTONS; i++) {
         if (!s_buttons[i].active) continue;
@@ -3335,9 +3443,10 @@ void td5_frontend_render_ui_rects(void) {
              * DDBLT_KEYSRC (black = transparent). We draw only the 9-slice
              * frame with alpha blending; background shows through naturally. */
             int bb_state;
-            if (s_buttons[i].disabled)                          bb_state = 2;
+            if (s_buttons[i].disabled)                               bb_state = 2;
+            else if (s_buttons[i].is_selector)                       bb_state = 1;
             else if (flash_active || s_buttons[i].highlight_ramp == 6) bb_state = 0;
-            else                                                bb_state = 1;
+            else                                                     bb_state = 1;
 
             td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
             fe_draw_button_9slice(bx, by, bw, bh, bb_state, sx, sy);
@@ -3834,7 +3943,7 @@ static void Screen_MainMenu(void) {
         break;
 
     case 3: /* Slide-in animation: 7 buttons alternating L/R, title descends. 39 frames. */
-        if (frontend_update_timed_animation(0x27, 1200) >= 1.0f) {
+        if (frontend_update_timed_animation(0x27, 650) >= 1.0f) {
             frontend_set_cursor_visible(0);
             frontend_play_sfx(4); /* ready chime */
             s_anim_complete = 1;
@@ -3935,7 +4044,7 @@ static void Screen_MainMenu(void) {
         break;
 
     case 9: /* Slide-out animation: buttons scatter, ~500ms */
-        if (frontend_update_timed_animation(16, 500) >= 1.0f) {
+        if (frontend_update_timed_animation(16, 267) >= 1.0f) {
             /* Controller validation: check joystick assignment */
             /* 1P modes (context 1,2,4): check P1 input source */
             /* 2P mode (context 3): also check P2 input source */
@@ -3952,7 +4061,7 @@ static void Screen_MainMenu(void) {
 
     case 12: /* Scatter buttons for exit transition (~500ms) */
         if (s_anim_start_ms == 0) frontend_begin_timed_animation();
-        if (frontend_update_timed_animation(16, 500) >= 1.0f) {
+        if (frontend_update_timed_animation(16, 267) >= 1.0f) {
             frontend_post_quit();
         }
         break;
@@ -4195,7 +4304,7 @@ static void Screen_RaceTypeCategory(void) {
 
     /* --- Return transition --- */
     case 0x14: /* Slide-out animation (~500ms), then navigate */
-        if (frontend_update_timed_animation(16, 500) >= 1.0f) {
+        if (frontend_update_timed_animation(16, 267) >= 1.0f) {
             td5_frontend_set_screen((TD5_ScreenIndex)s_return_screen);
         }
         break;
@@ -4234,8 +4343,11 @@ static void Screen_QuickRaceMenu(void) {
          * ChangeTrack: (120, halfH+0x11)       = (120, 257), size 256x32
          * OK:          (120, halfH+0x89)        = (120, 377), size 0x60x0x20 (96x32)
          * Back:        (halfW-0x58, halfH+0x89) = (232, 377), size 0x70x0x20 (112x32) */
-        frontend_create_button("Change Car",   120, 137, 256, 32);
-        frontend_create_button("Change Track", 120, 257, 256, 32);
+        { int bi;
+          bi = frontend_create_button("Change Car",   120, 137, 256, 32);
+          if (bi >= 0) s_buttons[bi].is_selector = 1;
+          bi = frontend_create_button("Change Track", 120, 257, 256, 32);
+          if (bi >= 0) s_buttons[bi].is_selector = 1; }
         frontend_create_button("OK",           120, 377,  96, 32);
         frontend_create_button("Back",         232, 377, 112, 32);
 
@@ -4252,7 +4364,7 @@ static void Screen_QuickRaceMenu(void) {
         break;
 
     case 3: /* Slide-in: 39 frames */
-        if (frontend_update_timed_animation(0x27, 1200) >= 1.0f) {
+        if (frontend_update_timed_animation(0x27, 650) >= 1.0f) {
             s_anim_complete = 1;
             s_inner_state = 4;
         }
@@ -4313,7 +4425,7 @@ static void Screen_QuickRaceMenu(void) {
         break;
 
     case 6: /* Slide-out: ~500ms, then dispatch */
-        if (frontend_update_timed_animation(16, 500) >= 1.0f) {
+        if (frontend_update_timed_animation(16, 267) >= 1.0f) {
             if (s_return_screen == -1) {
                 /* Start race */
                 frontend_init_race_schedule();
@@ -4395,7 +4507,7 @@ static void Screen_ConnectionBrowser(void) {
         break;
 
     case 9: /* Slide-out (~500ms) */
-        if (frontend_update_timed_animation(16, 500) >= 1.0f) {
+        if (frontend_update_timed_animation(16, 267) >= 1.0f) {
             td5_frontend_set_screen((TD5_ScreenIndex)s_return_screen);
         }
         break;
@@ -4459,7 +4571,7 @@ static void Screen_SessionPicker(void) {
         break;
 
     case 6: /* Slide-out (~500ms) */
-        if (frontend_update_timed_animation(16, 500) >= 1.0f) {
+        if (frontend_update_timed_animation(16, 267) >= 1.0f) {
             td5_frontend_set_screen((TD5_ScreenIndex)s_return_screen);
         }
         break;
@@ -4909,7 +5021,7 @@ static void Screen_OptionsHub(void) {
         break;
 
     case 3: /* Slide-in: 39 frames */
-        if (frontend_update_timed_animation(0x27, 1200) >= 1.0f) {
+        if (frontend_update_timed_animation(0x27, 650) >= 1.0f) {
             s_anim_complete = 1;
             s_inner_state = 4;
         }
@@ -4944,7 +5056,7 @@ static void Screen_OptionsHub(void) {
         break;
 
     case 8: /* Slide-out (~500ms) */
-        if (frontend_update_timed_animation(16, 500) >= 1.0f) {
+        if (frontend_update_timed_animation(16, 267) >= 1.0f) {
             s_inner_state = 9;
         }
         break;
@@ -4988,7 +5100,7 @@ static void Screen_GameOptions(void) {
         break;
 
     case 3: /* Slide-in (~1200ms) */
-        if (frontend_update_timed_animation(0x27, 1200) >= 1.0f) {
+        if (frontend_update_timed_animation(0x27, 650) >= 1.0f) {
             s_anim_complete = 1;
             s_inner_state = 4;
         }
@@ -5048,7 +5160,7 @@ static void Screen_GameOptions(void) {
         break;
 
     case 8: /* Slide-out (~500ms) */
-        if (frontend_update_timed_animation(16, 500) >= 1.0f) {
+        if (frontend_update_timed_animation(16, 267) >= 1.0f) {
             s_inner_state = 9;
         }
         break;
@@ -5080,7 +5192,7 @@ static void Screen_ControlOptions(void) {
         s_inner_state++;
         break;
     case 3:
-        if (frontend_update_timed_animation(0x27, 1200) >= 1.0f) {
+        if (frontend_update_timed_animation(0x27, 650) >= 1.0f) {
             s_anim_complete = 1;
             s_inner_state = 4;
         }
@@ -5113,7 +5225,7 @@ static void Screen_ControlOptions(void) {
         s_inner_state = 8;
         break;
     case 8: /* Slide-out (~500ms) */
-        if (frontend_update_timed_animation(16, 500) >= 1.0f) {
+        if (frontend_update_timed_animation(16, 267) >= 1.0f) {
             s_inner_state = 9;
         }
         break;
@@ -5147,7 +5259,7 @@ static void Screen_SoundOptions(void) {
         s_inner_state++;
         break;
     case 3: /* Slide-in (~1200ms) */
-        if (frontend_update_timed_animation(0x27, 1200) >= 1.0f) {
+        if (frontend_update_timed_animation(0x27, 650) >= 1.0f) {
             s_anim_complete = 1;
             s_inner_state = 4;
         }
@@ -5190,7 +5302,7 @@ static void Screen_SoundOptions(void) {
         s_inner_state = 8;
         break;
     case 8: /* Slide-out (~500ms) */
-        if (frontend_update_timed_animation(16, 500) >= 1.0f) {
+        if (frontend_update_timed_animation(16, 267) >= 1.0f) {
             s_inner_state = 9;
         }
         break;
@@ -5226,7 +5338,7 @@ static void Screen_DisplayOptions(void) {
         s_inner_state++;
         break;
     case 3: /* Slide-in (~1200ms) */
-        if (frontend_update_timed_animation(0x27, 1200) >= 1.0f) {
+        if (frontend_update_timed_animation(0x27, 650) >= 1.0f) {
             s_anim_complete = 1;
             s_inner_state = 4;
         }
@@ -5279,7 +5391,7 @@ static void Screen_DisplayOptions(void) {
         s_inner_state = 8;
         break;
     case 8: /* Slide-out (~500ms) */
-        if (frontend_update_timed_animation(16, 500) >= 1.0f) {
+        if (frontend_update_timed_animation(16, 267) >= 1.0f) {
             td5_frontend_set_screen(TD5_SCREEN_OPTIONS_HUB);
         }
         break;
@@ -5308,7 +5420,7 @@ static void Screen_TwoPlayerOptions(void) {
         s_inner_state++;
         break;
     case 3: /* Slide-in (~1200ms) */
-        if (frontend_update_timed_animation(0x27, 1200) >= 1.0f) {
+        if (frontend_update_timed_animation(0x27, 650) >= 1.0f) {
             s_anim_complete = 1;
             s_inner_state = 4;
         }
@@ -5338,7 +5450,7 @@ static void Screen_TwoPlayerOptions(void) {
         s_inner_state = 8;
         break;
     case 8: /* Slide-out (~500ms) */
-        if (frontend_update_timed_animation(16, 500) >= 1.0f) {
+        if (frontend_update_timed_animation(16, 267) >= 1.0f) {
             td5_frontend_set_screen(TD5_SCREEN_OPTIONS_HUB);
         }
         break;
@@ -5431,7 +5543,7 @@ static void Screen_MusicTestExtras(void) {
         break;
 
     case 3: /* Slide-in (~1200ms) */
-        if (frontend_update_timed_animation(0x27, 1200) >= 1.0f) {
+        if (frontend_update_timed_animation(0x27, 650) >= 1.0f) {
             s_anim_complete = 1;
             s_inner_state = 4;
         }
@@ -5469,7 +5581,7 @@ static void Screen_MusicTestExtras(void) {
         break;
 
     case 8: /* Slide-out (~500ms). Restore gallery images. */
-        if (frontend_update_timed_animation(16, 500) >= 1.0f) {
+        if (frontend_update_timed_animation(16, 267) >= 1.0f) {
             /* Release band surfaces, reload gallery surfaces */
             td5_frontend_set_screen(TD5_SCREEN_SOUND_OPTIONS);
         }
@@ -5878,7 +5990,7 @@ static void Screen_TrackSelection(void) {
 
     case 3: /* Slide-in: 39 frames */
         /* Hide direction button if track has no reverse */
-        if (frontend_update_timed_animation(0x27, 1200) >= 1.0f) {
+        if (frontend_update_timed_animation(0x27, 650) >= 1.0f) {
             s_anim_complete = 1;
             s_inner_state = 4;
         }
@@ -5953,7 +6065,7 @@ static void Screen_TrackSelection(void) {
         break;
 
     case 7: /* Slide-out animation (~1200ms) */
-        if (frontend_update_timed_animation(0x27, 1200) >= 1.0f) {
+        if (frontend_update_timed_animation(0x27, 650) >= 1.0f) {
             s_inner_state = 8;
         }
         break;
@@ -6091,7 +6203,7 @@ static void Screen_PostRaceHighScore(void) {
         break;
 
     case 3: /* Slide-in: 39 frames */
-        if (frontend_update_timed_animation(0x27, 1200) >= 1.0f) {
+        if (frontend_update_timed_animation(0x27, 650) >= 1.0f) {
             frontend_set_cursor_visible(0);
             frontend_play_sfx(4);
             s_anim_complete = 1;
@@ -6145,7 +6257,7 @@ static void Screen_PostRaceHighScore(void) {
         break;
 
     case 8: /* Slide-out (~500ms) */
-        if (frontend_update_timed_animation(16, 500) >= 1.0f) {
+        if (frontend_update_timed_animation(16, 267) >= 1.0f) {
             /* Return to caller or init race */
             if (s_return_screen == -1) {
                 frontend_init_race_schedule();
