@@ -51,7 +51,6 @@ static void dbglog(const char *fmt, ...) {
     va_end(ap);
     OutputDebugStringA(buf);
     OutputDebugStringA("\n");
-    printf("%s\n", buf);   /* also emit to attached console (if any) */
 
     if (!s_main_log_init) {
         DWORD n = GetModuleFileNameA(NULL, s_main_log_path, sizeof(s_main_log_path) - 32);
@@ -141,14 +140,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
      * are accurate. Without this, Sleep(16) may sleep ~30ms (15.6ms default). */
     timeBeginPeriod(1);
 
-    /* Attach to parent console if launched from CMD, otherwise create a new
-     * console window so warnings/errors are always visible. */
-    if (!AttachConsole(ATTACH_PARENT_PROCESS)) {
-        AllocConsole();
-        SetConsoleTitleA("TD5RE Debug Output");
-    }
-    freopen("CONOUT$", "w", stdout);
-    freopen("CONOUT$", "w", stderr);
+    /* All output goes to td5re_debug.log — no console window needed. */
 
     /* ---------------------------------------------------------------
      * Step 1: Initialize backend (display mode enumeration, PNG init)
