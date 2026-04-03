@@ -3440,8 +3440,9 @@ void td5_frontend_render_ui_rects(void) {
     }
 
     /* Background gallery slideshow (UpdateExtrasGalleryDisplay 0x40D830) --
-     * original only runs on the Extras/Music Test screen (ScreenMusicTestExtras 0x418460) */
-    if (s_current_screen == TD5_SCREEN_MUSIC_TEST)
+     * FlushFrontendSpriteBlits calls this unconditionally on every screen;
+     * skip only EXTRAS_GALLERY which fills the full viewport */
+    if (s_current_screen != TD5_SCREEN_EXTRAS_GALLERY)
         frontend_render_bg_gallery(sx, sy);
 
     /* Draw buttons */
