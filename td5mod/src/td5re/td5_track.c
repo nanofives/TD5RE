@@ -490,14 +490,13 @@ static int compute_span_center_world(int span_index,
     src[2] = vertex_at(vr0);
     src[3] = vertex_at(vr1);
 
-    /* Scale from integer coords to 1/256 render scale to match
-     * the scaled model bounding centers. */
+    /* Average of 4 corner positions in integer-coord float space */
     x = (float)(sp->origin_x + src[0]->x + sp->origin_x + src[1]->x +
-                sp->origin_x + src[2]->x + sp->origin_x + src[3]->x) * (0.25f / 256.0f);
+                sp->origin_x + src[2]->x + sp->origin_x + src[3]->x) * 0.25f;
     y = (float)(sp->pad_10 + src[0]->y + sp->pad_10 + src[1]->y +
-                sp->pad_10 + src[2]->y + sp->pad_10 + src[3]->y) * (0.25f / 256.0f);
+                sp->pad_10 + src[2]->y + sp->pad_10 + src[3]->y) * 0.25f;
     z = (float)(sp->origin_z + src[0]->z + sp->origin_z + src[1]->z +
-                sp->origin_z + src[2]->z + sp->origin_z + src[3]->z) * (0.25f / 256.0f);
+                sp->origin_z + src[2]->z + sp->origin_z + src[3]->z) * 0.25f;
 
     if (out_x) *out_x = x;
     if (out_y) *out_y = y;
@@ -529,6 +528,45 @@ int td5_track_get_span_center_world(int span_index,
         lane_count = 1;
 
     get_quad_vertices(sp, lane_count / 2, &vl0, &vl1, &vr0, &vr1);
+    src[0] = vertex_at(vl0);
+    src[1] = vertex_at(vl1);
+    src[2] = vertex_at(vr0);
+    src[3] = vertex_at(vr1);
+    if (!src[0] || !src[1] || !src[2] || !src[3])
+        return 0;
+
+    if (out_x) *out_x = sp->origin_x + (src[0]->x + src[1]->x + src[2]->x + src[3]->x) / 4;
+    if (out_y) *out_y = sp->pad_10 + (src[0]->y + src[1]->y + src[2]->y + src[3]->y) / 4;
+    if (out_z) *out_z = sp->origin_z + (src[0]->z + src[1]->z + src[2]->z + src[3]->z) / 4;
+    return 1;
+}
+
+int td5_track_get_span_lane_world(int span_index, int sub_lane,
+                                   int *out_x, int *out_y, int *out_z)
+{
+    const TD5_StripSpan *sp;
+    int lane_count;
+    int vl0, vl1, vr0, vr1;
+    TD5_StripVertex *src[4];
+
+    if (out_x) *out_x = 0;
+    if (out_y) *out_y = 0;
+    if (out_z) *out_z = 0;
+
+    if (!s_span_array || !s_vertex_table || span_index < 0 || span_index >= s_span_count)
+        return 0;
+
+    sp = &s_span_array[span_index];
+    if (sp->span_type == 9 || sp->span_type == 10)
+        return 0;
+
+    lane_count = span_lane_count(sp);
+    if (lane_count < 1)
+        lane_count = 1;
+    if (sub_lane < 0) sub_lane = 0;
+    if (sub_lane >= lane_count) sub_lane = lane_count - 1;
+
+    get_quad_vertices(sp, sub_lane, &vl0, &vl1, &vr0, &vr1);
     src[0] = vertex_at(vl0);
     src[1] = vertex_at(vl1);
     src[2] = vertex_at(vr0);
@@ -737,9 +775,11 @@ static void *build_span_strip_display_list(int span_index)
 
     min_x = min_y = min_z =  1.0e30f;
     max_x = max_y = max_z = -1.0e30f;
-    origin_x = (float)sp->origin_x * (1.0f / 256.0f);
-    origin_y = (float)sp->pad_10 * (1.0f / 256.0f);
-    origin_z = (float)sp->origin_z * (1.0f / 256.0f);
+    /* Origins in integer-coord float space (matching MODELS.DAT and
+     * camera positions from 24.8 FP / 256). No /256 scaling here. */
+    origin_x = (float)sp->origin_x;
+    origin_y = (float)sp->pad_10;
+    origin_z = (float)sp->origin_z;
     mesh->origin_x = origin_x;
     mesh->origin_y = origin_y;
     mesh->origin_z = origin_z;
@@ -760,9 +800,12 @@ static void *build_span_strip_display_list(int span_index)
         src[3] = vertex_at(vr0);
 
         for (int i = 0; i < 4; i++) {
-            px[i] = (float)src[i]->x * (1.0f / 256.0f) - origin_x;
-            py[i] = (float)src[i]->y * (1.0f / 256.0f) - origin_y;
-            pz[i] = (float)src[i]->z * (1.0f / 256.0f) - origin_z;
+            /* Strip vertices (int16) are LOCAL offsets from the span origin.
+             * Keep in integer-coord space (no /256) to match MODELS.DAT
+             * and camera coordinate space. */
+            px[i] = (float)src[i]->x;
+            py[i] = (float)src[i]->y;
+            pz[i] = (float)src[i]->z;
 
             if (px[i] < min_x) min_x = px[i];
             if (py[i] < min_y) min_y = py[i];
@@ -2431,29 +2474,10 @@ int td5_track_parse_models_dat(const void *data, size_t size)
             /* vertex_data_ptr in commands is 0 for MODELS.DAT meshes;
              * the renderer uses a running vertex cursor instead. */
 
-            /* Scale coordinates from integer-scale to 1/256 render scale.
-             * Model data stores floats in the raw integer coordinate system
-             * (256 units = 1 world unit). Camera operates in 1/256 scale. */
-            {
-                const float inv256 = 1.0f / 256.0f;
-                mesh->origin_x *= inv256;
-                mesh->origin_y *= inv256;
-                mesh->origin_z *= inv256;
-                mesh->bounding_center_x *= inv256;
-                mesh->bounding_center_y *= inv256;
-                mesh->bounding_center_z *= inv256;
-                mesh->bounding_radius *= inv256;
-
-                /* Scale all vertex positions */
-                TD5_MeshVertex *verts = (TD5_MeshVertex *)(uintptr_t)mesh->vertices_offset;
-                if (verts && mesh->total_vertex_count > 0) {
-                    for (int v = 0; v < mesh->total_vertex_count; v++) {
-                        verts[v].pos_x *= inv256;
-                        verts[v].pos_y *= inv256;
-                        verts[v].pos_z *= inv256;
-                    }
-                }
-            }
+            /* MODELS.DAT vertex/origin data is already in float world
+             * coordinates (e.g. origin 1,854,109 matches camera pos
+             * from actor fixed-point 474,652,006 * 1/256 = 1,854,109).
+             * No 1/256 rescale needed — the camera uses the same space. */
         }
     }
 

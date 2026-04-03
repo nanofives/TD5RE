@@ -483,21 +483,25 @@ typedef struct TD5_GameOptions {
     int32_t collisions_3d;          /* 0=Off, 1=On */
 } TD5_GameOptions;
 
-/** NPC racer entry (32 bytes) */
+/** NPC high-score entry (32 bytes)
+ *  Field layout verified against binary defaults at 0x4643B8. */
 #pragma pack(push, 1)
 typedef struct TD5_NpcEntry {
-    char     name[13];
+    char     name[13];              /* player name (null-terminated) */
     uint8_t  _pad[3];
-    int32_t  car_sprite_id;
-    int32_t  car_index;
-    int32_t  best_lap;              /* milliseconds */
-    int32_t  best_race;             /* milliseconds */
+    int32_t  score;                 /* race time in game ticks (30fps) for types 0/1/4, points for type 2 */
+    int32_t  car_id;                /* car identifier (low byte used for name lookup) */
+    int32_t  avg_speed;             /* average speed in raw internal units */
+    int32_t  top_speed;             /* top speed in raw internal units */
 } TD5_NpcEntry;
 #pragma pack(pop)
 
-/** NPC racer group (164 bytes) */
+/** NPC high-score group (164 bytes) — one per track, 26 total.
+ *  Header byte selects score column type:
+ *    0 = "TIME"  (MM:SS.cc)     1 = "LAP" (MM:SS.cc)
+ *    2 = "PTS"   (integer)      4 = "TIME" (MM:SS.mmm) */
 typedef struct TD5_NpcGroup {
-    int32_t      header;            /* 0=standard, 1=special */
+    int32_t      header;
     TD5_NpcEntry entries[5];
 } TD5_NpcGroup;
 

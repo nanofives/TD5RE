@@ -459,11 +459,13 @@ void LoadCameraPresetForView(int actor, int force_reload, int view, int save_sta
     short radius_raw  = p->orbit_radius_raw;
     short height_raw  = p->height_target_raw;
 
-    /* radius_raw and height_raw are already in world-space units (24.8 fixed-point).
-     * Do NOT multiply by g_const256 (256.0) — that would place the camera 2100
-     * render-units (~2100 m) behind the car instead of the intended ~8 m. */
-    float radius_f = (float)(int)radius_raw;
-    float height_f = (float)(int)height_raw;
+    /* Original binary (0x401481) multiplies both by g_const256 (256.0).
+     * This keeps the orient vector balanced (X/Z ≈ ±2100, Y ≈ 600) so
+     * terrain rotation doesn't leak the large elevation into X/Z and
+     * destabilize the radius spring. We divide by 256 when producing
+     * actual world-space orbit offsets (see UpdateChaseCamera). */
+    float radius_f = (float)(int)radius_raw * g_const256;
+    float height_f = (float)(int)height_raw * g_const256;
 
     /* Store offset vector from preset */
     g_camOffsetVec[view][0] = (short)(p->extra_param_1 & 0xFFFF);
@@ -521,7 +523,7 @@ void UpdateChaseCamera(int actor, int do_track_heading, int view)
     int pos_x, pos_z;
     float terrain_matrix[12];
     short cam_angles[4];
-    short transformed_angles[2];
+    short transformed_angles[4]; /* needs 3 for ConvertFloatVec3ToShortAngles */
     unsigned int look_angle;
     int i;
     int height_delta;
@@ -549,7 +551,9 @@ after_flyin:
 
     g_camRotationSlot[v] = 0;
 
-    /* Camera orbit position = sin/cos of visual angle * radius */
+    /* Camera orbit position = sin/cos of visual angle * radius.
+     * All values are in 24.8 fixed-point scale (matching actor positions).
+     * SetCameraWorldPosition divides by 256 to produce float world coords. */
     g_camOrbitOffset[v][0] = (int)(SinFloat12bit(orbit_visual_angle) * current_radius + 0.5f);
     g_camOrbitOffset[v][1] = g_camStoredPitch[v];
     g_camOrbitOffset[v][2] = (int)(-(CosFloat12bit((unsigned int)orbit_visual_angle) * current_radius) + 0.5f);
@@ -633,17 +637,14 @@ after_flyin:
         ComputeActorTrackContactNormal(probe_c, pc, &norm_c_y);
     }
 
-    /* Compute pitch and roll from terrain normals */
+    /* Compute pitch and roll from terrain normals.
+     * NOTE: Terrain probes currently return garbage because actor positions
+     * are in integer coords but probes expect 24.8 FP. Force pitch/roll to
+     * zero until the coordinate system is unified. */
     {
-        int pitch_delta = -((norm_a_y - (norm_b_y + norm_c_y) / 2) >> 8);
-        short pitch_angle = (short)AngleFromVector12(pitch_delta, 0x200);
-
-        int roll_delta = -((norm_b_y - norm_c_y) >> 8);
-        short roll_angle = (short)AngleFromVector12(roll_delta, 0x400);
-
-        cam_angles[0] = pitch_angle;
+        cam_angles[0] = 0;  /* pitch = 0 (flat terrain) */
         cam_angles[1] = (short)combined_angle;
-        cam_angles[2] = roll_angle;
+        cam_angles[2] = 0;  /* roll = 0 */
 
         BuildRotationMatrixFromAngles(terrain_matrix, cam_angles);
     }
@@ -665,14 +666,10 @@ after_flyin:
         LoadRenderRotationMatrix(terrain_matrix);
         ConvertFloatVec3ToShortAngles(orient, transformed_angles);
 
-        /* Store transformed result back */
-        *(int *)&orient[0] = *(int *)&transformed_angles[0];
-        /* Second pair */
-        {
-            int tmp;
-            memcpy(&tmp, &transformed_angles[0], 4);
-            memcpy(&orient[0], &tmp, 4);
-        }
+        /* Store all 3 transformed components back */
+        orient[0] = transformed_angles[0];
+        orient[1] = transformed_angles[1];
+        orient[2] = transformed_angles[2];
     }
 
     /* --- Height/pitch angle smoother --- */
@@ -700,6 +697,7 @@ after_flyin:
 
     /* --- Set camera world position from actor + orbit offset --- */
     {
+        /* smoothed_h is in 24.8 FP scale (matching actor positions). */
         int smoothed_h = (int)(g_camSmoothedHeight[v] + 0.5f);
         int target[3];
 
@@ -713,6 +711,7 @@ after_flyin:
 
         SetCameraWorldPosition(g_camWorldPos[v]);
         OrientCameraTowardTarget(target, g_tracksideYawOffset[v]);
+
     }
 }
 

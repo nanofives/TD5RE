@@ -164,6 +164,7 @@ typedef struct TD5_GlobalState {
     int     track_type;         /* TD5_TrackType */
     int     track_index;
     int     car_index;
+    int     ai_car_indices[6];  /* per-slot car index for AI racers (slot 1-5) */
 
     /* Frontend */
     int  frontend_screen_index;

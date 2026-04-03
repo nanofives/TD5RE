@@ -635,9 +635,11 @@ int td5_game_init_race_session(void) {
                 world_z = sp->origin_z;
             }
 
-            *(int32_t *)(actor + 0x1FC) = world_x;
-            *(int32_t *)(actor + 0x200) = world_y;
-            *(int32_t *)(actor + 0x204) = world_z;
+            /* Actor positions are 24.8 fixed-point; track functions return
+             * integer coords, so shift left by 8 to convert to FP. */
+            *(int32_t *)(actor + 0x1FC) = world_x << 8;
+            *(int32_t *)(actor + 0x200) = world_y << 8;
+            *(int32_t *)(actor + 0x204) = world_z << 8;
 
             actor[0x375] = (uint8_t)slot;
             actor[0x37B] = 1;

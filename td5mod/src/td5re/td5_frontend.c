@@ -325,6 +325,7 @@ static char s_cheat_key_history[32];
 static FE_Surface s_surfaces[FE_MAX_SURFACES];
 static int s_white_tex_page = -1;
 static int s_background_surface = 0;
+static int s_carsel_bg_surface = 0;     /* MainMenu.tga drawn as car-selection backdrop */
 static int s_carsel_bar_surface = 0;
 static int s_carsel_curve_surface = 0;
 static int s_carsel_topbar_surface = 0;
@@ -2203,6 +2204,7 @@ void td5_frontend_set_screen(TD5_ScreenIndex index) {
         }
     }
     s_background_surface = preserved_background;
+    s_carsel_bg_surface = 0;
     s_carsel_bar_surface = 0;
     s_carsel_curve_surface = 0;
     s_carsel_topbar_surface = 0;
@@ -2995,40 +2997,52 @@ static void frontend_render_sound_options_overlay(float sx, float sy) {
     frontend_draw_value_text(sx, sy, 344, s_buttons[2].y + 6, music_volume, 0xFFFFFFFF);
     for (int i = 0; i <= 2; i++) fe_draw_option_arrows(i, sx, sy);
 
-    /* Speaker icon (Controllers.tga) right of SFX Mode button.
-     * Original: [0x497a50] blitted at y=EDI+10, x=ESI-centred (FUN_0041EA90). */
+    /* All image positions from FUN_0041EA90 case6 steady-state (640x480 absolute):
+     *   EDI_base=110, ESI_base=81, EBP=EDI+0x11c=394
+     *
+     * Controllers.tga speaker icon: x=394, y=97, w=64, h=32
+     *   src_y = (ctrl_type+4)*32; default ctrl_type=0 → src_y=128 (row 4 of sheet)
+     * VolumeBox Music bg:  x=394, y=185, w=224, h=12  (ESI+0x68)
+     * VolumeFill Music:    x=395, y=186, w=0-222,h=10
+     * VolumeBox SFX bg:    x=394, y=225, w=224, h=12  (ESI+0x90)
+     * VolumeFill SFX:      x=395, y=226, w=0-222,h=10 */
+    td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
+
+    /* Speaker icon: 64x32 sprite sheet crop (row 4, src_y=128) */
     if (s_sound_icon_surface > 0) {
         int slot = s_sound_icon_surface - 1;
-        if (slot >= 0 && slot < FE_MAX_SURFACES && s_surfaces[slot].in_use)
-            fe_draw_surface_rect(s_sound_icon_surface,
-                                 358.0f * sx, ((float)s_buttons[0].y - 8.0f) * sy,
-                                 (float)s_surfaces[slot].width  * sx,
-                                 (float)s_surfaces[slot].height * sy, 0xFFFFFFFF);
+        if (slot >= 0 && slot < FE_MAX_SURFACES && s_surfaces[slot].in_use && s_surfaces[slot].height > 0) {
+            float sh  = (float)s_surfaces[slot].height;
+            float v0  = 128.0f / sh;
+            float v1  = 160.0f / sh;
+            fe_draw_quad(394.0f * sx, 97.0f * sy, 64.0f * sx, 32.0f * sy,
+                         0xFFFFFFFF, s_surfaces[slot].tex_page, 0.0f, v0, 1.0f, v1);
+        }
     }
 
-    /* Volume bars: VolumeBox (bg) + VolumeFill (level) for SFX and Music volume.
-     * Original: w=224 bg bar, fill width = volume-scaled; h=12 per row (FUN_0041EA90). */
-    td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
+    /* Volume bars: Music first (y=185), then SFX (y=225) */
+    static const float k_bar_y[2]  = { 185.0f, 225.0f };
+    static const float k_fill_y[2] = { 186.0f, 226.0f };
+    int vols[2] = { s_sound_option_music_volume, s_sound_option_sfx_volume };
+
     for (int vi = 0; vi < 2; vi++) {
-        int btn_idx = 1 + vi;  /* btn1 = SFX Volume, btn2 = Music Volume */
-        float bar_x = 344.0f * sx;
-        float bar_y = ((float)s_buttons[btn_idx].y + 4.0f) * sy;
-        float bar_w = 224.0f * sx;
-        float bar_h = 12.0f  * sy;
-        int   vol   = (vi == 0) ? s_sound_option_sfx_volume : s_sound_option_music_volume;
+        float bar_y  = k_bar_y[vi]  * sy;
+        float fill_y = k_fill_y[vi] * sy;
+        int   vol    = vols[vi];
+        float fill_w = (float)vol / 100.0f * 222.0f * sx;
 
         if (s_sound_volumebox_surface > 0) {
             int slot = s_sound_volumebox_surface - 1;
             if (slot >= 0 && slot < FE_MAX_SURFACES && s_surfaces[slot].in_use)
-                fe_draw_quad(bar_x, bar_y, bar_w, bar_h, 0xFFFFFFFF,
-                             s_surfaces[slot].tex_page, 0.0f, 0.0f, 1.0f, 1.0f);
+                fe_draw_quad(394.0f * sx, bar_y, 224.0f * sx, 12.0f * sy,
+                             0xFFFFFFFF, s_surfaces[slot].tex_page, 0.0f, 0.0f, 1.0f, 1.0f);
         }
-        if (s_sound_volumefill_surface > 0) {
+        if (fill_w > 0.0f && s_sound_volumefill_surface > 0) {
             int slot = s_sound_volumefill_surface - 1;
             if (slot >= 0 && slot < FE_MAX_SURFACES && s_surfaces[slot].in_use) {
                 float u1 = (float)vol / 100.0f;
-                fe_draw_quad(bar_x, bar_y + sy, bar_w * u1, bar_h - 2.0f * sy, 0xFFFFFFFF,
-                             s_surfaces[slot].tex_page, 0.0f, 0.0f, u1, 1.0f);
+                fe_draw_quad(395.0f * sx, fill_y, fill_w, 10.0f * sy,
+                             0xFFFFFFFF, s_surfaces[slot].tex_page, 0.0f, 0.0f, u1, 1.0f);
             }
         }
     }
@@ -3228,12 +3242,23 @@ static void frontend_render_car_stats_overlay(float sx, float sy) {
 
 static void frontend_render_car_selection_preview(float sx, float sy) {
     int actual_car = frontend_current_car_index();
+    float sw = sx * 640.0f;
+    float sh = sy * 480.0f;
+
+    /* Full-screen background (MainMenu.tga — original preserved the previous screen's
+     * primary surface, which always had this TGA). Drawn independently of s_background_surface
+     * to avoid eviction by shared logic. */
+    if (s_carsel_bg_surface > 0) {
+        int bg_slot = s_carsel_bg_surface - 1;
+        if (bg_slot >= 0 && bg_slot < FE_MAX_SURFACES && s_surfaces[bg_slot].in_use)
+            fe_draw_quad(0, 0, sw, sh, 0xFFFFFFFF, s_surfaces[bg_slot].tex_page, 0, 0, 1, 1);
+    }
 
     /* Overlay UI elements: animated during state 2, static otherwise.
      * State 2 formula (0x40DFC0): bar+curve slide from right (636→36, 8px/frame @30fps);
      * topbar slides from left (-532→0, 8px/frame @30fps); 75 frames total = ~2500ms. */
     if (s_inner_state == 2) {
-        float t = frontend_clamp01((float)(td5_plat_time_ms() - s_anim_start_ms) / 2500.0f);
+        float t = frontend_clamp01((float)(td5_plat_time_ms() - s_anim_start_ms) * 2.0f / 2500.0f);
         float bar_x    = 636.0f - (636.0f - 36.0f) * t;   /* right→left: 636 → 36 */
         float topbar_x = -532.0f + 532.0f * t;             /* left→right: -532 → 0 */
         if (s_carsel_topbar_surface > 0)
@@ -3265,14 +3290,14 @@ static void frontend_render_car_selection_preview(float sx, float sy) {
         fe_draw_quad(232.0f * sx, 124.0f * sy, 408.0f * sx, 280.0f * sy, 0xFF101020, -1, 0, 0, 1, 1);
         if (s_inner_state == 11 && s_car_preview_prev_surface > 0) {
             /* Old car slides out to the right (state 11, ~433ms) — animPhase 0x0B: offset = counter*0x20 */
-            float t = frontend_clamp01((float)(td5_plat_time_ms() - s_anim_start_ms) / 433.0f);
+            float t = frontend_clamp01((float)(td5_plat_time_ms() - s_anim_start_ms) * 2.0f / 433.0f);
             float x = 232.0f + 408.0f * t;  /* 232 → 640 (off-screen right) */
             fe_draw_surface_rect(s_car_preview_prev_surface, x * sx, 124.0f * sy, 408.0f * sx, 280.0f * sy, 0xFFFFFFFF);
         } else if (s_inner_state == 14 && s_car_preview_surface > 0) {
             /* New car slides in from right (state 14, ~833ms @30fps):
              * formula: offset = counter*-0x40 + 0x4A8 (1192px beyond final pos=232)
              * arrives at x=232 in ~620ms (18.6 frames @30fps), then held */
-            float t = frontend_clamp01((float)(td5_plat_time_ms() - s_anim_start_ms) / 620.0f);
+            float t = frontend_clamp01((float)(td5_plat_time_ms() - s_anim_start_ms) * 2.0f / 620.0f);
             float x = 1424.0f - 1192.0f * t;  /* 1424 → 232 */
             fe_draw_surface_rect(s_car_preview_surface, x * sx, 124.0f * sy, 408.0f * sx, 280.0f * sy, 0xFFFFFFFF);
         } else if (s_inner_state != 12 && s_inner_state != 13 && s_car_preview_surface > 0) {
@@ -5923,17 +5948,14 @@ static void Screen_CarSelection(void) {
         TD5_LOG_D(LOG_TAG, "CarSelection: state 0 - init");
         s_anim_complete = 0;
 
-        /* Car selection uses a dark background with overlay elements (sidebar,
-         * curve, topbar), NOT a fullscreen background TGA like other screens.
-         * Load overlay UI assets; s_background_surface stays 0 (dark clear). */
-        s_carsel_bar_surface = frontend_load_tga("Front_End/CarSelBar1.tga",  "Front_End/FrontEnd.zip");
-        s_carsel_curve_surface = frontend_load_tga("Front_End/CarSelCurve.tga", "Front_End/FrontEnd.zip");
-        s_carsel_topbar_surface = frontend_load_tga("Front_End/CarSelTopBar.tga","Front_End/FrontEnd.zip");
-        s_graphbars_surface = frontend_load_tga("Front_End/GraphBars.tga",   "Front_End/FrontEnd.zip");
-        /* Original keeps the previous DirectDraw buffer so MainMenu.tga shows through
-         * the left/bottom areas. Load it here to replicate that: every prior screen
-         * uses this same TGA, so it matches what the original preserved. */
-        frontend_load_tga("Front_End/MainMenu.tga", "Front_End/FrontEnd.zip");
+        /* Load overlay UI assets */
+        s_carsel_bar_surface    = frontend_load_tga("Front_End/CarSelBar1.tga",   "Front_End/FrontEnd.zip");
+        s_carsel_curve_surface  = frontend_load_tga("Front_End/CarSelCurve.tga",  "Front_End/FrontEnd.zip");
+        s_carsel_topbar_surface = frontend_load_tga("Front_End/CarSelTopBar.tga", "Front_End/FrontEnd.zip");
+        s_graphbars_surface     = frontend_load_tga("Front_End/GraphBars.tga",    "Front_End/FrontEnd.zip");
+        /* Background: original preserved the previous screen's primary surface (MainMenu.tga).
+         * Use a dedicated slot so it's never clobbered by s_background_surface logic. */
+        s_carsel_bg_surface = frontend_load_tga("Front_End/MainMenu.tga", "Front_End/FrontEnd.zip");
 
         /* Determine car roster range by game type */
         s_car_roster_min = 0;

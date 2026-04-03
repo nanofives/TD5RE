@@ -50,7 +50,7 @@
 #define TD5_VFX_TIRE_TRACK_Y_OFFSET     -20.0f  /* flush with road surface */
 
 #define TD5_VFX_BILLBOARD_STRIDE        0x22C   /* 556 bytes per billboard entry */
-#define TD5_VFX_BILLBOARD_PHASE_INC     0x10    /* phase counter increment per tick */
+#define TD5_VFX_BILLBOARD_PHASE_INC     0x20    /* phase counter increment per tick */
 
 #define TD5_VFX_MAX_DENSITY_PAIRS       6       /* max weather density pairs per track */
 

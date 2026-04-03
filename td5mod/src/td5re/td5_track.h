@@ -133,6 +133,8 @@ void td5_track_get_span_edges(int span_index,
                                int *right_x, int *right_z);
 int  td5_track_get_span_center_world(int span_index,
                                       int *out_x, int *out_y, int *out_z);
+int  td5_track_get_span_lane_world(int span_index, int sub_lane,
+                                    int *out_x, int *out_y, int *out_z);
 
 /* --- Lighting --- */
 void td5_track_apply_segment_lighting(TD5_Actor *actor, int view_index);

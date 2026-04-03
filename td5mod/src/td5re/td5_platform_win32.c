@@ -1978,6 +1978,8 @@ void td5_plat_render_set_preset(TD5_RenderPreset preset)
         s->mag_filter   = 2; /* LINEAR */
         s->min_filter   = 2;
         s->texblend_mode = D3DTBLEND_MODULATE;
+        s->alpha_test_enable = 0;
+        s->alpha_ref         = 0;
         break;
 
     case TD5_PRESET_TRANSLUCENT_LINEAR:
@@ -1989,6 +1991,10 @@ void td5_plat_render_set_preset(TD5_RenderPreset preset)
         s->mag_filter   = 2;
         s->min_filter   = 2;
         s->texblend_mode = D3DTBLEND_MODULATEALPHA;
+        /* Discard pixels with alpha=0 so color-keyed transparent backgrounds
+         * don't bleed through if the blend equation is not applied correctly. */
+        s->alpha_test_enable = 1;
+        s->alpha_ref         = 1; /* discard alpha < 1/255 */
         break;
 
     case TD5_PRESET_TRANSLUCENT_ANISO:
@@ -2000,6 +2006,8 @@ void td5_plat_render_set_preset(TD5_RenderPreset preset)
         s->mag_filter   = 2;
         s->min_filter   = 2;
         s->texblend_mode = D3DTBLEND_MODULATEALPHA;
+        s->alpha_test_enable = 1;
+        s->alpha_ref         = 1;
         break;
 
     case TD5_PRESET_OPAQUE_LINEAR:
@@ -2009,6 +2017,8 @@ void td5_plat_render_set_preset(TD5_RenderPreset preset)
         s->mag_filter   = 2;
         s->min_filter   = 2;
         s->texblend_mode = D3DTBLEND_MODULATE;
+        s->alpha_test_enable = 0;
+        s->alpha_ref         = 0;
         break;
     }
 

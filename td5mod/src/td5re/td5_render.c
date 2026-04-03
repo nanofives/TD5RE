@@ -862,29 +862,13 @@ void td5_render_begin_scene(void)
 
 void td5_render_end_scene(void)
 {
-    TD5_LOG_D(LOG_TAG,
-              "end scene: frame=%u triangles=%d texture_binds=%d draw_calls=%d cache_hits=%d cache_misses=%d evictions=%d",
-              (unsigned int)g_tick_counter,
-              s_debug_flush_submitted_tris,
-              s_debug_texture_bind_calls,
-              s_debug_scene_draw_calls,
-              s_debug_texture_cache_hits,
-              s_debug_texture_cache_misses,
-              s_debug_texture_cache_evictions);
-
-    if (g_td5.total_actor_count <= 0 && s_debug_clip_log_count < 40) {
-        TD5_LOG_I(RENDER_LOG_TAG,
-                  "frame clip stats: meshes=%d near=%d backface=%d screen=%d emitted=%d append=%d flush=%d flush_tris=%d imm_verts=%d imm_indices=%d",
-                  s_debug_prepared_mesh_calls,
-                  s_debug_clip_near_rejects,
-                  s_debug_clip_backface_rejects,
-                  s_debug_clip_screen_rejects,
-                  s_debug_clip_emitted_tris,
-                  s_debug_append_calls,
-                  s_debug_flush_calls,
+    if (g_td5.total_actor_count <= 0 && s_debug_clip_log_count < 5) {
+        TD5_LOG_D(LOG_TAG,
+                  "end scene: frame=%u tris=%d draws=%d span_meshes=%d",
+                  (unsigned int)g_tick_counter,
                   s_debug_flush_submitted_tris,
-                  s_imm_vert_count,
-                  s_imm_index_count);
+                  s_debug_scene_draw_calls,
+                  s_debug_span_meshes_submitted);
         s_debug_clip_log_count++;
     }
 
@@ -1975,5 +1959,5 @@ void td5_render_advance_billboard_anims(void)
      * Advance animation phase by +0x10 per tick for billboard animation pool.
      * Drives texture frame selection for animated signs/flags.
      */
-    s_billboard_anim_phase += 0x10;
+    s_billboard_anim_phase += 0x20;
 }
