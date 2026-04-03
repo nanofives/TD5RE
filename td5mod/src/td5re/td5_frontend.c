@@ -3015,31 +3015,44 @@ static void frontend_render_race_type_description(float sx, float sy) {
 static void frontend_render_car_selection_preview(float sx, float sy) {
     int actual_car = frontend_current_car_index();
 
-    /* Overlay UI elements — final positions from state 2 animation (FUN_0040ddc0):
-     * CarSelTopBar (532x36): x=0,  y=45
-     * CarSelBar1   (24x408): x=36, y=0
-     * CarSelCurve  (80x56):  x=36, y=408  (bottom-left corner piece) */
-    if (s_carsel_topbar_surface > 0)
-        fe_draw_surface_rect(s_carsel_topbar_surface,  0.0f * sx,  45.0f * sy, 532.0f * sx,  36.0f * sy, 0xFFFFFFFF);
-    if (s_carsel_bar_surface > 0)
-        fe_draw_surface_rect(s_carsel_bar_surface,    36.0f * sx,   0.0f * sy,  24.0f * sx, 408.0f * sy, 0xFFFFFFFF);
-    if (s_carsel_curve_surface > 0)
-        fe_draw_surface_rect(s_carsel_curve_surface,  36.0f * sx, 408.0f * sy,  80.0f * sx,  56.0f * sy, 0xFFFFFFFF);
+    /* Overlay UI elements: animated during state 2, static otherwise.
+     * State 2 formula (0x40DFC0): bar+curve slide from right (636→36, 8px/frame @30fps);
+     * topbar slides from left (-532→0, 8px/frame @30fps); 75 frames total = ~2500ms. */
+    if (s_inner_state == 2) {
+        float t = frontend_clamp01((float)(td5_plat_time_ms() - s_anim_start_ms) / 2500.0f);
+        float bar_x    = 636.0f - (636.0f - 36.0f) * t;   /* right→left: 636 → 36 */
+        float topbar_x = -532.0f + 532.0f * t;             /* left→right: -532 → 0 */
+        if (s_carsel_topbar_surface > 0)
+            fe_draw_surface_rect(s_carsel_topbar_surface, topbar_x * sx,  45.0f * sy, 532.0f * sx,  36.0f * sy, 0xFFFFFFFF);
+        if (s_carsel_bar_surface > 0)
+            fe_draw_surface_rect(s_carsel_bar_surface,   bar_x * sx,   0.0f * sy,  24.0f * sx, 408.0f * sy, 0xFFFFFFFF);
+        if (s_carsel_curve_surface > 0)
+            fe_draw_surface_rect(s_carsel_curve_surface, bar_x * sx, 408.0f * sy,  80.0f * sx,  56.0f * sy, 0xFFFFFFFF);
+    } else {
+        /* CarSelTopBar (532x36): x=0, y=45; CarSelBar1 (24x408): x=36, y=0;
+         * CarSelCurve  (80x56): x=36, y=408 */
+        if (s_carsel_topbar_surface > 0)
+            fe_draw_surface_rect(s_carsel_topbar_surface,  0.0f * sx,  45.0f * sy, 532.0f * sx,  36.0f * sy, 0xFFFFFFFF);
+        if (s_carsel_bar_surface > 0)
+            fe_draw_surface_rect(s_carsel_bar_surface,    36.0f * sx,   0.0f * sy,  24.0f * sx, 408.0f * sy, 0xFFFFFFFF);
+        if (s_carsel_curve_surface > 0)
+            fe_draw_surface_rect(s_carsel_curve_surface,  36.0f * sx, 408.0f * sy,  80.0f * sx,  56.0f * sy, 0xFFFFFFFF);
+    }
 
     /* Car preview area: dark backing then carpic image (408x280 at x=232, y=124) */
     fe_draw_quad(232.0f * sx, 124.0f * sy, 408.0f * sx, 280.0f * sy, 0xC0101020, -1, 0, 0, 1, 1);
 
-    if (s_inner_state == 11 && s_car_preview_prev_surface > 0 && s_car_preview_next_surface > 0) {
-        /* Cross-fade old -> new car image (state 11, ~133ms) */
-        float t = frontend_clamp01((float)(td5_plat_time_ms() - s_anim_start_ms) / 150.0f);
-        uint32_t old_alpha = ((uint32_t)((1.0f - t) * 255.0f) << 24) | 0x00FFFFFF;
-        uint32_t new_alpha = ((uint32_t)(t * 255.0f) << 24) | 0x00FFFFFF;
-        fe_draw_surface_rect(s_car_preview_prev_surface, 232.0f * sx, 124.0f * sy, 408.0f * sx, 280.0f * sy, old_alpha);
-        fe_draw_surface_rect(s_car_preview_next_surface, 232.0f * sx, 124.0f * sy, 408.0f * sx, 280.0f * sy, new_alpha);
+    if (s_inner_state == 11 && s_car_preview_prev_surface > 0) {
+        /* Old car slides out to the right (state 11, ~433ms) — animPhase 0x0B: offset = counter*0x20 */
+        float t = frontend_clamp01((float)(td5_plat_time_ms() - s_anim_start_ms) / 433.0f);
+        float x = 232.0f + 408.0f * t;  /* 232 → 640 (off-screen right) */
+        fe_draw_surface_rect(s_car_preview_prev_surface, x * sx, 124.0f * sy, 408.0f * sx, 280.0f * sy, 0xFFFFFFFF);
     } else if (s_inner_state == 14 && s_car_preview_surface > 0) {
-        /* Slide-in from right: 0x19 (25) frames (~417ms) — 0x40DFC0 state 14 */
-        float t = frontend_clamp01((float)(td5_plat_time_ms() - s_anim_start_ms) / 417.0f);
-        float x = 640.0f + (232.0f - 640.0f) * t;
+        /* New car slides in from right (state 14, ~833ms @30fps):
+         * formula: offset = counter*-0x40 + 0x4A8 (1192px beyond final pos=232)
+         * arrives at x=232 in ~620ms (18.6 frames @30fps), then held */
+        float t = frontend_clamp01((float)(td5_plat_time_ms() - s_anim_start_ms) / 620.0f);
+        float x = 1424.0f - 1192.0f * t;  /* 1424 → 232 */
         fe_draw_surface_rect(s_car_preview_surface, x * sx, 124.0f * sy, 408.0f * sx, 280.0f * sy, 0xFFFFFFFF);
     } else if (s_car_preview_surface > 0) {
         fe_draw_surface_rect(s_car_preview_surface, 232.0f * sx, 124.0f * sy, 408.0f * sx, 280.0f * sy, 0xFFFFFFFF);
@@ -3137,8 +3150,18 @@ static void frontend_render_high_score_overlay(float sx, float sy) {
     float panel_x = 115.0f * sx;
     float panel_y = 177.0f * sy;
 
-    /* Opaque black panel background (original: BltColorFillToSurface with 0) */
-    fe_draw_quad(panel_x, panel_y, panel_w, panel_h, 0xFF000000, -1, 0, 0, 1, 1);
+    /* Nav bar: track name centered on button 0, with left/right arrows */
+    {
+        char track_name[80];
+        frontend_get_track_display_name(s_score_category_index, 1, track_name, sizeof(track_name));
+        float nav_bx, nav_by, nav_bw, nav_bh;
+        frontend_get_button_render_rect(0, sx, sy, &nav_bx, &nav_by, &nav_bw, &nav_bh);
+        float tnw = fe_measure_text(track_name, sx);
+        float tx = nav_bx + (nav_bw - tnw) * 0.5f;
+        float ty = nav_by + (nav_bh - sy * 12.0f) * 0.5f;
+        fe_draw_text(tx, ty, track_name, 0xFFFFFFFF, sx, sy);
+        fe_draw_option_arrows(0, sx, sy);
+    }
 
     /* Column X positions (in 520px panel space, scaled to screen) */
     float col_name  = panel_x + 16.0f  * sx;
@@ -3170,13 +3193,11 @@ static void frontend_render_high_score_overlay(float sx, float sy) {
         fe_draw_text(col_score, hdr_y, score_hdr, hdr_color, sx * ts, sy * ts);
     }
     fe_draw_text(col_car,   hdr_y, "CAR",       hdr_color, sx * ts, sy * ts);
-    {
-        char avg_hdr[16], top_hdr[16];
-        snprintf(avg_hdr, sizeof(avg_hdr), "AVG %s", speed_suffix);
-        snprintf(top_hdr, sizeof(top_hdr), "TOP %s", speed_suffix);
-        fe_draw_text(col_avg, hdr_y, avg_hdr, hdr_color, sx * ts, sy * ts);
-        fe_draw_text(col_top, hdr_y, top_hdr, hdr_color, sx * ts, sy * ts);
-    }
+    /* AVG/TOP headers are two lines: label on y=0, unit on y=14 within surface */
+    fe_draw_text(col_avg, panel_y + 0.0f,        "AVG",        hdr_color, sx * ts, sy * ts);
+    fe_draw_text(col_avg, panel_y + 14.0f * sy,  speed_suffix, hdr_color, sx * ts, sy * ts);
+    fe_draw_text(col_top, panel_y + 0.0f,        "TOP",        hdr_color, sx * ts, sy * ts);
+    fe_draw_text(col_top, panel_y + 14.0f * sy,  speed_suffix, hdr_color, sx * ts, sy * ts);
 
     /* 5 entry rows */
     float row_y = panel_y + 48.0f * sy;
@@ -3184,7 +3205,7 @@ static void frontend_render_high_score_overlay(float sx, float sy) {
     for (int i = 0; i < 5; i++) {
         const TD5_NpcEntry *e = &grp->entries[i];
         float y = row_y + (float)i * row_h;
-        uint32_t row_color = 0xFFE0E0E0;
+        uint32_t row_color = (i == 0) ? 0xFFFFCC44 : 0xFFE0E0E0;
         char buf[64];
 
         /* Check if entry is empty (no name) */
@@ -5662,8 +5683,10 @@ static void Screen_CarSelection(void) {
         s_carsel_curve_surface = frontend_load_tga("Front_End/CarSelCurve.tga", "Front_End/FrontEnd.zip");
         s_carsel_topbar_surface = frontend_load_tga("Front_End/CarSelTopBar.tga","Front_End/FrontEnd.zip");
         s_graphbars_surface = frontend_load_tga("Front_End/GraphBars.tga",   "Front_End/FrontEnd.zip");
-        /* Ensure no fullscreen bg is active (overlays are narrow, won't trigger auto-set) */
-        s_background_surface = 0;
+        /* Original keeps the previous DirectDraw buffer so MainMenu.tga shows through
+         * the left/bottom areas. Load it here to replicate that: every prior screen
+         * uses this same TGA, so it matches what the original preserved. */
+        frontend_load_tga("Front_End/MainMenu.tga", "Front_End/FrontEnd.zip");
 
         /* Determine car roster range by game type */
         s_car_roster_min = 0;
@@ -5713,7 +5736,7 @@ static void Screen_CarSelection(void) {
         /* Skip if returning from network car select or 2P round 2 */
         if ((s_two_player_mode & 4) != 0 || s_network_active) {
             s_inner_state = 3;
-        } else if (frontend_update_timed_animation(24, 400) >= 1.0f) {
+        } else if (frontend_update_timed_animation(75, 2500) >= 1.0f) {
             s_inner_state = 3;
         }
         break;
@@ -5871,7 +5894,7 @@ static void Screen_CarSelection(void) {
         s_inner_state = 11;
         break;
 
-    case 11: /* Car preview cross-fade transition */
+    case 11: /* Old car slides out to the right (~433ms, 13 frames @30fps) — 0x40DFC0 state 11 */
     {
         int actual_car = frontend_current_car_index();
         if (s_car_preview_next_surface <= 0) {
@@ -5879,14 +5902,14 @@ static void Screen_CarSelection(void) {
             s_car_preview_next_surface = frontend_load_car_preview_surface(actual_car, s_selected_paint);
             frontend_begin_timed_animation();
         }
-        if (frontend_update_timed_animation(8, 133) >= 1.0f) {
+        if (frontend_update_timed_animation(13, 433) >= 1.0f) {
             if (s_car_preview_prev_surface > 0 && s_car_preview_prev_surface != s_car_preview_next_surface) {
                 frontend_release_surface(s_car_preview_prev_surface);
             }
             s_car_preview_surface = s_car_preview_next_surface;
             s_car_preview_prev_surface = 0;
             s_car_preview_next_surface = 0;
-            s_inner_state = 14;
+            s_inner_state = 12;
         }
     }
         break;
@@ -5900,8 +5923,8 @@ static void Screen_CarSelection(void) {
         s_inner_state = 14;
         break;
 
-    case 14: /* Car preview slide-in from right, 25 frames (~417ms) — 0x40DFC0 state 14 */
-        if (frontend_update_timed_animation(0x19, 417) >= 1.0f) {
+    case 14: /* Car preview slide-in from right, 25 frames (~833ms @30fps) — 0x40DFC0 state 14 */
+        if (frontend_update_timed_animation(0x19, 833) >= 1.0f) {
             s_inner_state = 7; /* return to interaction */
         }
         break;
@@ -6250,8 +6273,8 @@ static void Screen_PostRaceHighScore(void) {
         s_anim_complete = 0;
         /* Create 0x208 x 0x90 score panel surface (black fill) */
         /* Create nav button + OK button */
-        frontend_create_button(NULL,  -0x208, 0, 0x208, 0x20);
-        frontend_create_button("OK",  -0x130, 0, 0x60,  0x20);
+        frontend_create_button(NULL, 115,  93, 520, 32);  /* nav bar: x=115, y=93 */
+        frontend_create_button("OK", 120, 416,  96, 32);  /* OK button at bottom */
         frontend_set_cursor_visible(1);
         frontend_play_sfx(5);
         s_score_category_index = 0;
