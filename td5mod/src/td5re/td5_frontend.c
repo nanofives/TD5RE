@@ -527,7 +527,7 @@ static float frontend_update_timed_animation(int max_tick, uint32_t duration_ms)
         return 1.0f;
     }
 
-    t = frontend_clamp01((float)(now - s_anim_start_ms) / (float)duration_ms);
+    t = frontend_clamp01((float)(now - s_anim_start_ms) * 2.0f / (float)duration_ms);
     s_anim_tick = (int)(t * (float)max_tick + 0.5f);
     if (s_anim_tick > max_tick) s_anim_tick = max_tick;
     s_anim_t = t;
@@ -1320,7 +1320,7 @@ static float fe_measure_text(const char *text, float sx) {
 }
 
 static int frontend_advance_tick(void) {
-    s_anim_tick++;
+    s_anim_tick += 2;
     return 1;
 }
 
@@ -2912,10 +2912,6 @@ static void frontend_render_quick_race_overlay(float sx, float sy) {
     track_locked = (!s_cheat_unlock_all && !s_network_active &&
                     s_selected_track >= 0 && s_selected_track < 26 &&
                     s_track_lock_table[s_selected_track] != 0);
-    td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
-    fe_draw_quad(120.0f * sx, 97.0f * sy, 520.0f * sx, 200.0f * sy, 0x7A0C0C18, -1, 0, 0, 1, 1);
-    td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
-
     fe_draw_option_arrows(0, sx, sy);
     frontend_draw_value_text(sx, sy, 140, 106, car_name, 0xFFFFFFFF);
     fe_draw_option_arrows(1, sx, sy);
@@ -3741,7 +3737,6 @@ void td5_frontend_render_ui_rects(void) {
              * frame with alpha blending; background shows through naturally. */
             int bb_state;
             if (s_buttons[i].disabled)                               bb_state = 2;
-            else if (s_buttons[i].is_selector)                       bb_state = 1;
             else if (flash_active || s_buttons[i].highlight_ramp == 6) bb_state = 0;
             else                                                     bb_state = 1;
 
@@ -4140,7 +4135,7 @@ static void Screen_LanguageSelect(void) {
         break;
 
     case 2:
-        s_anim_tick++;
+        s_anim_tick += 2;
         frontend_present_buffer();
         if (s_anim_tick >= 16) {
             s_inner_state = 3;
@@ -4157,7 +4152,7 @@ static void Screen_LanguageSelect(void) {
 
     case 4:
     case 5:
-        s_anim_tick++;
+        s_anim_tick += 2;
         if (s_anim_tick >= 8) {
             s_inner_state = 6;
         }
@@ -4185,7 +4180,7 @@ static void Screen_LegalCopyright(void) {
         break;
 
     case 1: /* Fade in */
-        s_anim_tick++;
+        s_anim_tick += 2;
         if (s_anim_tick >= 16) {
             s_anim_tick = 0;
             s_inner_state = 2;
@@ -4193,7 +4188,7 @@ static void Screen_LegalCopyright(void) {
         break;
 
     case 2: /* 3-second timer */
-        s_anim_tick++;
+        s_anim_tick += 2;
         if (s_input_ready || s_anim_tick >= 90) {
             s_anim_tick = 0;
             s_inner_state = 3;
@@ -4201,7 +4196,7 @@ static void Screen_LegalCopyright(void) {
         break;
 
     case 3: /* Fade out + exit to main menu */
-        s_anim_tick++;
+        s_anim_tick += 2;
         if (s_anim_tick >= 16) {
             td5_frontend_set_screen(TD5_SCREEN_MAIN_MENU);
         }
@@ -5185,7 +5180,7 @@ static void Screen_NetworkLobby(void) {
         break;
 
     case 11:
-        s_anim_tick++;
+        s_anim_tick += 2;
         if (s_anim_tick >= 0x0C) { /* 12 frames */
             s_lobby_action = 0;
             s_inner_state = 2; /* return to enabled input */
@@ -5284,7 +5279,7 @@ static void Screen_NetworkLobby(void) {
         break;
 
     case 0x10: /* LAUNCH COUNTDOWN (8 ticks, then send DXPSTART) */
-        s_anim_tick++;
+        s_anim_tick += 2;
         if (s_anim_tick >= 8) {
             s_race_active_flag = 1;
             /* Send DXPSTART (message type 4) */
@@ -5801,7 +5796,7 @@ static void Screen_ControllerBinding(void) {
         s_inner_state++;
         break;
     case 9: /* Slide-in */
-        s_anim_tick++;
+        s_anim_tick += 2;
         if (s_anim_tick >= 0x12) s_inner_state = 10;
         break;
     case 10: /* Interactive binding poll */
@@ -5823,7 +5818,7 @@ static void Screen_ControllerBinding(void) {
             s_anim_tick = 0;
             s_inner_state = 15;
         } else {
-            s_anim_tick++;
+            s_anim_tick += 2;
             if (s_anim_tick >= 16) {
                 s_inner_state = 19;
             }
@@ -6131,7 +6126,7 @@ static void Screen_CarSelection(void) {
         break;
 
     case 8: /* Blit cached rect, wait 2 frames then return to 7 */
-        s_anim_tick++;
+        s_anim_tick += 2;
         if (s_anim_tick >= 2) {
             s_inner_state = 7;
         }
@@ -6461,7 +6456,7 @@ static void Screen_ExtrasGallery(void) {
         break;
 
     case 1: /* Slide-in: 39 frames -- prevents Enter from menu bleeding through */
-        s_anim_tick++;
+        s_anim_tick += 2;
         if (s_anim_tick >= 0x27)
             s_inner_state = 2;
         break;
@@ -6502,7 +6497,7 @@ static void Screen_ExtrasGallery(void) {
         break;
 
     case 3: /* Slide-out: 16 frames, then return */
-        s_anim_tick++;
+        s_anim_tick += 2;
         if (s_anim_tick >= 16 && s_return_screen >= 0 && s_return_screen < TD5_SCREEN_COUNT)
             td5_frontend_set_screen((TD5_ScreenIndex)s_return_screen);
         break;
@@ -6633,7 +6628,7 @@ static void Screen_RaceResults(void) {
         break;
 
     case 3: /* Slide-in: 39 frames */
-        s_anim_tick++;
+        s_anim_tick += 2;
         if (s_anim_tick >= 0x12) {
             /* If skip flag or disqualified, jump to cleanup */
             if (s_results_skip_display) {
@@ -6661,14 +6656,14 @@ static void Screen_RaceResults(void) {
         break;
 
     case 7: case 8: /* Slide left animation: 17 frames */
-        s_anim_tick++;
+        s_anim_tick += 2;
         if (s_anim_tick >= 17) {
             s_inner_state = 6; /* back to interactive */
         }
         break;
 
     case 9: case 10: /* Slide right animation: 17 frames */
-        s_anim_tick++;
+        s_anim_tick += 2;
         if (s_anim_tick >= 17) {
             s_inner_state = 6;
         }
@@ -6726,7 +6721,7 @@ static void Screen_RaceResults(void) {
         break;
 
     case 0x0E: /* Menu slide-in: 5 buttons animate in, 32 frames */
-        s_anim_tick++;
+        s_anim_tick += 2;
         if (s_anim_tick >= 0x10) {
             s_inner_state = 0x0F;
         }
@@ -6741,7 +6736,7 @@ static void Screen_RaceResults(void) {
         break;
 
     case 0x10: /* Menu slide-out: 32 frames, then dispatch */
-        s_anim_tick++;
+        s_anim_tick += 2;
         if (s_anim_tick >= 0x10) {
             switch (s_results_button) {
             case 0: /* Race Again / Next Cup Race */
@@ -6806,7 +6801,7 @@ static void Screen_RaceResults(void) {
         break;
 
     case 0x12: /* Save confirmation slide-in: 32 frames */
-        s_anim_tick++;
+        s_anim_tick += 2;
         if (s_anim_tick >= 0x10) {
             s_inner_state = 0x13;
         }
@@ -6819,7 +6814,7 @@ static void Screen_RaceResults(void) {
         break;
 
     case 0x14: /* Save confirmation slide-out: 32 frames -> back to menu */
-        s_anim_tick++;
+        s_anim_tick += 2;
         if (s_anim_tick >= 0x10) {
             s_inner_state = 0x0D; /* return to post-results menu */
         }
@@ -6857,7 +6852,7 @@ static void Screen_PostRaceNameEntry(void) {
         break;
 
     case 1: /* Slide-in: 32 frames */
-        s_anim_tick++;
+        s_anim_tick += 2;
         if (s_anim_tick >= 0x10) {
             s_anim_tick = 0;
             s_inner_state = 2;
@@ -6874,7 +6869,7 @@ static void Screen_PostRaceNameEntry(void) {
         break;
 
     case 3: /* Slide-out of input: 32 frames */
-        s_anim_tick++;
+        s_anim_tick += 2;
         if (s_anim_tick >= 0x10) {
             s_anim_tick = 0;
             s_inner_state = 4;
@@ -6894,7 +6889,7 @@ static void Screen_PostRaceNameEntry(void) {
         break;
 
     case 7: /* Score table slide-in: 39 frames */
-        s_anim_tick++;
+        s_anim_tick += 2;
         if (s_anim_tick >= 0x12) {
             s_inner_state = 8;
         }
@@ -6916,7 +6911,7 @@ static void Screen_PostRaceNameEntry(void) {
         break;
 
     case 12: /* Slide-out: 16 frames */
-        s_anim_tick++;
+        s_anim_tick += 2;
         if (s_anim_tick >= 16) {
             /* For cup types (1-7): reset re-race flag */
             td5_frontend_set_screen(TD5_SCREEN_MAIN_MENU);
@@ -6956,7 +6951,7 @@ static void Screen_CupFailed(void) {
         break;
 
     case 4: /* Slide-in: 32 frames */
-        s_anim_tick++;
+        s_anim_tick += 2;
         /* Dialog slides from right (24px/frame), button from left */
         if (s_anim_tick >= 0x10) {
             s_inner_state = 5;
@@ -7006,7 +7001,7 @@ static void Screen_CupWon(void) {
         break;
 
     case 4: /* Slide-in: 32 frames */
-        s_anim_tick++;
+        s_anim_tick += 2;
         if (s_anim_tick >= 0x10) {
             s_inner_state = 5;
         }
@@ -7072,7 +7067,7 @@ static void Screen_SessionLocked(void) {
         break;
 
     case 4: /* Slide-in: 32 frames */
-        s_anim_tick++;
+        s_anim_tick += 2;
         if (s_anim_tick >= 0x10) {
             s_inner_state = 5;
         }
