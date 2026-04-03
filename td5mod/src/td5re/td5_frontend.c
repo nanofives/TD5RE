@@ -3335,9 +3335,9 @@ void td5_frontend_render_ui_rects(void) {
              * DDBLT_KEYSRC (black = transparent). We draw only the 9-slice
              * frame with alpha blending; background shows through naturally. */
             int bb_state;
-            if (s_buttons[i].disabled)               bb_state = 2;
-            else if (flash_active || ramp_t >= 0.5f) bb_state = 0;
-            else                                     bb_state = 1;
+            if (s_buttons[i].disabled)                          bb_state = 2;
+            else if (flash_active || s_buttons[i].highlight_ramp == 6) bb_state = 0;
+            else                                                bb_state = 1;
 
             td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
             fe_draw_button_9slice(bx, by, bw, bh, bb_state, sx, sy);
