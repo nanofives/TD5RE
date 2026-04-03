@@ -279,7 +279,7 @@ static void td5_asset_init_static_atlas(void)
 
         /* Upload the page the first time we encounter this slot */
         if (!s_static_page_done[tex_slot]) {
-            if (tex_slot <= 2 && load_static_r5g6b5_tpage(tex_slot)) {
+            if (load_static_r5g6b5_tpage(tex_slot)) {
                 s_static_page_done[tex_slot] = 1;
             } else {
                 upload_atlas_placeholder(tex_slot);
