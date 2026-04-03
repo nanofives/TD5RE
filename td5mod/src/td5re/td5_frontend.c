@@ -1106,7 +1106,7 @@ static int frontend_create_button(const char *label, int x, int y, int w, int h)
 
             /* Auto-layout: negative x (or both zero) triggers center-relative placement */
             if ((x < 0 || (x == 0 && y == 0)) && s_auto_button_idx < 9) {
-                s_buttons[i].x = FE_CENTER_X - s_buttons[i].w;
+                s_buttons[i].x = FE_CENTER_X - FE_BTN_LEFT_OFFSET;
                 s_buttons[i].y = FE_CENTER_Y + s_auto_button_y_offset[s_auto_button_idx];
                 s_auto_button_idx++;
             } else {
@@ -2913,6 +2913,7 @@ static void frontend_render_game_options_overlay(float sx, float sy) {
     const char *dynamics[] = { "SIMULATION", "ARCADE" };
     char laps[16];
     if (!s_buttons[0].active) return;
+    if (!s_anim_complete) return;
     snprintf(laps, sizeof(laps), "%d", (s_game_option_laps + 1) * 2);
     frontend_draw_value_text(sx, sy, 372, s_buttons[0].y + 6, laps, 0xFFFFFFFF);
     frontend_draw_value_text(sx, sy, 372, s_buttons[1].y + 6, on_off[s_game_option_checkpoint_timers & 1], 0xFFFFFFFF);
@@ -2930,6 +2931,7 @@ static void frontend_render_display_options_overlay(float sx, float sy) {
     const char *on_off[] = { "OFF", "ON" };
     const char *speed_read[] = { "MPH", "KPH" };
     if (!s_buttons[0].active) return;
+    if (!s_anim_complete) return;
     if (s_display_mode_count > 0 &&
         s_display_mode_index >= 0 &&
         s_display_mode_index < s_display_mode_count)
@@ -2948,6 +2950,7 @@ static void frontend_render_sound_options_overlay(float sx, float sy) {
     char music_volume[16];
 
     if (!s_buttons[0].active) return;
+    if (!s_anim_complete) return;
     snprintf(sfx_volume, sizeof(sfx_volume), "%d", s_sound_option_sfx_volume);
     snprintf(music_volume, sizeof(music_volume), "%d", s_sound_option_music_volume);
     frontend_draw_value_text(sx, sy, 372, s_buttons[0].y + 6, sfx_mode[s_sound_option_sfx_mode & 1], 0xFFFFFFFF);
@@ -2960,6 +2963,7 @@ static void frontend_render_two_player_options_overlay(float sx, float sy) {
     const char *on_off[] = { "OFF", "ON" };
 
     if (!s_buttons[0].active) return;
+    if (!s_anim_complete) return;
     frontend_draw_value_text(sx, sy, 372, s_buttons[0].y + 6, on_off[(s_two_player_mode & 4) ? 1 : 0], 0xFFFFFFFF);
     frontend_draw_value_text(sx, sy, 372, s_buttons[1].y + 6, on_off[(s_two_player_mode & 8) ? 1 : 0], 0xFFFFFFFF);
     for (int i = 0; i <= 1; i++) fe_draw_option_arrows(i, sx, sy);
