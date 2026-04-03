@@ -1354,12 +1354,33 @@ static int frontend_render_fade(void) {
     return 0;
 }
 
+/*
+ * Maps external car-id / cup-schedule slot index → s_car_zip_paths index.
+ * Mirrors DAT_00463E24[37] from the original binary (confirmed by RE).
+ * Quick-race default: all cup_schedule_track[i] = 0 → type index 7 (XKR).
+ */
+static const int s_ext_car_to_type_index[37] = {
+     7,  2, 17, 33, 22, 31, 32, 34, 18, 14,
+     1, 15, 13,  9, 11,  5,  0, 35,  8,  3,
+     4, 12, 26, 10, 36, 16, 19, 25, 20, 23,
+     6, 24, 21, 30, 28, 27, 29
+};
+
 static void frontend_init_race_schedule(void) {
+    int i;
     g_td5.race_requested = 1;
     g_td5.car_index   = frontend_current_car_index();
     g_td5.track_index = (s_current_screen == TD5_SCREEN_ATTRACT_MODE)
                         ? s_attract_track
                         : s_selected_track;
+
+    /* Assign AI car types per slot from the cup schedule.
+     * For quick race the schedule defaults to ext_id 0 for all slots → XKR (type 7).
+     * Cup modes should override s_cup_schedule_track[] before calling this. */
+    for (i = 1; i < TD5_MAX_RACER_SLOTS; i++) {
+        g_td5.ai_car_indices[i] = s_ext_car_to_type_index[0]; /* default: XKR */
+    }
+
     TD5_LOG_I(LOG_TAG, "InitializeRaceSeriesSchedule: car=%d (resolved=%d) track=%d type=%d",
               s_selected_car, g_td5.car_index, g_td5.track_index, s_selected_game_type);
 }
@@ -3361,7 +3382,7 @@ static void frontend_render_high_score_overlay(float sx, float sy) {
 
     /* Column X positions (in 520px panel space, scaled to screen) */
     float col_name  = panel_x + 16.0f  * sx;
-    float col_score = panel_x + 140.0f * sx;
+    float col_score = panel_x + 128.0f * sx; /* 0x80: original left edge */
     float col_car   = panel_x + 228.0f * sx;
     float col_avg   = panel_x + 352.0f * sx;
     float col_top   = panel_x + 444.0f * sx;
@@ -3432,10 +3453,16 @@ static void frontend_render_high_score_overlay(float sx, float sy) {
         {
             int cid = e->car_id & 0xFF;
             const char *cname = frontend_get_car_display_name(cid);
-            /* Truncate long car names for column fit */
+            /* Clip car name to 108px column width [0xe4..0x150] */
             char cname_buf[20];
             strncpy(cname_buf, cname, sizeof(cname_buf) - 1);
             cname_buf[sizeof(cname_buf) - 1] = '\0';
+            {
+                int clen = (int)strlen(cname_buf);
+                while (clen > 0 && fe_measure_text(cname_buf, sx * ts) > 108.0f * sx) {
+                    cname_buf[--clen] = '\0';
+                }
+            }
             fe_draw_text(col_car, y, cname_buf, row_color, sx * ts, sy * ts);
         }
 
