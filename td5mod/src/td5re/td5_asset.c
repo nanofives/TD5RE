@@ -1526,13 +1526,15 @@ int td5_asset_load_level(int track_index)
         levelinf_data = load_first_available_level_entry(track_index, s_levelinf_names, 1,
                                                          &levelinf_sz, NULL, 0);
         if (levelinf_data && levelinf_sz >= 4) {
-            int32_t p2p_flag;
-            memcpy(&p2p_flag, (uint8_t *)levelinf_data, sizeof(int32_t));
-            g_td5.track_type = (p2p_flag == 1) ? TD5_TRACK_POINT_TO_POINT : TD5_TRACK_CIRCUIT;
+            int32_t circuit_flag;
+            memcpy(&circuit_flag, (uint8_t *)levelinf_data, sizeof(int32_t));
+            /* DWORD[0]==1 → circuit (show laps); DWORD[0]==0 → point-to-point (no laps).
+             * Verified from original binary at 0x42AE6B: cmp %edi,(%eax); je → mov [0x466E94],edi(1) */
+            g_td5.track_type = (circuit_flag == 1) ? TD5_TRACK_CIRCUIT : TD5_TRACK_POINT_TO_POINT;
             g_track_environment_config = (uint8_t *)levelinf_data;
             levelinf_data = NULL; /* ownership transferred; do not free */
-            TD5_LOG_I(LOG_TAG, "LEVELINF.DAT loaded: track_type=%d (p2p_flag=%d)",
-                      g_td5.track_type, p2p_flag);
+            TD5_LOG_I(LOG_TAG, "LEVELINF.DAT loaded: track_type=%d (circuit_flag=%d)",
+                      g_td5.track_type, circuit_flag);
         } else {
             TD5_LOG_W(LOG_TAG, "missing or short %s in %s, defaulting to circuit", levelinf_name, zip_path);
             g_td5.track_type = TD5_TRACK_CIRCUIT;
