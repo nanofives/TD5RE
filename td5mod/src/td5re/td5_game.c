@@ -460,6 +460,12 @@ TD5_GameState td5_game_get_state(void) {
     return g_td5.game_state;
 }
 
+int td5_game_get_player_lap(int slot)
+{
+    if (slot < 0 || slot >= TD5_MAX_RACER_SLOTS) return 0;
+    return (int)s_metrics[slot].checkpoint_index;
+}
+
 /* ========================================================================
  * InitializeRaceSession (0x42AA10)
  *
@@ -519,9 +525,10 @@ int td5_game_init_race_session(void) {
     /* ---- Step 5: Load vehicle assets for all active slots ---- */
     for (int i = 0; i < TD5_MAX_RACER_SLOTS; i++) {
         if (s_slot_state[i].state != 3) {
-            td5_asset_load_vehicle(0 /* car_index from slot config */, i);
+            int car_for_slot = (i == 0) ? g_td5.car_index : 0;
+            td5_asset_load_vehicle(car_for_slot, i);
             TD5_LOG_I(LOG_TAG, "InitRace step 5/19: vehicle asset loaded slot=%d car_index=%d",
-                      i, 0);
+                      i, car_for_slot);
         }
     }
 
@@ -616,7 +623,7 @@ int td5_game_init_race_session(void) {
             }
 
             *(int32_t *)(actor + 0x1FC) = world_x;
-            *(int32_t *)(actor + 0x200) = -0x40000000;
+            *(int32_t *)(actor + 0x200) = world_y;
             *(int32_t *)(actor + 0x204) = world_z;
 
             actor[0x375] = (uint8_t)slot;
