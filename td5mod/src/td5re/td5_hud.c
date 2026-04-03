@@ -46,6 +46,9 @@ extern TD5_AtlasEntry *td5_asset_find_atlas_entry(void *context, const char *nam
 /* 0x430CF0: Allocate from game heap */
 extern void *td5_game_heap_alloc(size_t size);
 
+/* Returns completed lap index (0-based) for the given actor slot */
+extern int td5_game_get_player_lap(int slot);
+
 /* 0x432BD0: Build sprite quad template from layout params */
 extern void td5_render_build_sprite_quad(int *params);
 
@@ -207,9 +210,13 @@ static int   s_pause_quad_count;          /* 0x4B1368 */
 static TD5_AtlasEntry *s_pause_slider_atlas; /* 0x4B1358 */
 static uint8_t *s_pause_sel_box;          /* 0x4BCB70 */
 static void *s_pause_slider_ptrs[3];      /* 0x4B11D8..0x4B11E4 */
+/* Persistent storage for pre-built pause menu quads (submitted each frame) */
+static uint8_t s_pause_quad_buf[TD5_HUD_PAUSE_MAX_QUADS * 0xB8];
 
-/* Pause overlay dimmer state */
-#define HUD_WHITE_TEX_PAGE 898
+/* Pause overlay dimmer state.
+ * Must NOT be 898 (TD5_SHARED_FONT_PAGE) — that would clobber BodyText.tga
+ * and cause white boxes on all frontend text after returning from a race. */
+#define HUD_WHITE_TEX_PAGE 899
 static int s_hud_white_tex_uploaded;
 
 static void hud_log_atlas_status(const char *name, const TD5_AtlasEntry *entry)
@@ -305,6 +312,14 @@ static void hud_build_quad(void *dest, int mode, int tex_page,
 
     p.depth_z[0] = depth; p.depth_z[1] = depth;
     p.depth_z[2] = depth; p.depth_z[3] = depth;
+
+    /* Normalize pixel atlas UVs to [0,1] for D3D11 sampler.
+     * Static atlas pages are 256x256 BGRA32. The original engine uses
+     * 1/256 for both axes (confirmed from BuildSpriteQuadTemplate @ 0x432BD0,
+     * constant at [0x4749D0] = 0.00390625 = 1/256). Solid-color 1x1 pages
+     * work correctly with any UV under WRAP mode. */
+    u0 /= 256.0f; v0 /= 256.0f;
+    u1 /= 256.0f; v1 /= 256.0f;
 
     p.tex_u[0] = u0; p.tex_u[1] = u0; p.tex_u[2] = u1; p.tex_u[3] = u1;
     p.tex_v[0] = v0; p.tex_v[1] = v1; p.tex_v[2] = v1; p.tex_v[3] = v0;
@@ -457,6 +472,107 @@ void td5_hud_init_font_atlas(void)
 
     s_queued_glyph_count = 0;
 
+    /* Generate synthetic font texture for page 705 using GDI.
+     * tpage5.dat is not extracted from the original game data, so we build
+     * a 256x512 BGRA atlas page and render the 64-glyph 4x16 grid into it
+     * at the correct atlas offset (atlas_x=96, atlas_y=192, size=160x64).
+     *
+     * The glyph table stores pixel UV coordinates; hud_build_quad normalizes
+     * them by 256/512 before submission to D3D11. */
+    if (font_entry->texture_page > 0) {
+        /* 256x256 BGRA = 256 KB; static to avoid stack overflow.
+         * Atlas pages are 256x256 (confirmed by UV scale = 1/256 for both axes). */
+        static uint8_t s_font_page_buf[256 * 256 * 4];
+        memset(s_font_page_buf, 0, sizeof(s_font_page_buf));
+
+        /* Character rendered for each glyph index (4 rows x 16 cols = 64):
+         *   row 0 (0x00-0x0F): A-P
+         *   row 1 (0x10-0x1F): Q-Z then space (0x1A-0x1F unmapped)
+         *   row 2 (0x20-0x2F): !"#$%&'()*+,-./0
+         *   row 3 (0x30-0x3F): 1-9:; then space (0x3C-0x3F unmapped) */
+        static const char k_glyph_chars[64] = {
+            'A','B','C','D','E','F','G','H','I','J','K','L','M','N','O','P',
+            'Q','R','S','T','U','V','W','X','Y','Z',' ',' ',' ',' ',' ',' ',
+            '!','"','#','$','%','&','\'','(',')','*','+',',','-','.','/','0',
+            '1','2','3','4','5','6','7','8','9',':',' ',' ',' ',' ',' ',' '
+        };
+
+        /* The font region occupies rows atlas_y..atlas_y+63 in the full page.
+         * We render into a 256x64 DIB (top-down) and blit into s_font_page_buf. */
+        BITMAPINFO bmi;
+        memset(&bmi, 0, sizeof(bmi));
+        bmi.bmiHeader.biSize        = sizeof(BITMAPINFOHEADER);
+        bmi.bmiHeader.biWidth       = 256;
+        bmi.bmiHeader.biHeight      = -64; /* negative = top-down */
+        bmi.bmiHeader.biPlanes      = 1;
+        bmi.bmiHeader.biBitCount    = 32;
+        bmi.bmiHeader.biCompression = BI_RGB;
+
+        void *dib_bits = NULL;
+        HDC hdc_mem = CreateCompatibleDC(NULL);
+        HBITMAP hbmp = CreateDIBSection(hdc_mem, &bmi, DIB_RGB_COLORS,
+                                        &dib_bits, NULL, 0);
+
+        if (hbmp && dib_bits) {
+            HBITMAP old_bmp = (HBITMAP)SelectObject(hdc_mem, hbmp);
+            HFONT hfont = (HFONT)GetStockObject(SYSTEM_FIXED_FONT);
+            HFONT old_font = (HFONT)SelectObject(hdc_mem, hfont);
+
+            RECT fill_rc = {0, 0, 256, 64};
+            FillRect(hdc_mem, &fill_rc,
+                     (HBRUSH)GetStockObject(BLACK_BRUSH));
+
+            SetBkMode(hdc_mem, OPAQUE);
+            SetBkColor(hdc_mem, RGB(0, 0, 0));
+            SetTextColor(hdc_mem, RGB(255, 255, 255));
+
+            int ax = font_entry->atlas_x; /* 96 */
+            /* atlas_y offset is applied when copying into s_font_page_buf */
+
+            for (int gi = 0; gi < TD5_HUD_FONT_GLYPH_COUNT; gi++) {
+                char c = k_glyph_chars[gi];
+                if (c == ' ') continue;
+                int col = gi % TD5_HUD_FONT_GRID_COLS;
+                int row = gi / TD5_HUD_FONT_GRID_COLS;
+                /* Pixel position in the DIB: column stride=10, row stride=16.
+                 * +1/+2 match the 1.5/2.5 sub-pixel offsets in the glyph table. */
+                int px = ax + col * 10 + 1;
+                int py = row * 16 + 2;
+                TextOutA(hdc_mem, px, py, &c, 1);
+            }
+
+            GdiFlush();
+
+            /* Convert DIB pixels (BGRX) to BGRA with luminance alpha.
+             * White GDI text → full alpha; black background → transparent. */
+            const uint8_t *src = (const uint8_t *)dib_bits;
+            int ay = font_entry->atlas_y; /* 192 */
+            for (int y = 0; y < 64; y++) {
+                for (int x = 0; x < 256; x++) {
+                    int si = (y * 256 + x) * 4;
+                    uint8_t b = src[si + 0];
+                    uint8_t g_ch = src[si + 1];
+                    uint8_t r = src[si + 2];
+                    /* Luminance as alpha (integer approximation of 0.299R+0.587G+0.114B) */
+                    uint8_t alpha = (uint8_t)((r * 77u + g_ch * 150u + b * 29u) >> 8);
+                    int di = ((ay + y) * 256 + x) * 4;
+                    s_font_page_buf[di + 0] = 0xFF; /* B */
+                    s_font_page_buf[di + 1] = 0xFF; /* G */
+                    s_font_page_buf[di + 2] = 0xFF; /* R */
+                    s_font_page_buf[di + 3] = alpha; /* A */
+                }
+            }
+
+            SelectObject(hdc_mem, old_font);
+            SelectObject(hdc_mem, old_bmp);
+            DeleteObject(hbmp);
+        }
+        DeleteDC(hdc_mem);
+
+        td5_plat_render_upload_texture(font_entry->texture_page,
+                                       s_font_page_buf, 256, 256, 2);
+    }
+
     /* Upload 1x1 white texture for solid-color overlays (pause dimmer) */
     if (!s_hud_white_tex_uploaded) {
         static const uint32_t k_white = 0xFFFFFFFF;
@@ -473,9 +589,11 @@ void td5_hud_init_font_atlas(void)
 void td5_hud_draw_pause_overlay(void)
 {
     static uint8_t s_dimmer_quad[0xB8];
+    int i;
 
     if (!s_hud_white_tex_uploaded) return;
 
+    /* Semi-transparent black dimmer over the whole screen */
     hud_build_quad(
         s_dimmer_quad,
         0,
@@ -488,6 +606,11 @@ void td5_hud_draw_pause_overlay(void)
         HUD_DEPTH
     );
     hud_submit_quad(s_dimmer_quad);
+
+    /* Submit pre-built pause menu panel, selection, sliders, and text */
+    for (i = 0; i < s_pause_quad_count && i < TD5_HUD_PAUSE_MAX_QUADS; i++) {
+        hud_submit_quad(s_pause_quad_buf + i * 0xB8);
+    }
 }
 
 /* ========================================================================
@@ -721,75 +844,75 @@ void td5_hud_init_layout(int viewport_mode)
     s_scale_x = g_render_width_f * (1.0f / 640.0f);
     s_scale_y = g_render_height_f * (1.0f / 480.0f);
 
-    /* Set up per-view layout */
+    /* Set up per-view layout in pixel-space coordinates.
+     *
+     * The original binary uses a centered coordinate system where origin is
+     * the screen center (vp_left = -width/2, vp_right = +width/2).
+     * BuildSpriteQuadTemplate @ 0x432BD0 adds screen_center to each vertex
+     * before submitting to hardware.  Our source port submits vertices
+     * directly to D3D11 without that centering step, so all HUD positions
+     * must be in pixel-space (vp_left = 0, vp_right = width). */
     if (viewport_mode == 0) {
         /* Single full-screen view */
         s_view_count = 1;
-
-        s_view_layout[0].scale_x = s_scale_x;
-        s_view_layout[0].scale_y = s_scale_y;
-        s_view_layout[0].vp_left  = g_render_width_f * 0.5f;  /* not used as left edge */
-        s_view_layout[0].vp_right = g_render_width_f * 0.5f;
-        s_view_layout[0].vp_top   = g_render_height_f * 0.5f;
-        s_view_layout[0].vp_bottom = g_render_height_f * 0.5f;
-
-        /* Actual viewport edges */
-        s_view_layout[0].vp_int_left = 0.0f;
-        s_view_layout[0].vp_int_top  = 0.0f;
-        s_view_layout[0].vp_int_right = g_render_width_f;
-        s_view_layout[0].vp_int_bottom = g_render_height_f;
+        s_view_layout[0].scale_x  = s_scale_x;
+        s_view_layout[0].scale_y  = s_scale_y;
+        s_view_layout[0].vp_left   = 0.0f;
+        s_view_layout[0].vp_right  = g_render_width_f;
+        s_view_layout[0].vp_top    = 0.0f;
+        s_view_layout[0].vp_bottom = g_render_height_f;
 
     } else if (viewport_mode == 1) {
-        /* Left/right split */
+        /* Left/right split: each half-screen view */
         s_scale_x *= 0.5f;
         s_scale_y *= 0.5f;
         s_view_count = 2;
-
         /* View 0: left half */
-        s_view_layout[0].scale_x = s_scale_x;
-        s_view_layout[0].scale_y = s_scale_y;
-        s_view_layout[0].vp_left  = g_render_width_f * 0.5f;
-        s_view_layout[0].vp_right = 0.0f;
-        s_view_layout[0].vp_top   = g_render_height_f * 0.5f;
-        s_view_layout[0].vp_bottom = g_render_height_f * 0.5f;
-
+        s_view_layout[0].scale_x  = s_scale_x;
+        s_view_layout[0].scale_y  = s_scale_y;
+        s_view_layout[0].vp_left   = 0.0f;
+        s_view_layout[0].vp_right  = g_render_width_f * 0.5f;
+        s_view_layout[0].vp_top    = 0.0f;
+        s_view_layout[0].vp_bottom = g_render_height_f;
         /* View 1: right half */
-        s_view_layout[1].scale_x = s_scale_x;
-        s_view_layout[1].scale_y = s_scale_y;
-        s_view_layout[1].vp_left  = g_render_width_f * 0.5f;
-        s_view_layout[1].vp_right = g_render_width_f * 0.5f;
-        s_view_layout[1].vp_top   = s_view_layout[0].vp_top;
-        s_view_layout[1].vp_bottom = s_view_layout[0].vp_bottom;
+        s_view_layout[1].scale_x  = s_scale_x;
+        s_view_layout[1].scale_y  = s_scale_y;
+        s_view_layout[1].vp_left   = g_render_width_f * 0.5f;
+        s_view_layout[1].vp_right  = g_render_width_f;
+        s_view_layout[1].vp_top    = 0.0f;
+        s_view_layout[1].vp_bottom = g_render_height_f;
 
     } else {
-        /* Top/bottom split */
+        /* Top/bottom split: each half-screen view */
         s_scale_x *= 0.5f;
         s_scale_y *= 0.5f;
         s_view_count = 2;
-
         /* View 0: top half */
-        s_view_layout[0].scale_x = s_scale_x;
-        s_view_layout[0].scale_y = s_scale_y;
-        s_view_layout[0].vp_left  = g_render_width_f * 0.5f;
-        s_view_layout[0].vp_right = g_render_width_f * 0.5f;
-        s_view_layout[0].vp_top   = g_render_height_f * 0.5f;
-        s_view_layout[0].vp_bottom = 0.0f;
-
+        s_view_layout[0].scale_x  = s_scale_x;
+        s_view_layout[0].scale_y  = s_scale_y;
+        s_view_layout[0].vp_left   = 0.0f;
+        s_view_layout[0].vp_right  = g_render_width_f;
+        s_view_layout[0].vp_top    = 0.0f;
+        s_view_layout[0].vp_bottom = g_render_height_f * 0.5f;
         /* View 1: bottom half */
-        s_view_layout[1].scale_x = s_scale_x;
-        s_view_layout[1].scale_y = s_scale_y;
-        s_view_layout[1].vp_left  = s_view_layout[0].vp_left;
-        s_view_layout[1].vp_right = s_view_layout[0].vp_right;
-        s_view_layout[1].vp_top   = g_render_height_f * 0.5f;
-        s_view_layout[1].vp_bottom = g_render_height_f * 0.5f;
+        s_view_layout[1].scale_x  = s_scale_x;
+        s_view_layout[1].scale_y  = s_scale_y;
+        s_view_layout[1].vp_left   = 0.0f;
+        s_view_layout[1].vp_right  = g_render_width_f;
+        s_view_layout[1].vp_top    = g_render_height_f * 0.5f;
+        s_view_layout[1].vp_bottom = g_render_height_f;
     }
 
-    /* Compute derived viewport values for each view */
+    /* Compute derived viewport values for each view.
+     * center_x/center_y = viewport center in pixel coords.
+     * half_width = center_x (used by text centering code as horizontal pivot).
+     * vp_int_* = pixel-space edges (same as vp_* for our pipeline). */
     for (int v = 0; v < s_view_count; v++) {
         TD5_HudViewLayout *vl = &s_view_layout[v];
-        vl->half_width  = (vl->vp_right + vl->vp_left) * 0.5f;
-        vl->half_height = (vl->vp_bottom + vl->vp_top) * 0.5f;
-        /* Integer viewport bounds (truncated) */
+        vl->center_x    = (vl->vp_left  + vl->vp_right)  * 0.5f;
+        vl->center_y    = (vl->vp_top   + vl->vp_bottom) * 0.5f;
+        vl->half_width  = vl->center_x;   /* used as horizontal pivot for text */
+        vl->half_height = vl->center_y;
         vl->vp_int_left   = vl->vp_left;
         vl->vp_int_top    = vl->vp_top;
         vl->vp_int_right  = vl->vp_right;
@@ -840,9 +963,9 @@ void td5_hud_init_layout(int viewport_mode)
             hud_log_atlas_status("SPEEDOFONT", s_speedofont_atlas);
         }
 
-        float font_glyph_w = sx * 16.0f;
-        float font_x_start = vp_r - font_glyph_w * 3.5f;
-        float font_y = vp_b - sy * 24.0f - sy * 8.0f;
+        float font_glyph_w = sx * 15.0f;
+        float font_x_start = vp_r - sx * 60.0f;
+        float font_y = vp_b - sy * 23.0f - sy * 8.0f;
 
         /* Build 3 digit quads (ones, tens, hundreds -- right to left) */
         for (int d = 0; d < 3; d++) {
@@ -864,7 +987,7 @@ void td5_hud_init_layout(int viewport_mode)
         }
 
         float gear_x = vp_r - sx * 32.0f;
-        float gear_y = vp_b - sy * 16.0f - sy * 20.0f;
+        float gear_y = vp_b - sy * 16.0f - sy * 56.0f;
 
         hud_build_quad(
             view_base + GEAR_QUAD_OFF,
@@ -878,7 +1001,7 @@ void td5_hud_init_layout(int viewport_mode)
         /* --- Metric digit quads (numbers atlas, 4 digits) --- */
         float metric_glyph_w = sx * 16.0f;
         float metric_x = s_view_layout[v].center_x - metric_glyph_w * 2.5f;
-        float metric_y = vp_t + 2.0f;
+        float metric_y = vp_t + sy * 12.0f;
 
         for (int d = 0; d < 4; d++) {
             float mdx = metric_x + (float)d * metric_glyph_w;
@@ -1242,11 +1365,13 @@ void td5_hud_render_overlays(float dt)
 
         /* --- Bit 9: Circuit lap count --- */
         if (flags & TD5_HUD_CIRCUIT_LAPS) {
+            int cur_lap = td5_game_get_player_lap(actor_slot) + 1;
+            int total_laps = g_td5.circuit_lap_count;
             td5_hud_queue_text(0,
                 (int)(vl->vp_int_left + 8.0f),
                 (int)(vl->vp_int_top + 40.0f),
                 0,
-                "%s %d/%d", s_hud_string_table[12], 0, 0);
+                "%s %d/%d", s_hud_string_table[12], cur_lap, total_laps);
         }
 
         /* --- Bit 8: Lap/checkpoint counter --- */
@@ -1554,6 +1679,11 @@ void td5_hud_render_minimap(int actor_slot)
         s_minimap_width * 0.5f + s_minimap_x,
         s_minimap_height * 0.5f + s_minimap_y);
 
+    /* Minimap screen center — used for all coord offsets below since
+     * td5_render_set_projection_center is a stub (no-op in source port). */
+    float mm_cx = s_minimap_width * 0.5f + s_minimap_x;
+    float mm_cy = s_minimap_height * 0.5f + s_minimap_y;
+
     /* Compute player heading rotation */
     int32_t heading = actor_heading(actor_slot);
     uint32_t rot_angle = 0x800 - (uint32_t)(heading >> 8);
@@ -1561,17 +1691,18 @@ void td5_hud_render_minimap(int actor_slot)
     float cos_h = td5_cos_12bit(rot_angle);
     float sin_h = td5_sin_12bit(rot_angle);
 
-    /* World-to-minimap offset (player centered) */
-    float world_scale = 1.0f / 1024.0f; /* 0x0009765625 */
-    float offset_x = -(float)actor_world_x(actor_slot) * world_scale;
-    float offset_z = -(float)actor_world_z(actor_slot) * world_scale;
+    /* World-to-minimap offset (player centered).
+     * World coordinates are 24.8 fixed-point; multiply by 1/256 to convert
+     * to float world units before applying s_minimap_world_scale_x.
+     * Binary: fVar9 = -(worldX * _DAT_004749d0) where _DAT_004749d0 = 1/256. */
+    const float kFP = 1.0f / 256.0f;
+    float offset_x = -(float)actor_world_x(actor_slot) * kFP;
+    float offset_z = -(float)actor_world_z(actor_slot) * kFP;
 
-    /* Submit background tiles */
-    for (int i = 0; i < 0x30; i++) {
+    /* Submit 16 background tiles (binary: offset 0x4500..0x507F, stride 0xB8) */
+    for (int i = 0; i < 16; i++) {
         int buf_off = 0x4500 + i * TD5_HUD_GLYPH_QUAD_SIZE;
-        if (buf_off + TD5_HUD_GLYPH_QUAD_SIZE <= TD5_HUD_MINIMAP_BUF_SIZE) {
-            hud_submit_quad(s_minimap_quad_buf + buf_off);
-        }
+        hud_submit_quad(s_minimap_quad_buf + buf_off);
     }
 
     /* Walk track spans and render road segments */
@@ -1582,11 +1713,11 @@ void td5_hud_render_minimap(int actor_slot)
     /* Simplified: iterate visible spans around the player */
     uint8_t *span_base = (uint8_t *)g_strip_span_base;
     uint8_t *vert_base = (uint8_t *)g_strip_vertex_base;
-    int seg_idx = 0;
     int dot_count = 0;
     TD5_SpriteQuad map_quad;
 
-    for (int i = 0; i < 0x30 && (int)(start_span + i * 5) < g_strip_span_count - 2; i++) {
+    for (int i = 0; span_base && vert_base &&
+             i < 0x30 && (int)(start_span + i * 5) < g_strip_span_count - 2; i++) {
         int span_a = start_span + i * 5;
         int span_b = span_a + 5;
         if (span_b >= g_strip_span_count) span_b = g_strip_span_count - 2;
@@ -1600,8 +1731,8 @@ void td5_hud_render_minimap(int actor_slot)
         uint16_t vi_a = *(uint16_t *)(sa + 4);
 
         int16_t *va = (int16_t *)(vert_base + vi_a * 6);
-        float wx0 = (float)((int)va[0] + ox_a) + offset_x;
-        float wz0 = (float)((int)va[2] + oz_a) + offset_z;
+        float wx0 = (float)((int)va[0] + ox_a) * kFP + offset_x;
+        float wz0 = (float)((int)va[2] + oz_a) * kFP + offset_z;
 
         /* Transform through player heading rotation */
         float mx0 = (wx0 * cos_h + wz0 * sin_h) * s_minimap_world_scale_x;
@@ -1613,18 +1744,18 @@ void td5_hud_render_minimap(int actor_slot)
         uint16_t vi_b = *(uint16_t *)(sb + 6);
 
         int16_t *vb = (int16_t *)(vert_base + vi_b * 6);
-        float wx1 = (float)((int)vb[0] + ox_b) + offset_x;
-        float wz1 = (float)((int)vb[2] + oz_b) + offset_z;
+        float wx1 = (float)((int)vb[0] + ox_b) * kFP + offset_x;
+        float wz1 = (float)((int)vb[2] + oz_b) * kFP + offset_z;
 
         float mx1 = (wx1 * cos_h + wz1 * sin_h) * s_minimap_world_scale_x;
         float my1 = (wz1 * cos_h - wx1 * sin_h) * s_minimap_world_scale_y;
 
-        /* Build a quad for this road segment */
+        /* Build a quad for this road segment (absolute screen coords) */
         hud_build_quad(
             &map_quad,
             1, 0, /* mode 1: no texture, solid color */
-            mx0 - 1.0f, my0 - 1.0f,
-            mx1 + 1.0f, my1 + 1.0f,
+            mm_cx + mx0 - 1.0f, mm_cy + my0 - 1.0f,
+            mm_cx + mx1 + 1.0f, mm_cy + my1 + 1.0f,
             0.0f, 0.0f, 0.0f, 0.0f,
             0xFF404040, /* dark gray road */
             HUD_DEPTH
@@ -1645,8 +1776,8 @@ void td5_hud_render_minimap(int actor_slot)
 
         /* Only show racers within +/-144 spans */
         if (span_delta > -0x91 && span_delta < 0x91) {
-            float rwx = (float)actor_world_x(r) * world_scale + offset_x;
-            float rwz = (float)actor_world_z(r) * world_scale + offset_z;
+            float rwx = (float)actor_world_x(r) * kFP + offset_x;
+            float rwz = (float)actor_world_z(r) * kFP + offset_z;
 
             float dmx = (rwx * cos_h + rwz * sin_h) * s_minimap_world_scale_x;
             float dmy = (rwz * cos_h - rwx * sin_h) * s_minimap_world_scale_y;
@@ -1656,8 +1787,8 @@ void td5_hud_render_minimap(int actor_slot)
             hud_build_quad(
                 &map_quad,
                 1, 0,
-                dmx - half_dot, dmy - half_dot,
-                dmx + half_dot, dmy + half_dot,
+                mm_cx + dmx - half_dot, mm_cy + dmy - half_dot,
+                mm_cx + dmx + half_dot, mm_cy + dmy + half_dot,
                 0.0f, 0.0f, 0.0f, 0.0f,
                 (r == g_actor_slot_map[0]) ? 0xFFFF0000 : 0xFFFFFF00,
                 HUD_DEPTH
@@ -1756,16 +1887,20 @@ void td5_hud_init_minimap_layout(void)
     float bg_u1 = (float)(scanback->atlas_x + scanback->width) - 0.5f;
     float bg_v1 = (float)(scanback->atlas_y + scanback->height) - 0.5f;
 
-    /* Build 4x4 grid of background tiles */
+    /* Build 4x4 grid of background tiles.
+     * td5_render_set_projection_center is a stub, so we bake the minimap
+     * screen center into each tile quad directly (absolute screen coords). */
     float tile_w = s_minimap_tile_width * 0.25f;
     float tile_h = s_minimap_tile_height * 0.25f;
+    float mm_cx = s_minimap_width * 0.5f + s_minimap_x;
+    float mm_cy = s_minimap_height * 0.5f + s_minimap_y;
 
     for (uint32_t t = 0; t < 16; t++) {
         int col = (int)(t & 3);
         int row = (int)(t / 4);
 
-        float tx0 = ((float)col * 0.25f - 0.5f) * s_minimap_tile_width;
-        float ty0 = ((float)row * 0.25f - 0.5f) * s_minimap_tile_height;
+        float tx0 = mm_cx + ((float)col * 0.25f - 0.5f) * s_minimap_tile_width;
+        float ty0 = mm_cy + ((float)row * 0.25f - 0.5f) * s_minimap_tile_height;
 
         int off = 0x4500 + (int)t * TD5_HUD_GLYPH_QUAD_SIZE;
         if (off + TD5_HUD_GLYPH_QUAD_SIZE <= TD5_HUD_MINIMAP_BUF_SIZE) {
@@ -1857,46 +1992,52 @@ void td5_hud_init_pause_menu(int page_index)
     float page_size = (float)g_pause_page_sizes[page_index];
     s_pause_half_width = page_size * 0.5f;
     s_pause_quad_count = 0;
+    memset(s_pause_quad_buf, 0, sizeof(s_pause_quad_buf));
+
+    /* The original uses centered coords (origin = screen center).
+     * Our pipeline uses pixel-space coords, so offset all positions by
+     * the screen center so the panel appears in the middle of the screen. */
+    float cx = g_render_width_f  * 0.5f;
+    float cy = g_render_height_f * 0.5f;
+
+#define PAUSE_BUF(n) (s_pause_quad_buf + (n) * 0xB8)
+#define PAUSE_ADD(x0, y0, x1, y1, u0, v0, u1, v1, page, col) \
+    do { \
+        if (s_pause_quad_count < TD5_HUD_PAUSE_MAX_QUADS) { \
+            hud_build_quad(PAUSE_BUF(s_pause_quad_count), 0, (page), \
+                           cx + (x0), cy + (y0), cx + (x1), cy + (y1), \
+                           (u0), (v0), (u1), (v1), (col), HUD_DEPTH); \
+            s_pause_quad_count++; \
+        } \
+    } while (0)
 
     /* Build BLACKBOX (background panel) */
     TD5_AtlasEntry *blackbox = td5_asset_find_atlas_entry(NULL, "BLACKBOX");
     hud_log_atlas_status("BLACKBOX", blackbox);
-
-    TD5_SpriteQuad panel_quad;
-    hud_build_quad(
-        &panel_quad,
-        0, blackbox->texture_page,
-        -s_pause_half_width, -s_pause_half_width,
-        s_pause_half_width, s_pause_half_width,
-        (float)blackbox->atlas_x + 0.5f,
-        (float)blackbox->atlas_y + 0.5f,
-        (float)blackbox->atlas_x + 0.5f,
-        (float)blackbox->atlas_y + 0.5f,
-        0xFFFFFFFF, HUD_DEPTH
-    );
-    s_pause_quad_count++;
+    if (blackbox) {
+        PAUSE_ADD(-s_pause_half_width, -s_pause_half_width,
+                   s_pause_half_width,  s_pause_half_width,
+                   (float)blackbox->atlas_x + 0.5f,
+                   (float)blackbox->atlas_y + 0.5f,
+                   (float)(blackbox->atlas_x + blackbox->width)  - 0.5f,
+                   (float)(blackbox->atlas_y + blackbox->height) - 0.5f,
+                   blackbox->texture_page, 0xFFFFFFFF);
+    }
 
     /* Build SELBOX (selection highlight) */
     TD5_AtlasEntry *selbox = td5_asset_find_atlas_entry(NULL, "SELBOX");
     hud_log_atlas_status("SELBOX", selbox);
-    s_pause_sel_box = NULL; /* pointer set during page setup */
-
-    TD5_SpriteQuad sel_quad;
-    float sel_y0 = 1.0f - s_pause_half_width;
-    float sel_y1 = s_pause_half_width - 1.0f;
-
-    hud_build_quad(
-        &sel_quad,
-        0, selbox->texture_page,
-        sel_y0, -1.0f,
-        sel_y1, 15.0f,
-        (float)selbox->atlas_x + 0.5f,
-        (float)selbox->atlas_y + 0.5f,
-        (float)selbox->atlas_x + 20.0f,
-        (float)selbox->atlas_y + 12.0f,
-        0xFFFFFFFF, HUD_DEPTH
-    );
-    s_pause_quad_count++;
+    s_pause_sel_box = NULL;
+    if (selbox) {
+        float sel_x0 = 1.0f - s_pause_half_width;
+        float sel_x1 = s_pause_half_width - 1.0f;
+        PAUSE_ADD(sel_x0, -1.0f, sel_x1, 15.0f,
+                  (float)selbox->atlas_x + 0.5f,
+                  (float)selbox->atlas_y + 0.5f,
+                  (float)selbox->atlas_x + 20.0f,
+                  (float)selbox->atlas_y + 12.0f,
+                  selbox->texture_page, 0xFFFFFFFF);
+    }
 
     /* Build SLIDER and BLACKBAR rows for each menu option */
     s_pause_slider_atlas = td5_asset_find_atlas_entry(NULL, "SLIDER");
@@ -1906,58 +2047,44 @@ void td5_hud_init_pause_menu(int page_index)
 
     for (int row = 0; row < 3; row++) {
         float row_y = (float)row * 16.0f;
-
-        /* BLACKBAR (option row background) */
-        TD5_SpriteQuad bar_quad;
-        hud_build_quad(
-            &bar_quad,
-            0, blackbar->texture_page,
-            s_pause_half_width - 10.0f, row_y - 8.0f,
-            s_pause_half_width - 1.0f, row_y - 2.0f,
-            (float)blackbar->atlas_x + 0.5f,
-            (float)blackbar->atlas_y + 0.5f,
-            (float)blackbar->atlas_x + 0.5f,
-            (float)blackbar->atlas_y + 0.5f,
-            0xFFFFFFFF, HUD_DEPTH
-        );
-        s_pause_quad_count++;
-
-        /* SLIDER bar */
-        TD5_SpriteQuad slider_quad;
-        hud_build_quad(
-            &slider_quad,
-            0, s_pause_slider_atlas->texture_page,
-            s_pause_half_width - 8.0f, row_y - 6.0f,
-            s_pause_half_width - 2.0f, row_y - 4.0f,
-            (float)s_pause_slider_atlas->atlas_x + 20.0f,
-            (float)s_pause_slider_atlas->atlas_y + 0.5f,
-            (float)s_pause_slider_atlas->atlas_x + 0.5f,
-            (float)s_pause_slider_atlas->atlas_y + 0.5f,
-            0xFFFFFFFF, HUD_DEPTH
-        );
-        s_pause_slider_ptrs[row] = NULL; /* set to slider quad pointer */
-        s_pause_quad_count++;
+        if (blackbar) {
+            PAUSE_ADD(s_pause_half_width - 10.0f, row_y - 8.0f,
+                      s_pause_half_width -  1.0f, row_y - 2.0f,
+                      (float)blackbar->atlas_x + 0.5f,
+                      (float)blackbar->atlas_y + 0.5f,
+                      (float)blackbar->atlas_x + 0.5f,
+                      (float)blackbar->atlas_y + 0.5f,
+                      blackbar->texture_page, 0xFFFFFFFF);
+        }
+        if (s_pause_slider_atlas) {
+            s_pause_slider_ptrs[row] = (s_pause_quad_count < TD5_HUD_PAUSE_MAX_QUADS)
+                                        ? PAUSE_BUF(s_pause_quad_count) : NULL;
+            PAUSE_ADD(s_pause_half_width - 8.0f, row_y - 6.0f,
+                      s_pause_half_width - 2.0f, row_y - 4.0f,
+                      (float)s_pause_slider_atlas->atlas_x + 20.0f,
+                      (float)s_pause_slider_atlas->atlas_y + 0.5f,
+                      (float)s_pause_slider_atlas->atlas_x + 0.5f,
+                      (float)s_pause_slider_atlas->atlas_y + 0.5f,
+                      s_pause_slider_atlas->texture_page, 0xFFFFFFFF);
+        }
     }
 
     /* Build text glyphs from PAUSETXT atlas */
     TD5_AtlasEntry *pausetxt = td5_asset_find_atlas_entry(NULL, "PAUSETXT");
     hud_log_atlas_status("PAUSETXT", pausetxt);
 
-    /* Iterate string table entries for this page */
     float text_y = -52.0f;
     int string_offset = 0;
 
-    while (s_pause_menu_strings && string_offset < 0x30) { /* max 6 lines * 8 bytes per entry */
+    while (pausetxt && s_pause_menu_strings && string_offset < 0x30) {
         const char *str = s_pause_menu_strings[string_offset / 4];
         if (str == NULL) break;
 
         int alignment = *(int *)((uint8_t *)s_pause_menu_strings + string_offset + 4);
         int len = (int)strlen(str);
 
-        /* Compute starting X based on alignment */
         float start_x;
         if (alignment == 2) {
-            /* Centered: compute total width first */
             float total_w = 0.0f;
             for (int c = 0; c < len; c++) {
                 uint8_t ch = (uint8_t)str[c];
@@ -1966,40 +2093,29 @@ void td5_hud_init_pause_menu(int page_index)
             }
             start_x = -(total_w * 0.5f);
         } else {
-            /* Left-aligned: offset from left edge of panel */
             start_x = 4.0f - s_pause_half_width;
         }
 
-        /* Build one sprite quad per character */
         float cursor_x = start_x;
-
         for (int c = 0; c < len; c++) {
             uint8_t ch = (uint8_t)str[c];
             int glyph_w = (g_pause_glyph_widths[ch] * 2) / 3;
-
-            /* PAUSETXT atlas UV: 16x14 grid, 16x16 per cell */
             float glyph_u = (float)(ch & 0x0F) * 16.0f + 0.5f;
             float glyph_v = (float)(ch >> 4) * 16.0f + 0.5f;
-
-            TD5_SpriteQuad glyph_quad;
-            hud_build_quad(
-                &glyph_quad,
-                0, pausetxt->texture_page,
-                cursor_x + 0.5f, text_y + 0.5f,
-                cursor_x + (float)(glyph_w - 1) + 0.5f, text_y + 16.0f,
-                glyph_u, glyph_v,
-                glyph_u + (float)(glyph_w - 1), glyph_v + 16.0f,
-                0xFFFFFFFF, HUD_DEPTH
-            );
-            s_pause_quad_count++;
+            PAUSE_ADD(cursor_x + 0.5f, text_y + 0.5f,
+                      cursor_x + (float)(glyph_w - 1) + 0.5f, text_y + 16.0f,
+                      glyph_u, glyph_v,
+                      glyph_u + (float)(glyph_w - 1), glyph_v + 16.0f,
+                      pausetxt->texture_page, 0xFFFFFFFF);
             cursor_x += (float)(glyph_w + 2);
         }
 
         text_y += 16.0f;
         string_offset += 8;
-
         if (string_offset > 0x2F) break;
     }
+#undef PAUSE_ADD
+#undef PAUSE_BUF
 
     TD5_LOG_I(LOG_TAG,
               "pause menu: page=%d item_count=%d theme=page_%d",
