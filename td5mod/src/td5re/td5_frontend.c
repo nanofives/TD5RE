@@ -3163,19 +3163,6 @@ static void frontend_render_high_score_overlay(float sx, float sy) {
     float panel_x = 115.0f * sx;
     float panel_y = 177.0f * sy;
 
-    /* Nav bar: track name centered on button 0, with left/right arrows */
-    {
-        char track_name[80];
-        frontend_get_track_display_name(s_score_category_index, 1, track_name, sizeof(track_name));
-        float nav_bx, nav_by, nav_bw, nav_bh;
-        frontend_get_button_render_rect(0, sx, sy, &nav_bx, &nav_by, &nav_bw, &nav_bh);
-        float tnw = fe_measure_text(track_name, sx);
-        float tx = nav_bx + (nav_bw - tnw) * 0.5f;
-        float ty = nav_by + (nav_bh - sy * 12.0f) * 0.5f;
-        fe_draw_text(tx, ty, track_name, 0xFFFFFFFF, sx, sy);
-        fe_draw_option_arrows(0, sx, sy);
-    }
-
     /* Column X positions (in 520px panel space, scaled to screen) */
     float col_name  = panel_x + 16.0f  * sx;
     float col_score = panel_x + 140.0f * sx;
@@ -3195,18 +3182,20 @@ static void frontend_render_high_score_overlay(float sx, float sy) {
 
     int score_type = grp->header & 0xFF;
 
-    /* Column headers */
+    /* Column headers — same white font as data rows (SmallText.tga, no color change) */
     float hdr_y = panel_y + 7.0f * sy;
-    uint32_t hdr_color = 0xFFFFCC44;
-    fe_draw_text(col_name,  hdr_y, "NAME",  hdr_color, sx * ts, sy * ts);
-    {
-        const char *score_hdr = "TIME";
-        if (score_type == 1) score_hdr = "LAP";
-        else if (score_type == 2) score_hdr = "PTS";
-        fe_draw_text(col_score, hdr_y, score_hdr, hdr_color, sx * ts, sy * ts);
+    uint32_t hdr_color = 0xFFFFFFFF;
+    fe_draw_text(col_name,  hdr_y, "NAME", hdr_color, sx * ts, sy * ts);
+    /* Score column: two-line header. "BEST"/"LAP"/"PTS" on y=0, type label on y=14.
+     * For PTS only one line. (SNK_BestTxt at y=0, SNK_TimeTxt/LapTxt at y=14) */
+    if (score_type == 2) {
+        fe_draw_text(col_score, hdr_y, "PTS",  hdr_color, sx * ts, sy * ts);
+    } else {
+        fe_draw_text(col_score, panel_y + 0.0f,       "BEST",                          hdr_color, sx * ts, sy * ts);
+        fe_draw_text(col_score, panel_y + 14.0f * sy, (score_type == 1) ? "LAP" : "TIME", hdr_color, sx * ts, sy * ts);
     }
-    fe_draw_text(col_car,   hdr_y, "CAR",       hdr_color, sx * ts, sy * ts);
-    /* AVG/TOP headers are two lines: label on y=0, unit on y=14 within surface */
+    fe_draw_text(col_car, hdr_y, "CAR", hdr_color, sx * ts, sy * ts);
+    /* AVG/TOP: two lines — label at y=0, speed unit at y=14 within the 144px surface */
     fe_draw_text(col_avg, panel_y + 0.0f,        "AVG",        hdr_color, sx * ts, sy * ts);
     fe_draw_text(col_avg, panel_y + 14.0f * sy,  speed_suffix, hdr_color, sx * ts, sy * ts);
     fe_draw_text(col_top, panel_y + 0.0f,        "TOP",        hdr_color, sx * ts, sy * ts);
@@ -3570,6 +3559,21 @@ void td5_frontend_render_ui_rects(void) {
             fe_draw_quad(bx+inL, by+inT, barH, bh-inT-inB, gc, -1,0,0,1,1);
             fe_draw_quad(bx+bw-inR-barH, by+inT, barH, bh-inT-inB, gc, -1,0,0,1,1);
         }
+    }
+
+    /* Nav bar text drawn after buttons so it renders on top of the button frame.
+     * (button 0 is the nav bar: button loop draws the 9-slice frame, then we
+     * draw the track name and arrows on top.) */
+    if (s_current_screen == TD5_SCREEN_HIGH_SCORE && s_anim_complete && s_inner_state >= 6) {
+        char track_name[80];
+        frontend_get_track_display_name(s_score_category_index, 1, track_name, sizeof(track_name));
+        float nav_bx, nav_by, nav_bw, nav_bh;
+        frontend_get_button_render_rect(0, sx, sy, &nav_bx, &nav_by, &nav_bw, &nav_bh);
+        float tnw = fe_measure_text(track_name, sx);
+        float tx = nav_bx + (nav_bw - tnw) * 0.5f;
+        float ty = nav_by + (nav_bh - sy * 12.0f) * 0.5f;
+        fe_draw_text(tx, ty, track_name, 0xFFFFFFFF, sx, sy);
+        fe_draw_option_arrows(0, sx, sy);
     }
 
     /* (text overlay rendering deferred to font system) */
