@@ -1428,11 +1428,15 @@ void td5_hud_render_overlays(float dt)
             int32_t engine_speed = actor_engine_speed(actor_slot);
             int16_t max_rpm     = actor_max_rpm(actor_slot);
 
+            /* Needle sweeps counterclockwise from 7 o'clock (0 RPM) to 11 o'clock (redline).
+             * Base 0xD55 = 7 o'clock; subtract RPM contribution to sweep counterclockwise.
+             * Sweep range 0xA5A ≈ 233° matches the original dial arc. */
             uint32_t needle_angle;
             if (max_rpm > 0) {
-                needle_angle = (uint32_t)((engine_speed * 0xA5A) / (int32_t)max_rpm) + 0x400;
+                uint32_t rpm_offset = (uint32_t)((engine_speed * 0xA5A) / (int32_t)max_rpm);
+                needle_angle = (uint32_t)((int32_t)0xD55 - (int32_t)rpm_offset) & 0xFFF;
             } else {
-                needle_angle = 0x400;
+                needle_angle = 0xD55;
             }
 
             float cos_a = td5_cos_12bit(needle_angle);
