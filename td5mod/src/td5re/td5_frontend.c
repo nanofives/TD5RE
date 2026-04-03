@@ -3048,16 +3048,25 @@ static void frontend_render_two_player_options_overlay(float sx, float sy) {
     frontend_draw_value_text(sx, sy, 344, s_buttons[1].y + 6, on_off[(s_two_player_mode & 8) ? 1 : 0], 0xFFFFFFFF);
     for (int i = 0; i <= 1; i++) fe_draw_option_arrows(i, sx, sy);
 
-    /* SplitScreen.tga: 224x120 layout preview, drawn to the right of buttons.
-     * Original: surface [0x497a54], drawn at y=center+32 (FUN_00420C70 caseD_4). */
+    /* SplitScreen.tga: sprite sheet, 64x32 per split-mode icon, rows stacked vertically.
+     * Drawn at x=394, y=97 (same formula as Controllers.tga in Control Options):
+     *   x = uVar2+0x4a = 394,  y = uVar4-0x8f = 97  (FUN_00420C70 case4/5 steady-state)
+     * Row = split_screen_mode index (0=off, 1=on), src_y = mode*32. */
     if (s_split_screen_surface > 0) {
         int slot = s_split_screen_surface - 1;
-        if (slot >= 0 && slot < FE_MAX_SURFACES && s_surfaces[slot].in_use)
-            fe_draw_surface_rect(s_split_screen_surface,
-                                 358.0f * sx,
-                                 (240.0f + 32.0f) * sy,
-                                 (float)s_surfaces[slot].width  * sx,
-                                 (float)s_surfaces[slot].height * sy, 0xFFFFFFFF);
+        if (slot >= 0 && slot < FE_MAX_SURFACES && s_surfaces[slot].in_use) {
+            int sh = s_surfaces[slot].height;
+            if (sh > 0) {
+                int   mode = (s_two_player_mode & 4) ? 1 : 0;
+                float v_row = 32.0f / (float)sh;
+                float v0    = (float)mode * v_row;
+                float v1    = v0 + v_row;
+                td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
+                fe_draw_quad(394.0f * sx, 97.0f * sy, 64.0f * sx, 32.0f * sy,
+                             0xFFFFFFFF, s_surfaces[slot].tex_page, 0.0f, v0, 1.0f, v1);
+                td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
+            }
+        }
     }
 }
 
@@ -3313,28 +3322,23 @@ static void frontend_render_control_options_overlay(float sx, float sy) {
     if (slot < 0 || slot >= FE_MAX_SURFACES || !s_surfaces[slot].in_use) return;
 
     /* Controllers.tga: sprite sheet, 64x32 per controller-type icon, rows stacked vertically.
-     * Icon x = 0x11C = 284 (right panel), y = button_y + 16 (original: FUN_0041DF20 caseD_4).
-     * Row = controller_type_index * 32.  Source port currently only has type 0 (keyboard). */
+     * Positions are absolute canvas coords from FUN_0041DF20 case4/5 steady-state:
+     *   P1 icon: x = uVar2+0x4a = 320+74 = 394,  y = uVar4-0x8f = 240-143 = 97
+     *   P2 icon: x = 394,                          y = uVar4-0x17 = 240-23  = 217
+     * Row = controller_type * 32; type 0 = keyboard (only type currently supported). */
     int sh = s_surfaces[slot].height;
     if (sh <= 0) return;
 
-    float icon_x = 394.0f * sx;  /* ESI + 0x11C = 110 + 284 = 394, right of button panel */
     float icon_w = 64.0f * sx;
     float icon_h = 32.0f * sy;
-    float v_row  = 32.0f / (float)sh;   /* height of one icon row in UV space */
-
-    /* type 0 for both players (keyboard — only type currently supported) */
-    float v0 = 0.0f, v1 = v_row;
+    float v_row  = 32.0f / (float)sh;
+    float v0 = 0.0f, v1 = v_row;   /* type 0 (keyboard) */
 
     td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
-    /* Player 1 icon next to button 0 */
-    if (s_buttons[0].active)
-        fe_draw_quad(icon_x, ((float)s_buttons[0].y + 16.0f) * sy, icon_w, icon_h,
-                     0xFFFFFFFF, s_surfaces[slot].tex_page, 0.0f, v0, 1.0f, v1);
-    /* Player 2 icon next to button 2 */
-    if (s_buttons[2].active)
-        fe_draw_quad(icon_x, ((float)s_buttons[2].y + 16.0f) * sy, icon_w, icon_h,
-                     0xFFFFFFFF, s_surfaces[slot].tex_page, 0.0f, v0, 1.0f, v1);
+    fe_draw_quad(394.0f * sx,  97.0f * sy, icon_w, icon_h,
+                 0xFFFFFFFF, s_surfaces[slot].tex_page, 0.0f, v0, 1.0f, v1);
+    fe_draw_quad(394.0f * sx, 217.0f * sy, icon_w, icon_h,
+                 0xFFFFFFFF, s_surfaces[slot].tex_page, 0.0f, v0, 1.0f, v1);
     td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
 }
 
