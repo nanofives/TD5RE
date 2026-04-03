@@ -3585,7 +3585,7 @@ void td5_frontend_render_ui_rects(void) {
         frontend_get_button_render_rect(0, sx, sy, &nav_bx, &nav_by, &nav_bw, &nav_bh);
         float tnw = fe_measure_text(track_name, sx);
         float tx = nav_bx + (nav_bw - tnw) * 0.5f;
-        float ty = nav_by + (nav_bh - sy * 12.0f) * 0.5f;
+        float ty = nav_by + (nav_bh - sy * 24.0f) * 0.5f;  /* font cells are 24px tall */
         fe_draw_text(tx, ty, track_name, 0xFFFFFFFF, sx, sy);
         fe_draw_option_arrows(0, sx, sy);
     }
