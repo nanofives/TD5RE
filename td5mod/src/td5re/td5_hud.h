@@ -164,6 +164,7 @@ int  td5_hud_build_metric_digits(void);
 void td5_hud_draw_status_text(int player_slot, int view_index);
 void td5_hud_render_minimap(int view_index);
 void td5_hud_draw_pause_overlay(void);
+void td5_hud_update_pause_overlay(int cursor, float sfx_frac, float music_frac, float cd_frac);
 
 /* --- State control --- */
 void td5_hud_set_indicator_state(int view_index, int value);

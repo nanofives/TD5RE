@@ -121,4 +121,13 @@ int  td5_save_is_track_unlocked(int track_index);
 void td5_save_unlock_car(int car_index);
 void td5_save_unlock_track(int track_index);
 
+/* ========================================================================
+ * Volume accessors
+ * ======================================================================== */
+
+int  td5_save_get_sfx_volume(void);
+void td5_save_set_sfx_volume(int v);
+int  td5_save_get_music_volume(void);
+void td5_save_set_music_volume(int v);
+
 #endif /* TD5_SAVE_H */

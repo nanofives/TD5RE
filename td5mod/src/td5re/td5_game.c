@@ -23,6 +23,7 @@
 #include "td5re.h"
 #include "td5_platform.h"
 #include "td5_net.h"
+#include "td5_save.h"
 
 #include <stdlib.h>
 #include <stdio.h>
@@ -195,7 +196,7 @@ static int      s_replay_mode;
 static int      s_race_countdown_ticks;
 static int      s_race_countdown_state;
 static int      s_pause_menu_active;
-static int      s_pause_menu_cursor;   /* 0=Resume, 1=Options, 2=Quit */
+static int      s_pause_menu_cursor;   /* 0=SFX, 1=Music, 2=CD, 3=Continue, 4=Quit */
 
 /* ========================================================================
  * Forward declarations (internal helpers)
@@ -838,33 +839,54 @@ int td5_game_run_race_frame(void) {
             s_pause_menu_cursor = 0;
         }
         if (s_pause_menu_active) {
-            /* Navigation: 2 items (Resume / Quit) */
-            if (td5_plat_input_key_pressed(0xD0) || td5_plat_input_key_pressed(0xC8))
-                s_pause_menu_cursor = 1 - s_pause_menu_cursor;
-            /* Confirm */
-            if (td5_plat_input_key_pressed(0x1C)) { /* enter */
-                if (s_pause_menu_cursor == 0) {
-                    /* Resume */
+            /* Navigation: 5 items (SFX / Music / CD / Continue / Quit) */
+            static int s_prev_down = 0, s_prev_up = 0;
+            static int s_prev_left = 0, s_prev_right = 0;
+            int key_down  = td5_plat_input_key_pressed(0xD0);
+            int key_up    = td5_plat_input_key_pressed(0xC8);
+            int key_left  = td5_plat_input_key_pressed(0xCB);
+            int key_right = td5_plat_input_key_pressed(0xCD);
+            if (key_down  && !s_prev_down)  s_pause_menu_cursor = (s_pause_menu_cursor + 1) % 5;
+            if (key_up    && !s_prev_up)    s_pause_menu_cursor = (s_pause_menu_cursor + 4) % 5;
+            s_prev_down = key_down; s_prev_up = key_up;
+
+            /* Left/right adjusts volume for rows 0-2 */
+            if (s_pause_menu_cursor < 3) {
+                if (key_right && !s_prev_right) {
+                    if (s_pause_menu_cursor == 0)      td5_save_set_sfx_volume(td5_save_get_sfx_volume() + 5);
+                    else if (s_pause_menu_cursor == 1) td5_save_set_music_volume(td5_save_get_music_volume() + 5);
+                    else                               td5_save_set_music_volume(td5_save_get_music_volume() + 5); /* CD ~ music */
+                }
+                if (key_left && !s_prev_left) {
+                    if (s_pause_menu_cursor == 0)      td5_save_set_sfx_volume(td5_save_get_sfx_volume() - 5);
+                    else if (s_pause_menu_cursor == 1) td5_save_set_music_volume(td5_save_get_music_volume() - 5);
+                    else                               td5_save_set_music_volume(td5_save_get_music_volume() - 5);
+                }
+            }
+            s_prev_left = key_left; s_prev_right = key_right;
+
+            /* Confirm (Enter) */
+            if (td5_plat_input_key_pressed(0x1C)) {
+                if (s_pause_menu_cursor == 3) {
+                    /* Continue */
                     s_pause_menu_active = 0;
-                } else {
-                    /* Quit race → return to menu immediately */
+                } else if (s_pause_menu_cursor == 4) {
+                    /* Quit race */
                     s_pause_menu_active = 0;
                     td5_game_release_race_resources();
                     td5_game_set_state(TD5_GAMESTATE_MENU);
                     return 1;
                 }
             }
-            /* ESC again = resume */
+            /* ESC again = continue */
             if (esc_edge && pause_menu_was_active) {
                 s_pause_menu_active = 0;
             }
 
-            /* Draw pause menu text via HUD */
-            td5_hud_queue_text(0, 280, 180, 1, "PAUSED");
-            td5_hud_queue_text(0, 280, 220, 1,
-                s_pause_menu_cursor == 0 ? "> RESUME" : "  RESUME");
-            td5_hud_queue_text(0, 280, 260, 1,
-                s_pause_menu_cursor == 1 ? "> QUIT" : "  QUIT");
+            /* Update graphical overlay (SELBOX + sliders) */
+            float sfx_frac   = (float)td5_save_get_sfx_volume()   / 100.0f;
+            float music_frac = (float)td5_save_get_music_volume()  / 100.0f;
+            td5_hud_update_pause_overlay(s_pause_menu_cursor, sfx_frac, music_frac, music_frac);
 
             g_td5.sim_time_accumulator -= TD5_TICK_ACCUMULATOR_ONE;
             ticks_this_frame++;
