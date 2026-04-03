@@ -66,5 +66,6 @@ void td5_game_store_rounded_vec3(const float *in, int32_t *out);
 TD5_Actor *td5_game_get_actor(int slot);
 int td5_game_get_total_actor_count(void);
 int td5_game_get_player_lap(int slot);
+int32_t td5_game_get_race_timer(int slot, int lap_index);
 
 #endif /* TD5_GAME_H */

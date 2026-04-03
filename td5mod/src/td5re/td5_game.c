@@ -466,6 +466,17 @@ int td5_game_get_player_lap(int slot)
     return (int)s_metrics[slot].checkpoint_index;
 }
 
+/* Returns cumulative race timer ticks (30/sec) for lap_index 0,
+ * or the split time for lap_index 1-8. Used by HUD. */
+int32_t td5_game_get_race_timer(int slot, int lap_index)
+{
+    if (slot < 0 || slot >= TD5_MAX_RACER_SLOTS) return 0;
+    if (lap_index == 0) return s_metrics[slot].cumulative_timer;
+    if (lap_index >= 1 && lap_index <= 8)
+        return (int32_t)s_metrics[slot].lap_split_times[lap_index - 1];
+    return 0;
+}
+
 /* ========================================================================
  * InitializeRaceSession (0x42AA10)
  *
@@ -616,7 +627,7 @@ int td5_game_init_race_session(void) {
             *(int16_t *)(actor + 0x086) = (int16_t)span_index;
             actor[0x08C] = (uint8_t)sub_lane;
 
-            if (!td5_track_get_span_center_world(span_index, &world_x, &world_y, &world_z)) {
+            if (!td5_track_get_span_lane_world(span_index, sub_lane, &world_x, &world_y, &world_z)) {
                 world_x = sp->origin_x;
                 world_y = sp->pad_10;
                 world_z = sp->origin_z;

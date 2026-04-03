@@ -49,6 +49,9 @@ extern void *td5_game_heap_alloc(size_t size);
 /* Returns completed lap index (0-based) for the given actor slot */
 extern int td5_game_get_player_lap(int slot);
 
+/* Returns race timer ticks (30/sec) for lap_index=0, or split time for 1-8 */
+extern int32_t td5_game_get_race_timer(int slot, int lap_index);
+
 /* Returns the configured circuit lap count from saved options */
 extern int td5_save_get_circuit_lap_count(void);
 
@@ -383,7 +386,7 @@ static inline uint8_t actor_gear(int slot)
 static inline int32_t actor_speed_fp(int slot)
 {
     uint8_t *a = (uint8_t *)actor_ptr(slot);
-    return *(int32_t *)(a + 0x114); /* speed as 24.8 fixed-point */
+    return *(int32_t *)(a + 0x314); /* longitudinal_speed 24.8 fixed-point */
 }
 
 static inline int16_t actor_max_rpm(int slot)
@@ -419,8 +422,7 @@ static inline int32_t actor_heading(int slot)
 
 static inline uint16_t actor_lap_time(int slot, int lap_index)
 {
-    uint8_t *a = (uint8_t *)actor_ptr(slot);
-    return *(uint16_t *)(a + 0x14C + lap_index * 2);
+    return (uint16_t)td5_game_get_race_timer(slot, lap_index);
 }
 
 static inline uint8_t actor_route_index(int slot)
@@ -1094,7 +1096,7 @@ int td5_hud_build_metric_digits(void)
     /* Select metric value based on display mode */
     switch (g_hud_metric_mode) {
     case TD5_METRIC_FINISH_TIMER:
-        s_metric_value = (uint32_t)(actor_lap_time(actor_slot, 0) >> 8);
+        s_metric_value = (uint32_t)actor_lap_time(actor_slot, 0);
         break;
     case TD5_METRIC_FPS:
         s_metric_value = (uint32_t)(g_instant_fps + 0.5f);
