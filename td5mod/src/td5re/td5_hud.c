@@ -389,11 +389,14 @@ static inline int32_t actor_speed_fp(int slot)
     return *(int32_t *)(a + 0x314); /* longitudinal_speed 24.8 fixed-point */
 }
 
-static inline int16_t actor_max_rpm(int slot)
+/* Returns the top speed in the same fixed-point units as longitudinal_speed.
+ * tuning+0x74 is the speed_limiter raw value; physics uses it as << 8. */
+static inline int32_t actor_max_speed_fp(int slot)
 {
     uint8_t *a = (uint8_t *)actor_ptr(slot);
     void *tuning = *(void **)(a + 0x1BC);
-    return *(int16_t *)((uint8_t *)tuning + 0x72);
+    if (!tuning) return 0x8000;
+    return (int32_t)(*(int16_t *)((uint8_t *)tuning + 0x74)) << 8;
 }
 
 static inline int16_t actor_span_index(int slot)
@@ -1420,13 +1423,12 @@ void td5_hud_render_overlays(float dt)
 
         /* --- Bit 2: Speedometer (needle + gear + digits) --- */
         if (flags & TD5_HUD_SPEEDOMETER) {
-            /* Compute needle angle from speed and max RPM */
             int32_t speed_fp = actor_speed_fp(actor_slot);
-            int16_t max_rpm = actor_max_rpm(actor_slot);
+            int32_t max_speed = actor_max_speed_fp(actor_slot);
 
             uint32_t needle_angle;
-            if (max_rpm > 0) {
-                needle_angle = (uint32_t)((speed_fp * 0xA5A) / (int)max_rpm) + 0x400;
+            if (max_speed > 0) {
+                needle_angle = (uint32_t)((speed_fp * 0xA5A) / max_speed) + 0x400;
             } else {
                 needle_angle = 0x400;
             }
@@ -1613,7 +1615,7 @@ void td5_hud_render_overlays(float dt)
 
         /* --- Indicator digit (countdown/finish) --- */
         if (s_indicator_state[v] != 0) {
-            int digit_val = s_indicator_state[v] - 1;
+            int digit_val = s_indicator_state[v]; /* state 3,2,1 → shows "3","2","1" */
             int col = digit_val % 5;
             int row = digit_val / 5;
 
