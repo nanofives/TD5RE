@@ -184,46 +184,36 @@ static int            s_atlas_count = 0;
 static TD5_AtlasEntry s_atlas_fallback = {0};   /* returned for unknown names */
 static uint8_t        s_static_page_done[32];   /* per-slot: 0=none,1=real,2=placeholder */
 
-/** Convert tpageN.dat (R5G6B5, 256×512) → BGRA32 and upload to GPU. */
+/** Load tpageN.dat (256×256 BGRA32) and upload to GPU.
+ *
+ * Originally believed to be R5G6B5 256×512 (same byte count), but the
+ * original engine normalizes UVs by multiplying by 1/256 for BOTH axes
+ * (BuildSpriteQuadTemplate @ 0x432BD0, constant [0x4749D0] = 0.00390625).
+ * A 256×512 page would require V normalization by 1/512, not 1/256.
+ * Therefore the pages are 256×256 BGRA32 (4 bytes/pixel × 65536 px = 262144 bytes).
+ */
 static int load_static_r5g6b5_tpage(int slot)
 {
     char path[128];
-    int w = 256, h = 512, npx = w * h;
-    uint16_t *r16;
-    uint8_t  *bgra;
+    int w = 256, h = 256, npx = w * h;
+    uint8_t *bgra;
     FILE *f;
-    int i;
 
     snprintf(path, sizeof(path), "../re/assets/static/tpage%d.dat", slot);
     f = fopen(path, "rb");
     if (!f) return 0;
 
-    r16 = (uint16_t *)malloc((size_t)npx * 2);
-    if (!r16) { fclose(f); return 0; }
+    bgra = (uint8_t *)malloc((size_t)npx * 4);
+    if (!bgra) { fclose(f); return 0; }
 
-    if ((int)fread(r16, 2, (size_t)npx, f) < npx) {
-        free(r16); fclose(f); return 0;
+    if ((int)fread(bgra, 4, (size_t)npx, f) < npx) {
+        free(bgra); fclose(f); return 0;
     }
     fclose(f);
 
-    bgra = (uint8_t *)malloc((size_t)npx * 4);
-    if (!bgra) { free(r16); return 0; }
-
-    for (i = 0; i < npx; i++) {
-        uint16_t p  = r16[i];
-        uint8_t  r5 = (uint8_t)((p >> 11) & 0x1F);
-        uint8_t  g6 = (uint8_t)((p >>  5) & 0x3F);
-        uint8_t  b5 = (uint8_t)((p >>  0) & 0x1F);
-        bgra[i*4+0] = (uint8_t)((b5 << 3) | (b5 >> 2));
-        bgra[i*4+1] = (uint8_t)((g6 << 2) | (g6 >> 4));
-        bgra[i*4+2] = (uint8_t)((r5 << 3) | (r5 >> 2));
-        bgra[i*4+3] = 0xFF;
-    }
-
     td5_plat_render_upload_texture(STATIC_ATLAS_BASE + slot, bgra, w, h, 2);
     free(bgra);
-    free(r16);
-    TD5_LOG_D(LOG_TAG, "static atlas: uploaded tpage%d.dat → D3D page %d",
+    TD5_LOG_D(LOG_TAG, "static atlas: uploaded tpage%d.dat (256x256 BGRA) → D3D page %d",
               slot, STATIC_ATLAS_BASE + slot);
     return 1;
 }
@@ -1278,11 +1268,28 @@ static const char *s_right_names[2]   = { "RIGHT.TRK",   "RIGHTB.TRK"   };
 
 int td5_asset_level_number(int track_index)
 {
-    /* Frontend/game track indices are zero-based; level archives/files are
-     * numbered from 1 (level001.zip). */
+    /* Two-step lookup from the original binary:
+     * Step 1: schedule slot index -> pool index via gScheduleToPoolIndex (VA 0x466894).
+     * Step 2: pool index -> level ZIP number via pool-to-ZIP table (VA 0x466D50). */
+    static const uint8_t k_schedule_to_pool[20] = {
+        11,  9,  7, 10, 13, 16, 15, 14,  6,  8,
+         0,  1,  2,  3,  4,  5, 12, 18, 17, 19
+    };
+    /* Pool 0-18 mapped to level zip numbers; pool 19 (drag strip) uses level064
+     * which is not shipped -- fall back to level001 for that slot. */
+    static const int k_pool_to_zip[19] = {
+         1,  2,  3,  4,  5,  6, 13, 14, 15, 16,
+        17, 23, 25, 26, 27, 28, 29, 37, 39
+    };
+    int pool;
     if (track_index < 0)
         return 1;
-    return track_index + 1;
+    if (track_index >= 20)
+        return 1;
+    pool = k_schedule_to_pool[track_index];
+    if (pool >= 19)
+        return 1; /* pool 19 = drag strip (level064 not shipped) */
+    return k_pool_to_zip[pool];
 }
 
 static int td5_asset_build_track_texture_png_path(int track_index,
@@ -1790,6 +1797,62 @@ int td5_asset_load_vehicle(int car_index, int slot)
               "vehicle slot=%d car=%d: himodel.dat loaded (%d bytes, %d verts, %d cmds)",
               slot, car_index, mesh_size,
               mesh->total_vertex_count, mesh->command_count);
+
+    /* --- Car textures ---------------------------------------------------- */
+    /* All car meshes use exactly 2 PrimitiveCmd page IDs:
+     *   7 → carskin0.tga  (body/paint)
+     *   8 → carhub0.tga   (wheel hub)
+     * These are track-relative indices in himodel.dat and must be patched to
+     * dedicated car texture pages so they don't show track geometry textures.
+     *
+     * Allocation: pages 800 + slot*2 = skin, 800 + slot*2 + 1 = hub.
+     * 6 slots → pages 800-811, well above any track's page_count (<600). */
+#define TD5_CAR_TEXTURE_PAGE_BASE 800
+#define TD5_CAR_MESH_SKIN_ID  7
+#define TD5_CAR_MESH_HUB_ID   8
+    {
+        int skin_page = TD5_CAR_TEXTURE_PAGE_BASE + slot * 2;
+        int hub_page  = TD5_CAR_TEXTURE_PAGE_BASE + slot * 2 + 1;
+
+        /* Load and upload carskin0.tga */
+        int tga_size = 0;
+        void *tga_data = td5_asset_open_and_read("carskin0.tga", zip_path, &tga_size);
+        if (tga_data) {
+            void *pixels = NULL; int tw = 0, th = 0;
+            if (td5_asset_decode_tga(tga_data, (size_t)tga_size, &pixels, &tw, &th)) {
+                td5_plat_render_upload_texture(skin_page, pixels, tw, th, 2);
+                TD5_LOG_I(LOG_TAG, "vehicle slot=%d: carskin0 %dx%d -> page %d", slot, tw, th, skin_page);
+                free(pixels);
+            }
+            free(tga_data);
+        } else {
+            TD5_LOG_W(LOG_TAG, "vehicle slot=%d: carskin0.tga not found in %s", slot, zip_path);
+        }
+
+        /* Load and upload carhub0.tga */
+        tga_data = td5_asset_open_and_read("carhub0.tga", zip_path, &tga_size);
+        if (tga_data) {
+            void *pixels = NULL; int tw = 0, th = 0;
+            if (td5_asset_decode_tga(tga_data, (size_t)tga_size, &pixels, &tw, &th)) {
+                td5_plat_render_upload_texture(hub_page, pixels, tw, th, 2);
+                TD5_LOG_I(LOG_TAG, "vehicle slot=%d: carhub0 %dx%d -> page %d", slot, tw, th, hub_page);
+                free(pixels);
+            }
+            free(tga_data);
+        } else {
+            TD5_LOG_W(LOG_TAG, "vehicle slot=%d: carhub0.tga not found in %s", slot, zip_path);
+        }
+
+        /* Patch PrimitiveCmd page IDs: 7→skin, 8→hub */
+        mesh->texture_page_id = (int16_t)skin_page;
+        TD5_PrimitiveCmd *cmds = (TD5_PrimitiveCmd *)(uintptr_t)mesh->commands_offset;
+        for (int c = 0; c < mesh->command_count; c++) {
+            if (cmds[c].texture_page_id == TD5_CAR_MESH_SKIN_ID)
+                cmds[c].texture_page_id = (int16_t)skin_page;
+            else if (cmds[c].texture_page_id == TD5_CAR_MESH_HUB_ID)
+                cmds[c].texture_page_id = (int16_t)hub_page;
+        }
+    }
 
     /* --- carparam.dat (deferred) ----------------------------------------- */
     TD5_LOG_I(LOG_TAG, "vehicle slot=%d car=%d: carparam.dat loading deferred (using defaults)",
