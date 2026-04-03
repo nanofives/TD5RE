@@ -323,6 +323,7 @@ static int s_buttonbits_tex_page = -1; /* page 897: ButtonBits.tga gradient */
 static int s_buttonbits_w = 0, s_buttonbits_h = 0;
 static int s_buttonlights_tex_page = -1; /* page 895: ButtonLights.tga indicator */
 static int s_buttonlights_w = 0, s_buttonlights_h = 0;
+static int s_arrowbuttonz_tex_page = -1; /* page 894: ArrowButtonz.tga 12x36 sprite sheet */
 static int s_title_tex_page[TD5_SCREEN_COUNT];
 static int s_title_tex_w[TD5_SCREEN_COUNT];
 static int s_title_tex_h[TD5_SCREEN_COUNT];
@@ -366,7 +367,8 @@ static const uint8_t k_font_glyph_advance_default[96] = {
 #define SHARED_PAGE_BUTTONBITS 897
 #define SHARED_PAGE_CURSOR    896
 #define SHARED_PAGE_BTNLIGHTS 895
-#define SHARED_PAGE_MIN       894  /* lowest shared page -- don't clear below this */
+#define SHARED_PAGE_ARROWBTNZ 894  /* ArrowButtonz.tga 12x36 sprite sheet */
+#define SHARED_PAGE_MIN       893  /* lowest shared page -- don't clear below this */
 #define FE_TITLE_PAGE_BASE    931
 
 static void frontend_note_activity(void) {
@@ -390,15 +392,45 @@ static int frontend_find_surface_by_source(const char *name, const char *archive
     return 0;
 }
 
+/* UI order matches original binary table at 0x00463e24 (DO NOT REORDER) */
 static const char *s_car_zip_paths[37] = {
-    "cars/128.zip", "cars/69v.zip", "cars/97c.zip", "cars/atp.zip", "cars/c21.zip",
-    "cars/cam.zip", "cars/cat.zip", "cars/chv.zip", "cars/cob.zip", "cars/cop.zip",
-    "cars/crg.zip", "cars/cud.zip", "cars/day.zip", "cars/fhm.zip", "cars/frd.zip",
-    "cars/gto.zip", "cars/gtr.zip", "cars/hot.zip", "cars/jag.zip", "cars/mus.zip",
-    "cars/nis.zip", "cars/pit.zip", "cars/sky.zip", "cars/sp1.zip", "cars/sp2.zip",
-    "cars/sp3.zip", "cars/sp4.zip", "cars/sp5.zip", "cars/sp6.zip", "cars/sp7.zip",
-    "cars/sp8.zip", "cars/ss1.zip", "cars/tvr.zip", "cars/van.zip", "cars/vet.zip",
-    "cars/vip.zip", "cars/xkr.zip"
+    "cars/vip.zip",  /* 0  - VIPER            - unlocked */
+    "cars/97c.zip",  /* 1  - '97 CAMARO       - unlocked */
+    "cars/frd.zip",  /* 2  - SALEEN MUSTANG   - unlocked */
+    "cars/vet.zip",  /* 3  - '98 CORVETTE     - unlocked */
+    "cars/sky.zip",  /* 4  - SKYLINE          - unlocked */
+    "cars/tvr.zip",  /* 5  - CERBERA          - unlocked */
+    "cars/van.zip",  /* 6  - '98 VANTAGE      - unlocked */
+    "cars/xkr.zip",  /* 7  - XKR              - unlocked */
+    "cars/gto.zip",  /* 8  - GTO              - unlocked */
+    "cars/crg.zip",  /* 9  - '69 CHARGER      - unlocked */
+    "cars/chv.zip",  /* 10 - '70 CHEVELLE     - unlocked */
+    "cars/cud.zip",  /* 11 - CUDA             - unlocked */
+    "cars/cob.zip",  /* 12 - COBRA            - unlocked */
+    "cars/69v.zip",  /* 13 - '69 CORVETTE     - unlocked */
+    "cars/cam.zip",  /* 14 - '69 CAMARO       - unlocked */
+    "cars/mus.zip",  /* 15 - '68 MUSTANG      - unlocked */
+    "cars/atp.zip",  /* 16 - P.VANTAGE        - locked   */
+    "cars/ss1.zip",  /* 17 - SERIES 1         - locked   */
+    "cars/128.zip",  /* 18 - SPEED 12         - locked   */
+    "cars/gtr.zip",  /* 19 - GTS-R            - locked   */
+    "cars/jag.zip",  /* 20 - XJ220            - locked   */
+    "cars/cat.zip",  /* 21 - SUPER 7          - locked   */
+    "cars/sp4.zip",  /* 22 - R390             - locked   */
+    "cars/c21.zip",  /* 23 - CAT 21           - locked   */
+    "cars/day.zip",  /* 24 - DAYTONA          - locked   */
+    "cars/fhm.zip",  /* 25 - '68 MUSTANG HR   - locked   */
+    "cars/hot.zip",  /* 26 - '69 CAMARO HR    - locked   */
+    "cars/sp3.zip",  /* 27 - '98 MUSTANG GT   - locked   */
+    "cars/nis.zip",  /* 28 - HOT DOG          - locked   */
+    "cars/sp1.zip",  /* 29 - MAUL             - locked   */
+    "cars/sp8.zip",  /* 30 - PITBULL          - locked   */
+    "cars/pit.zip",  /* 31 - BEAST            - locked   */
+    "cars/sp2.zip",  /* 32 - WAGON            - locked   */
+    "cars/cop.zip",  /* 33 - POLICE CERBERA   - locked   */
+    "cars/sp5.zip",  /* 34 - POLICE MUSTANG   - locked   */
+    "cars/sp6.zip",  /* 35 - POLICE CHARGER   - locked   */
+    "cars/sp7.zip",  /* 36 - POLICE CAMARO    - locked   */
 };
 
 static const char *s_track_display_names[26] = {
@@ -2368,6 +2400,48 @@ int td5_frontend_init_resources(void) {
         }
     }
 
+    /* ---- ArrowButtonz.tga (left/right scroll arrows on selector buttons) ----
+     * 12x36 sprite sheet (DAT_00496284 in original, FUN_00426260).
+     * Four 12x9 rows:
+     *   Row 0 (y=0-8):   Left  arrow, unselected (blue)
+     *   Row 1 (y=9-17):  Right arrow, unselected (blue)
+     *   Row 2 (y=18-26): Left  arrow, selected (gold)
+     *   Row 3 (y=27-35): Right arrow, selected (gold)
+     * Black colorkey. */
+    if (s_arrowbuttonz_tex_page < 0) {
+        s_arrowbuttonz_tex_page = SHARED_PAGE_ARROWBTNZ;
+        {
+            int sz = 0;
+            void *raw = td5_asset_open_and_read("ArrowButtonz.tga",
+                                                "Front End/frontend.zip", &sz);
+            if (raw && sz > 0) {
+                void *pixels = NULL;
+                int aw = 0, ah = 0;
+                if (td5_asset_decode_tga(raw, (size_t)sz, &pixels, &aw, &ah) && pixels) {
+                    uint8_t *p = (uint8_t *)pixels;
+                    for (int ci = 0; ci < aw * ah; ci++, p += 4) {
+                        if (p[0] < 8 && p[1] < 8 && p[2] < 8)
+                            p[3] = 0;
+                    }
+                    if (td5_plat_render_upload_texture(s_arrowbuttonz_tex_page,
+                                                       pixels, aw, ah, 2)) {
+                        TD5_LOG_I(LOG_TAG, "ArrowButtonz.tga loaded: page=%d %dx%d",
+                                  s_arrowbuttonz_tex_page, aw, ah);
+                    } else {
+                        s_arrowbuttonz_tex_page = -1;
+                    }
+                    free(pixels);
+                } else {
+                    s_arrowbuttonz_tex_page = -1;
+                }
+                free(raw);
+            } else {
+                TD5_LOG_W(LOG_TAG, "Failed to load ArrowButtonz.tga");
+                s_arrowbuttonz_tex_page = -1;
+            }
+        }
+    }
+
     /* ---- ButtonLights.tga (selection indicator dot) ----
      * 16x32 paletted TGA (DAT_00496284 in original).
      * Two 16x16 frames stacked vertically:
@@ -2438,8 +2512,10 @@ int td5_frontend_init_resources(void) {
 
     /* Initialize lock tables with defaults:
      * Cars 0-35 unlocked (includes Viper at index 35), 36 unlocked */
+    /* Lock table: binary 0x00463e4c - indices 0-15 unlocked, 16-36 locked */
     memset(s_car_lock_table, 0, sizeof(s_car_lock_table));
-    s_total_unlocked_cars = 36; /* Viper (35) is the last unlocked car */
+    for (int _li = 16; _li < 37; _li++) s_car_lock_table[_li] = 1;
+    s_total_unlocked_cars = 16; /* 16 unlocked cars: indices 0-15 */
 
     /* Tracks 0-17 unlocked (Moscow=8 is unlocked), 18+ unlocked */
     memset(s_track_lock_table, 0, sizeof(s_track_lock_table));
@@ -2459,6 +2535,7 @@ void td5_frontend_release_resources(void) {
     s_buttonbits_w = 0; s_buttonbits_h = 0;
     s_buttonlights_tex_page = -1;
     s_buttonlights_w = 0; s_buttonlights_h = 0;
+    s_arrowbuttonz_tex_page = -1;
     s_white_tex_page = -1;
     s_background_surface = 0;
     memset(s_title_tex_page, 0, sizeof(s_title_tex_page));
@@ -2665,24 +2742,27 @@ static void frontend_render_quick_race_overlay(float sx, float sy) {
 }
 
 static void fe_draw_option_arrows(int btn_idx, float sx, float sy) {
-    /* Render arrow sprites from ButtonBits.tga (56x100 atlas, FUN_00426260).
-     * State 0 = gold/selected, state 1 = blue/unselected.
-     * Left  arrow: (0,s*32+6)-(12,s*32+19) = 12x13 px
-     * Right arrow: (18,s*32+6)-(27,s*32+19) = 9x13 px */
+    /* ArrowButtonz.tga: 12x36 sprite sheet (FUN_00426260, original DAT_00496284).
+     * Four 12x9 rows (u spans full width = 0.0..1.0):
+     *   Row 0 v=0.00..0.25  Left  arrow, unselected (blue)
+     *   Row 1 v=0.25..0.50  Right arrow, unselected (blue)
+     *   Row 2 v=0.50..0.75  Left  arrow, selected   (gold)
+     *   Row 3 v=0.75..1.00  Right arrow, selected   (gold) */
     float bx, by, bw, bh;
-    int state;
-    float aw_l = 12.0f * sx, aw_r = 9.0f * sx, ah = 13.0f * sy;
-    float v0, v1;
-    if (!s_buttons[btn_idx].active || s_buttonbits_tex_page < 0) return;
+    float aw = 12.0f * sx, ah = 9.0f * sy;
+    float v_left, v_right;
+    if (!s_buttons[btn_idx].active || s_arrowbuttonz_tex_page < 0) return;
     frontend_get_button_render_rect(btn_idx, sx, sy, &bx, &by, &bw, &bh);
-    state = (s_buttons[btn_idx].highlight_ramp > 0) ? 0 : 1;
-    v0 = (float)(state * 32 + 6)  / 100.0f;  /* BB_TEX_H = 100 */
-    v1 = (float)(state * 32 + 19) / 100.0f;
-    td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
-    fe_draw_quad(bx + 4.0f * sx,             by + (bh - ah) * 0.5f, aw_l, ah, 0xFFFFFFFF,
-                 s_buttonbits_tex_page,  0.0f / 56.0f, v0, 12.0f / 56.0f, v1);  /* BB_TEX_W = 56 */
-    fe_draw_quad(bx + bw - 4.0f*sx - aw_r,  by + (bh - ah) * 0.5f, aw_r, ah, 0xFFFFFFFF,
-                 s_buttonbits_tex_page, 18.0f / 56.0f, v0, 27.0f / 56.0f, v1);
+    if (s_buttons[btn_idx].highlight_ramp > 0) {
+        v_left  = 0.50f; v_right = 0.75f;  /* selected (gold) */
+    } else {
+        v_left  = 0.00f; v_right = 0.25f;  /* unselected (blue) */
+    }
+    td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
+    fe_draw_quad(bx + 4.0f * sx,           by + (bh - ah) * 0.5f, aw, ah, 0xFFFFFFFF,
+                 s_arrowbuttonz_tex_page, 0.0f, v_left,  1.0f, v_left  + 0.25f);
+    fe_draw_quad(bx + bw - 4.0f*sx - aw,  by + (bh - ah) * 0.5f, aw, ah, 0xFFFFFFFF,
+                 s_arrowbuttonz_tex_page, 0.0f, v_right, 1.0f, v_right + 0.25f);
 }
 
 static void frontend_render_game_options_overlay(float sx, float sy) {
@@ -2787,26 +2867,22 @@ static void frontend_render_race_type_description(float sx, float sy) {
 }
 
 static void frontend_render_car_selection_preview(float sx, float sy) {
-    const char *paint_names[] = { "SILVER", "BLUE", "RED", "BLACK" };
-    const char *trans_names[] = { "AUTOMATIC", "MANUAL" };
     int actual_car = frontend_current_car_index();
 
-    fe_draw_quad(210.0f * sx, 55.0f * sy, 420.0f * sx, 280.0f * sy, 0xC0101020, -1, 0, 0, 1, 1);
+    fe_draw_quad(232.0f * sx, 124.0f * sy, 408.0f * sx, 280.0f * sy, 0xC0101020, -1, 0, 0, 1, 1);
 
     if (s_inner_state == 11 && s_car_preview_prev_surface > 0 && s_car_preview_next_surface > 0) {
         float t = frontend_clamp01((float)(td5_plat_time_ms() - s_anim_start_ms) / 150.0f);
         uint32_t old_alpha = ((uint32_t)((1.0f - t) * 255.0f) << 24) | 0x00FFFFFF;
         uint32_t new_alpha = ((uint32_t)(t * 255.0f) << 24) | 0x00FFFFFF;
-        fe_draw_surface_rect(s_car_preview_prev_surface, 210.0f * sx, 55.0f * sy, 420.0f * sx, 280.0f * sy, old_alpha);
-        fe_draw_surface_rect(s_car_preview_next_surface, 210.0f * sx, 55.0f * sy, 420.0f * sx, 280.0f * sy, new_alpha);
+        fe_draw_surface_rect(s_car_preview_prev_surface, 232.0f * sx, 124.0f * sy, 408.0f * sx, 280.0f * sy, old_alpha);
+        fe_draw_surface_rect(s_car_preview_next_surface, 232.0f * sx, 124.0f * sy, 408.0f * sx, 280.0f * sy, new_alpha);
     } else if (s_car_preview_surface > 0) {
-        fe_draw_surface_rect(s_car_preview_surface, 210.0f * sx, 55.0f * sy, 420.0f * sx, 280.0f * sy, 0xFFFFFFFF);
+        fe_draw_surface_rect(s_car_preview_surface, 232.0f * sx, 124.0f * sy, 408.0f * sx, 280.0f * sy, 0xFFFFFFFF);
     }
 
     if (s_anim_complete) {
-        frontend_draw_value_text(sx, sy, 22, 70, frontend_get_car_display_name(actual_car), 0xFFFFFFFF);
-        frontend_draw_value_text(sx, sy, 22, 292, paint_names[s_selected_paint & 3], 0xFFE0E0E0);
-        frontend_draw_value_text(sx, sy, 22, 332, trans_names[s_selected_transmission & 1], 0xFFE0E0E0);
+        frontend_draw_value_text(sx, sy, 232, 106, frontend_get_car_display_name(actual_car), 0xFFFFFFFF);
         if (s_graphbars_surface > 0 && s_inner_state == 7) {
             fe_draw_surface_rect(s_graphbars_surface, 20.0f * sx, 310.0f * sy, 180.0f * sx, 120.0f * sy, 0xFFFFFFFF);
         }
@@ -3404,7 +3480,7 @@ int td5_frontend_init(void) {
     s_race_within_series = 0;
     s_cup_unlock_tier = 0;
     s_two_player_mode = 0;
-    s_selected_car = 35;  /* Dodge Viper (vip.zip) */
+    s_selected_car = 0;   /* Dodge Viper (vip.zip) - index 0 in UI order */
     s_selected_paint = 0;
     s_selected_config = 0;
     s_selected_transmission = 0;
@@ -3865,9 +3941,9 @@ static void Screen_MainMenu(void) {
         frontend_post_quit();
         break;
 
-    case 12: /* Scatter buttons for exit transition */
-        s_anim_tick++;
-        if (s_anim_tick >= 16) {
+    case 12: /* Scatter buttons for exit transition (~500ms) */
+        if (s_anim_start_ms == 0) frontend_begin_timed_animation();
+        if (frontend_update_timed_animation(16, 500) >= 1.0f) {
             frontend_post_quit();
         }
         break;
@@ -4002,8 +4078,8 @@ static void Screen_RaceTypeCategory(void) {
         s_inner_state = 3;
         break;
 
-    case 5: /* Slide-out: buttons scatter */
-        s_anim_tick = 0;
+    case 5: /* Slide-out prep: buttons scatter */
+        frontend_begin_timed_animation();
         s_inner_state = 0x14;
         break;
 
@@ -4042,13 +4118,12 @@ static void Screen_RaceTypeCategory(void) {
 
         frontend_create_button("Back", -0xE0, 0, 0xE0, 0x20);
 
-        s_anim_tick = 0;
+        frontend_begin_timed_animation();
         s_inner_state = 7;
         break;
 
-    case 7: /* Cup sub-menu slide-in: 32 frames (original 0x20) */
-        s_anim_tick++;
-        if (s_anim_tick >= 0x20) {
+    case 7: /* Cup sub-menu slide-in: ~1000ms */
+        if (frontend_update_timed_animation(0x20, 1000) >= 1.0f) {
             s_inner_state = 8;
         }
         break;
@@ -4110,9 +4185,8 @@ static void Screen_RaceTypeCategory(void) {
         break;
 
     /* --- Return transition --- */
-    case 0x14: /* Slide-out animation, then navigate */
-        s_anim_tick++;
-        if (s_anim_tick >= 16) {
+    case 0x14: /* Slide-out animation (~500ms), then navigate */
+        if (frontend_update_timed_animation(16, 500) >= 1.0f) {
             td5_frontend_set_screen((TD5_ScreenIndex)s_return_screen);
         }
         break;
@@ -4225,13 +4299,12 @@ static void Screen_QuickRaceMenu(void) {
     case 5: /* Prep slide-out */
         frontend_set_cursor_visible(1);
         frontend_play_sfx(5);
-        s_anim_tick = 0;
+        frontend_begin_timed_animation();
         s_inner_state = 6;
         break;
 
-    case 6: /* Slide-out: 16 frames, then dispatch */
-        s_anim_tick++;
-        if (s_anim_tick >= 16) {
+    case 6: /* Slide-out: ~500ms, then dispatch */
+        if (frontend_update_timed_animation(16, 500) >= 1.0f) {
             if (s_return_screen == -1) {
                 /* Start race */
                 frontend_init_race_schedule();
@@ -4268,9 +4341,11 @@ static void Screen_ConnectionBrowser(void) {
         s_inner_state = 2;
         break;
 
-    case 2: /* Slide-in */
-        s_anim_tick++;
-        if (s_anim_tick >= 0x10) s_inner_state = 3;
+    case 2: /* Slide-in (~500ms) */
+        if (frontend_update_timed_animation(0x10, 500) >= 1.0f) {
+            s_anim_complete = 1;
+            s_inner_state = 3;
+        }
         break;
 
     case 3: /* Tick + render */
@@ -4305,14 +4380,13 @@ static void Screen_ConnectionBrowser(void) {
         s_inner_state = 5;
         break;
 
-    case 8: /* Slide-out */
-        s_anim_tick = 0;
+    case 8: /* Slide-out prep */
+        frontend_begin_timed_animation();
         s_inner_state = 9;
         break;
 
-    case 9:
-        s_anim_tick++;
-        if (s_anim_tick >= 16) {
+    case 9: /* Slide-out (~500ms) */
+        if (frontend_update_timed_animation(16, 500) >= 1.0f) {
             td5_frontend_set_screen((TD5_ScreenIndex)s_return_screen);
         }
         break;
@@ -4342,9 +4416,11 @@ static void Screen_SessionPicker(void) {
         s_inner_state = 2;
         break;
 
-    case 2: /* Slide-in */
-        s_anim_tick++;
-        if (s_anim_tick >= 0x10) s_inner_state = 3;
+    case 2: /* Slide-in (~500ms) */
+        if (frontend_update_timed_animation(0x10, 500) >= 1.0f) {
+            s_anim_complete = 1;
+            s_inner_state = 3;
+        }
         break;
 
     case 3: /* Interaction */
@@ -4368,14 +4444,13 @@ static void Screen_SessionPicker(void) {
         s_inner_state = 5;
         break;
 
-    case 5: /* Slide-out confirm */
-        s_anim_tick = 0;
+    case 5: /* Slide-out prep */
+        frontend_begin_timed_animation();
         s_inner_state = 6;
         break;
 
-    case 6: /* Slide-out + exit */
-        s_anim_tick++;
-        if (s_anim_tick >= 16) {
+    case 6: /* Slide-out (~500ms) */
+        if (frontend_update_timed_animation(16, 500) >= 1.0f) {
             td5_frontend_set_screen((TD5_ScreenIndex)s_return_screen);
         }
         break;
@@ -4405,9 +4480,11 @@ static void Screen_CreateSession(void) {
         s_inner_state = 1;
         break;
 
-    case 1: /* Slide-in */
-        s_anim_tick++;
-        if (s_anim_tick >= 0x10) s_inner_state = 2;
+    case 1: /* Slide-in (~500ms) */
+        if (frontend_update_timed_animation(0x10, 500) >= 1.0f) {
+            s_anim_complete = 1;
+            s_inner_state = 2;
+        }
         break;
 
     case 2: /* Name input */
@@ -4487,12 +4564,11 @@ static void Screen_NetworkLobby(void) {
         s_inner_state = 1;
         break;
 
-    case 1: /* ANIMATE IN (20 frames) */
-        s_anim_tick++;
-        /* Clear screen on first frame */
+    case 1: /* ANIMATE IN (~600ms) */
         /* Animate buttons sliding into position */
-        if (s_anim_tick >= 0x14) { /* 20 frames */
+        if (frontend_update_timed_animation(0x14, 600) >= 1.0f) {
             frontend_play_sfx(4);
+            s_anim_complete = 1;
             s_inner_state = 2;
         }
         break;
@@ -4854,13 +4930,12 @@ static void Screen_OptionsHub(void) {
     case 7: /* Slide-out prep */
         frontend_set_cursor_visible(1);
         frontend_play_sfx(5);
-        s_anim_tick = 0;
+        frontend_begin_timed_animation();
         s_inner_state = 8;
         break;
 
-    case 8: /* Slide-out: 16 frames */
-        s_anim_tick++;
-        if (s_anim_tick >= 16) {
+    case 8: /* Slide-out (~500ms) */
+        if (frontend_update_timed_animation(16, 500) >= 1.0f) {
             s_inner_state = 9;
         }
         break;
@@ -5468,13 +5543,15 @@ static void Screen_CarSelection(void) {
     case 4: /* Button creation: 6 buttons along the left column.
              * Original layout places the button column on the left side and the
              * 408x280 car preview on the right side. */
-        frontend_create_button("Car",        20, 100, 180, 32);
-        frontend_create_button("Paint",      20, 138, 180, 32);
-        frontend_create_button("Stats",      20, 176, 180, 32);
+        /* 5 buttons per original (0x40DFC0 state 4): tab column left, OK bottom */
+        frontend_create_button("Car",   34, 168, 168, 32);
+        frontend_create_button("Paint", 34, 200, 168, 32);
+        frontend_create_button("Stats", 34, 232, 168, 32);
         frontend_create_button(s_selected_transmission ? "Manual" : "Automatic",
-                               20, 214, 180, 32);
-        frontend_create_button("OK",         20, 252,  88, 32);
-        frontend_create_button("Back",       114, 252,  88, 32);
+                               34, 264, 168, 32);
+        frontend_create_button("OK",   276, 440,  64, 32);
+        if (s_selected_game_type != 7 && !s_network_active)
+            frontend_create_button("Back", 180, 440, 96, 32);
 
         /* Time Trials: grey out Manual button */
         /* Load inline string table SNK_CarSelect_MT1 */
