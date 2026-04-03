@@ -760,9 +760,9 @@ static void *build_span_strip_display_list(int span_index)
         src[3] = vertex_at(vr0);
 
         for (int i = 0; i < 4; i++) {
-            px[i] = (float)src[i]->x * (1.0f / 256.0f);
-            py[i] = (float)src[i]->y * (1.0f / 256.0f);
-            pz[i] = (float)src[i]->z * (1.0f / 256.0f);
+            px[i] = (float)src[i]->x * (1.0f / 256.0f) - origin_x;
+            py[i] = (float)src[i]->y * (1.0f / 256.0f) - origin_y;
+            pz[i] = (float)src[i]->z * (1.0f / 256.0f) - origin_z;
 
             if (px[i] < min_x) min_x = px[i];
             if (py[i] < min_y) min_y = py[i];

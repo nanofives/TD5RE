@@ -1713,12 +1713,23 @@ void td5_camera_tick(void)
     /* Use debug track camera only if no actors are populated */
     if (td5_game_get_total_actor_count() <= 0) {
         update_debug_track_camera();
-        TD5_LOG_D(LOG_TAG, "camera tick: active_mode=debug");
-    } else {
-        TD5_LOG_D(LOG_TAG, "camera tick: active_mode=%s",
-                  camera_mode_name_for_view(0, 1));
+        return;
     }
-    /* Otherwise camera is driven per-view by td5_camera_update_transition_state */
+    /* Per-sim-tick camera update — matches CacheVehicleCameraAngles +
+       UpdateChaseCamera inside the RunRaceFrame sim loop (0x0042B580).
+       Called once per fixed timestep tick from td5_game.c sim loop. */
+    for (int v = 0; v < 2; v++) {
+        TD5_Actor *actor = td5_game_get_actor(g_actorSlotForView[v]);
+        if (!actor && g_actor_table_base) {
+            int slot = g_actorSlotForView[v];
+            int total = td5_game_get_total_actor_count();
+            if (slot >= 0 && slot < total)
+                actor = (TD5_Actor *)(g_actor_table_base + (size_t)slot * TD5_ACTOR_STRIDE);
+        }
+        if (!actor) continue;
+        CacheVehicleCameraAngles((int)actor, v);
+        UpdateChaseCamera((int)actor, 1, v);
+    }
 }
 
 void td5_camera_update_chase(TD5_Actor *a, int p, int vi)
@@ -1802,12 +1813,8 @@ void td5_camera_update_transition_state(int p, int vi)
             TD5_LOG_I(LOG_TAG, "transition view %d: path=bumper actor_slot=%d preset=%d",
                       vi, g_actorSlotForView[vi], preset);
             UpdateVehicleRelativeCamera((int)actor, vi);
-        } else {
-            /* Chase camera (default) */
-            TD5_LOG_I(LOG_TAG, "transition view %d: path=chase actor_slot=%d preset=%d",
-                      vi, g_actorSlotForView[vi], preset);
-            UpdateChaseCamera((int)actor, p, vi);
         }
+        /* Chase camera: already updated per-sim-tick in td5_camera_tick() */
     }
 
     TD5_LOG_D(LOG_TAG,
