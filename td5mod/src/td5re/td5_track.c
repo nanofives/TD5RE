@@ -775,11 +775,11 @@ static void *build_span_strip_display_list(int span_index)
 
     min_x = min_y = min_z =  1.0e30f;
     max_x = max_y = max_z = -1.0e30f;
-    /* Origins in integer-coord float space (matching MODELS.DAT and
-     * camera positions from 24.8 FP / 256). No /256 scaling here. */
-    origin_x = (float)sp->origin_x;
-    origin_y = (float)sp->pad_10;
-    origin_z = (float)sp->origin_z;
+    /* Span origins are 24.8 fixed-point integers; divide by 256 to match
+     * camera/actor "meter" coordinate space (same as MODELS.DAT after inv256). */
+    origin_x = (float)sp->origin_x * (1.0f / 256.0f);
+    origin_y = (float)sp->pad_10   * (1.0f / 256.0f);
+    origin_z = (float)sp->origin_z * (1.0f / 256.0f);
     mesh->origin_x = origin_x;
     mesh->origin_y = origin_y;
     mesh->origin_z = origin_z;
@@ -800,12 +800,11 @@ static void *build_span_strip_display_list(int span_index)
         src[3] = vertex_at(vr0);
 
         for (int i = 0; i < 4; i++) {
-            /* Strip vertices (int16) are LOCAL offsets from the span origin.
-             * Keep in integer-coord space (no /256) to match MODELS.DAT
-             * and camera coordinate space. */
-            px[i] = (float)src[i]->x;
-            py[i] = (float)src[i]->y;
-            pz[i] = (float)src[i]->z;
+            /* Strip vertices (int16) are LOCAL offsets from the span origin,
+             * also in 24.8 fixed-point; divide by 256 to match meter space. */
+            px[i] = (float)src[i]->x * (1.0f / 256.0f);
+            py[i] = (float)src[i]->y * (1.0f / 256.0f);
+            pz[i] = (float)src[i]->z * (1.0f / 256.0f);
 
             if (px[i] < min_x) min_x = px[i];
             if (py[i] < min_y) min_y = py[i];
@@ -837,8 +836,8 @@ static void *build_span_strip_display_list(int span_index)
     mesh->bounding_center_y = (min_y + max_y) * 0.5f;
     mesh->bounding_center_z = (min_z + max_z) * 0.5f;
     mesh->bounding_radius = (max_x - min_x) + (max_y - min_y) + (max_z - min_z);
-    if (mesh->bounding_radius < 4.0f)
-        mesh->bounding_radius = 4.0f;
+    if (mesh->bounding_radius < 0.1f)
+        mesh->bounding_radius = 0.1f;
 
     return mem;
 }
