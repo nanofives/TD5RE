@@ -1730,8 +1730,34 @@ void td5_camera_set_preset(int pi)
 {
     s_active_preset = pi;
     memset(s_debug_camera_frame, 0, sizeof(s_debug_camera_frame));
-    /* In full integration, this would call CycleRaceCameraPreset and
-       LoadCameraPresetForView */
+
+    /* Reset preset selection state for both views */
+    g_raceCameraPresetId[0]   = 0;
+    g_raceCameraPresetId[1]   = 0;
+    g_raceCameraPresetMode[0] = 0;
+    g_raceCameraPresetMode[1] = 0;
+
+    /* Seed per-view chase-camera state from the spawned actors so the first
+       UpdateChaseCamera frame starts with correct radius/height/orbit values
+       rather than stale or zero-initialized garbage.  actor+0x208 is the
+       display_angles base used by LoadCameraPresetForView (+2 = yaw). */
+    if (g_actor_table_base) {
+        for (int v = 0; v < 2; v++) {
+            TD5_Actor *actor = td5_game_get_actor(g_actorSlotForView[v]);
+
+            if (!actor) {
+                int slot = g_actorSlotForView[v];
+                int total = td5_game_get_total_actor_count();
+                if (slot >= 0 && slot < total) {
+                    actor = (TD5_Actor *)(g_actor_table_base + (size_t)slot * TD5_ACTOR_STRIDE);
+                }
+            }
+
+            if (actor) {
+                LoadCameraPresetForView((int)((uint8_t *)actor + 0x208), 1, v, 0);
+            }
+        }
+    }
 }
 
 void td5_camera_update_trackside(TD5_Actor *a, int vi)

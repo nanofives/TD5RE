@@ -597,7 +597,7 @@ unsigned int g_tracksideYawOffset[2] = {0};
 int    g_spanTable      = 0;
 int    g_vertexTable    = 0;
 
-int    g_cameraTransitionActive = 0;
+int    g_cameraTransitionActive = 0xA000;
 int    g_camTransitionGate      = 0;
 int    g_actorSlotForView[2]    = {0};
 int    g_actorBaseAddr          = 0;

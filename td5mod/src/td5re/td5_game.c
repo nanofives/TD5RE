@@ -565,6 +565,15 @@ int td5_game_init_race_session(void) {
         g_td5.total_actor_count = spawn_count;
         td5_ai_bind_actor_table(s_actor_memory);
 
+        static const int8_t s_racer_span_offsets[TD5_MAX_RACER_SLOTS] = {
+            -9, -6, -3, -12, -15, -18
+        };
+        static const uint8_t s_racer_lanes[TD5_MAX_RACER_SLOTS] = {
+            1, 2, 1, 2, 1, 2
+        };
+        int track_span_count = td5_track_get_span_count();
+        int start_span = (track_span_count > 0) ? track_span_count : 1;
+
         for (int slot = 0; slot < spawn_count; ++slot) {
             uint8_t *actor = s_actor_memory + slot * TD5_ACTOR_STRIDE;
             int span_index = 1 + slot * 2;
@@ -573,6 +582,18 @@ int td5_game_init_race_session(void) {
             int world_z = 0;
             TD5_StripSpan *sp = td5_track_get_span(span_index);
             int sub_lane = slot % 4;
+
+            if (slot < TD5_MAX_RACER_SLOTS && track_span_count > 0) {
+                span_index = start_span + s_racer_span_offsets[slot];
+                while (span_index < 0) {
+                    span_index += track_span_count;
+                }
+                while (span_index >= track_span_count) {
+                    span_index -= track_span_count;
+                }
+                sp = td5_track_get_span(span_index);
+                sub_lane = s_racer_lanes[slot];
+            }
 
             if (!sp) {
                 span_index = 1;
@@ -595,12 +616,13 @@ int td5_game_init_race_session(void) {
             }
 
             *(int32_t *)(actor + 0x1FC) = world_x;
-            *(int32_t *)(actor + 0x200) = world_y;
+            *(int32_t *)(actor + 0x200) = -0x40000000;
             *(int32_t *)(actor + 0x204) = world_z;
 
             actor[0x375] = (uint8_t)slot;
             actor[0x37B] = 1;
             td5_track_compute_heading((TD5_Actor *)actor);
+            td5_physics_reset_actor_state((TD5_Actor *)actor);
             TD5_LOG_I(LOG_TAG,
                       "Actor spawn: slot=%d span=%d pos=(%d,%d,%d) state=%d lane=%d",
                       slot, span_index,
@@ -660,7 +682,6 @@ int td5_game_init_race_session(void) {
     g_actorSlotForView[1] = (g_td5.split_screen_mode > 0 && g_td5.total_actor_count > 1) ? 1 : 0;
     g_actor_slot_map[0] = g_actorSlotForView[0];
     g_actor_slot_map[1] = g_actorSlotForView[1];
-    td5_camera_set_preset(0);
     TD5_LOG_I(LOG_TAG, "InitRace step 17/19: render state and viewport layout initialized views=%d",
               g_td5.viewport_count);
     CK("ck17_after_viewport");
@@ -683,6 +704,7 @@ int td5_game_init_race_session(void) {
     td5_hud_init_pause_menu(0);
     DBG_WRITE("19f_complete");
     #undef DBG_WRITE
+    td5_camera_set_preset(0);
     TD5_LOG_I(LOG_TAG, "InitRace step 19/19: HUD and pause menu initialized");
 
     /* ---- Load sky texture ---- */
