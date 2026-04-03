@@ -2600,6 +2600,13 @@ static void frontend_load_bg_gallery(void) {
             free(data); continue;
         }
         free(data);
+        /* Apply black colorkey: pure-black pixels → fully transparent
+         * (mirrors original CrossFade16BitSurfaces 0x0000 colorkey mask) */
+        uint8_t *px = (uint8_t *)pixels;
+        for (int j = 0; j < w * h; j++) {
+            if (px[j*4+0] == 0 && px[j*4+1] == 0 && px[j*4+2] == 0)
+                px[j*4+3] = 0;
+        }
         if (td5_plat_render_upload_texture(page, pixels, w, h, 2)) {
             s_bg_gallery[i].width  = w;
             s_bg_gallery[i].height = h;
@@ -2619,16 +2626,21 @@ static void frontend_render_bg_gallery(float sx, float sy) {
     int i = s_bg_gal_current;
     if (s_bg_gallery[i].width <= 0) return;
 
-    /* Update blend weight each frame: halve then decrement (0x40D9B0) */
-    s_bg_gal_blend = s_bg_gal_blend / 2 - 1;
+    /* Update blend weight: decrement 1 per frame (original g_attractModeIdleCounter--).
+     * Starts at 256 on load/advance, triggers next image at -24 (~280 frames ≈ 4.7s @60fps) */
+    s_bg_gal_blend--;
     if (s_bg_gal_blend <= -24) {
         frontend_advance_bg_gallery();
         i = s_bg_gal_current;
     }
 
-    /* Alpha: stable ~60% while blend > 0, linear fade-out as blend 0 → -24 */
-    float alpha = 0.6f;
-    if (s_bg_gal_blend < 0)
+    /* Alpha: fade-in 256→240 (16 frames), hold at 60%, fade-out 0→-24 */
+    float alpha;
+    if (s_bg_gal_blend > 240)
+        alpha = 0.6f * (float)(256 - s_bg_gal_blend) / 16.0f;
+    else if (s_bg_gal_blend >= 0)
+        alpha = 0.6f;
+    else
         alpha = 0.6f * (1.0f + (float)s_bg_gal_blend / 24.0f);
     if (alpha <= 0.0f) return;
 
@@ -2990,6 +3002,18 @@ static void frontend_render_race_type_description(float sx, float sy) {
 static void frontend_render_car_selection_preview(float sx, float sy) {
     int actual_car = frontend_current_car_index();
 
+    /* Overlay UI elements — final positions from state 2 animation (FUN_0040ddc0):
+     * CarSelTopBar (532x36): x=0,  y=45
+     * CarSelBar1   (24x408): x=36, y=0
+     * CarSelCurve  (80x56):  x=36, y=408  (bottom-left corner piece) */
+    if (s_carsel_topbar_surface > 0)
+        fe_draw_surface_rect(s_carsel_topbar_surface,  0.0f * sx,  45.0f * sy, 532.0f * sx,  36.0f * sy, 0xFFFFFFFF);
+    if (s_carsel_bar_surface > 0)
+        fe_draw_surface_rect(s_carsel_bar_surface,    36.0f * sx,   0.0f * sy,  24.0f * sx, 408.0f * sy, 0xFFFFFFFF);
+    if (s_carsel_curve_surface > 0)
+        fe_draw_surface_rect(s_carsel_curve_surface,  36.0f * sx, 408.0f * sy,  80.0f * sx,  56.0f * sy, 0xFFFFFFFF);
+
+    /* Car preview area: dark backing then carpic image (408x280 at x=232, y=124) */
     fe_draw_quad(232.0f * sx, 124.0f * sy, 408.0f * sx, 280.0f * sy, 0xC0101020, -1, 0, 0, 1, 1);
 
     if (s_inner_state == 11 && s_car_preview_prev_surface > 0 && s_car_preview_next_surface > 0) {
@@ -3004,15 +3028,10 @@ static void frontend_render_car_selection_preview(float sx, float sy) {
 
     if (s_anim_complete) {
         frontend_draw_value_text(sx, sy, 232, 106, frontend_get_car_display_name(actual_car), 0xFFFFFFFF);
-        /* LOCKED indicator: Ghidra Screen_CarSelection case 0xc:
-         * FUN_004242b0(SNK_LockedTxt, uVar8-0xea, uVar10-0x77) = (86, 121) in 640x480 */
         if (!s_cheat_unlock_all && !s_network_active &&
             actual_car >= 0 && actual_car < 37 &&
             s_car_lock_table[actual_car] != 0) {
             frontend_draw_value_text(sx, sy, 86, 121, "LOCKED", 0xFFFF4444);
-        }
-        if (s_graphbars_surface > 0 && s_inner_state == 7) {
-            fe_draw_surface_rect(s_graphbars_surface, 20.0f * sx, 310.0f * sy, 180.0f * sx, 120.0f * sy, 0xFFFFFFFF);
         }
     }
 }
@@ -5690,15 +5709,17 @@ static void Screen_CarSelection(void) {
     case 4: /* Button creation: 6 buttons along the left column.
              * Original layout places the button column on the left side and the
              * 408x280 car preview on the right side. */
-        /* 5 buttons per original (0x40DFC0 state 4): tab column left, OK bottom */
-        frontend_create_button("Car",   34, 168, 168, 32);
-        frontend_create_button("Paint", 34, 200, 168, 32);
-        frontend_create_button("Stats", 34, 232, 168, 32);
+        /* 5 buttons per original (0x40DFC0 state 4): exact final positions from Ghidra
+         * Tab buttons: x=46, y=169/209/249/289, w=168, h=32
+         * OK: x=46, y=329, w=64  |  BACK: x=118, y=329, w=96 */
+        frontend_create_button("Car",   46, 169, 168, 32);
+        frontend_create_button("Paint", 46, 209, 168, 32);
+        frontend_create_button("Stats", 46, 249, 168, 32);
         frontend_create_button(s_selected_transmission ? "Manual" : "Automatic",
-                               34, 264, 168, 32);
-        frontend_create_button("OK",   276, 440,  64, 32);
-        if (s_selected_game_type != 7 && !s_network_active)
-            frontend_create_button("Back", 180, 440, 96, 32);
+                               46, 289, 168, 32);
+        frontend_create_button("OK",   46, 329,  64, 32);
+        if (!s_network_active)
+            frontend_create_button("Back", 118, 329, 96, 32);
 
         /* Time Trials: grey out Manual button */
         /* Load inline string table SNK_CarSelect_MT1 */
@@ -5864,14 +5885,19 @@ static void Screen_CarSelection(void) {
         }
         break;
 
-    case 15: /* Config sub-screen: render spec headers + graph bars */
-        /* Render SNK_Config_Hdrs and per-car spec values */
-        /* Headers starting with '*' are skipped */
-        s_inner_state = 16;
+    case 15: /* Stats/Config sub-screen: show GraphBars panel, wait for input */
+        /* Original (0x40DFC0 state 0xf): renders SNK_Config_Hdrs + stat values from
+         * DAT_0049b6fc (runtime buffer, 17 entries * 0x30 bytes per car).
+         * In the source port, stat data is not loaded, so display GraphBars only. */
+        if (s_input_ready && s_button_index >= 0) {
+            /* Any tab or OK/Back press exits the stats view */
+            s_car_preview_overlay = 2;
+            s_inner_state = 7;
+        }
         break;
 
-    case 16: /* Return from config */
-        s_car_preview_overlay = 1;
+    case 16: /* Unused (was "return from config") — fall through to 7 */
+        s_car_preview_overlay = 2;
         s_inner_state = 7;
         break;
 
