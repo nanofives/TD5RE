@@ -1490,7 +1490,7 @@ static void frontend_init_display_mode_state(void) {
     TD5_LOG_I(LOG_TAG, "Display modes enumerated: count=%d", s_display_mode_count);
     for (int i = 0; i < s_display_mode_count; i++) {
         snprintf(s_display_mode_names[i], sizeof(s_display_mode_names[i]),
-            "Resolution: %dx%d %dbpp",
+            "%dx%d %dbpp",
             s_display_modes[i].width,
             s_display_modes[i].height,
             s_display_modes[i].bpp);
@@ -2931,13 +2931,13 @@ static void frontend_render_game_options_overlay(float sx, float sy) {
     if (!s_buttons[0].active) return;
     if (!s_anim_complete) return;
     snprintf(laps, sizeof(laps), "%d", (s_game_option_laps + 1) * 2);
-    frontend_draw_value_text(sx, sy, 372, s_buttons[0].y + 6, laps, 0xFFFFFFFF);
-    frontend_draw_value_text(sx, sy, 372, s_buttons[1].y + 6, on_off[s_game_option_checkpoint_timers & 1], 0xFFFFFFFF);
-    frontend_draw_value_text(sx, sy, 372, s_buttons[2].y + 6, on_off[s_game_option_traffic & 1], 0xFFFFFFFF);
-    frontend_draw_value_text(sx, sy, 372, s_buttons[3].y + 6, on_off[s_game_option_cops & 1], 0xFFFFFFFF);
-    frontend_draw_value_text(sx, sy, 372, s_buttons[4].y + 6, difficulty[s_game_option_difficulty % 3], 0xFFFFFFFF);
-    frontend_draw_value_text(sx, sy, 372, s_buttons[5].y + 6, dynamics[s_game_option_dynamics & 1], 0xFFFFFFFF);
-    frontend_draw_value_text(sx, sy, 372, s_buttons[6].y + 6, on_off[s_game_option_collisions & 1], 0xFFFFFFFF);
+    frontend_draw_value_text(sx, sy, 344, s_buttons[0].y + 6, laps, 0xFFFFFFFF);
+    frontend_draw_value_text(sx, sy, 344, s_buttons[1].y + 6, on_off[s_game_option_checkpoint_timers & 1], 0xFFFFFFFF);
+    frontend_draw_value_text(sx, sy, 344, s_buttons[2].y + 6, on_off[s_game_option_traffic & 1], 0xFFFFFFFF);
+    frontend_draw_value_text(sx, sy, 344, s_buttons[3].y + 6, on_off[s_game_option_cops & 1], 0xFFFFFFFF);
+    frontend_draw_value_text(sx, sy, 344, s_buttons[4].y + 6, difficulty[s_game_option_difficulty % 3], 0xFFFFFFFF);
+    frontend_draw_value_text(sx, sy, 344, s_buttons[5].y + 6, dynamics[s_game_option_dynamics & 1], 0xFFFFFFFF);
+    frontend_draw_value_text(sx, sy, 344, s_buttons[6].y + 6, on_off[s_game_option_collisions & 1], 0xFFFFFFFF);
     for (int i = 0; i <= 6; i++) fe_draw_option_arrows(i, sx, sy);
 }
 
@@ -2953,10 +2953,10 @@ static void frontend_render_display_options_overlay(float sx, float sy) {
         s_display_mode_index < s_display_mode_count)
         mode_name = s_display_mode_names[s_display_mode_index];
     snprintf(damping, sizeof(damping), "%d", s_display_camera_damping);
-    frontend_draw_value_text(sx, sy, 372, s_buttons[0].y + 6, mode_name, 0xFFFFFFFF);
-    frontend_draw_value_text(sx, sy, 372, s_buttons[1].y + 6, on_off[s_display_fog_enabled & 1], 0xFFFFFFFF);
-    frontend_draw_value_text(sx, sy, 372, s_buttons[2].y + 6, speed_read[s_display_speed_units & 1], 0xFFFFFFFF);
-    frontend_draw_value_text(sx, sy, 372, s_buttons[3].y + 6, damping, 0xFFFFFFFF);
+    frontend_draw_value_text(sx, sy, 344, s_buttons[0].y + 6, mode_name, 0xFFFFFFFF);
+    frontend_draw_value_text(sx, sy, 344, s_buttons[1].y + 6, on_off[s_display_fog_enabled & 1], 0xFFFFFFFF);
+    frontend_draw_value_text(sx, sy, 344, s_buttons[2].y + 6, speed_read[s_display_speed_units & 1], 0xFFFFFFFF);
+    frontend_draw_value_text(sx, sy, 344, s_buttons[3].y + 6, damping, 0xFFFFFFFF);
     for (int i = 0; i <= 3; i++) fe_draw_option_arrows(i, sx, sy);
 }
 
@@ -2969,9 +2969,9 @@ static void frontend_render_sound_options_overlay(float sx, float sy) {
     if (!s_anim_complete) return;
     snprintf(sfx_volume, sizeof(sfx_volume), "%d", s_sound_option_sfx_volume);
     snprintf(music_volume, sizeof(music_volume), "%d", s_sound_option_music_volume);
-    frontend_draw_value_text(sx, sy, 372, s_buttons[0].y + 6, sfx_mode[s_sound_option_sfx_mode & 1], 0xFFFFFFFF);
-    frontend_draw_value_text(sx, sy, 372, s_buttons[1].y + 6, sfx_volume, 0xFFFFFFFF);
-    frontend_draw_value_text(sx, sy, 372, s_buttons[2].y + 6, music_volume, 0xFFFFFFFF);
+    frontend_draw_value_text(sx, sy, 344, s_buttons[0].y + 6, sfx_mode[s_sound_option_sfx_mode & 1], 0xFFFFFFFF);
+    frontend_draw_value_text(sx, sy, 344, s_buttons[1].y + 6, sfx_volume, 0xFFFFFFFF);
+    frontend_draw_value_text(sx, sy, 344, s_buttons[2].y + 6, music_volume, 0xFFFFFFFF);
     for (int i = 0; i <= 2; i++) fe_draw_option_arrows(i, sx, sy);
 }
 
@@ -2980,8 +2980,8 @@ static void frontend_render_two_player_options_overlay(float sx, float sy) {
 
     if (!s_buttons[0].active) return;
     if (!s_anim_complete) return;
-    frontend_draw_value_text(sx, sy, 372, s_buttons[0].y + 6, on_off[(s_two_player_mode & 4) ? 1 : 0], 0xFFFFFFFF);
-    frontend_draw_value_text(sx, sy, 372, s_buttons[1].y + 6, on_off[(s_two_player_mode & 8) ? 1 : 0], 0xFFFFFFFF);
+    frontend_draw_value_text(sx, sy, 344, s_buttons[0].y + 6, on_off[(s_two_player_mode & 4) ? 1 : 0], 0xFFFFFFFF);
+    frontend_draw_value_text(sx, sy, 344, s_buttons[1].y + 6, on_off[(s_two_player_mode & 8) ? 1 : 0], 0xFFFFFFFF);
     for (int i = 0; i <= 1; i++) fe_draw_option_arrows(i, sx, sy);
 }
 
@@ -3237,7 +3237,7 @@ static void frontend_render_control_options_overlay(float sx, float sy) {
     int sh = s_surfaces[slot].height;
     if (sh <= 0) return;
 
-    float icon_x = 284.0f * sx;
+    float icon_x = 394.0f * sx;  /* ESI + 0x11C = 110 + 284 = 394, right of button panel */
     float icon_w = 64.0f * sx;
     float icon_h = 32.0f * sy;
     float v_row  = 32.0f / (float)sh;   /* height of one icon row in UV space */
@@ -5310,14 +5310,14 @@ static void Screen_GameOptions(void) {
         /* 7 option rows with left/right arrows:
          * Circuit Laps, Checkpoint Timers, Traffic, Cops,
          * Difficulty, Dynamics, 3D Collisions */
-        frontend_create_button("Circuit Laps", -0xE0, 0, 0xE0, 0x20);
-        frontend_create_button("Checkpoint Timers", -0xE0, 0, 0xE0, 0x20);
-        frontend_create_button("Traffic", -0xE0, 0, 0xE0, 0x20);
-        frontend_create_button("Cops", -0xE0, 0, 0xE0, 0x20);
-        frontend_create_button("Difficulty", -0xE0, 0, 0xE0, 0x20);
-        frontend_create_button("Dynamics", -0xE0, 0, 0xE0, 0x20);
-        frontend_create_button("3D Collisions", -0xE0, 0, 0xE0, 0x20);
-        frontend_create_button("OK", -0xE0, 0, 0xE0, 0x20);
+        frontend_create_button("Circuit Laps",      -0x128, 0, 0x128, 0x20);
+        frontend_create_button("Checkpoint Timers", -0x128, 0, 0x128, 0x20);
+        frontend_create_button("Traffic",           -0x128, 0, 0x128, 0x20);
+        frontend_create_button("Cops",              -0x128, 0, 0x128, 0x20);
+        frontend_create_button("Difficulty",        -0x128, 0, 0x128, 0x20);
+        frontend_create_button("Dynamics",          -0x128, 0, 0x128, 0x20);
+        frontend_create_button("3D Collisions",     -0x128, 0, 0x128, 0x20);
+        frontend_create_button("OK",                -0x60,  0, 0x60,  0x20);
         s_anim_tick = 0;
         s_inner_state = 1;
         break;
