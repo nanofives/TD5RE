@@ -3104,7 +3104,7 @@ static void frontend_render_car_stats_overlay(float sx, float sy) {
     float hx = 234.0f * sx;   /* header column x */
     float vx = 430.0f * sx;   /* value column x */
     float y0 = 130.0f * sy;   /* first row y */
-    float dy = 11.5f * sy;    /* row spacing */
+    float dy = 12.0f * sy;    /* row spacing — matches 12px font cell height */
     char val[64];
     int i;
 
@@ -3172,27 +3172,32 @@ static void frontend_render_car_selection_preview(float sx, float sy) {
             fe_draw_surface_rect(s_carsel_curve_surface,  36.0f * sx, 408.0f * sy,  80.0f * sx,  56.0f * sy, 0xFFFFFFFF);
     }
 
-    /* Car preview area: fully opaque dark backing over background, then car image */
-    fe_draw_quad(232.0f * sx, 124.0f * sy, 408.0f * sx, 280.0f * sy, 0xFF101020, -1, 0, 0, 1, 1);
-
-    if (s_inner_state == 11 && s_car_preview_prev_surface > 0) {
-        /* Old car slides out to the right (state 11, ~433ms) — animPhase 0x0B: offset = counter*0x20 */
-        float t = frontend_clamp01((float)(td5_plat_time_ms() - s_anim_start_ms) / 433.0f);
-        float x = 232.0f + 408.0f * t;  /* 232 → 640 (off-screen right) */
-        fe_draw_surface_rect(s_car_preview_prev_surface, x * sx, 124.0f * sy, 408.0f * sx, 280.0f * sy, 0xFFFFFFFF);
-    } else if (s_inner_state == 14 && s_car_preview_surface > 0) {
-        /* New car slides in from right (state 14, ~833ms @30fps):
-         * formula: offset = counter*-0x40 + 0x4A8 (1192px beyond final pos=232)
-         * arrives at x=232 in ~620ms (18.6 frames @30fps), then held */
-        float t = frontend_clamp01((float)(td5_plat_time_ms() - s_anim_start_ms) / 620.0f);
-        float x = 1424.0f - 1192.0f * t;  /* 1424 → 232 */
-        fe_draw_surface_rect(s_car_preview_surface, x * sx, 124.0f * sy, 408.0f * sx, 280.0f * sy, 0xFFFFFFFF);
-    } else if (s_inner_state == 15) {
-        /* Stats sub-screen (state 0xF): show spec sheet text, not the car image */
+    /* Car preview area backing and car image */
+    if (s_inner_state == 15) {
+        /* Stats sub-screen: draw car behind a semi-transparent dark quad, then spec text on top */
+        if (s_car_preview_surface > 0)
+            fe_draw_surface_rect(s_car_preview_surface, 232.0f * sx, 124.0f * sy, 408.0f * sx, 280.0f * sy, 0xFFFFFFFF);
+        fe_draw_quad(232.0f * sx, 124.0f * sy, 408.0f * sx, 280.0f * sy, 0xB0101020, -1, 0, 0, 1, 1);
         frontend_render_car_stats_overlay(sx, sy);
-    } else if (s_inner_state != 12 && s_inner_state != 13 && s_car_preview_surface > 0) {
-        /* Static: states 12/13 are pass-through transition ticks — skip to avoid 1-frame flash */
-        fe_draw_surface_rect(s_car_preview_surface, 232.0f * sx, 124.0f * sy, 408.0f * sx, 280.0f * sy, 0xFFFFFFFF);
+    } else {
+        /* All other states: opaque dark backing, then car animation */
+        fe_draw_quad(232.0f * sx, 124.0f * sy, 408.0f * sx, 280.0f * sy, 0xFF101020, -1, 0, 0, 1, 1);
+        if (s_inner_state == 11 && s_car_preview_prev_surface > 0) {
+            /* Old car slides out to the right (state 11, ~433ms) — animPhase 0x0B: offset = counter*0x20 */
+            float t = frontend_clamp01((float)(td5_plat_time_ms() - s_anim_start_ms) / 433.0f);
+            float x = 232.0f + 408.0f * t;  /* 232 → 640 (off-screen right) */
+            fe_draw_surface_rect(s_car_preview_prev_surface, x * sx, 124.0f * sy, 408.0f * sx, 280.0f * sy, 0xFFFFFFFF);
+        } else if (s_inner_state == 14 && s_car_preview_surface > 0) {
+            /* New car slides in from right (state 14, ~833ms @30fps):
+             * formula: offset = counter*-0x40 + 0x4A8 (1192px beyond final pos=232)
+             * arrives at x=232 in ~620ms (18.6 frames @30fps), then held */
+            float t = frontend_clamp01((float)(td5_plat_time_ms() - s_anim_start_ms) / 620.0f);
+            float x = 1424.0f - 1192.0f * t;  /* 1424 → 232 */
+            fe_draw_surface_rect(s_car_preview_surface, x * sx, 124.0f * sy, 408.0f * sx, 280.0f * sy, 0xFFFFFFFF);
+        } else if (s_inner_state != 12 && s_inner_state != 13 && s_car_preview_surface > 0) {
+            /* Static: states 12/13 are pass-through transition ticks — skip to avoid 1-frame flash */
+            fe_draw_surface_rect(s_car_preview_surface, 232.0f * sx, 124.0f * sy, 408.0f * sx, 280.0f * sy, 0xFFFFFFFF);
+        }
     }
 
     if (s_anim_complete) {
