@@ -3144,9 +3144,7 @@ static void frontend_render_high_score_overlay(float sx, float sy) {
     int speed_kph = td5_save_get_speed_units();
     const char *speed_suffix = speed_kph ? "KPH" : "MPH";
 
-    /* Panel geometry (matches original 0x208 x 0x90 surface at center) */
-    float panel_w = 520.0f * sx;
-    float panel_h = 144.0f * sy;
+    /* Panel geometry: 0x208 x 0x90 surface blitted at (115, 177) in 640x480 */
     float panel_x = 115.0f * sx;
     float panel_y = 177.0f * sy;
 
