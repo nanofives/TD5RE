@@ -257,11 +257,16 @@ int td5_plat_window_create(const char *title, const TD5_DisplayMode *mode)
         DWORD style;
         RECT wr;
 
+        HICON hIcon = LoadIconA(GetModuleHandleA(NULL), MAKEINTRESOURCE(1));
+        if (!hIcon) hIcon = LoadIconA(NULL, IDI_APPLICATION);
+
         ZeroMemory(&wc, sizeof(wc));
         wc.cbSize        = sizeof(wc);
         wc.style         = CS_HREDRAW | CS_VREDRAW;
         wc.lpfnWndProc   = TD5_WndProc;
         wc.hInstance      = GetModuleHandleA(NULL);
+        wc.hIcon          = hIcon;
+        wc.hIconSm        = hIcon;
         wc.hCursor        = LoadCursor(NULL, IDC_ARROW);
         wc.hbrBackground  = (HBRUSH)GetStockObject(BLACK_BRUSH);
         wc.lpszClassName  = "TD5RE_Window";
@@ -283,6 +288,10 @@ int td5_plat_window_create(const char *title, const TD5_DisplayMode *mode)
             NULL, NULL, GetModuleHandleA(NULL), NULL);
 
         if (!s_hwnd) return 0;
+        if (hIcon) {
+            SendMessageA(s_hwnd, WM_SETICON, ICON_BIG,   (LPARAM)hIcon);
+            SendMessageA(s_hwnd, WM_SETICON, ICON_SMALL, (LPARAM)hIcon);
+        }
         ShowCursor(FALSE);
         SetCursor(NULL);
         s_window_w = w;
