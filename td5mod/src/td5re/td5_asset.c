@@ -1472,8 +1472,11 @@ int td5_asset_load_level(int track_index)
     void *left_data = NULL;
     void *right_data = NULL;
     void *models_data = NULL;
+    void *levelinf_data = NULL;
     const char *checkpoint_name = "CHECKPT.NUM";
     const char *levelinf_name = "LEVELINF.DAT";
+
+    extern uint8_t *g_track_environment_config; /* 0x4AEE20 */
 
     /*
      * The reverse direction flag would come from the game state.
@@ -1513,24 +1516,35 @@ int td5_asset_load_level(int track_index)
     }
 
     {
+        static const char *s_levelinf_names[1] = { "LEVELINF.DAT" };
+        free(g_track_environment_config);
+        g_track_environment_config = NULL;
+        levelinf_data = load_first_available_level_entry(track_index, s_levelinf_names, 1,
+                                                         &levelinf_sz, NULL, 0);
+        if (levelinf_data && levelinf_sz >= 4) {
+            int32_t p2p_flag;
+            memcpy(&p2p_flag, (uint8_t *)levelinf_data, sizeof(int32_t));
+            g_td5.track_type = (p2p_flag == 1) ? TD5_TRACK_POINT_TO_POINT : TD5_TRACK_CIRCUIT;
+            g_track_environment_config = (uint8_t *)levelinf_data;
+            levelinf_data = NULL; /* ownership transferred; do not free */
+            TD5_LOG_I(LOG_TAG, "LEVELINF.DAT loaded: track_type=%d (p2p_flag=%d)",
+                      g_td5.track_type, p2p_flag);
+        } else {
+            TD5_LOG_W(LOG_TAG, "missing or short %s in %s, defaulting to circuit", levelinf_name, zip_path);
+            g_td5.track_type = TD5_TRACK_CIRCUIT;
+            free(levelinf_data);
+            levelinf_data = NULL;
+        }
+    }
+    {
         char checkpoint_path[256];
-        char levelinf_path[256];
         td5_asset_build_level_loose_path(track_index, checkpoint_name,
                                          checkpoint_path, sizeof(checkpoint_path));
-        td5_asset_build_level_loose_path(track_index, levelinf_name,
-                                         levelinf_path, sizeof(levelinf_path));
         checkpoint_sz = td5_asset_get_entry_size_from_path(checkpoint_path, zip_path);
         if (checkpoint_sz < 0)
             checkpoint_sz = td5_asset_get_entry_size_from_path(checkpoint_name, zip_path);
-        levelinf_sz = td5_asset_get_entry_size_from_path(levelinf_path, zip_path);
-        if (levelinf_sz < 0)
-            levelinf_sz = td5_asset_get_entry_size_from_path(levelinf_name, zip_path);
-    }
-    if (checkpoint_sz < 0) {
-        TD5_LOG_W(LOG_TAG, "missing optional entry: %s in %s", checkpoint_name, zip_path);
-    }
-    if (levelinf_sz < 0) {
-        TD5_LOG_W(LOG_TAG, "missing optional entry: %s in %s", levelinf_name, zip_path);
+        if (checkpoint_sz < 0)
+            TD5_LOG_W(LOG_TAG, "missing optional entry: %s in %s", checkpoint_name, zip_path);
     }
 
     TD5_LOG_I(LOG_TAG, "level load complete: %s (strip=%d left=%d right=%d models=%d checkpoint=%d levelinf=%d)",
