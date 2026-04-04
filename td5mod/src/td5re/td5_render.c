@@ -83,9 +83,9 @@ extern uint32_t g_tick_counter;
 #define BACKFACE_THRESHOLD  0.03662f
 
 /** Fog defaults (from M2DX analysis) */
-#define FOG_START_DEFAULT   0.50f
-#define FOG_END_DEFAULT     0.95f
-#define FOG_DENSITY_DEFAULT 0.50f
+#define FOG_START_DEFAULT   0.60f
+#define FOG_END_DEFAULT     1.00f
+#define FOG_DENSITY_DEFAULT 0.40f
 
 /* ========================================================================
  * Render Transform (3x4 matrix, 8-byte aligned)
@@ -1414,7 +1414,20 @@ void td5_render_actors_for_view(int view_index)
 
             td5_track_apply_segment_lighting(actor, view_index);
 
-            mat3x3_mul(s_camera_basis, actor->rotation_matrix.m, view_rot.m);
+            /* The original binary's rotation matrix (FUN_0042e1e0) includes a
+             * built-in Rx(90°) coordinate conversion (identity = [1,0,0;
+             * 0,0,-1; 0,1,0]).  The physics uses standard identity to keep
+             * dependent code simple.  Apply the conversion here for rendering
+             * only: multiply actor_rot * Rx(90°) before the camera multiply.
+             * Rx(90°) swaps columns 1↔2 with sign flip on column 2. */
+            {
+                const float *am = actor->rotation_matrix.m;
+                float conv[9];
+                conv[0] = am[0];  conv[1] = am[2];  conv[2] = -am[1];
+                conv[3] = am[3];  conv[4] = am[5];  conv[5] = -am[4];
+                conv[6] = am[6];  conv[7] = am[8];  conv[8] = -am[7];
+                mat3x3_mul(s_camera_basis, conv, view_rot.m);
+            }
             td5_render_load_rotation(&view_rot);
 
             render_pos.x = actor->render_pos.x;
