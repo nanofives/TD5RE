@@ -583,6 +583,119 @@ void td5_hud_init_font_atlas(void)
         }
         DeleteDC(hdc_mem);
 
+        /* SPEEDOFONT: digits 0-9 at atlas (96,160) 160×32 — 16px wide × 32px tall each.
+         * Speed digit UVs are selected as: u = atlas_x + digit * 16. */
+        {
+            TD5_AtlasEntry *sf_entry = td5_asset_find_atlas_entry(NULL, "SPEEDOFONT");
+            if (sf_entry && sf_entry->width > 0) {
+                BITMAPINFO sf_bmi;
+                memset(&sf_bmi, 0, sizeof(sf_bmi));
+                sf_bmi.bmiHeader.biSize        = sizeof(BITMAPINFOHEADER);
+                sf_bmi.bmiHeader.biWidth       = 160;
+                sf_bmi.bmiHeader.biHeight      = -32;
+                sf_bmi.bmiHeader.biPlanes      = 1;
+                sf_bmi.bmiHeader.biBitCount    = 32;
+                sf_bmi.bmiHeader.biCompression = BI_RGB;
+                void *sf_bits = NULL;
+                HDC   sf_hdc  = CreateCompatibleDC(NULL);
+                HBITMAP sf_bmp = CreateDIBSection(sf_hdc, &sf_bmi, DIB_RGB_COLORS,
+                                                  &sf_bits, NULL, 0);
+                if (sf_bmp && sf_bits) {
+                    HBITMAP sf_old = (HBITMAP)SelectObject(sf_hdc, sf_bmp);
+                    RECT sf_rc = {0, 0, 160, 32};
+                    FillRect(sf_hdc, &sf_rc, (HBRUSH)GetStockObject(BLACK_BRUSH));
+                    /* Bold proportional font scaled to fit 16×32 cells */
+                    HFONT sf_font = CreateFontA(-22, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
+                        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                        NONANTIALIASED_QUALITY, FIXED_PITCH | FF_DONTCARE, "Courier New");
+                    if (!sf_font) sf_font = (HFONT)GetStockObject(ANSI_FIXED_FONT);
+                    HFONT sf_oldf = (HFONT)SelectObject(sf_hdc, sf_font);
+                    SetBkMode(sf_hdc, TRANSPARENT);
+                    SetTextColor(sf_hdc, RGB(255, 255, 255));
+                    for (int d = 0; d < 10; d++) {
+                        char ch[2] = {(char)('0' + d), '\0'};
+                        TextOutA(sf_hdc, d * 16 + 2, 4, ch, 1);
+                    }
+                    GdiFlush();
+                    SelectObject(sf_hdc, sf_oldf);
+                    DeleteObject(sf_font);
+                    const uint8_t *sf_src = (const uint8_t *)sf_bits;
+                    int sf_ay = sf_entry->atlas_y;
+                    int sf_ax = sf_entry->atlas_x;
+                    for (int ry = 0; ry < 32; ry++) {
+                        for (int rx2 = 0; rx2 < 160; rx2++) {
+                            int si = (ry * 160 + rx2) * 4;
+                            uint8_t b = sf_src[si], g = sf_src[si+1], r = sf_src[si+2];
+                            uint8_t al = (uint8_t)((r*77u + g*150u + b*29u) >> 8);
+                            int di = ((sf_ay + ry) * 256 + sf_ax + rx2) * 4;
+                            s_font_page_buf[di+0] = 0xFF;
+                            s_font_page_buf[di+1] = 0xFF;
+                            s_font_page_buf[di+2] = 0xFF;
+                            s_font_page_buf[di+3] = al;
+                        }
+                    }
+                    SelectObject(sf_hdc, sf_old);
+                    DeleteObject(sf_bmp);
+                }
+                DeleteDC(sf_hdc);
+            }
+        }
+
+        /* GEARNUMBERS: labels N,1-5,R,_ at atlas (128,128) 128×16 — 16px per slot.
+         * Gear UV: u = atlas_x + gear_index * 16. */
+        {
+            TD5_AtlasEntry *gn_entry = td5_asset_find_atlas_entry(NULL, "GEARNUMBERS");
+            if (gn_entry && gn_entry->width > 0) {
+                static const char k_gear_chars[8] = {'N','1','2','3','4','5','R',' '};
+                BITMAPINFO gn_bmi;
+                memset(&gn_bmi, 0, sizeof(gn_bmi));
+                gn_bmi.bmiHeader.biSize        = sizeof(BITMAPINFOHEADER);
+                gn_bmi.bmiHeader.biWidth       = 128;
+                gn_bmi.bmiHeader.biHeight      = -16;
+                gn_bmi.bmiHeader.biPlanes      = 1;
+                gn_bmi.bmiHeader.biBitCount    = 32;
+                gn_bmi.bmiHeader.biCompression = BI_RGB;
+                void *gn_bits = NULL;
+                HDC   gn_hdc  = CreateCompatibleDC(NULL);
+                HBITMAP gn_bmp = CreateDIBSection(gn_hdc, &gn_bmi, DIB_RGB_COLORS,
+                                                  &gn_bits, NULL, 0);
+                if (gn_bmp && gn_bits) {
+                    HBITMAP gn_old = (HBITMAP)SelectObject(gn_hdc, gn_bmp);
+                    RECT gn_rc = {0, 0, 128, 16};
+                    FillRect(gn_hdc, &gn_rc, (HBRUSH)GetStockObject(BLACK_BRUSH));
+                    HFONT gn_font = (HFONT)GetStockObject(SYSTEM_FIXED_FONT);
+                    HFONT gn_oldf = (HFONT)SelectObject(gn_hdc, gn_font);
+                    SetBkMode(gn_hdc, TRANSPARENT);
+                    SetTextColor(gn_hdc, RGB(255, 255, 255));
+                    for (int gi = 0; gi < 8; gi++) {
+                        if (k_gear_chars[gi] == ' ') continue;
+                        char ch[2] = {k_gear_chars[gi], '\0'};
+                        TextOutA(gn_hdc, gi * 16 + 4, 2, ch, 1);
+                    }
+                    GdiFlush();
+                    SelectObject(gn_hdc, gn_oldf);
+                    const uint8_t *gn_src = (const uint8_t *)gn_bits;
+                    int gn_ay = gn_entry->atlas_y;
+                    int gn_ax = gn_entry->atlas_x;
+                    for (int gy = 0; gy < 16; gy++) {
+                        for (int gx = 0; gx < 128; gx++) {
+                            int si = (gy * 128 + gx) * 4;
+                            uint8_t b = gn_src[si], g = gn_src[si+1], r = gn_src[si+2];
+                            uint8_t al = (uint8_t)((r*77u + g*150u + b*29u) >> 8);
+                            int di = ((gn_ay + gy) * 256 + gn_ax + gx) * 4;
+                            s_font_page_buf[di+0] = 0xFF;
+                            s_font_page_buf[di+1] = 0xFF;
+                            s_font_page_buf[di+2] = 0xFF;
+                            s_font_page_buf[di+3] = al;
+                        }
+                    }
+                    SelectObject(gn_hdc, gn_old);
+                    DeleteObject(gn_bmp);
+                }
+                DeleteDC(gn_hdc);
+            }
+        }
+
         td5_plat_render_upload_texture(font_entry->texture_page,
                                        s_font_page_buf, 256, 256, 2);
     }
