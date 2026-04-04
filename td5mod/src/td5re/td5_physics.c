@@ -178,28 +178,45 @@ static inline int16_t *get_cardef(TD5_Actor *a)
 
 int td5_physics_init(void)
 {
-    /* Initialize surface tables with sensible defaults.
-     * In the final build these are loaded from binary data. */
-    for (int i = 0; i < 32; i++) {
-        s_surface_friction[i] = 0x48; /* moderate grip */
-        s_surface_grip[i] = 0x08;     /* small drag */
+    /* Surface grip coefficients from DAT_004748C0 (short[32]).
+     * NOTE: s_surface_friction is used for grip calc at line ~361,
+     * despite the misleading variable name. Values from original binary. */
+    {
+        static const int16_t k_grip_004748C0[16] = {
+            0x0100, 0x0100, 0x00DC, 0x00F0, 0x00FC, 0x00C0, 0x00B4, 0x0100,
+            0x0100, 0x0100, 0x00C8, 0x0100, 0x0100, 0x0100, 0x0100, 0x0100
+        };
+        for (int i = 0; i < 16; i++)
+            s_surface_friction[i] = k_grip_004748C0[i];
+        for (int i = 16; i < 32; i++)
+            s_surface_friction[i] = 0x0100;
     }
-    /* Dry asphalt: high grip, low drag */
-    s_surface_friction[1] = 0x50;
-    s_surface_grip[1] = 0x04;
-    /* Wet asphalt: lower grip */
-    s_surface_friction[2] = 0x38;
-    s_surface_grip[2] = 0x0C;
-    /* Dirt: low grip, high drag */
-    s_surface_friction[3] = 0x30;
-    s_surface_grip[3] = 0x14;
-    /* Gravel */
-    s_surface_friction[4] = 0x28;
-    s_surface_grip[4] = 0x18;
 
-    /* Gear torque multipliers (per-gear shift kick scaling) */
-    for (int i = 0; i < 16; i++)
-        s_gear_torque[i] = (int16_t)(0x100 - i * 0x10);
+    /* Surface drag coefficients from DAT_00474900 (short[32]).
+     * NOTE: s_surface_grip is used for drag/damping at line ~393. */
+    {
+        static const int16_t k_drag_00474900[16] = {
+            0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0002, 0x0000, 0x0000,
+            0x0000, 0x0000, 0x0008, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000
+        };
+        for (int i = 0; i < 16; i++)
+            s_surface_grip[i] = k_drag_00474900[i];
+        for (int i = 16; i < 32; i++)
+            s_surface_grip[i] = 0;
+    }
+
+    /* Gear torque multipliers from DAT_00467394 (dword[8] -> int16_t[16]).
+     * Original: {0, 0, 256, 192, 128, 64, 32, 16} indexed by gear number.
+     * Entries [0]=reverse and [1]=neutral produce zero kick. */
+    {
+        static const int16_t k_gear_torque[8] = {
+            0, 0, 256, 192, 128, 64, 32, 16
+        };
+        for (int i = 0; i < 8; i++)
+            s_gear_torque[i] = k_gear_torque[i];
+        for (int i = 8; i < 16; i++)
+            s_gear_torque[i] = 0;
+    }
 
     for (int i = 0; i < 5; ++i) {
         TD5_LOG_I(LOG_TAG, "Surface table[%d]: friction=%d grip=%d",
@@ -372,7 +389,23 @@ void td5_physics_update_player(TD5_Actor *actor)
         grip[3] = (grip[3] * hb_mod) >> 8;
     }
 
-    /* --- 5. Resolve body-frame velocities (cos/sin of heading) --- */
+    /* --- 5. Velocity damping in WORLD frame (before body decomposition) ---
+     * Original at 0x404030: applies damping to linear_velocity_x/z
+     * BEFORE cos/sin heading decomposition into body-frame. */
+    {
+        int32_t surf_drag = (int32_t)s_surface_grip[surface_center & 0x1F];
+        int32_t damp_coeff;
+        /* Original uses 0x6C for low-throttle/low-gear, 0x6A for high-gear */
+        if (actor->frame_counter < 0x20 || actor->current_gear < 2)
+            damp_coeff = surf_drag * 256 + (int32_t)PHYS_S(actor, 0x6C);
+        else
+            damp_coeff = surf_drag * 256 + (int32_t)PHYS_S(actor, 0x6A);
+
+        actor->linear_velocity_x -= ((actor->linear_velocity_x >> 8) * damp_coeff) >> 12;
+        actor->linear_velocity_z -= ((actor->linear_velocity_z >> 8) * damp_coeff) >> 12;
+    }
+
+    /* --- 6. Resolve body-frame velocities (cos/sin of heading) --- */
     int32_t heading = (actor->euler_accum.yaw >> 8) & 0xFFF;
     int32_t cos_h = cos_fixed12(heading);
     int32_t sin_h = sin_fixed12(heading);
@@ -388,30 +421,35 @@ void td5_physics_update_player(TD5_Actor *actor)
     actor->longitudinal_speed = v_long;
     actor->lateral_speed = v_lat;
 
-    /* --- 6. Velocity damping (surface-dependent) --- */
-    {
-        int32_t surf_drag = (int32_t)s_surface_grip[surface_center & 0x1F];
-        int32_t damp_coeff;
-        if (actor->frame_counter < 0x20 || actor->current_gear < 2)
-            damp_coeff = surf_drag * 256 + (int32_t)PHYS_S(actor, 0x6A);
-        else
-            damp_coeff = surf_drag * 256 + (int32_t)PHYS_S(actor, 0x6C);
-
-        v_long -= ((v_long >> 8) * damp_coeff) >> 12;
-        v_lat  -= ((v_lat >> 8) * damp_coeff) >> 12;
+    /* --- 7/8. Gear selection: mutually exclusive paths (original 0x404030).
+     * field_0x378 (throttle_input_active) selects between:
+     *   0 -> ApplyReverseGearThrottleSign only
+     *   !0 -> UpdateAutomaticGearSelection only */
+    if (actor->throttle_input_active == 0) {
+        td5_physics_reverse_throttle_sign(actor);
+    } else {
+        td5_physics_auto_gear_select(actor);
     }
-
-    /* --- 7. ApplyReverseGearThrottleSign --- */
-    td5_physics_reverse_throttle_sign(actor);
-
-    /* --- 8. UpdateAutomaticGearSelection --- */
-    td5_physics_auto_gear_select(actor);
 
     /* --- 9. UpdateEngineSpeedAccumulator --- */
     td5_physics_update_engine_speed(actor);
 
-    /* --- 10. ComputeDriveTorqueFromGearCurve --- */
-    int32_t drive_torque = td5_physics_compute_drive_torque(actor);
+    /* --- 10. ComputeDriveTorqueFromGearCurve ---
+     * Original only computes drive torque when grounded (surface_contact_flags != 0).
+     * When airborne, no torque is applied. */
+    int32_t drive_torque = 0;
+    if (actor->surface_contact_flags != 0) {
+        drive_torque = td5_physics_compute_drive_torque(actor);
+    }
+
+    if (actor->slot_index == 0 && (actor->frame_counter % 120u) == 0u) {
+        TD5_LOG_I(LOG_TAG,
+                  "Player phys: gear=%d rpm=%d torque=%d v_long=%d v_lat=%d "
+                  "throttle_active=%d surface_contact=0x%X",
+                  actor->current_gear, actor->engine_speed_accum, drive_torque,
+                  v_long, v_lat, actor->throttle_input_active,
+                  actor->surface_contact_flags);
+    }
 
     /* --- 11. Distribute torque by drivetrain (FWD/RWD/AWD) --- */
     int32_t wheel_drive[4] = {0, 0, 0, 0};
@@ -1975,9 +2013,10 @@ int32_t td5_physics_compute_drive_torque(TD5_Actor *actor)
     int32_t frac = rpm & 0x1FF;
     int32_t torque = t0 + (((t1 - t0) * frac) >> 9);
 
-    /* Scale by throttle and gear ratio */
+    /* Scale by throttle and gear ratio.
+     * Original preserves throttle sign (actor+0x33E) — negative in reverse
+     * produces negative torque, which is correct for backward motion. */
     int32_t throttle = (int32_t)actor->encounter_steering_cmd;
-    if (throttle < 0) throttle = -throttle; /* abs for torque magnitude */
     torque = (torque * throttle) >> 8;
 
     int32_t gear_ratio = (int32_t)PHYS_S(actor, 0x2E + gear * 2);
