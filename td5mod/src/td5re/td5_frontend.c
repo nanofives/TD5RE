@@ -1769,17 +1769,22 @@ static void frontend_poll_input(void) {
         s_mouse_click_latched = 0;
     }
 
-    /* Mouse hover: track hovered button but do NOT update selection.
-     * Original UpdateFrontendDisplayModeSelection (0x426580) uses a separate
-     * hover index (DAT_00498700) distinct from the selection index.
-     * First click selects, second click confirms. */
+    /* Mouse hover: when mouse moves over a button, select it immediately.
+     * Original UpdateFrontendDisplayModeSelection (0x426580) updates the
+     * selection index on hover so buttons highlight as the cursor passes over
+     * them.  A single click then confirms the already-selected button. */
     if (mouse_moved) {
         s_mouse_hover_button = -1;
         for (int i = 0; i < FE_MAX_BUTTONS; i++) {
-            if (!s_buttons[i].active) continue;
+            if (!s_buttons[i].active || s_buttons[i].disabled) continue;
             if (s_mouse_x >= s_buttons[i].x && s_mouse_x < s_buttons[i].x + s_buttons[i].w &&
                 s_mouse_y >= s_buttons[i].y && s_mouse_y < s_buttons[i].y + s_buttons[i].h) {
                 s_mouse_hover_button = i;
+                if (i != s_selected_button) {
+                    s_selected_button = i;
+                    s_selection_from_mouse = 1;
+                    frontend_play_sfx(2);
+                }
                 break;
             }
         }
@@ -3306,16 +3311,11 @@ static void frontend_render_car_selection_preview(float sx, float sy) {
     /* Car preview area: solid dark blue fill matching CarSelBar1 color (R=0,G=0,B=92).
      * Original: FillPrimaryFrontendRect(0x5c, x, y, 0x198, 300) at states 10 and 14
      * (0x40DFC0). 0x5c = RGB888 B=92 → same dark blue as CarSelBar1 dominant pixel.
-     * In the source port we clear every frame, so this must be redrawn each frame.
-     * Use TRANSLUCENT preset (no depth test) to avoid depth-buffer rejection from
-     * the full-screen background draw that precedes this in the render loop. */
-    {
-        int saved_page = s_white_tex_page;
-        td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
-        td5_plat_render_bind_texture(saved_page);
-        fe_draw_quad(232.0f * sx, 96.0f * sy, 408.0f * sx, 336.0f * sy, 0xFF00005C, saved_page, 0, 0, 1, 1);
-        td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
-    }
+     * Rect matches car preview surface: 408x300 starting at (232, 96).
+     * In the source port we clear every frame, so this must be redrawn each frame. */
+    td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
+    fe_draw_quad(232.0f * sx, 96.0f * sy, 408.0f * sx, 300.0f * sy, 0xFF00005C,
+                 s_white_tex_page, 0, 0, 1, 1);
 
     if (s_inner_state == 15) {
         /* Stats sub-screen: car image at 35% opacity over the blue panel background,
@@ -3359,8 +3359,8 @@ static void frontend_render_track_selection_preview(float sx, float sy) {
     const char *comma;
     if (!s_anim_complete) return;
     frontend_get_track_display_name(s_selected_track, 0, track_name, sizeof(track_name));
-    /* Original splits at comma: city on line 1 (y=113), country on line 2 (y=113+20)
-     * RE: 0x00427CD0-0x00427D56 — split at 0x2C, draw at y=0 and y=0x20 on text surface */
+    /* Original: text surface 296x184 at (344,81), city at surf y=0, country at surf y=0x20=32
+     * RE: 0x00427CD0-0x00427D56 — split at 0x2C; blit top 64 rows to screen (344,81) */
     comma = strchr(track_name, ',');
     if (comma) {
         int city_len = (int)(comma - track_name);
@@ -3370,10 +3370,10 @@ static void frontend_render_track_selection_preview(float sx, float sy) {
         /* skip comma + space */
         strncpy(country, comma + 2, sizeof(country) - 1);
         country[sizeof(country) - 1] = '\0';
-        frontend_draw_value_text(sx, sy, 412, 113, city, 0xFFFFFFFF);
-        frontend_draw_value_text(sx, sy, 412, 133, country, 0xFFFFFFFF);
+        frontend_draw_value_text(sx, sy, 344, 81, city, 0xFFFFFFFF);
+        frontend_draw_value_text(sx, sy, 344, 113, country, 0xFFFFFFFF);
     } else {
-        frontend_draw_value_text(sx, sy, 412, 113, track_name, 0xFFFFFFFF);
+        frontend_draw_value_text(sx, sy, 344, 81, track_name, 0xFFFFFFFF);
     }
     /* Track preview: 152x224 portrait, right of buttons.
      * x=EDI+0x12E=412, y=ESI+0x36=135 (640x480) */
@@ -6176,10 +6176,11 @@ static void Screen_CarSelection(void) {
                     s_selected_game_type != 8 && s_selected_game_type != 5) {
                     frontend_play_sfx(10); /* rejection */
                 } else {
-                    /* Accept selection */
+                    /* Accept selection → forward to track selection */
                     if (s_selected_game_type == 5) {
                         s_masters_roster_flags[s_selected_car] = 2; /* taken */
                     }
+                    s_return_screen = TD5_SCREEN_TRACK_SELECTION;
                     s_inner_state = 0x14; /* slide-out prep */
                 }
             }
@@ -6337,8 +6338,8 @@ static void Screen_CarSelection(void) {
             return;
         }
 
-        /* Single-player: proceed to track selection */
-        td5_frontend_set_screen(TD5_SCREEN_TRACK_SELECTION);
+        /* Single-player: OK → track selection, Back → return screen */
+        td5_frontend_set_screen((TD5_ScreenIndex)s_return_screen);
     }
         break;
 
@@ -6409,8 +6410,6 @@ static void Screen_TrackSelection(void) {
         if (s_input_ready) {
             int delta = frontend_option_delta();
             int selected_button = (s_button_index >= 0) ? s_button_index : s_selected_button;
-            TD5_LOG_I(LOG_TAG, "TrackSel input: delta=%d sel_btn=%d btn_idx=%d arrow=0x%x track=%d",
-                      delta, selected_button, s_button_index, s_arrow_input, s_selected_track);
             if (selected_button == 0 && delta != 0) {
                 /* Cycle track index, skipping tracks whose level zips are absent */
                 if (s_network_active) {
