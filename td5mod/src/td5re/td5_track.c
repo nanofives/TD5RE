@@ -2607,6 +2607,21 @@ int td5_track_parse_models_dat(const void *data, size_t size)
 
             /* Relocate commands/vertices/normals offsets within mesh */
             td5_track_prepare_mesh_resource(mesh);
+
+            /* Fix vertex UV layout: MODELS.DAT vertices have a 4-byte specular
+             * field at +0x1C that the shared TD5_MeshVertex struct doesn't have.
+             * Shift tex_u/tex_v from +0x20/+0x24 to +0x1C/+0x20 in-place so the
+             * struct reads correctly.  This overwrites the specular field (unused
+             * in the source port's D3D11 pipeline). */
+            if (mesh->vertices_offset != 0 && mesh->total_vertex_count > 0) {
+                uint8_t *vbase = (uint8_t *)(uintptr_t)mesh->vertices_offset;
+                for (int32_t vi = 0; vi < mesh->total_vertex_count; vi++) {
+                    uint8_t *v = vbase + vi * 0x2C;
+                    /* Copy tex_u from +0x20 to +0x1C, tex_v from +0x24 to +0x20 */
+                    *(uint32_t *)(v + 0x1C) = *(uint32_t *)(v + 0x20);
+                    *(uint32_t *)(v + 0x20) = *(uint32_t *)(v + 0x24);
+                }
+            }
         }
     }
 
