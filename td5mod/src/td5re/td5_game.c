@@ -829,7 +829,7 @@ int td5_game_run_race_frame(void) {
     {
         static uint32_t s_frame_diag_ctr = 0;
         if ((s_frame_diag_ctr++ % 60u) == 0u) {
-            TD5_LOG_D(LOG_TAG, "race_frame: accum=0x%X paused=%d pause_menu=%d trans=%d",
+            TD5_LOG_I(LOG_TAG, "race_frame: accum=0x%X paused=%d pause_menu=%d trans=%d",
                       g_td5.sim_time_accumulator, g_td5.paused,
                       s_pause_menu_active, g_cameraTransitionActive);
         }
@@ -854,7 +854,7 @@ int td5_game_run_race_frame(void) {
             s_pause_menu_cursor = 0;
         }
         if (s_pause_menu_active) {
-            /* Navigation: 5 items (SFX / Music / CD / Continue / Quit) */
+            /* Navigation: 5 selectable items (View / Music / Sound / Continue / Exit) */
             static int s_prev_down = 0, s_prev_up = 0;
             static int s_prev_left = 0, s_prev_right = 0;
             int key_down  = td5_plat_input_key_pressed(0xD0);
@@ -865,17 +865,17 @@ int td5_game_run_race_frame(void) {
             if (key_up    && !s_prev_up)    s_pause_menu_cursor = (s_pause_menu_cursor + 4) % 5;
             s_prev_down = key_down; s_prev_up = key_up;
 
-            /* Left/right adjusts volume for rows 0-2 */
+            /* Left/right adjusts sliders for rows 0-2 (View / Music / Sound) */
             if (s_pause_menu_cursor < 3) {
                 if (key_right && !s_prev_right) {
-                    if (s_pause_menu_cursor == 0)      td5_save_set_sfx_volume(td5_save_get_sfx_volume() + 5);
+                    if (s_pause_menu_cursor == 0)      { /* VIEW: cycle view distance up */ }
                     else if (s_pause_menu_cursor == 1) td5_save_set_music_volume(td5_save_get_music_volume() + 5);
-                    else                               td5_save_set_music_volume(td5_save_get_music_volume() + 5); /* CD ~ music */
+                    else                               td5_save_set_sfx_volume(td5_save_get_sfx_volume() + 5);
                 }
                 if (key_left && !s_prev_left) {
-                    if (s_pause_menu_cursor == 0)      td5_save_set_sfx_volume(td5_save_get_sfx_volume() - 5);
+                    if (s_pause_menu_cursor == 0)      { /* VIEW: cycle view distance down */ }
                     else if (s_pause_menu_cursor == 1) td5_save_set_music_volume(td5_save_get_music_volume() - 5);
-                    else                               td5_save_set_music_volume(td5_save_get_music_volume() - 5);
+                    else                               td5_save_set_sfx_volume(td5_save_get_sfx_volume() - 5);
                 }
             }
             s_prev_left = key_left; s_prev_right = key_right;
@@ -886,7 +886,7 @@ int td5_game_run_race_frame(void) {
                     /* Continue */
                     s_pause_menu_active = 0;
                 } else if (s_pause_menu_cursor == 4) {
-                    /* Quit race */
+                    /* Exit race */
                     s_pause_menu_active = 0;
                     td5_game_release_race_resources();
                     td5_game_set_state(TD5_GAMESTATE_MENU);
@@ -898,10 +898,12 @@ int td5_game_run_race_frame(void) {
                 s_pause_menu_active = 0;
             }
 
-            /* Update graphical overlay (SELBOX + sliders) */
-            float sfx_frac   = (float)td5_save_get_sfx_volume()   / 100.0f;
+            /* Update graphical overlay (SELBOX + sliders).
+             * Row 0=View (stub: 0.5), Row 1=Music, Row 2=Sound */
+            float view_frac  = 0.5f;  /* TODO: implement view distance getter */
             float music_frac = (float)td5_save_get_music_volume()  / 100.0f;
-            td5_hud_update_pause_overlay(s_pause_menu_cursor, sfx_frac, music_frac, music_frac);
+            float sfx_frac   = (float)td5_save_get_sfx_volume()   / 100.0f;
+            td5_hud_update_pause_overlay(s_pause_menu_cursor, view_frac, music_frac, sfx_frac);
 
             g_td5.sim_time_accumulator -= TD5_TICK_ACCUMULATOR_ONE;
             ticks_this_frame++;
@@ -1050,21 +1052,20 @@ int td5_game_run_race_frame(void) {
     /* Pause overlay: draw panel first, then queue labels on top */
     if (s_pause_menu_active) {
         td5_hud_draw_pause_overlay();
-        /* Queue text AFTER draw_pause_overlay so flush_text renders it on top */
+        /* Queue text AFTER draw_pause_overlay so flush_text renders it on top.
+         * 6 rows from binary string table: PAUSED(center), VIEW(left),
+         * MUSIC(left), SOUND(left), CONTINUE(center), EXIT(center).
+         * Row N pixel_y = cy_px - 52 + N*16 (matches PAUSETXT atlas layout). */
         {
             int cx_px = (int)(g_render_width_f * 0.5f);
             int cy_px = (int)(g_render_height_f * 0.5f);
-            /* Row N text pixel_y = cy_px + N*16 - 25 (center of each 16px row) */
-            int lx = cx_px - 120;   /* left-aligned: cx - half_w + 8 */
-            int rx = cx_px + 52;    /* right side for volume value */
-            td5_hud_queue_text(0, lx, cy_px - 25,      0, "SOUND EFFECTS");
-            td5_hud_queue_text(0, lx, cy_px - 25 + 16, 0, "MUSIC");
-            td5_hud_queue_text(0, lx, cy_px - 25 + 32, 0, "CD MUSIC");
-            td5_hud_queue_text(0, cx_px, cy_px - 25 + 48, 1, "CONTINUE");
-            td5_hud_queue_text(0, cx_px, cy_px - 25 + 64, 1, "QUIT");
-            td5_hud_queue_text(0, rx, cy_px - 25,      0, "%d%%", td5_save_get_sfx_volume());
-            td5_hud_queue_text(0, rx, cy_px - 25 + 16, 0, "%d%%", td5_save_get_music_volume());
-            td5_hud_queue_text(0, rx, cy_px - 25 + 32, 0, "%d%%", td5_save_get_music_volume());
+            int lx = cx_px - 124;   /* left-aligned: cx - half_w(128) + 4 */
+            td5_hud_queue_text(0, cx_px, cy_px - 52,      1, "PAUSED");
+            td5_hud_queue_text(0, lx, cy_px - 36,         0, "VIEW");
+            td5_hud_queue_text(0, lx, cy_px - 20,         0, "MUSIC");
+            td5_hud_queue_text(0, lx, cy_px - 4,          0, "SOUND");
+            td5_hud_queue_text(0, cx_px, cy_px + 12,      1, "CONTINUE");
+            td5_hud_queue_text(0, cx_px, cy_px + 28,      1, "EXIT");
         }
     }
 

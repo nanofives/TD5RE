@@ -701,20 +701,36 @@ int32_t g_actor_best_lap        = 0;
 int32_t g_actor_best_race       = 0;
 void   *g_route_data            = NULL;
 
-const int8_t g_pause_glyph_widths[256] = {0};
+/* 0x4660C8: PAUSETXT font glyph widths indexed by ASCII code.
+ * Values are in pixels before the *2/3 scaling applied during rendering. */
+const int8_t g_pause_glyph_widths[256] = {
+    /* 0x00-0x1F: control chars = 0 */
+    [0x00] = 0,
+    /* 0x20 = space */
+    [' '] = 8,
+    /* Uppercase letters (from binary at 0x4660C8) */
+    ['A'] = 19, ['B'] = 15, ['C'] = 15, ['D'] = 17, ['E'] = 13,
+    ['F'] = 13, ['G'] = 17, ['H'] = 17, ['I'] = 8,  ['J'] = 10,
+    ['K'] = 18, ['L'] = 13, ['M'] = 23, ['N'] = 17, ['O'] = 20,
+    ['P'] = 16, ['Q'] = 20, ['R'] = 17, ['S'] = 14, ['T'] = 14,
+    ['U'] = 17, ['V'] = 18, ['W'] = 24, ['X'] = 19, ['Y'] = 18,
+    ['Z'] = 15,
+};
 
-/* English audio-options overlay string table.
+/* English pause overlay string table (from binary at 0x4744B8).
  * Layout: alternating {const char *label, (const char *)(intptr_t)alignment}.
- * alignment 1 = left-aligned, 2 = centred.
+ * alignment 0 = left-aligned, 2 = centred.
+ * 6 entries: PAUSED (title), VIEW, MUSIC, SOUND, CONTINUE, EXIT.
  * Accessed as: string = table[string_offset / 4]
  *              align  = *(int *)((uint8_t *)table + string_offset + 4)
  * with string_offset advancing by 8 each row. */
 static const char *s_eng_pause_strings[] = {
-    "SOUND EFFECTS",  (const char *)(intptr_t)1,
-    "MUSIC",          (const char *)(intptr_t)1,
-    "CD MUSIC",       (const char *)(intptr_t)1,
-    "CONTINUE",       (const char *)(intptr_t)2,
-    "QUIT",           (const char *)(intptr_t)2,
+    "PAUSED",     (const char *)(intptr_t)2,   /* row 0: title, centered */
+    "VIEW",       (const char *)(intptr_t)0,   /* row 1: view distance, left */
+    "MUSIC",      (const char *)(intptr_t)0,   /* row 2: music volume, left */
+    "SOUND",      (const char *)(intptr_t)0,   /* row 3: SFX volume, left */
+    "CONTINUE",   (const char *)(intptr_t)2,   /* row 4: resume, centered */
+    "EXIT",       (const char *)(intptr_t)2,   /* row 5: quit race, centered */
     NULL
 };
 const char **g_pause_page_strings[8] = {
