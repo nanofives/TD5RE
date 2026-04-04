@@ -1457,9 +1457,9 @@ void td5_render_actors_for_view(int view_index)
             {
                 const float *am = actor->rotation_matrix.m;
                 float conv[9];
-                conv[0] = am[0]; conv[1] = am[2]; conv[2] = am[1];
-                conv[3] = am[3]; conv[4] = am[5]; conv[5] = am[4];
-                conv[6] = am[6]; conv[7] = am[8]; conv[8] = am[7];
+                conv[0] = am[0]; conv[1] = am[2]; conv[2] = -am[1];
+                conv[3] = am[3]; conv[4] = am[5]; conv[5] = -am[4];
+                conv[6] = am[6]; conv[7] = am[8]; conv[8] = -am[7];
                 mat3x3_mul(s_camera_basis, conv, view_rot.m);
             }
             td5_render_load_rotation(&view_rot);
