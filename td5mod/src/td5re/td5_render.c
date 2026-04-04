@@ -1356,6 +1356,18 @@ void td5_render_actors_for_view(int view_index)
      */
     int rendered_spans = 0;
     int span_count = td5_track_get_span_count();
+
+    /* Apply view distance: effective_frac = view_frac * 0.85 + 0.15
+     * From binary at 0x42BB2E: limits visible track spans.
+     * view_frac=0.0 → 15% of spans, 1.0 → 100%, default 0.65 → ~70%. */
+    {
+        extern float td5_save_get_view_distance(void);
+        float vf = td5_save_get_view_distance();
+        float eff = vf * 0.85f + 0.15f;
+        int max_spans = (int)(eff * (float)span_count);
+        if (max_spans < 1) max_spans = 1;
+        if (max_spans < span_count) span_count = max_spans;
+    }
     int actor_render_count = 0;
     int actor_meshes_submitted = 0;
 

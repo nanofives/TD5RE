@@ -940,12 +940,12 @@ int td5_game_run_race_frame(void) {
                 /* Left/right adjusts sliders for rows 0-2 (View / Music / Sound) */
                 if (s_pause_menu_cursor < 3) {
                     if (key_right && !s_prev_right) {
-                        if (s_pause_menu_cursor == 0)      { /* VIEW: cycle view distance up (TODO) */ }
+                        if (s_pause_menu_cursor == 0)      td5_save_set_view_distance(td5_save_get_view_distance() + 0.02f);
                         else if (s_pause_menu_cursor == 1) td5_save_set_music_volume(td5_save_get_music_volume() + 5);
                         else                               td5_save_set_sfx_volume(td5_save_get_sfx_volume() + 5);
                     }
                     if (key_left && !s_prev_left) {
-                        if (s_pause_menu_cursor == 0)      { /* VIEW: cycle view distance down (TODO) */ }
+                        if (s_pause_menu_cursor == 0)      td5_save_set_view_distance(td5_save_get_view_distance() - 0.02f);
                         else if (s_pause_menu_cursor == 1) td5_save_set_music_volume(td5_save_get_music_volume() - 5);
                         else                               td5_save_set_sfx_volume(td5_save_get_sfx_volume() - 5);
                     }
@@ -975,7 +975,7 @@ int td5_game_run_race_frame(void) {
 
             /* Update graphical overlay (SELBOX + sliders).
              * Row 0=View (stub: 0.5), Row 1=Music, Row 2=Sound */
-            float view_frac  = 0.5f;  /* TODO: implement view distance getter */
+            float view_frac  = td5_save_get_view_distance();
             float music_frac = (float)td5_save_get_music_volume()  / 100.0f;
             float sfx_frac   = (float)td5_save_get_sfx_volume()   / 100.0f;
             td5_hud_update_pause_overlay(s_pause_menu_cursor, view_frac, music_frac, sfx_frac);

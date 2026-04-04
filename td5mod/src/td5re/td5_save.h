@@ -129,5 +129,7 @@ int  td5_save_get_sfx_volume(void);
 void td5_save_set_sfx_volume(int v);
 int  td5_save_get_music_volume(void);
 void td5_save_set_music_volume(int v);
+float td5_save_get_view_distance(void);
+void  td5_save_set_view_distance(float v);
 
 #endif /* TD5_SAVE_H */

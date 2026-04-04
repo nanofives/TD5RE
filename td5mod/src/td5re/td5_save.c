@@ -178,11 +178,14 @@ static uint32_t s_p2_device_desc_backup[8];                   /* 0x4656C0 (read 
 static uint32_t s_sound_mode;                                 /* 0x465FE8 */
 static uint32_t s_sfx_volume;                                 /* 0x465FEC */
 static uint32_t s_music_volume;                               /* 0x465FF0 */
+static float    s_view_distance_frac = 0.65f;                 /* 0x466EA8: runtime only, not persisted */
 
 int td5_save_get_sfx_volume(void)       { return (int)s_sfx_volume; }
 void td5_save_set_sfx_volume(int v)     { if (v < 0) v = 0; if (v > 100) v = 100; s_sfx_volume = (uint32_t)v; }
 int td5_save_get_music_volume(void)     { return (int)s_music_volume; }
 void td5_save_set_music_volume(int v)   { if (v < 0) v = 0; if (v > 100) v = 100; s_music_volume = (uint32_t)v; }
+float td5_save_get_view_distance(void)  { return s_view_distance_frac; }
+void td5_save_set_view_distance(float v) { if (v < 0.0f) v = 0.0f; if (v > 1.0f) v = 1.0f; s_view_distance_frac = v; }
 static int32_t  s_display_mode;                               /* 0x466020 */
 static int32_t  s_fog_enabled;                                /* 0x466024 */
 static int32_t  s_speed_units;                                /* 0x466028 */
