@@ -1799,20 +1799,24 @@ void td5_hud_render_overlays(float dt)
 
             td5_render_build_sprite_quad((int *)&needle_params);
 
-            /* Update gear indicator UV based on current gear.
-             * Original code computed gear_u/gear_v but never applied them;
-             * use mode=2 hud_build_quad to write UV into the pre-positioned quad. */
+            /* Update gear indicator UV.  GEARNUMBERS atlas region is empty in
+             * the original runtime dump; use NUMBERS atlas (5×2 digit grid,
+             * 16px wide × 24px tall per cell) at (0,208) instead. */
             uint8_t gear = actor_gear(actor_slot);
-            float gear_u = (float)gear * 16.0f + (float)s_gearnumbers_atlas->atlas_x;
-            float gear_v = (float)s_gearnumbers_atlas->atlas_y;
-            hud_build_quad(
-                view_base + GEAR_QUAD_OFF,
-                2, s_gearnumbers_atlas->texture_page,
-                0.0f, 0.0f, 0.0f, 0.0f,
-                gear_u + 0.5f, gear_v + 0.5f,
-                gear_u + 15.5f, gear_v + 15.5f,
-                0xFFFFFFFF, HUD_DEPTH
-            );
+            {
+                int gd = (int)gear;
+                if (gd < 0) gd = 0; if (gd > 9) gd = 9;
+                float gu = (float)s_numbers_atlas->atlas_x + (float)(gd % 5) * 16.0f;
+                float gv = (float)s_numbers_atlas->atlas_y + (float)(gd / 5) * 24.0f;
+                hud_build_quad(
+                    view_base + GEAR_QUAD_OFF,
+                    2, s_numbers_atlas->texture_page,
+                    0.0f, 0.0f, 0.0f, 0.0f,
+                    gu + 0.5f, gv + 0.5f,
+                    gu + 15.5f, gv + 23.5f,
+                    0xFFFFFFFF, HUD_DEPTH
+                );
+            }
 
             /* Compute speed value from longitudinal_speed (24.8 fp) for digit display */
             uint8_t *_actor_a = (uint8_t *)actor_ptr(actor_slot);
@@ -1827,20 +1831,19 @@ void td5_hud_render_overlays(float dt)
                 speed_display = (speed_raw * 256 + 389) / 778;  /* KPH */
             }
 
-            /* Build and submit speed digit quads with full position + UV (mode=0).
-             * Using mode=0 instead of mode=2 so we don't depend on init-time
-             * positions which may not have been set if init_layout ran before
-             * the viewport was configured. */
-            float digit_u_base = (float)s_speedofont_atlas->atlas_x;
-            float digit_v_base = (float)s_speedofont_atlas->atlas_y;
-            float digit_w = 16.0f;
+            /* Build and submit speed digit quads using NUMBERS atlas (5×2 grid,
+             * 16px × 24px per digit cell at atlas (0,208) 80×48).
+             * SPEEDOFONT region is empty in both static PNGs and original runtime
+             * dump — the original engine never writes there. */
             float sf_gw = sx * 15.0f;
             float sf_x0 = vl->vp_int_right - sx * 60.0f;
             float sf_y0 = vl->vp_int_bottom - sy * 23.0f - sy * 8.0f;
             float sf_y1 = sf_y0 + sy * 24.0f;
+            float num_ax = (float)s_numbers_atlas->atlas_x;
+            float num_ay = (float)s_numbers_atlas->atlas_y;
+            int   num_pg = s_numbers_atlas->texture_page;
 
             int ones = speed_display % 10;
-            float u_ones = digit_u_base + (float)ones * digit_w + 0.5f;
 
             /* Submit speedo dial */
             hud_submit_quad(view_base + SPEEDO_QUAD_OFF);
@@ -1851,14 +1854,18 @@ void td5_hud_render_overlays(float dt)
             int digit_count = 1;
             int tens = (speed_display % 1000) / 10;
 
+            /* Helper: UV for digit N in the 5×2 NUMBERS grid */
+            #define NUM_U(n) (num_ax + (float)((n) % 5) * 16.0f + 0.5f)
+            #define NUM_V(n) (num_ay + (float)((n) / 5) * 24.0f + 0.5f)
+
             /* Ones digit quad */
             float dx = sf_x0;
             hud_build_quad(
                 view_base + SPEEDFONT_BASE_OFF,
-                0, s_speedofont_atlas->texture_page,
+                0, num_pg,
                 dx, sf_y0, dx + sf_gw, sf_y1,
-                u_ones, digit_v_base + 0.5f,
-                u_ones + 15.5f, digit_v_base + 23.5f,
+                NUM_U(ones), NUM_V(ones),
+                NUM_U(ones) + 15.0f, NUM_V(ones) + 23.0f,
                 0xFFFFFFFF, HUD_DEPTH
             );
             hud_submit_quad(view_base + SPEEDFONT_BASE_OFF);
@@ -1866,14 +1873,14 @@ void td5_hud_render_overlays(float dt)
             /* Tens digit if speed >= 10 */
             if (tens > 0) {
                 digit_count = 2;
-                float u_tens = digit_u_base + (float)(tens % 10) * digit_w + 0.5f;
+                int t = tens % 10;
                 dx = sf_x0 + 1.0f * (sf_gw + 1.0f);
                 hud_build_quad(
                     view_base + SPEEDFONT_BASE_OFF + TD5_HUD_GLYPH_QUAD_SIZE,
-                    0, s_speedofont_atlas->texture_page,
+                    0, num_pg,
                     dx, sf_y0, dx + sf_gw, sf_y1,
-                    u_tens, digit_v_base + 0.5f,
-                    u_tens + 15.5f, digit_v_base + 23.5f,
+                    NUM_U(t), NUM_V(t),
+                    NUM_U(t) + 15.0f, NUM_V(t) + 23.0f,
                     0xFFFFFFFF, HUD_DEPTH
                 );
                 hud_submit_quad(view_base + SPEEDFONT_BASE_OFF + TD5_HUD_GLYPH_QUAD_SIZE);
@@ -1882,19 +1889,21 @@ void td5_hud_render_overlays(float dt)
                 int hundreds = tens / 10;
                 if (hundreds > 0) {
                     digit_count = 3;
-                    float u_hund = digit_u_base + (float)hundreds * digit_w + 0.5f;
                     dx = sf_x0 + 2.0f * (sf_gw + 1.0f);
                     hud_build_quad(
                         view_base + SPEEDFONT_BASE_OFF + 2 * TD5_HUD_GLYPH_QUAD_SIZE,
-                        0, s_speedofont_atlas->texture_page,
+                        0, num_pg,
                         dx, sf_y0, dx + sf_gw, sf_y1,
-                        u_hund, digit_v_base + 0.5f,
-                        u_hund + 15.5f, digit_v_base + 23.5f,
+                        NUM_U(hundreds), NUM_V(hundreds),
+                        NUM_U(hundreds) + 15.0f, NUM_V(hundreds) + 23.0f,
                         0xFFFFFFFF, HUD_DEPTH
                     );
                     hud_submit_quad(view_base + SPEEDFONT_BASE_OFF + 2 * TD5_HUD_GLYPH_QUAD_SIZE);
                 }
             }
+
+            #undef NUM_U
+            #undef NUM_V
 
             /* Submit gear indicator */
             hud_submit_quad(view_base + GEAR_QUAD_OFF);
