@@ -106,6 +106,15 @@ const TD5_NpcGroup *td5_save_get_npc_group(int group_index);
 /** Returns the speed-units setting (0=MPH, 1=KPH). */
 int td5_save_get_speed_units(void);
 
+/** Set the speed-units setting (0=MPH, 1=KPH). */
+void td5_save_set_speed_units(int units);
+
+/** Set the camera damping setting. */
+void td5_save_set_camera_damping(int d);
+
+/** Set the sound mode (0=stereo, 1=mono). */
+void td5_save_set_sound_mode(int mode);
+
 /** Returns the configured circuit lap count (2/4/6/8). */
 int td5_save_get_circuit_lap_count(void);
 
@@ -120,6 +129,51 @@ int  td5_save_is_car_unlocked(int car_index);
 int  td5_save_is_track_unlocked(int track_index);
 void td5_save_unlock_car(int car_index);
 void td5_save_unlock_track(int track_index);
+
+/** Returns the maximum car index (exclusive) visible to the player.
+ *  Cars [0..max-1] appear in the selector; higher indices are hidden. */
+int  td5_save_get_max_unlocked_car(void);
+
+/** Returns 1 if all_cars_unlocked flag is set (all 37 available). */
+int  td5_save_get_all_cars_unlocked(void);
+
+/** Returns the cup tier bitmask (bits 0-2: Championship/Challenge/Pitbull). */
+int  td5_save_get_cup_tier(void);
+
+/** Copy lock tables into caller-supplied arrays.
+ *  car_locks:   37-byte array, filled with 0=unlocked, nonzero=locked.
+ *  track_locks: 26-byte array, filled with 0=unlocked, nonzero=locked.
+ *  (Note: internal track lock sense is inverted: 1=unlocked, 0=locked.
+ *   These functions normalize to 0=unlocked for the caller.) */
+void td5_save_get_car_lock_table(uint8_t *out_car_locks, int count);
+void td5_save_get_track_lock_table(uint8_t *out_track_locks, int count);
+
+/** Process cup tier state and apply unlocks for completed cups.
+ *  Call after loading Config.td5 or after a cup is won.
+ *  game_type: the cup that was just won (1-6), or -1 to just refresh.
+ *  Returns the number of newly unlocked items. */
+int  td5_save_apply_cup_unlocks(int game_type);
+
+/* ========================================================================
+ * Cup state sync -- bridge save module statics <-> game globals
+ *
+ * In the original binary, save and frontend shared global addresses.
+ * In the source port, the save module has private copies that must be
+ * synced before write and after load.
+ * ======================================================================== */
+
+/** Copy current game state (g_td5 + actor table) into save module cup statics.
+ *  Call immediately before td5_save_write_cup_data(). */
+void td5_save_sync_cup_from_game(int race_within_series);
+
+/** Copy save module cup statics back to game state (g_td5 + actor table).
+ *  Call immediately after td5_save_load_cup_data().
+ *  Returns the restored game_type, or -1 if no valid cup state. */
+int  td5_save_sync_cup_to_game(int *out_race_within_series);
+
+/** Validate CupData.td5 integrity without restoring state.
+ *  Reads file, decrypts, checks CRC.  Returns 1 if valid, 0 otherwise. */
+int  td5_save_is_cup_valid(const char *path);
 
 /* ========================================================================
  * Volume accessors

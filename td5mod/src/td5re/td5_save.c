@@ -13,6 +13,8 @@
 
 #include "td5_save.h"
 #include "td5_platform.h"
+#include "td5re.h"
+#include "td5_game.h"
 #include <string.h>
 
 #define LOG_TAG "save"
@@ -189,7 +191,10 @@ void td5_save_set_view_distance(float v) { if (v < 0.0f) v = 0.0f; if (v > 1.0f)
 static int32_t  s_display_mode;                               /* 0x466020 */
 static int32_t  s_fog_enabled;                                /* 0x466024 */
 static int32_t  s_speed_units;                                /* 0x466028 */
+void td5_save_set_speed_units(int u) { s_speed_units = u; }
 static int32_t  s_camera_damping;                             /* 0x46602C */
+void td5_save_set_camera_damping(int d) { s_camera_damping = d; }
+void td5_save_set_sound_mode(int m) { s_sound_mode = m; }
 static uint32_t s_p1_custom_bindings[0x62];                   /* 0x4978C0 */
 static uint32_t s_p2_custom_bindings[0x62];                   /* 0x497330 */
 static uint32_t s_split_screen_mode;                          /* 0x497A5C */
@@ -528,15 +533,23 @@ int td5_save_init(void)
     s_sfx_volume = 80;
     s_music_volume = 80;
 
-    /* Default everything unlocked so the game is playable even without
-     * a Config.td5 on disk.  td5_save_load_config() below will override
-     * these with whatever the save file contains. */
-    s_cup_tier = 0x07;
-    s_max_unlocked_car = TD5_CONFIG_NUM_CARS;
-    s_all_cars_unlocked = 1;
-    for (i = 0; i < TD5_CONFIG_NUM_TRACKS; i++)
-        s_track_locks[i] = 1;   /* 1 = unlocked */
-    memset(s_car_locks, 0, sizeof(s_car_locks)); /* 0 = unlocked */
+    /* Fresh-game default: match original binary's initial progression state.
+     * Cars 0-20: unlocked (standard roster, 21 cars).
+     * Cars 21-22: visible but locked (SUPER7, R390).
+     * Cars 23-36: locked (cop-chase / cup-unlock only).
+     * Tracks 0-19: unlocked (race tracks).
+     * Tracks 20-25: locked (cup tracks, unlocked by winning cups).
+     * td5_save_load_config() below will override with save file contents. */
+    s_cup_tier = 0x00;
+    s_max_unlocked_car = 23;    /* 23 visible slots (0-22) */
+    s_all_cars_unlocked = 0;
+    memset(s_car_locks, 0, sizeof(s_car_locks));
+    for (i = 21; i < TD5_CONFIG_NUM_CARS; i++)
+        s_car_locks[i] = 1;    /* locked */
+    for (i = 0; i < 20; i++)
+        s_track_locks[i] = 1;  /* 1 = unlocked */
+    for (i = 20; i < TD5_CONFIG_NUM_TRACKS; i++)
+        s_track_locks[i] = 0;  /* 0 = locked */
 
     /* Try to load Config.td5 from the working directory (original/).
      * If the file doesn't exist or has a bad CRC the defaults above stay. */
@@ -1196,6 +1209,118 @@ int td5_save_validate_cup_checksum(const char *path, uint32_t expected_crc)
 }
 
 /* ========================================================================
+ * Cup state sync (source-port bridge)
+ *
+ * In the original binary these globals lived at fixed addresses shared
+ * by both the frontend and save code.  In the source port each module
+ * keeps private statics, so we explicitly copy before write / after load.
+ * ======================================================================== */
+
+void td5_save_sync_cup_from_game(int race_within_series)
+{
+    /* Header fields from g_td5 */
+    s_selected_game_type  = (uint32_t)g_td5.game_type;
+    s_race_within_series  = (uint32_t)race_within_series;
+    s_race_rule_variant   = (uint32_t)g_td5.race_rule_variant;
+    s_time_trial_enabled  = (uint32_t)g_td5.time_trial_enabled;
+    s_wanted_enabled      = (uint32_t)g_td5.wanted_mode_enabled;
+    s_difficulty_tier     = (uint32_t)g_td5.difficulty;
+    s_checkpoint_mode     = (uint32_t)g_td5.checkpoint_timers_enabled;
+    s_traffic_enabled     = (uint32_t)g_td5.traffic_enabled;
+    s_special_encounter   = (uint32_t)g_td5.special_encounter_enabled;
+    s_circuit_lap_count   = (uint32_t)g_td5.circuit_lap_count;
+
+    /* npc_group_index and track_opponent_state: not tracked by frontend
+     * in the source port yet -- leave as-is (previously serialized value
+     * or 0 on first save). */
+
+    /* Actor snapshot: copy raw bytes from game module actor table. */
+    {
+        int total = td5_game_get_total_actor_count();
+        int i;
+        memset(s_actor_table, 0, sizeof(s_actor_table));
+        for (i = 0; i < total && i < 14; i++) {
+            TD5_Actor *a = td5_game_get_actor(i);
+            if (a) {
+                memcpy((uint8_t *)s_actor_table + (size_t)i * 0x388,
+                       a, 0x388);
+            }
+        }
+    }
+
+    TD5_LOG_I(LOG_TAG, "sync_cup_from_game: type=%u race=%u actors=%d",
+              s_selected_game_type, s_race_within_series,
+              td5_game_get_total_actor_count());
+}
+
+int td5_save_sync_cup_to_game(int *out_race_within_series)
+{
+    /* Restore header fields to g_td5 */
+    g_td5.game_type                = (TD5_GameType)s_selected_game_type;
+    g_td5.race_rule_variant        = (int)s_race_rule_variant;
+    g_td5.time_trial_enabled       = (int)s_time_trial_enabled;
+    g_td5.wanted_mode_enabled      = (int)s_wanted_enabled;
+    g_td5.difficulty                = (TD5_Difficulty)s_difficulty_tier;
+    g_td5.checkpoint_timers_enabled = (int)s_checkpoint_mode;
+    g_td5.traffic_enabled          = (int)s_traffic_enabled;
+    g_td5.special_encounter_enabled = (int)s_special_encounter;
+    g_td5.circuit_lap_count        = (int)s_circuit_lap_count;
+
+    if (out_race_within_series) {
+        *out_race_within_series = (int)s_race_within_series;
+    }
+
+    /* Restore actor data to game module actor table. */
+    {
+        int total = td5_game_get_total_actor_count();
+        int i;
+        for (i = 0; i < total && i < 14; i++) {
+            TD5_Actor *a = td5_game_get_actor(i);
+            if (a) {
+                memcpy(a, (uint8_t *)s_actor_table + (size_t)i * 0x388,
+                       0x388);
+            }
+        }
+    }
+
+    TD5_LOG_I(LOG_TAG, "sync_cup_to_game: type=%u race=%u",
+              s_selected_game_type, s_race_within_series);
+
+    return (int)s_selected_game_type;
+}
+
+int td5_save_is_cup_valid(const char *path)
+{
+    const char *filepath = path ? path : TD5_CUPDATA_FILENAME;
+
+    TD5_File *f = td5_plat_file_open(filepath, "rb");
+    if (!f) {
+        return 0;
+    }
+
+    uint8_t read_buf[TD5_CUPDATA_READ_BUF_SIZE];
+    size_t bytes_read = td5_plat_file_read(f, read_buf, TD5_CUPDATA_READ_BUF_SIZE);
+    td5_plat_file_close(f);
+
+    if (bytes_read < 0x10) {
+        return 0; /* Too small to contain header + CRC */
+    }
+
+    /* Decrypt */
+    td5_save_xor_decrypt(read_buf, bytes_read, TD5_CUPDATA_XOR_KEY);
+
+    /* Extract stored CRC from offset 0x0C, set placeholder, recompute */
+    uint32_t stored_crc = read_le32(read_buf + 0x0C);
+    write_le32(read_buf + 0x0C, TD5_CRC_PLACEHOLDER);
+    uint32_t computed_crc = td5_save_crc32(read_buf, bytes_read);
+
+    TD5_LOG_I(LOG_TAG, "is_cup_valid: path=%s stored=0x%08X computed=0x%08X match=%d",
+              filepath, stored_crc, computed_crc, stored_crc == computed_crc);
+
+    return (stored_crc == computed_crc) ? 1 : 0;
+}
+
+/* ========================================================================
  * Game Options Access
  * ======================================================================== */
 
@@ -1270,4 +1395,163 @@ void td5_save_unlock_track(int track_index)
     if (track_index >= 0 && track_index < TD5_CONFIG_NUM_TRACKS) {
         s_track_locks[track_index] = 1;
     }
+}
+
+int td5_save_get_max_unlocked_car(void)
+{
+    return (int)s_max_unlocked_car;
+}
+
+int td5_save_get_all_cars_unlocked(void)
+{
+    return s_all_cars_unlocked ? 1 : 0;
+}
+
+int td5_save_get_cup_tier(void)
+{
+    return (int)(s_cup_tier & 0x07);
+}
+
+void td5_save_get_car_lock_table(uint8_t *out_car_locks, int count)
+{
+    int i;
+    if (!out_car_locks) return;
+    if (count > TD5_CONFIG_NUM_CARS) count = TD5_CONFIG_NUM_CARS;
+    for (i = 0; i < count; i++) {
+        /* s_car_locks: 0=unlocked, 1=locked -- pass through directly */
+        if (s_all_cars_unlocked) {
+            out_car_locks[i] = 0; /* unlocked */
+        } else {
+            out_car_locks[i] = s_car_locks[i];
+        }
+    }
+}
+
+void td5_save_get_track_lock_table(uint8_t *out_track_locks, int count)
+{
+    int i;
+    if (!out_track_locks) return;
+    if (count > TD5_CONFIG_NUM_TRACKS) count = TD5_CONFIG_NUM_TRACKS;
+    for (i = 0; i < count; i++) {
+        /* s_track_locks: 1=unlocked, 0=locked -- invert for caller */
+        out_track_locks[i] = (s_track_locks[i] != 0) ? 0 : 1;
+    }
+}
+
+/* ========================================================================
+ * Cup Unlock Tables
+ *
+ * Derived from RE analysis of the original binary's progression system.
+ * The original game has 6 cup types (game types 1-6), each unlocking
+ * specific cars and tracks upon completion.
+ *
+ * Cup tier bits (s_cup_tier, 3 bits):
+ *   bit 0: Championship completed
+ *   bit 1: Challenge completed
+ *   bit 2: Pitbull completed
+ *
+ * Original progression (from Ghidra analysis of 0x410CA0 and 0x423A80):
+ *   - Fresh save: 21 cars visible (indices 0-20), 2 locked (21-22).
+ *     Tracks 0-19 unlocked (race tracks), 20-25 locked (cup tracks).
+ *   - Championship (type 1) won: unlocks car 23 (Dodge Viper GTS-R),
+ *     car 24 (McLaren F1 GTR), track 20 (Cup track 1).
+ *   - Era (type 2) won: unlocks car 25 (Lister Storm).
+ *   - Challenge (type 3) won: unlocks car 26 (Panoz Esperante GTR-1),
+ *     car 27 (Mercedes CLK-GTR), tracks 21-22.
+ *   - Pitbull (type 4) won: unlocks car 28 (Porsche 911 GT1),
+ *     car 29 (Toyota GT-One), tracks 23-24.
+ *   - Masters (type 5) won: unlocks car 30 (Nissan R390 GT1),
+ *     car 31 (BMW V12 LMR), track 25.
+ *   - Cop Chase (type 8) and others: no unlock progression.
+ *
+ * The initial lock state for a fresh game:
+ *   Cars 0-20: unlocked (standard roster)
+ *   Cars 21-22: locked (visible but locked: SUPER7, R390)
+ *   Cars 23-36: locked (hidden in normal mode, cop-chase/cup only)
+ *   Tracks 0-19: unlocked (race tracks)
+ *   Tracks 20-25: locked (cup tracks)
+ * ======================================================================== */
+
+int td5_save_apply_cup_unlocks(int game_type)
+{
+    int count = 0;
+
+    /* Apply unlocks based on the cup that was just won */
+    switch (game_type) {
+    case 1: /* Championship */
+        if (!(s_cup_tier & 0x01)) {
+            s_cup_tier |= 0x01;
+        }
+        /* Unlock cars 23, 24 (Dodge Viper GTS-R, McLaren F1 GTR) */
+        if (s_car_locks[23] != 0) { s_car_locks[23] = 0; count++; }
+        if (s_car_locks[24] != 0) { s_car_locks[24] = 0; count++; }
+        /* Unlock cup track 20 */
+        if (s_track_locks[20] == 0) { s_track_locks[20] = 1; count++; }
+        break;
+
+    case 2: /* Era */
+        /* Unlock car 25 (Lister Storm) */
+        if (s_car_locks[25] != 0) { s_car_locks[25] = 0; count++; }
+        break;
+
+    case 3: /* Challenge */
+        if (!(s_cup_tier & 0x02)) {
+            s_cup_tier |= 0x02;
+        }
+        /* Unlock cars 26, 27 (Panoz Esperante GTR-1, Mercedes CLK-GTR) */
+        if (s_car_locks[26] != 0) { s_car_locks[26] = 0; count++; }
+        if (s_car_locks[27] != 0) { s_car_locks[27] = 0; count++; }
+        /* Unlock cup tracks 21, 22 */
+        if (s_track_locks[21] == 0) { s_track_locks[21] = 1; count++; }
+        if (s_track_locks[22] == 0) { s_track_locks[22] = 1; count++; }
+        break;
+
+    case 4: /* Pitbull */
+        if (!(s_cup_tier & 0x04)) {
+            s_cup_tier |= 0x04;
+        }
+        /* Unlock cars 28, 29 (Porsche 911 GT1, Toyota GT-One) */
+        if (s_car_locks[28] != 0) { s_car_locks[28] = 0; count++; }
+        if (s_car_locks[29] != 0) { s_car_locks[29] = 0; count++; }
+        /* Unlock cup tracks 23, 24 */
+        if (s_track_locks[23] == 0) { s_track_locks[23] = 1; count++; }
+        if (s_track_locks[24] == 0) { s_track_locks[24] = 1; count++; }
+        break;
+
+    case 5: /* Masters */
+        /* Unlock cars 30, 31 (Nissan R390 GT1, BMW V12 LMR) */
+        if (s_car_locks[30] != 0) { s_car_locks[30] = 0; count++; }
+        if (s_car_locks[31] != 0) { s_car_locks[31] = 0; count++; }
+        /* Unlock cup track 25 */
+        if (s_track_locks[25] == 0) { s_track_locks[25] = 1; count++; }
+        break;
+
+    case 6: /* Drag */
+        /* Unlock car 32 (unlocks access to hidden car index 32) */
+        if (s_car_locks[32] != 0) { s_car_locks[32] = 0; count++; }
+        break;
+
+    default:
+        /* game_type == -1: just refresh max_unlocked_car from lock table */
+        break;
+    }
+
+    /* Recompute max_unlocked_car from the lock table */
+    {
+        int i;
+        uint32_t max_car = 0;
+        for (i = 0; i < TD5_CONFIG_NUM_CARS; i++) {
+            if (s_car_locks[i] == 0) {
+                if ((uint32_t)(i + 1) > max_car) {
+                    max_car = (uint32_t)(i + 1);
+                }
+            }
+        }
+        s_max_unlocked_car = max_car;
+    }
+
+    TD5_LOG_I(LOG_TAG, "apply_cup_unlocks: game_type=%d tier=0x%02X max_car=%u new_unlocks=%d",
+              game_type, (unsigned)s_cup_tier, (unsigned)s_max_unlocked_car, count);
+
+    return count;
 }

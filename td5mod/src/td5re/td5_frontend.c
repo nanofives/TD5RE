@@ -10,8 +10,10 @@
 
 #include "td5_frontend.h"
 #include "td5_asset.h"
+#include "td5_physics.h"
 #include "td5_net.h"
 #include "td5_platform.h"
+#include "td5_render.h"
 #include "td5_save.h"
 #include "td5_sound.h"
 #include "td5re.h"
@@ -314,6 +316,7 @@ typedef struct {
     int width, height;
     char source_name[128];
     char source_archive[128];
+    char png_path[256];         /* resolved PNG path for recovery (empty = ZIP fallback) */
 } FE_Surface;
 
 typedef struct {
@@ -631,8 +634,6 @@ static void fe_draw_surface_rect(int handle, float x, float y, float w, float h,
 }
 
 static int frontend_load_tga(const char *name, const char *archive) {
-    int sz = 0;
-    void *data = NULL;
     int existing_handle;
 
     /* Strip path prefix from entry name — the ZIP stores bare filenames */
@@ -658,21 +659,20 @@ static int frontend_load_tga(const char *name, const char *archive) {
         return existing_handle;
     }
 
-    data = td5_asset_open_and_read(bare_name, real_archive, &sz);
-    if (!data || sz <= 0) {
-        TD5_LOG_W(LOG_TAG, "LoadTGA failed: %s from %s", name, archive);
-        return 0;
-    }
-
+    /* Try PNG from td5_png_clean first, fall back to ZIP+TGA */
     void *pixels = NULL;
     int w = 0, h = 0;
-    if (!td5_asset_decode_tga(data, (size_t)sz, &pixels, &w, &h) || !pixels) {
-        free(data);
+    char png_path[256];
+
+    if (td5_asset_resolve_png_path(bare_name, real_archive, png_path, sizeof(png_path))) {
+        if (!td5_asset_load_png_to_buffer(png_path, TD5_COLORKEY_NONE, &pixels, &w, &h))
+            pixels = NULL;
+    }
+
+    if (!pixels) {
+        TD5_LOG_W(LOG_TAG, "LoadTGA failed: %s from %s (no PNG found)", name, archive);
         return 0;
     }
-    free(data);
-
-    /* TGA decode already outputs BGRA matching D3D11 B8G8R8A8_UNORM — no swap needed */
 
     /* Find free surface slot */
     int slot = -1;
@@ -692,6 +692,8 @@ static int frontend_load_tga(const char *name, const char *archive) {
         s_surfaces[slot].source_name[sizeof(s_surfaces[slot].source_name) - 1] = '\0';
         strncpy(s_surfaces[slot].source_archive, real_archive, sizeof(s_surfaces[slot].source_archive) - 1);
         s_surfaces[slot].source_archive[sizeof(s_surfaces[slot].source_archive) - 1] = '\0';
+        strncpy(s_surfaces[slot].png_path, png_path, sizeof(s_surfaces[slot].png_path) - 1);
+        s_surfaces[slot].png_path[sizeof(s_surfaces[slot].png_path) - 1] = '\0';
         free(pixels);
         int handle = slot + 1;
         /* Large images (>=640 wide or 640x480) are backgrounds — auto-set as current bg.
@@ -720,9 +722,6 @@ static int frontend_load_tga(const char *name, const char *archive) {
  */
 static int frontend_load_tga_colorkey(const char *name, const char *archive,
                                        int dest_page, int *out_w, int *out_h) {
-    int sz = 0;
-    void *data = NULL;
-
     const char *bare_name = name;
     const char *slash = strrchr(name, '/');
     if (slash) bare_name = slash + 1;
@@ -733,36 +732,29 @@ static int frontend_load_tga_colorkey(const char *name, const char *archive,
     if (strstr(archive, "FrontEnd.zip") || strstr(archive, "frontend.zip"))
         real_archive = "Front End/frontend.zip";
 
-    data = td5_asset_open_and_read(bare_name, real_archive, &sz);
-    if (!data || sz <= 0) {
-        TD5_LOG_W(LOG_TAG, "LoadTGA_CK failed: %s from %s", name, archive);
-        return 0;
-    }
-
+    /* Try PNG from td5_png_clean first */
     void *pixels = NULL;
     int w = 0, h = 0;
-    if (!td5_asset_decode_tga(data, (size_t)sz, &pixels, &w, &h) || !pixels) {
-        free(data);
-        return 0;
-    }
-    free(data);
+    char png_path[256];
+    int from_png = 0;
 
-    /* Color key: red pixels (R=255,G=0,B=0) become transparent.
-     * TGA decode outputs BGRA: byte0=B, byte1=G, byte2=R, byte3=A */
-    {
-        uint8_t *p = (uint8_t *)pixels;
-        int count = w * h;
-        for (int ci = 0; ci < count; ci++) {
-            uint8_t b_val = p[0], g_val = p[1], r_val = p[2];
-            if (r_val == 255 && g_val == 0 && b_val == 0) {
-                p[3] = 0;
+    if (td5_asset_resolve_png_path(bare_name, real_archive, png_path, sizeof(png_path))) {
+        if (td5_asset_load_png_to_buffer(png_path, TD5_COLORKEY_RED, &pixels, &w, &h)) {
+            from_png = 1;
+            /* Font page also needs black keying */
+            if (dest_page == SHARED_PAGE_FONT) {
+                uint8_t *p = (uint8_t *)pixels;
+                for (int ci = 0; ci < w * h; ci++, p += 4) {
+                    if (p[0] < 8 && p[1] < 8 && p[2] < 8)
+                        p[3] = 0;
+                }
             }
-            if (dest_page == SHARED_PAGE_FONT &&
-                b_val < 8 && g_val < 8 && r_val < 8) {
-                p[3] = 0;
-            }
-            p += 4;
         }
+    }
+
+    if (!pixels) {
+        TD5_LOG_W(LOG_TAG, "LoadTGA_CK failed: %s from %s (no PNG found)", name, archive);
+        return 0;
     }
 
     if (td5_plat_render_upload_texture(dest_page, pixels, w, h, 2)) {
@@ -771,7 +763,8 @@ static int frontend_load_tga_colorkey(const char *name, const char *archive,
         }
         if (out_w) *out_w = w;
         if (out_h) *out_h = h;
-        TD5_LOG_I(LOG_TAG, "LoadTGA_CK OK: %s -> page=%d %dx%d", bare_name, dest_page, w, h);
+        TD5_LOG_I(LOG_TAG, "LoadTGA_CK OK: %s -> page=%d %dx%d%s",
+                  bare_name, dest_page, w, h, from_png ? " (PNG)" : "");
         free(pixels);
         return 1;
     }
@@ -783,8 +776,6 @@ static int frontend_load_tga_colorkey(const char *name, const char *archive,
 /* Load a TGA into a surface slot, making near-black pixels (R<8,G<8,B<8) transparent.
  * Track preview TGAs use black as the background color key. */
 static int frontend_load_tga_black_key(const char *name, const char *archive) {
-    int sz = 0;
-    void *data = NULL;
     int existing_handle;
 
     const char *bare_name = name;
@@ -800,31 +791,17 @@ static int frontend_load_tga_black_key(const char *name, const char *archive) {
     existing_handle = frontend_find_surface_by_source(bare_name, real_archive);
     if (existing_handle > 0) return existing_handle;
 
-    data = td5_asset_open_and_read(bare_name, real_archive, &sz);
-    if (!data || sz <= 0) {
-        TD5_LOG_W(LOG_TAG, "LoadTGA_BK failed: %s from %s", name, archive);
-        return 0;
-    }
-
+    /* Try PNG from td5_png_clean first */
     void *pixels = NULL;
     int w = 0, h = 0;
-    if (!td5_asset_decode_tga(data, (size_t)sz, &pixels, &w, &h) || !pixels) {
-        free(data);
-        return 0;
-    }
-    free(data);
+    char png_path[256];
 
-    /* Black colorkey: near-black pixels (all channels < 8) become transparent.
-     * TGA pixels decoded as BGRA. */
-    {
-        uint8_t *p = (uint8_t *)pixels;
-        int count = w * h;
-        for (int ci = 0; ci < count; ci++) {
-            if (p[0] < 8 && p[1] < 8 && p[2] < 8) {
-                p[3] = 0;
-            }
-            p += 4;
-        }
+    if (td5_asset_resolve_png_path(bare_name, real_archive, png_path, sizeof(png_path)))
+        td5_asset_load_png_to_buffer(png_path, TD5_COLORKEY_BLACK, &pixels, &w, &h);
+
+    if (!pixels) {
+        TD5_LOG_W(LOG_TAG, "LoadTGA_BK failed: %s from %s (no PNG found)", name, archive);
+        return 0;
     }
 
     int slot = -1;
@@ -843,6 +820,8 @@ static int frontend_load_tga_black_key(const char *name, const char *archive) {
         s_surfaces[slot].source_name[sizeof(s_surfaces[slot].source_name) - 1] = '\0';
         strncpy(s_surfaces[slot].source_archive, real_archive, sizeof(s_surfaces[slot].source_archive) - 1);
         s_surfaces[slot].source_archive[sizeof(s_surfaces[slot].source_archive) - 1] = '\0';
+        strncpy(s_surfaces[slot].png_path, png_path, sizeof(s_surfaces[slot].png_path) - 1);
+        s_surfaces[slot].png_path[sizeof(s_surfaces[slot].png_path) - 1] = '\0';
         free(pixels);
         TD5_LOG_I(LOG_TAG, "LoadTGA_BK OK: %s → slot=%d page=%d %dx%d", bare_name, slot, page, w, h);
         return slot + 1;
@@ -2020,42 +1999,56 @@ static void frontend_recover_surfaces(void) {
     int i;
     /* Re-upload all tracked surfaces from source metadata on device change */
     for (i = 0; i < FE_MAX_SURFACES; i++) {
-        int sz = 0;
-        void *data, *pixels = NULL;
+        void *pixels = NULL;
         int w = 0, h = 0;
         if (!s_surfaces[i].in_use || !s_surfaces[i].source_name[0]) continue;
-        data = td5_asset_open_and_read(s_surfaces[i].source_name,
-                                        s_surfaces[i].source_archive, &sz);
-        if (!data || sz <= 0) continue;
-        if (!td5_asset_decode_tga(data, (size_t)sz, &pixels, &w, &h) || !pixels) {
-            free(data); continue;
+
+        /* Try PNG path first (saved during initial load) */
+        if (s_surfaces[i].png_path[0]) {
+            if (td5_asset_load_png_to_buffer(s_surfaces[i].png_path, TD5_COLORKEY_NONE,
+                                              &pixels, &w, &h)) {
+                s_surfaces[i].width = w;
+                s_surfaces[i].height = h;
+                td5_plat_render_upload_texture(s_surfaces[i].tex_page, pixels, w, h, 2);
+                free(pixels);
+                continue;
+            }
         }
-        free(data);
-        s_surfaces[i].width = w;
-        s_surfaces[i].height = h;
-        td5_plat_render_upload_texture(s_surfaces[i].tex_page, pixels, w, h, 2);
-        free(pixels);
+
+        TD5_LOG_W(LOG_TAG, "surface recovery: no PNG for %s", s_surfaces[i].source_name);
     }
 }
 static void frontend_post_quit(void) {
     g_td5.quit_requested = 1;
 }
 
-/* Placeholder: write cup data save file */
+/* Write cup data: sync game state into save module, then write file. */
 static int frontend_write_cup_data(void) {
-    TD5_LOG_I(LOG_TAG, "WriteCupData");
-    return 1;
+    td5_save_sync_cup_from_game(s_race_within_series);
+    int ok = td5_save_write_cup_data(NULL);
+    TD5_LOG_I(LOG_TAG, "WriteCupData: result=%d race=%d type=%d",
+              ok, s_race_within_series, (int)s_selected_game_type);
+    return ok;
 }
 
-/* Placeholder: load continue cup data; returns 1 on success */
+/* Load continue cup data: read + decrypt + restore game state. */
 static int frontend_load_continue_cup_data(void) {
-    TD5_LOG_I(LOG_TAG, "LoadContinueCupData");
-    return 1;
+    int ok = td5_save_load_cup_data(NULL);
+    if (ok) {
+        int restored_race = 0;
+        int game_type = td5_save_sync_cup_to_game(&restored_race);
+        s_selected_game_type = game_type;
+        s_race_within_series = restored_race;
+        TD5_LOG_I(LOG_TAG, "LoadContinueCupData: type=%d race=%d", game_type, restored_race);
+    } else {
+        TD5_LOG_W(LOG_TAG, "LoadContinueCupData: failed");
+    }
+    return ok;
 }
 
-/* Placeholder: validate CupData.td5 checksum; returns 1 if valid */
+/* Validate CupData.td5 checksum without restoring state. */
 static int frontend_validate_cup_checksum(void) {
-    return 0; /* no save by default */
+    return td5_save_is_cup_valid(NULL);
 }
 
 /* Placeholder: delete cup data file */
@@ -2167,6 +2160,12 @@ static int ConfigureGameTypeFlags(void) {
     switch (s_selected_game_type) {
     case 0: /* Single Race -- user preferences apply */
         g_td5.circuit_lap_count = (s_game_option_laps + 1) * 2;
+        g_td5.difficulty = (TD5_Difficulty)s_game_option_difficulty;
+        g_td5.traffic_enabled = s_game_option_traffic;
+        g_td5.special_encounter_enabled = s_game_option_cops;
+        td5_physics_set_collisions(s_game_option_collisions);
+        td5_physics_set_dynamics(s_game_option_dynamics);
+        g_td5.checkpoint_timers_enabled = s_game_option_checkpoint_timers;
         break;
 
     case 1: /* Championship */
@@ -2562,130 +2561,78 @@ int td5_frontend_init_resources(void) {
         }
     }
 
-    /* ---- ButtonBits.tga (gradient source for button backgrounds) ----
-     * 56x100 paletted TGA (DAT_00496268 in original).
-     * Layout: 3 sections of 32px each (style * 0x20 offset):
-     *   Section 0 (rows 0-31):  Normal style (gold/warm gradient)
-     *   Section 1 (rows 32-63): Highlighted style (blue gradient)
-     *   Section 2 (rows 64-95): Preview/disabled style
-     * Black colorkey (no red pixels in this texture). */
+    /* ---- ButtonBits (gradient source for button backgrounds) ----
+     * 56x100 paletted texture (DAT_00496268 in original).
+     * Layout: 3 sections of 32px each (style * 0x20 offset).
+     * Black colorkey. */
     if (s_buttonbits_tex_page < 0) {
         s_buttonbits_tex_page = SHARED_PAGE_BUTTONBITS;
         {
-            int sz = 0;
-            void *raw = td5_asset_open_and_read("ButtonBits.tga",
-                                                "Front End/frontend.zip", &sz);
-            if (raw && sz > 0) {
-                void *pixels = NULL;
-                int bw = 0, bh = 0;
-                if (td5_asset_decode_tga(raw, (size_t)sz, &pixels, &bw, &bh) && pixels) {
-                    /* Black colorkey: near-black pixels become transparent */
-                    uint8_t *p = (uint8_t *)pixels;
-                    for (int ci = 0; ci < bw * bh; ci++, p += 4) {
-                        if (p[0] < 8 && p[1] < 8 && p[2] < 8)
-                            p[3] = 0;
-                    }
-                    if (td5_plat_render_upload_texture(s_buttonbits_tex_page,
-                                                       pixels, bw, bh, 2)) {
-                        s_buttonbits_w = bw;
-                        s_buttonbits_h = bh;
-                        TD5_LOG_I(LOG_TAG, "ButtonBits.tga loaded: page=%d %dx%d",
-                                  s_buttonbits_tex_page, bw, bh);
-                    } else {
-                        s_buttonbits_tex_page = -1;
-                    }
-                    free(pixels);
+            void *pixels = NULL;
+            int bw = 0, bh = 0;
+            if (td5_asset_load_png_to_buffer("../re/td5_png_clean/frontend/ButtonBits.png",
+                                              TD5_COLORKEY_BLACK, &pixels, &bw, &bh)) {
+                if (td5_plat_render_upload_texture(s_buttonbits_tex_page, pixels, bw, bh, 2)) {
+                    s_buttonbits_w = bw;
+                    s_buttonbits_h = bh;
+                    TD5_LOG_I(LOG_TAG, "ButtonBits loaded (PNG): page=%d %dx%d",
+                              s_buttonbits_tex_page, bw, bh);
                 } else {
                     s_buttonbits_tex_page = -1;
                 }
-                free(raw);
+                free(pixels);
             } else {
-                TD5_LOG_W(LOG_TAG, "Failed to load ButtonBits.tga");
+                TD5_LOG_W(LOG_TAG, "Failed to load ButtonBits.png");
                 s_buttonbits_tex_page = -1;
             }
         }
     }
 
-    /* ---- ArrowButtonz.tga (left/right scroll arrows on selector buttons) ----
+    /* ---- ArrowButtonz (left/right scroll arrows on selector buttons) ----
      * 12x36 sprite sheet (DAT_00496284 in original, FUN_00426260).
-     * Four 12x9 rows:
-     *   Row 0 (y=0-8):   Left  arrow, unselected (blue)
-     *   Row 1 (y=9-17):  Right arrow, unselected (blue)
-     *   Row 2 (y=18-26): Left  arrow, selected (gold)
-     *   Row 3 (y=27-35): Right arrow, selected (gold)
-     * Red colorkey (background is pure red, not black). */
+     * Red colorkey. */
     if (s_arrowbuttonz_tex_page < 0) {
         s_arrowbuttonz_tex_page = SHARED_PAGE_ARROWBTNZ;
         {
-            int sz = 0;
-            void *raw = td5_asset_open_and_read("ArrowButtonz.tga",
-                                                "Front End/frontend.zip", &sz);
-            if (raw && sz > 0) {
-                void *pixels = NULL;
-                int aw = 0, ah = 0;
-                if (td5_asset_decode_tga(raw, (size_t)sz, &pixels, &aw, &ah) && pixels) {
-                    uint8_t *p = (uint8_t *)pixels;
-                    for (int ci = 0; ci < aw * ah; ci++, p += 4) {
-                        /* Red colorkey: pure red background. BGRA order: p[2]=R, p[1]=G, p[0]=B */
-                        if (p[2] > 200 && p[1] < 30 && p[0] < 30)
-                            p[3] = 0;
-                    }
-                    if (td5_plat_render_upload_texture(s_arrowbuttonz_tex_page,
-                                                       pixels, aw, ah, 2)) {
-                        TD5_LOG_I(LOG_TAG, "ArrowButtonz.tga loaded: page=%d %dx%d",
-                                  s_arrowbuttonz_tex_page, aw, ah);
-                    } else {
-                        s_arrowbuttonz_tex_page = -1;
-                    }
-                    free(pixels);
+            void *pixels = NULL;
+            int aw = 0, ah = 0;
+            if (td5_asset_load_png_to_buffer("../re/td5_png_clean/frontend/ArrowButtonz.png",
+                                              TD5_COLORKEY_RED, &pixels, &aw, &ah)) {
+                if (td5_plat_render_upload_texture(s_arrowbuttonz_tex_page, pixels, aw, ah, 2)) {
+                    TD5_LOG_I(LOG_TAG, "ArrowButtonz loaded (PNG): page=%d %dx%d",
+                              s_arrowbuttonz_tex_page, aw, ah);
                 } else {
                     s_arrowbuttonz_tex_page = -1;
                 }
-                free(raw);
+                free(pixels);
             } else {
-                TD5_LOG_W(LOG_TAG, "Failed to load ArrowButtonz.tga");
+                TD5_LOG_W(LOG_TAG, "Failed to load ArrowButtonz.png");
                 s_arrowbuttonz_tex_page = -1;
             }
         }
     }
 
-    /* ---- ButtonLights.tga (selection indicator dot) ----
-     * 16x32 paletted TGA (DAT_00496284 in original).
-     * Two 16x16 frames stacked vertically:
-     *   Top half  (V 0.0-0.5): dim/off state
-     *   Bottom half (V 0.5-1.0): bright/on state
+    /* ---- ButtonLights (selection indicator dot) ----
+     * 16x32 texture. Two 16x16 frames stacked vertically.
      * Black colorkey. */
     if (s_buttonlights_tex_page < 0) {
         s_buttonlights_tex_page = SHARED_PAGE_BTNLIGHTS;
         {
-            int sz = 0;
-            void *raw = td5_asset_open_and_read("ButtonLights.tga",
-                                                "Front End/frontend.zip", &sz);
-            if (raw && sz > 0) {
-                void *pixels = NULL;
-                int lw = 0, lh = 0;
-                if (td5_asset_decode_tga(raw, (size_t)sz, &pixels, &lw, &lh) && pixels) {
-                    uint8_t *p = (uint8_t *)pixels;
-                    for (int ci = 0; ci < lw * lh; ci++, p += 4) {
-                        if (p[0] < 8 && p[1] < 8 && p[2] < 8)
-                            p[3] = 0;
-                    }
-                    if (td5_plat_render_upload_texture(s_buttonlights_tex_page,
-                                                       pixels, lw, lh, 2)) {
-                        s_buttonlights_w = lw;
-                        s_buttonlights_h = lh;
-                        TD5_LOG_I(LOG_TAG, "ButtonLights.tga loaded: page=%d %dx%d",
-                                  s_buttonlights_tex_page, lw, lh);
-                    } else {
-                        s_buttonlights_tex_page = -1;
-                    }
-                    free(pixels);
+            void *pixels = NULL;
+            int lw = 0, lh = 0;
+            if (td5_asset_load_png_to_buffer("../re/td5_png_clean/frontend/ButtonLights.png",
+                                              TD5_COLORKEY_BLACK, &pixels, &lw, &lh)) {
+                if (td5_plat_render_upload_texture(s_buttonlights_tex_page, pixels, lw, lh, 2)) {
+                    s_buttonlights_w = lw;
+                    s_buttonlights_h = lh;
+                    TD5_LOG_I(LOG_TAG, "ButtonLights loaded (PNG): page=%d %dx%d",
+                              s_buttonlights_tex_page, lw, lh);
                 } else {
                     s_buttonlights_tex_page = -1;
                 }
-                free(raw);
+                free(pixels);
             } else {
-                TD5_LOG_W(LOG_TAG, "ButtonLights.tga not found (optional)");
+                TD5_LOG_W(LOG_TAG, "ButtonLights.png not found (optional)");
                 s_buttonlights_tex_page = -1;
             }
         }
@@ -2784,34 +2731,28 @@ static void frontend_advance_bg_gallery(void) {
 }
 
 static void frontend_load_bg_gallery(void) {
-    static const char * const names[5] = {
-        "pic1.tga", "pic2.tga", "pic3.tga", "pic4.tga", "pic5.tga"
+    static const char * const png_names[5] = {
+        "../re/td5_png_clean/extras/pic1.png",
+        "../re/td5_png_clean/extras/pic2.png",
+        "../re/td5_png_clean/extras/pic3.png",
+        "../re/td5_png_clean/extras/pic4.png",
+        "../re/td5_png_clean/extras/pic5.png"
     };
     if (s_bg_gal_loaded) return;
     for (int i = 0; i < 5; i++) {
         int page = SHARED_PAGE_BG_GALLERY + i;
-        int sz = 0;
-        void *data = td5_asset_open_and_read(names[i], "Front End/Extras/Extras.zip", &sz);
-        if (!data || sz <= 0) {
-            TD5_LOG_W(LOG_TAG, "BgGallery: failed to load %s", names[i]);
+        void *pixels = NULL; int w = 0, h = 0;
+
+        /* Try PNG first */
+        if (!td5_asset_load_png_to_buffer(png_names[i], TD5_COLORKEY_BLACK, &pixels, &w, &h)) {
+            TD5_LOG_W(LOG_TAG, "BgGallery: failed to load %s", png_names[i]);
             continue;
         }
-        void *pixels = NULL; int w = 0, h = 0;
-        if (!td5_asset_decode_tga(data, (size_t)sz, &pixels, &w, &h) || !pixels) {
-            free(data); continue;
-        }
-        free(data);
-        /* Apply black colorkey: pure-black pixels → fully transparent
-         * (mirrors original CrossFade16BitSurfaces 0x0000 colorkey mask) */
-        uint8_t *px = (uint8_t *)pixels;
-        for (int j = 0; j < w * h; j++) {
-            if (px[j*4+0] == 0 && px[j*4+1] == 0 && px[j*4+2] == 0)
-                px[j*4+3] = 0;
-        }
+
         if (td5_plat_render_upload_texture(page, pixels, w, h, 2)) {
             s_bg_gallery[i].width  = w;
             s_bg_gallery[i].height = h;
-            TD5_LOG_I(LOG_TAG, "BgGallery[%d]: %s %dx%d page=%d", i, names[i], w, h, page);
+            TD5_LOG_I(LOG_TAG, "BgGallery[%d]: %dx%d page=%d", i, w, h, page);
         }
         free(pixels);
     }
@@ -4156,11 +4097,11 @@ int td5_frontend_init(void) {
     s_race_within_series = 0;
     s_cup_unlock_tier = 0;
     s_two_player_mode = 0;
-    s_selected_car = 0;   /* Dodge Viper (vip.zip) - index 0 in UI order */
+    s_selected_car = g_td5.ini.loaded ? g_td5.ini.default_car : 0;
     s_selected_paint = 0;
     s_selected_config = 0;
     s_selected_transmission = 0;
-    s_selected_track = 0; /* Los Angeles, CA (level001.zip -- always present) */
+    s_selected_track = g_td5.ini.loaded ? g_td5.ini.default_track : 0;
     s_track_direction = 0;
     s_network_active = 0;
     s_kicked_flag = 0;
@@ -4175,6 +4116,32 @@ int td5_frontend_init(void) {
     s_results_rerace_flag = 0;
     s_results_cup_complete = 0;
     s_cheat_unlock_all = 0;
+
+    /* Apply INI defaults (override compile-time defaults if INI was loaded) */
+    if (g_td5.ini.loaded) {
+        s_display_fog_enabled       = g_td5.ini.fog_enabled;
+        td5_render_set_fog(g_td5.ini.fog_enabled);
+        s_display_speed_units       = g_td5.ini.speed_units;
+        td5_save_set_speed_units(g_td5.ini.speed_units);
+        s_display_camera_damping    = g_td5.ini.camera_damping;
+        td5_save_set_camera_damping(g_td5.ini.camera_damping);
+        s_sound_option_sfx_volume   = g_td5.ini.sfx_volume;
+        s_sound_option_music_volume = g_td5.ini.music_volume;
+        s_sound_option_sfx_mode     = g_td5.ini.sfx_mode;
+        td5_save_set_sound_mode(g_td5.ini.sfx_mode);
+        td5_sound_set_sfx_volume(s_sound_option_sfx_volume);
+        td5_sound_set_music_volume(s_sound_option_music_volume);
+        td5_physics_set_collisions(g_td5.ini.collisions);
+        s_game_option_laps              = g_td5.ini.laps;
+        s_game_option_checkpoint_timers = g_td5.ini.checkpoint_timers;
+        s_game_option_traffic           = g_td5.ini.traffic;
+        s_game_option_cops              = g_td5.ini.cops;
+        s_game_option_difficulty        = g_td5.ini.difficulty;
+        s_game_option_dynamics          = g_td5.ini.dynamics;
+        td5_physics_set_dynamics(g_td5.ini.dynamics);
+        s_game_option_collisions        = g_td5.ini.collisions;
+        s_selected_game_type = g_td5.ini.default_game_type;
+    }
 
     g_td5.frontend_screen_index = TD5_SCREEN_STARTUP_INIT;
     g_td5.frontend_inner_state = 0;
