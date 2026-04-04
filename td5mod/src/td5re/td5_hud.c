@@ -521,9 +521,23 @@ void td5_hud_init_font_atlas(void)
      * page 705 with FONT + SPEEDOFONT + GEARNUMBERS. */
     if (font_entry->texture_page > 0) {
         /* 256x256 BGRA = 256 KB; static to avoid stack overflow.
-         * Atlas pages are 256x256 (confirmed by UV scale = 1/256 for both axes). */
+         * Atlas pages are 256x256 (confirmed by UV scale = 1/256 for both axes).
+         * Pre-fill with tpage5.dat so NUMBERS/GEARNUMBERS/etc. art is preserved;
+         * the GDI synthesis only overwrites the FONT columns (x >= atlas_x). */
         static uint8_t s_font_page_buf[256 * 256 * 4];
-        memset(s_font_page_buf, 0, sizeof(s_font_page_buf));
+        {
+            int tpage_slot = (int)(font_entry->texture_page - 700);
+            char tpage_path[128];
+            snprintf(tpage_path, sizeof(tpage_path),
+                     "../re/assets/static/tpage%d.dat", tpage_slot);
+            FILE *tf = fopen(tpage_path, "rb");
+            if (tf) {
+                fread(s_font_page_buf, 1, sizeof(s_font_page_buf), tf);
+                fclose(tf);
+            } else {
+                memset(s_font_page_buf, 0, sizeof(s_font_page_buf));
+            }
+        }
 
         /* Character rendered for each glyph index (4 rows x 16 cols = 64):
          *   row 0 (0x00-0x0F): A-P
@@ -584,16 +598,18 @@ void td5_hud_init_font_atlas(void)
             GdiFlush();
 
             /* Convert DIB pixels (BGRX) to BGRA with luminance alpha.
-             * White GDI text → full alpha; black background → transparent. */
+             * White GDI text -> full alpha; black background -> transparent.
+             * Only overwrite columns >= atlas_x so NUMBERS/GEARNUMBERS
+             * data from tpage.dat (at x=0..95) is preserved. */
             const uint8_t *src = (const uint8_t *)dib_bits;
             int ay = font_entry->atlas_y; /* 192 */
+            int font_x_start = font_entry->atlas_x; /* 96 */
             for (int y = 0; y < 64; y++) {
-                for (int x = 0; x < 256; x++) {
+                for (int x = font_x_start; x < 256; x++) {
                     int si = (y * 256 + x) * 4;
                     uint8_t b = src[si + 0];
                     uint8_t g_ch = src[si + 1];
                     uint8_t r = src[si + 2];
-                    /* Luminance as alpha (integer approximation of 0.299R+0.587G+0.114B) */
                     uint8_t alpha = (uint8_t)((r * 77u + g_ch * 150u + b * 29u) >> 8);
                     int di = ((ay + y) * 256 + x) * 4;
                     s_font_page_buf[di + 0] = 0xFF; /* B */
