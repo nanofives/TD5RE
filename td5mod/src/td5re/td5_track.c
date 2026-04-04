@@ -2363,10 +2363,10 @@ int td5_track_load_routes(const void *left_data, size_t left_size,
 int td5_track_parse_models_dat(const void *data, size_t size)
 {
     const uint8_t *src;
-    uint32_t first_entry_offset;
     uint32_t raw_entry_count;
     int parsed_count = 0;
     int display_list_count = 0;
+    uint32_t table_start_byte;   /* byte offset of entry table in file */
 
     if (!data || size < 8)
         return 0;
@@ -2380,16 +2380,60 @@ int td5_track_parse_models_dat(const void *data, size_t size)
     memcpy(s_models_blob, src, size);
     s_models_blob_size = size;
 
-    /* Real MODELS.DAT files begin with an 8-byte index table:
-     *   [entry_size_0][entry_offset_0] ... [entry_size_n][entry_offset_n]
-     * The first entry offset therefore also gives the table size. */
-    first_entry_offset = *(const uint32_t *)(const void *)(s_models_blob + 4);
-    if (first_entry_offset == 0 || (first_entry_offset & 7u) != 0 || first_entry_offset > size) {
-        free_models_dat_runtime();
-        return 0;
+    /*
+     * MODELS.DAT format (from Ghidra RE of SetupModelsDisplayList 0x431190):
+     *
+     *   DWORD[0] = entry_count (number of display list blocks)
+     *   DWORD[1..count*2] = table of (offset, block_size) pairs, 8 bytes each
+     *     offset: byte offset from file start to display list block
+     *     block_size: byte size of the block
+     *   [data blocks follow the table]
+     *
+     * The original lookup (0x431260) does: return *(table_base + span_index * 8)
+     * where table_base = &DWORD[1].
+     *
+     * Heuristic to detect which format variant we have:
+     *   - If DWORD[0] looks like a count (small number, and DWORD[1] == 4 + DWORD[0]*8),
+     *     treat DWORD[0] as count with table at byte 4.
+     *   - Otherwise, fall back to offset-based detection (DWORD[1] / 8 = entry count,
+     *     table at byte 0).
+     */
+    {
+        uint32_t dword0 = *(const uint32_t *)(const void *)(s_models_blob);
+        uint32_t dword1 = *(const uint32_t *)(const void *)(s_models_blob + 4);
+
+        /* Try format A: DWORD[0] = count, table starts at byte 4 */
+        if (dword0 > 0 && dword0 < 10000 &&
+            dword1 == 4 + dword0 * 8 &&
+            (size_t)(4 + dword0 * 8) <= size) {
+            raw_entry_count = dword0;
+            table_start_byte = 4;
+            TD5_LOG_I("track", "MODELS.DAT format A: count=%u table@4 first_block@%u",
+                      raw_entry_count, dword1);
+        }
+        /* Try format B: no count header, table at byte 0, count = DWORD[1]/8 */
+        else if (dword1 > 0 && (dword1 & 7u) == 0 && dword1 <= size) {
+            raw_entry_count = dword1 / 8u;
+            table_start_byte = 0;
+            TD5_LOG_I("track", "MODELS.DAT format B: count=%u table@0 first_block@%u",
+                      raw_entry_count, dword1);
+        }
+        /* Try format A fallback: maybe DWORD[1] isn't exactly 4+count*8 but DWORD[0]
+         * is still a count and the table has 8-byte stride from byte 4 */
+        else if (dword0 > 0 && dword0 < 10000 && (size_t)(4 + dword0 * 8) <= size) {
+            raw_entry_count = dword0;
+            table_start_byte = 4;
+            TD5_LOG_I("track", "MODELS.DAT format A (relaxed): count=%u table@4",
+                      raw_entry_count);
+        }
+        else {
+            TD5_LOG_W("track", "MODELS.DAT: cannot determine format (dword0=%u dword1=%u size=%zu)",
+                      dword0, dword1, size);
+            free_models_dat_runtime();
+            return 0;
+        }
     }
 
-    raw_entry_count = first_entry_offset / 8u;
     if (raw_entry_count == 0) {
         free_models_dat_runtime();
         return 0;
@@ -2403,39 +2447,72 @@ int td5_track_parse_models_dat(const void *data, size_t size)
     }
 
     for (uint32_t i = 0; i < raw_entry_count; i++) {
-        const TD5_TrackRawMeshHeader *first_mesh;
-        uint32_t entry_size = *(const uint32_t *)(const void *)(s_models_blob + i * 8u);
-        uint32_t entry_offset = *(const uint32_t *)(const void *)(s_models_blob + i * 8u + 4u);
+        uint32_t tbl_byte = table_start_byte + i * 8u;
+        uint32_t entry_offset, entry_size;
         const uint8_t *entry_base;
         uint32_t sub_mesh_count;
 
-        if (entry_offset == 0 || entry_size == 0)
+        if (tbl_byte + 8 > size)
+            break;
+
+        entry_offset = *(const uint32_t *)(const void *)(s_models_blob + tbl_byte);
+        entry_size   = *(const uint32_t *)(const void *)(s_models_blob + tbl_byte + 4);
+
+        /* In format A the table is [offset, size] pairs.
+         * In format B the table is [size, offset] pairs (legacy interpretation).
+         * Auto-detect: if entry_offset < entry_size and entry_size looks like
+         * a plausible file offset, they might be swapped. */
+        if (table_start_byte == 0) {
+            /* Format B: [size, offset] — swap */
+            uint32_t tmp = entry_offset;
+            entry_offset = entry_size;
+            entry_size = tmp;
+        }
+
+        if (entry_offset == 0 || entry_offset >= size)
             continue;
-        if ((size_t)entry_offset + (size_t)entry_size > size)
+
+        /* Compute block size from next entry's offset if available,
+         * as entry_size may not be reliable in all format variants */
+        if (entry_size == 0 || (size_t)entry_offset + (size_t)entry_size > size) {
+            /* Estimate size from next entry or end of file */
+            uint32_t next_off = (uint32_t)size;
+            if (i + 1 < raw_entry_count) {
+                uint32_t next_tbl = table_start_byte + (i + 1) * 8u;
+                if (next_tbl + 8 <= size) {
+                    uint32_t candidate = (table_start_byte == 0)
+                        ? *(const uint32_t *)(const void *)(s_models_blob + next_tbl + 4)
+                        : *(const uint32_t *)(const void *)(s_models_blob + next_tbl);
+                    if (candidate > entry_offset && candidate <= size)
+                        next_off = candidate;
+                }
+            }
+            entry_size = next_off - entry_offset;
+        }
+
+        if (entry_size < 8 || (size_t)entry_offset + (size_t)entry_size > size)
             continue;
 
         entry_base = s_models_blob + entry_offset;
-        if (entry_size < 8)
-            continue;
-
         sub_mesh_count = *(const uint32_t *)(const void *)entry_base;
-        if (sub_mesh_count == 0)
+        if (sub_mesh_count == 0 || sub_mesh_count > 256)
             continue;
         if (entry_size < 4u + sub_mesh_count * 4u)
             continue;
 
         s_models_entry_offsets[display_list_count] = entry_offset;
         s_models_entry_sizes[display_list_count] = entry_size;
-        /* Temporarily advance count so get_models_display_list_entry can
-         * find the entry we just stored. */
         s_models_display_list_count = display_list_count + 1;
 
-        if (parsed_count < MODELS_DAT_MAX_ENTRIES &&
-            get_display_list_first_mesh_header(display_list_count, &first_mesh)) {
-            TD5_ModelsDatEntry *dst = &s_models[parsed_count++];
-            dst->mesh_ptr = (void *)(uintptr_t)first_mesh;
-            dst->texture_page_id = (int32_t)first_mesh->texture_page_id;
-            dst->bounding_radius = first_mesh->bounding_radius;
+        {
+            const TD5_TrackRawMeshHeader *first_mesh;
+            if (parsed_count < MODELS_DAT_MAX_ENTRIES &&
+                get_display_list_first_mesh_header(display_list_count, &first_mesh)) {
+                TD5_ModelsDatEntry *dst = &s_models[parsed_count++];
+                dst->mesh_ptr = (void *)(uintptr_t)first_mesh;
+                dst->texture_page_id = (int32_t)first_mesh->texture_page_id;
+                dst->bounding_radius = first_mesh->bounding_radius;
+            }
         }
 
         display_list_count++;
@@ -2453,7 +2530,7 @@ int td5_track_parse_models_dat(const void *data, size_t size)
         uint32_t block_size = s_models_entry_sizes[dl];
         uint32_t sub_count = *(uint32_t *)block_base;
 
-        if (sub_count == 0 || block_size < 4u + sub_count * 4u)
+        if (sub_count == 0 || sub_count > 256 || block_size < 4u + sub_count * 4u)
             continue;
 
         for (uint32_t j = 0; j < sub_count; j++) {
@@ -2462,29 +2539,30 @@ int td5_track_parse_models_dat(const void *data, size_t size)
 
             if (mesh_off == 0 || mesh_off >= block_size)
                 continue;
+            if (mesh_off + sizeof(TD5_MeshHeader) > block_size)
+                continue;
 
             /* Convert relative offset to absolute pointer */
             TD5_MeshHeader *mesh = (TD5_MeshHeader *)(block_base + mesh_off);
             *slot = (uint32_t)(uintptr_t)mesh;
 
+            /* Validate mesh fields before relocation */
+            if (mesh->command_count <= 0 || mesh->command_count > 4096 ||
+                mesh->total_vertex_count <= 0 || mesh->total_vertex_count > 65536) {
+                *slot = 0; /* mark as invalid */
+                continue;
+            }
+
             /* Relocate commands/vertices/normals offsets within mesh */
             td5_track_prepare_mesh_resource(mesh);
-
-            /* vertex_data_ptr in commands is 0 for MODELS.DAT meshes;
-             * the renderer uses a running vertex cursor instead. */
-
-            /* MODELS.DAT vertex/origin data is already in float world
-             * coordinates (e.g. origin 1,854,109 matches camera pos
-             * from actor fixed-point 474,652,006 * 1/256 = 1,854,109).
-             * No 1/256 rescale needed — the camera uses the same space. */
         }
     }
 
     if (s_models_display_list_count > 0 && s_span_count > 0)
         rebuild_span_display_list_mapping();
 
-    TD5_LOG_I("track", "MODELS.DAT: %d display lists, %d model entries, relocation complete",
-              s_models_display_list_count, s_model_count);
+    TD5_LOG_I("track", "MODELS.DAT: %d/%u display lists, %d model entries, blob=%zuB",
+              s_models_display_list_count, raw_entry_count, s_model_count, size);
 
     return parsed_count;
 }
@@ -2594,14 +2672,23 @@ int td5_track_get_span_count(void)
 
 int td5_track_is_valid_mesh_ptr(const void *ptr)
 {
+    uintptr_t p;
     if (!ptr || (uintptr_t)ptr < 0x10000u) return 0;
+    p = (uintptr_t)ptr;
+    /* Must be within the models blob or a generated display list allocation */
     if (s_models_blob && s_models_blob_size > 0) {
-        uintptr_t p = (uintptr_t)ptr;
         uintptr_t base = (uintptr_t)s_models_blob;
-        if (p >= base && p < base + s_models_blob_size) return 1;
+        if (p >= base && p < base + s_models_blob_size) {
+            /* Extra sanity: mesh header must fit within blob */
+            if (p + sizeof(TD5_MeshHeader) <= base + s_models_blob_size)
+                return 1;
+            return 0;
+        }
     }
-    /* Also accept heap pointers from generated display lists */
-    return 1;
+    /* Accept heap pointers from generated strip display lists */
+    if (s_display_lists_are_generated_meshes)
+        return 1;
+    return 0;
 }
 
 TD5_StripSpan *td5_track_get_span(int index)

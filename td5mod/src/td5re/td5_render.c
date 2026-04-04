@@ -1164,11 +1164,37 @@ void td5_render_span_display_list(void *display_list_block)
         TD5_MeshHeader *mesh = (TD5_MeshHeader *)(uintptr_t)block[i + 1];
         if (!mesh || (uintptr_t)mesh < 0x10000u || !td5_track_is_valid_mesh_ptr(mesh)) continue;
 
+        /* Validate mesh header fields to prevent crashes from bad data */
+        if (mesh->command_count <= 0 || mesh->command_count > 4096) continue;
+        if (mesh->total_vertex_count <= 0 || mesh->total_vertex_count > 65536) continue;
+        if (!mesh->commands_offset || !mesh->vertices_offset) continue;
+        if ((uintptr_t)(uintptr_t)mesh->commands_offset < 0x10000u) continue;
+        if ((uintptr_t)(uintptr_t)mesh->vertices_offset < 0x10000u) continue;
+
         /* Frustum cull via bounding sphere */
         float cx = mesh->bounding_center_x + mesh->origin_x;
         float cy = mesh->bounding_center_y + mesh->origin_y;
         float cz = mesh->bounding_center_z + mesh->origin_z;
         float r  = mesh->bounding_radius;
+
+        /* Validate bounding data isn't NaN/Inf */
+        if (r != r || r < 0.0f) continue;
+        if (cx != cx || cy != cy || cz != cz) continue;
+
+        {
+            static int s_span_diag = 0;
+            if (s_span_diag < 5) {
+                float ddx = cx - s_camera_pos[0];
+                float ddy = cy - s_camera_pos[1];
+                float ddz = cz - s_camera_pos[2];
+                float dist = ddx*ddx + ddy*ddy + ddz*ddz;
+                TD5_LOG_I(LOG_TAG,
+                    "SPAN_MESH origin=(%.1f,%.1f,%.1f) r=%.1f cam_dist2=%.0f",
+                    mesh->origin_x, mesh->origin_y, mesh->origin_z,
+                    r, dist);
+                s_span_diag++;
+            }
+        }
 
         if (!td5_render_is_sphere_visible(cx, cy, cz, r))
             continue;
@@ -1217,7 +1243,10 @@ void td5_render_prepared_mesh(TD5_MeshHeader *mesh)
     TD5_PrimitiveCmd *cmds = (TD5_PrimitiveCmd *)(uintptr_t)mesh->commands_offset;
     TD5_MeshVertex *base_verts = (TD5_MeshVertex *)(uintptr_t)mesh->vertices_offset;
     if (!cmds || !base_verts || cmd_count <= 0) return;
-    if (cmd_count > 4096) return;
+    if (cmd_count > 4096 || mesh->total_vertex_count > 65536) return;
+
+    /* Validate pointers are accessible (within models blob or heap) */
+    if ((uintptr_t)cmds < 0x10000u || (uintptr_t)base_verts < 0x10000u) return;
 
     /* Running vertex offset: commands consume vertices sequentially.
      * If vertex_data_ptr is 0, use the running offset from base_verts. */
@@ -1240,10 +1269,19 @@ void td5_render_prepared_mesh(TD5_MeshHeader *mesh)
         /* If vertex_data_ptr is 0, point to running cursor position */
         {
             TD5_MeshVertex *cmd_verts = base_verts;
+            int verts_needed = cmd->triangle_count * 3 + cmd->quad_count * 4;
+
             if (cmd->vertex_data_ptr != 0) {
                 cmd_verts = (TD5_MeshVertex *)(uintptr_t)cmd->vertex_data_ptr;
+                if ((uintptr_t)cmd_verts < 0x10000u) continue;
             } else if (vert_cursor > 0) {
                 cmd_verts = base_verts + vert_cursor;
+            }
+
+            /* Bounds check: don't read past total vertex count */
+            if (cmd->vertex_data_ptr == 0 &&
+                vert_cursor + verts_needed > mesh->total_vertex_count) {
+                break; /* out of vertices */
             }
 
             /* Dispatch through table with correct vertex pointer */
@@ -1253,7 +1291,7 @@ void td5_render_prepared_mesh(TD5_MeshHeader *mesh)
 
             /* Advance running cursor by vertices consumed */
             if (cmd->vertex_data_ptr == 0) {
-                vert_cursor += cmd->triangle_count * 3 + cmd->quad_count * 4;
+                vert_cursor += verts_needed;
             }
         }
 
@@ -1367,10 +1405,35 @@ void td5_render_actors_for_view(int view_index)
         }
     }
 
-    TD5_LOG_D(LOG_TAG,
-              "actors for view %d: actors=%d spans=%d/%d meshes=%d span_meshes=%d",
-              view_index, actor_render_count, rendered_spans, span_count,
-              actor_meshes_submitted, s_debug_span_meshes_submitted);
+    {
+        static int s_diag_frame = 0;
+        if (s_diag_frame < 60 || (s_diag_frame % 300) == 0) {
+            TD5_Actor *a0 = td5_game_get_actor(0);
+            TD5_MeshHeader *m0 = td5_render_get_vehicle_mesh(0);
+            TD5_LOG_I(LOG_TAG,
+                      "DIAG frame=%d cam=(%.1f,%.1f,%.1f) "
+                      "actor0_rpos=(%.1f,%.1f,%.1f) "
+                      "actors_rendered=%d span_meshes=%d/%d "
+                      "mesh0=%p "
+                      "clip_near=%d clip_back=%d clip_screen=%d tris_out=%d "
+                      "mesh0_radius=%.1f mesh0_origin=(%.1f,%.1f,%.1f)",
+                      s_diag_frame,
+                      s_camera_pos[0], s_camera_pos[1], s_camera_pos[2],
+                      a0 ? a0->render_pos.x : -1.0f,
+                      a0 ? a0->render_pos.y : -1.0f,
+                      a0 ? a0->render_pos.z : -1.0f,
+                      actor_render_count,
+                      s_debug_span_meshes_submitted, rendered_spans,
+                      (void *)m0,
+                      s_debug_clip_near_rejects, s_debug_clip_backface_rejects,
+                      s_debug_clip_screen_rejects, s_debug_clip_emitted_tris,
+                      m0 ? m0->bounding_radius : -1.0f,
+                      m0 ? m0->origin_x : -1.0f,
+                      m0 ? m0->origin_y : -1.0f,
+                      m0 ? m0->origin_z : -1.0f);
+        }
+        s_diag_frame++;
+    }
 
     if (rendered_spans > 0) {
         /* Keep the legacy renderer fallback disabled while debugging the
@@ -1852,7 +1915,8 @@ void td5_render_load_sky(const char *path)
     void *pixels = NULL;
     int w = 0, h = 0;
 
-    if (s_sky_loaded) return;
+    /* Reset so a new sky is loaded each race */
+    s_sky_loaded = 0;
 
     if (td5_asset_decode_png_rgba32(path, &pixels, &w, &h)) {
         if (td5_plat_render_upload_texture(SKY_TEXTURE_PAGE, pixels, w, h, 2)) {
