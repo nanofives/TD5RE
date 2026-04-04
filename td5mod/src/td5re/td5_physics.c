@@ -1334,23 +1334,25 @@ void td5_physics_integrate_pose(TD5_Actor *actor)
         int32_t cp = cos_fixed12(pitch_a);
         int32_t sp = sin_fixed12(pitch_a);
 
-        /* Rotation matrix from FUN_0042e1e0 (Ghidra decompilation).
-         * Includes built-in coordinate system conversion (identity is
-         * a 90-degree X-rotation, not standard identity).
-         * A=roll, B=yaw, C=pitch; cr/sr, cy/sy, cp/sp = cos/sin of each. */
+        /* ZYX euler rotation matrix (row-major).
+         * NOTE: the original binary (FUN_0042e1e0) includes a coordinate
+         * system conversion in its matrix, but the rest of the source port
+         * assumes standard identity. Do NOT change this formula without
+         * also updating all dependent code (wheel contacts, suspension,
+         * camera multiply, collision). */
         float s = 1.0f / 4096.0f;
 
-        actor->rotation_matrix.m[0] = (float)(((cp * cy >> 12) * cr >> 12) + ((sp * sy) >> 12)) * s;
-        actor->rotation_matrix.m[1] = (float)(((sp * cy >> 12) * cr >> 12) - ((cp * sy) >> 12)) * s;
-        actor->rotation_matrix.m[2] = (float)((cy * sr) >> 12) * s;
+        actor->rotation_matrix.m[0] = (float)((cy * cp) >> 12) * s;
+        actor->rotation_matrix.m[1] = (float)(((cy * sp >> 12) * sr >> 12) - ((sy * cr) >> 12)) * s;
+        actor->rotation_matrix.m[2] = (float)(((cy * sp >> 12) * cr >> 12) + ((sy * sr) >> 12)) * s;
 
-        actor->rotation_matrix.m[3] = (float)((cp * sr) >> 12) * s;
-        actor->rotation_matrix.m[4] = (float)((sp * sr) >> 12) * s;
-        actor->rotation_matrix.m[5] = (float)(-cr) * s;
+        actor->rotation_matrix.m[3] = (float)((sy * cp) >> 12) * s;
+        actor->rotation_matrix.m[4] = (float)(((sy * sp >> 12) * sr >> 12) + ((cy * cr) >> 12)) * s;
+        actor->rotation_matrix.m[5] = (float)(((sy * sp >> 12) * cr >> 12) - ((cy * sr) >> 12)) * s;
 
-        actor->rotation_matrix.m[6] = (float)(((cp * sy >> 12) * cr >> 12) - ((sp * cy) >> 12)) * s;
-        actor->rotation_matrix.m[7] = (float)(((sp * sy >> 12) * cr >> 12) + ((cp * cy) >> 12)) * s;
-        actor->rotation_matrix.m[8] = (float)((sy * sr) >> 12) * s;
+        actor->rotation_matrix.m[6] = (float)(-sp) * s;
+        actor->rotation_matrix.m[7] = (float)((cp * sr) >> 12) * s;
+        actor->rotation_matrix.m[8] = (float)((cp * cr) >> 12) * s;
     }
 
     /* 6. Compute render position (world_pos / 256 as float) */
@@ -1439,16 +1441,16 @@ static void update_vehicle_pose_from_physics(TD5_Actor *actor)
 
         float s = 1.0f / 4096.0f;
 
-        /* Exact formula from FUN_0042e1e0 (Ghidra) */
-        actor->rotation_matrix.m[0] = (float)(((cp * cy >> 12) * cr >> 12) + ((sp * sy) >> 12)) * s;
-        actor->rotation_matrix.m[1] = (float)(((sp * cy >> 12) * cr >> 12) - ((cp * sy) >> 12)) * s;
-        actor->rotation_matrix.m[2] = (float)((cy * sr) >> 12) * s;
-        actor->rotation_matrix.m[3] = (float)((cp * sr) >> 12) * s;
-        actor->rotation_matrix.m[4] = (float)((sp * sr) >> 12) * s;
-        actor->rotation_matrix.m[5] = (float)(-cr) * s;
-        actor->rotation_matrix.m[6] = (float)(((cp * sy >> 12) * cr >> 12) - ((sp * cy) >> 12)) * s;
-        actor->rotation_matrix.m[7] = (float)(((sp * sy >> 12) * cr >> 12) + ((cp * cy) >> 12)) * s;
-        actor->rotation_matrix.m[8] = (float)((sy * sr) >> 12) * s;
+        /* ZYX euler (same as integrate_pose) */
+        actor->rotation_matrix.m[0] = (float)((cy * cp) >> 12) * s;
+        actor->rotation_matrix.m[1] = (float)(((cy * sp >> 12) * sr >> 12) - ((sy * cr) >> 12)) * s;
+        actor->rotation_matrix.m[2] = (float)(((cy * sp >> 12) * cr >> 12) + ((sy * sr) >> 12)) * s;
+        actor->rotation_matrix.m[3] = (float)((sy * cp) >> 12) * s;
+        actor->rotation_matrix.m[4] = (float)(((sy * sp >> 12) * sr >> 12) + ((cy * cr) >> 12)) * s;
+        actor->rotation_matrix.m[5] = (float)(((sy * sp >> 12) * cr >> 12) - ((cy * sr) >> 12)) * s;
+        actor->rotation_matrix.m[6] = (float)(-sp) * s;
+        actor->rotation_matrix.m[7] = (float)((cp * sr) >> 12) * s;
+        actor->rotation_matrix.m[8] = (float)((cp * cr) >> 12) * s;
     }
 
     /* Render position */
