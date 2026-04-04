@@ -1938,12 +1938,12 @@ void td5_render_apply_mesh_projection_effect(TD5_MeshVertex *verts, int count, i
             float wx = verts[i].view_x * 0.001f;
             float wz = verts[i].view_z * 0.001f;
             float time_ofs = (float)g_tick_counter * 0.0002f;
-            verts[i].proj_u = wx + time_ofs;
-            verts[i].proj_v = wz + time_ofs * 0.7f;
+            verts[i].tex_u = wx + time_ofs;
+            verts[i].tex_v = wz + time_ofs * 0.7f;
         } else if (mode == 2) {
             /* Chrome/envmap fallback from view-space direction. */
-            verts[i].proj_u = verts[i].view_x * 0.5f + 0.5f;
-            verts[i].proj_v = verts[i].view_y * 0.5f + 0.5f;
+            verts[i].tex_u = verts[i].view_x * 0.5f + 0.5f;
+            verts[i].tex_v = verts[i].view_y * 0.5f + 0.5f;
         }
     }
 }

@@ -320,8 +320,8 @@ static int build_placeholder_display_lists(void)
         fallback->verts[i].view_y = 0.0f;
         fallback->verts[i].view_z = 0.0f;
         fallback->verts[i].lighting = (i < 2) ? 0xE0u : 0xA0u;
-        fallback->verts[i].proj_u = 0.0f;
-        fallback->verts[i].proj_v = 0.0f;
+        fallback->verts[i]._pad28 = 0.0f;
+        fallback->verts[i]._pad28 = 0.0f;
         fallback->norms[i].nx = 0.0f;
         fallback->norms[i].ny = 1.0f;
         fallback->norms[i].nz = 0.0f;

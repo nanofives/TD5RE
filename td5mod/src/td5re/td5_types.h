@@ -405,11 +405,12 @@ typedef struct TD5_PrimitiveCmd {
 
 /** Mesh vertex (44 bytes, 0x2C stride) */
 typedef struct TD5_MeshVertex {
-    float    pos_x, pos_y, pos_z;           /* model-space */
-    float    view_x, view_y, view_z;        /* view-space (runtime) */
-    uint32_t lighting;                       /* intensity byte in low 8 bits */
-    float    tex_u, tex_v;                   /* primary UV */
-    float    proj_u, proj_v;                /* secondary/projection UV */
+    float    pos_x, pos_y, pos_z;           /* +0x00: model-space position */
+    float    view_x, view_y, view_z;        /* +0x0C: view-space (runtime output) */
+    uint32_t lighting;                       /* +0x18: pre-baked vertex color (BGRA) */
+    uint32_t specular;                       /* +0x1C: specular/padding */
+    float    tex_u, tex_v;                   /* +0x20: primary UV */
+    uint32_t _pad28;                         /* +0x28: padding to 44 bytes */
 } TD5_MeshVertex;
 
 /** Vertex normal (16 bytes) */
