@@ -117,6 +117,30 @@ extern void td5_platform_win32_init(void *ddraw4, void *d3ddevice3,
  * WinMain
  * ======================================================================== */
 
+/* Crash handler: logs the faulting address before terminating. */
+static LONG WINAPI td5_crash_handler(EXCEPTION_POINTERS *ep)
+{
+    char crash_msg[512];
+    DWORD code = ep->ExceptionRecord->ExceptionCode;
+    void *addr = ep->ExceptionRecord->ExceptionAddress;
+    void *fault_addr = (ep->ExceptionRecord->NumberParameters >= 2)
+        ? (void *)ep->ExceptionRecord->ExceptionInformation[1] : NULL;
+    snprintf(crash_msg, sizeof(crash_msg),
+        "CRASH: code=0x%08lX at EIP=%p access=%p EAX=0x%08lX ECX=0x%08lX EDX=0x%08lX",
+        code, addr, fault_addr,
+        (unsigned long)ep->ContextRecord->Eax,
+        (unsigned long)ep->ContextRecord->Ecx,
+        (unsigned long)ep->ContextRecord->Edx);
+    dbglog(crash_msg);
+    /* Also write to a crash file in case the log is buffered */
+    {
+        FILE *cf = fopen("td5re_crash.log", "w");
+        if (cf) { fprintf(cf, "%s\n", crash_msg); fclose(cf); }
+    }
+    MessageBoxA(NULL, crash_msg, "TD5RE Crash", MB_OK | MB_ICONERROR);
+    return EXCEPTION_EXECUTE_HANDLER;
+}
+
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
                    LPSTR lpCmdLine, int nCmdShow)
 {
@@ -135,6 +159,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     (void)hPrevInstance;
     (void)lpCmdLine;
     (void)nCmdShow;
+
+    SetUnhandledExceptionFilter(td5_crash_handler);
 
     /* Set Windows timer resolution to 1ms so Sleep() and GetTickCount()
      * are accurate. Without this, Sleep(16) may sleep ~30ms (15.6ms default). */

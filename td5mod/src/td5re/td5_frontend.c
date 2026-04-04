@@ -1769,10 +1769,11 @@ static void frontend_poll_input(void) {
         s_mouse_click_latched = 0;
     }
 
-    /* Mouse hover: when mouse moves over a button, select it immediately.
-     * Original UpdateFrontendDisplayModeSelection (0x426580) updates the
-     * selection index on hover so buttons highlight as the cursor passes over
-     * them.  A single click then confirms the already-selected button. */
+    /* Mouse hover: track hovered button but do NOT update selection.
+     * Original UpdateFrontendDisplayModeSelection (0x426580) uses a separate
+     * hover index (DAT_00498700) distinct from the selection index.
+     * Hover only draws the green highlight border; the purple/gold selected
+     * state changes on click only.  First click selects, second confirms. */
     if (mouse_moved) {
         s_mouse_hover_button = -1;
         for (int i = 0; i < FE_MAX_BUTTONS; i++) {
@@ -1780,11 +1781,6 @@ static void frontend_poll_input(void) {
             if (s_mouse_x >= s_buttons[i].x && s_mouse_x < s_buttons[i].x + s_buttons[i].w &&
                 s_mouse_y >= s_buttons[i].y && s_mouse_y < s_buttons[i].y + s_buttons[i].h) {
                 s_mouse_hover_button = i;
-                if (i != s_selected_button) {
-                    s_selected_button = i;
-                    s_selection_from_mouse = 1;
-                    frontend_play_sfx(2);
-                }
                 break;
             }
         }
@@ -2636,7 +2632,7 @@ int td5_frontend_init_resources(void) {
     s_total_unlocked_cars = 37; /* all 37 cars visible + selectable */
 
     memset(s_track_lock_table, 0, sizeof(s_track_lock_table));
-    s_total_unlocked_tracks = 26; /* all 26 tracks visible + selectable */
+    s_total_unlocked_tracks = 20; /* 20 race tracks; indices 20-25 are cup-only */
 
     /* Background gallery slideshow (LoadExtrasGalleryImageSurfaces 0x40D590) */
     frontend_load_bg_gallery();
@@ -3309,10 +3305,17 @@ static void frontend_render_car_selection_preview(float sx, float sy) {
      * (0x40DFC0). 0x5c = RGB888 B=92 → same dark blue as CarSelBar1 dominant pixel.
      * Rect matches car preview surface: 408x300 starting at (232, 96).
      * In the source port we clear every frame, so this must be redrawn each frame.
-     * Original y = screenH - 0x164 = 480 - 356 = 124 (confirmed at 0x40EB3B). */
-    td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
+     * Original y = screenH - 0x164 = 480 - 356 = 124 (confirmed at 0x40EB3B).
+     * Force depth test to ALWAYS to guarantee the fill overwrites the background. */
+    g_backend.state.z_func = 1;  /* triggers DS_Z_ON_WRITE_ON_ALWAYS in ApplyStateCache */
+    g_backend.state.z_enable = 1;
+    g_backend.state.z_write = 1;
+    g_backend.state.blend_enable = 0;
+    g_backend.state.dirty = 1;
     fe_draw_quad(232.0f * sx, 124.0f * sy, 408.0f * sx, 300.0f * sy, 0xFF00005C,
                  s_white_tex_page, 0, 0, 1, 1);
+    g_backend.state.z_func = 0;  /* restore to LESS_EQUAL */
+    g_backend.state.dirty = 1;
 
     if (s_inner_state == 15) {
         /* Stats sub-screen: car image at 35% opacity over the blue panel background,
@@ -3831,8 +3834,7 @@ void td5_frontend_render_ui_rects(void) {
              * frame with alpha blending; background shows through naturally. */
             int bb_state;
             if (s_buttons[i].disabled)                               bb_state = 2;
-            else if (flash_active || s_buttons[i].highlight_ramp == 6
-                     || (i == s_selected_button && s_selection_from_mouse)) bb_state = 0;
+            else if (flash_active || s_buttons[i].highlight_ramp == 6) bb_state = 0;
             else                                                     bb_state = 1;
 
             td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
@@ -3863,10 +3865,10 @@ void td5_frontend_render_ui_rects(void) {
         }
 
         /* Green highlight border (RenderFrontendDisplayModeHighlight 0x4263e0).
-         * 2px outline, mouse-hover only. Inset 20/22/4/6 px from edges.
-         * Color 0xC000 → pure green ≈ (0,128,0). */
-        if (i == s_selected_button && s_selection_from_mouse &&
-            !s_buttons[i].disabled && ramp_t > 0.01f) {
+         * 2px outline, mouse-hover only. Driven by the separate hover index
+         * (DAT_00498700), NOT the selection index — hover does not select. */
+        if (i == s_mouse_hover_button &&
+            !s_buttons[i].disabled) {
             uint32_t gc = 0xFF008000;
             float inL = 20.0f * sx, inR = 22.0f * sx;
             float inT = 4.0f * sy,  inB = 6.0f * sy;
