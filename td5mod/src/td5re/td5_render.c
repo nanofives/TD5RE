@@ -1418,30 +1418,7 @@ void td5_render_actors_for_view(int view_index)
 
             td5_track_apply_segment_lighting(actor, view_index);
 
-            /* Build the render rotation using the exact Ghidra formula
-             * (FUN_0042e1e0) which includes the coordinate conversion.
-             * The physics rotation_matrix uses standard ZYX (for contacts/
-             * suspension), but the car mesh needs the original convention. */
-            {
-                float render_rot[9];
-                unsigned int ra = (unsigned int)actor->display_angles.roll  & 0xFFF;
-                unsigned int ya = (unsigned int)actor->display_angles.yaw   & 0xFFF;
-                unsigned int pa = (unsigned int)actor->display_angles.pitch & 0xFFF;
-                float sA = SinFloat12bit((int)ra), cA = CosFloat12bit(ra);
-                float sB = SinFloat12bit((int)ya), cB = CosFloat12bit(ya);
-                float sC = SinFloat12bit((int)pa), cC = CosFloat12bit(pa);
-                /* A=roll, B=yaw, C=pitch — from Ghidra FUN_0042e1e0 */
-                render_rot[0] = cC * cB * cA + sC * sB;
-                render_rot[1] = sC * cB * cA - cC * sB;
-                render_rot[2] = cB * sA;
-                render_rot[3] = cC * sA;
-                render_rot[4] = sC * sA;
-                render_rot[5] = -cA;
-                render_rot[6] = cC * sB * cA - sC * cB;
-                render_rot[7] = sC * sB * cA + cC * cB;
-                render_rot[8] = sB * sA;
-                mat3x3_mul(s_camera_basis, render_rot, view_rot.m);
-            }
+            mat3x3_mul(s_camera_basis, actor->rotation_matrix.m, view_rot.m);
             td5_render_load_rotation(&view_rot);
 
             render_pos.x = actor->render_pos.x;
