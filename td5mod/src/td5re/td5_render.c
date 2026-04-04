@@ -426,9 +426,11 @@ static void update_render_camera_from_game(void)
      * built without this conversion, so apply it here as a post-multiply:
      * basis_render = basis_camera * Rx(90°).
      * Rx(90°) swaps columns 1↔2 with sign flip on new column 2. */
-    s_camera_basis[0] = raw[0];  s_camera_basis[1] = raw[2];  s_camera_basis[2] = -raw[1];
-    s_camera_basis[3] = raw[3];  s_camera_basis[4] = raw[5];  s_camera_basis[5] = -raw[4];
-    s_camera_basis[6] = raw[6];  s_camera_basis[7] = raw[8];  s_camera_basis[8] = -raw[7];
+    /* Rx(-90°): inverse of the Rx(+90°) that was in FUN_0042e1e0.
+     * Swaps columns 1↔2 with sign flip on new column 1. */
+    s_camera_basis[0] = raw[0];  s_camera_basis[1] = -raw[2];  s_camera_basis[2] = raw[1];
+    s_camera_basis[3] = raw[3];  s_camera_basis[4] = -raw[5];  s_camera_basis[5] = raw[4];
+    s_camera_basis[6] = raw[6];  s_camera_basis[7] = -raw[8];  s_camera_basis[8] = raw[7];
 }
 
 /**
@@ -1184,9 +1186,9 @@ void td5_render_span_display_list(void *display_list_block)
         TD5_MeshHeader *mesh = (TD5_MeshHeader *)(uintptr_t)block[i + 1];
         if (!mesh || (uintptr_t)mesh < 0x100000u || !td5_track_is_valid_mesh_ptr(mesh)) continue;
 
-        /* Validate mesh header fields to prevent crashes from bad data */
+        /* Validate mesh header fields — skip empty and out-of-range meshes */
         if (mesh->command_count <= 0 || mesh->command_count > 4096) continue;
-        if (mesh->total_vertex_count <= 0 || mesh->total_vertex_count > 65536) continue;
+        if (mesh->total_vertex_count <= 0 || mesh->total_vertex_count > 131072) continue;
         if (!mesh->commands_offset || !mesh->vertices_offset) continue;
         if ((uintptr_t)mesh->commands_offset < 0x10000u) continue;
         if ((uintptr_t)mesh->vertices_offset < 0x10000u) continue;
