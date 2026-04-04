@@ -31,6 +31,10 @@
 int  td5_asset_init(void);
 void td5_asset_shutdown(void);
 
+/* Returns 1 if static atlas slot was loaded from a real .dat file, 0 otherwise.
+ * Use to guard synthetic texture generation so it only runs when the .dat is absent. */
+int  td5_asset_static_tpage_is_real(int slot);
+
 /* ========================================================================
  * ZIP Archive System
  *

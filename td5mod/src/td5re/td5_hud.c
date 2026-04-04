@@ -490,13 +490,10 @@ void td5_hud_init_font_atlas(void)
     s_queued_glyph_count = 0;
 
     /* Generate synthetic font texture for page 705 using GDI.
-     * tpage5.dat is not extracted from the original game data, so we build
-     * a 256x512 BGRA atlas page and render the 64-glyph 4x16 grid into it
-     * at the correct atlas offset (atlas_x=96, atlas_y=192, size=160x64).
-     *
-     * The glyph table stores pixel UV coordinates; hud_build_quad normalizes
-     * them by 256/512 before submission to D3D11. */
-    if (font_entry->texture_page > 0) {
+     * Only runs when tpage5.dat is absent; skipped if the real .dat was loaded
+     * so the original game artwork (WHEELS, UTURN, SPEEDOFONT, FONT…) is kept. */
+    if (font_entry->texture_page > 0 &&
+        !td5_asset_static_tpage_is_real((int)(font_entry->texture_page - 700))) {
         /* 256x256 BGRA = 256 KB; static to avoid stack overflow.
          * Atlas pages are 256x256 (confirmed by UV scale = 1/256 for both axes). */
         static uint8_t s_font_page_buf[256 * 256 * 4];
@@ -601,7 +598,8 @@ void td5_hud_init_font_atlas(void)
      * (12 o'clock) at 60 mph, end: 390°=30° (2 o'clock) at 120 mph. */
     {
         TD5_AtlasEntry *speedo_entry = td5_asset_find_atlas_entry(NULL, "SPEEDO");
-        if (speedo_entry && speedo_entry->texture_page > 0) {
+        if (speedo_entry && speedo_entry->texture_page > 0 &&
+            !td5_asset_static_tpage_is_real((int)(speedo_entry->texture_page - 700))) {
             static uint8_t s_speedo_page_buf[256 * 256 * 4];
             memset(s_speedo_page_buf, 0, sizeof(s_speedo_page_buf));
 

@@ -323,6 +323,12 @@ void td5_asset_shutdown(void)
     TD5_LOG_I(LOG_TAG, "asset module shut down");
 }
 
+int td5_asset_static_tpage_is_real(int slot)
+{
+    if (slot < 0 || slot >= 32) return 0;
+    return s_static_page_done[slot] == 1;
+}
+
 /* ========================================================================
  * ZIP Central Directory Parser
  *
@@ -1788,27 +1794,9 @@ int td5_asset_load_vehicle(int car_index, int slot)
     /* Relocate internal offsets (commands, vertices, normals) to absolute ptrs */
     td5_track_prepare_mesh_resource(mesh);
 
-    /* Scale from integer coordinate system (256 units = 1 world unit) to the
-     * 1/256 render scale, matching td5_track_parse_models_dat processing. */
-    {
-        const float inv256 = 1.0f / 256.0f;
-        mesh->origin_x          *= inv256;
-        mesh->origin_y          *= inv256;
-        mesh->origin_z          *= inv256;
-        mesh->bounding_center_x *= inv256;
-        mesh->bounding_center_y *= inv256;
-        mesh->bounding_center_z *= inv256;
-        mesh->bounding_radius   *= inv256;
-
-        TD5_MeshVertex *verts = (TD5_MeshVertex *)(uintptr_t)mesh->vertices_offset;
-        if (verts && mesh->total_vertex_count > 0) {
-            for (int v = 0; v < mesh->total_vertex_count; v++) {
-                verts[v].pos_x *= inv256;
-                verts[v].pos_y *= inv256;
-                verts[v].pos_z *= inv256;
-            }
-        }
-    }
+    /* Vehicle mesh data is in integer-coord float space, same as
+     * MODELS.DAT and the camera/render coordinate system.
+     * No rescaling needed. */
 
     /* Register mesh with render system */
     td5_render_set_vehicle_mesh(slot, mesh);
