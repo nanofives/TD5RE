@@ -1163,10 +1163,18 @@ void td5_render_span_display_list(void *display_list_block)
      *   [0] = sub_mesh_count
      *   [1..N] = pointers to MeshResourceHeader (relocated by ParseModelsDat)
      */
+    static int s_debug_reject_ptr = 0;
+    static int s_debug_reject_counts = 0;
+    static int s_debug_reject_offsets = 0;
+    static int s_debug_reject_blob = 0;
+    static int s_debug_accept = 0;
+    static int s_debug_dl_calls = 0;
+
     if (!display_list_block) return;
 
     uint32_t *block = (uint32_t *)display_list_block;
     int count = (int)block[0];
+    s_debug_dl_calls++;
     if (count <= 0 || count > 256) return; /* sanity */
 
     TD5_LOG_D(LOG_TAG,
@@ -1175,23 +1183,40 @@ void td5_render_span_display_list(void *display_list_block)
 
     for (int i = 0; i < count; i++) {
         TD5_MeshHeader *mesh = (TD5_MeshHeader *)(uintptr_t)block[i + 1];
-        if (!mesh || (uintptr_t)mesh < 0x100000u || !td5_track_is_valid_mesh_ptr(mesh)) continue;
+        if (!mesh || (uintptr_t)mesh < 0x100000u || !td5_track_is_valid_mesh_ptr(mesh)) {
+            s_debug_reject_ptr++; continue;
+        }
 
         /* Validate mesh header fields — skip empty and out-of-range meshes */
-        if (mesh->command_count <= 0 || mesh->command_count > 4096) continue;
-        if (mesh->total_vertex_count <= 0 || mesh->total_vertex_count > 131072) continue;
-        if (!mesh->commands_offset || !mesh->vertices_offset) continue;
-        if ((uintptr_t)mesh->commands_offset < 0x10000u) continue;
-        if ((uintptr_t)mesh->vertices_offset < 0x10000u) continue;
+        if (mesh->command_count <= 0 || mesh->command_count > 4096) {
+            s_debug_reject_counts++; continue;
+        }
+        if (mesh->total_vertex_count <= 0 || mesh->total_vertex_count > 131072) {
+            s_debug_reject_counts++; continue;
+        }
+        if (!mesh->commands_offset || !mesh->vertices_offset) {
+            s_debug_reject_offsets++; continue;
+        }
+        if ((uintptr_t)mesh->commands_offset < 0x10000u) {
+            s_debug_reject_offsets++; continue;
+        }
+        if ((uintptr_t)mesh->vertices_offset < 0x10000u) {
+            s_debug_reject_offsets++; continue;
+        }
 
         /* Validate commands and vertices pointers are within models blob
          * OR valid heap memory (strip-generated display lists use calloc). */
         if (!td5_track_is_ptr_in_blob((void *)(uintptr_t)mesh->commands_offset,
                 (size_t)mesh->command_count * sizeof(TD5_PrimitiveCmd)) &&
-            !td5_track_is_valid_mesh_ptr((void *)(uintptr_t)mesh->commands_offset)) continue;
+            !td5_track_is_valid_mesh_ptr((void *)(uintptr_t)mesh->commands_offset)) {
+            s_debug_reject_blob++; continue;
+        }
         if (!td5_track_is_ptr_in_blob((void *)(uintptr_t)mesh->vertices_offset,
                 (size_t)mesh->total_vertex_count * sizeof(TD5_MeshVertex)) &&
-            !td5_track_is_valid_mesh_ptr((void *)(uintptr_t)mesh->vertices_offset)) continue;
+            !td5_track_is_valid_mesh_ptr((void *)(uintptr_t)mesh->vertices_offset)) {
+            s_debug_reject_blob++; continue;
+        }
+        s_debug_accept++;
 
         /* Frustum cull via bounding sphere */
         float cx = mesh->bounding_center_x + mesh->origin_x;
@@ -1244,6 +1269,14 @@ void td5_render_span_display_list(void *display_list_block)
             td5_render_prepared_mesh(mesh);
             s_debug_span_meshes_submitted++;
         }
+    }
+
+    if ((s_debug_dl_calls % 500) == 1) {
+        TD5_LOG_I(LOG_TAG,
+            "mesh filter: calls=%d accept=%d rej_ptr=%d rej_cnt=%d "
+            "rej_off=%d rej_blob=%d",
+            s_debug_dl_calls, s_debug_accept, s_debug_reject_ptr,
+            s_debug_reject_counts, s_debug_reject_offsets, s_debug_reject_blob);
     }
 }
 
@@ -1418,7 +1451,17 @@ void td5_render_actors_for_view(int view_index)
 
             td5_track_apply_segment_lighting(actor, view_index);
 
-            mat3x3_mul(s_camera_basis, actor->rotation_matrix.m, view_rot.m);
+            /* Car meshes store Y=forward, Z=up; rendering expects Y=up,
+             * Z=forward. Swap columns 1 and 2 of actor rotation to convert
+             * mesh-local axes before the camera multiply. */
+            {
+                const float *am = actor->rotation_matrix.m;
+                float conv[9];
+                conv[0] = am[0]; conv[1] = am[2]; conv[2] = am[1];
+                conv[3] = am[3]; conv[4] = am[5]; conv[5] = am[4];
+                conv[6] = am[6]; conv[7] = am[8]; conv[8] = am[7];
+                mat3x3_mul(s_camera_basis, conv, view_rot.m);
+            }
             td5_render_load_rotation(&view_rot);
 
             render_pos.x = actor->render_pos.x;
