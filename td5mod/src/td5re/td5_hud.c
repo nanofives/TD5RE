@@ -80,53 +80,78 @@ extern float td5_sin_12bit(uint32_t angle);
 extern uint32_t td5_compute_heading_delta(void *route_entry);
 
 /* ========================================================================
- * External game state references
- *
- * These map to original global variables. In the final source port they
- * live in the appropriate module's state; here we reference them via
- * extern declarations matching the original memory layout.
+ * HUD-owned globals (migrated from td5re_stubs.c)
  * ======================================================================== */
 
-/* Race configuration (0x4AAF64..0x4AAF8C) */
-extern int     g_replay_mode;            /* 0x4AAF64 */
-extern int     g_wanted_mode_enabled;    /* 0x4AAF68 */
-extern int     g_special_encounter;      /* 0x4AAF6C */
-extern int     g_race_rule_variant;      /* 0x4AAF70 */
-extern int     g_game_type;              /* 0x4AAF74: TD5_GameType */
-extern int     g_split_screen_mode;      /* 0x4AAF89: byte, viewport layout */
-extern int     g_racer_count;            /* 0x4AAF00: total racers in race */
-extern float   g_render_width_f;         /* 0x4AAF08 */
-extern float   g_render_height_f;        /* 0x4AAF0C */
-extern int     g_render_width;           /* 0x4AAF10 */
-extern int     g_render_height;          /* 0x4AAF14 */
-extern int     g_track_is_circuit;       /* 0x466E94 */
-extern int     g_track_type_mode;        /* 0x4AAEF8 */
-extern int     g_hud_metric_mode;        /* 0x473E30 */
-extern float   g_instant_fps;            /* 0x466E90 */
-extern uint32_t g_tick_counter;          /* 0x4AADA0 */
-extern int     g_kph_mode;              /* 0x4B11C4: 0=MPH, 1=KPH */
+int     g_hud_metric_mode       = 0;
+int     g_kph_mode              = 0;
 
-/* Actor data base pointers (0x4AB2C4..0x4AB47D) */
-extern int     g_actor_slot_map[2];      /* 0x466EA0: per-view actor index */
-extern void   *g_actor_pool;             /* base of actor array */
+/* HUD string table: 13 entries per player (matches Language.dll SNK exports).
+ * [0..5] = position labels, [6..12] = UI labels (LAP, TIME, DEMO MODE, etc.) */
+static const char *s_default_position_strings[] = {
+    "1ST", "2ND", "3RD", "4TH", "5TH", "6TH",
+    "WRONG WAY", "PIT STOP", "FINISH", "BEST LAP",
+    "DEMO MODE", "TIME", "LAP",
+    /* P2 copy */
+    "1ST", "2ND", "3RD", "4TH", "5TH", "6TH",
+    "WRONG WAY", "PIT STOP", "FINISH", "BEST LAP",
+    "DEMO MODE", "TIME", "LAP"
+};
+const char **g_position_strings = s_default_position_strings;
 
-/* Track strip data pointers */
-extern int     g_strip_span_count;       /* 0x4C3D90 */
-extern int     g_strip_total_segments;   /* 0x4C3D94 */
-extern void   *g_strip_span_base;        /* 0x4C3D9C */
-extern void   *g_strip_vertex_base;      /* 0x4C3D98 */
+static const char *s_default_wanted_line1[] = { "YOU ARE", "PULL OVER", "" };
+static const char *s_default_wanted_line2[] = { "WANTED!", "NOW!", "" };
+const char **g_wanted_msg_line1 = s_default_wanted_line1;
+const char **g_wanted_msg_line2 = s_default_wanted_line2;
 
-/* Checkpoint data */
-extern uint16_t *g_checkpoint_array;     /* 0x4AED88 */
+int     g_wanted_msg_timer      = 0;
+int     g_wanted_msg_index      = 0;
 
-/* String tables */
-extern const char **g_position_strings;  /* 0x473E38: "1ST".."6TH", labels */
-extern const char **g_wanted_msg_line1;  /* 0x474038 */
-extern const char **g_wanted_msg_line2;  /* 0x47403C */
+const int8_t g_pause_glyph_widths[256] = {0};
 
-/* Wanted state */
-extern int     g_wanted_msg_timer;       /* 0x4BF50C */
-extern int     g_wanted_msg_index;       /* 0x4BF508 */
+/* English audio-options overlay string table. */
+static const char *s_eng_pause_strings[] = {
+    "SOUND EFFECTS",  (const char *)(intptr_t)1,
+    "MUSIC",          (const char *)(intptr_t)1,
+    "CD MUSIC",       (const char *)(intptr_t)1,
+    "CONTINUE",       (const char *)(intptr_t)2,
+    "QUIT",           (const char *)(intptr_t)2,
+    NULL
+};
+const char **g_pause_page_strings[8] = {
+    s_eng_pause_strings, NULL, NULL, NULL, NULL, NULL, NULL, NULL
+};
+const int g_pause_page_sizes[8] = { 256, 0, 0, 0, 0, 0, 0, 0 };
+
+/* ========================================================================
+ * External game state references
+ * ======================================================================== */
+
+extern int     g_replay_mode;            /* td5_game.c */
+extern int     g_wanted_mode_enabled;    /* td5_game.c */
+extern int     g_special_encounter;      /* td5_game.c */
+extern int     g_race_rule_variant;      /* td5_game.c */
+extern int     g_game_type;              /* td5_game.c */
+extern int     g_split_screen_mode;      /* td5_game.c */
+extern int     g_racer_count;            /* td5_game.c */
+extern float   g_render_width_f;         /* td5_render.c */
+extern float   g_render_height_f;        /* td5_render.c */
+extern int     g_render_width;           /* td5_render.c */
+extern int     g_render_height;          /* td5_render.c */
+extern int     g_track_is_circuit;       /* td5_track.c */
+extern int     g_track_type_mode;        /* td5_track.c */
+extern float   g_instant_fps;            /* td5_game.c */
+extern uint32_t g_tick_counter;          /* td5_game.c */
+
+extern int     g_actor_slot_map[2];      /* td5_game.c */
+extern void   *g_actor_pool;             /* td5_game.c */
+
+extern int     g_strip_span_count;       /* td5_track.c */
+extern int     g_strip_total_segments;   /* td5_track.c */
+extern void   *g_strip_span_base;        /* td5_track.c */
+extern void   *g_strip_vertex_base;      /* td5_track.c */
+
+extern uint16_t *g_checkpoint_array;     /* td5_track.c */
 
 /* ========================================================================
  * Module-local state
@@ -490,10 +515,11 @@ void td5_hud_init_font_atlas(void)
     s_queued_glyph_count = 0;
 
     /* Generate synthetic font texture for page 705 using GDI.
-     * Only runs when tpage5.dat is absent; skipped if the real .dat was loaded
-     * so the original game artwork (WHEELS, UTURN, SPEEDOFONT, FONT…) is kept. */
-    if (font_entry->texture_page > 0 &&
-        !td5_asset_static_tpage_is_real((int)(font_entry->texture_page - 700))) {
+     * Always runs: even when tpage5.dat is loaded from disk, it never
+     * contains SPEEDOFONT or GEARNUMBERS content (those are assembled
+     * at runtime by the original engine).  The synthesis overwrites
+     * page 705 with FONT + SPEEDOFONT + GEARNUMBERS. */
+    if (font_entry->texture_page > 0) {
         /* 256x256 BGRA = 256 KB; static to avoid stack overflow.
          * Atlas pages are 256x256 (confirmed by UV scale = 1/256 for both axes). */
         static uint8_t s_font_page_buf[256 * 256 * 4];
@@ -865,17 +891,22 @@ void td5_hud_update_pause_overlay(int cursor, float sfx_frac, float music_frac, 
     float cy = g_render_height_f * 0.5f;
     float fracs[3] = { sfx_frac, music_frac, cd_frac };
 
-    /* Move SELBOX to cursor row: row N → y=[base_y+N*16, base_y+N*16+16] */
-    if (s_pause_sel_box) {
+    /* Move SELBOX to cursor row using atlas texture.
+     * Row N → y=[base_y+N*16, base_y+N*16+16]. */
+    if (s_pause_sel_box && s_pause_selbox_atlas) {
         float row_y = s_pause_selbox_base_y + (float)cursor * 16.0f;
-        hud_build_quad(s_pause_sel_box, 0, HUD_WHITE_TEX_PAGE,
+        float su0 = (float)s_pause_selbox_atlas->atlas_x + 0.5f;
+        float sv0 = (float)s_pause_selbox_atlas->atlas_y + 0.5f;
+        float su1 = su0 + 255.0f;
+        float sv1 = sv0 + 15.0f;
+        hud_build_quad(s_pause_sel_box, 0, s_pause_selbox_atlas->texture_page,
                        cx + s_pause_selbox_x0, cy + row_y,
                        cx + s_pause_selbox_x1, cy + row_y + 16.0f,
-                       0.25f, 0.25f, 0.25f, 0.25f,
-                       0x80FFFF60, HUD_DEPTH);
+                       su0, sv0, su1, sv1,
+                       0xFFFFFFFF, HUD_DEPTH);
     }
 
-    /* Update slider fill bar: fill from bar_x0 to bar_x0 + frac*(bar_x1-bar_x0).
+    /* Update slider fill bar using atlas texture.
      * Row N (no base_y offset): y=[N*16-28, N*16-22]. */
     float bar_span = s_pause_bar_x1 - s_pause_bar_x0;
     for (int row = 0; row < 3; row++) {
@@ -885,11 +916,15 @@ void td5_hud_update_pause_overlay(int cursor, float sfx_frac, float music_frac, 
         if (frac > 1.0f) frac = 1.0f;
         float row_y = (float)row * 16.0f;
         float fill_x1 = s_pause_bar_x0 + frac * bar_span;
-        hud_build_quad(s_pause_slider_ptrs[row], 0, HUD_WHITE_TEX_PAGE,
+        int slider_page = s_pause_slider_atlas ? s_pause_slider_atlas->texture_page : HUD_WHITE_TEX_PAGE;
+        float slu0 = s_pause_slider_atlas ? (float)s_pause_slider_atlas->atlas_x + 255.5f : 0.25f;
+        float slu1 = s_pause_slider_atlas ? (float)s_pause_slider_atlas->atlas_x + 0.5f   : 0.25f;
+        float slv  = s_pause_slider_atlas ? (float)s_pause_slider_atlas->atlas_y + 0.5f   : 0.25f;
+        hud_build_quad(s_pause_slider_ptrs[row], 0, slider_page,
                        cx + s_pause_bar_x0, cy + row_y - 28.0f,
                        cx + fill_x1,        cy + row_y - 22.0f,
-                       0.25f, 0.25f, 0.25f, 0.25f,
-                       0xFFE0C040, HUD_DEPTH);
+                       slu0, slv, slu1, slv,
+                       0xFFFFFFFF, HUD_DEPTH);
     }
 }
 
@@ -2330,17 +2365,28 @@ void td5_hud_init_pause_menu(int page_index)
         } \
     } while (0)
 
-    /* BLACKBOX: semi-transparent dark panel. y is fixed ±56 (not ±half_w).
-     * From binary 0x43B7C0: y0=-56.0, y1=+56.0 hardcoded. */
-    PAUSE_ADD(-s_pause_half_width, -56.0f,
-               s_pause_half_width,  56.0f,
-               0.25f, 0.25f, 0.25f, 0.25f,
-               HUD_WHITE_TEX_PAGE, 0xB0000000);
+    /* Look up atlas entries for pause overlay textures (all on tpage12) */
+    TD5_AtlasEntry *blackbox_e = td5_asset_find_atlas_entry(NULL, "BLACKBOX");
+    TD5_AtlasEntry *selbox_e   = td5_asset_find_atlas_entry(NULL, "SELBOX");
+    TD5_AtlasEntry *blackbar_e = td5_asset_find_atlas_entry(NULL, "BLACKBAR");
+    TD5_AtlasEntry *slider_e   = td5_asset_find_atlas_entry(NULL, "SLIDER");
 
-    /* SELBOX: semi-transparent highlight bar.
-     * From binary: x0=1-half_w, x1=half_w-1; cursor=0 → y0=-33, y1=-17.
+    /* BLACKBOX: dark panel background. y is fixed ±56 (not ±half_w).
+     * From binary 0x43B7C0: y0=-56.0, y1=+56.0 hardcoded.
+     * Single-texel sample from atlas (all 4 UV corners same). */
+    {
+        float bu = (float)blackbox_e->atlas_x + 0.5f;
+        float bv = (float)blackbox_e->atlas_y + 0.5f;
+        PAUSE_ADD(-s_pause_half_width, -56.0f,
+                   s_pause_half_width,  56.0f,
+                   bu, bv, bu, bv,
+                   blackbox_e->texture_page, 0xFFFFFFFF);
+    }
+
+    /* SELBOX: highlight bar using atlas texture (256x16 grayscale bar).
+     * From binary: x0=1-half_w, x1=half_w-1; cursor=3 default (CONTINUE).
      * base_y=-33.0f so cursor N → y=[base_y+N*16, base_y+N*16+16]. */
-    s_pause_selbox_atlas = NULL;
+    s_pause_selbox_atlas = selbox_e;
     s_pause_sel_box = NULL;
     s_pause_selbox_base_y = -33.0f;
     {
@@ -2350,33 +2396,44 @@ void td5_hud_init_pause_menu(int page_index)
         s_pause_selbox_x1 = sel_x1;
         s_pause_sel_box = (s_pause_quad_count < TD5_HUD_PAUSE_MAX_QUADS)
                           ? PAUSE_BUF(s_pause_quad_count) : NULL;
-        /* cursor=0 initial position: y0=-33, y1=-17 */
-        PAUSE_ADD(sel_x0, -33.0f, sel_x1, -17.0f,
-                  0.25f, 0.25f, 0.25f, 0.25f,
-                  HUD_WHITE_TEX_PAGE, 0x80FFFF60);
+        float su0 = (float)selbox_e->atlas_x + 0.5f;
+        float sv0 = (float)selbox_e->atlas_y + 0.5f;
+        float su1 = su0 + 255.0f;
+        float sv1 = sv0 + 15.0f;
+        /* cursor=3 (CONTINUE) initial position */
+        float init_y = s_pause_selbox_base_y + 3.0f * 16.0f;
+        PAUSE_ADD(sel_x0, init_y, sel_x1, init_y + 16.0f,
+                  su0, sv0, su1, sv1,
+                  selbox_e->texture_page, 0xFFFFFFFF);
     }
 
-    /* BLACKBAR (trough) + SLIDER (fill bar): solid-colour volume indicators.
+    /* BLACKBAR (trough) + SLIDER (fill bar) using atlas textures.
      * From binary: bar x=[half_w-131, half_w-1], row N y=[N*16-29, N*16-21].
      * Slider fill: from bar_x0 to bar_x0 + vol_frac*(bar_x1-bar_x0). */
-    s_pause_slider_atlas = NULL;
+    s_pause_slider_atlas = slider_e;
     s_pause_bar_x0 = s_pause_half_width - 131.0f;  /* = -3 when half_w=128 */
     s_pause_bar_x1 = s_pause_half_width - 1.0f;    /* = 127 when half_w=128 */
 
     for (int row = 0; row < 3; row++) {
         float row_y = (float)row * 16.0f;
-        /* Dark background trough */
+        /* Dark background trough — single-texel sample from BLACKBAR atlas */
+        float bbu = (float)blackbar_e->atlas_x + 0.5f;
+        float bbv = (float)blackbar_e->atlas_y + 0.5f;
         PAUSE_ADD(s_pause_bar_x0, row_y - 29.0f,
                   s_pause_bar_x1,  row_y - 21.0f,
-                  0.25f, 0.25f, 0.25f, 0.25f,
-                  HUD_WHITE_TEX_PAGE, 0xFF101010);
-        /* Slider fill bar (td5_hud_update_pause_overlay will resize x1 per volume) */
+                  bbu, bbv, bbu, bbv,
+                  blackbar_e->texture_page, 0xFFFFFFFF);
+        /* Slider fill bar — uses SLIDER atlas texture (256x8).
+         * UV flipped horizontally per binary: U0=entry_u+255.5, U1=entry_u+0.5. */
         s_pause_slider_ptrs[row] = (s_pause_quad_count < TD5_HUD_PAUSE_MAX_QUADS)
                                     ? PAUSE_BUF(s_pause_quad_count) : NULL;
+        float slu0 = (float)slider_e->atlas_x + 255.5f;  /* right edge */
+        float slu1 = (float)slider_e->atlas_x + 0.5f;    /* left edge (flipped) */
+        float slv  = (float)slider_e->atlas_y + 0.5f;
         PAUSE_ADD(s_pause_bar_x0, row_y - 28.0f,
                   s_pause_bar_x0, row_y - 22.0f,  /* x1=x0 initially; updated each frame */
-                  0.25f, 0.25f, 0.25f, 0.25f,
-                  HUD_WHITE_TEX_PAGE, 0xFFE0C040);
+                  slu0, slv, slu1, slv,
+                  slider_e->texture_page, 0xFFFFFFFF);
     }
 
     /* Build text glyphs from PAUSETXT atlas */
