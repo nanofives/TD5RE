@@ -3355,11 +3355,26 @@ static void frontend_render_car_selection_preview(float sx, float sy) {
 }
 
 static void frontend_render_track_selection_preview(float sx, float sy) {
-    char track_name[80];
+    char track_name[80], city[80], country[80];
+    const char *comma;
     if (!s_anim_complete) return;
     frontend_get_track_display_name(s_selected_track, 0, track_name, sizeof(track_name));
-    /* Track name above the preview */
-    frontend_draw_value_text(sx, sy, 412, 113, track_name, 0xFFFFFFFF);
+    /* Original splits at comma: city on line 1 (y=113), country on line 2 (y=113+20)
+     * RE: 0x00427CD0-0x00427D56 — split at 0x2C, draw at y=0 and y=0x20 on text surface */
+    comma = strchr(track_name, ',');
+    if (comma) {
+        int city_len = (int)(comma - track_name);
+        if (city_len >= (int)sizeof(city)) city_len = (int)sizeof(city) - 1;
+        memcpy(city, track_name, city_len);
+        city[city_len] = '\0';
+        /* skip comma + space */
+        strncpy(country, comma + 2, sizeof(country) - 1);
+        country[sizeof(country) - 1] = '\0';
+        frontend_draw_value_text(sx, sy, 412, 113, city, 0xFFFFFFFF);
+        frontend_draw_value_text(sx, sy, 412, 133, country, 0xFFFFFFFF);
+    } else {
+        frontend_draw_value_text(sx, sy, 412, 113, track_name, 0xFFFFFFFF);
+    }
     /* Track preview: 152x224 portrait, right of buttons.
      * x=EDI+0x12E=412, y=ESI+0x36=135 (640x480) */
     if (s_track_preview_surface > 0) {
