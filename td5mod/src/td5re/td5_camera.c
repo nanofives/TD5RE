@@ -1801,6 +1801,14 @@ void td5_camera_update_transition_state(int p, int vi)
         return;
     }
 
+    /* During race-start countdown, run the transition state machine (0x401E10).
+     * This selects fly-in camera presets 10→11→12→13 based on the countdown
+     * level (g_cameraTransitionActive / 0x2800) and updates the HUD digit. */
+    if (g_cameraTransitionActive > 0) {
+        UpdateRaceCameraTransitionState((int)actor, vi);
+        return;
+    }
+
     /* Route to appropriate camera based on mode */
     if (g_replay_mode) {
         TD5_LOG_I(LOG_TAG, "transition view %d: path=trackside actor_slot=%d", vi, g_actorSlotForView[vi]);

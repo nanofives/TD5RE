@@ -41,6 +41,7 @@ extern int g_split_screen_mode;
 extern int g_track_is_circuit;
 extern int g_track_type_mode;
 extern int g_replay_mode;
+extern int g_cameraTransitionActive;  /* 0x4AAEF0 -- countdown/transition timer */
 
 /* Win32-based checkpoint log -- bypasses broken CRT fopen in -mwindows builds */
 static void ck_write(const char *path, const char *msg) {
@@ -96,8 +97,11 @@ static void ck_write(const char *path, const char *msg) {
  * ======================================================================== */
 
 #define LOG_TAG "td5_game"
-#define TD5_COUNTDOWN_STEPS 3
-#define TD5_COUNTDOWN_TICKS_PER_STEP 30
+/* Original: g_cameraTransitionActive init=0xA000, -=0x100/tick, 160 ticks total
+ * Level = timer / 0x2800; levels 4..0 → digits 5..1, then GO at level<0 */
+#define TD5_COUNTDOWN_INIT    0xA000
+#define TD5_COUNTDOWN_DECR    0x100
+#define TD5_COUNTDOWN_LEVEL_DIV 0x2800
 
 /* ========================================================================
  * Module-private state
@@ -942,14 +946,14 @@ int td5_game_run_race_frame(void) {
 
     if ((g_td5.simulation_tick_counter % 60u) == 0u) {
         TD5_LOG_D(LOG_TAG,
-                  "Race frame timing: dt=%.3f fps=%.2f ticks_this_frame=%d paused=%d pause_menu=%d countdown_state=%d countdown_ticks=%d fade=%d",
+                  "Race frame timing: dt=%.3f fps=%.2f ticks_this_frame=%d paused=%d pause_menu=%d countdown_indicator=%d countdown_timer=0x%X fade=%d",
                   g_td5.normalized_frame_dt,
                   g_td5.instant_fps,
                   ticks_this_frame,
                   g_td5.paused,
                   s_pause_menu_active,
                   s_race_countdown_state,
-                  s_race_countdown_ticks,
+                  g_cameraTransitionActive,
                   g_td5.race_end_fade_state);
         {
             TD5_Actor *actor0 = td5_game_get_actor(0);
@@ -1071,35 +1075,43 @@ static void set_countdown_indicator_state(int value)
 
 static void reset_race_countdown(void)
 {
-    s_race_countdown_ticks = TD5_COUNTDOWN_STEPS * TD5_COUNTDOWN_TICKS_PER_STEP;
-    s_race_countdown_state = TD5_COUNTDOWN_STEPS;
+    /* Match original: init g_cameraTransitionActive = 0xA000, show digit 5 */
+    g_cameraTransitionActive = TD5_COUNTDOWN_INIT;
+    s_race_countdown_ticks   = 0;   /* unused — timer is g_cameraTransitionActive */
+    s_race_countdown_state   = (TD5_COUNTDOWN_INIT / TD5_COUNTDOWN_LEVEL_DIV) + 1; /* 5 */
     set_countdown_indicator_state(s_race_countdown_state);
-    TD5_LOG_I(LOG_TAG, "Race countdown reset: state=%d ticks=%d",
-              s_race_countdown_state, s_race_countdown_ticks);
+    TD5_LOG_I(LOG_TAG, "Race countdown reset: timer=0x%X indicator=%d",
+              g_cameraTransitionActive, s_race_countdown_state);
 }
 
 static void tick_race_countdown(void)
 {
-    int next_state;
+    int level, next_indicator;
 
-    if (!g_td5.paused || s_race_countdown_ticks <= 0) {
+    if (!g_td5.paused || g_cameraTransitionActive <= 0) {
         return;
     }
 
-    s_race_countdown_ticks--;
-    next_state = (s_race_countdown_ticks + TD5_COUNTDOWN_TICKS_PER_STEP - 1) /
-                 TD5_COUNTDOWN_TICKS_PER_STEP;
+    /* Decrement by 0x100 per sim tick — matches original UpdateRaceCameraTransitionTimer */
+    g_cameraTransitionActive -= TD5_COUNTDOWN_DECR;
 
-    if (next_state != s_race_countdown_state) {
-        s_race_countdown_state = next_state;
-        set_countdown_indicator_state(next_state);
-        TD5_LOG_I(LOG_TAG, "Race countdown advanced: state=%d ticks_remaining=%d",
-                  next_state, s_race_countdown_ticks);
+    if (g_cameraTransitionActive <= 0) {
+        g_cameraTransitionActive = 0;
+        set_countdown_indicator_state(0);
+        g_td5.paused = 0;
+        s_race_countdown_state = 0;
+        TD5_LOG_I(LOG_TAG, "Race countdown complete: GO");
+        return;
+    }
 
-        if (next_state == 0) {
-            g_td5.paused = 0;
-            TD5_LOG_I(LOG_TAG, "Race countdown complete: GO");
-        }
+    /* level 4..0 → indicator digit 5..1 (level + 1) */
+    level = g_cameraTransitionActive / TD5_COUNTDOWN_LEVEL_DIV;
+    next_indicator = level + 1;
+    if (next_indicator != s_race_countdown_state) {
+        s_race_countdown_state = next_indicator;
+        set_countdown_indicator_state(next_indicator);
+        TD5_LOG_I(LOG_TAG, "Race countdown: level=%d indicator=%d timer=0x%X",
+                  level, next_indicator, g_cameraTransitionActive);
     }
 }
 
