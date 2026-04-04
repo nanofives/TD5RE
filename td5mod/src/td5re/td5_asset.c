@@ -54,6 +54,14 @@
     td5_inflate_mem_to_mem(out, out_len, in, in_len)
 
 /* ========================================================================
+ * Asset Globals (migrated from td5re_stubs.c — owned by this module)
+ * ======================================================================== */
+
+TD5_StaticHedEntry *g_static_hed_entries     = NULL;
+int                 g_static_hed_entry_count = 0;
+uint8_t            *g_track_environment_config = NULL;
+
+/* ========================================================================
  * CRC-32 Table (matches original at 0x00475160)
  * ======================================================================== */
 
@@ -1224,6 +1232,8 @@ int td5_asset_decode_tga(const void *data, size_t size, void **pixels_out,
 
     if (w == 0 || h == 0 || w > 4096 || h > 4096) return 0;
 
+    uint8_t bpp = src[16];
+
     /* Allocate RGBA32 output */
     size_t rgb_size = (size_t)w * (size_t)h * 3;
     uint8_t *rgb = (uint8_t *)malloc(rgb_size);
@@ -1243,8 +1253,17 @@ int td5_asset_decode_tga(const void *data, size_t size, void **pixels_out,
         rgba[i * 4 + 0] = b;
         rgba[i * 4 + 1] = g;
         rgba[i * 4 + 2] = r;
-        /* Black (0,0,0) is the color key for all frontend TGA sprites */
-        rgba[i * 4 + 3] = (r == 0 && g == 0 && b == 0) ? 0 : 0xFF;
+        /* Color key depends on TGA bit depth:
+         * - 8/24-bit TGAs (frontend sprites): black (0,0,0) is the color key
+         * - 16-bit TGAs (car previews): no color key at decode time.
+         *   Original uses SRCCOLORKEY 0x000B (dark blue ≈ R0 G0 B88) at blit
+         *   time, but the car background and the blue fill (0x5c = R0 G0 B92)
+         *   are near-identical, so rendering fully opaque is visually correct. */
+        if (bpp == 16) {
+            rgba[i * 4 + 3] = 0xFF; /* fully opaque */
+        } else {
+            rgba[i * 4 + 3] = (r == 0 && g == 0 && b == 0) ? 0 : 0xFF;
+        }
     }
 
     free(rgb);
@@ -1471,6 +1490,9 @@ int td5_asset_load_level(int track_index)
     char strip_source[256];
     td5_asset_build_level_zip_path(track_index, zip_path, sizeof(zip_path));
 
+    TD5_LOG_I(LOG_TAG, "td5_asset_load_level: track_index=%d -> zip=%s exists=%d",
+              track_index, zip_path, td5_plat_file_exists(zip_path));
+
     int ok = 1;
     int strip_sz = 0;
     int left_sz = 0;
@@ -1486,7 +1508,7 @@ int td5_asset_load_level(int track_index)
     const char *checkpoint_name = "CHECKPT.NUM";
     const char *levelinf_name = "LEVELINF.DAT";
 
-    extern uint8_t *g_track_environment_config; /* 0x4AEE20 */
+    /* g_track_environment_config is now defined at file scope above */
 
     /*
      * The reverse direction flag would come from the game state.

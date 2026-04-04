@@ -3308,9 +3308,10 @@ static void frontend_render_car_selection_preview(float sx, float sy) {
      * Original: FillPrimaryFrontendRect(0x5c, x, y, 0x198, 300) at states 10 and 14
      * (0x40DFC0). 0x5c = RGB888 B=92 → same dark blue as CarSelBar1 dominant pixel.
      * Rect matches car preview surface: 408x300 starting at (232, 96).
-     * In the source port we clear every frame, so this must be redrawn each frame. */
-    td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
-    fe_draw_quad(232.0f * sx, 96.0f * sy, 408.0f * sx, 300.0f * sy, 0xFF00005C,
+     * In the source port we clear every frame, so this must be redrawn each frame.
+     * Original y = screenH - 0x164 = 480 - 356 = 124 (confirmed at 0x40EB3B). */
+    td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
+    fe_draw_quad(232.0f * sx, 124.0f * sy, 408.0f * sx, 300.0f * sy, 0xFF00005C,
                  s_white_tex_page, 0, 0, 1, 1);
 
     if (s_inner_state == 15) {
