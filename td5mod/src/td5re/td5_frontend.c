@@ -1403,8 +1403,10 @@ static void frontend_init_race_schedule(void) {
         g_td5.ai_car_indices[i] = s_ext_car_to_type_index[0]; /* default: XKR */
     }
 
-    TD5_LOG_I(LOG_TAG, "InitializeRaceSeriesSchedule: car=%d (resolved=%d) track=%d type=%d",
-              s_selected_car, g_td5.car_index, g_td5.track_index, s_selected_game_type);
+    TD5_LOG_I(LOG_TAG, "InitializeRaceSeriesSchedule: car=%d (resolved=%d) track=%d level=%d screen=%d type=%d",
+              s_selected_car, g_td5.car_index, g_td5.track_index,
+              td5_asset_level_number(g_td5.track_index),
+              s_current_screen, s_selected_game_type);
 }
 
 static int frontend_find_display_mode_index(int width, int height, int bpp) {
@@ -3286,8 +3288,13 @@ static void frontend_render_car_selection_preview(float sx, float sy) {
             fe_draw_surface_opaque(s_carsel_curve_surface,  36.0f * sx, 408.0f * sy,  80.0f * sx,  56.0f * sy, 0xFFFFFFFF);
     }
 
-    /* Car preview area: no opaque backing — original preserved the primary surface (MainMenu.tga
-     * car art) which shows through here; CarPic TGAs are fully opaque and cover the area. */
+    /* Car preview area: solid dark blue fill matching CarSelBar1 color (R=0,G=0,B=92).
+     * Original: FillPrimaryFrontendRect(0x5c, x, y, 0x198, 300) at states 10 and 14
+     * (0x40DFC0). 0x5c = RGB888 B=92 → same dark blue as CarSelBar1 dominant pixel.
+     * In the source port we clear every frame, so this must be redrawn each frame. */
+    td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
+    fe_draw_quad(232.0f * sx, 124.0f * sy, 408.0f * sx, 300.0f * sy, 0xFF00005C, -1, 0, 0, 1, 1);
+
     if (s_inner_state == 15) {
         /* Stats sub-screen: draw car, then semi-transparent dark quad, then spec text */
         if (s_car_preview_surface > 0)
@@ -4448,7 +4455,7 @@ static void Screen_RaceTypeCategory(void) {
         frontend_init_return_screen(TD5_SCREEN_RACE_TYPE_MENU);
         TD5_LOG_D(LOG_TAG, "RaceTypeCategory: state 0 - init");
         frontend_reset_buttons();
-        frontend_load_tga("Front_End/RaceMenu.tga", "Front_End/FrontEnd.zip");
+        frontend_load_tga("Front_End/MainMenu.tga", "Front_End/FrontEnd.zip");
         s_anim_complete = 0;
 
         /* Create 0x110 x 0xB4 description preview surface */
@@ -4739,6 +4746,9 @@ static void Screen_QuickRaceMenu(void) {
                     if (s_selected_track < 0) s_selected_track = track_max - 1;
                     if (s_selected_track >= track_max) s_selected_track = 0;
                 }
+                TD5_LOG_I(LOG_TAG, "QuickRace track cycle: s_selected_track=%d level=%d name=%s",
+                          s_selected_track, td5_asset_level_number(s_selected_track),
+                          frontend_get_track_name(s_selected_track));
                 frontend_play_sfx(2); /* ping2.wav cycle */
             }
             if (s_button_index == 2) { /* OK */
