@@ -1180,11 +1180,14 @@ void td5_render_span_display_list(void *display_list_block)
         if ((uintptr_t)mesh->commands_offset < 0x10000u) continue;
         if ((uintptr_t)mesh->vertices_offset < 0x10000u) continue;
 
-        /* Validate commands and vertices pointers are within models blob */
+        /* Validate commands and vertices pointers are within models blob
+         * OR valid heap memory (strip-generated display lists use calloc). */
         if (!td5_track_is_ptr_in_blob((void *)(uintptr_t)mesh->commands_offset,
-                (size_t)mesh->command_count * sizeof(TD5_PrimitiveCmd))) continue;
+                (size_t)mesh->command_count * sizeof(TD5_PrimitiveCmd)) &&
+            !td5_track_is_valid_mesh_ptr((void *)(uintptr_t)mesh->commands_offset)) continue;
         if (!td5_track_is_ptr_in_blob((void *)(uintptr_t)mesh->vertices_offset,
-                (size_t)mesh->total_vertex_count * sizeof(TD5_MeshVertex))) continue;
+                (size_t)mesh->total_vertex_count * sizeof(TD5_MeshVertex)) &&
+            !td5_track_is_valid_mesh_ptr((void *)(uintptr_t)mesh->vertices_offset)) continue;
 
         /* Frustum cull via bounding sphere */
         float cx = mesh->bounding_center_x + mesh->origin_x;
@@ -2021,6 +2024,7 @@ void td5_render_load_sky(const char *path)
     /* Reset so a new sky is loaded each race */
     s_sky_loaded = 0;
 
+    /* td5_asset_decode_png_rgba32 handles R↔B swap to BGRA internally */
     if (td5_asset_decode_png_rgba32(path, &pixels, &w, &h)) {
         if (td5_plat_render_upload_texture(SKY_TEXTURE_PAGE, pixels, w, h, 2)) {
             s_sky_loaded = 1;
@@ -2028,30 +2032,8 @@ void td5_render_load_sky(const char *path)
             TD5_LOG_I(RENDER_LOG_TAG, "sky loaded: %s (%dx%d)", path, w, h);
         }
         free(pixels);
-    }
-
-    /* Try TGA if PNG failed */
-    if (!s_sky_loaded) {
-        FILE *f = fopen(path, "rb");
-        if (f) {
-            fseek(f, 0, SEEK_END);
-            long sz = ftell(f);
-            fseek(f, 0, SEEK_SET);
-            void *buf = malloc((size_t)sz);
-            if (buf) {
-                fread(buf, 1, (size_t)sz, f);
-                if (td5_asset_decode_tga(buf, (size_t)sz, &pixels, &w, &h) && pixels) {
-                    if (td5_plat_render_upload_texture(SKY_TEXTURE_PAGE, pixels, w, h, 2)) {
-                        s_sky_loaded = 1;
-                        s_sky_page = SKY_TEXTURE_PAGE;
-                        TD5_LOG_I(RENDER_LOG_TAG, "sky loaded (TGA): %s (%dx%d)", path, w, h);
-                    }
-                    free(pixels);
-                }
-                free(buf);
-            }
-            fclose(f);
-        }
+    } else {
+        TD5_LOG_W(RENDER_LOG_TAG, "sky not found: %s", path);
     }
 }
 
