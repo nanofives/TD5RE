@@ -623,7 +623,8 @@ static void rebuild_span_display_list_mapping(void)
             /* Slot now holds an absolute pointer after relocation */
             mesh_a = (const TD5_MeshHeader *)(uintptr_t)(*(const uint32_t *)(blk_a + 4));
             mesh_b = (const TD5_MeshHeader *)(uintptr_t)(*(const uint32_t *)(blk_b + 4));
-            if (!mesh_a || !mesh_b)
+            if (!mesh_a || !mesh_b ||
+                (uintptr_t)mesh_a < 0x10000u || (uintptr_t)mesh_b < 0x10000u)
                 break;
 
             ax = mesh_a->bounding_center_x + mesh_a->origin_x;
@@ -2553,6 +2554,26 @@ int td5_track_parse_models_dat(const void *data, size_t size)
                 continue;
             }
 
+            /* Validate internal offsets stay within the models blob before
+             * relocating.  A wild commands_offset or vertices_offset is the
+             * most common crash vector for tracks with unusual MODELS.DAT.
+             * Offsets are relative to the mesh header start. */
+            {
+                uintptr_t mesh_abs = (uintptr_t)mesh;
+                uintptr_t blob_end = (uintptr_t)s_models_blob + s_models_blob_size;
+                uint32_t cmd_off = mesh->commands_offset;
+                uint32_t vtx_off = mesh->vertices_offset;
+
+                if (cmd_off != 0 && mesh_abs + cmd_off >= blob_end) {
+                    *slot = 0;
+                    continue;
+                }
+                if (vtx_off != 0 && mesh_abs + vtx_off >= blob_end) {
+                    *slot = 0;
+                    continue;
+                }
+            }
+
             /* Relocate commands/vertices/normals offsets within mesh */
             td5_track_prepare_mesh_resource(mesh);
         }
@@ -2668,6 +2689,17 @@ int td5_track_load_runtime_data(int track_index, int reverse)
 int td5_track_get_span_count(void)
 {
     return s_span_count;
+}
+
+int td5_track_is_ptr_in_blob(const void *ptr, size_t need)
+{
+    if (!ptr || !s_models_blob || s_models_blob_size == 0) return 0;
+    uintptr_t p = (uintptr_t)ptr;
+    uintptr_t base = (uintptr_t)s_models_blob;
+    uintptr_t end  = base + s_models_blob_size;
+    if (p < base || p >= end) return 0;
+    if (need > 0 && p + need > end) return 0;
+    return 1;
 }
 
 int td5_track_is_valid_mesh_ptr(const void *ptr)

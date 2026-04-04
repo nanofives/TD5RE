@@ -1168,8 +1168,14 @@ void td5_render_span_display_list(void *display_list_block)
         if (mesh->command_count <= 0 || mesh->command_count > 4096) continue;
         if (mesh->total_vertex_count <= 0 || mesh->total_vertex_count > 65536) continue;
         if (!mesh->commands_offset || !mesh->vertices_offset) continue;
-        if ((uintptr_t)(uintptr_t)mesh->commands_offset < 0x10000u) continue;
-        if ((uintptr_t)(uintptr_t)mesh->vertices_offset < 0x10000u) continue;
+        if ((uintptr_t)mesh->commands_offset < 0x10000u) continue;
+        if ((uintptr_t)mesh->vertices_offset < 0x10000u) continue;
+
+        /* Validate commands and vertices pointers are within models blob */
+        if (!td5_track_is_ptr_in_blob((void *)(uintptr_t)mesh->commands_offset,
+                (size_t)mesh->command_count * sizeof(TD5_PrimitiveCmd))) continue;
+        if (!td5_track_is_ptr_in_blob((void *)(uintptr_t)mesh->vertices_offset,
+                (size_t)mesh->total_vertex_count * sizeof(TD5_MeshVertex))) continue;
 
         /* Frustum cull via bounding sphere */
         float cx = mesh->bounding_center_x + mesh->origin_x;

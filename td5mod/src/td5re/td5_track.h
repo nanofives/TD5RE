@@ -106,6 +106,7 @@ int              td5_track_get_span_count(void);
 TD5_StripSpan   *td5_track_get_span(int index);
 TD5_StripVertex *td5_track_get_vertex(int index);
 int              td5_track_is_valid_mesh_ptr(const void *ptr);
+int              td5_track_is_ptr_in_blob(const void *ptr, size_t size);
 void            *td5_track_get_display_list(int span_index);
 
 /* --- MODELS.DAT --- */
