@@ -812,7 +812,22 @@ int td5_game_init_race_session(void) {
         td5_render_load_sky(sky_path);
     }
 
-    /* ---- Step 20: Adjust checkpoint timers by difficulty ---- */
+    /* ---- Step 20: Load checkpoint data from CHECKPT.NUM (0x42FB90) ---- */
+    {
+        int cp_size = 0;
+        const void *cp_data = td5_asset_get_checkpoint_data(&cp_size);
+        memset(&s_active_checkpoint, 0, sizeof(s_active_checkpoint));
+        if (cp_data && cp_size >= 24) {
+            memcpy(&s_active_checkpoint, cp_data, 24);
+            TD5_LOG_I(LOG_TAG, "Checkpoint record loaded: count=%d initial_time=%d",
+                      (int)s_active_checkpoint.checkpoint_count,
+                      (int)s_active_checkpoint.initial_time);
+        } else {
+            TD5_LOG_W(LOG_TAG, "No checkpoint data available (P2P tracks will use span-only progression)");
+        }
+    }
+
+    /* ---- Step 21: Adjust checkpoint timers by difficulty ---- */
     for (int i = 0; i < TD5_MAX_RACER_SLOTS; i++) {
         if (s_slot_state[i].state == 1) {   /* human player */
             adjust_checkpoint_timers(i);

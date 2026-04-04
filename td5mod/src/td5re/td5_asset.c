@@ -60,6 +60,8 @@
 TD5_StaticHedEntry *g_static_hed_entries     = NULL;
 int                 g_static_hed_entry_count = 0;
 uint8_t            *g_track_environment_config = NULL;
+static uint8_t      s_checkpoint_data[96];
+static int          s_checkpoint_data_size = 0;
 
 /* ========================================================================
  * CRC-32 Table (matches original at 0x00475160)
@@ -1571,14 +1573,23 @@ int td5_asset_load_level(int track_index)
         }
     }
     {
-        char checkpoint_path[256];
-        td5_asset_build_level_loose_path(track_index, checkpoint_name,
-                                         checkpoint_path, sizeof(checkpoint_path));
-        checkpoint_sz = td5_asset_get_entry_size_from_path(checkpoint_path, zip_path);
-        if (checkpoint_sz < 0)
-            checkpoint_sz = td5_asset_get_entry_size_from_path(checkpoint_name, zip_path);
-        if (checkpoint_sz < 0)
+        static const char *s_checkpoint_names[1] = { "CHECKPT.NUM" };
+        void *cp_data = load_first_available_level_entry(track_index, s_checkpoint_names, 1,
+                                                          &checkpoint_sz, NULL, 0);
+        s_checkpoint_data_size = 0;
+        memset(s_checkpoint_data, 0, sizeof(s_checkpoint_data));
+        if (cp_data && checkpoint_sz > 0) {
+            int copy_sz = checkpoint_sz > (int)sizeof(s_checkpoint_data)
+                        ? (int)sizeof(s_checkpoint_data) : checkpoint_sz;
+            memcpy(s_checkpoint_data, cp_data, (size_t)copy_sz);
+            s_checkpoint_data_size = copy_sz;
+            TD5_LOG_I(LOG_TAG, "CHECKPT.NUM loaded: %d bytes (count=%d initial_time=%d)",
+                      copy_sz, (int)s_checkpoint_data[0],
+                      copy_sz >= 4 ? (int)(*(uint16_t *)(s_checkpoint_data + 2)) : 0);
+        } else {
             TD5_LOG_W(LOG_TAG, "missing optional entry: %s in %s", checkpoint_name, zip_path);
+        }
+        free(cp_data);
     }
 
     TD5_LOG_I(LOG_TAG, "level load complete: %s (strip=%d left=%d right=%d models=%d checkpoint=%d levelinf=%d)",
@@ -1589,6 +1600,19 @@ int td5_asset_load_level(int track_index)
     free(right_data);
     free(models_data);
     return ok;
+}
+
+/* ========================================================================
+ * Checkpoint Data Accessor (0x42FB90)
+ *
+ * Returns pointer to loaded CHECKPT.NUM data (up to 96 bytes).
+ * First 24 bytes = active checkpoint record for this track.
+ * ======================================================================== */
+
+const void *td5_asset_get_checkpoint_data(int *out_size)
+{
+    if (out_size) *out_size = s_checkpoint_data_size;
+    return s_checkpoint_data_size > 0 ? s_checkpoint_data : NULL;
 }
 
 /* ========================================================================
