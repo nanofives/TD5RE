@@ -3190,38 +3190,42 @@ static void frontend_fmt_spec(char *out, size_t cap, const char *raw) {
 }
 
 static void frontend_render_car_stats_overlay(float sx, float sy) {
-    /* 14 rows: SNK_Config_Hdrs + config.nfo fields 2-16.
+    /* 14 rows: SNK_Config_Hdrs (Language.dll 0x10006e80) + config.nfo fields 2-16.
      * Rendered in the car preview area (x=232, y=124, 408x280).
-     * Headers dim gray on left, values white on right. */
-    static const struct { const char *hdr; int fi; int exp; } k_rows[] = {
-        /* exp: 0=raw value, 1=layout type, 2=engine type, 3=tire pair (fi + fi+1) */
-        { "LAYOUT:",     2,  1 },
-        { "GEARS:",      3,  0 },
-        { "PRICE:",      4,  0 },
-        { "TIRES:",      5,  3 },
-        { "TOP SPEED:",  7,  0 },
-        { "0-60 MPH:",   8,  0 },
-        { "60-0 MPH:",   9,  0 },
-        { "1/4 MILE:",  10,  0 },
-        { "ENGINE:",    11,  2 },
-        { "COMPRESS:",  12,  0 },
-        { "DISPLAC:",   13,  0 },
-        { "LAT. ACC:",  14,  0 },
-        { "TORQUE:",    15,  0 },
-        { "HP:",        16,  0 },
+     * Four visual groups match the original binary's loop structure (0x40DFC0 case 0xF):
+     *   Group A (y=124): LAYOUT, GEARS, PRICE, TIRES      (canvasH-0x164, step 0xC)
+     *   Group B (y=196): TOP SPEED, 0 TO 60, 60 TO 0, 1/4 (canvasH-0x11C, step 0xC)
+     *   ENGINE  (y=256): alone                             (canvasH-0xE0)
+     *   Group C (y=280): COMPRESSION, DISPLACEMENT, LAT.  (canvasH-0xC8, step 0xC)
+     *   Group D (y=328): TORQUE, HP                        (canvasH-0x98, step 0xC)
+     * exp: 0=raw value, 1=layout type, 2=engine type, 3=tire pair (fi + fi+1) */
+    static const struct { const char *hdr; int fi; int exp; float y; } k_rows[] = {
+        { "LAYOUT:",       2,  1, 124.0f },
+        { "GEARS:",        3,  0, 136.0f },
+        { "PRICE:",        4,  0, 148.0f },
+        { "TIRES:",        5,  3, 160.0f },
+        { "TOP SPEED:",    7,  0, 196.0f },
+        { "0 TO 60 MPH:",  8,  0, 208.0f },
+        { "60 TO 0 MPH:",  9,  0, 220.0f },
+        { "1/4 MILE:",    10,  0, 232.0f },
+        { "ENGINE:",      11,  2, 256.0f },
+        { "COMPRESSION:", 12,  0, 280.0f },
+        { "DISPLACEMENT:",13,  0, 292.0f },
+        { "LATERAL ACC:", 14,  0, 304.0f },
+        { "TORQUE:",      15,  0, 328.0f },
+        { "HP:",          16,  0, 340.0f },
     };
     int n_layout = (int)(sizeof(k_stat_layout_types)/sizeof(k_stat_layout_types[0]));
     int n_engine = (int)(sizeof(k_stat_engine_types)/sizeof(k_stat_engine_types[0]));
     float tsc = 0.5f;
-    float hx = 234.0f * sx;   /* header column x */
-    float vx = 430.0f * sx;   /* value column x */
-    float y0 = 130.0f * sy;   /* first row y */
-    float dy = 12.0f * sy;    /* row spacing — matches 12px font cell height */
+    float hx = 232.0f * sx;   /* label column x = canvasW - 0x198 */
+    /* Value column: label_x + max_label_width + 16px gap (matches original dynamic measure) */
+    float vx = hx + fe_measure_text("COMPRESSION:", tsc * sx) + 16.0f * sx;
     char val[64];
     int i;
 
     for (i = 0; i < 14; i++) {
-        float y = y0 + (float)i * dy;
+        float y = k_rows[i].y * sy;
         const char *raw = (k_rows[i].fi < 17) ? s_car_spec[k_rows[i].fi] : "";
         int idx;
 
@@ -3296,10 +3300,11 @@ static void frontend_render_car_selection_preview(float sx, float sy) {
     fe_draw_quad(232.0f * sx, 124.0f * sy, 408.0f * sx, 300.0f * sy, 0xFF00005C, -1, 0, 0, 1, 1);
 
     if (s_inner_state == 15) {
-        /* Stats sub-screen: draw car, then semi-transparent dark quad, then spec text */
+        /* Stats sub-screen: car image at 35% opacity over the blue panel background,
+         * then spec text. Matches original: car blitted at alpha 0x5A onto the blue
+         * primary surface (FillPrimaryFrontendRect 0x5c), no additional overlay quad. */
         if (s_car_preview_surface > 0)
-            fe_draw_surface_rect(s_car_preview_surface, 232.0f * sx, 124.0f * sy, 408.0f * sx, 280.0f * sy, 0xFFFFFFFF);
-        fe_draw_quad(232.0f * sx, 124.0f * sy, 408.0f * sx, 280.0f * sy, 0xB0101020, -1, 0, 0, 1, 1);
+            fe_draw_surface_rect(s_car_preview_surface, 232.0f * sx, 124.0f * sy, 408.0f * sx, 280.0f * sy, 0x5AFFFFFF);
         frontend_render_car_stats_overlay(sx, sy);
     } else {
         if (s_inner_state == 11 && s_car_preview_prev_surface > 0) {
@@ -3321,7 +3326,8 @@ static void frontend_render_car_selection_preview(float sx, float sy) {
     }
 
     if (s_anim_complete) {
-        frontend_draw_value_text(sx, sy, 232, 106, frontend_get_car_display_name(actual_car), 0xFFFFFFFF);
+        /* Car name: y = canvasH/2 - 0x97 = 480/2 - 151 = 89 (gap between topbar bottom y=81 and car preview y=124) */
+        frontend_draw_value_text(sx, sy, 232, 89, frontend_get_car_display_name(actual_car), 0xFFFFFFFF);
         if (!s_cheat_unlock_all && !s_network_active &&
             actual_car >= 0 && actual_car < 37 &&
             s_car_lock_table[actual_car] != 0) {
@@ -3333,7 +3339,7 @@ static void frontend_render_car_selection_preview(float sx, float sy) {
 static void frontend_render_track_selection_preview(float sx, float sy) {
     char track_name[80];
     if (!s_anim_complete) return;
-    frontend_get_track_display_name(s_selected_track, 1, track_name, sizeof(track_name));
+    frontend_get_track_display_name(s_selected_track, 0, track_name, sizeof(track_name));
     /* Track name above the preview */
     frontend_draw_value_text(sx, sy, 412, 113, track_name, 0xFFFFFFFF);
     /* Track preview: 152x224 portrait, right of buttons.
