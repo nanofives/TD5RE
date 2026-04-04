@@ -596,11 +596,13 @@ int td5_game_init_race_session(void) {
     }
     TD5_LOG_I(LOG_TAG, "InitRace step 10/19: race metrics/runtime arrays reset");
 
-    /* ---- Step 11: Position actors on grid ---- */
+    /* ---- Step 11: Allocate actors and init vehicle/AI runtime ---- */
     {
         static uint8_t s_actor_memory[TD5_ACTOR_STRIDE * TD5_MAX_TOTAL_ACTORS];
         int spawn_count = g_td5.time_trial_enabled ? 2 :
                           (g_td5.traffic_enabled ? TD5_MAX_TOTAL_ACTORS : TD5_MAX_RACER_SLOTS);
+        int racer_count = (spawn_count > TD5_MAX_RACER_SLOTS)
+                          ? TD5_MAX_RACER_SLOTS : spawn_count;
 
         memset(s_actor_memory, 0, sizeof(s_actor_memory));
         g_actorBaseAddr = (int)(uintptr_t)s_actor_memory;
@@ -610,43 +612,58 @@ int td5_game_init_race_session(void) {
         g_td5.total_actor_count = spawn_count;
         td5_ai_bind_actor_table(s_actor_memory);
 
-        static const int8_t s_racer_span_offsets[TD5_MAX_RACER_SLOTS] = {
-            -9, -6, -3, -12, -15, -18
+        /* Original order (0x42AFE2-0x42AFE7): vehicle + AI runtime init
+         * BEFORE actor placement (step 22). */
+        td5_physics_init_vehicle_runtime();
+        td5_ai_init_race_actor_runtime();
+
+        /* ---- Step 11b: Position racer actors on grid ---- */
+        /* Grid patterns from InitializeRaceSession (0x42B07B-0x42B225):
+         *   Circuit (0x42B110): paired rows 6 spans apart
+         *   Non-circuit (0x42B174): staggered 3 spans apart */
+        static const int8_t s_circuit_span_offsets[TD5_MAX_RACER_SLOTS] = {
+            -6, -6, -12, -12, -18, -18
+        };
+        static const int8_t s_staggered_span_offsets[TD5_MAX_RACER_SLOTS] = {
+            -3, -6, -9, -12, -15, -18
         };
         static const uint8_t s_racer_lanes[TD5_MAX_RACER_SLOTS] = {
             1, 2, 1, 2, 1, 2
         };
+
+        const int8_t *span_offsets = g_track_is_circuit
+                                     ? s_circuit_span_offsets
+                                     : s_staggered_span_offsets;
+
         int track_span_count = td5_track_get_span_count();
         int start_span = (track_span_count > 0) ? track_span_count : 1;
 
-        for (int slot = 0; slot < spawn_count; ++slot) {
+        for (int slot = 0; slot < racer_count; ++slot) {
             uint8_t *actor = s_actor_memory + slot * TD5_ACTOR_STRIDE;
-            int span_index = 1 + slot * 2;
+            int span_index;
             int world_x = 0;
             int world_y = 0;
             int world_z = 0;
-            TD5_StripSpan *sp = td5_track_get_span(span_index);
-            int sub_lane = slot % 4;
+            int sub_lane = s_racer_lanes[slot];
+            TD5_StripSpan *sp;
 
-            if (slot < TD5_MAX_RACER_SLOTS && track_span_count > 0) {
-                span_index = start_span + s_racer_span_offsets[slot];
-                while (span_index < 0) {
+            if (track_span_count > 0) {
+                span_index = start_span + span_offsets[slot];
+                while (span_index < 0)
                     span_index += track_span_count;
-                }
-                while (span_index >= track_span_count) {
+                while (span_index >= track_span_count)
                     span_index -= track_span_count;
-                }
-                sp = td5_track_get_span(span_index);
-                sub_lane = s_racer_lanes[slot];
+            } else {
+                span_index = 1;
             }
 
+            sp = td5_track_get_span(span_index);
             if (!sp) {
                 span_index = 1;
                 sp = td5_track_get_span(span_index);
             }
-            if (!sp) {
+            if (!sp)
                 continue;
-            }
 
             *(int16_t *)(actor + 0x080) = (int16_t)span_index;
             *(int16_t *)(actor + 0x082) = (int16_t)span_index;
@@ -676,17 +693,15 @@ int td5_game_init_race_session(void) {
                       *(int32_t *)(actor + 0x1FC),
                       *(int32_t *)(actor + 0x200),
                       *(int32_t *)(actor + 0x204),
-                      (slot < TD5_MAX_RACER_SLOTS) ? s_slot_state[slot].state : -1,
+                      s_slot_state[slot].state,
                       sub_lane);
         }
 
-        td5_physics_init_vehicle_runtime();
-        td5_ai_init_race_actor_runtime();
         TD5_LOG_I(LOG_TAG, "InitRace step 11/19: actors spawned and runtime bound count=%d",
                   spawn_count);
 
-        TD5_LOG_I(LOG_TAG, "Actors spawned: base=%p count=%d",
-                  (void *)s_actor_memory, g_td5.total_actor_count);
+        TD5_LOG_I(LOG_TAG, "Actors spawned: base=%p count=%d racers=%d",
+                  (void *)s_actor_memory, g_td5.total_actor_count, racer_count);
     }
 
     /* ---- Step 12: Open input recording/playback ---- */
