@@ -75,6 +75,18 @@ static int16_t s_gear_torque[16];       /* DAT_00467394: per-gear torque multipl
 /* --- Globals matching original binary layout --- */
 static int32_t g_gravity_constant = TD5_GRAVITY_NORMAL;
 static int32_t g_collisions_enabled = 0;     /* DAT_00463188: 0=on, 1=off */
+
+void td5_physics_set_collisions(int enabled) {
+    g_collisions_enabled = enabled ? 0 : 1;  /* inverted: 0=on, 1=off */
+}
+
+static int g_dynamics_mode = 0;  /* 0=arcade, 1=simulation */
+
+void td5_physics_set_dynamics(int mode) {
+    g_dynamics_mode = mode;
+    g_td5.dynamics_mode = mode;
+}
+
 static int32_t g_game_paused = 0;            /* DAT_004AAD60 */
 static int32_t g_difficulty_easy = 0;
 static int32_t g_difficulty_hard = 0;
@@ -363,6 +375,13 @@ void td5_physics_update_player(TD5_Actor *actor)
         grip[i] = (sf * load + 128) >> 8;
         if (grip[i] < TD5_PLAYER_GRIP_MIN) grip[i] = TD5_PLAYER_GRIP_MIN;
         if (grip[i] > TD5_PLAYER_GRIP_MAX) grip[i] = TD5_PLAYER_GRIP_MAX;
+    }
+
+    /* Simulation mode: reduce player grip by 30% (multiply by 179/256) */
+    if (g_dynamics_mode == 1) {
+        for (i = 0; i < 4; i++) {
+            grip[i] = (grip[i] * 179) >> 8;
+        }
     }
 
     /* --- 4. Handbrake modifier on rear wheels (tuning+0x7A) --- */
@@ -1334,21 +1353,21 @@ void td5_physics_integrate_pose(TD5_Actor *actor)
         int32_t cp = cos_fixed12(pitch_a);
         int32_t sp = sin_fixed12(pitch_a);
 
-        /* ZYX euler rotation matrix (row-major) */
-        /* Scale: fixed12 * fixed12 >> 12 = fixed12, then /4096.0f to float */
+        /* Rz(pitch) * Ry(yaw) * Rx(roll) -- yaw is Y-axis (heading),
+         * pitch is Z-axis, roll is X-axis.  Row-major. */
         float s = 1.0f / 4096.0f;
 
-        actor->rotation_matrix.m[0] = (float)((cy * cp) >> 12) * s;
-        actor->rotation_matrix.m[1] = (float)(((cy * sp >> 12) * sr >> 12) - ((sy * cr) >> 12)) * s;
-        actor->rotation_matrix.m[2] = (float)(((cy * sp >> 12) * cr >> 12) + ((sy * sr) >> 12)) * s;
+        actor->rotation_matrix.m[0] = (float)((cp * cy) >> 12) * s;
+        actor->rotation_matrix.m[1] = (float)(((cp * sy >> 12) * sr >> 12) - ((sp * cr) >> 12)) * s;
+        actor->rotation_matrix.m[2] = (float)(((cp * sy >> 12) * cr >> 12) + ((sp * sr) >> 12)) * s;
 
-        actor->rotation_matrix.m[3] = (float)((sy * cp) >> 12) * s;
-        actor->rotation_matrix.m[4] = (float)(((sy * sp >> 12) * sr >> 12) + ((cy * cr) >> 12)) * s;
-        actor->rotation_matrix.m[5] = (float)(((sy * sp >> 12) * cr >> 12) - ((cy * sr) >> 12)) * s;
+        actor->rotation_matrix.m[3] = (float)((sp * cy) >> 12) * s;
+        actor->rotation_matrix.m[4] = (float)(((sp * sy >> 12) * sr >> 12) + ((cp * cr) >> 12)) * s;
+        actor->rotation_matrix.m[5] = (float)(((sp * sy >> 12) * cr >> 12) - ((cp * sr) >> 12)) * s;
 
-        actor->rotation_matrix.m[6] = (float)(-sp) * s;
-        actor->rotation_matrix.m[7] = (float)((cp * sr) >> 12) * s;
-        actor->rotation_matrix.m[8] = (float)((cp * cr) >> 12) * s;
+        actor->rotation_matrix.m[6] = (float)(-sy) * s;
+        actor->rotation_matrix.m[7] = (float)((cy * sr) >> 12) * s;
+        actor->rotation_matrix.m[8] = (float)((cy * cr) >> 12) * s;
     }
 
     /* 6. Compute render position (world_pos / 256 as float) */
@@ -1437,15 +1456,16 @@ static void update_vehicle_pose_from_physics(TD5_Actor *actor)
 
         float s = 1.0f / 4096.0f;
 
-        actor->rotation_matrix.m[0] = (float)((cy * cp) >> 12) * s;
-        actor->rotation_matrix.m[1] = (float)(((cy * sp >> 12) * sr >> 12) - ((sy * cr) >> 12)) * s;
-        actor->rotation_matrix.m[2] = (float)(((cy * sp >> 12) * cr >> 12) + ((sy * sr) >> 12)) * s;
-        actor->rotation_matrix.m[3] = (float)((sy * cp) >> 12) * s;
-        actor->rotation_matrix.m[4] = (float)(((sy * sp >> 12) * sr >> 12) + ((cy * cr) >> 12)) * s;
-        actor->rotation_matrix.m[5] = (float)(((sy * sp >> 12) * cr >> 12) - ((cy * sr) >> 12)) * s;
-        actor->rotation_matrix.m[6] = (float)(-sp) * s;
-        actor->rotation_matrix.m[7] = (float)((cp * sr) >> 12) * s;
-        actor->rotation_matrix.m[8] = (float)((cp * cr) >> 12) * s;
+        /* Rz(pitch) * Ry(yaw) * Rx(roll) */
+        actor->rotation_matrix.m[0] = (float)((cp * cy) >> 12) * s;
+        actor->rotation_matrix.m[1] = (float)(((cp * sy >> 12) * sr >> 12) - ((sp * cr) >> 12)) * s;
+        actor->rotation_matrix.m[2] = (float)(((cp * sy >> 12) * cr >> 12) + ((sp * sr) >> 12)) * s;
+        actor->rotation_matrix.m[3] = (float)((sp * cy) >> 12) * s;
+        actor->rotation_matrix.m[4] = (float)(((sp * sy >> 12) * sr >> 12) + ((cp * cr) >> 12)) * s;
+        actor->rotation_matrix.m[5] = (float)(((sp * sy >> 12) * cr >> 12) - ((cp * sr) >> 12)) * s;
+        actor->rotation_matrix.m[6] = (float)(-sy) * s;
+        actor->rotation_matrix.m[7] = (float)((cy * sr) >> 12) * s;
+        actor->rotation_matrix.m[8] = (float)((cy * cr) >> 12) * s;
     }
 
     /* Render position */
