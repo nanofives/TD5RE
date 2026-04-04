@@ -56,6 +56,7 @@ int32_t g_actor_best_race       = 0;
 void   *g_route_data            = NULL;
 
 extern int   g_cameraTransitionActive;  /* td5_camera.c */
+extern int   g_camWorldPos[2][3];       /* td5_camera.c -- per-viewport camera pos (24.8 fixed) */
 extern float g_render_width_f;          /* td5_render.c */
 extern float g_render_height_f;         /* td5_render.c */
 extern int   g_track_is_circuit;        /* td5_track.c */
@@ -183,19 +184,50 @@ typedef struct RaceResultEntry {
 
 static RaceResultEntry s_results[TD5_MAX_RACER_SLOTS];
 
-/* Checkpoint timing record (24 bytes, loaded per track) */
+/* Checkpoint timing record (24 bytes = 12 x uint16, from binary at 0x46CBB0)
+ * Loaded per-track via pointer table at 0x46CF6C (1-based index). */
 typedef struct CheckpointRecord {
-    uint8_t  checkpoint_count;
-    uint8_t  pad;
-    uint16_t initial_time;
+    uint16_t checkpoint_count;   /* always 5 in shipped data */
+    uint16_t initial_time;       /* countdown start (8.8 fixed-point seconds) */
     struct {
-        uint16_t span_threshold;
-        uint16_t time_bonus;
+        uint16_t span_threshold; /* span index where checkpoint triggers */
+        uint16_t time_bonus;     /* time added on crossing (8.8 FP seconds) */
     } checkpoints[5];
-    uint16_t pad_end;
 } CheckpointRecord;
 
 static CheckpointRecord s_active_checkpoint;
+
+/* Hardcoded checkpoint timing table extracted from binary at 0x46CBB0.
+ * 26 records (track_index 0..25), each 12 uint16s = 24 bytes.
+ * Pointer table at 0x46CF6C uses 1-based indexing; here we use 0-based. */
+static const uint16_t k_checkpoint_table[26][12] = {
+    {5,25659,  869,15360, 1511,11520, 2061,15360, 2618,10240, 3074,    0}, /* 0:DragStrip */
+    {5,17979,  826,11520, 1429, 5120, 1652, 7680, 1926,15360, 2516,    0}, /* 1:Jamaica */
+    {5,20539,  768,17920, 1379,16640, 2090,16640, 2776,11520, 3221,    0}, /* 2:HouseOfBez */
+    {5,17979,  623,12800, 1175,15360, 1751, 8960, 2181, 8960, 2552,    0}, /* 3:Newcastle */
+    {5,17979,  747, 7680, 1006,12800, 1533,14080, 1978,17920, 2754,    0}, /* 4:Hawaii */
+    {5,16699,  609,10240, 1029,10240, 1560,12800, 2140,16640, 2567,    0}, /* 5:Italy */
+    {5,17979,  556,17920, 1113,14080, 1663,14080, 2305,23040, 3060,    0}, /* 6:Jordan */
+    {5,20539,  715, 8960,  989, 8960, 1212,14080, 1815,12800, 2508,    0}, /* 7:Cheddar */
+    {5,15419,  585,19200, 1271,20480, 1982,17920, 2593,17920, 3282,    0}, /* 8:Moscow */
+    {5,15419,  466, 8960,  896,12800, 1472,14080, 2024,12800, 2528,    0}, /* 9:BlueRidge */
+    {5,21819,  901,10240, 1346,11520, 1873, 7680, 2132,14080, 2755,    0}, /*10:Scotland */
+    {5,15419,  519,15360, 1099,11520, 1630, 7680, 2050, 8960, 2523,    0}, /*11:Tokyo */
+    {5,17979,  651,14080, 1128,12800, 1599,14080, 2115,11520, 2574,    0}, /*12:Sydney */
+    {5,10299,  486,10240, 1057,11520, 1655, 8960, 2071,11520, 2658,    0}, /*13:Honolulu */
+    {5,17979,  660,15360, 1297,14080, 1840,10240, 2193,12800, 2656,    0}, /*14:Munich */
+    {5,23099,  629,10240, 1182,11520, 1608,12800, 2211,14080, 2644,    0}, /*15:Washington */
+    {5,17979,  685,16640, 1446,11520, 1842,12800, 2281,17920, 2988,    0}, /*16:Kyoto */
+    {5,16699,  606,15360, 1122,12800, 1593,16640, 2070,15360, 2610,    0}, /*17:Bern */
+    {5,15419,  665,10240, 1081,12800, 1679,11520, 2250,11520, 2635,    0}, /*18:SanFrancisco */
+    {5,17979,  583,11520,  936,14080, 1479,17920, 2116,14080, 2657,    0}, /*19:Keswick */
+    {5,16699,  544,19200, 1147,11520, 1573,14080, 2126,14080, 2684,    0}, /*20:Cup21 */
+    {5,23099,  827,12800, 1266,12800, 1662,19200, 2423,15360, 2989,    0}, /*21:Cup22 */
+    {5,17979,  738, 7680, 1116,14080, 1707,10240, 2094,11520, 2649,    0}, /*22:Cup23 */
+    {5,17979,  694, 8960, 1081,16640, 1672, 8960, 2050,17920, 2668,    0}, /*23:Cup24 */
+    {5,30779,  106,10240, 1511,11520, 2061,12800, 2618,14080, 3120,    0}, /*24:Cup25 */
+    {5,30779,   25,10240, 1511,11520, 2061,12800, 2618,14080, 3120,    0}, /*25:Cup26 */
+};
 
 /* Benchmark state */
 static int   s_benchmark_image_load_pending;
@@ -327,6 +359,9 @@ void td5_game_shutdown(void) {
  * ======================================================================== */
 
 int td5_game_tick(void) {
+    /* Poll network subsystem (discovery, connection management) */
+    td5_net_tick();
+
     switch (g_td5.game_state) {
 
     /* ------------------------------------------------------------------
@@ -560,11 +595,22 @@ int td5_game_init_race_session(void) {
     TD5_LOG_I(LOG_TAG, "InitRace step 4/19: level runtime loaded track=%d is_circuit=%d", g_td5.track_index, g_track_is_circuit);
     CK("ck4_after_load_level");
 
-    /* ---- Step 5: Load vehicle assets for all active slots ---- */
+    /* ---- Step 4b: Initialize race sound resources ---- */
+    td5_sound_init_race_resources();
+
+    /* ---- Step 5: Load vehicle assets and sound banks for all active slots ---- */
     for (int i = 0; i < TD5_MAX_RACER_SLOTS; i++) {
         if (s_slot_state[i].state != 3) {
             int car_for_slot = (i == 0) ? g_td5.car_index : g_td5.ai_car_indices[i];
             td5_asset_load_vehicle(car_for_slot, i);
+
+            /* Load per-vehicle sound bank (Drive.wav, Rev.wav/Reverb.wav, Horn.wav).
+             * Slot 0 is the local player and uses Reverb.wav (is_reverb=1). */
+            const char *car_zip = td5_asset_get_car_zip_path(car_for_slot);
+            if (car_zip) {
+                td5_sound_load_vehicle_bank(car_zip, i, (i == 0) ? 1 : 0);
+            }
+
             TD5_LOG_I(LOG_TAG, "InitRace step 5/19: vehicle asset loaded slot=%d car_index=%d",
                       i, car_for_slot);
         }
@@ -760,10 +806,12 @@ int td5_game_init_race_session(void) {
     TD5_LOG_I(LOG_TAG, "InitRace step 14/19: VFX systems initialized");
 
     /* ---- Step 15: Configure force feedback + input mapping ---- */
+    td5_input_set_active_players(g_td5.split_screen_mode > 0 ? 2 : 1);
     td5_input_ff_init();
     td5_input_reset_accumulators();
     td5_input_reset_buffers();
-    TD5_LOG_I(LOG_TAG, "InitRace step 15/19: force feedback and input buffers initialized");
+    TD5_LOG_I(LOG_TAG, "InitRace step 15/19: force feedback and input buffers initialized (players=%d)",
+              g_td5.split_screen_mode > 0 ? 2 : 1);
 
     /* ---- Step 16: Start CD audio track ---- */
     td5_sound_cd_play(g_td5.track_index % 10 + 1);
@@ -812,18 +860,23 @@ int td5_game_init_race_session(void) {
         td5_render_load_sky(sky_path);
     }
 
-    /* ---- Step 20: Load checkpoint data from CHECKPT.NUM (0x42FB90) ---- */
+    /* ---- Step 20: Load checkpoint timing from hardcoded table (0x46CBB0) ---- */
     {
-        int cp_size = 0;
-        const void *cp_data = td5_asset_get_checkpoint_data(&cp_size);
+        int tidx = g_td5.track_index;
         memset(&s_active_checkpoint, 0, sizeof(s_active_checkpoint));
-        if (cp_data && cp_size >= 24) {
-            memcpy(&s_active_checkpoint, cp_data, 24);
-            TD5_LOG_I(LOG_TAG, "Checkpoint record loaded: count=%d initial_time=%d",
-                      (int)s_active_checkpoint.checkpoint_count,
-                      (int)s_active_checkpoint.initial_time);
+        if (tidx >= 0 && tidx < 26) {
+            memcpy(&s_active_checkpoint, k_checkpoint_table[tidx], 24);
+            TD5_LOG_I(LOG_TAG, "Checkpoint record loaded: track=%d count=%d initial_time=%u",
+                      tidx, (int)s_active_checkpoint.checkpoint_count,
+                      (unsigned)s_active_checkpoint.initial_time);
+            for (int ci = 0; ci < (int)s_active_checkpoint.checkpoint_count && ci < 5; ci++) {
+                TD5_LOG_I(LOG_TAG, "  checkpoint[%d]: span_threshold=%u time_bonus=%u",
+                          ci,
+                          (unsigned)s_active_checkpoint.checkpoints[ci].span_threshold,
+                          (unsigned)s_active_checkpoint.checkpoints[ci].time_bonus);
+            }
         } else {
-            TD5_LOG_W(LOG_TAG, "No checkpoint data available (P2P tracks will use span-only progression)");
+            TD5_LOG_W(LOG_TAG, "Track index %d out of range, no checkpoint data", tidx);
         }
     }
 
@@ -956,17 +1009,19 @@ int td5_game_run_race_frame(void) {
                 if (key_down  && !s_prev_down)  s_pause_menu_cursor = (s_pause_menu_cursor + 1) % 5;
                 if (key_up    && !s_prev_up)    s_pause_menu_cursor = (s_pause_menu_cursor + 4) % 5;
 
-                /* Left/right adjusts sliders for rows 0-2 (View / Music / Sound) */
+                /* Left/right adjusts sliders for rows 0-2 (View / Music / Sound).
+                 * CONTINUOUS while held (not edge-triggered) — matches original binary
+                 * RunAudioOptionsOverlay (0x43BF70): slider[cursor] += 0.02 per frame. */
                 if (s_pause_menu_cursor < 3) {
-                    if (key_right && !s_prev_right) {
+                    if (key_right) {
                         if (s_pause_menu_cursor == 0)      td5_save_set_view_distance(td5_save_get_view_distance() + 0.02f);
-                        else if (s_pause_menu_cursor == 1) td5_save_set_music_volume(td5_save_get_music_volume() + 5);
-                        else                               td5_save_set_sfx_volume(td5_save_get_sfx_volume() + 5);
+                        else if (s_pause_menu_cursor == 1) td5_save_set_music_volume(td5_save_get_music_volume() + 2);
+                        else                               td5_save_set_sfx_volume(td5_save_get_sfx_volume() + 2);
                     }
-                    if (key_left && !s_prev_left) {
+                    if (key_left) {
                         if (s_pause_menu_cursor == 0)      td5_save_set_view_distance(td5_save_get_view_distance() - 0.02f);
-                        else if (s_pause_menu_cursor == 1) td5_save_set_music_volume(td5_save_get_music_volume() - 5);
-                        else                               td5_save_set_sfx_volume(td5_save_get_sfx_volume() - 5);
+                        else if (s_pause_menu_cursor == 1) td5_save_set_music_volume(td5_save_get_music_volume() - 2);
+                        else                               td5_save_set_sfx_volume(td5_save_get_sfx_volume() - 2);
                     }
                 }
 
@@ -1164,6 +1219,42 @@ int td5_game_run_race_frame(void) {
     td5_hud_flush_text();
 
     /* ---- Audio tick ---- */
+
+    /* Feed camera position into the sound system as listener position.
+     * g_camWorldPos is in 24.8 fixed-point, which is the same coordinate
+     * space td5_sound expects (matching actor world_pos). */
+    for (int vp = 0; vp < (g_td5.split_screen_mode ? 2 : 1); vp++) {
+        td5_sound_set_listener_pos(vp,
+            g_camWorldPos[vp][0],
+            g_camWorldPos[vp][1],
+            g_camWorldPos[vp][2]);
+    }
+
+    /* Feed per-vehicle skid intensity and gear state into the sound system */
+    for (i = 0; i < TD5_MAX_RACER_SLOTS; i++) {
+        if (s_slot_state[i].state == 3) continue;
+        TD5_Actor *actor_snd = td5_game_get_actor(i);
+        if (!actor_snd) continue;
+        uint8_t *a = (uint8_t *)actor_snd;
+
+        /* Skid intensity: max of front/rear axle slip excess (offset 0x31C, 0x320) */
+        int slip_front = *(int32_t *)(a + 0x31C);
+        int slip_rear  = *(int32_t *)(a + 0x320);
+        int slip_max   = (slip_front > slip_rear) ? slip_front : slip_rear;
+        if (slip_max < 0) slip_max = 0;
+
+        /* Feed skid intensity for the viewport that is watching this vehicle */
+        for (int vp = 0; vp < (g_td5.split_screen_mode ? 2 : 1); vp++) {
+            if (g_actorSlotForView[vp] == i) {
+                td5_sound_set_skid_intensity(vp, slip_max);
+            }
+        }
+
+        /* Gear state (offset 0x224) -- used for horn volume table lookup */
+        int gear = *(int32_t *)(a + 0x224);
+        td5_sound_set_gear_state(i, gear);
+    }
+
     for (i = 0; i < TD5_MAX_RACER_SLOTS; i++) {
         if (s_slot_state[i].state != 3) {
             td5_sound_update_vehicle_looping_state(i);
@@ -1360,6 +1451,15 @@ static int check_race_completion(uint32_t sim_delta) {
 static void advance_pending_finish_state(int slot, uint32_t sim_delta) {
     ActorRaceMetric *m = &s_metrics[slot];
 
+    /* Sync span from actor struct (original reads actor+0x82 directly) */
+    {
+        TD5_Actor *actor = td5_game_get_actor(slot);
+        if (actor) {
+            int16_t *track_state = (int16_t *)((uint8_t *)actor + 0x80);
+            m->normalized_span = track_state[1];  /* actor+0x82: current span */
+        }
+    }
+
     /* Already finished */
     if (s_slot_state[slot].companion_1 != 0) return;
 
@@ -1408,15 +1508,22 @@ static void advance_pending_finish_state(int slot, uint32_t sim_delta) {
             }
         }
     } else {
-        /* Point-to-point / time trial: checkpoint crossing */
+        /* Point-to-point / time trial: checkpoint crossing (0x409E80 P2P branch)
+         * Original comparison: (int)(uint)(uint16_t)threshold <= (int)(int16_t)span */
         if (m->checkpoint_index < s_active_checkpoint.checkpoint_count) {
             int cp = m->checkpoint_index;
-            if (m->normalized_span >=
-                (int16_t)s_active_checkpoint.checkpoints[cp].span_threshold) {
+            int threshold = (int)(unsigned int)s_active_checkpoint.checkpoints[cp].span_threshold;
+            int span_val  = (int)m->normalized_span;
+            if (span_val >= threshold) {
                 /* Crossed checkpoint: add time bonus */
                 m->timer_ticks +=
                     (int16_t)s_active_checkpoint.checkpoints[cp].time_bonus;
                 m->checkpoint_index++;
+                TD5_LOG_I(LOG_TAG,
+                          "Checkpoint crossed: slot=%d cp=%d span=%d threshold=%d bonus=%d timer=%d",
+                          slot, cp, span_val, threshold,
+                          (int)(int16_t)s_active_checkpoint.checkpoints[cp].time_bonus,
+                          m->cumulative_timer);
 
                 /* Store split time */
                 if (cp < 8) {
@@ -1491,18 +1598,22 @@ static void decay_ultimate_timer(int slot) {
 
 static void adjust_checkpoint_timers(int slot) {
     ActorRaceMetric *m = &s_metrics[slot];
-    int numerator, denominator = 10;
+    int numerator = 10, denominator = 10;
+
+    /* Set base timer from checkpoint record (0x40A530 writes to actor+0x344) */
+    m->timer_ticks = (int16_t)s_active_checkpoint.initial_time;
+
+    /* Clear checkpoint state (matches original: clears +0x37E, +0x328, +0x34C) */
+    m->checkpoint_index = 0;
+    m->post_finish_metric_base = 0;
+    m->cumulative_timer = 0;
 
     switch (g_td5.difficulty) {
-    case TD5_DIFFICULTY_EASY:
-        numerator = 12;   /* +20% */
-        break;
-    case TD5_DIFFICULTY_NORMAL:
-        numerator = 11;   /* +10% */
-        break;
+    case TD5_DIFFICULTY_EASY:   numerator = 12; break;  /* +20% */
+    case TD5_DIFFICULTY_NORMAL: numerator = 11; break;  /* +10% */
     case TD5_DIFFICULTY_HARD:
     default:
-        return;           /* no adjustment */
+        return;  /* hard = baseline, no scaling */
     }
 
     /* Scale initial time */
@@ -1510,7 +1621,7 @@ static void adjust_checkpoint_timers(int slot) {
                                numerator / denominator);
 
     /* Scale each checkpoint bonus */
-    for (int i = 0; i < s_active_checkpoint.checkpoint_count; i++) {
+    for (int i = 0; i < (int)s_active_checkpoint.checkpoint_count && i < 5; i++) {
         s_active_checkpoint.checkpoints[i].time_bonus =
             (uint16_t)(s_active_checkpoint.checkpoints[i].time_bonus *
                        numerator / denominator);
@@ -1873,10 +1984,16 @@ void td5_game_init_viewport_layout(void) {
 void td5_game_play_intro_movie(void) {
     /* Original: PlayIntroMovie (0x43C440)
      * Plays Movie/intro.tgq via EA TGQ engine.
-     * Source port: try MP4 first, then original AVI. */
+     * Source port: try MP4 first (transcoded from TGQ), then AVI, then WMV.
+     * TGQ is not supported by Media Foundation -- it will be rejected early
+     * with a log message telling the user to transcode. */
     if (td5_fmv_is_supported()) {
-        if (!td5_fmv_play("Movie/intro.mp4")) {
-            td5_fmv_play("Movie/intro.avi");
+        if (!td5_fmv_play("Movie/intro.mp4") &&
+            !td5_fmv_play("Movie/intro.avi") &&
+            !td5_fmv_play("Movie/intro.wmv")) {
+            /* None of the transcoded formats found. Try the original TGQ
+             * path -- td5_fmv_play will log the "transcode to MP4" hint. */
+            td5_fmv_play("Movie/intro.tgq");
         }
     }
 }
@@ -1991,7 +2108,13 @@ void td5_game_store_rounded_vec3(const float *in, int32_t *out) {
  * Game Logic Helpers (migrated from td5re_stubs.c)
  * ======================================================================== */
 
-int td5_game_get_player_slot(int viewport) { (void)viewport; return 0; }
+int td5_game_get_player_slot(int viewport) {
+    if (viewport < 0 || viewport > 1) return 0;
+    return g_actorSlotForView[viewport];
+}
+int td5_game_is_split_screen(void) {
+    return g_split_screen_mode != 0;
+}
 int td5_game_is_replay_active(void) { return 0; }
 int td5_game_get_traffic_variant(int traffic_index) { (void)traffic_index; return 0; }
 int td5_game_get_cop_actor_index(void) { return -1; }
