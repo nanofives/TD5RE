@@ -84,7 +84,12 @@ void td5_physics_init_vehicle_runtime(void);
 void td5_physics_compute_suspension_envelope(TD5_Actor *actor);
 
 /* --- Collision --- */
+void td5_physics_set_collisions(int enabled);
 void td5_physics_apply_collision_impulse(TD5_Actor *a, TD5_Actor *b);
 void td5_physics_resolve_vehicle_contacts(void);
+
+/* --- Dynamics mode --- */
+void td5_physics_set_dynamics(int mode);  /* 0=arcade, 1=simulation */
+void td5_physics_set_paused(int paused); /* 1=countdown (RPM only), 0=full sim */
 
 #endif /* TD5_PHYSICS_H */

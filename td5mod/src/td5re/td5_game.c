@@ -62,20 +62,7 @@ extern float g_render_height_f;         /* td5_render.c */
 extern int   g_track_is_circuit;        /* td5_track.c */
 extern int   g_track_type_mode;         /* td5_track.c */
 
-/* Win32-based checkpoint log -- bypasses broken CRT fopen in -mwindows builds */
-static void ck_write(const char *path, const char *msg) {
-    HANDLE hf = CreateFileA(path, FILE_APPEND_DATA, FILE_SHARE_READ,
-                            NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
-    if (hf != INVALID_HANDLE_VALUE) {
-        DWORD w;
-        WriteFile(hf, msg, (DWORD)strlen(msg), &w, NULL);
-        WriteFile(hf, "\n", 1, &w, NULL);
-        CloseHandle(hf);
-    }
-    OutputDebugStringA("CK: ");
-    OutputDebugStringA(msg);
-    OutputDebugStringA("\n");
-}
+/* Checkpoint logging now routes through the centralized logger (race.log) */
 
 /* ========================================================================
  * Original function addresses and implementation status
@@ -316,7 +303,7 @@ static void set_countdown_indicator_state(int value);
 int td5_game_init(void) {
     /* Initialize game state machine (0x442170 entry, 0x430A90 GameWinMain setup) */
     g_td5.game_state = TD5_GAMESTATE_INTRO;
-    g_td5.intro_movie_pending = 1;
+    g_td5.intro_movie_pending = g_td5.ini.skip_intro ? 0 : 1;
     g_td5.frontend_init_pending = 1;
 
     s_fade_accumulator = 0.0f;
@@ -379,8 +366,9 @@ int td5_game_tick(void) {
         /* Step 2: Initialize render memory management and state */
         td5_render_init();
 
-        /* Step 3: Show legal / splash screens */
-        td5_game_show_legal_screens();
+        /* Step 3: Show legal / splash screens (skip if SkipIntro is set) */
+        if (!g_td5.ini.skip_intro)
+            td5_game_show_legal_screens();
 
         /* Step 4: Transition to MENU (fallthrough) */
         TD5_LOG_I(LOG_TAG, "State transition: %s -> %s",
@@ -463,20 +451,15 @@ int td5_game_tick(void) {
              * Source port: load the TGA through the asset pipeline and
              * present it via the platform render clear + present path.
              */
-            void *tga_pixels = NULL;
-            int tga_w = 0, tga_h = 0;
-            int tga_size = 0;
-            void *tga_data = td5_asset_open_and_read("benchmark.tga", ".", &tga_size);
-            if (tga_data) {
-                td5_asset_decode_tga(tga_data, (size_t)tga_size,
-                                     &tga_pixels, &tga_w, &tga_h);
-                if (tga_pixels) {
-                    /* Upload as a full-screen texture and present */
-                    td5_plat_render_upload_texture(0, tga_pixels, tga_w, tga_h, 0);
-                    td5_plat_present(0);
-                    free(tga_pixels);
-                }
-                td5_plat_heap_free(tga_data);
+            void *bm_pixels = NULL;
+            int bm_w = 0, bm_h = 0;
+            if (td5_asset_load_png_to_buffer("../re/td5_png_clean/benchmark.png",
+                                              TD5_COLORKEY_NONE, &bm_pixels, &bm_w, &bm_h)) {
+                td5_plat_render_upload_texture(0, bm_pixels, bm_w, bm_h, 0);
+                td5_plat_present(0);
+                free(bm_pixels);
+            } else {
+                TD5_LOG_W(LOG_TAG, "benchmark.png not found");
             }
             s_benchmark_image_load_pending = 0;
         }
@@ -545,7 +528,7 @@ int32_t td5_game_get_race_timer(int slot, int lap_index)
  * ======================================================================== */
 
 int td5_game_init_race_session(void) {
-    #define CK(n) ck_write("../ck.txt", n)
+    #define CK(n) TD5_LOG_I(LOG_TAG, "CK: %s", n)
     CK("ck0_start");
     TD5_LOG_I(LOG_TAG, "InitializeRaceSession: begin");
 
@@ -835,7 +818,7 @@ int td5_game_init_race_session(void) {
     TD5_LOG_I(LOG_TAG, "InitRace step 18/19: race texture pages uploaded");
 
     /* ---- Step 19: Initialize HUD, pause menu overlay ---- */
-    #define DBG_WRITE(msg) ck_write("../step19.txt", msg)
+    #define DBG_WRITE(msg) TD5_LOG_I(LOG_TAG, "Step19: %s", msg)
     DBG_WRITE("19a_before_overlay");
     td5_hud_init_overlay_resources(1, 0);
     DBG_WRITE("19b_before_layout");
@@ -856,7 +839,7 @@ int td5_game_init_race_session(void) {
         char sky_path[256];
         int level_num = td5_asset_level_number(g_td5.track_index);
         snprintf(sky_path, sizeof(sky_path),
-                 "../re/assets/levels/level%03d/forwsky.tga", level_num);
+                 "../re/td5_png_clean/levels/level%03d/FORWSKY.png", level_num);
         td5_render_load_sky(sky_path);
     }
 
@@ -883,7 +866,11 @@ int td5_game_init_race_session(void) {
     /* ---- Step 21: Adjust checkpoint timers by difficulty ---- */
     for (int i = 0; i < TD5_MAX_RACER_SLOTS; i++) {
         if (s_slot_state[i].state == 1) {   /* human player */
-            adjust_checkpoint_timers(i);
+            if (g_td5.checkpoint_timers_enabled) {
+                adjust_checkpoint_timers(i);
+            } else {
+                s_metrics[i].timer_ticks = 0x7FFF;  /* disable: max timer */
+            }
         }
     }
 
@@ -1061,14 +1048,21 @@ int td5_game_run_race_frame(void) {
 
         if (g_td5.paused) {
             tick_race_countdown();
-            /* Still run physics during countdown so suspension/gravity settle
-             * and cars don't appear frozen; input is not polled so no thrust. */
+            /* Poll input during countdown so player can rev the engine.
+             * Physics runs with g_game_paused=1, which only updates
+             * engine RPM (no vehicle movement). */
+            td5_physics_set_paused(1);
+            for (i = 0; i < TD5_MAX_RACER_SLOTS; i++) {
+                if (s_slot_state[i].state == 1)
+                    td5_input_update_player_control(i);
+            }
             td5_physics_tick();
             td5_track_tick();
             g_td5.sim_time_accumulator -= TD5_TICK_ACCUMULATOR_ONE;
             ticks_this_frame++;
             continue;
         }
+        td5_physics_set_paused(0);
 
         /* Input record/playback is handled inside td5_input_poll_race_session(). */
 
@@ -2015,40 +2009,21 @@ void td5_game_show_legal_screens(void) {
  * ======================================================================== */
 
 static void display_loading_screen_tga(void) {
-    char filename[32];
+    char png_path[128];
     int index = rand() % 20;
-    sprintf(filename, "load%02d.tga", index);
-
-    TD5_LOG_I(LOG_TAG, "Loading screen: %s", filename);
-
-    /* Query size and allocate buffer for TGA data + decode space */
-    int size = td5_asset_get_entry_size_from_path(filename, "LOADING.ZIP");
-    if (size <= 0) {
-        TD5_LOG_W(LOG_TAG, "Loading screen %s not found in LOADING.ZIP", filename);
-        return;
-    }
-
-    /* Allocate TGA data buffer + decode space (640*480*2 = 0x96000) */
-    void *buf = td5_plat_heap_alloc((size_t)size + 0x96000);
-    if (!buf) {
-        TD5_LOG_E(LOG_TAG, "Failed to allocate loading screen buffer (%d bytes)",
-                  size + 0x96000);
-        return;
-    }
-
-    /* Extract TGA from ZIP */
-    int bytes_read = td5_asset_read_entry_from_path(filename, "LOADING.ZIP",
-                                                     buf, size);
-    if (bytes_read <= 0) {
-        td5_plat_heap_free(buf);
-        return;
-    }
-
-    /* Decode TGA, draw fullscreen quad, and present */
     void *pixels = NULL;
-    int tga_w = 0, tga_h = 0;
-    if (td5_asset_decode_tga(buf, (size_t)bytes_read, &pixels, &tga_w, &tga_h)
-        && pixels) {
+    int img_w = 0, img_h = 0;
+
+    snprintf(png_path, sizeof(png_path), "../re/td5_png_clean/loading/load%02d.png", index);
+    TD5_LOG_I(LOG_TAG, "Loading screen: %s", png_path);
+
+    if (!td5_asset_load_png_to_buffer(png_path, TD5_COLORKEY_NONE, &pixels, &img_w, &img_h)) {
+        TD5_LOG_W(LOG_TAG, "Loading screen %s not found", png_path);
+        return;
+    }
+
+    /* Draw fullscreen quad and present */
+    {
         int screen_w = 0, screen_h = 0;
         td5_plat_get_window_size(&screen_w, &screen_h);
         float sw = (float)screen_w;
@@ -2077,7 +2052,7 @@ static void display_loading_screen_tga(void) {
         verts[3].tex_u = 0.0f;    verts[3].tex_v = 1.0f;
 
         td5_plat_render_clear(0x00000000);
-        td5_plat_render_upload_texture(0, pixels, tga_w, tga_h, 2);
+        td5_plat_render_upload_texture(0, pixels, img_w, img_h, 2);
         td5_plat_render_begin_scene();
         td5_plat_render_set_viewport(0, 0, screen_w, screen_h);
         td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
@@ -2088,8 +2063,6 @@ static void display_loading_screen_tga(void) {
         td5_plat_present_texture_page(0, 0);
         free(pixels);
     }
-
-    td5_plat_heap_free(buf);
 }
 
 /* ========================================================================

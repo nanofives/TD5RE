@@ -423,11 +423,15 @@ void td5_physics_update_player(TD5_Actor *actor)
 
     /* --- 7/8. Gear selection: mutually exclusive paths (original 0x404030).
      * field_0x378 (throttle_input_active) selects between:
-     *   0 -> ApplyReverseGearThrottleSign only
-     *   !0 -> UpdateAutomaticGearSelection only */
-    if (actor->throttle_input_active == 0) {
-        td5_physics_reverse_throttle_sign(actor);
+     *   0 -> ApplyReverseGearThrottleSign (NOS-stun path)
+     *   !0 -> UpdateAutomaticGearSelection (normal driving)
+     * throttle_input_active defaults to 0 and must be written by input
+     * handler as ~(bits>>28)&1. Since the NOS-stun input bit is not yet
+     * implemented, default to auto_gear_select for normal driving. */
+    if (actor->throttle_input_active != 0) {
+        td5_physics_auto_gear_select(actor);
     } else {
+        /* Fallback: always use auto gear until NOS-stun input is wired */
         td5_physics_auto_gear_select(actor);
     }
 
@@ -435,12 +439,9 @@ void td5_physics_update_player(TD5_Actor *actor)
     td5_physics_update_engine_speed(actor);
 
     /* --- 10. ComputeDriveTorqueFromGearCurve ---
-     * Original only computes drive torque when grounded (surface_contact_flags != 0).
-     * When airborne, no torque is applied. */
-    int32_t drive_torque = 0;
-    if (actor->surface_contact_flags != 0) {
-        drive_torque = td5_physics_compute_drive_torque(actor);
-    }
+     * Drive torque is computed unconditionally (including airborne).
+     * The original allows engine revving and speed changes mid-air. */
+    int32_t drive_torque = td5_physics_compute_drive_torque(actor);
 
     if (actor->slot_index == 0 && (actor->frame_counter % 120u) == 0u) {
         TD5_LOG_I(LOG_TAG,
@@ -2313,4 +2314,10 @@ void td5_physics_set_collisions(int enabled)
 void td5_physics_set_dynamics(int mode)
 {
     (void)mode;  /* TODO: arcade vs simulation toggle */
+}
+
+void td5_physics_set_paused(int paused)
+{
+    g_game_paused = paused;
+    TD5_LOG_I(LOG_TAG, "Physics paused=%d", paused);
 }
