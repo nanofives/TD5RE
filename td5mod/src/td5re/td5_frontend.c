@@ -289,6 +289,10 @@ static int  s_sound_icon_mono_surface = 0;  /* Mono.tga   (mono icon,   Sound Op
 static int  s_sound_volumebox_surface = 0;  /* VolumeBox.tga   (volume bar background) */
 static int  s_sound_volumefill_surface = 0; /* VolumeFill.tga  (volume bar fill)       */
 static int  s_split_screen_surface = 0;     /* SplitScreen.tga (Two Player layout preview)    */
+static int  s_joypad_icon_surface = 0;      /* JoypadIcon.tga   (64x32 gamepad icon)   */
+static int  s_joystick_icon_surface = 0;    /* JoystickIcon.tga (64x32 joystick icon)  */
+static int  s_keyboard_icon_surface = 0;    /* KeyboardIcon.tga (64x32 keyboard icon)  */
+static int  s_nocontroller_surface = 0;     /* NoControllerText.tga (376x20 warning)   */
 static int  s_car_preview_prev_surface;
 static int  s_car_preview_next_surface;
 
@@ -547,6 +551,11 @@ static const char *frontend_get_title_tga_for_screen(TD5_ScreenIndex screen) {
     case TD5_SCREEN_TRACK_SELECTION: return "TrackSelectText.TGA";
     case TD5_SCREEN_HIGH_SCORE: return "HighScoresText.TGA";
     case TD5_SCREEN_RACE_RESULTS: return "ResultsText.tga";
+    case TD5_SCREEN_CONNECTION_BROWSER:
+    case TD5_SCREEN_SESSION_PICKER:
+    case TD5_SCREEN_CREATE_SESSION:
+    case TD5_SCREEN_NETWORK_LOBBY:
+    case TD5_SCREEN_SESSION_LOCKED: return "NetPlayText.TGA";
     default: return NULL;
     }
 }
@@ -561,6 +570,11 @@ static int frontend_get_title_page_for_screen(TD5_ScreenIndex screen) {
     case TD5_SCREEN_TRACK_SELECTION: return FE_TITLE_PAGE_BASE + 5;
     case TD5_SCREEN_HIGH_SCORE: return FE_TITLE_PAGE_BASE + 6;
     case TD5_SCREEN_RACE_RESULTS: return FE_TITLE_PAGE_BASE + 7;
+    case TD5_SCREEN_CONNECTION_BROWSER:
+    case TD5_SCREEN_SESSION_PICKER:
+    case TD5_SCREEN_CREATE_SESSION:
+    case TD5_SCREEN_NETWORK_LOBBY:
+    case TD5_SCREEN_SESSION_LOCKED: return FE_TITLE_PAGE_BASE + 8;
     default: return -1;
     }
 }
@@ -2254,6 +2268,10 @@ void td5_frontend_set_screen(TD5_ScreenIndex index) {
     s_gallery_pic_index = 0;
     s_gallery_visited_mask = 0;
     s_control_options_surface = 0;
+    s_joypad_icon_surface = 0;
+    s_joystick_icon_surface = 0;
+    s_keyboard_icon_surface = 0;
+    s_nocontroller_surface = 0;
     /* Release recyclable surfaces, but KEEP shared assets on dedicated pages.
      * Shared pages (895-899) hold font, cursor, ButtonBits, mainfont --
      * these are loaded once in init and must survive screen transitions. */
@@ -3306,16 +3324,11 @@ static void frontend_render_car_selection_preview(float sx, float sy) {
      * Rect matches car preview surface: 408x300 starting at (232, 96).
      * In the source port we clear every frame, so this must be redrawn each frame.
      * Original y = screenH - 0x164 = 480 - 356 = 124 (confirmed at 0x40EB3B).
-     * Force depth test to ALWAYS to guarantee the fill overwrites the background. */
-    g_backend.state.z_func = 1;  /* triggers DS_Z_ON_WRITE_ON_ALWAYS in ApplyStateCache */
-    g_backend.state.z_enable = 1;
-    g_backend.state.z_write = 1;
-    g_backend.state.blend_enable = 0;
-    g_backend.state.dirty = 1;
-    fe_draw_quad(232.0f * sx, 124.0f * sy, 408.0f * sx, 300.0f * sy, 0xFF00005C,
-                 s_white_tex_page, 0, 0, 1, 1);
-    g_backend.state.z_func = 0;  /* restore to LESS_EQUAL */
-    g_backend.state.dirty = 1;
+     * Use TRANSLUCENT_LINEAR + tex_page=-1 (same path as button fills which work). */
+    td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
+    fe_draw_quad(232.0f * sx, 124.0f * sy, 408.0f * sx, 300.0f * sy,
+                 0xFF00005C, -1, 0, 0, 1, 1);
+    td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
 
     if (s_inner_state == 15) {
         /* Stats sub-screen: car image at 35% opacity over the blue panel background,
@@ -3416,6 +3429,37 @@ static void frontend_render_control_options_overlay(float sx, float sy) {
     fe_draw_quad(394.0f * sx, 217.0f * sy, icon_w, icon_h,
                  0xFFFFFFFF, s_surfaces[slot].tex_page, 0.0f, v0, 1.0f, v1);
     td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
+}
+
+/* Controller binding overlay: show the active controller-type icon (64x32)
+ * centered horizontally at y=120, plus "No Controller" warning when applicable.
+ * Original: FUN_0040FE00 draws the detected device icon from individual TGAs.
+ * The Control Options screen (14) uses Controllers.TGA sprite sheet instead;
+ * the binding screen (18) uses per-type icon TGAs. */
+static void frontend_render_controller_binding_overlay(float sx, float sy) {
+    if (!s_anim_complete) return;
+
+    /* Determine which icon to show based on detected controller type.
+     * For now, default to keyboard (type 0). TODO: read actual device. */
+    int icon_surface = s_keyboard_icon_surface;  /* type 0 = keyboard */
+    /* type 1 = joypad, type 2 = joystick */
+    /* if (controller_type == 1) icon_surface = s_joypad_icon_surface; */
+    /* if (controller_type == 2) icon_surface = s_joystick_icon_surface; */
+
+    if (icon_surface > 0) {
+        int slot = icon_surface - 1;
+        if (slot >= 0 && slot < FE_MAX_SURFACES && s_surfaces[slot].in_use) {
+            float icon_w = (float)s_surfaces[slot].width  * sx;
+            float icon_h = (float)s_surfaces[slot].height * sy;
+            float icon_x = (320.0f - (float)s_surfaces[slot].width * 0.5f) * sx;
+            float icon_y = 120.0f * sy;
+            td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
+            fe_draw_quad(icon_x, icon_y, icon_w, icon_h,
+                         0xFFFFFFFF, s_surfaces[slot].tex_page,
+                         0.0f, 0.0f, 1.0f, 1.0f);
+            td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
+        }
+    }
 }
 
 static void frontend_format_score_time(char *buf, size_t cap, int raw_ticks, int type) {
@@ -3786,6 +3830,9 @@ void td5_frontend_render_ui_rects(void) {
         break;
     case TD5_SCREEN_CONTROL_OPTIONS:
         frontend_render_control_options_overlay(sx, sy);
+        break;
+    case TD5_SCREEN_CONTROLLER_BINDING:
+        frontend_render_controller_binding_overlay(sx, sy);
         break;
     case TD5_SCREEN_HIGH_SCORE:
         frontend_render_high_score_overlay(sx, sy);
@@ -5888,6 +5935,10 @@ static void Screen_ControllerBinding(void) {
         frontend_init_return_screen(TD5_SCREEN_CONTROLLER_BINDING);
         TD5_LOG_D(LOG_TAG, "ControllerBinding: init");
         frontend_load_tga("Front_End/MainMenu.tga", "Front_End/FrontEnd.zip");
+        s_joypad_icon_surface   = frontend_load_tga("JoypadIcon.tga",   "Front End/frontend.zip");
+        s_joystick_icon_surface = frontend_load_tga("JoystickIcon.tga", "Front End/frontend.zip");
+        s_keyboard_icon_surface = frontend_load_tga("KeyboardIcon.tga", "Front End/frontend.zip");
+        s_nocontroller_surface  = frontend_load_tga("NoControllerText.tga", "Front End/frontend.zip");
         frontend_create_button("Detect Input", -220, 0, 220, 0x20);
         frontend_create_button("OK", -120, 0, 120, 0x20);
         s_inner_state = 1;
