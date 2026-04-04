@@ -260,6 +260,7 @@ static int  s_prev_down_state;
 static int  s_prev_escape_state;
 static int  s_mouse_click_latched;
 static int  s_mouse_confirm_button = -1;
+static int  s_mouse_hover_button  = -1;
 static uint32_t s_mouse_confirm_until;
 static int  s_mouse_flash_button = -1;
 static uint32_t s_mouse_flash_until;
@@ -1040,6 +1041,7 @@ static void frontend_reset_buttons(void) {
     s_selection_from_mouse = 0;
     s_button_index = -1;
     s_mouse_confirm_button = -1;
+    s_mouse_hover_button  = -1;
     s_mouse_flash_button = -1;
     s_prev_mouse_x = -1;
     s_prev_mouse_y = -1;
@@ -1720,55 +1722,64 @@ static void frontend_poll_input(void) {
      * of the right edge, set arrow_input RIGHT; within 20px of left edge, set LEFT.
      * This enables mouse-driven left/right cycling on options screens. */
     if (s_mouse_clicked) {
+        /* Find which button the mouse is over */
+        int hit_button = -1;
         for (int i = 0; i < FE_MAX_BUTTONS; i++) {
             if (!s_buttons[i].active || s_buttons[i].disabled) continue;
             if (s_mouse_x >= s_buttons[i].x && s_mouse_x < s_buttons[i].x + s_buttons[i].w &&
                 s_mouse_y >= s_buttons[i].y && s_mouse_y < s_buttons[i].y + s_buttons[i].h) {
-                if (i == s_selected_button) {
-                    /* Already selected: check arrow zones (20px from edges) */
-                    int arrow_zone = 0;
-                    if (s_mouse_x >= s_buttons[i].x + s_buttons[i].w - 0x14) {
-                        arrow_zone = 1;   /* RIGHT */
-                    } else if (s_mouse_x < s_buttons[i].x + 0x14) {
-                        arrow_zone = -1;  /* LEFT */
-                    }
-
-                    if (arrow_zone != 0) {
-                        /* Arrow click: set arrow input directly, play feedback */
-                        if (arrow_zone > 0) s_arrow_input |= 2;  /* RIGHT */
-                        else                s_arrow_input |= 1;  /* LEFT */
-                        frontend_play_sfx(2);
-                    } else {
-                        /* Center click on selected button: confirm */
-                        s_button_index = i;
-                        s_input_ready = 1;
-                        s_mouse_flash_button = i;
-                        s_mouse_flash_until = now + 180;
-                        s_mouse_confirm_button = -1;
-                        frontend_play_sfx(4);
-                        TD5_LOG_I(LOG_TAG, "Button pressed: index=%d label=\"%s\" source=mouse",
-                                  s_button_index, s_buttons[s_button_index].label);
-                    }
-                } else {
-                    /* Different button: select it (first click selects, second confirms) */
-                    s_selected_button = i;
-                    s_selection_from_mouse = 1;
-                    frontend_play_sfx(2);
-                }
+                hit_button = i;
                 break;
+            }
+        }
+        if (hit_button >= 0) {
+            int i = hit_button;
+            if (i == s_selected_button) {
+                /* Already selected: check arrow zones (20px from edges) */
+                int arrow_zone = 0;
+                if (s_mouse_x >= s_buttons[i].x + s_buttons[i].w - 0x14) {
+                    arrow_zone = 1;   /* RIGHT */
+                } else if (s_mouse_x < s_buttons[i].x + 0x14) {
+                    arrow_zone = -1;  /* LEFT */
+                }
+
+                if (arrow_zone != 0) {
+                    /* Arrow click: set arrow input directly, play feedback */
+                    if (arrow_zone > 0) s_arrow_input |= 2;  /* RIGHT */
+                    else                s_arrow_input |= 1;  /* LEFT */
+                    frontend_play_sfx(2);
+                } else {
+                    /* Center click on selected button: confirm */
+                    s_button_index = i;
+                    s_input_ready = 1;
+                    s_mouse_flash_button = i;
+                    s_mouse_flash_until = now + 180;
+                    s_mouse_confirm_button = -1;
+                    frontend_play_sfx(4);
+                    TD5_LOG_I(LOG_TAG, "Button pressed: index=%d label=\"%s\" source=mouse",
+                              s_button_index, s_buttons[s_button_index].label);
+                }
+            } else {
+                /* Different button: select it (first click selects, second confirms) */
+                s_selected_button = i;
+                s_selection_from_mouse = 1;
+                frontend_play_sfx(2);
             }
         }
         s_mouse_click_latched = 0;
     }
 
-    /* Mouse hover updates selected button */
+    /* Mouse hover: track hovered button but do NOT update selection.
+     * Original UpdateFrontendDisplayModeSelection (0x426580) uses a separate
+     * hover index (DAT_00498700) distinct from the selection index.
+     * First click selects, second click confirms. */
     if (mouse_moved) {
+        s_mouse_hover_button = -1;
         for (int i = 0; i < FE_MAX_BUTTONS; i++) {
             if (!s_buttons[i].active) continue;
             if (s_mouse_x >= s_buttons[i].x && s_mouse_x < s_buttons[i].x + s_buttons[i].w &&
                 s_mouse_y >= s_buttons[i].y && s_mouse_y < s_buttons[i].y + s_buttons[i].h) {
-                s_selected_button = i;
-                s_selection_from_mouse = 1;
+                s_mouse_hover_button = i;
                 break;
             }
         }
