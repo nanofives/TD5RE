@@ -1434,6 +1434,54 @@ void td5_physics_integrate_pose(TD5_Actor *actor)
         }
     }
 
+    /* 8b. Out-of-bounds recovery: if the car has fallen far below the road
+     * surface (or the ground probe failed entirely), teleport it back to
+     * the nearest valid road position on its current span. */
+    {
+        int32_t road_y = 0;
+        int road_surf = 0;
+        int oob_span = actor->track_span_raw;
+        int have_road = td5_track_probe_height(actor->world_pos.x,
+                                                actor->world_pos.z,
+                                                oob_span, &road_y, &road_surf);
+        /* Threshold: 128 world units below road = 128*256 = 32768 in 24.8 FP */
+        int32_t oob_threshold = 32768;
+        int fallen = 0;
+        if (have_road && (actor->world_pos.y < road_y - oob_threshold))
+            fallen = 1;
+        if (!have_road && actor->world_pos.y < -256000) /* absolute fallback */
+            fallen = 1;
+
+        if (fallen) {
+            int wx = 0, wy = 0, wz = 0;
+            int sub_lane = (int)actor->track_sub_lane_index;
+            if (td5_track_get_span_lane_world(oob_span, sub_lane, &wx, &wy, &wz)) {
+                actor->world_pos.x = wx << 8;
+                actor->world_pos.y = wy << 8;
+                actor->world_pos.z = wz << 8;
+            } else if (have_road) {
+                /* At least snap Y to road height */
+                actor->world_pos.y = road_y;
+            }
+            actor->linear_velocity_x = 0;
+            actor->linear_velocity_y = 0;
+            actor->linear_velocity_z = 0;
+            actor->angular_velocity_roll = 0;
+            actor->angular_velocity_yaw = 0;
+            actor->angular_velocity_pitch = 0;
+            actor->euler_accum.roll = 0;
+            actor->euler_accum.pitch = 0;
+            /* Preserve yaw (heading) — recompute from track */
+            td5_track_compute_heading(actor);
+            actor->render_pos.x = (float)actor->world_pos.x * (1.0f / 256.0f);
+            actor->render_pos.y = (float)actor->world_pos.y * (1.0f / 256.0f);
+            actor->render_pos.z = (float)actor->world_pos.z * (1.0f / 256.0f);
+            TD5_LOG_I(LOG_TAG, "OOB recovery: slot=%d span=%d pos=(%d,%d,%d)",
+                      actor->slot_index, oob_span,
+                      actor->world_pos.x, actor->world_pos.y, actor->world_pos.z);
+        }
+    }
+
     /* 9. Clamp angular velocity deltas to +/- 6000 per frame */
     if (actor->angular_velocity_roll > 6000) actor->angular_velocity_roll = 6000;
     if (actor->angular_velocity_roll < -6000) actor->angular_velocity_roll = -6000;
