@@ -938,12 +938,12 @@ static int frontend_current_car_index(void) {
     return s_selected_car;
 }
 
-/* Check whether the level zip for a given track index is present on disk.
- * track_index + 1 = level number (track 0 -> level001.zip, track 8 -> level009.zip). */
+/* Check whether the level zip for a given track index is present on disk. */
 static int frontend_track_level_exists(int track_index) {
     char zippath[32];
     if (track_index < 0) return 1; /* -1 = random, always "valid" */
-    snprintf(zippath, sizeof(zippath), "level%03d.zip", track_index + 1);
+    snprintf(zippath, sizeof(zippath), "level%03d.zip",
+             td5_asset_level_number(track_index));
     return td5_plat_file_exists(zippath);
 }
 
