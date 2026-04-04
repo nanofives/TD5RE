@@ -2550,10 +2550,19 @@ int td5_track_parse_models_dat(const void *data, size_t size)
             TD5_MeshHeader *mesh = (TD5_MeshHeader *)(block_base + mesh_off);
             *slot = (uint32_t)(uintptr_t)mesh;
 
-            /* Validate mesh fields before relocation */
-            if (mesh->command_count <= 0 || mesh->command_count > 4096 ||
-                mesh->total_vertex_count <= 0 || mesh->total_vertex_count > 65536) {
-                *slot = 0; /* mark as invalid */
+            /* Validate mesh fields before relocation.
+             * Allow command_count==0 or vertex_count==0 — the original game
+             * has placeholder/empty meshes that the renderer simply skips. */
+            if (mesh->command_count < 0 || mesh->command_count > 4096 ||
+                mesh->total_vertex_count < 0 || mesh->total_vertex_count > 65536) {
+                static int s_vfail_log = 0;
+                if (s_vfail_log < 5) {
+                    TD5_LOG_W("track", "MODELS.DAT mesh validation fail: dl=%d slot=%d "
+                              "cmds=%d verts=%d off=0x%x",
+                              dl, j, mesh->command_count, mesh->total_vertex_count, mesh_off);
+                    s_vfail_log++;
+                }
+                *slot = 0;
                 continue;
             }
 
@@ -2598,8 +2607,8 @@ int td5_track_parse_models_dat(const void *data, size_t size)
                 TD5_MeshHeader *m = (TD5_MeshHeader *)(uintptr_t)ptr_val;
                 if ((uintptr_t)m < 0x10000u ||
                     !td5_track_is_ptr_in_blob(m, sizeof(TD5_MeshHeader)) ||
-                    m->command_count <= 0 || m->command_count > 4096 ||
-                    m->total_vertex_count <= 0 || m->total_vertex_count > 65536) {
+                    m->command_count < 0 || m->command_count > 4096 ||
+                    m->total_vertex_count < 0 || m->total_vertex_count > 65536) {
                     /* Zero the bad slot so the renderer skips it */
                     *(uint32_t *)(blk + 4 + j * 4) = 0;
                     bad_blocks++;
