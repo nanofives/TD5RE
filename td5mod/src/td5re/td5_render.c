@@ -71,6 +71,10 @@ extern uint32_t g_tick_counter;
 #define IMMEDIATE_MAX_VERTS   1024
 #define IMMEDIATE_MAX_INDICES 4096
 
+/* Forward declarations for trig (defined later in this file) */
+float CosFloat12bit(unsigned int angle);
+float SinFloat12bit(int angle);
+
 /** Near/far clip defaults */
 #define DEFAULT_NEAR_CLIP   1.0f
 #define DEFAULT_FAR_CLIP    32768.0f
@@ -994,13 +998,9 @@ void td5_render_transform_mesh_vertices(TD5_MeshHeader *mesh)
      * Vertex stride: 0x2C (44 bytes). Input XYZ at +0x00, output at +0x0C.
      */
     for (int i = 0; i < count; i++) {
-        /* Mesh vertices are stored with Y=forward, Z=up (the original
-         * binary's rotation matrix FUN_0042e1e0 has identity=[1,0,0;
-         * 0,0,-1; 0,1,0] which maps (x,y,z)→(x,-z,y)).  The camera
-         * basis and physics use Y=up, Z=forward.  Convert here. */
         float px = verts[i].pos_x;
-        float py = -verts[i].pos_z;   /* mesh Z-up → render -Y */
-        float pz = verts[i].pos_y;    /* mesh Y-fwd → render Z */
+        float py = verts[i].pos_y;
+        float pz = verts[i].pos_z;
 
         verts[i].view_x = px * m[0] + py * m[1] + pz * m[2] + m[9];
         verts[i].view_y = px * m[3] + py * m[4] + pz * m[5] + m[10];
@@ -1418,7 +1418,30 @@ void td5_render_actors_for_view(int view_index)
 
             td5_track_apply_segment_lighting(actor, view_index);
 
-            mat3x3_mul(s_camera_basis, actor->rotation_matrix.m, view_rot.m);
+            /* Build the render rotation using the exact Ghidra formula
+             * (FUN_0042e1e0) which includes the coordinate conversion.
+             * The physics rotation_matrix uses standard ZYX (for contacts/
+             * suspension), but the car mesh needs the original convention. */
+            {
+                float render_rot[9];
+                unsigned int ra = (unsigned int)actor->display_angles.roll  & 0xFFF;
+                unsigned int ya = (unsigned int)actor->display_angles.yaw   & 0xFFF;
+                unsigned int pa = (unsigned int)actor->display_angles.pitch & 0xFFF;
+                float sA = SinFloat12bit((int)ra), cA = CosFloat12bit(ra);
+                float sB = SinFloat12bit((int)ya), cB = CosFloat12bit(ya);
+                float sC = SinFloat12bit((int)pa), cC = CosFloat12bit(pa);
+                /* A=roll, B=yaw, C=pitch — from Ghidra FUN_0042e1e0 */
+                render_rot[0] = cC * cB * cA + sC * sB;
+                render_rot[1] = sC * cB * cA - cC * sB;
+                render_rot[2] = cB * sA;
+                render_rot[3] = cC * sA;
+                render_rot[4] = sC * sA;
+                render_rot[5] = -cA;
+                render_rot[6] = cC * sB * cA - sC * cB;
+                render_rot[7] = sC * sB * cA + cC * cB;
+                render_rot[8] = sB * sA;
+                mat3x3_mul(s_camera_basis, render_rot, view_rot.m);
+            }
             td5_render_load_rotation(&view_rot);
 
             render_pos.x = actor->render_pos.x;
