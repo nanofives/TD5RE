@@ -533,23 +533,19 @@ int td5_save_init(void)
     s_sfx_volume = 80;
     s_music_volume = 80;
 
-    /* Fresh-game default: match original binary's initial progression state.
-     * Cars 0-20: unlocked (standard roster, 21 cars).
-     * Cars 21-22: visible but locked (SUPER7, R390).
-     * Cars 23-36: locked (cop-chase / cup-unlock only).
+    /* All cars and race tracks unlocked by default.
+     * Cars 0-36: all unlocked.
      * Tracks 0-19: unlocked (race tracks).
      * Tracks 20-25: locked (cup tracks, unlocked by winning cups).
      * td5_save_load_config() below will override with save file contents. */
     s_cup_tier = 0x00;
-    s_max_unlocked_car = 23;    /* 23 visible slots (0-22) */
-    s_all_cars_unlocked = 0;
-    memset(s_car_locks, 0, sizeof(s_car_locks));
-    for (i = 21; i < TD5_CONFIG_NUM_CARS; i++)
-        s_car_locks[i] = 1;    /* locked */
+    s_max_unlocked_car = TD5_CONFIG_NUM_CARS; /* all 37 visible */
+    s_all_cars_unlocked = 1;
+    memset(s_car_locks, 0, sizeof(s_car_locks)); /* 0 = unlocked */
     for (i = 0; i < 20; i++)
         s_track_locks[i] = 1;  /* 1 = unlocked */
     for (i = 20; i < TD5_CONFIG_NUM_TRACKS; i++)
-        s_track_locks[i] = 0;  /* 0 = locked */
+        s_track_locks[i] = 0;  /* 0 = locked (cup tracks) */
 
     /* Try to load Config.td5 from the working directory (original/).
      * If the file doesn't exist or has a bad CRC the defaults above stay. */
