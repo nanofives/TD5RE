@@ -29,21 +29,37 @@
 #include <stdio.h>
 #include <string.h>
 
-extern int g_actorSlotForView[2];
-extern int g_actorBaseAddr;
-extern void *g_actor_pool;
-extern void *g_actor_base;
-extern uint8_t *g_actor_table_base;
-extern int g_actor_slot_map[2];
-extern int g_racer_count;
-extern int g_game_type;
-extern int g_split_screen_mode;
-extern int g_track_is_circuit;
-extern int g_track_type_mode;
-extern int g_replay_mode;
-extern int   g_cameraTransitionActive;  /* 0x4AAEF0 -- countdown/transition timer */
-extern float g_render_width_f;
-extern float g_render_height_f;
+/* ========================================================================
+ * Game State Globals (migrated from td5re_stubs.c — owned by this module)
+ * ======================================================================== */
+
+int     g_actorSlotForView[2]   = {0};
+int     g_actorBaseAddr         = 0;
+void   *g_actor_pool            = NULL;
+void   *g_actor_base            = NULL;
+uint8_t *g_actor_table_base     = NULL;
+int     g_actor_slot_map[2]     = {0};
+int     g_racer_count           = 0;
+int     g_game_type             = 0;
+int     g_split_screen_mode     = 0;
+int     g_replay_mode           = 0;
+int     g_wanted_mode_enabled   = 0;
+int     g_special_encounter     = 0;
+int     g_race_rule_variant     = 0;
+float   g_instant_fps           = 30.0f;
+uint32_t g_tick_counter         = 0;
+int     g_special_render_mode   = 0;
+int     g_pending_finish_timer  = 0;
+int     g_race_end_state        = 0;
+int32_t g_actor_best_lap        = 0;
+int32_t g_actor_best_race       = 0;
+void   *g_route_data            = NULL;
+
+extern int   g_cameraTransitionActive;  /* td5_camera.c */
+extern float g_render_width_f;          /* td5_render.c */
+extern float g_render_height_f;         /* td5_render.c */
+extern int   g_track_is_circuit;        /* td5_track.c */
+extern int   g_track_type_mode;         /* td5_track.c */
 
 /* Win32-based checkpoint log -- bypasses broken CRT fopen in -mwindows builds */
 static void ck_write(const char *path, const char *msg) {
@@ -755,6 +771,7 @@ int td5_game_init_race_session(void) {
     /* ---- Reset race state ---- */
     g_td5.race_end_fade_state = 0;
     g_td5.paused = 1;              /* start paused for countdown */
+    s_pause_menu_active = 0;       /* clear stale pause menu from previous race */
     g_td5.sim_tick_budget = 0.0f;
     g_td5.sim_time_accumulator = 0;
     g_td5.simulation_tick_counter = 0;
@@ -849,9 +866,9 @@ int td5_game_run_race_frame(void) {
         int esc_edge = (esc_now && !s_prev_esc_state);
         int pause_menu_was_active = s_pause_menu_active;
         s_prev_esc_state = esc_now;
-        if (esc_edge && !s_pause_menu_active) {
+        if (esc_edge && !s_pause_menu_active && !g_td5.paused) {
             s_pause_menu_active = 1;
-            s_pause_menu_cursor = 0;
+            s_pause_menu_cursor = 3;  /* default to CONTINUE */
         }
         if (s_pause_menu_active) {
             /* Navigation: 5 selectable items (View / Music / Sound / Continue / Exit) */
@@ -1049,24 +1066,10 @@ int td5_game_run_race_frame(void) {
     /* Full-screen HUD overlay (speedometer, lap counter, etc.) */
     td5_hud_render_overlays(g_td5.sim_tick_budget);
 
-    /* Pause overlay: draw panel first, then queue labels on top */
+    /* Pause overlay: all text is pre-built from PAUSETXT atlas during init,
+     * no queue_text needed — the overlay quads include baked glyph quads. */
     if (s_pause_menu_active) {
         td5_hud_draw_pause_overlay();
-        /* Queue text AFTER draw_pause_overlay so flush_text renders it on top.
-         * 6 rows from binary string table: PAUSED(center), VIEW(left),
-         * MUSIC(left), SOUND(left), CONTINUE(center), EXIT(center).
-         * Row N pixel_y = cy_px - 52 + N*16 (matches PAUSETXT atlas layout). */
-        {
-            int cx_px = (int)(g_render_width_f * 0.5f);
-            int cy_px = (int)(g_render_height_f * 0.5f);
-            int lx = cx_px - 124;   /* left-aligned: cx - half_w(128) + 4 */
-            td5_hud_queue_text(0, cx_px, cy_px - 52,      1, "PAUSED");
-            td5_hud_queue_text(0, lx, cy_px - 36,         0, "VIEW");
-            td5_hud_queue_text(0, lx, cy_px - 20,         0, "MUSIC");
-            td5_hud_queue_text(0, lx, cy_px - 4,          0, "SOUND");
-            td5_hud_queue_text(0, cx_px, cy_px + 12,      1, "CONTINUE");
-            td5_hud_queue_text(0, cx_px, cy_px + 28,      1, "EXIT");
-        }
     }
 
     td5_hud_flush_text();
@@ -1892,4 +1895,19 @@ void td5_game_store_rounded_vec3(const float *in, int32_t *out) {
     for (int i = 0; i < 3; i++) {
         out[i] = (int32_t)(in[i] + (in[i] >= 0.0f ? 0.5f : -0.5f));
     }
+}
+
+/* ========================================================================
+ * Game Logic Helpers (migrated from td5re_stubs.c)
+ * ======================================================================== */
+
+int td5_game_get_player_slot(int viewport) { (void)viewport; return 0; }
+int td5_game_is_replay_active(void) { return 0; }
+int td5_game_get_traffic_variant(int traffic_index) { (void)traffic_index; return 0; }
+int td5_game_get_cop_actor_index(void) { return -1; }
+int td5_game_is_wanted_mode(void) { return 0; }
+void td5_game_advance_sky_rotation(void) { }
+
+void *td5_game_heap_alloc(size_t size) {
+    return calloc(1, size);
 }
