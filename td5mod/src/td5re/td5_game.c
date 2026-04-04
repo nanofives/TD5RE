@@ -41,7 +41,9 @@ extern int g_split_screen_mode;
 extern int g_track_is_circuit;
 extern int g_track_type_mode;
 extern int g_replay_mode;
-extern int g_cameraTransitionActive;  /* 0x4AAEF0 -- countdown/transition timer */
+extern int   g_cameraTransitionActive;  /* 0x4AAEF0 -- countdown/transition timer */
+extern float g_render_width_f;
+extern float g_render_height_f;
 
 /* Win32-based checkpoint log -- bypasses broken CRT fopen in -mwindows builds */
 static void ck_write(const char *path, const char *msg) {
@@ -891,6 +893,25 @@ int td5_game_run_race_frame(void) {
             float sfx_frac   = (float)td5_save_get_sfx_volume()   / 100.0f;
             float music_frac = (float)td5_save_get_music_volume()  / 100.0f;
             td5_hud_update_pause_overlay(s_pause_menu_cursor, sfx_frac, music_frac, music_frac);
+
+            /* Draw labels using the working text system (PAUSETXT tpage missing) */
+            {
+                /* Positions match s_pause_selbox_base_y = -52 from screen centre */
+                int cx_px = (int)(g_render_width_f  * 0.5f);
+                int cy_px = (int)(g_render_height_f * 0.5f);
+                int base_y = cy_px - 52;
+                int lx     = cx_px - 88;   /* left-aligned inside the 200px panel */
+                int rx     = cx_px + 50;   /* right side for volume value */
+                td5_hud_queue_text(0, lx, base_y + 0,  0, "SOUND EFFECTS");
+                td5_hud_queue_text(0, lx, base_y + 16, 0, "MUSIC");
+                td5_hud_queue_text(0, lx, base_y + 32, 0, "CD MUSIC");
+                td5_hud_queue_text(0, cx_px, base_y + 48, 1, "CONTINUE");
+                td5_hud_queue_text(0, cx_px, base_y + 64, 1, "QUIT");
+                /* Volume values */
+                td5_hud_queue_text(0, rx, base_y + 0,  0, "%d%%", td5_save_get_sfx_volume());
+                td5_hud_queue_text(0, rx, base_y + 16, 0, "%d%%", td5_save_get_music_volume());
+                td5_hud_queue_text(0, rx, base_y + 32, 0, "%d%%", td5_save_get_music_volume());
+            }
 
             g_td5.sim_time_accumulator -= TD5_TICK_ACCUMULATOR_ONE;
             ticks_this_frame++;

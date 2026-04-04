@@ -58,7 +58,7 @@ typedef struct TD5_CameraPreset {
     int32_t  extra_param_2;
 } TD5_CameraPreset;
 
-#define TD5_CAMERA_PRESET_COUNT  7
+#define TD5_CAMERA_PRESET_COUNT  14  /* 0-6: normal, 7-9: unused, 10-13: countdown fly-in */
 
 /* ========================================================================
  * Trackside camera profile (16 bytes per entry, terminated by -1)

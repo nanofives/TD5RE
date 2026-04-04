@@ -615,13 +615,20 @@ float  g_nearZeroThreshold = 0.001f;
 
 /* Camera presets from original binary at 0x463098 (7 entries, 16 bytes each) */
 TD5_CameraPreset g_cameraPresets[TD5_CAMERA_PRESET_COUNT] = {
-    { 0, 600,  2100, 510, 0, 0 },  /* preset 0: far chase */
-    { 0, 550,  1710, 110, 0, 0 },  /* preset 1: medium chase */
-    { 0, 475,  1500, 310, 0, 0 },  /* preset 2: close chase high */
-    { 0, 400,  1350, 110, 0, 0 },  /* preset 3: close chase low */
-    { 0, 325,  1200, 240, 0, 0 },  /* preset 4: tight chase */
-    { 0, 240,  1550, 110, 0, 0 },  /* preset 5: wide low */
-    { 1, 0,    0,    0,   (int)0xFFF38000, 0 },  /* preset 6: bumper cam */
+    { 0, 600,  2100, 510, 0, 0 },  /* preset  0: far chase */
+    { 0, 550,  1710, 110, 0, 0 },  /* preset  1: medium chase */
+    { 0, 475,  1500, 310, 0, 0 },  /* preset  2: close chase high */
+    { 0, 400,  1350, 110, 0, 0 },  /* preset  3: close chase low */
+    { 0, 325,  1200, 240, 0, 0 },  /* preset  4: tight chase */
+    { 0, 240,  1550, 110, 0, 0 },  /* preset  5: wide low */
+    { 1, 0,    0,    0,   (int)0xFF380000, 0 },  /* preset  6: bumper cam */
+    { 0, 0,    0,    0,   0, 0 },  /* preset  7: unused */
+    { 0, 0,    0,    0,   0, 0 },  /* preset  8: unused */
+    { 0, 0,    0,    0,   0, 0 },  /* preset  9: unused */
+    { 0, 400,  1600, 310, 0, 0 },  /* preset 10: fly-in level>=3 (0x401E10) */
+    { 0, 2000, 1400, 110, 0, 0 },  /* preset 11: fly-in level 2  (high elevation side shot) */
+    { 0, 300,  1600, 310, 0, 0 },  /* preset 12: fly-in level 1  */
+    { 0, 550,  3800, 110, 0, 0 },  /* preset 13: fly-in level 0  (wide pull-back before GO) */
 };
 
 float  g_renderBasisMatrix[12] = { 1,0,0, 0,1,0, 0,0,1, 0,0,0 };
@@ -686,8 +693,25 @@ int32_t g_actor_best_race       = 0;
 void   *g_route_data            = NULL;
 
 const int8_t g_pause_glyph_widths[256] = {0};
-const char **g_pause_page_strings[8]   = {NULL};
-const int    g_pause_page_sizes[8]     = {0};
+
+/* English audio-options overlay string table.
+ * Layout: alternating {const char *label, (const char *)(intptr_t)alignment}.
+ * alignment 1 = left-aligned, 2 = centred.
+ * Accessed as: string = table[string_offset / 4]
+ *              align  = *(int *)((uint8_t *)table + string_offset + 4)
+ * with string_offset advancing by 8 each row. */
+static const char *s_eng_pause_strings[] = {
+    "SOUND EFFECTS",  (const char *)(intptr_t)1,
+    "MUSIC",          (const char *)(intptr_t)1,
+    "CD MUSIC",       (const char *)(intptr_t)1,
+    "CONTINUE",       (const char *)(intptr_t)2,
+    "QUIT",           (const char *)(intptr_t)2,
+    NULL
+};
+const char **g_pause_page_strings[8] = {
+    s_eng_pause_strings, NULL, NULL, NULL, NULL, NULL, NULL, NULL
+};
+const int g_pause_page_sizes[8] = { 200, 0, 0, 0, 0, 0, 0, 0 };
 
 /* ========================================================================
  * VFX / Track Environment Globals
