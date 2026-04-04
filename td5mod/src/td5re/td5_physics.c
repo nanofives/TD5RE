@@ -1359,7 +1359,39 @@ void td5_physics_integrate_pose(TD5_Actor *actor)
     /* 7. Refresh wheel contact frames */
     td5_physics_refresh_wheel_contacts(actor);
 
-    /* 8. Clamp angular velocity deltas to +/- 6000 per frame */
+    /* 8. Ground-snap: compute averaged ground height from grounded wheels and
+     * correct world_pos.y (IntegrateVehiclePoseAndContacts step 9 in analysis).
+     * Without this, gravity accumulates each frame with no correction and cars
+     * fall away from the road surface. */
+    {
+        int32_t corr_sum = 0;
+        int corr_count = 0;
+        uint8_t gnd_mask = actor->wheel_contact_bitmask;
+        for (int i = 0; i < 4; i++) {
+            if (!(gnd_mask & (1 << i))) {  /* grounded wheel */
+                int32_t g_y = 0;
+                int g_surf = 0;
+                int g_span = actor->wheel_probes[i].span_index;
+                if (g_span < 0 || g_span >= g_td5.track_span_ring_length)
+                    g_span = actor->track_span_raw;
+                if (td5_track_probe_height(actor->wheel_contact_pos[i].x,
+                                           actor->wheel_contact_pos[i].z,
+                                           g_span, &g_y, &g_surf)) {
+                    corr_sum += g_y - actor->wheel_contact_pos[i].y;
+                    corr_count++;
+                }
+            }
+        }
+        if (corr_count > 0) {
+            actor->world_pos.y += corr_sum / corr_count;
+            actor->render_pos.y = (float)actor->world_pos.y * (1.0f / 256.0f);
+            /* Cancel downward velocity: ground is a hard constraint. */
+            if (actor->linear_velocity_y < 0)
+                actor->linear_velocity_y = 0;
+        }
+    }
+
+    /* 9. Clamp angular velocity deltas to +/- 6000 per frame */
     if (actor->angular_velocity_roll > 6000) actor->angular_velocity_roll = 6000;
     if (actor->angular_velocity_roll < -6000) actor->angular_velocity_roll = -6000;
     if (actor->angular_velocity_yaw > 6000) actor->angular_velocity_yaw = 6000;
@@ -1367,7 +1399,7 @@ void td5_physics_integrate_pose(TD5_Actor *actor)
     if (actor->angular_velocity_pitch > 6000) actor->angular_velocity_pitch = 6000;
     if (actor->angular_velocity_pitch < -6000) actor->angular_velocity_pitch = -6000;
 
-    /* 9. Update suspension response */
+    /* 10. Update suspension response */
     td5_physics_update_suspension_response(actor);
 
     if (actor->slot_index == 0 && (actor->frame_counter % 60u) == 0u) {
@@ -1425,6 +1457,32 @@ static void update_vehicle_pose_from_physics(TD5_Actor *actor)
 
     /* Refresh wheel contacts */
     td5_physics_refresh_wheel_contacts(actor);
+
+    /* Ground-snap from grounded wheels (UpdateVehiclePoseFromPhysicsState step 7) */
+    {
+        int32_t corr_sum = 0;
+        int corr_count = 0;
+        uint8_t gnd_mask = actor->wheel_contact_bitmask;
+        for (int i = 0; i < 4; i++) {
+            if (!(gnd_mask & (1 << i))) {
+                int32_t g_y = 0;
+                int g_surf = 0;
+                int g_span = actor->wheel_probes[i].span_index;
+                if (g_span < 0 || g_span >= g_td5.track_span_ring_length)
+                    g_span = actor->track_span_raw;
+                if (td5_track_probe_height(actor->wheel_contact_pos[i].x,
+                                           actor->wheel_contact_pos[i].z,
+                                           g_span, &g_y, &g_surf)) {
+                    corr_sum += g_y - actor->wheel_contact_pos[i].y;
+                    corr_count++;
+                }
+            }
+        }
+        if (corr_count > 0) {
+            actor->world_pos.y += corr_sum / corr_count;
+            actor->render_pos.y = (float)actor->world_pos.y * (1.0f / 256.0f);
+        }
+    }
 }
 
 /* ========================================================================
