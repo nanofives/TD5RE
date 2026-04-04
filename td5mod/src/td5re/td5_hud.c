@@ -515,11 +515,11 @@ void td5_hud_init_font_atlas(void)
     s_queued_glyph_count = 0;
 
     /* Generate synthetic font texture for page 705 using GDI.
-     * Always runs: even when tpage5.dat is loaded from disk, it never
-     * contains SPEEDOFONT or GEARNUMBERS content (those are assembled
-     * at runtime by the original engine).  The synthesis overwrites
-     * page 705 with FONT + SPEEDOFONT + GEARNUMBERS. */
-    if (font_entry->texture_page > 0) {
+     * Only runs when tpage5.dat is absent.  When the real runtime dump
+     * is available (captured via dump_tpages or ASI mod), it contains
+     * SPEEDOFONT, GEARNUMBERS, FONT, etc. and should be used as-is. */
+    if (font_entry->texture_page > 0 &&
+        !td5_asset_static_tpage_is_real((int)(font_entry->texture_page - 700))) {
         /* 256x256 BGRA = 256 KB; static to avoid stack overflow.
          * Atlas pages are 256x256 (confirmed by UV scale = 1/256 for both axes).
          * Pre-fill with tpage5.dat so NUMBERS/GEARNUMBERS/etc. art is preserved;
@@ -1799,21 +1799,18 @@ void td5_hud_render_overlays(float dt)
 
             td5_render_build_sprite_quad((int *)&needle_params);
 
-            /* Update gear indicator UV.  GEARNUMBERS atlas region is empty in
-             * the original runtime dump; use NUMBERS atlas (5×2 digit grid,
-             * 16px wide × 24px tall per cell) at (0,208) instead. */
+            /* Update gear indicator UV from GEARNUMBERS atlas (linear strip,
+             * 8 slots × 16px wide at (128,128) 128×16). */
             uint8_t gear = actor_gear(actor_slot);
             {
-                int gd = (int)gear;
-                if (gd < 0) gd = 0; if (gd > 9) gd = 9;
-                float gu = (float)s_numbers_atlas->atlas_x + (float)(gd % 5) * 16.0f;
-                float gv = (float)s_numbers_atlas->atlas_y + (float)(gd / 5) * 24.0f;
+                float gu = (float)gear * 16.0f + (float)s_gearnumbers_atlas->atlas_x;
+                float gv = (float)s_gearnumbers_atlas->atlas_y;
                 hud_build_quad(
                     view_base + GEAR_QUAD_OFF,
-                    2, s_numbers_atlas->texture_page,
+                    2, s_gearnumbers_atlas->texture_page,
                     0.0f, 0.0f, 0.0f, 0.0f,
                     gu + 0.5f, gv + 0.5f,
-                    gu + 15.5f, gv + 23.5f,
+                    gu + 15.5f, gv + 15.5f,
                     0xFFFFFFFF, HUD_DEPTH
                 );
             }
@@ -1831,17 +1828,15 @@ void td5_hud_render_overlays(float dt)
                 speed_display = (speed_raw * 256 + 389) / 778;  /* KPH */
             }
 
-            /* Build and submit speed digit quads using NUMBERS atlas (5×2 grid,
-             * 16px × 24px per digit cell at atlas (0,208) 80×48).
-             * SPEEDOFONT region is empty in both static PNGs and original runtime
-             * dump — the original engine never writes there. */
+            /* Build and submit speed digit quads using SPEEDOFONT atlas
+             * (linear strip of 10 digits, 16px wide each at atlas (96,160)). */
             float sf_gw = sx * 15.0f;
             float sf_x0 = vl->vp_int_right - sx * 60.0f;
             float sf_y0 = vl->vp_int_bottom - sy * 23.0f - sy * 8.0f;
             float sf_y1 = sf_y0 + sy * 24.0f;
-            float num_ax = (float)s_numbers_atlas->atlas_x;
-            float num_ay = (float)s_numbers_atlas->atlas_y;
-            int   num_pg = s_numbers_atlas->texture_page;
+            float digit_u_base = (float)s_speedofont_atlas->atlas_x;
+            float digit_v_base = (float)s_speedofont_atlas->atlas_y;
+            int   sf_pg = s_speedofont_atlas->texture_page;
 
             int ones = speed_display % 10;
 
@@ -1854,18 +1849,15 @@ void td5_hud_render_overlays(float dt)
             int digit_count = 1;
             int tens = (speed_display % 1000) / 10;
 
-            /* Helper: UV for digit N in the 5×2 NUMBERS grid */
-            #define NUM_U(n) (num_ax + (float)((n) % 5) * 16.0f + 0.5f)
-            #define NUM_V(n) (num_ay + (float)((n) / 5) * 24.0f + 0.5f)
-
             /* Ones digit quad */
             float dx = sf_x0;
+            float u_ones = digit_u_base + (float)ones * 16.0f + 0.5f;
             hud_build_quad(
                 view_base + SPEEDFONT_BASE_OFF,
-                0, num_pg,
+                0, sf_pg,
                 dx, sf_y0, dx + sf_gw, sf_y1,
-                NUM_U(ones), NUM_V(ones),
-                NUM_U(ones) + 15.0f, NUM_V(ones) + 23.0f,
+                u_ones, digit_v_base + 0.5f,
+                u_ones + 15.5f, digit_v_base + 23.5f,
                 0xFFFFFFFF, HUD_DEPTH
             );
             hud_submit_quad(view_base + SPEEDFONT_BASE_OFF);
@@ -1873,14 +1865,14 @@ void td5_hud_render_overlays(float dt)
             /* Tens digit if speed >= 10 */
             if (tens > 0) {
                 digit_count = 2;
-                int t = tens % 10;
+                float u_tens = digit_u_base + (float)(tens % 10) * 16.0f + 0.5f;
                 dx = sf_x0 + 1.0f * (sf_gw + 1.0f);
                 hud_build_quad(
                     view_base + SPEEDFONT_BASE_OFF + TD5_HUD_GLYPH_QUAD_SIZE,
-                    0, num_pg,
+                    0, sf_pg,
                     dx, sf_y0, dx + sf_gw, sf_y1,
-                    NUM_U(t), NUM_V(t),
-                    NUM_U(t) + 15.0f, NUM_V(t) + 23.0f,
+                    u_tens, digit_v_base + 0.5f,
+                    u_tens + 15.5f, digit_v_base + 23.5f,
                     0xFFFFFFFF, HUD_DEPTH
                 );
                 hud_submit_quad(view_base + SPEEDFONT_BASE_OFF + TD5_HUD_GLYPH_QUAD_SIZE);
@@ -1889,21 +1881,19 @@ void td5_hud_render_overlays(float dt)
                 int hundreds = tens / 10;
                 if (hundreds > 0) {
                     digit_count = 3;
+                    float u_hund = digit_u_base + (float)hundreds * 16.0f + 0.5f;
                     dx = sf_x0 + 2.0f * (sf_gw + 1.0f);
                     hud_build_quad(
                         view_base + SPEEDFONT_BASE_OFF + 2 * TD5_HUD_GLYPH_QUAD_SIZE,
-                        0, num_pg,
+                        0, sf_pg,
                         dx, sf_y0, dx + sf_gw, sf_y1,
-                        NUM_U(hundreds), NUM_V(hundreds),
-                        NUM_U(hundreds) + 15.0f, NUM_V(hundreds) + 23.0f,
+                        u_hund, digit_v_base + 0.5f,
+                        u_hund + 15.5f, digit_v_base + 23.5f,
                         0xFFFFFFFF, HUD_DEPTH
                     );
                     hud_submit_quad(view_base + SPEEDFONT_BASE_OFF + 2 * TD5_HUD_GLYPH_QUAD_SIZE);
                 }
             }
-
-            #undef NUM_U
-            #undef NUM_V
 
             /* Submit gear indicator */
             hud_submit_quad(view_base + GEAR_QUAD_OFF);

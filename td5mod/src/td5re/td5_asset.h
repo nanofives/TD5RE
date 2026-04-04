@@ -220,6 +220,12 @@ int td5_asset_load_track_textures(int track_index);
  */
 int td5_asset_load_race_texture_pages(void);
 
+/**
+ * Get loaded CHECKPT.NUM data (up to 96 bytes, first 24 = active record).
+ * Returns NULL if no checkpoint data loaded for current track.
+ */
+const void *td5_asset_get_checkpoint_data(int *out_size);
+
 /* ========================================================================
  * Vehicle Asset Loading
  * ======================================================================== */
