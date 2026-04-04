@@ -228,6 +228,26 @@ static int load_static_r5g6b5_tpage(int slot)
     return 1;
 }
 
+/** Try loading a static atlas page from td5_png_clean PNG files.
+ *  Uses the same stbi RGBA → format=2 upload pipeline as track textures,
+ *  which correctly handles the R↔B channel swap in the cleaned PNGs. */
+static int load_static_png_tpage(int slot)
+{
+    char path[128];
+    void *pixels = NULL;
+    int w = 0, h = 0;
+
+    snprintf(path, sizeof(path), "../re/td5_png_clean/static/tpage%d.png", slot);
+    if (td5_asset_decode_png_rgba32(path, &pixels, &w, &h)) {
+        td5_plat_render_upload_texture(STATIC_ATLAS_BASE + slot, pixels, w, h, 2);
+        stbi_image_free(pixels);
+        TD5_LOG_I(LOG_TAG, "static atlas: loaded PNG %s -> D3D page %d (slot %d)",
+                  path, STATIC_ATLAS_BASE + slot, slot);
+        return 1;
+    }
+    return 0;
+}
+
 /** Upload a 2×2 magenta placeholder for tpage slots without on-disk art. */
 static void upload_atlas_placeholder(int slot)
 {
@@ -287,9 +307,12 @@ static void td5_asset_init_static_atlas(void)
         ar->entry.height       = h;
         ar->entry.texture_page = STATIC_ATLAS_BASE + tex_slot;
 
-        /* Upload the page the first time we encounter this slot */
+        /* Upload the page the first time we encounter this slot.
+         * Try PNG first (td5_png_clean has correct channel mapping), then .dat, then placeholder. */
         if (!s_static_page_done[tex_slot]) {
-            if (load_static_r5g6b5_tpage(tex_slot)) {
+            if (load_static_png_tpage(tex_slot)) {
+                s_static_page_done[tex_slot] = 1;
+            } else if (load_static_r5g6b5_tpage(tex_slot)) {
                 s_static_page_done[tex_slot] = 1;
             } else {
                 upload_atlas_placeholder(tex_slot);

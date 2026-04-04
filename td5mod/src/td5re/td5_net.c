@@ -19,6 +19,7 @@
 
 #include <string.h>
 #include <stdlib.h>
+#include <stdio.h>
 
 /* ========================================================================
  * Win32 threading primitives (matches original M2DX.dll architecture)
@@ -57,8 +58,20 @@
 /** Maximum connections (service providers) */
 #define MAX_CONNECTIONS     16
 
-/** Local loopback UDP port used by the Winsock2 backend */
-#define WS2_LOOPBACK_PORT   37050
+/** UDP port used by the Winsock2 backend for game traffic */
+#define WS2_GAME_PORT       37050
+
+/** UDP port used for LAN session discovery broadcasts */
+#define WS2_DISCOVERY_PORT  37051
+
+/** Magic number for discovery protocol messages */
+#define WS2_DISCOVERY_MAGIC 0x54443552  /* "TD5R" */
+
+/** Discovery message types */
+#define WS2_DISC_QUERY      1
+#define WS2_DISC_ANNOUNCE   2
+#define WS2_DISC_JOIN_REQ   3
+#define WS2_DISC_JOIN_ACK   4
 
 /* Worker thread event indices for WaitForMultipleObjects */
 #define EVT_RECEIVE         0
@@ -187,6 +200,22 @@ static TransportJoinFn      s_transport_join;
 static TransportEnumFn      s_transport_enum;
 static TransportShutdownFn  s_transport_shutdown;
 
+/* --- Discovery protocol message (sent on WS2_DISCOVERY_PORT) --- */
+#pragma pack(push, 1)
+typedef struct DiscoveryMsg {
+    uint32_t    magic;
+    uint32_t    disc_type;
+    char        session_name[64];
+    uint32_t    player_count;
+    uint32_t    max_players;
+    uint32_t    game_type;
+    uint32_t    sealed;
+    uint16_t    game_port;
+    uint32_t    assigned_slot;
+    uint32_t    assigned_id;
+} DiscoveryMsg;
+#pragma pack(pop)
+
 /* --- Winsock2 UDP backend state --- */
 static SOCKET       s_ws2_socket = INVALID_SOCKET;
 static WSAEVENT     s_ws2_event = WSA_INVALID_EVENT;
@@ -196,6 +225,8 @@ static int          s_receive_event_is_ws2;
 static SOCKADDR_IN  s_ws2_host_addr;
 static SOCKADDR_IN  s_ws2_peer_addrs[TD5_NET_MAX_PLAYERS];
 static int          s_ws2_peer_valid[TD5_NET_MAX_PLAYERS];
+static SOCKET       s_ws2_disc_socket = INVALID_SOCKET;
+static SOCKADDR_IN  s_ws2_enum_host_addrs[MAX_ENUM_SESSIONS];
 
 /* ========================================================================
  * Forward Declarations
@@ -215,6 +246,9 @@ static void             ws2_transport_shutdown(void);
 static int              ws2_bind_socket(u_short port);
 static uint32_t         ws2_resolve_sender_id(const SOCKADDR_IN *addr);
 static const SOCKADDR_IN *ws2_get_target_addr(uint32_t target_id);
+static int              ws2_discovery_init(void);
+static void             ws2_discovery_shutdown(void);
+static void             ws2_handle_join_request(const SOCKADDR_IN *from_addr);
 
 /* Per-type handlers (13 DXPTYPE handlers) */
 static void handle_frame(uint32_t sender, const void *data, int size);
@@ -981,44 +1015,153 @@ static int ws2_transport_host(const char *name, int max_players)
     (void)name;
     (void)max_players;
 
-    memset(&s_ws2_host_addr, 0, sizeof(s_ws2_host_addr));
-    s_ws2_host_addr.sin_family = AF_INET;
-    s_ws2_host_addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    s_ws2_host_addr.sin_port = htons(WS2_LOOPBACK_PORT);
-
-    s_ws2_peer_addrs[0] = s_ws2_host_addr;
-    s_ws2_peer_valid[0] = 1;
-
-    return ws2_bind_socket(WS2_LOOPBACK_PORT);
-}
-
-static int ws2_transport_join(int session_index)
-{
-    (void)session_index;
-
-    if (!ws2_bind_socket(0)) {
+    if (!ws2_bind_socket(WS2_GAME_PORT)) {
+        TD5_LOG_E(NET_LOG, "Host: failed to bind game port %u", (unsigned)WS2_GAME_PORT);
         return 0;
     }
 
     memset(&s_ws2_host_addr, 0, sizeof(s_ws2_host_addr));
     s_ws2_host_addr.sin_family = AF_INET;
-    s_ws2_host_addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    s_ws2_host_addr.sin_port = htons(WS2_LOOPBACK_PORT);
+    s_ws2_host_addr.sin_addr.s_addr = htonl(INADDR_ANY);
+    s_ws2_host_addr.sin_port = htons(WS2_GAME_PORT);
 
     s_ws2_peer_addrs[0] = s_ws2_host_addr;
     s_ws2_peer_valid[0] = 1;
 
+    ws2_discovery_init();
+
+    TD5_LOG_I(NET_LOG, "Host: bound on port %u, discovery active", (unsigned)WS2_GAME_PORT);
+    return 1;
+}
+
+static int ws2_transport_join(int session_index)
+{
+    DiscoveryMsg join_req;
+    SOCKADDR_IN disc_addr;
+    uint32_t hello[2];
+
+    if (session_index < 0 || session_index >= s_enum_session_count) {
+        TD5_LOG_E(NET_LOG, "Join: invalid session index %d", session_index);
+        return 0;
+    }
+
+    if (!ws2_bind_socket(0)) {
+        TD5_LOG_E(NET_LOG, "Join: failed to bind game socket");
+        return 0;
+    }
+
+    s_ws2_host_addr = s_ws2_enum_host_addrs[session_index];
+    s_ws2_peer_addrs[0] = s_ws2_host_addr;
+    s_ws2_peer_valid[0] = 1;
+
+    /* Send join request to host's discovery port */
+    memset(&join_req, 0, sizeof(join_req));
+    join_req.magic = WS2_DISCOVERY_MAGIC;
+    join_req.disc_type = WS2_DISC_JOIN_REQ;
+
+    disc_addr = s_ws2_host_addr;
+    disc_addr.sin_port = htons(WS2_DISCOVERY_PORT);
+
+    if (s_ws2_disc_socket == INVALID_SOCKET)
+        ws2_discovery_init();
+
+    if (s_ws2_disc_socket != INVALID_SOCKET) {
+        sendto(s_ws2_disc_socket, (const char *)&join_req, sizeof(join_req), 0,
+               (const struct sockaddr *)&disc_addr, (int)sizeof(disc_addr));
+    }
+
+    /* Send a hello on the game socket so host learns our address */
+    hello[0] = TD5_DXPDATA;
+    hello[1] = 0;
+    sendto(s_ws2_socket, (const char *)hello, 8, 0,
+           (const struct sockaddr *)&s_ws2_host_addr,
+           (int)sizeof(s_ws2_host_addr));
+
+    TD5_LOG_I(NET_LOG, "Join: connected to host at port %u",
+              (unsigned)ntohs(s_ws2_host_addr.sin_port));
     return 1;
 }
 
 static int ws2_transport_enum(void)
 {
+    SOCKADDR_IN bcast_addr, lo_addr;
+    DiscoveryMsg query;
+    DWORD start_tick;
+    int count = 0;
+
     memset(s_enum_sessions, 0, sizeof(s_enum_sessions));
-    strncpy(s_enum_sessions[0].name, "UDP Loopback", sizeof(s_enum_sessions[0].name) - 1);
-    s_enum_sessions[0].max_players = TD5_NET_MAX_PLAYERS;
-    s_enum_sessions[0].player_count = 0;
-    s_enum_sessions[0].game_type = s_session.game_type;
-    return 1;
+    memset(s_ws2_enum_host_addrs, 0, sizeof(s_ws2_enum_host_addrs));
+
+    if (s_ws2_disc_socket == INVALID_SOCKET) {
+        if (!ws2_discovery_init())
+            return 0;
+    }
+
+    memset(&query, 0, sizeof(query));
+    query.magic = WS2_DISCOVERY_MAGIC;
+    query.disc_type = WS2_DISC_QUERY;
+
+    /* Broadcast on LAN */
+    memset(&bcast_addr, 0, sizeof(bcast_addr));
+    bcast_addr.sin_family = AF_INET;
+    bcast_addr.sin_addr.s_addr = htonl(INADDR_BROADCAST);
+    bcast_addr.sin_port = htons(WS2_DISCOVERY_PORT);
+    sendto(s_ws2_disc_socket, (const char *)&query, sizeof(query), 0,
+           (const struct sockaddr *)&bcast_addr, (int)sizeof(bcast_addr));
+
+    /* Also try loopback for same-machine testing */
+    memset(&lo_addr, 0, sizeof(lo_addr));
+    lo_addr.sin_family = AF_INET;
+    lo_addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    lo_addr.sin_port = htons(WS2_DISCOVERY_PORT);
+    sendto(s_ws2_disc_socket, (const char *)&query, sizeof(query), 0,
+           (const struct sockaddr *)&lo_addr, (int)sizeof(lo_addr));
+
+    /* Poll for responses up to 500ms */
+    start_tick = GetTickCount();
+    while ((GetTickCount() - start_tick) < 500 && count < MAX_ENUM_SESSIONS) {
+        DiscoveryMsg resp;
+        SOCKADDR_IN from_addr;
+        int from_len = (int)sizeof(from_addr);
+        int ret;
+        fd_set readfds;
+        struct timeval tv;
+
+        FD_ZERO(&readfds);
+        FD_SET(s_ws2_disc_socket, &readfds);
+        tv.tv_sec = 0;
+        tv.tv_usec = 50000;
+
+        if (select(0, &readfds, NULL, NULL, &tv) <= 0)
+            continue;
+
+        ret = recvfrom(s_ws2_disc_socket, (char *)&resp, sizeof(resp), 0,
+                       (struct sockaddr *)&from_addr, &from_len);
+        if (ret < (int)sizeof(DiscoveryMsg))
+            continue;
+        if (resp.magic != WS2_DISCOVERY_MAGIC)
+            continue;
+        if (resp.disc_type != WS2_DISC_ANNOUNCE)
+            continue;
+        if (resp.sealed)
+            continue;
+
+        strncpy(s_enum_sessions[count].name, resp.session_name,
+                sizeof(s_enum_sessions[count].name) - 1);
+        s_enum_sessions[count].player_count = resp.player_count;
+        s_enum_sessions[count].max_players  = resp.max_players;
+        s_enum_sessions[count].game_type    = resp.game_type;
+
+        s_ws2_enum_host_addrs[count] = from_addr;
+        s_ws2_enum_host_addrs[count].sin_port = htons(resp.game_port);
+
+        TD5_LOG_I(NET_LOG, "Enum: found session \"%s\" (%u/%u)",
+                  resp.session_name, resp.player_count, resp.max_players);
+        count++;
+    }
+
+    TD5_LOG_I(NET_LOG, "Enum: discovered %d session(s)", count);
+    return count;
 }
 
 static uint32_t ws2_resolve_sender_id(const SOCKADDR_IN *addr)
@@ -1172,6 +1315,8 @@ static int ws2_transport_send(uint32_t target_id, const void *data, int size)
 
 static void ws2_transport_shutdown(void)
 {
+    ws2_discovery_shutdown();
+
     if (s_ws2_socket != INVALID_SOCKET) {
         closesocket(s_ws2_socket);
         s_ws2_socket = INVALID_SOCKET;
@@ -1191,6 +1336,104 @@ static void ws2_transport_shutdown(void)
     memset(&s_ws2_host_addr, 0, sizeof(s_ws2_host_addr));
     memset(s_ws2_peer_addrs, 0, sizeof(s_ws2_peer_addrs));
     memset(s_ws2_peer_valid, 0, sizeof(s_ws2_peer_valid));
+    memset(s_ws2_enum_host_addrs, 0, sizeof(s_ws2_enum_host_addrs));
+}
+
+/* ========================================================================
+ * Discovery Socket + Join Request Handler
+ * ======================================================================== */
+
+static int ws2_discovery_init(void)
+{
+    SOCKADDR_IN bind_addr;
+    BOOL opt_broadcast = TRUE;
+    BOOL opt_reuse = TRUE;
+    u_long nonblocking = 1;
+
+    if (s_ws2_disc_socket != INVALID_SOCKET)
+        return 1;
+
+    s_ws2_disc_socket = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (s_ws2_disc_socket == INVALID_SOCKET) {
+        TD5_LOG_E(NET_LOG, "Discovery: socket() failed: %d", (int)WSAGetLastError());
+        return 0;
+    }
+
+    setsockopt(s_ws2_disc_socket, SOL_SOCKET, SO_BROADCAST,
+               (const char *)&opt_broadcast, sizeof(opt_broadcast));
+    setsockopt(s_ws2_disc_socket, SOL_SOCKET, SO_REUSEADDR,
+               (const char *)&opt_reuse, sizeof(opt_reuse));
+    ioctlsocket(s_ws2_disc_socket, FIONBIO, &nonblocking);
+
+    memset(&bind_addr, 0, sizeof(bind_addr));
+    bind_addr.sin_family = AF_INET;
+    bind_addr.sin_addr.s_addr = htonl(INADDR_ANY);
+    bind_addr.sin_port = htons(WS2_DISCOVERY_PORT);
+
+    if (bind(s_ws2_disc_socket, (const struct sockaddr *)&bind_addr,
+             sizeof(bind_addr)) == SOCKET_ERROR)
+    {
+        TD5_LOG_W(NET_LOG, "Discovery: bind(%u) failed: %d (non-fatal for clients)",
+                  (unsigned)WS2_DISCOVERY_PORT, (int)WSAGetLastError());
+    }
+
+    TD5_LOG_I(NET_LOG, "Discovery socket initialized on port %u",
+              (unsigned)WS2_DISCOVERY_PORT);
+    return 1;
+}
+
+static void ws2_discovery_shutdown(void)
+{
+    if (s_ws2_disc_socket != INVALID_SOCKET) {
+        closesocket(s_ws2_disc_socket);
+        s_ws2_disc_socket = INVALID_SOCKET;
+    }
+}
+
+static void ws2_handle_join_request(const SOCKADDR_IN *from_addr)
+{
+    int slot = -1;
+    int i;
+    DiscoveryMsg ack;
+
+    if (!s_is_host || s_session.sealed)
+        return;
+
+    for (i = 1; i < TD5_NET_MAX_PLAYERS; i++) {
+        if (!s_roster[i].active) {
+            slot = i;
+            break;
+        }
+    }
+
+    if (slot < 0) {
+        TD5_LOG_W(NET_LOG, "Join request rejected: no free slots");
+        return;
+    }
+
+    s_roster[slot].id = (uint32_t)(slot + 1);
+    s_roster[slot].active = 1;
+    snprintf(s_roster[slot].name, sizeof(s_roster[slot].name), "Player %d", slot + 1);
+    s_player_count++;
+
+    s_ws2_peer_addrs[slot] = *from_addr;
+    s_ws2_peer_valid[slot] = 1;
+
+    memset(&ack, 0, sizeof(ack));
+    ack.magic = WS2_DISCOVERY_MAGIC;
+    ack.disc_type = WS2_DISC_JOIN_ACK;
+    ack.assigned_slot = (uint32_t)slot;
+    ack.assigned_id   = s_roster[slot].id;
+    ack.game_port     = ntohs(s_ws2_host_addr.sin_port);
+    strncpy(ack.session_name, s_session.name, sizeof(ack.session_name) - 1);
+
+    sendto(s_ws2_disc_socket, (const char *)&ack, sizeof(ack), 0,
+           (const struct sockaddr *)from_addr, (int)sizeof(*from_addr));
+
+    broadcast_roster();
+    InterlockedIncrement(&s_sync_generation);
+
+    TD5_LOG_I(NET_LOG, "Join accepted: slot=%d id=%u", slot, s_roster[slot].id);
 }
 
 /* ========================================================================
@@ -1518,13 +1761,72 @@ void td5_net_shutdown(void)
  */
 void td5_net_tick(void)
 {
-    if (!s_initialized || !s_is_client)
+    if (!s_initialized)
         return;
+
+    /* Poll the discovery socket for queries (host) and join requests */
+    if (s_ws2_disc_socket != INVALID_SOCKET) {
+        DiscoveryMsg disc_msg;
+        SOCKADDR_IN from_addr;
+        int from_len, ret;
+        int max_polls = 16;
+
+        while (max_polls-- > 0) {
+            from_len = (int)sizeof(from_addr);
+            ret = recvfrom(s_ws2_disc_socket, (char *)&disc_msg, sizeof(disc_msg), 0,
+                           (struct sockaddr *)&from_addr, &from_len);
+            if (ret < (int)sizeof(DiscoveryMsg))
+                break;
+            if (disc_msg.magic != WS2_DISCOVERY_MAGIC)
+                continue;
+
+            switch (disc_msg.disc_type) {
+            case WS2_DISC_QUERY:
+                if (s_is_host) {
+                    DiscoveryMsg announce;
+                    memset(&announce, 0, sizeof(announce));
+                    announce.magic = WS2_DISCOVERY_MAGIC;
+                    announce.disc_type = WS2_DISC_ANNOUNCE;
+                    strncpy(announce.session_name, s_session.name,
+                            sizeof(announce.session_name) - 1);
+                    announce.player_count = (uint32_t)s_player_count;
+                    announce.max_players  = s_session.max_players;
+                    announce.game_type    = s_session.game_type;
+                    announce.sealed       = (uint32_t)s_session.sealed;
+                    announce.game_port    = WS2_GAME_PORT;
+                    sendto(s_ws2_disc_socket, (const char *)&announce,
+                           sizeof(announce), 0,
+                           (const struct sockaddr *)&from_addr,
+                           (int)sizeof(from_addr));
+                }
+                break;
+
+            case WS2_DISC_JOIN_REQ:
+                if (s_is_host)
+                    ws2_handle_join_request(&from_addr);
+                break;
+
+            case WS2_DISC_JOIN_ACK:
+                if (!s_is_host && s_local_slot < 0) {
+                    s_local_slot = (int)disc_msg.assigned_slot;
+                    if (s_local_slot >= 0 && s_local_slot < TD5_NET_MAX_PLAYERS) {
+                        s_roster[s_local_slot].id = disc_msg.assigned_id;
+                        s_roster[s_local_slot].active = 1;
+                        TD5_LOG_I(NET_LOG, "Assigned slot %d, id %u",
+                                  s_local_slot, disc_msg.assigned_id);
+                    }
+                }
+                break;
+
+            default:
+                break;
+            }
+        }
+    }
 
     /* Check for connection loss */
     if (s_connection_lost) {
         TD5_LOG_W(NET_LOG, "Connection lost detected in tick");
-        /* Game thread should query this via state and handle UI */
     }
 }
 
