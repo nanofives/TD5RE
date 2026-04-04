@@ -1371,9 +1371,7 @@ void td5_physics_integrate_pose(TD5_Actor *actor)
             if (!(gnd_mask & (1 << i))) {  /* grounded wheel */
                 int32_t g_y = 0;
                 int g_surf = 0;
-                int g_span = actor->wheel_probes[i].span_index;
-                if (g_span < 0 || g_span >= g_td5.track_span_ring_length)
-                    g_span = actor->track_span_raw;
+                int g_span = actor->track_span_raw;
                 if (td5_track_probe_height(actor->wheel_contact_pos[i].x,
                                            actor->wheel_contact_pos[i].z,
                                            g_span, &g_y, &g_surf)) {
@@ -1467,9 +1465,7 @@ static void update_vehicle_pose_from_physics(TD5_Actor *actor)
             if (!(gnd_mask & (1 << i))) {
                 int32_t g_y = 0;
                 int g_surf = 0;
-                int g_span = actor->wheel_probes[i].span_index;
-                if (g_span < 0 || g_span >= g_td5.track_span_ring_length)
-                    g_span = actor->track_span_raw;
+                int g_span = actor->track_span_raw;
                 if (td5_track_probe_height(actor->wheel_contact_pos[i].x,
                                            actor->wheel_contact_pos[i].z,
                                            g_span, &g_y, &g_surf)) {
@@ -1498,6 +1494,17 @@ void td5_physics_refresh_wheel_contacts(TD5_Actor *actor)
     float *rot = actor->rotation_matrix.m;
     int resolved_surface = actor->surface_type_chassis;
     int resolved_surface_valid = 0;
+
+    /* Step 1 (original 0x403720): copy chassis track position to each wheel probe.
+     * Without this, wheel_probes[i].span_index stays at 0 (memset init) and
+     * all height probes use span 0 instead of the car's actual span. */
+    for (int i = 0; i < 4; i++) {
+        actor->wheel_probes[i].span_index       = actor->track_span_raw;
+        actor->wheel_probes[i].span_normalized   = actor->track_span_normalized;
+        actor->wheel_probes[i].span_accumulated  = actor->track_span_accumulated;
+        actor->wheel_probes[i].span_high_water   = actor->track_span_high_water;
+        actor->wheel_probes[i].sub_lane_index    = (int8_t)actor->track_sub_lane_index;
+    }
 
     /* Per-wheel contact frame computation */
     for (int i = 0; i < 4; i++) {
