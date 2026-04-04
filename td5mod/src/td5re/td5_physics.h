@@ -92,4 +92,8 @@ void td5_physics_resolve_vehicle_contacts(void);
 void td5_physics_set_dynamics(int mode);  /* 0=arcade, 1=simulation */
 void td5_physics_set_paused(int paused); /* 1=countdown (RPM only), 0=full sim */
 
+/* Load per-car physics tuning from carparam.dat (268 bytes).
+ * Must be called before td5_physics_init_vehicle_runtime(). */
+void td5_physics_load_carparam(int slot, const uint8_t *data_268);
+
 #endif /* TD5_PHYSICS_H */

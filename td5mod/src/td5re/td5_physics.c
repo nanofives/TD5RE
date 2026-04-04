@@ -90,6 +90,9 @@ static int32_t g_race_slot_state[6];         /* 1=human, 0=AI per slot */
 static int32_t g_actor_aabb[TD5_MAX_TOTAL_ACTORS][5]; /* min_x, min_z, max_x, max_z, chain */
 static uint8_t s_default_tuning[TD5_MAX_TOTAL_ACTORS][0x80];
 static uint8_t s_default_cardef[TD5_MAX_TOTAL_ACTORS][0x90];
+static uint8_t s_carparam_loaded[TD5_MAX_TOTAL_ACTORS];  /* 1 if carparam.dat was loaded */
+static uint8_t s_loaded_cardef[TD5_MAX_TOTAL_ACTORS][0x8C]; /* carparam 0x00..0x8B */
+static uint8_t s_loaded_tuning[TD5_MAX_TOTAL_ACTORS][0x80]; /* carparam 0x8C..0x10B */
 
 /* ========================================================================
  * Forward declarations for internal helpers
@@ -178,6 +181,7 @@ static inline int16_t *get_cardef(TD5_Actor *a)
 
 int td5_physics_init(void)
 {
+    memset(s_carparam_loaded, 0, sizeof(s_carparam_loaded));
     /* Surface grip coefficients from DAT_004748C0 (short[32]).
      * NOTE: s_surface_friction is used for grip calc at line ~361,
      * despite the misleading variable name. Values from original binary. */
@@ -2266,6 +2270,21 @@ static void bind_default_vehicle_tuning(TD5_Actor *actor, int slot)
 {
     uint8_t *tuning;
     uint8_t *cardef;
+
+    tuning = s_default_tuning[slot];
+    cardef = s_default_cardef[slot];
+
+    /* If carparam.dat was loaded for this slot, use it directly */
+    if (slot < TD5_MAX_TOTAL_ACTORS && s_carparam_loaded[slot]) {
+        memcpy(tuning, s_loaded_tuning[slot], 0x80);
+        memcpy(cardef, s_loaded_cardef[slot], 0x8C);
+        actor->tuning_data_ptr = tuning;
+        actor->car_definition_ptr = cardef;
+        TD5_LOG_I(LOG_TAG, "bind_tuning slot=%d: using carparam.dat data", slot);
+        return;
+    }
+
+    /* Fallback: hardcoded defaults */
     static const int16_t k_torque_curve[16] = {
         96, 120, 144, 168, 184, 192, 196, 192,
         184, 176, 168, 156, 144, 132, 120, 104
@@ -2279,9 +2298,6 @@ static void bind_default_vehicle_tuning(TD5_Actor *actor, int slot)
     static const int16_t k_downshift[8] = {
         400, 400, 900, 1200, 1600, 2000, 2400, 2800
     };
-
-    tuning = s_default_tuning[slot];
-    cardef = s_default_cardef[slot];
 
     memset(tuning, 0, sizeof(s_default_tuning[slot]));
     memset(cardef, 0, sizeof(s_default_cardef[slot]));
@@ -2372,4 +2388,27 @@ void td5_physics_set_paused(int paused)
         TD5_LOG_I(LOG_TAG, "Physics paused=%d", paused);
         g_game_paused = paused;
     }
+}
+
+void td5_physics_load_carparam(int slot, const uint8_t *data_268)
+{
+    if (slot < 0 || slot >= TD5_MAX_TOTAL_ACTORS || !data_268) return;
+
+    /* carparam.dat layout (268 bytes):
+     *   0x00..0x8B: car definition (bounding box/collision) -> car_definition_ptr
+     *   0x8C..0x10B: physics tuning (torque, gears, damping) -> tuning_data_ptr */
+    memcpy(s_loaded_cardef[slot], data_268, 0x8C);
+    memcpy(s_loaded_tuning[slot], data_268 + 0x8C, 0x80);
+    s_carparam_loaded[slot] = 1;
+
+    TD5_LOG_I(LOG_TAG,
+              "carparam slot=%d: redline=%d speed_lim=%d dt=%d damp_hi=%d damp_lo=%d brk_f=%d brk_r=%d",
+              slot,
+              *(int16_t *)(s_loaded_tuning[slot] + 0x72),
+              *(int16_t *)(s_loaded_tuning[slot] + 0x74),
+              *(int16_t *)(s_loaded_tuning[slot] + 0x76),
+              *(int16_t *)(s_loaded_tuning[slot] + 0x6A),
+              *(int16_t *)(s_loaded_tuning[slot] + 0x6C),
+              *(int16_t *)(s_loaded_tuning[slot] + 0x6E),
+              *(int16_t *)(s_loaded_tuning[slot] + 0x70));
 }

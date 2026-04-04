@@ -31,6 +31,7 @@
 #include "td5re.h"
 #include "td5_render.h"
 #include "td5_hud.h"    /* for TD5_AtlasEntry */
+#include "td5_physics.h" /* for td5_physics_load_carparam */
 
 #include <stdlib.h>
 #include <string.h>
@@ -229,8 +230,7 @@ static int load_static_r5g6b5_tpage(int slot)
 }
 
 /** Try loading a static atlas page from td5_png_clean PNG files.
- *  Uses the same stbi RGBA → format=2 upload pipeline as track textures,
- *  which correctly handles the R↔B channel swap in the cleaned PNGs. */
+ *  td5_asset_decode_png_rgba32 handles R↔B swap to BGRA internally. */
 static int load_static_png_tpage(int slot)
 {
     char path[128];
@@ -989,316 +989,7 @@ TD5_StaticHedEntry *td5_asset_find_entry_by_name(
     return NULL;
 }
 
-/* ========================================================================
- * TGA Decoder -- DecodeArchiveImageToRgb24 (0x442E00)
- *
- * The original is a full TGA decoder supporting types 1 (uncompressed
- * color-mapped), 2 (uncompressed truecolor), 9 (RLE color-mapped), and
- * 10 (RLE truecolor). Output is always 24-bit BGR.
- *
- * TGA header layout (18 bytes):
- *   [0]     id_length
- *   [1]     color_map_type (0=none, 1=present)
- *   [2]     image_type (1,2,9,10)
- *   [3..4]  color_map_first_entry
- *   [5..6]  color_map_length
- *   [7]     color_map_entry_size (bits)
- *   [8..9]  x_origin
- *   [10..11] y_origin
- *   [12..13] width
- *   [14..15] height
- *   [16]    bits_per_pixel
- *   [17]    image_descriptor (bit 4=right-to-left, bit 5=top-to-bottom)
- * ======================================================================== */
-
-void td5_asset_decode_tga_to_rgb24(const void *tga_data, void *rgb_out)
-{
-    const uint8_t *src = (const uint8_t *)tga_data;
-    uint8_t *dst = (uint8_t *)rgb_out;
-
-    uint8_t  id_length     = src[0];
-    uint8_t  cmap_type     = src[1];
-    uint8_t  image_type    = src[2];
-    uint16_t cmap_length   = read_u16(src + 5);
-    uint8_t  cmap_depth    = src[7]; /* bits per palette entry (0, 15, 16, 24, or 32) */
-    int      cmap_entry_bytes = (cmap_depth >= 8) ? (cmap_depth + 7) / 8 : 3; /* default 3 */
-    uint16_t width         = read_u16(src + 12);
-    uint16_t height        = read_u16(src + 14);
-    uint8_t  bpp           = src[16];
-    uint8_t  descriptor    = src[17];
-
-    /* Palette pointer (after header + id) */
-    const uint8_t *palette = NULL;
-    int pixel_data_offset  = 18 + id_length;
-
-    if (cmap_type != 0) {
-        palette = src + pixel_data_offset;
-        pixel_data_offset += cmap_length * cmap_entry_bytes;
-    }
-
-    const uint8_t *pixel_data = src + pixel_data_offset;
-    int total_pixels = (int)width * (int)height;
-    int total_bytes  = total_pixels * 3;
-
-    switch (image_type) {
-    case 1: {
-        /* Uncompressed color-mapped (indexed, 8bpp) */
-        const uint8_t *idx = pixel_data;
-        uint8_t *out = dst;
-        for (int i = 0; i < total_bytes; i += 3) {
-            int ci = (*idx++) * cmap_entry_bytes;
-            out[0] = palette[ci + 2]; /* R -> B */
-            out[1] = palette[ci + 1]; /* G */
-            out[2] = palette[ci + 0]; /* B -> R */
-            out += 3;
-        }
-        break;
-    }
-
-    case 2: {
-        /* Uncompressed truecolor */
-        const uint8_t *in = pixel_data;
-        uint8_t *out = dst;
-        int npx = total_pixels;
-
-        if (bpp == 16) {
-            for (int i = 0; i < npx; i++) {
-                uint16_t v = read_u16(in);
-                in += 2;
-                out[0] = (uint8_t)((v >> 7) & 0xF8); /* R */
-                out[1] = (uint8_t)((v >> 2) & 0xF8); /* G */
-                out[2] = (uint8_t)((v << 3) & 0xF8); /* B */
-                out += 3;
-            }
-        } else if (bpp == 24) {
-            for (int i = 0; i < npx; i++) {
-                out[0] = in[2]; /* R <- B */
-                out[1] = in[1]; /* G */
-                out[2] = in[0]; /* B <- R */
-                in += 3;
-                out += 3;
-            }
-        } else if (bpp == 32) {
-            for (int i = 0; i < npx; i++) {
-                out[0] = in[2]; /* R */
-                out[1] = in[1]; /* G */
-                out[2] = in[0]; /* B */
-                in += 4;        /* skip alpha */
-                out += 3;
-            }
-        }
-        break;
-    }
-
-    case 9: {
-        /* RLE color-mapped */
-        const uint8_t *in = pixel_data;
-        uint8_t *out = dst;
-        int remaining = total_bytes;
-
-        while (remaining > 0) {
-            uint8_t packet = *in++;
-
-            if (packet < 0x80) {
-                /* Raw run: (packet + 1) pixels */
-                int count = (int)(packet + 1);
-                for (int j = 0; j < count && remaining > 0; j++) {
-                    int ci = (*in++) * cmap_entry_bytes;
-                    out[0] = palette[ci + 2];
-                    out[1] = palette[ci + 1];
-                    out[2] = palette[ci + 0];
-                    out += 3;
-                    remaining -= 3;
-                }
-            } else {
-                /* RLE run: (packet - 127) pixels of the same index */
-                int count = (int)(packet - 127);
-                int ci = (*in++) * cmap_entry_bytes;
-                uint8_t r = palette[ci + 2];
-                uint8_t g = palette[ci + 1];
-                uint8_t b = palette[ci + 0];
-                for (int j = 0; j < count && remaining > 0; j++) {
-                    out[0] = r;
-                    out[1] = g;
-                    out[2] = b;
-                    out += 3;
-                    remaining -= 3;
-                }
-            }
-        }
-        break;
-    }
-
-    case 10: {
-        /* RLE truecolor */
-        const uint8_t *in = pixel_data;
-        uint8_t *out = dst;
-        int remaining = total_bytes;
-
-        if (bpp == 24) {
-            while (remaining > 0) {
-                uint8_t packet = *in++;
-
-                if (packet < 0x80) {
-                    int count = (int)(packet + 1);
-                    for (int j = 0; j < count && remaining > 0; j++) {
-                        out[0] = in[2]; /* R */
-                        out[1] = in[1]; /* G */
-                        out[2] = in[0]; /* B */
-                        in += 3;
-                        out += 3;
-                        remaining -= 3;
-                    }
-                } else {
-                    int count = (int)(packet - 127);
-                    uint8_t r = in[2], g = in[1], b = in[0];
-                    in += 3;
-                    for (int j = 0; j < count && remaining > 0; j++) {
-                        out[0] = r;
-                        out[1] = g;
-                        out[2] = b;
-                        out += 3;
-                        remaining -= 3;
-                    }
-                }
-            }
-        }
-        /* bpp==32 RLE truecolor: similar but skip alpha byte */
-        else if (bpp == 32) {
-            while (remaining > 0) {
-                uint8_t packet = *in++;
-
-                if (packet < 0x80) {
-                    int count = (int)(packet + 1);
-                    for (int j = 0; j < count && remaining > 0; j++) {
-                        out[0] = in[2];
-                        out[1] = in[1];
-                        out[2] = in[0];
-                        in += 4;
-                        out += 3;
-                        remaining -= 3;
-                    }
-                } else {
-                    int count = (int)(packet - 127);
-                    uint8_t r = in[2], g = in[1], b = in[0];
-                    in += 4;
-                    for (int j = 0; j < count && remaining > 0; j++) {
-                        out[0] = r;
-                        out[1] = g;
-                        out[2] = b;
-                        out += 3;
-                        remaining -= 3;
-                    }
-                }
-            }
-        }
-        break;
-    }
-
-    default:
-        TD5_LOG_E(LOG_TAG, "unsupported TGA type: %d", image_type);
-        memset(dst, 0, (size_t)total_bytes);
-        break;
-    }
-
-    /*
-     * Apply vertical flip if origin is bottom-left (bit 5 of descriptor = 0).
-     * The original checks descriptor & 0x20 and flips rows if not set.
-     */
-    int row_bytes = (int)width * 3;
-
-    if (!(descriptor & 0x20)) {
-        /* Flip vertically (bottom-to-top -> top-to-bottom) */
-        uint8_t *top = dst;
-        uint8_t *bot = dst + (height - 1) * row_bytes;
-        for (int y = 0; y < height / 2; y++) {
-            /* Swap rows in 4-byte chunks for speed (matching original) */
-            for (int x = 0; x < row_bytes / 4; x++) {
-                uint32_t tmp = ((uint32_t *)top)[x];
-                ((uint32_t *)top)[x] = ((uint32_t *)bot)[x];
-                ((uint32_t *)bot)[x] = tmp;
-            }
-            /* Handle remaining bytes */
-            for (int x = (row_bytes / 4) * 4; x < row_bytes; x++) {
-                uint8_t tmp = top[x];
-                top[x] = bot[x];
-                bot[x] = tmp;
-            }
-            top += row_bytes;
-            bot -= row_bytes;
-        }
-    }
-
-    /* Apply horizontal flip if bit 4 of descriptor is set */
-    if (descriptor & 0x10) {
-        for (int y = 0; y < height; y++) {
-            uint8_t *row_start = dst + y * row_bytes;
-            uint8_t *left = row_start;
-            uint8_t *right = row_start + row_bytes - 3;
-            for (int x = 0; x < width / 2; x++) {
-                uint8_t t0 = left[0], t1 = left[1], t2 = left[2];
-                left[0] = right[0]; left[1] = right[1]; left[2] = right[2];
-                right[0] = t0; right[1] = t1; right[2] = t2;
-                left += 3;
-                right -= 3;
-            }
-        }
-    }
-}
-
-int td5_asset_decode_tga(const void *data, size_t size, void **pixels_out,
-                          int *width_out, int *height_out)
-{
-    if (!data || size < 18 || !pixels_out) return 0;
-
-    const uint8_t *src = (const uint8_t *)data;
-    uint16_t w = read_u16(src + 12);
-    uint16_t h = read_u16(src + 14);
-
-    if (w == 0 || h == 0 || w > 4096 || h > 4096) return 0;
-
-    uint8_t bpp = src[16];
-
-    /* Allocate RGBA32 output */
-    size_t rgb_size = (size_t)w * (size_t)h * 3;
-    uint8_t *rgb = (uint8_t *)malloc(rgb_size);
-    if (!rgb) return 0;
-
-    td5_asset_decode_tga_to_rgb24(data, rgb);
-
-    /* Convert RGB24 to BGRA32 (D3D11 B8G8R8A8_UNORM native format) */
-    size_t rgba_size = (size_t)w * (size_t)h * 4;
-    uint8_t *rgba = (uint8_t *)malloc(rgba_size);
-    if (!rgba) { free(rgb); return 0; }
-
-    for (int i = 0; i < w * h; i++) {
-        uint8_t r = rgb[i * 3 + 0];
-        uint8_t g = rgb[i * 3 + 1];
-        uint8_t b = rgb[i * 3 + 2];
-        rgba[i * 4 + 0] = b;
-        rgba[i * 4 + 1] = g;
-        rgba[i * 4 + 2] = r;
-        /* Color key depends on TGA bit depth:
-         * - 8/24-bit TGAs (frontend sprites): black (0,0,0) is the color key
-         * - 16-bit TGAs (car previews): color key is dark blue (0,0,88) matching
-         *   original SRCCOLORKEY 0x000B (RGB555 B=11 → 8-bit B=88). The original
-         *   sets this via SetColorKey(DDCKEY_SRCBLT, 0x000B) then blits with
-         *   Copy16BitSurfaceRect flag 0x11. Black (0,0,0) pixels in car TGAs are
-         *   intentional (tires, shadows) and must remain opaque. */
-        if (bpp == 16) {
-            rgba[i * 4 + 3] = (r == 0 && g == 0 && b == 88) ? 0 : 0xFF;
-        } else {
-            rgba[i * 4 + 3] = (r == 0 && g == 0 && b == 0) ? 0 : 0xFF;
-        }
-    }
-
-    free(rgb);
-
-    *pixels_out = rgba;
-    if (width_out)  *width_out  = w;
-    if (height_out) *height_out = h;
-    return 1;
-}
+/* TGA decoder removed — all assets now loaded as PNG from td5_png_clean/ */
 
 /* ========================================================================
  * Level Data Loading -- LoadTrackRuntimeData (0x42FB90)
@@ -1422,10 +1113,162 @@ int td5_asset_decode_png_rgba32(const char *path,
         return 0;
     }
 
+    /* stb_image outputs RGBA; D3D11 format=2 upload expects BGRA byte order.
+     * Swap R↔B here so all callers get GPU-ready pixel data. */
+    {
+        int count = width * height;
+        int i;
+        uint8_t *p = pixels;
+        for (i = 0; i < count; i++, p += 4) {
+            uint8_t tmp = p[0];  /* R */
+            p[0] = p[2];        /* R = B */
+            p[2] = tmp;         /* B = R */
+        }
+    }
+
     *pixels_out = pixels;
     if (width_out) *width_out = width;
     if (height_out) *height_out = height;
     return 1;
+}
+
+/* ========================================================================
+ * Unified PNG Texture Loading
+ * ======================================================================== */
+
+/** Apply color keying to BGRA32 pixel buffer in-place.
+ *  Byte order after decode: p[0]=B, p[1]=G, p[2]=R, p[3]=A. */
+static void apply_colorkey(void *pixels, int w, int h, TD5_ColorKeyMode mode)
+{
+    uint8_t *p = (uint8_t *)pixels;
+    int count = w * h;
+    int i;
+    if (mode == TD5_COLORKEY_NONE) return;
+    for (i = 0; i < count; i++, p += 4) {
+        uint8_t b = p[0], g = p[1], r = p[2];
+        switch (mode) {
+        case TD5_COLORKEY_BLACK:
+            if (r < 8 && g < 8 && b < 8)
+                p[3] = 0;
+            break;
+        case TD5_COLORKEY_RED:
+            if (r >= 248 && g < 8 && b < 8)
+                p[3] = 0;
+            break;
+        case TD5_COLORKEY_BLUE88:
+            if (r < 8 && g < 8 && b >= 80 && b <= 96)
+                p[3] = 0;
+            break;
+        default:
+            break;
+        }
+    }
+}
+
+int td5_asset_load_png_to_buffer(const char *png_path, TD5_ColorKeyMode colorkey,
+                                 void **pixels_out, int *w_out, int *h_out)
+{
+    if (!td5_asset_decode_png_rgba32(png_path, pixels_out, w_out, h_out))
+        return 0;
+    /* td5_asset_decode_png_rgba32 already swapped R↔B → data is now BGRA.
+     * Colorkey operates on BGRA: p[0]=B, p[1]=G, p[2]=R, p[3]=A */
+    apply_colorkey(*pixels_out, *w_out, *h_out, colorkey);
+    return 1;
+}
+
+int td5_asset_load_png_texture(int page_index, const char *png_path,
+                               TD5_ColorKeyMode colorkey)
+{
+    void *pixels = NULL;
+    int w = 0, h = 0;
+    int ok;
+
+    if (!td5_asset_load_png_to_buffer(png_path, colorkey, &pixels, &w, &h))
+        return 0;
+
+    ok = td5_plat_render_upload_texture(page_index, pixels, w, h, 2);
+    stbi_image_free(pixels);
+    if (ok)
+        TD5_LOG_D(LOG_TAG, "PNG texture: %s → page %d (%dx%d)", png_path, page_index, w, h);
+    return ok;
+}
+
+int td5_asset_resolve_png_path(const char *entry_name, const char *archive,
+                               char *out_path, size_t out_size)
+{
+    char subfolder[128] = {0};
+    char stem[128];
+    const char *dot;
+    int n;
+    const char *zp;
+
+    if (!entry_name || !archive || !out_path || out_size < 16)
+        return 0;
+
+    /* --- map archive path to td5_png_clean subfolder --- */
+    zp = archive;
+    while (*zp == '\\' || *zp == '/') zp++;
+
+    if (_strnicmp(zp, "level", 5) == 0 && zp[5] >= '0' && zp[5] <= '9') {
+        n = 0;
+        while (zp[5 + n] && zp[5 + n] != '.') n++;
+        snprintf(subfolder, sizeof(subfolder), "levels/level%.*s", n, zp + 5);
+    }
+    else if (_strnicmp(zp, "cars\\", 5) == 0 || _strnicmp(zp, "cars/", 5) == 0) {
+        const char *base = zp + 5;
+        n = 0;
+        while (base[n] && base[n] != '.') n++;
+        snprintf(subfolder, sizeof(subfolder), "cars/%.*s", n, base);
+    }
+    else if (_strnicmp(zp, "static.zip", 10) == 0)
+        strncpy(subfolder, "static", sizeof(subfolder));
+    else if (_strnicmp(zp, "traffic.zip", 11) == 0)
+        strncpy(subfolder, "traffic", sizeof(subfolder));
+    else if (_strnicmp(zp, "environs.zip", 12) == 0)
+        strncpy(subfolder, "environs", sizeof(subfolder));
+    else if (_strnicmp(zp, "loading.zip", 11) == 0)
+        strncpy(subfolder, "loading", sizeof(subfolder));
+    else if (_strnicmp(zp, "legals.zip", 10) == 0)
+        strncpy(subfolder, "legals", sizeof(subfolder));
+    else if (_strnicmp(zp, "cup.zip", 7) == 0 || _strnicmp(zp, "Cup.zip", 7) == 0)
+        strncpy(subfolder, "cup", sizeof(subfolder));
+    else if (_strnicmp(zp, "sound", 5) == 0)
+        strncpy(subfolder, "sounds", sizeof(subfolder));
+    else if (_strnicmp(zp, "Front", 5) == 0) {
+        /* Front End archives — match any variant of separators/case */
+        if (strstr(zp, "rontend") || strstr(zp, "rontEnd"))
+            strncpy(subfolder, "frontend", sizeof(subfolder));
+        else if (strstr(zp, "Extras.zip") || strstr(zp, "extras.zip"))
+            strncpy(subfolder, "extras", sizeof(subfolder));
+        else if (strstr(zp, "Mugshots") || strstr(zp, "mugshots"))
+            strncpy(subfolder, "mugshots", sizeof(subfolder));
+        else if (strstr(zp, "Sounds") || strstr(zp, "sounds"))
+            strncpy(subfolder, "sounds", sizeof(subfolder));
+        else if (strstr(zp, "Tracks") || strstr(zp, "tracks"))
+            strncpy(subfolder, "tracks", sizeof(subfolder));
+        else
+            return 0;
+    }
+    else
+        return 0;
+
+    subfolder[sizeof(subfolder) - 1] = '\0';
+
+    /* --- strip extension from entry name, build stem.png --- */
+    dot = strrchr(entry_name, '.');
+    n = dot ? (int)(dot - entry_name) : (int)strlen(entry_name);
+    if (n >= (int)sizeof(stem)) n = (int)sizeof(stem) - 1;
+    memcpy(stem, entry_name, n);
+    stem[n] = '\0';
+
+    n = snprintf(out_path, out_size, "../re/td5_png_clean/%s/%s.png", subfolder, stem);
+    if (n < 0 || (size_t)n >= out_size)
+        return 0;
+
+    /* Normalize backslashes */
+    { char *p = out_path; while (*p) { if (*p == '\\') *p = '/'; p++; } }
+
+    return td5_plat_file_exists(out_path);
 }
 
 static int td5_asset_upload_png_texture_page(int page_index,
@@ -1821,16 +1664,46 @@ int td5_asset_load_race_texture_pages(void)
  * Phase 4: Load traffic models from traffic.zip.
  * ======================================================================== */
 
-/* Car ZIP archive paths indexed by car_index (matches frontend table) */
+/* Car ZIP archive paths indexed by car_index — MUST match td5_frontend.c order
+ * (original binary pointer table at 0x00466edc, UI order at 0x00463e24). */
 static const char *s_car_zip_paths[37] = {
-    "cars/128.zip", "cars/69v.zip", "cars/97c.zip", "cars/atp.zip", "cars/c21.zip",
-    "cars/cam.zip", "cars/cat.zip", "cars/chv.zip", "cars/cob.zip", "cars/cop.zip",
-    "cars/crg.zip", "cars/cud.zip", "cars/day.zip", "cars/fhm.zip", "cars/frd.zip",
-    "cars/gto.zip", "cars/gtr.zip", "cars/hot.zip", "cars/jag.zip", "cars/mus.zip",
-    "cars/nis.zip", "cars/pit.zip", "cars/sky.zip", "cars/sp1.zip", "cars/sp2.zip",
-    "cars/sp3.zip", "cars/sp4.zip", "cars/sp5.zip", "cars/sp6.zip", "cars/sp7.zip",
-    "cars/sp8.zip", "cars/ss1.zip", "cars/tvr.zip", "cars/van.zip", "cars/vet.zip",
-    "cars/vip.zip", "cars/xkr.zip"
+    "cars/vip.zip",  /* 0  - VIPER            */
+    "cars/97c.zip",  /* 1  - '97 CAMARO       */
+    "cars/frd.zip",  /* 2  - SALEEN MUSTANG   */
+    "cars/vet.zip",  /* 3  - '98 CORVETTE     */
+    "cars/sky.zip",  /* 4  - SKYLINE          */
+    "cars/tvr.zip",  /* 5  - CERBERA          */
+    "cars/van.zip",  /* 6  - '98 VANTAGE      */
+    "cars/xkr.zip",  /* 7  - XKR              */
+    "cars/gto.zip",  /* 8  - GTO              */
+    "cars/crg.zip",  /* 9  - '69 CHARGER      */
+    "cars/chv.zip",  /* 10 - '70 CHEVELLE     */
+    "cars/cud.zip",  /* 11 - CUDA             */
+    "cars/cob.zip",  /* 12 - COBRA            */
+    "cars/69v.zip",  /* 13 - '69 CORVETTE     */
+    "cars/cam.zip",  /* 14 - '69 CAMARO       */
+    "cars/mus.zip",  /* 15 - '68 MUSTANG      */
+    "cars/atp.zip",  /* 16 - P.VANTAGE        */
+    "cars/ss1.zip",  /* 17 - SERIES 1         */
+    "cars/128.zip",  /* 18 - SPEED 12         */
+    "cars/gtr.zip",  /* 19 - GTS-R            */
+    "cars/jag.zip",  /* 20 - XJ220            */
+    "cars/cat.zip",  /* 21 - SUPER 7          */
+    "cars/sp4.zip",  /* 22 - R390             */
+    "cars/c21.zip",  /* 23 - CAT 21           */
+    "cars/day.zip",  /* 24 - DAYTONA          */
+    "cars/fhm.zip",  /* 25 - '68 MUSTANG HR   */
+    "cars/hot.zip",  /* 26 - '69 CAMARO HR    */
+    "cars/sp3.zip",  /* 27 - '98 MUSTANG GT   */
+    "cars/nis.zip",  /* 28 - HOT DOG          */
+    "cars/sp1.zip",  /* 29 - MAUL             */
+    "cars/sp8.zip",  /* 30 - PITBULL          */
+    "cars/pit.zip",  /* 31 - BEAST            */
+    "cars/sp2.zip",  /* 32 - WAGON            */
+    "cars/cop.zip",  /* 33 - POLICE CERBERA   */
+    "cars/sp5.zip",  /* 34 - POLICE MUSTANG   */
+    "cars/sp6.zip",  /* 35 - POLICE CHARGER   */
+    "cars/sp7.zip",  /* 36 - POLICE CAMARO    */
 };
 
 int td5_asset_load_vehicle(int car_index, int slot)
@@ -1892,33 +1765,20 @@ int td5_asset_load_vehicle(int car_index, int slot)
         int skin_page = TD5_CAR_TEXTURE_PAGE_BASE + slot * 2;
         int hub_page  = TD5_CAR_TEXTURE_PAGE_BASE + slot * 2 + 1;
 
-        /* Load and upload carskin0.tga */
-        int tga_size = 0;
-        void *tga_data = td5_asset_open_and_read("carskin0.tga", zip_path, &tga_size);
-        if (tga_data) {
-            void *pixels = NULL; int tw = 0, th = 0;
-            if (td5_asset_decode_tga(tga_data, (size_t)tga_size, &pixels, &tw, &th)) {
-                td5_plat_render_upload_texture(skin_page, pixels, tw, th, 2);
-                TD5_LOG_I(LOG_TAG, "vehicle slot=%d: carskin0 %dx%d -> page %d", slot, tw, th, skin_page);
-                free(pixels);
-            }
-            free(tga_data);
-        } else {
-            TD5_LOG_W(LOG_TAG, "vehicle slot=%d: carskin0.tga not found in %s", slot, zip_path);
-        }
+        /* Try PNG from td5_png_clean, fall back to ZIP+TGA */
+        {
+            char png_skin[256], png_hub[256];
+            int skin_ok = 0, hub_ok = 0;
 
-        /* Load and upload carhub0.tga */
-        tga_data = td5_asset_open_and_read("carhub0.tga", zip_path, &tga_size);
-        if (tga_data) {
-            void *pixels = NULL; int tw = 0, th = 0;
-            if (td5_asset_decode_tga(tga_data, (size_t)tga_size, &pixels, &tw, &th)) {
-                td5_plat_render_upload_texture(hub_page, pixels, tw, th, 2);
-                TD5_LOG_I(LOG_TAG, "vehicle slot=%d: carhub0 %dx%d -> page %d", slot, tw, th, hub_page);
-                free(pixels);
-            }
-            free(tga_data);
-        } else {
-            TD5_LOG_W(LOG_TAG, "vehicle slot=%d: carhub0.tga not found in %s", slot, zip_path);
+            if (td5_asset_resolve_png_path("carskin0.tga", zip_path, png_skin, sizeof(png_skin)))
+                skin_ok = td5_asset_load_png_texture(skin_page, png_skin, TD5_COLORKEY_NONE);
+            if (!skin_ok)
+                TD5_LOG_W(LOG_TAG, "vehicle slot=%d: carskin0 PNG not found in %s", slot, zip_path);
+
+            if (td5_asset_resolve_png_path("carhub0.tga", zip_path, png_hub, sizeof(png_hub)))
+                hub_ok = td5_asset_load_png_texture(hub_page, png_hub, TD5_COLORKEY_NONE);
+            if (!hub_ok)
+                TD5_LOG_W(LOG_TAG, "vehicle slot=%d: carhub0 PNG not found in %s", slot, zip_path);
         }
 
         /* Patch PrimitiveCmd page IDs: 7→skin, 8→hub */
@@ -1932,9 +1792,25 @@ int td5_asset_load_vehicle(int car_index, int slot)
         }
     }
 
-    /* --- carparam.dat (deferred) ----------------------------------------- */
-    TD5_LOG_I(LOG_TAG, "vehicle slot=%d car=%d: carparam.dat loading deferred (using defaults)",
-              slot, car_index);
+    /* --- carparam.dat ---------------------------------------------------- */
+    /* Layout (0x10C = 268 bytes):
+     *   0x00..0x8B: car definition table (bounding box, collision geometry)
+     *   0x8C..0x10B: physics tuning table (torque curve, gear ratios, damping, etc.)
+     * See re/analysis/archive-and-asset-loading.md for full layout docs. */
+    {
+        int cp_size = 0;
+        void *cp_data = td5_asset_open_and_read("carparam.dat", zip_path, &cp_size);
+        if (cp_data && cp_size >= 0x10C) {
+            td5_physics_load_carparam(slot, (const uint8_t *)cp_data);
+            TD5_LOG_I(LOG_TAG, "vehicle slot=%d car=%d: carparam.dat loaded (%d bytes)",
+                      slot, car_index, cp_size);
+            free(cp_data);
+        } else {
+            TD5_LOG_W(LOG_TAG, "vehicle slot=%d car=%d: carparam.dat not found or too small (%d bytes), using defaults",
+                      slot, car_index, cp_size);
+            if (cp_data) free(cp_data);
+        }
+    }
 
     return 1;
 }
