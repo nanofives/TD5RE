@@ -284,6 +284,10 @@ static void dispatch_billboard(TD5_PrimitiveCmd *cmd, TD5_MeshVertex *base_verts
 static void dispatch_tristrip_direct(TD5_PrimitiveCmd *cmd, TD5_MeshVertex *base_verts);
 static void dispatch_quad_direct(TD5_PrimitiveCmd *cmd, TD5_MeshVertex *base_verts);
 
+/* Vehicle shadow + wheel billboard rendering */
+static void render_vehicle_shadow_quad(void);
+static void render_vehicle_wheel_billboards(TD5_Actor *actor);
+
 /** 7-entry dispatch table matching original at 0x473b9c */
 typedef void (*PrimDispatchFn)(TD5_PrimitiveCmd *cmd, TD5_MeshVertex *base_verts);
 
@@ -1431,6 +1435,16 @@ void td5_render_actors_for_view(int view_index)
             td5_render_transform_mesh_vertices(mesh);
             td5_render_compute_vertex_lighting(mesh);
             td5_render_prepared_mesh(mesh);
+
+            /* Render car shadow (dark ground quad under vehicle) */
+            render_vehicle_shadow_quad();
+
+            /* Render wheel billboards at 4 wheel positions */
+            flush_immediate_internal();
+            td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
+            td5_plat_render_bind_texture(-1);
+            render_vehicle_wheel_billboards(actor);
+
             actor_render_count++;
             actor_meshes_submitted++;
 
@@ -1917,27 +1931,138 @@ void td5_render_crossfade_surfaces(uint32_t *dst, const uint32_t *src_a,
     }
 }
 
-/* --- Vehicle Shadow Projection --- */
+/* --- Vehicle Shadow Projection (0x40C120 inline) --- */
+
+/**
+ * Render a dark translucent ground quad under a vehicle.
+ * Uses the currently loaded s_render_transform (actor rotation + camera basis).
+ * Shadow is a flat rectangle in model space at Y=0 (approximately ground level).
+ *
+ * Original builds shadow from 4 wheel contact positions (actor+0x198..+0x1C4)
+ * and projects them. This simplified version uses a fixed-size rectangle.
+ */
+static void render_vehicle_shadow_quad(void)
+{
+    const float hw = 2.2f;   /* half-width (roughly car width / 2) */
+    const float hl = 4.5f;   /* half-length (roughly car length / 2) */
+    const float y_off = 0.3f; /* small Y offset above ground to prevent z-fighting */
+
+    /* Shadow corners in model space (flat quad at car base level).
+     * Winding: CW when viewed from above (+Y direction). */
+    static const float corners[4][3] = {
+        { -2.2f, 0.3f,  4.5f },  /* front-left */
+        {  2.2f, 0.3f,  4.5f },  /* front-right */
+        {  2.2f, 0.3f, -4.5f },  /* back-right */
+        { -2.2f, 0.3f, -4.5f }   /* back-left */
+    };
+    (void)hw; (void)hl; (void)y_off;
+
+    const float *m = s_render_transform.m;
+    TD5_D3DVertex verts[4];
+
+    for (int i = 0; i < 4; i++) {
+        float px = corners[i][0], py = corners[i][1], pz = corners[i][2];
+        float vx = px * m[0] + py * m[1] + pz * m[2] + m[9];
+        float vy = px * m[3] + py * m[4] + pz * m[5] + m[10];
+        float vz = px * m[6] + py * m[7] + pz * m[8] + m[11];
+
+        if (vz <= s_near_clip) return; /* bail if any vertex behind camera */
+
+        float inv_z = 1.0f / vz;
+        verts[i].screen_x = vx * s_focal_length * inv_z + s_center_x;
+        verts[i].screen_y = -vy * s_focal_length * inv_z + s_center_y;
+        verts[i].depth_z  = vz * (1.0f / s_far_clip);
+        verts[i].rhw      = inv_z;
+        verts[i].diffuse  = 0x60000000u; /* semi-transparent black (alpha=0x60) */
+        verts[i].specular = 0;
+        verts[i].tex_u    = 0.0f;
+        verts[i].tex_v    = 0.0f;
+    }
+
+    uint16_t indices[6] = { 0, 1, 2, 0, 2, 3 };
+    flush_immediate_internal();
+    td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
+    td5_plat_render_bind_texture(-1);
+    td5_plat_render_draw_tris(verts, 4, indices, 6);
+}
+
+/* --- Vehicle Wheel Billboards (0x446F00) --- */
+
+/**
+ * Render simple billboard quads at the 4 wheel positions.
+ * Wheel positions are stored at actor+0x2B0 + wheel*12 as int32 X,Y,Z
+ * triplets in 24.8 fixed-point world coordinates.
+ *
+ * Original uses pre-built ring geometry (8 segments per wheel) with a
+ * WHEELS/INWHEEL atlas texture. This simplified version renders flat
+ * camera-facing billboard quads with a dark gray color.
+ */
+static void render_vehicle_wheel_billboards(TD5_Actor *actor)
+{
+    uint8_t *base = (uint8_t *)actor;
+    const float wheel_radius = 0.9f; /* approximate wheel radius in world units */
+
+    for (int wheel = 0; wheel < 4; wheel++) {
+        int32_t wx = *(int32_t *)(base + 0x2B0 + wheel * 12);
+        int32_t wy = *(int32_t *)(base + 0x2B4 + wheel * 12);
+        int32_t wz = *(int32_t *)(base + 0x2B8 + wheel * 12);
+
+        /* Skip uninitialized wheel positions */
+        if (wx == 0 && wy == 0 && wz == 0) continue;
+
+        /* Convert from 24.8 fixed-point to float world coordinates */
+        float world_x = (float)wx * (1.0f / 256.0f);
+        float world_y = (float)wy * (1.0f / 256.0f);
+        float world_z = (float)wz * (1.0f / 256.0f);
+
+        /* Transform to view space using camera basis (not actor rotation,
+         * since wheel positions are already in world space) */
+        float dx = world_x - s_camera_pos[0];
+        float dy = world_y - s_camera_pos[1];
+        float dz = world_z - s_camera_pos[2];
+
+        float vx = dx * s_camera_basis[0] + dy * s_camera_basis[1] + dz * s_camera_basis[2];
+        float vy = dx * s_camera_basis[3] + dy * s_camera_basis[4] + dz * s_camera_basis[5];
+        float vz = dx * s_camera_basis[6] + dy * s_camera_basis[7] + dz * s_camera_basis[8];
+
+        if (vz <= s_near_clip) continue; /* behind camera */
+
+        /* Build camera-facing billboard quad in view space */
+        float r = wheel_radius;
+        float inv_z = 1.0f / vz;
+        float depth = vz * (1.0f / s_far_clip);
+
+        TD5_D3DVertex qv[4];
+        float sx_c = vx * s_focal_length * inv_z + s_center_x;
+        float sy_c = -vy * s_focal_length * inv_z + s_center_y;
+        float sr = r * s_focal_length * inv_z; /* screen-space radius */
+
+        /* Quad corners: TL, TR, BR, BL */
+        qv[0].screen_x = sx_c - sr; qv[0].screen_y = sy_c - sr;
+        qv[1].screen_x = sx_c + sr; qv[1].screen_y = sy_c - sr;
+        qv[2].screen_x = sx_c + sr; qv[2].screen_y = sy_c + sr;
+        qv[3].screen_x = sx_c - sr; qv[3].screen_y = sy_c + sr;
+
+        for (int v = 0; v < 4; v++) {
+            qv[v].depth_z  = depth;
+            qv[v].rhw      = inv_z;
+            qv[v].diffuse  = 0xFF303030u; /* dark gray opaque */
+            qv[v].specular = 0;
+            qv[v].tex_u    = 0.0f;
+            qv[v].tex_v    = 0.0f;
+        }
+
+        uint16_t idx[6] = { 0, 1, 2, 0, 2, 3 };
+        td5_plat_render_draw_tris(qv, 4, idx, 6);
+    }
+}
 
 void td5_render_project_vehicle_shadow(float pos_x, float pos_y, float pos_z,
                                         float half_w, float half_l, int tex_page)
 {
-    /* Build a dark translucent quad on the ground plane under the vehicle */
-    float ground_y = pos_y + 2.0f; /* slightly above track surface */
-    float verts[4][3] = {
-        { pos_x - half_w, ground_y, pos_z - half_l },
-        { pos_x + half_w, ground_y, pos_z - half_l },
-        { pos_x + half_w, ground_y, pos_z + half_l },
-        { pos_x - half_w, ground_y, pos_z + half_l }
-    };
-    float uvs[4][2] = { {0,0}, {1,0}, {1,1}, {0,1} };
-    uint32_t color = 0x60000000u; /* dark translucent */
-
-    /* Transform through camera and submit as translucent quad */
-    /* This is a simplified path — full implementation would use
-       td5_render_load_translation + clip_and_submit_polygon */
-    (void)verts; (void)uvs; (void)color; (void)tex_page;
-    /* TODO: wire through actual translucent submit pipeline */
+    (void)pos_x; (void)pos_y; (void)pos_z;
+    (void)half_w; (void)half_l; (void)tex_page;
+    /* Legacy stub — shadow rendering now handled by render_vehicle_shadow_quad() */
 }
 
 /* --- Sky --- */

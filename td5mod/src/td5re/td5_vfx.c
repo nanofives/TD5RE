@@ -2176,32 +2176,8 @@ void td5_vfx_advance_billboard_anims(void) {
 
 void td5_vfx_render_wheel_billboards(int view_index)
 {
-    int total = td5_game_get_total_actor_count();
-    int slot;
-
-    for (slot = 0; slot < total && slot < TD5_MAX_TOTAL_ACTORS; slot++) {
-        TD5_Actor *actor = td5_game_get_actor(slot);
-        int wheel;
-        uint8_t *base;
-
-        if (!actor) continue;
-        base = (uint8_t *)actor;
-        /* car_definition_ptr at offset 0x04 */
-        if (!*(uint32_t *)(base + 0x04)) continue;
-
-        /* Render a camera-facing billboard at each of 4 wheel positions */
-        for (wheel = 0; wheel < 4; wheel++) {
-            /* Read wheel world position from actor struct.
-             * Wheel positions at offsets 0x2B0 + wheel*12 (X,Y,Z int triplets) */
-            int32_t wx = *(int32_t *)(base + 0x2B0 + wheel * 12);
-            int32_t wy = *(int32_t *)(base + 0x2B4 + wheel * 12);
-            int32_t wz = *(int32_t *)(base + 0x2B8 + wheel * 12);
-
-            /* Build billboard quad centered at wheel position.
-             * Full implementation would look up wheel radius from carparam
-             * and submit via the translucent sprite pipeline. */
-            (void)wx; (void)wy; (void)wz; (void)view_index;
-            /* TODO: build quad from wheel atlas, submit as translucent */
-        }
-    }
+    /* Wheel rendering is now handled inline in td5_render.c actor loop
+     * via render_vehicle_wheel_billboards(). This stub is kept for API
+     * compatibility but does nothing. */
+    (void)view_index;
 }
