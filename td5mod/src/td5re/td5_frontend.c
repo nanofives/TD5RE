@@ -2628,19 +2628,13 @@ int td5_frontend_init_resources(void) {
      *   Note: atp(16), ss1(17), 128(18), gtr(19), jag(20) are UNLOCKED in original.
      * Positions 21-22: visible but locked (cat=SUPER7, sp4=R390).
      * Positions 23-36: invisible in regular mode (cop-chase / cup unlock only). */
+    /* All cars and tracks unlocked for development/testing.
+     * TODO: wire up to td5_save lock tables for proper progression. */
     memset(s_car_lock_table, 0, sizeof(s_car_lock_table));
-    for (int _li = 21; _li < 37; _li++) s_car_lock_table[_li] = 1;
-    s_total_unlocked_cars = 23; /* 23 visible in selector (21 unlocked + 2 locked-visible) */
+    s_total_unlocked_cars = 37; /* all 37 cars visible + selectable */
 
-    /* Track lock table: DAT_004668b0 (original binary).
-     * Selector shows 16 tracks in regular mode (DAT_00466840 = 16).
-     * Slots 0-7: unlocked (Moscow, Edinburgh, Sydney, Blue Ridge, Jarash,
-     *                       Newcastle, Maui, Courmayeur).
-     * Slots 8-15: visible but locked.
-     * Slots 16+: championship-only (not shown in regular selector). */
     memset(s_track_lock_table, 0, sizeof(s_track_lock_table));
-    for (int _ti = 8; _ti < 26; _ti++) s_track_lock_table[_ti] = 1;
-    s_total_unlocked_tracks = 16; /* 16 visible tracks (8 unlocked + 8 locked-visible) */
+    s_total_unlocked_tracks = 26; /* all 26 tracks visible + selectable */
 
     /* Background gallery slideshow (LoadExtrasGalleryImageSurfaces 0x40D590) */
     frontend_load_bg_gallery();

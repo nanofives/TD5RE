@@ -1277,14 +1277,28 @@ void td5_render_prepared_mesh(TD5_MeshHeader *mesh)
             continue;
         }
 
-        /* If vertex_data_ptr is 0, point to running cursor position */
+        /* If vertex_data_ptr is 0, point to running cursor position.
+         * For MODELS.DAT meshes, vertex_data_ptr is typically 0 and the
+         * renderer uses a sequential cursor.  If non-zero, it may be
+         * an unrelocated relative offset from the mesh header — relocate
+         * it on the fly if it looks like a small offset rather than an
+         * absolute pointer. */
         {
             TD5_MeshVertex *cmd_verts = base_verts;
             int verts_needed = cmd->triangle_count * 3 + cmd->quad_count * 4;
 
             if (cmd->vertex_data_ptr != 0) {
-                cmd_verts = (TD5_MeshVertex *)(uintptr_t)cmd->vertex_data_ptr;
-                if ((uintptr_t)cmd_verts < 0x10000u) continue;
+                uintptr_t vp = (uintptr_t)cmd->vertex_data_ptr;
+                if (vp < 0x10000u) {
+                    /* Looks like a relative offset — relocate from mesh base */
+                    cmd_verts = (TD5_MeshVertex *)((uint8_t *)mesh + vp);
+                    if (!td5_track_is_ptr_in_blob(cmd_verts, sizeof(TD5_MeshVertex)))
+                        continue;
+                } else if (td5_track_is_ptr_in_blob((void *)vp, sizeof(TD5_MeshVertex))) {
+                    cmd_verts = (TD5_MeshVertex *)vp;
+                } else {
+                    continue; /* bad pointer, skip command */
+                }
             } else if (vert_cursor > 0) {
                 cmd_verts = base_verts + vert_cursor;
             }
