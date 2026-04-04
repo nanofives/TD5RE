@@ -1334,21 +1334,23 @@ void td5_physics_integrate_pose(TD5_Actor *actor)
         int32_t cp = cos_fixed12(pitch_a);
         int32_t sp = sin_fixed12(pitch_a);
 
-        /* ZYX euler rotation matrix (row-major) */
-        /* Scale: fixed12 * fixed12 >> 12 = fixed12, then /4096.0f to float */
+        /* Rotation matrix from FUN_0042e1e0 (Ghidra decompilation).
+         * Includes built-in coordinate system conversion (identity is
+         * a 90-degree X-rotation, not standard identity).
+         * A=roll, B=yaw, C=pitch; cr/sr, cy/sy, cp/sp = cos/sin of each. */
         float s = 1.0f / 4096.0f;
 
-        actor->rotation_matrix.m[0] = (float)((cy * cp) >> 12) * s;
-        actor->rotation_matrix.m[1] = (float)(((cy * sp >> 12) * sr >> 12) - ((sy * cr) >> 12)) * s;
-        actor->rotation_matrix.m[2] = (float)(((cy * sp >> 12) * cr >> 12) + ((sy * sr) >> 12)) * s;
+        actor->rotation_matrix.m[0] = (float)(((cp * cy >> 12) * cr >> 12) + ((sp * sy) >> 12)) * s;
+        actor->rotation_matrix.m[1] = (float)(((sp * cy >> 12) * cr >> 12) - ((cp * sy) >> 12)) * s;
+        actor->rotation_matrix.m[2] = (float)((cy * sr) >> 12) * s;
 
-        actor->rotation_matrix.m[3] = (float)((sy * cp) >> 12) * s;
-        actor->rotation_matrix.m[4] = (float)(((sy * sp >> 12) * sr >> 12) + ((cy * cr) >> 12)) * s;
-        actor->rotation_matrix.m[5] = (float)(((sy * sp >> 12) * cr >> 12) - ((cy * sr) >> 12)) * s;
+        actor->rotation_matrix.m[3] = (float)((cp * sr) >> 12) * s;
+        actor->rotation_matrix.m[4] = (float)((sp * sr) >> 12) * s;
+        actor->rotation_matrix.m[5] = (float)(-cr) * s;
 
-        actor->rotation_matrix.m[6] = (float)(-sp) * s;
-        actor->rotation_matrix.m[7] = (float)((cp * sr) >> 12) * s;
-        actor->rotation_matrix.m[8] = (float)((cp * cr) >> 12) * s;
+        actor->rotation_matrix.m[6] = (float)(((cp * sy >> 12) * cr >> 12) - ((sp * cy) >> 12)) * s;
+        actor->rotation_matrix.m[7] = (float)(((sp * sy >> 12) * cr >> 12) + ((cp * cy) >> 12)) * s;
+        actor->rotation_matrix.m[8] = (float)((sy * sr) >> 12) * s;
     }
 
     /* 6. Compute render position (world_pos / 256 as float) */
@@ -1437,15 +1439,16 @@ static void update_vehicle_pose_from_physics(TD5_Actor *actor)
 
         float s = 1.0f / 4096.0f;
 
-        actor->rotation_matrix.m[0] = (float)((cy * cp) >> 12) * s;
-        actor->rotation_matrix.m[1] = (float)(((cy * sp >> 12) * sr >> 12) - ((sy * cr) >> 12)) * s;
-        actor->rotation_matrix.m[2] = (float)(((cy * sp >> 12) * cr >> 12) + ((sy * sr) >> 12)) * s;
-        actor->rotation_matrix.m[3] = (float)((sy * cp) >> 12) * s;
-        actor->rotation_matrix.m[4] = (float)(((sy * sp >> 12) * sr >> 12) + ((cy * cr) >> 12)) * s;
-        actor->rotation_matrix.m[5] = (float)(((sy * sp >> 12) * cr >> 12) - ((cy * sr) >> 12)) * s;
-        actor->rotation_matrix.m[6] = (float)(-sp) * s;
-        actor->rotation_matrix.m[7] = (float)((cp * sr) >> 12) * s;
-        actor->rotation_matrix.m[8] = (float)((cp * cr) >> 12) * s;
+        /* Exact formula from FUN_0042e1e0 (Ghidra) */
+        actor->rotation_matrix.m[0] = (float)(((cp * cy >> 12) * cr >> 12) + ((sp * sy) >> 12)) * s;
+        actor->rotation_matrix.m[1] = (float)(((sp * cy >> 12) * cr >> 12) - ((cp * sy) >> 12)) * s;
+        actor->rotation_matrix.m[2] = (float)((cy * sr) >> 12) * s;
+        actor->rotation_matrix.m[3] = (float)((cp * sr) >> 12) * s;
+        actor->rotation_matrix.m[4] = (float)((sp * sr) >> 12) * s;
+        actor->rotation_matrix.m[5] = (float)(-cr) * s;
+        actor->rotation_matrix.m[6] = (float)(((cp * sy >> 12) * cr >> 12) - ((sp * cy) >> 12)) * s;
+        actor->rotation_matrix.m[7] = (float)(((sp * sy >> 12) * cr >> 12) + ((cp * cy) >> 12)) * s;
+        actor->rotation_matrix.m[8] = (float)((sy * sr) >> 12) * s;
     }
 
     /* Render position */
@@ -2259,4 +2262,14 @@ void td5_physics_compute_suspension_envelope(TD5_Actor *actor)
     tun[3] = hw;  tun[4] = 0;   tun[5] = hl;
     tun[6] = -hw; tun[7] = 0;   tun[8] = hl;
     tun[9] = hw;  tun[10] = 0;  tun[11] = -hl;
+}
+
+void td5_physics_set_collisions(int enabled)
+{
+    g_collisions_enabled = enabled ? 0 : 1;  /* 0=on, 1=off (inverted) */
+}
+
+void td5_physics_set_dynamics(int mode)
+{
+    (void)mode;  /* TODO: arcade vs simulation toggle */
 }

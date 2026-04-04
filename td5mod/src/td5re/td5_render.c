@@ -73,7 +73,7 @@ extern uint32_t g_tick_counter;
 
 /** Near/far clip defaults */
 #define DEFAULT_NEAR_CLIP   1.0f
-#define DEFAULT_FAR_CLIP    8192.0f
+#define DEFAULT_FAR_CLIP    32768.0f
 
 /** Billboard depth sort stride sizes (bytes) */
 #define BILLBOARD_TRI_STRIDE  0x84
@@ -83,9 +83,9 @@ extern uint32_t g_tick_counter;
 #define BACKFACE_THRESHOLD  0.03662f
 
 /** Fog defaults (from M2DX analysis) */
-#define FOG_START_DEFAULT   0.01f
-#define FOG_END_DEFAULT     0.5f
-#define FOG_DENSITY_DEFAULT 0.99f
+#define FOG_START_DEFAULT   0.50f
+#define FOG_END_DEFAULT     0.95f
+#define FOG_DENSITY_DEFAULT 0.50f
 
 /* ========================================================================
  * Render Transform (3x4 matrix, 8-byte aligned)
@@ -1364,17 +1364,8 @@ void td5_render_actors_for_view(int view_index)
     int rendered_spans = 0;
     int span_count = td5_track_get_span_count();
 
-    /* Apply view distance: effective_frac = view_frac * 0.85 + 0.15
-     * From binary at 0x42BB2E: limits visible track spans.
-     * view_frac=0.0 → 15% of spans, 1.0 → 100%, default 0.65 → ~70%. */
-    {
-        extern float td5_save_get_view_distance(void);
-        float vf = td5_save_get_view_distance();
-        float eff = vf * 0.85f + 0.15f;
-        int max_spans = (int)(eff * (float)span_count);
-        if (max_spans < 1) max_spans = 1;
-        if (max_spans < span_count) span_count = max_spans;
-    }
+    /* The original (0x42BB2E) walks spans outward from the player's span.
+     * Our loop walks from span 0; rely on per-mesh frustum cull instead. */
     int actor_render_count = 0;
     int actor_meshes_submitted = 0;
 
