@@ -416,21 +416,8 @@ static void flush_immediate_internal(void)
 
 static void update_render_camera_from_game(void)
 {
-    float raw[9];
-    td5_camera_get_basis(&raw[0], &raw[3], &raw[6]);
+    td5_camera_get_basis(&s_camera_basis[0], &s_camera_basis[3], &s_camera_basis[6]);
     td5_camera_get_position(&s_camera_pos[0], &s_camera_pos[1], &s_camera_pos[2]);
-
-    /* The original binary's rotation matrix (FUN_0042e1e0) includes a
-     * built-in Rx(90°) that converts from the game's mesh coordinate
-     * system to the rendering coordinate system.  The camera basis is
-     * built without this conversion, so apply it here as a post-multiply:
-     * basis_render = basis_camera * Rx(90°).
-     * Rx(90°) swaps columns 1↔2 with sign flip on new column 2. */
-    /* Rx(-90°): inverse of the Rx(+90°) that was in FUN_0042e1e0.
-     * Swaps columns 1↔2 with sign flip on new column 1. */
-    s_camera_basis[0] = raw[0];  s_camera_basis[1] = -raw[2];  s_camera_basis[2] = raw[1];
-    s_camera_basis[3] = raw[3];  s_camera_basis[4] = -raw[5];  s_camera_basis[5] = raw[4];
-    s_camera_basis[6] = raw[6];  s_camera_basis[7] = -raw[8];  s_camera_basis[8] = raw[7];
 }
 
 /**
@@ -1007,9 +994,13 @@ void td5_render_transform_mesh_vertices(TD5_MeshHeader *mesh)
      * Vertex stride: 0x2C (44 bytes). Input XYZ at +0x00, output at +0x0C.
      */
     for (int i = 0; i < count; i++) {
+        /* Mesh vertices are stored with Y=forward, Z=up (the original
+         * binary's rotation matrix FUN_0042e1e0 has identity=[1,0,0;
+         * 0,0,-1; 0,1,0] which maps (x,y,z)→(x,-z,y)).  The camera
+         * basis and physics use Y=up, Z=forward.  Convert here. */
         float px = verts[i].pos_x;
-        float py = verts[i].pos_y;
-        float pz = verts[i].pos_z;
+        float py = -verts[i].pos_z;   /* mesh Z-up → render -Y */
+        float pz = verts[i].pos_y;    /* mesh Y-fwd → render Z */
 
         verts[i].view_x = px * m[0] + py * m[1] + pz * m[2] + m[9];
         verts[i].view_y = px * m[3] + py * m[4] + pz * m[5] + m[10];
