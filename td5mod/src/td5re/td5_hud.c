@@ -755,35 +755,29 @@ void td5_hud_update_pause_overlay(int cursor, float sfx_frac, float music_frac, 
     float fracs[3] = { sfx_frac, music_frac, cd_frac };
 
     /* Move SELBOX to cursor row */
-    if (s_pause_sel_box && s_pause_selbox_atlas) {
+    if (s_pause_sel_box) {
         float row_y = s_pause_selbox_base_y + (float)cursor * 16.0f;
-        hud_build_quad(s_pause_sel_box, 0, s_pause_selbox_atlas->texture_page,
+        hud_build_quad(s_pause_sel_box, 0, HUD_WHITE_TEX_PAGE,
                        cx + s_pause_selbox_x0, cy + row_y - 1.0f,
                        cx + s_pause_selbox_x1, cy + row_y + 15.0f,
-                       (float)s_pause_selbox_atlas->atlas_x + 0.5f,
-                       (float)s_pause_selbox_atlas->atlas_y + 0.5f,
-                       (float)s_pause_selbox_atlas->atlas_x + 20.0f,
-                       (float)s_pause_selbox_atlas->atlas_y + 12.0f,
-                       0xFFFFFFFF, HUD_DEPTH);
+                       0.25f, 0.25f, 0.25f, 0.25f,
+                       0x80FFFF60, HUD_DEPTH);
     }
 
     /* Update slider thumb x positions based on volume fraction */
-    float bar_range = s_pause_bar_x1 - s_pause_bar_x0 - 6.0f; /* 6 = thumb width */
+    float bar_range = s_pause_bar_x1 - s_pause_bar_x0 - 6.0f;
     for (int row = 0; row < 3; row++) {
-        if (!s_pause_slider_ptrs[row] || !s_pause_slider_atlas) continue;
+        if (!s_pause_slider_ptrs[row]) continue;
         float frac = fracs[row];
         if (frac < 0.0f) frac = 0.0f;
         if (frac > 1.0f) frac = 1.0f;
         float row_y = s_pause_selbox_base_y + (float)row * 16.0f;
         float thumb_x = s_pause_bar_x0 + frac * bar_range;
-        hud_build_quad(s_pause_slider_ptrs[row], 0, s_pause_slider_atlas->texture_page,
-                       cx + thumb_x, cy + row_y + 3.0f,
-                       cx + thumb_x + 6.0f, cy + row_y + 11.0f,
-                       (float)s_pause_slider_atlas->atlas_x + 0.5f,
-                       (float)s_pause_slider_atlas->atlas_y + 0.5f,
-                       (float)(s_pause_slider_atlas->atlas_x + s_pause_slider_atlas->width) - 0.5f,
-                       (float)(s_pause_slider_atlas->atlas_y + s_pause_slider_atlas->height) - 0.5f,
-                       0xFFFFFFFF, HUD_DEPTH);
+        hud_build_quad(s_pause_slider_ptrs[row], 0, HUD_WHITE_TEX_PAGE,
+                       cx + thumb_x, cy + row_y + 4.0f,
+                       cx + thumb_x + 6.0f, cy + row_y + 12.0f,
+                       0.25f, 0.25f, 0.25f, 0.25f,
+                       0xFFE0C040, HUD_DEPTH);
     }
 }
 
@@ -2205,71 +2199,48 @@ void td5_hud_init_pause_menu(int page_index)
         } \
     } while (0)
 
-    /* Build BLACKBOX (background panel) */
-    TD5_AtlasEntry *blackbox = td5_asset_find_atlas_entry(NULL, "BLACKBOX");
-    hud_log_atlas_status("BLACKBOX", blackbox);
-    if (blackbox) {
-        PAUSE_ADD(-s_pause_half_width, -s_pause_half_width,
-                   s_pause_half_width,  s_pause_half_width,
-                   (float)blackbox->atlas_x + 0.5f,
-                   (float)blackbox->atlas_y + 0.5f,
-                   (float)(blackbox->atlas_x + blackbox->width)  - 0.5f,
-                   (float)(blackbox->atlas_y + blackbox->height) - 0.5f,
-                   blackbox->texture_page, 0xFFFFFFFF);
-    }
+    /* BLACKBOX: opaque dark-grey panel using the white solid-colour page */
+    PAUSE_ADD(-s_pause_half_width, -s_pause_half_width,
+               s_pause_half_width,  s_pause_half_width,
+               0.25f, 0.25f, 0.25f, 0.25f,
+               HUD_WHITE_TEX_PAGE, 0xFF202020);
 
-    /* Build SELBOX (selection highlight) — positioned at row 0 (cursor=0) */
-    s_pause_selbox_atlas = td5_asset_find_atlas_entry(NULL, "SELBOX");
-    hud_log_atlas_status("SELBOX", s_pause_selbox_atlas);
+    /* SELBOX: semi-transparent highlight bar, no atlas needed */
+    s_pause_selbox_atlas = NULL;   /* not used for solid-colour path */
     s_pause_sel_box = NULL;
-    s_pause_selbox_base_y = -52.0f;   /* text_y base (row 0 y-center) */
-    if (s_pause_selbox_atlas) {
+    s_pause_selbox_base_y = -52.0f;
+    {
         float sel_x0 = 1.0f - s_pause_half_width;
         float sel_x1 = s_pause_half_width - 1.0f;
         s_pause_selbox_x0 = sel_x0;
         s_pause_selbox_x1 = sel_x1;
-        /* Record pointer before appending */
         s_pause_sel_box = (s_pause_quad_count < TD5_HUD_PAUSE_MAX_QUADS)
                           ? PAUSE_BUF(s_pause_quad_count) : NULL;
-        float row_y = s_pause_selbox_base_y;   /* cursor=0 */
+        float row_y = s_pause_selbox_base_y;   /* cursor=0 at init */
         PAUSE_ADD(sel_x0, row_y - 1.0f, sel_x1, row_y + 15.0f,
-                  (float)s_pause_selbox_atlas->atlas_x + 0.5f,
-                  (float)s_pause_selbox_atlas->atlas_y + 0.5f,
-                  (float)s_pause_selbox_atlas->atlas_x + 20.0f,
-                  (float)s_pause_selbox_atlas->atlas_y + 12.0f,
-                  s_pause_selbox_atlas->texture_page, 0xFFFFFFFF);
+                  0.25f, 0.25f, 0.25f, 0.25f,
+                  HUD_WHITE_TEX_PAGE, 0x80FFFF60);   /* semi-transparent amber */
     }
 
-    /* Build SLIDER and BLACKBAR rows for each menu option */
-    s_pause_slider_atlas = td5_asset_find_atlas_entry(NULL, "SLIDER");
-    TD5_AtlasEntry *blackbar = td5_asset_find_atlas_entry(NULL, "BLACKBAR");
-    hud_log_atlas_status("SLIDER", s_pause_slider_atlas);
-    hud_log_atlas_status("BLACKBAR", blackbar);
-
+    /* BLACKBAR + SLIDER: solid-colour volume bars, no atlas needed */
+    s_pause_slider_atlas = NULL;   /* solid-colour path */
+    s_pause_bar_x0 = 10.0f;
     s_pause_bar_x1 = s_pause_half_width - 4.0f;
+
     for (int row = 0; row < 3; row++) {
         float row_y = s_pause_selbox_base_y + (float)row * 16.0f;
-        float bar_x0 =  10.0f;                       /* left edge of slider bar, relative to cx */
-        float bar_x1 =  s_pause_half_width - 4.0f;   /* right edge, relative to cx */
-        if (blackbar) {
-            PAUSE_ADD(bar_x0, row_y + 2.0f, bar_x1, row_y + 12.0f,
-                      (float)blackbar->atlas_x + 0.5f,
-                      (float)blackbar->atlas_y + 0.5f,
-                      (float)(blackbar->atlas_x + blackbar->width) - 0.5f,
-                      (float)(blackbar->atlas_y + blackbar->height) - 0.5f,
-                      blackbar->texture_page, 0xFFFFFFFF);
-        }
-        if (s_pause_slider_atlas) {
-            s_pause_slider_ptrs[row] = (s_pause_quad_count < TD5_HUD_PAUSE_MAX_QUADS)
-                                        ? PAUSE_BUF(s_pause_quad_count) : NULL;
-            /* Thumb starts at left (volume=0); td5_hud_update_pause_overlay moves it */
-            PAUSE_ADD(bar_x0, row_y + 3.0f, bar_x0 + 6.0f, row_y + 11.0f,
-                      (float)s_pause_slider_atlas->atlas_x + 0.5f,
-                      (float)s_pause_slider_atlas->atlas_y + 0.5f,
-                      (float)(s_pause_slider_atlas->atlas_x + s_pause_slider_atlas->width) - 0.5f,
-                      (float)(s_pause_slider_atlas->atlas_y + s_pause_slider_atlas->height) - 0.5f,
-                      s_pause_slider_atlas->texture_page, 0xFFFFFFFF);
-        }
+        /* Dark background bar */
+        PAUSE_ADD(s_pause_bar_x0, row_y + 3.0f,
+                  s_pause_bar_x1,  row_y + 13.0f,
+                  0.25f, 0.25f, 0.25f, 0.25f,
+                  HUD_WHITE_TEX_PAGE, 0xFF101010);
+        /* Slider thumb (starts at x=bar_x0; td5_hud_update_pause_overlay moves it) */
+        s_pause_slider_ptrs[row] = (s_pause_quad_count < TD5_HUD_PAUSE_MAX_QUADS)
+                                    ? PAUSE_BUF(s_pause_quad_count) : NULL;
+        PAUSE_ADD(s_pause_bar_x0, row_y + 4.0f,
+                  s_pause_bar_x0 + 6.0f, row_y + 12.0f,
+                  0.25f, 0.25f, 0.25f, 0.25f,
+                  HUD_WHITE_TEX_PAGE, 0xFFE0C040);   /* golden thumb */
     }
 
     /* Build text glyphs from PAUSETXT atlas */
