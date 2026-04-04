@@ -1822,6 +1822,8 @@ static int frontend_check_escape(void) {
 
 /* Forward declaration for text rendering (defined later in file) */
 static void fe_draw_text(float x, float y, const char *text, uint32_t color, float sx, float sy);
+static void fe_draw_text_centered(float center_x, float y, const char *text,
+                                  uint32_t color, float sx, float sy);
 static void frontend_fill_rect(int layer, int x, int y, int w, int h, uint32_t color);
 static void fe_draw_option_arrows(int btn_idx, float sx, float sy);
 static void frontend_load_bg_gallery(void);
@@ -3364,10 +3366,12 @@ static void frontend_render_track_selection_preview(float sx, float sy) {
         /* skip comma + space */
         strncpy(country, comma + 2, sizeof(country) - 1);
         country[sizeof(country) - 1] = '\0';
-        frontend_draw_value_text(sx, sy, 344, 81, city, 0xFFFFFFFF);
-        frontend_draw_value_text(sx, sy, 344, 113, country, 0xFFFFFFFF);
+        /* Original centers each line within 296px surface blitted at x=344
+         * RE: FUN_00424a50 returns (0x128 - text_width) / 2; center = 344 + 148 = 492 */
+        fe_draw_text_centered(492.0f * sx, 81.0f * sy, city, 0xFFFFFFFF, sx, sy);
+        fe_draw_text_centered(492.0f * sx, 113.0f * sy, country, 0xFFFFFFFF, sx, sy);
     } else {
-        frontend_draw_value_text(sx, sy, 344, 81, track_name, 0xFFFFFFFF);
+        fe_draw_text_centered(492.0f * sx, 81.0f * sy, track_name, 0xFFFFFFFF, sx, sy);
     }
     /* Track preview: 152x224 portrait, right of buttons.
      * x=EDI+0x12E=412, y=ESI+0x36=135 (640x480) */
@@ -3552,6 +3556,23 @@ static void frontend_render_extras_gallery_overlay(float sx, float sy) {
     if (s_gallery_pic_surface > 0) {
         fe_draw_surface_rect(s_gallery_pic_surface, 0.0f, 0.0f, 640.0f * sx, 480.0f * sy, 0xFFFFFFFF);
     }
+}
+
+static float fe_measure_text_width(const char *text, float sx) {
+    float w = 0.0f;
+    if (!text) return 0.0f;
+    for (int i = 0; text[i]; i++) {
+        int c = toupper((unsigned char)text[i]);
+        if (c < 32 || c > 127) { w += 14.0f * sx; continue; }
+        w += (float)s_font_glyph_advance[c - 0x20] * sx;
+    }
+    return w;
+}
+
+static void fe_draw_text_centered(float center_x, float y, const char *text,
+                                  uint32_t color, float sx, float sy) {
+    float w = fe_measure_text_width(text, sx);
+    fe_draw_text(center_x - w * 0.5f, y, text, color, sx, sy);
 }
 
 static void fe_draw_text(float x, float y, const char *text, uint32_t color, float sx, float sy) {
@@ -3809,7 +3830,8 @@ void td5_frontend_render_ui_rects(void) {
              * frame with alpha blending; background shows through naturally. */
             int bb_state;
             if (s_buttons[i].disabled)                               bb_state = 2;
-            else if (flash_active || s_buttons[i].highlight_ramp == 6) bb_state = 0;
+            else if (flash_active || s_buttons[i].highlight_ramp == 6
+                     || (i == s_selected_button && s_selection_from_mouse)) bb_state = 0;
             else                                                     bb_state = 1;
 
             td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
