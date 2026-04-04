@@ -631,12 +631,42 @@ int td5_game_init_race_session(void) {
             1, 2, 1, 2, 1, 2
         };
 
+        /* Per-track start span: circuit reads from checkpoint structure
+         * at 0x46CBB0[track*24+4] (word); non-circuit reads byte table
+         * at 0x466F6F[track]. Indices are 1-based (track 1 = index 1). */
+        static const uint16_t s_circuit_start_span[28] = {
+            /*  0 */ 0,
+            /*  1 */ 869,  826,  768,  623,  747,  609,  556,  715,
+            /*  9 */ 585,  466,  901,  519,  651,  486,  660,  629,
+            /* 17 */ 685,  606,  665,  583,
+            /* 21 */ 544,  827,  738,  694,  106,   25,  119
+        };
+        static const uint8_t s_noncircuit_start_span[28] = {
+            /*  0 */ 0,
+            /*  1 */ 114, 134,  79, 119, 124, 136, 100, 125,
+            /*  9 */ 140,  95, 125,  92, 111, 101, 119,  71,
+            /* 17 */ 119, 147,  78, 120,
+            /* 21 */ 111, 120, 120, 139,   0,   0,   0
+        };
+
         const int8_t *span_offsets = g_track_is_circuit
                                      ? s_circuit_span_offsets
                                      : s_staggered_span_offsets;
 
         int track_span_count = td5_track_get_span_count();
-        int start_span = (track_span_count > 0) ? track_span_count : 1;
+        int tidx = g_td5.track_index;
+        int start_span;
+        if (tidx >= 1 && tidx <= 27) {
+            start_span = g_track_is_circuit
+                         ? (int)s_circuit_start_span[tidx]
+                         : (int)s_noncircuit_start_span[tidx];
+        } else {
+            start_span = (track_span_count > 0) ? track_span_count : 1;
+        }
+        if (start_span <= 0)
+            start_span = (track_span_count > 0) ? track_span_count : 1;
+        TD5_LOG_I(LOG_TAG, "Grid start: track=%d circuit=%d start_span=%d span_count=%d",
+                  tidx, g_track_is_circuit, start_span, track_span_count);
 
         for (int slot = 0; slot < racer_count; ++slot) {
             uint8_t *actor = s_actor_memory + slot * TD5_ACTOR_STRIDE;
@@ -1376,8 +1406,9 @@ static void advance_pending_finish_state(int slot, uint32_t sim_delta) {
             }
         }
 
-        /* Check if all checkpoints passed */
-        if (m->checkpoint_index >= s_active_checkpoint.checkpoint_count) {
+        /* Check if all checkpoints passed (skip if checkpoint data not loaded) */
+        if (s_active_checkpoint.checkpoint_count > 0 &&
+            m->checkpoint_index >= s_active_checkpoint.checkpoint_count) {
             m->post_finish_metric_base = m->cumulative_timer;
             if (m->average_speed_raw > 0) {
                 int avg = (m->normalized_span * 1500) / m->average_speed_raw;
