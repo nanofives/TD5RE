@@ -2459,13 +2459,35 @@ int td5_track_parse_models_dat(const void *data, size_t size)
         if (tbl_byte + 8 > size)
             break;
 
-        entry_offset = *(const uint32_t *)(const void *)(s_models_blob + tbl_byte);
-        entry_size   = *(const uint32_t *)(const void *)(s_models_blob + tbl_byte + 4);
+        {
+            uint32_t f0 = *(const uint32_t *)(const void *)(s_models_blob + tbl_byte);
+            uint32_t f1 = *(const uint32_t *)(const void *)(s_models_blob + tbl_byte + 4);
 
-        /* Both format A and B use [offset, size] pairs.  The only difference
-         * is where the entry table starts (byte 4 for A, byte 0+4 for B).
-         * The old swap was incorrect and caused blocks to be read from wrong
-         * positions, producing 28-64% validation failures. */
+            /* Auto-detect field order: one field is the block offset (should be
+             * >= table end = 4 + count*8), the other is the block size (smaller).
+             * Check which field points to a valid sub_mesh_count (1..256). */
+            uint32_t table_end = table_start_byte + raw_entry_count * 8u + 4u;
+            int f0_is_offset = (f0 >= table_end && f0 < size &&
+                                f0 + 4 <= size &&
+                                *(const uint32_t *)(s_models_blob + f0) >= 1 &&
+                                *(const uint32_t *)(s_models_blob + f0) <= 256);
+            int f1_is_offset = (f1 >= table_end && f1 < size &&
+                                f1 + 4 <= size &&
+                                *(const uint32_t *)(s_models_blob + f1) >= 1 &&
+                                *(const uint32_t *)(s_models_blob + f1) <= 256);
+
+            if (f0_is_offset && !f1_is_offset) {
+                entry_offset = f0; entry_size = f1;  /* [offset, size] */
+            } else if (f1_is_offset && !f0_is_offset) {
+                entry_offset = f1; entry_size = f0;  /* [size, offset] */
+            } else if (f0_is_offset && f1_is_offset) {
+                /* Both valid — pick the one closer to table_end for first entry */
+                entry_offset = (f0 <= f1) ? f0 : f1;
+                entry_size = (f0 <= f1) ? f1 : f0;
+            } else {
+                entry_offset = f0; entry_size = f1;  /* fallback */
+            }
+        }
 
         if (entry_offset == 0 || entry_offset >= size)
             continue;
@@ -2478,8 +2500,12 @@ int td5_track_parse_models_dat(const void *data, size_t size)
             if (i + 1 < raw_entry_count) {
                 uint32_t next_tbl = table_start_byte + (i + 1) * 8u;
                 if (next_tbl + 8 <= size) {
-                    uint32_t candidate =
-                        *(const uint32_t *)(const void *)(s_models_blob + next_tbl);
+                    /* Pick whichever field of the next entry looks like a
+                     * plausible offset (> current offset, within file). */
+                    uint32_t nf0 = *(const uint32_t *)(const void *)(s_models_blob + next_tbl);
+                    uint32_t nf1 = *(const uint32_t *)(const void *)(s_models_blob + next_tbl + 4);
+                    uint32_t candidate = (nf0 > entry_offset && nf0 <= size) ? nf0 :
+                                         (nf1 > entry_offset && nf1 <= size) ? nf1 : (uint32_t)size;
                     if (candidate > entry_offset && candidate <= size)
                         next_off = candidate;
                 }
