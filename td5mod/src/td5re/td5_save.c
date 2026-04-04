@@ -551,6 +551,14 @@ int td5_save_init(void)
      * If the file doesn't exist or has a bad CRC the defaults above stay. */
     td5_save_load_config(NULL);
 
+    /* Force-unlock all cars and race tracks regardless of Config.td5 contents.
+     * Cup tracks (20-25) remain locked -- they require cup wins. */
+    s_max_unlocked_car = TD5_CONFIG_NUM_CARS;
+    s_all_cars_unlocked = 1;
+    memset(s_car_locks, 0, sizeof(s_car_locks));
+    for (i = 0; i < 20; i++)
+        s_track_locks[i] = 1;  /* 1 = unlocked */
+
     return 1;
 }
 
