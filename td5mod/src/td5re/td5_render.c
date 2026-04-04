@@ -416,8 +416,19 @@ static void flush_immediate_internal(void)
 
 static void update_render_camera_from_game(void)
 {
-    td5_camera_get_basis(&s_camera_basis[0], &s_camera_basis[3], &s_camera_basis[6]);
+    float raw[9];
+    td5_camera_get_basis(&raw[0], &raw[3], &raw[6]);
     td5_camera_get_position(&s_camera_pos[0], &s_camera_pos[1], &s_camera_pos[2]);
+
+    /* The original binary's rotation matrix (FUN_0042e1e0) includes a
+     * built-in Rx(90°) that converts from the game's mesh coordinate
+     * system to the rendering coordinate system.  The camera basis is
+     * built without this conversion, so apply it here as a post-multiply:
+     * basis_render = basis_camera * Rx(90°).
+     * Rx(90°) swaps columns 1↔2 with sign flip on new column 2. */
+    s_camera_basis[0] = raw[0];  s_camera_basis[1] = raw[2];  s_camera_basis[2] = -raw[1];
+    s_camera_basis[3] = raw[3];  s_camera_basis[4] = raw[5];  s_camera_basis[5] = -raw[4];
+    s_camera_basis[6] = raw[6];  s_camera_basis[7] = raw[8];  s_camera_basis[8] = -raw[7];
 }
 
 /**
@@ -1414,20 +1425,7 @@ void td5_render_actors_for_view(int view_index)
 
             td5_track_apply_segment_lighting(actor, view_index);
 
-            /* The original binary's rotation matrix (FUN_0042e1e0) includes a
-             * built-in Rx(90°) coordinate conversion (identity = [1,0,0;
-             * 0,0,-1; 0,1,0]).  The physics uses standard identity to keep
-             * dependent code simple.  Apply the conversion here for rendering
-             * only: multiply actor_rot * Rx(90°) before the camera multiply.
-             * Rx(90°) swaps columns 1↔2 with sign flip on column 2. */
-            {
-                const float *am = actor->rotation_matrix.m;
-                float conv[9];
-                conv[0] = am[0];  conv[1] = am[2];  conv[2] = -am[1];
-                conv[3] = am[3];  conv[4] = am[5];  conv[5] = -am[4];
-                conv[6] = am[6];  conv[7] = am[8];  conv[8] = -am[7];
-                mat3x3_mul(s_camera_basis, conv, view_rot.m);
-            }
+            mat3x3_mul(s_camera_basis, actor->rotation_matrix.m, view_rot.m);
             td5_render_load_rotation(&view_rot);
 
             render_pos.x = actor->render_pos.x;

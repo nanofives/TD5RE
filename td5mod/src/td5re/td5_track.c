@@ -2582,10 +2582,10 @@ int td5_track_parse_models_dat(const void *data, size_t size)
         }
     }
 
-    /* Post-relocation validation: test-read each display list block.
-     * If ANY block has a bad mesh pointer after relocation, the entire
-     * MODELS.DAT is suspect — wipe the display list table so the renderer
-     * falls back to generated strip display lists. */
+    /* Post-relocation validation: log bad blocks but do NOT disable all
+     * display lists.  The per-mesh validation in td5_render_span_display_list
+     * already skips individual bad meshes safely.  The old 25% threshold was
+     * disabling tracks that were 72% valid, leaving no visible geometry. */
     {
         int bad_blocks = 0;
         for (int dl = 0; dl < s_models_display_list_count; dl++) {
@@ -2594,30 +2594,22 @@ int td5_track_parse_models_dat(const void *data, size_t size)
             if (sc == 0 || sc > 256) { bad_blocks++; continue; }
             for (uint32_t j = 0; j < sc; j++) {
                 uint32_t ptr_val = *(uint32_t *)(blk + 4 + j * 4);
-                if (ptr_val == 0) continue; /* marked invalid, OK */
+                if (ptr_val == 0) continue;
                 TD5_MeshHeader *m = (TD5_MeshHeader *)(uintptr_t)ptr_val;
                 if ((uintptr_t)m < 0x10000u ||
                     !td5_track_is_ptr_in_blob(m, sizeof(TD5_MeshHeader)) ||
                     m->command_count <= 0 || m->command_count > 4096 ||
-                    m->total_vertex_count <= 0 || m->total_vertex_count > 65536 ||
-                    (m->commands_offset != 0 &&
-                     !td5_track_is_ptr_in_blob((void*)(uintptr_t)m->commands_offset, 1)) ||
-                    (m->vertices_offset != 0 &&
-                     !td5_track_is_ptr_in_blob((void*)(uintptr_t)m->vertices_offset, 1))) {
+                    m->total_vertex_count <= 0 || m->total_vertex_count > 65536) {
+                    /* Zero the bad slot so the renderer skips it */
+                    *(uint32_t *)(blk + 4 + j * 4) = 0;
                     bad_blocks++;
-                    break;
                 }
             }
         }
-        if (bad_blocks > s_models_display_list_count / 4) {
+        if (bad_blocks > 0) {
             TD5_LOG_W("track",
-                "MODELS.DAT: %d/%d blocks failed validation, disabling MODELS.DAT display lists",
+                "MODELS.DAT: %d/%d blocks had bad meshes (zeroed, not disabled)",
                 bad_blocks, s_models_display_list_count);
-            s_models_display_list_count = 0;
-            if (s_span_display_list_indices) {
-                free(s_span_display_list_indices);
-                s_span_display_list_indices = NULL;
-            }
         }
     }
 
