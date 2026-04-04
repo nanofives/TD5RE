@@ -826,6 +826,15 @@ int td5_game_run_race_frame(void) {
     /* Drain sim_time_accumulator in 0x10000 steps, max 4 ticks per frame */
     int ticks_this_frame = 0;
 
+    {
+        static uint32_t s_frame_diag_ctr = 0;
+        if ((s_frame_diag_ctr++ % 60u) == 0u) {
+            TD5_LOG_D(LOG_TAG, "race_frame: accum=0x%X paused=%d pause_menu=%d trans=%d",
+                      g_td5.sim_time_accumulator, g_td5.paused,
+                      s_pause_menu_active, g_cameraTransitionActive);
+        }
+    }
+
     while (g_td5.sim_time_accumulator > 0xFFFF && ticks_this_frame < 4) {
         /* --- Input polling --- */
         td5_input_poll_race_session();
@@ -893,25 +902,6 @@ int td5_game_run_race_frame(void) {
             float sfx_frac   = (float)td5_save_get_sfx_volume()   / 100.0f;
             float music_frac = (float)td5_save_get_music_volume()  / 100.0f;
             td5_hud_update_pause_overlay(s_pause_menu_cursor, sfx_frac, music_frac, music_frac);
-
-            /* Draw labels using the working text system (PAUSETXT tpage missing) */
-            {
-                /* Positions match s_pause_selbox_base_y = -52 from screen centre */
-                int cx_px = (int)(g_render_width_f  * 0.5f);
-                int cy_px = (int)(g_render_height_f * 0.5f);
-                int base_y = cy_px - 52;
-                int lx     = cx_px - 88;   /* left-aligned inside the 200px panel */
-                int rx     = cx_px + 50;   /* right side for volume value */
-                td5_hud_queue_text(0, lx, base_y + 0,  0, "SOUND EFFECTS");
-                td5_hud_queue_text(0, lx, base_y + 16, 0, "MUSIC");
-                td5_hud_queue_text(0, lx, base_y + 32, 0, "CD MUSIC");
-                td5_hud_queue_text(0, cx_px, base_y + 48, 1, "CONTINUE");
-                td5_hud_queue_text(0, cx_px, base_y + 64, 1, "QUIT");
-                /* Volume values */
-                td5_hud_queue_text(0, rx, base_y + 0,  0, "%d%%", td5_save_get_sfx_volume());
-                td5_hud_queue_text(0, rx, base_y + 16, 0, "%d%%", td5_save_get_music_volume());
-                td5_hud_queue_text(0, rx, base_y + 32, 0, "%d%%", td5_save_get_music_volume());
-            }
 
             g_td5.sim_time_accumulator -= TD5_TICK_ACCUMULATOR_ONE;
             ticks_this_frame++;
@@ -1057,9 +1047,25 @@ int td5_game_run_race_frame(void) {
     /* Full-screen HUD overlay (speedometer, lap counter, etc.) */
     td5_hud_render_overlays(g_td5.sim_tick_budget);
 
-    /* Pause overlay: darken screen before drawing pause text */
+    /* Pause overlay: draw panel first, then queue labels on top */
     if (s_pause_menu_active) {
         td5_hud_draw_pause_overlay();
+        /* Queue text AFTER draw_pause_overlay so flush_text renders it on top */
+        {
+            int cx_px = (int)(g_render_width_f * 0.5f);
+            int cy_px = (int)(g_render_height_f * 0.5f);
+            /* Row N text pixel_y = cy_px + N*16 - 25 (center of each 16px row) */
+            int lx = cx_px - 120;   /* left-aligned: cx - half_w + 8 */
+            int rx = cx_px + 52;    /* right side for volume value */
+            td5_hud_queue_text(0, lx, cy_px - 25,      0, "SOUND EFFECTS");
+            td5_hud_queue_text(0, lx, cy_px - 25 + 16, 0, "MUSIC");
+            td5_hud_queue_text(0, lx, cy_px - 25 + 32, 0, "CD MUSIC");
+            td5_hud_queue_text(0, cx_px, cy_px - 25 + 48, 1, "CONTINUE");
+            td5_hud_queue_text(0, cx_px, cy_px - 25 + 64, 1, "QUIT");
+            td5_hud_queue_text(0, rx, cy_px - 25,      0, "%d%%", td5_save_get_sfx_volume());
+            td5_hud_queue_text(0, rx, cy_px - 25 + 16, 0, "%d%%", td5_save_get_music_volume());
+            td5_hud_queue_text(0, rx, cy_px - 25 + 32, 0, "%d%%", td5_save_get_music_volume());
+        }
     }
 
     td5_hud_flush_text();
@@ -1113,6 +1119,12 @@ static void tick_race_countdown(void)
     int level, next_indicator;
 
     if (!g_td5.paused || g_cameraTransitionActive <= 0) {
+        static int s_cd_early_logged = 0;
+        if (s_cd_early_logged < 5) {
+            TD5_LOG_W(LOG_TAG, "tick_countdown early return: paused=%d timer=%d",
+                      g_td5.paused, g_cameraTransitionActive);
+            s_cd_early_logged++;
+        }
         return;
     }
 

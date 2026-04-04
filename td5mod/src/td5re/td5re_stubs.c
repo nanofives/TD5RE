@@ -113,6 +113,15 @@ void BuildRotationMatrixFromAngles(float *out, short *angles) {
      *
      * angles[0] = pitch, angles[1] = yaw, angles[2] = roll
      * All in 12-bit fixed-point (0-4095 = 0-360 degrees).
+     *
+     * NOTE: The original binary's trig lookup at 0x40a6a0 is a cosine
+     * table (table[0]=1), and 0x40a6c0 offsets by -1024 giving sine.
+     * Our stubs label them backwards (SinFloat12bit=sin, CosFloat12bit=cos).
+     * The matrix slot pattern was decompiled from the original where the
+     * "first" trig call (func_A) returns cos.  We swap s/c here to match:
+     *   s = CosFloat12bit (= original func_B = sin)
+     *   c = SinFloat12bit (= original func_A = cos)
+     * so the rest of the matrix construction stays correct.
      */
     float rot[9];
     float s, c;
@@ -125,8 +134,8 @@ void BuildRotationMatrixFromAngles(float *out, short *angles) {
     out[6] = 0.0f; out[7] = 0.0f; out[8] = 1.0f;
 
     /* Yaw (angles[1]): rotate around Y axis */
-    s = SinFloat12bit(angles[1]);
-    c = CosFloat12bit((unsigned int)(unsigned short)angles[1]);
+    s = CosFloat12bit((unsigned int)(unsigned short)angles[1]);
+    c = SinFloat12bit(angles[1]);
     rot[4] = 1.0f;
     rot[3] = 0.0f; rot[5] = 0.0f;
     rot[1] = 0.0f; rot[7] = 0.0f;
@@ -135,8 +144,8 @@ void BuildRotationMatrixFromAngles(float *out, short *angles) {
     MultiplyRotationMatrices3x3(rot, out, out);
 
     /* Pitch (angles[0]): rotate around X axis */
-    s = SinFloat12bit(angles[0]);
-    c = CosFloat12bit((unsigned int)(unsigned short)angles[0]);
+    s = CosFloat12bit((unsigned int)(unsigned short)angles[0]);
+    c = SinFloat12bit(angles[0]);
     rot[0] = 1.0f;
     rot[1] = 0.0f; rot[2] = 0.0f;
     rot[3] = 0.0f; rot[6] = 0.0f;
@@ -145,8 +154,8 @@ void BuildRotationMatrixFromAngles(float *out, short *angles) {
     MultiplyRotationMatrices3x3(rot, out, out);
 
     /* Roll (angles[2]): rotate around Z axis */
-    s = SinFloat12bit(angles[2]);
-    c = CosFloat12bit((unsigned int)(unsigned short)angles[2]);
+    s = CosFloat12bit((unsigned int)(unsigned short)angles[2]);
+    c = SinFloat12bit(angles[2]);
     rot[8] = 1.0f;
     rot[2] = 0.0f; rot[5] = 0.0f;
     rot[6] = 0.0f; rot[7] = 0.0f;
@@ -711,7 +720,7 @@ static const char *s_eng_pause_strings[] = {
 const char **g_pause_page_strings[8] = {
     s_eng_pause_strings, NULL, NULL, NULL, NULL, NULL, NULL, NULL
 };
-const int g_pause_page_sizes[8] = { 200, 0, 0, 0, 0, 0, 0, 0 };
+const int g_pause_page_sizes[8] = { 256, 0, 0, 0, 0, 0, 0, 0 };
 
 /* ========================================================================
  * VFX / Track Environment Globals
