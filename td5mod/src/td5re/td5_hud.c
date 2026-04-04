@@ -907,22 +907,17 @@ void td5_hud_update_pause_overlay(int cursor, float sfx_frac, float music_frac, 
     float cy = g_render_height_f * 0.5f;
     float fracs[3] = { sfx_frac, music_frac, cd_frac };
 
-    /* Move SELBOX to cursor row using atlas texture.
-     * Row N → y=[base_y+N*16, base_y+N*16+16]. */
-    if (s_pause_sel_box && s_pause_selbox_atlas) {
+    /* Move SELBOX to cursor row: row N → y=[base_y+N*16, base_y+N*16+16] */
+    if (s_pause_sel_box) {
         float row_y = s_pause_selbox_base_y + (float)cursor * 16.0f;
-        float su0 = (float)s_pause_selbox_atlas->atlas_x + 0.5f;
-        float sv0 = (float)s_pause_selbox_atlas->atlas_y + 0.5f;
-        float su1 = su0 + 255.0f;
-        float sv1 = sv0 + 15.0f;
-        hud_build_quad(s_pause_sel_box, 0, s_pause_selbox_atlas->texture_page,
+        hud_build_quad(s_pause_sel_box, 0, HUD_WHITE_TEX_PAGE,
                        cx + s_pause_selbox_x0, cy + row_y,
                        cx + s_pause_selbox_x1, cy + row_y + 16.0f,
-                       su0, sv0, su1, sv1,
-                       0xFFFFFFFF, HUD_DEPTH);
+                       0.25f, 0.25f, 0.25f, 0.25f,
+                       0x80C0C0C0, HUD_DEPTH);
     }
 
-    /* Update slider fill bar using atlas texture.
+    /* Update slider fill bar: fill from bar_x0 to bar_x0 + frac*(bar_x1-bar_x0).
      * Row N (no base_y offset): y=[N*16-28, N*16-22]. */
     float bar_span = s_pause_bar_x1 - s_pause_bar_x0;
     for (int row = 0; row < 3; row++) {
@@ -932,15 +927,11 @@ void td5_hud_update_pause_overlay(int cursor, float sfx_frac, float music_frac, 
         if (frac > 1.0f) frac = 1.0f;
         float row_y = (float)row * 16.0f;
         float fill_x1 = s_pause_bar_x0 + frac * bar_span;
-        int slider_page = s_pause_slider_atlas ? s_pause_slider_atlas->texture_page : HUD_WHITE_TEX_PAGE;
-        float slu0 = s_pause_slider_atlas ? (float)s_pause_slider_atlas->atlas_x + 255.5f : 0.25f;
-        float slu1 = s_pause_slider_atlas ? (float)s_pause_slider_atlas->atlas_x + 0.5f   : 0.25f;
-        float slv  = s_pause_slider_atlas ? (float)s_pause_slider_atlas->atlas_y + 0.5f   : 0.25f;
-        hud_build_quad(s_pause_slider_ptrs[row], 0, slider_page,
+        hud_build_quad(s_pause_slider_ptrs[row], 0, HUD_WHITE_TEX_PAGE,
                        cx + s_pause_bar_x0, cy + row_y - 28.0f,
                        cx + fill_x1,        cy + row_y - 22.0f,
-                       slu0, slv, slu1, slv,
-                       0xFFFFFFFF, HUD_DEPTH);
+                       0.25f, 0.25f, 0.25f, 0.25f,
+                       0xFFE0C040, HUD_DEPTH);
     }
 }
 
@@ -2381,28 +2372,17 @@ void td5_hud_init_pause_menu(int page_index)
         } \
     } while (0)
 
-    /* Look up atlas entries for pause overlay textures (all on tpage12) */
-    TD5_AtlasEntry *blackbox_e = td5_asset_find_atlas_entry(NULL, "BLACKBOX");
-    TD5_AtlasEntry *selbox_e   = td5_asset_find_atlas_entry(NULL, "SELBOX");
-    TD5_AtlasEntry *blackbar_e = td5_asset_find_atlas_entry(NULL, "BLACKBAR");
-    TD5_AtlasEntry *slider_e   = td5_asset_find_atlas_entry(NULL, "SLIDER");
+    /* BLACKBOX: dark semi-transparent panel. y is fixed ±56 (not ±half_w).
+     * From binary 0x43B7C0: y0=-56.0, y1=+56.0 hardcoded. */
+    PAUSE_ADD(-s_pause_half_width, -56.0f,
+               s_pause_half_width,  56.0f,
+               0.25f, 0.25f, 0.25f, 0.25f,
+               HUD_WHITE_TEX_PAGE, 0xB0000000);
 
-    /* BLACKBOX: dark panel background. y is fixed ±56 (not ±half_w).
-     * From binary 0x43B7C0: y0=-56.0, y1=+56.0 hardcoded.
-     * Single-texel sample from atlas (all 4 UV corners same). */
-    {
-        float bu = (float)blackbox_e->atlas_x + 0.5f;
-        float bv = (float)blackbox_e->atlas_y + 0.5f;
-        PAUSE_ADD(-s_pause_half_width, -56.0f,
-                   s_pause_half_width,  56.0f,
-                   bu, bv, bu, bv,
-                   blackbox_e->texture_page, 0xFFFFFFFF);
-    }
-
-    /* SELBOX: highlight bar using atlas texture (256x16 grayscale bar).
+    /* SELBOX: grayscale highlight bar.
      * From binary: x0=1-half_w, x1=half_w-1; cursor=3 default (CONTINUE).
      * base_y=-33.0f so cursor N → y=[base_y+N*16, base_y+N*16+16]. */
-    s_pause_selbox_atlas = selbox_e;
+    s_pause_selbox_atlas = NULL;
     s_pause_sel_box = NULL;
     s_pause_selbox_base_y = -33.0f;
     {
@@ -2412,44 +2392,34 @@ void td5_hud_init_pause_menu(int page_index)
         s_pause_selbox_x1 = sel_x1;
         s_pause_sel_box = (s_pause_quad_count < TD5_HUD_PAUSE_MAX_QUADS)
                           ? PAUSE_BUF(s_pause_quad_count) : NULL;
-        float su0 = (float)selbox_e->atlas_x + 0.5f;
-        float sv0 = (float)selbox_e->atlas_y + 0.5f;
-        float su1 = su0 + 255.0f;
-        float sv1 = sv0 + 15.0f;
         /* cursor=3 (CONTINUE) initial position */
         float init_y = s_pause_selbox_base_y + 3.0f * 16.0f;
         PAUSE_ADD(sel_x0, init_y, sel_x1, init_y + 16.0f,
-                  su0, sv0, su1, sv1,
-                  selbox_e->texture_page, 0xFFFFFFFF);
+                  0.25f, 0.25f, 0.25f, 0.25f,
+                  HUD_WHITE_TEX_PAGE, 0x80C0C0C0);  /* semi-transparent grey */
     }
 
-    /* BLACKBAR (trough) + SLIDER (fill bar) using atlas textures.
+    /* BLACKBAR (trough) + SLIDER (fill bar).
      * From binary: bar x=[half_w-131, half_w-1], row N y=[N*16-29, N*16-21].
      * Slider fill: from bar_x0 to bar_x0 + vol_frac*(bar_x1-bar_x0). */
-    s_pause_slider_atlas = slider_e;
+    s_pause_slider_atlas = NULL;
     s_pause_bar_x0 = s_pause_half_width - 131.0f;  /* = -3 when half_w=128 */
     s_pause_bar_x1 = s_pause_half_width - 1.0f;    /* = 127 when half_w=128 */
 
     for (int row = 0; row < 3; row++) {
         float row_y = (float)row * 16.0f;
-        /* Dark background trough — single-texel sample from BLACKBAR atlas */
-        float bbu = (float)blackbar_e->atlas_x + 0.5f;
-        float bbv = (float)blackbar_e->atlas_y + 0.5f;
+        /* Dark background trough */
         PAUSE_ADD(s_pause_bar_x0, row_y - 29.0f,
                   s_pause_bar_x1,  row_y - 21.0f,
-                  bbu, bbv, bbu, bbv,
-                  blackbar_e->texture_page, 0xFFFFFFFF);
-        /* Slider fill bar — uses SLIDER atlas texture (256x8).
-         * UV flipped horizontally per binary: U0=entry_u+255.5, U1=entry_u+0.5. */
+                  0.25f, 0.25f, 0.25f, 0.25f,
+                  HUD_WHITE_TEX_PAGE, 0xFF101010);
+        /* Slider fill bar (updated each frame by td5_hud_update_pause_overlay) */
         s_pause_slider_ptrs[row] = (s_pause_quad_count < TD5_HUD_PAUSE_MAX_QUADS)
                                     ? PAUSE_BUF(s_pause_quad_count) : NULL;
-        float slu0 = (float)slider_e->atlas_x + 255.5f;  /* right edge */
-        float slu1 = (float)slider_e->atlas_x + 0.5f;    /* left edge (flipped) */
-        float slv  = (float)slider_e->atlas_y + 0.5f;
         PAUSE_ADD(s_pause_bar_x0, row_y - 28.0f,
-                  s_pause_bar_x0, row_y - 22.0f,  /* x1=x0 initially; updated each frame */
-                  slu0, slv, slu1, slv,
-                  slider_e->texture_page, 0xFFFFFFFF);
+                  s_pause_bar_x0, row_y - 22.0f,
+                  0.25f, 0.25f, 0.25f, 0.25f,
+                  HUD_WHITE_TEX_PAGE, 0xFFE0C040);
     }
 
     /* Build text glyphs from PAUSETXT atlas */

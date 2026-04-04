@@ -218,7 +218,9 @@ static int      s_replay_mode;
 static int      s_race_countdown_ticks;
 static int      s_race_countdown_state;
 static int      s_pause_menu_active;
-static int      s_pause_menu_cursor;   /* 0=SFX, 1=Music, 2=CD, 3=Continue, 4=Quit */
+static int      s_pause_menu_cursor;   /* 0=View, 1=Music, 2=Sound, 3=Continue, 4=Exit */
+static int      s_pause_input_done;    /* reset per-frame, set after first tick processes input */
+static int      s_prev_esc_state;      /* edge detector for ESC key */
 
 /* ========================================================================
  * Forward declarations (internal helpers)
@@ -772,6 +774,7 @@ int td5_game_init_race_session(void) {
     g_td5.race_end_fade_state = 0;
     g_td5.paused = 1;              /* start paused for countdown */
     s_pause_menu_active = 0;       /* clear stale pause menu from previous race */
+    s_prev_esc_state = 1;          /* suppress false ESC edge on first frame */
     g_td5.sim_tick_budget = 0.0f;
     g_td5.sim_time_accumulator = 0;
     g_td5.simulation_tick_counter = 0;
@@ -842,6 +845,7 @@ int td5_game_run_race_frame(void) {
     /* ---- Fixed-timestep simulation loop ---- */
     /* Drain sim_time_accumulator in 0x10000 steps, max 4 ticks per frame */
     int ticks_this_frame = 0;
+    s_pause_input_done = 0;  /* allow pause input once this frame */
 
     {
         static uint32_t s_frame_diag_ctr = 0;
@@ -861,55 +865,64 @@ int td5_game_run_race_frame(void) {
         td5_camera_tick();
 
         /* --- Pause menu (ESC toggles) --- */
-        static int s_prev_esc_state = 0;
         int esc_now = td5_plat_input_key_pressed(0x01);
         int esc_edge = (esc_now && !s_prev_esc_state);
         int pause_menu_was_active = s_pause_menu_active;
         s_prev_esc_state = esc_now;
-        if (esc_edge && !s_pause_menu_active && !g_td5.paused) {
+        if (esc_edge && !s_pause_menu_active) {
             s_pause_menu_active = 1;
             s_pause_menu_cursor = 3;  /* default to CONTINUE */
         }
         if (s_pause_menu_active) {
-            /* Navigation: 5 selectable items (View / Music / Sound / Continue / Exit) */
-            static int s_prev_down = 0, s_prev_up = 0;
-            static int s_prev_left = 0, s_prev_right = 0;
-            int key_down  = td5_plat_input_key_pressed(0xD0);
-            int key_up    = td5_plat_input_key_pressed(0xC8);
-            int key_left  = td5_plat_input_key_pressed(0xCB);
-            int key_right = td5_plat_input_key_pressed(0xCD);
-            if (key_down  && !s_prev_down)  s_pause_menu_cursor = (s_pause_menu_cursor + 1) % 5;
-            if (key_up    && !s_prev_up)    s_pause_menu_cursor = (s_pause_menu_cursor + 4) % 5;
-            s_prev_down = key_down; s_prev_up = key_up;
+            /* Process pause menu input ONCE per frame (not per tick) to avoid
+             * multiple edge triggers from the sim tick loop. */
+            if (!s_pause_input_done) {
+                s_pause_input_done = 1;
 
-            /* Left/right adjusts sliders for rows 0-2 (View / Music / Sound) */
-            if (s_pause_menu_cursor < 3) {
-                if (key_right && !s_prev_right) {
-                    if (s_pause_menu_cursor == 0)      { /* VIEW: cycle view distance up */ }
-                    else if (s_pause_menu_cursor == 1) td5_save_set_music_volume(td5_save_get_music_volume() + 5);
-                    else                               td5_save_set_sfx_volume(td5_save_get_sfx_volume() + 5);
-                }
-                if (key_left && !s_prev_left) {
-                    if (s_pause_menu_cursor == 0)      { /* VIEW: cycle view distance down */ }
-                    else if (s_pause_menu_cursor == 1) td5_save_set_music_volume(td5_save_get_music_volume() - 5);
-                    else                               td5_save_set_sfx_volume(td5_save_get_sfx_volume() - 5);
-                }
-            }
-            s_prev_left = key_left; s_prev_right = key_right;
+                static int s_prev_down = 0, s_prev_up = 0;
+                static int s_prev_left = 0, s_prev_right = 0;
+                static int s_prev_enter = 0;
+                int key_down  = td5_plat_input_key_pressed(0xD0);
+                int key_up    = td5_plat_input_key_pressed(0xC8);
+                int key_left  = td5_plat_input_key_pressed(0xCB);
+                int key_right = td5_plat_input_key_pressed(0xCD);
+                int key_enter = td5_plat_input_key_pressed(0x1C);
 
-            /* Confirm (Enter) */
-            if (td5_plat_input_key_pressed(0x1C)) {
-                if (s_pause_menu_cursor == 3) {
-                    /* Continue */
-                    s_pause_menu_active = 0;
-                } else if (s_pause_menu_cursor == 4) {
-                    /* Exit race */
-                    s_pause_menu_active = 0;
-                    td5_game_release_race_resources();
-                    td5_game_set_state(TD5_GAMESTATE_MENU);
-                    return 1;
+                /* Navigation: 5 selectable items (View / Music / Sound / Continue / Exit) */
+                if (key_down  && !s_prev_down)  s_pause_menu_cursor = (s_pause_menu_cursor + 1) % 5;
+                if (key_up    && !s_prev_up)    s_pause_menu_cursor = (s_pause_menu_cursor + 4) % 5;
+
+                /* Left/right adjusts sliders for rows 0-2 (View / Music / Sound) */
+                if (s_pause_menu_cursor < 3) {
+                    if (key_right && !s_prev_right) {
+                        if (s_pause_menu_cursor == 0)      { /* VIEW: cycle view distance up (TODO) */ }
+                        else if (s_pause_menu_cursor == 1) td5_save_set_music_volume(td5_save_get_music_volume() + 5);
+                        else                               td5_save_set_sfx_volume(td5_save_get_sfx_volume() + 5);
+                    }
+                    if (key_left && !s_prev_left) {
+                        if (s_pause_menu_cursor == 0)      { /* VIEW: cycle view distance down (TODO) */ }
+                        else if (s_pause_menu_cursor == 1) td5_save_set_music_volume(td5_save_get_music_volume() - 5);
+                        else                               td5_save_set_sfx_volume(td5_save_get_sfx_volume() - 5);
+                    }
                 }
+
+                /* Confirm (Enter) */
+                if (key_enter && !s_prev_enter) {
+                    if (s_pause_menu_cursor == 3) {
+                        s_pause_menu_active = 0;
+                    } else if (s_pause_menu_cursor == 4) {
+                        s_pause_menu_active = 0;
+                        td5_game_release_race_resources();
+                        td5_game_set_state(TD5_GAMESTATE_MENU);
+                        return 1;
+                    }
+                }
+
+                s_prev_down = key_down; s_prev_up = key_up;
+                s_prev_left = key_left; s_prev_right = key_right;
+                s_prev_enter = key_enter;
             }
+
             /* ESC again = continue */
             if (esc_edge && pause_menu_was_active) {
                 s_pause_menu_active = 0;
@@ -1066,10 +1079,22 @@ int td5_game_run_race_frame(void) {
     /* Full-screen HUD overlay (speedometer, lap counter, etc.) */
     td5_hud_render_overlays(g_td5.sim_tick_budget);
 
-    /* Pause overlay: all text is pre-built from PAUSETXT atlas during init,
-     * no queue_text needed — the overlay quads include baked glyph quads. */
+    /* Pause overlay: draw panel then queue text labels on top */
     if (s_pause_menu_active) {
         td5_hud_draw_pause_overlay();
+        /* Queue text AFTER draw_pause_overlay so flush_text renders on top.
+         * Row N pixel_y = cy_px - 52 + N*16 (matches binary layout). */
+        {
+            int cx_px = (int)(g_render_width_f * 0.5f);
+            int cy_px = (int)(g_render_height_f * 0.5f);
+            int lx = cx_px - 124;   /* left-aligned: cx - half_w(128) + 4 */
+            td5_hud_queue_text(0, cx_px, cy_px - 52,      1, "PAUSED");
+            td5_hud_queue_text(0, lx, cy_px - 36,         0, "VIEW");
+            td5_hud_queue_text(0, lx, cy_px - 20,         0, "MUSIC");
+            td5_hud_queue_text(0, lx, cy_px - 4,          0, "SOUND");
+            td5_hud_queue_text(0, cx_px, cy_px + 12,      1, "CONTINUE");
+            td5_hud_queue_text(0, cx_px, cy_px + 28,      1, "EXIT");
+        }
     }
 
     td5_hud_flush_text();
