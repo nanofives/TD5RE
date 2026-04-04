@@ -1096,13 +1096,14 @@ static void set_countdown_indicator_state(int value)
 
 static void reset_race_countdown(void)
 {
-    /* Match original: init g_cameraTransitionActive = 0xA000, show digit 5 */
+    /* Original timer init: 0xA000 (160 ticks total, 40 per level).
+     * Levels 4,3 → indicator 5,4 → blank atlas cells (not visible in original).
+     * Only levels 2,1,0 → digits 3,2,1 are actually shown. */
     g_cameraTransitionActive = TD5_COUNTDOWN_INIT;
-    s_race_countdown_ticks   = 0;   /* unused — timer is g_cameraTransitionActive */
-    s_race_countdown_state   = (TD5_COUNTDOWN_INIT / TD5_COUNTDOWN_LEVEL_DIV) + 1; /* 5 */
-    set_countdown_indicator_state(s_race_countdown_state);
-    TD5_LOG_I(LOG_TAG, "Race countdown reset: timer=0x%X indicator=%d",
-              g_cameraTransitionActive, s_race_countdown_state);
+    s_race_countdown_ticks   = 0;
+    s_race_countdown_state   = 0;   /* hide indicator until level 2 is reached */
+    set_countdown_indicator_state(0);
+    TD5_LOG_I(LOG_TAG, "Race countdown reset: timer=0x%X", g_cameraTransitionActive);
 }
 
 static void tick_race_countdown(void)
@@ -1125,9 +1126,11 @@ static void tick_race_countdown(void)
         return;
     }
 
-    /* level 4..0 → indicator digit 5..1 (level + 1) */
     level = g_cameraTransitionActive / TD5_COUNTDOWN_LEVEL_DIV;
-    next_indicator = level + 1;
+    /* Only levels 2,1,0 map to visible digits 3,2,1.
+     * Levels 4,3 (indicator 5,4) correspond to blank atlas cells in the original
+     * — don't show them to avoid rendering garbage sprites. */
+    next_indicator = (level <= 2) ? (level + 1) : 0;
     if (next_indicator != s_race_countdown_state) {
         s_race_countdown_state = next_indicator;
         set_countdown_indicator_state(next_indicator);
