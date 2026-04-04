@@ -3295,9 +3295,16 @@ static void frontend_render_car_selection_preview(float sx, float sy) {
     /* Car preview area: solid dark blue fill matching CarSelBar1 color (R=0,G=0,B=92).
      * Original: FillPrimaryFrontendRect(0x5c, x, y, 0x198, 300) at states 10 and 14
      * (0x40DFC0). 0x5c = RGB888 B=92 → same dark blue as CarSelBar1 dominant pixel.
-     * In the source port we clear every frame, so this must be redrawn each frame. */
-    td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
-    fe_draw_quad(232.0f * sx, 124.0f * sy, 408.0f * sx, 300.0f * sy, 0xFF00005C, -1, 0, 0, 1, 1);
+     * In the source port we clear every frame, so this must be redrawn each frame.
+     * Use TRANSLUCENT preset (no depth test) to avoid depth-buffer rejection from
+     * the full-screen background draw that precedes this in the render loop. */
+    {
+        int saved_page = s_white_tex_page;
+        td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
+        td5_plat_render_bind_texture(saved_page);
+        fe_draw_quad(232.0f * sx, 96.0f * sy, 408.0f * sx, 336.0f * sy, 0xFF00005C, saved_page, 0, 0, 1, 1);
+        td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
+    }
 
     if (s_inner_state == 15) {
         /* Stats sub-screen: car image at 35% opacity over the blue panel background,
@@ -6376,6 +6383,8 @@ static void Screen_TrackSelection(void) {
         if (s_input_ready) {
             int delta = frontend_option_delta();
             int selected_button = (s_button_index >= 0) ? s_button_index : s_selected_button;
+            TD5_LOG_I(LOG_TAG, "TrackSel input: delta=%d sel_btn=%d btn_idx=%d arrow=0x%x track=%d",
+                      delta, selected_button, s_button_index, s_arrow_input, s_selected_track);
             if (selected_button == 0 && delta != 0) {
                 /* Cycle track index, skipping tracks whose level zips are absent */
                 if (s_network_active) {
@@ -6391,6 +6400,9 @@ static void Screen_TrackSelection(void) {
                 } else {
                     frontend_cycle_track(delta, 0, s_track_max);
                 }
+                TD5_LOG_I(LOG_TAG, "TrackSel CYCLED: track=%d level=%d name=%s",
+                          s_selected_track, td5_asset_level_number(s_selected_track),
+                          frontend_get_track_name(s_selected_track));
 
                 /* For cup modes (type > 7): skip non-playable NPC groups */
                 s_inner_state = 5; /* trigger track change display */
