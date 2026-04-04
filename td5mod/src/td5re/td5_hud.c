@@ -752,28 +752,29 @@ void td5_hud_update_pause_overlay(int cursor, float sfx_frac, float music_frac, 
     float cy = g_render_height_f * 0.5f;
     float fracs[3] = { sfx_frac, music_frac, cd_frac };
 
-    /* Move SELBOX to cursor row */
+    /* Move SELBOX to cursor row: row N → y=[base_y+N*16, base_y+N*16+16] */
     if (s_pause_sel_box) {
         float row_y = s_pause_selbox_base_y + (float)cursor * 16.0f;
         hud_build_quad(s_pause_sel_box, 0, HUD_WHITE_TEX_PAGE,
-                       cx + s_pause_selbox_x0, cy + row_y - 1.0f,
-                       cx + s_pause_selbox_x1, cy + row_y + 15.0f,
+                       cx + s_pause_selbox_x0, cy + row_y,
+                       cx + s_pause_selbox_x1, cy + row_y + 16.0f,
                        0.25f, 0.25f, 0.25f, 0.25f,
                        0x80FFFF60, HUD_DEPTH);
     }
 
-    /* Update slider thumb x positions based on volume fraction */
-    float bar_range = s_pause_bar_x1 - s_pause_bar_x0 - 6.0f;
+    /* Update slider fill bar: fill from bar_x0 to bar_x0 + frac*(bar_x1-bar_x0).
+     * Row N (no base_y offset): y=[N*16-28, N*16-22]. */
+    float bar_span = s_pause_bar_x1 - s_pause_bar_x0;
     for (int row = 0; row < 3; row++) {
         if (!s_pause_slider_ptrs[row]) continue;
         float frac = fracs[row];
         if (frac < 0.0f) frac = 0.0f;
         if (frac > 1.0f) frac = 1.0f;
-        float row_y = s_pause_selbox_base_y + (float)row * 16.0f;
-        float thumb_x = s_pause_bar_x0 + frac * bar_range;
+        float row_y = (float)row * 16.0f;
+        float fill_x1 = s_pause_bar_x0 + frac * bar_span;
         hud_build_quad(s_pause_slider_ptrs[row], 0, HUD_WHITE_TEX_PAGE,
-                       cx + thumb_x, cy + row_y + 4.0f,
-                       cx + thumb_x + 6.0f, cy + row_y + 12.0f,
+                       cx + s_pause_bar_x0, cy + row_y - 28.0f,
+                       cx + fill_x1,        cy + row_y - 22.0f,
                        0.25f, 0.25f, 0.25f, 0.25f,
                        0xFFE0C040, HUD_DEPTH);
     }
@@ -1777,28 +1778,34 @@ void td5_hud_render_overlays(float dt)
         }
 
         /* --- Indicator digit (countdown/finish) --- */
-        if (s_indicator_state[v] != 0) {
-            int digit_val = s_indicator_state[v]; /* state 3,2,1 → shows "3","2","1" */
-            int col = digit_val % 5;
-            int row = digit_val / 5;
+        if (s_indicator_state[v] != 0 && s_glyph_table) {
+            /* Render digit using the FONT atlas (which has proper transparency)
+             * instead of the NUMBERS atlas (tpage5.dat has wrong format data).
+             * Font glyph indices: '0'=0x2F, '1'=0x30, '2'=0x31, '3'=0x32 etc. */
+            int digit_val = s_indicator_state[v];
+            int glyph_idx = 0x2F + digit_val; /* '0' + digit → font glyph index */
+            if (glyph_idx >= 0x30 && glyph_idx <= 0x39) { /* valid '1'-'9' */
+                TD5_GlyphRecord *g = &s_glyph_table[glyph_idx];
+                int tex_page = (int)(intptr_t)((void **)s_glyph_table)[0x100];
 
-            float u0 = (float)(col * 16 + s_numbers_atlas->atlas_x) + 0.5f;
-            float v0 = (float)(row * 24 + s_numbers_atlas->atlas_y) + 0.5f;
+                /* Scale up the 8×12 font glyph to 32×48 for visibility */
+                float qw = sx * 32.0f;
+                float qh = sy * 48.0f;
+                float ind_x = vl->center_x - qw * 0.5f;
+                float ind_y = vl->center_y - qh * 0.5f;
 
-            /* Build and submit a centered digit quad */
-            TD5_SpriteQuad indicator_quad;
-            float ind_x = vl->center_x - sx * 16.0f;
-            float ind_y = vl->center_y - sy * 24.0f;
-
-            hud_build_quad(
-                &indicator_quad,
-                2, s_numbers_atlas->texture_page,
-                ind_x, ind_y,
-                ind_x + sx * 16.0f, ind_y + sy * 24.0f,
-                u0, v0, u0 + 15.0f, v0 + 23.0f,
-                0xFFFFFFFF, HUD_DEPTH
-            );
-            hud_submit_quad(&indicator_quad);
+                TD5_SpriteQuad indicator_quad;
+                hud_build_quad(
+                    &indicator_quad,
+                    0, tex_page,
+                    ind_x, ind_y,
+                    ind_x + qw, ind_y + qh,
+                    g->atlas_u, g->atlas_v,
+                    g->atlas_u + g->width, g->atlas_v + g->height,
+                    0xFFFFFFFF, HUD_DEPTH
+                );
+                hud_submit_quad(&indicator_quad);
+            }
         }
 
         s_cur_view++;
@@ -2197,16 +2204,19 @@ void td5_hud_init_pause_menu(int page_index)
         } \
     } while (0)
 
-    /* BLACKBOX: opaque dark-grey panel using the white solid-colour page */
-    PAUSE_ADD(-s_pause_half_width, -s_pause_half_width,
-               s_pause_half_width,  s_pause_half_width,
+    /* BLACKBOX: semi-transparent dark panel. y is fixed ±56 (not ±half_w).
+     * From binary 0x43B7C0: y0=-56.0, y1=+56.0 hardcoded. */
+    PAUSE_ADD(-s_pause_half_width, -56.0f,
+               s_pause_half_width,  56.0f,
                0.25f, 0.25f, 0.25f, 0.25f,
-               HUD_WHITE_TEX_PAGE, 0xFF202020);
+               HUD_WHITE_TEX_PAGE, 0xB0000000);
 
-    /* SELBOX: semi-transparent highlight bar, no atlas needed */
-    s_pause_selbox_atlas = NULL;   /* not used for solid-colour path */
+    /* SELBOX: semi-transparent highlight bar.
+     * From binary: x0=1-half_w, x1=half_w-1; cursor=0 → y0=-33, y1=-17.
+     * base_y=-33.0f so cursor N → y=[base_y+N*16, base_y+N*16+16]. */
+    s_pause_selbox_atlas = NULL;
     s_pause_sel_box = NULL;
-    s_pause_selbox_base_y = -52.0f;
+    s_pause_selbox_base_y = -33.0f;
     {
         float sel_x0 = 1.0f - s_pause_half_width;
         float sel_x1 = s_pause_half_width - 1.0f;
@@ -2214,31 +2224,33 @@ void td5_hud_init_pause_menu(int page_index)
         s_pause_selbox_x1 = sel_x1;
         s_pause_sel_box = (s_pause_quad_count < TD5_HUD_PAUSE_MAX_QUADS)
                           ? PAUSE_BUF(s_pause_quad_count) : NULL;
-        float row_y = s_pause_selbox_base_y;   /* cursor=0 at init */
-        PAUSE_ADD(sel_x0, row_y - 1.0f, sel_x1, row_y + 15.0f,
+        /* cursor=0 initial position: y0=-33, y1=-17 */
+        PAUSE_ADD(sel_x0, -33.0f, sel_x1, -17.0f,
                   0.25f, 0.25f, 0.25f, 0.25f,
-                  HUD_WHITE_TEX_PAGE, 0x80FFFF60);   /* semi-transparent amber */
+                  HUD_WHITE_TEX_PAGE, 0x80FFFF60);
     }
 
-    /* BLACKBAR + SLIDER: solid-colour volume bars, no atlas needed */
-    s_pause_slider_atlas = NULL;   /* solid-colour path */
-    s_pause_bar_x0 = 10.0f;
-    s_pause_bar_x1 = s_pause_half_width - 4.0f;
+    /* BLACKBAR (trough) + SLIDER (fill bar): solid-colour volume indicators.
+     * From binary: bar x=[half_w-131, half_w-1], row N y=[N*16-29, N*16-21].
+     * Slider fill: from bar_x0 to bar_x0 + vol_frac*(bar_x1-bar_x0). */
+    s_pause_slider_atlas = NULL;
+    s_pause_bar_x0 = s_pause_half_width - 131.0f;  /* = -3 when half_w=128 */
+    s_pause_bar_x1 = s_pause_half_width - 1.0f;    /* = 127 when half_w=128 */
 
     for (int row = 0; row < 3; row++) {
-        float row_y = s_pause_selbox_base_y + (float)row * 16.0f;
-        /* Dark background bar */
-        PAUSE_ADD(s_pause_bar_x0, row_y + 3.0f,
-                  s_pause_bar_x1,  row_y + 13.0f,
+        float row_y = (float)row * 16.0f;
+        /* Dark background trough */
+        PAUSE_ADD(s_pause_bar_x0, row_y - 29.0f,
+                  s_pause_bar_x1,  row_y - 21.0f,
                   0.25f, 0.25f, 0.25f, 0.25f,
                   HUD_WHITE_TEX_PAGE, 0xFF101010);
-        /* Slider thumb (starts at x=bar_x0; td5_hud_update_pause_overlay moves it) */
+        /* Slider fill bar (td5_hud_update_pause_overlay will resize x1 per volume) */
         s_pause_slider_ptrs[row] = (s_pause_quad_count < TD5_HUD_PAUSE_MAX_QUADS)
                                     ? PAUSE_BUF(s_pause_quad_count) : NULL;
-        PAUSE_ADD(s_pause_bar_x0, row_y + 4.0f,
-                  s_pause_bar_x0 + 6.0f, row_y + 12.0f,
+        PAUSE_ADD(s_pause_bar_x0, row_y - 28.0f,
+                  s_pause_bar_x0, row_y - 22.0f,  /* x1=x0 initially; updated each frame */
                   0.25f, 0.25f, 0.25f, 0.25f,
-                  HUD_WHITE_TEX_PAGE, 0xFFE0C040);   /* golden thumb */
+                  HUD_WHITE_TEX_PAGE, 0xFFE0C040);
     }
 
     /* Build text glyphs from PAUSETXT atlas */
