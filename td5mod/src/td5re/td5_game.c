@@ -920,11 +920,13 @@ int td5_game_run_race_frame(void) {
 
         if (g_td5.paused) {
             tick_race_countdown();
-            if (g_td5.paused) {
-                g_td5.sim_time_accumulator -= TD5_TICK_ACCUMULATOR_ONE;
-                ticks_this_frame++;
-                continue;
-            }
+            /* Still run physics during countdown so suspension/gravity settle
+             * and cars don't appear frozen; input is not polled so no thrust. */
+            td5_physics_tick();
+            td5_track_tick();
+            g_td5.sim_time_accumulator -= TD5_TICK_ACCUMULATOR_ONE;
+            ticks_this_frame++;
+            continue;
         }
 
         /* Input record/playback is handled inside td5_input_poll_race_session(). */

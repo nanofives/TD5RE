@@ -1792,7 +1792,7 @@ void td5_hud_render_overlays(float dt)
 
             hud_build_quad(
                 &indicator_quad,
-                0, s_numbers_atlas->texture_page,
+                2, s_numbers_atlas->texture_page,
                 ind_x, ind_y,
                 ind_x + sx * 16.0f, ind_y + sy * 24.0f,
                 u0, v0, u0 + 15.0f, v0 + 23.0f,
