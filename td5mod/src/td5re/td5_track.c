@@ -2847,32 +2847,15 @@ void *td5_track_get_display_list(int span_index)
 
     /* Prefer real MODELS.DAT display lists when available.
      * Original (0x431260): return *(uint*)(table_base + span_index * 8)
-     * The MODELS.DAT table has one entry per span (direct 1:1 mapping). */
-    if (s_span_display_list_indices && s_models_blob && s_models_entry_offsets &&
+     * The MODELS.DAT table has one entry per span — direct 1:1 indexing.
+     * Original (0x431260): return *(uint*)(table_base + span_index * 8) */
+    if (s_models_blob && s_models_entry_offsets &&
         s_models_display_list_count > 0 &&
-        span_index >= 0 && span_index < s_span_count) {
-        int idx = s_span_display_list_indices[span_index];
-        if (idx >= 0 && idx < s_models_display_list_count) {
-            uint8_t *blk = s_models_blob + s_models_entry_offsets[idx];
-            if (s_models_log < 3) {
-                uint32_t sub_count = *(uint32_t *)blk;
-                TD5_LOG_I("track",
-                    "MODELS.DAT display list: span=%d idx=%d offset=0x%x sub_meshes=%u",
-                    span_index, idx, s_models_entry_offsets[idx], sub_count);
-                if (sub_count > 0 && sub_count <= 256) {
-                    TD5_MeshHeader *mesh = (TD5_MeshHeader *)(uintptr_t)(*(uint32_t *)(blk + 4));
-                    if (mesh && (uintptr_t)mesh > 0x10000u) {
-                        TD5_LOG_I("track",
-                            "  mesh0: origin=(%.1f,%.1f,%.1f) radius=%.1f cmds=%d verts=%d",
-                            mesh->origin_x, mesh->origin_y, mesh->origin_z,
-                            mesh->bounding_radius,
-                            mesh->command_count, mesh->total_vertex_count);
-                    }
-                }
-                s_models_log++;
-            }
-            return blk;
-        }
+        span_index >= 0 && span_index < s_models_display_list_count) {
+        /* Direct 1:1 mapping: entry[span_index] is the display list for span span_index.
+         * Original (0x431260): return *(uint*)(table_base + span_index * 8) */
+        uint8_t *blk = s_models_blob + s_models_entry_offsets[span_index];
+        return blk;
     }
 
     /* Fallback: generated strip display lists from STRIP.DAT */
