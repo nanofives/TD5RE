@@ -27,10 +27,13 @@
 static uint32_t s_actor_position_log_counter = 0;
 static uint32_t s_probe_log_counter = 0;
 
-extern int     g_strip_span_count;
-extern int     g_strip_total_segments;
-extern void   *g_strip_span_base;
-extern void   *g_strip_vertex_base;
+/* Track geometry globals (owned here, externed by other modules) */
+int     g_strip_span_count      = 0;
+int     g_strip_total_segments  = 0;
+void   *g_strip_span_base      = NULL;
+void   *g_strip_vertex_base    = NULL;
+int     g_track_is_circuit      = 0;
+int     g_track_type_mode       = 0;
 
 /* ========================================================================
  * Original functions: status
@@ -2579,6 +2582,45 @@ int td5_track_parse_models_dat(const void *data, size_t size)
         }
     }
 
+    /* Post-relocation validation: test-read each display list block.
+     * If ANY block has a bad mesh pointer after relocation, the entire
+     * MODELS.DAT is suspect — wipe the display list table so the renderer
+     * falls back to generated strip display lists. */
+    {
+        int bad_blocks = 0;
+        for (int dl = 0; dl < s_models_display_list_count; dl++) {
+            uint8_t *blk = s_models_blob + s_models_entry_offsets[dl];
+            uint32_t sc = *(uint32_t *)blk;
+            if (sc == 0 || sc > 256) { bad_blocks++; continue; }
+            for (uint32_t j = 0; j < sc; j++) {
+                uint32_t ptr_val = *(uint32_t *)(blk + 4 + j * 4);
+                if (ptr_val == 0) continue; /* marked invalid, OK */
+                TD5_MeshHeader *m = (TD5_MeshHeader *)(uintptr_t)ptr_val;
+                if ((uintptr_t)m < 0x10000u ||
+                    !td5_track_is_ptr_in_blob(m, sizeof(TD5_MeshHeader)) ||
+                    m->command_count <= 0 || m->command_count > 4096 ||
+                    m->total_vertex_count <= 0 || m->total_vertex_count > 65536 ||
+                    (m->commands_offset != 0 &&
+                     !td5_track_is_ptr_in_blob((void*)(uintptr_t)m->commands_offset, 1)) ||
+                    (m->vertices_offset != 0 &&
+                     !td5_track_is_ptr_in_blob((void*)(uintptr_t)m->vertices_offset, 1))) {
+                    bad_blocks++;
+                    break;
+                }
+            }
+        }
+        if (bad_blocks > s_models_display_list_count / 4) {
+            TD5_LOG_W("track",
+                "MODELS.DAT: %d/%d blocks failed validation, disabling MODELS.DAT display lists",
+                bad_blocks, s_models_display_list_count);
+            s_models_display_list_count = 0;
+            if (s_span_display_list_indices) {
+                free(s_span_display_list_indices);
+                s_span_display_list_indices = NULL;
+            }
+        }
+    }
+
     if (s_models_display_list_count > 0 && s_span_count > 0)
         rebuild_span_display_list_mapping();
 
@@ -2925,4 +2967,76 @@ void td5_track_tick(void)
     if (g_td5.traffic_enabled) {
         td5_track_recycle_traffic_actor();
     }
+}
+
+/* ========================================================================
+ * Track Probe Functions (migrated from td5re_stubs.c)
+ * ======================================================================== */
+
+void UpdateActorTrackPosition(short *probe, int *pos) {
+    /*
+     * Lightweight span-boundary walk for camera probes.
+     *
+     * probe is a TD5_TrackProbe laid out as short[]:
+     *   [0] = span_index
+     *   byte offset 12 = sub_lane_index (int8)
+     *
+     * pos = { world_x, world_z } in 24.8 fixed-point.
+     */
+    int span_count;
+    int span_idx;
+    int sub_lane;
+
+    if (!probe || !pos) return;
+
+    span_count = td5_track_get_span_count();
+    if (span_count <= 0) return;
+
+    span_idx = (int)probe[0];
+    sub_lane = (int)((int8_t *)probe)[12];
+
+    /* Clamp span index to valid range */
+    if (span_idx < 0) span_idx = 0;
+    if (span_idx >= span_count) span_idx = span_count - 1;
+
+    /* Clamp sub_lane */
+    if (sub_lane < 0) sub_lane = 0;
+
+    /* Write back clamped values */
+    probe[0] = (short)span_idx;
+    ((int8_t *)probe)[12] = (int8_t)sub_lane;
+}
+
+void ComputeActorTrackContactNormal(short *probe, int *pos, int *out_y) {
+    /*
+     * Compute terrain contact height at the probe's span/sub-lane
+     * for the world position pos = {x, z}.
+     *
+     * Returns the ground Y height (24.8 fixed-point, span-local units)
+     * via *out_y. The camera uses this to compute pitch/roll from
+     * three sample points around the vehicle.
+     */
+    int span_idx;
+    int sub_lane;
+    int span_count;
+    int32_t height;
+
+    if (!out_y) return;
+    *out_y = 0;
+
+    if (!probe || !pos) return;
+
+    span_count = td5_track_get_span_count();
+    if (span_count <= 0) return;
+
+    span_idx = (int)probe[0];
+    sub_lane = (int)((int8_t *)probe)[12];
+
+    if (span_idx < 0 || span_idx >= span_count) return;
+    if (sub_lane < 0) sub_lane = 0;
+
+    /* Delegate to the barycentric contact height resolver */
+    height = td5_track_compute_contact_height(span_idx, sub_lane,
+                                               pos[0], pos[1]);
+    *out_y = (int)height;
 }

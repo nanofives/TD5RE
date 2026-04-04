@@ -514,10 +514,31 @@ static uint32_t s_cup_cross_ref_3;                            /* 0x48F378 */
 
 int td5_save_init(void)
 {
+    int i;
+
     memset(s_config_buf, 0, sizeof(s_config_buf));
     memset(s_cup_buf, 0, sizeof(s_cup_buf));
     s_cup_buf_size = 0;
     memcpy(s_npc_group_table, k_npc_default_table, sizeof(s_npc_group_table));
+
+    /* Default audio */
+    s_sfx_volume = 80;
+    s_music_volume = 80;
+
+    /* Default everything unlocked so the game is playable even without
+     * a Config.td5 on disk.  td5_save_load_config() below will override
+     * these with whatever the save file contains. */
+    s_cup_tier = 0x07;
+    s_max_unlocked_car = TD5_CONFIG_NUM_CARS;
+    s_all_cars_unlocked = 1;
+    for (i = 0; i < TD5_CONFIG_NUM_TRACKS; i++)
+        s_track_locks[i] = 1;   /* 1 = unlocked */
+    memset(s_car_locks, 0, sizeof(s_car_locks)); /* 0 = unlocked */
+
+    /* Try to load Config.td5 from the working directory (original/).
+     * If the file doesn't exist or has a bad CRC the defaults above stay. */
+    td5_save_load_config(NULL);
+
     return 1;
 }
 

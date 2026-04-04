@@ -50,6 +50,11 @@
 #include <stdlib.h>
 #include <string.h>
 
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
+#include <string.h>
+
 extern uint32_t g_tick_counter;
 
 /* ========================================================================
@@ -2031,3 +2036,322 @@ void td5_render_advance_billboard_anims(void)
      */
     s_billboard_anim_phase += 0x20;
 }
+
+/* ========================================================================
+ * 12-bit Trigonometry (migrated from td5re_stubs.c)
+ *
+ * Original game uses lookup-table trig with 12-bit angles (0-4095 = 360).
+ * We provide real implementations using standard math.
+ * ======================================================================== */
+
+float CosFloat12bit(unsigned int angle) {
+    return (float)cos((double)(angle & 0xFFF) * (2.0 * M_PI / 4096.0));
+}
+
+float SinFloat12bit(int angle) {
+    return (float)sin((double)(angle & 0xFFF) * (2.0 * M_PI / 4096.0));
+}
+
+int CosFixed12bit(unsigned int angle) {
+    return (int)(cos((double)(angle & 0xFFF) * (2.0 * M_PI / 4096.0)) * 4096.0);
+}
+
+int SinFixed12bit(int angle) {
+    return (int)(sin((double)(angle & 0xFFF) * (2.0 * M_PI / 4096.0)) * 4096.0);
+}
+
+int AngleFromVector12(int x, int z) {
+    double rad = atan2((double)x, (double)z);
+    int angle = (int)(rad * (4096.0 / (2.0 * M_PI)));
+    return angle & 0xFFF;
+}
+
+float td5_cos_12bit(uint32_t angle) {
+    return CosFloat12bit(angle);
+}
+
+float td5_sin_12bit(uint32_t angle) {
+    return SinFloat12bit((int)angle);
+}
+
+/* ========================================================================
+ * Matrix / Vector Operations (migrated from td5re_stubs.c)
+ * ======================================================================== */
+
+void MultiplyRotationMatrices3x3(float *A, float *B, float *out) {
+    int i, j, k;
+    float tmp[9];
+    for (i = 0; i < 3; i++)
+        for (j = 0; j < 3; j++) {
+            tmp[i*3+j] = 0.0f;
+            for (k = 0; k < 3; k++)
+                tmp[i*3+j] += A[i*3+k] * B[k*3+j];
+        }
+    memcpy(out, tmp, 9 * sizeof(float));
+}
+
+void TransformVector3ByBasis(float *matrix, void *vec, int *out) {
+    /*
+     * 0x42dbd0 -- Transform a short[3] vector by a 3x3 rotation matrix,
+     * producing an int[3] result.  The matrix is row-major float[9+].
+     */
+    short *v = (short *)vec;
+    if (!out) return;
+    if (!matrix || !v) { out[0] = 0; out[1] = 0; out[2] = 0; return; }
+
+    float fx = (float)v[0];
+    float fy = (float)v[1];
+    float fz = (float)v[2];
+
+    out[0] = (int)(matrix[0] * fx + matrix[1] * fy + matrix[2] * fz);
+    out[1] = (int)(matrix[3] * fx + matrix[4] * fy + matrix[5] * fz);
+    out[2] = (int)(matrix[6] * fx + matrix[7] * fy + matrix[8] * fz);
+}
+
+void BuildRotationMatrixFromAngles(float *out, short *angles) {
+    /*
+     * 0x42e1e0 -- Build a 3x3 rotation matrix from 12-bit Euler angles
+     * (pitch, yaw, roll).  Uses the same axis convention as
+     * BuildCameraBasisFromAngles: yaw -> pitch -> roll.
+     *
+     * angles[0] = pitch, angles[1] = yaw, angles[2] = roll
+     * All in 12-bit fixed-point (0-4095 = 0-360 degrees).
+     *
+     * NOTE: The original binary's trig lookup at 0x40a6a0 is a cosine
+     * table (table[0]=1), and 0x40a6c0 offsets by -1024 giving sine.
+     * Our stubs label them backwards (SinFloat12bit=sin, CosFloat12bit=cos).
+     * The matrix slot pattern was decompiled from the original where the
+     * "first" trig call (func_A) returns cos.  We swap s/c here to match:
+     *   s = CosFloat12bit (= original func_B = sin)
+     *   c = SinFloat12bit (= original func_A = cos)
+     * so the rest of the matrix construction stays correct.
+     */
+    float rot[9];
+    float s, c;
+
+    if (!out || !angles) return;
+
+    /* Start with identity */
+    out[0] = 1.0f; out[1] = 0.0f; out[2] = 0.0f;
+    out[3] = 0.0f; out[4] = 1.0f; out[5] = 0.0f;
+    out[6] = 0.0f; out[7] = 0.0f; out[8] = 1.0f;
+
+    /* Yaw (angles[1]): rotate around Y axis */
+    s = CosFloat12bit((unsigned int)(unsigned short)angles[1]);
+    c = SinFloat12bit(angles[1]);
+    rot[4] = 1.0f;
+    rot[3] = 0.0f; rot[5] = 0.0f;
+    rot[1] = 0.0f; rot[7] = 0.0f;
+    rot[0] = s;  rot[8] = s;
+    rot[2] = c;  rot[6] = -c;
+    MultiplyRotationMatrices3x3(rot, out, out);
+
+    /* Pitch (angles[0]): rotate around X axis */
+    s = CosFloat12bit((unsigned int)(unsigned short)angles[0]);
+    c = SinFloat12bit(angles[0]);
+    rot[0] = 1.0f;
+    rot[1] = 0.0f; rot[2] = 0.0f;
+    rot[3] = 0.0f; rot[6] = 0.0f;
+    rot[4] = s;  rot[8] = s;
+    rot[7] = c;  rot[5] = -c;
+    MultiplyRotationMatrices3x3(rot, out, out);
+
+    /* Roll (angles[2]): rotate around Z axis */
+    s = CosFloat12bit((unsigned int)(unsigned short)angles[2]);
+    c = SinFloat12bit(angles[2]);
+    rot[8] = 1.0f;
+    rot[2] = 0.0f; rot[5] = 0.0f;
+    rot[6] = 0.0f; rot[7] = 0.0f;
+    rot[0] = s;  rot[4] = s;
+    rot[3] = c;  rot[1] = -c;
+    MultiplyRotationMatrices3x3(rot, out, out);
+}
+
+/*
+ * Static matrix loaded by LoadRenderRotationMatrix for use by
+ * ConvertFloatVec3ToShortAngles.  This mirrors the original engine's
+ * global at ~0x43DA80 target.
+ */
+static float s_loaded_render_matrix[12] = {
+    1,0,0, 0,1,0, 0,0,1, 0,0,0
+};
+
+void ConvertFloatVec3ToShortAngles(short *in, short *out) {
+    /*
+     * 0x42e2e0 -- Transform a short[3] direction vector through the
+     * currently loaded render rotation matrix and store the result as
+     * short[3].  Despite the misleading name, this is a matrix*vector
+     * transform, not a unit conversion.
+     */
+    if (!out) return;
+    if (!in) { out[0] = 0; out[1] = 0; out[2] = 0; return; }
+
+    float fx = (float)in[0];
+    float fy = (float)in[1];
+    float fz = (float)in[2];
+
+    out[0] = (short)(int)(s_loaded_render_matrix[0] * fx +
+                          s_loaded_render_matrix[1] * fy +
+                          s_loaded_render_matrix[2] * fz);
+    out[1] = (short)(int)(s_loaded_render_matrix[3] * fx +
+                          s_loaded_render_matrix[4] * fy +
+                          s_loaded_render_matrix[5] * fz);
+    out[2] = (short)(int)(s_loaded_render_matrix[6] * fx +
+                          s_loaded_render_matrix[7] * fy +
+                          s_loaded_render_matrix[8] * fz);
+}
+
+void LoadRenderRotationMatrix(float *matrix) {
+    /*
+     * 0x43da80 -- Load a rotation matrix (float[12] = 3x3 + translation)
+     * into the static render matrix used by ConvertFloatVec3ToShortAngles.
+     * Only the 3x3 rotation part (first 9 floats) is needed for the
+     * direction transform; we copy all 12 for completeness.
+     */
+    if (!matrix) return;
+    memcpy(s_loaded_render_matrix, matrix, 12 * sizeof(float));
+}
+
+/* ========================================================================
+ * Render Pipeline Helpers (migrated from td5re_stubs.c)
+ * ======================================================================== */
+
+typedef struct TD5_RenderSpriteQuadParams {
+    void     *dest;
+    int       mode_flags;
+    float     scr_x[4];
+    float     scr_y[4];
+    float     depth_z[4];
+    float     tex_u[4];
+    float     tex_v[4];
+    uint32_t  diffuse[4];
+    int       texture_page;
+    int       reserved;
+} TD5_RenderSpriteQuadParams;
+
+typedef struct TD5_RenderSpriteQuad {
+    int      geometry_ptr;
+    int      vertex_count;
+    float    v0_x, v0_y, v0_z, v0_rhw;
+    uint32_t v0_color;
+    float    v0_u, v0_v;
+    float    v1_x, v1_y, v1_z, v1_rhw;
+    uint32_t v1_color;
+    float    v1_u, v1_v;
+    float    v2_x, v2_y, v2_z, v2_rhw;
+    uint32_t v2_color;
+    float    v2_u, v2_v;
+    float    v3_x, v3_y, v3_z, v3_rhw;
+    uint32_t v3_color;
+    float    v3_u, v3_v;
+    float    tex_u0, tex_v0;
+    float    tex_u1, tex_v1;
+    float    quad_width;
+    float    quad_height;
+    float    texture_page;
+    uint8_t  padding[0xB8 - 0x94];
+} TD5_RenderSpriteQuad;
+
+void td5_render_build_sprite_quad(int *params) {
+    const TD5_RenderSpriteQuadParams *src = (const TD5_RenderSpriteQuadParams *)params;
+    TD5_RenderSpriteQuad *dst;
+    float z;
+    float rhw;
+
+    if (!src || !src->dest) {
+        return;
+    }
+
+    dst = (TD5_RenderSpriteQuad *)src->dest;
+
+    if (src->mode_flags != 2) {
+        z = src->depth_z[0];
+        rhw = (z > 0.0f) ? (1.0f / z) : 1.0f;
+
+        dst->geometry_ptr = 0;
+        dst->vertex_count = 4;
+
+        dst->v0_x = src->scr_x[0]; dst->v0_y = src->scr_y[0];
+        dst->v1_x = src->scr_x[3]; dst->v1_y = src->scr_y[3];
+        dst->v2_x = src->scr_x[2]; dst->v2_y = src->scr_y[2];
+        dst->v3_x = src->scr_x[1]; dst->v3_y = src->scr_y[1];
+
+        dst->v0_z = dst->v1_z = dst->v2_z = dst->v3_z = z;
+        dst->v0_rhw = dst->v1_rhw = dst->v2_rhw = dst->v3_rhw = rhw;
+    }
+
+    dst->v0_color = src->diffuse[0];
+    dst->v1_color = src->diffuse[3];
+    dst->v2_color = src->diffuse[2];
+    dst->v3_color = src->diffuse[1];
+
+    dst->v0_u = src->tex_u[0]; dst->v0_v = src->tex_v[0];
+    dst->v1_u = src->tex_u[3]; dst->v1_v = src->tex_v[3];
+    dst->v2_u = src->tex_u[2]; dst->v2_v = src->tex_v[2];
+    dst->v3_u = src->tex_u[1]; dst->v3_v = src->tex_v[1];
+
+    dst->tex_u0 = src->tex_u[0];
+    dst->tex_v0 = src->tex_v[0];
+    dst->tex_u1 = src->tex_u[2];
+    dst->tex_v1 = src->tex_v[2];
+    dst->quad_width = src->scr_x[2] - src->scr_x[0];
+    dst->quad_height = src->scr_y[1] - src->scr_y[0];
+    dst->texture_page = (float)src->texture_page;
+}
+
+void td5_render_submit_translucent(uint16_t *quad_data) {
+    float *fdata;
+    TD5_D3DVertex verts[4];
+    uint16_t indices[6] = { 0, 1, 2, 0, 2, 3 };
+    int tex_page;
+    int i;
+
+    if (!quad_data) {
+        return;
+    }
+
+    /*
+     * HUD translucent quads are already emitted as pre-transformed 0xB8 sprite
+     * records. They are not TD5_PrimitiveCmd batches, so forwarding them into
+     * td5_render_queue_translucent_batch() makes the batch parser read garbage
+     * dispatch_type state and crash after the first frame.
+     */
+    fdata = (float *)quad_data;
+    for (i = 0; i < 4; i++) {
+        int base = 2 + i * 7;
+        verts[i].screen_x = fdata[base + 0];
+        verts[i].screen_y = fdata[base + 1];
+        verts[i].depth_z = fdata[base + 2];
+        verts[i].rhw = fdata[base + 3];
+        verts[i].diffuse = *(uint32_t *)&fdata[base + 4];
+        verts[i].specular = 0;
+        verts[i].tex_u = fdata[base + 5];
+        verts[i].tex_v = fdata[base + 6];
+    }
+
+    tex_page = (int)(*(float *)((uint8_t *)quad_data + 0x90));
+    td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
+    td5_plat_render_bind_texture(tex_page);
+    td5_plat_render_draw_tris(verts, 4, indices, 6);
+}
+
+void td5_render_set_clip_rect(float left, float right, float top, float bottom) {
+    (void)left; (void)right; (void)top; (void)bottom;
+}
+
+void td5_render_set_projection_center(float cx, float cy) {
+    (void)cx; (void)cy;
+}
+
+void td5_render_radial_pulse(float dt) { (void)dt; }
+
+/* ========================================================================
+ * Display Globals (migrated from td5re_stubs.c)
+ * ======================================================================== */
+
+float   g_render_width_f        = 640.0f;
+float   g_render_height_f       = 480.0f;
+int     g_render_width          = 640;
+int     g_render_height         = 480;
+
+float   g_renderBasisMatrix[12] = { 1,0,0, 0,1,0, 0,0,1, 0,0,0 };
