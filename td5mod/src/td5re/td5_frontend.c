@@ -10,6 +10,7 @@
 
 #include "td5_frontend.h"
 #include "td5_asset.h"
+#include "td5_net.h"
 #include "td5_platform.h"
 #include "td5_save.h"
 #include "td5_sound.h"
@@ -1987,6 +1988,29 @@ static void frontend_update_cheat_codes(void) {
         s_cheat_unlock_all = !s_cheat_unlock_all;
         s_cheat_key_history[0] = '\0';
         TD5_LOG_I(LOG_TAG, "Cheat OPENALL %s", s_cheat_unlock_all ? "enabled" : "disabled");
+        /* Refresh lock tables: when cheat is on, everything unlocked;
+         * when cheat is off, revert to save file state */
+        if (s_cheat_unlock_all) {
+            memset(s_car_lock_table, 0, sizeof(s_car_lock_table));
+            memset(s_track_lock_table, 0, sizeof(s_track_lock_table));
+            s_total_unlocked_cars = 37;
+            s_total_unlocked_tracks = 26;
+        } else {
+            int t;
+            td5_save_get_car_lock_table(s_car_lock_table, 37);
+            td5_save_get_track_lock_table(s_track_lock_table, 26);
+            if (td5_save_get_all_cars_unlocked()) {
+                s_total_unlocked_cars = 37;
+            } else {
+                s_total_unlocked_cars = td5_save_get_max_unlocked_car();
+                if (s_total_unlocked_cars < 21) s_total_unlocked_cars = 21;
+            }
+            s_total_unlocked_tracks = 20;
+            for (t = 20; t < 26; t++) {
+                if (s_track_lock_table[t] == 0)
+                    s_total_unlocked_tracks = t + 1;
+            }
+        }
     }
 }
 
@@ -2039,35 +2063,90 @@ static void frontend_delete_cup_data(void) {
     td5_plat_file_delete("CupData.td5");
 }
 
-/* Placeholder: network send message */
+/**
+ * Send a network message via td5_net.
+ * Wraps td5_net_send with the DXPTYPE cast and optional payload header.
+ * For DATA messages (type 1), prepends a 4-byte payload size header
+ * matching the original DXPDATA wire format.
+ */
 static void frontend_net_send(int type, const void *data, int size) {
-    (void)type; (void)data; (void)size;
+    td5_net_send((TD5_NetMsgType)type, data, size);
 }
 
-/* Placeholder: network receive; returns msg type or -1 */
+/**
+ * Receive a network message from the ring buffer.
+ * Returns the DXPTYPE message type (0-12) or -1 if no message available.
+ * Copies payload into buf (up to max_size bytes).
+ */
 static int frontend_net_receive(void *buf, int max_size) {
-    (void)buf; (void)max_size;
-    return -1;
+    TD5_NetMsgType type;
+    void *data = NULL;
+    int size = 0;
+
+    if (!td5_net_receive(&type, &data, &size))
+        return -1;
+
+    /* Copy payload into caller's buffer */
+    if (data && size > 0 && buf && max_size > 0) {
+        int copy_size = (size < max_size) ? size : max_size;
+        memcpy(buf, data, (size_t)copy_size);
+    }
+
+    return (int)type;
 }
 
-/* Placeholder: network destroy session */
+/**
+ * Destroy the network session and shut down.
+ * Called when leaving network screens or on disconnect.
+ */
 static void frontend_net_destroy(void) {
+    td5_net_shutdown();
     s_network_active = 0;
 }
 
-/* Placeholder: network seal session */
+/**
+ * Seal or unseal the session (prevent/allow new joins).
+ */
 static void frontend_net_seal(int sealed) {
-    (void)sealed;
+    td5_net_seal_session(sealed);
 }
 
-/* Placeholder: enumerate network providers */
-static int frontend_net_enumerate(void) { return 0; }
+/**
+ * Enumerate network providers and sessions.
+ * Initializes the network subsystem if needed, enumerates connections,
+ * picks the first (UDP LAN), and triggers session discovery.
+ * Returns the number of sessions found.
+ */
+static int frontend_net_enumerate(void) {
+    int conn_count;
 
-/* Placeholder: check if local player is host */
-static int frontend_net_is_host(void) { return 0; }
+    /* Initialize network if not already done (td5_net_init is idempotent) */
+    if (!td5_net_init()) {
+        TD5_LOG_W(LOG_TAG, "frontend_net_enumerate: td5_net_init failed");
+        return 0;
+    }
 
-/* Placeholder: get local player slot index (0-5) */
-static int frontend_net_local_slot(void) { return 0; }
+    conn_count = td5_net_enumerate_connections();
+    if (conn_count > 0) {
+        td5_net_pick_connection(0);
+    }
+
+    return td5_net_enumerate_sessions();
+}
+
+/**
+ * Check if the local player is the session host.
+ */
+static int frontend_net_is_host(void) {
+    return td5_net_is_host();
+}
+
+/**
+ * Get the local player's slot index (0-5).
+ */
+static int frontend_net_local_slot(void) {
+    return td5_net_local_slot();
+}
 
 /* ========================================================================
  * ConfigureGameTypeFlags (0x410CA0)
@@ -2644,13 +2723,34 @@ int td5_frontend_init_resources(void) {
      *   Note: atp(16), ss1(17), 128(18), gtr(19), jag(20) are UNLOCKED in original.
      * Positions 21-22: visible but locked (cat=SUPER7, sp4=R390).
      * Positions 23-36: invisible in regular mode (cop-chase / cup unlock only). */
-    /* All cars and tracks unlocked for development/testing.
-     * TODO: wire up to td5_save lock tables for proper progression. */
-    memset(s_car_lock_table, 0, sizeof(s_car_lock_table));
-    s_total_unlocked_cars = 37; /* all 37 cars visible + selectable */
+    /* Populate lock tables from save system (Config.td5 loaded by td5_save_init). */
+    td5_save_get_car_lock_table(s_car_lock_table, 37);
+    td5_save_get_track_lock_table(s_track_lock_table, 26);
 
-    memset(s_track_lock_table, 0, sizeof(s_track_lock_table));
-    s_total_unlocked_tracks = 20; /* 20 race tracks; indices 20-25 are cup-only */
+    /* Compute total unlocked car count (visible + selectable in roster).
+     * s_total_unlocked_cars = max visible car index (exclusive).
+     * The original uses DAT_00463e0c which counts contiguous visible slots. */
+    if (td5_save_get_all_cars_unlocked()) {
+        s_total_unlocked_cars = 37;
+    } else {
+        s_total_unlocked_cars = td5_save_get_max_unlocked_car();
+        if (s_total_unlocked_cars < 21) s_total_unlocked_cars = 21; /* minimum visible roster */
+    }
+
+    /* Compute total navigable track count. Race tracks (0-19) are always
+     * navigable in the selector (locked ones show "LOCKED" but are visible).
+     * Cup tracks (20-25) become navigable when unlocked via cup wins.
+     * s_total_unlocked_tracks = exclusive upper bound for track cycling. */
+    {
+        int t;
+        s_total_unlocked_tracks = 20; /* race tracks 0-19 always navigable */
+        for (t = 20; t < 26; t++) {
+            if (s_track_lock_table[t] == 0) /* 0 = unlocked in frontend table */
+                s_total_unlocked_tracks = t + 1; /* extend range to include this cup track */
+        }
+    }
+    TD5_LOG_I(LOG_TAG, "Progression: unlocked_cars=%d unlocked_tracks=%d cup_tier=0x%02X cheat_unlock=%d",
+              s_total_unlocked_cars, s_total_unlocked_tracks, td5_save_get_cup_tier(), s_cheat_unlock_all);
 
     /* Background gallery slideshow (LoadExtrasGalleryImageSurfaces 0x40D590) */
     frontend_load_bg_gallery();
@@ -7136,6 +7236,33 @@ static void Screen_CupWon(void) {
         frontend_init_return_screen(TD5_SCREEN_CUP_WON);
         TD5_LOG_D(LOG_TAG, "CupWon: init -- deleting CupData.td5");
         frontend_delete_cup_data();
+
+        /* Apply cup unlock progression and save to Config.td5 */
+        {
+            int new_unlocks = td5_save_apply_cup_unlocks((int)s_selected_game_type);
+            TD5_LOG_I(LOG_TAG, "CupWon: game_type=%d new_unlocks=%d", (int)s_selected_game_type, new_unlocks);
+
+            /* Persist updated unlock state */
+            td5_save_write_config(NULL);
+
+            /* Refresh frontend lock tables from save system */
+            td5_save_get_car_lock_table(s_car_lock_table, 37);
+            td5_save_get_track_lock_table(s_track_lock_table, 26);
+            if (td5_save_get_all_cars_unlocked()) {
+                s_total_unlocked_cars = 37;
+            } else {
+                s_total_unlocked_cars = td5_save_get_max_unlocked_car();
+                if (s_total_unlocked_cars < 21) s_total_unlocked_cars = 21;
+            }
+            {
+                int t;
+                s_total_unlocked_tracks = 20;
+                for (t = 20; t < 26; t++) {
+                    if (s_track_lock_table[t] == 0)
+                        s_total_unlocked_tracks = t + 1;
+                }
+            }
+        }
 
         frontend_load_tga("Front_End/MainMenu.tga", "Front_End/FrontEnd.zip");
         /* Create 0x198 x 0xC4 dialog surface */

@@ -1257,12 +1257,13 @@ int td5_asset_decode_tga(const void *data, size_t size, void **pixels_out,
         rgba[i * 4 + 2] = r;
         /* Color key depends on TGA bit depth:
          * - 8/24-bit TGAs (frontend sprites): black (0,0,0) is the color key
-         * - 16-bit TGAs (car previews): no color key at decode time.
-         *   Original uses SRCCOLORKEY 0x000B (dark blue ≈ R0 G0 B88) at blit
-         *   time, but the car background and the blue fill (0x5c = R0 G0 B92)
-         *   are near-identical, so rendering fully opaque is visually correct. */
+         * - 16-bit TGAs (car previews): color key is dark blue (0,0,88) matching
+         *   original SRCCOLORKEY 0x000B (RGB555 B=11 → 8-bit B=88). The original
+         *   sets this via SetColorKey(DDCKEY_SRCBLT, 0x000B) then blits with
+         *   Copy16BitSurfaceRect flag 0x11. Black (0,0,0) pixels in car TGAs are
+         *   intentional (tires, shadows) and must remain opaque. */
         if (bpp == 16) {
-            rgba[i * 4 + 3] = 0xFF; /* fully opaque */
+            rgba[i * 4 + 3] = (r == 0 && g == 0 && b == 88) ? 0 : 0xFF;
         } else {
             rgba[i * 4 + 3] = (r == 0 && g == 0 && b == 0) ? 0 : 0xFF;
         }
@@ -1913,6 +1914,12 @@ int td5_asset_load_vehicle(int car_index, int slot)
               slot, car_index);
 
     return 1;
+}
+
+const char *td5_asset_get_car_zip_path(int car_index)
+{
+    if (car_index < 0 || car_index >= 37) return NULL;
+    return s_car_zip_paths[car_index];
 }
 
 /* ========================================================================

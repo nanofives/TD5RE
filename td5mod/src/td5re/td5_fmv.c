@@ -81,6 +81,7 @@ static void fmv_shutdown_media_foundation(void);
 static int  fmv_check_skip_keys(void);
 static void fmv_pump_messages(void);
 static int  fmv_play_with_mfplay(const wchar_t *wpath);
+static int  fmv_play_with_source_reader(const wchar_t *wpath);
 static void fmv_update_volume_keys(void);
 
 static int s_fmv_volume_percent = 100;
@@ -257,6 +258,11 @@ static wchar_t *fmv_to_wide(const char *path)
  */
 static int fmv_play_with_mfplay(const wchar_t *wpath)
 {
+    /* MFPlay API (MFPCreateMediaPlayer) is not available in MinGW.
+     * Stub out until a Media Foundation pipeline is implemented. */
+    (void)wpath;
+    return 0;
+#if 0  /* disabled: MFPlay not linkable with MinGW */
     HRESULT hr;
     HWND hwnd;
     int result = 0;
@@ -328,6 +334,7 @@ static int fmv_play_with_mfplay(const wchar_t *wpath)
     InvalidateRect(hwnd, NULL, TRUE);
 
     return result;
+#endif /* disabled MFPlay */
 }
 
 /* ========================================================================
@@ -731,7 +738,6 @@ static void fmv_display_image(const uint8_t *pixels, int w, int h,
 int td5_fmv_init(void)
 {
     memset(&s_fmv, 0, sizeof(s_fmv));
-    s_callback.ref_count = 1;
 
     s_fmv.mf_available = fmv_init_media_foundation();
     s_fmv.initialized = 1;
@@ -750,19 +756,19 @@ void td5_fmv_shutdown(void)
 {
     if (!s_fmv.initialized) return;
 
-    /* Release any active player */
-    if (s_fmv.player) {
-        IMFPMediaPlayer_Stop(s_fmv.player);
-        IMFPMediaPlayer_Release(s_fmv.player);
-        s_fmv.player = NULL;
-    }
-
     if (s_fmv.mf_available) {
         fmv_shutdown_media_foundation();
     }
 
     memset(&s_fmv, 0, sizeof(s_fmv));
     TD5_LOG_I("fmv", "FMV subsystem shut down");
+}
+
+/** Stub: Source Reader pipeline not yet implemented. */
+static int fmv_play_with_source_reader(const wchar_t *wpath)
+{
+    (void)wpath;
+    return 0;
 }
 
 int td5_fmv_play(const char *filename)
@@ -808,7 +814,7 @@ int td5_fmv_play(const char *filename)
 
     TD5_LOG_I("fmv", "Playing video: %s", filename);
 
-    /* Convert path to wide string for MFPlay */
+    /* Convert path to wide string for Media Foundation */
     wpath = fmv_to_wide(filename);
     if (!wpath) {
         TD5_LOG_E("fmv", "Failed to convert path to wide string");
@@ -819,7 +825,7 @@ int td5_fmv_play(const char *filename)
     td5_plat_render_clear(0x00000000);
     td5_plat_present(0);
 
-    result = fmv_play_with_mfplay(wpath);
+    result = fmv_play_with_source_reader(wpath);
     free(wpath);
 
     /* Clear screen after video ends */

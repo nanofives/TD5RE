@@ -1029,6 +1029,7 @@ static uint32_t ws2_resolve_sender_id(const SOCKADDR_IN *addr)
         return 0;
     }
 
+    /* First pass: exact match on existing peer addresses */
     for (i = 0; i < TD5_NET_MAX_PLAYERS; i++) {
         if (!s_ws2_peer_valid[i]) {
             continue;
@@ -1042,9 +1043,30 @@ static uint32_t ws2_resolve_sender_id(const SOCKADDR_IN *addr)
         }
     }
 
+    /* Check against host address */
     if (addr->sin_port == s_ws2_host_addr.sin_port &&
         addr->sin_addr.s_addr == s_ws2_host_addr.sin_addr.s_addr) {
         return 1;
+    }
+
+    /* Second pass (host only): match by IP only -- the peer's game-socket port
+       may differ from the discovery-socket port we stored during join handling.
+       Update the stored port to the actual game-socket port when found. */
+    if (s_is_host) {
+        for (i = 1; i < TD5_NET_MAX_PLAYERS; i++) {
+            if (!s_ws2_peer_valid[i] || !s_roster[i].active)
+                continue;
+            if (s_ws2_peer_addrs[i].sin_addr.s_addr == addr->sin_addr.s_addr) {
+                /* Update port to the actual game-socket port */
+                s_ws2_peer_addrs[i].sin_port = addr->sin_port;
+                TD5_LOG_D(NET_LOG, "Updated peer slot %d port to %u",
+                          i, (unsigned)ntohs(addr->sin_port));
+                if (s_roster[i].id != 0) {
+                    return s_roster[i].id;
+                }
+                return (uint32_t)(i + 1);
+            }
+        }
     }
 
     return 0;
@@ -2113,4 +2135,32 @@ int td5_net_get_player_count(void)
 int td5_net_is_active(void)
 {
     return s_active;
+}
+int td5_net_local_slot(void)
+{
+    return s_local_slot;
+}
+
+int td5_net_is_slot_active(int slot)
+{
+    if (slot < 0 || slot >= TD5_NET_MAX_PLAYERS)
+        return 0;
+    return s_roster[slot].active ? 1 : 0;
+}
+
+int td5_net_is_connection_lost(void)
+{
+    return s_connection_lost;
+}
+
+int td5_net_get_enum_session_count(void)
+{
+    return s_enum_session_count;
+}
+
+const char *td5_net_get_enum_session_name(int index)
+{
+    if (index < 0 || index >= s_enum_session_count)
+        return "";
+    return s_enum_sessions[index].name;
 }

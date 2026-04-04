@@ -32,7 +32,7 @@ REM Compile td5re modules
 REM ---------------------------------------------------------------------------
 
 set CFLAGS=-c -O2 -Wall -Wextra -Wpedantic -DWIN32 -m32 -I%SRCDIR% -I%WRAPPER_SRCDIR% -I%ZLIB_INC% -DTD5_INFLATE_USE_ZLIB
-set TD5RE_SRCS=td5re.c td5_game.c td5_physics.c td5_track.c td5_ai.c td5_render.c td5_frontend.c td5_hud.c td5_sound.c td5_input.c td5_asset.c td5_inflate.c td5_save.c td5_net.c td5_camera.c td5_vfx.c td5_fmv.c td5_platform_win32.c td5re_stubs.c main.c
+set TD5RE_SRCS=td5re.c td5_game.c td5_physics.c td5_track.c td5_ai.c td5_render.c td5_frontend.c td5_hud.c td5_sound.c td5_input.c td5_asset.c td5_inflate.c td5_save.c td5_net.c td5_camera.c td5_vfx.c td5_fmv.c td5_platform_win32.c main.c
 
 echo === TD5RE Standalone Build ===
 echo.
@@ -92,7 +92,7 @@ echo Linking td5re.exe...
     -L%BUILDDIR% -Wl,--whole-archive -ltd5re -Wl,--no-whole-archive ^
     -L%WRAPPER_BUILDDIR% -lddraw_wrapper ^
     -ld3d11 -ldxgi -lkernel32 -luser32 -lgdi32 -luuid -lole32 ^
-    -lwinmm -ldinput8 -ldsound -ldxguid -lz -lws2_32 ^
+    -lwinmm -ldinput8 -ldsound -ldxguid -lz -lws2_32 -lmfplat -lole32 ^
     -Wl,-Map=%BUILDDIR%\td5re.map ^
     -Wl,--enable-stdcall-fixup ^
     -Wl,--allow-multiple-definition
