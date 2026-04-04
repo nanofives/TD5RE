@@ -590,6 +590,121 @@ void td5_hud_init_font_atlas(void)
                                        s_font_page_buf, 256, 256, 2);
     }
 
+    /* Generate synthetic speedometer dial for page 704 using GDI.
+     * tpage4.dat is assembled at runtime by the original engine
+     * (UploadRaceTexturePage @ 0x40B590) and has no on-disk .dat file.
+     * We draw a simple circular gauge (96×96) into the 256×256 BGRA32 page
+     * at the SPEEDO atlas offset (atlas_x=0, atlas_y=0).
+     *
+     * Angle convention (screen coords, Y down): θ=0 → right, increases CW.
+     * Scale: 0-120 mph, 240° sweep.  Start: 150° (8 o'clock), mid: 270°
+     * (12 o'clock) at 60 mph, end: 390°=30° (2 o'clock) at 120 mph. */
+    {
+        TD5_AtlasEntry *speedo_entry = td5_asset_find_atlas_entry(NULL, "SPEEDO");
+        if (speedo_entry && speedo_entry->texture_page > 0) {
+            static uint8_t s_speedo_page_buf[256 * 256 * 4];
+            memset(s_speedo_page_buf, 0, sizeof(s_speedo_page_buf));
+
+            BITMAPINFO sp_bmi;
+            memset(&sp_bmi, 0, sizeof(sp_bmi));
+            sp_bmi.bmiHeader.biSize        = sizeof(BITMAPINFOHEADER);
+            sp_bmi.bmiHeader.biWidth       = 96;
+            sp_bmi.bmiHeader.biHeight      = -96; /* top-down */
+            sp_bmi.bmiHeader.biPlanes      = 1;
+            sp_bmi.bmiHeader.biBitCount    = 32;
+            sp_bmi.bmiHeader.biCompression = BI_RGB;
+
+            void *sp_dib = NULL;
+            HDC   sp_hdc = CreateCompatibleDC(NULL);
+            HBITMAP sp_bmp = CreateDIBSection(sp_hdc, &sp_bmi, DIB_RGB_COLORS,
+                                              &sp_dib, NULL, 0);
+            if (sp_bmp && sp_dib) {
+                HBITMAP sp_old = (HBITMAP)SelectObject(sp_hdc, sp_bmp);
+
+                /* Fill background with magenta key → becomes alpha=0 */
+                HBRUSH sp_key = CreateSolidBrush(RGB(255, 0, 255));
+                RECT sp_rc = {0, 0, 96, 96};
+                FillRect(sp_hdc, &sp_rc, sp_key);
+                DeleteObject(sp_key);
+
+                /* Filled dark circle: dial face */
+                HBRUSH sp_face  = CreateSolidBrush(RGB(25, 25, 30));
+                HPEN   sp_null  = (HPEN)GetStockObject(NULL_PEN);
+                HPEN   sp_opold = (HPEN)SelectObject(sp_hdc, sp_null);
+                HBRUSH sp_obold = (HBRUSH)SelectObject(sp_hdc, sp_face);
+                Ellipse(sp_hdc, 1, 1, 95, 95);
+
+                /* White outer ring */
+                HPEN sp_ring = CreatePen(PS_SOLID, 2, RGB(200, 200, 210));
+                SelectObject(sp_hdc, sp_ring);
+                SelectObject(sp_hdc, (HBRUSH)GetStockObject(NULL_BRUSH));
+                Ellipse(sp_hdc, 2, 2, 94, 94);
+
+                /* Tick marks: 0,10,20,...,120 mph (13 positions) */
+                HPEN sp_maj = CreatePen(PS_SOLID, 2, RGB(220, 220, 220));
+                HPEN sp_min = CreatePen(PS_SOLID, 1, RGB(150, 150, 150));
+                int sp_cx = 48, sp_cy = 48;
+                for (int ti = 0; ti <= 12; ti++) {
+                    double speed_v   = ti * 10.0;
+                    double angle_deg = 150.0 + (speed_v / 120.0) * 240.0;
+                    double angle_rad = angle_deg * 3.14159265358979 / 180.0;
+                    double ca = cos(angle_rad);
+                    double sa = sin(angle_rad);
+                    int is_major = (ti % 2 == 0); /* every 20 mph */
+                    int r_in  = is_major ? 35 : 40;
+                    int r_out = 43;
+                    SelectObject(sp_hdc, is_major ? sp_maj : sp_min);
+                    MoveToEx(sp_hdc,
+                             sp_cx + (int)(r_out * ca),
+                             sp_cy + (int)(r_out * sa), NULL);
+                    LineTo(sp_hdc,
+                           sp_cx + (int)(r_in  * ca),
+                           sp_cy + (int)(r_in  * sa));
+                }
+
+                /* Center pivot dot */
+                HBRUSH sp_piv = CreateSolidBrush(RGB(180, 180, 180));
+                SelectObject(sp_hdc, sp_null);
+                SelectObject(sp_hdc, sp_piv);
+                Ellipse(sp_hdc, sp_cx - 4, sp_cy - 4, sp_cx + 5, sp_cy + 5);
+
+                GdiFlush();
+                SelectObject(sp_hdc, sp_opold);
+                SelectObject(sp_hdc, sp_obold);
+                DeleteObject(sp_face);
+                DeleteObject(sp_ring);
+                DeleteObject(sp_maj);
+                DeleteObject(sp_min);
+                DeleteObject(sp_piv);
+
+                /* Convert 96×96 BGRX → BGRA32 in s_speedo_page_buf at (0,0).
+                 * Magenta key (R=255,G=0,B=255) → alpha=0 (transparent). */
+                const uint8_t *sp_src = (const uint8_t *)sp_dib;
+                for (int ry = 0; ry < 96; ry++) {
+                    for (int rx = 0; rx < 96; rx++) {
+                        int si = (ry * 96 + rx) * 4;
+                        uint8_t pb = sp_src[si + 0];
+                        uint8_t pg = sp_src[si + 1];
+                        uint8_t pr = sp_src[si + 2];
+                        uint8_t pa = (pr == 255 && pg == 0 && pb == 255) ? 0 : 255;
+                        int di = (ry * 256 + rx) * 4;
+                        s_speedo_page_buf[di + 0] = pb;
+                        s_speedo_page_buf[di + 1] = pg;
+                        s_speedo_page_buf[di + 2] = pr;
+                        s_speedo_page_buf[di + 3] = pa;
+                    }
+                }
+
+                SelectObject(sp_hdc, sp_old);
+                DeleteObject(sp_bmp);
+            }
+            DeleteDC(sp_hdc);
+
+            td5_plat_render_upload_texture(speedo_entry->texture_page,
+                                           s_speedo_page_buf, 256, 256, 2);
+        }
+    }
+
     /* Upload 1x1 white texture for solid-color overlays (pause dimmer) */
     if (!s_hud_white_tex_uploaded) {
         static const uint32_t k_white = 0xFFFFFFFF;
