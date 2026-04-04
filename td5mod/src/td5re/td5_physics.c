@@ -389,23 +389,7 @@ void td5_physics_update_player(TD5_Actor *actor)
         grip[3] = (grip[3] * hb_mod) >> 8;
     }
 
-    /* --- 5. Velocity damping in WORLD frame (before body decomposition) ---
-     * Original at 0x404030: applies damping to linear_velocity_x/z
-     * BEFORE cos/sin heading decomposition into body-frame. */
-    {
-        int32_t surf_drag = (int32_t)s_surface_grip[surface_center & 0x1F];
-        int32_t damp_coeff;
-        /* Original uses 0x6C for low-throttle/low-gear, 0x6A for high-gear */
-        if (actor->frame_counter < 0x20 || actor->current_gear < 2)
-            damp_coeff = surf_drag * 256 + (int32_t)PHYS_S(actor, 0x6C);
-        else
-            damp_coeff = surf_drag * 256 + (int32_t)PHYS_S(actor, 0x6A);
-
-        actor->linear_velocity_x -= ((actor->linear_velocity_x >> 8) * damp_coeff) >> 12;
-        actor->linear_velocity_z -= ((actor->linear_velocity_z >> 8) * damp_coeff) >> 12;
-    }
-
-    /* --- 6. Resolve body-frame velocities (cos/sin of heading) --- */
+    /* --- 5. Resolve body-frame velocities (cos/sin of heading) --- */
     int32_t heading = (actor->euler_accum.yaw >> 8) & 0xFFF;
     int32_t cos_h = cos_fixed12(heading);
     int32_t sin_h = sin_fixed12(heading);
@@ -418,8 +402,26 @@ void td5_physics_update_player(TD5_Actor *actor)
     /* Lateral = dot(velocity, heading_right) */
     int32_t v_lat  = (vx * cos_h - vz * sin_h) >> 12;
 
+    /* Store raw speed for HUD/speedometer BEFORE damping */
     actor->longitudinal_speed = v_long;
     actor->lateral_speed = v_lat;
+
+    /* --- 6. Velocity damping (body-frame, for force computation only) ---
+     * Damping modifies local v_long/v_lat used for slip/grip forces.
+     * The actual linear_velocity_x/z is NOT reduced — forces computed from
+     * damped values naturally provide the damping effect. */
+    {
+        int32_t surf_drag = (int32_t)s_surface_grip[surface_center & 0x1F];
+        int32_t damp_coeff;
+        /* Original uses 0x6C for low-throttle/low-gear, 0x6A for high-gear */
+        if (actor->frame_counter < 0x20 || actor->current_gear < 2)
+            damp_coeff = surf_drag * 256 + (int32_t)PHYS_S(actor, 0x6C);
+        else
+            damp_coeff = surf_drag * 256 + (int32_t)PHYS_S(actor, 0x6A);
+
+        v_long -= ((v_long >> 8) * damp_coeff) >> 12;
+        v_lat  -= ((v_lat >> 8) * damp_coeff) >> 12;
+    }
 
     /* --- 7/8. Gear selection: mutually exclusive paths (original 0x404030).
      * field_0x378 (throttle_input_active) selects between:
@@ -2318,6 +2320,8 @@ void td5_physics_set_dynamics(int mode)
 
 void td5_physics_set_paused(int paused)
 {
-    g_game_paused = paused;
-    TD5_LOG_I(LOG_TAG, "Physics paused=%d", paused);
+    if (g_game_paused != paused) {
+        TD5_LOG_I(LOG_TAG, "Physics paused=%d", paused);
+        g_game_paused = paused;
+    }
 }
