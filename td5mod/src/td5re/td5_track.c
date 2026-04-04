@@ -2462,16 +2462,10 @@ int td5_track_parse_models_dat(const void *data, size_t size)
         entry_offset = *(const uint32_t *)(const void *)(s_models_blob + tbl_byte);
         entry_size   = *(const uint32_t *)(const void *)(s_models_blob + tbl_byte + 4);
 
-        /* In format A the table is [offset, size] pairs.
-         * In format B the table is [size, offset] pairs (legacy interpretation).
-         * Auto-detect: if entry_offset < entry_size and entry_size looks like
-         * a plausible file offset, they might be swapped. */
-        if (table_start_byte == 0) {
-            /* Format B: [size, offset] — swap */
-            uint32_t tmp = entry_offset;
-            entry_offset = entry_size;
-            entry_size = tmp;
-        }
+        /* Both format A and B use [offset, size] pairs.  The only difference
+         * is where the entry table starts (byte 4 for A, byte 0+4 for B).
+         * The old swap was incorrect and caused blocks to be read from wrong
+         * positions, producing 28-64% validation failures. */
 
         if (entry_offset == 0 || entry_offset >= size)
             continue;
@@ -2484,9 +2478,8 @@ int td5_track_parse_models_dat(const void *data, size_t size)
             if (i + 1 < raw_entry_count) {
                 uint32_t next_tbl = table_start_byte + (i + 1) * 8u;
                 if (next_tbl + 8 <= size) {
-                    uint32_t candidate = (table_start_byte == 0)
-                        ? *(const uint32_t *)(const void *)(s_models_blob + next_tbl + 4)
-                        : *(const uint32_t *)(const void *)(s_models_blob + next_tbl);
+                    uint32_t candidate =
+                        *(const uint32_t *)(const void *)(s_models_blob + next_tbl);
                     if (candidate > entry_offset && candidate <= size)
                         next_off = candidate;
                 }
@@ -2609,7 +2602,19 @@ int td5_track_parse_models_dat(const void *data, size_t size)
                     !td5_track_is_ptr_in_blob(m, sizeof(TD5_MeshHeader)) ||
                     m->command_count < 0 || m->command_count > 4096 ||
                     m->total_vertex_count < 0 || m->total_vertex_count > 65536) {
-                    /* Zero the bad slot so the renderer skips it */
+                    static int s_post_fail_log = 0;
+                    if (s_post_fail_log < 10) {
+                        TD5_LOG_W("track",
+                            "post-reloc fail: dl=%d j=%d ptr=0x%08X in_blob=%d "
+                            "cmds=%d verts=%d cmd_off=0x%08X vtx_off=0x%08X",
+                            dl, (int)j, (unsigned)ptr_val,
+                            td5_track_is_ptr_in_blob(m, sizeof(TD5_MeshHeader)),
+                            ((uintptr_t)m >= 0x10000u) ? m->command_count : -1,
+                            ((uintptr_t)m >= 0x10000u) ? m->total_vertex_count : -1,
+                            ((uintptr_t)m >= 0x10000u) ? m->commands_offset : 0,
+                            ((uintptr_t)m >= 0x10000u) ? m->vertices_offset : 0);
+                        s_post_fail_log++;
+                    }
                     *(uint32_t *)(blk + 4 + j * 4) = 0;
                     bad_blocks++;
                 }
