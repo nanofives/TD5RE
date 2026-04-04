@@ -2747,22 +2747,24 @@ int td5_track_is_ptr_in_blob(const void *ptr, size_t need)
 int td5_track_is_valid_mesh_ptr(const void *ptr)
 {
     uintptr_t p;
-    if (!ptr || (uintptr_t)ptr < 0x10000u) return 0;
+    /* Reject NULL and anything below 1MB — no legitimate heap/blob pointer
+     * on Win32 is that low.  Unrelocated MODELS.DAT offsets (relative byte
+     * offsets within the file) are typically 0x100-0xFFFFF and must not be
+     * dereferenced as pointers. */
+    if (!ptr || (uintptr_t)ptr < 0x100000u) return 0;
     p = (uintptr_t)ptr;
-    /* Must be within the models blob or a generated display list allocation */
+    /* Check if pointer is within the models blob */
     if (s_models_blob && s_models_blob_size > 0) {
         uintptr_t base = (uintptr_t)s_models_blob;
         if (p >= base && p < base + s_models_blob_size) {
-            /* Extra sanity: mesh header must fit within blob */
             if (p + sizeof(TD5_MeshHeader) <= base + s_models_blob_size)
                 return 1;
             return 0;
         }
     }
-    /* Accept heap pointers from generated strip display lists */
-    if (s_display_lists_are_generated_meshes)
-        return 1;
-    return 0;
+    /* Accept heap pointers from generated strip display lists —
+     * these are above 0x100000 on any normal Win32 system. */
+    return 1;
 }
 
 TD5_StripSpan *td5_track_get_span(int index)

@@ -1167,7 +1167,7 @@ void td5_render_span_display_list(void *display_list_block)
 
     for (int i = 0; i < count; i++) {
         TD5_MeshHeader *mesh = (TD5_MeshHeader *)(uintptr_t)block[i + 1];
-        if (!mesh || (uintptr_t)mesh < 0x10000u || !td5_track_is_valid_mesh_ptr(mesh)) continue;
+        if (!mesh || (uintptr_t)mesh < 0x100000u || !td5_track_is_valid_mesh_ptr(mesh)) continue;
 
         /* Validate mesh header fields to prevent crashes from bad data */
         if (mesh->command_count <= 0 || mesh->command_count > 4096) continue;
