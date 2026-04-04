@@ -1891,34 +1891,28 @@ void td5_hud_render_overlays(float dt)
         }
 
         /* --- Indicator digit (countdown/finish) --- */
-        if (s_indicator_state[v] != 0 && s_glyph_table) {
-            /* Render digit using the FONT atlas (which has proper transparency)
-             * instead of the NUMBERS atlas (tpage5.dat has wrong format data).
-             * Font glyph indices: '0'=0x2F, '1'=0x30, '2'=0x31, '3'=0x32 etc. */
+        if (s_indicator_state[v] != 0 && s_numbers_atlas) {
             int digit_val = s_indicator_state[v];
-            int glyph_idx = 0x2F + digit_val; /* '0' + digit → font glyph index */
-            if (glyph_idx >= 0x30 && glyph_idx <= 0x39) { /* valid '1'-'9' */
-                TD5_GlyphRecord *g = &s_glyph_table[glyph_idx];
-                int tex_page = (int)(intptr_t)((void **)s_glyph_table)[0x100];
+            int col = digit_val % 5;
+            int row = digit_val / 5;
 
-                /* Scale up the 8×12 font glyph to 32×48 for visibility */
-                float qw = sx * 32.0f;
-                float qh = sy * 48.0f;
-                float ind_x = vl->center_x - qw * 0.5f;
-                float ind_y = vl->center_y - qh * 0.5f;
+            float u0 = (float)(col * 16 + s_numbers_atlas->atlas_x) + 0.5f;
+            float v0 = (float)(row * 24 + s_numbers_atlas->atlas_y) + 0.5f;
 
-                TD5_SpriteQuad indicator_quad;
-                hud_build_quad(
-                    &indicator_quad,
-                    0, tex_page,
-                    ind_x, ind_y,
-                    ind_x + qw, ind_y + qh,
-                    g->atlas_u, g->atlas_v,
-                    g->atlas_u + g->width, g->atlas_v + g->height,
-                    0xFFFFFFFF, HUD_DEPTH
-                );
-                hud_submit_quad(&indicator_quad);
-            }
+            /* Build and submit a centered digit quad */
+            TD5_SpriteQuad indicator_quad;
+            float ind_x = vl->center_x - sx * 16.0f;
+            float ind_y = vl->center_y - sy * 24.0f;
+
+            hud_build_quad(
+                &indicator_quad,
+                0, s_numbers_atlas->texture_page,
+                ind_x, ind_y,
+                ind_x + sx * 16.0f, ind_y + sy * 24.0f,
+                u0, v0, u0 + 15.0f, v0 + 23.0f,
+                0xFFFFFFFF, HUD_DEPTH
+            );
+            hud_submit_quad(&indicator_quad);
         }
 
         s_cur_view++;
