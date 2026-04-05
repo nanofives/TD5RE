@@ -47,6 +47,7 @@
 
 #include <math.h>
 #include <stdio.h>
+#include <stddef.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -1408,6 +1409,63 @@ void td5_render_actors_for_view(int view_index)
     /* Always clear the backbuffer so previous frames don't bleed through */
     td5_plat_render_clear(0xFF4080C0u);
 
+    /* === DIAGNOSTIC: dump camera basis + actor0 rotation === */
+    {
+        static int s_cam_diag_count = 0;
+        s_cam_diag_count++;
+        /* Log at frames 30-34 (after sim starts) and every 300 frames after */
+        if ((s_cam_diag_count >= 30 && s_cam_diag_count < 35) ||
+            (s_cam_diag_count > 0 && (s_cam_diag_count % 300) == 0)) {
+            TD5_LOG_I(RENDER_LOG_TAG,
+                "CAM_BASIS right=(%.4f,%.4f,%.4f) up=(%.4f,%.4f,%.4f) fwd=(%.4f,%.4f,%.4f)",
+                s_camera_basis[0], s_camera_basis[1], s_camera_basis[2],
+                s_camera_basis[3], s_camera_basis[4], s_camera_basis[5],
+                s_camera_basis[6], s_camera_basis[7], s_camera_basis[8]);
+            TD5_LOG_I(RENDER_LOG_TAG,
+                "CAM_POS=(%.2f,%.2f,%.2f) focal=%.1f center=(%.1f,%.1f)",
+                s_camera_pos[0], s_camera_pos[1], s_camera_pos[2],
+                s_focal_length, s_center_x, s_center_y);
+
+            TD5_Actor *a0 = td5_game_get_actor(0);
+            /* Verify struct offsets at runtime */
+            {
+                static int s_offsets_logged = 0;
+                if (!s_offsets_logged) {
+                    s_offsets_logged = 1;
+                    TD5_LOG_I(RENDER_LOG_TAG,
+                        "OFFSETS rotation_matrix=%d render_pos=%d euler_accum=%d display_angles=%d",
+                        (int)offsetof(TD5_Actor, rotation_matrix),
+                        (int)offsetof(TD5_Actor, render_pos),
+                        (int)offsetof(TD5_Actor, euler_accum),
+                        (int)offsetof(TD5_Actor, display_angles));
+                }
+            }
+            if (a0) {
+                /* Also log raw bytes at expected offset 0x120 */
+                {
+                    uint8_t *base = (uint8_t *)a0;
+                    float *rot_at_120 = (float *)(base + 0x120);
+                    TD5_LOG_I(RENDER_LOG_TAG,
+                        "RAW_0x120 [%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f]",
+                        rot_at_120[0], rot_at_120[1], rot_at_120[2],
+                        rot_at_120[3], rot_at_120[4], rot_at_120[5],
+                        rot_at_120[6], rot_at_120[7], rot_at_120[8]);
+                }
+                TD5_LOG_I(RENDER_LOG_TAG,
+                    "ACTOR0_ROT row0=(%.4f,%.4f,%.4f) row1=(%.4f,%.4f,%.4f) row2=(%.4f,%.4f,%.4f)",
+                    a0->rotation_matrix.m[0], a0->rotation_matrix.m[1], a0->rotation_matrix.m[2],
+                    a0->rotation_matrix.m[3], a0->rotation_matrix.m[4], a0->rotation_matrix.m[5],
+                    a0->rotation_matrix.m[6], a0->rotation_matrix.m[7], a0->rotation_matrix.m[8]);
+                TD5_LOG_I(RENDER_LOG_TAG,
+                    "ACTOR0_RPOS=(%.2f,%.2f,%.2f) euler=(R=0x%X,Y=0x%X,P=0x%X) disp=(R=%d,Y=%d,P=%d)",
+                    a0->render_pos.x, a0->render_pos.y, a0->render_pos.z,
+                    a0->euler_accum.roll, a0->euler_accum.yaw, a0->euler_accum.pitch,
+                    a0->display_angles.roll, a0->display_angles.yaw, a0->display_angles.pitch);
+            }
+            s_cam_diag_count++;
+        }
+    }
+
     /* Draw sky panorama behind all geometry */
     td5_render_draw_sky();
 
@@ -2015,217 +2073,229 @@ static void render_vehicle_shadow_quad(void)
     td5_plat_render_draw_tris(verts, 4, indices, 6);
 }
 
-/* --- Vehicle Wheel Billboards (0x446F00) ---
- *
- * Renders 4 wheels as 8-segment rings (cylinder cross-section) with a
- * filled hub-cap disc in the center.  Each wheel position is read from
- * actor+0x210 (int16 triples, stride 8 bytes per wheel).  The ring axis
- * points sideways from the car (outward along local X for left wheels,
- * inward -X for right wheels).
- *
- * Original uses per-car UV base from 0x4cefb0+car*8, tile size 32.0,
- * step 31.0, selects 2x2 sub-tile by rotation speed.  This implementation
- * uses the car mesh texture page with fixed UVs as a fallback until the
- * wheel atlas is fully reverse-engineered.
- *
- * Double-sided: both inside and outside ring faces are emitted.
- */
+/* --- Vehicle Wheel Billboards (0x446F00) --- */
 
 /**
- * Wheel rendering (0x446F00).
+ * Wheel rendering (0x446F00 + 0x446A70).
  *
- * Original renders 8 translucent quad strips per wheel (tire sidewall) plus a
- * flat hub-cap disc, using "WHEELS"/"INWHEEL" named textures from static.hed.
- * Source port approximation: 8-segment cylinder ring + filled hub disc, textured
- * with the per-car CARHUB0 texture (page 800 + slot*2 + 1).
+ * Original renders 8 quad strips per wheel (tire sidewall) plus a flat
+ * hub-cap quad, using textures from static.hed page 5:
+ *   "WHEELS"  — tire sidewall (pos 0,0 size 256x128)
+ *   "INWHEEL" — hub-cap disc  (pos 0,192 size 16x16)
  *
- * Wheel radius and half-width are read from cardef+0x80 (suspension height ref)
- * and cardef+0x04 (car half-width) respectively, matching the int16 model-space
- * coordinate system used by wheel positions at actor+0x210.
+ * Dimensions from cardef (RE confirmed at 0x446E30-0x446E3C):
+ *   rim_radius = cardef+0x82 * 0.76171875 (195/256, DAT_0045D7AC)
+ *   axle_halfw = cardef+0x84 (raw int16, no scaling)
+ *
+ * Ring: 9 vertices at 45-degree steps (8 segments + closing vertex).
+ * Hub-cap: flat quad perpendicular to axle, sized by rim_radius.
  */
-#define WHEEL_RING_SEGMENTS  8
-#define WHEEL_RADIUS_DEFAULT 90.0f   /* fallback if cardef missing */
-#define WHEEL_HALFW_DEFAULT  30.0f   /* fallback tire half-thickness */
+#define WHEEL_SEGMENTS       8
+#define WHEEL_RADIUS_SCALE   0.76171875f  /* 195/256, from DAT_0045D7AC */
+#define WHEEL_RADIUS_DEFAULT 110.0f       /* fallback: 0x90 * 0.76171875 */
+#define WHEEL_HALFW_DEFAULT  28.0f        /* fallback axle half-width */
 
-/* Hub texture page: 800 + slot*2 + 1 (matches td5_asset.c allocation) */
-#define TD5_CAR_HUB_PAGE(slot) (800 + (slot) * 2 + 1)
+/* Cached WHEELS/INWHEEL lookups from static.hed */
+static int   s_wheel_tex_page = -1;
+static float s_inwheel_u0, s_inwheel_v0, s_inwheel_u1, s_inwheel_v1;
+static int   s_wheel_lookup_done = 0;
+
+static void wheel_lookup_static_hed(void)
+{
+    extern TD5_StaticHedEntry *g_static_hed_entries;
+    extern int                 g_static_hed_entry_count;
+
+    s_wheel_lookup_done = 1;
+
+    TD5_StaticHedEntry *wheels = td5_asset_find_entry_by_name(
+        g_static_hed_entries, g_static_hed_entry_count, "WHEELS");
+    if (wheels) {
+        s_wheel_tex_page = wheels->texture_slot;
+        TD5_LOG_I(LOG_TAG, "wheel: WHEELS entry page=%d pos=(%d,%d) size=(%d,%d)",
+                  s_wheel_tex_page, wheels->pos_x, wheels->pos_y,
+                  wheels->width, wheels->height);
+    } else {
+        TD5_LOG_W(LOG_TAG, "wheel: WHEELS not found in static.hed");
+    }
+
+    TD5_StaticHedEntry *inwheel = td5_asset_find_entry_by_name(
+        g_static_hed_entries, g_static_hed_entry_count, "INWHEEL");
+    if (inwheel) {
+        /* Pixel UVs with half-pixel inset, normalized to [0,1] for D3D11 */
+        int tw = 256, th = 256;
+        if (s_wheel_tex_page >= 0)
+            td5_plat_render_get_texture_dims(s_wheel_tex_page, &tw, &th);
+        s_inwheel_u0 = ((float)inwheel->pos_x + 0.5f) / (float)tw;
+        s_inwheel_v0 = ((float)inwheel->pos_y + 0.5f) / (float)th;
+        s_inwheel_u1 = ((float)(inwheel->pos_x + inwheel->width) - 0.5f) / (float)tw;
+        s_inwheel_v1 = ((float)(inwheel->pos_y + inwheel->height) - 0.5f) / (float)th;
+        TD5_LOG_I(LOG_TAG, "wheel: INWHEEL UV=(%.4f,%.4f)-(%.4f,%.4f)",
+                  s_inwheel_u0, s_inwheel_v0, s_inwheel_u1, s_inwheel_v1);
+    } else {
+        s_inwheel_u0 = 0.5f / 256.0f;
+        s_inwheel_v0 = 192.5f / 256.0f;
+        s_inwheel_u1 = 15.5f / 256.0f;
+        s_inwheel_v1 = 207.5f / 256.0f;
+        TD5_LOG_W(LOG_TAG, "wheel: INWHEEL not found, using fallback UVs");
+    }
+}
 
 static void render_vehicle_wheel_billboards(TD5_Actor *actor, int slot)
 {
     const float *m = s_render_transform.m;
 
-    /* Read wheel dimensions from cardef (int16 model-space units).
-     * cardef+0x80 = bounding/suspension radius, used as wheel visual radius.
-     * cardef+0x04 = car half-width; tire half-thickness ~1/4 of that. */
-    float wheel_radius = WHEEL_RADIUS_DEFAULT;
-    float wheel_halfw  = WHEEL_HALFW_DEFAULT;
+    if (!s_wheel_lookup_done)
+        wheel_lookup_static_hed();
+
+    /* Read wheel dimensions from cardef (RE: 0x446E30-0x446E3C).
+     * cardef+0x82 -> rim_radius = value * 195/256
+     * cardef+0x84 -> axle_halfw = raw value (no scaling) */
+    float rim_radius = WHEEL_RADIUS_DEFAULT;
+    float axle_halfw = WHEEL_HALFW_DEFAULT;
     if (actor->car_definition_ptr) {
-        int16_t r = *(int16_t *)((uint8_t *)actor->car_definition_ptr + 0x80);
-        if (r > 0) wheel_radius = (float)r * 0.65f;  /* visual radius ~65% of bounding */
-        int16_t hw = *(int16_t *)((uint8_t *)actor->car_definition_ptr + 0x04);
-        if (hw > 0) wheel_halfw = (float)hw * 0.25f;  /* tire thickness ~25% of car half-width */
+        int16_t r = *(int16_t *)((uint8_t *)actor->car_definition_ptr + 0x82);
+        if (r > 0) rim_radius = (float)r * WHEEL_RADIUS_SCALE;
+        int16_t hw = *(int16_t *)((uint8_t *)actor->car_definition_ptr + 0x84);
+        if (hw > 0) axle_halfw = (float)hw;
     }
 
-    /* Precompute ring circle vertices (Y-Z plane) */
-    float circle_y[WHEEL_RING_SEGMENTS];
-    float circle_z[WHEEL_RING_SEGMENTS];
-    for (int i = 0; i < WHEEL_RING_SEGMENTS; i++) {
-        float angle = (float)i * (2.0f * (float)M_PI / (float)WHEEL_RING_SEGMENTS);
-        circle_y[i] = cosf(angle) * wheel_radius;
-        circle_z[i] = sinf(angle) * wheel_radius;
+    /* 9-vertex rim circle (8 segments + closing vertex, 45-degree steps) */
+    float ring_y[9], ring_z[9];
+    for (int i = 0; i <= WHEEL_SEGMENTS; i++) {
+        float angle = (float)i * ((float)M_PI / 4.0f);
+        ring_y[i] = cosf(angle) * rim_radius;
+        ring_z[i] = sinf(angle) * rim_radius;
     }
 
-    /* Use car hub texture (CARHUB0), not body skin */
-    int hub_page = TD5_CAR_HUB_PAGE(slot);
+    int tex_page = s_wheel_tex_page;
 
     static int s_wheel_log_once = 0;
     if (!s_wheel_log_once) {
-        TD5_LOG_I(LOG_TAG, "wheel render: slot=%d radius=%.1f halfw=%.1f hub_page=%d",
-                  slot, wheel_radius, wheel_halfw, hub_page);
+        TD5_LOG_I(LOG_TAG, "wheel render: slot=%d radius=%.1f halfw=%.1f page=%d",
+                  slot, rim_radius, axle_halfw, tex_page);
         s_wheel_log_once = 1;
     }
 
     for (int w = 0; w < 4; w++) {
-        /* Read int16 wheel position from actor+0x210 + w*8 */
         float wx = (float)actor->wheel_display_angles[w][0];
         float wy = (float)actor->wheel_display_angles[w][1];
         float wz = (float)actor->wheel_display_angles[w][2];
 
-        /* Skip wheels at origin (uninitialized) */
         if (wx == 0.0f && wy == 0.0f && wz == 0.0f)
             continue;
 
-        /* Determine ring axis direction: left wheels (0=FL, 2=RL) face +X,
-         * right wheels (1=FR, 3=RR) face -X in car-local space. */
-        float x_sign = (w & 1) ? -1.0f : 1.0f;
+        /* Original (0x446E30): inner_x = -cardef_0x84, outer_x = +cardef_0x84.
+         * Left wheels (even): inner=-halfw, outer=+halfw.
+         * Right wheels (odd): inner=+halfw, outer=-halfw. */
+        float inner_off = (w & 1) ?  axle_halfw : -axle_halfw;
+        float outer_off = (w & 1) ? -axle_halfw :  axle_halfw;
 
-        /* Build ring vertices in car-local space. */
-        float inner_x = wx - wheel_halfw * x_sign;
-        float outer_x = wx + wheel_halfw * x_sign;
-
-        /* 17 vertices: 0..7 = inner ring, 8..15 = outer ring, 16 = hub center */
-        TD5_D3DVertex projected[17];
+        /* 18 vertices: inner ring (0..8) + outer ring (9..17) */
+        TD5_D3DVertex verts[18];
         int all_visible = 1;
 
-        for (int i = 0; i < WHEEL_RING_SEGMENTS; i++) {
-            float cy = circle_y[i];
-            float cz = circle_z[i];
+        for (int i = 0; i <= WHEEL_SEGMENTS; i++) {
+            float cy = ring_y[i];
+            float cz = ring_z[i];
 
-            /* Inner ring vertex (i) */
+            /* Inner ring vertex */
             {
-                float px = inner_x;
-                float py = wy + cy;
-                float pz = wz + cz;
-                float vx = px * m[0] + py * m[1] + pz * m[2] + m[9];
-                float vy = px * m[3] + py * m[4] + pz * m[5] + m[10];
-                float vz = px * m[6] + py * m[7] + pz * m[8] + m[11];
+                float px = wx + inner_off, py = wy + cy, pz = wz + cz;
+                float vx = px*m[0] + py*m[1] + pz*m[2] + m[9];
+                float vy = px*m[3] + py*m[4] + pz*m[5] + m[10];
+                float vz = px*m[6] + py*m[7] + pz*m[8] + m[11];
                 if (vz <= s_near_clip) { all_visible = 0; break; }
                 float inv_z = 1.0f / vz;
-                projected[i].screen_x = vx * s_focal_length * inv_z + s_center_x;
-                projected[i].screen_y = -vy * s_focal_length * inv_z + s_center_y;
-                projected[i].depth_z  = vz * (1.0f / s_far_clip);
-                projected[i].rhw      = inv_z;
-                projected[i].diffuse  = 0xFF606060u;  /* tire rubber */
-                projected[i].specular = 0;
-                projected[i].tex_u = (float)i / (float)WHEEL_RING_SEGMENTS;
-                projected[i].tex_v = 0.0f;
+                verts[i].screen_x = vx * s_focal_length * inv_z + s_center_x;
+                verts[i].screen_y = -vy * s_focal_length * inv_z + s_center_y;
+                verts[i].depth_z  = vz * (1.0f / s_far_clip);
+                verts[i].rhw      = inv_z;
+                verts[i].diffuse  = 0xFF808080u;
+                verts[i].specular = 0;
+                verts[i].tex_u = (float)i / (float)WHEEL_SEGMENTS;
+                verts[i].tex_v = 0.0f;
             }
 
-            /* Outer ring vertex (i + 8) */
+            /* Outer ring vertex */
             {
-                float px = outer_x;
-                float py = wy + cy;
-                float pz = wz + cz;
-                float vx = px * m[0] + py * m[1] + pz * m[2] + m[9];
-                float vy = px * m[3] + py * m[4] + pz * m[5] + m[10];
-                float vz = px * m[6] + py * m[7] + pz * m[8] + m[11];
+                float px = wx + outer_off, py = wy + cy, pz = wz + cz;
+                float vx = px*m[0] + py*m[1] + pz*m[2] + m[9];
+                float vy = px*m[3] + py*m[4] + pz*m[5] + m[10];
+                float vz = px*m[6] + py*m[7] + pz*m[8] + m[11];
                 if (vz <= s_near_clip) { all_visible = 0; break; }
                 float inv_z = 1.0f / vz;
-                projected[8 + i].screen_x = vx * s_focal_length * inv_z + s_center_x;
-                projected[8 + i].screen_y = -vy * s_focal_length * inv_z + s_center_y;
-                projected[8 + i].depth_z  = vz * (1.0f / s_far_clip);
-                projected[8 + i].rhw      = inv_z;
-                projected[8 + i].diffuse  = 0xFF606060u;
-                projected[8 + i].specular = 0;
-                projected[8 + i].tex_u = (float)i / (float)WHEEL_RING_SEGMENTS;
-                projected[8 + i].tex_v = 1.0f;
+                verts[9+i].screen_x = vx * s_focal_length * inv_z + s_center_x;
+                verts[9+i].screen_y = -vy * s_focal_length * inv_z + s_center_y;
+                verts[9+i].depth_z  = vz * (1.0f / s_far_clip);
+                verts[9+i].rhw      = inv_z;
+                verts[9+i].diffuse  = 0xFF808080u;
+                verts[9+i].specular = 0;
+                verts[9+i].tex_u = (float)i / (float)WHEEL_SEGMENTS;
+                verts[9+i].tex_v = 1.0f;
             }
         }
 
-        if (!all_visible)
-            continue;
+        if (!all_visible) continue;
 
-        /* Hub center vertex (index 16) — at the outer face of the wheel */
-        {
-            float px = outer_x;
-            float py = wy;
-            float pz = wz;
-            float vx = px * m[0] + py * m[1] + pz * m[2] + m[9];
-            float vy = px * m[3] + py * m[4] + pz * m[5] + m[10];
-            float vz = px * m[6] + py * m[7] + pz * m[8] + m[11];
-            if (vz <= s_near_clip)
-                continue;
-            float inv_z = 1.0f / vz;
-            projected[16].screen_x = vx * s_focal_length * inv_z + s_center_x;
-            projected[16].screen_y = -vy * s_focal_length * inv_z + s_center_y;
-            projected[16].depth_z  = vz * (1.0f / s_far_clip);
-            projected[16].rhw      = inv_z;
-            projected[16].diffuse  = 0xFFFFFFFFu;  /* full white — let hub texture show */
-            projected[16].specular = 0;
-            projected[16].tex_u    = 0.5f;
-            projected[16].tex_v    = 0.5f;
-        }
-
-        /* Build index buffer:
-         * Ring quads (double-sided): 8 quads * 2 tris * 2 sides = 96 indices
-         * Hub-cap disc (double-sided): 8 tris * 2 sides = 48 indices
-         * Total: 144 indices max */
-        uint16_t indices[144];
+        /* Tire sidewall: 8 quads, double-sided = 96 indices */
+        uint16_t indices[96];
         int idx = 0;
-
-        for (int i = 0; i < WHEEL_RING_SEGMENTS; i++) {
-            int i0 = i;
-            int i1 = (i + 1) % WHEEL_RING_SEGMENTS;
-            int o0 = i + 8;
-            int o1 = ((i + 1) % WHEEL_RING_SEGMENTS) + 8;
-
-            /* Outside face (CW when viewed from outside) */
-            indices[idx++] = (uint16_t)i0;
-            indices[idx++] = (uint16_t)o0;
-            indices[idx++] = (uint16_t)o1;
-            indices[idx++] = (uint16_t)i0;
-            indices[idx++] = (uint16_t)o1;
-            indices[idx++] = (uint16_t)i1;
-
-            /* Inside face (reversed winding) */
-            indices[idx++] = (uint16_t)i0;
-            indices[idx++] = (uint16_t)o1;
-            indices[idx++] = (uint16_t)o0;
-            indices[idx++] = (uint16_t)i0;
-            indices[idx++] = (uint16_t)i1;
-            indices[idx++] = (uint16_t)o1;
-        }
-
-        /* Hub-cap disc — triangles from outer ring to center (index 16) */
-        for (int i = 0; i < WHEEL_RING_SEGMENTS; i++) {
-            int o0 = 8 + i;
-            int o1 = 8 + ((i + 1) % WHEEL_RING_SEGMENTS);
-
-            /* Outside face */
-            indices[idx++] = (uint16_t)o0;
-            indices[idx++] = 16;
-            indices[idx++] = (uint16_t)o1;
-
-            /* Inside face */
-            indices[idx++] = (uint16_t)o0;
-            indices[idx++] = (uint16_t)o1;
-            indices[idx++] = 16;
+        for (int i = 0; i < WHEEL_SEGMENTS; i++) {
+            int i0 = i, i1 = i + 1;
+            int o0 = 9 + i, o1 = 9 + i + 1;
+            indices[idx++] = (uint16_t)i0; indices[idx++] = (uint16_t)o0; indices[idx++] = (uint16_t)o1;
+            indices[idx++] = (uint16_t)i0; indices[idx++] = (uint16_t)o1; indices[idx++] = (uint16_t)i1;
+            indices[idx++] = (uint16_t)i0; indices[idx++] = (uint16_t)o1; indices[idx++] = (uint16_t)o0;
+            indices[idx++] = (uint16_t)i0; indices[idx++] = (uint16_t)i1; indices[idx++] = (uint16_t)o1;
         }
 
         flush_immediate_internal();
         td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
-        td5_plat_render_bind_texture(hub_page);
-        td5_plat_render_draw_tris(projected, 17, indices, idx);
+        td5_plat_render_bind_texture(tex_page);
+        td5_plat_render_draw_tris(verts, 18, indices, idx);
+
+        /* Hub-cap: flat quad at the outer face, sized by rim_radius.
+         * Original rotates corners by steering angles (actor+0x340/0x342);
+         * simplified here to axis-aligned square. */
+        {
+            float hx = wx + outer_off;
+            float corners[4][3] = {
+                { hx, wy + rim_radius, wz - rim_radius },
+                { hx, wy + rim_radius, wz + rim_radius },
+                { hx, wy - rim_radius, wz + rim_radius },
+                { hx, wy - rim_radius, wz - rim_radius },
+            };
+            float hub_uv[4][2] = {
+                { s_inwheel_u0, s_inwheel_v0 }, { s_inwheel_u1, s_inwheel_v0 },
+                { s_inwheel_u1, s_inwheel_v1 }, { s_inwheel_u0, s_inwheel_v1 },
+            };
+
+            TD5_D3DVertex hub[4];
+            int hub_ok = 1;
+            for (int c = 0; c < 4; c++) {
+                float px = corners[c][0], py = corners[c][1], pz = corners[c][2];
+                float vx = px*m[0] + py*m[1] + pz*m[2] + m[9];
+                float vy = px*m[3] + py*m[4] + pz*m[5] + m[10];
+                float vz = px*m[6] + py*m[7] + pz*m[8] + m[11];
+                if (vz <= s_near_clip) { hub_ok = 0; break; }
+                float inv_z = 1.0f / vz;
+                hub[c].screen_x = vx * s_focal_length * inv_z + s_center_x;
+                hub[c].screen_y = -vy * s_focal_length * inv_z + s_center_y;
+                hub[c].depth_z  = vz * (1.0f / s_far_clip);
+                hub[c].rhw      = inv_z;
+                hub[c].diffuse  = 0xFFFFFFFFu;
+                hub[c].specular = 0;
+                hub[c].tex_u    = hub_uv[c][0];
+                hub[c].tex_v    = hub_uv[c][1];
+            }
+            if (hub_ok) {
+                uint16_t hub_idx[12] = { 0,1,2, 0,2,3, 0,2,1, 0,3,2 };
+                flush_immediate_internal();
+                td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
+                td5_plat_render_bind_texture(tex_page);
+                td5_plat_render_draw_tris(hub, 4, hub_idx, 12);
+            }
+        }
     }
 }
 
