@@ -1343,16 +1343,20 @@ static uint8_t compute_boundary_bits(int span_idx, int sub_lane,
     if ((edge_mask & 0x01) && edge_cross(lx1, lz1, rx1, rz1, pos_x, pos_z) > 0)
         result |= 0x01;
 
-    /* Edge 1 (right): right0 -> right1 */
-    if ((edge_mask & 0x02) && edge_cross(rx0, rz0, rx1, rz1, pos_x, pos_z) > 0)
+    /* Edge 1 (right): right1 -> right0 (far-right to near-right)
+     * Cross > 0 means P is to the +X side (outside right wall).
+     * Previously rx0→rx1 gave false positives for inside points. */
+    if ((edge_mask & 0x02) && edge_cross(rx1, rz1, rx0, rz0, pos_x, pos_z) > 0)
         result |= 0x02;
 
     /* Edge 2 (backward): right0 -> left0 (the "near" edge) */
     if ((edge_mask & 0x04) && edge_cross(rx0, rz0, lx0, lz0, pos_x, pos_z) > 0)
         result |= 0x04;
 
-    /* Edge 3 (left): left1 -> left0 */
-    if ((edge_mask & 0x08) && edge_cross(lx1, lz1, lx0, lz0, pos_x, pos_z) > 0)
+    /* Edge 3 (left): left0 -> left1 (near-left to far-left)
+     * Cross > 0 means P is to the -X side (outside left wall).
+     * Previously lx1→lx0 gave false positives for inside points. */
+    if ((edge_mask & 0x08) && edge_cross(lx0, lz0, lx1, lz1, pos_x, pos_z) > 0)
         result |= 0x08;
 
     return result;
