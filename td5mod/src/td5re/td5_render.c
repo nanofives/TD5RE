@@ -47,7 +47,6 @@
 
 #include <math.h>
 #include <stdio.h>
-#include <stddef.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -1409,62 +1408,7 @@ void td5_render_actors_for_view(int view_index)
     /* Always clear the backbuffer so previous frames don't bleed through */
     td5_plat_render_clear(0xFF4080C0u);
 
-    /* === DIAGNOSTIC: dump camera basis + actor0 rotation === */
-    {
-        static int s_cam_diag_count = 0;
-        s_cam_diag_count++;
-        /* Log at frames 30-34 (after sim starts) and every 300 frames after */
-        if ((s_cam_diag_count >= 30 && s_cam_diag_count < 35) ||
-            (s_cam_diag_count > 0 && (s_cam_diag_count % 300) == 0)) {
-            TD5_LOG_I(RENDER_LOG_TAG,
-                "CAM_BASIS right=(%.4f,%.4f,%.4f) up=(%.4f,%.4f,%.4f) fwd=(%.4f,%.4f,%.4f)",
-                s_camera_basis[0], s_camera_basis[1], s_camera_basis[2],
-                s_camera_basis[3], s_camera_basis[4], s_camera_basis[5],
-                s_camera_basis[6], s_camera_basis[7], s_camera_basis[8]);
-            TD5_LOG_I(RENDER_LOG_TAG,
-                "CAM_POS=(%.2f,%.2f,%.2f) focal=%.1f center=(%.1f,%.1f)",
-                s_camera_pos[0], s_camera_pos[1], s_camera_pos[2],
-                s_focal_length, s_center_x, s_center_y);
-
-            TD5_Actor *a0 = td5_game_get_actor(0);
-            /* Verify struct offsets at runtime */
-            {
-                static int s_offsets_logged = 0;
-                if (!s_offsets_logged) {
-                    s_offsets_logged = 1;
-                    TD5_LOG_I(RENDER_LOG_TAG,
-                        "OFFSETS rotation_matrix=%d render_pos=%d euler_accum=%d display_angles=%d",
-                        (int)offsetof(TD5_Actor, rotation_matrix),
-                        (int)offsetof(TD5_Actor, render_pos),
-                        (int)offsetof(TD5_Actor, euler_accum),
-                        (int)offsetof(TD5_Actor, display_angles));
-                }
-            }
-            if (a0) {
-                /* Also log raw bytes at expected offset 0x120 */
-                {
-                    uint8_t *base = (uint8_t *)a0;
-                    float *rot_at_120 = (float *)(base + 0x120);
-                    TD5_LOG_I(RENDER_LOG_TAG,
-                        "RAW_0x120 [%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f]",
-                        rot_at_120[0], rot_at_120[1], rot_at_120[2],
-                        rot_at_120[3], rot_at_120[4], rot_at_120[5],
-                        rot_at_120[6], rot_at_120[7], rot_at_120[8]);
-                }
-                TD5_LOG_I(RENDER_LOG_TAG,
-                    "ACTOR0_ROT row0=(%.4f,%.4f,%.4f) row1=(%.4f,%.4f,%.4f) row2=(%.4f,%.4f,%.4f)",
-                    a0->rotation_matrix.m[0], a0->rotation_matrix.m[1], a0->rotation_matrix.m[2],
-                    a0->rotation_matrix.m[3], a0->rotation_matrix.m[4], a0->rotation_matrix.m[5],
-                    a0->rotation_matrix.m[6], a0->rotation_matrix.m[7], a0->rotation_matrix.m[8]);
-                TD5_LOG_I(RENDER_LOG_TAG,
-                    "ACTOR0_RPOS=(%.2f,%.2f,%.2f) euler=(R=0x%X,Y=0x%X,P=0x%X) disp=(R=%d,Y=%d,P=%d)",
-                    a0->render_pos.x, a0->render_pos.y, a0->render_pos.z,
-                    a0->euler_accum.roll, a0->euler_accum.yaw, a0->euler_accum.pitch,
-                    a0->display_angles.roll, a0->display_angles.yaw, a0->display_angles.pitch);
-            }
-            s_cam_diag_count++;
-        }
-    }
+    /* Diagnostic removed — rotation/projection bugs fixed */
 
     /* Draw sky panorama behind all geometry */
     td5_render_draw_sky();
@@ -1530,6 +1474,29 @@ void td5_render_actors_for_view(int view_index)
             render_vehicle_shadow_quad();
 
             /* Render wheel ring billboards (0x446F00) */
+            {
+                static int s_mesh_wheel_diag = 0;
+                if (s_mesh_wheel_diag < 2 && slot == 0) {
+                    /* Log mesh AABB to compare coordinate spaces */
+                    TD5_MeshVertex *mv = (TD5_MeshVertex *)(uintptr_t)mesh->vertices_offset;
+                    float minx=1e9f, maxx=-1e9f, miny=1e9f, maxy=-1e9f, minz=1e9f, maxz=-1e9f;
+                    for (int v = 0; v < mesh->total_vertex_count && v < 2000; v++) {
+                        if (mv[v].pos_x < minx) minx = mv[v].pos_x;
+                        if (mv[v].pos_x > maxx) maxx = mv[v].pos_x;
+                        if (mv[v].pos_y < miny) miny = mv[v].pos_y;
+                        if (mv[v].pos_y > maxy) maxy = mv[v].pos_y;
+                        if (mv[v].pos_z < minz) minz = mv[v].pos_z;
+                        if (mv[v].pos_z > maxz) maxz = mv[v].pos_z;
+                    }
+                    TD5_LOG_I(LOG_TAG,
+                        "WHEEL_DIAG slot0: mesh AABB x=[%.1f,%.1f] y=[%.1f,%.1f] z=[%.1f,%.1f] "
+                        "wheel FL=(%d,%d,%d) FR=(%d,%d,%d)",
+                        minx, maxx, miny, maxy, minz, maxz,
+                        actor->wheel_display_angles[0][0], actor->wheel_display_angles[0][1], actor->wheel_display_angles[0][2],
+                        actor->wheel_display_angles[1][0], actor->wheel_display_angles[1][1], actor->wheel_display_angles[1][2]);
+                    s_mesh_wheel_diag++;
+                }
+            }
             render_vehicle_wheel_billboards(actor, slot);
 
             actor_render_count++;

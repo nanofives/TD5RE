@@ -24,6 +24,7 @@
 #include "td5_platform.h"
 #include "td5re.h"
 #include <string.h>
+#include <math.h>
 
 #define LOG_TAG "ai"
 
@@ -225,29 +226,15 @@ static int32_t ai_sin_fixed12(int32_t angle);
 static void td5_ai_refresh_route_state_slot(int slot);
 
 static int32_t ai_cos_fixed12(int32_t angle) {
-    int32_t a;
-    int32_t value;
-
-    angle &= 0xFFF;
-    if (angle <= 0x400) {
-        a = angle;
-    } else if (angle <= 0x800) {
-        a = 0x800 - angle;
-    } else if (angle <= 0xC00) {
-        a = angle - 0x800;
-    } else {
-        a = 0x1000 - angle;
-    }
-
-    value = 0x1000 - ((2 * a * a + 0x80) >> 8);
-    if (angle > 0x400 && angle < 0xC00) {
-        value = -value;
-    }
-    return value;
+    /* Use standard math — the quadratic approximation was catastrophically
+     * wrong at quadrant boundaries (sin(0) returned -4096 instead of 0). */
+    double rad = (double)(angle & 0xFFF) * (2.0 * 3.14159265358979323846 / 4096.0);
+    return (int32_t)(cos(rad) * 4096.0);
 }
 
 static int32_t ai_sin_fixed12(int32_t angle) {
-    return ai_cos_fixed12((angle - 0x400) & 0xFFF);
+    double rad = (double)(angle & 0xFFF) * (2.0 * 3.14159265358979323846 / 4096.0);
+    return (int32_t)(sin(rad) * 4096.0);
 }
 
 /* ========================================================================

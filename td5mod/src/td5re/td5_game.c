@@ -17,6 +17,7 @@
 #include "td5_asset.h"
 #include "td5_physics.h"
 #include "td5_render.h"
+#include "../../../re/include/td5_actor_struct.h"
 #include "td5_camera.h"
 #include "td5_frontend.h"
 #include "td5_hud.h"
