@@ -470,9 +470,11 @@ void td5_physics_update_vehicle_actor(TD5_Actor *actor)
         update_engine_speed_smoothed(actor);
     }
 
-    /* 7. Integrate pose and contacts (skip during countdown) */
-    if (!g_game_paused)
-        td5_physics_integrate_pose(actor);
+    /* 7. Integrate pose and contacts.
+     * Run even during countdown (paused) so ground-snap keeps the car
+     * at the correct height above the road surface. Velocities are zero
+     * during pause, so the car doesn't actually move. */
+    td5_physics_integrate_pose(actor);
 
     /* 8. Track wall contact resolution (FUN_00406CC0 + FUN_004070E0 + FUN_00406F50)
      * Check wheel probes against span edges and push car back if outside.
