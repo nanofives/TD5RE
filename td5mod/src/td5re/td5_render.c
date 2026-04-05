@@ -1474,29 +1474,6 @@ void td5_render_actors_for_view(int view_index)
             render_vehicle_shadow_quad();
 
             /* Render wheel ring billboards (0x446F00) */
-            {
-                static int s_mesh_wheel_diag = 0;
-                if (s_mesh_wheel_diag < 2 && slot == 0) {
-                    /* Log mesh AABB to compare coordinate spaces */
-                    TD5_MeshVertex *mv = (TD5_MeshVertex *)(uintptr_t)mesh->vertices_offset;
-                    float minx=1e9f, maxx=-1e9f, miny=1e9f, maxy=-1e9f, minz=1e9f, maxz=-1e9f;
-                    for (int v = 0; v < mesh->total_vertex_count && v < 2000; v++) {
-                        if (mv[v].pos_x < minx) minx = mv[v].pos_x;
-                        if (mv[v].pos_x > maxx) maxx = mv[v].pos_x;
-                        if (mv[v].pos_y < miny) miny = mv[v].pos_y;
-                        if (mv[v].pos_y > maxy) maxy = mv[v].pos_y;
-                        if (mv[v].pos_z < minz) minz = mv[v].pos_z;
-                        if (mv[v].pos_z > maxz) maxz = mv[v].pos_z;
-                    }
-                    TD5_LOG_I(LOG_TAG,
-                        "WHEEL_DIAG slot0: mesh AABB x=[%.1f,%.1f] y=[%.1f,%.1f] z=[%.1f,%.1f] "
-                        "wheel FL=(%d,%d,%d) FR=(%d,%d,%d)",
-                        minx, maxx, miny, maxy, minz, maxz,
-                        actor->wheel_display_angles[0][0], actor->wheel_display_angles[0][1], actor->wheel_display_angles[0][2],
-                        actor->wheel_display_angles[1][0], actor->wheel_display_angles[1][1], actor->wheel_display_angles[1][2]);
-                    s_mesh_wheel_diag++;
-                }
-            }
             render_vehicle_wheel_billboards(actor, slot);
 
             actor_render_count++;
