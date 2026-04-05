@@ -362,7 +362,7 @@ static int frontend_load_tga(const char *name, const char *archive);
 static int frontend_load_tga_colorkey(const char *name, const char *archive,
                                       int page_override, int *w_out, int *h_out,
                                       TD5_ColorKeyMode colorkey);
-static int frontend_load_tga_black_key(const char *name, const char *archive);
+static int frontend_load_surface_keyed(const char *name, const char *archive, TD5_ColorKeyMode colorkey);
 static int frontend_track_level_exists(int track_index);
 static uint8_t s_font_glyph_advance[96];
 static const uint8_t k_font_glyph_advance_default[96] = {
@@ -607,7 +607,10 @@ static int frontend_load_car_preview_surface(int car_index, int paint_index) {
     if (car_index < 0 || car_index >= (int)(sizeof(s_car_zip_paths) / sizeof(s_car_zip_paths[0])))
         return 0;
     snprintf(entry, sizeof(entry), "CarPic%d.tga", paint_index & 3);
-    return frontend_load_tga(entry, s_car_zip_paths[car_index]);
+    /* Car preview PNGs have a blue (0,0,90) background — key it out so the
+     * car silhouette floats over the CarSel background.
+     * [CONFIRMED]: all carpic*.png in re/assets/cars have corners (0,0,90,255). */
+    return frontend_load_surface_keyed(entry, s_car_zip_paths[car_index], TD5_COLORKEY_BLUE88);
 }
 
 /* Draw a surface OPAQUE: all pixels (including black) rendered as-is, no color key.
@@ -779,9 +782,11 @@ static int frontend_load_tga_colorkey(const char *name, const char *archive,
     return 0;
 }
 
-/* Load a TGA into a surface slot, making near-black pixels (R<8,G<8,B<8) transparent.
- * Track preview TGAs use black as the background color key. */
-static int frontend_load_tga_black_key(const char *name, const char *archive) {
+/* Load a TGA/PNG into a surface slot with a caller-specified color key.
+ * colorkey = TD5_COLORKEY_BLACK: keys near-black pixels (track previews)
+ * colorkey = TD5_COLORKEY_BLUE88: keys (0,0,~90) blue pixels (car previews)
+ * colorkey = TD5_COLORKEY_NONE: no keying (opaque blit) */
+static int frontend_load_surface_keyed(const char *name, const char *archive, TD5_ColorKeyMode colorkey) {
     int existing_handle;
 
     const char *bare_name = name;
@@ -803,10 +808,10 @@ static int frontend_load_tga_black_key(const char *name, const char *archive) {
     char png_path[256];
 
     if (td5_asset_resolve_png_path(bare_name, real_archive, png_path, sizeof(png_path)))
-        td5_asset_load_png_to_buffer(png_path, TD5_COLORKEY_BLACK, &pixels, &w, &h);
+        td5_asset_load_png_to_buffer(png_path, colorkey, &pixels, &w, &h);
 
     if (!pixels) {
-        TD5_LOG_W(LOG_TAG, "LoadTGA_BK failed: %s from %s (no PNG found)", name, archive);
+        TD5_LOG_W(LOG_TAG, "LoadSurfaceKeyed failed: %s from %s ck=%d (no PNG found)", name, archive, (int)colorkey);
         return 0;
     }
 
@@ -829,7 +834,7 @@ static int frontend_load_tga_black_key(const char *name, const char *archive) {
         strncpy(s_surfaces[slot].png_path, png_path, sizeof(s_surfaces[slot].png_path) - 1);
         s_surfaces[slot].png_path[sizeof(s_surfaces[slot].png_path) - 1] = '\0';
         free(pixels);
-        TD5_LOG_I(LOG_TAG, "LoadTGA_BK OK: %s → slot=%d page=%d %dx%d", bare_name, slot, page, w, h);
+        TD5_LOG_I(LOG_TAG, "LoadSurfaceKeyed OK: %s → slot=%d page=%d %dx%d ck=%d", bare_name, slot, page, w, h, (int)colorkey);
         return slot + 1;
     }
     free(pixels);
@@ -987,7 +992,7 @@ static void frontend_load_selected_track_preview(void) {
               : s_selected_track;
     snprintf(entry, sizeof(entry), "trak%04d.tga", tga_idx);
     /* Black background is color-keyed out so the track outline floats over the scene background. */
-    s_track_preview_surface = frontend_load_tga_black_key(entry, "Front End/Tracks/Tracks.zip");
+    s_track_preview_surface = frontend_load_surface_keyed(entry, "Front End/Tracks/Tracks.zip", TD5_COLORKEY_BLACK);
 }
 
 /* --- Button System --- */
@@ -3456,6 +3461,13 @@ static void frontend_render_track_selection_preview(float sx, float sy) {
     }
     /* Track preview: 152x224 portrait, right of buttons.
      * x=EDI+0x12E=412, y=ESI+0x36=135 (640x480) */
+    {
+        static int s_track_preview_log = 0;
+        if (s_track_preview_log < 4) {
+            TD5_LOG_I(LOG_TAG, "TrackPreview: surface=%d track=%d", s_track_preview_surface, s_selected_track);
+            s_track_preview_log++;
+        }
+    }
     if (s_track_preview_surface > 0) {
         fe_draw_surface_rect(s_track_preview_surface, 412.0f * sx, 135.0f * sy, 152.0f * sx, 224.0f * sy, 0xFFFFFFFF);
     }
