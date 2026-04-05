@@ -52,7 +52,12 @@ VS_OUTPUT main(VS_INPUT input)
     float ndcY = (input.pos.y / viewportHeight) * -2.0 + 1.0;
     float z = saturate(input.pos.z);
 
-    output.pos = float4(ndcX, ndcY, z, 1.0);
+    /* Use RHW (input.pos.w = 1/view_z) to reconstruct proper W for
+     * perspective-correct interpolation.  Without this, the GPU does
+     * affine (linear) interpolation causing warped geometry at screen edges. */
+    float rhw = max(input.pos.w, 0.0001);
+    float w = 1.0 / rhw;
+    output.pos = float4(ndcX * w, ndcY * w, z * w, w);
     output.diffuse  = input.diffuse;
     output.specular = input.specular;
     output.uv       = input.uv;
