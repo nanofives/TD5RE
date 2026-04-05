@@ -71,9 +71,10 @@ extern uint32_t g_tick_counter;
 #define IMMEDIATE_MAX_VERTS   1024
 #define IMMEDIATE_MAX_INDICES 4096
 
-/* Forward declarations for trig (defined later in this file) */
+/* Forward declarations for trig and matrix builders (defined later in this file) */
 float CosFloat12bit(unsigned int angle);
 float SinFloat12bit(int angle);
+void BuildRotationMatrixFromAngles(float *out, short *angles);
 
 /** Near/far clip defaults */
 #define DEFAULT_NEAR_CLIP   1.0f
@@ -1452,14 +1453,41 @@ void td5_render_actors_for_view(int view_index)
 
             td5_track_apply_segment_lighting(actor, view_index);
 
-            /* Original (0x40BD20 / ApplyMeshRenderBasisFromTransform):
-             * camera_basis * actor_rotation, no axis negation. */
-            mat3x3_mul(s_camera_basis, actor->rotation_matrix.m, view_rot.m);
-            td5_render_load_rotation(&view_rot);
+            /* Original (0x40C120): compute interpolated render position.
+             * render_pos = (world_pos + linear_velocity * g_subTickFraction) / 256.
+             * [CONFIRMED @ 0x40C164-0x40C1D4] */
+            {
+                extern float g_subTickFraction;
+                float frac = g_subTickFraction;
+                float interp_x = (float)actor->world_pos.x + (float)actor->linear_velocity_x * frac;
+                float interp_y = (float)actor->world_pos.y + (float)actor->linear_velocity_y * frac;
+                float interp_z = (float)actor->world_pos.z + (float)actor->linear_velocity_z * frac;
+                render_pos.x = interp_x * (1.0f / 256.0f);
+                render_pos.y = interp_y * (1.0f / 256.0f);
+                render_pos.z = interp_z * (1.0f / 256.0f);
+            }
 
-            render_pos.x = actor->render_pos.x;
-            render_pos.y = actor->render_pos.y;
-            render_pos.z = actor->render_pos.z;
+            /* Original (0x40C1E2-0x40C25E): build interpolated rotation matrix
+             * from display_angles + angular_velocity * (1/256 * g_subTickFraction).
+             * [CONFIRMED @ 0x40C220: DAT_004749d0 = 0.00390625 = 1/256] */
+            {
+                extern float g_subTickFraction;
+                float ang_scale = (1.0f / 256.0f) * g_subTickFraction;
+                /* display_angles: {roll, yaw, pitch} at +0x208 */
+                /* BuildRotationMatrixFromAngles expects {pitch, yaw, roll} */
+                short interp_angles[3];
+                interp_angles[0] = (short)(actor->display_angles.pitch
+                    + (int)(actor->angular_velocity_pitch * ang_scale + 0.5f));
+                interp_angles[1] = (short)(actor->display_angles.yaw
+                    + (int)(actor->angular_velocity_yaw * ang_scale + 0.5f));
+                interp_angles[2] = (short)(actor->display_angles.roll
+                    + (int)(actor->angular_velocity_roll * ang_scale + 0.5f));
+
+                float actor_rot[9];
+                BuildRotationMatrixFromAngles(actor_rot, interp_angles);
+                mat3x3_mul(s_camera_basis, actor_rot, view_rot.m);
+            }
+            td5_render_load_rotation(&view_rot);
             td5_render_load_translation(&render_pos);
 
             if (!td5_render_test_mesh_frustum(mesh, &depth))
