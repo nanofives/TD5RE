@@ -24,6 +24,9 @@
 
 #include "td5_types.h"
 
+/* Forward declaration for per-probe track update */
+struct TD5_TrackProbeState;
+
 /* ========================================================================
  * Track Light Entry (36 bytes, 0x24 stride)
  *
@@ -118,6 +121,8 @@ const void *td5_track_get_models_display_list_raw(int index, size_t *size_out);
 
 /* --- Actor track position --- */
 void td5_track_update_actor_position(TD5_Actor *actor);
+void td5_track_update_probe_position(struct TD5_TrackProbeState *probe,
+                                     int32_t world_x, int32_t world_z);
 int  td5_track_get_surface_type(TD5_Actor *actor, int probe_index);
 void td5_track_compute_heading(TD5_Actor *actor);
 

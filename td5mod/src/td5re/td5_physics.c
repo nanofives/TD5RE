@@ -1948,6 +1948,12 @@ void td5_physics_integrate_pose(TD5_Actor *actor)
     actor->world_pos.y += actor->linear_velocity_y;
     actor->world_pos.z += actor->linear_velocity_z;
 
+    /* 3b. Update chassis track position from new world pos.
+     * Original calls FUN_004440F0 here [CONFIRMED @ 0x405E80 callees].
+     * Without this, track_span_raw stays at 0 and wall checks use the
+     * wrong span — the primary reason collisions don't work. */
+    td5_track_update_actor_position(actor);
+
     /* 4. Convert accumulators to 12-bit display angles */
     actor->display_angles.roll  = (int16_t)((actor->euler_accum.roll >> 8) & 0xFFF);
     actor->display_angles.yaw   = (int16_t)((actor->euler_accum.yaw >> 8) & 0xFFF);
@@ -2214,6 +2220,13 @@ void td5_physics_refresh_wheel_contacts(TD5_Actor *actor)
         actor->wheel_contact_pos[i].x = actor->world_pos.x + (world_x << 0);
         actor->wheel_contact_pos[i].y = actor->world_pos.y + (world_y << 0);
         actor->wheel_contact_pos[i].z = actor->world_pos.z + (world_z << 0);
+
+        /* Per-probe track position update [CONFIRMED @ 0x403720].
+         * Original calls FUN_004440F0 per probe with probe's own world pos.
+         * This gives each wheel its own span for accurate edge testing. */
+        td5_track_update_probe_position(&actor->wheel_probes[i],
+                                        actor->wheel_contact_pos[i].x,
+                                        actor->wheel_contact_pos[i].z);
 
         /* Compute wheel vertical force from the probed span surface. */
         int32_t wheel_y = actor->wheel_contact_pos[i].y;

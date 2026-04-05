@@ -1602,6 +1602,26 @@ void td5_track_update_actor_position(TD5_Actor *actor)
     }
 }
 
+/**
+ * UpdateProbeTrackPosition -- per-probe variant of UpdateActorTrackPosition
+ *
+ * The original FUN_004440F0 is called per wheel probe from
+ * RefreshVehicleWheelContactFrames (0x403720) with each probe's own
+ * track state and world position. This gives each probe its own
+ * span index for accurate wall edge testing.
+ */
+void td5_track_update_probe_position(TD5_TrackProbeState *probe,
+                                     int32_t world_x, int32_t world_z)
+{
+    if (!probe || !s_span_array || s_span_count == 0)
+        return;
+
+    /* TD5_TrackProbeState layout matches the int16_t[8] layout expected
+     * by update_position_recursive: [0]=span_index, [1]=normalized,
+     * [2]=accumulated, [3]=high_water, ... [6]=sub_lane_index (byte 12) */
+    update_position_recursive((int16_t *)probe, world_x, world_z, 0);
+}
+
 /* ========================================================================
  * Barycentric Contact Resolution (0x4456D0 / 0x445A70)
  *
