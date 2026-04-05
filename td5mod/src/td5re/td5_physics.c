@@ -650,9 +650,9 @@ void td5_physics_update_player(TD5_Actor *actor)
     int32_t front_lat_force = -(front_slip * ((grip[0] + grip[1]) >> 1)) >> 8;
 
     /* Rear axle lateral force.
-     * Arcade mode: reduce rear slip by ~25% to limit oversteer tendency.
-     * 192/256 = 0.75x slip -> less tail-out behavior. */
-    int32_t rear_slip = v_lat;
+     * Original at 0x4041E0: rear slip uses heading rotation (not steered heading).
+     * Arcade mode: reduce rear slip by ~25% to limit oversteer tendency. */
+    int32_t rear_slip = (v_lat * cos_h - v_long * sin_h) >> 12;
     if (s_dynamics_mode == 0) {
         rear_slip = (rear_slip * 192) >> 8;  /* 0.75x in arcade */
     }
@@ -704,23 +704,48 @@ void td5_physics_update_player(TD5_Actor *actor)
         }
     }
 
-    /* --- 14. Yaw torque, clamp [-0x578, +0x578] --- */
+    /* --- 14. Yaw torque, clamp [-0x578, +0x578] ---
+     *
+     * Original formula at 0x404C96-0x404CCC:
+     *   yaw = (cos_s * front_weight * rear_long
+     *        + (rear_lat - front_lat) * 500
+     *        - front_long * rear_weight)
+     *        / (inertia / 0x28C)
+     *
+     * The dominant term is the lateral force difference * 500 — this is the
+     * primary yaw torque source from steering. The longitudinal terms provide
+     * weight-transfer coupling (understeer/oversteer under throttle).
+     * [CONFIRMED: *500 via LEA chain at 0x404CA0-0x404CBF] */
     {
         int32_t inertia = PHYS_I(actor, 0x20);
         int32_t inertia_div = inertia / 0x28C;
         if (inertia_div == 0) inertia_div = 1;
 
-        /* Yaw torque = (front_lat * cos(steer) * rear_arm - rear_lat * front_arm) / inertia */
-        int32_t front_moment = (front_lat_force * cos_s) >> 12;
-        front_moment = (front_moment * rear_weight) >> 8;
-        int32_t rear_moment = (rear_lat_force * front_weight) >> 8;
+        /* Term 1: cos(steer) * front_weight * rear_long_force [CONFIRMED @ 0x404C96] */
+        int32_t term1 = ((cos_s * front_weight) >> 12);
+        term1 = (term1 * rear_long) >> 8;
 
-        int32_t yaw_torque = (front_moment - rear_moment) / inertia_div;
+        /* Term 2 (DOMINANT): lateral force difference * 500 [CONFIRMED @ 0x404CA0] */
+        int32_t lat_diff = rear_lat_force - front_lat_force;
+        int32_t term2 = lat_diff * 500;
+
+        /* Term 3: front_long_force * rear_weight [CONFIRMED @ 0x404CBF] */
+        int32_t term3 = (front_long * rear_weight) >> 8;
+
+        int32_t yaw_torque = (term1 + term2 - term3) / inertia_div;
 
         if (yaw_torque > TD5_YAW_TORQUE_MAX) yaw_torque = TD5_YAW_TORQUE_MAX;
         if (yaw_torque < -TD5_YAW_TORQUE_MAX) yaw_torque = -TD5_YAW_TORQUE_MAX;
 
         actor->angular_velocity_yaw += yaw_torque;
+
+        if (actor->slot_index == 0 && (actor->frame_counter % 120u) == 0u) {
+            TD5_LOG_I(LOG_TAG,
+                      "YAW: torque=%d ang_vel=%d heading=%d t1=%d t2=%d t3=%d idiv=%d",
+                      yaw_torque, actor->angular_velocity_yaw,
+                      (actor->euler_accum.yaw >> 8) & 0xFFF,
+                      term1, term2, term3, inertia_div);
+        }
     }
 
     /* --- Apply longitudinal and lateral forces back to world frame --- */
@@ -892,7 +917,9 @@ void td5_physics_update_ai(TD5_Actor *actor)
 
     int32_t front_slip = (v_lat * cos_s - v_long * sin_s) >> 12;
     int32_t front_lat = -(front_slip * grip_front) >> 8;
-    int32_t rear_lat  = -(v_lat * grip_rear) >> 8;
+    /* Rear slip uses heading rotation [CONFIRMED @ 0x4041E0] */
+    int32_t rear_slip_ai = (v_lat * cos_h - v_long * sin_h) >> 12;
+    int32_t rear_lat  = -(rear_slip_ai * grip_rear) >> 8;
 
     /* Slip detection (no per-wheel slip circle for AI) */
     {
@@ -906,16 +933,19 @@ void td5_physics_update_ai(TD5_Actor *actor)
         actor->rear_axle_slip_excess  = (rear_combined > glr)  ? rear_combined - glr  : 0;
     }
 
-    /* --- Yaw torque --- */
+    /* --- Yaw torque (same formula as player, 0x404C96) --- */
     {
         int32_t inertia = PHYS_I(actor, 0x20);
         int32_t inertia_div = inertia / 0x28C;
         if (inertia_div == 0) inertia_div = 1;
 
-        int32_t front_moment = (front_lat * cos_s) >> 12;
-        front_moment = (front_moment * rear_weight) >> 8;
-        int32_t rear_moment = (rear_lat * front_weight) >> 8;
-        int32_t yaw_torque = (front_moment - rear_moment) / inertia_div;
+        int32_t term1 = ((cos_s * front_weight) >> 12);
+        term1 = (term1 * rear_drive) >> 8;
+        int32_t lat_diff = rear_lat - front_lat;
+        int32_t term2 = lat_diff * 500;
+        int32_t term3 = (front_drive * rear_weight) >> 8;
+
+        int32_t yaw_torque = (term1 + term2 - term3) / inertia_div;
 
         if (yaw_torque > TD5_YAW_TORQUE_MAX) yaw_torque = TD5_YAW_TORQUE_MAX;
         if (yaw_torque < -TD5_YAW_TORQUE_MAX) yaw_torque = -TD5_YAW_TORQUE_MAX;
