@@ -1792,17 +1792,17 @@ void td5_hud_render_overlays(float dt)
             float cx = vl->vp_int_right - sx * 64.0f;
             float cy = vl->vp_int_bottom - sy * 56.0f;
 
-            /* Needle tip (45 units from center) and base (9 units back) */
-            float tip_x = cx - cos_a * sx * 45.0f;
-            float tip_y = cy - sin_a * sy * 45.0f;
+            /* V0: near end (9 units into dial), V2: far tip (45 units out) */
+            float near_x = cx - cos_a * sx * 9.0f;
+            float near_y = cy - sin_a * sy * 9.0f;
 
             float base_offset_x = sin_a * sx * 2.0f;
             float base_offset_y = cos_a * sy * 2.0f;
 
-            float base_x = cx + cos_a * sx * 9.0f;
-            float base_y = cy + sin_a * sy * 9.0f;
+            float tip_x = cx + cos_a * sx * 45.0f;
+            float tip_y = cy + sin_a * sy * 45.0f;
 
-            /* Build needle quad (4 vertices: tip, left-base, center-back, right-base) */
+            /* Build needle quad: V0=near(9), V1=left-perp, V2=far-tip(45), V3=right-perp */
             /* Needle uses mode 1 (position + color, no texture) */
             struct {
                 void *dest;
@@ -1816,14 +1816,14 @@ void td5_hud_render_overlays(float dt)
 
             needle_params.dest = view_base + 0x39C; /* needle quad offset */
             needle_params.mode = 1;
-            needle_params.x[0] = tip_x;
-            needle_params.x[1] = base_x - base_offset_x;
-            needle_params.x[2] = base_x + base_offset_x;
-            needle_params.x[3] = base_x;
-            needle_params.y[0] = tip_y;
-            needle_params.y[1] = base_y + base_offset_y;
-            needle_params.y[2] = base_y - base_offset_y;
-            needle_params.y[3] = base_y;
+            needle_params.x[0] = near_x;
+            needle_params.x[1] = cx - base_offset_x;
+            needle_params.x[2] = tip_x;
+            needle_params.x[3] = cx + base_offset_x;
+            needle_params.y[0] = near_y;
+            needle_params.y[1] = cy + base_offset_y;
+            needle_params.y[2] = tip_y;
+            needle_params.y[3] = cy - base_offset_y;
             for (int i = 0; i < 4; i++) needle_params.depth[i] = HUD_DEPTH;
             memset(needle_params.u, 0, sizeof(needle_params.u));
             memset(needle_params.v, 0, sizeof(needle_params.v));
