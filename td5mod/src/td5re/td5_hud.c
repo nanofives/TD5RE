@@ -28,6 +28,7 @@
 #include "td5_track.h"
 #include "td5re.h"
 
+#include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
 #include <stdarg.h>
@@ -352,12 +353,15 @@ static void hud_build_quad(void *dest, int mode, int tex_page,
     p.depth_z[2] = depth; p.depth_z[3] = depth;
 
     /* Normalize pixel atlas UVs to [0,1] for D3D11 sampler.
-     * Static atlas pages are 256x256 BGRA32. The original engine uses
-     * 1/256 for both axes (confirmed from BuildSpriteQuadTemplate @ 0x432BD0,
-     * constant at [0x4749D0] = 0.00390625 = 1/256). Solid-color 1x1 pages
-     * work correctly with any UV under WRAP mode. */
-    u0 /= 256.0f; v0 /= 256.0f;
-    u1 /= 256.0f; v1 /= 256.0f;
+     * Original engine uses 1/256 for both axes (BuildSpriteQuadTemplate
+     * @ 0x432BD0, constant [0x4749D0] = 0.00390625 = 1/256).
+     * Query actual texture dimensions so hi-res replacement pages work. */
+    {
+        int tw = 256, th = 256;
+        td5_plat_render_get_texture_dims(tex_page, &tw, &th);
+        u0 /= (float)tw; v0 /= (float)th;
+        u1 /= (float)tw; v1 /= (float)th;
+    }
 
     p.tex_u[0] = u0; p.tex_u[1] = u0; p.tex_u[2] = u1; p.tex_u[3] = u1;
     p.tex_v[0] = v0; p.tex_v[1] = v1; p.tex_v[2] = v1; p.tex_v[3] = v0;
@@ -527,15 +531,37 @@ void td5_hud_init_font_atlas(void)
         static uint8_t s_font_page_buf[256 * 256 * 4];
         {
             int tpage_slot = (int)(font_entry->texture_page - 700);
-            char tpage_path[128];
-            snprintf(tpage_path, sizeof(tpage_path),
-                     "../re/assets/static/tpage%d.dat", tpage_slot);
-            FILE *tf = fopen(tpage_path, "rb");
-            if (tf) {
-                fread(s_font_page_buf, 1, sizeof(s_font_page_buf), tf);
-                fclose(tf);
-            } else {
-                memset(s_font_page_buf, 0, sizeof(s_font_page_buf));
+            int loaded = 0;
+
+            /* Try PNG from td5_png_clean first */
+            {
+                char png_path[128];
+                void *png_pixels = NULL;
+                int pw = 0, ph = 0;
+                snprintf(png_path, sizeof(png_path),
+                         "../re/td5_png_clean/static/tpage%d.png", tpage_slot);
+                if (td5_asset_decode_png_rgba32(png_path, &png_pixels, &pw, &ph)
+                    && pw == 256 && ph == 256) {
+                    memcpy(s_font_page_buf, png_pixels, 256 * 256 * 4);
+                    free(png_pixels);
+                    loaded = 1;
+                } else if (png_pixels) {
+                    free(png_pixels);
+                }
+            }
+
+            /* Fallback: raw .dat BGRA */
+            if (!loaded) {
+                char tpage_path[128];
+                snprintf(tpage_path, sizeof(tpage_path),
+                         "../re/assets/static/tpage%d.dat", tpage_slot);
+                FILE *tf = fopen(tpage_path, "rb");
+                if (tf) {
+                    fread(s_font_page_buf, 1, sizeof(s_font_page_buf), tf);
+                    fclose(tf);
+                } else {
+                    memset(s_font_page_buf, 0, sizeof(s_font_page_buf));
+                }
             }
         }
 
@@ -1745,16 +1771,19 @@ void td5_hud_render_overlays(float dt)
             int32_t engine_speed = actor_engine_speed(actor_slot);
             int16_t max_rpm     = actor_max_rpm(actor_slot);
 
-            /* Needle sweeps counterclockwise from 7 o'clock (0 RPM) to 11 o'clock (redline).
-             * Base 0xD55 = 7 o'clock; subtract RPM contribution to sweep counterclockwise.
-             * Sweep range 0xA5A ≈ 233° matches the original dial arc. */
+            /* Needle sweeps clockwise from ~7 o'clock (0 RPM) to ~5 o'clock (redline).
+             * Base 0x400 (90° in 12-bit); add RPM contribution to sweep clockwise.
+             * Sweep range 0xA5A ≈ 233° matches the original dial arc.
+             * Original formula: angle = (speed * 0xA5A) / maxRPM + 0x400 */
             uint32_t needle_angle;
             if (max_rpm > 0) {
                 uint32_t rpm_offset = (uint32_t)((engine_speed * 0xA5A) / (int32_t)max_rpm);
-                needle_angle = (uint32_t)((int32_t)0xD55 - (int32_t)rpm_offset) & 0xFFF;
+                needle_angle = (rpm_offset + 0x400) & 0xFFF;
             } else {
-                needle_angle = 0xD55;
+                needle_angle = 0x400;
             }
+
+            TD5_LOG_I(LOG_TAG, "speedo: rpm=%d max=%d angle=0x%03X", engine_speed, max_rpm, needle_angle);
 
             float cos_a = td5_cos_12bit(needle_angle);
             float sin_a = td5_sin_12bit(needle_angle);
@@ -1996,6 +2025,12 @@ void td5_hud_render_overlays(float dt)
 
     /* Flush queued text glyphs */
     td5_hud_flush_text();
+
+    /* Debug overlay (gated by td5re.ini DebugOverlay setting) */
+    if (g_td5.ini.debug_overlay) {
+        td5_hud_queue_text(0, 8, 8, 0, "FPS: %.0f", g_td5.instant_fps);
+        td5_hud_flush_text();
+    }
 
     /* Radial pulse effect */
     td5_render_radial_pulse(dt);
