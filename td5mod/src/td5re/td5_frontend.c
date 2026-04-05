@@ -360,7 +360,8 @@ static int s_title_tex_h[TD5_SCREEN_COUNT];
 /* Forward declarations for functions used before their definitions */
 static int frontend_load_tga(const char *name, const char *archive);
 static int frontend_load_tga_colorkey(const char *name, const char *archive,
-                                      int page_override, int *w_out, int *h_out);
+                                      int page_override, int *w_out, int *h_out,
+                                      TD5_ColorKeyMode colorkey);
 static int frontend_load_tga_black_key(const char *name, const char *archive);
 static int frontend_track_level_exists(int track_index);
 static uint8_t s_font_glyph_advance[96];
@@ -590,8 +591,11 @@ static int frontend_ensure_title_texture(TD5_ScreenIndex screen) {
 
     if (!entry || page < 0) return 0;
     if (screen >= 0 && screen < TD5_SCREEN_COUNT && s_title_tex_page[screen] == page) return 1;
+    /* Title TGAs have black backgrounds in the PNG files → use black colorkey.
+     * [CONFIRMED]: all *Text.png files in re/assets/frontend/ have corners (0,0,0). */
     if (!frontend_load_tga_colorkey(entry, "Front End/frontend.zip", page,
-                                    &s_title_tex_w[screen], &s_title_tex_h[screen])) {
+                                    &s_title_tex_w[screen], &s_title_tex_h[screen],
+                                    TD5_COLORKEY_BLACK)) {
         return 0;
     }
     s_title_tex_page[screen] = page;
@@ -722,7 +726,8 @@ static int frontend_load_tga(const char *name, const char *archive) {
  * become fully transparent (alpha=0).
  */
 static int frontend_load_tga_colorkey(const char *name, const char *archive,
-                                       int dest_page, int *out_w, int *out_h) {
+                                       int dest_page, int *out_w, int *out_h,
+                                       TD5_ColorKeyMode colorkey) {
     const char *bare_name = name;
     const char *slash = strrchr(name, '/');
     if (slash) bare_name = slash + 1;
@@ -740,7 +745,7 @@ static int frontend_load_tga_colorkey(const char *name, const char *archive,
     int from_png = 0;
 
     if (td5_asset_resolve_png_path(bare_name, real_archive, png_path, sizeof(png_path))) {
-        if (td5_asset_load_png_to_buffer(png_path, TD5_COLORKEY_RED, &pixels, &w, &h)) {
+        if (td5_asset_load_png_to_buffer(png_path, colorkey, &pixels, &w, &h)) {
             from_png = 1;
             /* Font page also needs black keying */
             if (dest_page == SHARED_PAGE_FONT) {
@@ -764,8 +769,8 @@ static int frontend_load_tga_colorkey(const char *name, const char *archive,
         }
         if (out_w) *out_w = w;
         if (out_h) *out_h = h;
-        TD5_LOG_I(LOG_TAG, "LoadTGA_CK OK: %s -> page=%d %dx%d%s",
-                  bare_name, dest_page, w, h, from_png ? " (PNG)" : "");
+        TD5_LOG_I(LOG_TAG, "LoadTGA_CK OK: %s -> page=%d %dx%d%s ck=%d",
+                  bare_name, dest_page, w, h, from_png ? " (PNG)" : "", (int)colorkey);
         free(pixels);
         return 1;
     }
@@ -2487,7 +2492,8 @@ int td5_frontend_init_resources(void) {
     if (s_font_page < 0) {
         int font_w = 0, font_h = 0;
         if (frontend_load_tga_colorkey("BodyText.tga", "Front End/frontend.zip",
-                                        SHARED_PAGE_FONT, &font_w, &font_h)) {
+                                        SHARED_PAGE_FONT, &font_w, &font_h,
+                                        TD5_COLORKEY_BLACK)) {
             s_font_page = SHARED_PAGE_FONT;
             TD5_LOG_I(LOG_TAG, "Font atlas loaded: BodyText.tga page=%d %dx%d",
                       s_font_page, font_w, font_h);
@@ -2642,8 +2648,10 @@ int td5_frontend_init_resources(void) {
     /* ---- SnkMouse.TGA (cursor) ---- */
     if (s_cursor_tex_page < 0) {
         s_cursor_tex_page = SHARED_PAGE_CURSOR;
+        /* SnkMouse.png has a red background → use red colorkey. */
         if (!frontend_load_tga_colorkey("snkmouse.tga", "Front End/frontend.zip",
-                                         s_cursor_tex_page, &s_cursor_w, &s_cursor_h)) {
+                                         s_cursor_tex_page, &s_cursor_w, &s_cursor_h,
+                                         TD5_COLORKEY_RED)) {
             TD5_LOG_W(LOG_TAG, "Failed to load snkmouse.tga cursor texture");
             s_cursor_tex_page = -1;
         } else {
@@ -5909,6 +5917,7 @@ static void Screen_DisplayOptions(void) {
                 changed = 1;
             } else if (active_button == 1 && delta != 0) {
                 s_display_fog_enabled = !s_display_fog_enabled;
+                g_td5.ini.fog_enabled = s_display_fog_enabled;
                 changed = 1;
             } else if (active_button == 2 && delta != 0) {
                 s_display_speed_units = !s_display_speed_units;

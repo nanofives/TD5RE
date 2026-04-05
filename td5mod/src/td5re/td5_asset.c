@@ -128,8 +128,8 @@ static int build_extracted_level_path(char *out_path, size_t out_size,
     int level_num;
     const char *base;
     static const char *k_roots[] = {
-        "../re/assets/levels",
-        "../re/td5_dump/levels"
+        "re/assets/levels",
+        "re/td5_dump/levels"
     };
 
     if (!out_path || out_size == 0 || !entry_name || !zip_path)
@@ -151,6 +151,101 @@ static int build_extracted_level_path(char *out_path, size_t out_size,
     }
 
     return 0;
+}
+
+/* Forward declarations for loose file helpers (defined after Module State) */
+static int try_loose_file_size(const char *name);
+static int try_loose_file_read(const char *name, void *buf, int max_size);
+
+/**
+ * Generic archive-to-extracted-asset path resolver.
+ * Maps any archive path (e.g. "cars/vip.zip", "SOUND/SOUND.ZIP",
+ * "Front End/frontend.zip") to the corresponding re/assets/ subfolder
+ * and checks if the loose file exists there.
+ * Returns 1 if resolved path exists, 0 otherwise.
+ */
+static int build_extracted_asset_path(char *out_path, size_t out_size,
+                                      const char *entry_name,
+                                      const char *zip_path)
+{
+    char subfolder[128] = {0};
+    const char *zp;
+    int n;
+
+    if (!out_path || out_size == 0 || !entry_name || !zip_path)
+        return 0;
+
+    zp = zip_path;
+    while (*zp == '\\' || *zp == '/') zp++;
+
+    /* levels are handled by build_extracted_level_path — skip here */
+    if (_strnicmp(zp, "level", 5) == 0 && zp[5] >= '0' && zp[5] <= '9')
+        return 0;
+
+    if (_strnicmp(zp, "cars\\", 5) == 0 || _strnicmp(zp, "cars/", 5) == 0) {
+        const char *base = zp + 5;
+        n = 0;
+        while (base[n] && base[n] != '.') n++;
+        snprintf(subfolder, sizeof(subfolder), "cars/%.*s", n, base);
+    }
+    else if (_strnicmp(zp, "static.zip", 10) == 0)
+        strncpy(subfolder, "static", sizeof(subfolder) - 1);
+    else if (_strnicmp(zp, "traffic.zip", 11) == 0)
+        strncpy(subfolder, "traffic", sizeof(subfolder) - 1);
+    else if (_strnicmp(zp, "environs.zip", 12) == 0)
+        strncpy(subfolder, "environs", sizeof(subfolder) - 1);
+    else if (_strnicmp(zp, "loading.zip", 11) == 0)
+        strncpy(subfolder, "loading", sizeof(subfolder) - 1);
+    else if (_strnicmp(zp, "legals.zip", 10) == 0)
+        strncpy(subfolder, "legals", sizeof(subfolder) - 1);
+    else if (_strnicmp(zp, "cup.zip", 7) == 0)
+        strncpy(subfolder, "cup", sizeof(subfolder) - 1);
+    else if (_strnicmp(zp, "sound", 5) == 0)
+        strncpy(subfolder, "sound", sizeof(subfolder) - 1);
+    else if (_strnicmp(zp, "Front", 5) == 0) {
+        if (strstr(zp, "rontend") || strstr(zp, "rontEnd"))
+            strncpy(subfolder, "frontend", sizeof(subfolder) - 1);
+        else if (strstr(zp, "Extras.zip") || strstr(zp, "extras.zip"))
+            strncpy(subfolder, "extras", sizeof(subfolder) - 1);
+        else if (strstr(zp, "Mugshots") || strstr(zp, "mugshots"))
+            strncpy(subfolder, "mugshots", sizeof(subfolder) - 1);
+        else if (strstr(zp, "Sounds") || strstr(zp, "sounds"))
+            strncpy(subfolder, "sounds", sizeof(subfolder) - 1);
+        else if (strstr(zp, "Tracks") || strstr(zp, "tracks"))
+            strncpy(subfolder, "tracks", sizeof(subfolder) - 1);
+        else
+            return 0;
+    }
+    else
+        return 0;
+
+    subfolder[sizeof(subfolder) - 1] = '\0';
+
+    n = snprintf(out_path, out_size, "re/assets/%s/%s", subfolder, entry_name);
+    if (n > 0 && (size_t)n < out_size && td5_plat_file_exists(out_path))
+        return 1;
+
+    return 0;
+}
+
+static int try_loose_file_size(const char *name);
+static int try_loose_file_read(const char *name, void *buf, int max_size);
+
+static int try_extracted_asset_file_size(const char *name, const char *zip_path)
+{
+    char candidate[512];
+    if (build_extracted_asset_path(candidate, sizeof(candidate), name, zip_path))
+        return try_loose_file_size(candidate);
+    return -1;
+}
+
+static int try_extracted_asset_file_read(const char *name, const char *zip_path,
+                                         void *buf, int max_size)
+{
+    char candidate[512];
+    if (build_extracted_asset_path(candidate, sizeof(candidate), name, zip_path))
+        return try_loose_file_read(candidate, buf, max_size);
+    return -1;
 }
 
 /* ========================================================================
@@ -210,7 +305,7 @@ static int load_static_r5g6b5_tpage(int slot)
     uint8_t *bgra;
     FILE *f;
 
-    snprintf(path, sizeof(path), "../re/assets/static/tpage%d.dat", slot);
+    snprintf(path, sizeof(path), "re/assets/static/tpage%d.dat", slot);
     f = fopen(path, "rb");
     if (!f) return 0;
 
@@ -229,7 +324,7 @@ static int load_static_r5g6b5_tpage(int slot)
     return 1;
 }
 
-/** Try loading a static atlas page from td5_png_clean PNG files.
+/** Try loading a static atlas page from re/assets PNG files.
  *  td5_asset_decode_png_rgba32 handles R↔B swap to BGRA internally. */
 static int load_static_png_tpage(int slot)
 {
@@ -237,7 +332,7 @@ static int load_static_png_tpage(int slot)
     void *pixels = NULL;
     int w = 0, h = 0;
 
-    snprintf(path, sizeof(path), "../re/td5_png_clean/static/tpage%d.png", slot);
+    snprintf(path, sizeof(path), "re/assets/static/tpage%d.png", slot);
     if (td5_asset_decode_png_rgba32(path, &pixels, &w, &h)) {
         td5_plat_render_upload_texture(STATIC_ATLAS_BASE + slot, pixels, w, h, 2);
         stbi_image_free(pixels);
@@ -260,7 +355,7 @@ static void upload_atlas_placeholder(int slot)
 
 static void td5_asset_init_static_atlas(void)
 {
-    const char *hed_path = "../re/assets/static/static.hed";
+    const char *hed_path = "re/assets/static/static.hed";
     int32_t page_count = 0, entry_count = 0;
     FILE *f;
     int i;
@@ -308,7 +403,7 @@ static void td5_asset_init_static_atlas(void)
         ar->entry.texture_page = STATIC_ATLAS_BASE + tex_slot;
 
         /* Upload the page the first time we encounter this slot.
-         * Try PNG first (td5_png_clean has correct channel mapping), then .dat, then placeholder. */
+         * Try PNG first (re/assets has correct channel mapping), then .dat, then placeholder. */
         if (!s_static_page_done[tex_slot]) {
             if (load_static_png_tpage(tex_slot)) {
                 s_static_page_done[tex_slot] = 1;
@@ -875,6 +970,9 @@ int td5_asset_get_entry_size_from_path(const char *entry_name,
     loose_sz = try_extracted_level_file_size(entry_name, zip_path);
     if (loose_sz >= 0) return loose_sz;
 
+    loose_sz = try_extracted_asset_file_size(entry_name, zip_path);
+    if (loose_sz >= 0) return loose_sz;
+
     TD5_Archive *arc = td5_asset_open_archive(zip_path);
     if (!arc) return -1;
 
@@ -892,6 +990,9 @@ int td5_asset_read_entry_from_path(const char *entry_name,
     if (loose >= 0) return loose;
 
     loose = try_extracted_level_file_read(entry_name, zip_path, buf, max_size);
+    if (loose >= 0) return loose;
+
+    loose = try_extracted_asset_file_read(entry_name, zip_path, buf, max_size);
     if (loose >= 0) return loose;
 
     TD5_Archive *arc = td5_asset_open_archive(zip_path);
@@ -931,6 +1032,16 @@ void *td5_asset_open_and_read(const char *entry_name,
         void *buf = malloc((size_t)loose_sz);
         if (!buf) return NULL;
         int nread = try_extracted_level_file_read(entry_name, zip_path, buf, loose_sz);
+        if (nread < 0) { free(buf); return NULL; }
+        if (out_size) *out_size = nread;
+        return buf;
+    }
+
+    loose_sz = try_extracted_asset_file_size(entry_name, zip_path);
+    if (loose_sz >= 0) {
+        void *buf = malloc((size_t)loose_sz);
+        if (!buf) return NULL;
+        int nread = try_extracted_asset_file_read(entry_name, zip_path, buf, loose_sz);
         if (nread < 0) { free(buf); return NULL; }
         if (out_size) *out_size = nread;
         return buf;
@@ -989,7 +1100,7 @@ TD5_StaticHedEntry *td5_asset_find_entry_by_name(
     return NULL;
 }
 
-/* TGA decoder removed — all assets now loaded as PNG from td5_png_clean/ */
+/* TGA decoder removed — all assets now loaded as PNG from re/assets/ */
 
 /* ========================================================================
  * Level Data Loading -- LoadTrackRuntimeData (0x42FB90)
@@ -1050,13 +1161,13 @@ static int td5_asset_build_track_texture_png_path(int track_index,
         return 0;
 
     n = snprintf(out_path, out_size,
-                 "../re/td5_png_clean/levels/level%03d/textures/tex_%03d.png",
+                 "re/assets/levels/level%03d/textures/tex_%03d.png",
                  level_number, page_index);
     if (n > 0 && (size_t)n < out_size && td5_plat_file_exists(out_path))
         return 1;
 
     n = snprintf(out_path, out_size,
-                 "../re/assets/levels/level%03d/textures/tex_%03d.png",
+                 "re/assets/levels/level%03d/textures/tex_%03d.png",
                  level_number, page_index);
     if (n > 0 && (size_t)n < out_size && td5_plat_file_exists(out_path))
         return 1;
@@ -1205,7 +1316,7 @@ int td5_asset_resolve_png_path(const char *entry_name, const char *archive,
     if (!entry_name || !archive || !out_path || out_size < 16)
         return 0;
 
-    /* --- map archive path to td5_png_clean subfolder --- */
+    /* --- map archive path to re/assets subfolder --- */
     zp = archive;
     while (*zp == '\\' || *zp == '/') zp++;
 
@@ -1261,7 +1372,7 @@ int td5_asset_resolve_png_path(const char *entry_name, const char *archive,
     memcpy(stem, entry_name, n);
     stem[n] = '\0';
 
-    n = snprintf(out_path, out_size, "../re/td5_png_clean/%s/%s.png", subfolder, stem);
+    n = snprintf(out_path, out_size, "re/assets/%s/%s.png", subfolder, stem);
     if (n < 0 || (size_t)n >= out_size)
         return 0;
 
@@ -1304,7 +1415,7 @@ static void td5_asset_build_level_loose_path(int track_index,
                                              size_t out_size)
 {
     int level_number = td5_asset_level_number(track_index);
-    snprintf(out_path, out_size, "../re/assets/levels/level%03d/%s",
+    snprintf(out_path, out_size, "re/assets/levels/level%03d/%s",
              level_number, entry_name ? entry_name : "");
 }
 
@@ -1528,7 +1639,7 @@ int td5_asset_load_track_textures(int track_index)
     }
 
     TD5_LOG_I(LOG_TAG,
-              "track textures: %s page_count=%d loaded=%d map=page %d -> td5_png_clean/levels/level%03d/textures/tex_%%03d.png",
+              "track textures: %s page_count=%d loaded=%d map=page %d -> re/assets/levels/level%03d/textures/tex_%%03d.png",
               tex_data ? "TEXTURES.DAT" : "manifest-missing",
               page_count, loaded_count, 0, td5_asset_level_number(track_index));
 
@@ -1765,7 +1876,7 @@ int td5_asset_load_vehicle(int car_index, int slot)
         int skin_page = TD5_CAR_TEXTURE_PAGE_BASE + slot * 2;
         int hub_page  = TD5_CAR_TEXTURE_PAGE_BASE + slot * 2 + 1;
 
-        /* Try PNG from td5_png_clean, fall back to ZIP+TGA */
+        /* Try PNG from re/assets, fall back to ZIP+TGA */
         {
             char png_skin[256], png_hub[256];
             int skin_ok = 0, hub_ok = 0;
