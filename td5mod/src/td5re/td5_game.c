@@ -564,6 +564,10 @@ int td5_game_init_race_session(void) {
             s_slot_state[i].state = 3;  /* disabled */
         }
     }
+    /* Propagate player/AI state to physics module for dynamics dispatch */
+    for (int i = 0; i < TD5_MAX_RACER_SLOTS; i++) {
+        td5_physics_set_race_slot_state(i, s_slot_state[i].state == 1 ? 1 : 0);
+    }
     TD5_LOG_I(LOG_TAG,
               "InitRace step 3/19: race slots configured split=%d time_trial=%d traffic=%d",
               g_td5.split_screen_mode, g_td5.time_trial_enabled, g_td5.traffic_enabled);

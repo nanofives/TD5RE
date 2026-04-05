@@ -1748,7 +1748,11 @@ void td5_physics_integrate_pose(TD5_Actor *actor)
     actor->display_angles.yaw   = (int16_t)((actor->euler_accum.yaw >> 8) & 0xFFF);
     actor->display_angles.pitch = (int16_t)((actor->euler_accum.pitch >> 8) & 0xFFF);
 
-    /* 5. Build rotation matrix from euler angles (float boundary) */
+    /* 5. Build rotation matrix from euler angles (float boundary).
+     *
+     * Original (0x42E1E0): Ry(yaw) * Rx(roll) * Rz(pitch) — YXZ order.
+     * angles[0]=roll applied as X rotation, angles[1]=yaw as Y, angles[2]=pitch as Z.
+     * This matches BuildRotationMatrixFromAngles in td5_render.c. */
     {
         int32_t roll_a  = actor->display_angles.roll  & 0xFFF;
         int32_t yaw_a   = actor->display_angles.yaw   & 0xFFF;
@@ -1761,25 +1765,20 @@ void td5_physics_integrate_pose(TD5_Actor *actor)
         int32_t cp = cos_fixed12(pitch_a);
         int32_t sp = sin_fixed12(pitch_a);
 
-        /* ZYX euler rotation matrix (row-major).
-         * NOTE: the original binary (FUN_0042e1e0) includes a coordinate
-         * system conversion in its matrix, but the rest of the source port
-         * assumes standard identity. Do NOT change this formula without
-         * also updating all dependent code (wheel contacts, suspension,
-         * camera multiply, collision). */
+        /* Ry(yaw) * Rx(roll) * Rz(pitch) — verified against Ghidra 0x42E1E0 */
         float s = 1.0f / 4096.0f;
 
-        actor->rotation_matrix.m[0] = (float)((cy * cp) >> 12) * s;
-        actor->rotation_matrix.m[1] = (float)(((cy * sp >> 12) * sr >> 12) - ((sy * cr) >> 12)) * s;
-        actor->rotation_matrix.m[2] = (float)(((cy * sp >> 12) * cr >> 12) + ((sy * sr) >> 12)) * s;
+        actor->rotation_matrix.m[0] = (float)(((sp * sy >> 12) * sr >> 12) + ((cp * cy) >> 12)) * s;
+        actor->rotation_matrix.m[1] = (float)(((cp * sy >> 12) * sr >> 12) - ((sp * cy) >> 12)) * s;
+        actor->rotation_matrix.m[2] = (float)((sy * cr) >> 12) * s;
 
-        actor->rotation_matrix.m[3] = (float)((sy * cp) >> 12) * s;
-        actor->rotation_matrix.m[4] = (float)(((sy * sp >> 12) * sr >> 12) + ((cy * cr) >> 12)) * s;
-        actor->rotation_matrix.m[5] = (float)(((sy * sp >> 12) * cr >> 12) - ((cy * sr) >> 12)) * s;
+        actor->rotation_matrix.m[3] = (float)((sp * cr) >> 12) * s;
+        actor->rotation_matrix.m[4] = (float)((cp * cr) >> 12) * s;
+        actor->rotation_matrix.m[5] = (float)(-sr) * s;
 
-        actor->rotation_matrix.m[6] = (float)(-sp) * s;
-        actor->rotation_matrix.m[7] = (float)((cp * sr) >> 12) * s;
-        actor->rotation_matrix.m[8] = (float)((cp * cr) >> 12) * s;
+        actor->rotation_matrix.m[6] = (float)(((sp * cy >> 12) * sr >> 12) - ((cp * sy) >> 12)) * s;
+        actor->rotation_matrix.m[7] = (float)(((cp * cy >> 12) * sr >> 12) + ((sp * sy) >> 12)) * s;
+        actor->rotation_matrix.m[8] = (float)((cy * cr) >> 12) * s;
     }
 
     /* 6. Compute render position (world_pos / 256 as float) */
@@ -1916,16 +1915,16 @@ static void update_vehicle_pose_from_physics(TD5_Actor *actor)
 
         float s = 1.0f / 4096.0f;
 
-        /* ZYX euler (same as integrate_pose) */
-        actor->rotation_matrix.m[0] = (float)((cy * cp) >> 12) * s;
-        actor->rotation_matrix.m[1] = (float)(((cy * sp >> 12) * sr >> 12) - ((sy * cr) >> 12)) * s;
-        actor->rotation_matrix.m[2] = (float)(((cy * sp >> 12) * cr >> 12) + ((sy * sr) >> 12)) * s;
-        actor->rotation_matrix.m[3] = (float)((sy * cp) >> 12) * s;
-        actor->rotation_matrix.m[4] = (float)(((sy * sp >> 12) * sr >> 12) + ((cy * cr) >> 12)) * s;
-        actor->rotation_matrix.m[5] = (float)(((sy * sp >> 12) * cr >> 12) - ((cy * sr) >> 12)) * s;
-        actor->rotation_matrix.m[6] = (float)(-sp) * s;
-        actor->rotation_matrix.m[7] = (float)((cp * sr) >> 12) * s;
-        actor->rotation_matrix.m[8] = (float)((cp * cr) >> 12) * s;
+        /* Ry(yaw) * Rx(roll) * Rz(pitch) — same as integrate_pose */
+        actor->rotation_matrix.m[0] = (float)(((sp * sy >> 12) * sr >> 12) + ((cp * cy) >> 12)) * s;
+        actor->rotation_matrix.m[1] = (float)(((cp * sy >> 12) * sr >> 12) - ((sp * cy) >> 12)) * s;
+        actor->rotation_matrix.m[2] = (float)((sy * cr) >> 12) * s;
+        actor->rotation_matrix.m[3] = (float)((sp * cr) >> 12) * s;
+        actor->rotation_matrix.m[4] = (float)((cp * cr) >> 12) * s;
+        actor->rotation_matrix.m[5] = (float)(-sr) * s;
+        actor->rotation_matrix.m[6] = (float)(((sp * cy >> 12) * sr >> 12) - ((cp * sy) >> 12)) * s;
+        actor->rotation_matrix.m[7] = (float)(((cp * cy >> 12) * sr >> 12) + ((sp * sy) >> 12)) * s;
+        actor->rotation_matrix.m[8] = (float)((cy * cr) >> 12) * s;
     }
 
     /* Render position */
@@ -2851,6 +2850,15 @@ void td5_physics_set_paused(int paused)
     if (g_game_paused != paused) {
         TD5_LOG_I(LOG_TAG, "Physics paused=%d", paused);
         g_game_paused = paused;
+    }
+}
+
+void td5_physics_set_race_slot_state(int slot, int is_human)
+{
+    if (slot >= 0 && slot < 6) {
+        g_race_slot_state[slot] = is_human;
+        TD5_LOG_I(LOG_TAG, "Slot %d physics mode: %s", slot,
+                  is_human ? "player" : "AI");
     }
 }
 

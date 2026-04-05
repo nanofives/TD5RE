@@ -90,7 +90,9 @@ void td5_physics_resolve_vehicle_contacts(void);
 
 /* --- Dynamics mode --- */
 void td5_physics_set_dynamics(int mode);  /* 0=arcade, 1=simulation */
+int  td5_physics_get_dynamics(void);      /* returns current mode */
 void td5_physics_set_paused(int paused); /* 1=countdown (RPM only), 0=full sim */
+void td5_physics_set_race_slot_state(int slot, int is_human); /* 1=player, 0=AI */
 
 /* Load per-car physics tuning from carparam.dat (268 bytes).
  * Must be called before td5_physics_init_vehicle_runtime(). */

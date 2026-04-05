@@ -20,6 +20,7 @@
  */
 
 #include "td5_ai.h"
+#include "td5_track.h"
 #include "td5_platform.h"
 #include "td5re.h"
 #include <string.h>
@@ -79,6 +80,8 @@
 #define ACTOR_YAW_ACCUM           0x1F4   /* int32 */
 #define ACTOR_STEERING_CMD        0x30C   /* int32 */
 #define ACTOR_LONGITUDINAL_SPEED  0x314   /* int32 */
+#define ACTOR_LIN_VEL_X           0x1CC   /* int32: world-space velocity X */
+#define ACTOR_LIN_VEL_Z           0x1D4   /* int32: world-space velocity Z */
 #define ACTOR_ENCOUNTER_STEER     0x33E   /* int16 */
 #define ACTOR_BRAKE_FLAG          0x36D   /* byte  */
 #define ACTOR_THROTTLE_STATE      0x36F   /* byte  */
@@ -218,6 +221,7 @@ static uint32_t g_ai_frame_counter;
 static void ai_update_single_racer(int slot);
 static void ai_update_single_traffic(int slot);
 static int32_t ai_cos_fixed12(int32_t angle);
+static int32_t ai_sin_fixed12(int32_t angle);
 static void td5_ai_refresh_route_state_slot(int slot);
 
 static int32_t ai_cos_fixed12(int32_t angle) {
@@ -240,6 +244,10 @@ static int32_t ai_cos_fixed12(int32_t angle) {
         value = -value;
     }
     return value;
+}
+
+static int32_t ai_sin_fixed12(int32_t angle) {
+    return ai_cos_fixed12((angle - 0x400) & 0xFFF);
 }
 
 /* ========================================================================
@@ -362,9 +370,17 @@ static void td5_ai_refresh_route_state_slot(int slot) {
         forward_heading = (forward_heading + 0x800) & 0xFFF;
     }
 
-    actor_heading = (ACTOR_I32(actor, ACTOR_YAW_ACCUM) >> 8) & 0xFFF;
-    g_actor_forward_track_component[slot] =
-        ai_cos_fixed12((actor_heading - forward_heading) & 0xFFF) >> 2;
+    /* Project world-frame velocity onto route heading direction.
+     * Original (0x436B43) uses velocity dot product, NOT heading cosine.
+     * This gives speed-along-track which the threshold check uses as a
+     * speed governor — without speed in the value, AI never coasts. */
+    {
+        int32_t vx = ACTOR_I32(actor, ACTOR_LIN_VEL_X) >> 8;
+        int32_t vz = ACTOR_I32(actor, ACTOR_LIN_VEL_Z) >> 8;
+        int32_t cos_r = ai_cos_fixed12(forward_heading);
+        int32_t sin_r = ai_sin_fixed12(forward_heading);
+        g_actor_forward_track_component[slot] = (vx * sin_r + vz * cos_r) >> 12;
+    }
 }
 
 void td5_ai_tick(void) {
@@ -1267,7 +1283,22 @@ void td5_ai_update_track_behavior(int slot) {
     /* 2. Look-ahead waypoint sampling (SampleTrackTargetPoint)
      *    Looks ahead 4 spans, handles junction remapping.
      *    Computes angle delta from actor to target -- stored in route state.
-     *    This is handled by the external track module in the full port. */
+     *    Use ComputeSplinePosition (0x434670) to get signed distance along
+     *    the track spline for the look-ahead point. */
+    {
+        int16_t span = ACTOR_I16(actor, ACTOR_SPAN_RAW);
+        int span_count = td5_track_get_span_count();
+        if (span_count > 0) {
+            int route_lane_val = 0;
+            int32_t seg_dist = rs[RS_FORWARD_TRACK_COMP];
+            const uint8_t *route_bytes = (const uint8_t *)(intptr_t)rs[RS_ROUTE_TABLE_PTR];
+            if (route_bytes && span >= 0) {
+                route_lane_val = (int)route_bytes[(size_t)(unsigned)span * 3u];
+            }
+            rs[RS_TRACK_PROGRESS] = td5_track_compute_spline_position(
+                (int)span, seg_dist, route_lane_val);
+        }
+    }
 
     /* 3. Throttle/brake decision */
     threshold_result = td5_ai_update_route_threshold(slot);
