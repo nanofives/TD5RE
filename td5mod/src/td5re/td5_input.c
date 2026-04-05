@@ -435,31 +435,7 @@ void td5_input_update_player_control(int slot)
     if ((bits & TD5_INPUT_ANALOG_X_FLAG) == 0) {
         /* ---- Path A: Digital steering ---- */
 
-        /* Original: bit 0x02 subtracts (steer negative), bit 0x01 adds (steer positive).
-         * Our enum: LEFT=0x01, RIGHT=0x02. So RIGHT adds positive, LEFT subtracts.
-         * But the original has bit 0x02 (our RIGHT) going *negative* and bit 0x01 (our LEFT) going *positive*.
-         * Fix: swap which enum does what to match original sign convention. */
-        if (bits & TD5_INPUT_STEER_LEFT) {
-            /* Ramp up */
-            if (s_steer_ramp[slot] < TD5_INPUT_STEER_RAMP_MAX) {
-                s_steer_ramp[slot] += TD5_INPUT_STEER_RAMP_STEP;
-            }
-
-            int cmd = s_steering_cmd[slot];
-            if (cmd < 0) {
-                /* Steering was negative, snap-correct positive */
-                cmd += steer_rate * 2;
-            } else {
-                /* Continue positive */
-                cmd += (int)(((int32_t)s_steer_ramp[slot] * steer_rate +
-                              ((int32_t)s_steer_ramp[slot] * steer_rate >> 31 & 0xFF))
-                             >> 8);
-            }
-            if (cmd > pos_limit) cmd = pos_limit;
-            s_steering_cmd[slot] = cmd;
-            TD5_LOG_I(LOG_TAG, "steer_left_key: cmd=%d ramp=%d", cmd, s_steer_ramp[slot]);
-        }
-
+        /* Steer left (bit 1 = 0x02 in original; our enum has LEFT=0x01, RIGHT=0x02) */
         if (bits & TD5_INPUT_STEER_RIGHT) {
             /* Ramp up */
             if (s_steer_ramp[slot] < TD5_INPUT_STEER_RAMP_MAX) {
@@ -467,18 +443,37 @@ void td5_input_update_player_control(int slot)
             }
 
             int cmd = s_steering_cmd[slot];
+            if (cmd < 0) {
+                /* Steering was left, snap-correct right */
+                cmd += steer_rate * 2;
+            } else {
+                /* Continue right */
+                cmd += (int)(((int32_t)s_steer_ramp[slot] * steer_rate +
+                              ((int32_t)s_steer_ramp[slot] * steer_rate >> 31 & 0xFF))
+                             >> 8);
+            }
+            if (cmd > pos_limit) cmd = pos_limit;
+            s_steering_cmd[slot] = cmd;
+        }
+
+        if (bits & TD5_INPUT_STEER_LEFT) {
+            /* Ramp up */
+            if (s_steer_ramp[slot] < TD5_INPUT_STEER_RAMP_MAX) {
+                s_steer_ramp[slot] += TD5_INPUT_STEER_RAMP_STEP;
+            }
+
+            int cmd = s_steering_cmd[slot];
             if (cmd > 0) {
-                /* Steering was positive, snap-correct negative */
+                /* Steering was right, snap-correct left */
                 cmd += steer_rate * -2;
             } else {
-                /* Continue negative */
+                /* Continue left */
                 cmd -= (int)(((int32_t)s_steer_ramp[slot] * steer_rate +
                               ((int32_t)s_steer_ramp[slot] * steer_rate >> 31 & 0xFF))
                              >> 8);
             }
             if (cmd < neg_limit) cmd = neg_limit;
             s_steering_cmd[slot] = cmd;
-            TD5_LOG_I(LOG_TAG, "steer_right_key: cmd=%d ramp=%d", cmd, s_steer_ramp[slot]);
         }
 
         /* No steering input -- auto-center */
