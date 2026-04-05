@@ -1454,6 +1454,13 @@ static void update_position_recursive(int16_t *track_state, int32_t pos_x, int32
     int new_span;
     int iter;
 
+    /* Save state snapshot so we can roll back on non-convergence.
+     * If the boundary walk doesn't converge in TRACK_MAX_RECURSION steps,
+     * the state would be left pointing at a completely wrong span, which
+     * corrupts ground-snap height probes and wall collision checks. */
+    int16_t saved_state[8];
+    memcpy(saved_state, track_state, 16);
+
     for (iter = 0; iter < TRACK_MAX_RECURSION; iter++) {
         uint8_t bits = compute_boundary_bits(span_idx, sub_lane, pos_x, pos_z);
 
@@ -1565,8 +1572,13 @@ static void update_position_recursive(int16_t *track_state, int32_t pos_x, int32
     }
 
     if (iter >= TRACK_MAX_RECURSION) {
-        TD5_LOG_W(LOG_TAG, "update_pos: max iterations reached span=%d sub=%d",
-                  span_idx, sub_lane);
+        /* Non-convergence: boundary walk failed to find a containing quad.
+         * Roll back to saved state to avoid corrupting span tracking.
+         * This keeps the previous (possibly stale) span, which is still
+         * better than an actively-wrong span 8+ positions away. */
+        memcpy(track_state, saved_state, 16);
+        TD5_LOG_W(LOG_TAG, "update_pos: max iterations, rolled back span=%d sub=%d",
+                  (int)saved_state[0], (int)((int8_t *)saved_state)[12]);
     }
 }
 
