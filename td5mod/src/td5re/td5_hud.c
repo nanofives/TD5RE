@@ -1783,8 +1783,6 @@ void td5_hud_render_overlays(float dt)
                 needle_angle = 0x400;
             }
 
-            TD5_LOG_I(LOG_TAG, "speedo: rpm=%d max=%d angle=0x%03X", engine_speed, max_rpm, needle_angle);
-
             float cos_a = td5_cos_12bit(needle_angle);
             float sin_a = td5_sin_12bit(needle_angle);
 
@@ -1801,6 +1799,9 @@ void td5_hud_render_overlays(float dt)
 
             float tip_x = cx + cos_a * sx * 45.0f;
             float tip_y = cy + sin_a * sy * 45.0f;
+
+            TD5_LOG_I(LOG_TAG, "speedo: rpm=%d max=%d angle=0x%03X cos=%.3f sin=%.3f cx=%.1f cy=%.1f tip=(%.1f,%.1f) near=(%.1f,%.1f)",
+                engine_speed, max_rpm, needle_angle, cos_a, sin_a, cx, cy, tip_x, tip_y, near_x, near_y);
 
             /* Build needle quad: V0=near(9), V1=left-perp, V2=far-tip(45), V3=right-perp */
             /* Needle uses mode 1 (position + color, no texture) */

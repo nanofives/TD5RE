@@ -2520,27 +2520,35 @@ void td5_physics_auto_gear_select(TD5_Actor *actor)
         return;
     }
 
-    /* Skip neutral when throttle positive */
+    /* Skip neutral/reverse when throttle positive */
     if (gear == TD5_GEAR_REVERSE && throttle > 0)
         gear = TD5_GEAR_FIRST;
 
-    /* Upshift: RPM > upshift_threshold AND speed > 0 AND gear < max */
-    if (gear < actor->max_gear_index && actor->longitudinal_speed > 0) {
+    /* Upshift: RPM > upshift_threshold AND speed > 0 AND gear < 8
+     * Original hardcodes max gear index < 8 [CONFIRMED @ 0x42EF42] */
+    if (gear < 8 && actor->longitudinal_speed > 0) {
         int32_t up_thresh = (int32_t)PHYS_S(actor, 0x3E + gear * 2);
         if (rpm > up_thresh) {
             gear++;
-            /* Gear-change torque kick to wheel accumulators */
-            int32_t kick = (throttle * (int32_t)PHYS_S(actor, 0x68) * 0x1A) >> 16;
+            /* Gear-change torque kick to wheel accumulators.
+             * Original shifts >> 8 [CONFIRMED @ 0x42EF54], not >> 16. */
+            int32_t kick = (throttle * (int32_t)PHYS_S(actor, 0x68) * 0x1A) >> 8;
             if (gear < 16)
                 kick = (kick * (int32_t)s_gear_torque[gear]) >> 8;
             actor->wheel_force_accum[0] += kick;
             actor->wheel_force_accum[1] += kick;
             actor->wheel_force_accum[2] -= kick;
             actor->wheel_force_accum[3] -= kick;
+            /* Original returns immediately after upshift [CONFIRMED @ 0x42EF8E].
+             * This prevents the downshift check from undoing the shift
+             * in the same frame with stale RPM. */
+            actor->current_gear = (uint8_t)gear;
+            return;
         }
     }
 
-    /* Downshift: RPM < downshift_threshold AND gear > 2 */
+    /* Downshift: RPM < downshift_threshold AND gear > 2
+     * Only reached if NO upshift occurred this frame. */
     if (gear > TD5_GEAR_FIRST) {
         int32_t dn_thresh = (int32_t)PHYS_S(actor, 0x4E + gear * 2);
         if (rpm < dn_thresh) {
@@ -2609,7 +2617,7 @@ void td5_physics_apply_steering_torque(TD5_Actor *actor)
     int32_t sensitivity = (int32_t)PHYS_S(actor, 0x68);
     int32_t gear = (int32_t)actor->current_gear;
 
-    int32_t force = (throttle * sensitivity * 0x1A) >> 16;
+    int32_t force = (throttle * sensitivity * 0x1A) >> 8;
     if (gear < 16)
         force = (force * (int32_t)s_gear_torque[gear]) >> 8;
 
