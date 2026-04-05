@@ -76,6 +76,7 @@ static int16_t s_gear_torque[16];       /* DAT_00467394: per-gear torque multipl
 static int32_t g_gravity_constant = TD5_GRAVITY_NORMAL;
 static int32_t g_collisions_enabled = 0;     /* DAT_00463188: 0=on, 1=off */
 static int32_t g_game_paused = 0;            /* DAT_004AAD60 */
+static int32_t s_dynamics_mode = 0;          /* 0=arcade, 1=simulation (0x42F7B0) */
 static int32_t g_difficulty_easy = 0;
 static int32_t g_difficulty_hard = 0;
 static int32_t g_total_actor_count = 6;
@@ -386,6 +387,15 @@ void td5_physics_update_player(TD5_Actor *actor)
         if (grip[i] > TD5_PLAYER_GRIP_MAX) grip[i] = TD5_PLAYER_GRIP_MAX;
     }
 
+    /* --- 3b. Arcade mode grip boost (0x42F7B0) ---
+     * Arcade: multiply grip by ~1.3 (333/256). Simulation: raw values. */
+    if (s_dynamics_mode == 0) {
+        for (i = 0; i < 4; i++) {
+            grip[i] = (grip[i] * 333) >> 8;  /* ~1.30x */
+            if (grip[i] > TD5_PLAYER_GRIP_MAX) grip[i] = TD5_PLAYER_GRIP_MAX;
+        }
+    }
+
     /* --- 4. Handbrake modifier on rear wheels (tuning+0x7A) --- */
     if (actor->handbrake_flag) {
         int32_t hb_mod = (int32_t)PHYS_S(actor, 0x7A);
@@ -393,7 +403,24 @@ void td5_physics_update_player(TD5_Actor *actor)
         grip[3] = (grip[3] * hb_mod) >> 8;
     }
 
-    /* --- 5. Resolve body-frame velocities (cos/sin of heading) --- */
+    /* --- 5. Velocity drag in WORLD frame (confirmed by Ghidra at 0x40409x) ---
+     * Original applies drag to linear_velocity_x/z BEFORE body decomposition.
+     * 0x6A = driving drag (low value ~100), 0x6C = coasting drag (high ~3000).
+     * Formula: v -= ((v >> 8) * drag_coeff) >> 12
+     * Condition: throttle < 0x20 || gear < 2 → use 0x6C (coast), else 0x6A (drive) */
+    {
+        int32_t surf_drag = (int32_t)s_surface_grip[surface_center & 0x1F];
+        int32_t damp_coeff;
+        if (actor->frame_counter < 0x20 || actor->current_gear < 2)
+            damp_coeff = surf_drag * 256 + (int32_t)PHYS_S(actor, 0x6C);
+        else
+            damp_coeff = surf_drag * 256 + (int32_t)PHYS_S(actor, 0x6A);
+
+        actor->linear_velocity_x -= ((actor->linear_velocity_x >> 8) * damp_coeff) >> 12;
+        actor->linear_velocity_z -= ((actor->linear_velocity_z >> 8) * damp_coeff) >> 12;
+    }
+
+    /* --- 6. Resolve body-frame velocities (cos/sin of heading) --- */
     int32_t heading = (actor->euler_accum.yaw >> 8) & 0xFFF;
     int32_t cos_h = cos_fixed12(heading);
     int32_t sin_h = sin_fixed12(heading);
@@ -406,35 +433,8 @@ void td5_physics_update_player(TD5_Actor *actor)
     /* Lateral = dot(velocity, heading_right) */
     int32_t v_lat  = (vx * cos_h - vz * sin_h) >> 12;
 
-    /* Store raw speed for HUD/speedometer BEFORE damping */
     actor->longitudinal_speed = v_long;
     actor->lateral_speed = v_lat;
-
-    /* --- 6. Velocity damping (body-frame, for force computation only) ---
-     * 0x6A = damping_low_speed (small value ~100, used at startup/low gear)
-     * 0x6C = damping_high_speed (large value ~3000, aerodynamic drag at speed) */
-    {
-        int32_t surf_drag = (int32_t)s_surface_grip[surface_center & 0x1F];
-        int32_t damp_coeff;
-        if (actor->frame_counter < 0x20 || actor->current_gear < 2)
-            damp_coeff = surf_drag * 256 + (int32_t)PHYS_S(actor, 0x6A);
-        else
-            damp_coeff = surf_drag * 256 + (int32_t)PHYS_S(actor, 0x6C);
-
-        v_long -= ((v_long >> 8) * damp_coeff) >> 12;
-        v_lat  -= ((v_lat >> 8) * damp_coeff) >> 12;
-    }
-
-    /* --- 6b. Aerodynamic drag from drag_coefficient (0x2C) ---
-     * Speed-dependent drag force opposing longitudinal motion.
-     * drag_force = speed * drag_coeff / 4096 */
-    {
-        int32_t drag_coeff = (int32_t)PHYS_S(actor, 0x2C);
-        if (drag_coeff != 0 && v_long != 0) {
-            int32_t drag = (v_long * drag_coeff) >> 12;
-            v_long -= drag;
-        }
-    }
 
     /* --- 7/8. Gear selection: mutually exclusive paths (original 0x404030).
      * field_0x378 (throttle_input_active) selects between:
@@ -517,6 +517,10 @@ void td5_physics_update_player(TD5_Actor *actor)
 
     /* --- 12. Per-axle lateral/longitudinal forces --- */
     int32_t steer_angle = actor->steering_command >> 8;
+    /* Arcade mode: boost steering authority by ~15% (294/256 ~ 1.15x) */
+    if (s_dynamics_mode == 0) {
+        steer_angle = (steer_angle * 294) >> 8;
+    }
     int32_t steer_heading = (heading + (steer_angle >> 4)) & 0xFFF;
     int32_t cos_s = cos_fixed12(steer_heading);
     int32_t sin_s = sin_fixed12(steer_heading);
@@ -529,8 +533,13 @@ void td5_physics_update_player(TD5_Actor *actor)
         front_slip = (front_slip * lat_stiff) >> 8;
     int32_t front_lat_force = -(front_slip * ((grip[0] + grip[1]) >> 1)) >> 8;
 
-    /* Rear axle lateral force */
+    /* Rear axle lateral force.
+     * Arcade mode: reduce rear slip by ~25% to limit oversteer tendency.
+     * 192/256 = 0.75x slip -> less tail-out behavior. */
     int32_t rear_slip = v_lat;
+    if (s_dynamics_mode == 0) {
+        rear_slip = (rear_slip * 192) >> 8;  /* 0.75x in arcade */
+    }
     if (lat_stiff != 0)
         rear_slip = (rear_slip * lat_stiff) >> 8;
     int32_t rear_lat_force = -(rear_slip * ((grip[2] + grip[3]) >> 1)) >> 8;
@@ -539,14 +548,20 @@ void td5_physics_update_player(TD5_Actor *actor)
     int32_t front_long = (wheel_drive[0] + wheel_drive[1]);
     int32_t rear_long  = (wheel_drive[2] + wheel_drive[3]);
 
-    /* --- 13. Tire slip circle via isqrt (per axle) --- */
+    /* --- 13. Tire slip circle via isqrt (per axle) ---
+     * Grip limit scaled by tire grip coefficient (tuning 0x2C).
+     * Original at 0x4048xx: grip_limit = (axle_grip_sum * tuning[0x2C]) >> 8 */
+    int32_t tire_grip_coeff = (int32_t)PHYS_S(actor, 0x2C);
     {
         /* Front axle slip circle */
         int32_t fl16 = front_lat_force >> 4;
         int32_t flo16 = front_long >> 4;
         int32_t combined_sq = fl16 * fl16 + flo16 * flo16;
         int32_t combined = td5_isqrt(combined_sq) << 4;
-        int32_t grip_limit_f = ((grip[0] + grip[1]) >> 1) << 8;
+        int32_t grip_limit_f = ((grip[0] + grip[1]) >> 1);
+        if (tire_grip_coeff != 0)
+            grip_limit_f = (grip_limit_f * tire_grip_coeff) >> 8;
+        grip_limit_f <<= 8;
         if (combined > grip_limit_f && combined > 0) {
             actor->front_axle_slip_excess = combined - grip_limit_f;
             front_long = ((grip_limit_f << 8) / combined * front_long) >> 8;
@@ -560,7 +575,10 @@ void td5_physics_update_player(TD5_Actor *actor)
         int32_t rlo16 = rear_long >> 4;
         combined_sq = rl16 * rl16 + rlo16 * rlo16;
         combined = td5_isqrt(combined_sq) << 4;
-        int32_t grip_limit_r = ((grip[2] + grip[3]) >> 1) << 8;
+        int32_t grip_limit_r = ((grip[2] + grip[3]) >> 1);
+        if (tire_grip_coeff != 0)
+            grip_limit_r = (grip_limit_r * tire_grip_coeff) >> 8;
+        grip_limit_r <<= 8;
         if (combined > grip_limit_r && combined > 0) {
             actor->rear_axle_slip_excess = combined - grip_limit_r;
             rear_long = ((grip_limit_r << 8) / combined * rear_long) >> 8;
@@ -657,7 +675,21 @@ void td5_physics_update_ai(TD5_Actor *actor)
     if (grip_rear < TD5_AI_GRIP_MIN) grip_rear = TD5_AI_GRIP_MIN;
     if (grip_rear > TD5_AI_GRIP_MAX) grip_rear = TD5_AI_GRIP_MAX;
 
-    /* --- 4. Resolve body-frame velocities --- */
+    /* --- 4. Velocity drag in WORLD frame (same formula as player, 0x404EC0) ---
+     * 0x6A = driving drag, 0x6C = coasting drag */
+    {
+        int32_t surf_drag = (int32_t)s_surface_grip[surface & 0x1F];
+        int32_t damp_coeff;
+        if (actor->frame_counter < 0x20 || actor->current_gear < 2)
+            damp_coeff = surf_drag * 256 + (int32_t)PHYS_S(actor, 0x6C);
+        else
+            damp_coeff = surf_drag * 256 + (int32_t)PHYS_S(actor, 0x6A);
+
+        actor->linear_velocity_x -= ((actor->linear_velocity_x >> 8) * damp_coeff) >> 12;
+        actor->linear_velocity_z -= ((actor->linear_velocity_z >> 8) * damp_coeff) >> 12;
+    }
+
+    /* --- 5. Resolve body-frame velocities --- */
     int32_t heading = (actor->euler_accum.yaw >> 8) & 0xFFF;
     int32_t cos_h = cos_fixed12(heading);
     int32_t sin_h = sin_fixed12(heading);
@@ -669,19 +701,6 @@ void td5_physics_update_ai(TD5_Actor *actor)
 
     actor->longitudinal_speed = v_long;
     actor->lateral_speed = v_lat;
-
-    /* --- Velocity damping --- */
-    {
-        int32_t surf_drag = (int32_t)s_surface_grip[surface & 0x1F];
-        int32_t damp_coeff;
-        if (actor->frame_counter < 0x20 || actor->current_gear < 2)
-            damp_coeff = surf_drag * 256 + (int32_t)PHYS_S(actor, 0x6A);
-        else
-            damp_coeff = surf_drag * 256 + (int32_t)PHYS_S(actor, 0x6C);
-
-        v_long -= ((v_long >> 8) * damp_coeff) >> 12;
-        v_lat  -= ((v_lat >> 8) * damp_coeff) >> 12;
-    }
 
     /* --- Engine pipeline (same as player) --- */
     td5_physics_reverse_throttle_sign(actor);
@@ -2253,7 +2272,7 @@ void td5_physics_init_vehicle_runtime(void)
                     /* 0x68: drive_torque_mult *= 0x28A/256 (2.54x) */
                     int32_t tm = (int32_t)PHYS_S(actor, 0x68);
                     write_i16((uint8_t *)phys, 0x68, (int16_t)((tm * 0x28A) >> 8));
-                    /* 0x2C: drag_coeff *= 0x17C/256 (1.48x) */
+                    /* 0x2C: tire_grip_coeff *= 0x17C/256 (1.48x) */
                     int32_t dc = (int32_t)PHYS_S(actor, 0x2C);
                     write_i16((uint8_t *)phys, 0x2C, (int16_t)((dc * 0x17C) >> 8));
                     /* 0x6E: brake_force *= 0x1C2/256 (1.76x) */
@@ -2270,7 +2289,7 @@ void td5_physics_init_vehicle_runtime(void)
                     /* 0x68: drive_torque_mult *= 0x168/256 (0.5625x) */
                     int32_t tm = (int32_t)PHYS_S(actor, 0x68);
                     write_i16((uint8_t *)phys, 0x68, (int16_t)((tm * 0x168) >> 8));
-                    /* 0x2C: drag_coeff *= 300/256 (1.17x) */
+                    /* 0x2C: tire_grip_coeff *= 300/256 (1.17x) */
                     int32_t dc = (int32_t)PHYS_S(actor, 0x2C);
                     write_i16((uint8_t *)phys, 0x2C, (int16_t)((dc * 300) >> 8));
                     /* 0x78: speed_scale <<= 1 */
@@ -2462,7 +2481,14 @@ void td5_physics_set_collisions(int enabled)
 
 void td5_physics_set_dynamics(int mode)
 {
-    (void)mode;  /* TODO: arcade vs simulation toggle */
+    s_dynamics_mode = (mode != 0) ? 1 : 0;
+    TD5_LOG_I(LOG_TAG, "Dynamics mode set to %s (%d)",
+              s_dynamics_mode ? "simulation" : "arcade", s_dynamics_mode);
+}
+
+int td5_physics_get_dynamics(void)
+{
+    return s_dynamics_mode;
 }
 
 void td5_physics_set_paused(int paused)
