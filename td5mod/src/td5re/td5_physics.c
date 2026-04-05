@@ -798,6 +798,41 @@ void td5_physics_update_player(TD5_Actor *actor)
         }
     }
 
+    /* --- 14c. Front slip excess yaw damping [CONFIRMED @ 0x404DB6-0x404DF4] ---
+     * When front tires exceed grip circle, apply proportional correction to
+     * angular_velocity_yaw. This is the primary yaw damping mechanism that
+     * prevents the car from spinning. Without it, any small yaw perturbation
+     * feeds back through tire slip → lateral force → more yaw torque. */
+    if (actor->front_axle_slip_excess > 0) {
+        int32_t correction = (actor->angular_velocity_yaw >> 6)
+                           * actor->front_axle_slip_excess;
+        correction = correction >> 15;
+        if (correction > 0x200) correction = 0x200;
+        if (correction < -0x200) correction = -0x200;
+        actor->angular_velocity_yaw -= correction;
+        if (actor->slot_index == 0 && (actor->frame_counter % 120u) == 0u) {
+            TD5_LOG_I(LOG_TAG, "yaw_damp: corr=%d slip_ex=%d ang_vel=%d",
+                      correction, actor->front_axle_slip_excess,
+                      actor->angular_velocity_yaw);
+        }
+    }
+
+    /* --- 14d. Near-zero velocity zeroing [CONFIRMED @ 0x404E57-0x404E95] ---
+     * When car is nearly stopped, zero out all velocities to prevent drift. */
+    {
+        int32_t avx = actor->linear_velocity_x;
+        int32_t avz = actor->linear_velocity_z;
+        if (avx < 0) avx = -avx;
+        if (avz < 0) avz = -avz;
+        int32_t avy = actor->angular_velocity_yaw;
+        if (avy < 0) avy = -avy;
+        if (avx < 0x40 && avz < 0x40 && avy < 0x20) {
+            actor->linear_velocity_x = 0;
+            actor->linear_velocity_z = 0;
+            actor->angular_velocity_yaw = 0;
+        }
+    }
+
     /* --- 15. ApplySteeringTorqueToWheels --- */
     td5_physics_apply_steering_torque(actor);
 
