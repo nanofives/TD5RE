@@ -141,6 +141,11 @@ int  td5_track_get_span_lane_world(int span_index, int sub_lane,
 void td5_track_apply_segment_lighting(TD5_Actor *actor, int view_index);
 void td5_track_update_light_directions(void);
 
+/* --- Track wall contact resolution (FUN_00406CC0) ---
+ * Checks all 4 wheel probes against span edge boundaries.
+ * Calls td5_physics_wall_response for each penetration. */
+void td5_track_resolve_wall_contacts(TD5_Actor *actor);
+
 /* --- Race order --- */
 void td5_track_update_race_order(void);
 
@@ -153,9 +158,16 @@ int  td5_track_load_routes(const void *left_data, size_t left_size,
                             const void *right_data, size_t right_size);
 
 /* --- Wrap normalization --- */
-void td5_track_normalize_actor_wrap(TD5_Actor *actor);
+int  td5_track_normalize_actor_wrap(TD5_Actor *actor);
 
 /* --- Checkpoint detection --- */
 int  td5_track_check_checkpoint(TD5_Actor *actor);
+
+/* --- Circuit lap tracking (0x434DA0) --- */
+int  td5_track_update_circuit_lap(TD5_Actor *actor, int slot);
+
+/* --- Signed spline distance (0x434670) --- */
+int32_t td5_track_compute_spline_position(int span_index, int segment_distance,
+                                           int route_lane);
 
 #endif /* TD5_TRACK_H */

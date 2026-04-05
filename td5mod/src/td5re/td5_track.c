@@ -16,11 +16,14 @@
  */
 
 #include "td5_track.h"
+#include "td5_physics.h"
 #include "td5_ai.h"
 #include "td5_platform.h"
+#include "../../../re/include/td5_actor_struct.h"
 #include "td5re.h"
 #include <string.h>
 #include <stdlib.h>
+#include <math.h>
 
 #define LOG_TAG "track"
 
@@ -461,6 +464,155 @@ void td5_track_get_span_edges(int span_index,
         if (rv) {
             *right_x = ((int32_t)sp->origin_x + (int32_t)rv->x);
             *right_z = ((int32_t)sp->origin_z + (int32_t)rv->z);
+        }
+    }
+}
+
+/* ========================================================================
+ * Track wall contact resolution -- FUN_00406CC0
+ *
+ * Checks all 4 wheel probes against the left and right edges of
+ * their current span. If a probe is outside the edge (signed distance
+ * < 0), calls td5_physics_wall_response to push the car back.
+ *
+ * This is the PRIMARY mechanism that keeps cars on the road.
+ * Called from UpdateVehicleActor after IntegrateVehiclePoseAndContacts.
+ * ======================================================================== */
+
+void td5_track_resolve_wall_contacts(TD5_Actor *actor)
+{
+    if (!actor || !s_span_array || !s_vertex_table) return;
+
+    /* Check 4 wheel probes (indices 0-3) [CONFIRMED @ 0x467384] */
+    for (int pi = 0; pi < 4; pi++) {
+        TD5_TrackProbeState *probe = &actor->wheel_probes[pi];
+        int span_idx = probe->span_index;
+
+        if (span_idx < 0 || span_idx >= s_span_count) continue;
+
+        const TD5_StripSpan *sp = &s_span_array[span_idx];
+        int type = sp->span_type;
+        int lane_count = span_lane_count(sp);
+        if (lane_count < 1) lane_count = 1;
+
+        /* Get probe world position (24.8 fixed-point) */
+        int32_t probe_x = actor->probe_FL.x + pi * (int32_t)sizeof(TD5_Vec3_Fixed);
+        int32_t probe_z;
+        {
+            /* Read the correct probe position based on index */
+            TD5_Vec3_Fixed *p;
+            switch (pi) {
+                case 0: p = &actor->probe_FL; break;
+                case 1: p = &actor->probe_FR; break;
+                case 2: p = &actor->probe_RL; break;
+                default: p = &actor->probe_RR; break;
+            }
+            probe_x = p->x;
+            probe_z = p->z;
+        }
+
+        /* Convert probe from 24.8 to world units for comparison with span vertices */
+        int32_t px = probe_x >> 8;
+        int32_t pz = probe_z >> 8;
+
+        /* --- LEFT EDGE CHECK [CONFIRMED @ 0x406cf4]: sub_lane_index <= 0 --- */
+        if (probe->sub_lane_index <= 0) {
+            int vl0, vl1, vr0, vr1;
+            get_quad_vertices(sp, 0, &vl0, &vl1, &vr0, &vr1);
+
+            TD5_StripVertex *lv = vertex_at(vl0);
+            TD5_StripVertex *rv = vertex_at(vr0);
+            if (!lv || !rv) continue;
+
+            /* Edge direction: left vertex to right vertex
+             * Normal (pointing INTO road): perpendicular CW = (dz, -dx)
+             * But original uses: normal = (rightV.z - leftV.z, leftV.x - rightV.x)
+             * [CONFIRMED @ 0x407180] */
+            int32_t edge_dx = (int32_t)rv->x - (int32_t)lv->x;
+            int32_t edge_dz = (int32_t)rv->z - (int32_t)lv->z;
+
+            /* Normal pointing into the road (right-hand side of edge L→R) */
+            int32_t nx = edge_dz;   /* rightV.z - leftV.z */
+            int32_t nz = -edge_dx;  /* leftV.x - rightV.x */
+
+            /* Normalize for consistent distance (approximate with magnitude) */
+            int32_t nmag = td5_isqrt(nx * nx + nz * nz);
+            if (nmag == 0) continue;
+
+            /* Signed distance from probe to edge line
+             * [CONFIRMED @ 0x40719a]:
+             * d = (probeX - leftV.x - origin_x) * nz + (probeZ - leftV.z - origin_z) * nx
+             * But we need to use the normalized form. The original uses unnormalized
+             * distance and divides later. Let's compute raw dot product. */
+            int32_t rel_x = px - (int32_t)lv->x - sp->origin_x;
+            int32_t rel_z = pz - (int32_t)lv->z - sp->origin_z;
+
+            /* Signed distance (positive = inside road, negative = outside) */
+            int64_t d64 = (int64_t)rel_x * nx + (int64_t)rel_z * nz;
+            int32_t d = (int32_t)(d64 / nmag);
+
+            if (d < 0) {
+                /* Car is outside left wall — compute wall angle and respond */
+                /* Wall edge direction angle [CONFIRMED @ 0x4071d6] */
+                int32_t wall_angle;
+                {
+                    double rad = atan2((double)edge_dx, (double)edge_dz);
+                    wall_angle = (int32_t)(rad * (4096.0 / (2.0 * 3.14159265358979323846))) & 0xFFF;
+                }
+                td5_physics_wall_response(actor, wall_angle, d, 1);
+
+                /* Recompute pose after position change */
+                actor->render_pos.x = (float)actor->world_pos.x * (1.0f / 256.0f);
+                actor->render_pos.y = (float)actor->world_pos.y * (1.0f / 256.0f);
+                actor->render_pos.z = (float)actor->world_pos.z * (1.0f / 256.0f);
+                break;  /* One wall hit per tick is enough */
+            }
+        }
+
+        /* --- RIGHT EDGE CHECK [CONFIRMED @ 0x406da6]: sub_lane >= lane_count - 1 --- */
+        if (probe->sub_lane_index >= lane_count - 1) {
+            int vl0, vl1, vr0, vr1;
+            /* Use wall vertex offset tables for right edge [CONFIRMED @ 0x406da6] */
+            int wall_off_l = (type >= 0 && type < 12) ? s_wall_vtx_left[type] : 0;
+            int wall_off_r = (type >= 0 && type < 12) ? s_wall_vtx_right[type] : 0;
+
+            get_quad_vertices(sp, lane_count - 1, &vl0, &vl1, &vr0, &vr1);
+
+            /* Apply wall vertex offsets */
+            TD5_StripVertex *lv = vertex_at(vr0 + wall_off_l);
+            TD5_StripVertex *rv = vertex_at(vr0 + wall_off_r + 1);
+            if (!lv || !rv) continue;
+
+            /* Edge direction and normal (pointing INTO road = left of edge direction) */
+            int32_t edge_dx = (int32_t)rv->x - (int32_t)lv->x;
+            int32_t edge_dz = (int32_t)rv->z - (int32_t)lv->z;
+
+            /* For right wall, normal should point left (into road) */
+            int32_t nx = -edge_dz;
+            int32_t nz = edge_dx;
+
+            int32_t nmag = td5_isqrt(nx * nx + nz * nz);
+            if (nmag == 0) continue;
+
+            int32_t rel_x = px - (int32_t)lv->x - sp->origin_x;
+            int32_t rel_z = pz - (int32_t)lv->z - sp->origin_z;
+
+            int64_t d64 = (int64_t)rel_x * nx + (int64_t)rel_z * nz;
+            int32_t d = (int32_t)(d64 / nmag);
+
+            if (d < 0) {
+                int32_t wall_angle;
+                {
+                    double rad = atan2((double)edge_dx, (double)edge_dz);
+                    wall_angle = (int32_t)(rad * (4096.0 / (2.0 * 3.14159265358979323846))) & 0xFFF;
+                }
+                td5_physics_wall_response(actor, wall_angle, d, 2);
+
+                actor->render_pos.x = (float)actor->world_pos.x * (1.0f / 256.0f);
+                actor->render_pos.y = (float)actor->world_pos.y * (1.0f / 256.0f);
+                actor->render_pos.z = (float)actor->world_pos.z * (1.0f / 256.0f);
+                break;
+            }
         }
     }
 }
@@ -1744,6 +1896,17 @@ static int angle_from_vector_full(int32_t dx, int32_t dz)
 
 void td5_track_compute_heading(TD5_Actor *actor)
 {
+    /*
+     * InitializeActorTrackPose (0x434350):
+     * Computes initial heading from track span geometry.
+     *
+     * Fixes vs previous implementation (verified against Ghidra 0x434350):
+     *  1. Sub-lane NOT added to vertex indices [CONFIRMED @ 0x434390]
+     *  2. Case 3/4: uses right+2 vertex [CONFIRMED @ 0x434410]
+     *  3. Case 6/7: uses left+2 vertex [CONFIRMED @ 0x434450]
+     *  4. Signed divide rounds toward zero [CONFIRMED @ 0x434408]
+     *  5. 180° (0x800) offset added to heading [CONFIRMED @ 0x434501]
+     */
     int16_t *track_state;
     int span_idx, sub_lane;
     TD5_StripSpan *sp;
@@ -1764,37 +1927,45 @@ void td5_track_compute_heading(TD5_Actor *actor)
 
     sp = &s_span_array[span_idx];
 
-    /* Get the quad corner vertices */
-    vl0 = vertex_at(sp->left_vertex_index + sub_lane);
-    vl1 = vertex_at(sp->left_vertex_index + sub_lane + 1);
-    vr0 = vertex_at(sp->right_vertex_index + sub_lane);
-    vr1 = vertex_at(sp->right_vertex_index + sub_lane + 1);
+    /* Get base quad vertices — sub_lane is NOT added to indices
+     * [CONFIRMED @ 0x434390: uses span.left_vertex_index directly] */
+    vl0 = vertex_at(sp->left_vertex_index);
+    vl1 = vertex_at(sp->left_vertex_index + 1);
+    vr0 = vertex_at(sp->right_vertex_index);
+    vr1 = vertex_at(sp->right_vertex_index + 1);
 
     /* Compute heading based on span type */
     switch (sp->span_type) {
     case 1: case 2: case 5:
     case 8: case 9: case 10: case 11:
-        /* Standard: dx = (left1 - right1) - right0 + left0, divide by 4 */
+        /* Standard: dx = (left1 - right1) - right0 + left0 */
         dx = ((int32_t)vl1->x - (int32_t)vr1->x) - (int32_t)vr0->x + (int32_t)vl0->x;
         dz = ((int32_t)vl1->z - (int32_t)vr1->z) - (int32_t)vr0->z + (int32_t)vl0->z;
-        dx >>= 2;
-        dz >>= 2;
+        /* Signed divide-by-4 rounding toward zero [CONFIRMED @ 0x434408] */
+        dx = (dx + ((dx >> 31) & 3)) >> 2;
+        dz = (dz + ((dz >> 31) & 3)) >> 2;
         break;
 
     case 3: case 4:
-        /* Alternate diagonal: shifted right vertex pairs */
-        dx = ((int32_t)vl1->x - (int32_t)vr1->x) - (int32_t)vr0->x + (int32_t)vl0->x;
-        dz = ((int32_t)vl1->z - (int32_t)vr1->z) - (int32_t)vr0->z + (int32_t)vl0->z;
-        dx >>= 2;
-        dz >>= 2;
+        /* Shifted diagonal: uses right+2 vertex [CONFIRMED @ 0x434410] */
+        {
+            TD5_StripVertex *vr2 = vertex_at(sp->right_vertex_index + 2);
+            dx = ((int32_t)vl1->x - (int32_t)vr2->x) - (int32_t)vr1->x + (int32_t)vl0->x;
+            dz = ((int32_t)vl1->z - (int32_t)vr2->z) - (int32_t)vr1->z + (int32_t)vl0->z;
+        }
+        dx = (dx + ((dx >> 31) & 3)) >> 2;
+        dz = (dz + ((dz >> 31) & 3)) >> 2;
         break;
 
     case 6: case 7:
-        /* Reversed winding */
-        dx = ((int32_t)vl1->x - (int32_t)vr1->x) + (int32_t)vl0->x - (int32_t)vr0->x;
-        dz = ((int32_t)vl1->z - (int32_t)vr1->z) + (int32_t)vl0->z - (int32_t)vr0->z;
-        dx >>= 2;
-        dz >>= 2;
+        /* Reversed winding: uses left+2 vertex [CONFIRMED @ 0x434450] */
+        {
+            TD5_StripVertex *vl2 = vertex_at(sp->left_vertex_index + 2);
+            dx = ((int32_t)vl2->x - (int32_t)vr1->x) + (int32_t)vl1->x - (int32_t)vr0->x;
+            dz = ((int32_t)vl2->z - (int32_t)vr1->z) + (int32_t)vl1->z - (int32_t)vr0->z;
+        }
+        dx = (dx + ((dx >> 31) & 3)) >> 2;
+        dz = (dz + ((dz >> 31) & 3)) >> 2;
         break;
 
     default:
@@ -1802,7 +1973,16 @@ void td5_track_compute_heading(TD5_Actor *actor)
         break;
     }
 
-    angle = angle_from_vector_full(dx, dz);
+    /* Original calls AngleFromVector12 (atan2-based, 0°=+Z) — NOT
+     * angle_from_vector_full (0x433FC0, different quadrant mapping). */
+    {
+        double rad = atan2((double)dx, (double)dz);
+        angle = (int)(rad * (4096.0 / (2.0 * 3.14159265358979323846)));
+        angle &= 0xFFF;
+    }
+
+    TD5_LOG_I(LOG_TAG, "compute_heading: span=%d type=%d dx=%d dz=%d angle=%d",
+              span_idx, sp->span_type, dx, dz, angle);
 
     /* Write heading to actor's heading_normal at +0x290 (as int16[3]) */
     heading_normal = (int16_t *)((uint8_t *)actor + 0x290);
@@ -1810,8 +1990,9 @@ void td5_track_compute_heading(TD5_Actor *actor)
     heading_normal[1] = 0;
     heading_normal[2] = (int16_t)dz;
 
-    /* Also update the yaw euler accumulator at +0x1F4 */
-    *(int32_t *)((uint8_t *)actor + 0x1F4) = angle << 8;
+    /* Store to yaw euler accumulator at +0x1F4 with 180° offset
+     * [CONFIRMED @ 0x434501: (angle + 0x800) * 0x100] */
+    *(int32_t *)((uint8_t *)actor + 0x1F4) = (angle + 0x800) << 8;
 }
 
 /* ========================================================================

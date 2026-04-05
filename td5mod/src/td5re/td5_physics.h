@@ -88,6 +88,10 @@ void td5_physics_set_collisions(int enabled);
 void td5_physics_apply_collision_impulse(TD5_Actor *a, TD5_Actor *b);
 void td5_physics_resolve_vehicle_contacts(void);
 
+/* --- Wall collision response (FUN_00406980) --- */
+void td5_physics_wall_response(TD5_Actor *actor, int32_t wall_angle,
+                               int32_t penetration, int side);
+
 /* --- Dynamics mode --- */
 void td5_physics_set_dynamics(int mode);  /* 0=arcade, 1=simulation */
 int  td5_physics_get_dynamics(void);      /* returns current mode */

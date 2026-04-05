@@ -167,6 +167,93 @@ static int32_t sin_fixed12(int32_t angle)
 }
 
 /* ========================================================================
+ * Fixed-point atan2 (12-bit result: 0-4095 = 0-360°)
+ *
+ * Used for wall collision angle computation. Matches FUN_0040a720 in
+ * the original binary (angle LUT). Input: (dx, dz) in world coords.
+ * Returns: 12-bit angle where 0 = +Z direction, CW positive.
+ * ======================================================================== */
+
+static int32_t atan2_fixed12(int32_t dx, int32_t dz)
+{
+    double rad = atan2((double)dx, (double)dz);
+    int32_t angle = (int32_t)(rad * (4096.0 / (2.0 * 3.14159265358979323846)));
+    return angle & 0xFFF;
+}
+
+/* ========================================================================
+ * Wall collision response -- FUN_00406980
+ *
+ * Called when a probe detects the car is outside a track span edge.
+ * Pushes the car back onto the road and reflects velocity with damping.
+ *
+ * Parameters:
+ *   actor       - the vehicle actor
+ *   wall_angle  - 12-bit angle of the wall edge direction
+ *   penetration - signed distance (negative = outside wall)
+ *   side        - 0=left boundary, 1=left inner, 2=right inner
+ * ======================================================================== */
+
+/* Wall bounce damping factor [UNCERTAIN: DAT_00463200 not read, using 0xC0 = 75% energy loss] */
+#define V2W_BOUNCE_DAMP   0xC0
+
+void td5_physics_wall_response(TD5_Actor *actor, int32_t wall_angle,
+                               int32_t penetration, int side)
+{
+    /* Compute wall normal (perpendicular to wall direction) */
+    int32_t cos_w = cos_fixed12(wall_angle);
+    int32_t sin_w = sin_fixed12(wall_angle);
+
+    /* Push actor position out of wall by (|penetration| + 4) units.
+     * penetration is negative when outside, so we push in +normal direction.
+     * Normal points from wall INTO the road: (cos_w, sin_w) rotated 90° = (-sin_w, cos_w)
+     * Actually the original uses the wall-perpendicular direction directly.
+     * [CONFIRMED @ 0x4069a0]: push by (penetration_depth - 4) along normal */
+    int32_t push = (-penetration) + 4;  /* penetration is negative, push is positive */
+    /* Wall normal is perpendicular to wall edge: (-sin_w, cos_w) points into road */
+    actor->world_pos.x += ((-sin_w) * push) >> 4;
+    actor->world_pos.z += (cos_w * push) >> 4;
+
+    /* Decompose velocity into wall-parallel and wall-perpendicular components
+     * [CONFIRMED @ 0x4069cc] */
+    int32_t vx = actor->linear_velocity_x;
+    int32_t vz = actor->linear_velocity_z;
+
+    /* parallel = dot(vel, wall_direction) = vx*cos_w + vz*sin_w */
+    /* perpendicular = dot(vel, wall_normal) = -vx*sin_w + vz*cos_w */
+    int32_t v_para = (vx * cos_w + vz * sin_w) >> 12;
+    int32_t v_perp = (-vx * sin_w + vz * cos_w) >> 12;
+
+    /* If perpendicular velocity is INTO the wall (positive = toward road, negative = into wall):
+     * For our normal pointing into road, v_perp < 0 means moving away from road (into wall).
+     * Actually, this depends on the normal convention. The original clamps perpendicular
+     * to zero if already moving away from the wall. [CONFIRMED @ 0x406b6b] */
+    if (v_perp < 0) {
+        /* Moving into the wall: reflect with damping */
+        v_perp = (-v_perp * V2W_BOUNCE_DAMP) >> 8;
+    }
+    /* If v_perp >= 0, car is already moving away from wall — leave it */
+
+    /* Reconstruct world velocity from parallel + damped perpendicular
+     * [CONFIRMED @ 0x406a10]: vel = parallel * wall_dir + perp * wall_normal */
+    actor->linear_velocity_x = (v_para * cos_w - v_perp * sin_w) >> 12;
+    actor->linear_velocity_z = (v_para * sin_w + v_perp * cos_w) >> 12;
+
+    /* Apply yaw torque from wall impact [CONFIRMED @ 0x406b75] */
+    int32_t impact = v_perp < 0 ? -v_perp : v_perp;
+    int32_t yaw_kick = (impact >> 6);
+    if (side <= 1) yaw_kick = -yaw_kick;  /* left wall pushes CW */
+    actor->angular_velocity_yaw += yaw_kick;
+
+    /* Clamp yaw angular velocity */
+    if (actor->angular_velocity_yaw > 6000) actor->angular_velocity_yaw = 6000;
+    if (actor->angular_velocity_yaw < -6000) actor->angular_velocity_yaw = -6000;
+
+    /* Set track contact flag [CONFIRMED @ 0x406d7e/0x406e4e] */
+    actor->track_contact_flag = (uint8_t)(side + 1);
+}
+
+/* ========================================================================
  * Tuning data access helpers
  *
  * The tuning pointer at actor+0x1BC points to the physics table.
@@ -348,6 +435,13 @@ void td5_physics_update_vehicle_actor(TD5_Actor *actor)
     /* 7. Integrate pose and contacts (skip during countdown) */
     if (!g_game_paused)
         td5_physics_integrate_pose(actor);
+
+    /* 8. Track wall contact resolution (FUN_00406CC0 + FUN_004070E0 + FUN_00406F50)
+     * Check wheel probes against span edges and push car back if outside.
+     * Called after pose integration, matching original UpdateVehicleActor order.
+     * [CONFIRMED @ 0x4068c8] */
+    if (actor->vehicle_mode == 0 && !g_game_paused)
+        td5_track_resolve_wall_contacts(actor);
 
     if (actor->slot_index == 0 && (actor->frame_counter % 60u) == 0u) {
         TD5_LOG_D(LOG_TAG,
