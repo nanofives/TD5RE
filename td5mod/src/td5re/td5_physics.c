@@ -427,6 +427,27 @@ void td5_physics_update_vehicle_actor(TD5_Actor *actor)
             else
                 td5_physics_update_traffic(actor);
         }
+    } else if (actor->vehicle_mode == 1 && !g_game_paused) {
+        /* 6b. Scripted recovery mode [CONFIRMED @ 0x406650 + 0x409E5E]
+         * Original: vehicle_mode==1 runs RefreshScriptedVehicleTransforms +
+         * IntegrateScriptedVehicleMotion for 59 frames, then calls
+         * ResetVehicleActorState to respawn the car.
+         *
+         * Simplified implementation: damp velocities and recover after 59 frames. */
+        actor->frame_counter++;
+
+        /* Damp velocities (original: v -= v >> 8 each frame) */
+        actor->linear_velocity_x -= actor->linear_velocity_x >> 8;
+        actor->linear_velocity_z -= actor->linear_velocity_z >> 8;
+        actor->angular_velocity_yaw -= actor->angular_velocity_yaw >> 4;
+        actor->angular_velocity_roll -= actor->angular_velocity_roll >> 4;
+        actor->angular_velocity_pitch -= actor->angular_velocity_pitch >> 4;
+
+        if (actor->frame_counter > 0x3B) {  /* 59 frames */
+            TD5_LOG_I(LOG_TAG, "mode1 recovery: slot=%d resetting after %d frames",
+                      actor->slot_index, actor->frame_counter);
+            td5_physics_reset_actor_state(actor);
+        }
     } else if (g_game_paused) {
         /* Paused: only update engine RPM display */
         update_engine_speed_smoothed(actor);
@@ -2301,9 +2322,12 @@ void td5_physics_clamp_attitude(TD5_Actor *actor)
         /* Save current rotation -> saved orientation for recovery */
         memcpy(&actor->saved_orientation, &actor->rotation_matrix, sizeof(TD5_Mat3x3));
 
-        /* Set recovery flag */
+        /* Set recovery flag [CONFIRMED @ 0x405B40: sets vehicle_mode=1, frame_counter=0] */
         actor->vehicle_mode = 1;
+        actor->frame_counter = 0;
         actor->steering_command = 0;
+        TD5_LOG_I(LOG_TAG, "attitude exceeded: slot=%d roll=%d pitch=%d -> mode 1",
+                  actor->slot_index, roll, pitch);
     } else {
         /* Mode 1 (collisions OFF): hard clamp */
         /* Soft nudge: if approaching limit, add correction */
@@ -2778,19 +2802,31 @@ static int32_t compute_reverse_gear_torque(TD5_Actor *actor)
 
 void td5_physics_compute_surface_gravity(TD5_Actor *actor)
 {
-    float *rot = actor->rotation_matrix.m;
+    /* Original @ 0x42EBF0: uses 4 wheel probe world positions to compute
+     * two surface tangent vectors, then cross product for surface normal.
+     *
+     * v1 = (probe_FL - probe_FR - probe_RR + probe_RL) >> 8
+     * v2 = (probe_FL - probe_RR - probe_RL + probe_FR) >> 8
+     * normal = cross(v1, v2)
+     * gravity applied to vel_x and vel_z only.
+     *
+     * [CONFIRMED @ 0x42EBFA-0x42ECB7: offsets +0x090, +0x09C, +0x0A8, +0x0B4] */
+    TD5_Vec3_Fixed *fl = &actor->probe_FL;
+    TD5_Vec3_Fixed *fr = &actor->probe_FR;
+    TD5_Vec3_Fixed *rl = &actor->probe_RL;
+    TD5_Vec3_Fixed *rr = &actor->probe_RR;
 
-    /* Compute two perpendicular vectors from body rotation matrix
-     * representing the track surface tangent frame */
-    int32_t v1x = (int32_t)((rot[0] - rot[3] - rot[6] + rot[3]) * 256.0f);
-    int32_t v1y = (int32_t)((rot[1] - rot[4] - rot[7] + rot[4]) * 256.0f);
-    int32_t v1z = (int32_t)((rot[2] - rot[5] - rot[8] + rot[5]) * 256.0f);
+    /* v1 = FL - FR - RR + RL (lateral-ish diagonal) */
+    int32_t v1x = (fl->x - fr->x - rr->x + rl->x) >> 8;
+    int32_t v1y = (fl->y - fr->y - rr->y + rl->y) >> 8;
+    int32_t v1z = (fl->z - fr->z - rr->z + rl->z) >> 8;
 
-    int32_t v2x = (int32_t)((rot[0] - rot[6] - rot[3] + rot[3]) * 256.0f);
-    int32_t v2y = (int32_t)((rot[1] - rot[7] - rot[4] + rot[4]) * 256.0f);
-    int32_t v2z = (int32_t)((rot[2] - rot[8] - rot[5] + rot[5]) * 256.0f);
+    /* v2 = FL - RR - RL + FR (longitudinal-ish diagonal) */
+    int32_t v2x = (fl->x - rr->x - rl->x + fr->x) >> 8;
+    int32_t v2y = (fl->y - rr->y - rl->y + fr->y) >> 8;
+    int32_t v2z = (fl->z - rr->z - rl->z + fr->z) >> 8;
 
-    /* Cross product -> surface normal (12-bit fixed) */
+    /* Cross product -> surface normal */
     int32_t nx = (v1y * v2z - v1z * v2y) >> 8;
     int32_t nz = (v1x * v2y - v1y * v2x) >> 8;
 
