@@ -447,6 +447,23 @@ void td5_physics_update_vehicle_actor(TD5_Actor *actor)
             TD5_LOG_I(LOG_TAG, "mode1 recovery: slot=%d resetting after %d frames",
                       actor->slot_index, actor->frame_counter);
             td5_physics_reset_actor_state(actor);
+
+            /* Teleport to current track span (same as OOB recovery) */
+            int wx = 0, wy = 0, wz = 0;
+            int sub_lane = (int)actor->track_sub_lane_index;
+            int span = actor->track_span_raw;
+            if (td5_track_get_span_lane_world(span, sub_lane, &wx, &wy, &wz)) {
+                actor->world_pos.x = wx << 8;
+                actor->world_pos.y = wy << 8;
+                actor->world_pos.z = wz << 8;
+                /* Set heading to match track direction at this span.
+                 * td5_track_compute_heading writes euler_accum.yaw on the actor. */
+                td5_track_compute_heading(actor);
+                actor->euler_accum.roll = 0;
+                actor->euler_accum.pitch = 0;
+                TD5_LOG_I(LOG_TAG, "mode1 teleport: slot=%d span=%d pos=(%d,%d,%d)",
+                          actor->slot_index, span, wx, wy, wz);
+            }
         }
     } else if (g_game_paused) {
         /* Paused: only update engine RPM display */
@@ -639,27 +656,25 @@ void td5_physics_update_player(TD5_Actor *actor)
     int32_t brake_rear  = (int32_t)PHYS_S(actor, 0x70);
 
     if (actor->brake_flag && throttle < 0) {
+        /* Original grounded brake (0x404437-0x404481):
+         * Uses ONLY tuning[0x6E] (front brake coeff), applies to front wheels,
+         * rear wheels get 0. Clamps against lateral_speed, not longitudinal.
+         * [CONFIRMED @ 0x404441: only 0x6E read, 0x404478: front only] */
         int32_t brake_cmd = (-throttle);
         int32_t bf = (brake_front * brake_cmd) >> 8;
-        int32_t br = (brake_rear * brake_cmd) >> 8;
-        /* Original (0x404612): clamp brake force to v_long/2, not full speed.
-         * [CONFIRMED @ 0x404612-0x40464C] */
-        int32_t half_speed = abs_speed >> 1;
-        if (bf > half_speed) bf = half_speed;
-        if (br > half_speed) br = half_speed;
+        int32_t abs_lat = v_lat < 0 ? -v_lat : v_lat;
+        if (bf > abs_lat) bf = abs_lat;
+        bf >>= 1;
         int32_t sign = (v_long > 0) ? -1 : 1;
-        wheel_drive[0] += sign * (bf >> 1);
-        wheel_drive[1] += sign * (bf >> 1);
-        wheel_drive[2] += sign * (br >> 1);
-        wheel_drive[3] += sign * (br >> 1);
+        wheel_drive[0] += sign * bf;
+        wheel_drive[1] += sign * bf;
+        /* Rear wheels: no brake force applied [CONFIRMED @ 0x40447B: = 0] */
     }
 
     /* --- 12. Per-axle lateral/longitudinal forces --- */
     int32_t steer_angle = actor->steering_command >> 8;
-    /* Arcade mode: boost steering authority by ~15% (294/256 ~ 1.15x) */
-    if (s_dynamics_mode == 0) {
-        steer_angle = (steer_angle * 294) >> 8;
-    }
+    /* Original (0x40415B): steer_angle = steering_command >> 8, no scaling.
+     * Constant 294 does NOT exist in the binary. [CONFIRMED @ 0x404142-0x40415E] */
     int32_t steer_heading = (heading + steer_angle) & 0xFFF;
     int32_t cos_s = cos_fixed12(steer_heading);
     int32_t sin_s = sin_fixed12(steer_heading);
