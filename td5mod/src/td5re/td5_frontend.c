@@ -3371,11 +3371,25 @@ static void frontend_render_car_selection_preview(float sx, float sy) {
     /* Car preview area: solid dark blue fill matching CarSelBar1 color (R=0,G=0,B=92).
      * Original: FillPrimaryFrontendRect(0x5c, x, y, 0x198, 300) at states 10 and 14
      * (0x40DFC0). 0x5c = RGB888 B=92 → same dark blue as CarSelBar1 dominant pixel.
-     * Rect matches car preview surface: 408x300 starting at (232, 96).
-     * In the source port we clear every frame, so this must be redrawn each frame.
+     * Rect matches car preview surface: 408x300 starting at (232, 124).
      * Original y = screenH - 0x164 = 480 - 356 = 124 (confirmed at 0x40EB3B).
-     * Use TRANSLUCENT_LINEAR + tex_page=-1 (same path as button fills which work). */
+     * Force blend + depth states directly (same pattern as fe_draw_surface_rect) to
+     * bypass any stale D3D11 state cache that would prevent the fill from rendering. */
+    TD5_LOG_I(LOG_TAG, "car_sel_fill: inner=%d white=%d", s_inner_state, s_white_tex_page);
     td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
+    if (g_backend.context) {
+        if (g_backend.blend_states[BLEND_SRCALPHA_INVSRC]) {
+            ID3D11DeviceContext_OMSetBlendState(g_backend.context,
+                g_backend.blend_states[BLEND_SRCALPHA_INVSRC], NULL, 0xFFFFFFFF);
+            g_backend.state.current_blend_idx = BLEND_SRCALPHA_INVSRC;
+        }
+        if (g_backend.ds_states[DS_Z_OFF_WRITE_OFF]) {
+            ID3D11DeviceContext_OMSetDepthStencilState(g_backend.context,
+                g_backend.ds_states[DS_Z_OFF_WRITE_OFF], 0);
+            g_backend.state.current_ds_idx = DS_Z_OFF_WRITE_OFF;
+        }
+    }
+    Backend_UpdateFogCB();
     fe_draw_quad(232.0f * sx, 124.0f * sy, 408.0f * sx, 300.0f * sy,
                  0xFF00005C, -1, 0, 0, 1, 1);
     td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
