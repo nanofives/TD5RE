@@ -2102,36 +2102,35 @@ static int   s_wheel_lookup_done = 0;
 
 static void wheel_lookup_static_hed(void)
 {
-    extern TD5_StaticHedEntry *g_static_hed_entries;
-    extern int                 g_static_hed_entry_count;
-
     s_wheel_lookup_done = 1;
 
-    TD5_StaticHedEntry *wheels = td5_asset_find_entry_by_name(
-        g_static_hed_entries, g_static_hed_entry_count, "WHEELS");
-    if (wheels) {
-        s_wheel_tex_page = wheels->texture_slot;
+    /* Use td5_asset_find_atlas_entry which searches the loaded s_atlas_table
+     * (populated from static.hed at init). g_static_hed_entries is NULL —
+     * the raw HED array is not stored separately. */
+    TD5_AtlasEntry *wheels = td5_asset_find_atlas_entry(NULL, "WHEELS");
+    if (wheels && wheels->texture_page > 0) {
+        s_wheel_tex_page = wheels->texture_page;
         TD5_LOG_I(LOG_TAG, "wheel: WHEELS entry page=%d pos=(%d,%d) size=(%d,%d)",
-                  s_wheel_tex_page, wheels->pos_x, wheels->pos_y,
+                  s_wheel_tex_page, wheels->atlas_x, wheels->atlas_y,
                   wheels->width, wheels->height);
     } else {
-        TD5_LOG_W(LOG_TAG, "wheel: WHEELS not found in static.hed");
+        TD5_LOG_W(LOG_TAG, "wheel: WHEELS not found in static.hed atlas");
     }
 
-    TD5_StaticHedEntry *inwheel = td5_asset_find_entry_by_name(
-        g_static_hed_entries, g_static_hed_entry_count, "INWHEEL");
-    if (inwheel) {
+    TD5_AtlasEntry *inwheel = td5_asset_find_atlas_entry(NULL, "INWHEEL");
+    if (inwheel && inwheel->texture_page > 0) {
         /* Pixel UVs with half-pixel inset, normalized to [0,1] for D3D11 */
         int tw = 256, th = 256;
         if (s_wheel_tex_page >= 0)
             td5_plat_render_get_texture_dims(s_wheel_tex_page, &tw, &th);
-        s_inwheel_u0 = ((float)inwheel->pos_x + 0.5f) / (float)tw;
-        s_inwheel_v0 = ((float)inwheel->pos_y + 0.5f) / (float)th;
-        s_inwheel_u1 = ((float)(inwheel->pos_x + inwheel->width) - 0.5f) / (float)tw;
-        s_inwheel_v1 = ((float)(inwheel->pos_y + inwheel->height) - 0.5f) / (float)th;
+        s_inwheel_u0 = ((float)inwheel->atlas_x + 0.5f) / (float)tw;
+        s_inwheel_v0 = ((float)inwheel->atlas_y + 0.5f) / (float)th;
+        s_inwheel_u1 = ((float)(inwheel->atlas_x + inwheel->width) - 0.5f) / (float)tw;
+        s_inwheel_v1 = ((float)(inwheel->atlas_y + inwheel->height) - 0.5f) / (float)th;
         TD5_LOG_I(LOG_TAG, "wheel: INWHEEL UV=(%.4f,%.4f)-(%.4f,%.4f)",
                   s_inwheel_u0, s_inwheel_v0, s_inwheel_u1, s_inwheel_v1);
     } else {
+        /* Fallback: INWHEEL at (0,192) 16x16 on a 256x256 page */
         s_inwheel_u0 = 0.5f / 256.0f;
         s_inwheel_v0 = 192.5f / 256.0f;
         s_inwheel_u1 = 15.5f / 256.0f;
