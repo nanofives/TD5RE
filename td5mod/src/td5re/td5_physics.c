@@ -553,7 +553,7 @@ void td5_physics_update_player(TD5_Actor *actor)
     if (s_dynamics_mode == 0) {
         steer_angle = (steer_angle * 294) >> 8;
     }
-    int32_t steer_heading = (heading + (steer_angle >> 4)) & 0xFFF;
+    int32_t steer_heading = (heading + steer_angle) & 0xFFF;
     int32_t cos_s = cos_fixed12(steer_heading);
     int32_t sin_s = sin_fixed12(steer_heading);
 
@@ -778,7 +778,7 @@ void td5_physics_update_ai(TD5_Actor *actor)
 
     /* --- 2-axle lateral forces --- */
     int32_t steer_angle = actor->steering_command >> 8;
-    int32_t steer_heading = (heading + (steer_angle >> 4)) & 0xFFF;
+    int32_t steer_heading = (heading + steer_angle) & 0xFFF;
     int32_t cos_s = cos_fixed12(steer_heading);
     int32_t sin_s = sin_fixed12(steer_heading);
 
@@ -862,7 +862,7 @@ void td5_physics_update_traffic(TD5_Actor *actor)
 
     /* Steering from AI route: actor+0x30C */
     int32_t steer = actor->steering_command >> 8;
-    int32_t steer_heading = (heading + (steer >> 4)) & 0xFFF;
+    int32_t steer_heading = (heading + steer) & 0xFFF;
     int32_t cos_s = cos_fixed12(steer_heading);
     int32_t sin_s = sin_fixed12(steer_heading);
 
