@@ -533,13 +533,13 @@ void td5_hud_init_font_atlas(void)
             int tpage_slot = (int)(font_entry->texture_page - 700);
             int loaded = 0;
 
-            /* Try PNG from td5_png_clean first */
+            /* Try PNG from re/assets first */
             {
                 char png_path[128];
                 void *png_pixels = NULL;
                 int pw = 0, ph = 0;
                 snprintf(png_path, sizeof(png_path),
-                         "../re/td5_png_clean/static/tpage%d.png", tpage_slot);
+                         "re/assets/static/tpage%d.png", tpage_slot);
                 if (td5_asset_decode_png_rgba32(png_path, &png_pixels, &pw, &ph)
                     && pw == 256 && ph == 256) {
                     memcpy(s_font_page_buf, png_pixels, 256 * 256 * 4);
@@ -554,7 +554,7 @@ void td5_hud_init_font_atlas(void)
             if (!loaded) {
                 char tpage_path[128];
                 snprintf(tpage_path, sizeof(tpage_path),
-                         "../re/assets/static/tpage%d.dat", tpage_slot);
+                         "re/assets/static/tpage%d.dat", tpage_slot);
                 FILE *tf = fopen(tpage_path, "rb");
                 if (tf) {
                     fread(s_font_page_buf, 1, sizeof(s_font_page_buf), tf);
@@ -1864,8 +1864,12 @@ void td5_hud_render_overlays(float dt)
             }
 
             /* Build and submit speed digit quads using SPEEDOFONT atlas
-             * (linear strip of 10 digits, 16px wide each at atlas (96,160)). */
+             * (linear strip of 10 digits, 16px wide each at atlas (96,160)).
+             * Original renders right-to-left: ones at anchor, each additional
+             * digit subtracts (glyph_w + 2.0) moving LEFT (0x438E90).
+             * Inter-digit gap is 2.0 [CONFIRMED @ 0x45d6d8]. */
             float sf_gw = sx * 15.0f;
+            float sf_step = sf_gw + 2.0f;
             float sf_x0 = vl->vp_int_right - sx * 60.0f;
             float sf_y0 = vl->vp_int_bottom - sy * 23.0f - sy * 8.0f;
             float sf_y1 = sf_y0 + sy * 24.0f;
@@ -1874,20 +1878,25 @@ void td5_hud_render_overlays(float dt)
             int   sf_pg = s_speedofont_atlas->texture_page;
 
             int ones = speed_display % 10;
+            int tens_val = (speed_display / 10) % 10;
+            int hundreds_val = speed_display / 100;
+
+            /* Determine digit count to compute right-shifted anchor.
+             * All digits shift right so the leftmost digit stays at sf_x0. */
+            int num_digits = 1;
+            if (speed_display >= 100) num_digits = 3;
+            else if (speed_display >= 10) num_digits = 2;
+
+            /* Ones anchor: rightmost position = sf_x0 + (num_digits-1) * step */
+            float ones_x = sf_x0 + (float)(num_digits - 1) * sf_step;
 
             /* Submit speedo dial */
             hud_submit_quad(view_base + SPEEDO_QUAD_OFF);
             /* Submit needle */
             hud_submit_quad(view_base + 0x39C);
 
-            /* Submit speed digits right-to-left: ones at rightmost (sf_x0),
-             * tens one glyph left, hundreds two glyphs left.
-             * Original renders right-to-left from anchor (0x438E90). */
-            int tens_val = (speed_display / 10) % 10;
-            int hundreds_val = speed_display / 100;
-
-            /* Ones digit (always shown, rightmost position) */
-            float dx = sf_x0;
+            /* Ones digit (always shown) */
+            float dx = ones_x;
             float u_ones = digit_u_base + (float)ones * 16.0f + 0.5f;
             hud_build_quad(
                 view_base + SPEEDFONT_BASE_OFF,
@@ -1899,10 +1908,10 @@ void td5_hud_render_overlays(float dt)
             );
             hud_submit_quad(view_base + SPEEDFONT_BASE_OFF);
 
-            /* Tens digit if speed >= 10 (one position LEFT of ones) */
+            /* Tens digit if speed >= 10 (one step LEFT of ones) */
             if (speed_display >= 10) {
                 float u_tens = digit_u_base + (float)tens_val * 16.0f + 0.5f;
-                dx = sf_x0 - 1.0f * (sf_gw + 1.0f);
+                dx = ones_x - sf_step;
                 hud_build_quad(
                     view_base + SPEEDFONT_BASE_OFF + TD5_HUD_GLYPH_QUAD_SIZE,
                     0, sf_pg,
@@ -1913,10 +1922,10 @@ void td5_hud_render_overlays(float dt)
                 );
                 hud_submit_quad(view_base + SPEEDFONT_BASE_OFF + TD5_HUD_GLYPH_QUAD_SIZE);
 
-                /* Hundreds digit if speed >= 100 (two positions LEFT of ones) */
+                /* Hundreds digit if speed >= 100 (two steps LEFT of ones) */
                 if (speed_display >= 100) {
                     float u_hund = digit_u_base + (float)hundreds_val * 16.0f + 0.5f;
-                    dx = sf_x0 - 2.0f * (sf_gw + 1.0f);
+                    dx = ones_x - 2.0f * sf_step;
                     hud_build_quad(
                         view_base + SPEEDFONT_BASE_OFF + 2 * TD5_HUD_GLYPH_QUAD_SIZE,
                         0, sf_pg,
