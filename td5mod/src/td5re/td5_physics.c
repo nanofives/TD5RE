@@ -54,7 +54,24 @@ extern uint8_t *g_actor_table_base;
 
 int td5_game_get_total_actor_count(void);
 
-static void resolve_collision_pair(TD5_Actor *a, TD5_Actor *b);
+/* OBB corner test output: per-corner penetration data */
+typedef struct OBB_CornerData {
+    int16_t proj_x;     /* projected X position of corner */
+    int16_t proj_z;     /* projected Z position of corner */
+    int16_t pen_x;      /* penetration depth along X axis */
+    int16_t pen_z;      /* penetration depth along Z axis */
+} OBB_CornerData;
+
+static void resolve_collision_pair(TD5_Actor *a, TD5_Actor *b, int idx_a, int idx_b);
+static void collision_detect_full(TD5_Actor *a, TD5_Actor *b, int idx_a, int idx_b);
+static void collision_detect_simple(TD5_Actor *a, TD5_Actor *b);
+static int  obb_corner_test(TD5_Actor *a, TD5_Actor *b,
+                            int32_t ax, int32_t az, int32_t bx, int32_t bz,
+                            int32_t heading_a, int32_t heading_b,
+                            OBB_CornerData corners[8]);
+static void apply_collision_response(TD5_Actor *penetrator, TD5_Actor *target,
+                                     int corner_idx, OBB_CornerData *corner,
+                                     int32_t heading_target);
 
 /* ========================================================================
  * Key globals
@@ -87,8 +104,19 @@ static int32_t g_race_slot_state[6];         /* 1=human, 0=AI per slot */
 /* V2W inertia constant = 1,500,000 (DAT_00463200) */
 #define V2W_INERTIA_K       1500000
 
-/* Per-actor AABB table for broadphase (stride 20 bytes) */
-static int32_t g_actor_aabb[TD5_MAX_TOTAL_ACTORS][5]; /* min_x, min_z, max_x, max_z, chain */
+/* Per-actor AABB table for broadphase (stride 20 bytes: xMin, zMin, xMax, zMax, chain) */
+static int32_t g_actor_aabb[TD5_MAX_TOTAL_ACTORS][5];
+
+/* Spatial grid broadphase (FUN_00409150).
+ * Bucket array indexed by (segment_index >> 2).
+ * Each entry is a chain head (actor index, or 0xFF sentinel).
+ * Chain links stored in g_actor_aabb[][4]. */
+#define COLLISION_GRID_SIZE     256
+#define COLLISION_CHAIN_END     0xFF
+#define COLLISION_MAX_WALK      17
+static uint8_t s_collision_grid[COLLISION_GRID_SIZE];
+
+/* OBB_CornerData defined near top of file with forward declarations */
 static uint8_t s_default_tuning[TD5_MAX_TOTAL_ACTORS][0x80];
 static uint8_t s_default_cardef[TD5_MAX_TOTAL_ACTORS][0x90];
 static uint8_t s_carparam_loaded[TD5_MAX_TOTAL_ACTORS];  /* 1 if carparam.dat was loaded */
@@ -324,8 +352,9 @@ void td5_physics_update_vehicle_actor(TD5_Actor *actor)
         update_engine_speed_smoothed(actor);
     }
 
-    /* 7. Integrate pose and contacts */
-    td5_physics_integrate_pose(actor);
+    /* 7. Integrate pose and contacts (skip during countdown) */
+    if (!g_game_paused)
+        td5_physics_integrate_pose(actor);
 
     if (actor->slot_index == 0 && (actor->frame_counter % 60u) == 0u) {
         TD5_LOG_D(LOG_TAG,
@@ -912,7 +941,490 @@ static void apply_damped_suspension_force(TD5_Actor *actor, int32_t lateral, int
 }
 
 /* ========================================================================
- * Collision: ApplyVehicleCollisionImpulse (0x4079C0)
+ * OBB Corner Test -- FUN_00408570
+ *
+ * Tests 8 corners (4 of each car) against the other car's OBB.
+ * Returns bitmask: bits 0-3 = B corners inside A, bits 4-7 = A corners inside B.
+ * For each penetrating corner, stores {projX, projZ, penX, penZ} in corners[].
+ *
+ * Car bbox from carData pointer at actor+0x1B8:
+ *   carData+0x04 = halfWidth  (int16)
+ *   carData+0x08 = halfLength (int16)
+ *   carData+0x14 = negHalfWidth (int16, asymmetric)
+ * ======================================================================== */
+
+static int obb_corner_test(TD5_Actor *a, TD5_Actor *b,
+                           int32_t ax, int32_t az, int32_t bx, int32_t bz,
+                           int32_t heading_a, int32_t heading_b,
+                           OBB_CornerData corners[8])
+{
+    int result = 0;
+
+    /* Get half-extents from car definition */
+    int32_t hw_a = (int32_t)CDEF_S(a, 0x04);  /* halfWidth */
+    int32_t hl_a = (int32_t)CDEF_S(a, 0x08);  /* halfLength */
+    int32_t nw_a = (int32_t)CDEF_S(a, 0x14);  /* negHalfWidth (asymmetric) */
+    int32_t hw_b = (int32_t)CDEF_S(b, 0x04);
+    int32_t hl_b = (int32_t)CDEF_S(b, 0x08);
+    int32_t nw_b = (int32_t)CDEF_S(b, 0x14);
+
+    /* Precompute sin/cos for each heading */
+    int32_t cos_a = cos_fixed12(heading_a);
+    int32_t sin_a = sin_fixed12(heading_a);
+    int32_t cos_b = cos_fixed12(heading_b);
+    int32_t sin_b = sin_fixed12(heading_b);
+
+    /* Delta heading: rotation from B's frame to A's frame */
+    int32_t dheading = (heading_b - heading_a) & 0xFFF;
+    int32_t cos_d = cos_fixed12(dheading);
+    int32_t sin_d = sin_fixed12(dheading);
+
+    /* Delta heading inverse: rotation from A's frame to B's frame */
+    int32_t dheading_inv = (heading_a - heading_b) & 0xFFF;
+    int32_t cos_di = cos_fixed12(dheading_inv);
+    int32_t sin_di = sin_fixed12(dheading_inv);
+
+    /* B's 4 corners in B's local frame (right-hand: X=lateral, Z=forward) */
+    int32_t b_corners_lx[4] = { -nw_b,  hw_b,  hw_b, -nw_b };
+    int32_t b_corners_lz[4] = {  hl_b,  hl_b, -hl_b, -hl_b };
+
+    /* A's 4 corners in A's local frame */
+    int32_t a_corners_lx[4] = { -nw_a,  hw_a,  hw_a, -nw_a };
+    int32_t a_corners_lz[4] = {  hl_a,  hl_a, -hl_a, -hl_a };
+
+    /* --- Test B's corners in A's OBB (bits 0-3) --- */
+    /* World-space delta from A to B */
+    int32_t delta_x = bx - ax;
+    int32_t delta_z = bz - az;
+
+    /* Rotate delta into A's local frame */
+    int32_t local_dx = (delta_x * cos_a + delta_z * sin_a) >> 12;
+    int32_t local_dz = (-delta_x * sin_a + delta_z * cos_a) >> 12;
+
+    for (int i = 0; i < 4; i++) {
+        /* Rotate B's corner from B's local frame into A's local frame */
+        int32_t cx = (b_corners_lx[i] * cos_d - b_corners_lz[i] * sin_d) >> 12;
+        int32_t cz = (b_corners_lx[i] * sin_d + b_corners_lz[i] * cos_d) >> 12;
+
+        /* Translate by A-to-B delta in A's frame */
+        cx += local_dx;
+        cz += local_dz;
+
+        /* Test if within A's half-extents */
+        if (cx >= -nw_a && cx <= hw_a && cz >= -hl_a && cz <= hl_a) {
+            result |= (1 << i);
+            corners[i].proj_x = (int16_t)cx;
+            corners[i].proj_z = (int16_t)cz;
+            /* Penetration: distance from corner to nearest OBB face */
+            int32_t pen_right = hw_a - cx;
+            int32_t pen_left  = cx - (-nw_a);
+            int32_t pen_front = hl_a - cz;
+            int32_t pen_back  = cz - (-hl_a);
+            corners[i].pen_x = (int16_t)((pen_right < pen_left) ? pen_right : -pen_left);
+            corners[i].pen_z = (int16_t)((pen_front < pen_back) ? pen_front : -pen_back);
+        }
+    }
+
+    /* --- Test A's corners in B's OBB (bits 4-7) --- */
+    /* World-space delta from B to A */
+    int32_t delta2_x = ax - bx;
+    int32_t delta2_z = az - bz;
+
+    /* Rotate delta into B's local frame */
+    int32_t local2_dx = (delta2_x * cos_b + delta2_z * sin_b) >> 12;
+    int32_t local2_dz = (-delta2_x * sin_b + delta2_z * cos_b) >> 12;
+
+    for (int i = 0; i < 4; i++) {
+        /* Rotate A's corner from A's local frame into B's local frame */
+        int32_t cx = (a_corners_lx[i] * cos_di - a_corners_lz[i] * sin_di) >> 12;
+        int32_t cz = (a_corners_lx[i] * sin_di + a_corners_lz[i] * cos_di) >> 12;
+
+        /* Translate by B-to-A delta in B's frame */
+        cx += local2_dx;
+        cz += local2_dz;
+
+        /* Test if within B's half-extents */
+        if (cx >= -nw_b && cx <= hw_b && cz >= -hl_b && cz <= hl_b) {
+            result |= (1 << (i + 4));
+            corners[i + 4].proj_x = (int16_t)cx;
+            corners[i + 4].proj_z = (int16_t)cz;
+            int32_t pen_right = hw_b - cx;
+            int32_t pen_left  = cx - (-nw_b);
+            int32_t pen_front = hl_b - cz;
+            int32_t pen_back  = cz - (-hl_b);
+            corners[i + 4].pen_x = (int16_t)((pen_right < pen_left) ? pen_right : -pen_left);
+            corners[i + 4].pen_z = (int16_t)((pen_front < pen_back) ? pen_front : -pen_back);
+        }
+    }
+
+    return result;
+}
+
+/* ========================================================================
+ * Collision Response -- FUN_004079c0
+ *
+ * Impulse-based with angular velocity coupling.
+ * Called per penetrating corner from collision_detect_full.
+ *
+ * Key constants:
+ *   INERTIA_BASE = 500000 (0x7A120)
+ *   RESTITUTION_SCALE = 0x1100 (4352)
+ *   ANGULAR_DIVISOR = 0x28C (652)
+ *   Mass from carData+0x88 (int16)
+ * ======================================================================== */
+
+#define RESTITUTION_SCALE   0x1100
+#define ANGULAR_DIVISOR     0x28C
+
+static void apply_collision_response(TD5_Actor *penetrator, TD5_Actor *target,
+                                     int corner_idx, OBB_CornerData *corner,
+                                     int32_t heading_target)
+{
+    if (!penetrator || !target) return;
+    if (!penetrator->car_definition_ptr || !target->car_definition_ptr) return;
+
+    /* Get masses */
+    int32_t mass_p = (int32_t)CDEF_S(penetrator, 0x88);
+    int32_t mass_t = (int32_t)CDEF_S(target, 0x88);
+    if (mass_p <= 0) mass_p = 0x20;
+    if (mass_t <= 0) mass_t = 0x20;
+
+    int32_t pen_x = (int32_t)corner->pen_x;
+    int32_t pen_z = (int32_t)corner->pen_z;
+
+    /* Determine which OBB face was penetrated (minimum penetration axis) */
+    int32_t abs_pen_x = pen_x < 0 ? -pen_x : pen_x;
+    int32_t abs_pen_z = pen_z < 0 ? -pen_z : pen_z;
+
+    /* Contact normal in target's local frame: choose minimum penetration axis */
+    int32_t local_nx, local_nz;
+    int32_t penetration;
+    if (abs_pen_x < abs_pen_z) {
+        /* Side face contact */
+        local_nx = (pen_x > 0) ? 1 : -1;
+        local_nz = 0;
+        penetration = abs_pen_x;
+    } else {
+        /* Front/rear face contact */
+        local_nx = 0;
+        local_nz = (pen_z > 0) ? 1 : -1;
+        penetration = abs_pen_z;
+    }
+
+    /* Rotate contact normal from target's local frame to world frame */
+    int32_t cos_t = cos_fixed12(heading_target);
+    int32_t sin_t = sin_fixed12(heading_target);
+    int32_t world_nx = (local_nx * cos_t - local_nz * sin_t);
+    int32_t world_nz = (local_nx * sin_t + local_nz * cos_t);
+    /* world_nx/world_nz are in [-4096..4096] range (12-bit) when local is unit */
+    if (local_nx == 0 && local_nz == 0) return;
+
+    /* Normalize: local_nx/nz are +/-1, so world normal magnitude = 1 in 12-bit.
+     * Scale to proper 12-bit range */
+    if (local_nx != 0) {
+        world_nx *= 0x1000;
+        world_nz *= 0x1000;
+    } else {
+        world_nx *= 0x1000;
+        world_nz *= 0x1000;
+    }
+    /* At this point world_nx/nz are 12-bit scaled unit normal */
+
+    /* --- 3. Push actors apart along normal by penetration --- */
+    int32_t push_half = (penetration + 1) >> 1;
+    penetrator->world_pos.x += (world_nx * push_half) >> 12;
+    penetrator->world_pos.z += (world_nz * push_half) >> 12;
+    target->world_pos.x -= (world_nx * push_half) >> 12;
+    target->world_pos.z -= (world_nz * push_half) >> 12;
+
+    /* --- 1. Rotate velocities into collision frame using heading --- */
+    /* Relative velocity */
+    int32_t rel_vx = penetrator->linear_velocity_x - target->linear_velocity_x;
+    int32_t rel_vz = penetrator->linear_velocity_z - target->linear_velocity_z;
+
+    /* Project relative velocity onto contact normal */
+    int32_t v_closing = (rel_vx * world_nx + rel_vz * world_nz) >> 12;
+
+    /* Guard: if separating, only apply positional correction */
+    if (v_closing > 0) return;
+
+    /* --- 4. Compute impulse using moment-of-inertia formula --- */
+    /* Contact offset from center of mass (use projected position) */
+    int32_t r_p = (int32_t)corner->proj_x;  /* lateral offset in target frame */
+    int32_t r_t = (int32_t)corner->proj_z;  /* longitudinal offset in target frame */
+    int32_t r_sq_p = (int64_t)r_p * r_p;
+    int32_t r_sq_t = (int64_t)r_t * r_t;
+
+    /* denominator = (r_sq + INERTIA_BASE) / mass for each car */
+    int64_t denom = (int64_t)(r_sq_t + V2V_INERTIA_K) * mass_p +
+                    (int64_t)(r_sq_p + V2V_INERTIA_K) * mass_t;
+    denom >>= 8;
+    if (denom == 0) denom = 1;
+
+    /* numerator = (INERTIA_BASE >> 8) * RESTITUTION_SCALE */
+    int64_t impulse_num = (int64_t)(V2V_INERTIA_K >> 8) * RESTITUTION_SCALE;
+    int32_t impulse = (int32_t)(impulse_num / denom) * (-v_closing);
+    impulse >>= 4;
+
+    /* --- 5. Apply linear impulse --- */
+    int32_t imp_x = (impulse * world_nx) >> 12;
+    int32_t imp_z = (impulse * world_nz) >> 12;
+
+    penetrator->linear_velocity_x += imp_x / mass_p;
+    penetrator->linear_velocity_z += imp_z / mass_p;
+    target->linear_velocity_x -= imp_x / mass_t;
+    target->linear_velocity_z -= imp_z / mass_t;
+
+    /* --- 6. Angular impulse: angVel += J * mass * r / (INERTIA_BASE / ANGULAR_DIVISOR) --- */
+    int32_t inertia_ang = V2V_INERTIA_K / ANGULAR_DIVISOR;  /* ~767 */
+    if (inertia_ang == 0) inertia_ang = 1;
+
+    /* Cross product of contact offset x impulse direction -> yaw torque */
+    int32_t torque_p = ((int64_t)r_p * imp_z - (int64_t)r_t * imp_x) >> 12;
+    int32_t torque_t = ((int64_t)corner->proj_x * imp_z -
+                        (int64_t)corner->proj_z * imp_x) >> 12;
+
+    penetrator->angular_velocity_yaw += (torque_p * mass_p) / (inertia_ang * mass_p + 1);
+    target->angular_velocity_yaw     -= (torque_t * mass_t) / (inertia_ang * mass_t + 1);
+
+    /* --- 7. Velocity damping based on penetration depth --- */
+    if (penetration > 16) {
+        int32_t damp = 256 - (penetration >> 2);
+        if (damp < 128) damp = 128;
+        penetrator->linear_velocity_x = (penetrator->linear_velocity_x * damp) >> 8;
+        penetrator->linear_velocity_z = (penetrator->linear_velocity_z * damp) >> 8;
+        target->linear_velocity_x = (target->linear_velocity_x * damp) >> 8;
+        target->linear_velocity_z = (target->linear_velocity_z * damp) >> 8;
+    }
+
+    /* --- 8. Update poses --- */
+    update_vehicle_pose_from_physics(penetrator);
+    update_vehicle_pose_from_physics(target);
+
+    /* --- 9. Crash effects based on impulse magnitude --- */
+    int32_t impact_mag = impulse < 0 ? -impulse : impulse;
+
+    /* Heavy impact (> 90000): tumble + heavy SFX */
+    if (impact_mag > 90000 && g_collisions_enabled == 0) {
+        if (penetrator->slot_index < 6) {
+            penetrator->euler_accum.roll  += (impact_mag >> 10) & 0x3F;
+            penetrator->euler_accum.pitch += (impact_mag >> 11) & 0x1F;
+        }
+        if (target->slot_index < 6) {
+            target->euler_accum.roll  -= (impact_mag >> 10) & 0x3F;
+            target->euler_accum.pitch -= (impact_mag >> 11) & 0x1F;
+        }
+        /* Increment damage lockout for traffic vehicles */
+        if (penetrator->slot_index >= 6) penetrator->damage_lockout++;
+        if (target->slot_index >= 6) target->damage_lockout++;
+    }
+
+    /* Medium impact (> 50000): medium SFX + traffic damage */
+    if (impact_mag > 50000) {
+        if (penetrator->slot_index >= 6) penetrator->damage_lockout++;
+        if (target->slot_index >= 6) target->damage_lockout++;
+    }
+
+    /* Light impact (> 12800): light SFX (sound hook point) */
+    /* Impact SFX severity stored for sound system to pick up */
+    (void)impact_mag; /* sound integration point */
+}
+
+/* ========================================================================
+ * Simple Collision -- FUN_00408f70
+ *
+ * For crashed/flipped cars -- sphere overlap with simple impulse.
+ * Combined radius = (radiusA + radiusB) * 3/4
+ * ======================================================================== */
+
+static void collision_detect_simple(TD5_Actor *a, TD5_Actor *b)
+{
+    if (!a || !b) return;
+    if (!a->car_definition_ptr || !b->car_definition_ptr) return;
+
+    int32_t radius_a = (int32_t)CDEF_S(a, 0x80);
+    int32_t radius_b = (int32_t)CDEF_S(b, 0x80);
+    int32_t combined = ((radius_a + radius_b) * 3) >> 2;
+
+    int32_t dx = (a->world_pos.x >> 8) - (b->world_pos.x >> 8);
+    int32_t dy = (a->world_pos.y >> 8) - (b->world_pos.y >> 8);
+    int32_t dz = (a->world_pos.z >> 8) - (b->world_pos.z >> 8);
+
+    int32_t dist_sq = dx * dx + dy * dy + dz * dz;
+    if (dist_sq >= combined * combined) return;
+
+    int32_t dist = td5_isqrt(dist_sq);
+    if (dist == 0) return;
+
+    /* Normalize separation vector (12-bit) */
+    int32_t nx = (dx << 12) / dist;
+    int32_t ny = (dy << 12) / dist;
+    int32_t nz = (dz << 12) / dist;
+
+    /* Project relative velocity onto normal */
+    int32_t rel_vx = a->linear_velocity_x - b->linear_velocity_x;
+    int32_t rel_vy = a->linear_velocity_y - b->linear_velocity_y;
+    int32_t rel_vz = a->linear_velocity_z - b->linear_velocity_z;
+    int32_t v_dot = (rel_vx * nx + rel_vy * ny + rel_vz * nz) >> 12;
+
+    /* Only apply if closing (dot < 0) */
+    if (v_dot >= 0) return;
+
+    /* Apply half closing velocity / 16 as impulse */
+    int32_t impulse = (-v_dot) >> 5;  /* /32 = half/16 */
+
+    int32_t mass_a = (int32_t)CDEF_S(a, 0x88);
+    int32_t mass_b = (int32_t)CDEF_S(b, 0x88);
+    if (mass_a <= 0) mass_a = 0x20;
+    if (mass_b <= 0) mass_b = 0x20;
+
+    int32_t imp_x = (impulse * nx) >> 12;
+    int32_t imp_y = (impulse * ny) >> 12;
+    int32_t imp_z = (impulse * nz) >> 12;
+
+    a->linear_velocity_x += imp_x / mass_a;
+    a->linear_velocity_y += imp_y / mass_a;
+    a->linear_velocity_z += imp_z / mass_a;
+    b->linear_velocity_x -= imp_x / mass_b;
+    b->linear_velocity_y -= imp_y / mass_b;
+    b->linear_velocity_z -= imp_z / mass_b;
+}
+
+/* ========================================================================
+ * Full Collision Detection -- FUN_00408a60
+ *
+ * Binary search refinement using OBB corner test:
+ * 1. AABB pre-test from grid bounds
+ * 2. Initial OBB test at full size
+ * 3. Binary search 7 iterations: halve half-extents each step
+ * 4. Penetration depth = final_adjustment - 0x10
+ * 5. Dispatch collision response based on corner bitmask
+ * ======================================================================== */
+
+static void collision_detect_full(TD5_Actor *a, TD5_Actor *b, int idx_a, int idx_b)
+{
+    if (!a || !b) return;
+    if (!a->car_definition_ptr || !b->car_definition_ptr) return;
+
+    /* AABB pre-test from broadphase grid */
+    if (g_actor_aabb[idx_a][2] < g_actor_aabb[idx_b][0] ||
+        g_actor_aabb[idx_b][2] < g_actor_aabb[idx_a][0] ||
+        g_actor_aabb[idx_a][3] < g_actor_aabb[idx_b][1] ||
+        g_actor_aabb[idx_b][3] < g_actor_aabb[idx_a][1]) {
+        return;
+    }
+
+    int32_t ax = a->world_pos.x >> 8;
+    int32_t az = a->world_pos.z >> 8;
+    int32_t bx = b->world_pos.x >> 8;
+    int32_t bz = b->world_pos.z >> 8;
+
+    /* Get headings from euler accumulators (>> 8 for 12-bit display angle) */
+    int32_t heading_a = (a->euler_accum.yaw >> 8) & 0xFFF;
+    int32_t heading_b = (b->euler_accum.yaw >> 8) & 0xFFF;
+
+    /* --- Initial OBB test at full size --- */
+    OBB_CornerData corners[8];
+    memset(corners, 0, sizeof(corners));
+    int bitmask = obb_corner_test(a, b, ax, az, bx, bz,
+                                  heading_a, heading_b, corners);
+
+    if (bitmask == 0) return;  /* No overlap at full size */
+
+    /* --- 7-iteration binary search refinement --- */
+    /* Save original half-extents */
+    int16_t orig_hw_a = CDEF_S(a, 0x04);
+    int16_t orig_hl_a = CDEF_S(a, 0x08);
+    int16_t orig_nw_a = CDEF_S(a, 0x14);
+    int16_t orig_hw_b = CDEF_S(b, 0x04);
+    int16_t orig_hl_b = CDEF_S(b, 0x08);
+    int16_t orig_nw_b = CDEF_S(b, 0x14);
+
+    /* Start with half-size adjustment */
+    int32_t adj_a = orig_hw_a >> 1;
+    int32_t adj_b = orig_hw_b >> 1;
+
+    for (int iter = 0; iter < 7; iter++) {
+        int32_t step = adj_a >> 1;
+        if (step < 1) step = 1;
+
+        /* Temporarily shrink/grow half-extents */
+        int16_t test_hw_a, test_hl_a, test_nw_a;
+        int16_t test_hw_b, test_hl_b, test_nw_b;
+
+        if (bitmask != 0) {
+            /* Overlap found: shrink inward */
+            test_hw_a = orig_hw_a - (int16_t)adj_a;
+            test_hl_a = orig_hl_a - (int16_t)adj_a;
+            test_nw_a = orig_nw_a + (int16_t)adj_a;  /* neg side: shrink = add */
+            test_hw_b = orig_hw_b - (int16_t)adj_b;
+            test_hl_b = orig_hl_b - (int16_t)adj_b;
+            test_nw_b = orig_nw_b + (int16_t)adj_b;
+        } else {
+            /* No overlap: grow outward */
+            test_hw_a = orig_hw_a + (int16_t)adj_a;
+            test_hl_a = orig_hl_a + (int16_t)adj_a;
+            test_nw_a = orig_nw_a - (int16_t)adj_a;
+            test_hw_b = orig_hw_b + (int16_t)adj_b;
+            test_hl_b = orig_hl_b + (int16_t)adj_b;
+            test_nw_b = orig_nw_b - (int16_t)adj_b;
+        }
+
+        /* Clamp to non-negative */
+        if (test_hw_a < 1) test_hw_a = 1;
+        if (test_hl_a < 1) test_hl_a = 1;
+        if (test_hw_b < 1) test_hw_b = 1;
+        if (test_hl_b < 1) test_hl_b = 1;
+
+        /* Temporarily set modified extents for the OBB test */
+        write_i16((uint8_t*)a->car_definition_ptr, 0x04, test_hw_a);
+        write_i16((uint8_t*)a->car_definition_ptr, 0x08, test_hl_a);
+        write_i16((uint8_t*)a->car_definition_ptr, 0x14, test_nw_a);
+        write_i16((uint8_t*)b->car_definition_ptr, 0x04, test_hw_b);
+        write_i16((uint8_t*)b->car_definition_ptr, 0x08, test_hl_b);
+        write_i16((uint8_t*)b->car_definition_ptr, 0x14, test_nw_b);
+
+        memset(corners, 0, sizeof(corners));
+        bitmask = obb_corner_test(a, b, ax, az, bx, bz,
+                                  heading_a, heading_b, corners);
+
+        adj_a = step;
+        adj_b = (orig_hw_b >> 1) >> (iter + 1);
+        if (adj_b < 1) adj_b = 1;
+    }
+
+    /* Restore original half-extents */
+    write_i16((uint8_t*)a->car_definition_ptr, 0x04, orig_hw_a);
+    write_i16((uint8_t*)a->car_definition_ptr, 0x08, orig_hl_a);
+    write_i16((uint8_t*)a->car_definition_ptr, 0x14, orig_nw_a);
+    write_i16((uint8_t*)b->car_definition_ptr, 0x04, orig_hw_b);
+    write_i16((uint8_t*)b->car_definition_ptr, 0x08, orig_hl_b);
+    write_i16((uint8_t*)b->car_definition_ptr, 0x14, orig_nw_b);
+
+    /* Recalculate with original extents using the refined positions */
+    memset(corners, 0, sizeof(corners));
+    bitmask = obb_corner_test(a, b, ax, az, bx, bz,
+                              heading_a, heading_b, corners);
+
+    if (bitmask == 0) return;
+
+    /* --- Dispatch collision response based on corner bitmask --- */
+    /* Bits 0-3: B corners in A -> response(B, A, corner) -- B is penetrating A */
+    for (int i = 0; i < 4; i++) {
+        if (bitmask & (1 << i)) {
+            apply_collision_response(b, a, i, &corners[i], heading_a);
+        }
+    }
+    /* Bits 4-7: A corners in B -> response(A, B, corner) -- A is penetrating B */
+    for (int i = 0; i < 4; i++) {
+        if (bitmask & (1 << (i + 4))) {
+            apply_collision_response(a, b, i, &corners[i + 4], heading_b);
+        }
+    }
+}
+
+/* ========================================================================
+ * Collision impulse API (0x4079C0) -- Wrapper for backward compatibility
  * ======================================================================== */
 
 void td5_physics_apply_collision_impulse(TD5_Actor *a, TD5_Actor *b)
@@ -920,93 +1432,18 @@ void td5_physics_apply_collision_impulse(TD5_Actor *a, TD5_Actor *b)
     if (!a || !b) return;
     if (!a->car_definition_ptr || !b->car_definition_ptr) return;
 
-    /* --- Get masses from cardef+0x88 --- */
-    int32_t mass_a = (int32_t)CDEF_S(a, 0x88);
-    int32_t mass_b = (int32_t)CDEF_S(b, 0x88);
-    if (mass_a <= 0) mass_a = 0x20;
-    if (mass_b <= 0) mass_b = 0x20;
-
-    /* --- Compute separation vector --- */
-    int32_t dx = (a->world_pos.x - b->world_pos.x) >> 8;
-    int32_t dz = (a->world_pos.z - b->world_pos.z) >> 8;
-
-    /* Compute contact angle from separation vector */
-    /* Use atan2 approximation: just use the raw dx,dz as contact normal */
-    int32_t dist_sq = dx * dx + dz * dz;
-    int32_t dist = td5_isqrt(dist_sq);
-    if (dist == 0) return;
-
-    /* Normalize to 12-bit */
-    int32_t nx = (dx << 12) / dist;
-    int32_t nz = (dz << 12) / dist;
-
-    /* --- Relative velocity along contact normal --- */
-    int32_t rel_vx = a->linear_velocity_x - b->linear_velocity_x;
-    int32_t rel_vz = a->linear_velocity_z - b->linear_velocity_z;
-    int32_t v_rel = (rel_vx * nx + rel_vz * nz) >> 12;
-
-    /* Guard: if separating, no impulse */
-    if (v_rel > 0) return;
-
-    /* --- Contact point offsets for angular coupling --- */
-    int32_t half_len_a = (int32_t)CDEF_S(a, 0x08);
-    int32_t half_len_b = (int32_t)CDEF_S(b, 0x08);
-    int32_t r1 = half_len_a;
-    int32_t r2 = half_len_b;
-
-    /* --- Impulse magnitude via moment-of-inertia formula --- */
-    /* denominator = (r2^2 + K) * mass_a + (r1^2 + K) * mass_b */
-    int32_t denom = ((int64_t)(r2 * r2 + V2V_INERTIA_K) * mass_a +
-                     (int64_t)(r1 * r1 + V2V_INERTIA_K) * mass_b) >> 8;
-    if (denom == 0) denom = 1;
-
-    int32_t impulse_num = ((int64_t)(V2V_INERTIA_K >> 8) * 0x1100) >> 0;
-    int32_t impulse = (impulse_num / denom) * (-v_rel);
-    impulse >>= 4; /* scale to physics range */
-
-    /* --- Apply linear impulse --- */
-    int32_t imp_x = (impulse * nx) >> 12;
-    int32_t imp_z = (impulse * nz) >> 12;
-
-    a->linear_velocity_x += imp_x / mass_a;
-    a->linear_velocity_z += imp_z / mass_a;
-    b->linear_velocity_x -= imp_x / mass_b;
-    b->linear_velocity_z -= imp_z / mass_b;
-
-    /* --- Angular impulse from contact offset --- */
-    /* Cross product of offset x impulse direction -> yaw torque */
-    int32_t ang_a = (r1 * imp_x) >> 12;
-    int32_t ang_b = (r2 * imp_x) >> 12;
-    a->angular_velocity_yaw += ang_a / (mass_a + 1);
-    b->angular_velocity_yaw -= ang_b / (mass_b + 1);
-
-    /* --- Post-impulse: update poses --- */
-    update_vehicle_pose_from_physics(a);
-    update_vehicle_pose_from_physics(b);
-
-    /* --- Traffic recovery: if impact > 50,000 on traffic vehicle --- */
-    int32_t impact_mag = impulse < 0 ? -impulse : impulse;
-    if (impact_mag > 50000) {
-        if (a->slot_index >= 6) a->damage_lockout++;
-        if (b->slot_index >= 6) b->damage_lockout++;
-    }
-
-    /* --- Visual damage above 90,000 (if collisions enabled) --- */
-    if (impact_mag > 90000 && g_collisions_enabled == 0) {
-        /* Small random angular perturbation for cosmetic wobble */
-        if (a->slot_index < 6) {
-            a->euler_accum.roll  += (impact_mag >> 10) & 0x1F;
-            a->euler_accum.pitch += (impact_mag >> 11) & 0x0F;
-        }
-        if (b->slot_index < 6) {
-            b->euler_accum.roll  -= (impact_mag >> 10) & 0x1F;
-            b->euler_accum.pitch -= (impact_mag >> 11) & 0x0F;
-        }
-    }
+    /* Use the simple sphere-based collision for API-level calls.
+     * The full OBB system is invoked through resolve_vehicle_contacts. */
+    collision_detect_simple(a, b);
 }
 
 /* ========================================================================
- * ResolveVehicleContacts (0x409150) -- 7-iteration TOI binary search
+ * ResolveVehicleContacts (0x409150) -- Spatial grid broadphase + OBB
+ *
+ * Phase 1: Build AABB grid, insert actors into spatial buckets
+ * Phase 2: For each actor, walk adjacent buckets, test pairs
+ * Phase 3: V2W wall collision
+ * Phase 4: Reset grid
  * ======================================================================== */
 
 void td5_physics_resolve_vehicle_contacts(void)
@@ -1025,6 +1462,10 @@ void td5_physics_resolve_vehicle_contacts(void)
         total = TD5_MAX_TOTAL_ACTORS;
     }
 
+    /* --- Phase 1: Build AABB grid --- */
+    /* Reset grid chains */
+    memset(s_collision_grid, COLLISION_CHAIN_END, sizeof(s_collision_grid));
+
     for (int i = 0; i < total; ++i) {
         TD5_Actor *actor = (TD5_Actor *)(g_actor_table_base + (size_t)i * TD5_ACTOR_STRIDE);
         int32_t radius;
@@ -1034,185 +1475,123 @@ void td5_physics_resolve_vehicle_contacts(void)
             continue;
         }
 
+        /* Compute AABB from position +/- bounding radius */
         radius = (int32_t)CDEF_S(actor, 0x80);
-        g_actor_aabb[i][0] = (actor->world_pos.x >> 8) - radius;
-        g_actor_aabb[i][1] = (actor->world_pos.z >> 8) - radius;
-        g_actor_aabb[i][2] = (actor->world_pos.x >> 8) + radius;
-        g_actor_aabb[i][3] = (actor->world_pos.z >> 8) + radius;
-        g_actor_aabb[i][4] = -1;
+        g_actor_aabb[i][0] = (actor->world_pos.x >> 8) - radius;  /* xMin */
+        g_actor_aabb[i][1] = (actor->world_pos.z >> 8) - radius;  /* zMin */
+        g_actor_aabb[i][2] = (actor->world_pos.x >> 8) + radius;  /* xMax */
+        g_actor_aabb[i][3] = (actor->world_pos.z >> 8) + radius;  /* zMax */
+
+        /* Insert into bucket[segment >> 2] linked list */
+        int32_t seg = actor->track_span_normalized;
+        if (seg < 0) seg = 0;
+        int bucket = (seg >> 2) & (COLLISION_GRID_SIZE - 1);
+
+        /* Chain: actor's chain byte points to previous head */
+        g_actor_aabb[i][4] = s_collision_grid[bucket];
+        s_collision_grid[bucket] = (uint8_t)i;
     }
 
-    for (int i = 0; i < total - 1; ++i) {
-        TD5_Actor *a = (TD5_Actor *)(g_actor_table_base + (size_t)i * TD5_ACTOR_STRIDE);
-
-        if (!a->car_definition_ptr) {
-            continue;
-        }
-
-        for (int j = i + 1; j < total; ++j) {
-            TD5_Actor *b = (TD5_Actor *)(g_actor_table_base + (size_t)j * TD5_ACTOR_STRIDE);
-
-            if (!b->car_definition_ptr) {
-                continue;
-            }
-            if (g_actor_aabb[i][2] < g_actor_aabb[j][0] ||
-                g_actor_aabb[j][2] < g_actor_aabb[i][0] ||
-                g_actor_aabb[i][3] < g_actor_aabb[j][1] ||
-                g_actor_aabb[j][3] < g_actor_aabb[i][1]) {
-                continue;
-            }
-
-            TD5_LOG_D(LOG_TAG, "Collision pair detected: slot_a=%d slot_b=%d", i, j);
-            resolve_collision_pair(a, b);
-        }
-    }
-
-    /* --- V2W: Vehicle-to-Wall collision --- */
+    /* --- Phase 2: Walk adjacent buckets for each actor --- */
     for (int i = 0; i < total; ++i) {
         TD5_Actor *a = (TD5_Actor *)(g_actor_table_base + (size_t)i * TD5_ACTOR_STRIDE);
-        int32_t ax, az, radius;
-        int span_idx, edge;
 
         if (!a->car_definition_ptr) continue;
 
-        ax = a->world_pos.x >> 8;
-        az = a->world_pos.z >> 8;
-        radius = (int32_t)CDEF_S(a, 0x80);
-        span_idx = ACTOR_I16(a, ACTOR_OFF_SPAN_INDEX);
+        int32_t seg_a = a->track_span_normalized;
+        if (seg_a < 0) seg_a = 0;
+        int base_bucket = (seg_a >> 2) & (COLLISION_GRID_SIZE - 1);
 
-        /* Check actor bounding circle against track span edges.
-         * Query the track for left/right boundary at this span. */
+        /* Walk 3 adjacent buckets: base-1, base, base+1 */
+        for (int boff = -1; boff <= 1; boff++) {
+            int bucket = (base_bucket + boff) & (COLLISION_GRID_SIZE - 1);
+            int chain = s_collision_grid[bucket];
+            int walk_count = 0;
+
+            while (chain != COLLISION_CHAIN_END && walk_count < COLLISION_MAX_WALK) {
+                int j = chain;
+                walk_count++;
+
+                /* Only test pairs where i < j to avoid duplicates */
+                if (j <= i) {
+                    chain = g_actor_aabb[j][4] & 0xFF;
+                    continue;
+                }
+
+                TD5_Actor *b = (TD5_Actor *)(g_actor_table_base + (size_t)j * TD5_ACTOR_STRIDE);
+
+                if (!b->car_definition_ptr) {
+                    chain = g_actor_aabb[j][4] & 0xFF;
+                    continue;
+                }
+
+                /* Determine collision test type */
+                int a_crashed = (a->damage_lockout >= 15);
+                int b_crashed = (b->damage_lockout >= 15);
+
+                if (a_crashed || b_crashed) {
+                    /* Crashed/flipped: simple sphere collision */
+                    collision_detect_simple(a, b);
+                } else {
+                    /* Both active: full OBB collision */
+                    collision_detect_full(a, b, i, j);
+                }
+
+                chain = g_actor_aabb[j][4] & 0xFF;
+            }
+        }
+    }
+
+    /* --- Phase 3: V2W Vehicle-to-Wall collision --- */
+    for (int i = 0; i < total; ++i) {
+        TD5_Actor *a = (TD5_Actor *)(g_actor_table_base + (size_t)i * TD5_ACTOR_STRIDE);
+
+        if (!a->car_definition_ptr) continue;
+
+        int32_t ax = a->world_pos.x >> 8;
+        int32_t radius = (int32_t)CDEF_S(a, 0x80);
+        int span_idx = ACTOR_I16(a, ACTOR_OFF_SPAN_INDEX);
+
+        /* Check actor bounding circle against track span edges */
         {
             int left_x, left_z, right_x, right_z;
-            int pen_left, pen_right;
-            int nx, nz, nmag;
 
             td5_track_get_span_edges(span_idx, &left_x, &left_z, &right_x, &right_z);
 
-            /* Simplified: check perpendicular distance to each edge */
             /* Left edge penetration */
-            pen_left = radius - (ax - left_x);
+            int pen_left = radius - (ax - left_x);
             if (pen_left > 0) {
-                /* Push right, apply impulse */
                 int impulse = (pen_left * V2W_INERTIA_K) >> 12;
                 ACTOR_I32(a, ACTOR_OFF_LIN_VEL_X) += impulse >> 4;
                 ACTOR_I32(a, ACTOR_OFF_ANG_VEL_YAW) += impulse >> 8;
-                TD5_LOG_D(LOG_TAG,
-                          "Wall impulse: actor=%d side=left penetration=%d impulse=%d",
-                          a->slot_index, pen_left, impulse);
             }
 
             /* Right edge penetration */
-            pen_right = radius - (right_x - ax);
+            int pen_right = radius - (right_x - ax);
             if (pen_right > 0) {
                 int impulse = (pen_right * V2W_INERTIA_K) >> 12;
                 ACTOR_I32(a, ACTOR_OFF_LIN_VEL_X) -= impulse >> 4;
                 ACTOR_I32(a, ACTOR_OFF_ANG_VEL_YAW) -= impulse >> 8;
-                TD5_LOG_D(LOG_TAG,
-                          "Wall impulse: actor=%d side=right penetration=%d impulse=%d",
-                          a->slot_index, pen_right, impulse);
             }
         }
     }
+
+    /* --- Phase 4: Grid reset is handled at start of next call --- */
 }
 
-/* Internal: perform 7-iteration TOI binary search between two actors */
-static void resolve_collision_pair(TD5_Actor *a, TD5_Actor *b)
+/* Internal: dispatch collision between two actors (grid broadphase wrapper) */
+static void resolve_collision_pair(TD5_Actor *a, TD5_Actor *b, int idx_a, int idx_b)
 {
     if (!a || !b) return;
     if (!a->car_definition_ptr || !b->car_definition_ptr) return;
 
-    /* AABB broadphase check */
-    int32_t radius_a = (int32_t)CDEF_S(a, 0x80);
-    int32_t radius_b = (int32_t)CDEF_S(b, 0x80);
+    int a_crashed = (a->damage_lockout >= 15);
+    int b_crashed = (b->damage_lockout >= 15);
 
-    int32_t ax = a->world_pos.x >> 8;
-    int32_t az = a->world_pos.z >> 8;
-    int32_t bx = b->world_pos.x >> 8;
-    int32_t bz = b->world_pos.z >> 8;
-
-    if (ax + radius_a <= bx - radius_b) return;
-    if (bx + radius_b <= ax - radius_a) return;
-    if (az + radius_a <= bz - radius_b) return;
-    if (bz + radius_b <= az - radius_a) return;
-
-    /* Simple sphere distance check */
-    int32_t dx = ax - bx;
-    int32_t dz = az - bz;
-    int32_t combined_radius = radius_a + radius_b;
-    if (dx * dx + dz * dz > combined_radius * combined_radius) return;
-
-    /* --- 7-iteration binary search TOI refinement --- */
-    /* Save positions */
-    int32_t saved_ax = a->world_pos.x, saved_az = a->world_pos.z;
-    int32_t saved_bx = b->world_pos.x, saved_bz = b->world_pos.z;
-    int32_t saved_ayaw = a->euler_accum.yaw, saved_byaw = b->euler_accum.yaw;
-
-    /* Start at half-step back */
-    int32_t step_x_a = a->linear_velocity_x >> 1;
-    int32_t step_z_a = a->linear_velocity_z >> 1;
-    int32_t step_x_b = b->linear_velocity_x >> 1;
-    int32_t step_z_b = b->linear_velocity_z >> 1;
-    int32_t step_yaw_a = a->angular_velocity_yaw >> 1;
-    int32_t step_yaw_b = b->angular_velocity_yaw >> 1;
-
-    a->world_pos.x -= step_x_a;
-    a->world_pos.z -= step_z_a;
-    b->world_pos.x -= step_x_b;
-    b->world_pos.z -= step_z_b;
-    a->euler_accum.yaw -= step_yaw_a;
-    b->euler_accum.yaw -= step_yaw_b;
-
-    int32_t elasticity = 0x80;
-    int32_t contact_found = 0;
-
-    for (int iter = 0; iter < 7; iter++) {
-        step_x_a >>= 1;
-        step_z_a >>= 1;
-        step_x_b >>= 1;
-        step_z_b >>= 1;
-        step_yaw_a >>= 1;
-        step_yaw_b >>= 1;
-        int32_t step_e = 0x80 >> (iter + 1);
-
-        /* Simple overlap test at current interpolated positions */
-        int32_t cx = (a->world_pos.x >> 8) - (b->world_pos.x >> 8);
-        int32_t cz = (a->world_pos.z >> 8) - (b->world_pos.z >> 8);
-        int32_t overlap = (cx * cx + cz * cz < combined_radius * combined_radius);
-
-        if (overlap) {
-            /* Still overlapping -- step backward */
-            a->world_pos.x -= step_x_a;
-            a->world_pos.z -= step_z_a;
-            b->world_pos.x -= step_x_b;
-            b->world_pos.z -= step_z_b;
-            a->euler_accum.yaw -= step_yaw_a;
-            b->euler_accum.yaw -= step_yaw_b;
-            elasticity -= step_e;
-            contact_found = 1;
-        } else {
-            /* No overlap -- step forward */
-            a->world_pos.x += step_x_a;
-            a->world_pos.z += step_z_a;
-            b->world_pos.x += step_x_b;
-            b->world_pos.z += step_z_b;
-            a->euler_accum.yaw += step_yaw_a;
-            b->euler_accum.yaw += step_yaw_b;
-            elasticity += step_e;
-        }
-    }
-
-    /* Restore positions */
-    a->world_pos.x = saved_ax;
-    a->world_pos.z = saved_az;
-    b->world_pos.x = saved_bx;
-    b->world_pos.z = saved_bz;
-    a->euler_accum.yaw = saved_ayaw;
-    b->euler_accum.yaw = saved_byaw;
-
-    /* Apply impulse if contact was found */
-    if (contact_found) {
-        td5_physics_apply_collision_impulse(a, b);
+    if (a_crashed || b_crashed) {
+        collision_detect_simple(a, b);
+    } else {
+        collision_detect_full(a, b, idx_a, idx_b);
     }
 }
 

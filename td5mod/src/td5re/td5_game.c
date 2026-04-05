@@ -24,6 +24,7 @@
 #include "td5_platform.h"
 #include "td5_net.h"
 #include "td5_save.h"
+#include "td5_vfx.h"
 
 #include <stdlib.h>
 #include <stdio.h>
@@ -259,6 +260,7 @@ static void display_loading_screen_tga(void);
 static void reset_race_countdown(void);
 static void tick_race_countdown(void);
 static const char *td5_game_state_name(TD5_GameState state);
+void td5_game_update_split_screen_balance(void);
 
 TD5_Actor *td5_game_get_actor(int slot)
 {
@@ -1073,8 +1075,9 @@ int td5_game_run_race_frame(void) {
             }
         }
 
-        /* --- Core simulation: physics, contacts, AI --- */
+        /* --- Core simulation: physics, AI, contacts --- */
         td5_physics_tick();
+        td5_ai_tick();
 
         /* --- Track update (tire marks, wrap normalization) --- */
         td5_track_tick();
@@ -1087,6 +1090,19 @@ int td5_game_run_race_frame(void) {
 
         /* --- Per-viewport camera update --- */
         /* (Already handled in td5_camera_tick above for both viewports) */
+
+        /* --- Per-actor wrap normalization + lap tracking --- */
+        for (i = 0; i < TD5_MAX_RACER_SLOTS; i++) {
+            TD5_Actor *lap_actor;
+            if (s_slot_state[i].state == 3) continue; /* disabled */
+            lap_actor = td5_game_get_actor(i);
+            if (lap_actor) {
+                /* Decompose cumulative span into lap + normalized position */
+                td5_track_normalize_actor_wrap(lap_actor);
+                /* Circuit lap counting with anti-cheat checks */
+                td5_track_update_circuit_lap(lap_actor, i);
+            }
+        }
 
         /* --- Per-actor race progression --- */
         for (i = 0; i < TD5_MAX_RACER_SLOTS; i++) {
@@ -1128,8 +1144,13 @@ int td5_game_run_race_frame(void) {
         }
     }
 
+    /* ---- Per-tick fog fade ---- */
+    td5_render_per_tick_fog_fade();
+
+    /* ---- Split-screen steering balance ---- */
+    td5_game_update_split_screen_balance();
+
     /* ---- Rendering pipeline ---- */
-    /* ---- Rendering pipeline ----*/
 
     /* Begin scene */
     td5_render_begin_scene();
@@ -1170,19 +1191,31 @@ int td5_game_run_race_frame(void) {
         /* Configure projection for this viewport */
         td5_render_configure_projection(s_viewports[vp].w, s_viewports[vp].h);
 
-        /* Sky dome */
+        /* ---- Pass 0: SKY ---- */
+        td5_render_set_race_pass(TD5_RACE_PASS_SKY);
+        td5_render_set_fog(0);  /* fog off for sky */
         td5_render_advance_sky_rotation();
         td5_render_advance_billboard_anims();
-        /* Track spans from display list */
-        /* (td5_render_span_display_list called internally by render_frame) */
+
+        /* ---- Pass 1: OPAQUE (world + track + actors) ---- */
+        td5_render_set_race_pass(TD5_RACE_PASS_OPAQUE);
+        td5_render_set_fog(1);  /* fog on for world geometry */
 
         /* Render race actors for this view */
         td5_render_actors_for_view(vp);
 
         /* VFX: tire tracks, particles */
-        /* (Rendered as part of translucent pipeline) */
+        td5_vfx_render_tire_tracks();
+        td5_vfx_draw_particles(vp);
         td5_render_flush_translucent();
         td5_render_flush_projected_buckets();
+
+        /* ---- Pass 3: ALPHA (overlay effects) ---- */
+        td5_render_set_race_pass(TD5_RACE_PASS_ALPHA);
+
+        /* ---- Pass 1 again: HUD overlays ---- */
+        td5_render_set_race_pass(TD5_RACE_PASS_OPAQUE);
+        td5_render_set_fog(0);  /* fog off for HUD */
 
         /* HUD overlay for this viewport */
         td5_hud_draw_status_text(vp, vp);
@@ -2096,4 +2129,56 @@ void td5_game_advance_sky_rotation(void) { }
 
 void *td5_game_heap_alloc(size_t size) {
     return calloc(1, size);
+}
+
+/* ========================================================================
+ * Split-Screen Steering Balance (0x4036B0)
+ *
+ * Simple rubber-banding for split-screen mode: the player who is behind
+ * gets a steering sensitivity boost, while the leader gets nerfed.
+ * Scale is centered at 0x100 (1.0 in fixed-point).
+ * ======================================================================== */
+
+/** Per-player steering scale factors (0x100 = neutral) */
+int g_steer_scale_p1 = 0x100;
+int g_steer_scale_p2 = 0x100;
+
+#define SPLIT_STEER_MAX_ADJUSTMENT  0x40  /* max boost/nerf (25%) */
+
+void td5_game_update_split_screen_balance(void)
+{
+    int pos1, pos2;
+    int delta;
+    TD5_Actor *a1, *a2;
+
+    if (!g_split_screen_mode) {
+        g_steer_scale_p1 = 0x100;
+        g_steer_scale_p2 = 0x100;
+        return;
+    }
+
+    a1 = td5_game_get_actor(g_actorSlotForView[0]);
+    a2 = td5_game_get_actor(g_actorSlotForView[1]);
+    if (!a1 || !a2) {
+        g_steer_scale_p1 = 0x100;
+        g_steer_scale_p2 = 0x100;
+        return;
+    }
+
+    /* Read normalized span (track position) from actor struct at +0x1E4 */
+    pos1 = *(int32_t *)((uint8_t *)a1 + 0x1E4);
+    pos2 = *(int32_t *)((uint8_t *)a2 + 0x1E4);
+
+    delta = abs(pos2 - pos1) * 2;
+    if (delta > SPLIT_STEER_MAX_ADJUSTMENT)
+        delta = SPLIT_STEER_MAX_ADJUSTMENT;
+
+    if (pos1 < pos2) {
+        /* Player 1 behind: boost P1, nerf P2 */
+        g_steer_scale_p1 = 0x100 + delta;
+        g_steer_scale_p2 = 0x100 - delta;
+    } else {
+        g_steer_scale_p1 = 0x100 - delta;
+        g_steer_scale_p2 = 0x100 + delta;
+    }
 }
