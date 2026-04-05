@@ -45,6 +45,7 @@
 #include "../../../re/include/td5_actor_struct.h"
 
 #include <string.h>  /* memset, memcpy */
+#include <math.h>    /* cos, sin */
 
 #define LOG_TAG "physics"
 
@@ -152,28 +153,17 @@ static inline void write_i32(uint8_t *base, size_t offset, int32_t value)
 
 static int32_t cos_fixed12(int32_t angle)
 {
-    angle &= 0xFFF;
-    /* Map to [0, 0x400] quadrant */
-    int32_t a;
-    if (angle <= 0x400) {
-        a = angle;
-    } else if (angle <= 0x800) {
-        a = 0x800 - angle;
-    } else if (angle <= 0xC00) {
-        a = angle - 0x800;
-    } else {
-        a = 0x1000 - angle;
-    }
-    /* Quadratic approximation: cos(x) ~ 1 - 2*x^2/Q^2, Q=0x400 */
-    int32_t val = 0x1000 - ((2 * a * a + 0x80) >> 8);
-    if (angle > 0x400 && angle < 0xC00)
-        val = -val;
-    return val;
+    /* Use standard math for exact results matching the original game's
+     * lookup table.  The previous quadratic approximation was catastrophically
+     * wrong at quadrant boundaries (e.g., sin(0) returned -4096 instead of 0). */
+    double rad = (double)(angle & 0xFFF) * (2.0 * 3.14159265358979323846 / 4096.0);
+    return (int32_t)(cos(rad) * 4096.0);
 }
 
 static int32_t sin_fixed12(int32_t angle)
 {
-    return cos_fixed12(angle - 0x400);
+    double rad = (double)(angle & 0xFFF) * (2.0 * 3.14159265358979323846 / 4096.0);
+    return (int32_t)(sin(rad) * 4096.0);
 }
 
 /* ========================================================================
@@ -650,6 +640,30 @@ void td5_physics_update_player(TD5_Actor *actor)
 
         actor->linear_velocity_x += fx;
         actor->linear_velocity_z += fz;
+
+    }
+
+    /* --- 14b. Velocity magnitude safety clamp ---
+     * Without working wall collisions, cars can leave the road where the
+     * tire model creates a positive feedback loop (lateral forces >> drag).
+     * Clamp total velocity magnitude to 2x the car's speed_limit to prevent
+     * runaway speed while preserving normal driving feel.
+     * This is a guardrail — once wall collisions work, it rarely activates. */
+    {
+        int32_t speed_lim = (int32_t)PHYS_S(actor, 0x74) << 8;
+        int32_t vel_cap = speed_lim * 2;
+        int32_t vxh = actor->linear_velocity_x >> 8;
+        int32_t vzh = actor->linear_velocity_z >> 8;
+        int32_t mag_sq = vxh * vxh + vzh * vzh;
+        int32_t cap_sq = (vel_cap >> 8) * (vel_cap >> 8);
+        if (mag_sq > cap_sq && mag_sq > 0) {
+            int32_t mag = td5_isqrt(mag_sq);
+            int32_t cap_h = vel_cap >> 8;
+            actor->linear_velocity_x = (int32_t)((int64_t)actor->linear_velocity_x * cap_h / mag);
+            actor->linear_velocity_z = (int32_t)((int64_t)actor->linear_velocity_z * cap_h / mag);
+            TD5_LOG_W(LOG_TAG, "vel clamp: slot=%d mag=%d cap=%d",
+                      actor->slot_index, mag << 8, vel_cap);
+        }
     }
 
     /* --- 15. ApplySteeringTorqueToWheels --- */
@@ -823,6 +837,22 @@ void td5_physics_update_ai(TD5_Actor *actor)
         int32_t fz = (total_long * cos_h - total_lat * sin_h) >> 12;
         actor->linear_velocity_x += fx;
         actor->linear_velocity_z += fz;
+    }
+
+    /* --- Velocity magnitude safety clamp (same as player path) --- */
+    {
+        int32_t speed_lim = (int32_t)PHYS_S(actor, 0x74) << 8;
+        int32_t vel_cap = speed_lim * 2;
+        int32_t vxh = actor->linear_velocity_x >> 8;
+        int32_t vzh = actor->linear_velocity_z >> 8;
+        int32_t mag_sq = vxh * vxh + vzh * vzh;
+        int32_t cap_sq = (vel_cap >> 8) * (vel_cap >> 8);
+        if (mag_sq > cap_sq && mag_sq > 0) {
+            int32_t mag = td5_isqrt(mag_sq);
+            int32_t cap_h = vel_cap >> 8;
+            actor->linear_velocity_x = (int32_t)((int64_t)actor->linear_velocity_x * cap_h / mag);
+            actor->linear_velocity_z = (int32_t)((int64_t)actor->linear_velocity_z * cap_h / mag);
+        }
     }
 
     /* --- Suspension integration --- */
