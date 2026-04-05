@@ -291,7 +291,11 @@ void td5_physics_tick(void)
         td5_physics_update_vehicle_actor(actor);
     }
 
-    td5_physics_resolve_vehicle_contacts();
+    /* Skip collision resolution during countdown — wall/vehicle impulses
+     * would accumulate in velocity without integrate_pose to dissipate them,
+     * causing cars to shoot off at race start. */
+    if (!g_game_paused)
+        td5_physics_resolve_vehicle_contacts();
 }
 
 /* ========================================================================
@@ -2199,12 +2203,19 @@ void td5_physics_reset_actor_state(TD5_Actor *actor)
     actor->vehicle_mode = 0;
     actor->damage_lockout = 0;
 
+    /* Original (0x405D70): drop car from high altitude so the first
+     * IntegrateVehiclePoseAndContacts call resolves wheel contacts against
+     * the track surface and snaps the car to the correct ground height.
+     * -0x40000000 in 24.8 FP = approx -4194304 world units above. */
+    actor->world_pos.y = -0x40000000;
+
     /* Convert positions to float for render */
     actor->render_pos.x = (float)actor->world_pos.x * (1.0f / 256.0f);
     actor->render_pos.y = (float)actor->world_pos.y * (1.0f / 256.0f);
     actor->render_pos.z = (float)actor->world_pos.z * (1.0f / 256.0f);
 
-    /* Re-establish ground contact */
+    /* Re-establish ground contact — integrate will resolve wheel contacts
+     * against the track and snap Y to the correct road surface height. */
     td5_physics_integrate_pose(actor);
 }
 

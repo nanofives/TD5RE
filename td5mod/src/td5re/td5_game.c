@@ -655,8 +655,10 @@ int td5_game_init_race_session(void) {
         static const int8_t s_circuit_span_offsets[TD5_MAX_RACER_SLOTS] = {
             -6, -6, -12, -12, -18, -18
         };
+        /* Original (0x42B174): slot 2 placed first (closest to line),
+         * slot 0 (player) placed third. Per-slot offsets: */
         static const int8_t s_staggered_span_offsets[TD5_MAX_RACER_SLOTS] = {
-            -3, -6, -9, -12, -15, -18
+            -9, -6, -3, -12, -15, -18
         };
         static const uint8_t s_racer_lanes[TD5_MAX_RACER_SLOTS] = {
             1, 2, 1, 2, 1, 2
@@ -738,7 +740,7 @@ int td5_game_init_race_session(void) {
 
             if (!td5_track_get_span_lane_world(span_index, sub_lane, &world_x, &world_y, &world_z)) {
                 world_x = sp->origin_x;
-                world_y = sp->pad_10;
+                world_y = sp->origin_y;
                 world_z = sp->origin_z;
             }
 
