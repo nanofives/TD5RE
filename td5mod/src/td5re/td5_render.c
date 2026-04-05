@@ -290,7 +290,7 @@ static void dispatch_quad_direct(TD5_PrimitiveCmd *cmd, TD5_MeshVertex *base_ver
 
 /* Vehicle shadow + wheel billboard rendering */
 static void render_vehicle_shadow_quad(void);
-/* render_vehicle_wheel_billboards disabled — see TODO at call site */
+static void render_vehicle_wheel_billboards(TD5_Actor *actor, int slot);
 
 /** 7-entry dispatch table matching original at 0x473b9c */
 typedef void (*PrimDispatchFn)(TD5_PrimitiveCmd *cmd, TD5_MeshVertex *base_verts);
@@ -546,9 +546,13 @@ static void clip_and_submit_polygon(TD5_MeshVertex *vert_data, int vert_count,
         float bx = clipped[2].screen_x - clipped[0].screen_x;
         float by = clipped[2].screen_y - clipped[0].screen_y;
         float cross = ax * by - ay * bx;
-        if (cross >= 0.0f && tex_page != 1021) {
+        /* Skip degenerate (zero-area) triangles but do NOT cull by winding.
+         * The Y-negation in the projection reverses winding for half the
+         * geometry (MODELS.DAT track meshes vs car meshes have opposite
+         * winding conventions).  D3D11 rasterizer has CullMode=NONE. */
+        if (cross == 0.0f) {
             s_debug_clip_backface_rejects++;
-            return;  /* back-facing or degenerate */
+            return;
         }
     }
 
@@ -1480,11 +1484,8 @@ void td5_render_actors_for_view(int view_index)
             /* Render car shadow (dark ground quad under vehicle) */
             render_vehicle_shadow_quad();
 
-            /* Wheel billboards disabled: the original uses 8-segment ring
-             * geometry (RenderVehicleWheelBillboards 0x446F00) with a WHEELS
-             * atlas texture.  The placeholder flat quads were producing visible
-             * dark rectangles at the bottom of the car.  TODO: implement ring
-             * geometry with proper wheel texture atlas UVs. */
+            /* Render wheel ring billboards (0x446F00) */
+            render_vehicle_wheel_billboards(actor, slot);
 
             actor_render_count++;
             actor_meshes_submitted++;
@@ -2029,15 +2030,190 @@ static void render_vehicle_shadow_quad(void)
 
 /* --- Vehicle Wheel Billboards (0x446F00) ---
  *
- * TODO: implement 8-segment ring geometry with WHEELS atlas texture.
- * Original reads int16 triples from actor+0x210 (stride 8), transforms
- * through actor render matrix, uses per-car UV base from 0x4cefb0+car*8,
- * tile size 32.0, step 31.0, selects 2x2 sub-tile by rotation speed.
- * Also renders a hub-cap disc and double-sided (inside/outside) faces.
+ * Renders 4 wheels as 8-segment rings (cylinder cross-section) with a
+ * filled hub-cap disc in the center.  Each wheel position is read from
+ * actor+0x210 (int16 triples, stride 8 bytes per wheel).  The ring axis
+ * points sideways from the car (outward along local X for left wheels,
+ * inward -X for right wheels).
  *
- * Placeholder flat quads were removed — they produced visible dark
- * rectangles at the bottom of the car.
+ * Original uses per-car UV base from 0x4cefb0+car*8, tile size 32.0,
+ * step 31.0, selects 2x2 sub-tile by rotation speed.  This implementation
+ * uses the car mesh texture page with fixed UVs as a fallback until the
+ * wheel atlas is fully reverse-engineered.
+ *
+ * Double-sided: both inside and outside ring faces are emitted.
  */
+
+#define WHEEL_RING_SEGMENTS 8
+#define WHEEL_RING_RADIUS   0.8f
+#define WHEEL_RING_HALF_W   0.25f   /* half-width of the ring (tire thickness) */
+
+static void render_vehicle_wheel_billboards(TD5_Actor *actor, int slot)
+{
+    const float *m = s_render_transform.m;
+    const uint8_t *raw = (const uint8_t *)actor;
+
+    /* Precompute ring circle vertices (Y-Z plane, 8 segments) */
+    float circle_y[WHEEL_RING_SEGMENTS];
+    float circle_z[WHEEL_RING_SEGMENTS];
+    for (int i = 0; i < WHEEL_RING_SEGMENTS; i++) {
+        float angle = (float)i * (2.0f * (float)M_PI / (float)WHEEL_RING_SEGMENTS);
+        circle_y[i] = cosf(angle) * WHEEL_RING_RADIUS;
+        circle_z[i] = sinf(angle) * WHEEL_RING_RADIUS;
+    }
+
+    /* Get the vehicle mesh texture page for fallback wheel texture */
+    TD5_MeshHeader *mesh = td5_render_get_vehicle_mesh(slot);
+    int tex_page = mesh ? mesh->texture_page_id : -1;
+
+    /* Each wheel: 8 ring quads (16 tris double-sided) + hub-cap (8 tris * 2 sides) = 48 tris
+     * 4 wheels => up to 192 triangles.
+     * Ring verts: 2 rings of 8 = 16 verts per wheel + 1 center = 17 per wheel.
+     * We render one wheel at a time to keep buffers small. */
+
+    for (int w = 0; w < 4; w++) {
+        /* Read int16 wheel position from actor+0x210 + w*8 */
+        const int16_t *wdata = (const int16_t *)(raw + 0x210 + w * 8);
+        float wx = (float)wdata[0];
+        float wy = (float)wdata[1];
+        float wz = (float)wdata[2];
+
+        /* Determine ring axis direction: left wheels (0=FL, 2=RL) face +X,
+         * right wheels (1=FR, 3=RR) face -X in car-local space. */
+        float x_sign = (w & 1) ? -1.0f : 1.0f;
+
+        /* Build ring vertices in car-local space.
+         * Inner ring: wx - HALF_W * x_sign, outer ring: wx + HALF_W * x_sign
+         * The ring circle lies in the Y-Z plane centered on the wheel position. */
+        float inner_x = wx - WHEEL_RING_HALF_W * x_sign;
+        float outer_x = wx + WHEEL_RING_HALF_W * x_sign;
+
+        /* 17 vertices: 0..7 = inner ring, 8..15 = outer ring, 16 = hub center */
+        TD5_D3DVertex projected[17];
+        int all_visible = 1;
+
+        for (int i = 0; i < WHEEL_RING_SEGMENTS; i++) {
+            float cy = circle_y[i];
+            float cz = circle_z[i];
+
+            /* Inner ring vertex (i) */
+            {
+                float px = inner_x;
+                float py = wy + cy;
+                float pz = wz + cz;
+                float vx = px * m[0] + py * m[1] + pz * m[2] + m[9];
+                float vy = px * m[3] + py * m[4] + pz * m[5] + m[10];
+                float vz = px * m[6] + py * m[7] + pz * m[8] + m[11];
+                if (vz <= s_near_clip) { all_visible = 0; break; }
+                float inv_z = 1.0f / vz;
+                projected[i].screen_x = vx * s_focal_length * inv_z + s_center_x;
+                projected[i].screen_y = -vy * s_focal_length * inv_z + s_center_y;
+                projected[i].depth_z  = vz * (1.0f / s_far_clip);
+                projected[i].rhw      = inv_z;
+                projected[i].diffuse  = 0xFF404040u;  /* dark gray tire rubber */
+                projected[i].specular = 0;
+                /* Simple cylindrical UV mapping */
+                projected[i].tex_u = (float)i / (float)WHEEL_RING_SEGMENTS;
+                projected[i].tex_v = 0.0f;
+            }
+
+            /* Outer ring vertex (i + 8) */
+            {
+                float px = outer_x;
+                float py = wy + cy;
+                float pz = wz + cz;
+                float vx = px * m[0] + py * m[1] + pz * m[2] + m[9];
+                float vy = px * m[3] + py * m[4] + pz * m[5] + m[10];
+                float vz = px * m[6] + py * m[7] + pz * m[8] + m[11];
+                if (vz <= s_near_clip) { all_visible = 0; break; }
+                float inv_z = 1.0f / vz;
+                projected[8 + i].screen_x = vx * s_focal_length * inv_z + s_center_x;
+                projected[8 + i].screen_y = -vy * s_focal_length * inv_z + s_center_y;
+                projected[8 + i].depth_z  = vz * (1.0f / s_far_clip);
+                projected[8 + i].rhw      = inv_z;
+                projected[8 + i].diffuse  = 0xFF404040u;
+                projected[8 + i].specular = 0;
+                projected[8 + i].tex_u = (float)i / (float)WHEEL_RING_SEGMENTS;
+                projected[8 + i].tex_v = 1.0f;
+            }
+        }
+
+        if (!all_visible)
+            continue;
+
+        /* Hub center vertex (index 16) — at the outer face of the wheel */
+        {
+            float px = outer_x;
+            float py = wy;
+            float pz = wz;
+            float vx = px * m[0] + py * m[1] + pz * m[2] + m[9];
+            float vy = px * m[3] + py * m[4] + pz * m[5] + m[10];
+            float vz = px * m[6] + py * m[7] + pz * m[8] + m[11];
+            if (vz <= s_near_clip)
+                continue;
+            float inv_z = 1.0f / vz;
+            projected[16].screen_x = vx * s_focal_length * inv_z + s_center_x;
+            projected[16].screen_y = -vy * s_focal_length * inv_z + s_center_y;
+            projected[16].depth_z  = vz * (1.0f / s_far_clip);
+            projected[16].rhw      = inv_z;
+            projected[16].diffuse  = 0xFF808080u;  /* lighter gray hub-cap */
+            projected[16].specular = 0;
+            projected[16].tex_u    = 0.5f;
+            projected[16].tex_v    = 0.5f;
+        }
+
+        /* Build index buffer:
+         * Ring quads (double-sided): 8 quads * 2 tris * 2 sides = 96 indices
+         * Hub-cap disc (double-sided): 8 tris * 2 sides = 48 indices
+         * Total: 144 indices max */
+        uint16_t indices[144];
+        int idx = 0;
+
+        for (int i = 0; i < WHEEL_RING_SEGMENTS; i++) {
+            int i0 = i;
+            int i1 = (i + 1) % WHEEL_RING_SEGMENTS;
+            int o0 = i + 8;
+            int o1 = ((i + 1) % WHEEL_RING_SEGMENTS) + 8;
+
+            /* Outside face (CW when viewed from outside) */
+            indices[idx++] = (uint16_t)i0;
+            indices[idx++] = (uint16_t)o0;
+            indices[idx++] = (uint16_t)o1;
+            indices[idx++] = (uint16_t)i0;
+            indices[idx++] = (uint16_t)o1;
+            indices[idx++] = (uint16_t)i1;
+
+            /* Inside face (reversed winding) */
+            indices[idx++] = (uint16_t)i0;
+            indices[idx++] = (uint16_t)o1;
+            indices[idx++] = (uint16_t)o0;
+            indices[idx++] = (uint16_t)i0;
+            indices[idx++] = (uint16_t)i1;
+            indices[idx++] = (uint16_t)o1;
+        }
+
+        /* Hub-cap disc — triangles from outer ring to center (index 16) */
+        for (int i = 0; i < WHEEL_RING_SEGMENTS; i++) {
+            int o0 = 8 + i;
+            int o1 = 8 + ((i + 1) % WHEEL_RING_SEGMENTS);
+
+            /* Outside face */
+            indices[idx++] = (uint16_t)o0;
+            indices[idx++] = 16;
+            indices[idx++] = (uint16_t)o1;
+
+            /* Inside face */
+            indices[idx++] = (uint16_t)o0;
+            indices[idx++] = (uint16_t)o1;
+            indices[idx++] = 16;
+        }
+
+        flush_immediate_internal();
+        td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
+        td5_plat_render_bind_texture(tex_page);
+        td5_plat_render_draw_tris(projected, 17, indices, idx);
+    }
+}
 
 void td5_render_project_vehicle_shadow(float pos_x, float pos_y, float pos_z,
                                         float half_w, float half_l, int tex_page)
