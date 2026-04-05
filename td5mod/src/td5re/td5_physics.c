@@ -411,20 +411,29 @@ void td5_physics_update_player(TD5_Actor *actor)
     actor->lateral_speed = v_lat;
 
     /* --- 6. Velocity damping (body-frame, for force computation only) ---
-     * Damping modifies local v_long/v_lat used for slip/grip forces.
-     * The actual linear_velocity_x/z is NOT reduced — forces computed from
-     * damped values naturally provide the damping effect. */
+     * 0x6A = damping_low_speed (small value ~100, used at startup/low gear)
+     * 0x6C = damping_high_speed (large value ~3000, aerodynamic drag at speed) */
     {
         int32_t surf_drag = (int32_t)s_surface_grip[surface_center & 0x1F];
         int32_t damp_coeff;
-        /* Original uses 0x6C for low-throttle/low-gear, 0x6A for high-gear */
         if (actor->frame_counter < 0x20 || actor->current_gear < 2)
-            damp_coeff = surf_drag * 256 + (int32_t)PHYS_S(actor, 0x6C);
-        else
             damp_coeff = surf_drag * 256 + (int32_t)PHYS_S(actor, 0x6A);
+        else
+            damp_coeff = surf_drag * 256 + (int32_t)PHYS_S(actor, 0x6C);
 
         v_long -= ((v_long >> 8) * damp_coeff) >> 12;
         v_lat  -= ((v_lat >> 8) * damp_coeff) >> 12;
+    }
+
+    /* --- 6b. Aerodynamic drag from drag_coefficient (0x2C) ---
+     * Speed-dependent drag force opposing longitudinal motion.
+     * drag_force = speed * drag_coeff / 4096 */
+    {
+        int32_t drag_coeff = (int32_t)PHYS_S(actor, 0x2C);
+        if (drag_coeff != 0 && v_long != 0) {
+            int32_t drag = (v_long * drag_coeff) >> 12;
+            v_long -= drag;
+        }
     }
 
     /* --- 7/8. Gear selection: mutually exclusive paths (original 0x404030).
@@ -2221,6 +2230,47 @@ void td5_physics_init_vehicle_runtime(void)
         TD5_Actor *actor = (TD5_Actor *)(g_actor_table_base + (size_t)slot * TD5_ACTOR_STRIDE);
 
         bind_default_vehicle_tuning(actor, slot);
+
+        /* --- Difficulty scaling (from InitializeRaceVehicleRuntime 0x42F140) ---
+         * Apply in-place multipliers to physics table fields per difficulty.
+         * Normal: torque *= 360/256, drag *= 300/256, speed_scale <<= 1
+         * Hard:   torque *= 650/256, drag *= 380/256, brake *= 450/256,
+         *         engine_brake *= 400/256, speed_scale <<= 2 */
+        {
+            int16_t *phys = (int16_t *)actor->tuning_data_ptr;
+            if (phys) {
+                if (g_difficulty_hard) {
+                    /* 0x68: drive_torque_mult *= 0x28A/256 (2.54x) */
+                    int32_t tm = (int32_t)PHYS_S(actor, 0x68);
+                    write_i16((uint8_t *)phys, 0x68, (int16_t)((tm * 0x28A) >> 8));
+                    /* 0x2C: drag_coeff *= 0x17C/256 (1.48x) */
+                    int32_t dc = (int32_t)PHYS_S(actor, 0x2C);
+                    write_i16((uint8_t *)phys, 0x2C, (int16_t)((dc * 0x17C) >> 8));
+                    /* 0x6E: brake_force *= 0x1C2/256 (1.76x) */
+                    int32_t bf = (int32_t)PHYS_S(actor, 0x6E);
+                    write_i16((uint8_t *)phys, 0x6E, (int16_t)((bf * 0x1C2) >> 8));
+                    /* 0x70: engine_brake *= 400/256 (1.56x) */
+                    int32_t eb = (int32_t)PHYS_S(actor, 0x70);
+                    write_i16((uint8_t *)phys, 0x70, (int16_t)((eb * 400) >> 8));
+                    /* 0x78: speed_scale <<= 2 */
+                    int32_t ss = (int32_t)PHYS_S(actor, 0x78);
+                    write_i16((uint8_t *)phys, 0x78, (int16_t)(ss << 2));
+                } else if (!g_difficulty_easy) {
+                    /* Normal difficulty */
+                    /* 0x68: drive_torque_mult *= 0x168/256 (0.5625x) */
+                    int32_t tm = (int32_t)PHYS_S(actor, 0x68);
+                    write_i16((uint8_t *)phys, 0x68, (int16_t)((tm * 0x168) >> 8));
+                    /* 0x2C: drag_coeff *= 300/256 (1.17x) */
+                    int32_t dc = (int32_t)PHYS_S(actor, 0x2C);
+                    write_i16((uint8_t *)phys, 0x2C, (int16_t)((dc * 300) >> 8));
+                    /* 0x78: speed_scale <<= 1 */
+                    int32_t ss = (int32_t)PHYS_S(actor, 0x78);
+                    write_i16((uint8_t *)phys, 0x78, (int16_t)(ss << 1));
+                }
+                /* Easy: no scaling (raw carparam values used as-is) */
+            }
+        }
+
         actor->linear_velocity_x = 0;
         actor->linear_velocity_y = 0;
         actor->linear_velocity_z = 0;
