@@ -1572,13 +1572,51 @@ static void update_position_recursive(int16_t *track_state, int32_t pos_x, int32
     }
 
     if (iter >= TRACK_MAX_RECURSION) {
-        /* Non-convergence: boundary walk failed to find a containing quad.
-         * Roll back to saved state to avoid corrupting span tracking.
-         * This keeps the previous (possibly stale) span, which is still
-         * better than an actively-wrong span 8+ positions away. */
+        /* Non-convergence: boundary walk failed. Restore snapshot, then
+         * do a brute-force nearest-span search in a ±SEARCH_RADIUS window
+         * around the saved span to find the correct span by XZ distance. */
         memcpy(track_state, saved_state, 16);
-        TD5_LOG_W(LOG_TAG, "update_pos: max iterations, rolled back span=%d sub=%d",
-                  (int)saved_state[0], (int)((int8_t *)saved_state)[12]);
+
+        int search_center = (int)saved_state[0];
+        int best_span = search_center;
+        int64_t best_dist = INT64_MAX;
+        int search_lo = search_center - 32;
+        int search_hi = search_center + 32;
+        if (search_lo < 0) search_lo = 0;
+        if (search_hi >= s_span_count) search_hi = s_span_count - 1;
+
+        /* Convert position to world units for comparison with span centers */
+        int32_t wx = pos_x >> 8;
+        int32_t wz = pos_z >> 8;
+
+        for (int si = search_lo; si <= search_hi; si++) {
+            int cx = 0, cy = 0, cz = 0;
+            /* Inline span center: use origin + first vertex midpoint for speed */
+            const TD5_StripSpan *tsp = &s_span_array[si];
+            if (tsp->span_type == 9 || tsp->span_type == 10) continue;
+            TD5_StripVertex *v0 = vertex_at(tsp->left_vertex_index);
+            TD5_StripVertex *v1 = vertex_at(tsp->right_vertex_index);
+            if (!v0 || !v1) continue;
+            cx = tsp->origin_x + ((int32_t)v0->x + (int32_t)v1->x) / 2;
+            cz = tsp->origin_z + ((int32_t)v0->z + (int32_t)v1->z) / 2;
+
+            int64_t dx = (int64_t)(wx - cx);
+            int64_t dz = (int64_t)(wz - cz);
+            int64_t dist = dx * dx + dz * dz;
+            if (dist < best_dist) {
+                best_dist = dist;
+                best_span = si;
+            }
+        }
+
+        if (best_span != search_center) {
+            track_state[0] = (int16_t)best_span;
+            /* Update accumulated span counter based on direction of movement */
+            int16_t delta = (int16_t)(best_span - search_center);
+            track_state[2] += delta;
+            if (track_state[2] > track_state[3])
+                track_state[3] = track_state[2];
+        }
     }
 }
 
