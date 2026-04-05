@@ -2254,14 +2254,15 @@ void td5_physics_refresh_wheel_contacts(TD5_Actor *actor)
         int32_t world_y = (int32_t)(rot[3] * wx + rot[4] * wy + rot[5] * wz);
         int32_t world_z = (int32_t)(rot[6] * wx + rot[7] * wy + rot[8] * wz);
 
-        /* Add to chassis world position.
-         * The rotation matrix is normalized to 1.0 (not 4096), so the product
-         * is in the same scale as wheel_display_angles (car-definition units).
-         * These are intentionally NOT shifted <<8 — the original binary at
-         * 0x403720 adds the rotated offset directly without scaling. */
-        actor->wheel_contact_pos[i].x = actor->world_pos.x + world_x;
-        actor->wheel_contact_pos[i].y = actor->world_pos.y + world_y;
-        actor->wheel_contact_pos[i].z = actor->world_pos.z + world_z;
+        /* Add to chassis world position, scaling to 24.8 fixed-point.
+         * Original (0x403720): integer matrix (4096-scale) * offset >> 12,
+         * then << 8 to convert to 24.8 world units.
+         * Float path: matrix is pre-divided by 4096, so multiply by 256
+         * to match the original's >> 12 << 8 = >> 4 = * 256/4096.
+         * [CONFIRMED @ 0x403720, RE analysis line 624] */
+        actor->wheel_contact_pos[i].x = actor->world_pos.x + (int32_t)(world_x * 256.0f);
+        actor->wheel_contact_pos[i].y = actor->world_pos.y + (int32_t)(world_y * 256.0f);
+        actor->wheel_contact_pos[i].z = actor->world_pos.z + (int32_t)(world_z * 256.0f);
 
         /* Per-probe track position update [CONFIRMED @ 0x403720].
          * Original calls FUN_004440F0 per probe with probe's own world pos.
