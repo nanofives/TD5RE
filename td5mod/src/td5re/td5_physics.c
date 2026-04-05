@@ -443,7 +443,7 @@ void td5_physics_update_player(TD5_Actor *actor)
     {
         int32_t surf_drag = (int32_t)s_surface_grip[surface_center & 0x1F];
         int32_t damp_coeff;
-        if (actor->frame_counter < 0x20 || actor->current_gear < 2)
+        if (actor->encounter_steering_cmd < 0x20 || actor->current_gear < 2)
             damp_coeff = surf_drag * 256 + (int32_t)PHYS_S(actor, 0x6C);
         else
             damp_coeff = surf_drag * 256 + (int32_t)PHYS_S(actor, 0x6A);
@@ -712,7 +712,7 @@ void td5_physics_update_ai(TD5_Actor *actor)
     {
         int32_t surf_drag = (int32_t)s_surface_grip[surface & 0x1F];
         int32_t damp_coeff;
-        if (actor->frame_counter < 0x20 || actor->current_gear < 2)
+        if (actor->encounter_steering_cmd < 0x20 || actor->current_gear < 2)
             damp_coeff = surf_drag * 256 + (int32_t)PHYS_S(actor, 0x6C);
         else
             damp_coeff = surf_drag * 256 + (int32_t)PHYS_S(actor, 0x6A);
