@@ -411,10 +411,13 @@ void td5_input_update_player_control(int slot)
     if (vehicle_stopped) {
         steer_rate_denom = 0;
     } else {
-        /* Original (0x402EBC): denominator = speed_sq * speed_sq + 0x40
-         * (4th-power speed falloff, not linear). [CONFIRMED @ 0x402EBC-0x402ECC] */
-        steer_rate_denom = (int)((uint32_t)(speed * 0x40) /
-                                 (uint32_t)(speed_sq * speed_sq + 0x40));
+        /* Original (0x402EBF-0x402ECD):
+         *   iVar8 = actor[0x31C] >> 8  (already in speed_sq)
+         *   EBX = iVar8 * iVar8        (squared once = quadratic)
+         *   EAX = abs_speed * 0x40
+         *   result = EAX / (EBX + 0x40)
+         * [CONFIRMED @ 0x402EC1: IMUL EBX,EAX — single square, not 4th power] */
+        steer_rate_denom = (speed * 0x40) / (speed_sq * speed_sq + 0x40);
     }
     int steer_rate = (int)(TD5_INPUT_STEER_RATE_NUM /
                            (int64_t)(steer_rate_denom + 0x40));
@@ -560,7 +563,7 @@ void td5_input_update_player_control(int slot)
             s_reverse_req[slot] = 0;
 
             if (bits & TD5_INPUT_THROTTLE) {
-                s_throttle[slot] = 0xFF;  /* full digital throttle (0-255 range, >>8 in RPM formula) */
+                s_throttle[slot] = 0x100;  /* original DAT_0046317C = 0x0100 [CONFIRMED @ 0x403182] */
             } else {
                 s_throttle[slot] = 0;
             }
