@@ -23,7 +23,7 @@
 #include "td5re.h"
 #include "td5_game.h"
 
-/* Defined in td5re_stubs.c -- not yet in td5_game.h */
+/* Defined in td5_game.c */
 extern int td5_game_is_wanted_mode(void);
 
 #include <string.h>
@@ -300,8 +300,11 @@ void td5_input_poll_race_session(void)
         }
     }
 
-    /* Force feedback update for local player (slot 0 in local play) */
+    /* Force feedback update for local players */
     td5_input_ff_update_player(0);
+    if (s_active_players > 1) {
+        td5_input_ff_update_player(1);
+    }
 
     /* Record input (delta-compressed, strip camera/escape bits) */
     td5_input_write_frame(s_control_bits[0], s_control_bits[1], 1);
@@ -527,7 +530,7 @@ void td5_input_update_player_control(int slot)
             s_reverse_req[slot] = 0;
         } else {
             /* Negative Y = accelerate */
-            s_throttle[slot] = 0x60;  /* full digital throttle */
+            s_throttle[slot] = 0xFF;  /* full digital throttle (0-255 range, >>8 in RPM formula) */
             s_brake[slot] = 0;
             s_reverse_req[slot] = 0;
         }
@@ -555,7 +558,7 @@ void td5_input_update_player_control(int slot)
             s_reverse_req[slot] = 0;
 
             if (bits & TD5_INPUT_THROTTLE) {
-                s_throttle[slot] = 0x60;  /* full digital throttle */
+                s_throttle[slot] = 0xFF;  /* full digital throttle (0-255 range, >>8 in RPM formula) */
             } else {
                 s_throttle[slot] = 0;
             }
@@ -1130,4 +1133,13 @@ void td5_input_set_device(int player, int device_index)
 const char *td5_input_get_device_name(int index)
 {
     return td5_plat_input_device_name(index);
+}
+
+int td5_input_get_device_type(int player)
+{
+    if (player < 0 || player >= 2) return 0;
+    int source = s_input_source[player];
+    if (source == 0) return 0;  /* keyboard */
+    /* source is 1-based device index for joysticks */
+    return td5_plat_input_device_type(source);
 }
