@@ -2252,10 +2252,10 @@ void td5_physics_refresh_wheel_contacts(TD5_Actor *actor)
         int32_t world_y = (int32_t)(rot[3] * wx + rot[4] * wy + rot[5] * wz);
         int32_t world_z = (int32_t)(rot[6] * wx + rot[7] * wy + rot[8] * wz);
 
-        /* Add to chassis world position */
-        actor->wheel_contact_pos[i].x = actor->world_pos.x + (world_x << 0);
-        actor->wheel_contact_pos[i].y = actor->world_pos.y + (world_y << 0);
-        actor->wheel_contact_pos[i].z = actor->world_pos.z + (world_z << 0);
+        /* Add to chassis world position (<<8 converts world units to 24.8 FP) */
+        actor->wheel_contact_pos[i].x = actor->world_pos.x + (world_x << 8);
+        actor->wheel_contact_pos[i].y = actor->world_pos.y + (world_y << 8);
+        actor->wheel_contact_pos[i].z = actor->world_pos.z + (world_z << 8);
 
         /* Per-probe track position update [CONFIRMED @ 0x403720].
          * Original calls FUN_004440F0 per probe with probe's own world pos.
