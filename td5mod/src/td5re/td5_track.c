@@ -2560,13 +2560,22 @@ int td5_track_parse_models_dat(const void *data, size_t size)
             uint32_t *slot = (uint32_t *)(block_base + 4 + j * 4);
             uint32_t mesh_off = *slot;
 
-            if (mesh_off == 0 || mesh_off >= block_size)
-                continue;
-            if (mesh_off + sizeof(TD5_MeshHeader) > block_size)
-                continue;
+            if (mesh_off == 0) continue;
 
-            /* Convert relative offset to absolute pointer */
-            TD5_MeshHeader *mesh = (TD5_MeshHeader *)(block_base + mesh_off);
+            /* Convert relative offset to absolute pointer.
+             * Try block-relative first, then blob-relative for offsets
+             * that exceed the block boundary (some MODELS.DAT entries
+             * store global blob offsets instead of block-local offsets). */
+            TD5_MeshHeader *mesh;
+            if (mesh_off < block_size && mesh_off + sizeof(TD5_MeshHeader) <= block_size) {
+                mesh = (TD5_MeshHeader *)(block_base + mesh_off);
+            } else if (mesh_off < s_models_blob_size &&
+                       mesh_off + sizeof(TD5_MeshHeader) <= s_models_blob_size) {
+                mesh = (TD5_MeshHeader *)(s_models_blob + mesh_off);
+            } else {
+                *slot = 0;
+                continue;
+            }
             *slot = (uint32_t)(uintptr_t)mesh;
 
             /* Validate mesh fields before relocation.

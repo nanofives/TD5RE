@@ -521,12 +521,18 @@ void td5_physics_update_player(TD5_Actor *actor)
     int32_t cos_s = cos_fixed12(steer_heading);
     int32_t sin_s = sin_fixed12(steer_heading);
 
-    /* Front axle lateral force from slip angle */
+    /* Front axle lateral force from slip angle.
+     * lateral_slip_stiffness (0x7C) scales slip sensitivity per car. */
+    int32_t lat_stiff = (int32_t)PHYS_S(actor, 0x7C);
     int32_t front_slip = (v_lat * cos_s - v_long * sin_s) >> 12;
+    if (lat_stiff != 0)
+        front_slip = (front_slip * lat_stiff) >> 8;
     int32_t front_lat_force = -(front_slip * ((grip[0] + grip[1]) >> 1)) >> 8;
 
     /* Rear axle lateral force */
     int32_t rear_slip = v_lat;
+    if (lat_stiff != 0)
+        rear_slip = (rear_slip * lat_stiff) >> 8;
     int32_t rear_lat_force = -(rear_slip * ((grip[2] + grip[3]) >> 1)) >> 8;
 
     /* Front/rear longitudinal forces (sum of per-wheel drive) */
@@ -1620,8 +1626,12 @@ void td5_physics_refresh_wheel_contacts(TD5_Actor *actor)
         int32_t wy = actor->wheel_display_angles[i][1];
         int32_t wz = actor->wheel_display_angles[i][2];
 
-        /* Apply suspension deflection offset */
+        /* Apply suspension deflection offset + height reference preload.
+         * cardef+0x82 is the suspension height reference, scaled by 0xB5/256. */
         int32_t susp_offset = actor->wheel_suspension_pos[i];
+        int32_t susp_height_ref = (int32_t)CDEF_S(actor, 0x82);
+        if (susp_height_ref != 0)
+            susp_offset += (susp_height_ref * 0xB5) >> 8;
         wy += susp_offset;
 
         /* Transform by body rotation matrix and scale to world coords (<<8) */
@@ -2305,6 +2315,29 @@ void td5_physics_init_vehicle_runtime(void)
         actor->prev_race_position = 0;
         actor->race_position = (uint8_t)slot;
         actor->max_gear_index = 6;
+
+        /* --- Load wheel positions from car definition (cardef 0x40-0x5F) ---
+         * 4 wheels x {x, y, z, pad} as int16, copied to actor->wheel_display_angles.
+         * These define per-car wheel contact probe positions in body frame. */
+        {
+            int16_t *cardef = (int16_t *)actor->car_definition_ptr;
+            if (cardef) {
+                for (int w = 0; w < 4; w++) {
+                    actor->wheel_display_angles[w][0] = cardef[(0x40 + w * 8 + 0) / 2];
+                    actor->wheel_display_angles[w][1] = cardef[(0x40 + w * 8 + 2) / 2];
+                    actor->wheel_display_angles[w][2] = cardef[(0x40 + w * 8 + 4) / 2];
+                    actor->wheel_display_angles[w][3] = cardef[(0x40 + w * 8 + 6) / 2];
+                }
+                TD5_LOG_I(LOG_TAG,
+                          "Wheel pos slot=%d: FL=(%d,%d,%d) FR=(%d,%d,%d) RL=(%d,%d,%d) RR=(%d,%d,%d)",
+                          slot,
+                          actor->wheel_display_angles[0][0], actor->wheel_display_angles[0][1], actor->wheel_display_angles[0][2],
+                          actor->wheel_display_angles[1][0], actor->wheel_display_angles[1][1], actor->wheel_display_angles[1][2],
+                          actor->wheel_display_angles[2][0], actor->wheel_display_angles[2][1], actor->wheel_display_angles[2][2],
+                          actor->wheel_display_angles[3][0], actor->wheel_display_angles[3][1], actor->wheel_display_angles[3][2]);
+            }
+        }
+
         update_vehicle_pose_from_physics(actor);
         TD5_LOG_I(LOG_TAG,
                   "Init vehicle runtime: slot=%d gear=%d rpm=%d grip=%u race_pos=%u",
