@@ -2043,7 +2043,7 @@ void td5_physics_integrate_pose(TD5_Actor *actor)
      * Without this, gravity accumulates each frame with no correction and cars
      * fall away from the road surface. */
     {
-        int32_t corr_sum = 0;
+        int64_t corr_sum = 0;
         int corr_count = 0;
         uint8_t gnd_mask = actor->wheel_contact_bitmask;
         for (int i = 0; i < 4; i++) {
@@ -2054,13 +2054,13 @@ void td5_physics_integrate_pose(TD5_Actor *actor)
                 if (td5_track_probe_height(actor->wheel_contact_pos[i].x,
                                            actor->wheel_contact_pos[i].z,
                                            g_span, &g_y, &g_surf)) {
-                    corr_sum += g_y - actor->wheel_contact_pos[i].y;
+                    corr_sum += (int64_t)g_y - (int64_t)actor->wheel_contact_pos[i].y;
                     corr_count++;
                 }
             }
         }
         if (corr_count > 0) {
-            actor->world_pos.y += corr_sum / corr_count;
+            actor->world_pos.y += (int32_t)(corr_sum / corr_count);
             actor->render_pos.y = (float)actor->world_pos.y * (1.0f / 256.0f);
             /* Cancel downward velocity: ground is a hard constraint. */
             if (actor->linear_velocity_y < 0)
@@ -2186,7 +2186,7 @@ static void update_vehicle_pose_from_physics(TD5_Actor *actor)
 
     /* Ground-snap from grounded wheels (UpdateVehiclePoseFromPhysicsState step 7) */
     {
-        int32_t corr_sum = 0;
+        int64_t corr_sum = 0;
         int corr_count = 0;
         uint8_t gnd_mask = actor->wheel_contact_bitmask;
         for (int i = 0; i < 4; i++) {
@@ -2197,13 +2197,13 @@ static void update_vehicle_pose_from_physics(TD5_Actor *actor)
                 if (td5_track_probe_height(actor->wheel_contact_pos[i].x,
                                            actor->wheel_contact_pos[i].z,
                                            g_span, &g_y, &g_surf)) {
-                    corr_sum += g_y - actor->wheel_contact_pos[i].y;
+                    corr_sum += (int64_t)g_y - (int64_t)actor->wheel_contact_pos[i].y;
                     corr_count++;
                 }
             }
         }
         if (corr_count > 0) {
-            actor->world_pos.y += corr_sum / corr_count;
+            actor->world_pos.y += (int32_t)(corr_sum / corr_count);
             actor->render_pos.y = (float)actor->world_pos.y * (1.0f / 256.0f);
         }
     }
