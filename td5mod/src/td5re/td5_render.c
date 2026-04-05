@@ -529,7 +529,7 @@ static void clip_and_submit_polygon(TD5_MeshVertex *vert_data, int vert_count,
     /* --- Perspective projection --- */
     for (int i = 0; i < out_count; i++) {
         float inv_z = 1.0f / out_vz[i];
-        clipped[i].screen_x = out_vx[i] * s_focal_length * inv_z + s_center_x;
+        clipped[i].screen_x = -out_vx[i] * s_focal_length * inv_z + s_center_x;
         clipped[i].screen_y = -out_vy[i] * s_focal_length * inv_z + s_center_y;
         clipped[i].depth_z  = out_vz[i] * (1.0f / s_far_clip);
         clipped[i].rhw      = inv_z;
@@ -2097,7 +2097,8 @@ static void render_vehicle_shadow_quad(void)
 
 /* Cached WHEELS/INWHEEL lookups from static.hed */
 static int   s_wheel_tex_page = -1;
-static float s_inwheel_u0, s_inwheel_v0, s_inwheel_u1, s_inwheel_v1;
+static float s_wheels_u0, s_wheels_v0, s_wheels_u1, s_wheels_v1;  /* tire sidewall UVs */
+static float s_inwheel_u0, s_inwheel_v0, s_inwheel_u1, s_inwheel_v1;  /* hub-cap UVs */
 static int   s_wheel_lookup_done = 0;
 
 static void wheel_lookup_static_hed(void)
@@ -2110,10 +2111,23 @@ static void wheel_lookup_static_hed(void)
     TD5_AtlasEntry *wheels = td5_asset_find_atlas_entry(NULL, "WHEELS");
     if (wheels && wheels->texture_page > 0) {
         s_wheel_tex_page = wheels->texture_page;
-        TD5_LOG_I(LOG_TAG, "wheel: WHEELS entry page=%d pos=(%d,%d) size=(%d,%d)",
+        /* Normalize WHEELS UVs: pos=(0,0) size=(256,128) on 256x256 page */
+        int tw = 256, th = 256;
+        td5_plat_render_get_texture_dims(wheels->texture_page, &tw, &th);
+        s_wheels_u0 = ((float)wheels->atlas_x + 0.5f) / (float)tw;
+        s_wheels_v0 = ((float)wheels->atlas_y + 0.5f) / (float)th;
+        s_wheels_u1 = ((float)(wheels->atlas_x + wheels->width) - 0.5f) / (float)tw;
+        s_wheels_v1 = ((float)(wheels->atlas_y + wheels->height) - 0.5f) / (float)th;
+        TD5_LOG_I(LOG_TAG, "wheel: WHEELS page=%d pos=(%d,%d) size=(%d,%d) UV=(%.4f,%.4f)-(%.4f,%.4f)",
                   s_wheel_tex_page, wheels->atlas_x, wheels->atlas_y,
-                  wheels->width, wheels->height);
+                  wheels->width, wheels->height,
+                  s_wheels_u0, s_wheels_v0, s_wheels_u1, s_wheels_v1);
     } else {
+        /* Fallback: WHEELS at (0,0) 256x128 on 256x256 page */
+        s_wheels_u0 = 0.5f / 256.0f;
+        s_wheels_v0 = 0.5f / 256.0f;
+        s_wheels_u1 = 255.5f / 256.0f;
+        s_wheels_v1 = 127.5f / 256.0f;
         TD5_LOG_W(LOG_TAG, "wheel: WHEELS not found in static.hed atlas");
     }
 
@@ -2197,6 +2211,10 @@ static void render_vehicle_wheel_billboards(TD5_Actor *actor, int slot)
             float cy = ring_y[i];
             float cz = ring_z[i];
 
+            /* UV interpolation: map segment i across WHEELS atlas region */
+            float u_t = (float)i / (float)WHEEL_SEGMENTS;
+            float seg_u = s_wheels_u0 + u_t * (s_wheels_u1 - s_wheels_u0);
+
             /* Inner ring vertex */
             {
                 float px = wx + inner_off, py = wy + cy, pz = wz + cz;
@@ -2209,10 +2227,10 @@ static void render_vehicle_wheel_billboards(TD5_Actor *actor, int slot)
                 verts[i].screen_y = -vy * s_focal_length * inv_z + s_center_y;
                 verts[i].depth_z  = vz * (1.0f / s_far_clip);
                 verts[i].rhw      = inv_z;
-                verts[i].diffuse  = 0xFF808080u;
+                verts[i].diffuse  = 0xFFFFFFFFu;
                 verts[i].specular = 0;
-                verts[i].tex_u = (float)i / (float)WHEEL_SEGMENTS;
-                verts[i].tex_v = 0.0f;
+                verts[i].tex_u = seg_u;
+                verts[i].tex_v = s_wheels_v0;
             }
 
             /* Outer ring vertex */
@@ -2227,10 +2245,10 @@ static void render_vehicle_wheel_billboards(TD5_Actor *actor, int slot)
                 verts[9+i].screen_y = -vy * s_focal_length * inv_z + s_center_y;
                 verts[9+i].depth_z  = vz * (1.0f / s_far_clip);
                 verts[9+i].rhw      = inv_z;
-                verts[9+i].diffuse  = 0xFF808080u;
+                verts[9+i].diffuse  = 0xFFFFFFFFu;
                 verts[9+i].specular = 0;
-                verts[9+i].tex_u = (float)i / (float)WHEEL_SEGMENTS;
-                verts[9+i].tex_v = 1.0f;
+                verts[9+i].tex_u = seg_u;
+                verts[9+i].tex_v = s_wheels_v1;
             }
         }
 
@@ -2249,7 +2267,7 @@ static void render_vehicle_wheel_billboards(TD5_Actor *actor, int slot)
         }
 
         flush_immediate_internal();
-        td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
+        td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
         td5_plat_render_bind_texture(tex_page);
         td5_plat_render_draw_tris(verts, 18, indices, idx);
 
@@ -2290,7 +2308,7 @@ static void render_vehicle_wheel_billboards(TD5_Actor *actor, int slot)
             if (hub_ok) {
                 uint16_t hub_idx[12] = { 0,1,2, 0,2,3, 0,2,1, 0,3,2 };
                 flush_immediate_internal();
-                td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
+                td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
                 td5_plat_render_bind_texture(tex_page);
                 td5_plat_render_draw_tris(hub, 4, hub_idx, 12);
             }
