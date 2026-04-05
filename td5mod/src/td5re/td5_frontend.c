@@ -5633,14 +5633,14 @@ static void Screen_GameOptions(void) {
         /* 7 option rows with left/right arrows:
          * Circuit Laps, Checkpoint Timers, Traffic, Cops,
          * Difficulty, Dynamics, 3D Collisions */
-        frontend_create_button("Circuit Laps",      -0xE0, 0, 0xE0, 0x20);
-        frontend_create_button("Checkpoint Timers", -0xE0, 0, 0xE0, 0x20);
-        frontend_create_button("Traffic",           -0xE0, 0, 0xE0, 0x20);
-        frontend_create_button("Cops",              -0xE0, 0, 0xE0, 0x20);
-        frontend_create_button("Difficulty",        -0xE0, 0, 0xE0, 0x20);
-        frontend_create_button("Dynamics",          -0xE0, 0, 0xE0, 0x20);
-        frontend_create_button("3D Collisions",     -0xE0, 0, 0xE0, 0x20);
-        frontend_create_button("OK",                -0x60, 0, 0x60,  0x20);
+        frontend_create_button("Circuit Laps",      -0x128, 0, 0x128, 0x20); /* 0x41fa1d: width=0x128 */
+        frontend_create_button("Checkpoint Timers", -0x128, 0, 0x128, 0x20);
+        frontend_create_button("Traffic",           -0x128, 0, 0x128, 0x20);
+        frontend_create_button("Cops",              -0x128, 0, 0x128, 0x20);
+        frontend_create_button("Difficulty",        -0x128, 0, 0x128, 0x20);
+        frontend_create_button("Dynamics",          -0x128, 0, 0x128, 0x20);
+        frontend_create_button("3D Collisions",     -0x128, 0, 0x128, 0x20);
+        frontend_create_button("OK",                -0x60,  0, 0x60,  0x20); /* 0x41fae3: width=0x60 */
         s_anim_tick = 0;
         s_inner_state = 1;
         break;
@@ -5734,11 +5734,11 @@ static void Screen_ControlOptions(void) {
         frontend_load_tga("Front_End/MainMenu.tga", "Front_End/FrontEnd.zip");
         s_control_options_surface = frontend_load_tga("Controllers.TGA", "Front End/frontend.zip");
         /* Original layout: Player 1 label, Configure P1, Player 2 label, Configure P2, OK */
-        frontend_create_preview_button("Player 1",  -0xE0, 0, 0xE0, 0x20);
-        frontend_create_button("Configure",         -0xE0, 0, 0xE0, 0x20);
-        frontend_create_preview_button("Player 2",  -0xE0, 0, 0xE0, 0x20);
-        frontend_create_button("Configure",         -0xE0, 0, 0xE0, 0x20);
-        frontend_create_button("OK",                -0x60, 0, 0x60, 0x20);
+        frontend_create_preview_button("Player 1",  -0x100, 0, 0x100, 0x20); /* 0x41e07d: width=0x100 */
+        frontend_create_button("Configure",         -0x100, 0, 0x100, 0x20);
+        frontend_create_preview_button("Player 2",  -0x100, 0, 0x100, 0x20);
+        frontend_create_button("Configure",         -0x100, 0, 0x100, 0x20);
+        frontend_create_button("OK",                -0x60,  0, 0x60,  0x20); /* 0x41e0f1: width=0x60 */
         s_anim_complete = 0;
         frontend_begin_timed_animation();
         s_inner_state = 1;
@@ -5804,11 +5804,11 @@ static void Screen_SoundOptions(void) {
         s_sound_icon_mono_surface  = frontend_load_tga("Mono.tga",      "Front End/frontend.zip");
         s_sound_volumebox_surface  = frontend_load_tga("VolumeBox.tga", "Front End/frontend.zip");
         s_sound_volumefill_surface = frontend_load_tga("VolumeFill.tga","Front End/frontend.zip");
-        frontend_create_button("SFX Mode",     -0xE0, 0, 0xE0, 0x20);
-        frontend_create_button("SFX Volume",   -0xE0, 0, 0xE0, 0x20);
-        frontend_create_button("Music Volume", -0xE0, 0, 0xE0, 0x20);
-        frontend_create_button("Music Test",   -0xE0, 0, 0xE0, 0x20);
-        frontend_create_button("OK",           -0xE0, 0, 0xE0, 0x20);
+        frontend_create_button("SFX Mode",     -0x100, 0, 0x100, 0x20); /* 0x41eb5e: width=0x100 */
+        frontend_create_button("SFX Volume",   -0x100, 0, 0x100, 0x20);
+        frontend_create_button("Music Volume", -0x100, 0, 0x100, 0x20);
+        frontend_create_button("Music Test",   -0x100, 0, 0x100, 0x20);
+        frontend_create_button("OK",           -0x60,  0, 0x60,  0x20); /* 0x41ebd0: width=0x60 */
         s_anim_tick = 0;
         s_inner_state = 1;
         break;
@@ -5882,11 +5882,11 @@ static void Screen_DisplayOptions(void) {
         TD5_LOG_D(LOG_TAG, "DisplayOptions: init");
         frontend_load_tga("Front_End/MainMenu.tga", "Front_End/FrontEnd.zip");
         frontend_init_display_mode_state();
-        frontend_create_button("Resolution",    -0xE0, 0, 0xE0, 0x20);
-        frontend_create_button("Fogging",       -0xE0, 0, 0xE0, 0x20);
-        frontend_create_button("Speed Readout", -0xE0, 0, 0xE0, 0x20);
-        frontend_create_button("Camera Damping",-0xE0, 0, 0xE0, 0x20);
-        frontend_create_button("OK",            -0x60, 0, 0x60,  0x20);
+        frontend_create_button("Resolution",    -0x120, 0, 0x120, 0x20); /* 0x420484: width=0x120 */
+        frontend_create_button("Fogging",       -0x120, 0, 0x120, 0x20);
+        frontend_create_button("Speed Readout", -0x120, 0, 0x120, 0x20);
+        frontend_create_button("Camera Damping",-0x120, 0, 0x120, 0x20);
+        frontend_create_button("OK",            -0x60,  0, 0x60,  0x20); /* 0x420522: width=0x60 */
         frontend_refresh_display_option_labels();
         s_anim_tick = 0;
         s_inner_state = 1;
@@ -5968,9 +5968,9 @@ static void Screen_TwoPlayerOptions(void) {
         frontend_init_return_screen(TD5_SCREEN_TWO_PLAYER_OPTIONS);
         TD5_LOG_D(LOG_TAG, "TwoPlayerOptions: init");
         s_split_screen_surface = frontend_load_tga("SplitScreen.tga", "Front End/frontend.zip");
-        frontend_create_button("Split Screen", -0xE0, 0, 0xE0, 0x20);
-        frontend_create_button("Catch-Up", -0xE0, 0, 0xE0, 0x20);
-        frontend_create_button("OK", -0xE0, 0, 0xE0, 0x20);
+        frontend_create_button("Split Screen", -0x100, 0, 0x100, 0x20); /* 0x420d22: width=0x100 */
+        frontend_create_button("Catch-Up",    -0x100, 0, 0x100, 0x20);
+        frontend_create_button("OK",          -0x60,  0, 0x60,  0x20); /* 0x420d43: width=0x60 */
         s_anim_tick = 0;
         s_inner_state = 1;
         break;
