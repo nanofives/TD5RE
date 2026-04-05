@@ -621,9 +621,11 @@ void td5_physics_update_player(TD5_Actor *actor)
         int32_t brake_cmd = (-throttle);
         int32_t bf = (brake_front * brake_cmd) >> 8;
         int32_t br = (brake_rear * brake_cmd) >> 8;
-        /* Clamp brake to not exceed wheel speed */
-        if (bf > abs_speed) bf = abs_speed;
-        if (br > abs_speed) br = abs_speed;
+        /* Original (0x404612): clamp brake force to v_long/2, not full speed.
+         * [CONFIRMED @ 0x404612-0x40464C] */
+        int32_t half_speed = abs_speed >> 1;
+        if (bf > half_speed) bf = half_speed;
+        if (br > half_speed) br = half_speed;
         int32_t sign = (v_long > 0) ? -1 : 1;
         wheel_drive[0] += sign * (bf >> 1);
         wheel_drive[1] += sign * (bf >> 1);
@@ -950,8 +952,9 @@ void td5_physics_update_ai(TD5_Actor *actor)
         int32_t brake_cmd = (-throttle);
         int32_t bf = ((int32_t)PHYS_S(actor, 0x6E) * brake_cmd) >> 8;
         int32_t br = ((int32_t)PHYS_S(actor, 0x70) * brake_cmd) >> 8;
-        if (bf > abs_speed) bf = abs_speed;
-        if (br > abs_speed) br = abs_speed;
+        int32_t half_speed = abs_speed >> 1;
+        if (bf > half_speed) bf = half_speed;
+        if (br > half_speed) br = half_speed;
         int32_t sign = (v_long > 0) ? -1 : 1;
         front_drive += sign * bf;
         rear_drive  += sign * br;
@@ -2517,20 +2520,19 @@ static void update_engine_speed_smoothed(TD5_Actor *actor)
         target = 400; /* idle */
     }
 
-    /* Asymmetric slew rates */
+    /* Asymmetric slew: approach at delta>>4, clamped to max step.
+     * Original (0x42ED80-0x42EDA0): delta>>4 smooth approach,
+     * fast slew triggers when (delta>>4) > 400 (up) or > 200 (down).
+     * [CONFIRMED @ 0x42ED92: 400 up clamp, 0x42ED88: >>4 shift] */
     int32_t delta = rpm - target;
     if (delta > 0) {
-        /* Slew down: max 200/frame */
-        if (delta > 200)
-            rpm -= 200;
-        else
-            rpm -= delta / 16 + 1;
-    } else {
-        /* Slew up: max 400/frame */
-        if (delta < -400)
-            rpm += 400;
-        else
-            rpm += (-delta) / 16 + 1;
+        int32_t step = delta >> 4;
+        if (step > 200) step = 200;
+        rpm -= step;
+    } else if (delta < 0) {
+        int32_t step = (-delta) >> 4;
+        if (step > 400) step = 400;
+        rpm += step;
     }
 
     if (rpm > redline) rpm = redline;

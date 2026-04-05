@@ -411,8 +411,10 @@ void td5_input_update_player_control(int slot)
     if (vehicle_stopped) {
         steer_rate_denom = 0;
     } else {
+        /* Original (0x402EBC): denominator = speed_sq * speed_sq + 0x40
+         * (4th-power speed falloff, not linear). [CONFIRMED @ 0x402EBC-0x402ECC] */
         steer_rate_denom = (int)((uint32_t)(speed * 0x40) /
-                                 (uint32_t)(speed_sq + 0x40));
+                                 (uint32_t)(speed_sq * speed_sq + 0x40));
     }
     int steer_rate = (int)(TD5_INPUT_STEER_RATE_NUM /
                            (int64_t)(steer_rate_denom + 0x40));
