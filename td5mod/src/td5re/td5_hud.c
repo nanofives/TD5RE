@@ -1880,11 +1880,14 @@ void td5_hud_render_overlays(float dt)
             /* Submit needle */
             hud_submit_quad(view_base + 0x39C);
 
-            /* Submit speed digits (ones always shown) */
+            /* Submit speed digits right-to-left: ones at rightmost position,
+             * tens one step left, hundreds two steps left.
+             * Original renders digits from the ones place outward (0x438E90). */
             int digit_count = 1;
-            int tens = (speed_display % 1000) / 10;
+            int tens_val = (speed_display / 10) % 10;
+            int hundreds_val = speed_display / 100;
 
-            /* Ones digit quad */
+            /* Ones digit (always shown, rightmost) */
             float dx = sf_x0;
             float u_ones = digit_u_base + (float)ones * 16.0f + 0.5f;
             hud_build_quad(
@@ -1897,11 +1900,11 @@ void td5_hud_render_overlays(float dt)
             );
             hud_submit_quad(view_base + SPEEDFONT_BASE_OFF);
 
-            /* Tens digit if speed >= 10 */
-            if (tens > 0) {
+            /* Tens digit if speed >= 10 (one position left of ones) */
+            if (speed_display >= 10) {
                 digit_count = 2;
-                float u_tens = digit_u_base + (float)(tens % 10) * 16.0f + 0.5f;
-                dx = sf_x0 + 1.0f * (sf_gw + 1.0f);
+                float u_tens = digit_u_base + (float)tens_val * 16.0f + 0.5f;
+                dx = sf_x0 - 1.0f * (sf_gw + 1.0f);
                 hud_build_quad(
                     view_base + SPEEDFONT_BASE_OFF + TD5_HUD_GLYPH_QUAD_SIZE,
                     0, sf_pg,
@@ -1912,12 +1915,11 @@ void td5_hud_render_overlays(float dt)
                 );
                 hud_submit_quad(view_base + SPEEDFONT_BASE_OFF + TD5_HUD_GLYPH_QUAD_SIZE);
 
-                /* Hundreds digit if speed >= 100 */
-                int hundreds = tens / 10;
-                if (hundreds > 0) {
+                /* Hundreds digit if speed >= 100 (two positions left of ones) */
+                if (speed_display >= 100) {
                     digit_count = 3;
-                    float u_hund = digit_u_base + (float)hundreds * 16.0f + 0.5f;
-                    dx = sf_x0 + 2.0f * (sf_gw + 1.0f);
+                    float u_hund = digit_u_base + (float)hundreds_val * 16.0f + 0.5f;
+                    dx = sf_x0 - 2.0f * (sf_gw + 1.0f);
                     hud_build_quad(
                         view_base + SPEEDFONT_BASE_OFF + 2 * TD5_HUD_GLYPH_QUAD_SIZE,
                         0, sf_pg,
