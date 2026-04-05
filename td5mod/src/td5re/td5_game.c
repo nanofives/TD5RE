@@ -57,6 +57,7 @@ int32_t g_actor_best_race       = 0;
 void   *g_route_data            = NULL;
 
 extern int   g_cameraTransitionActive;  /* td5_camera.c */
+extern float g_subTickFraction;        /* td5_camera.c -- [0..1) sub-tick interp */
 extern int   g_camWorldPos[2][3];       /* td5_camera.c -- per-viewport camera pos (24.8 fixed) */
 extern float g_render_width_f;          /* td5_render.c */
 extern float g_render_height_f;         /* td5_render.c */
@@ -1119,6 +1120,14 @@ int td5_game_run_race_frame(void) {
         g_td5.simulation_tick_counter++;
         ticks_this_frame++;
     }
+
+    /* Compute sub-tick interpolation fraction for camera/VFX rendering.
+     * Original: 0x4AAF60 — remainder after sim loop / tick size gives [0..1). */
+    g_subTickFraction = (float)g_td5.sim_time_accumulator / (float)TD5_TICK_ACCUMULATOR_ONE;
+    if (g_subTickFraction < 0.0f) g_subTickFraction = 0.0f;
+    if (g_subTickFraction > 1.0f) g_subTickFraction = 1.0f;
+    TD5_LOG_D(LOG_TAG, "subTickFraction=%.4f accum=0x%X ticks=%d",
+              g_subTickFraction, g_td5.sim_time_accumulator, ticks_this_frame);
 
     if ((g_td5.simulation_tick_counter % 60u) == 0u) {
         TD5_LOG_D(LOG_TAG,
