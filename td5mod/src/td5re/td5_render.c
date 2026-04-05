@@ -556,29 +556,24 @@ static void clip_and_submit_polygon(TD5_MeshVertex *vert_data, int vert_count,
         }
     }
 
-    /* --- Screen-space clip (left/right/top/bottom guard band) --- */
-    /* Simplified: clamp screen coordinates to viewport bounds */
-    float x_min = 0.0f, x_max = (float)s_viewport_width;
-    float y_min = 0.0f, y_max = (float)s_viewport_height;
-
-    /* Quick reject: all vertices outside same edge */
-    int all_left = 1, all_right = 1, all_top = 1, all_bottom = 1;
-    for (int i = 0; i < clipped_count; i++) {
-        if (clipped[i].screen_x >= x_min) all_left   = 0;
-        if (clipped[i].screen_x <= x_max) all_right  = 0;
-        if (clipped[i].screen_y >= y_min) all_top    = 0;
-        if (clipped[i].screen_y <= y_max) all_bottom = 0;
+    /* --- Screen-space reject (all verts outside same edge) --- */
+    {
+        float x_min = 0.0f, x_max = (float)s_viewport_width;
+        float y_min = 0.0f, y_max = (float)s_viewport_height;
+        int all_left = 1, all_right = 1, all_top = 1, all_bottom = 1;
+        for (int i = 0; i < clipped_count; i++) {
+            if (clipped[i].screen_x >= x_min) all_left   = 0;
+            if (clipped[i].screen_x <= x_max) all_right  = 0;
+            if (clipped[i].screen_y >= y_min) all_top    = 0;
+            if (clipped[i].screen_y <= y_max) all_bottom = 0;
+        }
+        if (all_left || all_right || all_top || all_bottom) {
+            s_debug_clip_screen_rejects++;
+            return;
+        }
     }
-    if ((all_left || all_right || all_top || all_bottom) && tex_page != 1021) {
-        s_debug_clip_screen_rejects++;
-        return;
-    }
-
-    /* Clamp individual vertices to viewport (guard band approach) */
-    for (int i = 0; i < clipped_count; i++) {
-        clipped[i].screen_x = clampf(clipped[i].screen_x, x_min, x_max);
-        clipped[i].screen_y = clampf(clipped[i].screen_y, y_min, y_max);
-    }
+    /* Do NOT clamp individual vertices to viewport bounds — that distorts
+     * triangles at screen edges.  D3D11 handles viewport clipping internally. */
 
     /* --- Set texture page --- */
     if (tex_page >= 0 && tex_page != s_current_texture_page) {
@@ -2632,6 +2627,133 @@ void td5_render_set_projection_center(float cx, float cy) {
 }
 
 void td5_render_radial_pulse(float dt) { (void)dt; }
+
+/* ========================================================================
+ * 4-Pass Race Rendering (0x40B070 -- SetRaceRenderStatePreset)
+ *
+ * The original called a render state function 4 times per frame with pass IDs:
+ *   Pass 0 (SKY):     texture blend = MODULATEALPHA, alpha blend = OFF
+ *   Pass 1 (OPAQUE):  texture blend = COPY, alpha blend = ON
+ *   Pass 3 (ALPHA):   texture blend = COPY, alpha blend = OFF
+ *
+ * In the D3D11 wrapper this maps to different blend/preset combinations.
+ * ======================================================================== */
+
+void td5_render_set_race_pass(TD5_RaceRenderPass pass)
+{
+    /* Flush any pending geometry before state change */
+    flush_immediate_internal();
+
+    switch (pass) {
+    case TD5_RACE_PASS_SKY:
+        /* Pass 0: sky dome -- MODULATEALPHA blend mode, no alpha blending */
+        td5_plat_render_set_preset(TD5_PRESET_OPAQUE_ANISO);
+        break;
+
+    case TD5_RACE_PASS_OPAQUE:
+        /* Pass 1: opaque geometry + overlays -- alpha blend ON */
+        td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
+        break;
+
+    case TD5_RACE_PASS_ALPHA:
+        /* Pass 3: alpha effects -- alpha blend OFF, copy mode */
+        td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
+        break;
+
+    default:
+        td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
+        break;
+    }
+}
+
+/* ========================================================================
+ * Per-Tick Fog Fade (0x40A490)
+ *
+ * Manages fog transition during scene changes. The transition_counter
+ * counts down from a starting value, dividing by 10240 to get the
+ * fog level (0 = clear, higher = denser).
+ * ======================================================================== */
+
+static int s_fog_transition_counter;
+static int s_fog_headlight_state;
+static int s_fog_ambient_state;
+
+void td5_render_set_fog_transition(int counter)
+{
+    s_fog_transition_counter = counter;
+}
+
+int td5_render_get_fog_transition(void)
+{
+    return s_fog_transition_counter;
+}
+
+void td5_render_set_fog_level(int viewport, int level)
+{
+    (void)viewport;
+
+    if (level <= 0) {
+        /* Fog disabled */
+        td5_plat_render_set_fog(0, 0, 0.0f, 0.0f, 0.0f);
+    } else {
+        /* Scale fog start/end based on level.
+         * Higher level = closer fog (denser).
+         * Level 1 = normal visibility (fog_start=0.6, fog_end=1.0)
+         * Level 2 = reduced visibility
+         * Level 3+ = heavy fog */
+        float scale = 1.0f / (float)level;
+        float fog_start = FOG_START_DEFAULT * scale;
+        float fog_end   = FOG_END_DEFAULT * scale;
+        td5_plat_render_set_fog(1, s_fog_color, fog_start, fog_end,
+                                FOG_DENSITY_DEFAULT);
+    }
+}
+
+void td5_render_per_tick_fog_fade(void)
+{
+    int fog_level;
+
+    if (s_fog_transition_counter == 0) {
+        /* No transition active: clear fog on both viewports */
+        td5_render_set_fog_level(0, 0);
+        td5_render_set_fog_level(1, 0);
+        return;
+    }
+
+    if (s_fog_transition_counter < 257) {
+        /* Transition nearly complete: finalize */
+        s_fog_transition_counter = 0;
+
+        /* Determine night/weather mode from global state */
+        int night_mode = (g_td5.weather != TD5_WEATHER_CLEAR) ? 1 : 0;
+
+        /* Setup final visibility based on night_mode.
+         * When night/weather: enable fog with standard parameters.
+         * When clear: disable fog. */
+        if (night_mode) {
+            td5_render_configure_fog(s_fog_color, 1);
+            td5_render_set_fog(1);
+        } else {
+            td5_render_configure_fog(0, 0);
+            td5_render_set_fog(0);
+        }
+        return;
+    }
+
+    /* Decrement counter by 256 per tick */
+    s_fog_transition_counter -= 256;
+
+    /* Compute fog level: counter / 10240 + 1 */
+    fog_level = s_fog_transition_counter / 10240 + 1;
+    td5_render_set_fog_level(0, fog_level);
+    td5_render_set_fog_level(1, fog_level);
+
+    /* When fog is minimal, clear headlight/ambient overrides */
+    if (fog_level <= 1) {
+        s_fog_headlight_state = 0;
+        s_fog_ambient_state = 0;
+    }
+}
 
 /* ========================================================================
  * Display Globals (migrated from td5re_stubs.c)
