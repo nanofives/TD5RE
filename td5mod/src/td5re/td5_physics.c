@@ -642,23 +642,36 @@ void td5_physics_update_player(TD5_Actor *actor)
     int32_t sin_s = sin_fixed12(steer_heading);
 
     /* Front axle lateral force from slip angle.
-     * lateral_slip_stiffness (0x7C) scales slip sensitivity per car. */
+     * lateral_slip_stiffness (0x7C) scales slip sensitivity per car.
+     * Original at 0x4041B0: slip is computed from WORLD-frame velocity
+     * projected onto steered heading perpendicular, NOT from body-frame.
+     * front_slip = (world_vx * cos(heading+steer) - world_vz * sin(heading+steer)) >> 12 */
     int32_t lat_stiff = (int32_t)PHYS_S(actor, 0x7C);
-    int32_t front_slip = (v_lat * cos_s - v_long * sin_s) >> 12;
+    int32_t front_slip = (vx * cos_s - vz * sin_s) >> 12;
     if (lat_stiff != 0)
         front_slip = (front_slip * lat_stiff) >> 8;
     int32_t front_lat_force = -(front_slip * ((grip[0] + grip[1]) >> 1)) >> 8;
 
     /* Rear axle lateral force.
-     * Original at 0x4041E0: rear slip uses heading rotation (not steered heading).
+     * Original at 0x4041E0: rear slip from WORLD-frame velocity projected
+     * onto body heading perpendicular (unsteered).
+     * rear_slip = (world_vx * cos(heading) - world_vz * sin(heading)) >> 12
+     * which equals v_lat (body-frame lateral velocity).
      * Arcade mode: reduce rear slip by ~25% to limit oversteer tendency. */
-    int32_t rear_slip = (v_lat * cos_h - v_long * sin_h) >> 12;
+    int32_t rear_slip = v_lat;
     if (s_dynamics_mode == 0) {
         rear_slip = (rear_slip * 192) >> 8;  /* 0.75x in arcade */
     }
     if (lat_stiff != 0)
         rear_slip = (rear_slip * lat_stiff) >> 8;
     int32_t rear_lat_force = -(rear_slip * ((grip[2] + grip[3]) >> 1)) >> 8;
+
+    if (actor->slot_index == 0 && (actor->frame_counter % 120u) == 0u) {
+        TD5_LOG_I(LOG_TAG,
+                  "SLIP: front=%d rear=%d f_lat=%d r_lat=%d steer_ang=%d v_lat=%d",
+                  front_slip, rear_slip, front_lat_force, rear_lat_force,
+                  steer_angle, v_lat);
+    }
 
     /* Front/rear longitudinal forces (sum of per-wheel drive) */
     int32_t front_long = (wheel_drive[0] + wheel_drive[1]);
