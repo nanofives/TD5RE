@@ -3739,6 +3739,17 @@ static void fe_draw_button_9slice(float bx, float by, float bw, float bh,
 
     if (bw < lw + rw) return;  /* too narrow for corners */
 
+    /* State 0: fill interior with dark purple, excluding the 4 corner rects.
+     * A full-button fill would bleed through the transparent "outside the curve"
+     * pixels of each corner texture. The original used color-key blit so the
+     * outside pixels were always transparent against the page background. */
+    if (state == 0) {
+        uint32_t fill = 0xFF392152u;
+        fe_draw_quad(bx + lw, by, bw - lw - rw, bh, fill, -1, 0,0,0,0);
+        fe_draw_quad(bx, by + tl_h, lw, bh - tl_h - bl_h, fill, -1, 0,0,0,0);
+        fe_draw_quad(bx + bw - rw, by + tr_h, rw, bh - tr_h - br_h, fill, -1, 0,0,0,0);
+    }
+
     /* Draw edges FIRST, then corners on top (matches original draw order
      * where BL/BR corners are drawn after edges, overwriting via colorkey). */
 
@@ -3945,9 +3956,6 @@ void td5_frontend_render_ui_rects(void) {
              * Original CreateFrontendDisplayModeButton (0x425DE0) applied COLORFILL with
              * RGB565 0x390A ≈ this color before BltFasting the ButtonBits frame columns.
              * Blue/unselected center is black = transparent via SRCCOLORKEY = correct. */
-            if (bb_state == 0) {
-                fe_draw_quad(bx, by, bw, bh, 0xFF392152u, -1, 0.0f, 0.0f, 1.0f, 1.0f);
-            }
             fe_draw_button_9slice(bx, by, bw, bh, bb_state, sx, sy);
             td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
 
