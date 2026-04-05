@@ -10,6 +10,7 @@
 
 #include "td5_frontend.h"
 #include "td5_asset.h"
+#include "td5_input.h"
 #include "td5_physics.h"
 #include "td5_net.h"
 #include "td5_platform.h"
@@ -659,7 +660,7 @@ static int frontend_load_tga(const char *name, const char *archive) {
         return existing_handle;
     }
 
-    /* Try PNG from td5_png_clean first, fall back to ZIP+TGA */
+    /* Try PNG from re/assets first, fall back to ZIP+TGA */
     void *pixels = NULL;
     int w = 0, h = 0;
     char png_path[256];
@@ -732,7 +733,7 @@ static int frontend_load_tga_colorkey(const char *name, const char *archive,
     if (strstr(archive, "FrontEnd.zip") || strstr(archive, "frontend.zip"))
         real_archive = "Front End/frontend.zip";
 
-    /* Try PNG from td5_png_clean first */
+    /* Try PNG from re/assets first */
     void *pixels = NULL;
     int w = 0, h = 0;
     char png_path[256];
@@ -791,7 +792,7 @@ static int frontend_load_tga_black_key(const char *name, const char *archive) {
     existing_handle = frontend_find_surface_by_source(bare_name, real_archive);
     if (existing_handle > 0) return existing_handle;
 
-    /* Try PNG from td5_png_clean first */
+    /* Try PNG from re/assets first */
     void *pixels = NULL;
     int w = 0, h = 0;
     char png_path[256];
@@ -2570,7 +2571,7 @@ int td5_frontend_init_resources(void) {
         {
             void *pixels = NULL;
             int bw = 0, bh = 0;
-            if (td5_asset_load_png_to_buffer("../re/td5_png_clean/frontend/ButtonBits.png",
+            if (td5_asset_load_png_to_buffer("re/assets/frontend/ButtonBits.png",
                                               TD5_COLORKEY_BLACK, &pixels, &bw, &bh)) {
                 if (td5_plat_render_upload_texture(s_buttonbits_tex_page, pixels, bw, bh, 2)) {
                     s_buttonbits_w = bw;
@@ -2596,7 +2597,7 @@ int td5_frontend_init_resources(void) {
         {
             void *pixels = NULL;
             int aw = 0, ah = 0;
-            if (td5_asset_load_png_to_buffer("../re/td5_png_clean/frontend/ArrowButtonz.png",
+            if (td5_asset_load_png_to_buffer("re/assets/frontend/ArrowButtonz.png",
                                               TD5_COLORKEY_RED, &pixels, &aw, &ah)) {
                 if (td5_plat_render_upload_texture(s_arrowbuttonz_tex_page, pixels, aw, ah, 2)) {
                     TD5_LOG_I(LOG_TAG, "ArrowButtonz loaded (PNG): page=%d %dx%d",
@@ -2620,7 +2621,7 @@ int td5_frontend_init_resources(void) {
         {
             void *pixels = NULL;
             int lw = 0, lh = 0;
-            if (td5_asset_load_png_to_buffer("../re/td5_png_clean/frontend/ButtonLights.png",
+            if (td5_asset_load_png_to_buffer("re/assets/frontend/ButtonLights.png",
                                               TD5_COLORKEY_BLACK, &pixels, &lw, &lh)) {
                 if (td5_plat_render_upload_texture(s_buttonlights_tex_page, pixels, lw, lh, 2)) {
                     s_buttonlights_w = lw;
@@ -2732,11 +2733,11 @@ static void frontend_advance_bg_gallery(void) {
 
 static void frontend_load_bg_gallery(void) {
     static const char * const png_names[5] = {
-        "../re/td5_png_clean/extras/pic1.png",
-        "../re/td5_png_clean/extras/pic2.png",
-        "../re/td5_png_clean/extras/pic3.png",
-        "../re/td5_png_clean/extras/pic4.png",
-        "../re/td5_png_clean/extras/pic5.png"
+        "re/assets/extras/pic1.png",
+        "re/assets/extras/pic2.png",
+        "re/assets/extras/pic3.png",
+        "re/assets/extras/pic4.png",
+        "re/assets/extras/pic5.png"
     };
     if (s_bg_gal_loaded) return;
     for (int i = 0; i < 5; i++) {
@@ -3455,20 +3456,23 @@ static void frontend_render_control_options_overlay(float sx, float sy) {
      * Positions are absolute canvas coords from FUN_0041DF20 case4/5 steady-state:
      *   P1 icon: x = uVar2+0x4a = 320+74 = 394,  y = uVar4-0x8f = 240-143 = 97
      *   P2 icon: x = 394,                          y = uVar4-0x17 = 240-23  = 217
-     * Row = controller_type * 32; type 0 = keyboard (only type currently supported). */
+     * Row = controller_type * 32; type 0 = keyboard, 1 = joypad, 2 = joystick. */
     int sh = s_surfaces[slot].height;
     if (sh <= 0) return;
 
     float icon_w = 64.0f * sx;
     float icon_h = 32.0f * sy;
     float v_row  = 32.0f / (float)sh;
-    float v0 = 0.0f, v1 = v_row;   /* type 0 (keyboard) */
+    int p1_type = td5_input_get_device_type(0);
+    int p2_type = td5_input_get_device_type(1);
+    float p1_v0 = (float)p1_type * v_row, p1_v1 = p1_v0 + v_row;
+    float p2_v0 = (float)p2_type * v_row, p2_v1 = p2_v0 + v_row;
 
     td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
     fe_draw_quad(394.0f * sx,  97.0f * sy, icon_w, icon_h,
-                 0xFFFFFFFF, s_surfaces[slot].tex_page, 0.0f, v0, 1.0f, v1);
+                 0xFFFFFFFF, s_surfaces[slot].tex_page, 0.0f, p1_v0, 1.0f, p1_v1);
     fe_draw_quad(394.0f * sx, 217.0f * sy, icon_w, icon_h,
-                 0xFFFFFFFF, s_surfaces[slot].tex_page, 0.0f, v0, 1.0f, v1);
+                 0xFFFFFFFF, s_surfaces[slot].tex_page, 0.0f, p2_v0, 1.0f, p2_v1);
     td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
 }
 
@@ -3481,11 +3485,12 @@ static void frontend_render_controller_binding_overlay(float sx, float sy) {
     if (!s_anim_complete) return;
 
     /* Determine which icon to show based on detected controller type.
-     * For now, default to keyboard (type 0). TODO: read actual device. */
-    int icon_surface = s_keyboard_icon_surface;  /* type 0 = keyboard */
-    /* type 1 = joypad, type 2 = joystick */
-    /* if (controller_type == 1) icon_surface = s_joypad_icon_surface; */
-    /* if (controller_type == 2) icon_surface = s_joystick_icon_surface; */
+     * Query the input module for the active device type on player 0.
+     * 0 = keyboard, 1 = joypad/gamepad, 2 = joystick/wheel. */
+    int controller_type = td5_input_get_device_type(0);
+    int icon_surface = s_keyboard_icon_surface;
+    if (controller_type == 1) icon_surface = s_joypad_icon_surface;
+    if (controller_type == 2) icon_surface = s_joystick_icon_surface;
 
     if (icon_surface > 0) {
         int slot = icon_surface - 1;
@@ -3738,26 +3743,28 @@ static void fe_draw_button_9slice(float bx, float by, float bw, float bh,
     for (float x = bx + lw; x + rw < bx + bw; x += tw)
         fe_draw_quad(x, by, tw, th, 0xFFFFFFFF, tex, te_u0, te_v0, te_u1, te_v1);
 
-    /* Bottom: src (28, 96)-(32, 100) — fixed, no state offset (Ghidra 0x425d37) */
-    float be_u0 = 28.0f / BB_TEX_W;
-    float be_u1 = 32.0f / BB_TEX_W;
+    /* Bottom: src (state*12+28, 96)-(state*12+32, 100) — state-indexed (Ghidra 0x425d37, iVar2+0x1c) */
+    float be_u0 = (float)(state * 12 + 28) / BB_TEX_W;
+    float be_u1 = (float)(state * 12 + 32) / BB_TEX_W;
     for (float x = bx + lw; x + rw < bx + bw; x += tw)
         fe_draw_quad(x, by + bh - th, tw, th, 0xFFFFFFFF, tex, be_u0, te_v0, be_u1, te_v1);
 
     /* --- Vertical edge tiles (full-column width, 4px tall) ---
-     * Original tiles all the way to H (while loop_y < H), relying on
-     * corners drawn afterwards to cover the overlap areas. */
+     * Stop before the corner areas: the bottom rows of BL/BR corners have
+     * transparent pixels at the outer edge. If edge tiles extend under those
+     * transparent pixels, the border color bleeds into the corner, making it
+     * appear as a continuous rectangle instead of a rounded corner. */
     /* Left: src (0, yb)-(26, yb+4) */
     float le_v0 = yb / BB_TEX_H;
     float le_v1 = (yb + 4.0f) / BB_TEX_H;
-    for (float y = by + 13.0f * sy; y < by + bh; y += th)
+    for (float y = by + tl_h; y < by + bh - bl_h; y += th)
         fe_draw_quad(bx, y, lw, th, 0xFFFFFFFF, tex,
                      0.0f, le_v0, (float)BB_LW / BB_TEX_W, le_v1);
 
     /* Right: src (28, yb)-(56, yb+4) */
     float re_v0 = yb / BB_TEX_H;
     float re_v1 = (yb + 4.0f) / BB_TEX_H;
-    for (float y = by + 9.0f * sy; y < by + bh; y += th)
+    for (float y = by + tr_h; y < by + bh - br_h; y += th)
         fe_draw_quad(bx + bw - rw, y, rw, th, 0xFFFFFFFF, tex,
                      (float)BB_RX / BB_TEX_W, re_v0, 1.0f, re_v1);
 
