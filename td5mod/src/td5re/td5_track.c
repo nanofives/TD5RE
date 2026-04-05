@@ -88,12 +88,12 @@ static const int8_t s_vtx_offset_right[12] = {
  * Bitmask: bit0=forward, bit1=right, bit2=backward, bit3=left.
  */
 static const uint8_t s_edge_mask_first[12] = {
-    0x0F, 0x0D, 0x0D, 0x0D, 0x0D, 0x0D, 0x0D, 0x0D,
-    0x0D, 0x0F, 0x0F, 0x0D
+    0x00, 0x0E, 0x0E, 0x06, 0x06, 0x0E, 0x0C, 0x0C,
+    0x0E, 0x0E, 0x0E, 0x0E
 };
 static const uint8_t s_edge_mask_last[12] = {
-    0x0F, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E,
-    0x0E, 0x0F, 0x0F, 0x0E
+    0x00, 0x0B, 0x03, 0x0B, 0x03, 0x09, 0x0B, 0x09,
+    0x0B, 0x0B, 0x0B, 0x0B
 };
 
 /**
@@ -496,8 +496,8 @@ static int compute_span_center_world(int span_index,
     /* Average of 4 corner positions in integer-coord float space */
     x = (float)(sp->origin_x + src[0]->x + sp->origin_x + src[1]->x +
                 sp->origin_x + src[2]->x + sp->origin_x + src[3]->x) * 0.25f;
-    y = (float)(sp->pad_10 + src[0]->y + sp->pad_10 + src[1]->y +
-                sp->pad_10 + src[2]->y + sp->pad_10 + src[3]->y) * 0.25f;
+    y = (float)(sp->origin_y + src[0]->y + sp->origin_y + src[1]->y +
+                sp->origin_y + src[2]->y + sp->origin_y + src[3]->y) * 0.25f;
     z = (float)(sp->origin_z + src[0]->z + sp->origin_z + src[1]->z +
                 sp->origin_z + src[2]->z + sp->origin_z + src[3]->z) * 0.25f;
 
@@ -539,7 +539,7 @@ int td5_track_get_span_center_world(int span_index,
         return 0;
 
     if (out_x) *out_x = sp->origin_x + (src[0]->x + src[1]->x + src[2]->x + src[3]->x) / 4;
-    if (out_y) *out_y = sp->pad_10 + (src[0]->y + src[1]->y + src[2]->y + src[3]->y) / 4;
+    if (out_y) *out_y = sp->origin_y + (src[0]->y + src[1]->y + src[2]->y + src[3]->y) / 4;
     if (out_z) *out_z = sp->origin_z + (src[0]->z + src[1]->z + src[2]->z + src[3]->z) / 4;
     return 1;
 }
@@ -578,7 +578,7 @@ int td5_track_get_span_lane_world(int span_index, int sub_lane,
         return 0;
 
     if (out_x) *out_x = sp->origin_x + (src[0]->x + src[1]->x + src[2]->x + src[3]->x) / 4;
-    if (out_y) *out_y = sp->pad_10 + (src[0]->y + src[1]->y + src[2]->y + src[3]->y) / 4;
+    if (out_y) *out_y = sp->origin_y + (src[0]->y + src[1]->y + src[2]->y + src[3]->y) / 4;
     if (out_z) *out_z = sp->origin_z + (src[0]->z + src[1]->z + src[2]->z + src[3]->z) / 4;
     return 1;
 }
@@ -662,19 +662,46 @@ static inline void vertex_world_pos(const TD5_StripSpan *sp,
                                      int32_t *out_x, int32_t *out_y, int32_t *out_z)
 {
     *out_x = ((int32_t)sp->origin_x + (int32_t)v->x) << 8;
-    *out_y = ((int32_t)sp->origin_z + (int32_t)v->y) << 8; /* origin_z maps to Y in world for pad_10 */
+    *out_y = ((int32_t)sp->origin_y + (int32_t)v->y) << 8;
     *out_z = ((int32_t)sp->origin_z + (int32_t)v->z) << 8;
 }
 
 /**
+ * Per-span-type vertex index offsets from original binary (0x474E40/41).
+ * Junction span types shift one side's vertex base by -1.
+ * Indexed by span_type: [left_offset, right_offset].
+ */
+static const int8_t k_span_vertex_offsets[12][2] = {
+    /* type  0 */ {  0,  0 },  /* sentinel start */
+    /* type  1 */ {  0,  0 },  /* normal */
+    /* type  2 */ {  0,  0 },  /* normal */
+    /* type  3 */ { -1,  0 },  /* junction (left shift) */
+    /* type  4 */ { -1,  0 },  /* junction (left shift) */
+    /* type  5 */ {  0,  0 },  /* normal variant */
+    /* type  6 */ {  0, -1 },  /* junction (right shift) */
+    /* type  7 */ {  0, -1 },  /* junction (right shift) */
+    /* type  8 */ {  0,  0 },  /* forward junction */
+    /* type  9 */ {  0,  0 },  /* sentinel wrap-start */
+    /* type 10 */ {  0,  0 },  /* sentinel wrap-end */
+    /* type 11 */ {  0,  0 },  /* reverse junction */
+};
+
+/**
  * Get the 4 corner vertex indices for a span quad at a given sub-lane.
  * Returns: vl0, vl1 (left pair), vr0, vr1 (right pair).
+ * Applies per-span-type vertex index offsets for junction geometry.
  */
 static void get_quad_vertices(const TD5_StripSpan *sp, int sub_lane,
                                int *vl0, int *vl1, int *vr0, int *vr1)
 {
-    int li = sp->left_vertex_index + sub_lane;
-    int ri = sp->right_vertex_index + sub_lane;
+    int type = sp->span_type;
+    int left_off = 0, right_off = 0;
+    if (type >= 0 && type < 12) {
+        left_off  = k_span_vertex_offsets[type][0];
+        right_off = k_span_vertex_offsets[type][1];
+    }
+    int li = left_off  + sp->left_vertex_index  + sub_lane;
+    int ri = right_off + sp->right_vertex_index + sub_lane;
     *vl0 = li;
     *vl1 = li + 1;
     *vr0 = ri;
@@ -782,7 +809,7 @@ static void *build_span_strip_display_list(int span_index)
     /* Span origins in integer-coord float space (same as MODELS.DAT
      * and camera render coordinates). */
     origin_x = (float)sp->origin_x;
-    origin_y = (float)sp->pad_10;
+    origin_y = (float)sp->origin_y;
     origin_z = (float)sp->origin_z;
     mesh->origin_x = origin_x;
     mesh->origin_y = origin_y;
@@ -997,9 +1024,8 @@ void td5_track_bind_runtime_pointers(void)
 
     /* Patch last span: type = SENTINEL_END, clear forward link area */
     last->span_type = 10;  /* TD5_SPAN_SENTINEL_END */
-    /* The original clears the int32 at +0x10 (origin_y / pad_10).
-     * In the original binary this was the link field area at +0x10 = 0. */
-    last->pad_10 = 0;
+    /* The original clears the int32 at +0x10 (origin_y). */
+    last->origin_y = 0;
 }
 
 /* ========================================================================
@@ -1260,57 +1286,132 @@ static int resolve_neighbor(int span_idx, int *sub_lane, uint8_t crossing_bit)
 }
 
 /**
- * Recursive boundary traversal. Updates the actor's track position state
- * when crossing span boundaries.
+ * Iterative boundary traversal matching original FUN_004440f0 switch logic.
+ * Handles compound crossings (diagonal movement) in a single step.
+ * Bitmask: bit0=forward(1), bit1=right(2), bit2=backward(4), bit3=left(8).
  */
 static void update_position_recursive(int16_t *track_state, int32_t pos_x, int32_t pos_z,
                                        int depth)
 {
     int span_idx = (int)track_state[0];
-    int sub_lane = (int)((int8_t *)track_state)[12]; /* sub_lane_index at byte +0x0C from track_state base */
-    uint8_t bits;
+    int sub_lane = (int)((int8_t *)track_state)[12];
     int new_span;
+    int iter;
 
-    if (depth >= TRACK_MAX_RECURSION)
-        return;
+    for (iter = 0; iter < TRACK_MAX_RECURSION; iter++) {
+        uint8_t bits = compute_boundary_bits(span_idx, sub_lane, pos_x, pos_z);
 
-    bits = compute_boundary_bits(span_idx, sub_lane, pos_x, pos_z);
+        if (bits == 0)
+            break; /* Actor is within the current quad */
 
-    if (bits == 0)
-        return; /* Actor is within the current quad */
+        switch (bits) {
+        case 1: /* Forward */
+            new_span = resolve_neighbor(span_idx, &sub_lane, 0x01);
+            span_idx = new_span;
+            track_state[0] = (int16_t)new_span;
+            track_state[2]++;
+            if (track_state[2] > track_state[3])
+                track_state[3] = track_state[2];
+            break;
 
-    /* Process the lowest set bit (single dominant crossing direction) */
-    if (bits & 0x01) {
-        /* Forward crossing: increment accumulated span counter */
-        new_span = resolve_neighbor(span_idx, &sub_lane, 0x01);
-        track_state[0] = (int16_t)new_span;
-        track_state[2]++; /* accumulated spans (forward progress) */
-        if (track_state[2] > track_state[3])
-            track_state[3] = track_state[2]; /* high-water mark */
-    } else if (bits & 0x02) {
-        /* Right crossing */
-        new_span = resolve_neighbor(span_idx, &sub_lane, 0x02);
-        track_state[0] = (int16_t)new_span;
-        track_state[2]++;
-        if (track_state[2] > track_state[3])
-            track_state[3] = track_state[2];
-    } else if (bits & 0x04) {
-        /* Backward crossing: decrement accumulated span counter */
-        new_span = resolve_neighbor(span_idx, &sub_lane, 0x04);
-        track_state[0] = (int16_t)new_span;
-        track_state[2]--;
-    } else if (bits & 0x08) {
-        /* Left crossing */
-        new_span = resolve_neighbor(span_idx, &sub_lane, 0x08);
-        track_state[0] = (int16_t)new_span;
-        track_state[2]--;
+        case 2: /* Right */
+            new_span = resolve_neighbor(span_idx, &sub_lane, 0x02);
+            span_idx = new_span;
+            track_state[0] = (int16_t)new_span;
+            break;
+
+        case 3: /* Forward + Right */
+            new_span = resolve_neighbor(span_idx, &sub_lane, 0x01);
+            span_idx = new_span;
+            track_state[0] = (int16_t)new_span;
+            track_state[2]++;
+            if (track_state[2] > track_state[3])
+                track_state[3] = track_state[2];
+            new_span = resolve_neighbor(span_idx, &sub_lane, 0x02);
+            span_idx = new_span;
+            track_state[0] = (int16_t)new_span;
+            break;
+
+        case 4: /* Backward */
+            new_span = resolve_neighbor(span_idx, &sub_lane, 0x04);
+            span_idx = new_span;
+            track_state[0] = (int16_t)new_span;
+            track_state[2]--;
+            break;
+
+        case 6: /* Right + Backward */
+            new_span = resolve_neighbor(span_idx, &sub_lane, 0x02);
+            span_idx = new_span;
+            track_state[0] = (int16_t)new_span;
+            new_span = resolve_neighbor(span_idx, &sub_lane, 0x04);
+            span_idx = new_span;
+            track_state[0] = (int16_t)new_span;
+            track_state[2]--;
+            break;
+
+        case 8: /* Left */
+            new_span = resolve_neighbor(span_idx, &sub_lane, 0x08);
+            span_idx = new_span;
+            track_state[0] = (int16_t)new_span;
+            break;
+
+        case 9: /* Forward + Left */
+            new_span = resolve_neighbor(span_idx, &sub_lane, 0x01);
+            span_idx = new_span;
+            track_state[0] = (int16_t)new_span;
+            track_state[2]++;
+            if (track_state[2] > track_state[3])
+                track_state[3] = track_state[2];
+            new_span = resolve_neighbor(span_idx, &sub_lane, 0x08);
+            span_idx = new_span;
+            track_state[0] = (int16_t)new_span;
+            break;
+
+        case 12: /* Backward + Left */
+            new_span = resolve_neighbor(span_idx, &sub_lane, 0x04);
+            span_idx = new_span;
+            track_state[0] = (int16_t)new_span;
+            track_state[2]--;
+            new_span = resolve_neighbor(span_idx, &sub_lane, 0x08);
+            span_idx = new_span;
+            track_state[0] = (int16_t)new_span;
+            break;
+
+        default:
+            /* Unhandled compound case — resolve forward/backward first, then lateral */
+            if (bits & 0x01) {
+                new_span = resolve_neighbor(span_idx, &sub_lane, 0x01);
+                span_idx = new_span;
+                track_state[0] = (int16_t)new_span;
+                track_state[2]++;
+                if (track_state[2] > track_state[3])
+                    track_state[3] = track_state[2];
+            } else if (bits & 0x04) {
+                new_span = resolve_neighbor(span_idx, &sub_lane, 0x04);
+                span_idx = new_span;
+                track_state[0] = (int16_t)new_span;
+                track_state[2]--;
+            }
+            if (bits & 0x02) {
+                new_span = resolve_neighbor(span_idx, &sub_lane, 0x02);
+                span_idx = new_span;
+                track_state[0] = (int16_t)new_span;
+            } else if (bits & 0x08) {
+                new_span = resolve_neighbor(span_idx, &sub_lane, 0x08);
+                span_idx = new_span;
+                track_state[0] = (int16_t)new_span;
+            }
+            break;
+        }
+
+        /* Write back sub-lane after each transition */
+        ((int8_t *)track_state)[12] = (int8_t)sub_lane;
     }
 
-    /* Write back sub-lane */
-    ((int8_t *)track_state)[12] = (int8_t)sub_lane;
-
-    /* Recursively test in the new span */
-    update_position_recursive(track_state, pos_x, pos_z, depth + 1);
+    if (iter >= TRACK_MAX_RECURSION) {
+        TD5_LOG_W(LOG_TAG, "update_pos: max iterations reached span=%d sub=%d",
+                  span_idx, sub_lane);
+    }
 }
 
 /**
@@ -1508,7 +1609,7 @@ static int32_t probe_span_lane_height(const TD5_StripSpan *sp, int sub_lane,
     }
 
     return triangle_height(va, vb, vc,
-                           sp->origin_x, sp->pad_10, sp->origin_z,
+                           sp->origin_x, sp->origin_y, sp->origin_z,
                            world_x, world_z, out_normal);
 }
 
@@ -1720,7 +1821,7 @@ void td5_track_compute_heading(TD5_Actor *actor)
  * position modulo the total span ring length. Returns the lap count.
  * ======================================================================== */
 
-void td5_track_normalize_actor_wrap(TD5_Actor *actor)
+int td5_track_normalize_actor_wrap(TD5_Actor *actor)
 {
     int16_t *track_state;
     int32_t raw_span;
@@ -1728,30 +1829,31 @@ void td5_track_normalize_actor_wrap(TD5_Actor *actor)
     int32_t wrapped, laps;
 
     if (!actor || s_span_count == 0)
-        return;
+        return 0;
 
     track_state = (int16_t *)((uint8_t *)actor + 0x80);
-    raw_span = (int32_t)track_state[2]; /* accumulated spans */
+    raw_span = (int32_t)track_state[2]; /* +0x84: accumulated spans (high_water) */
     ring_length = (int32_t)s_span_count;
 
     if (ring_length <= 0)
-        return;
+        return 0;
 
     if (raw_span >= 0) {
-        wrapped = raw_span % ring_length;
         laps = raw_span / ring_length;
+        wrapped = raw_span % ring_length;
     } else {
-        /* Handle negative wrap: ensure positive modulo result */
-        wrapped = (raw_span % ring_length) + ring_length;
+        /* C truncates toward zero for negative dividends.
+         * Original behavior: remainder adjusted to be non-negative. */
+        laps = raw_span / ring_length;
+        wrapped = raw_span % ring_length;
+        /* When remainder is negative, shift into [0, ring_length) */
+        wrapped += ring_length;
         if (wrapped >= ring_length)
             wrapped -= ring_length;
-        laps = raw_span / ring_length;
-        if (raw_span % ring_length != 0)
-            laps--; /* floor division for negative values */
     }
 
-    track_state[1] = (int16_t)wrapped;  /* normalized span */
-    (void)laps; /* Lap count is used by the checkpoint system externally */
+    track_state[1] = (int16_t)wrapped;  /* +0x82: normalized span */
+    return (int)laps;
 }
 
 /* ========================================================================
@@ -1907,6 +2009,255 @@ int td5_track_check_checkpoint(TD5_Actor *actor)
     }
 
     return 0;
+}
+
+/* ========================================================================
+ * Circuit Lap Tracking (0x434DA0 UpdateCircuitLap)
+ *
+ * Per-actor circuit-mode lap counting with anti-cheat checks:
+ *   - Checkpoint index: -1 = between laps (awaiting start-line crossing)
+ *   - New lap triggers when player crosses start line by 2 spans,
+ *     with sufficient speed, aligned heading, matching route lane,
+ *     and cooldown expired.
+ *   - Wrong-way detection: if >64 spans behind checkpoint, reset state
+ *     and set 300-frame cooldown.
+ *   - Lap completion: if >1 span ahead and route matches, set finish flag.
+ *
+ * Returns: 0 = no event, 1 = lap complete, 2 = race complete (all laps done)
+ * ======================================================================== */
+
+int td5_track_update_circuit_lap(TD5_Actor *actor, int slot)
+{
+    int16_t *track_state;
+    int16_t current_span;
+    int32_t ring_length;
+    int16_t checkpoint_span;
+    int32_t actor_heading;
+    int32_t route_heading;
+    int16_t heading_delta;
+    int32_t speed;
+    int32_t cooldown;
+    int16_t *checkpoint_idx_ptr;
+    int16_t  checkpoint_idx;
+    uint8_t *lap_count_ptr;
+    int32_t *cooldown_ptr;
+    int32_t *finish_time_ptr;
+
+    if (!actor || s_span_count == 0)
+        return 0;
+
+    ring_length = (int32_t)s_span_count;
+    if (ring_length <= 0)
+        return 0;
+
+    /* Only applies to circuit mode */
+    if (g_td5.track_type != TD5_TRACK_CIRCUIT)
+        return 0;
+
+    track_state = (int16_t *)((uint8_t *)actor + 0x80);
+    current_span = track_state[1]; /* +0x82: normalized span */
+
+    /* Checkpoint index at +0x336 (overloaded field):
+     * -1 = between laps (waiting for start line crossing)
+     *  0+ = checkpoint span target */
+    checkpoint_idx_ptr = (int16_t *)((uint8_t *)actor + 0x336);
+    checkpoint_idx = *checkpoint_idx_ptr;
+
+    /* Lap count at +0x37E */
+    lap_count_ptr = (uint8_t *)actor + 0x37E;
+
+    /* Cooldown timer at +0x338 (int32) */
+    cooldown_ptr = (int32_t *)((uint8_t *)actor + 0x338);
+    cooldown = *cooldown_ptr;
+
+    /* Finish time at +0x328 */
+    finish_time_ptr = (int32_t *)((uint8_t *)actor + 0x328);
+
+    /* Decrement cooldown if active */
+    if (cooldown > 0) {
+        (*cooldown_ptr)--;
+        return 0;
+    }
+
+    /* Actor speed at +0x314 (longitudinal speed, fixed-point) */
+    speed = *(int32_t *)((uint8_t *)actor + 0x314);
+
+    /* Actor heading at +0x1F4 (yaw accumulator, >>8 = 12-bit angle) */
+    actor_heading = (*(int32_t *)((uint8_t *)actor + 0x1F4) >> 8) & 0xFFF;
+
+    if (checkpoint_idx == -1) {
+        /* --- Between laps: waiting to cross start line --- */
+
+        /* Must be within first 2 spans of the track (start line zone) */
+        if (current_span > 2)
+            return 0;
+
+        /* Speed threshold: must be moving forward */
+        if (speed < 0x100)
+            return 0;
+
+        /* Heading alignment: compute delta between actor heading and
+         * route heading at span 0. Must be within 16 angle units. */
+        if (s_route_left && s_route_left_size >= 3) {
+            route_heading = ((int32_t)s_route_left[1] << 4) & 0xFFF;
+        } else {
+            route_heading = 0;
+        }
+        heading_delta = (int16_t)((actor_heading - route_heading) & 0xFFF);
+        if (heading_delta > 0x800)
+            heading_delta = (int16_t)(heading_delta - 0x1000);
+        if (heading_delta < 0)
+            heading_delta = -heading_delta;
+        if (heading_delta > 16)
+            return 0;
+
+        /* All checks passed: begin new lap checkpoint tracking */
+        *checkpoint_idx_ptr = current_span;
+        return 0;
+    }
+
+    /* --- Active checkpoint tracking --- */
+    checkpoint_span = checkpoint_idx;
+
+    /* Wrong-way detection: if actor is >64 spans behind the checkpoint,
+     * reset state and impose 300-frame cooldown */
+    {
+        int32_t behind = (int32_t)checkpoint_span - (int32_t)current_span;
+        /* Handle wrapping */
+        if (behind < -ring_length / 2)
+            behind += ring_length;
+        if (behind > ring_length / 2)
+            behind -= ring_length;
+
+        if (behind > 64) {
+            *checkpoint_idx_ptr = -1;
+            *cooldown_ptr = 300;
+            TD5_LOG_I(LOG_TAG,
+                      "Circuit wrong-way: slot=%d span=%d checkpoint=%d behind=%d",
+                      slot, current_span, checkpoint_span, behind);
+            return 0;
+        }
+    }
+
+    /* Lap completion check: actor must be >1 span ahead of the checkpoint.
+     * For circuit tracks, this means passing the start/finish line. */
+    {
+        int32_t ahead = (int32_t)current_span - (int32_t)checkpoint_span;
+        if (ahead < 0)
+            ahead += ring_length;
+
+        if (ahead > 1 && ahead < ring_length / 2) {
+            /* Lap complete */
+            (*lap_count_ptr)++;
+            *checkpoint_idx_ptr = -1; /* reset for next lap */
+
+            TD5_LOG_I(LOG_TAG,
+                      "Circuit lap complete: slot=%d lap=%d span=%d",
+                      slot, (int)*lap_count_ptr, current_span);
+
+            /* Check if race is finished (all laps completed) */
+            if (*lap_count_ptr >= (uint8_t)g_td5.circuit_lap_count) {
+                int16_t *timing_ctr = (int16_t *)((uint8_t *)actor + 0x34C);
+                if (*finish_time_ptr == 0) {
+                    *finish_time_ptr = (int32_t)*timing_ctr;
+                }
+                return 2; /* race complete */
+            }
+            return 1; /* lap complete */
+        }
+    }
+
+    return 0;
+}
+
+/* ========================================================================
+ * Signed Spline Position (0x434670 ComputeSplinePosition)
+ *
+ * Computes the signed distance along the track between two span vertices.
+ * Used by the AI routing system to determine forward progress magnitude
+ * along a spline segment.
+ *
+ * The function interpolates between the current span vertex and the next
+ * span vertex based on the difference between segment_distance and
+ * route_lane, then returns the magnitude with sign indicating direction.
+ *
+ * Parameters:
+ *   span_index       - index into the span array
+ *   segment_distance - position parameter along span
+ *   route_lane       - route lane offset (subtracted from segment_distance)
+ *
+ * Returns: signed distance (positive = ahead, negative = behind)
+ * ======================================================================== */
+
+int32_t td5_track_compute_spline_position(int span_index, int segment_distance,
+                                           int route_lane)
+{
+    const TD5_StripSpan *sp;
+    int lane_count;
+    int next_vertex_offset;
+    int vertex_idx_a, vertex_idx_b;
+    TD5_StripVertex *vtx_a, *vtx_b;
+    int32_t ax, az, bx, bz;
+    int32_t dx, dz;
+    int32_t t;
+    int32_t interp_x, interp_z;
+    int32_t mag_sq, mag;
+
+    if (!s_span_array || !s_vertex_table ||
+        span_index < 0 || span_index >= s_span_count)
+        return 0;
+
+    sp = &s_span_array[span_index];
+
+    /* Get current vertex index from right_vertex_index (+0x06) */
+    vertex_idx_a = (int)sp->right_vertex_index;
+
+    /* Get lane nibble from byte +0x03 (low nibble = lane count) */
+    lane_count = span_lane_count(sp);
+    if (lane_count < 1)
+        lane_count = 1;
+
+    /* Compute next vertex index:
+     * next = current + lane_count + height_offset
+     * The height_offset from the span type is encoded in the high nibble of +0x03.
+     * This matches the original zone_offset_table lookup. */
+    next_vertex_offset = lane_count + span_height_offset(sp);
+    vertex_idx_b = vertex_idx_a + next_vertex_offset;
+
+    /* Get vertex positions (x, z only -- this is 2D track-plane distance) */
+    vtx_a = vertex_at(vertex_idx_a);
+    vtx_b = vertex_at(vertex_idx_b);
+
+    if (!vtx_a || !vtx_b)
+        return 0;
+
+    ax = (int32_t)vtx_a->x;
+    az = (int32_t)vtx_a->z;
+    bx = (int32_t)vtx_b->x;
+    bz = (int32_t)vtx_b->z;
+
+    /* Direction vector from A to B */
+    dx = bx - ax;
+    dz = bz - az;
+
+    /* Interpolation parameter: how far along the segment */
+    t = segment_distance - route_lane;
+
+    /* Fixed-point interpolation with rounding toward zero:
+     * interp = (delta * t + bias) >> 8
+     * where bias = (delta * t >> 31) & 0xFF  (adds 255 for negative products) */
+    interp_x = dx * t;
+    interp_x = (interp_x + ((interp_x >> 31) & 0xFF)) >> 8;
+
+    interp_z = dz * t;
+    interp_z = (interp_z + ((interp_z >> 31) & 0xFF)) >> 8;
+
+    /* Compute magnitude */
+    mag_sq = interp_x * interp_x + interp_z * interp_z;
+    mag = td5_isqrt(mag_sq);
+
+    /* Sign: negative if behind (segment_distance < route_lane) */
+    return (segment_distance < route_lane) ? -mag : mag;
 }
 
 /* ========================================================================

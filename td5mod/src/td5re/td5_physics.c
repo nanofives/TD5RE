@@ -102,7 +102,6 @@ static int32_t g_race_slot_state[6];         /* 1=human, 0=AI per slot */
 /* V2V inertia constant = 500,000 (DAT_00463204) */
 #define V2V_INERTIA_K       500000
 /* V2W inertia constant = 1,500,000 (DAT_00463200) */
-#define V2W_INERTIA_K       1500000
 
 /* Per-actor AABB table for broadphase (stride 20 bytes: xMin, zMin, xMax, zMax, chain) */
 static int32_t g_actor_aabb[TD5_MAX_TOTAL_ACTORS][5];
@@ -1546,41 +1545,7 @@ void td5_physics_resolve_vehicle_contacts(void)
         }
     }
 
-    /* --- Phase 3: V2W Vehicle-to-Wall collision --- */
-    for (int i = 0; i < total; ++i) {
-        TD5_Actor *a = (TD5_Actor *)(g_actor_table_base + (size_t)i * TD5_ACTOR_STRIDE);
-
-        if (!a->car_definition_ptr) continue;
-
-        int32_t ax = a->world_pos.x >> 8;
-        int32_t radius = (int32_t)CDEF_S(a, 0x80);
-        int span_idx = ACTOR_I16(a, ACTOR_OFF_SPAN_INDEX);
-
-        /* Check actor bounding circle against track span edges */
-        {
-            int left_x, left_z, right_x, right_z;
-
-            td5_track_get_span_edges(span_idx, &left_x, &left_z, &right_x, &right_z);
-
-            /* Left edge penetration */
-            int pen_left = radius - (ax - left_x);
-            if (pen_left > 0) {
-                int impulse = (pen_left * V2W_INERTIA_K) >> 12;
-                ACTOR_I32(a, ACTOR_OFF_LIN_VEL_X) += impulse >> 4;
-                ACTOR_I32(a, ACTOR_OFF_ANG_VEL_YAW) += impulse >> 8;
-            }
-
-            /* Right edge penetration */
-            int pen_right = radius - (right_x - ax);
-            if (pen_right > 0) {
-                int impulse = (pen_right * V2W_INERTIA_K) >> 12;
-                ACTOR_I32(a, ACTOR_OFF_LIN_VEL_X) -= impulse >> 4;
-                ACTOR_I32(a, ACTOR_OFF_ANG_VEL_YAW) -= impulse >> 8;
-            }
-        }
-    }
-
-    /* --- Phase 4: Grid reset is handled at start of next call --- */
+    /* --- Phase 3: Grid reset is handled at start of next call --- */
 }
 
 /* Internal: dispatch collision between two actors (grid broadphase wrapper) */
