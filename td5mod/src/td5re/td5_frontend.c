@@ -3439,10 +3439,12 @@ static void frontend_render_car_selection_preview(float sx, float sy) {
             fe_draw_surface_rect(s_car_preview_prev_surface, x * sx, 124.0f * sy, 408.0f * sx, 280.0f * sy, 0xFFFFFFFF);
         } else if (s_inner_state == 14 && s_car_preview_surface > 0) {
             /* New car slides in from right (state 14, ~833ms @30fps):
-             * formula: offset = counter*-0x40 + 0x4A8 (1192px beyond final pos=232)
-             * arrives at x=232 in ~620ms (18.6 frames @30fps), then held */
-            float t = frontend_clamp01((float)(td5_plat_time_ms() - s_anim_start_ms) * 2.0f / 620.0f);
-            float x = 1424.0f - 1192.0f * t;  /* 1424 → 232 */
+             * formula @ 0x0040DF4A: x = canvasW + counter*(-0x40) + 0x4A8
+             *   = 640 + 1192 = 1832 at counter=0, arrives at 232 in 25 frames (1600px travel).
+             * Time-based equivalent: 25 frames / 30fps = ~833ms, using 800ms for match. */
+            float t = frontend_clamp01((float)(td5_plat_time_ms() - s_anim_start_ms) * 2.0f / 800.0f);
+            float x = 1832.0f - 1600.0f * t;  /* 1832 → 232 [CONFIRMED @ 0x0040DF4A] */
+            TD5_LOG_I(LOG_TAG, "car_sel: slide-in x=%.0f t=%.2f", x, t);
             fe_draw_surface_rect(s_car_preview_surface, x * sx, 124.0f * sy, 408.0f * sx, 280.0f * sy, 0xFFFFFFFF);
         } else if (s_inner_state != 12 && s_inner_state != 13 && s_car_preview_surface > 0) {
             /* Static: states 12/13 are pass-through transition ticks — skip to avoid 1-frame flash */
