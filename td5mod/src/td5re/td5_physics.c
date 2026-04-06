@@ -2038,29 +2038,24 @@ void td5_physics_integrate_pose(TD5_Actor *actor)
     /* 7. Refresh wheel contact frames */
     td5_physics_refresh_wheel_contacts(actor);
 
-    /* 8. Ground-snap: compute averaged ground height from grounded wheels and
-     * correct world_pos.y (IntegrateVehiclePoseAndContacts step 9 in analysis).
-     * Without this, gravity accumulates each frame with no correction and cars
-     * fall away from the road surface. */
+    /* 8. Ground-snap: direct Y assignment from averaged grounded wheel positions
+     * [CONFIRMED @ 0x405E80]. Original formula:
+     *   for each grounded wheel: sum += wheel_contact_pos[i].y
+     *   world_pos.y = sum / count   (DIRECT assignment, not additive correction)
+     * Contact normal Y contribution (-0x100 * normal_y) omitted for now as
+     * wheel_contact_normals[] is not yet populated. */
     {
-        int64_t corr_sum = 0;
-        int corr_count = 0;
+        int64_t snap_sum = 0;
+        int snap_count = 0;
         uint8_t gnd_mask = actor->wheel_contact_bitmask;
         for (int i = 0; i < 4; i++) {
             if (!(gnd_mask & (1 << i))) {  /* grounded wheel */
-                int32_t g_y = 0;
-                int g_surf = 0;
-                int g_span = actor->track_span_raw;
-                if (td5_track_probe_height(actor->wheel_contact_pos[i].x,
-                                           actor->wheel_contact_pos[i].z,
-                                           g_span, &g_y, &g_surf)) {
-                    corr_sum += (int64_t)g_y - (int64_t)actor->wheel_contact_pos[i].y;
-                    corr_count++;
-                }
+                snap_sum += (int64_t)actor->wheel_contact_pos[i].y;
+                snap_count++;
             }
         }
-        if (corr_count > 0) {
-            actor->world_pos.y += (int32_t)(corr_sum / corr_count);
+        if (snap_count > 0) {
+            actor->world_pos.y = (int32_t)(snap_sum / snap_count);
             actor->render_pos.y = (float)actor->world_pos.y * (1.0f / 256.0f);
             /* Cancel downward velocity: ground is a hard constraint. */
             if (actor->linear_velocity_y < 0)
@@ -2184,26 +2179,20 @@ static void update_vehicle_pose_from_physics(TD5_Actor *actor)
     /* Refresh wheel contacts */
     td5_physics_refresh_wheel_contacts(actor);
 
-    /* Ground-snap from grounded wheels (UpdateVehiclePoseFromPhysicsState step 7) */
+    /* Ground-snap: direct Y assignment from grounded wheel positions
+     * [CONFIRMED @ 0x405E80: same formula as player integrate_pose]. */
     {
-        int64_t corr_sum = 0;
-        int corr_count = 0;
+        int64_t snap_sum = 0;
+        int snap_count = 0;
         uint8_t gnd_mask = actor->wheel_contact_bitmask;
         for (int i = 0; i < 4; i++) {
             if (!(gnd_mask & (1 << i))) {
-                int32_t g_y = 0;
-                int g_surf = 0;
-                int g_span = actor->track_span_raw;
-                if (td5_track_probe_height(actor->wheel_contact_pos[i].x,
-                                           actor->wheel_contact_pos[i].z,
-                                           g_span, &g_y, &g_surf)) {
-                    corr_sum += (int64_t)g_y - (int64_t)actor->wheel_contact_pos[i].y;
-                    corr_count++;
-                }
+                snap_sum += (int64_t)actor->wheel_contact_pos[i].y;
+                snap_count++;
             }
         }
-        if (corr_count > 0) {
-            actor->world_pos.y += (int32_t)(corr_sum / corr_count);
+        if (snap_count > 0) {
+            actor->world_pos.y = (int32_t)(snap_sum / snap_count);
             actor->render_pos.y = (float)actor->world_pos.y * (1.0f / 256.0f);
         }
     }
@@ -2291,19 +2280,24 @@ void td5_physics_refresh_wheel_contacts(TD5_Actor *actor)
             }
         }
 
-        int32_t force = (wheel_y - ground_y) >> 8;
+        /* Force = (wheel_y - ground_y) + gravity [CONFIRMED @ 0x403720].
+         * Original does NOT shift by >>8 here — raw subtraction + gravity. */
+        int32_t force = (wheel_y - ground_y) + g_gravity_constant;
 
-        /* Dead zone */
+        /* Dead zone [CONFIRMED @ 0x403720] */
         if (force > -0x200 && force < 0x200)
             force = 0;
 
-        /* Airborne detection */
+        /* Airborne detection [CONFIRMED @ 0x403720: threshold 0x801] */
         if (force > 0x800) {
             /* Wheel is airborne */
             actor->wheel_contact_bitmask |= (1 << i);
             force = 12000; /* default airborne force */
         } else {
             actor->wheel_contact_bitmask &= ~(1 << i);
+            /* SNAP wheel Y to ground when grounded [CONFIRMED @ 0x403720:
+             * original writes *piVar8 = local_30 (wheel_y = ground_y)]. */
+            actor->wheel_contact_pos[i].y = ground_y;
         }
 
         /* Store high-res wheel world position */
