@@ -2342,31 +2342,26 @@ void td5_physics_refresh_wheel_contacts(TD5_Actor *actor)
             }
         }
 
-        /* Compute force = (wheel_y - ground_y) + gravity and store into
-         * wheel_force_accum[i] to drive the suspension spring-damper.
-         * [CONFIRMED @ 0x403720: *local_4c = (*piVar8 - local_30) + DAT_00467380;
-         *  local_4c at param_1+0x17e = byte offset 0x2FC = wheel_force_accum] */
-        int32_t force = (wheel_y - ground_y) + g_gravity_constant;
+        /* Force for airborne detection.
+         * Original stores (wheel_y - ground_y + gravity) into wheel_force_accum,
+         * but the original's suspension integrator reads XZ projections instead
+         * (BUG 6). Since our suspension reads force_accum, storing gravity-biased
+         * values creates a feedback loop. Use >>8 for stable airborne detection;
+         * force_accum left at 0 (initialized at race start). */
+        int32_t force = (wheel_y - ground_y) >> 8;
 
-        /* Dead zone [CONFIRMED @ 0x403720] */
+        /* Dead zone */
         if (force > -0x200 && force < 0x200)
             force = 0;
 
-        /* Airborne detection [CONFIRMED @ 0x403720: threshold 0x801] */
+        /* Airborne detection */
         if (force > 0x800) {
             /* Wheel is airborne */
             actor->wheel_contact_bitmask |= (1 << i);
             force = 12000; /* default airborne force */
         } else {
             actor->wheel_contact_bitmask &= ~(1 << i);
-            /* Snap wheel Y to ground when grounded
-             * [CONFIRMED @ 0x403720: *piVar8 = local_30] */
-            actor->wheel_contact_pos[i].y = ground_y;
         }
-
-        /* Store force into accumulator for suspension integrator
-         * [CONFIRMED @ 0x403720: writes to param_1+0x17e stepping by +1] */
-        actor->wheel_force_accum[i] = force;
 
         /* Store high-res wheel world position */
         actor->wheel_world_positions_hires[i] = actor->wheel_contact_pos[i];
@@ -2493,11 +2488,11 @@ void td5_physics_reset_actor_state(TD5_Actor *actor)
     actor->vehicle_mode = 0;
     actor->damage_lockout = 0;
 
-    /* Original (0x405D70): drop car from high altitude so the first
-     * IntegrateVehiclePoseAndContacts call resolves wheel contacts against
-     * the track surface and snaps the car to the correct ground height.
-     * -0x40000000 in 24.8 FP = approx -4194304 world units above. */
-    actor->world_pos.y = -0x40000000;
+    /* Original (0x405D70) sets world_pos.y to a high altitude so the first
+     * IntegrateVehiclePoseAndContacts resolves wheel contacts against the
+     * track surface. However, since spawn code sets world_pos BEFORE calling
+     * this reset, we must NOT overwrite it — the spawn Y is correct.
+     * The ground-settle in init_vehicle_runtime handles the rest. */
 
     /* Convert positions to float for render */
     actor->render_pos.x = (float)actor->world_pos.x * (1.0f / 256.0f);
