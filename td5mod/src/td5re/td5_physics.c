@@ -2533,20 +2533,29 @@ void td5_physics_reset_actor_state(TD5_Actor *actor)
     actor->vehicle_mode = 0;
     actor->damage_lockout = 0;
 
-    /* Original (0x405D70) sets world_pos.y to a high altitude so the first
-     * IntegrateVehiclePoseAndContacts resolves wheel contacts against the
-     * track surface. However, since spawn code sets world_pos BEFORE calling
-     * this reset, we must NOT overwrite it — the spawn Y is correct.
-     * The ground-settle in init_vehicle_runtime handles the rest. */
+    /* Original (0x405DA4) sets Y to extreme altitude so the first
+     * IntegrateVehiclePoseAndContacts drop-resolves wheel contacts against
+     * the track surface, establishing correct chassis height above road. */
+    actor->world_pos.y = -0x40000000;  /* sky-high; integrate will ground-snap */
+    TD5_LOG_I(LOG_TAG, "reset_actor_state: sky-drop Y=%d for actor %p", actor->world_pos.y, (void*)actor);
 
     /* Convert positions to float for render */
     actor->render_pos.x = (float)actor->world_pos.x * (1.0f / 256.0f);
     actor->render_pos.y = (float)actor->world_pos.y * (1.0f / 256.0f);
     actor->render_pos.z = (float)actor->world_pos.z * (1.0f / 256.0f);
 
-    /* Re-establish ground contact — integrate will resolve wheel contacts
-     * against the track and snap Y to the correct road surface height. */
+    /* Drop from sky — integrate resolves wheel contacts against the track
+     * and snaps Y to the correct road surface height (0x405E80). */
     td5_physics_integrate_pose(actor);
+
+    /* Post-integrate: zero all dynamics to prevent bounce (0x405E5E-0x405E7C) */
+    for (int i = 0; i < 4; i++)
+        actor->wheel_suspension_vel[i] = 0;
+    actor->angular_velocity_roll = 0;
+    actor->angular_velocity_pitch = 0;
+    actor->linear_velocity_y = 0;
+
+    TD5_LOG_I(LOG_TAG, "reset_actor_state: grounded Y=%d", actor->world_pos.y);
 }
 
 /* ========================================================================
