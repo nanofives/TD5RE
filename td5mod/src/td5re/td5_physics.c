@@ -2110,6 +2110,17 @@ void td5_physics_integrate_pose(TD5_Actor *actor)
         }
         if (corr_count > 0) {
             int32_t corr_val = (int32_t)(corr_sum / corr_count);
+
+            /* Clamp ground-snap correction to prevent bogus probe data
+             * from launching the car. When the car drives off-road (no
+             * wall collisions to keep it on track), the ground probe can
+             * return scenery geometry Y values that differ by millions of
+             * FP units from the road, causing a single-frame teleport.
+             * Max correction: ~32 world units per frame (8192 in 24.8 FP).
+             * This is generous enough for any real road gradient. */
+            if (corr_val > 8192) corr_val = 8192;
+            if (corr_val < -8192) corr_val = -8192;
+
             if (actor->slot_index == 0) {
                 static int s_snap_log = 0;
                 if ((s_snap_log++ % 30) == 0) {
