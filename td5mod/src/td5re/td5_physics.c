@@ -2156,63 +2156,8 @@ void td5_physics_integrate_pose(TD5_Actor *actor)
         }
     }
 
-    /* 8b. Out-of-bounds recovery: if the car has fallen far below the road
-     * surface (or the ground probe failed entirely), teleport it back to
-     * the nearest valid road position on its current span. */
-    {
-        int32_t road_y = 0;
-        int road_surf = 0;
-        int oob_span = actor->track_span_raw;
-        int have_road = td5_track_probe_height(actor->world_pos.x,
-                                                actor->world_pos.z,
-                                                oob_span, &road_y, &road_surf);
-        /* Threshold: 128 world units below road = 128*256 = 32768 in 24.8 FP */
-        int32_t oob_threshold = 32768;
-        int fallen = 0;
-        if (have_road && (actor->world_pos.y < road_y - oob_threshold))
-            fallen = 1;
-        if (!have_road && actor->world_pos.y < -256000) /* absolute fallback */
-            fallen = 1;
-
-        if (fallen) {
-            int wx = 0, wy = 0, wz = 0;
-            /* Use span center (lane_count/2) instead of actor's sub_lane_index.
-             * sub_lane_index can be 0 (wall/shoulder) after resolve_neighbor clamps
-             * it when crossing into a narrower adjacent span — this was causing an
-             * infinite OOB loop on Australia (and other tracks) where recovery would
-             * teleport to X=24641024 (off-road), probe_height would return an
-             * extrapolated road_y >> car Y, and fallen=1 every frame thereafter. */
-            if (td5_track_get_span_center_world(oob_span, &wx, &wy, &wz)) {
-                actor->world_pos.x = wx << 8;
-                actor->world_pos.y = wy << 8;
-                actor->world_pos.z = wz << 8;
-                /* Reset sub_lane to center so the next boundary traversal starts
-                 * from a valid road position rather than the wall. */
-                actor->track_sub_lane_index = 1;
-                TD5_LOG_I(LOG_TAG, "OOB recovery: slot=%d span=%d center pos=(%d,%d,%d)",
-                          actor->slot_index, oob_span,
-                          actor->world_pos.x, actor->world_pos.y, actor->world_pos.z);
-            } else if (have_road) {
-                /* Span center unavailable (type=9/10 or bad vertex) — at least snap Y */
-                actor->world_pos.y = road_y;
-                TD5_LOG_W(LOG_TAG, "OOB recovery: slot=%d span=%d center unavailable, snap Y only",
-                          actor->slot_index, oob_span);
-            }
-            actor->linear_velocity_x = 0;
-            actor->linear_velocity_y = 0;
-            actor->linear_velocity_z = 0;
-            actor->angular_velocity_roll = 0;
-            actor->angular_velocity_yaw = 0;
-            actor->angular_velocity_pitch = 0;
-            actor->euler_accum.roll = 0;
-            actor->euler_accum.pitch = 0;
-            /* Preserve yaw (heading) — recompute from track */
-            td5_track_compute_heading(actor);
-            actor->render_pos.x = (float)actor->world_pos.x * (1.0f / 256.0f);
-            actor->render_pos.y = (float)actor->world_pos.y * (1.0f / 256.0f);
-            actor->render_pos.z = (float)actor->world_pos.z * (1.0f / 256.0f);
-        }
-    }
+    /* 8b. OOB recovery disabled — was teleporting cars due to suspension
+     * instability rather than genuine out-of-bounds conditions. */
 
     /* 9. Clamp angular velocity deltas to +/- 6000 per frame */
     if (actor->angular_velocity_roll > 6000) actor->angular_velocity_roll = 6000;
