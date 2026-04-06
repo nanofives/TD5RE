@@ -1844,30 +1844,36 @@ void td5_physics_integrate_suspension(TD5_Actor *actor)
     int32_t limit     = (int32_t)PHYS_S(actor, 0x64);
     int32_t response  = (int32_t)PHYS_S(actor, 0x66);
 
-    /* Per-wheel spring-damper */
+    /* Per-wheel spring-damper.
+     *
+     * Original (0x403A20) reads XZ projections as force input, NOT the
+     * wheel_force_accum Y values. The source port's previous approach of
+     * reading force_accum created positive pitch feedback. Until the
+     * original's XZ projection logic is properly decompiled, use a stable
+     * passive spring-damper: restoring force from position (spring_k)
+     * and velocity damping (damping) with no external force input.
+     *
+     * The wheel_force_accum[i] (ground contact force from refresh_wheel_contacts)
+     * drives the external excitation via feedback scaling. */
     for (int i = 0; i < 4; i++) {
         int32_t pos = actor->wheel_suspension_pos[i];
         int32_t vel = actor->wheel_suspension_vel[i];
         int32_t force = actor->wheel_force_accum[i];
 
-        /* Compute target from wheel contact position relative to chassis */
-        /* Use the force accumulator as the driving input */
-        int32_t target = (force * feedback) >> 8;
-        target += (vel * response) >> 8;
+        /* External excitation: ground contact distance scaled by feedback */
+        int32_t drive = (force * feedback) >> 8;
 
-        /* Add spring restoring force */
-        int32_t accel = (target * spring_k) >> 8;
-        accel += vel;
-
-        /* Apply damping */
-        accel -= (pos * damping) >> 8;
+        /* Spring-damper: accel = drive - spring*pos - damp*vel */
+        int32_t accel = drive;
+        accel -= (pos * spring_k) >> 8;
+        accel -= (vel * damping) >> 8;
 
         /* Dead zone */
         if (accel > -16 && accel < 16)
             accel = 0;
 
-        vel = accel;
-        pos += accel;
+        vel += accel;
+        pos += vel;
 
         /* Clamp to travel limits */
         if (pos > limit) {
@@ -2395,14 +2401,14 @@ void td5_physics_refresh_wheel_contacts(TD5_Actor *actor)
             }
         }
 
-        /* Ground contact force for suspension input + airborne detection.
+        /* Ground contact distance for airborne detection.
          * Original (0x403720) stores (wheel_y - ground_y) >> 8 into
-         * wheel_force_accum each frame. This acts as the position reference
-         * signal for the spring-damper in integrate_suspension — without it,
-         * the velocity feedback (vel * response * spring_k) has no
-         * counterbalancing input and the system diverges. */
+         * wheel_force_accum, but the original's suspension integrator
+         * reads XZ projections, NOT this Y value (BUG 6). Feeding the
+         * Y-distance into the suspension creates positive pitch feedback
+         * (front goes up → force increases → suspension extends more).
+         * Store for airborne detection only; suspension uses force=0. */
         int32_t force = (wheel_y - ground_y) >> 8;
-        actor->wheel_force_accum[i] = force;
 
         /* Dead zone */
         if (force > -0x200 && force < 0x200)
