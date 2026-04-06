@@ -615,7 +615,7 @@ static int frontend_load_car_preview_surface(int car_index, int paint_index) {
 
 /* Draw a surface OPAQUE: all pixels (including black) rendered as-is, no color key.
  * Matches original game's BltFast without SRCCOLORKEY (Copy16BitSurfaceRect flag 0x10).
- * Used for UI chrome (CarSelBar1, CarSelCurve, CarSelTopBar) where black is part of the design. */
+ * Used for CarSelBar1 (0% black pixels — fully opaque solid bar). */
 static void fe_draw_surface_opaque(int handle, float x, float y, float w, float h, uint32_t color) {
     int slot = handle - 1;
     if (slot < 0 || slot >= FE_MAX_SURFACES || !s_surfaces[slot].in_use) return;
@@ -3366,27 +3366,28 @@ static void frontend_render_car_selection_preview(float sx, float sy) {
     /* Overlay UI elements: animated during state 2, static otherwise.
      * State 2 formula (0x40DFC0): bar+curve slide from right (636→36, 8px/frame @30fps);
      * topbar slides from left (-532→0, 8px/frame @30fps); 75 frames total = ~2500ms.
-     * Drawn OPAQUE (no color key): original used BltFast without SRCCOLORKEY (flag 0x10).
-     * Black pixels in these TGAs are part of the design and render as solid black. */
+     * CarSelBar1: fully opaque (0% black pixels) → fe_draw_surface_opaque.
+     * CarSelCurve (14% black corner fill) and CarSelTopBar (45% black bg) are loaded with
+     * TD5_COLORKEY_BLACK → drawn with fe_draw_surface_rect (alpha-blended, black=transparent). */
     if (s_inner_state == 2) {
         float t = frontend_clamp01((float)(td5_plat_time_ms() - s_anim_start_ms) * 2.0f / 2500.0f);
         float bar_x    = 636.0f - (636.0f - 36.0f) * t;   /* right→left: 636 → 36 */
         float topbar_x = -532.0f + 532.0f * t;             /* left→right: -532 → 0 */
         if (s_carsel_topbar_surface > 0)
-            fe_draw_surface_opaque(s_carsel_topbar_surface, topbar_x * sx,  45.0f * sy, 532.0f * sx,  36.0f * sy, 0xFFFFFFFF);
+            fe_draw_surface_rect(s_carsel_topbar_surface, topbar_x * sx,  45.0f * sy, 532.0f * sx,  36.0f * sy, 0xFFFFFFFF);
         if (s_carsel_bar_surface > 0)
             fe_draw_surface_opaque(s_carsel_bar_surface,   bar_x * sx,   0.0f * sy,  24.0f * sx, 408.0f * sy, 0xFFFFFFFF);
         if (s_carsel_curve_surface > 0)
-            fe_draw_surface_opaque(s_carsel_curve_surface, bar_x * sx, 408.0f * sy,  80.0f * sx,  56.0f * sy, 0xFFFFFFFF);
+            fe_draw_surface_rect(s_carsel_curve_surface, bar_x * sx, 408.0f * sy,  80.0f * sx,  56.0f * sy, 0xFFFFFFFF);
     } else {
         /* CarSelTopBar (532x36): x=0, y=45; CarSelBar1 (24x408): x=36, y=0;
          * CarSelCurve  (80x56): x=36, y=408 */
         if (s_carsel_topbar_surface > 0)
-            fe_draw_surface_opaque(s_carsel_topbar_surface,  0.0f * sx,  45.0f * sy, 532.0f * sx,  36.0f * sy, 0xFFFFFFFF);
+            fe_draw_surface_rect(s_carsel_topbar_surface,  0.0f * sx,  45.0f * sy, 532.0f * sx,  36.0f * sy, 0xFFFFFFFF);
         if (s_carsel_bar_surface > 0)
             fe_draw_surface_opaque(s_carsel_bar_surface,    36.0f * sx,   0.0f * sy,  24.0f * sx, 408.0f * sy, 0xFFFFFFFF);
         if (s_carsel_curve_surface > 0)
-            fe_draw_surface_opaque(s_carsel_curve_surface,  36.0f * sx, 408.0f * sy,  80.0f * sx,  56.0f * sy, 0xFFFFFFFF);
+            fe_draw_surface_rect(s_carsel_curve_surface,  36.0f * sx, 408.0f * sy,  80.0f * sx,  56.0f * sy, 0xFFFFFFFF);
     }
 
     /* Car preview area: solid dark blue fill matching CarSelBar1 color (R=0,G=0,B=92).
@@ -6246,10 +6247,13 @@ static void Screen_CarSelection(void) {
         TD5_LOG_D(LOG_TAG, "CarSelection: state 0 - init");
         s_anim_complete = 0;
 
-        /* Load overlay UI assets */
+        /* Load overlay UI assets.
+         * CarSelBar1 has no black pixels — fully opaque, use frontend_load_tga.
+         * CarSelCurve (~14% black corner fill) and CarSelTopBar (~45% black bg)
+         * must be loaded with TD5_COLORKEY_BLACK so black pixels become alpha=0. */
         s_carsel_bar_surface    = frontend_load_tga("Front_End/CarSelBar1.tga",   "Front_End/FrontEnd.zip");
-        s_carsel_curve_surface  = frontend_load_tga("Front_End/CarSelCurve.tga",  "Front_End/FrontEnd.zip");
-        s_carsel_topbar_surface = frontend_load_tga("Front_End/CarSelTopBar.tga", "Front_End/FrontEnd.zip");
+        s_carsel_curve_surface  = frontend_load_surface_keyed("CarSelCurve.tga",  "Front_End/FrontEnd.zip", TD5_COLORKEY_BLACK);
+        s_carsel_topbar_surface = frontend_load_surface_keyed("CarSelTopBar.tga", "Front_End/FrontEnd.zip", TD5_COLORKEY_BLACK);
         s_graphbars_surface     = frontend_load_tga("Front_End/GraphBars.tga",    "Front_End/FrontEnd.zip");
         /* Background: original preserved the previous screen's primary surface (RaceMenu.tga
          * set by RaceTypeCategory). s_background_surface carries it forward automatically. */
