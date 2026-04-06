@@ -2739,13 +2739,16 @@ static void frontend_advance_bg_gallery(void) {
     do { next = rand() % 5; } while (next == s_bg_gal_current && ++n < 8);
     s_bg_gal_current = next;
 
-    /* Random display position, clamped to keep the image fully on screen (640x480) */
+    /* Random display position within original bounds (0x40D7EE-0x40D823):
+       X = rand() % (0x1F4 - iw) + 0x8C  =>  [140, 500-iw+140]
+       Y = rand() % (0x150 - ih) + 0x54  =>  [84, 336-ih+84] */
     int iw = s_bg_gallery[next].width;
     int ih = s_bg_gallery[next].height;
-    int range_x = 640 - iw;
-    int range_y = 480 - ih;
-    s_bg_gal_x = (float)((range_x > 0 ? rand() % range_x : 0));
-    s_bg_gal_y = (float)((range_y > 0 ? rand() % range_y : 0));
+    int range_x = 500 - iw;   /* 0x1F4 @ 0x40D7EE */
+    int range_y = 336 - ih;   /* 0x150 @ 0x40D80A */
+    s_bg_gal_x = (float)((range_x > 0 ? rand() % range_x : 0) + 140); /* +0x8C @ 0x40D7F9 */
+    s_bg_gal_y = (float)((range_y > 0 ? rand() % range_y : 0) + 84);  /* +0x54 @ 0x40D820 */
+    TD5_LOG_I(LOG_TAG, "advance_bg_gallery: img=%d iw=%d ih=%d x=%.0f y=%.0f", next, iw, ih, s_bg_gal_x, s_bg_gal_y);
     s_bg_gal_blend = 0x100;
 }
 
