@@ -2077,14 +2077,35 @@ void td5_physics_integrate_pose(TD5_Actor *actor)
         }
     }
 
-    /* 8. Ground-snap: compute averaged ground height from grounded wheels and
-     * correct world_pos.y (IntegrateVehiclePoseAndContacts step 9 in analysis).
-     * Without this, gravity accumulates each frame with no correction and cars
-     * fall away from the road surface. */
+    /* 8. Ground-snap: correct world_pos.y to keep the car on the road.
+     *
+     * The correction = ground_y - wheel_contact_pos[i].y for grounded wheels.
+     * However, RefreshWheelContacts applies a suspension height reference
+     * (cardef+0x82 * 0xB5/256) that shifts wheel Y upward, reducing the
+     * chassis-to-ground offset from ~120 to ~14 local units. In the original,
+     * the contact normal offset in the ground-snap formula compensates for
+     * this. Since we don't compute contact normals, we add the suspension
+     * height reference back to restore the correct chassis height above road.
+     */
     {
         int64_t corr_sum = 0;
         int corr_count = 0;
         uint8_t gnd_mask = actor->wheel_contact_bitmask;
+
+        /* Compute the suspension height reference offset in world Y.
+         * This is the amount by which wheel Y was raised in RefreshWheelContacts.
+         * For a level car (rot[4] ≈ 1.0), this is approx (href * 0xB5) >> 8 * 256. */
+        int32_t susp_href_world = 0;
+        {
+            int32_t href = (int32_t)CDEF_S(actor, 0x82);
+            if (href != 0) {
+                int32_t href_local = (href * 0xB5) >> 8;
+                /* Transform through rotation matrix Y row and scale to 24.8 */
+                float rot4 = actor->rotation_matrix.m[4];
+                susp_href_world = (int32_t)(href_local * rot4 * 256.0f);
+            }
+        }
+
         for (int i = 0; i < 4; i++) {
             if (!(gnd_mask & (1 << i))) {  /* grounded wheel */
                 int32_t g_y = 0;
@@ -2093,7 +2114,9 @@ void td5_physics_integrate_pose(TD5_Actor *actor)
                 if (td5_track_probe_height(actor->wheel_contact_pos[i].x,
                                            actor->wheel_contact_pos[i].z,
                                            g_span, &g_y, &g_surf)) {
-                    corr_sum += (int64_t)g_y - (int64_t)actor->wheel_contact_pos[i].y;
+                    /* Base correction + undo suspension height reference shift */
+                    corr_sum += (int64_t)g_y - (int64_t)actor->wheel_contact_pos[i].y
+                              - (int64_t)susp_href_world;
                     corr_count++;
                 }
             }
@@ -2235,11 +2258,22 @@ static void update_vehicle_pose_from_physics(TD5_Actor *actor)
     /* Refresh wheel contacts */
     td5_physics_refresh_wheel_contacts(actor);
 
-    /* Ground-snap from grounded wheels (UpdateVehiclePoseFromPhysicsState step 7) */
+    /* Ground-snap: same suspension height reference compensation as IntegratePose */
     {
         int64_t corr_sum = 0;
         int corr_count = 0;
         uint8_t gnd_mask = actor->wheel_contact_bitmask;
+
+        int32_t susp_href_world = 0;
+        {
+            int32_t href = (int32_t)CDEF_S(actor, 0x82);
+            if (href != 0) {
+                int32_t href_local = (href * 0xB5) >> 8;
+                float rot4 = actor->rotation_matrix.m[4];
+                susp_href_world = (int32_t)(href_local * rot4 * 256.0f);
+            }
+        }
+
         for (int i = 0; i < 4; i++) {
             if (!(gnd_mask & (1 << i))) {
                 int32_t g_y = 0;
@@ -2248,7 +2282,8 @@ static void update_vehicle_pose_from_physics(TD5_Actor *actor)
                 if (td5_track_probe_height(actor->wheel_contact_pos[i].x,
                                            actor->wheel_contact_pos[i].z,
                                            g_span, &g_y, &g_surf)) {
-                    corr_sum += (int64_t)g_y - (int64_t)actor->wheel_contact_pos[i].y;
+                    corr_sum += (int64_t)g_y - (int64_t)actor->wheel_contact_pos[i].y
+                              - (int64_t)susp_href_world;
                     corr_count++;
                 }
             }
@@ -3059,10 +3094,19 @@ void td5_physics_init_vehicle_runtime(void)
          *  We do it explicitly to avoid any initial impulse.] */
         update_vehicle_pose_from_physics(actor);  /* builds matrix + render_pos */
         td5_physics_refresh_wheel_contacts(actor); /* probes ground, snaps wheels */
-        /* Apply ground-snap correction from wheel contact data */
+        /* Apply ground-snap correction with suspension height reference offset */
         {
             int64_t corr_sum = 0;
             int corr_count = 0;
+            int32_t susp_href_world = 0;
+            {
+                int32_t href = (int32_t)CDEF_S(actor, 0x82);
+                if (href != 0) {
+                    int32_t href_local = (href * 0xB5) >> 8;
+                    float rot4 = actor->rotation_matrix.m[4];
+                    susp_href_world = (int32_t)(href_local * rot4 * 256.0f);
+                }
+            }
             for (int i = 0; i < 4; i++) {
                 if (!(actor->wheel_contact_bitmask & (1 << i))) {
                     int32_t g_y = 0;
@@ -3071,7 +3115,8 @@ void td5_physics_init_vehicle_runtime(void)
                     if (td5_track_probe_height(actor->wheel_contact_pos[i].x,
                                                actor->wheel_contact_pos[i].z,
                                                g_span, &g_y, &g_surf)) {
-                        corr_sum += (int64_t)g_y - (int64_t)actor->wheel_contact_pos[i].y;
+                        corr_sum += (int64_t)g_y - (int64_t)actor->wheel_contact_pos[i].y
+                                  - (int64_t)susp_href_world;
                         corr_count++;
                     }
                 }
