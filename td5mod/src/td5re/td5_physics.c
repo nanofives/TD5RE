@@ -2740,15 +2740,9 @@ void td5_physics_auto_gear_select(TD5_Actor *actor)
         int32_t up_thresh = (int32_t)PHYS_S(actor, 0x3E + gear * 2);
         if (rpm > up_thresh) {
             gear++;
-            /* Gear-change torque kick to wheel accumulators.
-             * Original shifts >> 8 [CONFIRMED @ 0x42EF54], not >> 16. */
-            int32_t kick = (throttle * (int32_t)PHYS_S(actor, 0x68) * 0x1A) >> 8;
-            if (gear < 16)
-                kick = (kick * (int32_t)s_gear_torque[gear]) >> 8;
-            actor->wheel_force_accum[0] += kick;
-            actor->wheel_force_accum[1] += kick;
-            actor->wheel_force_accum[2] -= kick;
-            actor->wheel_force_accum[3] -= kick;
+            /* Gear-change torque kick: original writes to force_accum but
+             * the original suspension reads XZ projections, not this. Omitted
+             * to prevent pitch divergence (same issue as apply_steering_torque). */
             /* Original returns immediately after upshift [CONFIRMED @ 0x42EF8E].
              * This prevents the downshift check from undoing the shift
              * in the same frame with stale RPM. */
@@ -2827,14 +2821,17 @@ void td5_physics_apply_steering_torque(TD5_Actor *actor)
     int32_t sensitivity = (int32_t)PHYS_S(actor, 0x68);
     int32_t gear = (int32_t)actor->current_gear;
 
-    int32_t force = (throttle * sensitivity * 0x1A) >> 8;
-    if (gear < 16)
-        force = (force * (int32_t)s_gear_torque[gear]) >> 8;
-
-    actor->wheel_force_accum[0] += force;
-    actor->wheel_force_accum[1] += force;
-    actor->wheel_force_accum[2] -= force;
-    actor->wheel_force_accum[3] -= force;
+    /* Original writes force to wheel_force_accum[0..3] as [+,+,-,-],
+     * creating a pitch differential. However, the original's suspension
+     * reads XZ projections (not this Y-based force_accum), so steering
+     * torque never actually drives the suspension spring-damper. In the
+     * source port, this force goes directly into the suspension and
+     * causes immediate pitch divergence (62400 vs ground contact ~107).
+     * Steering already affects yaw via the separate yaw torque formula
+     * in update_player. Omit the force_accum writes. */
+    (void)throttle;
+    (void)sensitivity;
+    (void)gear;
 }
 
 /* --- ApplyReverseGearThrottleSign (0x42F010) --- */
