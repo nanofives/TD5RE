@@ -4666,8 +4666,9 @@ static void Screen_MainMenu(void) {
         }
         break;
 
-    case 7: /* Confirm exit -- post quit message */
-        frontend_post_quit();
+    case 7: /* Confirm exit -- navigate to credits then quit */
+        TD5_LOG_I(LOG_TAG, "MainMenu: exit confirmed, going to credits");
+        td5_frontend_set_screen(TD5_SCREEN_EXTRAS_GALLERY);
         break;
 
     case 8: /* Slide-out prep: keep the software cursor visible for the next frontend screen */
