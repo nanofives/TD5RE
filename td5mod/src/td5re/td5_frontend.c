@@ -6628,7 +6628,7 @@ static void Screen_TrackSelection(void) {
         frontend_load_tga("Front_End/TrackSelect.tga", "Front_End/FrontEnd.zip");
 
         s_track_direction = 0;
-        s_track_switch_tick = 16; /* no slide-in on initial entry */
+        s_track_switch_tick = 16; /* holds preview settled during button slide-in (state 3); reset to 0 in state 5 */
         frontend_load_selected_track_preview();
         frontend_begin_timed_animation();
         s_inner_state = 1;
@@ -6643,7 +6643,11 @@ static void Screen_TrackSelection(void) {
         /* Hide direction button if track has no reverse */
         if (frontend_update_timed_animation(0x27, 650) >= 1.0f) {
             s_anim_complete = 1;
-            s_inner_state = 4;
+            /* Original goes to state 5 (load preview) then state 8 (slide-in) on initial entry.
+             * Route through state 5 so the 16-frame preview slide-in plays here too
+             * [CONFIRMED @ frontend_screens_decompiled.c line 1222]. */
+            TD5_LOG_I(LOG_TAG, "TrackSel: button slide-in complete, starting preview slide-in");
+            s_inner_state = 5;
         }
         break;
 
