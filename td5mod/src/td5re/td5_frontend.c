@@ -6671,8 +6671,11 @@ static void Screen_TrackSelection(void) {
                           s_selected_track, td5_asset_level_number(s_selected_track),
                           frontend_get_track_name(s_selected_track));
 
-                /* For cup modes (type > 7): skip non-playable NPC groups */
-                s_inner_state = 5; /* trigger track change display */
+                /* Hide text+image immediately so render on THIS frame shows neither
+                 * (old preview still loaded, new s_selected_track already set).
+                 * Case 5 loads new preview next frame; case 9 runs the 16-frame slide-in. */
+                s_track_switch_tick = 0;
+                s_inner_state = 5;
             }
 
             if (selected_button == 1 && (delta != 0 || s_button_index == 1)) {
