@@ -3014,7 +3014,12 @@ static float frontend_get_title_render_y(float sy) {
     float hidden_y = -80.0f; /* above screen — title slides down from top */
     float t;
 
-    if (!frontend_get_button_anim_state(&mode, &tick, &max_tick)) return base_y * sy;
+    if (!frontend_get_button_anim_state(&mode, &tick, &max_tick)) {
+        /* Mirror button guard: keep title hidden before slide-in anim starts */
+        if (!s_anim_complete && frontend_screen_has_button_anim())
+            return hidden_y * sy;
+        return base_y * sy;
+    }
 
     t = (float)tick / (float)max_tick;
     if (t < 0.0f) t = 0.0f;
@@ -4721,7 +4726,7 @@ static void Screen_RaceTypeCategory(void) {
         frontend_init_return_screen(TD5_SCREEN_RACE_TYPE_MENU);
         TD5_LOG_D(LOG_TAG, "RaceTypeCategory: state 0 - init");
         frontend_reset_buttons();
-        frontend_load_tga("Front_End/RaceMenu.tga", "Front_End/FrontEnd.zip");
+        frontend_load_tga("Front_End/MainMenu.tga", "Front_End/FrontEnd.zip"); /* original 0x4168B0: loads MainMenu.tga, not RaceMenu.tga */
         s_anim_complete = 0;
 
         /* Create 0x110 x 0xB4 description preview surface */
