@@ -2035,7 +2035,7 @@ static void render_vehicle_shadow_quad(void)
         if (vz <= s_near_clip) return; /* bail if any vertex behind camera */
 
         float inv_z = 1.0f / vz;
-        verts[i].screen_x = vx * s_focal_length * inv_z + s_center_x;
+        verts[i].screen_x = -vx * s_focal_length * inv_z + s_center_x;
         verts[i].screen_y = -vy * s_focal_length * inv_z + s_center_y;
         verts[i].depth_z  = vz * (1.0f / s_far_clip);
         verts[i].rhw      = inv_z;
@@ -2163,17 +2163,8 @@ static void render_vehicle_wheel_billboards(TD5_Actor *actor, int slot)
 
     static int s_wheel_log_counter = 0;
     if (slot == 0 && (s_wheel_log_counter++ % 60) == 0) {
-        TD5_LOG_I(LOG_TAG, "wheel: slot=%d radius=%.1f halfw=%.1f steer_cmd=%d rot_m=[%.3f,%.3f,%.3f]",
-                  slot, rim_radius, axle_halfw, actor->steering_command,
-                  actor->rotation_matrix.m[0], actor->rotation_matrix.m[1], actor->rotation_matrix.m[2]);
-        for (int dbg = 0; dbg < 4; dbg++) {
-            TD5_LOG_I(LOG_TAG, "  wheel[%d] pos=(%d,%d,%d,%d)",
-                      dbg,
-                      actor->wheel_display_angles[dbg][0],
-                      actor->wheel_display_angles[dbg][1],
-                      actor->wheel_display_angles[dbg][2],
-                      actor->wheel_display_angles[dbg][3]);
-        }
+        TD5_LOG_I(LOG_TAG, "wheel: slot=%d radius=%.1f halfw=%.1f steer_cmd=%d",
+                  slot, rim_radius, axle_halfw, actor->steering_command);
     }
 
     for (int w = 0; w < 4; w++) {
@@ -2225,7 +2216,7 @@ static void render_vehicle_wheel_billboards(TD5_Actor *actor, int slot)
                 float vz = px*m[6] + py*m[7] + pz*m[8] + m[11];
                 if (vz <= s_near_clip) { all_visible = 0; break; }
                 float inv_z = 1.0f / vz;
-                verts[i].screen_x = vx * s_focal_length * inv_z + s_center_x;
+                verts[i].screen_x = -vx * s_focal_length * inv_z + s_center_x;
                 verts[i].screen_y = -vy * s_focal_length * inv_z + s_center_y;
                 verts[i].depth_z  = vz * (1.0f / s_far_clip);
                 verts[i].rhw      = inv_z;
@@ -2246,7 +2237,7 @@ static void render_vehicle_wheel_billboards(TD5_Actor *actor, int slot)
                 float vz = px*m[6] + py*m[7] + pz*m[8] + m[11];
                 if (vz <= s_near_clip) { all_visible = 0; break; }
                 float inv_z = 1.0f / vz;
-                verts[9+i].screen_x = vx * s_focal_length * inv_z + s_center_x;
+                verts[9+i].screen_x = -vx * s_focal_length * inv_z + s_center_x;
                 verts[9+i].screen_y = -vy * s_focal_length * inv_z + s_center_y;
                 verts[9+i].depth_z  = vz * (1.0f / s_far_clip);
                 verts[9+i].rhw      = inv_z;
@@ -2308,7 +2299,7 @@ static void render_vehicle_wheel_billboards(TD5_Actor *actor, int slot)
                 float vz = px*m[6] + py*m[7] + pz*m[8] + m[11];
                 if (vz <= s_near_clip) { hub_ok = 0; break; }
                 float inv_z = 1.0f / vz;
-                hub[c].screen_x = vx * s_focal_length * inv_z + s_center_x;
+                hub[c].screen_x = -vx * s_focal_length * inv_z + s_center_x;
                 hub[c].screen_y = -vy * s_focal_length * inv_z + s_center_y;
                 hub[c].depth_z  = vz * (1.0f / s_far_clip);
                 hub[c].rhw      = inv_z;

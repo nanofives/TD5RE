@@ -114,6 +114,43 @@ void td5_render_reset_texture_cache(void);
 void td5_render_advance_texture_ages(void);
 int  td5_render_bind_texture_page(int page_id);
 
+/* --- 4-Pass Race Rendering (0x40B070) --- */
+
+/**
+ * Race render pass IDs, matching original SetRaceRenderStatePreset param.
+ *   Pass 0 (SKY):     MODULATEALPHA texture blend, alpha blend OFF
+ *   Pass 1 (OPAQUE):  COPY texture blend, alpha blend ON
+ *   Pass 3 (ALPHA):   COPY texture blend, alpha blend OFF
+ */
+typedef enum TD5_RaceRenderPass {
+    TD5_RACE_PASS_SKY     = 0,
+    TD5_RACE_PASS_OPAQUE  = 1,
+    TD5_RACE_PASS_UNUSED  = 2,
+    TD5_RACE_PASS_ALPHA   = 3
+} TD5_RaceRenderPass;
+
+void td5_render_set_race_pass(TD5_RaceRenderPass pass);
+
+/* --- Per-Tick Fog Fade (0x40A490) --- */
+
+/**
+ * Per-tick fog fade management during scene transitions.
+ * Manages fog_transition_counter and calls td5_render_set_fog_level().
+ */
+void td5_render_per_tick_fog_fade(void);
+
+/**
+ * Set fog intensity level for a viewport.
+ * level=0 disables fog, level>0 scales fog start/end.
+ */
+void td5_render_set_fog_level(int viewport, int level);
+
+/**
+ * Set fog transition counter for scene fade effect.
+ */
+void td5_render_set_fog_transition(int counter);
+int  td5_render_get_fog_transition(void);
+
 /* --- Sky --- */
 void td5_render_advance_sky_rotation(void);
 void td5_render_load_sky(const char *path);
