@@ -2112,45 +2112,67 @@ void td5_hud_render_minimap(int actor_slot)
         hud_submit_quad(s_minimap_quad_buf + buf_off);
     }
 
-    /* Walk track spans and render road segments */
+    /* Walk track spans and render road segments using the pre-built segment table.
+     * Original @ 0x43A220 iterates the segment table (built in InitMinimapLayout),
+     * starting from the segment containing start_span [CONFIRMED @ 0x43A350-0x43A380],
+     * rendering up to 48 segments [CONFIRMED @ 0x43B09B: while (local_8c < 0x30)].
+     *
+     * start_span = ((player_span / 24) - 6) * 24 [CONFIRMED @ 0x43A380]:
+     * round down to 24-span group, go back 6 groups (144 spans behind player). */
     int16_t player_span = actor_span_index(actor_slot);
     int start_span = ((int)player_span / 24 - 6) * 24;
     if (start_span < 0) start_span = 0;
 
-    /* Simplified: iterate visible spans around the player */
     uint8_t *span_base = (uint8_t *)g_strip_span_base;
     uint8_t *vert_base = (uint8_t *)g_strip_vertex_base;
     int dot_count = 0;
     TD5_SpriteQuad map_quad;
 
-    for (int i = 0; span_base && vert_base &&
-             i < 0x30 && (int)(start_span + i * 5) < g_strip_span_count - 2; i++) {
-        int span_a = start_span + i * 5;
-        int span_b = span_a + 5;
-        if (span_b >= g_strip_span_count) span_b = g_strip_span_count - 2;
+    /* Minimap boundary for software clip (original: software-only globals @ 0x43E640,
+     * not GPU scissor; we enforce same constraint as bounds check before submit). */
+    float mm_r = s_minimap_x + s_minimap_width;
+    float mm_b = s_minimap_y + s_minimap_height;
 
-        /* Read span origins and vertex positions */
-        uint8_t *sa = span_base + span_a * 24;
-        uint8_t *sb = span_base + span_b * 24;
+    /* Find first segment whose end span is at or past start_span */
+    int seg_start_idx = 0;
+    for (int s = 0; s < s_minimap_seg_primary_end; s++) {
+        if ((int)s_minimap_seg_end[s] >= start_span) {
+            seg_start_idx = s;
+            break;
+        }
+        seg_start_idx = s; /* fallback: last segment if none qualify */
+    }
 
-        int32_t ox_a = *(int32_t *)(sa + 0x0C);
-        int32_t oz_a = *(int32_t *)(sa + 0x14);
+    int seg_rendered = 0;
+    for (int i = seg_start_idx; span_base && vert_base &&
+             i < s_minimap_seg_primary_end && seg_rendered < 0x30; i++, seg_rendered++) {
+        int span_a_idx = (int)s_minimap_seg_start[i];
+        int span_b_idx = (int)s_minimap_seg_end[i];
+
+        if (span_a_idx < 0 || span_b_idx < 0 ||
+            span_a_idx >= g_strip_span_count ||
+            span_b_idx >= g_strip_span_count) continue;
+
+        uint8_t *sa = span_base + span_a_idx * 24;
+        uint8_t *sb = span_base + span_b_idx * 24;
+
+        /* left vertex @ span+0x04 [CONFIRMED @ 0x43A49C] */
+        int32_t ox_a  = *(int32_t  *)(sa + 0x0C);
+        int32_t oz_a  = *(int32_t  *)(sa + 0x14);
         uint16_t vi_a = *(uint16_t *)(sa + 4);
 
         int16_t *va = (int16_t *)(vert_base + vi_a * 6);
         /* Track vertex+origin coords are raw world units (NOT 24.8 fp).
-         * Confirmed @ 0x43A4B4/0x43A4B7: original adds vert+origin directly,
-         * no division. Only actor world coords need the kFP (÷256) conversion. */
+         * Confirmed @ 0x43A4B4/0x43A4B7. Only actor coords use kFP. */
         float wx0 = (float)((int)va[0] + ox_a) + offset_x;
         float wz0 = (float)((int)va[2] + oz_a) + offset_z;
 
-        /* Transform through player heading rotation */
         float mx0 = (wx0 * cos_h + wz0 * sin_h) * s_minimap_world_scale_x;
         float my0 = (wz0 * cos_h - wx0 * sin_h) * s_minimap_world_scale_y;
 
-        /* Second span corner */
-        int32_t ox_b = *(int32_t *)(sb + 0x0C);
-        int32_t oz_b = *(int32_t *)(sb + 0x14);
+        /* right/end vertex @ span+0x06 [CONFIRMED @ 0x43A7D7] */
+        int32_t ox_b  = *(int32_t  *)(sb + 0x0C);
+        int32_t oz_b  = *(int32_t  *)(sb + 0x14);
         uint16_t vi_b = *(uint16_t *)(sb + 6);
 
         int16_t *vb = (int16_t *)(vert_base + vi_b * 6);
@@ -2160,17 +2182,26 @@ void td5_hud_render_minimap(int actor_slot)
         float mx1 = (wx1 * cos_h + wz1 * sin_h) * s_minimap_world_scale_x;
         float my1 = (wz1 * cos_h - wx1 * sin_h) * s_minimap_world_scale_y;
 
-        /* Build a quad for this road segment (absolute screen coords).
-         * HUD_WHITE_TEX_PAGE (1x1 white) ensures the pixel shader outputs
-         * the diffuse color instead of sampling a null SRV (tex_page=0
-         * → null SRV → RGBA=0 → fully transparent). */
+        float qx0 = mm_cx + mx0 - 1.0f;
+        float qy0 = mm_cy + my0 - 1.0f;
+        float qx1 = mm_cx + mx1 + 1.0f;
+        float qy1 = mm_cy + my1 + 1.0f;
+
+        /* Skip segments entirely outside the minimap area */
+        if (qx0 > mm_r || qx1 < s_minimap_x || qy0 > mm_b || qy1 < s_minimap_y) continue;
+
+        /* Clamp to minimap boundary */
+        if (qx0 < s_minimap_x) qx0 = s_minimap_x;
+        if (qy0 < s_minimap_y) qy0 = s_minimap_y;
+        if (qx1 > mm_r)        qx1 = mm_r;
+        if (qy1 > mm_b)        qy1 = mm_b;
+
         hud_build_quad(
             &map_quad,
             1, HUD_WHITE_TEX_PAGE,
-            mm_cx + mx0 - 1.0f, mm_cy + my0 - 1.0f,
-            mm_cx + mx1 + 1.0f, mm_cy + my1 + 1.0f,
+            qx0, qy0, qx1, qy1,
             0.0f, 0.0f, 0.0f, 0.0f,
-            0xFF404040, /* dark gray road */
+            0xFF404040,
             HUD_DEPTH
         );
         hud_submit_quad(&map_quad);
@@ -2241,10 +2272,9 @@ void td5_hud_render_minimap(int actor_slot)
     }
 
     TD5_LOG_I(LOG_TAG,
-              "minimap: actor=%d span_range=[%d,%d] dots=%d",
-              actor_slot, start_span,
-              (start_span + 0x30 * 5 < g_strip_span_count) ? (start_span + 0x30 * 5) : g_strip_span_count,
-              dot_count);
+              "minimap: actor=%d player_span=%d start_span=%d seg_start=%d segs_total=%d segs_rendered=%d dots=%d",
+              actor_slot, (int)player_span, start_span, seg_start_idx,
+              s_minimap_seg_primary_end, seg_rendered, dot_count);
 }
 
 /* ========================================================================
@@ -2471,15 +2501,15 @@ void td5_hud_init_pause_menu(int page_index)
     TD5_AtlasEntry *slider_e   = td5_asset_find_atlas_entry(NULL, "SLIDER");
 
     /* BLACKBOX: dark semi-transparent panel. y is fixed ±56.
-     * From binary 0x43B7C0: single-texel sample.  Texture is opaque dark;
-     * vertex alpha provides semi-transparency (0x80 ≈ 50%). */
+     * From binary 0x43B7C0: single-texel sample.  Texture alpha (A=128 after
+     * ARGB channel remap) provides semi-transparency naturally. */
     {
         float bu = (float)blackbox_e->atlas_x + 0.5f;
         float bv = (float)blackbox_e->atlas_y + 0.5f;
         PAUSE_ADD(-s_pause_half_width, -56.0f,
                    s_pause_half_width,  56.0f,
                    bu, bv, bu, bv,
-                   blackbox_e->texture_page, 0x80FFFFFF);
+                   blackbox_e->texture_page, 0xFFFFFFFF);
     }
 
     /* SELBOX: grayscale highlight bar (256x16 atlas texture).
