@@ -1978,10 +1978,18 @@ void td5_physics_update_suspension_response(TD5_Actor *actor)
         /* Pitch: /0x226 */
         actor->angular_velocity_pitch += (bounce_pitch + gravity_pitch / grounded_count) / 0x226;
         /* Vertical: add gravity to counteract the gravity subtracted in
-         * integrate_pose. When grounded, net vertical force = bounce_vert only.
-         * When airborne, this block doesn't execute, so gravity pulls freely.
-         * [CONFIRMED @ 0x4057F0: iVar8 = iVar8 + DAT_00467380] */
-        actor->linear_velocity_y += (bounce_vert / grounded_count) + g_gravity_constant;
+         * integrate_pose. When airborne, this block doesn't execute, so gravity
+         * pulls freely.
+         *
+         * Original (0x4057F0) adds bounce_vert + gravity. However, the
+         * original's ground-snap formula (assignment-based with angle
+         * correction) naturally absorbs the bounce contribution. Our
+         * additive ground-snap creates a positive feedback loop with
+         * bounce_vert — pitch oscillation produces asymmetric wheel
+         * velocities that sum to a small net positive bounce_vert each
+         * tick, causing upward drift. Omit bounce_vert here; the
+         * ground-snap hard constraint handles vertical positioning. */
+        actor->linear_velocity_y += g_gravity_constant;
     }
 
     /* Clamp angular velocities */
