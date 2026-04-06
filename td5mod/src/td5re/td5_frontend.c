@@ -4084,7 +4084,7 @@ void td5_frontend_render_ui_rects(void) {
         int title_w = s_title_tex_w[s_current_screen];
         int title_h = s_title_tex_h[s_current_screen];
         if (page > 0 && title_w > 0 && title_h > 0) {
-            float title_x = ((640.0f - (float)title_w) * 0.5f) * sx;
+            float title_x = 120.0f * sx; /* original: uVar4-200 = screenW/2-200 = 120 [0x4213D0, 0x41D890, others] */
             float title_y = frontend_get_title_render_y(sy);
             td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
             fe_draw_quad(title_x, title_y, (float)title_w * sx, (float)title_h * sy,
