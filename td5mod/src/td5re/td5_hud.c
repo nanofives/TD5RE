@@ -130,13 +130,15 @@ const int8_t g_pause_glyph_widths[256] = {
     /* 0xF0 */ 14, 14, 14, 14, 14, 14, 12, 14, 14, 14, 14, 14, 14, 15, 15, 12,
 };
 
-/* English audio-options overlay string table. */
+/* English pause-menu overlay string table (0x4744B8).
+ * 6 entries: PAUSED(center), VIEW/MUSIC/SOUND(left), CONTINUE/EXIT(center). */
 static const char *s_eng_pause_strings[] = {
-    "SOUND EFFECTS",  (const char *)(intptr_t)1,
-    "MUSIC",          (const char *)(intptr_t)1,
-    "CD MUSIC",       (const char *)(intptr_t)1,
+    "PAUSED",         (const char *)(intptr_t)2,
+    "VIEW",           (const char *)(intptr_t)0,
+    "MUSIC",          (const char *)(intptr_t)0,
+    "SOUND",          (const char *)(intptr_t)0,
     "CONTINUE",       (const char *)(intptr_t)2,
-    "QUIT",           (const char *)(intptr_t)2,
+    "EXIT",           (const char *)(intptr_t)2,
     NULL
 };
 const char **g_pause_page_strings[8] = {
@@ -242,6 +244,12 @@ static float s_minimap_world_scale_x;   /* 0x4B0A48 */
 static float s_minimap_world_scale_y;   /* 0x4B0A4C */
 static float s_minimap_tile_width;      /* 0x4B0A50 */
 static float s_minimap_tile_height;     /* 0x4B0A54 */
+
+/* Minimap scandots sprite info (stored at init, used per-frame for dot draws) */
+static int   s_minimap_scandots_tex_page;  /* texture_page for scandots sprite */
+static float s_minimap_dot_atlas_u;        /* scandots atlas_x + 0.5 */
+static float s_minimap_dot_atlas_v;        /* scandots atlas_y + 0.5 */
+static float s_minimap_dot_atlas_vstride;  /* row stride in pixels (7.0f) */
 
 /* Minimap route segment tables */
 static int   s_minimap_seg_primary_end;  /* 0x4B0A58 */
@@ -915,32 +923,16 @@ void td5_hud_init_font_atlas(void)
 }
 
 /* ========================================================================
- * Draw a full-screen semi-transparent dimmer overlay (for pause menu).
- * Uses a 1x1 white texture modulated by vertex color.
+ * Draw the pause menu overlay (BLACKBOX panel, selbox, sliders, text).
+ * No full-screen dimmer — original uses only the BLACKBOX panel (0x43C1E2).
  * ======================================================================== */
 
 void td5_hud_draw_pause_overlay(void)
 {
-    static uint8_t s_dimmer_quad[0xB8];
     int i;
 
-    if (!s_hud_white_tex_uploaded) return;
-
-    /* Semi-transparent black dimmer over the whole screen */
-    hud_build_quad(
-        s_dimmer_quad,
-        0,
-        HUD_WHITE_TEX_PAGE,
-        0.0f, 0.0f,
-        (float)g_render_width, (float)g_render_height,
-        0.0f, 0.0f,
-        0.5f, 0.5f,
-        0xA0000000,   /* semi-transparent black (BGRA) */
-        HUD_DEPTH
-    );
-    hud_submit_quad(s_dimmer_quad);
-
-    /* Submit pre-built pause menu panel, selection, sliders, and text */
+    /* No full-screen dimmer — original only uses the BLACKBOX panel (0x43C1E2).
+     * Submit pre-built pause menu panel, selection, sliders, and text. */
     for (i = 0; i < s_pause_quad_count && i < TD5_HUD_PAUSE_MAX_QUADS; i++) {
         hud_submit_quad(s_pause_quad_buf + i * 0xB8);
     }
@@ -967,19 +959,19 @@ void td5_hud_update_pause_overlay(int cursor, float sfx_frac, float music_frac, 
                        0xFFFFFFFF, HUD_DEPTH);
     }
 
-    /* Update slider fill bar using atlas texture */
-    float bar_span = s_pause_bar_x1 - s_pause_bar_x0;
+    /* Update slider fill bar using atlas texture.
+     * Fill scale = 128.0f (0x0045D600), UV scale = frac*255.0 (0x0045D684). */
     for (int row = 0; row < 3; row++) {
         if (!s_pause_slider_ptrs[row]) continue;
         float frac = fracs[row];
         if (frac < 0.0f) frac = 0.0f;
         if (frac > 1.0f) frac = 1.0f;
         float row_y = (float)row * 16.0f;
-        float fill_x1 = s_pause_bar_x0 + frac * bar_span;
+        float fill_x1 = s_pause_bar_x0 + frac * 128.0f;
         int sl_page = s_pause_slider_atlas ? s_pause_slider_atlas->texture_page : HUD_WHITE_TEX_PAGE;
-        float slu0 = s_pause_slider_atlas ? (float)s_pause_slider_atlas->atlas_x + 255.5f : 0.25f;
-        float slu1 = s_pause_slider_atlas ? (float)s_pause_slider_atlas->atlas_x + 0.5f   : 0.25f;
-        float slv  = s_pause_slider_atlas ? (float)s_pause_slider_atlas->atlas_y + 0.5f   : 0.25f;
+        float slu0 = s_pause_slider_atlas ? (float)s_pause_slider_atlas->atlas_x + 0.5f : 0.25f;
+        float slu1 = s_pause_slider_atlas ? (float)s_pause_slider_atlas->atlas_x + 0.5f + frac * 255.0f : 0.25f;
+        float slv  = s_pause_slider_atlas ? (float)s_pause_slider_atlas->atlas_y + 0.5f : 0.25f;
         hud_build_quad(s_pause_slider_ptrs[row], 0, sl_page,
                        cx + s_pause_bar_x0, cy + row_y - 28.0f,
                        cx + fill_x1,        cy + row_y - 22.0f,
@@ -2165,10 +2157,13 @@ void td5_hud_render_minimap(int actor_slot)
         float mx1 = (wx1 * cos_h + wz1 * sin_h) * s_minimap_world_scale_x;
         float my1 = (wz1 * cos_h - wx1 * sin_h) * s_minimap_world_scale_y;
 
-        /* Build a quad for this road segment (absolute screen coords) */
+        /* Build a quad for this road segment (absolute screen coords).
+         * HUD_WHITE_TEX_PAGE (1x1 white) ensures the pixel shader outputs
+         * the diffuse color instead of sampling a null SRV (tex_page=0
+         * → null SRV → RGBA=0 → fully transparent). */
         hud_build_quad(
             &map_quad,
-            1, 0, /* mode 1: no texture, solid color */
+            1, HUD_WHITE_TEX_PAGE,
             mm_cx + mx0 - 1.0f, mm_cy + my0 - 1.0f,
             mm_cx + mx1 + 1.0f, mm_cy + my1 + 1.0f,
             0.0f, 0.0f, 0.0f, 0.0f,
@@ -2213,13 +2208,30 @@ void td5_hud_render_minimap(int actor_slot)
             if (dot_y < mm_top)   dot_y = mm_top;
             if (dot_y > mm_bot)   dot_y = mm_bot;
 
+            /* Use scandots texture: row 0=player, row 1=AI, row 2=other.
+             * Fall back to white page with solid color if scandots not loaded. */
+            int dot_tex = s_minimap_scandots_tex_page ? s_minimap_scandots_tex_page : HUD_WHITE_TEX_PAGE;
+            float row_v;
+            uint32_t dot_color;
+            if (r == g_actor_slot_map[0]) {
+                row_v = s_minimap_dot_atlas_v;                            /* row 0: player */
+                dot_color = 0xFFFFFFFF;
+            } else if (r < 6) {
+                row_v = s_minimap_dot_atlas_v + s_minimap_dot_atlas_vstride;  /* row 1: AI */
+                dot_color = 0xFFFFFFFF;
+            } else {
+                row_v = s_minimap_dot_atlas_v + s_minimap_dot_atlas_vstride * 2.0f; /* row 2: other */
+                dot_color = 0xFFFFFFFF;
+            }
             hud_build_quad(
                 &map_quad,
-                1, 0,
+                0, dot_tex,
                 dot_x - half_dot, dot_y - half_dot,
                 dot_x + half_dot, dot_y + half_dot,
-                0.0f, 0.0f, 0.0f, 0.0f,
-                (r == g_actor_slot_map[0]) ? 0xFFFF0000 : 0xFFFFFF00,
+                s_minimap_dot_atlas_u, row_v,
+                s_minimap_dot_atlas_u + s_minimap_dot_atlas_vstride,
+                row_v + s_minimap_dot_atlas_vstride,
+                dot_color,
                 HUD_DEPTH
             );
             hud_submit_quad(&map_quad);
@@ -2266,6 +2278,14 @@ void td5_hud_init_minimap_layout(void)
     float dot_u = (float)scandots->atlas_x + 0.5f;
     float dot_v = (float)scandots->atlas_y + 0.5f;
     float dot_v_stride = 7.0f;
+
+    /* Store for use in td5_hud_render_minimap per-frame dot draws */
+    s_minimap_scandots_tex_page  = scandots->texture_page;
+    s_minimap_dot_atlas_u        = dot_u;
+    s_minimap_dot_atlas_v        = dot_v;
+    s_minimap_dot_atlas_vstride  = dot_v_stride;
+    TD5_LOG_I(LOG_TAG, "minimap_init: scandots tex_page=%d u=%.1f v=%.1f vstride=%.1f",
+              s_minimap_scandots_tex_page, dot_u, dot_v, dot_v_stride);
 
     /* Build racer dot quads (up to racer_count) */
     uint8_t *dot_buf = s_minimap_quad_buf + 0x51F0;
@@ -2315,6 +2335,9 @@ void td5_hud_init_minimap_layout(void)
     float bg_v0 = (float)scanback->atlas_y + 0.5f;
     float bg_u1 = (float)(scanback->atlas_x + scanback->width) - 0.5f;
     float bg_v1 = (float)(scanback->atlas_y + scanback->height) - 0.5f;
+
+    TD5_LOG_I(LOG_TAG, "minimap_init: scanback tex_page=%d u0=%.1f v0=%.1f u1=%.1f v1=%.1f",
+              scanback->texture_page, bg_u0, bg_v0, bg_u1, bg_v1);
 
     /* Build 4x4 grid of background tiles.
      * td5_render_set_projection_center is a stub, so we bake the minimap
@@ -2461,7 +2484,7 @@ void td5_hud_init_pause_menu(int page_index)
      * From binary: x0=1-half_w, x1=half_w-1; cursor=3 default (CONTINUE). */
     s_pause_selbox_atlas = selbox_e;
     s_pause_sel_box = NULL;
-    s_pause_selbox_base_y = -52.0f;  /* must match text_y so selbox aligns with text rows */
+    s_pause_selbox_base_y = -33.0f;  /* 0x0045D75C: selbox starts at row 1 (VIEW), not row 0 (PAUSED) */
     {
         float sel_x0 = 1.0f - s_pause_half_width;
         float sel_x1 = s_pause_half_width - 1.0f;
@@ -2482,7 +2505,7 @@ void td5_hud_init_pause_menu(int page_index)
     /* BLACKBAR (trough) + SLIDER (fill bar) using atlas textures.
      * From binary: bar x=[half_w-131, half_w-1], row N y=[N*16-29, N*16-21]. */
     s_pause_slider_atlas = slider_e;
-    s_pause_bar_x0 = s_pause_half_width - 131.0f;
+    s_pause_bar_x0 = s_pause_half_width - 130.0f;  /* 0x0045D73C */
     s_pause_bar_x1 = s_pause_half_width - 1.0f;
 
     for (int row = 0; row < 3; row++) {
@@ -2497,8 +2520,8 @@ void td5_hud_init_pause_menu(int page_index)
         /* Slider fill bar — SLIDER atlas texture (256x8) */
         s_pause_slider_ptrs[row] = (s_pause_quad_count < TD5_HUD_PAUSE_MAX_QUADS)
                                     ? PAUSE_BUF(s_pause_quad_count) : NULL;
-        float slu0 = (float)slider_e->atlas_x + 255.5f;
-        float slu1 = (float)slider_e->atlas_x + 0.5f;
+        float slu0 = (float)slider_e->atlas_x + 0.5f;
+        float slu1 = (float)slider_e->atlas_x + 0.5f;  /* zero-width initially, updated per frame */
         float slv  = (float)slider_e->atlas_y + 0.5f;
         PAUSE_ADD(s_pause_bar_x0, row_y - 28.0f,
                   s_pause_bar_x0, row_y - 22.0f,
