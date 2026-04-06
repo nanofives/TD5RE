@@ -1421,10 +1421,13 @@ void td5_render_actors_for_view(int view_index)
     int actor_render_count = 0;
     int actor_meshes_submitted = 0;
 
+    /* Refresh render-side camera snapshot from game-side globals every frame.
+     * td5_render_configure_projection only runs when viewport dimensions change,
+     * so without this the render camera stays frozen at its initial position. */
+    update_render_camera_from_game();
+
     /* Always clear the backbuffer so previous frames don't bleed through */
     td5_plat_render_clear(0xFF4080C0u);
-
-    /* Diagnostic removed — rotation/projection bugs fixed */
 
     /* Draw sky panorama behind all geometry */
     td5_render_draw_sky();
