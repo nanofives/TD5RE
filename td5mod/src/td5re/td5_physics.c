@@ -768,8 +768,26 @@ void td5_physics_update_player(TD5_Actor *actor)
      * The dominant term is the lateral force difference * 500 — this is the
      * primary yaw torque source from steering. The longitudinal terms provide
      * weight-transfer coupling (understeer/oversteer under throttle).
-     * [CONFIRMED: *500 via LEA chain at 0x404CA0-0x404CBF] */
+     * [CONFIRMED: *500 via LEA chain at 0x404CA0-0x404CBF]
+     *
+     * Speed gate: skip yaw torque when nearly stationary. At very low speed,
+     * surface gravity injects velocity that produces parasitic yaw torque
+     * (front/rear grip differ → lateral force imbalance → rotation).
+     * No damping mechanism fires at zero speed, so the torque accumulates.
+     * Gate on |v_long| + |v_lat| < 0x100 to prevent this feedback loop. */
     {
+        int32_t abs_vl = v_long < 0 ? -v_long : v_long;
+        int32_t abs_vlat = v_lat < 0 ? -v_lat : v_lat;
+        int32_t speed_sum = abs_vl + abs_vlat;
+        if (speed_sum < 0x100) {
+            /* Near-stationary: zero out lateral forces to prevent parasitic yaw */
+            front_lat_force = 0;
+            rear_lat_force = 0;
+            if (actor->slot_index == 0 && (actor->frame_counter % 120u) == 0u) {
+                TD5_LOG_I(LOG_TAG, "YAW gate: speed_sum=0x%X < 0x100, zeroing lat forces",
+                          speed_sum);
+            }
+        }
         int32_t inertia = PHYS_I(actor, 0x20);
         int32_t inertia_div = inertia / 0x28C;
         if (inertia_div == 0) inertia_div = 1;
@@ -2041,6 +2059,24 @@ void td5_physics_integrate_pose(TD5_Actor *actor)
     /* 7. Refresh wheel contact frames */
     td5_physics_refresh_wheel_contacts(actor);
 
+    /* DIAGNOSTIC: log player car (slot 0) physics state once per 30 frames */
+    if (actor->slot_index == 0) {
+        static int s_diag_frame = 0;
+        if ((s_diag_frame++ % 30) == 0) {
+            TD5_LOG_I(LOG_TAG,
+                "DIAG slot0: pos_y=%d vel_y=%d prev_y=%d render_y=%.2f "
+                "bitmask=0x%02X force=[%d,%d,%d,%d] susp_pos=[%d,%d,%d,%d] susp_vel=[%d,%d,%d,%d]",
+                actor->world_pos.y, actor->linear_velocity_y, actor->prev_frame_y_position,
+                actor->render_pos.y, actor->wheel_contact_bitmask,
+                actor->wheel_force_accum[0], actor->wheel_force_accum[1],
+                actor->wheel_force_accum[2], actor->wheel_force_accum[3],
+                actor->wheel_suspension_pos[0], actor->wheel_suspension_pos[1],
+                actor->wheel_suspension_pos[2], actor->wheel_suspension_pos[3],
+                actor->wheel_suspension_vel[0], actor->wheel_suspension_vel[1],
+                actor->wheel_suspension_vel[2], actor->wheel_suspension_vel[3]);
+        }
+    }
+
     /* 8. Ground-snap: compute averaged ground height from grounded wheels and
      * correct world_pos.y (IntegrateVehiclePoseAndContacts step 9 in analysis).
      * Without this, gravity accumulates each frame with no correction and cars
@@ -2063,7 +2099,19 @@ void td5_physics_integrate_pose(TD5_Actor *actor)
             }
         }
         if (corr_count > 0) {
-            actor->world_pos.y += (int32_t)(corr_sum / corr_count);
+            int32_t corr_val = (int32_t)(corr_sum / corr_count);
+            if (actor->slot_index == 0) {
+                static int s_snap_log = 0;
+                if ((s_snap_log++ % 30) == 0) {
+                    TD5_LOG_I(LOG_TAG,
+                        "SNAP slot0: corr=%d count=%d wheel_y=[%d,%d,%d,%d] pos_y_before=%d",
+                        corr_val, corr_count,
+                        actor->wheel_contact_pos[0].y, actor->wheel_contact_pos[1].y,
+                        actor->wheel_contact_pos[2].y, actor->wheel_contact_pos[3].y,
+                        actor->world_pos.y);
+                }
+            }
+            actor->world_pos.y += corr_val;
             actor->render_pos.y = (float)actor->world_pos.y * (1.0f / 256.0f);
             /* Cancel downward velocity: ground is a hard constraint. */
             if (actor->linear_velocity_y < 0)
