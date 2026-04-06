@@ -240,7 +240,7 @@ static int      s_replay_mode;
 static int      s_race_countdown_ticks;
 static int      s_race_countdown_state;
 static int      s_pause_menu_active;
-static int      s_pause_menu_cursor;   /* 0=View, 1=Music, 2=Sound, 3=Continue, 4=Exit */
+static int      s_pause_menu_cursor;   /* 0=VIEW, 1=MUSIC, 2=SOUND, 3=CONTINUE, 4=EXIT */
 static int      s_pause_input_done;    /* reset per-frame, set after first tick processes input */
 static int      s_prev_esc_state;      /* edge detector for ESC key */
 
@@ -457,7 +457,7 @@ int td5_game_tick(void) {
              */
             void *bm_pixels = NULL;
             int bm_w = 0, bm_h = 0;
-            if (td5_asset_load_png_to_buffer("../re/td5_png_clean/benchmark.png",
+            if (td5_asset_load_png_to_buffer("re/assets/benchmark.png",
                                               TD5_COLORKEY_NONE, &bm_pixels, &bm_w, &bm_h)) {
                 td5_plat_render_upload_texture(0, bm_pixels, bm_w, bm_h, 0);
                 td5_plat_present(0);
@@ -849,7 +849,7 @@ int td5_game_init_race_session(void) {
         char sky_path[256];
         int level_num = td5_asset_level_number(g_td5.track_index);
         snprintf(sky_path, sizeof(sky_path),
-                 "../re/td5_png_clean/levels/level%03d/FORWSKY.png", level_num);
+                 "re/assets/levels/level%03d/FORWSKY.png", level_num);
         td5_render_load_sky(sky_path);
     }
 
@@ -1011,13 +1011,17 @@ int td5_game_run_race_frame(void) {
                  * RunAudioOptionsOverlay (0x43BF70): slider[cursor] += 0.02 per frame. */
                 if (s_pause_menu_cursor < 3) {
                     if (key_right) {
-                        if (s_pause_menu_cursor == 0)      td5_save_set_view_distance(td5_save_get_view_distance() + 0.02f);
-                        else if (s_pause_menu_cursor == 1) td5_save_set_music_volume(td5_save_get_music_volume() + 2);
+                        if (s_pause_menu_cursor == 0) {
+                            td5_save_set_view_distance(td5_save_get_view_distance() + 0.02f);
+                            TD5_LOG_I(LOG_TAG, "view_dist: slider -> %.2f", td5_save_get_view_distance());
+                        } else if (s_pause_menu_cursor == 1) td5_save_set_music_volume(td5_save_get_music_volume() + 2);
                         else                               td5_save_set_sfx_volume(td5_save_get_sfx_volume() + 2);
                     }
                     if (key_left) {
-                        if (s_pause_menu_cursor == 0)      td5_save_set_view_distance(td5_save_get_view_distance() - 0.02f);
-                        else if (s_pause_menu_cursor == 1) td5_save_set_music_volume(td5_save_get_music_volume() - 2);
+                        if (s_pause_menu_cursor == 0) {
+                            td5_save_set_view_distance(td5_save_get_view_distance() - 0.02f);
+                            TD5_LOG_I(LOG_TAG, "view_dist: slider -> %.2f", td5_save_get_view_distance());
+                        } else if (s_pause_menu_cursor == 1) td5_save_set_music_volume(td5_save_get_music_volume() - 2);
                         else                               td5_save_set_sfx_volume(td5_save_get_sfx_volume() - 2);
                     }
                 }
@@ -1241,22 +1245,9 @@ int td5_game_run_race_frame(void) {
     /* Full-screen HUD overlay (speedometer, lap counter, etc.) */
     td5_hud_render_overlays(g_td5.sim_tick_budget);
 
-    /* Pause overlay: draw panel then queue text labels on top */
+    /* Pause overlay: panel + PAUSETXT atlas glyphs are all pre-built quads */
     if (s_pause_menu_active) {
         td5_hud_draw_pause_overlay();
-        /* Queue text AFTER draw_pause_overlay so flush_text renders on top.
-         * Row N pixel_y = cy_px - 52 + N*16 (matches binary layout). */
-        {
-            int cx_px = (int)(g_render_width_f * 0.5f);
-            int cy_px = (int)(g_render_height_f * 0.5f);
-            int lx = cx_px - 124;   /* left-aligned: cx - half_w(128) + 4 */
-            td5_hud_queue_text(0, cx_px, cy_px - 52,      1, "PAUSED");
-            td5_hud_queue_text(0, lx, cy_px - 36,         0, "VIEW");
-            td5_hud_queue_text(0, lx, cy_px - 20,         0, "MUSIC");
-            td5_hud_queue_text(0, lx, cy_px - 4,          0, "SOUND");
-            td5_hud_queue_text(0, cx_px, cy_px + 12,      1, "CONTINUE");
-            td5_hud_queue_text(0, cx_px, cy_px + 28,      1, "EXIT");
-        }
     }
 
     td5_hud_flush_text();
@@ -2063,7 +2054,7 @@ static void display_loading_screen_tga(void) {
     void *pixels = NULL;
     int img_w = 0, img_h = 0;
 
-    snprintf(png_path, sizeof(png_path), "../re/td5_png_clean/loading/load%02d.png", index);
+    snprintf(png_path, sizeof(png_path), "re/assets/loading/load%02d.png", index);
     TD5_LOG_I(LOG_TAG, "Loading screen: %s", png_path);
 
     if (!td5_asset_load_png_to_buffer(png_path, TD5_COLORKEY_NONE, &pixels, &img_w, &img_h)) {

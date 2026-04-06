@@ -41,6 +41,7 @@
 #include "td5_track.h"
 #include "td5_game.h"
 #include "td5_asset.h"
+#include "td5_save.h"
 #include "td5re.h"
 
 #include "../../../re/include/td5_actor_struct.h"
@@ -904,7 +905,7 @@ void td5_render_set_preset(TD5_RenderPreset preset)
 
 void td5_render_set_fog(int enable)
 {
-    if (enable) {
+    if (enable && g_td5.ini.fog_enabled) {
         /* Apply full fog pipeline: linear table fog */
         td5_plat_render_set_fog(1, s_fog_color,
                                 FOG_START_DEFAULT, FOG_END_DEFAULT,
@@ -1401,8 +1402,22 @@ void td5_render_actors_for_view(int view_index)
     int rendered_spans = 0;
     int span_count = td5_track_get_span_count();
 
-    /* The original (0x42BB2E) walks spans outward from the player's span.
-     * Our loop walks from span 0; rely on per-mesh frustum cull instead. */
+    /* View distance span-window cull.
+     * Original RunRaceFrame (0x42BB2E): effective_spans = (int)((v * 0.85 + 0.15) * max_spans)
+     * where max_spans = 0x40 (64) for single-screen [CONFIRMED @ InitializeRaceViewportLayout 0x0042C2B0].
+     * Source port uses max_spans=128 (200% of original) so slider at 1.0 shows 2× the original max.
+     * Cull window = player_span ± half_window with ring-wrap for circuit tracks. */
+#define VIEW_DIST_MAX_SPANS 128
+    int player_span = 0;
+    {
+        TD5_Actor *player = td5_game_get_actor(0);
+        if (player)
+            player_span = (int)player->track_span_raw;
+    }
+    float view_dist_frac = td5_save_get_view_distance();
+    int half_window = (int)((view_dist_frac * 0.85f + 0.15f) * (float)VIEW_DIST_MAX_SPANS);
+    if (half_window < 1) half_window = 1;
+
     int actor_render_count = 0;
     int actor_meshes_submitted = 0;
 
@@ -1429,10 +1444,16 @@ void td5_render_actors_for_view(int view_index)
         if (!display_list)
             continue;
 
-        /* Distance culling is handled inside td5_render_span_display_list
-         * via per-mesh frustum tests. The early cull here was removed because
-         * display list block[1] may not be a valid pointer if MODELS.DAT
-         * relocation didn't run for this entry. */
+        /* Span-window cull: skip spans outside ±half_window of the player's span.
+         * Delta is wrapped into [-span_count/2, span_count/2] to handle circuit ring. */
+        if (span_count > 0) {
+            int delta = span_index - player_span;
+            int half_count = span_count / 2;
+            if (delta >  half_count) delta -= span_count;
+            if (delta < -half_count) delta += span_count;
+            if (delta > half_window || delta < -half_window)
+                continue;
+        }
 
         td5_render_span_display_list(display_list);
         rendered_spans++;
@@ -2140,11 +2161,19 @@ static void render_vehicle_wheel_billboards(TD5_Actor *actor, int slot)
 
     int tex_page = s_wheel_tex_page;
 
-    static int s_wheel_log_once = 0;
-    if (!s_wheel_log_once) {
-        TD5_LOG_I(LOG_TAG, "wheel render: slot=%d radius=%.1f halfw=%.1f page=%d",
-                  slot, rim_radius, axle_halfw, tex_page);
-        s_wheel_log_once = 1;
+    static int s_wheel_log_counter = 0;
+    if (slot == 0 && (s_wheel_log_counter++ % 60) == 0) {
+        TD5_LOG_I(LOG_TAG, "wheel: slot=%d radius=%.1f halfw=%.1f steer_cmd=%d rot_m=[%.3f,%.3f,%.3f]",
+                  slot, rim_radius, axle_halfw, actor->steering_command,
+                  actor->rotation_matrix.m[0], actor->rotation_matrix.m[1], actor->rotation_matrix.m[2]);
+        for (int dbg = 0; dbg < 4; dbg++) {
+            TD5_LOG_I(LOG_TAG, "  wheel[%d] pos=(%d,%d,%d,%d)",
+                      dbg,
+                      actor->wheel_display_angles[dbg][0],
+                      actor->wheel_display_angles[dbg][1],
+                      actor->wheel_display_angles[dbg][2],
+                      actor->wheel_display_angles[dbg][3]);
+        }
     }
 
     for (int w = 0; w < 4; w++) {
@@ -2155,11 +2184,23 @@ static void render_vehicle_wheel_billboards(TD5_Actor *actor, int slot)
         if (wx == 0.0f && wy == 0.0f && wz == 0.0f)
             continue;
 
-        /* Original (0x446E30): inner_x = -cardef_0x84, outer_x = +cardef_0x84.
-         * Left wheels (even): inner=-halfw, outer=+halfw.
-         * Right wheels (odd): inner=+halfw, outer=-halfw. */
-        float inner_off = (w & 1) ?  axle_halfw : -axle_halfw;
-        float outer_off = (w & 1) ? -axle_halfw :  axle_halfw;
+        /* Tire ring X offsets: inner = inboard (towards car center),
+         * outer = outboard (away from car, where hub-cap is visible).
+         * Left wheels (even, negative X): outboard = -halfw.
+         * Right wheels (odd, positive X): outboard = +halfw. */
+        float inner_off = (w & 1) ? -axle_halfw :  axle_halfw;
+        float outer_off = (w & 1) ?  axle_halfw : -axle_halfw;
+
+        /* Front wheel visual steering yaw (0x446F00 uses actor+0x340/0x342).
+         * steering_command >> 8 gives 12-bit angle; convert to radians.
+         * Only front wheels (w=0,1) get steering rotation. */
+        float cos_s = 1.0f, sin_s = 0.0f;
+        if (w < 2) {
+            float steer_rad = (float)(actor->steering_command >> 8)
+                            * ((float)M_PI / 2048.0f);
+            cos_s = cosf(steer_rad);
+            sin_s = sinf(steer_rad);
+        }
 
         /* 18 vertices: inner ring (0..8) + outer ring (9..17) */
         TD5_D3DVertex verts[18];
@@ -2173,9 +2214,12 @@ static void render_vehicle_wheel_billboards(TD5_Actor *actor, int slot)
             float u_t = (float)i / (float)WHEEL_SEGMENTS;
             float seg_u = s_wheels_u0 + u_t * (s_wheels_u1 - s_wheels_u0);
 
-            /* Inner ring vertex */
+            /* Inner ring vertex (with front-wheel steering yaw) */
             {
-                float px = wx + inner_off, py = wy + cy, pz = wz + cz;
+                float dx = inner_off, dz = cz;
+                float rx = dx * cos_s - dz * sin_s;
+                float rz = dx * sin_s + dz * cos_s;
+                float px = wx + rx, py = wy + cy, pz = wz + rz;
                 float vx = px*m[0] + py*m[1] + pz*m[2] + m[9];
                 float vy = px*m[3] + py*m[4] + pz*m[5] + m[10];
                 float vz = px*m[6] + py*m[7] + pz*m[8] + m[11];
@@ -2191,9 +2235,12 @@ static void render_vehicle_wheel_billboards(TD5_Actor *actor, int slot)
                 verts[i].tex_v = s_wheels_v0;
             }
 
-            /* Outer ring vertex */
+            /* Outer ring vertex (with front-wheel steering yaw) */
             {
-                float px = wx + outer_off, py = wy + cy, pz = wz + cz;
+                float dx = outer_off, dz = cz;
+                float rx = dx * cos_s - dz * sin_s;
+                float rz = dx * sin_s + dz * cos_s;
+                float px = wx + rx, py = wy + cy, pz = wz + rz;
                 float vx = px*m[0] + py*m[1] + pz*m[2] + m[9];
                 float vy = px*m[3] + py*m[4] + pz*m[5] + m[10];
                 float vz = px*m[6] + py*m[7] + pz*m[8] + m[11];
@@ -2230,16 +2277,23 @@ static void render_vehicle_wheel_billboards(TD5_Actor *actor, int slot)
         td5_plat_render_draw_tris(verts, 18, indices, idx);
 
         /* Hub-cap: flat quad at the outer face, sized by rim_radius.
-         * Original rotates corners by steering angles (actor+0x340/0x342);
-         * simplified here to axis-aligned square. */
+         * Original rotates corners by steering angles (actor+0x340/0x342).
+         * Front wheels apply steering yaw via cos_s/sin_s computed above. */
         {
-            float hx = wx + outer_off;
-            float corners[4][3] = {
-                { hx, wy + rim_radius, wz - rim_radius },
-                { hx, wy + rim_radius, wz + rim_radius },
-                { hx, wy - rim_radius, wz + rim_radius },
-                { hx, wy - rim_radius, wz - rim_radius },
+            float ho = outer_off;
+            float corner_offsets[4][3] = {
+                { ho, +rim_radius, -rim_radius },
+                { ho, +rim_radius, +rim_radius },
+                { ho, -rim_radius, +rim_radius },
+                { ho, -rim_radius, -rim_radius },
             };
+            float corners[4][3];
+            for (int c = 0; c < 4; c++) {
+                float dx = corner_offsets[c][0], dz = corner_offsets[c][2];
+                corners[c][0] = wx + dx * cos_s - dz * sin_s;
+                corners[c][1] = wy + corner_offsets[c][1];
+                corners[c][2] = wz + dx * sin_s + dz * cos_s;
+            }
             float hub_uv[4][2] = {
                 { s_inwheel_u0, s_inwheel_v0 }, { s_inwheel_u1, s_inwheel_v0 },
                 { s_inwheel_u1, s_inwheel_v1 }, { s_inwheel_u0, s_inwheel_v1 },
@@ -2756,8 +2810,8 @@ void td5_render_set_fog_level(int viewport, int level)
 {
     (void)viewport;
 
-    if (level <= 0) {
-        /* Fog disabled */
+    if (level <= 0 || !g_td5.ini.fog_enabled) {
+        /* Fog disabled (level==0 or user preference off) */
         td5_plat_render_set_fog(0, 0, 0.0f, 0.0f, 0.0f);
     } else {
         /* Scale fog start/end based on level.
