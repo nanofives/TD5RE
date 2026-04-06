@@ -3010,8 +3010,8 @@ static float frontend_get_title_render_y(float sy) {
     int mode = FE_BUTTON_ANIM_NONE;
     int tick = 0;
     int max_tick = 0;
-    float base_y = 12.0f;   /* resting Y (matches render code) */
-    float hidden_y = -80.0f; /* above screen — title slides down from top */
+    float base_y = 1.0f;    /* resting Y — original formula: (iVar3-colorDepth)-0x40 = (81-16)-64 = 1 [0x4213D0 state 4] */
+    float hidden_y = -155.0f; /* above screen — original tick=0: (0*4-0xDC-0x10)+81 = -155 [0x4213D0 state 3] */
     float t;
 
     if (!frontend_get_button_anim_state(&mode, &tick, &max_tick)) return base_y * sy;
