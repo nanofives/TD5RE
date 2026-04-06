@@ -944,13 +944,18 @@ static int frontend_current_car_index(void) {
     return s_selected_car;
 }
 
-/* Check whether the level zip for a given track index is present on disk. */
+/* Check whether level data for a given track index is present on disk.
+ * Checks both the zip archive and the loose extracted directory. */
 static int frontend_track_level_exists(int track_index) {
-    char zippath[32];
+    char path[64];
+    int level_num;
     if (track_index < 0) return 1; /* -1 = random, always "valid" */
-    snprintf(zippath, sizeof(zippath), "level%03d.zip",
-             td5_asset_level_number(track_index));
-    return td5_plat_file_exists(zippath);
+    level_num = td5_asset_level_number(track_index);
+    snprintf(path, sizeof(path), "level%03d.zip", level_num);
+    if (td5_plat_file_exists(path)) return 1;
+    /* Also check for extracted loose-file directory (re/assets/levels/levelNNN/STRIP.DAT) */
+    snprintf(path, sizeof(path), "re/assets/levels/level%03d/STRIP.DAT", level_num);
+    return td5_plat_file_exists(path);
 }
 
 /* Advance track by delta (+1 or -1), skipping indices whose level zips are absent.
@@ -2846,6 +2851,20 @@ static void frontend_draw_value_text(float sx, float sy, int x, int y,
     fe_draw_text((float)x * sx, (float)y * sy, text, color, sx, sy);
 }
 
+/* Value text centering: original draws to 224px panel at screen x=394 (canvasW/2+0x4A),
+ * then centers text within via MeasureOrCenter. Panel center = 394+112 = 506.
+ * [CONFIRMED @ 0x41FF5B: ADD ESI,0x11C; panel width 0xE0 @ CreateTrackedFrontendSurface] */
+#define FE_VALUE_PANEL_X    394
+#define FE_VALUE_PANEL_W    224
+#define FE_VALUE_CENTER_X   506  /* FE_VALUE_PANEL_X + FE_VALUE_PANEL_W/2 */
+
+static void frontend_draw_value_centered(float sx, float sy, int y,
+                                         const char *text, uint32_t color) {
+    if (!text || !text[0] || s_font_page < 0) return;
+    fe_draw_text_centered((float)FE_VALUE_CENTER_X * sx, (float)y * sy,
+                          text, color, sx, sy);
+}
+
 enum {
     FE_BUTTON_ANIM_NONE = 0,
     FE_BUTTON_ANIM_IN,
@@ -3058,13 +3077,13 @@ static void frontend_render_game_options_overlay(float sx, float sy) {
     if (!s_buttons[0].active) return;
     if (!s_anim_complete) return;
     snprintf(laps, sizeof(laps), "%d", (s_game_option_laps + 1) * 2);
-    frontend_draw_value_text(sx, sy, 344, s_buttons[0].y + 6, laps, 0xFFFFFFFF);
-    frontend_draw_value_text(sx, sy, 344, s_buttons[1].y + 6, on_off[s_game_option_checkpoint_timers & 1], 0xFFFFFFFF);
-    frontend_draw_value_text(sx, sy, 344, s_buttons[2].y + 6, on_off[s_game_option_traffic & 1], 0xFFFFFFFF);
-    frontend_draw_value_text(sx, sy, 344, s_buttons[3].y + 6, on_off[s_game_option_cops & 1], 0xFFFFFFFF);
-    frontend_draw_value_text(sx, sy, 344, s_buttons[4].y + 6, difficulty[s_game_option_difficulty % 3], 0xFFFFFFFF);
-    frontend_draw_value_text(sx, sy, 344, s_buttons[5].y + 6, dynamics[s_game_option_dynamics & 1], 0xFFFFFFFF);
-    frontend_draw_value_text(sx, sy, 344, s_buttons[6].y + 6, on_off[s_game_option_collisions & 1], 0xFFFFFFFF);
+    frontend_draw_value_centered(sx, sy, s_buttons[0].y + 6, laps, 0xFFFFFFFF);
+    frontend_draw_value_centered(sx, sy, s_buttons[1].y + 6, on_off[s_game_option_checkpoint_timers & 1], 0xFFFFFFFF);
+    frontend_draw_value_centered(sx, sy, s_buttons[2].y + 6, on_off[s_game_option_traffic & 1], 0xFFFFFFFF);
+    frontend_draw_value_centered(sx, sy, s_buttons[3].y + 6, on_off[s_game_option_cops & 1], 0xFFFFFFFF);
+    frontend_draw_value_centered(sx, sy, s_buttons[4].y + 6, difficulty[s_game_option_difficulty % 3], 0xFFFFFFFF);
+    frontend_draw_value_centered(sx, sy, s_buttons[5].y + 6, dynamics[s_game_option_dynamics & 1], 0xFFFFFFFF);
+    frontend_draw_value_centered(sx, sy, s_buttons[6].y + 6, on_off[s_game_option_collisions & 1], 0xFFFFFFFF);
     for (int i = 0; i <= 6; i++) fe_draw_option_arrows(i, sx, sy);
 }
 
@@ -3080,10 +3099,10 @@ static void frontend_render_display_options_overlay(float sx, float sy) {
         s_display_mode_index < s_display_mode_count)
         mode_name = s_display_mode_names[s_display_mode_index];
     snprintf(damping, sizeof(damping), "%d", s_display_camera_damping);
-    frontend_draw_value_text(sx, sy, 344, s_buttons[0].y + 6, mode_name, 0xFFFFFFFF);
-    frontend_draw_value_text(sx, sy, 344, s_buttons[1].y + 6, on_off[s_display_fog_enabled & 1], 0xFFFFFFFF);
-    frontend_draw_value_text(sx, sy, 344, s_buttons[2].y + 6, speed_read[s_display_speed_units & 1], 0xFFFFFFFF);
-    frontend_draw_value_text(sx, sy, 344, s_buttons[3].y + 6, damping, 0xFFFFFFFF);
+    frontend_draw_value_centered(sx, sy, s_buttons[0].y + 6, mode_name, 0xFFFFFFFF);
+    frontend_draw_value_centered(sx, sy, s_buttons[1].y + 6, on_off[s_display_fog_enabled & 1], 0xFFFFFFFF);
+    frontend_draw_value_centered(sx, sy, s_buttons[2].y + 6, speed_read[s_display_speed_units & 1], 0xFFFFFFFF);
+    frontend_draw_value_centered(sx, sy, s_buttons[3].y + 6, damping, 0xFFFFFFFF);
     for (int i = 0; i <= 3; i++) fe_draw_option_arrows(i, sx, sy);
 }
 
@@ -3114,7 +3133,7 @@ static void frontend_render_sound_options_overlay(float sx, float sy) {
     }
 
     /* Volume bars: SFX = button[1], Music = button[2]
-     * Each bar sits to the right of its button at x=344, vertically
+     * Each bar sits to the right of its button at x=394, vertically
      * centred in the button height (32px). Bar=12px tall, fill=10px. */
     {
         int bar_btns[2]  = { 1, 2 }; /* SFX Volume, Music Volume */
@@ -3122,7 +3141,7 @@ static void frontend_render_sound_options_overlay(float sx, float sy) {
 
         for (int vi = 0; vi < 2; vi++) {
             int   btn    = bar_btns[vi];
-            float bar_x  = 344.0f * sx;
+            float bar_x  = 394.0f * sx; /* panel x = canvasW/2+0x4A [CONFIRMED @ 0x41FF5B] */
             float bar_y  = ((float)s_buttons[btn].y + 10.0f) * sy; /* centre 12px in 32px */
             float fill_y = ((float)s_buttons[btn].y + 11.0f) * sy; /* centre 10px in 32px */
             int   vol    = vols[vi];
@@ -3152,8 +3171,8 @@ static void frontend_render_two_player_options_overlay(float sx, float sy) {
 
     if (!s_buttons[0].active) return;
     if (!s_anim_complete) return;
-    frontend_draw_value_text(sx, sy, 344, s_buttons[0].y + 6, on_off[(s_two_player_mode & 4) ? 1 : 0], 0xFFFFFFFF);
-    frontend_draw_value_text(sx, sy, 344, s_buttons[1].y + 6, on_off[(s_two_player_mode & 8) ? 1 : 0], 0xFFFFFFFF);
+    frontend_draw_value_centered(sx, sy, s_buttons[0].y + 6, on_off[(s_two_player_mode & 4) ? 1 : 0], 0xFFFFFFFF);
+    frontend_draw_value_centered(sx, sy, s_buttons[1].y + 6, on_off[(s_two_player_mode & 8) ? 1 : 0], 0xFFFFFFFF);
     for (int i = 0; i <= 1; i++) fe_draw_option_arrows(i, sx, sy);
 
     /* SplitScreen.tga: sprite sheet, 64x32 per split-mode icon, rows stacked vertically.
@@ -3469,9 +3488,21 @@ static void frontend_render_track_selection_preview(float sx, float sy) {
         }
     }
     if (s_track_preview_surface > 0) {
-        fe_draw_surface_rect(s_track_preview_surface, 412.0f * sx, 135.0f * sy, 152.0f * sx, 224.0f * sy, 0xFFFFFFFF);
+        /* Draw track preview with same pattern as title TGA (which works):
+         * set TRANSLUCENT_LINEAR, draw quad directly, restore OPAQUE_LINEAR.
+         * Bypasses fe_draw_surface_rect to isolate whether its manual blend
+         * force is interfering with transparency. */
+        int tp_slot = s_track_preview_surface - 1;
+        if (tp_slot >= 0 && tp_slot < FE_MAX_SURFACES && s_surfaces[tp_slot].in_use) {
+            td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
+            fe_draw_quad(412.0f * sx, 135.0f * sy, 152.0f * sx, 224.0f * sy,
+                         0xFFFFFFFF, s_surfaces[tp_slot].tex_page, 0, 0, 1, 1);
+            td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
+        }
     }
-    /* Direction is shown by the Forwards button — no duplicate text here */
+    /* Draw L/R arrow indicators on Track and Direction buttons */
+    fe_draw_option_arrows(0, sx, sy);
+    fe_draw_option_arrows(1, sx, sy);
     if (!s_cheat_unlock_all &&
         s_selected_track >= 0 &&
         s_selected_track < 26 &&
@@ -6612,6 +6643,7 @@ static void Screen_TrackSelection(void) {
                 } else {
                     frontend_cycle_track(delta, 0, s_track_max);
                 }
+                frontend_play_sfx(2); /* ping2.wav cycle */
                 TD5_LOG_I(LOG_TAG, "TrackSel CYCLED: track=%d level=%d name=%s",
                           s_selected_track, td5_asset_level_number(s_selected_track),
                           frontend_get_track_name(s_selected_track));
