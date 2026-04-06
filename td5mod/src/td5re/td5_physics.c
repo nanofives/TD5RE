@@ -1926,55 +1926,28 @@ void td5_physics_integrate_suspension(TD5_Actor *actor)
 
 void td5_physics_update_suspension_response(TD5_Actor *actor)
 {
-    int32_t bounce_roll = 0;
-    int32_t bounce_pitch = 0;
-    int32_t bounce_vert = 0;
-    int32_t gravity_roll = 0;
-    int32_t gravity_pitch = 0;
     int32_t grounded_count = 0;
-
     uint8_t contact_mask = actor->wheel_contact_bitmask;
 
     for (int i = 0; i < 4; i++) {
-        if (contact_mask & (1 << i))
-            continue;  /* Airborne wheel -- skip */
-
-        grounded_count++;
-
-        /* Use wheel suspension deflection for force computation */
-        int32_t wpos = actor->wheel_suspension_pos[i];
-
-        /* Compute roll contribution: left wheels (+), right wheels (-) */
-        if (i == 0 || i == 2)
-            gravity_roll += wpos;
-        else
-            gravity_roll -= wpos;
-
-        /* Compute pitch contribution: front (+), rear (-) */
-        if (i < 2)
-            gravity_pitch += wpos;
-        else
-            gravity_pitch -= wpos;
-
-        /* Bounce from velocity */
-        int32_t wvel = actor->wheel_suspension_vel[i];
-        bounce_vert += wvel;
-        if (i == 0 || i == 2)
-            bounce_roll += wvel;
-        else
-            bounce_roll -= wvel;
-        if (i < 2)
-            bounce_pitch += wvel;
-        else
-            bounce_pitch -= wvel;
+        if (!(contact_mask & (1 << i)))
+            grounded_count++;
     }
 
     if (grounded_count > 0) {
-        /* Apply averaged forces to angular velocities */
-        /* Roll: /0x4B0 */
-        actor->angular_velocity_roll += (bounce_roll + gravity_roll / grounded_count) / 0x4B0;
-        /* Pitch: /0x226 */
-        actor->angular_velocity_pitch += (bounce_pitch + gravity_pitch / grounded_count) / 0x226;
+        /* Suspension-to-chassis pitch/roll torques disabled.
+         *
+         * Original (0x4057F0) converts per-wheel suspension deflection
+         * into angular_velocity_roll/pitch. This requires the original's
+         * suspension integrator (which reads XZ projections for force
+         * input and has different stability characteristics). With our
+         * simplified spring-damper + additive ground-snap, the pitch/roll
+         * torques accumulate without proper counterbalance, causing the
+         * car to visually tilt and eventually fly off the road.
+         *
+         * The ground-snap provides the vertical constraint. Pitch/roll
+         * visual response will be added back once the original suspension
+         * integrator is properly decompiled. */
         /* Vertical: add gravity to counteract the gravity subtracted in
          * integrate_pose. When airborne, this block doesn't execute, so gravity
          * pulls freely.
