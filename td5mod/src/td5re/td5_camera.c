@@ -716,15 +716,6 @@ after_flyin:
         SetCameraWorldPosition(g_camWorldPos[v]);
         OrientCameraTowardTarget(target, g_tracksideYawOffset[v]);
 
-        if (g_cameraTransitionActive > 0) {
-            static int s_chase_diag = 0;
-            if ((s_chase_diag++ % 30) == 0)
-                TD5_LOG_I(LOG_TAG, "chase-flyin v%d: visAng=%d R=%.0f off=(%d,%d,%d) wpos=(%d,%d,%d) cam=(%.1f,%.1f,%.1f)",
-                          v, orbit_visual_angle, current_radius,
-                          g_camOrbitOffset[v][0], g_camOrbitOffset[v][1], g_camOrbitOffset[v][2],
-                          g_camWorldPos[v][0], g_camWorldPos[v][1], g_camWorldPos[v][2],
-                          g_cameraPos[0], g_cameraPos[1], g_cameraPos[2]);
-        }
     }
 }
 
@@ -1741,8 +1732,12 @@ void td5_camera_tick(void)
     }
     /* Per-sim-tick camera update — matches CacheVehicleCameraAngles +
        UpdateChaseCamera inside the RunRaceFrame sim loop (0x0042B580).
-       Called once per fixed timestep tick from td5_game.c sim loop. */
-    for (int v = 0; v < 2; v++) {
+       Called once per fixed timestep tick from td5_game.c sim loop.
+       Only iterate active viewports: in single-screen, view 1 shares actor
+       slot 0 but its orbit angle is never advanced by the transition state
+       machine, so it would overwrite g_cameraPos with a stale value. */
+    int view_count = g_td5.split_screen_mode ? 2 : 1;
+    for (int v = 0; v < view_count; v++) {
         TD5_Actor *actor = td5_game_get_actor(g_actorSlotForView[v]);
         if (!actor && g_actor_table_base) {
             int slot = g_actorSlotForView[v];
