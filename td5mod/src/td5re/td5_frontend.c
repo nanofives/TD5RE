@@ -3037,9 +3037,7 @@ static void frontend_render_quick_race_overlay(float sx, float sy) {
     track_locked = (!s_cheat_unlock_all && !s_network_active &&
                     s_selected_track >= 0 && s_selected_track < 26 &&
                     s_track_lock_table[s_selected_track] != 0);
-    fe_draw_option_arrows(0, sx, sy);
     frontend_draw_value_text(sx, sy, 140, 106, car_name, 0xFFFFFFFF);
-    fe_draw_option_arrows(1, sx, sy);
     frontend_draw_value_text(sx, sy, 140, 226, track_name, 0xFFFFFFFF);
     if (car_locked) frontend_draw_value_text(sx, sy, 398, 126, "LOCKED", 0xFFFF4444);
     if (track_locked) frontend_draw_value_text(sx, sy, 398, 246, "LOCKED", 0xFFFF4444);
@@ -3084,7 +3082,6 @@ static void frontend_render_game_options_overlay(float sx, float sy) {
     frontend_draw_value_centered(sx, sy, s_buttons[4].y + 6, difficulty[s_game_option_difficulty % 3], 0xFFFFFFFF);
     frontend_draw_value_centered(sx, sy, s_buttons[5].y + 6, dynamics[s_game_option_dynamics & 1], 0xFFFFFFFF);
     frontend_draw_value_centered(sx, sy, s_buttons[6].y + 6, on_off[s_game_option_collisions & 1], 0xFFFFFFFF);
-    for (int i = 0; i <= 6; i++) fe_draw_option_arrows(i, sx, sy);
 }
 
 static void frontend_render_display_options_overlay(float sx, float sy) {
@@ -3103,7 +3100,6 @@ static void frontend_render_display_options_overlay(float sx, float sy) {
     frontend_draw_value_centered(sx, sy, s_buttons[1].y + 6, on_off[s_display_fog_enabled & 1], 0xFFFFFFFF);
     frontend_draw_value_centered(sx, sy, s_buttons[2].y + 6, speed_read[s_display_speed_units & 1], 0xFFFFFFFF);
     frontend_draw_value_centered(sx, sy, s_buttons[3].y + 6, damping, 0xFFFFFFFF);
-    for (int i = 0; i <= 3; i++) fe_draw_option_arrows(i, sx, sy);
 }
 
 static void frontend_render_sound_options_overlay(float sx, float sy) {
@@ -3111,7 +3107,6 @@ static void frontend_render_sound_options_overlay(float sx, float sy) {
     if (!s_anim_complete) return;
     /* SFX Mode is indicated by the Stereo/Mono icon; no extra text needed.
      * Volume levels are indicated by bar fill only; no numbers. */
-    for (int i = 0; i <= 2; i++) fe_draw_option_arrows(i, sx, sy);
 
     /* Image positions from FUN_0041EA90 (640x480 absolute):
      * Stereo/Mono icon: x=394, y=97, w=64, h=32
@@ -3173,7 +3168,6 @@ static void frontend_render_two_player_options_overlay(float sx, float sy) {
     if (!s_anim_complete) return;
     frontend_draw_value_centered(sx, sy, s_buttons[0].y + 6, on_off[(s_two_player_mode & 4) ? 1 : 0], 0xFFFFFFFF);
     frontend_draw_value_centered(sx, sy, s_buttons[1].y + 6, on_off[(s_two_player_mode & 8) ? 1 : 0], 0xFFFFFFFF);
-    for (int i = 0; i <= 1; i++) fe_draw_option_arrows(i, sx, sy);
 
     /* SplitScreen.tga: sprite sheet, 64x32 per split-mode icon, rows stacked vertically.
      * Drawn at x=394, y=97 (same formula as Controllers.tga in Control Options):
@@ -4045,6 +4039,32 @@ void td5_frontend_render_ui_rects(void) {
             fe_draw_quad(bx+inL, by+bh-inB-barV, bw-inL-inR, barV, gc, -1,0,0,1,1);
             fe_draw_quad(bx+inL, by+inT, barH, bh-inT-inB, gc, -1,0,0,1,1);
             fe_draw_quad(bx+bw-inR-barH, by+inT, barH, bh-inT-inB, gc, -1,0,0,1,1);
+        }
+    }
+
+    /* Option arrows drawn AFTER buttons so they render on top of the button fill.
+     * Original BltFast compositing placed arrows on top of the pre-baked button surface. */
+    if (s_anim_complete) {
+        switch (s_current_screen) {
+        case TD5_SCREEN_QUICK_RACE:
+            fe_draw_option_arrows(0, sx, sy);
+            fe_draw_option_arrows(1, sx, sy);
+            TD5_LOG_I("frontend", "fe_draw_option_arrows: quick_race pass");
+            break;
+        case TD5_SCREEN_GAME_OPTIONS:
+            for (int i = 0; i <= 6; i++) fe_draw_option_arrows(i, sx, sy);
+            break;
+        case TD5_SCREEN_DISPLAY_OPTIONS:
+            for (int i = 0; i <= 3; i++) fe_draw_option_arrows(i, sx, sy);
+            break;
+        case TD5_SCREEN_SOUND_OPTIONS:
+            for (int i = 0; i <= 2; i++) fe_draw_option_arrows(i, sx, sy);
+            break;
+        case TD5_SCREEN_TWO_PLAYER_OPTIONS:
+            for (int i = 0; i <= 1; i++) fe_draw_option_arrows(i, sx, sy);
+            break;
+        default:
+            break;
         }
     }
 
