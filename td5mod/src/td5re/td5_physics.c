@@ -409,14 +409,6 @@ void td5_physics_update_vehicle_actor(TD5_Actor *actor)
 
     /* 6. Dynamics dispatch */
     if (actor->vehicle_mode == 0 && !g_game_paused) {
-        /* Clear per-frame force accumulators.
-         * Original: RefreshWheelContacts OVERWRITES force_accum each frame
-         * with (wheel_y - ground_y + gravity). Since we skip that assignment
-         * (see BUG 6 comment in refresh_wheel_contacts), we must explicitly
-         * zero force_accum here to prevent frame-over-frame accumulation
-         * from apply_steering_torque. */
-        memset(actor->wheel_force_accum, 0, sizeof(actor->wheel_force_accum));
-
         /* Select effective grip: min of grip_reduction and race_position */
         uint8_t eff_grip = actor->grip_reduction;
         if (actor->race_position < eff_grip)
@@ -2403,13 +2395,14 @@ void td5_physics_refresh_wheel_contacts(TD5_Actor *actor)
             }
         }
 
-        /* Force for airborne detection.
-         * Original stores (wheel_y - ground_y + gravity) into wheel_force_accum,
-         * but the original's suspension integrator reads XZ projections instead
-         * (BUG 6). Since our suspension reads force_accum, storing gravity-biased
-         * values creates a feedback loop. Use >>8 for stable airborne detection;
-         * force_accum left at 0 (initialized at race start). */
+        /* Ground contact force for suspension input + airborne detection.
+         * Original (0x403720) stores (wheel_y - ground_y) >> 8 into
+         * wheel_force_accum each frame. This acts as the position reference
+         * signal for the spring-damper in integrate_suspension — without it,
+         * the velocity feedback (vel * response * spring_k) has no
+         * counterbalancing input and the system diverges. */
         int32_t force = (wheel_y - ground_y) >> 8;
+        actor->wheel_force_accum[i] = force;
 
         /* Dead zone */
         if (force > -0x200 && force < 0x200)
