@@ -1951,8 +1951,11 @@ void td5_physics_update_suspension_response(TD5_Actor *actor)
         actor->angular_velocity_roll += (bounce_roll + gravity_roll / grounded_count) / 0x4B0;
         /* Pitch: /0x226 */
         actor->angular_velocity_pitch += (bounce_pitch + gravity_pitch / grounded_count) / 0x226;
-        /* Vertical */
-        actor->linear_velocity_y += (bounce_vert / grounded_count);
+        /* Vertical: add gravity to counteract the gravity subtracted in
+         * integrate_pose. When grounded, net vertical force = bounce_vert only.
+         * When airborne, this block doesn't execute, so gravity pulls freely.
+         * [CONFIRMED @ 0x4057F0: iVar8 = iVar8 + DAT_00467380] */
+        actor->linear_velocity_y += (bounce_vert / grounded_count) + g_gravity_constant;
     }
 
     /* Clamp angular velocities */
@@ -2291,20 +2294,31 @@ void td5_physics_refresh_wheel_contacts(TD5_Actor *actor)
             }
         }
 
-        int32_t force = (wheel_y - ground_y) >> 8;
+        /* Compute force = (wheel_y - ground_y) + gravity and store into
+         * wheel_force_accum[i] to drive the suspension spring-damper.
+         * [CONFIRMED @ 0x403720: *local_4c = (*piVar8 - local_30) + DAT_00467380;
+         *  local_4c at param_1+0x17e = byte offset 0x2FC = wheel_force_accum] */
+        int32_t force = (wheel_y - ground_y) + g_gravity_constant;
 
-        /* Dead zone */
+        /* Dead zone [CONFIRMED @ 0x403720] */
         if (force > -0x200 && force < 0x200)
             force = 0;
 
-        /* Airborne detection */
+        /* Airborne detection [CONFIRMED @ 0x403720: threshold 0x801] */
         if (force > 0x800) {
             /* Wheel is airborne */
             actor->wheel_contact_bitmask |= (1 << i);
             force = 12000; /* default airborne force */
         } else {
             actor->wheel_contact_bitmask &= ~(1 << i);
+            /* Snap wheel Y to ground when grounded
+             * [CONFIRMED @ 0x403720: *piVar8 = local_30] */
+            actor->wheel_contact_pos[i].y = ground_y;
         }
+
+        /* Store force into accumulator for suspension integrator
+         * [CONFIRMED @ 0x403720: writes to param_1+0x17e stepping by +1] */
+        actor->wheel_force_accum[i] = force;
 
         /* Store high-res wheel world position */
         actor->wheel_world_positions_hires[i] = actor->wheel_contact_pos[i];
@@ -2994,7 +3008,15 @@ void td5_physics_init_vehicle_runtime(void)
             }
         }
 
-        update_vehicle_pose_from_physics(actor);
+        /* Original calls IntegrateVehiclePoseAndContacts (0x405E80) for racer
+         * slots (< 6). This runs full pose integration including ground-snap,
+         * ensuring cars start ON the road surface.
+         * [CONFIRMED @ 0x42F140: calls FUN_00405e80 for slots < 6] */
+        if (slot < 6) {
+            td5_physics_integrate_pose(actor);
+        } else {
+            update_vehicle_pose_from_physics(actor);
+        }
         TD5_LOG_I(LOG_TAG,
                   "Init vehicle runtime: slot=%d gear=%d rpm=%d grip=%u race_pos=%u",
                   slot,
