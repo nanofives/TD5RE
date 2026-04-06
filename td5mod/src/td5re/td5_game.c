@@ -952,8 +952,8 @@ int td5_game_run_race_frame(void) {
             }
         }
 
-        /* Accumulate fade */
-        s_fade_accumulator += g_td5.normalized_frame_dt * 2.0f;
+        /* Accumulate fade — ~2 seconds from 0 to 255 (128/s * dt) */
+        s_fade_accumulator += g_td5.normalized_frame_dt * 128.0f;
         if (s_fade_accumulator >= 255.0f) {
             s_fade_accumulator = 255.0f;
 
@@ -1264,6 +1264,11 @@ int td5_game_run_race_frame(void) {
     /* Pause overlay: panel + PAUSETXT atlas glyphs are all pre-built quads */
     if (s_pause_menu_active) {
         td5_hud_draw_pause_overlay();
+    }
+
+    /* Race end fade: directional wipe overlay (black bars closing in) */
+    if (g_td5.race_end_fade_state > 0) {
+        td5_hud_draw_race_fade(s_fade_accumulator, g_td5.fade_direction);
     }
 
     td5_hud_flush_text();

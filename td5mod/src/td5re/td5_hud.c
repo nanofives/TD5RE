@@ -2664,3 +2664,62 @@ void td5_hud_render(void)
      * Delegates to td5_hud_render_overlays with the current frame dt. */
     td5_hud_render_overlays(g_td5.normalized_frame_dt);
 }
+
+/* ========================================================================
+ * Race End Fade — Directional screen wipe (0x43E750 SetClipBounds)
+ *
+ * Renders black bars that close in from opposite screen edges.
+ * progress: 0.0 = no coverage, 255.0 = full screen black.
+ * direction: 0 = horizontal (left/right), 1 = vertical (top/bottom).
+ * Uses the pre-built FADEWHT fade quads (s_fade_quads[0..1]).
+ * ======================================================================== */
+
+void td5_hud_draw_race_fade(float progress, int direction)
+{
+    if (progress <= 0.0f) return;
+
+    float frac = progress / 255.0f;
+    if (frac > 1.0f) frac = 1.0f;
+
+    float sw = g_render_width_f;
+    float sh = g_render_height_f;
+
+    /* Two bars closing toward center. At frac=1.0 they each cover half
+     * the screen, meeting in the middle for full black. */
+    float bar_size;
+    float x0a, y0a, x1a, y1a;  /* bar A */
+    float x0b, y0b, x1b, y1b;  /* bar B */
+
+    if (direction == 0) {
+        /* Horizontal: bars from left and right edges */
+        bar_size = sw * 0.5f * frac;
+        x0a = 0.0f;      y0a = 0.0f;  x1a = bar_size;        y1a = sh;
+        x0b = sw - bar_size; y0b = 0.0f;  x1b = sw;           y1b = sh;
+    } else {
+        /* Vertical: bars from top and bottom edges */
+        bar_size = sh * 0.5f * frac;
+        x0a = 0.0f; y0a = 0.0f;           x1a = sw; y1a = bar_size;
+        x0b = 0.0f; y0b = sh - bar_size;  x1b = sw; y1b = sh;
+    }
+
+    /* Rebuild the two fade quads with updated positions and submit */
+    if (s_fadewht_atlas) {
+        float fu = (float)s_fadewht_atlas->atlas_x + 0.5f;
+        float fv = (float)s_fadewht_atlas->atlas_y + 0.5f;
+        int   ftex = s_fadewht_atlas->texture_page;
+
+        /* Bar A */
+        hud_build_quad(&s_fade_quads[0], 0, ftex,
+                       x0a, y0a, x1a, y1a,
+                       fu, fv, fu, fv,
+                       0xFF000000, HUD_DEPTH);
+        hud_submit_quad(&s_fade_quads[0]);
+
+        /* Bar B */
+        hud_build_quad(&s_fade_quads[1], 0, ftex,
+                       x0b, y0b, x1b, y1b,
+                       fu, fv, fu, fv,
+                       0xFF000000, HUD_DEPTH);
+        hud_submit_quad(&s_fade_quads[1]);
+    }
+}
