@@ -1747,11 +1747,7 @@ void td5_camera_tick(void)
         }
         if (!actor) continue;
         CacheVehicleCameraAngles((int)actor, v);
-        /* During race-start fly-in, disable heading tracking so the
-           transition state machine controls the orbit angle freely.
-           UpdateChaseCamera still runs to compute position/radius. */
-        int track_heading = (g_cameraTransitionActive > 0) ? 0 : 1;
-        UpdateChaseCamera((int)actor, track_heading, v);
+        UpdateChaseCamera((int)actor, 1, v);
     }
 }
 
