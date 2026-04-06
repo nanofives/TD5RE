@@ -108,7 +108,27 @@ const char **g_wanted_msg_line2 = s_default_wanted_line2;
 int     g_wanted_msg_timer      = 0;
 int     g_wanted_msg_index      = 0;
 
-const int8_t g_pause_glyph_widths[256] = {0};
+/* Pause-menu font glyph widths — extracted from original binary at 0x4660C8.
+ * 256 signed bytes: one per character code.  Row 0-1 (chars 0-31) are special
+ * graphics in the PAUSETXT atlas; row 2+ are normal printable ASCII. */
+const int8_t g_pause_glyph_widths[256] = {
+    /* 0x00 */ 54, 84, 72,  0, 37, 51,100,  0, 37, 51,100, 75, 80, 72,  0,  0,
+    /* 0x10 */ 37, 51,100, 77, 80, 72,  0,  0, 37,100, 32, 37,115,  0,  0,  0,
+    /* 0x20 */  8,  8, 10, 14, 14, 25, 21,  9,  9,  9, 10, 14, 10, 10,  8, 13,
+    /* 0x30 */ 17, 10, 17, 16, 17, 16, 16, 17, 17, 17,  8, 10, 12, 13, 11, 13,
+    /* 0x40 */ 18, 19, 15, 15, 17, 13, 13, 19, 17,  8, 12, 18, 13, 23, 17, 20,
+    /* 0x50 */ 16, 19, 16, 14, 14, 17, 18, 24, 19, 18, 17,  9, 13,  9, 13, 14,
+    /* 0x60 */  9, 16, 16, 11, 15, 15, 11, 15, 15,  8,  8, 15,  8, 21, 15, 16,
+    /* 0x70 */ 15, 16, 12, 12, 11, 15, 16, 22, 16, 16, 14,  9,  6, 10, 20, 20,
+    /* 0x80 */ 20, 20, 20, 20, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12,
+    /* 0x90 */ 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12,
+    /* 0xA0 */ 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12,
+    /* 0xB0 */ 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 20,
+    /* 0xC0 */ 18, 18, 18, 18, 18, 18, 24, 13, 12, 12, 12, 13,  8,  8, 10, 11,
+    /* 0xD0 */ 18, 16, 19, 19, 18, 18, 12, 18, 15, 15, 15, 15, 17, 14, 15, 14,
+    /* 0xE0 */ 14, 14, 14, 14, 14, 23, 11, 14, 14, 14, 14,  7,  7, 10, 12, 12,
+    /* 0xF0 */ 14, 14, 14, 14, 14, 14, 12, 14, 14, 14, 14, 14, 14, 15, 15, 12,
+};
 
 /* English audio-options overlay string table. */
 static const char *s_eng_pause_strings[] = {
@@ -781,6 +801,8 @@ void td5_hud_init_font_atlas(void)
         TD5_AtlasEntry *speedo_entry = td5_asset_find_atlas_entry(NULL, "SPEEDO");
         if (speedo_entry && speedo_entry->texture_page > 0 &&
             !td5_asset_static_tpage_is_real((int)(speedo_entry->texture_page - 700))) {
+            /* Only generate synthetic speedo dial when tpage4.dat is missing.
+             * When the real dump texture exists, use it as-is. */
             static uint8_t s_speedo_page_buf[256 * 256 * 4];
             memset(s_speedo_page_buf, 0, sizeof(s_speedo_page_buf));
 
@@ -2311,15 +2333,13 @@ void td5_hud_init_minimap_layout(void)
 
         int off = 0x4500 + (int)t * TD5_HUD_GLYPH_QUAD_SIZE;
         if (off + TD5_HUD_GLYPH_QUAD_SIZE <= TD5_HUD_MINIMAP_BUF_SIZE) {
-            /* tpage4.dat (scanback) is not extracted; draw solid dark background
-             * instead of the missing scanline texture to avoid magenta artifact. */
             hud_build_quad(
                 s_minimap_quad_buf + off,
-                1, 0,
+                0, scanback->texture_page,
                 tx0, ty0,
                 tx0 + tile_w, ty0 + tile_h,
-                0.0f, 0.0f, 0.0f, 0.0f,
-                0xB0000000, HUD_DEPTH4
+                bg_u0, bg_v0, bg_u1, bg_v1,
+                0x60FFFFFF, HUD_DEPTH4
             );
         }
     }
@@ -2441,7 +2461,7 @@ void td5_hud_init_pause_menu(int page_index)
      * From binary: x0=1-half_w, x1=half_w-1; cursor=3 default (CONTINUE). */
     s_pause_selbox_atlas = selbox_e;
     s_pause_sel_box = NULL;
-    s_pause_selbox_base_y = -33.0f;
+    s_pause_selbox_base_y = -52.0f;  /* must match text_y so selbox aligns with text rows */
     {
         float sel_x0 = 1.0f - s_pause_half_width;
         float sel_x1 = s_pause_half_width - 1.0f;
@@ -2514,11 +2534,13 @@ void td5_hud_init_pause_menu(int page_index)
         }
 
         float cursor_x = start_x;
+        float atlas_ox = (float)pausetxt->atlas_x;
+        float atlas_oy = (float)pausetxt->atlas_y;
         for (int c = 0; c < len; c++) {
             uint8_t ch = (uint8_t)str[c];
             int glyph_w = (g_pause_glyph_widths[ch] * 2) / 3;
-            float glyph_u = (float)(ch & 0x0F) * 16.0f + 0.5f;
-            float glyph_v = (float)(ch >> 4) * 16.0f + 0.5f;
+            float glyph_u = atlas_ox + (float)(ch & 0x0F) * 16.0f + 0.5f;
+            float glyph_v = atlas_oy + (float)(ch >> 4) * 16.0f + 0.5f;
             PAUSE_ADD(cursor_x + 0.5f, text_y + 0.5f,
                       cursor_x + (float)(glyph_w - 1) + 0.5f, text_y + 16.0f,
                       glyph_u, glyph_v,
@@ -2535,8 +2557,13 @@ void td5_hud_init_pause_menu(int page_index)
 #undef PAUSE_BUF
 
     TD5_LOG_I(LOG_TAG,
-              "pause menu: page=%d item_count=%d theme=page_%d",
-              page_index, string_offset / 8, page_index);
+              "pause menu: page=%d items=%d quads=%d half_w=%.0f "
+              "pausetxt_atlas=(%d,%d) selbox_base_y=%.0f",
+              page_index, string_offset / 8, s_pause_quad_count,
+              s_pause_half_width,
+              pausetxt ? pausetxt->atlas_x : -1,
+              pausetxt ? pausetxt->atlas_y : -1,
+              s_pause_selbox_base_y);
 }
 
 /* ========================================================================
