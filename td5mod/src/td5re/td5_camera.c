@@ -26,144 +26,145 @@ extern int g_replay_mode;
 
 /* ========================================================================
  * External functions (defined in other modules, linked at build time)
- *
- * These correspond to original binary functions called by camera code.
  * ======================================================================== */
 
-/* Trig lookup tables (0x40a6a0 .. 0x40a720) */
-extern float  CosFloat12bit(unsigned int angle);   /* 0x40a6a0 */
-extern float  SinFloat12bit(int angle);             /* 0x40a6c0 */
-extern int    CosFixed12bit(unsigned int angle);    /* 0x40a6e0 */
-extern int    SinFixed12bit(int angle);             /* 0x40a700 */
-extern int    AngleFromVector12(int x, int z);      /* 0x40a720 */
+/* Trig (td5_render.c) */
+extern float  CosFloat12bit(unsigned int angle);
+extern float  SinFloat12bit(int angle);
+extern int    CosFixed12bit(unsigned int angle);
+extern int    SinFixed12bit(int angle);
+extern int    AngleFromVector12(int x, int z);
 
-/* Matrix math (0x42da10, 0x42dbd0, 0x42e1e0, 0x42e2e0) */
-extern void MultiplyRotationMatrices3x3(float *A, float *B, float *out);  /* 0x42da10 */
-extern void TransformVector3ByBasis(float *matrix, void *vec, int *out);  /* 0x42dbd0 -- variant for short[3] input */
-extern void BuildRotationMatrixFromAngles(float *out, short *angles);     /* 0x42e1e0 */
-extern void ConvertFloatVec3ToShortAngles(short *in, short *out);         /* 0x42e2e0 -- transforms through loaded render matrix */
+/* Matrix math (td5_render.c) */
+extern void MultiplyRotationMatrices3x3(float *A, float *B, float *out);
+extern void TransformVector3ByBasis(float *matrix, void *vec, int *out);
+extern void BuildRotationMatrixFromAngles(float *out, short *angles);
+extern void ConvertFloatVec3ToShortAngles(short *in, short *out);
+extern void LoadRenderRotationMatrix(float *matrix);
 
-/* Render matrix load (0x43da80) */
-extern void LoadRenderRotationMatrix(float *matrix);    /* 0x43da80 -- variant taking float[12] */
+/* Track position (td5_track.c) */
+extern void UpdateActorTrackPosition(short *probe, int *pos);
+extern void ComputeActorTrackContactNormal(short *probe, int *pos, int *out_y);
 
-/* Track position (0x4440f0, 0x445450) */
-extern void UpdateActorTrackPosition(short *probe, int *pos);              /* 0x4440f0 */
-extern void ComputeActorTrackContactNormal(short *probe, int *pos, int *out_y); /* 0x445450 */
-
-/* Spline (0x441f90, 0x442090) */
-extern void BuildCubicSpline3D(int *spline_state, int control_points);     /* 0x441f90 */
-extern void EvaluateCubicSpline3D(int *out_pos, int *spline_state, int t); /* 0x442090 */
-
-/* Projection recompute (0x43e900) */
-extern void RecomputeTracksideProjectionScale(void);    /* 0x43e900 */
-
-/* HUD indicator (0x40a260) */
-extern void UpdateCameraTransitionHudIndicator(int view, int actor_index); /* 0x40a260 */
+/* Forward declarations for functions defined at end of this file */
+void BuildCubicSpline3D(int *spline_state, int control_points);
+void EvaluateCubicSpline3D(int *out_pos, int *spline_state, int t);
+void RecomputeTracksideProjectionScale(void);
+void UpdateCameraTransitionHudIndicator(int view, int actor_index);
+uint32_t td5_compute_heading_delta(void *route_entry);
 
 /* ========================================================================
- * External globals (mapped from original binary addresses)
+ * Camera Globals (migrated from td5re_stubs.c — owned by this module)
  * ======================================================================== */
 
 /* --- World scale --- */
-extern float  g_worldToRenderScale;       /* 0x4749D0 -- world int -> float scale */
-extern float  g_subTickFraction;          /* 0x4AAF60 -- interpolation factor [0..1) */
+float  g_worldToRenderScale = 0.00390625f;  /* 1/256 */
+float  g_subTickFraction    = 0.0f;
 
 /* --- Projection / FOV --- */
-extern float  g_projectionScale;          /* 0x467364 -- FOV control */
-extern int    g_depthFovFactor;           /* 0x467368 -- integer depth/FOV factor */
-extern float  g_projConst1;              /* 0x45D5F4 -- projection constant 1.0 */
-extern float  g_projDepthScale;          /* 0x45D694 -- 65000.0 */
-extern float  g_projFovScale;            /* 0x45D698 -- 0.00024414063 = 1/4096 */
-extern int    g_projDepthInt;            /* 0x467360 -- (int)(projScale * 65000) */
-extern float  g_invDistScale;            /* 0x46737C -- 1/sqrt normalization */
+float  g_projectionScale    = 1.0f;
+int    g_depthFovFactor     = 0;
+float  g_projConst1         = 1.0f;
+float  g_projDepthScale     = 65000.0f;
+float  g_projFovScale       = 0.00024414063f; /* 1/4096 */
+int    g_projDepthInt       = 0;
+float  g_invDistScale       = 1.0f;
 
 /* --- Camera output matrices --- */
-extern float  g_cameraBasis[9];          /* 0x4AAFA0 -- primary 3x3 view rotation */
-extern float  g_cameraPos[3];           /* 0x4AAFC4 -- camera world position (float) */
-extern float  g_cameraBasisWork[12];     /* 0x4AAFE0 -- working copy (3x3 + translation) */
-extern float  g_cameraSecondary[9];      /* 0x4AB070 -- secondary rotation matrix */
-extern float  g_cameraTertiary[9];       /* 0x4AB040 -- tertiary rotation matrix */
+float  g_cameraBasis[9]     = { 1,0,0, 0,1,0, 0,0,1 };
+float  g_cameraPos[3]       = { 0, 0, 0 };
+float  g_cameraBasisWork[12] = { 1,0,0, 0,1,0, 0,0,1, 0,0,0 };
+float  g_cameraSecondary[9] = { 1,0,0, 0,1,0, 0,0,1 };
+float  g_cameraTertiary[9]  = { 1,0,0, 0,1,0, 0,0,1 };
 
 /* --- Per-view camera state arrays --- */
-extern int    g_camElevationAngleFP[2];     /* 0x482E0C, stride 4 */
-extern short  g_camCachedAngles[2][4];      /* 0x482E18, stride 8 -- {pitch, yaw, roll, ?} */
-extern short  g_camOffsetVec[2][4];         /* 0x482EA0, stride 8 */
-extern float  g_camSmoothedHeight[2];       /* 0x482EB0, stride 4 */
-extern int    g_camHeightSampleOfs[2];      /* 0x482EB8, stride 4 */
-extern int    g_camTrackSpanOfs[2];         /* 0x482EC0, stride 4 */
-extern int    g_camBehaviorType[2];         /* 0x482EC8, stride 4 */
-extern float  g_camOrbitRadiusScale[2];     /* 0x482ED0, stride 4 */
-extern int    g_camOrbitOffset[2][3];       /* 0x482ED8, stride 12 */
-extern int    g_camFlyInCounter[2];         /* 0x482EF0, stride 4 */
-extern int    g_camRotationSlot[2];         /* 0x482EF8, stride 4 */
-extern float  g_camCurrentRadius[2];        /* 0x482F00, stride 4 */
-extern int    g_camSplineParam[2];          /* 0x482F08, stride 4 */
-extern float  g_camTargetHeight[2];         /* 0x482F10, stride 4 */
-extern int    g_camOrbitAngleFP[2];         /* 0x482F18, stride 4 */
-extern int    g_camAnchorSpan[2];           /* 0x482F20, stride 4 */
-extern int    g_camPresetChangeFlag[2];     /* 0x482F28, stride 4 */
-extern int    g_camWorldPos[2][3];          /* 0x482F30, stride 12 */
-extern short  g_camOrientShort[2][4];       /* 0x482F50, stride 8 */
-extern int    g_camHeadingDelta20[2];       /* 0x482F60, stride 4 */
-extern int    g_camSplineNodeCount[2];      /* 0x482F68, stride 4 */
-extern int    g_camYawOffset[2];            /* 0x482F70, stride 4 */
-extern int    g_camReserved78[2];           /* 0x482F78, stride 4 */
-extern int    g_camSplineAdvRate[2];        /* 0x482F80, stride 4 */
-extern int    g_camAnchorX[2];              /* 0x482F88, stride 4 */
-extern int    g_camHeightParam[2];          /* 0x482F90, stride 4 */
-extern int    g_camAnchorZ[2];              /* 0x482F98, stride 4 */
-extern int    g_camStoredPitch[2];          /* 0x482FA0, stride 4 */
+int    g_camElevationAngleFP[2]     = {0};
+short  g_camCachedAngles[2][4]      = {{0}};
+short  g_camOffsetVec[2][4]         = {{0}};
+float  g_camSmoothedHeight[2]       = {0};
+int    g_camHeightSampleOfs[2]      = {0};
+int    g_camTrackSpanOfs[2]         = {0};
+int    g_camBehaviorType[2]         = {0};
+float  g_camOrbitRadiusScale[2]     = {0};
+int    g_camOrbitOffset[2][3]       = {{0}};
+int    g_camFlyInCounter[2]         = {0};
+int    g_camRotationSlot[2]         = {0};
+float  g_camCurrentRadius[2]        = {0};
+int    g_camSplineParam[2]          = {0};
+float  g_camTargetHeight[2]         = {0};
+int    g_camOrbitAngleFP[2]         = {0};
+int    g_camAnchorSpan[2]           = {0};
+int    g_camPresetChangeFlag[2]     = {0};
+int    g_camWorldPos[2][3]          = {{0}};
+short  g_camOrientShort[2][4]       = {{0}};
+int    g_camHeadingDelta20[2]       = {0};
+int    g_camSplineNodeCount[2]      = {0};
+int    g_camYawOffset[2]            = {0};
+int    g_camReserved78[2]           = {0};
+int    g_camSplineAdvRate[2]        = {0};
+int    g_camAnchorX[2]              = {0};
+int    g_camHeightParam[2]          = {0};
+int    g_camAnchorZ[2]              = {0};
+int    g_camStoredPitch[2]          = {0};
 
 /* --- Scalar camera globals --- */
-extern int    g_raceCameraPresetId[2];      /* 0x482FD0, stride 4 (view 0 & 1) */
-extern int    g_raceCameraPresetMode[2];    /* 0x482FD8, stride 4 (view 0 & 1) */
-extern int    g_cameraProfileIndex[2];      /* 0x482FC8, stride 4 */
-extern int    g_cameraLastProjScale[2];     /* 0x482DEC, stride 4 */
-extern int    g_cameraProjDist[2];          /* 0x482DFC, stride 4 */
-extern int    g_cameraProjScaleComp[2];     /* 0x482E04, stride 4 */
-extern int    g_cameraPrevPresetId[2];      /* 0x482DF4, stride 4 */
+int    g_raceCameraPresetId[2]      = {0};
+int    g_raceCameraPresetMode[2]    = {0};
+int    g_cameraProfileIndex[2]      = {0};
+int    g_cameraLastProjScale[2]     = {0};
+int    g_cameraProjDist[2]          = {0};
+int    g_cameraProjScaleComp[2]     = {0};
+int    g_cameraPrevPresetId[2]      = {0};
 
-extern unsigned char g_camPackedSave[2];    /* 0x482F48 -- packed {7-bit preset | 1-bit mode} */
+unsigned char g_camPackedSave[2]    = {0};
 
 /* --- Trackside --- */
-extern int    g_tracksideCameraProfileCount;        /* 0x482DE8 */
-extern short *g_tracksideCameraProfiles;             /* 0x4AEE18 -- pointer to profile array */
-extern int    g_tracksideTimer[2];                   /* 0x463088, stride 4 */
-extern unsigned int g_tracksideYawOffset[2];         /* 0x463080, stride 4 */
+int    g_tracksideCameraProfileCount = 0;
+short *g_tracksideCameraProfiles     = NULL;
+int    g_tracksideTimer[2]           = {0};
+unsigned int g_tracksideYawOffset[2] = {0};
 
 /* --- Track geometry tables --- */
-extern int    g_spanTable;               /* 0x4C3D9C -- pointer to span record array */
-extern int    g_vertexTable;             /* 0x4C3D98 -- pointer to vertex array */
+int    g_spanTable      = 0;
+int    g_vertexTable    = 0;
 
-/* --- Race state --- */
-extern int    g_cameraTransitionActive;  /* 0x4AAEF0 -- transition timer */
-extern int    g_camTransitionGate;       /* 0x4AAF8C -- nonzero while blocking input */
-extern int    g_actorSlotForView[2];     /* 0x466EA0, stride 4 -- actor index per view */
-extern int    g_actorBaseAddr;           /* 0x4AB310 -- base of actor table (offset form) */
-extern uint8_t *g_actor_table_base;
-extern int    g_trackType;               /* 0x466E94 -- 0=circuit, 1=point-to-point */
-extern unsigned char g_actorAliveTable[12]; /* 0x4AADF5, stride 4 -- per-actor alive flag */
-extern int    g_lookLeftRight[2];        /* 0x466F88, stride 4 */
+/* --- Race state (camera-owned) --- */
+int    g_cameraTransitionActive = 0xA000;
+int    g_camTransitionGate      = 0;
+extern int    g_actorSlotForView[2];     /* td5_game.c */
+extern int    g_actorBaseAddr;           /* td5_game.c */
+extern uint8_t *g_actor_table_base;      /* td5_game.c */
+int    g_trackType              = 0;
+unsigned char g_actorAliveTable[12] = {0};
+int    g_lookLeftRight[2]       = {0};
 
 /* --- Camera spline workspace --- */
-extern int    g_camSplineState[2][15];   /* 0x482E28, stride 0x3C -- cubic spline coefficients */
+int    g_camSplineState[2][15]  = {{0}};
 
 /* --- Constants in .data --- */
-extern int    g_flyInThreshold;          /* 0x463090 -- default 40 */
-extern float  g_const256;               /* 0x45D5D8 -- 256.0 */
-extern float  g_const32;                /* 0x45D5DC -- 32.0 */
-extern float  g_dampWeight;             /* 0x4749C8 -- 0.125 */
-extern float  g_radiusScale;            /* 0x4749D0 -- 1/256 = 0.00390625 */
-extern float  g_nearZeroThreshold;      /* 0x45D624 -- degenerate look-at threshold */
+int    g_flyInThreshold  = 40;
+float  g_const256        = 256.0f;
+float  g_const32         = 32.0f;
+float  g_dampWeight      = 0.125f;
+float  g_nearZeroThreshold = 0.001f;
 
-/* ========================================================================
- * Camera Preset Table (7 entries at 0x463098)
- *
- * We declare this as an extern referencing the original .data section.
- * The table is 7 x 16 bytes = 112 bytes.
- * ======================================================================== */
-
-extern TD5_CameraPreset g_cameraPresets[TD5_CAMERA_PRESET_COUNT]; /* 0x463098 */
+/* Camera presets from original binary at 0x463098 (7 entries, 16 bytes each) */
+TD5_CameraPreset g_cameraPresets[TD5_CAMERA_PRESET_COUNT] = {
+    { 0, 600,  2100, 510, 0, 0 },  /* preset  0: far chase */
+    { 0, 550,  1710, 110, 0, 0 },  /* preset  1: medium chase */
+    { 0, 475,  1500, 310, 0, 0 },  /* preset  2: close chase high */
+    { 0, 400,  1350, 110, 0, 0 },  /* preset  3: close chase low */
+    { 0, 325,  1200, 240, 0, 0 },  /* preset  4: tight chase */
+    { 0, 240,  1550, 110, 0, 0 },  /* preset  5: wide low */
+    { 1, 0,    0,    0,   (int)0xFF380000, 0 },  /* preset  6: bumper cam */
+    { 0, 0,    0,    0,   0, 0 },  /* preset  7: unused */
+    { 0, 0,    0,    0,   0, 0 },  /* preset  8: unused */
+    { 0, 0,    0,    0,   0, 0 },  /* preset  9: unused */
+    { 0, 400,  1600, 310, 0, 0 },  /* preset 10: fly-in level>=3 (0x401E10) */
+    { 0, 2000, 1400, 110, 0, 0 },  /* preset 11: fly-in level 2  (high elevation side shot) */
+    { 0, 300,  1600, 310, 0, 0 },  /* preset 12: fly-in level 1  */
+    { 0, 550,  3800, 110, 0, 0 },  /* preset 13: fly-in level 0  (wide pull-back before GO) */
+};
 
 /* ========================================================================
  * Spline template table (6 templates x 8 shorts, on stack in original)
@@ -240,9 +241,10 @@ void BuildCameraBasisFromAngles(short *angles)
     g_cameraBasis[3] = 0.0f; g_cameraBasis[4] = 1.0f; g_cameraBasis[5] = 0.0f;
     g_cameraBasis[6] = 0.0f; g_cameraBasis[7] = 0.0f; g_cameraBasis[8] = 1.0f;
 
-    /* Yaw (param_1[1]): center=[1,1]=1, sin->[0,0],[2,2], cos->[0,2], -cos->[2,0] */
-    s = SinFloat12bit(yaw);
-    c = CosFloat12bit((unsigned int)(unsigned short)yaw);
+    /* Yaw (param_1[1]): center=[1,1]=1, sin->[0,0],[2,2], cos->[0,2], -cos->[2,0]
+     * NOTE: sin/cos swapped — see BuildRotationMatrixFromAngles comment. */
+    s = CosFloat12bit((unsigned int)(unsigned short)yaw);
+    c = SinFloat12bit(yaw);
     rot[4] = 1.0f;
     rot[3] = 0.0f; rot[5] = 0.0f;
     rot[1] = 0.0f; rot[7] = 0.0f;
@@ -251,8 +253,8 @@ void BuildCameraBasisFromAngles(short *angles)
     MultiplyRotationMatrices3x3(rot, g_cameraBasis, g_cameraBasis);
 
     /* Pitch (param_1[0]): center=[0,0]=1, sin->[1,1],[2,2], cos->[2,1], -cos->[1,2] */
-    s = SinFloat12bit(pitch);
-    c = CosFloat12bit((unsigned int)(unsigned short)pitch);
+    s = CosFloat12bit((unsigned int)(unsigned short)pitch);
+    c = SinFloat12bit(pitch);
     rot[0] = 1.0f;
     rot[1] = 0.0f; rot[2] = 0.0f;
     rot[3] = 0.0f; rot[6] = 0.0f;
@@ -261,8 +263,8 @@ void BuildCameraBasisFromAngles(short *angles)
     MultiplyRotationMatrices3x3(rot, g_cameraBasis, g_cameraBasis);
 
     /* Roll (param_1[2]): center=[2,2]=1, sin->[0,0],[1,1], cos->[1,0], -cos->[0,1] */
-    s = SinFloat12bit(roll);
-    c = CosFloat12bit((unsigned int)(unsigned short)roll);
+    s = CosFloat12bit((unsigned int)(unsigned short)roll);
+    c = SinFloat12bit(roll);
     rot[8] = 1.0f;
     rot[2] = 0.0f; rot[5] = 0.0f;
     rot[6] = 0.0f; rot[7] = 0.0f;
@@ -277,8 +279,8 @@ void BuildCameraBasisFromAngles(short *angles)
     g_cameraSecondary[6] = 0.0f; g_cameraSecondary[7] = 0.0f; g_cameraSecondary[8] = 1.0f;
 
     /* Pitch */
-    s = SinFloat12bit(pitch);
-    c = CosFloat12bit((unsigned int)(unsigned short)pitch);
+    s = CosFloat12bit((unsigned int)(unsigned short)pitch);
+    c = SinFloat12bit(pitch);
     rot[0] = 1.0f;
     rot[1] = 0.0f; rot[2] = 0.0f;
     rot[3] = 0.0f; rot[6] = 0.0f;
@@ -287,8 +289,8 @@ void BuildCameraBasisFromAngles(short *angles)
     MultiplyRotationMatrices3x3(rot, g_cameraSecondary, g_cameraSecondary);
 
     /* Roll */
-    s = SinFloat12bit(roll);
-    c = CosFloat12bit((unsigned int)(unsigned short)roll);
+    s = CosFloat12bit((unsigned int)(unsigned short)roll);
+    c = SinFloat12bit(roll);
     rot[8] = 1.0f;
     rot[2] = 0.0f; rot[5] = 0.0f;
     rot[6] = 0.0f; rot[7] = 0.0f;
@@ -303,8 +305,8 @@ void BuildCameraBasisFromAngles(short *angles)
     g_cameraTertiary[6] = 0.0f; g_cameraTertiary[7] = 0.0f; g_cameraTertiary[8] = 1.0f;
 
     /* Roll */
-    s = SinFloat12bit(roll);
-    c = CosFloat12bit((unsigned int)(unsigned short)roll);
+    s = CosFloat12bit((unsigned int)(unsigned short)roll);
+    c = SinFloat12bit(roll);
     rot[8] = 1.0f;
     rot[2] = 0.0f; rot[5] = 0.0f;
     rot[6] = 0.0f; rot[7] = 0.0f;
@@ -418,9 +420,9 @@ void OrientCameraTowardTarget(int *target_pos, unsigned int yaw_offset)
     g_cameraBasis[5] = -g_cameraBasis[5];
     g_cameraBasis[1] = 0.0f;
 
-    /* Apply yaw offset rotation */
-    s = SinFloat12bit((int)yaw_offset);
-    c = CosFloat12bit(yaw_offset);
+    /* Apply yaw offset rotation (sin/cos swapped — see BuildRotationMatrixFromAngles) */
+    s = CosFloat12bit(yaw_offset);
+    c = SinFloat12bit((int)yaw_offset);
     yaw_rot[0] = s;  yaw_rot[1] = -c;  yaw_rot[2] = 0.0f;
     yaw_rot[3] = 0.0f; yaw_rot[4] = 0.0f; yaw_rot[5] = 0.0f;
     yaw_rot[6] = 0.0f; yaw_rot[7] = 0.0f; yaw_rot[8] = 1.0f;
@@ -662,11 +664,13 @@ after_flyin:
         orient[2] = -(short)((unsigned int)(int)(CosFloat12bit(look_angle) *
                     g_camOrbitRadiusScale[v] + 0.5f) >> 8);
 
-        /* Transform through terrain rotation matrix */
+        /* Transform through terrain rotation matrix.
+         * BuildRotationMatrixFromAngles now uses the same swapped sin/cos
+         * convention (s=CosFloat12bit, c=SinFloat12bit) as the inline
+         * camera basis code, so this transform is correct. */
         LoadRenderRotationMatrix(terrain_matrix);
         ConvertFloatVec3ToShortAngles(orient, transformed_angles);
 
-        /* Store all 3 transformed components back */
         orient[0] = transformed_angles[0];
         orient[1] = transformed_angles[1];
         orient[2] = transformed_angles[2];
@@ -765,16 +769,21 @@ void UpdateTracksideOrbitCamera(int actor, int is_active, int view)
         orient[1] = (short)((unsigned int)g_camElevationAngleFP[v] >> 8);
         orient[2] = (short)(int)(-(CosFloat12bit(heading) * radius_scaled) + 0.5f);
 
-        /* Transform through actor's rotation matrix */
+        /* Transform through actor's rotation matrix.
+         * DISABLED: same sin/cos convention bug as in UpdateChaseCamera.
+         * See comment there for details. */
+#if 0
         LoadRenderRotationMatrix((float *)(actor + 0x120));
         {
-            short out_ang[2];
+            short out_ang[4];
             ConvertFloatVec3ToShortAngles(orient, out_ang);
 
-            /* Store back */
             g_camOrientShort[v][0] = out_ang[0];
             g_camOrientShort[v][1] = out_ang[1];
         }
+#endif
+        g_camOrientShort[v][0] = orient[0];
+        g_camOrientShort[v][1] = orient[1];
     }
 
     /* Smooth height */
@@ -944,40 +953,40 @@ void UpdateRaceCameraTransitionState(int actor, int view)
         return;
     }
 
-    /* Compute level from timer */
+    /* Compute level from timer: timer / 0x2800 gives 4 levels (0,1,2,3+) */
     {
         int level = g_cameraTransitionActive / 0x2800;
         int new_preset;
         int force_reload;
+        float frame_delta = g_subTickFraction;
 
         if (level == 0) {
+            /* Level 0: preset 13, orbit radius shrinks by frameDelta * 3584.0 */
             new_preset = 0x0D;
             g_raceCameraPresetId[v] = new_preset;
-            {
-                /* Adjust orbit radius based on __ftol of some float expression */
-                /* Original: lVar5 = __ftol(); then subtract from radius */
-                /* This is a transition effect -- the preset handles it */
-            }
-            g_camOrbitRadiusScale[v] -= 0.0f; /* placeholder -- actual ftol result */
+            g_camOrbitRadiusScale[v] -= (float)(int)(frame_delta * 3584.0f);
 
             if (g_cameraPrevPresetId[v] == 0x0D) goto store_prev;
             force_reload = 0;
         } else if (level == 1) {
+            /* Level 1: preset 12, orbit angle advances by frameDelta * 1024.0 */
             new_preset = 0x0C;
             g_raceCameraPresetId[v] = new_preset;
-            g_camOrbitAngleFP[v] += 0; /* ftol addition */
+            g_camOrbitAngleFP[v] += (int)(frame_delta * 1024.0f);
             if (g_cameraPrevPresetId[v] == 0x0C) goto store_prev;
             force_reload = 0;
         } else if (level == 2) {
+            /* Level 2: preset 11, orbit angle advances by frameDelta * 1024.0 */
             new_preset = 0x0B;
             g_raceCameraPresetId[v] = new_preset;
-            g_camOrbitAngleFP[v] += 0; /* ftol addition */
+            g_camOrbitAngleFP[v] += (int)(frame_delta * 1024.0f);
             if (g_cameraPrevPresetId[v] == 0x0B) goto store_prev;
             force_reload = 0;
         } else {
+            /* Level 3+: preset 10, orbit angle advances by frameDelta * 256.0 */
             new_preset = 10;
             g_raceCameraPresetId[v] = new_preset;
-            g_camOrbitAngleFP[v] += 0; /* ftol addition */
+            g_camOrbitAngleFP[v] += (int)(frame_delta * 256.0f);
             if (g_cameraPrevPresetId[v] == 10) goto store_prev;
             force_reload = 1;
         }
@@ -987,6 +996,13 @@ void UpdateRaceCameraTransitionState(int actor, int view)
 
     store_prev:
         g_cameraPrevPresetId[v] = g_raceCameraPresetId[v];
+        {
+            static int s_flyin_log_ctr = 0;
+            if ((s_flyin_log_ctr++ % 30) == 0)
+                TD5_LOG_I(LOG_TAG, "fly-in: level=%d preset=%d orbitFP=0x%X radius=%.0f delta=%.3f",
+                          level, g_raceCameraPresetId[v], g_camOrbitAngleFP[v],
+                          g_camOrbitRadiusScale[v], frame_delta);
+        }
     }
 }
 
@@ -1609,7 +1625,7 @@ static void sample_span_center_world(int span_index, int *out_pos)
         return;
 
     out_pos[0] = sp->origin_x + (vl0->x + vl1->x + vr0->x + vr1->x) / 4;
-    out_pos[1] = sp->pad_10 + (vl0->y + vl1->y + vr0->y + vr1->y) / 4;
+    out_pos[1] = sp->origin_y + (vl0->y + vl1->y + vr0->y + vr1->y) / 4;
     out_pos[2] = sp->origin_z + (vl0->z + vl1->z + vr0->z + vr1->z) / 4;
 }
 
@@ -1727,7 +1743,11 @@ void td5_camera_tick(void)
         }
         if (!actor) continue;
         CacheVehicleCameraAngles((int)actor, v);
-        UpdateChaseCamera((int)actor, 1, v);
+        /* During race-start fly-in, disable heading tracking so the
+           transition state machine controls the orbit angle freely.
+           UpdateChaseCamera still runs to compute position/radius. */
+        int track_heading = (g_cameraTransitionActive > 0) ? 0 : 1;
+        UpdateChaseCamera((int)actor, track_heading, v);
     }
 }
 
@@ -1853,4 +1873,91 @@ void td5_camera_get_basis(float *right, float *up, float *forward)
     for (i = 0; i < 3; i++) right[i]   = g_cameraBasis[i];
     for (i = 0; i < 3; i++) up[i]      = g_cameraBasis[3 + i];
     for (i = 0; i < 3; i++) forward[i] = g_cameraBasis[6 + i];
+}
+
+/* ========================================================================
+ * Spline Functions (migrated from td5re_stubs.c)
+ * ======================================================================== */
+
+void BuildCubicSpline3D(int *spline_state, int control_points) {
+    /*
+     * Catmull-Rom spline builder (0x441F90).
+     * Input: 4 control points at control_points, each 3 ints (X,Y,Z in 8.8 fixed).
+     * Output: 15 ints at spline_state:
+     *   [0..2]  = P1 (base point)
+     *   [3..5]  = cubic coefficients (a)
+     *   [6..8]  = quadratic coefficients (b)
+     *   [9..11] = linear coefficients (c)
+     *   [12..14]= constant offset (d)
+     *
+     * Catmull-Rom basis matrix (scaled by 2):
+     *   -1  3 -3  1
+     *    2 -5  4 -1
+     *   -1  0  1  0
+     *    0  2  0  0
+     */
+    int *P = (int *)(intptr_t)control_points;
+    int delta[4][3];
+    int i;
+
+    if (!spline_state || !P) return;
+
+    /* Copy base point P1 */
+    spline_state[0] = P[3];  /* P1.x */
+    spline_state[1] = P[4];  /* P1.y */
+    spline_state[2] = P[5];  /* P1.z */
+
+    /* Compute deltas relative to P1, scaled down by 256 (>>8) */
+    for (i = 0; i < 4; i++) {
+        delta[i][0] = (P[i*3+0] - P[3]) >> 8;
+        delta[i][1] = (P[i*3+1] - P[4]) >> 8;
+        delta[i][2] = (P[i*3+2] - P[5]) >> 8;
+    }
+
+    /* Multiply by Catmull-Rom basis matrix, then divide by 2 */
+    for (i = 0; i < 3; i++) {
+        int d0 = delta[0][i], d1 = delta[1][i];
+        int d2 = delta[2][i], d3 = delta[3][i];
+        spline_state[3+i]  = (-d0 + 3*d1 - 3*d2 + d3) / 2;  /* a (cubic) */
+        spline_state[6+i]  = (2*d0 - 5*d1 + 4*d2 - d3) / 2;  /* b (quadratic) */
+        spline_state[9+i]  = (-d0 + d2) / 2;                   /* c (linear) */
+        spline_state[12+i] = (2*d1) / 2;                        /* d (constant) */
+    }
+}
+
+void EvaluateCubicSpline3D(int *out_pos, int *spline_state, int t) {
+    /*
+     * Catmull-Rom spline evaluator (0x442090).
+     * t is 12-bit fixed-point: 0 = start, 0xFFF = end.
+     * result[axis] = ((a*t^3 + b*t^2 + c*t) >> 12 + d) * 256 + base[axis]
+     */
+    int t2, t3, i;
+
+    if (!out_pos) return;
+    if (!spline_state) {
+        out_pos[0] = 0; out_pos[1] = 0; out_pos[2] = 0;
+        return;
+    }
+
+    t2 = (t * t) >> 12;
+    t3 = (t2 * t) >> 12;
+
+    for (i = 0; i < 3; i++) {
+        int a = spline_state[3+i];
+        int b = spline_state[6+i];
+        int c = spline_state[9+i];
+        int d = spline_state[12+i];
+        out_pos[i] = (((a * t3 + b * t2 + c * t) >> 12) + d) * 256 + spline_state[i];
+    }
+}
+
+void RecomputeTracksideProjectionScale(void) { }
+
+void UpdateCameraTransitionHudIndicator(int view, int actor_index) {
+    (void)view; (void)actor_index;
+}
+
+uint32_t td5_compute_heading_delta(void *route_entry) {
+    (void)route_entry;
+    return 0;
 }
