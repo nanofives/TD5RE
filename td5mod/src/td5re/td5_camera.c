@@ -958,7 +958,11 @@ void UpdateRaceCameraTransitionState(int actor, int view)
         int level = g_cameraTransitionActive / 0x2800;
         int new_preset;
         int force_reload;
-        float frame_delta = g_subTickFraction;
+        /* In the original binary, this function ran once per sim tick via
+           the callback system at 0x429790, so the effective delta was 1.0
+           per invocation.  Using g_subTickFraction here caused frame-rate-
+           dependent orbit speed (too fast at high fps). */
+        float frame_delta = 1.0f;
 
         if (level == 0) {
             /* Level 0: preset 13, orbit radius shrinks by frameDelta * 3584.0 */
