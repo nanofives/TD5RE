@@ -952,8 +952,12 @@ int td5_game_run_race_frame(void) {
             }
         }
 
-        /* Accumulate fade — ~0.5 seconds from 0 to 255 (512/s * dt) */
-        s_fade_accumulator += g_td5.normalized_frame_dt * 512.0f;
+        /* Accumulate fade — ~1s wipe at 60fps.
+         * Clamp dt to 1/30 to prevent instant fade after pause frames
+         * (pause menu exit produces a huge dt spike on the next frame). */
+        float fade_dt = g_td5.normalized_frame_dt;
+        if (fade_dt > 0.034f) fade_dt = 0.034f;
+        s_fade_accumulator += fade_dt * 255.0f;
         if (s_fade_accumulator >= 255.0f) {
             s_fade_accumulator = 255.0f;
 
