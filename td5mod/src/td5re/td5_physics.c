@@ -2079,15 +2079,31 @@ void td5_physics_integrate_pose(TD5_Actor *actor)
 
     /* 8. Ground-snap: correct world_pos.y to keep the car on the road.
      *
-     * Original (0x406300): correction = ground_y - wheel_contact_pos[i].y
-     * for grounded wheels. The suspension height reference (cardef+0x82 *
-     * 0xB5/256) is subtracted before rotation and added back after in both
-     * RefreshWheelContacts and the original integrate — net zero effect on
-     * the final Y. No susp_href compensation needed here. */
+     * RefreshWheelContacts adds susp_href (cardef+0x82 * 0xB5/256) to the
+     * wheel Y before rotation, raising the contact probe ~107 units toward
+     * the chassis. Without compensation, ground-snap aligns this elevated
+     * probe at ground level, leaving the visual model sunk by susp_href.
+     *
+     * Original (0x403720 / 0x406300): subtracts susp_href before rotation,
+     * adds it back after — the add-back in world space effectively raises
+     * the chassis by susp_href. We replicate by adding susp_href_world to
+     * the per-wheel correction. */
     {
         int64_t corr_sum = 0;
         int corr_count = 0;
         uint8_t gnd_mask = actor->wheel_contact_bitmask;
+
+        /* Compute suspension height reference in world Y.
+         * This is the amount RefreshWheelContacts raised the wheel probe. */
+        int32_t susp_href_world = 0;
+        {
+            int32_t href = (int32_t)CDEF_S(actor, 0x82);
+            if (href != 0) {
+                int32_t href_local = (href * 0xB5) >> 8;
+                float rot4 = actor->rotation_matrix.m[4];
+                susp_href_world = (int32_t)(href_local * rot4 * 256.0f);
+            }
+        }
 
         for (int i = 0; i < 4; i++) {
             if (!(gnd_mask & (1 << i))) {  /* grounded wheel */
@@ -2097,7 +2113,10 @@ void td5_physics_integrate_pose(TD5_Actor *actor)
                 if (td5_track_probe_height(actor->wheel_contact_pos[i].x,
                                            actor->wheel_contact_pos[i].z,
                                            g_span, &g_y, &g_surf)) {
-                    corr_sum += (int64_t)g_y - (int64_t)actor->wheel_contact_pos[i].y;
+                    /* Base correction + raise chassis by susp_href to compensate
+                     * for elevated wheel probe positions */
+                    corr_sum += (int64_t)g_y - (int64_t)actor->wheel_contact_pos[i].y
+                              + (int64_t)susp_href_world;
                     corr_count++;
                 }
             }
