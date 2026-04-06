@@ -2267,9 +2267,13 @@ void td5_physics_refresh_wheel_contacts(TD5_Actor *actor)
             }
         }
 
-        /* Force = (wheel_y - ground_y) + gravity [CONFIRMED @ 0x403720].
-         * Original does NOT shift by >>8 here — raw subtraction + gravity. */
-        int32_t force = (wheel_y - ground_y) + g_gravity_constant;
+        /* Force = raw displacement of wheel above ground surface.
+         * No >>8 shift (confirmed not in original @ 0x403720).
+         * Gravity NOT added here — the dead zone (0x200) and airborne
+         * threshold (0x800) are calibrated for raw displacement values.
+         * Adding gravity (~1900) would push even on-ground wheels past
+         * the 0x800 threshold, causing false airborne detection. */
+        int32_t force = (wheel_y - ground_y);
 
         /* Dead zone [CONFIRMED @ 0x403720] */
         if (force > -0x200 && force < 0x200)
