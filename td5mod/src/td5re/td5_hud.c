@@ -2702,24 +2702,34 @@ void td5_hud_draw_race_fade(float progress, int direction)
         x0b = 0.0f; y0b = sh - bar_size;  x1b = sw; y1b = sh;
     }
 
-    /* Rebuild the two fade quads with updated positions and submit */
+    /* Draw two opaque black bars directly via platform render.
+     * Cannot use hud_submit_quad — it routes through submit_translucent
+     * which uses alpha blending, making the bars see-through. */
     if (s_fadewht_atlas) {
-        float fu = (float)s_fadewht_atlas->atlas_x + 0.5f;
-        float fv = (float)s_fadewht_atlas->atlas_y + 0.5f;
-        int   ftex = s_fadewht_atlas->texture_page;
+        int ftex = s_fadewht_atlas->texture_page;
+        int tw = 256, th = 256;
+        td5_plat_render_get_texture_dims(ftex, &tw, &th);
+        float fu = ((float)s_fadewht_atlas->atlas_x + 0.5f) / (float)tw;
+        float fv = ((float)s_fadewht_atlas->atlas_y + 0.5f) / (float)th;
+
+        TD5_D3DVertex verts[4];
+        uint16_t indices[6] = { 0, 1, 2, 0, 2, 3 };
+
+        td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
+        td5_plat_render_bind_texture(ftex);
 
         /* Bar A */
-        hud_build_quad(&s_fade_quads[0], 0, ftex,
-                       x0a, y0a, x1a, y1a,
-                       fu, fv, fu, fv,
-                       0xFF000000, HUD_DEPTH);
-        hud_submit_quad(&s_fade_quads[0]);
+        verts[0] = (TD5_D3DVertex){ x0a, y0a, 0.0f, 1.0f, 0xFF000000, 0, fu, fv };
+        verts[1] = (TD5_D3DVertex){ x0a, y1a, 0.0f, 1.0f, 0xFF000000, 0, fu, fv };
+        verts[2] = (TD5_D3DVertex){ x1a, y1a, 0.0f, 1.0f, 0xFF000000, 0, fu, fv };
+        verts[3] = (TD5_D3DVertex){ x1a, y0a, 0.0f, 1.0f, 0xFF000000, 0, fu, fv };
+        td5_plat_render_draw_tris(verts, 4, indices, 6);
 
         /* Bar B */
-        hud_build_quad(&s_fade_quads[1], 0, ftex,
-                       x0b, y0b, x1b, y1b,
-                       fu, fv, fu, fv,
-                       0xFF000000, HUD_DEPTH);
-        hud_submit_quad(&s_fade_quads[1]);
+        verts[0] = (TD5_D3DVertex){ x0b, y0b, 0.0f, 1.0f, 0xFF000000, 0, fu, fv };
+        verts[1] = (TD5_D3DVertex){ x0b, y1b, 0.0f, 1.0f, 0xFF000000, 0, fu, fv };
+        verts[2] = (TD5_D3DVertex){ x1b, y1b, 0.0f, 1.0f, 0xFF000000, 0, fu, fv };
+        verts[3] = (TD5_D3DVertex){ x1b, y0b, 0.0f, 1.0f, 0xFF000000, 0, fu, fv };
+        td5_plat_render_draw_tris(verts, 4, indices, 6);
     }
 }

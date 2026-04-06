@@ -952,8 +952,8 @@ int td5_game_run_race_frame(void) {
             }
         }
 
-        /* Accumulate fade — ~2 seconds from 0 to 255 (128/s * dt) */
-        s_fade_accumulator += g_td5.normalized_frame_dt * 128.0f;
+        /* Accumulate fade — ~0.5 seconds from 0 to 255 (512/s * dt) */
+        s_fade_accumulator += g_td5.normalized_frame_dt * 512.0f;
         if (s_fade_accumulator >= 255.0f) {
             s_fade_accumulator = 255.0f;
 
