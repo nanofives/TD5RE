@@ -2436,8 +2436,14 @@ int td5_frontend_display_loop(void) {
             if (s_inner_state == 4) {
                 s_inner_state = 5;
             } else if (s_inner_state == 6) {
+                if (s_button_count > 7) s_button_count = 7;
+                s_selected_button = 6;
                 s_inner_state = 4;
             }
+        } else if (s_current_screen == TD5_SCREEN_EXTRAS_GALLERY) {
+            /* Original: ESC in credits always exits the game [CONFIRMED @ 0x417D50] */
+            TD5_LOG_I(LOG_TAG, "ExtrasGallery: ESC pressed, quitting game");
+            frontend_post_quit();
         } else if (s_current_screen != TD5_SCREEN_STARTUP_INIT &&
                    s_current_screen != TD5_SCREEN_LOCALIZATION_INIT) {
             if (s_return_screen >= 0 &&
@@ -4621,10 +4627,9 @@ static void Screen_MainMenu(void) {
                 s_inner_state = 8;
                 break;
 
-            case 6: /* Exit -> credits slideshow */
-                s_flow_context = 10;
-                s_return_screen = TD5_SCREEN_EXTRAS_GALLERY;
-                s_inner_state = 8;
+            case 6: /* Exit -> Yes/No confirm dialog */
+                TD5_LOG_I(LOG_TAG, "MainMenu: Exit pressed, showing confirm dialog");
+                s_inner_state = 5;
                 break;
             }
         }
@@ -4637,7 +4642,8 @@ static void Screen_MainMenu(void) {
         int yes_idx = frontend_create_button("Yes", exit_x, exit_y + exit_h + 8, 96, 32);
         int no_idx  = frontend_create_button("No",  exit_x + 100, exit_y + exit_h + 8, 96, 32);
         if (yes_idx >= 0) s_selected_button = yes_idx;
-        (void)yes_idx; (void)no_idx;
+        TD5_LOG_I(LOG_TAG, "MainMenu: exit confirm dialog created yes=%d no=%d", yes_idx, no_idx);
+        (void)no_idx;
         s_inner_state = 6;
         break;
     }
@@ -4647,10 +4653,14 @@ static void Screen_MainMenu(void) {
             /* Check by label since button indices depend on pool state */
             if (s_button_index < FE_MAX_BUTTONS &&
                 strcmp(s_buttons[s_button_index].label, "Yes") == 0) {
+                TD5_LOG_I(LOG_TAG, "MainMenu: exit Yes selected, quitting");
                 s_inner_state = 7;
             } else if (s_button_index < FE_MAX_BUTTONS &&
                        strcmp(s_buttons[s_button_index].label, "No") == 0) {
-                /* Remove Yes/No buttons, return to main interaction */
+                /* Drop Yes/No buttons (appended after the 7 main menu buttons) */
+                if (s_button_count > 7) s_button_count = 7;
+                s_selected_button = 6; /* re-focus on Exit */
+                TD5_LOG_I(LOG_TAG, "MainMenu: exit No selected, returning to menu");
                 s_inner_state = 4;
             }
         }
@@ -6792,60 +6802,59 @@ static const char * const s_gallery_names[GALLERY_PIC_COUNT] = {
 
 static void Screen_ExtrasGallery(void) {
     switch (s_inner_state) {
-    case 0: /* Init: load first slide */
+    case 0: /* Init: load first image (Legals5 first, then mugshots in order) */
         frontend_init_return_screen(TD5_SCREEN_EXTRAS_GALLERY);
         s_gallery_pic_index = 0;
         s_gallery_visited_mask = 1;
+        if (s_gallery_pic_surface > 0) {
+            frontend_release_surface(s_gallery_pic_surface);
+            s_gallery_pic_surface = 0;
+        }
         s_gallery_pic_surface = frontend_load_tga(s_gallery_names[0], GALLERY_ZIP);
+        s_anim_start_ms = 0;
         s_anim_tick = 0;
+        TD5_LOG_I(LOG_TAG, "ExtrasGallery: init, %d images total", GALLERY_PIC_COUNT);
         s_inner_state = 1;
         break;
 
-    case 1: /* Slide-in: 39 frames -- prevents Enter from menu bleeding through */
+    case 1: /* Brief delay to prevent input bleed from menu (~39 ticks) */
         s_anim_tick += 2;
-        if (s_anim_tick >= 0x27)
+        if (s_anim_tick >= 0x27) {
+            s_anim_start_ms = td5_plat_time_ms();
             s_inner_state = 2;
+        }
         break;
 
-    case 2: /* Interactive: L/R to navigate, Escape to exit */
-        if (frontend_check_escape()) {
-            if (s_flow_context == 10 || s_previous_screen == TD5_SCREEN_MAIN_MENU) {
-                frontend_post_quit();
-            } else {
-                s_anim_tick = 0;
-                s_inner_state = 3;
-            }
-            break;
-        }
-        if (s_input_ready) {
-            int delta = frontend_option_delta();
-            if (delta != 0) {
-                int next_index = s_gallery_pic_index + delta;
-                /* Scrolling right past last slide in exit flow quits (only after all visited) */
-                if (delta > 0 && next_index >= GALLERY_PIC_COUNT) {
-                    if ((s_gallery_visited_mask & GALLERY_ALL_VISITED) == GALLERY_ALL_VISITED &&
-                        (s_flow_context == 10 || s_previous_screen == TD5_SCREEN_MAIN_MENU)) {
-                        frontend_post_quit();
-                        break;
+    case 2: /* Auto-advance through all images; ESC handled by global handler -> quit */
+        {
+            uint32_t now = td5_plat_time_ms();
+            /* Advance image every 4000ms [UNCERTAIN: original uses per-frame scroll counter
+             * starting at 0x27F; exact per-image duration not confirmed] */
+            if (now - s_anim_start_ms >= 4000) {
+                s_gallery_pic_index++;
+                if (s_gallery_pic_index >= GALLERY_PIC_COUNT) {
+                    /* All images shown -- original exits game here */
+                    TD5_LOG_I(LOG_TAG, "ExtrasGallery: all %d images shown, quitting", GALLERY_PIC_COUNT);
+                    if (s_gallery_pic_surface > 0) {
+                        frontend_release_surface(s_gallery_pic_surface);
+                        s_gallery_pic_surface = 0;
                     }
-                    next_index = 0;
+                    frontend_post_quit();
+                    break;
                 }
-                if (next_index < 0) next_index = GALLERY_PIC_COUNT - 1;
                 if (s_gallery_pic_surface > 0) {
                     frontend_release_surface(s_gallery_pic_surface);
                     s_gallery_pic_surface = 0;
                 }
-                s_gallery_pic_index = next_index;
+                s_gallery_pic_surface = frontend_load_tga(
+                    s_gallery_names[s_gallery_pic_index], GALLERY_ZIP);
                 s_gallery_visited_mask |= (1 << s_gallery_pic_index);
-                s_gallery_pic_surface = frontend_load_tga(s_gallery_names[s_gallery_pic_index], GALLERY_ZIP);
+                s_anim_start_ms = now;
+                TD5_LOG_I(LOG_TAG, "ExtrasGallery: image %d/%d: %s",
+                          s_gallery_pic_index + 1, GALLERY_PIC_COUNT,
+                          s_gallery_names[s_gallery_pic_index]);
             }
         }
-        break;
-
-    case 3: /* Slide-out: 16 frames, then return */
-        s_anim_tick += 2;
-        if (s_anim_tick >= 16 && s_return_screen >= 0 && s_return_screen < TD5_SCREEN_COUNT)
-            td5_frontend_set_screen((TD5_ScreenIndex)s_return_screen);
         break;
     }
 }
