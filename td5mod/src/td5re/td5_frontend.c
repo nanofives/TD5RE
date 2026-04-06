@@ -3049,22 +3049,21 @@ static void frontend_render_quick_race_overlay(float sx, float sy) {
 static void fe_draw_option_arrows(int btn_idx, float sx, float sy) {
     /* ArrowButtonz.tga: 12x36 sprite sheet (FUN_00426260, original DAT_00496284).
      * Four 12x9 rows (u spans full width = 0.0..1.0):
-     *   Row 0 v=0.00..0.25  Left  arrow
-     *   Row 1 v=0.25..0.50  Right arrow
-     *   Row 2 v=0.50..0.75  Left  arrow (alt)
-     *   Row 3 v=0.75..1.00  Right arrow (alt)
-     * Original FUN_00426260 always passes param_2=1 (confirmed @ 0x00422430) —
-     * arrows look identical on selected and unselected buttons in the original game.
-     * Always use rows 0/1 for consistency. */
+     *   Row 0 v=0.00..0.25  Left  arrow (lighter blue — not used)
+     *   Row 1 v=0.25..0.50  Right arrow (lighter blue — not used)
+     *   Row 2 v=0.50..0.75  Left  arrow (brighter blue)
+     *   Row 3 v=0.75..1.00  Right arrow (brighter blue)
+     * Use bottom rows (2/3) — brighter blue, matches original appearance.
+     * Original FUN_00426260 always passes param_2=1 (confirmed @ 0x00422430). */
     float bx, by, bw, bh;
     float aw = 12.0f * sx, ah = 9.0f * sy;
     if (!s_buttons[btn_idx].active || s_arrowbuttonz_tex_page < 0) return;
     frontend_get_button_render_rect(btn_idx, sx, sy, &bx, &by, &bw, &bh);
     td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
     fe_draw_quad(bx + 4.0f * sx,          by + (bh - ah) * 0.5f, aw, ah, 0xFFFFFFFF,
-                 s_arrowbuttonz_tex_page, 0.0f, 0.00f, 1.0f, 0.25f);
+                 s_arrowbuttonz_tex_page, 0.0f, 0.50f, 1.0f, 0.75f);
     fe_draw_quad(bx + bw - 4.0f*sx - aw, by + (bh - ah) * 0.5f, aw, ah, 0xFFFFFFFF,
-                 s_arrowbuttonz_tex_page, 0.0f, 0.25f, 1.0f, 0.50f);
+                 s_arrowbuttonz_tex_page, 0.0f, 0.75f, 1.0f, 1.00f);
 }
 
 static void frontend_render_game_options_overlay(float sx, float sy) {

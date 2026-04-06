@@ -298,6 +298,7 @@ static uint8_t        s_static_page_done[32];   /* per-slot: 0=none,1=real,2=pla
  * A 256×512 page would require V normalization by 1/512, not 1/256.
  * Therefore the pages are 256×256 BGRA32 (4 bytes/pixel × 65536 px = 262144 bytes).
  */
+static void apply_colorkey(void *pixels, int w, int h, TD5_ColorKeyMode mode);
 static int load_static_r5g6b5_tpage(int slot)
 {
     char path[128];
@@ -317,9 +318,42 @@ static int load_static_r5g6b5_tpage(int slot)
     }
     fclose(f);
 
+    /* Static tpage .dat files are runtime dumps.  Detect byte order:
+     * - XRGB dumps (e.g. tpage4) have byte[0]=0xFF for every pixel
+     *   (X pad always set).  Layout: [0]=X, [1]=R, [2]=G, [3]=B.
+     * - BGRA dumps (e.g. tpage0-3) store normal B,G,R,A byte order.
+     * Both need black colorkey applied for proper transparency. */
+    {
+        int is_xrgb = 1;
+        for (int i = 0; i < npx && is_xrgb; i++) {
+            if (bgra[i * 4] != 0xFF) is_xrgb = 0;
+        }
+
+        for (int i = 0; i < npx; i++) {
+            uint8_t r, g, b;
+            if (is_xrgb) {
+                r = bgra[i * 4 + 1];
+                g = bgra[i * 4 + 2];
+                b = bgra[i * 4 + 3];
+            } else {
+                b = bgra[i * 4 + 0];
+                g = bgra[i * 4 + 1];
+                r = bgra[i * 4 + 2];
+            }
+            uint8_t a = (r < 8 && g < 8 && b < 8) ? 0x00 : 0xFF;
+            bgra[i * 4 + 0] = b;
+            bgra[i * 4 + 1] = g;
+            bgra[i * 4 + 2] = r;
+            bgra[i * 4 + 3] = a;
+        }
+
+        TD5_LOG_D(LOG_TAG, "static atlas: tpage%d.dat format=%s",
+                  slot, is_xrgb ? "XRGB" : "BGRA");
+    }
+
     td5_plat_render_upload_texture(STATIC_ATLAS_BASE + slot, bgra, w, h, 2);
     free(bgra);
-    TD5_LOG_D(LOG_TAG, "static atlas: uploaded tpage%d.dat (256x256 BGRA) → D3D page %d",
+    TD5_LOG_D(LOG_TAG, "static atlas: uploaded tpage%d.dat (256x256 BGRA+colorkey) → D3D page %d",
               slot, STATIC_ATLAS_BASE + slot);
     return 1;
 }
@@ -334,6 +368,13 @@ static int load_static_png_tpage(int slot)
 
     snprintf(path, sizeof(path), "re/assets/static/tpage%d.png", slot);
     if (td5_asset_decode_png_rgba32(path, &pixels, &w, &h)) {
+        /* Slot 12 contains PAUSETXT (y>=32) which uses cyan (0,255,255)
+         * as the color-key background.  Apply cyan colorkey so the
+         * font renders with proper transparency. */
+        if (slot == 12) {
+            apply_colorkey(pixels, w, h, TD5_COLORKEY_CYAN);
+            TD5_LOG_I(LOG_TAG, "static atlas: applied cyan colorkey to tpage12");
+        }
         td5_plat_render_upload_texture(STATIC_ATLAS_BASE + slot, pixels, w, h, 2);
         stbi_image_free(pixels);
         TD5_LOG_I(LOG_TAG, "static atlas: loaded PNG %s -> D3D page %d (slot %d)",
@@ -1263,12 +1304,22 @@ static void apply_colorkey(void *pixels, int w, int h, TD5_ColorKeyMode mode)
                 p[3] = 0;
             break;
         case TD5_COLORKEY_RED:
-            if (r >= 248 && g < 8 && b < 8)
-                p[3] = 0;
+            if (r >= 248 && g < 8 && b < 8) {
+                p[0] = p[1] = p[2] = p[3] = 0; /* zero RGB to prevent red bleed under bilinear filter */
+            }
             break;
         case TD5_COLORKEY_BLUE88:
             if (r < 8 && g < 8 && b >= 80 && b <= 96)
                 p[3] = 0;
+            break;
+        case TD5_COLORKEY_CYAN:
+            /* PAUSETXT: white glyphs on cyan bg.  R channel = glyph
+             * intensity (255=text, 0=background, 1-254=anti-aliased edge).
+             * Use R as alpha so edges blend smoothly, set RGB to white. */
+            if (g > 240 && b > 240) {
+                p[3] = r;
+                p[0] = p[1] = p[2] = 255;
+            }
             break;
         default:
             break;
