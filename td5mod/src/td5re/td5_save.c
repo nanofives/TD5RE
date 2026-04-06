@@ -180,8 +180,8 @@ static uint32_t s_p2_device_desc_backup[8];                   /* 0x4656C0 (read 
 static uint32_t s_sound_mode;                                 /* 0x465FE8 */
 static uint32_t s_sfx_volume;                                 /* 0x465FEC */
 static uint32_t s_music_volume;                               /* 0x465FF0 */
-static float    s_view_distance_frac = 0.65f;                 /* 0x466EA8: runtime only, not persisted.
-                                                                * Original default = 0.65 [CONFIRMED @ 0x0042AA27]. */
+static float    s_view_distance_frac = 1.0f;                  /* 0x466EA8: runtime only, not persisted.
+                                                                * Original default = 0.65 [0x0042AA27], source port uses 1.0. */
 
 int td5_save_get_sfx_volume(void)       { return (int)s_sfx_volume; }
 void td5_save_set_sfx_volume(int v)     { if (v < 0) v = 0; if (v > 100) v = 100; s_sfx_volume = (uint32_t)v; }
