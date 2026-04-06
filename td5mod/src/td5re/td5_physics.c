@@ -90,6 +90,11 @@ static int16_t s_surface_friction[32];  /* DAT_00474900: shared friction per sur
 static int16_t s_surface_grip[32];      /* DAT_004748C0: player-only per-wheel grip */
 static int16_t s_gear_torque[16];       /* DAT_00467394: per-gear torque multipliers */
 
+/* Accumulated wheel snap Y correction from last RefreshWheelContacts call.
+ * Used by IntegratePose to apply ground-snap as additive correction. */
+static int64_t s_wheel_snap_y_sum = 0;
+static int     s_wheel_snap_y_count = 0;
+
 /* --- Globals matching original binary layout --- */
 static int32_t g_gravity_constant = TD5_GRAVITY_NORMAL;
 static int32_t g_collisions_enabled = 0;     /* DAT_00463188: 0=on, 1=off */
@@ -2038,29 +2043,17 @@ void td5_physics_integrate_pose(TD5_Actor *actor)
     /* 7. Refresh wheel contact frames */
     td5_physics_refresh_wheel_contacts(actor);
 
-    /* 8. Ground-snap: direct Y assignment from averaged grounded wheel positions
-     * [CONFIRMED @ 0x405E80]. Original formula:
-     *   for each grounded wheel: sum += wheel_contact_pos[i].y
-     *   world_pos.y = sum / count   (DIRECT assignment, not additive correction)
-     * Contact normal Y contribution (-0x100 * normal_y) omitted for now as
-     * wheel_contact_normals[] is not yet populated. */
-    {
-        int64_t snap_sum = 0;
-        int snap_count = 0;
-        uint8_t gnd_mask = actor->wheel_contact_bitmask;
-        for (int i = 0; i < 4; i++) {
-            if (!(gnd_mask & (1 << i))) {  /* grounded wheel */
-                snap_sum += (int64_t)actor->wheel_contact_pos[i].y;
-                snap_count++;
-            }
-        }
-        if (snap_count > 0) {
-            actor->world_pos.y = (int32_t)(snap_sum / snap_count);
-            actor->render_pos.y = (float)actor->world_pos.y * (1.0f / 256.0f);
-            /* Cancel downward velocity: ground is a hard constraint. */
-            if (actor->linear_velocity_y < 0)
-                actor->linear_velocity_y = 0;
-        }
+    /* 8. Ground-snap: additive Y correction from wheel snap deltas.
+     * RefreshWheelContacts accumulated (ground_y - pre_snap_wheel_y) for each
+     * grounded wheel. Applying the average delta to world_pos.y keeps the
+     * chassis-to-wheel offset intact while pushing the car onto the road.
+     * [CONFIRMED @ 0x403720: wheel snap; 0x405E80: chassis correction] */
+    if (s_wheel_snap_y_count > 0) {
+        actor->world_pos.y += (int32_t)(s_wheel_snap_y_sum / s_wheel_snap_y_count);
+        actor->render_pos.y = (float)actor->world_pos.y * (1.0f / 256.0f);
+        /* Cancel downward velocity: ground is a hard constraint. */
+        if (actor->linear_velocity_y < 0)
+            actor->linear_velocity_y = 0;
     }
 
     /* 8b. Out-of-bounds recovery: if the car has fallen far below the road
@@ -2179,22 +2172,12 @@ static void update_vehicle_pose_from_physics(TD5_Actor *actor)
     /* Refresh wheel contacts */
     td5_physics_refresh_wheel_contacts(actor);
 
-    /* Ground-snap: direct Y assignment from grounded wheel positions
-     * [CONFIRMED @ 0x405E80: same formula as player integrate_pose]. */
-    {
-        int64_t snap_sum = 0;
-        int snap_count = 0;
-        uint8_t gnd_mask = actor->wheel_contact_bitmask;
-        for (int i = 0; i < 4; i++) {
-            if (!(gnd_mask & (1 << i))) {
-                snap_sum += (int64_t)actor->wheel_contact_pos[i].y;
-                snap_count++;
-            }
-        }
-        if (snap_count > 0) {
-            actor->world_pos.y = (int32_t)(snap_sum / snap_count);
-            actor->render_pos.y = (float)actor->world_pos.y * (1.0f / 256.0f);
-        }
+    /* Ground-snap: additive Y correction from wheel snap deltas.
+     * Same approach as IntegratePose step 8 — uses accumulated snap deltas
+     * from RefreshWheelContacts. */
+    if (s_wheel_snap_y_count > 0) {
+        actor->world_pos.y += (int32_t)(s_wheel_snap_y_sum / s_wheel_snap_y_count);
+        actor->render_pos.y = (float)actor->world_pos.y * (1.0f / 256.0f);
     }
 }
 
@@ -2211,6 +2194,10 @@ void td5_physics_refresh_wheel_contacts(TD5_Actor *actor)
     float *rot = actor->rotation_matrix.m;
     int resolved_surface = actor->surface_type_chassis;
     int resolved_surface_valid = 0;
+
+    /* Reset snap correction accumulators */
+    s_wheel_snap_y_sum = 0;
+    s_wheel_snap_y_count = 0;
 
     /* Step 1 (original 0x403720): copy chassis track position to each wheel probe.
      * Without this, wheel_probes[i].span_index stays at 0 (memset init) and
@@ -2295,6 +2282,12 @@ void td5_physics_refresh_wheel_contacts(TD5_Actor *actor)
             force = 12000; /* default airborne force */
         } else {
             actor->wheel_contact_bitmask &= ~(1 << i);
+            /* Accumulate snap delta BEFORE overwriting wheel Y.
+             * delta = ground_y - pre_snap_wheel_y: how much the wheel
+             * needs to move to sit on the road. The same correction
+             * applies to the chassis (world_pos.y). */
+            s_wheel_snap_y_sum += (int64_t)(ground_y - wheel_y);
+            s_wheel_snap_y_count++;
             /* SNAP wheel Y to ground when grounded [CONFIRMED @ 0x403720:
              * original writes *piVar8 = local_30 (wheel_y = ground_y)]. */
             actor->wheel_contact_pos[i].y = ground_y;
