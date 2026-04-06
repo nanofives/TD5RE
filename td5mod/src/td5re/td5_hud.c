@@ -2133,21 +2133,17 @@ void td5_hud_render_minimap(int actor_slot)
     float mm_r = s_minimap_x + s_minimap_width;
     float mm_b = s_minimap_y + s_minimap_height;
 
-    /* Find first segment whose end span is at or past start_span */
-    int seg_start_idx = 0;
-    for (int s = 0; s < s_minimap_seg_primary_end; s++) {
-        if ((int)s_minimap_seg_end[s] >= start_span) {
-            seg_start_idx = s;
-            break;
-        }
-        seg_start_idx = s; /* fallback: last segment if none qualify */
-    }
-
+    /* Walk 48 iterations of direct span pairs, step=6.
+     * Binary @ 0x43A3A0: local_a4 starts at start_span; each iteration renders
+     * span[local_a4] to span[local_a4+5], then advances local_a4 += 6.
+     * 48 iterations unconditionally [CONFIRMED @ 0x43A220: while (local_8c < 0x30)].
+     * Segment table is junction lookup only — NOT the iteration driver. */
+    int local_a4 = start_span;
     int seg_rendered = 0;
-    for (int i = seg_start_idx; span_base && vert_base &&
-             i < s_minimap_seg_primary_end && seg_rendered < 0x30; i++, seg_rendered++) {
-        int span_a_idx = (int)s_minimap_seg_start[i];
-        int span_b_idx = (int)s_minimap_seg_end[i];
+    for (int i = 0; span_base && vert_base && i < 0x30; i++) {
+        int span_a_idx = local_a4;
+        int span_b_idx = local_a4 + 5;
+        local_a4 = span_b_idx + 1; /* advance by 6 [CONFIRMED @ 0x43A3A0] */
 
         if (span_a_idx < 0 || span_b_idx < 0 ||
             span_a_idx >= g_strip_span_count ||
@@ -2156,7 +2152,7 @@ void td5_hud_render_minimap(int actor_slot)
         uint8_t *sa = span_base + span_a_idx * 24;
         uint8_t *sb = span_base + span_b_idx * 24;
 
-        /* left vertex @ span+0x04 [CONFIRMED @ 0x43A49C] */
+        /* left vertex index @ span+0x04 [CONFIRMED @ 0x43A49C] */
         int32_t ox_a  = *(int32_t  *)(sa + 0x0C);
         int32_t oz_a  = *(int32_t  *)(sa + 0x14);
         uint16_t vi_a = *(uint16_t *)(sa + 4);
@@ -2170,7 +2166,7 @@ void td5_hud_render_minimap(int actor_slot)
         float mx0 = (wx0 * cos_h + wz0 * sin_h) * s_minimap_world_scale_x;
         float my0 = (wz0 * cos_h - wx0 * sin_h) * s_minimap_world_scale_y;
 
-        /* right/end vertex @ span+0x06 [CONFIRMED @ 0x43A7D7] */
+        /* right vertex index @ span+0x06 [CONFIRMED @ 0x43A7D7] */
         int32_t ox_b  = *(int32_t  *)(sb + 0x0C);
         int32_t oz_b  = *(int32_t  *)(sb + 0x14);
         uint16_t vi_b = *(uint16_t *)(sb + 6);
@@ -2205,7 +2201,10 @@ void td5_hud_render_minimap(int actor_slot)
             HUD_DEPTH
         );
         hud_submit_quad(&map_quad);
+        seg_rendered++;
     }
+    TD5_LOG_I(LOG_TAG, "minimap_render: segs_rendered=%d start_span=%d end_span=%d span_count=%d",
+              seg_rendered, start_span, local_a4 - 1, g_strip_span_count);
 
     /* Render racer dot markers */
     for (int r = 0; r < g_racer_count; r++) {
@@ -2272,9 +2271,8 @@ void td5_hud_render_minimap(int actor_slot)
     }
 
     TD5_LOG_I(LOG_TAG,
-              "minimap: actor=%d player_span=%d start_span=%d seg_start=%d segs_total=%d segs_rendered=%d dots=%d",
-              actor_slot, (int)player_span, start_span, seg_start_idx,
-              s_minimap_seg_primary_end, seg_rendered, dot_count);
+              "minimap: actor=%d player_span=%d start_span=%d segs_rendered=%d dots=%d span_count=%d",
+              actor_slot, (int)player_span, start_span, seg_rendered, dot_count, g_strip_span_count);
 }
 
 /* ========================================================================
