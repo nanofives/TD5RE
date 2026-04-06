@@ -41,7 +41,7 @@ TD5_GameState td5_game_get_state(void);
 
 /* --- Race session --- */
 int  td5_game_init_race_session(void);
-int  td5_game_run_race_frame(void);   /* Returns 0=racing, 1=race over */
+int  td5_game_run_race_frame(void);   /* Returns 0=racing, 1=race finished, 2=ESC quit */
 void td5_game_release_race_resources(void);
 
 /* --- Race flow --- */
@@ -67,5 +67,12 @@ TD5_Actor *td5_game_get_actor(int slot);
 int td5_game_get_total_actor_count(void);
 int td5_game_get_player_lap(int slot);
 int32_t td5_game_get_race_timer(int slot, int lap_index);
+
+/* --- Split-screen --- */
+int td5_game_get_player_slot(int viewport);
+int td5_game_is_split_screen(void);
+
+/* --- Split-Screen Steering Balance (0x4036B0) --- */
+void td5_game_update_split_screen_balance(void);
 
 #endif /* TD5_GAME_H */

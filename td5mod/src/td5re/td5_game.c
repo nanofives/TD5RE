@@ -419,19 +419,25 @@ int td5_game_tick(void) {
     case TD5_GAMESTATE_RACE: {
         int result = td5_game_run_race_frame();
         if (result != 0) {
-            /* Race is over. Determine next state. */
+            /* Race is over. Determine next state.
+             * result=1: normal race completion (fade finished) -> results screen
+             * result=2: ESC/pause menu exit -> main menu */
             if (g_td5.benchmark_active) {
                 TD5_LOG_I(LOG_TAG, "State transition: %s -> %s",
                           td5_game_state_name(TD5_GAMESTATE_RACE),
                           td5_game_state_name(TD5_GAMESTATE_BENCHMARK));
                 g_td5.game_state = TD5_GAMESTATE_BENCHMARK;
             } else {
-                TD5_LOG_I(LOG_TAG, "State transition: %s -> %s",
-                          td5_game_state_name(TD5_GAMESTATE_RACE),
-                          td5_game_state_name(TD5_GAMESTATE_MENU));
                 g_td5.game_state = TD5_GAMESTATE_MENU;
-                /* Always return to main menu (screen 5), never attract demo (screen 2) */
-                td5_frontend_set_screen(TD5_SCREEN_MAIN_MENU);
+                if (result == 2) {
+                    /* ESC quit — go to main menu */
+                    TD5_LOG_I(LOG_TAG, "Race aborted (ESC) -> main menu");
+                    td5_frontend_set_screen(TD5_SCREEN_MAIN_MENU);
+                } else {
+                    /* Normal race finish — go to race results screen */
+                    TD5_LOG_I(LOG_TAG, "Race finished -> results screen");
+                    td5_frontend_set_screen(TD5_SCREEN_RACE_RESULTS);
+                }
             }
             return 0;
         }
@@ -950,9 +956,10 @@ int td5_game_run_race_frame(void) {
             s_fade_accumulator = 255.0f;
 
             /* Fade complete: release all race resources and exit */
+            TD5_LOG_I(LOG_TAG, "Race fade complete, transitioning to results");
             td5_game_release_race_resources();
 
-            return 1;  /* race over */
+            return 1;  /* 1 = normal race finish (-> results screen) */
         }
     }
 
@@ -1032,9 +1039,10 @@ int td5_game_run_race_frame(void) {
                         s_pause_menu_active = 0;
                     } else if (s_pause_menu_cursor == 4) {
                         s_pause_menu_active = 0;
+                        TD5_LOG_I(LOG_TAG, "Pause menu: Exit selected, aborting race");
                         td5_game_release_race_resources();
                         td5_game_set_state(TD5_GAMESTATE_MENU);
-                        return 1;
+                        return 2;  /* 2 = ESC quit (-> main menu, not results) */
                     }
                 }
 
