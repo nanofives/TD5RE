@@ -2401,17 +2401,12 @@ void td5_physics_clamp_attitude(TD5_Actor *actor)
 
     if (!exceeded) return;
 
-    if (g_collisions_enabled == 0) {
-        /* Mode 0 (collisions ON): latch recovery state */
-        /* Save current rotation -> saved orientation for recovery */
-        memcpy(&actor->saved_orientation, &actor->rotation_matrix, sizeof(TD5_Mat3x3));
-
-        /* Set recovery flag [CONFIRMED @ 0x405B40: sets vehicle_mode=1, frame_counter=0] */
-        actor->vehicle_mode = 1;
-        actor->frame_counter = 0;
-        actor->steering_command = 0;
-        TD5_LOG_I(LOG_TAG, "attitude exceeded: slot=%d roll=%d pitch=%d -> mode 1",
-                  actor->slot_index, roll, pitch);
+    if (0) {
+        /* Recovery mode disabled — the source port's simplified suspension
+         * creates slow pitch/roll drift that eventually exceeds attitude
+         * limits during normal driving, triggering the 59-frame recovery
+         * teleport. In the original, this only fires during actual crashes.
+         * Hard-clamp instead (fall through to else branch). */
     } else {
         /* Mode 1 (collisions OFF): hard clamp */
         /* Soft nudge: if approaching limit, add correction */
