@@ -1360,7 +1360,7 @@ void td5_hud_init_layout(int viewport_mode)
             view_base + GEAR_QUAD_OFF,
             0, s_gearnumbers_atlas->texture_page,
             gear_x, gear_y,
-            gear_x + sx * 32.0f, gear_y + sy * 16.0f,
+            gear_x + sx * 16.0f, gear_y + sy * 16.0f,
             0.0f, 0.0f, 0.0f, 0.0f, /* UV set at render time */
             0xFFFFFFFF, HUD_DEPTH
         );
@@ -1843,7 +1843,7 @@ void td5_hud_render_overlays(float dt)
             memset(needle_params.u, 0, sizeof(needle_params.u));
             memset(needle_params.v, 0, sizeof(needle_params.v));
             for (int i = 0; i < 4; i++) needle_params.color[i] = 0xFFFFFFFF;
-            needle_params.tex = 0;
+            needle_params.tex = HUD_WHITE_TEX_PAGE;
             needle_params.pad = 0;
 
             td5_render_build_sprite_quad((int *)&needle_params);
@@ -2138,8 +2138,11 @@ void td5_hud_render_minimap(int actor_slot)
         uint16_t vi_a = *(uint16_t *)(sa + 4);
 
         int16_t *va = (int16_t *)(vert_base + vi_a * 6);
-        float wx0 = (float)((int)va[0] + ox_a) * kFP + offset_x;
-        float wz0 = (float)((int)va[2] + oz_a) * kFP + offset_z;
+        /* Track vertex+origin coords are raw world units (NOT 24.8 fp).
+         * Confirmed @ 0x43A4B4/0x43A4B7: original adds vert+origin directly,
+         * no division. Only actor world coords need the kFP (÷256) conversion. */
+        float wx0 = (float)((int)va[0] + ox_a) + offset_x;
+        float wz0 = (float)((int)va[2] + oz_a) + offset_z;
 
         /* Transform through player heading rotation */
         float mx0 = (wx0 * cos_h + wz0 * sin_h) * s_minimap_world_scale_x;
@@ -2151,8 +2154,8 @@ void td5_hud_render_minimap(int actor_slot)
         uint16_t vi_b = *(uint16_t *)(sb + 6);
 
         int16_t *vb = (int16_t *)(vert_base + vi_b * 6);
-        float wx1 = (float)((int)vb[0] + ox_b) * kFP + offset_x;
-        float wz1 = (float)((int)vb[2] + oz_b) * kFP + offset_z;
+        float wx1 = (float)((int)vb[0] + ox_b) + offset_x;
+        float wz1 = (float)((int)vb[2] + oz_b) + offset_z;
 
         float mx1 = (wx1 * cos_h + wz1 * sin_h) * s_minimap_world_scale_x;
         float my1 = (wz1 * cos_h - wx1 * sin_h) * s_minimap_world_scale_y;
@@ -2208,30 +2211,28 @@ void td5_hud_render_minimap(int actor_slot)
             if (dot_y < mm_top)   dot_y = mm_top;
             if (dot_y > mm_bot)   dot_y = mm_bot;
 
-            /* Use scandots texture: row 0=player, row 1=AI, row 2=other.
-             * Fall back to white page with solid color if scandots not loaded. */
+            /* Use scandots texture: 3 dots arranged horizontally in tpage5.
+             * Confirmed Ghidra constants @ 0x45D724=8.5, 0x45D720=16.5 are
+             * U-axis offsets: player at u=atlas_x+0.5, AI at +8.5, other at +16.5.
+             * Pixel data: player(64,200)=red, AI(72,200)=blue, other(80,200)=teal. */
             int dot_tex = s_minimap_scandots_tex_page ? s_minimap_scandots_tex_page : HUD_WHITE_TEX_PAGE;
-            float row_v;
-            uint32_t dot_color;
+            float dot_u0;
             if (r == g_actor_slot_map[0]) {
-                row_v = s_minimap_dot_atlas_v;                            /* row 0: player */
-                dot_color = 0xFFFFFFFF;
+                dot_u0 = s_minimap_dot_atlas_u;          /* col 0: player (red) */
             } else if (r < 6) {
-                row_v = s_minimap_dot_atlas_v + s_minimap_dot_atlas_vstride;  /* row 1: AI */
-                dot_color = 0xFFFFFFFF;
+                dot_u0 = s_minimap_dot_atlas_u + 8.5f;  /* col 1: AI (blue) [@ 0x45D724] */
             } else {
-                row_v = s_minimap_dot_atlas_v + s_minimap_dot_atlas_vstride * 2.0f; /* row 2: other */
-                dot_color = 0xFFFFFFFF;
+                dot_u0 = s_minimap_dot_atlas_u + 16.5f; /* col 2: other (teal) [@ 0x45D720] */
             }
             hud_build_quad(
                 &map_quad,
                 0, dot_tex,
                 dot_x - half_dot, dot_y - half_dot,
                 dot_x + half_dot, dot_y + half_dot,
-                s_minimap_dot_atlas_u, row_v,
-                s_minimap_dot_atlas_u + s_minimap_dot_atlas_vstride,
-                row_v + s_minimap_dot_atlas_vstride,
-                dot_color,
+                dot_u0, s_minimap_dot_atlas_v,
+                dot_u0 + 7.0f,
+                s_minimap_dot_atlas_v + 7.0f,
+                0xFFFFFFFF,
                 HUD_DEPTH
             );
             hud_submit_quad(&map_quad);
@@ -2239,7 +2240,7 @@ void td5_hud_render_minimap(int actor_slot)
         }
     }
 
-    TD5_LOG_D(LOG_TAG,
+    TD5_LOG_I(LOG_TAG,
               "minimap: actor=%d span_range=[%d,%d] dots=%d",
               actor_slot, start_span,
               (start_span + 0x30 * 5 < g_strip_span_count) ? (start_span + 0x30 * 5) : g_strip_span_count,
@@ -2469,15 +2470,16 @@ void td5_hud_init_pause_menu(int page_index)
     TD5_AtlasEntry *blackbar_e = td5_asset_find_atlas_entry(NULL, "BLACKBAR");
     TD5_AtlasEntry *slider_e   = td5_asset_find_atlas_entry(NULL, "SLIDER");
 
-    /* BLACKBOX: dark semi-transparent panel. y is fixed ±56 (not ±half_w).
-     * From binary 0x43B7C0: single-texel sample, vertex color 0xFFFFFFFF. */
+    /* BLACKBOX: dark semi-transparent panel. y is fixed ±56.
+     * From binary 0x43B7C0: single-texel sample.  Texture is opaque dark;
+     * vertex alpha provides semi-transparency (0x80 ≈ 50%). */
     {
         float bu = (float)blackbox_e->atlas_x + 0.5f;
         float bv = (float)blackbox_e->atlas_y + 0.5f;
         PAUSE_ADD(-s_pause_half_width, -56.0f,
                    s_pause_half_width,  56.0f,
                    bu, bv, bu, bv,
-                   blackbox_e->texture_page, 0xFFFFFFFF);
+                   blackbox_e->texture_page, 0x80FFFFFF);
     }
 
     /* SELBOX: grayscale highlight bar (256x16 atlas texture).
@@ -2557,13 +2559,14 @@ void td5_hud_init_pause_menu(int page_index)
         }
 
         float cursor_x = start_x;
-        float atlas_ox = (float)pausetxt->atlas_x;
-        float atlas_oy = (float)pausetxt->atlas_y;
+        /* Glyph UVs are absolute pixel coords in the 256x256 texture page —
+         * the character code itself encodes the cell position (0x43BDB0).
+         * Do NOT add atlas_x/atlas_y offset. */
         for (int c = 0; c < len; c++) {
             uint8_t ch = (uint8_t)str[c];
             int glyph_w = (g_pause_glyph_widths[ch] * 2) / 3;
-            float glyph_u = atlas_ox + (float)(ch & 0x0F) * 16.0f + 0.5f;
-            float glyph_v = atlas_oy + (float)(ch >> 4) * 16.0f + 0.5f;
+            float glyph_u = (float)(ch & 0x0F) * 16.0f + 0.5f;
+            float glyph_v = (float)(ch >> 4) * 16.0f + 0.5f;
             PAUSE_ADD(cursor_x + 0.5f, text_y + 0.5f,
                       cursor_x + (float)(glyph_w - 1) + 0.5f, text_y + 16.0f,
                       glyph_u, glyph_v,
