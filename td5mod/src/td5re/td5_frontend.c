@@ -345,6 +345,7 @@ static int s_car_preview_surface = 0;
 static char s_car_spec[17][48]; /* config.nfo fields (0-16) for stats sub-screen */
 static int  s_car_spec_car = -1; /* which car index is currently cached */
 static int s_track_preview_surface = 0;
+static int s_track_switch_tick = 16; /* 0-15 = animating in, 16 = settled */
 static int s_font_page = -1;
 static int s_cursor_tex_page = -1;  /* page 896: snkmouse.tga cursor */
 static int s_cursor_w = 0, s_cursor_h = 0;
@@ -3457,6 +3458,13 @@ static void frontend_render_car_selection_preview(float sx, float sy) {
 static void frontend_render_track_selection_preview(float sx, float sy) {
     char track_name[80], city[80], country[80];
     const char *comma;
+    /* Animation offsets for track-switch slide-in (state 9).
+     * Original: state 8 @ 0x427630 uses single counter _DAT_0049522c (0..0x10=16 frames).
+     * Preview slides in from right: x_offset = (16 - tick) * 16px [CONFIRMED @ 0x427b80-ish].
+     * Text slides in from above:  y_offset = (tick - 16) * 16px [CONFIRMED @ 0x427957 formula]. */
+    float img_x_off = (s_track_switch_tick < 16) ? (16 - s_track_switch_tick) * 16.0f * sx : 0.0f;
+    float txt_y_off = (s_track_switch_tick < 16) ? (s_track_switch_tick - 16) * 16.0f * sy : 0.0f;
+
     if (!s_anim_complete) return;
     frontend_get_track_display_name(s_selected_track, 0, track_name, sizeof(track_name));
     /* Original: text surface 296x184 at (344,81), city at surf y=0, country at surf y=0x20=32
@@ -3472,26 +3480,18 @@ static void frontend_render_track_selection_preview(float sx, float sy) {
         country[sizeof(country) - 1] = '\0';
         /* Original centers each line within 296px surface blitted at x=344
          * RE: FUN_00424a50 returns (0x128 - text_width) / 2; center = 344 + 148 = 492 */
-        fe_draw_text_centered(492.0f * sx, 81.0f * sy, city, 0xFFFFFFFF, sx, sy);
-        fe_draw_text_centered(492.0f * sx, 113.0f * sy, country, 0xFFFFFFFF, sx, sy);
+        fe_draw_text_centered(492.0f * sx, 81.0f * sy + txt_y_off, city, 0xFFFFFFFF, sx, sy);
+        fe_draw_text_centered(492.0f * sx, 113.0f * sy + txt_y_off, country, 0xFFFFFFFF, sx, sy);
     } else {
-        fe_draw_text_centered(492.0f * sx, 81.0f * sy, track_name, 0xFFFFFFFF, sx, sy);
+        fe_draw_text_centered(492.0f * sx, 81.0f * sy + txt_y_off, track_name, 0xFFFFFFFF, sx, sy);
     }
     /* Track preview: 152x224 portrait, right of buttons.
-     * x=EDI+0x12E=412, y=ESI+0x36=135 (640x480) */
-    {
-        static int s_track_preview_log = 0;
-        if (s_track_preview_log < 4) {
-            TD5_LOG_I(LOG_TAG, "TrackPreview: surface=%d track=%d", s_track_preview_surface, s_selected_track);
-            s_track_preview_log++;
-        }
-    }
+     * x=EDI+0x12E=412, y=ESI+0x36=135 (640x480).
+     * Slides in from right during track-switch animation (state 9). */
     if (s_track_preview_surface > 0) {
-        /* Original: QueueFrontendOverlayRect @ 0x4279ef → flushed with flag 0x11 (color-key transparent).
-         * Color key = black (0x000000) @ 0x4279d7. Use fe_draw_surface_rect which forces the correct
-         * blend state (BLEND_SRCALPHA_INVSRC + alphaTest) so black pixels are transparent. */
-        TD5_LOG_I(LOG_TAG, "TrackPreview: draw surface=%d track=%d", s_track_preview_surface, s_selected_track);
-        fe_draw_surface_rect(s_track_preview_surface, 412.0f * sx, 135.0f * sy, 152.0f * sx, 224.0f * sy, 0xFFFFFFFF);
+        fe_draw_surface_rect(s_track_preview_surface,
+                             412.0f * sx + img_x_off, 135.0f * sy,
+                             152.0f * sx, 224.0f * sy, 0xFFFFFFFF);
     }
     /* Draw L/R arrow indicators on Track and Direction buttons */
     fe_draw_option_arrows(0, sx, sy);
@@ -6628,6 +6628,7 @@ static void Screen_TrackSelection(void) {
         frontend_load_tga("Front_End/TrackSelect.tga", "Front_End/FrontEnd.zip");
 
         s_track_direction = 0;
+        s_track_switch_tick = 16; /* no slide-in on initial entry */
         frontend_load_selected_track_preview();
         frontend_begin_timed_animation();
         s_inner_state = 1;
@@ -6705,11 +6706,14 @@ static void Screen_TrackSelection(void) {
         }
         break;
 
-    case 5: /* Track change: clear info, render name, load preview, check locked */
-        /* Load track preview TGA from Front_End/Tracks/Tracks.zip */
-        /* Show "Locked" if track is locked */
+    case 5: /* Track change: load new preview, start slide-in animation */
+        /* Original: frame 1 clears text surface, frame 2 loads preview → state 8 (slide-in).
+         * Source port: load immediately, then run slide-in via state 9.
+         * Both text and preview animate together via s_track_switch_tick [CONFIRMED @ 0x427984]. */
         frontend_load_selected_track_preview();
-        s_inner_state = 4;
+        s_track_switch_tick = 0;
+        TD5_LOG_I(LOG_TAG, "TrackSel: track change slide-in start track=%d", s_selected_track);
+        s_inner_state = 9;
         break;
 
     case 6: /* Slide-out prep */
@@ -6739,6 +6743,18 @@ static void Screen_TrackSelection(void) {
             frontend_init_display_mode_state();
         } else {
             td5_frontend_set_screen((TD5_ScreenIndex)s_return_screen);
+        }
+        break;
+
+    case 9: /* Track-switch slide-in: 16 frames [CONFIRMED @ 0x427e96 original state 8].
+             * Single tick counter drives both preview (slides from right) and text (slides from above).
+             * Original: tick * -0x10 + 0x22e for preview x; (tick-0x10)*0x10 + base for text y. */
+        s_track_switch_tick++;
+        if (s_track_switch_tick >= 16) {
+            s_track_switch_tick = 16; /* settled: render offsets become 0 */
+            TD5_LOG_I(LOG_TAG, "TrackSel: track change slide-in complete");
+            frontend_play_sfx(4); /* completion chime [CONFIRMED @ 0x427e96] */
+            s_inner_state = 4;
         }
         break;
     }
