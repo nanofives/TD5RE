@@ -3008,15 +3008,39 @@ void td5_physics_init_vehicle_runtime(void)
             }
         }
 
-        /* Original calls IntegrateVehiclePoseAndContacts (0x405E80) for racer
-         * slots (< 6). This runs full pose integration including ground-snap,
-         * ensuring cars start ON the road surface.
-         * [CONFIRMED @ 0x42F140: calls FUN_00405e80 for slots < 6] */
-        if (slot < 6) {
-            td5_physics_integrate_pose(actor);
-        } else {
-            update_vehicle_pose_from_physics(actor);
+        /* Ground-settle: build matrix, compute wheel positions, probe ground,
+         * snap world_pos.y so the car starts ON the road — without applying
+         * any gravity or velocity (which would drop the car on the first call).
+         * [CONFIRMED @ 0x42F140: original calls FUN_00405e80 for slots < 6,
+         *  but with velocity=0 the gravity in that call self-corrects.
+         *  We do it explicitly to avoid any initial impulse.] */
+        update_vehicle_pose_from_physics(actor);  /* builds matrix + render_pos */
+        td5_physics_refresh_wheel_contacts(actor); /* probes ground, snaps wheels */
+        /* Apply ground-snap correction from wheel contact data */
+        {
+            int64_t corr_sum = 0;
+            int corr_count = 0;
+            for (int i = 0; i < 4; i++) {
+                if (!(actor->wheel_contact_bitmask & (1 << i))) {
+                    int32_t g_y = 0;
+                    int g_surf = 0;
+                    int g_span = actor->track_span_raw;
+                    if (td5_track_probe_height(actor->wheel_contact_pos[i].x,
+                                               actor->wheel_contact_pos[i].z,
+                                               g_span, &g_y, &g_surf)) {
+                        corr_sum += (int64_t)g_y - (int64_t)actor->wheel_contact_pos[i].y;
+                        corr_count++;
+                    }
+                }
+            }
+            if (corr_count > 0) {
+                actor->world_pos.y += (int32_t)(corr_sum / corr_count);
+            }
         }
+        actor->render_pos.x = (float)actor->world_pos.x * (1.0f / 256.0f);
+        actor->render_pos.y = (float)actor->world_pos.y * (1.0f / 256.0f);
+        actor->render_pos.z = (float)actor->world_pos.z * (1.0f / 256.0f);
+        actor->prev_frame_y_position = actor->world_pos.y;
         TD5_LOG_I(LOG_TAG,
                   "Init vehicle runtime: slot=%d gear=%d rpm=%d grip=%u race_pos=%u",
                   slot,
