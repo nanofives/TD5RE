@@ -2252,7 +2252,7 @@ static void update_vehicle_pose_from_physics(TD5_Actor *actor)
                                            actor->wheel_contact_pos[i].z,
                                            g_span, &g_y, &g_surf)) {
                     corr_sum += (int64_t)g_y - (int64_t)actor->wheel_contact_pos[i].y
-                              - (int64_t)susp_href_world;
+                              + (int64_t)susp_href_world;
                     corr_count++;
                 }
             }
@@ -3087,7 +3087,7 @@ void td5_physics_init_vehicle_runtime(void)
                                                actor->wheel_contact_pos[i].z,
                                                g_span, &g_y, &g_surf)) {
                         corr_sum += (int64_t)g_y - (int64_t)actor->wheel_contact_pos[i].y
-                                  - (int64_t)susp_href_world;
+                                  + (int64_t)susp_href_world;
                         corr_count++;
                     }
                 }
