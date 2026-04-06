@@ -2162,14 +2162,27 @@ void td5_physics_integrate_pose(TD5_Actor *actor)
 
         if (fallen) {
             int wx = 0, wy = 0, wz = 0;
-            int sub_lane = (int)actor->track_sub_lane_index;
-            if (td5_track_get_span_lane_world(oob_span, sub_lane, &wx, &wy, &wz)) {
+            /* Use span center (lane_count/2) instead of actor's sub_lane_index.
+             * sub_lane_index can be 0 (wall/shoulder) after resolve_neighbor clamps
+             * it when crossing into a narrower adjacent span — this was causing an
+             * infinite OOB loop on Australia (and other tracks) where recovery would
+             * teleport to X=24641024 (off-road), probe_height would return an
+             * extrapolated road_y >> car Y, and fallen=1 every frame thereafter. */
+            if (td5_track_get_span_center_world(oob_span, &wx, &wy, &wz)) {
                 actor->world_pos.x = wx << 8;
                 actor->world_pos.y = wy << 8;
                 actor->world_pos.z = wz << 8;
+                /* Reset sub_lane to center so the next boundary traversal starts
+                 * from a valid road position rather than the wall. */
+                actor->track_sub_lane_index = 1;
+                TD5_LOG_I(LOG_TAG, "OOB recovery: slot=%d span=%d center pos=(%d,%d,%d)",
+                          actor->slot_index, oob_span,
+                          actor->world_pos.x, actor->world_pos.y, actor->world_pos.z);
             } else if (have_road) {
-                /* At least snap Y to road height */
+                /* Span center unavailable (type=9/10 or bad vertex) — at least snap Y */
                 actor->world_pos.y = road_y;
+                TD5_LOG_W(LOG_TAG, "OOB recovery: slot=%d span=%d center unavailable, snap Y only",
+                          actor->slot_index, oob_span);
             }
             actor->linear_velocity_x = 0;
             actor->linear_velocity_y = 0;
@@ -2184,9 +2197,6 @@ void td5_physics_integrate_pose(TD5_Actor *actor)
             actor->render_pos.x = (float)actor->world_pos.x * (1.0f / 256.0f);
             actor->render_pos.y = (float)actor->world_pos.y * (1.0f / 256.0f);
             actor->render_pos.z = (float)actor->world_pos.z * (1.0f / 256.0f);
-            TD5_LOG_I(LOG_TAG, "OOB recovery: slot=%d span=%d pos=(%d,%d,%d)",
-                      actor->slot_index, oob_span,
-                      actor->world_pos.x, actor->world_pos.y, actor->world_pos.z);
         }
     }
 
