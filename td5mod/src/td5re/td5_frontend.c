@@ -3711,9 +3711,33 @@ static void frontend_render_high_score_overlay(float sx, float sy) {
 }
 
 static void frontend_render_extras_gallery_overlay(float sx, float sy) {
-    if (s_gallery_pic_surface > 0) {
-        fe_draw_surface_rect(s_gallery_pic_surface, 0.0f, 0.0f, 640.0f * sx, 480.0f * sy, 0xFFFFFFFF);
+    /* Black background fills entire viewport */
+    if (s_white_tex_page >= 0) {
+        td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
+        fe_draw_quad(0.0f, 0.0f, 640.0f * sx, 480.0f * sy, 0xFF000000,
+                     s_white_tex_page, 0.0f, 0.0f, 1.0f, 1.0f);
     }
+
+    if (s_gallery_pic_surface <= 0) return;
+    int slot = s_gallery_pic_surface - 1;
+    if (slot < 0 || slot >= FE_MAX_SURFACES || !s_surfaces[slot].in_use) return;
+
+    int img_w = s_surfaces[slot].width;
+    int img_h = s_surfaces[slot].height;
+    if (img_w <= 0 || img_h <= 0) return;
+
+    /* Scale to fit 640x480, maintaining aspect ratio, centered */
+    float scale_x = 640.0f / (float)img_w;
+    float scale_y = 480.0f / (float)img_h;
+    float scale = scale_x < scale_y ? scale_x : scale_y;
+    float virt_w = (float)img_w * scale;
+    float virt_h = (float)img_h * scale;
+    float virt_x = (640.0f - virt_w) * 0.5f;
+    float virt_y = (480.0f - virt_h) * 0.5f;
+
+    td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
+    fe_draw_quad(virt_x * sx, virt_y * sy, virt_w * sx, virt_h * sy,
+                 0xFFFFFFFF, s_surfaces[slot].tex_page, 0.0f, 0.0f, 1.0f, 1.0f);
 }
 
 static float fe_measure_text_width(const char *text, float sx) {
