@@ -3486,17 +3486,11 @@ static void frontend_render_track_selection_preview(float sx, float sy) {
         }
     }
     if (s_track_preview_surface > 0) {
-        /* Draw track preview with same pattern as title TGA (which works):
-         * set TRANSLUCENT_LINEAR, draw quad directly, restore OPAQUE_LINEAR.
-         * Bypasses fe_draw_surface_rect to isolate whether its manual blend
-         * force is interfering with transparency. */
-        int tp_slot = s_track_preview_surface - 1;
-        if (tp_slot >= 0 && tp_slot < FE_MAX_SURFACES && s_surfaces[tp_slot].in_use) {
-            td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
-            fe_draw_quad(412.0f * sx, 135.0f * sy, 152.0f * sx, 224.0f * sy,
-                         0xFFFFFFFF, s_surfaces[tp_slot].tex_page, 0, 0, 1, 1);
-            td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
-        }
+        /* Original: QueueFrontendOverlayRect @ 0x4279ef → flushed with flag 0x11 (color-key transparent).
+         * Color key = black (0x000000) @ 0x4279d7. Use fe_draw_surface_rect which forces the correct
+         * blend state (BLEND_SRCALPHA_INVSRC + alphaTest) so black pixels are transparent. */
+        TD5_LOG_I(LOG_TAG, "TrackPreview: draw surface=%d track=%d", s_track_preview_surface, s_selected_track);
+        fe_draw_surface_rect(s_track_preview_surface, 412.0f * sx, 135.0f * sy, 152.0f * sx, 224.0f * sy, 0xFFFFFFFF);
     }
     /* Draw L/R arrow indicators on Track and Direction buttons */
     fe_draw_option_arrows(0, sx, sy);
