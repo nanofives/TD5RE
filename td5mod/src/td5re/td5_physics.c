@@ -2039,9 +2039,9 @@ void td5_physics_integrate_pose(TD5_Actor *actor)
     td5_physics_refresh_wheel_contacts(actor);
 
     /* 8. Ground-snap: compute averaged ground height from grounded wheels and
-     * correct world_pos.y. Uses each wheel's own probe span (not chassis span)
-     * so the ground height matches what RefreshWheelContacts computed, even
-     * at span boundaries on hilly terrain. */
+     * correct world_pos.y (IntegrateVehiclePoseAndContacts step 9 in analysis).
+     * Without this, gravity accumulates each frame with no correction and cars
+     * fall away from the road surface. */
     {
         int64_t corr_sum = 0;
         int corr_count = 0;
@@ -2050,11 +2050,7 @@ void td5_physics_integrate_pose(TD5_Actor *actor)
             if (!(gnd_mask & (1 << i))) {  /* grounded wheel */
                 int32_t g_y = 0;
                 int g_surf = 0;
-                /* Use per-wheel probe span, not chassis span, to match
-                 * RefreshWheelContacts ground height at same triangle. */
-                int g_span = actor->wheel_probes[i].span_index;
-                if (g_span < 0 || g_span >= g_td5.track_span_ring_length)
-                    g_span = actor->track_span_raw;
+                int g_span = actor->track_span_raw;
                 if (td5_track_probe_height(actor->wheel_contact_pos[i].x,
                                            actor->wheel_contact_pos[i].z,
                                            g_span, &g_y, &g_surf)) {
@@ -2197,9 +2193,7 @@ static void update_vehicle_pose_from_physics(TD5_Actor *actor)
             if (!(gnd_mask & (1 << i))) {
                 int32_t g_y = 0;
                 int g_surf = 0;
-                int g_span = actor->wheel_probes[i].span_index;
-                if (g_span < 0 || g_span >= g_td5.track_span_ring_length)
-                    g_span = actor->track_span_raw;
+                int g_span = actor->track_span_raw;
                 if (td5_track_probe_height(actor->wheel_contact_pos[i].x,
                                            actor->wheel_contact_pos[i].z,
                                            g_span, &g_y, &g_surf)) {
