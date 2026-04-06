@@ -409,6 +409,14 @@ void td5_physics_update_vehicle_actor(TD5_Actor *actor)
 
     /* 6. Dynamics dispatch */
     if (actor->vehicle_mode == 0 && !g_game_paused) {
+        /* Clear per-frame force accumulators.
+         * Original: RefreshWheelContacts OVERWRITES force_accum each frame
+         * with (wheel_y - ground_y + gravity). Since we skip that assignment
+         * (see BUG 6 comment in refresh_wheel_contacts), we must explicitly
+         * zero force_accum here to prevent frame-over-frame accumulation
+         * from apply_steering_torque. */
+        memset(actor->wheel_force_accum, 0, sizeof(actor->wheel_force_accum));
+
         /* Select effective grip: min of grip_reduction and race_position */
         uint8_t eff_grip = actor->grip_reduction;
         if (actor->race_position < eff_grip)
