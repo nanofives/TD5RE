@@ -64,14 +64,31 @@ static LPDIRECTINPUTDEVICE8A s_di_keyboard   = NULL;
 static LPDIRECTINPUTDEVICE8A s_di_mouse      = NULL;
 static LPDIRECTINPUTDEVICE8A s_di_joystick   = NULL;
 static char s_device_names[16][256];
+static int  s_device_types[16];  /* 0=keyboard, 1=gamepad, 2=wheel/joystick */
 static int  s_device_count = 0;
 
-static char   s_log_path[512];
-static int    s_log_path_init = 0;
-static HANDLE s_log_handle = INVALID_HANDLE_VALUE;
-static char   s_log_buffer[4096];
-static size_t s_log_buffer_used = 0;
-static unsigned int s_log_line_count = 0;
+/* Multi-file logging — messages routed by module tag to separate log files.
+ * Session rotation keeps up to 5 previous logs per category. */
+#define TD5_LOG_CAT_FRONTEND 0
+#define TD5_LOG_CAT_RACE     1
+#define TD5_LOG_CAT_ENGINE   2
+#define TD5_LOG_CAT_COUNT    3
+#define TD5_LOG_MAX_SESSIONS 5
+
+static const char *s_log_cat_names[TD5_LOG_CAT_COUNT] = {
+    "frontend", "race", "engine"
+};
+
+typedef struct TD5_LogFile {
+    HANDLE handle;
+    char   buffer[4096];
+    size_t buffer_used;
+    unsigned int line_count;
+} TD5_LogFile;
+
+static TD5_LogFile s_log_files[TD5_LOG_CAT_COUNT];
+static char s_log_dir[512];
+static int  s_log_initialized = 0;
 
 /* Audio */
 #define MAX_AUDIO_BUFFERS  256
@@ -112,6 +129,8 @@ static TD5_FFState          s_ff;
 static WrapperSurface  *s_tex_surfaces[MAX_TEXTURE_PAGES];
 static WrapperTexture  *s_tex_wrappers[MAX_TEXTURE_PAGES];
 static DWORD            s_tex_handles[MAX_TEXTURE_PAGES];
+static uint16_t         s_tex_widths[MAX_TEXTURE_PAGES];
+static uint16_t         s_tex_heights[MAX_TEXTURE_PAGES];
 static int              s_tex_page_count = 0;
 static int              s_frame_draw_calls = 0;
 static int              s_frame_vertices = 0;
@@ -179,6 +198,8 @@ void td5_platform_win32_init(void *ddraw4, void *d3ddevice3, void *primary_surfa
     memset(s_tex_surfaces, 0, sizeof(s_tex_surfaces));
     memset(s_tex_wrappers, 0, sizeof(s_tex_wrappers));
     memset(s_tex_handles, 0, sizeof(s_tex_handles));
+    memset(s_tex_widths, 0, sizeof(s_tex_widths));
+    memset(s_tex_heights, 0, sizeof(s_tex_heights));
     memset(s_ds_buffers, 0, sizeof(s_ds_buffers));
     memset(s_ds_channels, 0, sizeof(s_ds_channels));
     memset(s_ds_buffer_rates, 0, sizeof(s_ds_buffer_rates));
@@ -779,15 +800,32 @@ void td5_plat_input_poll(int slot, TD5_InputState *out)
                 hr = IDirectInputDevice8_GetDeviceState(s_di_keyboard,
                         sizeof(s_keyboard), s_keyboard);
             }
-            if (SUCCEEDED(hr)) di_ok = 1;
+            if (SUCCEEDED(hr)) {
+                static int s_dinput_ok_logged = 0;
+                if (!s_dinput_ok_logged) {
+                    TD5_LOG_I(LOG_TAG, "DInput keyboard acquired successfully");
+                    s_dinput_ok_logged = 1;
+                }
+                di_ok = 1;
+            }
         }
         if (!di_ok) {
-            /* Win32 fallback — GetKeyboardState uses VK codes (high bit = pressed).
-             * This matches the 0x80 check in td5_plat_input_key_pressed but uses
-             * VK codes not DIK scancodes. Map via GetAsyncKeyState instead. */
+            /* Win32 fallback — DInput scancodes for extended keys (arrows, Ins,
+             * Del, Home, End, etc.) live at indices 0x80-0xFF, formed by ORing
+             * the base Set-1 scancode with 0x80 (i.e. E0,48 → 0xC8 for Up).
+             * MapVirtualKey needs the E0 prefix in bits 8-15 for these keys;
+             * passing 0xC8 raw returns 0 (unmapped). Use MAPVK_VSC_TO_VK_EX
+             * to distinguish left/right variants. */
+            static int s_fallback_warned = 0;
+            if (!s_fallback_warned) {
+                TD5_LOG_W(LOG_TAG, "DInput keyboard unavailable — using Win32 GetAsyncKeyState fallback");
+                s_fallback_warned = 1;
+            }
             memset(s_keyboard, 0, sizeof(s_keyboard));
             for (int sc = 0; sc < 256; sc++) {
-                UINT vk = MapVirtualKeyA((UINT)sc, MAPVK_VSC_TO_VK);
+                UINT win_sc = (sc >= 0x80) ? (0xE000u | ((UINT)sc & 0x7Fu))
+                                           : (UINT)sc;
+                UINT vk = MapVirtualKeyA(win_sc, MAPVK_VSC_TO_VK_EX);
                 if (vk && (GetAsyncKeyState(vk) & 0x8000))
                     s_keyboard[sc] = 0x80;
             }
@@ -836,27 +874,51 @@ void td5_plat_input_poll(int slot, TD5_InputState *out)
     out->mouse_buttons = s_mouse_buttons | s_mouse_click_latch;
     s_mouse_click_latch = 0;
 
-    /* Map keyboard to game buttons */
+    /* Map keyboard to game buttons.
+     * Split-screen layout:
+     *   P1 (slot 0): Arrow keys + LShift/RShift + Space
+     *   P2 (slot 1): WASD + Q/E + Tab
+     * Single-player: all keys mapped to slot 0 (backwards compatible). */
     {
         uint32_t bits = 0;
 
-        /* DInput scancodes (DIK_*) when using DInput, else high bit = pressed */
         #define K_DOWN(sc) (s_keyboard[(sc)] & 0x80)
 
-        if (K_DOWN(DIK_LEFT)  || K_DOWN(DIK_A))  bits |= TD5_INPUT_STEER_LEFT;
-        if (K_DOWN(DIK_RIGHT) || K_DOWN(DIK_D))  bits |= TD5_INPUT_STEER_RIGHT;
-        if (K_DOWN(DIK_UP)    || K_DOWN(DIK_W))  bits |= TD5_INPUT_THROTTLE;
-        if (K_DOWN(DIK_DOWN)  || K_DOWN(DIK_S))  bits |= TD5_INPUT_BRAKE;
-        if (K_DOWN(DIK_LSHIFT))                   bits |= TD5_INPUT_GEAR_DOWN;
-        if (K_DOWN(DIK_RSHIFT))                   bits |= TD5_INPUT_GEAR_UP;
-        if (K_DOWN(DIK_H)     || K_DOWN(DIK_SPACE)) bits |= TD5_INPUT_HORN;
+        if (slot == 0) {
+            /* Player 1: arrow keys (always), plus WASD in single-player only */
+            if (K_DOWN(DIK_LEFT))                     bits |= TD5_INPUT_STEER_LEFT;
+            if (K_DOWN(DIK_RIGHT))                    bits |= TD5_INPUT_STEER_RIGHT;
+            if (K_DOWN(DIK_UP))                       bits |= TD5_INPUT_THROTTLE;
+            if (K_DOWN(DIK_DOWN))                     bits |= TD5_INPUT_BRAKE;
+            if (K_DOWN(DIK_LSHIFT))                   bits |= TD5_INPUT_GEAR_DOWN;
+            if (K_DOWN(DIK_RSHIFT))                   bits |= TD5_INPUT_GEAR_UP;
+            if (K_DOWN(DIK_SPACE))                    bits |= TD5_INPUT_HORN;
+        } else {
+            /* Player 2: WASD + Q/E */
+            if (K_DOWN(DIK_A))                        bits |= TD5_INPUT_STEER_LEFT;
+            if (K_DOWN(DIK_D))                        bits |= TD5_INPUT_STEER_RIGHT;
+            if (K_DOWN(DIK_W))                        bits |= TD5_INPUT_THROTTLE;
+            if (K_DOWN(DIK_S))                        bits |= TD5_INPUT_BRAKE;
+            if (K_DOWN(DIK_Q))                        bits |= TD5_INPUT_GEAR_DOWN;
+            if (K_DOWN(DIK_E))                        bits |= TD5_INPUT_GEAR_UP;
+            if (K_DOWN(DIK_TAB))                      bits |= TD5_INPUT_HORN;
+        }
 
         #undef K_DOWN
+
+        /* Diagnostic: log any non-zero button state (throttled) */
+        {
+            static uint32_t s_btn_log_ctr = 0;
+            if (bits && (s_btn_log_ctr++ % 60u) == 0u) {
+                TD5_LOG_I(LOG_TAG, "input_poll slot=%d buttons=0x%08X",
+                          slot, bits);
+            }
+        }
 
         out->buttons = bits;
     }
 
-    /* Joystick (slot 0 only for now) */
+    /* Joystick: slot 0 uses first joystick, slot 1 uses second (if available) */
     if (slot == 0 && s_di_joystick) {
         DIJOYSTATE2 js;
         HRESULT hr;
@@ -897,6 +959,17 @@ static BOOL CALLBACK EnumJoysticksCallback(
                 inst->tszInstanceName,
                 sizeof(s_device_names[0]) - 1);
         s_device_names[s_device_count][255] = '\0';
+        /* Classify device type: wheel/driving=2, gamepad=1 */
+        {
+            BYTE dev_type = GET_DIDEVICE_TYPE(inst->dwDevType);
+            if (dev_type == DI8DEVTYPE_DRIVING ||
+                dev_type == DI8DEVTYPE_FLIGHT  ||
+                dev_type == DI8DEVTYPE_1STPERSON) {
+                s_device_types[s_device_count] = 2; /* joystick/wheel */
+            } else {
+                s_device_types[s_device_count] = 1; /* gamepad */
+            }
+        }
         s_device_count++;
     }
     return DIENUM_CONTINUE;
@@ -907,6 +980,7 @@ int td5_plat_input_enumerate_devices(void)
     s_device_count = 0;
     /* Keyboard is always device 0 */
     strncpy(s_device_names[0], "Keyboard", sizeof(s_device_names[0]));
+    s_device_types[0] = 0; /* keyboard */
     s_device_count = 1;
 
     if (s_dinput) {
@@ -926,6 +1000,12 @@ const char *td5_plat_input_device_name(int index)
 {
     if (index < 0 || index >= s_device_count) return NULL;
     return s_device_names[index];
+}
+
+int td5_plat_input_device_type(int index)
+{
+    if (index < 0 || index >= s_device_count) return 0;
+    return s_device_types[index];
 }
 
 void td5_plat_input_set_device(int slot, int device_index)
@@ -1978,21 +2058,19 @@ void td5_plat_render_set_preset(TD5_RenderPreset preset)
         s->mag_filter   = 2; /* LINEAR */
         s->min_filter   = 2;
         s->texblend_mode = D3DTBLEND_MODULATE;
-        s->alpha_test_enable = 0;
-        s->alpha_ref         = 0;
+        s->alpha_test_enable = 1;
+        s->alpha_ref         = 1; /* discard alpha < 1/255 (color-keyed pixels) */
         break;
 
     case TD5_PRESET_TRANSLUCENT_LINEAR:
         s->blend_enable = 1;
         s->src_blend    = D3D6BLEND_SRCALPHA;
         s->dest_blend   = D3D6BLEND_INVSRCALPHA;
-        s->z_enable     = 1;
+        s->z_enable     = 0; /* 2D overlay: no depth test, draw order = z-order */
         s->z_write      = 0;
         s->mag_filter   = 2;
         s->min_filter   = 2;
         s->texblend_mode = D3DTBLEND_MODULATEALPHA;
-        /* Discard pixels with alpha=0 so color-keyed transparent backgrounds
-         * don't bleed through if the blend equation is not applied correctly. */
         s->alpha_test_enable = 1;
         s->alpha_ref         = 1; /* discard alpha < 1/255 */
         break;
@@ -2017,8 +2095,21 @@ void td5_plat_render_set_preset(TD5_RenderPreset preset)
         s->mag_filter   = 2;
         s->min_filter   = 2;
         s->texblend_mode = D3DTBLEND_MODULATE;
-        s->alpha_test_enable = 0;
-        s->alpha_ref         = 0;
+        s->alpha_test_enable = 1;
+        s->alpha_ref         = 1; /* discard alpha < 1/255 (color-keyed pixels) */
+        break;
+
+    case TD5_PRESET_TRANSLUCENT_POINT:
+        s->blend_enable = 1;
+        s->src_blend    = D3D6BLEND_SRCALPHA;
+        s->dest_blend   = D3D6BLEND_INVSRCALPHA;
+        s->z_enable     = 0;
+        s->z_write      = 0;
+        s->mag_filter   = 0; /* POINT — no bilinear bleed into transparent border pixels */
+        s->min_filter   = 0;
+        s->texblend_mode = D3DTBLEND_MODULATEALPHA;
+        s->alpha_test_enable = 1;
+        s->alpha_ref         = 1;
         break;
     }
 
@@ -2159,10 +2250,21 @@ int td5_plat_render_upload_texture(int page_index, const void *pixels,
 
     s_tex_surfaces[page_index] = surf;
     s_tex_wrappers[page_index] = tex;
+    s_tex_widths[page_index]   = (uint16_t)width;
+    s_tex_heights[page_index]  = (uint16_t)height;
     TD5_LOG_I(LOG_TAG, "Texture upload: page=%d size=%dx%d format=%d",
               page_index, width, height, format);
 
     return 1;
+}
+
+void td5_plat_render_get_texture_dims(int page_index, int *w, int *h)
+{
+    if (page_index >= 0 && page_index < MAX_TEXTURE_PAGES &&
+        s_tex_widths[page_index] > 0 && s_tex_heights[page_index] > 0) {
+        *w = s_tex_widths[page_index];
+        *h = s_tex_heights[page_index];
+    }
 }
 
 void td5_plat_render_set_viewport(int x, int y, int width, int height)
@@ -2310,70 +2412,149 @@ void td5_plat_mutex_destroy(void *mutex_handle)
 }
 
 /* ========================================================================
- * Logging
+ * Logging — multi-file with session rotation
+ *
+ * Messages are routed to frontend.log / race.log / engine.log based on
+ * the module tag.  On startup, existing logs are rotated up to 5 previous
+ * sessions (e.g. frontend.log → frontend.1.log → ... → frontend.5.log).
  * ======================================================================== */
 
 static const char *s_log_level_names[] = { "DBG", "INF", "WRN", "ERR" };
 
-static void td5_plat_log_flush_locked(void)
+static int td5_log_classify_module(const char *module)
+{
+    if (!module) return TD5_LOG_CAT_ENGINE;
+
+    /* Frontend category */
+    if (strcmp(module, "frontend") == 0 ||
+        strcmp(module, "hud")      == 0 ||
+        strcmp(module, "save")     == 0 ||
+        strcmp(module, "input")    == 0)
+        return TD5_LOG_CAT_FRONTEND;
+
+    /* Race category */
+    if (strcmp(module, "td5_game") == 0 ||
+        strcmp(module, "physics")  == 0 ||
+        strcmp(module, "ai")       == 0 ||
+        strcmp(module, "track")    == 0 ||
+        strcmp(module, "camera")   == 0 ||
+        strcmp(module, "vfx")      == 0)
+        return TD5_LOG_CAT_RACE;
+
+    /* Everything else: render, asset, platform, sound, net, fmv, main, ... */
+    return TD5_LOG_CAT_ENGINE;
+}
+
+static void td5_log_flush_file(TD5_LogFile *lf)
 {
     DWORD written;
-
-    if (s_log_handle == INVALID_HANDLE_VALUE || s_log_buffer_used == 0) {
-        return;
-    }
-
-    WriteFile(s_log_handle, s_log_buffer, (DWORD)s_log_buffer_used, &written, NULL);
-    s_log_buffer_used = 0;
+    if (lf->handle == INVALID_HANDLE_VALUE || lf->buffer_used == 0) return;
+    WriteFile(lf->handle, lf->buffer, (DWORD)lf->buffer_used, &written, NULL);
+    lf->buffer_used = 0;
 }
 
 static void td5_plat_log_shutdown(void)
 {
-    if (s_log_handle != INVALID_HANDLE_VALUE) {
-        td5_plat_log_flush_locked();
-        FlushFileBuffers(s_log_handle);
-        CloseHandle(s_log_handle);
-        s_log_handle = INVALID_HANDLE_VALUE;
+    int i;
+    for (i = 0; i < TD5_LOG_CAT_COUNT; i++) {
+        if (s_log_files[i].handle != INVALID_HANDLE_VALUE) {
+            td5_log_flush_file(&s_log_files[i]);
+            FlushFileBuffers(s_log_files[i].handle);
+            CloseHandle(s_log_files[i].handle);
+            s_log_files[i].handle = INVALID_HANDLE_VALUE;
+        }
     }
 }
 
-static void td5_plat_log_ensure_open(void)
+static void td5_log_rotate_file(const char *base_path)
 {
-    if (s_log_path_init) {
-        return;
+    char old_path[600], new_path[600];
+    int i;
+
+    /* Delete the oldest (generation MAX_SESSIONS) */
+    snprintf(old_path, sizeof(old_path), "%s.%d.log", base_path, TD5_LOG_MAX_SESSIONS);
+    DeleteFileA(old_path);
+
+    /* Shift generations up: N-1 → N, N-2 → N-1, ... 1 → 2 */
+    for (i = TD5_LOG_MAX_SESSIONS - 1; i >= 1; i--) {
+        snprintf(old_path, sizeof(old_path), "%s.%d.log", base_path, i);
+        snprintf(new_path, sizeof(new_path), "%s.%d.log", base_path, i + 1);
+        MoveFileA(old_path, new_path);
     }
 
+    /* Current .log → .1.log */
+    snprintf(old_path, sizeof(old_path), "%s.log", base_path);
+    snprintf(new_path, sizeof(new_path), "%s.1.log", base_path);
+    MoveFileA(old_path, new_path);
+}
+
+void td5_plat_log_init(void)
+{
+    int i;
+    if (s_log_initialized) return;
+
+    /* Determine log directory: <exe_dir>/log/ */
     {
-        DWORD n = GetModuleFileNameA(NULL, s_log_path, sizeof(s_log_path) - 32);
+        DWORD n = GetModuleFileNameA(NULL, s_log_dir, sizeof(s_log_dir) - 32);
         if (n > 0) {
-            char *slash = s_log_path + n;
-            while (slash > s_log_path && *slash != '\\' && *slash != '/') slash--;
-            if (slash > s_log_path) slash[1] = '\0';
-            strcat(s_log_path, "td5re_debug.log");
+            char *slash = s_log_dir + n;
+            while (slash > s_log_dir && *slash != '\\' && *slash != '/') slash--;
+            if (slash > s_log_dir) slash[1] = '\0';
         } else {
-            strcpy(s_log_path, "td5re_debug.log");
+            strcpy(s_log_dir, ".\\");
+        }
+        strcat(s_log_dir, "log\\");
+    }
+
+    /* Create directory (ignore error if already exists) */
+    CreateDirectoryA(s_log_dir, NULL);
+
+    /* Rotate each category's log files */
+    for (i = 0; i < TD5_LOG_CAT_COUNT; i++) {
+        char base[600];
+        char path[600];
+        DWORD written;
+        const char *marker = "[session start]\n";
+
+        snprintf(base, sizeof(base), "%s%s", s_log_dir, s_log_cat_names[i]);
+        td5_log_rotate_file(base);
+
+        /* Open fresh log file */
+        snprintf(path, sizeof(path), "%s.log", base);
+        s_log_files[i].handle = CreateFileA(path, FILE_APPEND_DATA,
+                                    FILE_SHARE_READ | FILE_SHARE_WRITE,
+                                    NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+        s_log_files[i].buffer_used = 0;
+        s_log_files[i].line_count = 0;
+
+        if (s_log_files[i].handle != INVALID_HANDLE_VALUE) {
+            WriteFile(s_log_files[i].handle, marker, (DWORD)strlen(marker), &written, NULL);
         }
     }
 
-    s_log_handle = CreateFileA(s_log_path, FILE_APPEND_DATA,
-                               FILE_SHARE_READ | FILE_SHARE_WRITE,
-                               NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
-    if (s_log_handle != INVALID_HANDLE_VALUE) {
-        const char *marker = "[platform logger active]\n";
-        DWORD written;
-        WriteFile(s_log_handle, marker, (DWORD)strlen(marker), &written, NULL);
-        atexit(td5_plat_log_shutdown);
+    /* Also rotate crash.log */
+    {
+        char base[600];
+        snprintf(base, sizeof(base), "%scrash", s_log_dir);
+        td5_log_rotate_file(base);
     }
 
-    s_log_path_init = 1;
+    atexit(td5_plat_log_shutdown);
+    s_log_initialized = 1;
+}
+
+const char *td5_plat_log_dir(void)
+{
+    return s_log_dir;
 }
 
 void td5_plat_log(TD5_LogLevel level, const char *module, const char *fmt, ...)
 {
     char buf[2048];
     va_list ap;
-    int off;
+    int off, cat;
     DWORD written;
+    TD5_LogFile *lf;
 
     if (!fmt) return;
 
@@ -2397,26 +2578,31 @@ void td5_plat_log(TD5_LogLevel level, const char *module, const char *fmt, ...)
         }
     }
 
-    td5_plat_log_ensure_open();
-    if (s_log_handle != INVALID_HANDLE_VALUE) {
+    /* Lazy init if td5_plat_log_init() was not called yet */
+    if (!s_log_initialized) td5_plat_log_init();
+
+    cat = td5_log_classify_module(module);
+    lf = &s_log_files[cat];
+
+    if (lf->handle != INVALID_HANDLE_VALUE) {
         size_t len = strlen(buf);
-        if (len > sizeof(s_log_buffer)) {
-            td5_plat_log_flush_locked();
-            WriteFile(s_log_handle, buf, (DWORD)len, &written, NULL);
+        if (len > sizeof(lf->buffer)) {
+            td5_log_flush_file(lf);
+            WriteFile(lf->handle, buf, (DWORD)len, &written, NULL);
         } else {
-            if (s_log_buffer_used + len > sizeof(s_log_buffer)) {
-                td5_plat_log_flush_locked();
+            if (lf->buffer_used + len > sizeof(lf->buffer)) {
+                td5_log_flush_file(lf);
             }
-            memcpy(s_log_buffer + s_log_buffer_used, buf, len);
-            s_log_buffer_used += len;
+            memcpy(lf->buffer + lf->buffer_used, buf, len);
+            lf->buffer_used += len;
         }
-        s_log_line_count++;
+        lf->line_count++;
         /* Flush to disk periodically — only on ERROR or every 256 messages.
          * Flushing on WARN caused thousands of synchronous WriteFile calls per
          * frame during rendering (invalid mesh opcodes, wall impulse logs),
          * which was the root cause of the 5-10 second frame freeze in race mode. */
-        if (level >= TD5_LOG_ERROR || (s_log_line_count % 256) == 0) {
-            td5_plat_log_flush_locked();
+        if (level >= TD5_LOG_ERROR || (lf->line_count % 256) == 0) {
+            td5_log_flush_file(lf);
         }
     }
 
@@ -2432,9 +2618,12 @@ void td5_plat_log(TD5_LogLevel level, const char *module, const char *fmt, ...)
 
 void td5_plat_log_flush(void)
 {
-    if (s_log_handle != INVALID_HANDLE_VALUE) {
-        td5_plat_log_flush_locked();
-        FlushFileBuffers(s_log_handle);
+    int i;
+    for (i = 0; i < TD5_LOG_CAT_COUNT; i++) {
+        if (s_log_files[i].handle != INVALID_HANDLE_VALUE) {
+            td5_log_flush_file(&s_log_files[i]);
+            FlushFileBuffers(s_log_files[i].handle);
+        }
     }
 }
 

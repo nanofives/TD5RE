@@ -249,10 +249,11 @@ typedef enum TD5_NetMsgType {
 
 /** Render state presets */
 typedef enum TD5_RenderPreset {
-    TD5_PRESET_OPAQUE_ANISO     = 0,  /* Opaque track geometry */
-    TD5_PRESET_TRANSLUCENT_LINEAR = 1, /* Translucent, linear filter */
-    TD5_PRESET_TRANSLUCENT_ANISO = 2,  /* Translucent, aniso filter */
-    TD5_PRESET_OPAQUE_LINEAR    = 3   /* Opaque, linear filter */
+    TD5_PRESET_OPAQUE_ANISO       = 0,  /* Opaque track geometry */
+    TD5_PRESET_TRANSLUCENT_LINEAR = 1,  /* Translucent, linear filter */
+    TD5_PRESET_TRANSLUCENT_ANISO  = 2,  /* Translucent, aniso filter */
+    TD5_PRESET_OPAQUE_LINEAR      = 3,  /* Opaque, linear filter */
+    TD5_PRESET_TRANSLUCENT_POINT  = 4   /* Translucent, point (nearest-neighbour) filter */
 } TD5_RenderPreset;
 
 /** Mesh primitive dispatch opcodes */
@@ -345,7 +346,7 @@ typedef struct TD5_StripSpan {
     int16_t  link_next;             /* +0x08: forward link / junction */
     int16_t  link_prev;             /* +0x0A: backward link */
     int32_t  origin_x;              /* +0x0C */
-    int32_t  pad_10;               /* +0x10 */
+    int32_t  origin_y;              /* +0x10 */
     int32_t  origin_z;              /* +0x14 */
 } TD5_StripSpan;
 #pragma pack(pop)

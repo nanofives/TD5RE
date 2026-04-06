@@ -3010,8 +3010,8 @@ static float frontend_get_title_render_y(float sy) {
     int mode = FE_BUTTON_ANIM_NONE;
     int tick = 0;
     int max_tick = 0;
-    float base_y = 1.0f;    /* resting Y — original formula: (iVar3-colorDepth)-0x40 = (81-16)-64 = 1 [0x4213D0 state 4] */
-    float hidden_y = -155.0f; /* above screen — original tick=0: (0*4-0xDC-0x10)+81 = -155 [0x4213D0 state 3] */
+    float base_y = 12.0f;   /* resting Y (matches render code) */
+    float hidden_y = -80.0f; /* above screen — title slides down from top */
     float t;
 
     if (!frontend_get_button_anim_state(&mode, &tick, &max_tick)) return base_y * sy;
@@ -3059,7 +3059,7 @@ static void fe_draw_option_arrows(int btn_idx, float sx, float sy) {
     float aw = 12.0f * sx, ah = 9.0f * sy;
     if (!s_buttons[btn_idx].active || s_arrowbuttonz_tex_page < 0) return;
     frontend_get_button_render_rect(btn_idx, sx, sy, &bx, &by, &bw, &bh);
-    td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
+    td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_POINT);
     fe_draw_quad(bx + 4.0f * sx,          by + (bh - ah) * 0.5f, aw, ah, 0xFFFFFFFF,
                  s_arrowbuttonz_tex_page, 0.0f, 0.50f, 1.0f, 0.75f);
     fe_draw_quad(bx + bw - 4.0f*sx - aw, by + (bh - ah) * 0.5f, aw, ah, 0xFFFFFFFF,
@@ -4721,7 +4721,7 @@ static void Screen_RaceTypeCategory(void) {
         frontend_init_return_screen(TD5_SCREEN_RACE_TYPE_MENU);
         TD5_LOG_D(LOG_TAG, "RaceTypeCategory: state 0 - init");
         frontend_reset_buttons();
-        frontend_load_tga("Front_End/MainMenu.tga", "Front_End/FrontEnd.zip");
+        frontend_load_tga("Front_End/RaceMenu.tga", "Front_End/FrontEnd.zip");
         s_anim_complete = 0;
 
         /* Create 0x110 x 0xB4 description preview surface */
