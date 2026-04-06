@@ -243,6 +243,7 @@ static int      s_pause_menu_active;
 static int      s_pause_menu_cursor;   /* 0=VIEW, 1=MUSIC, 2=SOUND, 3=CONTINUE, 4=EXIT */
 static int      s_pause_input_done;    /* reset per-frame, set after first tick processes input */
 static int      s_prev_esc_state;      /* edge detector for ESC key */
+static int      s_pause_exit_pending;  /* 1 = ESC exit fade in progress, return 2 when fade done */
 
 /* ========================================================================
  * Forward declarations (internal helpers)
@@ -892,6 +893,7 @@ int td5_game_init_race_session(void) {
 
     /* ---- Reset race state ---- */
     g_td5.race_end_fade_state = 0;
+    s_pause_exit_pending = 0;
     g_td5.paused = 1;              /* start paused for countdown */
     s_pause_menu_active = 0;       /* clear stale pause menu from previous race */
     s_prev_esc_state = 1;          /* suppress false ESC edge on first frame */
@@ -956,9 +958,14 @@ int td5_game_run_race_frame(void) {
             s_fade_accumulator = 255.0f;
 
             /* Fade complete: release all race resources and exit */
-            TD5_LOG_I(LOG_TAG, "Race fade complete, transitioning to results");
             td5_game_release_race_resources();
 
+            if (s_pause_exit_pending) {
+                TD5_LOG_I(LOG_TAG, "Fade complete (ESC exit) -> main menu");
+                s_pause_exit_pending = 0;
+                return 2;  /* 2 = ESC quit (-> main menu) */
+            }
+            TD5_LOG_I(LOG_TAG, "Fade complete (race finish) -> results");
             return 1;  /* 1 = normal race finish (-> results screen) */
         }
     }
@@ -1039,10 +1046,11 @@ int td5_game_run_race_frame(void) {
                         s_pause_menu_active = 0;
                     } else if (s_pause_menu_cursor == 4) {
                         s_pause_menu_active = 0;
-                        TD5_LOG_I(LOG_TAG, "Pause menu: Exit selected, aborting race");
-                        td5_game_release_race_resources();
-                        td5_game_set_state(TD5_GAMESTATE_MENU);
-                        return 2;  /* 2 = ESC quit (-> main menu, not results) */
+                        s_pause_exit_pending = 1;
+                        TD5_LOG_I(LOG_TAG, "Pause menu: Exit selected, starting fade-out");
+                        /* Trigger fade-out; resources released when fade completes.
+                         * Original (0x43C317): calls BeginRaceFadeOutTransition(0). */
+                        td5_game_begin_fade_out(0);
                     }
                 }
 
