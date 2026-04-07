@@ -2474,17 +2474,31 @@ void td5_physics_reset_actor_state(TD5_Actor *actor)
 
     /* Original (0x405DA4) sets Y to extreme altitude so the first
      * IntegrateVehiclePoseAndContacts drop-resolves wheel contacts against
-     * the track surface, establishing correct chassis height above road. */
-    actor->world_pos.y = -0x40000000;  /* sky-high; integrate will ground-snap */
-    TD5_LOG_I(LOG_TAG, "reset_actor_state: sky-drop Y=%d for actor %p", actor->world_pos.y, (void*)actor);
+     * the track surface, establishing correct chassis height above road.
+     *
+     * However, the source port's ground-snap clamp (±8192 FP/frame) prevents
+     * the sky-drop from reaching the actual ground surface in reasonable time.
+     * Instead, probe the track surface directly and set Y from the result. */
+    {
+        int32_t ground_y = 0;
+        int g_surf = 0;
+        if (td5_track_probe_height(actor->world_pos.x, actor->world_pos.z,
+                                    actor->track_span_raw, &ground_y, &g_surf)) {
+            actor->world_pos.y = ground_y;
+            TD5_LOG_I(LOG_TAG, "reset_actor_state: ground probe Y=%d (span=%d) for actor %p",
+                      ground_y, actor->track_span_raw, (void *)actor);
+        } else {
+            TD5_LOG_W(LOG_TAG, "reset_actor_state: ground probe failed, keeping spawn Y=%d for actor %p",
+                      actor->world_pos.y, (void *)actor);
+        }
+    }
 
     /* Convert positions to float for render */
     actor->render_pos.x = (float)actor->world_pos.x * (1.0f / 256.0f);
     actor->render_pos.y = (float)actor->world_pos.y * (1.0f / 256.0f);
     actor->render_pos.z = (float)actor->world_pos.z * (1.0f / 256.0f);
 
-    /* Drop from sky — integrate resolves wheel contacts against the track
-     * and snaps Y to the correct road surface height (0x405E80). */
+    /* Run one integrate step to settle suspension against the ground. */
     td5_physics_integrate_pose(actor);
 
     /* Post-integrate: zero all dynamics to prevent bounce (0x405E5E-0x405E7C) */
