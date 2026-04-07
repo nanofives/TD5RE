@@ -131,6 +131,7 @@ int    g_vertexTable    = 0;
 /* --- Race state (camera-owned) --- */
 int    g_cameraTransitionActive = 0xA000;
 int    g_camTransitionGate      = 0;
+static int s_flyin_preset_reloaded[2] = {0, 0};
 extern int    g_actorSlotForView[2];     /* td5_game.c */
 extern int    g_actorBaseAddr;           /* td5_game.c */
 extern uint8_t *g_actor_table_base;      /* td5_game.c */
@@ -1763,6 +1764,8 @@ void td5_camera_set_preset(int pi)
 {
     s_active_preset = pi;
     memset(s_debug_camera_frame, 0, sizeof(s_debug_camera_frame));
+    s_flyin_preset_reloaded[0] = 0;
+    s_flyin_preset_reloaded[1] = 0;
 
     /* Reset preset selection state for both views */
     g_raceCameraPresetId[0]   = 0;
@@ -1830,6 +1833,20 @@ void td5_camera_update_transition_state(int p, int vi)
     if (g_cameraTransitionActive > 0) {
         UpdateRaceCameraTransitionState((int)actor, vi);
         return;
+    }
+
+    /* One-shot: when fly-in just ended, reload the chase camera preset so
+     * g_camOrbitRadiusScale and g_camCurrentRadius are restored from the
+     * saved chase preset rather than the shrunken fly-in values.
+     * Original binary calls ResetRaceCameraSelectionState (0x402000) here;
+     * we use force_reload=1 to ensure the radius is actually reset. */
+    if (!s_flyin_preset_reloaded[v]) {
+        s_flyin_preset_reloaded[v] = 1;
+        g_raceCameraPresetId[v] = 0;
+        g_raceCameraPresetMode[v] = 0;
+        LoadCameraPresetForView((int)((uint8_t *)actor + 0x208), 1, v, 0);
+        TD5_LOG_I(LOG_TAG, "fly-in ended view %d: reloaded chase preset (radius=%.0f height=%.0f)",
+                  v, g_camOrbitRadiusScale[v], g_camTargetHeight[v]);
     }
 
     /* Route to appropriate camera based on mode */
