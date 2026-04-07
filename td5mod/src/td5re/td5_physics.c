@@ -618,9 +618,10 @@ void td5_physics_update_player(TD5_Actor *actor)
     if (actor->slot_index == 0 && (actor->frame_counter % 120u) == 0u) {
         TD5_LOG_I(LOG_TAG,
                   "Player phys: gear=%d rpm=%d torque=%d v_long=%d v_lat=%d "
-                  "throttle_active=%d surface_contact=0x%X",
+                  "throttle_cmd=%d throttle_active=%d surface_contact=0x%X",
                   actor->current_gear, actor->engine_speed_accum, drive_torque,
-                  v_long, v_lat, actor->throttle_input_active,
+                  v_long, v_lat, (int)actor->encounter_steering_cmd,
+                  actor->throttle_input_active,
                   actor->surface_contact_flags);
     }
 
@@ -2359,6 +2360,20 @@ void td5_physics_refresh_wheel_contacts(TD5_Actor *actor)
 
     if (resolved_surface_valid)
         actor->surface_type_chassis = (uint8_t)resolved_surface;
+
+    /* Set surface_contact_flags from wheel contact state.
+     * bit0 = rear contact (at least one rear wheel grounded)
+     * bit1 = front contact (at least one front wheel grounded)
+     * [CONFIRMED @ 0x376: bitmask read by tire screech + friction paths] */
+    {
+        uint8_t bm = actor->wheel_contact_bitmask;
+        uint8_t flags = 0;
+        if (!(bm & 0x04) || !(bm & 0x08))  /* RL or RR grounded */
+            flags |= 1;
+        if (!(bm & 0x01) || !(bm & 0x02))  /* FL or FR grounded */
+            flags |= 2;
+        actor->surface_contact_flags = flags;
+    }
 }
 
 /* ========================================================================
@@ -2468,6 +2483,7 @@ void td5_physics_reset_actor_state(TD5_Actor *actor)
 
     /* Clear control state */
     actor->steering_command = 0;
+    actor->encounter_steering_cmd = 0;  /* zero throttle */
     actor->brake_flag = 0;
     actor->handbrake_flag = 0;
     actor->vehicle_mode = 0;
@@ -3015,6 +3031,7 @@ void td5_physics_init_vehicle_runtime(void)
         actor->longitudinal_speed = 0;
         actor->lateral_speed = 0;
         actor->steering_command = 0;
+        actor->encounter_steering_cmd = 0;  /* zero throttle — prevents stale value from driving torque */
         actor->brake_flag = 0;
         actor->handbrake_flag = 0;
         actor->vehicle_mode = 0;
