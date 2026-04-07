@@ -271,14 +271,20 @@ static int s_initialized = 0;
  *     int32     width         (offset 52)
  *     int32     height        (offset 56)
  *     int32     texture_slot  (offset 60, raw tpage index 0..N)
+ *   page_count × 16-byte TD5_PageMetadata records:
+ *     int32     transparency_flag  (0=opaque/LoadRGBS24, 2=alpha/LoadRGBS32)
+ *     int32     image_type         (0=skip tpage load, 1=load tpageN.dat)
+ *     int32     source_width       (page pixel width)
+ *     int32     source_height      (page pixel height)
  *
  * We map texture_slot → D3D page (STATIC_ATLAS_BASE + texture_slot).
- * tpage0-2.dat exist on disk as 256×512 R5G6B5 images and are uploaded.
- * Higher-index pages get a magenta 2×2 placeholder.
+ * Pages with image_type==1 have their tpageN.dat loaded; others are loaded
+ * by separate subsystems (car skins, sky, traffic, environment).
  * ======================================================================== */
 
-#define STATIC_ATLAS_MAX   64
+#define STATIC_ATLAS_MAX   256
 #define STATIC_ATLAS_BASE  700   /* first D3D page reserved for static atlas */
+#define STATIC_PAGE_META_MAX 32  /* max page metadata entries */
 
 typedef struct {
     char           name[44];
@@ -289,6 +295,20 @@ static S_AtlasRec     s_atlas_table[STATIC_ATLAS_MAX];
 static int            s_atlas_count = 0;
 static TD5_AtlasEntry s_atlas_fallback = {0};   /* returned for unknown names */
 static uint8_t        s_static_page_done[32];   /* per-slot: 0=none,1=real,2=placeholder */
+
+/* Per-page metadata from static.hed (parsed after entry table).
+ * Controls whether a tpageN.dat should be loaded and what pixel format to use. */
+static TD5_PageMetadata s_page_metadata[STATIC_PAGE_META_MAX];
+static int              s_page_metadata_count = 0;
+
+/* Chassis sprite UV bounds (from "CHASSIS" static.hed entry).
+ * Original stores these at DAT_004c3d7c-88 [CONFIRMED @ 0x00443336-0x0044336c].
+ * UV = atlas_coord * (1.0 / 256.0) per axis. */
+static float s_chassis_uv_x = 0.0f;   /* pos_x / 256 */
+static float s_chassis_uv_y = 0.0f;   /* pos_y / 256 */
+static float s_chassis_uv_w = 0.0f;   /* width / 256 */
+static float s_chassis_uv_h = 0.0f;   /* height / 256 */
+static int   s_chassis_page = -1;      /* D3D texture page */
 
 /** Load tpageN.dat (256×256 BGRA32) and upload to GPU.
  *
@@ -340,7 +360,21 @@ static int load_static_r5g6b5_tpage(int slot)
                 g = bgra[i * 4 + 1];
                 r = bgra[i * 4 + 2];
             }
-            uint8_t a = (r < 8 && g < 8 && b < 8) ? 0x00 : 0xFF;
+            /* Alpha mode from page metadata [CONFIRMED @ 0x0040b590]:
+             *   transparency_flag==0: opaque (LoadRGBS24), black colorkey
+             *   transparency_flag==2: alpha (LoadRGBS32), semi-transparent
+             * Page 4 (speedo) is special: alpha=0x80 for non-black pixels. */
+            uint8_t a;
+            int is_alpha_page = (slot < s_page_metadata_count)
+                                ? (s_page_metadata[slot].transparency_flag != 0)
+                                : (slot == 4 || slot == 5 || slot == 12);
+            if (slot == 4) {
+                a = ((int)r + (int)g + (int)b == 0) ? 0x00 : 0x80;
+            } else if (is_alpha_page) {
+                a = (r < 8 && g < 8 && b < 8) ? 0x00 : 0xFF;
+            } else {
+                a = (r < 8 && g < 8 && b < 8) ? 0x00 : 0xFF;
+            }
             bgra[i * 4 + 0] = b;
             bgra[i * 4 + 1] = g;
             bgra[i * 4 + 2] = r;
@@ -368,12 +402,45 @@ static int load_static_png_tpage(int slot)
 
     snprintf(path, sizeof(path), "re/assets/static/tpage%d.png", slot);
     if (td5_asset_decode_png_rgba32(path, &pixels, &w, &h)) {
-        /* Slot 12 contains PAUSETXT (y>=32) which uses cyan (0,255,255)
-         * as the color-key background.  Apply cyan colorkey so the
-         * font renders with proper transparency. */
+        /* Slot 12 layout:
+         *   y=0..7   = SLIDER (256x8)  — gradient alpha is intentional, keep as-is
+         *   y=8..15  = BLACKBOX(0,8 8x8) + BLACKBAR(8,8 8x8) — PNG alpha unreliable,
+         *              force opaque so vertex color controls semi-transparency
+         *   y=16..31 = SELBOX (256x16)  — gradient alpha is intentional, keep as-is
+         *   y=32..255 = PAUSETXT font glyphs on cyan background
+         */
         if (slot == 12) {
+            uint8_t *p12 = (uint8_t *)pixels;
+            /* y<32 UI textures (SLIDER, BLACKBOX, BLACKBAR, SELBOX) are stored
+             * in ARGB byte order in the original dump, but the PNG extraction
+             * preserved raw bytes as RGBA.  After stb's R↔B swap the in-memory
+             * layout is {G_orig, R_orig, A_orig, B_orig}.  Remap to correct
+             * BGRA: {B_orig, G_orig, R_orig, A_orig} = {px[3], px[0], px[1], px[2]}. */
+            for (int y12 = 0; y12 < 32 && y12 < h; y12++) {
+                for (int x12 = 0; x12 < w; x12++) {
+                    uint8_t *px = p12 + (y12 * w + x12) * 4;
+                    uint8_t t0 = px[0], t1 = px[1], t2 = px[2], t3 = px[3];
+                    px[0] = t3;  /* B_orig */
+                    px[1] = t0;  /* G_orig */
+                    px[2] = t1;  /* R_orig */
+                    px[3] = t2;  /* A_orig */
+                }
+            }
+            /* PAUSETXT (y>=32): cyan colorkey */
             apply_colorkey(pixels, w, h, TD5_COLORKEY_CYAN);
-            TD5_LOG_I(LOG_TAG, "static atlas: applied cyan colorkey to tpage12");
+            TD5_LOG_I(LOG_TAG, "static atlas: applied tpage12 alpha fixes + cyan colorkey");
+        }
+        /* Slot 4 (speedo gauge): original UploadRaceTexturePage @ 0x40B590
+         * sets alpha=0x00 for pure-black pixels and alpha=0x80 for all others.
+         * The gauge renders as a semi-transparent overlay, not an opaque surface. */
+        if (slot == 4) {
+            uint8_t *p4 = (uint8_t *)pixels;
+            int npx4 = w * h;
+            for (int i = 0; i < npx4; i++, p4 += 4) {
+                uint8_t b = p4[0], g = p4[1], r = p4[2];
+                p4[3] = ((int)r + (int)g + (int)b == 0) ? 0x00 : 0x80;
+            }
+            TD5_LOG_I(LOG_TAG, "static atlas: applied speedo alpha keying to tpage4");
         }
         td5_plat_render_upload_texture(STATIC_ATLAS_BASE + slot, pixels, w, h, 2);
         stbi_image_free(pixels);
@@ -442,25 +509,73 @@ static void td5_asset_init_static_atlas(void)
         ar->entry.width        = w;
         ar->entry.height       = h;
         ar->entry.texture_page = STATIC_ATLAS_BASE + tex_slot;
+    }
 
-        /* Upload the page the first time we encounter this slot.
-         * Try PNG first (re/assets has correct channel mapping), then .dat, then placeholder. */
-        if (!s_static_page_done[tex_slot]) {
-            if (load_static_png_tpage(tex_slot)) {
-                s_static_page_done[tex_slot] = 1;
-            } else if (load_static_r5g6b5_tpage(tex_slot)) {
-                s_static_page_done[tex_slot] = 1;
-            } else {
-                upload_atlas_placeholder(tex_slot);
-                s_static_page_done[tex_slot] = 2;
-            }
+    /* --- Parse per-page metadata [CONFIRMED @ 0x004425D0, 0x004427A9] ---
+     * page_count × 16-byte TD5_PageMetadata records follow the entry table.
+     * Controls which pages get tpageN.dat loaded and what pixel format. */
+    s_page_metadata_count = 0;
+    if (page_count > 0 && page_count <= STATIC_PAGE_META_MAX) {
+        for (i = 0; i < page_count; i++) {
+            uint8_t meta[16];
+            if (fread(meta, 1, 16, f) != 16) break;
+            memcpy(&s_page_metadata[i].transparency_flag, meta + 0,  4);
+            memcpy(&s_page_metadata[i].image_type,        meta + 4,  4);
+            memcpy(&s_page_metadata[i].source_width,      meta + 8,  4);
+            memcpy(&s_page_metadata[i].source_height,     meta + 12, 4);
+            s_page_metadata_count++;
         }
+        TD5_LOG_I(LOG_TAG, "static atlas: parsed %d page metadata records", s_page_metadata_count);
     }
 
     fclose(f);
+
+    /* --- Upload tpage textures using metadata to decide which to load ---
+     * Pages with image_type==1 have actual tpageN.dat files.
+     * Pages with image_type==0 are loaded by other subsystems (cars, sky, traffic). */
+    for (i = 0; i < 32; i++) {
+        if (s_static_page_done[i]) continue;
+
+        int should_load = 0;
+        if (i < s_page_metadata_count) {
+            should_load = (s_page_metadata[i].image_type != 0);
+        } else {
+            /* No metadata — try loading anyway (backward compat) */
+            should_load = 1;
+        }
+
+        if (!should_load) continue;
+
+        if (load_static_png_tpage(i)) {
+            s_static_page_done[i] = 1;
+        } else if (load_static_r5g6b5_tpage(i)) {
+            s_static_page_done[i] = 1;
+        } else {
+            upload_atlas_placeholder(i);
+            s_static_page_done[i] = 2;
+        }
+    }
+
+    /* --- Look up "CHASSIS" entry for underside/shadow sprite UV bounds
+     * [CONFIRMED @ 0x00443324-0x0044336c] --- */
+    {
+        TD5_AtlasEntry *chassis = td5_asset_find_atlas_entry(NULL, "CHASSIS");
+        if (chassis && (chassis->width > 0 || chassis->height > 0)) {
+            s_chassis_uv_x = (float)chassis->atlas_x * (1.0f / 256.0f);
+            s_chassis_uv_y = (float)chassis->atlas_y * (1.0f / 256.0f);
+            s_chassis_uv_w = (float)chassis->width   * (1.0f / 256.0f);
+            s_chassis_uv_h = (float)chassis->height  * (1.0f / 256.0f);
+            s_chassis_page = chassis->texture_page;
+            TD5_LOG_I(LOG_TAG, "chassis sprite: uv=(%.3f,%.3f) size=(%.3f,%.3f) page=%d",
+                      s_chassis_uv_x, s_chassis_uv_y, s_chassis_uv_w, s_chassis_uv_h,
+                      s_chassis_page);
+        }
+    }
+
     TD5_LOG_I(LOG_TAG,
-              "static atlas: %d entries loaded from %s (D3D pages %d..%d)",
-              s_atlas_count, hed_path, STATIC_ATLAS_BASE, STATIC_ATLAS_BASE + 31);
+              "static atlas: %d entries, %d page metadata from %s (D3D pages %d..%d)",
+              s_atlas_count, s_page_metadata_count, hed_path,
+              STATIC_ATLAS_BASE, STATIC_ATLAS_BASE + 31);
 }
 
 TD5_AtlasEntry *td5_asset_find_atlas_entry(void *context, const char *name)

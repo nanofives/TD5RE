@@ -2346,8 +2346,9 @@ void td5_render_project_vehicle_shadow(float pos_x, float pos_y, float pos_z,
 
 #define SKY_TEXTURE_PAGE 1020
 
-static int   s_sky_loaded;
-static int   s_sky_page;
+static int             s_sky_loaded;
+static int             s_sky_page;
+static TD5_MeshHeader *s_sky_mesh = NULL;   /* sky.prr dome mesh */
 
 void td5_render_load_sky(const char *path)
 {
@@ -2368,58 +2369,107 @@ void td5_render_load_sky(const char *path)
     } else {
         TD5_LOG_W(RENDER_LOG_TAG, "sky not found: %s", path);
     }
+
+    /* --- Load sky.prr dome mesh [CONFIRMED @ 0x0042af5d-0x0042afd4] ---
+     * Original loads from static.zip, processes with FUN_0040ac00 (mesh prepare),
+     * and forces texture page to 0x0403. We load from extracted re/assets. */
+    if (!s_sky_mesh) {
+        const char *prr_path = "re/assets/static/sky.prr";
+        FILE *f = fopen(prr_path, "rb");
+        if (f) {
+            fseek(f, 0, SEEK_END);
+            long sz = ftell(f);
+            fseek(f, 0, SEEK_SET);
+            if (sz >= (long)sizeof(TD5_MeshHeader)) {
+                void *buf = malloc((size_t)sz);
+                if (buf && (long)fread(buf, 1, (size_t)sz, f) == sz) {
+                    s_sky_mesh = (TD5_MeshHeader *)buf;
+                    td5_track_prepare_mesh_resource(s_sky_mesh);
+                    /* Patch command texture page to sky TGA page */
+                    TD5_PrimitiveCmd *cmds = (TD5_PrimitiveCmd *)(uintptr_t)s_sky_mesh->commands_offset;
+                    for (int c = 0; c < s_sky_mesh->command_count; c++)
+                        cmds[c].texture_page_id = (int16_t)SKY_TEXTURE_PAGE;
+                    TD5_LOG_I(RENDER_LOG_TAG,
+                              "sky.prr loaded: %ld bytes, %d verts, %d cmds",
+                              sz, s_sky_mesh->total_vertex_count, s_sky_mesh->command_count);
+                } else {
+                    free(buf);
+                }
+            }
+            fclose(f);
+        }
+    }
 }
 
 void td5_render_draw_sky(void)
 {
     if (!s_sky_loaded) return;
 
-    float sw = (float)s_viewport_width;
-    float sh = (float)s_viewport_height;
+    /* --- 3D dome rendering (sky.prr) [CONFIRMED @ 0x0042bdf7-0x0042c044] ---
+     * Original applies camera rotation only (no translation) to sky dome mesh,
+     * then dispatches via the standard mesh pipeline. */
+    if (s_sky_mesh) {
+        TD5_Mat3x3 sky_rot;
+        TD5_Vec3f  sky_pos = {0.0f, 0.0f, 0.0f};
 
-    /* Compute horizontal UV offset from camera yaw for panoramic scrolling */
-    float yaw_frac = 0.0f;
-    {
-        /* Camera forward projected onto XZ plane gives yaw */
-        float fx = s_camera_basis[6];
-        float fz = s_camera_basis[8];
-        float len = sqrtf(fx * fx + fz * fz);
-        if (len > 0.001f) {
-            float angle = atan2f(fx, fz); /* -PI..PI */
-            yaw_frac = angle / (2.0f * 3.14159265f) + 0.5f; /* 0..1 */
-        }
+        /* Camera basis IS the rotation — sky has identity model rotation */
+        for (int i = 0; i < 9; i++)
+            sky_rot.m[i] = s_camera_basis[i];
+
+        td5_render_load_rotation(&sky_rot);
+        td5_render_load_translation(&sky_pos);
+        td5_render_transform_mesh_vertices(s_sky_mesh);
+        td5_render_prepared_mesh(s_sky_mesh);
+        s_scene_has_renderer_geometry = 1;
+        return;
     }
 
-    /* Two-triangle fullscreen quad with panoramic UV scroll */
-    float u0 = yaw_frac;
-    float u1 = yaw_frac + 1.0f; /* wraps via texture repeat */
+    /* --- Fallback: 2D panoramic quad (when sky.prr unavailable) --- */
+    {
+        float sw = (float)s_viewport_width;
+        float sh = (float)s_viewport_height;
 
-    TD5_D3DVertex verts[4];
-    uint16_t indices[6] = {0, 1, 2, 0, 2, 3};
-    memset(verts, 0, sizeof(verts));
+        /* Compute horizontal UV offset from camera yaw for panoramic scrolling */
+        float yaw_frac = 0.0f;
+        {
+            float fx = s_camera_basis[6];
+            float fz = s_camera_basis[8];
+            float len = sqrtf(fx * fx + fz * fz);
+            if (len > 0.001f) {
+                float angle = atan2f(fx, fz);
+                yaw_frac = angle / (2.0f * 3.14159265f) + 0.5f;
+            }
+        }
 
-    verts[0].screen_x = 0;  verts[0].screen_y = 0;
-    verts[0].depth_z = 0.999f; verts[0].rhw = 1.0f;
-    verts[0].diffuse = 0xFFFFFFFF; verts[0].tex_u = u0; verts[0].tex_v = 0.0f;
+        float u0 = yaw_frac;
+        float u1 = yaw_frac + 1.0f;
 
-    verts[1].screen_x = sw;  verts[1].screen_y = 0;
-    verts[1].depth_z = 0.999f; verts[1].rhw = 1.0f;
-    verts[1].diffuse = 0xFFFFFFFF; verts[1].tex_u = u1; verts[1].tex_v = 0.0f;
+        TD5_D3DVertex verts[4];
+        uint16_t indices[6] = {0, 1, 2, 0, 2, 3};
+        memset(verts, 0, sizeof(verts));
 
-    verts[2].screen_x = sw;  verts[2].screen_y = sh;
-    verts[2].depth_z = 0.999f; verts[2].rhw = 1.0f;
-    verts[2].diffuse = 0xFFFFFFFF; verts[2].tex_u = u1; verts[2].tex_v = 1.0f;
+        verts[0].screen_x = 0;  verts[0].screen_y = 0;
+        verts[0].depth_z = 0.999f; verts[0].rhw = 1.0f;
+        verts[0].diffuse = 0xFFFFFFFF; verts[0].tex_u = u0; verts[0].tex_v = 0.0f;
 
-    verts[3].screen_x = 0;   verts[3].screen_y = sh;
-    verts[3].depth_z = 0.999f; verts[3].rhw = 1.0f;
-    verts[3].diffuse = 0xFFFFFFFF; verts[3].tex_u = u0; verts[3].tex_v = 1.0f;
+        verts[1].screen_x = sw;  verts[1].screen_y = 0;
+        verts[1].depth_z = 0.999f; verts[1].rhw = 1.0f;
+        verts[1].diffuse = 0xFFFFFFFF; verts[1].tex_u = u1; verts[1].tex_v = 0.0f;
 
-    /* Draw sky with opaque preset, behind all geometry */
-    flush_immediate_internal();
-    td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
-    td5_plat_render_bind_texture(s_sky_page);
-    td5_plat_render_draw_tris(verts, 4, indices, 6);
-    s_scene_has_renderer_geometry = 1;
+        verts[2].screen_x = sw;  verts[2].screen_y = sh;
+        verts[2].depth_z = 0.999f; verts[2].rhw = 1.0f;
+        verts[2].diffuse = 0xFFFFFFFF; verts[2].tex_u = u1; verts[2].tex_v = 1.0f;
+
+        verts[3].screen_x = 0;   verts[3].screen_y = sh;
+        verts[3].depth_z = 0.999f; verts[3].rhw = 1.0f;
+        verts[3].diffuse = 0xFFFFFFFF; verts[3].tex_u = u0; verts[3].tex_v = 1.0f;
+
+        flush_immediate_internal();
+        td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
+        td5_plat_render_bind_texture(s_sky_page);
+        td5_plat_render_draw_tris(verts, 4, indices, 6);
+        s_scene_has_renderer_geometry = 1;
+    }
 }
 
 void td5_render_advance_sky_rotation(void)
