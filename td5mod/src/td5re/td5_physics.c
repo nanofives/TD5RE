@@ -836,14 +836,14 @@ void td5_physics_update_player(TD5_Actor *actor)
     }
 
     /* --- 14b. Velocity magnitude safety clamp ---
-     * Without working wall collisions, cars can leave the road where the
-     * tire model creates a positive feedback loop (lateral forces >> drag).
-     * Clamp total velocity magnitude to 2x the car's speed_limit to prevent
-     * runaway speed while preserving normal driving feel.
-     * This is a guardrail — once wall collisions work, it rarely activates. */
+     * Without working wall collisions, cars leave the road immediately.
+     * Clamp total velocity magnitude to the car's speed_limit (1x, not 2x)
+     * so the car stays at a controllable speed. The original game relies on
+     * track walls to contain speed through corners; until walls are
+     * implemented, this hard cap prevents runaway velocity. */
     {
         int32_t speed_lim = (int32_t)PHYS_S(actor, 0x74) << 8;
-        int32_t vel_cap = speed_lim * 2;
+        int32_t vel_cap = speed_lim;  /* 1x speed limit until walls exist */
         int32_t vxh = actor->linear_velocity_x >> 8;
         int32_t vzh = actor->linear_velocity_z >> 8;
         int32_t mag_sq = vxh * vxh + vzh * vzh;
@@ -853,8 +853,6 @@ void td5_physics_update_player(TD5_Actor *actor)
             int32_t cap_h = vel_cap >> 8;
             actor->linear_velocity_x = (int32_t)((int64_t)actor->linear_velocity_x * cap_h / mag);
             actor->linear_velocity_z = (int32_t)((int64_t)actor->linear_velocity_z * cap_h / mag);
-            TD5_LOG_W(LOG_TAG, "vel clamp: slot=%d mag=%d cap=%d",
-                      actor->slot_index, mag << 8, vel_cap);
         }
     }
 
