@@ -515,8 +515,12 @@ void td5_track_resolve_wall_contacts(TD5_Actor *actor)
         int32_t px = probe_x >> 8;
         int32_t pz = probe_z >> 8;
 
-        /* --- LEFT EDGE CHECK [CONFIRMED @ 0x406cf4]: sub_lane_index <= 0 --- */
-        if (probe->sub_lane_index <= 0) {
+        /* --- LEFT EDGE CHECK [CONFIRMED @ 0x406cf4] ---
+         * Original gates on sub_lane_index <= 0, but the probe's sub_lane
+         * tracking via update_position_recursive may not converge to 0
+         * before the wheel physically reaches the wall. Always test —
+         * the signed-distance check is the real guard. */
+        {
             int vl0, vl1, vr0, vr1;
             get_quad_vertices(sp, 0, &vl0, &vl1, &vr0, &vr1);
 
@@ -569,8 +573,9 @@ void td5_track_resolve_wall_contacts(TD5_Actor *actor)
             }
         }
 
-        /* --- RIGHT EDGE CHECK [CONFIRMED @ 0x406da6]: sub_lane >= lane_count - 1 --- */
-        if (probe->sub_lane_index >= lane_count - 1) {
+        /* --- RIGHT EDGE CHECK [CONFIRMED @ 0x406da6] ---
+         * Same as left: always test, don't gate on sub_lane. */
+        {
             int vl0, vl1, vr0, vr1;
             /* Use wall vertex offset tables for right edge [CONFIRMED @ 0x406da6] */
             int wall_off_l = (type >= 0 && type < 12) ? s_wall_vtx_left[type] : 0;
