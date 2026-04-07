@@ -713,9 +713,11 @@ after_flyin:
         target[1] = *(int *)(actor + 0x200) + smoothed_h;
         target[2] = *(int *)(actor + 0x204);
 
-        SetCameraWorldPosition(g_camWorldPos[v]);
-        OrientCameraTowardTarget(target, g_tracksideYawOffset[v]);
-
+        /* Original UpdateChaseCamera (0x401590) does NOT set camera position.
+         * Camera pos is set during render pass by UpdateTracksideOrbitCamera.
+         * Removing SetCameraWorldPosition + OrientCameraTowardTarget here
+         * fixes intermittent bug where camera Y gets set to uninterpolated
+         * actor position before render pass, causing invisible track. */
     }
 }
 
@@ -1844,8 +1846,13 @@ void td5_camera_update_transition_state(int p, int vi)
             TD5_LOG_I(LOG_TAG, "transition view %d: path=bumper actor_slot=%d preset=%d",
                       vi, g_actorSlotForView[vi], preset);
             UpdateVehicleRelativeCamera((int)actor, vi);
+        } else {
+            /* Chase camera (preset 0): original RunRaceFrame (0x42BEF0) calls
+             * UpdateTracksideOrbitCamera during render pass — sets camera position
+             * with sub-tick velocity interpolation. UpdateChaseCamera in the sim
+             * loop only prepares orbit parameters, it never sets camera position. */
+            UpdateTracksideOrbitCamera((int)actor, 1, vi);
         }
-        /* Chase camera: already updated per-sim-tick in td5_camera_tick() */
     }
 
     TD5_LOG_D(LOG_TAG,
