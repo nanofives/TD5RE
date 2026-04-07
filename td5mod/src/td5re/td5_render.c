@@ -1225,10 +1225,12 @@ void td5_render_span_display_list(void *display_list_block)
         }
         s_debug_accept++;
 
-        /* Frustum cull via bounding sphere */
-        float cx = mesh->bounding_center_x + mesh->origin_x;
-        float cy = mesh->bounding_center_y + mesh->origin_y;
-        float cz = mesh->bounding_center_z + mesh->origin_z;
+        /* Frustum cull via bounding sphere — bounding center is already in
+           render-float world space (original reads +0x10/14/18 directly,
+           no origin offset added) [CONFIRMED @ 0x42dcad] */
+        float cx = mesh->bounding_center_x;
+        float cy = mesh->bounding_center_y;
+        float cz = mesh->bounding_center_z;
         float r  = mesh->bounding_radius;
 
         /* Validate bounding data isn't NaN/Inf */
@@ -1243,7 +1245,8 @@ void td5_render_span_display_list(void *display_list_block)
                 float ddz = cz - s_camera_pos[2];
                 float dist = ddx*ddx + ddy*ddy + ddz*ddz;
                 TD5_LOG_I(LOG_TAG,
-                    "SPAN_MESH origin=(%.1f,%.1f,%.1f) r=%.1f cam_dist2=%.0f",
+                    "SPAN_MESH bc=(%.1f,%.1f,%.1f) origin_raw=(%.1f,%.1f,%.1f) r=%.1f cam_dist2=%.0f",
+                    cx, cy, cz,
                     mesh->origin_x, mesh->origin_y, mesh->origin_z,
                     r, dist);
                 s_span_diag++;
@@ -1253,11 +1256,13 @@ void td5_render_span_display_list(void *display_list_block)
         if (!td5_render_is_sphere_visible(cx, cy, cz, r))
             continue;
 
-        /* Build world-to-view basis from mesh origin */
+        /* Build world-to-view basis from mesh origin — origin is in integer-
+           coordinate space, must scale by 1/256 to match camera (render-float
+           space) before subtraction [CONFIRMED @ 0x42d954-0x42d97a] */
         TD5_Vec3f origin;
-        origin.x = mesh->origin_x;
-        origin.y = mesh->origin_y;
-        origin.z = mesh->origin_z;
+        origin.x = mesh->origin_x * (1.0f / 256.0f);
+        origin.y = mesh->origin_y * (1.0f / 256.0f);
+        origin.z = mesh->origin_z * (1.0f / 256.0f);
 
         td5_render_load_translation(&origin);
 
