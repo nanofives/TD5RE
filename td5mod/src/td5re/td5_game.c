@@ -64,6 +64,7 @@ extern float g_render_width_f;          /* td5_render.c */
 extern float g_render_height_f;         /* td5_render.c */
 extern int   g_track_is_circuit;        /* td5_track.c */
 extern int   g_track_type_mode;         /* td5_track.c */
+extern uint8_t *g_track_environment_config; /* td5_asset.c -- LEVELINF.DAT buffer (0x4AEE20) */
 
 /* Checkpoint logging now routes through the centralized logger (race.log) */
 
@@ -186,6 +187,14 @@ typedef struct CheckpointRecord {
 } CheckpointRecord;
 
 static CheckpointRecord s_active_checkpoint;
+
+/* LEVELINF.DAT checkpoint span storage (+0x08..+0x24) */
+static int32_t s_levelinf_checkpoint_spans[7]; /* +0x0C..+0x24 from LEVELINF.DAT */
+static int32_t s_levelinf_checkpoint_config;   /* +0x08 from LEVELINF.DAT */
+
+/* LEVELINF.DAT additional fields */
+static int32_t s_levelinf_track_subvariant;  /* +0x54: 36 for race, -1 for cup */
+static int32_t s_levelinf_span_count;        /* +0x58: track ring length (redundant with STRIP.DAT) */
 
 /* Hardcoded checkpoint timing table extracted from binary at 0x46CBB0.
  * 26 records (track_index 0..25), each 12 uint16s = 24 bytes.
@@ -593,6 +602,30 @@ int td5_game_init_race_session(void) {
     TD5_LOG_I(LOG_TAG, "InitRace step 4/19: level runtime loaded track=%d is_circuit=%d", g_td5.track_index, g_track_is_circuit);
     CK("ck4_after_load_level");
 
+    /* ---- Step 4a: Initialize per-track fog from LEVELINF.DAT ----
+     * Original: 0x42AE56 reads fog_enable at +0x5C, fog RGB at +0x60..+0x62,
+     * constructs color = (R<<16)|(G<<8)|B and passes to FUN_0040af10. */
+    if (g_track_environment_config) {
+        int32_t fog_enable;
+        memcpy(&fog_enable, g_track_environment_config + 0x5C, sizeof(int32_t));
+        if (fog_enable && g_td5.ini.fog_enabled) {
+            uint8_t fog_r = g_track_environment_config[0x60];
+            uint8_t fog_g = g_track_environment_config[0x61];
+            uint8_t fog_b = g_track_environment_config[0x62];
+            uint32_t fog_color = ((uint32_t)fog_r << 16) | ((uint32_t)fog_g << 8) | (uint32_t)fog_b;
+            td5_render_configure_fog(fog_color, 1);
+            TD5_LOG_I(LOG_TAG, "Fog enabled from LEVELINF: color=0x%06X (R=%02X G=%02X B=%02X)",
+                      fog_color, fog_r, fog_g, fog_b);
+        } else {
+            td5_render_configure_fog(0x808080, 0);
+            TD5_LOG_I(LOG_TAG, "Fog disabled (levelinf_flag=%d user_pref=%d)",
+                      fog_enable, g_td5.ini.fog_enabled);
+        }
+    } else {
+        td5_render_configure_fog(0x808080, 0);
+        TD5_LOG_I(LOG_TAG, "Fog disabled (no LEVELINF data)");
+    }
+
     /* ---- Step 4b: Initialize race sound resources ---- */
     td5_sound_init_race_resources();
 
@@ -659,6 +692,15 @@ int td5_game_init_race_session(void) {
         /* Original order (0x42AFE2-0x42AFE7): vehicle + AI runtime init
          * BEFORE actor placement (step 22). */
         td5_physics_init_vehicle_runtime();
+
+        /* Compute mesh-derived collision envelopes per slot (0x42F6D0).
+         * Must run AFTER init_vehicle_runtime (which binds cardef) and
+         * AFTER asset_load_vehicle (which registers mesh). */
+        for (int s = 0; s < spawn_count; s++) {
+            TD5_Actor *a = (TD5_Actor *)(s_actor_memory + (size_t)s * TD5_ACTOR_STRIDE);
+            td5_physics_compute_suspension_envelope(a, s);
+        }
+
         td5_ai_init_race_actor_runtime();
 
         /* ---- Step 11b: Position racer actors on grid ---- */
@@ -877,6 +919,86 @@ int td5_game_init_race_session(void) {
             }
         } else {
             TD5_LOG_W(LOG_TAG, "Track index %d out of range, no checkpoint data", tidx);
+        }
+    }
+
+    /* ---- Step 20b: Read remaining LEVELINF.DAT fields ----
+     *
+     * LEVELINF.DAT layout (100 bytes, loaded into g_track_environment_config):
+     *
+     *   +0x00 int32  circuit_flag         (0=P2P, 1=circuit)           [READ by td5_asset.c]
+     *   +0x04 int32  smoke_enable         (0/1)                        [READ by td5_vfx.c]
+     *   +0x08 int32  checkpoint_config    (checkpoint count, 0=disable) [READ below]
+     *   +0x0C int32  checkpoint_span_0    (start/traffic span)          [READ below]
+     *   +0x10 int32  checkpoint_span_1                                  [READ below]
+     *   +0x14 int32  checkpoint_span_2                                  [READ below]
+     *   +0x18 int32  checkpoint_span_3                                  [READ below]
+     *   +0x1C int32  checkpoint_span_4                                  [READ below]
+     *   +0x20 int32  checkpoint_span_5                                  [READ below]
+     *   +0x24 int32  checkpoint_span_6    (usually zero)                [READ below]
+     *   +0x28 int32  weather_type         (0=rain,1=snow,2=none)        [READ by td5_vfx.c]
+     *   +0x2C int32  density_pair_count                                 [READ by td5_vfx.c]
+     *   +0x30 int32  special_encounters   (1=enable, 0=disable)         [READ below]
+     *   +0x34 ...    density_pairs        (int16 seg, int16 density)×N  [READ by td5_vfx.c]
+     *   +0x54 int32  track_subvariant     (36=race, -1=cup)             [READ below]
+     *   +0x58 int32  span_count           (ring length, redundant)      [READ below]
+     *   +0x5C int32  fog_enable           (0/1)                         [READ in step 4a]
+     *   +0x60 byte   fog_r                                              [READ in step 4a]
+     *   +0x61 byte   fog_g                                              [READ in step 4a]
+     *   +0x62 byte   fog_b                                              [READ in step 4a]
+     *   +0x63 byte   padding              (always 0)
+     */
+    {
+        s_levelinf_checkpoint_config = 0;
+        memset(s_levelinf_checkpoint_spans, 0, sizeof(s_levelinf_checkpoint_spans));
+        s_levelinf_track_subvariant = 0;
+        s_levelinf_span_count = 0;
+
+        if (g_track_environment_config) {
+            /* +0x08: checkpoint system config (0 = disabled) — assembly at 0x40a04d */
+            memcpy(&s_levelinf_checkpoint_config, g_track_environment_config + 0x08, sizeof(int32_t));
+            TD5_LOG_I(LOG_TAG, "LEVELINF checkpoint config (+0x08) = %d", s_levelinf_checkpoint_config);
+
+            if (s_levelinf_checkpoint_config == 0) {
+                TD5_LOG_I(LOG_TAG, "LEVELINF checkpoint config is 0 — disabling checkpoint system");
+                s_active_checkpoint.checkpoint_count = 0;
+            }
+
+            /* +0x0C..+0x24: checkpoint span indices (7 x int32) */
+            for (int i = 0; i < 7; i++) {
+                memcpy(&s_levelinf_checkpoint_spans[i],
+                       g_track_environment_config + 0x0C + i * 4, sizeof(int32_t));
+            }
+            TD5_LOG_I(LOG_TAG, "LEVELINF checkpoint spans: %d %d %d %d %d %d %d",
+                      s_levelinf_checkpoint_spans[0], s_levelinf_checkpoint_spans[1],
+                      s_levelinf_checkpoint_spans[2], s_levelinf_checkpoint_spans[3],
+                      s_levelinf_checkpoint_spans[4], s_levelinf_checkpoint_spans[5],
+                      s_levelinf_checkpoint_spans[6]);
+
+            /* +0x30: special encounter enable — assembly at 0x42ae7b */
+            {
+                int32_t encounter_flag = 0;
+                memcpy(&encounter_flag, g_track_environment_config + 0x30, sizeof(int32_t));
+                TD5_LOG_I(LOG_TAG, "LEVELINF special encounter (+0x30) = %d", encounter_flag);
+                if (encounter_flag == 0) {
+                    g_td5.special_encounter_enabled = 0;
+                }
+            }
+
+            /* +0x54: track subvariant (36=race, -1=cup) */
+            memcpy(&s_levelinf_track_subvariant, g_track_environment_config + 0x54, sizeof(int32_t));
+            /* +0x58: span count (ring length, redundant with STRIP.DAT) */
+            memcpy(&s_levelinf_span_count, g_track_environment_config + 0x58, sizeof(int32_t));
+
+            TD5_LOG_I(LOG_TAG, "LEVELINF +0x54 track_subvariant=%d +0x58 span_count=%d",
+                      (int)s_levelinf_track_subvariant, (int)s_levelinf_span_count);
+
+            /* Cross-check span count against STRIP.DAT */
+            if (g_td5.track_span_ring_length != 0 &&
+                g_td5.track_span_ring_length != s_levelinf_span_count) {
+                TD5_LOG_I(LOG_TAG, "NOTE: LEVELINF span_count=%d vs STRIP.DAT ring_length=%d",
+                          (int)s_levelinf_span_count, (int)g_td5.track_span_ring_length);
+            }
         }
     }
 

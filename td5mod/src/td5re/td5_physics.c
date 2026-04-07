@@ -37,6 +37,7 @@
 
 #include "td5_physics.h"
 #include "td5_track.h"
+#include "td5_render.h"   /* td5_render_get_vehicle_mesh */
 #include "td5_platform.h"
 #include "td5re.h"
 
@@ -3184,34 +3185,101 @@ static void bind_default_vehicle_tuning(TD5_Actor *actor, int slot)
 /* ========================================================================
  * ComputeVehicleSuspensionEnvelope (0x42F6D0)
  *
- * Computes AABB of vehicle mesh for suspension/collision envelope.
+ * Iterates all mesh vertices to compute the AABB, then writes collision
+ * geometry into the car definition buffer:
+ *   0x00-0x1C: 4 lower corners (Y = suspension height for racers)
+ *   0x20-0x3C: 4 upper corners (Y = max_abs_y from mesh)
+ *   0x60-0x7C: simplified traffic footprint (slot >= 6 only)
+ *   0x80:      bounding sphere radius
+ *   0x86:      Y height value (suspension for racers, min_y for traffic)
  * ======================================================================== */
 
-void td5_physics_compute_suspension_envelope(TD5_Actor *actor)
+void td5_physics_compute_suspension_envelope(TD5_Actor *actor, int slot)
 {
-    /* In the full build:
-     * 1. Iterate all vertices in the car mesh
-     * 2. Track min/max for each axis
-     * 3. Store as 8 corner points (AABB) in world-space short coordinates
-     * 4. For traffic: also store simplified 4-point footprint
-     *
-     * This requires access to the mesh vertex data which is loaded
-     * by the asset system. The envelope is stored in the tuning table
-     * at offsets 0x00-0x1F (overwritten from carparam.dat original data).
-     */
     if (!actor || !actor->car_definition_ptr) return;
 
-    /* Store default envelope from car definition half-extents */
-    int16_t *cardef = get_cardef(actor);
-    int16_t hw = cardef[0x04 / 2]; /* half-width */
-    int16_t hl = cardef[0x08 / 2]; /* half-length */
+    TD5_MeshHeader *mesh = td5_render_get_vehicle_mesh(slot);
+    if (!mesh || mesh->total_vertex_count <= 0) return;
 
-    /* Write to tuning table offset 0x00-0x17 as bounding corners */
-    int16_t *tun = (int16_t *)actor->car_definition_ptr;
-    tun[0] = -hw; tun[1] = 0;   tun[2] = -hl;
-    tun[3] = hw;  tun[4] = 0;   tun[5] = hl;
-    tun[6] = -hw; tun[7] = 0;   tun[8] = hl;
-    tun[9] = hw;  tun[10] = 0;  tun[11] = -hl;
+    int16_t *cd = get_cardef(actor);
+
+    /* --- Iterate mesh vertices to find extents [CONFIRMED @ 0x0042f720-0x0042f7b9] --- */
+    float max_x = 0.0f, max_y = 0.0f, max_z = 0.0f, min_y = 0.0f;
+    int vert_count = mesh->total_vertex_count;
+    TD5_MeshVertex *verts = (TD5_MeshVertex *)(uintptr_t)mesh->vertices_offset;
+
+    for (int i = 0; i < vert_count; i++) {
+        float vx = verts[i].pos_x;
+        float vy = verts[i].pos_y;
+        float vz = verts[i].pos_z;
+        if ( vx > max_x) max_x =  vx;
+        if (-vx > max_x) max_x = -vx;
+        if ( vy > max_y) max_y =  vy;
+        if (-vy > max_y) max_y = -vy;
+        if ( vz > max_z) max_z =  vz;
+        if (-vz > max_z) max_z = -vz;
+        if (vy < min_y)  min_y = vy;
+    }
+
+    /* --- Racer-only width clamp [CONFIRMED @ 0x0042f7cc-0x0042f7f2] --- */
+    float y_val;  /* used for lower box Y and bounding sphere */
+    if (slot < TD5_MAX_RACER_SLOTS) {
+        float delta = (float)((int32_t)cd[0x84 / 2] - (int32_t)cd[0x40 / 2]);
+        if (delta > max_x) max_x = delta;
+        /* Suspension-derived Y for lower box [CONFIRMED @ 0x0042f893-0x0042f8aa] */
+        y_val = (float)((int32_t)cd[0x42 / 2] - (int32_t)cd[0x82 / 2]) * -0.707f;
+    } else {
+        y_val = min_y;
+    }
+
+    /* --- Add/subtract 20.0f padding [CONFIRMED @ 0x0042f7fa, 0x0042f808] --- */
+    max_x += 20.0f;
+    max_z -= 20.0f;
+    if (max_z < 0.0f) max_z = 0.0f; /* safety clamp */
+
+    /* Convert to int16 */
+    int16_t neg_mx = (int16_t)(int)(-max_x);
+    int16_t pos_mx = (int16_t)(int)( max_x);
+    int16_t my_i16 = (int16_t)(int)( max_y);
+    int16_t mz_i16 = (int16_t)(int)( max_z);
+    int16_t nmz_i16= (int16_t)(int)(-max_z);
+    int16_t ny_i16 = (int16_t)(int)(-y_val);
+
+    /* --- Upper AABB box at offsets 0x20-0x3C [CONFIRMED @ 0x0042f827-0x0042f88d] --- */
+    cd[0x20 / 2] = neg_mx;   cd[0x22 / 2] = my_i16;  cd[0x24 / 2] = mz_i16;
+    cd[0x28 / 2] = pos_mx;   cd[0x2a / 2] = my_i16;  cd[0x2c / 2] = mz_i16;
+    cd[0x30 / 2] = neg_mx;   cd[0x32 / 2] = my_i16;  cd[0x34 / 2] = nmz_i16;
+    cd[0x38 / 2] = pos_mx;   cd[0x3a / 2] = my_i16;  cd[0x3c / 2] = nmz_i16;
+
+    /* --- Lower AABB box at offsets 0x00-0x1C [CONFIRMED @ 0x0042f8b0-0x0042f8f0] --- */
+    cd[0x00 / 2] = neg_mx;   cd[0x02 / 2] = ny_i16;  cd[0x04 / 2] = mz_i16;
+    cd[0x08 / 2] = pos_mx;   cd[0x0a / 2] = ny_i16;  cd[0x0c / 2] = mz_i16;
+    cd[0x10 / 2] = neg_mx;   cd[0x12 / 2] = ny_i16;  cd[0x14 / 2] = nmz_i16;
+    cd[0x18 / 2] = pos_mx;   cd[0x1a / 2] = ny_i16;  cd[0x1c / 2] = nmz_i16;
+
+    /* --- Bounding sphere radius at 0x80 [CONFIRMED @ 0x0042f918-0x0042f921] --- */
+    float r = sqrtf(max_z * max_z + y_val * y_val + max_x * max_x);
+    cd[0x80 / 2] = (int16_t)(int)r;
+
+    /* --- Y height at 0x86 [CONFIRMED @ 0x0042f8f4-0x0042f901] --- */
+    cd[0x86 / 2] = (int16_t)(int)y_val;
+
+    /* --- Traffic simplified footprint at 0x60-0x7C [CONFIRMED @ 0x0042f928-0x0042f97e] --- */
+    if (slot >= TD5_MAX_RACER_SLOTS) {
+        float shrunk_x = max_x - max_x * 0.2f;  /* max_x * 0.8 */
+        int16_t neg_sx = (int16_t)(int)(-shrunk_x);
+        int16_t pos_sx = (int16_t)(int)( shrunk_x);
+
+        cd[0x70 / 2] = neg_sx;  cd[0x72 / 2] = 0;  cd[0x74 / 2] = mz_i16;
+        cd[0x78 / 2] = pos_sx;  cd[0x7a / 2] = 0;  cd[0x7c / 2] = mz_i16;
+        cd[0x60 / 2] = neg_sx;  cd[0x62 / 2] = 0;  cd[0x64 / 2] = nmz_i16;
+        cd[0x68 / 2] = pos_sx;  cd[0x6a / 2] = 0;  cd[0x6c / 2] = nmz_i16;
+    }
+
+    TD5_LOG_I(LOG_TAG,
+              "suspension_envelope slot=%d: max_x=%.1f max_y=%.1f max_z=%.1f min_y=%.1f "
+              "y_val=%.1f radius=%d",
+              slot, max_x, max_y, max_z, min_y, y_val, (int)cd[0x80 / 2]);
 }
 
 void td5_physics_set_collisions(int enabled)

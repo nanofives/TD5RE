@@ -81,7 +81,7 @@ void td5_physics_compute_surface_gravity(TD5_Actor *actor);
 
 /* --- Initialization --- */
 void td5_physics_init_vehicle_runtime(void);
-void td5_physics_compute_suspension_envelope(TD5_Actor *actor);
+void td5_physics_compute_suspension_envelope(TD5_Actor *actor, int slot);
 
 /* --- Collision --- */
 void td5_physics_set_collisions(int enabled);
