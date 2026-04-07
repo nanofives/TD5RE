@@ -1835,17 +1835,25 @@ void td5_camera_update_transition_state(int p, int vi)
         return;
     }
 
-    /* One-shot: when fly-in just ended, reload the chase camera preset so
-     * g_camOrbitRadiusScale and g_camCurrentRadius are restored from the
-     * saved chase preset rather than the shrunken fly-in values.
-     * Original binary calls ResetRaceCameraSelectionState (0x402000) here;
-     * we use force_reload=1 to ensure the radius is actually reset. */
+    /* One-shot: when fly-in just ended, restore the chase camera's spring
+     * targets (orbit radius scale and height target) from preset 0 so the
+     * radius spring converges to the correct chase distance instead of
+     * decaying toward 0 from the shrunken fly-in value.
+     *
+     * DON'T use LoadCameraPresetForView with force_reload — that resets
+     * orbit angle, current radius, and smoothed height simultaneously,
+     * causing a jarring visual jump. Instead, only update the spring
+     * TARGETS and let the existing spring smooth the transition. */
     if (!s_flyin_preset_reloaded[v]) {
         s_flyin_preset_reloaded[v] = 1;
         g_raceCameraPresetId[v] = 0;
         g_raceCameraPresetMode[v] = 0;
-        LoadCameraPresetForView((int)((uint8_t *)actor + 0x208), 1, v, 0);
-        TD5_LOG_I(LOG_TAG, "fly-in ended view %d: reloaded chase preset (radius=%.0f height=%.0f)",
+        /* Restore spring targets from preset 0 (far chase) */
+        TD5_CameraPreset *p = &g_cameraPresets[0];
+        g_camOrbitRadiusScale[v] = (float)(int)p->orbit_radius_raw * g_const256;
+        g_camTargetHeight[v]     = (float)(int)p->height_target_raw * g_const256;
+        g_camElevationAngleFP[v] = (int)p->elevation_angle << 8;
+        TD5_LOG_I(LOG_TAG, "fly-in ended view %d: restored chase targets (radius=%.0f height=%.0f)",
                   v, g_camOrbitRadiusScale[v], g_camTargetHeight[v]);
     }
 
