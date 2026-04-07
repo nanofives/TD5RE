@@ -78,13 +78,12 @@ float SinFloat12bit(int angle);
 void BuildRotationMatrixFromAngles(float *out, short *angles);
 
 /** Near/far clip defaults.
- * Original depth normalization (0x00473bcc): depth = (vz - 64) / 65472, i.e. far = 65536.
- * Original frustum far-cull (0x0042D48E): round(3.0 * 65000) = 195000. */
+ * Original depth normalization (0x00473bcc): depth = (vz - 64) / 65472, far = 65536.
+ * Original frustum far-cull (0x0042D48E): round(3.0 * 65000) = 195000.
+ * Source port uses far_cull as depth range so all geometry within frustum maps to [0,1]. */
 #define DEFAULT_NEAR_CLIP   1.0f
-#define DEFAULT_FAR_CLIP    65536.0f
+#define DEFAULT_FAR_CLIP    195000.0f
 #define DEFAULT_FAR_CULL    195000.0f
-#define DEPTH_NEAR_BIAS     64.0f
-#define DEPTH_RANGE_INV     (1.0f / 65472.0f)  /* 1/(65536-64) */
 
 /** Billboard depth sort stride sizes (bytes) */
 #define BILLBOARD_TRI_STRIDE  0x84
@@ -366,7 +365,7 @@ static int project_vertex(float vx, float vy, float vz,
     float inv_z = 1.0f / vz;
     *sx  = vx * s_focal_length * inv_z + s_center_x;
     *sy  = vy * s_focal_length * inv_z + s_center_y;
-    *sz  = (vz - DEPTH_NEAR_BIAS) * DEPTH_RANGE_INV;  /* normalized depth [0..1] (0x00473bcc) */
+    *sz  = vz * (1.0f / s_far_clip);  /* normalized depth [0..1] (0x00473bcc) */
     *rhw = inv_z;
     return 1;
 }
@@ -538,7 +537,7 @@ static void clip_and_submit_polygon(TD5_MeshVertex *vert_data, int vert_count,
         float inv_z = 1.0f / out_vz[i];
         clipped[i].screen_x = -out_vx[i] * s_focal_length * inv_z + s_center_x;
         clipped[i].screen_y = -out_vy[i] * s_focal_length * inv_z + s_center_y;
-        clipped[i].depth_z  = (out_vz[i] - DEPTH_NEAR_BIAS) * DEPTH_RANGE_INV;
+        clipped[i].depth_z  = out_vz[i] * (1.0f / s_far_clip);
         clipped[i].rhw      = inv_z;
         clipped[i].diffuse  = out_color[i];
         clipped[i].specular = 0;
@@ -682,7 +681,7 @@ static void dispatch_billboard(TD5_PrimitiveCmd *cmd, TD5_MeshVertex *base_verts
         TD5_MeshVertex *v = (TD5_MeshVertex *)data;
         float avg_z = (v[0].view_z + v[1].view_z + v[2].view_z) * (1.0f / 3.0f);
         if (avg_z > s_near_clip) {
-            int bucket = (int)((avg_z - DEPTH_NEAR_BIAS) * DEPTH_RANGE_INV * (float)(DEPTH_BUCKET_COUNT - 1));
+            int bucket = (int)(avg_z * (float)(DEPTH_BUCKET_COUNT - 1) / s_far_clip);
             bucket = clampi(bucket, 0, DEPTH_BUCKET_COUNT - 1);
             bucket ^= (DEPTH_BUCKET_COUNT - 1);
             td5_render_queue_projected_entry(data, bucket, 0x3u, tex_page);
@@ -695,7 +694,7 @@ static void dispatch_billboard(TD5_PrimitiveCmd *cmd, TD5_MeshVertex *base_verts
         TD5_MeshVertex *v = (TD5_MeshVertex *)data;
         float avg_z = (v[0].view_z + v[1].view_z + v[2].view_z + v[3].view_z) * 0.25f;
         if (avg_z > s_near_clip) {
-            int bucket = (int)((avg_z - DEPTH_NEAR_BIAS) * DEPTH_RANGE_INV * (float)(DEPTH_BUCKET_COUNT - 1));
+            int bucket = (int)(avg_z * (float)(DEPTH_BUCKET_COUNT - 1) / s_far_clip);
             bucket = clampi(bucket, 0, DEPTH_BUCKET_COUNT - 1);
             bucket ^= (DEPTH_BUCKET_COUNT - 1);
             td5_render_queue_projected_entry(data, bucket, 0x4u, tex_page);
@@ -2048,7 +2047,7 @@ static void render_vehicle_shadow_quad(void)
         float inv_z = 1.0f / vz;
         verts[i].screen_x = -vx * s_focal_length * inv_z + s_center_x;
         verts[i].screen_y = -vy * s_focal_length * inv_z + s_center_y;
-        verts[i].depth_z  = (vz - DEPTH_NEAR_BIAS) * DEPTH_RANGE_INV;
+        verts[i].depth_z  = vz * (1.0f / s_far_clip);
         verts[i].rhw      = inv_z;
         verts[i].diffuse  = 0x60000000u; /* semi-transparent black (alpha=0x60) */
         verts[i].specular = 0;
@@ -2229,7 +2228,7 @@ static void render_vehicle_wheel_billboards(TD5_Actor *actor, int slot)
                 float inv_z = 1.0f / vz;
                 verts[i].screen_x = -vx * s_focal_length * inv_z + s_center_x;
                 verts[i].screen_y = -vy * s_focal_length * inv_z + s_center_y;
-                verts[i].depth_z  = (vz - DEPTH_NEAR_BIAS) * DEPTH_RANGE_INV;
+                verts[i].depth_z  = vz * (1.0f / s_far_clip);
                 verts[i].rhw      = inv_z;
                 verts[i].diffuse  = 0xFFFFFFFFu;
                 verts[i].specular = 0;
@@ -2250,7 +2249,7 @@ static void render_vehicle_wheel_billboards(TD5_Actor *actor, int slot)
                 float inv_z = 1.0f / vz;
                 verts[9+i].screen_x = -vx * s_focal_length * inv_z + s_center_x;
                 verts[9+i].screen_y = -vy * s_focal_length * inv_z + s_center_y;
-                verts[9+i].depth_z  = (vz - DEPTH_NEAR_BIAS) * DEPTH_RANGE_INV;
+                verts[9+i].depth_z  = vz * (1.0f / s_far_clip);
                 verts[9+i].rhw      = inv_z;
                 verts[9+i].diffuse  = 0xFFFFFFFFu;
                 verts[9+i].specular = 0;
@@ -2312,7 +2311,7 @@ static void render_vehicle_wheel_billboards(TD5_Actor *actor, int slot)
                 float inv_z = 1.0f / vz;
                 hub[c].screen_x = -vx * s_focal_length * inv_z + s_center_x;
                 hub[c].screen_y = -vy * s_focal_length * inv_z + s_center_y;
-                hub[c].depth_z  = (vz - DEPTH_NEAR_BIAS) * DEPTH_RANGE_INV;
+                hub[c].depth_z  = vz * (1.0f / s_far_clip);
                 hub[c].rhw      = inv_z;
                 hub[c].diffuse  = 0xFFFFFFFFu;
                 hub[c].specular = 0;
