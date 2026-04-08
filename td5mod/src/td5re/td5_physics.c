@@ -208,17 +208,14 @@ void td5_physics_wall_response(TD5_Actor *actor, int32_t wall_angle,
     int32_t cos_w = cos_fixed12(wall_angle);
     int32_t sin_w = sin_fixed12(wall_angle);
 
-    /* Push actor position out of wall along the verified inward normal.
-     * [CONFIRMED @ 0x4069a0]: push magnitude = (magnitude - 4), shift >>4
-     * normal_x/normal_z point INTO the road (verified by caller). */
+    /* Push actor position out of wall using sin/cos of wall angle.
+     * [CONFIRMED @ 0x4069a1-0x4069d7]: push along (-sin_w, +cos_w) direction.
+     * push magnitude = (magnitude - 4), shift >>4 */
     int32_t magnitude = (-penetration);  /* penetration is negative when outside */
     int32_t push = magnitude - 4;
     if (push < 1) push = 1;
-    if (normal_mag > 0) {
-        /* Push along the caller-provided inward normal */
-        actor->world_pos.x += (int32_t)((int64_t)normal_x * push / normal_mag) >> 4;
-        actor->world_pos.z += (int32_t)((int64_t)normal_z * push / normal_mag) >> 4;
-    }
+    actor->world_pos.x -= (int32_t)((int64_t)sin_w * push) >> 4;
+    actor->world_pos.z += (int32_t)((int64_t)cos_w * push) >> 4;
 
     /* Decompose velocity into wall-parallel and wall-perpendicular components
      * [CONFIRMED @ 0x4069cc] */
@@ -230,11 +227,12 @@ void td5_physics_wall_response(TD5_Actor *actor, int32_t wall_angle,
     int32_t v_para = (vx * cos_w + vz * sin_w) >> 12;
     int32_t v_perp = (-vx * sin_w + vz * cos_w) >> 12;
 
-    /* If moving into the wall (v_perp < 0), apply inertia-based impulse response.
-     * If already moving away (v_perp >= 0), skip velocity modification.
-     * [CONFIRMED @ 0x406b6b] */
-    if (v_perp < 0) {
-        int32_t v_into_wall = -v_perp;  /* positive magnitude */
+    /* Apply impulse when perpendicular velocity is non-negative (moving into wall
+     * or along it). Original uses JS (jump-if-sign) at 0x406a78 to SKIP impulse
+     * when combined < 0, meaning impulse fires when combined >= 0.
+     * [CONFIRMED @ 0x406a76-0x406a78] */
+    if (v_perp >= 0) {
+        int32_t v_into_wall = v_perp;  /* positive magnitude */
 
         /* --- Angular impulse from lever arm [CONFIRMED @ 0x406a60-0x406b75] ---
          * Lever arm = angular_velocity_yaw / ANGULAR_DIVISOR_W
