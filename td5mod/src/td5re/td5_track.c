@@ -515,13 +515,17 @@ void td5_track_resolve_wall_contacts(TD5_Actor *actor)
             int vl0, vl1, vr0, vr1;
             get_quad_vertices(sp, 0, &vl0, &vl1, &vr0, &vr1);
 
+            /* Left wall edge = vl0 → vl1 (along-track left boundary).
+             * Must use same-side vertices to get an along-track edge;
+             * using vl0→vr0 gives a cross-track edge whose perpendicular
+             * measures along-track distance instead of wall penetration,
+             * producing false contacts with huge fake penetrations. */
             TD5_StripVertex *lv = vertex_at(vl0);
-            TD5_StripVertex *rv = vertex_at(vr0);
+            TD5_StripVertex *rv = vertex_at(vl1);
             if (!lv || !rv) continue;
 
-            /* Edge direction: left vertex to right vertex
-             * Normal (pointing INTO road): perpendicular CW = (dz, -dx)
-             * But original uses: normal = (rightV.z - leftV.z, leftV.x - rightV.x)
+            /* Edge direction: along-track on left boundary (vl0 → vl1)
+             * Normal (pointing INTO road): right-hand perpendicular = (dz, -dx)
              * [CONFIRMED @ 0x407180] */
             int32_t edge_dx = (int32_t)rv->x - (int32_t)lv->x;
             int32_t edge_dz = (int32_t)rv->z - (int32_t)lv->z;
