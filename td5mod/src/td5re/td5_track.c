@@ -507,26 +507,23 @@ void td5_track_resolve_wall_contacts(TD5_Actor *actor)
         int32_t pz = probe_z >> 8;
 
         /* --- LEFT EDGE CHECK [CONFIRMED @ 0x406cf4] ---
-         * Original gates on sub_lane_index <= 0, but the probe's sub_lane
-         * tracking via update_position_recursive may not converge to 0
-         * before the wheel physically reaches the wall. Always test —
-         * the signed-distance check is the real guard. */
+         * Original gates on sub_lane_index <= 0. Restored: without this gate,
+         * probes in inner lanes get false wall contacts because the signed
+         * distance from an inner-lane wheel to the outer wall boundary can
+         * be negative depending on the span's vertex winding direction. */
+        if (probe->sub_lane_index > 0)
+            goto skip_left_wall;
         {
             int vl0, vl1, vr0, vr1;
             get_quad_vertices(sp, 0, &vl0, &vl1, &vr0, &vr1);
 
-            /* Left wall edge = vl0 → vl1 (along-track left boundary).
-             * Must use same-side vertices to get an along-track edge;
-             * using vl0→vr0 gives a cross-track edge whose perpendicular
-             * measures along-track distance instead of wall penetration,
-             * producing false contacts with huge fake penetrations. */
-            TD5_StripVertex *lv = vertex_at(vl0);
-            TD5_StripVertex *rv = vertex_at(vl1);
-            if (!lv || !rv) continue;
-
-            /* Edge direction: along-track on left boundary (vl0 → vl1)
+            /* Left wall edge = vl0 → vr0 (along-track left boundary).
+             * vl0 = cross-section 1, lane 0; vr0 = cross-section 2, lane 0.
              * Normal (pointing INTO road): right-hand perpendicular = (dz, -dx)
              * [CONFIRMED @ 0x407180] */
+            TD5_StripVertex *lv = vertex_at(vl0);
+            TD5_StripVertex *rv = vertex_at(vr0);
+            if (!lv || !rv) continue;
             int32_t edge_dx = (int32_t)rv->x - (int32_t)lv->x;
             int32_t edge_dz = (int32_t)rv->z - (int32_t)lv->z;
 
@@ -566,9 +563,12 @@ void td5_track_resolve_wall_contacts(TD5_Actor *actor)
                 TD5_LOG_I(LOG_TAG, "wall_contact: probe=%d LEFT d=%d angle=%d", pi, d, wall_angle);
             }
         }
+    skip_left_wall:
 
         /* --- RIGHT EDGE CHECK [CONFIRMED @ 0x406da6] ---
-         * Same as left: always test, don't gate on sub_lane. */
+         * Original gates on sub_lane_index >= lane_count - 1. */
+        if (probe->sub_lane_index < lane_count - 1)
+            continue;
         {
             int vl0, vl1, vr0, vr1;
             /* Use wall vertex offset tables for right edge [CONFIRMED @ 0x406da6] */
