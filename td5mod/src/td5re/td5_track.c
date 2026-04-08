@@ -523,23 +523,28 @@ void td5_track_resolve_wall_contacts(TD5_Actor *actor)
              * [CONFIRMED @ 0x407180] */
             TD5_StripVertex *lv = vertex_at(vl0);
             TD5_StripVertex *rv = vertex_at(vr0);
-            if (!lv || !rv) continue;
+            TD5_StripVertex *inner_v = vertex_at(vl1); /* inner lane vertex for normal check */
+            if (!lv || !rv || !inner_v) continue;
             int32_t edge_dx = (int32_t)rv->x - (int32_t)lv->x;
             int32_t edge_dz = (int32_t)rv->z - (int32_t)lv->z;
 
-            /* Normal pointing into the road (right-hand side of edge L→R) */
-            int32_t nx = edge_dz;   /* rightV.z - leftV.z */
-            int32_t nz = -edge_dx;  /* leftV.x - rightV.x */
+            /* Normal: right-hand perpendicular of edge = (dz, -dx).
+             * But edge winding varies per span — verify the normal points
+             * toward the road interior (toward inner_v) and flip if not. */
+            int32_t nx = edge_dz;
+            int32_t nz = -edge_dx;
+            {
+                int32_t to_inner_x = (int32_t)inner_v->x - (int32_t)lv->x;
+                int32_t to_inner_z = (int32_t)inner_v->z - (int32_t)lv->z;
+                if ((int64_t)nx * to_inner_x + (int64_t)nz * to_inner_z < 0) {
+                    nx = -nx;
+                    nz = -nz;
+                }
+            }
 
-            /* Normalize for consistent distance (approximate with magnitude) */
             int32_t nmag = td5_isqrt(nx * nx + nz * nz);
             if (nmag == 0) continue;
 
-            /* Signed distance from probe to edge line
-             * [CONFIRMED @ 0x40719a]:
-             * d = (probeX - leftV.x - origin_x) * nz + (probeZ - leftV.z - origin_z) * nx
-             * But we need to use the normalized form. The original uses unnormalized
-             * distance and divides later. Let's compute raw dot product. */
             int32_t rel_x = px - (int32_t)lv->x - sp->origin_x;
             int32_t rel_z = pz - (int32_t)lv->z - sp->origin_z;
 
@@ -555,7 +560,7 @@ void td5_track_resolve_wall_contacts(TD5_Actor *actor)
                     double rad = atan2((double)edge_dx, (double)edge_dz);
                     wall_angle = (int32_t)(rad * (4096.0 / (2.0 * 3.14159265358979323846))) & 0xFFF;
                 }
-                td5_physics_wall_response(actor, wall_angle, d, 1);
+                td5_physics_wall_response(actor, wall_angle, d, 1, nx, nz, nmag);
 
                 /* Rebuild full pose (rotation matrix + render_pos + wheel contacts)
                  * matching original callback pattern [CONFIRMED @ 0x4068c8] */
@@ -580,15 +585,24 @@ void td5_track_resolve_wall_contacts(TD5_Actor *actor)
             /* Apply wall vertex offsets */
             TD5_StripVertex *lv = vertex_at(vr0 + wall_off_l);
             TD5_StripVertex *rv = vertex_at(vr0 + wall_off_r + 1);
-            if (!lv || !rv) continue;
+            TD5_StripVertex *inner_v = vertex_at(vl0); /* inner lane vertex for normal check */
+            if (!lv || !rv || !inner_v) continue;
 
-            /* Edge direction and normal (pointing INTO road = left of edge direction) */
             int32_t edge_dx = (int32_t)rv->x - (int32_t)lv->x;
             int32_t edge_dz = (int32_t)rv->z - (int32_t)lv->z;
 
-            /* For right wall, normal should point left (into road) */
+            /* Normal: left-hand perpendicular = (-dz, dx).
+             * Verify it points toward road interior (toward inner_v) and flip if not. */
             int32_t nx = -edge_dz;
             int32_t nz = edge_dx;
+            {
+                int32_t to_inner_x = (int32_t)inner_v->x - (int32_t)lv->x;
+                int32_t to_inner_z = (int32_t)inner_v->z - (int32_t)lv->z;
+                if ((int64_t)nx * to_inner_x + (int64_t)nz * to_inner_z < 0) {
+                    nx = -nx;
+                    nz = -nz;
+                }
+            }
 
             int32_t nmag = td5_isqrt(nx * nx + nz * nz);
             if (nmag == 0) continue;
@@ -605,7 +619,7 @@ void td5_track_resolve_wall_contacts(TD5_Actor *actor)
                     double rad = atan2((double)edge_dx, (double)edge_dz);
                     wall_angle = (int32_t)(rad * (4096.0 / (2.0 * 3.14159265358979323846))) & 0xFFF;
                 }
-                td5_physics_wall_response(actor, wall_angle, d, 2);
+                td5_physics_wall_response(actor, wall_angle, d, 2, nx, nz, nmag);
 
                 /* Rebuild full pose after wall push [CONFIRMED @ 0x4068c8] */
                 td5_physics_rebuild_pose(actor);

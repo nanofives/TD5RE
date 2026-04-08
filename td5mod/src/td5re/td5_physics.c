@@ -201,28 +201,23 @@ static int32_t atan2_fixed12(int32_t dx, int32_t dz)
 #define ANGULAR_DIVISOR_W   0x28C
 
 void td5_physics_wall_response(TD5_Actor *actor, int32_t wall_angle,
-                               int32_t penetration, int side)
+                               int32_t penetration, int side,
+                               int32_t normal_x, int32_t normal_z, int32_t normal_mag)
 {
     /* Compute wall normal (perpendicular to wall direction) */
     int32_t cos_w = cos_fixed12(wall_angle);
     int32_t sin_w = sin_fixed12(wall_angle);
 
-    /* Push actor position out of wall by (|penetration| - 4) >> 4 along normal.
+    /* Push actor position out of wall along the verified inward normal.
      * [CONFIRMED @ 0x4069a0]: push magnitude = (magnitude - 4), shift >>4
-     * Push direction: perpendicular to wall edge, pointing INTO the road.
-     * Left wall (side=1): road is to the right → right perp = (cos_w, -sin_w)
-     * Right wall (side=2): road is to the left → left perp = (-cos_w, sin_w) */
+     * normal_x/normal_z point INTO the road (verified by caller). */
     int32_t magnitude = (-penetration);  /* penetration is negative when outside */
     int32_t push = magnitude - 4;
     if (push < 1) push = 1;
-    if (side == 2) {
-        /* Right wall: push left (into road) */
-        actor->world_pos.x += ((-cos_w) * push) >> 4;
-        actor->world_pos.z += (sin_w * push) >> 4;
-    } else {
-        /* Left wall: push right (into road) */
-        actor->world_pos.x += (cos_w * push) >> 4;
-        actor->world_pos.z += ((-sin_w) * push) >> 4;
+    if (normal_mag > 0) {
+        /* Push along the caller-provided inward normal */
+        actor->world_pos.x += (int32_t)((int64_t)normal_x * push / normal_mag) >> 4;
+        actor->world_pos.z += (int32_t)((int64_t)normal_z * push / normal_mag) >> 4;
     }
 
     /* Decompose velocity into wall-parallel and wall-perpendicular components

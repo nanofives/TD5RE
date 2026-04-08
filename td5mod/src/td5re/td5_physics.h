@@ -90,7 +90,8 @@ void td5_physics_resolve_vehicle_contacts(void);
 
 /* --- Wall collision response (FUN_00406980) --- */
 void td5_physics_wall_response(TD5_Actor *actor, int32_t wall_angle,
-                               int32_t penetration, int side);
+                               int32_t penetration, int side,
+                               int32_t normal_x, int32_t normal_z, int32_t normal_mag);
 
 /* --- Pose rebuild callback (UpdateVehiclePoseFromPhysicsState) ---
  * Rebuilds rotation matrix + render_pos + wheel contacts from current
