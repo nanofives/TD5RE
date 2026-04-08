@@ -208,13 +208,22 @@ void td5_physics_wall_response(TD5_Actor *actor, int32_t wall_angle,
     int32_t sin_w = sin_fixed12(wall_angle);
 
     /* Push actor position out of wall by (|penetration| - 4) >> 4 along normal.
-     * [CONFIRMED @ 0x4069a0]: push magnitude = (magnitude - 4), shift >>4 */
+     * [CONFIRMED @ 0x4069a0]: push magnitude = (magnitude - 4), shift >>4
+     * Push direction: perpendicular to wall edge, pointing INTO the road.
+     * Left wall (side=1): road is to the right → right perp = (cos_w, -sin_w)
+     * Right wall (side=2): road is to the left → left perp = (-cos_w, sin_w) */
     int32_t magnitude = (-penetration);  /* penetration is negative when outside */
     int32_t push = magnitude - 4;
     if (push < 1) push = 1;
-    /* Wall normal perpendicular to wall edge: (-sin_w, cos_w) points into road */
-    actor->world_pos.x += ((-sin_w) * push) >> 4;
-    actor->world_pos.z += (cos_w * push) >> 4;
+    if (side == 2) {
+        /* Right wall: push left (into road) */
+        actor->world_pos.x += ((-cos_w) * push) >> 4;
+        actor->world_pos.z += (sin_w * push) >> 4;
+    } else {
+        /* Left wall: push right (into road) */
+        actor->world_pos.x += (cos_w * push) >> 4;
+        actor->world_pos.z += ((-sin_w) * push) >> 4;
+    }
 
     /* Decompose velocity into wall-parallel and wall-perpendicular components
      * [CONFIRMED @ 0x4069cc] */
