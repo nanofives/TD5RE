@@ -545,12 +545,18 @@ void td5_track_resolve_wall_contacts(TD5_Actor *actor)
             int32_t d = (int32_t)((dot + ((dot >> 63) & 0xFFF)) >> 12);
 
             /* Clamp penetration to prevent teleportation from bad geometry */
-            if (d < -500) d = -500;
+            if (d < -4000) d = -4000;
 
             if (d < 0) {
                 int32_t wall_angle;
                 {
-                    double rad = atan2((double)edge_dx, (double)edge_dz);
+                    /* Compute angle from the perpendicular (CW of edge), matching
+                     * original AngleFromVector12(dz, dx) at 0x406D90.  The push
+                     * direction (-sin_w, cos_w) then points along the inward
+                     * normal, pushing the car back onto the road.  The previous
+                     * atan2(edge_dx, edge_dz) gave the edge heading — off by 90°,
+                     * so the push went along the wall instead of perpendicular. */
+                    double rad = atan2((double)(-edge_dz), (double)(-edge_dx));
                     wall_angle = (int32_t)(rad * (4096.0 / (2.0 * 3.14159265358979323846))) & 0xFFF;
                     if (normal_flipped) wall_angle = (wall_angle + 2048) & 0xFFF;
                 }
@@ -601,12 +607,13 @@ void td5_track_resolve_wall_contacts(TD5_Actor *actor)
             int32_t d = (int32_t)((dot + ((dot >> 63) & 0xFFF)) >> 12);
 
             /* Clamp penetration to prevent teleportation from bad geometry */
-            if (d < -500) d = -500;
+            if (d < -4000) d = -4000;
 
             if (d < 0) {
                 int32_t wall_angle;
                 {
-                    double rad = atan2((double)edge_dx, (double)edge_dz);
+                    /* Same perpendicular-based angle as LEFT edge — see comment above. */
+                    double rad = atan2((double)(-edge_dz), (double)(-edge_dx));
                     wall_angle = (int32_t)(rad * (4096.0 / (2.0 * 3.14159265358979323846))) & 0xFFF;
                     if (normal_flipped) wall_angle = (wall_angle + 2048) & 0xFFF;
                 }
