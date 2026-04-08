@@ -3016,7 +3016,7 @@ int td5_track_parse_models_dat(const void *data, size_t size)
         uint32_t dword0 = *(const uint32_t *)(const void *)(s_models_blob);
         uint32_t dword1 = *(const uint32_t *)(const void *)(s_models_blob + 4);
 
-        /* Try format A: DWORD[0] = count, table starts at byte 4 */
+        /* Try format A (strict): DWORD[0] = count, DWORD[1] == 4 + count*8 */
         if (dword0 > 0 && dword0 < 10000 &&
             dword1 == 4 + dword0 * 8 &&
             (size_t)(4 + dword0 * 8) <= size) {
@@ -3025,20 +3025,26 @@ int td5_track_parse_models_dat(const void *data, size_t size)
             TD5_LOG_I("track", "MODELS.DAT format A: count=%u table@4 first_block@%u",
                       raw_entry_count, dword1);
         }
+        /* Try format A (relaxed): DWORD[0] looks like a count, DWORD[1] is the
+         * first entry's offset (not necessarily == 4+count*8 due to padding).
+         * Validate by checking that DWORD[1] points to a valid sub_mesh_count.
+         * Must check BEFORE format B because format B misinterprets the count
+         * header as entry[0] when DWORD[1] happens to be divisible by 8. */
+        else if (dword0 > 0 && dword0 < 10000 && (size_t)(4 + dword0 * 8) <= size &&
+                 dword1 >= 4 + dword0 * 8 && dword1 < size && dword1 + 4 <= size &&
+                 *(const uint32_t *)(s_models_blob + dword1) >= 1 &&
+                 *(const uint32_t *)(s_models_blob + dword1) <= 256) {
+            raw_entry_count = dword0;
+            table_start_byte = 4;
+            TD5_LOG_I("track", "MODELS.DAT format A (relaxed): count=%u table@4 first_block@%u",
+                      raw_entry_count, dword1);
+        }
         /* Try format B: no count header, table at byte 0, count = DWORD[1]/8 */
         else if (dword1 > 0 && (dword1 & 7u) == 0 && dword1 <= size) {
             raw_entry_count = dword1 / 8u;
             table_start_byte = 0;
             TD5_LOG_I("track", "MODELS.DAT format B: count=%u table@0 first_block@%u",
                       raw_entry_count, dword1);
-        }
-        /* Try format A fallback: maybe DWORD[1] isn't exactly 4+count*8 but DWORD[0]
-         * is still a count and the table has 8-byte stride from byte 4 */
-        else if (dword0 > 0 && dword0 < 10000 && (size_t)(4 + dword0 * 8) <= size) {
-            raw_entry_count = dword0;
-            table_start_byte = 4;
-            TD5_LOG_I("track", "MODELS.DAT format A (relaxed): count=%u table@4",
-                      raw_entry_count);
         }
         else {
             TD5_LOG_W("track", "MODELS.DAT: cannot determine format (dword0=%u dword1=%u size=%zu)",
@@ -3074,9 +3080,9 @@ int td5_track_parse_models_dat(const void *data, size_t size)
             uint32_t f1 = *(const uint32_t *)(const void *)(s_models_blob + tbl_byte + 4);
 
             /* Auto-detect field order: one field is the block offset (should be
-             * >= table end = 4 + count*8), the other is the block size (smaller).
+             * >= table end), the other is the block size (smaller).
              * Check which field points to a valid sub_mesh_count (1..256). */
-            uint32_t table_end = table_start_byte + raw_entry_count * 8u + 4u;
+            uint32_t table_end = table_start_byte + raw_entry_count * 8u;
             int f0_is_offset = (f0 >= table_end && f0 < size &&
                                 f0 + 4 <= size &&
                                 *(const uint32_t *)(s_models_blob + f0) >= 1 &&
