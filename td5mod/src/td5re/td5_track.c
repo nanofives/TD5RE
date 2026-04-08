@@ -3479,18 +3479,18 @@ void *td5_track_get_display_list(int span_index)
     static int s_models_log = 0;
 
     /* Prefer real MODELS.DAT display lists when available.
-     * Original (0x431260): return *(uint*)(table_base + span_index * 8)
-     * The MODELS.DAT table has one entry per span — direct 1:1 indexing.
-     * Original (0x431260): return *(uint*)(table_base + span_index * 8) */
+     * Original render loop (0x42baf4) converts span_index to display list
+     * index with >> 2 (divide by 4), mapping ~2789 spans to ~698 entries.
+     * Original lookup (0x431260): return *(uint*)(table_base + dl_index * 8)
+     * [CONFIRMED @ 0x42baf4: SHR by 2; table count stored at 0x4aaee0] */
     if (s_models_blob && s_models_entry_offsets &&
-        s_models_display_list_count > 0 &&
-        span_index >= 0 && span_index < s_models_display_list_count) {
-        /* Direct 1:1 mapping: entry[span_index] is the display list for span span_index.
-         * Original (0x431260): return *(uint*)(table_base + span_index * 8)
-         * Entries that failed validation have offset 0 → return NULL. */
-        uint32_t off = s_models_entry_offsets[span_index];
-        if (off != 0)
-            return s_models_blob + off;
+        s_models_display_list_count > 0 && span_index >= 0) {
+        int dl_index = span_index >> 2;  /* ~4 spans per display list block */
+        if (dl_index >= 0 && dl_index < s_models_display_list_count) {
+            uint32_t off = s_models_entry_offsets[dl_index];
+            if (off != 0)
+                return s_models_blob + off;
+        }
         return NULL;
     }
 
