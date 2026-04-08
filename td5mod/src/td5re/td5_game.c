@@ -60,6 +60,7 @@ void   *g_route_data            = NULL;
 extern int   g_cameraTransitionActive;  /* td5_camera.c */
 extern float g_subTickFraction;        /* td5_camera.c -- [0..1) sub-tick interp */
 extern int   g_camWorldPos[2][3];       /* td5_camera.c -- per-viewport camera pos (24.8 fixed) */
+extern float g_cameraPos[3];            /* td5_camera.c -- float camera pos for render */
 extern float g_render_width_f;          /* td5_render.c */
 extern float g_render_height_f;         /* td5_render.c */
 extern int   g_track_is_circuit;        /* td5_track.c */
@@ -1034,6 +1035,15 @@ int td5_game_init_race_session(void) {
     td5_sound_set_race_end(0);
 
     reset_race_countdown();
+
+    /* Seed camera position from the spawned player actor.
+     * sim_time_accumulator starts at 0 so no sim ticks fire for the first
+     * few frames — without this, g_cameraPos stays at (0,0,0) and the
+     * renderer draws from the world origin (geometry invisible).
+     * [FIX: camera at origin for first ~4 frames of race] */
+    td5_camera_tick();
+    TD5_LOG_I(LOG_TAG, "Camera seeded: pos=(%.1f, %.1f, %.1f)",
+              g_cameraPos[0], g_cameraPos[1], g_cameraPos[2]);
 
     TD5_LOG_I(LOG_TAG, "InitializeRaceSession: complete (%d actors)",
               g_td5.total_actor_count);
