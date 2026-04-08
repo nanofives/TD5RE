@@ -506,109 +506,80 @@ void td5_track_resolve_wall_contacts(TD5_Actor *actor)
         int32_t px = probe_x >> 8;
         int32_t pz = probe_z >> 8;
 
-        /* --- LEFT EDGE CHECK [CONFIRMED @ 0x406cf4] ---
-         * Original gates on sub_lane_index <= 0. Restored: without this gate,
-         * probes in inner lanes get false wall contacts because the signed
-         * distance from an inner-lane wheel to the outer wall boundary can
-         * be negative depending on the span's vertex winding direction. */
+        /* --- LEFT EDGE CHECK [CONFIRMED @ 0x406D28-0x406DD4] ---
+         * Original gates on sub_lane_index <= 0.
+         * Uses raw span vertex indices (NO offset table lookup).
+         * psVar2 = vertex_at(span.right_vertex_index)  [span+0x06]
+         * psVar3 = vertex_at(span.left_vertex_index)   [span+0x04]
+         * Edge direction = psVar3 - psVar2.
+         * Normal = (edge_dz, -edge_dx) — fixed, no inner-vertex flip. */
         if (probe->sub_lane_index > 0)
             goto skip_left_wall;
         {
-            int vl0, vl1, vr0, vr1;
-            get_quad_vertices(sp, 0, &vl0, &vl1, &vr0, &vr1);
+            TD5_StripVertex *psVar2 = vertex_at(sp->right_vertex_index);
+            TD5_StripVertex *psVar3 = vertex_at(sp->left_vertex_index);
+            if (!psVar2 || !psVar3) continue;
 
-            /* Left wall edge = vl0 → vr0 (along-track left boundary).
-             * vl0 = cross-section 1, lane 0; vr0 = cross-section 2, lane 0.
-             * Normal (pointing INTO road): right-hand perpendicular = (dz, -dx)
-             * [CONFIRMED @ 0x407180] */
-            TD5_StripVertex *lv = vertex_at(vl0);
-            TD5_StripVertex *rv = vertex_at(vr0);
-            TD5_StripVertex *inner_v = vertex_at(vl1); /* inner lane vertex for normal check */
-            if (!lv || !rv || !inner_v) continue;
-            int32_t edge_dx = (int32_t)rv->x - (int32_t)lv->x;
-            int32_t edge_dz = (int32_t)rv->z - (int32_t)lv->z;
+            int32_t edge_dx = (int32_t)psVar3->x - (int32_t)psVar2->x;
+            int32_t edge_dz = (int32_t)psVar3->z - (int32_t)psVar2->z;
 
-            /* Normal: right-hand perpendicular of edge = (dz, -dx).
-             * But edge winding varies per span — verify the normal points
-             * toward the road interior (toward inner_v) and flip if not. */
+            /* Normal: right-hand perpendicular (dz, -dx) [CONFIRMED @ 0x406D56-0x406D72] */
             int32_t nx = edge_dz;
             int32_t nz = -edge_dx;
-            {
-                int32_t to_inner_x = (int32_t)inner_v->x - (int32_t)lv->x;
-                int32_t to_inner_z = (int32_t)inner_v->z - (int32_t)lv->z;
-                if ((int64_t)nx * to_inner_x + (int64_t)nz * to_inner_z < 0) {
-                    nx = -nx;
-                    nz = -nz;
-                }
-            }
 
             int32_t nmag = td5_isqrt(nx * nx + nz * nz);
             if (nmag == 0) continue;
 
-            int32_t rel_x = px - (int32_t)lv->x - sp->origin_x;
-            int32_t rel_z = pz - (int32_t)lv->z - sp->origin_z;
+            int32_t rel_x = px - (int32_t)psVar2->x - sp->origin_x;
+            int32_t rel_z = pz - (int32_t)psVar2->z - sp->origin_z;
 
-            /* Signed distance (positive = inside road, negative = outside) */
             int64_t d64 = (int64_t)rel_x * nx + (int64_t)rel_z * nz;
             int32_t d = (int32_t)(d64 / nmag);
 
             if (d < 0) {
-                /* Car is outside left wall — compute wall angle and respond */
-                /* Wall edge direction angle [CONFIRMED @ 0x4071d6] */
                 int32_t wall_angle;
                 {
                     double rad = atan2((double)edge_dx, (double)edge_dz);
                     wall_angle = (int32_t)(rad * (4096.0 / (2.0 * 3.14159265358979323846))) & 0xFFF;
                 }
                 td5_physics_wall_response(actor, wall_angle, d, 1, nx, nz, nmag);
-
-                /* Rebuild full pose (rotation matrix + render_pos + wheel contacts)
-                 * matching original callback pattern [CONFIRMED @ 0x4068c8] */
                 td5_physics_rebuild_pose(actor);
                 TD5_LOG_I(LOG_TAG, "wall_contact: probe=%d LEFT d=%d angle=%d", pi, d, wall_angle);
             }
         }
     skip_left_wall:
 
-        /* --- RIGHT EDGE CHECK [CONFIRMED @ 0x406da6] ---
-         * Original gates on sub_lane_index >= lane_count - 1. */
+        /* --- RIGHT EDGE CHECK [CONFIRMED @ 0x406E31-0x406E75] ---
+         * Original gates on sub_lane_index >= lane_count - 1.
+         * idx1 = wall_table_left[type] + span.left_vertex_index + lane_count  [span+0x04]
+         * idx2 = wall_table_right[type] + span.right_vertex_index + lane_count [span+0x06]
+         * Both cross-sections, offset to the far side of the road.
+         * Normal = (edge_dz, -edge_dx) same formula as left wall. */
         if (probe->sub_lane_index < lane_count - 1)
             continue;
         {
-            int vl0, vl1, vr0, vr1;
-            /* Use wall vertex offset tables for right edge [CONFIRMED @ 0x406da6] */
             int wall_off_l = (type >= 0 && type < 12) ? s_wall_vtx_left[type] : 0;
             int wall_off_r = (type >= 0 && type < 12) ? s_wall_vtx_right[type] : 0;
 
-            get_quad_vertices(sp, lane_count - 1, &vl0, &vl1, &vr0, &vr1);
+            int idx1 = wall_off_l + (int)sp->left_vertex_index + lane_count;
+            int idx2 = wall_off_r + (int)sp->right_vertex_index + lane_count;
 
-            /* Apply wall vertex offsets */
-            TD5_StripVertex *lv = vertex_at(vr0 + wall_off_l);
-            TD5_StripVertex *rv = vertex_at(vr0 + wall_off_r + 1);
-            TD5_StripVertex *inner_v = vertex_at(vl0); /* inner lane vertex for normal check */
-            if (!lv || !rv || !inner_v) continue;
+            TD5_StripVertex *psVar2 = vertex_at(idx1);
+            TD5_StripVertex *psVar3 = vertex_at(idx2);
+            if (!psVar2 || !psVar3) continue;
 
-            int32_t edge_dx = (int32_t)rv->x - (int32_t)lv->x;
-            int32_t edge_dz = (int32_t)rv->z - (int32_t)lv->z;
+            int32_t edge_dx = (int32_t)psVar3->x - (int32_t)psVar2->x;
+            int32_t edge_dz = (int32_t)psVar3->z - (int32_t)psVar2->z;
 
-            /* Normal: left-hand perpendicular = (-dz, dx).
-             * Verify it points toward road interior (toward inner_v) and flip if not. */
-            int32_t nx = -edge_dz;
-            int32_t nz = edge_dx;
-            {
-                int32_t to_inner_x = (int32_t)inner_v->x - (int32_t)lv->x;
-                int32_t to_inner_z = (int32_t)inner_v->z - (int32_t)lv->z;
-                if ((int64_t)nx * to_inner_x + (int64_t)nz * to_inner_z < 0) {
-                    nx = -nx;
-                    nz = -nz;
-                }
-            }
+            /* Normal: same (dz, -dx) formula [CONFIRMED @ 0x406E78-0x406E94] */
+            int32_t nx = edge_dz;
+            int32_t nz = -edge_dx;
 
             int32_t nmag = td5_isqrt(nx * nx + nz * nz);
             if (nmag == 0) continue;
 
-            int32_t rel_x = px - (int32_t)lv->x - sp->origin_x;
-            int32_t rel_z = pz - (int32_t)lv->z - sp->origin_z;
+            int32_t rel_x = px - (int32_t)psVar2->x - sp->origin_x;
+            int32_t rel_z = pz - (int32_t)psVar2->z - sp->origin_z;
 
             int64_t d64 = (int64_t)rel_x * nx + (int64_t)rel_z * nz;
             int32_t d = (int32_t)(d64 / nmag);
@@ -620,8 +591,6 @@ void td5_track_resolve_wall_contacts(TD5_Actor *actor)
                     wall_angle = (int32_t)(rad * (4096.0 / (2.0 * 3.14159265358979323846))) & 0xFFF;
                 }
                 td5_physics_wall_response(actor, wall_angle, d, 2, nx, nz, nmag);
-
-                /* Rebuild full pose after wall push [CONFIRMED @ 0x4068c8] */
                 td5_physics_rebuild_pose(actor);
                 TD5_LOG_I(LOG_TAG, "wall_contact: probe=%d RIGHT d=%d angle=%d", pi, d, wall_angle);
             }
