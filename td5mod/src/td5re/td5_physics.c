@@ -2144,12 +2144,13 @@ void td5_physics_integrate_pose(TD5_Actor *actor)
         if (corr_count > 0) {
             int32_t corr_val = (int32_t)(corr_sum / corr_count);
 
-            /* Safety clamp for bogus probe data (off-road scenery heights).
-             * The original has no clamp — ground correction is applied directly.
-             * Keep a generous safety net: 1024 world units (262144 in 24.8 FP)
-             * handles any real road gradient at any speed. */
-            if (corr_val > 262144) corr_val = 262144;
-            if (corr_val < -262144) corr_val = -262144;
+            /* Clamp ground-snap correction. The ground probe can return wrong
+             * heights for spans with unusual geometry (bridges, scenery),
+             * producing 200K+ corrections that launch or sink the car.
+             * Real steep slopes need ~16K max. Clamp at 32768 (128 world units)
+             * to allow all real gradients while blocking bogus probes. */
+            if (corr_val > 32768) corr_val = 32768;
+            if (corr_val < -32768) corr_val = -32768;
 
             if (actor->slot_index == 0) {
                 static int s_snap_log = 0;
