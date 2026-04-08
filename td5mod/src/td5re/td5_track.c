@@ -1759,10 +1759,11 @@ static int32_t triangle_height(int va_idx, int vb_idx, int vc_idx,
     e2y = (int32_t)vc->y - (int32_t)va->y;
     e2z = (int32_t)vc->z - (int32_t)va->z;
 
-    /* Cross product -> surface normal (right-shifted for precision) */
-    nx = (e1y * e2z - e1z * e2y) >> 4;
-    ny = (e1z * e2x - e1x * e2z) >> 4;
-    nz = (e1x * e2y - e1y * e2x) >> 4;
+    /* Cross product -> surface normal (int64 to prevent overflow from
+     * int16 edge vectors: e.g., 30000 * 30000 = 900M > INT32_MAX) */
+    nx = (int32_t)(((int64_t)e1y * e2z - (int64_t)e1z * e2y) >> 4);
+    ny = (int32_t)(((int64_t)e1z * e2x - (int64_t)e1x * e2z) >> 4);
+    nz = (int32_t)(((int64_t)e1x * e2y - (int64_t)e1y * e2x) >> 4);
 
     /* If ny is too small, the triangle is nearly vertical — the plane
      * equation would produce an enormous height. Return the vertex Y
