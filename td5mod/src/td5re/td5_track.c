@@ -1771,8 +1771,10 @@ static int32_t triangle_height(int va_idx, int vb_idx, int vc_idx,
     dx = (pos_x >> 8) - origin_x - (int32_t)va->x;
     dz = (pos_z >> 8) - origin_z - (int32_t)va->z;
 
-    /* Plane equation: y = va.y + (dx * nx + dz * nz) / ny */
-    height = (int32_t)va->y - ((int32_t)dx * nx + (int32_t)dz * nz) / ny;
+    /* Plane equation: y = origin_y + va.y - (dx * nx + dz * nz) / ny
+     * Returns world Y in 24.8 fixed-point (matching actor positions). */
+    height = origin_y + (int32_t)va->y - ((int32_t)dx * nx + (int32_t)dz * nz) / ny;
+    height <<= 8;  /* convert integer world Y to 24.8 FP */
 
     /* Output normal if requested (normalized to int16 range) */
     if (out_normal) {
