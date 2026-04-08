@@ -1764,20 +1764,24 @@ static int32_t triangle_height(int va_idx, int vb_idx, int vc_idx,
     ny = (e1z * e2x - e1x * e2z) >> 4;
     nz = (e1x * e2y - e1y * e2x) >> 4;
 
-    /* Prevent divide-by-zero */
-    if (ny == 0) ny = 1;
+    /* If ny is too small, the triangle is nearly vertical — the plane
+     * equation would produce an enormous height. Return the vertex Y
+     * directly as the best available estimate. Threshold: |ny| < 16
+     * (corresponds to a surface tilted > ~89 degrees from horizontal). */
+    if (ny > -16 && ny < 16) {
+        height = (int32_t)va->y;
+        height <<= 8;
+        return height;
+    }
 
     /* Position relative to vertex A in span-local coordinates */
     dx = (pos_x >> 8) - origin_x - (int32_t)va->x;
     dz = (pos_z >> 8) - origin_z - (int32_t)va->z;
 
     /* Plane equation: y = va.y - (dx * nx + dz * nz) / ny
-     * Returns height in 24.8 fixed-point.
-     * Note: origin_y is NOT added because the renderer (MODELS.DAT meshes)
-     * uses absolute world coordinates that don't include the strip span
-     * origin offset. The car position must match the renderer's space. */
-    height = (int32_t)va->y - ((int32_t)dx * nx + (int32_t)dz * nz) / ny;
-    height <<= 8;  /* convert to 24.8 FP */
+     * Returns height in 24.8 fixed-point. */
+    height = (int32_t)va->y - (int32_t)(((int64_t)dx * nx + (int64_t)dz * nz) / ny);
+    height <<= 8;
 
     /* Output normal if requested (normalized to int16 range) */
     if (out_normal) {
