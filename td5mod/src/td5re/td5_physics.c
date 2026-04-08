@@ -2528,26 +2528,13 @@ void td5_physics_reset_actor_state(TD5_Actor *actor)
     actor->vehicle_mode = 0;
     actor->damage_lockout = 0;
 
-    /* Original (0x405DA4) sets Y to extreme altitude so the first
-     * IntegrateVehiclePoseAndContacts drop-resolves wheel contacts against
-     * the track surface, establishing correct chassis height above road.
-     *
-     * However, the source port's ground-snap clamp (±8192 FP/frame) prevents
-     * the sky-drop from reaching the actual ground surface in reasonable time.
-     * Instead, probe the track surface directly and set Y from the result. */
-    {
-        int32_t ground_y = 0;
-        int g_surf = 0;
-        if (td5_track_probe_height(actor->world_pos.x, actor->world_pos.z,
-                                    actor->track_span_raw, &ground_y, &g_surf)) {
-            actor->world_pos.y = ground_y;
-            TD5_LOG_I(LOG_TAG, "reset_actor_state: ground probe Y=%d (span=%d) for actor %p",
-                      ground_y, actor->track_span_raw, (void *)actor);
-        } else {
-            TD5_LOG_W(LOG_TAG, "reset_actor_state: ground probe failed, keeping spawn Y=%d for actor %p",
-                      actor->world_pos.y, (void *)actor);
-        }
-    }
+    /* Keep the spawn Y position (set by the caller in 24.8 FP from
+     * td5_track_get_span_lane_world). The ground snap in integrate_pose
+     * will fine-tune the height each tick. Don't override with
+     * td5_track_probe_height here — the probe returns in a different
+     * coordinate scale than the spawn/render pipeline expects. */
+    TD5_LOG_I(LOG_TAG, "reset_actor_state: keeping spawn Y=%d (span=%d) for actor %p",
+              actor->world_pos.y, actor->track_span_raw, (void *)actor);
 
     /* Convert positions to float for render */
     actor->render_pos.x = (float)actor->world_pos.x * (1.0f / 256.0f);

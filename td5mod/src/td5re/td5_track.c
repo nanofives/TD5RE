@@ -1767,12 +1767,9 @@ static int32_t triangle_height(int va_idx, int vb_idx, int vc_idx,
 
     /* If ny is too small, the triangle is nearly vertical — the plane
      * equation would produce an enormous height. Return the vertex Y
-     * directly as the best available estimate. Threshold: |ny| < 16
-     * (corresponds to a surface tilted > ~89 degrees from horizontal). */
+     * directly as the best available estimate. */
     if (ny > -16 && ny < 16) {
-        height = (int32_t)va->y;
-        height <<= 8;
-        return height;
+        return (int32_t)va->y;
     }
 
     /* Position relative to vertex A in span-local coordinates */
@@ -1780,9 +1777,8 @@ static int32_t triangle_height(int va_idx, int vb_idx, int vc_idx,
     dz = (pos_z >> 8) - origin_z - (int32_t)va->z;
 
     /* Plane equation: y = va.y - (dx * nx + dz * nz) / ny
-     * Returns height in 24.8 fixed-point. */
+     * Returns height in integer world units (same scale as vertex Y). */
     height = (int32_t)va->y - (int32_t)(((int64_t)dx * nx + (int64_t)dz * nz) / ny);
-    height <<= 8;
 
     /* Output normal if requested (normalized to int16 range) */
     if (out_normal) {
