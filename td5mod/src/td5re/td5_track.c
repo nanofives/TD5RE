@@ -507,60 +507,62 @@ void td5_track_resolve_wall_contacts(TD5_Actor *actor)
         int32_t pz = probe_z >> 8;
 
         /* --- LEFT EDGE CHECK [CONFIRMED @ 0x406D28-0x406DD4] ---
-         * Original gates on sub_lane_index <= 0.
          * Uses raw span vertex indices (NO offset table lookup).
          * psVar2 = vertex_at(span.right_vertex_index)  [span+0x06]
          * psVar3 = vertex_at(span.left_vertex_index)   [span+0x04]
-         * Edge direction = psVar3 - psVar2.
-         * Normal = (edge_dz, -edge_dx) — fixed, no inner-vertex flip. */
+         * Normal = (edge_dz, -edge_dx), verified to point inward via inner vertex. */
         if (probe->sub_lane_index > 0)
             goto skip_left_wall;
         {
             TD5_StripVertex *psVar2 = vertex_at(sp->right_vertex_index);
             TD5_StripVertex *psVar3 = vertex_at(sp->left_vertex_index);
-            if (!psVar2 || !psVar3) continue;
+            TD5_StripVertex *inner_v = vertex_at(sp->left_vertex_index + 1);
+            if (!psVar2 || !psVar3 || !inner_v) continue;
 
             int32_t edge_dx = (int32_t)psVar3->x - (int32_t)psVar2->x;
             int32_t edge_dz = (int32_t)psVar3->z - (int32_t)psVar2->z;
 
-            /* Normal: right-hand perpendicular (dz, -dx) [CONFIRMED @ 0x406D56-0x406D72]
-             * Normalize to magnitude ~4096 matching StoreRoundedVector3Ints (0x42CCD0).
-             * Original normalizes first then uses dot>>12 for signed distance.
-             * Using float avoids int32 overflow on nx*nx for long edges. */
+            float fnx = (float)edge_dz;
+            float fnz = (float)(-edge_dx);
+
+            /* Verify normal points toward road interior; flip if not */
             {
-                float fnx = (float)edge_dz;
-                float fnz = (float)(-edge_dx);
-                float fmag = sqrtf(fnx * fnx + fnz * fnz);
-                if (fmag < 0.5f) continue;
-                int32_t nnx = (int32_t)(fnx / fmag * 4096.0f);
-                int32_t nnz = (int32_t)(fnz / fmag * 4096.0f);
-
-                int32_t rel_x = px - (int32_t)psVar2->x - sp->origin_x;
-                int32_t rel_z = pz - (int32_t)psVar2->z - sp->origin_z;
-
-                int64_t dot = (int64_t)rel_x * nnx + (int64_t)rel_z * nnz;
-                int32_t d = (int32_t)((dot + ((dot >> 63) & 0xFFF)) >> 12);
-
-                if (d < 0) {
-                    int32_t wall_angle;
-                    {
-                        double rad = atan2((double)edge_dx, (double)edge_dz);
-                        wall_angle = (int32_t)(rad * (4096.0 / (2.0 * 3.14159265358979323846))) & 0xFFF;
-                    }
-                    td5_physics_wall_response(actor, wall_angle, d, 1, nnx, nnz, 4096);
-                    td5_physics_rebuild_pose(actor);
-                    TD5_LOG_I(LOG_TAG, "wall_contact: probe=%d LEFT d=%d angle=%d", pi, d, wall_angle);
+                float to_inner_x = (float)((int32_t)inner_v->x - (int32_t)psVar2->x);
+                float to_inner_z = (float)((int32_t)inner_v->z - (int32_t)psVar2->z);
+                if (fnx * to_inner_x + fnz * to_inner_z < 0.0f) {
+                    fnx = -fnx;
+                    fnz = -fnz;
                 }
+            }
+
+            float fmag = sqrtf(fnx * fnx + fnz * fnz);
+            if (fmag < 0.5f) continue;
+            int32_t nnx = (int32_t)(fnx / fmag * 4096.0f);
+            int32_t nnz = (int32_t)(fnz / fmag * 4096.0f);
+
+            int32_t rel_x = px - (int32_t)psVar2->x - sp->origin_x;
+            int32_t rel_z = pz - (int32_t)psVar2->z - sp->origin_z;
+
+            int64_t dot = (int64_t)rel_x * nnx + (int64_t)rel_z * nnz;
+            int32_t d = (int32_t)((dot + ((dot >> 63) & 0xFFF)) >> 12);
+
+            if (d < 0) {
+                int32_t wall_angle;
+                {
+                    double rad = atan2((double)edge_dx, (double)edge_dz);
+                    wall_angle = (int32_t)(rad * (4096.0 / (2.0 * 3.14159265358979323846))) & 0xFFF;
+                }
+                td5_physics_wall_response(actor, wall_angle, d, 1, nnx, nnz, 4096);
+                td5_physics_rebuild_pose(actor);
+                TD5_LOG_I(LOG_TAG, "wall_contact: probe=%d LEFT d=%d angle=%d", pi, d, wall_angle);
             }
         }
     skip_left_wall:
 
         /* --- RIGHT EDGE CHECK [CONFIRMED @ 0x406E31-0x406E75] ---
-         * Original gates on sub_lane_index >= lane_count - 1.
          * idx1 = wall_table_left[type] + span.left_vertex_index + lane_count  [span+0x04]
          * idx2 = wall_table_right[type] + span.right_vertex_index + lane_count [span+0x06]
-         * Both cross-sections, offset to the far side of the road.
-         * Normal = (edge_dz, -edge_dx) same formula as left wall. */
+         * Normal = (edge_dz, -edge_dx), verified to point inward via inner vertex. */
         if (probe->sub_lane_index < lane_count - 1)
             continue;
         {
@@ -572,37 +574,46 @@ void td5_track_resolve_wall_contacts(TD5_Actor *actor)
 
             TD5_StripVertex *psVar2 = vertex_at(idx1);
             TD5_StripVertex *psVar3 = vertex_at(idx2);
-            if (!psVar2 || !psVar3) continue;
+            /* Inner vertex: one lane inward from the right edge (in section 1) */
+            TD5_StripVertex *inner_v = vertex_at((int)sp->left_vertex_index + lane_count - 1);
+            if (!psVar2 || !psVar3 || !inner_v) continue;
 
             int32_t edge_dx = (int32_t)psVar3->x - (int32_t)psVar2->x;
             int32_t edge_dz = (int32_t)psVar3->z - (int32_t)psVar2->z;
 
-            /* Normal: same (dz, -dx) formula [CONFIRMED @ 0x406E78-0x406E94]
-             * Normalize to ~4096 magnitude, same as left wall. */
+            float fnx = (float)edge_dz;
+            float fnz = (float)(-edge_dx);
+
+            /* Verify normal points toward road interior; flip if not */
             {
-                float fnx = (float)edge_dz;
-                float fnz = (float)(-edge_dx);
-                float fmag = sqrtf(fnx * fnx + fnz * fnz);
-                if (fmag < 0.5f) continue;
-                int32_t nnx = (int32_t)(fnx / fmag * 4096.0f);
-                int32_t nnz = (int32_t)(fnz / fmag * 4096.0f);
-
-                int32_t rel_x = px - (int32_t)psVar2->x - sp->origin_x;
-                int32_t rel_z = pz - (int32_t)psVar2->z - sp->origin_z;
-
-                int64_t dot = (int64_t)rel_x * nnx + (int64_t)rel_z * nnz;
-                int32_t d = (int32_t)((dot + ((dot >> 63) & 0xFFF)) >> 12);
-
-                if (d < 0) {
-                    int32_t wall_angle;
-                    {
-                        double rad = atan2((double)edge_dx, (double)edge_dz);
-                        wall_angle = (int32_t)(rad * (4096.0 / (2.0 * 3.14159265358979323846))) & 0xFFF;
-                    }
-                    td5_physics_wall_response(actor, wall_angle, d, 2, nnx, nnz, 4096);
-                    td5_physics_rebuild_pose(actor);
-                    TD5_LOG_I(LOG_TAG, "wall_contact: probe=%d RIGHT d=%d angle=%d", pi, d, wall_angle);
+                float to_inner_x = (float)((int32_t)inner_v->x - (int32_t)psVar2->x);
+                float to_inner_z = (float)((int32_t)inner_v->z - (int32_t)psVar2->z);
+                if (fnx * to_inner_x + fnz * to_inner_z < 0.0f) {
+                    fnx = -fnx;
+                    fnz = -fnz;
                 }
+            }
+
+            float fmag = sqrtf(fnx * fnx + fnz * fnz);
+            if (fmag < 0.5f) continue;
+            int32_t nnx = (int32_t)(fnx / fmag * 4096.0f);
+            int32_t nnz = (int32_t)(fnz / fmag * 4096.0f);
+
+            int32_t rel_x = px - (int32_t)psVar2->x - sp->origin_x;
+            int32_t rel_z = pz - (int32_t)psVar2->z - sp->origin_z;
+
+            int64_t dot = (int64_t)rel_x * nnx + (int64_t)rel_z * nnz;
+            int32_t d = (int32_t)((dot + ((dot >> 63) & 0xFFF)) >> 12);
+
+            if (d < 0) {
+                int32_t wall_angle;
+                {
+                    double rad = atan2((double)edge_dx, (double)edge_dz);
+                    wall_angle = (int32_t)(rad * (4096.0 / (2.0 * 3.14159265358979323846))) & 0xFFF;
+                }
+                td5_physics_wall_response(actor, wall_angle, d, 2, nnx, nnz, 4096);
+                td5_physics_rebuild_pose(actor);
+                TD5_LOG_I(LOG_TAG, "wall_contact: probe=%d RIGHT d=%d angle=%d", pi, d, wall_angle);
             }
         }
     }
