@@ -506,47 +506,46 @@ void td5_track_resolve_wall_contacts(TD5_Actor *actor)
         int32_t px = probe_x >> 8;
         int32_t pz = probe_z >> 8;
 
-        /* --- LEFT EDGE CHECK [CONFIRMED @ 0x406D28-0x406DD4] ---
-         * Uses raw span vertex indices (NO offset table lookup).
-         * psVar2 = vertex_at(span.right_vertex_index)  [span+0x06]
-         * psVar3 = vertex_at(span.left_vertex_index)   [span+0x04]
-         * Normal = (edge_dz, -edge_dx), verified to point inward via inner vertex. */
+        /* --- LEFT EDGE CHECK ---
+         * Reverted to pre-session vertex selection via get_quad_vertices,
+         * with float normalization (overflow-safe) and inner-vertex normal flip. */
         if (probe->sub_lane_index > 0)
             goto skip_left_wall;
         {
-            TD5_StripVertex *psVar2 = vertex_at(sp->right_vertex_index);
-            TD5_StripVertex *psVar3 = vertex_at(sp->left_vertex_index);
-            TD5_StripVertex *inner_v = vertex_at(sp->left_vertex_index + 1);
-            if (!psVar2 || !psVar3 || !inner_v) continue;
+            int vl0, vl1, vr0, vr1;
+            get_quad_vertices(sp, 0, &vl0, &vl1, &vr0, &vr1);
 
-            int32_t edge_dx = (int32_t)psVar3->x - (int32_t)psVar2->x;
-            int32_t edge_dz = (int32_t)psVar3->z - (int32_t)psVar2->z;
+            TD5_StripVertex *lv = vertex_at(vl0);
+            TD5_StripVertex *rv = vertex_at(vr0);
+            TD5_StripVertex *inner_v = vertex_at(vl1);
+            if (!lv || !rv || !inner_v) continue;
+
+            int32_t edge_dx = (int32_t)rv->x - (int32_t)lv->x;
+            int32_t edge_dz = (int32_t)rv->z - (int32_t)lv->z;
 
             float fnx = (float)edge_dz;
             float fnz = (float)(-edge_dx);
             int normal_flipped = 0;
-
-            /* Verify normal points toward road interior; flip if not */
             {
-                float to_inner_x = (float)((int32_t)inner_v->x - (int32_t)psVar2->x);
-                float to_inner_z = (float)((int32_t)inner_v->z - (int32_t)psVar2->z);
+                float to_inner_x = (float)((int32_t)inner_v->x - (int32_t)lv->x);
+                float to_inner_z = (float)((int32_t)inner_v->z - (int32_t)lv->z);
                 if (fnx * to_inner_x + fnz * to_inner_z < 0.0f) {
-                    fnx = -fnx;
-                    fnz = -fnz;
-                    normal_flipped = 1;
+                    fnx = -fnx; fnz = -fnz; normal_flipped = 1;
                 }
             }
-
             float fmag = sqrtf(fnx * fnx + fnz * fnz);
             if (fmag < 0.5f) continue;
             int32_t nnx = (int32_t)(fnx / fmag * 4096.0f);
             int32_t nnz = (int32_t)(fnz / fmag * 4096.0f);
 
-            int32_t rel_x = px - (int32_t)psVar2->x - sp->origin_x;
-            int32_t rel_z = pz - (int32_t)psVar2->z - sp->origin_z;
+            int32_t rel_x = px - (int32_t)lv->x - sp->origin_x;
+            int32_t rel_z = pz - (int32_t)lv->z - sp->origin_z;
 
             int64_t dot = (int64_t)rel_x * nnx + (int64_t)rel_z * nnz;
             int32_t d = (int32_t)((dot + ((dot >> 63) & 0xFFF)) >> 12);
+
+            /* Clamp penetration to prevent teleportation from bad geometry */
+            if (d < -500) d = -500;
 
             if (d < 0) {
                 int32_t wall_angle;
@@ -562,53 +561,47 @@ void td5_track_resolve_wall_contacts(TD5_Actor *actor)
         }
     skip_left_wall:
 
-        /* --- RIGHT EDGE CHECK [CONFIRMED @ 0x406E31-0x406E75] ---
-         * idx1 = wall_table_left[type] + span.left_vertex_index + lane_count  [span+0x04]
-         * idx2 = wall_table_right[type] + span.right_vertex_index + lane_count [span+0x06]
-         * Normal = (edge_dz, -edge_dx), verified to point inward via inner vertex. */
+        /* --- RIGHT EDGE CHECK ---
+         * Reverted to pre-session vertex selection via get_quad_vertices. */
         if (probe->sub_lane_index < lane_count - 1)
             continue;
         {
+            int vl0, vl1, vr0, vr1;
             int wall_off_l = (type >= 0 && type < 12) ? s_wall_vtx_left[type] : 0;
             int wall_off_r = (type >= 0 && type < 12) ? s_wall_vtx_right[type] : 0;
+            get_quad_vertices(sp, lane_count - 1, &vl0, &vl1, &vr0, &vr1);
 
-            int idx1 = wall_off_l + (int)sp->left_vertex_index + lane_count;
-            int idx2 = wall_off_r + (int)sp->right_vertex_index + lane_count;
+            TD5_StripVertex *lv = vertex_at(vr0 + wall_off_l);
+            TD5_StripVertex *rv = vertex_at(vr0 + wall_off_r + 1);
+            TD5_StripVertex *inner_v = vertex_at(vl0);
+            if (!lv || !rv || !inner_v) continue;
 
-            TD5_StripVertex *psVar2 = vertex_at(idx1);
-            TD5_StripVertex *psVar3 = vertex_at(idx2);
-            /* Inner vertex: one lane inward from the right edge (in section 1) */
-            TD5_StripVertex *inner_v = vertex_at((int)sp->left_vertex_index + lane_count - 1);
-            if (!psVar2 || !psVar3 || !inner_v) continue;
-
-            int32_t edge_dx = (int32_t)psVar3->x - (int32_t)psVar2->x;
-            int32_t edge_dz = (int32_t)psVar3->z - (int32_t)psVar2->z;
+            int32_t edge_dx = (int32_t)rv->x - (int32_t)lv->x;
+            int32_t edge_dz = (int32_t)rv->z - (int32_t)lv->z;
 
             float fnx = (float)edge_dz;
             float fnz = (float)(-edge_dx);
             int normal_flipped = 0;
-
-            /* Verify normal points toward road interior; flip if not */
             {
-                float to_inner_x = (float)((int32_t)inner_v->x - (int32_t)psVar2->x);
-                float to_inner_z = (float)((int32_t)inner_v->z - (int32_t)psVar2->z);
+                float to_inner_x = (float)((int32_t)inner_v->x - (int32_t)lv->x);
+                float to_inner_z = (float)((int32_t)inner_v->z - (int32_t)lv->z);
                 if (fnx * to_inner_x + fnz * to_inner_z < 0.0f) {
-                    fnx = -fnx;
-                    fnz = -fnz;
-                    normal_flipped = 1;
+                    fnx = -fnx; fnz = -fnz; normal_flipped = 1;
                 }
             }
-
             float fmag = sqrtf(fnx * fnx + fnz * fnz);
             if (fmag < 0.5f) continue;
             int32_t nnx = (int32_t)(fnx / fmag * 4096.0f);
             int32_t nnz = (int32_t)(fnz / fmag * 4096.0f);
 
-            int32_t rel_x = px - (int32_t)psVar2->x - sp->origin_x;
-            int32_t rel_z = pz - (int32_t)psVar2->z - sp->origin_z;
+            int32_t rel_x = px - (int32_t)lv->x - sp->origin_x;
+            int32_t rel_z = pz - (int32_t)lv->z - sp->origin_z;
 
             int64_t dot = (int64_t)rel_x * nnx + (int64_t)rel_z * nnz;
             int32_t d = (int32_t)((dot + ((dot >> 63) & 0xFFF)) >> 12);
+
+            /* Clamp penetration to prevent teleportation from bad geometry */
+            if (d < -500) d = -500;
 
             if (d < 0) {
                 int32_t wall_angle;
