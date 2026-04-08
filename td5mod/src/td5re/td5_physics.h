@@ -92,6 +92,11 @@ void td5_physics_resolve_vehicle_contacts(void);
 void td5_physics_wall_response(TD5_Actor *actor, int32_t wall_angle,
                                int32_t penetration, int side);
 
+/* --- Pose rebuild callback (UpdateVehiclePoseFromPhysicsState) ---
+ * Rebuilds rotation matrix + render_pos + wheel contacts from current
+ * euler angles and world_pos. Called after wall push or V2V impulse. */
+void td5_physics_rebuild_pose(TD5_Actor *actor);
+
 /* --- Dynamics mode --- */
 void td5_physics_set_dynamics(int mode);  /* 0=arcade, 1=simulation */
 int  td5_physics_get_dynamics(void);      /* returns current mode */

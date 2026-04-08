@@ -495,21 +495,12 @@ void td5_track_resolve_wall_contacts(TD5_Actor *actor)
         int lane_count = span_lane_count(sp);
         if (lane_count < 1) lane_count = 1;
 
-        /* Get probe world position (24.8 fixed-point) */
-        int32_t probe_x = actor->probe_FL.x + pi * (int32_t)sizeof(TD5_Vec3_Fixed);
-        int32_t probe_z;
-        {
-            /* Read the correct probe position based on index */
-            TD5_Vec3_Fixed *p;
-            switch (pi) {
-                case 0: p = &actor->probe_FL; break;
-                case 1: p = &actor->probe_FR; break;
-                case 2: p = &actor->probe_RL; break;
-                default: p = &actor->probe_RR; break;
-            }
-            probe_x = p->x;
-            probe_z = p->z;
-        }
+        /* Get probe world position (24.8 fixed-point).
+         * Use wheel_contact_pos (0x0F0) which is populated by
+         * refresh_wheel_contacts. probe_FL/FR/RL/RR (0x090) are also
+         * populated but wheel_contact_pos is the canonical source. */
+        int32_t probe_x = actor->wheel_contact_pos[pi].x;
+        int32_t probe_z = actor->wheel_contact_pos[pi].z;
 
         /* Convert probe from 24.8 to world units for comparison with span vertices */
         int32_t px = probe_x >> 8;
@@ -565,11 +556,10 @@ void td5_track_resolve_wall_contacts(TD5_Actor *actor)
                 }
                 td5_physics_wall_response(actor, wall_angle, d, 1);
 
-                /* Recompute pose after position change */
-                actor->render_pos.x = (float)actor->world_pos.x * (1.0f / 256.0f);
-                actor->render_pos.y = (float)actor->world_pos.y * (1.0f / 256.0f);
-                actor->render_pos.z = (float)actor->world_pos.z * (1.0f / 256.0f);
-                break;  /* One wall hit per tick is enough */
+                /* Rebuild full pose (rotation matrix + render_pos + wheel contacts)
+                 * matching original callback pattern [CONFIRMED @ 0x4068c8] */
+                td5_physics_rebuild_pose(actor);
+                TD5_LOG_I(LOG_TAG, "wall_contact: probe=%d LEFT d=%d angle=%d", pi, d, wall_angle);
             }
         }
 
@@ -613,10 +603,9 @@ void td5_track_resolve_wall_contacts(TD5_Actor *actor)
                 }
                 td5_physics_wall_response(actor, wall_angle, d, 2);
 
-                actor->render_pos.x = (float)actor->world_pos.x * (1.0f / 256.0f);
-                actor->render_pos.y = (float)actor->world_pos.y * (1.0f / 256.0f);
-                actor->render_pos.z = (float)actor->world_pos.z * (1.0f / 256.0f);
-                break;
+                /* Rebuild full pose after wall push [CONFIRMED @ 0x4068c8] */
+                td5_physics_rebuild_pose(actor);
+                TD5_LOG_I(LOG_TAG, "wall_contact: probe=%d RIGHT d=%d angle=%d", pi, d, wall_angle);
             }
         }
     }

@@ -195,8 +195,10 @@ static int32_t atan2_fixed12(int32_t dx, int32_t dz)
  *   side        - 0=left boundary, 1=left inner, 2=right inner
  * ======================================================================== */
 
-/* Wall bounce damping factor [UNCERTAIN: DAT_00463200 not read, using 0xC0 = 75% energy loss] */
-#define V2W_BOUNCE_DAMP   0xC0
+/* Wall-to-vehicle inertia constant = 1,500,000 [CONFIRMED @ 0x463200] */
+#define V2W_INERTIA_K       1500000
+/* Angular divisor matching V2V = 0x28C (652) [CONFIRMED @ 0x406a60] */
+#define ANGULAR_DIVISOR_W   0x28C
 
 void td5_physics_wall_response(TD5_Actor *actor, int32_t wall_angle,
                                int32_t penetration, int side)
@@ -205,13 +207,12 @@ void td5_physics_wall_response(TD5_Actor *actor, int32_t wall_angle,
     int32_t cos_w = cos_fixed12(wall_angle);
     int32_t sin_w = sin_fixed12(wall_angle);
 
-    /* Push actor position out of wall by (|penetration| + 4) units.
-     * penetration is negative when outside, so we push in +normal direction.
-     * Normal points from wall INTO the road: (cos_w, sin_w) rotated 90° = (-sin_w, cos_w)
-     * Actually the original uses the wall-perpendicular direction directly.
-     * [CONFIRMED @ 0x4069a0]: push by (penetration_depth - 4) along normal */
-    int32_t push = (-penetration) + 4;  /* penetration is negative, push is positive */
-    /* Wall normal is perpendicular to wall edge: (-sin_w, cos_w) points into road */
+    /* Push actor position out of wall by (|penetration| - 4) >> 4 along normal.
+     * [CONFIRMED @ 0x4069a0]: push magnitude = (magnitude - 4), shift >>4 */
+    int32_t magnitude = (-penetration);  /* penetration is negative when outside */
+    int32_t push = magnitude - 4;
+    if (push < 1) push = 1;
+    /* Wall normal perpendicular to wall edge: (-sin_w, cos_w) points into road */
     actor->world_pos.x += ((-sin_w) * push) >> 4;
     actor->world_pos.z += (cos_w * push) >> 4;
 
@@ -225,26 +226,50 @@ void td5_physics_wall_response(TD5_Actor *actor, int32_t wall_angle,
     int32_t v_para = (vx * cos_w + vz * sin_w) >> 12;
     int32_t v_perp = (-vx * sin_w + vz * cos_w) >> 12;
 
-    /* If perpendicular velocity is INTO the wall (positive = toward road, negative = into wall):
-     * For our normal pointing into road, v_perp < 0 means moving away from road (into wall).
-     * Actually, this depends on the normal convention. The original clamps perpendicular
-     * to zero if already moving away from the wall. [CONFIRMED @ 0x406b6b] */
+    /* If moving into the wall (v_perp < 0), apply inertia-based impulse response.
+     * If already moving away (v_perp >= 0), skip velocity modification.
+     * [CONFIRMED @ 0x406b6b] */
     if (v_perp < 0) {
-        /* Moving into the wall: reflect with damping */
-        v_perp = (-v_perp * V2W_BOUNCE_DAMP) >> 8;
-    }
-    /* If v_perp >= 0, car is already moving away from wall — leave it */
+        int32_t v_into_wall = -v_perp;  /* positive magnitude */
 
-    /* Reconstruct world velocity from parallel + damped perpendicular
+        /* --- Angular impulse from lever arm [CONFIRMED @ 0x406a60-0x406b75] ---
+         * Lever arm = angular_velocity_yaw / ANGULAR_DIVISOR_W
+         * impulse = (-inertia * v_into_wall) / (arm^2 + inertia) */
+        int32_t inertia = V2W_INERTIA_K;
+        int32_t arm = actor->angular_velocity_yaw / ANGULAR_DIVISOR_W;
+        int64_t denom = (int64_t)arm * arm + (int64_t)inertia;
+        if (denom == 0) denom = 1;
+        int32_t impulse = (int32_t)(-(int64_t)inertia * v_into_wall / denom);
+
+        /* Update angular velocity: yaw += (impulse * arm) / (inertia / ANGULAR_DIVISOR)
+         * [CONFIRMED @ 0x406b75] */
+        int32_t inertia_ang = inertia / ANGULAR_DIVISOR_W;
+        if (inertia_ang == 0) inertia_ang = 1;
+        actor->angular_velocity_yaw += (impulse * arm) / inertia_ang;
+
+        /* Reflect perpendicular velocity with damping.
+         * Parallel velocity also damped: (v_impact*2 + 0x800 - v_para/64) * 0x180 >> 11
+         * [CONFIRMED @ 0x406af6] */
+        int32_t v_abs_para = v_para < 0 ? -v_para : v_para;
+        int32_t para_damp = (v_into_wall * 2 + 0x800 - v_abs_para / 64);
+        if (para_damp < 0) para_damp = 0;
+        para_damp = (para_damp * 0x180) >> 11;
+        if (para_damp > v_abs_para) para_damp = v_abs_para;
+
+        /* Reduce parallel velocity magnitude by damping amount */
+        if (v_para > 0)
+            v_para -= para_damp;
+        else
+            v_para += para_damp;
+
+        /* Perpendicular becomes a small bounce: scale by impulse response */
+        v_perp = v_into_wall >> 3;  /* small outward bounce */
+    }
+
+    /* Reconstruct world velocity from parallel + reflected perpendicular
      * [CONFIRMED @ 0x406a10]: vel = parallel * wall_dir + perp * wall_normal */
     actor->linear_velocity_x = (v_para * cos_w - v_perp * sin_w) >> 12;
     actor->linear_velocity_z = (v_para * sin_w + v_perp * cos_w) >> 12;
-
-    /* Apply yaw torque from wall impact [CONFIRMED @ 0x406b75] */
-    int32_t impact = v_perp < 0 ? -v_perp : v_perp;
-    int32_t yaw_kick = (impact >> 6);
-    if (side <= 1) yaw_kick = -yaw_kick;  /* left wall pushes CW */
-    actor->angular_velocity_yaw += yaw_kick;
 
     /* Clamp yaw angular velocity */
     if (actor->angular_velocity_yaw > 6000) actor->angular_velocity_yaw = 6000;
@@ -252,6 +277,9 @@ void td5_physics_wall_response(TD5_Actor *actor, int32_t wall_angle,
 
     /* Set track contact flag [CONFIRMED @ 0x406d7e/0x406e4e] */
     actor->track_contact_flag = (uint8_t)(side + 1);
+
+    TD5_LOG_I(LOG_TAG, "wall_response: side=%d pen=%d angle=%d v_para=%d v_perp=%d yaw=%d",
+              side, penetration, wall_angle, v_para, v_perp, actor->angular_velocity_yaw);
 }
 
 /* ========================================================================
@@ -2354,6 +2382,17 @@ void td5_physics_refresh_wheel_contacts(TD5_Actor *actor)
 
         /* Store high-res wheel world position */
         actor->wheel_world_positions_hires[i] = actor->wheel_contact_pos[i];
+
+        /* Copy to probe_FL/FR/RL/RR (0x090) for wall contact detection.
+         * The original RefreshVehicleWheelContactFrames writes both 0x0F0
+         * (wheel_contact_pos) and 0x090 (probe_FL..RR). Without this,
+         * UpdateActorTrackSegmentContacts reads zero positions. */
+        switch (i) {
+            case 0: actor->probe_FL = actor->wheel_contact_pos[0]; break;
+            case 1: actor->probe_FR = actor->wheel_contact_pos[1]; break;
+            case 2: actor->probe_RL = actor->wheel_contact_pos[2]; break;
+            case 3: actor->probe_RR = actor->wheel_contact_pos[3]; break;
+        }
     }
 
     if (resolved_surface_valid)
@@ -3300,6 +3339,12 @@ void td5_physics_compute_suspension_envelope(TD5_Actor *actor, int slot)
 void td5_physics_set_collisions(int enabled)
 {
     g_collisions_enabled = enabled ? 0 : 1;  /* 0=on, 1=off (inverted) */
+}
+
+void td5_physics_rebuild_pose(TD5_Actor *actor)
+{
+    if (!actor) return;
+    update_vehicle_pose_from_physics(actor);
 }
 
 void td5_physics_set_dynamics(int mode)
