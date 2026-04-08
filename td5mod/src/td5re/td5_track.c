@@ -507,32 +507,27 @@ void td5_track_resolve_wall_contacts(TD5_Actor *actor)
         int32_t pz = probe_z >> 8;
 
         /* --- LEFT EDGE CHECK ---
-         * Reverted to pre-session vertex selection via get_quad_vertices,
-         * with float normalization (overflow-safe) and inner-vertex normal flip. */
+         * Original (0x406CC0): uses raw left_vertex_index and right_vertex_index
+         * without span_type offsets. No inner-vertex normal flip — the CW
+         * perpendicular of the forward edge always points inward for the left wall.
+         * The previous implementation used get_quad_vertices (added type offsets
+         * for junction spans) and an inner-vertex flip heuristic that could
+         * invert the normal on certain spans, creating phantom invisible walls. */
         if (probe->sub_lane_index > 0)
             goto skip_left_wall;
         {
-            int vl0, vl1, vr0, vr1;
-            get_quad_vertices(sp, 0, &vl0, &vl1, &vr0, &vr1);
-
-            TD5_StripVertex *lv = vertex_at(vl0);
-            TD5_StripVertex *rv = vertex_at(vr0);
-            TD5_StripVertex *inner_v = vertex_at(vl1);
-            if (!lv || !rv || !inner_v) continue;
+            /* Use raw vertex indices — no span_type offsets [CONFIRMED @ 0x406D20] */
+            TD5_StripVertex *lv = vertex_at((int)sp->left_vertex_index);
+            TD5_StripVertex *rv = vertex_at((int)sp->right_vertex_index);
+            if (!lv || !rv) continue;
 
             int32_t edge_dx = (int32_t)rv->x - (int32_t)lv->x;
             int32_t edge_dz = (int32_t)rv->z - (int32_t)lv->z;
 
+            /* CW perpendicular of edge = (edge_dz, -edge_dx).
+             * No flip — matches original [CONFIRMED @ 0x406D30-0x406D40]. */
             float fnx = (float)edge_dz;
             float fnz = (float)(-edge_dx);
-            int normal_flipped = 0;
-            {
-                float to_inner_x = (float)((int32_t)inner_v->x - (int32_t)lv->x);
-                float to_inner_z = (float)((int32_t)inner_v->z - (int32_t)lv->z);
-                if (fnx * to_inner_x + fnz * to_inner_z < 0.0f) {
-                    fnx = -fnx; fnz = -fnz; normal_flipped = 1;
-                }
-            }
             float fmag = sqrtf(fnx * fnx + fnz * fnz);
             if (fmag < 0.5f) continue;
             int32_t nnx = (int32_t)(fnx / fmag * 4096.0f);
@@ -548,53 +543,44 @@ void td5_track_resolve_wall_contacts(TD5_Actor *actor)
             if (d < -4000) d = -4000;
 
             if (d < 0) {
-                int32_t wall_angle;
-                {
-                    /* Compute angle from the perpendicular (CW of edge), matching
-                     * original AngleFromVector12(dz, dx) at 0x406D90.  The push
-                     * direction (-sin_w, cos_w) then points along the inward
-                     * normal, pushing the car back onto the road.  The previous
-                     * atan2(edge_dx, edge_dz) gave the edge heading — off by 90°,
-                     * so the push went along the wall instead of perpendicular. */
-                    double rad = atan2((double)(-edge_dz), (double)(-edge_dx));
-                    wall_angle = (int32_t)(rad * (4096.0 / (2.0 * 3.14159265358979323846))) & 0xFFF;
-                    if (normal_flipped) wall_angle = (wall_angle + 2048) & 0xFFF;
-                }
+                /* wall_angle = heading of CW perpendicular (inward normal).
+                 * Push direction (-sin_w, cos_w) then points along the normal. */
+                double rad = atan2((double)(-edge_dz), (double)(-edge_dx));
+                int32_t wall_angle = (int32_t)(rad * (4096.0 / (2.0 * 3.14159265358979323846))) & 0xFFF;
+
                 td5_physics_wall_response(actor, wall_angle, d, 1, nnx, nnz, 4096);
                 td5_physics_rebuild_pose(actor);
-                TD5_LOG_I(LOG_TAG, "wall_contact: probe=%d LEFT d=%d angle=%d", pi, d, wall_angle);
+                TD5_LOG_I(LOG_TAG, "wall_contact: probe=%d LEFT span=%d d=%d angle=%d",
+                          pi, span_idx, d, wall_angle);
             }
         }
     skip_left_wall:
 
         /* --- RIGHT EDGE CHECK ---
-         * Reverted to pre-session vertex selection via get_quad_vertices. */
+         * Original: uses (left_vertex_index + lane_count + DAT_004631A0[type]) for
+         * the near vertex and (right_vertex_index + lane_count + DAT_004631A4[type])
+         * for the far vertex [CONFIRMED @ 0x406E20 area]. The edge goes from near
+         * rightmost to far rightmost along the road. No inner-vertex flip. */
         if (probe->sub_lane_index < lane_count - 1)
             continue;
         {
-            int vl0, vl1, vr0, vr1;
             int wall_off_l = (type >= 0 && type < 12) ? s_wall_vtx_left[type] : 0;
             int wall_off_r = (type >= 0 && type < 12) ? s_wall_vtx_right[type] : 0;
-            get_quad_vertices(sp, lane_count - 1, &vl0, &vl1, &vr0, &vr1);
 
-            TD5_StripVertex *lv = vertex_at(vr0 + wall_off_l);
-            TD5_StripVertex *rv = vertex_at(vr0 + wall_off_r + 1);
-            TD5_StripVertex *inner_v = vertex_at(vl0);
-            if (!lv || !rv || !inner_v) continue;
+            /* Original vertex selection: near_rightmost and far_rightmost */
+            TD5_StripVertex *lv = vertex_at((int)sp->left_vertex_index + lane_count + wall_off_l);
+            TD5_StripVertex *rv = vertex_at((int)sp->right_vertex_index + lane_count + wall_off_r);
+            if (!lv || !rv) continue;
 
             int32_t edge_dx = (int32_t)rv->x - (int32_t)lv->x;
             int32_t edge_dz = (int32_t)rv->z - (int32_t)lv->z;
 
-            float fnx = (float)edge_dz;
-            float fnz = (float)(-edge_dx);
-            int normal_flipped = 0;
-            {
-                float to_inner_x = (float)((int32_t)inner_v->x - (int32_t)lv->x);
-                float to_inner_z = (float)((int32_t)inner_v->z - (int32_t)lv->z);
-                if (fnx * to_inner_x + fnz * to_inner_z < 0.0f) {
-                    fnx = -fnx; fnz = -fnz; normal_flipped = 1;
-                }
-            }
+            /* CW perpendicular — for the right wall, this points LEFT (outward
+             * from the right boundary). To make d < 0 = "outside the right wall",
+             * we negate to get the CCW perpendicular (inward).
+             * Equivalently: use (-edge_dz, edge_dx) instead of (edge_dz, -edge_dx). */
+            float fnx = (float)(-edge_dz);
+            float fnz = (float)(edge_dx);
             float fmag = sqrtf(fnx * fnx + fnz * fnz);
             if (fmag < 0.5f) continue;
             int32_t nnx = (int32_t)(fnx / fmag * 4096.0f);
@@ -610,16 +596,18 @@ void td5_track_resolve_wall_contacts(TD5_Actor *actor)
             if (d < -4000) d = -4000;
 
             if (d < 0) {
-                int32_t wall_angle;
-                {
-                    /* Same perpendicular-based angle as LEFT edge — see comment above. */
-                    double rad = atan2((double)(-edge_dz), (double)(-edge_dx));
-                    wall_angle = (int32_t)(rad * (4096.0 / (2.0 * 3.14159265358979323846))) & 0xFFF;
-                    if (normal_flipped) wall_angle = (wall_angle + 2048) & 0xFFF;
-                }
+                /* wall_angle for RIGHT: push in the CCW perpendicular direction.
+                 * atan2(edge_dz, edge_dx) gives the heading of (-edge_dz, edge_dx)
+                 * reflected, so push (-sin_w, cos_w) = (edge_dz/R, edge_dx/R)...
+                 * Just use atan2(-fnz, -fnx) = atan2(-edge_dx, edge_dz) which
+                 * gives the correct push along the CCW normal. */
+                double rad = atan2((double)(-fnz), (double)(-fnx));
+                int32_t wall_angle = (int32_t)(rad * (4096.0 / (2.0 * 3.14159265358979323846))) & 0xFFF;
+
                 td5_physics_wall_response(actor, wall_angle, d, 2, nnx, nnz, 4096);
                 td5_physics_rebuild_pose(actor);
-                TD5_LOG_I(LOG_TAG, "wall_contact: probe=%d RIGHT d=%d angle=%d", pi, d, wall_angle);
+                TD5_LOG_I(LOG_TAG, "wall_contact: probe=%d RIGHT span=%d d=%d angle=%d",
+                          pi, span_idx, d, wall_angle);
             }
         }
     }
