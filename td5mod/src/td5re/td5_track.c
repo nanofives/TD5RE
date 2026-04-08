@@ -524,6 +524,7 @@ void td5_track_resolve_wall_contacts(TD5_Actor *actor)
 
             float fnx = (float)edge_dz;
             float fnz = (float)(-edge_dx);
+            int normal_flipped = 0;
 
             /* Verify normal points toward road interior; flip if not */
             {
@@ -532,6 +533,7 @@ void td5_track_resolve_wall_contacts(TD5_Actor *actor)
                 if (fnx * to_inner_x + fnz * to_inner_z < 0.0f) {
                     fnx = -fnx;
                     fnz = -fnz;
+                    normal_flipped = 1;
                 }
             }
 
@@ -551,6 +553,7 @@ void td5_track_resolve_wall_contacts(TD5_Actor *actor)
                 {
                     double rad = atan2((double)edge_dx, (double)edge_dz);
                     wall_angle = (int32_t)(rad * (4096.0 / (2.0 * 3.14159265358979323846))) & 0xFFF;
+                    if (normal_flipped) wall_angle = (wall_angle + 2048) & 0xFFF;
                 }
                 td5_physics_wall_response(actor, wall_angle, d, 1, nnx, nnz, 4096);
                 td5_physics_rebuild_pose(actor);
@@ -583,6 +586,7 @@ void td5_track_resolve_wall_contacts(TD5_Actor *actor)
 
             float fnx = (float)edge_dz;
             float fnz = (float)(-edge_dx);
+            int normal_flipped = 0;
 
             /* Verify normal points toward road interior; flip if not */
             {
@@ -591,6 +595,7 @@ void td5_track_resolve_wall_contacts(TD5_Actor *actor)
                 if (fnx * to_inner_x + fnz * to_inner_z < 0.0f) {
                     fnx = -fnx;
                     fnz = -fnz;
+                    normal_flipped = 1;
                 }
             }
 
@@ -610,6 +615,7 @@ void td5_track_resolve_wall_contacts(TD5_Actor *actor)
                 {
                     double rad = atan2((double)edge_dx, (double)edge_dz);
                     wall_angle = (int32_t)(rad * (4096.0 / (2.0 * 3.14159265358979323846))) & 0xFFF;
+                    if (normal_flipped) wall_angle = (wall_angle + 2048) & 0xFFF;
                 }
                 td5_physics_wall_response(actor, wall_angle, d, 2, nnx, nnz, 4096);
                 td5_physics_rebuild_pose(actor);
