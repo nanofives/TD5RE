@@ -2128,10 +2128,11 @@ void td5_physics_integrate_pose(TD5_Actor *actor)
                 if (td5_track_probe_height(actor->wheel_contact_pos[i].x,
                                            actor->wheel_contact_pos[i].z,
                                            g_span, &g_y, &g_surf)) {
-                    /* Base correction + raise chassis by susp_href to compensate
-                     * for elevated wheel probe positions */
-                    corr_sum += (int64_t)g_y - (int64_t)actor->wheel_contact_pos[i].y
-                              + (int64_t)susp_href_world;
+                    /* Ground snap: move chassis so wheels sit on the track surface.
+                     * wheel_contact_pos already includes susp_href offset from
+                     * refresh_wheel_contacts, so g_y - wheel_y gives the correct
+                     * correction without adding susp_href again. */
+                    corr_sum += (int64_t)g_y - (int64_t)actor->wheel_contact_pos[i].y;
                     corr_count++;
                 }
             }
@@ -2263,8 +2264,7 @@ static void update_vehicle_pose_from_physics(TD5_Actor *actor)
                 if (td5_track_probe_height(actor->wheel_contact_pos[i].x,
                                            actor->wheel_contact_pos[i].z,
                                            g_span, &g_y, &g_surf)) {
-                    corr_sum += (int64_t)g_y - (int64_t)actor->wheel_contact_pos[i].y
-                              + (int64_t)susp_href_world;
+                    corr_sum += (int64_t)g_y - (int64_t)actor->wheel_contact_pos[i].y;
                     corr_count++;
                 }
             }
