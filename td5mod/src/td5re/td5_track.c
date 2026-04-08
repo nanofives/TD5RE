@@ -760,6 +760,12 @@ static void rebuild_span_display_list_mapping(void)
         }
 
         while (entry_index + 1 < s_models_display_list_count) {
+            /* Skip entries that failed validation (offset == 0) */
+            if (s_models_entry_offsets[entry_index] == 0 ||
+                s_models_entry_offsets[entry_index + 1] == 0) {
+                entry_index++;
+                continue;
+            }
             /* After relocation, mesh slots contain absolute pointers.
              * Read the first mesh pointer directly from each block. */
             const uint8_t *blk_a = s_models_blob + s_models_entry_offsets[entry_index];
@@ -3127,14 +3133,20 @@ int td5_track_parse_models_dat(const void *data, size_t size)
         if (entry_size < 4u + sub_mesh_count * 4u)
             continue;
 
-        s_models_entry_offsets[display_list_count] = entry_offset;
-        s_models_entry_sizes[display_list_count] = entry_size;
-        s_models_display_list_count = display_list_count + 1;
+        /* Store at raw table index i (not compacted display_list_count).
+         * The original lookup (0x431260) does: table_base + span_index * 8,
+         * so entry[i] must correspond to span i — not the i-th valid entry.
+         * Invalid entries stay 0 from calloc → lookup returns NULL for them. */
+        s_models_entry_offsets[i] = entry_offset;
+        s_models_entry_sizes[i] = entry_size;
 
         {
             const TD5_TrackRawMeshHeader *first_mesh;
+            /* Use i (raw index) for the header lookup since offsets are now
+             * stored at their true table position. */
+            s_models_display_list_count = i + 1;
             if (parsed_count < MODELS_DAT_MAX_ENTRIES &&
-                get_display_list_first_mesh_header(display_list_count, &first_mesh)) {
+                get_display_list_first_mesh_header(i, &first_mesh)) {
                 TD5_ModelsDatEntry *dst = &s_models[parsed_count++];
                 dst->mesh_ptr = (void *)(uintptr_t)first_mesh;
                 dst->texture_page_id = (int32_t)first_mesh->texture_page_id;
@@ -3145,7 +3157,7 @@ int td5_track_parse_models_dat(const void *data, size_t size)
         display_list_count++;
     }
 
-    s_models_display_list_count = display_list_count;
+    s_models_display_list_count = raw_entry_count;
     s_model_count = parsed_count;
 
     /* Relocate mesh pointers within each display list block.
@@ -3153,6 +3165,7 @@ int td5_track_parse_models_dat(const void *data, size_t size)
      * mesh_offset values are byte offsets from block start → convert to
      * absolute pointers. Then relocate internal MeshHeader fields. */
     for (int dl = 0; dl < s_models_display_list_count; dl++) {
+        if (s_models_entry_offsets[dl] == 0) continue;  /* skip invalid entries */
         uint8_t *block_base = s_models_blob + s_models_entry_offsets[dl];
         uint32_t block_size = s_models_entry_sizes[dl];
         uint32_t sub_count = *(uint32_t *)block_base;
@@ -3230,6 +3243,7 @@ int td5_track_parse_models_dat(const void *data, size_t size)
     {
         int bad_blocks = 0;
         for (int dl = 0; dl < s_models_display_list_count; dl++) {
+            if (s_models_entry_offsets[dl] == 0) continue;  /* skip invalid entries */
             uint8_t *blk = s_models_blob + s_models_entry_offsets[dl];
             uint32_t sc = *(uint32_t *)blk;
             if (sc == 0 || sc > 256) { bad_blocks++; continue; }
@@ -3466,9 +3480,12 @@ void *td5_track_get_display_list(int span_index)
         s_models_display_list_count > 0 &&
         span_index >= 0 && span_index < s_models_display_list_count) {
         /* Direct 1:1 mapping: entry[span_index] is the display list for span span_index.
-         * Original (0x431260): return *(uint*)(table_base + span_index * 8) */
-        uint8_t *blk = s_models_blob + s_models_entry_offsets[span_index];
-        return blk;
+         * Original (0x431260): return *(uint*)(table_base + span_index * 8)
+         * Entries that failed validation have offset 0 → return NULL. */
+        uint32_t off = s_models_entry_offsets[span_index];
+        if (off != 0)
+            return s_models_blob + off;
+        return NULL;
     }
 
     /* Fallback: generated strip display lists from STRIP.DAT */
