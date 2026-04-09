@@ -507,16 +507,12 @@ void td5_track_resolve_wall_contacts(TD5_Actor *actor)
         int32_t pz = probe_z >> 8;
 
         /* --- LEFT EDGE CHECK ---
-         * Original (0x406CC0): uses raw left_vertex_index and right_vertex_index
-         * without span_type offsets. No inner-vertex normal flip — the CW
-         * perpendicular of the forward edge always points inward for the left wall.
-         * The previous implementation used get_quad_vertices (added type offsets
-         * for junction spans) and an inner-vertex flip heuristic that could
-         * invert the normal on certain spans, creating phantom invisible walls. */
+         * CW perpendicular of forward edge points LEFT (outward from left wall).
+         * Diagnostic data confirms: d < 0 = probe on road, d > 0 = outside left wall.
+         * Push toward road center = RIGHT = opposite of CW perp. */
         if (probe->sub_lane_index > 0)
             goto skip_left_wall;
         {
-            /* Use raw vertex indices — no span_type offsets [CONFIRMED @ 0x406D20] */
             TD5_StripVertex *lv = vertex_at((int)sp->left_vertex_index);
             TD5_StripVertex *rv = vertex_at((int)sp->right_vertex_index);
             if (!lv || !rv) continue;
@@ -524,8 +520,6 @@ void td5_track_resolve_wall_contacts(TD5_Actor *actor)
             int32_t edge_dx = (int32_t)rv->x - (int32_t)lv->x;
             int32_t edge_dz = (int32_t)rv->z - (int32_t)lv->z;
 
-            /* CW perpendicular of edge = (edge_dz, -edge_dx).
-             * No flip — matches original [CONFIRMED @ 0x406D30-0x406D40]. */
             float fnx = (float)edge_dz;
             float fnz = (float)(-edge_dx);
             float fmag = sqrtf(fnx * fnx + fnz * fnz);
@@ -539,16 +533,16 @@ void td5_track_resolve_wall_contacts(TD5_Actor *actor)
             int64_t dot = (int64_t)rel_x * nnx + (int64_t)rel_z * nnz;
             int32_t d = (int32_t)((dot + ((dot >> 63) & 0xFFF)) >> 12);
 
-            /* Clamp penetration to prevent teleportation from bad geometry */
-            if (d < -4000) d = -4000;
+            if (d > 4000) d = 4000;
 
-            if (d < 0) {
-                /* wall_angle = heading of CW perpendicular (inward normal).
-                 * Push direction (-sin_w, cos_w) then points along the normal. */
-                double rad = atan2((double)(-edge_dz), (double)(-edge_dx));
+            if (d > 0) {
+                /* Push RIGHT (toward road center) = opposite of CW perp.
+                 * atan2(edge_dz, edge_dx) gives angle where (-sin_w, cos_w)
+                 * points opposite to CW perp = inward. */
+                double rad = atan2((double)(edge_dz), (double)(edge_dx));
                 int32_t wall_angle = (int32_t)(rad * (4096.0 / (2.0 * 3.14159265358979323846))) & 0xFFF;
 
-                td5_physics_wall_response(actor, wall_angle, d, 1, nnx, nnz, 4096);
+                td5_physics_wall_response(actor, wall_angle, -d, 1, nnx, nnz, 4096);
                 td5_physics_rebuild_pose(actor);
                 TD5_LOG_I(LOG_TAG, "wall_contact: probe=%d LEFT span=%d d=%d angle=%d",
                           pi, span_idx, d, wall_angle);
@@ -557,16 +551,14 @@ void td5_track_resolve_wall_contacts(TD5_Actor *actor)
     skip_left_wall:
 
         /* --- RIGHT EDGE CHECK ---
-         * Uses same CW perpendicular as LEFT edge, but checks d > 0 for collision
-         * because the CW perp of a forward-going right-side edge points OUTWARD
-         * (away from road center). d > 0 = probe on the outward side = outside. */
+         * Same CW perp points LEFT. For right wall: d > 0 = on road, d < 0 = outside.
+         * Push toward road center = LEFT = same direction as CW perp. */
         if (probe->sub_lane_index < lane_count - 1)
             continue;
         {
             int wall_off_l = (type >= 0 && type < 12) ? s_wall_vtx_left[type] : 0;
             int wall_off_r = (type >= 0 && type < 12) ? s_wall_vtx_right[type] : 0;
 
-            /* Near rightmost → far rightmost (same forward direction as LEFT edge) */
             TD5_StripVertex *lv = vertex_at((int)sp->left_vertex_index + lane_count + wall_off_l);
             TD5_StripVertex *rv = vertex_at((int)sp->right_vertex_index + lane_count + wall_off_r);
             if (!lv || !rv) continue;
@@ -574,8 +566,6 @@ void td5_track_resolve_wall_contacts(TD5_Actor *actor)
             int32_t edge_dx = (int32_t)rv->x - (int32_t)lv->x;
             int32_t edge_dz = (int32_t)rv->z - (int32_t)lv->z;
 
-            /* Same CW perpendicular as LEFT: (edge_dz, -edge_dx).
-             * For the right wall this points OUTWARD, so d > 0 = outside. */
             float fnx = (float)edge_dz;
             float fnz = (float)(-edge_dx);
             float fmag = sqrtf(fnx * fnx + fnz * fnz);
@@ -589,17 +579,16 @@ void td5_track_resolve_wall_contacts(TD5_Actor *actor)
             int64_t dot = (int64_t)rel_x * nnx + (int64_t)rel_z * nnz;
             int32_t d = (int32_t)((dot + ((dot >> 63) & 0xFFF)) >> 12);
 
-            /* Clamp penetration (positive for right wall) */
-            if (d > 4000) d = 4000;
+            if (d < -4000) d = -4000;
 
-            if (d > 0) {
-                /* Push INWARD = opposite to CW perp = use atan2(edge_dz, edge_dx)
-                 * so (-sin_w, cos_w) points in the (-edge_dz/R, -edge_dx/R)
-                 * = inward direction. Negate d for wall_response (expects negative). */
-                double rad = atan2((double)(edge_dz), (double)(edge_dx));
+            if (d < 0) {
+                /* Push LEFT (toward road center) = same direction as CW perp.
+                 * atan2(-edge_dz, -edge_dx) gives angle where (-sin_w, cos_w)
+                 * points along CW perp = inward from right wall. */
+                double rad = atan2((double)(-edge_dz), (double)(-edge_dx));
                 int32_t wall_angle = (int32_t)(rad * (4096.0 / (2.0 * 3.14159265358979323846))) & 0xFFF;
 
-                td5_physics_wall_response(actor, wall_angle, -d, 2, nnx, nnz, 4096);
+                td5_physics_wall_response(actor, wall_angle, d, 2, nnx, nnz, 4096);
                 td5_physics_rebuild_pose(actor);
                 TD5_LOG_I(LOG_TAG, "wall_contact: probe=%d RIGHT span=%d d=%d angle=%d",
                           pi, span_idx, d, wall_angle);
