@@ -2343,6 +2343,7 @@ void td5_physics_refresh_wheel_contacts(TD5_Actor *actor)
         int32_t ground_y = 0;
         int surface_type = actor->surface_type_chassis;
         int probe_span = actor->wheel_probes[i].span_index;
+        int probe_ok = 0;
 
         if (probe_span < 0 || probe_span >= g_td5.track_span_ring_length)
             probe_span = actor->track_span_raw;
@@ -2352,32 +2353,33 @@ void td5_physics_refresh_wheel_contacts(TD5_Actor *actor)
                                    probe_span,
                                    (int *)&ground_y,
                                    &surface_type)) {
+            probe_ok = 1;
             if (!resolved_surface_valid) {
                 resolved_surface = surface_type;
                 resolved_surface_valid = 1;
             }
         }
 
-        /* Ground contact distance for airborne detection.
-         * Original (0x403720) stores (wheel_y - ground_y) >> 8 into
-         * wheel_force_accum, but the original's suspension integrator
-         * reads XZ projections, NOT this Y value (BUG 6). Feeding the
-         * Y-distance into the suspension creates positive pitch feedback
-         * (front goes up → force increases → suspension extends more).
-         * Store for airborne detection only; suspension uses force=0. */
         int32_t force = (wheel_y - ground_y) >> 8;
 
         /* Dead zone */
         if (force > -0x200 && force < 0x200)
             force = 0;
 
-        /* Airborne detection */
+        /* Airborne detection + ground snap.
+         * Original (0x403720): when force < 0x801 (grounded), DIRECTLY
+         * overwrites wheel_contact_pos[i].y = ground_y. Without this,
+         * wheel_y stays at the rotation-computed value (often 0) and the
+         * ground snap in integrate_pose has no valid baseline.
+         * [CONFIRMED @ 0x403720 — piVar8 = local_30] */
         if (force > 0x800) {
-            /* Wheel is airborne */
             actor->wheel_contact_bitmask |= (1 << i);
-            force = 12000; /* default airborne force */
+            force = 12000;
         } else {
             actor->wheel_contact_bitmask &= ~(1 << i);
+            /* Snap wheel Y to ground surface when grounded and probe succeeded */
+            if (probe_ok)
+                actor->wheel_contact_pos[i].y = ground_y;
         }
 
         /* Store high-res wheel world position */
