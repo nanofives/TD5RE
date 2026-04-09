@@ -506,75 +506,33 @@ void td5_track_resolve_wall_contacts(TD5_Actor *actor)
         int32_t px = probe_x >> 8;
         int32_t pz = probe_z >> 8;
 
-        /* --- LEFT EDGE CHECK ---
-         * CW perpendicular of forward edge points LEFT (outward from left wall).
-         * Diagnostic data confirms: d < 0 = probe on road, d > 0 = outside left wall.
-         * Push toward road center = RIGHT = opposite of CW perp. */
+        /* --- LEFT EDGE CHECK --- [CONFIRMED @ 0x406CC0]
+         * Original perpendicular: (-edge_dz, edge_dx), collision when d < 0.
+         * Vertices: psVar3=span+4 (left_vertex), psVar2=span+6 (right_vertex).
+         * AngleFromVector12 called with (edge_dz, edge_dx) of (psVar3 - psVar2). */
         if (probe->sub_lane_index > 0)
             goto skip_left_wall;
         {
-            TD5_StripVertex *lv = vertex_at((int)sp->left_vertex_index);
-            TD5_StripVertex *rv = vertex_at((int)sp->right_vertex_index);
-            if (!lv || !rv) continue;
+            /* psVar2 = right_vertex_index (span+6), psVar3 = left_vertex_index (span+4) */
+            TD5_StripVertex *va = vertex_at((int)sp->right_vertex_index);  /* psVar2 */
+            TD5_StripVertex *vb = vertex_at((int)sp->left_vertex_index);   /* psVar3 */
+            if (!va || !vb) continue;
 
-            int32_t edge_dx = (int32_t)rv->x - (int32_t)lv->x;
-            int32_t edge_dz = (int32_t)rv->z - (int32_t)lv->z;
+            /* Edge: vb - va (left minus right, matching original psVar3 - psVar2) */
+            int32_t edge_dx = (int32_t)vb->x - (int32_t)va->x;
+            int32_t edge_dz = (int32_t)vb->z - (int32_t)va->z;
 
-            float fnx = (float)edge_dz;
-            float fnz = (float)(-edge_dx);
+            /* Perpendicular = (-edge_dz, edge_dx) matching original local_c */
+            float fnx = (float)(-edge_dz);
+            float fnz = (float)(edge_dx);
             float fmag = sqrtf(fnx * fnx + fnz * fnz);
             if (fmag < 0.5f) continue;
             int32_t nnx = (int32_t)(fnx / fmag * 4096.0f);
             int32_t nnz = (int32_t)(fnz / fmag * 4096.0f);
 
-            int32_t rel_x = px - (int32_t)lv->x - sp->origin_x;
-            int32_t rel_z = pz - (int32_t)lv->z - sp->origin_z;
-
-            int64_t dot = (int64_t)rel_x * nnx + (int64_t)rel_z * nnz;
-            int32_t d = (int32_t)((dot + ((dot >> 63) & 0xFFF)) >> 12);
-
-            if (d > 4000) d = 4000;
-
-            if (d > 0) {
-                /* Push RIGHT (toward road center) = opposite of CW perp.
-                 * atan2(edge_dz, edge_dx) gives angle where (-sin_w, cos_w)
-                 * points opposite to CW perp = inward. */
-                double rad = atan2((double)(edge_dz), (double)(edge_dx));
-                int32_t wall_angle = (int32_t)(rad * (4096.0 / (2.0 * 3.14159265358979323846))) & 0xFFF;
-
-                td5_physics_wall_response(actor, wall_angle, -d, 1, nnx, nnz, 4096);
-                td5_physics_rebuild_pose(actor);
-                TD5_LOG_I(LOG_TAG, "wall_contact: probe=%d LEFT span=%d d=%d angle=%d",
-                          pi, span_idx, d, wall_angle);
-            }
-        }
-    skip_left_wall:
-
-        /* --- RIGHT EDGE CHECK ---
-         * Same CW perp points LEFT. For right wall: d > 0 = on road, d < 0 = outside.
-         * Push toward road center = LEFT = same direction as CW perp. */
-        if (probe->sub_lane_index < lane_count - 1)
-            continue;
-        {
-            int wall_off_l = (type >= 0 && type < 12) ? s_wall_vtx_left[type] : 0;
-            int wall_off_r = (type >= 0 && type < 12) ? s_wall_vtx_right[type] : 0;
-
-            TD5_StripVertex *lv = vertex_at((int)sp->left_vertex_index + lane_count + wall_off_l);
-            TD5_StripVertex *rv = vertex_at((int)sp->right_vertex_index + lane_count + wall_off_r);
-            if (!lv || !rv) continue;
-
-            int32_t edge_dx = (int32_t)rv->x - (int32_t)lv->x;
-            int32_t edge_dz = (int32_t)rv->z - (int32_t)lv->z;
-
-            float fnx = (float)edge_dz;
-            float fnz = (float)(-edge_dx);
-            float fmag = sqrtf(fnx * fnx + fnz * fnz);
-            if (fmag < 0.5f) continue;
-            int32_t nnx = (int32_t)(fnx / fmag * 4096.0f);
-            int32_t nnz = (int32_t)(fnz / fmag * 4096.0f);
-
-            int32_t rel_x = px - (int32_t)lv->x - sp->origin_x;
-            int32_t rel_z = pz - (int32_t)lv->z - sp->origin_z;
+            /* Relative to va (psVar2 = right_vertex), matching original */
+            int32_t rel_x = px - (int32_t)va->x - sp->origin_x;
+            int32_t rel_z = pz - (int32_t)va->z - sp->origin_z;
 
             int64_t dot = (int64_t)rel_x * nnx + (int64_t)rel_z * nnz;
             int32_t d = (int32_t)((dot + ((dot >> 63) & 0xFFF)) >> 12);
@@ -582,10 +540,53 @@ void td5_track_resolve_wall_contacts(TD5_Actor *actor)
             if (d < -4000) d = -4000;
 
             if (d < 0) {
-                /* Push LEFT (toward road center) = same direction as CW perp.
-                 * atan2(-edge_dz, -edge_dx) gives angle where (-sin_w, cos_w)
-                 * points along CW perp = inward from right wall. */
-                double rad = atan2((double)(-edge_dz), (double)(-edge_dx));
+                /* AngleFromVector12(dz, dx) where dz=vb.z-va.z, dx=vb.x-va.x */
+                double rad = atan2((double)(edge_dz), (double)(edge_dx));
+                int32_t wall_angle = (int32_t)(rad * (4096.0 / (2.0 * 3.14159265358979323846))) & 0xFFF;
+
+                td5_physics_wall_response(actor, wall_angle, d, 1, nnx, nnz, 4096);
+                td5_physics_rebuild_pose(actor);
+                TD5_LOG_I(LOG_TAG, "wall_contact: probe=%d LEFT span=%d d=%d angle=%d",
+                          pi, span_idx, d, wall_angle);
+            }
+        }
+    skip_left_wall:
+
+        /* --- RIGHT EDGE CHECK --- [CONFIRMED @ 0x406E20]
+         * Same perpendicular formula, same d < 0 collision condition.
+         * Vertices offset by lane_count + wall lookup table. */
+        if (probe->sub_lane_index < lane_count - 1)
+            continue;
+        {
+            int wall_off_a = (type >= 0 && type < 12) ? s_wall_vtx_left[type] : 0;
+            int wall_off_b = (type >= 0 && type < 12) ? s_wall_vtx_right[type] : 0;
+
+            /* psVar2 = left_vertex_index + lane_count + DAT_004631A0[type] */
+            TD5_StripVertex *va = vertex_at((int)sp->left_vertex_index + lane_count + wall_off_a);
+            /* psVar3 = right_vertex_index + lane_count + DAT_004631A4[type] */
+            TD5_StripVertex *vb = vertex_at((int)sp->right_vertex_index + lane_count + wall_off_b);
+            if (!va || !vb) continue;
+
+            int32_t edge_dx = (int32_t)vb->x - (int32_t)va->x;
+            int32_t edge_dz = (int32_t)vb->z - (int32_t)va->z;
+
+            float fnx = (float)(-edge_dz);
+            float fnz = (float)(edge_dx);
+            float fmag = sqrtf(fnx * fnx + fnz * fnz);
+            if (fmag < 0.5f) continue;
+            int32_t nnx = (int32_t)(fnx / fmag * 4096.0f);
+            int32_t nnz = (int32_t)(fnz / fmag * 4096.0f);
+
+            int32_t rel_x = px - (int32_t)va->x - sp->origin_x;
+            int32_t rel_z = pz - (int32_t)va->z - sp->origin_z;
+
+            int64_t dot = (int64_t)rel_x * nnx + (int64_t)rel_z * nnz;
+            int32_t d = (int32_t)((dot + ((dot >> 63) & 0xFFF)) >> 12);
+
+            if (d < -4000) d = -4000;
+
+            if (d < 0) {
+                double rad = atan2((double)(edge_dz), (double)(edge_dx));
                 int32_t wall_angle = (int32_t)(rad * (4096.0 / (2.0 * 3.14159265358979323846))) & 0xFFF;
 
                 td5_physics_wall_response(actor, wall_angle, d, 2, nnx, nnz, 4096);
