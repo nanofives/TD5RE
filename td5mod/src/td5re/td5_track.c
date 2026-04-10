@@ -522,9 +522,11 @@ void td5_track_resolve_wall_contacts(TD5_Actor *actor)
             int32_t edge_dx = (int32_t)vb->x - (int32_t)va->x;
             int32_t edge_dz = (int32_t)vb->z - (int32_t)va->z;
 
-            /* Perpendicular = (-edge_dz, edge_dx) matching original local_c */
-            float fnx = (float)(-edge_dz);
-            float fnz = (float)(edge_dx);
+            /* Perpendicular = (edge_dz, -edge_dx) matching original local_c
+             * [CONFIRMED @ 0x406CC0]: local_c[0]=psVar3[2]-psVar2[2]=edge_dz,
+             *                         local_c[2]=*psVar2-*psVar3=-edge_dx */
+            float fnx = (float)(edge_dz);
+            float fnz = (float)(-edge_dx);
             float fmag = sqrtf(fnx * fnx + fnz * fnz);
             if (fmag < 0.5f) continue;
             int32_t nnx = (int32_t)(fnx / fmag * 4096.0f);
@@ -570,8 +572,9 @@ void td5_track_resolve_wall_contacts(TD5_Actor *actor)
             int32_t edge_dx = (int32_t)vb->x - (int32_t)va->x;
             int32_t edge_dz = (int32_t)vb->z - (int32_t)va->z;
 
-            float fnx = (float)(-edge_dz);
-            float fnz = (float)(edge_dx);
+            /* [CONFIRMED @ 0x406E20]: same perpendicular formula as left */
+            float fnx = (float)(edge_dz);
+            float fnz = (float)(-edge_dx);
             float fmag = sqrtf(fnx * fnx + fnz * fnz);
             if (fmag < 0.5f) continue;
             int32_t nnx = (int32_t)(fnx / fmag * 4096.0f);
@@ -2432,6 +2435,101 @@ int td5_track_update_circuit_lap(TD5_Actor *actor, int slot)
  * Parameters:
  *   span_index       - index into the span array
  *   segment_distance - position parameter along span
+ */
+
+/* ========================================================================
+ * SampleTrackTargetPoint (0x434800)
+ *
+ * Computes world-space XZ position for AI look-ahead by interpolating
+ * between strip left/right vertices using route_byte (0-255), then
+ * applying a perpendicular lateral_bias offset.
+ *
+ * [CONFIRMED @ 0x434800-0x4348F1]
+ * ======================================================================== */
+
+int td5_track_sample_target_point(int span_index, int route_byte,
+                                   int *out_x, int *out_z, int lateral_bias)
+{
+    const TD5_StripSpan *sp;
+    TD5_StripVertex *v_left, *v_right;
+    int lane_count;
+    int type_offset;
+
+    if (out_x) *out_x = 0;
+    if (out_z) *out_z = 0;
+
+    if (!s_span_array || !s_vertex_table ||
+        span_index < 0 || span_index >= s_span_count)
+        return 0;
+
+    sp = &s_span_array[span_index];
+    if (sp->span_type == 9 || sp->span_type == 10)
+        return 0;
+
+    /* Lane count from geometry metadata (low nibble of byte +0x03)
+     * [CONFIRMED @ 0x434836] */
+    lane_count = span_lane_count(sp);
+    if (lane_count < 1) lane_count = 1;
+
+    /* Span-type vertex offset [CONFIRMED @ 0x434836: DAT_00473c68]
+     * Uses the left column of k_span_vertex_offsets for the right-side vertex */
+    type_offset = 0;
+    if (sp->span_type >= 0 && sp->span_type < 12)
+        type_offset = k_span_vertex_offsets[sp->span_type][0];
+
+    /* Two-vertex lookup [CONFIRMED @ 0x434803-0x434862]
+     * left  = vertex_table[left_vertex_index]
+     * right = vertex_table[left_vertex_index + type_offset + lane_count] */
+    v_left  = vertex_at((int)sp->left_vertex_index);
+    v_right = vertex_at((int)sp->left_vertex_index + type_offset + lane_count);
+    if (!v_left || !v_right)
+        return 0;
+
+    /* World-space base coordinates [CONFIRMED @ 0x43483D] */
+    int32_t left_x  = (int32_t)v_left->x  + sp->origin_x;
+    int32_t left_z  = (int32_t)v_left->z  + sp->origin_z;
+    int32_t right_x = (int32_t)v_right->x + sp->origin_x;
+    int32_t right_z = (int32_t)v_right->z + sp->origin_z;
+
+    /* Route-byte interpolation (24.8 output) [CONFIRMED @ 0x434868-0x43489D]
+     * result = (right - left) * route_byte + left * 0x100 */
+    int32_t result_x = (right_x - left_x) * route_byte + left_x * 0x100;
+    int32_t result_z = (right_z - left_z) * route_byte + left_z * 0x100;
+
+    /* Perpendicular lateral offset [CONFIRMED @ 0x434883-0x4348F1] */
+    if (lateral_bias != 0) {
+        int32_t edge_dx = (int16_t)(right_x - left_x);
+        int32_t edge_dz = (int16_t)(right_z - left_z);
+
+        /* Normalize edge direction to unit vector (ConvertFloatVec4ToShortAngles)
+         * [CONFIRMED @ 0x42CDB0] */
+        float fex = (float)edge_dx;
+        float fez = (float)edge_dz;
+        float mag = sqrtf(fex * fex + fez * fez);
+        if (mag > 0.5f) {
+            /* Perpendicular is (-dz, dx) normalized to short range */
+            int16_t perp_x = (int16_t)((-fez / mag) * 4096.0f);
+            int16_t perp_z = (int16_t)(( fex / mag) * 4096.0f);
+
+            /* Apply bias with fixed-point 4.12 multiply and rounding
+             * [CONFIRMED @ 0x4348B1-0x4348F1] */
+            int32_t off_x = (int32_t)perp_x * lateral_bias;
+            int32_t off_z = (int32_t)perp_z * lateral_bias;
+            /* Signed rounding: (val + (CDQ(val) & 0xFFF)) >> 12 */
+            off_x = (off_x + ((off_x >> 31) & 0xFFF)) >> 12;
+            off_z = (off_z + ((off_z >> 31) & 0xFFF)) >> 12;
+            result_x += off_x * 0x100;
+            result_z += off_z * 0x100;
+        }
+    }
+
+    if (out_x) *out_x = result_x;
+    if (out_z) *out_z = result_z;
+    return 1;
+}
+
+/* ========================================================================
+ * Signed spline distance (0x434670)
  *   route_lane       - route lane offset (subtracted from segment_distance)
  *
  * Returns: signed distance (positive = ahead, negative = behind)

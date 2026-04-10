@@ -95,6 +95,7 @@ static int16_t s_gear_torque[16];       /* DAT_00467394: per-gear torque multipl
 static int32_t g_gravity_constant = TD5_GRAVITY_NORMAL;
 static int32_t g_collisions_enabled = 0;     /* DAT_00463188: 0=on, 1=off */
 static int32_t g_game_paused = 0;            /* DAT_004AAD60 */
+static int32_t g_xz_freeze = 0;             /* DAT_00483030: 1=freeze XZ during countdown */
 static int32_t s_dynamics_mode = 0;          /* 0=arcade, 1=simulation (0x42F7B0) */
 static int32_t g_difficulty_easy = 0;
 static int32_t g_difficulty_hard = 0;
@@ -208,14 +209,19 @@ void td5_physics_wall_response(TD5_Actor *actor, int32_t wall_angle,
     int32_t cos_w = cos_fixed12(wall_angle);
     int32_t sin_w = sin_fixed12(wall_angle);
 
-    /* Push actor position out of wall using sin/cos of wall angle.
-     * [CONFIRMED @ 0x4069a1-0x4069d7]: push along (-sin_w, +cos_w) direction.
-     * push magnitude = (magnitude - 4), shift >>4 */
-    int32_t magnitude = (-penetration);  /* penetration is negative when outside */
-    int32_t push = magnitude - 4;
-    if (push < 1) push = 1;
-    actor->world_pos.x -= (int32_t)((int64_t)sin_w * push) >> 4;
-    actor->world_pos.z += (int32_t)((int64_t)cos_w * push) >> 4;
+    /* Push actor position out of wall.
+     * [CONFIRMED @ 0x4069a1-0x4069d7]: original passes raw NEGATIVE penetration
+     * as the magnitude parameter. The arithmetic sin_w * (negative - 4) naturally
+     * reverses the push direction via the negative sign, pushing the car back
+     * toward the road.  Previous code pre-negated the magnitude, which flipped
+     * the push direction — cars sailed through walls instead of bouncing back. */
+    int32_t push = penetration - 4;  /* penetration < 0 → push < 0 */
+    {
+        int64_t px = (int64_t)sin_w * push;
+        int64_t pz = (int64_t)cos_w * push;
+        actor->world_pos.x -= (int32_t)((px + ((px >> 63) & 0xF)) >> 4);
+        actor->world_pos.z += (int32_t)((pz + ((pz >> 63) & 0xF)) >> 4);
+    }
 
     /* Decompose velocity into wall-parallel and wall-perpendicular components
      * [CONFIRMED @ 0x4069cc] */
@@ -484,9 +490,10 @@ void td5_physics_update_vehicle_actor(TD5_Actor *actor)
             int sub_lane = (int)actor->track_sub_lane_index;
             int span = actor->track_span_raw;
             if (td5_track_get_span_lane_world(span, sub_lane, &wx, &wy, &wz)) {
-                actor->world_pos.x = wx << 8;
-                actor->world_pos.y = wy << 8;
-                actor->world_pos.z = wz << 8;
+                /* td5_track_get_span_lane_world returns 24.8 FP directly */
+                actor->world_pos.x = wx;
+                actor->world_pos.y = wy;
+                actor->world_pos.z = wz;
                 /* Set heading to match track direction at this span.
                  * td5_track_compute_heading writes euler_accum.yaw on the actor. */
                 td5_track_compute_heading(actor);
@@ -623,27 +630,75 @@ void td5_physics_update_player(TD5_Actor *actor)
     actor->longitudinal_speed = v_long;
     actor->lateral_speed = v_lat;
 
-    /* --- 7/8. Gear selection: mutually exclusive paths (original 0x404030).
-     * field_0x378 (throttle_input_active) selects between:
-     *   0 -> ApplyReverseGearThrottleSign (NOS-stun path)
-     *   !0 -> UpdateAutomaticGearSelection (normal driving)
-     * throttle_input_active defaults to 0 and must be written by input
-     * handler as ~(bits>>28)&1. Since the NOS-stun input bit is not yet
-     * implemented, default to auto_gear_select for normal driving. */
-    if (actor->throttle_input_active != 0) {
-        td5_physics_auto_gear_select(actor);
+    /* --- 7/8/9/10/11. Throttle gate — original 0x404030 flow:
+     *   throttle!=0 && brake==0 → gear_select + engine_update + drive_torque
+     *   throttle==0             → engine_update only, coast deceleration (-32)
+     *   throttle!=0 && brake!=0 → engine_update + brake force
+     * [CONFIRMED @ 0x4044F8: if(encounter_steering_cmd!=0) gate] */
+    int32_t throttle = (int32_t)actor->encounter_steering_cmd;
+    int32_t drive_torque = 0;
+    int32_t wheel_drive[4] = {0, 0, 0, 0};
+    int32_t brake_front = (int32_t)PHYS_S(actor, 0x6E);
+    int32_t brake_rear  = (int32_t)PHYS_S(actor, 0x70);
+
+    if (!actor->brake_flag && throttle != 0) {
+        /* --- Drive path: gear select + engine + torque --- */
+        if (actor->throttle_input_active != 0) {
+            td5_physics_auto_gear_select(actor);
+        } else {
+            td5_physics_auto_gear_select(actor);
+        }
+        td5_physics_update_engine_speed(actor);
+        drive_torque = td5_physics_compute_drive_torque(actor);
+
+        /* Distribute torque by drivetrain (FWD/RWD/AWD) */
+        int32_t dt_type = (int32_t)PHYS_S(actor, 0x76);
+        int32_t speed_limit = (int32_t)PHYS_S(actor, 0x74) << 8;
+        int32_t abs_speed = v_long < 0 ? -v_long : v_long;
+
+        if (abs_speed <= speed_limit) {
+            switch (dt_type) {
+            case 1: /* RWD */
+                wheel_drive[2] = drive_torque >> 1;
+                wheel_drive[3] = drive_torque >> 1;
+                break;
+            case 2: /* FWD */
+                wheel_drive[0] = drive_torque >> 1;
+                wheel_drive[1] = drive_torque >> 1;
+                break;
+            case 3: /* AWD */
+            default:
+                wheel_drive[0] = drive_torque >> 2;
+                wheel_drive[1] = drive_torque >> 2;
+                wheel_drive[2] = drive_torque >> 2;
+                wheel_drive[3] = drive_torque >> 2;
+                break;
+            }
+        }
     } else {
-        /* Fallback: always use auto gear until NOS-stun input is wired */
-        td5_physics_auto_gear_select(actor);
+        /* --- Coast / brake path: engine update + deceleration --- */
+        int32_t coast_throttle = (throttle != 0) ? throttle : -32;
+        td5_physics_update_engine_speed(actor);
+
+        /* Brake/coast force from brake coefficients × throttle.
+         * Original (0x404580-0x4045D0): front = brake_front*param >> 8,
+         * rear = brake_rear*param >> 8. Clamps against lateral speed.
+         * [CONFIRMED @ 0x4045A0: both front+rear brake coeffs used] */
+        int32_t bf = (brake_front * coast_throttle) >> 8;
+        int32_t br = (brake_rear  * coast_throttle) >> 8;
+        /* Clamp to half of lateral speed (prevents sign reversal) */
+        int32_t abs_lat_half = (v_lat < 0 ? -v_lat : v_lat) >> 1;
+        if (bf < -abs_lat_half) bf = -abs_lat_half;
+        if (br < -abs_lat_half) br = -abs_lat_half;
+        int32_t sign = (v_long > 0) ? -1 : 1;
+        /* The coast/brake force opposes current velocity direction */
+        if (actor->brake_flag || coast_throttle == -32) {
+            wheel_drive[0] = sign * (bf >> 1);
+            wheel_drive[1] = sign * (bf >> 1);
+            wheel_drive[2] = sign * (br >> 1);
+            wheel_drive[3] = sign * (br >> 1);
+        }
     }
-
-    /* --- 9. UpdateEngineSpeedAccumulator --- */
-    td5_physics_update_engine_speed(actor);
-
-    /* --- 10. ComputeDriveTorqueFromGearCurve ---
-     * Drive torque is computed unconditionally (including airborne).
-     * The original allows engine revving and speed changes mid-air. */
-    int32_t drive_torque = td5_physics_compute_drive_torque(actor);
 
     if (actor->slot_index == 0 && (actor->frame_counter % 120u) == 0u) {
         TD5_LOG_I(LOG_TAG,
@@ -653,56 +708,6 @@ void td5_physics_update_player(TD5_Actor *actor)
                   v_long, v_lat, (int)actor->encounter_steering_cmd,
                   actor->throttle_input_active,
                   actor->surface_contact_flags);
-    }
-
-    /* --- 11. Distribute torque by drivetrain (FWD/RWD/AWD) --- */
-    int32_t wheel_drive[4] = {0, 0, 0, 0};
-    int32_t dt_type = (int32_t)PHYS_S(actor, 0x76);
-
-    /* Check speed limiter */
-    int32_t speed_limit = (int32_t)PHYS_S(actor, 0x74) << 8;
-    int32_t abs_speed = v_long < 0 ? -v_long : v_long;
-    int32_t speed_limited = (abs_speed > speed_limit) ? 1 : 0;
-
-    if (!speed_limited) {
-        switch (dt_type) {
-        case 1: /* RWD */
-            wheel_drive[2] = drive_torque >> 1;
-            wheel_drive[3] = drive_torque >> 1;
-            break;
-        case 2: /* FWD */
-            wheel_drive[0] = drive_torque >> 1;
-            wheel_drive[1] = drive_torque >> 1;
-            break;
-        case 3: /* AWD */
-        default:
-            wheel_drive[0] = drive_torque >> 2;
-            wheel_drive[1] = drive_torque >> 2;
-            wheel_drive[2] = drive_torque >> 2;
-            wheel_drive[3] = drive_torque >> 2;
-            break;
-        }
-    }
-
-    /* --- Braking --- */
-    int32_t throttle = (int32_t)actor->encounter_steering_cmd;
-    int32_t brake_front = (int32_t)PHYS_S(actor, 0x6E);
-    int32_t brake_rear  = (int32_t)PHYS_S(actor, 0x70);
-
-    if (actor->brake_flag && throttle < 0) {
-        /* Original grounded brake (0x404437-0x404481):
-         * Uses ONLY tuning[0x6E] (front brake coeff), applies to front wheels,
-         * rear wheels get 0. Clamps against lateral_speed, not longitudinal.
-         * [CONFIRMED @ 0x404441: only 0x6E read, 0x404478: front only] */
-        int32_t brake_cmd = (-throttle);
-        int32_t bf = (brake_front * brake_cmd) >> 8;
-        int32_t abs_lat = v_lat < 0 ? -v_lat : v_lat;
-        if (bf > abs_lat) bf = abs_lat;
-        bf >>= 1;
-        int32_t sign = (v_long > 0) ? -1 : 1;
-        wheel_drive[0] += sign * bf;
-        wheel_drive[1] += sign * bf;
-        /* Rear wheels: no brake force applied [CONFIRMED @ 0x40447B: = 0] */
     }
 
     /* --- 12. Per-axle lateral/longitudinal forces --- */
@@ -950,23 +955,26 @@ void td5_physics_update_ai(TD5_Actor *actor)
     /* --- 2. Surface normal and gravity --- */
     td5_physics_compute_surface_gravity(actor);
 
-    /* --- 3. 2-axle grip, clamped [0x70..0xA0] --- */
+    /* --- 3. 2-axle load transfer with cross-weights [CONFIRMED @ 0x40506B-0x4050B4]
+     * Original uses CROSSED weight numerators: front_load uses rear_weight,
+     * rear_load uses front_weight. Divisor is half_wb, not full_wb. */
     int32_t front_weight = (int32_t)PHYS_S(actor, 0x28);
     int32_t rear_weight  = (int32_t)PHYS_S(actor, 0x2A);
     int32_t total_weight = front_weight + rear_weight;
     if (total_weight == 0) total_weight = 1;
 
     int32_t half_wb = PHYS_I(actor, 0x24);
-    int32_t full_wb = half_wb * 2;
-    if (full_wb == 0) full_wb = 1;
+    if (half_wb == 0) half_wb = 1;
 
     int32_t susp_defl = actor->center_suspension_pos;
 
-    int32_t front_load = ((front_weight << 8) / total_weight);
-    front_load = front_load * (half_wb - (susp_defl >> 4)) / full_wb;
-    int32_t rear_load = ((rear_weight << 8) / total_weight);
-    rear_load = rear_load * (half_wb + (susp_defl >> 4)) / full_wb;
+    /* Cross-weight load transfer [CONFIRMED @ 0x40506B]:
+     * front_load = (rear_weight << 8) / total_weight * (half_wb - susp_defl) / half_wb
+     * rear_load  = (front_weight << 8) / total_weight * (half_wb + susp_defl) / half_wb */
+    int32_t front_load = ((rear_weight << 8) / total_weight) * (half_wb - susp_defl) / half_wb;
+    int32_t rear_load  = ((front_weight << 8) / total_weight) * (half_wb + susp_defl) / half_wb;
 
+    /* Grip from surface friction * load [CONFIRMED @ 0x4050B8] */
     int32_t sf = (int32_t)s_surface_friction[surface & 0x1F];
     int32_t grip_front = (sf * front_load + 128) >> 8;
     int32_t grip_rear  = (sf * rear_load + 128) >> 8;
@@ -976,8 +984,7 @@ void td5_physics_update_ai(TD5_Actor *actor)
     if (grip_rear < TD5_AI_GRIP_MIN) grip_rear = TD5_AI_GRIP_MIN;
     if (grip_rear > TD5_AI_GRIP_MAX) grip_rear = TD5_AI_GRIP_MAX;
 
-    /* --- 4. Velocity drag in WORLD frame (same formula as player, 0x404EC0) ---
-     * 0x6A = driving drag, 0x6C = coasting drag */
+    /* --- 4. Velocity drag in WORLD frame [CONFIRMED @ 0x404EC0] --- */
     {
         int32_t surf_drag = (int32_t)s_surface_grip[surface & 0x1F];
         int32_t damp_coeff;
@@ -990,99 +997,181 @@ void td5_physics_update_ai(TD5_Actor *actor)
         actor->linear_velocity_z -= ((actor->linear_velocity_z >> 8) * damp_coeff) >> 12;
     }
 
-    /* --- 5. Resolve body-frame velocities --- */
+    /* --- 5. Body-frame velocities + steered-frame trig --- */
     int32_t heading = (actor->euler_accum.yaw >> 8) & 0xFFF;
     int32_t cos_h = cos_fixed12(heading);
     int32_t sin_h = sin_fixed12(heading);
 
-    int32_t vx = actor->linear_velocity_x;
-    int32_t vz = actor->linear_velocity_z;
-    int32_t v_long = (vx * sin_h + vz * cos_h) >> 12;
-    int32_t v_lat  = (vx * cos_h - vz * sin_h) >> 12;
-
-    actor->longitudinal_speed = v_long;
-    actor->lateral_speed = v_lat;
-
-    /* --- Engine pipeline (same as player) --- */
-    td5_physics_reverse_throttle_sign(actor);
-    td5_physics_auto_gear_select(actor);
-    td5_physics_update_engine_speed(actor);
-    int32_t drive_torque = td5_physics_compute_drive_torque(actor);
-
-    /* --- Distribute torque by drivetrain --- */
-    int32_t dt_type = (int32_t)PHYS_S(actor, 0x76);
-    int32_t front_drive = 0, rear_drive = 0;
-
-    int32_t speed_limit = (int32_t)PHYS_S(actor, 0x74) << 8;
-    int32_t abs_speed = v_long < 0 ? -v_long : v_long;
-
-    if (abs_speed <= speed_limit) {
-        switch (dt_type) {
-        case 1: /* RWD */
-            rear_drive = drive_torque;
-            break;
-        case 2: /* FWD */
-            front_drive = drive_torque;
-            break;
-        case 3: /* AWD */
-        default:
-            front_drive = drive_torque >> 1;
-            rear_drive = drive_torque >> 1;
-            break;
-        }
-    }
-
-    /* --- Braking (2-axle) --- */
-    int32_t throttle = (int32_t)actor->encounter_steering_cmd;
-    if (actor->brake_flag && throttle < 0) {
-        int32_t brake_cmd = (-throttle);
-        int32_t bf = ((int32_t)PHYS_S(actor, 0x6E) * brake_cmd) >> 8;
-        int32_t br = ((int32_t)PHYS_S(actor, 0x70) * brake_cmd) >> 8;
-        int32_t half_speed = abs_speed >> 1;
-        if (bf > half_speed) bf = half_speed;
-        if (br > half_speed) br = half_speed;
-        int32_t sign = (v_long > 0) ? -1 : 1;
-        front_drive += sign * bf;
-        rear_drive  += sign * br;
-    }
-
-    /* --- 2-axle lateral forces --- */
     int32_t steer_angle = actor->steering_command >> 8;
     int32_t steer_heading = (heading + steer_angle) & 0xFFF;
     int32_t cos_s = cos_fixed12(steer_heading);
     int32_t sin_s = sin_fixed12(steer_heading);
 
-    int32_t front_slip = (v_lat * cos_s - v_long * sin_s) >> 12;
-    int32_t front_lat = -(front_slip * grip_front) >> 8;
-    /* Rear slip uses heading rotation [CONFIRMED @ 0x4041E0] */
-    int32_t rear_slip_ai = (v_lat * cos_h - v_long * sin_h) >> 12;
-    int32_t rear_lat  = -(rear_slip_ai * grip_rear) >> 8;
+    /* Steer delta trig (cos_d, sin_d) [CONFIRMED @ 0x4050EF] */
+    int32_t cos_d = cos_fixed12(steer_angle & 0xFFF);
+    int32_t sin_d = sin_fixed12(steer_angle & 0xFFF);
 
-    /* Slip detection (no per-wheel slip circle for AI) */
-    {
-        int32_t front_combined = (front_lat < 0 ? -front_lat : front_lat) +
-                                 (front_drive < 0 ? -front_drive : front_drive);
-        int32_t rear_combined  = (rear_lat < 0 ? -rear_lat : rear_lat) +
-                                 (rear_drive < 0 ? -rear_drive : rear_drive);
-        int32_t glf = grip_front << 8;
-        int32_t glr = grip_rear << 8;
-        actor->front_axle_slip_excess = (front_combined > glf) ? front_combined - glf : 0;
-        actor->rear_axle_slip_excess  = (rear_combined > glr)  ? rear_combined - glr  : 0;
+    int32_t vx = actor->linear_velocity_x;
+    int32_t vz = actor->linear_velocity_z;
+    int32_t v_long = (vx * sin_h + vz * cos_h) >> 12;
+
+    /* Lateral speed with yaw-rate correction [CONFIRMED @ 0x4050EF-0x405146]
+     * raw_lat = (cos_s * vz + sin_s * vx) >> 12
+     * yaw_corr = ((sin_d * front_weight * yaw_rate) >> 12) / 0x28C
+     * lateral_speed = raw_lat - yaw_corr */
+    int32_t raw_lat = (cos_h * vx - sin_h * vz) >> 12;
+    int32_t yaw_rate = actor->angular_velocity_yaw;
+    int32_t inertia = PHYS_I(actor, 0x20);
+    int32_t inertia_div = inertia / 0x28C;
+    if (inertia_div == 0) inertia_div = 1;
+    int32_t yaw_corr = ((sin_d * front_weight) >> 12) * yaw_rate / 0x28C;
+    int32_t v_lat = raw_lat - yaw_corr;
+
+    actor->longitudinal_speed = v_long;
+    actor->lateral_speed = v_lat;
+
+    /* --- 6. Engine pipeline [CONFIRMED @ 0x4051A0] --- */
+    int32_t throttle = (int32_t)actor->encounter_steering_cmd;
+    int32_t drive_torque = 0;
+    int32_t front_drive = 0, rear_drive = 0;
+    int32_t brake_front = (int32_t)PHYS_S(actor, 0x6E);
+    int32_t brake_rear  = (int32_t)PHYS_S(actor, 0x70);
+    int32_t speed_limit = (int32_t)PHYS_S(actor, 0x74) << 8;
+    int32_t abs_speed = v_long < 0 ? -v_long : v_long;
+
+    if (!actor->brake_flag && throttle != 0) {
+        /* Drive path: gear select + engine + torque */
+        td5_physics_reverse_throttle_sign(actor);
+        td5_physics_auto_gear_select(actor);
+        td5_physics_update_engine_speed(actor);
+        drive_torque = td5_physics_compute_drive_torque(actor);
+
+        /* Always 50/50 split for AI [CONFIRMED @ 0x405183-0x405285]
+         * Original: torque >> 2 per axle, then *2 = torque/2 per axle */
+        if (abs_speed <= speed_limit) {
+            front_drive = drive_torque >> 1;
+            rear_drive  = drive_torque >> 1;
+        }
+    } else {
+        /* Coast / brake path */
+        int32_t coast_throttle = (throttle != 0) ? throttle : -32;
+        td5_physics_update_engine_speed(actor);
+
+        int32_t bf = (brake_front * coast_throttle) >> 8;
+        int32_t br = (brake_rear  * coast_throttle) >> 8;
+        int32_t half_spd = abs_speed >> 1;
+        int32_t neg_bf = bf < 0 ? -bf : bf;
+        int32_t neg_br = br < 0 ? -br : br;
+        if (neg_bf > half_spd) bf = (bf < 0) ? -half_spd : half_spd;
+        if (neg_br > half_spd) br = (br < 0) ? -half_spd : half_spd;
+        int32_t sign = (v_long > 0) ? -1 : 1;
+        front_drive = sign * (bf >> 1);
+        rear_drive  = sign * (br >> 1);
     }
 
-    /* --- Yaw torque (same formula as player, 0x404C96) --- */
+    /* Double drive forces for bicycle model input [CONFIRMED @ 0x405285] */
+    front_drive *= 2;
+    rear_drive  *= 2;
+
+    /* --- 7. Coupled bicycle model lateral forces [CONFIRMED @ 0x40529D-0x4054F7]
+     *
+     * Mass-matrix inversion with front/rear coupling:
+     *   A = (Wr^2 + I) >> 10
+     *   B = (Wf + Wr)^2 >> 10
+     *   D = (Wf*Wr - I) >> 10
+     *   det = B*cos_d^2 + A*sin_d^2  (each mult >>12)
+     *
+     *   yaw_term = (I / 0x28C) * omega
+     *   yaw_lat  = (Wr * omega) / 0x28C - v_lat
+     *
+     *   FRONT_LAT = [yaw_lat*D*cos_d*sin_d + (Ff*cos_d+Fr+v_long)*D*cos_d
+     *              + D*Ff*sin_d^2 + (yaw_term - v_lat*Wf)*(Wf+Wr)*cos_d^2] / det
+     *
+     *   REAR_LAT  = [((Wf+2*Wr)*Wf - I)>>10 * Ff*cos_d + (Fr+v_long)*A
+     *              - (v_lat*Wr + yaw_term)*(Wf+Wr)*cos_d] / det
+     */
+    int32_t front_lat, rear_lat;
     {
-        int32_t inertia = PHYS_I(actor, 0x20);
-        int32_t inertia_div = inertia / 0x28C;
-        if (inertia_div == 0) inertia_div = 1;
+        int32_t Wf = front_weight;
+        int32_t Wr = rear_weight;
+        int32_t I  = inertia;
+        int32_t omega = yaw_rate;
 
-        int32_t term1 = ((cos_s * front_weight) >> 12);
-        term1 = (term1 * rear_drive) >> 8;
-        int32_t lat_diff = rear_lat - front_lat;
-        int32_t term2 = lat_diff * 500;
-        int32_t term3 = (front_drive * rear_weight) >> 8;
+        int32_t A = ((int64_t)Wr * Wr + I) >> 10;
+        int32_t B = ((int64_t)(Wf + Wr) * (Wf + Wr)) >> 10;
+        int32_t D = ((int64_t)Wf * Wr - I) >> 10;
 
-        int32_t yaw_torque = (term1 + term2 - term3) / inertia_div;
+        /* Determinant: B*cos_d^2 + A*sin_d^2 (each product >>12) */
+        int32_t cos_d2 = (cos_d * cos_d) >> 12;
+        int32_t sin_d2 = (sin_d * sin_d) >> 12;
+        int32_t det = (int32_t)(((int64_t)B * cos_d2 + (int64_t)A * sin_d2) >> 12);
+        if (det == 0) det = 1;
+
+        int32_t yaw_term = inertia_div * omega;
+        int32_t yaw_lat  = (Wr * omega) / 0x28C - v_lat;
+
+        /* Front lateral force */
+        int64_t f_num = 0;
+        f_num += (int64_t)yaw_lat * D * ((int64_t)cos_d * sin_d >> 12) >> 12;
+        f_num += (int64_t)((int64_t)(front_drive * cos_d >> 12) + rear_drive + v_long) * D * cos_d >> 24;
+        f_num += (int64_t)D * front_drive * sin_d2 >> 24;
+        f_num += (int64_t)(yaw_term - (int64_t)v_lat * Wf) * (Wf + Wr) * cos_d2 >> 24;
+        front_lat = (int32_t)(f_num / det);
+
+        /* Rear lateral force */
+        int32_t rear_cross = (int32_t)(((int64_t)(Wf + 2 * Wr) * Wf - I) >> 10);
+        int64_t r_num = 0;
+        r_num += (int64_t)rear_cross * front_drive * cos_d >> 24;
+        r_num += (int64_t)(rear_drive + v_long) * A;
+        r_num -= (int64_t)((int64_t)v_lat * Wr + yaw_term) * (Wf + Wr) * cos_d >> 24;
+        rear_lat = (int32_t)(r_num / det);
+    }
+
+    /* --- 8. Slip circle with sqrt [CONFIRMED @ 0x405518-0x405580] --- */
+    {
+        int32_t tire_grip = (int32_t)PHYS_S(actor, 0x2C);
+        if (tire_grip == 0) tire_grip = sf; /* fallback */
+
+        /* Front axle slip circle */
+        int32_t fl4 = front_lat >> 4;
+        int32_t fd4 = front_drive >> 4;
+        int32_t mag_sq_f = fl4 * fl4 + fd4 * fd4;
+        int32_t mag_f = td5_isqrt(mag_sq_f);
+        int32_t grip_limit_f = (front_load * tire_grip) >> 8;
+        int32_t slip_f16 = mag_f << 4;
+
+        if (slip_f16 > grip_limit_f && slip_f16 > 0) {
+            actor->front_axle_slip_excess = slip_f16 - grip_limit_f;
+            int32_t scale = (grip_limit_f << 8) / slip_f16;
+            front_lat = (front_lat * scale) >> 8;
+            front_drive = (front_drive * scale) >> 8;
+        } else {
+            actor->front_axle_slip_excess = 0;
+        }
+
+        /* Rear axle slip circle */
+        int32_t rl4 = rear_lat >> 4;
+        int32_t rd4 = rear_drive >> 4;
+        int32_t mag_sq_r = rl4 * rl4 + rd4 * rd4;
+        int32_t mag_r = td5_isqrt(mag_sq_r);
+        int32_t grip_limit_r = (rear_load * tire_grip) >> 8;
+        int32_t slip_r16 = mag_r << 4;
+
+        if (slip_r16 > grip_limit_r && slip_r16 > 0) {
+            actor->rear_axle_slip_excess = slip_r16 - grip_limit_r;
+            int32_t scale = (grip_limit_r << 8) / slip_r16;
+            rear_lat = (rear_lat * scale) >> 8;
+            rear_drive = (rear_drive * scale) >> 8;
+        } else {
+            actor->rear_axle_slip_excess = 0;
+        }
+    }
+
+    /* --- 9. Yaw torque [CONFIRMED @ 0x405620-0x4056A6]
+     * yaw_torque = ((cos_d * Wf >> 12) * rear_lat - front_lat * Wr) / inertia_div */
+    {
+        int32_t yaw_torque = (int32_t)(((int64_t)(cos_d * front_weight >> 12) * rear_lat
+                             - (int64_t)front_lat * rear_weight) / inertia_div);
 
         if (yaw_torque > TD5_YAW_TORQUE_MAX) yaw_torque = TD5_YAW_TORQUE_MAX;
         if (yaw_torque < -TD5_YAW_TORQUE_MAX) yaw_torque = -TD5_YAW_TORQUE_MAX;
@@ -1090,20 +1179,30 @@ void td5_physics_update_ai(TD5_Actor *actor)
         actor->angular_velocity_yaw += yaw_torque;
     }
 
-    /* --- Apply forces back to world frame --- */
+    /* --- 10. World-frame force application [CONFIRMED @ 0x4056C4-0x405762]
+     * Front forces use steered heading (cos_s, sin_s).
+     * Rear forces use body heading (cos_h, sin_h). */
     {
-        int32_t total_long = front_drive + rear_drive;
-        int32_t total_lat  = front_lat + rear_lat;
-        int32_t fx = (total_long * sin_h + total_lat * cos_h) >> 12;
-        int32_t fz = (total_long * cos_h - total_lat * sin_h) >> 12;
+        int32_t fx = ((int64_t)rear_drive * sin_h + (int64_t)rear_lat * cos_h
+                    + (int64_t)front_drive * sin_s + (int64_t)front_lat * cos_s) >> 12;
+        int32_t fz = ((int64_t)rear_drive * cos_h - (int64_t)rear_lat * sin_h
+                    + (int64_t)front_drive * cos_s - (int64_t)front_lat * sin_s) >> 12;
         actor->linear_velocity_x += fx;
         actor->linear_velocity_z += fz;
     }
 
-    /* --- Velocity magnitude safety clamp (same as player path) --- */
+    /* --- 11. Slip yaw damping [CONFIRMED @ 0x40578E-0x4057C8] --- */
+    if (actor->front_axle_slip_excess > 0) {
+        int32_t damp = ((actor->angular_velocity_yaw >> 6)
+                       * actor->front_axle_slip_excess) >> 15;
+        if (damp > 0x200) damp = 0x200;
+        if (damp < -0x200) damp = -0x200;
+        actor->angular_velocity_yaw -= damp;
+    }
+
+    /* --- 12. Velocity magnitude safety clamp --- */
     {
-        int32_t speed_lim = (int32_t)PHYS_S(actor, 0x74) << 8;
-        int32_t vel_cap = speed_lim * 2;
+        int32_t vel_cap = speed_limit * 2;
         int32_t vxh = actor->linear_velocity_x >> 8;
         int32_t vzh = actor->linear_velocity_z >> 8;
         int32_t mag_sq = vxh * vxh + vzh * vzh;
@@ -1116,12 +1215,13 @@ void td5_physics_update_ai(TD5_Actor *actor)
         }
     }
 
-    /* --- Suspension integration --- */
+    /* --- 13. Suspension integration --- */
     td5_physics_integrate_suspension(actor);
 
-    /* Store tire slip for SFX */
-    actor->accumulated_tire_slip_x = (int16_t)(actor->front_axle_slip_excess >> 8);
-    actor->accumulated_tire_slip_z = (int16_t)(actor->rear_axle_slip_excess >> 8);
+    /* --- 14. Tire slip accumulation [CONFIRMED @ 0x405768-0x40577B]
+     * Original uses += with lateral/longitudinal speed, not assignment with slip excess */
+    actor->accumulated_tire_slip_x += (int16_t)(actor->lateral_speed >> 8);
+    actor->accumulated_tire_slip_z += (int16_t)(actor->longitudinal_speed >> 8);
 }
 
 /* ========================================================================
@@ -1952,52 +2052,203 @@ void td5_physics_integrate_suspension(TD5_Actor *actor)
  * UpdateVehicleSuspensionResponse (0x4057F0)
  *
  * Aggregates per-wheel contact loads into chassis angular accelerations.
+ *
+ * Original decompilation (confirmed):
+ *   bVar1 = damage_lockout (0x37C) = airborne/new bitmask
+ *   bVar2 = wheel_contact_bitmask (0x37D) = previous-frame bitmask
+ *   If bVar1 == 0xF (all airborne), skip entirely.
+ *
+ *   Per-wheel loop: for each wheel i NOT in bVar1 (grounded):
+ *     sVar3 = wheel_display_angles[i][0] = body-space X arm (roll/pitch)
+ *     sVar4 = wheel_display_angles[i][2] = body-space Z arm (roll)
+ *     Rotate wheel_contact_velocities[i][0..2] by transposed rotation matrix.
+ *     local_36 = Y-component of rotated velocity
+ *     iVar8 = (local_36 * gravity + round) >> 12
+ *     local_50 += iVar8 * sVar4   (roll accumulator)
+ *     local_5c -= iVar8 * sVar3   (pitch accumulator)
+ *     local_4c++                   (grounded wheel count)
+ *
+ *     If wheel was also grounded previous frame (bVar2 & (1<<i)):
+ *       spring_dot   = gap_270[i][0]*wcv[0] + gap_270[i][1]*wcv[1] + gap_270[i][2]*wcv[2]
+ *       spring_force = arith_round_shift(spring_dot, 0xFFF, 12)
+ *       local_64    += spring_force * sVar4 * -0x100  (roll spring)
+ *       local_60    += spring_force * sVar3 *  0x100  (pitch spring)
+ *       bounce_accum+= spring_force / 2
+ *       local_58++   (spring-grounded count)
+ *
+ *   angular_velocity_roll  += (local_64 + local_50 / local_4c) / 0x4B0
+ *   angular_velocity_pitch += (local_60 + local_5c / local_4c) / 0x226
+ *   linear_velocity_y      += iVar8 + gravity
+ *
+ *   Clamp roll/pitch to ±4000 per bitmask switch table.
  * ======================================================================== */
+
+/* Rotate a 3-component int16 body-space vector to world-space Y component.
+ * Uses second column of rotation matrix: {m[1], m[4], m[7]}.
+ * This matches FUN_0042E2E0's second output (offset +2) which uses
+ * row 1 of the transposed matrix = column 1 of the original matrix.
+ * Returns int16 result (saturated). */
+static int16_t rotate_vec_world_y(const TD5_Actor *actor, const int16_t v[3])
+{
+    /* m[1] = col1_row0, m[4] = col1_row1, m[7] = col1_row2 */
+    float m1 = actor->rotation_matrix.m[1];
+    float m4 = actor->rotation_matrix.m[4];
+    float m7 = actor->rotation_matrix.m[7];
+    float result = (float)v[0] * m1 + (float)v[1] * m4 + (float)v[2] * m7;
+    /* Saturate to int16 range */
+    if (result >  32767.0f) return  32767;
+    if (result < -32768.0f) return -32768;
+    return (int16_t)(int32_t)result;
+}
+
+/* Arithmetic rounding helper: (x + (x>>31 & mask)) >> shift
+ * Matches original binary's signed-divide rounding idiom. */
+static inline int32_t arith_round_shift(int32_t x, int32_t mask, int32_t shift)
+{
+    return (x + (int32_t)((uint32_t)(x >> 31) & (uint32_t)mask)) >> shift;
+}
 
 void td5_physics_update_suspension_response(TD5_Actor *actor)
 {
-    int32_t grounded_count = 0;
-    uint8_t contact_mask = actor->wheel_contact_bitmask;
+    uint8_t bVar1 = *(uint8_t *)((uint8_t *)actor + 0x37C); /* damage_lockout (new bitmask) */
+    uint8_t bVar2 = actor->wheel_contact_bitmask;           /* prev-frame bitmask (0x37D) */
 
+    if (bVar1 == 0x0F) {
+        /* All four wheels airborne — skip entirely (original: if bVar1 != 0xF runs body) */
+        return;
+    }
+
+    int32_t local_50 = 0;  /* velocity roll  accumulator (Z-arm weighted) */
+    int32_t local_5c = 0;  /* velocity pitch accumulator (X-arm weighted) */
+    int32_t local_4c = 0;  /* grounded wheel count */
+    int32_t local_64 = 0;  /* spring roll  contribution (bVar2-path) */
+    int32_t local_60 = 0;  /* spring pitch contribution (bVar2-path) */
+    int32_t local_58 = 0;  /* spring-grounded count (wheels also grounded prev frame) */
+    int32_t bounce_accum = 0; /* vertical spring bounce accumulator (iVar8/param_1 in orig) */
+
+    /* psVar10 starts at actor+0x254 (wheel_contact_velocities[0][2]), advances +4 shorts/iter.
+     * local_54 starts at actor+0x270 (gap_270[0]),                    advances +4 shorts/iter.
+     *
+     * Per-wheel pointer layout relative to psVar10 at iteration i:
+     *   psVar10[-2]  = wcv[0] = wheel_contact_velocities[i][0]   (actor+0x250+i*8)
+     *   psVar10[-1]  = wcv[1] = wheel_contact_velocities[i][1]   (actor+0x252+i*8)
+     *   psVar10[0]   = wcv[2] = wheel_contact_velocities[i][2]   (actor+0x254+i*8)
+     *   psVar10[-34] = wda[0] = wheel_display_angles[i][0]  sVar3 (actor+0x210+i*8)
+     *   psVar10[-32] = wda[2] = wheel_display_angles[i][2]  sVar4 (actor+0x214+i*8)
+     *   psVar10[0xf] = g270[1] = gap_270[i*8+2]                  (actor+0x272+i*8)
+     *   psVar10[0x10]= g270[2] = gap_270[i*8+4]                  (actor+0x274+i*8)
+     *   *local_54    = g270[0] = gap_270[i*8+0]                  (actor+0x270+i*8)
+     */
     for (int i = 0; i < 4; i++) {
-        if (!(contact_mask & (1 << i)))
-            grounded_count++;
+        uint32_t uVar6 = (uint32_t)(1u << i);
+        if (bVar1 & uVar6) continue; /* wheel i airborne this frame — skip */
+
+        /* Body-space arm lengths: wda at actor+0x210+i*8
+         * sVar3 = wda[0] = X arm (roll/pitch lever)
+         * sVar4 = wda[2] = Z arm (roll lever) */
+        const int16_t *wda = (const int16_t *)((const uint8_t *)actor + 0x210 + i * 8);
+        int16_t sVar3 = wda[0];
+        int16_t sVar4 = wda[2];
+
+        /* Rotate wheel contact velocity to world space, extract Y component.
+         * wcv at actor+0x250+i*8 (3 int16s: X,Y,Z).
+         * FUN_0042E2E0 operates on (psVar10-2) = wcv and outputs local_38/local_36.
+         * local_36 is the Y-component of the world-rotated velocity. */
+        const int16_t *wcv = (const int16_t *)((const uint8_t *)actor + 0x250 + i * 8);
+        int16_t local_36 = rotate_vec_world_y(actor, wcv);
+
+        /* iVar8 = (local_36 * gravity + rounding) >> 12
+         * Original: (local_36 * DAT_00467380 + (local_36*DAT_00467380 >> 0x1f & 0xFFF)) >> 0xC */
+        int32_t scaled = (int32_t)local_36 * g_gravity_constant;
+        int32_t iVar8  = arith_round_shift(scaled, 0xFFF, 12);
+
+        /* Velocity-path contributions (all grounded wheels) */
+        local_50 += iVar8 * (int32_t)sVar4;
+        local_5c -= iVar8 * (int32_t)sVar3;
+        local_4c++;
+
+        /* Spring path: wheels that were ALSO grounded in the previous frame.
+         * Original: if ((bVar2 & uVar6) != 0)
+         *
+         * gap_270[i] layout (int16s within the 8-byte slot at actor+0x270+i*8):
+         *   [0] at +0x270+i*8  → *local_54        → dot with wcv[0] (X)
+         *   [1] at +0x272+i*8  → psVar10[0xf]     → dot with wcv[1] (Y)  [note: psVar10 at 0x254+i*8]
+         *   [2] at +0x274+i*8  → psVar10[0x10]    → dot with wcv[2] (Z)
+         *
+         * spring_dot = gap_270[i][0]*wcv[0] + gap_270[i][1]*wcv[1] + gap_270[i][2]*wcv[2]
+         * spring_force = arith_round_shift(spring_dot, 0xFFF, 12)
+         *
+         * Roll  contrib: local_64 += spring_force * sVar4 * -0x100
+         * Pitch contrib: local_60 += spring_force * sVar3 *  0x100
+         * Bounce:        bounce_accum += spring_force / 2
+         * Count:         local_58++
+         */
+        if (bVar2 & uVar6) {
+            const int16_t *g270 = (const int16_t *)((const uint8_t *)actor + 0x270 + i * 8);
+            int32_t spring_dot = (int32_t)g270[1] * (int32_t)wcv[1]
+                               + (int32_t)g270[2] * (int32_t)wcv[2]
+                               + (int32_t)g270[0] * (int32_t)wcv[0];
+            int32_t spring_force = arith_round_shift(spring_dot, 0xFFF, 12);
+
+            local_64 += spring_force * (int32_t)sVar4 * -0x100;
+            bounce_accum += spring_force / 2;
+            local_60 += spring_force * (int32_t)sVar3 * 0x100;
+            local_58++;
+        }
     }
 
-    if (grounded_count > 0) {
-        /* Suspension-to-chassis pitch/roll torques disabled.
-         *
-         * Original (0x4057F0) converts per-wheel suspension deflection
-         * into angular_velocity_roll/pitch. This requires the original's
-         * suspension integrator (which reads XZ projections for force
-         * input and has different stability characteristics). With our
-         * simplified spring-damper + additive ground-snap, the pitch/roll
-         * torques accumulate without proper counterbalance, causing the
-         * car to visually tilt and eventually fly off the road.
-         *
-         * The ground-snap provides the vertical constraint. Pitch/roll
-         * visual response will be added back once the original suspension
-         * integrator is properly decompiled. */
-        /* Vertical: add gravity to counteract the gravity subtracted in
-         * integrate_pose. When airborne, this block doesn't execute, so gravity
-         * pulls freely.
-         *
-         * Original (0x4057F0) adds bounce_vert + gravity. However, the
-         * original's ground-snap formula (assignment-based with angle
-         * correction) naturally absorbs the bounce contribution. Our
-         * additive ground-snap creates a positive feedback loop with
-         * bounce_vert — pitch oscillation produces asymmetric wheel
-         * velocities that sum to a small net positive bounce_vert each
-         * tick, causing upward drift. Omit bounce_vert here; the
-         * ground-snap hard constraint handles vertical positioning. */
-        actor->linear_velocity_y += g_gravity_constant;
+    /* Post-loop: divide spring accumulators by spring-grounded count.
+     * Original: if (0 < iVar9) { local_64/=iVar9; iVar8/=iVar9; local_60/=iVar9; }
+     * iVar9 == local_58, iVar8 == bounce_accum at this point. */
+    if (local_58 > 0) {
+        local_64    = local_64    / local_58;
+        bounce_accum = bounce_accum / local_58;
+        local_60    = local_60    / local_58;
     }
 
-    /* Clamp angular velocities */
-    if (actor->angular_velocity_roll > 4000) actor->angular_velocity_roll = 4000;
-    if (actor->angular_velocity_roll < -4000) actor->angular_velocity_roll = -4000;
-    if (actor->angular_velocity_pitch > 4000) actor->angular_velocity_pitch = 4000;
-    if (actor->angular_velocity_pitch < -4000) actor->angular_velocity_pitch = -4000;
+    /* Vertical spring impact event: original calls FUN_00441d90 (collision sound/rumble)
+     * when bounce_accum > 0x14 (20). We skip the side-effect call but still apply bounce. */
+    /* if (bounce_accum > 0x14) { FUN_00441d90(0x17, bounce_accum*0x32, ...); } */
+
+    /* linear_velocity_y += bounce_accum + gravity
+     * Original: iVar8 = iVar8 + DAT_00467380; *(iVar5+0x1d0) += iVar8;
+     * The gravity constant cancels the subtract in integrate_pose.
+     * bounce_accum == 0 when no spring-grounded wheels (same as before). */
+    actor->linear_velocity_y += bounce_accum + g_gravity_constant;
+
+    if (local_4c > 0) {
+        /* angular_velocity_roll  += (local_64 + local_50/local_4c) / 0x4B0
+         * angular_velocity_pitch += (local_60 + local_5c/local_4c) / 0x226 */
+        int32_t roll_delta  = (local_64 + local_50 / local_4c) / 0x4B0;
+        int32_t pitch_delta = (local_60 + local_5c / local_4c) / 0x226;
+
+        actor->angular_velocity_roll  += roll_delta;
+        actor->angular_velocity_pitch += pitch_delta;
+
+        /* Clamp angular velocities per original switch-case table.
+         * Clamp key controlled by bVar2 (prev-frame bitmask).
+         * Cases 0,1,2,4,6,8,9 → clamp both roll and pitch to ±4000.
+         * Cases 3,C           → clamp roll only.
+         * Cases 5,A           → clamp pitch only. */
+        switch (bVar2 & 0x0F) {
+        case 0: case 1: case 2: case 4: case 6: case 8: case 9:
+            if (actor->angular_velocity_roll  >  4000) actor->angular_velocity_roll  =  4000;
+            if (actor->angular_velocity_roll  < -4000) actor->angular_velocity_roll  = -4000;
+            if (actor->angular_velocity_pitch >  4000) actor->angular_velocity_pitch =  4000;
+            if (actor->angular_velocity_pitch < -4000) actor->angular_velocity_pitch = -4000;
+            break;
+        case 3: case 0xC:
+            if (actor->angular_velocity_roll  >  4000) actor->angular_velocity_roll  =  4000;
+            if (actor->angular_velocity_roll  < -4000) actor->angular_velocity_roll  = -4000;
+            break;
+        case 5: case 0xA:
+            if (actor->angular_velocity_pitch >  4000) actor->angular_velocity_pitch =  4000;
+            if (actor->angular_velocity_pitch < -4000) actor->angular_velocity_pitch = -4000;
+            break;
+        default:
+            break;
+        }
+    }
 }
 
 /* ========================================================================
@@ -2019,10 +2270,14 @@ void td5_physics_integrate_pose(TD5_Actor *actor)
     actor->euler_accum.yaw   += actor->angular_velocity_yaw;
     actor->euler_accum.pitch += actor->angular_velocity_pitch;
 
-    /* 3. Integrate linear velocity into position */
-    actor->world_pos.x += actor->linear_velocity_x;
+    /* 3. Integrate linear velocity into position.
+     * XZ integration is frozen during countdown (DAT_00483030 in original).
+     * Y (vertical) integration is always active for gravity/suspension. */
+    if (!g_xz_freeze) {
+        actor->world_pos.x += actor->linear_velocity_x;
+        actor->world_pos.z += actor->linear_velocity_z;
+    }
     actor->world_pos.y += actor->linear_velocity_y;
-    actor->world_pos.z += actor->linear_velocity_z;
 
     /* 3b. Update chassis track position from new world pos.
      * Original calls FUN_004440F0 here [CONFIRMED @ 0x405E80 callees].
@@ -2105,67 +2360,84 @@ void td5_physics_integrate_pose(TD5_Actor *actor)
      * adds it back after — the add-back in world space effectively raises
      * the chassis by susp_href. We replicate by adding susp_href_world to
      * the per-wheel correction. */
+    /* 8. Ground-snap: direct Y write from wheel contact average.
+     *
+     * Original (0x405E80): accumulates per-wheel Y from local_1c + suspension
+     * spring output, averages over grounded wheels, and DIRECTLY WRITES the
+     * result to world_pos.y. No delta clamp — the chassis position is set
+     * absolutely to the contact surface each tick.
+     *
+     * Per-wheel Y contribution = wheel_world_y + spring_output * -0x100
+     * where wheel_world_y is from RefreshWheelContacts (includes susp_href).
+     */
     {
-        int64_t corr_sum = 0;
-        int corr_count = 0;
+        int64_t contact_y_sum = 0;
+        int contact_count = 0;
         uint8_t gnd_mask = actor->wheel_contact_bitmask;
 
-        /* Compute suspension height reference in world Y.
-         * This is the amount RefreshWheelContacts raised the wheel probe. */
-        int32_t susp_href_world = 0;
-        {
-            int32_t href = (int32_t)CDEF_S(actor, 0x82);
-            if (href != 0) {
-                int32_t href_local = (href * 0xB5) >> 8;
-                float rot4 = actor->rotation_matrix.m[4];
-                susp_href_world = (int32_t)(href_local * rot4 * 256.0f);
-            }
-        }
+        int32_t href = (int32_t)CDEF_S(actor, 0x82);
+        int32_t susp_offset = (href * 0xB5 + ((href * 0xB5) >> 31 & 0xFF)) >> 8;
 
         for (int i = 0; i < 4; i++) {
             if (!(gnd_mask & (1 << i))) {  /* grounded wheel */
-                int32_t g_y = 0;
-                int g_surf = 0;
-                int g_span = actor->track_span_raw;
-                if (td5_track_probe_height(actor->wheel_contact_pos[i].x,
-                                           actor->wheel_contact_pos[i].z,
-                                           g_span, &g_y, &g_surf)) {
-                    /* Ground snap: move chassis so wheels sit on the track surface.
-                     * wheel_contact_pos already includes susp_href offset from
-                     * refresh_wheel_contacts, so g_y - wheel_y gives the correct
-                     * correction without adding susp_href again. */
-                    corr_sum += (int64_t)g_y - (int64_t)actor->wheel_contact_pos[i].y;
-                    corr_count++;
+                /* Wheel Y contribution: ground contact Y + suspension offset
+                 * + spring response. Original (0x403720 → 0x405E80):
+                 * The +sVar3 add-back in RefreshWheelContacts raises each
+                 * wheel Y by susp_offset in world space. This propagates
+                 * through the integrator's averaging to raise world_pos.y
+                 * by susp_offset, placing the chassis at ride height above
+                 * the track surface. */
+                int32_t wheel_y = actor->wheel_contact_pos[i].y;
+                int32_t spring_y = actor->wheel_suspension_pos[i] * -0x100;
+                /* Ride height: original (0x405E80) accumulates
+                 * ground_y + rotated_body_offset * -0x100 per wheel.
+                 * The body offset = (cardef_wy - susp_pos - sVar3).
+                 * Front axle: cardef_wy=-120 → offset=-227 → ride=58112
+                 * Rear axle:  cardef_wy=0   → offset=-107 → ride=27392
+                 * Average ride ≈ 42752 FP = 167 world units.
+                 * Remaining ~60 unit gap to target comes from the original's
+                 * rotation transform + spring-damper interactions on the
+                 * second integrate pass. */
+                int16_t cdef_wy = 0;
+                {
+                    uint8_t *cd = (uint8_t *)actor->car_definition_ptr;
+                    if (cd) cdef_wy = *(int16_t *)(cd + 0x42 + i * 16);
                 }
+                int32_t body_wy = (int32_t)cdef_wy
+                                - actor->wheel_suspension_pos[i]
+                                - susp_offset;
+                int32_t ride_offset = body_wy * -0x100;
+                contact_y_sum += (int64_t)(wheel_y + ride_offset);
+                contact_count++;
             }
         }
-        if (corr_count > 0) {
-            int32_t corr_val = (int32_t)(corr_sum / corr_count);
 
-            /* Clamp ground-snap correction. The ground probe can return wrong
-             * heights for spans with unusual geometry (bridges, scenery),
-             * producing 200K+ corrections that launch or sink the car.
-             * Real steep slopes need ~16K max. Clamp at 32768 (128 world units)
-             * to allow all real gradients while blocking bogus probes. */
-            if (corr_val > 32768) corr_val = 32768;
-            if (corr_val < -32768) corr_val = -32768;
+        if (contact_count > 0) {
+            int32_t new_y = (int32_t)(contact_y_sum / contact_count);
+            /* +0x80 rounding bias matches original (0x405E80 output path) */
+            actor->world_pos.y = new_y + 0x80;
+            actor->render_pos.y = (float)(new_y + 0x80) * (1.0f / 256.0f);
 
-            if (actor->slot_index == 0) {
-                static int s_snap_log = 0;
-                if ((s_snap_log++ % 30) == 0) {
-                    TD5_LOG_I(LOG_TAG,
-                        "SNAP slot0: corr=%d count=%d wheel_y=[%d,%d,%d,%d] pos_y_before=%d",
-                        corr_val, corr_count,
-                        actor->wheel_contact_pos[0].y, actor->wheel_contact_pos[1].y,
-                        actor->wheel_contact_pos[2].y, actor->wheel_contact_pos[3].y,
-                        actor->world_pos.y);
+            /* Update velocity only when vehicle_mode and contact bitmask are
+             * consistent. Original (0x406300) checks DAT_0046318c[vehicle_mode]
+             * and (prev_mask & (vehicle_mode ^ 0xF)) == 0. At spawn with
+             * vehicle_mode=0 and no previous contacts, this doesn't trigger,
+             * preventing the massive velocity spike from the snap delta. */
+            {
+                static const uint8_t k_mode_gate[] = {
+                    0,1,1,0,1,0,1,0,1,1,0,0,1,0,0,0
+                };
+                uint8_t vmode = actor->wheel_contact_bitmask;
+                uint8_t prev_mask = *(uint8_t *)((uint8_t *)actor + 0x37D);
+                if (k_mode_gate[vmode & 0xF] &&
+                    (prev_mask & (vmode ^ 0xF)) == 0) {
+                    actor->linear_velocity_y = new_y - actor->prev_frame_y_position
+                                               - g_gravity_constant;
                 }
             }
-            actor->world_pos.y += corr_val;
-            actor->render_pos.y = (float)actor->world_pos.y * (1.0f / 256.0f);
-            /* Cancel downward velocity: ground is a hard constraint. */
-            if (actor->linear_velocity_y < 0)
-                actor->linear_velocity_y = 0;
+        } else {
+            /* No ground contact: increment airborne counter (original 0x40631A) */
+            actor->frame_counter++;
         }
     }
 
@@ -2301,6 +2573,19 @@ void td5_physics_refresh_wheel_contacts(TD5_Actor *actor)
         actor->wheel_probes[i].sub_lane_index    = (int8_t)actor->track_sub_lane_index;
     }
 
+    /* Save previous-frame wheel contact positions for gap_270 velocity computation.
+     * Original (0x403720): saves old piVar1/piVar8/piVar8[1] before the transform,
+     * then computes arith_round_shift(new_pos - old_pos, 0xFF, 8) per component.
+     * gap_270[i][0..2] = frame-to-frame wheel contact position delta >> 8
+     *   = contact point velocity, used as the spring velocity term in
+     *     UpdateVehicleSuspensionResponse (0x4057F0). */
+    int32_t old_wcp_x[4], old_wcp_y[4], old_wcp_z[4];
+    for (int i = 0; i < 4; i++) {
+        old_wcp_x[i] = actor->wheel_contact_pos[i].x;
+        old_wcp_y[i] = actor->wheel_contact_pos[i].y;
+        old_wcp_z[i] = actor->wheel_contact_pos[i].z;
+    }
+
     /* Per-wheel contact frame computation */
     for (int i = 0; i < 4; i++) {
         /* Get wheel display angle data */
@@ -2310,11 +2595,11 @@ void td5_physics_refresh_wheel_contacts(TD5_Actor *actor)
 
         /* Apply suspension deflection offset + height reference preload.
          * cardef+0x82 is the suspension height reference, scaled by 0xB5/256. */
-        int32_t susp_offset = actor->wheel_suspension_pos[i];
+        int32_t susp_offset_i = actor->wheel_suspension_pos[i];
         int32_t susp_height_ref = (int32_t)CDEF_S(actor, 0x82);
         if (susp_height_ref != 0)
-            susp_offset += (susp_height_ref * 0xB5) >> 8;
-        wy += susp_offset;
+            susp_offset_i += (susp_height_ref * 0xB5) >> 8;
+        wy += susp_offset_i;
 
         /* Transform by body rotation matrix and scale to world coords (<<8) */
         int32_t world_x = (int32_t)(rot[0] * wx + rot[1] * wy + rot[2] * wz);
@@ -2348,11 +2633,24 @@ void td5_physics_refresh_wheel_contacts(TD5_Actor *actor)
         if (probe_span < 0 || probe_span >= g_td5.track_span_ring_length)
             probe_span = actor->track_span_raw;
 
-        if (td5_track_probe_height(actor->wheel_contact_pos[i].x,
-                                   actor->wheel_contact_pos[i].z,
-                                   probe_span,
-                                   (int *)&ground_y,
-                                   &surface_type)) {
+        /* Use the wheel probe's own sub_lane for height computation.
+         * The original (0x403720 → 0x4457E0) passes the per-wheel probe
+         * state directly, which has its own sub_lane from the track
+         * position update. Our td5_track_probe_height re-computes the
+         * lane via boundary testing which may pick a different lane.
+         *
+         * Also retrieve the span surface normal, which the original writes to
+         * actor+0x250+i*8 (wheel_contact_velocities[i]) via FUN_00445A70.
+         * This normal is the "wcv" consumed by UpdateVehicleSuspensionResponse
+         * (0x4057F0) as the contact surface direction vector. */
+        int16_t span_normal[3] = {0, 4096, 0};  /* default: flat upward normal (magnitude 4096) */
+        {
+            int probe_lane = actor->wheel_probes[i].sub_lane_index;
+            ground_y = td5_track_compute_contact_height_with_normal(
+                probe_span, probe_lane,
+                actor->wheel_contact_pos[i].x,
+                actor->wheel_contact_pos[i].z,
+                span_normal);
             probe_ok = 1;
             if (!resolved_surface_valid) {
                 resolved_surface = surface_type;
@@ -2360,7 +2658,41 @@ void td5_physics_refresh_wheel_contacts(TD5_Actor *actor)
             }
         }
 
+        /* Write surface normal to wheel_contact_velocities[i][0..2] (actor+0x250+i*8).
+         * Original: FUN_00445A70 computes cross-product of span edge vectors >> 12,
+         * then FUN_0042CD40 normalizes to magnitude 4096. For flat ground: (0, 4096, 0).
+         * The previous attempt used unnormalized values (~0x7FFF), ~8x too large,
+         * which caused the spring path dot product to produce ~14x too strong forces. */
+        /* wcv (surface normal at 0x250) and gap_270 (contact velocity at 0x270)
+         * are left at zero. Enabling them requires the full RefreshWheelContacts
+         * body-space→world transform pipeline to produce correct per-frame deltas.
+         * The port's simplified ground-snap creates Y deltas ~100x larger than
+         * the original's per-wheel spring system, making the suspension spring
+         * path produce runaway roll. Fixing this requires reimplementing the
+         * original's FUN_00403720 transform chain, not just populating the fields. */
+        (void)span_normal;
+
+        /* Original order in FUN_00403720:
+         *   1. force = (wheel_y - ground_y) + gravity_offset
+         *   2. gap_270 = (new_pos - old_pos) >> 8   ← BEFORE Y-snap
+         *   3. dead zone on force
+         *   4. Y-snap if grounded
+         * The gap_270 Y component uses the TRANSFORM-computed Y, not ground-snapped Y.
+         * This ensures the velocity reflects the body's actual motion, not the snap. */
+
+        /* Compute force (uses original wheel_y before snap) */
         int32_t force = (wheel_y - ground_y) >> 8;
+
+        /* gap_270[i] = frame-to-frame wheel contact position delta >> 8.
+         * old_wcp was saved at function entry — these are the previous frame's
+         * final wheel_contact_pos values (post-transform, post-snap from last frame).
+         * Current wheel_contact_pos has this frame's transform result but NOT yet
+         * the Y-snap, matching the original's write order. */
+        /* gap_270[i] = frame-to-frame wheel contact position delta >> 8.
+         * Skip on first frame (old_wcp is zero from spawn) to avoid huge deltas.
+         * The original's ResetVehicleActorState (0x405D70) calls integrate_pose
+         * which sets wheel_contact_pos, so subsequent frames have valid old values. */
+        /* gap_270 write disabled — see wcv comment above */
 
         /* Dead zone */
         if (force > -0x200 && force < 0x200)
@@ -2377,9 +2709,10 @@ void td5_physics_refresh_wheel_contacts(TD5_Actor *actor)
             force = 12000;
         } else {
             actor->wheel_contact_bitmask &= ~(1 << i);
-            /* Snap wheel Y to ground surface when grounded and probe succeeded */
-            if (probe_ok)
-                actor->wheel_contact_pos[i].y = ground_y;
+            /* Snap wheel Y to ground surface when grounded.
+             * Original (0x403720) unconditionally snaps without checking
+             * probe success — the track update above ensures a valid span. */
+            actor->wheel_contact_pos[i].y = ground_y;
         }
 
         /* Store high-res wheel world position */
@@ -2502,12 +2835,31 @@ void td5_physics_reset_actor_state(TD5_Actor *actor)
     /* Reset engine RPM to idle */
     actor->engine_speed_accum = TD5_ENGINE_IDLE_RPM;
 
-    /* Clear wheel contact and suspension state */
+    /* Initialize wheel contact and suspension state.
+     * In the original, the suspension spring-damper (0x4057F0) converges
+     * wheel_suspension_pos to a steady-state value over multiple ticks.
+     * Since our spring-damper is simplified, we initialize to the
+     * steady-state deflection derived from the cardef suspension
+     * geometry. The exact value depends on the cardef spring constants;
+     * the heuristic below (susp_href / 2) produces the correct ride
+     * height for the cars tested. */
     actor->wheel_contact_bitmask = 0;
-    for (int i = 0; i < 4; i++) {
-        actor->wheel_suspension_pos[i] = 0;
-        actor->wheel_suspension_vel[i] = 0;
-        actor->wheel_force_accum[i] = 0;
+    {
+        int32_t href = 0;
+        uint8_t *cd = (uint8_t *)actor->car_definition_ptr;
+        if (cd) {
+            int16_t sh = *(int16_t *)(cd + 0x82);
+            href = (sh * 0xB5 + ((sh * 0xB5) >> 31 & 0xFF)) >> 8;
+        }
+        /* Steady-state deflection ≈ href * 5/9 (from trace-matching:
+         * the original's spring-damper converges susp_pos to ~59.5
+         * when href=107, giving the correct ride height). */
+        int16_t ss = (int16_t)((href * 5 + 4) / 9);
+        for (int i = 0; i < 4; i++) {
+            actor->wheel_suspension_pos[i] = ss;
+            actor->wheel_suspension_vel[i] = 0;
+            actor->wheel_force_accum[i] = 0;
+        }
     }
     actor->center_suspension_pos = 0;
     actor->center_suspension_vel = 0;
@@ -3353,6 +3705,14 @@ void td5_physics_set_paused(int paused)
     if (g_game_paused != paused) {
         TD5_LOG_I(LOG_TAG, "Physics paused=%d", paused);
         g_game_paused = paused;
+    }
+}
+
+void td5_physics_set_xz_freeze(int freeze)
+{
+    if (g_xz_freeze != freeze) {
+        TD5_LOG_I(LOG_TAG, "XZ freeze=%d (DAT_00483030)", freeze);
+        g_xz_freeze = freeze;
     }
 }
 

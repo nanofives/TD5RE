@@ -14,7 +14,6 @@
  *   0x40AC00  PrepareMeshResource
  *   0x434FE0  UpdateActorTrackBehavior (AI path-following)
  *   0x436A70  UpdateRaceActors
- *   0x42F5B0  UpdateRaceOrder
  *   0x435930  InitializeTrafficActorsFromQueue
  *   0x435310  RecycleTrafficActorFromQueue
  */
@@ -151,9 +150,6 @@ void td5_track_update_light_directions(void);
  * Calls td5_physics_wall_response for each penetration. */
 void td5_track_resolve_wall_contacts(TD5_Actor *actor);
 
-/* --- Race order --- */
-void td5_track_update_race_order(void);
-
 /* --- Traffic --- */
 void td5_track_init_traffic_from_queue(void);
 void td5_track_recycle_traffic_actor(void);
@@ -168,11 +164,18 @@ int  td5_track_normalize_actor_wrap(TD5_Actor *actor);
 /* --- Checkpoint detection --- */
 int  td5_track_check_checkpoint(TD5_Actor *actor);
 
-/* --- Circuit lap tracking (0x434DA0) --- */
-int  td5_track_update_circuit_lap(TD5_Actor *actor, int slot);
+/* --- Route heading helpers --- */
+int  td5_track_get_primary_route_heading(int span_index);
 
 /* --- Signed spline distance (0x434670) --- */
 int32_t td5_track_compute_spline_position(int span_index, int segment_distance,
                                            int route_lane);
+
+/* --- AI target point sampling (0x434800) ---
+ * Computes world-space XZ target for AI look-ahead by interpolating between
+ * strip vertices using route_byte, then applying perpendicular lateral_bias.
+ * Returns 24.8 fixed-point coordinates. Returns 1 on success, 0 on failure. */
+int  td5_track_sample_target_point(int span_index, int route_byte,
+                                    int *out_x, int *out_z, int lateral_bias);
 
 #endif /* TD5_TRACK_H */

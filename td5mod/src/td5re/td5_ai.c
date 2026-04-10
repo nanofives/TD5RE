@@ -1344,26 +1344,22 @@ void td5_ai_update_track_behavior(int slot) {
                     (int)span, seg_dist, route_lane_val);
             }
 
-            /* (b) Get target world position from track
-             * Original uses SampleTrackTargetPoint with route_byte interpolation;
-             * we use td5_track_get_span_lane_world which gives the track lane
-             * center — functionally equivalent for steering purposes. */
+            /* (b) Get target world position via SampleTrackTargetPoint
+             * [CONFIRMED @ 0x434800: 2-vertex interpolation with route_byte + lateral bias]
+             * route_byte from route table controls left-right interpolation (0-255).
+             * lateral_bias from RS_TRACK_OFFSET_BIAS applies perpendicular peer avoidance. */
             {
-                int target_x = 0, target_y = 0, target_z = 0;
-                int sub_lane = (int)ACTOR_U8(actor, ACTOR_SUB_LANE_INDEX);
+                int target_x = 0, target_z = 0;
+                int route_byte = 128; /* default: center of span */
+                int lateral_bias = rs[RS_TRACK_OFFSET_BIAS];
 
-                /* Apply lateral offset bias from route table if available */
                 const uint8_t *route_bytes = (const uint8_t *)(intptr_t)rs[RS_ROUTE_TABLE_PTR];
                 if (route_bytes) {
-                    int route_byte = (int)route_bytes[(size_t)(unsigned)target_span * 3u];
-                    /* Route byte 0=left edge, ~128=center, 255=right edge.
-                     * Map to sub_lane for position query */
-                    (void)route_byte; /* Used by SampleTrackTargetPoint for interpolation;
-                                       * td5_track_get_span_lane_world uses sub_lane index */
+                    route_byte = (int)route_bytes[(size_t)(unsigned)target_span * 3u];
                 }
 
-                if (td5_track_get_span_lane_world(target_span, sub_lane,
-                                                   &target_x, &target_y, &target_z)) {
+                if (td5_track_sample_target_point(target_span, route_byte,
+                                                   &target_x, &target_z, lateral_bias)) {
                     /* (c) Delta vector: target - actor, shift from 24.8 FP to integer
                      * [CONFIRMED @ 0x4352A1-0x4352C8] */
                     int32_t actor_x = ACTOR_I32(actor, ACTOR_WORLD_POS_X);
