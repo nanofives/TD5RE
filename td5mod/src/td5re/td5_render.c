@@ -2424,7 +2424,6 @@ void td5_render_draw_sky(void)
         s_render_transform.m[9]  = 0.0f;
         s_render_transform.m[10] = 0.0f;
         s_render_transform.m[11] = 0.0f;
-        TD5_LOG_I(RENDER_LOG_TAG, "sky: camera-centered dome, translation zeroed");
         td5_render_transform_mesh_vertices(s_sky_mesh);
         td5_render_prepared_mesh(s_sky_mesh);
         s_scene_has_renderer_geometry = 1;
