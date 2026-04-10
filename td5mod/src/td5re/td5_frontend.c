@@ -337,6 +337,7 @@ static FE_Surface s_surfaces[FE_MAX_SURFACES];
 static int s_white_tex_page = -1;
 static int s_background_surface = 0;
 static int s_carsel_bg_surface = 0;     /* unused — background inherited from RaceMenu.tga via s_background_surface */
+static int s_carsel_fill_surface = 0;  /* 1x1 solid blue pixel for car preview area fill */
 static int s_carsel_bar_surface = 0;
 static int s_carsel_curve_surface = 0;
 static int s_carsel_topbar_surface = 0;
@@ -1401,25 +1402,146 @@ static const int s_ext_car_to_type_index[37] = {
      6, 24, 21, 30, 28, 27, 29
 };
 
+/*
+ * Difficulty tier table — 8 tiers × 6 ext car IDs.
+ * From original binary @ 0x463e10 [CONFIRMED].
+ * Default/single-race path picks rand() % 6 into the tier row.
+ */
+static const int8_t s_difficulty_tier_cars[8][6] = {
+    { 10, 14,  7,  4, 11,  9 },  /* tier 0 */
+    {  9,  6,  3, 13, 12,  0 },  /* tier 1 */
+    { 22, 24, 16, 17, 19, 18 },  /* tier 2 */
+    {  0,  0,  7,  2, 17, 33 },  /* tier 3 */
+    { 22, 31, 32, 34, 18, 14 },  /* tier 4 */
+    {  1, 15, 13,  9, 11,  5 },  /* tier 5 */
+    {  0, 35,  8,  3,  4, 12 },  /* tier 6 */
+    { 26, 10, 36, 16, 19, 25 },  /* tier 7 */
+};
+
+/* Check if ext_id is already used by any active slot */
+static int frontend_ai_ext_id_taken(int ext_id, const int *slot_ext_ids,
+                                    const int *slot_active, int count) {
+    for (int i = 0; i < count; i++) {
+        if (slot_active[i] && slot_ext_ids[i] == ext_id)
+            return 1;
+    }
+    return 0;
+}
+
 static void frontend_init_race_schedule(void) {
     int i;
+    int slot_active[TD5_MAX_RACER_SLOTS]  = {0};
+    int slot_ext_id[TD5_MAX_RACER_SLOTS]  = {0};
+    int slot_variant[TD5_MAX_RACER_SLOTS] = {0};
+    int start_slot = 1;
+
     g_td5.race_requested = 1;
     g_td5.car_index   = frontend_current_car_index();
     g_td5.track_index = (s_current_screen == TD5_SCREEN_ATTRACT_MODE)
                         ? s_attract_track
                         : s_selected_track;
 
-    /* Assign AI car types per slot from the cup schedule.
-     * For quick race the schedule defaults to ext_id 0 for all slots → XKR (type 7).
-     * Cup modes should override s_cup_schedule_track[] before calling this. */
-    for (i = 1; i < TD5_MAX_RACER_SLOTS; i++) {
-        g_td5.ai_car_indices[i] = s_ext_car_to_type_index[0]; /* default: XKR */
+    /* Slot 0 = player, always active */
+    slot_active[0]  = 1;
+    slot_ext_id[0]  = s_selected_car;
+    slot_variant[0] = s_selected_paint;
+
+    /* Two-player setup [CONFIRMED @ 0x0040daf0]:
+     * If two-player mode or game type 7 (time trial), slot 1 = player 2's car */
+    if (s_two_player_mode || s_selected_game_type == 7) {
+        slot_active[1]  = 1;
+        slot_ext_id[1]  = s_p2_car;
+        slot_variant[1] = 0;
+        start_slot = 2;
+        TD5_LOG_I(LOG_TAG, "InitRaceSchedule: P2 slot1 ext_id=%d", s_p2_car);
     }
 
-    TD5_LOG_I(LOG_TAG, "InitializeRaceSeriesSchedule: car=%d (resolved=%d) track=%d level=%d screen=%d type=%d",
+    srand(timeGetTime());
+
+    if (s_selected_game_type == 2) {
+        /* === Path 1: Quick Race (gameType == 2, Era) [CONFIRMED @ 0x0040dac0] ===
+         * Random ext_id in 0..7; if player car > 7, shift to 8..15 (class match).
+         * Dedup: reject if any active slot already has this ext_id. */
+        for (i = start_slot; i < TD5_MAX_RACER_SLOTS; i++) {
+            int ext_id;
+            int attempts = 0;
+            do {
+                ext_id = rand() & 7;
+                if (s_selected_car > 7)
+                    ext_id += 8;
+                rand(); /* third rand() call discarded per original */
+                if (++attempts > 100) break; /* safety */
+            } while (frontend_ai_ext_id_taken(ext_id, slot_ext_id, slot_active,
+                                               TD5_MAX_RACER_SLOTS));
+            slot_active[i]  = 1;
+            slot_ext_id[i]  = ext_id;
+            slot_variant[i] = rand() & 3;
+            TD5_LOG_I(LOG_TAG, "InitRaceSchedule: quick-race slot%d ext_id=%d var=%d",
+                      i, ext_id, slot_variant[i]);
+        }
+    } else if (s_selected_game_type == 5) {
+        /* === Path 2: Cup/Masters (gameType == 5) [CONFIRMED @ 0x0040dac0] ===
+         * Scans s_masters_roster_flags[] for state==1 entries, claims them (sets to 2),
+         * reads ext car id from s_masters_roster[]. */
+        for (i = start_slot; i < TD5_MAX_RACER_SLOTS; i++) {
+            int found = 0;
+            for (int j = 0; j < 15; j++) {
+                if (s_masters_roster_flags[j] == 1) {
+                    s_masters_roster_flags[j] = 2; /* claimed */
+                    slot_active[i]  = 1;
+                    slot_ext_id[i]  = s_masters_roster[j];
+                    slot_variant[i] = rand() % 3;
+                    found = 1;
+                    TD5_LOG_I(LOG_TAG, "InitRaceSchedule: cup slot%d roster[%d] ext_id=%d var=%d",
+                              i, j, slot_ext_id[i], slot_variant[i]);
+                    break;
+                }
+            }
+            if (!found) {
+                TD5_LOG_W(LOG_TAG, "InitRaceSchedule: cup slot%d no roster entry available", i);
+            }
+        }
+    } else {
+        /* === Path 3: Default (single race, all other types) [CONFIRMED @ 0x0040dac0] ===
+         * Pick from difficulty tier table: rand() % 6 into row[g_td5.difficulty]. */
+        int tier = (int)g_td5.difficulty;
+        if (tier < 0 || tier > 7) tier = 2; /* default tier */
+        for (i = start_slot; i < TD5_MAX_RACER_SLOTS; i++) {
+            int ext_id;
+            int attempts = 0;
+            do {
+                int tier_idx = rand() % 6;
+                ext_id = s_difficulty_tier_cars[tier][tier_idx];
+                rand(); /* third rand() call discarded per original */
+                if (++attempts > 100) break;
+            } while (frontend_ai_ext_id_taken(ext_id, slot_ext_id, slot_active,
+                                               TD5_MAX_RACER_SLOTS));
+            slot_active[i]  = 1;
+            slot_ext_id[i]  = ext_id;
+            slot_variant[i] = rand() & 3;
+            TD5_LOG_I(LOG_TAG, "InitRaceSchedule: default slot%d tier=%d ext_id=%d var=%d",
+                      i, tier, ext_id, slot_variant[i]);
+        }
+    }
+
+    /* Convert ext_ids to type indices and store in g_td5 */
+    for (i = 1; i < TD5_MAX_RACER_SLOTS; i++) {
+        if (slot_active[i] && slot_ext_id[i] >= 0 && slot_ext_id[i] < 37) {
+            g_td5.ai_car_indices[i]  = s_ext_car_to_type_index[slot_ext_id[i]];
+            g_td5.ai_car_variants[i] = slot_variant[i];
+        } else {
+            g_td5.ai_car_indices[i]  = s_ext_car_to_type_index[0]; /* fallback: XKR */
+            g_td5.ai_car_variants[i] = 0;
+        }
+    }
+
+    TD5_LOG_I(LOG_TAG, "InitializeRaceSeriesSchedule: car=%d (resolved=%d) track=%d level=%d screen=%d type=%d ai=[%d,%d,%d,%d,%d]",
               s_selected_car, g_td5.car_index, g_td5.track_index,
               td5_asset_level_number(g_td5.track_index),
-              s_current_screen, s_selected_game_type);
+              s_current_screen, s_selected_game_type,
+              g_td5.ai_car_indices[1], g_td5.ai_car_indices[2],
+              g_td5.ai_car_indices[3], g_td5.ai_car_indices[4],
+              g_td5.ai_car_indices[5]);
 }
 
 static int frontend_find_display_mode_index(int width, int height, int bpp) {
@@ -2351,6 +2473,7 @@ void td5_frontend_set_screen(TD5_ScreenIndex index) {
     }
     s_background_surface = preserved_background;
     s_carsel_bg_surface = 0;
+    s_carsel_fill_surface = 0;
     s_carsel_bar_surface = 0;
     s_carsel_curve_surface = 0;
     s_carsel_topbar_surface = 0;
@@ -3371,58 +3494,60 @@ static void frontend_render_car_selection_preview(float sx, float sy) {
     float sw = sx * 640.0f;
     float sh = sy * 480.0f;
 
-    /* Overlay UI elements: animated during state 2, static otherwise.
-     * State 2 formula (0x40DFC0): bar+curve slide from right (636→36, 8px/frame @30fps);
-     * topbar slides from left (-532→0, 8px/frame @30fps); 75 frames total = ~2500ms.
-     * CarSelBar1: fully opaque (0% black pixels) → fe_draw_surface_opaque.
-     * CarSelCurve (14% black corner fill) and CarSelTopBar (45% black bg) are loaded with
-     * TD5_COLORKEY_BLACK → drawn with fe_draw_surface_rect (alpha-blended, black=transparent). */
+    /* Layer 1: Solid dark blue fill — drawn FIRST so overlays render on top.
+     * Original DDraw renderer preserves pixels between frames; our clear-per-frame
+     * D3D11 renderer needs an explicit fill to produce the same visual.
+     * BGRA 0xFF00005C = RGB(0, 0, 92) — matches CarSelBar1 dominant pixel.
+     *
+     * During state 2 (slide-in): fill tracks the bar position, growing from right.
+     * After slide-in: fill covers the full content area (x=60..640, y=0..464). */
+    {
+        uint32_t fill_color = 0xFF00005C; /* BGRA: B=0x5C(92), G=0, R=0, A=0xFF */
+        if (s_inner_state == 2) {
+            float t = frontend_clamp01((float)(td5_plat_time_ms() - s_anim_start_ms) * 2.0f / 2500.0f);
+            float bar_x = 636.0f - (636.0f - 36.0f) * t;
+            float fill_x = bar_x + 24.0f;
+            td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
+            fe_draw_quad(fill_x * sx, 0.0f * sy, (640.0f - fill_x) * sx, 408.0f * sy,
+                         fill_color, s_white_tex_page, 0, 0, 1, 1);
+        } else {
+            td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
+            fe_draw_quad(60.0f * sx, 0.0f * sy, 580.0f * sx, 408.0f * sy,
+                         fill_color, s_white_tex_page, 0, 0, 1, 1);
+        }
+    }
+
+    /* Layer 2: Overlay UI elements on top of the fill.
+     * State 2: bar+curve slide from right (636→36); topbar slides from left (-532→0).
+     * CarSelBar1: fully opaque solid bar → fe_draw_surface_opaque.
+     * CarSelCurve + CarSelTopBar: color-keyed black (alpha=0) → fe_draw_surface_rect
+     * so transparent pixels show whatever is behind (fill or background during anim). */
     if (s_inner_state == 2) {
         float t = frontend_clamp01((float)(td5_plat_time_ms() - s_anim_start_ms) * 2.0f / 2500.0f);
-        float bar_x    = 636.0f - (636.0f - 36.0f) * t;   /* right→left: 636 → 36 */
-        float topbar_x = -532.0f + 532.0f * t;             /* left→right: -532 → 0 */
+        float bar_x    = 636.0f - (636.0f - 36.0f) * t;
+        float topbar_x = -532.0f + 532.0f * t;
         if (s_carsel_topbar_surface > 0)
             fe_draw_surface_rect(s_carsel_topbar_surface, topbar_x * sx,  45.0f * sy, 532.0f * sx,  36.0f * sy, 0xFFFFFFFF);
         if (s_carsel_bar_surface > 0)
             fe_draw_surface_opaque(s_carsel_bar_surface,   bar_x * sx,   0.0f * sy,  24.0f * sx, 408.0f * sy, 0xFFFFFFFF);
         if (s_carsel_curve_surface > 0)
             fe_draw_surface_rect(s_carsel_curve_surface, bar_x * sx, 408.0f * sy,  80.0f * sx,  56.0f * sy, 0xFFFFFFFF);
+        /* Bottom strip: flat fill from right of curve to screen edge */
+        td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
+        fe_draw_quad((bar_x + 80.0f) * sx, 408.0f * sy, (640.0f - bar_x - 80.0f) * sx, 56.0f * sy,
+                     0xFF00005C, s_white_tex_page, 0, 0, 1, 1);
     } else {
-        /* CarSelTopBar (532x36): x=0, y=45; CarSelBar1 (24x408): x=36, y=0;
-         * CarSelCurve  (80x56): x=36, y=408 */
         if (s_carsel_topbar_surface > 0)
             fe_draw_surface_rect(s_carsel_topbar_surface,  0.0f * sx,  45.0f * sy, 532.0f * sx,  36.0f * sy, 0xFFFFFFFF);
         if (s_carsel_bar_surface > 0)
             fe_draw_surface_opaque(s_carsel_bar_surface,    36.0f * sx,   0.0f * sy,  24.0f * sx, 408.0f * sy, 0xFFFFFFFF);
         if (s_carsel_curve_surface > 0)
             fe_draw_surface_rect(s_carsel_curve_surface,  36.0f * sx, 408.0f * sy,  80.0f * sx,  56.0f * sy, 0xFFFFFFFF);
+        /* Bottom strip: flat fill from right of curve (x=116) to screen edge */
+        td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
+        fe_draw_quad(116.0f * sx, 408.0f * sy, 524.0f * sx, 56.0f * sy,
+                     0xFF00005C, s_white_tex_page, 0, 0, 1, 1);
     }
-
-    /* Car preview area: solid dark blue fill matching CarSelBar1 color (R=0,G=0,B=92).
-     * Original: FillPrimaryFrontendRect(0x5c, x, y, 0x198, 300) at states 10 and 14
-     * (0x40DFC0). 0x5c = RGB888 B=92 → same dark blue as CarSelBar1 dominant pixel.
-     * Rect matches car preview surface: 408x300 starting at (232, 124).
-     * Original y = screenH - 0x164 = 480 - 356 = 124 (confirmed at 0x40EB3B).
-     * Force blend + depth states directly (same pattern as fe_draw_surface_rect) to
-     * bypass any stale D3D11 state cache that would prevent the fill from rendering. */
-    TD5_LOG_I(LOG_TAG, "car_sel_fill: inner=%d white=%d", s_inner_state, s_white_tex_page);
-    td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
-    if (g_backend.context) {
-        if (g_backend.blend_states[BLEND_SRCALPHA_INVSRC]) {
-            ID3D11DeviceContext_OMSetBlendState(g_backend.context,
-                g_backend.blend_states[BLEND_SRCALPHA_INVSRC], NULL, 0xFFFFFFFF);
-            g_backend.state.current_blend_idx = BLEND_SRCALPHA_INVSRC;
-        }
-        if (g_backend.ds_states[DS_Z_OFF_WRITE_OFF]) {
-            ID3D11DeviceContext_OMSetDepthStencilState(g_backend.context,
-                g_backend.ds_states[DS_Z_OFF_WRITE_OFF], 0);
-            g_backend.state.current_ds_idx = DS_Z_OFF_WRITE_OFF;
-        }
-    }
-    Backend_UpdateFogCB();
-    fe_draw_quad(232.0f * sx, 124.0f * sy, 408.0f * sx, 300.0f * sy,
-                 0xFF00005C, -1, 0, 0, 1, 1);
-    td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
 
     if (s_inner_state == 15) {
         /* Stats sub-screen: car image at 35% opacity over the blue panel background,
@@ -3446,8 +3571,9 @@ static void frontend_render_car_selection_preview(float sx, float sy) {
             float x = 1832.0f - 1600.0f * t;  /* 1832 → 232 [CONFIRMED @ 0x0040DF4A] */
             TD5_LOG_I(LOG_TAG, "car_sel: slide-in x=%.0f t=%.2f", x, t);
             fe_draw_surface_rect(s_car_preview_surface, x * sx, 124.0f * sy, 408.0f * sx, 280.0f * sy, 0xFFFFFFFF);
-        } else if (s_inner_state != 12 && s_inner_state != 13 && s_car_preview_surface > 0) {
-            /* Static: states 12/13 are pass-through transition ticks — skip to avoid 1-frame flash */
+        } else if (s_inner_state >= 6 && s_inner_state != 12 && s_inner_state != 13 && s_car_preview_surface > 0) {
+            /* Static car display: skip during init+slide-in (states 0-5) and
+             * pass-through transition ticks (12/13) to avoid premature display */
             fe_draw_surface_rect(s_car_preview_surface, 232.0f * sx, 124.0f * sy, 408.0f * sx, 280.0f * sy, 0xFFFFFFFF);
         }
     }
@@ -6279,16 +6405,49 @@ static void Screen_CarSelection(void) {
         TD5_LOG_D(LOG_TAG, "CarSelection: state 0 - init");
         s_anim_complete = 0;
 
+        /* Reload MainMenu.tga background so that returning from TrackSelection
+         * (which loads TrackSelect.tga) restores the correct background.
+         * Original relies on preserved primary surface from RaceTypeCategory
+         * (0x4168B0 loads MainMenu.tga at 0x00416940), but our clear-per-frame
+         * renderer needs the background surface explicitly set.
+         * [CONFIRMED @ Ghidra 0x00416940: RaceTypeCategory loads MainMenu.tga] */
+        frontend_load_tga("Front_End/MainMenu.tga", "Front_End/FrontEnd.zip");
+
         /* Load overlay UI assets.
-         * CarSelBar1 has no black pixels — fully opaque, use frontend_load_tga.
-         * CarSelCurve (~14% black corner fill) and CarSelTopBar (~45% black bg)
-         * must be loaded with TD5_COLORKEY_BLACK so black pixels become alpha=0. */
+         * All three overlays use opaque blit (flag 0x10) in the original binary
+         * [CONFIRMED @ Ghidra 0x0040E1CD–0x0040E20F: all loaded via FUN_00412030].
+         * CarSelCurve and CarSelTopBar have black areas that are intentionally
+         * opaque — they cover the background, not show through it. */
         s_carsel_bar_surface    = frontend_load_tga("Front_End/CarSelBar1.tga",   "Front_End/FrontEnd.zip");
-        s_carsel_curve_surface  = frontend_load_surface_keyed("CarSelCurve.tga",  "Front_End/FrontEnd.zip", TD5_COLORKEY_BLACK);
-        s_carsel_topbar_surface = frontend_load_surface_keyed("CarSelTopBar.tga", "Front_End/FrontEnd.zip", TD5_COLORKEY_BLACK);
+        s_carsel_curve_surface  = frontend_load_tga("Front_End/CarSelCurve.tga",  "Front_End/FrontEnd.zip");
+        s_carsel_topbar_surface = frontend_load_tga("Front_End/CarSelTopBar.tga", "Front_End/FrontEnd.zip");
         s_graphbars_surface     = frontend_load_tga("Front_End/GraphBars.tga",    "Front_End/FrontEnd.zip");
-        /* Background: original preserved the previous screen's primary surface (RaceMenu.tga
-         * set by RaceTypeCategory). s_background_surface carries it forward automatically. */
+
+        /* Create 1x1 solid blue fill surface for the car preview background.
+         * Original uses FillPrimaryFrontendRect(0x5c, ...) which fills the
+         * DDraw primary surface directly. Our renderer clears each frame, so
+         * we create a tiny fill texture drawn via fe_draw_surface_opaque —
+         * the same proven path used by the overlay TGAs above. */
+        {
+            int slot = -1;
+            for (int i = 0; i < FE_MAX_SURFACES; i++) {
+                if (!s_surfaces[i].in_use) { slot = i; break; }
+            }
+            if (slot >= 0) {
+                int page = FE_SURFACE_PAGE_BASE + slot;
+                /* BGRA pixel: B=0x5C(92), G=0, R=0, A=0xFF */
+                uint32_t blue_pixel = 0xFF00005C;
+                if (td5_plat_render_upload_texture(page, &blue_pixel, 1, 1, 2)) {
+                    s_surfaces[slot].in_use = 1;
+                    s_surfaces[slot].tex_page = page;
+                    s_surfaces[slot].width = 1;
+                    s_surfaces[slot].height = 1;
+                    strncpy(s_surfaces[slot].source_name, "_fill_blue", sizeof(s_surfaces[slot].source_name) - 1);
+                    s_carsel_fill_surface = slot + 1;
+                    TD5_LOG_I(LOG_TAG, "CarSel: blue fill surface created: slot=%d page=%d", slot, page);
+                }
+            }
+        }
 
         /* Determine car roster range by game type */
         s_car_roster_min = 0;

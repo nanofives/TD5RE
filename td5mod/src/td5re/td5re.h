@@ -138,8 +138,10 @@ typedef struct TD5_GlobalState {
     int  traffic_enabled;
     int  special_encounter_enabled;
     int  circuit_lap_count;
+    int  checkpoint_timers_enabled;
     int  race_rule_variant;
     int  reverse_direction;
+    int  dynamics_mode;  /* 0=arcade, 1=simulation */
 
     /* Viewport */
     int  render_width;
@@ -165,6 +167,7 @@ typedef struct TD5_GlobalState {
     int     track_index;
     int     car_index;
     int     ai_car_indices[6];  /* per-slot car index for AI racers (slot 1-5) */
+    int     ai_car_variants[6]; /* per-slot color variant (0..3) */
 
     /* Frontend */
     int  frontend_screen_index;
@@ -175,6 +178,38 @@ typedef struct TD5_GlobalState {
     int  race_end_fade_state;
     int  fade_direction;
     int  total_actor_count;
+
+    /* INI defaults (loaded from td5re.ini by main.c) */
+    struct {
+        /* Display */
+        int  fog_enabled;
+        int  speed_units;
+        int  camera_damping;
+        /* Audio */
+        int  sfx_volume;
+        int  music_volume;
+        int  sfx_mode;
+        /* Game options */
+        int  laps;
+        int  checkpoint_timers;
+        int  traffic;
+        int  cops;
+        int  difficulty;
+        int  dynamics;
+        int  collisions;
+        /* Defaults */
+        int  default_car;
+        int  default_track;
+        int  default_game_type;
+        int  skip_intro;
+        int  debug_overlay;
+        /* Trace */
+        int  race_trace_enabled;
+        int  race_trace_slot;
+        int  race_trace_max_frames;
+        int  auto_throttle;         /* 1 = force full throttle for slot 0 */
+        int  loaded;  /* 1 once INI has been read */
+    } ini;
 
 } TD5_GlobalState;
 
