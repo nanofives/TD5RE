@@ -1274,6 +1274,13 @@ int td5_game_run_race_frame(void) {
         /* --- Input polling --- */
         td5_input_poll_race_session();
 
+        /* --- Camera angle caching (per viewport) --- */
+        /* Original (0x0042b84e) gates camera inside the pause-flag check.
+         * Camera must tick during countdown but NOT during pause menu. */
+        if (!s_pause_menu_active) {
+            td5_camera_tick();
+        }
+
         /* --- Pause menu (ESC toggles) --- */
         int esc_now = td5_plat_input_key_pressed(0x01);
         int esc_edge = (esc_now && !s_prev_esc_state);
@@ -1386,11 +1393,6 @@ int td5_game_run_race_frame(void) {
             continue;
         }
         td5_physics_set_paused(0);
-
-        /* --- Camera angle caching (per viewport) --- */
-        /* Original gates camera updates behind pause flag (0x0042b84e).
-         * Must not tick camera when paused — FP drift causes visible shaking. */
-        td5_camera_tick();
 
         /* Input record/playback is handled inside td5_input_poll_race_session(). */
 
