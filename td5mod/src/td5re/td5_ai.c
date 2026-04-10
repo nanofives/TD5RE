@@ -2114,3 +2114,31 @@ static void ai_update_single_traffic(int slot) {
     td5_ai_update_traffic_route_plan(slot);
     /* UpdateTrafficActorMotion(slot) would follow in the physics module */
 }
+
+/* ========================================================================
+ * Per-frame AI setup — rubber-band + route state refresh.
+ * Called once before the interleaved per-actor loop.
+ * Matches the top of UpdateRaceActors (0x436A70) before the actor loop.
+ * ======================================================================== */
+void td5_ai_pre_tick(void) {
+    td5_ai_compute_rubber_band();
+    td5_ai_refresh_route_state();
+    g_ai_frame_counter++;
+}
+
+/* ========================================================================
+ * Per-actor AI dispatch — call for each slot before physics.
+ * Matches the per-actor body of UpdateRaceActors (0x436A70):
+ *   racer slots: ai_update_single_racer(slot) [CONFIRMED @ 0x436E1D]
+ *   traffic slots: ai_update_single_traffic(slot)
+ * ======================================================================== */
+void td5_ai_update_actor(int slot) {
+    if (slot < 0 || slot >= g_active_actor_count)
+        return;
+
+    if (slot < TD5_MAX_RACER_SLOTS) {
+        ai_update_single_racer(slot);
+    } else {
+        ai_update_single_traffic(slot);
+    }
+}

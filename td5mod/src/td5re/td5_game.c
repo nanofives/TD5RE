@@ -1384,8 +1384,21 @@ int td5_game_run_race_frame(void) {
                 if (s_slot_state[i].state == 1)
                     td5_input_update_player_control(i);
             }
-            td5_physics_tick();
-            td5_ai_tick();
+            /* Interleaved AI→physics per-actor, matching UpdateRaceActors
+             * (0x436A70): original runs this unconditionally even during
+             * countdown so AI engines can rev to ~7200 RPM at race start. */
+            {
+                int total = td5_game_get_total_actor_count();
+                if (total > TD5_MAX_TOTAL_ACTORS) total = TD5_MAX_TOTAL_ACTORS;
+                td5_ai_pre_tick();
+                for (i = 0; i < total; i++) {
+                    TD5_Actor *actor = td5_game_get_actor(i);
+                    if (!actor) continue;
+                    td5_ai_update_actor(i);
+                    td5_physics_update_vehicle_actor(actor);
+                }
+                td5_physics_resolve_vehicle_contacts();
+            }
             td5_track_tick();
             g_td5.sim_time_accumulator -= TD5_TICK_ACCUMULATOR_ONE;
             ticks_this_frame++;
@@ -1403,12 +1416,24 @@ int td5_game_run_race_frame(void) {
             }
         }
 
-        /* --- Core simulation: physics, AI, contacts --- */
-        td5_game_trace_stage("pre_physics", ticks_this_frame);
-        td5_physics_tick();
-        td5_game_trace_stage("post_physics", ticks_this_frame);
-        td5_ai_tick();
-        td5_game_trace_stage("post_ai", ticks_this_frame);
+        /* --- Core simulation: interleaved AI→physics per-actor --- */
+        /* Original UpdateRaceActors (0x436A70) loops each actor calling
+         * AI routing [0x436E1D] then physics [0x436E5A] per-slot, with
+         * collision resolve after all actors are done. */
+        td5_game_trace_stage("pre_sim", ticks_this_frame);
+        {
+            int total = td5_game_get_total_actor_count();
+            if (total > TD5_MAX_TOTAL_ACTORS) total = TD5_MAX_TOTAL_ACTORS;
+            td5_ai_pre_tick();
+            for (i = 0; i < total; i++) {
+                TD5_Actor *actor = td5_game_get_actor(i);
+                if (!actor) continue;
+                td5_ai_update_actor(i);
+                td5_physics_update_vehicle_actor(actor);
+            }
+            td5_physics_resolve_vehicle_contacts();
+        }
+        td5_game_trace_stage("post_sim", ticks_this_frame);
 
         /* --- Track update (tire marks, wrap normalization) --- */
         td5_track_tick();

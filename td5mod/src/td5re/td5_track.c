@@ -3682,3 +3682,10 @@ void ComputeActorTrackContactNormal(short *probe, int *pos, int *out_y) {
                                                pos[0], pos[1]);
     *out_y = (int)height;
 }
+
+/* Stub — TODO: implement from Ghidra decompilation */
+int td5_track_get_primary_route_heading(int span_index)
+{
+    (void)span_index;
+    return 0;
+}

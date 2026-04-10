@@ -69,6 +69,12 @@ void td5_ai_update_encounter_control(int slot);
 /* --- Master dispatcher --- */
 void td5_ai_update_race_actors(void);
 
+/* --- Per-frame AI setup (rubber-band + route refresh, no per-actor work) --- */
+void td5_ai_pre_tick(void);
+
+/* --- Per-actor AI dispatch (call before physics for each slot) --- */
+void td5_ai_update_actor(int slot);
+
 /* ========================================================================
  * Route State Array (per-actor, stride 0x47 dwords = 0x11C bytes)
  *
