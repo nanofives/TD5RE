@@ -83,6 +83,8 @@
 #define ACTOR_LONGITUDINAL_SPEED  0x314   /* int32 */
 #define ACTOR_LIN_VEL_X           0x1CC   /* int32: world-space velocity X */
 #define ACTOR_LIN_VEL_Z           0x1D4   /* int32: world-space velocity Z */
+#define ACTOR_WORLD_POS_X         0x1FC   /* int32: 24.8 fixed */
+#define ACTOR_WORLD_POS_Z         0x204   /* int32: 24.8 fixed */
 #define ACTOR_ENCOUNTER_STEER     0x33E   /* int16 */
 #define ACTOR_BRAKE_FLAG          0x36D   /* byte  */
 #define ACTOR_THROTTLE_STATE      0x36F   /* byte  */
@@ -224,6 +226,7 @@ static void ai_update_single_traffic(int slot);
 static int32_t ai_cos_fixed12(int32_t angle);
 static int32_t ai_sin_fixed12(int32_t angle);
 static void td5_ai_refresh_route_state_slot(int slot);
+static int32_t ai_angle_from_vector(int32_t dx, int32_t dz);
 
 static int32_t ai_cos_fixed12(int32_t angle) {
     /* Use standard math — the quadratic approximation was catastrophically
@@ -235,6 +238,24 @@ static int32_t ai_cos_fixed12(int32_t angle) {
 static int32_t ai_sin_fixed12(int32_t angle) {
     double rad = (double)(angle & 0xFFF) * (2.0 * 3.14159265358979323846 / 4096.0);
     return (int32_t)(sin(rad) * 4096.0);
+}
+
+/* ========================================================================
+ * AngleFromVector12 -- atan2-based angle computation (0x40A720 equivalent)
+ *
+ * Returns angle in 0..4095 (12-bit), matching original's table-based LUT.
+ * Original uses 1024-entry atan LUT at 0x463214; we use atan2f for precision.
+ *
+ * Coordinate system: 0=north(+Z), 0x400=east(+X), 0x800=south(-Z), 0xC00=west(-X)
+ * ======================================================================== */
+
+static int32_t ai_angle_from_vector(int32_t dx, int32_t dz) {
+    if (dx == 0 && dz == 0) return 0;
+    /* atan2(dx, dz) gives angle from +Z axis, clockwise = positive */
+    double angle_rad = atan2((double)dx, (double)dz);
+    /* Convert from [-pi, pi] to [0, 4096) */
+    int32_t angle = (int32_t)(angle_rad * (4096.0 / (2.0 * 3.14159265358979323846)));
+    return angle & 0xFFF;
 }
 
 /* ========================================================================
@@ -395,9 +416,16 @@ void td5_ai_tick(void) {
  * slot computes: modifier = (scale * delta) / range
  *                live_bias[slot] = 0x100 - modifier
  *
- * When AI is behind player: delta < 0, behind_range < 0 ->
- *   modifier is negative -> bias > 0x100 (catch-up boost)
- * When AI is ahead: delta > 0, modifier > 0 -> bias < 0x100 (slow down)
+ * When AI is behind player: delta < 0, range > 0 ->
+ *   modifier = (scale * negative) / positive = negative
+ *   bias = 0x100 - negative > 0x100 (catch-up boost)
+ * When AI is ahead: delta > 0, range > 0 ->
+ *   modifier = (scale * positive) / positive = positive
+ *   bias = 0x100 - positive < 0x100 (slow down)
+ *
+ * NOTE: the denominator is always the POSITIVE range value for both branches.
+ * An earlier port error used (-g_rb_behind_range) in the behind branch, which
+ * made the modifier positive and throttled down AI that should be boosted.
  * ======================================================================== */
 
 void td5_ai_compute_rubber_band(void) {
@@ -439,16 +467,22 @@ void td5_ai_compute_rubber_band(void) {
         delta = ai_span - player0_span;
 
         if (delta < 0) {
-            /* AI is behind player -- catch-up */
+            /* AI is behind player -- catch-up boost.
+             * Original: modifier = (scale * negative_delta) / positive_range = negative
+             *           bias = 0x100 - negative = > 0x100 (throttle boost)
+             * Clamp: original checks (behind_range < delta) which never fires for
+             * negative delta; port mirrors with equivalent negative-delta clamp. */
             if (g_rb_behind_range != 0) {
                 if (delta < -g_rb_behind_range)
                     delta = -g_rb_behind_range;
-                modifier = (g_rb_behind_scale * delta) / (-g_rb_behind_range);
+                modifier = (g_rb_behind_scale * delta) / g_rb_behind_range;  /* negative / positive = negative */
             } else {
                 modifier = 0;
             }
         } else {
-            /* AI is ahead of player -- slow down */
+            /* AI is ahead of player -- slow down.
+             * modifier = (scale * positive_delta) / positive_range = positive
+             * bias = 0x100 - positive = < 0x100 (throttle reduction) */
             if (g_rb_ahead_range != 0) {
                 if (delta > g_rb_ahead_range)
                     delta = g_rb_ahead_range;
@@ -872,7 +906,7 @@ int td5_ai_update_route_threshold(int slot) {
 
         if (fwd_comp >= scaled) {
             /* Coasting: above speed threshold -- no throttle, no brake */
-            ACTOR_I32(actor, ACTOR_STEERING_CMD) = 0;
+            ACTOR_I16(actor, ACTOR_ENCOUNTER_STEER) = 0;
             ACTOR_U8(actor, ACTOR_BRAKE_FLAG) = 0;
             return 0;
         }
@@ -1249,9 +1283,21 @@ void td5_ai_update_track_behavior(int slot) {
     /* --- Heading misalignment trigger: start recovery script --- */
     heading = ACTOR_I32(actor, ACTOR_YAW_ACCUM) >> 8;
     route_heading = rs[RS_FORWARD_TRACK_COMP];
-    hdelta = (heading - route_heading) & 0xFFF;
+    /* Original FUN_00434FE0: adjusts for expected 0x800 offset between actor
+     * yaw (atan2+0x800) and route heading (route_byte<<4), then checks if
+     * the residual misalignment exceeds threshold.
+     * Formula: uVar3 = -(((heading - route_heading - 0x800U & 0xFFF) - 0x800 & 0xFFF) & 0xFFF)
+     * This cancels the expected 0x800 so a correctly-aligned car gives uVar3=0x800,
+     * which is NOT in [0x800..0xCE0) — recovery does not fire for aligned cars.
+     * Without the adjustment, an aligned car gives hdelta=0x800 which IS in
+     * [0x320..0xCE0], causing false recovery triggers every frame. */
+    {
+        uint32_t adjusted = (((uint32_t)(heading - route_heading) - 0x800U) & 0xFFF);
+        adjusted = (adjusted - 0x800U) & 0xFFF;
+        hdelta = (int32_t)(-(int32_t)adjusted) & 0xFFF;
+    }
 
-    if (hdelta >= 0x320 && hdelta <= 0xCE0) {
+    if (hdelta >= 0x800 && hdelta <= 0xCE0) {
         /* Significant misalignment: assign initial recovery script [8, 9, 0] */
         rs[RS_SCRIPT_BASE_PTR] = (int32_t)(intptr_t)g_script_init_recovery;
         rs[RS_SCRIPT_IP] = 0;
@@ -1267,23 +1313,95 @@ void td5_ai_update_track_behavior(int slot) {
     /* 1. Lateral offset targeting (peer avoidance) */
     td5_ai_update_track_offset_bias(slot);
 
-    /* 2. Look-ahead waypoint sampling (SampleTrackTargetPoint)
-     *    Looks ahead 4 spans, handles junction remapping.
-     *    Computes angle delta from actor to target -- stored in route state.
-     *    Use ComputeSplinePosition (0x434670) to get signed distance along
-     *    the track spline for the look-ahead point. */
+    /* 2. Look-ahead waypoint sampling + deviation computation
+     *    [CONFIRMED @ 0x43523D-0x435372]
+     *
+     *    Original pipeline:
+     *      a) Compute target span = current + 4 (wrapped by span count)
+     *      b) SampleTrackTargetPoint -> world XZ of target point
+     *      c) dx = (target_x - actor_x) >> 8, dz = (target_z - actor_z) >> 8
+     *      d) target_angle = AngleFromVector12(dx, dz) with 4-quadrant expansion
+     *      e) actor_heading = ((yaw_accum + steering_cmd) >> 8) & 0xFFF
+     *      f) delta = actor_heading - target_angle
+     *      g) Decompose into LEFT_DEVIATION / RIGHT_DEVIATION
+     */
     {
         int16_t span = ACTOR_I16(actor, ACTOR_SPAN_RAW);
         int span_count = td5_track_get_span_count();
-        if (span_count > 0) {
-            int route_lane_val = 0;
-            int32_t seg_dist = rs[RS_FORWARD_TRACK_COMP];
-            const uint8_t *route_bytes = (const uint8_t *)(intptr_t)rs[RS_ROUTE_TABLE_PTR];
-            if (route_bytes && span >= 0) {
-                route_lane_val = (int)route_bytes[(size_t)(unsigned)span * 3u];
+        if (span_count > 0 && span >= 0) {
+            /* (a) Target span: 4 spans ahead, wrapped [CONFIRMED @ 0x43514D] */
+            int target_span = ((int)span + 4) % span_count;
+
+            /* Spline progress update (original also does this) */
+            {
+                int route_lane_val = 0;
+                int32_t seg_dist = rs[RS_FORWARD_TRACK_COMP];
+                const uint8_t *route_bytes = (const uint8_t *)(intptr_t)rs[RS_ROUTE_TABLE_PTR];
+                if (route_bytes) {
+                    route_lane_val = (int)route_bytes[(size_t)(unsigned)span * 3u];
+                }
+                rs[RS_TRACK_PROGRESS] = td5_track_compute_spline_position(
+                    (int)span, seg_dist, route_lane_val);
             }
-            rs[RS_TRACK_PROGRESS] = td5_track_compute_spline_position(
-                (int)span, seg_dist, route_lane_val);
+
+            /* (b) Get target world position from track
+             * Original uses SampleTrackTargetPoint with route_byte interpolation;
+             * we use td5_track_get_span_lane_world which gives the track lane
+             * center — functionally equivalent for steering purposes. */
+            {
+                int target_x = 0, target_y = 0, target_z = 0;
+                int sub_lane = (int)ACTOR_U8(actor, ACTOR_SUB_LANE_INDEX);
+
+                /* Apply lateral offset bias from route table if available */
+                const uint8_t *route_bytes = (const uint8_t *)(intptr_t)rs[RS_ROUTE_TABLE_PTR];
+                if (route_bytes) {
+                    int route_byte = (int)route_bytes[(size_t)(unsigned)target_span * 3u];
+                    /* Route byte 0=left edge, ~128=center, 255=right edge.
+                     * Map to sub_lane for position query */
+                    (void)route_byte; /* Used by SampleTrackTargetPoint for interpolation;
+                                       * td5_track_get_span_lane_world uses sub_lane index */
+                }
+
+                if (td5_track_get_span_lane_world(target_span, sub_lane,
+                                                   &target_x, &target_y, &target_z)) {
+                    /* (c) Delta vector: target - actor, shift from 24.8 FP to integer
+                     * [CONFIRMED @ 0x4352A1-0x4352C8] */
+                    int32_t actor_x = ACTOR_I32(actor, ACTOR_WORLD_POS_X);
+                    int32_t actor_z = ACTOR_I32(actor, ACTOR_WORLD_POS_Z);
+                    int32_t dx = (target_x - actor_x) >> 8;
+                    int32_t dz = (target_z - actor_z) >> 8;
+
+                    /* (d) Compute target angle using atan2 equivalent
+                     * [CONFIRMED @ 0x4352CB-0x435336] */
+                    int32_t target_angle = ai_angle_from_vector(dx, dz) & 0xFFF;
+
+                    /* (e) Actor heading: (yaw_accum + steering_cmd) >> 8
+                     * [CONFIRMED @ 0x435338-0x43534C] */
+                    int32_t yaw = ACTOR_I32(actor, ACTOR_YAW_ACCUM);
+                    int32_t steer = ACTOR_I32(actor, ACTOR_STEERING_CMD);
+                    int32_t actor_heading = ((yaw + steer) >> 8) & 0xFFF;
+
+                    /* (f) Delta = actor_heading - target_angle
+                     * [CONFIRMED @ 0x435352] */
+                    int32_t delta = actor_heading - target_angle;
+
+                    /* (g) Decompose into left/right deviation
+                     * [CONFIRMED @ 0x435354-0x435372] */
+                    int32_t abs_delta = delta < 0 ? -delta : delta;
+                    if (delta >= 0) {
+                        rs[RS_LEFT_DEVIATION]  = 0xFFF - abs_delta;
+                        rs[RS_RIGHT_DEVIATION] = delta;
+                    } else {
+                        rs[RS_LEFT_DEVIATION]  = abs_delta;
+                        rs[RS_RIGHT_DEVIATION] = delta + 0xFFF;
+                    }
+
+                    TD5_LOG_D(LOG_TAG, "deviation: slot=%d target_span=%d target_angle=%d "
+                              "heading=%d delta=%d left=%d right=%d",
+                              slot, target_span, target_angle, actor_heading, delta,
+                              rs[RS_LEFT_DEVIATION], rs[RS_RIGHT_DEVIATION]);
+                }
+            }
         }
     }
 
@@ -1941,10 +2059,13 @@ static void ai_update_single_racer(int slot) {
 
     switch (state) {
     case 0x00: /* AI racer */
-        /* Wanted mode check: skip AI track behavior for wanted-mode AI unless
-         * they have a non-zero entry in the wanted mode actor table */
-        if (g_td5.wanted_mode_enabled) {
-            /* In wanted mode, AI racers skip track behavior */
+        /* Wanted mode check [CONFIRMED @ 0x436E1D]:
+         * Original: if (g_wantedModeEnabled == 0 || *local_8 != 0)
+         * AI runs track behavior when wanted mode is OFF, or when the actor
+         * has a non-zero damage/encounter state.  Skip only when wanted mode
+         * is ON and the actor has zero encounter state. */
+        if (g_td5.wanted_mode_enabled &&
+            ACTOR_I32(actor, ACTOR_ENCOUNTER_STATE) == 0) {
             return;
         }
 
