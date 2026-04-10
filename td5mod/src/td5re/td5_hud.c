@@ -438,7 +438,7 @@ static inline void *actor_ptr(int slot)
 static inline uint8_t actor_race_position(int slot)
 {
     uint8_t *a = (uint8_t *)actor_ptr(slot);
-    return a[0x18B]; /* race position byte */
+    return a[0x383]; /* race position byte */
 }
 
 static inline uint8_t actor_gear(int slot)
@@ -1113,7 +1113,10 @@ void td5_hud_init_overlay_resources(int race_mode, int string_table_offset)
                        | TD5_HUD_RESERVED_3;
 
         /* Position label and lap timers for most modes */
-        if (g_game_type == 2 || g_game_type == 0 || g_game_type == 1) {
+        if (g_game_type == 7) {
+            /* Time Trial: show lap timers + total timer, no position label (solo) */
+            flags |= TD5_HUD_LAP_TIMERS | TD5_HUD_TOTAL_TIMER;
+        } else if (g_game_type == 2 || g_game_type == 0 || g_game_type == 1) {
             flags |= TD5_HUD_POSITION_LABEL | TD5_HUD_LAP_TIMERS;
         } else if (g_game_type == 5) {
             if (g_special_encounter == 0) {
@@ -1618,7 +1621,7 @@ void td5_hud_draw_status_text(int player_slot, int view_index)
     }
 
     /* Time trial / special encounter timers */
-    if (g_special_encounter != 0) {
+    if (g_special_encounter != 0 || g_td5.time_trial_enabled) {
         /* Main player timer */
         int actor_slot = g_actor_slot_map[view_index];
         uint16_t time_raw = actor_lap_time(actor_slot, 0);
@@ -1691,6 +1694,7 @@ void td5_hud_draw_status_text(int player_slot, int view_index)
 
 void td5_hud_render_overlays(float dt)
 {
+    /* dt is normalized 30 Hz frame time from td5_game.c. */
     s_cur_view = 0;
 
     for (int v = 0; v < s_view_count; v++) {
@@ -2661,7 +2665,7 @@ void td5_hud_shutdown(void)
 void td5_hud_render(void)
 {
     /* Entry point called from the main render frame.
-     * Delegates to td5_hud_render_overlays with the current frame dt. */
+     * Delegates to td5_hud_render_overlays with normalized 30 Hz frame dt. */
     td5_hud_render_overlays(g_td5.normalized_frame_dt);
 }
 

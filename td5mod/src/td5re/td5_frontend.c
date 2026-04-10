@@ -1546,6 +1546,50 @@ static void frontend_init_race_schedule(void) {
               g_td5.ai_car_indices[5]);
 }
 
+/* ========================================================================
+ * Auto-race setup — bypass frontend, configure race from INI values
+ *
+ * Called from td5_game.c when AutoRace=1 is set. Sets up the race schedule
+ * using INI defaults (DefaultCar, DefaultTrack, DefaultGameType, game options)
+ * without requiring any user input or frontend navigation.
+ * ======================================================================== */
+
+static int ConfigureGameTypeFlags(void);  /* forward decl */
+
+void td5_frontend_auto_race_setup(void) {
+    /* Apply INI values to frontend statics (normally done in init_resources) */
+    s_selected_car       = g_td5.ini.default_car;
+    s_selected_track     = g_td5.ini.default_track;
+    s_selected_game_type = g_td5.ini.default_game_type;
+    s_selected_paint     = 0;
+    s_selected_transmission = 0;
+    s_track_direction    = 0;
+
+    /* Apply game options from INI */
+    s_game_option_laps              = g_td5.ini.laps;
+    s_game_option_checkpoint_timers = g_td5.ini.checkpoint_timers;
+    s_game_option_traffic           = g_td5.ini.traffic;
+    s_game_option_cops              = g_td5.ini.cops;
+    s_game_option_difficulty        = g_td5.ini.difficulty;
+    s_game_option_dynamics          = g_td5.ini.dynamics;
+    s_game_option_collisions        = g_td5.ini.collisions;
+
+    /* Unlock all cars/tracks for auto-race (bypass lock tables) */
+    s_cheat_unlock_all = 1;
+
+    /* Configure game type flags (sets g_td5.game_type, traffic, etc.) */
+    ConfigureGameTypeFlags();
+
+    /* Now trigger the race schedule (sets race_requested, assigns AI cars) */
+    frontend_init_race_schedule();
+
+    TD5_LOG_I(LOG_TAG, "AutoRace: car=%d track=%d gameType=%d laps=%d diff=%d dyn=%d traffic=%d cops=%d coll=%d",
+              g_td5.car_index, g_td5.track_index, s_selected_game_type,
+              g_td5.circuit_lap_count, (int)g_td5.difficulty,
+              g_td5.dynamics_mode, g_td5.traffic_enabled,
+              g_td5.special_encounter_enabled, g_td5.ini.collisions);
+}
+
 static int frontend_find_display_mode_index(int width, int height, int bpp) {
     for (int i = 0; i < s_display_mode_count; i++) {
         if (s_display_modes[i].width == width &&
@@ -2384,6 +2428,9 @@ static int ConfigureGameTypeFlags(void) {
         g_td5.difficulty = TD5_DIFFICULTY_HARD;
         g_td5.traffic_enabled = 0;
         g_td5.special_encounter_enabled = 0;
+        g_td5.circuit_lap_count = 1;           /* single lap on circuits */
+        g_td5.checkpoint_timers_enabled = 1;   /* enable P2P checkpoint timers */
+        td5_physics_set_collisions(0);         /* no collisions (solo) */
         break;
 
     case 8: /* Cop Chase */

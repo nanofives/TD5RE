@@ -541,6 +541,21 @@ void td5_track_resolve_wall_contacts(TD5_Actor *actor)
 
             if (d < -4000) d = -4000;
 
+            /* Diagnostic: dump geometry for first few contacts to trace the sign issue */
+            {
+                static int s_left_diag_count = 0;
+                if (s_left_diag_count < 5) {
+                    TD5_LOG_I(LOG_TAG, "LEFT_DIAG: probe=%d span=%d type=%d d=%d "
+                              "va=(%d,%d) vb=(%d,%d) origin=(%d,%d) probe=(%d,%d) "
+                              "edge=(%d,%d) perp=(%d,%d) rel=(%d,%d)",
+                              pi, span_idx, type, d,
+                              (int)va->x, (int)va->z, (int)vb->x, (int)vb->z,
+                              sp->origin_x, sp->origin_z, px, pz,
+                              edge_dx, edge_dz, nnx, nnz, rel_x, rel_z);
+                    s_left_diag_count++;
+                }
+            }
+
             if (d < 0) {
                 /* AngleFromVector12(dz, dx) where dz=vb.z-va.z, dx=vb.x-va.x */
                 double rad = atan2((double)(edge_dz), (double)(edge_dx));
@@ -2167,7 +2182,7 @@ int td5_track_check_checkpoint(TD5_Actor *actor)
     track_state = (int16_t *)((uint8_t *)actor + 0x80);
     current_span = track_state[1]; /* normalized span */
 
-    if (g_td5.track_type == TD5_TRACK_CIRCUIT && !g_td5.time_trial_enabled) {
+    if (g_td5.track_type == TD5_TRACK_CIRCUIT) {
         /* Circuit mode: 4-sector bitmask lap detection */
         sector_size = s_span_count / 4;
         if (sector_size <= 0) sector_size = 1;

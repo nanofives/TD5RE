@@ -524,14 +524,16 @@ void td5_ai_init_race_actor_runtime(void) {
 
     /* --- Active actor count --- */
     if (is_time_trial) {
-        g_active_actor_count = 2;
+        g_active_actor_count = (g_td5.split_screen_mode > 0) ? 2 : 1;
     } else if (has_traffic) {
         g_active_actor_count = 12;
     } else {
         g_active_actor_count = 6;
     }
     g_td5.total_actor_count = g_active_actor_count;
-    racer_count = is_time_trial ? 2 : TD5_MAX_RACER_SLOTS;
+    racer_count = is_time_trial
+                  ? ((g_td5.split_screen_mode > 0) ? 2 : 1)
+                  : TD5_MAX_RACER_SLOTS;
 
     memset(g_route_state_storage, 0, sizeof(g_route_state_storage));
     memset(g_actor_forward_track_component, 0, sizeof(g_actor_forward_track_component));
