@@ -299,7 +299,7 @@ int td5_game_get_total_actor_count(void)
 
     if (total <= 0 && g_actor_table_base) {
         if (g_td5.time_trial_enabled) {
-            total = 2;
+            total = (g_td5.split_screen_mode > 0) ? 2 : 1;
         } else if (g_td5.traffic_enabled) {
             total = TD5_MAX_TOTAL_ACTORS;
         } else {
@@ -410,6 +410,12 @@ int td5_game_tick(void) {
         if (g_td5.frontend_init_pending) {
             td5_frontend_init_resources();
             g_td5.frontend_init_pending = 0;
+        }
+
+        /* AutoRace: skip frontend, set up race from INI and go straight to loading */
+        if (g_td5.ini.auto_race && !g_td5.race_requested) {
+            td5_frontend_auto_race_setup();
+            g_td5.ini.auto_race = 0;  /* one-shot: don't re-trigger after race ends */
         }
 
         /* Run one frame of the frontend display loop */
@@ -584,6 +590,11 @@ int td5_game_init_race_session(void) {
     if (g_td5.split_screen_mode > 0) {
         s_slot_state[1].state = 1;
     }
+    /* Time trial single-player: disable slot 1 (no ghost car yet) */
+    if (g_td5.time_trial_enabled && g_td5.split_screen_mode == 0) {
+        s_slot_state[1].state = 3;  /* disabled */
+        TD5_LOG_I(LOG_TAG, "Time trial single-player: slot 1 disabled");
+    }
     /* Mark unused racer slots as disabled based on the current mode */
     {
         int racer_slot_count = g_td5.time_trial_enabled ? 2 : TD5_MAX_RACER_SLOTS;
@@ -601,7 +612,9 @@ int td5_game_init_race_session(void) {
     g_game_type = g_td5.game_type;
     g_split_screen_mode = g_td5.split_screen_mode;
     g_replay_mode = s_replay_mode;
-    g_racer_count = g_td5.time_trial_enabled ? 2 : TD5_MAX_RACER_SLOTS;
+    g_racer_count = g_td5.time_trial_enabled
+                    ? (g_td5.split_screen_mode > 0 ? 2 : 1)
+                    : TD5_MAX_RACER_SLOTS;
 
     /* ---- Step 4: Load track runtime data ---- */
     /* NOTE: td5_asset_load_level sets g_td5.track_type from LEVELINF.DAT,
@@ -688,8 +701,9 @@ int td5_game_init_race_session(void) {
     /* ---- Step 11: Allocate actors and init vehicle/AI runtime ---- */
     {
         static uint8_t s_actor_memory[TD5_ACTOR_STRIDE * TD5_MAX_TOTAL_ACTORS];
-        int spawn_count = g_td5.time_trial_enabled ? 2 :
-                          (g_td5.traffic_enabled ? TD5_MAX_TOTAL_ACTORS : TD5_MAX_RACER_SLOTS);
+        int spawn_count = g_td5.time_trial_enabled
+                          ? (g_td5.split_screen_mode > 0 ? 2 : 1)
+                          : (g_td5.traffic_enabled ? TD5_MAX_TOTAL_ACTORS : TD5_MAX_RACER_SLOTS);
         int racer_count = (spawn_count > TD5_MAX_RACER_SLOTS)
                           ? TD5_MAX_RACER_SLOTS : spawn_count;
 
@@ -1384,19 +1398,8 @@ int td5_game_run_race_frame(void) {
                 if (s_slot_state[i].state == 1)
                     td5_input_update_player_control(i);
             }
-            /* Interleaved AI→physics per-actor (UpdateRaceActors 0x436A70).
-             * Collision resolve skipped during countdown (paused=1). */
-            {
-                int total = td5_game_get_total_actor_count();
-                if (total > TD5_MAX_TOTAL_ACTORS) total = TD5_MAX_TOTAL_ACTORS;
-                td5_ai_pre_tick();
-                for (i = 0; i < total; i++) {
-                    TD5_Actor *actor = td5_game_get_actor(i);
-                    if (!actor) continue;
-                    td5_ai_update_actor(i);
-                    td5_physics_update_vehicle_actor(actor);
-                }
-            }
+            td5_physics_tick();
+            td5_ai_tick();
             td5_track_tick();
             g_td5.sim_time_accumulator -= TD5_TICK_ACCUMULATOR_ONE;
             ticks_this_frame++;
@@ -1414,22 +1417,12 @@ int td5_game_run_race_frame(void) {
             }
         }
 
-        /* --- Core simulation: interleaved AI→physics per-actor --- */
-        /* UpdateRaceActors (0x436A70): AI [0x436E1D] then physics [0x436E5A] per-slot */
-        td5_game_trace_stage("pre_sim", ticks_this_frame);
-        {
-            int total = td5_game_get_total_actor_count();
-            if (total > TD5_MAX_TOTAL_ACTORS) total = TD5_MAX_TOTAL_ACTORS;
-            td5_ai_pre_tick();
-            for (i = 0; i < total; i++) {
-                TD5_Actor *actor = td5_game_get_actor(i);
-                if (!actor) continue;
-                td5_ai_update_actor(i);
-                td5_physics_update_vehicle_actor(actor);
-            }
-            td5_physics_resolve_vehicle_contacts();
-        }
-        td5_game_trace_stage("post_sim", ticks_this_frame);
+        /* --- Core simulation: physics, AI, contacts --- */
+        td5_game_trace_stage("pre_physics", ticks_this_frame);
+        td5_physics_tick();
+        td5_game_trace_stage("post_physics", ticks_this_frame);
+        td5_ai_tick();
+        td5_game_trace_stage("post_ai", ticks_this_frame);
 
         /* --- Track update (tire marks, wrap normalization) --- */
         td5_track_tick();
@@ -1851,7 +1844,7 @@ static void advance_pending_finish_state(int slot, uint32_t sim_delta) {
     /* Circuit progression is owned here, with track code reduced to geometry
      * helpers. Use explicit start-line anchoring and wrong-way cooldown
      * instead of the older 4-sector proxy. */
-    if (g_td5.track_type == TD5_TRACK_CIRCUIT && !g_td5.time_trial_enabled) {
+    if (g_td5.track_type == TD5_TRACK_CIRCUIT) {
         int32_t span_ring = g_td5.track_span_ring_length;
         int32_t actor_heading;
         int32_t speed;
