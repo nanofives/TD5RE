@@ -1386,7 +1386,9 @@ int td5_game_run_race_frame(void) {
             }
             /* Interleaved AI→physics per-actor, matching UpdateRaceActors
              * (0x436A70): original runs this unconditionally even during
-             * countdown so AI engines can rev to ~7200 RPM at race start. */
+             * countdown so AI engines can rev to ~7200 RPM at race start.
+             * Collision resolve is skipped during countdown (paused=1) —
+             * the original td5_physics_tick guarded it with !g_game_paused. */
             {
                 int total = td5_game_get_total_actor_count();
                 if (total > TD5_MAX_TOTAL_ACTORS) total = TD5_MAX_TOTAL_ACTORS;
@@ -1397,7 +1399,8 @@ int td5_game_run_race_frame(void) {
                     td5_ai_update_actor(i);
                     td5_physics_update_vehicle_actor(actor);
                 }
-                td5_physics_resolve_vehicle_contacts();
+                /* No collision resolve during countdown — impulses accumulate
+                 * in velocity without integrate_pose to dissipate them. */
             }
             td5_track_tick();
             g_td5.sim_time_accumulator -= TD5_TICK_ACCUMULATOR_ONE;
