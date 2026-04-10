@@ -728,9 +728,22 @@ int td5_track_get_span_lane_world(int span_index, int sub_lane,
     if (!src[0] || !src[1] || !src[2] || !src[3])
         return 0;
 
-    if (out_x) *out_x = sp->origin_x + (src[0]->x + src[1]->x + src[2]->x + src[3]->x) / 4;
-    if (out_y) *out_y = sp->origin_y + (src[0]->y + src[1]->y + src[2]->y + src[3]->y) / 4;
-    if (out_z) *out_z = sp->origin_z + (src[0]->z + src[1]->z + src[2]->z + src[3]->z) / 4;
+    /* Original FUN_00445f10 @ 0x445FB8-0x445FF7 returns 24.8 fixed-point:
+     *   world = ((sum_of_4_verts * 0x100) / 4) + origin * 0x100
+     * Callers in td5_game.c (spawn) and td5_physics.c (ground snap) both
+     * treat this as 24.8 FP. */
+    {
+        int sum_x = src[0]->x + src[1]->x + src[2]->x + src[3]->x;
+        int sum_y = src[0]->y + src[1]->y + src[2]->y + src[3]->y;
+        int sum_z = src[0]->z + src[1]->z + src[2]->z + src[3]->z;
+        if (out_x) *out_x = (sum_x * 0x100) / 4 + sp->origin_x * 0x100;
+        if (out_y) *out_y = (sum_y * 0x100) / 4 + sp->origin_y * 0x100;
+        if (out_z) *out_z = (sum_z * 0x100) / 4 + sp->origin_z * 0x100;
+    }
+    TD5_LOG_I(LOG_TAG,
+              "span_lane_world: span=%d lane=%d world=(%d,%d,%d) [24.8 FP]",
+              span_index, sub_lane,
+              out_x ? *out_x : 0, out_y ? *out_y : 0, out_z ? *out_z : 0);
     return 1;
 }
 
