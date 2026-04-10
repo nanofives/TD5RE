@@ -1428,6 +1428,17 @@ static int frontend_ai_ext_id_taken(int ext_id, const int *slot_ext_ids,
     return 0;
 }
 
+/*
+ * Check if ext_id resolves to a police or special/bonus car.
+ * Type indices 28-32 = special (HOT DOG, MAUL, PITBULL, BEAST, WAGON)
+ * Type indices 33-36 = police  (POLICE CERBERA/MUSTANG/CHARGER/CAMARO)
+ */
+static int frontend_is_excluded_opponent(int ext_id) {
+    if (ext_id < 0 || ext_id >= 37) return 1;
+    int type_idx = s_ext_car_to_type_index[ext_id];
+    return (type_idx >= 28);
+}
+
 static void frontend_init_race_schedule(void) {
     int i;
     int slot_active[TD5_MAX_RACER_SLOTS]  = {0};
@@ -1461,7 +1472,8 @@ static void frontend_init_race_schedule(void) {
     if (s_selected_game_type == 2) {
         /* === Path 1: Quick Race (gameType == 2, Era) [CONFIRMED @ 0x0040dac0] ===
          * Random ext_id in 0..7; if player car > 7, shift to 8..15 (class match).
-         * Dedup: reject if any active slot already has this ext_id. */
+         * Dedup: reject if any active slot already has this ext_id.
+         * Filter: reject police/special cars (type indices 28-36). */
         for (i = start_slot; i < TD5_MAX_RACER_SLOTS; i++) {
             int ext_id;
             int attempts = 0;
@@ -1472,12 +1484,16 @@ static void frontend_init_race_schedule(void) {
                 rand(); /* third rand() call discarded per original */
                 if (++attempts > 100) break; /* safety */
             } while (frontend_ai_ext_id_taken(ext_id, slot_ext_id, slot_active,
-                                               TD5_MAX_RACER_SLOTS));
+                                               TD5_MAX_RACER_SLOTS)
+                     || frontend_is_excluded_opponent(ext_id));
+            if (frontend_is_excluded_opponent(ext_id)) {
+                TD5_LOG_W(LOG_TAG, "InitRaceSchedule: quick-race slot%d exhausted after %d attempts, falling back ext_id=%d (excluded car)", i, attempts, ext_id);
+            }
             slot_active[i]  = 1;
             slot_ext_id[i]  = ext_id;
             slot_variant[i] = rand() & 3;
-            TD5_LOG_I(LOG_TAG, "InitRaceSchedule: quick-race slot%d ext_id=%d var=%d",
-                      i, ext_id, slot_variant[i]);
+            TD5_LOG_I(LOG_TAG, "InitRaceSchedule: quick-race slot%d ext_id=%d type=%d var=%d",
+                      i, ext_id, s_ext_car_to_type_index[ext_id], slot_variant[i]);
         }
     } else if (s_selected_game_type == 5) {
         /* === Path 2: Cup/Masters (gameType == 5) [CONFIRMED @ 0x0040dac0] ===
@@ -1503,7 +1519,8 @@ static void frontend_init_race_schedule(void) {
         }
     } else {
         /* === Path 3: Default (single race, all other types) [CONFIRMED @ 0x0040dac0] ===
-         * Pick from difficulty tier table: rand() % 6 into row[g_td5.difficulty]. */
+         * Pick from difficulty tier table: rand() % 6 into row[g_td5.difficulty].
+         * Filter: reject police/special cars (type indices 28-36). */
         int tier = (int)g_td5.difficulty;
         if (tier < 0 || tier > 7) tier = 2; /* default tier */
         for (i = start_slot; i < TD5_MAX_RACER_SLOTS; i++) {
@@ -1515,12 +1532,16 @@ static void frontend_init_race_schedule(void) {
                 rand(); /* third rand() call discarded per original */
                 if (++attempts > 100) break;
             } while (frontend_ai_ext_id_taken(ext_id, slot_ext_id, slot_active,
-                                               TD5_MAX_RACER_SLOTS));
+                                               TD5_MAX_RACER_SLOTS)
+                     || frontend_is_excluded_opponent(ext_id));
+            if (frontend_is_excluded_opponent(ext_id)) {
+                TD5_LOG_W(LOG_TAG, "InitRaceSchedule: default slot%d exhausted after %d attempts, falling back ext_id=%d (excluded car)", i, attempts, ext_id);
+            }
             slot_active[i]  = 1;
             slot_ext_id[i]  = ext_id;
             slot_variant[i] = rand() & 3;
-            TD5_LOG_I(LOG_TAG, "InitRaceSchedule: default slot%d tier=%d ext_id=%d var=%d",
-                      i, tier, ext_id, slot_variant[i]);
+            TD5_LOG_I(LOG_TAG, "InitRaceSchedule: default slot%d tier=%d ext_id=%d type=%d var=%d",
+                      i, tier, ext_id, s_ext_car_to_type_index[ext_id], slot_variant[i]);
         }
     }
 
