@@ -1403,19 +1403,16 @@ static const int s_ext_car_to_type_index[37] = {
 };
 
 /*
- * Difficulty tier table — 8 tiers × 6 ext car IDs.
+ * Difficulty tier table — 3 tiers × 6 ext car IDs.
  * From original binary @ 0x463e10 [CONFIRMED].
+ * Only 3 real rows exist (18 bytes); rows 3-7 in the old table were actually
+ * reading into the adjacent gExtCarIdToTypeIndex data @ 0x463e24.
  * Default/single-race path picks rand() % 6 into the tier row.
  */
-static const int8_t s_difficulty_tier_cars[8][6] = {
-    { 10, 14,  7,  4, 11,  9 },  /* tier 0 */
-    {  9,  6,  3, 13, 12,  0 },  /* tier 1 */
-    { 22, 24, 16, 17, 19, 18 },  /* tier 2 */
-    {  0,  0,  7,  2, 17, 33 },  /* tier 3 */
-    { 22, 31, 32, 34, 18, 14 },  /* tier 4 */
-    {  1, 15, 13,  9, 11,  5 },  /* tier 5 */
-    {  0, 35,  8,  3,  4, 12 },  /* tier 6 */
-    { 26, 10, 36, 16, 19, 25 },  /* tier 7 */
+static const int8_t s_difficulty_tier_cars[3][6] = {
+    { 10, 14,  7,  4, 11,  9 },  /* tier 0: CHEVELLE, '69 CAMARO, XKR, SKYLINE, CUDA, '69 CHARGER */
+    {  9,  6,  3, 13, 12,  0 },  /* tier 1: '69 CHARGER, '98 VANTAGE, '98 CORVETTE, '69 CORVETTE, COBRA, VIPER */
+    { 22, 24, 16, 17, 19, 18 },  /* tier 2: R390, DAYTONA, P.VANTAGE, SERIES 1, GTS-R, SPEED 12 */
 };
 
 /* Check if ext_id is already used by any active slot */
@@ -1426,17 +1423,6 @@ static int frontend_ai_ext_id_taken(int ext_id, const int *slot_ext_ids,
             return 1;
     }
     return 0;
-}
-
-/*
- * Check if ext_id resolves to a police or special/bonus car.
- * Type indices 28-32 = special (HOT DOG, MAUL, PITBULL, BEAST, WAGON)
- * Type indices 33-36 = police  (POLICE CERBERA/MUSTANG/CHARGER/CAMARO)
- */
-static int frontend_is_excluded_opponent(int ext_id) {
-    if (ext_id < 0 || ext_id >= 37) return 1;
-    int type_idx = s_ext_car_to_type_index[ext_id];
-    return (type_idx >= 28);
 }
 
 static void frontend_init_race_schedule(void) {
@@ -1472,8 +1458,7 @@ static void frontend_init_race_schedule(void) {
     if (s_selected_game_type == 2) {
         /* === Path 1: Quick Race (gameType == 2, Era) [CONFIRMED @ 0x0040dac0] ===
          * Random ext_id in 0..7; if player car > 7, shift to 8..15 (class match).
-         * Dedup: reject if any active slot already has this ext_id.
-         * Filter: reject police/special cars (type indices 28-36). */
+         * Dedup: reject if any active slot already has this ext_id. */
         for (i = start_slot; i < TD5_MAX_RACER_SLOTS; i++) {
             int ext_id;
             int attempts = 0;
@@ -1484,16 +1469,12 @@ static void frontend_init_race_schedule(void) {
                 rand(); /* third rand() call discarded per original */
                 if (++attempts > 100) break; /* safety */
             } while (frontend_ai_ext_id_taken(ext_id, slot_ext_id, slot_active,
-                                               TD5_MAX_RACER_SLOTS)
-                     || frontend_is_excluded_opponent(ext_id));
-            if (frontend_is_excluded_opponent(ext_id)) {
-                TD5_LOG_W(LOG_TAG, "InitRaceSchedule: quick-race slot%d exhausted after %d attempts, falling back ext_id=%d (excluded car)", i, attempts, ext_id);
-            }
+                                               TD5_MAX_RACER_SLOTS));
             slot_active[i]  = 1;
             slot_ext_id[i]  = ext_id;
             slot_variant[i] = rand() & 3;
-            TD5_LOG_I(LOG_TAG, "InitRaceSchedule: quick-race slot%d ext_id=%d type=%d var=%d",
-                      i, ext_id, s_ext_car_to_type_index[ext_id], slot_variant[i]);
+            TD5_LOG_I(LOG_TAG, "InitRaceSchedule: quick-race slot%d ext_id=%d var=%d",
+                      i, ext_id, slot_variant[i]);
         }
     } else if (s_selected_game_type == 5) {
         /* === Path 2: Cup/Masters (gameType == 5) [CONFIRMED @ 0x0040dac0] ===
@@ -1520,9 +1501,9 @@ static void frontend_init_race_schedule(void) {
     } else {
         /* === Path 3: Default (single race, all other types) [CONFIRMED @ 0x0040dac0] ===
          * Pick from difficulty tier table: rand() % 6 into row[g_td5.difficulty].
-         * Filter: reject police/special cars (type indices 28-36). */
+         * Only 3 real tier rows exist (0-2); rows 3-7 overlap gExtCarIdToTypeIndex. */
         int tier = (int)g_td5.difficulty;
-        if (tier < 0 || tier > 7) tier = 2; /* default tier */
+        if (tier < 0 || tier > 2) tier = 2; /* clamp to valid tiers */
         for (i = start_slot; i < TD5_MAX_RACER_SLOTS; i++) {
             int ext_id;
             int attempts = 0;
@@ -1532,26 +1513,26 @@ static void frontend_init_race_schedule(void) {
                 rand(); /* third rand() call discarded per original */
                 if (++attempts > 100) break;
             } while (frontend_ai_ext_id_taken(ext_id, slot_ext_id, slot_active,
-                                               TD5_MAX_RACER_SLOTS)
-                     || frontend_is_excluded_opponent(ext_id));
-            if (frontend_is_excluded_opponent(ext_id)) {
-                TD5_LOG_W(LOG_TAG, "InitRaceSchedule: default slot%d exhausted after %d attempts, falling back ext_id=%d (excluded car)", i, attempts, ext_id);
-            }
+                                               TD5_MAX_RACER_SLOTS));
             slot_active[i]  = 1;
             slot_ext_id[i]  = ext_id;
             slot_variant[i] = rand() & 3;
-            TD5_LOG_I(LOG_TAG, "InitRaceSchedule: default slot%d tier=%d ext_id=%d type=%d var=%d",
-                      i, tier, ext_id, s_ext_car_to_type_index[ext_id], slot_variant[i]);
+            TD5_LOG_I(LOG_TAG, "InitRaceSchedule: default slot%d tier=%d ext_id=%d var=%d",
+                      i, tier, ext_id, slot_variant[i]);
         }
     }
 
-    /* Convert ext_ids to type indices and store in g_td5 */
+    /* Store ext_ids directly as car indices.
+     * s_car_zip_paths is indexed by ext_id (display order), NOT by the original
+     * binary's gCarZipPathTable type_index. The s_ext_car_to_type_index conversion
+     * is NOT applied here — it maps to the original binary's table ordering which
+     * doesn't match the source port's reordered table. */
     for (i = 1; i < TD5_MAX_RACER_SLOTS; i++) {
         if (slot_active[i] && slot_ext_id[i] >= 0 && slot_ext_id[i] < 37) {
-            g_td5.ai_car_indices[i]  = s_ext_car_to_type_index[slot_ext_id[i]];
+            g_td5.ai_car_indices[i]  = slot_ext_id[i];
             g_td5.ai_car_variants[i] = slot_variant[i];
         } else {
-            g_td5.ai_car_indices[i]  = s_ext_car_to_type_index[0]; /* fallback: XKR */
+            g_td5.ai_car_indices[i]  = 0; /* fallback: VIPER (ext_id 0) */
             g_td5.ai_car_variants[i] = 0;
         }
     }
