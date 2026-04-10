@@ -2410,14 +2410,21 @@ void td5_render_draw_sky(void)
      * then dispatches via the standard mesh pipeline. */
     if (s_sky_mesh) {
         TD5_Mat3x3 sky_rot;
-        TD5_Vec3f  sky_pos = {0.0f, 0.0f, 0.0f};
 
         /* Camera basis IS the rotation — sky has identity model rotation */
         for (int i = 0; i < 9; i++)
             sky_rot.m[i] = s_camera_basis[i];
 
         td5_render_load_rotation(&sky_rot);
-        td5_render_load_translation(&sky_pos);
+        /* Sky dome is camera-centered: translation must be zero in view space.
+         * Do NOT use td5_render_load_translation() — it subtracts camera_pos,
+         * which would offset the dome to world origin.
+         * Original LoadRenderTranslation (0x43DC20) is a pure memcpy with no
+         * camera subtraction; the subtraction lives in ApplyMeshResourceRenderTransform. */
+        s_render_transform.m[9]  = 0.0f;
+        s_render_transform.m[10] = 0.0f;
+        s_render_transform.m[11] = 0.0f;
+        TD5_LOG_I(RENDER_LOG_TAG, "sky: camera-centered dome, translation zeroed");
         td5_render_transform_mesh_vertices(s_sky_mesh);
         td5_render_prepared_mesh(s_sky_mesh);
         s_scene_has_renderer_geometry = 1;
