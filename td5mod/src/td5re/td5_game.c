@@ -26,6 +26,7 @@
 #include "td5_net.h"
 #include "td5_save.h"
 #include "td5_vfx.h"
+#include "td5_trace.h"
 
 #include <stdlib.h>
 #include <stdio.h>
@@ -108,6 +109,7 @@ extern uint8_t *g_track_environment_config; /* td5_asset.c -- LEVELINF.DAT buffe
  * ======================================================================== */
 
 #define LOG_TAG "td5_game"
+#define TD5_CIRCUIT_WRONG_WAY_COOLDOWN_TICKS 300
 /* Original: g_cameraTransitionActive init=0xA000, -=0x100/tick, 160 ticks total
  * Level = timer / 0x2800; levels 4..0 → digits 5..1, then GO at level<0 */
 #define TD5_COUNTDOWN_INIT    0xA000
@@ -156,6 +158,8 @@ typedef struct ActorRaceMetric {
 } ActorRaceMetric;
 
 static ActorRaceMetric s_metrics[TD5_MAX_RACER_SLOTS];
+static int16_t s_circuit_anchor_span[TD5_MAX_RACER_SLOTS];
+static int16_t s_circuit_wrong_way_cooldown[TD5_MAX_RACER_SLOTS];
 
 /* Race order array (indices into slot table, sorted by position) */
 static uint8_t s_race_order[TD5_MAX_RACER_SLOTS];
@@ -266,6 +270,7 @@ static void sort_results_by_time_asc(void);
 static void sort_results_by_score_desc(void);
 static void update_race_order(void);
 static void advance_pending_finish_state(int slot, uint32_t sim_delta);
+static void sync_actor_race_metrics(int slot);
 static void accumulate_speed_bonus(int slot);
 static void decay_ultimate_timer(int slot);
 static void adjust_checkpoint_timers(int slot);
@@ -273,6 +278,8 @@ static void display_loading_screen_tga(void);
 static void reset_race_countdown(void);
 static void tick_race_countdown(void);
 static const char *td5_game_state_name(TD5_GameState state);
+static uint32_t td5_game_normalized_dt_to_accum(float dt_normalized);
+static float td5_game_normalized_dt_to_seconds(float dt_normalized);
 void td5_game_update_split_screen_balance(void);
 
 TD5_Actor *td5_game_get_actor(int slot)
@@ -333,6 +340,8 @@ int td5_game_init(void) {
 
     memset(s_slot_state, 0, sizeof(s_slot_state));
     memset(s_metrics, 0, sizeof(s_metrics));
+    memset(s_circuit_anchor_span, 0xFF, sizeof(s_circuit_anchor_span));
+    memset(s_circuit_wrong_way_cooldown, 0, sizeof(s_circuit_wrong_way_cooldown));
     memset(s_results, 0, sizeof(s_results));
     memset(s_viewports, 0, sizeof(s_viewports));
     g_td5.total_actor_count = 0;
@@ -668,6 +677,8 @@ int td5_game_init_race_session(void) {
     /* ---- Step 10: Initialize race vehicle runtime ---- */
     /* Initialize per-actor race metrics */
     memset(s_metrics, 0, sizeof(s_metrics));
+    memset(s_circuit_anchor_span, 0xFF, sizeof(s_circuit_anchor_span));
+    memset(s_circuit_wrong_way_cooldown, 0, sizeof(s_circuit_wrong_way_cooldown));
     for (int i = 0; i < TD5_MAX_RACER_SLOTS; i++) {
         s_metrics[i].display_position = (int16_t)i;
         s_race_order[i] = (uint8_t)i;
@@ -788,28 +799,56 @@ int td5_game_init_race_session(void) {
             if (!sp)
                 continue;
 
+            /* Original (0x434350): only sets track_state[0] (span_raw at +0x080)
+             * and sub_lane (+0x08C). span_norm (+0x082), span_accum (+0x084),
+             * and span_high (+0x086) are NOT initialized — they start at 0.
+             * update_position_recursive will populate them on the first physics
+             * tick via td5_track_update_actor_position. [CONFIRMED @ 0x434365] */
             *(int16_t *)(actor + 0x080) = (int16_t)span_index;
-            *(int16_t *)(actor + 0x082) = (int16_t)span_index;
-            *(int16_t *)(actor + 0x084) = (int16_t)span_index;
-            *(int16_t *)(actor + 0x086) = (int16_t)span_index;
+            /* 0x082/0x084/0x086 intentionally left at 0 — original does not set them */
             actor[0x08C] = (uint8_t)sub_lane;
 
             if (!td5_track_get_span_lane_world(span_index, sub_lane, &world_x, &world_y, &world_z)) {
-                world_x = sp->origin_x;
-                world_y = sp->origin_y;
-                world_z = sp->origin_z;
+                /* Fallback: use span origin, shift to 24.8 FP to match the
+                 * format returned by td5_track_get_span_lane_world. */
+                world_x = sp->origin_x * 0x100;
+                world_y = sp->origin_y * 0x100;
+                world_z = sp->origin_z * 0x100;
             }
 
-            /* Actor positions are 24.8 fixed-point; track functions return
-             * integer coords, so shift left by 8 to convert to FP. */
-            *(int32_t *)(actor + 0x1FC) = world_x << 8;
-            *(int32_t *)(actor + 0x200) = world_y << 8;
-            *(int32_t *)(actor + 0x204) = world_z << 8;
+            /* Actor X/Z in 24.8 FP from lane vertex average.
+             * td5_track_get_span_lane_world now returns 24.8 FP directly
+             * (matching original FUN_00445f10 which returns origin*0x100 + sum*64).
+             * Y: set to 0xC0000000 matching the original binary (0x405D70).
+             * The physics reset below runs IntegratePose which should snap
+             * Y to the ground surface via wheel contact averaging. */
+            *(int32_t *)(actor + 0x1FC) = world_x;
+            *(int32_t *)(actor + 0x200) = (int32_t)0xC0000000;
+            *(int32_t *)(actor + 0x204) = world_z;
 
             actor[0x375] = (uint8_t)slot;
-            actor[0x37B] = 1;
+            /* track_contact_flag (+0x37B) intentionally NOT set here.
+             * Original (0x434350) never touches it during init — it is a
+             * per-frame wall-contact flag set by wall_response() and cleared
+             * at the start of each physics tick. Starting at 0 is correct.
+             * [CONFIRMED @ 0x405D70 / 0x434350 decompilation] */
             td5_track_compute_heading((TD5_Actor *)actor);
             td5_physics_reset_actor_state((TD5_Actor *)actor);
+
+            /* Restore span_raw to the spawn span after reset.
+             * reset_actor_state calls integrate_pose which calls
+             * td5_track_update_actor_position — this overwrites the entire
+             * track_state[0..3] block via update_position_recursive.
+             * The original (FUN_00405D70) has no integrate_pose step so
+             * track_state stays exactly as set above.  We replicate that
+             * by re-writing span_raw and zeroing span_norm/accum/high after
+             * reset, matching the original's post-init state.
+             * [CONFIRMED @ 0x434350 / 0x405D70: span_norm = 0 at tick 0] */
+            *(int16_t *)(actor + 0x080) = (int16_t)span_index; /* span_raw   */
+            *(int16_t *)(actor + 0x082) = 0;                   /* span_norm  */
+            *(int16_t *)(actor + 0x084) = 0;                   /* span_accum */
+            *(int16_t *)(actor + 0x086) = 0;                   /* span_high  */
+
             TD5_LOG_I(LOG_TAG,
                       "Actor spawn: slot=%d span=%d pos=(%d,%d,%d) state=%d lane=%d",
                       slot, span_index,
@@ -1018,6 +1057,7 @@ int td5_game_init_race_session(void) {
     g_td5.race_end_fade_state = 0;
     s_pause_exit_pending = 0;
     g_td5.paused = 1;              /* start paused for countdown */
+    td5_physics_set_xz_freeze(1); /* freeze XZ until countdown ends (DAT_00483030) */
     s_pause_menu_active = 0;       /* clear stale pause menu from previous race */
     s_prev_esc_state = 1;          /* suppress false ESC edge on first frame */
     g_td5.sim_tick_budget = 0.0f;
@@ -1051,6 +1091,114 @@ int td5_game_init_race_session(void) {
 }
 
 /* ========================================================================
+ * Race Trace Helper
+ *
+ * Snapshots frame / actor / view state and writes CSV rows via td5_trace.
+ * Called at stage boundaries inside the race frame loop.
+ * ======================================================================== */
+
+static void td5_game_trace_stage(const char *stage, int ticks_this_frame)
+{
+    uint32_t frame = g_tick_counter;
+    uint32_t sim_tick = (uint32_t)g_td5.simulation_tick_counter;
+
+    if (!td5_trace_begin_frame(frame))
+        return;
+
+    /* Frame row */
+    {
+        TD5_TraceFrameState fs;
+        fs.game_state           = (int)g_td5.game_state;
+        fs.paused               = g_td5.paused;
+        fs.pause_menu_active    = s_pause_menu_active;
+        fs.fade_state           = g_td5.race_end_fade_state;
+        fs.countdown_timer      = s_race_countdown_state;
+        fs.sim_time_accumulator = g_td5.sim_time_accumulator;
+        fs.sim_tick_budget      = g_td5.sim_tick_budget;
+        fs.frame_dt             = g_td5.normalized_frame_dt;
+        fs.instant_fps          = g_td5.instant_fps;
+        fs.viewport_count       = g_td5.viewport_count;
+        fs.split_screen_mode    = g_td5.split_screen_mode;
+        fs.ticks_this_frame     = ticks_this_frame;
+        td5_trace_write_frame(frame, sim_tick, stage, &fs);
+    }
+
+    /* Actor rows */
+    for (int i = 0; i < TD5_MAX_RACER_SLOTS; i++) {
+        if (!td5_trace_selected_slot(i))
+            continue;
+        if (s_slot_state[i].state == 3)
+            continue;  /* disabled */
+
+        TD5_Actor *actor = td5_game_get_actor(i);
+        if (!actor) continue;
+        uint8_t *a = (uint8_t *)actor;
+
+        TD5_TraceActorState as;
+        as.slot                  = i;
+        as.slot_state            = s_slot_state[i].state;
+        as.slot_companion_1      = s_slot_state[i].companion_1;
+        as.slot_companion_2      = s_slot_state[i].companion_2;
+        as.view_target           = (g_actorSlotForView[0] == i) ? 0
+                                 : (g_actorSlotForView[1] == i) ? 1 : -1;
+        as.world_x               = *(int32_t *)(a + 0x1FC);
+        as.world_y               = *(int32_t *)(a + 0x200);
+        as.world_z               = *(int32_t *)(a + 0x204);
+        as.vel_x                 = *(int32_t *)(a + 0x1CC);
+        as.vel_y                 = *(int32_t *)(a + 0x1D0);
+        as.vel_z                 = *(int32_t *)(a + 0x1D4);
+        as.ang_roll              = *(int32_t *)(a + 0x1C0);
+        as.ang_yaw               = *(int32_t *)(a + 0x1C4);
+        as.ang_pitch             = *(int32_t *)(a + 0x1C8);
+        as.disp_roll             = *(int16_t *)(a + 0x208);
+        as.disp_yaw              = *(int16_t *)(a + 0x20A);
+        as.disp_pitch            = *(int16_t *)(a + 0x20C);
+        as.span_raw              = *(int16_t *)(a + 0x080);
+        as.span_norm             = *(int16_t *)(a + 0x082);
+        as.span_accum            = *(int16_t *)(a + 0x084);
+        as.span_high             = *(int16_t *)(a + 0x086);
+        as.steering_cmd          = *(int32_t *)(a + 0x30C);
+        as.engine_speed          = *(int32_t *)(a + 0x310);
+        as.long_speed            = *(int32_t *)(a + 0x314);
+        as.lat_speed             = *(int32_t *)(a + 0x318);
+        as.front_slip            = *(int32_t *)(a + 0x31C);
+        as.rear_slip             = *(int32_t *)(a + 0x320);
+        as.finish_time           = *(int32_t *)(a + 0x328);
+        as.accum_distance        = *(int32_t *)(a + 0x32C);
+        as.pending_finish_timer  = *(uint16_t *)(a + 0x344);
+        as.current_gear          = *(uint8_t *)(a + 0x36B);
+        as.vehicle_mode          = *(uint8_t *)(a + 0x379);
+        as.track_contact_flag    = *(uint8_t *)(a + 0x37B);
+        as.wheel_contact_mask    = *(uint8_t *)(a + 0x37D);
+        as.race_position         = *(uint8_t *)(a + 0x383);
+
+        as.metric_checkpoint_index  = s_metrics[i].checkpoint_index;
+        as.metric_checkpoint_mask   = s_metrics[i].checkpoint_bitmask;
+        as.metric_normalized_span   = s_metrics[i].normalized_span;
+        as.metric_timer_ticks       = s_metrics[i].timer_ticks;
+        as.metric_display_position  = s_metrics[i].display_position;
+        as.metric_speed_bonus       = s_metrics[i].speed_bonus;
+        as.metric_top_speed         = s_metrics[i].top_speed;
+
+        td5_trace_write_actor(frame, sim_tick, stage, &as);
+    }
+
+    /* View rows */
+    for (int vp = 0; vp < g_td5.viewport_count && vp < 2; vp++) {
+        TD5_TraceViewState vs;
+        vs.view_index   = vp;
+        vs.actor_slot   = g_actorSlotForView[vp];
+        vs.cam_world_x  = g_camWorldPos[vp][0];
+        vs.cam_world_y  = g_camWorldPos[vp][1];
+        vs.cam_world_z  = g_camWorldPos[vp][2];
+        vs.cam_x        = (float)g_camWorldPos[vp][0] / 256.0f;
+        vs.cam_y        = (float)g_camWorldPos[vp][1] / 256.0f;
+        vs.cam_z        = (float)g_camWorldPos[vp][2] / 256.0f;
+        td5_trace_write_view(frame, sim_tick, stage, &vs);
+    }
+}
+
+/* ========================================================================
  * RunRaceFrame (0x42B580)
  *
  * Fixed-timestep simulation loop + render pipeline + audio tick.
@@ -1062,10 +1210,12 @@ int td5_game_run_race_frame(void) {
     /* ---- Update frame timing ---- */
     td5_game_update_frame_timing();
 
+    td5_game_trace_stage("frame_begin", 0);
+
     /* ---- Race completion check (before sim loop) ---- */
     if (g_td5.race_end_fade_state == 0) {
         int completion = check_race_completion(
-            (uint32_t)(g_td5.normalized_frame_dt * 65536.0f));
+            td5_game_normalized_dt_to_accum(g_td5.normalized_frame_dt));
         if (completion) {
             g_td5.race_end_fade_state = 1;
 
@@ -1087,9 +1237,9 @@ int td5_game_run_race_frame(void) {
         /* Accumulate fade — ~1s wipe at 60fps.
          * Clamp dt to 1/30 to prevent instant fade after pause frames
          * (pause menu exit produces a huge dt spike on the next frame). */
-        float fade_dt = g_td5.normalized_frame_dt;
-        if (fade_dt > 0.034f) fade_dt = 0.034f;
-        s_fade_accumulator += fade_dt * 255.0f;
+        float fade_dt_seconds = td5_game_normalized_dt_to_seconds(g_td5.normalized_frame_dt);
+        if (fade_dt_seconds > 0.034f) fade_dt_seconds = 0.034f;
+        s_fade_accumulator += fade_dt_seconds * 255.0f;
         if (s_fade_accumulator >= 255.0f) {
             s_fade_accumulator = 255.0f;
 
@@ -1123,10 +1273,6 @@ int td5_game_run_race_frame(void) {
     while (g_td5.sim_time_accumulator > 0xFFFF && ticks_this_frame < 4) {
         /* --- Input polling --- */
         td5_input_poll_race_session();
-
-        /* --- Camera angle caching (per viewport) --- */
-        /* td5_camera_cache_vehicle_angles for primary and secondary players */
-        td5_camera_tick();
 
         /* --- Pause menu (ESC toggles) --- */
         int esc_now = td5_plat_input_key_pressed(0x01);
@@ -1209,6 +1355,7 @@ int td5_game_run_race_frame(void) {
 
             g_td5.sim_time_accumulator -= TD5_TICK_ACCUMULATOR_ONE;
             ticks_this_frame++;
+            td5_game_trace_stage("pause_menu", ticks_this_frame);
             continue;
         }
 
@@ -1216,19 +1363,34 @@ int td5_game_run_race_frame(void) {
             tick_race_countdown();
             /* Poll input during countdown so player can rev the engine.
              * Physics runs with g_game_paused=1, which only updates
-             * engine RPM (no vehicle movement). */
+             * engine RPM (no vehicle movement).
+             *
+             * The original (FUN_0042b580) runs UpdateRaceActors (0x436A70)
+             * unconditionally inside the simulation tick loop — there is no
+             * countdown branch that skips AI.  Running td5_ai_tick() here
+             * causes AI to set encounter_steering_cmd (throttle) each frame,
+             * so update_engine_speed_smoothed can ramp AI RPM toward the
+             * target during the countdown, matching the original's ~7200 RPM
+             * at race start. */
             td5_physics_set_paused(1);
             for (i = 0; i < TD5_MAX_RACER_SLOTS; i++) {
                 if (s_slot_state[i].state == 1)
                     td5_input_update_player_control(i);
             }
             td5_physics_tick();
+            td5_ai_tick();
             td5_track_tick();
             g_td5.sim_time_accumulator -= TD5_TICK_ACCUMULATOR_ONE;
             ticks_this_frame++;
+            td5_game_trace_stage("countdown", ticks_this_frame);
             continue;
         }
         td5_physics_set_paused(0);
+
+        /* --- Camera angle caching (per viewport) --- */
+        /* Original gates camera updates behind pause flag (0x0042b84e).
+         * Must not tick camera when paused — FP drift causes visible shaking. */
+        td5_camera_tick();
 
         /* Input record/playback is handled inside td5_input_poll_race_session(). */
 
@@ -1240,11 +1402,15 @@ int td5_game_run_race_frame(void) {
         }
 
         /* --- Core simulation: physics, AI, contacts --- */
+        td5_game_trace_stage("pre_physics", ticks_this_frame);
         td5_physics_tick();
+        td5_game_trace_stage("post_physics", ticks_this_frame);
         td5_ai_tick();
+        td5_game_trace_stage("post_ai", ticks_this_frame);
 
         /* --- Track update (tire marks, wrap normalization) --- */
         td5_track_tick();
+        td5_game_trace_stage("post_track", ticks_this_frame);
 
         /* --- VFX tick (tire tracks) --- */
         td5_vfx_tick();
@@ -1255,16 +1421,14 @@ int td5_game_run_race_frame(void) {
         /* --- Per-viewport camera update --- */
         /* (Already handled in td5_camera_tick above for both viewports) */
 
-        /* --- Per-actor wrap normalization + lap tracking --- */
+        /* --- Per-actor wrap normalization --- */
         for (i = 0; i < TD5_MAX_RACER_SLOTS; i++) {
             TD5_Actor *lap_actor;
             if (s_slot_state[i].state == 3) continue; /* disabled */
             lap_actor = td5_game_get_actor(i);
             if (lap_actor) {
-                /* Decompose cumulative span into lap + normalized position */
+                /* Track owns span normalization only. Race progression stays here. */
                 td5_track_normalize_actor_wrap(lap_actor);
-                /* Circuit lap counting with anti-cheat checks */
-                td5_track_update_circuit_lap(lap_actor, i);
             }
         }
 
@@ -1274,25 +1438,29 @@ int td5_game_run_race_frame(void) {
             advance_pending_finish_state(i, TD5_TICK_ACCUMULATOR_ONE);
             accumulate_speed_bonus(i);
             decay_ultimate_timer(i);
+            sync_actor_race_metrics(i);
         }
 
         /* --- Consume one tick --- */
         g_td5.sim_time_accumulator -= TD5_TICK_ACCUMULATOR_ONE;
         g_td5.simulation_tick_counter++;
         ticks_this_frame++;
+        td5_game_trace_stage("post_progress", ticks_this_frame);
     }
 
     /* Compute sub-tick interpolation fraction for camera/VFX rendering.
-     * Original: 0x4AAF60 — remainder after sim loop / tick size gives [0..1). */
-    g_subTickFraction = (float)g_td5.sim_time_accumulator / (float)TD5_TICK_ACCUMULATOR_ONE;
-    if (g_subTickFraction < 0.0f) g_subTickFraction = 0.0f;
-    if (g_subTickFraction > 1.0f) g_subTickFraction = 1.0f;
-    TD5_LOG_D(LOG_TAG, "subTickFraction=%.4f accum=0x%X ticks=%d",
-              g_subTickFraction, g_td5.sim_time_accumulator, ticks_this_frame);
+     * Original (0x0042b709): fraction is NOT recomputed when paused. */
+    if (!s_pause_menu_active) {
+        g_subTickFraction = (float)g_td5.sim_time_accumulator / (float)TD5_TICK_ACCUMULATOR_ONE;
+        if (g_subTickFraction < 0.0f) g_subTickFraction = 0.0f;
+        if (g_subTickFraction > 1.0f) g_subTickFraction = 1.0f;
+        TD5_LOG_D(LOG_TAG, "subTickFraction=%.4f accum=0x%X ticks=%d",
+                  g_subTickFraction, g_td5.sim_time_accumulator, ticks_this_frame);
+    }
 
     if ((g_td5.simulation_tick_counter % 60u) == 0u) {
         TD5_LOG_D(LOG_TAG,
-                  "Race frame timing: dt=%.3f fps=%.2f ticks_this_frame=%d paused=%d pause_menu=%d countdown_indicator=%d countdown_timer=0x%X fade=%d",
+                  "Race frame timing: norm_dt=%.3f fps=%.2f ticks_this_frame=%d paused=%d pause_menu=%d countdown_indicator=%d countdown_timer=0x%X fade=%d",
                   g_td5.normalized_frame_dt,
                   g_td5.instant_fps,
                   ticks_this_frame,
@@ -1395,7 +1563,7 @@ int td5_game_run_race_frame(void) {
     }
 
     /* Full-screen HUD overlay (speedometer, lap counter, etc.) */
-    td5_hud_render_overlays(g_td5.sim_tick_budget);
+    td5_hud_render_overlays(g_td5.normalized_frame_dt);
 
     /* Pause overlay: panel + PAUSETXT atlas glyphs are all pre-built quads */
     if (s_pause_menu_active) {
@@ -1458,6 +1626,8 @@ int td5_game_run_race_frame(void) {
     td5_render_end_scene();
     td5_plat_present(1);
 
+    td5_game_trace_stage("frame_end", ticks_this_frame);
+
     return 0;  /* race continues */
 }
 
@@ -1510,6 +1680,7 @@ static void tick_race_countdown(void)
         g_cameraTransitionActive = 0;
         set_countdown_indicator_state(0);
         g_td5.paused = 0;
+        td5_physics_set_xz_freeze(0); /* release XZ freeze on GO */
         s_race_countdown_state = 0;
         TD5_LOG_I(LOG_TAG, "Race countdown complete: GO");
         return;
@@ -1641,14 +1812,11 @@ static int check_race_completion(uint32_t sim_delta) {
 
 static void advance_pending_finish_state(int slot, uint32_t sim_delta) {
     ActorRaceMetric *m = &s_metrics[slot];
+    TD5_Actor *actor = td5_game_get_actor(slot);
 
     /* Sync span from actor struct (original reads actor+0x82 directly) */
-    {
-        TD5_Actor *actor = td5_game_get_actor(slot);
-        if (actor) {
-            int16_t *track_state = (int16_t *)((uint8_t *)actor + 0x80);
-            m->normalized_span = track_state[1];  /* actor+0x82: current span */
-        }
+    if (actor) {
+        m->normalized_span = actor->track_span_normalized;
     }
 
     /* Already finished */
@@ -1657,45 +1825,118 @@ static void advance_pending_finish_state(int slot, uint32_t sim_delta) {
     /* Increment cumulative timer */
     m->cumulative_timer++;
 
-    /* Circuit lap detection via 4-bit sector bitmask */
+    /* Circuit progression is owned here, with track code reduced to geometry
+     * helpers. Use explicit start-line anchoring and wrong-way cooldown
+     * instead of the older 4-sector proxy. */
     if (g_td5.track_type == TD5_TRACK_CIRCUIT && !g_td5.time_trial_enabled) {
         int32_t span_ring = g_td5.track_span_ring_length;
-        if (span_ring <= 0) return;
+        int32_t actor_heading;
+        int32_t speed;
+        int32_t route_heading;
 
-        int sector_size = span_ring / 4;
-        for (int s = 0; s < 4; s++) {
-            int sector_center = sector_size * s + sector_size / 2;
-            int delta = m->normalized_span - sector_center;
-            if (delta < 0) delta = -delta;
-            if (delta <= 1) {
-                /* Check strict ordering: bit s can only be set if bits 0..(s-1) are set */
-                uint8_t expected_mask = (uint8_t)((1 << s) - 1);
-                if ((m->checkpoint_bitmask & expected_mask) == expected_mask) {
-                    m->checkpoint_bitmask |= (uint8_t)(1 << s);
-                }
+        if (!actor || span_ring <= 0) {
+            return;
+        }
+
+        if (s_circuit_wrong_way_cooldown[slot] > 0) {
+            s_circuit_wrong_way_cooldown[slot]--;
+            return;
+        }
+
+        speed = actor->longitudinal_speed;
+        actor_heading = (actor->euler_accum.yaw >> 8) & 0xFFF;
+
+        if (s_circuit_anchor_span[slot] < 0) {
+            int heading_delta;
+
+            if (m->normalized_span > 2 || speed < 0x100) {
+                m->checkpoint_bitmask = 0;
+                return;
+            }
+
+            route_heading = td5_track_get_primary_route_heading(0);
+            heading_delta = (int)((actor_heading - route_heading) & 0xFFF);
+            if (heading_delta > 0x800) {
+                heading_delta -= 0x1000;
+            }
+            if (heading_delta < 0) {
+                heading_delta = -heading_delta;
+            }
+            if (heading_delta > 16) {
+                m->checkpoint_bitmask = 0;
+                return;
+            }
+
+            s_circuit_anchor_span[slot] = m->normalized_span;
+            m->checkpoint_bitmask = 1;
+            return;
+        }
+
+        {
+            int32_t anchor_span = (int32_t)s_circuit_anchor_span[slot];
+            int32_t behind = anchor_span - (int32_t)m->normalized_span;
+
+            if (behind < -span_ring / 2) {
+                behind += span_ring;
+            }
+            if (behind > span_ring / 2) {
+                behind -= span_ring;
+            }
+            if (behind > 64) {
+                TD5_LOG_I(LOG_TAG,
+                          "Circuit wrong-way: slot=%d span=%d checkpoint=%d behind=%d",
+                          slot, m->normalized_span, (int)anchor_span, (int)behind);
+                s_circuit_anchor_span[slot] = -1;
+                s_circuit_wrong_way_cooldown[slot] = TD5_CIRCUIT_WRONG_WAY_COOLDOWN_TICKS;
+                m->checkpoint_bitmask = 0;
+                return;
             }
         }
 
-        /* All 4 sectors passed = lap complete */
-        if (m->checkpoint_bitmask == 0x0F) {
-            m->checkpoint_index++;
-            m->checkpoint_bitmask = 0;
-
-            /* Store lap split time */
-            if (m->checkpoint_index > 0 && m->checkpoint_index <= 8) {
-                m->lap_split_times[m->checkpoint_index - 1] =
-                    (int16_t)m->cumulative_timer;
+        {
+            int32_t ahead = (int32_t)m->normalized_span - (int32_t)s_circuit_anchor_span[slot];
+            if (ahead < 0) {
+                ahead += span_ring;
             }
+            if (span_ring >= 4) {
+                int32_t quarter = span_ring / 4;
+                uint8_t progress_mask = 0x01;
+                if (ahead >= quarter) {
+                    progress_mask = 0x03;
+                }
+                if (ahead >= quarter * 2) {
+                    progress_mask = 0x07;
+                }
+                if (ahead >= quarter * 3) {
+                    progress_mask = 0x0F;
+                }
+                m->checkpoint_bitmask = progress_mask;
+            }
+            if (ahead > 1 && ahead < span_ring / 2) {
+                s_circuit_anchor_span[slot] = -1;
+                s_circuit_wrong_way_cooldown[slot] = 0;
+                m->checkpoint_bitmask = 0;
 
-            /* Check if race finished */
-            if (m->checkpoint_index >= g_td5.circuit_lap_count) {
-                m->post_finish_metric_base = m->cumulative_timer;
-                s_slot_state[slot].companion_1 = 1;
-                s_slot_state[slot].companion_2 = 1;
-                s_slot_state[slot].state = 2;  /* completed */
+                if (m->checkpoint_index >= 0 && m->checkpoint_index < 8) {
+                    m->lap_split_times[m->checkpoint_index] =
+                        (int16_t)m->cumulative_timer;
+                }
+
+                m->checkpoint_index++;
+
                 TD5_LOG_I(LOG_TAG,
-                          "Actor finish: slot=%d mode=circuit lap=%d timer=%d span=%d",
-                          slot, m->checkpoint_index, m->cumulative_timer, m->normalized_span);
+                          "Circuit lap complete: slot=%d lap=%d span=%d",
+                          slot, m->checkpoint_index, m->normalized_span);
+
+                if (m->checkpoint_index >= g_td5.circuit_lap_count) {
+                    m->post_finish_metric_base = m->cumulative_timer;
+                    s_slot_state[slot].companion_1 = 1;
+                    s_slot_state[slot].companion_2 = 1;
+                    s_slot_state[slot].state = 2;  /* completed */
+                    TD5_LOG_I(LOG_TAG,
+                              "Actor finish: slot=%d mode=circuit lap=%d timer=%d span=%d",
+                              slot, m->checkpoint_index, m->cumulative_timer, m->normalized_span);
+                }
             }
         }
     } else {
@@ -1739,6 +1980,20 @@ static void advance_pending_finish_state(int slot, uint32_t sim_delta) {
                       slot, m->checkpoint_index, m->cumulative_timer, m->normalized_span);
         }
     }
+}
+
+static void sync_actor_race_metrics(int slot)
+{
+    TD5_Actor *actor = td5_game_get_actor(slot);
+    ActorRaceMetric *m = &s_metrics[slot];
+
+    if (!actor) {
+        return;
+    }
+
+    actor->finish_time = m->post_finish_metric_base;
+    actor->pending_finish_timer = (m->timer_ticks > 0) ? (uint16_t)m->timer_ticks : 0;
+    actor->timing_frame_counter = (int16_t)m->cumulative_timer;
 }
 
 /* ========================================================================
@@ -1991,6 +2246,15 @@ static void update_race_order(void) {
             s_metrics[1].display_position = 0;
         }
     }
+
+    for (int i = 0; i < TD5_MAX_RACER_SLOTS; i++) {
+        TD5_Actor *actor = td5_game_get_actor(i);
+        if (!actor) {
+            continue;
+        }
+        actor->prev_race_position = actor->race_position;
+        actor->race_position = (uint8_t)s_metrics[i].display_position;
+    }
 }
 
 /* ========================================================================
@@ -1998,8 +2262,7 @@ static void update_race_order(void) {
  * ======================================================================== */
 
 int td5_game_check_race_completion(void) {
-    return check_race_completion(
-        (uint32_t)(g_td5.normalized_frame_dt * 65536.0f));
+    return check_race_completion(td5_game_normalized_dt_to_accum(g_td5.normalized_frame_dt));
 }
 
 /* ========================================================================
@@ -2060,14 +2323,30 @@ int td5_game_is_local_participant(int slot) {
  *
  * g_frameEndTimestamp = td5_plat_time_ms()
  * frameDeltaMs = end - prev
- * g_instantFPS = 1000000.0 / frameDeltaMs
- * g_normalizedFrameDt = frameDeltaMs * timeScale
- * g_simTickBudget += smoothedDt (clamped to 4.0 max)
+ * g_instantFPS = 1000.0 / frameDeltaMs
+ * g_normalizedFrameDt = frameDeltaSeconds * 30.0f
+ * g_simTickBudget = g_normalizedFrameDt (clamped to 4.0 max)
+ * g_simTimeAccumulator += g_normalizedFrameDt * 0x10000
  * ======================================================================== */
+
+static uint32_t td5_game_normalized_dt_to_accum(float dt_normalized)
+{
+    if (dt_normalized <= 0.0f) {
+        return 0;
+    }
+    return (uint32_t)(dt_normalized * (float)TD5_TICK_ACCUMULATOR_ONE);
+}
+
+static float td5_game_normalized_dt_to_seconds(float dt_normalized)
+{
+    return dt_normalized * (1.0f / 30.0f);
+}
 
 void td5_game_update_frame_timing(void) {
     uint32_t now = td5_plat_time_ms();
     uint32_t delta_ms = now - g_td5.frame_prev_timestamp;
+    float frame_dt_seconds;
+    float frame_dt_normalized;
 
     /* Clamp minimum to avoid division by zero (and max to 100ms = 10fps) */
     if (delta_ms < 1) delta_ms = 1;
@@ -2076,19 +2355,19 @@ void td5_game_update_frame_timing(void) {
     /* Instant FPS */
     g_td5.instant_fps = 1000.0f / (float)delta_ms;
 
-    /* Normalized frame delta time (in internal time units) */
-    /* Original: frameDeltaMs * timeScale * tickScale */
-    g_td5.normalized_frame_dt = (float)delta_ms / 1000.0f;
+    /* Normalized frame delta time: 1.0 = one 30 Hz simulation tick. */
+    frame_dt_seconds = (float)delta_ms / 1000.0f;
+    frame_dt_normalized = frame_dt_seconds * 30.0f;
+    g_td5.normalized_frame_dt = frame_dt_normalized;
 
-    /* Accumulate simulation budget (capped at 4.0 to prevent spiral of death) */
-    g_td5.sim_tick_budget += g_td5.normalized_frame_dt;
+    /* Per-frame simulation budget in normalized tick units. */
+    g_td5.sim_tick_budget = frame_dt_normalized;
     if (g_td5.sim_tick_budget > TD5_MAX_SIM_BUDGET) {
         g_td5.sim_tick_budget = TD5_MAX_SIM_BUDGET;
     }
 
-    /* Convert budget to integer accumulator (0x10000 per tick at 30fps) */
-    /* 1.0 normalized dt = 30 ticks worth of accumulator at 30fps game speed */
-    g_td5.sim_time_accumulator += (uint32_t)(delta_ms * 0x10000 / 33);
+    /* Convert normalized frame time to the 16.16 tick accumulator. */
+    g_td5.sim_time_accumulator += td5_game_normalized_dt_to_accum(frame_dt_normalized);
 
     /* Benchmark mode: force constant sim budget for deterministic timing */
     if (g_td5.benchmark_active) {
