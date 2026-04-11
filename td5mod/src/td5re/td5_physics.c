@@ -690,14 +690,23 @@ void td5_physics_update_player(TD5_Actor *actor)
             int32_t abs_speed = v_long < 0 ? -v_long : v_long;
 
             if (abs_speed <= speed_limit) {
+                /* Per-wheel distribution confirmed against original @ 0x00404030:
+                 *   RWD: rear_long total = D/2 (each rear wheel D/4, front = 0)
+                 *   FWD: front_long total = D/2 (each front wheel D/4, rear = 0)
+                 *   AWD: all four wheels D/4 (total = D, front pair D/2, rear pair D/2)
+                 * Previously the port used D/2 per wheel for RWD/FWD, producing
+                 * total = D — 2x the original's rear-only D/2. That was the ~2.15x
+                 * magnitude ratio observed in /diff-race at sim_tick=2 slot 0
+                 * (orig vel_x=-185 vs port vel_x=-399). The Dodge Viper is RWD so
+                 * it hits case 1 at tick 2 and the error propagates. [CONFIRMED] */
                 switch (dt_type) {
                 case 1: /* RWD */
-                    wheel_drive[2] = drive_torque >> 1;
-                    wheel_drive[3] = drive_torque >> 1;
+                    wheel_drive[2] = drive_torque >> 2;
+                    wheel_drive[3] = drive_torque >> 2;
                     break;
                 case 2: /* FWD */
-                    wheel_drive[0] = drive_torque >> 1;
-                    wheel_drive[1] = drive_torque >> 1;
+                    wheel_drive[0] = drive_torque >> 2;
+                    wheel_drive[1] = drive_torque >> 2;
                     break;
                 case 3: /* AWD */
                 default:
@@ -2068,6 +2077,9 @@ void td5_physics_apply_collision_impulse(TD5_Actor *a, TD5_Actor *b)
 void td5_physics_resolve_vehicle_contacts(void)
 {
     int total;
+    static uint32_t s_v2v_tick = 0;
+    static uint32_t s_v2v_slot0_pair_count = 0;
+    static uint32_t s_v2v_slot0_obb_enter = 0;
 
     if (!g_actor_table_base) {
         return;
@@ -2079,6 +2091,28 @@ void td5_physics_resolve_vehicle_contacts(void)
     }
     if (total > TD5_MAX_TOTAL_ACTORS) {
         total = TD5_MAX_TOTAL_ACTORS;
+    }
+
+    s_v2v_tick++;
+
+    /* Log slot 0's broadphase state once per second (60 ticks). Helps diagnose
+     * why player rarely produces V2V events: either the grid isn't bucketing
+     * it with AI (spatial separation) or the dispatch is filtering it out. */
+    if ((s_v2v_tick % 60u) == 0u) {
+        TD5_Actor *p0 = (TD5_Actor *)g_actor_table_base;
+        if (p0->car_definition_ptr) {
+            int32_t seg0 = p0->track_span_normalized < 0 ? 0 : p0->track_span_normalized;
+            int bucket0 = (seg0 >> 2) & (COLLISION_GRID_SIZE - 1);
+            TD5_LOG_I(LOG_TAG,
+                      "v2v_tick slot0: total=%d span=%d bucket=%d pos=(%d,%d,%d) "
+                      "vmode=%d dmg=%d pair_calls=%u obb_enter=%u",
+                      total, seg0, bucket0,
+                      p0->world_pos.x >> 8, p0->world_pos.y >> 8, p0->world_pos.z >> 8,
+                      p0->vehicle_mode, p0->damage_lockout,
+                      s_v2v_slot0_pair_count, s_v2v_slot0_obb_enter);
+            s_v2v_slot0_pair_count = 0;
+            s_v2v_slot0_obb_enter = 0;
+        }
     }
 
     /* --- Phase 1: Build AABB grid --- */
@@ -2168,9 +2202,26 @@ void td5_physics_resolve_vehicle_contacts(void)
                                  (b->vehicle_mode != 0) ||
                                  (b->damage_lockout >= 0x0F);
 
+                if (i == 0 || j == 0) {
+                    s_v2v_slot0_pair_count++;
+                }
+
                 if (a_scripted || b_scripted) {
                     collision_detect_simple(a, b);
                 } else {
+                    if (i == 0 || j == 0) {
+                        s_v2v_slot0_obb_enter++;
+                        TD5_LOG_I(LOG_TAG,
+                                  "v2v_obb_enter: i=%d j=%d slot_i=%d slot_j=%d "
+                                  "pos_i=(%d,%d) pos_j=(%d,%d) aabb_i=[%d,%d,%d,%d] aabb_j=[%d,%d,%d,%d]",
+                                  i, j, a->slot_index, b->slot_index,
+                                  a->world_pos.x >> 8, a->world_pos.z >> 8,
+                                  b->world_pos.x >> 8, b->world_pos.z >> 8,
+                                  g_actor_aabb[i][0], g_actor_aabb[i][1],
+                                  g_actor_aabb[i][2], g_actor_aabb[i][3],
+                                  g_actor_aabb[j][0], g_actor_aabb[j][1],
+                                  g_actor_aabb[j][2], g_actor_aabb[j][3]);
+                    }
                     collision_detect_full(a, b, i, j);
                 }
 
