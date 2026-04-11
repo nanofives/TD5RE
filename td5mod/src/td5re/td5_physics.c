@@ -2924,11 +2924,22 @@ void td5_physics_refresh_wheel_contacts(TD5_Actor *actor)
     if (resolved_surface_valid)
         actor->surface_type_chassis = (uint8_t)resolved_surface;
 
-    /* Set surface_contact_flags from wheel contact state.
-     * bit0 = rear contact (at least one rear wheel grounded)
-     * bit1 = front contact (at least one front wheel grounded)
-     * [CONFIRMED @ 0x376: bitmask read by tire screech + friction paths] */
-    {
+    /* Set surface_contact_flags from wheel contact state — but ONLY when
+     * the sim is running. During countdown (g_game_paused=1), integrate_pose
+     * still ticks for ground-snap, which previously caused this write to
+     * seed the flag to 3 before the first post-GO update_player ran.
+     *
+     * The original's surface_contact_flags is a state variable written
+     * ONLY inside UpdatePlayerVehicleDynamics @ 0x00404030 at a drivetrain-
+     * commit condition (and cleared in the near-zero block). At tick 1
+     * post-countdown, the original's field is still 0 from the init memset,
+     * so the original takes the airborne branch and produces zero drive
+     * torque — matching the observed vel_x=0 / vel_z=0 / long_speed=0 at
+     * sim_tick=1. By gating the port's write on !g_game_paused, the first
+     * post-GO tick sees the pre-countdown init value (0), takes the
+     * airborne branch in update_player, then this refresh populates the
+     * flag for tick 2+ where drive torque starts to apply normally. */
+    if (!g_game_paused) {
         uint8_t bm = actor->wheel_contact_bitmask;
         uint8_t flags = 0;
         if (!(bm & 0x04) || !(bm & 0x08))  /* RL or RR grounded */
