@@ -1814,6 +1814,31 @@ int td5_asset_load_track_textures(int track_index)
     if (page_count <= 0)
         page_count = TD5_TRACK_TEXTURE_PAGE_LIMIT;
 
+    /* Even though pixel data comes from PNGs, the per-page transparency
+     * type byte (raw TEXTURES.DAT byte +3 of each page descriptor) is
+     * still needed by the renderer to pick the right blend preset.
+     * Layout (BuildTrackTextureCacheImpl @ 0x0040B1D0):
+     *   uint32 page_count
+     *   uint32 offsets[page_count]
+     *   each page: byte[3] padding | byte type | ...
+     * Type 3 → additive blend (street lights, glows). */
+    if (tex_data && tex_sz >= 4 + page_count * 4) {
+        const uint32_t *offsets = (const uint32_t *)((const uint8_t *)tex_data + 4);
+        int additive_count = 0;
+        for (int p = 0; p < page_count; p++) {
+            uint32_t off = offsets[p];
+            if (off + 4 > (uint32_t)tex_sz) continue;
+            uint8_t page_type = ((const uint8_t *)tex_data)[off + 3];
+            td5_asset_set_page_transparency(p, (int)page_type);
+            if (page_type == 3) additive_count++;
+        }
+        if (additive_count > 0) {
+            TD5_LOG_I(LOG_TAG,
+                      "track textures: %d type-3 (additive) pages registered",
+                      additive_count);
+        }
+    }
+
     for (int page = 0; page < page_count && page < TD5_TRACK_TEXTURE_PAGE_LIMIT; page++) {
         char png_path[512];
         if (td5_asset_build_track_texture_png_path(track_index, page,

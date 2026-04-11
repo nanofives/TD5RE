@@ -390,6 +390,11 @@ static float clampf(float x, float lo, float hi)
     return x;
 }
 
+/* Forward decl: defined alongside td5_render_bind_texture_page below.
+ * Switches the current render preset based on the bound page's
+ * transparency type byte (0/1/2/3 → opaque/alpha/alpha/additive). */
+static void td5_render_apply_page_blend_preset(int page_id);
+
 /**
  * Flush immediate vertex/index buffers to GPU via platform DrawPrimitive.
  * Corresponds to FlushImmediateDrawPrimitiveBatch (0x4329e0).
@@ -409,8 +414,13 @@ static void flush_immediate_internal(void)
         }
     }
 
-    /* Bind current texture */
+    /* Bind current texture and apply per-page blend preset.
+     * The actual render path bypasses td5_render_bind_texture_page (the
+     * cmd handlers funnel through clip_and_submit_polygon → here), so the
+     * preset hook lives at the flush site to mirror BindRaceTexturePage @
+     * 0x40B660. Type 3 (additive) is the streetlight/glow path. */
     if (s_current_texture_page >= 0) {
+        td5_render_apply_page_blend_preset(s_current_texture_page);
         td5_plat_render_bind_texture(s_current_texture_page);
     }
 
