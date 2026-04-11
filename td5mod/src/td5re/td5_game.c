@@ -1492,6 +1492,17 @@ int td5_game_run_race_frame(void) {
         if (g_subTickFraction > 1.0f) g_subTickFraction = 1.0f;
         TD5_LOG_D(LOG_TAG, "subTickFraction=%.4f accum=0x%X ticks=%d",
                   g_subTickFraction, g_td5.sim_time_accumulator, ticks_this_frame);
+
+        /* Re-finalize chase camera position with the freshly computed
+         * subtick fraction. Without this call, at render rates above the
+         * 30 Hz sim tick rate (i.e. any frame where the fixed-tick loop
+         * ran 0 times), g_camWorldPos is stale from the previous tick
+         * while the car-mesh render extrapolates world_pos by vel*subtick
+         * each frame — producing sawtooth shake that scales with speed.
+         * td5_camera_finalize_all() re-writes g_camWorldPos using the
+         * latest orbit state + actor pose + current subtick, matching
+         * td5_render.c:1530-1537. */
+        td5_camera_finalize_all();
     }
 
     if ((g_td5.simulation_tick_counter % 60u) == 0u) {

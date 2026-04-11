@@ -42,6 +42,13 @@ void td5_camera_tick(void);
 void td5_camera_cache_angles(void);
 void td5_camera_update_chase_all(void);
 
+/* Per-render-frame camera position finalization. Writes g_camWorldPos[v]
+   from current orbit state + vel*subTickFraction so the camera stays
+   synchronized with the car-mesh render extrapolation every render frame
+   (not just sim-tick frames). */
+void td5_camera_finalize_chase_pos(TD5_Actor *actor, int view);
+void td5_camera_finalize_all(void);
+
 /* ========================================================================
  * Camera preset table (7 presets x 16 bytes at 0x463098)
  *

@@ -712,22 +712,76 @@ after_flyin:
     g_camSmoothedHeight[v] = g_camSmoothedHeight[v] +
         (g_camTargetHeight[v] - g_camSmoothedHeight[v]) * g_dampWeight;
 
-    /* --- Set camera world position from actor + orbit offset --- */
-    {
-        /* smoothed_h is in 24.8 FP scale (matching actor positions). */
-        int smoothed_h = (int)(g_camSmoothedHeight[v] + 0.5f);
-        int target[3];
+    /* Final chase position is written by td5_camera_finalize_chase_pos(),
+     * which also runs per-render-frame so the camera stays pinned to the
+     * interpolated car mesh even when the fixed-tick sim loop runs 0 times
+     * in a render frame (60fps render / 30Hz sim). See fn comment below. */
+    td5_camera_finalize_chase_pos((TD5_Actor *)(uintptr_t)actor, v);
+}
 
-        g_camWorldPos[v][0] = *(int *)(actor + 0x1FC) + g_camOrbitOffset[v][0];
-        g_camWorldPos[v][1] = g_camOrbitOffset[v][1] + *(int *)(actor + 0x200);
-        g_camWorldPos[v][2] = *(int *)(actor + 0x204) + g_camOrbitOffset[v][2];
+/* ========================================================================
+ * td5_camera_finalize_chase_pos
+ *
+ * Writes g_camWorldPos[view] and re-orients the camera from the current
+ * chase-orbit state (g_camOrbitOffset, g_camSmoothedHeight) + the CURRENT
+ * actor pose + the CURRENT g_subTickFraction velocity extrapolation. Must
+ * match the velocity extrapolation applied by the car-mesh render path
+ * (td5_render.c:1530-1537 — render_pos = world_pos + vel * subtick / 256)
+ * so the car stays pinned in camera space as subtick advances between
+ * sim ticks. Without this extrapolation, at render rates above the 30Hz
+ * sim tick the car mesh extrapolates forward every frame while the camera
+ * stays locked to the last tick's world_pos, producing a sawtooth shake
+ * whose amplitude scales with velocity (hence "shake when accelerating").
+ *
+ * Called BOTH from inside UpdateChaseCamera (per tick, to keep existing
+ * ordering for any tick-level consumers) AND from td5_camera_finalize_all
+ * at the top of the render frame so the final g_camWorldPos uses the same
+ * g_subTickFraction the car mesh will be drawn with.
+ * ======================================================================== */
+void td5_camera_finalize_chase_pos(TD5_Actor *actor_p, int view)
+{
+    if (!actor_p) return;
+    int v = view & 1;
+    uintptr_t actor = (uintptr_t)actor_p;
 
-        target[0] = *(int *)(actor + 0x1FC);
-        target[1] = *(int *)(actor + 0x200) + smoothed_h;
-        target[2] = *(int *)(actor + 0x204);
+    int smoothed_h = (int)(g_camSmoothedHeight[v] + 0.5f);
+    int target[3];
 
-        SetCameraWorldPosition(g_camWorldPos[v]);
-        OrientCameraTowardTarget(target, g_tracksideYawOffset[v]);
+    int pos_x = *(int *)(actor + 0x1FC);
+    int pos_y = *(int *)(actor + 0x200);
+    int pos_z = *(int *)(actor + 0x204);
+
+    /* Velocity extrapolation — matches td5_render.c:1530-1537 and the
+     * UpdateTracksideOrbitCamera pattern at td5_camera.c:834-846. */
+    int vel_x_interp = (int)((float)*(int *)(actor + 0x1CC) * g_subTickFraction + 0.5f);
+    int vel_y_interp = (int)((float)*(int *)(actor + 0x1D0) * g_subTickFraction + 0.5f);
+    int vel_z_interp = (int)((float)*(int *)(actor + 0x1D4) * g_subTickFraction + 0.5f);
+
+    g_camWorldPos[v][0] = pos_x + g_camOrbitOffset[v][0] + vel_x_interp;
+    g_camWorldPos[v][1] = pos_y + g_camOrbitOffset[v][1] + vel_y_interp;
+    g_camWorldPos[v][2] = pos_z + g_camOrbitOffset[v][2] + vel_z_interp;
+
+    target[0] = pos_x + vel_x_interp;
+    target[1] = pos_y + smoothed_h + vel_y_interp;
+    target[2] = pos_z + vel_z_interp;
+
+    SetCameraWorldPosition(g_camWorldPos[v]);
+    OrientCameraTowardTarget(target, g_tracksideYawOffset[v]);
+}
+
+/* Per-render-frame finalization entry point. Called once per render frame
+ * from td5_game.c after the fixed-tick sim loop (and AFTER g_subTickFraction
+ * has been recomputed from the post-drain accumulator remainder). */
+static TD5_Actor *camera_actor_for_view(int v);  /* forward decl — defined below near td5_camera_tick */
+
+void td5_camera_finalize_all(void)
+{
+    if (td5_game_get_total_actor_count() <= 0) return;
+    int view_count = g_td5.split_screen_mode ? 2 : 1;
+    for (int v = 0; v < view_count; v++) {
+        TD5_Actor *actor = camera_actor_for_view(v);
+        if (!actor) continue;
+        td5_camera_finalize_chase_pos(actor, v);
     }
 }
 
