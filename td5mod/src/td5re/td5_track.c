@@ -470,33 +470,49 @@ void td5_track_get_span_edges(int span_index,
 }
 
 /* ========================================================================
- * Track wall contact resolution -- FUN_00406CC0
+ * Generic lateral wall contacts (port-specific; deviates from original)
  *
- * Checks all 4 wheel probes against the left and right edges of
- * their current span. If a probe is outside the edge (signed distance
- * < 0), calls td5_physics_wall_response to push the car back.
+ * This function *previously* claimed to implement `0x406CC0`
+ * UpdateActorTrackSegmentContacts as a "lateral wall" test. That was wrong.
+ * Per Ghidra decomp verified 2026-04-11, `0x406CC0` is a **sub_lane extremity
+ * longitudinal boundary** test — not a lateral wall. Its vertex pair is
+ * right[0] / left[0] (one from each rail), giving a transverse edge whose
+ * perpendicular is **along the road**, not across it. The port's old
+ * geometry was therefore testing longitudinal distance, not lateral, which
+ * is why the "LEFT/RIGHT sign-flip" saga never produced a working wall.
  *
- * This is the PRIMARY mechanism that keeps cars on the road.
- * Called from UpdateVehicleActor after IntegrateVehiclePoseAndContacts.
+ * The original TD5_d3d.exe binary has **no dedicated function** that applies
+ * lateral wall impulses for generic mid-strip driving. Off-road lateral
+ * containment is topological: `UpdateActorTrackPosition` (0x4440F0) walks
+ * boundary bits and either transitions the probe to a neighbor span or
+ * fails, in which case the car enters state 0x0F damping. The only calls
+ * to ApplyTrackSurfaceForceToActor (0x406980) are:
+ *   - `0x406CC0` branches 1/2  → sub_lane start/end longitudinal rumble
+ *   - `0x406F50`               → left rail of fence strip DAT_00483954
+ *   - `0x4070E0`               → left rail of fence strip DAT_00483550
+ * None handle mid-track lateral walls.
+ *
+ * THIS FUNCTION is a **port-specific** lateral wall check added to give the
+ * expected "drive into wall and bounce" feel while the state-0x0F damping
+ * path is still stubbed in the port. It tests the probe against both rails
+ * of the probe's CURRENT span, using two vertices on the SAME rail to get
+ * an along-road edge and a **lateral** perpendicular (pointing inward).
+ * `d < 0` means the probe is outside that rail.
+ *
+ * Not gated by sub_lane — the original's gate served a purpose only with
+ * the original's (longitudinal) geometry. Here the test is safe to run
+ * every probe every tick.
+ *
+ * See reference_v2w_function_semantics.md for full background.
  * ======================================================================== */
 
 void td5_track_resolve_wall_contacts(TD5_Actor *actor)
 {
     if (!actor || !s_span_array || !s_vertex_table) return;
 
-    /* Guard against pre-spawn actors. Cars placed by ResetVehicleActorState
-     * always have non-zero world_pos; (0,0) means this actor hasn't been
-     * placed yet (or is a placeholder) and its wheel_probes/wheel_contact_pos
-     * are still zero. Running the wall check with zero probes walks into
-     * whatever span contains world (0,0) and produces spurious contacts. */
+    /* Pre-spawn guard. */
     if (actor->world_pos.x == 0 && actor->world_pos.z == 0) return;
 
-    /* [CONFIRMED @ 0x406CC0 via Ghidra pass 2]: original reads probe positions
-     * from actor+0x90 + probe_idx*12 (the probe_FL/FR/RL/RR block), indexed
-     * through the probe-iteration table at 0x467384 = [0,1,2,3,0xFF].
-     * The port's refresh_wheel_contacts mirrors wheel_contact_pos into this
-     * block, so reading probe_FL[] here is equivalent to wheel_contact_pos[]
-     * — but probe_FL is the canonical source in the original pipeline. */
     TD5_Vec3_Fixed *probe_block = &actor->probe_FL;
 
     for (int pi = 0; pi < 4; pi++) {
@@ -507,127 +523,255 @@ void td5_track_resolve_wall_contacts(TD5_Actor *actor)
 
         const TD5_StripSpan *sp = &s_span_array[span_idx];
         int type = sp->span_type;
+
+        /* Skip sentinel spans — their rails are degenerate. */
+        if (type == 9 || type == 10) continue;
+
         int lane_count = span_lane_count(sp);
         if (lane_count < 1) lane_count = 1;
 
-        /* Get probe world position (24.8 fixed-point) from the probe_FL block
-         * at actor+0x90, per-probe stride 12 bytes. [CONFIRMED @ 0x406CC0] */
-        int32_t probe_x = probe_block[pi].x;
-        int32_t probe_z = probe_block[pi].z;
+        int32_t px = probe_block[pi].x >> 8;
+        int32_t pz = probe_block[pi].z >> 8;
 
-        /* Convert probe from 24.8 to world units for comparison with span vertices */
-        int32_t px = probe_x >> 8;
-        int32_t pz = probe_z >> 8;
-
-        /* --- LEFT EDGE CHECK --- [CONFIRMED @ 0x406CC0]
-         * Original perpendicular: (-edge_dz, edge_dx), collision when d < 0.
-         * Vertices: psVar3=span+4 (left_vertex), psVar2=span+6 (right_vertex).
-         * AngleFromVector12 called with (edge_dz, edge_dx) of (psVar3 - psVar2). */
-        if (probe->sub_lane_index > 0)
-            goto skip_left_wall;
+        /* --- LEFT RAIL: vertices left[0] and left[lane_count] ---
+         * Edge runs ALONG the left rail. Rotating it 90° clockwise via
+         * (edge_dz, -edge_dx) gives a perpendicular pointing INWARD
+         * (into the road from the left wall). Signed distance of the
+         * probe relative to left[0] projected onto this perp is positive
+         * when the probe is inside (right of the left rail) and negative
+         * when outside. */
         {
-            /* psVar2 = right_vertex_index (span+6), psVar3 = left_vertex_index (span+4) */
-            TD5_StripVertex *va = vertex_at((int)sp->right_vertex_index);  /* psVar2 */
-            TD5_StripVertex *vb = vertex_at((int)sp->left_vertex_index);   /* psVar3 */
-            if (!va || !vb) continue;
+            TD5_StripVertex *base = vertex_at((int)sp->left_vertex_index);
+            TD5_StripVertex *end_v = vertex_at((int)sp->left_vertex_index + lane_count);
+            if (base && end_v) {
+                int32_t edge_dx = (int32_t)end_v->x - (int32_t)base->x;
+                int32_t edge_dz = (int32_t)end_v->z - (int32_t)base->z;
 
-            /* Edge: vb - va (left minus right, matching original psVar3 - psVar2) */
-            int32_t edge_dx = (int32_t)vb->x - (int32_t)va->x;
-            int32_t edge_dz = (int32_t)vb->z - (int32_t)va->z;
+                float fnx = (float)(edge_dz);
+                float fnz = (float)(-edge_dx);
+                float fmag = sqrtf(fnx * fnx + fnz * fnz);
+                if (fmag >= 0.5f) {
+                    int32_t nnx = (int32_t)(fnx / fmag * 4096.0f);
+                    int32_t nnz = (int32_t)(fnz / fmag * 4096.0f);
 
-            /* Perpendicular = (edge_dz, -edge_dx) matching original local_c
-             * [CONFIRMED @ 0x406CC0]: local_c[0]=psVar3[2]-psVar2[2]=edge_dz,
-             *                         local_c[2]=*psVar2-*psVar3=-edge_dx */
-            float fnx = (float)(edge_dz);
-            float fnz = (float)(-edge_dx);
-            float fmag = sqrtf(fnx * fnx + fnz * fnz);
-            if (fmag < 0.5f) continue;
-            int32_t nnx = (int32_t)(fnx / fmag * 4096.0f);
-            int32_t nnz = (int32_t)(fnz / fmag * 4096.0f);
+                    int32_t rel_x = px - (int32_t)base->x - sp->origin_x;
+                    int32_t rel_z = pz - (int32_t)base->z - sp->origin_z;
 
-            /* Relative to va (psVar2 = right_vertex), matching original */
-            int32_t rel_x = px - (int32_t)va->x - sp->origin_x;
-            int32_t rel_z = pz - (int32_t)va->z - sp->origin_z;
+                    int64_t dot = (int64_t)rel_x * nnx + (int64_t)rel_z * nnz;
+                    int32_t d = (int32_t)((dot + ((dot >> 63) & 0xFFF)) >> 12);
 
-            int64_t dot = (int64_t)rel_x * nnx + (int64_t)rel_z * nnz;
-            int32_t d = (int32_t)((dot + ((dot >> 63) & 0xFFF)) >> 12);
+                    if (d < -4000) d = -4000;
 
-            if (d < -4000) d = -4000;
+                    if (d < 0) {
+                        /* Wall angle = direction of the rail edge. */
+                        double rad = atan2((double)edge_dz, (double)edge_dx);
+                        int32_t wall_angle = (int32_t)(rad * (4096.0 / (2.0 * 3.14159265358979323846))) & 0xFFF;
 
-            if (d < 0) {
-                TD5_LOG_I(LOG_TAG, "LEFT_DIAG: slot=%d probe=%d span=%d type=%d d=%d "
-                          "va=(%d,%d) vb=(%d,%d) origin=(%d,%d) probe=(%d,%d) "
-                          "edge=(%d,%d) perp=(%d,%d) rel=(%d,%d)",
-                          actor->slot_index, pi, span_idx, type, d,
-                          (int)va->x, (int)va->z, (int)vb->x, (int)vb->z,
-                          sp->origin_x, sp->origin_z, px, pz,
-                          edge_dx, edge_dz, nnx, nnz, rel_x, rel_z);
-                /* AngleFromVector12(dz, dx) where dz=vb.z-va.z, dx=vb.x-va.x */
-                double rad = atan2((double)(edge_dz), (double)(edge_dx));
-                int32_t wall_angle = (int32_t)(rad * (4096.0 / (2.0 * 3.14159265358979323846))) & 0xFFF;
+                        td5_physics_wall_response(actor, wall_angle, d, 1, nnx, nnz, 4096);
+                        td5_physics_rebuild_pose(actor);
 
-                td5_physics_wall_response(actor, wall_angle, d, 1, nnx, nnz, 4096);
-                td5_physics_rebuild_pose(actor);
-                TD5_LOG_I(LOG_TAG, "wall_contact: slot=%d probe=%d LEFT span=%d d=%d angle=%d",
-                          actor->slot_index, pi, span_idx, d, wall_angle);
+                        TD5_LOG_I(LOG_TAG, "wall_contact: slot=%d probe=%d LEFT span=%d d=%d angle=%d",
+                                  actor->slot_index, pi, span_idx, d, wall_angle);
+                    }
+                }
             }
         }
-    skip_left_wall:
 
-        /* --- RIGHT EDGE CHECK --- [CONFIRMED @ 0x406E20]
-         * Same perpendicular formula, same d < 0 collision condition.
-         * Vertices offset by lane_count + wall lookup table. */
-        if (probe->sub_lane_index < lane_count - 1)
-            continue;
+        /* --- RIGHT RAIL: vertices right[0] and right[lane_count] ---
+         * Same along-rail edge, but rotated 90° CCW via (-edge_dz, edge_dx)
+         * so the perpendicular points INWARD (into the road from the right
+         * wall = in -X direction for a +Z span). Sign convention matches
+         * LEFT — positive d = inside, negative = outside. The wall_angle
+         * is rotated 180° from the rail direction so `wall_response`'s
+         * sin/cos push moves the car in the opposite (inward) direction
+         * compared to LEFT. */
         {
-            int wall_off_a = (type >= 0 && type < 12) ? s_wall_vtx_left[type] : 0;
-            int wall_off_b = (type >= 0 && type < 12) ? s_wall_vtx_right[type] : 0;
+            TD5_StripVertex *base = vertex_at((int)sp->right_vertex_index);
+            TD5_StripVertex *end_v = vertex_at((int)sp->right_vertex_index + lane_count);
+            if (base && end_v) {
+                int32_t edge_dx = (int32_t)end_v->x - (int32_t)base->x;
+                int32_t edge_dz = (int32_t)end_v->z - (int32_t)base->z;
 
-            /* psVar2 = left_vertex_index + lane_count + DAT_004631A0[type] */
-            TD5_StripVertex *va = vertex_at((int)sp->left_vertex_index + lane_count + wall_off_a);
-            /* psVar3 = right_vertex_index + lane_count + DAT_004631A4[type] */
-            TD5_StripVertex *vb = vertex_at((int)sp->right_vertex_index + lane_count + wall_off_b);
-            if (!va || !vb) continue;
+                /* CCW rotation: (-edge_dz, edge_dx) */
+                float fnx = (float)(-edge_dz);
+                float fnz = (float)(edge_dx);
+                float fmag = sqrtf(fnx * fnx + fnz * fnz);
+                if (fmag >= 0.5f) {
+                    int32_t nnx = (int32_t)(fnx / fmag * 4096.0f);
+                    int32_t nnz = (int32_t)(fnz / fmag * 4096.0f);
 
-            int32_t edge_dx = (int32_t)vb->x - (int32_t)va->x;
-            int32_t edge_dz = (int32_t)vb->z - (int32_t)va->z;
+                    int32_t rel_x = px - (int32_t)base->x - sp->origin_x;
+                    int32_t rel_z = pz - (int32_t)base->z - sp->origin_z;
 
-            /* [CONFIRMED @ 0x406E20]: same perpendicular formula as left */
-            float fnx = (float)(edge_dz);
-            float fnz = (float)(-edge_dx);
-            float fmag = sqrtf(fnx * fnx + fnz * fnz);
-            if (fmag < 0.5f) continue;
-            int32_t nnx = (int32_t)(fnx / fmag * 4096.0f);
-            int32_t nnz = (int32_t)(fnz / fmag * 4096.0f);
+                    int64_t dot = (int64_t)rel_x * nnx + (int64_t)rel_z * nnz;
+                    int32_t d = (int32_t)((dot + ((dot >> 63) & 0xFFF)) >> 12);
 
-            int32_t rel_x = px - (int32_t)va->x - sp->origin_x;
-            int32_t rel_z = pz - (int32_t)va->z - sp->origin_z;
+                    if (d < -4000) d = -4000;
 
-            int64_t dot = (int64_t)rel_x * nnx + (int64_t)rel_z * nnz;
-            int32_t d = (int32_t)((dot + ((dot >> 63) & 0xFFF)) >> 12);
+                    if (d < 0) {
+                        /* Angle rotated 180° from rail direction so the
+                         * push in wall_response goes -X for a +Z rail. */
+                        double rad = atan2((double)(-edge_dz), (double)(-edge_dx));
+                        int32_t wall_angle = (int32_t)(rad * (4096.0 / (2.0 * 3.14159265358979323846))) & 0xFFF;
 
-            if (d < -4000) d = -4000;
+                        td5_physics_wall_response(actor, wall_angle, d, 2, nnx, nnz, 4096);
+                        td5_physics_rebuild_pose(actor);
 
-            if (d < 0) {
-                double rad = atan2((double)(edge_dz), (double)(edge_dx));
-                int32_t wall_angle = (int32_t)(rad * (4096.0 / (2.0 * 3.14159265358979323846))) & 0xFFF;
-
-                TD5_LOG_I(LOG_TAG, "RIGHT_DIAG: slot=%d probe=%d span=%d type=%d d=%d "
-                          "va=(%d,%d) vb=(%d,%d) origin=(%d,%d) probe=(%d,%d) "
-                          "edge=(%d,%d) perp=(%d,%d) rel=(%d,%d) lane_count=%d sub_lane=%d",
-                          actor->slot_index, pi, span_idx, type, d,
-                          (int)va->x, (int)va->z, (int)vb->x, (int)vb->z,
-                          sp->origin_x, sp->origin_z, px, pz,
-                          edge_dx, edge_dz, nnx, nnz, rel_x, rel_z,
-                          lane_count, probe->sub_lane_index);
-
-                td5_physics_wall_response(actor, wall_angle, d, 2, nnx, nnz, 4096);
-                td5_physics_rebuild_pose(actor);
-                TD5_LOG_I(LOG_TAG, "wall_contact: slot=%d probe=%d RIGHT span=%d d=%d angle=%d",
-                          actor->slot_index, pi, span_idx, d, wall_angle);
+                        TD5_LOG_I(LOG_TAG, "wall_contact: slot=%d probe=%d RIGHT span=%d d=%d angle=%d",
+                                  actor->slot_index, pi, span_idx, d, wall_angle);
+                    }
+                }
             }
         }
     }
+}
+
+/* ========================================================================
+ * Forward / Reverse track-segment contact handlers
+ *
+ * FUN_00406F50 (Forward) and FUN_004070E0 (Reverse). Paired with the
+ * lateral handler above; the three run in order Reverse -> Forward ->
+ * Lateral inside UpdateVehicleActor (0x00406650) after integrate_pose.
+ *
+ * Both functions gate on a global "boundary strip" index that marks the
+ * first/last playable span (after the sentinel patch). In the original:
+ *   DAT_00483550 = reverse_min  (first valid span)
+ *   DAT_00483954 = forward_max  (last valid span)
+ * In the port the sentinels are patched into slots 0 and s_span_count-1
+ * (td5_track_bind_runtime_pointers), so the playable range is
+ * [1, s_span_count-2], giving reverse_min = 1 and forward_max = s_span_count - 2.
+ *
+ * The key non-obvious detail (raw disasm at 0x406FCF, 0x007115):
+ *   - Outer gate uses actor->track_span_raw vs the GLOBAL boundary ± 1.
+ *   - Per-probe gate filters probes whose span matches (Reverse: equality)
+ *     or stays below the boundary (Forward: <=).
+ *   - The strip record used to build the outward normal is ALWAYS
+ *     g_strip[boundary], NOT the probe's own span. This is a boundary test,
+ *     not a walk of per-probe strips.
+ *   - Outward normal comes from the two vertices (base, base+count) of
+ *     the boundary strip's left edge, normalized to length 4096.
+ *   - flag=0 to wall_response so track_contact_flag is NOT written
+ *     (port hooks side<0 to skip that write).
+ * ======================================================================== */
+
+static void fwd_rev_resolve_contact(TD5_Actor *actor,
+                                    const TD5_StripSpan *sp,
+                                    const TD5_StripVertex *base_v,
+                                    const TD5_StripVertex *end_v,
+                                    int reverse_mode,
+                                    TD5_Vec3_Fixed *probe_block,
+                                    int pi,
+                                    int boundary)
+{
+    /* Outward normal perpendicular to the edge (base -> end), rotated
+     * 90° out of the playable region. In Forward the edge goes (base -> end)
+     * and outward = (end.z - base.z, base.x - end.x). In Reverse both
+     * signs flip so the normal points back upstream. */
+    int32_t edge_dx, edge_dz, nx, nz;
+    if (!reverse_mode) {
+        edge_dx = (int32_t)end_v->x  - (int32_t)base_v->x;
+        edge_dz = (int32_t)end_v->z  - (int32_t)base_v->z;
+        nx = (int32_t)end_v->z  - (int32_t)base_v->z;  /* end.z - base.z */
+        nz = (int32_t)base_v->x - (int32_t)end_v->x;   /* base.x - end.x */
+    } else {
+        edge_dx = (int32_t)base_v->x - (int32_t)end_v->x;
+        edge_dz = (int32_t)base_v->z - (int32_t)end_v->z;
+        nx = (int32_t)base_v->z - (int32_t)end_v->z;   /* base.z - end.z */
+        nz = (int32_t)end_v->x  - (int32_t)base_v->x;  /* end.x - base.x */
+    }
+
+    /* Normalize to length 4096 (matches StoreRoundedVector3Ints @ 0x42CCD0). */
+    float fnx = (float)nx;
+    float fnz = (float)nz;
+    float fmag = sqrtf(fnx * fnx + fnz * fnz);
+    if (fmag < 0.5f) return;
+    int32_t nnx = (int32_t)(fnx / fmag * 4096.0f);
+    int32_t nnz = (int32_t)(fnz / fmag * 4096.0f);
+
+    /* Reference vertex used in the dot: base_v for Forward, end_v for Reverse.
+     * [CONFIRMED raw disasm 0x406FE7]: psVar1 is the reference, and Reverse
+     * swaps base/end relative to Forward. */
+    const TD5_StripVertex *ref_v = reverse_mode ? end_v : base_v;
+
+    int32_t probe_x = probe_block[pi].x >> 8;
+    int32_t probe_z = probe_block[pi].z >> 8;
+
+    /* Note the asymmetric decomposition: the Z term subtracts origin_z
+     * before ref.z, while the X term subtracts ref.x before origin_x.
+     * This matches the raw compiler output literally. */
+    int64_t pen64 = (int64_t)((probe_z - sp->origin_z) - (int32_t)ref_v->z) * nnz
+                  + (int64_t)((probe_x - (int32_t)ref_v->x) - sp->origin_x) * nnx;
+    int32_t pen = (int32_t)((pen64 + ((pen64 >> 63) & 0xFFF)) >> 12);
+
+    if (pen >= 0) return;  /* probe inside the playable region */
+
+    /* Tangent along the edge (NOT the outward normal) feeds the angle. */
+    double rad = atan2((double)edge_dz, (double)edge_dx);
+    int32_t wall_angle = (int32_t)(rad * (4096.0 / (2.0 * 3.14159265358979323846))) & 0xFFF;
+
+    /* side=-1 -> wall_response skips the track_contact_flag write, matching
+     * the original's flag=0 branch of ApplyTrackSurfaceForceToActor. */
+    td5_physics_wall_response(actor, wall_angle, pen, -1, nnx, nnz, 4096);
+    td5_physics_rebuild_pose(actor);
+
+    TD5_LOG_I(LOG_TAG, "%s_contact: slot=%d probe=%d boundary=%d pen=%d angle=%d",
+              reverse_mode ? "reverse" : "forward",
+              actor->slot_index, pi, boundary, pen, wall_angle);
+}
+
+static void fwd_rev_handler(TD5_Actor *actor, int reverse_mode)
+{
+    if (!actor || !s_span_array || !s_vertex_table || s_span_count < 3) return;
+    if (actor->world_pos.x == 0 && actor->world_pos.z == 0) return;
+
+    /* Playable range after sentinel patching: [1, s_span_count-2]. */
+    int boundary = reverse_mode ? 1 : (s_span_count - 2);
+
+    /* Outer gate [CONFIRMED raw disasm 0x406F77 / 0x00407107]:
+     *   Forward: actor.track_span_raw > boundary + 1 -> early exit
+     *   Reverse: actor.track_span_raw < boundary - 1 -> early exit */
+    int32_t chassis_span = (int32_t)actor->track_span_raw;
+    if (!reverse_mode) {
+        if (chassis_span > boundary + 1) return;
+    } else {
+        if (chassis_span < boundary - 1) return;
+    }
+
+    const TD5_StripSpan *sp = &s_span_array[boundary];
+    TD5_StripVertex *base_v = vertex_at((int)sp->left_vertex_index);
+    int count = span_lane_count(sp);
+    TD5_StripVertex *end_v  = vertex_at((int)sp->left_vertex_index + count);
+    if (!base_v || !end_v) return;
+
+    TD5_Vec3_Fixed *probe_block = &actor->probe_FL;
+
+    /* Iterate the car probe table [0,1,2,3,0xFF,...] — 4 probes. */
+    static const int8_t k_probe_table[8] = { 0, 1, 2, 3, -1, 0, 0, 0 };
+    for (int i = 0; i < 8; i++) {
+        int probe_idx = k_probe_table[i];
+        if (probe_idx < 0) break;
+
+        /* Per-probe gate — Forward: probe_span <= boundary, Reverse: equality. */
+        int probe_span = (int)actor->wheel_probes[i].span_index;
+        if (!reverse_mode) {
+            if (probe_span > boundary) continue;
+        } else {
+            if (probe_span != boundary) continue;
+        }
+
+        fwd_rev_resolve_contact(actor, sp, base_v, end_v, reverse_mode,
+                                probe_block, probe_idx, boundary);
+    }
+}
+
+void td5_track_resolve_forward_contacts(TD5_Actor *actor)
+{
+    fwd_rev_handler(actor, 0);
+}
+
+void td5_track_resolve_reverse_contacts(TD5_Actor *actor)
+{
+    fwd_rev_handler(actor, 1);
 }
 
 static int compute_span_center_world(int span_index,
