@@ -508,10 +508,18 @@ void td5_track_get_span_edges(int span_index,
 
 void td5_track_resolve_wall_contacts(TD5_Actor *actor)
 {
+    static uint32_t s_wall_tick = 0;
+    int diag_slot0 = 0;
+
     if (!actor || !s_span_array || !s_vertex_table) return;
 
     /* Pre-spawn guard. */
     if (actor->world_pos.x == 0 && actor->world_pos.z == 0) return;
+
+    if (actor->slot_index == 0) {
+        s_wall_tick++;
+        if ((s_wall_tick % 60u) == 0u) diag_slot0 = 1;
+    }
 
     TD5_Vec3_Fixed *probe_block = &actor->probe_FL;
 
@@ -562,6 +570,12 @@ void td5_track_resolve_wall_contacts(TD5_Actor *actor)
 
                     if (d < -4000) d = -4000;
 
+                    if (diag_slot0) {
+                        TD5_LOG_I(LOG_TAG, "wall_diag slot0 p%d LEFT span=%d d=%d probe=(%d,%d) base=(%d,%d) origin=(%d,%d)",
+                                  pi, span_idx, d, px, pz,
+                                  (int)base->x, (int)base->z, sp->origin_x, sp->origin_z);
+                    }
+
                     if (d < 0) {
                         /* Wall angle = direction of the rail edge. */
                         double rad = atan2((double)edge_dz, (double)edge_dx);
@@ -607,6 +621,12 @@ void td5_track_resolve_wall_contacts(TD5_Actor *actor)
                     int32_t d = (int32_t)((dot + ((dot >> 63) & 0xFFF)) >> 12);
 
                     if (d < -4000) d = -4000;
+
+                    if (diag_slot0) {
+                        TD5_LOG_I(LOG_TAG, "wall_diag slot0 p%d RIGHT span=%d d=%d probe=(%d,%d) base=(%d,%d) origin=(%d,%d)",
+                                  pi, span_idx, d, px, pz,
+                                  (int)base->x, (int)base->z, sp->origin_x, sp->origin_z);
+                    }
 
                     if (d < 0) {
                         /* Angle rotated 180° from rail direction so the
