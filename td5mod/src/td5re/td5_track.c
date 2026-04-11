@@ -484,7 +484,21 @@ void td5_track_resolve_wall_contacts(TD5_Actor *actor)
 {
     if (!actor || !s_span_array || !s_vertex_table) return;
 
-    /* Check 4 wheel probes (indices 0-3) [CONFIRMED @ 0x467384] */
+    /* Guard against pre-spawn actors. Cars placed by ResetVehicleActorState
+     * always have non-zero world_pos; (0,0) means this actor hasn't been
+     * placed yet (or is a placeholder) and its wheel_probes/wheel_contact_pos
+     * are still zero. Running the wall check with zero probes walks into
+     * whatever span contains world (0,0) and produces spurious contacts. */
+    if (actor->world_pos.x == 0 && actor->world_pos.z == 0) return;
+
+    /* [CONFIRMED @ 0x406CC0 via Ghidra pass 2]: original reads probe positions
+     * from actor+0x90 + probe_idx*12 (the probe_FL/FR/RL/RR block), indexed
+     * through the probe-iteration table at 0x467384 = [0,1,2,3,0xFF].
+     * The port's refresh_wheel_contacts mirrors wheel_contact_pos into this
+     * block, so reading probe_FL[] here is equivalent to wheel_contact_pos[]
+     * — but probe_FL is the canonical source in the original pipeline. */
+    TD5_Vec3_Fixed *probe_block = &actor->probe_FL;
+
     for (int pi = 0; pi < 4; pi++) {
         TD5_TrackProbeState *probe = &actor->wheel_probes[pi];
         int span_idx = probe->span_index;
@@ -496,12 +510,10 @@ void td5_track_resolve_wall_contacts(TD5_Actor *actor)
         int lane_count = span_lane_count(sp);
         if (lane_count < 1) lane_count = 1;
 
-        /* Get probe world position (24.8 fixed-point).
-         * Use wheel_contact_pos (0x0F0) which is populated by
-         * refresh_wheel_contacts. probe_FL/FR/RL/RR (0x090) are also
-         * populated but wheel_contact_pos is the canonical source. */
-        int32_t probe_x = actor->wheel_contact_pos[pi].x;
-        int32_t probe_z = actor->wheel_contact_pos[pi].z;
+        /* Get probe world position (24.8 fixed-point) from the probe_FL block
+         * at actor+0x90, per-probe stride 12 bytes. [CONFIRMED @ 0x406CC0] */
+        int32_t probe_x = probe_block[pi].x;
+        int32_t probe_z = probe_block[pi].z;
 
         /* Convert probe from 24.8 to world units for comparison with span vertices */
         int32_t px = probe_x >> 8;
@@ -542,30 +554,22 @@ void td5_track_resolve_wall_contacts(TD5_Actor *actor)
 
             if (d < -4000) d = -4000;
 
-            /* Diagnostic: dump geometry for first few contacts to trace the sign issue */
-            {
-                static int s_left_diag_count = 0;
-                if (s_left_diag_count < 5) {
-                    TD5_LOG_I(LOG_TAG, "LEFT_DIAG: probe=%d span=%d type=%d d=%d "
-                              "va=(%d,%d) vb=(%d,%d) origin=(%d,%d) probe=(%d,%d) "
-                              "edge=(%d,%d) perp=(%d,%d) rel=(%d,%d)",
-                              pi, span_idx, type, d,
-                              (int)va->x, (int)va->z, (int)vb->x, (int)vb->z,
-                              sp->origin_x, sp->origin_z, px, pz,
-                              edge_dx, edge_dz, nnx, nnz, rel_x, rel_z);
-                    s_left_diag_count++;
-                }
-            }
-
             if (d < 0) {
+                TD5_LOG_I(LOG_TAG, "LEFT_DIAG: slot=%d probe=%d span=%d type=%d d=%d "
+                          "va=(%d,%d) vb=(%d,%d) origin=(%d,%d) probe=(%d,%d) "
+                          "edge=(%d,%d) perp=(%d,%d) rel=(%d,%d)",
+                          actor->slot_index, pi, span_idx, type, d,
+                          (int)va->x, (int)va->z, (int)vb->x, (int)vb->z,
+                          sp->origin_x, sp->origin_z, px, pz,
+                          edge_dx, edge_dz, nnx, nnz, rel_x, rel_z);
                 /* AngleFromVector12(dz, dx) where dz=vb.z-va.z, dx=vb.x-va.x */
                 double rad = atan2((double)(edge_dz), (double)(edge_dx));
                 int32_t wall_angle = (int32_t)(rad * (4096.0 / (2.0 * 3.14159265358979323846))) & 0xFFF;
 
                 td5_physics_wall_response(actor, wall_angle, d, 1, nnx, nnz, 4096);
                 td5_physics_rebuild_pose(actor);
-                TD5_LOG_I(LOG_TAG, "wall_contact: probe=%d LEFT span=%d d=%d angle=%d",
-                          pi, span_idx, d, wall_angle);
+                TD5_LOG_I(LOG_TAG, "wall_contact: slot=%d probe=%d LEFT span=%d d=%d angle=%d",
+                          actor->slot_index, pi, span_idx, d, wall_angle);
             }
         }
     skip_left_wall:
@@ -608,10 +612,19 @@ void td5_track_resolve_wall_contacts(TD5_Actor *actor)
                 double rad = atan2((double)(edge_dz), (double)(edge_dx));
                 int32_t wall_angle = (int32_t)(rad * (4096.0 / (2.0 * 3.14159265358979323846))) & 0xFFF;
 
+                TD5_LOG_I(LOG_TAG, "RIGHT_DIAG: slot=%d probe=%d span=%d type=%d d=%d "
+                          "va=(%d,%d) vb=(%d,%d) origin=(%d,%d) probe=(%d,%d) "
+                          "edge=(%d,%d) perp=(%d,%d) rel=(%d,%d) lane_count=%d sub_lane=%d",
+                          actor->slot_index, pi, span_idx, type, d,
+                          (int)va->x, (int)va->z, (int)vb->x, (int)vb->z,
+                          sp->origin_x, sp->origin_z, px, pz,
+                          edge_dx, edge_dz, nnx, nnz, rel_x, rel_z,
+                          lane_count, probe->sub_lane_index);
+
                 td5_physics_wall_response(actor, wall_angle, d, 2, nnx, nnz, 4096);
                 td5_physics_rebuild_pose(actor);
-                TD5_LOG_I(LOG_TAG, "wall_contact: probe=%d RIGHT span=%d d=%d angle=%d",
-                          pi, span_idx, d, wall_angle);
+                TD5_LOG_I(LOG_TAG, "wall_contact: slot=%d probe=%d RIGHT span=%d d=%d angle=%d",
+                          actor->slot_index, pi, span_idx, d, wall_angle);
             }
         }
     }
