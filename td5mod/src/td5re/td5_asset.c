@@ -554,6 +554,14 @@ static void td5_asset_init_static_atlas(void)
             upload_atlas_placeholder(i);
             s_static_page_done[i] = 2;
         }
+
+        /* Register transparency for the static atlas page so the renderer
+         * picks the right blend preset at bind time. The static.hed file
+         * stores the same type byte as world tpages (0/1/2/3). */
+        if (i < s_page_metadata_count) {
+            td5_asset_set_page_transparency(STATIC_ATLAS_BASE + i,
+                                            s_page_metadata[i].transparency_flag);
+        }
     }
 
     /* --- Look up "CHASSIS" entry for underside/shadow sprite UV bounds
@@ -611,6 +619,26 @@ int td5_asset_static_tpage_is_real(int slot)
 {
     if (slot < 0 || slot >= 32) return 0;
     return s_static_page_done[slot] == 1;
+}
+
+/* Per-tpage transparency type, indexed by page_id. -1 = unknown.
+ * Mirrors the per-page metadata stored at DAT_0048dc40[3]+7+i*8 in the
+ * original BindRaceTexturePage @ 0x0040B660. */
+#define TD5_PAGE_TRANSPARENCY_MAX 1024
+static int8_t s_page_transparency[TD5_PAGE_TRANSPARENCY_MAX] = {
+    [0 ... (TD5_PAGE_TRANSPARENCY_MAX - 1)] = -1
+};
+
+void td5_asset_set_page_transparency(int page_id, int transparency)
+{
+    if (page_id < 0 || page_id >= TD5_PAGE_TRANSPARENCY_MAX) return;
+    s_page_transparency[page_id] = (int8_t)transparency;
+}
+
+int td5_asset_get_page_transparency(int page_id)
+{
+    if (page_id < 0 || page_id >= TD5_PAGE_TRANSPARENCY_MAX) return -1;
+    return s_page_transparency[page_id];
 }
 
 /* ========================================================================
@@ -1934,10 +1962,15 @@ int td5_asset_load_race_texture_pages(void)
         }
 
         td5_plat_render_upload_texture((int)pg, rgba, 64, 64, 2);
+        td5_asset_set_page_transparency((int)pg, (int)page_type);
         if (page_type == 1 && keyed_pixel_count > 0) {
             TD5_LOG_I(LOG_TAG,
                       "race tpage %u: type=1 keyed_pixels=%d/4096 (RGB zeroed)",
                       pg, keyed_pixel_count);
+        }
+        if (page_type == 3) {
+            TD5_LOG_I(LOG_TAG,
+                      "race tpage %u: type=3 ADDITIVE (light/glow sprite)", pg);
         }
         loaded_count++;
     }

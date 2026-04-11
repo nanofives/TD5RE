@@ -2116,6 +2116,27 @@ void td5_plat_render_set_preset(TD5_RenderPreset preset)
         s->alpha_test_enable = 1;
         s->alpha_ref         = 1;
         break;
+
+    case TD5_PRESET_ADDITIVE:
+        /* Mirror BindRaceTexturePage @ 0x0040B660 case 3:
+         *   ALPHABLENDENABLE (0x1B) = 1
+         *   SRCBLEND         (0x13) = D3DBLEND_ONE  (2)
+         *   DESTBLEND        (0x14) = D3DBLEND_ONE  (2)
+         * Used for type-3 tpages — street-light sprites, headlight glows,
+         * additive particles. Black RGB pixels add nothing → naturally
+         * invisible without color-keying. Z-write off so additive splats
+         * don't punch holes in the depth buffer. */
+        s->blend_enable      = 1;
+        s->src_blend         = D3D6BLEND_ONE;
+        s->dest_blend        = D3D6BLEND_ONE;
+        s->z_enable          = 1;
+        s->z_write           = 0;
+        s->mag_filter        = 2; /* LINEAR */
+        s->min_filter        = 2;
+        s->texblend_mode     = D3DTBLEND_MODULATE;
+        s->alpha_test_enable = 0;
+        s->alpha_ref         = 0;
+        break;
     }
 
     g_backend.alpha_blend_enabled = s->blend_enable;

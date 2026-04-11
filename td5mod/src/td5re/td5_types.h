@@ -132,6 +132,12 @@
 #define TD5_NET_MAX_PLAYERS         6
 #define TD5_NET_RING_BUFFER_SIZE    16
 
+_Static_assert(TD5_FP_ONE == 256, "TD5_FP_ONE must remain 24.8 fixed-point one");
+_Static_assert(TD5_ANGLE_FULL == 0x1000, "TD5 angle space must remain 12-bit");
+_Static_assert(TD5_TICK_ACCUMULATOR_ONE == 0x10000, "TD5 tick accumulator must remain 0x10000");
+_Static_assert(TD5_MAX_TOTAL_ACTORS == (TD5_MAX_RACER_SLOTS + TD5_MAX_TRAFFIC_SLOTS),
+               "TD5 actor slot constants drifted");
+
 /* ========================================================================
  * Enumerations
  * ======================================================================== */
@@ -253,7 +259,8 @@ typedef enum TD5_RenderPreset {
     TD5_PRESET_TRANSLUCENT_LINEAR = 1,  /* Translucent, linear filter */
     TD5_PRESET_TRANSLUCENT_ANISO  = 2,  /* Translucent, aniso filter */
     TD5_PRESET_OPAQUE_LINEAR      = 3,  /* Opaque, linear filter */
-    TD5_PRESET_TRANSLUCENT_POINT  = 4   /* Translucent, point (nearest-neighbour) filter */
+    TD5_PRESET_TRANSLUCENT_POINT  = 4,  /* Translucent, point (nearest-neighbour) filter */
+    TD5_PRESET_ADDITIVE           = 5   /* Additive (ONE/ONE) — type-3 tpages: lights, glows */
 } TD5_RenderPreset;
 
 /** Mesh primitive dispatch opcodes */

@@ -1904,6 +1904,32 @@ void td5_render_advance_texture_ages(void)
     }
 }
 
+/* Switch the current render preset to match a tpage's transparency type.
+ * Mirrors the case dispatch in BindRaceTexturePage @ 0x0040B660 which
+ * reads the type byte from per-page metadata and routes to one of:
+ *   0 → opaque (no blend, alpha test on)
+ *   1,2 → alpha-blend (SRCALPHA / INVSRCALPHA)
+ *   3 → additive (ONE / ONE) — street lights, headlight glows
+ * Pages with unknown type stay on the caller's preset (default opaque). */
+static void td5_render_apply_page_blend_preset(int page_id)
+{
+    int t = td5_asset_get_page_transparency(page_id);
+    if (t < 0) return;
+    switch (t) {
+    case 3:
+        td5_plat_render_set_preset(TD5_PRESET_ADDITIVE);
+        break;
+    case 1:
+    case 2:
+        td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_ANISO);
+        break;
+    case 0:
+    default:
+        td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
+        break;
+    }
+}
+
 int td5_render_bind_texture_page(int page_id)
 {
     /*
@@ -1936,6 +1962,7 @@ int td5_render_bind_texture_page(int page_id)
         s_debug_texture_cache_hits++;
 
         td5_plat_render_bind_texture(found_slot);
+        td5_render_apply_page_blend_preset(page_id);
         if ((g_tick_counter % 60u) == 0u) {
             TD5_LOG_D(LOG_TAG,
                       "texture bind: hit page=%d slot=%d active=%d",
@@ -1982,6 +2009,7 @@ int td5_render_bind_texture_page(int page_id)
 
     /* Bind (the actual texture upload happens in td5_asset streaming scheduler) */
     td5_plat_render_bind_texture(best_slot);
+    td5_render_apply_page_blend_preset(page_id);
     if ((g_tick_counter % 60u) == 0u) {
         TD5_LOG_D(LOG_TAG,
                   "texture bind: miss page=%d slot=%d evicted=%d active=%d",

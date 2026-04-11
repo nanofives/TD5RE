@@ -35,6 +35,15 @@ void td5_asset_shutdown(void);
  * Use to guard synthetic texture generation so it only runs when the .dat is absent. */
 int  td5_asset_static_tpage_is_real(int slot);
 
+/* Per-tpage transparency type (raw byte +3 of original tpage descriptor):
+ *   0 = opaque, 1 = color-keyed, 2 = semi-transparent (alpha 0x80), 3 = additive
+ *   -1 = unknown / not registered (caller should treat as 0).
+ * Setter is called by the texture loaders right after upload; the renderer
+ * queries it during td5_render_bind_texture_page to pick the blend preset.
+ * Mirrors the per-page metadata in BindRaceTexturePage @ 0x0040B660. */
+void td5_asset_set_page_transparency(int page_id, int transparency);
+int  td5_asset_get_page_transparency(int page_id);
+
 /* ========================================================================
  * ZIP Archive System
  *
@@ -167,35 +176,6 @@ TD5_StaticHedEntry *td5_asset_find_entry_by_name(
 TD5_AtlasEntry *td5_asset_find_atlas_entry(void *context, const char *name);
 
 /* ========================================================================
- * TGA Decoding
- *
- * Reimplements DecodeArchiveImageToRgb24 (0x442E00) which is a custom
- * TGA decoder supporting types 1, 2, 9, 10 (uncompressed/RLE, indexed/RGB).
- * Output is always 24-bit RGB (B,G,R byte order as per original).
- * ======================================================================== */
-
-/**
- * Decode a TGA image from raw file data to 24-bit RGB pixels.
- *
- * @param tga_data    Pointer to raw TGA file bytes.
- * @param rgb_out     Output buffer for decoded RGB24 pixels (must be
- *                    width * height * 3 bytes). Pixels are in BGR order
- *                    matching the original engine convention.
- *
- * Handles TGA types: 1 (indexed), 2 (truecolor), 9 (RLE indexed),
- * 10 (RLE truecolor). Supports 16/24/32-bit source formats.
- * Applies vertical/horizontal flip per TGA descriptor flags.
- */
-void td5_asset_decode_tga_to_rgb24(const void *tga_data, void *rgb_out);
-
-/**
- * Decode a TGA to RGBA32. Returns malloc'd buffer; caller frees.
- * Sets *width_out and *height_out. Returns 0 on failure.
- */
-int td5_asset_decode_tga(const void *data, size_t size, void **pixels_out,
-                          int *width_out, int *height_out);
-
-/* ========================================================================
  * Level Data Loading
  * ======================================================================== */
 
@@ -241,6 +221,9 @@ const void *td5_asset_get_checkpoint_data(int *out_size);
  */
 int td5_asset_load_vehicle(int car_index, int slot);
 
+/** Get the ZIP archive path for a car by index (0-36). Returns NULL if out of range. */
+const char *td5_asset_get_car_zip_path(int car_index);
+
 /* ========================================================================
  * Mipmap Generation
  * ======================================================================== */
@@ -265,9 +248,49 @@ void  td5_asset_free(void *ptr);
  * ======================================================================== */
 
 int  td5_asset_level_number(int track_index);
+/** Load PNG and return BGRA32 pixels (R↔B swapped for D3D11 B8G8R8A8_UNORM).
+ *  Despite the legacy name, output is BGRA, not RGBA. */
 int  td5_asset_decode_png_rgba32(const char *path,
                                   void **pixels_out, int *w_out, int *h_out);
-int  td5_asset_decode_tga(const void *data, size_t size,
-                           void **pixels_out, int *w_out, int *h_out);
+
+
+/* ========================================================================
+ * Unified PNG Texture Loading
+ *
+ * All source-port texture loads should go through these functions.
+ * Canonical texture directory: re/assets/
+ * ======================================================================== */
+
+/** Color-key modes for PNG texture loading. */
+typedef enum {
+    TD5_COLORKEY_NONE   = 0,  /* No transparency keying */
+    TD5_COLORKEY_BLACK  = 1,  /* Near-black (R<8,G<8,B<8) → alpha=0 */
+    TD5_COLORKEY_RED    = 2,  /* Pure red (R=255,G=0,B=0) → alpha=0 */
+    TD5_COLORKEY_BLUE88 = 3,  /* Dark blue (0,0,88) → alpha=0 (car previews) */
+    TD5_COLORKEY_CYAN   = 4,  /* Cyan (R<16,G>240,B>240) → alpha=0 (PAUSETXT bg) */
+} TD5_ColorKeyMode;
+
+/**
+ * Load a PNG texture, apply color keying, and upload to a GPU texture page.
+ * Returns 1 on success, 0 on failure (file not found, decode error, etc.).
+ */
+int td5_asset_load_png_texture(int page_index, const char *png_path,
+                               TD5_ColorKeyMode colorkey);
+
+/**
+ * Load a PNG texture into a caller-owned pixel buffer (BGRA32, GPU-ready).
+ * Applies color keying in-place. Caller must free *pixels_out with free().
+ * Returns 1 on success, 0 on failure.
+ */
+int td5_asset_load_png_to_buffer(const char *png_path, TD5_ColorKeyMode colorkey,
+                                 void **pixels_out, int *w_out, int *h_out);
+
+/**
+ * Resolve a ZIP entry name + archive path to a re/assets PNG path.
+ * Strips .tga extension, maps archive to subfolder, checks file exists.
+ * Returns 1 if resolved PNG exists, 0 otherwise.
+ */
+int td5_asset_resolve_png_path(const char *entry_name, const char *archive,
+                               char *out_path, size_t out_size);
 
 #endif /* TD5_ASSET_H */
