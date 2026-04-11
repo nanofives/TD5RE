@@ -935,9 +935,21 @@ void td5_physics_update_player(TD5_Actor *actor)
     /* --- 17. ApplyMissingWheelVelocityCorrection --- */
     td5_physics_missing_wheel_correction(actor);
 
-    /* Store tire slip for SFX */
-    actor->accumulated_tire_slip_x = (int16_t)(actor->front_axle_slip_excess >> 8);
-    actor->accumulated_tire_slip_z = (int16_t)(actor->rear_axle_slip_excess >> 8);
+    /* Tire slip accumulators — drive the wheel billboard rotation visuals
+     * via RenderVehicleWheelBillboards (0x446F00).
+     * [CONFIRMED @ UpdatePlayerVehicleDynamics 0x404030, near the end]:
+     *
+     *   slip_x += lateral_speed >> 8;          (always)
+     *   if (!handbrake) slip_z += long_speed >> 8;  (handbrake gates slip_z)
+     *
+     * Front wheels rotate by slip_z * -4, rear wheels by slip_x * -4
+     * (see RenderVehicleWheelBillboards decomp).  An earlier version
+     * here assigned these fields from {front,rear}_axle_slip_excess,
+     * which wiped out the accumulation every tick — wheels never spun. */
+    actor->accumulated_tire_slip_x += (int16_t)(actor->lateral_speed >> 8);
+    if (!actor->handbrake_flag) {
+        actor->accumulated_tire_slip_z += (int16_t)(actor->longitudinal_speed >> 8);
+    }
 }
 
 /* ========================================================================
