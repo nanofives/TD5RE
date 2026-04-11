@@ -341,6 +341,11 @@ void FinalizeCameraProjectionMatrices(void)
     /* Copy primary basis + position to working area (12 floats) */
     memcpy(g_cameraBasisWork, g_cameraBasis, 12 * sizeof(float));
 
+    /* Source-port snapshot: yaw-stripped basis BEFORE projection scaling.
+     * The td5_render.c billboard branch uses this so its rotation lives
+     * in the same coordinate space as s_camera_basis (also unscaled). */
+    memcpy(g_cameraSecondaryUnscaled, g_cameraSecondary, 9 * sizeof(float));
+
     /* Scale all three 3x3 matrices by 1/projectionScale */
     for (i = 0; i < 9; i++) {
         g_cameraBasisWork[i] *= inv_proj;

@@ -1267,22 +1267,33 @@ void td5_render_span_display_list(void *display_list_block)
         td5_render_load_translation(&origin);
 
         /* Billboard meshes (trees/signs/street-lights): replace rotation with
-         * the yaw-stripped camera basis g_cameraSecondary so the quad faces
-         * the camera horizontally while still tilting with pitch/roll.
-         * TODO: the original reads a short at mesh+2 and tests ==1 || ==2,
-         * but reading mesh->texture_page_id at the same offset makes all
-         * textures invisible — meaning the source port's mesh iterator
-         * doesn't point at the same struct shape the original sees here.
-         * Falling back to render_type until the dispatch is reverified. */
-        if (mesh->render_type == 1 || mesh->render_type == 2) {
-            extern float g_cameraSecondary[9];
+         * the yaw-stripped camera basis so the quad faces the camera
+         * horizontally while still tilting with pitch/roll.
+         * [CONFIRMED @ 0x00431296 raw 66 8b 46 02]: original reads
+         * `MOV AX, [ESI+0x02]` and tests `==1 || ==2` to take the billboard
+         * branch which calls LoadRenderRotationMatrix(&DAT_004ab070).
+         * In TD5_MeshHeader the int16 at byte offset 2 is currently named
+         * `texture_page_id`, but per-mesh texture binding is done from the
+         * per-primitive cmd->texture_page_id, not this field — the mesh
+         * header field is the billboard tag.
+         * We load g_cameraSecondaryUnscaled (snapshot of g_cameraSecondary
+         * BEFORE FinalizeCameraProjectionMatrices applies inv_proj*fov_factor)
+         * because s_camera_basis above is also the unscaled g_cameraBasis.
+         * Loading the SCALED g_cameraSecondary into the rotation slot of
+         * s_render_transform mixes coordinate spaces and collapses every
+         * billboard quad off-screen. */
+        int billboard_tag = (int)mesh->texture_page_id;
+        if (billboard_tag == 1 || billboard_tag == 2) {
+            extern float g_cameraSecondaryUnscaled[9];
+            static int s_bb_hit = 0, s_bb_log = 0;
+            s_bb_hit++;
             td5_render_push_transform();
-            td5_render_load_rotation((const TD5_Mat3x3 *)g_cameraSecondary);
-            if ((s_debug_dl_calls % 500) == 1) {
+            td5_render_load_rotation((const TD5_Mat3x3 *)g_cameraSecondaryUnscaled);
+            if (s_bb_log < 10) {
                 TD5_LOG_I(LOG_TAG,
-                    "billboard mesh: render_type=%d origin=(%.1f,%.1f,%.1f) "
-                    "loaded g_cameraSecondary",
-                    (int)mesh->render_type, origin.x, origin.y, origin.z);
+                    "billboard mesh: tag=%d origin=(%.1f,%.1f,%.1f) hits=%d",
+                    billboard_tag, origin.x, origin.y, origin.z, s_bb_hit);
+                s_bb_log++;
             }
             td5_render_transform_mesh_vertices(mesh);
             td5_render_compute_vertex_lighting(mesh);
