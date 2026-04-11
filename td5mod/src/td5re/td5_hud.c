@@ -1191,8 +1191,10 @@ void td5_hud_init_overlay_resources(int race_mode, int string_table_offset)
 
         /* Position label and lap timers for most modes */
         if (g_game_type == 7) {
-            /* Time Trial: show lap timers + total timer, no position label (solo) */
-            flags |= TD5_HUD_LAP_TIMERS | TD5_HUD_TOTAL_TIMER;
+            /* Time Trial (preset 3 @ 0x004377B0): no flag-driven timers.
+             * The main TIME readout is emitted from td5_hud_draw_status_text
+             * (DrawRaceStatusText @ 0x00439B70), not from the overlay bitmask. */
+            TD5_LOG_I(LOG_TAG, "overlay flags: time-trial (game_type=7) baseline only");
         } else if (g_game_type == 2 || g_game_type == 0 || g_game_type == 1) {
             flags |= TD5_HUD_POSITION_LABEL | TD5_HUD_LAP_TIMERS;
         } else if (g_game_type == 5) {
