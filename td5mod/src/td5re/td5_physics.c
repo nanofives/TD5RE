@@ -133,7 +133,7 @@ static uint8_t s_loaded_tuning[TD5_MAX_TOTAL_ACTORS][0x80]; /* carparam 0x8C..0x
 static void update_engine_speed_smoothed(TD5_Actor *actor);
 static void apply_damped_suspension_force(TD5_Actor *actor, int32_t lateral, int32_t longitudinal);
 static void update_vehicle_pose_from_physics(TD5_Actor *actor);
-static int32_t compute_reverse_gear_torque(TD5_Actor *actor);
+static int32_t compute_reverse_gear_torque(TD5_Actor *actor, int32_t speed_in);
 static void bind_default_vehicle_tuning(TD5_Actor *actor, int slot);
 
 static inline void write_i16(uint8_t *base, size_t offset, int16_t value)
@@ -684,9 +684,15 @@ void td5_physics_update_player(TD5_Actor *actor)
     int32_t brake_rear  = (int32_t)PHYS_S(actor, 0x70);
 
     if (actor->surface_contact_flags != 0) {
-        /* --- ON-GROUND branch --- */
+        /* --- ON-GROUND branch ---
+         * td5_physics_update_engine_speed (UESA @ 0x0042EDF0) is NOT called
+         * on the grounded path in the original — compute_reverse_gear_torque
+         * (CRGT @ 0x00403C80) is the authoritative engine updater here, and
+         * it runs later in this function as part of the post-force
+         * longitudinal/lateral_speed write. [CONFIRMED via 2026-04-11 CRGT
+         * Ghidra pass: CRGT and UESA are mutually exclusive per tick — CRGT
+         * on ground, UESA on airborne.] */
         td5_physics_auto_gear_select(actor);
-        td5_physics_update_engine_speed(actor);
 
         if (!actor->brake_flag) {
             /* Drive path: drive torque distributed by drivetrain. At
@@ -782,41 +788,104 @@ void td5_physics_update_player(TD5_Actor *actor)
     /* Original (0x40415B): steer_angle = steering_command >> 8, no scaling.
      * Constant 294 does NOT exist in the binary. [CONFIRMED @ 0x404142-0x40415E] */
     int32_t steer_heading = (heading + steer_angle) & 0xFFF;
-    int32_t cos_s = cos_fixed12(steer_heading);
-    int32_t sin_s = sin_fixed12(steer_heading);
+    int32_t cos_s = cos_fixed12(steer_heading);   /* cos(h+s) — iVar16 */
+    int32_t sin_s = sin_fixed12(steer_heading);   /* sin(h+s) — iVar17 */
 
-    /* Front axle lateral force from slip angle.
-     * lateral_slip_stiffness (0x7C) scales slip sensitivity per car.
-     * Original at 0x4041B0: slip is computed from WORLD-frame velocity
-     * projected onto steered heading perpendicular, NOT from body-frame.
-     * front_slip = (world_vx * cos(heading+steer) - world_vz * sin(heading+steer)) >> 12 */
-    int32_t lat_stiff = (int32_t)PHYS_S(actor, 0x7C);
-    int32_t front_slip = (vx * cos_s - vz * sin_s) >> 12;
-    if (lat_stiff != 0)
-        front_slip = (front_slip * lat_stiff) >> 8;
-    int32_t front_lat_force = -(front_slip * ((grip[0] + grip[1]) >> 1)) >> 8;
-
-    /* Rear axle lateral force.
-     * Original at 0x4041E0: rear slip from WORLD-frame velocity projected
-     * onto body heading perpendicular (unsteered) — equals v_lat.
-     * Prior port multiplied arcade-mode rear_slip by 0.75 to "limit oversteer",
-     * which directly killed drift. Research @ 0x004041E0 shows no such
-     * multiplier in the original. [CONFIRMED removed] */
-    int32_t rear_slip = v_lat;
-    if (lat_stiff != 0)
-        rear_slip = (rear_slip * lat_stiff) >> 8;
-    int32_t rear_lat_force = -(rear_slip * ((grip[2] + grip[3]) >> 1)) >> 8;
-
-    if (actor->slot_index == 0 && (actor->frame_counter % 120u) == 0u) {
-        TD5_LOG_I(LOG_TAG,
-                  "SLIP: front=%d rear=%d f_lat=%d r_lat=%d steer_ang=%d v_lat=%d",
-                  front_slip, rear_slip, front_lat_force, rear_lat_force,
-                  steer_angle, v_lat);
-    }
+    /* Steer-angle-only cos/sin for the lateral force solve.
+     * Decomp uses iVar18 = cos(steer), iVar19 = sin(steer) — NOT (h+s). */
+    int32_t steer_only = steer_angle & 0xFFF;
+    int32_t cos_sr = cos_fixed12(steer_only);     /* iVar18 = cos(s) */
+    int32_t sin_sr = sin_fixed12(steer_only);     /* iVar19 = sin(s) */
 
     /* Front/rear longitudinal forces (sum of per-wheel drive) */
     int32_t front_long = (wheel_drive[0] + wheel_drive[1]);
     int32_t rear_long  = (wheel_drive[2] + wheel_drive[3]);
+
+    /* --- Coupled bicycle-model lateral force solve ---
+     * Literal port of UpdatePlayerVehicleDynamics @ 0x00404A40-0x00404CCC.
+     * Ghidra name mapping: local_c = front_lat_force, local_14 = rear_lat_force,
+     * local_8 = F_f (front drive), local_2c = F_r (rear drive), iVar27 = I
+     * (tuning+0x20 inertia).
+     *
+     * Prior port used a linear approximation
+     *   front_lat = -front_slip * grip_avg >> 8
+     *   rear_lat  = -v_lat * grip_avg >> 8
+     * which dropped the 2x2 bicycle determinant, yaw-rate coupling, and
+     * drive-force cross terms — all required for drift initiation and
+     * propagation. Replaced with literal decomp transcription.
+     *
+     * Uses signed integer `/` (not `>>`) to match the original's rounding-
+     * toward-zero idiom `(x + (x>>31 & mask)) >> n`. [CONFIRMED bit-exact] */
+    int32_t front_lat_force;
+    int32_t rear_lat_force;
+    {
+        int32_t a_ = front_weight;                          /* iVar32 */
+        int32_t b_ = rear_weight;                           /* iVar13 */
+        int32_t I_ = PHYS_I(actor, 0x20);                   /* iVar27 */
+        int32_t L_ = a_ + b_;                               /* iVar33 */
+        int32_t w_ = actor->angular_velocity_yaw;           /* iVar28 (initial) */
+        int32_t F_f = front_long;                           /* local_8 */
+        int32_t F_r = rear_long;                            /* local_2c */
+        int32_t vx_b = v_lat;                               /* iVar20 */
+        int32_t vz_b = v_long;                              /* uVar12 */
+
+        /* Determinant: denom = [L²·cos²(s) + (b²+I)·sin²(s)] / 2^34
+         * [CONFIRMED @ 0x00404A40-0x00404A9F] */
+        int32_t bb_plus_I = (b_ * b_ + I_) / 1024;          /* iVar21 */
+        int32_t LL_over_1024 = (L_ * L_) / 1024;
+        int32_t t22 = (LL_over_1024 * cos_sr) / 4096 * cos_sr;
+        int32_t t23 = (bb_plus_I * sin_sr) / 4096 * sin_sr;
+        int32_t denom = t22 / 4096 + t23 / 4096;
+        if (denom == 0) denom = 1;
+
+        /* Rear lateral force (local_14) numerator
+         * [CONFIRMED @ 0x00404AA0-0x00404B27] */
+        int32_t ba_minus_I = (b_ * a_ - I_) / 1024;
+        int32_t iv24 = (I_ / 0x28C) * w_;
+
+        /* A = (I/1024) * ((b*w)/652 - vx_b) / 4096 * sin(s) */
+        int32_t t_a = (I_ / 1024) * ((b_ * w_) / 0x28C - vx_b);
+        t_a = (t_a / 4096) * sin_sr;
+
+        /* B = ((F_f*cos(s)/4096 + F_r + vz_b) * (b*a-I)/1024 / 4096) * cos(s) */
+        int32_t drive_sum = (F_f * cos_sr) / 4096 + F_r + vz_b;
+        int32_t t_b = drive_sum * ba_minus_I;
+        t_b = (t_b / 4096) * cos_sr;
+
+        /* C = ((b*a-I)/1024 * F_f / 4096 * sin(s)) / 4096 * sin(s) */
+        int32_t t_c = ba_minus_I * F_f;
+        t_c = (t_c / 4096) * sin_sr;
+        t_c = (t_c / 4096) * sin_sr;
+
+        /* D = (((I/652)*w - vx_b*a) / 1024 * L) / 4096 * cos(s) */
+        int32_t t_d = (iv24 - vx_b * a_) / 1024 * L_;
+        t_d = (t_d / 4096) * cos_sr;
+
+        int32_t local_14_num = (t_d / 4096) * cos_sr
+                             + ((t_a / 4096) + (t_b / 4096) + (t_c / 4096)) * sin_sr;
+        rear_lat_force = local_14_num / denom;
+
+        /* Front lateral force (local_c) numerator
+         * [CONFIRMED @ 0x00404B28-0x00404B93] */
+        /* E = ((a+2b)*a - I)/1024 * F_f / 4096 * cos(s) + (F_r + vz_b) * (b²+I)/1024 */
+        int32_t acoef = (a_ + 2 * b_) * a_ - I_;
+        int32_t t_e = (acoef / 1024) * F_f;
+        t_e = (t_e / 4096) * cos_sr + (F_r + vz_b) * bb_plus_I;
+
+        /* F = (vx_b*b + iv24) / 1024 * L */
+        int32_t iv24b = vx_b * b_ + iv24;
+        int32_t t_f = (iv24b / 1024) * L_;
+
+        int32_t local_c_num = (t_e / 4096) * sin_sr - (t_f / 4096) * cos_sr;
+        front_lat_force = local_c_num / denom;
+    }
+
+    if (actor->slot_index == 0 && (actor->frame_counter % 60u) == 0u) {
+        TD5_LOG_I(LOG_TAG,
+                  "LATFORCE: f_lat=%d r_lat=%d vx_b=%d vz_b=%d w=%d steer=%d F_f=%d F_r=%d",
+                  front_lat_force, rear_lat_force, v_lat, v_long,
+                  actor->angular_velocity_yaw, steer_angle, front_long, rear_long);
+    }
 
     /* --- 13. Tire slip circle via isqrt (per axle) ---
      * Grip limit scaled by tire grip coefficient (tuning 0x2C).
@@ -952,24 +1021,69 @@ void td5_physics_update_player(TD5_Actor *actor)
         actor->linear_velocity_z += fz;
     }
 
-    /* --- 14a. Re-project longitudinal/lateral body-frame speeds from
-     * the POST-force world velocity. The original writes longitudinal_speed
-     * and lateral_speed from the force-updated velocity at the tail of
-     * UpdatePlayerVehicleDynamics, not from the pre-force velocity at the
-     * top of the function. The prior port wrote these fields once at line
-     * 659 using the pre-force v_long/v_lat locals, leaving long_speed one
-     * tick stale. That cascade produced:
-     *   - gear stuck one step off (auto_gear_select at next tick sees wrong speed)
-     *   - front/rear slip read 0 until the next tick
-     *   - accumulated_distance off by one tick
-     *   - downstream yaw-damping / slip-circle mispredictions
-     * Using the same sin_h/cos_h keeps the projection consistent with the
-     * forward rotation at line 655. */
+    /* --- 14a. Re-project longitudinal/lateral speeds from the POST-force
+     * world velocity. The original writes these at the tail of
+     * UpdatePlayerVehicleDynamics @ 0x00404030 — but not always as plain
+     * body-frame projections. For grounded cars the drivetrain layout
+     * (phys_data+0x76 = sVar2) decides which field(s) get the body-frame
+     * value and which get the CRGT-encoded (RPM-inverted) pseudo-speed.
+     *
+     * [CONFIRMED via 2026-04-11 Ghidra decomp of 0x00404030 + 0x00403C80 +
+     * 0x0042EDF0 (research agent).]  The encode/decode closed loop
+     * explains why the port's plain body-frame write produced a ~131×
+     * mismatch against the original's +0x314 (64256 vs 489).
+     *
+     *   sVar2 | longitudinal_speed (+0x314) | lateral_speed (+0x318)
+     *   ------+-----------------------------+------------------------
+     *     1   | CRGT(engine, gear_ratio)    | body-frame Vlat
+     *     2   | body-frame Vlong            | CRGT(engine, gear_ratio)
+     *     3   | CRGT(engine, gear_ratio)    | CRGT(engine, gear_ratio)
+     *
+     * Airborne cars (surface_contact_flags == 0) unconditionally get the
+     * body-frame projection on both fields — same as the port's prior
+     * behaviour. */
     {
         int64_t post_vx = actor->linear_velocity_x;
         int64_t post_vz = actor->linear_velocity_z;
-        actor->longitudinal_speed = (int32_t)((post_vx * sin_h + post_vz * cos_h) >> 12);
-        actor->lateral_speed      = (int32_t)((post_vx * cos_h - post_vz * sin_h) >> 12);
+        int32_t body_vlong = (int32_t)((post_vx * sin_h + post_vz * cos_h) >> 12);
+        int32_t body_vlat  = (int32_t)((post_vx * cos_h - post_vz * sin_h) >> 12);
+
+        if (actor->surface_contact_flags != 0) {
+            /* Drivetrain dispatch per UpdatePlayerVehicleDynamics @ 0x00404030:
+             * sVar2=1 (RWD): CRGT(speed=body_vlong) → long_speed; lat=body_vlat
+             * sVar2=2 (FWD): CRGT(speed=body_vlat)  → lat_speed;  long=body_vlong
+             * sVar2=3 (AWD): CRGT(speed=(long+lat)/2) → BOTH fields
+             * [CONFIRMED via 2026-04-11 Ghidra pass — the `speed_in` passed
+             *  to CRGT is the drivetrain-appropriate velocity component.] */
+            int32_t dt_layout = (int32_t)PHYS_S(actor, 0x76);
+            switch (dt_layout) {
+            case 1: {  /* RWD */
+                int32_t crgt = compute_reverse_gear_torque(actor, body_vlong);
+                actor->longitudinal_speed = crgt;
+                actor->lateral_speed      = body_vlat;
+                break;
+            }
+            case 2: {  /* FWD */
+                int32_t crgt = compute_reverse_gear_torque(actor, body_vlat);
+                actor->lateral_speed      = crgt;
+                actor->longitudinal_speed = body_vlong;
+                break;
+            }
+            case 3: {  /* AWD */
+                int32_t crgt = compute_reverse_gear_torque(actor, (body_vlong + body_vlat) / 2);
+                actor->longitudinal_speed = crgt;
+                actor->lateral_speed      = crgt;
+                break;
+            }
+            default:
+                actor->longitudinal_speed = body_vlong;
+                actor->lateral_speed      = body_vlat;
+                break;
+            }
+        } else {
+            actor->longitudinal_speed = body_vlong;
+            actor->lateral_speed      = body_vlat;
+        }
     }
 
     /* --- 14b. Velocity magnitude safety clamp ---
@@ -3550,58 +3664,85 @@ void td5_physics_update_engine_speed(TD5_Actor *actor)
     actor->engine_speed_accum = rpm;
 }
 
-/* --- UpdateAutomaticGearSelection (0x42EF10) --- */
+/* --- UpdateAutomaticGearSelection (0x0042EF10) ---
+ *
+ * [CONFIRMED via 2026-04-11 full Ghidra pass.] Key port-vs-original
+ * corrections over the prior implementation:
+ *
+ *   1. CACHED GEAR for threshold indexing. The original loads current_gear
+ *      into EAX once at 0x0042EF21 and never refreshes it before the
+ *      upshift/downshift index reads (`MOVSX [ESI+EAX*2+0x3e]` at 0x42EF52
+ *      and `MOVSX [ESI+EAX*2+0x4e]` at 0x42EFF1). When the reverse→forward
+ *      promotion writes memory (gear=2), the cached EAX stays at 0, so the
+ *      upshift reads `phys[0x3E + 0]` (reverse entry), NOT `phys[0x42]`.
+ *      The prior port updated its local `gear` variable in the promotion
+ *      path and then used it for indexing, causing a one-tick upshift race
+ *      on the first post-reverse tick.
+ *
+ *   2. DRIVETRAIN KICK into wheel_force_accum on upshift. The original
+ *      spreads a per-gear torque pulse across the four wheel force-accum
+ *      slots (+0x2EC/+0x2F0/+0x2F4/+0x2F8) via the table at 0x00467394
+ *      (= {0, 0, 0x100, 0xC0, 0x80, 0x40, 0x20, 0x10, 0}, indexed by the
+ *      NEW post-upshift gear). FL/FR get +k, RL/RR get -k. The prior port
+ *      omitted this entirely. */
 void td5_physics_auto_gear_select(TD5_Actor *actor)
 {
     int16_t *phys = get_phys(actor);
     if (!phys) return;
 
-    int32_t throttle = (int32_t)actor->encounter_steering_cmd;
-    int32_t gear = (int32_t)actor->current_gear;
-    int32_t rpm = actor->engine_speed_accum;
+    /* Cache up-front — never refresh across the function body. */
+    int32_t throttle    = (int32_t)actor->encounter_steering_cmd;
+    uint8_t gear_cached = actor->current_gear;
+    int32_t rpm         = actor->engine_speed_accum;
 
-    /* Reverse gear on negative throttle.
-     * Original (0x0042EF32): unconditional gear=0 + early return on any
-     * throttle<0. The HUD reads actor+0x36B directly, so the 'R' glyph
-     * appears the instant the brake is pressed. The speedometer digit
-     * (RenderRaceHudOverlays @ 0x00438D70) clamps negative longitudinal_speed
-     * to 0 and continues to show the decaying forward speed during deceleration. */
+    /* Negative throttle → force reverse and return. */
     if (throttle < 0) {
         actor->current_gear = TD5_GEAR_REVERSE;
         return;
     }
 
-    /* Skip neutral/reverse when throttle positive */
-    if (gear == TD5_GEAR_REVERSE && throttle > 0)
-        gear = TD5_GEAR_FIRST;
-
-    /* Upshift: RPM > upshift_threshold AND speed > 0 AND gear < 8
-     * Original hardcodes max gear index < 8 [CONFIRMED @ 0x42EF42] */
-    if (gear < 8 && actor->longitudinal_speed > 0) {
-        int32_t up_thresh = (int32_t)PHYS_S(actor, 0x3E + gear * 2);
-        if (rpm > up_thresh) {
-            gear++;
-            /* Gear-change torque kick: original writes to force_accum but
-             * the original suspension reads XZ projections, not this. Omitted
-             * to prevent pitch divergence (same issue as apply_steering_torque). */
-            /* Original returns immediately after upshift [CONFIRMED @ 0x42EF8E].
-             * This prevents the downshift check from undoing the shift
-             * in the same frame with stale RPM. */
-            actor->current_gear = (uint8_t)gear;
-            return;
-        }
+    /* Already in reverse: promote to first forward in MEMORY only when
+     * throttle > 0. Cached value is intentionally NOT updated — matches
+     * the original's non-refreshed EAX cache. */
+    if (gear_cached == TD5_GEAR_REVERSE) {
+        if (throttle <= 0) return;
+        actor->current_gear = TD5_GEAR_FIRST;
+        /* gear_cached stays 0 on purpose */
     }
 
-    /* Downshift: RPM < downshift_threshold AND gear > 2
-     * Only reached if NO upshift occurred this frame. */
-    if (gear > TD5_GEAR_FIRST) {
-        int32_t dn_thresh = (int32_t)PHYS_S(actor, 0x4E + gear * 2);
-        if (rpm < dn_thresh) {
-            gear--;
-        }
+    /* Upshift test — indexed by gear_cached (pre-promotion). */
+    int32_t up_thresh = (int32_t)PHYS_S(actor, 0x3E + gear_cached * 2);
+    if (rpm > up_thresh
+        && gear_cached < 8
+        && actor->longitudinal_speed > 0) {
+
+        /* Re-load gear byte from memory (may already be 2 after promotion)
+         * and +1, matching the original's `INC BL` after a second load. */
+        uint8_t new_gear = (uint8_t)(actor->current_gear + 1);
+        actor->current_gear = new_gear;
+
+        /* Drivetrain kick — per-gear force impulse spread across wheels.
+         * [CONFIRMED @ 0x42EFB0..0x42EFD7 raw disasm + DAT_00467394 table.] */
+        static const int32_t g_gear_torque_table[9] = {
+            0, 0, 0x100, 0xC0, 0x80, 0x40, 0x20, 0x10, 0
+        };
+        int32_t k = (int32_t)PHYS_S(actor, 0x68) * throttle * 0x1A;
+        k = ((k + ((k >> 31) & 0xFF)) >> 8)
+          * g_gear_torque_table[new_gear & 0x0F];
+        k =  (k + ((k >> 31) & 0xFF)) >> 8;
+
+        actor->wheel_force_accum[0] += k;   /* +0x2EC FL */
+        actor->wheel_force_accum[1] += k;   /* +0x2F0 FR */
+        actor->wheel_force_accum[2] -= k;   /* +0x2F4 RL */
+        actor->wheel_force_accum[3] -= k;   /* +0x2F8 RR */
+        return;
     }
 
-    actor->current_gear = (uint8_t)gear;
+    /* Downshift test — also indexed by gear_cached. */
+    int32_t dn_thresh = (int32_t)PHYS_S(actor, 0x4E + gear_cached * 2);
+    if (rpm < dn_thresh && gear_cached > TD5_GEAR_FIRST) {
+        actor->current_gear = (uint8_t)(actor->current_gear - 1);
+    }
 }
 
 /* --- ComputeDriveTorqueFromGearCurve (0x42F030) ---
@@ -3682,47 +3823,96 @@ void td5_physics_reverse_throttle_sign(TD5_Actor *actor)
         actor->encounter_steering_cmd = -actor->encounter_steering_cmd;
 }
 
-/* --- ComputeReverseGearTorque (0x403C80) ---
+/* --- ComputeReverseGearTorque (0x00403C80) — full encode + engine slew ---
  *
- * Computes engine RPM and drive torque for reverse gear path.
- * Includes speed-dependent target RPM with asymmetric slew.
+ * Despite the Ghidra name, this function does NOT compute torque. It
+ * (a) produces the RPM-encoded pseudo-speed written back as the caller's
+ * longitudinal_speed or lateral_speed, and (b) slews engine_speed_accum
+ * toward a target that depends on throttle, gear, brake, and a caller-
+ * supplied signed speed term. It is the GROUND-PATH authoritative engine
+ * updater — UpdateEngineSpeedAccumulator (UESA) runs on the airborne path
+ * instead; the two are mutually exclusive per tick.
+ *
+ * [CONFIRMED @ 0x00403C80 via 2026-04-11 full Ghidra pass + raw disasm
+ * 0x00403d2f..0x00403d75 for the three +0x310 writeback sites.]
+ *
+ * Target RPM:
+ *   - gear == 1 (neutral): return 0, leave engine alone (early-out).
+ *   - throttle >= 1 AND gear == 2 (first forward): hot target =
+ *       max((speed*4) >> 8, 0) + redline - 1800, step = 400
+ *   - otherwise: target = 0, step = (brake ? 800 : 400) — coast down fast.
+ *
+ * Slew:
+ *   cur > target: cur -= step (clamp to target if overshoot) → write A or C
+ *   cur <= target - 4*step: cur += step (big-gap linear ramp) → write B
+ *   cur <= target, gap <= 4*step: cur += (target - cur) / 4 (exponential) → write C
+ *
+ * Return value (pseudo-speed) is the closed-form inverse of UESA's decode:
+ *   encode(rpm, gear_ratio) = (((rpm - 400) * 0x1000) / 45 / gear_ratio) << 8
+ *
+ * speed_in is drivetrain-dependent per UpdatePlayerVehicleDynamics @ 0x00404030:
+ *   sVar2=1 (RWD): body_vlong (uVar12)
+ *   sVar2=2 (FWD): body_vlat  (uVar37)
+ *   sVar2=3 (AWD): (uVar12 + uVar37) / 2
  */
-static int32_t compute_reverse_gear_torque(TD5_Actor *actor)
+static int32_t compute_reverse_gear_torque(TD5_Actor *actor, int32_t speed_in)
 {
+    if (!actor) return 0;
     int16_t *phys = get_phys(actor);
     if (!phys) return 0;
 
-    int32_t abs_speed = actor->longitudinal_speed;
-    if (abs_speed < 0) abs_speed = -abs_speed;
+    int32_t engine = actor->engine_speed_accum;
+    int32_t gear   = (int32_t)actor->current_gear;
 
-    int32_t gear_ratio = (int32_t)PHYS_S(actor, 0x2E); /* gear 0 = reverse */
-    if (gear_ratio == 0) gear_ratio = 1;
+    /* --- Encode pseudo-speed (return value) --- */
+    int32_t ret_value;
+    if (gear == 1) {
+        return 0;  /* neutral — no engine slew, no return value */
+    }
+    {
+        int32_t gear_ratio = (int32_t)PHYS_S(actor, 0x2E + gear * 2);
+        if (gear_ratio == 0) return 0;
+        int32_t num = (engine - 400) * 0x1000;
+        ret_value = ((num / 45) / gear_ratio) << 8;
+    }
 
-    /* Target RPM for reverse */
-    int32_t target = ((abs_speed >> 8) * gear_ratio * 0x2D) >> 12;
-    target += 400;
+    /* --- Target RPM + slew step --- */
+    int32_t throttle = (int32_t)actor->encounter_steering_cmd;  /* signed short */
+    int32_t target, step;
 
-    int32_t rpm = actor->engine_speed_accum;
-    int32_t delta = rpm - target;
+    if (throttle < 1 || gear != 2) {
+        int base = actor->brake_flag ? 400 : 200;
+        step = base * 2;                     /* 800 or 400 */
+        target = 0;
+    } else {
+        /* Hot target: first-forward under throttle */
+        int32_t u = (speed_in * 4) >> 8;
+        if (u < 0) u = 0;                    /* clamp via (AND sign-1) idiom */
+        int32_t redline = (int32_t)PHYS_S(actor, 0x72);
+        target = u + redline - 1800;         /* 0x708 */
+        step = 200 * 2;                      /* 400 — brake branch unreachable here */
+    }
 
-    /* Asymmetric slew: 200 base, 400 when braking */
-    int32_t slew_rate = actor->brake_flag ? 400 : 200;
+    /* --- Slew engine_speed_accum toward target --- */
+    int32_t new_accum;
+    if (target < engine) {
+        /* Descending: linear step, clamp to target on overshoot */
+        int32_t stepped = engine - step;
+        if (stepped < target) new_accum = target;   /* write A */
+        else                  new_accum = stepped;  /* write C (dec) */
+    } else {
+        if (engine < target - 4 * step) {
+            new_accum = engine + step;                /* write B (big-gap ramp) */
+        } else {
+            /* Exponential pull — C99 signed integer division rounds toward
+             * zero, matching the original's SAR+CDQ+AND 3 idiom. */
+            int32_t delta = target - engine;
+            new_accum = engine + (delta / 4);        /* write C (exp) */
+        }
+    }
 
-    if (delta > slew_rate)
-        rpm -= slew_rate;
-    else if (delta < -slew_rate)
-        rpm += slew_rate;
-    else
-        rpm += (target - rpm) >> 2;
-
-    int32_t redline = (int32_t)PHYS_S(actor, 0x72);
-    if (rpm > redline) rpm = redline;
-    if (rpm < 400) rpm = 400;
-    actor->engine_speed_accum = rpm;
-
-    /* Drive force scaled by gear ratio */
-    int32_t torque = td5_physics_compute_drive_torque(actor);
-    return torque;
+    actor->engine_speed_accum = new_accum;
+    return ret_value;
 }
 
 /* ========================================================================
