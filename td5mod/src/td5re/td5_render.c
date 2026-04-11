@@ -1266,10 +1266,22 @@ void td5_render_span_display_list(void *display_list_block)
 
         td5_render_load_translation(&origin);
 
-        /* Special types (water/animated surfaces): use alternate rotation */
+        /* Billboard meshes (trees/signs/flat scenery): replace rotation with
+         * the yaw-stripped camera basis g_cameraSecondary so the quad faces
+         * the camera horizontally while still tilting with pitch/roll.
+         * [CONFIRMED @ 0x00431289-0x004312B8]: original loads DAT_004ab070
+         * (= g_cameraSecondary) into the render transform between
+         * PushRenderTransform and TransformAndQueueTranslucentMesh. */
         if (mesh->render_type == 1 || mesh->render_type == 2) {
+            extern float g_cameraSecondary[9];
             td5_render_push_transform();
-            /* Transform + queue translucent */
+            td5_render_load_rotation((const TD5_Mat3x3 *)g_cameraSecondary);
+            if ((s_debug_dl_calls % 500) == 1) {
+                TD5_LOG_I(LOG_TAG,
+                    "billboard mesh: render_type=%d origin=(%.1f,%.1f,%.1f) "
+                    "loaded g_cameraSecondary",
+                    (int)mesh->render_type, origin.x, origin.y, origin.z);
+            }
             td5_render_transform_mesh_vertices(mesh);
             td5_render_compute_vertex_lighting(mesh);
             td5_render_prepared_mesh(mesh);
