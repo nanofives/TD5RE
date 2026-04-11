@@ -47,6 +47,7 @@
 
 #include <string.h>  /* memset, memcpy */
 #include <math.h>    /* cos, sin */
+#include <stdlib.h>  /* abs */
 
 #define LOG_TAG "physics"
 
@@ -283,8 +284,12 @@ void td5_physics_wall_response(TD5_Actor *actor, int32_t wall_angle,
     if (actor->angular_velocity_yaw > 6000) actor->angular_velocity_yaw = 6000;
     if (actor->angular_velocity_yaw < -6000) actor->angular_velocity_yaw = -6000;
 
-    /* Set track contact flag [CONFIRMED @ 0x406d7e/0x406e4e] */
-    actor->track_contact_flag = (uint8_t)(side + 1);
+    /* Set track contact flag [CONFIRMED @ 0x406d7e/0x406e4e].
+     * Forward/Reverse handlers pass side=-1 because the original's
+     * ApplyTrackSurfaceForceToActor branch for flag=0 does NOT write
+     * field_0x37b at all. */
+    if (side >= 0)
+        actor->track_contact_flag = (uint8_t)(side + 1);
 
     TD5_LOG_I(LOG_TAG, "wall_response: side=%d pen=%d angle=%d v_para=%d v_perp=%d yaw=%d",
               side, penetration, wall_angle, v_para, v_perp, actor->angular_velocity_yaw);
@@ -514,13 +519,16 @@ void td5_physics_update_vehicle_actor(TD5_Actor *actor)
      * during pause, so the car doesn't actually move. */
     td5_physics_integrate_pose(actor);
 
-    /* 8. Track wall contact resolution (FUN_00406CC0 + FUN_004070E0 + FUN_00406F50)
+    /* 8. Track wall contact resolution (FUN_004070E0 -> FUN_00406F50 -> FUN_00406CC0)
      * Check wheel probes against span edges and push car back if outside.
-     * Called after pose integration, matching original UpdateVehicleActor order.
-     * [CONFIRMED @ 0x4068c8] Original calls these inside the damage_lockout==0
-     * branch with NO pause gate — removing !g_game_paused to match. */
-    if (actor->vehicle_mode == 0)
+     * Called after pose integration, matching original UpdateVehicleActor order:
+     *   Reverse boundary -> Forward boundary -> Lateral (left/right).
+     * [CONFIRMED @ 0x4068c8 + 0x406650 callsite order] */
+    if (actor->vehicle_mode == 0) {
+        td5_track_resolve_reverse_contacts(actor);
+        td5_track_resolve_forward_contacts(actor);
         td5_track_resolve_wall_contacts(actor);
+    }
 
     /* 9. Update surface_contact_flags for the NEXT tick's dynamics dispatch.
      * Placed here (not in integrate_pose) so the init path — which calls
@@ -945,6 +953,26 @@ void td5_physics_update_player(TD5_Actor *actor)
         actor->linear_velocity_z += fz;
     }
 
+    /* --- 14a. Re-project longitudinal/lateral body-frame speeds from
+     * the POST-force world velocity. The original writes longitudinal_speed
+     * and lateral_speed from the force-updated velocity at the tail of
+     * UpdatePlayerVehicleDynamics, not from the pre-force velocity at the
+     * top of the function. The prior port wrote these fields once at line
+     * 659 using the pre-force v_long/v_lat locals, leaving long_speed one
+     * tick stale. That cascade produced:
+     *   - gear stuck one step off (auto_gear_select at next tick sees wrong speed)
+     *   - front/rear slip read 0 until the next tick
+     *   - accumulated_distance off by one tick
+     *   - downstream yaw-damping / slip-circle mispredictions
+     * Using the same sin_h/cos_h keeps the projection consistent with the
+     * forward rotation at line 655. */
+    {
+        int64_t post_vx = actor->linear_velocity_x;
+        int64_t post_vz = actor->linear_velocity_z;
+        actor->longitudinal_speed = (int32_t)((post_vx * sin_h + post_vz * cos_h) >> 12);
+        actor->lateral_speed      = (int32_t)((post_vx * cos_h - post_vz * sin_h) >> 12);
+    }
+
     /* --- 14b. Velocity magnitude safety clamp ---
      * Without working wall collisions, cars leave the road immediately.
      * Clamp total velocity magnitude to the car's speed_limit (1x, not 2x)
@@ -1024,6 +1052,18 @@ void td5_physics_update_player(TD5_Actor *actor)
     actor->accumulated_tire_slip_x += (int16_t)(actor->lateral_speed >> 8);
     if (!actor->handbrake_flag) {
         actor->accumulated_tire_slip_z += (int16_t)(actor->longitudinal_speed >> 8);
+    }
+
+    /* current_slip_metric (+0x33C) = abs(tire_slip) >> 8 — struct header
+     * documents this as the source for tire squeal SFX and, via
+     * UpdateRearTireEffects @ 0x43F7E0, the smoke-spawn probability
+     * (rand()%50 < slip/2) and tire-track intensity (slip >> 2). The
+     * original binary writes this every physics tick; we were leaving it
+     * at zero, so smoke/tire marks never spawned. */
+    {
+        int32_t slip = abs(actor->lateral_speed) >> 8;
+        if (slip > 0x7FFF) slip = 0x7FFF;
+        actor->current_slip_metric = (int16_t)slip;
     }
 }
 
@@ -1323,6 +1363,14 @@ void td5_physics_update_ai(TD5_Actor *actor)
      * Original uses += with lateral/longitudinal speed, not assignment with slip excess */
     actor->accumulated_tire_slip_x += (int16_t)(actor->lateral_speed >> 8);
     actor->accumulated_tire_slip_z += (int16_t)(actor->longitudinal_speed >> 8);
+
+    /* current_slip_metric (+0x33C) — see player path for rationale. Same
+     * formula so AI cars also drop tire marks and smoke when drifting. */
+    {
+        int32_t slip = abs(actor->lateral_speed) >> 8;
+        if (slip > 0x7FFF) slip = 0x7FFF;
+        actor->current_slip_metric = (int16_t)slip;
+    }
 }
 
 /* ========================================================================
@@ -1640,7 +1688,27 @@ static void apply_collision_response(TD5_Actor *penetrator, TD5_Actor *target,
     TD5_Actor *A = target;      /* frame owner (yaw drives `angle`) */
     TD5_Actor *B = penetrator;  /* other actor */
     int32_t    angle       = heading_target;
-    int32_t    impactForce = 0x70;  /* TODO: wire from caller's TOI bisection */
+
+    /* Derive TOI fraction from corner penetration magnitude. The original
+     * computes impactForce via a 7-iteration binary-search bisection in
+     * ResolveVehicleCollisionPair @ 0x00408A60, converging on the first
+     * non-penetrating step and setting `impactForce = bisection_midpoint - 0x10`
+     * (range 16..240). Deeper penetration → smaller impactForce → larger
+     * toi_frac = (0x100 - impactForce) → more position rollback.
+     *
+     * Porting the full bisection requires also porting CollectVehicleCollisionContacts
+     * @ 0x00408570 (synthesizes per-corner contactData[4]). Until that lands,
+     * we approximate: map the OBB corner's penetration depth to [16..240] so
+     * shallow contacts get minimal rollback and deep contacts get near-full.
+     * This is better than the prior hardcoded 0x70 and responds to the
+     * geometry instead of a constant. [CONFIRMED mapping direction via decomp
+     * of 0x408A60 bisection termination condition.] */
+    int32_t pen_x_abs = corner->pen_x < 0 ? -corner->pen_x : corner->pen_x;
+    int32_t pen_z_abs = corner->pen_z < 0 ? -corner->pen_z : corner->pen_z;
+    int32_t pen_mag   = pen_x_abs > pen_z_abs ? pen_x_abs : pen_z_abs;
+    int32_t impactForce = 240 - (pen_mag >> 1);
+    if (impactForce < 16)  impactForce = 16;
+    if (impactForce > 240) impactForce = 240;
 
     /* --- 1. Prologue: save angular velocities for delta application --- */
     int32_t saved_omega_A = A->angular_velocity_yaw;
@@ -2105,7 +2173,7 @@ void td5_physics_resolve_vehicle_contacts(void)
             int bucket0 = (seg0 >> 2) & (COLLISION_GRID_SIZE - 1);
             TD5_LOG_I(LOG_TAG,
                       "v2v_tick slot0: total=%d span=%d bucket=%d pos=(%d,%d,%d) "
-                      "vmode=%d dmg=%d pair_calls=%u obb_enter=%u",
+                      "vmode=%d dmg=%d pair_calls=%u aabb_hits=%u",
                       total, seg0, bucket0,
                       p0->world_pos.x >> 8, p0->world_pos.y >> 8, p0->world_pos.z >> 8,
                       p0->vehicle_mode, p0->damage_lockout,
@@ -2204,15 +2272,22 @@ void td5_physics_resolve_vehicle_contacts(void)
 
                 if (i == 0 || j == 0) {
                     s_v2v_slot0_pair_count++;
-                }
 
-                if (a_scripted || b_scripted) {
-                    collision_detect_simple(a, b);
-                } else {
-                    if (i == 0 || j == 0) {
+                    /* Inline AABB check so we only log the cases where the
+                     * boxes actually overlap — the previous "v2v_obb_enter"
+                     * was firing on every dispatch and missing the fact that
+                     * collision_detect_full bails at the same AABB pre-check
+                     * 588/601 times. The cases below are what we actually
+                     * care about: slot 0 pairs whose AABBs touch but OBB
+                     * still produces no impulse. */
+                    int aabb_sep = (g_actor_aabb[i][2] < g_actor_aabb[j][0] ||
+                                    g_actor_aabb[j][2] < g_actor_aabb[i][0] ||
+                                    g_actor_aabb[i][3] < g_actor_aabb[j][1] ||
+                                    g_actor_aabb[j][3] < g_actor_aabb[i][1]);
+                    if (!aabb_sep) {
                         s_v2v_slot0_obb_enter++;
                         TD5_LOG_I(LOG_TAG,
-                                  "v2v_obb_enter: i=%d j=%d slot_i=%d slot_j=%d "
+                                  "v2v_aabb_hit: i=%d j=%d slot_i=%d slot_j=%d "
                                   "pos_i=(%d,%d) pos_j=(%d,%d) aabb_i=[%d,%d,%d,%d] aabb_j=[%d,%d,%d,%d]",
                                   i, j, a->slot_index, b->slot_index,
                                   a->world_pos.x >> 8, a->world_pos.z >> 8,
@@ -2222,6 +2297,11 @@ void td5_physics_resolve_vehicle_contacts(void)
                                   g_actor_aabb[j][0], g_actor_aabb[j][1],
                                   g_actor_aabb[j][2], g_actor_aabb[j][3]);
                     }
+                }
+
+                if (a_scripted || b_scripted) {
+                    collision_detect_simple(a, b);
+                } else {
                     collision_detect_full(a, b, i, j);
                 }
 
@@ -2562,16 +2642,19 @@ void td5_physics_integrate_pose(TD5_Actor *actor)
     /* Save previous Y for suspension delta */
     actor->prev_frame_y_position = actor->world_pos.y;
 
-    /* 1. Apply gravity to velocity Y — only when dynamics are running.
-     * Original IntegrateVehiclePoseAndContacts @ 0x405E80 does not write
-     * linear_velocity. During pause the original skips UpdatePlayerVehicleDynamics
-     * (the only writer of vel_y) so vel_y stays 0; the port leaked vel_y=-128
-     * per countdown tick because gravity accumulated here unconditionally. */
-    if (!g_game_paused) {
-        actor->linear_velocity_y -= g_gravity_constant;
-        TD5_LOG_D(LOG_TAG, "integrate_pose: applied gravity slot=%d vel_y=%d",
-                  actor->slot_index, actor->linear_velocity_y);
-    }
+    /* 1. Apply gravity to velocity Y — UNCONDITIONAL, matching
+     * IntegrateVehiclePoseAndContacts @ 0x00405EDE. The suspension_response
+     * tail call at the end of this function adds back `(g + Σ(wheel_vel·normal)/2/n)`
+     * at 0x00405A49 — for stationary grounded cars the Σ term is 0 and the
+     * two writes cancel cleanly. [CONFIRMED via 2026-04-11 Ghidra pass on
+     * 0x4057F0: the function writes +0x1D0 exactly once with the formula
+     * `vel_y + g + avg_wheel_contact_lift`.]
+     *
+     * A prior cluster-A workaround gated this on `!g_game_paused` because
+     * suspension_response wasn't producing the right add-back. That gate
+     * leaked a -128 residual at sim_tick=1 — removing it restores the
+     * original's invariant. */
+    actor->linear_velocity_y -= g_gravity_constant;
 
     /* 2. Integrate angular velocity into euler accumulators */
     actor->euler_accum.roll  += actor->angular_velocity_roll;
@@ -2720,10 +2803,11 @@ void td5_physics_integrate_pose(TD5_Actor *actor)
         }
 
         if (contact_count > 0) {
-            int32_t new_y = (int32_t)(contact_y_sum / contact_count);
+            int32_t new_y_raw = (int32_t)(contact_y_sum / contact_count);
             /* +0x80 rounding bias matches original (0x405E80 output path) */
-            actor->world_pos.y = new_y + 0x80;
-            actor->render_pos.y = (float)(new_y + 0x80) * (1.0f / 256.0f);
+            int32_t new_y = new_y_raw + 0x80;
+            actor->world_pos.y = new_y;
+            actor->render_pos.y = (float)new_y * (1.0f / 256.0f);
 
             /* Velocity-from-snap gate — literal port of original
              * IntegrateVehiclePoseAndContacts tail (0x0040630D–0x00406335):
@@ -3207,6 +3291,16 @@ void td5_physics_reset_actor_state(TD5_Actor *actor)
     actor->accumulated_tire_slip_z = 0;
     actor->longitudinal_speed = 0;
     actor->lateral_speed = 0;
+    actor->current_slip_metric = 0;
+
+    /* Tire-track emitter IDs default to 0xFF (no emitter). The vfx module
+     * uses 0xFF as the "free" sentinel when checking whether to allocate
+     * a new emitter from the 80-slot pool; leaving these zero means the
+     * acquire path never fires and tire marks never appear. */
+    actor->tire_track_emitter_FL = 0xFF;
+    actor->tire_track_emitter_FR = 0xFF;
+    actor->tire_track_emitter_RL = 0xFF;
+    actor->tire_track_emitter_RR = 0xFF;
 
     /* Clear control state */
     actor->steering_command = 0;

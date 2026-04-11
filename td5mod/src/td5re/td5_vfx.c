@@ -561,9 +561,7 @@ void td5_vfx_init_smoke_sprite_pool(void) {
  * Sets the "projected" flag (bit 6) on successful projection.
  */
 void td5_vfx_project_particles(int view_index) {
-    /* Load current render rotation matrix */
-    /* Original calls FUN_0043da80(DAT_004aaeec) = LoadRenderRotationMatrix */
-    /* td5_render_load_rotation(...) would be called here */
+    extern float g_renderBasisMatrix[12];
 
     /* Get camera world position for subtraction */
     float cam_x, cam_y, cam_z;
@@ -573,33 +571,33 @@ void td5_vfx_project_particles(int view_index) {
 
     for (int i = 0; i < TD5_VFX_PARTICLE_SLOTS_PER_VIEW; i++) {
         uint8_t *slot = bank + i * TD5_VFX_PARTICLE_SLOT_STRIDE;
-        uint8_t flags = slot[0];  /* flags byte at slot base */
+        uint8_t flags = slot[0];
 
-        if ((flags & 0x80) == 0) continue;  /* not active */
-        if ((flags & 0x20) != 0) continue;  /* skip blend-only particles */
+        if ((flags & 0x80) == 0) continue;
+        if ((flags & 0x20) != 0) continue;
 
-        /* Read 24.8 fixed-point world position from slot+1, slot+5, slot+9 */
         int32_t wx, wy, wz;
         memcpy(&wx, slot + 1, 4);
         memcpy(&wy, slot + 5, 4);
         memcpy(&wz, slot + 9, 4);
 
-        /* Convert to float and subtract camera position */
-        float local[3];
-        local[0] = (float)wx * FP_TO_FLOAT - cam_x;
-        local[1] = (float)wy * FP_TO_FLOAT - cam_y;
-        local[2] = (float)wz * FP_TO_FLOAT - cam_z;
+        /* Camera-relative world delta (match td5_vfx_render_tire_tracks) */
+        float cx = (float)wx * FP_TO_FLOAT - cam_x;
+        float cy = (float)wy * FP_TO_FLOAT - cam_y;
+        float cz = (float)wz * FP_TO_FLOAT - cam_z;
 
-        /* Transform by render rotation matrix into view space */
-        float view[3];
-        td5_render_transform_vec3(local, view);
+        /* Apply view rotation via render basis matrix (3x3 portion).
+         * Using g_renderBasisMatrix explicitly matches the tire-track
+         * render path; td5_render_transform_vec3 reads a different
+         * matrix (s_render_transform.m) that isn't the camera basis. */
+        float view_x = cx * g_renderBasisMatrix[0] + cy * g_renderBasisMatrix[1] + cz * g_renderBasisMatrix[2];
+        float view_y = cx * g_renderBasisMatrix[3] + cy * g_renderBasisMatrix[4] + cz * g_renderBasisMatrix[5];
+        float view_z = cx * g_renderBasisMatrix[6] + cy * g_renderBasisMatrix[7] + cz * g_renderBasisMatrix[8];
 
-        /* Write view-space coords at slot+0x0D */
-        memcpy(slot + 0x0D, &view[0], 4);
-        memcpy(slot + 0x11, &view[1], 4);
-        memcpy(slot + 0x15, &view[2], 4);
+        memcpy(slot + 0x0D, &view_x, 4);
+        memcpy(slot + 0x11, &view_y, 4);
+        memcpy(slot + 0x15, &view_z, 4);
 
-        /* Set projected flag */
         slot[0] = flags | 0x40;
     }
 }
@@ -664,14 +662,26 @@ void td5_vfx_draw_particles(int view_index) {
         float sz = vz * (1.0f / far_clip);
         if (sz > 1.0f) sz = 1.0f;
 
-        /* Perspective-scale the sprite half-size from texel units. The stored
-         * quad_width/quad_height are texel dimensions; divide by vz so distant
-         * smoke shrinks. Multiplier tuned to keep smoke readable at race
-         * distances; the original uses a similar focal-over-z scaling. */
-        float half_w = sq->quad_width  * focal * inv_z * 0.25f;
-        float half_h = sq->quad_height * focal * inv_z * 0.25f;
-        if (half_w < 1.0f) half_w = 1.0f;
-        if (half_h < 1.0f) half_h = 1.0f;
+        /* Perspective-scale the sprite to a world-space half-size of
+         * ~40 units (car-width scale). Texel-derived sizing produces
+         * 2-4 px sprites at typical race distances, which is invisible. */
+        const float WORLD_HALF = 40.0f;
+        float half_w = WORLD_HALF * focal * inv_z;
+        float half_h = WORLD_HALF * focal * inv_z;
+        if (half_w < 3.0f) half_w = 3.0f;
+        if (half_h < 3.0f) half_h = 3.0f;
+
+        /* Normalize texel UVs to [0,1] for the D3D11 sampler. Static atlas
+         * pages are 256x256; query actual dimensions so hi-res replacement
+         * pages keep working. Matches hud_build_sprite_quad (td5_hud.c:388). */
+        int tw = 256, th = 256;
+        td5_plat_render_get_texture_dims((int)sq->texture_page, &tw, &th);
+        float inv_tw = 1.0f / (float)tw;
+        float inv_th = 1.0f / (float)th;
+        float nu0 = sq->tex_u0 * inv_tw;
+        float nv0 = sq->tex_v0 * inv_th;
+        float nu1 = sq->tex_u1 * inv_tw;
+        float nv1 = sq->tex_v1 * inv_th;
 
         /* Rewrite the 4 corners: v0=TL, v1=TR, v2=BR, v3=BL */
         sq->geometry_ptr = 0;
@@ -680,28 +690,28 @@ void td5_vfx_draw_particles(int view_index) {
         sq->v0_x = sx - half_w; sq->v0_y = sy - half_h;
         sq->v0_z = sz;          sq->v0_rhw = inv_z;
         sq->v0_color = 0xFFFFFFFF;
-        sq->v0_u = sq->tex_u0;  sq->v0_v = sq->tex_v0;
+        sq->v0_u = nu0;         sq->v0_v = nv0;
 
         sq->v1_x = sx + half_w; sq->v1_y = sy - half_h;
         sq->v1_z = sz;          sq->v1_rhw = inv_z;
         sq->v1_color = 0xFFFFFFFF;
-        sq->v1_u = sq->tex_u1;  sq->v1_v = sq->tex_v0;
+        sq->v1_u = nu1;         sq->v1_v = nv0;
 
         sq->v2_x = sx + half_w; sq->v2_y = sy + half_h;
         sq->v2_z = sz;          sq->v2_rhw = inv_z;
         sq->v2_color = 0xFFFFFFFF;
-        sq->v2_u = sq->tex_u1;  sq->v2_v = sq->tex_v1;
+        sq->v2_u = nu1;         sq->v2_v = nv1;
 
         sq->v3_x = sx - half_w; sq->v3_y = sy + half_h;
         sq->v3_z = sz;          sq->v3_rhw = inv_z;
         sq->v3_color = 0xFFFFFFFF;
-        sq->v3_u = sq->tex_u0;  sq->v3_v = sq->tex_v1;
+        sq->v3_u = nu0;         sq->v3_v = nv1;
 
         td5_render_submit_translucent((uint16_t *)sq);
         drawn++;
     }
 
-    if ((s_vfx_debug_frame % 60u) == 0u && drawn > 0) {
+    if ((s_vfx_debug_frame % 60u) == 0u) {
         TD5_LOG_D(LOG_TAG, "particle draw view %d: drawn=%d", view_index, drawn);
     }
 }
@@ -1398,7 +1408,7 @@ void td5_vfx_update_tire_tracks(void) {
     }
 
     if ((s_vfx_debug_frame % 60u) == 0u) {
-        TD5_LOG_D(LOG_TAG, "tire tracks: active_emitters=%d", active_emitters);
+        TD5_LOG_D(LOG_TAG, "tire tracks update: active_emitters=%d", active_emitters);
     }
 }
 
@@ -1415,6 +1425,10 @@ void td5_vfx_render_tire_tracks(void) {
     extern float g_renderBasisMatrix[12];
     extern float g_render_width_f;
     extern float g_render_height_f;
+
+    static uint32_t s_tt_render_frame = 0;
+    int tt_log = ((s_tt_render_frame++ % 60u) == 0u);
+    int tt_alive = 0, tt_submitted = 0;
 
     if (!s_tire_track_pool) return;
 
@@ -1439,6 +1453,7 @@ void td5_vfx_render_tire_tracks(void) {
 
         /* Only render slots with geometry (bit 1 = has_geometry) */
         if ((slot->control & 2) == 0) continue;
+        tt_alive++;
 
         /* Age the lifetime counter */
         slot->lifetime++;
@@ -1512,6 +1527,16 @@ void td5_vfx_render_tire_tracks(void) {
         uint32_t color = 0xFF000000 | ((uint32_t)val << 16) |
                          ((uint32_t)val << 8) | (uint32_t)val;
 
+        /* Normalize texel UVs to [0,1] for the D3D11 sampler (same as HUD). */
+        int tt_tw = 256, tt_th = 256;
+        td5_plat_render_get_texture_dims((int)s_tiremark_page, &tt_tw, &tt_th);
+        float tt_inv_tw = 1.0f / (float)tt_tw;
+        float tt_inv_th = 1.0f / (float)tt_th;
+        float tm_u0 = s_tiremark_u0 * tt_inv_tw;
+        float tm_v0 = s_tiremark_v0 * tt_inv_th;
+        float tm_u1 = s_tiremark_u1 * tt_inv_tw;
+        float tm_v1 = s_tiremark_v1 * tt_inv_th;
+
         /* Build a VfxSpriteQuad on the stack for submission.
          * Vertex order: 0=trailing-left, 1=trailing-right, 2=leading-right, 3=leading-left
          * Maps to sprite quad: v0=TL, v1=TR, v2=BR, v3=BL */
@@ -1522,16 +1547,16 @@ void td5_vfx_render_tire_tracks(void) {
         tquad.vertex_count = 4;
 
         tquad.v0_x = sx[0]; tquad.v0_y = sy[0]; tquad.v0_z = sz[0]; tquad.v0_rhw = srhw[0];
-        tquad.v0_color = color; tquad.v0_u = s_tiremark_u0; tquad.v0_v = s_tiremark_v0;
+        tquad.v0_color = color; tquad.v0_u = tm_u0; tquad.v0_v = tm_v0;
 
         tquad.v1_x = sx[1]; tquad.v1_y = sy[1]; tquad.v1_z = sz[1]; tquad.v1_rhw = srhw[1];
-        tquad.v1_color = color; tquad.v1_u = s_tiremark_u1; tquad.v1_v = s_tiremark_v0;
+        tquad.v1_color = color; tquad.v1_u = tm_u1; tquad.v1_v = tm_v0;
 
         tquad.v2_x = sx[3]; tquad.v2_y = sy[3]; tquad.v2_z = sz[3]; tquad.v2_rhw = srhw[3];
-        tquad.v2_color = color; tquad.v2_u = s_tiremark_u1; tquad.v2_v = s_tiremark_v1;
+        tquad.v2_color = color; tquad.v2_u = tm_u1; tquad.v2_v = tm_v1;
 
         tquad.v3_x = sx[2]; tquad.v3_y = sy[2]; tquad.v3_z = sz[2]; tquad.v3_rhw = srhw[2];
-        tquad.v3_color = color; tquad.v3_u = s_tiremark_u0; tquad.v3_v = s_tiremark_v1;
+        tquad.v3_color = color; tquad.v3_u = tm_u0; tquad.v3_v = tm_v1;
 
         tquad.tex_u0 = s_tiremark_u0; tquad.tex_v0 = s_tiremark_v0;
         tquad.tex_u1 = s_tiremark_u1; tquad.tex_v1 = s_tiremark_v1;
@@ -1541,6 +1566,12 @@ void td5_vfx_render_tire_tracks(void) {
 
         /* Submit as pre-transformed translucent quad (same path as HUD overlays) */
         td5_render_submit_translucent((uint16_t *)&tquad);
+        tt_submitted++;
+    }
+
+    if (tt_log) {
+        TD5_LOG_D(LOG_TAG, "tire render: alive=%d submitted=%d",
+                  tt_alive, tt_submitted);
     }
 }
 
