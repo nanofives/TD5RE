@@ -296,7 +296,7 @@ static void dispatch_tristrip_direct(TD5_PrimitiveCmd *cmd, TD5_MeshVertex *base
 static void dispatch_quad_direct(TD5_PrimitiveCmd *cmd, TD5_MeshVertex *base_verts);
 
 /* Vehicle shadow + wheel billboard rendering */
-static void render_vehicle_shadow_quad(void);
+static void render_vehicle_shadow_quad(const TD5_Actor *actor);
 static void render_vehicle_wheel_billboards(TD5_Actor *actor, int slot);
 
 /** 7-entry dispatch table matching original at 0x473b9c */
@@ -1563,7 +1563,7 @@ void td5_render_actors_for_view(int view_index)
             td5_render_prepared_mesh(mesh);
 
             /* Render car shadow (dark ground quad under vehicle) */
-            render_vehicle_shadow_quad();
+            render_vehicle_shadow_quad(actor);
 
             /* Render wheel ring billboards (0x446F00) */
             render_vehicle_wheel_billboards(actor, slot);
@@ -2084,58 +2084,120 @@ void td5_render_crossfade_surfaces(uint32_t *dst, const uint32_t *src_a,
     }
 }
 
-/* --- Vehicle Shadow Projection (0x40C120 inline) --- */
-
-/**
- * Render a dark translucent ground quad under a vehicle.
- * Uses the currently loaded s_render_transform (actor rotation + camera basis).
- * Shadow is a flat rectangle in model space at Y=0 (approximately ground level).
+/* --- Vehicle Shadow Projection (0x40C120 / 0x40BB70) ---
  *
- * Original builds shadow from 4 wheel contact positions (actor+0x198..+0x1C4)
- * and projects them. This simplified version uses a fixed-size rectangle.
+ * Original (InitializeVehicleShadowAndWheelSpriteTemplates @ 0x40bb70 +
+ * RenderRaceActorForView @ 0x40c120) draws the vehicle shadow as two
+ * textured quads sampling the SHADOW atlas entry on tpage5 (128x64 at
+ * atlas (128,64)), with vertex color 0xFFFFFFFF (darkness comes from
+ * the texture alpha, NOT vertex color) and a vertical offset of -22
+ * world units (_g_shadowVerticalOffset @ 0x48dc48). Corners are derived
+ * from the 4 wheel probe positions at actor+0x90..+0xbc.
+ *
+ * This port renders a single quad FL-FR-RR-RL using the probe positions
+ * directly and the full SHADOW atlas UV rect. The 2-sub-quad split is
+ * skipped because the scale constants (_g_wheelSuspensionRenderScale,
+ * _g_wheelAxleMidpointScale, _g_inverseQuarterScale) were not recovered
+ * from decompilation. Visibly correct, slightly less faithful in shape.
  */
-static void render_vehicle_shadow_quad(void)
+#define SHADOW_VERTICAL_OFFSET (-22.0f)   /* _g_shadowVerticalOffset @ 0x40bcfa */
+
+static int   s_shadow_lookup_done = 0;
+static int   s_shadow_page        = -1;
+static float s_shadow_u0, s_shadow_v0, s_shadow_u1, s_shadow_v1;
+
+static void shadow_lookup_static_hed(void)
 {
-    const float hw = 2.2f;   /* half-width (roughly car width / 2) */
-    const float hl = 4.5f;   /* half-length (roughly car length / 2) */
-    const float y_off = 0.3f; /* small Y offset above ground to prevent z-fighting */
+    s_shadow_lookup_done = 1;
+    TD5_AtlasEntry *sh = td5_asset_find_atlas_entry(NULL, "SHADOW");
+    if (!sh || sh->texture_page <= 0 || sh->width <= 0 || sh->height <= 0) {
+        TD5_LOG_W(LOG_TAG, "shadow: SHADOW atlas entry not found");
+        return;
+    }
+    int tw = 256, th = 256;
+    td5_plat_render_get_texture_dims(sh->texture_page, &tw, &th);
+    float inv_w = 1.0f / (float)tw;
+    float inv_h = 1.0f / (float)th;
+    /* Half-pixel inset to avoid neighbour bleed. */
+    s_shadow_u0 = ((float)sh->atlas_x + 0.5f) * inv_w;
+    s_shadow_v0 = ((float)sh->atlas_y + 0.5f) * inv_h;
+    s_shadow_u1 = ((float)(sh->atlas_x + sh->width)  - 0.5f) * inv_w;
+    s_shadow_v1 = ((float)(sh->atlas_y + sh->height) - 0.5f) * inv_h;
+    s_shadow_page = sh->texture_page;
+    TD5_LOG_I(LOG_TAG,
+              "shadow: atlas uv=(%.3f,%.3f..%.3f,%.3f) page=%d",
+              s_shadow_u0, s_shadow_v0, s_shadow_u1, s_shadow_v1, s_shadow_page);
+}
 
-    /* Shadow corners in model space (flat quad at car base level).
-     * Winding: CW when viewed from above (+Y direction). */
-    static const float corners[4][3] = {
-        { -2.2f, 0.3f,  4.5f },  /* front-left */
-        {  2.2f, 0.3f,  4.5f },  /* front-right */
-        {  2.2f, 0.3f, -4.5f },  /* back-right */
-        { -2.2f, 0.3f, -4.5f }   /* back-left */
+static void render_vehicle_shadow_quad(const TD5_Actor *actor)
+{
+    if (!actor) return;
+    if (!s_shadow_lookup_done) shadow_lookup_static_hed();
+    if (s_shadow_page < 0) return;
+
+    /* Wheel probe positions (world-space, 24.8 fixed) at actor +0x90..+0xbc.
+     * [CONFIRMED @ 0x40c3d0-0x40c5a0, td5_actor_struct.h:232-235]
+     * Order in original: FL, FR, RL, RR. For CW winding (viewed from +Y down)
+     * we emit FL, FR, RR, RL. */
+    const TD5_Vec3_Fixed *probes[4] = {
+        &actor->probe_FL,
+        &actor->probe_FR,
+        &actor->probe_RR,
+        &actor->probe_RL,
     };
-    (void)hw; (void)hl; (void)y_off;
 
-    const float *m = s_render_transform.m;
+    /* UV corners matching the FL/FR/RR/RL corner order. */
+    const float uvs[4][2] = {
+        { s_shadow_u0, s_shadow_v0 },
+        { s_shadow_u1, s_shadow_v0 },
+        { s_shadow_u1, s_shadow_v1 },
+        { s_shadow_u0, s_shadow_v1 },
+    };
+
     TD5_D3DVertex verts[4];
-
     for (int i = 0; i < 4; i++) {
-        float px = corners[i][0], py = corners[i][1], pz = corners[i][2];
-        float vx = px * m[0] + py * m[1] + pz * m[2] + m[9];
-        float vy = px * m[3] + py * m[4] + pz * m[5] + m[10];
-        float vz = px * m[6] + py * m[7] + pz * m[8] + m[11];
+        float wx = (float)probes[i]->x * (1.0f / 256.0f);
+        float wy = (float)probes[i]->y * (1.0f / 256.0f) + SHADOW_VERTICAL_OFFSET;
+        float wz = (float)probes[i]->z * (1.0f / 256.0f);
 
-        if (vz <= s_near_clip) return; /* bail if any vertex behind camera */
+        float dx = wx - s_camera_pos[0];
+        float dy = wy - s_camera_pos[1];
+        float dz = wz - s_camera_pos[2];
+
+        /* camera_basis is row-major { right, up, forward } */
+        float vx = dx * s_camera_basis[0] + dy * s_camera_basis[1] + dz * s_camera_basis[2];
+        float vy = dx * s_camera_basis[3] + dy * s_camera_basis[4] + dz * s_camera_basis[5];
+        float vz = dx * s_camera_basis[6] + dy * s_camera_basis[7] + dz * s_camera_basis[8];
+
+        if (vz <= s_near_clip) return;
 
         float inv_z = 1.0f / vz;
         verts[i].screen_x = -vx * s_focal_length * inv_z + s_center_x;
         verts[i].screen_y = -vy * s_focal_length * inv_z + s_center_y;
         verts[i].depth_z  = vz * (1.0f / s_far_clip);
         verts[i].rhw      = inv_z;
-        verts[i].diffuse  = 0x60000000u; /* semi-transparent black (alpha=0x60) */
+        verts[i].diffuse  = 0xFFFFFFFFu;   /* white — alpha comes from texture */
         verts[i].specular = 0;
-        verts[i].tex_u    = 0.0f;
-        verts[i].tex_v    = 0.0f;
+        verts[i].tex_u    = uvs[i][0];
+        verts[i].tex_v    = uvs[i][1];
+    }
+
+    static int s_shadow_draw_logged = 0;
+    if (!s_shadow_draw_logged) {
+        s_shadow_draw_logged = 1;
+        TD5_LOG_I(LOG_TAG,
+                  "shadow: first draw page=%d uv=(%.3f..%.3f,%.3f..%.3f) "
+                  "FL=(%.1f,%.1f,%.1f)",
+                  s_shadow_page, s_shadow_u0, s_shadow_u1, s_shadow_v0, s_shadow_v1,
+                  (float)actor->probe_FL.x * (1.0f/256.0f),
+                  (float)actor->probe_FL.y * (1.0f/256.0f),
+                  (float)actor->probe_FL.z * (1.0f/256.0f));
     }
 
     uint16_t indices[6] = { 0, 1, 2, 0, 2, 3 };
     flush_immediate_internal();
     td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
-    td5_plat_render_bind_texture(-1);
+    td5_plat_render_bind_texture(s_shadow_page);
     td5_plat_render_draw_tris(verts, 4, indices, 6);
 }
 
@@ -2420,7 +2482,7 @@ static void render_vehicle_wheel_billboards(TD5_Actor *actor, int slot)
             if (hub_ok) {
                 uint16_t hub_idx[12] = { 0,1,2, 0,2,3, 0,2,1, 0,3,2 };
                 flush_immediate_internal();
-                td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
+                td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
                 td5_plat_render_bind_texture(hub_page);
                 td5_plat_render_draw_tris(hub, 4, hub_idx, 12);
             }
