@@ -631,73 +631,99 @@ void td5_physics_update_player(TD5_Actor *actor)
     actor->longitudinal_speed = v_long;
     actor->lateral_speed = v_lat;
 
-    /* --- 7/8/9/10/11. Throttle gate — original 0x404030 flow:
-     *   throttle!=0 && brake==0 → gear_select + engine_update + drive_torque
-     *   throttle==0             → engine_update only, coast deceleration (-32)
-     *   throttle!=0 && brake!=0 → engine_update + brake force
-     * [CONFIRMED @ 0x4044F8: if(encounter_steering_cmd!=0) gate] */
+    /* --- 7/8/9/10/11. On-ground vs airborne gate — matches original 0x404030:
+     *   if (surface_contact_flags != 0) → ON-GROUND:
+     *     always run auto-gear + engine + drive torque (drive_torque
+     *     returns 0 at idle throttle, so an idle stationary car gets
+     *     wheel_drive=0 and no force is added to vel_x/vel_z here).
+     *     If brake_flag set, use brake path instead.
+     *   else → AIRBORNE:
+     *     run engine + the -32 coast fallback.
+     * [CONFIRMED @ 0x00404030]
+     *
+     * The previous port structure inverted this: it gated on
+     * `(!brake && throttle != 0)`, so an idle stationary on-ground car
+     * fell into the coast path and got a nonzero -32*brake_coeff impulse
+     * on every tick — the root cause of Cluster A vel_x=-399 / vel_z=+895
+     * observed in /diff-race on 2026-04-11. */
     int32_t throttle = (int32_t)actor->encounter_steering_cmd;
     int32_t drive_torque = 0;
     int32_t wheel_drive[4] = {0, 0, 0, 0};
     int32_t brake_front = (int32_t)PHYS_S(actor, 0x6E);
     int32_t brake_rear  = (int32_t)PHYS_S(actor, 0x70);
 
-    if (!actor->brake_flag && throttle != 0) {
-        /* --- Drive path: gear select + engine + torque --- */
-        if (actor->throttle_input_active != 0) {
-            td5_physics_auto_gear_select(actor);
-        } else {
-            td5_physics_auto_gear_select(actor);
-        }
+    if (actor->surface_contact_flags != 0) {
+        /* --- ON-GROUND branch --- */
+        td5_physics_auto_gear_select(actor);
         td5_physics_update_engine_speed(actor);
-        drive_torque = td5_physics_compute_drive_torque(actor);
 
-        /* Distribute torque by drivetrain (FWD/RWD/AWD) */
-        int32_t dt_type = (int32_t)PHYS_S(actor, 0x76);
-        int32_t speed_limit = (int32_t)PHYS_S(actor, 0x74) << 8;
-        int32_t abs_speed = v_long < 0 ? -v_long : v_long;
+        if (!actor->brake_flag) {
+            /* Drive path: drive torque distributed by drivetrain. At
+             * idle throttle (encounter_steering_cmd == 0), compute_drive_torque
+             * returns 0 via the actor+0x33e multiply inside the gear curve,
+             * so wheel_drive stays zero and no force is added below. */
+            drive_torque = td5_physics_compute_drive_torque(actor);
 
-        if (abs_speed <= speed_limit) {
-            switch (dt_type) {
-            case 1: /* RWD */
-                wheel_drive[2] = drive_torque >> 1;
-                wheel_drive[3] = drive_torque >> 1;
-                break;
-            case 2: /* FWD */
-                wheel_drive[0] = drive_torque >> 1;
-                wheel_drive[1] = drive_torque >> 1;
-                break;
-            case 3: /* AWD */
-            default:
-                wheel_drive[0] = drive_torque >> 2;
-                wheel_drive[1] = drive_torque >> 2;
-                wheel_drive[2] = drive_torque >> 2;
-                wheel_drive[3] = drive_torque >> 2;
-                break;
+            int32_t dt_type = (int32_t)PHYS_S(actor, 0x76);
+            int32_t speed_limit = (int32_t)PHYS_S(actor, 0x74) << 8;
+            int32_t abs_speed = v_long < 0 ? -v_long : v_long;
+
+            if (abs_speed <= speed_limit) {
+                switch (dt_type) {
+                case 1: /* RWD */
+                    wheel_drive[2] = drive_torque >> 1;
+                    wheel_drive[3] = drive_torque >> 1;
+                    break;
+                case 2: /* FWD */
+                    wheel_drive[0] = drive_torque >> 1;
+                    wheel_drive[1] = drive_torque >> 1;
+                    break;
+                case 3: /* AWD */
+                default:
+                    wheel_drive[0] = drive_torque >> 2;
+                    wheel_drive[1] = drive_torque >> 2;
+                    wheel_drive[2] = drive_torque >> 2;
+                    wheel_drive[3] = drive_torque >> 2;
+                    break;
+                }
             }
+        } else {
+            /* Brake path: front/rear brake torque opposing current velocity.
+             * [CONFIRMED @ 0x4045A0] */
+            int32_t bf = (brake_front * throttle) >> 8;
+            int32_t br = (brake_rear  * throttle) >> 8;
+            int32_t abs_lat_half = (v_lat < 0 ? -v_lat : v_lat) >> 1;
+            if (bf < -abs_lat_half) bf = -abs_lat_half;
+            if (br < -abs_lat_half) br = -abs_lat_half;
+            int32_t sign = (v_long > 0) ? -1 : 1;
+            wheel_drive[0] = sign * (bf >> 1);
+            wheel_drive[1] = sign * (bf >> 1);
+            wheel_drive[2] = sign * (br >> 1);
+            wheel_drive[3] = sign * (br >> 1);
         }
     } else {
-        /* --- Coast / brake path: engine update + deceleration --- */
+        /* --- AIRBORNE branch --- */
         int32_t coast_throttle = (throttle != 0) ? throttle : -32;
         td5_physics_update_engine_speed(actor);
 
-        /* Brake/coast force from brake coefficients × throttle.
-         * Original (0x404580-0x4045D0): front = brake_front*param >> 8,
-         * rear = brake_rear*param >> 8. Clamps against lateral speed.
-         * [CONFIRMED @ 0x4045A0: both front+rear brake coeffs used] */
+        /* Airborne coast/brake fallback — the original only runs this
+         * when the car is off the ground. */
         int32_t bf = (brake_front * coast_throttle) >> 8;
         int32_t br = (brake_rear  * coast_throttle) >> 8;
-        /* Clamp to half of lateral speed (prevents sign reversal) */
         int32_t abs_lat_half = (v_lat < 0 ? -v_lat : v_lat) >> 1;
         if (bf < -abs_lat_half) bf = -abs_lat_half;
         if (br < -abs_lat_half) br = -abs_lat_half;
         int32_t sign = (v_long > 0) ? -1 : 1;
-        /* The coast/brake force opposes current velocity direction */
         if (actor->brake_flag || coast_throttle == -32) {
             wheel_drive[0] = sign * (bf >> 1);
             wheel_drive[1] = sign * (bf >> 1);
             wheel_drive[2] = sign * (br >> 1);
             wheel_drive[3] = sign * (br >> 1);
+        }
+
+        if (actor->slot_index == 0 && (actor->frame_counter % 120u) == 0u) {
+            TD5_LOG_I(LOG_TAG, "update_player: airborne branch coast=%d bf=%d br=%d",
+                      coast_throttle, bf, br);
         }
     }
 
