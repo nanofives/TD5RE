@@ -1769,7 +1769,11 @@ int td5_game_run_race_frame(void) {
 
         /* HUD overlay for this viewport */
         td5_hud_draw_status_text(vp, vp);
-        td5_hud_render_minimap(vp);
+        /* NOTE: minimap is drawn from td5_hud_render_overlays (below).
+         * A duplicated call here used to be a no-op (set_clip_rect was a stub),
+         * but once 65a4fea wired hardware scissor, it left the minimap rect
+         * active across the speedo/tach/digit/countdown draws that follow in
+         * render_overlays — clipping every HUD element on non-circuit tracks. */
     }
 
     /* Full-screen HUD overlay (speedometer, lap counter, etc.) */
