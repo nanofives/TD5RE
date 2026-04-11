@@ -1431,6 +1431,85 @@ int td5_asset_decode_png_rgba32(const char *path,
  * Unified PNG Texture Loading
  * ======================================================================== */
 
+/** Dilate RGB from opaque neighbors into alpha==0 pixels.
+ *
+ *  Why: the original .exe stores {R=0,G=0,B=0,A=0} at transparent texels
+ *  (UploadRaceTexturePage @ 0x0040b590, LoadRaceTexturePages @ 0x00442770)
+ *  and the D3D3/DDraw pipeline masks the dark-bleed artifact via (assumed)
+ *  POINT sampling. The td5re D3D11 wrapper samples LINEAR by default
+ *  (d3d11_backend.c LINEAR_WRAP), so near-zero RGB at alpha=0 bleeds into
+ *  opaque neighbors as a dark halo. Fix: premultiplied-edge style bleed —
+ *  replace RGB of every transparent pixel with the average of its opaque
+ *  neighbors, iterated so the fill propagates inward. Alpha stays 0. */
+static void alpha_bleed_rgb(uint8_t *pixels, int w, int h)
+{
+    size_t n, i;
+    uint8_t *back;
+    uint8_t *valid;
+    int iter;
+
+    if (!pixels || w < 2 || h < 2) return;
+    n = (size_t)w * (size_t)h;
+    back = (uint8_t *)malloc(n * 4);
+    valid = (uint8_t *)malloc(n);
+    if (!back || !valid) {
+        free(back);
+        free(valid);
+        return;
+    }
+
+    for (i = 0; i < n; i++)
+        valid[i] = (pixels[i * 4 + 3] != 0) ? 1 : 0;
+
+    for (iter = 0; iter < 4; iter++) {
+        int filled_any = 0;
+        int y, x, dy, dx;
+        memcpy(back, pixels, n * 4);
+        for (y = 0; y < h; y++) {
+            for (x = 0; x < w; x++) {
+                size_t idx = (size_t)y * w + x;
+                uint32_t sb = 0, sg = 0, sr = 0, cnt = 0;
+                uint8_t *p;
+                if (valid[idx]) continue;
+                for (dy = -1; dy <= 1; dy++) {
+                    int ny = y + dy;
+                    if (ny < 0 || ny >= h) continue;
+                    for (dx = -1; dx <= 1; dx++) {
+                        int nx = x + dx;
+                        size_t nidx;
+                        uint8_t *np;
+                        if ((dx | dy) == 0) continue;
+                        if (nx < 0 || nx >= w) continue;
+                        nidx = (size_t)ny * w + nx;
+                        if (!valid[nidx]) continue;
+                        np = &back[nidx * 4];
+                        sb += np[0];
+                        sg += np[1];
+                        sr += np[2];
+                        cnt++;
+                    }
+                }
+                if (cnt == 0) continue;
+                p = &pixels[idx * 4];
+                p[0] = (uint8_t)(sb / cnt);
+                p[1] = (uint8_t)(sg / cnt);
+                p[2] = (uint8_t)(sr / cnt);
+                /* p[3] stays 0 — this pixel remains transparent */
+                filled_any = 1;
+            }
+        }
+        if (!filled_any) break;
+        for (i = 0; i < n; i++) {
+            if (valid[i]) continue;
+            if (pixels[i * 4] || pixels[i * 4 + 1] || pixels[i * 4 + 2])
+                valid[i] = 1;
+        }
+    }
+
+    free(valid);
+    free(back);
+}
+
 /** Apply color keying to BGRA32 pixel buffer in-place.
  *  Byte order after decode: p[0]=B, p[1]=G, p[2]=R, p[3]=A. */
 static void apply_colorkey(void *pixels, int w, int h, TD5_ColorKeyMode mode)
@@ -1438,22 +1517,28 @@ static void apply_colorkey(void *pixels, int w, int h, TD5_ColorKeyMode mode)
     uint8_t *p = (uint8_t *)pixels;
     int count = w * h;
     int i;
+    int keyed = 0;
     if (mode == TD5_COLORKEY_NONE) return;
     for (i = 0; i < count; i++, p += 4) {
         uint8_t b = p[0], g = p[1], r = p[2];
         switch (mode) {
         case TD5_COLORKEY_BLACK:
-            if (r < 8 && g < 8 && b < 8)
+            if (r < 8 && g < 8 && b < 8) {
                 p[3] = 0;
+                keyed++;
+            }
             break;
         case TD5_COLORKEY_RED:
             if (r >= 248 && g < 8 && b < 8) {
-                p[0] = p[1] = p[2] = p[3] = 0; /* zero RGB to prevent red bleed under bilinear filter */
+                p[0] = p[1] = p[2] = p[3] = 0;
+                keyed++;
             }
             break;
         case TD5_COLORKEY_BLUE88:
-            if (r < 8 && g < 8 && b >= 80 && b <= 96)
+            if (r < 8 && g < 8 && b >= 80 && b <= 96) {
                 p[3] = 0;
+                keyed++;
+            }
             break;
         case TD5_COLORKEY_CYAN:
             /* PAUSETXT: white glyphs on cyan bg.  R channel = glyph
@@ -1462,11 +1547,17 @@ static void apply_colorkey(void *pixels, int w, int h, TD5_ColorKeyMode mode)
             if (g > 240 && b > 240) {
                 p[3] = r;
                 p[0] = p[1] = p[2] = 255;
+                if (r == 0) keyed++;
             }
             break;
         default:
             break;
         }
+    }
+    if (keyed > 0) {
+        alpha_bleed_rgb((uint8_t *)pixels, w, h);
+        TD5_LOG_D(LOG_TAG, "alpha_bleed: mode=%d keyed=%d size=%dx%d",
+                  (int)mode, keyed, w, h);
     }
 }
 
