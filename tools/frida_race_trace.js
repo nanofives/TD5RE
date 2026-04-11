@@ -1,0 +1,728 @@
+/**
+ * frida_race_trace.js -- Capture a race trace CSV from the original TD5_d3d.exe
+ *
+ * Hooks RunRaceFrame (0x42B580) and its key callees at the same stage boundaries
+ * as the source port's td5_trace module, then writes a matching CSV to
+ * log/race_trace_original.csv for differential comparison.
+ *
+ * Usage:
+ *   frida -p <pid> -l tools/frida_race_trace.js
+ *   frida -f TD5_d3d.exe -l tools/frida_race_trace.js
+ *
+ * Configuration (edit below):
+ *   TRACE_SLOT      -1 = all slots, 0 = player only, N = specific slot
+ *   TRACE_MAX_FRAMES  0 = unlimited, N = stop after N frames
+ *   OUTPUT_PATH       where to write the CSV
+ */
+
+"use strict";
+
+// ============================================================================
+// Configuration
+// ============================================================================
+
+var TRACE_SLOT         = -1;     // -1 = all, 0 = player only, 1-5 = specific AI
+var TRACE_MAX_FRAMES   = 3000;   // 0 = unlimited render frames (safety ceiling)
+var TRACE_MAX_SIM_TICK = 0;      // 0 = unlimited; N = stop when g_simulationTickCounter >= N
+                                 // (engine-clock cap; 450 = 15 s post-countdown at 30 Hz)
+var ENABLE_INNER_TICK_HOOKS = false; // inner hooks crash — binary prologue incompatible with Frida trampoline
+// AUTO_THROTTLE re-added 2026-04-10 with the CORRECT bit mask.
+// Per Ghidra decomp of UpdatePlayerVehicleControlState at 0x402E60 [CONFIRMED]:
+//   0x01 = RIGHT
+//   0x02 = LEFT
+//   0x200 = HANDBRAKE(!)
+//   0x400 = BRAKE
+//   0x100000 = ACCELERATE (the real throttle)
+//   0x8000000 = REVERSE
+//   0x40000000 = ESCAPE
+// Player 1 control bits are at g_playerControlBits = 0x482FFC.
+// Without this, the original sits at idle during the capture window while
+// the port (with [Trace] AutoThrottle=1) accelerates forward, producing a
+// false world_x divergence.
+var AUTO_THROTTLE = true;
+// Absolute path so it works regardless of process CWD
+var OUTPUT_PATH      = "C:\\Users\\maria\\Desktop\\Proyectos\\TD5RE\\log\\race_trace_original.csv";
+
+// ============================================================================
+// Original binary addresses (TD5_d3d.exe, image base 0x00400000)
+// ============================================================================
+
+var BASE = ptr(0x00400000);
+
+// --- Functions (CALL targets from race-frame-hook-points.md) ---
+var ADDR_RunRaceFrame           = ptr(0x42B580);
+var ADDR_PollRaceSessionInput   = ptr(0x42C470);
+var ADDR_UpdateRaceActors       = ptr(0x436A70);  // AI + track dispatcher
+var ADDR_ResolveVehicleContacts = ptr(0x409150);  // collision
+var ADDR_UpdateTireTrackPool    = ptr(0x43EB50);  // cosmetic
+var ADDR_UpdateRaceOrder        = ptr(0x42F5B0);  // position sort
+var ADDR_UpdateChaseCamera      = ptr(0x401590);  // camera
+var ADDR_UpdateRaceParticles    = ptr(0x429790);  // VFX
+var ADDR_NormalizeWrapState     = ptr(0x443FB0);  // wrap norm (last sim op)
+var ADDR_EndRaceScene           = ptr(0x40AE00);  // end scene
+var ADDR_UpdateVehicleAudioMix  = ptr(0x440B00);  // audio mix (near end of frame)
+
+// --- Globals (from frame-timing-system.md + global-variable-catalog.md) ---
+var G_gameState            = ptr(0x4C3CE8);   // dword
+var G_gamePaused           = ptr(0x4AAD60);   // dword
+var G_raceEndFadeState     = ptr(0x4C3D80);   // dword
+var G_simTimeAccumulator   = ptr(0x4AAED0);   // uint32
+var G_simTickBudget        = ptr(0x466E88);    // float
+var G_simulationTickCounter= ptr(0x4AADA0);   // int
+var G_normalizedFrameDt    = ptr(0x4AAD70);    // float
+var G_instantFPS           = ptr(0x466E90);    // float
+// 0x49522C is the frontend frame counter -- NOT incremented during race.
+// Use a Frida-side counter instead, incremented each RunRaceFrame entry.
+var fridaFrameCounter      = 0;
+// Inner-tick hook safety: only fire after the first successful frame_begin in
+// game_state==2. The sim-time accumulator can hold many ticks of residual on
+// the first transition frame, which would flood Frida's I/O before actors are
+// initialized. raceConfirmed flips to true on the first frame_begin, after which
+// inner hooks are allowed. ticksThisFrameLimit caps per-frame I/O in case the
+// accumulator burst is very large on later frames too.
+var raceConfirmed          = false;
+var raceFrameCount         = 0;     // frames since raceConfirmed (for auto-close)
+var INNER_TICK_MAX_PER_FRAME = 8;   // ignore inner-hook calls beyond this count per frame
+var G_viewCount            = ptr(0x4B1134);    // dword
+var G_splitscreenCount     = ptr(0x4C3D44);    // dword
+var G_cameraWorldPosFloat  = ptr(0x4AAFC4);    // float[3] (shared camera pos)
+var G_camWorldPosFixed     = ptr(0x482F30);    // int[2][3] (per-viewport, 24.8 fixed)
+
+// Race slot state table: 6 entries x 4 bytes (state, comp1, comp2, reserved)
+var G_raceSlotStateTable   = ptr(0x4AADF4);
+
+// Actor table
+var ACTOR_BASE             = ptr(0x4AB108);
+var ACTOR_STRIDE           = 0x388;
+
+// Race order array (6 bytes)
+var G_raceOrderArray       = ptr(0x4AE278);
+
+// Countdown timer (camera transition active)
+// This is stored in the camera state block; use g_gamePaused as proxy
+
+// ============================================================================
+// Helpers
+// ============================================================================
+
+var fileHandle = null;
+var framesStarted = 0;
+var lastFrameIndex = -1;
+var enabled = false;
+var simTicksThisFrame = 0;
+
+function readU32(addr) { return addr.readU32(); }
+function readS32(addr) { return addr.readS32(); }
+function readS16(addr) { return addr.readS16(); }
+function readU16(addr) { return addr.readU16(); }
+function readU8(addr)  { return addr.readU8(); }
+function readFloat(addr) { return addr.readFloat(); }
+
+function actorPtr(slot) {
+    return ACTOR_BASE.add(slot * ACTOR_STRIDE);
+}
+
+function slotStatePtr(slot) {
+    return G_raceSlotStateTable.add(slot * 4);
+}
+
+function selectedSlot(slot) {
+    if (TRACE_SLOT < 0) return true;
+    return slot === TRACE_SLOT;
+}
+
+// ============================================================================
+// CSV output
+// ============================================================================
+
+var CSV_HEADER =
+    "frame,sim_tick,stage,kind,id," +
+    "game_state,paused,pause_menu,fade_state,countdown_timer,sim_accum,sim_budget,frame_dt,instant_fps,viewport_count,split_mode,ticks_this_frame," +
+    "slot_state,slot_comp1,slot_comp2,view_target," +
+    "world_x,world_y,world_z,vel_x,vel_y,vel_z,ang_roll,ang_yaw,ang_pitch,disp_roll,disp_yaw,disp_pitch," +
+    "span_raw,span_norm,span_accum,span_high,steer,engine,long_speed,lat_speed,front_slip,rear_slip,finish_time,accum_distance,pending_finish,gear,vehicle_mode,track_contact,wheel_mask,race_pos," +
+    "metric_checkpoint,metric_mask,metric_norm_span,metric_timer,metric_display_pos,metric_speed_bonus,metric_top_speed," +
+    "cam_world_x,cam_world_y,cam_world_z,cam_x,cam_y,cam_z\n";
+
+function writeRow(line) {
+    if (fileHandle !== null) {
+        fileHandle.write(line);
+    }
+}
+
+function beginFrame(frameIndex) {
+    if (!enabled) return false;
+
+    if (frameIndex !== lastFrameIndex) {
+        lastFrameIndex = frameIndex;
+        framesStarted++;
+        if (TRACE_MAX_FRAMES > 0 && framesStarted > TRACE_MAX_FRAMES) {
+            console.log("[trace] Reached frame limit (" + TRACE_MAX_FRAMES + "), stopping");
+            shutdown();
+            return false;
+        }
+    }
+    return true;
+}
+
+function writePrefix(frameIndex, simTick, stage, kind, id) {
+    return frameIndex + "," + simTick + "," + stage + "," + kind + "," + id + ",";
+}
+
+function writeFrameRow(frameIndex, simTick, stage) {
+    var gs       = readS32(G_gameState);
+    var paused   = readS32(G_gamePaused);
+    var fadeState = 0; // G_raceEndFadeState address uncertain, zero for now
+    var simAccum = readU32(G_simTimeAccumulator);
+    var simBudget= readFloat(G_simTickBudget);
+    var frameDt  = readFloat(G_normalizedFrameDt);
+    var fps      = readFloat(G_instantFPS);
+    var vpCount  = readS32(G_viewCount);
+    var splitMode= readS32(G_splitscreenCount);
+
+    var prefix = writePrefix(frameIndex, simTick, stage, "frame", 0);
+    var line = prefix +
+        gs + "," + paused + ",0," + fadeState + ",0," +
+        simAccum + "," + simBudget.toFixed(6) + "," + frameDt.toFixed(6) + "," + fps.toFixed(6) + "," +
+        vpCount + "," + splitMode + "," + simTicksThisFrame + "," +
+        // actor fields (zeros for frame row)
+        "0,0,0,0," +
+        "0,0,0,0,0,0,0,0,0,0,0,0," +
+        "0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0," +
+        "0,0,0,0,0,0,0," +
+        // view fields (zeros)
+        "0,0,0,0.000000,0.000000,0.000000\n";
+    writeRow(line);
+}
+
+function writeActorRow(frameIndex, simTick, stage, slot) {
+    var a = actorPtr(slot);
+    var ss = slotStatePtr(slot);
+
+    var slotState = readU8(ss);
+    var comp1     = readU8(ss.add(1));
+    var comp2     = readU8(ss.add(2));
+
+    // view target: -1 if not viewed
+    var viewTarget = -1;
+    // We don't have the actorSlotForView address confirmed, so skip exact matching
+
+    var worldX  = readS32(a.add(0x1FC));
+    var worldY  = readS32(a.add(0x200));
+    var worldZ  = readS32(a.add(0x204));
+    var velX    = readS32(a.add(0x1CC));
+    var velY    = readS32(a.add(0x1D0));
+    var velZ    = readS32(a.add(0x1D4));
+    var angRoll = readS32(a.add(0x1C0));
+    var angYaw  = readS32(a.add(0x1C4));
+    var angPitch= readS32(a.add(0x1C8));
+    var dispRoll = readS16(a.add(0x208));
+    var dispYaw  = readS16(a.add(0x20A));
+    var dispPitch= readS16(a.add(0x20C));
+    var spanRaw  = readS16(a.add(0x080));
+    var spanNorm = readS16(a.add(0x082));
+    var spanAccum= readS16(a.add(0x084));
+    var spanHigh = readS16(a.add(0x086));
+    var steer    = readS32(a.add(0x30C));
+    var engine   = readS32(a.add(0x310));
+    var longSpd  = readS32(a.add(0x314));
+    var latSpd   = readS32(a.add(0x318));
+    var frontSlip= readS32(a.add(0x31C));
+    var rearSlip = readS32(a.add(0x320));
+    var finishT  = readS32(a.add(0x328));
+    var accumDist= readS32(a.add(0x32C));
+    var pendFin  = readU16(a.add(0x344));
+    var gear     = readU8(a.add(0x36B));
+    var vehMode  = readU8(a.add(0x379));
+    var trkContact= readU8(a.add(0x37B));
+    var wheelMask= readU8(a.add(0x37D));
+    var racePos  = readU8(a.add(0x383));
+
+    // Metrics: in the original binary these are in a separate table,
+    // not embedded in the actor. We emit zeros for now -- the key
+    // physics/position fields are the important comparison targets.
+    var prefix = writePrefix(frameIndex, simTick, stage, "actor", slot);
+    var line = prefix +
+        // frame fields (zeros for actor row)
+        "0,0,0,0,0,0,0.000000,0.000000,0.000000,0,0,0," +
+        // actor fields
+        slotState + "," + comp1 + "," + comp2 + "," + viewTarget + "," +
+        worldX + "," + worldY + "," + worldZ + "," +
+        velX + "," + velY + "," + velZ + "," +
+        angRoll + "," + angYaw + "," + angPitch + "," +
+        dispRoll + "," + dispYaw + "," + dispPitch + "," +
+        spanRaw + "," + spanNorm + "," + spanAccum + "," + spanHigh + "," +
+        steer + "," + engine + "," + longSpd + "," + latSpd + "," +
+        frontSlip + "," + rearSlip + "," + finishT + "," + accumDist + "," +
+        pendFin + "," + gear + "," + vehMode + "," + trkContact + "," + wheelMask + "," + racePos + "," +
+        // metric fields (zeros -- original metrics table address TBD)
+        "0,0,0,0,0,0,0," +
+        // view fields (zeros)
+        "0,0,0,0.000000,0.000000,0.000000\n";
+    writeRow(line);
+}
+
+function writeViewRow(frameIndex, simTick, stage, vpIndex) {
+    // Per-viewport camera world position (24.8 fixed-point int[3])
+    var camBase = G_camWorldPosFixed.add(vpIndex * 12);
+    var cwx = readS32(camBase);
+    var cwy = readS32(camBase.add(4));
+    var cwz = readS32(camBase.add(8));
+    var cx = cwx / 256.0;
+    var cy = cwy / 256.0;
+    var cz = cwz / 256.0;
+
+    var actorSlot = 0; // default to player for view 0
+
+    var prefix = writePrefix(frameIndex, simTick, stage, "view", vpIndex);
+    var line = prefix +
+        // frame fields (zeros)
+        "0,0,0,0,0,0,0.000000,0.000000,0.000000,0,0,0," +
+        // actor fields (zeros except view_target)
+        "0,0,0," + actorSlot + "," +
+        "0,0,0,0,0,0,0,0,0,0,0,0," +
+        "0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0," +
+        "0,0,0,0,0,0,0," +
+        // view fields
+        cwx + "," + cwy + "," + cwz + "," +
+        cx.toFixed(6) + "," + cy.toFixed(6) + "," + cz.toFixed(6) + "\n";
+    writeRow(line);
+}
+
+// ============================================================================
+// Stage snapshot -- mirrors td5_game_trace_stage() in the source port
+// ============================================================================
+
+function traceStage(stage) {
+    if (!enabled) return;
+
+    var frameIndex = fridaFrameCounter;
+    var simTick    = readS32(G_simulationTickCounter);
+
+    if (!beginFrame(frameIndex)) return;
+
+    // Frame row
+    writeFrameRow(frameIndex, simTick, stage);
+
+    // Actor rows — all 6 racer slots, no state filter
+    for (var i = 0; i < 6; i++) {
+        if (!selectedSlot(i)) continue;
+        writeActorRow(frameIndex, simTick, stage, i);
+    }
+
+    // View rows
+    var vpCount = readS32(G_viewCount);
+    for (var vp = 0; vp < vpCount && vp < 2; vp++) {
+        writeViewRow(frameIndex, simTick, stage, vp);
+    }
+}
+
+// ============================================================================
+// Lifecycle
+// ============================================================================
+
+function init() {
+    console.log("[trace] Initializing race trace hooks on TD5_d3d.exe");
+    console.log("[trace] Output: " + OUTPUT_PATH);
+    console.log("[trace] Slot filter: " + (TRACE_SLOT < 0 ? "all" : TRACE_SLOT));
+    console.log("[trace] Max frames: " + (TRACE_MAX_FRAMES > 0 ? TRACE_MAX_FRAMES : "unlimited"));
+
+    fileHandle = new File(OUTPUT_PATH, "w");
+    if (fileHandle === null) {
+        console.log("[trace] ERROR: Could not open " + OUTPUT_PATH);
+        return;
+    }
+    writeRow(CSV_HEADER);
+    fileHandle.flush();
+
+    enabled = true;
+    framesStarted = 0;
+    lastFrameIndex = -1;
+    simTicksThisFrame = 0;
+    fridaFrameCounter = 0;
+    raceConfirmed = false;
+
+    installHooks();
+
+    // Auto-throttle: clamp player 1 control bits on PollRaceSessionInput onLeave
+    // so the original binary's car accelerates exactly like td5re (with its
+    // [Trace] AutoThrottle=1 ini flag). Uses 0x100000 = ACCELERATE, never
+    // touches handbrake (0x200) or brake (0x400).
+    if (AUTO_THROTTLE) {
+        var PLAYER1_CONTROL = ptr(0x482FFC);
+        var ACCELERATE_BIT  = 0x100000;
+        var HANDBRAKE_BIT   = 0x200;
+        var BRAKE_BIT       = 0x400;
+        var REVERSE_BIT     = 0x8000000;
+        safeAttach("PollRaceSessionInput_AutoThrottle", ADDR_PollRaceSessionInput, {
+            onLeave: function (retval) {
+                if (!raceConfirmed) return;
+                try {
+                    var cbits = PLAYER1_CONTROL.readU32();
+                    cbits |= ACCELERATE_BIT;
+                    cbits &= ~(HANDBRAKE_BIT | BRAKE_BIT | REVERSE_BIT);
+                    PLAYER1_CONTROL.writeU32(cbits);
+                } catch (e) { /* skip */ }
+            }
+        });
+        console.log("[trace] Auto-throttle: forcing ACCELERATE on PollRaceSessionInput");
+    }
+
+    // Windowed mode: not implemented — DDraw exclusive mode can't be reliably
+    // overridden via Frida without crashing. Accept fullscreen for trace capture.
+    console.log("[trace] Hooks installed, waiting for race...");
+}
+
+/*  Windowed mode removed — DDraw COM vtable hooks crash the game.
+function installWindowedMode() {
+    // 1. Hook IDirectDraw4::SetCooperativeLevel via ddraw.dll export trampoline.
+    //    SetCooperativeLevel is vtable index 20 on IDirectDraw4.
+    //    We intercept DirectDrawCreateEx to grab the DDraw interface pointer,
+    //    then hook its vtable.
+    var ddrawMod = Module.findBaseAddress("ddraw.dll");
+    if (!ddrawMod) {
+        // ddraw.dll not loaded yet — hook LoadLibrary to catch it
+        var pLoadLibA = Module.findExportByName("kernel32.dll", "LoadLibraryA");
+        Interceptor.attach(pLoadLibA, {
+            onLeave: function (retval) {
+                if (retval.isNull()) return;
+                var mod = new NativePointer(retval);
+                // Check if this is ddraw.dll
+                try {
+                    var name = Module.findModuleByAddress(mod).name.toLowerCase();
+                    if (name === "ddraw.dll") {
+                        hookDDrawExports(mod);
+                    }
+                } catch (e) {}
+            }
+        });
+        console.log("[windowed] ddraw.dll not yet loaded, hooking LoadLibraryA");
+    } else {
+        hookDDrawExports(ddrawMod);
+    }
+
+    // 2. Prevent display mode changes
+    var pChangeDisplayA = Module.findExportByName("user32.dll", "ChangeDisplaySettingsA");
+    if (pChangeDisplayA) {
+        Interceptor.attach(pChangeDisplayA, {
+            onEnter: function (args) {
+                // Force no-op: set lpDevMode to NULL = reset to registry default
+                args[0] = ptr(0);
+                args[1] = ptr(0);
+            }
+        });
+        console.log("[windowed] Hooked ChangeDisplaySettingsA");
+    }
+    var pChangeDisplayExA = Module.findExportByName("user32.dll", "ChangeDisplaySettingsExA");
+    if (pChangeDisplayExA) {
+        Interceptor.attach(pChangeDisplayExA, {
+            onEnter: function (args) {
+                args[1] = ptr(0);
+                args[2] = ptr(0);
+            }
+        });
+        console.log("[windowed] Hooked ChangeDisplaySettingsExA");
+    }
+
+    // 3. Fix window style after creation
+    var pCreateWindowExA = Module.findExportByName("user32.dll", "CreateWindowExA");
+    if (pCreateWindowExA) {
+        Interceptor.attach(pCreateWindowExA, {
+            onLeave: function (retval) {
+                if (retval.isNull()) return;
+                var hwnd = retval;
+                var WS_OVERLAPPEDWINDOW = 0x00CF0000;
+                var WS_VISIBLE = 0x10000000;
+                var GWL_STYLE = -16;
+                var SetWindowLongA = new NativeFunction(
+                    Module.findExportByName("user32.dll", "SetWindowLongA"),
+                    "long", ["pointer", "int", "long"], "stdcall");
+                var SetWindowPos = new NativeFunction(
+                    Module.findExportByName("user32.dll", "SetWindowPos"),
+                    "int", ["pointer", "pointer", "int", "int", "int", "int", "uint"], "stdcall");
+                var SWP_FRAMECHANGED = 0x0020;
+                var SWP_NOZORDER = 0x0004;
+                SetWindowLongA(hwnd, GWL_STYLE, WS_OVERLAPPEDWINDOW | WS_VISIBLE);
+                SetWindowPos(hwnd, ptr(0), 50, 50, 656, 519, SWP_FRAMECHANGED | SWP_NOZORDER);
+                console.log("[windowed] Window style set to overlapped 640x480 at (50,50)");
+            }
+        });
+        console.log("[windowed] Hooked CreateWindowExA");
+    }
+}
+
+var hookedVtables = {};  // prevent double-hooking same vtable
+
+function hookDDrawVtable(pDD, label) {
+    var vtable = pDD.readPointer();
+    var vtKey = vtable.toString();
+    if (hookedVtables[vtKey]) return;
+    hookedVtables[vtKey] = true;
+
+    // SetCooperativeLevel = vtable index 20
+    var pSetCoopLevel = vtable.add(20 * 4).readPointer();
+    Interceptor.attach(pSetCoopLevel, {
+        onEnter: function (args) {
+            var DDSCL_NORMAL = 0x8;
+            console.log("[windowed] " + label + "::SetCooperativeLevel 0x" +
+                        args[2].toInt32().toString(16) + " -> DDSCL_NORMAL");
+            args[2] = ptr(DDSCL_NORMAL);
+        }
+    });
+
+    // SetDisplayMode not hooked — Interceptor.replace crashed before.
+    // With DDSCL_NORMAL, SetDisplayMode should fail gracefully.
+
+    console.log("[windowed] Hooked " + label + " vtable at " + vtable);
+}
+
+function hookDDrawExports(ddrawBase) {
+    // Hook DirectDrawCreateEx (IDirectDraw4/7)
+    var pDDCreateEx = Module.findExportByName("ddraw.dll", "DirectDrawCreateEx");
+    if (pDDCreateEx) {
+        Interceptor.attach(pDDCreateEx, {
+            onEnter: function (args) { this.ppDD = args[1]; },
+            onLeave: function (retval) {
+                if (retval.toInt32() !== 0) return;
+                hookDDrawVtable(this.ppDD.readPointer(), "DDCreateEx");
+            }
+        });
+        console.log("[windowed] Hooked DirectDrawCreateEx");
+    }
+
+    // Hook DirectDrawCreate (IDirectDraw)
+    var pDDCreate = Module.findExportByName("ddraw.dll", "DirectDrawCreate");
+    if (pDDCreate) {
+        Interceptor.attach(pDDCreate, {
+            onEnter: function (args) { this.ppDD = args[1]; },
+            onLeave: function (retval) {
+                if (retval.toInt32() !== 0) return;
+                hookDDrawVtable(this.ppDD.readPointer(), "DDCreate");
+            }
+        });
+        console.log("[windowed] Hooked DirectDrawCreate");
+    }
+
+    // Hook QueryInterface to catch IDirectDraw -> IDirectDraw4 upgrades
+    // (game may create IDirectDraw then QI to IDirectDraw4)
+}  End of windowed mode block */
+
+function shutdown() {
+    enabled = false;
+    if (fileHandle !== null) {
+        fileHandle.flush();
+        fileHandle.close();
+        fileHandle = null;
+        console.log("[trace] Trace file closed (" + framesStarted + " frames captured)");
+    }
+}
+
+// ============================================================================
+// Hook installation
+//
+// Strategy: We hook at the callee level and reconstruct the source-port stage
+// boundaries as closely as possible.
+//
+// Source port stages vs original binary hooks:
+//   frame_begin   -> RunRaceFrame entry
+//   pre_physics   -> UpdateRaceActors entry (AI+physics dispatcher)
+//   post_physics  -> ResolveVehicleContacts entry (after UpdateRaceActors returned)
+//   post_ai       -> ResolveVehicleContacts onLeave (after collision)
+//   post_track    -> UpdateRaceOrder entry (after tire tracks)
+//   post_progress -> NormalizeWrapState onLeave (last sim tick operation)
+//   post_progress -> NormalizeWrapState onLeave (preferred)
+//   frame_end     -> EndRaceScene onLeave
+//
+// Note: The original binary's pipeline order is slightly different from the
+// source port's decomposed calls. UpdateRaceActors encompasses physics+AI+track
+// in one dispatcher. We capture before/after the major stages.
+//
+// The fallback "minimal" hook set (ENABLE_INNER_TICK_HOOKS=false) captures only
+// frame_begin and frame_end. It is sufficient for position/velocity differential
+// comparison because both the source port and original sample state at the same
+// sim_tick counter value. Enable inner hooks only when you need per-tick
+// stage-boundary data (e.g., isolating which stage introduces a divergence).
+//
+// Inner-hook safety: the sim time accumulator (0x4AAED0) can hold a large
+// residual on the first post-transition frame, causing 10-30+ inner loop
+// iterations before Frida's file I/O can keep up. Two guards prevent the crash:
+//   • raceConfirmed: set on first frame_begin — ensures actor memory is valid
+//   • INNER_TICK_MAX_PER_FRAME: caps CSV rows even if accumulator bursts
+// ============================================================================
+
+function safeAttach(name, addr, callbacks) {
+    try {
+        Interceptor.attach(addr, callbacks);
+        console.log("[trace] Hooked " + name + " at " + addr);
+    } catch (e) {
+        console.log("[trace] SKIP " + name + " at " + addr + ": " + e.message);
+    }
+}
+
+function installHooks() {
+    safeAttach("RunRaceFrame", ADDR_RunRaceFrame, {
+        onEnter: function (args) {
+            try {
+                var gs = readS32(G_gameState);
+                if (gs !== 2) {
+                    // If we leave race state, reset the confirmed flag so the next
+                    // race entry re-arms the guard correctly.
+                    raceConfirmed = false;
+                    raceFrameCount = 0;
+                    return;
+                }
+                // Clamp g_simTickBudget to >= 1.0 each frame.
+                //
+                // The original's inner sim-tick loop is gated by
+                //   g_simTimeAccumulator >= 0x10000  (set fresh per frame via
+                //   accumulator = budget * 65536)
+                // and UpdateRaceCameraTransitionTimer (0x40A490) — which drains
+                // the race countdown — only runs inside that loop. Frida hook
+                // overhead slows the game enough that the game's own adaptive
+                // budget drifts below 1.0, which permanently prevents the
+                // sim-tick loop from running and leaves the race stuck at
+                // paused=1 forever. Unlike the source port, the original's
+                // accumulator does not carry over across frames, so a single
+                // starved frame is enough to stall the race indefinitely.
+                // Clamping budget to 1.0 guarantees >= 1 sim tick per frame.
+                if (G_simTickBudget.readFloat() < 1.0) {
+                    G_simTickBudget.writeFloat(1.0);
+                }
+                simTicksThisFrame = 0;
+                fridaFrameCounter++;
+                // Auto-close: stop when either the engine-clock cap (sim_tick)
+                // or the render-frame ceiling is reached.
+                // sim_tick is the authoritative "game engine time" — ticks at
+                // 30 Hz once the countdown ends, so TRACE_MAX_SIM_TICK=450
+                // maps to exactly 15 seconds of post-countdown race on both
+                // binaries and lets the diff comparator align rows on a
+                // common timeline.
+                var curSimTick = readS32(G_simulationTickCounter);
+                if ((TRACE_MAX_SIM_TICK > 0 && curSimTick >= TRACE_MAX_SIM_TICK) ||
+                    (TRACE_MAX_FRAMES > 0 && raceFrameCount > TRACE_MAX_FRAMES)) {
+                    console.log("[trace] Auto-close: sim_tick=" + curSimTick +
+                                " raceFrames=" + raceFrameCount +
+                                " (caps: sim_tick=" + TRACE_MAX_SIM_TICK +
+                                " frames=" + TRACE_MAX_FRAMES + ")");
+                    shutdown();
+                    Thread.sleep(0.1);
+                    send({type: "auto-close"});
+                }
+                traceStage("frame_begin");
+                // Mark that at least one frame_begin has fired in race state.
+                // Inner tick hooks are now safe to read actor memory.
+                if (!raceConfirmed) {
+                    // Re-apply windowed style on first race frame (game may
+                    // have switched to fullscreen during the transition).
+                    try {
+                        var FindWindowA = new NativeFunction(
+                            Module.findExportByName("user32.dll", "FindWindowA"),
+                            "pointer", ["pointer", "pointer"], "stdcall");
+                        var SetWindowLongA = new NativeFunction(
+                            Module.findExportByName("user32.dll", "SetWindowLongA"),
+                            "long", ["pointer", "int", "long"], "stdcall");
+                        var SetWindowPos = new NativeFunction(
+                            Module.findExportByName("user32.dll", "SetWindowPos"),
+                            "int", ["pointer", "pointer", "int", "int", "int", "int", "uint"], "stdcall");
+                        var hwnd = FindWindowA(ptr(0), Memory.allocUtf8String("Test Drive 5"));
+                        if (!hwnd.isNull()) {
+                            SetWindowLongA(hwnd, -16, 0x10CF0000);  // WS_OVERLAPPEDWINDOW|WS_VISIBLE
+                            SetWindowPos(hwnd, ptr(0), 50, 50, 656, 519, 0x0024);  // SWP_FRAMECHANGED|SWP_NOZORDER
+                            console.log("[windowed] Re-applied window style on race start");
+                        }
+                    } catch(e) {}
+                }
+                raceConfirmed = true;
+                raceFrameCount++;
+            } catch (e) { /* skip */ }
+        }
+    });
+
+    safeAttach("EndRaceScene", ADDR_EndRaceScene, {
+        onEnter: function (args) {
+            try {
+                var gs = readS32(G_gameState);
+                if (gs !== 2) return;
+                if (!ENABLE_INNER_TICK_HOOKS) {
+                    // Skip post_progress during countdown — the port only
+                    // emits this stage inside the post-countdown sim-tick
+                    // loop (after simulation_tick_counter++), so matching
+                    // its semantics keeps the comparator's (sim_tick, stage,
+                    // kind, id) keys aligned on both sides.
+                    if (readS32(G_simulationTickCounter) > 0) {
+                        traceStage("post_progress");
+                    }
+                }
+            } catch (e) { /* skip */ }
+        },
+        onLeave: function (retval) {
+            try {
+                var gs = readS32(G_gameState);
+                if (gs !== 2) return;
+                traceStage("frame_end");
+            } catch (e) { /* skip */ }
+        }
+    });
+
+    if (!ENABLE_INNER_TICK_HOOKS) {
+        return;
+    }
+
+    // Only hook UpdateRaceOrder — last operation in the inner tick loop.
+    // Hooking all 3 inner functions generates too much I/O overhead per tick.
+    // UpdateRaceActors and ResolveVehicleContacts can be re-enabled if needed.
+    //
+    // Safety: two guards before any memory read or CSV write:
+    //   1. raceConfirmed — true only after first frame_begin in game_state==2.
+    //      Prevents reads during the actor-init burst on the very first sim tick.
+    //   2. simTicksThisFrame < INNER_TICK_MAX_PER_FRAME — caps I/O when the
+    //      time accumulator carries a large residual (e.g., after a stall or the
+    //      first post-transition frame). The sim runs at 60 Hz fixed-step so
+    //      normal frames have 1-2 ticks; 8 is a safe ceiling.
+    //
+    // NormalizeWrapState (0x443FB0) is called 6x per actor OUTSIDE the tick loop
+    // and its 57-byte body is too small for Frida's 5-byte trampoline patch —
+    // do not hook it.
+
+    safeAttach("UpdateRaceOrder", ADDR_UpdateRaceOrder, {
+        onLeave: function (retval) {
+            try {
+                // Guard 1: actor memory not valid until first frame_begin fired.
+                if (!raceConfirmed) return;
+                // Guard 2: game must still be in race state.
+                var gs = readS32(G_gameState);
+                if (gs !== 2) return;
+                // Guard 3: cap I/O burst from large time-accumulator residuals.
+                if (simTicksThisFrame >= INNER_TICK_MAX_PER_FRAME) return;
+                traceStage("post_track");
+                // post_progress: UpdateRaceOrder is the last sim-tick operation
+                // inside the inner loop before NormalizeWrapState (which is
+                // outside the loop and too small to hook safely).
+                simTicksThisFrame++;
+                traceStage("post_progress");
+            } catch (e) {}
+        }
+    });
+}
+
+// ============================================================================
+// Cleanup on script unload
+// ============================================================================
+
+// Clean up when the Frida script is unloaded (detach / ctrl-C)
+Script.setGlobalAccessHandler({
+    enumerate: function () { return []; },
+    get: function (property) { return undefined; }
+});
+// Frida calls rpc.exports.dispose on unload if defined
+rpc.exports = {
+    dispose: function () {
+        shutdown();
+    }
+};
+
+// ============================================================================
+// Go
+// ============================================================================
+
+init();

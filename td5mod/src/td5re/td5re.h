@@ -208,7 +208,19 @@ typedef struct TD5_GlobalState {
         int  race_trace_slot;
         int  race_trace_max_frames;
         int  auto_throttle;         /* 1 = force full throttle for slot 0 */
+        int  trace_fast_forward;    /* N = inject N extra sim ticks per render frame
+                                     * during trace capture (0 = real-time).
+                                     * Mirrors the Frida-side sim budget clamp so the
+                                     * diff-race skill runs in seconds instead of
+                                     * minutes. */
+        int  race_trace_max_sim_ticks; /* stop the trace after N sim ticks; 0 = no cap.
+                                     * Paired with trace_fast_forward so the skill can
+                                     * cap the port's workload at the same simulated
+                                     * window the Frida side captures, instead of
+                                     * burning time on sim ticks we'll never diff. */
         int  loaded;  /* 1 once INI has been read */
+        /* AutoRace: skip frontend, launch race immediately with INI settings */
+        int  auto_race;             /* 1 = auto-start race on launch */
     } ini;
 
 } TD5_GlobalState;
