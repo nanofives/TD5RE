@@ -904,18 +904,36 @@ void td5_physics_update_player(TD5_Actor *actor)
         }
     }
 
-    /* --- Apply longitudinal and lateral forces back to world frame --- */
+    /* --- Apply longitudinal and lateral forces back to world frame ---
+     *
+     * Original UpdatePlayerVehicleDynamics @ 0x00404030 writes linear_velocity
+     * via TWO SEPARATE ROTATIONS, not one combined total-force rotation:
+     *
+     *   rear-axle forces (rear_long, rear_lat_force)
+     *     → rotated by HEADING                (cos_h, sin_h)
+     *   front-axle forces (front_long, front_lat_force)
+     *     → rotated by HEADING + STEER        (cos_s, sin_s)
+     *
+     * The previous port collapsed both pairs into (total_long, total_lat)
+     * and rotated once by HEADING, which folds the steered axis into the
+     * body axis and produced a ~2.15x magnitude error at the first post-GO
+     * drive tick (observed 2026-04-11 in /diff-race, orig vel_x=-185 vs
+     * port vel_x=-399). This is the same structure the AI path already
+     * uses at td5_physics.c:1246-1249, just applied to the 4-wheel player
+     * distribution. [CONFIRMED @ 0x00404D10 / 0x00404D30 force-writeback
+     * tail of UpdatePlayerVehicleDynamics] */
     {
-        int32_t total_long = front_long + rear_long;
-        int32_t total_lat  = front_lat_force + rear_lat_force;
-
-        /* Rotate back to world frame */
-        int32_t fx = (total_long * sin_h + total_lat * cos_h) >> 12;
-        int32_t fz = (total_long * cos_h - total_lat * sin_h) >> 12;
+        int32_t fx = ((int64_t)rear_long       * sin_h
+                    + (int64_t)rear_lat_force  * cos_h
+                    + (int64_t)front_long      * sin_s
+                    + (int64_t)front_lat_force * cos_s) >> 12;
+        int32_t fz = ((int64_t)rear_long       * cos_h
+                    - (int64_t)rear_lat_force  * sin_h
+                    + (int64_t)front_long      * cos_s
+                    - (int64_t)front_lat_force * sin_s) >> 12;
 
         actor->linear_velocity_x += fx;
         actor->linear_velocity_z += fz;
-
     }
 
     /* --- 14b. Velocity magnitude safety clamp ---
