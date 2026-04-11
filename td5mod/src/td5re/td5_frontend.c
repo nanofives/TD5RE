@@ -6655,8 +6655,9 @@ static void Screen_CarSelection(void) {
         break;
 
     case 2: /* Sidebar slide-in: bar slides from right, curve+topbar from left */
-        /* Skip if returning from network car select or 2P round 2 */
-        if ((s_two_player_mode & 4) != 0 || s_network_active) {
+        /* Skip if returning from network car select, 2P round 2, or drag-race 2nd pass */
+        if ((s_two_player_mode & 4) != 0 || s_network_active ||
+            s_drag_carselect_pass != 0) {
             s_inner_state = 3;
         } else if (frontend_update_timed_animation(75, 2500) >= 1.0f) {
             s_inner_state = 3;

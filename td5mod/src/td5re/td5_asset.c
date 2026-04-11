@@ -1309,28 +1309,26 @@ static const char *s_right_names[2]   = { "RIGHT.TRK",   "RIGHTB.TRK"   };
 
 int td5_asset_level_number(int track_index)
 {
+    /* Drag race hardcodes level030.zip [CONFIRMED @ InitializeRaceSession
+     * 0x0042ad63-0x0042ad73]: when s_selected_track < 0 the original writes
+     * MOV [0x004aaf3c], 0x1e (=30) directly, bypassing the schedule remap. */
+    if (g_td5.drag_race_enabled)
+        return 30;
+
     /* Two-step lookup from the original binary:
      * Step 1: schedule slot index -> pool index via gScheduleToPoolIndex (VA 0x466894).
      * Step 2: pool index -> level ZIP number via pool-to-ZIP table (VA 0x466D50). */
-    static const uint8_t k_schedule_to_pool[20] = {
+    static const uint8_t k_schedule_to_pool[19] = {
         11,  9,  7, 10, 13, 16, 15, 14,  6,  8,
-         0,  1,  2,  3,  4,  5, 12, 18, 17, 19
+         0,  1,  2,  3,  4,  5, 12, 18, 17
     };
-    /* Pool 0-18 mapped to level zip numbers; pool 19 (drag strip) uses level064
-     * which is not shipped -- fall back to level001 for that slot. */
     static const int k_pool_to_zip[19] = {
          1,  2,  3,  4,  5,  6, 13, 14, 15, 16,
         17, 23, 25, 26, 27, 28, 29, 37, 39
     };
-    int pool;
-    if (track_index < 0)
+    if (track_index < 0 || track_index >= 19)
         return 1;
-    if (track_index >= 20)
-        return 1;
-    pool = k_schedule_to_pool[track_index];
-    if (pool >= 19)
-        return 1; /* pool 19 = drag strip (level064 not shipped) */
-    return k_pool_to_zip[pool];
+    return k_pool_to_zip[k_schedule_to_pool[track_index]];
 }
 
 static int td5_asset_build_track_texture_png_path(int track_index,
