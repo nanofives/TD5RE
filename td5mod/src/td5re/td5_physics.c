@@ -2418,21 +2418,53 @@ void td5_physics_integrate_pose(TD5_Actor *actor)
             actor->world_pos.y = new_y + 0x80;
             actor->render_pos.y = (float)(new_y + 0x80) * (1.0f / 256.0f);
 
-            /* Update velocity only when vehicle_mode and contact bitmask are
-             * consistent. Original (0x406300) checks DAT_0046318c[vehicle_mode]
-             * and (prev_mask & (vehicle_mode ^ 0xF)) == 0. At spawn with
-             * vehicle_mode=0 and no previous contacts, this doesn't trigger,
-             * preventing the massive velocity spike from the snap delta. */
+            /* Velocity-from-snap gate — literal port of original
+             * IntegrateVehiclePoseAndContacts tail (0x0040630D–0x00406335):
+             *
+             *   if (DAT_0046318C[actor[0x37C]] != 0 &&
+             *       (actor[0x37D] & (actor[0x37C] ^ 0xF)) == 0)
+             *       linear_velocity_y = (new_y - prev_y) - gGravityConstant;
+             *
+             * Field roles (see td5_physics.c:2057-2058, 2113-2114):
+             *   0x37C = NEW-frame wheel-contact bitmask (gate index)
+             *   0x37D = PREVIOUS-frame wheel-contact bitmask (mask operand)
+             *
+             * The second condition detects "no wheel that was grounded last
+             * frame is airborne this frame" — i.e. only apply the
+             * snap-derived velocity when the wheel contact set did not lose
+             * any wheels this tick. Otherwise we keep the integrated velocity
+             * so a wheel lifting off doesn't kill vertical momentum.
+             *
+             * DAT_0046318C read via mcp memory_read at 0x0046318C:
+             *   01 01 01 00 01 00 00 00 01 00 00 00 00 00 00 00
+             * (indices 0,1,2,4,8 are gated ON; everything else OFF.)
+             *
+             * Previous port code had THREE bugs in this gate:
+             *   (1) table bytes wrong (leaked into indices 6, 9, 12)
+             *   (2) index read from 0x37D instead of 0x37C
+             *   (3) XOR operand also read from 0x37D, making the mask
+             *       check `(x & ~x) == 0` → always true → effectively
+             *       no mask check at all.
+             * Combined, the gate fired spurious velocity resets during
+             * normal driving and produced visible chase-cam shake on accel.
+             *
+             * Use raw byte offsets rather than named fields because the
+             * port has named accessors (`damage_lockout`, `wheel_contact_
+             * bitmask`) whose semantics are overloaded across call sites. */
             {
-                static const uint8_t k_mode_gate[] = {
-                    0,1,1,0,1,0,1,0,1,1,0,0,1,0,0,0
+                static const uint8_t k_mode_gate[16] = {
+                    1,1,1,0, 1,0,0,0, 1,0,0,0, 0,0,0,0
                 };
-                uint8_t vmode = actor->wheel_contact_bitmask;
-                uint8_t prev_mask = *(uint8_t *)((uint8_t *)actor + 0x37D);
-                if (k_mode_gate[vmode & 0xF] &&
-                    (prev_mask & (vmode ^ 0xF)) == 0) {
+                uint8_t new_mask  = *(const uint8_t *)((const uint8_t *)actor + 0x37C);
+                uint8_t prev_mask = *(const uint8_t *)((const uint8_t *)actor + 0x37D);
+                if (k_mode_gate[new_mask & 0xF] &&
+                    (prev_mask & (new_mask ^ 0x0F)) == 0) {
                     actor->linear_velocity_y = new_y - actor->prev_frame_y_position
                                                - g_gravity_constant;
+                    if (actor->slot_index == 0 && (actor->frame_counter % 60u) == 0u) {
+                        TD5_LOG_I(LOG_TAG, "y_snap: gate_open new=%u prev=%u vy=%d",
+                                  new_mask, prev_mask, actor->linear_velocity_y);
+                    }
                 }
             }
         } else {
