@@ -1306,7 +1306,15 @@ void td5_render_span_display_list(void *display_list_block)
                 s_bb_log++;
             }
             td5_render_transform_mesh_vertices(mesh);
-            td5_render_compute_vertex_lighting(mesh);
+            /* Skip runtime vertex-lighting recompute for billboard meshes.
+             * The original RenderTrackSpanDisplayList @ 0x00431270 calls
+             * only TransformAndQueueTranslucentMesh @ 0x0043DCB0 which
+             * transforms XYZ only (no color work); the per-vertex
+             * intensity comes from the asset's baked values. Running the
+             * runtime lighting model on billboard-sprite normals gives a
+             * max dot product against all three lights, clamping intensity
+             * to 0xFF — which makes the subsequent diffuse-LUT remap a
+             * no-op, leaving ONE/ONE additive free to blow out. */
             td5_render_prepared_mesh(mesh);
             s_debug_span_meshes_submitted++;
             td5_render_pop_transform();
@@ -2352,12 +2360,25 @@ static void render_vehicle_wheel_billboards(TD5_Actor *actor, int slot)
         td5_plat_render_bind_texture(tex_page);
         td5_plat_render_draw_tris(verts, 18, indices, idx);
 
-        /* Hub-cap: flat INWHEEL disc at the outer face, sized by rim_radius.
-         * (void)slot — per-car carhub texture wiring is TODO; for now every
-         * wheel uses the static INWHEEL disc which is known to render.
-         * Original rotates corners by steering angles (actor+0x340/0x342);
-         * front wheels apply steering yaw via cos_s/sin_s computed above. */
-        (void)slot;
+        /* Hub-cap: per-slot 64x64 carhub texture (page 800+slot*2+1).
+         * The carhub PNG stores 4 motion-blur frames in a 2x2 grid of 32x32
+         * sub-tiles. Pixels outside the hubcap disc are alpha=0, so we use
+         * TRANSLUCENT_LINEAR to blend them out over the tire behind.
+         *
+         * Spin frame [CONFIRMED @ 0x446F00]:
+         *   frame = min(abs(long_speed) >> 14, 3)
+         *   col   = frame & 1,  row = frame >> 1 */
+        int hub_page = 800 + slot * 2 + 1;
+        int32_t spd_raw = actor->longitudinal_speed;
+        uint32_t spd_abs = (uint32_t)(spd_raw < 0 ? -spd_raw : spd_raw);
+        int spin_frame = (int)(spd_abs >> 14);
+        if (spin_frame > 3) spin_frame = 3;
+        int spin_col = spin_frame & 1;
+        int spin_row = spin_frame >> 1;
+        float hub_u0 = ((float)(spin_col * 32) + 0.5f) / 64.0f;
+        float hub_v0 = ((float)(spin_row * 32) + 0.5f) / 64.0f;
+        float hub_u1 = ((float)(spin_col * 32 + 31) + 0.5f) / 64.0f;
+        float hub_v1 = ((float)(spin_row * 32 + 31) + 0.5f) / 64.0f;
         {
             float ho = outer_off;
             float corner_offsets[4][3] = {
@@ -2374,8 +2395,8 @@ static void render_vehicle_wheel_billboards(TD5_Actor *actor, int slot)
                 corners[c][2] = wz + dx * sin_s + dz * cos_s;
             }
             float hub_uv[4][2] = {
-                { s_inwheel_u0, s_inwheel_v0 }, { s_inwheel_u1, s_inwheel_v0 },
-                { s_inwheel_u1, s_inwheel_v1 }, { s_inwheel_u0, s_inwheel_v1 },
+                { hub_u0, hub_v0 }, { hub_u1, hub_v0 },
+                { hub_u1, hub_v1 }, { hub_u0, hub_v1 },
             };
 
             TD5_D3DVertex hub[4];
@@ -2399,8 +2420,8 @@ static void render_vehicle_wheel_billboards(TD5_Actor *actor, int slot)
             if (hub_ok) {
                 uint16_t hub_idx[12] = { 0,1,2, 0,2,3, 0,2,1, 0,3,2 };
                 flush_immediate_internal();
-                td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
-                td5_plat_render_bind_texture(tex_page);
+                td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
+                td5_plat_render_bind_texture(hub_page);
                 td5_plat_render_draw_tris(hub, 4, hub_idx, 12);
             }
         }
