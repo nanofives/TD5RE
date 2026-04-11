@@ -1565,21 +1565,24 @@ void td5_render_actors_for_view(int view_index)
 
             td5_render_transform_mesh_vertices(mesh);
             td5_render_compute_vertex_lighting(mesh);
+
+            /* Shadow FIRST, then car mesh, then wheels. The shadow is drawn
+             * with z_test=0 (TRANSLUCENT_POINT) so it paints unconditionally
+             * over whatever is already in the colour buffer (the track). The
+             * opaque car body and wheels are drawn afterwards with z_write=1
+             * and paint over the shadow exactly where they exist in screen
+             * space — that's how we get "car occludes shadow" without a
+             * depth test on the shadow itself. This avoids the terrain-
+             * slope flicker you get with z_test=1, and it works correctly
+             * now that the wheel hub has been reshaped from a 4-vertex
+             * diamond (which had triangular gaps to the rim) to a 9-vertex
+             * disc that fully fills the wheel face. */
+            render_vehicle_shadow_quad(actor);
+
             td5_render_prepared_mesh(mesh);
 
             /* Render wheel ring billboards (0x446F00) */
             render_vehicle_wheel_billboards(actor, slot);
-
-            /* Shadow renders LAST — after car body AND wheels. The shadow
-             * uses z_test=0 (TRANSLUCENT_POINT) so it paints over anything
-             * in its screen-space quad, which also covers the small
-             * triangular gaps between the wheel hub diamond and the rim
-             * circle (the wheel face is not fully tessellated). The
-             * world-Y offset pushes the quad slightly below wheel-contact
-             * level so it projects lower than the car body in screen
-             * space, keeping the translucent overlap with the car sides
-             * to a minimum. */
-            render_vehicle_shadow_quad(actor);
 
             actor_render_count++;
             actor_meshes_submitted++;
@@ -2113,22 +2116,22 @@ void td5_render_crossfade_surfaces(uint32_t *dst, const uint32_t *src_a,
  *   - TRANSLUCENT_POINT (z_test=0, z_write=0, alpha_ref=1, SRCALPHA/
  *     INVSRCALPHA). No depth test means no terrain-slope flicker and no
  *     alpha-cutoff cropping of the feathered shadow edges.
- *   - The call site draws the shadow LAST, after the car body AND the
- *     wheels. This paints over the small triangular gaps between the
- *     wheel hub diamond and the tyre ring circle (the current wheel
- *     tessellation is incomplete).
+ *   - The call site draws the shadow BEFORE the car mesh (and the
+ *     wheels). The opaque car body and wheels draw afterwards with
+ *     z_write=1 and paint over the shadow where they exist in screen
+ *     space, so the car correctly "occludes" the shadow without a
+ *     depth test on the shadow itself.
  *   - Scale corners outward from the XZ centroid by 1.85 to approximate
  *     the unread _g_wheelSuspensionRenderScale and give the shadow a
  *     footprint larger than the raw wheel spread.
- *   - Push the corners -1.5 world units below wheel-contact Y so the
- *     projected quad sits slightly below the car body in screen space
- *     rather than on top of it (there is no depth test to clip the
- *     overlap), minimising the translucent blend over the car sides.
+ *   - Corners stay at wheel-contact Y; no vertical lift is needed
+ *     because the shadow is painted at ground level and then occluded
+ *     by the car body via draw order, not depth test.
  *   - Subtick-interpolate corners with linear_velocity * g_subTickFraction
  *     so the shadow doesn't sawtooth-lag behind the car at speed (the
  *     car mesh is interpolated the same way at line ~1547).
  */
-#define SHADOW_VERTICAL_OFFSET  (-1.5f)
+#define SHADOW_VERTICAL_OFFSET  (0.0f)
 #define SHADOW_CORNER_SCALE     (1.85f)
 
 static int   s_shadow_lookup_done = 0;
