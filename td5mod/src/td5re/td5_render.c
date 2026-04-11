@@ -1572,10 +1572,15 @@ void td5_render_actors_for_view(int view_index)
 
             td5_render_transform_mesh_vertices(mesh);
             td5_render_compute_vertex_lighting(mesh);
-            td5_render_prepared_mesh(mesh);
 
-            /* Render car shadow (dark ground quad under vehicle) */
+            /* Render car shadow BEFORE the car mesh. The shadow is drawn
+             * with z_test=0 (TRANSLUCENT_POINT) to match the original's
+             * translucent sort list, so draw order is what makes the car
+             * body occlude the shadow: the car mesh paints over shadow
+             * pixels where its own depth-writing geometry lives. */
             render_vehicle_shadow_quad(actor);
+
+            td5_render_prepared_mesh(mesh);
 
             /* Render wheel ring billboards (0x446F00) */
             render_vehicle_wheel_billboards(actor, slot);
@@ -2104,24 +2109,31 @@ void td5_render_crossfade_surfaces(uint32_t *dst, const uint32_t *src_a,
  * (128,64)), vertex color 0xFFFFFFFF, darkness from the texture alpha.
  * Corners derived from the 4 wheel probe positions at actor+0x90..+0xbc.
  *
- * The original's translucent primitive list draws with z-test disabled and
- * uses _g_shadowVerticalOffset = -22.0f as a pure screen-space nudge; it
- * never depth-tests the shadow against the car or the track. This port
- * uses a real D3D depth buffer (D16_UNORM), so we instead:
- *   - draw with TRANSLUCENT_ANISO (z_test=1, z_write=0, alpha_ref=1) so
- *     the car body (drawn first with z_write=1) occludes the shadow
- *     exactly where they overlap, and the feathered shadow edges survive
- *     alpha test instead of being cropped by the 0x80 cutoff;
- *   - lift the shadow quad +3 world units above the wheel-contact points
- *     so it wins the depth test against the ~1-unit precision of D16 vs
- *     the track mesh beneath it;
- *   - scale corners outward from the XZ centroid by 1.25 because the
- *     original multiplies wheel-relative deltas by
- *     _g_wheelSuspensionRenderScale (unread) to extend the shadow past
- *     the wheel footprint.
+ * The original draws shadows via a translucent sort list with z-test
+ * disabled entirely — the -22.0f offset is a pure screen-space nudge, never
+ * depth-tested against the car or the track. Previous attempts here used
+ * z_test=1 (TRANSLUCENT_ANISO) with a small vertical lift, but on uneven
+ * terrain the extended corners dip below the track surface and flicker as
+ * the depth test fails intermittently.
+ *
+ * Matched the original's behaviour instead:
+ *   - TRANSLUCENT_POINT (z_test=0, z_write=0, alpha_ref=1, SRCALPHA/
+ *     INVSRCALPHA) — no depth test, so the shadow always draws and can
+ *     never clip through terrain. Point filter is acceptable on a blurry
+ *     128x64 shadow texture.
+ *   - The call site draws the shadow BEFORE the car mesh, so the opaque
+ *     car body (z_write=1) writes over the shadow where they overlap in
+ *     screen space — that's how the car occludes the shadow.
+ *   - Corners stay at wheel-contact Y, no vertical lift needed.
+ *   - Scale corners outward from the XZ centroid by 1.85 to approximate
+ *     _g_wheelSuspensionRenderScale (unread from Ghidra); this extends
+ *     the footprint beyond raw wheel spread.
+ *   - Subtick-interpolate corners with linear_velocity * g_subTickFraction
+ *     so the shadow doesn't sawtooth-lag behind the car at speed (the
+ *     car mesh is interpolated the same way at line ~1547).
  */
-#define SHADOW_VERTICAL_OFFSET  (3.0f)
-#define SHADOW_CORNER_SCALE     (1.6f)
+#define SHADOW_VERTICAL_OFFSET  (0.0f)
+#define SHADOW_CORNER_SCALE     (1.85f)
 
 static int   s_shadow_lookup_done = 0;
 static int   s_shadow_page        = -1;
@@ -2248,7 +2260,7 @@ static void render_vehicle_shadow_quad(const TD5_Actor *actor)
 
     uint16_t indices[6] = { 0, 1, 2, 0, 2, 3 };
     flush_immediate_internal();
-    td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_ANISO);
+    td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_POINT);
     td5_plat_render_bind_texture(s_shadow_page);
     td5_plat_render_draw_tris(verts, 4, indices, 6);
 }
