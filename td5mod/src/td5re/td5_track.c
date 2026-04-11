@@ -508,33 +508,6 @@ void td5_track_get_span_edges(int span_index,
 
 void td5_track_resolve_wall_contacts(TD5_Actor *actor)
 {
-    /* DISABLED 2026-04-11 — the lateral wall test is geometrically correct
-     * (segment-iteration with auto-flipped inward perp verified against
-     * the wall_layout vertex dump on Moscow span 111) but the cars are
-     * spawning rotated 90° from the rail direction. Runtime diag showed
-     * slot 0 with front wheels on the road's RIGHT rail and rear wheels
-     * on the LEFT rail — the car body is diagonally oriented across the
-     * road, so hitting the lateral rails with front+rear probes feels
-     * like blocking forward/backward motion from the driver's viewpoint.
-     *
-     * This is a spawn-heading bug, NOT a wall geometry bug. The walls
-     * need correct car orientation to feel right. Until spawn heading
-     * is fixed, disabling lateral walls is less frustrating than the
-     * "invisible confinement" experience.
-     *
-     * Forward/Reverse fence-strip handlers remain active — they only
-     * fire at DAT_00483550 / DAT_00483954 boundary spans and are
-     * independent of the current-span lateral check.
-     *
-     * TODO: investigate why spawn heading is 90° off from the rail walk
-     * direction. Likely in td5_track_compute_heading or the grid-start
-     * orientation computation. */
-    (void)actor;
-    return;
-
-    /* Everything below is unreachable but preserved for when the spawn
-     * heading bug is fixed and we want to re-enable the lateral walls.
-     * Delete if we decide lateral walls should stay permanently disabled. */
     static uint32_t s_wall_tick = 0;
     int diag_slot0 = 0;
 
@@ -570,209 +543,153 @@ void td5_track_resolve_wall_contacts(TD5_Actor *actor)
     int lane_count = span_lane_count(sp);
     if (lane_count < 1) lane_count = 1;
 
+    /* NEAR and FAR rows. The strip field labels in TD5 data are misleading:
+     *
+     *   left_vertex_index   → base of the span's NEAR row (entry edge)
+     *   right_vertex_index  → base of the span's FAR row  (exit edge)
+     *   +k walks LATERALLY across the span's lane_count lanes (0..lane_count
+     *   inclusive gives lane_count+1 vertices per row).
+     *
+     * Verified by the wall_layout dump on Moscow span 111:
+     *   - left[k+1] - left[k] = (-1355, -600) constant — lateral step
+     *   - right[k] - left[k] ≈ (-545, 1242), perpendicular to the lateral
+     *     step — that's the longitudinal travel direction
+     *
+     * And verified against slot 0's visible heading: probe layout gives
+     * car forward ≈ 114° world. The (right[0] - left[0]) vector
+     * atan2(1242, -545) ≈ 114° matches exactly. Cars travel along the
+     * near→far direction; they walk the +k lane index only when drifting
+     * laterally.
+     *
+     * So the outer ROAD walls run in the longitudinal direction and sit
+     * at the two edges of the lane range:
+     *
+     *   LEFT road wall  = line from left[0]            to right[0]
+     *   RIGHT road wall = line from left[lane_count]   to right[lane_count]
+     *
+     * Each "wall" edge runs near→far (travel direction); perpendicular is
+     * lateral (across the road). d < 0 means the probe is outside that
+     * edge. The auto-flip uses an inside-reference vertex from the
+     * opposite lane extreme to pick the correct sign.
+     *
+     * This approach tests just two lines per span regardless of how many
+     * lanes the span has, which is what a lateral wall check should do. */
+
+    struct wall_line {
+        TD5_StripVertex *base;    /* near vertex */
+        TD5_StripVertex *end_v;   /* far vertex */
+        TD5_StripVertex *inside;  /* reference vertex definitely on the inside */
+    };
+
+    struct wall_line l_wall = {
+        vertex_at((int)sp->left_vertex_index + 0),
+        vertex_at((int)sp->right_vertex_index + 0),
+        vertex_at((int)sp->left_vertex_index + lane_count)
+    };
+    struct wall_line r_wall = {
+        vertex_at((int)sp->left_vertex_index + lane_count),
+        vertex_at((int)sp->right_vertex_index + lane_count),
+        vertex_at((int)sp->left_vertex_index + 0)
+    };
+
+    if (!l_wall.base || !l_wall.end_v || !l_wall.inside) return;
+    if (!r_wall.base || !r_wall.end_v || !r_wall.inside) return;
+
+    /* Precompute each wall's perp (with auto-flipped inside direction). */
+    struct wall_params {
+        int32_t edge_dx, edge_dz;
+        int32_t nnx, nnz;
+        int32_t base_x, base_z;
+        int ok;
+    } l_par = {0}, r_par = {0};
+
+    {
+        l_par.edge_dx = (int32_t)l_wall.end_v->x - (int32_t)l_wall.base->x;
+        l_par.edge_dz = (int32_t)l_wall.end_v->z - (int32_t)l_wall.base->z;
+        l_par.base_x  = (int32_t)l_wall.base->x;
+        l_par.base_z  = (int32_t)l_wall.base->z;
+        float fnx = (float)(l_par.edge_dz);
+        float fnz = (float)(-l_par.edge_dx);
+        float fmag = sqrtf(fnx * fnx + fnz * fnz);
+        if (fmag >= 0.5f) {
+            int32_t nnx = (int32_t)(fnx / fmag * 4096.0f);
+            int32_t nnz = (int32_t)(fnz / fmag * 4096.0f);
+            /* Auto-flip so perp points INWARD (toward the opposite lane
+             * extreme inside vertex). */
+            int32_t opp_rel_x = (int32_t)l_wall.inside->x - l_par.base_x;
+            int32_t opp_rel_z = (int32_t)l_wall.inside->z - l_par.base_z;
+            int64_t opp_dot = (int64_t)opp_rel_x * nnx + (int64_t)opp_rel_z * nnz;
+            if (opp_dot < 0) { nnx = -nnx; nnz = -nnz; }
+            l_par.nnx = nnx; l_par.nnz = nnz; l_par.ok = 1;
+        }
+    }
+    {
+        r_par.edge_dx = (int32_t)r_wall.end_v->x - (int32_t)r_wall.base->x;
+        r_par.edge_dz = (int32_t)r_wall.end_v->z - (int32_t)r_wall.base->z;
+        r_par.base_x  = (int32_t)r_wall.base->x;
+        r_par.base_z  = (int32_t)r_wall.base->z;
+        float fnx = (float)(r_par.edge_dz);
+        float fnz = (float)(-r_par.edge_dx);
+        float fmag = sqrtf(fnx * fnx + fnz * fnz);
+        if (fmag >= 0.5f) {
+            int32_t nnx = (int32_t)(fnx / fmag * 4096.0f);
+            int32_t nnz = (int32_t)(fnz / fmag * 4096.0f);
+            int32_t opp_rel_x = (int32_t)r_wall.inside->x - r_par.base_x;
+            int32_t opp_rel_z = (int32_t)r_wall.inside->z - r_par.base_z;
+            int64_t opp_dot = (int64_t)opp_rel_x * nnx + (int64_t)opp_rel_z * nnz;
+            if (opp_dot < 0) { nnx = -nnx; nnz = -nnz; }
+            r_par.nnx = nnx; r_par.nnz = nnz; r_par.ok = 1;
+        }
+    }
+
     for (int pi = 0; pi < 4; pi++) {
         int32_t px = probe_block[pi].x >> 8;
         int32_t pz = probe_block[pi].z >> 8;
 
-        /* --- Closest-segment rail test ---
-         *
-         * The rail is a polyline of vertices rail[0..lane_count]. Using
-         * the probe's sub_lane_index to pick a segment (previous attempt)
-         * reads stale state from the boundary walker, which on curved
-         * spans can point at a segment far from the probe's real
-         * position — producing massively negative d values and
-         * "invisible walls" inside the drivable area.
-         *
-         * Instead: iterate all segments of the polyline, compute for
-         * each the projection t along the segment and the perpendicular
-         * distance d, and pick the segment where the probe's projection
-         * actually lands inside the segment (0 <= t <= edge_len_sq). Of
-         * those, take the one with smallest |d|. If no segment contains
-         * the projection (probe is past the polyline ends), pick the
-         * segment with smallest |d| regardless.
-         *
-         * Signed distance sign follows the rail-side convention:
-         *   LEFT rail  — perp rotated CW  (edge_dz, -edge_dx), d > 0 inside
-         *   RIGHT rail — perp rotated CCW (-edge_dz, edge_dx), d > 0 inside
-         * d < 0 → probe is outside the rail → fire wall. */
+        int32_t l_d = 0, r_d = 0;
+        int l_ok = 0, r_ok = 0;
 
-        struct rail_hit {
-            int32_t d;
-            int32_t nnx, nnz;
-            int32_t edge_dx, edge_dz;
-            int valid;
-        } lhit = { 0, 0, 0, 0, 0, 0 }, rhit = { 0, 0, 0, 0, 0, 0 };
-
-        int32_t lbest_abs = 0x7FFFFFFF;
-        int32_t rbest_abs = 0x7FFFFFFF;
-        int lbest_contained = 0;
-        int rbest_contained = 0;
-
-        /* Per-rail test: determine "inside" direction at each segment by
-         * checking which side of the rail edge the OPPOSITE rail vertex
-         * is on. TD5's left_vertex_index / right_vertex_index labels
-         * don't correspond to a fixed X/Z sign convention — on different
-         * spans the "left" label can mean +X or -X depending on the
-         * span's orientation. Computing the raw CW perp and then
-         * flipping it if the opposite rail is on the wrong side gives a
-         * data-driven inside direction that works regardless of naming. */
-
-        for (int seg = 0; seg < lane_count; seg++) {
-            /* --- LEFT RAIL segment --- */
-            {
-                TD5_StripVertex *base = vertex_at((int)sp->left_vertex_index + seg);
-                TD5_StripVertex *end_v = vertex_at((int)sp->left_vertex_index + seg + 1);
-                TD5_StripVertex *opp_v = vertex_at((int)sp->right_vertex_index + seg);
-                if (base && end_v && opp_v) {
-                    int32_t edge_dx = (int32_t)end_v->x - (int32_t)base->x;
-                    int32_t edge_dz = (int32_t)end_v->z - (int32_t)base->z;
-                    int64_t elen_sq = (int64_t)edge_dx * edge_dx + (int64_t)edge_dz * edge_dz;
-                    if (elen_sq >= 1) {
-                        int32_t rel_x = px - (int32_t)base->x - sp->origin_x;
-                        int32_t rel_z = pz - (int32_t)base->z - sp->origin_z;
-                        int64_t t_num = (int64_t)rel_x * edge_dx + (int64_t)rel_z * edge_dz;
-                        int contained = (t_num >= 0 && t_num <= elen_sq);
-
-                        /* Raw CW perp. */
-                        float fnx = (float)(edge_dz);
-                        float fnz = (float)(-edge_dx);
-                        float fmag = sqrtf(fnx * fnx + fnz * fnz);
-                        if (fmag >= 0.5f) {
-                            int32_t nnx = (int32_t)(fnx / fmag * 4096.0f);
-                            int32_t nnz = (int32_t)(fnz / fmag * 4096.0f);
-
-                            /* Flip perp if the opposite rail vertex is on
-                             * the perp-NEGATIVE side (we want perp to point
-                             * toward the opposite rail = road interior). */
-                            int32_t opp_rel_x = (int32_t)opp_v->x - (int32_t)base->x;
-                            int32_t opp_rel_z = (int32_t)opp_v->z - (int32_t)base->z;
-                            int64_t opp_dot = (int64_t)opp_rel_x * nnx + (int64_t)opp_rel_z * nnz;
-                            if (opp_dot < 0) { nnx = -nnx; nnz = -nnz; }
-
-                            int64_t dot = (int64_t)rel_x * nnx + (int64_t)rel_z * nnz;
-                            int32_t d = (int32_t)((dot + ((dot >> 63) & 0xFFF)) >> 12);
-                            int32_t abs_d = d < 0 ? -d : d;
-
-                            int better = 0;
-                            if (contained && !lbest_contained) better = 1;
-                            else if (contained == lbest_contained && abs_d < lbest_abs) better = 1;
-
-                            if (better) {
-                                lbest_abs = abs_d;
-                                lbest_contained = contained;
-                                lhit.d = d;
-                                lhit.nnx = nnx;
-                                lhit.nnz = nnz;
-                                lhit.edge_dx = edge_dx;
-                                lhit.edge_dz = edge_dz;
-                                lhit.valid = 1;
-                            }
-                        }
-                    }
-                }
-            }
-
-            /* --- RIGHT RAIL segment --- */
-            {
-                TD5_StripVertex *base = vertex_at((int)sp->right_vertex_index + seg);
-                TD5_StripVertex *end_v = vertex_at((int)sp->right_vertex_index + seg + 1);
-                TD5_StripVertex *opp_v = vertex_at((int)sp->left_vertex_index + seg);
-                if (base && end_v && opp_v) {
-                    int32_t edge_dx = (int32_t)end_v->x - (int32_t)base->x;
-                    int32_t edge_dz = (int32_t)end_v->z - (int32_t)base->z;
-                    int64_t elen_sq = (int64_t)edge_dx * edge_dx + (int64_t)edge_dz * edge_dz;
-                    if (elen_sq >= 1) {
-                        int32_t rel_x = px - (int32_t)base->x - sp->origin_x;
-                        int32_t rel_z = pz - (int32_t)base->z - sp->origin_z;
-                        int64_t t_num = (int64_t)rel_x * edge_dx + (int64_t)rel_z * edge_dz;
-                        int contained = (t_num >= 0 && t_num <= elen_sq);
-
-                        /* Raw CW perp. Flip below if opposite rail is on
-                         * the wrong side. */
-                        float fnx = (float)(edge_dz);
-                        float fnz = (float)(-edge_dx);
-                        float fmag = sqrtf(fnx * fnx + fnz * fnz);
-                        if (fmag >= 0.5f) {
-                            int32_t nnx = (int32_t)(fnx / fmag * 4096.0f);
-                            int32_t nnz = (int32_t)(fnz / fmag * 4096.0f);
-
-                            int32_t opp_rel_x = (int32_t)opp_v->x - (int32_t)base->x;
-                            int32_t opp_rel_z = (int32_t)opp_v->z - (int32_t)base->z;
-                            int64_t opp_dot = (int64_t)opp_rel_x * nnx + (int64_t)opp_rel_z * nnz;
-                            if (opp_dot < 0) { nnx = -nnx; nnz = -nnz; }
-
-                            int64_t dot = (int64_t)rel_x * nnx + (int64_t)rel_z * nnz;
-                            int32_t d = (int32_t)((dot + ((dot >> 63) & 0xFFF)) >> 12);
-                            int32_t abs_d = d < 0 ? -d : d;
-
-                            int better = 0;
-                            if (contained && !rbest_contained) better = 1;
-                            else if (contained == rbest_contained && abs_d < rbest_abs) better = 1;
-
-                            if (better) {
-                                rbest_abs = abs_d;
-                                rbest_contained = contained;
-                                rhit.d = d;
-                                rhit.nnx = nnx;
-                                rhit.nnz = nnz;
-                                rhit.edge_dx = edge_dx;
-                                rhit.edge_dz = edge_dz;
-                                rhit.valid = 1;
-                            }
-                        }
-                    }
-                }
-            }
+        if (l_par.ok) {
+            int32_t rel_x = px - l_par.base_x - sp->origin_x;
+            int32_t rel_z = pz - l_par.base_z - sp->origin_z;
+            int64_t dot = (int64_t)rel_x * l_par.nnx + (int64_t)rel_z * l_par.nnz;
+            l_d = (int32_t)((dot + ((dot >> 63) & 0xFFF)) >> 12);
+            if (l_d < -1200) l_d = -1200;
+            l_ok = 1;
+        }
+        if (r_par.ok) {
+            int32_t rel_x = px - r_par.base_x - sp->origin_x;
+            int32_t rel_z = pz - r_par.base_z - sp->origin_z;
+            int64_t dot = (int64_t)rel_x * r_par.nnx + (int64_t)rel_z * r_par.nnz;
+            r_d = (int32_t)((dot + ((dot >> 63) & 0xFFF)) >> 12);
+            if (r_d < -1200) r_d = -1200;
+            r_ok = 1;
         }
 
-        /* Fire a wall only when the penetration is clearly non-trivial.
-         * A DEAD ZONE of 10 units eliminates the oscillation seen at race
-         * start: AI cars at the starting grid have wheelbases that
-         * slightly exceed the grid-cell rail spacing, leaving their
-         * corner probes ~4 units past each rail. Without the dead zone
-         * the wall check fires every tick on both LEFT and RIGHT probes,
-         * the response oscillates, and the AI gets pinned in place —
-         * which is what the "invisible confinement blocking the race
-         * start" was in the last test lap.
-         *
-         * Clamp penetration to -1200 so a single-frame chassis-span
-         * glitch can't produce a huge push.
-         *
-         * wall_angle: the push formula inside td5_physics_wall_response
-         * moves the car by (sin(angle), -cos(angle)) * push. To push in
-         * the inward perp direction (nnx, nnz), angle must satisfy
-         * sin(angle) ∝ nnx and -cos(angle) ∝ nnz, i.e.
-         * angle = atan2(nnx, -nnz). */
+        /* 10-unit dead zone (keep from oscillating on grid-cell boundaries). */
         const int32_t WALL_DEAD_ZONE = -10;
 
-        if (lhit.valid && lhit.d < WALL_DEAD_ZONE) {
-            int32_t d = lhit.d;
-            if (d < -1200) d = -1200;
-            double rad = atan2((double)lhit.nnx, (double)(-lhit.nnz));
+        if (l_ok && l_d < WALL_DEAD_ZONE) {
+            double rad = atan2((double)l_par.nnx, (double)(-l_par.nnz));
             int32_t wall_angle = (int32_t)(rad * (4096.0 / (2.0 * 3.14159265358979323846))) & 0xFFF;
-            td5_physics_wall_response(actor, wall_angle, d, 1, lhit.nnx, lhit.nnz, 4096);
+            td5_physics_wall_response(actor, wall_angle, l_d, 1, l_par.nnx, l_par.nnz, 4096);
             td5_physics_rebuild_pose(actor);
-            TD5_LOG_I(LOG_TAG, "wall_contact: slot=%d probe=%d LEFT span=%d d=%d c=%d angle=%d",
-                      actor->slot_index, pi, span_idx, d, lbest_contained, wall_angle);
+            TD5_LOG_I(LOG_TAG, "wall_contact: slot=%d probe=%d LEFT span=%d d=%d angle=%d",
+                      actor->slot_index, pi, span_idx, l_d, wall_angle);
         }
 
-        if (rhit.valid && rhit.d < WALL_DEAD_ZONE) {
-            int32_t d = rhit.d;
-            if (d < -1200) d = -1200;
-            double rad = atan2((double)rhit.nnx, (double)(-rhit.nnz));
+        if (r_ok && r_d < WALL_DEAD_ZONE) {
+            double rad = atan2((double)r_par.nnx, (double)(-r_par.nnz));
             int32_t wall_angle = (int32_t)(rad * (4096.0 / (2.0 * 3.14159265358979323846))) & 0xFFF;
-            td5_physics_wall_response(actor, wall_angle, d, 2, rhit.nnx, rhit.nnz, 4096);
+            td5_physics_wall_response(actor, wall_angle, r_d, 2, r_par.nnx, r_par.nnz, 4096);
             td5_physics_rebuild_pose(actor);
-            TD5_LOG_I(LOG_TAG, "wall_contact: slot=%d probe=%d RIGHT span=%d d=%d c=%d angle=%d",
-                      actor->slot_index, pi, span_idx, d, rbest_contained, wall_angle);
+            TD5_LOG_I(LOG_TAG, "wall_contact: slot=%d probe=%d RIGHT span=%d d=%d angle=%d",
+                      actor->slot_index, pi, span_idx, r_d, wall_angle);
         }
 
         if (diag_slot0) {
-            TD5_LOG_I(LOG_TAG, "wall_diag slot0 p%d span=%d L:d=%d c=%d R:d=%d c=%d probe=(%d,%d)",
-                      pi, span_idx,
-                      lhit.valid ? lhit.d : 0, lbest_contained,
-                      rhit.valid ? rhit.d : 0, rbest_contained,
-                      px, pz);
+            TD5_LOG_I(LOG_TAG, "wall_diag slot0 p%d span=%d L:d=%d R:d=%d probe=(%d,%d)",
+                      pi, span_idx, l_d, r_d, px, pz);
         }
     }
 }
