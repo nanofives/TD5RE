@@ -155,6 +155,21 @@ void td5_track_update_light_directions(void);
  * Calls td5_physics_wall_response for each penetration. */
 void td5_track_resolve_wall_contacts(TD5_Actor *actor);
 
+/* --- Forward/Reverse boundary contact resolution ---
+ * FUN_00406F50 / FUN_004070E0 — check probes against the track's
+ * forward-/reverse-side boundary sentinel strips. The two sentinels
+ * are per-level constants from a 40-entry table at original VA
+ * 0x00473820, NOT `1` / `s_span_count-2`. Bind via
+ * td5_track_bind_boundary_sentinels() before racing on a level. */
+void td5_track_resolve_forward_contacts(TD5_Actor *actor);
+void td5_track_resolve_reverse_contacts(TD5_Actor *actor);
+
+/* Bind the forward/reverse boundary sentinel pair for the level about
+ * to race. level_number is the 1-based level ZIP number (same value
+ * td5_asset_level_number() returns). Values outside the populated
+ * range disable the boundary handlers for that level. */
+void td5_track_bind_boundary_sentinels(int level_number);
+
 /* --- Traffic --- */
 void td5_track_init_traffic_from_queue(void);
 void td5_track_recycle_traffic_actor(void);

@@ -1881,6 +1881,13 @@ int td5_asset_load_level(int track_index)
         free(cp_data);
     }
 
+    /* Bind the per-level forward/reverse boundary sentinel pair.
+     * Mirrors LoadTrackRuntimeData @ 0x0042fb90: reads the 40-entry table
+     * at original VA 0x00473820 (keyed on level_number - 1) and stores
+     * both values in the track module so fwd_rev_handler can use them
+     * instead of the wrong `(1, s_span_count - 2)` assumption. */
+    td5_track_bind_boundary_sentinels(td5_asset_level_number(track_index));
+
     /* ---- TRAFFIC.BUS: per-level traffic spawn queue ----
      * 4-byte records: int16 span, u8 flags (bit0 = oncoming direction),
      * u8 lane — terminated by a span == -1 sentinel.

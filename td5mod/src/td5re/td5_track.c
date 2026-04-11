@@ -709,26 +709,92 @@ void td5_track_resolve_wall_contacts(TD5_Actor *actor)
  * lateral handler above; the three run in order Reverse -> Forward ->
  * Lateral inside UpdateVehicleActor (0x00406650) after integrate_pose.
  *
- * Both functions gate on a global "boundary strip" index that marks the
- * first/last playable span (after the sentinel patch). In the original:
- *   DAT_00483550 = reverse_min  (first valid span)
- *   DAT_00483954 = forward_max  (last valid span)
- * In the port the sentinels are patched into slots 0 and s_span_count-1
- * (td5_track_bind_runtime_pointers), so the playable range is
- * [1, s_span_count-2], giving reverse_min = 1 and forward_max = s_span_count - 2.
+ * Both functions gate on a per-level boundary span index:
+ *   DAT_00483954 = forward-side sentinel  (used by Forward handler)
+ *   DAT_00483550 = reverse-side sentinel  (used by Reverse handler)
  *
- * The key non-obvious detail (raw disasm at 0x406FCF, 0x007115):
- *   - Outer gate uses actor->track_span_raw vs the GLOBAL boundary ± 1.
+ * Both values are written EXACTLY ONCE by LoadTrackRuntimeData @ 0x0042fb90
+ * from a 40-entry table at 0x00473820, keyed on (level_number - 1). Raw
+ * disasm @ 0x0042fd00-0x0042fd57:
+ *   MOV EAX, [ESP+0x128]     ; level number (1..N)
+ *   DEC EAX
+ *   MOV EDX, [EAX*8 + 0x473820]  ; DAT_00483954 = fwd sentinel
+ *   MOV EAX, [EAX*8 + 0x473824]  ; DAT_00483550 = rev sentinel
+ *   MOV [0x00483954], EDX
+ *   MOV [0x00483550], EAX
+ *
+ * The values are NOT `(1, s_span_count-2)` — Australia (level 14) is
+ * `{21, 2716}`, Scotland (level 16) is `{20, 2736}`, etc. Naming is also
+ * inverted from intuition: the FORWARD sentinel is a SMALL span number
+ * near the start, and the REVERSE sentinel is a LARGE span number near
+ * the end. Placeholder levels (drag-race reverse-only entries, unused
+ * slots) use `{-1, 9999}` which naturally disables both handlers.
+ *
+ * The port's previous assumption of `(1, s_span_count-2)` caused the
+ * Forward handler to fire at spawn on Australia/Scotland (player at
+ * span ~92, boundary=2735 instead of 21), compute a huge bogus
+ * penetration against strip[2735], and teleport the player off-track.
+ *
+ * Raw-disasm details [CONFIRMED @ 0x406FCF, 0x007115]:
+ *   - Outer gate uses actor->track_span_raw vs the boundary ± 1.
  *   - Per-probe gate filters probes whose span matches (Reverse: equality)
  *     or stays below the boundary (Forward: <=).
  *   - The strip record used to build the outward normal is ALWAYS
- *     g_strip[boundary], NOT the probe's own span. This is a boundary test,
- *     not a walk of per-probe strips.
+ *     g_strip[boundary], NOT the probe's own span.
  *   - Outward normal comes from the two vertices (base, base+count) of
  *     the boundary strip's left edge, normalized to length 4096.
  *   - flag=0 to wall_response so track_contact_flag is NOT written
  *     (port hooks side<0 to skip that write).
  * ======================================================================== */
+
+/* Per-level boundary sentinel pair, copied from the original binary's
+ * table at 0x00473820 (40 entries x int32[2], little-endian). Indexed by
+ * `level_number - 1`. Each row is { forward_sentinel, reverse_sentinel }.
+ * [CONFIRMED via raw memory_read 0x00473820..0x0047395F, 320 bytes.] */
+static const int32_t s_level_boundary_sentinels[40][2] = {
+    /* L1  */ {   36, 3135 },  /* L2  */ {   34, 2615 },
+    /* L3  */ {    1, 3326 },  /* L4  */ {   24, 2610 },
+    /* L5  */ {   24, 2855 },  /* L6  */ {   36, 2658 },
+    /* L7  */ {   40, 3114 },  /* L8  */ {   27, 2608 },
+    /* L9  */ {   36, 3359 },  /* L10 */ {   38, 2624 },
+    /* L11 */ {   25, 2856 },  /* L12 */ {    2, 2624 },
+    /* L13 */ {   23, 2695 },  /* L14 */ {   21, 2716 },
+    /* L15 */ {   20, 2757 },  /* L16 */ {   20, 2736 },
+    /* L17 */ {   20, 3089 },  /* L18 */ {    1, 2720 },
+    /* L19 */ {   21, 2736 },  /* L20 */ {   20, 2757 },
+    /* L21 */ {   20, 2736 },  /* L22 */ {   20, 3089 },
+    /* L23 */ {   20, 2769 },  /* L24 */ {   20, 2769 },
+    /* L25 */ {   -1, 9999 },  /* L26 */ {   -1, 9999 },
+    /* L27 */ {   -1, 9999 },  /* L28 */ {   -1, 9999 },
+    /* L29 */ {   -1, 9999 },  /* L30 */ {  104,  240 },
+    /* L31 */ {  104,  240 },  /* L32 */ {   -1, 9999 },
+    /* L33 */ {   -1, 9999 },  /* L34 */ {   -1, 9999 },
+    /* L35 */ {   -1, 9999 },  /* L36 */ {   -1, 9999 },
+    /* L37 */ {   -1, 9999 },  /* L38 */ {   -1, 9999 },
+    /* L39 */ {   -1, 9999 },  /* L40 */ {   -1, 9999 },
+};
+
+/* Current race's boundary pair. Set by td5_track_bind_boundary_sentinels()
+ * at level load. Defaults to {-1, 9999} which disables both handlers. */
+static int32_t s_boundary_fwd_sentinel = -1;
+static int32_t s_boundary_rev_sentinel = 9999;
+
+void td5_track_bind_boundary_sentinels(int level_number)
+{
+    if (level_number < 1 || level_number > 40) {
+        s_boundary_fwd_sentinel = -1;
+        s_boundary_rev_sentinel = 9999;
+        TD5_LOG_W(LOG_TAG,
+                  "boundary sentinels: level=%d out of table range, disabling",
+                  level_number);
+        return;
+    }
+    s_boundary_fwd_sentinel = s_level_boundary_sentinels[level_number - 1][0];
+    s_boundary_rev_sentinel = s_level_boundary_sentinels[level_number - 1][1];
+    TD5_LOG_I(LOG_TAG,
+              "boundary sentinels: level=%d fwd=%d rev=%d",
+              level_number, s_boundary_fwd_sentinel, s_boundary_rev_sentinel);
+}
 
 static void fwd_rev_resolve_contact(TD5_Actor *actor,
                                     const TD5_StripSpan *sp,
@@ -800,36 +866,17 @@ static void fwd_rev_handler(TD5_Actor *actor, int reverse_mode)
     if (!actor || !s_span_array || !s_vertex_table || s_span_count < 3) return;
     if (actor->world_pos.x == 0 && actor->world_pos.z == 0) return;
 
-    /* Playable range after sentinel patching: [1, s_span_count-2]. */
-    int boundary = reverse_mode ? 1 : (s_span_count - 2);
+    /* Boundary sentinel span — set at level load from the per-level table
+     * mirrored from original VA 0x00473820. Placeholder values {-1, 9999}
+     * naturally fail the outer gate and disable the handler. */
+    int boundary = reverse_mode ? s_boundary_rev_sentinel
+                                : s_boundary_fwd_sentinel;
+    if (boundary < 0 || boundary >= s_span_count) return;
 
     /* Outer gate [CONFIRMED raw disasm 0x406F77 / 0x00407107]:
-     *   Forward: actor.track_span_raw > boundary + 1 -> early exit
-     *   Reverse: actor.track_span_raw < boundary - 1 -> early exit
-     *
-     * SAFETY GUARD: the gate as RE'd above is a noop in practice for a
-     * player driving normally (chassis_span stays inside [0, s_span_count-1],
-     * never > s_span_count-1). As a result the handler unconditionally
-     * computes a boundary-span penetration dot product and, for any track
-     * where that dot product happens to be negative at the player's spawn
-     * position (Australia/Scotland on the current data), fires
-     * td5_physics_wall_response with pen=~-530k, teleporting the player off
-     * the track at frame 2. Moscow/USA are lucky enough to get pen>=0
-     * (probe "inside") so they don't regress, which is why the bug is
-     * track-specific.
-     *
-     * Bail out if the player is clearly not near the boundary (distance
-     * > 3 spans). This matches the intent of "forward/reverse contact is a
-     * boundary-adjacent check" and keeps d70920b's handler correct for
-     * the edge case it was meant to catch, without regressing well-behaved
-     * spans. [TODO: re-run Ghidra on 0x00406F50 / 0x004070E0 outer gate;
-     * the port's `>` / `<` directions look inverted from the original's
-     * intent.] */
+     *   Forward: actor.track_span_raw > fwd_sentinel + 1 -> early exit
+     *   Reverse: actor.track_span_raw < rev_sentinel - 1 -> early exit */
     int32_t chassis_span = (int32_t)actor->track_span_raw;
-    int32_t span_dist = chassis_span - boundary;
-    if (span_dist < 0) span_dist = -span_dist;
-    if (span_dist > 3) return;
-
     if (!reverse_mode) {
         if (chassis_span > boundary + 1) return;
     } else {
