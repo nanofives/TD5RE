@@ -1307,14 +1307,26 @@ void td5_render_span_display_list(void *display_list_block)
             }
             td5_render_transform_mesh_vertices(mesh);
             /* Skip runtime vertex-lighting recompute for billboard meshes.
-             * The original RenderTrackSpanDisplayList @ 0x00431270 calls
-             * only TransformAndQueueTranslucentMesh @ 0x0043DCB0 which
-             * transforms XYZ only (no color work); the per-vertex
-             * intensity comes from the asset's baked values. Running the
-             * runtime lighting model on billboard-sprite normals gives a
-             * max dot product against all three lights, clamping intensity
-             * to 0xFF — which makes the subsequent diffuse-LUT remap a
-             * no-op, leaving ONE/ONE additive free to blow out. */
+             * RenderTrackSpanDisplayList @ 0x00431270 only calls
+             * TransformAndQueueTranslucentMesh which transforms XYZ only.
+             * Per-vertex intensity comes from the asset's baked values. */
+            {
+                TD5_MeshVertex *dbg_v = (TD5_MeshVertex *)(uintptr_t)mesh->vertices_offset;
+                int dbg_n = mesh->total_vertex_count;
+                if (dbg_v && dbg_n > 0) {
+                    static int s_bb_lum_log = 0;
+                    if (s_bb_lum_log < 6) {
+                        TD5_LOG_I(LOG_TAG,
+                            "billboard lum dump: tag=%d n=%d v0=0x%08X v1=0x%08X v2=0x%08X v3=0x%08X",
+                            billboard_tag, dbg_n,
+                            dbg_v[0].lighting,
+                            dbg_n > 1 ? dbg_v[1].lighting : 0,
+                            dbg_n > 2 ? dbg_v[2].lighting : 0,
+                            dbg_n > 3 ? dbg_v[3].lighting : 0);
+                        s_bb_lum_log++;
+                    }
+                }
+            }
             td5_render_prepared_mesh(mesh);
             s_debug_span_meshes_submitted++;
             td5_render_pop_transform();
@@ -2087,20 +2099,29 @@ void td5_render_crossfade_surfaces(uint32_t *dst, const uint32_t *src_a,
 /* --- Vehicle Shadow Projection (0x40C120 / 0x40BB70) ---
  *
  * Original (InitializeVehicleShadowAndWheelSpriteTemplates @ 0x40bb70 +
- * RenderRaceActorForView @ 0x40c120) draws the vehicle shadow as two
- * textured quads sampling the SHADOW atlas entry on tpage5 (128x64 at
- * atlas (128,64)), with vertex color 0xFFFFFFFF (darkness comes from
- * the texture alpha, NOT vertex color) and a vertical offset of -22
- * world units (_g_shadowVerticalOffset @ 0x48dc48). Corners are derived
- * from the 4 wheel probe positions at actor+0x90..+0xbc.
+ * RenderRaceActorForView @ 0x40c120) draws the vehicle shadow as textured
+ * quads sampling the SHADOW atlas entry on tpage5 (128x64 at atlas
+ * (128,64)), vertex color 0xFFFFFFFF, darkness from the texture alpha.
+ * Corners derived from the 4 wheel probe positions at actor+0x90..+0xbc.
  *
- * This port renders a single quad FL-FR-RR-RL using the probe positions
- * directly and the full SHADOW atlas UV rect. The 2-sub-quad split is
- * skipped because the scale constants (_g_wheelSuspensionRenderScale,
- * _g_wheelAxleMidpointScale, _g_inverseQuarterScale) were not recovered
- * from decompilation. Visibly correct, slightly less faithful in shape.
+ * The original's translucent primitive list draws with z-test disabled and
+ * uses _g_shadowVerticalOffset = -22.0f as a pure screen-space nudge; it
+ * never depth-tests the shadow against the car or the track. This port
+ * uses a real D3D depth buffer (D16_UNORM), so we instead:
+ *   - draw with TRANSLUCENT_ANISO (z_test=1, z_write=0, alpha_ref=1) so
+ *     the car body (drawn first with z_write=1) occludes the shadow
+ *     exactly where they overlap, and the feathered shadow edges survive
+ *     alpha test instead of being cropped by the 0x80 cutoff;
+ *   - lift the shadow quad +3 world units above the wheel-contact points
+ *     so it wins the depth test against the ~1-unit precision of D16 vs
+ *     the track mesh beneath it;
+ *   - scale corners outward from the XZ centroid by 1.25 because the
+ *     original multiplies wheel-relative deltas by
+ *     _g_wheelSuspensionRenderScale (unread) to extend the shadow past
+ *     the wheel footprint.
  */
-#define SHADOW_VERTICAL_OFFSET (-22.0f)   /* _g_shadowVerticalOffset @ 0x40bcfa */
+#define SHADOW_VERTICAL_OFFSET  (3.0f)
+#define SHADOW_CORNER_SCALE     (1.25f)
 
 static int   s_shadow_lookup_done = 0;
 static int   s_shadow_page        = -1;
@@ -2137,8 +2158,8 @@ static void render_vehicle_shadow_quad(const TD5_Actor *actor)
 
     /* Wheel probe positions (world-space, 24.8 fixed) at actor +0x90..+0xbc.
      * [CONFIRMED @ 0x40c3d0-0x40c5a0, td5_actor_struct.h:232-235]
-     * Order in original: FL, FR, RL, RR. For CW winding (viewed from +Y down)
-     * we emit FL, FR, RR, RL. */
+     * Order in original: FL, FR, RL, RR. For CW winding (viewed from +Y
+     * down) we emit FL, FR, RR, RL. */
     const TD5_Vec3_Fixed *probes[4] = {
         &actor->probe_FL,
         &actor->probe_FR,
@@ -2154,15 +2175,31 @@ static void render_vehicle_shadow_quad(const TD5_Actor *actor)
         { s_shadow_u0, s_shadow_v1 },
     };
 
+    /* Convert the 4 probes to world-float, accumulating the XZ centroid so we
+     * can scale corners outward from it (the original uses
+     * _g_wheelSuspensionRenderScale ≈ 1.25 for the same effect). Y is kept
+     * at each wheel's contact height so the shadow follows uneven terrain. */
+    float corners[4][3];
+    float cx = 0.0f, cz = 0.0f;
+    for (int i = 0; i < 4; i++) {
+        corners[i][0] = (float)probes[i]->x * (1.0f / 256.0f);
+        corners[i][1] = (float)probes[i]->y * (1.0f / 256.0f) + SHADOW_VERTICAL_OFFSET;
+        corners[i][2] = (float)probes[i]->z * (1.0f / 256.0f);
+        cx += corners[i][0];
+        cz += corners[i][2];
+    }
+    cx *= 0.25f;
+    cz *= 0.25f;
+    for (int i = 0; i < 4; i++) {
+        corners[i][0] = cx + (corners[i][0] - cx) * SHADOW_CORNER_SCALE;
+        corners[i][2] = cz + (corners[i][2] - cz) * SHADOW_CORNER_SCALE;
+    }
+
     TD5_D3DVertex verts[4];
     for (int i = 0; i < 4; i++) {
-        float wx = (float)probes[i]->x * (1.0f / 256.0f);
-        float wy = (float)probes[i]->y * (1.0f / 256.0f) + SHADOW_VERTICAL_OFFSET;
-        float wz = (float)probes[i]->z * (1.0f / 256.0f);
-
-        float dx = wx - s_camera_pos[0];
-        float dy = wy - s_camera_pos[1];
-        float dz = wz - s_camera_pos[2];
+        float dx = corners[i][0] - s_camera_pos[0];
+        float dy = corners[i][1] - s_camera_pos[1];
+        float dz = corners[i][2] - s_camera_pos[2];
 
         /* camera_basis is row-major { right, up, forward } */
         float vx = dx * s_camera_basis[0] + dy * s_camera_basis[1] + dz * s_camera_basis[2];
@@ -2187,16 +2224,17 @@ static void render_vehicle_shadow_quad(const TD5_Actor *actor)
         s_shadow_draw_logged = 1;
         TD5_LOG_I(LOG_TAG,
                   "shadow: first draw page=%d uv=(%.3f..%.3f,%.3f..%.3f) "
-                  "FL=(%.1f,%.1f,%.1f)",
+                  "FL=(%.1f,%.1f,%.1f) lift=%.1f scale=%.2f",
                   s_shadow_page, s_shadow_u0, s_shadow_u1, s_shadow_v0, s_shadow_v1,
                   (float)actor->probe_FL.x * (1.0f/256.0f),
                   (float)actor->probe_FL.y * (1.0f/256.0f),
-                  (float)actor->probe_FL.z * (1.0f/256.0f));
+                  (float)actor->probe_FL.z * (1.0f/256.0f),
+                  SHADOW_VERTICAL_OFFSET, SHADOW_CORNER_SCALE);
     }
 
     uint16_t indices[6] = { 0, 1, 2, 0, 2, 3 };
     flush_immediate_internal();
-    td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
+    td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_ANISO);
     td5_plat_render_bind_texture(s_shadow_page);
     td5_plat_render_draw_tris(verts, 4, indices, 6);
 }
