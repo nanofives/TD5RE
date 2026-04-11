@@ -32,9 +32,8 @@
  * External globals from other modules
  * ======================================================================== */
 
-/* Static HED texture directory -- set by td5_asset_load_track_textures */
-extern TD5_StaticHedEntry *g_static_hed_entries;   /* DAT_004c3cfc */
-extern int                 g_static_hed_entry_count; /* DAT_004c3cf8 */
+/* Static.hed sprite lookups now go through td5_asset_find_atlas_entry,
+ * which reads the real populated s_atlas_table[] built in td5_asset_init. */
 
 /* Sub-tick interpolation fraction -- set by timing system */
 extern float  g_subTickFraction;   /* 0x4AAF60 -- [0..1) for sub-tick interp */
@@ -259,23 +258,28 @@ static const float TAILLIGHT_Z_BIAS = -24.0f;      /* DAT_0045d5d4 */
 static const float VIEW_SCALE       = 4096.0f;     /* DAT_0045d604 */
 
 /* ========================================================================
- * Helper: extract UV coords from a TD5_StaticHedEntry
+ * Helper: extract UV coords from a TD5_AtlasEntry (static.hed sprite)
  *
- * The original reads entry fields at +0x2c (pos_x), +0x30 (pos_y),
- * +0x34 (width), +0x38 (height), +0x3c (texture_slot).
+ * Reads the populated atlas table built by td5_asset_init_static_atlas:
+ * atlas_x/atlas_y/width/height/texture_page. The page is already biased by
+ * STATIC_ATLAS_BASE at load time, so we write it straight through.
  * UVs are computed with a half-pixel inset for texel-center sampling.
  * ======================================================================== */
 
-static void vfx_extract_sprite_uvs(const TD5_StaticHedEntry *entry,
+static int vfx_atlas_entry_valid(const TD5_AtlasEntry *entry) {
+    return entry && (entry->width > 0 || entry->height > 0);
+}
+
+static void vfx_extract_sprite_uvs(const TD5_AtlasEntry *entry,
                                     float *u0, float *v0,
                                     float *u1, float *v1,
                                     float *page)
 {
-    *u0   = (float)entry->pos_x + HALF_PIXEL;
-    *v0   = (float)entry->pos_y + HALF_PIXEL;
-    *u1   = (float)(entry->pos_x + entry->width) - HALF_PIXEL;
-    *v1   = (float)(entry->pos_y + entry->height) - HALF_PIXEL;
-    *page = (float)entry->texture_slot;
+    *u0   = (float)entry->atlas_x + HALF_PIXEL;
+    *v0   = (float)entry->atlas_y + HALF_PIXEL;
+    *u1   = (float)(entry->atlas_x + entry->width) - HALF_PIXEL;
+    *v1   = (float)(entry->atlas_y + entry->height) - HALF_PIXEL;
+    *page = (float)entry->texture_page;
 }
 
 /* ========================================================================
@@ -437,27 +441,24 @@ void td5_vfx_tick(void) {
  * Also builds the 4-variant smoke UV table (2x2 grid in atlas).
  */
 void td5_vfx_init_race_particles(void) {
-    /* Look up RAINSPL sprite entry from static.hed and extract UVs.
-     * The original reads archive entry fields at +0x2c/+0x30/+0x34/+0x38/+0x3c. */
-    TD5_StaticHedEntry *rainspl = td5_asset_find_entry_by_name(
-        g_static_hed_entries, g_static_hed_entry_count, "RAINSPL");
-    if (rainspl) {
+    /* Look up RAINSPL sprite entry in the populated static atlas.
+     * s_atlas_table[] is the real data loaded by td5_asset_init_static_atlas;
+     * find_atlas_entry always returns non-NULL so guard by width/height. */
+    TD5_AtlasEntry *rainspl = td5_asset_find_atlas_entry(NULL, "RAINSPL");
+    if (vfx_atlas_entry_valid(rainspl)) {
         vfx_extract_sprite_uvs(rainspl,
                                 &s_rainspl_u0, &s_rainspl_v0,
                                 &s_rainspl_u1, &s_rainspl_v1,
                                 &s_rainspl_page);
     } else {
-        /* Fallback UV values matching typical archive layout */
         s_rainspl_u0 = 1.0f;   s_rainspl_v0 = 1.0f;
         s_rainspl_u1 = 62.0f;  s_rainspl_v1 = 126.0f;
         s_rainspl_page = 0.0f;
-        TD5_LOG_W("vfx", "RAINSPL sprite not found in static.hed");
+        TD5_LOG_W("vfx", "RAINSPL sprite not found in static atlas");
     }
 
-    /* Look up SMOKE sprite entry */
-    TD5_StaticHedEntry *smoke = td5_asset_find_entry_by_name(
-        g_static_hed_entries, g_static_hed_entry_count, "SMOKE");
-    if (smoke) {
+    TD5_AtlasEntry *smoke = td5_asset_find_atlas_entry(NULL, "SMOKE");
+    if (vfx_atlas_entry_valid(smoke)) {
         vfx_extract_sprite_uvs(smoke,
                                 &s_smoke_u0, &s_smoke_v0,
                                 &s_smoke_u1, &s_smoke_v1,
@@ -466,7 +467,7 @@ void td5_vfx_init_race_particles(void) {
         s_smoke_u0 = 1.0f;   s_smoke_v0 = 1.0f;
         s_smoke_u1 = 30.0f;  s_smoke_v1 = 30.0f;
         s_smoke_page = 0.0f;
-        TD5_LOG_W("vfx", "SMOKE sprite not found in static.hed");
+        TD5_LOG_W("vfx", "SMOKE sprite not found in static atlas");
     }
 
     /* Clear all particle slots across both views */
@@ -495,9 +496,8 @@ void td5_vfx_init_race_particles(void) {
     }
 
     /* Look up SKIDMARK sprite for tire marks; fall back to dark SMOKE variant */
-    TD5_StaticHedEntry *skidmark = td5_asset_find_entry_by_name(
-        g_static_hed_entries, g_static_hed_entry_count, "SKIDMARK");
-    if (skidmark) {
+    TD5_AtlasEntry *skidmark = td5_asset_find_atlas_entry(NULL, "SKIDMARK");
+    if (vfx_atlas_entry_valid(skidmark)) {
         vfx_extract_sprite_uvs(skidmark,
                                 &s_tiremark_u0, &s_tiremark_v0,
                                 &s_tiremark_u1, &s_tiremark_v1,
@@ -545,11 +545,10 @@ void td5_vfx_init_smoke_sprite_pool(void) {
         memset(s_smoke_pool, 0, pool_size);
     }
 
-    /* Load "SMOKE" texture entry from archive for smoke overlay rendering */
-    TD5_StaticHedEntry *smoke_entry = td5_asset_find_entry_by_name(
-        g_static_hed_entries, g_static_hed_entry_count, "SMOKE");
-    if (smoke_entry) {
-        s_smoke_page_id = (float)smoke_entry->texture_slot;
+    /* Load "SMOKE" texture entry from static atlas for smoke overlay rendering */
+    TD5_AtlasEntry *smoke_entry = td5_asset_find_atlas_entry(NULL, "SMOKE");
+    if (vfx_atlas_entry_valid(smoke_entry)) {
+        s_smoke_page_id = (float)smoke_entry->texture_page;
     }
 }
 
@@ -608,13 +607,21 @@ void td5_vfx_project_particles(int view_index) {
 /**
  * DrawRaceParticleEffects (0x429720)
  *
- * Per-frame particle render pass. Decrements sprite render flags (fade
- * timer), projects active particles to view space, then dispatches the
- * render callback for each slot that has both active and projected flags.
+ * Per-frame particle render pass. Projects each active particle's view-space
+ * position to screen, rebuilds its sprite batch quad with the projected
+ * corners, and submits via the pre-transformed translucent sprite path
+ * (same as the HUD and tire-track pipelines). Using td5_render_submit_
+ * translucent — NOT td5_render_queue_translucent_batch, which expects
+ * TD5_PrimitiveCmd records, not 0xB8 sprite quads.
  */
 void td5_vfx_draw_particles(int view_index) {
+    extern void td5_render_submit_translucent(uint16_t *quad_data);
+    extern float g_render_width_f;
+    extern float g_render_height_f;
+
     s_current_view_index = view_index;
     int vi = view_index & 1;
+    int drawn = 0;
 
     /* Decrement sprite render flags (fade timers) */
     for (int i = 0; i < TD5_VFX_SPRITE_BATCH_COUNT; i++) {
@@ -626,37 +633,76 @@ void td5_vfx_draw_particles(int view_index) {
     /* Project all active particles to view space */
     td5_vfx_project_particles(view_index);
 
-    /* Reset render state */
-    /* Original: FUN_0042e9c0() = reset render transform */
+    /* Perspective projection parameters (match tire track pipeline) */
+    const float focal    = g_render_width_f * 0.5f / 0.41421356f;
+    const float center_x = g_render_width_f  * 0.5f;
+    const float center_y = g_render_height_f * 0.5f;
+    const float far_clip = 10000.0f;
+    const float near_z   = 1.0f;
 
-    /* Dispatch render callbacks for projected+active particles */
     uint8_t *bank = s_particle_banks[vi];
     for (int i = 0; i < TD5_VFX_PARTICLE_SLOTS_PER_VIEW; i++) {
         uint8_t *slot = bank + i * TD5_VFX_PARTICLE_SLOT_STRIDE;
         uint8_t flags = slot[0];
 
-        /* Original checks (flags & 0xC0) == 0xC0, i.e. both active and projected */
-        if ((flags & 0xC0) == 0xC0) {
-            /* Read the sprite batch index from the particle slot.
-             * The render callback builds/updates the sprite quad from the
-             * particle's view-space position and submits it. */
-            int batch_index = slot[2]; /* sprite batch slot index */
-            if (batch_index < TD5_VFX_SPRITE_BATCH_COUNT) {
-                VfxSpriteQuad *quad = &s_sprite_batches[vi * TD5_VFX_SPRITE_BATCH_COUNT + batch_index];
+        if ((flags & 0xC0) != 0xC0) continue;       /* need active + projected */
 
-                /* Read view-space position from slot */
-                float vx, vy, vz;
-                memcpy(&vx, slot + 0x0D, 4);
-                memcpy(&vy, slot + 0x11, 4);
-                memcpy(&vz, slot + 0x15, 4);
+        int batch_index = slot[2];
+        if (batch_index < 0 || batch_index >= TD5_VFX_SPRITE_BATCH_COUNT) continue;
+        VfxSpriteQuad *sq = &s_sprite_batches[vi * TD5_VFX_SPRITE_BATCH_COUNT + batch_index];
 
-                /* Only render if in front of camera */
-                if (vz > 1.0f) {
-                    /* Submit quad to translucent pipeline */
-                    td5_render_queue_translucent_batch(quad);
-                }
-            }
-        }
+        float vx, vy, vz;
+        memcpy(&vx, slot + 0x0D, 4);
+        memcpy(&vy, slot + 0x11, 4);
+        memcpy(&vz, slot + 0x15, 4);
+
+        if (vz <= near_z) continue;
+
+        float inv_z = 1.0f / vz;
+        float sx = vx * focal * inv_z + center_x;
+        float sy = -vy * focal * inv_z + center_y;
+        float sz = vz * (1.0f / far_clip);
+        if (sz > 1.0f) sz = 1.0f;
+
+        /* Perspective-scale the sprite half-size from texel units. The stored
+         * quad_width/quad_height are texel dimensions; divide by vz so distant
+         * smoke shrinks. Multiplier tuned to keep smoke readable at race
+         * distances; the original uses a similar focal-over-z scaling. */
+        float half_w = sq->quad_width  * focal * inv_z * 0.25f;
+        float half_h = sq->quad_height * focal * inv_z * 0.25f;
+        if (half_w < 1.0f) half_w = 1.0f;
+        if (half_h < 1.0f) half_h = 1.0f;
+
+        /* Rewrite the 4 corners: v0=TL, v1=TR, v2=BR, v3=BL */
+        sq->geometry_ptr = 0;
+        sq->vertex_count = 4;
+
+        sq->v0_x = sx - half_w; sq->v0_y = sy - half_h;
+        sq->v0_z = sz;          sq->v0_rhw = inv_z;
+        sq->v0_color = 0xFFFFFFFF;
+        sq->v0_u = sq->tex_u0;  sq->v0_v = sq->tex_v0;
+
+        sq->v1_x = sx + half_w; sq->v1_y = sy - half_h;
+        sq->v1_z = sz;          sq->v1_rhw = inv_z;
+        sq->v1_color = 0xFFFFFFFF;
+        sq->v1_u = sq->tex_u1;  sq->v1_v = sq->tex_v0;
+
+        sq->v2_x = sx + half_w; sq->v2_y = sy + half_h;
+        sq->v2_z = sz;          sq->v2_rhw = inv_z;
+        sq->v2_color = 0xFFFFFFFF;
+        sq->v2_u = sq->tex_u1;  sq->v2_v = sq->tex_v1;
+
+        sq->v3_x = sx - half_w; sq->v3_y = sy + half_h;
+        sq->v3_z = sz;          sq->v3_rhw = inv_z;
+        sq->v3_color = 0xFFFFFFFF;
+        sq->v3_u = sq->tex_u0;  sq->v3_v = sq->tex_v1;
+
+        td5_render_submit_translucent((uint16_t *)sq);
+        drawn++;
+    }
+
+    if ((s_vfx_debug_frame % 60u) == 0u && drawn > 0) {
+        TD5_LOG_D(LOG_TAG, "particle draw view %d: drawn=%d", view_index, drawn);
     }
 }
 
@@ -753,20 +799,18 @@ void td5_vfx_init_weather(TD5_WeatherType type) {
             memset(s_weather_buf[v], 0, TD5_VFX_WEATHER_BUFFER_SIZE);
         }
 
-        /* Load RAINDROP sprite from archive and extract UVs */
-        TD5_StaticHedEntry *raindrop = td5_asset_find_entry_by_name(
-            g_static_hed_entries, g_static_hed_entry_count, "RAINDROP");
-        if (raindrop) {
+        /* Load RAINDROP sprite from the static atlas and extract UVs */
+        TD5_AtlasEntry *raindrop = td5_asset_find_atlas_entry(NULL, "RAINDROP");
+        if (vfx_atlas_entry_valid(raindrop)) {
             vfx_extract_sprite_uvs(raindrop,
                                     &s_weather_u0, &s_weather_v0,
                                     &s_weather_u1, &s_weather_v1,
                                     &s_weather_sprite_page);
         } else {
-            /* Fallback: reasonable defaults for rain streak sprite */
             s_weather_u0 = 1.0f;   s_weather_v0 = 1.0f;
             s_weather_u1 = 14.0f;  s_weather_v1 = 30.0f;
             s_weather_sprite_page = 0.0f;
-            TD5_LOG_W("vfx", "RAINDROP sprite not found in static.hed");
+            TD5_LOG_W("vfx", "RAINDROP sprite not found in static atlas");
         }
 
         /* Seed 128 particles per buffer with random positions */
@@ -806,8 +850,7 @@ void td5_vfx_init_weather(TD5_WeatherType type) {
 
         /* FindArchiveEntryByName("SNOWDROP") -- referenced but UVs never extracted.
          * This matches the original: the entry is looked up but the result is unused. */
-        (void)td5_asset_find_entry_by_name(
-            g_static_hed_entries, g_static_hed_entry_count, "SNOWDROP");
+        (void)td5_asset_find_atlas_entry(NULL, "SNOWDROP");
 
         /* Snow init ranges: X [-8000,8000], Y [-8000,4000], Z [200,8143] */
         for (int v = 0; v < 2; v++) {
@@ -2090,20 +2133,18 @@ void td5_vfx_init_taillight_templates(void) {
     s_taillight_quads_alt = (VfxSpriteQuad *)((uint8_t *)s_taillight_quads +
                                                (size_t)num_actors * 0x170);
 
-    /* Load BRAKED texture from archive and extract UV coordinates */
-    TD5_StaticHedEntry *braked = td5_asset_find_entry_by_name(
-        g_static_hed_entries, g_static_hed_entry_count, "BRAKED");
-    if (braked) {
+    /* Load BRAKED texture from the static atlas and extract UV coordinates */
+    TD5_AtlasEntry *braked = td5_asset_find_atlas_entry(NULL, "BRAKED");
+    if (vfx_atlas_entry_valid(braked)) {
         vfx_extract_sprite_uvs(braked,
                                 &s_taillight_u0, &s_taillight_v0,
                                 &s_taillight_u1, &s_taillight_v1,
                                 &s_taillight_page);
     } else {
-        /* Fallback UV values */
         s_taillight_u0 = 1.0f;  s_taillight_v0 = 1.0f;
         s_taillight_u1 = 14.0f; s_taillight_v1 = 14.0f;
         s_taillight_page = 0.0f;
-        TD5_LOG_W("vfx", "BRAKED sprite not found in static.hed");
+        TD5_LOG_W("vfx", "BRAKED sprite not found in static atlas");
     }
 
     /* Build sprite quad template for each taillight quad (4 per actor = 2 primary + 2 alt).
