@@ -581,12 +581,22 @@ void td5_track_resolve_wall_contacts(TD5_Actor *actor)
         int lbest_contained = 0;
         int rbest_contained = 0;
 
+        /* Per-rail test: determine "inside" direction at each segment by
+         * checking which side of the rail edge the OPPOSITE rail vertex
+         * is on. TD5's left_vertex_index / right_vertex_index labels
+         * don't correspond to a fixed X/Z sign convention — on different
+         * spans the "left" label can mean +X or -X depending on the
+         * span's orientation. Computing the raw CW perp and then
+         * flipping it if the opposite rail is on the wrong side gives a
+         * data-driven inside direction that works regardless of naming. */
+
         for (int seg = 0; seg < lane_count; seg++) {
             /* --- LEFT RAIL segment --- */
             {
                 TD5_StripVertex *base = vertex_at((int)sp->left_vertex_index + seg);
                 TD5_StripVertex *end_v = vertex_at((int)sp->left_vertex_index + seg + 1);
-                if (base && end_v) {
+                TD5_StripVertex *opp_v = vertex_at((int)sp->right_vertex_index + seg);
+                if (base && end_v && opp_v) {
                     int32_t edge_dx = (int32_t)end_v->x - (int32_t)base->x;
                     int32_t edge_dz = (int32_t)end_v->z - (int32_t)base->z;
                     int64_t elen_sq = (int64_t)edge_dx * edge_dx + (int64_t)edge_dz * edge_dz;
@@ -596,17 +606,26 @@ void td5_track_resolve_wall_contacts(TD5_Actor *actor)
                         int64_t t_num = (int64_t)rel_x * edge_dx + (int64_t)rel_z * edge_dz;
                         int contained = (t_num >= 0 && t_num <= elen_sq);
 
+                        /* Raw CW perp. */
                         float fnx = (float)(edge_dz);
                         float fnz = (float)(-edge_dx);
                         float fmag = sqrtf(fnx * fnx + fnz * fnz);
                         if (fmag >= 0.5f) {
                             int32_t nnx = (int32_t)(fnx / fmag * 4096.0f);
                             int32_t nnz = (int32_t)(fnz / fmag * 4096.0f);
+
+                            /* Flip perp if the opposite rail vertex is on
+                             * the perp-NEGATIVE side (we want perp to point
+                             * toward the opposite rail = road interior). */
+                            int32_t opp_rel_x = (int32_t)opp_v->x - (int32_t)base->x;
+                            int32_t opp_rel_z = (int32_t)opp_v->z - (int32_t)base->z;
+                            int64_t opp_dot = (int64_t)opp_rel_x * nnx + (int64_t)opp_rel_z * nnz;
+                            if (opp_dot < 0) { nnx = -nnx; nnz = -nnz; }
+
                             int64_t dot = (int64_t)rel_x * nnx + (int64_t)rel_z * nnz;
                             int32_t d = (int32_t)((dot + ((dot >> 63) & 0xFFF)) >> 12);
                             int32_t abs_d = d < 0 ? -d : d;
 
-                            /* Prefer contained segments over uncontained. */
                             int better = 0;
                             if (contained && !lbest_contained) better = 1;
                             else if (contained == lbest_contained && abs_d < lbest_abs) better = 1;
@@ -630,7 +649,8 @@ void td5_track_resolve_wall_contacts(TD5_Actor *actor)
             {
                 TD5_StripVertex *base = vertex_at((int)sp->right_vertex_index + seg);
                 TD5_StripVertex *end_v = vertex_at((int)sp->right_vertex_index + seg + 1);
-                if (base && end_v) {
+                TD5_StripVertex *opp_v = vertex_at((int)sp->left_vertex_index + seg);
+                if (base && end_v && opp_v) {
                     int32_t edge_dx = (int32_t)end_v->x - (int32_t)base->x;
                     int32_t edge_dz = (int32_t)end_v->z - (int32_t)base->z;
                     int64_t elen_sq = (int64_t)edge_dx * edge_dx + (int64_t)edge_dz * edge_dz;
@@ -640,13 +660,20 @@ void td5_track_resolve_wall_contacts(TD5_Actor *actor)
                         int64_t t_num = (int64_t)rel_x * edge_dx + (int64_t)rel_z * edge_dz;
                         int contained = (t_num >= 0 && t_num <= elen_sq);
 
-                        /* CCW rotation for the right-rail inward perp */
-                        float fnx = (float)(-edge_dz);
-                        float fnz = (float)(edge_dx);
+                        /* Raw CW perp. Flip below if opposite rail is on
+                         * the wrong side. */
+                        float fnx = (float)(edge_dz);
+                        float fnz = (float)(-edge_dx);
                         float fmag = sqrtf(fnx * fnx + fnz * fnz);
                         if (fmag >= 0.5f) {
                             int32_t nnx = (int32_t)(fnx / fmag * 4096.0f);
                             int32_t nnz = (int32_t)(fnz / fmag * 4096.0f);
+
+                            int32_t opp_rel_x = (int32_t)opp_v->x - (int32_t)base->x;
+                            int32_t opp_rel_z = (int32_t)opp_v->z - (int32_t)base->z;
+                            int64_t opp_dot = (int64_t)opp_rel_x * nnx + (int64_t)opp_rel_z * nnz;
+                            if (opp_dot < 0) { nnx = -nnx; nnz = -nnz; }
+
                             int64_t dot = (int64_t)rel_x * nnx + (int64_t)rel_z * nnz;
                             int32_t d = (int32_t)((dot + ((dot >> 63) & 0xFFF)) >> 12);
                             int32_t abs_d = d < 0 ? -d : d;
@@ -673,15 +700,19 @@ void td5_track_resolve_wall_contacts(TD5_Actor *actor)
 
         /* Fire a wall whenever the closest rail segment's signed distance
          * is negative. Containment is preferred when picking the segment
-         * but no longer gates the fire — a probe that's past the end of
-         * every segment (all c=0) can still be outside the rail and
-         * should trigger a response. Clamp penetration to -1200 so a
-         * single-frame excursion (e.g. the boundary walker momentarily
-         * losing the chassis span) can't produce a huge push. */
+         * but no longer gates the fire. Clamp penetration to -1200 so a
+         * single-frame chassis-span glitch can't produce a huge push.
+         *
+         * wall_angle: the push formula inside td5_physics_wall_response
+         * moves the car by (sin(angle), -cos(angle)) * push. To push in
+         * the inward perp direction (nnx, nnz), angle must satisfy
+         * sin(angle) ∝ nnx and -cos(angle) ∝ nnz, i.e.
+         * angle = atan2(nnx, -nnz). This works regardless of whether the
+         * perp was auto-flipped in the segment loop. */
         if (lhit.valid && lhit.d < 0) {
             int32_t d = lhit.d;
             if (d < -1200) d = -1200;
-            double rad = atan2((double)lhit.edge_dz, (double)lhit.edge_dx);
+            double rad = atan2((double)lhit.nnx, (double)(-lhit.nnz));
             int32_t wall_angle = (int32_t)(rad * (4096.0 / (2.0 * 3.14159265358979323846))) & 0xFFF;
             td5_physics_wall_response(actor, wall_angle, d, 1, lhit.nnx, lhit.nnz, 4096);
             td5_physics_rebuild_pose(actor);
@@ -692,7 +723,7 @@ void td5_track_resolve_wall_contacts(TD5_Actor *actor)
         if (rhit.valid && rhit.d < 0) {
             int32_t d = rhit.d;
             if (d < -1200) d = -1200;
-            double rad = atan2((double)(-rhit.edge_dz), (double)(-rhit.edge_dx));
+            double rad = atan2((double)rhit.nnx, (double)(-rhit.nnz));
             int32_t wall_angle = (int32_t)(rad * (4096.0 / (2.0 * 3.14159265358979323846))) & 0xFFF;
             td5_physics_wall_response(actor, wall_angle, d, 2, rhit.nnx, rhit.nnz, 4096);
             td5_physics_rebuild_pose(actor);
