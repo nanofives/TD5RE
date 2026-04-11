@@ -645,21 +645,36 @@ void td5_track_resolve_wall_contacts(TD5_Actor *actor)
     /* Track previous d per (slot, probe, side) to distinguish real wall
      * impacts (d stable or improving under push) from walker-lag cases
      * (d worsens monotonically as the car drives forward past a stale
-     * chassis span). The check: fire the wall on the first entry into
-     * the fire zone (prev was inside, current is outside), and continue
-     * firing if d is holding or improving. If d worsens by a noticeable
-     * amount while we're already past the wall, it's walker lag — skip.
-     *
-     * Sentinel value 32767 means "no previous reading" (fresh probe or
-     * just re-entered fire zone after sitting inside). */
+     * chassis span). Sentinel 32767 = "no previous reading". */
     static int16_t s_wall_prev_d[TD5_MAX_TOTAL_ACTORS][4][2];
+    /* Track previous chassis span per actor so we can detect transitions.
+     * When the chassis span just changed, the wall geometry has flipped
+     * to a new strip whose first d readings are unrelated to the previous
+     * ones — treat the whole tick as unreliable and skip firing. This
+     * catches walker-lag "jumps" where track_span_raw suddenly updates
+     * after sitting stale for many ticks, which is when the invisible
+     * wall fires with d in the -100..-200 range. */
+    static int16_t s_wall_prev_span[TD5_MAX_TOTAL_ACTORS];
     static uint8_t s_wall_prev_init = 0;
     if (!s_wall_prev_init) {
-        for (int i = 0; i < TD5_MAX_TOTAL_ACTORS; i++)
+        for (int i = 0; i < TD5_MAX_TOTAL_ACTORS; i++) {
+            s_wall_prev_span[i] = -1;
             for (int j = 0; j < 4; j++)
                 for (int k = 0; k < 2; k++)
                     s_wall_prev_d[i][j][k] = 32767;
+        }
         s_wall_prev_init = 1;
+    }
+
+    int slot_for_state = actor->slot_index & (TD5_MAX_TOTAL_ACTORS - 1);
+    int span_changed = (s_wall_prev_span[slot_for_state] != (int16_t)span_idx);
+    if (span_changed) {
+        /* Reset prev d for all probes since the wall geometry has changed. */
+        for (int j = 0; j < 4; j++) {
+            s_wall_prev_d[slot_for_state][j][0] = 32767;
+            s_wall_prev_d[slot_for_state][j][1] = 32767;
+        }
+        s_wall_prev_span[slot_for_state] = (int16_t)span_idx;
     }
 
     for (int pi = 0; pi < 4; pi++) {
@@ -688,14 +703,18 @@ void td5_track_resolve_wall_contacts(TD5_Actor *actor)
 
         const int32_t WALL_DEAD_ZONE = -10;
         const int32_t WORSEN_TOL     = 10;  /* worsening past this = walker lag */
+        /* On a chassis-span transition, skip the fire — the new span's
+         * wall geometry hasn't yet been compared against the probe, and
+         * the first reading can be an artifact of the new wall line
+         * position. Don't trust it. One skipped tick is invisible. */
 
-        int slot = actor->slot_index & (TD5_MAX_TOTAL_ACTORS - 1);
+        int slot = slot_for_state;
 
         /* --- LEFT wall --- */
         if (l_ok) {
             int16_t prev_d = s_wall_prev_d[slot][pi][0];
             int fire = 0;
-            if (l_d < WALL_DEAD_ZONE) {
+            if (l_d < WALL_DEAD_ZONE && !span_changed) {
                 if (prev_d == 32767 || prev_d >= WALL_DEAD_ZONE) {
                     /* Fresh entry into fire zone — always fire the first hit. */
                     fire = 1;
@@ -725,7 +744,7 @@ void td5_track_resolve_wall_contacts(TD5_Actor *actor)
         if (r_ok) {
             int16_t prev_d = s_wall_prev_d[slot][pi][1];
             int fire = 0;
-            if (r_d < WALL_DEAD_ZONE) {
+            if (r_d < WALL_DEAD_ZONE && !span_changed) {
                 if (prev_d == 32767 || prev_d >= WALL_DEAD_ZONE) {
                     fire = 1;
                 } else if (r_d >= prev_d - WORSEN_TOL) {
