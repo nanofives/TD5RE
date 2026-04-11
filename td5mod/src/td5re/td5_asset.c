@@ -1884,6 +1884,8 @@ int td5_asset_load_race_texture_pages(void)
 
         if (indices + 4096 > tex_data + tex_size) continue;
 
+        int keyed_pixel_count = 0;
+
         /* Decode 4096 palette-indexed pixels to BGRA32 */
         for (int px = 0; px < 4096; px++) {
             int idx = indices[px];
@@ -1902,7 +1904,17 @@ int td5_asset_load_race_texture_pages(void)
 
             switch (page_type) {
             case 1: /* Alpha-keyed: index 0 = transparent */
-                alpha = (idx == 0) ? 0x00 : 0xFF;
+                if (idx == 0) {
+                    /* Match BuildTrackTextureCacheImpl @ 0x0040B1D0 case 1:
+                     * transparent pixels must have RGB=0 so bilinear taps
+                     * at the keyed edge don't bleed palette[0] into the
+                     * visible neighbour (causes dark/black fringes). */
+                    alpha = 0x00;
+                    b_val = g_val = r_val = 0;
+                    keyed_pixel_count++;
+                } else {
+                    alpha = 0xFF;
+                }
                 break;
             case 2: /* Semi-transparent */
                 alpha = 0x80;
@@ -1922,6 +1934,11 @@ int td5_asset_load_race_texture_pages(void)
         }
 
         td5_plat_render_upload_texture((int)pg, rgba, 64, 64, 2);
+        if (page_type == 1 && keyed_pixel_count > 0) {
+            TD5_LOG_I(LOG_TAG,
+                      "race tpage %u: type=1 keyed_pixels=%d/4096 (RGB zeroed)",
+                      pg, keyed_pixel_count);
+        }
         loaded_count++;
     }
 

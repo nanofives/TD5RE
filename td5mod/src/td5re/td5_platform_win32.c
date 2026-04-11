@@ -2072,7 +2072,12 @@ void td5_plat_render_set_preset(TD5_RenderPreset preset)
         s->min_filter   = 2;
         s->texblend_mode = D3DTBLEND_MODULATEALPHA;
         s->alpha_test_enable = 1;
-        s->alpha_ref         = 1; /* discard alpha < 1/255 */
+        /* alpha_ref = 0x80 (1-bit-alpha cutoff): with bilinear sampling on
+         * color-keyed textures the edge taps produce alphas in (0,255).
+         * Discarding < 128 prunes the dark/black fringes around transparent
+         * pixels (street-light backgrounds, props). Type-2 semi-transparent
+         * pages sit at exactly 0x80 — strict < keeps them. */
+        s->alpha_ref         = 0x80;
         break;
 
     case TD5_PRESET_TRANSLUCENT_ANISO:
