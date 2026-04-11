@@ -642,6 +642,13 @@ void td5_track_resolve_wall_contacts(TD5_Actor *actor)
         }
     }
 
+    /* Hysteresis: after a probe has fired a wall, don't re-fire on it until
+     * the probe has clearly returned to the inside (d > release threshold).
+     * Prevents the stuck-oscillation pattern seen on the Scotland lap where
+     * a probe bounced between -11 and -20 on the right wall for dozens of
+     * ticks without ever escaping. Per-probe × per-side state. */
+    static uint8_t s_wall_latched[TD5_MAX_TOTAL_ACTORS][4][2];  /* [slot][pi][0=L,1=R] */
+
     for (int pi = 0; pi < 4; pi++) {
         int32_t px = probe_block[pi].x >> 8;
         int32_t pz = probe_block[pi].z >> 8;
@@ -666,25 +673,58 @@ void td5_track_resolve_wall_contacts(TD5_Actor *actor)
             r_ok = 1;
         }
 
-        /* 10-unit dead zone (keep from oscillating on grid-cell boundaries). */
-        const int32_t WALL_DEAD_ZONE = -10;
+        /* Dead zone (skip very shallow contacts) and suspicion cap (skip
+         * very deep ones — real driving off-road is gradual; a sudden
+         * d < -80 is almost certainly a chassis-span mismatch and firing
+         * would push the car based on wrong geometry). */
+        const int32_t WALL_DEAD_ZONE   = -10;
+        const int32_t WALL_DEEP_SKIP   = -80;
+        const int32_t WALL_RELEASE     =  5;   /* d must rise above this to re-arm */
 
-        if (l_ok && l_d < WALL_DEAD_ZONE) {
-            double rad = atan2((double)l_par.nnx, (double)(-l_par.nnz));
-            int32_t wall_angle = (int32_t)(rad * (4096.0 / (2.0 * 3.14159265358979323846))) & 0xFFF;
-            td5_physics_wall_response(actor, wall_angle, l_d, 1, l_par.nnx, l_par.nnz, 4096);
-            td5_physics_rebuild_pose(actor);
-            TD5_LOG_I(LOG_TAG, "wall_contact: slot=%d probe=%d LEFT span=%d d=%d angle=%d",
-                      actor->slot_index, pi, span_idx, l_d, wall_angle);
+        int slot = actor->slot_index & (TD5_MAX_TOTAL_ACTORS - 1);
+
+        /* --- LEFT wall --- */
+        if (l_ok) {
+            uint8_t *latched = &s_wall_latched[slot][pi][0];
+            if (l_d > WALL_RELEASE) {
+                *latched = 0;  /* re-armed */
+            }
+            if (l_d < WALL_DEAD_ZONE) {
+                if (l_d < WALL_DEEP_SKIP) {
+                    TD5_LOG_W(LOG_TAG, "wall_skip_deep: slot=%d probe=%d LEFT span=%d d=%d",
+                              actor->slot_index, pi, span_idx, l_d);
+                } else if (!*latched) {
+                    double rad = atan2((double)l_par.nnx, (double)(-l_par.nnz));
+                    int32_t wall_angle = (int32_t)(rad * (4096.0 / (2.0 * 3.14159265358979323846))) & 0xFFF;
+                    td5_physics_wall_response(actor, wall_angle, l_d, 1, l_par.nnx, l_par.nnz, 4096);
+                    td5_physics_rebuild_pose(actor);
+                    *latched = 1;
+                    TD5_LOG_I(LOG_TAG, "wall_contact: slot=%d probe=%d LEFT span=%d d=%d angle=%d",
+                              actor->slot_index, pi, span_idx, l_d, wall_angle);
+                }
+            }
         }
 
-        if (r_ok && r_d < WALL_DEAD_ZONE) {
-            double rad = atan2((double)r_par.nnx, (double)(-r_par.nnz));
-            int32_t wall_angle = (int32_t)(rad * (4096.0 / (2.0 * 3.14159265358979323846))) & 0xFFF;
-            td5_physics_wall_response(actor, wall_angle, r_d, 2, r_par.nnx, r_par.nnz, 4096);
-            td5_physics_rebuild_pose(actor);
-            TD5_LOG_I(LOG_TAG, "wall_contact: slot=%d probe=%d RIGHT span=%d d=%d angle=%d",
-                      actor->slot_index, pi, span_idx, r_d, wall_angle);
+        /* --- RIGHT wall --- */
+        if (r_ok) {
+            uint8_t *latched = &s_wall_latched[slot][pi][1];
+            if (r_d > WALL_RELEASE) {
+                *latched = 0;
+            }
+            if (r_d < WALL_DEAD_ZONE) {
+                if (r_d < WALL_DEEP_SKIP) {
+                    TD5_LOG_W(LOG_TAG, "wall_skip_deep: slot=%d probe=%d RIGHT span=%d d=%d",
+                              actor->slot_index, pi, span_idx, r_d);
+                } else if (!*latched) {
+                    double rad = atan2((double)r_par.nnx, (double)(-r_par.nnz));
+                    int32_t wall_angle = (int32_t)(rad * (4096.0 / (2.0 * 3.14159265358979323846))) & 0xFFF;
+                    td5_physics_wall_response(actor, wall_angle, r_d, 2, r_par.nnx, r_par.nnz, 4096);
+                    td5_physics_rebuild_pose(actor);
+                    *latched = 1;
+                    TD5_LOG_I(LOG_TAG, "wall_contact: slot=%d probe=%d RIGHT span=%d d=%d angle=%d",
+                              actor->slot_index, pi, span_idx, r_d, wall_angle);
+                }
+            }
         }
 
         if (diag_slot0) {
