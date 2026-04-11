@@ -543,6 +543,22 @@ void td5_physics_update_player(TD5_Actor *actor)
 
     int32_t i;
 
+    /* DIAG: log first 5 player ticks to pinpoint Cluster A residual */
+    if (actor->slot_index == 0) {
+        static int s_tick1_logged = 0;
+        if (s_tick1_logged < 5) {
+            TD5_LOG_I(LOG_TAG, "tick_diag[%d]: flag=0x%X vel=(%d,%d,%d) pos=(%d,%d,%d) gear=%d rpm=%d throttle=%d wcb=0x%X",
+                      s_tick1_logged,
+                      actor->surface_contact_flags,
+                      actor->linear_velocity_x, actor->linear_velocity_y, actor->linear_velocity_z,
+                      actor->world_pos.x, actor->world_pos.y, actor->world_pos.z,
+                      actor->current_gear, actor->engine_speed_accum,
+                      (int)actor->encounter_steering_cmd,
+                      actor->wheel_contact_bitmask);
+            s_tick1_logged++;
+        }
+    }
+
     /* --- 1. Surface type probes (5: chassis + 4 wheels) --- */
     uint8_t surface_center = actor->surface_type_chassis;
     uint8_t surface_wheel[4];
@@ -1642,15 +1658,21 @@ static void apply_collision_response(TD5_Actor *penetrator, TD5_Actor *target,
     int32_t push_x = 0, push_z = 0;
 
     const int64_t INERTIA_K_64 = (int64_t)V2V_INERTIA_K;
-    /* NUM_CONST = 500000 * 0x1100 = 2,176,000,000 — exceeds int32.
-     * The original binary was forced by its compiler to rewrite this as
-     * (500000 >> 8) * 0x1100 = 8,499,456 to avoid int32 overflow, and
-     * Ghidra renders that rewrite literally. In our 64-bit port we don't
-     * need the workaround, and the pre-shift silently drops ~256× of
-     * precision in the NUM_CONST / denom_shifted ratio — which at runtime
-     * reduced impulses to the [-4..1] range (magnitudes 0..8192), far
-     * below even the 12800 light-SFX threshold. Use full-width. */
-    const int64_t NUM_CONST    = INERTIA_K_64 * V2V_NUM_SCALE;
+    /* NUM_CONST = (500000 >> 8) * 0x1100 = 8,499,456 [CONFIRMED @ 0x4079C0].
+     * The `>> 8` on INERTIA_K is NOT a compiler overflow workaround — it is
+     * intentional scaling paired with the denom `>> 8` below. Together they
+     * produce small integer impulses (typically 1-200) such that
+     * `impulse * mass` — the velocity channel update — lands in the right
+     * 24.8-FP range.
+     *
+     * An earlier commit tried full-width NUM_CONST = 500000 * 0x1100 to
+     * "recover precision"; with the OBB corner fix making rel_vel realistic,
+     * it produced impulse magnitudes in the 10^8..10^9 range. That's a
+     * clear signal the shift is load-bearing, not cosmetic. The earlier
+     * symptom of impulse∈[-4..1] was unrelated — it came from obb_corner_test
+     * having swapped cardef offsets (fixed in 4e8860e), which made rel_vel
+     * collapse to near-zero. */
+    const int64_t NUM_CONST    = (INERTIA_K_64 >> 8) * V2V_NUM_SCALE;
 
     if (is_side_branch) {
         /* --- SIDE BRANCH (LAB_00407B7F) --- */
@@ -1667,8 +1689,7 @@ static void apply_collision_response(TD5_Actor *penetrator, TD5_Actor *target,
             (int32_t)(((int64_t)cz_A * saved_omega_A) / V2V_ANG_DIVISOR);
         int32_t rel_vel = ang_contrib - local_54 + local_4c;
 
-        /* Multiply-first preserves precision vs. pre-dividing NUM_CONST. */
-        int64_t impulse_raw = (NUM_CONST * rel_vel) / denom;
+        int64_t impulse_raw = (NUM_CONST / denom) * rel_vel;
         impulse = (int32_t)(impulse_raw >> 12);
 
         /* [CONFIRMED @ 0x4079C0 side branch]: XOR sign rejection. */
@@ -1695,7 +1716,7 @@ static void apply_collision_response(TD5_Actor *penetrator, TD5_Actor *target,
             (int32_t)(((int64_t)cx_A * saved_omega_A) / V2V_ANG_DIVISOR);
         int32_t rel_vel = ang_contrib - local_50 + local_44;
 
-        int64_t impulse_raw = (NUM_CONST * rel_vel) / denom;
+        int64_t impulse_raw = (NUM_CONST / denom) * rel_vel;
         impulse = (int32_t)(impulse_raw >> 12);
 
         if (((cz_B - cz_A) ^ impulse) < 0) {
@@ -2505,6 +2526,27 @@ void td5_physics_integrate_pose(TD5_Actor *actor)
     /* 7. Refresh wheel contact frames */
     td5_physics_refresh_wheel_contacts(actor);
 
+    /* 7b. Update surface_contact_flags for the NEXT update_player call.
+     * Gated on !g_game_paused so the init path (which calls
+     * refresh_wheel_contacts once outside a sim tick) and the countdown
+     * path (which ticks integrate_pose with g_game_paused=1) both leave
+     * the flag at 0. The first post-countdown update_player reads 0 and
+     * takes the airborne branch; this refresh then writes the flag for
+     * tick 2+ where drive torque applies normally. Matches the original's
+     * tick-1 behavior where surface_contact_flags is still 0 from the
+     * init memset. [RE basis: InitializeRaceVehicleRuntime @ 0x42F140
+     * leaves the field at 0; UpdatePlayerVehicleDynamics @ 0x404030 is
+     * the only writer in the original.] */
+    if (!g_game_paused) {
+        uint8_t bm = actor->wheel_contact_bitmask;
+        uint8_t flags = 0;
+        if (!(bm & 0x04) || !(bm & 0x08))  /* RL or RR grounded */
+            flags |= 1;
+        if (!(bm & 0x01) || !(bm & 0x02))  /* FL or FR grounded */
+            flags |= 2;
+        actor->surface_contact_flags = flags;
+    }
+
     /* DIAGNOSTIC: log player car (slot 0) physics state once per 30 frames */
     if (actor->slot_index == 0) {
         static int s_diag_frame = 0;
@@ -2939,30 +2981,16 @@ void td5_physics_refresh_wheel_contacts(TD5_Actor *actor)
     if (resolved_surface_valid)
         actor->surface_type_chassis = (uint8_t)resolved_surface;
 
-    /* Set surface_contact_flags from wheel contact state — but ONLY when
-     * the sim is running. During countdown (g_game_paused=1), integrate_pose
-     * still ticks for ground-snap, which previously caused this write to
-     * seed the flag to 3 before the first post-GO update_player ran.
-     *
-     * The original's surface_contact_flags is a state variable written
-     * ONLY inside UpdatePlayerVehicleDynamics @ 0x00404030 at a drivetrain-
-     * commit condition (and cleared in the near-zero block). At tick 1
-     * post-countdown, the original's field is still 0 from the init memset,
-     * so the original takes the airborne branch and produces zero drive
-     * torque — matching the observed vel_x=0 / vel_z=0 / long_speed=0 at
-     * sim_tick=1. By gating the port's write on !g_game_paused, the first
-     * post-GO tick sees the pre-countdown init value (0), takes the
-     * airborne branch in update_player, then this refresh populates the
-     * flag for tick 2+ where drive torque starts to apply normally. */
-    if (!g_game_paused) {
-        uint8_t bm = actor->wheel_contact_bitmask;
-        uint8_t flags = 0;
-        if (!(bm & 0x04) || !(bm & 0x08))  /* RL or RR grounded */
-            flags |= 1;
-        if (!(bm & 0x01) || !(bm & 0x02))  /* FL or FR grounded */
-            flags |= 2;
-        actor->surface_contact_flags = flags;
-    }
+    /* surface_contact_flags update moved to the tail of integrate_pose
+     * so the spawn-time init call chain (td5_physics_init_vehicle_runtime
+     * -> refresh_wheel_contacts at line 3707) does NOT seed the flag. The
+     * original leaves the flag at 0 from the slot memset; it is only
+     * written inside UpdatePlayerVehicleDynamics. Running it at the end of
+     * integrate_pose (after refresh_wheel_contacts has updated
+     * wheel_contact_bitmask) keeps the field in sync with the port's
+     * existing "bits = grounded axles" interpretation while matching the
+     * original's tick-1 behavior (flag=0 → airborne branch → no drive
+     * torque). See the gate block in td5_physics_integrate_pose. */
 }
 
 /* ========================================================================
