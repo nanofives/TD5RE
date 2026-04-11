@@ -522,6 +522,27 @@ void td5_physics_update_vehicle_actor(TD5_Actor *actor)
     if (actor->vehicle_mode == 0)
         td5_track_resolve_wall_contacts(actor);
 
+    /* 9. Update surface_contact_flags for the NEXT tick's dynamics dispatch.
+     * Placed here (not in integrate_pose) so the init path — which calls
+     * integrate_pose once from reset_actor_state for suspension settle —
+     * doesn't seed the flag. The first post-countdown update_player reads
+     * 0 (from the spawn memset) and takes the airborne/coast branch → no
+     * drive torque applied → no tick-1 velocity impulse. From tick 2
+     * onwards the flag reflects wheel_contact_bitmask and drive torque
+     * runs normally. [RE basis: the original's surface_contact_flags is
+     * only written inside UpdatePlayerVehicleDynamics @ 0x00404030, at a
+     * late drivetrain-commit condition; leaving it at 0 at tick 1 matches
+     * the original's observed tick-1 state where vel_x=vel_z=0.] */
+    if (!g_game_paused) {
+        uint8_t bm = actor->wheel_contact_bitmask;
+        uint8_t flags = 0;
+        if (!(bm & 0x04) || !(bm & 0x08))  /* RL or RR grounded */
+            flags |= 1;
+        if (!(bm & 0x01) || !(bm & 0x02))  /* FL or FR grounded */
+            flags |= 2;
+        actor->surface_contact_flags = flags;
+    }
+
     if (actor->slot_index == 0 && (actor->frame_counter % 60u) == 0u) {
         TD5_LOG_D(LOG_TAG,
                   "Vehicle actor0: speed=%d rpm=%d gear=%d surface=%u",
@@ -542,22 +563,6 @@ void td5_physics_update_player(TD5_Actor *actor)
     if (!phys) return;
 
     int32_t i;
-
-    /* DIAG: log first 5 player ticks to pinpoint Cluster A residual */
-    if (actor->slot_index == 0) {
-        static int s_tick1_logged = 0;
-        if (s_tick1_logged < 5) {
-            TD5_LOG_I(LOG_TAG, "tick_diag[%d]: flag=0x%X vel=(%d,%d,%d) pos=(%d,%d,%d) gear=%d rpm=%d throttle=%d wcb=0x%X",
-                      s_tick1_logged,
-                      actor->surface_contact_flags,
-                      actor->linear_velocity_x, actor->linear_velocity_y, actor->linear_velocity_z,
-                      actor->world_pos.x, actor->world_pos.y, actor->world_pos.z,
-                      actor->current_gear, actor->engine_speed_accum,
-                      (int)actor->encounter_steering_cmd,
-                      actor->wheel_contact_bitmask);
-            s_tick1_logged++;
-        }
-    }
 
     /* --- 1. Surface type probes (5: chassis + 4 wheels) --- */
     uint8_t surface_center = actor->surface_type_chassis;
@@ -2525,27 +2530,6 @@ void td5_physics_integrate_pose(TD5_Actor *actor)
 
     /* 7. Refresh wheel contact frames */
     td5_physics_refresh_wheel_contacts(actor);
-
-    /* 7b. Update surface_contact_flags for the NEXT update_player call.
-     * Gated on !g_game_paused so the init path (which calls
-     * refresh_wheel_contacts once outside a sim tick) and the countdown
-     * path (which ticks integrate_pose with g_game_paused=1) both leave
-     * the flag at 0. The first post-countdown update_player reads 0 and
-     * takes the airborne branch; this refresh then writes the flag for
-     * tick 2+ where drive torque applies normally. Matches the original's
-     * tick-1 behavior where surface_contact_flags is still 0 from the
-     * init memset. [RE basis: InitializeRaceVehicleRuntime @ 0x42F140
-     * leaves the field at 0; UpdatePlayerVehicleDynamics @ 0x404030 is
-     * the only writer in the original.] */
-    if (!g_game_paused) {
-        uint8_t bm = actor->wheel_contact_bitmask;
-        uint8_t flags = 0;
-        if (!(bm & 0x04) || !(bm & 0x08))  /* RL or RR grounded */
-            flags |= 1;
-        if (!(bm & 0x01) || !(bm & 0x02))  /* FL or FR grounded */
-            flags |= 2;
-        actor->surface_contact_flags = flags;
-    }
 
     /* DIAGNOSTIC: log player car (slot 0) physics state once per 30 frames */
     if (actor->slot_index == 0) {
