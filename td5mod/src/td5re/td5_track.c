@@ -16,6 +16,7 @@
  */
 
 #include "td5_track.h"
+#include "td5_asset.h"
 #include "td5_physics.h"
 #include "td5_ai.h"
 #include "td5_platform.h"
@@ -3437,29 +3438,82 @@ void td5_track_prepare_mesh_resource(TD5_MeshHeader *mesh)
     if (mesh->normals_offset != 0)
         mesh->normals_offset = (uint32_t)(uintptr_t)(base + mesh->normals_offset);
 
-    /* Billboard meshes (texture_page_id at +0x02 = 1 or 2) carry disk-
-     * baked per-vertex diffuse values that were authored for the
-     * original game's 16bpp R5G6B5 + additive ONE/ONE pipeline. At
-     * 32bpp the same values saturate the framebuffer white because the
-     * additive sum has 2× the headroom before clamp. Halve the per-
-     * vertex RGB once at relocation time to bring the additive result
-     * back into the CRT-era perceptual range. Alpha byte is preserved.
-     * This is idempotent on the loaded mesh (one-shot at load). */
-    if ((mesh->texture_page_id == 1 || mesh->texture_page_id == 2) &&
-        mesh->vertices_offset != 0 &&
-        mesh->total_vertex_count > 0 &&
-        mesh->total_vertex_count <= 65536) {
-        TD5_MeshVertex *bb_v = (TD5_MeshVertex *)(uintptr_t)mesh->vertices_offset;
-        for (int vi = 0; vi < mesh->total_vertex_count; vi++) {
-            uint32_t c = bb_v[vi].lighting;
-            uint32_t a = c & 0xFF000000u;
-            uint32_t r = (c >> 16) & 0xFFu;
-            uint32_t g = (c >>  8) & 0xFFu;
-            uint32_t b =  c        & 0xFFu;
-            r >>= 1; g >>= 1; b >>= 1;
-            bb_v[vi].lighting = a | (r << 16) | (g << 8) | b;
+    /* Note: per-vertex diffuse dim for additive billboards lives in a
+     * separate post-pass (td5_track_dim_additive_billboard_meshes) called
+     * AFTER track textures load. At this point the page transparency
+     * table is still empty and we can't tell which billboard tags (1/2)
+     * correspond to real lights (type-3 page) vs normal trees/signs
+     * (type-1 alpha-keyed). Dimming all of them would wash out trees. */
+}
+
+void td5_track_dim_additive_billboard_meshes(void)
+{
+    /* Walk every parsed MODELS.DAT display list, find billboard meshes
+     * (mesh header +0x02 == 1 || 2) whose FIRST command renders through
+     * a type-3 (additive) texture page, and halve their per-vertex
+     * diffuse.
+     *
+     * Why: the asset authors baked per-vertex intensity around 0xA0 for
+     * streetlight quads in a 16bpp R5G6B5 + ONE/ONE additive pipeline.
+     * At 32bpp the same values saturate the framebuffer because the
+     * additive sum has more headroom before the 0xFF clamp. Halving
+     * pulls the additive result back into the CRT-era perceptual range.
+     *
+     * One-shot per track load (call AFTER td5_asset_load_track_textures
+     * so the transparency table is populated). Regular alpha-keyed
+     * billboards (trees, signs — type-1 pages) are left untouched. */
+    int dimmed = 0;
+    int total_bb = 0;
+
+    for (int dl = 0; dl < s_models_display_list_count; dl++) {
+        if (s_models_entry_offsets[dl] == 0) continue;
+        uint8_t *block_base = s_models_blob + s_models_entry_offsets[dl];
+        uint32_t sub_count = *(const uint32_t *)block_base;
+        if (sub_count == 0 || sub_count > 256) continue;
+
+        for (uint32_t j = 0; j < sub_count; j++) {
+            uint32_t mesh_ptr_val = *(const uint32_t *)(block_base + 4 + j * 4);
+            if (mesh_ptr_val == 0) continue;
+
+            TD5_MeshHeader *mesh = (TD5_MeshHeader *)(uintptr_t)mesh_ptr_val;
+            if (!td5_track_is_ptr_in_blob(mesh, sizeof(TD5_MeshHeader)))
+                continue;
+            if (mesh->texture_page_id != 1 && mesh->texture_page_id != 2)
+                continue;
+            if (mesh->commands_offset == 0 || mesh->vertices_offset == 0)
+                continue;
+            if (mesh->command_count <= 0 || mesh->total_vertex_count <= 0)
+                continue;
+            if (mesh->total_vertex_count > 65536)
+                continue;
+
+            total_bb++;
+
+            /* Check the first command's texture page — if not type-3 we
+             * leave the mesh alone (that's a tree/sign, not a light). */
+            const TD5_PrimitiveCmd *cmd0 =
+                (const TD5_PrimitiveCmd *)(uintptr_t)mesh->commands_offset;
+            if (td5_asset_get_page_transparency(cmd0->texture_page_id) != 3)
+                continue;
+
+            TD5_MeshVertex *bb_v =
+                (TD5_MeshVertex *)(uintptr_t)mesh->vertices_offset;
+            for (int vi = 0; vi < mesh->total_vertex_count; vi++) {
+                uint32_t c = bb_v[vi].lighting;
+                uint32_t a = c & 0xFF000000u;
+                uint32_t r = (c >> 16) & 0xFFu;
+                uint32_t g = (c >>  8) & 0xFFu;
+                uint32_t b =  c        & 0xFFu;
+                r >>= 1; g >>= 1; b >>= 1;
+                bb_v[vi].lighting = a | (r << 16) | (g << 8) | b;
+            }
+            dimmed++;
         }
     }
+
+    TD5_LOG_I("track",
+        "additive billboard dim: %d/%d billboard meshes had type-3 pages "
+        "(halved per-vertex diffuse)", dimmed, total_bb);
 }
 
 /* ========================================================================

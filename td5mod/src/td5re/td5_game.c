@@ -680,6 +680,9 @@ int td5_game_init_race_session(void) {
 
     /* ---- Step 8: Load track textures ---- */
     td5_asset_load_track_textures(g_td5.track_index);
+    /* Must run AFTER textures load so the per-page transparency table is
+     * populated. Dims billboard meshes that use a type-3 (additive) page. */
+    td5_track_dim_additive_billboard_meshes();
     TD5_LOG_I(LOG_TAG, "InitRace step 8/19: track textures loaded for track=%d",
               g_td5.track_index);
 
@@ -1115,6 +1118,15 @@ static void td5_game_trace_stage(const char *stage, int ticks_this_frame)
 {
     uint32_t frame = g_tick_counter;
     uint32_t sim_tick = (uint32_t)g_td5.simulation_tick_counter;
+
+    /* Sim-tick cap — shuts the trace down once the target simulated window
+     * has been captured, instead of burning wall-clock on sim ticks the
+     * diff-race comparator will never reach. */
+    if (g_td5.ini.race_trace_max_sim_ticks > 0 &&
+        (int)sim_tick > g_td5.ini.race_trace_max_sim_ticks) {
+        td5_trace_shutdown();
+        return;
+    }
 
     if (!td5_trace_begin_frame(frame))
         return;
@@ -2415,6 +2427,19 @@ void td5_game_update_frame_timing(void) {
 
     /* Convert normalized frame time to the 16.16 tick accumulator. */
     g_td5.sim_time_accumulator += td5_game_normalized_dt_to_accum(frame_dt_normalized);
+
+    /* Trace fast-forward: inject N extra sim ticks per render frame so the
+     * diff-race skill runs in seconds instead of minutes. The Frida side
+     * achieves the same effect by clamping g_simTickBudget >= 1.0 in the
+     * original. Only active when race-trace capture is enabled AND
+     * TraceFastForward > 0 in the [Trace] section of td5re.ini. */
+    if (g_td5.ini.race_trace_enabled && g_td5.ini.trace_fast_forward > 0) {
+        g_td5.sim_time_accumulator +=
+            (uint32_t)g_td5.ini.trace_fast_forward * TD5_TICK_ACCUMULATOR_ONE;
+        if (g_td5.sim_tick_budget < (float)g_td5.ini.trace_fast_forward) {
+            g_td5.sim_tick_budget = (float)g_td5.ini.trace_fast_forward;
+        }
+    }
 
     /* Benchmark mode: force constant sim budget for deterministic timing */
     if (g_td5.benchmark_active) {

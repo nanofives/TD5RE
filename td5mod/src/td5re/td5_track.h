@@ -114,6 +114,11 @@ void            *td5_track_get_display_list(int span_index);
 /* --- MODELS.DAT --- */
 int  td5_track_parse_models_dat(const void *data, size_t size);
 void td5_track_prepare_mesh_resource(TD5_MeshHeader *mesh);
+
+/* Halve per-vertex diffuse of billboard meshes that draw through a
+ * type-3 (additive) texture page. Call AFTER td5_asset_load_track_textures
+ * so the transparency table is populated. */
+void td5_track_dim_additive_billboard_meshes(void);
 int  td5_track_get_models_display_list_count(void);
 int  td5_track_get_span_display_list_index(int span_index);
 const void *td5_track_get_models_display_list_raw(int index, size_t *size_out);

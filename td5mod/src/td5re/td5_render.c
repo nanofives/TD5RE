@@ -1295,31 +1295,15 @@ void td5_render_span_display_list(void *display_list_block)
         int billboard_tag = (int)mesh->texture_page_id;
         if (billboard_tag == 1 || billboard_tag == 2) {
             extern float g_cameraSecondaryUnscaled[9];
-            static int s_bb_hit = 0, s_bb_log = 0;
-            s_bb_hit++;
             td5_render_push_transform();
             td5_render_load_rotation((const TD5_Mat3x3 *)g_cameraSecondaryUnscaled);
-            if (s_bb_log < 10) {
-                TD5_LOG_I(LOG_TAG,
-                    "billboard mesh: tag=%d origin=(%.1f,%.1f,%.1f) hits=%d",
-                    billboard_tag, origin.x, origin.y, origin.z, s_bb_hit);
-                s_bb_log++;
-            }
             td5_render_transform_mesh_vertices(mesh);
             /* Skip runtime vertex-lighting recompute for billboard meshes.
              * RenderTrackSpanDisplayList @ 0x00431270 only calls
              * TransformAndQueueTranslucentMesh which transforms XYZ only.
-             * Per-vertex intensity comes from the asset's baked values. */
-            {
-                TD5_MeshVertex *dbg_v = (TD5_MeshVertex *)(uintptr_t)mesh->vertices_offset;
-                static int s_bb_render_log = 0;
-                if (s_bb_render_log < 6 && dbg_v && mesh->total_vertex_count > 0) {
-                    TD5_LOG_I(LOG_TAG,
-                        "billboard render: mesh=%p tag=%d v0=0x%08X",
-                        (void *)mesh, billboard_tag, dbg_v[0].lighting);
-                    s_bb_render_log++;
-                }
-            }
+             * Per-vertex intensity comes from the asset's baked values
+             * (pre-dimmed for type-3 additive billboards by
+             * td5_track_dim_additive_billboard_meshes at track load). */
             td5_render_prepared_mesh(mesh);
             s_debug_span_meshes_submitted++;
             td5_render_pop_transform();
@@ -2262,6 +2246,19 @@ static void render_vehicle_shadow_quad(const TD5_Actor *actor)
     td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_POINT);
     td5_plat_render_bind_texture(s_shadow_page);
     td5_plat_render_draw_tris(verts, 4, indices, 6);
+
+    /* Restore the default opaque preset. The mesh flush path funnels
+     * through td5_render_apply_page_blend_preset (td5_render.c:1937),
+     * which is a narrow transition-only setter — it only calls
+     * set_preset on the additive toggle boundary and does nothing for
+     * ordinary opaque pages. Without this explicit reset, the shadow's
+     * TRANSLUCENT_POINT state (z_test=0, z_write=0, blend on) leaks
+     * into the car mesh draw that runs next, the car mesh never writes
+     * depth, and the wheels drawn afterwards pass depth test freely
+     * and appear inside the body. That presents as intermittent
+     * "see-through car" because the shadow doesn't draw every frame
+     * (off-screen actors, cull-skipped, etc.). */
+    td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
 }
 
 /* --- Vehicle Wheel Billboards (0x446F00) --- */
