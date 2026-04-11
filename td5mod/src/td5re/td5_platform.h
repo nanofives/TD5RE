@@ -154,6 +154,9 @@ int td5_plat_input_enumerate_devices(void);
 /** Get device name by index. */
 const char *td5_plat_input_device_name(int index);
 
+/** Get device type by index. Returns 0=keyboard, 1=gamepad, 2=joystick/wheel. */
+int td5_plat_input_device_type(int index);
+
 /** Set the active device for a player slot. */
 void td5_plat_input_set_device(int slot, int device_index);
 
@@ -304,8 +307,19 @@ void td5_plat_render_set_fog(int enable, uint32_t color, float start, float end,
 /** Upload a texture page to the GPU. Returns 0 on failure. */
 int td5_plat_render_upload_texture(int page_index, const void *pixels, int width, int height, int format);
 
+/** Query the dimensions of an uploaded texture page.
+ *  w and h are only written if the page has valid dimensions;
+ *  caller should initialize them to a sensible fallback before calling. */
+void td5_plat_render_get_texture_dims(int page_index, int *w, int *h);
+
 /** Set viewport rectangle. */
 void td5_plat_render_set_viewport(int x, int y, int width, int height);
+
+/** Set the active rasterizer scissor rect (pixels in the current render
+ *  target). Passing a rect covering the full backbuffer effectively
+ *  disables clipping. Used by the HUD/minimap render path to trim
+ *  translucent 2D draws to a sub-rect. */
+void td5_plat_render_set_clip_rect(int left, int top, int right, int bottom);
 
 /** Clear the back buffer. */
 void td5_plat_render_clear(uint32_t color);
@@ -321,8 +335,26 @@ typedef enum TD5_LogLevel {
     TD5_LOG_ERROR = 3
 } TD5_LogLevel;
 
-/** Log a message. */
+/** Log a message.  Module tag determines which log file receives it:
+ *  - frontend.log : "frontend", "hud", "save", "input"
+ *  - race.log     : "td5_game", "physics", "ai", "track", "camera", "vfx"
+ *  - engine.log   : everything else ("render", "asset", "platform", "sound",
+ *                   "net", "fmv", "main", unknown tags)
+ */
 void td5_plat_log(TD5_LogLevel level, const char *module, const char *fmt, ...);
+
+/** Flush all open log files to disk. */
+void td5_plat_log_flush(void);
+
+/** Initialize the logging subsystem.  Creates log/ directory, rotates old
+ *  sessions (keeps up to 5 previous), and opens fresh log files.
+ *  Called from main before any other logging.  Safe to call multiple times. */
+void td5_plat_log_init(void);
+
+/** Return the log directory path (e.g. "C:/.../log/").  Only valid after
+ *  td5_plat_log_init() has been called.  Useful for redirecting other
+ *  subsystem logs into the same folder. */
+const char *td5_plat_log_dir(void);
 
 #define TD5_LOG_D(mod, ...) td5_plat_log(TD5_LOG_DEBUG, mod, __VA_ARGS__)
 #define TD5_LOG_I(mod, ...) td5_plat_log(TD5_LOG_INFO,  mod, __VA_ARGS__)

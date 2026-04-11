@@ -2321,15 +2321,20 @@ void td5_hud_render_minimap(int actor_slot)
         float bl_x = mm_cx + mx_bl, bl_y = mm_cy + my_bl;
         float br_x = mm_cx + mx_br, br_y = mm_cy + my_br;
 
-        /* Soft-clip: drop road quads whose ANY corner is outside the grid rect.
-         * The original used hardware scissor; td5re has no scissor plumbing yet,
-         * so conservative-drop keeps the road inside the grid boundary. */
-        float cx_lo = s_minimap_x, cx_hi = mm_r;
-        float cy_lo = s_minimap_y, cy_hi = mm_b;
-        if (fl_x < cx_lo || fl_x > cx_hi || fl_y < cy_lo || fl_y > cy_hi) continue;
-        if (fr_x < cx_lo || fr_x > cx_hi || fr_y < cy_lo || fr_y > cy_hi) continue;
-        if (bl_x < cx_lo || bl_x > cx_hi || bl_y < cy_lo || bl_y > cy_hi) continue;
-        if (br_x < cx_lo || br_x > cx_hi || br_y < cy_lo || br_y > cy_hi) continue;
+        /* Loose AABB reject: drop only when the quad is entirely outside
+         * the minimap rect. Hardware scissor (set via td5_render_set_clip_rect
+         * at the start of this function) clips partial overhangs at the
+         * rasterizer stage, so the road extends naturally to the edge
+         * instead of popping in/out as quads enter the rect. */
+        float min_x = fl_x, max_x = fl_x, min_y = fl_y, max_y = fl_y;
+        if (fr_x < min_x) min_x = fr_x; if (fr_x > max_x) max_x = fr_x;
+        if (bl_x < min_x) min_x = bl_x; if (bl_x > max_x) max_x = bl_x;
+        if (br_x < min_x) min_x = br_x; if (br_x > max_x) max_x = br_x;
+        if (fr_y < min_y) min_y = fr_y; if (fr_y > max_y) max_y = fr_y;
+        if (bl_y < min_y) min_y = bl_y; if (bl_y > max_y) max_y = bl_y;
+        if (br_y < min_y) min_y = br_y; if (br_y > max_y) max_y = br_y;
+        if (max_x < s_minimap_x || min_x > mm_r ||
+            max_y < s_minimap_y || min_y > mm_b) continue;
 
         /* TL=front-left, BL=back-left, BR=back-right, TR=front-right */
         hud_build_quad_warped(
@@ -2369,12 +2374,9 @@ void td5_hud_render_minimap(int actor_slot)
 
             float half_dot = s_minimap_dot_size * 0.5f;
 
-            /* Skip dots that fall outside the minimap rect.
-             * The original relied on software projection-center clipping;
-             * td5_render_set_clip_rect is a stub here, so we cull in code.
-             * Previous behavior clamped to edge, which made distant racers
-             * appear pinned to the minimap border — fixing the user-visible
-             * "dots still visible far away" complaint. */
+            /* Hardware scissor clips dots that fall outside the minimap rect
+             * at the rasterizer stage. Loose AABB reject skips dots fully
+             * offscreen so we don't spend CPU building their quads. */
             float dot_x = mm_cx + dmx;
             float dot_y = mm_cy + dmy;
             if (dot_x + half_dot < s_minimap_x ||

@@ -1964,6 +1964,17 @@ void td5_plat_render_begin_scene(void)
     ID3D11DeviceContext_RSSetViewports(g_backend.context, 1, &vp);
     Backend_UpdateViewportCB(vp_w, vp_h);
 
+    /* Reset scissor rect to the full render target at scene start so any
+     * HUD-set sub-rect from the previous frame doesn't leak into this one. */
+    {
+        D3D11_RECT scissor;
+        scissor.left   = 0;
+        scissor.top    = 0;
+        scissor.right  = (LONG)vp_w;
+        scissor.bottom = (LONG)vp_h;
+        ID3D11DeviceContext_RSSetScissorRects(g_backend.context, 1, &scissor);
+    }
+
     /* Clear depth buffer */
     if (g_backend.depth_dsv) {
         ID3D11DeviceContext_ClearDepthStencilView(g_backend.context,
@@ -2310,6 +2321,34 @@ void td5_plat_render_set_viewport(int x, int y, int width, int height)
     ID3D11DeviceContext_RSSetViewports(g_backend.context, 1, &vp);
     Backend_UpdateViewportCB((float)width, (float)height);
     TD5_LOG_I(LOG_TAG, "Viewport set: x=%d y=%d w=%d h=%d", x, y, width, height);
+}
+
+void td5_plat_render_set_clip_rect(int left, int top, int right, int bottom)
+{
+    D3D11_RECT rc;
+
+    if (!g_backend.context) return;
+
+    /* Clamp to render target dimensions so we never set an invalid rect. */
+    int rt_w = (g_backend.backbuffer && g_backend.backbuffer->width)
+             ? g_backend.backbuffer->width
+             : (int)g_backend.width;
+    int rt_h = (g_backend.backbuffer && g_backend.backbuffer->height)
+             ? g_backend.backbuffer->height
+             : (int)g_backend.height;
+
+    if (left < 0)            left   = 0;
+    if (top  < 0)            top    = 0;
+    if (right  > rt_w)       right  = rt_w;
+    if (bottom > rt_h)       bottom = rt_h;
+    if (right  < left)       right  = left;
+    if (bottom < top)        bottom = top;
+
+    rc.left   = left;
+    rc.top    = top;
+    rc.right  = right;
+    rc.bottom = bottom;
+    ID3D11DeviceContext_RSSetScissorRects(g_backend.context, 1, &rc);
 }
 
 void td5_plat_render_clear(uint32_t color)

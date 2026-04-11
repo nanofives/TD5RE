@@ -492,7 +492,7 @@ static int Backend_CreateStateObjects(void)
         rd.FillMode = D3D11_FILL_SOLID;
         rd.CullMode = D3D11_CULL_NONE;
         rd.DepthClipEnable = FALSE;  /* Legacy Direct3D XYZRHW didn't clip on Z — match that behavior */
-        rd.ScissorEnable = FALSE;
+        rd.ScissorEnable = TRUE;     /* HUD/minimap uses RSSetScissorRects for 2D clipping */
         rd.MultisampleEnable = FALSE;
         rd.AntialiasedLineEnable = FALSE;
         hr = ID3D11Device_CreateRasterizerState(dev, &rd, &g_backend.rs_state);
@@ -684,20 +684,25 @@ int Backend_CreateDevice(HWND hwnd, int width, int height, int bpp, int windowed
         /* In windowed mode, create our own display window */
         device_hwnd = hwnd;
         if (windowed) {
-            int ini_w, ini_h;
-            char ini_path[MAX_PATH];
-            GetModuleFileNameA(NULL, ini_path, MAX_PATH);
-            { char *s = strrchr(ini_path, '\\'); if (s) strcpy(s + 1, "scripts\\td5_mod.ini"); }
-            ini_w = GetPrivateProfileIntA("Windowed", "Width", 0, ini_path);
-            ini_h = GetPrivateProfileIntA("Windowed", "Height", 0, ini_path);
-            if (ini_w <= 0 || ini_h <= 0) {
-                ini_w = GetSystemMetrics(SM_CXSCREEN);
-                ini_h = GetSystemMetrics(SM_CYSCREEN);
-                if (ini_w <= 0) ini_w = 1280;
-                if (ini_h <= 0) ini_h = 960;
+            /* Use pre-set target dimensions if available (standalone mode sets
+             * these from td5re.ini before calling Backend_CreateDevice).
+             * Only fall back to INI/native detection for wrapper DLL mode. */
+            if (g_backend.target_width <= 0 || g_backend.target_height <= 0) {
+                int ini_w, ini_h;
+                char ini_path[MAX_PATH];
+                GetModuleFileNameA(NULL, ini_path, MAX_PATH);
+                { char *s = strrchr(ini_path, '\\'); if (s) strcpy(s + 1, "td5re.ini"); }
+                ini_w = GetPrivateProfileIntA("Display", "Width", 0, ini_path);
+                ini_h = GetPrivateProfileIntA("Display", "Height", 0, ini_path);
+                if (ini_w <= 0 || ini_h <= 0) {
+                    ini_w = GetSystemMetrics(SM_CXSCREEN);
+                    ini_h = GetSystemMetrics(SM_CYSCREEN);
+                    if (ini_w <= 0) ini_w = 1280;
+                    if (ini_h <= 0) ini_h = 960;
+                }
+                g_backend.target_width  = ini_w;
+                g_backend.target_height = ini_h;
             }
-            g_backend.target_width  = ini_w;
-            g_backend.target_height = ini_h;
 
             if (!s_display_hwnd) {
                 s_display_hwnd = Backend_CreateDisplayWindow(g_backend.target_width, g_backend.target_height);
@@ -803,6 +808,18 @@ int Backend_CreateDevice(HWND hwnd, int width, int height, int bpp, int windowed
             vp.MinDepth = 0.0f;
             vp.MaxDepth = 1.0f;
             ID3D11DeviceContext_RSSetViewports(ctx, 1, &vp);
+
+            /* Default scissor rect covers the full render target; the RS state
+             * has ScissorEnable=TRUE so 2D HUD clipping can override it via
+             * RSSetScissorRects without touching rasterizer state. */
+            {
+                D3D11_RECT scissor;
+                scissor.left   = 0;
+                scissor.top    = 0;
+                scissor.right  = (LONG)rt_width;
+                scissor.bottom = (LONG)rt_height;
+                ID3D11DeviceContext_RSSetScissorRects(ctx, 1, &scissor);
+            }
         }
 
         /* Initialize state cache */

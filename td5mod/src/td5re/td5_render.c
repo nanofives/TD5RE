@@ -3267,7 +3267,11 @@ void td5_render_submit_translucent_low_ref(uint16_t *quad_data) {
 }
 
 void td5_render_set_clip_rect(float left, float right, float top, float bottom) {
-    (void)left; (void)right; (void)top; (void)bottom;
+    int ileft   = (int)left;
+    int itop    = (int)top;
+    int iright  = (int)(right + 0.5f);
+    int ibottom = (int)(bottom + 0.5f);
+    td5_plat_render_set_clip_rect(ileft, itop, iright, ibottom);
 }
 
 void td5_render_set_projection_center(float cx, float cy) {
