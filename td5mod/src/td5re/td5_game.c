@@ -642,6 +642,20 @@ int td5_game_init_race_session(void) {
             s_slot_state[i].state = 3;  /* disabled */
         }
     }
+    /* Drag race: slots uVar18..5 forced to state=3 (decoration).
+     * [CONFIRMED @ InitializeRaceSession 0x0042ac8e + uVar18 init 0x0042ac66]
+     * uVar18 = (g_twoPlayerModeEnabled != 0) + 1, so SP drag uVar18=1 →
+     * slots 1..5 all decoration (zero live AI); 2P drag uVar18=2 →
+     * slots 2..5 decoration. */
+    if (g_td5.drag_race_enabled) {
+        int decoration_start = (g_td5.split_screen_mode > 0) ? 2 : 1;
+        for (int i = decoration_start; i < TD5_MAX_RACER_SLOTS; i++) {
+            s_slot_state[i].state = 3;
+        }
+        TD5_LOG_I(LOG_TAG,
+                  "Drag race: slots %d..5 set to state=3 (decoration) split=%d",
+                  decoration_start, g_td5.split_screen_mode);
+    }
     /* Player-as-AI autopilot: mirrors original attract-mode at
      * InitializeRaceSession 0x0042ACCF, which writes
      *   slot[0].state = 1 - (g_attractModeDemoActive | g_benchmarkModeActive)
@@ -850,20 +864,13 @@ int td5_game_init_race_session(void) {
         static const uint8_t s_wanted_lanes[TD5_MAX_RACER_SLOTS] = {
             2, 2, 2, 2, 2, 2  /* original: 2,2,3,3,2,3 — 3 clamped to 2 */
         };
-        /* Drag-race spawn [CONFIRMED @ InitializeRaceSession 0x42B110 circuit
-         * branch + LAB_0042B228 override]:
-         *   Circuit branch at 0x42B110 (level030 is circuit) places all 6
-         *   actors in a 2x3 grid near start_span.
-         *   LAB_0042B228 then re-places slots 1-5 at absolute span 1 with
-         *   lanes 0-4 (the original's "parked decoration" layout).
-         *
-         * PORT DIVERGENCE: the drag strip STRIP.DAT has 300 spans, and span 1
-         * is ~162m away from (start_span - 6) along the Z axis. Applying the
-         * span-1 override leaves the player visually alone — slots 1-5 end up
-         * behind/ahead where the camera can't see them. Keep the circuit 2x3
-         * grid layout and skip the override so decoration cars stay beside
-         * the player. Original behavior can be restored once the STRIP.DAT
-         * span count is reconciled with LEVELINF (300 vs 3135). */
+        /* Drag-race spawn is handled as a special case below in the spawn
+         * loop [CONFIRMED @ InitializeRaceSession]:
+         *   Slot 0: InitializeActorTrackPose(0, 0x73=115, 1, 0) — hardcoded
+         *   immediate at 0x0042b0f8.
+         *   Slots 1..5: LAB_0042B228 calls InitializeActorTrackPose(i, 1,
+         *   i-1, 0) — span=1 absolute, lanes=0..4 (decoration).
+         * The circuit 2x3 grid tables below are NOT used for drag race. */
         static const uint8_t s_racer_lanes[TD5_MAX_RACER_SLOTS] = {
             1, 2, 1, 2, 1, 2
         };
@@ -921,15 +928,10 @@ int td5_game_init_race_session(void) {
         if (start_span <= 0)
             start_span = (track_span_count > 0) ? track_span_count : 1;
 
-        /* Drag race: override start_span to first LEVELINF checkpoint span.
-         * Original circuit branch @ 0x42B0F0 reads *(ushort*)(DAT_004aed88+4),
-         * which is the first checkpoint span from the per-track checkpoint
-         * record. The port loads these into s_levelinf_checkpoint_spans[]. */
-        if (drag_mode_spawn && s_levelinf_checkpoint_spans[0] > 0) {
-            start_span = (int)s_levelinf_checkpoint_spans[0];
-            TD5_LOG_I(LOG_TAG, "Grid start: drag-race override start_span=%d from LEVELINF checkpoint[0]",
-                      start_span);
-        }
+        /* Drag race does NOT derive from start_span — it uses hardcoded
+         * absolute span values (slot 0 = 115, slots 1..5 = 1) inside the
+         * spawn loop below. Start_span stays at its per-mode default so
+         * logs remain readable. */
         TD5_LOG_I(LOG_TAG, "Grid start: slot=%d level=%d circuit=%d start_span=%d span_count=%d",
                   g_td5.track_index, level_num, g_track_is_circuit, start_span, track_span_count);
 
@@ -950,6 +952,24 @@ int td5_game_init_race_session(void) {
                     span_index -= track_span_count;
             } else {
                 span_index = 1;
+            }
+
+            /* Drag race spawn override [CONFIRMED @ 0x0042b0fb, 0x0042b228]:
+             *   slot 0 → span=115, lane=1 (hardcoded immediate 0x73 at 0x42b0f8)
+             *   slots 1..5 → span=1, lane=(slot-1) via LAB_0042B228 override.
+             * Flip flag is 0 for all — no secondary 180° rotation [CONFIRMED
+             * @ 0x0043450e: param_4 == 0 skips the flip branch]. */
+            if (drag_mode_spawn) {
+                if (slot == 0) {
+                    span_index = 115;
+                    sub_lane = 1;
+                } else {
+                    span_index = 1;
+                    sub_lane = slot - 1;
+                }
+                TD5_LOG_I(LOG_TAG,
+                          "Drag spawn override: slot=%d span=%d lane=%d",
+                          slot, span_index, sub_lane);
             }
 
             sp = td5_track_get_span(span_index);
@@ -1008,17 +1028,18 @@ int td5_game_init_race_session(void) {
 
             /* Restore span_raw to the spawn span after reset.
              * reset_actor_state calls integrate_pose which calls
-             * td5_track_update_actor_position — this overwrites the entire
-             * track_state[0..3] block via update_position_recursive.
-             * The original (FUN_00405D70) has no integrate_pose step so
-             * track_state stays exactly as set above.  We replicate that
-             * by re-writing span_raw and zeroing span_norm/accum/high after
-             * reset, matching the original's post-init state.
-             * [CONFIRMED @ 0x434350 / 0x405D70: span_norm = 0 at tick 0] */
+             * td5_track_update_actor_position — this may overwrite the
+             * chassis track_state[0] via update_position_recursive if the
+             * actor crossed a boundary.
+             *
+             * Previously we also zeroed [1]/[2]/[3] here (claiming the
+             * original post-init state was 0). Wide /diff-race 2026-04-11
+             * showed the original emits span_norm=span_accum=span_high=111
+             * at sim_tick=1 for a Viper on Moscow — i.e. these fields are
+             * seeded to spawn_span by InitActorTrackSegmentPlacement
+             * (0x00445F10) and NEVER zeroed. Restore only span_raw and
+             * leave the other three at the values placed above. */
             *(int16_t *)(actor + 0x080) = (int16_t)span_index; /* span_raw   */
-            *(int16_t *)(actor + 0x082) = 0;                   /* span_norm  */
-            *(int16_t *)(actor + 0x084) = 0;                   /* span_accum */
-            *(int16_t *)(actor + 0x086) = 0;                   /* span_high  */
 
             TD5_LOG_I(LOG_TAG,
                       "Actor spawn: slot=%d span=%d pos=(%d,%d,%d) state=%d lane=%d",
