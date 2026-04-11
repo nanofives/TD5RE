@@ -2127,18 +2127,28 @@ void td5_physics_resolve_vehicle_contacts(void)
                 }
 
                 /* Dispatch rule from 0x409150 ResolveVehicleContacts:
-                 * Full OBB (ResolveVehicleCollisionPair) only when BOTH actors
-                 * are in normal state (vehicle_mode == 0) AND neither is in
-                 * max damage lockout (damage_lockout < 0x0F). Otherwise use
-                 * the simple sphere path (ResolveSimpleActorSeparation).
+                 * Full OBB only when BOTH actors are in normal state
+                 * (vehicle_mode == 0) AND neither is in max damage lockout
+                 * (damage_lockout < 0x0F). Otherwise use the sphere path
+                 * (ResolveSimpleActorSeparation).
                  *
-                 * Traffic actors (slots 6-11) are always in vehicle_mode == 1
-                 * (scripted motion), so traffic-vs-* pairs always go through
-                 * the sphere path. This matches the original and sidesteps
-                 * the broken traffic cardef half_width=0 that was producing
-                 * ~27k degenerate OBB events per lap. */
-                int a_scripted = (a->vehicle_mode != 0) || (a->damage_lockout >= 0x0F);
-                int b_scripted = (b->vehicle_mode != 0) || (b->damage_lockout >= 0x0F);
+                 * Traffic slots (6-11) should always hit the sphere path —
+                 * in the original, UpdateTrafficActorMotion flips them to
+                 * vehicle_mode == 1 (scripted motion). The port never lands
+                 * that write, so traffic stays at vehicle_mode == 0 and a
+                 * vehicle_mode-only check would fall through to OBB. Use
+                 * slot_index >= 6 as the traffic identifier directly — it is
+                 * populated unconditionally at spawn and matches the
+                 * original's intent (traffic is always scripted).
+                 *
+                 * TODO: find and land the missing vehicle_mode = 1 write for
+                 * traffic actors; then this can simplify to vehicle_mode-only. */
+                int a_scripted = (a->slot_index >= 6) ||
+                                 (a->vehicle_mode != 0) ||
+                                 (a->damage_lockout >= 0x0F);
+                int b_scripted = (b->slot_index >= 6) ||
+                                 (b->vehicle_mode != 0) ||
+                                 (b->damage_lockout >= 0x0F);
 
                 if (a_scripted || b_scripted) {
                     collision_detect_simple(a, b);
@@ -2162,8 +2172,12 @@ static void resolve_collision_pair(TD5_Actor *a, TD5_Actor *b, int idx_a, int id
     if (!a || !b) return;
     if (!a->car_definition_ptr || !b->car_definition_ptr) return;
 
-    int a_scripted = (a->vehicle_mode != 0) || (a->damage_lockout >= 0x0F);
-    int b_scripted = (b->vehicle_mode != 0) || (b->damage_lockout >= 0x0F);
+    int a_scripted = (a->slot_index >= 6) ||
+                     (a->vehicle_mode != 0) ||
+                     (a->damage_lockout >= 0x0F);
+    int b_scripted = (b->slot_index >= 6) ||
+                     (b->vehicle_mode != 0) ||
+                     (b->damage_lockout >= 0x0F);
 
     if (a_scripted || b_scripted) {
         collision_detect_simple(a, b);
