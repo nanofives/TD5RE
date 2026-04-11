@@ -2333,13 +2333,26 @@ static void render_vehicle_wheel_billboards(TD5_Actor *actor, int slot)
         wheel_lookup_static_hed();
 
     /* Read wheel dimensions from cardef (RE: 0x446E30-0x446E3C).
-     * cardef+0x82 -> rim_radius = value * 195/256
-     * cardef+0x84 -> axle_halfw = raw value (no scaling) */
+     *   cardef+0x82 (int16) -> raw rim value
+     *     - Tire ring radius = raw * 0.76171875 (DAT_0045D7AC)
+     *     - Hub-cap corners use the RAW value directly as the diamond
+     *       distance from the wheel center [CONFIRMED @ 0x446F32]; without
+     *       this the axis-aligned square is ~7.7% oversize (its corners
+     *       land at rim_scaled*sqrt(2) instead of rim_raw).
+     *   cardef+0x84 (int16) -> axle_halfw (raw, no scaling) */
     float rim_radius = WHEEL_RADIUS_DEFAULT;
+    float hub_half   = (WHEEL_RADIUS_DEFAULT / WHEEL_RADIUS_SCALE) * 0.70710678f;
     float axle_halfw = WHEEL_HALFW_DEFAULT;
     if (actor->car_definition_ptr) {
         int16_t r = *(int16_t *)((uint8_t *)actor->car_definition_ptr + 0x82);
-        if (r > 0) rim_radius = (float)r * WHEEL_RADIUS_SCALE;
+        if (r > 0) {
+            rim_radius = (float)r * WHEEL_RADIUS_SCALE;
+            /* Axis-aligned square with half-side = rim_raw / sqrt(2) has
+             * corners at distance rim_raw from the wheel center — matches
+             * the original's diamond inscription (4 verts on a circle
+             * of radius rim_raw). */
+            hub_half   = (float)r * 0.70710678f;
+        }
         int16_t hw = *(int16_t *)((uint8_t *)actor->car_definition_ptr + 0x84);
         if (hw > 0) axle_halfw = (float)hw;
     }
@@ -2485,10 +2498,10 @@ static void render_vehicle_wheel_billboards(TD5_Actor *actor, int slot)
         {
             float ho = outer_off;
             float corner_offsets[4][3] = {
-                { ho, +rim_radius, -rim_radius },
-                { ho, +rim_radius, +rim_radius },
-                { ho, -rim_radius, +rim_radius },
-                { ho, -rim_radius, -rim_radius },
+                { ho, +hub_half, -hub_half },
+                { ho, +hub_half, +hub_half },
+                { ho, -hub_half, +hub_half },
+                { ho, -hub_half, -hub_half },
             };
             float corners[4][3];
             for (int c = 0; c < 4; c++) {
