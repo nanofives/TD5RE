@@ -698,18 +698,27 @@ void td5_track_resolve_wall_contacts(TD5_Actor *actor)
             }
         }
 
-        /* Fire a wall whenever the closest rail segment's signed distance
-         * is negative. Containment is preferred when picking the segment
-         * but no longer gates the fire. Clamp penetration to -1200 so a
-         * single-frame chassis-span glitch can't produce a huge push.
+        /* Fire a wall only when the penetration is clearly non-trivial.
+         * A DEAD ZONE of 10 units eliminates the oscillation seen at race
+         * start: AI cars at the starting grid have wheelbases that
+         * slightly exceed the grid-cell rail spacing, leaving their
+         * corner probes ~4 units past each rail. Without the dead zone
+         * the wall check fires every tick on both LEFT and RIGHT probes,
+         * the response oscillates, and the AI gets pinned in place —
+         * which is what the "invisible confinement blocking the race
+         * start" was in the last test lap.
+         *
+         * Clamp penetration to -1200 so a single-frame chassis-span
+         * glitch can't produce a huge push.
          *
          * wall_angle: the push formula inside td5_physics_wall_response
          * moves the car by (sin(angle), -cos(angle)) * push. To push in
          * the inward perp direction (nnx, nnz), angle must satisfy
          * sin(angle) ∝ nnx and -cos(angle) ∝ nnz, i.e.
-         * angle = atan2(nnx, -nnz). This works regardless of whether the
-         * perp was auto-flipped in the segment loop. */
-        if (lhit.valid && lhit.d < 0) {
+         * angle = atan2(nnx, -nnz). */
+        const int32_t WALL_DEAD_ZONE = -10;
+
+        if (lhit.valid && lhit.d < WALL_DEAD_ZONE) {
             int32_t d = lhit.d;
             if (d < -1200) d = -1200;
             double rad = atan2((double)lhit.nnx, (double)(-lhit.nnz));
@@ -720,7 +729,7 @@ void td5_track_resolve_wall_contacts(TD5_Actor *actor)
                       actor->slot_index, pi, span_idx, d, lbest_contained, wall_angle);
         }
 
-        if (rhit.valid && rhit.d < 0) {
+        if (rhit.valid && rhit.d < WALL_DEAD_ZONE) {
             int32_t d = rhit.d;
             if (d < -1200) d = -1200;
             double rad = atan2((double)rhit.nnx, (double)(-rhit.nnz));
