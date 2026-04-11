@@ -811,21 +811,20 @@ int td5_game_init_race_session(void) {
         static const uint8_t s_wanted_lanes[TD5_MAX_RACER_SLOTS] = {
             2, 2, 2, 2, 2, 2  /* original: 2,2,3,3,2,3 — 3 clamped to 2 */
         };
-        /* Drag-race spawn (InitializeRaceSession @ LAB_0042B228):
-         *   slot 0: span 0x73,  lane 1  (set via the non-wanted GT!=0 path @ 0x42B1CE)
-         *   slot 1: span 1,     lane 0
-         *   slot 2: span 1,     lane 1
-         *   slot 3: span 1,     lane 2
-         *   slot 4: span 1,     lane 3
-         *   slot 5: span 1,     lane 4
-         * Port only supports lanes 1-2; drag lanes 0..4 map to alternating 1/2.
-         * Span 1 is an absolute span index, not an offset. We detect drag in the
-         * spawn loop and use absolute-span path. [RE basis: Ghidra @ 0x42B228] */
-        static const int8_t s_drag_absolute_spans[TD5_MAX_RACER_SLOTS] = {
-            0x73, 1, 1, 1, 1, 1
-        };
-        static const uint8_t s_drag_lanes[TD5_MAX_RACER_SLOTS] = {
-            1, 1, 2, 1, 2, 1  /* best-effort mapping of original lanes 1,0,1,2,3,4 */
+        /* Drag-race spawn [CONFIRMED @ InitializeRaceSession 0x42B110 circuit
+         * branch + LAB_0042B228 override]:
+         *   Slot 0 spawns via the CIRCUIT branch at 0x42B110:
+         *     FUN_00434350(0, start_span - 6, 1, 0)  — start_span is the first
+         *     LEVELINF checkpoint span, loaded from (DAT_004aed88 + 4).
+         *   Slots 1-5 overridden at LAB_0042B228 to span 1 with lanes 0-4:
+         *     FUN_00434350(1, 1, 0, 0), FUN_00434350(2, 1, 1, 0), ...
+         * Port only supports lanes 1-2; original lanes 0..4 map to alternating
+         * 1/2 as best-effort decoration placement. Prior table `{0x73,...}`
+         * was a misread — 0x73 came from the Time-Trial branch @ 0x42B1E7, not
+         * drag. The drag override handles slots 1-5 only; slot 0 is left in
+         * its circuit-branch position. */
+        static const uint8_t s_drag_decoration_lanes[TD5_MAX_RACER_SLOTS] = {
+            1, 2, 1, 2, 1, 2  /* slot 0 unused here; 1-5 alternate lanes */
         };
         static const uint8_t s_racer_lanes[TD5_MAX_RACER_SLOTS] = {
             1, 2, 1, 2, 1, 2
@@ -860,8 +859,9 @@ int td5_game_init_race_session(void) {
             span_offsets = s_wanted_span_offsets;
             active_lanes = s_wanted_lanes;
         } else if (drag_mode_spawn) {
-            span_offsets = NULL;          /* absolute-span path used instead */
-            active_lanes = s_drag_lanes;
+            /* Slot 0 uses circuit-branch offsets; slots 1-5 overridden below. */
+            span_offsets = s_circuit_span_offsets;
+            active_lanes = s_drag_decoration_lanes;
         } else if (g_track_is_circuit) {
             span_offsets = s_circuit_span_offsets;
             active_lanes = s_racer_lanes;
@@ -882,6 +882,16 @@ int td5_game_init_race_session(void) {
         }
         if (start_span <= 0)
             start_span = (track_span_count > 0) ? track_span_count : 1;
+
+        /* Drag race: override start_span to first LEVELINF checkpoint span.
+         * Original circuit branch @ 0x42B0F0 reads *(ushort*)(DAT_004aed88+4),
+         * which is the first checkpoint span from the per-track checkpoint
+         * record. The port loads these into s_levelinf_checkpoint_spans[]. */
+        if (drag_mode_spawn && s_levelinf_checkpoint_spans[0] > 0) {
+            start_span = (int)s_levelinf_checkpoint_spans[0];
+            TD5_LOG_I(LOG_TAG, "Grid start: drag-race override start_span=%d from LEVELINF checkpoint[0]",
+                      start_span);
+        }
         TD5_LOG_I(LOG_TAG, "Grid start: slot=%d level=%d circuit=%d start_span=%d span_count=%d",
                   g_td5.track_index, level_num, g_track_is_circuit, start_span, track_span_count);
 
@@ -895,10 +905,13 @@ int td5_game_init_race_session(void) {
             TD5_StripSpan *sp;
 
             if (track_span_count > 0) {
-                if (drag_mode_spawn) {
-                    /* Drag race uses ABSOLUTE span indices from 0x42B228. */
-                    span_index = (int)s_drag_absolute_spans[slot];
+                if (drag_mode_spawn && slot > 0) {
+                    /* Drag override [LAB_0042B228]: slots 1-5 all at span 1,
+                     * lanes 0-4 (port clamps to 1/2 alternating). */
+                    span_index = 1;
+                    sub_lane = s_drag_decoration_lanes[slot];
                 } else {
+                    /* Slot 0 (or non-drag): normal circuit/staggered path. */
                     span_index = start_span + span_offsets[slot];
                 }
                 while (span_index < 0)
