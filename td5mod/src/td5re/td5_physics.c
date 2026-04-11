@@ -1494,20 +1494,63 @@ static int obb_corner_test(TD5_Actor *a, TD5_Actor *b,
 }
 
 /* ========================================================================
- * Collision Response -- FUN_004079c0
+ * Collision Response -- FUN_004079c0 ApplyVehicleCollisionImpulse
  *
- * Impulse-based with angular velocity coupling.
- * Called per penetrating corner from collision_detect_full.
+ * Rewrite (2026-04-11) to match the original's case-split impulse model.
+ * Prior port used a 2D minimum-penetration-axis model; the original does NOT.
+ *
+ * Algorithm [CONFIRMED @ 0x4079C0 via Ghidra pass]:
+ *   1. Save angular velocities (prologue).
+ *   2. Rotate both actors' linear velocities into A's local frame using
+ *      cos/sin of `angle` (= target's world yaw).
+ *        local_54 = A tangent, local_50 = A normal
+ *        local_4c = B tangent, local_44 = B normal
+ *   3. Case split on contactData[1] (cz_A) sign vs. A's box extents to pick
+ *      SIDE or FRONT/REAR impact branch.
+ *   4. Branch body (either side or front/rear):
+ *      - Apply positional push along ±sin/cos of angle.
+ *      - Compute mass polynomial using z² (side) or x² (front) terms.
+ *      - Angular contribution: (cz_B*ω_B - cz_A*ω_A)/0x28C for side, (cx ...)
+ *        for front.
+ *      - Impulse scalar = (500000>>8 * 0x1100) / (poly>>8) * rel_vel, >>12.
+ *      - Sign rejection: if ((cx_B - cx_A) ^ impulse) < 0 → return (separating).
+ *      - Update tangent/normal velocity channels and angular deltas.
+ *   5. TOI rollback: pos/euler -= (0x100 - impactForce) * vel >> 8 for both.
+ *   6. Commit new angular velocity (saved + delta).
+ *   7. Rotate linear velocities back to world frame from tangent/normal.
+ *   8. TOI re-advance: pos/euler += (0x100 - impactForce) * new_vel >> 8.
+ *   9. UpdateVehiclePoseFromPhysicsState on both actors.
+ *  10. Impact magnitude = |(mass_A + mass_B) * impulse|; apply damage/sfx.
  *
  * Key constants:
- *   INERTIA_BASE = 500000 (0x7A120)
- *   RESTITUTION_SCALE = 0x1100 (4352)
- *   ANGULAR_DIVISOR = 0x28C (652)
- *   Mass from carData+0x88 (int16)
+ *   INERTIA_K      = 500000 (DAT_00463204)
+ *   NUM_SCALE      = 0x1100 (4352)
+ *   ANG_DIVISOR    = 0x28C  (652)
+ *   INERTIA_PER_ANG = 500000/652 = 766 (integer)
+ *   Mass: cardef+0x88 (int16)
+ *   Extents: cardef+0x04 (front-Z), cardef+0x08 (half-width),
+ *            cardef+0x14 (rear-Z, stored negative).
+ *
+ * Caller interface preserved: (penetrator, target, corner_idx, corner, heading).
+ * Internally, "A" = target (frame owner whose yaw = angle), "B" = penetrator.
+ * Contact data is synthesized from corner:
+ *   cx_A, cz_A = corner->proj_x, proj_z      (contact in A's frame)
+ *   cx_B, cz_B = -proj_x + pen_x, -proj_z + pen_z  (equal-and-opposite approx)
+ *
+ * Notes on UNCERTAIN items (tracked in todo_collision_engine_gaps.md):
+ *  - impactForce (TOI fraction) is hardcoded to 0x70 here; the original
+ *    receives it from the caller's binary-search refinement. The port's
+ *    `collision_detect_full` does a different binary search that doesn't
+ *    track TOI. Fixing this requires rewriting the caller to do the
+ *    position-based bisection the original does (0x408A60).
+ *  - contactData[2,3] (cx_B,cz_B) mapping is an approximation — the original
+ *    has per-frame coordinates written by CollectVehicleCollisionContacts
+ *    (0x408570) that aren't fully decoded yet.
  * ======================================================================== */
 
-#define RESTITUTION_SCALE   0x1100
-#define ANGULAR_DIVISOR     0x28C
+#define V2V_NUM_SCALE        0x1100
+#define V2V_ANG_DIVISOR      0x28C
+#define V2V_INERTIA_PER_ANG  (V2V_INERTIA_K / V2V_ANG_DIVISOR)  /* 766 */
 
 static void apply_collision_response(TD5_Actor *penetrator, TD5_Actor *target,
                                      int corner_idx, OBB_CornerData *corner,
@@ -1515,152 +1558,213 @@ static void apply_collision_response(TD5_Actor *penetrator, TD5_Actor *target,
 {
     if (!penetrator || !target) return;
     if (!penetrator->car_definition_ptr || !target->car_definition_ptr) return;
+    (void)corner_idx;
 
-    /* Get masses */
-    int32_t mass_p = (int32_t)CDEF_S(penetrator, 0x88);
-    int32_t mass_t = (int32_t)CDEF_S(target, 0x88);
-    if (mass_p <= 0) mass_p = 0x20;
-    if (mass_t <= 0) mass_t = 0x20;
+    TD5_Actor *A = target;      /* frame owner (yaw drives `angle`) */
+    TD5_Actor *B = penetrator;  /* other actor */
+    int32_t    angle       = heading_target;
+    int32_t    impactForce = 0x70;  /* TODO: wire from caller's TOI bisection */
 
-    int32_t pen_x = (int32_t)corner->pen_x;
-    int32_t pen_z = (int32_t)corner->pen_z;
+    /* --- 1. Prologue: save angular velocities for delta application --- */
+    int32_t saved_omega_A = A->angular_velocity_yaw;
+    int32_t saved_omega_B = B->angular_velocity_yaw;
 
-    /* Determine which OBB face was penetrated (minimum penetration axis) */
-    int32_t abs_pen_x = pen_x < 0 ? -pen_x : pen_x;
-    int32_t abs_pen_z = pen_z < 0 ? -pen_z : pen_z;
+    /* Mass from cardef+0x88 (int16); clamp invalid values. */
+    int32_t mass_A = (int32_t)CDEF_S(A, 0x88);
+    int32_t mass_B = (int32_t)CDEF_S(B, 0x88);
+    if (mass_A <= 0) mass_A = 0x20;
+    if (mass_B <= 0) mass_B = 0x20;
 
-    /* Contact normal in target's local frame: choose minimum penetration axis */
-    int32_t local_nx, local_nz;
-    int32_t penetration;
-    if (abs_pen_x < abs_pen_z) {
-        /* Side face contact */
-        local_nx = (pen_x > 0) ? 1 : -1;
-        local_nz = 0;
-        penetration = abs_pen_x;
+    /* --- 2. Rotate both velocities into A's local (contact) frame --- */
+    int32_t cos_a = cos_fixed12(angle);
+    int32_t sin_a = sin_fixed12(angle);
+
+    int32_t vxA = A->linear_velocity_x;
+    int32_t vzA = A->linear_velocity_z;
+    int32_t vxB = B->linear_velocity_x;
+    int32_t vzB = B->linear_velocity_z;
+
+    int32_t local_54 = (vxA * cos_a - vzA * sin_a) >> 12;  /* A tangent */
+    int32_t local_50 = (vxA * sin_a + vzA * cos_a) >> 12;  /* A normal  */
+    int32_t local_4c = (vxB * cos_a - vzB * sin_a) >> 12;  /* B tangent */
+    int32_t local_44 = (vxB * sin_a + vzB * cos_a) >> 12;  /* B normal  */
+
+    /* --- Unpack contactData (synthesized from corner) --- */
+    int32_t cx_A = (int32_t)corner->proj_x;
+    int32_t cz_A = (int32_t)corner->proj_z;
+    int32_t cx_B = -(int32_t)corner->proj_x + (int32_t)corner->pen_x;
+    int32_t cz_B = -(int32_t)corner->proj_z + (int32_t)corner->pen_z;
+
+    /* --- 3. Case split: side vs front/rear --- */
+    /* [CONFIRMED @ 0x407ADB]: cardef+0x04 = front-Z extent (positive),
+     *                         cardef+0x08 = half-width,
+     *                         cardef+0x14 = rear-Z extent (stored negative). */
+    int32_t half_w_A   = (int32_t)CDEF_S(A, 0x08);
+    int32_t front_z_A  = (int32_t)CDEF_S(A, 0x04);
+    int32_t rear_z_A   = (int32_t)CDEF_S(A, 0x14);
+
+    int32_t abs_cx_A   = cx_A < 0 ? -cx_A : cx_A;
+    int32_t side_extent = half_w_A - abs_cx_A;
+
+    int is_side_branch;
+    if (cz_A < 1) {
+        /* Rear half (cz_A <= 0) — compare distance past rear vs side */
+        int32_t rear_depth = cz_A - rear_z_A;  /* rear_z_A negative → adds |rear| */
+        if (rear_depth < 0) rear_depth = -rear_depth;
+        is_side_branch = (rear_depth > side_extent);
     } else {
-        /* Front/rear face contact */
-        local_nx = 0;
-        local_nz = (pen_z > 0) ? 1 : -1;
-        penetration = abs_pen_z;
+        /* Front half (cz_A > 0) — compare distance past front vs side */
+        int32_t front_depth = front_z_A - cz_A;
+        if (front_depth < 0) front_depth = -front_depth;
+        is_side_branch = (side_extent < front_depth);
     }
 
-    /* Rotate contact normal from target's local frame to world frame */
-    int32_t cos_t = cos_fixed12(heading_target);
-    int32_t sin_t = sin_fixed12(heading_target);
-    int32_t world_nx = (local_nx * cos_t - local_nz * sin_t);
-    int32_t world_nz = (local_nx * sin_t + local_nz * cos_t);
-    /* world_nx/world_nz are in [-4096..4096] range (12-bit) when local is unit */
-    if (local_nx == 0 && local_nz == 0) return;
+    /* --- 4. Branch-specific impulse math --- */
+    int32_t impulse      = 0;
+    int32_t omega_A_delta = 0;
+    int32_t omega_B_delta = 0;
+    int     rejected     = 0;
+    int32_t push_x = 0, push_z = 0;
 
-    /* Normalize: local_nx/nz are +/-1, so world normal magnitude = 1 in 12-bit.
-     * Scale to proper 12-bit range */
-    if (local_nx != 0) {
-        world_nx *= 0x1000;
-        world_nz *= 0x1000;
+    const int64_t INERTIA_K_64 = (int64_t)V2V_INERTIA_K;
+    const int64_t NUM_CONST    = (INERTIA_K_64 >> 8) * V2V_NUM_SCALE;
+
+    if (is_side_branch) {
+        /* --- SIDE BRANCH (LAB_00407B7F) --- */
+        if (cx_A - cx_B >= 0) { push_x = -cos_a / 2; push_z =  sin_a / 2; }
+        else                  { push_x =  cos_a / 2; push_z = -sin_a / 2; }
+
+        int64_t denom = ((int64_t)cz_B * cz_B + INERTIA_K_64) * mass_A
+                      + ((int64_t)cz_A * cz_A + INERTIA_K_64) * mass_B;
+        denom >>= 8;
+        if (denom == 0) denom = 1;
+
+        int32_t ang_contrib =
+            (int32_t)(((int64_t)cz_B * saved_omega_B) / V2V_ANG_DIVISOR) -
+            (int32_t)(((int64_t)cz_A * saved_omega_A) / V2V_ANG_DIVISOR);
+        int32_t rel_vel = ang_contrib - local_54 + local_4c;
+
+        int64_t impulse_raw = (NUM_CONST / denom) * rel_vel;
+        impulse = (int32_t)(impulse_raw >> 12);
+
+        /* [CONFIRMED @ 0x4079C0 side branch]: XOR sign rejection. */
+        if (((cx_B - cx_A) ^ impulse) < 0) {
+            rejected = 1;
+        } else {
+            local_54 += impulse * mass_A;
+            local_4c -= impulse * mass_B;
+            omega_A_delta =  (int32_t)(((int64_t)impulse * mass_A * cz_A) / V2V_INERTIA_PER_ANG);
+            omega_B_delta = -(int32_t)(((int64_t)impulse * mass_B * cz_B) / V2V_INERTIA_PER_ANG);
+        }
     } else {
-        world_nx *= 0x1000;
-        world_nz *= 0x1000;
-    }
-    /* At this point world_nx/nz are 12-bit scaled unit normal */
+        /* --- FRONT/REAR BRANCH (LAB_00407B2D) --- */
+        if (cz_A - cz_B >= 0) { push_x = -sin_a / 2; push_z = -cos_a / 2; }
+        else                  { push_x =  sin_a / 2; push_z =  cos_a / 2; }
 
-    /* --- 3. Push actors apart along normal by penetration --- */
-    int32_t push_half = (penetration + 1) >> 1;
-    penetrator->world_pos.x += (world_nx * push_half) >> 12;
-    penetrator->world_pos.z += (world_nz * push_half) >> 12;
-    target->world_pos.x -= (world_nx * push_half) >> 12;
-    target->world_pos.z -= (world_nz * push_half) >> 12;
+        int64_t denom = ((int64_t)cx_B * cx_B + INERTIA_K_64) * mass_A
+                      + ((int64_t)cx_A * cx_A + INERTIA_K_64) * mass_B;
+        denom >>= 8;
+        if (denom == 0) denom = 1;
 
-    /* --- 1. Rotate velocities into collision frame using heading --- */
-    /* Relative velocity */
-    int32_t rel_vx = penetrator->linear_velocity_x - target->linear_velocity_x;
-    int32_t rel_vz = penetrator->linear_velocity_z - target->linear_velocity_z;
+        int32_t ang_contrib =
+            (int32_t)(((int64_t)cx_B * saved_omega_B) / V2V_ANG_DIVISOR) -
+            (int32_t)(((int64_t)cx_A * saved_omega_A) / V2V_ANG_DIVISOR);
+        int32_t rel_vel = ang_contrib - local_50 + local_44;
 
-    /* Project relative velocity onto contact normal */
-    int32_t v_closing = (rel_vx * world_nx + rel_vz * world_nz) >> 12;
+        int64_t impulse_raw = (NUM_CONST / denom) * rel_vel;
+        impulse = (int32_t)(impulse_raw >> 12);
 
-    /* Guard: if separating, only apply positional correction */
-    if (v_closing > 0) return;
-
-    /* --- 4. Compute impulse using moment-of-inertia formula --- */
-    /* Contact offset from center of mass (use projected position) */
-    int32_t r_p = (int32_t)corner->proj_x;  /* lateral offset in target frame */
-    int32_t r_t = (int32_t)corner->proj_z;  /* longitudinal offset in target frame */
-    int32_t r_sq_p = (int64_t)r_p * r_p;
-    int32_t r_sq_t = (int64_t)r_t * r_t;
-
-    /* denominator = (r_sq + INERTIA_BASE) / mass for each car */
-    int64_t denom = (int64_t)(r_sq_t + V2V_INERTIA_K) * mass_p +
-                    (int64_t)(r_sq_p + V2V_INERTIA_K) * mass_t;
-    denom >>= 8;
-    if (denom == 0) denom = 1;
-
-    /* numerator = (INERTIA_BASE >> 8) * RESTITUTION_SCALE */
-    int64_t impulse_num = (int64_t)(V2V_INERTIA_K >> 8) * RESTITUTION_SCALE;
-    int32_t impulse = (int32_t)(impulse_num / denom) * (-v_closing);
-    impulse >>= 4;
-
-    /* --- 5. Apply linear impulse --- */
-    int32_t imp_x = (impulse * world_nx) >> 12;
-    int32_t imp_z = (impulse * world_nz) >> 12;
-
-    penetrator->linear_velocity_x += imp_x / mass_p;
-    penetrator->linear_velocity_z += imp_z / mass_p;
-    target->linear_velocity_x -= imp_x / mass_t;
-    target->linear_velocity_z -= imp_z / mass_t;
-
-    /* --- 6. Angular impulse: angVel += J * mass * r / (INERTIA_BASE / ANGULAR_DIVISOR) --- */
-    int32_t inertia_ang = V2V_INERTIA_K / ANGULAR_DIVISOR;  /* ~767 */
-    if (inertia_ang == 0) inertia_ang = 1;
-
-    /* Cross product of contact offset x impulse direction -> yaw torque */
-    int32_t torque_p = ((int64_t)r_p * imp_z - (int64_t)r_t * imp_x) >> 12;
-    int32_t torque_t = ((int64_t)corner->proj_x * imp_z -
-                        (int64_t)corner->proj_z * imp_x) >> 12;
-
-    penetrator->angular_velocity_yaw += (torque_p * mass_p) / (inertia_ang * mass_p + 1);
-    target->angular_velocity_yaw     -= (torque_t * mass_t) / (inertia_ang * mass_t + 1);
-
-    /* --- 7. Velocity damping based on penetration depth --- */
-    if (penetration > 16) {
-        int32_t damp = 256 - (penetration >> 2);
-        if (damp < 128) damp = 128;
-        penetrator->linear_velocity_x = (penetrator->linear_velocity_x * damp) >> 8;
-        penetrator->linear_velocity_z = (penetrator->linear_velocity_z * damp) >> 8;
-        target->linear_velocity_x = (target->linear_velocity_x * damp) >> 8;
-        target->linear_velocity_z = (target->linear_velocity_z * damp) >> 8;
+        if (((cz_B - cz_A) ^ impulse) < 0) {
+            rejected = 1;
+        } else {
+            local_50 += impulse * mass_A;
+            local_44 -= impulse * mass_B;
+            omega_A_delta = -(int32_t)(((int64_t)impulse * mass_A * cx_A) / V2V_INERTIA_PER_ANG);
+            omega_B_delta =  (int32_t)(((int64_t)impulse * mass_B * cx_B) / V2V_INERTIA_PER_ANG);
+        }
     }
 
-    /* --- 8. Update poses --- */
-    update_vehicle_pose_from_physics(penetrator);
-    update_vehicle_pose_from_physics(target);
+    if (rejected) {
+        /* Separating contact — no position or velocity update. */
+        TD5_LOG_I(LOG_TAG, "v2v_reject: slot_A=%d slot_B=%d side=%d cxA=%d czA=%d cxB=%d czB=%d imp=%d",
+                  A->slot_index, B->slot_index, is_side_branch, cx_A, cz_A, cx_B, cz_B, impulse);
+        return;
+    }
 
-    /* --- 9. Crash effects based on impulse magnitude --- */
-    int32_t impact_mag = impulse < 0 ? -impulse : impulse;
+    /* Apply positional push (A pushed one way, B the opposite). */
+    A->world_pos.x -= push_x;
+    A->world_pos.z -= push_z;
+    B->world_pos.x += push_x;
+    B->world_pos.z += push_z;
 
-    /* Heavy impact (> 90000): tumble + heavy SFX */
+    /* --- 5. TOI rollback (before committing new velocities) --- */
+    int32_t toi_frac = 0x100 - impactForce;
+
+    A->world_pos.x -= (toi_frac * A->linear_velocity_x) >> 8;
+    A->world_pos.z -= (toi_frac * A->linear_velocity_z) >> 8;
+    A->euler_accum.yaw -= (toi_frac * A->angular_velocity_yaw) >> 8;
+    B->world_pos.x -= (toi_frac * B->linear_velocity_x) >> 8;
+    B->world_pos.z -= (toi_frac * B->linear_velocity_z) >> 8;
+    B->euler_accum.yaw -= (toi_frac * B->angular_velocity_yaw) >> 8;
+
+    /* --- 6. Commit new angular velocities --- */
+    A->angular_velocity_yaw = saved_omega_A + omega_A_delta;
+    B->angular_velocity_yaw = saved_omega_B + omega_B_delta;
+
+    /* --- 7. Rotate tangent/normal channels back to world frame --- */
+    A->linear_velocity_x = (local_50 * sin_a + local_54 * cos_a) >> 12;
+    A->linear_velocity_z = (local_50 * cos_a - local_54 * sin_a) >> 12;
+    B->linear_velocity_x = (local_44 * sin_a + local_4c * cos_a) >> 12;
+    B->linear_velocity_z = (local_44 * cos_a - local_4c * sin_a) >> 12;
+
+    /* --- 8. TOI re-advance (with the new post-impulse velocities) --- */
+    A->world_pos.x += (toi_frac * A->linear_velocity_x) >> 8;
+    A->world_pos.z += (toi_frac * A->linear_velocity_z) >> 8;
+    A->euler_accum.yaw += (toi_frac * A->angular_velocity_yaw) >> 8;
+    B->world_pos.x += (toi_frac * B->linear_velocity_x) >> 8;
+    B->world_pos.z += (toi_frac * B->linear_velocity_z) >> 8;
+    B->euler_accum.yaw += (toi_frac * B->angular_velocity_yaw) >> 8;
+
+    /* --- 9. Post-impulse pose update on both --- */
+    update_vehicle_pose_from_physics(A);
+    update_vehicle_pose_from_physics(B);
+
+    /* --- 10. Impact magnitude and damage effects --- */
+    int64_t impact_signed = (int64_t)(mass_A + mass_B) * impulse;
+    int32_t impact_mag = (int32_t)(impact_signed < 0 ? -impact_signed : impact_signed);
+
+    TD5_LOG_I(LOG_TAG, "v2v_impulse: side=%d slot_A=%d slot_B=%d mA=%d mB=%d "
+              "cxA=%d czA=%d cxB=%d czB=%d imp=%d mag=%d toi=%d",
+              is_side_branch, A->slot_index, B->slot_index, mass_A, mass_B,
+              cx_A, cz_A, cx_B, cz_B, impulse, impact_mag, impactForce);
+
+    /* Traffic recovery escalation (> 50000 and slot>=6). */
+    if (A->slot_index >= 6 && impact_mag > 50000 &&
+        A->damage_lockout > 0 && A->damage_lockout < 7) {
+        A->damage_lockout++;
+    }
+    if (B->slot_index >= 6 && impact_mag > 50000 &&
+        B->damage_lockout > 0 && B->damage_lockout < 7) {
+        B->damage_lockout++;
+    }
+
+    /* Heavy impact (> 90000) with collisions enabled: visual scatter.
+     * Original uses GetDamageRulesStub() RNG + traffic orientation rebuild;
+     * we use a deterministic approximation here. */
     if (impact_mag > 90000 && g_collisions_enabled == 0) {
-        if (penetrator->slot_index < 6) {
-            penetrator->euler_accum.roll  += (impact_mag >> 10) & 0x3F;
-            penetrator->euler_accum.pitch += (impact_mag >> 11) & 0x1F;
+        int32_t scatter = impact_mag / 4;
+        if (scatter > 0x7FFF) scatter = 0x7FFF;
+        if (A->slot_index < 6) {
+            A->euler_accum.roll  += (scatter >> 2) - (scatter >> 3);
+            A->euler_accum.pitch += (scatter >> 1) - scatter;
+            A->linear_velocity_y  = impact_mag / 6;
         }
-        if (target->slot_index < 6) {
-            target->euler_accum.roll  -= (impact_mag >> 10) & 0x3F;
-            target->euler_accum.pitch -= (impact_mag >> 11) & 0x1F;
+        if (B->slot_index < 6) {
+            B->euler_accum.roll  -= (scatter >> 2) - (scatter >> 3);
+            B->euler_accum.pitch -= (scatter >> 1) - scatter;
+            B->linear_velocity_y  = impact_mag / 6;
         }
-        /* Increment damage lockout for traffic vehicles */
-        if (penetrator->slot_index >= 6) penetrator->damage_lockout++;
-        if (target->slot_index >= 6) target->damage_lockout++;
     }
-
-    /* Medium impact (> 50000): medium SFX + traffic damage */
-    if (impact_mag > 50000) {
-        if (penetrator->slot_index >= 6) penetrator->damage_lockout++;
-        if (target->slot_index >= 6) target->damage_lockout++;
-    }
-
-    /* Light impact (> 12800): light SFX (sound hook point) */
-    /* Impact SFX severity stored for sound system to pick up */
-    (void)impact_mag; /* sound integration point */
 }
 
 /* ========================================================================

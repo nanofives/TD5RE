@@ -1691,6 +1691,10 @@ static int td5_asset_upload_png_texture_page(int page_index,
                 px[3] = (r | g | b) ? 0xFF : 0x00;
             }
         }
+        /* Dilate RGB into transparent texels so the D3D11 LINEAR sampler
+         * doesn't bleed {0,0,0,0} into opaque edges. No-op if the PNG has
+         * no alpha=0 pixels. */
+        alpha_bleed_rgb((uint8_t *)pixels, width, height);
         ok = td5_plat_render_upload_texture(page_index, pixels, width, height, 2);
         stbi_image_free(pixels);
         if (ok && loaded_count)
@@ -2101,6 +2105,15 @@ int td5_asset_load_race_texture_pages(void)
             rgba[px * 4 + 1] = g_val;
             rgba[px * 4 + 2] = r_val;
             rgba[px * 4 + 3] = alpha;
+        }
+
+        /* Alpha-keyed and additive pages zero RGB at transparent texels
+         * (matching BuildTrackTextureCacheImpl @ 0x0040B1D0). Under the
+         * wrapper's LINEAR sampler that bleeds black into opaque edges —
+         * dilate neighbour RGB into the zero-alpha texels to cancel it.
+         * Type 2 (uniform alpha 0x80) has no transparent pixels: skipped. */
+        if (page_type == 1 || page_type == 3) {
+            alpha_bleed_rgb(rgba, 64, 64);
         }
 
         td5_plat_render_upload_texture((int)pg, rgba, 64, 64, 2);
