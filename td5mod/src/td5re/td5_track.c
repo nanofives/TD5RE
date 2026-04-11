@@ -538,129 +538,166 @@ void td5_track_resolve_wall_contacts(TD5_Actor *actor)
         int lane_count = span_lane_count(sp);
         if (lane_count < 1) lane_count = 1;
 
-        /* Sub-segment index within the span (from the boundary walker).
-         * Clamp to [0, lane_count-1] so `+sub_lane+1` stays within the
-         * span's rail vertex array. */
-        int sub_lane = (int)probe->sub_lane_index;
-        if (sub_lane < 0) sub_lane = 0;
-        if (sub_lane >= lane_count) sub_lane = lane_count - 1;
-
         int32_t px = probe_block[pi].x >> 8;
         int32_t pz = probe_block[pi].z >> 8;
 
-        /* --- LEFT RAIL of the current sub-segment ---
+        /* --- Closest-segment rail test ---
          *
-         * For a multi-segment (curved or bent) span, the left rail is a
-         * polyline of vertices left[0..lane_count]. Using left[0] and
-         * left[lane_count] gives the overall CHORD of the rail — a
-         * single straight line from the first to last vertex. On a
-         * curved span that chord cuts through the interior of the curve
-         * and creates "invisible walls" inside the drivable area, which
-         * matches the reported symptom.
+         * The rail is a polyline of vertices rail[0..lane_count]. Using
+         * the probe's sub_lane_index to pick a segment (previous attempt)
+         * reads stale state from the boundary walker, which on curved
+         * spans can point at a segment far from the probe's real
+         * position — producing massively negative d values and
+         * "invisible walls" inside the drivable area.
          *
-         * Fix: use the probe's current sub-segment vertices (left[sub_lane]
-         * and left[sub_lane+1]) so the rail edge follows the actual
-         * polyline at each point. The boundary walker in
-         * update_position_recursive is responsible for keeping the
-         * probe's sub_lane_index synchronized with the probe's real
-         * position along the span's length.
+         * Instead: iterate all segments of the polyline, compute for
+         * each the projection t along the segment and the perpendicular
+         * distance d, and pick the segment where the probe's projection
+         * actually lands inside the segment (0 <= t <= edge_len_sq). Of
+         * those, take the one with smallest |d|. If no segment contains
+         * the projection (probe is past the polyline ends), pick the
+         * segment with smallest |d| regardless.
          *
-         * Rotating the edge 90° CW via (edge_dz, -edge_dx) gives a
-         * perpendicular pointing INWARD (into the road from the left
-         * rail). Signed distance relative to left[sub_lane] is positive
-         * when the probe is inside and negative when outside. */
-        {
-            TD5_StripVertex *base = vertex_at((int)sp->left_vertex_index + sub_lane);
-            TD5_StripVertex *end_v = vertex_at((int)sp->left_vertex_index + sub_lane + 1);
-            if (base && end_v) {
-                int32_t edge_dx = (int32_t)end_v->x - (int32_t)base->x;
-                int32_t edge_dz = (int32_t)end_v->z - (int32_t)base->z;
+         * Signed distance sign follows the rail-side convention:
+         *   LEFT rail  — perp rotated CW  (edge_dz, -edge_dx), d > 0 inside
+         *   RIGHT rail — perp rotated CCW (-edge_dz, edge_dx), d > 0 inside
+         * d < 0 → probe is outside the rail → fire wall. */
 
-                float fnx = (float)(edge_dz);
-                float fnz = (float)(-edge_dx);
-                float fmag = sqrtf(fnx * fnx + fnz * fnz);
-                if (fmag >= 0.5f) {
-                    int32_t nnx = (int32_t)(fnx / fmag * 4096.0f);
-                    int32_t nnz = (int32_t)(fnz / fmag * 4096.0f);
+        struct rail_hit {
+            int32_t d;
+            int32_t nnx, nnz;
+            int32_t edge_dx, edge_dz;
+            int valid;
+        } lhit = { 0, 0, 0, 0, 0, 0 }, rhit = { 0, 0, 0, 0, 0, 0 };
 
-                    int32_t rel_x = px - (int32_t)base->x - sp->origin_x;
-                    int32_t rel_z = pz - (int32_t)base->z - sp->origin_z;
+        int32_t lbest_abs = 0x7FFFFFFF;
+        int32_t rbest_abs = 0x7FFFFFFF;
+        int lbest_contained = 0;
+        int rbest_contained = 0;
 
-                    int64_t dot = (int64_t)rel_x * nnx + (int64_t)rel_z * nnz;
-                    int32_t d = (int32_t)((dot + ((dot >> 63) & 0xFFF)) >> 12);
+        for (int seg = 0; seg < lane_count; seg++) {
+            /* --- LEFT RAIL segment --- */
+            {
+                TD5_StripVertex *base = vertex_at((int)sp->left_vertex_index + seg);
+                TD5_StripVertex *end_v = vertex_at((int)sp->left_vertex_index + seg + 1);
+                if (base && end_v) {
+                    int32_t edge_dx = (int32_t)end_v->x - (int32_t)base->x;
+                    int32_t edge_dz = (int32_t)end_v->z - (int32_t)base->z;
+                    int64_t elen_sq = (int64_t)edge_dx * edge_dx + (int64_t)edge_dz * edge_dz;
+                    if (elen_sq >= 1) {
+                        int32_t rel_x = px - (int32_t)base->x - sp->origin_x;
+                        int32_t rel_z = pz - (int32_t)base->z - sp->origin_z;
+                        int64_t t_num = (int64_t)rel_x * edge_dx + (int64_t)rel_z * edge_dz;
+                        int contained = (t_num >= 0 && t_num <= elen_sq);
 
-                    if (d < -4000) d = -4000;
+                        float fnx = (float)(edge_dz);
+                        float fnz = (float)(-edge_dx);
+                        float fmag = sqrtf(fnx * fnx + fnz * fnz);
+                        if (fmag >= 0.5f) {
+                            int32_t nnx = (int32_t)(fnx / fmag * 4096.0f);
+                            int32_t nnz = (int32_t)(fnz / fmag * 4096.0f);
+                            int64_t dot = (int64_t)rel_x * nnx + (int64_t)rel_z * nnz;
+                            int32_t d = (int32_t)((dot + ((dot >> 63) & 0xFFF)) >> 12);
+                            int32_t abs_d = d < 0 ? -d : d;
 
-                    if (diag_slot0) {
-                        TD5_LOG_I(LOG_TAG, "wall_diag slot0 p%d LEFT span=%d d=%d probe=(%d,%d) base=(%d,%d) origin=(%d,%d)",
-                                  pi, span_idx, d, px, pz,
-                                  (int)base->x, (int)base->z, sp->origin_x, sp->origin_z);
+                            /* Prefer contained segments over uncontained. */
+                            int better = 0;
+                            if (contained && !lbest_contained) better = 1;
+                            else if (contained == lbest_contained && abs_d < lbest_abs) better = 1;
+
+                            if (better) {
+                                lbest_abs = abs_d;
+                                lbest_contained = contained;
+                                lhit.d = d;
+                                lhit.nnx = nnx;
+                                lhit.nnz = nnz;
+                                lhit.edge_dx = edge_dx;
+                                lhit.edge_dz = edge_dz;
+                                lhit.valid = 1;
+                            }
+                        }
                     }
+                }
+            }
 
-                    if (d < 0) {
-                        /* Wall angle = direction of the rail edge. */
-                        double rad = atan2((double)edge_dz, (double)edge_dx);
-                        int32_t wall_angle = (int32_t)(rad * (4096.0 / (2.0 * 3.14159265358979323846))) & 0xFFF;
+            /* --- RIGHT RAIL segment --- */
+            {
+                TD5_StripVertex *base = vertex_at((int)sp->right_vertex_index + seg);
+                TD5_StripVertex *end_v = vertex_at((int)sp->right_vertex_index + seg + 1);
+                if (base && end_v) {
+                    int32_t edge_dx = (int32_t)end_v->x - (int32_t)base->x;
+                    int32_t edge_dz = (int32_t)end_v->z - (int32_t)base->z;
+                    int64_t elen_sq = (int64_t)edge_dx * edge_dx + (int64_t)edge_dz * edge_dz;
+                    if (elen_sq >= 1) {
+                        int32_t rel_x = px - (int32_t)base->x - sp->origin_x;
+                        int32_t rel_z = pz - (int32_t)base->z - sp->origin_z;
+                        int64_t t_num = (int64_t)rel_x * edge_dx + (int64_t)rel_z * edge_dz;
+                        int contained = (t_num >= 0 && t_num <= elen_sq);
 
-                        td5_physics_wall_response(actor, wall_angle, d, 1, nnx, nnz, 4096);
-                        td5_physics_rebuild_pose(actor);
+                        /* CCW rotation for the right-rail inward perp */
+                        float fnx = (float)(-edge_dz);
+                        float fnz = (float)(edge_dx);
+                        float fmag = sqrtf(fnx * fnx + fnz * fnz);
+                        if (fmag >= 0.5f) {
+                            int32_t nnx = (int32_t)(fnx / fmag * 4096.0f);
+                            int32_t nnz = (int32_t)(fnz / fmag * 4096.0f);
+                            int64_t dot = (int64_t)rel_x * nnx + (int64_t)rel_z * nnz;
+                            int32_t d = (int32_t)((dot + ((dot >> 63) & 0xFFF)) >> 12);
+                            int32_t abs_d = d < 0 ? -d : d;
 
-                        TD5_LOG_I(LOG_TAG, "wall_contact: slot=%d probe=%d LEFT span=%d d=%d angle=%d",
-                                  actor->slot_index, pi, span_idx, d, wall_angle);
+                            int better = 0;
+                            if (contained && !rbest_contained) better = 1;
+                            else if (contained == rbest_contained && abs_d < rbest_abs) better = 1;
+
+                            if (better) {
+                                rbest_abs = abs_d;
+                                rbest_contained = contained;
+                                rhit.d = d;
+                                rhit.nnx = nnx;
+                                rhit.nnz = nnz;
+                                rhit.edge_dx = edge_dx;
+                                rhit.edge_dz = edge_dz;
+                                rhit.valid = 1;
+                            }
+                        }
                     }
                 }
             }
         }
 
-        /* --- RIGHT RAIL of the current sub-segment ---
-         * Same sub-segment fix as the LEFT rail. Rotated 90° CCW via
-         * (-edge_dz, edge_dx) so the perpendicular points INWARD from
-         * the right rail (in -X direction for a +Z span). wall_angle
-         * is rotated 180° from the rail direction so wall_response's
-         * sin/cos push moves the car opposite the LEFT case. */
-        {
-            TD5_StripVertex *base = vertex_at((int)sp->right_vertex_index + sub_lane);
-            TD5_StripVertex *end_v = vertex_at((int)sp->right_vertex_index + sub_lane + 1);
-            if (base && end_v) {
-                int32_t edge_dx = (int32_t)end_v->x - (int32_t)base->x;
-                int32_t edge_dz = (int32_t)end_v->z - (int32_t)base->z;
+        /* Don't fire a wall unless the chosen segment actually contains
+         * the probe's longitudinal projection. If the nearest segment is
+         * uncontained, the probe is past the polyline ends — that's a
+         * span-boundary case handled by Forward/Reverse, not a lateral
+         * wall. */
+        if (lhit.valid && lbest_contained && lhit.d < 0) {
+            int32_t d = lhit.d;
+            if (d < -4000) d = -4000;
+            double rad = atan2((double)lhit.edge_dz, (double)lhit.edge_dx);
+            int32_t wall_angle = (int32_t)(rad * (4096.0 / (2.0 * 3.14159265358979323846))) & 0xFFF;
+            td5_physics_wall_response(actor, wall_angle, d, 1, lhit.nnx, lhit.nnz, 4096);
+            td5_physics_rebuild_pose(actor);
+            TD5_LOG_I(LOG_TAG, "wall_contact: slot=%d probe=%d LEFT span=%d d=%d angle=%d",
+                      actor->slot_index, pi, span_idx, d, wall_angle);
+        }
 
-                /* CCW rotation: (-edge_dz, edge_dx) */
-                float fnx = (float)(-edge_dz);
-                float fnz = (float)(edge_dx);
-                float fmag = sqrtf(fnx * fnx + fnz * fnz);
-                if (fmag >= 0.5f) {
-                    int32_t nnx = (int32_t)(fnx / fmag * 4096.0f);
-                    int32_t nnz = (int32_t)(fnz / fmag * 4096.0f);
+        if (rhit.valid && rbest_contained && rhit.d < 0) {
+            int32_t d = rhit.d;
+            if (d < -4000) d = -4000;
+            double rad = atan2((double)(-rhit.edge_dz), (double)(-rhit.edge_dx));
+            int32_t wall_angle = (int32_t)(rad * (4096.0 / (2.0 * 3.14159265358979323846))) & 0xFFF;
+            td5_physics_wall_response(actor, wall_angle, d, 2, rhit.nnx, rhit.nnz, 4096);
+            td5_physics_rebuild_pose(actor);
+            TD5_LOG_I(LOG_TAG, "wall_contact: slot=%d probe=%d RIGHT span=%d d=%d angle=%d",
+                      actor->slot_index, pi, span_idx, d, wall_angle);
+        }
 
-                    int32_t rel_x = px - (int32_t)base->x - sp->origin_x;
-                    int32_t rel_z = pz - (int32_t)base->z - sp->origin_z;
-
-                    int64_t dot = (int64_t)rel_x * nnx + (int64_t)rel_z * nnz;
-                    int32_t d = (int32_t)((dot + ((dot >> 63) & 0xFFF)) >> 12);
-
-                    if (d < -4000) d = -4000;
-
-                    if (diag_slot0) {
-                        TD5_LOG_I(LOG_TAG, "wall_diag slot0 p%d RIGHT span=%d d=%d probe=(%d,%d) base=(%d,%d) origin=(%d,%d)",
-                                  pi, span_idx, d, px, pz,
-                                  (int)base->x, (int)base->z, sp->origin_x, sp->origin_z);
-                    }
-
-                    if (d < 0) {
-                        /* Angle rotated 180° from rail direction so the
-                         * push in wall_response goes -X for a +Z rail. */
-                        double rad = atan2((double)(-edge_dz), (double)(-edge_dx));
-                        int32_t wall_angle = (int32_t)(rad * (4096.0 / (2.0 * 3.14159265358979323846))) & 0xFFF;
-
-                        td5_physics_wall_response(actor, wall_angle, d, 2, nnx, nnz, 4096);
-                        td5_physics_rebuild_pose(actor);
-
-                        TD5_LOG_I(LOG_TAG, "wall_contact: slot=%d probe=%d RIGHT span=%d d=%d angle=%d",
-                                  actor->slot_index, pi, span_idx, d, wall_angle);
-                    }
-                }
-            }
+        if (diag_slot0) {
+            TD5_LOG_I(LOG_TAG, "wall_diag slot0 p%d span=%d L:d=%d c=%d R:d=%d c=%d probe=(%d,%d)",
+                      pi, span_idx,
+                      lhit.valid ? lhit.d : 0, lbest_contained,
+                      rhit.valid ? rhit.d : 0, rbest_contained,
+                      px, pz);
         }
     }
 }
