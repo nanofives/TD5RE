@@ -561,7 +561,15 @@ void td5_ai_init_race_actor_runtime(void) {
         g_last_logged_opcode[i] = -1;
     }
 
-    g_slot_state[0] = 1;
+    /* Player-as-AI: leave slot 0 at 0 so td5_ai_update_race_actors drives
+     * it and td5_ai_compute_rubber_band treats it as an AI racer. Mirrors
+     * the original attract-mode slot-state write at 0x0042ACCF. */
+    if (!g_td5.ini.player_is_ai) {
+        g_slot_state[0] = 1;
+    } else {
+        TD5_LOG_I(LOG_TAG,
+                  "player_is_ai=1 -> AI slot_state[0]=0 (autopilot active)");
+    }
     if (g_td5.split_screen_mode > 0 && racer_count > 1) {
         g_slot_state[1] = 1;
     }

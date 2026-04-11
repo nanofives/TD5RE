@@ -206,6 +206,9 @@ static int td5_load_shared_quickrace_ini(void)
     g_td5.ini.default_car =
         GetPrivateProfileIntA("car", "car",
                               g_td5.ini.default_car, path);
+    g_td5.ini.player_is_ai =
+        GetPrivateProfileIntA("race", "player_is_ai",
+                              g_td5.ini.player_is_ai, path);
     g_td5.ini.auto_race  = 1;
     g_td5.ini.skip_intro = 1;
 
@@ -275,6 +278,11 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
      * Matches the original's dead-code button-2 branch (app+0x170 is never written
      * in TD5_d3d.exe). Default 0 = button 2 is 2-player. */
     g_td5.ini.enable_benchmark  = td5_ini_int("Debug", "EnableBenchmark", 0);
+
+    /* Player-as-AI: forces slot 0 through td5_ai tick + physics AI dispatch,
+     * matching the original attract-mode autopilot (InitializeRaceSession
+     * 0x0042ACCF writes slot[0].state = 1 - g_attractModeDemoActive). */
+    g_td5.ini.player_is_ai      = td5_ini_int("GameOptions", "PlayerIsAI", 0);
 
     /* Auto-race: skip frontend entirely, launch race with INI settings */
     g_td5.ini.auto_race             = td5_ini_int("Game", "AutoRace", 0);

@@ -226,6 +226,11 @@ typedef struct TD5_GlobalState {
          * the shipped binary). Default 0 = button 2 is 2-player, matching the
          * original's runtime behavior. */
         int  enable_benchmark;
+        /* Player-as-AI autopilot (mirrors original attract-mode switch at
+         * InitializeRaceSession 0x0042ACCF: slot[0].state = 1 - attract).
+         * When set, slot 0 is driven by td5_ai_update_race_actors and the
+         * human input-to-actor path is skipped, exactly like demo mode. */
+        int  player_is_ai;
     } ini;
 
 } TD5_GlobalState;

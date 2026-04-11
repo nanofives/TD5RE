@@ -642,6 +642,18 @@ int td5_game_init_race_session(void) {
             s_slot_state[i].state = 3;  /* disabled */
         }
     }
+    /* Player-as-AI autopilot: mirrors original attract-mode at
+     * InitializeRaceSession 0x0042ACCF, which writes
+     *   slot[0].state = 1 - (g_attractModeDemoActive | g_benchmarkModeActive)
+     * Dropping slot 0 to state=0 (AI) routes it through
+     * td5_physics_update_ai at td5_physics.c:463 and makes td5_game skip
+     * td5_input_update_player_control(0) at td5_game.c:1538/1559. */
+    if (g_td5.ini.player_is_ai && s_slot_state[0].state == 1) {
+        s_slot_state[0].state = 0;
+        TD5_LOG_I(LOG_TAG,
+                  "InitRace: player_is_ai=1 -> slot 0 switched to AI "
+                  "(mirrors 0x0042ACCF attract-mode write)");
+    }
     /* Propagate player/AI state to physics module for dynamics dispatch */
     for (int i = 0; i < TD5_MAX_RACER_SLOTS; i++) {
         td5_physics_set_race_slot_state(i, s_slot_state[i].state == 1 ? 1 : 0);
