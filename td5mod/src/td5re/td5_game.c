@@ -1290,9 +1290,20 @@ int td5_game_run_race_frame(void) {
 
         /* --- Camera angle caching (per viewport) --- */
         /* Original (0x0042b84e) gates camera inside the pause-flag check.
-         * Camera must tick during countdown but NOT during pause menu. */
+         * Camera must tick during countdown but NOT during pause menu.
+         *
+         * Split camera into two phases to match RunRaceFrame (0x0042B580):
+         *   - cache_angles runs HERE, before physics, snapshotting the
+         *     previous-frame orientation so UpdateVehicleRelativeCamera /
+         *     chase modes 1-2 can compute a shortest-path delta later.
+         *   - update_chase_all runs AFTER physics (see post-physics calls
+         *     below) so the orbit smoothing reads fresh post-integration
+         *     actor angles/position instead of stale ones. Running it
+         *     before physics caused visible chase-cam shake whenever the
+         *     vehicle was accelerating (pre-physics yaw fed into the
+         *     orbit angle integrator one tick behind the actual heading). */
         if (!s_pause_menu_active) {
-            td5_camera_tick();
+            td5_camera_cache_angles();
         }
 
         /* --- Pause menu (ESC toggles) --- */
@@ -1401,6 +1412,10 @@ int td5_game_run_race_frame(void) {
             td5_physics_tick();
             td5_ai_tick();
             td5_track_tick();
+            /* Chase camera runs AFTER physics — matches RunRaceFrame
+             * (0x0042B580). Countdown still updates the camera so the
+             * fly-in/idle-orbit animates while the grid counts down. */
+            td5_camera_update_chase_all();
             g_td5.sim_time_accumulator -= TD5_TICK_ACCUMULATOR_ONE;
             ticks_this_frame++;
             td5_game_trace_stage("countdown", ticks_this_frame);
@@ -1434,8 +1449,13 @@ int td5_game_run_race_frame(void) {
         /* --- Update race order (bubble sort by span position) --- */
         update_race_order();
 
-        /* --- Per-viewport camera update --- */
-        /* (Already handled in td5_camera_tick above for both viewports) */
+        /* --- Per-viewport camera update (post-physics) ---
+         * Must run AFTER physics + AI + track + update_race_order,
+         * matching UpdateChaseCamera near the tail of RunRaceFrame's
+         * sim-tick loop (0x0042B580). See cache_angles call earlier
+         * in this loop for the full rationale. */
+        td5_camera_update_chase_all();
+        td5_game_trace_stage("post_camera", ticks_this_frame);
 
         /* --- Per-actor wrap normalization --- */
         for (i = 0; i < TD5_MAX_RACER_SLOTS; i++) {

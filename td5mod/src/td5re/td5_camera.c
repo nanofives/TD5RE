@@ -75,6 +75,13 @@ float  g_cameraBasis[9]     = { 1,0,0, 0,1,0, 0,0,1 };
 float  g_cameraPos[3]       = { 0, 0, 0 };
 float  g_cameraBasisWork[12] = { 1,0,0, 0,1,0, 0,0,1, 0,0,0 };
 float  g_cameraSecondary[9] = { 1,0,0, 0,1,0, 0,0,1 };
+/* Snapshot of g_cameraSecondary BEFORE FinalizeCameraProjectionMatrices
+ * applies inv_proj * fov_factor scaling. Source-port use only: the
+ * render basis (s_camera_basis in td5_render.c) is the unscaled
+ * g_cameraBasis, so the billboard branch needs an unscaled yaw-stripped
+ * counterpart to live in the same coordinate space as the rotation
+ * already loaded in s_render_transform. */
+float  g_cameraSecondaryUnscaled[9] = { 1,0,0, 0,1,0, 0,0,1 };
 float  g_cameraTertiary[9]  = { 1,0,0, 0,1,0, 0,0,1 };
 
 /* --- Per-view camera state arrays --- */
@@ -1727,32 +1734,66 @@ int td5_camera_init(void)
 
 void td5_camera_shutdown(void) {}
 
-void td5_camera_tick(void)
+/* Shared viewport actor lookup used by both camera-tick phases. */
+static TD5_Actor *camera_actor_for_view(int v)
 {
-    /* Use debug track camera only if no actors are populated */
+    TD5_Actor *actor = td5_game_get_actor(g_actorSlotForView[v]);
+    if (!actor && g_actor_table_base) {
+        int slot = g_actorSlotForView[v];
+        int total = td5_game_get_total_actor_count();
+        if (slot >= 0 && slot < total)
+            actor = (TD5_Actor *)(g_actor_table_base + (size_t)slot * TD5_ACTOR_STRIDE);
+    }
+    return actor;
+}
+
+/* Phase 1: snapshot vehicle orientation BEFORE physics integrates this tick.
+   Matches CacheVehicleCameraAngles(primary,0)+CacheVehicleCameraAngles(secondary,1)
+   at the top of the sim-tick loop inside RunRaceFrame (0x0042B580).
+   The cached angles become the "previous-frame" state that
+   UpdateVehicleRelativeCamera / chase-modes 1,2 smooth FROM this tick. */
+void td5_camera_cache_angles(void)
+{
+    if (td5_game_get_total_actor_count() <= 0) return;
+    int view_count = g_td5.split_screen_mode ? 2 : 1;
+    for (int v = 0; v < view_count; v++) {
+        TD5_Actor *actor = camera_actor_for_view(v);
+        if (!actor) continue;
+        CacheVehicleCameraAngles((int)actor, v);
+    }
+}
+
+/* Phase 2: run the chase camera AFTER physics has updated actor pose.
+   Matches UpdateChaseCamera(actor,1,view) near the tail of RunRaceFrame's
+   sim-tick loop (0x0042B580, after UpdateRaceActors/ResolveVehicleContacts/
+   UpdateRaceOrder). Reading post-physics actor angles against the
+   pre-physics cached angles is what makes the orbit smoothing and the
+   shortest-path angle lerp converge instead of snapping. */
+void td5_camera_update_chase_all(void)
+{
     if (td5_game_get_total_actor_count() <= 0) {
         update_debug_track_camera();
         return;
     }
-    /* Per-sim-tick camera update — matches CacheVehicleCameraAngles +
-       UpdateChaseCamera inside the RunRaceFrame sim loop (0x0042B580).
-       Called once per fixed timestep tick from td5_game.c sim loop.
-       Only iterate active viewports: in single-screen, view 1 shares actor
-       slot 0 but its orbit angle is never advanced by the transition state
-       machine, so it would overwrite g_cameraPos with a stale value. */
     int view_count = g_td5.split_screen_mode ? 2 : 1;
     for (int v = 0; v < view_count; v++) {
-        TD5_Actor *actor = td5_game_get_actor(g_actorSlotForView[v]);
-        if (!actor && g_actor_table_base) {
-            int slot = g_actorSlotForView[v];
-            int total = td5_game_get_total_actor_count();
-            if (slot >= 0 && slot < total)
-                actor = (TD5_Actor *)(g_actor_table_base + (size_t)slot * TD5_ACTOR_STRIDE);
-        }
+        TD5_Actor *actor = camera_actor_for_view(v);
         if (!actor) continue;
-        CacheVehicleCameraAngles((int)actor, v);
         UpdateChaseCamera((int)actor, 1, v);
     }
+}
+
+/* Legacy single-call entry point: still used by non-race paths (frontend
+   transitions, etc.). In-race code must call cache_angles + update_chase_all
+   around the physics tick instead. */
+void td5_camera_tick(void)
+{
+    if (td5_game_get_total_actor_count() <= 0) {
+        update_debug_track_camera();
+        return;
+    }
+    td5_camera_cache_angles();
+    td5_camera_update_chase_all();
 }
 
 void td5_camera_update_chase(TD5_Actor *a, int p, int vi)

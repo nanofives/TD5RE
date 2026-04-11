@@ -37,6 +37,11 @@ int  td5_camera_init(void);
 void td5_camera_shutdown(void);
 void td5_camera_tick(void);
 
+/* Split camera-tick entry points — matches original RunRaceFrame order:
+   Cache angles BEFORE physics, chase update AFTER physics. */
+void td5_camera_cache_angles(void);
+void td5_camera_update_chase_all(void);
+
 /* ========================================================================
  * Camera preset table (7 presets x 16 bytes at 0x463098)
  *
