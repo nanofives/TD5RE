@@ -61,6 +61,10 @@ void td5_ai_recycle_traffic_actor(void);
 void td5_ai_init_traffic_actors(void);
 void td5_ai_update_traffic_route_plan(int slot);
 int  td5_ai_find_nearest_route_peer(int *route_state);
+/* Bind the per-level traffic spawn queue (TRAFFIC.BUS). 4-byte records:
+ * int16 span, u8 flags, u8 lane — terminated by span == -1. The pointer
+ * must outlive the race; pass NULL to clear. */
+void td5_ai_set_traffic_queue(const uint8_t *data, int size);
 
 /* --- Special encounter (cop chase) --- */
 void td5_ai_update_special_encounter(void);

@@ -1311,18 +1311,20 @@ void td5_ai_update_track_behavior(int slot) {
     if (g_td5.time_trial_enabled)
         return;
 
-    /* During countdown (paused), force steer_cmd to 0 and skip the cascade.
-     * Rationale: the cascade is a closed-loop controller expecting the car to
-     * physically rotate in response to steering. While the car is XZ-frozen,
-     * the cascade would accumulate steer_cmd chasing zero delta, leaving a
-     * large pre-baked steering input when the freeze releases — the car then
-     * spins at race start. The original's gate mechanism here is unclear;
-     * this keeps AI throttle revving (via update_route_threshold which runs
-     * in other branches) without accumulating phantom steering.
-     * TODO: research original's exact countdown behavior for cascade. */
+    /* During countdown (paused), zero the steering-cascade state but pass
+     * through the rubber-band throttle so the RPM integrator revs to ~7200
+     * before the lights go out — matching the original, which runs its full
+     * AI pipeline every tick and holds cars stationary via brake_flag/gear<2
+     * rather than by skipping AI. [CONFIRMED @ RunRaceFrame 0x42B580:
+     * ComputeAIRubberBandThrottle + UpdateActorTrackBehavior + UpdateAIVehicleDynamics
+     * are called unconditionally; only g_gamePaused gates them, not countdown.]
+     * We still short-circuit the port's steering cascade because g_game_paused
+     * is set during countdown in the port and physics isn't rotating the car. */
     if (g_td5.paused) {
         ACTOR_I32(actor, ACTOR_STEERING_CMD) = 0;
         ACTOR_I16(actor, ACTOR_STEERING_RAMP_ACCUM) = 0;
+        ACTOR_I16(actor, ACTOR_ENCOUNTER_STEER) = (int16_t)g_actor_route_steer_bias[slot];
+        ACTOR_U8(actor, ACTOR_BRAKE_FLAG) = 0;
         return;
     }
 
@@ -1641,11 +1643,24 @@ void td5_ai_recycle_traffic_actor(void) {
  * InitializeTrafficActorsFromQueue: fill slots 6-11 from the head
  * of the TRAFFIC.BUS queue at race start.
  */
+void td5_ai_set_traffic_queue(const uint8_t *data, int size) {
+    /* Store the raw pointer — caller owns the backing buffer for the race
+     * lifetime. `size` is informational; the queue is actually terminated
+     * by a span == -1 sentinel record. */
+    g_traffic_queue_base = data;
+    g_traffic_queue_ptr  = data;
+    TD5_LOG_I(LOG_TAG, "traffic queue bound: data=%p size=%d records=%d",
+              (const void *)data, size, size / 4);
+}
+
 void td5_ai_init_traffic_actors(void) {
     int i;
     const uint8_t *qp = g_traffic_queue_base;
 
-    if (!qp) return;
+    if (!qp) {
+        TD5_LOG_W(LOG_TAG, "init_traffic_actors: g_traffic_queue_base is NULL — traffic slots will remain at origin");
+        return;
+    }
 
     g_traffic_queue_ptr = qp;
 

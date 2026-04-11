@@ -32,6 +32,7 @@
 #include "td5_render.h"
 #include "td5_hud.h"    /* for TD5_AtlasEntry */
 #include "td5_physics.h" /* for td5_physics_load_carparam */
+#include "td5_ai.h"      /* for td5_ai_set_traffic_queue */
 
 #include <stdlib.h>
 #include <string.h>
@@ -63,6 +64,11 @@ int                 g_static_hed_entry_count = 0;
 uint8_t            *g_track_environment_config = NULL;
 static uint8_t      s_checkpoint_data[96];
 static int          s_checkpoint_data_size = 0;
+
+/* Holds the TRAFFIC.BUS payload for the active level. Owned by this TU;
+ * freed on the next td5_asset_load_level call. td5_ai keeps a read-only
+ * pointer into this buffer — do not free until a new level loads. */
+static uint8_t     *s_traffic_queue_buf = NULL;
 
 /* ========================================================================
  * CRC-32 Table (matches original at 0x00475160)
@@ -1873,6 +1879,33 @@ int td5_asset_load_level(int track_index)
             TD5_LOG_W(LOG_TAG, "missing optional entry: %s in %s", checkpoint_name, zip_path);
         }
         free(cp_data);
+    }
+
+    /* ---- TRAFFIC.BUS: per-level traffic spawn queue ----
+     * 4-byte records: int16 span, u8 flags (bit0 = oncoming direction),
+     * u8 lane — terminated by a span == -1 sentinel.
+     * Consumed by td5_ai_init_traffic_actors to place slots 6..11 on the
+     * track. Without this, traffic actors stay at world_pos (0,0,0) and
+     * never render. Buffer is held across the race via s_traffic_queue_buf
+     * and freed on the next td5_asset_load_level call. */
+    {
+        static const char *s_traffic_bus_names[2] = { "TRAFFIC.BUS", "traffic.bus" };
+        int bus_sz = 0;
+        free(s_traffic_queue_buf);
+        s_traffic_queue_buf = NULL;
+        td5_ai_set_traffic_queue(NULL, 0);
+        void *bus_data = load_first_available_level_entry(track_index, s_traffic_bus_names, 2,
+                                                          &bus_sz, NULL, 0);
+        if (bus_data && bus_sz >= 4) {
+            s_traffic_queue_buf = (uint8_t *)bus_data; /* ownership transferred */
+            td5_ai_set_traffic_queue(s_traffic_queue_buf, bus_sz);
+            TD5_LOG_I(LOG_TAG, "TRAFFIC.BUS loaded: %d bytes (%d records incl. sentinel)",
+                      bus_sz, bus_sz / 4);
+        } else {
+            TD5_LOG_W(LOG_TAG, "TRAFFIC.BUS missing or short in %s — traffic will be invisible",
+                      zip_path);
+            free(bus_data);
+        }
     }
 
     TD5_LOG_I(LOG_TAG, "level load complete: %s (strip=%d left=%d right=%d models=%d checkpoint=%d levelinf=%d)",
