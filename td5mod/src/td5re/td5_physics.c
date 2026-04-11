@@ -3112,9 +3112,18 @@ void td5_physics_auto_gear_select(TD5_Actor *actor)
     int32_t gear = (int32_t)actor->current_gear;
     int32_t rpm = actor->engine_speed_accum;
 
-    /* Reverse gear on negative throttle */
+    /* Negative throttle = brake/reverse intent.
+     * Original (0x0042EF32) immediately writes gear=REVERSE on any throttle<0,
+     * so the HUD shows 'R' the instant the brake is pressed. We deviate here:
+     * only engage reverse once forward motion has decayed to zero, so braking
+     * from speed first decelerates in the current forward gear, then flips to
+     * reverse when stopped. longitudinal_speed is signed 24.8 at actor+0x314. */
     if (throttle < 0) {
-        actor->current_gear = TD5_GEAR_REVERSE;
+        if (actor->longitudinal_speed <= 0) {
+            TD5_LOG_I(LOG_TAG, "auto_gear: brake@stop -> REVERSE (long_speed=%d)",
+                      actor->longitudinal_speed);
+            actor->current_gear = TD5_GEAR_REVERSE;
+        }
         return;
     }
 
