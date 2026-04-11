@@ -2112,15 +2112,23 @@ void td5_physics_resolve_vehicle_contacts(void)
                     continue;
                 }
 
-                /* Determine collision test type */
-                int a_crashed = (a->damage_lockout >= 15);
-                int b_crashed = (b->damage_lockout >= 15);
+                /* Dispatch rule from 0x409150 ResolveVehicleContacts:
+                 * Full OBB (ResolveVehicleCollisionPair) only when BOTH actors
+                 * are in normal state (vehicle_mode == 0) AND neither is in
+                 * max damage lockout (damage_lockout < 0x0F). Otherwise use
+                 * the simple sphere path (ResolveSimpleActorSeparation).
+                 *
+                 * Traffic actors (slots 6-11) are always in vehicle_mode == 1
+                 * (scripted motion), so traffic-vs-* pairs always go through
+                 * the sphere path. This matches the original and sidesteps
+                 * the broken traffic cardef half_width=0 that was producing
+                 * ~27k degenerate OBB events per lap. */
+                int a_scripted = (a->vehicle_mode != 0) || (a->damage_lockout >= 0x0F);
+                int b_scripted = (b->vehicle_mode != 0) || (b->damage_lockout >= 0x0F);
 
-                if (a_crashed || b_crashed) {
-                    /* Crashed/flipped: simple sphere collision */
+                if (a_scripted || b_scripted) {
                     collision_detect_simple(a, b);
                 } else {
-                    /* Both active: full OBB collision */
                     collision_detect_full(a, b, i, j);
                 }
 
@@ -2132,16 +2140,18 @@ void td5_physics_resolve_vehicle_contacts(void)
     /* --- Phase 3: Grid reset is handled at start of next call --- */
 }
 
-/* Internal: dispatch collision between two actors (grid broadphase wrapper) */
+/* Internal: dispatch collision between two actors (grid broadphase wrapper).
+ * Same rule as the inline dispatch in td5_physics_resolve_vehicle_contacts
+ * (see comment there). */
 static void resolve_collision_pair(TD5_Actor *a, TD5_Actor *b, int idx_a, int idx_b)
 {
     if (!a || !b) return;
     if (!a->car_definition_ptr || !b->car_definition_ptr) return;
 
-    int a_crashed = (a->damage_lockout >= 15);
-    int b_crashed = (b->damage_lockout >= 15);
+    int a_scripted = (a->vehicle_mode != 0) || (a->damage_lockout >= 0x0F);
+    int b_scripted = (b->vehicle_mode != 0) || (b->damage_lockout >= 0x0F);
 
-    if (a_crashed || b_crashed) {
+    if (a_scripted || b_scripted) {
         collision_detect_simple(a, b);
     } else {
         collision_detect_full(a, b, idx_a, idx_b);
