@@ -1310,23 +1310,6 @@ void td5_render_span_display_list(void *display_list_block)
              * RenderTrackSpanDisplayList @ 0x00431270 only calls
              * TransformAndQueueTranslucentMesh which transforms XYZ only.
              * Per-vertex intensity comes from the asset's baked values. */
-            {
-                TD5_MeshVertex *dbg_v = (TD5_MeshVertex *)(uintptr_t)mesh->vertices_offset;
-                int dbg_n = mesh->total_vertex_count;
-                if (dbg_v && dbg_n > 0) {
-                    static int s_bb_lum_log = 0;
-                    if (s_bb_lum_log < 6) {
-                        TD5_LOG_I(LOG_TAG,
-                            "billboard lum dump: tag=%d n=%d v0=0x%08X v1=0x%08X v2=0x%08X v3=0x%08X",
-                            billboard_tag, dbg_n,
-                            dbg_v[0].lighting,
-                            dbg_n > 1 ? dbg_v[1].lighting : 0,
-                            dbg_n > 2 ? dbg_v[2].lighting : 0,
-                            dbg_n > 3 ? dbg_v[3].lighting : 0);
-                        s_bb_lum_log++;
-                    }
-                }
-            }
             td5_render_prepared_mesh(mesh);
             s_debug_span_meshes_submitted++;
             td5_render_pop_transform();

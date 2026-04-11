@@ -3436,6 +3436,30 @@ void td5_track_prepare_mesh_resource(TD5_MeshHeader *mesh)
         mesh->vertices_offset = (uint32_t)(uintptr_t)(base + mesh->vertices_offset);
     if (mesh->normals_offset != 0)
         mesh->normals_offset = (uint32_t)(uintptr_t)(base + mesh->normals_offset);
+
+    /* Billboard meshes (texture_page_id at +0x02 = 1 or 2) carry disk-
+     * baked per-vertex diffuse values that were authored for the
+     * original game's 16bpp R5G6B5 + additive ONE/ONE pipeline. At
+     * 32bpp the same values saturate the framebuffer white because the
+     * additive sum has 2× the headroom before clamp. Halve the per-
+     * vertex RGB once at relocation time to bring the additive result
+     * back into the CRT-era perceptual range. Alpha byte is preserved.
+     * This is idempotent on the loaded mesh (one-shot at load). */
+    if ((mesh->texture_page_id == 1 || mesh->texture_page_id == 2) &&
+        mesh->vertices_offset != 0 &&
+        mesh->total_vertex_count > 0 &&
+        mesh->total_vertex_count <= 65536) {
+        TD5_MeshVertex *bb_v = (TD5_MeshVertex *)(uintptr_t)mesh->vertices_offset;
+        for (int vi = 0; vi < mesh->total_vertex_count; vi++) {
+            uint32_t c = bb_v[vi].lighting;
+            uint32_t a = c & 0xFF000000u;
+            uint32_t r = (c >> 16) & 0xFFu;
+            uint32_t g = (c >>  8) & 0xFFu;
+            uint32_t b =  c        & 0xFFu;
+            r >>= 1; g >>= 1; b >>= 1;
+            bb_v[vi].lighting = a | (r << 16) | (g << 8) | b;
+        }
+    }
 }
 
 /* ========================================================================
