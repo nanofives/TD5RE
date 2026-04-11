@@ -1099,34 +1099,48 @@ void td5_physics_update_ai(TD5_Actor *actor)
     int32_t speed_limit = (int32_t)PHYS_S(actor, 0x74) << 8;
     int32_t abs_speed = v_long < 0 ? -v_long : v_long;
 
-    if (!actor->brake_flag && throttle != 0) {
-        /* Drive path: gear select + engine + torque */
+    /* On-ground vs airborne gate — mirrors the update_player restructure.
+     * surface_contact_flags != 0 → on-ground: drive or brake torque.
+     * else → airborne: engine update only, no wheel force.
+     *
+     * Previous code used (!brake && throttle != 0) and fell into a coast
+     * path with a -32 fallback that produced lateral impulses on idle
+     * stationary AI cars at sim_tick=1 (slot 1 Cluster A residual observed
+     * 2026-04-11). The original's 0x404EC0 gates drivetrain on ground
+     * contact and only uses -32 as a local engine-decel scalar, never as
+     * a wheel-drive input. */
+    if (actor->surface_contact_flags != 0) {
+        /* --- ON-GROUND branch --- */
         td5_physics_reverse_throttle_sign(actor);
         td5_physics_auto_gear_select(actor);
         td5_physics_update_engine_speed(actor);
-        drive_torque = td5_physics_compute_drive_torque(actor);
 
-        /* Always 50/50 split for AI [CONFIRMED @ 0x405183-0x405285]
-         * Original: torque >> 2 per axle, then *2 = torque/2 per axle */
-        if (abs_speed <= speed_limit) {
-            front_drive = drive_torque >> 1;
-            rear_drive  = drive_torque >> 1;
+        if (!actor->brake_flag) {
+            /* Drive path: compute_drive_torque returns 0 at idle throttle
+             * via the actor+0x33e multiply in ComputeDriveTorqueFromGearCurve
+             * (0x42F030). An idle stationary AI gets front/rear_drive=0. */
+            drive_torque = td5_physics_compute_drive_torque(actor);
+            if (abs_speed <= speed_limit) {
+                front_drive = drive_torque >> 1;
+                rear_drive  = drive_torque >> 1;
+            }
+        } else {
+            /* Brake path: torque opposing current velocity */
+            int32_t bf = (brake_front * throttle) >> 8;
+            int32_t br = (brake_rear  * throttle) >> 8;
+            int32_t half_spd = abs_speed >> 1;
+            int32_t neg_bf = bf < 0 ? -bf : bf;
+            int32_t neg_br = br < 0 ? -br : br;
+            if (neg_bf > half_spd) bf = (bf < 0) ? -half_spd : half_spd;
+            if (neg_br > half_spd) br = (br < 0) ? -half_spd : half_spd;
+            int32_t sign = (v_long > 0) ? -1 : 1;
+            front_drive = sign * (bf >> 1);
+            rear_drive  = sign * (br >> 1);
         }
     } else {
-        /* Coast / brake path */
-        int32_t coast_throttle = (throttle != 0) ? throttle : -32;
+        /* --- AIRBORNE branch ---
+         * Only update engine RPM; leave front_drive / rear_drive at 0. */
         td5_physics_update_engine_speed(actor);
-
-        int32_t bf = (brake_front * coast_throttle) >> 8;
-        int32_t br = (brake_rear  * coast_throttle) >> 8;
-        int32_t half_spd = abs_speed >> 1;
-        int32_t neg_bf = bf < 0 ? -bf : bf;
-        int32_t neg_br = br < 0 ? -br : br;
-        if (neg_bf > half_spd) bf = (bf < 0) ? -half_spd : half_spd;
-        if (neg_br > half_spd) br = (br < 0) ? -half_spd : half_spd;
-        int32_t sign = (v_long > 0) ? -1 : 1;
-        front_drive = sign * (bf >> 1);
-        rear_drive  = sign * (br >> 1);
     }
 
     /* Double drive forces for bicycle model input [CONFIRMED @ 0x405285] */
