@@ -2424,8 +2424,11 @@ static void render_vehicle_wheel_billboards(TD5_Actor *actor, int slot)
 
         /* Hub-cap: per-slot 64x64 carhub texture (page 800+slot*2+1).
          * The carhub PNG stores 4 motion-blur frames in a 2x2 grid of 32x32
-         * sub-tiles. Pixels outside the hubcap disc are alpha=0, so we use
-         * TRANSLUCENT_LINEAR to blend them out over the tire behind.
+         * sub-tiles. Pixels outside the hubcap disc are alpha=0.
+         * Use OPAQUE_LINEAR (alpha_ref=1, z_enable=1) so the transparent
+         * carhub corners are discarded via alpha test while the depth test
+         * still keeps the hub behind the car body. TRANSLUCENT_LINEAR is a
+         * 2D overlay preset (z_enable=0) and would bleed through bodywork.
          *
          * Spin frame [CONFIRMED @ 0x446F00]:
          *   frame = min(abs(long_speed) >> 14, 3)
