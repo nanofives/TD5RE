@@ -1163,7 +1163,12 @@ int td5_game_init_race_session(void) {
     g_td5.race_end_fade_state = 0;
     s_pause_exit_pending = 0;
     g_td5.paused = 1;              /* start paused for countdown */
-    td5_physics_set_xz_freeze(1); /* freeze XZ until countdown ends (DAT_00483030) */
+    /* DAT_00483030 (xz_freeze) has 1 read / 0 writes in the original binary.
+     * The port previously set a software flag here to gate XZ integration,
+     * but the original leaves position integration active during pause and
+     * relies on vel_x/vel_z staying 0 because dynamics is skipped. Dead
+     * g_xz_freeze / td5_physics_set_xz_freeze kept around but no longer
+     * driven — slated for cleanup. */
     s_pause_menu_active = 0;       /* clear stale pause menu from previous race */
     s_prev_esc_state = 1;          /* suppress false ESC edge on first frame */
     g_td5.sim_tick_budget = 0.0f;
@@ -1869,7 +1874,8 @@ static void tick_race_countdown(void)
         g_cameraTransitionActive = 0;
         set_countdown_indicator_state(0);
         g_td5.paused = 0;
-        td5_physics_set_xz_freeze(0); /* release XZ freeze on GO */
+        /* XZ freeze setter intentionally not called — see init_race_session
+         * note; DAT_00483030 is unused in the original. */
         s_race_countdown_state = 0;
         TD5_LOG_I(LOG_TAG, "Race countdown complete: GO");
         return;

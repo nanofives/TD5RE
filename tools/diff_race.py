@@ -105,7 +105,15 @@ def restore(path: Path, blob: bytes):
 
 
 def patch_td5re_ini(args):
-    """Ensure td5re.ini has the trace + auto-race knobs we need for one run."""
+    """Ensure td5re.ini has the trace + auto-race knobs we need for one run.
+
+    AutoRace is forced on: `td5_frontend_auto_race_setup` was refactored on
+    2026-04-11 to mirror the original's Frida quickrace-hook sequence
+    (ConfigureGameTypeFlags → InitializeRaceSeriesSchedule →
+    InitializeFrontendDisplayModeState) and to skip the wall-clock srand
+    reseed when RaceTrace=1 so both binaries spawn with the same RNG
+    state. No more manual kickoff needed.
+    """
     cp = configparser.ConfigParser()
     cp.optionxform = str  # preserve case
     cp.read(TD5RE_INI, encoding="utf-8")
@@ -130,6 +138,11 @@ def patch_td5re_ini(args):
     if not cp.has_section("Game"):
         cp.add_section("Game")
     cp.set("Game", "SkipIntro", "1")
+    # Pin scenario defaults so AutoRace reads the requested scenario even
+    # when the user's persisted td5re.ini has different ones.
+    cp.set("Game", "DefaultCar", str(args.car))
+    cp.set("Game", "DefaultTrack", str(args.track))
+    cp.set("Game", "DefaultGameType", str(args.game_type))
     with TD5RE_INI.open("w", encoding="utf-8") as f:
         cp.write(f)
 
@@ -141,6 +154,10 @@ def patch_quickrace_ini(args):
     def _set(pattern: str, repl: str, text: str) -> str:
         return re.sub(pattern, repl, text, count=1, flags=re.MULTILINE)
 
+    # skip_frontend=true overlays scenario fields from this shared INI onto
+    # td5re's [Game] defaults and flips auto_race=1 on the port. Both paths
+    # now use the faithful ConfigureGameTypeFlags → schedule → display-mode
+    # sequence (see patch_td5re_ini).
     raw = _set(r"^skip_frontend\s*=.*$", "skip_frontend = true", raw)
     raw = _set(r"^game_type\s*=.*$",     f"game_type = {args.game_type}", raw)
     raw = _set(r"^track\s*=.*$",         f"track = {args.track}", raw)

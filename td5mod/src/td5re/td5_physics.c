@@ -517,8 +517,9 @@ void td5_physics_update_vehicle_actor(TD5_Actor *actor)
     /* 8. Track wall contact resolution (FUN_00406CC0 + FUN_004070E0 + FUN_00406F50)
      * Check wheel probes against span edges and push car back if outside.
      * Called after pose integration, matching original UpdateVehicleActor order.
-     * [CONFIRMED @ 0x4068c8] */
-    if (actor->vehicle_mode == 0 && !g_game_paused)
+     * [CONFIRMED @ 0x4068c8] Original calls these inside the damage_lockout==0
+     * branch with NO pause gate — removing !g_game_paused to match. */
+    if (actor->vehicle_mode == 0)
         td5_track_resolve_wall_contacts(actor);
 
     if (actor->slot_index == 0 && (actor->frame_counter % 60u) == 0u) {
@@ -2274,8 +2275,16 @@ void td5_physics_integrate_pose(TD5_Actor *actor)
     /* Save previous Y for suspension delta */
     actor->prev_frame_y_position = actor->world_pos.y;
 
-    /* 1. Apply gravity to velocity Y */
-    actor->linear_velocity_y -= g_gravity_constant;
+    /* 1. Apply gravity to velocity Y — only when dynamics are running.
+     * Original IntegrateVehiclePoseAndContacts @ 0x405E80 does not write
+     * linear_velocity. During pause the original skips UpdatePlayerVehicleDynamics
+     * (the only writer of vel_y) so vel_y stays 0; the port leaked vel_y=-128
+     * per countdown tick because gravity accumulated here unconditionally. */
+    if (!g_game_paused) {
+        actor->linear_velocity_y -= g_gravity_constant;
+        TD5_LOG_D(LOG_TAG, "integrate_pose: applied gravity slot=%d vel_y=%d",
+                  actor->slot_index, actor->linear_velocity_y);
+    }
 
     /* 2. Integrate angular velocity into euler accumulators */
     actor->euler_accum.roll  += actor->angular_velocity_roll;
@@ -2283,12 +2292,11 @@ void td5_physics_integrate_pose(TD5_Actor *actor)
     actor->euler_accum.pitch += actor->angular_velocity_pitch;
 
     /* 3. Integrate linear velocity into position.
-     * XZ integration is frozen during countdown (DAT_00483030 in original).
-     * Y (vertical) integration is always active for gravity/suspension. */
-    if (!g_xz_freeze) {
-        actor->world_pos.x += actor->linear_velocity_x;
-        actor->world_pos.z += actor->linear_velocity_z;
-    }
+     * The original gates this on DAT_00483030 (ref_count=1, read-only), which
+     * is never written, so effectively always runs. With dynamics skipped
+     * during pause, vel_x/vel_z stay 0 and the integration is a no-op. */
+    actor->world_pos.x += actor->linear_velocity_x;
+    actor->world_pos.z += actor->linear_velocity_z;
     actor->world_pos.y += actor->linear_velocity_y;
 
     /* 3b. Update chassis track position from new world pos.

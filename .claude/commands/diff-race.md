@@ -21,7 +21,10 @@ logic — it already:
 
 - Snapshots `td5re.ini` and `re/tools/quickrace/td5_quickrace.ini`, patches
   them for `skip_frontend=true`, `AutoThrottle=1`, `RaceTrace=1`,
-  `RaceTraceSlot=0`, and the requested scenario.
+  `RaceTraceSlot=-1`, and the requested scenario. The port's auto-race path
+  mirrors the original's Frida quickrace hook exactly (ConfigureGameTypeFlags
+  → InitializeRaceSeriesSchedule → InitializeFrontendDisplayModeState) and
+  skips the wall-clock srand reseed whenever `RaceTrace=1`.
 - Spawns `original/TD5_d3d.exe` via `re/tools/quickrace/td5_quickrace.py
   --trace --trace-auto-exit` (both the quickrace hook and
   `tools/frida_race_trace.js` load into the same Frida session).
