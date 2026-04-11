@@ -960,14 +960,24 @@ int td5_game_init_race_session(void) {
             if (!sp)
                 continue;
 
-            /* Original (0x434350): only sets track_state[0] (span_raw at +0x080)
-             * and sub_lane (+0x08C). span_norm (+0x082), span_accum (+0x084),
-             * and span_high (+0x086) are NOT initialized — they start at 0.
-             * update_position_recursive will populate them on the first physics
-             * tick via td5_track_update_actor_position. [CONFIRMED @ 0x434365] */
+            /* InitActorTrackSegmentPlacement @ 0x00445F10 seeds:
+             *   param_1[0] = spawn_span (+0x80)
+             *   param_1[2] = spawn_span (+0x84 — accumulated span counter)
+             *   param_1[3] = spawn_span (+0x86 — high-water mark)
+             * NormalizeActorTrackWrapState @ 0x00443FB0 then derives +0x82
+             * from +0x84. Without seeding +0x84/+0x86 to spawn_span, the very
+             * first backward boundary crossing in update_position_recursive
+             * decrements +0x84 from 0 to -1, td5_track_normalize_actor_wrap
+             * wraps -1 to ring_length-1 (~3999), and every P2P checkpoint
+             * threshold compares true at once. */
             *(int16_t *)(actor + 0x080) = (int16_t)span_index;
-            /* 0x082/0x084/0x086 intentionally left at 0 — original does not set them */
+            *(int16_t *)(actor + 0x082) = (int16_t)span_index;
+            *(int16_t *)(actor + 0x084) = (int16_t)span_index;
+            *(int16_t *)(actor + 0x086) = (int16_t)span_index;
             actor[0x08C] = (uint8_t)sub_lane;
+            TD5_LOG_I(LOG_TAG,
+                      "Actor spawn span: slot=%d span_index=%d sub_lane=%d",
+                      slot, span_index, sub_lane);
 
             if (!td5_track_get_span_lane_world(span_index, sub_lane, &world_x, &world_y, &world_z)) {
                 /* Fallback: use span origin, shift to 24.8 FP to match the
