@@ -109,6 +109,14 @@ void td5_render_flush_immediate_batch(void);
 void td5_render_queue_projected_entry(void *entry, int bucket, uint32_t flags, int texture_page);
 void td5_render_flush_projected_buckets(void);
 
+/* --- Deferred additive pass ---
+ * Begin before the opaque world pass (enables deferral of type-3 batches
+ * inside flush_immediate_internal). Flush after the opaque world AND the
+ * projected-bucket flush have drained, so lights composite on top of
+ * everything behind them including alpha-keyed trees. */
+void td5_render_begin_world_pass(void);
+void td5_render_flush_deferred_additive(void);
+
 /* --- Texture cache --- */
 void td5_render_reset_texture_cache(void);
 void td5_render_advance_texture_ages(void);

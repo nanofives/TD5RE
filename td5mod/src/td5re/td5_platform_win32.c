@@ -2118,26 +2118,20 @@ void td5_plat_render_set_preset(TD5_RenderPreset preset)
         break;
 
     case TD5_PRESET_ADDITIVE:
-        /* Exact-match BindRaceTexturePage @ 0x0040B660 case 3:
+        /* BindRaceTexturePage @ 0x0040B660 case 3:
          *   ALPHABLENDENABLE (0x1B) = 1
          *   SRCBLEND         (0x13) = D3DBLEND_ONE (2)
          *   DESTBLEND        (0x14) = D3DBLEND_ONE (2)
-         *   (clamp byte = 0 → WRAP)
-         * The original did not touch ZWRITEENABLE or ALPHATESTENABLE in
-         * case 3 — those are inherited from the surrounding world pass,
-         * which in the source port is OPAQUE_LINEAR: z_write=1,
-         * alpha_test_enable=1, alpha_ref=1. Keep the same inherited
-         * values here so the blend behaviour is literally identical to
-         * the original's type-3 binding. The background pixels of the
-         * sprite (palette index 0 → alpha 0 in BuildTrackTextureCacheImpl
-         * @ 0x0040B1D0 case 3) are discarded by alpha_test, so z_write=1
-         * is safe and lets the lit pixels correctly occlude geometry
-         * drawn behind them in the immediate path. */
+         * Additive draws happen in the deferred pass AFTER all opaque
+         * geometry has finished writing depth, so z_write can stay off
+         * here — we still z_test so lights hidden behind opaque walls
+         * stay hidden. Alpha test on with ref=1 to discard palette-index-0
+         * background pixels (zero-RGB, zero-alpha from the type-3 loader). */
         s->blend_enable      = 1;
         s->src_blend         = D3D6BLEND_ONE;
         s->dest_blend        = D3D6BLEND_ONE;
         s->z_enable          = 1;
-        s->z_write           = 1;
+        s->z_write           = 0;
         s->mag_filter        = 2; /* LINEAR */
         s->min_filter        = 2;
         s->texblend_mode     = D3DTBLEND_MODULATE;

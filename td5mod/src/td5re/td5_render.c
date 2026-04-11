@@ -246,6 +246,46 @@ static int           s_imm_vert_count;   /* DAT_004afb4c */
 static int           s_imm_index_count;  /* DAT_004afb50 */
 
 /* ========================================================================
+ * Deferred Additive Pass
+ *
+ * The source port has no PrepareMeshResource opcode-rewrite pass, so
+ * loaded-texture commands never reach the depth-sorted billboard bucket
+ * path. Street-light meshes draw in mesh-list order through the immediate
+ * path, which means either:
+ *   - They draw first and later opaque geometry (trees) overwrites them, or
+ *   - They draw last in any given span but still get occluded by trees from
+ *     a later span mesh.
+ *
+ * To get correct additive compositing without implementing the full bucket
+ * sort, copy every immediate batch whose current page is type-3 into a
+ * side buffer during the world pass, then flush all of them AFTER the
+ * opaque world has been laid down. That mirrors the "draw all transparent
+ * effects last" pattern and handles the tree-vs-light ordering cleanly.
+ * ======================================================================== */
+
+#define DEFERRED_ADD_MAX_VERTS   8192
+#define DEFERRED_ADD_MAX_INDICES 16384
+#define DEFERRED_ADD_MAX_BATCHES 512
+
+typedef struct DeferredAdditiveBatch {
+    int page_id;
+    int vert_start;
+    int vert_count;
+    int index_start;
+    int index_count;
+} DeferredAdditiveBatch;
+
+static TD5_D3DVertex        s_deferred_add_verts[DEFERRED_ADD_MAX_VERTS];
+static uint16_t             s_deferred_add_indices[DEFERRED_ADD_MAX_INDICES];
+static int                  s_deferred_add_vert_count;
+static int                  s_deferred_add_index_count;
+static DeferredAdditiveBatch s_deferred_add_batches[DEFERRED_ADD_MAX_BATCHES];
+static int                  s_deferred_add_batch_count;
+/* Only defer while the world/opaque pass is active. HUD/FMV/frontend
+ * draws don't need deferral. */
+static int                  s_deferred_add_active;
+
+/* ========================================================================
  * Sky Rotation (12-bit fixed angle, +0x400 per tick)
  *
  * Original: DAT_004bf500
@@ -395,6 +435,53 @@ static float clampf(float x, float lo, float hi)
  * transparency type byte (0/1/2/3 → opaque/alpha/alpha/additive). */
 static void td5_render_apply_page_blend_preset(int page_id);
 
+void td5_render_begin_world_pass(void)
+{
+    s_deferred_add_active      = 1;
+    s_deferred_add_batch_count = 0;
+    s_deferred_add_vert_count  = 0;
+    s_deferred_add_index_count = 0;
+}
+
+void td5_render_flush_deferred_additive(void)
+{
+    if (s_deferred_add_batch_count == 0) {
+        s_deferred_add_active = 0;
+        return;
+    }
+
+    /* Any pending non-additive batch must be drained first so the
+     * deferred pass starts on a clean immediate buffer. */
+    int prev_page = s_current_texture_page;
+
+    for (int i = 0; i < s_deferred_add_batch_count; i++) {
+        const DeferredAdditiveBatch *b = &s_deferred_add_batches[i];
+        td5_plat_render_set_preset(TD5_PRESET_ADDITIVE);
+        td5_plat_render_bind_texture(b->page_id);
+        s_scene_has_renderer_geometry = 1;
+        td5_plat_render_draw_tris(
+            &s_deferred_add_verts[b->vert_start],
+            b->vert_count,
+            &s_deferred_add_indices[b->index_start],
+            b->index_count);
+    }
+
+    TD5_LOG_D(LOG_TAG,
+              "deferred additive flush: %d batches, %d verts, %d indices",
+              s_deferred_add_batch_count,
+              s_deferred_add_vert_count,
+              s_deferred_add_index_count);
+
+    /* Restore opaque preset for anything drawn after this point. */
+    td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
+
+    s_deferred_add_batch_count = 0;
+    s_deferred_add_vert_count  = 0;
+    s_deferred_add_index_count = 0;
+    s_deferred_add_active      = 0;
+    s_current_texture_page     = prev_page;
+}
+
 /**
  * Flush immediate vertex/index buffers to GPU via platform DrawPrimitive.
  * Corresponds to FlushImmediateDrawPrimitiveBatch (0x4329e0).
@@ -414,11 +501,46 @@ static void flush_immediate_internal(void)
         }
     }
 
+    /* If this batch is a type-3 (additive) page AND the world pass is
+     * active, defer the draw until after opaque geometry is laid down.
+     * Mirrors the "draw all additive effects last" pattern and gets the
+     * streetlight-vs-tree ordering right without implementing the full
+     * BindRaceTexturePage depth-bucket sort. */
+    if (s_deferred_add_active && s_current_texture_page >= 0 &&
+        td5_asset_get_page_transparency(s_current_texture_page) == 3) {
+        if (s_deferred_add_batch_count < DEFERRED_ADD_MAX_BATCHES &&
+            s_deferred_add_vert_count + s_imm_vert_count <= DEFERRED_ADD_MAX_VERTS &&
+            s_deferred_add_index_count + s_imm_index_count <= DEFERRED_ADD_MAX_INDICES) {
+            DeferredAdditiveBatch *db =
+                &s_deferred_add_batches[s_deferred_add_batch_count++];
+            db->page_id     = s_current_texture_page;
+            db->vert_start  = s_deferred_add_vert_count;
+            db->vert_count  = s_imm_vert_count;
+            db->index_start = s_deferred_add_index_count;
+            db->index_count = s_imm_index_count;
+            memcpy(&s_deferred_add_verts[s_deferred_add_vert_count],
+                   s_imm_verts,
+                   (size_t)s_imm_vert_count * sizeof(TD5_D3DVertex));
+            memcpy(&s_deferred_add_indices[s_deferred_add_index_count],
+                   s_imm_indices,
+                   (size_t)s_imm_index_count * sizeof(uint16_t));
+            s_deferred_add_vert_count  += s_imm_vert_count;
+            s_deferred_add_index_count += s_imm_index_count;
+        }
+        /* Skip the direct draw — reset batch and fall through to tail. */
+        s_imm_vert_count  = 0;
+        s_imm_index_count = 0;
+        s_current_texture_page = s_previous_texture_page;
+        return;
+    }
+
     /* Bind current texture and apply per-page blend preset.
      * The actual render path bypasses td5_render_bind_texture_page (the
      * cmd handlers funnel through clip_and_submit_polygon → here), so the
      * preset hook lives at the flush site to mirror BindRaceTexturePage @
-     * 0x40B660. Type 3 (additive) is the streetlight/glow path. */
+     * 0x40B660. Type 3 (additive) is handled by the deferred path above;
+     * the preset hook below is now a no-op for type-3 and only toggles
+     * back to OPAQUE_LINEAR when needed for non-type-3 pages. */
     if (s_current_texture_page >= 0) {
         td5_render_apply_page_blend_preset(s_current_texture_page);
         td5_plat_render_bind_texture(s_current_texture_page);

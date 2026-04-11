@@ -81,6 +81,8 @@
 #define ACTOR_YAW_ACCUM           0x1F4   /* int32 */
 #define ACTOR_STEERING_CMD        0x30C   /* int32 */
 #define ACTOR_LONGITUDINAL_SPEED  0x314   /* int32 */
+#define ACTOR_REAR_AXLE_SLIP      0x320   /* int32: rear_axle_slip_excess */
+#define ACTOR_STEERING_RAMP_ACCUM 0x33A   /* int16: steering_ramp_accumulator */
 #define ACTOR_LIN_VEL_X           0x1CC   /* int32: world-space velocity X */
 #define ACTOR_LIN_VEL_Z           0x1D4   /* int32: world-space velocity Z */
 #define ACTOR_WORLD_POS_X         0x1FC   /* int32: 24.8 fixed */
@@ -370,7 +372,8 @@ static void td5_ai_refresh_route_state_slot(int slot) {
         span = (int16_t)(route_count - 1u);
     }
 
-    route_heading = ((int32_t)route_table[(size_t)span * 3u + 1u] << 4) & 0xFFF;
+    /* Route-byte → 12-bit angle: (byte * 0x102C) >> 8 [CONFIRMED @ 0x434FFB] */
+    route_heading = (((int32_t)route_table[(size_t)span * 3u + 1u] * 0x102C) >> 8) & 0xFFF;
     rs[RS_FORWARD_TRACK_COMP] = route_heading;
 
     forward_heading = route_heading;
@@ -765,103 +768,122 @@ void td5_ai_init_race_actor_runtime(void) {
  * ======================================================================== */
 
 void td5_ai_update_steering_bias(int *route_state, int32_t steer_weight) {
-    int slot = route_state[RS_SLOT_INDEX];
-    char *actor = actor_ptr(slot);
+    /* Literal translation of UpdateActorSteeringBias @ 0x4340C0.
+     *
+     * NESTED cascade (NOT parallel left/right):
+     *   if (LEFT < 0x800) left-side branches
+     *   else if (RIGHT < 0x401) right-side small branches
+     *   else -0x4000
+     *
+     * This prevents the aligned case (LEFT=0xFFF, RIGHT=0) from
+     * incorrectly firing the LEFT-emergency path and saturating steer_cmd.
+     *
+     * param_2 == 0 path is SCRIPT mode (uses actor ramp accumulator +0x33A
+     * and iVar2-rate-limited update with clamp to iVar3).
+     * param_2 != 0 path is NORMAL mode (uses SinFixed12bit for fine bands
+     * and direct param_2 addition for mid bands).
+     * Clamp at end is always ±0x18000.
+     */
+    int   slot       = route_state[RS_SLOT_INDEX];
+    char *actor      = actor_ptr(slot);
+    int32_t iVar6    = ACTOR_I32(actor, ACTOR_LONGITUDINAL_SPEED);
+    int32_t sign_mask = iVar6 >> 31;
+    int32_t iVar4    = ACTOR_I32(actor, ACTOR_REAR_AXLE_SLIP) >> 8;
+    int32_t iVar2, iVar3;
+    int32_t left_dev, right_dev;
+    int32_t bias;
+    int32_t param_2 = steer_weight;
 
-    int32_t left_dev  = route_state[RS_LEFT_DEVIATION];
-    int32_t right_dev = route_state[RS_RIGHT_DEVIATION];
-    int32_t speed     = ACTOR_I32(actor, ACTOR_LONGITUDINAL_SPEED);
-    int32_t steer_cmd = ACTOR_I32(actor, ACTOR_STEERING_CMD);
+    iVar4 = iVar4 * iVar4;                           /* rear_slip_excess_shifted² */
+    iVar6 = ((iVar6 >> 8) ^ sign_mask) - sign_mask;  /* abs(longitudinal_speed >> 8) */
 
-    int32_t speed_scaled, speed_sq, rate_clamp, max_steer, delta;
+    /* iVar2 = per-tick rate cap (small-band script path) */
+    iVar2 = 0xC0000 / (((iVar6 * 0x400) / (iVar4 + 0x400)) + 0x40);
 
-    /* Compute speed magnitude (absolute value) */
-    if (speed < 0) speed = -speed;
-    speed_scaled = speed >> 8;
+    /* iVar3 = absolute steering cap (small-band script path) */
+    iVar3 = 0x1800000 / (((iVar6 * 0x10000) / (iVar4 + 0x10000)) + 0x100);
 
-    /* Speed-dependent rate and absolute clamps */
-    speed_sq = (speed_scaled * speed_scaled) >> 8;
+    left_dev  = route_state[RS_LEFT_DEVIATION];
+    right_dev = route_state[RS_RIGHT_DEVIATION];
 
-    /* Rate clamp: 0xC0000 / (speed_scaled * 0x400 / (speed_sq + 0x400) + 0x40) */
-    {
-        int32_t denom = 0x40;
-        if (speed_sq + 0x400 != 0)
-            denom += (speed_scaled * 0x400) / (speed_sq + 0x400);
-        rate_clamp = (denom != 0) ? (0xC0000 / denom) : 0x18000;
-    }
-
-    /* Max steering: 0x1800000 / (speed_scaled*0x10000/(speed_sq+0x10000) + 0x100) */
-    {
-        int32_t denom = 0x100;
-        if (speed_sq + 0x10000 != 0)
-            denom += (speed_scaled * 0x10000) / (speed_sq + 0x10000);
-        max_steer = (denom != 0) ? (0x1800000 / denom) : 0x18000;
-    }
-
-    /* Clamp max_steer to the hard limit */
-    if (max_steer > TD5_STEER_MAX) max_steer = TD5_STEER_MAX;
-
-    /* --- Three deviation bands --- */
-
-    if (left_dev != 0 && left_dev < 0x800) {
-        if (left_dev < 0x400) {
-            /* Band 1: Direct delta, sin-scaled for small deviations */
-            delta = steer_weight;
+    if (left_dev < 0x800) {
+        if (left_dev < 0x401) {
+            if (param_2 == 0) {
+                /* Script mode: ramp-accumulated delta, clamp to +iVar3 */
+                int16_t ramp = ACTOR_I16(actor, ACTOR_STEERING_RAMP_ACCUM);
+                if (ramp < 0x100) {
+                    ramp += 0x40;
+                    ACTOR_I16(actor, ACTOR_STEERING_RAMP_ACCUM) = ramp;
+                }
+                iVar2 = (int32_t)ramp * iVar2;
+                bias = ACTOR_I32(actor, ACTOR_STEERING_CMD)
+                     + ((iVar2 + ((iVar2 >> 31) & 0xFF)) >> 8);
+                ACTOR_I32(actor, ACTOR_STEERING_CMD) = bias;
+                if (iVar3 < bias) {
+                    ACTOR_I32(actor, ACTOR_STEERING_CMD) = iVar3;
+                }
+                goto clamp_end;
+            }
             if (left_dev < 0x100) {
-                /* Scale down for very small deviations */
-                delta = (steer_weight * left_dev) >> 8;
+                /* Normal mode, fine deviation: SinFixed12bit-scaled */
+                int32_t t   = ai_sin_fixed12(left_dev);
+                int32_t mul = t * param_2;
+                ACTOR_I32(actor, ACTOR_STEERING_CMD) =
+                    ACTOR_I32(actor, ACTOR_STEERING_CMD)
+                    + ((mul + ((mul >> 31) & 0xFFF)) >> 12);
+                goto clamp_end;
             }
-            steer_cmd += delta;
+            /* 0x100 <= left_dev < 0x401: direct add param_2 */
+            param_2 = ACTOR_I32(actor, ACTOR_STEERING_CMD) + param_2;
         } else {
-            /* Band 2: Ramp-up accumulator (0x40/tick, max 0x100) */
-            int32_t accum = route_state[RS_SCRIPT_FIELD_3E];
-            accum += 0x40;
-            if (accum > 0x100) accum = 0x100;
-            route_state[RS_SCRIPT_FIELD_3E] = accum;
-            steer_cmd += accum;
+            /* 0x401 <= left_dev < 0x800: fixed +0x4000 */
+            param_2 = ACTOR_I32(actor, ACTOR_STEERING_CMD) + 0x4000;
         }
-    } else if (left_dev >= 0x800) {
-        /* Band 3: Emergency snap toward left */
-        steer_cmd += 0x4000;
-    }
-
-    if (right_dev != 0 && right_dev < 0x800) {
-        if (right_dev < 0x400) {
-            delta = steer_weight;
+    } else if (right_dev < 0x401) {
+        if (param_2 == 0) {
+            /* Script mode mirror: subtract, clamp to -iVar3 */
+            int16_t ramp = ACTOR_I16(actor, ACTOR_STEERING_RAMP_ACCUM);
+            if (ramp < 0x100) {
+                ramp += 0x40;
+                ACTOR_I16(actor, ACTOR_STEERING_RAMP_ACCUM) = ramp;
+            }
+            iVar2 = (int32_t)ramp * iVar2;
+            bias = ACTOR_I32(actor, ACTOR_STEERING_CMD)
+                 - ((iVar2 + ((iVar2 >> 31) & 0xFF)) >> 8);
+            param_2 = -iVar3;
+            ACTOR_I32(actor, ACTOR_STEERING_CMD) = bias;
+            if (param_2 <= bias) {
+                goto clamp_end;
+            }
+            /* fall through: write -iVar3 as new bias */
+        } else {
             if (right_dev < 0x100) {
-                delta = (steer_weight * right_dev) >> 8;
+                int32_t t   = ai_sin_fixed12(right_dev);
+                int32_t mul = t * param_2;
+                ACTOR_I32(actor, ACTOR_STEERING_CMD) =
+                    ACTOR_I32(actor, ACTOR_STEERING_CMD)
+                    - ((mul + ((mul >> 31) & 0xFFF)) >> 12);
+                goto clamp_end;
             }
-            steer_cmd -= delta;
-        } else {
-            int32_t accum = route_state[RS_SCRIPT_FIELD_43];
-            accum += 0x40;
-            if (accum > 0x100) accum = 0x100;
-            route_state[RS_SCRIPT_FIELD_43] = accum;
-            steer_cmd -= accum;
+            /* 0x100 <= right_dev < 0x401: direct sub param_2 */
+            param_2 = ACTOR_I32(actor, ACTOR_STEERING_CMD) - param_2;
         }
-    } else if (right_dev >= 0x800) {
-        /* Emergency snap toward right */
-        steer_cmd -= 0x4000;
+    } else {
+        /* LEFT >= 0x800 AND RIGHT >= 0x401: emergency snap -0x4000 */
+        param_2 = ACTOR_I32(actor, ACTOR_STEERING_CMD) + -0x4000;
+    }
+    ACTOR_I32(actor, ACTOR_STEERING_CMD) = param_2;
+
+clamp_end:
+    if (ACTOR_I32(actor, ACTOR_STEERING_CMD) > 0x18000) {
+        ACTOR_I32(actor, ACTOR_STEERING_CMD) = 0x18000;
+    } else if (ACTOR_I32(actor, ACTOR_STEERING_CMD) < -0x18000) {
+        ACTOR_I32(actor, ACTOR_STEERING_CMD) = -0x18000;
     }
 
-    /* Rate clamp: limit change per tick */
-    {
-        int32_t prev = ACTOR_I32(actor, ACTOR_STEERING_CMD);
-        int32_t diff = steer_cmd - prev;
-        if (diff > rate_clamp)  diff = rate_clamp;
-        if (diff < -rate_clamp) diff = -rate_clamp;
-        steer_cmd = prev + diff;
-    }
-
-    /* Absolute clamp to [-max_steer, +max_steer] */
-    if (steer_cmd >  max_steer) steer_cmd =  max_steer;
-    if (steer_cmd < -max_steer) steer_cmd = -max_steer;
-
-    /* Hard limit: [-0x18000, +0x18000] */
-    if (steer_cmd >  TD5_STEER_MAX) steer_cmd =  TD5_STEER_MAX;
-    if (steer_cmd < -TD5_STEER_MAX) steer_cmd = -TD5_STEER_MAX;
-
-    ACTOR_I32(actor, ACTOR_STEERING_CMD) = steer_cmd;
+    TD5_LOG_I(LOG_TAG, "steer_bias: slot=%d L=%d R=%d w=%d out=%d",
+              slot, left_dev, right_dev, steer_weight,
+              ACTOR_I32(actor, ACTOR_STEERING_CMD));
 }
 
 /* ========================================================================

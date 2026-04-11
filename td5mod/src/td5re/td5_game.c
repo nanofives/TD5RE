@@ -1119,12 +1119,25 @@ static void td5_game_trace_stage(const char *stage, int ticks_this_frame)
     uint32_t frame = g_tick_counter;
     uint32_t sim_tick = (uint32_t)g_td5.simulation_tick_counter;
 
-    /* Sim-tick cap — shuts the trace down once the target simulated window
-     * has been captured, instead of burning wall-clock on sim ticks the
-     * diff-race comparator will never reach. */
+    /* Sim-tick cap — shuts the trace down AND requests a clean quit once the
+     * target simulated window has been captured. Without the quit_requested
+     * kick, the game keeps fast-forwarding after the trace file closes — the
+     * sim loop and renderer keep going until the diff-race orchestrator's
+     * CSV-stability poll fires, and with fast_forward=4 that's many extra
+     * in-game seconds past the cap (the user sees the in-game timer overshoot
+     * 15s and keep climbing to 1:21 etc.). Setting quit_requested makes
+     * td5_game_run_race_frame exit on the next tick. */
     if (g_td5.ini.race_trace_max_sim_ticks > 0 &&
         (int)sim_tick > g_td5.ini.race_trace_max_sim_ticks) {
+        static int s_trace_cap_logged = 0;
+        if (!s_trace_cap_logged) {
+            TD5_LOG_I(LOG_TAG,
+                      "Race trace sim_tick cap reached (%d), requesting quit",
+                      g_td5.ini.race_trace_max_sim_ticks);
+            s_trace_cap_logged = 1;
+        }
         td5_trace_shutdown();
+        g_td5.quit_requested = 1;
         return;
     }
 
@@ -1283,9 +1296,18 @@ int td5_game_run_race_frame(void) {
     }
 
     /* ---- Fixed-timestep simulation loop ---- */
-    /* Drain sim_time_accumulator in 0x10000 steps, max 4 ticks per frame */
+    /* Drain sim_time_accumulator in 0x10000 steps.
+     * Normal play caps at 4 ticks/frame (spiral-of-death protection).
+     * Trace fast-forward bypasses this cap so the diff-race skill can
+     * actually run at multiple sim-ticks per render frame without the
+     * injected accumulator piling up unused. */
     int ticks_this_frame = 0;
     s_pause_input_done = 0;  /* allow pause input once this frame */
+
+    const int max_ticks_per_frame =
+        (g_td5.ini.race_trace_enabled && g_td5.ini.trace_fast_forward > 0)
+            ? (g_td5.ini.trace_fast_forward + 8)
+            : 4;
 
     {
         static uint32_t s_frame_diag_ctr = 0;
@@ -1296,7 +1318,8 @@ int td5_game_run_race_frame(void) {
         }
     }
 
-    while (g_td5.sim_time_accumulator > 0xFFFF && ticks_this_frame < 4) {
+    while (g_td5.sim_time_accumulator > 0xFFFF &&
+           ticks_this_frame < max_ticks_per_frame) {
         /* --- Input polling --- */
         td5_input_poll_race_session();
 
@@ -1600,6 +1623,13 @@ int td5_game_run_race_frame(void) {
         td5_render_set_race_pass(TD5_RACE_PASS_OPAQUE);
         td5_render_set_fog(1);  /* fog on for world geometry */
 
+        /* Enable deferred additive capture. Type-3 (streetlight / glow)
+         * batches emitted during this pass are copied into a side buffer
+         * instead of being drawn immediately, so they can be composited
+         * on top of all opaque geometry (including alpha-keyed trees)
+         * after the world pass finishes. */
+        td5_render_begin_world_pass();
+
         /* Render race actors for this view */
         td5_render_actors_for_view(vp);
 
@@ -1608,6 +1638,11 @@ int td5_game_run_race_frame(void) {
         td5_vfx_draw_particles(vp);
         td5_render_flush_translucent();
         td5_render_flush_projected_buckets();
+
+        /* Now that all opaque world geometry has depth-written, composite
+         * the deferred additive lights on top. Fog stays on — lights
+         * follow the same fog the world does. */
+        td5_render_flush_deferred_additive();
 
         /* ---- Pass 3: ALPHA (overlay effects) ---- */
         td5_render_set_race_pass(TD5_RACE_PASS_ALPHA);
