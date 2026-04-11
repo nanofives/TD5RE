@@ -508,6 +508,33 @@ void td5_track_get_span_edges(int span_index,
 
 void td5_track_resolve_wall_contacts(TD5_Actor *actor)
 {
+    /* DISABLED 2026-04-11 — the lateral wall test is geometrically correct
+     * (segment-iteration with auto-flipped inward perp verified against
+     * the wall_layout vertex dump on Moscow span 111) but the cars are
+     * spawning rotated 90° from the rail direction. Runtime diag showed
+     * slot 0 with front wheels on the road's RIGHT rail and rear wheels
+     * on the LEFT rail — the car body is diagonally oriented across the
+     * road, so hitting the lateral rails with front+rear probes feels
+     * like blocking forward/backward motion from the driver's viewpoint.
+     *
+     * This is a spawn-heading bug, NOT a wall geometry bug. The walls
+     * need correct car orientation to feel right. Until spawn heading
+     * is fixed, disabling lateral walls is less frustrating than the
+     * "invisible confinement" experience.
+     *
+     * Forward/Reverse fence-strip handlers remain active — they only
+     * fire at DAT_00483550 / DAT_00483954 boundary spans and are
+     * independent of the current-span lateral check.
+     *
+     * TODO: investigate why spawn heading is 90° off from the rail walk
+     * direction. Likely in td5_track_compute_heading or the grid-start
+     * orientation computation. */
+    (void)actor;
+    return;
+
+    /* Everything below is unreachable but preserved for when the spawn
+     * heading bug is fixed and we want to re-enable the lateral walls.
+     * Delete if we decide lateral walls should stay permanently disabled. */
     static uint32_t s_wall_tick = 0;
     int diag_slot0 = 0;
 
