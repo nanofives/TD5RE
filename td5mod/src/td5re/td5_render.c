@@ -1310,6 +1310,16 @@ void td5_render_span_display_list(void *display_list_block)
              * RenderTrackSpanDisplayList @ 0x00431270 only calls
              * TransformAndQueueTranslucentMesh which transforms XYZ only.
              * Per-vertex intensity comes from the asset's baked values. */
+            {
+                TD5_MeshVertex *dbg_v = (TD5_MeshVertex *)(uintptr_t)mesh->vertices_offset;
+                static int s_bb_render_log = 0;
+                if (s_bb_render_log < 6 && dbg_v && mesh->total_vertex_count > 0) {
+                    TD5_LOG_I(LOG_TAG,
+                        "billboard render: mesh=%p tag=%d v0=0x%08X",
+                        (void *)mesh, billboard_tag, dbg_v[0].lighting);
+                    s_bb_render_log++;
+                }
+            }
             td5_render_prepared_mesh(mesh);
             s_debug_span_meshes_submitted++;
             td5_render_pop_transform();
@@ -1555,18 +1565,21 @@ void td5_render_actors_for_view(int view_index)
 
             td5_render_transform_mesh_vertices(mesh);
             td5_render_compute_vertex_lighting(mesh);
-
-            /* Render car shadow BEFORE the car mesh. The shadow is drawn
-             * with z_test=0 (TRANSLUCENT_POINT) to match the original's
-             * translucent sort list, so draw order is what makes the car
-             * body occlude the shadow: the car mesh paints over shadow
-             * pixels where its own depth-writing geometry lives. */
-            render_vehicle_shadow_quad(actor);
-
             td5_render_prepared_mesh(mesh);
 
             /* Render wheel ring billboards (0x446F00) */
             render_vehicle_wheel_billboards(actor, slot);
+
+            /* Shadow renders LAST — after car body AND wheels. The shadow
+             * uses z_test=0 (TRANSLUCENT_POINT) so it paints over anything
+             * in its screen-space quad, which also covers the small
+             * triangular gaps between the wheel hub diamond and the rim
+             * circle (the wheel face is not fully tessellated). The
+             * world-Y offset pushes the quad slightly below wheel-contact
+             * level so it projects lower than the car body in screen
+             * space, keeping the translucent overlap with the car sides
+             * to a minimum. */
+            render_vehicle_shadow_quad(actor);
 
             actor_render_count++;
             actor_meshes_submitted++;
@@ -2094,28 +2107,28 @@ void td5_render_crossfade_surfaces(uint32_t *dst, const uint32_t *src_a,
  *
  * The original draws shadows via a translucent sort list with z-test
  * disabled entirely — the -22.0f offset is a pure screen-space nudge, never
- * depth-tested against the car or the track. Previous attempts here used
- * z_test=1 (TRANSLUCENT_ANISO) with a small vertical lift, but on uneven
- * terrain the extended corners dip below the track surface and flicker as
- * the depth test fails intermittently.
+ * depth-tested against the car or the track.
  *
- * Matched the original's behaviour instead:
+ * Source port approach:
  *   - TRANSLUCENT_POINT (z_test=0, z_write=0, alpha_ref=1, SRCALPHA/
- *     INVSRCALPHA) — no depth test, so the shadow always draws and can
- *     never clip through terrain. Point filter is acceptable on a blurry
- *     128x64 shadow texture.
- *   - The call site draws the shadow BEFORE the car mesh, so the opaque
- *     car body (z_write=1) writes over the shadow where they overlap in
- *     screen space — that's how the car occludes the shadow.
- *   - Corners stay at wheel-contact Y, no vertical lift needed.
+ *     INVSRCALPHA). No depth test means no terrain-slope flicker and no
+ *     alpha-cutoff cropping of the feathered shadow edges.
+ *   - The call site draws the shadow LAST, after the car body AND the
+ *     wheels. This paints over the small triangular gaps between the
+ *     wheel hub diamond and the tyre ring circle (the current wheel
+ *     tessellation is incomplete).
  *   - Scale corners outward from the XZ centroid by 1.85 to approximate
- *     _g_wheelSuspensionRenderScale (unread from Ghidra); this extends
- *     the footprint beyond raw wheel spread.
+ *     the unread _g_wheelSuspensionRenderScale and give the shadow a
+ *     footprint larger than the raw wheel spread.
+ *   - Push the corners -1.5 world units below wheel-contact Y so the
+ *     projected quad sits slightly below the car body in screen space
+ *     rather than on top of it (there is no depth test to clip the
+ *     overlap), minimising the translucent blend over the car sides.
  *   - Subtick-interpolate corners with linear_velocity * g_subTickFraction
  *     so the shadow doesn't sawtooth-lag behind the car at speed (the
  *     car mesh is interpolated the same way at line ~1547).
  */
-#define SHADOW_VERTICAL_OFFSET  (0.0f)
+#define SHADOW_VERTICAL_OFFSET  (-1.5f)
 #define SHADOW_CORNER_SCALE     (1.85f)
 
 static int   s_shadow_lookup_done = 0;
@@ -2508,62 +2521,112 @@ static void render_vehicle_wheel_billboards(TD5_Actor *actor, int slot)
         float hub_u1 = ((float)(spin_col * 32 + 31) + 0.5f) / 64.0f;
         float hub_v1 = ((float)(spin_row * 32 + 31) + 0.5f) / 64.0f;
         {
+            /* Hub-cap disc: center vertex + 8 perimeter vertices (at the same
+             * rim_radius as the tyre ring) drawn as a triangle fan. The
+             * original port used a 4-vertex diamond inscribed in the rim
+             * circle, which left four triangular gaps between the diamond
+             * edges and the tyre ring through which the opposite side of the
+             * car (and the ground) was visible. A 9-vertex disc fills the
+             * whole wheel face.
+             *
+             * Spin rotation matches the original diamond convention: corner
+             * at unrotated angle θ_i rotates to
+             *   ( cos(θ_i)*C + sin(θ_i)*S, -cos(θ_i)*S + sin(θ_i)*C )
+             * where C = rot_cos, S = rot_sin. Verified against the diamond
+             * at θ=0 → ( C, -S), θ=π/2 → ( S,  C). */
             float ho = outer_off;
-            /* Rotated diamond (original's verts on a circle of radius hub_r).
-             * Front wheels use the tire_slip_z rotation (longitudinal odometer);
-             * rear wheels use tire_slip_x. The 4 verts are at rotation θ,
-             * θ+90°, θ+180°, θ+270° — matching the original's local_cc[] layout:
-             *   v0 = ( C, -S),  v1 = (S, C),  v2 = (-C, S),  v3 = (-S, -C)
-             * where C = cos(θ)*hub_r, S = sin(θ)*hub_r. Using rim_radius
-             * (scaled tire ring radius) so corners sit inside the tire ring. */
             float rot_cos = (w < 2) ? front_cos : rear_cos;
             float rot_sin = (w < 2) ? front_sin : rear_sin;
             float hub_r  = rim_radius;
-            float C = rot_cos * hub_r;
-            float S = rot_sin * hub_r;
-            float corner_offsets[4][3] = {
-                { ho,  C, -S },
-                { ho,  S,  C },
-                { ho, -C,  S },
-                { ho, -S, -C },
+
+            /* Hub texture: 32x32 tile inside a 64x64 carhub page. */
+            const float hub_cu = ((float)(spin_col * 32 + 16)) / 64.0f;
+            const float hub_cv = ((float)(spin_row * 32 + 16)) / 64.0f;
+            const float hub_ru = 15.5f / 64.0f;
+
+            static const float k_hub_unit_y[8] = {
+                1.0f,  0.70710678f,  0.0f, -0.70710678f,
+               -1.0f, -0.70710678f,  0.0f,  0.70710678f,
             };
-            float corners[4][3];
-            for (int c = 0; c < 4; c++) {
-                float dx = corner_offsets[c][0], dz = corner_offsets[c][2];
-                corners[c][0] = wx + dx * cos_s - dz * sin_s;
-                corners[c][1] = wy + corner_offsets[c][1];
-                corners[c][2] = wz + dx * sin_s + dz * cos_s;
-            }
-            float hub_uv[4][2] = {
-                { hub_u0, hub_v0 }, { hub_u1, hub_v0 },
-                { hub_u1, hub_v1 }, { hub_u0, hub_v1 },
+            static const float k_hub_unit_z[8] = {
+                0.0f,  0.70710678f,  1.0f,  0.70710678f,
+                0.0f, -0.70710678f, -1.0f, -0.70710678f,
             };
 
-            TD5_D3DVertex hub[4];
+            TD5_D3DVertex hub[9];
             int hub_ok = 1;
-            for (int c = 0; c < 4; c++) {
-                float px = corners[c][0], py = corners[c][1], pz = corners[c][2];
+
+            /* Vertex 0: disc center (axle centre at the outer face). */
+            {
+                float dx0 = ho;
+                float px = wx + dx0 * cos_s;
+                float py = wy;
+                float pz = wz + dx0 * sin_s;
+                float vx = px*m[0] + py*m[1] + pz*m[2] + m[9];
+                float vy = px*m[3] + py*m[4] + pz*m[5] + m[10];
+                float vz = px*m[6] + py*m[7] + pz*m[8] + m[11];
+                if (vz <= s_near_clip) { hub_ok = 0; }
+                else {
+                    float inv_z = 1.0f / vz;
+                    hub[0].screen_x = -vx * s_focal_length * inv_z + s_center_x;
+                    hub[0].screen_y = -vy * s_focal_length * inv_z + s_center_y;
+                    hub[0].depth_z  = vz * (1.0f / s_far_clip);
+                    hub[0].rhw      = inv_z;
+                    hub[0].diffuse  = 0xFFFFFFFFu;
+                    hub[0].specular = 0;
+                    hub[0].tex_u    = hub_cu;
+                    hub[0].tex_v    = hub_cv;
+                }
+            }
+
+            /* Perimeter vertices: unrotated unit directions in YZ rotated by
+             * the spin angle and scaled to hub_r, then UV set from the
+             * unrotated direction so the texture rotates with the disc. */
+            for (int c = 0; c < 8 && hub_ok; c++) {
+                float uy = k_hub_unit_y[c];
+                float uz = k_hub_unit_z[c];
+                float ry = uy * rot_cos + uz * rot_sin;
+                float rz = -uy * rot_sin + uz * rot_cos;
+
+                float dx0 = ho;
+                float dz0 = rz * hub_r;
+                float px = wx + dx0 * cos_s - dz0 * sin_s;
+                float py = wy + ry * hub_r;
+                float pz = wz + dx0 * sin_s + dz0 * cos_s;
+
                 float vx = px*m[0] + py*m[1] + pz*m[2] + m[9];
                 float vy = px*m[3] + py*m[4] + pz*m[5] + m[10];
                 float vz = px*m[6] + py*m[7] + pz*m[8] + m[11];
                 if (vz <= s_near_clip) { hub_ok = 0; break; }
                 float inv_z = 1.0f / vz;
-                hub[c].screen_x = -vx * s_focal_length * inv_z + s_center_x;
-                hub[c].screen_y = -vy * s_focal_length * inv_z + s_center_y;
-                hub[c].depth_z  = vz * (1.0f / s_far_clip);
-                hub[c].rhw      = inv_z;
-                hub[c].diffuse  = 0xFFFFFFFFu;
-                hub[c].specular = 0;
-                hub[c].tex_u    = hub_uv[c][0];
-                hub[c].tex_v    = hub_uv[c][1];
+                hub[1+c].screen_x = -vx * s_focal_length * inv_z + s_center_x;
+                hub[1+c].screen_y = -vy * s_focal_length * inv_z + s_center_y;
+                hub[1+c].depth_z  = vz * (1.0f / s_far_clip);
+                hub[1+c].rhw      = inv_z;
+                hub[1+c].diffuse  = 0xFFFFFFFFu;
+                hub[1+c].specular = 0;
+                hub[1+c].tex_u    = hub_cu + uy * hub_ru;
+                hub[1+c].tex_v    = hub_cv + uz * hub_ru;
             }
+
             if (hub_ok) {
-                uint16_t hub_idx[12] = { 0,1,2, 0,2,3, 0,2,1, 0,3,2 };
+                /* Triangle fan: 8 front tris + 8 back tris = 48 indices. */
+                uint16_t hub_idx[48];
+                int hi = 0;
+                for (int c = 0; c < 8; c++) {
+                    uint16_t a = (uint16_t)(1 + c);
+                    uint16_t b = (uint16_t)(1 + ((c + 1) & 7));
+                    /* Front face */
+                    hub_idx[hi++] = 0; hub_idx[hi++] = a; hub_idx[hi++] = b;
+                    /* Back face (reverse winding) */
+                    hub_idx[hi++] = 0; hub_idx[hi++] = b; hub_idx[hi++] = a;
+                }
                 flush_immediate_internal();
                 td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
                 td5_plat_render_bind_texture(hub_page);
-                td5_plat_render_draw_tris(hub, 4, hub_idx, 12);
+                td5_plat_render_draw_tris(hub, 9, hub_idx, 48);
             }
+            (void)hub_u0; (void)hub_u1; (void)hub_v0; (void)hub_v1;
         }
     }
 }
