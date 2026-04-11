@@ -2118,24 +2118,21 @@ void td5_plat_render_set_preset(TD5_RenderPreset preset)
         break;
 
     case TD5_PRESET_ADDITIVE:
-        /* Mirror BindRaceTexturePage @ 0x0040B660 case 3:
-         *   ALPHABLENDENABLE (0x1B) = 1
-         *   SRCBLEND         (0x13) = D3DBLEND_ONE  (2)
-         *   DESTBLEND        (0x14) = D3DBLEND_ONE  (2)
-         * Used for type-3 tpages — street-light sprites, headlight glows,
-         * additive particles. Black RGB pixels add nothing → naturally
-         * invisible without color-keying.
+        /* Type-3 tpages — street-light sprites, headlight glows, additive
+         * particles. Original BindRaceTexturePage @ 0x0040B660 case 3 set
+         * SRCBLEND=ONE / DESTBLEND=ONE, but the original ran at 16bpp
+         * R5G6B5 where the narrower channel range tempered the blow-out.
+         * Running that at 32bpp in D3D11 pushes every lit pixel toward
+         * fully saturated white.
          *
-         * Z-write STAYS ON combined with alpha_test (ref=16): type-3
-         * textures are uploaded with alpha=max(r,g,b), so dark pixels
-         * (the black background of a light sprite) are discarded by the
-         * alpha test and never write depth, while lit pixels do write
-         * depth and correctly occlude later-drawn geometry behind them.
-         * Without this, trees submitted after streetlights overwrote the
-         * lit pixels because the source port has no depth-sorted pass
-         * that would draw additive effects last. */
+         * SRCALPHA/ONE gives the same hard-cut darkness for background
+         * pixels (combined with alpha_test ref=16) but scales the additive
+         * contribution of lit pixels by their own brightness (alpha =
+         * max(r,g,b) after upload). Visual: a soft glow that adds most at
+         * the bright core and trails off at the edges — matches the
+         * period art better than a flat ONE/ONE splat. */
         s->blend_enable      = 1;
-        s->src_blend         = D3D6BLEND_ONE;
+        s->src_blend         = D3D6BLEND_SRCALPHA;
         s->dest_blend        = D3D6BLEND_ONE;
         s->z_enable          = 1;
         s->z_write           = 1;
