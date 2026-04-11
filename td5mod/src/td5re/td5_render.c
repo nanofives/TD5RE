@@ -1266,21 +1266,25 @@ void td5_render_span_display_list(void *display_list_block)
 
         td5_render_load_translation(&origin);
 
-        /* Billboard meshes (trees/signs/flat scenery): replace rotation with
+        /* Billboard meshes (trees/signs/street-lights): replace rotation with
          * the yaw-stripped camera basis g_cameraSecondary so the quad faces
          * the camera horizontally while still tilting with pitch/roll.
-         * [CONFIRMED @ 0x00431289-0x004312B8]: original loads DAT_004ab070
-         * (= g_cameraSecondary) into the render transform between
-         * PushRenderTransform and TransformAndQueueTranslucentMesh. */
-        if (mesh->render_type == 1 || mesh->render_type == 2) {
+         * [CONFIRMED @ 0x00431296 raw bytes 668b4602]: original reads SHORT
+         * at mesh byte offset 2; values 1 and 2 take the billboard branch
+         * which loads DAT_004ab070 (= g_cameraSecondary). The struct field
+         * at byte offset 2 in TD5_MeshHeader is named `texture_page_id` but
+         * actually holds the billboard mode tag — per-mesh texture binding
+         * is done from cmd->texture_page_id, not from this field. */
+        int billboard_mode = mesh->texture_page_id;
+        if (billboard_mode == 1 || billboard_mode == 2) {
             extern float g_cameraSecondary[9];
             td5_render_push_transform();
             td5_render_load_rotation((const TD5_Mat3x3 *)g_cameraSecondary);
             if ((s_debug_dl_calls % 500) == 1) {
                 TD5_LOG_I(LOG_TAG,
-                    "billboard mesh: render_type=%d origin=(%.1f,%.1f,%.1f) "
+                    "billboard mesh: mode=%d origin=(%.1f,%.1f,%.1f) "
                     "loaded g_cameraSecondary",
-                    (int)mesh->render_type, origin.x, origin.y, origin.z);
+                    billboard_mode, origin.x, origin.y, origin.z);
             }
             td5_render_transform_mesh_vertices(mesh);
             td5_render_compute_vertex_lighting(mesh);
