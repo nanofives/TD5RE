@@ -1914,29 +1914,30 @@ void td5_render_advance_texture_ages(void)
     }
 }
 
-/* Switch the current render preset to match a tpage's transparency type.
- * Mirrors the case dispatch in BindRaceTexturePage @ 0x0040B660 which
- * reads the type byte from per-page metadata and routes to one of:
- *   0 → opaque (no blend, alpha test on)
- *   1,2 → alpha-blend (SRCALPHA / INVSRCALPHA)
- *   3 → additive (ONE / ONE) — street lights, headlight glows
- * Pages with unknown type stay on the caller's preset (default opaque). */
+/* Switch render preset only for additive (type 3) pages — and restore
+ * opaque when leaving them. Types 0/1/2 are left to the caller's preset
+ * (the world pass sets OPAQUE_LINEAR once at start, which has alpha_ref=1
+ * so color-keyed pages discard their keyed pixels correctly).
+ *
+ * Forcing TRANSLUCENT_ANISO for type 1/2 was wrong: it disabled z-write
+ * and turned on alpha blend for the entire opaque world, causing z-order
+ * tearing on track geometry and washed-out / flickering car rendering.
+ * The original BindRaceTexturePage @ 0x40B660 only sets blend state when
+ * the type actually changes between successive binds, and the case-2
+ * branch we don't need at all because the alpha_ref=1 path handles
+ * color-keyed (type 1) pages correctly already. */
 static void td5_render_apply_page_blend_preset(int page_id)
 {
+    static int s_in_additive = 0;
     int t = td5_asset_get_page_transparency(page_id);
-    if (t < 0) return;
-    switch (t) {
-    case 3:
-        td5_plat_render_set_preset(TD5_PRESET_ADDITIVE);
-        break;
-    case 1:
-    case 2:
-        td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_ANISO);
-        break;
-    case 0:
-    default:
+    if (t == 3) {
+        if (!s_in_additive) {
+            td5_plat_render_set_preset(TD5_PRESET_ADDITIVE);
+            s_in_additive = 1;
+        }
+    } else if (s_in_additive) {
         td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
-        break;
+        s_in_additive = 0;
     }
 }
 
