@@ -2124,18 +2124,26 @@ void td5_plat_render_set_preset(TD5_RenderPreset preset)
          *   DESTBLEND        (0x14) = D3DBLEND_ONE  (2)
          * Used for type-3 tpages — street-light sprites, headlight glows,
          * additive particles. Black RGB pixels add nothing → naturally
-         * invisible without color-keying. Z-write off so additive splats
-         * don't punch holes in the depth buffer. */
+         * invisible without color-keying.
+         *
+         * Z-write STAYS ON combined with alpha_test (ref=16): type-3
+         * textures are uploaded with alpha=max(r,g,b), so dark pixels
+         * (the black background of a light sprite) are discarded by the
+         * alpha test and never write depth, while lit pixels do write
+         * depth and correctly occlude later-drawn geometry behind them.
+         * Without this, trees submitted after streetlights overwrote the
+         * lit pixels because the source port has no depth-sorted pass
+         * that would draw additive effects last. */
         s->blend_enable      = 1;
         s->src_blend         = D3D6BLEND_ONE;
         s->dest_blend        = D3D6BLEND_ONE;
         s->z_enable          = 1;
-        s->z_write           = 0;
+        s->z_write           = 1;
         s->mag_filter        = 2; /* LINEAR */
         s->min_filter        = 2;
         s->texblend_mode     = D3DTBLEND_MODULATE;
-        s->alpha_test_enable = 0;
-        s->alpha_ref         = 0;
+        s->alpha_test_enable = 1;
+        s->alpha_ref         = 16;
         break;
     }
 
