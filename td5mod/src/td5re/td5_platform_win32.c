@@ -2118,21 +2118,23 @@ void td5_plat_render_set_preset(TD5_RenderPreset preset)
         break;
 
     case TD5_PRESET_ADDITIVE:
-        /* Type-3 tpages — street-light sprites, headlight glows, additive
-         * particles. Original BindRaceTexturePage @ 0x0040B660 case 3 set
-         * SRCBLEND=ONE / DESTBLEND=ONE, but the original ran at 16bpp
-         * R5G6B5 where the narrower channel range tempered the blow-out.
-         * Running that at 32bpp in D3D11 pushes every lit pixel toward
-         * fully saturated white.
-         *
-         * SRCALPHA/ONE gives the same hard-cut darkness for background
-         * pixels (combined with alpha_test ref=16) but scales the additive
-         * contribution of lit pixels by their own brightness (alpha =
-         * max(r,g,b) after upload). Visual: a soft glow that adds most at
-         * the bright core and trails off at the edges — matches the
-         * period art better than a flat ONE/ONE splat. */
+        /* Exact-match BindRaceTexturePage @ 0x0040B660 case 3:
+         *   ALPHABLENDENABLE (0x1B) = 1
+         *   SRCBLEND         (0x13) = D3DBLEND_ONE (2)
+         *   DESTBLEND        (0x14) = D3DBLEND_ONE (2)
+         *   (clamp byte = 0 → WRAP)
+         * The original did not touch ZWRITEENABLE or ALPHATESTENABLE in
+         * case 3 — those are inherited from the surrounding world pass,
+         * which in the source port is OPAQUE_LINEAR: z_write=1,
+         * alpha_test_enable=1, alpha_ref=1. Keep the same inherited
+         * values here so the blend behaviour is literally identical to
+         * the original's type-3 binding. The background pixels of the
+         * sprite (palette index 0 → alpha 0 in BuildTrackTextureCacheImpl
+         * @ 0x0040B1D0 case 3) are discarded by alpha_test, so z_write=1
+         * is safe and lets the lit pixels correctly occlude geometry
+         * drawn behind them in the immediate path. */
         s->blend_enable      = 1;
-        s->src_blend         = D3D6BLEND_SRCALPHA;
+        s->src_blend         = D3D6BLEND_ONE;
         s->dest_blend        = D3D6BLEND_ONE;
         s->z_enable          = 1;
         s->z_write           = 1;
@@ -2140,7 +2142,7 @@ void td5_plat_render_set_preset(TD5_RenderPreset preset)
         s->min_filter        = 2;
         s->texblend_mode     = D3DTBLEND_MODULATE;
         s->alpha_test_enable = 1;
-        s->alpha_ref         = 16;
+        s->alpha_ref         = 1;
         break;
     }
 

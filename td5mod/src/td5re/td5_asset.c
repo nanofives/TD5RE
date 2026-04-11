@@ -1585,18 +1585,19 @@ static int td5_asset_upload_png_texture_page(int page_index,
     int ok = 0;
 
     if (td5_asset_decode_png_rgba32(path, &pixels, &width, &height)) {
-        /* Type-3 (additive) pages: rewrite alpha as max(r,g,b). This lets
-         * the ADDITIVE preset's alpha_test discard the dark "background"
-         * pixels so they don't punch holes in the depth buffer with
-         * z_write on. Lit pixels keep high alpha and write depth. */
+        /* Type-3 (additive) pages: the PNG extractor doesn't preserve the
+         * palette-index-0 → alpha 0 rule from BuildTrackTextureCacheImpl
+         * @ 0x0040B1D0 case 3. Approximate it by treating pure black
+         * (RGB=0) as the background colour and setting its alpha to 0;
+         * everything else stays alpha=0xFF. The ADDITIVE preset's
+         * inherited alpha_test ref=1 then discards only the background,
+         * matching the original's type-3 path exactly. */
         if (td5_asset_get_page_transparency(page_index) == 3) {
             uint8_t *px = (uint8_t *)pixels;
             int total = width * height;
             for (int i = 0; i < total; i++, px += 4) {
                 uint8_t b = px[0], g = px[1], r = px[2];
-                uint8_t m = r > g ? r : g;
-                if (b > m) m = b;
-                px[3] = m;
+                px[3] = (r | g | b) ? 0xFF : 0x00;
             }
         }
         ok = td5_plat_render_upload_texture(page_index, pixels, width, height, 2);
@@ -1986,12 +1987,18 @@ int td5_asset_load_race_texture_pages(void)
             case 2: /* Semi-transparent */
                 alpha = 0x80;
                 break;
-            case 3: /* Additive — alpha = max(r,g,b) so alpha_test in the
-                     * ADDITIVE preset (ref=16) can discard dark "background"
-                     * pixels, letting z_write stay on without punching holes
-                     * in the depth buffer. */
-                alpha = r_val > g_val ? r_val : g_val;
-                if (b_val > alpha) alpha = b_val;
+            case 3: /* Additive — BuildTrackTextureCacheImpl @ 0x0040B1D0
+                     * case 3: palette index 0 → alpha 0 (background of
+                     * the light sprite), all other palette entries →
+                     * alpha 0xFF with their raw RGB kept. alpha_test ref=1
+                     * in the ADDITIVE preset then discards just the
+                     * background so z_write stays safe. */
+                if (idx == 0) {
+                    alpha = 0x00;
+                    b_val = g_val = r_val = 0;
+                } else {
+                    alpha = 0xFF;
+                }
                 break;
             default: /* 0: opaque */
                 alpha = 0xFF;
