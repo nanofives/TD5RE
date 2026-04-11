@@ -4882,9 +4882,21 @@ static void Screen_MainMenu(void) {
                 break;
 
             case 1: /* Quick Race */
+                /* Main Menu "Quick Race" is a single-race flow: stamp
+                 * game_type=0 and run ConfigureGameTypeFlags so it copies
+                 * s_game_option_traffic / s_game_option_cops into
+                 * g_td5.traffic_enabled / g_td5.special_encounter_enabled.
+                 * Without this, traffic stays at whatever the zero-init
+                 * default is and AI traffic + cops never spawn on the track.
+                 * Mirrors ConfigureGameTypeFlags @ 0x00410CA0 case 0. */
+                s_selected_game_type = 0;
+                ConfigureGameTypeFlags();
                 s_flow_context = 2;
                 s_return_screen = TD5_SCREEN_QUICK_RACE;
                 s_inner_state = 8;
+                TD5_LOG_I(LOG_TAG,
+                          "MainMenu Quick Race: game_type=0 traffic=%d cops=%d",
+                          g_td5.traffic_enabled, g_td5.special_encounter_enabled);
                 break;
 
             case 2: /* Two Player / Time Demo
