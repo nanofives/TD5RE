@@ -3491,14 +3491,22 @@ void td5_physics_compute_surface_gravity(TD5_Actor *actor)
     int32_t v2y = (fl->y - rr->y - rl->y + fr->y) >> 8;
     int32_t v2z = (fl->z - rr->z - rl->z + fr->z) >> 8;
 
-    /* Cross product -> surface normal */
-    int32_t nx = (v1y * v2z - v1z * v2y) >> 8;
-    int32_t nz = (v1x * v2y - v1y * v2x) >> 8;
+    /* Cross product -> surface normal via CrossProduct3i_FixedPoint12 @ 0x42EAC0.
+     * Original shifts by >> 12, not >> 8. The previous >> 8 produced a 16x
+     * magnitude error that injected a ~1.5 world-unit lateral impulse at
+     * spawn — root cause of Cluster A vel_x=-399 / vel_z=+895 observed on
+     * 2026-04-11. [CONFIRMED @ 0x42EAC0 CrossProduct3i_FixedPoint12] */
+    int32_t nx = (v1y * v2z - v1z * v2y) >> 12;
+    int32_t nz = (v1x * v2y - v1y * v2x) >> 12;
 
-    /* Project gravity onto body X and Z axes */
-    int32_t gravity_half = g_gravity_constant >> 1;
-    actor->linear_velocity_x += (gravity_half * nx) >> 12;
-    actor->linear_velocity_z += (gravity_half * nz) >> 12;
+    /* Project gravity onto body X and Z axes.
+     * Original @ 0x42EBF0: (gGravityConstant * n) / 2 then
+     * (ax + ((ax >> 31) & 0xfff)) >> 12  (signed round toward zero).
+     * Previous port used (g >> 1) * n which loses 1 LSB on odd n. */
+    int32_t ax = (g_gravity_constant * nx) / 2;
+    int32_t az = (g_gravity_constant * nz) / 2;
+    actor->linear_velocity_x += (ax + ((ax >> 31) & 0xfff)) >> 12;
+    actor->linear_velocity_z += (az + ((az >> 31) & 0xfff)) >> 12;
 }
 
 /* ========================================================================
