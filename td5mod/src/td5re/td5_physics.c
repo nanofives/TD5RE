@@ -3389,9 +3389,11 @@ static void update_engine_speed_smoothed(TD5_Actor *actor)
         rpm += step;
     }
 
-    if (rpm > redline) rpm = redline;
-    if (rpm < 400) rpm = 400;
-
+    /* Original @ 0x42EDC2 / 0x42EDE3 stores rpm unconditionally — NO
+     * post-store clamps. Previously the port added `if (rpm > redline)
+     * rpm = redline; if (rpm < 400) rpm = 400;` here, which blocked the
+     * natural overshoot behavior of the asymmetric slew. Removed to
+     * match the original. [CONFIRMED @ 0x42EDC2, 0x42EDE3] */
     actor->engine_speed_accum = rpm;
 }
 
@@ -3430,10 +3432,12 @@ void td5_physics_update_engine_speed(TD5_Actor *actor)
         rpm += (target - rpm) >> 2;  /* smooth approach */
     }
 
-    /* Cap at redline */
+    /* Cap at redline — original @ 0x42EE6F-0x42EE7A clamps only the UPPER
+     * bound; it does NOT have a 400 floor. Previously the port had
+     * `if (rpm < 400) rpm = 400;` which blocked the valid low-RPM
+     * transient during shifts. [CONFIRMED @ 0x42EE7A] */
     int32_t redline = (int32_t)PHYS_S(actor, 0x72);
     if (rpm > redline) rpm = redline;
-    if (rpm < 400) rpm = 400;
 
     actor->engine_speed_accum = rpm;
 }
