@@ -2361,27 +2361,30 @@ static void render_vehicle_wheel_billboards(TD5_Actor *actor, int slot)
     /* Read wheel dimensions from cardef (RE: 0x446E30-0x446E3C).
      *   cardef+0x82 (int16) -> raw rim value
      *     - Tire ring radius = raw * 0.76171875 (DAT_0045D7AC)
-     *     - Hub-cap corners use the RAW value directly as the diamond
-     *       distance from the wheel center [CONFIRMED @ 0x446F32]; without
-     *       this the axis-aligned square is ~7.7% oversize (its corners
-     *       land at rim_scaled*sqrt(2) instead of rim_raw).
      *   cardef+0x84 (int16) -> axle_halfw (raw, no scaling) */
     float rim_radius = WHEEL_RADIUS_DEFAULT;
-    float hub_half   = (WHEEL_RADIUS_DEFAULT / WHEEL_RADIUS_SCALE) * 0.70710678f;
     float axle_halfw = WHEEL_HALFW_DEFAULT;
     if (actor->car_definition_ptr) {
         int16_t r = *(int16_t *)((uint8_t *)actor->car_definition_ptr + 0x82);
-        if (r > 0) {
-            rim_radius = (float)r * WHEEL_RADIUS_SCALE;
-            /* Axis-aligned square with half-side = rim_raw / sqrt(2) has
-             * corners at distance rim_raw from the wheel center — matches
-             * the original's diamond inscription (4 verts on a circle
-             * of radius rim_raw). */
-            hub_half   = (float)r * 0.70710678f;
-        }
+        if (r > 0) rim_radius = (float)r * WHEEL_RADIUS_SCALE;
         int16_t hw = *(int16_t *)((uint8_t *)actor->car_definition_ptr + 0x84);
         if (hw > 0) axle_halfw = (float)hw;
     }
+
+    /* Hub-cap spin rotation around the wheel axle.
+     * Original (0x446F00) pre-computes:
+     *   front_angle_12b = accumulated_tire_slip_z * -4  [CONFIRMED @ 0x446F15]
+     *   rear_angle_12b  = accumulated_tire_slip_x * -4  [CONFIRMED @ 0x446F23]
+     * The slip fields accumulate forward speed every physics tick
+     * (td5_physics.c:1223-1224), so they act as an odometer that drives
+     * the continuous hub-cap rotation. Angle is in the game's 12-bit unit
+     * (4096 = full turn) -> radians via (2*PI/4096) = PI/2048. */
+    int32_t slip_front_12 = (int32_t)actor->accumulated_tire_slip_z * -4;
+    int32_t slip_rear_12  = (int32_t)actor->accumulated_tire_slip_x * -4;
+    float front_rad = (float)slip_front_12 * ((float)M_PI / 2048.0f);
+    float rear_rad  = (float)slip_rear_12  * ((float)M_PI / 2048.0f);
+    float front_cos = cosf(front_rad), front_sin = sinf(front_rad);
+    float rear_cos  = cosf(rear_rad),  rear_sin  = sinf(rear_rad);
 
     /* 9-vertex rim circle (8 segments + closing vertex, 45-degree steps) */
     float ring_y[9], ring_z[9];
@@ -2523,11 +2526,23 @@ static void render_vehicle_wheel_billboards(TD5_Actor *actor, int slot)
         float hub_v1 = ((float)(spin_row * 32 + 31) + 0.5f) / 64.0f;
         {
             float ho = outer_off;
+            /* Rotated diamond (original's verts on a circle of radius hub_r).
+             * Front wheels use the tire_slip_z rotation (longitudinal odometer);
+             * rear wheels use tire_slip_x. The 4 verts are at rotation θ,
+             * θ+90°, θ+180°, θ+270° — matching the original's local_cc[] layout:
+             *   v0 = ( C, -S),  v1 = (S, C),  v2 = (-C, S),  v3 = (-S, -C)
+             * where C = cos(θ)*hub_r, S = sin(θ)*hub_r. Using rim_radius
+             * (scaled tire ring radius) so corners sit inside the tire ring. */
+            float rot_cos = (w < 2) ? front_cos : rear_cos;
+            float rot_sin = (w < 2) ? front_sin : rear_sin;
+            float hub_r  = rim_radius;
+            float C = rot_cos * hub_r;
+            float S = rot_sin * hub_r;
             float corner_offsets[4][3] = {
-                { ho, +hub_half, -hub_half },
-                { ho, +hub_half, +hub_half },
-                { ho, -hub_half, +hub_half },
-                { ho, -hub_half, -hub_half },
+                { ho,  C, -S },
+                { ho,  S,  C },
+                { ho, -C,  S },
+                { ho, -S, -C },
             };
             float corners[4][3];
             for (int c = 0; c < 4; c++) {
