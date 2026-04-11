@@ -749,8 +749,31 @@ static void fwd_rev_handler(TD5_Actor *actor, int reverse_mode)
 
     /* Outer gate [CONFIRMED raw disasm 0x406F77 / 0x00407107]:
      *   Forward: actor.track_span_raw > boundary + 1 -> early exit
-     *   Reverse: actor.track_span_raw < boundary - 1 -> early exit */
+     *   Reverse: actor.track_span_raw < boundary - 1 -> early exit
+     *
+     * SAFETY GUARD: the gate as RE'd above is a noop in practice for a
+     * player driving normally (chassis_span stays inside [0, s_span_count-1],
+     * never > s_span_count-1). As a result the handler unconditionally
+     * computes a boundary-span penetration dot product and, for any track
+     * where that dot product happens to be negative at the player's spawn
+     * position (Australia/Scotland on the current data), fires
+     * td5_physics_wall_response with pen=~-530k, teleporting the player off
+     * the track at frame 2. Moscow/USA are lucky enough to get pen>=0
+     * (probe "inside") so they don't regress, which is why the bug is
+     * track-specific.
+     *
+     * Bail out if the player is clearly not near the boundary (distance
+     * > 3 spans). This matches the intent of "forward/reverse contact is a
+     * boundary-adjacent check" and keeps d70920b's handler correct for
+     * the edge case it was meant to catch, without regressing well-behaved
+     * spans. [TODO: re-run Ghidra on 0x00406F50 / 0x004070E0 outer gate;
+     * the port's `>` / `<` directions look inverted from the original's
+     * intent.] */
     int32_t chassis_span = (int32_t)actor->track_span_raw;
+    int32_t span_dist = chassis_span - boundary;
+    if (span_dist < 0) span_dist = -span_dist;
+    if (span_dist > 3) return;
+
     if (!reverse_mode) {
         if (chassis_span > boundary + 1) return;
     } else {
