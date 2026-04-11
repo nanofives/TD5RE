@@ -165,6 +165,12 @@ static int  s_p2_paint;
 static int  s_p2_config;
 static int  s_p2_transmission;
 
+/* Drag-race CarSelect 2-pass counter [CONFIRMED @ DAT_0048f380].
+ * Original binary gates this on g_selectedGameType == 7 which is DRAG RACE in the
+ * original; the port's game_type convention has Drag Race = 9. 0 = picking car 1,
+ * 1 = picking car 2. Reset on Back, on race entry, and on screen leave. */
+static int  s_drag_carselect_pass;
+
 /* Track selection state */
 static int  s_selected_track;           /* DAT_004a2c90            */
 static int  s_attract_track;            /* random track for attract demo; never overwrites s_selected_track */
@@ -1449,8 +1455,12 @@ static void frontend_init_race_schedule(void) {
     slot_variant[0] = s_selected_paint;
 
     /* Two-player setup [CONFIRMED @ 0x0040daf0]:
-     * If two-player mode or game type 7 (time trial), slot 1 = player 2's car */
-    if (s_two_player_mode || s_selected_game_type == 7) {
+     * Original gate: g_twoPlayerModeEnabled != 0 || g_selectedGameType == 7.
+     * In the original, game_type 7 is DRAG RACE (user picks a 2nd car via the
+     * 2-pass CarSelect loop). The port's convention uses game_type 9 for drag
+     * race, so the constant is swapped here. Time Trials is solo and must NOT
+     * fall into this branch. */
+    if (s_two_player_mode || s_selected_game_type == 9) {
         slot_active[1]  = 1;
         slot_ext_id[1]  = s_p2_car;
         slot_variant[1] = 0;
@@ -5108,6 +5118,7 @@ static void Screen_RaceTypeCategory(void) {
 
             case 4: /* Drag Race */
                 s_selected_game_type = 9;
+                s_drag_carselect_pass = 0;
                 ConfigureGameTypeFlags();
                 s_return_screen = TD5_SCREEN_CAR_SELECTION;
                 s_inner_state = 5;
@@ -6773,6 +6784,7 @@ static void Screen_CarSelection(void) {
                 break;
 
             case 5: /* Back */
+                s_drag_carselect_pass = 0;
                 s_return_screen = TD5_SCREEN_RACE_TYPE_MENU;
                 s_inner_state = 0x14;
                 break;
@@ -6922,6 +6934,36 @@ static void Screen_CarSelection(void) {
             s_p2_transmission = s_selected_transmission;
             td5_frontend_set_screen(TD5_SCREEN_TRACK_SELECTION);
             return;
+        }
+
+        /* Drag-race 2-pass CarSelect [CONFIRMED @ 0x0040f744].
+         * Original: game_type==7 (=drag race there) && pass_marker==0 → re-enter
+         * CarSelect with pass_marker=1, showing "CAR 2". After pass 2, skip
+         * TrackSelection entirely and call InitializeRaceSeriesSchedule +
+         * InitializeFrontendDisplayModeState directly (drag strip is fixed).
+         * Port convention: case 4 OK sets s_return_screen=TRACK_SELECTION while
+         * case 5 Back sets RACE_TYPE_MENU — only fire on OK. */
+        if (g_td5.drag_race_enabled &&
+            s_return_screen == TD5_SCREEN_TRACK_SELECTION) {
+            if (s_drag_carselect_pass == 0) {
+                s_selected_car = actual_car;
+                s_drag_carselect_pass = 1;
+                TD5_LOG_I(LOG_TAG, "CarSelect: drag-race pass1 car=%d → re-enter for car 2",
+                          actual_car);
+                td5_frontend_set_screen(TD5_SCREEN_CAR_SELECTION);
+                return;
+            } else {
+                s_p2_car = actual_car;
+                s_p2_paint = s_selected_paint;
+                s_p2_config = s_selected_config;
+                s_p2_transmission = s_selected_transmission;
+                s_drag_carselect_pass = 0;
+                TD5_LOG_I(LOG_TAG, "CarSelect: drag-race pass2 car=%d → skip track select, start race",
+                          actual_car);
+                frontend_init_race_schedule();
+                frontend_init_display_mode_state();
+                return;
+            }
         }
 
         /* Single-player: OK → track selection, Back → return screen */
