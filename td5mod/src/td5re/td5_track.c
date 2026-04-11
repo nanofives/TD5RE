@@ -674,11 +674,15 @@ void td5_track_resolve_wall_contacts(TD5_Actor *actor)
         }
 
         /* Dead zone (skip very shallow contacts) and suspicion cap (skip
-         * very deep ones — real driving off-road is gradual; a sudden
-         * d < -80 is almost certainly a chassis-span mismatch and firing
-         * would push the car based on wrong geometry). */
+         * everything past -40 because the chassis span is almost
+         * certainly stale). Walker-lag staleness grows d linearly with
+         * forward velocity — a car at ~15 units/tick crosses -40 after
+         * 3 ticks, and real off-road drift (the push is always active)
+         * almost never produces d past that. Earlier -80 threshold was
+         * too loose and let spurious walls fire at d=-18..-65 while the
+         * walker catches up. */
         const int32_t WALL_DEAD_ZONE   = -10;
-        const int32_t WALL_DEEP_SKIP   = -80;
+        const int32_t WALL_DEEP_SKIP   = -40;
         const int32_t WALL_RELEASE     =  5;   /* d must rise above this to re-arm */
 
         int slot = actor->slot_index & (TD5_MAX_TOTAL_ACTORS - 1);
