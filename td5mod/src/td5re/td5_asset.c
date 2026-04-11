@@ -2305,6 +2305,90 @@ const char *td5_asset_get_car_zip_path(int car_index)
 }
 
 /* ========================================================================
+ * Traffic Vehicle Loading -- LoadRaceVehicleAssets Phase 4 (0x00443280)
+ *
+ * Reads model%d.prr + skin%d.tga from traffic.zip and registers the mesh
+ * against the given actor slot. Each traffic slot gets its own dedicated
+ * skin texture page so models can be visually distinct.
+ *
+ * The traffic.zip archive holds 31 models (model0.prr..model30.prr).
+ * model_index selects which one to load for this slot.
+ * ======================================================================== */
+#define TD5_TRAFFIC_TEXTURE_PAGE_BASE 820
+#define TD5_TRAFFIC_ZIP               "traffic.zip"
+#define TD5_TRAFFIC_MODEL_COUNT       31
+
+int td5_asset_load_traffic_model(int model_index, int slot)
+{
+    char mesh_name[32];
+    char skin_name[32];
+
+    if (slot < 0 || slot >= 12) {
+        TD5_LOG_W(LOG_TAG, "traffic slot=%d out of range", slot);
+        return 0;
+    }
+    if (model_index < 0 || model_index >= TD5_TRAFFIC_MODEL_COUNT) {
+        TD5_LOG_W(LOG_TAG, "traffic slot=%d model_index=%d out of range",
+                  slot, model_index);
+        return 0;
+    }
+
+    snprintf(mesh_name, sizeof(mesh_name), "model%d.prr", model_index);
+    snprintf(skin_name, sizeof(skin_name), "skin%d.tga",  model_index);
+
+    /* --- Load mesh ------------------------------------------------------- */
+    int mesh_size = 0;
+    void *mesh_data = td5_asset_open_and_read(mesh_name, TD5_TRAFFIC_ZIP, &mesh_size);
+    if (!mesh_data) {
+        TD5_LOG_W(LOG_TAG, "traffic slot=%d: %s not found in %s",
+                  slot, mesh_name, TD5_TRAFFIC_ZIP);
+        return 0;
+    }
+    if (mesh_size < (int)sizeof(TD5_MeshHeader)) {
+        TD5_LOG_W(LOG_TAG, "traffic slot=%d: %s too small (%d bytes)",
+                  slot, mesh_name, mesh_size);
+        free(mesh_data);
+        return 0;
+    }
+
+    TD5_MeshHeader *mesh = (TD5_MeshHeader *)mesh_data;
+    td5_track_prepare_mesh_resource(mesh);
+
+    /* --- Load skin texture + patch primitive page IDs -------------------- */
+    /* Traffic slots live in [6..11]; subtract 6 so we get a 0..5 index into
+     * the dedicated traffic texture page block. */
+    int traffic_idx = (slot >= 6) ? (slot - 6) : slot;
+    int skin_page   = TD5_TRAFFIC_TEXTURE_PAGE_BASE + traffic_idx;
+
+    char png_path[256];
+    int skin_ok = 0;
+    if (td5_asset_resolve_png_path(skin_name, TD5_TRAFFIC_ZIP, png_path, sizeof(png_path))) {
+        skin_ok = td5_asset_load_png_texture(skin_page, png_path, TD5_COLORKEY_NONE);
+    }
+    if (!skin_ok) {
+        TD5_LOG_W(LOG_TAG, "traffic slot=%d: skin%d PNG not found in %s (model will draw untextured)",
+                  slot, model_index, TD5_TRAFFIC_ZIP);
+    }
+
+    /* Patch mesh header + all primitive cmd page IDs to the traffic skin
+     * page. Traffic cars use a single skin texture (no separate hub/body)
+     * so we replace every command's texture_page_id unconditionally. */
+    mesh->texture_page_id = (int16_t)skin_page;
+    TD5_PrimitiveCmd *cmds = (TD5_PrimitiveCmd *)(uintptr_t)mesh->commands_offset;
+    for (int c = 0; c < mesh->command_count; c++) {
+        cmds[c].texture_page_id = (int16_t)skin_page;
+    }
+
+    td5_render_set_vehicle_mesh(slot, mesh);
+
+    TD5_LOG_I(LOG_TAG,
+              "traffic slot=%d model=%d: loaded (%d bytes, %d verts, %d cmds, skin_page=%d)",
+              slot, model_index, mesh_size,
+              mesh->total_vertex_count, mesh->command_count, skin_page);
+    return 1;
+}
+
+/* ========================================================================
  * Mipmap Builder -- ParseAndDecodeCompressedTrackData (0x430D30)
  *
  * Generates a mipmap chain by box-filtering from source dimensions

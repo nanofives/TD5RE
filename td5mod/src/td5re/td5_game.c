@@ -722,6 +722,45 @@ int td5_game_init_race_session(void) {
         }
     }
 
+    /* ---- Step 5b: Load traffic vehicle models (Phase 4 of LoadRaceVehicleAssets @ 0x00443280) ----
+     * Populates actor slots 6..11 with traffic.zip/model%d.prr meshes.
+     * Without this, td5_render_get_vehicle_mesh(slot>=6) returns NULL and
+     * the render loop at td5_render.c:1647 silently skips every traffic
+     * actor even though td5_ai + td5_physics are ticking them.
+     *
+     * The original binary uses a per-track 6-entry model-index table at
+     * 0x00474D74 to pick which traffic models appear on each track. That
+     * table has not been fully decoded yet — for now, load models 0..5
+     * into slots 6..11 as a deterministic fallback. Per-track selection
+     * is a cosmetic refinement (which cars appear, not whether they
+     * appear). [UNCERTAIN: per-track model table not decoded]
+     *
+     * Gate mirrors the original 0x0042AA10 forced-off conditions:
+     * network / split-screen already cleared g_td5.traffic_enabled above;
+     * time-trial and drag-race don't spawn traffic actors. */
+    if (g_td5.traffic_enabled
+        && !g_td5.time_trial_enabled
+        && !g_td5.drag_race_enabled
+        && !g_td5.network_active
+        && g_td5.split_screen_mode == 0) {
+        for (int ti = 0; ti < 6; ti++) {
+            int traffic_slot  = TD5_MAX_RACER_SLOTS + ti;  /* slots 6..11 */
+            int traffic_model = ti;                         /* fallback: 0..5 */
+            if (!td5_asset_load_traffic_model(traffic_model, traffic_slot)) {
+                TD5_LOG_W(LOG_TAG,
+                          "InitRace step 5b: traffic slot %d (model %d) load failed",
+                          traffic_slot, traffic_model);
+            }
+        }
+        TD5_LOG_I(LOG_TAG, "InitRace step 5b/19: traffic vehicle assets loaded");
+    } else {
+        TD5_LOG_I(LOG_TAG,
+                  "InitRace step 5b/19: traffic disabled (traffic_enabled=%d time_trial=%d drag=%d net=%d split=%d)",
+                  g_td5.traffic_enabled, g_td5.time_trial_enabled,
+                  g_td5.drag_race_enabled, g_td5.network_active,
+                  g_td5.split_screen_mode);
+    }
+
     /* ---- Step 6: Bind track strip runtime pointers ---- */
     /* (Internal to td5_asset_load_level -- strip data is patched in place) */
     TD5_LOG_I(LOG_TAG, "InitRace step 6/19: track strip runtime pointers bound");

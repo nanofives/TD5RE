@@ -224,6 +224,14 @@ int td5_asset_load_vehicle(int car_index, int slot);
 /** Get the ZIP archive path for a car by index (0-36). Returns NULL if out of range. */
 const char *td5_asset_get_car_zip_path(int car_index);
 
+/**
+ * Load a traffic vehicle model (model%d.prr + skin%d.png) from traffic.zip into
+ * the given actor slot (expected range 6..11). Mirrors Phase 4 of
+ * LoadRaceVehicleAssets (0x00443280) which populates the traffic half of the
+ * 12-slot race actor table. Returns 1 on success, 0 on failure.
+ */
+int td5_asset_load_traffic_model(int model_index, int slot);
+
 /* ========================================================================
  * Mipmap Generation
  * ======================================================================== */
