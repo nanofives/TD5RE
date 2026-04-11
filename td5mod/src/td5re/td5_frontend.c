@@ -1458,7 +1458,12 @@ static void frontend_init_race_schedule(void) {
         TD5_LOG_I(LOG_TAG, "InitRaceSchedule: P2 slot1 ext_id=%d", s_p2_car);
     }
 
-    srand(timeGetTime());
+    /* Skip the wall-clock reseed during race-trace runs so /diff-race gets
+     * deterministic AI ext_id picks. The original's quickrace hook never
+     * calls srand() — it relies on the process-default RNG state. */
+    if (!g_td5.ini.race_trace_enabled) {
+        srand(timeGetTime());
+    }
 
     if (s_selected_game_type == 2) {
         /* === Path 1: Quick Race (gameType == 2, Era) [CONFIRMED @ 0x0040dac0] ===
@@ -1560,7 +1565,13 @@ static void frontend_init_race_schedule(void) {
  * ======================================================================== */
 
 static int ConfigureGameTypeFlags(void);  /* forward decl */
+static void frontend_init_display_mode_state(void);  /* forward decl */
 
+/* Matches the sequence in re/tools/quickrace/td5_quickrace_hook.js:
+ * stamp race globals, then ConfigureGameTypeFlags -> InitializeRaceSeriesSchedule
+ * -> InitializeFrontendDisplayModeState. Any divergence from the original's
+ * attract-mode demo path reappears as a sim_tick=1 spawn-state mismatch in
+ * /diff-race, so keep this in lockstep with the Frida hook. */
 void td5_frontend_auto_race_setup(void) {
     /* Apply INI values to frontend statics (normally done in init_resources) */
     s_selected_car       = g_td5.ini.default_car;
@@ -1579,14 +1590,23 @@ void td5_frontend_auto_race_setup(void) {
     s_game_option_dynamics          = g_td5.ini.dynamics;
     s_game_option_collisions        = g_td5.ini.collisions;
 
-    /* Unlock all cars/tracks for auto-race (bypass lock tables) */
-    s_cheat_unlock_all = 1;
+    /* Match the Frida hook's pre-call writes.
+     *   g_twoPlayerModeEnabled=0, g_returnToScreenIndex=-1
+     *   s_current_screen pinned to MAIN_MENU so frontend_init_race_schedule
+     *   takes the selected-track branch instead of s_attract_track. */
+    s_two_player_mode = 0;
+    s_return_screen   = -1;
+    s_current_screen  = TD5_SCREEN_MAIN_MENU;
 
     /* Configure game type flags (sets g_td5.game_type, traffic, etc.) */
     ConfigureGameTypeFlags();
 
     /* Now trigger the race schedule (sets race_requested, assigns AI cars) */
     frontend_init_race_schedule();
+
+    /* Enumerate display modes — original quickrace hook calls
+     * InitializeFrontendDisplayModeState() right after the schedule init. */
+    frontend_init_display_mode_state();
 
     TD5_LOG_I(LOG_TAG, "AutoRace: car=%d track=%d gameType=%d laps=%d diff=%d dyn=%d traffic=%d cops=%d coll=%d",
               g_td5.car_index, g_td5.track_index, s_selected_game_type,
@@ -4857,12 +4877,38 @@ static void Screen_MainMenu(void) {
                 s_inner_state = 8;
                 break;
 
-            case 2: /* Two Player */
-                s_flow_context = 3;
-                s_two_player_mode = 1;
-                s_selected_game_type = 0;
-                s_return_screen = TD5_SCREEN_CAR_SELECTION;
-                s_inner_state = 8;
+            case 2: /* Two Player / Time Demo
+                     *
+                     * Original ScreenMainMenuAnd1PRaceFlow @ 0x415BFC:
+                     *   if (*(int*)(g_appExref+0x170) != 0) {
+                     *       g_benchmarkModeActive = 1;
+                     *       InitializeRaceSeriesSchedule();
+                     *       return;
+                     *   } else {
+                     *       g_twoPlayerModeEnabled = 1;
+                     *       g_selectedGameType = 0;
+                     *   }
+                     *
+                     * `app+0x170` is never written anywhere in TD5_d3d.exe
+                     * (zero write xrefs), so button 2 is always 2-Player in
+                     * the shipped binary. The port exposes the benchmark
+                     * path via the td5re.ini [Debug] EnableBenchmark=1
+                     * option so that the existing TD5_GAMESTATE_BENCHMARK
+                     * code path is reachable for testing.
+                     * [RE basis: research agent xref scan of app+0x170] */
+                if (g_td5.ini.enable_benchmark) {
+                    TD5_LOG_I(LOG_TAG, "MainMenu: button 2 → benchmark mode (INI override)");
+                    g_td5.benchmark_active = 1;
+                    s_flow_context = 3;
+                    s_return_screen = TD5_SCREEN_CAR_SELECTION;
+                    s_inner_state = 8;
+                } else {
+                    s_flow_context = 3;
+                    s_two_player_mode = 1;
+                    s_selected_game_type = 0;
+                    s_return_screen = TD5_SCREEN_CAR_SELECTION;
+                    s_inner_state = 8;
+                }
                 break;
 
             case 3: /* Net Play */

@@ -2766,6 +2766,11 @@ int td5_game_get_player_slot(int viewport) {
 int td5_game_is_split_screen(void) {
     return g_split_screen_mode != 0;
 }
+
+int td5_game_get_slot_state(int slot) {
+    if (slot < 0 || slot >= TD5_MAX_RACER_SLOTS) return 3;  /* disabled */
+    return (int)s_slot_state[slot].state;
+}
 int td5_game_is_replay_active(void) { return 0; }
 int td5_game_get_traffic_variant(int traffic_index) { (void)traffic_index; return 0; }
 int td5_game_get_cop_actor_index(void) { return -1; }

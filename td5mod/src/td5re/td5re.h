@@ -221,6 +221,11 @@ typedef struct TD5_GlobalState {
         int  loaded;  /* 1 once INI has been read */
         /* AutoRace: skip frontend, launch race immediately with INI settings */
         int  auto_race;             /* 1 = auto-start race on launch */
+        /* Enable benchmark mode: redirects main-menu button 2 to TD5_GAMESTATE_BENCHMARK.
+         * Matches the dead-code path in TD5_d3d.exe gated by app+0x170 (always 0 in
+         * the shipped binary). Default 0 = button 2 is 2-player, matching the
+         * original's runtime behavior. */
+        int  enable_benchmark;
     } ini;
 
 } TD5_GlobalState;

@@ -49,6 +49,11 @@ int  td5_game_check_race_completion(void);
 void td5_game_begin_fade_out(int param);
 int  td5_game_is_local_participant(int slot);
 
+/* Returns the race slot state byte:
+ *   0 = AI racer, 1 = active player, 2 = completed, 3 = disabled.
+ * Used by the renderer to skip disabled slots in drag race. */
+int  td5_game_get_slot_state(int slot);
+
 /* --- Timing --- */
 void td5_game_update_frame_timing(void);
 float td5_game_get_fps(void);

@@ -1571,7 +1571,13 @@ void td5_render_actors_for_view(int view_index)
      * Original RunRaceFrame (0x42BB2E): effective_spans = (int)((v * 0.85 + 0.15) * max_spans)
      * where max_spans = 0x40 (64) for single-screen [CONFIRMED @ InitializeRaceViewportLayout 0x0042C2B0].
      * Source port uses max_spans=128 (200% of original) so slider at 1.0 shows 2× the original max.
-     * Cull window = player_span ± half_window with ring-wrap for circuit tracks. */
+     * Cull window = player_span ± half_window with ring-wrap for circuit tracks.
+     *
+     * Original also pulls the cull-start back by −0x19 (≈100 spans) at 0x42BBDF when
+     * g_selectedGameType != 0 (cup/wanted/drag). The port's doubled max_spans already
+     * exceeds the original's (64 + 25 quarter-span = ~89 effective) trailing reach,
+     * so no explicit offset is needed. [RE basis: research agent confirmed the
+     * architectural coverage — task #9 resolved by doubled window.] */
 #define VIEW_DIST_MAX_SPANS 128
     int player_span = 0;
     {
@@ -1629,6 +1635,7 @@ void td5_render_actors_for_view(int view_index)
 
     {
         int total_actors = td5_game_get_total_actor_count();
+        int drag_mode = g_td5.drag_race_enabled;
 
         for (int slot = 0; slot < total_actors; slot++) {
             TD5_Actor *actor = td5_game_get_actor(slot);
@@ -1639,6 +1646,16 @@ void td5_render_actors_for_view(int view_index)
 
             if (!actor || !mesh)
                 continue;
+
+            /* Drag race: only render actors with non-zero slot state.
+             * Original RenderRaceActorsForView @ 0x40BD26: in drag mode,
+             * iterates racer slots but skips `slot.state == 0` (absent AI).
+             * [RE basis: deep decomp pass, state-gated loop] */
+            if (drag_mode && slot < TD5_MAX_RACER_SLOTS) {
+                int ss = td5_game_get_slot_state(slot);
+                if (ss == 0)
+                    continue;
+            }
 
             td5_track_apply_segment_lighting(actor, view_index);
 

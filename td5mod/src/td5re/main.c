@@ -27,72 +27,26 @@
 #include <stdarg.h>
 #include <string.h>
 
-/* Debug log to file + OutputDebugString (Win32 API for share-compatible writes) */
-static char s_main_log_path[512];
-static int  s_main_log_init = 0;
-static HANDLE s_main_log_handle = INVALID_HANDLE_VALUE;
-static unsigned int s_main_log_line_count = 0;
-
-static void dbglog_flush_close(void) {
-    if (s_main_log_handle != INVALID_HANDLE_VALUE) {
-        FlushFileBuffers(s_main_log_handle);
-        CloseHandle(s_main_log_handle);
-        s_main_log_handle = INVALID_HANDLE_VALUE;
-    }
-}
-
-static void dbglog(const char *fmt, ...) {
-    char buf[512];
-    va_list ap;
-    DWORD written;
-
-    va_start(ap, fmt);
-    vsnprintf(buf, sizeof(buf), fmt, ap);
-    va_end(ap);
-    OutputDebugStringA(buf);
-    OutputDebugStringA("\n");
-
-    if (!s_main_log_init) {
-        DWORD n = GetModuleFileNameA(NULL, s_main_log_path, sizeof(s_main_log_path) - 32);
-        if (n > 0) {
-            char *sl = s_main_log_path + n;
-            while (sl > s_main_log_path && *sl != '\\' && *sl != '/') sl--;
-            if (sl > s_main_log_path) sl[1] = '\0';
-            strcat(s_main_log_path, "td5re_debug.log");
-        } else {
-            strcpy(s_main_log_path, "td5re_debug.log");
-        }
-        /* Truncate on first call */
-        s_main_log_handle = CreateFileA(s_main_log_path, GENERIC_WRITE,
-                                        FILE_SHARE_READ | FILE_SHARE_WRITE,
-                                        NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
-        if (s_main_log_handle != INVALID_HANDLE_VALUE) {
-            atexit(dbglog_flush_close);
-        }
-        s_main_log_init = 1;
-    }
-
-    {
-        size_t len = strlen(buf);
-        if (len > 0 && len < sizeof(buf) - 2 && buf[len-1] != '\n') {
-            buf[len] = '\n'; buf[len+1] = '\0';
-        }
-    }
-    if (s_main_log_handle != INVALID_HANDLE_VALUE) {
-        WriteFile(s_main_log_handle, buf, (DWORD)strlen(buf), &written, NULL);
-        s_main_log_line_count++;
-        if ((s_main_log_line_count % 100u) == 0u) {
-            FlushFileBuffers(s_main_log_handle);
-        }
-    }
-}
-
 /* TD5RE headers */
 #include "td5re.h"
 #include "td5_platform.h"
 
 /* Wrapper backend types and functions */
 #include "../../ddraw_wrapper/src/wrapper.h"
+
+/* Bootstrap logging — routes through the platform logger (engine.log).
+ * Also echoes to OutputDebugString for IDE visibility. */
+static void dbglog(const char *fmt, ...) {
+    char buf[512];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(buf, sizeof(buf), fmt, ap);
+    va_end(ap);
+    OutputDebugStringA(buf);
+    OutputDebugStringA("\n");
+    /* Forward to the centralized platform logger (engine category) */
+    td5_plat_log(TD5_LOG_INFO, "main", "%s", buf);
+}
 
 /* ========================================================================
  * External declarations
@@ -132,13 +86,133 @@ static LONG WINAPI td5_crash_handler(EXCEPTION_POINTERS *ep)
         (unsigned long)ep->ContextRecord->Ecx,
         (unsigned long)ep->ContextRecord->Edx);
     dbglog(crash_msg);
-    /* Also write to a crash file in case the log is buffered */
+    td5_plat_log_flush();
+    /* Also write to a dedicated crash file in the log directory */
     {
-        FILE *cf = fopen("td5re_crash.log", "w");
-        if (cf) { fprintf(cf, "%s\n", crash_msg); fclose(cf); }
+        char crash_path[600];
+        const char *logdir = td5_plat_log_dir();
+        snprintf(crash_path, sizeof(crash_path), "%scrash.log", logdir);
+        {
+            FILE *cf = fopen(crash_path, "w");
+            if (cf) { fprintf(cf, "%s\n", crash_msg); fclose(cf); }
+        }
     }
     MessageBoxA(NULL, crash_msg, "TD5RE Crash", MB_OK | MB_ICONERROR);
     return EXCEPTION_EXECUTE_HANDLER;
+}
+
+/* ========================================================================
+ * INI configuration (td5re.ini next to executable)
+ * ======================================================================== */
+
+static char s_ini_path[MAX_PATH];
+
+static void td5_load_ini(void)
+{
+    DWORD n = GetModuleFileNameA(NULL, s_ini_path, MAX_PATH);
+    if (n > 0) {
+        char *sl = s_ini_path + n;
+        while (sl > s_ini_path && *sl != '\\' && *sl != '/') sl--;
+        if (sl > s_ini_path) sl[1] = '\0';
+        strcat(s_ini_path, "td5re.ini");
+    } else {
+        strcpy(s_ini_path, "td5re.ini");
+    }
+}
+
+static int td5_ini_int(const char *section, const char *key, int fallback)
+{
+    return GetPrivateProfileIntA(section, key, fallback, s_ini_path);
+}
+
+/* ------------------------------------------------------------------------
+ * Shared quick-race INI (re/tools/quickrace/td5_quickrace.ini)
+ *
+ * Same file the original-game Frida launcher reads. When td5re finds it and
+ * [launcher] skip_frontend=1, override the td5re.ini race defaults and flip
+ * on auto_race + skip_intro so the main-loop jumps straight into the race.
+ * ------------------------------------------------------------------------ */
+/* Parse a loose boolean: accepts 1/0, true/false, yes/no, on/off (any case). */
+static int td5_ini_parse_bool(const char *s, int fallback)
+{
+    if (!s || !*s) return fallback;
+    if (s[0] == '1') return 1;
+    if (s[0] == '0') return 0;
+    if (s[0] == 't' || s[0] == 'T' || s[0] == 'y' || s[0] == 'Y') return 1;
+    if (s[0] == 'f' || s[0] == 'F' || s[0] == 'n' || s[0] == 'N') return 0;
+    if ((s[0] == 'o' || s[0] == 'O') && (s[1] == 'n' || s[1] == 'N')) return 1;
+    if ((s[0] == 'o' || s[0] == 'O') && (s[1] == 'f' || s[1] == 'F')) return 0;
+    return fallback;
+}
+
+static int td5_load_shared_quickrace_ini(void)
+{
+    char exe_dir[MAX_PATH];
+    DWORD n = GetModuleFileNameA(NULL, exe_dir, MAX_PATH);
+    if (n == 0 || n >= MAX_PATH) {
+        dbglog("Shared INI: GetModuleFileNameA failed (n=%lu)", n);
+        return 0;
+    }
+
+    char *sl = exe_dir + n;
+    while (sl > exe_dir && *sl != '\\' && *sl != '/') sl--;
+    if (sl > exe_dir) *sl = '\0';
+
+    char path[MAX_PATH];
+    int found = 0;
+
+    /* Candidate locations, in preference order:
+     *   1. <exe_dir>\td5_quickrace.ini                      (next to the exe)
+     *   2. <exe_dir>\re\tools\quickrace\td5_quickrace.ini   (exe at repo root)
+     *   3. <exe_dir>\..\re\tools\quickrace\td5_quickrace.ini (exe one level down)
+     */
+    const char *rel_paths[] = {
+        "\\td5_quickrace.ini",
+        "\\re\\tools\\quickrace\\td5_quickrace.ini",
+        "\\..\\re\\tools\\quickrace\\td5_quickrace.ini",
+    };
+    size_t i;
+    for (i = 0; i < sizeof(rel_paths) / sizeof(rel_paths[0]); ++i) {
+        _snprintf(path, sizeof(path), "%s%s", exe_dir, rel_paths[i]);
+        path[sizeof(path) - 1] = '\0';
+        if (GetFileAttributesA(path) != INVALID_FILE_ATTRIBUTES) {
+            found = 1;
+            break;
+        }
+    }
+
+    if (!found) {
+        dbglog("Shared INI: not found in any candidate path (exe_dir=%s)", exe_dir);
+        return 0;
+    }
+
+    /* skip_frontend accepts 1/0, true/false, yes/no — use string read then parse. */
+    char skip_str[16] = {0};
+    GetPrivateProfileStringA("launcher", "skip_frontend", "0",
+                             skip_str, sizeof(skip_str), path);
+    int skip = td5_ini_parse_bool(skip_str, 0);
+    dbglog("Shared INI: %s (skip_frontend='%s' -> %d)", path, skip_str, skip);
+    if (!skip) return 0;
+
+    g_td5.ini.default_game_type =
+        GetPrivateProfileIntA("race", "game_type",
+                              g_td5.ini.default_game_type, path);
+    g_td5.ini.default_track =
+        GetPrivateProfileIntA("race", "track",
+                              g_td5.ini.default_track, path);
+    g_td5.ini.laps =
+        GetPrivateProfileIntA("race", "laps",
+                              g_td5.ini.laps, path);
+    g_td5.ini.default_car =
+        GetPrivateProfileIntA("car", "car",
+                              g_td5.ini.default_car, path);
+    g_td5.ini.auto_race  = 1;
+    g_td5.ini.skip_intro = 1;
+
+    dbglog("  -> auto_race=1 skip_intro=1 type=%d track=%d car=%d laps=%d",
+           g_td5.ini.default_game_type, g_td5.ini.default_track,
+           g_td5.ini.default_car, g_td5.ini.laps);
+    return 1;
 }
 
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
@@ -161,6 +235,88 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     (void)nCmdShow;
 
     SetUnhandledExceptionFilter(td5_crash_handler);
+
+    /* Initialize multi-file logging (creates log/ dir, rotates old sessions) */
+    td5_plat_log_init();
+
+    /* Load INI before anything else */
+    td5_load_ini();
+    width    = td5_ini_int("Display", "Width", 0);
+    height   = td5_ini_int("Display", "Height", 0);
+    windowed = td5_ini_int("Display", "Windowed", 1);
+
+    /* Display options */
+    g_td5.ini.fog_enabled    = td5_ini_int("Display", "Fogging", 1);
+    g_td5.ini.speed_units    = td5_ini_int("Display", "SpeedUnits", 0);
+    g_td5.ini.camera_damping = td5_ini_int("Display", "CameraDamping", 5);
+
+    /* Audio */
+    g_td5.ini.sfx_volume    = td5_ini_int("Audio", "SFXVolume", 80);
+    g_td5.ini.music_volume  = td5_ini_int("Audio", "MusicVolume", 80);
+    g_td5.ini.sfx_mode      = td5_ini_int("Audio", "SFXMode", 0);
+
+    /* Game options */
+    g_td5.ini.laps               = td5_ini_int("GameOptions", "Laps", 0);
+    g_td5.ini.checkpoint_timers  = td5_ini_int("GameOptions", "CheckpointTimers", 1);
+    g_td5.ini.traffic            = td5_ini_int("GameOptions", "Traffic", 1);
+    g_td5.ini.cops               = td5_ini_int("GameOptions", "Cops", 1);
+    g_td5.ini.difficulty         = td5_ini_int("GameOptions", "Difficulty", 1);
+    g_td5.ini.dynamics           = td5_ini_int("GameOptions", "Dynamics", 0);
+    g_td5.ini.collisions         = td5_ini_int("GameOptions", "Collisions", 1);
+
+    /* Game defaults */
+    g_td5.ini.default_car       = td5_ini_int("Game", "DefaultCar", 0);
+    g_td5.ini.default_track     = td5_ini_int("Game", "DefaultTrack", 0);
+    g_td5.ini.default_game_type = td5_ini_int("Game", "DefaultGameType", 0);
+    g_td5.ini.skip_intro        = td5_ini_int("Game", "SkipIntro", 1);
+    g_td5.ini.debug_overlay     = td5_ini_int("Game", "DebugOverlay", 0);
+
+    /* Benchmark mode: enables main-menu button 2 → TD5_GAMESTATE_BENCHMARK path.
+     * Matches the original's dead-code button-2 branch (app+0x170 is never written
+     * in TD5_d3d.exe). Default 0 = button 2 is 2-player. */
+    g_td5.ini.enable_benchmark  = td5_ini_int("Debug", "EnableBenchmark", 0);
+
+    /* Auto-race: skip frontend entirely, launch race with INI settings */
+    g_td5.ini.auto_race             = td5_ini_int("Game", "AutoRace", 0);
+
+    /* Trace */
+    g_td5.ini.race_trace_enabled    = td5_ini_int("Trace", "RaceTrace", 0);
+    g_td5.ini.race_trace_slot       = td5_ini_int("Trace", "RaceTraceSlot", -1);
+    g_td5.ini.race_trace_max_frames = td5_ini_int("Trace", "RaceTraceMaxFrames", 600);
+    g_td5.ini.auto_throttle         = td5_ini_int("Trace", "AutoThrottle", 0);
+    g_td5.ini.trace_fast_forward    = td5_ini_int("Trace", "TraceFastForward", 0);
+    g_td5.ini.race_trace_max_sim_ticks =
+        td5_ini_int("Trace", "RaceTraceMaxSimTicks", 0);
+
+    g_td5.ini.loaded = 1;
+
+    /* Shared quick-race INI overlay (re/tools/quickrace/td5_quickrace.ini).
+     * Applied AFTER td5re.ini so skip_frontend=1 wins over AutoRace=0. */
+    td5_load_shared_quickrace_ini();
+
+    dbglog("=== td5re.ini loaded from: %s ===", s_ini_path);
+    dbglog("  [Display] Width=%d Height=%d Windowed=%d", width, height, windowed);
+    dbglog("  [Display] Fogging=%d SpeedUnits=%d CameraDamping=%d",
+           g_td5.ini.fog_enabled, g_td5.ini.speed_units, g_td5.ini.camera_damping);
+    dbglog("  [Audio]   SFXVolume=%d MusicVolume=%d SFXMode=%d",
+           g_td5.ini.sfx_volume, g_td5.ini.music_volume, g_td5.ini.sfx_mode);
+    dbglog("  [GameOpt] Laps=%d Timers=%d Traffic=%d Cops=%d Diff=%d Dyn=%d Coll=%d",
+           g_td5.ini.laps, g_td5.ini.checkpoint_timers, g_td5.ini.traffic,
+           g_td5.ini.cops, g_td5.ini.difficulty, g_td5.ini.dynamics, g_td5.ini.collisions);
+    dbglog("  [Game]    Car=%d Track=%d GameType=%d SkipIntro=%d DebugOverlay=%d AutoRace=%d",
+           g_td5.ini.default_car, g_td5.ini.default_track, g_td5.ini.default_game_type,
+           g_td5.ini.skip_intro, g_td5.ini.debug_overlay, g_td5.ini.auto_race);
+    dbglog("  [Trace]   RaceTrace=%d Slot=%d MaxFrames=%d",
+           g_td5.ini.race_trace_enabled, g_td5.ini.race_trace_slot,
+           g_td5.ini.race_trace_max_frames);
+
+    if (width <= 0 || height <= 0) {
+        width  = GetSystemMetrics(SM_CXSCREEN);
+        height = GetSystemMetrics(SM_CYSCREEN);
+        if (width <= 0)  width  = 640;
+        if (height <= 0) height = 480;
+    }
+    bpp = DEFAULT_BPP;
 
     /* Set Windows timer resolution to 1ms so Sleep() and GetTickCount()
      * are accurate. Without this, Sleep(16) may sleep ~30ms (15.6ms default). */
@@ -190,7 +346,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
      * --------------------------------------------------------------- */
     dbglog("Step 1: Backend_Init OK");
     dbglog("Step 2: Backend_CreateDevice(%d x %d, bpp=%d, windowed=%d)...", width, height, bpp, windowed);
-    /* Win32 API logging auto-flushes on each CloseHandle */
+    /* Pre-set target dimensions so Backend_CreateDevice skips its own INI read */
+    g_backend.target_width  = width;
+    g_backend.target_height = height;
     if (!Backend_CreateDevice(NULL, width, height, bpp, windowed)) {
         MessageBoxA(NULL, "Backend_CreateDevice failed.\n\n"
                     "Could not create D3D11 device and swap chain.",
@@ -294,19 +452,15 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
      * track, ai, render, frontend, hud, sound, input, asset, save,
      * net, camera, vfx, fmv.
      * --------------------------------------------------------------- */
-    /* Change working directory to original/ so all relative asset paths
-     * (LOADING.ZIP, LEGALS.ZIP, SOUND\SOUND.ZIP, etc.) resolve correctly.
-     * The original game files live in original/ (clean, unmodified). */
-    if (!SetCurrentDirectoryA("original")) {
-        /* Fallback: try plain data/ in case exe is run from original/ directly */
-        SetCurrentDirectoryA("data");
-    }
-    dbglog("Working directory changed to original (or data)");
+    /* CWD stays at the project root — all assets are pre-extracted under
+     * re/assets/.  No dependency on original/. */
+    dbglog("Working directory: project root (assets in re/)");
 
-    /* Update global state with actual render dimensions */
+    /* Update global state with actual render dimensions and INI settings */
     g_td5.render_width  = width;
     g_td5.render_height = height;
-    dbglog("Step 4: Platform init OK (render=%dx%d)", width, height);
+    g_td5.intro_movie_pending = g_td5.ini.skip_intro ? 0 : 1;
+    dbglog("Step 4: Platform init OK (render=%dx%d, skip_intro=%d)", width, height, g_td5.ini.skip_intro);
     dbglog("Step 5: td5re_init (15 modules)...");
     if (!td5re_init()) {
         MessageBoxA(NULL, "td5re_init failed.\n\n"
@@ -377,7 +531,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     td5re_shutdown();
     Backend_Shutdown();
     timeEndPeriod(1);
-    dbglog_flush_close();
+    td5_plat_log_flush();
 
     return 0;
 }
