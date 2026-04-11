@@ -1040,6 +1040,17 @@ void td5_ai_update_track_offset_bias(int slot) {
         }
         rs[RS_TRACK_OFFSET_BIAS] = bias;
     }
+
+    /* Port-only safeguard: clamp to ±0x200 to prevent runaway accumulation.
+     * The original @ 0x434900 has no explicit clamp but its peer-search
+     * (0x4337E0) + direction-toggle on DAT_004b08b0 keeps bias oscillating
+     * around zero. The port's simplified find_offset_peer always returns
+     * a peer and never toggles direction, so without this clamp bias grows
+     * unboundedly (observed ~7000 after 15s), which pulls the sampled
+     * target point far perpendicular to the track and saturates AI steer.
+     * TODO: port the original's toggle logic for bit-accurate behavior. */
+    if (rs[RS_TRACK_OFFSET_BIAS] >  0x200) rs[RS_TRACK_OFFSET_BIAS] =  0x200;
+    if (rs[RS_TRACK_OFFSET_BIAS] < -0x200) rs[RS_TRACK_OFFSET_BIAS] = -0x200;
 }
 
 /* ========================================================================
@@ -1291,6 +1302,21 @@ void td5_ai_update_track_behavior(int slot) {
     /* Time trial: skip AI track behavior entirely */
     if (g_td5.time_trial_enabled)
         return;
+
+    /* During countdown (paused), force steer_cmd to 0 and skip the cascade.
+     * Rationale: the cascade is a closed-loop controller expecting the car to
+     * physically rotate in response to steering. While the car is XZ-frozen,
+     * the cascade would accumulate steer_cmd chasing zero delta, leaving a
+     * large pre-baked steering input when the freeze releases — the car then
+     * spins at race start. The original's gate mechanism here is unclear;
+     * this keeps AI throttle revving (via update_route_threshold which runs
+     * in other branches) without accumulating phantom steering.
+     * TODO: research original's exact countdown behavior for cascade. */
+    if (g_td5.paused) {
+        ACTOR_I32(actor, ACTOR_STEERING_CMD) = 0;
+        ACTOR_I16(actor, ACTOR_STEERING_RAMP_ACCUM) = 0;
+        return;
+    }
 
     /* --- Script check: if a script is active, run it --- */
     if (rs[RS_SCRIPT_BASE_PTR] != 0) {
