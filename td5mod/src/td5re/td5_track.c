@@ -3496,6 +3496,10 @@ void td5_track_dim_additive_billboard_meshes(void)
             if (td5_asset_get_page_transparency(cmd0->texture_page_id) != 3)
                 continue;
 
+            /* Scale per-vertex RGB to ~40% of disk value. Disk-baked
+             * intensity is 0xA0 (63%). Halving (0x50 = 31%) still read
+             * too bright on 32bpp; scaling to 5/8 of that (0x40 = 25%)
+             * matches the CRT-era additive look. Formula: r * 5 / 8. */
             TD5_MeshVertex *bb_v =
                 (TD5_MeshVertex *)(uintptr_t)mesh->vertices_offset;
             for (int vi = 0; vi < mesh->total_vertex_count; vi++) {
@@ -3504,7 +3508,7 @@ void td5_track_dim_additive_billboard_meshes(void)
                 uint32_t r = (c >> 16) & 0xFFu;
                 uint32_t g = (c >>  8) & 0xFFu;
                 uint32_t b =  c        & 0xFFu;
-                r >>= 1; g >>= 1; b >>= 1;
+                r = (r * 5u) >> 3; g = (g * 5u) >> 3; b = (b * 5u) >> 3;
                 bb_v[vi].lighting = a | (r << 16) | (g << 8) | b;
             }
             dimmed++;
