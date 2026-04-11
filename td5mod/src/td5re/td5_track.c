@@ -523,21 +523,27 @@ void td5_track_resolve_wall_contacts(TD5_Actor *actor)
 
     TD5_Vec3_Fixed *probe_block = &actor->probe_FL;
 
+    /* Use the chassis span (actor+0x80), not per-probe span_index, because
+     * the boundary walker leaves wheel_probes[pi].span_index stale across
+     * span transitions. Runtime diag showed probes testing against a span
+     * whose rail is hundreds of units from the actual probe position —
+     * that's the source of the d=-4000 "invisible walls". The chassis
+     * span is maintained by update_actor_track_position and lags less.
+     *
+     * All four wheel probes test against the same chassis span. That's
+     * close enough for lateral wall tests since the wheels are ~800 units
+     * apart — within a single span's extent on any normal track. */
+    int span_idx = (int)actor->track_span_raw;
+    if (span_idx < 0 || span_idx >= s_span_count) return;
+
+    const TD5_StripSpan *sp = &s_span_array[span_idx];
+    int type = sp->span_type;
+    if (type == 9 || type == 10) return;  /* sentinel spans */
+
+    int lane_count = span_lane_count(sp);
+    if (lane_count < 1) lane_count = 1;
+
     for (int pi = 0; pi < 4; pi++) {
-        TD5_TrackProbeState *probe = &actor->wheel_probes[pi];
-        int span_idx = probe->span_index;
-
-        if (span_idx < 0 || span_idx >= s_span_count) continue;
-
-        const TD5_StripSpan *sp = &s_span_array[span_idx];
-        int type = sp->span_type;
-
-        /* Skip sentinel spans — their rails are degenerate. */
-        if (type == 9 || type == 10) continue;
-
-        int lane_count = span_lane_count(sp);
-        if (lane_count < 1) lane_count = 1;
-
         int32_t px = probe_block[pi].x >> 8;
         int32_t pz = probe_block[pi].z >> 8;
 
@@ -665,31 +671,33 @@ void td5_track_resolve_wall_contacts(TD5_Actor *actor)
             }
         }
 
-        /* Don't fire a wall unless the chosen segment actually contains
-         * the probe's longitudinal projection. If the nearest segment is
-         * uncontained, the probe is past the polyline ends — that's a
-         * span-boundary case handled by Forward/Reverse, not a lateral
-         * wall. */
-        if (lhit.valid && lbest_contained && lhit.d < 0) {
+        /* Fire a wall whenever the closest rail segment's signed distance
+         * is negative. Containment is preferred when picking the segment
+         * but no longer gates the fire — a probe that's past the end of
+         * every segment (all c=0) can still be outside the rail and
+         * should trigger a response. Clamp penetration to -1200 so a
+         * single-frame excursion (e.g. the boundary walker momentarily
+         * losing the chassis span) can't produce a huge push. */
+        if (lhit.valid && lhit.d < 0) {
             int32_t d = lhit.d;
-            if (d < -4000) d = -4000;
+            if (d < -1200) d = -1200;
             double rad = atan2((double)lhit.edge_dz, (double)lhit.edge_dx);
             int32_t wall_angle = (int32_t)(rad * (4096.0 / (2.0 * 3.14159265358979323846))) & 0xFFF;
             td5_physics_wall_response(actor, wall_angle, d, 1, lhit.nnx, lhit.nnz, 4096);
             td5_physics_rebuild_pose(actor);
-            TD5_LOG_I(LOG_TAG, "wall_contact: slot=%d probe=%d LEFT span=%d d=%d angle=%d",
-                      actor->slot_index, pi, span_idx, d, wall_angle);
+            TD5_LOG_I(LOG_TAG, "wall_contact: slot=%d probe=%d LEFT span=%d d=%d c=%d angle=%d",
+                      actor->slot_index, pi, span_idx, d, lbest_contained, wall_angle);
         }
 
-        if (rhit.valid && rbest_contained && rhit.d < 0) {
+        if (rhit.valid && rhit.d < 0) {
             int32_t d = rhit.d;
-            if (d < -4000) d = -4000;
+            if (d < -1200) d = -1200;
             double rad = atan2((double)(-rhit.edge_dz), (double)(-rhit.edge_dx));
             int32_t wall_angle = (int32_t)(rad * (4096.0 / (2.0 * 3.14159265358979323846))) & 0xFFF;
             td5_physics_wall_response(actor, wall_angle, d, 2, rhit.nnx, rhit.nnz, 4096);
             td5_physics_rebuild_pose(actor);
-            TD5_LOG_I(LOG_TAG, "wall_contact: slot=%d probe=%d RIGHT span=%d d=%d angle=%d",
-                      actor->slot_index, pi, span_idx, d, wall_angle);
+            TD5_LOG_I(LOG_TAG, "wall_contact: slot=%d probe=%d RIGHT span=%d d=%d c=%d angle=%d",
+                      actor->slot_index, pi, span_idx, d, rbest_contained, wall_angle);
         }
 
         if (diag_slot0) {
