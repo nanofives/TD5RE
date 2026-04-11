@@ -642,12 +642,25 @@ void td5_track_resolve_wall_contacts(TD5_Actor *actor)
         }
     }
 
-    /* Hysteresis: after a probe has fired a wall, don't re-fire on it until
-     * the probe has clearly returned to the inside (d > release threshold).
-     * Prevents the stuck-oscillation pattern seen on the Scotland lap where
-     * a probe bounced between -11 and -20 on the right wall for dozens of
-     * ticks without ever escaping. Per-probe × per-side state. */
-    static uint8_t s_wall_latched[TD5_MAX_TOTAL_ACTORS][4][2];  /* [slot][pi][0=L,1=R] */
+    /* Track previous d per (slot, probe, side) to distinguish real wall
+     * impacts (d stable or improving under push) from walker-lag cases
+     * (d worsens monotonically as the car drives forward past a stale
+     * chassis span). The check: fire the wall on the first entry into
+     * the fire zone (prev was inside, current is outside), and continue
+     * firing if d is holding or improving. If d worsens by a noticeable
+     * amount while we're already past the wall, it's walker lag — skip.
+     *
+     * Sentinel value 32767 means "no previous reading" (fresh probe or
+     * just re-entered fire zone after sitting inside). */
+    static int16_t s_wall_prev_d[TD5_MAX_TOTAL_ACTORS][4][2];
+    static uint8_t s_wall_prev_init = 0;
+    if (!s_wall_prev_init) {
+        for (int i = 0; i < TD5_MAX_TOTAL_ACTORS; i++)
+            for (int j = 0; j < 4; j++)
+                for (int k = 0; k < 2; k++)
+                    s_wall_prev_d[i][j][k] = 32767;
+        s_wall_prev_init = 1;
+    }
 
     for (int pi = 0; pi < 4; pi++) {
         int32_t px = probe_block[pi].x >> 8;
@@ -673,61 +686,64 @@ void td5_track_resolve_wall_contacts(TD5_Actor *actor)
             r_ok = 1;
         }
 
-        /* Dead zone (skip very shallow contacts) and suspicion cap (skip
-         * everything past -40 because the chassis span is almost
-         * certainly stale). Walker-lag staleness grows d linearly with
-         * forward velocity — a car at ~15 units/tick crosses -40 after
-         * 3 ticks, and real off-road drift (the push is always active)
-         * almost never produces d past that. Earlier -80 threshold was
-         * too loose and let spurious walls fire at d=-18..-65 while the
-         * walker catches up. */
-        const int32_t WALL_DEAD_ZONE   = -10;
-        const int32_t WALL_DEEP_SKIP   = -40;
-        const int32_t WALL_RELEASE     =  5;   /* d must rise above this to re-arm */
+        const int32_t WALL_DEAD_ZONE = -10;
+        const int32_t WORSEN_TOL     = 10;  /* worsening past this = walker lag */
 
         int slot = actor->slot_index & (TD5_MAX_TOTAL_ACTORS - 1);
 
         /* --- LEFT wall --- */
         if (l_ok) {
-            uint8_t *latched = &s_wall_latched[slot][pi][0];
-            if (l_d > WALL_RELEASE) {
-                *latched = 0;  /* re-armed */
-            }
+            int16_t prev_d = s_wall_prev_d[slot][pi][0];
+            int fire = 0;
             if (l_d < WALL_DEAD_ZONE) {
-                if (l_d < WALL_DEEP_SKIP) {
-                    TD5_LOG_W(LOG_TAG, "wall_skip_deep: slot=%d probe=%d LEFT span=%d d=%d",
-                              actor->slot_index, pi, span_idx, l_d);
-                } else if (!*latched) {
-                    double rad = atan2((double)l_par.nnx, (double)(-l_par.nnz));
-                    int32_t wall_angle = (int32_t)(rad * (4096.0 / (2.0 * 3.14159265358979323846))) & 0xFFF;
-                    td5_physics_wall_response(actor, wall_angle, l_d, 1, l_par.nnx, l_par.nnz, 4096);
-                    td5_physics_rebuild_pose(actor);
-                    *latched = 1;
-                    TD5_LOG_I(LOG_TAG, "wall_contact: slot=%d probe=%d LEFT span=%d d=%d angle=%d",
-                              actor->slot_index, pi, span_idx, l_d, wall_angle);
+                if (prev_d == 32767 || prev_d >= WALL_DEAD_ZONE) {
+                    /* Fresh entry into fire zone — always fire the first hit. */
+                    fire = 1;
+                } else if (l_d >= prev_d - WORSEN_TOL) {
+                    /* d is holding (wall push working) or improving — fire. */
+                    fire = 1;
                 }
+                /* Else d is worsening noticeably — walker lag, skip. */
+            }
+            if (fire) {
+                double rad = atan2((double)l_par.nnx, (double)(-l_par.nnz));
+                int32_t wall_angle = (int32_t)(rad * (4096.0 / (2.0 * 3.14159265358979323846))) & 0xFFF;
+                td5_physics_wall_response(actor, wall_angle, l_d, 1, l_par.nnx, l_par.nnz, 4096);
+                td5_physics_rebuild_pose(actor);
+                TD5_LOG_I(LOG_TAG, "wall_contact: slot=%d probe=%d LEFT span=%d d=%d prev=%d angle=%d",
+                          actor->slot_index, pi, span_idx, l_d, (int)prev_d, wall_angle);
+            }
+            /* Reset prev when probe is clearly inside so next entry is fresh. */
+            if (l_d >= 0) {
+                s_wall_prev_d[slot][pi][0] = 32767;
+            } else {
+                s_wall_prev_d[slot][pi][0] = (int16_t)(l_d < -32000 ? -32000 : l_d);
             }
         }
 
         /* --- RIGHT wall --- */
         if (r_ok) {
-            uint8_t *latched = &s_wall_latched[slot][pi][1];
-            if (r_d > WALL_RELEASE) {
-                *latched = 0;
-            }
+            int16_t prev_d = s_wall_prev_d[slot][pi][1];
+            int fire = 0;
             if (r_d < WALL_DEAD_ZONE) {
-                if (r_d < WALL_DEEP_SKIP) {
-                    TD5_LOG_W(LOG_TAG, "wall_skip_deep: slot=%d probe=%d RIGHT span=%d d=%d",
-                              actor->slot_index, pi, span_idx, r_d);
-                } else if (!*latched) {
-                    double rad = atan2((double)r_par.nnx, (double)(-r_par.nnz));
-                    int32_t wall_angle = (int32_t)(rad * (4096.0 / (2.0 * 3.14159265358979323846))) & 0xFFF;
-                    td5_physics_wall_response(actor, wall_angle, r_d, 2, r_par.nnx, r_par.nnz, 4096);
-                    td5_physics_rebuild_pose(actor);
-                    *latched = 1;
-                    TD5_LOG_I(LOG_TAG, "wall_contact: slot=%d probe=%d RIGHT span=%d d=%d angle=%d",
-                              actor->slot_index, pi, span_idx, r_d, wall_angle);
+                if (prev_d == 32767 || prev_d >= WALL_DEAD_ZONE) {
+                    fire = 1;
+                } else if (r_d >= prev_d - WORSEN_TOL) {
+                    fire = 1;
                 }
+            }
+            if (fire) {
+                double rad = atan2((double)r_par.nnx, (double)(-r_par.nnz));
+                int32_t wall_angle = (int32_t)(rad * (4096.0 / (2.0 * 3.14159265358979323846))) & 0xFFF;
+                td5_physics_wall_response(actor, wall_angle, r_d, 2, r_par.nnx, r_par.nnz, 4096);
+                td5_physics_rebuild_pose(actor);
+                TD5_LOG_I(LOG_TAG, "wall_contact: slot=%d probe=%d RIGHT span=%d d=%d prev=%d angle=%d",
+                          actor->slot_index, pi, span_idx, r_d, (int)prev_d, wall_angle);
+            }
+            if (r_d >= 0) {
+                s_wall_prev_d[slot][pi][1] = 32767;
+            } else {
+                s_wall_prev_d[slot][pi][1] = (int16_t)(r_d < -32000 ? -32000 : r_d);
             }
         }
 
