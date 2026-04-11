@@ -206,9 +206,6 @@ static int td5_load_shared_quickrace_ini(void)
     g_td5.ini.default_car =
         GetPrivateProfileIntA("car", "car",
                               g_td5.ini.default_car, path);
-    g_td5.ini.player_is_ai =
-        GetPrivateProfileIntA("race", "player_is_ai",
-                              g_td5.ini.player_is_ai, path);
     g_td5.ini.auto_race  = 1;
     g_td5.ini.skip_intro = 1;
 
@@ -308,9 +305,10 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
            g_td5.ini.fog_enabled, g_td5.ini.speed_units, g_td5.ini.camera_damping);
     dbglog("  [Audio]   SFXVolume=%d MusicVolume=%d SFXMode=%d",
            g_td5.ini.sfx_volume, g_td5.ini.music_volume, g_td5.ini.sfx_mode);
-    dbglog("  [GameOpt] Laps=%d Timers=%d Traffic=%d Cops=%d Diff=%d Dyn=%d Coll=%d",
+    dbglog("  [GameOpt] Laps=%d Timers=%d Traffic=%d Cops=%d Diff=%d Dyn=%d Coll=%d PlayerIsAI=%d",
            g_td5.ini.laps, g_td5.ini.checkpoint_timers, g_td5.ini.traffic,
-           g_td5.ini.cops, g_td5.ini.difficulty, g_td5.ini.dynamics, g_td5.ini.collisions);
+           g_td5.ini.cops, g_td5.ini.difficulty, g_td5.ini.dynamics, g_td5.ini.collisions,
+           g_td5.ini.player_is_ai);
     dbglog("  [Game]    Car=%d Track=%d GameType=%d SkipIntro=%d DebugOverlay=%d AutoRace=%d",
            g_td5.ini.default_car, g_td5.ini.default_track, g_td5.ini.default_game_type,
            g_td5.ini.skip_intro, g_td5.ini.debug_overlay, g_td5.ini.auto_race);
