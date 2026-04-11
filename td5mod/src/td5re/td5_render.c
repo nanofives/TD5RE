@@ -2134,75 +2134,72 @@ static void render_vehicle_shadow_quad(void)
 /* --- Vehicle Wheel Billboards (0x446F00) --- */
 
 /**
- * Wheel rendering (0x446F00 + 0x446A70).
+ * Wheel rendering (0x446F00 + 0x446A70 + 0x446EA0).
  *
- * Original renders 8 quad strips per wheel (tire sidewall) plus a flat
- * hub-cap quad, using textures from static.hed page 5:
- *   "WHEELS"  — tire sidewall (pos 0,0 size 256x128)
- *   "INWHEEL" — hub-cap disc  (pos 0,192 size 16x16)
+ * The original renders each wheel as 8 tire-sidewall quads + 2 hub-cap quads:
  *
- * Dimensions from cardef (RE confirmed at 0x446E30-0x446E3C):
+ *   1. Tire sidewall (8 quads, rim ring): TEMPLATE BINDS COLOURS texture page
+ *      with all 4 corners at the single pixel (COLOURS.atlas_x+1, atlas_y+1).
+ *      This is a flat-color sample — effectively a fixed black tire color
+ *      (the pixel at (65,177) on tpage5 is (8,8,8)). [CONFIRMED @ 0x446B44]
+ *
+ *   2. Hub-cap front face (1 quad): binds the WHEELS tpage and samples a
+ *      32x32 spin sub-tile from a per-actor 64x64 cell. The WHEELS tpage
+ *      is runtime-patched at race load by LoadRaceTexturePages (0x442770):
+ *      each car's "CARHUB_N.TGA" is decoded and blitted into its actor's cell.
+ *      In the source port, each slot already owns a dedicated 64x64 carhub
+ *      texture page (800 + slot*2 + 1, td5_asset.c:2137), so we bind that
+ *      directly instead of building a shared atlas. [CONFIRMED @ 0x442a10]
+ *
+ *      Spin frame [CONFIRMED @ 0x446F00]:
+ *        frame = min(abs(actor->longitudinal_speed) >> 14, 3)
+ *        col   = frame & 1
+ *        row   = frame >> 1
+ *        sub-tile = (col*32 .. col*32+31, row*32 .. row*32+31) in 64x64
+ *
+ *   3. Hub-cap back face (1 mirrored quad): fixed INWHEEL atlas UVs,
+ *      positions negated for the opposite-side view. [CONFIRMED @ 0x446F00]
+ *
+ * Wheel dimensions from cardef [CONFIRMED @ 0x446E30-0x446E3C]:
  *   rim_radius = cardef+0x82 * 0.76171875 (195/256, DAT_0045D7AC)
  *   axle_halfw = cardef+0x84 (raw int16, no scaling)
- *
- * Ring: 9 vertices at 45-degree steps (8 segments + closing vertex).
- * Hub-cap: flat quad perpendicular to axle, sized by rim_radius.
  */
 #define WHEEL_SEGMENTS       8
 #define WHEEL_RADIUS_SCALE   0.76171875f  /* 195/256, from DAT_0045D7AC */
 #define WHEEL_RADIUS_DEFAULT 110.0f       /* fallback: 0x90 * 0.76171875 */
 #define WHEEL_HALFW_DEFAULT  28.0f        /* fallback axle half-width */
 
-/* Cached WHEELS/INWHEEL lookups from static.hed */
-static int   s_wheel_tex_page = -1;
-static float s_wheels_u0, s_wheels_v0, s_wheels_u1, s_wheels_v1;  /* tire sidewall UVs */
-static float s_inwheel_u0, s_inwheel_v0, s_inwheel_u1, s_inwheel_v1;  /* hub-cap UVs */
+/* Tire sidewall flat color: COLOURS(+1,+1) on tpage5 = (8,8,8) near-black.
+ * Stored as BGRA little-endian uint32. [CONFIRMED @ tpage5.png pixel (65,177)] */
+#define WHEEL_TIRE_COLOR_BGRA  0xFF080808u
+
+/* Per-slot car hub page allocated by td5_asset_load_vehicle (td5_asset.c:2137):
+ *   page = 800 + slot*2 + 1  (64x64 RGBA carhub texture, 2x2 grid of spin frames) */
+#define WHEEL_HUB_PAGE_BASE    800
+#define WHEEL_HUB_PAGE(slot)   (WHEEL_HUB_PAGE_BASE + (slot) * 2 + 1)
+
+/* Cached INWHEEL lookup from static.hed (used for the mirrored back face) */
+static int   s_wheel_tex_page = -1;  /* static tpage5 — holds INWHEEL */
+static float s_inwheel_u0, s_inwheel_v0, s_inwheel_u1, s_inwheel_v1;
 static int   s_wheel_lookup_done = 0;
 
 static void wheel_lookup_static_hed(void)
 {
     s_wheel_lookup_done = 1;
 
-    /* Use td5_asset_find_atlas_entry which searches the loaded s_atlas_table
-     * (populated from static.hed at init). g_static_hed_entries is NULL —
-     * the raw HED array is not stored separately. */
-    TD5_AtlasEntry *wheels = td5_asset_find_atlas_entry(NULL, "WHEELS");
-    if (wheels && wheels->texture_page > 0) {
-        s_wheel_tex_page = wheels->texture_page;
-        /* Normalize WHEELS UVs: pos=(0,0) size=(256,128) on 256x256 page */
-        int tw = 256, th = 256;
-        td5_plat_render_get_texture_dims(wheels->texture_page, &tw, &th);
-        s_wheels_u0 = ((float)wheels->atlas_x + 0.5f) / (float)tw;
-        s_wheels_v0 = ((float)wheels->atlas_y + 0.5f) / (float)th;
-        s_wheels_u1 = ((float)(wheels->atlas_x + wheels->width) - 0.5f) / (float)tw;
-        s_wheels_v1 = ((float)(wheels->atlas_y + wheels->height) - 0.5f) / (float)th;
-        TD5_LOG_I(LOG_TAG, "wheel: WHEELS page=%d pos=(%d,%d) size=(%d,%d) UV=(%.4f,%.4f)-(%.4f,%.4f)",
-                  s_wheel_tex_page, wheels->atlas_x, wheels->atlas_y,
-                  wheels->width, wheels->height,
-                  s_wheels_u0, s_wheels_v0, s_wheels_u1, s_wheels_v1);
-    } else {
-        /* Fallback: WHEELS at (0,0) 256x128 on 256x256 page */
-        s_wheels_u0 = 0.5f / 256.0f;
-        s_wheels_v0 = 0.5f / 256.0f;
-        s_wheels_u1 = 255.5f / 256.0f;
-        s_wheels_v1 = 127.5f / 256.0f;
-        TD5_LOG_W(LOG_TAG, "wheel: WHEELS not found in static.hed atlas");
-    }
-
     TD5_AtlasEntry *inwheel = td5_asset_find_atlas_entry(NULL, "INWHEEL");
     if (inwheel && inwheel->texture_page > 0) {
-        /* Pixel UVs with half-pixel inset, normalized to [0,1] for D3D11 */
+        s_wheel_tex_page = inwheel->texture_page;
         int tw = 256, th = 256;
-        if (s_wheel_tex_page >= 0)
-            td5_plat_render_get_texture_dims(s_wheel_tex_page, &tw, &th);
+        td5_plat_render_get_texture_dims(inwheel->texture_page, &tw, &th);
         s_inwheel_u0 = ((float)inwheel->atlas_x + 0.5f) / (float)tw;
         s_inwheel_v0 = ((float)inwheel->atlas_y + 0.5f) / (float)th;
         s_inwheel_u1 = ((float)(inwheel->atlas_x + inwheel->width) - 0.5f) / (float)tw;
         s_inwheel_v1 = ((float)(inwheel->atlas_y + inwheel->height) - 0.5f) / (float)th;
-        TD5_LOG_I(LOG_TAG, "wheel: INWHEEL UV=(%.4f,%.4f)-(%.4f,%.4f)",
+        TD5_LOG_I(LOG_TAG, "wheel: INWHEEL page=%d UV=(%.4f,%.4f)-(%.4f,%.4f)",
+                  s_wheel_tex_page,
                   s_inwheel_u0, s_inwheel_v0, s_inwheel_u1, s_inwheel_v1);
     } else {
-        /* Fallback: INWHEEL at (0,192) 16x16 on a 256x256 page */
         s_inwheel_u0 = 0.5f / 256.0f;
         s_inwheel_v0 = 192.5f / 256.0f;
         s_inwheel_u1 = 15.5f / 256.0f;
@@ -2238,12 +2235,33 @@ static void render_vehicle_wheel_billboards(TD5_Actor *actor, int slot)
         ring_z[i] = sinf(angle) * rim_radius;
     }
 
-    int tex_page = s_wheel_tex_page;
+    /* Hub-cap spin frame from actor longitudinal speed [CONFIRMED @ 0x446F00]:
+     *   frame = min(abs(long_speed) >> 14, 3)
+     *   col   = frame & 1,  row = frame >> 1
+     * Speed is 24.8 fp; (>>8) gives int speed, (>>6) bands it into 4 frames.
+     * Each frame samples a 32x32 sub-tile of the 64x64 carhub texture. */
+    int32_t spd_raw = actor->longitudinal_speed;
+    uint32_t spd_abs = (uint32_t)(spd_raw < 0 ? -spd_raw : spd_raw);
+    int spin_frame = (int)(spd_abs >> 14);
+    if (spin_frame > 3) spin_frame = 3;
+    int spin_col = spin_frame & 1;
+    int spin_row = spin_frame >> 1;
+    /* 32x32 sub-tile with half-pixel inset, normalized to 0..1 on a 64x64 texture */
+    float hub_u0 = ((float)(spin_col * 32) + 0.5f) / 64.0f;
+    float hub_v0 = ((float)(spin_row * 32) + 0.5f) / 64.0f;
+    float hub_u1 = ((float)(spin_col * 32 + 31) + 0.5f) / 64.0f;
+    float hub_v1 = ((float)(spin_row * 32 + 31) + 0.5f) / 64.0f;
+
+    int hub_front_page = WHEEL_HUB_PAGE(slot);
+    int hub_back_page  = s_wheel_tex_page;  /* static tpage5 holds INWHEEL */
 
     static int s_wheel_log_counter = 0;
     if (slot == 0 && (s_wheel_log_counter++ % 60) == 0) {
-        TD5_LOG_I(LOG_TAG, "wheel: slot=%d radius=%.1f halfw=%.1f steer_cmd=%d",
-                  slot, rim_radius, axle_halfw, actor->steering_command);
+        TD5_LOG_I(LOG_TAG,
+                  "wheel: slot=%d radius=%.1f halfw=%.1f steer_cmd=%d "
+                  "spin_frame=%d(col=%d,row=%d) hub_front_page=%d",
+                  slot, rim_radius, axle_halfw, actor->steering_command,
+                  spin_frame, spin_col, spin_row, hub_front_page);
     }
 
     for (int w = 0; w < 4; w++) {
@@ -2272,17 +2290,15 @@ static void render_vehicle_wheel_billboards(TD5_Actor *actor, int slot)
             sin_s = sinf(steer_rad);
         }
 
-        /* 18 vertices: inner ring (0..8) + outer ring (9..17) */
+        /* 18 vertices: inner ring (0..8) + outer ring (9..17).
+         * Tire sidewall is flat-colored near-black (COLOURS(+1,+1) sample in
+         * the original — we skip the texture bind and drive it with diffuse). */
         TD5_D3DVertex verts[18];
         int all_visible = 1;
 
         for (int i = 0; i <= WHEEL_SEGMENTS; i++) {
             float cy = ring_y[i];
             float cz = ring_z[i];
-
-            /* UV interpolation: map segment i across WHEELS atlas region */
-            float u_t = (float)i / (float)WHEEL_SEGMENTS;
-            float seg_u = s_wheels_u0 + u_t * (s_wheels_u1 - s_wheels_u0);
 
             /* Inner ring vertex (with front-wheel steering yaw) */
             {
@@ -2299,10 +2315,10 @@ static void render_vehicle_wheel_billboards(TD5_Actor *actor, int slot)
                 verts[i].screen_y = -vy * s_focal_length * inv_z + s_center_y;
                 verts[i].depth_z  = vz * (1.0f / s_far_clip);
                 verts[i].rhw      = inv_z;
-                verts[i].diffuse  = 0xFFFFFFFFu;
+                verts[i].diffuse  = WHEEL_TIRE_COLOR_BGRA;
                 verts[i].specular = 0;
-                verts[i].tex_u = seg_u;
-                verts[i].tex_v = s_wheels_v0;
+                verts[i].tex_u = 0.0f;
+                verts[i].tex_v = 0.0f;
             }
 
             /* Outer ring vertex (with front-wheel steering yaw) */
@@ -2320,10 +2336,10 @@ static void render_vehicle_wheel_billboards(TD5_Actor *actor, int slot)
                 verts[9+i].screen_y = -vy * s_focal_length * inv_z + s_center_y;
                 verts[9+i].depth_z  = vz * (1.0f / s_far_clip);
                 verts[9+i].rhw      = inv_z;
-                verts[9+i].diffuse  = 0xFFFFFFFFu;
+                verts[9+i].diffuse  = WHEEL_TIRE_COLOR_BGRA;
                 verts[9+i].specular = 0;
-                verts[9+i].tex_u = seg_u;
-                verts[9+i].tex_v = s_wheels_v1;
+                verts[9+i].tex_u = 0.0f;
+                verts[9+i].tex_v = 0.0f;
             }
         }
 
@@ -2343,12 +2359,15 @@ static void render_vehicle_wheel_billboards(TD5_Actor *actor, int slot)
 
         flush_immediate_internal();
         td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
-        td5_plat_render_bind_texture(tex_page);
+        td5_plat_render_bind_texture(-1);  /* untextured — flat vertex color */
         td5_plat_render_draw_tris(verts, 18, indices, idx);
 
-        /* Hub-cap: flat quad at the outer face, sized by rim_radius.
-         * Original rotates corners by steering angles (actor+0x340/0x342).
-         * Front wheels apply steering yaw via cos_s/sin_s computed above. */
+        /* --- Hub-cap front face (outboard) — per-car carhub spin tile ---
+         * Original (0x446F00) draws one WHEELS-textured quad per wheel with
+         * the active spin-frame sub-tile, then a mirrored INWHEEL-textured
+         * quad for the back face. Positions form a flat quad at the outer
+         * face of the wheel, sized by rim_radius. Front wheels inherit the
+         * steering yaw (cos_s/sin_s). */
         {
             float ho = outer_off;
             float corner_offsets[4][3] = {
@@ -2364,9 +2383,11 @@ static void render_vehicle_wheel_billboards(TD5_Actor *actor, int slot)
                 corners[c][1] = wy + corner_offsets[c][1];
                 corners[c][2] = wz + dx * sin_s + dz * cos_s;
             }
-            float hub_uv[4][2] = {
-                { s_inwheel_u0, s_inwheel_v0 }, { s_inwheel_u1, s_inwheel_v0 },
-                { s_inwheel_u1, s_inwheel_v1 }, { s_inwheel_u0, s_inwheel_v1 },
+
+            /* Carhub quad corners: (u0,v0)=TL, (u1,v0)=TR, (u1,v1)=BR, (u0,v1)=BL */
+            float front_uv[4][2] = {
+                { hub_u0, hub_v0 }, { hub_u1, hub_v0 },
+                { hub_u1, hub_v1 }, { hub_u0, hub_v1 },
             };
 
             TD5_D3DVertex hub[4];
@@ -2384,15 +2405,35 @@ static void render_vehicle_wheel_billboards(TD5_Actor *actor, int slot)
                 hub[c].rhw      = inv_z;
                 hub[c].diffuse  = 0xFFFFFFFFu;
                 hub[c].specular = 0;
-                hub[c].tex_u    = hub_uv[c][0];
-                hub[c].tex_v    = hub_uv[c][1];
+                hub[c].tex_u    = front_uv[c][0];
+                hub[c].tex_v    = front_uv[c][1];
             }
-            if (hub_ok) {
-                uint16_t hub_idx[12] = { 0,1,2, 0,2,3, 0,2,1, 0,3,2 };
+            if (hub_ok && hub_front_page >= 0) {
+                uint16_t hub_idx[6] = { 0,1,2, 0,2,3 };
                 flush_immediate_internal();
                 td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
-                td5_plat_render_bind_texture(tex_page);
-                td5_plat_render_draw_tris(hub, 4, hub_idx, 12);
+                td5_plat_render_bind_texture(hub_front_page);
+                td5_plat_render_draw_tris(hub, 4, hub_idx, 6);
+            }
+
+            /* Back face (inboard view) — mirrored quad with INWHEEL disc.
+             * Original negates the short position vectors (0x446F04-0x446F0C);
+             * geometrically equivalent to reversing triangle winding so the
+             * back face is visible from the opposite side. */
+            if (hub_ok && hub_back_page >= 0) {
+                TD5_D3DVertex back[4];
+                for (int c = 0; c < 4; c++) {
+                    back[c] = hub[c];
+                    back[c].diffuse = 0xFFFFFFFFu;
+                    /* Map INWHEEL disc UVs onto the same quad corners */
+                    back[c].tex_u = (c == 0 || c == 3) ? s_inwheel_u0 : s_inwheel_u1;
+                    back[c].tex_v = (c == 0 || c == 1) ? s_inwheel_v0 : s_inwheel_v1;
+                }
+                uint16_t back_idx[6] = { 0,2,1, 0,3,2 };  /* reversed winding */
+                flush_immediate_internal();
+                td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
+                td5_plat_render_bind_texture(hub_back_page);
+                td5_plat_render_draw_tris(back, 4, back_idx, 6);
             }
         }
     }
