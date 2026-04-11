@@ -1627,7 +1627,15 @@ static void apply_collision_response(TD5_Actor *penetrator, TD5_Actor *target,
     int32_t push_x = 0, push_z = 0;
 
     const int64_t INERTIA_K_64 = (int64_t)V2V_INERTIA_K;
-    const int64_t NUM_CONST    = (INERTIA_K_64 >> 8) * V2V_NUM_SCALE;
+    /* NUM_CONST = 500000 * 0x1100 = 2,176,000,000 — exceeds int32.
+     * The original binary was forced by its compiler to rewrite this as
+     * (500000 >> 8) * 0x1100 = 8,499,456 to avoid int32 overflow, and
+     * Ghidra renders that rewrite literally. In our 64-bit port we don't
+     * need the workaround, and the pre-shift silently drops ~256× of
+     * precision in the NUM_CONST / denom_shifted ratio — which at runtime
+     * reduced impulses to the [-4..1] range (magnitudes 0..8192), far
+     * below even the 12800 light-SFX threshold. Use full-width. */
+    const int64_t NUM_CONST    = INERTIA_K_64 * V2V_NUM_SCALE;
 
     if (is_side_branch) {
         /* --- SIDE BRANCH (LAB_00407B7F) --- */
@@ -1644,7 +1652,8 @@ static void apply_collision_response(TD5_Actor *penetrator, TD5_Actor *target,
             (int32_t)(((int64_t)cz_A * saved_omega_A) / V2V_ANG_DIVISOR);
         int32_t rel_vel = ang_contrib - local_54 + local_4c;
 
-        int64_t impulse_raw = (NUM_CONST / denom) * rel_vel;
+        /* Multiply-first preserves precision vs. pre-dividing NUM_CONST. */
+        int64_t impulse_raw = (NUM_CONST * rel_vel) / denom;
         impulse = (int32_t)(impulse_raw >> 12);
 
         /* [CONFIRMED @ 0x4079C0 side branch]: XOR sign rejection. */
@@ -1671,7 +1680,7 @@ static void apply_collision_response(TD5_Actor *penetrator, TD5_Actor *target,
             (int32_t)(((int64_t)cx_A * saved_omega_A) / V2V_ANG_DIVISOR);
         int32_t rel_vel = ang_contrib - local_50 + local_44;
 
-        int64_t impulse_raw = (NUM_CONST / denom) * rel_vel;
+        int64_t impulse_raw = (NUM_CONST * rel_vel) / denom;
         impulse = (int32_t)(impulse_raw >> 12);
 
         if (((cz_B - cz_A) ^ impulse) < 0) {
