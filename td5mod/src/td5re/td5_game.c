@@ -255,6 +255,25 @@ static int      s_race_countdown_ticks;
 static int      s_race_countdown_state;
 static int      s_pause_menu_active;
 static int      s_pause_menu_cursor;   /* 0=VIEW, 1=MUSIC, 2=SOUND, 3=CONTINUE, 4=EXIT */
+
+/* Wanted-mode tracker marker intensity (DecayTrackedActorMarkerIntensity @ 0x43D7E0).
+ * Original global g_wantedTargetTrackerActive. Decays 0x200/sub-tick, clamped to
+ * [0, 0x1000]. Gate: audio-options overlay (= pause menu) pauses decay. */
+static int32_t  s_wanted_target_tracker;
+
+static void tick_wanted_target_tracker(void) {
+    if (s_pause_menu_active) return;
+    if (s_wanted_target_tracker > 0) {
+        s_wanted_target_tracker -= 0x200;
+    }
+    if (s_wanted_target_tracker < 0) {
+        s_wanted_target_tracker = 0;
+        return;
+    }
+    if (s_wanted_target_tracker > 0x1000) {
+        s_wanted_target_tracker = 0x1000;
+    }
+}
 static int      s_pause_input_done;    /* reset per-frame, set after first tick processes input */
 static int      s_prev_esc_state;      /* edge detector for ESC key */
 static int      s_pause_exit_pending;  /* 1 = ESC exit fade in progress, return 2 when fade done */
@@ -568,6 +587,27 @@ int td5_game_init_race_session(void) {
     CK("ck0_start");
     TD5_LOG_I(LOG_TAG, "InitializeRaceSession: begin");
 
+    /* ---- Mode overrides from InitializeRaceSession @ 0x42AA10 ----
+     *
+     * Network session @ 0x42ABD5 [RE basis: research agent pass]:
+     *   unconditionally forces drag-race mode with 4-lap circuit,
+     *   clears special encounters, rebuilds slot states from dpu+0xBCC.
+     * Split-screen 2-player:
+     *   clears gSpecialEncounterEnabled + gTrafficActorsEnabled. */
+    if (g_td5.network_active) {
+        TD5_LOG_I(LOG_TAG, "InitRace: network session — forcing drag race, 4 laps, no encounters");
+        g_td5.drag_race_enabled = 1;
+        g_td5.special_encounter_enabled = 0;
+        g_td5.wanted_mode_enabled = 0;
+        g_td5.traffic_enabled = 0;
+        g_td5.circuit_lap_count = 4;
+    }
+    if (g_td5.split_screen_mode > 0) {
+        TD5_LOG_I(LOG_TAG, "InitRace: 2-player split-screen — disabling traffic/encounters");
+        g_td5.traffic_enabled = 0;
+        g_td5.special_encounter_enabled = 0;
+    }
+
     /* ---- Step 1: Display random loading screen TGA (rand()%20) ---- */
     display_loading_screen_tga();
     TD5_LOG_I(LOG_TAG, "InitRace step 1/19: loading screen displayed for track=%d",
@@ -744,6 +784,37 @@ int td5_game_init_race_session(void) {
         static const int8_t s_staggered_span_offsets[TD5_MAX_RACER_SLOTS] = {
             -9, -6, -3, -12, -15, -18
         };
+        /* Wanted-mode spawn (InitializeRaceSession @ 0x42B1C6..0x42B21E):
+         *   slot 0: startSpan - 3,   lane 2
+         *   slot 1: startSpan +0x19, lane 2
+         *   slot 2: startSpan +0x32, lane 3
+         *   slot 3: startSpan +0x4B, lane 3
+         *   slot 4: startSpan +0x64, lane 2
+         *   slot 5: startSpan +0x7D, lane 3
+         * Port lane system supports only lanes 1-2; lane 3 is clamped to 2.
+         * [RE basis: deep Ghidra pass at 0x42B1C6] */
+        static const int8_t s_wanted_span_offsets[TD5_MAX_RACER_SLOTS] = {
+            -3, 0x19, 0x32, 0x4B, 0x64, 0x7D
+        };
+        static const uint8_t s_wanted_lanes[TD5_MAX_RACER_SLOTS] = {
+            2, 2, 2, 2, 2, 2  /* original: 2,2,3,3,2,3 — 3 clamped to 2 */
+        };
+        /* Drag-race spawn (InitializeRaceSession @ LAB_0042B228):
+         *   slot 0: span 0x73,  lane 1  (set via the non-wanted GT!=0 path @ 0x42B1CE)
+         *   slot 1: span 1,     lane 0
+         *   slot 2: span 1,     lane 1
+         *   slot 3: span 1,     lane 2
+         *   slot 4: span 1,     lane 3
+         *   slot 5: span 1,     lane 4
+         * Port only supports lanes 1-2; drag lanes 0..4 map to alternating 1/2.
+         * Span 1 is an absolute span index, not an offset. We detect drag in the
+         * spawn loop and use absolute-span path. [RE basis: Ghidra @ 0x42B228] */
+        static const int8_t s_drag_absolute_spans[TD5_MAX_RACER_SLOTS] = {
+            0x73, 1, 1, 1, 1, 1
+        };
+        static const uint8_t s_drag_lanes[TD5_MAX_RACER_SLOTS] = {
+            1, 1, 2, 1, 2, 1  /* best-effort mapping of original lanes 1,0,1,2,3,4 */
+        };
         static const uint8_t s_racer_lanes[TD5_MAX_RACER_SLOTS] = {
             1, 2, 1, 2, 1, 2
         };
@@ -770,9 +841,22 @@ int td5_game_init_race_session(void) {
             /* 35 */   0,   0,   0,   0,   0
         };
 
-        const int8_t *span_offsets = g_track_is_circuit
-                                     ? s_circuit_span_offsets
-                                     : s_staggered_span_offsets;
+        const int8_t  *span_offsets;
+        const uint8_t *active_lanes;
+        int drag_mode_spawn = g_td5.drag_race_enabled ? 1 : 0;
+        if (g_td5.wanted_mode_enabled) {
+            span_offsets = s_wanted_span_offsets;
+            active_lanes = s_wanted_lanes;
+        } else if (drag_mode_spawn) {
+            span_offsets = NULL;          /* absolute-span path used instead */
+            active_lanes = s_drag_lanes;
+        } else if (g_track_is_circuit) {
+            span_offsets = s_circuit_span_offsets;
+            active_lanes = s_racer_lanes;
+        } else {
+            span_offsets = s_staggered_span_offsets;
+            active_lanes = s_racer_lanes;
+        }
 
         int track_span_count = td5_track_get_span_count();
         int level_num = td5_asset_level_number(g_td5.track_index);
@@ -795,11 +879,16 @@ int td5_game_init_race_session(void) {
             int world_x = 0;
             int world_y = 0;
             int world_z = 0;
-            int sub_lane = s_racer_lanes[slot];
+            int sub_lane = active_lanes[slot];
             TD5_StripSpan *sp;
 
             if (track_span_count > 0) {
-                span_index = start_span + span_offsets[slot];
+                if (drag_mode_spawn) {
+                    /* Drag race uses ABSOLUTE span indices from 0x42B228. */
+                    span_index = (int)s_drag_absolute_spans[slot];
+                } else {
+                    span_index = start_span + span_offsets[slot];
+                }
                 while (span_index < 0)
                     span_index += track_span_count;
                 while (span_index >= track_span_count)
@@ -1473,6 +1562,12 @@ int td5_game_run_race_frame(void) {
         td5_game_trace_stage("post_physics", ticks_this_frame);
         td5_ai_tick();
         td5_game_trace_stage("post_ai", ticks_this_frame);
+
+        /* Wanted mode: decay target-tracker marker per sub-tick
+         * (DecayTrackedActorMarkerIntensity @ 0x43D7E0) */
+        if (g_td5.wanted_mode_enabled) {
+            tick_wanted_target_tracker();
+        }
 
         /* --- Track update (tire marks, wrap normalization) --- */
         td5_track_tick();

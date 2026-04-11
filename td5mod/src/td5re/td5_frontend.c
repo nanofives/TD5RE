@@ -227,14 +227,19 @@ static int  s_snap_opp_car, s_snap_opp_paint, s_snap_opp_trans, s_snap_opp_confi
 static int  s_masters_roster[15];
 static int  s_masters_roster_flags[15]; /* 0=available, 1=AI, 2=taken */
 
-/* Cup series schedule table (from 0x4640A4) */
+/* Cup series schedule tables (from TD5_d3d.exe 0x464098, stride 0x10, sentinel 0x63=99).
+ * Original formula @ 0x410E8E: entry = *(base + raceWithinSeries + gameType*0x10 + 0x14)
+ * with base = 0x464084 → row0 = 0x464098. Rows are byte arrays; port widens to int.
+ * Indexed here by (game_type - 1), so [0] = Championship (GT=1). */
 static const int s_cup_schedules[][13] = {
-    /* [1] Championship */ { 0, 1, 2, 3, 99, -1,-1,-1,-1,-1,-1,-1,-1 },
-    /* [2] Era          */ { 4, 16, 6, 7, 5, 17, 99, -1,-1,-1,-1,-1,-1 },
-    /* [3] Challenge    */ { 0, 1, 2, 3, 15, 8, 99, -1,-1,-1,-1,-1,-1 },
-    /* [4] Pitbull      */ { 0, 1, 2, 3, 15, 8, 11, 13, 99, -1,-1,-1,-1 },
-    /* [5] Masters      */ { 0, 1, 2, 3, 15, 8, 11, 13, 10, 12, 99, -1,-1 },
-    /* [6] Ultimate     */ { 0, 1, 2, 3, 15, 8, 11, 13, 10, 12, 9, 14, 99 },
+    /* [0] Championship (GT=1) @ 0x4640A8 */ {  4, 16,  6,  7,  5, 17, 99, -1,-1,-1,-1,-1,-1 },
+    /* [1] Era          (GT=2) @ 0x4640B8 */ {  1,  2,  3, 15,  8, 99, -1,-1,-1,-1,-1,-1,-1 },
+    /* [2] Challenge    (GT=3) @ 0x4640C8 */ {  1,  2,  3, 15,  8, 11, 13, 99, -1,-1,-1,-1,-1 },
+    /* [3] Pitbull      (GT=4) @ 0x4640D8 */ {  1,  2,  3, 15,  8, 11, 13, 10, 12, 99, -1,-1,-1 },
+    /* [4] Masters      (GT=5) @ 0x4640E8 */ {  1,  2,  3, 15,  8, 11, 13, 10, 12,  9, 14, 99, -1 },
+    /* [5] Ultimate     (GT=6) — RE found no schedule row; handled by jump table
+     *                  callback @ 0x4110A0 (task #2). Placeholder = Masters order. */
+    {  1,  2,  3, 15,  8, 11, 13, 10, 12,  9, 14, 99, -1 },
 };
 
 /* Bar-fade transition lookup table (slot -> {r,g,b} bar color + type) */
@@ -2423,7 +2428,15 @@ static int ConfigureGameTypeFlags(void) {
         g_td5.special_encounter_enabled = 1;
         break;
 
-    case 7: /* Time Trials */
+    case 7: /* Time Trials
+             *
+             * [DIVERGENCE from original @ 0x410CA0 case 7]
+             * Original clears g_selectedGameType back to 0 after setting the
+             * tier/overlay flags — time trial is identified at runtime purely
+             * by (gRaceDifficultyTier==2 && !traffic && !encounter &&
+             * g_raceOverlayPresetMode==3). The port keeps game_type=7 and
+             * uses an explicit time_trial_enabled flag for clarity. No runtime
+             * code currently tests game_type==7 for mode dispatch. */
         g_td5.time_trial_enabled = 1;
         g_td5.difficulty = TD5_DIFFICULTY_HARD;
         g_td5.traffic_enabled = 0;
@@ -2454,6 +2467,48 @@ static int ConfigureGameTypeFlags(void) {
         int sched_idx = s_selected_game_type - 1;
         if (s_race_within_series >= 0 && s_race_within_series < 13) {
             if (s_cup_schedules[sched_idx][s_race_within_series] == 99) {
+                /* End-of-series: invoke the per-tier commit callback.
+                 * Jump table @ 0x464108, entries @ 0x410F60..0x4110A0.
+                 * Each callback sets unlock bits in s_cup_unlock_tier
+                 * (DAT_004962A8) and advances s_total_unlocked_tracks
+                 * / s_total_unlocked_cars for higher tiers.
+                 * [RE basis: deep Ghidra pass of each callback body] */
+                switch (s_selected_game_type) {
+                case 1: /* Championship @ 0x410F60: unlock bit 0 if track>=18 */
+                    if (s_total_unlocked_tracks >= 18 &&
+                        (s_cup_unlock_tier & 7) == 0) {
+                        s_cup_unlock_tier |= 1;
+                    }
+                    break;
+                case 2: /* Era @ 0x410FA0: clamp tracks to 18, unlock bit 0 */
+                    if (s_total_unlocked_tracks < 18) {
+                        s_total_unlocked_tracks = 18;
+                    }
+                    if ((s_cup_unlock_tier & 7) == 0) {
+                        s_cup_unlock_tier |= 1;
+                    }
+                    break;
+                case 3: /* Challenge @ 0x410FF0: unlock bit 1 */
+                    s_cup_unlock_tier |= 2;
+                    break;
+                case 4: /* Pitbull @ 0x411030: unlock bit 1 */
+                    s_cup_unlock_tier |= 2;
+                    break;
+                case 5: /* Masters @ 0x411070: tier clear, no new bits */
+                    break;
+                case 6: /* Ultimate @ 0x4110A0: clamp cars>=37, tracks>=19 */
+                    if (s_total_unlocked_cars < 37) {
+                        s_total_unlocked_cars = 37;
+                    }
+                    if (s_total_unlocked_tracks < 19) {
+                        s_total_unlocked_tracks = 19;
+                    }
+                    break;
+                }
+                TD5_LOG_I(LOG_TAG,
+                          "ConfigureGameType: cup %d completed, tier=0x%02X tracks=%d cars=%d",
+                          s_selected_game_type, s_cup_unlock_tier,
+                          s_total_unlocked_tracks, s_total_unlocked_cars);
                 return 0; /* end of series */
             }
         }

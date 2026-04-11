@@ -2059,8 +2059,17 @@ void td5_hud_render_overlays(float dt)
         td5_hud_flush_text();
     }
 
-    /* Radial pulse effect */
-    td5_render_radial_pulse(dt);
+    /* Radial pulse effect — only active in single-player free race.
+     * Original RunRaceFrame @ 0x42B67F gates on:
+     *   g_humanPlayerCount==1 && !dead && !network && selectedGameType==0
+     *   && !g_dragRaceModeEnabled
+     * [RE basis: research agent deep pass] */
+    if (!g_split_screen_mode &&
+        !g_td5.network_active &&
+        g_td5.game_type == TD5_GAMETYPE_SINGLE_RACE &&
+        !g_td5.drag_race_enabled) {
+        td5_render_radial_pulse(dt);
+    }
 
     /* Split-screen divider bars */
     if (g_split_screen_mode != 0) {
