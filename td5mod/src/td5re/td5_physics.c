@@ -597,11 +597,15 @@ void td5_physics_update_player(TD5_Actor *actor)
     /* Suspension deflection -> load transfer */
     int32_t susp_defl = actor->center_suspension_pos;
 
-    /* Front load fraction (8.8 fixed) */
+    /* Front/rear load fraction (8.8 fixed) — weight transfer via suspension
+     * deflection. Original @ 0x004041AE uses center_suspension_pos directly
+     * (no shift). Prior port divided by 16, which near-zeroed load transfer
+     * and made grip front/rear symmetric under weight shift, killing the
+     * asymmetry that drives oversteer/understeer during cornering. [CONFIRMED] */
     int32_t front_load = ((front_weight << 8) / total_weight);
-    front_load = front_load * (half_wb - (susp_defl >> 4)) / full_wb;
+    front_load = front_load * (half_wb - susp_defl) / full_wb;
     int32_t rear_load = ((rear_weight << 8) / total_weight);
-    rear_load = rear_load * (half_wb + (susp_defl >> 4)) / full_wb;
+    rear_load = rear_load * (half_wb + susp_defl) / full_wb;
 
     for (i = 0; i < 4; i++) {
         int32_t sf = (int32_t)s_surface_friction[surface_wheel[i] & 0x1F];
@@ -611,13 +615,11 @@ void td5_physics_update_player(TD5_Actor *actor)
         if (grip[i] > TD5_PLAYER_GRIP_MAX) grip[i] = TD5_PLAYER_GRIP_MAX;
     }
 
-    /* --- 3b. Arcade mode grip boost (0x42F7B0) ---
-     * Arcade: multiply grip by ~1.3 (333/256). Simulation: raw values. */
-    if (s_dynamics_mode == 0) {
-        for (i = 0; i < 4; i++) {
-            grip[i] = (grip[i] * 333) >> 8;  /* ~1.30x */
-            if (grip[i] > TD5_PLAYER_GRIP_MAX) grip[i] = TD5_PLAYER_GRIP_MAX;
-        }
+    if (actor->slot_index == 0 && (actor->frame_counter % 120u) == 0u) {
+        TD5_LOG_I(LOG_TAG,
+                  "GRIP: front_load=%d rear_load=%d susp_defl=%d grip=[%d,%d,%d,%d]",
+                  front_load, rear_load, susp_defl,
+                  grip[0], grip[1], grip[2], grip[3]);
     }
 
     /* --- 4. Handbrake modifier on rear wheels (tuning+0x7A) --- */
@@ -796,14 +798,11 @@ void td5_physics_update_player(TD5_Actor *actor)
 
     /* Rear axle lateral force.
      * Original at 0x4041E0: rear slip from WORLD-frame velocity projected
-     * onto body heading perpendicular (unsteered).
-     * rear_slip = (world_vx * cos(heading) - world_vz * sin(heading)) >> 12
-     * which equals v_lat (body-frame lateral velocity).
-     * Arcade mode: reduce rear slip by ~25% to limit oversteer tendency. */
+     * onto body heading perpendicular (unsteered) — equals v_lat.
+     * Prior port multiplied arcade-mode rear_slip by 0.75 to "limit oversteer",
+     * which directly killed drift. Research @ 0x004041E0 shows no such
+     * multiplier in the original. [CONFIRMED removed] */
     int32_t rear_slip = v_lat;
-    if (s_dynamics_mode == 0) {
-        rear_slip = (rear_slip * 192) >> 8;  /* 0.75x in arcade */
-    }
     if (lat_stiff != 0)
         rear_slip = (rear_slip * lat_stiff) >> 8;
     int32_t rear_lat_force = -(rear_slip * ((grip[2] + grip[3]) >> 1)) >> 8;
@@ -2760,52 +2759,67 @@ void td5_physics_integrate_pose(TD5_Actor *actor)
      * Per-wheel Y contribution = wheel_world_y + spring_output * -0x100
      * where wheel_world_y is from RefreshWheelContacts (includes susp_href).
      */
+    /* Ground-snap: direct Y write from wheel contact average.
+     * [CONFIRMED via 2026-04-11 Ghidra pass on 0x00405E80 by research agent.]
+     * Three bugs fixed vs prior port:
+     *
+     *   1. Per-wheel cardef stride is 8 bytes (not 16). Each wheel's body-
+     *      space offset is `short[3]` at `cd + 0x40 + i*8`: X at +0x40+i*8,
+     *      Y at +0x42+i*8, Z at +0x44+i*8. Prior port indexed at stride 16
+     *      which made wheels 1..3 read garbage for every non-Viper car.
+     *   2. No `+0x80` rounding bias. Original writes the plain `IDIV` result.
+     *      Previous port added +0x80 to work around bug #1 on Viper.
+     *   3. Full 3-vec rotation through the chassis rotation matrix. The
+     *      ride_offset vector is (cwx, body_wy, cwz), rotated by the
+     *      actor's rotation matrix, and ONLY the Y component of the rotated
+     *      result is used. Prior port used `body_wy * -0x100` directly,
+     *      ignoring the X/Z terms which contribute pitch/roll coupling.
+     *
+     * The `rotate_vec_world_y` helper (see ~line 2403) extracts exactly the
+     * Y component via `m[1]*v[0] + m[4]*v[1] + m[7]*v[2]`, matching the
+     * original's `TransformShortVec3ByRenderMatrixRounded @ 0x0042E2E0`
+     * used inside 0x00405E80 (followed by reading out[1]). */
     {
         int64_t contact_y_sum = 0;
         int contact_count = 0;
         uint8_t gnd_mask = actor->wheel_contact_bitmask;
 
         int32_t href = (int32_t)CDEF_S(actor, 0x82);
-        int32_t susp_offset = (href * 0xB5 + ((href * 0xB5) >> 31 & 0xFF)) >> 8;
+        int32_t href_x181 = href * 0xB5;
+        int32_t susp_offset = (href_x181 + ((href_x181 >> 31) & 0xFF)) >> 8;
+
+        uint8_t *cd = (uint8_t *)actor->car_definition_ptr;
 
         for (int i = 0; i < 4; i++) {
-            if (!(gnd_mask & (1 << i))) {  /* grounded wheel */
-                /* Wheel Y contribution: ground contact Y + suspension offset
-                 * + spring response. Original (0x403720 → 0x405E80):
-                 * The +sVar3 add-back in RefreshWheelContacts raises each
-                 * wheel Y by susp_offset in world space. This propagates
-                 * through the integrator's averaging to raise world_pos.y
-                 * by susp_offset, placing the chassis at ride height above
-                 * the track surface. */
-                int32_t wheel_y = actor->wheel_contact_pos[i].y;
-                int32_t spring_y = actor->wheel_suspension_pos[i] * -0x100;
-                /* Ride height: original (0x405E80) accumulates
-                 * ground_y + rotated_body_offset * -0x100 per wheel.
-                 * The body offset = (cardef_wy - susp_pos - sVar3).
-                 * Front axle: cardef_wy=-120 → offset=-227 → ride=58112
-                 * Rear axle:  cardef_wy=0   → offset=-107 → ride=27392
-                 * Average ride ≈ 42752 FP = 167 world units.
-                 * Remaining ~60 unit gap to target comes from the original's
-                 * rotation transform + spring-damper interactions on the
-                 * second integrate pass. */
-                int16_t cdef_wy = 0;
-                {
-                    uint8_t *cd = (uint8_t *)actor->car_definition_ptr;
-                    if (cd) cdef_wy = *(int16_t *)(cd + 0x42 + i * 16);
-                }
-                int32_t body_wy = (int32_t)cdef_wy
-                                - actor->wheel_suspension_pos[i]
-                                - susp_offset;
-                int32_t ride_offset = body_wy * -0x100;
-                contact_y_sum += (int64_t)(wheel_y + ride_offset);
-                contact_count++;
-            }
+            if (gnd_mask & (1 << i)) continue;  /* airborne wheel — skip */
+            if (!cd) break;
+
+            /* [FIX #1] stride 8 per wheel, not 16. */
+            int16_t cwx = *(int16_t *)(cd + 0x40 + i * 8);
+            int16_t cwy = *(int16_t *)(cd + 0x42 + i * 8);
+            int16_t cwz = *(int16_t *)(cd + 0x44 + i * 8);
+
+            /* Truncate-toward-zero /256 on suspension pos (matches the
+             * original's CDQ;AND 0xff;ADD;SAR 8 idiom at 0x00406273). */
+            int32_t sp = actor->wheel_suspension_pos[i];
+            int32_t sp_div = (sp + ((sp >> 31) & 0xFF)) >> 8;
+
+            int16_t body_wy = (int16_t)((int32_t)cwy - sp_div - susp_offset);
+
+            /* [FIX #3] rotate the full short[3] body-offset vector through
+             * the actor's rotation matrix and take the Y component. */
+            int16_t src[3] = { cwx, body_wy, cwz };
+            int16_t rot_y = rotate_vec_world_y(actor, src);
+
+            int32_t wheel_y = actor->wheel_contact_pos[i].y;
+            contact_y_sum += (int64_t)(wheel_y + (int32_t)rot_y * -0x100);
+            contact_count++;
         }
 
         if (contact_count > 0) {
-            int32_t new_y_raw = (int32_t)(contact_y_sum / contact_count);
-            /* +0x80 rounding bias matches original (0x405E80 output path) */
-            int32_t new_y = new_y_raw + 0x80;
+            /* [FIX #2] NO +0x80 bias — the original writes the plain
+             * signed-IDIV result (MOV [ESI+0x200], EAX at 0x00406307). */
+            int32_t new_y = (int32_t)(contact_y_sum / contact_count);
             actor->world_pos.y = new_y;
             actor->render_pos.y = (float)new_y * (1.0f / 256.0f);
 
