@@ -1311,8 +1311,11 @@ int td5_asset_level_number(int track_index)
 {
     /* Drag race hardcodes level030.zip [CONFIRMED @ InitializeRaceSession
      * 0x0042ad63-0x0042ad73]: when s_selected_track < 0 the original writes
-     * MOV [0x004aaf3c], 0x1e (=30) directly, bypassing the schedule remap. */
-    if (g_td5.drag_race_enabled)
+     * MOV [0x004aaf3c], 0x1e (=30) directly, bypassing the schedule remap.
+     * Check game_type (not drag_race_enabled) — game_type is explicitly
+     * assigned in ConfigureGameTypeFlags for every race mode, so it won't
+     * leak between sessions even if a flag reset is missed. */
+    if (g_td5.game_type == TD5_GAMETYPE_DRAG_RACE)
         return 30;
 
     /* Two-step lookup from the original binary:
