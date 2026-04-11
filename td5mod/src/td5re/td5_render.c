@@ -3234,6 +3234,38 @@ void td5_render_submit_translucent(uint16_t *quad_data) {
     td5_plat_render_draw_tris(verts, 4, indices, 6);
 }
 
+/* Submit a pre-built translucent quad using the POINT-filter preset, which
+ * uses alpha_ref=1 instead of the LINEAR preset's 0x80. Needed for surfaces
+ * that want fractional vertex-alpha transparency below 0x80 — primarily the
+ * minimap background grid, whose tiles need to stay under ~50% opacity. */
+void td5_render_submit_translucent_low_ref(uint16_t *quad_data) {
+    float *fdata;
+    TD5_D3DVertex verts[4];
+    uint16_t indices[6] = { 0, 1, 2, 0, 2, 3 };
+    int tex_page;
+    int i;
+
+    if (!quad_data) return;
+
+    fdata = (float *)quad_data;
+    for (i = 0; i < 4; i++) {
+        int base = 2 + i * 7;
+        verts[i].screen_x = fdata[base + 0];
+        verts[i].screen_y = fdata[base + 1];
+        verts[i].depth_z  = fdata[base + 2];
+        verts[i].rhw      = fdata[base + 3];
+        verts[i].diffuse  = *(uint32_t *)&fdata[base + 4];
+        verts[i].specular = 0;
+        verts[i].tex_u    = fdata[base + 5];
+        verts[i].tex_v    = fdata[base + 6];
+    }
+
+    tex_page = (int)(*(float *)((uint8_t *)quad_data + 0x90));
+    td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_POINT);
+    td5_plat_render_bind_texture(tex_page);
+    td5_plat_render_draw_tris(verts, 4, indices, 6);
+}
+
 void td5_render_set_clip_rect(float left, float right, float top, float bottom) {
     (void)left; (void)right; (void)top; (void)bottom;
 }

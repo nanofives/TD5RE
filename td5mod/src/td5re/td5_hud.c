@@ -61,6 +61,7 @@ extern void td5_render_build_sprite_quad(int *params);
 
 /* 0x4315B0: Submit immediate translucent primitive for rendering */
 extern void td5_render_submit_translucent(uint16_t *quad_data);
+extern void td5_render_submit_translucent_low_ref(uint16_t *quad_data);
 
 /* 0x43E640: Set viewport clip rect */
 extern void td5_render_set_clip_rect(float left, float right, float top, float bottom);
@@ -410,14 +411,20 @@ static void hud_submit_quad(void *quad_data)
 }
 
 /* Helper: build a warped 4-corner quad.
- * Corners are provided in order: vert0 (front-left), vert1 (front-right),
- * vert2 (back-left), vert3 (back-right). Matches the original minimap road
- * quad layout from RenderTrackMinimapOverlay @ 0x0043a220. */
+ *
+ * Corner ordering MUST match td5_render_build_sprite_quad's slot mapping.
+ * The render builder maps input slots to output verts as:
+ *   dst->v0 = scr[0]   dst->v1 = scr[3]
+ *   dst->v3 = scr[1]   dst->v2 = scr[2]
+ * and the index buffer [0,1,2, 0,2,3] produces tris (v0,v1,v2) + (v0,v2,v3).
+ * To get a consistent 4-corner quad, pass slots as TL, BL, BR, TR
+ * (front-left, back-left, back-right, front-right in minimap terms).
+ */
 static void hud_build_quad_warped(void *dest, int tex_page,
-                                   float x0, float y0,
-                                   float x1, float y1,
-                                   float x2, float y2,
-                                   float x3, float y3,
+                                   float tl_x, float tl_y,
+                                   float bl_x, float bl_y,
+                                   float br_x, float br_y,
+                                   float tr_x, float tr_y,
                                    float u0, float v0, float u1, float v1,
                                    uint32_t color, float depth)
 {
@@ -437,16 +444,14 @@ static void hud_build_quad_warped(void *dest, int tex_page,
     p.dest = dest;
     p.mode = 0;
 
-    /* 4 independent corner positions (warped quad) */
-    p.scr_x[0] = x0; p.scr_y[0] = y0;
-    p.scr_x[1] = x1; p.scr_y[1] = y1;
-    p.scr_x[2] = x2; p.scr_y[2] = y2;
-    p.scr_x[3] = x3; p.scr_y[3] = y3;
+    p.scr_x[0] = tl_x; p.scr_y[0] = tl_y; /* slot 0 → dst.v0 = TL */
+    p.scr_x[1] = bl_x; p.scr_y[1] = bl_y; /* slot 1 → dst.v3 = BL */
+    p.scr_x[2] = br_x; p.scr_y[2] = br_y; /* slot 2 → dst.v2 = BR */
+    p.scr_x[3] = tr_x; p.scr_y[3] = tr_y; /* slot 3 → dst.v1 = TR */
 
     p.depth_z[0] = depth; p.depth_z[1] = depth;
     p.depth_z[2] = depth; p.depth_z[3] = depth;
 
-    /* Normalize pixel atlas UVs for D3D11 sampler. */
     {
         int tw = 256, th = 256;
         td5_plat_render_get_texture_dims(tex_page, &tw, &th);
@@ -454,12 +459,11 @@ static void hud_build_quad_warped(void *dest, int tex_page,
         u1 /= (float)tw; v1 /= (float)th;
     }
 
-    /* Map UVs across the 4 corners (v0 front-L, v1 front-R, v2 back-L, v3 back-R):
-     * Front of quad uses v0; back uses v1. Left uses u0; right uses u1. */
+    /* UV assignment mirrors hud_build_quad's axis-aligned slot pattern. */
     p.tex_u[0] = u0; p.tex_v[0] = v0;
-    p.tex_u[1] = u1; p.tex_v[1] = v0;
-    p.tex_u[2] = u0; p.tex_v[2] = v1;
-    p.tex_u[3] = u1; p.tex_v[3] = v1;
+    p.tex_u[1] = u0; p.tex_v[1] = v1;
+    p.tex_u[2] = u1; p.tex_v[2] = v1;
+    p.tex_u[3] = u1; p.tex_v[3] = v0;
 
     p.diffuse[0] = color; p.diffuse[1] = color;
     p.diffuse[2] = color; p.diffuse[3] = color;
@@ -471,19 +475,29 @@ static void hud_build_quad_warped(void *dest, int tex_page,
 }
 
 /* Minimap span-type → right-edge vertex delta table.
- * From DAT_00473fd8 @ TD5_d3d.exe — i32 values indexed by span[0] type byte.
- * Only types 0..15 are valid; table entries beyond that spill into the
- * anti-piracy string pool in the original and are never reached in practice.
- * [CONFIRMED via memory_read @ 0x00473fd8] */
-static const int32_t s_minimap_vtx_delta_a[16] = {
-    0,  0, -1, -1, -2,  0, -1, -1,
-   -2,  0,  0,  0,  0,  0,  0,  0,
+ *
+ * Layout at DAT_00473fd8 in TD5_d3d.exe is a SINGLE int32[8][2] table (8 rows
+ * of 2 columns). The decomp reads column 0 via `*(int *)(&DAT_00473fd8 + t*8)`
+ * for the near-span vertex-1 formula, and column 1 via
+ * `*(int *)(&DAT_00473fdc + t*8)` for the far-span vertex-3 formula —
+ * two columns of the same row. Types 0..7 are valid.
+ * [CONFIRMED via memory_read @ 0x00473fd8..0x00474018]
+ *
+ *     type | col 0 | col 1
+ *       0  |   0   |   0
+ *       1  |   0   |   0
+ *       2  |  -1   |   0
+ *       3  |  -1   |   0
+ *       4  |  -2   |   0
+ *       5  |   0   |  -1
+ *       6  |   0   |  -1
+ *       7  |   0   |  -2
+ */
+static const int32_t s_minimap_vtx_delta_col0[8] = {
+    0,  0, -1, -1, -2,  0,  0,  0
 };
-/* DAT_00473fdc — same table + 4 bytes; second dword of each row.
- * All zeros for valid types 0..15. Used by span-b (+0x06) right-edge path. */
-static const int32_t s_minimap_vtx_delta_b[16] = {
-    0,  0,  0,  0,  0,  0,  0,  0,
-    0,  0,  0,  0,  0,  0,  0,  0,
+static const int32_t s_minimap_vtx_delta_col1[8] = {
+    0,  0,  0,  0,  0, -1, -1, -2
 };
 
 /* Depth constant for HUD overlay quads.
@@ -2198,10 +2212,14 @@ void td5_hud_render_minimap(int actor_slot)
     float offset_x = -(float)actor_world_x(actor_slot) * kFP;
     float offset_z = -(float)actor_world_z(actor_slot) * kFP;
 
-    /* Submit 16 background tiles (binary: offset 0x4500..0x507F, stride 0xB8) */
+    /* Submit 16 background tiles (binary: offset 0x4500..0x507F, stride 0xB8).
+     * Use the low-alpha-ref translucent path (TRANSLUCENT_POINT preset,
+     * alpha_ref=1) so the per-tile vertex alpha can drop below 0x80 and
+     * produce a more see-through grid. */
     for (int i = 0; i < 16; i++) {
         int buf_off = 0x4500 + i * TD5_HUD_GLYPH_QUAD_SIZE;
-        hud_submit_quad(s_minimap_quad_buf + buf_off);
+        td5_render_submit_translucent_low_ref(
+            (uint16_t *)(s_minimap_quad_buf + buf_off));
     }
 
     /* Walk track spans and render road segments using the pre-built segment table.
@@ -2227,96 +2245,99 @@ void td5_hud_render_minimap(int actor_slot)
 
     /* Walk up to 48 road quads [CONFIRMED @ 0x43A220: while (local_8c < 0x30)].
      *
-     * Each iteration reads TWO span records (span_a, span_b) and emits a single
-     * warped 4-corner quad:
-     *   vert0 = span_a's "left vertex" at span+0x04 (plus span_a origin)
-     *   vert1 = span_a's right edge: vert0 + (span_a[3]&0xf) + table_a[span_a[0]]
-     *   vert2 = span_b's "left vertex" at span+0x06 (DIFFERENT field from span_a!)
-     *   vert3 = span_b's right edge: vert2 + (span_b[3]&0xf) + table_b[span_b[0]]
-     * [CONFIRMED @ 0x0043a220 decomp]
+     * Per iteration, two span records are read: NEAR at `local_a4` and FAR at
+     * `local_a4 + 5` (clamped). The primary quad is built from 4 corners:
      *
-     * span_b = span_a + 5, clamped to segment boundary. advance += 6 per iter.
+     *   vert0 (front-left ) = pool[near[+0x04]]
+     *   vert1 (front-right) = vert0 + (near[3]&0xf) + delta_col0[near[0]]
+     *   vert2 (back-left  ) = pool[ far[+0x06]]      ← note +0x06, not +0x04
+     *   vert3 (back-right ) = vert2 + ( far[3]&0xf) + delta_col1[ far[0]]
+     *
+     * Origins from each respective span (+0x0c, +0x14) are added before rotation.
+     * [CONFIRMED @ 0x0043a220 decomp + memory_read @ 0x00473fd8]
      */
     int local_a4 = start_span;
     int seg_rendered = 0;
-    const float road_diffuse_alpha = 1.0f; (void)road_diffuse_alpha;
     for (int i = 0; span_base && vert_base && i < 0x30; i++) {
-        int span_a_idx = local_a4;
-        int span_b_idx = span_a_idx + 5;
-        local_a4 = span_b_idx + 1; /* advance by 6 */
+        int near_idx = local_a4;
+        int far_idx  = near_idx + 5;
+        local_a4 = far_idx + 1; /* advance by 6 */
 
-        if (span_a_idx < 0 || span_b_idx < 0 ||
-            span_a_idx >= g_strip_span_count ||
-            span_b_idx >= g_strip_span_count) continue;
+        if (near_idx < 0 || far_idx < 0 ||
+            near_idx >= g_strip_span_count ||
+            far_idx  >= g_strip_span_count) continue;
 
-        uint8_t *sa = span_base + span_a_idx * 24;
-        uint8_t *sb = span_base + span_b_idx * 24;
+        uint8_t *sn = span_base + near_idx * 24;
+        uint8_t *sf = span_base + far_idx  * 24;
 
-        int32_t ox_a  = *(int32_t  *)(sa + 0x0C);
-        int32_t oz_a  = *(int32_t  *)(sa + 0x14);
-        int32_t ox_b  = *(int32_t  *)(sb + 0x0C);
-        int32_t oz_b  = *(int32_t  *)(sb + 0x14);
+        int32_t ox_n = *(int32_t *)(sn + 0x0C);
+        int32_t oz_n = *(int32_t *)(sn + 0x14);
+        int32_t ox_f = *(int32_t *)(sf + 0x0C);
+        int32_t oz_f = *(int32_t *)(sf + 0x14);
 
-        /* span_a uses left-vertex index at +0x04 [CONFIRMED @ 0x0043a220] */
-        uint16_t vi_a_left  = *(uint16_t *)(sa + 0x04);
-        uint8_t  type_a     = sa[0];
-        uint8_t  delta_a    = sa[3] & 0x0f;
-        int32_t  tbl_a      = s_minimap_vtx_delta_a[type_a & 0x0f];
-        int32_t  vi_a_right = (int32_t)vi_a_left + (int32_t)delta_a + tbl_a;
+        /* NEAR span: base vertex from +0x04, column-0 delta for the right edge. */
+        uint16_t vi_n_l  = *(uint16_t *)(sn + 0x04);
+        uint8_t  type_n  = sn[0];
+        uint8_t  nib_n   = sn[3] & 0x0F;
+        int32_t  col0    = s_minimap_vtx_delta_col0[type_n & 0x07];
+        int32_t  vi_n_r  = (int32_t)vi_n_l + (int32_t)nib_n + col0;
 
-        /* span_b uses left-vertex index at +0x06 — different field from span_a */
-        uint16_t vi_b_left  = *(uint16_t *)(sb + 0x06);
-        uint8_t  type_b     = sb[0];
-        uint8_t  delta_b    = sb[3] & 0x0f;
-        int32_t  tbl_b      = s_minimap_vtx_delta_b[type_b & 0x0f];
-        int32_t  vi_b_right = (int32_t)vi_b_left + (int32_t)delta_b + tbl_b;
+        /* FAR span: base vertex from +0x06, column-1 delta for the right edge. */
+        uint16_t vi_f_l  = *(uint16_t *)(sf + 0x06);
+        uint8_t  type_f  = sf[0];
+        uint8_t  nib_f   = sf[3] & 0x0F;
+        int32_t  col1    = s_minimap_vtx_delta_col1[type_f & 0x07];
+        int32_t  vi_f_r  = (int32_t)vi_f_l + (int32_t)nib_f + col1;
 
-        if (vi_a_right < 0 || vi_b_right < 0) continue;
+        if (vi_n_r < 0 || vi_f_r < 0) continue;
 
-        int16_t *va_l = (int16_t *)(vert_base + (uint32_t)vi_a_left  * 6);
-        int16_t *va_r = (int16_t *)(vert_base + (uint32_t)vi_a_right * 6);
-        int16_t *vb_l = (int16_t *)(vert_base + (uint32_t)vi_b_left  * 6);
-        int16_t *vb_r = (int16_t *)(vert_base + (uint32_t)vi_b_right * 6);
+        int16_t *vn_l = (int16_t *)(vert_base + (uint32_t)vi_n_l * 6);
+        int16_t *vn_r = (int16_t *)(vert_base + (uint32_t)vi_n_r * 6);
+        int16_t *vf_l = (int16_t *)(vert_base + (uint32_t)vi_f_l * 6);
+        int16_t *vf_r = (int16_t *)(vert_base + (uint32_t)vi_f_r * 6);
 
-        /* World-space corners (raw world units; only actor coords use kFP) */
-        float wx0 = (float)((int)va_l[0] + ox_a) + offset_x;
-        float wz0 = (float)((int)va_l[2] + oz_a) + offset_z;
-        float wx1 = (float)((int)va_r[0] + ox_a) + offset_x;
-        float wz1 = (float)((int)va_r[2] + oz_a) + offset_z;
-        float wx2 = (float)((int)vb_l[0] + ox_b) + offset_x;
-        float wz2 = (float)((int)vb_l[2] + oz_b) + offset_z;
-        float wx3 = (float)((int)vb_r[0] + ox_b) + offset_x;
-        float wz3 = (float)((int)vb_r[2] + oz_b) + offset_z;
+        /* Raw world units (only actor coords use kFP). */
+        float wx_fl = (float)((int)vn_l[0] + ox_n) + offset_x;
+        float wz_fl = (float)((int)vn_l[2] + oz_n) + offset_z;
+        float wx_fr = (float)((int)vn_r[0] + ox_n) + offset_x;
+        float wz_fr = (float)((int)vn_r[2] + oz_n) + offset_z;
+        float wx_bl = (float)((int)vf_l[0] + ox_f) + offset_x;
+        float wz_bl = (float)((int)vf_l[2] + oz_f) + offset_z;
+        float wx_br = (float)((int)vf_r[0] + ox_f) + offset_x;
+        float wz_br = (float)((int)vf_r[2] + oz_f) + offset_z;
 
         /* Rotate into player-up minimap space */
-        float mx0 = (wx0 * cos_h + wz0 * sin_h) * s_minimap_world_scale_x;
-        float my0 = (wz0 * cos_h - wx0 * sin_h) * s_minimap_world_scale_y;
-        float mx1 = (wx1 * cos_h + wz1 * sin_h) * s_minimap_world_scale_x;
-        float my1 = (wz1 * cos_h - wx1 * sin_h) * s_minimap_world_scale_y;
-        float mx2 = (wx2 * cos_h + wz2 * sin_h) * s_minimap_world_scale_x;
-        float my2 = (wz2 * cos_h - wx2 * sin_h) * s_minimap_world_scale_y;
-        float mx3 = (wx3 * cos_h + wz3 * sin_h) * s_minimap_world_scale_x;
-        float my3 = (wz3 * cos_h - wx3 * sin_h) * s_minimap_world_scale_y;
+        float mx_fl = (wx_fl * cos_h + wz_fl * sin_h) * s_minimap_world_scale_x;
+        float my_fl = (wz_fl * cos_h - wx_fl * sin_h) * s_minimap_world_scale_y;
+        float mx_fr = (wx_fr * cos_h + wz_fr * sin_h) * s_minimap_world_scale_x;
+        float my_fr = (wz_fr * cos_h - wx_fr * sin_h) * s_minimap_world_scale_y;
+        float mx_bl = (wx_bl * cos_h + wz_bl * sin_h) * s_minimap_world_scale_x;
+        float my_bl = (wz_bl * cos_h - wx_bl * sin_h) * s_minimap_world_scale_y;
+        float mx_br = (wx_br * cos_h + wz_br * sin_h) * s_minimap_world_scale_x;
+        float my_br = (wz_br * cos_h - wx_br * sin_h) * s_minimap_world_scale_y;
 
-        float sx0 = mm_cx + mx0, sy0 = mm_cy + my0;
-        float sx1 = mm_cx + mx1, sy1 = mm_cy + my1;
-        float sx2 = mm_cx + mx2, sy2 = mm_cy + my2;
-        float sx3 = mm_cx + mx3, sy3 = mm_cy + my3;
+        float fl_x = mm_cx + mx_fl, fl_y = mm_cy + my_fl;
+        float fr_x = mm_cx + mx_fr, fr_y = mm_cy + my_fr;
+        float bl_x = mm_cx + mx_bl, bl_y = mm_cy + my_bl;
+        float br_x = mm_cx + mx_br, br_y = mm_cy + my_br;
 
-        /* Skip if all 4 corners are entirely outside the minimap rect */
-        float min_x = sx0, max_x = sx0, min_y = sy0, max_y = sy0;
-        if (sx1 < min_x) min_x = sx1; if (sx1 > max_x) max_x = sx1;
-        if (sx2 < min_x) min_x = sx2; if (sx2 > max_x) max_x = sx2;
-        if (sx3 < min_x) min_x = sx3; if (sx3 > max_x) max_x = sx3;
-        if (sy1 < min_y) min_y = sy1; if (sy1 > max_y) max_y = sy1;
-        if (sy2 < min_y) min_y = sy2; if (sy2 > max_y) max_y = sy2;
-        if (sy3 < min_y) min_y = sy3; if (sy3 > max_y) max_y = sy3;
-        if (max_x < s_minimap_x || min_x > mm_r ||
-            max_y < s_minimap_y || min_y > mm_b) continue;
+        /* Soft-clip: drop road quads whose ANY corner is outside the grid rect.
+         * The original used hardware scissor; td5re has no scissor plumbing yet,
+         * so conservative-drop keeps the road inside the grid boundary. */
+        float cx_lo = s_minimap_x, cx_hi = mm_r;
+        float cy_lo = s_minimap_y, cy_hi = mm_b;
+        if (fl_x < cx_lo || fl_x > cx_hi || fl_y < cy_lo || fl_y > cy_hi) continue;
+        if (fr_x < cx_lo || fr_x > cx_hi || fr_y < cy_lo || fr_y > cy_hi) continue;
+        if (bl_x < cx_lo || bl_x > cx_hi || bl_y < cy_lo || bl_y > cy_hi) continue;
+        if (br_x < cx_lo || br_x > cx_hi || br_y < cy_lo || br_y > cy_hi) continue;
 
+        /* TL=front-left, BL=back-left, BR=back-right, TR=front-right */
         hud_build_quad_warped(
             &map_quad, HUD_WHITE_TEX_PAGE,
-            sx0, sy0, sx1, sy1, sx2, sy2, sx3, sy3,
+            fl_x, fl_y,  /* TL */
+            bl_x, bl_y,  /* BL */
+            br_x, br_y,  /* BR */
+            fr_x, fr_y,  /* TR */
             0.0f, 0.0f, 0.0f, 0.0f,
             0xFF9A9A9A,
             HUD_DEPTH
@@ -2507,20 +2528,23 @@ void td5_hud_init_minimap_layout(void)
 
         int off = 0x4500 + (int)t * TD5_HUD_GLYPH_QUAD_SIZE;
         if (off + TD5_HUD_GLYPH_QUAD_SIZE <= TD5_HUD_MINIMAP_BUF_SIZE) {
-            /* Grid tile diffuse = 0xFFFFFFFF to match original literal
-             * [CONFIRMED @ 0x0043b250..0x0043b2c0]. Semi-transparency comes
-             * from the tpage slot-4 loader, which writes alpha=0x80 on all
-             * non-black pixels (see load_static_png_tpage slot==4 case).
-             * The previous 0x60FFFFFF diffuse multiplied down to final alpha
-             * 0x30 and was discarded by the TRANSLUCENT_LINEAR alpha_ref=0x80
-             * test, which made the grid entirely invisible. */
+            /* Grid tile diffuse: 0x40FFFFFF gives ~25% vertex alpha which,
+             * combined with the scanback texture's 0x80 alpha (slot-4 loader),
+             * produces a final fragment alpha of 0x20 (~12%) — well below
+             * TRANSLUCENT_LINEAR's 0x80 alpha_ref but fine for the
+             * TRANSLUCENT_POINT preset (alpha_ref=1) the grid render path
+             * uses. Result: ~12% screen-space blend, visible but see-through.
+             * Original literal @ 0x0043b250 was 0xFFFFFFFF, but the td5re
+             * pipeline clips that to 0x80 via the texture alpha — tuning
+             * vertex alpha down here is the cleanest way to reach the
+             * subjective "minimap should be more transparent" target. */
             hud_build_quad(
                 s_minimap_quad_buf + off,
                 0, scanback->texture_page,
                 tx0, ty0,
                 tx0 + tile_w, ty0 + tile_h,
                 bg_u0, bg_v0, bg_u1, bg_v1,
-                0xFFFFFFFF, HUD_DEPTH4
+                0x40FFFFFF, HUD_DEPTH4
             );
         }
     }
