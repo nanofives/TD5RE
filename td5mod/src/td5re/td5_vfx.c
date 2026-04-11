@@ -204,6 +204,11 @@ static VfxEmitterDesc    s_emitter_descs[TD5_MAX_TOTAL_ACTORS * 4]; /* per-wheel
 static int               s_emitter_desc_count;
 static int               s_tire_track_cursor;  /* roving allocation cursor */
 
+/* Tire mark UV coords -- loaded from SKIDMARK sprite or fallback to SMOKE dark variant */
+static float    s_tiremark_u0, s_tiremark_v0;
+static float    s_tiremark_u1, s_tiremark_v1;
+static float    s_tiremark_page;
+
 /* --- Smoke sprite pool (used by LEVELINF smoke flag) --- */
 static VfxSpriteQuad    *s_smoke_pool;         /* per-actor sprite quads */
 static float             s_smoke_page_id;
@@ -362,7 +367,17 @@ int td5_vfx_init(void) {
     s_current_view_index = 0;
     s_vfx_debug_frame = 0;
 
-    TD5_LOG_I(LOG_TAG, "VFX system initialized");
+    /* Wire up the race particle system: look up RAINSPL/SMOKE atlas UVs,
+     * clear banks, build the 2x2 smoke variant table. Without these calls
+     * every smoke spawn writes a degenerate all-zero UV quad and the
+     * sprite is invisible. Originals: InitializeRaceParticleSystem @ 0x429510,
+     * InitializeRaceSmokeSpritePool @ 0x401410,
+     * InitializeVehicleTaillightQuadTemplates @ 0x401000. */
+    td5_vfx_init_race_particles();
+    td5_vfx_init_smoke_sprite_pool();
+    td5_vfx_init_taillight_templates();
+
+    TD5_LOG_I(LOG_TAG, "VFX system initialized (race particles, smoke pool, taillights)");
     return 1;
 }
 
@@ -394,6 +409,16 @@ void td5_vfx_tick(void) {
     s_vfx_debug_frame++;
     td5_vfx_update_tire_tracks();
     td5_vfx_advance_billboard_anims();
+
+    /* UpdateRaceParticleEffects @ 0x429790 runs once per view per sim tick;
+     * decrements slot lifetimes and drives update callbacks. Without this
+     * call the 100-slot bank fills up with stale particles and nothing
+     * ever expires. */
+    int view_count = g_td5.viewport_count > 0 ? g_td5.viewport_count : 1;
+    if (view_count > 2) view_count = 2;
+    for (int vp = 0; vp < view_count; vp++) {
+        td5_vfx_update_particles(vp);
+    }
 }
 
 /* ========================================================================
@@ -467,6 +492,24 @@ void td5_vfx_init_race_particles(void) {
         s_smoke_variant_uv[i][2] = half_w;   /* width */
         s_smoke_variant_uv[i][3] = half_h;   /* height */
         s_smoke_variant_uv[i][4] = s_smoke_page;
+    }
+
+    /* Look up SKIDMARK sprite for tire marks; fall back to dark SMOKE variant */
+    TD5_StaticHedEntry *skidmark = td5_asset_find_entry_by_name(
+        g_static_hed_entries, g_static_hed_entry_count, "SKIDMARK");
+    if (skidmark) {
+        vfx_extract_sprite_uvs(skidmark,
+                                &s_tiremark_u0, &s_tiremark_v0,
+                                &s_tiremark_u1, &s_tiremark_v1,
+                                &s_tiremark_page);
+    } else {
+        /* Fallback: use dark smoke variant (bottom-left quadrant of SMOKE atlas) */
+        s_tiremark_u0   = s_smoke_variant_uv[2][0];
+        s_tiremark_v0   = s_smoke_variant_uv[2][1];
+        s_tiremark_u1   = s_smoke_variant_uv[2][0] + s_smoke_variant_uv[2][2];
+        s_tiremark_v1   = s_smoke_variant_uv[2][1] + s_smoke_variant_uv[2][3];
+        s_tiremark_page = s_smoke_page;
+        TD5_LOG_W(LOG_TAG, "SKIDMARK sprite not found, using SMOKE fallback for tire marks");
     }
 
     TD5_LOG_I(LOG_TAG,
@@ -1236,40 +1279,62 @@ void td5_vfx_update_tire_tracks(void) {
 
         VfxTireTrackSlot *slot = &s_tire_track_pool[slot_idx];
 
-        /* Read current wheel world position from actor's hires wheel positions.
-         * Actor offset +0x298 + wheel_id * 12 (Vec3_Fixed per wheel). */
-        int actor_slot = (int)desc->actor_slot;
-        int wheel_id = (int)desc->wheel_id;
+        /* The actor pointer is resolved during the per-vehicle update dispatch
+         * (vfx_update_tire_track_emitters). Here we only use the stored anchor
+         * position which was set by vfx_set_emitter_anchor_from_wheel. */
 
-        /* Compute the actor pointer from the slot index.
-         * In the original: actor_base = DAT_004ab108 + actor_slot * 0x388 */
-        /* We read via byte offsets from the global actor table base.
-         * For the source port, actors are passed through the update functions;
-         * here we store the last known anchor position when the slot was acquired. */
-
-        /* Compute heading direction from position delta */
-        int32_t dx = slot->anchor_x - (int32_t)slot->prev_verts[0][0];
-        int32_t dz = slot->anchor_z - (int32_t)slot->prev_verts[0][2];
+        /* Compute heading direction from position delta (24.8 fixed) */
+        int32_t dx = slot->anchor_x - (int32_t)(slot->prev_verts[0][0] << 8);
+        int32_t dz = slot->anchor_z - (int32_t)(slot->prev_verts[0][2] << 8);
 
         /* Compute perpendicular offset for strip width:
-         * width * cos/sin of heading, shifted >> 12 */
+         * width * cos/sin of heading, normalized by travel distance */
         int32_t w = (int32_t)desc->width;
         int32_t len = td5_isqrt(dx * dx + dz * dz);
         if (len > 0) {
             int32_t perp_x = (-dz * w) / len;
             int32_t perp_z = ( dx * w) / len;
 
-            /* Build strip vertices: 4 corners forming a quad segment
-             * The first two vertices connect to the previous slot's last two */
+            /* Build strip vertices: 4 corners forming a quad segment.
+             * vertices[0],[1] = previous position (trailing edge)
+             * vertices[2],[3] = current position (leading edge)
+             * Y coordinate = anchor Y for road-flush placement */
             float anchor_fx = (float)slot->anchor_x * FP_TO_FLOAT;
+            float anchor_fy = (float)slot->anchor_y * FP_TO_FLOAT;
             float anchor_fz = (float)slot->anchor_z * FP_TO_FLOAT;
             float perp_fx = (float)perp_x * FP_TO_FLOAT;
             float perp_fz = (float)perp_z * FP_TO_FLOAT;
 
-            slot->vertices[0][0] = (int16_t)(anchor_fx - perp_fx);
-            slot->vertices[0][2] = (int16_t)(anchor_fz - perp_fz);
-            slot->vertices[1][0] = (int16_t)(anchor_fx + perp_fx);
-            slot->vertices[1][2] = (int16_t)(anchor_fz + perp_fz);
+            /* Copy current leading edge to trailing edge (previous frame's
+             * leading edge becomes this frame's trailing edge) */
+            if (slot->control & 2) {
+                /* Already has geometry: shift leading edge to trailing */
+                slot->vertices[0][0] = slot->vertices[2][0];
+                slot->vertices[0][1] = slot->vertices[2][1];
+                slot->vertices[0][2] = slot->vertices[2][2];
+                slot->vertices[1][0] = slot->vertices[3][0];
+                slot->vertices[1][1] = slot->vertices[3][1];
+                slot->vertices[1][2] = slot->vertices[3][2];
+            } else {
+                /* First geometry frame: trailing edge = previous anchor */
+                float prev_fx = (float)slot->prev_verts[0][0];
+                float prev_fy = anchor_fy;
+                float prev_fz = (float)slot->prev_verts[0][2];
+                slot->vertices[0][0] = (int16_t)(prev_fx - perp_fx);
+                slot->vertices[0][1] = (int16_t)(prev_fy);
+                slot->vertices[0][2] = (int16_t)(prev_fz - perp_fz);
+                slot->vertices[1][0] = (int16_t)(prev_fx + perp_fx);
+                slot->vertices[1][1] = (int16_t)(prev_fy);
+                slot->vertices[1][2] = (int16_t)(prev_fz + perp_fz);
+            }
+
+            /* Leading edge: current anchor +/- perpendicular */
+            slot->vertices[2][0] = (int16_t)(anchor_fx - perp_fx);
+            slot->vertices[2][1] = (int16_t)(anchor_fy);
+            slot->vertices[2][2] = (int16_t)(anchor_fz - perp_fz);
+            slot->vertices[3][0] = (int16_t)(anchor_fx + perp_fx);
+            slot->vertices[3][1] = (int16_t)(anchor_fy);
+            slot->vertices[3][2] = (int16_t)(anchor_fz + perp_fz);
 
             slot->control |= 2; /* has_geometry flag */
         }
@@ -1299,15 +1364,32 @@ void td5_vfx_update_tire_tracks(void) {
  *
  * Iterates all 80 pool slots. For active slots with geometry (bit 1 set),
  * ages the lifetime counter, applies intensity fade after 300 ticks,
- * expires at 600 ticks. Transforms vertices to view space and submits
- * translucent quads with Y offset for road flush rendering.
+ * expires at 600 ticks. Projects 4 world-space vertices to screen space
+ * and submits translucent quads with road-flush Y offset.
  */
 void td5_vfx_render_tire_tracks(void) {
+    extern void td5_render_submit_translucent(uint16_t *quad_data);
+    extern float g_renderBasisMatrix[12];
+    extern float g_render_width_f;
+    extern float g_render_height_f;
+
     if (!s_tire_track_pool) return;
+
+    /* Per-frame gravity constant (applied to Y of each active mark).
+     * Original: subtracts a small gravity offset per frame. */
+    static const float PARTICLE_GRAVITY_PER_FRAME = 0.25f;
 
     /* Get camera position for view-space transformation */
     float cam_x, cam_y, cam_z;
     td5_camera_get_position(&cam_x, &cam_y, &cam_z);
+
+    /* Projection parameters: focal length derived from render width,
+     * matching the original's 640-width perspective scale. */
+    float focal = g_render_width_f * 0.5f / 0.41421356f; /* tan(45/2) */
+    float center_x = g_render_width_f * 0.5f;
+    float center_y = g_render_height_f * 0.5f;
+    float far_clip = 10000.0f;
+    float near_clip = 1.0f;
 
     for (int i = 0; i < TD5_VFX_TIRE_TRACK_POOL_SIZE; i++) {
         VfxTireTrackSlot *slot = &s_tire_track_pool[i];
@@ -1324,29 +1406,20 @@ void td5_vfx_render_tire_tracks(void) {
             continue;
         }
 
-        /* Fade after 300 ticks: decrement intensity every 8th tick */
+        /* Fade after 300 ticks: decrement intensity by 1 per tick.
+         * Skip fade if bit 3 (0x08) is set in control flags (persistent marks). */
         if (slot->lifetime > TD5_VFX_TIRE_TRACK_FADE_START) {
-            if ((slot->lifetime & 7) == 0) {
+            if (!(slot->control & 0x08)) {
                 if (slot->intensity > 0) {
                     slot->intensity--;
                 }
             }
         }
 
-        /* Build vertex color from intensity: 0xFFiiiiii where i=intensity */
-        uint8_t val = slot->intensity;
-        uint32_t color = 0xFF000000 | ((uint32_t)val << 16) |
-                         ((uint32_t)val << 8) | (uint32_t)val;
+        /* Skip invisible marks */
+        if (slot->intensity == 0) continue;
 
-        /* Update all 4 vertex colors in the sprite quad template */
-        VfxSpriteQuad *tquad = (VfxSpriteQuad *)(slot->quad_data + 0x20);
-        tquad->v0_color = color;
-        tquad->v1_color = color;
-        tquad->v2_color = color;
-        tquad->v3_color = color;
-
-        /* Transform world anchor to view space:
-         * view_pos = (anchor * FP_TO_FLOAT) - camera_translation */
+        /* Transform world anchor to view space for frustum test */
         float view_x = (float)slot->anchor_x * FP_TO_FLOAT - cam_x;
         float view_y = (float)slot->anchor_y * FP_TO_FLOAT - cam_y;
         float view_z = (float)slot->anchor_z * FP_TO_FLOAT - cam_z;
@@ -1355,15 +1428,76 @@ void td5_vfx_render_tire_tracks(void) {
         if (!td5_render_is_sphere_visible(view_x, view_y, view_z, 50.0f))
             continue;
 
-        /* Load render translation for this track mark's anchor */
-        TD5_Vec3f track_pos;
-        track_pos.x = view_x;
-        track_pos.y = view_y + TRACK_Y_OFFSET; /* road-flush Y offset (-20.0) */
-        track_pos.z = view_z;
-        td5_render_load_translation(&track_pos);
+        /* Project 4 world-space vertices to screen space.
+         * Each vertex is int16 (x,y,z) in float-scale world units.
+         * Transform: world -> camera-relative -> view (via basis matrix) -> screen */
+        float sx[4], sy[4], sz[4], srhw[4];
+        int all_visible = 1;
 
-        /* Submit to translucent pipeline */
-        td5_render_queue_translucent_batch(tquad);
+        for (int v = 0; v < 4; v++) {
+            /* World position from int16 vertices */
+            float wx = (float)slot->vertices[v][0];
+            float wy = (float)slot->vertices[v][1] + TRACK_Y_OFFSET;
+            float wz = (float)slot->vertices[v][2];
+
+            /* Camera-relative */
+            float cx = wx - cam_x;
+            float cy = wy - cam_y;
+            float cz = wz - cam_z;
+
+            /* Apply view rotation via render basis matrix (3x3 portion) */
+            float vx = cx * g_renderBasisMatrix[0] + cy * g_renderBasisMatrix[1] + cz * g_renderBasisMatrix[2];
+            float vy = cx * g_renderBasisMatrix[3] + cy * g_renderBasisMatrix[4] + cz * g_renderBasisMatrix[5];
+            float vz = cx * g_renderBasisMatrix[6] + cy * g_renderBasisMatrix[7] + cz * g_renderBasisMatrix[8];
+
+            /* Perspective project */
+            if (vz <= near_clip) { all_visible = 0; break; }
+            float inv_z = 1.0f / vz;
+            sx[v]   = vx * focal * inv_z + center_x;
+            sy[v]   = -vy * focal * inv_z + center_y; /* Y inverted for screen */
+            sz[v]   = vz * (1.0f / far_clip);
+            srhw[v] = inv_z;
+        }
+
+        if (!all_visible) continue;
+
+        /* Apply gravity to Y coordinates (subtract per-frame gravity constant) */
+        slot->anchor_y -= (int32_t)(PARTICLE_GRAVITY_PER_FRAME * 256.0f);
+
+        /* Build vertex color from intensity: gray BGRA = 0xFF000000 | (a<<16) | (a<<8) | a */
+        uint8_t val = slot->intensity;
+        uint32_t color = 0xFF000000 | ((uint32_t)val << 16) |
+                         ((uint32_t)val << 8) | (uint32_t)val;
+
+        /* Build a VfxSpriteQuad on the stack for submission.
+         * Vertex order: 0=trailing-left, 1=trailing-right, 2=leading-right, 3=leading-left
+         * Maps to sprite quad: v0=TL, v1=TR, v2=BR, v3=BL */
+        VfxSpriteQuad tquad;
+        memset(&tquad, 0, sizeof(tquad));
+
+        tquad.geometry_ptr = 0;
+        tquad.vertex_count = 4;
+
+        tquad.v0_x = sx[0]; tquad.v0_y = sy[0]; tquad.v0_z = sz[0]; tquad.v0_rhw = srhw[0];
+        tquad.v0_color = color; tquad.v0_u = s_tiremark_u0; tquad.v0_v = s_tiremark_v0;
+
+        tquad.v1_x = sx[1]; tquad.v1_y = sy[1]; tquad.v1_z = sz[1]; tquad.v1_rhw = srhw[1];
+        tquad.v1_color = color; tquad.v1_u = s_tiremark_u1; tquad.v1_v = s_tiremark_v0;
+
+        tquad.v2_x = sx[3]; tquad.v2_y = sy[3]; tquad.v2_z = sz[3]; tquad.v2_rhw = srhw[3];
+        tquad.v2_color = color; tquad.v2_u = s_tiremark_u1; tquad.v2_v = s_tiremark_v1;
+
+        tquad.v3_x = sx[2]; tquad.v3_y = sy[2]; tquad.v3_z = sz[2]; tquad.v3_rhw = srhw[2];
+        tquad.v3_color = color; tquad.v3_u = s_tiremark_u0; tquad.v3_v = s_tiremark_v1;
+
+        tquad.tex_u0 = s_tiremark_u0; tquad.tex_v0 = s_tiremark_v0;
+        tquad.tex_u1 = s_tiremark_u1; tquad.tex_v1 = s_tiremark_v1;
+        tquad.quad_width = 0.0f;
+        tquad.quad_height = 0.0f;
+        tquad.texture_page = s_tiremark_page;
+
+        /* Submit as pre-transformed translucent quad (same path as HUD overlays) */
+        td5_render_submit_translucent((uint16_t *)&tquad);
     }
 }
 

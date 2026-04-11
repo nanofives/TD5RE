@@ -1643,8 +1643,22 @@ int td5_game_run_race_frame(void) {
         td5_track_tick();
         td5_game_trace_stage("post_track", ticks_this_frame);
 
-        /* --- VFX tick (tire tracks) --- */
+        /* --- VFX tick (tire tracks, particle lifetimes) --- */
         td5_vfx_tick();
+
+        /* --- Per-actor tire smoke / track emitter dispatch ---
+         * Original: UpdateTireTrackEmitterDispatch @ 0x43FAE0 fired per
+         * vehicle from the sim-tick loop. Reads drivetrain layout and
+         * calls update_rear/front_tire_effects, which spawn slip smoke.
+         * Without this loop no actor ever requests smoke spawns. */
+        for (i = 0; i < TD5_MAX_RACER_SLOTS; i++) {
+            TD5_Actor *tire_actor;
+            if (s_slot_state[i].state == 3) continue; /* disabled */
+            tire_actor = td5_game_get_actor(i);
+            if (tire_actor) {
+                td5_vfx_update_tire_track_emitters(tire_actor);
+            }
+        }
 
         /* --- Update race order (bubble sort by span position) --- */
         update_race_order();
