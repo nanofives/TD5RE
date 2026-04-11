@@ -538,19 +538,40 @@ void td5_track_resolve_wall_contacts(TD5_Actor *actor)
         int lane_count = span_lane_count(sp);
         if (lane_count < 1) lane_count = 1;
 
+        /* Sub-segment index within the span (from the boundary walker).
+         * Clamp to [0, lane_count-1] so `+sub_lane+1` stays within the
+         * span's rail vertex array. */
+        int sub_lane = (int)probe->sub_lane_index;
+        if (sub_lane < 0) sub_lane = 0;
+        if (sub_lane >= lane_count) sub_lane = lane_count - 1;
+
         int32_t px = probe_block[pi].x >> 8;
         int32_t pz = probe_block[pi].z >> 8;
 
-        /* --- LEFT RAIL: vertices left[0] and left[lane_count] ---
-         * Edge runs ALONG the left rail. Rotating it 90° clockwise via
-         * (edge_dz, -edge_dx) gives a perpendicular pointing INWARD
-         * (into the road from the left wall). Signed distance of the
-         * probe relative to left[0] projected onto this perp is positive
-         * when the probe is inside (right of the left rail) and negative
-         * when outside. */
+        /* --- LEFT RAIL of the current sub-segment ---
+         *
+         * For a multi-segment (curved or bent) span, the left rail is a
+         * polyline of vertices left[0..lane_count]. Using left[0] and
+         * left[lane_count] gives the overall CHORD of the rail — a
+         * single straight line from the first to last vertex. On a
+         * curved span that chord cuts through the interior of the curve
+         * and creates "invisible walls" inside the drivable area, which
+         * matches the reported symptom.
+         *
+         * Fix: use the probe's current sub-segment vertices (left[sub_lane]
+         * and left[sub_lane+1]) so the rail edge follows the actual
+         * polyline at each point. The boundary walker in
+         * update_position_recursive is responsible for keeping the
+         * probe's sub_lane_index synchronized with the probe's real
+         * position along the span's length.
+         *
+         * Rotating the edge 90° CW via (edge_dz, -edge_dx) gives a
+         * perpendicular pointing INWARD (into the road from the left
+         * rail). Signed distance relative to left[sub_lane] is positive
+         * when the probe is inside and negative when outside. */
         {
-            TD5_StripVertex *base = vertex_at((int)sp->left_vertex_index);
-            TD5_StripVertex *end_v = vertex_at((int)sp->left_vertex_index + lane_count);
+            TD5_StripVertex *base = vertex_at((int)sp->left_vertex_index + sub_lane);
+            TD5_StripVertex *end_v = vertex_at((int)sp->left_vertex_index + sub_lane + 1);
             if (base && end_v) {
                 int32_t edge_dx = (int32_t)end_v->x - (int32_t)base->x;
                 int32_t edge_dz = (int32_t)end_v->z - (int32_t)base->z;
@@ -591,17 +612,15 @@ void td5_track_resolve_wall_contacts(TD5_Actor *actor)
             }
         }
 
-        /* --- RIGHT RAIL: vertices right[0] and right[lane_count] ---
-         * Same along-rail edge, but rotated 90° CCW via (-edge_dz, edge_dx)
-         * so the perpendicular points INWARD (into the road from the right
-         * wall = in -X direction for a +Z span). Sign convention matches
-         * LEFT — positive d = inside, negative = outside. The wall_angle
-         * is rotated 180° from the rail direction so `wall_response`'s
-         * sin/cos push moves the car in the opposite (inward) direction
-         * compared to LEFT. */
+        /* --- RIGHT RAIL of the current sub-segment ---
+         * Same sub-segment fix as the LEFT rail. Rotated 90° CCW via
+         * (-edge_dz, edge_dx) so the perpendicular points INWARD from
+         * the right rail (in -X direction for a +Z span). wall_angle
+         * is rotated 180° from the rail direction so wall_response's
+         * sin/cos push moves the car opposite the LEFT case. */
         {
-            TD5_StripVertex *base = vertex_at((int)sp->right_vertex_index);
-            TD5_StripVertex *end_v = vertex_at((int)sp->right_vertex_index + lane_count);
+            TD5_StripVertex *base = vertex_at((int)sp->right_vertex_index + sub_lane);
+            TD5_StripVertex *end_v = vertex_at((int)sp->right_vertex_index + sub_lane + 1);
             if (base && end_v) {
                 int32_t edge_dx = (int32_t)end_v->x - (int32_t)base->x;
                 int32_t edge_dz = (int32_t)end_v->z - (int32_t)base->z;
