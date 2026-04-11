@@ -2121,7 +2121,7 @@ void td5_render_crossfade_surfaces(uint32_t *dst, const uint32_t *src_a,
  *     the wheel footprint.
  */
 #define SHADOW_VERTICAL_OFFSET  (3.0f)
-#define SHADOW_CORNER_SCALE     (1.25f)
+#define SHADOW_CORNER_SCALE     (1.6f)
 
 static int   s_shadow_lookup_done = 0;
 static int   s_shadow_page        = -1;
@@ -2177,14 +2177,28 @@ static void render_vehicle_shadow_quad(const TD5_Actor *actor)
 
     /* Convert the 4 probes to world-float, accumulating the XZ centroid so we
      * can scale corners outward from it (the original uses
-     * _g_wheelSuspensionRenderScale ≈ 1.25 for the same effect). Y is kept
-     * at each wheel's contact height so the shadow follows uneven terrain. */
+     * _g_wheelSuspensionRenderScale for the same effect). Y is kept at each
+     * wheel's contact height so the shadow follows uneven terrain.
+     *
+     * Subtick interpolation: probes are only refreshed once per sim tick, but
+     * the car mesh is rendered with (world_pos + linear_velocity *
+     * g_subTickFraction) / 256 per render frame (see line ~1547). Without
+     * applying the same delta to the shadow corners, the shadow sawtooth-
+     * lags behind the car at speed and produces edge flicker as probes jump
+     * each sim tick. This mirrors the camera/overlay subtick invariant. */
+    extern float g_subTickFraction;
+    const float frac = g_subTickFraction;
+    const float inv256 = 1.0f / 256.0f;
+    const float interp_dx = (float)actor->linear_velocity_x * frac * inv256;
+    const float interp_dy = (float)actor->linear_velocity_y * frac * inv256;
+    const float interp_dz = (float)actor->linear_velocity_z * frac * inv256;
+
     float corners[4][3];
     float cx = 0.0f, cz = 0.0f;
     for (int i = 0; i < 4; i++) {
-        corners[i][0] = (float)probes[i]->x * (1.0f / 256.0f);
-        corners[i][1] = (float)probes[i]->y * (1.0f / 256.0f) + SHADOW_VERTICAL_OFFSET;
-        corners[i][2] = (float)probes[i]->z * (1.0f / 256.0f);
+        corners[i][0] = (float)probes[i]->x * inv256 + interp_dx;
+        corners[i][1] = (float)probes[i]->y * inv256 + interp_dy + SHADOW_VERTICAL_OFFSET;
+        corners[i][2] = (float)probes[i]->z * inv256 + interp_dz;
         cx += corners[i][0];
         cz += corners[i][2];
     }
