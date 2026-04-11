@@ -81,10 +81,12 @@ Only if all 4 pass does it proceed to narrowphase.
 
 `CollectVehicleCollisionContacts` (0x408570):
 
-Takes two actor pointers and their current poses (position + heading angles). The car definition at `actor+0x1B8` provides:
-- `cardef+0x04` = half-width (short)
-- `cardef+0x08` = half-length (short)
-- `cardef+0x14` = rear offset (short, typically negative)
+Takes two actor pointers and their current poses (position + heading angles). The car definition at `actor+0x1B8` provides [CORRECTED 2026-04-11 from Ghidra decomp of `0x4079C0` — prior version of this doc had 0x04/0x08 swapped]:
+- `cardef+0x04` = **front-Z extent** (positive short) — forward Z distance from center
+- `cardef+0x08` = **half-width** (positive short) — lateral X extent
+- `cardef+0x14` = **rear-Z extent** (signed short, stored negative) — backward Z distance
+
+The swap was confirmed by how `ApplyVehicleCollisionImpulse` (0x4079C0) consumes them: `side_extent = cardef[0x08] - |cx_A|` requires 0x08 to be the lateral (half-width) dimension; `front_depth = |cardef[0x04] - cz_A|` and `rear_depth = |cz_A - cardef[0x14]|` require 0x04 and 0x14 to be the Z extents.
 
 The function:
 1. Computes the heading delta between the two vehicles
@@ -326,12 +328,14 @@ All offsets are byte offsets within the 0x388-byte actor struct at `gRuntimeSlot
 
 ### Car Definition Fields (pointed to by actor+0x1B8)
 
+[CORRECTED 2026-04-11 — 0x04 and 0x08 were previously swapped.]
+
 | Offset | Type | Description |
 |--------|------|-------------|
-| 0x04 | short | Half-width (bounding box) |
-| 0x08 | short | Half-length (bounding box, front) |
+| 0x04 | short | **Front-Z extent** (positive) — forward half-length from center |
+| 0x08 | short | **Half-width** (positive) — lateral extent |
 | 0x0C | short | Rear body length |
-| 0x14 | short | Rear offset (negative = behind center) |
+| 0x14 | short | **Rear-Z extent** (signed negative) — backward half-length from center |
 | 0x80 | short | Bounding sphere radius |
 | 0x82 | short | Track span half-width |
 | 0x88 | short | **Mass parameter** (used in impulse denominator) |

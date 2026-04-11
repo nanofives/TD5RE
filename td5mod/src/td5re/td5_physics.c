@@ -1380,10 +1380,19 @@ static void apply_damped_suspension_force(TD5_Actor *actor, int32_t lateral, int
  * Returns bitmask: bits 0-3 = B corners inside A, bits 4-7 = A corners inside B.
  * For each penetrating corner, stores {projX, projZ, penX, penZ} in corners[].
  *
- * Car bbox from carData pointer at actor+0x1B8:
- *   carData+0x04 = halfWidth  (int16)
- *   carData+0x08 = halfLength (int16)
- *   carData+0x14 = negHalfWidth (int16, asymmetric)
+ * Car bbox from carData pointer at actor+0x1B8 [CONFIRMED @ 0x407ADB-0x407ADF]:
+ *   carData+0x04 = front_z  (int16, positive)  — forward Z extent from center
+ *   carData+0x08 = half_w   (int16, positive)  — lateral X extent
+ *   carData+0x14 = rear_z   (int16, negative)  — backward Z extent (stored signed)
+ *
+ * Prior port had these SWAPPED (0x04 → "halfWidth", 0x08 → "halfLength"),
+ * which produced corners laid out with front/rear-Z along the X axis and
+ * half-width along the Z axis. The degenerate bounds check
+ * `cx in [-rear_z, front_z]` ≈ `[160, 156]` (empty range) made nearly every
+ * test fail except for corners whose integer math collapsed to cx=0. That
+ * left ~12k spurious "contacts" per lap with cx=0 and tiny rel_vel → imp=0.
+ * The mapping above is verified by how 0x4079C0's case split consumes
+ * them: `side_extent = cardef[0x08] - |cx_A|` requires 0x08 = half-width.
  * ======================================================================== */
 
 static int obb_corner_test(TD5_Actor *a, TD5_Actor *b,
@@ -1393,13 +1402,13 @@ static int obb_corner_test(TD5_Actor *a, TD5_Actor *b,
 {
     int result = 0;
 
-    /* Get half-extents from car definition */
-    int32_t hw_a = (int32_t)CDEF_S(a, 0x04);  /* halfWidth */
-    int32_t hl_a = (int32_t)CDEF_S(a, 0x08);  /* halfLength */
-    int32_t nw_a = (int32_t)CDEF_S(a, 0x14);  /* negHalfWidth (asymmetric) */
-    int32_t hw_b = (int32_t)CDEF_S(b, 0x04);
-    int32_t hl_b = (int32_t)CDEF_S(b, 0x08);
-    int32_t nw_b = (int32_t)CDEF_S(b, 0x14);
+    /* Car box extents (correct mapping — see header comment) */
+    int32_t half_w_a  = (int32_t)CDEF_S(a, 0x08);  /* half-width (positive) */
+    int32_t front_z_a = (int32_t)CDEF_S(a, 0x04);  /* front-Z extent (positive) */
+    int32_t rear_z_a  = (int32_t)CDEF_S(a, 0x14);  /* rear-Z extent (negative) */
+    int32_t half_w_b  = (int32_t)CDEF_S(b, 0x08);
+    int32_t front_z_b = (int32_t)CDEF_S(b, 0x04);
+    int32_t rear_z_b  = (int32_t)CDEF_S(b, 0x14);
 
     /* Precompute sin/cos for each heading */
     int32_t cos_a = cos_fixed12(heading_a);
@@ -1417,13 +1426,17 @@ static int obb_corner_test(TD5_Actor *a, TD5_Actor *b,
     int32_t cos_di = cos_fixed12(dheading_inv);
     int32_t sin_di = sin_fixed12(dheading_inv);
 
-    /* B's 4 corners in B's local frame (right-hand: X=lateral, Z=forward) */
-    int32_t b_corners_lx[4] = { -nw_b,  hw_b,  hw_b, -nw_b };
-    int32_t b_corners_lz[4] = {  hl_b,  hl_b, -hl_b, -hl_b };
+    /* B's 4 corners in B's local frame. Layout (X=lateral, Z=forward):
+     *   0 = FL  (-half_w, front_z)
+     *   1 = FR  (+half_w, front_z)
+     *   2 = RR  (+half_w, rear_z)   ← rear_z is stored negative
+     *   3 = RL  (-half_w, rear_z)                                         */
+    int32_t b_corners_lx[4] = { -half_w_b, +half_w_b, +half_w_b, -half_w_b };
+    int32_t b_corners_lz[4] = {  front_z_b, front_z_b,  rear_z_b,  rear_z_b };
 
-    /* A's 4 corners in A's local frame */
-    int32_t a_corners_lx[4] = { -nw_a,  hw_a,  hw_a, -nw_a };
-    int32_t a_corners_lz[4] = {  hl_a,  hl_a, -hl_a, -hl_a };
+    /* A's 4 corners in A's local frame (same layout as B's) */
+    int32_t a_corners_lx[4] = { -half_w_a, +half_w_a, +half_w_a, -half_w_a };
+    int32_t a_corners_lz[4] = {  front_z_a, front_z_a,  rear_z_a,  rear_z_a };
 
     /* --- Test B's corners in A's OBB (bits 0-3) --- */
     /* World-space delta from A to B */
@@ -1443,16 +1456,18 @@ static int obb_corner_test(TD5_Actor *a, TD5_Actor *b,
         cx += local_dx;
         cz += local_dz;
 
-        /* Test if within A's half-extents */
-        if (cx >= -nw_a && cx <= hw_a && cz >= -hl_a && cz <= hl_a) {
+        /* Test if within A's box: |cx| <= half_w_a and rear_z_a <= cz <= front_z_a */
+        if (cx >= -half_w_a && cx <= half_w_a &&
+            cz >= rear_z_a  && cz <= front_z_a) {
             result |= (1 << i);
             corners[i].proj_x = (int16_t)cx;
             corners[i].proj_z = (int16_t)cz;
-            /* Penetration: distance from corner to nearest OBB face */
-            int32_t pen_right = hw_a - cx;
-            int32_t pen_left  = cx - (-nw_a);
-            int32_t pen_front = hl_a - cz;
-            int32_t pen_back  = cz - (-hl_a);
+            /* Penetration depth along each face normal (signed).
+             * Minimum |pen| identifies the closest face. */
+            int32_t pen_right = half_w_a  - cx;     /* to +X face */
+            int32_t pen_left  = cx + half_w_a;      /* to -X face */
+            int32_t pen_front = front_z_a - cz;     /* to +Z face */
+            int32_t pen_back  = cz - rear_z_a;      /* to -Z face */
             corners[i].pen_x = (int16_t)((pen_right < pen_left) ? pen_right : -pen_left);
             corners[i].pen_z = (int16_t)((pen_front < pen_back) ? pen_front : -pen_back);
         }
@@ -1476,15 +1491,15 @@ static int obb_corner_test(TD5_Actor *a, TD5_Actor *b,
         cx += local2_dx;
         cz += local2_dz;
 
-        /* Test if within B's half-extents */
-        if (cx >= -nw_b && cx <= hw_b && cz >= -hl_b && cz <= hl_b) {
+        if (cx >= -half_w_b && cx <= half_w_b &&
+            cz >= rear_z_b  && cz <= front_z_b) {
             result |= (1 << (i + 4));
             corners[i + 4].proj_x = (int16_t)cx;
             corners[i + 4].proj_z = (int16_t)cz;
-            int32_t pen_right = hw_b - cx;
-            int32_t pen_left  = cx - (-nw_b);
-            int32_t pen_front = hl_b - cz;
-            int32_t pen_back  = cz - (-hl_b);
+            int32_t pen_right = half_w_b  - cx;
+            int32_t pen_left  = cx + half_w_b;
+            int32_t pen_front = front_z_b - cz;
+            int32_t pen_back  = cz - rear_z_b;
             corners[i + 4].pen_x = (int16_t)((pen_right < pen_left) ? pen_right : -pen_left);
             corners[i + 4].pen_z = (int16_t)((pen_front < pen_back) ? pen_front : -pen_back);
         }
