@@ -336,9 +336,10 @@ static void dispatch_billboard(TD5_PrimitiveCmd *cmd, TD5_MeshVertex *base_verts
 static void dispatch_tristrip_direct(TD5_PrimitiveCmd *cmd, TD5_MeshVertex *base_verts);
 static void dispatch_quad_direct(TD5_PrimitiveCmd *cmd, TD5_MeshVertex *base_verts);
 
-/* Vehicle shadow + wheel billboard rendering */
+/* Vehicle shadow + wheel billboard + brake light rendering */
 static void render_vehicle_shadow_quad(const TD5_Actor *actor);
 static void render_vehicle_wheel_billboards(TD5_Actor *actor, int slot);
+static void render_vehicle_brake_lights(const TD5_Actor *actor, int slot);
 
 /** 7-entry dispatch table matching original at 0x473b9c */
 typedef void (*PrimDispatchFn)(TD5_PrimitiveCmd *cmd, TD5_MeshVertex *base_verts);
@@ -1711,7 +1712,7 @@ void td5_render_actors_for_view(int view_index)
             render_vehicle_wheel_billboards(actor, slot);
 
             /* Render brake light billboards (0x4011C0) */
-            td5_vfx_render_taillights(slot);
+            render_vehicle_brake_lights(actor, slot);
 
             actor_render_count++;
             actor_meshes_submitted++;
@@ -2405,6 +2406,132 @@ static void render_vehicle_shadow_quad(const TD5_Actor *actor)
     td5_plat_render_draw_tris(verts, 4, indices, 6);
 
     /* Restore opaque preset so it doesn't leak into the car mesh draw. */
+    td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
+}
+
+/* --- Vehicle Brake Lights (0x4011C0) --- */
+
+/* BRAKED sprite atlas cache */
+static int   s_braked_page = -1;
+static float s_braked_u0, s_braked_v0, s_braked_u1, s_braked_v1;
+static int   s_braked_lookup_done = 0;
+static uint8_t s_brake_brightness[12]; /* per-slot brightness ramp */
+
+static void brake_light_lookup_atlas(void)
+{
+    s_braked_lookup_done = 1;
+    memset(s_brake_brightness, 0, sizeof(s_brake_brightness));
+
+    TD5_AtlasEntry *e = td5_asset_find_atlas_entry(NULL, "BRAKED");
+    if (!e || e->texture_page <= 0) {
+        TD5_LOG_W(RENDER_LOG_TAG, "brake: BRAKED sprite not found");
+        return;
+    }
+    int tw = 256, th = 256;
+    td5_plat_render_get_texture_dims(e->texture_page, &tw, &th);
+    s_braked_u0 = ((float)e->atlas_x + 0.5f) / (float)tw;
+    s_braked_v0 = ((float)e->atlas_y + 0.5f) / (float)th;
+    s_braked_u1 = ((float)(e->atlas_x + e->width) - 0.5f) / (float)tw;
+    s_braked_v1 = ((float)(e->atlas_y + e->height) - 0.5f) / (float)th;
+    s_braked_page = e->texture_page;
+    TD5_LOG_I(RENDER_LOG_TAG,
+              "brake: page=%d uv=(%.4f,%.4f)-(%.4f,%.4f) dim=%dx%d",
+              s_braked_page, s_braked_u0, s_braked_v0,
+              s_braked_u1, s_braked_v1, e->width, e->height);
+}
+
+/**
+ * Draw brake light sprites at the two taillight hardpoints.
+ * Called from the actor render loop where the render transform
+ * (camera basis * actor rotation + translation) is already loaded.
+ *
+ * Hardpoints: car_config+0x60 (left), car_config+0x68 (right).
+ * Each is int16[3] in model space.
+ */
+static void render_vehicle_brake_lights(const TD5_Actor *actor, int slot)
+{
+    if (!actor) return;
+    if (!s_braked_lookup_done) brake_light_lookup_atlas();
+    if (s_braked_page < 0) return;
+    if (slot < 0 || slot >= 12) return;
+
+    /* Read brake_flag at actor+0x36D */
+    const uint8_t *ap = (const uint8_t *)actor;
+    int braking = (*(ap + 0x36D) != 0);
+
+    /* Brightness ramp / decay */
+    uint8_t bright = s_brake_brightness[slot];
+    if (braking) {
+        if (bright < 0x80) bright += 8;
+        if (bright > 0x80) bright = 0x80;
+    } else {
+        bright >>= 1;
+    }
+    s_brake_brightness[slot] = bright;
+    if (bright == 0) return;
+
+    /* Car definition pointer at actor+0x1B8 */
+    void *car_def = NULL;
+    memcpy(&car_def, ap + 0x1B8, sizeof(void *));
+    if (!car_def) return;
+
+    const float *m = s_render_transform.m;
+    const float half_size = 18.0f; /* model-space half-extent of the billboard */
+
+    for (int light = 0; light < 2; light++) {
+        /* Read hardpoint int16[3] at car_def+0x60 / +0x68 */
+        int16_t hp[3];
+        memcpy(hp, (uint8_t *)car_def + 0x60 + light * 8, 6);
+
+        float px = (float)hp[0];
+        float py = (float)hp[1];
+        float pz = (float)hp[2];
+
+        /* Transform hardpoint center through the render matrix to view space */
+        float vx = px*m[0] + py*m[1] + pz*m[2] + m[9];
+        float vy = px*m[3] + py*m[4] + pz*m[5] + m[10];
+        float vz = px*m[6] + py*m[7] + pz*m[8] + m[11];
+
+        if (vz <= s_near_clip) continue;
+
+        float inv_z = 1.0f / vz;
+        float cx = -vx * s_focal_length * inv_z + s_center_x;
+        float cy = -vy * s_focal_length * inv_z + s_center_y;
+        float depth = vz * (1.0f / s_far_clip);
+
+        /* Screen-space half-size: perspective-scale the billboard */
+        float h = half_size * s_focal_length * inv_z;
+
+        TD5_D3DVertex v[4];
+        /* TL */
+        v[0].screen_x = cx - h;  v[0].screen_y = cy - h;
+        v[0].depth_z  = depth;   v[0].rhw      = inv_z;
+        v[0].diffuse  = 0xFFFFFFFF; v[0].specular = 0;
+        v[0].tex_u    = s_braked_u0; v[0].tex_v = s_braked_v0;
+        /* BL */
+        v[1].screen_x = cx - h;  v[1].screen_y = cy + h;
+        v[1].depth_z  = depth;   v[1].rhw      = inv_z;
+        v[1].diffuse  = 0xFFFFFFFF; v[1].specular = 0;
+        v[1].tex_u    = s_braked_u0; v[1].tex_v = s_braked_v1;
+        /* TR */
+        v[2].screen_x = cx + h;  v[2].screen_y = cy - h;
+        v[2].depth_z  = depth;   v[2].rhw      = inv_z;
+        v[2].diffuse  = 0xFFFFFFFF; v[2].specular = 0;
+        v[2].tex_u    = s_braked_u1; v[2].tex_v = s_braked_v0;
+        /* BR */
+        v[3].screen_x = cx + h;  v[3].screen_y = cy + h;
+        v[3].depth_z  = depth;   v[3].rhw      = inv_z;
+        v[3].diffuse  = 0xFFFFFFFF; v[3].specular = 0;
+        v[3].tex_u    = s_braked_u1; v[3].tex_v = s_braked_v1;
+
+        uint16_t idx[6] = { 0, 1, 2, 1, 3, 2 };
+        flush_immediate_internal();
+        td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
+        td5_plat_render_bind_texture(s_braked_page);
+        td5_plat_render_draw_tris(v, 4, idx, 6);
+    }
+
+    /* Restore opaque so it doesn't leak into next mesh */
     td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
 }
 

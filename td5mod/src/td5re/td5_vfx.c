@@ -2276,78 +2276,10 @@ void td5_vfx_render_taillights(int actor_index) {
               "taillights actor=%d brake=%d brightness=%u",
               actor_index, brake_active, (unsigned int)brightness);
 
-    if (brightness == 0) return; /* fully faded, nothing to render */
-
-    /* Read car_config pointer at actor+0x1B8 [CONFIRMED @ 0x40128F] */
-    void *car_config;
-    memcpy(&car_config, ap + 0x1B8, sizeof(void *));
-    if (!car_config) return;
-
-    /* Vertex diffuse: 0xFF909090 gray tint [CONFIRMED @ 0x401246] */
-    uint32_t diffuse = 0xFF909090;
-
-    /* BRAKED texture from atlas */
-    int tex_page = (int)s_taillight_page;
-
-    static int s_tl_log_ctr = 0;
-    if (actor_index == 0 && (s_tl_log_ctr++ % 120) == 0) {
-        int16_t hp0[3], hp1[3];
-        memcpy(hp0, (uint8_t *)car_config + 0x60, 6);
-        memcpy(hp1, (uint8_t *)car_config + 0x68, 6);
-        TD5_LOG_I(LOG_TAG,
-                  "taillight: actor=%d bright=%u page=%d hp0=(%d,%d,%d) hp1=(%d,%d,%d)",
-                  actor_index, (unsigned)brightness, tex_page,
-                  hp0[0], hp0[1], hp0[2], hp1[0], hp1[1], hp1[2]);
-    }
-
-    /* Render 2 tail lights (hardpoints at car_config+0x60 and +0x68) */
-    for (int light = 0; light < 2; light++) {
-        int16_t hardpoint[3];
-        int hp_offset = 0x60 + light * 8;
-        memcpy(hardpoint, (uint8_t *)car_config + hp_offset, 6);
-
-        float hx = (float)hardpoint[0];
-        float hy = (float)hardpoint[1];
-        float hz = (float)hardpoint[2] + TAILLIGHT_Z_BIAS;
-
-        /* Project 4 billboard corners through the current render transform.
-         * Each corner = hardpoint + offset vector, transformed to screen space
-         * via td5_render_transform_and_project (model→view→screen). */
-        TD5_D3DVertex verts[4];
-        int all_visible = 1;
-
-        for (int c = 0; c < 4; c++) {
-            float mx = hx + (float)s_taillight_offsets[c][0];
-            float my = hy + (float)s_taillight_offsets[c][1];
-            float mz = hz + (float)s_taillight_offsets[c][2];
-
-            float sx, sy, sz, rhw;
-            if (!td5_render_transform_and_project(mx, my, mz, &sx, &sy, &sz, &rhw)) {
-                all_visible = 0;
-                break;
-            }
-            verts[c].screen_x = sx;
-            verts[c].screen_y = sy;
-            verts[c].depth_z  = sz;
-            verts[c].rhw      = rhw;
-            verts[c].diffuse  = diffuse;
-            verts[c].specular = 0;
-        }
-
-        if (!all_visible) continue;
-
-        /* UVs from BRAKED atlas sprite */
-        verts[0].tex_u = s_taillight_u0;  verts[0].tex_v = s_taillight_v0;
-        verts[1].tex_u = s_taillight_u0;  verts[1].tex_v = s_taillight_v1;
-        verts[2].tex_u = s_taillight_u1;  verts[2].tex_v = s_taillight_v0;
-        verts[3].tex_u = s_taillight_u1;  verts[3].tex_v = s_taillight_v1;
-
-        uint16_t indices[6] = { 0, 1, 2, 1, 3, 2 };
-
-        td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
-        td5_plat_render_bind_texture(tex_page);
-        td5_plat_render_draw_tris(verts, 4, indices, 6);
-    }
+    /* Rendering is now handled by render_vehicle_brake_lights() in
+     * td5_render.c, called from the actor render loop. This function
+     * only tracks brightness state for the VFX module's init/shutdown. */
+    if (brightness == 0) return;
 }
 
 /* ========================================================================
