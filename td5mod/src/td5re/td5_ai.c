@@ -1311,18 +1311,22 @@ void td5_ai_update_track_behavior(int slot) {
     if (g_td5.time_trial_enabled)
         return;
 
-    /* During countdown (paused), zero the steering-cascade state but pass
-     * through the rubber-band throttle so the RPM integrator revs to ~7200
-     * before the lights go out — matching the original, which runs its full
-     * AI pipeline every tick and holds cars stationary via brake_flag/gear<2
-     * rather than by skipping AI. [CONFIRMED @ RunRaceFrame 0x42B580:
-     * ComputeAIRubberBandThrottle + UpdateActorTrackBehavior + UpdateAIVehicleDynamics
-     * are called unconditionally; only g_gamePaused gates them, not countdown.]
-     * We still short-circuit the port's steering cascade because g_game_paused
-     * is set during countdown in the port and physics isn't rotating the car. */
+    /* During countdown (paused), pass through the rubber-band throttle so
+     * the RPM integrator revs to ~7200 before the lights go out, then
+     * short-circuit the track-behavior cascade. [CONFIRMED via fresh decomp
+     * of UpdateActorTrackBehavior @ 0x00434FE0: the original has NO internal
+     * countdown gate — it runs the full cascade every tick. It self-extinguishes
+     * because UpdateAIVehicleDynamics is paused-gated (master gate), so
+     * linear_velocity_x/z stay 0, and UpdateActorSteeringBias's vx<0x100
+     * branch computes sin(vx)*param_2 = 0.]
+     *
+     * We take a conservative middle-ground: skip the cascade but DO NOT zero
+     * ACTOR_STEERING_CMD or ACTOR_STEERING_RAMP_ACCUM. The port's bias function
+     * branches on route deviation rather than velocity, so un-gating could
+     * drift; but zeroing the state mid-pause introduces a discontinuity on
+     * the first active tick that the original never has. Preserve whatever
+     * the pre-countdown state was (0 for fresh spawns). */
     if (g_td5.paused) {
-        ACTOR_I32(actor, ACTOR_STEERING_CMD) = 0;
-        ACTOR_I16(actor, ACTOR_STEERING_RAMP_ACCUM) = 0;
         ACTOR_I16(actor, ACTOR_ENCOUNTER_STEER) = (int16_t)g_actor_route_steer_bias[slot];
         ACTOR_U8(actor, ACTOR_BRAKE_FLAG) = 0;
         return;
@@ -1333,8 +1337,6 @@ void td5_ai_update_track_behavior(int slot) {
         int result = td5_ai_advance_track_script(rs);
         if (result == 0) {
             /* Script still running (blocking): just update track progress */
-            /* ComputeTrackSpanProgress / ComputeSignedTrackOffset would be
-             * called here in the original -- omitted for external integration */
             return;
         }
         /* result == 1: script complete, fall through to normal AI */
@@ -1343,29 +1345,34 @@ void td5_ai_update_track_behavior(int slot) {
     /* --- Heading misalignment trigger: start recovery script --- */
     heading = ACTOR_I32(actor, ACTOR_YAW_ACCUM) >> 8;
     route_heading = rs[RS_FORWARD_TRACK_COMP];
-    /* Original FUN_00434FE0: adjusts for expected 0x800 offset between actor
-     * yaw (atan2+0x800) and route heading (route_byte<<4), then checks if
-     * the residual misalignment exceeds threshold.
-     * Formula: uVar3 = -(((heading - route_heading - 0x800U & 0xFFF) - 0x800 & 0xFFF) & 0xFFF)
-     * This cancels the expected 0x800 so a correctly-aligned car gives uVar3=0x800,
-     * which is NOT in [0x800..0xCE0) — recovery does not fire for aligned cars.
-     * Without the adjustment, an aligned car gives hdelta=0x800 which IS in
-     * [0x320..0xCE0], causing false recovery triggers every frame. */
-    {
+
+    /* Skip recovery when route heading byte is 0 (no heading data).
+     * Some tracks (e.g. level014 spans 0-174) have heading_byte=0 in the
+     * route file. With route_heading=0 the recovery formula always fires
+     * (comparing against a nonsense reference), trapping AI in an infinite
+     * recovery→normal→recovery loop. The normal target-point steering
+     * at step 2 handles guidance without heading data. */
+    if (route_heading != 0) {
+        /* Original FUN_00434FE0: adjusts for expected 0x800 offset between actor
+         * yaw (atan2+0x800) and route heading (route_byte<<4), then checks if
+         * the residual misalignment exceeds threshold.
+         * Formula: uVar3 = -(((heading - route_heading - 0x800U & 0xFFF) - 0x800 & 0xFFF) & 0xFFF) */
         uint32_t adjusted = (((uint32_t)(heading - route_heading) - 0x800U) & 0xFFF);
         adjusted = (adjusted - 0x800U) & 0xFFF;
         hdelta = (int32_t)(-(int32_t)adjusted) & 0xFFF;
-    }
 
-    if (hdelta >= 0x800 && hdelta <= 0xCE0) {
-        /* Significant misalignment: assign initial recovery script [8, 9, 0] */
-        rs[RS_SCRIPT_BASE_PTR] = (int32_t)(intptr_t)g_script_init_recovery;
-        rs[RS_SCRIPT_IP] = 0;
-        rs[RS_SCRIPT_FLAGS] = 0;
-        rs[RS_SCRIPT_FIELD_3E] = 0;
-        rs[RS_SCRIPT_FIELD_43] = 0;
-        rs[RS_SCRIPT_COUNTDOWN] = 0x96;
-        return;
+        if (hdelta > 0x800 && hdelta <= 0xCE0) {
+            TD5_LOG_D(LOG_TAG, "recovery: slot=%d hdelta=0x%X heading=0x%X route=0x%X",
+                      slot, hdelta, heading & 0xFFF, route_heading & 0xFFF);
+            /* Significant misalignment: assign initial recovery script [8, 9, 0] */
+            rs[RS_SCRIPT_BASE_PTR] = (int32_t)(intptr_t)g_script_init_recovery;
+            rs[RS_SCRIPT_IP] = 0;
+            rs[RS_SCRIPT_FLAGS] = 0;
+            rs[RS_SCRIPT_FIELD_3E] = 0;
+            rs[RS_SCRIPT_FIELD_43] = 0;
+            rs[RS_SCRIPT_COUNTDOWN] = 0x96;
+            return;
+        }
     }
 
     /* --- Normal AI path following --- */
@@ -1428,8 +1435,10 @@ void td5_ai_update_track_behavior(int slot) {
                     int32_t dz = (target_z - actor_z) >> 8;
 
                     /* (d) Compute target angle using atan2 equivalent
-                     * [CONFIRMED @ 0x4352CB-0x435336] */
-                    int32_t target_angle = ai_angle_from_vector(dx, dz) & 0xFFF;
+                     * [CONFIRMED @ 0x4352CB-0x435336]
+                     * +0x800 aligns with yaw_accum convention (angle+0x800)<<8
+                     * [CONFIRMED @ 0x434501 via td5_track.c spawn heading init] */
+                    int32_t target_angle = (ai_angle_from_vector(dx, dz) + 0x800) & 0xFFF;
 
                     /* (e) Actor heading: (yaw_accum + steering_cmd) >> 8
                      * [CONFIRMED @ 0x435338-0x43534C] */
