@@ -2679,183 +2679,99 @@ void td5_physics_update_suspension_response(TD5_Actor *actor)
         return;
     }
 
-    int32_t local_50 = 0;  /* velocity roll  accumulator (Z-arm weighted) */
-    int32_t local_5c = 0;  /* velocity pitch accumulator (X-arm weighted) */
-    int32_t local_4c = 0;  /* grounded wheel count */
-    int32_t local_64 = 0;  /* spring roll  contribution (bVar2-path) */
-    int32_t local_60 = 0;  /* spring pitch contribution (bVar2-path) */
-    int32_t local_58 = 0;  /* spring-grounded count (wheels also grounded prev frame) */
-    int32_t bounce_accum = 0; /* vertical spring bounce accumulator (iVar8/param_1 in orig) */
+    /* Gravity add-back: cancels the subtract in integrate_pose for grounded cars. */
+    actor->linear_velocity_y += g_gravity_constant;
 
-    /* psVar10 starts at actor+0x254 (wheel_contact_velocities[0][2]), advances +4 shorts/iter.
-     * local_54 starts at actor+0x270 (gap_270[0]),                    advances +4 shorts/iter.
+    /* ---------- Target-angle spring-damper for body roll/pitch ----------
      *
-     * Per-wheel pointer layout relative to psVar10 at iteration i:
-     *   psVar10[-2]  = wcv[0] = wheel_contact_velocities[i][0]   (actor+0x250+i*8)
-     *   psVar10[-1]  = wcv[1] = wheel_contact_velocities[i][1]   (actor+0x252+i*8)
-     *   psVar10[0]   = wcv[2] = wheel_contact_velocities[i][2]   (actor+0x254+i*8)
-     *   psVar10[-34] = wda[0] = wheel_display_angles[i][0]  sVar3 (actor+0x210+i*8)
-     *   psVar10[-32] = wda[2] = wheel_display_angles[i][2]  sVar4 (actor+0x214+i*8)
-     *   psVar10[0xf] = g270[1] = gap_270[i*8+2]                  (actor+0x272+i*8)
-     *   psVar10[0x10]= g270[2] = gap_270[i*8+4]                  (actor+0x274+i*8)
-     *   *local_54    = g270[0] = gap_270[i*8+0]                  (actor+0x270+i*8)
+     * Instead of the original's per-wheel normal torque accumulation (which
+     * requires a full body-space transform chain to produce stable forces),
+     * compute target roll/pitch directly from wheel ground heights, then
+     * drive angular velocity with a critically-damped spring.
+     *
+     * Wheel layout: 0=FL, 1=FR, 2=RL, 3=RR
+     * Roll  = height difference between left/right sides
+     * Pitch = height difference between front/rear
      */
-    /* Pre-compute averaged surface normal across all grounded wheels.
-     * Per-wheel normals differ because wheels probe different track triangles.
-     * Using per-wheel normals in the velocity path creates persistent non-zero
-     * torque on flat ground (~roll_d=32/frame) because the arm-weighted sum
-     * doesn't cancel. Averaging ensures symmetric cancellation on flat terrain
-     * while still responding to actual slopes (all wheels see similar slope). */
-    int16_t avg_wcv[3] = {0, 0, 0};
     {
-        int32_t sx = 0, sy = 0, sz = 0;
-        int cnt = 0;
+        int32_t gy[4];
+        int grounded = 0;
         for (int i = 0; i < 4; i++) {
-            if (bVar1 & (1u << i)) continue;
-            const int16_t *w = (const int16_t *)((const uint8_t *)actor + 0x250 + i * 8);
-            sx += w[0]; sy += w[1]; sz += w[2];
-            cnt++;
-        }
-        if (cnt > 0) {
-            avg_wcv[0] = (int16_t)(sx / cnt);
-            avg_wcv[1] = (int16_t)(sy / cnt);
-            avg_wcv[2] = (int16_t)(sz / cnt);
-        }
-    }
-
-    for (int i = 0; i < 4; i++) {
-        uint32_t uVar6 = (uint32_t)(1u << i);
-        if (bVar1 & uVar6) continue; /* wheel i airborne this frame — skip */
-
-        /* Body-space arm lengths: wda at actor+0x210+i*8
-         * sVar3 = wda[0] = X arm (roll/pitch lever)
-         * sVar4 = wda[2] = Z arm (roll lever) */
-        const int16_t *wda = (const int16_t *)((const uint8_t *)actor + 0x210 + i * 8);
-        int16_t sVar3 = wda[0];
-        int16_t sVar4 = wda[2];
-
-        /* Velocity path: use averaged normal so arm-weighted sum cancels on
-         * flat ground. Per-wheel normals are still used for the spring path. */
-        int16_t local_36 = rotate_vec_world_y(actor, avg_wcv);
-
-        /* iVar8 = (local_36 * gravity + rounding) >> 12 */
-        int32_t scaled = (int32_t)local_36 * g_gravity_constant;
-        int32_t iVar8  = arith_round_shift(scaled, 0xFFF, 12);
-
-        /* Velocity-path contributions (all grounded wheels) */
-        local_50 += iVar8 * (int32_t)sVar4;
-        local_5c -= iVar8 * (int32_t)sVar3;
-        local_4c++;
-
-        /* Spring path: wheels that were ALSO grounded in the previous frame.
-         * Original: if ((bVar2 & uVar6) != 0)
-         *
-         * gap_270[i] layout (int16s within the 8-byte slot at actor+0x270+i*8):
-         *   [0] at +0x270+i*8  → *local_54        → dot with wcv[0] (X)
-         *   [1] at +0x272+i*8  → psVar10[0xf]     → dot with wcv[1] (Y)  [note: psVar10 at 0x254+i*8]
-         *   [2] at +0x274+i*8  → psVar10[0x10]    → dot with wcv[2] (Z)
-         *
-         * spring_dot = gap_270[i][0]*wcv[0] + gap_270[i][1]*wcv[1] + gap_270[i][2]*wcv[2]
-         * spring_force = arith_round_shift(spring_dot, 0xFFF, 12)
-         *
-         * Roll  contrib: local_64 += spring_force * sVar4 * -0x100
-         * Pitch contrib: local_60 += spring_force * sVar3 *  0x100
-         * Bounce:        bounce_accum += spring_force / 2
-         * Count:         local_58++
-         */
-        /* Spring path DISABLED — the port's gap_270 reflects world-space body
-         * rotation, not local suspension compression. This creates positive
-         * feedback: tilt → changed wheel positions → gap_270 amplifies tilt →
-         * resonance at ±7000 av_roll. The original's integer transform chain
-         * isolates local wheel motion; reimplementing that is TODO.
-         * The velocity path + angle restoring force + velocity decay provides
-         * stable tilt without the spring path. */
-        if (bVar2 & uVar6) {
-            local_58++;
-        }
-    }
-
-    /* Post-loop: divide spring accumulators by spring-grounded count.
-     * Original: if (0 < iVar9) { local_64/=iVar9; iVar8/=iVar9; local_60/=iVar9; }
-     * iVar9 == local_58, iVar8 == bounce_accum at this point. */
-    if (local_58 > 0) {
-        local_64    = local_64    / local_58;
-        bounce_accum = bounce_accum / local_58;
-        local_60    = local_60    / local_58;
-    }
-
-    /* Vertical spring impact event: original calls FUN_00441d90 (collision sound/rumble)
-     * when bounce_accum > 0x14 (20). We skip the side-effect call but still apply bounce. */
-    /* if (bounce_accum > 0x14) { FUN_00441d90(0x17, bounce_accum*0x32, ...); } */
-
-    /* linear_velocity_y += bounce_accum + gravity
-     * Original: iVar8 = iVar8 + DAT_00467380; *(iVar5+0x1d0) += iVar8;
-     * The gravity constant cancels the subtract in integrate_pose.
-     * bounce_accum == 0 when no spring-grounded wheels (same as before). */
-    actor->linear_velocity_y += bounce_accum + g_gravity_constant;
-
-    if (local_4c > 0) {
-        /* angular_velocity_roll  += (local_64 + local_50/local_4c) / 0x4B0
-         * angular_velocity_pitch += (local_60 + local_5c/local_4c) / 0x226 */
-        int32_t roll_delta  = (local_64 + local_50 / local_4c) / 0x4B0;
-        int32_t pitch_delta = (local_60 + local_5c / local_4c) / 0x226;
-
-        actor->angular_velocity_roll  += roll_delta;
-        actor->angular_velocity_pitch += pitch_delta;
-
-        /* Dampen angular velocity — prevents oscillation from per-wheel normal
-         * asymmetry. The original's gap_270 spring path provides velocity-proportional
-         * damping, but the port's coarser per-wheel normals create more excitation.
-         * 6.25% decay per frame gives ~16-frame time constant (0.5s at 30fps) —
-         * slow enough for visible hill tilt, fast enough to suppress rocking. */
-        actor->angular_velocity_roll  -= actor->angular_velocity_roll  >> 4;
-        actor->angular_velocity_pitch -= actor->angular_velocity_pitch >> 4;
-
-        /* Angle-proportional restoring force: models gravity pulling a tilted
-         * body back toward level. Without this, even small persistent torques
-         * from the spring path (gap_270 Y noise from gravity/bounce cycle)
-         * integrate into unbounded angle drift. The restoring spring creates
-         * equilibrium: tilt_angle = torque_bias / k. With k=4 (>>2), the
-         * residual flat-ground tilt is ~0.7° (roll_d=32 → angle=8/4096). */
-        {
-            int32_t ra = (actor->euler_accum.roll >> 8) & 0xFFF;
-            if (ra > 0x800) ra -= 0x1000;   /* signed 12-bit */
-            actor->angular_velocity_roll -= ra >> 2;
-
-            int32_t pa = (actor->euler_accum.pitch >> 8) & 0xFFF;
-            if (pa > 0x800) pa -= 0x1000;
-            actor->angular_velocity_pitch -= pa >> 2;
+            if (!(bVar1 & (1u << i))) {
+                gy[i] = actor->wheel_contact_pos[i].y;
+                grounded++;
+            } else {
+                gy[i] = actor->world_pos.y;  /* fallback for airborne wheels */
+            }
         }
 
-        if (actor->slot_index == 0 && (actor->frame_counter % 60u) == 0u) {
-            TD5_LOG_I(LOG_TAG, "susp_resp: roll_d=%d pitch_d=%d grnd=%d spring=%d "
-                      "av_roll=%d av_pitch=%d",
-                      roll_delta, pitch_delta, local_4c, local_58,
-                      actor->angular_velocity_roll, actor->angular_velocity_pitch);
-        }
+        if (grounded >= 2) {
+            /* Height differences (24.8 fixed-point) */
+            int32_t left_avg  = (gy[0] + gy[2]) / 2;
+            int32_t right_avg = (gy[1] + gy[3]) / 2;
+            int32_t front_avg = (gy[0] + gy[1]) / 2;
+            int32_t rear_avg  = (gy[2] + gy[3]) / 2;
 
-        /* Clamp angular velocities per original switch-case table.
-         * Clamp key controlled by bVar2 (prev-frame bitmask).
-         * Cases 0,1,2,4,6,8,9 → clamp both roll and pitch to ±4000.
-         * Cases 3,C           → clamp roll only.
-         * Cases 5,A           → clamp pitch only. */
-        switch (bVar2 & 0x0F) {
-        case 0: case 1: case 2: case 4: case 6: case 8: case 9:
-            if (actor->angular_velocity_roll  >  4000) actor->angular_velocity_roll  =  4000;
-            if (actor->angular_velocity_roll  < -4000) actor->angular_velocity_roll  = -4000;
-            if (actor->angular_velocity_pitch >  4000) actor->angular_velocity_pitch =  4000;
-            if (actor->angular_velocity_pitch < -4000) actor->angular_velocity_pitch = -4000;
-            break;
-        case 3: case 0xC:
-            if (actor->angular_velocity_roll  >  4000) actor->angular_velocity_roll  =  4000;
-            if (actor->angular_velocity_roll  < -4000) actor->angular_velocity_roll  = -4000;
-            break;
-        case 5: case 0xA:
-            if (actor->angular_velocity_pitch >  4000) actor->angular_velocity_pitch =  4000;
-            if (actor->angular_velocity_pitch < -4000) actor->angular_velocity_pitch = -4000;
-            break;
-        default:
-            break;
+            /* Wheel spacing from body-space arm lengths (actor+0x210).
+             * sVar4 (Z arm) gives half-track-width, sVar3 (X arm) gives half-wheelbase.
+             * Use wheel 0 (FL) as reference; absolute value for distance. */
+            const int16_t *wda0 = (const int16_t *)((const uint8_t *)actor + 0x210);
+            int32_t half_track = wda0[2];  /* Z arm = half track width */
+            int32_t half_wbase = wda0[0];  /* X arm = half wheelbase */
+            if (half_track < 0) half_track = -half_track;
+            if (half_wbase < 0) half_wbase = -half_wbase;
+            if (half_track < 32) half_track = 32;  /* prevent div-by-zero */
+            if (half_wbase < 32) half_wbase = 32;
+
+            /* Target angles in 12-bit units (4096 = 360°).
+             * angle = atan(height_diff / width) ≈ height_diff / width for small angles.
+             * height_diff is 24.8 FP, arm is integer → shift to match.
+             * Scale: (hdiff >> 8) / (2 * arm) * (4096 / 2π) ≈ (hdiff >> 8) * 652 / arm
+             * Simplified: (hdiff * 652) >> 8 / (2 * arm) */
+            int32_t roll_hdiff  = (left_avg - right_avg) >> 8;   /* world units */
+            int32_t pitch_hdiff = (front_avg - rear_avg) >> 8;
+
+            /* 4096/(2*pi) ≈ 652. Divide by full track/wheelbase (2x half). */
+            int32_t target_roll  = (roll_hdiff * 652) / (2 * half_track);
+            int32_t target_pitch = (pitch_hdiff * 652) / (2 * half_wbase);
+
+            /* Clamp target to reasonable range (±0x100 = ±22.5°) */
+            if (target_roll  >  0x100) target_roll  =  0x100;
+            if (target_roll  < -0x100) target_roll  = -0x100;
+            if (target_pitch >  0x100) target_pitch =  0x100;
+            if (target_pitch < -0x100) target_pitch = -0x100;
+
+            /* Current angles (signed 12-bit) */
+            int32_t cur_roll  = (actor->euler_accum.roll >> 8) & 0xFFF;
+            if (cur_roll  > 0x800) cur_roll  -= 0x1000;
+            int32_t cur_pitch = (actor->euler_accum.pitch >> 8) & 0xFFF;
+            if (cur_pitch > 0x800) cur_pitch -= 0x1000;
+
+            /* Spring-damper: F = k*(target - current) - c*velocity
+             * k=0.25 (>>2), c=0.25 (>>2) for critical damping feel. */
+            int32_t roll_err  = target_roll  - cur_roll;
+            int32_t pitch_err = target_pitch - cur_pitch;
+
+            actor->angular_velocity_roll  += roll_err  >> 2;
+            actor->angular_velocity_pitch += pitch_err >> 2;
+
+            /* Velocity damping */
+            actor->angular_velocity_roll  -= actor->angular_velocity_roll  >> 2;
+            actor->angular_velocity_pitch -= actor->angular_velocity_pitch >> 2;
+
+            /* Clamp angular velocities */
+            if (actor->angular_velocity_roll  >  2000) actor->angular_velocity_roll  =  2000;
+            if (actor->angular_velocity_roll  < -2000) actor->angular_velocity_roll  = -2000;
+            if (actor->angular_velocity_pitch >  2000) actor->angular_velocity_pitch =  2000;
+            if (actor->angular_velocity_pitch < -2000) actor->angular_velocity_pitch = -2000;
+
+            if (actor->slot_index == 0 && (actor->frame_counter % 60u) == 0u) {
+                TD5_LOG_I(LOG_TAG, "susp_tgt: tgt_r=%d tgt_p=%d cur_r=%d cur_p=%d "
+                          "av_r=%d av_p=%d grnd=%d",
+                          target_roll, target_pitch, cur_roll, cur_pitch,
+                          actor->angular_velocity_roll, actor->angular_velocity_pitch,
+                          grounded);
+            }
         }
     }
 }
