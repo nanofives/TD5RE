@@ -260,6 +260,17 @@ static int32_t ai_angle_from_vector(int32_t dx, int32_t dz) {
     return angle & 0xFFF;
 }
 
+/* Compute route heading from route table for a given actor span.
+ * Matches inline computation at 0x43503A in the original. */
+static int32_t ai_route_heading_for_actor(const int32_t *rs, const char *actor) {
+    const uint8_t *rb = (const uint8_t *)(intptr_t)rs[RS_ROUTE_TABLE_PTR];
+    int16_t sp = ACTOR_I16(actor, ACTOR_SPAN_RAW);
+    if (rb && sp >= 0) {
+        return (((int)rb[(size_t)(unsigned)sp * 3u + 1u] * 0x102C) >> 8) & 0xFFF;
+    }
+    return 0;
+}
+
 /* ========================================================================
  * Module lifecycle
  * ======================================================================== */
@@ -374,7 +385,6 @@ static void td5_ai_refresh_route_state_slot(int slot) {
 
     /* Route-byte → 12-bit angle: (byte * 0x102C) >> 8 [CONFIRMED @ 0x434FFB] */
     route_heading = (((int32_t)route_table[(size_t)span * 3u + 1u] * 0x102C) >> 8) & 0xFFF;
-    rs[RS_FORWARD_TRACK_COMP] = route_heading;
 
     forward_heading = route_heading;
     if (rs[RS_DIRECTION_POLARITY] != 0) {
@@ -382,15 +392,17 @@ static void td5_ai_refresh_route_state_slot(int slot) {
     }
 
     /* Project world-frame velocity onto route heading direction.
-     * Original (0x436B43) uses velocity dot product, NOT heading cosine.
-     * This gives speed-along-track which the threshold check uses as a
-     * speed governor — without speed in the value, AI never coasts. */
+     * [CONFIRMED @ 0x436B43-0x436B90: RS[0x18] = velocity dot product]
+     * Original stores the velocity projection here, NOT the route heading.
+     * The recovery check at 0x434FE0 computes route heading inline. */
     {
         int32_t vx = ACTOR_I32(actor, ACTOR_LIN_VEL_X) >> 8;
         int32_t vz = ACTOR_I32(actor, ACTOR_LIN_VEL_Z) >> 8;
         int32_t cos_r = ai_cos_fixed12(forward_heading);
         int32_t sin_r = ai_sin_fixed12(forward_heading);
-        g_actor_forward_track_component[slot] = (vx * sin_r + vz * cos_r) >> 12;
+        int32_t fwd_comp = (vx * sin_r + vz * cos_r) >> 12;
+        rs[RS_FORWARD_TRACK_COMP] = fwd_comp;
+        g_actor_forward_track_component[slot] = fwd_comp;
     }
 }
 
@@ -833,8 +845,9 @@ void td5_ai_update_steering_bias(int *route_state, int32_t steer_weight) {
                 goto clamp_end;
             }
             if (left_dev < 0x100) {
-                /* Normal mode, fine deviation: SinFixed12bit-scaled */
-                int32_t t   = ai_sin_fixed12(left_dev);
+                /* Normal mode, fine deviation: CosFixed12-scaled
+                 * [CONFIRMED @ 0x4340C0: original calls FUN_0040a700 = CosFixed12] */
+                int32_t t   = ai_cos_fixed12(left_dev);
                 int32_t mul = t * param_2;
                 ACTOR_I32(actor, ACTOR_STEERING_CMD) =
                     ACTOR_I32(actor, ACTOR_STEERING_CMD)
@@ -866,7 +879,8 @@ void td5_ai_update_steering_bias(int *route_state, int32_t steer_weight) {
             /* fall through: write -iVar3 as new bias */
         } else {
             if (right_dev < 0x100) {
-                int32_t t   = ai_sin_fixed12(right_dev);
+                /* CosFixed12 [CONFIRMED @ 0x4340C0: FUN_0040a700] */
+                int32_t t   = ai_cos_fixed12(right_dev);
                 int32_t mul = t * param_2;
                 ACTOR_I32(actor, ACTOR_STEERING_CMD) =
                     ACTOR_I32(actor, ACTOR_STEERING_CMD)
@@ -1123,7 +1137,7 @@ int td5_ai_advance_track_script(int *rs) {
     /* Flag 0x04: Steer left (toward route alignment) */
     if (flags & 0x04) {
         int32_t heading = ACTOR_I32(actor, ACTOR_YAW_ACCUM) >> 8;
-        int32_t route_heading = rs[RS_FORWARD_TRACK_COMP]; /* simplified */
+        int32_t route_heading = ai_route_heading_for_actor(rs, actor);
         int32_t hdelta = (heading - route_heading) & 0xFFF;
 
         if (hdelta < 0x201 || hdelta > 0xDFF) {
@@ -1143,7 +1157,7 @@ int td5_ai_advance_track_script(int *rs) {
     /* Flag 0x08: Steer right (opposite to route alignment) */
     if (flags & 0x08) {
         int32_t heading = ACTOR_I32(actor, ACTOR_YAW_ACCUM) >> 8;
-        int32_t route_heading = rs[RS_FORWARD_TRACK_COMP];
+        int32_t route_heading = ai_route_heading_for_actor(rs, actor);
         int32_t hdelta = (heading - route_heading) & 0xFFF;
 
         if (hdelta < 0x201 || hdelta > 0xDFF) {
@@ -1247,8 +1261,7 @@ int td5_ai_advance_track_script(int *rs) {
 
         case 9: { /* Auto-select program based on heading vs route geometry */
             int32_t heading = ACTOR_I32(actor, ACTOR_YAW_ACCUM) >> 8;
-            int32_t route_heading = rs[RS_FORWARD_TRACK_COMP];
-            int32_t hdelta = (heading - route_heading) & 0xFFF;
+            int32_t hdelta = (heading - ai_route_heading_for_actor(rs, actor)) & 0xFFF;
             uint8_t lane = ACTOR_U8(actor, ACTOR_SUB_LANE_INDEX);
             const int32_t *selected;
 
@@ -1344,7 +1357,11 @@ void td5_ai_update_track_behavior(int slot) {
 
     /* --- Heading misalignment trigger: start recovery script --- */
     heading = ACTOR_I32(actor, ACTOR_YAW_ACCUM) >> 8;
-    route_heading = rs[RS_FORWARD_TRACK_COMP];
+
+    /* Compute route heading inline from route byte, matching original @ 0x43503A.
+     * The original does NOT read RS[0x18] here — it reads the route byte directly.
+     * RS[0x18] stores velocity dot product (forward track component). */
+    route_heading = ai_route_heading_for_actor(rs, actor);
 
     /* Skip recovery when route heading byte is 0 (no heading data).
      * Some tracks (e.g. level014 spans 0-174) have heading_byte=0 in the
@@ -1435,10 +1452,13 @@ void td5_ai_update_track_behavior(int slot) {
                     int32_t dz = (target_z - actor_z) >> 8;
 
                     /* (d) Compute target angle using atan2 equivalent
-                     * [CONFIRMED @ 0x4352CB-0x435336]
-                     * +0x800 aligns with yaw_accum convention (angle+0x800)<<8
-                     * [CONFIRMED @ 0x434501 via td5_track.c spawn heading init] */
-                    int32_t target_angle = (ai_angle_from_vector(dx, dz) + 0x800) & 0xFFF;
+                     * [CONFIRMED @ 0x4352CB-0x435336: no +0x800 on target]
+                     * The yaw_accum convention (angle+0x800)<<8 creates a delta
+                     * baseline of ~0x800 for aligned cars. The steering bands at
+                     * 0x4340C0 are designed around this offset — L~0x7FF enters
+                     * the moderate-left band which turns the car slowly, matching
+                     * the original's behavior. */
+                    int32_t target_angle = ai_angle_from_vector(dx, dz) & 0xFFF;
 
                     /* (e) Actor heading: (yaw_accum + steering_cmd) >> 8
                      * [CONFIRMED @ 0x435338-0x43534C] */
@@ -1479,7 +1499,25 @@ void td5_ai_update_track_behavior(int slot) {
     steer_weight = threshold_result ? 0x10000 : 0x20000;
 
     /* 5. Final steering bias computation */
-    td5_ai_update_steering_bias(rs, steer_weight);
+    {
+        int32_t old_steer = ACTOR_I32(actor, ACTOR_STEERING_CMD);
+        td5_ai_update_steering_bias(rs, steer_weight);
+        /* Rate-limit steer change per tick. The original's large-band
+         * corrections (+0x20000, -0x20000 per tick) assume fast yaw
+         * response from the physics. The port's AI dynamics damp more
+         * slowly, causing full-amplitude steer oscillation. Capping
+         * the per-tick change to ±0x4000 smooths the convergence while
+         * preserving the original's steering band logic.
+         * TODO: remove once boundary pre-loop (0x433CE0/0x4366E0/0x4368A0)
+         * and bit-accurate AI dynamics are ported. */
+        {
+            int32_t new_steer = ACTOR_I32(actor, ACTOR_STEERING_CMD);
+            int32_t change = new_steer - old_steer;
+            if (change > 0x4000) change = 0x4000;
+            if (change < -0x4000) change = -0x4000;
+            ACTOR_I32(actor, ACTOR_STEERING_CMD) = old_steer + change;
+        }
+    }
 }
 
 /* ========================================================================
@@ -1743,7 +1781,7 @@ void td5_ai_update_traffic_route_plan(int slot) {
 
     /* --- Stage 2: Heading misalignment check --- */
     heading = ACTOR_I32(actor, ACTOR_YAW_ACCUM) >> 8;
-    route_heading = rs[RS_FORWARD_TRACK_COMP];
+    route_heading = ai_route_heading_for_actor(rs, actor);
     polarity = rs[RS_DIRECTION_POLARITY];
 
     /* For oncoming traffic, offset the heading comparison by 0x800 (180 deg) */
@@ -2021,7 +2059,7 @@ void td5_ai_update_encounter_control(int slot) {
 
     /* Compute heading deltas for alignment check */
     enc_heading    = ACTOR_I32(enc, ACTOR_YAW_ACCUM) >> 8;
-    target_heading = rs[RS_FORWARD_TRACK_COMP];
+    target_heading = ai_route_heading_for_actor(rs, actor);
 
     hdelta_enc    = (enc_heading - target_heading) & 0xFFF;
     hdelta_target = ((ACTOR_I32(actor, ACTOR_YAW_ACCUM) >> 8) - target_heading) & 0xFFF;
