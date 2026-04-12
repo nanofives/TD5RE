@@ -28,6 +28,8 @@
 
 #define LOG_TAG "track"
 
+extern int AngleFromVector12(int x, int z);
+
 static uint32_t s_actor_position_log_counter = 0;
 static uint32_t s_probe_log_counter = 0;
 
@@ -642,41 +644,13 @@ void td5_track_resolve_wall_contacts(TD5_Actor *actor)
         }
     }
 
-    /* Track previous d per (slot, probe, side) to distinguish real wall
-     * impacts (d stable or improving under push) from walker-lag cases
-     * (d worsens monotonically as the car drives forward past a stale
-     * chassis span). Sentinel 32767 = "no previous reading". */
-    static int16_t s_wall_prev_d[TD5_MAX_TOTAL_ACTORS][4][2];
-    /* Track previous chassis span per actor so we can detect transitions.
-     * When the chassis span just changed, the wall geometry has flipped
-     * to a new strip whose first d readings are unrelated to the previous
-     * ones — treat the whole tick as unreliable and skip firing. This
-     * catches walker-lag "jumps" where track_span_raw suddenly updates
-     * after sitting stale for many ticks, which is when the invisible
-     * wall fires with d in the -100..-200 range. */
-    static int16_t s_wall_prev_span[TD5_MAX_TOTAL_ACTORS];
-    static uint8_t s_wall_prev_init = 0;
-    if (!s_wall_prev_init) {
-        for (int i = 0; i < TD5_MAX_TOTAL_ACTORS; i++) {
-            s_wall_prev_span[i] = -1;
-            for (int j = 0; j < 4; j++)
-                for (int k = 0; k < 2; k++)
-                    s_wall_prev_d[i][j][k] = 32767;
-        }
-        s_wall_prev_init = 1;
-    }
-
-    int slot_for_state = actor->slot_index & (TD5_MAX_TOTAL_ACTORS - 1);
-    int span_changed = (s_wall_prev_span[slot_for_state] != (int16_t)span_idx);
-    s_wall_prev_span[slot_for_state] = (int16_t)span_idx;
-    /* On a span change: skip firing this tick (the new wall geometry's
-     * first d reading is noise), but DON'T reset prev_d to 32767 — let
-     * it be written by this tick's actual d values below. That way the
-     * NEXT tick has a meaningful previous and the trend detector can
-     * distinguish a stale-geometry spike (d worsening) from a real wall
-     * (d improving under push). If we reset to 32767, next tick is
-     * "fresh entry" and fires unconditionally — which was exactly the
-     * d=-142 Moscow invisible wall. */
+    /* Simple wall fire: d < dead zone and clamp at -200. No trend
+     * detection, no span-transition skip, no hysteresis. Earlier
+     * attempts to filter walker-lag spikes ended up suppressing real
+     * walls — the geometry is correct (verified), the walker is broken
+     * (root cause), and no wall-side heuristic can reliably distinguish
+     * the two. Accept occasional walker-lag fires (clamped to -200 so
+     * the push is bounded) in exchange for walls that actually work. */
 
     for (int pi = 0; pi < 4; pi++) {
         int32_t px = probe_block[pi].x >> 8;
@@ -690,7 +664,7 @@ void td5_track_resolve_wall_contacts(TD5_Actor *actor)
             int32_t rel_z = pz - l_par.base_z - sp->origin_z;
             int64_t dot = (int64_t)rel_x * l_par.nnx + (int64_t)rel_z * l_par.nnz;
             l_d = (int32_t)((dot + ((dot >> 63) & 0xFFF)) >> 12);
-            if (l_d < -1200) l_d = -1200;
+            if (l_d < -200) l_d = -200;
             l_ok = 1;
         }
         if (r_par.ok) {
@@ -698,79 +672,28 @@ void td5_track_resolve_wall_contacts(TD5_Actor *actor)
             int32_t rel_z = pz - r_par.base_z - sp->origin_z;
             int64_t dot = (int64_t)rel_x * r_par.nnx + (int64_t)rel_z * r_par.nnz;
             r_d = (int32_t)((dot + ((dot >> 63) & 0xFFF)) >> 12);
-            if (r_d < -1200) r_d = -1200;
+            if (r_d < -200) r_d = -200;
             r_ok = 1;
         }
 
         const int32_t WALL_DEAD_ZONE = -10;
-        const int32_t WORSEN_TOL     = 40;  /* d can worsen by up to 40/tick
-                                              * during a real impact before we
-                                              * call it walker lag. At 250
-                                              * units/tick and 10° approach angle,
-                                              * lateral velocity ≈ 43. Tighter
-                                              * values (10, 20) suppressed real
-                                              * wall contacts. */
-        /* On a chassis-span transition, skip the fire — the new span's
-         * wall geometry hasn't yet been compared against the probe, and
-         * the first reading can be an artifact of the new wall line
-         * position. Don't trust it. One skipped tick is invisible. */
 
-        int slot = slot_for_state;
-
-        /* --- LEFT wall --- */
-        if (l_ok) {
-            int16_t prev_d = s_wall_prev_d[slot][pi][0];
-            int fire = 0;
-            if (l_d < WALL_DEAD_ZONE && !span_changed) {
-                if (prev_d == 32767 || prev_d >= WALL_DEAD_ZONE) {
-                    /* Fresh entry into fire zone — always fire the first hit. */
-                    fire = 1;
-                } else if (l_d >= prev_d - WORSEN_TOL) {
-                    /* d is holding (wall push working) or improving — fire. */
-                    fire = 1;
-                }
-                /* Else d is worsening noticeably — walker lag, skip. */
-            }
-            if (fire) {
-                double rad = atan2((double)l_par.nnx, (double)(-l_par.nnz));
-                int32_t wall_angle = (int32_t)(rad * (4096.0 / (2.0 * 3.14159265358979323846))) & 0xFFF;
-                td5_physics_wall_response(actor, wall_angle, l_d, 1, l_par.nnx, l_par.nnz, 4096);
-                td5_physics_rebuild_pose(actor);
-                TD5_LOG_I(LOG_TAG, "wall_contact: slot=%d probe=%d LEFT span=%d d=%d prev=%d angle=%d",
-                          actor->slot_index, pi, span_idx, l_d, (int)prev_d, wall_angle);
-            }
-            /* Reset prev when probe is clearly inside so next entry is fresh. */
-            if (l_d >= 0) {
-                s_wall_prev_d[slot][pi][0] = 32767;
-            } else {
-                s_wall_prev_d[slot][pi][0] = (int16_t)(l_d < -32000 ? -32000 : l_d);
-            }
+        if (l_ok && l_d < WALL_DEAD_ZONE) {
+            double rad = atan2((double)l_par.nnx, (double)(-l_par.nnz));
+            int32_t wall_angle = (int32_t)(rad * (4096.0 / (2.0 * 3.14159265358979323846))) & 0xFFF;
+            td5_physics_wall_response(actor, wall_angle, l_d, 1, l_par.nnx, l_par.nnz, 4096);
+            td5_physics_rebuild_pose(actor);
+            TD5_LOG_I(LOG_TAG, "wall_contact: slot=%d probe=%d LEFT span=%d d=%d angle=%d",
+                      actor->slot_index, pi, span_idx, l_d, wall_angle);
         }
 
-        /* --- RIGHT wall --- */
-        if (r_ok) {
-            int16_t prev_d = s_wall_prev_d[slot][pi][1];
-            int fire = 0;
-            if (r_d < WALL_DEAD_ZONE && !span_changed) {
-                if (prev_d == 32767 || prev_d >= WALL_DEAD_ZONE) {
-                    fire = 1;
-                } else if (r_d >= prev_d - WORSEN_TOL) {
-                    fire = 1;
-                }
-            }
-            if (fire) {
-                double rad = atan2((double)r_par.nnx, (double)(-r_par.nnz));
-                int32_t wall_angle = (int32_t)(rad * (4096.0 / (2.0 * 3.14159265358979323846))) & 0xFFF;
-                td5_physics_wall_response(actor, wall_angle, r_d, 2, r_par.nnx, r_par.nnz, 4096);
-                td5_physics_rebuild_pose(actor);
-                TD5_LOG_I(LOG_TAG, "wall_contact: slot=%d probe=%d RIGHT span=%d d=%d prev=%d angle=%d",
-                          actor->slot_index, pi, span_idx, r_d, (int)prev_d, wall_angle);
-            }
-            if (r_d >= 0) {
-                s_wall_prev_d[slot][pi][1] = 32767;
-            } else {
-                s_wall_prev_d[slot][pi][1] = (int16_t)(r_d < -32000 ? -32000 : r_d);
-            }
+        if (r_ok && r_d < WALL_DEAD_ZONE) {
+            double rad = atan2((double)r_par.nnx, (double)(-r_par.nnz));
+            int32_t wall_angle = (int32_t)(rad * (4096.0 / (2.0 * 3.14159265358979323846))) & 0xFFF;
+            td5_physics_wall_response(actor, wall_angle, r_d, 2, r_par.nnx, r_par.nnz, 4096);
+            td5_physics_rebuild_pose(actor);
+            TD5_LOG_I(LOG_TAG, "wall_contact: slot=%d probe=%d RIGHT span=%d d=%d angle=%d",
+                      actor->slot_index, pi, span_idx, r_d, wall_angle);
         }
 
         if (diag_slot0) {
@@ -2453,13 +2376,10 @@ void td5_track_compute_heading(TD5_Actor *actor)
         break;
     }
 
-    /* Original calls AngleFromVector12 (atan2-based, 0°=+Z) — NOT
-     * angle_from_vector_full (0x433FC0, different quadrant mapping). */
-    {
-        double rad = atan2((double)dx, (double)dz);
-        angle = (int)(rad * (4096.0 / (2.0 * 3.14159265358979323846)));
-        angle &= 0xFFF;
-    }
+    /* Original calls AngleFromVector12 (0x40A720, integer LUT) — NOT
+     * angle_from_vector_full (0x433FC0, different quadrant mapping).
+     * Using the shared AngleFromVector12 for consistent rounding. */
+    angle = AngleFromVector12(dx, dz) & 0xFFF;
 
     TD5_LOG_I(LOG_TAG, "compute_heading: span=%d type=%d dx=%d dz=%d angle=%d",
               span_idx, sp->span_type, dx, dz, angle);
