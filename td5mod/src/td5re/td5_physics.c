@@ -693,26 +693,9 @@ void td5_physics_update_player(TD5_Actor *actor)
 
     if (actor->surface_contact_flags != 0) {
         /* --- ON-GROUND branch ---
-         * td5_physics_update_engine_speed (UESA @ 0x0042EDF0) is NOT called
-         * on the grounded path in the original — compute_reverse_gear_torque
-         * (CRGT @ 0x00403C80) is the authoritative engine updater here, and
-         * it runs later in this function as part of the post-force
-         * longitudinal/lateral_speed write. [CONFIRMED via 2026-04-11 CRGT
-         * Ghidra pass: CRGT and UESA are mutually exclusive per tick — CRGT
-         * on ground, UESA on airborne.]
-         *
-         * Gearbox dispatch [CONFIRMED via 2026-04-11 auto_gear Ghidra pass]:
-         *   field_0x378 == 0 → manual (reverse_throttle_sign, no auto upshift)
-         *   field_0x378 != 0 → automatic (auto_gear_select)
-         * The Frida diff-race scenario leaves field_0x378 at 0 because the
-         * input path that writes it isn't invoked — so the original runs the
-         * manual path. The port previously called auto_gear_select
-         * unconditionally, causing spurious tick-3 upshifts. */
-        if (*((const uint8_t *)actor + 0x378) == 0) {
-            td5_physics_reverse_throttle_sign(actor);
-        } else {
-            td5_physics_auto_gear_select(actor);
-        }
+         * No auto_gear_select or reverse_throttle_sign here — the original
+         * only calls those on the AIRBORNE path [CONFIRMED @ 0x404521].
+         * CRGT (later in this function) is the engine updater for grounded. */
 
         if (!actor->brake_flag) {
             /* Drive path: drive torque distributed by drivetrain. At
@@ -767,19 +750,59 @@ void td5_physics_update_player(TD5_Actor *actor)
             wheel_drive[3] = sign * (br >> 1);
         }
     } else {
-        /* --- AIRBORNE branch --- */
+        /* --- AIRBORNE branch [CONFIRMED @ 0x4044F9-0x4045AE] ---
+         * Original structure:
+         *   1. Write body velocities to long/lat speed
+         *   2. Brake check
+         *   3. If !brake && throttle != 0:
+         *        auto_gear or reverse_throttle + UESA + CDTFGC + wheel dist
+         *   4. Speed limit check
+         *   5. If brake || coast(-32): UESA + brake forces */
         int32_t coast_throttle = (throttle != 0) ? throttle : -32;
-        td5_physics_update_engine_speed(actor);
 
-        /* Airborne coast/brake fallback — the original only runs this
-         * when the car is off the ground. */
-        int32_t bf = (brake_front * coast_throttle) >> 8;
-        int32_t br = (brake_rear  * coast_throttle) >> 8;
-        int32_t abs_lat_half = (v_lat < 0 ? -v_lat : v_lat) >> 1;
-        if (bf < -abs_lat_half) bf = -abs_lat_half;
-        if (br < -abs_lat_half) br = -abs_lat_half;
-        int32_t sign = (v_long > 0) ? -1 : 1;
-        if (actor->brake_flag || coast_throttle == -32) {
+        if (!actor->brake_flag && throttle != 0) {
+            /* Gearbox dispatch [CONFIRMED @ 0x404521]:
+             * field_0x378 == 0 → manual, != 0 → automatic */
+            if (*((const uint8_t *)actor + 0x378) == 0) {
+                td5_physics_reverse_throttle_sign(actor);
+            } else {
+                td5_physics_auto_gear_select(actor);
+            }
+            td5_physics_update_engine_speed(actor);
+
+            /* Drive torque while airborne [CONFIRMED @ 0x404560-0x4045AE] */
+            drive_torque = td5_physics_compute_drive_torque(actor);
+            int32_t dt_type = (int32_t)PHYS_S(actor, 0x76);
+            int32_t speed_limit = (int32_t)PHYS_S(actor, 0x74) << 8;
+            int32_t abs_speed = v_long < 0 ? -v_long : v_long;
+            if (abs_speed <= speed_limit) {
+                switch (dt_type) {
+                case 1: /* RWD */
+                    wheel_drive[2] = drive_torque >> 1;
+                    wheel_drive[3] = drive_torque >> 1;
+                    break;
+                case 2: /* FWD */
+                    wheel_drive[0] = drive_torque >> 1;
+                    wheel_drive[1] = drive_torque >> 1;
+                    break;
+                case 3: /* AWD */
+                default:
+                    wheel_drive[0] = drive_torque >> 2;
+                    wheel_drive[1] = drive_torque >> 2;
+                    wheel_drive[2] = drive_torque >> 2;
+                    wheel_drive[3] = drive_torque >> 2;
+                    break;
+                }
+            }
+        } else {
+            /* Brake or coast path */
+            td5_physics_update_engine_speed(actor);
+            int32_t bf = (brake_front * coast_throttle) >> 8;
+            int32_t br = (brake_rear  * coast_throttle) >> 8;
+            int32_t abs_lat_half = (v_lat < 0 ? -v_lat : v_lat) >> 1;
+            if (bf < -abs_lat_half) bf = -abs_lat_half;
+            if (br < -abs_lat_half) br = -abs_lat_half;
+            int32_t sign = (v_long > 0) ? -1 : 1;
             wheel_drive[0] = sign * (bf >> 1);
             wheel_drive[1] = sign * (bf >> 1);
             wheel_drive[2] = sign * (br >> 1);
@@ -787,8 +810,8 @@ void td5_physics_update_player(TD5_Actor *actor)
         }
 
         if (actor->slot_index == 0 && (actor->frame_counter % 120u) == 0u) {
-            TD5_LOG_I(LOG_TAG, "update_player: airborne branch coast=%d bf=%d br=%d",
-                      coast_throttle, bf, br);
+            TD5_LOG_I(LOG_TAG, "update_player: airborne gear=%d rpm=%d torque=%d",
+                      actor->current_gear, actor->engine_speed_accum, drive_torque);
         }
     }
 
@@ -4168,6 +4191,7 @@ void td5_physics_init_vehicle_runtime(void)
         memset(actor->wheel_load_accum, 0, sizeof(actor->wheel_load_accum));
         memset(actor->wheel_spring_dv, 0, sizeof(actor->wheel_spring_dv));
         actor->slot_index = (uint8_t)slot;
+        *((uint8_t *)actor + 0x378) = 1;  /* auto gearbox [CONFIRMED @ 0x42F140] */
         actor->frame_counter = 0;
         actor->track_contact_flag = 0;
         actor->surface_contact_flags = 0;
