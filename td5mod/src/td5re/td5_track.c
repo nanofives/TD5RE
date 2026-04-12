@@ -664,7 +664,7 @@ void td5_track_resolve_wall_contacts(TD5_Actor *actor)
             int32_t rel_z = pz - l_par.base_z - sp->origin_z;
             int64_t dot = (int64_t)rel_x * l_par.nnx + (int64_t)rel_z * l_par.nnz;
             l_d = (int32_t)((dot + ((dot >> 63) & 0xFFF)) >> 12);
-            if (l_d < -200) l_d = -200;
+            if (l_d < -30) l_d = -30;
             l_ok = 1;
         }
         if (r_par.ok) {
@@ -672,7 +672,7 @@ void td5_track_resolve_wall_contacts(TD5_Actor *actor)
             int32_t rel_z = pz - r_par.base_z - sp->origin_z;
             int64_t dot = (int64_t)rel_x * r_par.nnx + (int64_t)rel_z * r_par.nnz;
             r_d = (int32_t)((dot + ((dot >> 63) & 0xFFF)) >> 12);
-            if (r_d < -200) r_d = -200;
+            if (r_d < -30) r_d = -30;
             r_ok = 1;
         }
 
