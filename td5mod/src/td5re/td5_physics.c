@@ -2101,12 +2101,16 @@ static void apply_collision_response(TD5_Actor *penetrator, TD5_Actor *target,
         if (A->slot_index < 6) {
             A->euler_accum.roll  += (scatter >> 2) - (scatter >> 3);
             A->euler_accum.pitch += (scatter >> 1) - scatter;
-            A->linear_velocity_y  = impact_mag / 6;
+            int32_t lift_a = impact_mag / 6;
+            if (lift_a > 200000) lift_a = 200000;
+            A->linear_velocity_y  = lift_a;
         }
         if (B->slot_index < 6) {
             B->euler_accum.roll  -= (scatter >> 2) - (scatter >> 3);
             B->euler_accum.pitch -= (scatter >> 1) - scatter;
-            B->linear_velocity_y  = impact_mag / 6;
+            int32_t lift_b = impact_mag / 6;
+            if (lift_b > 200000) lift_b = 200000;
+            B->linear_velocity_y  = lift_b;
         }
     }
 }
@@ -2755,19 +2759,17 @@ void td5_physics_update_suspension_response(TD5_Actor *actor)
             int32_t cur_pitch = (actor->euler_accum.pitch >> 8) & 0xFFF;
             if (cur_pitch > 0x800) cur_pitch -= 0x1000;
 
-            /* Spring-damper: F = k*(target - current) - c*velocity
-             * k=0.25 (>>2), c=0.25 (>>2) for critical damping feel. */
-            int32_t roll_err  = target_roll  - cur_roll;
-            int32_t pitch_err = target_pitch - cur_pitch;
+            /* Proportional chase: set angular velocity to close 25% of the
+             * euler_accum gap per frame. Works in euler_accum scale (<<8) so
+             * display angle changes visibly. Time constant ~4 frames (0.13s);
+             * clamp limits rotation to ~21°/s. */
+            int32_t euler_err_r = (target_roll  << 8) - actor->euler_accum.roll;
+            int32_t euler_err_p = (target_pitch << 8) - actor->euler_accum.pitch;
 
-            actor->angular_velocity_roll  += roll_err  >> 2;
-            actor->angular_velocity_pitch += pitch_err >> 2;
+            actor->angular_velocity_roll  = euler_err_r >> 2;
+            actor->angular_velocity_pitch = euler_err_p >> 2;
 
-            /* Velocity damping */
-            actor->angular_velocity_roll  -= actor->angular_velocity_roll  >> 2;
-            actor->angular_velocity_pitch -= actor->angular_velocity_pitch >> 2;
-
-            /* Clamp angular velocities */
+            /* Clamp angular velocities — limits visual rotation rate */
             if (actor->angular_velocity_roll  >  2000) actor->angular_velocity_roll  =  2000;
             if (actor->angular_velocity_roll  < -2000) actor->angular_velocity_roll  = -2000;
             if (actor->angular_velocity_pitch >  2000) actor->angular_velocity_pitch =  2000;
