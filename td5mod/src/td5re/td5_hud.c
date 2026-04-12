@@ -1961,10 +1961,20 @@ void td5_hud_render_overlays(float dt)
                 );
             }
 
-            /* Compute speed value from longitudinal_speed (24.8 fp) for digit display */
+            /* Compute speed from actual world velocity, not CRGT pseudo-speed.
+             * actor+0x314 (longitudinal_speed) is RPM-encoded by CRGT for RWD/AWD
+             * and drops to 0 when throttle is released, even though the car is
+             * still moving. Instead, project world velocity onto heading. */
             uint8_t *_actor_a = (uint8_t *)actor_ptr(actor_slot);
-            int32_t speed_raw = *(int32_t *)(_actor_a + 0x314);
-            if (speed_raw < 0) speed_raw = 0;
+            int32_t vx = *(int32_t *)(_actor_a + 0x1CC);  /* linear_velocity_x */
+            int32_t vz = *(int32_t *)(_actor_a + 0x1D4);  /* linear_velocity_z */
+            int32_t heading_accum = *(int32_t *)(_actor_a + 0x1F4); /* euler_accum.yaw */
+            int32_t h12 = (heading_accum >> 8) & 0xFFF;
+            double hrad = (double)h12 * (2.0 * 3.14159265358979323846 / 4096.0);
+            int32_t sin_h = (int32_t)(sin(hrad) * 4096.0);
+            int32_t cos_h = (int32_t)(cos(hrad) * 4096.0);
+            int32_t speed_raw = (vx * sin_h + vz * cos_h) >> 12; /* body-frame longitudinal */
+            if (speed_raw < 0) speed_raw = -speed_raw;
             speed_raw >>= 8;
 
             int speed_display;
