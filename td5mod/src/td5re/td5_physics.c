@@ -2692,6 +2692,29 @@ void td5_physics_update_suspension_response(TD5_Actor *actor)
      *   psVar10[0x10]= g270[2] = gap_270[i*8+4]                  (actor+0x274+i*8)
      *   *local_54    = g270[0] = gap_270[i*8+0]                  (actor+0x270+i*8)
      */
+    /* Pre-compute averaged surface normal across all grounded wheels.
+     * Per-wheel normals differ because wheels probe different track triangles.
+     * Using per-wheel normals in the velocity path creates persistent non-zero
+     * torque on flat ground (~roll_d=32/frame) because the arm-weighted sum
+     * doesn't cancel. Averaging ensures symmetric cancellation on flat terrain
+     * while still responding to actual slopes (all wheels see similar slope). */
+    int16_t avg_wcv[3] = {0, 0, 0};
+    {
+        int32_t sx = 0, sy = 0, sz = 0;
+        int cnt = 0;
+        for (int i = 0; i < 4; i++) {
+            if (bVar1 & (1u << i)) continue;
+            const int16_t *w = (const int16_t *)((const uint8_t *)actor + 0x250 + i * 8);
+            sx += w[0]; sy += w[1]; sz += w[2];
+            cnt++;
+        }
+        if (cnt > 0) {
+            avg_wcv[0] = (int16_t)(sx / cnt);
+            avg_wcv[1] = (int16_t)(sy / cnt);
+            avg_wcv[2] = (int16_t)(sz / cnt);
+        }
+    }
+
     for (int i = 0; i < 4; i++) {
         uint32_t uVar6 = (uint32_t)(1u << i);
         if (bVar1 & uVar6) continue; /* wheel i airborne this frame — skip */
@@ -2703,15 +2726,11 @@ void td5_physics_update_suspension_response(TD5_Actor *actor)
         int16_t sVar3 = wda[0];
         int16_t sVar4 = wda[2];
 
-        /* Rotate wheel contact velocity to world space, extract Y component.
-         * wcv at actor+0x250+i*8 (3 int16s: X,Y,Z).
-         * FUN_0042E2E0 operates on (psVar10-2) = wcv and outputs local_38/local_36.
-         * local_36 is the Y-component of the world-rotated velocity. */
-        const int16_t *wcv = (const int16_t *)((const uint8_t *)actor + 0x250 + i * 8);
-        int16_t local_36 = rotate_vec_world_y(actor, wcv);
+        /* Velocity path: use averaged normal so arm-weighted sum cancels on
+         * flat ground. Per-wheel normals are still used for the spring path. */
+        int16_t local_36 = rotate_vec_world_y(actor, avg_wcv);
 
-        /* iVar8 = (local_36 * gravity + rounding) >> 12
-         * Original: (local_36 * DAT_00467380 + (local_36*DAT_00467380 >> 0x1f & 0xFFF)) >> 0xC */
+        /* iVar8 = (local_36 * gravity + rounding) >> 12 */
         int32_t scaled = (int32_t)local_36 * g_gravity_constant;
         int32_t iVar8  = arith_round_shift(scaled, 0xFFF, 12);
 
@@ -2737,10 +2756,12 @@ void td5_physics_update_suspension_response(TD5_Actor *actor)
          * Count:         local_58++
          */
         if (bVar2 & uVar6) {
+            /* Spring path uses per-wheel normals (not averaged) for damping */
+            const int16_t *pw_wcv = (const int16_t *)((const uint8_t *)actor + 0x250 + i * 8);
             const int16_t *g270 = (const int16_t *)((const uint8_t *)actor + 0x270 + i * 8);
-            int32_t spring_dot = (int32_t)g270[1] * (int32_t)wcv[1]
-                               + (int32_t)g270[2] * (int32_t)wcv[2]
-                               + (int32_t)g270[0] * (int32_t)wcv[0];
+            int32_t spring_dot = (int32_t)g270[1] * (int32_t)pw_wcv[1]
+                               + (int32_t)g270[2] * (int32_t)pw_wcv[2]
+                               + (int32_t)g270[0] * (int32_t)pw_wcv[0];
             int32_t spring_force = arith_round_shift(spring_dot, 0xFFF, 12);
 
             local_64 += spring_force * (int32_t)sVar4 * -0x100;
@@ -2785,6 +2806,22 @@ void td5_physics_update_suspension_response(TD5_Actor *actor)
          * slow enough for visible hill tilt, fast enough to suppress rocking. */
         actor->angular_velocity_roll  -= actor->angular_velocity_roll  >> 4;
         actor->angular_velocity_pitch -= actor->angular_velocity_pitch >> 4;
+
+        /* Angle-proportional restoring force: models gravity pulling a tilted
+         * body back toward level. Without this, even small persistent torques
+         * from the spring path (gap_270 Y noise from gravity/bounce cycle)
+         * integrate into unbounded angle drift. The restoring spring creates
+         * equilibrium: tilt_angle = torque_bias / k. With k=4 (>>2), the
+         * residual flat-ground tilt is ~0.7° (roll_d=32 → angle=8/4096). */
+        {
+            int32_t ra = (actor->euler_accum.roll >> 8) & 0xFFF;
+            if (ra > 0x800) ra -= 0x1000;   /* signed 12-bit */
+            actor->angular_velocity_roll -= ra >> 2;
+
+            int32_t pa = (actor->euler_accum.pitch >> 8) & 0xFFF;
+            if (pa > 0x800) pa -= 0x1000;
+            actor->angular_velocity_pitch -= pa >> 2;
+        }
 
         if (actor->slot_index == 0 && (actor->frame_counter % 60u) == 0u) {
             TD5_LOG_I(LOG_TAG, "susp_resp: roll_d=%d pitch_d=%d grnd=%d spring=%d "
