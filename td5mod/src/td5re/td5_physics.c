@@ -517,7 +517,22 @@ void td5_physics_update_vehicle_actor(TD5_Actor *actor)
      * Run even during countdown (paused) so ground-snap keeps the car
      * at the correct height above the road surface. Velocities are zero
      * during pause, so the car doesn't actually move. */
-    td5_physics_integrate_pose(actor);
+    if (actor->slot_index == 0) {
+        int32_t pre_vx = actor->linear_velocity_x;
+        int32_t pre_vz = actor->linear_velocity_z;
+        td5_physics_integrate_pose(actor);
+        int32_t post_vx = actor->linear_velocity_x;
+        int32_t post_vz = actor->linear_velocity_z;
+        int32_t dvx = post_vx - pre_vx;
+        int32_t dvz = post_vz - pre_vz;
+        if (abs(dvx) > 5000 || abs(dvz) > 5000) {
+            TD5_LOG_I(LOG_TAG, "POSE_JOLT: vx %d->%d dvx=%d vz %d->%d dvz=%d span=%d",
+                      pre_vx, post_vx, dvx, pre_vz, post_vz, dvz,
+                      (int)actor->track_span_raw);
+        }
+    } else {
+        td5_physics_integrate_pose(actor);
+    }
 
     /* 8. Track wall contact resolution (FUN_004070E0 -> FUN_00406F50 -> FUN_00406CC0)
      * Check wheel probes against span edges and push car back if outside.
@@ -525,9 +540,21 @@ void td5_physics_update_vehicle_actor(TD5_Actor *actor)
      *   Reverse boundary -> Forward boundary -> Lateral (left/right).
      * [CONFIRMED @ 0x4068c8 + 0x406650 callsite order] */
     if (actor->vehicle_mode == 0) {
+        int32_t pre_wx = actor->linear_velocity_x;
+        int32_t pre_wz = actor->linear_velocity_z;
         td5_track_resolve_reverse_contacts(actor);
         td5_track_resolve_forward_contacts(actor);
         td5_track_resolve_wall_contacts(actor);
+        if (actor->slot_index == 0) {
+            int32_t dwx = actor->linear_velocity_x - pre_wx;
+            int32_t dwz = actor->linear_velocity_z - pre_wz;
+            if (abs(dwx) > 2000 || abs(dwz) > 2000) {
+                TD5_LOG_I(LOG_TAG, "WALL_JOLT: vx %d->%d dvx=%d vz %d->%d dvz=%d span=%d",
+                          pre_wx, actor->linear_velocity_x, dwx,
+                          pre_wz, actor->linear_velocity_z, dwz,
+                          (int)actor->track_span_raw);
+            }
+        }
     }
 
     /* 9. Update surface_contact_flags for the NEXT tick's dynamics dispatch.
@@ -718,23 +745,22 @@ void td5_physics_update_player(TD5_Actor *actor)
             int32_t abs_speed = v_long < 0 ? -v_long : v_long;
 
             if (abs_speed <= speed_limit) {
-                /* Per-wheel distribution confirmed against original @ 0x00404030:
-                 *   RWD: rear_long total = D/2 (each rear wheel D/4, front = 0)
-                 *   FWD: front_long total = D/2 (each front wheel D/4, rear = 0)
-                 *   AWD: all four wheels D/4 (total = D, front pair D/2, rear pair D/2)
-                 * Previously the port used D/2 per wheel for RWD/FWD, producing
-                 * total = D — 2x the original's rear-only D/2. That was the ~2.15x
-                 * magnitude ratio observed in /diff-race at sim_tick=2 slot 0
-                 * (orig vel_x=-185 vs port vel_x=-399). The Dodge Viper is RWD so
-                 * it hits case 1 at tick 2 and the error propagates. [CONFIRMED] */
+                /* Per-wheel distribution [CONFIRMED @ 0x00404030]:
+                 *   RWD: D/2 per rear wheel (front = 0)
+                 *   FWD: D/2 per front wheel (rear = 0)
+                 *   AWD: D/4 per wheel (total = D)
+                 * After grip scaling (grip[i]*wheel_drive[i]>>8) the effective
+                 * totals are: RWD rear_long ≈ grip*D, FWD front_long ≈ grip*D,
+                 * AWD each pair ≈ grip*D/2. Prior D/4 was a workaround for
+                 * missing grip scaling — now that grip is applied, D/2 is correct. */
                 switch (dt_type) {
-                case 1: /* RWD */
-                    wheel_drive[2] = drive_torque >> 2;
-                    wheel_drive[3] = drive_torque >> 2;
+                case 1: /* RWD — D/2 per rear wheel [CONFIRMED @ 0x00404030] */
+                    wheel_drive[2] = drive_torque >> 1;
+                    wheel_drive[3] = drive_torque >> 1;
                     break;
-                case 2: /* FWD */
-                    wheel_drive[0] = drive_torque >> 2;
-                    wheel_drive[1] = drive_torque >> 2;
+                case 2: /* FWD — D/2 per front wheel [CONFIRMED @ 0x00404030] */
+                    wheel_drive[0] = drive_torque >> 1;
+                    wheel_drive[1] = drive_torque >> 1;
                     break;
                 case 3: /* AWD */
                 default:
@@ -796,8 +822,13 @@ void td5_physics_update_player(TD5_Actor *actor)
     }
 
     /* --- 12. Per-axle lateral/longitudinal forces --- */
-    int32_t steer_angle = actor->steering_command >> 8;
-    /* Original (0x40415B): steer_angle = steering_command >> 8, no scaling.
+    int32_t steer_angle = -(actor->steering_command >> 8);
+    /* Original input maps LEFT=positive, RIGHT=negative (bit 0x02=LEFT feeds
+     * the add-to-cmd path). Port input maps LEFT=negative, RIGHT=positive.
+     * Negate here to match the original convention the physics was built
+     * around. [CONFIRMED: original bit layout documented in td5_input.c:484]
+     *
+     * Original (0x40415B): steer_angle = steering_command >> 8, no scaling.
      * Constant 294 does NOT exist in the binary. [CONFIRMED @ 0x404142-0x40415E] */
     int32_t steer_heading = (heading + steer_angle) & 0xFFF;
     int32_t cos_s = cos_fixed12(steer_heading);   /* cos(h+s) — iVar16 */
@@ -1121,6 +1152,10 @@ void td5_physics_update_player(TD5_Actor *actor)
         if (mag_sq > cap_sq && mag_sq > 0) {
             int32_t mag = td5_isqrt(mag_sq);
             int32_t cap_h = vel_cap >> 8;
+            if (actor->slot_index == 0) {
+                TD5_LOG_I(LOG_TAG, "VEL_CAP: vx=%d vz=%d mag=%d cap=%d",
+                          actor->linear_velocity_x, actor->linear_velocity_z, mag, cap_h);
+            }
             actor->linear_velocity_x = (int32_t)((int64_t)actor->linear_velocity_x * cap_h / mag);
             actor->linear_velocity_z = (int32_t)((int64_t)actor->linear_velocity_z * cap_h / mag);
         }
@@ -2739,6 +2774,13 @@ void td5_physics_update_suspension_response(TD5_Actor *actor)
         actor->angular_velocity_roll  += roll_delta;
         actor->angular_velocity_pitch += pitch_delta;
 
+        if (actor->slot_index == 0 && (actor->frame_counter % 60u) == 0u) {
+            TD5_LOG_I(LOG_TAG, "susp_resp: roll_d=%d pitch_d=%d grnd=%d spring=%d "
+                      "av_roll=%d av_pitch=%d",
+                      roll_delta, pitch_delta, local_4c, local_58,
+                      actor->angular_velocity_roll, actor->angular_velocity_pitch);
+        }
+
         /* Clamp angular velocities per original switch-case table.
          * Clamp key controlled by bVar2 (prev-frame bitmask).
          * Cases 0,1,2,4,6,8,9 → clamp both roll and pitch to ±4000.
@@ -3233,16 +3275,24 @@ void td5_physics_refresh_wheel_contacts(TD5_Actor *actor)
         /* Write surface normal to wheel_contact_velocities[i][0..2] (actor+0x250+i*8).
          * Original: FUN_00445A70 computes cross-product of span edge vectors >> 12,
          * then FUN_0042CD40 normalizes to magnitude 4096. For flat ground: (0, 4096, 0).
-         * The previous attempt used unnormalized values (~0x7FFF), ~8x too large,
-         * which caused the spring path dot product to produce ~14x too strong forces. */
-        /* wcv (surface normal at 0x250) and gap_270 (contact velocity at 0x270)
-         * are left at zero. Enabling them requires the full RefreshWheelContacts
-         * body-space→world transform pipeline to produce correct per-frame deltas.
-         * The port's simplified ground-snap creates Y deltas ~100x larger than
-         * the original's per-wheel spring system, making the suspension spring
-         * path produce runaway roll. Fixing this requires reimplementing the
-         * original's FUN_00403720 transform chain, not just populating the fields. */
-        (void)span_normal;
+         * Normalize the raw cross-product normal to magnitude 4096 before writing. */
+        {
+            int32_t snx = span_normal[0], sny = span_normal[1], snz = span_normal[2];
+            int32_t mag_sq = snx * snx + sny * sny + snz * snz;
+            if (mag_sq > 0) {
+                int32_t mag = td5_isqrt(mag_sq);
+                if (mag > 0) {
+                    snx = (snx * 4096) / mag;
+                    sny = (sny * 4096) / mag;
+                    snz = (snz * 4096) / mag;
+                }
+            } else {
+                snx = 0; sny = 4096; snz = 0;
+            }
+            actor->wheel_contact_velocities[i][0] = (int16_t)snx;
+            actor->wheel_contact_velocities[i][1] = (int16_t)sny;
+            actor->wheel_contact_velocities[i][2] = (int16_t)snz;
+        }
 
         /* Original order in FUN_00403720:
          *   1. force = (wheel_y - ground_y) + gravity_offset
@@ -3256,15 +3306,21 @@ void td5_physics_refresh_wheel_contacts(TD5_Actor *actor)
         int32_t force = (wheel_y - ground_y) >> 8;
 
         /* gap_270[i] = frame-to-frame wheel contact position delta >> 8.
-         * old_wcp was saved at function entry — these are the previous frame's
-         * final wheel_contact_pos values (post-transform, post-snap from last frame).
-         * Current wheel_contact_pos has this frame's transform result but NOT yet
-         * the Y-snap, matching the original's write order. */
-        /* gap_270[i] = frame-to-frame wheel contact position delta >> 8.
-         * Skip on first frame (old_wcp is zero from spawn) to avoid huge deltas.
-         * The original's ResetVehicleActorState (0x405D70) calls integrate_pose
-         * which sets wheel_contact_pos, so subsequent frames have valid old values. */
-        /* gap_270 write disabled — see wcv comment above */
+         * Uses pre-Y-snap wheel_contact_pos (transform result, not ground_y).
+         * Skip first frame (frame_counter==0) where old_wcp is zero from spawn. */
+        {
+            int16_t *g270 = (int16_t *)((uint8_t *)actor + 0x270 + i * 8);
+            if (actor->frame_counter > 0) {
+                int32_t dx = actor->wheel_contact_pos[i].x - old_wcp_x[i];
+                int32_t dy = actor->wheel_contact_pos[i].y - old_wcp_y[i];
+                int32_t dz = actor->wheel_contact_pos[i].z - old_wcp_z[i];
+                g270[0] = (int16_t)arith_round_shift(dx, 0xFF, 8);
+                g270[1] = (int16_t)arith_round_shift(dy, 0xFF, 8);
+                g270[2] = (int16_t)arith_round_shift(dz, 0xFF, 8);
+            } else {
+                g270[0] = 0; g270[1] = 0; g270[2] = 0;
+            }
+        }
 
         /* Dead zone */
         if (force > -0x200 && force < 0x200)
