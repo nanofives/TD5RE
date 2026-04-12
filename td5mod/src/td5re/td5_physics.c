@@ -2763,18 +2763,14 @@ void td5_physics_update_suspension_response(TD5_Actor *actor)
          * Bounce:        bounce_accum += spring_force / 2
          * Count:         local_58++
          */
+        /* Spring path DISABLED — the port's gap_270 reflects world-space body
+         * rotation, not local suspension compression. This creates positive
+         * feedback: tilt → changed wheel positions → gap_270 amplifies tilt →
+         * resonance at ±7000 av_roll. The original's integer transform chain
+         * isolates local wheel motion; reimplementing that is TODO.
+         * The velocity path + angle restoring force + velocity decay provides
+         * stable tilt without the spring path. */
         if (bVar2 & uVar6) {
-            /* Spring path uses per-wheel normals (not averaged) for damping */
-            const int16_t *pw_wcv = (const int16_t *)((const uint8_t *)actor + 0x250 + i * 8);
-            const int16_t *g270 = (const int16_t *)((const uint8_t *)actor + 0x270 + i * 8);
-            int32_t spring_dot = (int32_t)g270[1] * (int32_t)pw_wcv[1]
-                               + (int32_t)g270[2] * (int32_t)pw_wcv[2]
-                               + (int32_t)g270[0] * (int32_t)pw_wcv[0];
-            int32_t spring_force = arith_round_shift(spring_dot, 0xFFF, 12);
-
-            local_64 += spring_force * (int32_t)sVar4 * -0x100;
-            bounce_accum += spring_force / 2;
-            local_60 += spring_force * (int32_t)sVar3 * 0x100;
             local_58++;
         }
     }
@@ -4037,12 +4033,12 @@ static int32_t compute_reverse_gear_torque(TD5_Actor *actor, int32_t speed_in)
     int32_t throttle = (int32_t)actor->encounter_steering_cmd;  /* signed short */
     int32_t target, step;
 
-    if (throttle < 1 || gear != 2) {
-        /* Cold branch: coast target=0. Brake flag doubles the step floor. */
+    if (throttle < 1) {
+        /* Cold branch: no throttle → coast target=0. */
         int base = actor->brake_flag ? 400 : 200;
         step = base * 2;                     /* 800 or 400 */
         target = 0;
-    } else {
+    } else if (gear == 2) {
         /* Hot branch: first-forward under throttle. Step STAYS at 200 here —
          * the doubling is inside the cold branch only. [CONFIRMED @ 0x00403C80
          * raw disasm: iVar4=200 default, `iVar4 * 2` only inside the cold
@@ -4052,6 +4048,22 @@ static int32_t compute_reverse_gear_torque(TD5_Actor *actor, int32_t speed_in)
         int32_t redline = (int32_t)PHYS_S(actor, 0x72);
         target = u + redline - 1800;         /* 0x708 */
         step = 200;
+    } else if (gear > 2) {
+        /* Higher gears: UESA-style target so RPM stays correct.
+         * The original's CRGT targets 0 for gear > 2, relying on airborne
+         * UESA ticks to maintain RPM. Since the port runs auto_gear_select
+         * on-ground, CRGT must also support higher gears or the car
+         * oscillates between gear 2 and 3 (upshift → RPM tanks → downshift). */
+        int32_t abs_spd = speed_in < 0 ? -speed_in : speed_in;
+        int32_t gr = (int32_t)PHYS_S(actor, 0x2E + gear * 2);
+        target = ((abs_spd >> 8) * gr * 0x2D) >> 12;
+        target += 400;
+        step = 200;
+    } else {
+        /* Reverse or neutral under throttle: coast down. */
+        int base = actor->brake_flag ? 400 : 200;
+        step = base * 2;
+        target = 0;
     }
 
     /* --- Slew engine_speed_accum toward target --- */
