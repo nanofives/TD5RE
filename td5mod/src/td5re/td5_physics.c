@@ -2755,6 +2755,14 @@ void td5_physics_update_suspension_response(TD5_Actor *actor)
         actor->angular_velocity_roll  += roll_delta;
         actor->angular_velocity_pitch += pitch_delta;
 
+        /* Dampen angular velocity — prevents oscillation from per-wheel normal
+         * asymmetry. The original's gap_270 spring path provides velocity-proportional
+         * damping, but the port's coarser per-wheel normals create more excitation.
+         * 6.25% decay per frame gives ~16-frame time constant (0.5s at 30fps) —
+         * slow enough for visible hill tilt, fast enough to suppress rocking. */
+        actor->angular_velocity_roll  -= actor->angular_velocity_roll  >> 4;
+        actor->angular_velocity_pitch -= actor->angular_velocity_pitch >> 4;
+
         if (actor->slot_index == 0 && (actor->frame_counter % 60u) == 0u) {
             TD5_LOG_I(LOG_TAG, "susp_resp: roll_d=%d pitch_d=%d grnd=%d spring=%d "
                       "av_roll=%d av_pitch=%d",
