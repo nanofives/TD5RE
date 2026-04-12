@@ -19,6 +19,7 @@
 #include "td5_camera.h"
 #include "td5_vfx.h"
 #include "td5_fmv.h"
+#include "td5_trace.h"
 
 #include <string.h>
 
@@ -85,18 +86,30 @@ uint32_t td5_crc32(const uint8_t *data, size_t len) {
  * ======================================================================== */
 
 int td5re_init(void) {
-    /* Preserve render dimensions set by main.c before memset */
+    /* Preserve settings injected by main.c before memset */
     int saved_w = g_td5.render_width;
     int saved_h = g_td5.render_height;
+    int saved_intro = g_td5.intro_movie_pending;
+    typeof(g_td5.ini) saved_ini = g_td5.ini;
     memset(&g_td5, 0, sizeof(g_td5));
 
-    /* Defaults */
+    /* Restore main.c settings */
+    g_td5.ini = saved_ini;
     g_td5.render_width = (saved_w > 0) ? saved_w : 640;
     g_td5.render_height = (saved_h > 0) ? saved_h : 480;
+
+    /* Sync the legacy render dimension globals used by HUD, VFX, etc. */
+    extern float g_render_width_f, g_render_height_f;
+    extern int   g_render_width,   g_render_height;
+    g_render_width    = g_td5.render_width;
+    g_render_height   = g_td5.render_height;
+    g_render_width_f  = (float)g_td5.render_width;
+    g_render_height_f = (float)g_td5.render_height;
+    TD5_LOG_I("td5re", "render dims synced: %dx%d", g_render_width, g_render_height);
     g_td5.gravity_constant = TD5_GRAVITY_NORMAL;
     g_td5.difficulty = TD5_DIFFICULTY_NORMAL;
     g_td5.viewport_count = 1;
-    g_td5.intro_movie_pending = 0;      /* skip intro for now */
+    g_td5.intro_movie_pending = saved_intro;
     g_td5.frontend_init_pending = 1;    /* MUST be 1 so MENU state inits resources */
     g_td5.game_state = TD5_GAMESTATE_INTRO;
 
@@ -114,10 +127,17 @@ int td5re_init(void) {
     }
 
     TD5_LOG_I("td5re", "All %d modules initialized", g_td5re_module_count);
+
+    /* Initialize race trace (after all modules, reads INI globals) */
+    td5_trace_init();
+
     return 1;
 }
 
 void td5re_shutdown(void) {
+    /* Flush and close the race trace before modules are torn down */
+    td5_trace_shutdown();
+
     /* Shutdown in reverse order */
     for (int i = g_td5re_module_count - 1; i >= 0; i--) {
         TD5_LOG_I("td5re", "Shutting down module: %s", g_td5re_modules[i].name);
