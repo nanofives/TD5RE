@@ -1700,6 +1700,11 @@ void td5_render_actors_for_view(int view_index)
             td5_render_transform_mesh_vertices(mesh);
             td5_render_compute_vertex_lighting(mesh);
 
+            /* Shadow before car mesh — car body + wheels paint over it via
+             * z_write=1 (draw-order occlusion). z_test=0 on the shadow so
+             * it doesn't z-fight with the track surface. */
+            render_vehicle_shadow_quad(actor);
+
             td5_render_prepared_mesh(mesh);
 
             /* Render wheel ring billboards (0x446F00) */
@@ -1707,15 +1712,6 @@ void td5_render_actors_for_view(int view_index)
 
             /* Render brake light billboards (0x4011C0) */
             td5_vfx_render_taillights(slot);
-
-            /* Shadow AFTER car mesh + wheels, matching original render order.
-             * [CONFIRMED @ 0x40C120: original submits shadow into a deferred
-             * translucent sort list after RenderPreparedMeshResource + wheels.]
-             * Uses TD5_PRESET_SHADOW (z_test=1, z_write=0) so the car body's
-             * depth occludes the shadow where they overlap in screen space.
-             * Drawing before the car caused shadows to appear on top of
-             * opponent cars since z_test=0 ignored their depth. */
-            render_vehicle_shadow_quad(actor);
 
             actor_render_count++;
             actor_meshes_submitted++;
@@ -2404,11 +2400,11 @@ static void render_vehicle_shadow_quad(const TD5_Actor *actor)
 
     uint16_t indices[6] = { 0, 1, 2, 0, 2, 3 };
     flush_immediate_internal();
-    td5_plat_render_set_preset(TD5_PRESET_SHADOW);
+    td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_POINT);
     td5_plat_render_bind_texture(s_shadow_page);
     td5_plat_render_draw_tris(verts, 4, indices, 6);
 
-    /* Restore opaque preset for subsequent draws. */
+    /* Restore opaque preset so it doesn't leak into the car mesh draw. */
     td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
 }
 
