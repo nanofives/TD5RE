@@ -2744,7 +2744,7 @@ void td5_physics_update_suspension_response(TD5_Actor *actor)
             int32_t leftrt_hdiff = (left_avg - right_avg) >> 8;   /* left vs right → visual roll */
 
             /* 4096/(2*pi) ≈ 652. Divide by full track/wheelbase (2x half). */
-            int32_t target_roll  = (fwdbk_hdiff  * 652) / (2 * half_wbase);  /* Rx = visual pitch */
+            int32_t target_roll  = -(fwdbk_hdiff  * 652) / (2 * half_wbase);  /* Rx = visual pitch (negated) */
             int32_t target_pitch = (leftrt_hdiff * 652) / (2 * half_track);  /* Rz = visual roll */
 
             /* Clamp target to reasonable range (±0x100 = ±22.5°) */
