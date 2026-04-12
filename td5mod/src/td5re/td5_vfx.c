@@ -222,12 +222,13 @@ static float    s_taillight_u0, s_taillight_v0;
 static float    s_taillight_u1, s_taillight_v1;
 static float    s_taillight_page;
 
-/* Taillight billboard offset vectors (from 0x463030-0x463048) */
+/* Taillight billboard offset vectors (from 0x463030-0x463048)
+ * Original: int16[4] per entry (4th = 0 padding). We store only xyz. */
 static const int16_t s_taillight_offsets[4][3] = {
-    { -12, -12, 0 },   /* top-left */
-    { -12,  12, 0 },   /* bottom-left */
-    {  12, -12, 0 },   /* top-right */
-    {  12,  12, 0 },   /* bottom-right */
+    {  80, -80, 0 },   /* 0x463030: top-left     */
+    { -80, -80, 0 },   /* 0x463038: bottom-left  */
+    {  80,  80, 0 },   /* 0x463040: top-right    */
+    { -80,  80, 0 },   /* 0x463048: bottom-right */
 };
 
 /* --- Billboard animation --- */
@@ -495,7 +496,11 @@ void td5_vfx_init_race_particles(void) {
         s_smoke_variant_uv[i][4] = s_smoke_page;
     }
 
-    /* Look up SKIDMARK sprite for tire marks; fall back to dark SMOKE variant */
+    /* Look up SKIDMARK sprite for tire marks. TD5's static.hed does not
+     * include one — the original binary likely drew tire marks procedurally
+     * or used a level-specific texture. Fall back to FADEWHT (a 4x4 white
+     * quad in tpage4 at 220,32) so the vertex color dominates the
+     * modulation and we can draw semi-transparent dark strips. */
     TD5_AtlasEntry *skidmark = td5_asset_find_atlas_entry(NULL, "SKIDMARK");
     if (vfx_atlas_entry_valid(skidmark)) {
         vfx_extract_sprite_uvs(skidmark,
@@ -503,13 +508,21 @@ void td5_vfx_init_race_particles(void) {
                                 &s_tiremark_u1, &s_tiremark_v1,
                                 &s_tiremark_page);
     } else {
-        /* Fallback: use dark smoke variant (bottom-left quadrant of SMOKE atlas) */
-        s_tiremark_u0   = s_smoke_variant_uv[2][0];
-        s_tiremark_v0   = s_smoke_variant_uv[2][1];
-        s_tiremark_u1   = s_smoke_variant_uv[2][0] + s_smoke_variant_uv[2][2];
-        s_tiremark_v1   = s_smoke_variant_uv[2][1] + s_smoke_variant_uv[2][3];
-        s_tiremark_page = s_smoke_page;
-        TD5_LOG_W(LOG_TAG, "SKIDMARK sprite not found, using SMOKE fallback for tire marks");
+        /* Use FADEWHT — pure white 4x4 region on tpage4, alpha=0x80 after
+         * speedo keying. A white texture lets the vertex color dominate
+         * modulation so we can draw any tire-mark color we want. */
+        TD5_AtlasEntry *fadewht = td5_asset_find_atlas_entry(NULL, "FADEWHT");
+        if (vfx_atlas_entry_valid(fadewht)) {
+            vfx_extract_sprite_uvs(fadewht,
+                                    &s_tiremark_u0, &s_tiremark_v0,
+                                    &s_tiremark_u1, &s_tiremark_v1,
+                                    &s_tiremark_page);
+        } else {
+            s_tiremark_u0 = 0.5f;  s_tiremark_v0 = 0.5f;
+            s_tiremark_u1 = 1.5f;  s_tiremark_v1 = 1.5f;
+            s_tiremark_page = (float)(700 + 4);
+        }
+        TD5_LOG_I(LOG_TAG, "SKIDMARK not in static.hed; using FADEWHT as tire-mark base");
     }
 
     TD5_LOG_I(LOG_TAG,
@@ -561,9 +574,12 @@ void td5_vfx_init_smoke_sprite_pool(void) {
  * Sets the "projected" flag (bit 6) on successful projection.
  */
 void td5_vfx_project_particles(int view_index) {
-    extern float g_renderBasisMatrix[12];
+    /* g_cameraBasis is the real per-frame camera rotation matrix written
+     * by the camera module (td5_camera.c). The older g_renderBasisMatrix
+     * declared in td5_render.c is a stale identity and never updated.
+     * Row layout: m[0..2]=right, m[3..5]=up, m[6..8]=forward. */
+    extern float g_cameraBasis[9];
 
-    /* Get camera world position for subtraction */
     float cam_x, cam_y, cam_z;
     td5_camera_get_position(&cam_x, &cam_y, &cam_z);
 
@@ -581,18 +597,13 @@ void td5_vfx_project_particles(int view_index) {
         memcpy(&wy, slot + 5, 4);
         memcpy(&wz, slot + 9, 4);
 
-        /* Camera-relative world delta (match td5_vfx_render_tire_tracks) */
         float cx = (float)wx * FP_TO_FLOAT - cam_x;
         float cy = (float)wy * FP_TO_FLOAT - cam_y;
         float cz = (float)wz * FP_TO_FLOAT - cam_z;
 
-        /* Apply view rotation via render basis matrix (3x3 portion).
-         * Using g_renderBasisMatrix explicitly matches the tire-track
-         * render path; td5_render_transform_vec3 reads a different
-         * matrix (s_render_transform.m) that isn't the camera basis. */
-        float view_x = cx * g_renderBasisMatrix[0] + cy * g_renderBasisMatrix[1] + cz * g_renderBasisMatrix[2];
-        float view_y = cx * g_renderBasisMatrix[3] + cy * g_renderBasisMatrix[4] + cz * g_renderBasisMatrix[5];
-        float view_z = cx * g_renderBasisMatrix[6] + cy * g_renderBasisMatrix[7] + cz * g_renderBasisMatrix[8];
+        float view_x = cx * g_cameraBasis[0] + cy * g_cameraBasis[1] + cz * g_cameraBasis[2];
+        float view_y = cx * g_cameraBasis[3] + cy * g_cameraBasis[4] + cz * g_cameraBasis[5];
+        float view_z = cx * g_cameraBasis[6] + cy * g_cameraBasis[7] + cz * g_cameraBasis[8];
 
         memcpy(slot + 0x0D, &view_x, 4);
         memcpy(slot + 0x11, &view_y, 4);
@@ -620,6 +631,7 @@ void td5_vfx_draw_particles(int view_index) {
     s_current_view_index = view_index;
     int vi = view_index & 1;
     int drawn = 0;
+
 
     /* Decrement sprite render flags (fade timers) */
     for (int i = 0; i < TD5_VFX_SPRITE_BATCH_COUNT; i++) {
@@ -662,14 +674,14 @@ void td5_vfx_draw_particles(int view_index) {
         float sz = vz * (1.0f / far_clip);
         if (sz > 1.0f) sz = 1.0f;
 
-        /* Perspective-scale the sprite to a world-space half-size of
-         * ~40 units (car-width scale). Texel-derived sizing produces
-         * 2-4 px sprites at typical race distances, which is invisible. */
-        const float WORLD_HALF = 40.0f;
+        /* Perspective-scale the sprite billboard. */
+        const float WORLD_HALF = 30.0f;
         float half_w = WORLD_HALF * focal * inv_z;
         float half_h = WORLD_HALF * focal * inv_z;
-        if (half_w < 3.0f) half_w = 3.0f;
-        if (half_h < 3.0f) half_h = 3.0f;
+        if (half_w < 6.0f) half_w = 6.0f;
+        if (half_h < 6.0f) half_h = 6.0f;
+        if (half_w > 200.0f) half_w = 200.0f;
+        if (half_h > 200.0f) half_h = 200.0f;
 
         /* Normalize texel UVs to [0,1] for the D3D11 sampler. Static atlas
          * pages are 256x256; query actual dimensions so hi-res replacement
@@ -1421,8 +1433,15 @@ void td5_vfx_update_tire_tracks(void) {
  * and submits translucent quads with road-flush Y offset.
  */
 void td5_vfx_render_tire_tracks(void) {
+    /* TODO: tire track strip geometry has multiple bugs:
+     * - Degenerate quads (v0 == v2, zero-area strips)
+     * - Per-frame gravity sinks anchor_y indefinitely
+     * - No SKIDMARK texture in static.hed (FADEWHT fallback)
+     * Disabled until the strip builder in update_tire_tracks is fixed. */
+    return;
+
     extern void td5_render_submit_translucent(uint16_t *quad_data);
-    extern float g_renderBasisMatrix[12];
+    extern float g_cameraBasis[9];
     extern float g_render_width_f;
     extern float g_render_height_f;
 
@@ -1503,10 +1522,12 @@ void td5_vfx_render_tire_tracks(void) {
             float cy = wy - cam_y;
             float cz = wz - cam_z;
 
-            /* Apply view rotation via render basis matrix (3x3 portion) */
-            float vx = cx * g_renderBasisMatrix[0] + cy * g_renderBasisMatrix[1] + cz * g_renderBasisMatrix[2];
-            float vy = cx * g_renderBasisMatrix[3] + cy * g_renderBasisMatrix[4] + cz * g_renderBasisMatrix[5];
-            float vz = cx * g_renderBasisMatrix[6] + cy * g_renderBasisMatrix[7] + cz * g_renderBasisMatrix[8];
+            /* Apply view rotation via the real per-frame camera basis
+             * (g_cameraBasis is written by td5_camera.c; the older
+             * g_renderBasisMatrix is a stale identity). */
+            float vx = cx * g_cameraBasis[0] + cy * g_cameraBasis[1] + cz * g_cameraBasis[2];
+            float vy = cx * g_cameraBasis[3] + cy * g_cameraBasis[4] + cz * g_cameraBasis[5];
+            float vz = cx * g_cameraBasis[6] + cy * g_cameraBasis[7] + cz * g_cameraBasis[8];
 
             /* Perspective project */
             if (vz <= near_clip) { all_visible = 0; break; }
@@ -1522,9 +1543,9 @@ void td5_vfx_render_tire_tracks(void) {
         /* Apply gravity to Y coordinates (subtract per-frame gravity constant) */
         slot->anchor_y -= (int32_t)(PARTICLE_GRAVITY_PER_FRAME * 256.0f);
 
-        /* Build vertex color from intensity: gray BGRA = 0xFF000000 | (a<<16) | (a<<8) | a */
         uint8_t val = slot->intensity;
-        uint32_t color = 0xFF000000 | ((uint32_t)val << 16) |
+        if (val < 0x30) val = 0x30;
+        uint32_t color = 0xFF000000u | ((uint32_t)val << 16) |
                          ((uint32_t)val << 8) | (uint32_t)val;
 
         /* Normalize texel UVs to [0,1] for the D3D11 sampler (same as HUD). */
@@ -1570,7 +1591,7 @@ void td5_vfx_render_tire_tracks(void) {
     }
 
     if (tt_log) {
-        TD5_LOG_D(LOG_TAG, "tire render: alive=%d submitted=%d",
+        TD5_LOG_I(LOG_TAG, "tire render: alive=%d submitted=%d",
                   tt_alive, tt_submitted);
     }
 }
@@ -2233,44 +2254,27 @@ void td5_vfx_render_taillights(int actor_index) {
     /* Brightness decay/ramp */
     uint8_t brightness = s_taillight_brightness[actor_index];
 
-    /* Read brake state from actor.
-     * Original: actor+0x37C & 0x0F (damage_lockout low nibble)
-     * More accurately: actor+0x36D (brake_flag byte, nonzero = braking).
-     * The comment in the original source says "actor+0x376+6 & 0xF" but
-     * 0x376+6 = 0x37C = damage_lockout. The brake_flag at 0x36D is the
-     * actual brake indicator. We use the confirmed field. */
+    /* Original gate + brake-active check (0x4011C0):
+     *   Gate:   actor[0x36D] == 0 → return  [CONFIRMED @ 0x4011E3]
+     *   Active: actor[0x37C] & 0x0F != 0    [CONFIRMED @ 0x4011F5]
+     * 0x36D = brake capability flag (set by input/AI).
+     * 0x37C & 0x0F = low nibble used as brake-light trigger in original. */
     int brake_active = 0;
-    /* Compute actor byte pointer from global actor table base concept.
-     * In the source port, the actor array is managed by td5_game/td5_physics.
-     * For now we read brake state indirectly. */
-    /* The actual check in the original: *(uint8_t*)(actor_base + 0x36D) != 0 */
-    /* Since we only have actor_index, and the render function is called from
-     * a loop over all actors, the caller can pass the actor. But the API takes
-     * only an index. We conservatively set brake_active from the brightness
-     * trend -- a proper implementation would read from the actor table. */
-    (void)brake_active; /* will be set below */
 
-    /* We need actor access. Compute from the global actor table. */
-    if (g_actor_table_base) {
-        uint8_t *ap = g_actor_table_base + actor_index * TD5_ACTOR_STRIDE;
+    if (!g_actor_table_base) return;
 
-        /* Check brake capability (brake_flag at +0x36D) */
-        if (*(ap + 0x36D) == 0) return; /* no brake light capability */
+    uint8_t *ap = g_actor_table_base + actor_index * TD5_ACTOR_STRIDE;
 
-        /* Read brake state: brake_flag at +0x36D, nonzero = braking */
-        brake_active = (*(ap + 0x36D) != 0) ? 1 : 0;
+    /* Capability gate: actor must have brake_flag capability */
+    if (*(ap + 0x36D) == 0) return;
 
-        /* More precise check from the original: the low nibble of +0x37C
-         * (damage_lockout) is checked as brake indicator in some paths.
-         * We use +0x36D which is the confirmed brake_flag. */
-    } else {
-        return; /* cannot render without actor table */
-    }
+    /* Brake active: original checks low nibble of +0x37C [CONFIRMED @ 0x4011F5] */
+    brake_active = ((*(ap + 0x37C) & 0x0F) != 0) ? 1 : 0;
 
     if (brake_active) {
-        if (brightness < 127) {
+        if (brightness < 0x80) {  /* cap at 128 [CONFIRMED @ 0x401204] */
             brightness += 8;
-            if (brightness > 127) brightness = 127;
+            if (brightness > 0x80) brightness = 0x80;
         }
     } else {
         if (brightness > 0) {
@@ -2303,10 +2307,9 @@ void td5_vfx_render_taillights(int actor_index) {
 
         /* Read taillight hardpoint position from vehicle config.
          * Original: reads int16[3] from car_config + 0x60/0x68 for left/right.
-         * Transform via TransformShortVec3 into view space. */
-        uint8_t *ap = g_actor_table_base + actor_index * TD5_ACTOR_STRIDE;
+         * Car config pointer at actor+0x1B8 [CONFIRMED @ 0x40128F] */
         void *car_config;
-        memcpy(&car_config, ap + 0x1B0, sizeof(void *));
+        memcpy(&car_config, ap + 0x1B8, sizeof(void *));
 
         if (car_config) {
             int16_t hardpoint[3];
