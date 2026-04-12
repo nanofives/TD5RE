@@ -2497,8 +2497,7 @@ static void render_vehicle_brake_lights(const TD5_Actor *actor, int slot)
         float inv_z = 1.0f / vz;
         float cx = -vx * s_focal_length * inv_z + s_center_x;
         float cy = -vy * s_focal_length * inv_z + s_center_y;
-        /* Bias depth toward camera to prevent z-fighting with car body */
-        float depth = (vz - 2.0f) * (1.0f / s_far_clip);
+        float depth = vz * (1.0f / s_far_clip);
 
         /* Screen-space half-size: perspective-scale the billboard */
         float h = half_size * s_focal_length * inv_z;
@@ -2527,7 +2526,9 @@ static void render_vehicle_brake_lights(const TD5_Actor *actor, int slot)
 
         uint16_t idx[6] = { 0, 1, 2, 1, 3, 2 };
         flush_immediate_internal();
-        td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
+        /* TRANSLUCENT_POINT disables z-test (like the shadow quad) so the
+         * brake light billboard doesn't z-fight with the car body mesh. */
+        td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_POINT);
         td5_plat_render_bind_texture(s_braked_page);
         td5_plat_render_draw_tris(v, 4, idx, 6);
     }
