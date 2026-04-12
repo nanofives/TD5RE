@@ -691,8 +691,20 @@ void td5_physics_update_player(TD5_Actor *actor)
          * it runs later in this function as part of the post-force
          * longitudinal/lateral_speed write. [CONFIRMED via 2026-04-11 CRGT
          * Ghidra pass: CRGT and UESA are mutually exclusive per tick — CRGT
-         * on ground, UESA on airborne.] */
-        td5_physics_auto_gear_select(actor);
+         * on ground, UESA on airborne.]
+         *
+         * Gearbox dispatch [CONFIRMED via 2026-04-11 auto_gear Ghidra pass]:
+         *   field_0x378 == 0 → manual (reverse_throttle_sign, no auto upshift)
+         *   field_0x378 != 0 → automatic (auto_gear_select)
+         * The Frida diff-race scenario leaves field_0x378 at 0 because the
+         * input path that writes it isn't invoked — so the original runs the
+         * manual path. The port previously called auto_gear_select
+         * unconditionally, causing spurious tick-3 upshifts. */
+        if (*((const uint8_t *)actor + 0x378) == 0) {
+            td5_physics_reverse_throttle_sign(actor);
+        } else {
+            td5_physics_auto_gear_select(actor);
+        }
 
         if (!actor->brake_flag) {
             /* Drive path: drive torque distributed by drivetrain. At
@@ -929,49 +941,50 @@ void td5_physics_update_player(TD5_Actor *actor)
 
     /* --- 14. Yaw torque, clamp [-0x578, +0x578] ---
      *
-     * Original formula at 0x404C96-0x404CCC:
-     *   yaw = (cos_s * front_weight * rear_long
-     *        + (rear_lat - front_lat) * 500
-     *        - front_long * rear_weight)
-     *        / (inertia / 0x28C)
+     * Literal decomp @ 0x404C80-0x404CCC:
+     *   yaw = (cos(s)*a/4096 * front_lat
+     *        + (wheel_RR - wheel_RL - wheel_FL + wheel_FR) * 500
+     *        - rear_lat * b)
+     *        / (I / 0x28C)
      *
-     * The dominant term is the lateral force difference * 500 — this is the
-     * primary yaw torque source from steering. The longitudinal terms provide
-     * weight-transfer coupling (understeer/oversteer under throttle).
-     * [CONFIRMED: *500 via LEA chain at 0x404CA0-0x404CBF]
+     * Term2 is the left-right per-WHEEL longitudinal force differential:
+     * each wheel_XX = grip_surface[bVarN] * wheel_drive_force >> 8. Since
+     * the port uses a single center surface probe (all 4 wheels share the
+     * same grip), and each axle pair shares equal drive force, term2 = 0.
+     * When per-wheel surface probing is implemented, term2 becomes non-zero
+     * on mixed-surface transitions (e.g. two wheels on grass).
+     * [CONFIRMED @ 0x404C80 via literal decomp — iVar31 = rear-right,
+     * iVar11 = rear-left, iVar35 = front-left, iVar36 = front-right]
      *
-     * Speed gate: skip yaw torque when nearly stationary. At very low speed,
-     * surface gravity injects velocity that produces parasitic yaw torque
-     * (front/rear grip differ → lateral force imbalance → rotation).
-     * No damping mechanism fires at zero speed, so the torque accumulates.
-     * Gate on |v_long| + |v_lat| < 0x100 to prevent this feedback loop. */
+     * PRIOR BUG: port used (rear_lat - front_lat)*500, which was millions
+     * of units and saturated the ±1400 clamp every tick — root cause of
+     * handling over-sensitivity after the coupled solve landed.
+     *
+     * Speed gate (0x100 threshold) also removed — original has no analogous
+     * gate. With the coupled solve and correct yaw formula, lateral forces
+     * naturally go to zero at zero velocity. [CONFIRMED no gate in original] */
     {
-        int32_t abs_vl = v_long < 0 ? -v_long : v_long;
-        int32_t abs_vlat = v_lat < 0 ? -v_lat : v_lat;
-        int32_t speed_sum = abs_vl + abs_vlat;
-        if (speed_sum < 0x100) {
-            /* Near-stationary: zero out lateral forces to prevent parasitic yaw */
-            front_lat_force = 0;
-            rear_lat_force = 0;
-            if (actor->slot_index == 0 && (actor->frame_counter % 120u) == 0u) {
-                TD5_LOG_I(LOG_TAG, "YAW gate: speed_sum=0x%X < 0x100, zeroing lat forces",
-                          speed_sum);
-            }
-        }
         int32_t inertia = PHYS_I(actor, 0x20);
         int32_t inertia_div = inertia / 0x28C;
         if (inertia_div == 0) inertia_div = 1;
 
-        /* Term 1: cos(steer) * front_weight * rear_long_force [CONFIRMED @ 0x404C96] */
-        int32_t term1 = ((cos_s * front_weight) >> 12);
-        term1 = (term1 * rear_long) >> 8;
+        /* Term 1: cos(steer) * front_weight / 4096 * front_lat_force
+         * [CONFIRMED @ 0x404C80: (iVar18*iVar32 >> 12) * local_c] */
+        int32_t term1 = (cos_sr * front_weight) / 4096;
+        term1 = term1 * front_lat_force;
 
-        /* Term 2 (DOMINANT): lateral force difference * 500 [CONFIRMED @ 0x404CA0] */
-        int32_t lat_diff = rear_lat_force - front_lat_force;
-        int32_t term2 = lat_diff * 500;
+        /* Term 2: per-wheel longitudinal force left-right differential * 500.
+         * Currently 0 because port uses uniform grip per axle pair.
+         * [CONFIRMED @ 0x404C8E: (iVar31-iVar11-iVar35+iVar36)*500] */
+        int32_t wheel_long_fl = (grip[0] * wheel_drive[0]) / 256;
+        int32_t wheel_long_fr = (grip[1] * wheel_drive[1]) / 256;
+        int32_t wheel_long_rl = (grip[2] * wheel_drive[2]) / 256;
+        int32_t wheel_long_rr = (grip[3] * wheel_drive[3]) / 256;
+        int32_t term2 = (wheel_long_rr - wheel_long_rl - wheel_long_fl + wheel_long_fr) * 500;
 
-        /* Term 3: front_long_force * rear_weight [CONFIRMED @ 0x404CBF] */
-        int32_t term3 = (front_long * rear_weight) >> 8;
+        /* Term 3: rear_lat_force * rear_weight
+         * [CONFIRMED @ 0x404CBF: local_14 * iVar13] */
+        int32_t term3 = rear_lat_force * rear_weight;
 
         int32_t yaw_torque = (term1 + term2 - term3) / inertia_div;
 
@@ -980,7 +993,7 @@ void td5_physics_update_player(TD5_Actor *actor)
 
         actor->angular_velocity_yaw += yaw_torque;
 
-        if (actor->slot_index == 0 && (actor->frame_counter % 120u) == 0u) {
+        if (actor->slot_index == 0 && (actor->frame_counter % 60u) == 0u) {
             TD5_LOG_I(LOG_TAG,
                       "YAW: torque=%d ang_vel=%d heading=%d t1=%d t2=%d t3=%d idiv=%d",
                       yaw_torque, actor->angular_velocity_yaw,
@@ -1291,9 +1304,11 @@ void td5_physics_update_ai(TD5_Actor *actor)
      * a wheel-drive input. */
     if (actor->surface_contact_flags != 0) {
         /* --- ON-GROUND branch --- */
-        td5_physics_reverse_throttle_sign(actor);
-        td5_physics_auto_gear_select(actor);
-        td5_physics_update_engine_speed(actor);
+        /* Original 0x404EC0 skips gear+engine when throttle==0 */
+        if (actor->encounter_steering_cmd != 0) {
+            td5_physics_auto_gear_select(actor);
+            td5_physics_update_engine_speed(actor);
+        }
 
         if (!actor->brake_flag) {
             /* Drive path: compute_drive_torque returns 0 at idle throttle
@@ -3881,16 +3896,20 @@ static int32_t compute_reverse_gear_torque(TD5_Actor *actor, int32_t speed_in)
     int32_t target, step;
 
     if (throttle < 1 || gear != 2) {
+        /* Cold branch: coast target=0. Brake flag doubles the step floor. */
         int base = actor->brake_flag ? 400 : 200;
         step = base * 2;                     /* 800 or 400 */
         target = 0;
     } else {
-        /* Hot target: first-forward under throttle */
+        /* Hot branch: first-forward under throttle. Step STAYS at 200 here —
+         * the doubling is inside the cold branch only. [CONFIRMED @ 0x00403C80
+         * raw disasm: iVar4=200 default, `iVar4 * 2` only inside the cold
+         * conditional.] */
         int32_t u = (speed_in * 4) >> 8;
         if (u < 0) u = 0;                    /* clamp via (AND sign-1) idiom */
         int32_t redline = (int32_t)PHYS_S(actor, 0x72);
         target = u + redline - 1800;         /* 0x708 */
-        step = 200 * 2;                      /* 400 — brake branch unreachable here */
+        step = 200;
     }
 
     /* --- Slew engine_speed_accum toward target --- */
