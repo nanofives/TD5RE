@@ -21,6 +21,7 @@
 #ifndef TD5_ACTOR_STRUCT_H
 #define TD5_ACTOR_STRUCT_H
 
+#include <stddef.h>
 #include <stdint.h>
 
 #pragma pack(push, 1)   /* exact layout required -- no compiler padding */
@@ -426,9 +427,10 @@ typedef struct TD5_Actor {
      * Zeroed by ResetVehicleActorState (loop at param_1+0x16E, short* = byte 0x2DC).
      */
     int32_t  wheel_suspension_pos[4];   /* +0x2DC: per-wheel spring deflection [CONFIRMED] */
-    int32_t  wheel_force_accum[4];      /* +0x2EC: per-wheel force accumulators [CONFIRMED]
-                                         *         target of ApplySteeringTorqueToWheels */
-    int32_t  wheel_suspension_vel[4];   /* +0x2FC: per-wheel spring-damper velocity [CONFIRMED] */
+    int32_t  wheel_spring_dv[4];        /* +0x2EC: per-wheel spring delta-v buffer [CONFIRMED]
+                                         *         (was: wheel_force_accum — misnomer) */
+    int32_t  wheel_load_accum[4];      /* +0x2FC: per-wheel load accumulator [CONFIRMED]
+                                         *         (was: wheel_suspension_vel — misnomer) */
 
     /* === STEERING & ENGINE (0x30C-0x323) =============================
      *
@@ -570,7 +572,30 @@ typedef struct TD5_Actor {
  * Compile-time size verification
  * ====================================================================== */
 
-typedef char _TD5_Actor_size_check[sizeof(TD5_Actor) == TD5_ACTOR_STRIDE ? 1 : -1];
+_Static_assert(sizeof(TD5_Vec3_Fixed) == 0x0C, "TD5_Vec3_Fixed must stay 12 bytes");
+_Static_assert(sizeof(TD5_DisplayAngles) == 0x06, "TD5_DisplayAngles must stay 6 bytes");
+_Static_assert(sizeof(TD5_EulerAccum) == 0x0C, "TD5_EulerAccum must stay 12 bytes");
+_Static_assert(sizeof(TD5_TrackProbeState) == 0x10, "TD5_TrackProbeState must stay 16 bytes");
+_Static_assert(sizeof(TD5_Actor) == TD5_ACTOR_STRIDE, "TD5_Actor size drifted from 0x388");
+_Static_assert(offsetof(TD5_Actor, wheel_probes) == 0x000, "TD5_Actor.wheel_probes offset drifted");
+_Static_assert(offsetof(TD5_Actor, body_probes) == 0x040, "TD5_Actor.body_probes offset drifted");
+_Static_assert(offsetof(TD5_Actor, track_span_raw) == 0x080, "TD5_Actor.track_span_raw offset drifted");
+_Static_assert(offsetof(TD5_Actor, track_sub_lane_index) == 0x08C, "TD5_Actor.track_sub_lane_index offset drifted");
+_Static_assert(offsetof(TD5_Actor, probe_FL) == 0x090, "TD5_Actor.probe_FL offset drifted");
+_Static_assert(offsetof(TD5_Actor, rotation_matrix) == 0x120, "TD5_Actor.rotation_matrix offset drifted");
+_Static_assert(offsetof(TD5_Actor, collision_spin_matrix) == 0x180, "TD5_Actor.collision_spin_matrix offset drifted");
+_Static_assert(offsetof(TD5_Actor, world_pos) == 0x1FC, "TD5_Actor.world_pos offset drifted");
+_Static_assert(offsetof(TD5_Actor, display_angles) == 0x208, "TD5_Actor.display_angles offset drifted");
+_Static_assert(offsetof(TD5_Actor, steering_command) == 0x30C, "TD5_Actor.steering_command offset drifted");
+_Static_assert(offsetof(TD5_Actor, engine_speed_accum) == 0x310, "TD5_Actor.engine_speed_accum offset drifted");
+_Static_assert(offsetof(TD5_Actor, finish_time) == 0x328, "TD5_Actor.finish_time offset drifted");
+_Static_assert(offsetof(TD5_Actor, pending_finish_timer) == 0x344, "TD5_Actor.pending_finish_timer offset drifted");
+_Static_assert(offsetof(TD5_Actor, current_gear) == 0x36B, "TD5_Actor.current_gear offset drifted");
+_Static_assert(offsetof(TD5_Actor, slot_index) == 0x375, "TD5_Actor.slot_index offset drifted");
+_Static_assert(offsetof(TD5_Actor, vehicle_mode) == 0x379, "TD5_Actor.vehicle_mode offset drifted");
+_Static_assert(offsetof(TD5_Actor, track_contact_flag) == 0x37B, "TD5_Actor.track_contact_flag offset drifted");
+_Static_assert(offsetof(TD5_Actor, wheel_contact_bitmask) == 0x37D, "TD5_Actor.wheel_contact_bitmask offset drifted");
+_Static_assert(offsetof(TD5_Actor, race_position) == 0x383, "TD5_Actor.race_position offset drifted");
 
 /* ======================================================================
  * Race Slot State Table

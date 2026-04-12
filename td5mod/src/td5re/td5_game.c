@@ -1051,6 +1051,13 @@ int td5_game_init_race_session(void) {
                       sub_lane);
         }
 
+        /* Seed initial race_position from spawn order (original seeds at init) */
+        for (int s = 0; s < racer_count; s++) {
+            TD5_Actor *a = (TD5_Actor *)(s_actor_memory + (size_t)s * TD5_ACTOR_STRIDE);
+            a->race_position = (uint8_t)s;
+            a->prev_race_position = (uint8_t)s;
+        }
+
         TD5_LOG_I(LOG_TAG, "InitRace step 11/19: actors spawned and runtime bound count=%d",
                   spawn_count);
 
@@ -2113,10 +2120,9 @@ static void advance_pending_finish_state(int slot, uint32_t sim_delta) {
     ActorRaceMetric *m = &s_metrics[slot];
     TD5_Actor *actor = td5_game_get_actor(slot);
 
-    /* Sync span from actor struct (original reads actor+0x82 directly) */
-    if (actor) {
-        m->normalized_span = actor->track_span_normalized;
-    }
+    /* Original reads actor+0x82 directly per-tick but does NOT sync it into
+     * the metric struct — metric normalized_span stays 0 until checkpoint. */
+    int16_t actor_span = actor ? actor->track_span_normalized : 0;
 
     /* Already finished */
     if (s_slot_state[slot].companion_1 != 0) return;
@@ -2148,7 +2154,7 @@ static void advance_pending_finish_state(int slot, uint32_t sim_delta) {
         if (s_circuit_anchor_span[slot] < 0) {
             int heading_delta;
 
-            if (m->normalized_span > 2 || speed < 0x100) {
+            if (actor_span > 2 || speed < 0x100) {
                 m->checkpoint_bitmask = 0;
                 return;
             }
@@ -2166,14 +2172,14 @@ static void advance_pending_finish_state(int slot, uint32_t sim_delta) {
                 return;
             }
 
-            s_circuit_anchor_span[slot] = m->normalized_span;
+            s_circuit_anchor_span[slot] = actor_span;
             m->checkpoint_bitmask = 1;
             return;
         }
 
         {
             int32_t anchor_span = (int32_t)s_circuit_anchor_span[slot];
-            int32_t behind = anchor_span - (int32_t)m->normalized_span;
+            int32_t behind = anchor_span - (int32_t)actor_span;
 
             if (behind < -span_ring / 2) {
                 behind += span_ring;
@@ -2184,7 +2190,7 @@ static void advance_pending_finish_state(int slot, uint32_t sim_delta) {
             if (behind > 64) {
                 TD5_LOG_I(LOG_TAG,
                           "Circuit wrong-way: slot=%d span=%d checkpoint=%d behind=%d",
-                          slot, m->normalized_span, (int)anchor_span, (int)behind);
+                          slot, (int)actor_span, (int)anchor_span, (int)behind);
                 s_circuit_anchor_span[slot] = -1;
                 s_circuit_wrong_way_cooldown[slot] = TD5_CIRCUIT_WRONG_WAY_COOLDOWN_TICKS;
                 m->checkpoint_bitmask = 0;
@@ -2193,7 +2199,7 @@ static void advance_pending_finish_state(int slot, uint32_t sim_delta) {
         }
 
         {
-            int32_t ahead = (int32_t)m->normalized_span - (int32_t)s_circuit_anchor_span[slot];
+            int32_t ahead = (int32_t)actor_span - (int32_t)s_circuit_anchor_span[slot];
             if (ahead < 0) {
                 ahead += span_ring;
             }
@@ -2222,10 +2228,11 @@ static void advance_pending_finish_state(int slot, uint32_t sim_delta) {
                 }
 
                 m->checkpoint_index++;
+                m->normalized_span = actor_span;
 
                 TD5_LOG_I(LOG_TAG,
                           "Circuit lap complete: slot=%d lap=%d span=%d",
-                          slot, m->checkpoint_index, m->normalized_span);
+                          slot, m->checkpoint_index, (int)actor_span);
 
                 if (m->checkpoint_index >= g_td5.circuit_lap_count) {
                     m->post_finish_metric_base = m->cumulative_timer;
@@ -2234,7 +2241,7 @@ static void advance_pending_finish_state(int slot, uint32_t sim_delta) {
                     s_slot_state[slot].state = 2;  /* completed */
                     TD5_LOG_I(LOG_TAG,
                               "Actor finish: slot=%d mode=circuit lap=%d timer=%d span=%d",
-                              slot, m->checkpoint_index, m->cumulative_timer, m->normalized_span);
+                              slot, m->checkpoint_index, m->cumulative_timer, (int)actor_span);
                 }
             }
         }
@@ -2244,12 +2251,13 @@ static void advance_pending_finish_state(int slot, uint32_t sim_delta) {
         if (m->checkpoint_index < s_active_checkpoint.checkpoint_count) {
             int cp = m->checkpoint_index;
             int threshold = (int)(unsigned int)s_active_checkpoint.checkpoints[cp].span_threshold;
-            int span_val  = (int)m->normalized_span;
+            int span_val  = (int)actor_span;
             if (span_val >= threshold) {
                 /* Crossed checkpoint: add time bonus */
                 m->timer_ticks +=
                     (int16_t)s_active_checkpoint.checkpoints[cp].time_bonus;
                 m->checkpoint_index++;
+                m->normalized_span = actor_span;
                 TD5_LOG_I(LOG_TAG,
                           "Checkpoint crossed: slot=%d cp=%d span=%d threshold=%d bonus=%d timer=%d",
                           slot, cp, span_val, threshold,
@@ -2268,7 +2276,7 @@ static void advance_pending_finish_state(int slot, uint32_t sim_delta) {
             m->checkpoint_index >= s_active_checkpoint.checkpoint_count) {
             m->post_finish_metric_base = m->cumulative_timer;
             if (m->average_speed_raw > 0) {
-                int avg = (m->normalized_span * 1500) / m->average_speed_raw;
+                int avg = (actor_span * 1500) / m->average_speed_raw;
                 m->speed_bonus += (avg * 1000 - m->average_speed_raw * 1000 / 256);
             }
             s_slot_state[slot].companion_1 = 1;
@@ -2276,7 +2284,7 @@ static void advance_pending_finish_state(int slot, uint32_t sim_delta) {
             s_slot_state[slot].state = 2;
             TD5_LOG_I(LOG_TAG,
                       "Actor finish: slot=%d mode=checkpoint checkpoints=%d timer=%d span=%d",
-                      slot, m->checkpoint_index, m->cumulative_timer, m->normalized_span);
+                      slot, m->checkpoint_index, m->cumulative_timer, (int)actor_span);
         }
     }
 }

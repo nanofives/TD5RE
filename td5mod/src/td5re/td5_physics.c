@@ -875,7 +875,7 @@ void td5_physics_update_player(TD5_Actor *actor)
 
         int32_t local_14_num = (t_d / 4096) * cos_sr
                              + ((t_a / 4096) + (t_b / 4096) + (t_c / 4096)) * sin_sr;
-        rear_lat_force = local_14_num / denom;
+        rear_lat_force = -(local_14_num / denom);
 
         /* Front lateral force (local_c) numerator
          * [CONFIRMED @ 0x00404B28-0x00404B93] */
@@ -889,7 +889,7 @@ void td5_physics_update_player(TD5_Actor *actor)
         int32_t t_f = (iv24b / 1024) * L_;
 
         int32_t local_c_num = (t_e / 4096) * sin_sr - (t_f / 4096) * cos_sr;
-        front_lat_force = local_c_num / denom;
+        front_lat_force = -(local_c_num / denom);
     }
 
     if (actor->slot_index == 0 && (actor->frame_counter % 60u) == 0u) {
@@ -1593,7 +1593,7 @@ static void apply_damped_suspension_force(TD5_Actor *actor, int32_t lateral, int
 
     /* Pitch axis: use wheel_suspension_pos[0]/vel[0] as pitch state */
     int32_t pitch_pos = actor->wheel_suspension_pos[0];
-    int32_t pitch_vel = actor->wheel_suspension_vel[0];
+    int32_t pitch_vel = actor->wheel_load_accum[0];
 
     pitch_vel += (longitudinal * 0x80) >> 8;
     pitch_vel += (pitch_vel * -0x20) >> 8;
@@ -1604,7 +1604,7 @@ static void apply_damped_suspension_force(TD5_Actor *actor, int32_t lateral, int
     if (pitch_pos < -0x4000) pitch_pos = -0x4000;
 
     actor->wheel_suspension_pos[0] = pitch_pos;
-    actor->wheel_suspension_vel[0] = pitch_vel;
+    actor->wheel_load_accum[0] = pitch_vel;
 
     /* Feed into angular velocity for visual tilt */
     actor->angular_velocity_roll  += (roll_pos >> 6);
@@ -2485,18 +2485,18 @@ void td5_physics_integrate_suspension(TD5_Actor *actor)
     /* Per-wheel spring-damper.
      *
      * Original (0x403A20) reads XZ projections as force input, NOT the
-     * wheel_force_accum Y values. The source port's previous approach of
+     * wheel_spring_dv Y values. The source port's previous approach of
      * reading force_accum created positive pitch feedback. Until the
      * original's XZ projection logic is properly decompiled, use a stable
      * passive spring-damper: restoring force from position (spring_k)
      * and velocity damping (damping) with no external force input.
      *
-     * The wheel_force_accum[i] (ground contact force from refresh_wheel_contacts)
+     * The wheel_spring_dv[i] (ground contact force from refresh_wheel_contacts)
      * drives the external excitation via feedback scaling. */
     for (int i = 0; i < 4; i++) {
         int32_t pos = actor->wheel_suspension_pos[i];
-        int32_t vel = actor->wheel_suspension_vel[i];
-        int32_t force = actor->wheel_force_accum[i];
+        int32_t vel = actor->wheel_load_accum[i];
+        int32_t force = actor->wheel_spring_dv[i];
 
         /* External excitation: ground contact distance scaled by feedback */
         int32_t drive = (force * feedback) >> 8;
@@ -2524,7 +2524,7 @@ void td5_physics_integrate_suspension(TD5_Actor *actor)
         }
 
         actor->wheel_suspension_pos[i] = pos;
-        actor->wheel_suspension_vel[i] = vel;
+        actor->wheel_load_accum[i] = vel;
     }
 
     /* Central chassis suspension (averaged from wheel positions) */
@@ -2858,12 +2858,12 @@ void td5_physics_integrate_pose(TD5_Actor *actor)
                 "bitmask=0x%02X force=[%d,%d,%d,%d] susp_pos=[%d,%d,%d,%d] susp_vel=[%d,%d,%d,%d]",
                 actor->world_pos.y, actor->linear_velocity_y, actor->prev_frame_y_position,
                 actor->render_pos.y, actor->wheel_contact_bitmask,
-                actor->wheel_force_accum[0], actor->wheel_force_accum[1],
-                actor->wheel_force_accum[2], actor->wheel_force_accum[3],
+                actor->wheel_spring_dv[0], actor->wheel_spring_dv[1],
+                actor->wheel_spring_dv[2], actor->wheel_spring_dv[3],
                 actor->wheel_suspension_pos[0], actor->wheel_suspension_pos[1],
                 actor->wheel_suspension_pos[2], actor->wheel_suspension_pos[3],
-                actor->wheel_suspension_vel[0], actor->wheel_suspension_vel[1],
-                actor->wheel_suspension_vel[2], actor->wheel_suspension_vel[3]);
+                actor->wheel_load_accum[0], actor->wheel_load_accum[1],
+                actor->wheel_load_accum[2], actor->wheel_load_accum[3]);
         }
     }
 
@@ -3420,8 +3420,8 @@ void td5_physics_reset_actor_state(TD5_Actor *actor)
         int16_t ss = (int16_t)((href * 5 + 4) / 9);
         for (int i = 0; i < 4; i++) {
             actor->wheel_suspension_pos[i] = ss;
-            actor->wheel_suspension_vel[i] = 0;
-            actor->wheel_force_accum[i] = 0;
+            actor->wheel_load_accum[i] = 0;
+            actor->wheel_spring_dv[i] = 0;
         }
     }
     actor->center_suspension_pos = 0;
@@ -3471,7 +3471,7 @@ void td5_physics_reset_actor_state(TD5_Actor *actor)
 
     /* Post-integrate: zero all dynamics to prevent bounce (0x405E5E-0x405E7C) */
     for (int i = 0; i < 4; i++)
-        actor->wheel_suspension_vel[i] = 0;
+        actor->wheel_load_accum[i] = 0;
     actor->angular_velocity_roll = 0;
     actor->angular_velocity_pitch = 0;
     actor->linear_velocity_y = 0;
@@ -3546,12 +3546,12 @@ void td5_physics_state0f_damping(TD5_Actor *actor)
     /* Temporarily zero force accumulators */
     int32_t saved_forces[4];
     for (int i = 0; i < 4; i++) {
-        saved_forces[i] = actor->wheel_force_accum[i];
-        actor->wheel_force_accum[i] = 0;
+        saved_forces[i] = actor->wheel_spring_dv[i];
+        actor->wheel_spring_dv[i] = 0;
     }
     td5_physics_integrate_suspension(actor);
     for (int i = 0; i < 4; i++)
-        actor->wheel_force_accum[i] = saved_forces[i];
+        actor->wheel_spring_dv[i] = saved_forces[i];
 
     /* Zero tire screech */
     actor->surface_contact_flags &= ~1;
@@ -3694,7 +3694,7 @@ void td5_physics_update_engine_speed(TD5_Actor *actor)
  *      path and then used it for indexing, causing a one-tick upshift race
  *      on the first post-reverse tick.
  *
- *   2. DRIVETRAIN KICK into wheel_force_accum on upshift. The original
+ *   2. DRIVETRAIN KICK into wheel_spring_dv on upshift. The original
  *      spreads a per-gear torque pulse across the four wheel force-accum
  *      slots (+0x2EC/+0x2F0/+0x2F4/+0x2F8) via the table at 0x00467394
  *      (= {0, 0, 0x100, 0xC0, 0x80, 0x40, 0x20, 0x10, 0}, indexed by the
@@ -3746,10 +3746,10 @@ void td5_physics_auto_gear_select(TD5_Actor *actor)
           * g_gear_torque_table[new_gear & 0x0F];
         k =  (k + ((k >> 31) & 0xFF)) >> 8;
 
-        actor->wheel_force_accum[0] += k;   /* +0x2EC FL */
-        actor->wheel_force_accum[1] += k;   /* +0x2F0 FR */
-        actor->wheel_force_accum[2] -= k;   /* +0x2F4 RL */
-        actor->wheel_force_accum[3] -= k;   /* +0x2F8 RR */
+        actor->wheel_spring_dv[0] += k;   /* +0x2EC FL */
+        actor->wheel_spring_dv[1] += k;   /* +0x2F0 FR */
+        actor->wheel_spring_dv[2] -= k;   /* +0x2F4 RL */
+        actor->wheel_spring_dv[3] -= k;   /* +0x2F8 RR */
         return;
     }
 
@@ -3818,7 +3818,7 @@ void td5_physics_apply_steering_torque(TD5_Actor *actor)
     int32_t sensitivity = (int32_t)PHYS_S(actor, 0x68);
     int32_t gear = (int32_t)actor->current_gear;
 
-    /* Original writes force to wheel_force_accum[0..3] as [+,+,-,-],
+    /* Original writes force to wheel_spring_dv[0..3] as [+,+,-,-],
      * creating a pitch differential. However, the original's suspension
      * reads XZ projections (not this Y-based force_accum), so steering
      * torque never actually drives the suspension spring-damper. In the
@@ -4087,8 +4087,8 @@ void td5_physics_init_vehicle_runtime(void)
         actor->center_suspension_pos = 0;
         actor->center_suspension_vel = 0;
         memset(actor->wheel_suspension_pos, 0, sizeof(actor->wheel_suspension_pos));
-        memset(actor->wheel_suspension_vel, 0, sizeof(actor->wheel_suspension_vel));
-        memset(actor->wheel_force_accum, 0, sizeof(actor->wheel_force_accum));
+        memset(actor->wheel_load_accum, 0, sizeof(actor->wheel_load_accum));
+        memset(actor->wheel_spring_dv, 0, sizeof(actor->wheel_spring_dv));
         actor->slot_index = (uint8_t)slot;
         actor->frame_counter = 0;
         actor->track_contact_flag = 0;
