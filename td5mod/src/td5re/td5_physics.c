@@ -3059,8 +3059,13 @@ void td5_physics_integrate_pose(TD5_Actor *actor)
     if (actor->angular_velocity_pitch > 6000) actor->angular_velocity_pitch = 6000;
     if (actor->angular_velocity_pitch < -6000) actor->angular_velocity_pitch = -6000;
 
-    /* 10. Update suspension response */
-    td5_physics_update_suspension_response(actor);
+    /* 10. Update suspension response.
+     * Skip during countdown/pause — no dynamics are running, so angular
+     * velocity should stay at zero. Without this gate, the velocity-path
+     * torque from per-wheel normal asymmetry accumulates during the entire
+     * countdown, tilting the car before the race even starts. */
+    if (!g_game_paused)
+        td5_physics_update_suspension_response(actor);
 
     if (actor->slot_index == 0 && (actor->frame_counter % 60u) == 0u) {
         TD5_LOG_D(LOG_TAG, "Integrate actor0: pos=(%d,%d,%d)",
