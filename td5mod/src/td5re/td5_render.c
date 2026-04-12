@@ -2476,7 +2476,7 @@ static void render_vehicle_brake_lights(const TD5_Actor *actor, int slot)
     if (!car_def) return;
 
     const float *m = s_render_transform.m;
-    const float half_size = 18.0f; /* model-space half-extent of the billboard */
+    const float half_size = 40.0f; /* model-space half-extent (original ±80 / 2) */
 
     for (int light = 0; light < 2; light++) {
         /* Read hardpoint int16[3] at car_def+0x60 / +0x68 */
@@ -2497,7 +2497,8 @@ static void render_vehicle_brake_lights(const TD5_Actor *actor, int slot)
         float inv_z = 1.0f / vz;
         float cx = -vx * s_focal_length * inv_z + s_center_x;
         float cy = -vy * s_focal_length * inv_z + s_center_y;
-        float depth = vz * (1.0f / s_far_clip);
+        /* Bias depth toward camera to prevent z-fighting with car body */
+        float depth = (vz - 2.0f) * (1.0f / s_far_clip);
 
         /* Screen-space half-size: perspective-scale the billboard */
         float h = half_size * s_focal_length * inv_z;
