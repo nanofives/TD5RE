@@ -809,9 +809,11 @@ void td5_physics_update_player(TD5_Actor *actor)
     int32_t cos_sr = cos_fixed12(steer_only);     /* iVar18 = cos(s) */
     int32_t sin_sr = sin_fixed12(steer_only);     /* iVar19 = sin(s) */
 
-    /* Front/rear longitudinal forces (sum of per-wheel drive) */
-    int32_t front_long = (wheel_drive[0] + wheel_drive[1]);
-    int32_t rear_long  = (wheel_drive[2] + wheel_drive[3]);
+    /* Front/rear longitudinal forces (grip-scaled sum of per-wheel drive)
+     * [CONFIRMED @ 0x004046DC]: original scales each wheel by surface grip
+     * before summing — grip[i] * wheel_drive[i] >> 8 */
+    int32_t front_long = ((grip[0] * wheel_drive[0]) >> 8) + ((grip[1] * wheel_drive[1]) >> 8);
+    int32_t rear_long  = ((grip[2] * wheel_drive[2]) >> 8) + ((grip[3] * wheel_drive[3]) >> 8);
 
     /* --- Coupled bicycle-model lateral force solve ---
      * Literal port of UpdatePlayerVehicleDynamics @ 0x00404A40-0x00404CCC.
@@ -879,7 +881,7 @@ void td5_physics_update_player(TD5_Actor *actor)
 
         int32_t local_14_num = (t_d / 4096) * cos_sr
                              + ((t_a / 4096) + (t_b / 4096) + (t_c / 4096)) * sin_sr;
-        rear_lat_force = -(local_14_num / denom);
+        rear_lat_force = local_14_num / denom;  /* no negation [CONFIRMED @ 0x00404B27] */
 
         /* Front lateral force (local_c) numerator
          * [CONFIRMED @ 0x00404B28-0x00404B93] */
@@ -893,7 +895,7 @@ void td5_physics_update_player(TD5_Actor *actor)
         int32_t t_f = (iv24b / 1024) * L_;
 
         int32_t local_c_num = (t_e / 4096) * sin_sr - (t_f / 4096) * cos_sr;
-        front_lat_force = -(local_c_num / denom);
+        front_lat_force = local_c_num / denom;  /* no negation [CONFIRMED @ 0x00404B93] */
     }
 
     if (actor->slot_index == 0 && (actor->frame_counter % 120u) == 0u) {
