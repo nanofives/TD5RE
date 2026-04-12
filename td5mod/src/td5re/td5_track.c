@@ -668,14 +668,15 @@ void td5_track_resolve_wall_contacts(TD5_Actor *actor)
 
     int slot_for_state = actor->slot_index & (TD5_MAX_TOTAL_ACTORS - 1);
     int span_changed = (s_wall_prev_span[slot_for_state] != (int16_t)span_idx);
-    if (span_changed) {
-        /* Reset prev d for all probes since the wall geometry has changed. */
-        for (int j = 0; j < 4; j++) {
-            s_wall_prev_d[slot_for_state][j][0] = 32767;
-            s_wall_prev_d[slot_for_state][j][1] = 32767;
-        }
-        s_wall_prev_span[slot_for_state] = (int16_t)span_idx;
-    }
+    s_wall_prev_span[slot_for_state] = (int16_t)span_idx;
+    /* On a span change: skip firing this tick (the new wall geometry's
+     * first d reading is noise), but DON'T reset prev_d to 32767 — let
+     * it be written by this tick's actual d values below. That way the
+     * NEXT tick has a meaningful previous and the trend detector can
+     * distinguish a stale-geometry spike (d worsening) from a real wall
+     * (d improving under push). If we reset to 32767, next tick is
+     * "fresh entry" and fires unconditionally — which was exactly the
+     * d=-142 Moscow invisible wall. */
 
     for (int pi = 0; pi < 4; pi++) {
         int32_t px = probe_block[pi].x >> 8;
@@ -702,7 +703,13 @@ void td5_track_resolve_wall_contacts(TD5_Actor *actor)
         }
 
         const int32_t WALL_DEAD_ZONE = -10;
-        const int32_t WORSEN_TOL     = 10;  /* worsening past this = walker lag */
+        const int32_t WORSEN_TOL     = 40;  /* d can worsen by up to 40/tick
+                                              * during a real impact before we
+                                              * call it walker lag. At 250
+                                              * units/tick and 10° approach angle,
+                                              * lateral velocity ≈ 43. Tighter
+                                              * values (10, 20) suppressed real
+                                              * wall contacts. */
         /* On a chassis-span transition, skip the fire — the new span's
          * wall geometry hasn't yet been compared against the probe, and
          * the first reading can be an artifact of the new wall line
