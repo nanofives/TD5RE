@@ -2254,22 +2254,20 @@ void td5_vfx_render_taillights(int actor_index) {
     /* Brightness decay/ramp */
     uint8_t brightness = s_taillight_brightness[actor_index];
 
-    /* Original gate + brake-active check (0x4011C0):
-     *   Gate:   actor[0x36D] == 0 → return  [CONFIRMED @ 0x4011E3]
-     *   Active: actor[0x37C] & 0x0F != 0    [CONFIRMED @ 0x4011F5]
-     * 0x36D = brake capability flag (set by input/AI).
-     * 0x37C & 0x0F = low nibble used as brake-light trigger in original. */
+    /* Brake-active check:
+     *   Gate + active both use actor+0x36D (brake_flag byte).
+     *   0x36D is written by td5_input (player) and td5_ai (opponents).
+     *   Original decompilation at 0x4011F5 referenced +0x37C & 0x0F but
+     *   that field is the wheel-contact bitmask, not the brake input —
+     *   corrected after runtime testing showed brakes never triggering. */
     int brake_active = 0;
 
     if (!g_actor_table_base) return;
 
     uint8_t *ap = g_actor_table_base + actor_index * TD5_ACTOR_STRIDE;
 
-    /* Capability gate: actor must have brake_flag capability */
-    if (*(ap + 0x36D) == 0) return;
-
-    /* Brake active: original checks low nibble of +0x37C [CONFIRMED @ 0x4011F5] */
-    brake_active = ((*(ap + 0x37C) & 0x0F) != 0) ? 1 : 0;
+    /* Read brake_flag at +0x36D — nonzero = braking */
+    brake_active = (*(ap + 0x36D) != 0) ? 1 : 0;
 
     if (brake_active) {
         if (brightness < 0x80) {  /* cap at 128 [CONFIRMED @ 0x401204] */
