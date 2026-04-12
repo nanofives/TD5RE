@@ -515,7 +515,15 @@ void td5_track_resolve_wall_contacts(TD5_Actor *actor)
 
     if (!actor || !s_span_array || !s_vertex_table) return;
 
-    /* Pre-spawn guard. */
+    /* Traffic actors (slots 6+) skip lateral wall checks entirely.
+     * This function is port-specific (original has no mid-strip lateral walls).
+     * Traffic follows fixed AI paths and doesn't need containment.
+     * Running the check on traffic with uninitialized probe positions produced
+     * massive false-positive contacts (raw d = -199000) whose cumulative
+     * rebuild_pose calls disrupted the simulation for ALL actors. */
+    if (actor->slot_index >= 6) return;
+
+    /* Pre-spawn guard: skip if world position or all probes are at origin. */
     if (actor->world_pos.x == 0 && actor->world_pos.z == 0) return;
 
     if (actor->slot_index == 0) {

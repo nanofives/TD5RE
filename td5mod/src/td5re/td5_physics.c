@@ -102,6 +102,14 @@ static int32_t g_difficulty_easy = 0;
 static int32_t g_difficulty_hard = 0;
 static int32_t g_total_actor_count = 6;
 static int32_t g_race_slot_state[6];         /* 1=human, 0=AI per slot */
+static uint8_t s_prev_grounded_mask[16];     /* per-slot previous-frame grounded bitmask (1=grounded) */
+
+/* Per-slot previous-frame wheel transform results (pre-snap) for gap_270 delta.
+ * Using post-snap positions causes huge Y deltas because snap Y != transform Y. */
+static int32_t s_prev_wheel_tx[12][4];  /* [slot][wheel] X transform result */
+static int32_t s_prev_wheel_ty[12][4];  /* [slot][wheel] Y transform result */
+static int32_t s_prev_wheel_tz[12][4];  /* [slot][wheel] Z transform result */
+static uint8_t s_prev_wheel_valid[12];  /* per-slot: 1 if previous transform is valid */
 
 /* V2V inertia constant = 500,000 (DAT_00463204) */
 #define V2V_INERTIA_K       500000
@@ -517,22 +525,7 @@ void td5_physics_update_vehicle_actor(TD5_Actor *actor)
      * Run even during countdown (paused) so ground-snap keeps the car
      * at the correct height above the road surface. Velocities are zero
      * during pause, so the car doesn't actually move. */
-    if (actor->slot_index == 0) {
-        int32_t pre_vx = actor->linear_velocity_x;
-        int32_t pre_vz = actor->linear_velocity_z;
-        td5_physics_integrate_pose(actor);
-        int32_t post_vx = actor->linear_velocity_x;
-        int32_t post_vz = actor->linear_velocity_z;
-        int32_t dvx = post_vx - pre_vx;
-        int32_t dvz = post_vz - pre_vz;
-        if (abs(dvx) > 5000 || abs(dvz) > 5000) {
-            TD5_LOG_I(LOG_TAG, "POSE_JOLT: vx %d->%d dvx=%d vz %d->%d dvz=%d span=%d",
-                      pre_vx, post_vx, dvx, pre_vz, post_vz, dvz,
-                      (int)actor->track_span_raw);
-        }
-    } else {
-        td5_physics_integrate_pose(actor);
-    }
+    td5_physics_integrate_pose(actor);
 
     /* 8. Track wall contact resolution (FUN_004070E0 -> FUN_00406F50 -> FUN_00406CC0)
      * Check wheel probes against span edges and push car back if outside.
@@ -540,21 +533,9 @@ void td5_physics_update_vehicle_actor(TD5_Actor *actor)
      *   Reverse boundary -> Forward boundary -> Lateral (left/right).
      * [CONFIRMED @ 0x4068c8 + 0x406650 callsite order] */
     if (actor->vehicle_mode == 0) {
-        int32_t pre_wx = actor->linear_velocity_x;
-        int32_t pre_wz = actor->linear_velocity_z;
         td5_track_resolve_reverse_contacts(actor);
         td5_track_resolve_forward_contacts(actor);
         td5_track_resolve_wall_contacts(actor);
-        if (actor->slot_index == 0) {
-            int32_t dwx = actor->linear_velocity_x - pre_wx;
-            int32_t dwz = actor->linear_velocity_z - pre_wz;
-            if (abs(dwx) > 2000 || abs(dwz) > 2000) {
-                TD5_LOG_I(LOG_TAG, "WALL_JOLT: vx %d->%d dvx=%d vz %d->%d dvz=%d span=%d",
-                          pre_wx, actor->linear_velocity_x, dwx,
-                          pre_wz, actor->linear_velocity_z, dwz,
-                          (int)actor->track_span_raw);
-            }
-        }
     }
 
     /* 9. Update surface_contact_flags for the NEXT tick's dynamics dispatch.
@@ -1152,10 +1133,6 @@ void td5_physics_update_player(TD5_Actor *actor)
         if (mag_sq > cap_sq && mag_sq > 0) {
             int32_t mag = td5_isqrt(mag_sq);
             int32_t cap_h = vel_cap >> 8;
-            if (actor->slot_index == 0) {
-                TD5_LOG_I(LOG_TAG, "VEL_CAP: vx=%d vz=%d mag=%d cap=%d",
-                          actor->linear_velocity_x, actor->linear_velocity_z, mag, cap_h);
-            }
             actor->linear_velocity_x = (int32_t)((int64_t)actor->linear_velocity_x * cap_h / mag);
             actor->linear_velocity_z = (int32_t)((int64_t)actor->linear_velocity_z * cap_h / mag);
         }
@@ -2659,8 +2636,12 @@ static inline int32_t arith_round_shift(int32_t x, int32_t mask, int32_t shift)
 
 void td5_physics_update_suspension_response(TD5_Actor *actor)
 {
-    uint8_t bVar1 = *(uint8_t *)((uint8_t *)actor + 0x37C); /* damage_lockout (new bitmask) */
-    uint8_t bVar2 = actor->wheel_contact_bitmask;           /* prev-frame bitmask (0x37D) */
+    /* bVar1: current-frame airborne mask (1=airborne). In the original this is
+     * read from 0x37C; in the port we use the current wheel_contact_bitmask. */
+    uint8_t bVar1 = actor->wheel_contact_bitmask;
+    /* bVar2: previous-frame GROUNDED mask (1=grounded), saved by integrate_pose
+     * before refresh_wheel_contacts overwrites wheel_contact_bitmask. */
+    uint8_t bVar2 = s_prev_grounded_mask[actor->slot_index & 0x0F];
 
     if (bVar1 == 0x0F) {
         /* All four wheels airborne — skip entirely (original: if bVar1 != 0xF runs body) */
@@ -2894,7 +2875,11 @@ void td5_physics_integrate_pose(TD5_Actor *actor)
     actor->render_pos.y = (float)actor->world_pos.y * (1.0f / 256.0f);
     actor->render_pos.z = (float)actor->world_pos.z * (1.0f / 256.0f);
 
-    /* 7. Refresh wheel contact frames */
+    /* 7. Save previous-frame grounded mask, then refresh wheel contacts.
+     * suspension_response needs "was grounded last frame" for the spring
+     * damping path. refresh overwrites wheel_contact_bitmask (airborne polarity:
+     * 1=airborne), so save the inverted version (1=grounded) before the call. */
+    s_prev_grounded_mask[actor->slot_index & 0x0F] = (~actor->wheel_contact_bitmask) & 0x0F;
     td5_physics_refresh_wheel_contacts(actor);
 
     /* DIAGNOSTIC: log player car (slot 0) physics state once per 30 frames */
@@ -3187,18 +3172,11 @@ void td5_physics_refresh_wheel_contacts(TD5_Actor *actor)
         actor->wheel_probes[i].sub_lane_index    = (int8_t)actor->track_sub_lane_index;
     }
 
-    /* Save previous-frame wheel contact positions for gap_270 velocity computation.
-     * Original (0x403720): saves old piVar1/piVar8/piVar8[1] before the transform,
-     * then computes arith_round_shift(new_pos - old_pos, 0xFF, 8) per component.
-     * gap_270[i][0..2] = frame-to-frame wheel contact position delta >> 8
-     *   = contact point velocity, used as the spring velocity term in
-     *     UpdateVehicleSuspensionResponse (0x4057F0). */
-    int32_t old_wcp_x[4], old_wcp_y[4], old_wcp_z[4];
-    for (int i = 0; i < 4; i++) {
-        old_wcp_x[i] = actor->wheel_contact_pos[i].x;
-        old_wcp_y[i] = actor->wheel_contact_pos[i].y;
-        old_wcp_z[i] = actor->wheel_contact_pos[i].z;
-    }
+    /* gap_270 uses the pre-snap transform results, not post-snap positions.
+     * Read old values from the persistent per-slot array (set at end of this
+     * function from this frame's transform output, before Y-snap). */
+    int slot = actor->slot_index;
+    if (slot < 0 || slot >= 12) slot = 0;
 
     /* Per-wheel contact frame computation */
     for (int i = 0; i < 4; i++) {
@@ -3306,20 +3284,38 @@ void td5_physics_refresh_wheel_contacts(TD5_Actor *actor)
         int32_t force = (wheel_y - ground_y) >> 8;
 
         /* gap_270[i] = frame-to-frame wheel contact position delta >> 8.
-         * Uses pre-Y-snap wheel_contact_pos (transform result, not ground_y).
-         * Skip first frame (frame_counter==0) where old_wcp is zero from spawn. */
+         * MUST compare pre-snap transform results from two consecutive frames.
+         * Using post-snap (ground_y) as old causes huge Y deltas (~90k). */
         {
             int16_t *g270 = (int16_t *)((uint8_t *)actor + 0x270 + i * 8);
-            if (actor->frame_counter > 0) {
-                int32_t dx = actor->wheel_contact_pos[i].x - old_wcp_x[i];
-                int32_t dy = actor->wheel_contact_pos[i].y - old_wcp_y[i];
-                int32_t dz = actor->wheel_contact_pos[i].z - old_wcp_z[i];
+            if (s_prev_wheel_valid[slot]) {
+                int32_t dx = actor->wheel_contact_pos[i].x - s_prev_wheel_tx[slot][i];
+                int32_t dy = actor->wheel_contact_pos[i].y - s_prev_wheel_ty[slot][i];
+                int32_t dz = actor->wheel_contact_pos[i].z - s_prev_wheel_tz[slot][i];
+                /* Clamp deltas: if any component exceeds ±100k (~390 world units,
+                 * well above max single-frame travel), zero it — indicates teleport
+                 * or init transient, not physical motion. */
+                #define CLAMP_DELTA(v) ((v) > 100000 ? 0 : (v) < -100000 ? 0 : (v))
+                dx = CLAMP_DELTA(dx); dy = CLAMP_DELTA(dy); dz = CLAMP_DELTA(dz);
+                #undef CLAMP_DELTA
                 g270[0] = (int16_t)arith_round_shift(dx, 0xFF, 8);
                 g270[1] = (int16_t)arith_round_shift(dy, 0xFF, 8);
                 g270[2] = (int16_t)arith_round_shift(dz, 0xFF, 8);
+                if (actor->slot_index == 0 && i == 0 && (actor->frame_counter % 60u) == 0u) {
+                    TD5_LOG_I(LOG_TAG, "gap270[0]: dx=%d dy=%d dz=%d g270=(%d,%d,%d) "
+                              "wcv=(%d,%d,%d)",
+                              dx, dy, dz, g270[0], g270[1], g270[2],
+                              actor->wheel_contact_velocities[0][0],
+                              actor->wheel_contact_velocities[0][1],
+                              actor->wheel_contact_velocities[0][2]);
+                }
             } else {
                 g270[0] = 0; g270[1] = 0; g270[2] = 0;
             }
+            /* Save this frame's pre-snap transform result for next frame */
+            s_prev_wheel_tx[slot][i] = actor->wheel_contact_pos[i].x;
+            s_prev_wheel_ty[slot][i] = actor->wheel_contact_pos[i].y;
+            s_prev_wheel_tz[slot][i] = actor->wheel_contact_pos[i].z;
         }
 
         /* Dead zone */
@@ -3357,6 +3353,9 @@ void td5_physics_refresh_wheel_contacts(TD5_Actor *actor)
             case 3: actor->probe_RR = actor->wheel_contact_pos[3]; break;
         }
     }
+
+    /* Mark this slot's pre-snap transform as valid for next frame */
+    s_prev_wheel_valid[slot] = 1;
 
     if (resolved_surface_valid)
         actor->surface_type_chassis = (uint8_t)resolved_surface;
@@ -4071,6 +4070,10 @@ void td5_physics_init_vehicle_runtime(void)
 
     g_actor_pool = g_actor_table_base;
     g_actor_base = g_actor_table_base;
+
+    /* Invalidate pre-snap wheel transform data — init path transforms
+     * differ from in-race transforms and cause huge gap_270 transients. */
+    memset(s_prev_wheel_valid, 0, sizeof(s_prev_wheel_valid));
 
     total = td5_game_get_total_actor_count();
     if (total <= 0) {
