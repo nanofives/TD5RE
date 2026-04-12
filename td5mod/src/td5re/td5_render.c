@@ -2270,6 +2270,7 @@ void td5_render_crossfade_surfaces(uint32_t *dst, const uint32_t *src_a,
  */
 #define SHADOW_VERTICAL_OFFSET  (0.0f)
 #define SHADOW_CORNER_SCALE     (1.85f)
+#define SHADOW_VIEW_Y_OFFSET    (-22.0f)   /* [CONFIRMED @ 0x40C5CC] push shadow below car in view-space */
 
 static int   s_shadow_lookup_done = 0;
 static int   s_shadow_page        = -1;
@@ -2374,6 +2375,10 @@ static void render_vehicle_shadow_quad(const TD5_Actor *actor)
         float vx = dx * s_camera_basis[0] + dy * s_camera_basis[1] + dz * s_camera_basis[2];
         float vy = dx * s_camera_basis[3] + dy * s_camera_basis[4] + dz * s_camera_basis[5];
         float vz = dx * s_camera_basis[6] + dy * s_camera_basis[7] + dz * s_camera_basis[8];
+
+        /* Push shadow down in view-space so it renders on the ground below
+         * the car, not at wheel-probe height. [CONFIRMED @ 0x40C5CC] */
+        vy += SHADOW_VIEW_Y_OFFSET;
 
         if (vz <= s_near_clip) return;
 
