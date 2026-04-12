@@ -2736,16 +2736,16 @@ void td5_physics_update_suspension_response(TD5_Actor *actor)
             if (half_wbase < 32) half_wbase = 32;
 
             /* Target angles in 12-bit units (4096 = 360°).
-             * angle = atan(height_diff / width) ≈ height_diff / width for small angles.
-             * height_diff is 24.8 FP, arm is integer → shift to match.
-             * Scale: (hdiff >> 8) / (2 * arm) * (4096 / 2π) ≈ (hdiff >> 8) * 652 / arm
-             * Simplified: (hdiff * 652) >> 8 / (2 * arm) */
-            int32_t roll_hdiff  = (left_avg - right_avg) >> 8;   /* world units */
-            int32_t pitch_hdiff = (front_avg - rear_avg) >> 8;
+             * TD5 axis convention: euler_accum.roll = Rx = visual pitch (fwd/back),
+             *                      euler_accum.pitch = Rz = visual roll (left/right).
+             * So front/rear height diff drives "roll" (Rx), left/right drives "pitch" (Rz).
+             * Scale: (hdiff >> 8) / (2 * arm) * (4096 / 2π) */
+            int32_t fwdbk_hdiff = (front_avg - rear_avg) >> 8;   /* front vs rear → visual pitch */
+            int32_t leftrt_hdiff = (left_avg - right_avg) >> 8;   /* left vs right → visual roll */
 
             /* 4096/(2*pi) ≈ 652. Divide by full track/wheelbase (2x half). */
-            int32_t target_roll  = (roll_hdiff * 652) / (2 * half_track);
-            int32_t target_pitch = (pitch_hdiff * 652) / (2 * half_wbase);
+            int32_t target_roll  = (fwdbk_hdiff  * 652) / (2 * half_wbase);  /* Rx = visual pitch */
+            int32_t target_pitch = (leftrt_hdiff * 652) / (2 * half_track);  /* Rz = visual roll */
 
             /* Clamp target to reasonable range (±0x100 = ±22.5°) */
             if (target_roll  >  0x100) target_roll  =  0x100;
