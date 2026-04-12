@@ -842,11 +842,15 @@ void td5_physics_update_player(TD5_Actor *actor)
         int32_t vz_b = v_long;                              /* uVar12 */
 
         /* Determinant: denom = [L²·cos²(s) + (b²+I)·sin²(s)] / 2^34
-         * [CONFIRMED @ 0x00404A40-0x00404A9F] */
+         * [CONFIRMED @ 0x00404A40-0x00404A9F]
+         * Original x86 uses 32-bit `imul reg,reg` (wrapping) with the
+         * `(x + (x>>31 & mask)) >> n` rounding idiom — Ghidra's `>> 0x1f`
+         * confirms 32-bit, not 64-bit. All intermediates are int32 with
+         * natural wrapping matching the original binary. */
         int32_t bb_plus_I = (b_ * b_ + I_) / 1024;          /* iVar21 */
         int32_t LL_over_1024 = (L_ * L_) / 1024;
-        int32_t t22 = (LL_over_1024 * cos_sr) / 4096 * cos_sr;
-        int32_t t23 = (bb_plus_I * sin_sr) / 4096 * sin_sr;
+        int32_t t22 = (LL_over_1024 * cos_sr / 4096) * cos_sr;
+        int32_t t23 = (bb_plus_I * sin_sr / 4096) * sin_sr;
         int32_t denom = t22 / 4096 + t23 / 4096;
         if (denom == 0) denom = 1;
 
@@ -860,7 +864,7 @@ void td5_physics_update_player(TD5_Actor *actor)
         t_a = (t_a / 4096) * sin_sr;
 
         /* B = ((F_f*cos(s)/4096 + F_r + vz_b) * (b*a-I)/1024 / 4096) * cos(s) */
-        int32_t drive_sum = (F_f * cos_sr) / 4096 + F_r + vz_b;
+        int32_t drive_sum = (F_f * cos_sr / 4096) + F_r + vz_b;
         int32_t t_b = drive_sum * ba_minus_I;
         t_b = (t_b / 4096) * cos_sr;
 
@@ -892,11 +896,11 @@ void td5_physics_update_player(TD5_Actor *actor)
         front_lat_force = -(local_c_num / denom);
     }
 
-    if (actor->slot_index == 0 && (actor->frame_counter % 60u) == 0u) {
+    if (actor->slot_index == 0 && (actor->frame_counter % 120u) == 0u) {
         TD5_LOG_I(LOG_TAG,
-                  "LATFORCE: f_lat=%d r_lat=%d vx_b=%d vz_b=%d w=%d steer=%d F_f=%d F_r=%d",
+                  "LATFORCE: f_lat=%d r_lat=%d vx_b=%d vz_b=%d w=%d steer=%d",
                   front_lat_force, rear_lat_force, v_lat, v_long,
-                  actor->angular_velocity_yaw, steer_angle, front_long, rear_long);
+                  actor->angular_velocity_yaw, steer_angle);
     }
 
     /* --- 13. Tire slip circle via isqrt (per axle) ---
