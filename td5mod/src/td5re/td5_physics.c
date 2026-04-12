@@ -702,6 +702,14 @@ void td5_physics_update_player(TD5_Actor *actor)
         if (*((const uint8_t *)actor + 0x378) == 0) {
             td5_physics_reverse_throttle_sign(actor);
         } else {
+            /* Run UESA before auto_gear to get correct RPM for shift decision.
+             * CRGT (the ground engine updater) targets RPM ≈ redline-1800 for
+             * gear 2, which is below the upshift threshold (5400 for Viper).
+             * UESA's formula (speed * gear_ratio * 0x2D / 4096 + 400) produces
+             * the correct RPM that matches the upshift thresholds.
+             * CRGT will overwrite engine_speed_accum later in the tick, so this
+             * only affects the auto_gear_select decision. */
+            td5_physics_update_engine_speed(actor);
             td5_physics_auto_gear_select(actor);
         }
 
@@ -3014,12 +3022,24 @@ void td5_physics_integrate_pose(TD5_Actor *actor)
                 uint8_t prev_mask = *(const uint8_t *)((const uint8_t *)actor + 0x37D);
                 if (k_mode_gate[new_mask & 0xF] &&
                     (prev_mask & (new_mask ^ 0x0F)) == 0) {
-                    actor->linear_velocity_y = new_y - actor->prev_frame_y_position
-                                               - g_gravity_constant;
-                    if (actor->slot_index == 0 && (actor->frame_counter % 60u) == 0u) {
-                        TD5_LOG_I(LOG_TAG, "y_snap: gate_open new=%u prev=%u vy=%d",
-                                  new_mask, prev_mask, actor->linear_velocity_y);
+                    int32_t snap_vy = new_y - actor->prev_frame_y_position
+                                     - g_gravity_constant;
+                    /* Clamp snap-derived velocity to prevent launch-to-infinity.
+                     * The spawn sentinel Y (0xC0000000) or a bad terrain lookup
+                     * can produce new_y - prev_y deltas of ~1 billion, setting
+                     * vel_y so high that gravity (1900/tick) can never recover.
+                     * 200000 ≈ 780 world units/tick — far beyond any normal
+                     * terrain change rate. */
+                    if (snap_vy > 200000) snap_vy = 200000;
+                    if (snap_vy < -200000) snap_vy = -200000;
+                    if (actor->slot_index == 0 &&
+                        (snap_vy > 100000 || snap_vy < -100000 ||
+                         (actor->frame_counter % 60u) == 0u)) {
+                        TD5_LOG_I(LOG_TAG, "y_snap: new=%u prev=%u vy=%d new_y=%d prev_y=%d",
+                                  new_mask, prev_mask, snap_vy, new_y,
+                                  actor->prev_frame_y_position);
                     }
+                    actor->linear_velocity_y = snap_vy;
                 }
             }
         } else {
@@ -3781,6 +3801,14 @@ void td5_physics_auto_gear_select(TD5_Actor *actor)
 
     /* Upshift test — indexed by gear_cached (pre-promotion). */
     int32_t up_thresh = (int32_t)PHYS_S(actor, 0x3E + gear_cached * 2);
+
+    if (actor->slot_index == 0 && (actor->frame_counter % 30u) == 0u) {
+        TD5_LOG_I(LOG_TAG,
+                  "AUTO_GEAR: gear=%d rpm=%d up_thresh=%d long_spd=%d throttle=%d f378=%d",
+                  gear_cached, rpm, up_thresh, actor->longitudinal_speed,
+                  throttle, *((const uint8_t *)actor + 0x378));
+    }
+
     if (rpm > up_thresh
         && gear_cached < 8
         && actor->longitudinal_speed > 0) {
