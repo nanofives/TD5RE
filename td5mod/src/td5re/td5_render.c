@@ -42,6 +42,7 @@
 #include "td5_game.h"
 #include "td5_asset.h"
 #include "td5_save.h"
+#include "td5_vfx.h"
 #include "td5re.h"
 
 #include "../../../re/include/td5_actor_struct.h"
@@ -408,6 +409,16 @@ static int project_vertex(float vx, float vy, float vz,
     *sz  = vz * (1.0f / s_far_clip);  /* normalized depth [0..1] (0x00473bcc) */
     *rhw = inv_z;
     return 1;
+}
+
+int td5_render_transform_and_project(float mx, float my, float mz,
+                                     float *sx, float *sy, float *sz, float *rhw)
+{
+    const float *m = s_render_transform.m;
+    float vx = mx*m[0] + my*m[1] + mz*m[2] + m[9];
+    float vy = mx*m[3] + my*m[4] + mz*m[5] + m[10];
+    float vz = mx*m[6] + my*m[7] + mz*m[8] + m[11];
+    return project_vertex(-vx, -vy, vz, sx, sy, sz, rhw);
 }
 
 /**
@@ -1706,6 +1717,9 @@ void td5_render_actors_for_view(int view_index)
 
             /* Render wheel ring billboards (0x446F00) */
             render_vehicle_wheel_billboards(actor, slot);
+
+            /* Render brake light billboards (0x4011C0) */
+            td5_vfx_render_taillights(slot);
 
             actor_render_count++;
             actor_meshes_submitted++;

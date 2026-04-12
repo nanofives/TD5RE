@@ -2234,22 +2234,13 @@ void td5_vfx_init_taillight_templates(void) {
  * Per-frame taillight rendering for one vehicle. Two tail lights per
  * vehicle, rendered as translucent camera-facing billboard quads.
  *
- * Brightness decays exponentially when brakes released, ramps linearly
- * when braking (8 per frame, capped at 127).
- *
- * Guard: actor brake_flag at +0x36D must be nonzero for the vehicle
- * to have tail light capability.
+ * Brightness ramps +8/frame when braking, capped at 0x80 (128).
+ * Decays exponentially (>>1) when released.
+ * Reads brake_flag at actor+0x36D (written by input and AI modules).
  */
 void td5_vfx_render_taillights(int actor_index) {
     if (!s_taillight_quads) return;
     if (actor_index < 0 || actor_index >= TD5_MAX_TOTAL_ACTORS) return;
-
-    /* Read brake_flag from actor+0x36D (brake capability check).
-     * The original checks DAT_004ab475[actor_index * 0x388] which is actor+0x36D.
-     * In td5_actor_struct.h this is the brake_flag field. */
-    /* Note: we cannot directly dereference the actor pointer here since we only
-     * have the index. The caller should ensure the actor has braking capability.
-     * For faithful reproduction, we check via the global actor table. */
 
     /* Brightness decay/ramp */
     uint8_t brightness = s_taillight_brightness[actor_index];
@@ -2287,66 +2278,75 @@ void td5_vfx_render_taillights(int actor_index) {
 
     if (brightness == 0) return; /* fully faded, nothing to render */
 
-    /* Render 2 tail lights (offsets 0x60 and 0x68 in vehicle config) */
+    /* Read car_config pointer at actor+0x1B8 [CONFIRMED @ 0x40128F] */
+    void *car_config;
+    memcpy(&car_config, ap + 0x1B8, sizeof(void *));
+    if (!car_config) return;
+
+    /* Vertex diffuse: 0xFF909090 gray tint [CONFIRMED @ 0x401246] */
+    uint32_t diffuse = 0xFF909090;
+
+    /* BRAKED texture from atlas */
+    int tex_page = (int)s_taillight_page;
+
+    static int s_tl_log_ctr = 0;
+    if (actor_index == 0 && (s_tl_log_ctr++ % 120) == 0) {
+        int16_t hp0[3], hp1[3];
+        memcpy(hp0, (uint8_t *)car_config + 0x60, 6);
+        memcpy(hp1, (uint8_t *)car_config + 0x68, 6);
+        TD5_LOG_I(LOG_TAG,
+                  "taillight: actor=%d bright=%u page=%d hp0=(%d,%d,%d) hp1=(%d,%d,%d)",
+                  actor_index, (unsigned)brightness, tex_page,
+                  hp0[0], hp0[1], hp0[2], hp1[0], hp1[1], hp1[2]);
+    }
+
+    /* Render 2 tail lights (hardpoints at car_config+0x60 and +0x68) */
     for (int light = 0; light < 2; light++) {
-        /* Get quad template pointer */
-        VfxSpriteQuad *quad = (VfxSpriteQuad *)((uint8_t *)s_taillight_quads +
-                               (size_t)actor_index * 0x170 +
-                               (size_t)light * 0xB8);
+        int16_t hardpoint[3];
+        int hp_offset = 0x60 + light * 8;
+        memcpy(hardpoint, (uint8_t *)car_config + hp_offset, 6);
 
-        /* Set vertex color to 0xFF909090 (gray tint) */
-        quad->v0_color = 0xFF909090;
-        quad->v1_color = 0xFF909090;
-        quad->v2_color = 0xFF909090;
-        quad->v3_color = 0xFF909090;
+        float hx = (float)hardpoint[0];
+        float hy = (float)hardpoint[1];
+        float hz = (float)hardpoint[2] + TAILLIGHT_Z_BIAS;
 
-        /* Push render transform */
-        td5_render_push_transform();
+        /* Project 4 billboard corners through the current render transform.
+         * Each corner = hardpoint + offset vector, transformed to screen space
+         * via td5_render_transform_and_project (model→view→screen). */
+        TD5_D3DVertex verts[4];
+        int all_visible = 1;
 
-        /* Read taillight hardpoint position from vehicle config.
-         * Original: reads int16[3] from car_config + 0x60/0x68 for left/right.
-         * Car config pointer at actor+0x1B8 [CONFIRMED @ 0x40128F] */
-        void *car_config;
-        memcpy(&car_config, ap + 0x1B8, sizeof(void *));
+        for (int c = 0; c < 4; c++) {
+            float mx = hx + (float)s_taillight_offsets[c][0];
+            float my = hy + (float)s_taillight_offsets[c][1];
+            float mz = hz + (float)s_taillight_offsets[c][2];
 
-        if (car_config) {
-            int16_t hardpoint[3];
-            int hp_offset = 0x60 + light * 8; /* 0x60 for left, 0x68 for right */
-            memcpy(hardpoint, (uint8_t *)car_config + hp_offset, 6);
-
-            /* Transform hardpoint to float and set as render translation.
-             * Offset Z by TAILLIGHT_Z_BIAS (-24.0) for z-fighting prevention. */
-            TD5_Vec3f light_pos;
-            light_pos.x = (float)hardpoint[0];
-            light_pos.y = (float)hardpoint[1];
-            light_pos.z = (float)hardpoint[2] + TAILLIGHT_Z_BIAS;
-            td5_render_load_translation(&light_pos);
-
-            /* Write 4 corners from fixed offset vectors (billboard quad).
-             * Each corner is the center + one of the taillight offset vectors. */
-            float rhw = 1.0f / 128.0f;
-            for (int c = 0; c < 4; c++) {
-                float cx = light_pos.x + (float)s_taillight_offsets[c][0];
-                float cy = light_pos.y + (float)s_taillight_offsets[c][1];
-                float cz = light_pos.z + (float)s_taillight_offsets[c][2];
-
-                /* Write to quad vertices */
-                float *vx, *vy, *vz, *vrhw;
-                switch (c) {
-                case 0: vx = &quad->v0_x; vy = &quad->v0_y; vz = &quad->v0_z; vrhw = &quad->v0_rhw; break;
-                case 1: vx = &quad->v1_x; vy = &quad->v1_y; vz = &quad->v1_z; vrhw = &quad->v1_rhw; break;
-                case 2: vx = &quad->v2_x; vy = &quad->v2_y; vz = &quad->v2_z; vrhw = &quad->v2_rhw; break;
-                default:vx = &quad->v3_x; vy = &quad->v3_y; vz = &quad->v3_z; vrhw = &quad->v3_rhw; break;
-                }
-                *vx = cx; *vy = cy; *vz = cz; *vrhw = rhw;
+            float sx, sy, sz, rhw;
+            if (!td5_render_transform_and_project(mx, my, mz, &sx, &sy, &sz, &rhw)) {
+                all_visible = 0;
+                break;
             }
+            verts[c].screen_x = sx;
+            verts[c].screen_y = sy;
+            verts[c].depth_z  = sz;
+            verts[c].rhw      = rhw;
+            verts[c].diffuse  = diffuse;
+            verts[c].specular = 0;
         }
 
-        /* Submit to translucent pipeline */
-        td5_render_queue_translucent_batch(quad);
+        if (!all_visible) continue;
 
-        /* Pop render transform */
-        td5_render_pop_transform();
+        /* UVs from BRAKED atlas sprite */
+        verts[0].tex_u = s_taillight_u0;  verts[0].tex_v = s_taillight_v0;
+        verts[1].tex_u = s_taillight_u0;  verts[1].tex_v = s_taillight_v1;
+        verts[2].tex_u = s_taillight_u1;  verts[2].tex_v = s_taillight_v0;
+        verts[3].tex_u = s_taillight_u1;  verts[3].tex_v = s_taillight_v1;
+
+        uint16_t indices[6] = { 0, 1, 2, 1, 3, 2 };
+
+        td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
+        td5_plat_render_bind_texture(tex_page);
+        td5_plat_render_draw_tris(verts, 4, indices, 6);
     }
 }
 

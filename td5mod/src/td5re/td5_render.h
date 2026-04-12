@@ -99,6 +99,14 @@ TD5_MeshHeader *td5_render_get_vehicle_mesh(int slot);
 /* --- Projection --- */
 void td5_render_configure_projection(int width, int height);
 
+/**
+ * Transform a model-space point through the current render transform
+ * (3x4 matrix) and perspective-project to screen coordinates.
+ * Returns 1 on success, 0 if the point is behind the near clip plane.
+ */
+int td5_render_transform_and_project(float mx, float my, float mz,
+                                     float *sx, float *sy, float *sz, float *rhw);
+
 /* --- Translucent pipeline --- */
 void td5_render_init_translucent_pipeline(void);
 void td5_render_queue_translucent_batch(void *record);
