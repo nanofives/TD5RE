@@ -2244,17 +2244,18 @@ void td5_render_crossfade_surfaces(uint32_t *dst, const uint32_t *src_a,
  *     z_write=1 and paint over the shadow where they exist in screen
  *     space, so the car correctly "occludes" the shadow without a
  *     depth test on the shadow itself.
- *   - Scale corners outward from the XYZ centroid by 1.25
- *     (g_wheelSuspensionRenderScale [CONFIRMED @ 0x40C490]).
- *   - Apply -22.0 offset in view-space Y after the camera basis
- *     transform [CONFIRMED @ 0x40C5CC] to push the shadow below
- *     the car on screen.
+ *   - Scale corners outward from the XZ centroid by 1.85 to approximate
+ *     the unread _g_wheelSuspensionRenderScale and give the shadow a
+ *     footprint larger than the raw wheel spread.
+ *   - Corners stay at wheel-contact Y; no vertical lift is needed
+ *     because the shadow is painted at ground level and then occluded
+ *     by the car body via draw order, not depth test.
  *   - Subtick-interpolate corners with linear_velocity * g_subTickFraction
  *     so the shadow doesn't sawtooth-lag behind the car at speed (the
  *     car mesh is interpolated the same way at line ~1547).
  */
-#define SHADOW_CORNER_SCALE      (1.25f)   /* [CONFIRMED @ 0x40C490] g_wheelSuspensionRenderScale */
-#define SHADOW_VIEW_Y_OFFSET    (-22.0f)   /* [CONFIRMED @ 0x40C5CC] applied in view-space Y */
+#define SHADOW_VERTICAL_OFFSET  (0.0f)
+#define SHADOW_CORNER_SCALE     (1.85f)
 
 static int   s_shadow_lookup_done = 0;
 static int   s_shadow_page        = -1;
@@ -2330,7 +2331,7 @@ static void render_vehicle_shadow_quad(const TD5_Actor *actor)
     float cx = 0.0f, cy = 0.0f, cz = 0.0f;
     for (int i = 0; i < 4; i++) {
         corners[i][0] = (float)probes[i]->x * inv256 + interp_dx;
-        corners[i][1] = (float)probes[i]->y * inv256 + interp_dy;
+        corners[i][1] = (float)probes[i]->y * inv256 + interp_dy + SHADOW_VERTICAL_OFFSET;
         corners[i][2] = (float)probes[i]->z * inv256 + interp_dz;
         cx += corners[i][0];
         cy += corners[i][1];
@@ -2339,10 +2340,13 @@ static void render_vehicle_shadow_quad(const TD5_Actor *actor)
     cx *= 0.25f;
     cy *= 0.25f;
     cz *= 0.25f;
-    /* Scale all 3 axes from centroid [CONFIRMED @ 0x40C490] */
+    /* Flatten all corners to the centroid Y so the shadow lies flat on the
+     * ground regardless of slope. Without this, front/rear probe Y differences
+     * (e.g. 24-88 world units on AI cars) create a tilted quad that renders
+     * as tall diagonal streaks instead of a ground-hugging shadow. */
     for (int i = 0; i < 4; i++) {
         corners[i][0] = cx + (corners[i][0] - cx) * SHADOW_CORNER_SCALE;
-        corners[i][1] = cy + (corners[i][1] - cy) * SHADOW_CORNER_SCALE;
+        corners[i][1] = cy;
         corners[i][2] = cz + (corners[i][2] - cz) * SHADOW_CORNER_SCALE;
     }
 
@@ -2356,9 +2360,6 @@ static void render_vehicle_shadow_quad(const TD5_Actor *actor)
         float vx = dx * s_camera_basis[0] + dy * s_camera_basis[1] + dz * s_camera_basis[2];
         float vy = dx * s_camera_basis[3] + dy * s_camera_basis[4] + dz * s_camera_basis[5];
         float vz = dx * s_camera_basis[6] + dy * s_camera_basis[7] + dz * s_camera_basis[8];
-
-        /* Push shadow down in view-space [CONFIRMED @ 0x40C5CC] */
-        vy += SHADOW_VIEW_Y_OFFSET;
 
         if (vz <= s_near_clip) return;
 
@@ -2378,12 +2379,12 @@ static void render_vehicle_shadow_quad(const TD5_Actor *actor)
         s_shadow_draw_logged = 1;
         TD5_LOG_I(LOG_TAG,
                   "shadow: first draw page=%d uv=(%.3f..%.3f,%.3f..%.3f) "
-                  "FL=(%.1f,%.1f,%.1f) view_y_off=%.1f scale=%.2f",
+                  "FL=(%.1f,%.1f,%.1f) lift=%.1f scale=%.2f",
                   s_shadow_page, s_shadow_u0, s_shadow_u1, s_shadow_v0, s_shadow_v1,
                   (float)actor->probe_FL.x * (1.0f/256.0f),
                   (float)actor->probe_FL.y * (1.0f/256.0f),
                   (float)actor->probe_FL.z * (1.0f/256.0f),
-                  SHADOW_VIEW_Y_OFFSET, SHADOW_CORNER_SCALE);
+                  SHADOW_VERTICAL_OFFSET, SHADOW_CORNER_SCALE);
     }
 
     uint16_t indices[6] = { 0, 1, 2, 0, 2, 3 };
