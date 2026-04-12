@@ -2148,7 +2148,105 @@ void td5_hud_render_overlays(float dt)
 
     /* Debug overlay (gated by td5re.ini DebugOverlay setting) */
     if (g_td5.ini.debug_overlay) {
-        td5_hud_queue_text(0, 8, 8, 0, "FPS: %.0f", g_td5.instant_fps);
+        /* FPS sampled once per second */
+        static float s_dbg_fps = 0.0f;
+        static float s_dbg_fps_accum = 0.0f;
+        static int   s_dbg_fps_frames = 0;
+        s_dbg_fps_accum += dt;
+        s_dbg_fps_frames++;
+        if (s_dbg_fps_accum >= 1.0f) {
+            s_dbg_fps = (float)s_dbg_fps_frames / s_dbg_fps_accum;
+            s_dbg_fps_accum = 0.0f;
+            s_dbg_fps_frames = 0;
+        }
+
+        int dbg_slot = g_actor_slot_map[0];
+        uint8_t *dbg_a = (uint8_t *)actor_ptr(dbg_slot);
+        int dbg_y = 52;
+        const int dbg_dy = 14;
+
+        td5_hud_queue_text(0, 8, dbg_y, 0, "FPS: %.0f", s_dbg_fps);
+        dbg_y += dbg_dy;
+
+        /* World position (24.8 fixed-point -> float) */
+        int32_t wx = *(int32_t *)(dbg_a + 0x1FC);
+        int32_t wy = *(int32_t *)(dbg_a + 0x200);
+        int32_t wz = *(int32_t *)(dbg_a + 0x204);
+        td5_hud_queue_text(0, 8, dbg_y, 0, "POS: %.1f %.1f %.1f",
+                           (float)wx / 256.0f, (float)wy / 256.0f, (float)wz / 256.0f);
+        dbg_y += dbg_dy;
+
+        /* Euler angles: yaw(heading), pitch, roll — 20-bit accum, display as degrees */
+        int32_t yaw_acc   = *(int32_t *)(dbg_a + 0x1F4);
+        int32_t pitch_acc = *(int32_t *)(dbg_a + 0x1F8);
+        int32_t roll_acc  = *(int32_t *)(dbg_a + 0x1F0);
+        float yaw_deg   = (float)((yaw_acc >> 8) & 0xFFF) * (360.0f / 4096.0f);
+        float pitch_deg = (float)((pitch_acc >> 8) & 0xFFF) * (360.0f / 4096.0f);
+        float roll_deg  = (float)((roll_acc >> 8) & 0xFFF) * (360.0f / 4096.0f);
+        td5_hud_queue_text(0, 8, dbg_y, 0, "YAW: %.1f  PITCH: %.1f  ROLL: %.1f",
+                           yaw_deg, pitch_deg, roll_deg);
+        dbg_y += dbg_dy;
+
+        /* Speed: longitudinal + lateral (body-frame, 8.8 fp) */
+        int32_t long_spd = *(int32_t *)(dbg_a + 0x314);
+        int32_t lat_spd  = *(int32_t *)(dbg_a + 0x318);
+        td5_hud_queue_text(0, 8, dbg_y, 0, "SPD: fwd=%d  lat=%d",
+                           long_spd >> 8, lat_spd >> 8);
+        dbg_y += dbg_dy;
+
+        /* Engine RPM + gear */
+        int32_t rpm = *(int32_t *)(dbg_a + 0x310);
+        uint8_t gear = dbg_a[0x36B];
+        td5_hud_queue_text(0, 8, dbg_y, 0, "RPM: %d  GEAR: %d", rpm, (int)gear);
+        dbg_y += dbg_dy;
+
+        /* Steering command + brake flag */
+        int32_t steer = *(int32_t *)(dbg_a + 0x30C);
+        uint8_t brake = dbg_a[0x36D];
+        td5_hud_queue_text(0, 8, dbg_y, 0, "STEER: %d  BRAKE: %s",
+                           steer, brake ? "ON" : "OFF");
+        dbg_y += dbg_dy;
+
+        /* Suspension: roll (center) and pitch (wheel[0]) positions */
+        int32_t susp_roll  = *(int32_t *)(dbg_a + 0x2CC);
+        int32_t susp_pitch = *(int32_t *)(dbg_a + 0x2DC);
+        td5_hud_queue_text(0, 8, dbg_y, 0, "SUSP: roll=%d  pitch=%d",
+                           susp_roll, susp_pitch);
+        dbg_y += dbg_dy;
+
+        /* Collision / contact state */
+        uint8_t wall_flag    = dbg_a[0x37B];  /* track_contact_flag: 0=none, 1=wall, 2=edge */
+        uint8_t veh_mode     = dbg_a[0x379];  /* vehicle_mode: 0=normal, 1=recovery */
+        uint8_t dmg_lockout  = dbg_a[0x37C];  /* damage_lockout counter */
+        uint8_t wheel_contact = dbg_a[0x37D]; /* per-wheel ground contact bits */
+        uint8_t surface_flags = dbg_a[0x376]; /* surface contact (bit0=rear, bit1=front) */
+        int32_t slip_f = *(int32_t *)(dbg_a + 0x31C); /* front axle slip excess */
+        int32_t slip_r = *(int32_t *)(dbg_a + 0x320); /* rear axle slip excess */
+
+        const char *wall_str = "NONE";
+        if (wall_flag == 1) wall_str = "WALL";
+        else if (wall_flag == 2) wall_str = "EDGE";
+
+        td5_hud_queue_text(0, 8, dbg_y, 0, "COL: %s  MODE: %s  DMG: %d",
+                           wall_str,
+                           veh_mode ? "RECOVERY" : "NORMAL",
+                           (int)dmg_lockout);
+        dbg_y += dbg_dy;
+
+        td5_hud_queue_text(0, 8, dbg_y, 0, "WHEELS: %c%c%c%c  SURF: %s%s  SLIP: F%d R%d",
+                           (wheel_contact & 1) ? 'L' : '-',
+                           (wheel_contact & 2) ? 'R' : '-',
+                           (wheel_contact & 4) ? 'l' : '-',
+                           (wheel_contact & 8) ? 'r' : '-',
+                           (surface_flags & 2) ? "FRT " : "",
+                           (surface_flags & 1) ? "REAR" : "",
+                           slip_f >> 8, slip_r >> 8);
+        dbg_y += dbg_dy;
+
+        /* Track span index */
+        int16_t span = *(int16_t *)(dbg_a + 0x82);
+        td5_hud_queue_text(0, 8, dbg_y, 0, "SPAN: %d", (int)span);
+
         td5_hud_flush_text();
     }
 
@@ -2230,7 +2328,27 @@ void td5_hud_render_minimap(int actor_slot)
      * start_span = ((player_span / 24) - 6) * 24 [CONFIRMED @ 0x43A380]:
      * round down to 24-span group, go back 6 groups (144 spans behind player). */
     int16_t player_span = actor_span_index(actor_slot);
-    int start_span = ((int)player_span / 24 - 6) * 24;
+
+    /* Branch remap [CONFIRMED @ 0x43A350]: when the player is on a branch
+     * segment (player_span >= g_strip_span_count), remap back into the primary
+     * track range using the segment table built during init.  Without this,
+     * start_span overflows and every loop iteration fails bounds checks. */
+    int remapped_span = (int)player_span;
+    if (remapped_span >= g_strip_span_count &&
+        s_minimap_seg_branch_start < s_minimap_seg_primary_end) {
+        for (int si = s_minimap_seg_branch_start;
+             si < s_minimap_seg_primary_end; si++) {
+            if (remapped_span <= (int)s_minimap_seg_end[si]) {
+                remapped_span += (int)s_minimap_seg_branch[si]
+                               - (int)s_minimap_seg_start[si];
+                TD5_LOG_I(LOG_TAG, "minimap: branch remap span %d -> %d (seg %d)",
+                          (int)player_span, remapped_span, si);
+                break;
+            }
+        }
+    }
+
+    int start_span = (remapped_span / 24 - 6) * 24;
     if (start_span < 0) start_span = 0;
 
     uint8_t *span_base = (uint8_t *)g_strip_span_base;
@@ -2350,8 +2468,14 @@ void td5_hud_render_minimap(int actor_slot)
         hud_submit_quad(&map_quad);
         seg_rendered++;
     }
-    TD5_LOG_I(LOG_TAG, "minimap_render: segs_rendered=%d start_span=%d end_span=%d span_count=%d",
-              seg_rendered, start_span, local_a4 - 1, g_strip_span_count);
+    {
+        static int s_prev_seg_rendered = -1;
+        if (seg_rendered != s_prev_seg_rendered) {
+            TD5_LOG_I(LOG_TAG, "minimap_render: segs_rendered=%d start_span=%d end_span=%d span_count=%d player_span=%d",
+                      seg_rendered, start_span, local_a4 - 1, g_strip_span_count, (int)player_span);
+            s_prev_seg_rendered = seg_rendered;
+        }
+    }
 
     /* Render racer dot markers */
     for (int r = 0; r < g_racer_count; r++) {
@@ -2415,9 +2539,7 @@ void td5_hud_render_minimap(int actor_slot)
         }
     }
 
-    TD5_LOG_I(LOG_TAG,
-              "minimap: actor=%d player_span=%d start_span=%d segs_rendered=%d dots=%d span_count=%d",
-              actor_slot, (int)player_span, start_span, seg_rendered, dot_count, g_strip_span_count);
+    /* (per-frame minimap summary suppressed — see minimap_render log for changes) */
 }
 
 /* ========================================================================
