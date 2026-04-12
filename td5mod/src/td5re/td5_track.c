@@ -695,6 +695,13 @@ void td5_track_resolve_wall_contacts(TD5_Actor *actor)
 
         const int32_t WALL_DEAD_ZONE = -10;
 
+        /* Sanity check: if BOTH walls report the probe as outside (both d
+         * negative), the span has degenerate geometry (e.g., lane-count
+         * transition where one wall edge runs diagonally instead of
+         * longitudinally). Skip both impulses for this probe. */
+        if (l_ok && r_ok && l_d < 0 && r_d < 0)
+            continue;
+
         if (l_ok && l_d < WALL_DEAD_ZONE) {
             double rad = atan2((double)l_par.nnx, (double)(-l_par.nnz));
             int32_t wall_angle = (int32_t)(rad * (4096.0 / (2.0 * 3.14159265358979323846))) & 0xFFF;
