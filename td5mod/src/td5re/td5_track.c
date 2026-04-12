@@ -548,7 +548,12 @@ void td5_track_resolve_wall_contacts(TD5_Actor *actor)
 
     const TD5_StripSpan *sp = &s_span_array[span_idx];
     int type = sp->span_type;
-    if (type == 9 || type == 10) return;  /* sentinel spans */
+    /* Only run on standard quad types (1, 2, 5) whose vertex layout gives
+     * reliable longitudinal wall lines. Transition (3, 4), reversed (6, 7),
+     * junction (8, 11), and sentinel (9, 10) types have irregular vertex
+     * geometry that produces inverted wall normals — the road center tests
+     * as "outside" both walls, creating invisible barriers mid-road. */
+    if (type != 1 && type != 2 && type != 5) return;
 
     int lane_count = span_lane_count(sp);
     if (lane_count < 1) lane_count = 1;
@@ -585,6 +590,10 @@ void td5_track_resolve_wall_contacts(TD5_Actor *actor)
      * This approach tests just two lines per span regardless of how many
      * lanes the span has, which is what a lateral wall check should do. */
 
+    /* For standard types (1, 2, 5) vertex offsets are always 0. */
+    int li_base = (int)sp->left_vertex_index;
+    int ri_base = (int)sp->right_vertex_index;
+
     struct wall_line {
         TD5_StripVertex *base;    /* near vertex */
         TD5_StripVertex *end_v;   /* far vertex */
@@ -592,14 +601,14 @@ void td5_track_resolve_wall_contacts(TD5_Actor *actor)
     };
 
     struct wall_line l_wall = {
-        vertex_at((int)sp->left_vertex_index + 0),
-        vertex_at((int)sp->right_vertex_index + 0),
-        vertex_at((int)sp->left_vertex_index + lane_count)
+        vertex_at(li_base + 0),
+        vertex_at(ri_base + 0),
+        vertex_at(li_base + lane_count)
     };
     struct wall_line r_wall = {
-        vertex_at((int)sp->left_vertex_index + lane_count),
-        vertex_at((int)sp->right_vertex_index + lane_count),
-        vertex_at((int)sp->left_vertex_index + 0)
+        vertex_at(li_base + lane_count),
+        vertex_at(ri_base + lane_count),
+        vertex_at(li_base + 0)
     };
 
     if (!l_wall.base || !l_wall.end_v || !l_wall.inside) return;
