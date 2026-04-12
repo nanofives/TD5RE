@@ -2304,14 +2304,37 @@ int td5_asset_load_vehicle(int car_index, int slot)
                 TD5_LOG_W(LOG_TAG, "vehicle slot=%d: carhub0 PNG not found in %s", slot, zip_path);
         }
 
-        /* Patch PrimitiveCmd page IDs: 7→skin, 8→hub */
+        /* Patch PrimitiveCmd page IDs: 7→skin, 8→chassis underside
+         * [CONFIRMED @ 0x44374D] original patches cmd[1] page to CHASSIS
+         * atlas entry texture_slot, NOT to the hub texture.
+         * [CONFIRMED @ 0x443794-0x4437B9] original remaps cmd[1] UVs into
+         * the CHASSIS sprite sub-region on the static atlas page. */
         mesh->texture_page_id = (int16_t)skin_page;
         TD5_PrimitiveCmd *cmds = (TD5_PrimitiveCmd *)(uintptr_t)mesh->commands_offset;
+        TD5_MeshVertex *base_verts = (TD5_MeshVertex *)(uintptr_t)mesh->vertices_offset;
+        int vert_cursor = 0;
         for (int c = 0; c < mesh->command_count; c++) {
-            if (cmds[c].texture_page_id == TD5_CAR_MESH_SKIN_ID)
+            int vert_count = cmds[c].triangle_count * 3 + cmds[c].quad_count * 4;
+            if (cmds[c].texture_page_id == TD5_CAR_MESH_SKIN_ID) {
                 cmds[c].texture_page_id = (int16_t)skin_page;
-            else if (cmds[c].texture_page_id == TD5_CAR_MESH_HUB_ID)
-                cmds[c].texture_page_id = (int16_t)hub_page;
+            } else if (cmds[c].texture_page_id == TD5_CAR_MESH_HUB_ID) {
+                /* Underside polygons → CHASSIS sprite on static atlas page
+                 * [CONFIRMED @ 0x44374D, 0x443794-0x4437B9] */
+                cmds[c].texture_page_id = (int16_t)s_chassis_page;
+
+                /* Remap vertex UVs into the CHASSIS sub-region.
+                 * vertex_data_ptr is 0 at load time (relocated by renderer),
+                 * so we walk base_verts with a running cursor. */
+                TD5_MeshVertex *cmd_verts = base_verts + vert_cursor;
+                for (int v = 0; v < vert_count; v++) {
+                    cmd_verts[v].tex_u = s_chassis_uv_w * cmd_verts[v].tex_u + s_chassis_uv_x;
+                    cmd_verts[v].tex_v = s_chassis_uv_h * cmd_verts[v].tex_v + s_chassis_uv_y;
+                }
+                TD5_LOG_I(LOG_TAG, "vehicle slot=%d cmd[%d]: remapped %d verts to chassis page=%d uv=(%.3f,%.3f)+(%.3f,%.3f)",
+                          slot, c, vert_count, s_chassis_page,
+                          s_chassis_uv_x, s_chassis_uv_y, s_chassis_uv_w, s_chassis_uv_h);
+            }
+            vert_cursor += vert_count;
         }
     }
 
