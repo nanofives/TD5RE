@@ -693,9 +693,17 @@ void td5_physics_update_player(TD5_Actor *actor)
 
     if (actor->surface_contact_flags != 0) {
         /* --- ON-GROUND branch ---
-         * No auto_gear_select or reverse_throttle_sign here — the original
-         * only calls those on the AIRBORNE path [CONFIRMED @ 0x404521].
-         * CRGT (later in this function) is the engine updater for grounded. */
+         * The original only calls auto_gear on the AIRBORNE path
+         * [CONFIRMED @ 0x404521], relying on frequent micro-airborne frames
+         * from track bumps. The port's surface contact system is more
+         * conservative (fewer airborne frames), so we also run auto_gear
+         * on-ground to ensure gear shifts happen. Without this, the car
+         * stays stuck in first gear indefinitely. */
+        if (*((const uint8_t *)actor + 0x378) == 0) {
+            td5_physics_reverse_throttle_sign(actor);
+        } else {
+            td5_physics_auto_gear_select(actor);
+        }
 
         if (!actor->brake_flag) {
             /* Drive path: drive torque distributed by drivetrain. At
