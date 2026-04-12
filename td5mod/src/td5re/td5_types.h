@@ -224,15 +224,20 @@ typedef enum TD5_SpanType {
 
 /** Input bitmask flags */
 typedef enum TD5_InputBits {
-    TD5_INPUT_STEER_LEFT    = 0x00000001,
-    TD5_INPUT_STEER_RIGHT   = 0x00000002,
-    TD5_INPUT_THROTTLE      = 0x00000200,
-    TD5_INPUT_BRAKE         = 0x00000400,
-    TD5_INPUT_GEAR_DOWN     = 0x00080000,
-    TD5_INPUT_GEAR_UP       = 0x00100000,
-    TD5_INPUT_HORN          = 0x00200000,
-    TD5_INPUT_STUNNED       = 0x00200000, /* same bit triggers state 0x0F */
+    TD5_INPUT_STEER_LEFT    = 0x00000001,  /* bit  0 */
+    TD5_INPUT_STEER_RIGHT   = 0x00000002,  /* bit  1 */
+    TD5_INPUT_THROTTLE      = 0x00000200,  /* bit  9 */
+    TD5_INPUT_BRAKE         = 0x00000400,  /* bit 10 */
+    TD5_INPUT_HANDBRAKE     = 0x00100000,  /* bit 20 — original default: Q */
+    TD5_INPUT_HORN          = 0x00200000,  /* bit 21 — original default: RCtrl */
+    TD5_INPUT_STUNNED       = 0x00200000,  /* same bit triggers state 0x0F */
+    TD5_INPUT_GEAR_UP       = 0x00400000,  /* bit 22 — original default: A */
+    TD5_INPUT_GEAR_DOWN     = 0x00800000,  /* bit 23 — original default: Z */
+    TD5_INPUT_CAMERA_CHANGE = 0x01000000,  /* bit 24 — original default: T */
+    TD5_INPUT_REAR_VIEW     = 0x02000000,  /* bit 25 — original default: X */
     TD5_INPUT_ANALOG_Y_FLAG = 0x08000000,
+    TD5_INPUT_PAUSE         = 0x20000000,  /* bit 29 — hardcoded: P */
+    TD5_INPUT_ESCAPE        = 0x40000000,  /* bit 30 — hardcoded: Escape */
     TD5_INPUT_ANALOG_X_FLAG = 0x80000000u
 } TD5_InputBits;
 
@@ -260,7 +265,8 @@ typedef enum TD5_RenderPreset {
     TD5_PRESET_TRANSLUCENT_ANISO  = 2,  /* Translucent, aniso filter */
     TD5_PRESET_OPAQUE_LINEAR      = 3,  /* Opaque, linear filter */
     TD5_PRESET_TRANSLUCENT_POINT  = 4,  /* Translucent, point (nearest-neighbour) filter */
-    TD5_PRESET_ADDITIVE           = 5   /* Additive (ONE/ONE) — type-3 tpages: lights, glows */
+    TD5_PRESET_ADDITIVE           = 5,  /* Additive (ONE/ONE) — type-3 tpages: lights, glows */
+    TD5_PRESET_SHADOW             = 6   /* Shadow: translucent, z_test=1, z_write=0, point filter */
 } TD5_RenderPreset;
 
 /** Mesh primitive dispatch opcodes */

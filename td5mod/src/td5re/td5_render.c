@@ -1700,19 +1700,6 @@ void td5_render_actors_for_view(int view_index)
             td5_render_transform_mesh_vertices(mesh);
             td5_render_compute_vertex_lighting(mesh);
 
-            /* Shadow FIRST, then car mesh, then wheels. The shadow is drawn
-             * with z_test=0 (TRANSLUCENT_POINT) so it paints unconditionally
-             * over whatever is already in the colour buffer (the track). The
-             * opaque car body and wheels are drawn afterwards with z_write=1
-             * and paint over the shadow exactly where they exist in screen
-             * space — that's how we get "car occludes shadow" without a
-             * depth test on the shadow itself. This avoids the terrain-
-             * slope flicker you get with z_test=1, and it works correctly
-             * now that the wheel hub has been reshaped from a 4-vertex
-             * diamond (which had triangular gaps to the rim) to a 9-vertex
-             * disc that fully fills the wheel face. */
-            render_vehicle_shadow_quad(actor);
-
             td5_render_prepared_mesh(mesh);
 
             /* Render wheel ring billboards (0x446F00) */
@@ -1720,6 +1707,15 @@ void td5_render_actors_for_view(int view_index)
 
             /* Render brake light billboards (0x4011C0) */
             td5_vfx_render_taillights(slot);
+
+            /* Shadow AFTER car mesh + wheels, matching original render order.
+             * [CONFIRMED @ 0x40C120: original submits shadow into a deferred
+             * translucent sort list after RenderPreparedMeshResource + wheels.]
+             * Uses TD5_PRESET_SHADOW (z_test=1, z_write=0) so the car body's
+             * depth occludes the shadow where they overlap in screen space.
+             * Drawing before the car caused shadows to appear on top of
+             * opponent cars since z_test=0 ignored their depth. */
+            render_vehicle_shadow_quad(actor);
 
             actor_render_count++;
             actor_meshes_submitted++;
@@ -2408,21 +2404,11 @@ static void render_vehicle_shadow_quad(const TD5_Actor *actor)
 
     uint16_t indices[6] = { 0, 1, 2, 0, 2, 3 };
     flush_immediate_internal();
-    td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_POINT);
+    td5_plat_render_set_preset(TD5_PRESET_SHADOW);
     td5_plat_render_bind_texture(s_shadow_page);
     td5_plat_render_draw_tris(verts, 4, indices, 6);
 
-    /* Restore the default opaque preset. The mesh flush path funnels
-     * through td5_render_apply_page_blend_preset (td5_render.c:1937),
-     * which is a narrow transition-only setter — it only calls
-     * set_preset on the additive toggle boundary and does nothing for
-     * ordinary opaque pages. Without this explicit reset, the shadow's
-     * TRANSLUCENT_POINT state (z_test=0, z_write=0, blend on) leaks
-     * into the car mesh draw that runs next, the car mesh never writes
-     * depth, and the wheels drawn afterwards pass depth test freely
-     * and appear inside the body. That presents as intermittent
-     * "see-through car" because the shadow doesn't draw every frame
-     * (off-screen actors, cull-skipped, etc.). */
+    /* Restore opaque preset for subsequent draws. */
     td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
 }
 

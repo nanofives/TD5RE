@@ -885,14 +885,23 @@ void td5_plat_input_poll(int slot, TD5_InputState *out)
         #define K_DOWN(sc) (s_keyboard[(sc)] & 0x80)
 
         if (slot == 0) {
-            /* Player 1: arrow keys (always), plus WASD in single-player only */
+            /* Player 1: arrow keys + original defaults
+             * Original defaults: Left/Right/Up/Down, Q=handbrake,
+             * RCtrl=horn, A=gear up, Z=gear down, T=camera, X=rear view */
             if (K_DOWN(DIK_LEFT))                     bits |= TD5_INPUT_STEER_LEFT;
             if (K_DOWN(DIK_RIGHT))                    bits |= TD5_INPUT_STEER_RIGHT;
             if (K_DOWN(DIK_UP))                       bits |= TD5_INPUT_THROTTLE;
             if (K_DOWN(DIK_DOWN))                     bits |= TD5_INPUT_BRAKE;
+            if (K_DOWN(DIK_A))                        bits |= TD5_INPUT_GEAR_UP;
+            if (K_DOWN(DIK_Z))                        bits |= TD5_INPUT_GEAR_DOWN;
+            if (K_DOWN(DIK_RCONTROL))                 bits |= TD5_INPUT_HORN;
+            if (K_DOWN(DIK_Q))                        bits |= TD5_INPUT_HANDBRAKE;
+            if (K_DOWN(DIK_T))                        bits |= TD5_INPUT_CAMERA_CHANGE;
+            if (K_DOWN(DIK_X))                        bits |= TD5_INPUT_REAR_VIEW;
+            /* Modern alternates for convenience */
+            if (K_DOWN(DIK_SPACE))                    bits |= TD5_INPUT_HORN;
             if (K_DOWN(DIK_LSHIFT))                   bits |= TD5_INPUT_GEAR_DOWN;
             if (K_DOWN(DIK_RSHIFT))                   bits |= TD5_INPUT_GEAR_UP;
-            if (K_DOWN(DIK_SPACE))                    bits |= TD5_INPUT_HORN;
         } else {
             /* Player 2: WASD + Q/E */
             if (K_DOWN(DIK_A))                        bits |= TD5_INPUT_STEER_LEFT;
@@ -902,6 +911,9 @@ void td5_plat_input_poll(int slot, TD5_InputState *out)
             if (K_DOWN(DIK_Q))                        bits |= TD5_INPUT_GEAR_DOWN;
             if (K_DOWN(DIK_E))                        bits |= TD5_INPUT_GEAR_UP;
             if (K_DOWN(DIK_TAB))                      bits |= TD5_INPUT_HORN;
+            if (K_DOWN(DIK_CAPSLOCK))                 bits |= TD5_INPUT_HANDBRAKE;
+            if (K_DOWN(DIK_R))                        bits |= TD5_INPUT_CAMERA_CHANGE;
+            if (K_DOWN(DIK_F))                        bits |= TD5_INPUT_REAR_VIEW;
         }
 
         #undef K_DOWN
@@ -2122,6 +2134,24 @@ void td5_plat_render_set_preset(TD5_RenderPreset preset)
         s->z_enable     = 0;
         s->z_write      = 0;
         s->mag_filter   = 0; /* POINT — no bilinear bleed into transparent border pixels */
+        s->min_filter   = 0;
+        s->texblend_mode = D3DTBLEND_MODULATEALPHA;
+        s->alpha_test_enable = 1;
+        s->alpha_ref         = 1;
+        break;
+
+    case TD5_PRESET_SHADOW:
+        /* Shadow quads: same blend as TRANSLUCENT_POINT but with z_test ON
+         * and z_write OFF. Drawn AFTER car mesh so the car's depth occludes
+         * the shadow where they overlap. [CONFIRMED @ 0x40C120: original
+         * queues shadows into a deferred translucent sort list that renders
+         * after all opaque geometry with depth testing enabled.] */
+        s->blend_enable = 1;
+        s->src_blend    = D3D6BLEND_SRCALPHA;
+        s->dest_blend   = D3D6BLEND_INVSRCALPHA;
+        s->z_enable     = 1;
+        s->z_write      = 0;
+        s->mag_filter   = 0;
         s->min_filter   = 0;
         s->texblend_mode = D3DTBLEND_MODULATEALPHA;
         s->alpha_test_enable = 1;
