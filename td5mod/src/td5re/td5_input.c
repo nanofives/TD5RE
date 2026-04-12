@@ -555,6 +555,7 @@ void td5_input_update_player_control(int slot)
             } else {
                 s_throttle[slot] = (int16_t)0xFF00;
                 s_reverse_req[slot] = s_brake[slot];
+                s_brake[slot] = 1;
             }
         } else if (encounter_active) {
             /* Encounter steering override -- placeholder */
@@ -625,6 +626,16 @@ void td5_input_update_player_control(int slot)
         TD5_Actor *actor = td5_game_get_actor(slot);
         if (actor) {
             uint8_t *a = (uint8_t *)actor;
+
+            /* AutoThrottle: force full gas + straight steering for slot 0.
+             * Used for deterministic trace comparison (both port and original
+             * get identical input). Enable via [Trace] AutoThrottle=1 in INI. */
+            if (slot == 0 && g_td5.ini.auto_throttle) {
+                s_throttle[slot] = 0x100;
+                s_steering_cmd[slot] = 0;
+                s_brake[slot] = 0;
+            }
+
             /* 0x30C: steering_command (int32) */
             *(int32_t *)(a + 0x30C) = s_steering_cmd[slot];
             /* 0x33E: encounter_steering_cmd (int16) — used as throttle by physics */
