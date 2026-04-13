@@ -1584,16 +1584,6 @@ void td5_physics_update_ai(TD5_Actor *actor)
 
 void td5_physics_update_traffic(TD5_Actor *actor)
 {
-    static int s_traffic_phys_log = 0;
-    if (actor->slot_index == 6 && (s_traffic_phys_log < 10 || (s_traffic_phys_log % 30 == 0 && s_traffic_phys_log < 300))) {
-        TD5_LOG_I(LOG_TAG, "traffic_phys: slot=%d thr=%d heading=0x%X vel=(%d,%d) pos=(%d,%d,%d) span=%d mode=%d",
-                  actor->slot_index, (int)actor->encounter_steering_cmd,
-                  (actor->euler_accum.yaw >> 8) & 0xFFF,
-                  actor->linear_velocity_x, actor->linear_velocity_z,
-                  actor->world_pos.x, actor->world_pos.y, actor->world_pos.z,
-                  actor->track_span_raw, actor->vehicle_mode);
-    }
-    if (actor->slot_index == 6) s_traffic_phys_log++;
 
     /* Fixed drag: 0x10/4096 per axis */
     int32_t vx = actor->linear_velocity_x;

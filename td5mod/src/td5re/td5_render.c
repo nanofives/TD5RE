@@ -1675,8 +1675,6 @@ void td5_render_actors_for_view(int view_index)
     {
         int total_actors = td5_game_get_total_actor_count();
         int drag_mode = g_td5.drag_race_enabled;
-        static int s_traffic_diag_count = 0;
-        int traffic_diag_this_frame = (s_traffic_diag_count >= 200 && s_traffic_diag_count < 205);
 
         for (int slot = 0; slot < total_actors; slot++) {
             TD5_Actor *actor = td5_game_get_actor(slot);
@@ -1723,20 +1721,9 @@ void td5_render_actors_for_view(int view_index)
             td5_render_load_rotation(&view_rot);
             td5_render_load_translation(&render_pos);
 
-            if (!td5_render_test_mesh_frustum(mesh, &depth)) {
-                if (slot == 6 && traffic_diag_this_frame)
-                    TD5_LOG_I(LOG_TAG, "traffic6: CULLED pos=(%.0f,%.0f,%.0f) span=%d vel=(%d,%d,%d)",
-                              render_pos.x, render_pos.y, render_pos.z,
-                              actor->track_span_raw,
-                              actor->linear_velocity_x, actor->linear_velocity_y,
-                              actor->linear_velocity_z);
+            if (!td5_render_test_mesh_frustum(mesh, &depth))
                 continue;
-            }
             (void)depth;
-
-            if (slot >= 6 && traffic_diag_this_frame)
-                TD5_LOG_I(LOG_TAG, "traffic DRAWN: slot=%d pos=(%.0f,%.0f,%.0f) depth=%.1f",
-                          slot, render_pos.x, render_pos.y, render_pos.z, depth);
 
             td5_render_transform_mesh_vertices(mesh);
             td5_render_compute_vertex_lighting(mesh);
@@ -1778,7 +1765,6 @@ void td5_render_actors_for_view(int view_index)
                       render_pos.x, render_pos.y, render_pos.z,
                       (void *)mesh);
         }
-        s_traffic_diag_count++;
     }
 
     {
