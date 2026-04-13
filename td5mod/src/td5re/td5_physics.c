@@ -2743,9 +2743,10 @@ void td5_physics_update_suspension_response(TD5_Actor *actor)
             int32_t fwdbk_hdiff = (front_avg - rear_avg) >> 8;   /* front vs rear → visual pitch */
             int32_t leftrt_hdiff = (left_avg - right_avg) >> 8;   /* left vs right → visual roll */
 
-            /* 4096/(2*pi) ≈ 652. Divide by full track/wheelbase (2x half). */
-            int32_t target_roll  = -(fwdbk_hdiff  * 652) / (2 * half_wbase);  /* Rx = visual pitch (negated) */
-            int32_t target_pitch = (leftrt_hdiff * 652) / (2 * half_track);  /* Rz = visual roll */
+            /* 4096/(2*pi) ≈ 652 for exact geometry. Scale down to ~50% for a
+             * subtler visual tilt matching the original game's feel. */
+            int32_t target_roll  = -(fwdbk_hdiff  * 326) / (2 * half_wbase);  /* Rx = visual pitch */
+            int32_t target_pitch = (leftrt_hdiff * 326) / (2 * half_track);  /* Rz = visual roll */
 
             /* Clamp target to reasonable range (±0x100 = ±22.5°) */
             if (target_roll  >  0x100) target_roll  =  0x100;
@@ -2972,8 +2973,16 @@ void td5_physics_integrate_pose(TD5_Actor *actor)
             int16_t rot_y = rotate_vec_world_y(actor, src);
 
             int32_t wheel_y = actor->wheel_contact_pos[i].y;
-            contact_y_sum += (int64_t)(wheel_y + (int32_t)rot_y * -0x100);
+            int32_t contrib = wheel_y + (int32_t)rot_y * -0x100;
+            contact_y_sum += (int64_t)contrib;
             contact_count++;
+            /* Detect sudden Y discontinuity in wheel contact */
+            if (actor->slot_index == 0 &&
+                (contrib > 10000000 || contrib < -10000000)) {
+                TD5_LOG_W(LOG_TAG, "Y_SPIKE: wheel=%d wcy=%d rot_y=%d contrib=%d span=%d",
+                          i, wheel_y, rot_y, contrib,
+                          (int)actor->wheel_probes[i].span_index);
+            }
         }
 
         if (contact_count > 0) {
