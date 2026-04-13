@@ -845,9 +845,14 @@ void td5_ai_update_steering_bias(int *route_state, int32_t steer_weight) {
                 goto clamp_end;
             }
             if (left_dev < 0x100) {
-                /* Normal mode, fine deviation: CosFixed12-scaled
-                 * [CONFIRMED @ 0x4340C0: original calls FUN_0040a700 = CosFixed12] */
-                int32_t t   = ai_cos_fixed12(left_dev);
+                /* Normal mode, fine deviation: proportional correction.
+                 * Original uses CosFixed12 [CONFIRMED @ 0x4340C0: FUN_0040a700]
+                 * which works with 0x800 baseline (cos(small)≈max). Port uses
+                 * SinFixed12 because the operating point is near delta=0 where
+                 * sin(0)=0 prevents overshoot. The port lacks the boundary
+                 * pre-loop that stabilizes the original's cos-based correction.
+                 * TODO: revert to cos once boundary system is ported. */
+                int32_t t   = ai_sin_fixed12(left_dev);
                 int32_t mul = t * param_2;
                 ACTOR_I32(actor, ACTOR_STEERING_CMD) =
                     ACTOR_I32(actor, ACTOR_STEERING_CMD)
@@ -879,8 +884,8 @@ void td5_ai_update_steering_bias(int *route_state, int32_t steer_weight) {
             /* fall through: write -iVar3 as new bias */
         } else {
             if (right_dev < 0x100) {
-                /* CosFixed12 [CONFIRMED @ 0x4340C0: FUN_0040a700] */
-                int32_t t   = ai_cos_fixed12(right_dev);
+                /* SinFixed12 — see left fine band comment above */
+                int32_t t   = ai_sin_fixed12(right_dev);
                 int32_t mul = t * param_2;
                 ACTOR_I32(actor, ACTOR_STEERING_CMD) =
                     ACTOR_I32(actor, ACTOR_STEERING_CMD)
@@ -1498,25 +1503,56 @@ void td5_ai_update_track_behavior(int slot) {
      *    Coasting/accelerating -> 0x20000 (larger corrections) */
     steer_weight = threshold_result ? 0x10000 : 0x20000;
 
-    /* 5. Final steering bias computation */
+    /* 5. Steering: proportional controller on heading-to-target error.
+     *
+     * The original's band-based UpdateActorSteeringBias (0x4340C0) is designed
+     * for a 0x800 delta baseline and requires the boundary pre-loop and
+     * bit-accurate AI dynamics for stable convergence. The port lacks both.
+     *
+     * This proportional replacement computes the desired steer_cmd directly
+     * from the heading error to the look-ahead target point. The steer_cmd
+     * is the value that, when added to yaw_accum, points the car at the
+     * target. This is set directly (no accumulation) to prevent overshoot.
+     *
+     * TODO: replace with original band-based system once boundary pre-loop
+     * (0x433CE0/0x4366E0/0x4368A0) and bit-accurate AI dynamics are ported. */
     {
-        int32_t old_steer = ACTOR_I32(actor, ACTOR_STEERING_CMD);
-        td5_ai_update_steering_bias(rs, steer_weight);
-        /* Rate-limit steer change per tick. The original's large-band
-         * corrections (+0x20000, -0x20000 per tick) assume fast yaw
-         * response from the physics. The port's AI dynamics damp more
-         * slowly, causing full-amplitude steer oscillation. Capping
-         * the per-tick change to ±0x4000 smooths the convergence while
-         * preserving the original's steering band logic.
-         * TODO: remove once boundary pre-loop (0x433CE0/0x4366E0/0x4368A0)
-         * and bit-accurate AI dynamics are ported. */
+        int32_t yaw = ACTOR_I32(actor, ACTOR_YAW_ACCUM);
+        int32_t cur_steer = ACTOR_I32(actor, ACTOR_STEERING_CMD);
+        /* Desired heading = target_angle from step 2 deviation.
+         * Compute needed steer_cmd to point heading at target:
+         * heading = (yaw + steer) >> 8 & 0xFFF  should equal  target_angle
+         * steer = (target_angle << 8) - yaw */
+        int32_t ta = rs[RS_RIGHT_DEVIATION]; /* reuse step 2's target_angle? */
+        /* Recompute target angle for the proportional controller */
         {
-            int32_t new_steer = ACTOR_I32(actor, ACTOR_STEERING_CMD);
-            int32_t change = new_steer - old_steer;
-            if (change > 0x4000) change = 0x4000;
-            if (change < -0x4000) change = -0x4000;
-            ACTOR_I32(actor, ACTOR_STEERING_CMD) = old_steer + change;
+            int16_t sp = ACTOR_I16(actor, ACTOR_SPAN_RAW);
+            int span_count = td5_track_get_span_count();
+            if (span_count > 0 && sp >= 0) {
+                int tsp = ((int)sp + 4) % span_count;
+                int tx = 0, tz = 0;
+                int rb = 128;
+                const uint8_t *rp = (const uint8_t *)(intptr_t)rs[RS_ROUTE_TABLE_PTR];
+                if (rp) rb = (int)rp[(size_t)(unsigned)tsp * 3u];
+                if (td5_track_sample_target_point(tsp, rb, &tx, &tz, rs[RS_TRACK_OFFSET_BIAS])) {
+                    int32_t ax = ACTOR_I32(actor, ACTOR_WORLD_POS_X);
+                    int32_t az = ACTOR_I32(actor, ACTOR_WORLD_POS_Z);
+                    ta = ai_angle_from_vector((tx - ax) >> 8, (tz - az) >> 8) & 0xFFF;
+                }
+            }
         }
+        /* Shortest-path angular error from raw heading to target */
+        int32_t raw_heading = (yaw >> 8) & 0xFFF;
+        int32_t err = ((ta - raw_heading + 0x800) & 0xFFF) - 0x800;
+        /* Desired steer = error * 256 (shift back to accumulator scale) */
+        int32_t desired_steer = err << 8;
+        /* Clamp to ±0x6000 (~8.4° max turn angle) — gentle turns
+         * to avoid fighting physics angular momentum */
+        if (desired_steer > 0x6000) desired_steer = 0x6000;
+        if (desired_steer < -0x6000) desired_steer = -0x6000;
+        /* Exponential blend: move 25% toward desired each tick.
+         * This gives the physics time to respond without overshooting. */
+        ACTOR_I32(actor, ACTOR_STEERING_CMD) = cur_steer + ((desired_steer - cur_steer + 2) >> 2);
     }
 }
 
