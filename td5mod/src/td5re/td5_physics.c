@@ -2757,7 +2757,18 @@ void td5_physics_update_suspension_response(TD5_Actor *actor)
     uint8_t bVar2 = s_prev_grounded_mask[actor->slot_index & 0x0F];
 
     if (bVar1 == 0x0F) {
-        /* All four wheels airborne — skip entirely (original: if bVar1 != 0xF runs body) */
+        /* All four wheels airborne — no gravity add-back (let gravity pull the
+         * car down naturally), but apply a mild return-to-level pitch/roll
+         * torque so the car visibly rotates in the air instead of freezing
+         * at its takeoff attitude. */
+        int32_t euler_err_r = 0 - actor->euler_accum.roll;
+        int32_t euler_err_p = 0 - actor->euler_accum.pitch;
+        actor->angular_velocity_roll  = euler_err_r >> 4;   /* gentler than ground (>>2) */
+        actor->angular_velocity_pitch = euler_err_p >> 4;
+        if (actor->angular_velocity_roll  >  1500) actor->angular_velocity_roll  =  1500;
+        if (actor->angular_velocity_roll  < -1500) actor->angular_velocity_roll  = -1500;
+        if (actor->angular_velocity_pitch >  1500) actor->angular_velocity_pitch =  1500;
+        if (actor->angular_velocity_pitch < -1500) actor->angular_velocity_pitch = -1500;
         return;
     }
 
@@ -3239,14 +3250,19 @@ void td5_physics_integrate_pose(TD5_Actor *actor)
                 }
             }
 
-            /* Airborne detection: if the snap target is significantly below
-             * the current integrated position, the car is flying over a
-             * drop/ramp. Skip the snap and let gravity handle the descent.
-             * Threshold: 10240 in 24.8 = 40 world units of clearance.
-             * This replaces the per-wheel force-based airborne check which
-             * can't work with the port's ride-height equilibrium offset. */
+            /* Airborne detection: if the snap target is below the current
+             * integrated position, the car is flying over a drop/ramp.
+             * Threshold: 3072 in 24.8 = 12 world units of clearance above
+             * the expected snap position. This triggers when the car crests
+             * a slope/ramp with enough upward velocity that gravity (1900
+             * per frame) can't pull it back to the ground in one tick.
+             *
+             * During steady driving on flat ground or continuously rising
+             * slopes, airborne_gap ≈ -gravity (always negative). Only when
+             * the ground levels out after a climb (or drops away over a
+             * crest) does vel_y > gravity carry pos_y above new_y. */
             int32_t airborne_gap = actor->world_pos.y - new_y;
-            if (airborne_gap > 10240) {
+            if (airborne_gap > 3072) {
                 /* Car is above ground — flag all wheels airborne, don't snap */
                 actor->wheel_contact_bitmask = 0x0F;
                 TD5_LOG_I(LOG_TAG, "airborne: slot=%d gap=%d pos_y=%d snap_y=%d",
