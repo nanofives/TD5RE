@@ -1724,10 +1724,51 @@ static uint8_t compute_boundary_bits(int span_idx, int sub_lane,
 }
 
 /**
+ * Compute the car's effective sub_lane from its XZ position within a span.
+ * Returns a value in [0, lane_count-1] based on lateral position.
+ * Used for junction branch decisions when sub_lane tracking is unreliable.
+ */
+static int compute_effective_sublane(int span_idx, int32_t pos_x, int32_t pos_z)
+{
+    if (span_idx < 0 || span_idx >= s_span_count) return 0;
+    const TD5_StripSpan *sp = &s_span_array[span_idx];
+    int lc = span_lane_count(sp);
+    if (lc < 2) return 0;
+
+    /* Measure lateral position as fraction across the span width.
+     * Left edge vertex = left_vertex_index[0], right edge = left_vertex_index[lc].
+     * Project car position onto the lateral axis (perpendicular to the
+     * longitudinal near→far direction). */
+    TD5_StripVertex *v0 = vertex_at((int)sp->left_vertex_index);
+    TD5_StripVertex *vN = vertex_at((int)sp->left_vertex_index + lc);
+    if (!v0 || !vN) return 0;
+
+    int32_t ox = sp->origin_x;
+    int32_t oz = sp->origin_z;
+    /* Lateral vector: v0 → vN */
+    int32_t lat_dx = (int32_t)vN->x - (int32_t)v0->x;
+    int32_t lat_dz = (int32_t)vN->z - (int32_t)v0->z;
+    int64_t lat_sq = (int64_t)lat_dx * lat_dx + (int64_t)lat_dz * lat_dz;
+    if (lat_sq == 0) return 0;
+
+    /* Project car's position (relative to v0) onto lateral axis */
+    int32_t car_rx = (pos_x >> 8) - ox - (int32_t)v0->x;
+    int32_t car_rz = (pos_z >> 8) - oz - (int32_t)v0->z;
+    int64_t proj = (int64_t)car_rx * lat_dx + (int64_t)car_rz * lat_dz;
+
+    /* Convert projection to sub_lane index */
+    int result = (int)(proj * lc / lat_sq);
+    if (result < 0) result = 0;
+    if (result >= lc) result = lc - 1;
+    return result;
+}
+
+/**
  * Resolve neighbor span index for a given crossing direction.
  * Returns the new span index (and updates sub_lane via pointer).
  */
-static int resolve_neighbor(int span_idx, int *sub_lane, uint8_t crossing_bit)
+static int resolve_neighbor(int span_idx, int *sub_lane, uint8_t crossing_bit,
+                            int32_t pos_x, int32_t pos_z)
 {
     TD5_StripSpan *sp = &s_span_array[span_idx];
     int new_span = span_idx;
@@ -1741,9 +1782,15 @@ static int resolve_neighbor(int span_idx, int *sub_lane, uint8_t crossing_bit)
      *   Type 11 (bwd junction): sub_lane < prev_span.lane_count → span-1 (main)
      *                           sub_lane >= prev_span.lane_count → backward_link (branch)
      *
-     * The neighbor span's lane_count is read by peeking at its packed_sub_span
-     * byte: original uses pbVar1[0x1B] for next (span+1, byte +0x03 within
-     * that span's 0x18 record) and pbVar1[-0x15] for prev (span-1). */
+     * HOWEVER: the port's sub_lane tracking is unreliable (h_offset adjustment
+     * doesn't produce correct lateral tracking). As a workaround, we compute
+     * the car's geometric position within the junction span to determine which
+     * side of the lane threshold the car is on. This matches the original's
+     * intent (sub_lane reflects position) without depending on broken tracking.
+     *
+     * The lane threshold divides the junction's lateral extent. The car's
+     * perpendicular distance from the left edge, as a fraction of total width,
+     * determines the effective sub_lane for the branch decision. */
 
     switch (crossing_bit) {
     case 0x01: /* Forward */
@@ -1752,14 +1799,21 @@ static int resolve_neighbor(int span_idx, int *sub_lane, uint8_t crossing_bit)
             int next_seq = span_idx + 1;
             if (next_seq < s_span_count) {
                 int next_lanes = span_lane_count(&s_span_array[next_seq]);
-                if (*sub_lane < next_lanes) {
+                /* Use geometric position to determine effective sub_lane,
+                 * since the port's sub_lane tracking is unreliable. */
+                int eff_lane = compute_effective_sublane(span_idx, pos_x, pos_z);
+                TD5_LOG_I(LOG_TAG, "JUNCTION_FWD: span=%d sub_lane=%d eff=%d next_lanes=%d link=%d -> %s",
+                          span_idx, *sub_lane, eff_lane, next_lanes, (int)sp->link_next,
+                          (eff_lane < next_lanes) ? "MAIN" : "BRANCH");
+                if (eff_lane < next_lanes) {
                     new_span = next_seq;  /* main road */
+                    *sub_lane = eff_lane;
                 } else {
                     new_span = (int)sp->link_next;  /* branch */
-                    /* Adjust sub_lane: dest_lanes - cur_lanes [CONFIRMED @ 0x4443F4] */
                     if (new_span >= 0 && new_span < s_span_count) {
                         int dest_lanes = span_lane_count(&s_span_array[new_span]);
-                        *sub_lane += dest_lanes - cur_lane_count;
+                        *sub_lane = eff_lane - next_lanes;
+                        if (*sub_lane >= dest_lanes) *sub_lane = dest_lanes - 1;
                     }
                 }
             } else {
@@ -1791,13 +1845,16 @@ static int resolve_neighbor(int span_idx, int *sub_lane, uint8_t crossing_bit)
             int next_seq = span_idx + 1;
             if (next_seq < s_span_count) {
                 int next_lanes = span_lane_count(&s_span_array[next_seq]);
-                if (*sub_lane < next_lanes) {
+                int eff_lane = compute_effective_sublane(span_idx, pos_x, pos_z);
+                if (eff_lane < next_lanes) {
                     new_span = next_seq;
+                    *sub_lane = eff_lane;
                 } else {
                     new_span = (int)sp->link_next;
                     if (new_span >= 0 && new_span < s_span_count) {
                         int dest_lanes = span_lane_count(&s_span_array[new_span]);
-                        *sub_lane += dest_lanes - cur_lane_count;
+                        *sub_lane = eff_lane - next_lanes;
+                        if (*sub_lane >= dest_lanes) *sub_lane = dest_lanes - 1;
                     }
                 }
             } else {
@@ -1825,13 +1882,16 @@ static int resolve_neighbor(int span_idx, int *sub_lane, uint8_t crossing_bit)
             int prev_seq = span_idx - 1;
             if (prev_seq >= 0) {
                 int prev_lanes = span_lane_count(&s_span_array[prev_seq]);
-                if (*sub_lane < prev_lanes) {
+                int eff_lane = compute_effective_sublane(span_idx, pos_x, pos_z);
+                if (eff_lane < prev_lanes) {
                     new_span = prev_seq;  /* main road */
+                    *sub_lane = eff_lane;
                 } else {
                     new_span = (int)sp->link_prev;  /* branch */
                     if (new_span >= 0 && new_span < s_span_count) {
                         int dest_lanes = span_lane_count(&s_span_array[new_span]);
-                        *sub_lane += dest_lanes - cur_lane_count;
+                        *sub_lane = eff_lane - prev_lanes;
+                        if (*sub_lane >= dest_lanes) *sub_lane = dest_lanes - 1;
                     }
                 }
             } else {
@@ -1862,13 +1922,16 @@ static int resolve_neighbor(int span_idx, int *sub_lane, uint8_t crossing_bit)
             int prev_seq = span_idx - 1;
             if (prev_seq >= 0) {
                 int prev_lanes = span_lane_count(&s_span_array[prev_seq]);
-                if (*sub_lane < prev_lanes) {
+                int eff_lane = compute_effective_sublane(span_idx, pos_x, pos_z);
+                if (eff_lane < prev_lanes) {
                     new_span = prev_seq;
+                    *sub_lane = eff_lane;
                 } else {
                     new_span = (int)sp->link_prev;
                     if (new_span >= 0 && new_span < s_span_count) {
                         int dest_lanes = span_lane_count(&s_span_array[new_span]);
-                        *sub_lane += dest_lanes - cur_lane_count;
+                        *sub_lane = eff_lane - prev_lanes;
+                        if (*sub_lane >= dest_lanes) *sub_lane = dest_lanes - 1;
                     }
                 }
             } else {
@@ -1934,7 +1997,7 @@ static void update_position_recursive(int16_t *track_state, int32_t pos_x, int32
 
         switch (bits) {
         case 1: /* Forward */
-            new_span = resolve_neighbor(span_idx, &sub_lane, 0x01);
+            new_span = resolve_neighbor(span_idx, &sub_lane, 0x01, pos_x, pos_z);
             span_idx = new_span;
             track_state[0] = (int16_t)new_span;
             track_state[2]++;
@@ -1943,64 +2006,64 @@ static void update_position_recursive(int16_t *track_state, int32_t pos_x, int32
             break;
 
         case 2: /* Right */
-            new_span = resolve_neighbor(span_idx, &sub_lane, 0x02);
+            new_span = resolve_neighbor(span_idx, &sub_lane, 0x02, pos_x, pos_z);
             span_idx = new_span;
             track_state[0] = (int16_t)new_span;
             break;
 
         case 3: /* Forward + Right */
-            new_span = resolve_neighbor(span_idx, &sub_lane, 0x01);
+            new_span = resolve_neighbor(span_idx, &sub_lane, 0x01, pos_x, pos_z);
             span_idx = new_span;
             track_state[0] = (int16_t)new_span;
             track_state[2]++;
             if (track_state[2] > track_state[3])
                 track_state[3] = track_state[2];
-            new_span = resolve_neighbor(span_idx, &sub_lane, 0x02);
+            new_span = resolve_neighbor(span_idx, &sub_lane, 0x02, pos_x, pos_z);
             span_idx = new_span;
             track_state[0] = (int16_t)new_span;
             break;
 
         case 4: /* Backward */
-            new_span = resolve_neighbor(span_idx, &sub_lane, 0x04);
+            new_span = resolve_neighbor(span_idx, &sub_lane, 0x04, pos_x, pos_z);
             span_idx = new_span;
             track_state[0] = (int16_t)new_span;
             track_state[2]--;
             break;
 
         case 6: /* Right + Backward */
-            new_span = resolve_neighbor(span_idx, &sub_lane, 0x02);
+            new_span = resolve_neighbor(span_idx, &sub_lane, 0x02, pos_x, pos_z);
             span_idx = new_span;
             track_state[0] = (int16_t)new_span;
-            new_span = resolve_neighbor(span_idx, &sub_lane, 0x04);
+            new_span = resolve_neighbor(span_idx, &sub_lane, 0x04, pos_x, pos_z);
             span_idx = new_span;
             track_state[0] = (int16_t)new_span;
             track_state[2]--;
             break;
 
         case 8: /* Left */
-            new_span = resolve_neighbor(span_idx, &sub_lane, 0x08);
+            new_span = resolve_neighbor(span_idx, &sub_lane, 0x08, pos_x, pos_z);
             span_idx = new_span;
             track_state[0] = (int16_t)new_span;
             break;
 
         case 9: /* Forward + Left */
-            new_span = resolve_neighbor(span_idx, &sub_lane, 0x01);
+            new_span = resolve_neighbor(span_idx, &sub_lane, 0x01, pos_x, pos_z);
             span_idx = new_span;
             track_state[0] = (int16_t)new_span;
             track_state[2]++;
             if (track_state[2] > track_state[3])
                 track_state[3] = track_state[2];
-            new_span = resolve_neighbor(span_idx, &sub_lane, 0x08);
+            new_span = resolve_neighbor(span_idx, &sub_lane, 0x08, pos_x, pos_z);
             span_idx = new_span;
             track_state[0] = (int16_t)new_span;
             break;
 
         case 12: /* Backward + Left */
-            new_span = resolve_neighbor(span_idx, &sub_lane, 0x04);
+            new_span = resolve_neighbor(span_idx, &sub_lane, 0x04, pos_x, pos_z);
             span_idx = new_span;
             track_state[0] = (int16_t)new_span;
             track_state[2]--;
-            new_span = resolve_neighbor(span_idx, &sub_lane, 0x08);
+            new_span = resolve_neighbor(span_idx, &sub_lane, 0x08, pos_x, pos_z);
             span_idx = new_span;
             track_state[0] = (int16_t)new_span;
             break;
@@ -2008,24 +2071,24 @@ static void update_position_recursive(int16_t *track_state, int32_t pos_x, int32
         default:
             /* Unhandled compound case — resolve forward/backward first, then lateral */
             if (bits & 0x01) {
-                new_span = resolve_neighbor(span_idx, &sub_lane, 0x01);
+                new_span = resolve_neighbor(span_idx, &sub_lane, 0x01, pos_x, pos_z);
                 span_idx = new_span;
                 track_state[0] = (int16_t)new_span;
                 track_state[2]++;
                 if (track_state[2] > track_state[3])
                     track_state[3] = track_state[2];
             } else if (bits & 0x04) {
-                new_span = resolve_neighbor(span_idx, &sub_lane, 0x04);
+                new_span = resolve_neighbor(span_idx, &sub_lane, 0x04, pos_x, pos_z);
                 span_idx = new_span;
                 track_state[0] = (int16_t)new_span;
                 track_state[2]--;
             }
             if (bits & 0x02) {
-                new_span = resolve_neighbor(span_idx, &sub_lane, 0x02);
+                new_span = resolve_neighbor(span_idx, &sub_lane, 0x02, pos_x, pos_z);
                 span_idx = new_span;
                 track_state[0] = (int16_t)new_span;
             } else if (bits & 0x08) {
-                new_span = resolve_neighbor(span_idx, &sub_lane, 0x08);
+                new_span = resolve_neighbor(span_idx, &sub_lane, 0x08, pos_x, pos_z);
                 span_idx = new_span;
                 track_state[0] = (int16_t)new_span;
             }
