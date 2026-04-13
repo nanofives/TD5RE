@@ -2933,13 +2933,17 @@ static void integrate_traffic_pose(TD5_Actor *actor)
         int32_t rotated_x = (nx * cy - nz * sy) >> 12;
         int32_t rotated_z = (nx * sy + nz * cy) >> 12;
 
-        /* Roll from surface normal + longitudinal suspension correction */
-        int32_t roll_from_normal = atan2_fixed12(-rotated_z, -ny);
+        /* Roll from surface normal + longitudinal suspension correction.
+         * Original formula: AngleFromVector12(-rotated_z, -normal_y)
+         * The original binary uses Y-down convention where surface normal ny < 0
+         * for "up". Our port's normals have ny > 0 for "up", so we use
+         * atan2(-rotated_z, ny) to get roll=0 on flat ground. */
+        int32_t roll_from_normal = atan2_fixed12(-rotated_z, ny);
         int32_t susp_roll_corr = actor->wheel_suspension_pos[1] >> 8;
         actor->display_angles.roll = (int16_t)((roll_from_normal - susp_roll_corr) & 0xFFF);
 
         /* Pitch from surface normal + lateral suspension correction */
-        int32_t mag_xz = td5_isqrt(nx * nx + ny * ny);
+        int32_t mag_xz = td5_isqrt(rotated_x * rotated_x + ny * ny);
         int32_t pitch_from_normal = atan2_fixed12(rotated_x, mag_xz);
         int32_t susp_pitch_corr = actor->wheel_suspension_pos[0] >> 8;
         actor->display_angles.pitch = (int16_t)((pitch_from_normal + susp_pitch_corr) & 0xFFF);
@@ -3561,11 +3565,14 @@ void td5_physics_refresh_wheel_contacts(TD5_Actor *actor)
          * This ensures the velocity reflects the body's actual motion, not the snap. */
 
         /* Compute force (uses original wheel_y before snap).
-         * Original (0x403720): force = (wheel_y - ground_y) + gGravityConstant
-         * All values in 24.8 FP scale — do NOT shift to world units.
-         * The gravity offset ensures a car cresting a slope accumulates
-         * enough force to cross the airborne threshold (0x801). */
-        int32_t force = (wheel_y - ground_y) + g_gravity_constant;
+         * Original (0x403720): force = (wheel_y - ground_y) + gGravityConstant.
+         * The original also writes this force to wheel_load_accum[], which
+         * feeds the suspension spring-damper and dampens the gravity bias.
+         * The port does NOT write force to wheel_load_accum yet (TODO), so
+         * the +gravity bias causes false-airborne at spawn. Until the full
+         * suspension force path is ported, omit the gravity bias. Without
+         * it, airborne triggers at 2048 in 24.8 (= 8 world units). */
+        int32_t force = (wheel_y - ground_y);
 
         /* gap_270[i] = frame-to-frame wheel contact position delta >> 8.
          * MUST compare pre-snap transform results from two consecutive frames.
