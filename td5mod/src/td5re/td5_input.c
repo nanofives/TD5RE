@@ -585,33 +585,65 @@ void td5_input_update_player_control(int slot)
         s_handbrake[slot] = 0;
 
         if (bits & TD5_INPUT_BRAKE) {
-            /* Brake / reverse logic */
-            if (((~(bits >> 28)) & 1) && s_brake[slot] == 1 &&
-                speed < 10)
+            /* Brake / reverse latch — matches original at 0x4032A0-0x403300.
+             *
+             * The original uses throttle_state (+0x36F) as a two-state latch:
+             *   1 = forward/braking mode (brake_flag=1)
+             *   0 = reverse mode (brake_flag=0, physics takes drive path)
+             *
+             * Transition to reverse: auto gearbox (+0x378!=0) AND currently
+             * forward (throttle_state==1) AND nearly stopped (speed<10) AND
+             * not airborne (surface_contact_flags==0 means no ground contact,
+             * which blocks transition).
+             *
+             * Once in reverse: brake_flag=0, throttle=0xFF00 (-256), so
+             * auto_gear_select sees throttle<0 → gear=REVERSE, and the
+             * negative throttle through compute_drive_torque produces
+             * backward force. [CONFIRMED @ 0x4032A0-0x403300] */
             {
-                /* Transition to reverse: car nearly stopped while brake held.
-                 * Clear brake_flag so physics takes the drive path; throttle
-                 * stays 0xFF00 (-256) → auto_gear_select sees throttle<0 →
-                 * gear=REVERSE → negative drive torque pushes car backward.
-                 *
-                 * Previous code had `&& !vehicle_stopped` which was
-                 * contradictory (vehicle_stopped = speed<100, so speed<10
-                 * implies vehicle_stopped=1, making !vehicle_stopped always
-                 * false). The reverse transition could never fire. */
-                TD5_LOG_I(LOG_TAG, "brake→reverse transition: speed=%d slot=%d", speed, slot);
-                s_brake[slot] = 0;
+                TD5_Actor *a_actor = td5_game_get_actor(slot);
+                uint8_t throttle_st = 1;  /* default forward */
+                uint8_t auto_gearbox = 0;
+                uint8_t sflags = 0;
+                if (a_actor) {
+                    uint8_t *ab = (uint8_t *)a_actor;
+                    throttle_st = ab[0x36F];
+                    auto_gearbox = ab[0x378];
+                    sflags = ab[0x376];
+                }
+
+                /* Reverse transition [CONFIRMED @ 0x4032A0-0x4032BC] */
+                if (auto_gearbox != 0 && throttle_st == 1 &&
+                    speed < 10 && sflags != 0)
+                {
+                    TD5_LOG_I(LOG_TAG,
+                              "brake->reverse latch: speed=%d slot=%d sflags=0x%X",
+                              speed, slot, sflags);
+                    throttle_st = 0;
+                }
+
+                /* brake_flag mirrors throttle_state [CONFIRMED @ 0x4032E8] */
+                s_brake[slot] = throttle_st;
                 s_throttle[slot] = (int16_t)0xFF00;
                 s_reverse_req[slot] = 0;
-            } else {
-                s_throttle[slot] = (int16_t)0xFF00;
-                s_reverse_req[slot] = s_brake[slot];
-                s_brake[slot] = 1;
+
+                /* Write throttle_state back immediately */
+                if (a_actor) {
+                    ((uint8_t *)a_actor)[0x36F] = throttle_st;
+                }
             }
         } else if (encounter_active) {
             /* Encounter steering override -- placeholder */
         } else {
+            /* No brake: reset throttle_state to forward [CONFIRMED @ 0x403180] */
             s_brake[slot] = 0;
             s_reverse_req[slot] = 0;
+            {
+                TD5_Actor *a_actor = td5_game_get_actor(slot);
+                if (a_actor) {
+                    ((uint8_t *)a_actor)[0x36F] = 1;  /* reset to forward */
+                }
+            }
 
             if (bits & TD5_INPUT_THROTTLE) {
                 s_throttle[slot] = 0x100;  /* original DAT_0046317C = 0x0100 [CONFIRMED @ 0x403182] */

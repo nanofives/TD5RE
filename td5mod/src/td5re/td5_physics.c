@@ -4238,6 +4238,7 @@ void td5_physics_init_vehicle_runtime(void)
         actor->encounter_steering_cmd = 0;  /* zero throttle — prevents stale value from driving torque */
         actor->brake_flag = 0;
         actor->handbrake_flag = 0;
+        actor->throttle_state = 1;  /* forward mode [CONFIRMED @ 0x4032A0] */
         actor->vehicle_mode = 0;
         actor->damage_lockout = 0;
         actor->center_suspension_pos = 0;
