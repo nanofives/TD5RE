@@ -1957,6 +1957,14 @@ void td5_hud_render_overlays(float dt)
             if (gear == 0)      atlas_idx = 6;  /* reverse → "R" */
             else if (gear == 1) atlas_idx = 0;  /* neutral → "N" */
             else                atlas_idx = gear - 1;  /* 2→"1", 3→"2", ..., 7→"6" */
+            /* Diagnostic: log unexpected gear=1 (neutral) if it ever occurs */
+            if (gear == 1) {
+                static int s_gear1_logged = 0;
+                if (!s_gear1_logged) {
+                    TD5_LOG_W(LOG_TAG, "HUD gear=1 (neutral) detected — unexpected, slot=%d", actor_slot);
+                    s_gear1_logged = 1;
+                }
+            }
             {
                 float gu = (float)atlas_idx * 16.0f + (float)s_gearnumbers_atlas->atlas_x;
                 float gv = (float)s_gearnumbers_atlas->atlas_y;
