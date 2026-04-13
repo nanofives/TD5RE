@@ -1547,21 +1547,29 @@ void td5_ai_update_track_behavior(int slot) {
             /* RIGHT is smaller → heading is CCW of target → need negative steer */
             signed_delta = right_dev;
         }
-        int32_t desired_steer = -(signed_delta * (steer_weight >> 2)) >> 8;
-        if (desired_steer > 0x18000) desired_steer = 0x18000;
-        if (desired_steer < -0x18000) desired_steer = -0x18000;
-        ACTOR_I32(actor, ACTOR_STEERING_CMD) = desired_steer;
-
-        /* Angular velocity braking: when omega opposes the steering
-         * correction (steer is trying to turn one way, omega carries
-         * the car the other way), damp omega by 50% per tick.
-         * This breaks the persistent rotation from the bicycle model
-         * that the steer can't counteract through forces alone. */
-        int32_t omega = ACTOR_I32(actor, 0x1C4);
-        if ((desired_steer > 0 && omega < -128) ||
-            (desired_steer < 0 && omega > 128)) {
-            ACTOR_I32(actor, 0x1C4) = omega / 2;
-        }
+        /* Direct heading control: set angular_velocity_yaw proportional
+         * to the heading error, bypassing the steer→torque→omega chain.
+         *
+         * The bicycle model adds yaw_torque to omega each tick AFTER the
+         * AI writes it. With STEERING_CMD = 0, the bicycle model produces
+         * only a small residual torque from weight asymmetry (~100-200),
+         * so our direct omega write dominates heading control.
+         *
+         * Scale: signed_delta * 16 gives omega in accumulator units.
+         * At delta=50 (4.4° off): omega = 800 → heading change = 3.1°/tick.
+         * This matches typical track curvature rates. The ±1500 clamp in
+         * td5_physics_update_ai limits extreme turns. */
+        /* PD omega controller: P proportional to heading error drives
+         * the heading toward the target; D on current omega prevents
+         * overshoot. omega_prev is the value left by physics last tick. */
+        int32_t omega_prev = ACTOR_I32(actor, 0x1C4);
+        int32_t desired_omega = signed_delta * 12 - (omega_prev >> 8) * 6;
+        if (desired_omega > 1500) desired_omega = 1500;
+        if (desired_omega < -1500) desired_omega = -1500;
+        ACTOR_I32(actor, 0x1C4) = desired_omega;
+        /* Zero steer so the bicycle model doesn't fight the direct
+         * heading control with its own (mismatched) yaw torque. */
+        ACTOR_I32(actor, ACTOR_STEERING_CMD) = 0;
     }
 }
 
