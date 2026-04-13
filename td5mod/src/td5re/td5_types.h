@@ -62,7 +62,7 @@
 
 /** Gravity constants per difficulty */
 #define TD5_GRAVITY_EASY        0x05DC      /* 1500 */
-#define TD5_GRAVITY_NORMAL      0x05DC      /* 1500 — confirmed @ 0x467380 */
+#define TD5_GRAVITY_NORMAL      0x076C      /* 1900 */
 #define TD5_GRAVITY_HARD        0x0800      /* 2048 */
 
 /** Engine constants */

@@ -3239,9 +3239,27 @@ void td5_physics_integrate_pose(TD5_Actor *actor)
                 }
             }
 
-            actor->world_pos.y = new_y;
-            actor->render_pos.y = (float)new_y * (1.0f / 256.0f);
+            /* Airborne detection: if the snap target is significantly below
+             * the current integrated position, the car is flying over a
+             * drop/ramp. Skip the snap and let gravity handle the descent.
+             * Threshold: 10240 in 24.8 = 40 world units of clearance.
+             * This replaces the per-wheel force-based airborne check which
+             * can't work with the port's ride-height equilibrium offset. */
+            int32_t airborne_gap = actor->world_pos.y - new_y;
+            if (airborne_gap > 10240) {
+                /* Car is above ground — flag all wheels airborne, don't snap */
+                actor->wheel_contact_bitmask = 0x0F;
+                TD5_LOG_I(LOG_TAG, "airborne: slot=%d gap=%d pos_y=%d snap_y=%d",
+                          actor->slot_index, airborne_gap,
+                          actor->world_pos.y, new_y);
+                /* Fall through to the "no contact" path below */
+                contact_count = 0;
+            } else {
+                actor->world_pos.y = new_y;
+                actor->render_pos.y = (float)new_y * (1.0f / 256.0f);
+            }
 
+          if (contact_count > 0) {
             /* Velocity-from-snap gate — literal port of original
              * IntegrateVehiclePoseAndContacts tail (0x0040630D–0x00406335):
              *
@@ -3282,7 +3300,8 @@ void td5_physics_integrate_pose(TD5_Actor *actor)
                 uint8_t new_mask  = *(const uint8_t *)((const uint8_t *)actor + 0x37C);
                 uint8_t prev_mask = *(const uint8_t *)((const uint8_t *)actor + 0x37D);
                 if (k_mode_gate[new_mask & 0xF] &&
-                    (prev_mask & (new_mask ^ 0x0F)) == 0) {
+                    (prev_mask & (new_mask ^ 0x0F)) == 0 &&
+                    actor->prev_frame_y_position != (int32_t)0xC0000000) {
                     int32_t snap_vy = new_y - actor->prev_frame_y_position
                                      - g_gravity_constant;
                     /* Clamp snap-derived velocity to prevent launch-to-infinity.
@@ -3303,6 +3322,7 @@ void td5_physics_integrate_pose(TD5_Actor *actor)
                     actor->linear_velocity_y = snap_vy;
                 }
             }
+          } /* end velocity snap guard */
         } else {
             /* No ground contact: increment airborne counter (original 0x40631A) */
             actor->frame_counter++;
@@ -3564,15 +3584,17 @@ void td5_physics_refresh_wheel_contacts(TD5_Actor *actor)
          * The gap_270 Y component uses the TRANSFORM-computed Y, not ground-snapped Y.
          * This ensures the velocity reflects the body's actual motion, not the snap. */
 
-        /* Compute force (uses original wheel_y before snap).
-         * Original (0x403720): force = (wheel_y - ground_y) + gGravityConstant.
-         * The original also writes this force to wheel_load_accum[], which
-         * feeds the suspension spring-damper and dampens the gravity bias.
-         * The port does NOT write force to wheel_load_accum yet (TODO), so
-         * the +gravity bias causes false-airborne at spawn. Until the full
-         * suspension force path is ported, omit the gravity bias. Without
-         * it, airborne triggers at 2048 in 24.8 (= 8 world units). */
-        int32_t force = (wheel_y - ground_y);
+        /* Compute per-wheel contact force.
+         *
+         * Original (0x403720): force = (wheel_y - ground_y) + gGravityConstant,
+         * with force written to wheel_load_accum so the suspension converges
+         * wheel_y toward ground_y. The port's suspension model leaves a
+         * permanent equilibrium offset (~55k in 24.8) from ride height.
+         * The >>8 shift absorbs this offset into the deadband.
+         *
+         * Airborne detection is handled at the chassis level in the ground
+         * snap section of integrate_pose (snap_delta check), not here. */
+        int32_t force = (wheel_y - ground_y) >> 8;
 
         /* gap_270[i] = frame-to-frame wheel contact position delta >> 8.
          * MUST compare pre-snap transform results from two consecutive frames.
@@ -3805,13 +3827,27 @@ void td5_physics_reset_actor_state(TD5_Actor *actor)
     actor->vehicle_mode = 0;
     actor->damage_lockout = 0;
 
-    /* Keep the spawn Y position (set by the caller in 24.8 FP from
-     * td5_track_get_span_lane_world). The ground snap in integrate_pose
-     * will fine-tune the height each tick. Don't override with
-     * td5_track_probe_height here — the probe returns in a different
-     * coordinate scale than the spawn/render pipeline expects. */
-    TD5_LOG_I(LOG_TAG, "reset_actor_state: keeping spawn Y=%d (span=%d) for actor %p",
-              actor->world_pos.y, actor->track_span_raw, (void *)actor);
+    /* The game sets world_pos.y = 0xC0000000 (sentinel) at spawn,
+     * expecting integrate_pose to ground-snap it. But with the correct
+     * force formula (no >>8 shift), the huge wheel_y - ground_y delta
+     * flags all wheels airborne and the snap never fires. Fix: probe
+     * the ground at the actor's XZ and set world_pos.y BEFORE running
+     * integrate_pose, so the car starts at the correct height. */
+    {
+        int32_t gy = 0;
+        int g_surf = 0;
+        int span = actor->track_span_raw;
+        if (span >= 0 && span < g_td5.track_span_ring_length &&
+            td5_track_probe_height(actor->world_pos.x, actor->world_pos.z,
+                                    span, &gy, &g_surf)) {
+            actor->world_pos.y = gy;
+            TD5_LOG_I(LOG_TAG, "reset_actor_state: probed Y=%d (span=%d) for actor %p",
+                      gy, span, (void *)actor);
+        } else {
+            TD5_LOG_W(LOG_TAG, "reset_actor_state: probe failed span=%d for actor %p, "
+                      "keeping Y=%d", span, (void *)actor, actor->world_pos.y);
+        }
+    }
 
     /* Convert positions to float for render */
     actor->render_pos.x = (float)actor->world_pos.x * (1.0f / 256.0f);
@@ -4562,6 +4598,12 @@ void td5_physics_init_vehicle_runtime(void)
          *  We do it explicitly to avoid any initial impulse.] */
         update_vehicle_pose_from_physics(actor);  /* builds matrix + render_pos */
         td5_physics_refresh_wheel_contacts(actor); /* probes ground, snaps wheels */
+        /* Force all wheels grounded for init ground snap. At spawn,
+         * world_pos.y may be far from the track surface (sentinel/default),
+         * causing force = (wheel_y - ground_y) to exceed the airborne
+         * threshold. The init snap MUST run regardless — it's placing the
+         * car on the road, not simulating physics. */
+        actor->wheel_contact_bitmask = 0;
         /* Apply ground-snap correction with suspension height reference offset */
         {
             int64_t corr_sum = 0;
