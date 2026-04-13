@@ -777,19 +777,26 @@ void td5_physics_update_player(TD5_Actor *actor)
                 }
             }
         } else {
-            /* Brake path: front-wheel-only brake torque opposing current velocity.
-             * [CONFIRMED @ 0x4045A0]: original feeds bf directly — no sign flip.
-             * bf is already negative when braking forward (throttle=-256), which
-             * naturally opposes forward motion. Rear wheels get 0.
-             * Previous code had a double-negation bug: sign*bf flipped the
-             * already-negative bf positive, adding forward force instead of braking. */
+            /* Brake path [CONFIRMED @ 0x404441-0x404481]:
+             * bf = (brake_front * throttle) >> 8
+             * Clamp: bf magnitude capped to abs(v_long) — prevents over-braking
+             * past zero speed. Original uses min(abs(bf), abs(uVar37)) where
+             * uVar37 = body-frame longitudinal speed (sin_h*vx + cos_h*vz).
+             * Previous port used v_lat in the clamp, which killed brake force
+             * when going straight (v_lat ≈ 0).
+             * Wheel assignment: bf/2 per driven pair, 0 on other pair.
+             * [CONFIRMED @ 0x404474-0x40447e] */
             int32_t bf = (brake_front * throttle) >> 8;
-            int32_t abs_lat_half = (v_lat < 0 ? -v_lat : v_lat) >> 1;
-            if (bf < -abs_lat_half) bf = -abs_lat_half;
-            wheel_drive[0] = bf >> 1;  /* front-left  [CONFIRMED @ 0x404030] */
-            wheel_drive[1] = bf >> 1;  /* front-right [CONFIRMED @ 0x404030] */
-            wheel_drive[2] = 0;        /* rear-left:  no on-ground rear brake */
-            wheel_drive[3] = 0;        /* rear-right: no on-ground rear brake */
+            {
+                int32_t abs_bf = bf < 0 ? -bf : bf;
+                int32_t abs_vl = v_long < 0 ? -v_long : v_long;
+                int32_t clamped = abs_bf < abs_vl ? abs_bf : abs_vl;
+                bf = (bf < 0) ? -(int32_t)clamped : (int32_t)clamped;
+            }
+            wheel_drive[0] = bf >> 1;
+            wheel_drive[1] = bf >> 1;
+            wheel_drive[2] = 0;
+            wheel_drive[3] = 0;
             if (actor->slot_index == 0 && (actor->frame_counter % 30u) == 0u) {
                 TD5_LOG_I(LOG_TAG,
                     "BRAKE: bf=%d brk_front=%d throttle=%d v_long=%d v_lat=%d wd0=%d sf=%d",
@@ -843,14 +850,19 @@ void td5_physics_update_player(TD5_Actor *actor)
                 }
             }
         } else {
-            /* Brake or coast path — same double-negation fix as on-ground.
-             * [CONFIRMED @ 0x4044F9-0x4045AE]: no sign flip in original. */
+            /* Brake or coast path — clamp to v_long (same fix as on-ground). */
             td5_physics_update_engine_speed(actor);
             int32_t bf = (brake_front * coast_throttle) >> 8;
             int32_t br = (brake_rear  * coast_throttle) >> 8;
-            int32_t abs_lat_half = (v_lat < 0 ? -v_lat : v_lat) >> 1;
-            if (bf < -abs_lat_half) bf = -abs_lat_half;
-            if (br < -abs_lat_half) br = -abs_lat_half;
+            {
+                int32_t abs_vl = v_long < 0 ? -v_long : v_long;
+                int32_t abs_bf = bf < 0 ? -bf : bf;
+                int32_t abs_br = br < 0 ? -br : br;
+                int32_t cf = abs_bf < abs_vl ? abs_bf : abs_vl;
+                int32_t cr = abs_br < abs_vl ? abs_br : abs_vl;
+                bf = (bf < 0) ? -(int32_t)cf : (int32_t)cf;
+                br = (br < 0) ? -(int32_t)cr : (int32_t)cr;
+            }
             wheel_drive[0] = bf >> 1;
             wheel_drive[1] = bf >> 1;
             wheel_drive[2] = br >> 1;
