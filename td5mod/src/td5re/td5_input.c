@@ -587,9 +587,18 @@ void td5_input_update_player_control(int slot)
         if (bits & TD5_INPUT_BRAKE) {
             /* Brake / reverse logic */
             if (((~(bits >> 28)) & 1) && s_brake[slot] == 1 &&
-                speed < 10 && !vehicle_stopped)
+                speed < 10)
             {
-                /* Transition to reverse */
+                /* Transition to reverse: car nearly stopped while brake held.
+                 * Clear brake_flag so physics takes the drive path; throttle
+                 * stays 0xFF00 (-256) → auto_gear_select sees throttle<0 →
+                 * gear=REVERSE → negative drive torque pushes car backward.
+                 *
+                 * Previous code had `&& !vehicle_stopped` which was
+                 * contradictory (vehicle_stopped = speed<100, so speed<10
+                 * implies vehicle_stopped=1, making !vehicle_stopped always
+                 * false). The reverse transition could never fire. */
+                TD5_LOG_I(LOG_TAG, "brake→reverse transition: speed=%d slot=%d", speed, slot);
                 s_brake[slot] = 0;
                 s_throttle[slot] = (int16_t)0xFF00;
                 s_reverse_req[slot] = 0;
