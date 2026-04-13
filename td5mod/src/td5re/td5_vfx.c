@@ -100,6 +100,41 @@ typedef struct VfxParticleSlot {
     uint8_t  rest[0x40 - 0x19];    /* pad to stride */
 } VfxParticleSlot;
 
+/* --- Particle slot byte offsets (within 0x40-byte bank entry) ---
+ *
+ * Clean layout to avoid the old overlapping-field bugs (position used to
+ * overwrite type byte, batch index lived inside position bytes).
+ *
+ * Matches the original SmokeUpdateCallback (0x00429950) field semantics
+ * for the animation data starting at PSLOT_LIFETIME (0x04).
+ */
+#define PSLOT_FLAGS       0x00  /* uint8: 0x80=active, 0x40=projected, 0x20=blend */
+#define PSLOT_TYPE        0x01  /* uint8: 0=smoke, 1=rain */
+#define PSLOT_BATCH       0x02  /* uint8: sprite batch index */
+#define PSLOT_PHASE       0x03  /* uint8: animation phase (mod 32) */
+#define PSLOT_LIFETIME    0x04  /* int16: ticks remaining */
+#define PSLOT_SIZE_W      0x06  /* int16: width  (0x4000 init, original +0x04) */
+#define PSLOT_SIZE_W_D    0x08  /* int16: width delta per tick */
+#define PSLOT_SIZE_H      0x0A  /* int16: height (0x26C0 init, original +0x08) */
+#define PSLOT_SIZE_H_D    0x0C  /* int16: height delta per tick */
+#define PSLOT_VEL_X       0x0E  /* int32: velocity X (24.8 fixed) */
+#define PSLOT_VEL_Y       0x12  /* int32: velocity Y (24.8 fixed) */
+#define PSLOT_VEL_Z       0x16  /* int32: velocity Z (24.8 fixed) */
+#define PSLOT_POS_X       0x20  /* int32: world X (24.8 fixed) */
+#define PSLOT_POS_Y       0x24  /* int32: world Y (24.8 fixed) */
+#define PSLOT_POS_Z       0x28  /* int32: world Z (24.8 fixed) */
+#define PSLOT_VIEW_X      0x2C  /* float: view-space X (after projection) */
+#define PSLOT_VIEW_Y      0x30  /* float: view-space Y */
+#define PSLOT_VIEW_Z      0x34  /* float: view-space Z */
+
+/* Helper to read/write typed values from raw slot bytes */
+#define PSLOT_RD16(s,off)      (*(int16_t  *)((s)+(off)))
+#define PSLOT_WR16(s,off,v)    (*(int16_t  *)((s)+(off)) = (int16_t)(v))
+#define PSLOT_RD32(s,off)      (*(int32_t  *)((s)+(off)))
+#define PSLOT_WR32(s,off,v)    (*(int32_t  *)((s)+(off)) = (int32_t)(v))
+#define PSLOT_RDF(s,off)       (*(float    *)((s)+(off)))
+#define PSLOT_WRF(s,off,v)     (*(float    *)((s)+(off)) = (float)(v))
+
 /* ========================================================================
  * Tire track emitter slot (0xEC = 236 bytes)
  * ======================================================================== */
@@ -592,10 +627,9 @@ void td5_vfx_project_particles(int view_index) {
         if ((flags & 0x80) == 0) continue;
         if ((flags & 0x20) != 0) continue;
 
-        int32_t wx, wy, wz;
-        memcpy(&wx, slot + 1, 4);
-        memcpy(&wy, slot + 5, 4);
-        memcpy(&wz, slot + 9, 4);
+        int32_t wx = PSLOT_RD32(slot, PSLOT_POS_X);
+        int32_t wy = PSLOT_RD32(slot, PSLOT_POS_Y);
+        int32_t wz = PSLOT_RD32(slot, PSLOT_POS_Z);
 
         float cx = (float)wx * FP_TO_FLOAT - cam_x;
         float cy = (float)wy * FP_TO_FLOAT - cam_y;
@@ -605,9 +639,9 @@ void td5_vfx_project_particles(int view_index) {
         float view_y = cx * g_cameraBasis[3] + cy * g_cameraBasis[4] + cz * g_cameraBasis[5];
         float view_z = cx * g_cameraBasis[6] + cy * g_cameraBasis[7] + cz * g_cameraBasis[8];
 
-        memcpy(slot + 0x0D, &view_x, 4);
-        memcpy(slot + 0x11, &view_y, 4);
-        memcpy(slot + 0x15, &view_z, 4);
+        PSLOT_WRF(slot, PSLOT_VIEW_X, view_x);
+        PSLOT_WRF(slot, PSLOT_VIEW_Y, view_y);
+        PSLOT_WRF(slot, PSLOT_VIEW_Z, view_z);
 
         slot[0] = flags | 0x40;
     }
@@ -661,10 +695,9 @@ void td5_vfx_draw_particles(int view_index) {
         if (batch_index < 0 || batch_index >= TD5_VFX_SPRITE_BATCH_COUNT) continue;
         VfxSpriteQuad *sq = &s_sprite_batches[vi * TD5_VFX_SPRITE_BATCH_COUNT + batch_index];
 
-        float vx, vy, vz;
-        memcpy(&vx, slot + 0x0D, 4);
-        memcpy(&vy, slot + 0x11, 4);
-        memcpy(&vz, slot + 0x15, 4);
+        float vx = PSLOT_RDF(slot, PSLOT_VIEW_X);
+        float vy = PSLOT_RDF(slot, PSLOT_VIEW_Y);
+        float vz = PSLOT_RDF(slot, PSLOT_VIEW_Z);
 
         if (vz <= near_z) continue;
 
@@ -674,10 +707,23 @@ void td5_vfx_draw_particles(int view_index) {
         float sz = vz * (1.0f / far_clip);
         if (sz > 1.0f) sz = 1.0f;
 
-        /* Perspective-scale the sprite billboard. */
-        const float WORLD_HALF = 30.0f;
-        float half_w = WORLD_HALF * focal * inv_z;
-        float half_h = WORLD_HALF * focal * inv_z;
+        /* Perspective-scale using animated size from slot (original +0x04/+0x08).
+         * Size values are 14.2 fixed-point; convert to world-space half-extents.
+         * Fallback to 30.0 for rain splashes (type 1) which don't animate size. */
+        float world_half_w, world_half_h;
+        if (slot[PSLOT_TYPE] == 0) {
+            int16_t sw = PSLOT_RD16(slot, PSLOT_SIZE_W);
+            int16_t sh = PSLOT_RD16(slot, PSLOT_SIZE_H);
+            world_half_w = (float)sw / 512.0f;
+            world_half_h = (float)sh / 512.0f;
+            if (world_half_w < 5.0f) world_half_w = 5.0f;
+            if (world_half_h < 5.0f) world_half_h = 5.0f;
+        } else {
+            world_half_w = 30.0f;
+            world_half_h = 30.0f;
+        }
+        float half_w = world_half_w * focal * inv_z;
+        float half_h = world_half_h * focal * inv_z;
         if (half_w < 6.0f) half_w = 6.0f;
         if (half_h < 6.0f) half_h = 6.0f;
         if (half_w > 200.0f) half_w = 200.0f;
@@ -743,34 +789,56 @@ void td5_vfx_update_particles(int view_index) {
     uint8_t *bank = s_particle_banks[vi];
     for (int i = 0; i < TD5_VFX_PARTICLE_SLOTS_PER_VIEW; i++) {
         uint8_t *slot = bank + i * TD5_VFX_PARTICLE_SLOT_STRIDE;
-        uint8_t flags = slot[0];
+        uint8_t flags = slot[PSLOT_FLAGS];
 
-        /* Original checks flags & 0x80 (active bit) */
-        if ((flags & 0x80) != 0) {
-            active_particles++;
-            /* Dispatch by particle type byte at slot[1].
-             * Type 0 = smoke puff: apply gravity + drag, decrement lifetime.
-             * Type 1 = rain splash: expand + fade, short lifetime. */
-            uint8_t type = slot[1];
-            (void)type;
+        if ((flags & 0x80) == 0) continue;
+        active_particles++;
 
-            /* Read lifetime counter at a known offset within the slot */
-            uint8_t *lifetime_ptr = slot + 0x1C;
-            uint8_t lifetime = *lifetime_ptr;
-
-            /* Decrement lifetime; deactivate when expired */
-            if (lifetime > 0) {
-                (*lifetime_ptr)--;
-            } else {
-                /* Deactivate: clear active flag */
-                slot[0] = 0;
-                /* Free companion sprite render slot */
-                int batch_idx = slot[2];
-                if (batch_idx < TD5_VFX_SPRITE_BATCH_COUNT) {
-                    s_sprite_render_flags[vi][batch_idx] = 0;
-                }
+        /* Decrement lifetime; deactivate when expired */
+        int16_t lifetime = PSLOT_RD16(slot, PSLOT_LIFETIME);
+        if (lifetime <= 0) {
+            slot[PSLOT_FLAGS] = 0;
+            int batch_idx = slot[PSLOT_BATCH];
+            if (batch_idx < TD5_VFX_SPRITE_BATCH_COUNT) {
+                s_sprite_render_flags[vi][batch_idx] = 0;
             }
+            continue;
         }
+        PSLOT_WR16(slot, PSLOT_LIFETIME, lifetime - 1);
+
+        uint8_t type = slot[PSLOT_TYPE];
+        if (type == 0) {
+            /* --- SmokeUpdateCallback (0x00429950) ---
+             * Velocity drag: vel -= vel / 4 (arithmetic shift right 2)
+             * Position integration: pos += vel
+             * Size animation: size += delta per tick
+             * Phase cycling: (phase + 1) & 0x1F */
+            int32_t vx = PSLOT_RD32(slot, PSLOT_VEL_X);
+            int32_t vy = PSLOT_RD32(slot, PSLOT_VEL_Y);
+            int32_t vz = PSLOT_RD32(slot, PSLOT_VEL_Z);
+
+            /* Arithmetic drag: vel -= vel >> 2 (SAR 2) */
+            vx -= (vx >> 2);
+            vz -= (vz >> 2);
+
+            PSLOT_WR32(slot, PSLOT_VEL_X, vx);
+            PSLOT_WR32(slot, PSLOT_VEL_Z, vz);
+
+            /* Position integration */
+            PSLOT_WR32(slot, PSLOT_POS_X, PSLOT_RD32(slot, PSLOT_POS_X) + vx);
+            PSLOT_WR32(slot, PSLOT_POS_Y, PSLOT_RD32(slot, PSLOT_POS_Y) + vy);
+            PSLOT_WR32(slot, PSLOT_POS_Z, PSLOT_RD32(slot, PSLOT_POS_Z) + vz);
+
+            /* Size animation */
+            PSLOT_WR16(slot, PSLOT_SIZE_W,
+                        PSLOT_RD16(slot, PSLOT_SIZE_W) + PSLOT_RD16(slot, PSLOT_SIZE_W_D));
+            PSLOT_WR16(slot, PSLOT_SIZE_H,
+                        PSLOT_RD16(slot, PSLOT_SIZE_H) + PSLOT_RD16(slot, PSLOT_SIZE_H_D));
+
+            /* Phase cycling (32 steps) */
+            slot[PSLOT_PHASE] = (slot[PSLOT_PHASE] + 1) & 0x1F;
+        }
+        /* Type 1 (rain splash): no per-tick animation, just lifetime countdown */
     }
 
     if ((s_vfx_debug_frame % 60u) == 0u) {
@@ -1017,27 +1085,27 @@ void td5_vfx_render_ambient_streaks(TD5_Actor *actor, float sim_budget,
         uint8_t *bank = s_particle_banks[vi];
         for (int s = 0; s < TD5_VFX_PARTICLE_SLOTS_PER_VIEW; s++) {
             uint8_t *pslot = bank + s * TD5_VFX_PARTICLE_SLOT_STRIDE;
-            if (pslot[0] == 0) {
+            if (pslot[PSLOT_FLAGS] == 0) {
                 /* Found free slot -- initialize as rain splash particle */
-                pslot[0] = 0xE0; /* active | projected | blend */
-                pslot[1] = 1;    /* type 1 = rain splash */
-                pslot[0x1C] = 20; /* lifetime: 20 ticks */
+                memset(pslot, 0, TD5_VFX_PARTICLE_SLOT_STRIDE);
+                pslot[PSLOT_FLAGS] = 0xE0; /* active | projected | blend */
+                pslot[PSLOT_TYPE]  = 1;    /* type 1 = rain splash */
+                PSLOT_WR16(pslot, PSLOT_LIFETIME, 20);
 
                 /* Seed position near camera at ground level */
                 int32_t splash_wx = pos_x + (rand() % 8000 - 4000) * 256;
                 int32_t splash_wy = pos_y;
                 int32_t splash_wz = pos_z + (rand() % 8000 - 4000) * 256;
-                memcpy(pslot + 1, &splash_wx, 4);
-                memcpy(pslot + 5, &splash_wy, 4);
-                memcpy(pslot + 9, &splash_wz, 4);
+                PSLOT_WR32(pslot, PSLOT_POS_X, splash_wx);
+                PSLOT_WR32(pslot, PSLOT_POS_Y, splash_wy);
+                PSLOT_WR32(pslot, PSLOT_POS_Z, splash_wz);
 
                 /* Find free sprite batch slot */
                 for (int b = 0; b < TD5_VFX_SPRITE_BATCH_COUNT; b++) {
                     if (s_sprite_render_flags[vi][b] == 0) {
-                        s_sprite_render_flags[vi][b] = 0x80; /* mark used */
-                        pslot[2] = (uint8_t)b; /* store batch index */
+                        s_sprite_render_flags[vi][b] = 0x80;
+                        pslot[PSLOT_BATCH] = (uint8_t)b;
 
-                        /* Build splash quad */
                         VfxSpriteQuad *sq = &s_sprite_batches[vi * TD5_VFX_SPRITE_BATCH_COUNT + b];
                         vfx_build_sprite_quad(sq, 0.0f, 0.0f, 128.0f,
                                                4.0f, 4.0f,
@@ -1657,7 +1725,6 @@ static void vfx_spawn_smoke_at_position(TD5_Actor *actor, float wx, float wy,
 {
     int vi = view_index & 1;
     uint8_t *bank = s_particle_banks[vi];
-    (void)actor;
 
     TD5_LOG_D(LOG_TAG,
               "smoke spawn: pos=(%.2f, %.2f, %.2f) variant=%d view=%d",
@@ -1666,28 +1733,54 @@ static void vfx_spawn_smoke_at_position(TD5_Actor *actor, float wx, float wy,
     /* Find a free particle slot */
     for (int s = 0; s < TD5_VFX_PARTICLE_SLOTS_PER_VIEW; s++) {
         uint8_t *slot = bank + s * TD5_VFX_PARTICLE_SLOT_STRIDE;
-        if (slot[0] != 0) continue;
+        if (slot[PSLOT_FLAGS] != 0) continue;
 
-        /* Found free slot -- initialize as smoke particle */
-        slot[0] = 0xC0; /* active | projected */
-        slot[1] = 0;    /* type 0 = smoke puff */
-        slot[0x1C] = 40; /* lifetime: 40 ticks */
+        /* Clear entire slot to avoid stale data */
+        memset(slot, 0, TD5_VFX_PARTICLE_SLOT_STRIDE);
 
-        /* Set world position (convert float back to 24.8 fixed) */
-        int32_t fx = (int32_t)(wx * 256.0f);
-        int32_t fy = (int32_t)(wy * 256.0f);
-        int32_t fz = (int32_t)(wz * 256.0f);
-        memcpy(slot + 1, &fx, 4);
-        memcpy(slot + 5, &fy, 4);
-        memcpy(slot + 9, &fz, 4);
+        /* Header */
+        slot[PSLOT_FLAGS] = 0xC0;  /* active | projected */
+        slot[PSLOT_TYPE]  = 0;     /* type 0 = smoke puff */
+
+        /* Lifetime: (rand() % 4 + 1) * 10 = 10..40 ticks [CONFIRMED @ 0x0042a290] */
+        int16_t life = (int16_t)((rand() % 4 + 1) * 10);
+        PSLOT_WR16(slot, PSLOT_LIFETIME, life);
+
+        /* Size animation [CONFIRMED @ 0x0042a290]:
+         *   size_w  = 0x4000 (16384),  delta = -0x3000 / lifetime
+         *   size_h  = 0x26C0 (9920),   delta =  0x1900 / lifetime  */
+        PSLOT_WR16(slot, PSLOT_SIZE_W, 0x4000);
+        PSLOT_WR16(slot, PSLOT_SIZE_W_D, (int16_t)(-0x3000 / life));
+        PSLOT_WR16(slot, PSLOT_SIZE_H, 0x26C0);
+        PSLOT_WR16(slot, PSLOT_SIZE_H_D, (int16_t)(0x1900 / life));
+
+        /* Phase: random start [CONFIRMED @ 0x0042a290] */
+        slot[PSLOT_PHASE] = (uint8_t)(rand() % 0x1F);
+
+        /* Velocity [CONFIRMED @ 0x0042a290]:
+         *   Y = 0x600 (upward drift)
+         *   X/Z = copied from actor velocity at +0x1CC / +0x1D4 (24.8 fixed) */
+        int32_t actor_vx = 0, actor_vz = 0;
+        if (actor) {
+            uint8_t *ap = (uint8_t *)actor;
+            memcpy(&actor_vx, ap + 0x1CC, 4);
+            memcpy(&actor_vz, ap + 0x1D4, 4);
+        }
+        PSLOT_WR32(slot, PSLOT_VEL_X, actor_vx);
+        PSLOT_WR32(slot, PSLOT_VEL_Y, 0x600);
+        PSLOT_WR32(slot, PSLOT_VEL_Z, actor_vz);
+
+        /* World position (24.8 fixed) */
+        PSLOT_WR32(slot, PSLOT_POS_X, (int32_t)(wx * 256.0f));
+        PSLOT_WR32(slot, PSLOT_POS_Y, (int32_t)(wy * 256.0f));
+        PSLOT_WR32(slot, PSLOT_POS_Z, (int32_t)(wz * 256.0f));
 
         /* Find free sprite batch slot */
         for (int b = 0; b < TD5_VFX_SPRITE_BATCH_COUNT; b++) {
             if (s_sprite_render_flags[vi][b] == 0) {
-                s_sprite_render_flags[vi][b] = 0x80; /* mark used */
-                slot[2] = (uint8_t)b;
+                s_sprite_render_flags[vi][b] = 0x80;
+                slot[PSLOT_BATCH] = (uint8_t)b;
 
-                /* Build smoke quad using variant UV from the 2x2 atlas grid */
                 int v_idx = variant & 3;
                 VfxSpriteQuad *sq = &s_sprite_batches[vi * TD5_VFX_SPRITE_BATCH_COUNT + b];
                 float su0 = s_smoke_variant_uv[v_idx][0];
