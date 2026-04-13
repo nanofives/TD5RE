@@ -1718,52 +1718,156 @@ static int resolve_neighbor(int span_idx, int *sub_lane, uint8_t crossing_bit)
     TD5_StripSpan *sp = &s_span_array[span_idx];
     int new_span = span_idx;
     int h_offset = span_height_offset(sp);
+    int cur_lane_count = span_lane_count(sp);
+
+    /* Junction branch decision [CONFIRMED @ 0x4443E8, 0x4444A0]:
+     * The original decides main-road vs branch based on sub_lane:
+     *   Type 8 (fwd junction): sub_lane < next_span.lane_count → span+1 (main)
+     *                          sub_lane >= next_span.lane_count → forward_link (branch)
+     *   Type 11 (bwd junction): sub_lane < prev_span.lane_count → span-1 (main)
+     *                           sub_lane >= prev_span.lane_count → backward_link (branch)
+     *
+     * The neighbor span's lane_count is read by peeking at its packed_sub_span
+     * byte: original uses pbVar1[0x1B] for next (span+1, byte +0x03 within
+     * that span's 0x18 record) and pbVar1[-0x15] for prev (span-1). */
 
     switch (crossing_bit) {
     case 0x01: /* Forward */
         switch (sp->span_type) {
-        case 8:  /* JUNCTION_FWD: follow forward link */
-        case 10: /* SENTINEL_END */
-        case 11: /* JUNCTION_BWD */
+        case 8: { /* JUNCTION_FWD: conditional branch [CONFIRMED @ 0x4443E8] */
+            int next_seq = span_idx + 1;
+            if (next_seq < s_span_count) {
+                int next_lanes = span_lane_count(&s_span_array[next_seq]);
+                if (*sub_lane < next_lanes) {
+                    new_span = next_seq;  /* main road */
+                } else {
+                    new_span = (int)sp->link_next;  /* branch */
+                    /* Adjust sub_lane: dest_lanes - cur_lanes [CONFIRMED @ 0x4443F4] */
+                    if (new_span >= 0 && new_span < s_span_count) {
+                        int dest_lanes = span_lane_count(&s_span_array[new_span]);
+                        *sub_lane += dest_lanes - cur_lane_count;
+                    }
+                }
+            } else {
+                new_span = (int)sp->link_next;
+            }
+            break;
+        }
+        case 10: /* SENTINEL_END: always follow forward link */
             new_span = (int)sp->link_next;
+            if (new_span >= 0 && new_span < s_span_count) {
+                int dest_lanes = span_lane_count(&s_span_array[new_span]);
+                *sub_lane += dest_lanes - cur_lane_count;
+            }
             break;
         default:
             new_span = span_idx + 1;
+            /* Normal: adjust sub_lane by height_offset difference [CONFIRMED @ 0x444414] */
+            if (new_span >= 0 && new_span < s_span_count) {
+                int dest_h = span_height_offset(&s_span_array[new_span]);
+                *sub_lane += h_offset - dest_h;
+            }
             break;
         }
         break;
 
-    case 0x02: /* Right */
+    case 0x02: /* Right (forward + lateral) */
         switch (sp->span_type) {
-        case 8:
+        case 8: {
+            int next_seq = span_idx + 1;
+            if (next_seq < s_span_count) {
+                int next_lanes = span_lane_count(&s_span_array[next_seq]);
+                if (*sub_lane < next_lanes) {
+                    new_span = next_seq;
+                } else {
+                    new_span = (int)sp->link_next;
+                    if (new_span >= 0 && new_span < s_span_count) {
+                        int dest_lanes = span_lane_count(&s_span_array[new_span]);
+                        *sub_lane += dest_lanes - cur_lane_count;
+                    }
+                }
+            } else {
+                new_span = (int)sp->link_next;
+            }
+            break;
+        }
         case 10:
             new_span = (int)sp->link_next;
+            if (new_span >= 0 && new_span < s_span_count) {
+                int dest_lanes = span_lane_count(&s_span_array[new_span]);
+                *sub_lane += dest_lanes - cur_lane_count;
+            }
             break;
         default:
             new_span = span_idx + 1;
             break;
         }
-        /* Adjust sub-lane by height offset for lateral transitions */
         *sub_lane += h_offset;
         break;
 
     case 0x04: /* Backward */
         switch (sp->span_type) {
-        case 9:  /* SENTINEL_START: follow backward link */
-        case 11: /* JUNCTION_BWD */
+        case 11: { /* JUNCTION_BWD: conditional branch [CONFIRMED @ 0x4444A0] */
+            int prev_seq = span_idx - 1;
+            if (prev_seq >= 0) {
+                int prev_lanes = span_lane_count(&s_span_array[prev_seq]);
+                if (*sub_lane < prev_lanes) {
+                    new_span = prev_seq;  /* main road */
+                } else {
+                    new_span = (int)sp->link_prev;  /* branch */
+                    if (new_span >= 0 && new_span < s_span_count) {
+                        int dest_lanes = span_lane_count(&s_span_array[new_span]);
+                        *sub_lane += dest_lanes - cur_lane_count;
+                    }
+                }
+            } else {
+                new_span = (int)sp->link_prev;
+            }
+            break;
+        }
+        case 9: /* SENTINEL_START: always follow backward link */
             new_span = (int)sp->link_prev;
+            if (new_span >= 0 && new_span < s_span_count) {
+                int dest_lanes = span_lane_count(&s_span_array[new_span]);
+                *sub_lane += dest_lanes - cur_lane_count;
+            }
             break;
         default:
             new_span = span_idx - 1;
+            if (new_span >= 0) {
+                int dest_h = span_height_offset(&s_span_array[new_span]);
+                *sub_lane += h_offset - dest_h;
+            }
             break;
         }
         break;
 
-    case 0x08: /* Left */
+    case 0x08: /* Left (backward + lateral) */
         switch (sp->span_type) {
+        case 11: {
+            int prev_seq = span_idx - 1;
+            if (prev_seq >= 0) {
+                int prev_lanes = span_lane_count(&s_span_array[prev_seq]);
+                if (*sub_lane < prev_lanes) {
+                    new_span = prev_seq;
+                } else {
+                    new_span = (int)sp->link_prev;
+                    if (new_span >= 0 && new_span < s_span_count) {
+                        int dest_lanes = span_lane_count(&s_span_array[new_span]);
+                        *sub_lane += dest_lanes - cur_lane_count;
+                    }
+                }
+            } else {
+                new_span = (int)sp->link_prev;
+            }
+            break;
+        }
         case 9:
-        case 11:
             new_span = (int)sp->link_prev;
+            if (new_span >= 0 && new_span < s_span_count) {
+                int dest_lanes = span_lane_count(&s_span_array[new_span]);
+                *sub_lane += dest_lanes - cur_lane_count;
+            }
             break;
         default:
             new_span = span_idx - 1;
