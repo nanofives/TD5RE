@@ -1565,6 +1565,14 @@ void td5_physics_update_ai(TD5_Actor *actor)
 
         actor->angular_velocity_yaw += yaw_torque;
 
+        /* Clamp AI angular velocity to ±1500 to prevent the bicycle
+         * model's amplified yaw torque from causing uncontrolled spin.
+         * The AI steering sets omega directly, then physics adds torque;
+         * this clamp ensures the combined result stays manageable. */
+        if (actor->angular_velocity_yaw > 1500)
+            actor->angular_velocity_yaw = 1500;
+        if (actor->angular_velocity_yaw < -1500)
+            actor->angular_velocity_yaw = -1500;
     }
 
     /* --- 10. World-frame force application [CONFIRMED @ 0x4056C4-0x405762]

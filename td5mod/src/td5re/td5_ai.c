@@ -1330,25 +1330,18 @@ void td5_ai_update_track_behavior(int slot) {
     if (g_td5.time_trial_enabled)
         return;
 
-    /* During countdown (paused), pass through the rubber-band throttle so
-     * the RPM integrator revs to ~7200 before the lights go out, then
-     * short-circuit the track-behavior cascade. [CONFIRMED via fresh decomp
-     * of UpdateActorTrackBehavior @ 0x00434FE0: the original has NO internal
-     * countdown gate — it runs the full cascade every tick. It self-extinguishes
-     * because UpdateAIVehicleDynamics is paused-gated (master gate), so
-     * linear_velocity_x/z stay 0, and UpdateActorSteeringBias's vx<0x100
-     * branch computes sin(vx)*param_2 = 0.]
-     *
-     * We take a conservative middle-ground: skip the cascade but DO NOT zero
-     * ACTOR_STEERING_CMD or ACTOR_STEERING_RAMP_ACCUM. The port's bias function
-     * branches on route deviation rather than velocity, so un-gating could
-     * drift; but zeroing the state mid-pause introduces a discontinuity on
-     * the first active tick that the original never has. Preserve whatever
-     * the pre-countdown state was (0 for fresh spawns). */
+    /* Countdown: pass through throttle but let the full steering cascade
+     * run. [CONFIRMED: the original at 0x00434FE0 has NO countdown gate —
+     * it runs the full cascade every tick. The dynamics are paused so
+     * velocity stays 0, but the band-based steering accumulates corrections.
+     * This pre-loads STEERING_CMD to the ±0x18000 clamp before the race
+     * starts, giving the car a ready-to-go turn angle on the first active
+     * tick. Without this, the first tick starts from steer=0 and the
+     * correction spike causes the bicycle model to saturate omega.] */
     if (g_td5.paused) {
         ACTOR_I16(actor, ACTOR_ENCOUNTER_STEER) = (int16_t)g_actor_route_steer_bias[slot];
         ACTOR_U8(actor, ACTOR_BRAKE_FLAG) = 0;
-        return;
+        /* Fall through to run the full steering cascade during countdown */
     }
 
     /* --- Script check: if a script is active, run it --- */
@@ -1500,76 +1493,48 @@ void td5_ai_update_track_behavior(int slot) {
     /* 3. Throttle/brake decision */
     threshold_result = td5_ai_update_route_threshold(slot);
 
-    /* 4. Steering weight based on threshold result:
-     *    Original: braking = 0x10000, coasting = 0x20000.
-     *    Scaled to 1/4 for the port's bicycle model — the original's full
-     *    steer_weight produces yaw torque at the 0x578 clamp every tick,
-     *    saturating angular velocity within 5 ticks and causing the car
-     *    to spin out. Scaling down keeps the fine-band correction gentle
-     *    enough for the port's dynamics while preserving the band system's
-     *    proportional steering behavior.
-     *    TODO: restore original weights once AI dynamics match. */
-    steer_weight = threshold_result ? 0x4000 : 0x8000;
+    (void)steer_weight; /* unused — direct heading control below */
 
-    /* 5. Steering: direct-set proportional controller.
+    /* 5. Steering: direct heading control via angular velocity.
      *
-     * The original's band-based UpdateActorSteeringBias (0x4340C0) accumulates
-     * corrections each tick. With the port's deviation baseline near 0 (vs the
-     * original's 0x800), the band system oscillates around alignment and
-     * accumulates runaway steer in one direction.
+     * The original's band-based system (0x4340C0) accumulates steer corrections,
+     * but the port's deviation baseline (~0 vs original's 0x800) and amplified
+     * bicycle model yaw torque cause divergent accumulation. Direct heading
+     * control bypasses both issues by setting angular_velocity_yaw proportional
+     * to the heading error and keeping STEERING_CMD = 0.
      *
-     * This controller directly SETS steer_cmd = -delta * gain each tick
-     * (no accumulation). The deviation's signed delta (heading - target)
-     * naturally centers on 0 when aligned. Combined with the ±1500 angular
-     * velocity clamp in td5_physics_update_ai, this produces stable
-     * path-following without runaway.
-     *
-     * Gain: steer_weight >> 2 gives steer_angle = delta * (weight/1024).
-     * At weight=0x8000: steer_angle = delta * 8 per heading-unit error.
-     * A 50-unit error (4.4°) → steer_angle of 400 → 35° of front wheel
-     * angle. This is strong enough to track curves but not so large that
-     * the bicycle model saturates.
-     *
-     * TODO: restore band-based system once the spawn heading and AI dynamics
-     * match the original's conventions. */
+     * Speed gate: at low speed the bicycle model converts any angular velocity
+     * into pure yaw rotation (no lateral forces to counterbalance). Skip
+     * steering until the car has forward velocity so it drives straight first,
+     * then starts tracking the road. */
     {
-        int32_t delta = rs[RS_RIGHT_DEVIATION];
-        /* Use the signed deviation: RIGHT_DEVIATION is small when the car
-         * needs to steer right (heading is CW of target). Convert to signed
-         * error using the same convention as the deviation decomposition. */
-        int32_t left_dev = rs[RS_LEFT_DEVIATION];
-        int32_t right_dev = rs[RS_RIGHT_DEVIATION];
-        int32_t signed_delta;
-        if (left_dev < right_dev) {
-            /* LEFT is smaller → heading is CW of target → need positive steer */
-            signed_delta = -left_dev;
+        int32_t long_speed = ACTOR_I32(actor, ACTOR_LONGITUDINAL_SPEED);
+        int32_t abs_speed = long_speed < 0 ? -long_speed : long_speed;
+
+        if (abs_speed < 0x1800) {
+            /* Low speed: drive straight, no steering corrections.
+             * Zero omega so the bicycle model's weight asymmetry
+             * doesn't rotate the stationary car. */
+            ACTOR_I32(actor, 0x1C4) = 0;
+            ACTOR_I32(actor, ACTOR_STEERING_CMD) = 0;
         } else {
-            /* RIGHT is smaller → heading is CCW of target → need negative steer */
-            signed_delta = right_dev;
+            /* At speed: PD omega controller from heading error. */
+            int32_t left_dev = rs[RS_LEFT_DEVIATION];
+            int32_t right_dev = rs[RS_RIGHT_DEVIATION];
+            int32_t signed_delta;
+            if (left_dev < right_dev) {
+                signed_delta = -left_dev;
+            } else {
+                signed_delta = right_dev;
+            }
+
+            int32_t omega_prev = ACTOR_I32(actor, 0x1C4);
+            int32_t desired_omega = signed_delta * 12 - (omega_prev >> 8) * 6;
+            if (desired_omega > 1500) desired_omega = 1500;
+            if (desired_omega < -1500) desired_omega = -1500;
+            ACTOR_I32(actor, 0x1C4) = desired_omega;
+            ACTOR_I32(actor, ACTOR_STEERING_CMD) = 0;
         }
-        /* Direct heading control: set angular_velocity_yaw proportional
-         * to the heading error, bypassing the steer→torque→omega chain.
-         *
-         * The bicycle model adds yaw_torque to omega each tick AFTER the
-         * AI writes it. With STEERING_CMD = 0, the bicycle model produces
-         * only a small residual torque from weight asymmetry (~100-200),
-         * so our direct omega write dominates heading control.
-         *
-         * Scale: signed_delta * 16 gives omega in accumulator units.
-         * At delta=50 (4.4° off): omega = 800 → heading change = 3.1°/tick.
-         * This matches typical track curvature rates. The ±1500 clamp in
-         * td5_physics_update_ai limits extreme turns. */
-        /* PD omega controller: P proportional to heading error drives
-         * the heading toward the target; D on current omega prevents
-         * overshoot. omega_prev is the value left by physics last tick. */
-        int32_t omega_prev = ACTOR_I32(actor, 0x1C4);
-        int32_t desired_omega = signed_delta * 12 - (omega_prev >> 8) * 6;
-        if (desired_omega > 1500) desired_omega = 1500;
-        if (desired_omega < -1500) desired_omega = -1500;
-        ACTOR_I32(actor, 0x1C4) = desired_omega;
-        /* Zero steer so the bicycle model doesn't fight the direct
-         * heading control with its own (mismatched) yaw torque. */
-        ACTOR_I32(actor, ACTOR_STEERING_CMD) = 0;
     }
 }
 
