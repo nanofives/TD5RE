@@ -3012,11 +3012,14 @@ void td5_physics_integrate_pose(TD5_Actor *actor)
              * garbage terrain heights (47M vs -800K). The per-wheel span
              * clamp catches most cases, but some height functions return
              * stale/wrong values even for in-bounds spans at track edges.
-             * 2M ≈ 7800 world units — well beyond any real terrain step. */
-            int32_t snap_delta = new_y - actor->prev_frame_y_position;
-            if (snap_delta > 2000000 || snap_delta < -2000000) {
-                /* Keep previous Y — don't teleport */
-                new_y = actor->prev_frame_y_position;
+             * 2M ≈ 7800 world units — well beyond any real terrain step.
+             * Skip the check when prev_y is the spawn sentinel (0xC0000000)
+             * since the first ground snap is always a huge legitimate delta. */
+            if (actor->prev_frame_y_position != (int32_t)0xC0000000) {
+                int32_t snap_delta = new_y - actor->prev_frame_y_position;
+                if (snap_delta > 2000000 || snap_delta < -2000000) {
+                    new_y = actor->prev_frame_y_position;
+                }
             }
 
             actor->world_pos.y = new_y;
