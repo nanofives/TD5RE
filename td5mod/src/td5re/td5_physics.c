@@ -722,6 +722,12 @@ void td5_physics_update_player(TD5_Actor *actor)
              * so wheel_drive stays zero and no force is added below. */
             drive_torque = td5_physics_compute_drive_torque(actor);
 
+            /* TODO: drive force is ~1.9x too weak vs original (diff-race
+             * 2026-04-12: port 213/tick vs orig 405/tick at same RPM/gear).
+             * Root cause unknown — grip scaling, force writeback, or torque
+             * chain has a magnitude error. Compensate with 2x until found. */
+            drive_torque *= 2;
+
             int32_t dt_type = (int32_t)PHYS_S(actor, 0x76);
             int32_t speed_limit = (int32_t)PHYS_S(actor, 0x74) << 8;
             int32_t abs_speed = v_long < 0 ? -v_long : v_long;
@@ -790,6 +796,7 @@ void td5_physics_update_player(TD5_Actor *actor)
 
             /* Drive torque while airborne [CONFIRMED @ 0x404560-0x4045AE] */
             drive_torque = td5_physics_compute_drive_torque(actor);
+            drive_torque *= 2;  /* TODO: same 1.9x compensation as ground path */
             int32_t dt_type = (int32_t)PHYS_S(actor, 0x76);
             int32_t speed_limit = (int32_t)PHYS_S(actor, 0x74) << 8;
             int32_t abs_speed = v_long < 0 ? -v_long : v_long;
@@ -3249,6 +3256,14 @@ void td5_physics_refresh_wheel_contacts(TD5_Actor *actor)
                                         actor->wheel_contact_pos[i].x,
                                         actor->wheel_contact_pos[i].z);
 
+        /* Clamp per-wheel span after the probe walker (it can overflow
+         * independently of the chassis span walker). */
+        {
+            int max_sp = g_td5.track_span_ring_length;
+            if (max_sp > 0 && actor->wheel_probes[i].span_index >= (int16_t)max_sp)
+                actor->wheel_probes[i].span_index = (int16_t)(max_sp - 1);
+        }
+
         /* Compute wheel vertical force from the probed span surface. */
         int32_t wheel_y = actor->wheel_contact_pos[i].y;
         int32_t ground_y = 0;
@@ -3258,6 +3273,8 @@ void td5_physics_refresh_wheel_contacts(TD5_Actor *actor)
 
         if (probe_span < 0 || probe_span >= g_td5.track_span_ring_length)
             probe_span = actor->track_span_raw;
+        if (probe_span < 0 || probe_span >= g_td5.track_span_ring_length)
+            probe_span = 0;  /* absolute fallback */
 
         /* Use the wheel probe's own sub_lane for height computation.
          * The original (0x403720 → 0x4457E0) passes the per-wheel probe
