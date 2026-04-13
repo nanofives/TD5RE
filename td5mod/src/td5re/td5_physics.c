@@ -3409,8 +3409,12 @@ void td5_physics_refresh_wheel_contacts(TD5_Actor *actor)
          * The gap_270 Y component uses the TRANSFORM-computed Y, not ground-snapped Y.
          * This ensures the velocity reflects the body's actual motion, not the snap. */
 
-        /* Compute force (uses original wheel_y before snap) */
-        int32_t force = (wheel_y - ground_y) >> 8;
+        /* Compute force (uses original wheel_y before snap).
+         * Original (0x403720): force = (wheel_y - ground_y) + gGravityConstant
+         * All values in 24.8 FP scale — do NOT shift to world units.
+         * The gravity offset ensures a car cresting a slope accumulates
+         * enough force to cross the airborne threshold (0x801). */
+        int32_t force = (wheel_y - ground_y) + g_gravity_constant;
 
         /* gap_270[i] = frame-to-frame wheel contact position delta >> 8.
          * MUST compare pre-snap transform results from two consecutive frames.
