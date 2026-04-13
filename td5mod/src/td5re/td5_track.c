@@ -555,9 +555,14 @@ void td5_track_resolve_wall_contacts(TD5_Actor *actor)
      * as "outside" both walls, creating invisible barriers mid-road. */
     if (type != 1 && type != 2 && type != 5) return;
 
-    /* Branch road spans (index >= ring_length) now reachable since
-     * junction branching is enabled. Their geometry types (1/2/5)
-     * are standard quads — safe for lateral wall checks. */
+    /* Skip wall checks on branch road spans (index >= ring_length).
+     * Branch roads are typically narrow (1-2 lanes) and their vertex
+     * layout produces false-positive wall contacts on BOTH sides of the
+     * car simultaneously (probe 0/1 on RIGHT, probe 2/3 on LEFT, d=-30
+     * identical), creating invisible walls that trap the car. The
+     * original has no lateral wall system at all — this is port-specific.
+     * Forward/reverse boundary contacts still run on branch spans. */
+    if (span_idx >= g_td5.track_span_ring_length) return;
 
     int lane_count = span_lane_count(sp);
     if (lane_count < 1) lane_count = 1;
@@ -1958,6 +1963,42 @@ static int resolve_neighbor(int span_idx, int *sub_lane, uint8_t crossing_bit,
         }
         *sub_lane -= h_offset;
         break;
+    }
+
+    /* Branch-return safety net: only fires when the default case was
+     * taken (span_type 0-7 = regular quad). Type 8/9/10/11 have proper
+     * junction/sentinel handlers above that follow link_next/link_prev,
+     * and their results must not be overridden.
+     *
+     * If on a branch span (index >= ring) and the walker lands us
+     * outside the current branch's range, use the jump table to
+     * redirect to the main road equivalent so the car re-enters
+     * the main road instead of wandering into unrelated spans. */
+    if (sp->span_type < 8 || sp->span_type > 11) {
+        int ring = g_td5.track_span_ring_length;
+        if (span_idx >= ring && s_jump_entries && s_jump_entry_count > 0) {
+            for (int j = 0; j < s_jump_entry_count; j++) {
+                uint16_t *entry_u = (uint16_t *)(s_jump_entries + j * 6);
+                int16_t  *entry_s = (int16_t  *)(s_jump_entries + j * 6);
+                int branch_lo   = (int)entry_u[0];
+                int branch_hi   = (int)entry_u[1];
+                int main_target = (int)entry_s[2];
+                if (span_idx >= branch_lo && span_idx <= branch_hi) {
+                    if (new_span > branch_hi) {
+                        int remapped = main_target + (branch_hi - branch_lo) + 1;
+                        TD5_LOG_I(LOG_TAG, "branch_return_fwd: span=%d new=%d -> main=%d",
+                                  span_idx, new_span, remapped);
+                        new_span = remapped;
+                    } else if (new_span < branch_lo) {
+                        int remapped = main_target - 1;
+                        TD5_LOG_I(LOG_TAG, "branch_return_bwd: span=%d new=%d -> main=%d",
+                                  span_idx, new_span, remapped);
+                        new_span = remapped;
+                    }
+                    break;
+                }
+            }
+        }
     }
 
     /* Clamp span index to valid range */
@@ -4115,20 +4156,27 @@ int td5_track_get_ring_length(void)
 
 int td5_track_branch_to_junction(int span_idx)
 {
-    /* If span_idx is on a branch road (>= ring_length), find the junction
-     * span on the main road that leads to this branch. Returns the junction
-     * span index, or -1 if not found. Uses the jump table from STRIP.DAT. */
+    /* If span_idx is on a branch road (>= ring_length), find its main-road
+     * equivalent span. Returns the main-road span index, or -1 if not found.
+     *
+     * Jump table entry layout [CONFIRMED @ 0x443FF0 ResolveActorSegmentBoundary]:
+     *   +0x00 uint16  branch_lo     -- first span of branch range
+     *   +0x02 uint16  branch_hi     -- last span of branch range
+     *   +0x04 int16   main_target   -- ABSOLUTE main-road span index
+     * Formula: main_equiv = main_target + (span_idx - branch_lo)
+     */
     int ring = g_td5.track_span_ring_length;
     if (span_idx < ring) return span_idx;  /* already on main road */
     if (!s_jump_entries || s_jump_entry_count <= 0) return -1;
 
     for (int j = 0; j < s_jump_entry_count; j++) {
-        uint16_t *entry = (uint16_t *)(s_jump_entries + j * 6);
-        int src_start = (int)entry[0];
-        int dst_end   = (int)entry[1];
-        int junction  = (int)entry[2];
-        if (span_idx >= src_start && span_idx <= dst_end)
-            return junction;
+        uint16_t *entry_u = (uint16_t *)(s_jump_entries + j * 6);
+        int16_t  *entry_s = (int16_t  *)(s_jump_entries + j * 6);
+        int branch_lo   = (int)entry_u[0];
+        int branch_hi   = (int)entry_u[1];
+        int main_target = (int)entry_s[2];
+        if (span_idx >= branch_lo && span_idx <= branch_hi)
+            return main_target + (span_idx - branch_lo);
     }
     return -1;
 }
