@@ -3006,6 +3006,19 @@ void td5_physics_integrate_pose(TD5_Actor *actor)
             /* [FIX #2] NO +0x80 bias — the original writes the plain
              * signed-IDIV result (MOV [ESI+0x200], EAX at 0x00406307). */
             int32_t new_y = (int32_t)(contact_y_sum / contact_count);
+
+            /* Reject ground snap if new_y is wildly different from prev_y.
+             * The span walker can overflow to out-of-bounds spans, producing
+             * garbage terrain heights (47M vs -800K). The per-wheel span
+             * clamp catches most cases, but some height functions return
+             * stale/wrong values even for in-bounds spans at track edges.
+             * 2M ≈ 7800 world units — well beyond any real terrain step. */
+            int32_t snap_delta = new_y - actor->prev_frame_y_position;
+            if (snap_delta > 2000000 || snap_delta < -2000000) {
+                /* Keep previous Y — don't teleport */
+                new_y = actor->prev_frame_y_position;
+            }
+
             actor->world_pos.y = new_y;
             actor->render_pos.y = (float)new_y * (1.0f / 256.0f);
 
