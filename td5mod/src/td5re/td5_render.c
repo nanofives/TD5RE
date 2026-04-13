@@ -1619,10 +1619,22 @@ void td5_render_actors_for_view(int view_index)
      * architectural coverage — task #9 resolved by doubled window.] */
 #define VIEW_DIST_MAX_SPANS 128
     int player_span = 0;
+    int player_branch_span = -1;
     {
         TD5_Actor *player = td5_game_get_actor(0);
-        if (player)
+        if (player) {
             player_span = (int)player->track_span_raw;
+            /* If on a branch road, use the junction's main-road span as
+             * the culling center so nearby main road geometry stays visible.
+             * Also track the branch span to render branch geometry. */
+            int ring = td5_track_get_ring_length();
+            if (player_span >= ring) {
+                player_branch_span = player_span;
+                int junction = td5_track_branch_to_junction(player_span);
+                if (junction >= 0)
+                    player_span = junction;
+            }
+        }
     }
     float view_dist_frac = td5_save_get_view_distance();
     int half_window = (int)((view_dist_frac * 0.85f + 0.15f) * (float)VIEW_DIST_MAX_SPANS);
@@ -1658,14 +1670,25 @@ void td5_render_actors_for_view(int view_index)
             continue;
 
         /* Span-window cull: skip spans outside ±half_window of the player's span.
-         * Delta is wrapped into [-span_count/2, span_count/2] to handle circuit ring. */
+         * Delta is wrapped into [-span_count/2, span_count/2] to handle circuit ring.
+         * When on a branch road, also accept spans near the branch span index. */
         if (span_count > 0) {
+            int ring = td5_track_get_ring_length();
             int delta = span_index - player_span;
-            int half_count = span_count / 2;
-            if (delta >  half_count) delta -= span_count;
-            if (delta < -half_count) delta += span_count;
-            if (delta > half_window || delta < -half_window)
-                continue;
+            /* Only wrap for main road spans (ring topology) */
+            if (span_index < ring) {
+                int half_ring = ring / 2;
+                if (delta >  half_ring) delta -= ring;
+                if (delta < -half_ring) delta += ring;
+            }
+            int visible = (delta <= half_window && delta >= -half_window);
+            /* If on a branch, also render spans near the branch index */
+            if (!visible && player_branch_span >= 0) {
+                int bdelta = span_index - player_branch_span;
+                if (bdelta < 0) bdelta = -bdelta;
+                visible = (bdelta <= half_window);
+            }
+            if (!visible) continue;
         }
 
         td5_render_span_display_list(display_list);
@@ -2377,12 +2400,11 @@ static void render_vehicle_reflection_overlay(TD5_MeshHeader *mesh, int slot)
 #define REFLECTION_MAX_VERTS 4096
     int save_count = (vert_count < REFLECTION_MAX_VERTS) ? vert_count : REFLECTION_MAX_VERTS;
 
-    /* Set translucent blend for the reflection overlay.
-     * TRANSLUCENT_ANISO: z_test=1 (renders on car body, behind other geometry),
-     * z_write=0, alpha_ref=1 (no alpha discard), src_alpha blending.
-     * NOT TRANSLUCENT_LINEAR — that has alpha_ref=0x80 which discards our
-     * partial-alpha vertices, and z_enable=0 which is for 2D HUD overlays. */
-    td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_ANISO);
+    /* Additive blend for the reflection overlay.
+     * Chrome reflections ADD light on top of the car body color, making
+     * highlights brighter/whiter — matching the original's visual style.
+     * ADDITIVE preset: src=ONE, dst=ONE, z_test=1, z_write=0. */
+    td5_plat_render_set_preset(TD5_PRESET_ADDITIVE);
 
     /* Save and override vertex lighting + UVs for the reflection pass.
      * Vertex color must be white with partial alpha so the environs
@@ -2396,7 +2418,7 @@ static void render_vehicle_reflection_overlay(TD5_MeshHeader *mesh, int slot)
         saved_uv[i][0] = verts[i].tex_u;
         saved_uv[i][1] = verts[i].tex_v;
 
-        verts[i].lighting = 0x99FFFFFFu; /* 60% alpha, white — chrome reflection overlay */
+        verts[i].lighting = 0xFFBBBBBBu; /* additive: ~73% white intensity */
         verts[i].tex_u = verts[i].proj_u;
         verts[i].tex_v = verts[i].proj_v;
     }

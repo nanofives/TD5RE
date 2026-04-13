@@ -4108,6 +4108,31 @@ int td5_track_get_span_count(void)
     return s_span_count;
 }
 
+int td5_track_get_ring_length(void)
+{
+    return g_td5.track_span_ring_length;
+}
+
+int td5_track_branch_to_junction(int span_idx)
+{
+    /* If span_idx is on a branch road (>= ring_length), find the junction
+     * span on the main road that leads to this branch. Returns the junction
+     * span index, or -1 if not found. Uses the jump table from STRIP.DAT. */
+    int ring = g_td5.track_span_ring_length;
+    if (span_idx < ring) return span_idx;  /* already on main road */
+    if (!s_jump_entries || s_jump_entry_count <= 0) return -1;
+
+    for (int j = 0; j < s_jump_entry_count; j++) {
+        uint16_t *entry = (uint16_t *)(s_jump_entries + j * 6);
+        int src_start = (int)entry[0];
+        int dst_end   = (int)entry[1];
+        int junction  = (int)entry[2];
+        if (span_idx >= src_start && span_idx <= dst_end)
+            return junction;
+    }
+    return -1;
+}
+
 int td5_track_get_fwd_sentinel(void)
 {
     return s_boundary_fwd_sentinel;
