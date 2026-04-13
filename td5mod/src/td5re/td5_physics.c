@@ -554,7 +554,12 @@ void td5_physics_update_vehicle_actor(TD5_Actor *actor)
     if (actor->vehicle_mode == 0) {
         td5_track_resolve_reverse_contacts(actor);
         td5_track_resolve_forward_contacts(actor);
-        td5_track_resolve_wall_contacts(actor);
+        /* Lateral wall check disabled. This was a port-specific workaround
+         * (original has no mid-strip lateral walls) that produced false-
+         * positive invisible walls at junction transitions, lane-count
+         * changes, and degenerate span geometry on every track.
+         * TODO: replace with the original's state-0x0F damping system. */
+        /* td5_track_resolve_wall_contacts(actor); */
     }
 
     /* 9. Update surface_contact_flags for the NEXT tick's dynamics dispatch.
