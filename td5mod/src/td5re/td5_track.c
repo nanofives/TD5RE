@@ -555,11 +555,9 @@ void td5_track_resolve_wall_contacts(TD5_Actor *actor)
      * as "outside" both walls, creating invisible barriers mid-road. */
     if (type != 1 && type != 2 && type != 5) return;
 
-    /* Skip wall checks on branch road spans (index >= ring_length).
-     * Branch spans have geometry that doesn't align with the car's
-     * position when entering from a junction, causing immediate
-     * false-positive wall contacts that push the car backward. */
-    if (span_idx >= g_td5.track_span_ring_length) return;
+    /* Branch road spans (index >= ring_length) now reachable since
+     * junction branching is enabled. Their geometry types (1/2/5)
+     * are standard quads — safe for lateral wall checks. */
 
     int lane_count = span_lane_count(sp);
     if (lane_count < 1) lane_count = 1;
@@ -1801,16 +1799,31 @@ static int resolve_neighbor(int span_idx, int *sub_lane, uint8_t crossing_bit,
     switch (crossing_bit) {
     case 0x01: /* Forward */
         switch (sp->span_type) {
-        case 8: /* JUNCTION_FWD: always take main road (span+1).
-                 * Branch roads disabled — the port's sub_lane tracking and
-                 * terrain height system don't handle junctions reliably yet.
-                 * TODO: re-enable when sub_lane tracking is fixed. */
-            new_span = span_idx + 1;
-            if (new_span >= 0 && new_span < s_span_count) {
-                int dest_h = span_height_offset(&s_span_array[new_span]);
-                *sub_lane += h_offset - dest_h;
+        case 8: { /* JUNCTION_FWD [CONFIRMED @ 0x4440F0 case 1]:
+                   * sub_lane < next_span.lane_count → main road (span+1)
+                   * sub_lane >= next_span.lane_count → branch (link_next) */
+            int next_idx = span_idx + 1;
+            if (next_idx >= 0 && next_idx < s_span_count) {
+                int next_lanes = span_lane_count(&s_span_array[next_idx]);
+                if (*sub_lane < next_lanes) {
+                    /* Main road */
+                    new_span = next_idx;
+                    int dest_h = span_height_offset(&s_span_array[next_idx]);
+                    *sub_lane += h_offset - dest_h;
+                } else {
+                    /* Branch road */
+                    new_span = (int)sp->link_next;
+                    if (new_span >= 0 && new_span < s_span_count) {
+                        int dest_lanes = span_lane_count(&s_span_array[new_span]);
+                        *sub_lane += dest_lanes - cur_lane_count;
+                        /* junction_fwd branch taken */
+                    } else {
+                        new_span = next_idx; /* fallback to main */
+                    }
+                }
             }
             break;
+        }
         case 10: /* SENTINEL_END: always follow forward link */
             new_span = (int)sp->link_next;
             if (new_span >= 0 && new_span < s_span_count) {
@@ -1831,9 +1844,22 @@ static int resolve_neighbor(int span_idx, int *sub_lane, uint8_t crossing_bit,
 
     case 0x02: /* Right (forward + lateral) */
         switch (sp->span_type) {
-        case 8: /* JUNCTION_FWD: always main road */
-            new_span = span_idx + 1;
+        case 8: { /* JUNCTION_FWD: branch decision same as 0x01 */
+            int next_idx = span_idx + 1;
+            if (next_idx >= 0 && next_idx < s_span_count) {
+                int next_lanes = span_lane_count(&s_span_array[next_idx]);
+                if (*sub_lane < next_lanes) {
+                    new_span = next_idx;
+                } else {
+                    new_span = (int)sp->link_next;
+                    if (new_span < 0 || new_span >= s_span_count)
+                        new_span = next_idx;
+                }
+            } else {
+                new_span = span_idx + 1;
+            }
             break;
+        }
         case 10:
             new_span = (int)sp->link_next;
             if (new_span >= 0 && new_span < s_span_count) {
@@ -1850,13 +1876,31 @@ static int resolve_neighbor(int span_idx, int *sub_lane, uint8_t crossing_bit,
 
     case 0x04: /* Backward */
         switch (sp->span_type) {
-        case 11: /* JUNCTION_BWD: always main road */
-            new_span = span_idx - 1;
-            if (new_span >= 0) {
-                int dest_h = span_height_offset(&s_span_array[new_span]);
-                *sub_lane += h_offset - dest_h;
+        case 11: { /* JUNCTION_BWD [CONFIRMED @ 0x4440F0 case 4]:
+                    * sub_lane >= prev_span.lane_count → branch (link_prev)
+                    * sub_lane < prev_span.lane_count → main road (span-1) */
+            int prev_idx = span_idx - 1;
+            if (prev_idx >= 0 && prev_idx < s_span_count) {
+                int prev_lanes = span_lane_count(&s_span_array[prev_idx]);
+                if (*sub_lane >= prev_lanes) {
+                    /* Branch road */
+                    new_span = (int)sp->link_prev;
+                    if (new_span >= 0 && new_span < s_span_count) {
+                        int dest_lanes = span_lane_count(&s_span_array[new_span]);
+                        *sub_lane += dest_lanes - cur_lane_count;
+                        /* junction_bwd branch taken */
+                    } else {
+                        new_span = prev_idx; /* fallback to main */
+                    }
+                } else {
+                    /* Main road */
+                    new_span = prev_idx;
+                    int dest_h = span_height_offset(&s_span_array[prev_idx]);
+                    *sub_lane += h_offset - dest_h;
+                }
             }
             break;
+        }
         case 9: /* SENTINEL_START: always follow backward link */
             new_span = (int)sp->link_prev;
             if (new_span >= 0 && new_span < s_span_count) {
@@ -1876,9 +1920,22 @@ static int resolve_neighbor(int span_idx, int *sub_lane, uint8_t crossing_bit,
 
     case 0x08: /* Left (backward + lateral) */
         switch (sp->span_type) {
-        case 11: /* JUNCTION_BWD: always main road */
-            new_span = span_idx - 1;
+        case 11: { /* JUNCTION_BWD: branch decision same as 0x04 */
+            int prev_idx = span_idx - 1;
+            if (prev_idx >= 0 && prev_idx < s_span_count) {
+                int prev_lanes = span_lane_count(&s_span_array[prev_idx]);
+                if (*sub_lane >= prev_lanes) {
+                    new_span = (int)sp->link_prev;
+                    if (new_span < 0 || new_span >= s_span_count)
+                        new_span = prev_idx;
+                } else {
+                    new_span = prev_idx;
+                }
+            } else {
+                new_span = span_idx - 1;
+            }
             break;
+        }
         case 9:
             new_span = (int)sp->link_prev;
             if (new_span >= 0 && new_span < s_span_count) {

@@ -105,6 +105,7 @@ static int32_t g_difficulty_hard = 0;
 static int32_t g_total_actor_count = 6;
 static int32_t g_race_slot_state[6];         /* 1=human, 0=AI per slot */
 static uint8_t s_prev_grounded_mask[16];     /* per-slot previous-frame grounded bitmask (1=grounded) */
+static void integrate_traffic_pose(TD5_Actor *actor);  /* forward decl */
 
 /* Per-slot previous-frame wheel transform results (pre-snap) for gap_270 delta.
  * Using post-snap positions causes huge Y deltas because snap Y != transform Y. */
@@ -524,26 +525,17 @@ void td5_physics_update_vehicle_actor(TD5_Actor *actor)
     }
 
     /* 7. Integrate pose and contacts.
-     * Run even during countdown (paused) so ground-snap keeps the car
-     * at the correct height above the road surface. Velocities are zero
-     * during pause, so the car doesn't actually move. */
-    td5_physics_integrate_pose(actor);
-
-    /* 7b. Traffic Y re-snap: traffic slots have zero wheel positions
-     * (no carparam.dat), so integrate_pose's per-wheel ground snap fails
-     * and gravity accumulates unchecked — traffic falls underground.
-     * Re-snap Y to track surface and zero vertical dynamics each tick. */
+     * Traffic (slot >= 6) uses a dedicated path that skips gravity and
+     * per-wheel ground snap — the original never calls IntegrateVehiclePoseAndContacts
+     * for traffic [CONFIRMED @ 0x443ED0]. Instead, UpdateTrafficVehiclePose sets Y
+     * absolutely from barycentric track height each tick. */
     if (actor->slot_index >= 6) {
-        int32_t wx, wy, wz;
-        if (td5_track_get_span_lane_world(
-                actor->track_span_raw,
-                (int)actor->track_sub_lane_index,
-                &wx, &wy, &wz)) {
-            actor->world_pos.y = wy;
-        }
-        actor->linear_velocity_y = 0;
-        actor->angular_velocity_roll = 0;
-        actor->angular_velocity_pitch = 0;
+        integrate_traffic_pose(actor);
+    } else {
+        /* Racer path: full gravity + per-wheel ground snap.
+         * Run even during countdown (paused) so ground-snap keeps the car
+         * at the correct height above the road surface. */
+        td5_physics_integrate_pose(actor);
     }
 
     /* 8. Track wall contact resolution (FUN_004070E0 -> FUN_00406F50 -> FUN_00406CC0)
@@ -554,12 +546,11 @@ void td5_physics_update_vehicle_actor(TD5_Actor *actor)
     if (actor->vehicle_mode == 0) {
         td5_track_resolve_reverse_contacts(actor);
         td5_track_resolve_forward_contacts(actor);
-        /* Lateral wall check disabled. This was a port-specific workaround
-         * (original has no mid-strip lateral walls) that produced false-
-         * positive invisible walls at junction transitions, lane-count
-         * changes, and degenerate span geometry on every track.
-         * TODO: replace with the original's state-0x0F damping system. */
-        /* td5_track_resolve_wall_contacts(actor); */
+        /* Lateral wall check — re-enabled now that junction branching works.
+         * The original has no mid-strip lateral walls; containment is
+         * topological via the span walker. This port-specific check adds
+         * road-edge walls for types 1/2/5 only (safe geometry). */
+        td5_track_resolve_wall_contacts(actor);
     }
 
     /* 9. Update surface_contact_flags for the NEXT tick's dynamics dispatch.
@@ -793,21 +784,40 @@ void td5_physics_update_player(TD5_Actor *actor)
              * when going straight (v_lat ≈ 0).
              * Wheel assignment: bf/2 per driven pair, 0 on other pair.
              * [CONFIRMED @ 0x404474-0x40447e] */
+            /* On-ground brake: REAR wheels only, clamped to |v_lat|
+             * [CONFIRMED @ 0x404441-0x404481]: uses tuning+0x6E only,
+             * assigns result/2 to RL/RR, 0 to FL/FR.
+             * [CONFIRMED @ 0x404455-0x40446D]: clamp is against lateral
+             * speed, NOT longitudinal. */
             int32_t bf = (brake_front * throttle) >> 8;
             {
                 int32_t abs_bf = bf < 0 ? -bf : bf;
-                int32_t abs_vl = v_long < 0 ? -v_long : v_long;
+                int32_t abs_vl = v_lat < 0 ? -v_lat : v_lat;
                 int32_t clamped = abs_bf < abs_vl ? abs_bf : abs_vl;
                 bf = (bf < 0) ? -(int32_t)clamped : (int32_t)clamped;
             }
-            wheel_drive[0] = bf >> 1;
-            wheel_drive[1] = bf >> 1;
-            wheel_drive[2] = 0;
-            wheel_drive[3] = 0;
+            wheel_drive[0] = 0;
+            wheel_drive[1] = 0;
+            wheel_drive[2] = bf >> 1;
+            wheel_drive[3] = bf >> 1;
+            /* When braking on-ground near standstill, force gear to REVERSE.
+             * Original achieves this via auto_gear during brief airborne
+             * microbumps [CONFIRMED @ 0x42EF1C: throttle<0 → gear=0].
+             * The port's ground contact may be too sticky for microbumps,
+             * so replicate the effect directly. Threshold 0x40 matches the
+             * dead-zone clamp at 0x404E70. */
+            {
+                int32_t abs_vlong = v_long < 0 ? -v_long : v_long;
+                int32_t abs_vlat  = v_lat  < 0 ? -v_lat  : v_lat;
+                if (abs_vlong < 0x40 && abs_vlat < 0x40) {
+                    actor->current_gear = TD5_GEAR_REVERSE;
+                }
+            }
             if (actor->slot_index == 0 && (actor->frame_counter % 30u) == 0u) {
                 TD5_LOG_I(LOG_TAG,
-                    "BRAKE: bf=%d brk_front=%d throttle=%d v_long=%d v_lat=%d wd0=%d sf=%d",
-                    bf, brake_front, throttle, v_long, v_lat, wheel_drive[0],
+                    "BRAKE: bf=%d brk_front=%d throttle=%d v_long=%d v_lat=%d wd2=%d gear=%d sf=%d",
+                    bf, brake_front, throttle, v_long, v_lat, wheel_drive[2],
+                    (int)actor->current_gear,
                     (int)s_surface_friction[surface_wheel[0] & 0x1F]);
             }
         }
@@ -2844,9 +2854,105 @@ void td5_physics_update_suspension_response(TD5_Actor *actor)
 }
 
 /* ========================================================================
+ * Traffic Pose Integration: UpdateTrafficVehiclePose (0x443CF0)
+ *
+ * Traffic (slots 6-11) NEVER goes through IntegrateVehiclePoseAndContacts.
+ * Instead the original:
+ *   1. Integrates X/Z from velocity (NO gravity, NO Y velocity)
+ *   2. Updates track position from new XZ
+ *   3. Sets Y absolutely from barycentric track contact height
+ *   4. Converts euler accumulators to display angles + rotation matrix
+ *   5. Computes render position
+ * [CONFIRMED @ 0x443ED0 — no call to 0x405E80 for traffic]
+ * ======================================================================== */
+
+static void integrate_traffic_pose(TD5_Actor *actor)
+{
+    /* 1. Integrate X/Z position from velocity — no gravity, no Y integration.
+     * [CONFIRMED @ 0x443CD0-0x443CE8: IntegrateVehicleFrictionForces
+     *  writes world_pos_x += vel_x, world_pos_z += vel_z, no Y touch] */
+    actor->world_pos.x += actor->linear_velocity_x;
+    actor->world_pos.z += actor->linear_velocity_z;
+
+    /* 2. Integrate angular velocity into euler accumulators */
+    actor->euler_accum.roll  += actor->angular_velocity_roll;
+    actor->euler_accum.yaw   += actor->angular_velocity_yaw;
+    actor->euler_accum.pitch += actor->angular_velocity_pitch;
+
+    /* 3. Update chassis track position from new world XZ.
+     * [CONFIRMED @ 0x443D40: UpdateTrafficVehiclePose calls UpdateActorTrackPosition] */
+    {
+        int16_t prev_span = actor->track_span_raw;
+        td5_track_update_actor_position(actor);
+
+        int max_span = td5_track_get_span_count();
+        if (max_span > 0 && actor->track_span_raw >= (uint16_t)max_span)
+            actor->track_span_raw = (uint16_t)(max_span - 1);
+        (void)prev_span;
+    }
+
+    /* 4. Set Y absolutely from barycentric track contact height.
+     * [CONFIRMED @ 0x443D58 + 0x445A1C: ComputeActorTrackContactNormalExtended
+     *  writes world_pos_y = barycentric_height + origin_y * 0x100] */
+    {
+        int span  = (int)actor->track_span_raw;
+        int lane  = (int)actor->track_sub_lane_index;
+        int32_t ground_y = td5_track_compute_contact_height(
+            span, lane, actor->world_pos.x, actor->world_pos.z);
+        actor->world_pos.y = ground_y;
+    }
+
+    /* Keep vertical dynamics zeroed — traffic has no gravity or suspension */
+    actor->linear_velocity_y = 0;
+
+    /* 5. Convert accumulators to 12-bit display angles */
+    actor->display_angles.roll  = (int16_t)((actor->euler_accum.roll >> 8) & 0xFFF);
+    actor->display_angles.yaw   = (int16_t)((actor->euler_accum.yaw >> 8) & 0xFFF);
+    actor->display_angles.pitch = (int16_t)((actor->euler_accum.pitch >> 8) & 0xFFF);
+
+    /* 6. Build rotation matrix from euler angles (YXZ order, same as racers) */
+    {
+        int32_t roll_a  = actor->display_angles.roll  & 0xFFF;
+        int32_t yaw_a   = actor->display_angles.yaw   & 0xFFF;
+        int32_t pitch_a = actor->display_angles.pitch  & 0xFFF;
+
+        int32_t cr = cos_fixed12(roll_a);
+        int32_t sr = sin_fixed12(roll_a);
+        int32_t cy = cos_fixed12(yaw_a);
+        int32_t sy = sin_fixed12(yaw_a);
+        int32_t cp = cos_fixed12(pitch_a);
+        int32_t sp = sin_fixed12(pitch_a);
+
+        float s = 1.0f / 4096.0f;
+
+        actor->rotation_matrix.m[0] = (float)(((sp * sy >> 12) * sr >> 12) + ((cp * cy) >> 12)) * s;
+        actor->rotation_matrix.m[1] = (float)(((cp * sy >> 12) * sr >> 12) - ((sp * cy) >> 12)) * s;
+        actor->rotation_matrix.m[2] = (float)((sy * cr) >> 12) * s;
+
+        actor->rotation_matrix.m[3] = (float)((sp * cr) >> 12) * s;
+        actor->rotation_matrix.m[4] = (float)((cp * cr) >> 12) * s;
+        actor->rotation_matrix.m[5] = (float)(-sr) * s;
+
+        actor->rotation_matrix.m[6] = (float)(((sp * cy >> 12) * sr >> 12) - ((cp * sy) >> 12)) * s;
+        actor->rotation_matrix.m[7] = (float)(((cp * cy >> 12) * sr >> 12) + ((sp * sy) >> 12)) * s;
+        actor->rotation_matrix.m[8] = (float)((cy * cr) >> 12) * s;
+    }
+
+    /* 7. Compute render position (world_pos / 256 as float) */
+    actor->render_pos.x = (float)actor->world_pos.x * (1.0f / 256.0f);
+    actor->render_pos.y = (float)actor->world_pos.y * (1.0f / 256.0f);
+    actor->render_pos.z = (float)actor->world_pos.z * (1.0f / 256.0f);
+
+    TD5_LOG_I(LOG_TAG, "traffic_pose: slot=%d span=%d pos=(%d,%d,%d)",
+              actor->slot_index, (int)actor->track_span_raw,
+              actor->world_pos.x, actor->world_pos.y, actor->world_pos.z);
+}
+
+/* ========================================================================
  * Integration: IntegrateVehiclePoseAndContacts (0x405E80)
  *
  * Core integration step: gravity -> velocity -> position -> euler -> matrix.
+ * Racers only (slots 0-5). Traffic uses integrate_traffic_pose above.
  * ======================================================================== */
 
 void td5_physics_integrate_pose(TD5_Actor *actor)
