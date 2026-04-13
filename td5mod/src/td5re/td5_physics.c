@@ -722,12 +722,6 @@ void td5_physics_update_player(TD5_Actor *actor)
              * so wheel_drive stays zero and no force is added below. */
             drive_torque = td5_physics_compute_drive_torque(actor);
 
-            /* TODO: drive force is ~1.9x too weak vs original (diff-race
-             * 2026-04-12: port 213/tick vs orig 405/tick at same RPM/gear).
-             * Root cause unknown — grip scaling, force writeback, or torque
-             * chain has a magnitude error. Compensate with 2x until found. */
-            drive_torque *= 2;
-
             int32_t dt_type = (int32_t)PHYS_S(actor, 0x76);
             int32_t speed_limit = (int32_t)PHYS_S(actor, 0x74) << 8;
             int32_t abs_speed = v_long < 0 ? -v_long : v_long;
@@ -796,7 +790,6 @@ void td5_physics_update_player(TD5_Actor *actor)
 
             /* Drive torque while airborne [CONFIRMED @ 0x404560-0x4045AE] */
             drive_torque = td5_physics_compute_drive_torque(actor);
-            drive_torque *= 2;  /* TODO: same 1.9x compensation as ground path */
             int32_t dt_type = (int32_t)PHYS_S(actor, 0x76);
             int32_t speed_limit = (int32_t)PHYS_S(actor, 0x74) << 8;
             int32_t abs_speed = v_long < 0 ? -v_long : v_long;
@@ -869,11 +862,18 @@ void td5_physics_update_player(TD5_Actor *actor)
     int32_t cos_sr = cos_fixed12(steer_only);     /* iVar18 = cos(s) */
     int32_t sin_sr = sin_fixed12(steer_only);     /* iVar19 = sin(s) */
 
-    /* Front/rear longitudinal forces (grip-scaled sum of per-wheel drive)
-     * [CONFIRMED @ 0x004046DC]: original scales each wheel by surface grip
-     * before summing — grip[i] * wheel_drive[i] >> 8 */
-    int32_t front_long = ((grip[0] * wheel_drive[0]) >> 8) + ((grip[1] * wheel_drive[1]) >> 8);
-    int32_t rear_long  = ((grip[2] * wheel_drive[2]) >> 8) + ((grip[3] * wheel_drive[3]) >> 8);
+    /* Front/rear longitudinal forces scaled by RAW surface friction coefficient.
+     * [CONFIRMED @ 0x004046DC]: original re-reads gSurfaceGripCoefficientTable
+     * (DAT_004748C0) directly — it does NOT use the load-weighted/clamped grip[].
+     * The grip[] array is for slip-circle limiting only.
+     * Formula: sf[i] * wheel_drive[i] >> 8, where sf = raw table value (e.g. 256 for asphalt).
+     * Prior port used grip[i] (56-80 after load+clamp) which is ~2x too small. */
+    int32_t sf_fl = (int32_t)s_surface_friction[surface_wheel[0] & 0x1F];
+    int32_t sf_fr = (int32_t)s_surface_friction[surface_wheel[1] & 0x1F];
+    int32_t sf_rl = (int32_t)s_surface_friction[surface_wheel[2] & 0x1F];
+    int32_t sf_rr = (int32_t)s_surface_friction[surface_wheel[3] & 0x1F];
+    int32_t front_long = ((sf_fl * wheel_drive[0]) >> 8) + ((sf_fr * wheel_drive[1]) >> 8);
+    int32_t rear_long  = ((sf_rl * wheel_drive[2]) >> 8) + ((sf_rr * wheel_drive[3]) >> 8);
 
     /* --- Coupled bicycle-model lateral force solve ---
      * Literal port of UpdatePlayerVehicleDynamics @ 0x00404A40-0x00404CCC.
@@ -1042,10 +1042,10 @@ void td5_physics_update_player(TD5_Actor *actor)
         /* Term 2: per-wheel longitudinal force left-right differential * 500.
          * Currently 0 because port uses uniform grip per axle pair.
          * [CONFIRMED @ 0x404C8E: (iVar31-iVar11-iVar35+iVar36)*500] */
-        int32_t wheel_long_fl = (grip[0] * wheel_drive[0]) / 256;
-        int32_t wheel_long_fr = (grip[1] * wheel_drive[1]) / 256;
-        int32_t wheel_long_rl = (grip[2] * wheel_drive[2]) / 256;
-        int32_t wheel_long_rr = (grip[3] * wheel_drive[3]) / 256;
+        int32_t wheel_long_fl = (sf_fl * wheel_drive[0]) / 256;
+        int32_t wheel_long_fr = (sf_fr * wheel_drive[1]) / 256;
+        int32_t wheel_long_rl = (sf_rl * wheel_drive[2]) / 256;
+        int32_t wheel_long_rr = (sf_rr * wheel_drive[3]) / 256;
         int32_t term2 = (wheel_long_rr - wheel_long_rl - wheel_long_fl + wheel_long_fr) * 500;
 
         /* Term 3: rear_lat_force * rear_weight
