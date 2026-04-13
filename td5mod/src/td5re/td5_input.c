@@ -612,9 +612,10 @@ void td5_input_update_player_control(int slot)
                     sflags = ab[0x376];
                 }
 
-                /* Reverse transition [CONFIRMED @ 0x4032A0-0x4032BC] */
+                /* Reverse transition [CONFIRMED @ 0x4032A0-0x4032BC]:
+                 * original checks field_0x376 == 0 (no surface contact). */
                 if (auto_gearbox != 0 && throttle_st == 1 &&
-                    speed < 10 && sflags != 0)
+                    speed < 10 && sflags == 0)
                 {
                     TD5_LOG_I(LOG_TAG,
                               "brake->reverse latch: speed=%d slot=%d sflags=0x%X",

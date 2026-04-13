@@ -59,10 +59,12 @@ int td5_game_get_total_actor_count(void);
 
 /* OBB corner test output: per-corner penetration data */
 typedef struct OBB_CornerData {
-    int16_t proj_x;     /* projected X position of corner */
-    int16_t proj_z;     /* projected Z position of corner */
+    int16_t proj_x;     /* corner position in TARGET's local frame (X) */
+    int16_t proj_z;     /* corner position in TARGET's local frame (Z) */
     int16_t pen_x;      /* penetration depth along X axis */
     int16_t pen_z;      /* penetration depth along Z axis */
+    int16_t own_x;      /* corner position in PENETRATOR's own local frame (X) */
+    int16_t own_z;      /* corner position in PENETRATOR's own local frame (Z) */
 } OBB_CornerData;
 
 static void resolve_collision_pair(TD5_Actor *a, TD5_Actor *b, int idx_a, int idx_b);
@@ -704,19 +706,11 @@ void td5_physics_update_player(TD5_Actor *actor)
         } else {
             /* On-ground auto gear: the original only runs this on airborne
              * frames [CONFIRMED @ 0x4044F9]. The port runs it on-ground
-             * because it has fewer micro-airborne frames. auto_gear_select
-             * only downshifts by 1 per call [CONFIRMED @ 0x42EFF1], so
-             * after braking from gear 5 we need multiple passes to reach
-             * gear 2 where CRGT can rebuild RPM. Loop until stable. */
-            {
-                uint8_t prev_gear;
-                int passes = 0;
-                do {
-                    prev_gear = actor->current_gear;
-                    td5_physics_auto_gear_select(actor);
-                    passes++;
-                } while (actor->current_gear != prev_gear && passes < 6);
-            }
+             * because it has fewer micro-airborne frames. Single call only —
+             * the original shifts at most +1/-1 per tick. The previous loop
+             * (up to 6 passes) caused gear skipping 1→6 and accumulated
+             * drivetrain kick forces that lifted the car without recovery. */
+            td5_physics_auto_gear_select(actor);
         }
 
         if (!actor->brake_flag) {
@@ -1772,6 +1766,9 @@ static int obb_corner_test(TD5_Actor *a, TD5_Actor *b,
             result |= (1 << i);
             corners[i].proj_x = (int16_t)cx;
             corners[i].proj_z = (int16_t)cz;
+            /* Store B's corner in B's own local frame (the penetrator's frame) */
+            corners[i].own_x = (int16_t)b_corners_lx[i];
+            corners[i].own_z = (int16_t)b_corners_lz[i];
             /* Penetration depth along each face normal (signed).
              * Minimum |pen| identifies the closest face. */
             int32_t pen_right = half_w_a  - cx;     /* to +X face */
@@ -1806,6 +1803,9 @@ static int obb_corner_test(TD5_Actor *a, TD5_Actor *b,
             result |= (1 << (i + 4));
             corners[i + 4].proj_x = (int16_t)cx;
             corners[i + 4].proj_z = (int16_t)cz;
+            /* Store A's corner in A's own local frame (the penetrator's frame) */
+            corners[i + 4].own_x = (int16_t)a_corners_lx[i];
+            corners[i + 4].own_z = (int16_t)a_corners_lz[i];
             int32_t pen_right = half_w_b  - cx;
             int32_t pen_left  = cx + half_w_b;
             int32_t pen_front = front_z_b - cz;
@@ -1859,14 +1859,9 @@ static int obb_corner_test(TD5_Actor *a, TD5_Actor *b,
  * Caller interface: (penetrator, target, corner_idx, corner, heading, impactForce).
  * impactForce is now passed from the caller's position-based binary search.
  * Internally, "A" = target (frame owner whose yaw = angle), "B" = penetrator.
- * Contact data is synthesized from corner:
- *   cx_A, cz_A = corner->proj_x, proj_z      (contact in A's frame)
- *   cx_B, cz_B = -proj_x + pen_x, -proj_z + pen_z  (equal-and-opposite approx)
- *
- * Notes on UNCERTAIN items (tracked in todo_collision_engine_gaps.md):
- *  - contactData[2,3] (cx_B,cz_B) mapping is an approximation — the original
- *    has per-frame coordinates written by CollectVehicleCollisionContacts
- *    (0x408570) that aren't fully decoded yet.
+ * Contact data from OBB corner test:
+ *   cx_A, cz_A = corner->proj_x, proj_z   (corner in TARGET's frame)
+ *   cx_B, cz_B = corner->own_x, own_z     (corner in PENETRATOR's own frame)
  * ======================================================================== */
 
 #define V2V_NUM_SCALE        0x1100
@@ -1914,11 +1909,17 @@ static void apply_collision_response(TD5_Actor *penetrator, TD5_Actor *target,
     int32_t local_4c = (vxB * cos_a - vzB * sin_a) >> 12;  /* B tangent */
     int32_t local_44 = (vxB * sin_a + vzB * cos_a) >> 12;  /* B normal  */
 
-    /* --- Unpack contactData (synthesized from corner) --- */
+    /* --- Unpack contactData --- */
+    /* cx_A, cz_A = corner position in TARGET's (A's) local frame.
+     * cx_B, cz_B = corner position in PENETRATOR's (B's) own local frame.
+     * The original (0x408570) emits both frame positions directly.
+     * Previous port synthesized cx_B from penetration depth, which gave
+     * wrong signs and caused the XOR rejection check to reject valid
+     * approaching contacts. */
     int32_t cx_A = (int32_t)corner->proj_x;
     int32_t cz_A = (int32_t)corner->proj_z;
-    int32_t cx_B = -(int32_t)corner->proj_x + (int32_t)corner->pen_x;
-    int32_t cz_B = -(int32_t)corner->proj_z + (int32_t)corner->pen_z;
+    int32_t cx_B = (int32_t)corner->own_x;
+    int32_t cz_B = (int32_t)corner->own_z;
 
     /* --- 3. Case split: side vs front/rear --- */
     /* [CONFIRMED @ 0x407ADB]: cardef+0x04 = front-Z extent (positive),
@@ -2023,18 +2024,23 @@ static void apply_collision_response(TD5_Actor *penetrator, TD5_Actor *target,
         }
     }
 
-    if (rejected) {
-        /* Separating contact — no position or velocity update. */
-        TD5_LOG_I(LOG_TAG, "v2v_reject: slot_A=%d slot_B=%d side=%d cxA=%d czA=%d cxB=%d czB=%d imp=%d",
-                  A->slot_index, B->slot_index, is_side_branch, cx_A, cz_A, cx_B, cz_B, impulse);
-        return;
-    }
-
-    /* Apply positional push (A pushed one way, B the opposite). */
+    /* Apply positional push BEFORE rejection check.
+     * [CONFIRMED @ 0x4079C0]: The original applies the ±cos/sin/2 push
+     * unconditionally when a corner penetration is detected. The XOR
+     * sign-rejection only gates the velocity impulse, not the spatial
+     * separation. Without this, rejected contacts produce zero separation
+     * and cars ghost through each other over multiple frames. */
     A->world_pos.x -= push_x;
     A->world_pos.z -= push_z;
     B->world_pos.x += push_x;
     B->world_pos.z += push_z;
+
+    if (rejected) {
+        /* Separating contact — push applied above, but no velocity impulse. */
+        TD5_LOG_I(LOG_TAG, "v2v_reject: slot_A=%d slot_B=%d side=%d cxA=%d czA=%d cxB=%d czB=%d imp=%d push=(%d,%d)",
+                  A->slot_index, B->slot_index, is_side_branch, cx_A, cz_A, cx_B, cz_B, impulse, push_x, push_z);
+        return;
+    }
 
     /* --- 5. TOI rollback (before committing new velocities) --- */
     int32_t toi_frac = 0x100 - impactForce;
