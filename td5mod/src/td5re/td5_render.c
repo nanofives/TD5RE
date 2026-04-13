@@ -1676,7 +1676,7 @@ void td5_render_actors_for_view(int view_index)
         int total_actors = td5_game_get_total_actor_count();
         int drag_mode = g_td5.drag_race_enabled;
         static int s_traffic_diag_count = 0;
-        int traffic_diag_this_frame = (s_traffic_diag_count % 60 == 0) && (s_traffic_diag_count < 600);
+        int traffic_diag_this_frame = (s_traffic_diag_count >= 200 && s_traffic_diag_count < 205);
 
         for (int slot = 0; slot < total_actors; slot++) {
             TD5_Actor *actor = td5_game_get_actor(slot);
@@ -1762,6 +1762,12 @@ void td5_render_actors_for_view(int view_index)
 
             /* Render brake light billboards (0x4011C0) */
             render_vehicle_brake_lights(actor, slot);
+
+            /* Smoke effects (0x40C120 tail): called per visible actor per frame.
+             * SpawnRearWheelSmokeEffects (0x401330) — burnout hardpoint smoke
+             * SpawnVehicleSmokeSprite (0x429CF0) — general exhaust smoke */
+            td5_vfx_spawn_rear_wheel_smoke(actor, view_index);
+            td5_vfx_spawn_smoke(actor);
 
             actor_render_count++;
             actor_meshes_submitted++;

@@ -199,6 +199,10 @@ static void vfx_build_sprite_quad(VfxSpriteQuad *quad,
 static void vfx_spawn_smoke_at_position(TD5_Actor *actor, float wx, float wy,
                                          float wz, int variant, int view_index);
 
+/* Upward velocity for smoke particles. Hardpoint/tire smoke = 0x600 (default).
+ * Exhaust smoke (0x429CF0) = 0x2000. Set before spawn, auto-resets after. */
+static int32_t s_smoke_vel_y = 0x600;
+
 /* ========================================================================
  * Static state -- all VFX subsystem globals
  * ======================================================================== */
@@ -1767,8 +1771,9 @@ static void vfx_spawn_smoke_at_position(TD5_Actor *actor, float wx, float wy,
             memcpy(&actor_vz, ap + 0x1D4, 4);
         }
         PSLOT_WR32(slot, PSLOT_VEL_X, actor_vx);
-        PSLOT_WR32(slot, PSLOT_VEL_Y, 0x600);
+        PSLOT_WR32(slot, PSLOT_VEL_Y, s_smoke_vel_y);
         PSLOT_WR32(slot, PSLOT_VEL_Z, actor_vz);
+        s_smoke_vel_y = 0x600; /* reset to default after use */
 
         /* World position (24.8 fixed) */
         PSLOT_WR32(slot, PSLOT_POS_X, (int32_t)(wx * 256.0f));
@@ -2164,27 +2169,22 @@ void td5_vfx_spawn_rear_wheel_smoke(TD5_Actor *actor, int view_index) {
 
     if ((rand() % 1000) >= abs_speed / 200) return;
 
-    /* Read actor's rotation matrix at +0x120 (3x3 row-major float[9]) */
-    float rot[9];
-    memcpy(rot, ap + 0x120, sizeof(float) * 9);
-
-    /* Spawn from hardpoints 2 (rear-left) and 3 (rear-right) wheels.
-     * Read wheel world positions from +0x298 + wheel * 12. */
+    /* Spawn from hardpoints 2 (rear-left) and 3 (rear-right).
+     * Original reads body corner positions at actor + (hp*3 + 0x24)*4:
+     *   hp=2 → +0xA8, hp=3 → +0xB4  [CONFIRMED @ 0x42A35A] */
     for (int hp = 2; hp <= 3; hp++) {
+        int offset = 0x90 + hp * 12;  /* 0x90 + 2*12 = 0xA8, 0x90 + 3*12 = 0xB4 */
         int32_t wx, wy, wz;
-        vfx_read_wheel_world_pos(actor, hp, &wx, &wy, &wz);
+        memcpy(&wx, ap + offset,     4);
+        memcpy(&wy, ap + offset + 4, 4);
+        memcpy(&wz, ap + offset + 8, 4);
 
-        /* Convert to float */
         float fwx = (float)wx * FP_TO_FLOAT;
         float fwy = (float)wy * FP_TO_FLOAT;
         float fwz = (float)wz * FP_TO_FLOAT;
 
-        /* Apply a small upward offset using the rotation matrix's up vector
-         * (row 1 of the 3x3 matrix at indices 3,4,5) scaled by a hardpoint
-         * height of ~30 units */
-        fwx += rot[3] * 30.0f;
-        fwy += rot[4] * 30.0f;
-        fwz += rot[5] * 30.0f;
+        TD5_LOG_I(LOG_TAG, "rear_smoke: hp=%d pos=(%.1f,%.1f,%.1f) surface=%d",
+                  hp, fwx, fwy, fwz, surface_state);
 
         /* Spawn smoke variant 1 (dark tire smoke) at hardpoint position */
         vfx_spawn_smoke_at_position(actor, fwx, fwy, fwz, 1, view_index);
@@ -2242,6 +2242,11 @@ void td5_vfx_spawn_smoke(TD5_Actor *actor) {
     float mid_y = (float)((corner_rl_y + corner_rr_y) / 2 + 0x7800) * FP_TO_FLOAT;
     float mid_z = (float)(corner_rl_z + corner_rr_z) * 0.5f * FP_TO_FLOAT;
 
+    TD5_LOG_I(LOG_TAG, "exhaust_smoke: pos=(%.1f,%.1f,%.1f) speed=%d",
+              mid_x, mid_y, mid_z, abs_speed);
+
+    /* Exhaust smoke uses higher upward velocity: 0x2000 [CONFIRMED @ 0x429DEE] */
+    s_smoke_vel_y = 0x2000;
     vfx_spawn_smoke_at_position(actor, mid_x, mid_y, mid_z, 0, s_current_view_index);
 }
 
