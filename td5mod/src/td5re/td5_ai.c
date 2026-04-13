@@ -1541,8 +1541,10 @@ void td5_ai_update_track_behavior(int slot) {
                 }
             }
         }
-        /* Shortest-path angular error from raw heading to target */
-        int32_t raw_heading = (yaw >> 8) & 0xFFF;
+        /* Shortest-path angular error from physical heading to target.
+         * yaw_accum stores (angle + 0x800) << 8 [CONFIRMED @ 0x434501],
+         * so strip the 0x800 convention offset to get the actual direction. */
+        int32_t raw_heading = ((yaw >> 8) - 0x800) & 0xFFF;
         int32_t err = ((ta - raw_heading + 0x800) & 0xFFF) - 0x800;
         /* Desired steer = error * 256 (shift back to accumulator scale) */
         int32_t desired_steer = err << 8;
