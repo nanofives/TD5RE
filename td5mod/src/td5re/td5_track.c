@@ -555,6 +555,12 @@ void td5_track_resolve_wall_contacts(TD5_Actor *actor)
      * as "outside" both walls, creating invisible barriers mid-road. */
     if (type != 1 && type != 2 && type != 5) return;
 
+    /* Skip wall checks on branch road spans (index >= ring_length).
+     * Branch spans have geometry that doesn't align with the car's
+     * position when entering from a junction, causing immediate
+     * false-positive wall contacts that push the car backward. */
+    if (span_idx >= g_td5.track_span_ring_length) return;
+
     int lane_count = span_lane_count(sp);
     if (lane_count < 1) lane_count = 1;
 
