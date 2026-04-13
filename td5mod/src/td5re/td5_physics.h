@@ -72,6 +72,7 @@ void td5_physics_state0f_damping(TD5_Actor *actor);
 /* --- Engine / Transmission --- */
 void td5_physics_update_engine_speed(TD5_Actor *actor);
 void td5_physics_auto_gear_select(TD5_Actor *actor);
+void td5_physics_auto_gear_select_no_kick(TD5_Actor *actor);
 int32_t td5_physics_compute_drive_torque(TD5_Actor *actor);
 void td5_physics_apply_steering_torque(TD5_Actor *actor);
 void td5_physics_reverse_throttle_sign(TD5_Actor *actor);
@@ -102,6 +103,7 @@ void td5_physics_rebuild_pose(TD5_Actor *actor);
 void td5_physics_set_dynamics(int mode);  /* 0=arcade, 1=simulation */
 int  td5_physics_get_dynamics(void);      /* returns current mode */
 void td5_physics_set_paused(int paused); /* 1=countdown (RPM only), 0=full sim */
+void td5_physics_set_xz_freeze(int freeze); /* 1=freeze XZ pos (countdown), 0=normal */
 void td5_physics_set_race_slot_state(int slot, int is_human); /* 1=player, 0=AI */
 
 /* Load per-car physics tuning from carparam.dat (268 bytes).

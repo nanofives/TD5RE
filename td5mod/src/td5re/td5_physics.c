@@ -722,6 +722,13 @@ void td5_physics_update_player(TD5_Actor *actor)
          * skipping, drivetrain kick accumulation, and RPM oscillation. */
         if (*((const uint8_t *)actor + 0x378) == 0) {
             td5_physics_reverse_throttle_sign(actor);
+        } else {
+            /* The original only calls auto_gear on the airborne path
+             * [CONFIRMED @ 0x40452D], but the port's contact system rarely
+             * reports airborne state, so the car stays stuck in gear 2.
+             * Call auto_gear on-ground but suppress the drivetrain kick
+             * (which accumulates and causes roll-up when called every tick). */
+            td5_physics_auto_gear_select_no_kick(actor);
         }
 
         if (actor->slot_index == 0 && (actor->frame_counter % 30u) == 0u) {
@@ -1119,6 +1126,13 @@ void td5_physics_update_player(TD5_Actor *actor)
                     + (int64_t)front_long      * cos_s
                     - (int64_t)front_lat_force * sin_s) >> 12;
 
+        if (actor->slot_index == 0 && actor->brake_flag &&
+            (actor->frame_counter % 30u) == 0u) {
+            TD5_LOG_I(LOG_TAG,
+                "FORCE_BRK: fx=%d fz=%d f_long=%d r_long=%d f_lat=%d r_lat=%d vx=%d vz=%d",
+                fx, fz, front_long, rear_long, front_lat_force, rear_lat_force,
+                (int)actor->linear_velocity_x, (int)actor->linear_velocity_z);
+        }
         actor->linear_velocity_x += fx;
         actor->linear_velocity_z += fz;
     }
@@ -3931,6 +3945,47 @@ void td5_physics_auto_gear_select(TD5_Actor *actor)
     }
 }
 
+/* --- On-ground variant of auto_gear_select ---
+ * Same gear logic but WITHOUT the drivetrain kick (wheel_spring_dv writes).
+ * The original only calls auto_gear on airborne frames where kicks are rare.
+ * The port calls it on-ground every tick, so the kick accumulates and
+ * pitches the car up without recovery. */
+void td5_physics_auto_gear_select_no_kick(TD5_Actor *actor)
+{
+    int16_t *phys = get_phys(actor);
+    if (!phys) return;
+
+    int32_t throttle    = (int32_t)actor->encounter_steering_cmd;
+    uint8_t gear_cached = actor->current_gear;
+    int32_t rpm         = actor->engine_speed_accum;
+
+    if (throttle < 0) {
+        actor->current_gear = TD5_GEAR_REVERSE;
+        return;
+    }
+
+    if (gear_cached == TD5_GEAR_REVERSE) {
+        if (throttle <= 0) return;
+        actor->current_gear = TD5_GEAR_FIRST;
+    }
+
+    int32_t up_thresh = (int32_t)PHYS_S(actor, 0x3E + gear_cached * 2);
+
+    if (rpm > up_thresh
+        && gear_cached < 8
+        && actor->longitudinal_speed > 0) {
+        uint8_t new_gear = (uint8_t)(actor->current_gear + 1);
+        actor->current_gear = new_gear;
+        /* No drivetrain kick — on-ground only */
+        return;
+    }
+
+    int32_t dn_thresh = (int32_t)PHYS_S(actor, 0x4E + gear_cached * 2);
+    if (rpm < dn_thresh && gear_cached > TD5_GEAR_FIRST) {
+        actor->current_gear = (uint8_t)(actor->current_gear - 1);
+    }
+}
+
 /* --- ComputeDriveTorqueFromGearCurve (0x42F030) ---
  *
  * Piecewise-linear torque curve interpolation.
@@ -4081,11 +4136,19 @@ static int32_t compute_reverse_gear_torque(TD5_Actor *actor, int32_t speed_in)
         int32_t redline = (int32_t)PHYS_S(actor, 0x72);
         target = u + redline - 1800;         /* 0x708 */
         step = 200;
+    } else if (gear > 2 && throttle >= 1) {
+        /* Higher gears under throttle: maintain RPM proportional to speed
+         * and gear ratio. The original targets RPM=0 here and relies on
+         * airborne UESA ticks to maintain RPM. Since the port rarely goes
+         * airborne and runs auto_gear on-ground, CRGT must maintain RPM
+         * for higher gears or the car oscillates (upshift→RPM dies→downshift). */
+        int32_t gr = (int32_t)PHYS_S(actor, 0x2E + gear * 2);
+        int32_t abs_spd = speed_in < 0 ? -speed_in : speed_in;
+        target = ((abs_spd >> 8) * gr * 0x2D) >> 12;
+        target += 400;
+        step = 200;
     } else {
-        /* All other cases (gear > 2, reverse under throttle, etc.):
-         * target = 0, coast down. [CONFIRMED @ 0x403C80: original targets
-         * RPM=0 for all gears except gear==2 under throttle. RPM in higher
-         * gears is maintained by airborne UESA ticks, not by CRGT.] */
+        /* Reverse or neutral under throttle, or higher gears coasting: target=0. */
         int base = actor->brake_flag ? 400 : 200;
         step = base * 2;
         target = 0;
@@ -4109,6 +4172,12 @@ static int32_t compute_reverse_gear_torque(TD5_Actor *actor, int32_t speed_in)
         }
     }
 
+    if (actor->slot_index == 0 && (actor->frame_counter % 30u) == 0u) {
+        TD5_LOG_I(LOG_TAG,
+            "CRGT: gear=%d rpm=%d->%d target=%d step=%d throttle=%d brake=%d spd_in=%d",
+            gear, engine, new_accum, target, step, throttle,
+            actor->brake_flag, speed_in);
+    }
     actor->engine_speed_accum = new_accum;
     return ret_value;
 }

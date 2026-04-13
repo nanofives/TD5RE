@@ -750,10 +750,11 @@ void td5_input_update_player_control(int slot)
     if (slot == 0) {
         s_control_log_counter++;
         if ((s_control_log_counter % 30u) == 0u) {
-            TD5_LOG_D(LOG_TAG,
-                      "Player control p0: steering=%d throttle=%d brake=%u gear=%u",
+            TD5_LOG_I(LOG_TAG,
+                      "Player control p0: steering=%d throttle=%d brake=%u bits=0x%08X analog_y=%d",
                       (int)s_steering_cmd[0], (int)s_throttle[0],
-                      (unsigned int)s_brake[0], (unsigned int)s_gear[0]);
+                      (unsigned int)s_brake[0], (unsigned int)s_control_bits[0],
+                      (int)((s_control_bits[0] >> 9) & 0x1FF));
         }
     }
 }
