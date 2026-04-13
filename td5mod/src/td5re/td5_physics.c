@@ -546,11 +546,21 @@ void td5_physics_update_vehicle_actor(TD5_Actor *actor)
     if (actor->vehicle_mode == 0) {
         td5_track_resolve_reverse_contacts(actor);
         td5_track_resolve_forward_contacts(actor);
-        /* Lateral wall check — re-enabled now that junction branching works.
-         * The original has no mid-strip lateral walls; containment is
-         * topological via the span walker. This port-specific check adds
-         * road-edge walls for types 1/2/5 only (safe geometry). */
-        td5_track_resolve_wall_contacts(actor);
+        /* Lateral wall check disabled entirely. The original game has NO
+         * lateral walls — containment is topological via the span walker
+         * (cars that drive off the side just run on state-0x0F off-track
+         * damping). Any port-specific lateral wall produces false
+         * positives on narrow geometry, junction approaches, and branch
+         * roads. Forward/reverse boundary contacts above still handle
+         * the global start/end walls from the per-level sentinel table.
+         * [CONFIRMED: original 0x406650 calls only reverse/forward/sub-lane
+         *  extremity handlers — no mid-strip lateral walls exist.]
+         *
+         * Observed issue this fixes: Newcastle (L29) stuck at span 122
+         * with probe-1 RIGHT wall false-positive, angle=1121, d=-11..-30,
+         * oscillating 23+ times. Probe geometry was wider than the road
+         * at that span. */
+        /* td5_track_resolve_wall_contacts(actor); */
     }
 
     /* 9. Update surface_contact_flags for the NEXT tick's dynamics dispatch.
@@ -1145,26 +1155,24 @@ void td5_physics_update_player(TD5_Actor *actor)
      * uses at td5_physics.c:1246-1249, just applied to the 4-wheel player
      * distribution. [CONFIRMED @ 0x00404D10 / 0x00404D30 force-writeback
      * tail of UpdatePlayerVehicleDynamics] */
-    {
-        int32_t fx = ((int64_t)rear_long       * sin_h
-                    + (int64_t)rear_lat_force  * cos_h
-                    + (int64_t)front_long      * sin_s
-                    + (int64_t)front_lat_force * cos_s) >> 12;
-        int32_t fz = ((int64_t)rear_long       * cos_h
-                    - (int64_t)rear_lat_force  * sin_h
-                    + (int64_t)front_long      * cos_s
-                    - (int64_t)front_lat_force * sin_s) >> 12;
+    int32_t player_fx = ((int64_t)rear_long       * sin_h
+                       + (int64_t)rear_lat_force  * cos_h
+                       + (int64_t)front_long      * sin_s
+                       + (int64_t)front_lat_force * cos_s) >> 12;
+    int32_t player_fz = ((int64_t)rear_long       * cos_h
+                       - (int64_t)rear_lat_force  * sin_h
+                       + (int64_t)front_long      * cos_s
+                       - (int64_t)front_lat_force * sin_s) >> 12;
 
-        if (actor->slot_index == 0 && actor->brake_flag &&
-            (actor->frame_counter % 30u) == 0u) {
-            TD5_LOG_I(LOG_TAG,
-                "FORCE_BRK: fx=%d fz=%d f_long=%d r_long=%d f_lat=%d r_lat=%d vx=%d vz=%d",
-                fx, fz, front_long, rear_long, front_lat_force, rear_lat_force,
-                (int)actor->linear_velocity_x, (int)actor->linear_velocity_z);
-        }
-        actor->linear_velocity_x += fx;
-        actor->linear_velocity_z += fz;
+    if (actor->slot_index == 0 && actor->brake_flag &&
+        (actor->frame_counter % 30u) == 0u) {
+        TD5_LOG_I(LOG_TAG,
+            "FORCE_BRK: fx=%d fz=%d f_long=%d r_long=%d f_lat=%d r_lat=%d vx=%d vz=%d",
+            player_fx, player_fz, front_long, rear_long, front_lat_force, rear_lat_force,
+            (int)actor->linear_velocity_x, (int)actor->linear_velocity_z);
     }
+    actor->linear_velocity_x += player_fx;
+    actor->linear_velocity_z += player_fz;
 
     /* --- 14a. Re-project longitudinal/lateral speeds from the POST-force
      * world velocity. The original writes these at the tail of
@@ -1290,8 +1298,11 @@ void td5_physics_update_player(TD5_Actor *actor)
     /* --- 15. ApplySteeringTorqueToWheels --- */
     td5_physics_apply_steering_torque(actor);
 
-    /* --- 16. IntegrateWheelSuspensionTravel --- */
-    td5_physics_integrate_suspension(actor);
+    /* --- 16. IntegrateWheelSuspensionTravel ---
+     * Pass the net world-frame velocity delta applied this frame as the
+     * excitation for the per-wheel spring-damper (matches original at
+     * 0x00404EA2 passing iVar11/iVar36 = fx/fz). */
+    td5_physics_integrate_suspension(actor, player_fx, player_fz);
 
     /* --- 17. ApplyMissingWheelVelocityCorrection --- */
     td5_physics_missing_wheel_correction(actor);
@@ -1593,14 +1604,12 @@ void td5_physics_update_ai(TD5_Actor *actor)
     /* --- 10. World-frame force application [CONFIRMED @ 0x4056C4-0x405762]
      * Front forces use steered heading (cos_s, sin_s).
      * Rear forces use body heading (cos_h, sin_h). */
-    {
-        int32_t fx = ((int64_t)rear_drive * sin_h + (int64_t)rear_lat * cos_h
-                    + (int64_t)front_drive * sin_s + (int64_t)front_lat * cos_s) >> 12;
-        int32_t fz = ((int64_t)rear_drive * cos_h - (int64_t)rear_lat * sin_h
-                    + (int64_t)front_drive * cos_s - (int64_t)front_lat * sin_s) >> 12;
-        actor->linear_velocity_x += fx;
-        actor->linear_velocity_z += fz;
-    }
+    int32_t ai_fx = ((int64_t)rear_drive * sin_h + (int64_t)rear_lat * cos_h
+                   + (int64_t)front_drive * sin_s + (int64_t)front_lat * cos_s) >> 12;
+    int32_t ai_fz = ((int64_t)rear_drive * cos_h - (int64_t)rear_lat * sin_h
+                   + (int64_t)front_drive * cos_s - (int64_t)front_lat * sin_s) >> 12;
+    actor->linear_velocity_x += ai_fx;
+    actor->linear_velocity_z += ai_fz;
 
     /* --- 11. Slip yaw damping [CONFIRMED @ 0x40578E-0x4057C8] --- */
     if (actor->front_axle_slip_excess > 0) {
@@ -1626,8 +1635,10 @@ void td5_physics_update_ai(TD5_Actor *actor)
         }
     }
 
-    /* --- 13. Suspension integration --- */
-    td5_physics_integrate_suspension(actor);
+    /* --- 13. Suspension integration ---
+     * Pass the net world-frame velocity delta as the spring excitation
+     * (matches original at 0x00404EA2 passing iVar11/iVar36). */
+    td5_physics_integrate_suspension(actor, ai_fx, ai_fz);
 
     /* --- 14. Tire slip accumulation [CONFIRMED @ 0x405768-0x40577B]
      * Original uses += with lateral/longitudinal speed, not assignment with slip excess */
@@ -2595,95 +2606,132 @@ static void resolve_collision_pair(TD5_Actor *a, TD5_Actor *b, int idx_a, int id
 }
 
 /* ========================================================================
- * Suspension: IntegrateWheelSuspensionTravel (0x403A20)
+ * Suspension: IntegrateWheelSuspensionTravel (0x00403A20)
  *
- * Spring-damper per wheel (4) + central chassis pass.
- * Tuning offsets: 0x5E=damping, 0x60=spring, 0x62=feedback,
- *                 0x64=travel_limit, 0x66=response_factor.
+ * Per-wheel spring-damper. Projects the world-frame net acceleration
+ * applied this frame (accel_x, accel_z — the fx/fz written into
+ * linear_velocity just before this call) onto the lever arm from the
+ * chassis centre to each wheel's high-res world contact position. That
+ * scalar projection is the external excitation for the spring.
+ *
+ *   arm.x = wheel_world_positions_hires[i].x - (world_pos.x >> 8)
+ *   arm.z = wheel_world_positions_hires[i].z - (world_pos.z >> 8)
+ *   input = arm.x * accel_x + arm.z * accel_z        (world-frame lever torque)
+ *   spring_term = ((input >> 8) * cardef+0x62) >> 8
+ *   load_term   = (wheel_load_accum[i] * cardef+0x66) >> 8
+ *   new_vel = wheel_spring_dv[i] + spring_term + load_term
+ *   new_vel -= (wheel_suspension_pos[i] * cardef+0x5E) >> 8   // pos-damping (restoring)
+ *   new_vel -= (new_vel                * cardef+0x60) >> 8    // vel-damping
+ *   if |new_vel| < 0x10: new_vel = 0                          // deadzone
+ *   wheel_spring_dv[i] = new_vel
+ *   wheel_suspension_pos[i] += new_vel
+ *   clamp to +/- cardef+0x64   (zeros vel on hit)
+ *
+ * The post-loop central block repeats the same formula once with the
+ * front-axle contact midpoint for center_suspension_pos/vel
+ * (+0x2CC/+0x2D0), using 2x the per-wheel clamp and NO load-accum term
+ * and NO deadzone.
+ *
+ * NOTE ON FIELD NAMES (from re/include/td5_actor_struct.h — confirmed):
+ *   +0x2DC wheel_suspension_pos[4]  -- spring position (state)
+ *   +0x2EC wheel_spring_dv[4]       -- spring velocity (state)  (misnomer)
+ *   +0x2FC wheel_load_accum[4]      -- external force feed      (misnomer)
+ *
+ * The pre-2026-04-13 port of this function read/wrote the last two
+ * swapped AND ignored the world-frame acceleration input entirely, so
+ * it produced no dynamic bounce response. Fixed here.
  * ======================================================================== */
 
-void td5_physics_integrate_suspension(TD5_Actor *actor)
+void td5_physics_integrate_suspension(TD5_Actor *actor, int32_t accel_x, int32_t accel_z)
 {
     int16_t *phys = get_phys(actor);
     if (!phys) return;
 
-    int32_t damping   = (int32_t)PHYS_S(actor, 0x5E);
-    int32_t spring_k  = (int32_t)PHYS_S(actor, 0x60);
-    int32_t feedback  = (int32_t)PHYS_S(actor, 0x62);
-    int32_t limit     = (int32_t)PHYS_S(actor, 0x64);
-    int32_t response  = (int32_t)PHYS_S(actor, 0x66);
+    /* cardef constants -- see function header.
+     * Names chosen to match the original's semantic use. */
+    const int32_t k_pos_damp   = (int32_t)PHYS_S(actor, 0x5E);  /* position-proportional damping (restoring) */
+    const int32_t k_vel_damp   = (int32_t)PHYS_S(actor, 0x60);  /* velocity-proportional damping */
+    const int32_t k_spring     = (int32_t)PHYS_S(actor, 0x62);  /* spring coefficient (multiplies lever proj) */
+    const int32_t k_travel_lim = (int32_t)PHYS_S(actor, 0x64);  /* per-wheel +/- travel clamp */
+    const int32_t k_load_scale = (int32_t)PHYS_S(actor, 0x66);  /* multiplier on wheel_load_accum */
 
-    /* Per-wheel spring-damper.
-     *
-     * Original (0x403A20) reads XZ projections as force input, NOT the
-     * wheel_spring_dv Y values. The source port's previous approach of
-     * reading force_accum created positive pitch feedback. Until the
-     * original's XZ projection logic is properly decompiled, use a stable
-     * passive spring-damper: restoring force from position (spring_k)
-     * and velocity damping (damping) with no external force input.
-     *
-     * The wheel_spring_dv[i] (ground contact force from refresh_wheel_contacts)
-     * drives the external excitation via feedback scaling. */
+    const int32_t wpx_scaled = actor->world_pos.x >> 8;  /* signed fixed-point shift w/ round-to-zero */
+    const int32_t wpz_scaled = actor->world_pos.z >> 8;
+
+    /* ---- Per-wheel pass (4 wheels) ---- */
     for (int i = 0; i < 4; i++) {
-        int32_t pos = actor->wheel_suspension_pos[i];
-        int32_t vel = actor->wheel_load_accum[i];
-        int32_t force = actor->wheel_spring_dv[i];
+        /* Lever arm from chassis centre to this wheel's contact position,
+         * in world units (wheel_world_positions_hires is in FP with the
+         * same scale as world_pos>>8 after the bias). Exactly matches
+         * original: `(piVar10[X] - (world_pos.X >> 8)) * accel_X`. */
+        const int32_t arm_x = actor->wheel_world_positions_hires[i].x - wpx_scaled;
+        const int32_t arm_z = actor->wheel_world_positions_hires[i].z - wpz_scaled;
 
-        /* External excitation: ground contact distance scaled by feedback */
-        int32_t drive = (force * feedback) >> 8;
+        int32_t proj = arm_x * accel_x + arm_z * accel_z;
+        int32_t spring_term = (proj >> 8) * k_spring;
+        int32_t load_term   = actor->wheel_load_accum[i] * k_load_scale;
 
-        /* Spring-damper: accel = drive - spring*pos - damp*vel */
-        int32_t accel = drive;
-        accel -= (pos * spring_k) >> 8;
-        accel -= (vel * damping) >> 8;
+        int32_t new_vel = (spring_term >> 8)
+                        + (load_term   >> 8)
+                        + actor->wheel_spring_dv[i];
 
-        /* Dead zone */
-        if (accel > -16 && accel < 16)
-            accel = 0;
+        int32_t pos_damp = actor->wheel_suspension_pos[i] * k_pos_damp;
+        int32_t vel_damp = new_vel * k_vel_damp;
+        new_vel = new_vel - (pos_damp >> 8) - (vel_damp >> 8);
 
-        vel += accel;
-        pos += vel;
+        /* Deadzone: suppresses micro-oscillation at rest */
+        if (new_vel > -0x10 && new_vel < 0x10)
+            new_vel = 0;
 
-        /* Clamp to travel limits */
-        if (pos > limit) {
-            pos = limit;
-            vel = 0;
+        actor->wheel_spring_dv[i] = new_vel;
+        int32_t new_pos = actor->wheel_suspension_pos[i] + new_vel;
+        actor->wheel_suspension_pos[i] = new_pos;
+
+        if (new_pos > k_travel_lim) {
+            actor->wheel_suspension_pos[i] = k_travel_lim;
+            actor->wheel_spring_dv[i] = 0;
+        } else if (new_pos < -k_travel_lim) {
+            actor->wheel_suspension_pos[i] = -k_travel_lim;
+            actor->wheel_spring_dv[i] = 0;
         }
-        if (pos < -limit) {
-            pos = -limit;
-            vel = 0;
-        }
-
-        actor->wheel_suspension_pos[i] = pos;
-        actor->wheel_load_accum[i] = vel;
     }
 
-    /* Central chassis suspension (averaged from wheel positions) */
+    /* ---- Central chassis pass ----
+     * The original averages the front-axle contact (wheels 0+1) x and z
+     * to derive the lever arm for the body-level suspension. No load
+     * term, no deadzone; same spring/damping constants; travel clamp
+     * is 2x the per-wheel limit (hardcoded 0x4000 when limit is 0x2000
+     * in the original decomp — we use *2 so it tracks tuning data). */
     {
-        int32_t avg_pos = 0;
-        for (int i = 0; i < 4; i++)
-            avg_pos += actor->wheel_suspension_pos[i];
-        avg_pos >>= 2;
+        const int32_t front_mid_x =
+            (actor->wheel_world_positions_hires[1].x + actor->wheel_world_positions_hires[0].x) / 2;
+        const int32_t front_mid_z =
+            (actor->wheel_world_positions_hires[1].z + actor->wheel_world_positions_hires[0].z) / 2;
 
-        int32_t cpos = actor->center_suspension_pos;
-        int32_t cvel = actor->center_suspension_vel;
+        const int32_t arm_x = front_mid_x - wpx_scaled;
+        const int32_t arm_z = front_mid_z - wpz_scaled;
 
-        int32_t target = ((avg_pos - cpos) * feedback) >> 8;
-        target += (cvel * response) >> 8;
-        int32_t accel = (target * spring_k) >> 8;
-        accel += cvel;
-        accel -= (cpos * damping) >> 8;
+        int32_t proj = arm_x * accel_x + arm_z * accel_z;
+        int32_t spring_term = (proj >> 8) * k_spring;
 
-        if (accel > -16 && accel < 16)
-            accel = 0;
+        int32_t new_vel = (spring_term >> 8) + actor->center_suspension_vel;
 
-        cvel = accel;
-        cpos += accel;
-        if (cpos > limit) { cpos = limit; cvel = 0; }
-        if (cpos < -limit) { cpos = -limit; cvel = 0; }
+        int32_t pos_damp = actor->center_suspension_pos * k_pos_damp;
+        int32_t vel_damp = new_vel * k_vel_damp;
+        new_vel = new_vel - (pos_damp >> 8) - (vel_damp >> 8);
 
-        actor->center_suspension_pos = cpos;
-        actor->center_suspension_vel = cvel;
+        int32_t new_pos = actor->center_suspension_pos + new_vel;
+        actor->center_suspension_pos = new_pos;
+        actor->center_suspension_vel = new_vel;
+
+        const int32_t center_lim = k_travel_lim * 2;
+        if (new_pos > center_lim) {
+            actor->center_suspension_pos = center_lim;
+            actor->center_suspension_vel = 0;
+        } else if (new_pos < -center_lim) {
+            actor->center_suspension_pos = -center_lim;
+            actor->center_suspension_vel = 0;
+        }
     }
 }
 
@@ -3946,16 +3994,12 @@ void td5_physics_state0f_damping(TD5_Actor *actor)
     /* Keep engine alive */
     update_engine_speed_smoothed(actor);
 
-    /* Integrate wheel suspension with zero input */
-    /* Temporarily zero force accumulators */
-    int32_t saved_forces[4];
-    for (int i = 0; i < 4; i++) {
-        saved_forces[i] = actor->wheel_spring_dv[i];
-        actor->wheel_spring_dv[i] = 0;
-    }
-    td5_physics_integrate_suspension(actor);
-    for (int i = 0; i < 4; i++)
-        actor->wheel_spring_dv[i] = saved_forces[i];
+    /* Integrate wheel suspension with zero chassis-motion excitation.
+     * Matches original 0x00403DA9 call: IntegrateWheelSuspensionTravel(
+     *   actor, cardef, 0, 0). The wheel_load_accum term still drives
+     *  the spring; previous port hack of clearing wheel_spring_dv
+     * (the velocity state!) was incorrect — removed. */
+    td5_physics_integrate_suspension(actor, 0, 0);
 
     /* Zero surface contact flags and slip [CONFIRMED @ 0x403DC4-0x403DD0] */
     actor->surface_contact_flags = 0;
