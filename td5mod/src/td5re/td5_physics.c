@@ -3743,8 +3743,10 @@ void td5_physics_state0f_damping(TD5_Actor *actor)
     for (int i = 0; i < 4; i++)
         actor->wheel_spring_dv[i] = saved_forces[i];
 
-    /* Zero tire screech */
-    actor->surface_contact_flags &= ~1;
+    /* Zero surface contact flags and slip [CONFIRMED @ 0x403DC4-0x403DD0] */
+    actor->surface_contact_flags = 0;
+    actor->front_axle_slip_excess = 0;
+    actor->rear_axle_slip_excess = 0;
 
     /* Compute body-frame longitudinal speed */
     int32_t heading = (actor->euler_accum.yaw >> 8) & 0xFFF;
@@ -3752,29 +3754,32 @@ void td5_physics_state0f_damping(TD5_Actor *actor)
     int32_t sin_h = sin_fixed12(heading);
     int32_t v_long = (actor->linear_velocity_x * sin_h +
                       actor->linear_velocity_z * cos_h) >> 12;
+    int32_t v_lat  = (actor->linear_velocity_x * cos_h -
+                      actor->linear_velocity_z * sin_h) >> 12;
 
-    int32_t pitch = (actor->euler_accum.pitch >> 8) & 0xFFF;
-    if (pitch > 0x800) pitch -= 0x1000;
+    int32_t roll = (actor->euler_accum.roll >> 8) & 0xFFF;
+    if (roll > 0x800) roll -= 0x1000;
 
-    /* If speed is low and pitch is small: apply 1/4 of speed to yaw */
+    /* Roll correction: if low speed and small roll, apply speed/4 to roll
+     * angular velocity. This naturally steers the car back on-road.
+     * [CONFIRMED @ 0x403DF8-0x403E58] */
     int32_t abs_v = v_long < 0 ? -v_long : v_long;
-    int32_t abs_p = pitch < 0 ? -pitch : pitch;
-    if (abs_v < 33 && abs_p < 127) {
-        actor->angular_velocity_yaw += v_long >> 2;
+    int32_t abs_r = roll < 0 ? -roll : roll;
+    if (abs_v < 0x21 && abs_r < 0x7F) {
+        actor->angular_velocity_roll += v_long >> 2;
     }
 
-    /* Decay angular velocities by 1/16 per frame */
+    /* Decay roll and pitch angular velocities by 1/16 per frame.
+     * [CONFIRMED @ 0x403E58-0x403EA4]
+     * NOTE: yaw and linear velocities are NOT decayed — the car maintains
+     * momentum while airborne. Previous port code incorrectly decayed all
+     * three, causing airborne cars to lose speed. */
     actor->angular_velocity_roll  -= actor->angular_velocity_roll >> 4;
-    actor->angular_velocity_yaw   -= actor->angular_velocity_yaw >> 4;
     actor->angular_velocity_pitch -= actor->angular_velocity_pitch >> 4;
 
-    /* Decay linear velocities by 1/16 per frame */
-    actor->linear_velocity_x -= actor->linear_velocity_x >> 4;
-    actor->linear_velocity_z -= actor->linear_velocity_z >> 4;
-
-    /* Accumulate slip counters */
-    actor->accumulated_tire_slip_x += (int16_t)(actor->angular_velocity_yaw >> 4);
-    actor->accumulated_tire_slip_z += (int16_t)(actor->angular_velocity_pitch >> 4);
+    /* Accumulate slip from body-frame speeds [CONFIRMED @ 0x403E74-0x403E8C] */
+    actor->accumulated_tire_slip_x += (int16_t)(v_lat >> 8);
+    actor->accumulated_tire_slip_z += (int16_t)(v_long >> 8);
 }
 
 /* ========================================================================

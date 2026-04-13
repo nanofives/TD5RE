@@ -1695,14 +1695,14 @@ static uint8_t compute_boundary_bits(int span_idx, int sub_lane,
     rx1 = ox + ((int32_t)vr1->x << 8);
     rz1 = oz + ((int32_t)vr1->z << 8);
 
-    /* Select edge mask based on sub-lane position within span */
-    if (sub_lane == 0) {
+    /* Select edge mask based on sub-lane position within span.
+     * For single-lane spans (sub_lane is both first AND last), AND both
+     * masks together. [CONFIRMED @ 0x444188-0x4441A2] */
+    edge_mask = 0x0F;
+    if (sub_lane == 0)
         edge_mask = s_edge_mask_first[sp->span_type];
-    } else if (sub_lane >= lane_count - 1) {
-        edge_mask = s_edge_mask_last[sp->span_type];
-    } else {
-        edge_mask = 0x0F; /* all 4 edges for interior sub-lanes */
-    }
+    if (sub_lane >= lane_count - 1)
+        edge_mask &= s_edge_mask_last[sp->span_type];
 
     /* Test each edge. Cross product sign > 0 means outside. */
 
