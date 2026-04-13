@@ -738,6 +738,11 @@ void td5_input_update_player_control(int slot)
             *(int16_t *)(a + 0x33E) = s_throttle[slot];
             /* 0x36D: brake_flag (byte) */
             a[0x36D] = s_brake[slot];
+            /* 0x378: auto gearbox flag [CONFIRMED @ original input path]
+             * Original: actor+0x378 = ~(bits >> 28) & 1
+             * bit 28 clear = normal driving → auto_gearbox = 1
+             * bit 28 set   = stunned       → auto_gearbox = 0 */
+            a[0x378] = (uint8_t)((~(bits >> 28)) & 1);
         }
     }
 

@@ -702,16 +702,12 @@ void td5_physics_update_player(TD5_Actor *actor)
         if (*((const uint8_t *)actor + 0x378) == 0) {
             td5_physics_reverse_throttle_sign(actor);
         } else {
-            /* Run UESA with ACTUAL velocity so auto_gear gets correct RPM.
-             * On the ground path, longitudinal_speed holds CRGT's pseudo-speed
-             * (RPM-encoded), not the real velocity. UESA applied to pseudo-speed
-             * just echoes current RPM (circular). Feed the actual body-frame
-             * v_long so UESA computes speed-proportional RPM → enables upshifts.
-             * Restore pseudo-speed afterward since CRGT overwrites it later. */
-            int32_t saved_long = actor->longitudinal_speed;
-            actor->longitudinal_speed = v_long;  /* actual body-frame velocity */
-            td5_physics_update_engine_speed(actor);
-            actor->longitudinal_speed = saved_long;
+            /* On-ground auto gear: the original only runs this on airborne
+             * frames [CONFIRMED @ 0x4044F9], relying on CRGT's RPM from the
+             * previous tick (~3200 for gear 2) being above the upshift
+             * threshold (2600). Do NOT call UESA here — its target formula
+             * produces ~410 RPM which prevents upshifts entirely. CRGT
+             * (post-force, line ~1140) handles on-ground RPM slew. */
             td5_physics_auto_gear_select(actor);
         }
 
@@ -4269,11 +4265,10 @@ void td5_physics_init_vehicle_runtime(void)
         memset(actor->wheel_load_accum, 0, sizeof(actor->wheel_load_accum));
         memset(actor->wheel_spring_dv, 0, sizeof(actor->wheel_spring_dv));
         actor->slot_index = (uint8_t)slot;
-        *((uint8_t *)actor + 0x378) = 1;  /* auto gearbox [CONFIRMED @ 0x42F140] */
+        actor->throttle_input_active = 1;  /* auto gearbox [CONFIRMED @ 0x42F140] */
         actor->frame_counter = 0;
         actor->track_contact_flag = 0;
         actor->surface_contact_flags = 0;
-        actor->throttle_input_active = 0;
         actor->grip_reduction = 0xFF;
         actor->prev_race_position = 0;
         actor->race_position = (uint8_t)slot;
