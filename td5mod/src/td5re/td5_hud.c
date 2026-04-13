@@ -831,12 +831,13 @@ void td5_hud_init_font_atlas(void)
             }
         }
 
-        /* GEARNUMBERS: labels N,1-5,R,_ at atlas (128,128) 128×16 — 16px per slot.
-         * Gear UV: u = atlas_x + gear_index * 16. */
+        /* GEARNUMBERS: labels R,N,1-6 at atlas (128,128) 128×16 — 16px per slot.
+         * Real game atlas order matches gear byte: 0=R, 1=N, 2=1, 3=2, ...
+         * Gear UV: u = atlas_x + gear_byte * 16. */
         {
             TD5_AtlasEntry *gn_entry = td5_asset_find_atlas_entry(NULL, "GEARNUMBERS");
             if (gn_entry && gn_entry->width > 0) {
-                static const char k_gear_chars[8] = {'N','1','2','3','4','5','R',' '};
+                static const char k_gear_chars[8] = {'R','N','1','2','3','4','5','6'};
                 BITMAPINFO gn_bmi;
                 memset(&gn_bmi, 0, sizeof(gn_bmi));
                 gn_bmi.bmiHeader.biSize        = sizeof(BITMAPINFOHEADER);
@@ -1949,22 +1950,11 @@ void td5_hud_render_overlays(float dt)
             td5_render_build_sprite_quad((int *)&needle_params);
 
             /* Update gear indicator UV from GEARNUMBERS atlas (linear strip,
-             * 8 slots × 16px wide). Atlas layout: N(0),1(1),2(2),3(3),4(4),5(5),R(6),_(7).
-             * Gear bytes: 0=reverse, 1=neutral, 2=1st, 3=2nd, ... 7=6th.
-             * Map: gear 0→atlas 6 (R), gear 1→atlas 0 (N), gear N→atlas N-1 (display gear). */
+             * 8 slots × 16px wide). Real atlas order matches gear byte:
+             * 0=R, 1=N, 2=1st, 3=2nd, 4=3rd, 5=4th, 6=5th, 7=6th.
+             * No remapping needed — atlas_idx == gear byte. */
             uint8_t gear = actor_gear(actor_slot);
-            uint8_t atlas_idx;
-            if (gear == 0)      atlas_idx = 6;  /* reverse → "R" */
-            else if (gear == 1) atlas_idx = 0;  /* neutral → "N" */
-            else                atlas_idx = gear - 1;  /* 2→"1", 3→"2", ..., 7→"6" */
-            /* Diagnostic: log unexpected gear=1 (neutral) if it ever occurs */
-            if (gear == 1) {
-                static int s_gear1_logged = 0;
-                if (!s_gear1_logged) {
-                    TD5_LOG_W(LOG_TAG, "HUD gear=1 (neutral) detected — unexpected, slot=%d", actor_slot);
-                    s_gear1_logged = 1;
-                }
-            }
+            uint8_t atlas_idx = gear & 7;
             {
                 float gu = (float)atlas_idx * 16.0f + (float)s_gearnumbers_atlas->atlas_x;
                 float gv = (float)s_gearnumbers_atlas->atlas_y;
