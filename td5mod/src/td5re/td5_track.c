@@ -1521,28 +1521,37 @@ int td5_track_load_strip(const void *data, size_t size)
 /**
  * BindTrackStripRuntimePointers (0x444070)
  *
- * Patches sentinel records at the first and last span:
- *   - First span: type = 9 (SENTINEL_START), backward_link = span_count - 1
- *   - Last span:  type = 10 (SENTINEL_END), link at +0x10 cleared to 0
+ * Patches sentinel records at the first and last MAIN ROAD span:
+ *   - First span: type = 9 (SENTINEL_START), backward_link = ring_length - 1
+ *   - Last main road span: type = 10 (SENTINEL_END), link at +0x10 cleared
+ *
+ * Uses ring_length (main road count) — NOT s_span_count (total incl branches).
+ * The original reads DAT_004c3d90 which is the ring length.
+ * Branch spans (>= ring_length) keep their original types (junction links
+ * back to main road). [CONFIRMED @ 0x444070]
  */
 void td5_track_bind_runtime_pointers(void)
 {
     TD5_StripSpan *first, *last;
+    int ring = g_td5.track_span_ring_length;
 
-    if (!s_span_array || s_span_count < 2)
+    if (!s_span_array || ring < 2)
         return;
 
     first = &s_span_array[0];
-    last  = &s_span_array[s_span_count - 1];
+    last  = &s_span_array[ring - 1];
 
-    /* Patch first span: type = SENTINEL_START, backward link = last span */
+    /* Patch first span: type = SENTINEL_START, backward link = last main road span */
     first->span_type = 9;  /* TD5_SPAN_SENTINEL_START */
-    first->link_prev = (int16_t)(s_span_count - 1);
+    first->link_prev = (int16_t)(ring - 1);
 
-    /* Patch last span: type = SENTINEL_END, clear forward link area */
+    /* Patch last main road span: type = SENTINEL_END, clear forward link area */
     last->span_type = 10;  /* TD5_SPAN_SENTINEL_END */
     /* The original clears the int32 at +0x10 (origin_y). */
     last->origin_y = 0;
+
+    TD5_LOG_I(LOG_TAG, "bind_runtime: sentinels at span[0]=type9, span[%d]=type10 (ring=%d total=%d)",
+              ring - 1, ring, s_span_count);
 }
 
 /* ========================================================================
@@ -4222,7 +4231,9 @@ void *td5_track_get_display_list(int span_index)
             if (off != 0)
                 return s_models_blob + off;
         }
-        return NULL;
+        /* Don't return NULL here — branch spans (>= ring_length) may have
+         * dl_index outside the MODELS.DAT range. Fall through to STRIP.DAT
+         * fallback so branch road geometry is still visible. */
     }
 
     /* Fallback: generated strip display lists from STRIP.DAT */

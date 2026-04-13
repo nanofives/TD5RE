@@ -1719,39 +1719,43 @@ void td5_physics_update_traffic(TD5_Actor *actor)
 
 static void apply_damped_suspension_force(TD5_Actor *actor, int32_t lateral, int32_t longitudinal)
 {
-    /* Roll axis: use center_suspension_pos/vel as roll state */
-    int32_t roll_pos = actor->center_suspension_pos;
-    int32_t roll_vel = actor->center_suspension_vel;
+    /* First axis (lateral-driven): wheel_suspension_pos[0] (+0x2DC) / wheel_spring_dv[0] (+0x2EC)
+     * [CONFIRMED @ 0x4437C0-0x443838] */
+    int32_t axis0_pos = actor->wheel_suspension_pos[0];
+    int32_t axis0_vel = actor->wheel_spring_dv[0];
 
-    roll_vel += (lateral * 0x80) >> 8;           /* drive force */
-    roll_vel += (roll_vel * -0x20) >> 8;          /* velocity damping */
-    roll_vel -= (roll_pos * 0x20) >> 8;           /* spring force */
-    roll_pos += roll_vel;
+    axis0_vel += (lateral * 0x80) >> 8;           /* drive force */
+    axis0_vel += (axis0_vel * -0x20) >> 8;        /* velocity damping */
+    axis0_vel -= (axis0_pos * 0x20) >> 8;         /* spring force */
+    axis0_pos += axis0_vel;
 
-    if (roll_pos > 0x2000) roll_pos = 0x2000;
-    if (roll_pos < -0x2000) roll_pos = -0x2000;
+    if (axis0_pos > 0x2000) axis0_pos = 0x2000;
+    if (axis0_pos < -0x2000) axis0_pos = -0x2000;
 
-    actor->center_suspension_pos = roll_pos;
-    actor->center_suspension_vel = roll_vel;
+    actor->wheel_suspension_pos[0] = axis0_pos;
+    actor->wheel_spring_dv[0] = axis0_vel;
 
-    /* Pitch axis: use wheel_suspension_pos[0]/vel[0] as pitch state */
-    int32_t pitch_pos = actor->wheel_suspension_pos[0];
-    int32_t pitch_vel = actor->wheel_load_accum[0];
+    /* Second axis (longitudinal-driven): wheel_suspension_pos[1] (+0x2E0) / wheel_spring_dv[1] (+0x2F0)
+     * [CONFIRMED @ 0x443838-0x4438EC] */
+    int32_t axis1_pos = actor->wheel_suspension_pos[1];
+    int32_t axis1_vel = actor->wheel_spring_dv[1];
 
-    pitch_vel += (longitudinal * 0x80) >> 8;
-    pitch_vel += (pitch_vel * -0x20) >> 8;
-    pitch_vel -= (pitch_pos * 0x20) >> 8;
-    pitch_pos += pitch_vel;
+    axis1_vel += (longitudinal * 0x80) >> 8;
+    axis1_vel += (axis1_vel * -0x20) >> 8;
+    axis1_vel -= (axis1_pos * 0x20) >> 8;
+    axis1_pos += axis1_vel;
 
-    if (pitch_pos > 0x4000) pitch_pos = 0x4000;
-    if (pitch_pos < -0x4000) pitch_pos = -0x4000;
+    if (axis1_pos > 0x4000) axis1_pos = 0x4000;
+    if (axis1_pos < -0x4000) axis1_pos = -0x4000;
 
-    actor->wheel_suspension_pos[0] = pitch_pos;
-    actor->wheel_load_accum[0] = pitch_vel;
+    actor->wheel_suspension_pos[1] = axis1_pos;
+    actor->wheel_spring_dv[1] = axis1_vel;
 
-    /* Feed into angular velocity for visual tilt */
-    actor->angular_velocity_roll  += (roll_pos >> 6);
-    actor->angular_velocity_pitch += (pitch_pos >> 6);
+    /* Original does NOT feed suspension into angular_velocity.
+     * [CONFIRMED @ 0x4437C0-0x4438EC: writes only to +0x2DC/+0x2EC/+0x2E0/+0x2F0,
+     *  never to angular_velocity_roll/pitch.]
+     * Roll/pitch display angles are computed from surface normal + suspension
+     * correction in UpdateTrafficVehiclePose, not from euler accumulators. */
 }
 
 /* ========================================================================
@@ -2874,43 +2878,80 @@ static void integrate_traffic_pose(TD5_Actor *actor)
     actor->world_pos.x += actor->linear_velocity_x;
     actor->world_pos.z += actor->linear_velocity_z;
 
-    /* 2. Integrate angular velocity into euler accumulators */
-    actor->euler_accum.roll  += actor->angular_velocity_roll;
-    actor->euler_accum.yaw   += actor->angular_velocity_yaw;
-    actor->euler_accum.pitch += actor->angular_velocity_pitch;
+    /* 2. Integrate yaw ONLY from angular velocity.
+     * [CONFIRMED @ 0x443ED0: original only integrates yaw euler accum for traffic.
+     *  Roll/pitch display angles come from surface normal, not accumulators.] */
+    actor->euler_accum.yaw += actor->angular_velocity_yaw;
 
     /* 3. Update chassis track position from new world XZ.
      * [CONFIRMED @ 0x443D40: UpdateTrafficVehiclePose calls UpdateActorTrackPosition] */
     {
-        int16_t prev_span = actor->track_span_raw;
         td5_track_update_actor_position(actor);
 
         int max_span = td5_track_get_span_count();
         if (max_span > 0 && actor->track_span_raw >= (uint16_t)max_span)
             actor->track_span_raw = (uint16_t)(max_span - 1);
-        (void)prev_span;
     }
 
-    /* 4. Set Y absolutely from barycentric track contact height.
+    /* 4. Set Y from barycentric track contact height + car height offset.
      * [CONFIRMED @ 0x443D58 + 0x445A1C: ComputeActorTrackContactNormalExtended
-     *  writes world_pos_y = barycentric_height + origin_y * 0x100] */
+     *  writes world_pos_y = barycentric_height + origin_y * 0x100]
+     * [CONFIRMED @ 0x443D7C-0x443D8E: adds *(int16_t*)(car_definition + 0x86) << 8
+     *  to world_pos_y after contact height — lifts car above track surface] */
     {
         int span  = (int)actor->track_span_raw;
         int lane  = (int)actor->track_sub_lane_index;
-        int32_t ground_y = td5_track_compute_contact_height(
-            span, lane, actor->world_pos.x, actor->world_pos.z);
+        int16_t surface_normal[3] = {0, 1, 0};  /* default: flat up */
+        int32_t ground_y = td5_track_compute_contact_height_with_normal(
+            span, lane, actor->world_pos.x, actor->world_pos.z, surface_normal);
+
+        /* Add car height offset: signed int16 at car_definition + 0x86, shifted left 8.
+         * For traffic, this is min_y of the mesh (negative), so <<8 produces a
+         * negative value that lowers the body center toward the wheels. */
+        if (actor->car_definition_ptr) {
+            int32_t height_offset = (int32_t)CDEF_S(actor, 0x86) << 8;
+            ground_y += height_offset;
+        }
+
         actor->world_pos.y = ground_y;
+
+        /* 5. Compute roll/pitch display angles from surface normal + suspension.
+         * [CONFIRMED @ 0x443E00-0x443EC4: UpdateTrafficVehiclePose computes
+         *  roll/pitch from surface normal rotated by yaw, with suspension correction.
+         *  Roll  = AngleFromVector12(-rotated_z, -normal_y) - (susp[1] >> 8)
+         *  Pitch = AngleFromVector12( rotated_x,  mag_xz)  + (susp[0] >> 8)
+         *  where susp[0] = wheel_suspension_pos[0] (lateral-driven axis)
+         *        susp[1] = wheel_suspension_pos[1] (longitudinal-driven axis)] */
+        int32_t nx = (int32_t)surface_normal[0];
+        int32_t ny = (int32_t)surface_normal[1];
+        int32_t nz = (int32_t)surface_normal[2];
+
+        /* Rotate normal XZ by yaw */
+        int32_t yaw12 = (actor->euler_accum.yaw >> 8) & 0xFFF;
+        int32_t cy = cos_fixed12(yaw12);
+        int32_t sy = sin_fixed12(yaw12);
+        int32_t rotated_x = (nx * cy - nz * sy) >> 12;
+        int32_t rotated_z = (nx * sy + nz * cy) >> 12;
+
+        /* Roll from surface normal + longitudinal suspension correction */
+        int32_t roll_from_normal = atan2_fixed12(-rotated_z, -ny);
+        int32_t susp_roll_corr = actor->wheel_suspension_pos[1] >> 8;
+        actor->display_angles.roll = (int16_t)((roll_from_normal - susp_roll_corr) & 0xFFF);
+
+        /* Pitch from surface normal + lateral suspension correction */
+        int32_t mag_xz = td5_isqrt(nx * nx + ny * ny);
+        int32_t pitch_from_normal = atan2_fixed12(rotated_x, mag_xz);
+        int32_t susp_pitch_corr = actor->wheel_suspension_pos[0] >> 8;
+        actor->display_angles.pitch = (int16_t)((pitch_from_normal + susp_pitch_corr) & 0xFFF);
     }
+
+    /* Yaw from euler accumulator (only axis using accumulators for traffic) */
+    actor->display_angles.yaw = (int16_t)((actor->euler_accum.yaw >> 8) & 0xFFF);
 
     /* Keep vertical dynamics zeroed — traffic has no gravity or suspension */
     actor->linear_velocity_y = 0;
 
-    /* 5. Convert accumulators to 12-bit display angles */
-    actor->display_angles.roll  = (int16_t)((actor->euler_accum.roll >> 8) & 0xFFF);
-    actor->display_angles.yaw   = (int16_t)((actor->euler_accum.yaw >> 8) & 0xFFF);
-    actor->display_angles.pitch = (int16_t)((actor->euler_accum.pitch >> 8) & 0xFFF);
-
-    /* 6. Build rotation matrix from euler angles (YXZ order, same as racers) */
+    /* 6. Build rotation matrix from display angles (YXZ order, same as racers) */
     {
         int32_t roll_a  = actor->display_angles.roll  & 0xFFF;
         int32_t yaw_a   = actor->display_angles.yaw   & 0xFFF;
@@ -2918,24 +2959,24 @@ static void integrate_traffic_pose(TD5_Actor *actor)
 
         int32_t cr = cos_fixed12(roll_a);
         int32_t sr = sin_fixed12(roll_a);
-        int32_t cy = cos_fixed12(yaw_a);
-        int32_t sy = sin_fixed12(yaw_a);
+        int32_t cyy = cos_fixed12(yaw_a);
+        int32_t syy = sin_fixed12(yaw_a);
         int32_t cp = cos_fixed12(pitch_a);
         int32_t sp = sin_fixed12(pitch_a);
 
         float s = 1.0f / 4096.0f;
 
-        actor->rotation_matrix.m[0] = (float)(((sp * sy >> 12) * sr >> 12) + ((cp * cy) >> 12)) * s;
-        actor->rotation_matrix.m[1] = (float)(((cp * sy >> 12) * sr >> 12) - ((sp * cy) >> 12)) * s;
-        actor->rotation_matrix.m[2] = (float)((sy * cr) >> 12) * s;
+        actor->rotation_matrix.m[0] = (float)(((sp * syy >> 12) * sr >> 12) + ((cp * cyy) >> 12)) * s;
+        actor->rotation_matrix.m[1] = (float)(((cp * syy >> 12) * sr >> 12) - ((sp * cyy) >> 12)) * s;
+        actor->rotation_matrix.m[2] = (float)((syy * cr) >> 12) * s;
 
         actor->rotation_matrix.m[3] = (float)((sp * cr) >> 12) * s;
         actor->rotation_matrix.m[4] = (float)((cp * cr) >> 12) * s;
         actor->rotation_matrix.m[5] = (float)(-sr) * s;
 
-        actor->rotation_matrix.m[6] = (float)(((sp * cy >> 12) * sr >> 12) - ((cp * sy) >> 12)) * s;
-        actor->rotation_matrix.m[7] = (float)(((cp * cy >> 12) * sr >> 12) + ((sp * sy) >> 12)) * s;
-        actor->rotation_matrix.m[8] = (float)((cy * cr) >> 12) * s;
+        actor->rotation_matrix.m[6] = (float)(((sp * cyy >> 12) * sr >> 12) - ((cp * syy) >> 12)) * s;
+        actor->rotation_matrix.m[7] = (float)(((cp * cyy >> 12) * sr >> 12) + ((sp * syy) >> 12)) * s;
+        actor->rotation_matrix.m[8] = (float)((cyy * cr) >> 12) * s;
     }
 
     /* 7. Compute render position (world_pos / 256 as float) */
@@ -2945,10 +2986,10 @@ static void integrate_traffic_pose(TD5_Actor *actor)
 
     /* Log once per 60 frames per slot for diagnostics */
     if ((actor->frame_counter % 60u) == 0u) {
-        TD5_LOG_I(LOG_TAG, "traffic_pose: slot=%d span=%d ground_y=%d vel=(%d,%d)",
+        TD5_LOG_I(LOG_TAG, "traffic_pose: slot=%d span=%d y=%d roll=%d pitch=%d",
                   actor->slot_index, (int)actor->track_span_raw,
                   actor->world_pos.y,
-                  actor->linear_velocity_x, actor->linear_velocity_z);
+                  (int)actor->display_angles.roll, (int)actor->display_angles.pitch);
     }
 }
 
