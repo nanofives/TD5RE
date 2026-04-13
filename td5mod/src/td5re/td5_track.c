@@ -1965,16 +1965,17 @@ static int resolve_neighbor(int span_idx, int *sub_lane, uint8_t crossing_bit,
         break;
     }
 
-    /* Branch-return safety net: only fires when the default case was
-     * taken (span_type 0-7 = regular quad). Type 8/9/10/11 have proper
-     * junction/sentinel handlers above that follow link_next/link_prev,
-     * and their results must not be overridden.
+    /* Branch-return safety net: only fires when the walker lands on a
+     * span that's truly out of bounds (negative or >= s_span_count).
+     * Do NOT fire just because new_span crossed a branch boundary —
+     * adjacent branches may legitimately have consecutive span indices,
+     * and the 8/9/10/11 span-type handlers already handle proper
+     * branch-to-main-road returns via link_next/link_prev.
      *
-     * If on a branch span (index >= ring) and the walker lands us
-     * outside the current branch's range, use the jump table to
-     * redirect to the main road equivalent so the car re-enters
-     * the main road instead of wandering into unrelated spans. */
-    if (sp->span_type < 8 || sp->span_type > 11) {
+     * This safety net only protects against walker producing truly
+     * invalid spans (e.g. branch road data without a terminator). */
+    if ((sp->span_type < 8 || sp->span_type > 11) &&
+        (new_span < 0 || new_span >= s_span_count)) {
         int ring = g_td5.track_span_ring_length;
         if (span_idx >= ring && s_jump_entries && s_jump_entry_count > 0) {
             for (int j = 0; j < s_jump_entry_count; j++) {
@@ -1984,17 +1985,18 @@ static int resolve_neighbor(int span_idx, int *sub_lane, uint8_t crossing_bit,
                 int branch_hi   = (int)entry_u[1];
                 int main_target = (int)entry_s[2];
                 if (span_idx >= branch_lo && span_idx <= branch_hi) {
-                    if (new_span > branch_hi) {
-                        int remapped = main_target + (branch_hi - branch_lo) + 1;
+                    int remapped;
+                    if (new_span >= s_span_count) {
+                        remapped = main_target + (branch_hi - branch_lo) + 1;
                         TD5_LOG_I(LOG_TAG, "branch_return_fwd: span=%d new=%d -> main=%d",
                                   span_idx, new_span, remapped);
-                        new_span = remapped;
-                    } else if (new_span < branch_lo) {
-                        int remapped = main_target - 1;
+                    } else {
+                        remapped = main_target - 1;
                         TD5_LOG_I(LOG_TAG, "branch_return_bwd: span=%d new=%d -> main=%d",
                                   span_idx, new_span, remapped);
-                        new_span = remapped;
                     }
+                    new_span = remapped;
+                    *sub_lane = 0;  /* force inner lane to avoid re-branching */
                     break;
                 }
             }
