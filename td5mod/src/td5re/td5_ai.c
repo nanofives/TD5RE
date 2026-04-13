@@ -1487,11 +1487,10 @@ void td5_ai_update_track_behavior(int slot) {
                         rs[RS_RIGHT_DEVIATION] = delta + 0xFFF;
                     }
 
-                    TD5_LOG_I(LOG_TAG, "deviation: slot=%d tspan=%d ta=0x%X "
-                              "hd=0x%X yaw=0x%X steer=%d delta=%d L=%d R=%d",
+                    TD5_LOG_D(LOG_TAG, "deviation: slot=%d tspan=%d ta=0x%X "
+                              "hd=0x%X delta=%d L=%d R=%d",
                               slot, target_span, target_angle,
-                              actor_heading, (yaw >> 8) & 0xFFF, steer,
-                              delta,
+                              actor_heading, delta,
                               rs[RS_LEFT_DEVIATION], rs[RS_RIGHT_DEVIATION]);
                 }
             }
@@ -1506,32 +1505,43 @@ void td5_ai_update_track_behavior(int slot) {
      *    Coasting/accelerating -> 0x20000 (larger corrections) */
     steer_weight = threshold_result ? 0x10000 : 0x20000;
 
-    /* 5. Steering: direct proportional controller.
+    /* 5. Steering: PD controller on heading error.
      *
-     * The original's band-based UpdateActorSteeringBias (0x4340C0) expects a
-     * delta baseline of 0x800 between the biased heading and unbiased target.
-     * However, the source port's deviation computation produces a baseline
-     * near 0 (heading ≈ target in biased space), which causes band thresholds
-     * to mis-fire and accumulate runaway corrections.
+     * The original's band-based UpdateActorSteeringBias (0x4340C0) expects
+     * a deviation baseline of 0x800 when the car is aligned. This baseline
+     * requires the spawn heading to match the track direction exactly
+     * (heading = real_angle + 0x800, target = real_angle, delta = 0x800).
+     * The port's spawn heading is ~167° off [TODO: spawn heading bug],
+     * which collapses the baseline to ~0 and makes the band thresholds
+     * produce runaway corrections.
      *
-     * This controller directly computes the steer_cmd that points the
-     * steered heading (yaw + steer) >> 8 at the target with the +0x800
-     * bias offset that the deviation decomposition expects:
-     *   desired heading = (target_angle + 0x800) & 0xFFF
-     *   steer = ((desired_heading << 8) - yaw)
-     * This is a direct-set (not accumulated), clamped to ±0x18000.
+     * This PD controller replaces the band system:
+     *   P term: heading error to 4-span-ahead target (steer toward target)
+     *   D term: angular velocity damping (prevent overshoot)
      *
-     * TODO: restore band-based system once spawn heading and original
-     * dynamics are bit-accurate. */
+     * The biased heading (yaw >> 8 & 0xFFF) is compared directly to the
+     * unbiased target_angle. Since the spawn heading bug makes these two
+     * values close in the biased angle space (~147 units apart instead of
+     * ~0x800 apart), setting desired = ta works correctly.
+     *
+     * Gain: P = err << 6 (steer_angle = err/4, so 100 units of error
+     *   → 25 units of steer angle = 2.2°). Low enough to avoid saturating
+     *   the bicycle model's angular velocity at ±6000.
+     * Damp: D = omega << 6 (opposes rotation proportionally).
+     *
+     * TODO: restore band-based system once spawn heading is corrected. */
     {
         int32_t yaw = ACTOR_I32(actor, ACTOR_YAW_ACCUM);
-        /* Recompute target angle for the steering controller */
         int32_t ta = 0;
         {
             int16_t sp = ACTOR_I16(actor, ACTOR_SPAN_RAW);
             int span_count = td5_track_get_span_count();
             if (span_count > 0 && sp >= 0) {
-                int tsp = ((int)sp + 4) % span_count;
+                /* Look ahead 8 spans (not 4) for the PD controller. The
+                 * longer look-ahead smooths out sharp curves and gives the
+                 * slow bicycle model time to respond. The deviation computation
+                 * at step 2 still uses 4 spans for the band-based system. */
+                int tsp = ((int)sp + 8) % span_count;
                 int tx = 0, tz = 0;
                 int rb = 128;
                 const uint8_t *rp = (const uint8_t *)(intptr_t)rs[RS_ROUTE_TABLE_PTR];
@@ -1543,41 +1553,33 @@ void td5_ai_update_track_behavior(int slot) {
                 }
             }
         }
-        /* Desired heading = target_angle directly.
-         * The yaw_accum already contains (real_angle + 0x800) << 8, so the
-         * biased heading (yaw >> 8 & 0xFFF) is offset from the real direction
-         * by +0x800. Since ai_angle_from_vector returns a raw angle, the
-         * natural baseline is heading ≈ target + 0x800 when aligned, making
-         * delta ≈ 0x800. But in practice the baseline is near 0 because the
-         * target points ahead where the biased heading already is. Setting
-         * desired = ta (not ta + 0x800) correctly targets the current biased
-         * heading at the target angle — no double-bias. */
-        int32_t desired = ta;
         int32_t current = (yaw >> 8) & 0xFFF;
-        int32_t err = ((desired - current + 0x800) & 0xFFF) - 0x800;
+        int32_t err = ((ta - current + 0x800) & 0xFFF) - 0x800;
+        int32_t omega_raw = ACTOR_I32(actor, 0x1C4);
+        int32_t omega = omega_raw >> 8;  /* heading change per tick */
 
-        /* PD steering controller with aggressive angular velocity damping.
-         *
-         * The bicycle model integrates yaw torque into angular_velocity_yaw,
-         * which the AI steering can't directly overwrite (physics runs after).
-         * Instead, set steer_cmd = P*err - D*omega to:
-         *   (P) steer toward the target heading
-         *   (D) oppose the current angular velocity via the bicycle model's
-         *       lateral force asymmetry from the steered heading offset.
-         *
-         * D=8 means each unit/tick of omega contributes 8*256=2048 of steer,
-         * producing enough lateral force asymmetry to counteract the rotation.
-         * At typical speed omega~23: damping_steer = -8*23*256 = -47104.
-         * This is within ±0x18000 clamp and effectively brakes the yaw. */
-        int32_t omega_scaled = ACTOR_I32(actor, 0x1C4) >> 8; /* angular_velocity_yaw in 12-bit/tick */
-        int32_t pd_err = err - 8 * omega_scaled;
-        int32_t desired_steer = pd_err << 8;
+        /* Steer = P*err - D*omega. Both gain = 64 (<<6). */
+        int32_t desired_steer = (err << 6) - (omega << 6);
         if (desired_steer > 0x18000) desired_steer = 0x18000;
         if (desired_steer < -0x18000) desired_steer = -0x18000;
         ACTOR_I32(actor, ACTOR_STEERING_CMD) = desired_steer;
 
-        TD5_LOG_I(LOG_TAG, "steer_pd: slot=%d ta=0x%X cur=0x%X err=%d omega=%d ds=%d",
-                  slot, ta, current, err, omega_scaled, desired_steer);
+        /* Angular velocity braking: the bicycle model saturates omega at
+         * ±6000 from even small steer angles, building rotation momentum
+         * that the steer-based PD controller can't reverse fast enough.
+         * When omega opposes the desired correction (sign mismatch with err),
+         * directly damp it by 25% per tick. This is the only way to
+         * decelerate the yaw rotation given the physics runs after the AI. */
+        if ((err > 0 && omega_raw < -256) || (err < 0 && omega_raw > 256)) {
+            /* Omega opposes desired direction — brake aggressively */
+            ACTOR_I32(actor, 0x1C4) = omega_raw * 3 / 4;
+        } else if (err > -20 && err < 20 && (omega_raw > 512 || omega_raw < -512)) {
+            /* Nearly aligned but still rotating — brake gently */
+            ACTOR_I32(actor, 0x1C4) = omega_raw * 7 / 8;
+        }
+
+        TD5_LOG_D(LOG_TAG, "steer: slot=%d ta=0x%X cur=0x%X err=%d omega=%d ds=%d",
+                  slot, ta, current, err, omega, desired_steer);
     }
 }
 
