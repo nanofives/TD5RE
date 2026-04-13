@@ -1801,32 +1801,16 @@ static int resolve_neighbor(int span_idx, int *sub_lane, uint8_t crossing_bit,
     switch (crossing_bit) {
     case 0x01: /* Forward */
         switch (sp->span_type) {
-        case 8: { /* JUNCTION_FWD: conditional branch [CONFIRMED @ 0x4443E8] */
-            int next_seq = span_idx + 1;
-            if (next_seq < s_span_count) {
-                int next_lanes = span_lane_count(&s_span_array[next_seq]);
-                /* Use geometric position to determine effective sub_lane,
-                 * since the port's sub_lane tracking is unreliable. */
-                int eff_lane = compute_effective_sublane(span_idx, pos_x, pos_z);
-                TD5_LOG_I(LOG_TAG, "JUNCTION_FWD: span=%d sub_lane=%d eff=%d next_lanes=%d link=%d -> %s",
-                          span_idx, *sub_lane, eff_lane, next_lanes, (int)sp->link_next,
-                          (eff_lane < next_lanes) ? "MAIN" : "BRANCH");
-                if (eff_lane < next_lanes) {
-                    new_span = next_seq;  /* main road */
-                    *sub_lane = eff_lane;
-                } else {
-                    new_span = (int)sp->link_next;  /* branch */
-                    if (new_span >= 0 && new_span < s_span_count) {
-                        int dest_lanes = span_lane_count(&s_span_array[new_span]);
-                        *sub_lane = eff_lane - next_lanes;
-                        if (*sub_lane >= dest_lanes) *sub_lane = dest_lanes - 1;
-                    }
-                }
-            } else {
-                new_span = (int)sp->link_next;
+        case 8: /* JUNCTION_FWD: always take main road (span+1).
+                 * Branch roads disabled — the port's sub_lane tracking and
+                 * terrain height system don't handle junctions reliably yet.
+                 * TODO: re-enable when sub_lane tracking is fixed. */
+            new_span = span_idx + 1;
+            if (new_span >= 0 && new_span < s_span_count) {
+                int dest_h = span_height_offset(&s_span_array[new_span]);
+                *sub_lane += h_offset - dest_h;
             }
             break;
-        }
         case 10: /* SENTINEL_END: always follow forward link */
             new_span = (int)sp->link_next;
             if (new_span >= 0 && new_span < s_span_count) {
@@ -1847,27 +1831,9 @@ static int resolve_neighbor(int span_idx, int *sub_lane, uint8_t crossing_bit,
 
     case 0x02: /* Right (forward + lateral) */
         switch (sp->span_type) {
-        case 8: {
-            int next_seq = span_idx + 1;
-            if (next_seq < s_span_count) {
-                int next_lanes = span_lane_count(&s_span_array[next_seq]);
-                int eff_lane = compute_effective_sublane(span_idx, pos_x, pos_z);
-                if (eff_lane < next_lanes) {
-                    new_span = next_seq;
-                    *sub_lane = eff_lane;
-                } else {
-                    new_span = (int)sp->link_next;
-                    if (new_span >= 0 && new_span < s_span_count) {
-                        int dest_lanes = span_lane_count(&s_span_array[new_span]);
-                        *sub_lane = eff_lane - next_lanes;
-                        if (*sub_lane >= dest_lanes) *sub_lane = dest_lanes - 1;
-                    }
-                }
-            } else {
-                new_span = (int)sp->link_next;
-            }
+        case 8: /* JUNCTION_FWD: always main road */
+            new_span = span_idx + 1;
             break;
-        }
         case 10:
             new_span = (int)sp->link_next;
             if (new_span >= 0 && new_span < s_span_count) {
@@ -1884,27 +1850,13 @@ static int resolve_neighbor(int span_idx, int *sub_lane, uint8_t crossing_bit,
 
     case 0x04: /* Backward */
         switch (sp->span_type) {
-        case 11: { /* JUNCTION_BWD: conditional branch [CONFIRMED @ 0x4444A0] */
-            int prev_seq = span_idx - 1;
-            if (prev_seq >= 0) {
-                int prev_lanes = span_lane_count(&s_span_array[prev_seq]);
-                int eff_lane = compute_effective_sublane(span_idx, pos_x, pos_z);
-                if (eff_lane < prev_lanes) {
-                    new_span = prev_seq;  /* main road */
-                    *sub_lane = eff_lane;
-                } else {
-                    new_span = (int)sp->link_prev;  /* branch */
-                    if (new_span >= 0 && new_span < s_span_count) {
-                        int dest_lanes = span_lane_count(&s_span_array[new_span]);
-                        *sub_lane = eff_lane - prev_lanes;
-                        if (*sub_lane >= dest_lanes) *sub_lane = dest_lanes - 1;
-                    }
-                }
-            } else {
-                new_span = (int)sp->link_prev;
+        case 11: /* JUNCTION_BWD: always main road */
+            new_span = span_idx - 1;
+            if (new_span >= 0) {
+                int dest_h = span_height_offset(&s_span_array[new_span]);
+                *sub_lane += h_offset - dest_h;
             }
             break;
-        }
         case 9: /* SENTINEL_START: always follow backward link */
             new_span = (int)sp->link_prev;
             if (new_span >= 0 && new_span < s_span_count) {
@@ -1924,27 +1876,9 @@ static int resolve_neighbor(int span_idx, int *sub_lane, uint8_t crossing_bit,
 
     case 0x08: /* Left (backward + lateral) */
         switch (sp->span_type) {
-        case 11: {
-            int prev_seq = span_idx - 1;
-            if (prev_seq >= 0) {
-                int prev_lanes = span_lane_count(&s_span_array[prev_seq]);
-                int eff_lane = compute_effective_sublane(span_idx, pos_x, pos_z);
-                if (eff_lane < prev_lanes) {
-                    new_span = prev_seq;
-                    *sub_lane = eff_lane;
-                } else {
-                    new_span = (int)sp->link_prev;
-                    if (new_span >= 0 && new_span < s_span_count) {
-                        int dest_lanes = span_lane_count(&s_span_array[new_span]);
-                        *sub_lane = eff_lane - prev_lanes;
-                        if (*sub_lane >= dest_lanes) *sub_lane = dest_lanes - 1;
-                    }
-                }
-            } else {
-                new_span = (int)sp->link_prev;
-            }
+        case 11: /* JUNCTION_BWD: always main road */
+            new_span = span_idx - 1;
             break;
-        }
         case 9:
             new_span = (int)sp->link_prev;
             if (new_span >= 0 && new_span < s_span_count) {
