@@ -3921,6 +3921,11 @@ int td5_track_get_span_count(void)
     return s_span_count;
 }
 
+int td5_track_get_fwd_sentinel(void)
+{
+    return s_boundary_fwd_sentinel;
+}
+
 int td5_track_is_ptr_in_blob(const void *ptr, size_t need)
 {
     if (!ptr || !s_models_blob || s_models_blob_size == 0) return 0;

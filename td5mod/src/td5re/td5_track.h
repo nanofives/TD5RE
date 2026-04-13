@@ -105,6 +105,7 @@ int  td5_track_load_runtime_data(int track_index, int reverse);
 
 /* --- Span access --- */
 int              td5_track_get_span_count(void);
+int              td5_track_get_fwd_sentinel(void);
 TD5_StripSpan   *td5_track_get_span(int index);
 TD5_StripVertex *td5_track_get_vertex(int index);
 int              td5_track_is_valid_mesh_ptr(const void *ptr);

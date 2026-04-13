@@ -1418,8 +1418,21 @@ void td5_ai_update_track_behavior(int slot) {
         int16_t span = ACTOR_I16(actor, ACTOR_SPAN_RAW);
         int span_count = td5_track_get_span_count();
         if (span_count > 0 && span >= 0) {
-            /* (a) Target span: 4 spans ahead, wrapped [CONFIRMED @ 0x43514D] */
-            int target_span = ((int)span + 4) % span_count;
+            /* (a) Target span: 4 spans ahead in the forward direction.
+             * Original uses span+4 [CONFIRMED @ 0x43514D], which is forward
+             * when increasing spans = forward. For tracks where fwd_sentinel
+             * is below the car's span (finish is at low spans), forward =
+             * decreasing spans, so use span-4. */
+            int fwd = td5_track_get_fwd_sentinel();
+            int target_span;
+            if (fwd >= 0 && fwd < (int)span) {
+                /* Forward = decreasing spans (toward fwd sentinel) */
+                target_span = (int)span - 4;
+                if (target_span < 0) target_span += span_count;
+            } else {
+                /* Forward = increasing spans (default) */
+                target_span = ((int)span + 4) % span_count;
+            }
 
             /* Spline progress update (original also does this) */
             {
@@ -1523,13 +1536,20 @@ void td5_ai_update_track_behavior(int slot) {
          * Compute needed steer_cmd to point heading at target:
          * heading = (yaw + steer) >> 8 & 0xFFF  should equal  target_angle
          * steer = (target_angle << 8) - yaw */
-        int32_t ta = rs[RS_RIGHT_DEVIATION]; /* reuse step 2's target_angle? */
+        int32_t ta = 0;
         /* Recompute target angle for the proportional controller */
         {
             int16_t sp = ACTOR_I16(actor, ACTOR_SPAN_RAW);
             int span_count = td5_track_get_span_count();
             if (span_count > 0 && sp >= 0) {
-                int tsp = ((int)sp + 4) % span_count;
+                int fwd5 = td5_track_get_fwd_sentinel();
+                int tsp;
+                if (fwd5 >= 0 && fwd5 < (int)sp) {
+                    tsp = (int)sp - 4;
+                    if (tsp < 0) tsp += span_count;
+                } else {
+                    tsp = ((int)sp + 4) % span_count;
+                }
                 int tx = 0, tz = 0;
                 int rb = 128;
                 const uint8_t *rp = (const uint8_t *)(intptr_t)rs[RS_ROUTE_TABLE_PTR];
