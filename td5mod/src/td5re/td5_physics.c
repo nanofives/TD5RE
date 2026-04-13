@@ -74,7 +74,7 @@ static int  obb_corner_test(TD5_Actor *a, TD5_Actor *b,
                             OBB_CornerData corners[8]);
 static void apply_collision_response(TD5_Actor *penetrator, TD5_Actor *target,
                                      int corner_idx, OBB_CornerData *corner,
-                                     int32_t heading_target);
+                                     int32_t heading_target, int32_t impactForce);
 
 /* ========================================================================
  * Key globals
@@ -750,18 +750,19 @@ void td5_physics_update_player(TD5_Actor *actor)
                 }
             }
         } else {
-            /* Brake path: front/rear brake torque opposing current velocity.
-             * [CONFIRMED @ 0x4045A0] */
+            /* Brake path: front-wheel-only brake torque opposing current velocity.
+             * [CONFIRMED @ 0x4045A0]: original feeds bf directly — no sign flip.
+             * bf is already negative when braking forward (throttle=-256), which
+             * naturally opposes forward motion. Rear wheels get 0.
+             * Previous code had a double-negation bug: sign*bf flipped the
+             * already-negative bf positive, adding forward force instead of braking. */
             int32_t bf = (brake_front * throttle) >> 8;
-            int32_t br = (brake_rear  * throttle) >> 8;
             int32_t abs_lat_half = (v_lat < 0 ? -v_lat : v_lat) >> 1;
             if (bf < -abs_lat_half) bf = -abs_lat_half;
-            if (br < -abs_lat_half) br = -abs_lat_half;
-            int32_t sign = (v_long > 0) ? -1 : 1;
-            wheel_drive[0] = sign * (bf >> 1);
-            wheel_drive[1] = sign * (bf >> 1);
-            wheel_drive[2] = sign * (br >> 1);
-            wheel_drive[3] = sign * (br >> 1);
+            wheel_drive[0] = bf >> 1;  /* front-left  [CONFIRMED @ 0x404030] */
+            wheel_drive[1] = bf >> 1;  /* front-right [CONFIRMED @ 0x404030] */
+            wheel_drive[2] = 0;        /* rear-left:  no on-ground rear brake */
+            wheel_drive[3] = 0;        /* rear-right: no on-ground rear brake */
         }
     } else {
         /* --- AIRBORNE branch [CONFIRMED @ 0x4044F9-0x4045AE] ---
@@ -809,18 +810,18 @@ void td5_physics_update_player(TD5_Actor *actor)
                 }
             }
         } else {
-            /* Brake or coast path */
+            /* Brake or coast path — same double-negation fix as on-ground.
+             * [CONFIRMED @ 0x4044F9-0x4045AE]: no sign flip in original. */
             td5_physics_update_engine_speed(actor);
             int32_t bf = (brake_front * coast_throttle) >> 8;
             int32_t br = (brake_rear  * coast_throttle) >> 8;
             int32_t abs_lat_half = (v_lat < 0 ? -v_lat : v_lat) >> 1;
             if (bf < -abs_lat_half) bf = -abs_lat_half;
             if (br < -abs_lat_half) br = -abs_lat_half;
-            int32_t sign = (v_long > 0) ? -1 : 1;
-            wheel_drive[0] = sign * (bf >> 1);
-            wheel_drive[1] = sign * (bf >> 1);
-            wheel_drive[2] = sign * (br >> 1);
-            wheel_drive[3] = sign * (br >> 1);
+            wheel_drive[0] = bf >> 1;
+            wheel_drive[1] = bf >> 1;
+            wheel_drive[2] = br >> 1;
+            wheel_drive[3] = br >> 1;
         }
 
         if (actor->slot_index == 0 && (actor->frame_counter % 120u) == 0u) {
@@ -1382,7 +1383,9 @@ void td5_physics_update_ai(TD5_Actor *actor)
                 rear_drive  = drive_torque >> 1;
             }
         } else {
-            /* Brake path: torque opposing current velocity */
+            /* Brake path: torque opposing current velocity.
+             * Same double-negation fix as player path — no sign flip needed,
+             * bf is already negative when braking forward. */
             int32_t bf = (brake_front * throttle) >> 8;
             int32_t br = (brake_rear  * throttle) >> 8;
             int32_t half_spd = abs_speed >> 1;
@@ -1390,9 +1393,8 @@ void td5_physics_update_ai(TD5_Actor *actor)
             int32_t neg_br = br < 0 ? -br : br;
             if (neg_bf > half_spd) bf = (bf < 0) ? -half_spd : half_spd;
             if (neg_br > half_spd) br = (br < 0) ? -half_spd : half_spd;
-            int32_t sign = (v_long > 0) ? -1 : 1;
-            front_drive = sign * (bf >> 1);
-            rear_drive  = sign * (br >> 1);
+            front_drive = bf >> 1;
+            rear_drive  = br >> 1;
         }
     } else {
         /* --- AIRBORNE branch ---
@@ -1846,18 +1848,14 @@ static int obb_corner_test(TD5_Actor *a, TD5_Actor *b,
  *   Extents: cardef+0x04 (front-Z), cardef+0x08 (half-width),
  *            cardef+0x14 (rear-Z, stored negative).
  *
- * Caller interface preserved: (penetrator, target, corner_idx, corner, heading).
+ * Caller interface: (penetrator, target, corner_idx, corner, heading, impactForce).
+ * impactForce is now passed from the caller's position-based binary search.
  * Internally, "A" = target (frame owner whose yaw = angle), "B" = penetrator.
  * Contact data is synthesized from corner:
  *   cx_A, cz_A = corner->proj_x, proj_z      (contact in A's frame)
  *   cx_B, cz_B = -proj_x + pen_x, -proj_z + pen_z  (equal-and-opposite approx)
  *
  * Notes on UNCERTAIN items (tracked in todo_collision_engine_gaps.md):
- *  - impactForce (TOI fraction) is hardcoded to 0x70 here; the original
- *    receives it from the caller's binary-search refinement. The port's
- *    `collision_detect_full` does a different binary search that doesn't
- *    track TOI. Fixing this requires rewriting the caller to do the
- *    position-based bisection the original does (0x408A60).
  *  - contactData[2,3] (cx_B,cz_B) mapping is an approximation — the original
  *    has per-frame coordinates written by CollectVehicleCollisionContacts
  *    (0x408570) that aren't fully decoded yet.
@@ -1869,7 +1867,7 @@ static int obb_corner_test(TD5_Actor *a, TD5_Actor *b,
 
 static void apply_collision_response(TD5_Actor *penetrator, TD5_Actor *target,
                                      int corner_idx, OBB_CornerData *corner,
-                                     int32_t heading_target)
+                                     int32_t heading_target, int32_t impactForce)
 {
     if (!penetrator || !target) return;
     if (!penetrator->car_definition_ptr || !target->car_definition_ptr) return;
@@ -1879,26 +1877,10 @@ static void apply_collision_response(TD5_Actor *penetrator, TD5_Actor *target,
     TD5_Actor *B = penetrator;  /* other actor */
     int32_t    angle       = heading_target;
 
-    /* Derive TOI fraction from corner penetration magnitude. The original
-     * computes impactForce via a 7-iteration binary-search bisection in
-     * ResolveVehicleCollisionPair @ 0x00408A60, converging on the first
-     * non-penetrating step and setting `impactForce = bisection_midpoint - 0x10`
-     * (range 16..240). Deeper penetration → smaller impactForce → larger
-     * toi_frac = (0x100 - impactForce) → more position rollback.
-     *
-     * Porting the full bisection requires also porting CollectVehicleCollisionContacts
-     * @ 0x00408570 (synthesizes per-corner contactData[4]). Until that lands,
-     * we approximate: map the OBB corner's penetration depth to [16..240] so
-     * shallow contacts get minimal rollback and deep contacts get near-full.
-     * This is better than the prior hardcoded 0x70 and responds to the
-     * geometry instead of a constant. [CONFIRMED mapping direction via decomp
-     * of 0x408A60 bisection termination condition.] */
-    int32_t pen_x_abs = corner->pen_x < 0 ? -corner->pen_x : corner->pen_x;
-    int32_t pen_z_abs = corner->pen_z < 0 ? -corner->pen_z : corner->pen_z;
-    int32_t pen_mag   = pen_x_abs > pen_z_abs ? pen_x_abs : pen_z_abs;
-    int32_t impactForce = 240 - (pen_mag >> 1);
-    if (impactForce < 16)  impactForce = 16;
-    if (impactForce > 240) impactForce = 240;
+    /* impactForce is now passed from the caller's position-based binary search
+     * (matching ResolveVehicleCollisionPair @ 0x408A60). Range [0x10, 0xF0].
+     * Higher = contact near end of tick (less rollback).
+     * Lower = contact early in tick (more rollback). */
 
     /* --- 1. Prologue: save angular velocities for delta application --- */
     int32_t saved_omega_A = A->angular_velocity_yaw;
@@ -2221,94 +2203,82 @@ static void collision_detect_full(TD5_Actor *a, TD5_Actor *b, int idx_a, int idx
 
     if (bitmask == 0) return;  /* No overlap at full size */
 
-    /* --- 7-iteration binary search refinement --- */
-    /* Save original half-extents */
-    int16_t orig_hw_a = CDEF_S(a, 0x04);
-    int16_t orig_hl_a = CDEF_S(a, 0x08);
-    int16_t orig_nw_a = CDEF_S(a, 0x14);
-    int16_t orig_hw_b = CDEF_S(b, 0x04);
-    int16_t orig_hl_b = CDEF_S(b, 0x08);
-    int16_t orig_nw_b = CDEF_S(b, 0x14);
+    /* --- 7-iteration position-based binary search (matching 0x408A60) ---
+     *
+     * The original's ResolveVehicleCollisionPair steps actor positions and
+     * headings backward/forward in time on STACK COPIES to find the approximate
+     * moment of first contact (TOI). This produces an impactForce fraction
+     * used by the impulse solver for position rollback/re-advance.
+     *
+     * Previous port code mutated car_def extents (shrink/grow boxes), which was
+     * architecturally wrong: it tested different box sizes at the SAME position
+     * instead of the SAME box at different positions. [CONFIRMED @ 0x408A60] */
 
-    /* Start with half-size adjustment */
-    int32_t adj_a = orig_hw_a >> 1;
-    int32_t adj_b = orig_hw_b >> 1;
+    /* Per-tick velocity in OBB space (world_pos >> 8 coordinates) */
+    int32_t vel_ax = a->linear_velocity_x >> 8;
+    int32_t vel_az = a->linear_velocity_z >> 8;
+    int32_t vel_bx = b->linear_velocity_x >> 8;
+    int32_t vel_bz = b->linear_velocity_z >> 8;
+
+    /* Per-tick angular velocity in heading space (euler_accum >> 8) */
+    int32_t omega_a_h = a->angular_velocity_yaw >> 8;
+    int32_t omega_b_h = b->angular_velocity_yaw >> 8;
+
+    /* Bisection fraction: 0 = one tick ago, 0x100 = current time.
+     * Start at midpoint (0x80). [CONFIRMED @ 0x408A60 bisection init] */
+    int32_t frac = 0x80;
+    int32_t bisect_step = 0x40;
 
     for (int iter = 0; iter < 7; iter++) {
-        int32_t step = adj_a >> 1;
-        if (step < 1) step = 1;
-
-        /* Temporarily shrink/grow half-extents */
-        int16_t test_hw_a, test_hl_a, test_nw_a;
-        int16_t test_hw_b, test_hl_b, test_nw_b;
-
-        if (bitmask != 0) {
-            /* Overlap found: shrink inward */
-            test_hw_a = orig_hw_a - (int16_t)adj_a;
-            test_hl_a = orig_hl_a - (int16_t)adj_a;
-            test_nw_a = orig_nw_a + (int16_t)adj_a;  /* neg side: shrink = add */
-            test_hw_b = orig_hw_b - (int16_t)adj_b;
-            test_hl_b = orig_hl_b - (int16_t)adj_b;
-            test_nw_b = orig_nw_b + (int16_t)adj_b;
-        } else {
-            /* No overlap: grow outward */
-            test_hw_a = orig_hw_a + (int16_t)adj_a;
-            test_hl_a = orig_hl_a + (int16_t)adj_a;
-            test_nw_a = orig_nw_a - (int16_t)adj_a;
-            test_hw_b = orig_hw_b + (int16_t)adj_b;
-            test_hl_b = orig_hl_b + (int16_t)adj_b;
-            test_nw_b = orig_nw_b - (int16_t)adj_b;
-        }
-
-        /* Clamp to non-negative */
-        if (test_hw_a < 1) test_hw_a = 1;
-        if (test_hl_a < 1) test_hl_a = 1;
-        if (test_hw_b < 1) test_hw_b = 1;
-        if (test_hl_b < 1) test_hl_b = 1;
-
-        /* Temporarily set modified extents for the OBB test */
-        write_i16((uint8_t*)a->car_definition_ptr, 0x04, test_hw_a);
-        write_i16((uint8_t*)a->car_definition_ptr, 0x08, test_hl_a);
-        write_i16((uint8_t*)a->car_definition_ptr, 0x14, test_nw_a);
-        write_i16((uint8_t*)b->car_definition_ptr, 0x04, test_hw_b);
-        write_i16((uint8_t*)b->car_definition_ptr, 0x08, test_hl_b);
-        write_i16((uint8_t*)b->car_definition_ptr, 0x14, test_nw_b);
+        /* Interpolated positions at current fraction.
+         * test_pos = current_pos - vel * (0x100 - frac) / 0x100 */
+        int32_t rollback = 0x100 - frac;
+        int32_t test_ax = ax - ((vel_ax * rollback) >> 8);
+        int32_t test_az = az - ((vel_az * rollback) >> 8);
+        int32_t test_bx = bx - ((vel_bx * rollback) >> 8);
+        int32_t test_bz = bz - ((vel_bz * rollback) >> 8);
+        int32_t test_ha = (heading_a - ((omega_a_h * rollback) >> 8)) & 0xFFF;
+        int32_t test_hb = (heading_b - ((omega_b_h * rollback) >> 8)) & 0xFFF;
 
         memset(corners, 0, sizeof(corners));
-        bitmask = obb_corner_test(a, b, ax, az, bx, bz,
-                                  heading_a, heading_b, corners);
+        bitmask = obb_corner_test(a, b, test_ax, test_az, test_bx, test_bz,
+                                  test_ha, test_hb, corners);
 
-        adj_a = step;
-        adj_b = (orig_hw_b >> 1) >> (iter + 1);
-        if (adj_b < 1) adj_b = 1;
+        if (bitmask != 0) {
+            frac -= bisect_step;   /* Still overlapping: step backward in time */
+        } else {
+            frac += bisect_step;   /* No overlap: step forward in time */
+        }
+        bisect_step >>= 1;
+        if (bisect_step < 1) bisect_step = 1;
     }
 
-    /* Restore original half-extents */
-    write_i16((uint8_t*)a->car_definition_ptr, 0x04, orig_hw_a);
-    write_i16((uint8_t*)a->car_definition_ptr, 0x08, orig_hl_a);
-    write_i16((uint8_t*)a->car_definition_ptr, 0x14, orig_nw_a);
-    write_i16((uint8_t*)b->car_definition_ptr, 0x04, orig_hw_b);
-    write_i16((uint8_t*)b->car_definition_ptr, 0x08, orig_hl_b);
-    write_i16((uint8_t*)b->car_definition_ptr, 0x14, orig_nw_b);
+    /* impactForce from bisection [CONFIRMED range 0x10..0xF0 @ 0x408D26] */
+    int32_t impactForce = frac;
+    if (impactForce < 0x10) impactForce = 0x10;
+    if (impactForce > 0xF0) impactForce = 0xF0;
 
-    /* Recalculate with original extents using the refined positions */
+    /* Final OBB test at current (end-of-tick) positions for contact dispatch */
     memset(corners, 0, sizeof(corners));
     bitmask = obb_corner_test(a, b, ax, az, bx, bz,
                               heading_a, heading_b, corners);
 
     if (bitmask == 0) return;
 
+    TD5_LOG_I(LOG_TAG, "v2v_bisect: slotA=%d slotB=%d frac=0x%02X impactForce=0x%02X bitmask=0x%02X",
+              a->slot_index, b->slot_index, frac, impactForce, bitmask);
+
     /* --- Dispatch collision response based on corner bitmask --- */
     /* Bits 0-3: B corners in A -> response(B, A, corner) -- B is penetrating A */
     for (int i = 0; i < 4; i++) {
         if (bitmask & (1 << i)) {
-            apply_collision_response(b, a, i, &corners[i], heading_a);
+            apply_collision_response(b, a, i, &corners[i], heading_a, impactForce);
         }
     }
     /* Bits 4-7: A corners in B -> response(A, B, corner) -- A is penetrating B */
     for (int i = 0; i < 4; i++) {
         if (bitmask & (1 << (i + 4))) {
-            apply_collision_response(a, b, i, &corners[i + 4], heading_b);
+            apply_collision_response(a, b, i, &corners[i + 4], heading_b, impactForce);
         }
     }
 }

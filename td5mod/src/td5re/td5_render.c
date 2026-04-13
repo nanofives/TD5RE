@@ -326,6 +326,32 @@ static int s_debug_span_meshes_submitted;
 static TD5_MeshHeader *s_vehicle_meshes[TD5_ACTOR_MAX_TOTAL_SLOTS];
 
 /* ========================================================================
+ * Vehicle Projection Effect / Chrome Reflection (0x43DEC0 / 0x40CBD0)
+ *
+ * Original renders a second pass on the player car mesh with heading-
+ * rotated UV coordinates sampling environment textures (environs.zip).
+ * Mode 2 = chrome/specular reflection on car bodies.
+ *
+ * Effect state per-slot: heading cos/sin, sub-mode, texture page.
+ * ======================================================================== */
+
+#define ENVMAP_TEXTURE_PAGE_BASE 900  /* D3D page IDs for environs textures */
+#define ENVMAP_MAX_PAGES         4
+
+typedef struct {
+    float cos_heading;   /* +0x00: cos(heading) */
+    float sin_heading;   /* +0x04: sin(heading) */
+    float scroll_offset; /* +0x08: accumulated scroll (mode 1) */
+    int   sub_mode;      /* +0x0C: 1=water, 2=chrome, 3=world-anchor */
+    int   texture_page;  /* +0x10: environs page index */
+} ProjectionEffectState;
+
+static ProjectionEffectState s_proj_effect[TD5_ACTOR_MAX_TOTAL_SLOTS];
+static int  s_proj_effect_mode;   /* 0=disabled, 2=enabled (g_vehicleProjectionEffectMode @ 0x4C3D44) */
+static int  s_envmap_page_count;  /* number of uploaded environs textures */
+static int  s_envmap_pages[ENVMAP_MAX_PAGES]; /* D3D page IDs */
+
+/* ========================================================================
  * Forward Declarations (dispatch handlers)
  * ======================================================================== */
 
@@ -336,10 +362,12 @@ static void dispatch_billboard(TD5_PrimitiveCmd *cmd, TD5_MeshVertex *base_verts
 static void dispatch_tristrip_direct(TD5_PrimitiveCmd *cmd, TD5_MeshVertex *base_verts);
 static void dispatch_quad_direct(TD5_PrimitiveCmd *cmd, TD5_MeshVertex *base_verts);
 
-/* Vehicle shadow + wheel billboard + brake light rendering */
+/* Vehicle shadow + wheel billboard + brake light + reflection rendering */
 static void render_vehicle_shadow_quad(const TD5_Actor *actor);
 static void render_vehicle_wheel_billboards(TD5_Actor *actor, int slot);
 static void render_vehicle_brake_lights(const TD5_Actor *actor, int slot);
+static void render_vehicle_reflection_overlay(TD5_MeshHeader *mesh, int slot);
+static void render_vehicle_reflection_overlay(TD5_MeshHeader *mesh, int slot);
 
 /** 7-entry dispatch table matching original at 0x473b9c */
 typedef void (*PrimDispatchFn)(TD5_PrimitiveCmd *cmd, TD5_MeshVertex *base_verts);
@@ -1708,6 +1736,15 @@ void td5_render_actors_for_view(int view_index)
 
             td5_render_prepared_mesh(mesh);
 
+            /* Chrome/envmap reflection overlay (0x40C120 second pass).
+             * Original: after normal mesh, if mode==2, renders reflection
+             * mesh for the player car (slot 0). We apply to all racer slots
+             * for visual consistency. */
+            if (s_proj_effect_mode == 2 && slot < TD5_MAX_RACER_SLOTS) {
+                td5_render_update_projection_effect(slot, actor);
+                render_vehicle_reflection_overlay(mesh, slot);
+            }
+
             /* Render wheel ring billboards (0x446F00) */
             render_vehicle_wheel_billboards(actor, slot);
 
@@ -2185,6 +2222,21 @@ int td5_render_bind_texture_page(int page_id)
 
 /* --- Environment Map UV Generation (0x43DEC0) --- */
 
+/**
+ * ApplyMeshProjectionEffect (0x43DEC0):
+ * Overwrites vertex proj_u/proj_v fields based on projection mode.
+ *
+ * Mode 1 (water/scroll): UV from world X/Z + accumulated offset.
+ *   proj_u = vertex.x * 0.000667 + 0.5      [CONFIRMED @ 0x43DF0F]
+ *   proj_v = (scroll + vertex.z) * 0.001333  [CONFIRMED @ 0x43DF0F]
+ *
+ * Mode 2 (chrome/car reflection):
+ *   proj_u = (cos*vx - sin*vz + mesh_pos_x_scaled) * (1/2048)  [CONFIRMED @ 0x43DF80]
+ *   proj_v = (vz*cos + sin*vx + mesh_pos_z_scaled) * (1/1024)  [CONFIRMED @ 0x43DF80]
+ *   cos/sin from -(euler_yaw >> 8) heading rotation.
+ *   mesh_pos_x_scaled = mesh->origin_x * (1/8192)
+ *   mesh_pos_z_scaled = mesh->origin_z * (1/8192)
+ */
 void td5_render_apply_mesh_projection_effect(TD5_MeshVertex *verts, int count, int mode)
 {
     int i;
@@ -2192,18 +2244,168 @@ void td5_render_apply_mesh_projection_effect(TD5_MeshVertex *verts, int count, i
 
     for (i = 0; i < count; i++) {
         if (mode == 1) {
-            /* Water: scrolling UV from world XZ + time */
-            float wx = verts[i].view_x * 0.001f;
-            float wz = verts[i].view_z * 0.001f;
-            float time_ofs = (float)g_tick_counter * 0.0002f;
-            verts[i].proj_u = wx + time_ofs;
-            verts[i].proj_v = wz + time_ofs * 0.7f;
+            /* Water: scrolling UV from world XZ + time
+             * [CONFIRMED @ 0x43DF0F] */
+            float wx = verts[i].pos_x * 0.000667f;
+            float wz = verts[i].pos_z * 0.001333f;
+            float time_ofs = (float)g_tick_counter * 0.001333f;
+            verts[i].proj_u = wx + 0.5f;
+            verts[i].proj_v = wz + time_ofs;
         } else if (mode == 2) {
-            /* Chrome/envmap fallback from view-space direction. */
-            verts[i].proj_u = verts[i].view_x * 0.5f + 0.5f;
-            verts[i].proj_v = verts[i].view_y * 0.5f + 0.5f;
+            /* Chrome/envmap: heading-rotated model coords → UV.
+             * Uses pre-computed cos/sin from slot 0 projection state.
+             * [CONFIRMED @ 0x43DF80] */
+            float vx = verts[i].pos_x;
+            float vz = verts[i].pos_z;
+            float cos_h = s_proj_effect[0].cos_heading;
+            float sin_h = s_proj_effect[0].sin_heading;
+            verts[i].proj_u = (cos_h * vx - sin_h * vz) * (1.0f / 2048.0f);
+            verts[i].proj_v = (vz * cos_h + sin_h * vx) * (1.0f / 1024.0f);
         }
     }
+}
+
+/* --- Environs Texture Loading --- */
+
+int td5_render_load_environs_textures(void)
+{
+    /*
+     * LoadEnvironmentTexturePages (0x42F990):
+     * Loads environment textures from environs.zip as extra texture pages.
+     * Delegates to td5_asset for actual PNG loading and GPU upload.
+     */
+    s_envmap_page_count = td5_asset_load_environs_pages(
+        ENVMAP_TEXTURE_PAGE_BASE, ENVMAP_MAX_PAGES, s_envmap_pages);
+
+    /* Enable projection effect if we loaded at least one texture */
+    s_proj_effect_mode = (s_envmap_page_count > 0) ? 2 : 0;
+
+    TD5_LOG_I(LOG_TAG, "environs: loaded %d textures, effect_mode=%d",
+              s_envmap_page_count, s_proj_effect_mode);
+
+    return s_envmap_page_count;
+}
+
+/* --- Per-Frame Projection Effect Update --- */
+
+void td5_render_update_projection_effect(int slot, TD5_Actor *actor)
+{
+    /*
+     * ConfigureActorProjectionEffect (0x40CBD0) + SetProjectionEffectState (0x43E210):
+     * Per-frame: compute heading cos/sin from actor yaw and store in
+     * effect state array. Mode 2 uses -(euler_yaw >> 8) as the rotation.
+     * [CONFIRMED @ 0x43E210]
+     */
+    ProjectionEffectState *pe;
+    int yaw_12bit;
+
+    if (slot < 0 || slot >= TD5_ACTOR_MAX_TOTAL_SLOTS || !actor)
+        return;
+
+    pe = &s_proj_effect[slot];
+
+    /* 12-bit display yaw from actor struct [CONFIRMED @ 0x208+2] */
+    yaw_12bit = actor->display_angles.yaw & 0xFFF;
+
+    /* Mode 2: cos/sin of negated heading for UV rotation
+     * [CONFIRMED @ 0x43E210: cos(-(euler_yaw >> 8))] */
+    pe->cos_heading = CosFloat12bit((unsigned int)((-yaw_12bit) & 0xFFF));
+    pe->sin_heading = SinFloat12bit((-yaw_12bit) & 0xFFF);
+    pe->sub_mode = 2;
+
+    /* Use first environs page (SUN) as default reflection texture */
+    pe->texture_page = (s_envmap_page_count > 0) ? s_envmap_pages[0] : -1;
+}
+
+/**
+ * Render the chrome/reflection overlay for a vehicle.
+ * Called after the normal car mesh has been rendered.
+ *
+ * Original (RenderRaceActorForView @ 0x40C120): after normal mesh,
+ * if mode==2 AND actor==slot 0: transform reflection mesh, apply
+ * mode-2 UV rewrite, render with translucent blend.
+ *
+ * The original duplicates the himodel into a separate mesh resource
+ * (g_playerReflectionMeshResource @ 0x4C3D40) with command_count=1.
+ * For simplicity, we re-use the same mesh but override the texture
+ * page per-command and render with translucent preset.
+ */
+static void render_vehicle_reflection_overlay(TD5_MeshHeader *mesh, int slot)
+{
+    ProjectionEffectState *pe;
+    TD5_MeshVertex *verts;
+    TD5_PrimitiveCmd *cmds;
+    int cmd_count, vert_count;
+    int i;
+
+    if (s_proj_effect_mode != 2) return;
+    if (!mesh) return;
+
+    pe = &s_proj_effect[slot];
+    if (pe->sub_mode != 2 || pe->texture_page < 0) return;
+
+    verts = (TD5_MeshVertex *)(uintptr_t)mesh->vertices_offset;
+    vert_count = mesh->total_vertex_count;
+    if (!verts || vert_count <= 0) return;
+
+    /* Apply mode-2 projection UV rewrite to all vertices */
+    td5_render_apply_mesh_projection_effect(verts, vert_count, 2);
+
+    /* Render the mesh with the environs texture and translucent blend.
+     * Original uses a separate mesh with command_count=1, but we
+     * iterate the full command list, overriding each command's texture
+     * page to the environs page. */
+    cmds = (TD5_PrimitiveCmd *)(uintptr_t)mesh->commands_offset;
+    cmd_count = mesh->command_count;
+    if (!cmds || cmd_count <= 0) return;
+
+    /* Save original texture pages, override with environs */
+    int saved_pages[256];
+    if (cmd_count > 256) cmd_count = 256;
+
+    for (i = 0; i < cmd_count; i++) {
+        saved_pages[i] = cmds[i].texture_page_id;
+        cmds[i].texture_page_id = (int16_t)pe->texture_page;
+    }
+
+    /* Cap vertex count to stack budget */
+#define REFLECTION_MAX_VERTS 4096
+    int save_count = (vert_count < REFLECTION_MAX_VERTS) ? vert_count : REFLECTION_MAX_VERTS;
+
+    /* Set translucent blend for the reflection overlay */
+    td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
+
+    /* Save and override vertex lighting + UVs for the reflection pass.
+     * Set alpha to ~40% for a subtle chrome overlay; swap primary UVs
+     * with the projection UVs computed above. */
+    uint32_t saved_lighting[REFLECTION_MAX_VERTS];
+    float saved_uv[REFLECTION_MAX_VERTS][2];
+    for (i = 0; i < save_count; i++) {
+        saved_lighting[i] = verts[i].lighting;
+        saved_uv[i][0] = verts[i].tex_u;
+        saved_uv[i][1] = verts[i].tex_v;
+
+        uint32_t lum = verts[i].lighting & 0xFF;
+        verts[i].lighting = 0x66000000u | (lum >> 1);
+        verts[i].tex_u = verts[i].proj_u;
+        verts[i].tex_v = verts[i].proj_v;
+    }
+
+    /* Render the reflection mesh */
+    td5_render_prepared_mesh(mesh);
+
+    /* Restore original UVs, lighting, and texture pages */
+    for (i = 0; i < save_count; i++) {
+        verts[i].tex_u = saved_uv[i][0];
+        verts[i].tex_v = saved_uv[i][1];
+        verts[i].lighting = saved_lighting[i];
+    }
+    for (i = 0; i < cmd_count; i++) {
+        cmds[i].texture_page_id = (int16_t)saved_pages[i];
+    }
+
+    /* Restore opaque preset for subsequent geometry */
+    td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
 }
 
 /* --- Cross-Fade Blending --- */
