@@ -2838,20 +2838,42 @@ void td5_physics_integrate_pose(TD5_Actor *actor)
      * Original calls FUN_004440F0 here [CONFIRMED @ 0x405E80 callees].
      * Without this, track_span_raw stays at 0 and wall checks use the
      * wrong span — the primary reason collisions don't work. */
-    td5_track_update_actor_position(actor);
-
-    /* Clamp span indices after walker update. The span walker can overflow
-     * past the end of the span array on some tracks (e.g., Moscow span 2788
-     * with only 2722 spans). Out-of-bounds span reads garbage from memory,
-     * producing wildly wrong terrain heights that launch the car. */
     {
+        int16_t prev_span = actor->track_span_raw;
+        td5_track_update_actor_position(actor);
+
+        /* Guard against span walker overflow. The walker can jump to out-of-
+         * bounds or distant spans at track edges, causing terrain height
+         * garbage (Y launch) and XZ teleportation.
+         *
+         * Two checks:
+         * 1. Hard bounds: clamp to [0, span_count-1]
+         * 2. Jump limit: if span changed by more than 50 in one tick,
+         *    revert to the previous span. Normal driving is 1-2 spans/tick.
+         *    Skip the jump check on the first tick (prev_span == 0 at init). */
         int max_span = g_td5.track_span_ring_length;
         if (max_span > 0) {
+            /* Hard bounds clamp */
             if (actor->track_span_raw >= (uint16_t)max_span)
                 actor->track_span_raw = (uint16_t)(max_span - 1);
+
+            /* Jump limit — reject wild span transitions */
+            int delta = (int)actor->track_span_raw - (int)prev_span;
+            if (delta < 0) delta = -delta;
+            if (prev_span > 0 && delta > 50) {
+                actor->track_span_raw = prev_span;
+                TD5_LOG_W(LOG_TAG, "span_guard: slot=%d rejected %d->%d (delta=%d)",
+                          actor->slot_index, prev_span, actor->track_span_raw, delta);
+            }
+
+            /* Clamp per-wheel probes too */
             for (int wi = 0; wi < 4; wi++) {
                 if (actor->wheel_probes[wi].span_index >= (int16_t)max_span)
-                    actor->wheel_probes[wi].span_index = (int16_t)(max_span - 1);
+                    actor->wheel_probes[wi].span_index = actor->track_span_raw;
+                int wdelta = (int)actor->wheel_probes[wi].span_index - (int)actor->track_span_raw;
+                if (wdelta < 0) wdelta = -wdelta;
+                if (wdelta > 50)
+                    actor->wheel_probes[wi].span_index = actor->track_span_raw;
             }
         }
     }
