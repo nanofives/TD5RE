@@ -1487,9 +1487,11 @@ void td5_ai_update_track_behavior(int slot) {
                         rs[RS_RIGHT_DEVIATION] = delta + 0xFFF;
                     }
 
-                    TD5_LOG_D(LOG_TAG, "deviation: slot=%d target_span=%d target_angle=%d "
-                              "heading=%d delta=%d left=%d right=%d",
-                              slot, target_span, target_angle, actor_heading, delta,
+                    TD5_LOG_I(LOG_TAG, "deviation: slot=%d tspan=%d ta=0x%X "
+                              "hd=0x%X yaw=0x%X steer=%d delta=%d L=%d R=%d",
+                              slot, target_span, target_angle,
+                              actor_heading, (yaw >> 8) & 0xFFF, steer,
+                              delta,
                               rs[RS_LEFT_DEVIATION], rs[RS_RIGHT_DEVIATION]);
                 }
             }
@@ -1504,17 +1506,79 @@ void td5_ai_update_track_behavior(int slot) {
      *    Coasting/accelerating -> 0x20000 (larger corrections) */
     steer_weight = threshold_result ? 0x10000 : 0x20000;
 
-    /* 5. Steering: band-based UpdateActorSteeringBias [CONFIRMED @ 0x4340C0].
+    /* 5. Steering: direct proportional controller.
      *
-     * The deviation decomposition above sets RS_LEFT_DEVIATION / RS_RIGHT_DEVIATION
-     * using the 0x800 baseline convention (actor_heading includes the +0x800 yaw
-     * bias, target_angle does not → delta ~0x800 when aligned). The band-based
-     * steering reads those values and applies nested left/right correction bands:
-     *   LEFT < 0x800 → left correction (fine, medium, coarse)
-     *   RIGHT < 0x401 → right correction (fine, medium, coarse)
-     *   else → emergency snap
-     * This matches the original binary exactly. */
-    td5_ai_update_steering_bias(rs, steer_weight);
+     * The original's band-based UpdateActorSteeringBias (0x4340C0) expects a
+     * delta baseline of 0x800 between the biased heading and unbiased target.
+     * However, the source port's deviation computation produces a baseline
+     * near 0 (heading ≈ target in biased space), which causes band thresholds
+     * to mis-fire and accumulate runaway corrections.
+     *
+     * This controller directly computes the steer_cmd that points the
+     * steered heading (yaw + steer) >> 8 at the target with the +0x800
+     * bias offset that the deviation decomposition expects:
+     *   desired heading = (target_angle + 0x800) & 0xFFF
+     *   steer = ((desired_heading << 8) - yaw)
+     * This is a direct-set (not accumulated), clamped to ±0x18000.
+     *
+     * TODO: restore band-based system once spawn heading and original
+     * dynamics are bit-accurate. */
+    {
+        int32_t yaw = ACTOR_I32(actor, ACTOR_YAW_ACCUM);
+        /* Recompute target angle for the steering controller */
+        int32_t ta = 0;
+        {
+            int16_t sp = ACTOR_I16(actor, ACTOR_SPAN_RAW);
+            int span_count = td5_track_get_span_count();
+            if (span_count > 0 && sp >= 0) {
+                int tsp = ((int)sp + 4) % span_count;
+                int tx = 0, tz = 0;
+                int rb = 128;
+                const uint8_t *rp = (const uint8_t *)(intptr_t)rs[RS_ROUTE_TABLE_PTR];
+                if (rp) rb = (int)rp[(size_t)(unsigned)tsp * 3u];
+                if (td5_track_sample_target_point(tsp, rb, &tx, &tz, rs[RS_TRACK_OFFSET_BIAS])) {
+                    int32_t ax = ACTOR_I32(actor, ACTOR_WORLD_POS_X);
+                    int32_t az = ACTOR_I32(actor, ACTOR_WORLD_POS_Z);
+                    ta = ai_angle_from_vector((tx - ax) >> 8, (tz - az) >> 8) & 0xFFF;
+                }
+            }
+        }
+        /* Desired heading = target_angle directly.
+         * The yaw_accum already contains (real_angle + 0x800) << 8, so the
+         * biased heading (yaw >> 8 & 0xFFF) is offset from the real direction
+         * by +0x800. Since ai_angle_from_vector returns a raw angle, the
+         * natural baseline is heading ≈ target + 0x800 when aligned, making
+         * delta ≈ 0x800. But in practice the baseline is near 0 because the
+         * target points ahead where the biased heading already is. Setting
+         * desired = ta (not ta + 0x800) correctly targets the current biased
+         * heading at the target angle — no double-bias. */
+        int32_t desired = ta;
+        int32_t current = (yaw >> 8) & 0xFFF;
+        int32_t err = ((desired - current + 0x800) & 0xFFF) - 0x800;
+
+        /* PD steering controller with aggressive angular velocity damping.
+         *
+         * The bicycle model integrates yaw torque into angular_velocity_yaw,
+         * which the AI steering can't directly overwrite (physics runs after).
+         * Instead, set steer_cmd = P*err - D*omega to:
+         *   (P) steer toward the target heading
+         *   (D) oppose the current angular velocity via the bicycle model's
+         *       lateral force asymmetry from the steered heading offset.
+         *
+         * D=8 means each unit/tick of omega contributes 8*256=2048 of steer,
+         * producing enough lateral force asymmetry to counteract the rotation.
+         * At typical speed omega~23: damping_steer = -8*23*256 = -47104.
+         * This is within ±0x18000 clamp and effectively brakes the yaw. */
+        int32_t omega_scaled = ACTOR_I32(actor, 0x1C4) >> 8; /* angular_velocity_yaw in 12-bit/tick */
+        int32_t pd_err = err - 8 * omega_scaled;
+        int32_t desired_steer = pd_err << 8;
+        if (desired_steer > 0x18000) desired_steer = 0x18000;
+        if (desired_steer < -0x18000) desired_steer = -0x18000;
+        ACTOR_I32(actor, ACTOR_STEERING_CMD) = desired_steer;
+
+        TD5_LOG_I(LOG_TAG, "steer_pd: slot=%d ta=0x%X cur=0x%X err=%d omega=%d ds=%d",
+                  slot, ta, current, err, omega_scaled, desired_steer);
+    }
 }
 
 /* ========================================================================
@@ -1669,7 +1733,7 @@ void td5_ai_recycle_traffic_actor(void) {
                 int32_t world_x, world_y, world_z;
                 if (td5_track_get_span_lane_world(q_span, q_lane, &world_x, &world_y, &world_z)) {
                     ACTOR_I32(a, ACTOR_WORLD_POS_X) = world_x;
-                    *(int32_t *)(a + 0x200) = (int32_t)0xC0000000;
+                    *(int32_t *)(a + 0x200) = world_y;
                     ACTOR_I32(a, ACTOR_WORLD_POS_Z) = world_z;
                 }
             }
@@ -1678,6 +1742,27 @@ void td5_ai_recycle_traffic_actor(void) {
             td5_track_compute_heading((TD5_Actor *)a);
             if (q_flags & 1) {
                 ACTOR_I32(a, ACTOR_YAW_ACCUM) += 0x80000;
+            }
+
+            /* Build rotation matrix from heading (+0x120, float[9]) */
+            {
+                int32_t yaw12 = (ACTOR_I32(a, ACTOR_YAW_ACCUM) >> 8) & 0xFFF;
+                float cf = (float)ai_cos_fixed12(yaw12) * (1.0f / 4096.0f);
+                float sf = (float)ai_sin_fixed12(yaw12) * (1.0f / 4096.0f);
+                float *rm = (float *)(a + 0x120);
+                memset(rm, 0, 9 * sizeof(float));
+                rm[0] =  cf;
+                rm[2] =  sf;
+                rm[4] =  1.0f;
+                rm[6] = -sf;
+                rm[8] =  cf;
+                /* Zero velocities for clean re-spawn */
+                ACTOR_I32(a, ACTOR_LIN_VEL_X) = 0;
+                ACTOR_I32(a, 0x1D0) = 0; /* linear_velocity_y */
+                ACTOR_I32(a, ACTOR_LIN_VEL_Z) = 0;
+                ACTOR_I32(a, 0x1C0) = 0; /* angular_velocity_roll */
+                ACTOR_I32(a, 0x1C4) = 0; /* angular_velocity_yaw */
+                ACTOR_I32(a, 0x1C8) = 0; /* angular_velocity_pitch */
             }
 
             /* Clear all recovery/state fields */
@@ -1691,10 +1776,6 @@ void td5_ai_recycle_traffic_actor(void) {
             rs[RS_TRACK_OFFSET_BIAS] = 0;
             rs[RS_SCRIPT_FLAGS] = 0;
             rs[RS_RECOVERY_STAGE] = 0;
-
-            /* Reset physics state and snap to ground */
-            td5_physics_reset_actor_state((TD5_Actor *)a);
-            ACTOR_I16(a, ACTOR_SPAN_RAW) = q_span; /* restore after reset */
 
             TD5_LOG_I(LOG_TAG,
                       "Traffic recycled: slot=%d from_span=%d to_span=%d lane=%u flags=0x%02X pos=(%d,%d,%d)",
@@ -1765,7 +1846,11 @@ void td5_ai_init_traffic_actors(void) {
             int32_t world_x, world_y, world_z;
             if (td5_track_get_span_lane_world(q_span, q_lane, &world_x, &world_y, &world_z)) {
                 ACTOR_I32(a, ACTOR_WORLD_POS_X) = world_x;
-                *(int32_t *)(a + 0x200) = (int32_t)0xC0000000; /* Y: far below, physics snaps up */
+                /* Use track Y directly — traffic has zero wheel positions
+                 * (no carparam.dat), so reset_actor_state's integrate_pose
+                 * ground snap probes land at body center and produce
+                 * garbage Y ~5800 units underground. */
+                *(int32_t *)(a + 0x200) = world_y;
                 ACTOR_I32(a, ACTOR_WORLD_POS_Z) = world_z;
             } else {
                 TD5_LOG_W(LOG_TAG, "init_traffic: slot=%d span=%d lane=%d — world pos lookup failed", i, q_span, q_lane);
@@ -1778,6 +1863,22 @@ void td5_ai_init_traffic_actors(void) {
         /* Oncoming traffic: rotate 180 degrees (+ 0x80000 in 20-bit yaw) */
         if (q_flags & 1) {
             ACTOR_I32(a, ACTOR_YAW_ACCUM) += 0x80000;
+        }
+
+        /* Build rotation matrix from heading (+0x120, float[9]).
+         * Traffic has no wheel positions so skip reset_actor_state (which
+         * would corrupt Y via broken ground snap). Build Ry(yaw) only. */
+        {
+            int32_t yaw12 = (ACTOR_I32(a, ACTOR_YAW_ACCUM) >> 8) & 0xFFF;
+            float cf = (float)ai_cos_fixed12(yaw12) * (1.0f / 4096.0f);
+            float sf = (float)ai_sin_fixed12(yaw12) * (1.0f / 4096.0f);
+            float *rm = (float *)(a + 0x120);
+            memset(rm, 0, 9 * sizeof(float));
+            rm[0] =  cf;     /* m00 = cos  */
+            rm[2] =  sf;     /* m02 = sin  */
+            rm[4] =  1.0f;   /* m11 = 1    */
+            rm[6] = -sf;     /* m20 = -sin */
+            rm[8] =  cf;     /* m22 = cos  */
         }
 
         /* Clear state */
@@ -1793,13 +1894,6 @@ void td5_ai_init_traffic_actors(void) {
         rs[RS_RECOVERY_STAGE] = 0;
         rs[RS_SLOT_INDEX] = i;
         rs[RS_ENCOUNTER_HANDLE] = -1;
-
-        /* Reset physics state (suspension, velocity, ground snap)
-         * [CONFIRMED @ 0x435C3A] */
-        td5_physics_reset_actor_state((TD5_Actor *)a);
-
-        /* Restore span_raw after reset (reset may overwrite via integrate_pose) */
-        ACTOR_I16(a, ACTOR_SPAN_RAW) = q_span;
 
         TD5_LOG_I(LOG_TAG, "init_traffic: slot=%d span=%d lane=%u flags=0x%02X pos=(%d,%d,%d)",
                   i, q_span, q_lane, q_flags,

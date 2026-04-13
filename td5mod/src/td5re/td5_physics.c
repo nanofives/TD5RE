@@ -529,6 +529,23 @@ void td5_physics_update_vehicle_actor(TD5_Actor *actor)
      * during pause, so the car doesn't actually move. */
     td5_physics_integrate_pose(actor);
 
+    /* 7b. Traffic Y re-snap: traffic slots have zero wheel positions
+     * (no carparam.dat), so integrate_pose's per-wheel ground snap fails
+     * and gravity accumulates unchecked — traffic falls underground.
+     * Re-snap Y to track surface and zero vertical dynamics each tick. */
+    if (actor->slot_index >= 6) {
+        int32_t wx, wy, wz;
+        if (td5_track_get_span_lane_world(
+                actor->track_span_raw,
+                (int)actor->track_sub_lane_index,
+                &wx, &wy, &wz)) {
+            actor->world_pos.y = wy;
+        }
+        actor->linear_velocity_y = 0;
+        actor->angular_velocity_roll = 0;
+        actor->angular_velocity_pitch = 0;
+    }
+
     /* 8. Track wall contact resolution (FUN_004070E0 -> FUN_00406F50 -> FUN_00406CC0)
      * Check wheel probes against span edges and push car back if outside.
      * Called after pose integration, matching original UpdateVehicleActor order:
