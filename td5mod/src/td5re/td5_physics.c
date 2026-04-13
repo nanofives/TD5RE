@@ -703,12 +703,20 @@ void td5_physics_update_player(TD5_Actor *actor)
             td5_physics_reverse_throttle_sign(actor);
         } else {
             /* On-ground auto gear: the original only runs this on airborne
-             * frames [CONFIRMED @ 0x4044F9], relying on CRGT's RPM from the
-             * previous tick (~3200 for gear 2) being above the upshift
-             * threshold (2600). Do NOT call UESA here — its target formula
-             * produces ~410 RPM which prevents upshifts entirely. CRGT
-             * (post-force, line ~1140) handles on-ground RPM slew. */
-            td5_physics_auto_gear_select(actor);
+             * frames [CONFIRMED @ 0x4044F9]. The port runs it on-ground
+             * because it has fewer micro-airborne frames. auto_gear_select
+             * only downshifts by 1 per call [CONFIRMED @ 0x42EFF1], so
+             * after braking from gear 5 we need multiple passes to reach
+             * gear 2 where CRGT can rebuild RPM. Loop until stable. */
+            {
+                uint8_t prev_gear;
+                int passes = 0;
+                do {
+                    prev_gear = actor->current_gear;
+                    td5_physics_auto_gear_select(actor);
+                    passes++;
+                } while (actor->current_gear != prev_gear && passes < 6);
+            }
         }
 
         if (!actor->brake_flag) {
