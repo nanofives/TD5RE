@@ -1675,6 +1675,8 @@ void td5_render_actors_for_view(int view_index)
     {
         int total_actors = td5_game_get_total_actor_count();
         int drag_mode = g_td5.drag_race_enabled;
+        static int s_traffic_diag_count = 0;
+        int traffic_diag_this_frame = (s_traffic_diag_count % 60 == 0) && (s_traffic_diag_count < 600);
 
         for (int slot = 0; slot < total_actors; slot++) {
             TD5_Actor *actor = td5_game_get_actor(slot);
@@ -1721,9 +1723,20 @@ void td5_render_actors_for_view(int view_index)
             td5_render_load_rotation(&view_rot);
             td5_render_load_translation(&render_pos);
 
-            if (!td5_render_test_mesh_frustum(mesh, &depth))
+            if (!td5_render_test_mesh_frustum(mesh, &depth)) {
+                if (slot == 6 && traffic_diag_this_frame)
+                    TD5_LOG_I(LOG_TAG, "traffic6: CULLED pos=(%.0f,%.0f,%.0f) span=%d vel=(%d,%d,%d)",
+                              render_pos.x, render_pos.y, render_pos.z,
+                              actor->track_span_raw,
+                              actor->linear_velocity_x, actor->linear_velocity_y,
+                              actor->linear_velocity_z);
                 continue;
+            }
             (void)depth;
+
+            if (slot >= 6 && traffic_diag_this_frame)
+                TD5_LOG_I(LOG_TAG, "traffic DRAWN: slot=%d pos=(%.0f,%.0f,%.0f) depth=%.1f",
+                          slot, render_pos.x, render_pos.y, render_pos.z, depth);
 
             td5_render_transform_mesh_vertices(mesh);
             td5_render_compute_vertex_lighting(mesh);
@@ -1759,6 +1772,7 @@ void td5_render_actors_for_view(int view_index)
                       render_pos.x, render_pos.y, render_pos.z,
                       (void *)mesh);
         }
+        s_traffic_diag_count++;
     }
 
     {
@@ -2371,12 +2385,18 @@ static void render_vehicle_reflection_overlay(TD5_MeshHeader *mesh, int slot)
 #define REFLECTION_MAX_VERTS 4096
     int save_count = (vert_count < REFLECTION_MAX_VERTS) ? vert_count : REFLECTION_MAX_VERTS;
 
-    /* Set translucent blend for the reflection overlay */
-    td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
+    /* Set translucent blend for the reflection overlay.
+     * TRANSLUCENT_ANISO: z_test=1 (renders on car body, behind other geometry),
+     * z_write=0, alpha_ref=1 (no alpha discard), src_alpha blending.
+     * NOT TRANSLUCENT_LINEAR — that has alpha_ref=0x80 which discards our
+     * partial-alpha vertices, and z_enable=0 which is for 2D HUD overlays. */
+    td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_ANISO);
 
     /* Save and override vertex lighting + UVs for the reflection pass.
-     * Set alpha to ~40% for a subtle chrome overlay; swap primary UVs
-     * with the projection UVs computed above. */
+     * Vertex color must be white with partial alpha so the environs
+     * texture shows through as a chrome tint. The high byte being
+     * non-zero (0x66) bypasses the color LUT in flush_immediate_internal.
+     * ARGB format: A=0x66 (40%), R=G=B=0xFF (white). */
     uint32_t saved_lighting[REFLECTION_MAX_VERTS];
     float saved_uv[REFLECTION_MAX_VERTS][2];
     for (i = 0; i < save_count; i++) {
@@ -2384,14 +2404,25 @@ static void render_vehicle_reflection_overlay(TD5_MeshHeader *mesh, int slot)
         saved_uv[i][0] = verts[i].tex_u;
         saved_uv[i][1] = verts[i].tex_v;
 
-        uint32_t lum = verts[i].lighting & 0xFF;
-        verts[i].lighting = 0x66000000u | (lum >> 1);
+        verts[i].lighting = 0x66FFFFFFu; /* 40% alpha, white */
         verts[i].tex_u = verts[i].proj_u;
         verts[i].tex_v = verts[i].proj_v;
     }
 
     /* Render the reflection mesh */
     td5_render_prepared_mesh(mesh);
+
+    {
+        static int s_refl_log_count = 0;
+        if (s_refl_log_count < 10 || (s_refl_log_count % 300) == 0) {
+            TD5_LOG_I(LOG_TAG,
+                      "reflection overlay: slot=%d page=%d verts=%d cmds=%d "
+                      "cos=%.3f sin=%.3f",
+                      slot, pe->texture_page, save_count, cmd_count,
+                      pe->cos_heading, pe->sin_heading);
+        }
+        s_refl_log_count++;
+    }
 
     /* Restore original UVs, lighting, and texture pages */
     for (i = 0; i < save_count; i++) {

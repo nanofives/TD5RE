@@ -2210,6 +2210,9 @@ int td5_asset_load_environs_pages(int page_base, int max_pages, int *out_pages)
         alpha_bleed_rgb((uint8_t *)pixels, w, h);
 
         if (td5_plat_render_upload_texture(page_id, pixels, w, h, 2)) {
+            /* Register as semi-transparent (type 2) so the render pipeline
+             * uses the correct blend preset when binding this page. */
+            td5_asset_set_page_transparency(page_id, 2);
             if (out_pages)
                 out_pages[loaded] = page_id;
             loaded++;
