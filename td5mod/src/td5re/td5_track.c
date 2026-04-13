@@ -670,68 +670,80 @@ void td5_track_resolve_wall_contacts(TD5_Actor *actor)
         }
     }
 
-    /* Simple wall fire: d < dead zone and clamp at -200. No trend
-     * detection, no span-transition skip, no hysteresis. Earlier
-     * attempts to filter walker-lag spikes ended up suppressing real
-     * walls — the geometry is correct (verified), the walker is broken
-     * (root cause), and no wall-side heuristic can reliably distinguish
-     * the two. Accept occasional walker-lag fires (clamped to -200 so
-     * the push is bounded) in exchange for walls that actually work. */
+    /* Two-pass approach to filter single-probe false positives.
+     * Pass 1: compute all probes' penetrations against both walls.
+     * Pass 2: only fire impulse if 2+ probes hit the SAME wall with
+     *         genuine penetration. Single-probe hits are typically
+     *         caused by geometry edge cases (lane-count transitions,
+     *         narrow spans, walker lag) — not real wall contact. */
+    const int32_t WALL_DEAD_ZONE = -10;
+    int32_t probe_l_d[4] = {0}, probe_r_d[4] = {0};
+    int probe_l_ok[4] = {0}, probe_r_ok[4] = {0};
+    int l_hit_count = 0, r_hit_count = 0;
+    int32_t l_deepest = 0, r_deepest = 0;
 
     for (int pi = 0; pi < 4; pi++) {
         int32_t px = probe_block[pi].x >> 8;
         int32_t pz = probe_block[pi].z >> 8;
 
-        int32_t l_d = 0, r_d = 0;
-        int l_ok = 0, r_ok = 0;
-
         if (l_par.ok) {
             int32_t rel_x = px - l_par.base_x - sp->origin_x;
             int32_t rel_z = pz - l_par.base_z - sp->origin_z;
             int64_t dot = (int64_t)rel_x * l_par.nnx + (int64_t)rel_z * l_par.nnz;
-            l_d = (int32_t)((dot + ((dot >> 63) & 0xFFF)) >> 12);
-            if (l_d < -30) l_d = -30;
-            l_ok = 1;
+            int32_t d = (int32_t)((dot + ((dot >> 63) & 0xFFF)) >> 12);
+            if (d < -30) d = -30;
+            probe_l_d[pi] = d;
+            probe_l_ok[pi] = 1;
+            if (d < WALL_DEAD_ZONE) {
+                l_hit_count++;
+                if (d < l_deepest) l_deepest = d;
+            }
         }
         if (r_par.ok) {
             int32_t rel_x = px - r_par.base_x - sp->origin_x;
             int32_t rel_z = pz - r_par.base_z - sp->origin_z;
             int64_t dot = (int64_t)rel_x * r_par.nnx + (int64_t)rel_z * r_par.nnz;
-            r_d = (int32_t)((dot + ((dot >> 63) & 0xFFF)) >> 12);
-            if (r_d < -30) r_d = -30;
-            r_ok = 1;
-        }
-
-        const int32_t WALL_DEAD_ZONE = -10;
-
-        /* Sanity check: if BOTH walls report the probe as outside (both d
-         * negative), the span has degenerate geometry (e.g., lane-count
-         * transition where one wall edge runs diagonally instead of
-         * longitudinally). Skip both impulses for this probe. */
-        if (l_ok && r_ok && l_d < 0 && r_d < 0)
-            continue;
-
-        if (l_ok && l_d < WALL_DEAD_ZONE) {
-            double rad = atan2((double)l_par.nnx, (double)(-l_par.nnz));
-            int32_t wall_angle = (int32_t)(rad * (4096.0 / (2.0 * 3.14159265358979323846))) & 0xFFF;
-            td5_physics_wall_response(actor, wall_angle, l_d, 1, l_par.nnx, l_par.nnz, 4096);
-            td5_physics_rebuild_pose(actor);
-            TD5_LOG_I(LOG_TAG, "wall_contact: slot=%d probe=%d LEFT span=%d d=%d angle=%d",
-                      actor->slot_index, pi, span_idx, l_d, wall_angle);
-        }
-
-        if (r_ok && r_d < WALL_DEAD_ZONE) {
-            double rad = atan2((double)r_par.nnx, (double)(-r_par.nnz));
-            int32_t wall_angle = (int32_t)(rad * (4096.0 / (2.0 * 3.14159265358979323846))) & 0xFFF;
-            td5_physics_wall_response(actor, wall_angle, r_d, 2, r_par.nnx, r_par.nnz, 4096);
-            td5_physics_rebuild_pose(actor);
-            TD5_LOG_I(LOG_TAG, "wall_contact: slot=%d probe=%d RIGHT span=%d d=%d angle=%d",
-                      actor->slot_index, pi, span_idx, r_d, wall_angle);
+            int32_t d = (int32_t)((dot + ((dot >> 63) & 0xFFF)) >> 12);
+            if (d < -30) d = -30;
+            probe_r_d[pi] = d;
+            probe_r_ok[pi] = 1;
+            if (d < WALL_DEAD_ZONE) {
+                r_hit_count++;
+                if (d < r_deepest) r_deepest = d;
+            }
         }
 
         if (diag_slot0) {
             TD5_LOG_I(LOG_TAG, "wall_diag slot0 p%d span=%d L:d=%d R:d=%d probe=(%d,%d)",
-                      pi, span_idx, l_d, r_d, px, pz);
+                      pi, span_idx, probe_l_d[pi], probe_r_d[pi], px, pz);
+        }
+    }
+
+    /* Pass 2: apply impulses only if 2+ probes hit the same wall. */
+    for (int pi = 0; pi < 4; pi++) {
+        /* Skip probe if both walls say it's outside (degenerate span). */
+        if (probe_l_ok[pi] && probe_r_ok[pi] &&
+            probe_l_d[pi] < 0 && probe_r_d[pi] < 0)
+            continue;
+
+        if (probe_l_ok[pi] && probe_l_d[pi] < WALL_DEAD_ZONE && l_hit_count >= 2) {
+            double rad = atan2((double)l_par.nnx, (double)(-l_par.nnz));
+            int32_t wall_angle = (int32_t)(rad * (4096.0 / (2.0 * 3.14159265358979323846))) & 0xFFF;
+            td5_physics_wall_response(actor, wall_angle, probe_l_d[pi], 1,
+                                      l_par.nnx, l_par.nnz, 4096);
+            td5_physics_rebuild_pose(actor);
+            TD5_LOG_I(LOG_TAG, "wall_contact: slot=%d probe=%d LEFT span=%d d=%d angle=%d n=%d",
+                      actor->slot_index, pi, span_idx, probe_l_d[pi], wall_angle, l_hit_count);
+        }
+
+        if (probe_r_ok[pi] && probe_r_d[pi] < WALL_DEAD_ZONE && r_hit_count >= 2) {
+            double rad = atan2((double)r_par.nnx, (double)(-r_par.nnz));
+            int32_t wall_angle = (int32_t)(rad * (4096.0 / (2.0 * 3.14159265358979323846))) & 0xFFF;
+            td5_physics_wall_response(actor, wall_angle, probe_r_d[pi], 2,
+                                      r_par.nnx, r_par.nnz, 4096);
+            td5_physics_rebuild_pose(actor);
+            TD5_LOG_I(LOG_TAG, "wall_contact: slot=%d probe=%d RIGHT span=%d d=%d angle=%d n=%d",
+                      actor->slot_index, pi, span_idx, probe_r_d[pi], wall_angle, r_hit_count);
         }
     }
 }
@@ -2630,13 +2642,26 @@ void td5_track_compute_heading(TD5_Actor *actor)
         break;
     }
 
-    /* Original calls AngleFromVector12 (0x40A720, integer LUT) — NOT
-     * angle_from_vector_full (0x433FC0, different quadrant mapping).
-     * Using the shared AngleFromVector12 for consistent rounding. */
+    /* Original calls AngleFromVector12 (0x40A720, integer LUT). The port's
+     * shared AngleFromVector12 (td5_render.c:3345) is atan2(x,z)-based with
+     * compass convention (yaw=0 → +Z, +0x400 → +X, increases CW from above).
+     * The dx/dz computed above is the LATERAL R→L vector (right rail →
+     * left rail), which points 90° CCW of the road's forward direction.
+     * To recover forward from lateral_R→L in compass convention, rotate
+     * 90° CW = +0x400 (not the original's +0x800, which is correct for the
+     * LUT variant's different quadrant base).
+     *
+     * Verified with logged span-111 spawn (dx=279, dz=-629):
+     *   yaw=(1775+0x400)<<8 → forward direction (-0.913, -0.407)
+     *   matches rail walk dir (-1355, -600) normalized = (-0.914, -0.405).
+     * Pre-fix +0x800 produced (-0.405, +0.914), exactly 90° off — which
+     * caused the wall_diag-confirmed perpendicular spawn rotation. */
     angle = AngleFromVector12(dx, dz) & 0xFFF;
 
-    TD5_LOG_I(LOG_TAG, "compute_heading: span=%d type=%d dx=%d dz=%d angle=%d",
-              span_idx, sp->span_type, dx, dz, angle);
+    TD5_LOG_I(LOG_TAG, "compute_heading: span=%d type=%d dx=%d dz=%d "
+              "lateral_angle=%d yaw=%d",
+              span_idx, sp->span_type, dx, dz, angle,
+              (angle + 0x400) & 0xFFF);
 
     /* Write heading to actor's heading_normal at +0x290 (as int16[3]) */
     heading_normal = (int16_t *)((uint8_t *)actor + 0x290);
@@ -2644,9 +2669,10 @@ void td5_track_compute_heading(TD5_Actor *actor)
     heading_normal[1] = 0;
     heading_normal[2] = (int16_t)dz;
 
-    /* Store to yaw euler accumulator at +0x1F4 with 180° offset
-     * [CONFIRMED @ 0x434501: (angle + 0x800) * 0x100] */
-    *(int32_t *)((uint8_t *)actor + 0x1F4) = (angle + 0x800) << 8;
+    /* Store yaw to euler accumulator at +0x1F4. Offset is +0x400 in the
+     * port's compass-convention AngleFromVector12, corresponding to the
+     * original's +0x800 over the LUT variant @ 0x434501. */
+    *(int32_t *)((uint8_t *)actor + 0x1F4) = (angle + 0x400) << 8;
 }
 
 /* ========================================================================

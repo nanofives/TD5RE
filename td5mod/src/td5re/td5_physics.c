@@ -420,11 +420,14 @@ void td5_physics_tick(void)
         td5_physics_update_vehicle_actor(actor);
     }
 
-    /* Skip collision resolution during countdown — wall/vehicle impulses
-     * would accumulate in velocity without integrate_pose to dissipate them,
-     * causing cars to shoot off at race start. */
-    if (!g_game_paused)
-        td5_physics_resolve_vehicle_contacts();
+    /* Contacts resolve unconditionally — matches ResolveVehicleContacts
+     * call at 0x42BA0C (no paused gate in the original). update_vehicle_actor
+     * above already ran integrate_pose for every actor this tick, so any
+     * impulses contacts write to vel are picked up by the NEXT tick's
+     * integrate — exactly as the original handles it. This is part of why
+     * the original's sim_tick=1 row shows lat_speed=-1 (a tiny contact
+     * residue) while the port previously showed lat_speed=0. */
+    td5_physics_resolve_vehicle_contacts();
 }
 
 /* ========================================================================
@@ -546,21 +549,14 @@ void td5_physics_update_vehicle_actor(TD5_Actor *actor)
     if (actor->vehicle_mode == 0) {
         td5_track_resolve_reverse_contacts(actor);
         td5_track_resolve_forward_contacts(actor);
-        /* Lateral wall check disabled entirely. The original game has NO
-         * lateral walls — containment is topological via the span walker
-         * (cars that drive off the side just run on state-0x0F off-track
-         * damping). Any port-specific lateral wall produces false
-         * positives on narrow geometry, junction approaches, and branch
-         * roads. Forward/reverse boundary contacts above still handle
-         * the global start/end walls from the per-level sentinel table.
-         * [CONFIRMED: original 0x406650 calls only reverse/forward/sub-lane
-         *  extremity handlers — no mid-strip lateral walls exist.]
-         *
-         * Observed issue this fixes: Newcastle (L29) stuck at span 122
-         * with probe-1 RIGHT wall false-positive, angle=1121, d=-11..-30,
-         * oscillating 23+ times. Probe geometry was wider than the road
-         * at that span. */
-        /* td5_track_resolve_wall_contacts(actor); */
+        /* Lateral wall check — re-enabled with multi-probe filter to
+         * avoid single-probe false positives (Newcastle span 122 bug).
+         * The wall handler now requires 2+ probes hitting the same wall
+         * before applying impulse, filtering geometry edge cases while
+         * preserving real wall impacts. Disabling entirely caused the
+         * car to clip through the road on many tracks since the port
+         * lacks state-0x0F off-track damping. Branch spans still skipped. */
+        td5_track_resolve_wall_contacts(actor);
     }
 
     /* 9. Update surface_contact_flags for the NEXT tick's dynamics dispatch.
