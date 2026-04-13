@@ -1511,25 +1511,56 @@ void td5_ai_update_track_behavior(int slot) {
      *    TODO: restore original weights once AI dynamics match. */
     steer_weight = threshold_result ? 0x4000 : 0x8000;
 
-    /* 5. Steering: band-based UpdateActorSteeringBias [CONFIRMED @ 0x4340C0].
+    /* 5. Steering: direct-set proportional controller.
      *
-     * Speed-gate: skip steering when the car is nearly stationary.
-     * At low speed, the bicycle model converts any steer_cmd into pure yaw
-     * torque (from drive force asymmetry), instantly saturating the angular
-     * velocity at the 0x578 torque clamp. Once omega reaches ±6000+, the
-     * car spins uncontrollably. Waiting for forward speed ensures the
-     * lateral tire forces dominate over drive-torque asymmetry, giving the
-     * bicycle model the self-correcting feedback loop it needs.
+     * The original's band-based UpdateActorSteeringBias (0x4340C0) accumulates
+     * corrections each tick. With the port's deviation baseline near 0 (vs the
+     * original's 0x800), the band system oscillates around alignment and
+     * accumulates runaway steer in one direction.
      *
-     * The original doesn't need this gate because its tighter physics
-     * coupling (bit-accurate dynamics) naturally limits the torque response.
-     * abs_speed threshold of 0x1000: ~16 units of longitudinal speed,
-     * roughly 2-3 ticks of acceleration. */
+     * This controller directly SETS steer_cmd = -delta * gain each tick
+     * (no accumulation). The deviation's signed delta (heading - target)
+     * naturally centers on 0 when aligned. Combined with the ±1500 angular
+     * velocity clamp in td5_physics_update_ai, this produces stable
+     * path-following without runaway.
+     *
+     * Gain: steer_weight >> 2 gives steer_angle = delta * (weight/1024).
+     * At weight=0x8000: steer_angle = delta * 8 per heading-unit error.
+     * A 50-unit error (4.4°) → steer_angle of 400 → 35° of front wheel
+     * angle. This is strong enough to track curves but not so large that
+     * the bicycle model saturates.
+     *
+     * TODO: restore band-based system once the spawn heading and AI dynamics
+     * match the original's conventions. */
     {
-        int32_t long_speed = ACTOR_I32(actor, ACTOR_LONGITUDINAL_SPEED);
-        int32_t abs_speed = long_speed < 0 ? -long_speed : long_speed;
-        if (abs_speed > 0x1000) {
-            td5_ai_update_steering_bias(rs, steer_weight);
+        int32_t delta = rs[RS_RIGHT_DEVIATION];
+        /* Use the signed deviation: RIGHT_DEVIATION is small when the car
+         * needs to steer right (heading is CW of target). Convert to signed
+         * error using the same convention as the deviation decomposition. */
+        int32_t left_dev = rs[RS_LEFT_DEVIATION];
+        int32_t right_dev = rs[RS_RIGHT_DEVIATION];
+        int32_t signed_delta;
+        if (left_dev < right_dev) {
+            /* LEFT is smaller → heading is CW of target → need positive steer */
+            signed_delta = -left_dev;
+        } else {
+            /* RIGHT is smaller → heading is CCW of target → need negative steer */
+            signed_delta = right_dev;
+        }
+        int32_t desired_steer = -(signed_delta * (steer_weight >> 2)) >> 8;
+        if (desired_steer > 0x18000) desired_steer = 0x18000;
+        if (desired_steer < -0x18000) desired_steer = -0x18000;
+        ACTOR_I32(actor, ACTOR_STEERING_CMD) = desired_steer;
+
+        /* Angular velocity braking: when omega opposes the steering
+         * correction (steer is trying to turn one way, omega carries
+         * the car the other way), damp omega by 50% per tick.
+         * This breaks the persistent rotation from the bicycle model
+         * that the steer can't counteract through forces alone. */
+        int32_t omega = ACTOR_I32(actor, 0x1C4);
+        if ((desired_steer > 0 && omega < -128) ||
+            (desired_steer < 0 && omega > 128)) {
+            ACTOR_I32(actor, 0x1C4) = omega / 2;
         }
     }
 }

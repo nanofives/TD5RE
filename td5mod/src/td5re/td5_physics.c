@@ -724,6 +724,13 @@ void td5_physics_update_player(TD5_Actor *actor)
             td5_physics_reverse_throttle_sign(actor);
         }
 
+        if (actor->slot_index == 0 && (actor->frame_counter % 30u) == 0u) {
+            TD5_LOG_I(LOG_TAG,
+                "GATE: on_ground brake_flag=%d throttle=%d gear=%d rpm=%d v_long=%d scf=0x%X",
+                actor->brake_flag, throttle, actor->current_gear,
+                actor->engine_speed_accum, v_long, actor->surface_contact_flags);
+        }
+
         if (!actor->brake_flag) {
             /* Drive path: drive torque distributed by drivetrain. At
              * idle throttle (encounter_steering_cmd == 0), compute_drive_torque
@@ -776,6 +783,12 @@ void td5_physics_update_player(TD5_Actor *actor)
             wheel_drive[1] = bf >> 1;  /* front-right [CONFIRMED @ 0x404030] */
             wheel_drive[2] = 0;        /* rear-left:  no on-ground rear brake */
             wheel_drive[3] = 0;        /* rear-right: no on-ground rear brake */
+            if (actor->slot_index == 0 && (actor->frame_counter % 30u) == 0u) {
+                TD5_LOG_I(LOG_TAG,
+                    "BRAKE: bf=%d brk_front=%d throttle=%d v_long=%d v_lat=%d wd0=%d sf=%d",
+                    bf, brake_front, throttle, v_long, v_lat, wheel_drive[0],
+                    (int)s_surface_friction[surface_wheel[0] & 0x1F]);
+            }
         }
     } else {
         /* --- AIRBORNE branch [CONFIRMED @ 0x4044F9-0x4045AE] ---
@@ -1523,6 +1536,21 @@ void td5_physics_update_ai(TD5_Actor *actor)
         if (yaw_torque < -TD5_YAW_TORQUE_MAX) yaw_torque = -TD5_YAW_TORQUE_MAX;
 
         actor->angular_velocity_yaw += yaw_torque;
+
+        /* Angular velocity clamp for AI cars.
+         * The original has no explicit omega clamp in the normal dynamics
+         * path (only wall_response clamps to ±6000). However, the original's
+         * tighter physics coupling and bit-accurate integer math naturally
+         * limit the omega growth rate. The port's bicycle model produces
+         * higher net yaw torque (possibly from int64 promotion differences),
+         * causing omega to grow unchecked and the AI steering to lose
+         * control. Clamping to ±1500 keeps the car from spinning out while
+         * preserving the ability to navigate curves.
+         * TODO: remove once the AI bicycle model matches the original. */
+        if (actor->angular_velocity_yaw > 1500)
+            actor->angular_velocity_yaw = 1500;
+        if (actor->angular_velocity_yaw < -1500)
+            actor->angular_velocity_yaw = -1500;
     }
 
     /* --- 10. World-frame force application [CONFIRMED @ 0x4056C4-0x405762]
