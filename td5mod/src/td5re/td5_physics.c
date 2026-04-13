@@ -2943,9 +2943,13 @@ static void integrate_traffic_pose(TD5_Actor *actor)
     actor->render_pos.y = (float)actor->world_pos.y * (1.0f / 256.0f);
     actor->render_pos.z = (float)actor->world_pos.z * (1.0f / 256.0f);
 
-    TD5_LOG_I(LOG_TAG, "traffic_pose: slot=%d span=%d pos=(%d,%d,%d)",
-              actor->slot_index, (int)actor->track_span_raw,
-              actor->world_pos.x, actor->world_pos.y, actor->world_pos.z);
+    /* Log once per 60 frames per slot for diagnostics */
+    if ((actor->frame_counter % 60u) == 0u) {
+        TD5_LOG_I(LOG_TAG, "traffic_pose: slot=%d span=%d ground_y=%d vel=(%d,%d)",
+                  actor->slot_index, (int)actor->track_span_raw,
+                  actor->world_pos.y,
+                  actor->linear_velocity_x, actor->linear_velocity_z);
+    }
 }
 
 /* ========================================================================
