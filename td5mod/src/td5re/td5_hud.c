@@ -1949,10 +1949,16 @@ void td5_hud_render_overlays(float dt)
             td5_render_build_sprite_quad((int *)&needle_params);
 
             /* Update gear indicator UV from GEARNUMBERS atlas (linear strip,
-             * 8 slots × 16px wide at (128,128) 128×16). */
+             * 8 slots × 16px wide). Atlas layout: N(0),1(1),2(2),3(3),4(4),5(5),R(6),_(7).
+             * Gear bytes: 0=reverse, 1=neutral, 2=1st, 3=2nd, ... 7=6th.
+             * Map: gear 0→atlas 6 (R), gear 1→atlas 0 (N), gear N→atlas N-1 (display gear). */
             uint8_t gear = actor_gear(actor_slot);
+            uint8_t atlas_idx;
+            if (gear == 0)      atlas_idx = 6;  /* reverse → "R" */
+            else if (gear == 1) atlas_idx = 0;  /* neutral → "N" */
+            else                atlas_idx = gear - 1;  /* 2→"1", 3→"2", ..., 7→"6" */
             {
-                float gu = (float)gear * 16.0f + (float)s_gearnumbers_atlas->atlas_x;
+                float gu = (float)atlas_idx * 16.0f + (float)s_gearnumbers_atlas->atlas_x;
                 float gv = (float)s_gearnumbers_atlas->atlas_y;
                 hud_build_quad(
                     view_base + GEAR_QUAD_OFF,

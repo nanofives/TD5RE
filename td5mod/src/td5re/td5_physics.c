@@ -720,15 +720,17 @@ void td5_physics_update_player(TD5_Actor *actor)
          * The original relies on micro-airborne frames from track bumps for
          * gear shifts. Do NOT call auto_gear_select here — it causes gear
          * skipping, drivetrain kick accumulation, and RPM oscillation. */
-        if (*((const uint8_t *)actor + 0x378) == 0) {
-            td5_physics_reverse_throttle_sign(actor);
-        } else {
-            /* The original only calls auto_gear on the airborne path
-             * [CONFIRMED @ 0x40452D], but the port's contact system rarely
-             * reports airborne state, so the car stays stuck in gear 2.
-             * Call auto_gear on-ground but suppress the drivetrain kick
-             * (which accumulates and causes roll-up when called every tick). */
-            td5_physics_auto_gear_select_no_kick(actor);
+        /* Gearbox dispatch — only when NOT braking.
+         * Original airborne path gates on (!brake_flag && throttle != 0)
+         * before calling auto_gear [CONFIRMED @ 0x4044F9]. During braking,
+         * throttle=-256 which would make auto_gear set gear=REVERSE,
+         * corrupting the forward gear state. */
+        if (!actor->brake_flag) {
+            if (*((const uint8_t *)actor + 0x378) == 0) {
+                td5_physics_reverse_throttle_sign(actor);
+            } else {
+                td5_physics_auto_gear_select_no_kick(actor);
+            }
         }
 
         if (actor->slot_index == 0 && (actor->frame_counter % 30u) == 0u) {
@@ -1563,20 +1565,6 @@ void td5_physics_update_ai(TD5_Actor *actor)
 
         actor->angular_velocity_yaw += yaw_torque;
 
-        /* Angular velocity clamp for AI cars.
-         * The original has no explicit omega clamp in the normal dynamics
-         * path (only wall_response clamps to ±6000). However, the original's
-         * tighter physics coupling and bit-accurate integer math naturally
-         * limit the omega growth rate. The port's bicycle model produces
-         * higher net yaw torque (possibly from int64 promotion differences),
-         * causing omega to grow unchecked and the AI steering to lose
-         * control. Clamping to ±1500 keeps the car from spinning out while
-         * preserving the ability to navigate curves.
-         * TODO: remove once the AI bicycle model matches the original. */
-        if (actor->angular_velocity_yaw > 1500)
-            actor->angular_velocity_yaw = 1500;
-        if (actor->angular_velocity_yaw < -1500)
-            actor->angular_velocity_yaw = -1500;
     }
 
     /* --- 10. World-frame force application [CONFIRMED @ 0x4056C4-0x405762]
