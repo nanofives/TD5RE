@@ -702,14 +702,16 @@ void td5_physics_update_player(TD5_Actor *actor)
         if (*((const uint8_t *)actor + 0x378) == 0) {
             td5_physics_reverse_throttle_sign(actor);
         } else {
-            /* Run UESA before auto_gear to get correct RPM for shift decision.
-             * CRGT (the ground engine updater) targets RPM ≈ redline-1800 for
-             * gear 2, which is below the upshift threshold (5400 for Viper).
-             * UESA's formula (speed * gear_ratio * 0x2D / 4096 + 400) produces
-             * the correct RPM that matches the upshift thresholds.
-             * CRGT will overwrite engine_speed_accum later in the tick, so this
-             * only affects the auto_gear_select decision. */
+            /* Run UESA with ACTUAL velocity so auto_gear gets correct RPM.
+             * On the ground path, longitudinal_speed holds CRGT's pseudo-speed
+             * (RPM-encoded), not the real velocity. UESA applied to pseudo-speed
+             * just echoes current RPM (circular). Feed the actual body-frame
+             * v_long so UESA computes speed-proportional RPM → enables upshifts.
+             * Restore pseudo-speed afterward since CRGT overwrites it later. */
+            int32_t saved_long = actor->longitudinal_speed;
+            actor->longitudinal_speed = v_long;  /* actual body-frame velocity */
             td5_physics_update_engine_speed(actor);
+            actor->longitudinal_speed = saved_long;
             td5_physics_auto_gear_select(actor);
         }
 
@@ -2831,6 +2833,22 @@ void td5_physics_integrate_pose(TD5_Actor *actor)
      * wrong span — the primary reason collisions don't work. */
     td5_track_update_actor_position(actor);
 
+    /* Clamp span indices after walker update. The span walker can overflow
+     * past the end of the span array on some tracks (e.g., Moscow span 2788
+     * with only 2722 spans). Out-of-bounds span reads garbage from memory,
+     * producing wildly wrong terrain heights that launch the car. */
+    {
+        int max_span = g_td5.track_span_ring_length;
+        if (max_span > 0) {
+            if (actor->track_span_raw >= (uint16_t)max_span)
+                actor->track_span_raw = (uint16_t)(max_span - 1);
+            for (int wi = 0; wi < 4; wi++) {
+                if (actor->wheel_probes[wi].span_index >= (int16_t)max_span)
+                    actor->wheel_probes[wi].span_index = (int16_t)(max_span - 1);
+            }
+        }
+    }
+
     /* 4. Convert accumulators to 12-bit display angles */
     actor->display_angles.roll  = (int16_t)((actor->euler_accum.roll >> 8) & 0xFFF);
     actor->display_angles.yaw   = (int16_t)((actor->euler_accum.yaw >> 8) & 0xFFF);
@@ -2973,16 +2991,8 @@ void td5_physics_integrate_pose(TD5_Actor *actor)
             int16_t rot_y = rotate_vec_world_y(actor, src);
 
             int32_t wheel_y = actor->wheel_contact_pos[i].y;
-            int32_t contrib = wheel_y + (int32_t)rot_y * -0x100;
-            contact_y_sum += (int64_t)contrib;
+            contact_y_sum += (int64_t)(wheel_y + (int32_t)rot_y * -0x100);
             contact_count++;
-            /* Detect sudden Y discontinuity in wheel contact */
-            if (actor->slot_index == 0 &&
-                (contrib > 10000000 || contrib < -10000000)) {
-                TD5_LOG_W(LOG_TAG, "Y_SPIKE: wheel=%d wcy=%d rot_y=%d contrib=%d span=%d",
-                          i, wheel_y, rot_y, contrib,
-                          (int)actor->wheel_probes[i].span_index);
-            }
         }
 
         if (contact_count > 0) {

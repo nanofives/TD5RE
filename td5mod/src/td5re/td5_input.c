@@ -22,9 +22,12 @@
 #include "td5_platform.h"
 #include "td5re.h"
 #include "td5_game.h"
+#include "td5_camera.h"
 
 /* Defined in td5_game.c */
 extern int td5_game_is_wanted_mode(void);
+extern int    g_actorSlotForView[2];
+extern uint8_t *g_actor_table_base;
 
 #include <string.h>
 #include <stdlib.h>
@@ -285,17 +288,40 @@ void td5_input_poll_race_session(void)
             (!s_replay_mode_flag) &&
             (!s_escape_fade_active))
         {
-            /* Signal camera change to camera module.
-             * Original calls FUN_00402e00(i, 1) and FUN_00401450. */
+            /* Original calls CycleRaceCameraPreset(i, 1) then
+             * LoadCameraPresetForView(actor+0x208, 1, i, 1). (0x42C470) */
+            CycleRaceCameraPreset(i, 1);
+            {
+                int slot = g_actorSlotForView[i];
+                TD5_Actor *actor = td5_game_get_actor(slot);
+                if (!actor && g_actor_table_base && slot >= 0 &&
+                    slot < td5_game_get_total_actor_count()) {
+                    actor = (TD5_Actor *)(g_actor_table_base +
+                                          (size_t)slot * TD5_ACTOR_STRIDE);
+                }
+                if (actor) {
+                    LoadCameraPresetForView(
+                        (int)((uint8_t *)actor + 0x208), 1, i, 1);
+                }
+            }
             s_camera_cooldown[i] = TD5_INPUT_CAMERA_COOLDOWN;
+            TD5_LOG_I(LOG_TAG, "camera change: player=%d", i);
         }
 
         /* Rear view flag */
         if (((s_control_bits[i] & 0x2000000u) == 0) ||
             s_replay_mode_flag || s_escape_fade_active)
         {
+            if (s_rear_view[i]) {
+                td5_camera_set_rear_view(i, 0);
+                TD5_LOG_I(LOG_TAG, "rear view OFF: player=%d", i);
+            }
             s_rear_view[i] = 0;
         } else {
+            if (!s_rear_view[i]) {
+                td5_camera_set_rear_view(i, 1);
+                TD5_LOG_I(LOG_TAG, "rear view ON: player=%d", i);
+            }
             s_rear_view[i] = 1;
         }
     }
@@ -339,7 +365,22 @@ post_poll:
             !s_replay_mode_flag &&
             !s_escape_fade_active)
         {
+            CycleRaceCameraPreset(i, 1);
+            {
+                int slot = g_actorSlotForView[i];
+                TD5_Actor *actor = td5_game_get_actor(slot);
+                if (!actor && g_actor_table_base && slot >= 0 &&
+                    slot < td5_game_get_total_actor_count()) {
+                    actor = (TD5_Actor *)(g_actor_table_base +
+                                          (size_t)slot * TD5_ACTOR_STRIDE);
+                }
+                if (actor) {
+                    LoadCameraPresetForView(
+                        (int)((uint8_t *)actor + 0x208), 1, i, 1);
+                }
+            }
             s_camera_cooldown[i] = TD5_INPUT_CAMERA_COOLDOWN;
+            TD5_LOG_I(LOG_TAG, "camera cycle F%d: player=%d", 4 + i, i);
         }
     }
 }
@@ -631,9 +672,23 @@ void td5_input_update_player_control(int slot)
              * Used for deterministic trace comparison (both port and original
              * get identical input). Enable via [Trace] AutoThrottle=1 in INI. */
             if (slot == 0 && g_td5.ini.auto_throttle) {
+                static uint32_t s_at_log = 0;
+                if (s_steering_cmd[slot] != 0 && (s_at_log++ % 30u) == 0u) {
+                    TD5_LOG_I(LOG_TAG,
+                              "AutoThrottle: zeroing steer=%d (bits=0x%X analog_x=%d)",
+                              s_steering_cmd[slot], bits,
+                              (bits & TD5_INPUT_ANALOG_X_FLAG) ? 1 : 0);
+                }
                 s_throttle[slot] = 0x100;
                 s_steering_cmd[slot] = 0;
                 s_brake[slot] = 0;
+            } else if (slot == 0) {
+                static uint32_t s_at_log2 = 0;
+                if ((s_at_log2++ % 60u) == 0u) {
+                    TD5_LOG_I(LOG_TAG,
+                              "AutoThrottle INACTIVE: auto_throttle=%d steer=%d",
+                              g_td5.ini.auto_throttle, s_steering_cmd[slot]);
+                }
             }
 
             /* 0x30C: steering_command (int32) */

@@ -71,20 +71,52 @@ extern void td5_platform_win32_init(void *ddraw4, void *d3ddevice3,
  * WinMain
  * ======================================================================== */
 
-/* Crash handler: logs the faulting address before terminating. */
+/* Crash handler: logs the faulting address + stack walk before terminating. */
 static LONG WINAPI td5_crash_handler(EXCEPTION_POINTERS *ep)
 {
-    char crash_msg[512];
+    char crash_msg[2048];
+    int pos = 0;
     DWORD code = ep->ExceptionRecord->ExceptionCode;
     void *addr = ep->ExceptionRecord->ExceptionAddress;
     void *fault_addr = (ep->ExceptionRecord->NumberParameters >= 2)
         ? (void *)ep->ExceptionRecord->ExceptionInformation[1] : NULL;
-    snprintf(crash_msg, sizeof(crash_msg),
-        "CRASH: code=0x%08lX at EIP=%p access=%p EAX=0x%08lX ECX=0x%08lX EDX=0x%08lX",
+    pos += snprintf(crash_msg + pos, sizeof(crash_msg) - pos,
+        "CRASH: code=0x%08lX at EIP=%p access=%p\n"
+        "  EAX=0x%08lX EBX=0x%08lX ECX=0x%08lX EDX=0x%08lX\n"
+        "  ESI=0x%08lX EDI=0x%08lX EBP=0x%08lX ESP=0x%08lX\n",
         code, addr, fault_addr,
         (unsigned long)ep->ContextRecord->Eax,
+        (unsigned long)ep->ContextRecord->Ebx,
         (unsigned long)ep->ContextRecord->Ecx,
-        (unsigned long)ep->ContextRecord->Edx);
+        (unsigned long)ep->ContextRecord->Edx,
+        (unsigned long)ep->ContextRecord->Esi,
+        (unsigned long)ep->ContextRecord->Edi,
+        (unsigned long)ep->ContextRecord->Ebp,
+        (unsigned long)ep->ContextRecord->Esp);
+    /* Walk stack frames via EBP chain */
+    {
+        DWORD *ebp = (DWORD *)(uintptr_t)ep->ContextRecord->Ebp;
+        DWORD eip = (DWORD)(uintptr_t)ep->ContextRecord->Eip;
+        pos += snprintf(crash_msg + pos, sizeof(crash_msg) - pos, "  Stack: %08lX", (unsigned long)eip);
+        for (int i = 0; i < 16 && ebp && !IsBadReadPtr(ebp, 8); i++) {
+            DWORD ret = ebp[1];
+            pos += snprintf(crash_msg + pos, sizeof(crash_msg) - pos, " <- %08lX", (unsigned long)ret);
+            ebp = (DWORD *)(uintptr_t)ebp[0];
+        }
+        pos += snprintf(crash_msg + pos, sizeof(crash_msg) - pos, "\n");
+    }
+    /* Module info for crash EIP */
+    {
+        HMODULE hmod = NULL;
+        char modname[MAX_PATH] = {0};
+        if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                               (LPCSTR)addr, &hmod) && hmod) {
+            GetModuleFileNameA(hmod, modname, MAX_PATH);
+            pos += snprintf(crash_msg + pos, sizeof(crash_msg) - pos,
+                "  Module: %s base=%p offset=0x%08lX\n",
+                modname, (void *)hmod, (unsigned long)((uintptr_t)addr - (uintptr_t)hmod));
+        }
+    }
     dbglog(crash_msg);
     td5_plat_log_flush();
     /* Also write to a dedicated crash file in the log directory */
@@ -312,9 +344,10 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     dbglog("  [Game]    Car=%d Track=%d GameType=%d SkipIntro=%d DebugOverlay=%d AutoRace=%d",
            g_td5.ini.default_car, g_td5.ini.default_track, g_td5.ini.default_game_type,
            g_td5.ini.skip_intro, g_td5.ini.debug_overlay, g_td5.ini.auto_race);
-    dbglog("  [Trace]   RaceTrace=%d Slot=%d MaxFrames=%d",
+    dbglog("  [Trace]   RaceTrace=%d Slot=%d MaxFrames=%d AutoThrottle=%d FastFwd=%d SimTickCap=%d",
            g_td5.ini.race_trace_enabled, g_td5.ini.race_trace_slot,
-           g_td5.ini.race_trace_max_frames);
+           g_td5.ini.race_trace_max_frames, g_td5.ini.auto_throttle,
+           g_td5.ini.trace_fast_forward, g_td5.ini.race_trace_max_sim_ticks);
 
     if (width <= 0 || height <= 0) {
         width  = GetSystemMetrics(SM_CXSCREEN);
