@@ -1445,10 +1445,23 @@ int td5_track_load_strip(const void *data, size_t size)
     s_strip_header = hdr;
 
     span_offset     = hdr[0];  /* byte offset to span record table */
-    s_span_count    = (int)hdr[1]; /* total span count (ring length) */
+    s_span_count    = (int)hdr[1]; /* main road span count (ring length) */
     vertex_offset   = hdr[2];  /* byte offset to vertex table */
     s_secondary_count = (int)hdr[3];
     s_aux_count     = (int)hdr[4];
+
+    /* Branch roads (divergent paths) are stored as extra spans after the
+     * main road array. hdr[1] = main road count, but the span array
+     * physically extends up to (vertex_offset - span_offset) / 24 spans.
+     * Junction spans (type 8/11) link to these branch spans via forward_link
+     * and backward_link fields. Without including them, all branch links
+     * are out of bounds and the span walker overflows at road forks.
+     *
+     * Compute the actual physical span count from the data layout. The
+     * ring_length for wrapping/checkpoint purposes stays at hdr[1]. */
+    int physical_span_count = (int)((vertex_offset - span_offset) / 24);
+    if (physical_span_count > s_span_count)
+        s_span_count = physical_span_count;
 
     /* Resolve runtime pointers */
     if (span_offset >= size || vertex_offset >= size) {
@@ -1461,8 +1474,9 @@ int td5_track_load_strip(const void *data, size_t size)
     s_span_array   = (TD5_StripSpan *)(s_strip_blob + span_offset);
     s_vertex_table = (TD5_StripVertex *)(s_strip_blob + vertex_offset);
 
-    /* Store in global state */
-    g_td5.track_span_ring_length = s_span_count;
+    /* Store in global state. ring_length = main road only (for wrapping),
+     * but s_span_count includes branch spans (for bounds checks). */
+    g_td5.track_span_ring_length = (int)hdr[1];
 
     /* Parse jump table at header + 0x14 (if present) */
     if (size >= 6 * 4) {
