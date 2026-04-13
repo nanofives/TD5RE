@@ -420,14 +420,15 @@ void td5_physics_tick(void)
         td5_physics_update_vehicle_actor(actor);
     }
 
-    /* Contacts resolve unconditionally — matches ResolveVehicleContacts
-     * call at 0x42BA0C (no paused gate in the original). update_vehicle_actor
-     * above already ran integrate_pose for every actor this tick, so any
-     * impulses contacts write to vel are picked up by the NEXT tick's
-     * integrate — exactly as the original handles it. This is part of why
-     * the original's sim_tick=1 row shows lat_speed=-1 (a tiny contact
-     * residue) while the port previously showed lat_speed=0. */
-    td5_physics_resolve_vehicle_contacts();
+    /* Skip collision resolution during countdown — wall/vehicle impulses
+     * would accumulate in velocity without integrate_pose to dissipate them,
+     * causing cars to shoot off at race start. The original's V2V narrow
+     * phase gates impulses on nonzero relative velocity so stationary grid
+     * pairs are no-ops, but the port's V2V is not a faithful enough port
+     * to match that invariant — without this gate V2V between grid pairs
+     * (circuit sub-lane 1/2 at same span) produces bogus Y/X/Z impulses. */
+    if (!g_game_paused)
+        td5_physics_resolve_vehicle_contacts();
 }
 
 /* ========================================================================
@@ -3401,12 +3402,23 @@ void td5_physics_integrate_pose(TD5_Actor *actor)
     if (actor->angular_velocity_pitch < -6000) actor->angular_velocity_pitch = -6000;
 
     /* 10. Update suspension response.
-     * Skip during countdown/pause — no dynamics are running, so angular
-     * velocity should stay at zero. Without this gate, the velocity-path
-     * torque from per-wheel normal asymmetry accumulates during the entire
-     * countdown, tilting the car before the race even starts. */
-    if (!g_game_paused)
+     * During active race: full suspension_response (gravity add-back +
+     * roll/pitch spring-damper).
+     * During paused/countdown: apply ONLY the gravity add-back for grounded
+     * cars, skipping the roll/pitch spring-damper that would accumulate
+     * angular velocity during the entire countdown (tilting the car before
+     * the race even starts). This matches the original's net vel_y=0 behavior
+     * at sim_tick=1 on the gate-clearing tick: gravity subtract at 0x405EDE
+     * and the snap -= gravity at 0x40631A are both cancelled by the original's
+     * UpdateVehicleSuspensionResponse gravity add-back at 0x00405A49. Without
+     * this paused add-back, vel_y sits at -g_gravity_constant (-1900) on
+     * every paused tick. */
+    if (!g_game_paused) {
         td5_physics_update_suspension_response(actor);
+    } else if ((actor->wheel_contact_bitmask & 0x0F) != 0x0F) {
+        /* Grounded during paused — cancel gravity to match original invariant */
+        actor->linear_velocity_y += g_gravity_constant;
+    }
 
     if (actor->slot_index == 0 && (actor->frame_counter % 60u) == 0u) {
         TD5_LOG_D(LOG_TAG, "Integrate actor0: pos=(%d,%d,%d)",

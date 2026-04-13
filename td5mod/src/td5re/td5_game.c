@@ -154,7 +154,19 @@ typedef struct ActorRaceMetric {
     int16_t  forward_speed;             /* current speed */
     int16_t  skid_factor;               /* current skid intensity */
     int16_t  contact_count;             /* collision count */
-    int16_t  lap_split_times[8];        /* per-lap split deltas */
+    int16_t  lap_split_times[8];        /* per-lap split deltas
+                                         *
+                                         * DIVERGENCE from original (TODO, item 6 of
+                                         * checkpoint subsystem gaps). Original stores splits at
+                                         * actor+0x34E..+0x35D as a rolling 16-bit array indexed
+                                         * by circuit lap or P2P cp. The original stores the
+                                         * PREVIOUS split (or speculatively stores current span
+                                         * then normalises running deltas) — see 0x00409E98 and
+                                         * 0x00409FE0. Port stores cumulative_timer directly,
+                                         * which is wrong for results-screen display fidelity but
+                                         * benign for single-player lap counting. Rewrite to
+                                         * match actor+0x34E layout when the results screen
+                                         * needs exact per-split display. */
 } ActorRaceMetric;
 
 static ActorRaceMetric s_metrics[TD5_MAX_RACER_SLOTS];
@@ -289,6 +301,7 @@ static void sort_results_by_time_asc(void);
 static void sort_results_by_score_desc(void);
 static void update_race_order(void);
 static void advance_pending_finish_state(int slot, uint32_t sim_delta);
+static void tick_pending_finish_timer(int slot);
 static void sync_actor_race_metrics(int slot);
 static void accumulate_speed_bonus(int slot);
 static void decay_ultimate_timer(int slot);
@@ -1439,10 +1452,23 @@ int td5_game_run_race_frame(void) {
 
     td5_game_trace_stage("frame_begin", 0);
 
-    /* ---- Race completion check (before sim loop) ---- */
+    /* ---- Race completion check (before sim loop) ----
+     *
+     * Original CheckRaceCompletionState @ 0x00409E80 is invoked once per frame
+     * from the head of RunRaceFrame @ 0x0042B580 — it inlines the per-actor
+     * checkpoint/circuit scan and then runs the aggregate finish check.
+     * The port mirrors that cadence: advance_pending_finish_state runs once
+     * per frame per active slot here, feeding the results of any finish
+     * promotion into check_race_completion's aggregate scan below. */
     if (g_td5.race_end_fade_state == 0) {
-        int completion = check_race_completion(
-            td5_game_normalized_dt_to_accum(g_td5.normalized_frame_dt));
+        int pf;
+        uint32_t frame_accum = td5_game_normalized_dt_to_accum(g_td5.normalized_frame_dt);
+        for (pf = 0; pf < TD5_MAX_RACER_SLOTS; pf++) {
+            if (s_slot_state[pf].state == 3) continue;  /* disabled */
+            advance_pending_finish_state(pf, frame_accum);
+        }
+
+        int completion = check_race_completion(frame_accum);
         if (completion) {
             g_td5.race_end_fade_state = 1;
 
@@ -1615,18 +1641,22 @@ int td5_game_run_race_frame(void) {
         }
 
         if (g_td5.paused) {
-            tick_race_countdown();
-            /* Poll input during countdown so player can rev the engine.
-             * Physics runs with g_game_paused=1, which only updates
-             * engine RPM (no vehicle movement).
+            /* Sub-tick body ordering matches RunRaceFrame @ 0x0042B580:
+             *   UpdateRaceActors (reads OLD g_gamePaused)  @ 0x42B7C7
+             *   ResolveVehicleContacts (unconditional)     @ 0x42BA0C
+             *   UpdateRaceCameraTransitionTimer (LATE)     @ 0x42BA3A
+             *   g_simTimeAccumulator -= 0x10000            @ 0x42BA94
+             *   if (gate == 0) g_simulationTickCounter++   @ 0x42BAA1
              *
-             * The original (FUN_0042b580) runs UpdateRaceActors (0x436A70)
-             * unconditionally inside the simulation tick loop — there is no
-             * countdown branch that skips AI.  Running td5_ai_tick() here
-             * causes AI to set encounter_steering_cmd (throttle) each frame,
-             * so update_engine_speed_smoothed can ramp AI RPM toward the
-             * target during the countdown, matching the original's ~7200 RPM
-             * at race start. */
+             * The countdown decrement runs AFTER physics so physics on the
+             * gate-clearing sub-tick uses the OLD paused=1, while the counter
+             * increment below sees the NEW paused=0 and ticks up. This makes
+             * the port's sim_tick=1 row match the original's sim_tick=1 row:
+             * a paused-physics snapshot (vel=0).
+             *
+             * Poll input during countdown so player can rev the engine.
+             * Physics runs with g_game_paused=1, which only updates
+             * engine RPM (no vehicle movement). */
             td5_physics_set_paused(1);
             for (i = 0; i < TD5_MAX_RACER_SLOTS; i++) {
                 if (s_slot_state[i].state == 1)
@@ -1643,9 +1673,25 @@ int td5_game_run_race_frame(void) {
              * (0x0042B580). Countdown still updates the camera so the
              * fly-in/idle-orbit animates while the grid counts down. */
             td5_camera_update_chase_all();
+            /* Countdown decrement runs LATE in the sub-tick, matching
+             * UpdateRaceCameraTransitionTimer at 0x42BA3A. On the sub-tick
+             * where the timer reaches 0, this flips g_td5.paused 1→0; the
+             * counter gate below then sees paused=0 and increments. */
+            tick_race_countdown();
             g_td5.sim_time_accumulator -= TD5_TICK_ACCUMULATOR_ONE;
             ticks_this_frame++;
-            td5_game_trace_stage("countdown", ticks_this_frame);
+            /* Counter gated on countdown fully expired (gate==0), matching
+             * original check at 0x42BAA1. During active countdown the gate
+             * is non-zero and the counter stays at 0; on the clearing tick
+             * the gate becomes 0 and the counter increments to 1 with a
+             * paused-physics snapshot already in place. */
+            if (!g_td5.paused) {
+                g_td5.simulation_tick_counter++;
+                TD5_LOG_I(LOG_TAG, "Race countdown cleared on sub-tick — counter=1, sim_tick=1 snapshot is paused physics (matches original 0x42BAA1)");
+                td5_game_trace_stage("post_progress", ticks_this_frame);
+            } else {
+                td5_game_trace_stage("countdown", ticks_this_frame);
+            }
             continue;
         }
         td5_physics_set_paused(0);
@@ -1721,10 +1767,23 @@ int td5_game_run_race_frame(void) {
             }
         }
 
-        /* --- Per-actor race progression --- */
+        /* --- Per-actor race progression (sub-tick cadence) ---
+         *
+         * Original (0x00406650 UpdateVehicleActor) calls
+         *   AccumulateVehicleSpeedBonusScore (0x0040A3D0) — per-tick, gated on Ultimate
+         *   AdvancePendingFinishState        (0x0040A2B0) — per-tick, decrements +0x344
+         *   DecayUltimateVariantTimer        (0x0040A440) — per-tick from contact paths
+         * from inside UpdateRaceActors (which itself runs from the sub-tick loop of
+         * RunRaceFrame). Only the checkpoint-scan & finish-state promotion
+         * (CheckRaceCompletionState @ 0x00409E80) runs once per frame — see the
+         * pre-sub-tick call site in td5_game_run_race_frame for that.
+         *
+         * accumulate_speed_bonus contains a (simulation_tick_counter & 3) == 0
+         * gate that models the original's per-sub-tick throttle at 0x00409E24;
+         * this gate stays valid because the counter still advances per sub-tick. */
         for (i = 0; i < TD5_MAX_RACER_SLOTS; i++) {
             if (s_slot_state[i].state == 3) continue; /* disabled */
-            advance_pending_finish_state(i, TD5_TICK_ACCUMULATOR_ONE);
+            tick_pending_finish_timer(i);
             accumulate_speed_bonus(i);
             decay_ultimate_timer(i);
             sync_actor_race_metrics(i);
@@ -2122,9 +2181,75 @@ static int check_race_completion(uint32_t sim_delta) {
 }
 
 /* ========================================================================
- * Advance pending finish state per actor (0x40A2B0)
+ * Per-sub-tick P2P timer countdown + timeout failure (0x40A2B0)
  *
- * Per-tick update for each actor: check circuit sectors or P2P checkpoints.
+ * Mirrors AdvancePendingFinishState @ 0x0040A2B0. The original packs a 16-bit
+ * time bank at actor+0x344 as CONCAT11(hi, lo):
+ *
+ *   lo -= 2                              (sub-fractional counter, 0..56)
+ *   if (lo < 0)  lo += 0x39, hi -= 1     (borrow 1 unit from the upper byte)
+ *   if (hi < 0)  seed post-finish metrics and promote slot state to 2
+ *
+ * The decrement is gated on g_specialEncounterType != 0 (P2P modes only) and
+ * on actor+0x328 (finish_time) still being zero. When hi underflows the
+ * original sets:
+ *   actor+0x328 = actor+0x34c        (post_finish_metric_base from stored field)
+ *   actor+0x334 = clamp(actor+0x314 >> 8, min 1)
+ *   actor+0x336 = (track_sub_progress * 0x5dc) / actor+0x334
+ * and promotes state '\x01' -> '\x02' with companion_1 = '\x01', companion_2 = '\x02'.
+ *
+ * In the port, m->timer_ticks is a flat int16 representing the combined
+ * HI*0x39 + LO bank, updated here with the same wraparound semantics so that
+ * HUD/result code can keep treating it as a scalar. Timeout promotes slot
+ * state to 2 (completed, but marked as a failure via post_finish_metric_base
+ * fallback to cumulative_timer for sort fallback). This is the missing
+ * race-fail-on-timeout path for P2P.
+ * ======================================================================== */
+
+static void tick_pending_finish_timer(int slot) {
+    ActorRaceMetric *m = &s_metrics[slot];
+
+    /* Original gate: only runs when g_specialEncounterType != 0 (P2P) and
+     * !g_replayModeFlag and slot state == '\x01' and !camera transition.
+     * Approximate via port's flags: special_encounter_enabled covers P2P
+     * when s_active_checkpoint.checkpoint_count > 0.  */
+    if (s_active_checkpoint.checkpoint_count == 0) return;
+    if (s_slot_state[slot].state != 1) return;
+    if (s_slot_state[slot].companion_1 != 0) return;  /* already finished */
+    if (m->post_finish_metric_base != 0) return;       /* already scored */
+    if (m->timer_ticks <= 0) return;                   /* already expired */
+
+    /* Per-tick decrement matches the hi/lo bank in the original. Port combines
+     * hi and lo into a single int16; subtracting 2 per tick models the low
+     * byte -= 2 operation and the carry into the high byte is implicit. */
+    m->timer_ticks -= 2;
+
+    if (m->timer_ticks <= 0) {
+        /* Timer expired - race-fail-on-timeout. Equivalent to the original's
+         * state promotion at 0x0040A34F: post-finish metrics seeded and slot
+         * flipped into state 2. Fall back to cumulative_timer when
+         * post_finish_metric_base is unset so results sort consistently. */
+        m->timer_ticks = 0;
+        if (m->post_finish_metric_base == 0) {
+            m->post_finish_metric_base = (m->cumulative_timer != 0)
+                ? m->cumulative_timer
+                : 1;  /* nonzero sentinel = "finished" for aggregator */
+        }
+        s_slot_state[slot].companion_1 = 1;
+        s_slot_state[slot].companion_2 = 2;
+        s_slot_state[slot].state = 2;
+        TD5_LOG_I(LOG_TAG,
+                  "Actor finish: slot=%d mode=p2p-timeout timer=0 cumulative=%d cp=%d",
+                  slot, m->cumulative_timer, (int)m->checkpoint_index);
+    }
+}
+
+/* ========================================================================
+ * Advance pending finish state per actor (0x40A2B0 / 0x409E80 per-actor body)
+ *
+ * Per-frame update for each actor: check circuit sectors or P2P checkpoints.
+ * Called once per frame (not per sub-tick) — matches the original's
+ * CheckRaceCompletionState cadence at the head of RunRaceFrame.
  * ======================================================================== */
 
 static void advance_pending_finish_state(int slot, uint32_t sim_delta) {
@@ -2258,7 +2383,19 @@ static void advance_pending_finish_state(int slot, uint32_t sim_delta) {
         }
     } else {
         /* Point-to-point / time trial: checkpoint crossing (0x409E80 P2P branch)
-         * Original comparison: (int)(uint)(uint16_t)threshold <= (int)(int16_t)span */
+         * Original comparison: (int)(uint)(uint16_t)threshold <= (int)(int16_t)span
+         *
+         * LEVELINF +0x08 gate (asm 0x0040A047):
+         *   MOV EAX,[g_trackEnvironmentConfig + 8]; TEST EAX,EAX; JZ 0x0040A1F7
+         * When LEVELINF +0x08 is zero the original short-circuits the entire
+         * P2P per-actor loop. Port mirrors this two ways:
+         *   1. Asset load zeroes s_active_checkpoint.checkpoint_count when
+         *      +0x08 == 0 (td5_game.c:1204), so the block below is a no-op.
+         *   2. Explicit early-out here as a belt-and-braces guard against any
+         *      path that leaves checkpoint_count stale while +0x08 is 0. */
+        if (s_levelinf_checkpoint_config == 0) {
+            return;
+        }
         if (m->checkpoint_index < s_active_checkpoint.checkpoint_count) {
             int cp = m->checkpoint_index;
             int threshold = (int)(unsigned int)s_active_checkpoint.checkpoints[cp].span_threshold;
