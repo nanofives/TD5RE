@@ -2179,6 +2179,51 @@ int td5_asset_load_race_texture_pages(void)
     return loaded_count > 0 || s_fallback_texture_uploaded;
 }
 /* ========================================================================
+ * Environment / Reflection Texture Loading (0x42F990)
+ * ======================================================================== */
+
+int td5_asset_load_environs_pages(int page_base, int max_pages, int *out_pages)
+{
+    /*
+     * LoadEnvironmentTexturePages (0x42F990):
+     * Loads environment textures for the chrome/reflection projection
+     * effect on car bodies. Pre-extracted PNGs in re/assets/environs/.
+     */
+    static const char *s_envmap_names[] = {
+        "re/assets/environs/SUN.png",
+        "re/assets/environs/TREE.png",
+        "re/assets/environs/MSUN.png",
+        "re/assets/environs/BRIDGE.png"
+    };
+    int loaded = 0;
+
+    for (int i = 0; i < max_pages && i < 4; i++) {
+        void *pixels = NULL;
+        int w = 0, h = 0;
+        int page_id = page_base + i;
+
+        if (!td5_asset_decode_png_rgba32(s_envmap_names[i], &pixels, &w, &h)) {
+            TD5_LOG_W(LOG_TAG, "environs: failed to load %s", s_envmap_names[i]);
+            continue;
+        }
+
+        alpha_bleed_rgb((uint8_t *)pixels, w, h);
+
+        if (td5_plat_render_upload_texture(page_id, pixels, w, h, 2)) {
+            if (out_pages)
+                out_pages[loaded] = page_id;
+            loaded++;
+            TD5_LOG_I(LOG_TAG, "environs: loaded %s -> page %d (%dx%d)",
+                      s_envmap_names[i], page_id, w, h);
+        }
+
+        stbi_image_free(pixels);
+    }
+
+    return loaded;
+}
+
+/* ========================================================================
  * Vehicle Asset Loading -- LoadRaceVehicleAssets (0x443280)
  *
  * Phase 1: Query himodel.dat sizes and compute a single allocation.

@@ -1113,7 +1113,8 @@ int td5_game_init_race_session(void) {
 
     /* ---- Step 18: Upload race texture pages to GPU ---- */
     td5_asset_load_race_texture_pages();
-    TD5_LOG_I(LOG_TAG, "InitRace step 18/19: race texture pages uploaded");
+    td5_render_load_environs_textures();
+    TD5_LOG_I(LOG_TAG, "InitRace step 18/19: race texture pages + environs uploaded");
 
     /* ---- Step 19: Initialize HUD, pause menu overlay ---- */
     #define DBG_WRITE(msg) TD5_LOG_I(LOG_TAG, "Step19: %s", msg)

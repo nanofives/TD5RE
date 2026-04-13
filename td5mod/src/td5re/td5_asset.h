@@ -201,6 +201,13 @@ int td5_asset_load_track_textures(int track_index);
 int td5_asset_load_race_texture_pages(void);
 
 /**
+ * Load environment/reflection texture PNGs from re/assets/environs/.
+ * Uploads up to max_pages PNGs to GPU starting at page_base.
+ * Returns number of pages loaded, fills out_pages[] with D3D page IDs.
+ */
+int td5_asset_load_environs_pages(int page_base, int max_pages, int *out_pages);
+
+/**
  * Get loaded CHECKPT.NUM data (up to 96 bytes, first 24 = active record).
  * Returns NULL if no checkpoint data loaded for current track.
  */

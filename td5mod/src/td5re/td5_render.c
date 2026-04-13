@@ -367,7 +367,6 @@ static void render_vehicle_shadow_quad(const TD5_Actor *actor);
 static void render_vehicle_wheel_billboards(TD5_Actor *actor, int slot);
 static void render_vehicle_brake_lights(const TD5_Actor *actor, int slot);
 static void render_vehicle_reflection_overlay(TD5_MeshHeader *mesh, int slot);
-static void render_vehicle_reflection_overlay(TD5_MeshHeader *mesh, int slot);
 
 /** 7-entry dispatch table matching original at 0x473b9c */
 typedef void (*PrimDispatchFn)(TD5_PrimitiveCmd *cmd, TD5_MeshVertex *base_verts);
