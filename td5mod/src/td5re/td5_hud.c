@@ -558,8 +558,11 @@ static inline int16_t actor_max_rpm(int slot)
 
 static inline int16_t actor_span_index(int slot)
 {
+    /* track_state[0] at +0x80 is the actively-updated span index
+     * (written by update_position_recursive in td5_track.c).
+     * +0x82 is track_span_normalized which is NOT updated per-frame. */
     uint8_t *a = (uint8_t *)actor_ptr(slot);
-    return *(int16_t *)(a + 0x82);
+    return *(int16_t *)(a + 0x80);
 }
 
 static inline int32_t actor_world_x(int slot)
@@ -1974,7 +1977,9 @@ void td5_hud_render_overlays(float dt)
             int32_t sin_h = (int32_t)(sin(hrad) * 4096.0);
             int32_t cos_h = (int32_t)(cos(hrad) * 4096.0);
             int32_t speed_raw = (vx * sin_h + vz * cos_h) >> 12; /* body-frame longitudinal */
-            if (speed_raw < 0) speed_raw = -speed_raw;
+            /* Original clamps negative speed to 0 [CONFIRMED @ 0x4388A0].
+             * Previous code took abs(), showing speed while reversing. */
+            if (speed_raw < 0) speed_raw = 0;
             speed_raw >>= 8;
 
             int speed_display;
@@ -2339,10 +2344,45 @@ void td5_hud_render_minimap(int actor_slot)
      * round down to 24-span group, go back 6 groups (144 spans behind player). */
     int16_t player_span = actor_span_index(actor_slot);
 
+    /* Validate that the span tracker's answer is near the player's actual
+     * world position.  The boundary-walk tracker (td5_track.c) can fall
+     * behind when the car moves many spans per frame, leaving player_span
+     * pointing at a stale region.  If the span origin is too far from the
+     * actor, do a brute-force nearest-span search so the minimap stays
+     * centred on the car. */
+    {
+        int32_t px = actor_world_x(actor_slot) >> 8; /* 24.8 FP → world units */
+        int32_t pz = actor_world_z(actor_slot) >> 8;
+        uint8_t *sb = (uint8_t *)g_strip_span_base;
+        if (sb && player_span >= 0 && player_span < g_strip_span_count) {
+            int32_t sox = *(int32_t *)(sb + (int)player_span * 24 + 0x0C);
+            int32_t soz = *(int32_t *)(sb + (int)player_span * 24 + 0x14);
+            int64_t dx = (int64_t)(px - sox);
+            int64_t dz = (int64_t)(pz - soz);
+            int64_t dist2 = dx * dx + dz * dz;
+            /* If span origin is more than ~4000 world units away, search */
+            if (dist2 > (int64_t)4000 * 4000) {
+                int best = (int)player_span;
+                int64_t best_d = dist2;
+                /* Scan every 6th span for speed (same stride as render loop) */
+                for (int si = 0; si < g_strip_span_count; si += 6) {
+                    int32_t cx = *(int32_t *)(sb + si * 24 + 0x0C);
+                    int32_t cz = *(int32_t *)(sb + si * 24 + 0x14);
+                    int64_t ddx = (int64_t)(px - cx);
+                    int64_t ddz = (int64_t)(pz - cz);
+                    int64_t d2 = ddx * ddx + ddz * ddz;
+                    if (d2 < best_d) { best_d = d2; best = si; }
+                }
+                TD5_LOG_W(LOG_TAG, "minimap: span tracker stale %d→%d (dist %.0f)",
+                          (int)player_span, best, (float)dx);
+                player_span = (int16_t)best;
+            }
+        }
+    }
+
     /* Branch remap [CONFIRMED @ 0x43A350]: when the player is on a branch
      * segment (player_span >= g_strip_span_count), remap back into the primary
-     * track range using the segment table built during init.  Without this,
-     * start_span overflows and every loop iteration fails bounds checks. */
+     * track range using the segment table built during init. */
     int remapped_span = (int)player_span;
     if (remapped_span >= g_strip_span_count &&
         s_minimap_seg_branch_start < s_minimap_seg_primary_end) {
@@ -2351,8 +2391,6 @@ void td5_hud_render_minimap(int actor_slot)
             if (remapped_span <= (int)s_minimap_seg_end[si]) {
                 remapped_span += (int)s_minimap_seg_branch[si]
                                - (int)s_minimap_seg_start[si];
-                TD5_LOG_I(LOG_TAG, "minimap: branch remap span %d -> %d (seg %d)",
-                          (int)player_span, remapped_span, si);
                 break;
             }
         }
@@ -2386,6 +2424,7 @@ void td5_hud_render_minimap(int actor_slot)
      */
     int local_a4 = start_span;
     int seg_rendered = 0;
+    int skip_bounds = 0, skip_vtx = 0, skip_aabb = 0;
     for (int i = 0; span_base && vert_base && i < 0x30; i++) {
         int near_idx = local_a4;
         int far_idx  = near_idx + 5;
@@ -2393,7 +2432,7 @@ void td5_hud_render_minimap(int actor_slot)
 
         if (near_idx < 0 || far_idx < 0 ||
             near_idx >= g_strip_span_count ||
-            far_idx  >= g_strip_span_count) continue;
+            far_idx  >= g_strip_span_count) { skip_bounds++; continue; }
 
         uint8_t *sn = span_base + near_idx * 24;
         uint8_t *sf = span_base + far_idx  * 24;
@@ -2417,7 +2456,7 @@ void td5_hud_render_minimap(int actor_slot)
         int32_t  col1    = s_minimap_vtx_delta_col1[type_f & 0x07];
         int32_t  vi_f_r  = (int32_t)vi_f_l + (int32_t)nib_f + col1;
 
-        if (vi_n_r < 0 || vi_f_r < 0) continue;
+        if (vi_n_r < 0 || vi_f_r < 0) { skip_vtx++; continue; }
 
         int16_t *vn_l = (int16_t *)(vert_base + (uint32_t)vi_n_l * 6);
         int16_t *vn_r = (int16_t *)(vert_base + (uint32_t)vi_n_r * 6);
@@ -2462,7 +2501,20 @@ void td5_hud_render_minimap(int actor_slot)
         if (bl_y < min_y) min_y = bl_y; if (bl_y > max_y) max_y = bl_y;
         if (br_y < min_y) min_y = br_y; if (br_y > max_y) max_y = br_y;
         if (max_x < s_minimap_x || min_x > mm_r ||
-            max_y < s_minimap_y || min_y > mm_b) continue;
+            max_y < s_minimap_y || min_y > mm_b) {
+            /* Log first culled quad per frame for diagnostics */
+            if (skip_aabb == 0 && seg_rendered == 0) {
+                static int s_aabb_log_ctr = 0;
+                if ((s_aabb_log_ctr++ % 60) == 0) {
+                    TD5_LOG_W(LOG_TAG, "minimap AABB cull i=%d near=%d: fl=(%.0f,%.0f) fr=(%.0f,%.0f) bl=(%.0f,%.0f) br=(%.0f,%.0f) rect=(%.0f,%.0f)-(%.0f,%.0f) off=(%.0f,%.0f) ox_n=%d oz_n=%d",
+                              i, near_idx,
+                              fl_x, fl_y, fr_x, fr_y, bl_x, bl_y, br_x, br_y,
+                              s_minimap_x, s_minimap_y, mm_r, mm_b,
+                              offset_x, offset_z, ox_n, oz_n);
+                }
+            }
+            skip_aabb++; continue;
+        }
 
         /* TL=front-left, BL=back-left, BR=back-right, TR=front-right */
         hud_build_quad_warped(
@@ -2479,11 +2531,11 @@ void td5_hud_render_minimap(int actor_slot)
         seg_rendered++;
     }
     {
-        static int s_prev_seg_rendered = -1;
-        if (seg_rendered != s_prev_seg_rendered) {
-            TD5_LOG_I(LOG_TAG, "minimap_render: segs_rendered=%d start_span=%d end_span=%d span_count=%d player_span=%d",
-                      seg_rendered, start_span, local_a4 - 1, g_strip_span_count, (int)player_span);
-            s_prev_seg_rendered = seg_rendered;
+        static int s_mm_log_counter = 0;
+        if ((s_mm_log_counter++ % 60) == 0) {
+            TD5_LOG_I(LOG_TAG, "minimap: span=%d remap=%d start=%d rendered=%d skip_bounds=%d skip_vtx=%d skip_aabb=%d total=%d",
+                      (int)player_span, remapped_span, start_span, seg_rendered,
+                      skip_bounds, skip_vtx, skip_aabb, g_strip_span_count);
         }
     }
 

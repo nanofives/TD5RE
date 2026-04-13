@@ -712,22 +712,16 @@ void td5_physics_update_player(TD5_Actor *actor)
 
     if (actor->surface_contact_flags != 0) {
         /* --- ON-GROUND branch ---
-         * The original only calls auto_gear on the AIRBORNE path
-         * [CONFIRMED @ 0x404521], relying on frequent micro-airborne frames
-         * from track bumps. The port's surface contact system is more
-         * conservative (fewer airborne frames), so we also run auto_gear
-         * on-ground to ensure gear shifts happen. Without this, the car
-         * stays stuck in first gear indefinitely. */
+         * Original structure [CONFIRMED @ 0x404030]:
+         *   - Manual gearbox (field_0x378==0): reverse_throttle_sign only
+         *   - Auto gearbox: NO auto_gear_select on-ground — only on airborne path
+         *   - CRGT handles RPM slew (called later in speed writeback section)
+         *   - Then: drive or brake path
+         * The original relies on micro-airborne frames from track bumps for
+         * gear shifts. Do NOT call auto_gear_select here — it causes gear
+         * skipping, drivetrain kick accumulation, and RPM oscillation. */
         if (*((const uint8_t *)actor + 0x378) == 0) {
             td5_physics_reverse_throttle_sign(actor);
-        } else {
-            /* On-ground auto gear: the original only runs this on airborne
-             * frames [CONFIRMED @ 0x4044F9]. The port runs it on-ground
-             * because it has fewer micro-airborne frames. Single call only —
-             * the original shifts at most +1/-1 per tick. The previous loop
-             * (up to 6 passes) caused gear skipping 1→6 and accumulated
-             * drivetrain kick forces that lifted the car without recovery. */
-            td5_physics_auto_gear_select(actor);
         }
 
         if (!actor->brake_flag) {
@@ -1590,6 +1584,17 @@ void td5_physics_update_ai(TD5_Actor *actor)
 
 void td5_physics_update_traffic(TD5_Actor *actor)
 {
+    static int s_traffic_phys_log = 0;
+    if (actor->slot_index == 6 && (s_traffic_phys_log < 10 || (s_traffic_phys_log % 30 == 0 && s_traffic_phys_log < 300))) {
+        TD5_LOG_I(LOG_TAG, "traffic_phys: slot=%d thr=%d heading=0x%X vel=(%d,%d) pos=(%d,%d,%d) span=%d mode=%d",
+                  actor->slot_index, (int)actor->encounter_steering_cmd,
+                  (actor->euler_accum.yaw >> 8) & 0xFFF,
+                  actor->linear_velocity_x, actor->linear_velocity_z,
+                  actor->world_pos.x, actor->world_pos.y, actor->world_pos.z,
+                  actor->track_span_raw, actor->vehicle_mode);
+    }
+    if (actor->slot_index == 6) s_traffic_phys_log++;
+
     /* Fixed drag: 0x10/4096 per axis */
     int32_t vx = actor->linear_velocity_x;
     int32_t vz = actor->linear_velocity_z;
@@ -4058,19 +4063,11 @@ static int32_t compute_reverse_gear_torque(TD5_Actor *actor, int32_t speed_in)
         int32_t redline = (int32_t)PHYS_S(actor, 0x72);
         target = u + redline - 1800;         /* 0x708 */
         step = 200;
-    } else if (gear > 2) {
-        /* Higher gears: UESA-style target so RPM stays correct.
-         * The original's CRGT targets 0 for gear > 2, relying on airborne
-         * UESA ticks to maintain RPM. Since the port runs auto_gear_select
-         * on-ground, CRGT must also support higher gears or the car
-         * oscillates between gear 2 and 3 (upshift → RPM tanks → downshift). */
-        int32_t abs_spd = speed_in < 0 ? -speed_in : speed_in;
-        int32_t gr = (int32_t)PHYS_S(actor, 0x2E + gear * 2);
-        target = ((abs_spd >> 8) * gr * 0x2D) >> 12;
-        target += 400;
-        step = 200;
     } else {
-        /* Reverse or neutral under throttle: coast down. */
+        /* All other cases (gear > 2, reverse under throttle, etc.):
+         * target = 0, coast down. [CONFIRMED @ 0x403C80: original targets
+         * RPM=0 for all gears except gear==2 under throttle. RPM in higher
+         * gears is maintained by airborne UESA ticks, not by CRGT.] */
         int base = actor->brake_flag ? 400 : 200;
         step = base * 2;
         target = 0;
