@@ -2396,7 +2396,7 @@ static void render_vehicle_reflection_overlay(TD5_MeshHeader *mesh, int slot)
         saved_uv[i][0] = verts[i].tex_u;
         saved_uv[i][1] = verts[i].tex_v;
 
-        verts[i].lighting = 0x66FFFFFFu; /* 40% alpha, white */
+        verts[i].lighting = 0x99FFFFFFu; /* 60% alpha, white — chrome reflection overlay */
         verts[i].tex_u = verts[i].proj_u;
         verts[i].tex_v = verts[i].proj_v;
     }
