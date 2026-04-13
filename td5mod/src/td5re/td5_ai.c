@@ -1503,38 +1503,33 @@ void td5_ai_update_track_behavior(int slot) {
      * control bypasses both issues by setting angular_velocity_yaw proportional
      * to the heading error and keeping STEERING_CMD = 0.
      *
-     * Speed gate: at low speed the bicycle model converts any angular velocity
-     * into pure yaw rotation (no lateral forces to counterbalance). Skip
-     * steering until the car has forward velocity so it drives straight first,
-     * then starts tracking the road. */
+     * No speed gate: the original UpdateActorSteeringBias @ 0x004340C0 runs
+     * every tick regardless of longitudinal speed. A previous gate
+     * (abs_speed < 0x1800 = 24.0 in 24.8 fp) blocked steering until the car
+     * was moving at ≈24 m/s, which never happens in the first seconds of a
+     * race — AI accelerated straight off the spawn line. The PD output is
+     * clamped to ±1500 so a stationary car cannot spin out, and during the
+     * countdown g_game_paused=1 short-circuits bicycle integration so the
+     * omega write is harmless. */
     {
-        int32_t long_speed = ACTOR_I32(actor, ACTOR_LONGITUDINAL_SPEED);
-        int32_t abs_speed = long_speed < 0 ? -long_speed : long_speed;
+        int32_t left_dev = rs[RS_LEFT_DEVIATION];
+        int32_t right_dev = rs[RS_RIGHT_DEVIATION];
+        int32_t signed_delta;
+        int32_t omega_prev;
+        int32_t desired_omega;
 
-        if (abs_speed < 0x1800) {
-            /* Low speed: drive straight, no steering corrections.
-             * Zero omega so the bicycle model's weight asymmetry
-             * doesn't rotate the stationary car. */
-            ACTOR_I32(actor, 0x1C4) = 0;
-            ACTOR_I32(actor, ACTOR_STEERING_CMD) = 0;
+        if (left_dev < right_dev) {
+            signed_delta = -left_dev;
         } else {
-            /* At speed: PD omega controller from heading error. */
-            int32_t left_dev = rs[RS_LEFT_DEVIATION];
-            int32_t right_dev = rs[RS_RIGHT_DEVIATION];
-            int32_t signed_delta;
-            if (left_dev < right_dev) {
-                signed_delta = -left_dev;
-            } else {
-                signed_delta = right_dev;
-            }
-
-            int32_t omega_prev = ACTOR_I32(actor, 0x1C4);
-            int32_t desired_omega = signed_delta * 12 - (omega_prev >> 8) * 6;
-            if (desired_omega > 1500) desired_omega = 1500;
-            if (desired_omega < -1500) desired_omega = -1500;
-            ACTOR_I32(actor, 0x1C4) = desired_omega;
-            ACTOR_I32(actor, ACTOR_STEERING_CMD) = 0;
+            signed_delta = right_dev;
         }
+
+        omega_prev = ACTOR_I32(actor, 0x1C4);
+        desired_omega = signed_delta * 12 - (omega_prev >> 8) * 6;
+        if (desired_omega > 1500) desired_omega = 1500;
+        if (desired_omega < -1500) desired_omega = -1500;
+        ACTOR_I32(actor, 0x1C4) = desired_omega;
+        ACTOR_I32(actor, ACTOR_STEERING_CMD) = 0;
     }
 }
 

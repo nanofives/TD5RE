@@ -1632,8 +1632,12 @@ int td5_game_run_race_frame(void) {
                 if (s_slot_state[i].state == 1)
                     td5_input_update_player_control(i);
             }
-            td5_physics_tick();
+            /* AI must run BEFORE physics so encounter_steering_cmd (+0x33E) is
+             * written before td5_physics_update_ai reads it (gate > 0x20).
+             * Original UpdateRaceActors @ 0x00436A70 interleaves AI+physics
+             * per slot; we approximate by ordering AI then physics each tick. */
             td5_ai_tick();
+            td5_physics_tick();
             td5_track_tick();
             /* Chase camera runs AFTER physics — matches RunRaceFrame
              * (0x0042B580). Countdown still updates the camera so the
@@ -1655,12 +1659,18 @@ int td5_game_run_race_frame(void) {
             }
         }
 
-        /* --- Core simulation: physics, AI, contacts --- */
-        td5_game_trace_stage("pre_physics", ticks_this_frame);
-        td5_physics_tick();
-        td5_game_trace_stage("post_physics", ticks_this_frame);
+        /* --- Core simulation: AI, physics, contacts ---
+         * AI must run BEFORE physics: original UpdateRaceActors @ 0x00436A70
+         * interleaves ComputeAIRubberBandThrottle → UpdateActorTrackBehavior
+         * → UpdateVehicleActor per slot. The port approximates by ordering
+         * AI then physics each tick, so encounter_steering_cmd (+0x33E) is
+         * written before td5_physics_update_ai @ 0x00404EC0 reads it
+         * (throttle gate > 0x20 at 0x404EF4). */
+        td5_game_trace_stage("pre_ai", ticks_this_frame);
         td5_ai_tick();
         td5_game_trace_stage("post_ai", ticks_this_frame);
+        td5_physics_tick();
+        td5_game_trace_stage("post_physics", ticks_this_frame);
 
         /* Wanted mode: decay target-tracker marker per sub-tick
          * (DecayTrackedActorMarkerIntensity @ 0x43D7E0) */
