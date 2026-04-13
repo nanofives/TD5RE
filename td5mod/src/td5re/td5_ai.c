@@ -1418,21 +1418,8 @@ void td5_ai_update_track_behavior(int slot) {
         int16_t span = ACTOR_I16(actor, ACTOR_SPAN_RAW);
         int span_count = td5_track_get_span_count();
         if (span_count > 0 && span >= 0) {
-            /* (a) Target span: 4 spans ahead in the forward direction.
-             * Original uses span+4 [CONFIRMED @ 0x43514D], which is forward
-             * when increasing spans = forward. For tracks where fwd_sentinel
-             * is below the car's span (finish is at low spans), forward =
-             * decreasing spans, so use span-4. */
-            int fwd = td5_track_get_fwd_sentinel();
-            int target_span;
-            if (fwd >= 0 && fwd < (int)span) {
-                /* Forward = decreasing spans (toward fwd sentinel) */
-                target_span = (int)span - 4;
-                if (target_span < 0) target_span += span_count;
-            } else {
-                /* Forward = increasing spans (default) */
-                target_span = ((int)span + 4) % span_count;
-            }
+            /* (a) Target span: 4 spans ahead, wrapped [CONFIRMED @ 0x43514D] */
+            int target_span = ((int)span + 4) % span_count;
 
             /* Spline progress update (original also does this) */
             {
@@ -1542,14 +1529,7 @@ void td5_ai_update_track_behavior(int slot) {
             int16_t sp = ACTOR_I16(actor, ACTOR_SPAN_RAW);
             int span_count = td5_track_get_span_count();
             if (span_count > 0 && sp >= 0) {
-                int fwd5 = td5_track_get_fwd_sentinel();
-                int tsp;
-                if (fwd5 >= 0 && fwd5 < (int)sp) {
-                    tsp = (int)sp - 4;
-                    if (tsp < 0) tsp += span_count;
-                } else {
-                    tsp = ((int)sp + 4) % span_count;
-                }
+                int tsp = ((int)sp + 4) % span_count;
                 int tx = 0, tz = 0;
                 int rb = 128;
                 const uint8_t *rp = (const uint8_t *)(intptr_t)rs[RS_ROUTE_TABLE_PTR];
@@ -1561,10 +1541,12 @@ void td5_ai_update_track_behavior(int slot) {
                 }
             }
         }
-        /* Shortest-path angular error from physical heading to target.
-         * yaw_accum stores (angle + 0x800) << 8 [CONFIRMED @ 0x434501],
-         * so strip the 0x800 convention offset to get the actual direction. */
-        int32_t raw_heading = ((yaw >> 8) - 0x800) & 0xFFF;
+        /* Shortest-path angular error from heading to target.
+         * yaw_accum stores (angle + 0x800) << 8, and the physics adds
+         * steer_cmd to yaw when computing the driving direction. The error
+         * is computed against the unmodified yaw heading so the steer_cmd
+         * output directly offsets the driving direction toward the target. */
+        int32_t raw_heading = (yaw >> 8) & 0xFFF;
         int32_t err = ((ta - raw_heading + 0x800) & 0xFFF) - 0x800;
         /* Desired steer = error * 256 (shift back to accumulator scale) */
         int32_t desired_steer = err << 8;
@@ -1572,9 +1554,13 @@ void td5_ai_update_track_behavior(int slot) {
          * to avoid fighting physics angular momentum */
         if (desired_steer > 0x6000) desired_steer = 0x6000;
         if (desired_steer < -0x6000) desired_steer = -0x6000;
-        /* Exponential blend: move 25% toward desired each tick.
-         * This gives the physics time to respond without overshooting. */
-        ACTOR_I32(actor, ACTOR_STEERING_CMD) = cur_steer + ((desired_steer - cur_steer + 2) >> 2);
+        /* Direct set: the desired steer IS the exact offset that points
+         * the driving direction at the target. No accumulation needed.
+         * The ±0x6000 clamp prevents extreme turn angles. */
+        ACTOR_I32(actor, ACTOR_STEERING_CMD) = desired_steer;
+
+        TD5_LOG_D(LOG_TAG, "steer_p: slot=%d hd=%d ta=%d err=%d ds=%d",
+                  slot, raw_heading, ta, err, desired_steer);
     }
 }
 
