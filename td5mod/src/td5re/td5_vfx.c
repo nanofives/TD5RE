@@ -712,16 +712,17 @@ void td5_vfx_draw_particles(int view_index) {
         if (sz > 1.0f) sz = 1.0f;
 
         /* Perspective-scale using animated size from slot (original +0x04/+0x08).
-         * Size values are 14.2 fixed-point; convert to world-space half-extents.
+         * Size values are 24.8 fixed-point world units (same as positions).
+         * 0x4000 init → 64.0 world units half-extent at spawn.
          * Fallback to 30.0 for rain splashes (type 1) which don't animate size. */
         float world_half_w, world_half_h;
         if (slot[PSLOT_TYPE] == 0) {
             int16_t sw = PSLOT_RD16(slot, PSLOT_SIZE_W);
             int16_t sh = PSLOT_RD16(slot, PSLOT_SIZE_H);
-            world_half_w = (float)sw / 512.0f;
-            world_half_h = (float)sh / 512.0f;
-            if (world_half_w < 5.0f) world_half_w = 5.0f;
-            if (world_half_h < 5.0f) world_half_h = 5.0f;
+            world_half_w = (float)sw * FP_TO_FLOAT;  /* /256.0 */
+            world_half_h = (float)sh * FP_TO_FLOAT;
+            if (world_half_w < 8.0f) world_half_w = 8.0f;
+            if (world_half_h < 8.0f) world_half_h = 8.0f;
         } else {
             world_half_w = 30.0f;
             world_half_h = 30.0f;
