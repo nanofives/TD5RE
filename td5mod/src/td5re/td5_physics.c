@@ -2843,25 +2843,18 @@ void td5_physics_integrate_pose(TD5_Actor *actor)
          * bounds or distant spans at track edges, causing terrain height
          * garbage (Y launch) and XZ teleportation.
          *
-         * Two checks:
-         * 1. Hard bounds: clamp to [0, span_count-1]
-         * 2. Jump limit: if span changed by more than 50 in one tick,
-         *    revert to the previous span. Normal driving is 1-2 spans/tick.
-         *    Skip the jump check on the first tick (prev_span == 0 at init). */
-        int max_span = g_td5.track_span_ring_length;
+         * Use td5_track_get_span_count() which includes branch spans
+         * (NOT ring_length which is main road only). Junction links
+         * legitimately jump from e.g. span 499 to span 2790.
+         *
+         * The jump limit is DISABLED because junction transitions produce
+         * large span deltas that are valid. The hard bounds clamp alone
+         * prevents OOB access. */
+        int max_span = td5_track_get_span_count();  /* includes branch spans */
         if (max_span > 0) {
             /* Hard bounds clamp */
             if (actor->track_span_raw >= (uint16_t)max_span)
                 actor->track_span_raw = (uint16_t)(max_span - 1);
-
-            /* Jump limit — reject wild span transitions */
-            int delta = (int)actor->track_span_raw - (int)prev_span;
-            if (delta < 0) delta = -delta;
-            if (prev_span > 0 && delta > 50) {
-                actor->track_span_raw = prev_span;
-                TD5_LOG_W(LOG_TAG, "span_guard: slot=%d rejected %d->%d (delta=%d)",
-                          actor->slot_index, prev_span, actor->track_span_raw, delta);
-            }
 
             /* Clamp per-wheel probes too */
             for (int wi = 0; wi < 4; wi++) {
@@ -3294,7 +3287,7 @@ void td5_physics_refresh_wheel_contacts(TD5_Actor *actor)
         /* Clamp per-wheel span after the probe walker (it can overflow
          * independently of the chassis span walker). */
         {
-            int max_sp = g_td5.track_span_ring_length;
+            int max_sp = td5_track_get_span_count();  /* includes branch spans */
             if (max_sp > 0 && actor->wheel_probes[i].span_index >= (int16_t)max_sp)
                 actor->wheel_probes[i].span_index = (int16_t)(max_sp - 1);
         }
