@@ -567,37 +567,41 @@ void td5_track_resolve_wall_contacts(TD5_Actor *actor)
     int lane_count = span_lane_count(sp);
     if (lane_count < 1) lane_count = 1;
 
-    /* NEAR and FAR rows. The strip field labels in TD5 data are misleading:
+    /* Vertex-row layout — CORRECTED 2026-04-13 from UpdateActorTrackPosition
+     * @ 0x004440F0 cross-product walker analysis:
      *
-     *   left_vertex_index   → base of the span's NEAR row (entry edge)
-     *   right_vertex_index  → base of the span's FAR row  (exit edge)
-     *   +k walks LATERALLY across the span's lane_count lanes (0..lane_count
-     *   inclusive gives lane_count+1 vertices per row).
+     *   left_vertex_index   → base of the LEFT rail (runs near→far)
+     *   right_vertex_index  → base of the RIGHT rail (runs near→far)
+     *   +k walks LONGITUDINALLY along each rail (near→far, k = 0..lane_count)
      *
-     * Verified by the wall_layout dump on Moscow span 111:
-     *   - left[k+1] - left[k] = (-1355, -600) constant — lateral step
-     *   - right[k] - left[k] ≈ (-545, 1242), perpendicular to the lateral
-     *     step — that's the longitudinal travel direction
+     * Evidence: 0x004440F0 case-1 triggers strip DECREMENT when a probe
+     * crosses the (vr[k], vl[k]) edge — that only makes sense if vl[k]
+     * and vr[k] are two points on the SAME transverse slice at position k,
+     * i.e. each rail has k=0 at near end and k=lane_count at far end.
      *
-     * And verified against slot 0's visible heading: probe layout gives
-     * car forward ≈ 114° world. The (right[0] - left[0]) vector
-     * atan2(1242, -545) ≈ 114° matches exactly. Cars travel along the
-     * near→far direction; they walk the +k lane index only when drifting
-     * laterally.
+     * Therefore the vector `(vl[0]+vl[1]) − (vr[0]+vr[1])` computed by
+     * compute_heading @ 0x00434350 is 2·(left_near_avg − right_near_avg)
+     * = LATERAL R→L (right rail → left rail), NOT longitudinal. That
+     * matches the +0x400 compass rotation used in td5_track_compute_heading.
      *
-     * So the outer ROAD walls run in the longitudinal direction and sit
-     * at the two edges of the lane range:
+     * Prior interpretation (+k lateral, vl=NEAR row, vr=FAR row) is WRONG.
+     * It was empirically self-consistent for the Moscow span-111 dump but
+     * contradicts the walker's strip-transition logic.
      *
-     *   LEFT road wall  = line from left[0]            to right[0]
-     *   RIGHT road wall = line from left[lane_count]   to right[lane_count]
+     * CAVEAT — the wall-line construction below predates this correction:
+     *   base=vl[0] → end=vr[0] is the NEAR TRANSVERSE edge (left-near to
+     *   right-near), NOT a longitudinal rail line. perp points along-road.
+     * That means this function is currently testing span entry/exit
+     * transverse lines and calling them "walls" — equivalent to the
+     * original's `0x00406CC0` sub-lane-extremity boundary check, not a
+     * lateral wall impulse. The multi-probe + lane-count filter papers
+     * over the resulting false positives but the geometry is wrong.
      *
-     * Each "wall" edge runs near→far (travel direction); perpendicular is
-     * lateral (across the road). d < 0 means the probe is outside that
-     * edge. The auto-flip uses an inside-reference vertex from the
-     * opposite lane extreme to pick the correct sign.
-     *
-     * This approach tests just two lines per span regardless of how many
-     * lanes the span has, which is what a lateral wall check should do. */
+     * The correct LATERAL wall lines would be:
+     *   LEFT  wall  = line from left [0] to left [lane_count]  (left rail)
+     *   RIGHT wall  = line from right[0] to right[lane_count]  (right rail)
+     * Both edges run near→far; perp is lateral across the road. TODO: port
+     * this geometry once the empirical long-lap behavior is re-validated. */
 
     /* For standard types (1, 2, 5) vertex offsets are always 0. */
     int li_base = (int)sp->left_vertex_index;
