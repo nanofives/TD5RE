@@ -143,6 +143,14 @@ def patch_td5re_ini(args):
     cp.set("Game", "DefaultCar", str(args.car))
     cp.set("Game", "DefaultTrack", str(args.track))
     cp.set("Game", "DefaultGameType", str(args.game_type))
+
+    # Force PlayerIsAI off for the diff-race run. The user's dev setup
+    # commonly has this enabled for attract-mode testing, but it routes
+    # slot 0 through td5_physics_update_ai instead of update_player —
+    # making any fix targeting the player path invisible in the trace.
+    if not cp.has_section("GameOptions"):
+        cp.add_section("GameOptions")
+    cp.set("GameOptions", "PlayerIsAI", "0")
     with TD5RE_INI.open("w", encoding="utf-8") as f:
         cp.write(f)
 

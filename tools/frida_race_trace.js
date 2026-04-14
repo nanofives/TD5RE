@@ -345,27 +345,41 @@ function init() {
     installHooks();
 
     // Auto-throttle: clamp player 1 control bits on PollRaceSessionInput onLeave
-    // so the original binary's car accelerates exactly like td5re (with its
-    // [Trace] AutoThrottle=1 ini flag). Uses 0x100000 = ACCELERATE, never
-    // touches handbrake (0x200) or brake (0x400).
+    // so the original binary's car accelerates like td5re (with its [Trace]
+    // AutoThrottle=1 ini flag).
+    //
+    // Bit layout confirmed against td5mod/src/td5re/td5_types.h (TD5_InputBits):
+    //   0x00000200 = THROTTLE  (accelerate)
+    //   0x00000400 = BRAKE
+    //   0x00100000 = GEAR_UP
+    //   0x08000000 = ANALOG_Y_FLAG (reverse implied via negative Y axis)
+    //
+    // Previous version used 0x100000 as ACCELERATE (actually GEAR_UP) and
+    // masked off 0x200 thinking it was HANDBRAKE (actually THROTTLE), which
+    // made the original: OR in gear-up every frame, then clear throttle
+    // every frame — so the car shifted up repeatedly then coasted to a
+    // halt. Observed 2026-04-11 in /diff-race: original stopped by sim_tick
+    // 240 while port kept accelerating.
     if (AUTO_THROTTLE) {
         var PLAYER1_CONTROL = ptr(0x482FFC);
-        var ACCELERATE_BIT  = 0x100000;
-        var HANDBRAKE_BIT   = 0x200;
-        var BRAKE_BIT       = 0x400;
-        var REVERSE_BIT     = 0x8000000;
+        var THROTTLE_BIT    = 0x00000200;
+        var BRAKE_BIT       = 0x00000400;
+        var GEAR_UP_BIT     = 0x00100000;
+        var GEAR_DOWN_BIT   = 0x00080000;
+        var ANALOG_Y_FLAG   = 0x08000000;
         safeAttach("PollRaceSessionInput_AutoThrottle", ADDR_PollRaceSessionInput, {
             onLeave: function (retval) {
                 if (!raceConfirmed) return;
                 try {
                     var cbits = PLAYER1_CONTROL.readU32();
-                    cbits |= ACCELERATE_BIT;
-                    cbits &= ~(HANDBRAKE_BIT | BRAKE_BIT | REVERSE_BIT);
+                    // Force throttle on, clear brake/reverse/gear changes.
+                    cbits |= THROTTLE_BIT;
+                    cbits &= ~(BRAKE_BIT | GEAR_UP_BIT | GEAR_DOWN_BIT | ANALOG_Y_FLAG);
                     PLAYER1_CONTROL.writeU32(cbits);
                 } catch (e) { /* skip */ }
             }
         });
-        console.log("[trace] Auto-throttle: forcing ACCELERATE on PollRaceSessionInput");
+        console.log("[trace] Auto-throttle: forcing THROTTLE_BIT (0x200) on PollRaceSessionInput");
     }
 
     // Windowed mode: not implemented — DDraw exclusive mode can't be reliably
