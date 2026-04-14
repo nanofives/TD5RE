@@ -109,7 +109,6 @@ extern uint8_t *g_track_environment_config; /* td5_asset.c -- LEVELINF.DAT buffe
  * ======================================================================== */
 
 #define LOG_TAG "td5_game"
-#define TD5_CIRCUIT_WRONG_WAY_COOLDOWN_TICKS 300
 /* Original: g_cameraTransitionActive init=0xA000, -=0x100/tick, 160 ticks total
  * Level = timer / 0x2800; levels 4..0 → digits 5..1, then GO at level<0 */
 #define TD5_COUNTDOWN_INIT    0xA000
@@ -170,8 +169,6 @@ typedef struct ActorRaceMetric {
 } ActorRaceMetric;
 
 static ActorRaceMetric s_metrics[TD5_MAX_RACER_SLOTS];
-static int16_t s_circuit_anchor_span[TD5_MAX_RACER_SLOTS];
-static int16_t s_circuit_wrong_way_cooldown[TD5_MAX_RACER_SLOTS];
 
 /* Race order array (indices into slot table, sorted by position) */
 static uint8_t s_race_order[TD5_MAX_RACER_SLOTS];
@@ -372,8 +369,6 @@ int td5_game_init(void) {
 
     memset(s_slot_state, 0, sizeof(s_slot_state));
     memset(s_metrics, 0, sizeof(s_metrics));
-    memset(s_circuit_anchor_span, 0xFF, sizeof(s_circuit_anchor_span));
-    memset(s_circuit_wrong_way_cooldown, 0, sizeof(s_circuit_wrong_way_cooldown));
     memset(s_results, 0, sizeof(s_results));
     memset(s_viewports, 0, sizeof(s_viewports));
     g_td5.total_actor_count = 0;
@@ -811,8 +806,6 @@ int td5_game_init_race_session(void) {
     /* ---- Step 10: Initialize race vehicle runtime ---- */
     /* Initialize per-actor race metrics */
     memset(s_metrics, 0, sizeof(s_metrics));
-    memset(s_circuit_anchor_span, 0xFF, sizeof(s_circuit_anchor_span));
-    memset(s_circuit_wrong_way_cooldown, 0, sizeof(s_circuit_wrong_way_cooldown));
     for (int i = 0; i < TD5_MAX_RACER_SLOTS; i++) {
         s_metrics[i].display_position = (int16_t)i;
         s_race_order[i] = (uint8_t)i;
@@ -940,6 +933,11 @@ int td5_game_init_race_session(void) {
         }
         if (start_span <= 0)
             start_span = (track_span_count > 0) ? track_span_count : 1;
+
+        /* Publish start_span as g_trackStartSpanIndex — consumed by the
+         * circuit 4-case sector dispatch in advance_pending_finish_state
+         * (verbatim port of CheckRaceCompletionState @ 0x00409E80). */
+        g_td5.track_start_span_index = start_span;
 
         /* Drag race does NOT derive from start_span — it uses hardcoded
          * absolute span values (slot 0 = 115, slots 1..5 = 1) inside the
@@ -1256,12 +1254,31 @@ int td5_game_init_race_session(void) {
     }
 
     /* ---- Step 21: Adjust checkpoint timers by difficulty ---- */
+    /* Original AdjustCheckpointTimersByDifficulty @ 0x0040A530 is called
+     * per-slot from InitializeRaceVehicleRuntime @ 0x0042F140. The scaling
+     * branch fires only for slot 0 (+0x375==0) so the table is mutated
+     * exactly once; then actor+0x344 = *(ptr+2) executes for ALL slots
+     * (scaling is not gated on player/AI). Port matches by calling
+     * adjust_checkpoint_timers for every slot — the scaling itself is
+     * idempotent because it reads from s_active_checkpoint.initial_time
+     * which stays at the raw value. */
     for (int i = 0; i < TD5_MAX_RACER_SLOTS; i++) {
-        if (s_slot_state[i].state == 1) {   /* human player */
-            if (g_td5.checkpoint_timers_enabled) {
-                adjust_checkpoint_timers(i);
-            } else {
-                s_metrics[i].timer_ticks = 0x7FFF;  /* disable: max timer */
+        if (s_slot_state[i].state == 3) continue;   /* disabled slot */
+        if (g_td5.checkpoint_timers_enabled) {
+            adjust_checkpoint_timers(i);
+        } else {
+            s_metrics[i].timer_ticks = 0x7FFF;  /* disable: max timer */
+        }
+        /* Mirror m->timer_ticks to actor+0x344 immediately — original
+         * AdjustCheckpointTimersByDifficulty @ 0x0040A530 writes directly
+         * to actor+0x344 during init, not at end of first sub-tick. */
+        {
+            TD5_Actor *ai = td5_game_get_actor(i);
+            if (ai) {
+                ai->pending_finish_timer =
+                    (s_metrics[i].timer_ticks > 0)
+                        ? (uint16_t)s_metrics[i].timer_ticks
+                        : 0;
             }
         }
     }
@@ -2266,119 +2283,97 @@ static void advance_pending_finish_state(int slot, uint32_t sim_delta) {
     /* Increment cumulative timer */
     m->cumulative_timer++;
 
-    /* Circuit progression is owned here, with track code reduced to geometry
-     * helpers. Use explicit start-line anchoring and wrong-way cooldown
-     * instead of the older 4-sector proxy. */
+    /* Circuit branch — verbatim port of CheckRaceCompletionState circuit
+     * body @ 0x00409E80 / LAB_0040A014. The original uses:
+     *   - actor+0x82 (span_norm) as the progress index into the track ring
+     *   - actor+0x336 (progress_mask, here m->checkpoint_bitmask) as a
+     *     4-state sector latch: 0 → 1 → 3 → 7 → 0x0F → (lap end) → 0
+     *   - actor+0x37E (checkpoint_index, here m->checkpoint_index) as the
+     *     lap counter
+     *   - g_trackStartSpanIndex (g_td5.track_start_span_index) as the
+     *     start-line anchor span
+     *   - g_trackTotalSpanCount (g_td5.track_span_ring_length) as the ring
+     *     length
+     * Start-line test: span_norm within [start-1, start+1] AND mask==0x0F.
+     * Sector boundaries step by (ring - 2*start) / 5 from (2*start + 1). */
     if (g_td5.track_type == TD5_TRACK_CIRCUIT) {
-        int32_t span_ring = g_td5.track_span_ring_length;
-        int32_t actor_heading;
-        int32_t speed;
-        int32_t route_heading;
+        int32_t track_start = g_td5.track_start_span_index;
+        int32_t total_spans = g_td5.track_span_ring_length;
 
-        if (!actor || span_ring <= 0) {
+        if (!actor || total_spans <= 0) {
             return;
         }
 
-        if (s_circuit_wrong_way_cooldown[slot] > 0) {
-            s_circuit_wrong_way_cooldown[slot]--;
-            return;
-        }
-
-        speed = actor->longitudinal_speed;
-        actor_heading = (actor->euler_accum.yaw >> 8) & 0xFFF;
-
-        if (s_circuit_anchor_span[slot] < 0) {
-            int heading_delta;
-
-            if (actor_span > 2 || speed < 0x100) {
-                m->checkpoint_bitmask = 0;
-                return;
+        /* Start-line / lap-complete test @ 0x00409F78.
+         * The original reads actor+0x82 here (span_norm), not span_accum. */
+        if ((int32_t)actor_span >= (track_start - 1) &&
+            (int32_t)actor_span <= (track_start + 1) &&
+            m->checkpoint_bitmask == 0x0F) {
+            /* Store split for the just-completed lap before advancing */
+            if (m->checkpoint_index >= 0 && m->checkpoint_index < 8) {
+                m->lap_split_times[m->checkpoint_index] =
+                    (int16_t)m->cumulative_timer;
             }
+            m->checkpoint_index++;
+            m->checkpoint_bitmask = 0;
+            m->normalized_span = actor_span;
 
-            route_heading = td5_track_get_primary_route_heading(0);
-            heading_delta = (int)((actor_heading - route_heading) & 0xFFF);
-            if (heading_delta > 0x800) {
-                heading_delta -= 0x1000;
-            }
-            if (heading_delta < 0) {
-                heading_delta = -heading_delta;
-            }
-            if (heading_delta > 16) {
-                m->checkpoint_bitmask = 0;
-                return;
-            }
+            TD5_LOG_I(LOG_TAG,
+                      "Circuit lap complete: slot=%d lap=%d span=%d",
+                      slot, m->checkpoint_index, (int)actor_span);
 
-            s_circuit_anchor_span[slot] = actor_span;
-            m->checkpoint_bitmask = 1;
-            return;
-        }
-
-        {
-            int32_t anchor_span = (int32_t)s_circuit_anchor_span[slot];
-            int32_t behind = anchor_span - (int32_t)actor_span;
-
-            if (behind < -span_ring / 2) {
-                behind += span_ring;
-            }
-            if (behind > span_ring / 2) {
-                behind -= span_ring;
-            }
-            if (behind > 64) {
+            if (m->checkpoint_index >= g_td5.circuit_lap_count) {
+                /* Finish: seed post-finish metrics and promote state.
+                 * Original @ 0x00409FC0-0x00409FF3:
+                 *   actor+0x328 = actor+0x34C (metric_base)
+                 *   actor+0x334 = clamp(actor+0x314 >> 8, min 1)
+                 *   actor+0x336 = (track_sub_progress * 0x5DC) / actor+0x334
+                 *   slot.companion_1 = 1, slot.state = 2, slot.companion_2 = 2 */
+                m->post_finish_metric_base = m->cumulative_timer;
+                s_slot_state[slot].companion_1 = 1;
+                s_slot_state[slot].companion_2 = 2;
+                s_slot_state[slot].state = 2;
                 TD5_LOG_I(LOG_TAG,
-                          "Circuit wrong-way: slot=%d span=%d checkpoint=%d behind=%d",
-                          slot, (int)actor_span, (int)anchor_span, (int)behind);
-                s_circuit_anchor_span[slot] = -1;
-                s_circuit_wrong_way_cooldown[slot] = TD5_CIRCUIT_WRONG_WAY_COOLDOWN_TICKS;
-                m->checkpoint_bitmask = 0;
-                return;
+                          "Actor finish: slot=%d mode=circuit lap=%d timer=%d span=%d",
+                          slot, m->checkpoint_index, m->cumulative_timer,
+                          (int)actor_span);
             }
         }
 
+        /* 4-case sector bitmask dispatch @ LAB_0040A014.
+         *   remaining = total - 2*start
+         *   boundary_n = 2*start + 1 + n * (remaining / 5)   for n = 0..3
+         * Each sector promotes the mask only if the previous sector latched.
+         * This enforces going around the track in one direction to legally
+         * reach mask==0x0F and trip the start-line lap increment above. */
         {
-            int32_t ahead = (int32_t)actor_span - (int32_t)s_circuit_anchor_span[slot];
-            if (ahead < 0) {
-                ahead += span_ring;
-            }
-            if (span_ring >= 4) {
-                int32_t quarter = span_ring / 4;
-                uint8_t progress_mask = 0x01;
-                if (ahead >= quarter) {
-                    progress_mask = 0x03;
-                }
-                if (ahead >= quarter * 2) {
-                    progress_mask = 0x07;
-                }
-                if (ahead >= quarter * 3) {
-                    progress_mask = 0x0F;
-                }
-                m->checkpoint_bitmask = progress_mask;
-            }
-            if (ahead > 1 && ahead < span_ring / 2) {
-                s_circuit_anchor_span[slot] = -1;
-                s_circuit_wrong_way_cooldown[slot] = 0;
-                m->checkpoint_bitmask = 0;
+            int32_t remaining = total_spans - track_start * 2;
+            int32_t boundary  = track_start * 2 + 1;
+            int32_t step      = (remaining > 0) ? (remaining / 5) : 0;
 
-                if (m->checkpoint_index >= 0 && m->checkpoint_index < 8) {
-                    m->lap_split_times[m->checkpoint_index] =
-                        (int16_t)m->cumulative_timer;
+            for (int sector = 0; sector < 4; sector++) {
+                if ((int32_t)actor_span >= (boundary - 2) &&
+                    (int32_t)actor_span <= boundary) {
+                    switch (sector) {
+                    case 0:
+                        if (m->checkpoint_bitmask == 0x00)
+                            m->checkpoint_bitmask = 0x01;
+                        break;
+                    case 1:
+                        if (m->checkpoint_bitmask == 0x01)
+                            m->checkpoint_bitmask = 0x03;
+                        break;
+                    case 2:
+                        if (m->checkpoint_bitmask == 0x03)
+                            m->checkpoint_bitmask = 0x07;
+                        break;
+                    case 3:
+                        if (m->checkpoint_bitmask == 0x07)
+                            m->checkpoint_bitmask = 0x0F;
+                        break;
+                    }
                 }
-
-                m->checkpoint_index++;
-                m->normalized_span = actor_span;
-
-                TD5_LOG_I(LOG_TAG,
-                          "Circuit lap complete: slot=%d lap=%d span=%d",
-                          slot, m->checkpoint_index, (int)actor_span);
-
-                if (m->checkpoint_index >= g_td5.circuit_lap_count) {
-                    m->post_finish_metric_base = m->cumulative_timer;
-                    s_slot_state[slot].companion_1 = 1;
-                    s_slot_state[slot].companion_2 = 1;
-                    s_slot_state[slot].state = 2;  /* completed */
-                    TD5_LOG_I(LOG_TAG,
-                              "Actor finish: slot=%d mode=circuit lap=%d timer=%d span=%d",
-                              slot, m->checkpoint_index, m->cumulative_timer, (int)actor_span);
-                }
+                boundary += step;
             }
         }
     } else {
@@ -2501,32 +2496,45 @@ static void adjust_checkpoint_timers(int slot) {
     ActorRaceMetric *m = &s_metrics[slot];
     int numerator = 10, denominator = 10;
 
-    /* Set base timer from checkpoint record (0x40A530 writes to actor+0x344) */
-    m->timer_ticks = (int16_t)s_active_checkpoint.initial_time;
+    /* Original AdjustCheckpointTimersByDifficulty @ 0x0040A530:
+     *   1. If +0x375 == 0 (slot 0): scale *(ptr+2) and each checkpoint
+     *      bonus in place by difficulty tier.
+     *   2. Then unconditionally: actor+0x344 = *(ptr+2), and clear +0x37E,
+     *      +0x328, +0x34C on the actor.
+     * The in-place table mutation is why scaling happens at most once:
+     * subsequent slot-0 (re-entry) or non-slot-0 calls re-read the already
+     * scaled table and produce identical values. */
 
-    /* Clear checkpoint state (matches original: clears +0x37E, +0x328, +0x34C) */
+    int is_slot_zero = (slot == 0);
+
+    /* Step 1 — scale table in place, gated on slot 0 */
+    if (is_slot_zero) {
+        switch (g_td5.difficulty) {
+        case TD5_DIFFICULTY_EASY:   numerator = 12; break;  /* +20% */
+        case TD5_DIFFICULTY_NORMAL: numerator = 11; break;  /* +10% */
+        case TD5_DIFFICULTY_HARD:
+        default:
+            numerator = 10; break;                           /* no change */
+        }
+        if (numerator != denominator) {
+            s_active_checkpoint.initial_time =
+                (uint16_t)((int)s_active_checkpoint.initial_time *
+                           numerator / denominator);
+            for (int i = 0; i < (int)s_active_checkpoint.checkpoint_count && i < 5; i++) {
+                s_active_checkpoint.checkpoints[i].time_bonus =
+                    (uint16_t)((int)s_active_checkpoint.checkpoints[i].time_bonus *
+                               numerator / denominator);
+            }
+        }
+    }
+
+    /* Step 2 — seed actor+0x344 (= m->timer_ticks) + clear timers.
+     * s_active_checkpoint.initial_time is now the already-scaled value,
+     * so every slot reads the same final value as the original. */
+    m->timer_ticks = (int16_t)s_active_checkpoint.initial_time;
     m->checkpoint_index = 0;
     m->post_finish_metric_base = 0;
     m->cumulative_timer = 0;
-
-    switch (g_td5.difficulty) {
-    case TD5_DIFFICULTY_EASY:   numerator = 12; break;  /* +20% */
-    case TD5_DIFFICULTY_NORMAL: numerator = 11; break;  /* +10% */
-    case TD5_DIFFICULTY_HARD:
-    default:
-        return;  /* hard = baseline, no scaling */
-    }
-
-    /* Scale initial time */
-    m->timer_ticks = (int16_t)((int)s_active_checkpoint.initial_time *
-                               numerator / denominator);
-
-    /* Scale each checkpoint bonus */
-    for (int i = 0; i < (int)s_active_checkpoint.checkpoint_count && i < 5; i++) {
-        s_active_checkpoint.checkpoints[i].time_bonus =
-            (uint16_t)(s_active_checkpoint.checkpoints[i].time_bonus *
-                       numerator / denominator);
-    }
 }
 
 /* ========================================================================
@@ -2661,6 +2669,8 @@ static void sort_results_by_score_desc(void) {
  * ======================================================================== */
 
 static void update_race_order(void) {
+    /* UpdateRaceOrder @ 0x0042F5B0 — original sorts g_raceOrderTable[6]
+     * by actor+0x86 (track_span_high_water) DESCENDING, not by +0x82. */
     int swapped;
     do {
         swapped = 0;
@@ -2672,8 +2682,13 @@ static void update_race_order(void) {
             if (s_metrics[a].post_finish_metric_base != 0) continue;
             if (s_metrics[b].post_finish_metric_base != 0) continue;
 
-            /* Higher span = further ahead = better position (lower index) */
-            if (s_metrics[a].normalized_span < s_metrics[b].normalized_span) {
+            TD5_Actor *actor_a = td5_game_get_actor(a);
+            TD5_Actor *actor_b = td5_game_get_actor(b);
+            int32_t span_a = actor_a ? (int32_t)actor_a->track_span_high_water : 0;
+            int32_t span_b = actor_b ? (int32_t)actor_b->track_span_high_water : 0;
+
+            /* Higher span_high = further ahead = better position (lower index) */
+            if (span_a < span_b) {
                 s_race_order[i]     = (uint8_t)b;
                 s_race_order[i + 1] = (uint8_t)a;
                 swapped = 1;
