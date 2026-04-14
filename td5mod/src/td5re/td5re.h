@@ -163,6 +163,7 @@ typedef struct TD5_GlobalState {
 
     /* Track info */
     int32_t track_span_ring_length;
+    int32_t track_start_span_index;   /* g_trackStartSpanIndex — circuit start/finish span */
     int     track_type;         /* TD5_TrackType */
     int     track_index;
     int     car_index;
