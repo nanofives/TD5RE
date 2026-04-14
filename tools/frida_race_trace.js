@@ -25,7 +25,35 @@ var TRACE_SLOT         = -1;     // -1 = all, 0 = player only, 1-5 = specific AI
 var TRACE_MAX_FRAMES   = 3000;   // 0 = unlimited render frames (safety ceiling)
 var TRACE_MAX_SIM_TICK = 0;      // 0 = unlimited; N = stop when g_simulationTickCounter >= N
                                  // (engine-clock cap; 450 = 15 s post-countdown at 30 Hz)
-var ENABLE_INNER_TICK_HOOKS = false; // inner hooks crash — binary prologue incompatible with Frida trampoline
+// Inner-tick hooks were historically disabled because early revisions crashed.
+// Re-enabled 2026-04-13 after Ghidra confirmed all 3 target bodies are large
+// enough for Frida's 5-byte trampoline (UpdateRaceActors=1569B, ResolveVehicleContacts=381B).
+// NormalizeWrapState (57B) remains unhooked — the per-site comment flagging it
+// as "called 6× per actor OUTSIDE the tick loop" is the real blocker, not the size.
+// Safety guards (raceConfirmed + INNER_TICK_MAX_PER_FRAME) still in effect.
+var ENABLE_INNER_TICK_HOOKS = true;
+
+// Deterministic RNG seeding — the binary does NOT call srand; it maintains its
+// own race-RNG scaffolding at three globals (confirmed via Ghidra symbol audit
+// 2026-04-13). We overwrite those when raceConfirmed first flips, so slot-1+
+// spawn state becomes run-to-run identical.
+// NOTE: CRT _holdrand is NOT seeded (per-thread TLS offset unknown); if AI
+// still drifts, revisit via TLS read of _ptiddata.
+var DETERMINISTIC_SEED  = true;
+var FIXED_SEED_VALUE    = 0x1A2B3C4D;   // arbitrary fixed 32-bit constant
+
+// Brake/RPM per-frame capture (Item 3 from /fix Cluster 4). Writes a SECOND
+// CSV with a narrow schema tuned for diffing brake-to-0 runs. Kept separate
+// from race_trace_*.csv so its schema can evolve without breaking the main
+// comparator's header-equality check.
+var CAPTURE_BRAKE_TRACE = true;
+var BRAKE_OUTPUT_PATH   = "C:\\Users\\maria\\Desktop\\Proyectos\\TD5RE\\log\\race_trace_brake_original.csv";
+
+// V2V contact capture (Item 4). Event-driven: one row per
+// CollectVehicleCollisionContacts invocation. Dumps the full 8-quad shorts
+// array so contactData[2,3] "own_x/own_z" semantics can be resolved.
+var CAPTURE_CONTACTS    = true;
+var CONTACTS_OUTPUT_PATH = "C:\\Users\\maria\\Desktop\\Proyectos\\TD5RE\\log\\race_trace_contacts_original.csv";
 // AUTO_THROTTLE re-added 2026-04-10 with the CORRECT bit mask.
 // Per Ghidra decomp of UpdatePlayerVehicleControlState at 0x402E60 [CONFIRMED]:
 //   0x01 = RIGHT
@@ -61,6 +89,10 @@ var ADDR_UpdateRaceParticles    = ptr(0x429790);  // VFX
 var ADDR_NormalizeWrapState     = ptr(0x443FB0);  // wrap norm (last sim op)
 var ADDR_EndRaceScene           = ptr(0x40AE00);  // end scene
 var ADDR_UpdateVehicleAudioMix  = ptr(0x440B00);  // audio mix (near end of frame)
+// Added 2026-04-13 for brake/RPM/contact capture (Cluster 4 harness upgrade).
+var ADDR_UpdatePlayerVehicleDynamics     = ptr(0x404030);  // per-actor physics tick
+var ADDR_UpdateEngineSpeedAccumulator    = ptr(0x42EDF0);  // RPM accumulator (callee of above)
+var ADDR_CollectVehicleCollisionContacts = ptr(0x408570);  // per V2V pair contact solver
 
 // --- Globals (from frame-timing-system.md + global-variable-catalog.md) ---
 var G_gameState            = ptr(0x4C3CE8);   // dword
@@ -88,6 +120,17 @@ var G_splitscreenCount     = ptr(0x4C3D44);    // dword
 var G_cameraWorldPosFloat  = ptr(0x4AAFC4);    // float[3] (shared camera pos)
 var G_camWorldPosFixed     = ptr(0x482F30);    // int[2][3] (per-viewport, 24.8 fixed)
 
+// Game-level RNG seed globals (Ghidra-confirmed 2026-04-13; binary has NO
+// `srand` symbol — these three addresses ARE the race-determinism scaffolding).
+var G_randomSeedForRace        = ptr(0x4969D4);
+var G_raceSessionRandomSeed    = ptr(0x4AAD64);
+var G_raceRandomSeedTable      = ptr(0x4AADBC);
+
+// Player 1 control-bits address, used by auto-throttle AND read by
+// UpdatePlayerVehicleDynamics callers. We log the brake+throttle bits from
+// here each time 0x404030 fires, to cross-reference with in-actor brake_flag.
+var G_player1ControlBits       = ptr(0x482FFC);
+
 // Race slot state table: 6 entries x 4 bytes (state, comp1, comp2, reserved)
 var G_raceSlotStateTable   = ptr(0x4AADF4);
 
@@ -106,10 +149,27 @@ var G_raceOrderArray       = ptr(0x4AE278);
 // ============================================================================
 
 var fileHandle = null;
+var brakeFileHandle = null;
+var contactsFileHandle = null;
 var framesStarted = 0;
 var lastFrameIndex = -1;
 var enabled = false;
 var simTicksThisFrame = 0;
+// Flip once so RNG seeding only happens on the first race frame, not each one.
+var rngSeededThisRace = false;
+
+function actorSlotFromPtr(p) {
+    // Return slot index 0..5 if p is in the actor table; -1 otherwise.
+    try {
+        var base = ACTOR_BASE;
+        var delta = p.sub(base).toInt32();
+        if (delta < 0) return -1;
+        var slot = Math.floor(delta / ACTOR_STRIDE);
+        if (slot < 0 || slot >= 6) return -1;
+        if ((slot * ACTOR_STRIDE) !== delta) return -1; // misaligned → not a slot
+        return slot;
+    } catch (e) { return -1; }
+}
 
 function readU32(addr) { return addr.readU32(); }
 function readS32(addr) { return addr.readS32(); }
@@ -335,12 +395,54 @@ function init() {
     writeRow(CSV_HEADER);
     fileHandle.flush();
 
+    if (CAPTURE_BRAKE_TRACE) {
+        brakeFileHandle = new File(BRAKE_OUTPUT_PATH, "w");
+        if (brakeFileHandle !== null) {
+            // Columns chosen to cover Item 3 requirements:
+            //   long_speed, engine_accum, gear, throttle, brake_flag, handbrake_flag.
+            // Added front_slip/rear_slip as proxies for per-axle wheel forces
+            // since per-wheel force writes live in callees (0x00403720 et al.)
+            // and can be captured in a follow-up pass.
+            brakeFileHandle.write(
+                "sim_tick,slot,long_speed,engine_accum,gear,brake_flag,handbrake_flag," +
+                "throttle_bit,brake_bit,reverse_bit,front_slip,rear_slip," +
+                "steering_cmd,surface_flags\n"
+            );
+            brakeFileHandle.flush();
+            console.log("[trace] Brake trace: " + BRAKE_OUTPUT_PATH);
+        } else {
+            console.log("[trace] WARN: Could not open " + BRAKE_OUTPUT_PATH);
+        }
+    }
+
+    if (CAPTURE_CONTACTS) {
+        contactsFileHandle = new File(CONTACTS_OUTPUT_PATH, "w");
+        if (contactsFileHandle !== null) {
+            // Header: 32 short values (8 quads of 4) plus actor slots & return mask.
+            // q<k>_pt_x = contact point X in opponent's frame
+            // q<k>_pt_z = contact point Z in opponent's frame
+            // q<k>_arm_x = contact - origin (moment-arm X). Confirmed NOT own_x.
+            // q<k>_arm_z = contact - origin (moment-arm Z). Confirmed NOT own_z.
+            var hdr = "call_seq,sim_tick,a_slot,b_slot,ret_mask";
+            for (var k = 0; k < 8; k++) {
+                hdr += ",q" + k + "_pt_x,q" + k + "_pt_z,q" + k + "_arm_x,q" + k + "_arm_z";
+            }
+            hdr += "\n";
+            contactsFileHandle.write(hdr);
+            contactsFileHandle.flush();
+            console.log("[trace] Contacts trace: " + CONTACTS_OUTPUT_PATH);
+        } else {
+            console.log("[trace] WARN: Could not open " + CONTACTS_OUTPUT_PATH);
+        }
+    }
+
     enabled = true;
     framesStarted = 0;
     lastFrameIndex = -1;
     simTicksThisFrame = 0;
     fridaFrameCounter = 0;
     raceConfirmed = false;
+    rngSeededThisRace = false;
 
     installHooks();
 
@@ -515,6 +617,39 @@ function shutdown() {
         fileHandle = null;
         console.log("[trace] Trace file closed (" + framesStarted + " frames captured)");
     }
+    if (brakeFileHandle !== null) {
+        brakeFileHandle.flush();
+        brakeFileHandle.close();
+        brakeFileHandle = null;
+        console.log("[trace] Brake trace closed");
+    }
+    if (contactsFileHandle !== null) {
+        contactsFileHandle.flush();
+        contactsFileHandle.close();
+        contactsFileHandle = null;
+        console.log("[trace] Contacts trace closed");
+    }
+}
+
+function seedGameRng() {
+    // Race-RNG seeding. Called exactly once per race (gated by rngSeededThisRace).
+    // The 3 globals were identified via Ghidra symbol audit on 2026-04-13 — they
+    // are the only named "random seed" storage in TD5_d3d.exe.
+    try {
+        G_randomSeedForRace.writeU32(FIXED_SEED_VALUE);
+        G_raceSessionRandomSeed.writeU32(FIXED_SEED_VALUE);
+        // g_raceRandomSeedTable is a multi-entry table; blast with a
+        // deterministic ramp so every AI slot gets a known starting seed.
+        // 8 dwords covers 6 race slots + 2 spare.
+        for (var i = 0; i < 8; i++) {
+            G_raceRandomSeedTable.add(i * 4).writeU32(FIXED_SEED_VALUE + i * 0x1111);
+        }
+        console.log("[trace] RNG seeded: race=" + FIXED_SEED_VALUE.toString(16) +
+                    " session=" + FIXED_SEED_VALUE.toString(16) +
+                    " table[0..7]");
+    } catch (e) {
+        console.log("[trace] WARN: seedGameRng failed: " + e.message);
+    }
 }
 
 // ============================================================================
@@ -569,6 +704,7 @@ function installHooks() {
                     // race entry re-arms the guard correctly.
                     raceConfirmed = false;
                     raceFrameCount = 0;
+                    rngSeededThisRace = false;  // re-seed on next race entry
                     return;
                 }
                 // Clamp g_simTickBudget to >= 1.0 each frame.
@@ -612,6 +748,13 @@ function installHooks() {
                 // Mark that at least one frame_begin has fired in race state.
                 // Inner tick hooks are now safe to read actor memory.
                 if (!raceConfirmed) {
+                    // Deterministic seeding: this is the earliest point where the
+                    // race actor table is initialized but the first physics tick
+                    // has not yet run. Seeding now fixes AI spawn jitter.
+                    if (DETERMINISTIC_SEED && !rngSeededThisRace) {
+                        seedGameRng();
+                        rngSeededThisRace = true;
+                    }
                     // Re-apply windowed style on first race frame (game may
                     // have switched to fullscreen during the transition).
                     try {
@@ -664,25 +807,62 @@ function installHooks() {
         }
     });
 
+    if (CAPTURE_BRAKE_TRACE) {
+        hookBrakeCapture();
+    }
+    if (CAPTURE_CONTACTS) {
+        hookContactCapture();
+    }
+
     if (!ENABLE_INNER_TICK_HOOKS) {
         return;
     }
 
-    // Only hook UpdateRaceOrder — last operation in the inner tick loop.
-    // Hooking all 3 inner functions generates too much I/O overhead per tick.
-    // UpdateRaceActors and ResolveVehicleContacts can be re-enabled if needed.
+    // Inner tick hooks (re-enabled 2026-04-13 after Ghidra size audit).
     //
-    // Safety: two guards before any memory read or CSV write:
+    // Safety: three guards before any memory read or CSV write:
     //   1. raceConfirmed — true only after first frame_begin in game_state==2.
     //      Prevents reads during the actor-init burst on the very first sim tick.
-    //   2. simTicksThisFrame < INNER_TICK_MAX_PER_FRAME — caps I/O when the
+    //   2. game_state == 2 — race state still active.
+    //   3. simTicksThisFrame < INNER_TICK_MAX_PER_FRAME — caps I/O when the
     //      time accumulator carries a large residual (e.g., after a stall or the
     //      first post-transition frame). The sim runs at 60 Hz fixed-step so
     //      normal frames have 1-2 ticks; 8 is a safe ceiling.
     //
-    // NormalizeWrapState (0x443FB0) is called 6x per actor OUTSIDE the tick loop
-    // and its 57-byte body is too small for Frida's 5-byte trampoline patch —
-    // do not hook it.
+    // NormalizeWrapState (0x443FB0) is intentionally NOT hooked: per-site
+    // comment says it is called 6× per actor OUTSIDE the tick loop, which
+    // pollutes per-tick stage accounting. Its 57-byte body is large enough
+    // for Frida's trampoline (size is not the blocker).
+
+    safeAttach("UpdateRaceActors", ADDR_UpdateRaceActors, {
+        onEnter: function (args) {
+            try {
+                if (!raceConfirmed) return;
+                if (readS32(G_gameState) !== 2) return;
+                if (simTicksThisFrame >= INNER_TICK_MAX_PER_FRAME) return;
+                traceStage("pre_physics");
+            } catch (e) {}
+        }
+    });
+
+    safeAttach("ResolveVehicleContacts", ADDR_ResolveVehicleContacts, {
+        onEnter: function (args) {
+            try {
+                if (!raceConfirmed) return;
+                if (readS32(G_gameState) !== 2) return;
+                if (simTicksThisFrame >= INNER_TICK_MAX_PER_FRAME) return;
+                traceStage("post_physics");
+            } catch (e) {}
+        },
+        onLeave: function (retval) {
+            try {
+                if (!raceConfirmed) return;
+                if (readS32(G_gameState) !== 2) return;
+                if (simTicksThisFrame >= INNER_TICK_MAX_PER_FRAME) return;
+                traceStage("post_ai");
+            } catch (e) {}
+        }
+    });
 
     safeAttach("UpdateRaceOrder", ADDR_UpdateRaceOrder, {
         onLeave: function (retval) {
@@ -701,6 +881,120 @@ function installHooks() {
                 simTicksThisFrame++;
                 traceStage("post_progress");
             } catch (e) {}
+        }
+    });
+}
+
+// -----------------------------------------------------------------------------
+// Brake/RPM capture (Item 3). Hooks UpdatePlayerVehicleDynamics @ 0x404030
+// and reads the actor struct directly. Offsets are CONFIRMED from the
+// 2026-04-13 Ghidra audit:
+//   +0x310 engine_speed_accum   (int)
+//   +0x314 longitudinal_speed   (int)
+//   +0x30C steering_command     (int)
+//   +0x31C front_axle_slip_excess (int)  — proxy for front wheel force
+//   +0x320 rear_axle_slip_excess  (int)  — proxy for rear wheel force
+//   +0x36B current_gear         (u8)
+//   +0x36D brake_flag           (u8)
+//   +0x36E handbrake_flag       (u8)
+//   +0x376 surface_contact_flags(u8)
+// -----------------------------------------------------------------------------
+function hookBrakeCapture() {
+    safeAttach("UpdatePlayerVehicleDynamics_BrakeCap", ADDR_UpdatePlayerVehicleDynamics, {
+        onEnter: function (args) {
+            try {
+                if (!raceConfirmed) return;
+                if (readS32(G_gameState) !== 2) return;
+                if (brakeFileHandle === null) return;
+                var actor = args[0];
+                var slot  = actorSlotFromPtr(actor);
+                if (slot < 0) return; // called with non-actor arg — skip
+                var simTick = readS32(G_simulationTickCounter);
+
+                var longSpd = readS32(actor.add(0x314));
+                var engAcc  = readS32(actor.add(0x310));
+                var steer   = readS32(actor.add(0x30C));
+                var frontSl = readS32(actor.add(0x31C));
+                var rearSl  = readS32(actor.add(0x320));
+                var gear    = readU8 (actor.add(0x36B));
+                var brakeF  = readU8 (actor.add(0x36D));
+                var handbF  = readU8 (actor.add(0x36E));
+                var surface = readU8 (actor.add(0x376));
+
+                // Player 1 control-bits decomposition (player slot only).
+                var thrBit = 0, brkBit = 0, revBit = 0;
+                if (slot === 0) {
+                    var cbits = G_player1ControlBits.readU32();
+                    thrBit = (cbits & 0x100000) ? 1 : 0;
+                    brkBit = (cbits & 0x400)    ? 1 : 0;
+                    revBit = (cbits & 0x8000000) ? 1 : 0;
+                }
+
+                brakeFileHandle.write(
+                    simTick + "," + slot + "," +
+                    longSpd + "," + engAcc + "," + gear + "," +
+                    brakeF + "," + handbF + "," +
+                    thrBit + "," + brkBit + "," + revBit + "," +
+                    frontSl + "," + rearSl + "," +
+                    steer + "," + surface + "\n"
+                );
+            } catch (e) { /* skip */ }
+        }
+    });
+
+    // UpdateEngineSpeedAccumulator @ 0x42EDF0 is a CALLEE of 0x404030 and
+    // writes the same engine_speed_accum field. Hooking it is redundant for
+    // per-frame logging (we already read +0x310 after 0x404030 returns), but
+    // wire it up as a dormant no-op so the address is registered for
+    // future drill-down (e.g., logging target accumulator BEFORE damping).
+    safeAttach("UpdateEngineSpeedAccumulator_Probe", ADDR_UpdateEngineSpeedAccumulator, {
+        onEnter: function (args) { /* no-op; reserved for finer-grained capture */ }
+    });
+}
+
+// -----------------------------------------------------------------------------
+// V2V contact capture (Item 4). Hooks CollectVehicleCollisionContacts @ 0x408570
+// and dumps param_5[0..31] on every invocation. Signature per Ghidra audit:
+//   uint __cdecl CollectVehicleCollisionContacts(
+//       int actor_a, int actor_b, int *state_a, int *state_b, short *contactData);
+// contactData is a short[32] — 8 quads of {pt_x, pt_z, arm_x, arm_z}.
+// Return value is a bitmask of populated quads (0x01..0xFF).
+// -----------------------------------------------------------------------------
+var contactsCallSeq = 0;
+function hookContactCapture() {
+    safeAttach("CollectVehicleCollisionContacts", ADDR_CollectVehicleCollisionContacts, {
+        onEnter: function (args) {
+            try {
+                if (!raceConfirmed) return;
+                if (readS32(G_gameState) !== 2) return;
+                if (contactsFileHandle === null) return;
+                this.actor_a = args[0];
+                this.actor_b = args[1];
+                this.contact_data = args[4]; // short *
+            } catch (e) { this.contact_data = null; }
+        },
+        onLeave: function (retval) {
+            try {
+                if (this.contact_data === null) return;
+                if (contactsFileHandle === null) return;
+                var slotA = actorSlotFromPtr(this.actor_a);
+                var slotB = actorSlotFromPtr(this.actor_b);
+                var mask  = retval.toInt32() & 0xFF;
+                var simTick = readS32(G_simulationTickCounter);
+                var line = (contactsCallSeq++) + "," + simTick + "," +
+                           slotA + "," + slotB + "," + mask;
+                // 8 quads × 4 shorts = 32 signed 16-bit reads.
+                for (var k = 0; k < 8; k++) {
+                    var base = this.contact_data.add(k * 8); // 4 shorts = 8 bytes
+                    var pt_x  = base.readS16();
+                    var pt_z  = base.add(2).readS16();
+                    var arm_x = base.add(4).readS16();
+                    var arm_z = base.add(6).readS16();
+                    line += "," + pt_x + "," + pt_z + "," + arm_x + "," + arm_z;
+                }
+                line += "\n";
+                contactsFileHandle.write(line);
+            } catch (e) { /* skip */ }
         }
     });
 }
