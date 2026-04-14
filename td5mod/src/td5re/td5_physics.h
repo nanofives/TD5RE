@@ -60,7 +60,7 @@ void td5_physics_update_traffic(TD5_Actor *actor);
 /* --- Integration --- */
 void td5_physics_integrate_pose(TD5_Actor *actor);
 void td5_physics_refresh_wheel_contacts(TD5_Actor *actor);
-void td5_physics_integrate_suspension(TD5_Actor *actor);
+void td5_physics_integrate_suspension(TD5_Actor *actor, int32_t accel_x, int32_t accel_z);
 void td5_physics_update_suspension_response(TD5_Actor *actor);
 
 /* --- Attitude / Recovery --- */
