@@ -3838,6 +3838,27 @@ void td5_physics_reset_actor_state(TD5_Actor *actor)
     actor->angular_velocity_yaw = 0;
     actor->angular_velocity_pitch = 0;
 
+    /* Zero euler pitch/roll accumulators — yaw was set by
+     * InitializeActorTrackPose (compute_heading) and must be preserved.
+     * Missing these writes caused slot 1+ spawn-pose residuals in
+     * disp_pitch / ang_pitch / disp_roll at sim_tick=1.
+     * [RE basis: ResetVehicleActorState @ 0x00405D70 zeroes the pitch
+     * and roll accumulators while leaving yaw untouched.] */
+    actor->euler_accum.roll = 0;
+    actor->euler_accum.pitch = 0;
+
+    /* Seed display angles from the accumulator so the first render frame
+     * matches the spawn yaw. integrate_pose rewrites these each tick from
+     * (euler_accum >> 8), but the initial values need to be consistent. */
+    actor->display_angles.roll = 0;
+    actor->display_angles.yaw = (int16_t)((actor->euler_accum.yaw >> 8) & 0xFFF);
+    actor->display_angles.pitch = 0;
+
+    /* Reset frame counter — used by mode1 recovery timeout. Carrying
+     * residual counts from a prior race would shorten the recovery window
+     * on respawn. [RE basis: ResetVehicleActorState zeroes the counter.] */
+    actor->frame_counter = 0;
+
     /* Reset gear to first forward */
     actor->current_gear = TD5_GEAR_FIRST;
 
