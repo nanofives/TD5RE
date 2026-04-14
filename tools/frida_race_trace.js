@@ -405,7 +405,7 @@ function init() {
             // and can be captured in a follow-up pass.
             brakeFileHandle.write(
                 "sim_tick,slot,long_speed,engine_accum,gear,brake_flag,handbrake_flag," +
-                "throttle_bit,brake_bit,reverse_bit,front_slip,rear_slip," +
+                "throttle_bit,brake_bit,analog_y_flag,front_slip,rear_slip," +
                 "steering_cmd,surface_flags\n"
             );
             brakeFileHandle.flush();
@@ -922,19 +922,25 @@ function hookBrakeCapture() {
                 var surface = readU8 (actor.add(0x376));
 
                 // Player 1 control-bits decomposition (player slot only).
-                var thrBit = 0, brkBit = 0, revBit = 0;
+                // Bit layout per td5_types.h TD5_InputBits:
+                //   0x00000200 = THROTTLE
+                //   0x00000400 = BRAKE
+                //   0x08000000 = ANALOG_Y_FLAG (negative analog Y ⇒ reverse)
+                // Previous revisions used 0x100000 (GEAR_UP) for throttle —
+                // wrong, already corrected elsewhere in this file.
+                var thrBit = 0, brkBit = 0, yFlag = 0;
                 if (slot === 0) {
                     var cbits = G_player1ControlBits.readU32();
-                    thrBit = (cbits & 0x100000) ? 1 : 0;
-                    brkBit = (cbits & 0x400)    ? 1 : 0;
-                    revBit = (cbits & 0x8000000) ? 1 : 0;
+                    thrBit = (cbits & 0x00000200) ? 1 : 0;
+                    brkBit = (cbits & 0x00000400) ? 1 : 0;
+                    yFlag  = (cbits & 0x08000000) ? 1 : 0;
                 }
 
                 brakeFileHandle.write(
                     simTick + "," + slot + "," +
                     longSpd + "," + engAcc + "," + gear + "," +
                     brakeF + "," + handbF + "," +
-                    thrBit + "," + brkBit + "," + revBit + "," +
+                    thrBit + "," + brkBit + "," + yFlag + "," +
                     frontSl + "," + rearSl + "," +
                     steer + "," + surface + "\n"
                 );
