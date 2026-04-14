@@ -422,11 +422,7 @@ void td5_physics_tick(void)
 
     /* Skip collision resolution during countdown — wall/vehicle impulses
      * would accumulate in velocity without integrate_pose to dissipate them,
-     * causing cars to shoot off at race start. The original's V2V narrow
-     * phase gates impulses on nonzero relative velocity so stationary grid
-     * pairs are no-ops, but the port's V2V is not a faithful enough port
-     * to match that invariant — without this gate V2V between grid pairs
-     * (circuit sub-lane 1/2 at same span) produces bogus Y/X/Z impulses. */
+     * causing cars to shoot off at race start. */
     if (!g_game_paused)
         td5_physics_resolve_vehicle_contacts();
 }
@@ -550,13 +546,10 @@ void td5_physics_update_vehicle_actor(TD5_Actor *actor)
     if (actor->vehicle_mode == 0) {
         td5_track_resolve_reverse_contacts(actor);
         td5_track_resolve_forward_contacts(actor);
-        /* Lateral wall check — re-enabled with multi-probe filter to
-         * avoid single-probe false positives (Newcastle span 122 bug).
-         * The wall handler now requires 2+ probes hitting the same wall
-         * before applying impulse, filtering geometry edge cases while
-         * preserving real wall impacts. Disabling entirely caused the
-         * car to clip through the road on many tracks since the port
-         * lacks state-0x0F off-track damping. Branch spans still skipped. */
+        /* Lateral wall check — re-enabled now that junction branching works.
+         * The original has no mid-strip lateral walls; containment is
+         * topological via the span walker. This port-specific check adds
+         * road-edge walls for types 1/2/5 only (safe geometry). */
         td5_track_resolve_wall_contacts(actor);
     }
 
@@ -2802,18 +2795,10 @@ void td5_physics_update_suspension_response(TD5_Actor *actor)
     uint8_t bVar2 = s_prev_grounded_mask[actor->slot_index & 0x0F];
 
     if (bVar1 == 0x0F) {
-        /* All four wheels airborne — no gravity add-back (let gravity pull the
-         * car down naturally), but apply a mild return-to-level pitch/roll
-         * torque so the car visibly rotates in the air instead of freezing
-         * at its takeoff attitude. */
-        int32_t euler_err_r = 0 - actor->euler_accum.roll;
-        int32_t euler_err_p = 0 - actor->euler_accum.pitch;
-        actor->angular_velocity_roll  = euler_err_r >> 4;   /* gentler than ground (>>2) */
-        actor->angular_velocity_pitch = euler_err_p >> 4;
-        if (actor->angular_velocity_roll  >  1500) actor->angular_velocity_roll  =  1500;
-        if (actor->angular_velocity_roll  < -1500) actor->angular_velocity_roll  = -1500;
-        if (actor->angular_velocity_pitch >  1500) actor->angular_velocity_pitch =  1500;
-        if (actor->angular_velocity_pitch < -1500) actor->angular_velocity_pitch = -1500;
+        /* All four wheels airborne — original 0x004057F0 skips the entire
+         * body-torque pass. Angular velocity carries freely (takeoff spin
+         * preserved); gravity is applied in integrate_pose and is NOT
+         * added back here. [CONFIRMED @ 0x004057F0 early-return on bVar1==0xF] */
         return;
     }
 
@@ -3295,30 +3280,13 @@ void td5_physics_integrate_pose(TD5_Actor *actor)
                 }
             }
 
-            /* Airborne detection: if the snap target is below the current
-             * integrated position, the car is flying over a drop/ramp.
-             * Threshold: 3072 in 24.8 = 12 world units of clearance above
-             * the expected snap position. This triggers when the car crests
-             * a slope/ramp with enough upward velocity that gravity (1900
-             * per frame) can't pull it back to the ground in one tick.
-             *
-             * During steady driving on flat ground or continuously rising
-             * slopes, airborne_gap ≈ -gravity (always negative). Only when
-             * the ground levels out after a climb (or drops away over a
-             * crest) does vel_y > gravity carry pos_y above new_y. */
-            int32_t airborne_gap = actor->world_pos.y - new_y;
-            if (airborne_gap > 3072) {
-                /* Car is above ground — flag all wheels airborne, don't snap */
-                actor->wheel_contact_bitmask = 0x0F;
-                TD5_LOG_I(LOG_TAG, "airborne: slot=%d gap=%d pos_y=%d snap_y=%d",
-                          actor->slot_index, airborne_gap,
-                          actor->world_pos.y, new_y);
-                /* Fall through to the "no contact" path below */
-                contact_count = 0;
-            } else {
-                actor->world_pos.y = new_y;
-                actor->render_pos.y = (float)new_y * (1.0f / 256.0f);
-            }
+            /* Chassis Y-snap. No chassis-level airborne override here —
+             * the per-wheel airborne bits written by refresh_wheel_contacts
+             * (force >= 0x801 @ 0x00403720) now drive downstream airborne
+             * behavior. Match original 0x00406300 which snaps
+             * unconditionally once contact_count > 0. */
+            actor->world_pos.y = new_y;
+            actor->render_pos.y = (float)new_y * (1.0f / 256.0f);
 
           if (contact_count > 0) {
             /* Velocity-from-snap gate — literal port of original
@@ -3402,23 +3370,12 @@ void td5_physics_integrate_pose(TD5_Actor *actor)
     if (actor->angular_velocity_pitch < -6000) actor->angular_velocity_pitch = -6000;
 
     /* 10. Update suspension response.
-     * During active race: full suspension_response (gravity add-back +
-     * roll/pitch spring-damper).
-     * During paused/countdown: apply ONLY the gravity add-back for grounded
-     * cars, skipping the roll/pitch spring-damper that would accumulate
-     * angular velocity during the entire countdown (tilting the car before
-     * the race even starts). This matches the original's net vel_y=0 behavior
-     * at sim_tick=1 on the gate-clearing tick: gravity subtract at 0x405EDE
-     * and the snap -= gravity at 0x40631A are both cancelled by the original's
-     * UpdateVehicleSuspensionResponse gravity add-back at 0x00405A49. Without
-     * this paused add-back, vel_y sits at -g_gravity_constant (-1900) on
-     * every paused tick. */
-    if (!g_game_paused) {
+     * Skip during countdown/pause — no dynamics are running, so angular
+     * velocity should stay at zero. Without this gate, the velocity-path
+     * torque from per-wheel normal asymmetry accumulates during the entire
+     * countdown, tilting the car before the race even starts. */
+    if (!g_game_paused)
         td5_physics_update_suspension_response(actor);
-    } else if ((actor->wheel_contact_bitmask & 0x0F) != 0x0F) {
-        /* Grounded during paused — cancel gravity to match original invariant */
-        actor->linear_velocity_y += g_gravity_constant;
-    }
 
     if (actor->slot_index == 0 && (actor->frame_counter % 60u) == 0u) {
         TD5_LOG_D(LOG_TAG, "Integrate actor0: pos=(%d,%d,%d)",
@@ -3656,17 +3613,23 @@ void td5_physics_refresh_wheel_contacts(TD5_Actor *actor)
          * The gap_270 Y component uses the TRANSFORM-computed Y, not ground-snapped Y.
          * This ensures the velocity reflects the body's actual motion, not the snap. */
 
-        /* Compute per-wheel contact force.
+        /* Compute per-wheel contact force — literal port of 0x00403720.
          *
-         * Original (0x403720): force = (wheel_y - ground_y) + gGravityConstant,
-         * with force written to wheel_load_accum so the suspension converges
-         * wheel_y toward ground_y. The port's suspension model leaves a
-         * permanent equilibrium offset (~55k in 24.8) from ride height.
-         * The >>8 shift absorbs this offset into the deadband.
+         *   *local_4c = (*piVar8 - local_30) + gGravityConstant;
+         *   dead-zone |force| < 0x200 -> 0
+         *   if (force < 0x801) grounded: snap wheel_y = ground_y
+         *   else                airborne: set bit in new mask, clamp force = 12000
          *
-         * Airborne detection is handled at the chassis level in the ground
-         * snap section of integrate_pose (snap_delta check), not here. */
-        int32_t force = (wheel_y - ground_y) >> 8;
+         * The force is written to wheel_load_accum (+0x2FC) where the
+         * spring-damper (IntegrateWheelSuspensionTravel @ 0x00403A20)
+         * reads it next tick. This drives the convergence that keeps
+         * wheel_y tracking ground_y at equilibrium and lets the per-wheel
+         * airborne bit drive downstream suspension response.
+         *
+         * Raw 24.8 FP units — NO >>8 shift. Thresholds 0x200/0x801/12000
+         * are all in the same raw scale.
+         * [CONFIRMED @ 0x00403720] */
+        int32_t force = (wheel_y - ground_y) + g_gravity_constant;
 
         /* gap_270[i] = frame-to-frame wheel contact position delta >> 8.
          * MUST compare pre-snap transform results from two consecutive frames.
@@ -3722,6 +3685,18 @@ void td5_physics_refresh_wheel_contacts(TD5_Actor *actor)
              * Original (0x403720) unconditionally snaps without checking
              * probe success — the track update above ensures a valid span. */
             actor->wheel_contact_pos[i].y = ground_y;
+        }
+
+        /* Publish the per-wheel force to wheel_load_accum (+0x2FC).
+         * IntegrateWheelSuspensionTravel (0x00403A20) reads this next tick
+         * as the external excitation for the spring-damper.
+         * [CONFIRMED @ 0x00403720: *local_4c = ...] */
+        actor->wheel_load_accum[i] = force;
+
+        if (actor->slot_index == 0 && i == 0 && (actor->frame_counter % 60u) == 0u) {
+            TD5_LOG_I(LOG_TAG, "wheel_force: slot=%d wheel=%d wy=%d gy=%d force=%d bitmask=0x%02x",
+                      actor->slot_index, i, wheel_y, ground_y, force,
+                      actor->wheel_contact_bitmask);
         }
 
         /* Store high-res wheel world position */
