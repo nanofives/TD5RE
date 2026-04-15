@@ -2673,6 +2673,18 @@ void td5_physics_integrate_suspension(TD5_Actor *actor, int32_t accel_x, int32_t
         if (new_vel > -0x10 && new_vel < 0x10)
             new_vel = 0;
 
+        /* Rate limit per-tick velocity change. Without this, small lateral
+         * accel spikes during steering drive `spring_term` large enough to
+         * produce multi-thousand 24.8-FP susp_pos swings in a single tick,
+         * which cascade through refresh_wheel_contacts (body_wy includes
+         * susp_pos>>8) into ground-snap new_y jumps — visible micro-jumps
+         * when steering. Clamp `new_vel` to ±VEL_CAP so susp_pos moves
+         * smoothly. TODO: verify original's cardef[0x62] (spring k) scaling
+         * via runtime capture — may currently be over-amplified. */
+        const int32_t VEL_CAP = 0x100;  /* ±256 per tick = ±1 body unit/sec */
+        if (new_vel >  VEL_CAP) new_vel =  VEL_CAP;
+        if (new_vel < -VEL_CAP) new_vel = -VEL_CAP;
+
         actor->wheel_spring_dv[i] = new_vel;
         int32_t new_pos = actor->wheel_suspension_pos[i] + new_vel;
         actor->wheel_suspension_pos[i] = new_pos;
@@ -2807,6 +2819,11 @@ void td5_physics_update_suspension_response(TD5_Actor *actor)
 
     /* ---------- Target-angle spring-damper for body roll/pitch ----------
      *
+     * Gated on !g_game_paused so the parked car doesn't tilt during
+     * countdown — the height-diff proportional chase would drive
+     * angular_velocity from spurious per-wheel ground asymmetry before
+     * the race starts.
+     *
      * Instead of the original's per-wheel normal torque accumulation (which
      * requires a full body-space transform chain to produce stable forces),
      * compute target roll/pitch directly from wheel ground heights, then
@@ -2816,84 +2833,82 @@ void td5_physics_update_suspension_response(TD5_Actor *actor)
      * Roll  = height difference between left/right sides
      * Pitch = height difference between front/rear
      */
-    {
-        int32_t gy[4];
-        int grounded = 0;
-        for (int i = 0; i < 4; i++) {
-            if (!(bVar1 & (1u << i))) {
-                gy[i] = actor->wheel_contact_pos[i].y;
-                grounded++;
-            } else {
-                gy[i] = actor->world_pos.y;  /* fallback for airborne wheels */
-            }
+    /* ---------- Target-angle tilt with probed ground + decay ----------
+     *
+     * Pragmatic stabilizer for visual chassis tilt. The literal-port of the
+     * original's per-wheel torque (formerly here, see git history)
+     * accumulates angular velocity unboundedly with no in-loop damping —
+     * the original likely relies on the spring term's *0x100 amplification
+     * for counter-balance, but unit scales differ in the port and produce
+     * runaway in either direction.
+     *
+     * Approach instead:
+     *   1. Probe the GROUND height (not wheel_contact_pos.y, which wobbles
+     *      with suspension swing) at each wheel's XZ. On flat ground all
+     *      four heights are equal → no tilt. On slopes / banked turns →
+     *      front-rear and left-right deltas drive the target.
+     *   2. P controller + explicit decay on angular_velocity so it CAN'T
+     *      run away even if target wobbles.
+     *
+     * Wheel layout: 0=FL, 1=FR, 2=RL, 3=RR. */
+    int32_t gy[4];
+    int grounded = 0;
+    for (int i = 0; i < 4; i++) {
+        int32_t probe_y = 0;
+        int probe_surf = 0;
+        int probe_span = actor->wheel_probes[i].span_index;
+        if (probe_span < 0) probe_span = actor->track_span_raw;
+        if (td5_track_probe_height(actor->wheel_contact_pos[i].x,
+                                   actor->wheel_contact_pos[i].z,
+                                   probe_span, &probe_y, &probe_surf)) {
+            gy[i] = probe_y;
+            grounded++;
+        } else {
+            gy[i] = actor->world_pos.y;
         }
+    }
 
-        if (grounded >= 2) {
-            /* Height differences (24.8 fixed-point) */
-            int32_t left_avg  = (gy[0] + gy[2]) / 2;
-            int32_t right_avg = (gy[1] + gy[3]) / 2;
-            int32_t front_avg = (gy[0] + gy[1]) / 2;
-            int32_t rear_avg  = (gy[2] + gy[3]) / 2;
+    /* Decay angular velocity every tick (1/16 = 6.25%/tick ≈ 0.5s settle).
+     * This is the safety net that makes target-angle wobble survivable. */
+    actor->angular_velocity_roll  -= actor->angular_velocity_roll  >> 4;
+    actor->angular_velocity_pitch -= actor->angular_velocity_pitch >> 4;
 
-            /* Wheel spacing from body-space arm lengths (actor+0x210).
-             * sVar4 (Z arm) gives half-track-width, sVar3 (X arm) gives half-wheelbase.
-             * Use wheel 0 (FL) as reference; absolute value for distance. */
-            const int16_t *wda0 = (const int16_t *)((const uint8_t *)actor + 0x210);
-            int32_t half_track = wda0[2];  /* Z arm = half track width */
-            int32_t half_wbase = wda0[0];  /* X arm = half wheelbase */
-            if (half_track < 0) half_track = -half_track;
-            if (half_wbase < 0) half_wbase = -half_wbase;
-            if (half_track < 32) half_track = 32;  /* prevent div-by-zero */
-            if (half_wbase < 32) half_wbase = 32;
+    if (grounded == 4) {
+        int32_t left_avg  = (gy[0] + gy[2]) / 2;
+        int32_t right_avg = (gy[1] + gy[3]) / 2;
+        int32_t front_avg = (gy[0] + gy[1]) / 2;
+        int32_t rear_avg  = (gy[2] + gy[3]) / 2;
 
-            /* Target angles in 12-bit units (4096 = 360°).
-             * TD5 axis convention: euler_accum.roll = Rx = visual pitch (fwd/back),
-             *                      euler_accum.pitch = Rz = visual roll (left/right).
-             * So front/rear height diff drives "roll" (Rx), left/right drives "pitch" (Rz).
-             * Scale: (hdiff >> 8) / (2 * arm) * (4096 / 2π) */
-            int32_t fwdbk_hdiff = (front_avg - rear_avg) >> 8;   /* front vs rear → visual pitch */
-            int32_t leftrt_hdiff = (left_avg - right_avg) >> 8;   /* left vs right → visual roll */
+        const int16_t *wda0 = (const int16_t *)((const uint8_t *)actor + 0x210);
+        int32_t half_track = wda0[2];
+        int32_t half_wbase = wda0[0];
+        if (half_track < 0) half_track = -half_track;
+        if (half_wbase < 0) half_wbase = -half_wbase;
+        if (half_track < 32) half_track = 32;
+        if (half_wbase < 32) half_wbase = 32;
 
-            /* 4096/(2*pi) ≈ 652 for exact geometry. Scale down to ~50% for a
-             * subtler visual tilt matching the original game's feel. */
-            int32_t target_roll  = -(fwdbk_hdiff  * 326) / (2 * half_wbase);  /* Rx = visual pitch */
-            int32_t target_pitch = (leftrt_hdiff * 326) / (2 * half_track);  /* Rz = visual roll */
+        int32_t fwdbk_hdiff  = (front_avg - rear_avg) >> 8;
+        int32_t leftrt_hdiff = (left_avg  - right_avg) >> 8;
 
-            /* Clamp target to reasonable range (±0x100 = ±22.5°) */
-            if (target_roll  >  0x100) target_roll  =  0x100;
-            if (target_roll  < -0x100) target_roll  = -0x100;
-            if (target_pitch >  0x100) target_pitch =  0x100;
-            if (target_pitch < -0x100) target_pitch = -0x100;
+        int32_t target_roll  = -(fwdbk_hdiff  * 326) / (2 * half_wbase);
+        int32_t target_pitch =  (leftrt_hdiff * 326) / (2 * half_track);
 
-            /* Current angles (signed 12-bit) */
-            int32_t cur_roll  = (actor->euler_accum.roll >> 8) & 0xFFF;
-            if (cur_roll  > 0x800) cur_roll  -= 0x1000;
-            int32_t cur_pitch = (actor->euler_accum.pitch >> 8) & 0xFFF;
-            if (cur_pitch > 0x800) cur_pitch -= 0x1000;
+        if (target_roll  >  0x100) target_roll  =  0x100;
+        if (target_roll  < -0x100) target_roll  = -0x100;
+        if (target_pitch >  0x100) target_pitch =  0x100;
+        if (target_pitch < -0x100) target_pitch = -0x100;
 
-            /* Proportional chase: set angular velocity to close 25% of the
-             * euler_accum gap per frame. Works in euler_accum scale (<<8) so
-             * display angle changes visibly. Time constant ~4 frames (0.13s);
-             * clamp limits rotation to ~21°/s. */
-            int32_t euler_err_r = (target_roll  << 8) - actor->euler_accum.roll;
-            int32_t euler_err_p = (target_pitch << 8) - actor->euler_accum.pitch;
+        int32_t err_r = (target_roll  << 8) - actor->euler_accum.roll;
+        int32_t err_p = (target_pitch << 8) - actor->euler_accum.pitch;
 
-            actor->angular_velocity_roll  = euler_err_r >> 2;
-            actor->angular_velocity_pitch = euler_err_p >> 2;
+        actor->angular_velocity_roll  += err_r >> 6;   /* gentle P gain */
+        actor->angular_velocity_pitch += err_p >> 6;
 
-            /* Clamp angular velocities — limits visual rotation rate */
-            if (actor->angular_velocity_roll  >  2000) actor->angular_velocity_roll  =  2000;
-            if (actor->angular_velocity_roll  < -2000) actor->angular_velocity_roll  = -2000;
-            if (actor->angular_velocity_pitch >  2000) actor->angular_velocity_pitch =  2000;
-            if (actor->angular_velocity_pitch < -2000) actor->angular_velocity_pitch = -2000;
-
-            if (actor->slot_index == 0 && (actor->frame_counter % 60u) == 0u) {
-                TD5_LOG_I(LOG_TAG, "susp_tgt: tgt_r=%d tgt_p=%d cur_r=%d cur_p=%d "
-                          "av_r=%d av_p=%d grnd=%d",
-                          target_roll, target_pitch, cur_roll, cur_pitch,
-                          actor->angular_velocity_roll, actor->angular_velocity_pitch,
-                          grounded);
-            }
+        if (actor->slot_index == 0 && (actor->frame_counter % 60u) == 0u) {
+            TD5_LOG_I(LOG_TAG,
+                      "susp_tilt: tgt_r=%d tgt_p=%d gnd=%d av_r=%d av_p=%d",
+                      target_roll, target_pitch, grounded,
+                      actor->angular_velocity_roll, actor->angular_velocity_pitch);
         }
     }
 }
@@ -3052,16 +3067,9 @@ void td5_physics_integrate_pose(TD5_Actor *actor)
 
     /* 1. Apply gravity to velocity Y — UNCONDITIONAL, matching
      * IntegrateVehiclePoseAndContacts @ 0x00405EDE. The suspension_response
-     * tail call at the end of this function adds back `(g + Σ(wheel_vel·normal)/2/n)`
-     * at 0x00405A49 — for stationary grounded cars the Σ term is 0 and the
-     * two writes cancel cleanly. [CONFIRMED via 2026-04-11 Ghidra pass on
-     * 0x4057F0: the function writes +0x1D0 exactly once with the formula
-     * `vel_y + g + avg_wheel_contact_lift`.]
-     *
-     * A prior cluster-A workaround gated this on `!g_game_paused` because
-     * suspension_response wasn't producing the right add-back. That gate
-     * leaked a -128 residual at sim_tick=1 — removing it restores the
-     * original's invariant. */
+     * tail call (0x004057F0) adds back `(g + Σ(wheel_vel·normal)/2/n)` at
+     * 0x00405A49 — for stationary grounded cars the Σ term is 0 and the
+     * two writes cancel cleanly. */
     actor->linear_velocity_y -= g_gravity_constant;
 
     /* 2. Integrate angular velocity into euler accumulators */
@@ -3370,18 +3378,62 @@ void td5_physics_integrate_pose(TD5_Actor *actor)
     if (actor->angular_velocity_pitch < -6000) actor->angular_velocity_pitch = -6000;
 
     /* 10. Update suspension response.
-     * Skip during countdown/pause — no dynamics are running, so angular
-     * velocity should stay at zero. Without this gate, the velocity-path
-     * torque from per-wheel normal asymmetry accumulates during the entire
-     * countdown, tilting the car before the race even starts. */
-    if (!g_game_paused)
-        td5_physics_update_suspension_response(actor);
+     * UNCONDITIONAL, matching original 0x00405E80 which always calls
+     * UpdateVehicleSuspensionResponse (0x004057F0) when damage_lockout == 0.
+     * The target-angle spring-damper block inside is gated on !g_game_paused
+     * internally so the parked car doesn't tilt during countdown. */
+    td5_physics_update_suspension_response(actor);
 
     if (actor->slot_index == 0 && (actor->frame_counter % 60u) == 0u) {
         TD5_LOG_D(LOG_TAG, "Integrate actor0: pos=(%d,%d,%d)",
                   actor->world_pos.x,
                   actor->world_pos.y,
                   actor->world_pos.z);
+    }
+
+    /* ---- CLIP TELEMETRY ----
+     * Dedicated per-tick diagnostic for slot 0. Probes the road surface at
+     * the current chassis XZ and compares against pos_y. Logs a compact
+     * CSV-style line every tick so we can count clip events, correlate with
+     * gear/throttle, and verify whether a "should-clip" scenario (jump over
+     * a gap, genuine airborne) is misclassified as a ride-height-bug clip.
+     *
+     * Fields:
+     *   clip_t: t=<frame_counter> pos_y=<FP> probe=<FP> d=<FP_diff> vy=<FP>
+     *           bm=<contact_bitmask> gear=<n> thr=<0..256> brk=<0..1>
+     *           lspd=<FP> span=<raw> CLIP/ok
+     * Delta is (pos_y - probe_y): NEGATIVE means pos_y BELOW ground (clip).
+     * Only slot 0 and paused=0 OR every 10 frames during paused to keep
+     * volume manageable. */
+    if (actor->slot_index == 0) {
+        int emit = 1;
+        if (g_game_paused && (actor->frame_counter % 10u) != 0u) emit = 0;
+        if (emit) {
+            int32_t probe_y = 0;
+            int probe_surf = 0;
+            int probe_span = actor->track_span_raw;
+            int probe_ok = td5_track_probe_height(
+                actor->world_pos.x, actor->world_pos.z,
+                probe_span, &probe_y, &probe_surf);
+            if (probe_ok) {
+                int32_t delta = actor->world_pos.y - probe_y;
+                const char *flag = (delta < 0) ? "CLIP" : "ok";
+                TD5_LOG_I(LOG_TAG,
+                    "clip_t: t=%u pos_y=%d probe=%d d=%d vy=%d bm=0x%02X "
+                    "gear=%u thr=%d brk=%u lspd=%d span=%d paused=%d %s",
+                    actor->frame_counter,
+                    actor->world_pos.y, probe_y, delta,
+                    actor->linear_velocity_y,
+                    actor->wheel_contact_bitmask,
+                    actor->current_gear,
+                    actor->encounter_steering_cmd,
+                    actor->brake_flag,
+                    actor->longitudinal_speed,
+                    (int)actor->track_span_raw,
+                    g_game_paused,
+                    flag);
+            }
+        }
     }
 }
 
@@ -3508,13 +3560,30 @@ void td5_physics_refresh_wheel_contacts(TD5_Actor *actor)
         int32_t wy = actor->wheel_display_angles[i][1];
         int32_t wz = actor->wheel_display_angles[i][2];
 
-        /* Apply suspension deflection offset + height reference preload.
-         * cardef+0x82 is the suspension height reference, scaled by 0xB5/256. */
-        int32_t susp_offset_i = actor->wheel_suspension_pos[i];
-        int32_t susp_height_ref = (int32_t)CDEF_S(actor, 0x82);
-        if (susp_height_ref != 0)
-            susp_offset_i += (susp_height_ref * 0xB5) >> 8;
-        wy += susp_offset_i;
+        /* Body-space Y of the wheel = cwy − (susp_pos>>8) − (href*0xB5>>8).
+         *
+         * Literal port of the instruction sequence at 0x0040384D–0x00403869
+         * inside RefreshVehicleWheelContactFrames @ 0x00403720:
+         *   CDQ; AND EDX,0xFF; ADD EAX,EDX; SAR EAX,8      ; sp_div  = sp / 256 (signed toward zero)
+         *   SUB CX, AX                                     ; body_wy = cwy - sp_div
+         *   SUB ECX, EDX                                   ; body_wy -= href_preload (preloaded once, signed /256 of href*0xB5)
+         *   MOV [EBX], CX                                  ; body_wy is written as int16
+         *
+         * Two pre-existing port bugs corrected here:
+         *   1. susp_pos (`sp`) was used RAW — susp_pos is stored in 24.8 FP
+         *      (see 0x00403A20 consumers), so it must be >>8 before subtract.
+         *   2. Both correction terms were ADDED. Original SUBTRACTS. This sign
+         *      inversion alone produced the ~55k FP (~217 world unit)
+         *      equilibrium offset above ground (memory:
+         *      reference_port_ride_height_offset.md).
+         * [CONFIRMED @ 0x00403720 by research agent — ride-height refactor] */
+        int32_t sp = actor->wheel_suspension_pos[i];
+        int32_t sp_div = (sp + (int32_t)((uint32_t)(sp >> 31) & 0xFFu)) >> 8;
+        int32_t href = (int32_t)CDEF_S(actor, 0x82);
+        int32_t href_x181 = href * 0xB5;
+        int32_t href_preload =
+            (href_x181 + (int32_t)((uint32_t)(href_x181 >> 31) & 0xFFu)) >> 8;
+        wy = (int32_t)(int16_t)(wy - sp_div - href_preload);
 
         /* Transform by body rotation matrix and scale to world coords (<<8) */
         int32_t world_x = (int32_t)(rot[0] * wx + rot[1] * wy + rot[2] * wz);
