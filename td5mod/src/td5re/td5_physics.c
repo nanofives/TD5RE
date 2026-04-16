@@ -784,33 +784,61 @@ void td5_physics_update_player(TD5_Actor *actor)
              * when going straight (v_lat ≈ 0).
              * Wheel assignment: bf/2 per driven pair, 0 on other pair.
              * [CONFIRMED @ 0x404474-0x40447e] */
-            /* On-ground brake: REAR wheels only, clamped to |v_lat|
+            /* On-ground brake: REAR wheels only, clamped to |v_long|
              * [CONFIRMED @ 0x404441-0x404481]: uses tuning+0x6E only,
              * assigns result/2 to RL/RR, 0 to FL/FR.
-             * [CONFIRMED @ 0x404455-0x40446D]: clamp is against lateral
-             * speed, NOT longitudinal. */
+             * Original clamps against uVar37 = velocity projected onto the
+             * steered-front-wheel axis: ((cos(yaw+steer)*vz + sin(yaw+steer)*vx)>>12)
+             * minus a yaw-rate correction term [CONFIRMED @ 0x404441-0x404481].
+             * When steer≈0, uVar37 ≡ body longitudinal speed (v_long). We
+             * approximate with v_long here; this matches the original exactly
+             * when driving straight and diverges only under heavy steering.
+             * TODO: faithful uVar37 with steered-axle projection + yaw-rate.
+             * Previously this clamped against |v_lat|, which collapsed to 0
+             * when driving straight and killed all braking force. */
             int32_t bf = (brake_front * throttle) >> 8;
             {
                 int32_t abs_bf = bf < 0 ? -bf : bf;
-                int32_t abs_vl = v_lat < 0 ? -v_lat : v_lat;
-                int32_t clamped = abs_bf < abs_vl ? abs_bf : abs_vl;
+                /* Faithful clamp against velocity projected onto the steered-
+                 * front-wheel axis [CONFIRMED @ 0x404441-0x404481]:
+                 *   uVar37 ≈ (cos(yaw+steer)*vz + sin(yaw+steer)*vx) >> 12
+                 * When steer=0 this equals v_long (straight-line brake works
+                 * at full strength). When steering, the projection shrinks by
+                 * roughly cos(steer), naturally weakening brake during turns —
+                 * matching the original's behavior. The yaw-rate sub-term
+                 * (sin(steer)*tuning[0x28]*avy)/0x28C is omitted — port sign
+                 * conventions differ from the binary's and getting the correction
+                 * right requires a sign audit. Cap doubled to 2x for user-
+                 * preferred stronger feel; remove the <<1 for full RE parity. */
+                int32_t steer_angle = -(actor->steering_command >> 8);
+                int32_t steer_h = (heading + steer_angle) & 0xFFF;
+                int32_t cos_sh = cos_fixed12(steer_h);
+                int32_t sin_sh = sin_fixed12(steer_h);
+                int32_t v_steer_axis = (cos_sh * vz + sin_sh * vx) >> 12;
+                int32_t abs_vsa = v_steer_axis < 0 ? -v_steer_axis : v_steer_axis;
+                int32_t cap = abs_vsa << 1;
+                int32_t clamped = abs_bf < cap ? abs_bf : cap;
                 bf = (bf < 0) ? -(int32_t)clamped : (int32_t)clamped;
             }
             wheel_drive[0] = 0;
             wheel_drive[1] = 0;
             wheel_drive[2] = bf >> 1;
             wheel_drive[3] = bf >> 1;
-            /* When braking on-ground near standstill, force gear to REVERSE.
-             * Original achieves this via auto_gear during brief airborne
-             * microbumps [CONFIRMED @ 0x42EF1C: throttle<0 → gear=0].
-             * The port's ground contact may be too sticky for microbumps,
-             * so replicate the effect directly. Threshold 0x40 matches the
-             * dead-zone clamp at 0x404E70. */
+            /* When braking on-ground at low forward speed, hand off to
+             * REVERSE drive. Original achieves this via auto_gear during
+             * airborne microbumps [CONFIRMED @ 0x42EF1C: throttle<0 → gear=0];
+             * port replicates the effect directly because ground contact is
+             * too sticky for microbumps. Tuning departure: dropped lateral
+             * velocity gate (drift during brake blocked the trigger) and
+             * raised the longitudinal threshold from 0x40 to 0x100 so reverse
+             * engages crisply at the moment forward motion stops. Clearing
+             * brake_flag here routes the next tick through the drive path,
+             * which with throttle<0 + gear=REVERSE produces reverse motion. */
             {
                 int32_t abs_vlong = v_long < 0 ? -v_long : v_long;
-                int32_t abs_vlat  = v_lat  < 0 ? -v_lat  : v_lat;
-                if (abs_vlong < 0x40 && abs_vlat < 0x40) {
+                if (abs_vlong < 0x100) {
                     actor->current_gear = TD5_GEAR_REVERSE;
+                    actor->brake_flag = 0;
                 }
             }
             if (actor->slot_index == 0 && (actor->frame_counter % 30u) == 0u) {
@@ -1015,6 +1043,24 @@ void td5_physics_update_player(TD5_Actor *actor)
 
         int32_t local_c_num = (t_e / 4096) * sin_sr - (t_f / 4096) * cos_sr;
         front_lat_force = local_c_num / denom;  /* no negation [CONFIRMED @ 0x00404B93] */
+    }
+
+    /* Tuning departure: while braking on-ground, halve the lateral tire
+     * forces before they're rotated into world-frame velocity. The coupled
+     * bicycle model generates large cornering forces when steering, which
+     * get added on top of the rear longitudinal brake force and produce a
+     * ~9x-stronger per-tick deceleration than straight-line braking
+     * (observed in log/race.log FORCE_BRK entries: straight fz≈-593,
+     * steering fx=5414 fz=-888). This made brake feel uneven between
+     * straight and turning. Halving f_lat / r_lat flattens the asymmetry
+     * while preserving some cornering bite so the car still carves when
+     * trail-braking. Not RE-faithful — save as TODO for /diff-race
+     * investigation whether the original's coupled solve really produces
+     * these magnitudes or if a slip-circle / grip-limit upstream bug
+     * inflates them. */
+    if (actor->brake_flag && actor->surface_contact_flags != 0) {
+        front_lat_force >>= 1;
+        rear_lat_force  >>= 1;
     }
 
     if (actor->slot_index == 0 && (actor->frame_counter % 120u) == 0u) {
