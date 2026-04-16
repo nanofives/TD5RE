@@ -301,12 +301,20 @@ int td5_plat_window_create(const char *title, const TD5_DisplayMode *mode)
         wr.right = w; wr.bottom = h;
         AdjustWindowRect(&wr, style, FALSE);
 
-        s_hwnd = CreateWindowExA(0, "TD5RE_Window",
-            title ? title : "TD5RE",
-            style,
-            CW_USEDEFAULT, CW_USEDEFAULT,
-            wr.right - wr.left, wr.bottom - wr.top,
-            NULL, NULL, GetModuleHandleA(NULL), NULL);
+        {
+            static char env_title[256];
+            const char *win_title = title ? title : "TD5RE";
+            DWORD n = GetEnvironmentVariableA("TD5RE_WINDOW_TITLE",
+                                              env_title, sizeof(env_title));
+            if (n > 0 && n < sizeof(env_title)) win_title = env_title;
+
+            s_hwnd = CreateWindowExA(0, "TD5RE_Window",
+                win_title,
+                style,
+                CW_USEDEFAULT, CW_USEDEFAULT,
+                wr.right - wr.left, wr.bottom - wr.top,
+                NULL, NULL, GetModuleHandleA(NULL), NULL);
+        }
 
         if (!s_hwnd) return 0;
         if (hIcon) {

@@ -118,11 +118,21 @@ static HWND Backend_CreateDisplayWindow(int client_w, int client_h)
     x = (scr_w - (wr.right - wr.left)) / 2;
     y = (scr_h - (wr.bottom - wr.top)) / 2;
 
-    hwnd = CreateWindowExA(
-        0, "TD5_D3D11_Display", "Test Drive 5",
-        style, x, y,
-        wr.right - wr.left, wr.bottom - wr.top,
-        NULL, NULL, GetModuleHandleA(NULL), NULL);
+    /* TD5RE_WINDOW_TITLE overrides the default so /fix sessions can tag the
+     * window with the branch / scenario under test. */
+    {
+        static char title_buf[256];
+        const char *title = "Test Drive 5";
+        DWORD n = GetEnvironmentVariableA("TD5RE_WINDOW_TITLE",
+                                          title_buf, sizeof(title_buf));
+        if (n > 0 && n < sizeof(title_buf)) title = title_buf;
+
+        hwnd = CreateWindowExA(
+            0, "TD5_D3D11_Display", title,
+            style, x, y,
+            wr.right - wr.left, wr.bottom - wr.top,
+            NULL, NULL, GetModuleHandleA(NULL), NULL);
+    }
 
     if (hwnd) {
         ShowWindow(hwnd, SW_SHOW);
