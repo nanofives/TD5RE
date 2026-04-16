@@ -325,14 +325,31 @@ static int   s_chassis_page = -1;      /* D3D texture page */
  * Therefore the pages are 256×256 BGRA32 (4 bytes/pixel × 65536 px = 262144 bytes).
  */
 static void apply_colorkey(void *pixels, int w, int h, TD5_ColorKeyMode mode);
+
+/* Map static-atlas slot (0..31) to physical tpage file index.
+ * The shipping static.zip ships tpageN.dat files indexed by the Nth
+ * image_type=1 page in static.hed (NOT by the atlas slot number).
+ * Per static.hed HEAD-time layout: slot 4 → tpage0, slot 5 → tpage1,
+ * slot 12 → tpage2. */
+static int static_tpage_file_index(int slot)
+{
+    int phys = 0;
+    for (int i = 0; i < slot; i++) {
+        if (i < s_page_metadata_count && s_page_metadata[i].image_type != 0)
+            phys++;
+    }
+    return phys;
+}
+
 static int load_static_r5g6b5_tpage(int slot)
 {
     char path[128];
     int w = 256, h = 256, npx = w * h;
     uint8_t *bgra;
     FILE *f;
+    int file_idx = static_tpage_file_index(slot);
 
-    snprintf(path, sizeof(path), "re/assets/static/tpage%d.dat", slot);
+    snprintf(path, sizeof(path), "re/assets/static/tpage%d.dat", file_idx);
     f = fopen(path, "rb");
     if (!f) return 0;
 
@@ -405,8 +422,9 @@ static int load_static_png_tpage(int slot)
     char path[128];
     void *pixels = NULL;
     int w = 0, h = 0;
+    int file_idx = static_tpage_file_index(slot);
 
-    snprintf(path, sizeof(path), "re/assets/static/tpage%d.png", slot);
+    snprintf(path, sizeof(path), "re/assets/static/tpage%d.png", file_idx);
     if (td5_asset_decode_png_rgba32(path, &pixels, &w, &h)) {
         /* Slot 12 layout:
          *   y=0..7   = SLIDER (256x8)  — gradient alpha is intentional, keep as-is
@@ -415,39 +433,18 @@ static int load_static_png_tpage(int slot)
          *   y=16..31 = SELBOX (256x16)  — gradient alpha is intentional, keep as-is
          *   y=32..255 = PAUSETXT font glyphs on cyan background
          */
-        if (slot == 12) {
-            uint8_t *p12 = (uint8_t *)pixels;
-            /* y<32 UI textures (SLIDER, BLACKBOX, BLACKBAR, SELBOX) are stored
-             * in ARGB byte order in the original dump, but the PNG extraction
-             * preserved raw bytes as RGBA.  After stb's R↔B swap the in-memory
-             * layout is {G_orig, R_orig, A_orig, B_orig}.  Remap to correct
-             * BGRA: {B_orig, G_orig, R_orig, A_orig} = {px[3], px[0], px[1], px[2]}. */
-            for (int y12 = 0; y12 < 32 && y12 < h; y12++) {
-                for (int x12 = 0; x12 < w; x12++) {
-                    uint8_t *px = p12 + (y12 * w + x12) * 4;
-                    uint8_t t0 = px[0], t1 = px[1], t2 = px[2], t3 = px[3];
-                    px[0] = t3;  /* B_orig */
-                    px[1] = t0;  /* G_orig */
-                    px[2] = t1;  /* R_orig */
-                    px[3] = t2;  /* A_orig */
-                }
-            }
-            /* PAUSETXT (y>=32): cyan colorkey */
-            apply_colorkey(pixels, w, h, TD5_COLORKEY_CYAN);
-            TD5_LOG_I(LOG_TAG, "static atlas: applied tpage12 alpha fixes + cyan colorkey");
-        }
+        /* Slot 12 PAUSETXT: pristine tpage2.dat from static.zip stores alpha
+         * directly in byte0 (ARGB format). The ARGB→RGBA PNG conversion in
+         * re/tools recipe already puts the alpha in the PNG's A channel, so
+         * no cyan colorkey is needed — it would destroy anti-aliased edges.
+         * (The earlier cyan-key path was for the corrupted tpage4/5/12.dat
+         * artifacts, which baked cyan-bg into RGB channels.) */
         /* Slot 4 (speedo gauge): original UploadRaceTexturePage @ 0x40B590
          * sets alpha=0x00 for pure-black pixels and alpha=0x80 for all others.
          * The gauge renders as a semi-transparent overlay, not an opaque surface. */
-        if (slot == 4) {
-            uint8_t *p4 = (uint8_t *)pixels;
-            int npx4 = w * h;
-            for (int i = 0; i < npx4; i++, p4 += 4) {
-                uint8_t b = p4[0], g = p4[1], r = p4[2];
-                p4[3] = ((int)r + (int)g + (int)b == 0) ? 0x00 : 0x80;
-            }
-            TD5_LOG_I(LOG_TAG, "static atlas: applied speedo alpha keying to tpage4");
-        }
+        /* Slot 4 speedo alpha keying (alpha=0x00 for RGB==0, 0x80 otherwise)
+         * is now pre-baked into tpage0.png by re/tools/bake_transparency.py —
+         * see reference_re_assets_recovery.md. */
         td5_plat_render_upload_texture(STATIC_ATLAS_BASE + slot, pixels, w, h, 2);
         stbi_image_free(pixels);
         TD5_LOG_I(LOG_TAG, "static atlas: loaded PNG %s -> D3D page %d (slot %d)",
