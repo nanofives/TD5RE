@@ -2646,26 +2646,26 @@ void td5_track_compute_heading(TD5_Actor *actor)
         break;
     }
 
-    /* Original calls AngleFromVector12 (0x40A720, integer LUT). The port's
-     * shared AngleFromVector12 (td5_render.c:3345) is atan2(x,z)-based with
-     * compass convention (yaw=0 → +Z, +0x400 → +X, increases CW from above).
-     * The dx/dz computed above is the LATERAL R→L vector (right rail →
-     * left rail), which points 90° CCW of the road's forward direction.
-     * To recover forward from lateral_R→L in compass convention, rotate
-     * 90° CW = +0x400 (not the original's +0x800, which is correct for the
-     * LUT variant's different quadrant base).
+    /* Original calls AngleFromVector12 (0x40A720, integer LUT) at 0x00434501
+     * with `yaw = (angle + 0x800) << 8`. Port's shared AngleFromVector12
+     * (td5_render.c:3345) is atan2(x,z)-based and the dx/dz computed above
+     * is the LATERAL R→L vector (right rail → left rail), 90° CCW of road
+     * forward. Adding +0x800 rotates lateral_R→L into the rendered car's
+     * forward and feeds physics drive direction the same forward, so visual
+     * + drive stay aligned.
      *
-     * Verified with logged span-111 spawn (dx=279, dz=-629):
-     *   yaw=(1775+0x400)<<8 → forward direction (-0.913, -0.407)
-     *   matches rail walk dir (-1355, -600) normalized = (-0.914, -0.405).
-     * Pre-fix +0x800 produced (-0.405, +0.914), exactly 90° off — which
-     * caused the wall_diag-confirmed perpendicular spawn rotation. */
+     * History: an earlier +0x400 attempt made the (sin, cos) numerically
+     * match the track-walk (dx, dz) vector, but that was the LATERAL
+     * direction — the rendered car body, shadow, and chase camera all read
+     * yaw through a YXZ rotation matrix that needs the FORWARD direction,
+     * which is +0x400 further (= +0x800 total). Under +0x400 the visual
+     * was 90° CW; bumping to +0x800 aligns visual and drive. */
     angle = AngleFromVector12(dx, dz) & 0xFFF;
 
     TD5_LOG_I(LOG_TAG, "compute_heading: span=%d type=%d dx=%d dz=%d "
               "lateral_angle=%d yaw=%d",
               span_idx, sp->span_type, dx, dz, angle,
-              (angle + 0x400) & 0xFFF);
+              (angle + 0x800) & 0xFFF);
 
     /* Write heading to actor's heading_normal at +0x290 (as int16[3]) */
     heading_normal = (int16_t *)((uint8_t *)actor + 0x290);
@@ -2673,10 +2673,9 @@ void td5_track_compute_heading(TD5_Actor *actor)
     heading_normal[1] = 0;
     heading_normal[2] = (int16_t)dz;
 
-    /* Store yaw to euler accumulator at +0x1F4. Offset is +0x400 in the
-     * port's compass-convention AngleFromVector12, corresponding to the
-     * original's +0x800 over the LUT variant @ 0x434501. */
-    *(int32_t *)((uint8_t *)actor + 0x1F4) = (angle + 0x400) << 8;
+    /* Store yaw to euler accumulator at +0x1F4. Offset matches the original's
+     * +0x800 literal at 0x00434501. */
+    *(int32_t *)((uint8_t *)actor + 0x1F4) = (angle + 0x800) << 8;
 }
 
 /* ========================================================================
