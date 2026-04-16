@@ -5,9 +5,7 @@ Reverse engineering + clean-room C source port of **Test Drive 5** (Pitbull Synd
 Derived from a full Ghidra decompilation of `TD5_d3d.exe` (864 named functions).
 Original binary: Win32 x86, DirectDraw/Direct3D 3.
 
-Two build targets:
-- `td5re.exe` — standalone source port (D3D11 backend, no original DLLs needed)
-- `td5_mod.asi` — ASI mod DLL that injects into the original `TD5_d3d.exe`
+Build target: `td5re.exe` — standalone source port (D3D11 backend, no original DLLs needed).
 
 ## Build — ALWAYS use this to verify your changes compile
 
@@ -27,13 +25,12 @@ After any `.c` or `.h` edit, run the build and fix all errors before finishing.
 
 ```
 TD5RE/
-├── TD5_d3d.exe              # Original binary (RE target, do not modify)
 ├── td5re.exe                # Built output
-├── data/                    # Game data (working dir for td5re.exe)
-│   ├── assets/static/       # Static sprite atlas (tpage0-2.dat, static.hed)
+├── original/                # Game data (working dir for td5re.exe)
 │   ├── level*.zip           # Track data
-│   ├── loading.zip          # Loading screen TGA
-│   └── cars/                # Vehicle ZIPs
+│   ├── cars/                # Vehicle ZIPs
+│   ├── Front End/           # Frontend assets
+│   └── sound/               # Audio archives
 ├── td5mod/
 │   ├── src/td5re/           # ← ALL SOURCE FILES ARE HERE
 │   │   ├── build_standalone.bat
@@ -42,9 +39,10 @@ TD5RE/
 │   │   ├── td5_hud.c        td5_sound.c     td5_input.c
 │   │   ├── td5_asset.c      td5_save.c      td5_net.c
 │   │   ├── td5_camera.c     td5_vfx.c       td5_fmv.c
-│   │   ├── td5_inflate.c    td5re_stubs.c   main.c
+│   │   ├── td5_inflate.c    main.c
 │   │   └── build/           # .o files and td5re.exe here during build
 │   └── ddraw_wrapper/       # DirectDraw → D3D11 translation layer
+├── re/                      # RE analysis, extracted assets, PNG textures
 └── tools/                   # Local MCP helper tools
 ```
 
@@ -69,7 +67,6 @@ TD5RE/
 | `td5_net.c` | DirectPlay lockstep, DXPTYPE protocol |
 | `td5_fmv.c` | FMV stub (replaces EA TGQ codec) |
 | `td5_inflate.c` | zlib-backed DEFLATE decompression |
-| `td5re_stubs.c` | Stub globals and unported functions |
 
 ## Key RE constants
 

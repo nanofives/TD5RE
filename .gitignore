@@ -4,10 +4,12 @@
 *.o
 *.log
 *.dmp
+*.hprof
 *.bak
 *.lock
 *.lock~
 build/
+build_*/
 _organization/
 ghidra_*/
 ghidra-headless-mcp/
@@ -51,3 +53,4 @@ scripts/td5_dump/
 # Scratch files
 ck.txt
 step19.txt
+ghidra_pool/

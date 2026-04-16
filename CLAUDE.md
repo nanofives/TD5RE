@@ -4,9 +4,7 @@
 
 Reverse engineering project and clean-room C source port of **Test Drive 5** (Pitbull Syndicate / Accolade, 1999), derived from a full Ghidra decompilation of `TD5_d3d.exe` (822 functions analyzed, 864 named).
 
-Two build targets:
-- **td5re.exe** — standalone source-port executable (D3D11 backend, no original DLLs needed)
-- **td5_mod.asi** — ASI mod DLL that injects into the original `TD5_d3d.exe`
+Build target: **td5re.exe** — standalone source-port executable (D3D11 backend, no original DLLs needed).
 
 The original binary is a Win32 x86 DirectDraw/Direct3D 3 game. The source port replaces the DDraw layer with a D3D11 wrapper (`ddraw_wrapper/`).
 
@@ -15,7 +13,7 @@ The original binary is a Win32 x86 DirectDraw/Direct3D 3 game. The source port r
 ```
 TD5RE/
 ├── td5re.exe             # Built source port output
-├── original/             # Clean unmodified game files (CWD for source port)
+├── original/             # Clean unmodified game files (backup, not used at runtime)
 │   ├── TD5_d3d.exe       # Original binary (RE target)
 │   ├── M2DX.dll          # Original M2DX middleware
 │   ├── level*.zip        # Track data archives
@@ -24,29 +22,16 @@ TD5RE/
 │   ├── sound/            # Audio archives
 │   └── movie/            # FMV files
 ├── td5mod/
-│   ├── src/
-│   │   ├── td5re/        # Source port modules (15 .c files)
-│   │   ├── td5_sdk.h     # 864 function pointers + 122 globals (RE'd from binary)
-│   │   ├── td5_mod.c     # ASI mod framework (hooking)
-│   │   ├── td5_tuning.c  # Vehicle tuning parameters
-│   │   └── td5_gamemodes.c
+│   ├── src/td5re/        # Source port modules (15 .c files)
 │   ├── ddraw_wrapper/    # DirectDraw → D3D11 translation layer
-│   ├── deps/mingw/       # Bundled MinGW-w64 i686 toolchain
-│   ├── build.bat         # ASI mod build (outputs td5_mod.asi)
-│   └── CMakeLists.txt
+│   └── deps/mingw/       # Bundled MinGW-w64 i686 toolchain
 ├── re/                   # RE analysis, extracted assets, tools
-│   ├── assets/           # Extracted game data (from td5_asset_extractor.py)
-│   ├── td5_dump/         # ASI mod asset dumps
-│   ├── td5_png_clean/    # Cleaned PNG overrides for texture replacement
-│   ├── td5_png/          # PNG pipeline working directory
+│   ├── assets/           # All game data — pre-extracted PNGs, DATs, WAVs, meshes (runtime asset directory)
 │   ├── tools/            # RE helper scripts (extractor, alpha tool, etc.)
 │   ├── analysis/         # RE analysis notes
 │   └── sessions/         # RE session logs
 ├── tools/                # Cloned MCP helper repos
-├── scripts/              # ASI mod config and dump manifests
-├── pyghidra_projects/    # pyghidra-mcp Ghidra headless projects
-├── ghidra_12.0.3_PUBLIC/ # Ghidra installation
-└── _organization/        # x32dbg databases
+└── ghidra_12.0.3_PUBLIC/ # Ghidra installation
 ```
 
 ## Build commands
@@ -71,11 +56,6 @@ ZLIB_LIB="../../deps/mingw/mingw32/i686-w64-mingw32/lib"
 "$GCC" -m32 -mwindows -static -o build/td5re.exe build/main.o build/td5re_stubs.o build/libtd5re.a "$WRAPPER_BUILD"/*.o -L"$ZLIB_LIB" -lz -lkernel32 -luser32 -lgdi32 -ld3d11 -ldxgi -ldinput8 -ldsound -lwinmm -lole32 -lshell32 -luuid
 ```
 
-### ASI mod (td5_mod.asi)
-```cmd
-cd td5mod && build.bat
-```
-
 ## Source port modules
 
 | File | Responsibility |
@@ -97,7 +77,6 @@ cd td5mod && build.bat
 | `td5_net.c` | DirectPlay lockstep, DXPTYPE protocol |
 | `td5_fmv.c` | FMV stub (replaces EA TGQ codec) |
 | `td5_inflate.c` | Decompression utility |
-| `td5re_stubs.c` | Stub implementations for unported functions |
 
 ## Key constants (from RE)
 
@@ -125,7 +104,7 @@ cd td5mod && build.bat
 | Server | Purpose | Auto-invoke when |
 |--------|---------|-----------------|
 | `ghidra` | Static decompilation, function rename, struct defs | Analyzing original binary |
-| `x64dbg` | Live debugging, breakpoints, register inspection | Step-debugging TD5_d3d.exe |
+| `x64dbg` | Live debugging, breakpoints, register inspection | Step-debugging TD5_d3d.exe (requires x32dbg install) |
 | `microsoft-learn` | Win32 API / DirectX / DXGI docs | Any Win32/DX API lookup |
 | `frida-game-hacking` | Runtime hooking, memory scan, AoB patterns | Observing runtime behavior of TD5.exe |
 | `codebase-memory` | Cross-reference source port (2286 nodes indexed) | Navigation across source modules |
@@ -134,13 +113,22 @@ cd td5mod && build.bat
 | `semgrep` | C static analysis (OSS, tools deprecated) | Use Bash semgrep directly |
 
 **Frida attach:** `attach("TD5.exe")` or `attach("TD5_d3d.exe")` — process must be running.
-**codebase-memory index:** `td5mod/src` only (not `td5mod/` — deps/mingw crashes the indexer).
+**codebase-memory index:** `td5mod/src/td5re` only (deps/mingw crashes the indexer).
+
+### Ghidra pool (parallel session access)
+
+Multiple sessions share Ghidra via a pool of project clones in `ghidra_pool/`. Managed by `scripts/ghidra_pool.sh`.
+
+**HARD RULE: Always open Ghidra projects with `read_only=true`.** Never use `read_only=false`. This ensures `/ghidra-sync` can refresh pool slots without conflicts. Any session violating this blocks sync for all others.
+
+To open Ghidra in any context (skills, subagents, ad-hoc):
+1. `bash scripts/ghidra_pool.sh acquire` → get slot name (e.g. `TD5_pool2`)
+2. `project_program_open_existing(project_location=".../ghidra_pool", project_name="TD5_pool2", program_name="TD5_d3d.exe", read_only=true)`
+3. After done: `bash scripts/ghidra_pool.sh cleanup`
 
 ## Known issues / current work
 
 See `td5mod/src/td5re/EXPECTED_BEHAVIOR.md` for full behavioral spec.
-
-From session 2 (2026-03-31): crash fixed (NULL string table + display list ptr), BGRA color fix, asset loading + transforms implemented. 18 frontend/race bugs remain documented for session 3.
 
 ## Semgrep (local scan)
 
