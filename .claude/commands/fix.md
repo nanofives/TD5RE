@@ -293,9 +293,11 @@ git branch -d "${SESSION_TAG}"
 
 Rules for this step:
 - If `git merge` reports conflicts (another session merged something that collides), STOP and report the conflicting files to the user — do NOT auto-resolve.
+- If `git merge` reports `Your local changes ... would be overwritten by merge` (main tree has uncommitted work), STOP and report the file list. Do NOT stash or discard. The user must commit/clean main first; then either retry the merge, or — if the fix branch was created from old master and the merge would back out unrelated work — fall back to `git cherry-pick <fix-commits>` onto current master. Either path STILL requires the same post-merge guard, push, and teardown below.
 - If `git worktree remove` fails because files are locked (e.g., `td5re.exe` still running), ask the user to close the game, then retry. Do NOT use `--force` without confirmation.
 - If `git push` fails (no remote, auth error, etc.), report the error to the user and stop — do not retry destructively. The merge commit is already in local master, so there's nothing to clean up.
 - Only delete the branch with `-d` (safe, rejects unmerged branches). Never use `-D`.
+- **Push is mandatory.** Whether the fix landed via `git merge --no-ff` or via fallback `git cherry-pick`, the workflow is not done until `git push origin master` succeeds and `git rev-list --count origin/master..master` returns `0`. Verify both before declaring the fix shipped.
 
 ### Step 4.5: Propagate new master into sibling /fix worktrees
 
@@ -356,6 +358,29 @@ Rules for this step:
 - Never pass `--force` or `-X theirs/ours`. If a merge needs strategy help, that's a user decision.
 - Don't touch worktrees outside `.claude/worktrees/fix-*` (the main tree is already updated, other unrelated worktrees are not our business).
 - If the loop breaks early due to a lock/conflict, later worktrees stay unmerged — that's fine. Running this step again after the blocker clears will pick them up (git skips worktrees that are already up to date).
+
+### Step 5: Post-condition — verify origin is in sync (HARD STOP)
+
+After Step 4.5, run a final check that local master is fully published. This catches any case where the push was skipped — e.g. fallback cherry-pick path (Step 4 rules), partial flow due to manual recovery, or auth failure that wasn't surfaced.
+
+```bash
+cd C:/Users/maria/Desktop/Proyectos/TD5RE
+git fetch origin master --quiet
+AHEAD="$(git rev-list --count origin/master..master)"
+if [ "${AHEAD}" -gt 0 ]; then
+    echo "POST-CONDITION FAILED: local master is ${AHEAD} commit(s) ahead of origin."
+    echo "Pushing now:"
+    git push origin master
+    AHEAD="$(git rev-list --count origin/master..master)"
+    if [ "${AHEAD}" -gt 0 ]; then
+        echo "Push still failed. Surface the error to the user — do NOT delete the branch or worktree."
+        exit 1
+    fi
+fi
+echo "origin/master in sync — fix is shipped."
+```
+
+Only declare the /fix done after this step prints the success line. If the push fails (auth, no remote, etc.), report it to the user — leave the merged commit in place locally and stop.
 
 ### Abandoning a worktree
 
