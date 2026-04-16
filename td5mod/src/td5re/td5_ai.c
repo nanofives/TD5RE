@@ -1508,9 +1508,17 @@ void td5_ai_update_track_behavior(int slot) {
      * (abs_speed < 0x1800 = 24.0 in 24.8 fp) blocked steering until the car
      * was moving at ≈24 m/s, which never happens in the first seconds of a
      * race — AI accelerated straight off the spawn line. The PD output is
-     * clamped to ±1500 so a stationary car cannot spin out, and during the
-     * countdown g_game_paused=1 short-circuits bicycle integration so the
-     * omega write is harmless. */
+     * clamped to ±1500 so a stationary car cannot spin out.
+     *
+     * Pause gate: skip the omega write while g_td5.paused=1 (countdown /
+     * pause menu). Original UpdateVehicleActor @ 0x00406650 gates all
+     * dynamics behind g_gamePaused==0, so AI-driven yaw writes do not fire
+     * during countdown [CONFIRMED @ 0x00406650]. The port's IntegrateVehicle
+     * PoseAndContacts path at td5_physics.c:3076-3078 integrates
+     * angular_velocity_yaw → euler_accum.yaw EVERY tick (no pause gate —
+     * matches original 0x00405E80), so any non-zero omega written here
+     * during countdown visibly rotates the car in place over the 3 s grid
+     * hold. */
     {
         int32_t left_dev = rs[RS_LEFT_DEVIATION];
         int32_t right_dev = rs[RS_RIGHT_DEVIATION];
@@ -1528,8 +1536,16 @@ void td5_ai_update_track_behavior(int slot) {
         desired_omega = signed_delta * 12 - (omega_prev >> 8) * 6;
         if (desired_omega > 1500) desired_omega = 1500;
         if (desired_omega < -1500) desired_omega = -1500;
-        ACTOR_I32(actor, 0x1C4) = desired_omega;
-        ACTOR_I32(actor, ACTOR_STEERING_CMD) = 0;
+        if (!g_td5.paused) {
+            ACTOR_I32(actor, 0x1C4) = desired_omega;
+            ACTOR_I32(actor, ACTOR_STEERING_CMD) = 0;
+        } else {
+            ACTOR_I32(actor, 0x1C4) = 0;
+            ACTOR_I32(actor, ACTOR_STEERING_CMD) = 0;
+            TD5_LOG_D(LOG_TAG,
+                      "countdown: slot=%d omega forced to 0 (dev_L=%d dev_R=%d)",
+                      slot, left_dev, right_dev);
+        }
     }
 }
 
