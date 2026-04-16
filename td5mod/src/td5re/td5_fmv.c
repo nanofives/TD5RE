@@ -2,7 +2,7 @@
  * td5_fmv.c -- FMV playback module (replaces EA TGQ codec)
  *
  * Replaces the original EA TGQ multimedia engine with:
- *   - Video playback via Windows Media Foundation (MFPlay API)
+ *   - Video playback via Windows Media Foundation (IMFSourceReader)
  *   - Legal screen display via TGA loading + D3D11 render backend
  *
  * Original functions replaced:
@@ -21,9 +21,21 @@
  * The original TGQ codec used custom PE sections IDCT_DAT (8KB) and
  * UVA_DATA (20KB) for IDCT workspace and YUV-to-RGB LUTs. None of
  * that is needed here -- Media Foundation handles all decoding.
+ *
+ * Video playback uses IMFSourceReader to decode frames to RGB32,
+ * then uploads each frame as a D3D11 texture and renders a fullscreen
+ * quad. This avoids conflicts with the D3D11 swapchain (MFPlay's
+ * built-in EVR uses D3D9 which would fight with our D3D11 device).
+ *
+ * Note: The original game ships intro.tgq (EA TGQ format). Media
+ * Foundation cannot decode TGQ natively. Users must transcode to
+ * MP4 (H.264/AAC) and place it alongside the original:
+ *   Movie/intro.mp4  (preferred)
+ *   Movie/intro.avi  (fallback)
  */
 
 #include "td5_fmv.h"
+#include "td5_asset.h"
 #include "td5_platform.h"
 
 #include <string.h>
@@ -42,20 +54,40 @@
 #define WIN32_LEAN_AND_MEAN
 #endif
 #ifndef COBJMACROS
-#define COBJMACROS          /* enable IMFPMediaPlayer_Play/Stop/Release macros */
+#define COBJMACROS          /* enable IMFSourceReader/IMFSample/etc C macros */
 #endif
 #include <windows.h>
 
-/* MFPlay -- simplest Media Foundation playback API.
- * Available on Windows 7+ (Vista with Platform Update). */
-#include <mfplay.h>
+/* Media Foundation -- Source Reader API for frame-by-frame decoding.
+ * Available on Windows 7+. */
+#include <mfidl.h>          /* IMFMediaSink etc. (needed before mfreadwrite.h) */
 #include <mfapi.h>
+#include <mfreadwrite.h>
+#include <mfobjects.h>
+#include <mferror.h>
+
+/* MFGetAttributeSize is declared as C++ inline in mfapi.h and is not
+ * available in C compilation mode. Provide our own implementation that
+ * unpacks the UINT64 attribute into width + height. */
+static HRESULT fmv_get_attribute_size(IMFAttributes *pattr,
+                                       REFGUID guid,
+                                       UINT32 *pw, UINT32 *ph)
+{
+    UINT64 packed = 0;
+    HRESULT hr = IMFAttributes_GetUINT64(pattr, guid, &packed);
+    if (SUCCEEDED(hr)) {
+        *pw = (UINT32)(packed >> 32);
+        *ph = (UINT32)(packed & 0xFFFFFFFF);
+    }
+    return hr;
+}
 
 /* For CoInitializeEx */
 #include <objbase.h>
 
-#pragma comment(lib, "mfplay.lib")
 #pragma comment(lib, "mfplat.lib")
+#pragma comment(lib, "mfreadwrite.lib")
+#pragma comment(lib, "mfuuid.lib")
 #pragma comment(lib, "ole32.lib")
 
 /* ========================================================================
@@ -68,8 +100,6 @@ static struct {
     int              mf_available;      /* 1 if Media Foundation is usable  */
     int              com_initialized;   /* 1 if we called CoInitializeEx    */
     volatile LONG    skip_requested;    /* atomic skip flag                 */
-    volatile LONG    playback_done;     /* atomic: playback finished        */
-    IMFPMediaPlayer *player;            /* current MFPlay player instance   */
 } s_fmv;
 
 /* ========================================================================
@@ -80,110 +110,17 @@ static int  fmv_init_media_foundation(void);
 static void fmv_shutdown_media_foundation(void);
 static int  fmv_check_skip_keys(void);
 static void fmv_pump_messages(void);
-static int  fmv_play_with_mfplay(const wchar_t *wpath);
 static int  fmv_play_with_source_reader(const wchar_t *wpath);
-static void fmv_update_volume_keys(void);
 
-static int s_fmv_volume_percent = 100;
-
-/* TGA loader for legal screens */
-static uint8_t *fmv_load_tga(const char *path, int *out_w, int *out_h);
+/* PNG loader for legal screens */
+static uint8_t *fmv_load_png(const char *path, int *out_w, int *out_h);
 static void     fmv_display_image(const uint8_t *pixels, int w, int h,
                                   int timeout_ms);
 
-/* MFPlay callback -- minimal implementation */
-typedef struct FMVMediaPlayerCallback {
-    IMFPMediaPlayerCallbackVtbl *lpVtbl;
-    LONG ref_count;
-} FMVMediaPlayerCallback;
-
-static HRESULT STDMETHODCALLTYPE fmv_cb_QueryInterface(
-    IMFPMediaPlayerCallback *This, REFIID riid, void **ppv);
-static ULONG STDMETHODCALLTYPE fmv_cb_AddRef(
-    IMFPMediaPlayerCallback *This);
-static ULONG STDMETHODCALLTYPE fmv_cb_Release(
-    IMFPMediaPlayerCallback *This);
-static void STDMETHODCALLTYPE fmv_cb_OnMediaPlayerEvent(
-    IMFPMediaPlayerCallback *This, MFP_EVENT_HEADER *pEventHeader);
-
-static IMFPMediaPlayerCallbackVtbl s_callback_vtbl = {
-    fmv_cb_QueryInterface,
-    fmv_cb_AddRef,
-    fmv_cb_Release,
-    fmv_cb_OnMediaPlayerEvent
-};
-
-static FMVMediaPlayerCallback s_callback = {
-    &s_callback_vtbl,
-    1
-};
-
-/* ========================================================================
- * MFPlay Callback Implementation
- * ======================================================================== */
-
-static HRESULT STDMETHODCALLTYPE fmv_cb_QueryInterface(
-    IMFPMediaPlayerCallback *This, REFIID riid, void **ppv)
-{
-    (void)This;
-    if (!ppv) return E_POINTER;
-
-    /* MFPlay only queries for IMFPMediaPlayerCallback and IUnknown */
-    if (IsEqualIID(riid, &IID_IUnknown) ||
-        IsEqualIID(riid, &IID_IMFPMediaPlayerCallback)) {
-        *ppv = This;
-        fmv_cb_AddRef(This);
-        return S_OK;
-    }
-    *ppv = NULL;
-    return E_NOINTERFACE;
-}
-
-static ULONG STDMETHODCALLTYPE fmv_cb_AddRef(
-    IMFPMediaPlayerCallback *This)
-{
-    FMVMediaPlayerCallback *self = (FMVMediaPlayerCallback *)This;
-    return InterlockedIncrement(&self->ref_count);
-}
-
-static ULONG STDMETHODCALLTYPE fmv_cb_Release(
-    IMFPMediaPlayerCallback *This)
-{
-    FMVMediaPlayerCallback *self = (FMVMediaPlayerCallback *)This;
-    LONG ref = InterlockedDecrement(&self->ref_count);
-    /* Static object, never actually freed */
-    return ref;
-}
-
-static void STDMETHODCALLTYPE fmv_cb_OnMediaPlayerEvent(
-    IMFPMediaPlayerCallback *This, MFP_EVENT_HEADER *pEventHeader)
-{
-    (void)This;
-    if (!pEventHeader) return;
-
-    switch (pEventHeader->eEventType) {
-    case MFP_EVENT_TYPE_PLAYBACK_ENDED:
-        InterlockedExchange(&s_fmv.playback_done, 1);
-        TD5_LOG_I("fmv", "Playback ended (MFP_EVENT_TYPE_PLAYBACK_ENDED)");
-        break;
-
-    case MFP_EVENT_TYPE_ERROR:
-        InterlockedExchange(&s_fmv.playback_done, 1);
-        TD5_LOG_E("fmv", "MFPlay error: hr=0x%08X",
-                  (unsigned)pEventHeader->hrEvent);
-        break;
-
-    case MFP_EVENT_TYPE_MEDIAITEM_SET:
-        TD5_LOG_D("fmv", "Media item set, starting playback");
-        if (s_fmv.player) {
-            IMFPMediaPlayer_Play(s_fmv.player);
-        }
-        break;
-
-    default:
-        break;
-    }
-}
+/* Scratch texture page for video frames and legal screens.
+ * Index 599 (last slot in TD5_MAX_TEXTURE_CACHE_SLOTS) to avoid
+ * conflicting with game textures. */
+#define FMV_SCRATCH_TEXTURE_PAGE  599
 
 /* ========================================================================
  * Media Foundation Initialization
@@ -230,11 +167,15 @@ static void fmv_shutdown_media_foundation(void)
 }
 
 /* ========================================================================
- * Video Playback via MFPlay
+ * Video Playback via IMFSourceReader
+ *
+ * Decodes video frames to RGB32 (X8R8G8B8) using the Source Reader,
+ * then uploads each frame as a D3D11 texture and renders a fullscreen
+ * quad. Timing is driven by sample timestamps from the source.
  * ======================================================================== */
 
 /**
- * Convert a UTF-8/ANSI path to wide string for MFPlay.
+ * Convert a UTF-8/ANSI path to wide string for Media Foundation.
  * Caller must free the returned pointer with free().
  */
 static wchar_t *fmv_to_wide(const char *path)
@@ -250,91 +191,268 @@ static wchar_t *fmv_to_wide(const char *path)
 }
 
 /**
- * Play a video file using the MFPlay API.
- * Renders to the game window (HWND) with built-in video renderer.
+ * Render a decoded video frame as a fullscreen quad.
+ * Pixels are RGB32 (X8R8G8B8), top-down, uploaded to scratch texture.
+ */
+static void fmv_render_video_frame(const uint8_t *pixels, int w, int h)
+{
+    int screen_w, screen_h;
+    float sw, sh;
+    TD5_D3DVertex verts[4];
+    uint16_t indices[6];
+
+    td5_plat_get_window_size(&screen_w, &screen_h);
+    sw = (float)screen_w;
+    sh = (float)screen_h;
+
+    /* Upload frame. Format 2 = A8R8G8B8 (32-bit). */
+    if (!td5_plat_render_upload_texture(FMV_SCRATCH_TEXTURE_PAGE,
+                                        pixels, w, h, 2)) {
+        return;
+    }
+
+    /* Build fullscreen quad (pre-transformed screen-space vertices) */
+    verts[0].screen_x = 0.0f; verts[0].screen_y = 0.0f;
+    verts[0].depth_z = 0.0f;  verts[0].rhw = 1.0f;
+    verts[0].diffuse = 0xFFFFFFFF; verts[0].specular = 0;
+    verts[0].tex_u = 0.0f; verts[0].tex_v = 0.0f;
+
+    verts[1].screen_x = sw;   verts[1].screen_y = 0.0f;
+    verts[1].depth_z = 0.0f;  verts[1].rhw = 1.0f;
+    verts[1].diffuse = 0xFFFFFFFF; verts[1].specular = 0;
+    verts[1].tex_u = 1.0f; verts[1].tex_v = 0.0f;
+
+    verts[2].screen_x = sw;   verts[2].screen_y = sh;
+    verts[2].depth_z = 0.0f;  verts[2].rhw = 1.0f;
+    verts[2].diffuse = 0xFFFFFFFF; verts[2].specular = 0;
+    verts[2].tex_u = 1.0f; verts[2].tex_v = 1.0f;
+
+    verts[3].screen_x = 0.0f; verts[3].screen_y = sh;
+    verts[3].depth_z = 0.0f;  verts[3].rhw = 1.0f;
+    verts[3].diffuse = 0xFFFFFFFF; verts[3].specular = 0;
+    verts[3].tex_u = 0.0f; verts[3].tex_v = 1.0f;
+
+    indices[0] = 0; indices[1] = 1; indices[2] = 2;
+    indices[3] = 0; indices[4] = 2; indices[5] = 3;
+
+    td5_plat_render_clear(0x00000000);
+    td5_plat_render_begin_scene();
+    td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
+    td5_plat_render_bind_texture(FMV_SCRATCH_TEXTURE_PAGE);
+    td5_plat_render_draw_tris(verts, 4, indices, 6);
+    td5_plat_render_end_scene();
+    td5_plat_present(1);
+}
+
+/**
+ * Play a video file using IMFSourceReader.
+ * Decodes frames to RGB32, uploads as D3D11 textures, renders fullscreen.
  * Blocks until playback completes or skip is requested.
  *
  * Returns 1 if played to completion, 0 if skipped/error.
  */
-static int fmv_play_with_mfplay(const wchar_t *wpath)
+static int fmv_play_with_source_reader(const wchar_t *wpath)
 {
-    /* MFPlay API (MFPCreateMediaPlayer) is not available in MinGW.
-     * Stub out until a Media Foundation pipeline is implemented. */
-    (void)wpath;
-    return 0;
-#if 0  /* disabled: MFPlay not linkable with MinGW */
     HRESULT hr;
-    HWND hwnd;
+    IMFSourceReader *reader = NULL;
+    IMFMediaType *output_type = NULL;
+    UINT32 video_w = 0, video_h = 0;
     int result = 0;
+    uint32_t playback_start_ms;
 
-    hwnd = (HWND)td5_plat_get_native_window();
-    if (!hwnd) {
-        TD5_LOG_E("fmv", "No window handle available for video playback");
-        return 0;
-    }
-
-    /* Reset state */
+    /* Reset skip flag */
     InterlockedExchange(&s_fmv.skip_requested, 0);
-    InterlockedExchange(&s_fmv.playback_done, 0);
-    s_fmv.player = NULL;
 
-    /* Create the MFPlay media player.
-     * MFPCreateMediaPlayer creates a player that renders video to the
-     * specified HWND using EVR (Enhanced Video Renderer) internally. */
-    hr = MFPCreateMediaPlayer(
-        wpath,                              /* URL to play              */
-        FALSE,                              /* don't start immediately  */
-        0,                                  /* creation flags           */
-        (IMFPMediaPlayerCallback *)&s_callback, /* event callback       */
-        hwnd,                               /* video window             */
-        &s_fmv.player                       /* [out] player instance    */
-    );
-
-    if (FAILED(hr) || !s_fmv.player) {
-        TD5_LOG_E("fmv", "MFPCreateMediaPlayer failed: 0x%08X", (unsigned)hr);
+    /* Create Source Reader from file URL */
+    hr = MFCreateSourceReaderFromURL(wpath, NULL, &reader);
+    if (FAILED(hr) || !reader) {
+        TD5_LOG_E("fmv", "MFCreateSourceReaderFromURL failed: 0x%08X",
+                  (unsigned)hr);
         return 0;
     }
 
-    TD5_LOG_I("fmv", "MFPlay player created, waiting for media item...");
+    /* Request RGB32 (X8R8G8B8) output from the video stream.
+     * The Source Reader will insert a color converter MFT automatically. */
+    hr = MFCreateMediaType(&output_type);
+    if (FAILED(hr)) {
+        TD5_LOG_E("fmv", "MFCreateMediaType failed: 0x%08X", (unsigned)hr);
+        IMFSourceReader_Release(reader);
+        return 0;
+    }
 
-    /* The callback's OnMediaPlayerEvent will receive MFP_EVENT_TYPE_MEDIAITEM_SET
-     * when the source is resolved, then it calls Play(). We pump messages
-     * in a loop matching the original's pattern (30ms sleep per iteration). */
+    IMFMediaType_SetGUID(output_type, &MF_MT_MAJOR_TYPE, &MFMediaType_Video);
+    IMFMediaType_SetGUID(output_type, &MF_MT_SUBTYPE, &MFVideoFormat_RGB32);
 
-    while (!s_fmv.playback_done && !s_fmv.skip_requested) {
-        /* Process Windows messages (required for MFPlay callbacks) */
+    hr = IMFSourceReader_SetCurrentMediaType(reader,
+            (DWORD)MF_SOURCE_READER_FIRST_VIDEO_STREAM, NULL, output_type);
+    IMFMediaType_Release(output_type);
+    output_type = NULL;
+
+    if (FAILED(hr)) {
+        TD5_LOG_E("fmv", "SetCurrentMediaType(RGB32) failed: 0x%08X",
+                  (unsigned)hr);
+        IMFSourceReader_Release(reader);
+        return 0;
+    }
+
+    /* Read back the actual output type to get frame dimensions */
+    {
+        IMFMediaType *actual_type = NULL;
+        hr = IMFSourceReader_GetCurrentMediaType(reader,
+                (DWORD)MF_SOURCE_READER_FIRST_VIDEO_STREAM, &actual_type);
+        if (SUCCEEDED(hr) && actual_type) {
+            fmv_get_attribute_size((IMFAttributes *)actual_type,
+                               &MF_MT_FRAME_SIZE, &video_w, &video_h);
+            IMFMediaType_Release(actual_type);
+        }
+    }
+
+    if (video_w == 0 || video_h == 0) {
+        TD5_LOG_E("fmv", "Could not determine video dimensions");
+        IMFSourceReader_Release(reader);
+        return 0;
+    }
+
+    TD5_LOG_I("fmv", "Video opened: %ux%u", video_w, video_h);
+
+    /* Frame decode + render loop */
+    playback_start_ms = td5_plat_time_ms();
+
+    for (;;) {
+        DWORD stream_index = 0;
+        DWORD flags = 0;
+        LONGLONG timestamp_100ns = 0;
+        IMFSample *sample = NULL;
+        IMFMediaBuffer *buffer = NULL;
+        BYTE *raw_pixels = NULL;
+        DWORD buf_len = 0;
+
+        /* Pump Windows messages */
         fmv_pump_messages();
 
-        /* Handle +/- volume keys during playback */
-        fmv_update_volume_keys();
-
-        /* Check skip keys: Enter, Shift, Escape, Space (matching original) */
+        /* Check skip keys */
         if (fmv_check_skip_keys()) {
             InterlockedExchange(&s_fmv.skip_requested, 1);
             break;
         }
 
-        /* Sleep 30ms per iteration, matching original's timing */
-        td5_plat_sleep(30);
+        if (s_fmv.skip_requested)
+            break;
+
+        /* Read next video sample */
+        hr = IMFSourceReader_ReadSample(reader,
+                (DWORD)MF_SOURCE_READER_FIRST_VIDEO_STREAM,
+                0,              /* no flags */
+                &stream_index,
+                &flags,
+                &timestamp_100ns,
+                &sample);
+
+        if (FAILED(hr)) {
+            TD5_LOG_E("fmv", "ReadSample failed: 0x%08X", (unsigned)hr);
+            break;
+        }
+
+        /* End of stream */
+        if (flags & MF_SOURCE_READERF_ENDOFSTREAM) {
+            result = 1;
+            break;
+        }
+
+        /* Stream format changed -- re-read dimensions */
+        if (flags & MF_SOURCE_READERF_CURRENTMEDIATYPECHANGED) {
+            IMFMediaType *new_type = NULL;
+            hr = IMFSourceReader_GetCurrentMediaType(reader,
+                    (DWORD)MF_SOURCE_READER_FIRST_VIDEO_STREAM, &new_type);
+            if (SUCCEEDED(hr) && new_type) {
+                fmv_get_attribute_size((IMFAttributes *)new_type,
+                                   &MF_MT_FRAME_SIZE, &video_w, &video_h);
+                IMFMediaType_Release(new_type);
+                TD5_LOG_D("fmv", "Video format changed: %ux%u",
+                          video_w, video_h);
+            }
+        }
+
+        if (!sample) {
+            /* NULL sample but no end-of-stream: decoder still loading.
+             * Sleep briefly and retry. */
+            td5_plat_sleep(1);
+            continue;
+        }
+
+        /* Wait for correct presentation time.
+         * timestamp_100ns is in 100-nanosecond units from stream start.
+         * Convert to milliseconds and wait. */
+        {
+            uint32_t target_ms = (uint32_t)(timestamp_100ns / 10000);
+            uint32_t elapsed_ms = td5_plat_time_ms() - playback_start_ms;
+
+            if (target_ms > elapsed_ms) {
+                uint32_t wait_ms = target_ms - elapsed_ms;
+                /* Cap wait to avoid hanging on bad timestamps */
+                if (wait_ms > 500) wait_ms = 500;
+
+                /* Sleep in small increments to stay responsive to skip */
+                while (wait_ms > 0) {
+                    uint32_t chunk = (wait_ms > 16) ? 16 : wait_ms;
+                    td5_plat_sleep(chunk);
+                    wait_ms -= chunk;
+
+                    fmv_pump_messages();
+                    if (fmv_check_skip_keys()) {
+                        InterlockedExchange(&s_fmv.skip_requested, 1);
+                        break;
+                    }
+                }
+
+                if (s_fmv.skip_requested) {
+                    IMFSample_Release(sample);
+                    break;
+                }
+            }
+        }
+
+        /* Extract pixel data from sample */
+        hr = IMFSample_ConvertToContiguousBuffer(sample, &buffer);
+        if (FAILED(hr) || !buffer) {
+            IMFSample_Release(sample);
+            continue;
+        }
+
+        hr = IMFMediaBuffer_Lock(buffer, &raw_pixels, NULL, &buf_len);
+        if (SUCCEEDED(hr) && raw_pixels) {
+            /* RGB32 from MF is bottom-up (DIB order). We need to flip
+             * vertically for our top-down texture upload. */
+            DWORD stride = video_w * 4;
+            DWORD expected = stride * video_h;
+
+            if (buf_len >= expected) {
+                /* Flip in-place: swap rows top<->bottom */
+                uint8_t *top_row, *bot_row;
+                uint8_t *temp_row = (uint8_t *)_alloca(stride);
+                UINT32 y;
+                for (y = 0; y < video_h / 2; y++) {
+                    top_row = raw_pixels + y * stride;
+                    bot_row = raw_pixels + (video_h - 1 - y) * stride;
+                    memcpy(temp_row, top_row, stride);
+                    memcpy(top_row, bot_row, stride);
+                    memcpy(bot_row, temp_row, stride);
+                }
+
+                fmv_render_video_frame(raw_pixels, (int)video_w, (int)video_h);
+            }
+
+            IMFMediaBuffer_Unlock(buffer);
+        }
+
+        IMFMediaBuffer_Release(buffer);
+        IMFSample_Release(sample);
     }
 
-    /* Determine result */
-    if (s_fmv.playback_done && !s_fmv.skip_requested) {
-        result = 1; /* played to completion */
-    }
-
-    /* Cleanup: stop and release the player */
-    if (s_fmv.player) {
-        IMFPMediaPlayer_Stop(s_fmv.player);
-        IMFPMediaPlayer_Release(s_fmv.player);
-        s_fmv.player = NULL;
-    }
-
-    /* Repaint the window to clear the video surface */
-    InvalidateRect(hwnd, NULL, TRUE);
+    /* Cleanup */
+    IMFSourceReader_Release(reader);
 
     return result;
-#endif /* disabled MFPlay */
 }
 
 /* ========================================================================
@@ -353,47 +471,17 @@ static int fmv_check_skip_keys(void)
     return 0;
 }
 
-static void fmv_update_volume_keys(void)
-{
-    static uint8_t s_prev_plus;
-    static uint8_t s_prev_minus;
-    int plus_down, minus_down;
-
-    if (!s_fmv.player) return;
-
-    plus_down = ((GetAsyncKeyState(VK_OEM_PLUS) & 0x8000) != 0) ||
-                ((GetAsyncKeyState(VK_ADD) & 0x8000) != 0);
-    minus_down = ((GetAsyncKeyState(VK_OEM_MINUS) & 0x8000) != 0) ||
-                 ((GetAsyncKeyState(VK_SUBTRACT) & 0x8000) != 0);
-
-    if (plus_down && !s_prev_plus) {
-        s_fmv_volume_percent += 5;
-        if (s_fmv_volume_percent > 100) s_fmv_volume_percent = 100;
-        IMFPMediaPlayer_SetVolume(s_fmv.player,
-                                  (float)s_fmv_volume_percent / 100.0f);
-    }
-    if (minus_down && !s_prev_minus) {
-        s_fmv_volume_percent -= 5;
-        if (s_fmv_volume_percent < 0) s_fmv_volume_percent = 0;
-        IMFPMediaPlayer_SetVolume(s_fmv.player,
-                                  (float)s_fmv_volume_percent / 100.0f);
-    }
-
-    s_prev_plus = (uint8_t)plus_down;
-    s_prev_minus = (uint8_t)minus_down;
-}
-
 /**
  * Pump Windows messages.
- * MFPlay requires a message pump on the thread that created the player.
- * This mirrors the original's PeekMessageA/TranslateMessage/DispatchMessage loop.
+ * Required for COM/MF processing and to keep the window responsive.
+ * Mirrors the original's PeekMessageA/TranslateMessage/DispatchMessage loop.
  */
 static void fmv_pump_messages(void)
 {
     MSG msg;
     while (PeekMessageA(&msg, NULL, 0, 0, PM_REMOVE)) {
         if (msg.message == WM_QUIT) {
-            InterlockedExchange(&s_fmv.playback_done, 1);
+            InterlockedExchange(&s_fmv.skip_requested, 1);
             PostQuitMessage((int)msg.wParam);
             return;
         }
@@ -403,180 +491,25 @@ static void fmv_pump_messages(void)
 }
 
 /* ========================================================================
- * TGA Loader (for legal screens)
+ * PNG Loader (for legal screens)
  *
- * Supports uncompressed 24-bit and 32-bit TGA (types 2 and 10).
- * The original LEGALS.ZIP contains uncompressed 24-bit TGA files.
+ * Uses td5_asset_decode_png_rgba32 to load PNG files.
  * Returns RGBA pixel data (top-to-bottom, left-to-right).
  * ======================================================================== */
 
-#pragma pack(push, 1)
-typedef struct TGA_Header {
-    uint8_t  id_length;
-    uint8_t  colormap_type;
-    uint8_t  image_type;        /* 2 = uncompressed true-color */
-    uint16_t cm_first_entry;
-    uint16_t cm_length;
-    uint8_t  cm_entry_size;
-    uint16_t x_origin;
-    uint16_t y_origin;
-    uint16_t width;
-    uint16_t height;
-    uint8_t  pixel_depth;       /* 24 or 32 */
-    uint8_t  image_descriptor;
-} TGA_Header;
-#pragma pack(pop)
-
 /**
- * Load an uncompressed TGA file and return RGBA8888 pixel data.
- * Handles 24-bit (BGR) and 32-bit (BGRA) true-color images.
- * Also handles RLE-compressed TGA (type 10).
+ * Load a PNG file and return BGRA32 pixel data (via td5_asset_decode_png_rgba32).
  * Returns NULL on failure. Caller must free() the returned buffer.
  */
-static uint8_t *fmv_load_tga(const char *path, int *out_w, int *out_h)
+static uint8_t *fmv_load_png(const char *path, int *out_w, int *out_h)
 {
-    TD5_File *f;
-    TGA_Header hdr;
-    uint8_t *pixels = NULL;
-    int w, h, bpp, channels;
-    int top_to_bottom;
-    size_t pixel_count;
-    size_t read_size;
-
-    f = td5_plat_file_open(path, "rb");
-    if (!f) {
-        TD5_LOG_W("fmv", "Cannot open TGA: %s", path);
+    void *pixels = NULL;
+    if (!td5_asset_decode_png_rgba32(path, &pixels, out_w, out_h)) {
+        TD5_LOG_W("fmv", "Cannot load PNG: %s", path);
         return NULL;
     }
-
-    /* Read TGA header */
-    if (td5_plat_file_read(f, &hdr, sizeof(hdr)) != sizeof(hdr)) {
-        TD5_LOG_E("fmv", "Failed to read TGA header: %s", path);
-        td5_plat_file_close(f);
-        return NULL;
-    }
-
-    /* Validate: must be uncompressed or RLE true-color */
-    if (hdr.image_type != 2 && hdr.image_type != 10) {
-        TD5_LOG_E("fmv", "Unsupported TGA type %d: %s", hdr.image_type, path);
-        td5_plat_file_close(f);
-        return NULL;
-    }
-
-    if (hdr.pixel_depth != 24 && hdr.pixel_depth != 32) {
-        TD5_LOG_E("fmv", "Unsupported TGA depth %d: %s", hdr.pixel_depth, path);
-        td5_plat_file_close(f);
-        return NULL;
-    }
-
-    w = hdr.width;
-    h = hdr.height;
-    bpp = hdr.pixel_depth;
-    channels = bpp / 8;
-    top_to_bottom = (hdr.image_descriptor & 0x20) ? 1 : 0;
-    pixel_count = (size_t)w * (size_t)h;
-
-    /* Skip image ID field */
-    if (hdr.id_length > 0) {
-        td5_plat_file_seek(f, (int64_t)hdr.id_length, 1 /* SEEK_CUR */);
-    }
-
-    /* Allocate output: always RGBA (4 bytes per pixel) for D3D upload */
-    pixels = (uint8_t *)malloc(pixel_count * 4);
-    if (!pixels) {
-        TD5_LOG_E("fmv", "Out of memory loading TGA: %s", path);
-        td5_plat_file_close(f);
-        return NULL;
-    }
-
-    if (hdr.image_type == 2) {
-        /* Uncompressed true-color */
-        uint8_t *raw = (uint8_t *)malloc(pixel_count * (size_t)channels);
-        if (!raw) {
-            free(pixels);
-            td5_plat_file_close(f);
-            return NULL;
-        }
-
-        read_size = pixel_count * (size_t)channels;
-        if (td5_plat_file_read(f, raw, read_size) != read_size) {
-            TD5_LOG_E("fmv", "Failed to read TGA pixels: %s", path);
-            free(raw);
-            free(pixels);
-            td5_plat_file_close(f);
-            return NULL;
-        }
-
-        /* Convert BGR(A) to RGBA, handling row order */
-        for (int y = 0; y < h; y++) {
-            int src_y = top_to_bottom ? y : (h - 1 - y);
-            const uint8_t *src_row = raw + (size_t)src_y * (size_t)w * (size_t)channels;
-            uint8_t *dst_row = pixels + (size_t)y * (size_t)w * 4;
-
-            for (int x = 0; x < w; x++) {
-                dst_row[x * 4 + 0] = src_row[x * channels + 2]; /* R <- B */
-                dst_row[x * 4 + 1] = src_row[x * channels + 1]; /* G <- G */
-                dst_row[x * 4 + 2] = src_row[x * channels + 0]; /* B <- R */
-                dst_row[x * 4 + 3] = (channels == 4) ?
-                    src_row[x * channels + 3] : 0xFF;            /* A      */
-            }
-        }
-
-        free(raw);
-
-    } else {
-        /* RLE-compressed true-color (type 10) */
-        size_t px_idx = 0;
-        uint8_t pkt_hdr;
-        uint8_t color[4];
-
-        while (px_idx < pixel_count) {
-            if (td5_plat_file_read(f, &pkt_hdr, 1) != 1) break;
-
-            int count = (pkt_hdr & 0x7F) + 1;
-            if (pkt_hdr & 0x80) {
-                /* RLE packet: one color repeated 'count' times */
-                if (td5_plat_file_read(f, color, (size_t)channels) !=
-                    (size_t)channels)
-                    break;
-                for (int i = 0; i < count && px_idx < pixel_count; i++, px_idx++) {
-                    int y = top_to_bottom
-                        ? (int)(px_idx / (size_t)w)
-                        : h - 1 - (int)(px_idx / (size_t)w);
-                    int x = (int)(px_idx % (size_t)w);
-                    uint8_t *dst = pixels + ((size_t)y * (size_t)w + (size_t)x) * 4;
-                    dst[0] = color[2];
-                    dst[1] = color[1];
-                    dst[2] = color[0];
-                    dst[3] = (channels == 4) ? color[3] : 0xFF;
-                }
-            } else {
-                /* Raw packet: 'count' distinct pixels */
-                for (int i = 0; i < count && px_idx < pixel_count; i++, px_idx++) {
-                    if (td5_plat_file_read(f, color, (size_t)channels) !=
-                        (size_t)channels)
-                        goto rle_done;
-                    int y = top_to_bottom
-                        ? (int)(px_idx / (size_t)w)
-                        : h - 1 - (int)(px_idx / (size_t)w);
-                    int x = (int)(px_idx % (size_t)w);
-                    uint8_t *dst = pixels + ((size_t)y * (size_t)w + (size_t)x) * 4;
-                    dst[0] = color[2];
-                    dst[1] = color[1];
-                    dst[2] = color[0];
-                    dst[3] = (channels == 4) ? color[3] : 0xFF;
-                }
-            }
-        }
-rle_done:;
-    }
-
-    td5_plat_file_close(f);
-
-    *out_w = w;
-    *out_h = h;
-    TD5_LOG_D("fmv", "Loaded TGA: %s (%dx%d, %dbpp)", path, w, h, bpp);
-    return pixels;
+    TD5_LOG_D("fmv", "Loaded PNG: %s (%dx%d)", path, *out_w, *out_h);
+    return (uint8_t *)pixels;
 }
 
 /* ========================================================================
@@ -585,12 +518,7 @@ rle_done:;
  * Renders a full-screen textured quad using the D3D11 render backend.
  * The image is uploaded to a temporary texture page, then drawn as
  * two pre-transformed triangles filling the viewport.
- *
- * We use texture page index 599 (last slot in TD5_MAX_TEXTURE_CACHE_SLOTS)
- * as a scratch page to avoid conflicting with game textures.
  * ======================================================================== */
-
-#define FMV_SCRATCH_TEXTURE_PAGE  599
 
 /**
  * Display an RGBA image on screen for the specified duration.
@@ -617,7 +545,7 @@ static void fmv_display_image(const uint8_t *pixels, int w, int h,
     sh = (float)screen_h;
 
     /* Upload image as texture.
-     * Format 2 = A8R8G8B8 (32-bit), matching RGBA output from fmv_load_tga. */
+     * Format 2 = B8G8R8A8 (32-bit), matching BGRA output from fmv_load_png. */
     if (!td5_plat_render_upload_texture(FMV_SCRATCH_TEXTURE_PAGE,
                                         pixels, w, h, 2)) {
         TD5_LOG_E("fmv", "Failed to upload legal screen texture (%dx%d)", w, h);
@@ -764,13 +692,6 @@ void td5_fmv_shutdown(void)
     TD5_LOG_I("fmv", "FMV subsystem shut down");
 }
 
-/** Stub: Source Reader pipeline not yet implemented. */
-static int fmv_play_with_source_reader(const wchar_t *wpath)
-{
-    (void)wpath;
-    return 0;
-}
-
 int td5_fmv_play(const char *filename)
 {
     wchar_t *wpath;
@@ -805,9 +726,9 @@ int td5_fmv_play(const char *filename)
         if (len >= 4) {
             const char *ext = filename + len - 4;
             if (_stricmp(ext, ".tgq") == 0 || _stricmp(ext, ".tgv") == 0) {
-                TD5_LOG_W("fmv", "TGQ/TGV files are not directly supported. "
-                          "Transcode to MP4 first: %s", filename);
-                /* Try anyway in case user renamed an MP4 */
+                TD5_LOG_W("fmv", "TGQ/TGV files are not supported by Media "
+                          "Foundation. Transcode to MP4: %s", filename);
+                return 0;
             }
         }
     }
@@ -864,10 +785,11 @@ int td5_fmv_is_supported(void)
 
 /** Legal screen search paths (tried in order) */
 static const char *s_legal_paths[][2] = {
-    { "Legal/legal1.tga",   "Legal/legal2.tga"   },
-    { "Legals/legal1.tga",  "Legals/legal2.tga"  },
-    { "legal1.tga",         "legal2.tga"          },
-    { "Data/legal1.tga",    "Data/legal2.tga"     },
+    { "re/assets/legals/legal1.png", "re/assets/legals/legal2.png" },
+    { "Legal/legal1.png",   "Legal/legal2.png"   },
+    { "Legals/legal1.png",  "Legals/legal2.png"  },
+    { "legal1.png",         "legal2.png"          },
+    { "Data/legal1.png",    "Data/legal2.png"     },
 };
 
 #define FMV_LEGAL_PATH_COUNT  (sizeof(s_legal_paths) / sizeof(s_legal_paths[0]))
@@ -900,7 +822,7 @@ void td5_fmv_show_legal_screens(void)
                     continue;
                 }
 
-                pixels = fmv_load_tga(path, &img_w, &img_h);
+                pixels = fmv_load_png(path, &img_w, &img_h);
                 if (!pixels) continue;
 
                 TD5_LOG_I("fmv", "Showing legal screen: %s (%dx%d)",

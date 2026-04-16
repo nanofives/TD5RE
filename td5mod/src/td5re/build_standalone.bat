@@ -92,7 +92,7 @@ echo Linking td5re.exe...
     -L%BUILDDIR% -Wl,--whole-archive -ltd5re -Wl,--no-whole-archive ^
     -L%WRAPPER_BUILDDIR% -lddraw_wrapper ^
     -ld3d11 -ldxgi -lkernel32 -luser32 -lgdi32 -luuid -lole32 ^
-    -lwinmm -ldinput8 -ldsound -ldxguid -lz -lws2_32 -lmfplat -lole32 ^
+    -lwinmm -ldinput8 -ldsound -ldxguid -lz -lws2_32 -lmfplat -lmfreadwrite -lmfuuid -lole32 ^
     -Wl,-Map=%BUILDDIR%\td5re.map ^
     -Wl,--enable-stdcall-fixup ^
     -Wl,--allow-multiple-definition

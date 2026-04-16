@@ -6,7 +6,7 @@
  * DirectDraw surface presentation (see ea-tgq-multimedia-engine.md).
  *
  * The source port replaces this entirely with a modern video player:
- *   - Primary backend: Windows Media Foundation (MFPlay)
+ *   - Primary backend: Windows Media Foundation (IMFSourceReader)
  *   - Supports: MP4, AVI, WMV, and any format with installed MF codecs
  *   - TGQ files should be transcoded to MP4 at install/build time
  *
