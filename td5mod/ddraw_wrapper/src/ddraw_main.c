@@ -18,7 +18,11 @@ static FILE *g_logfile = NULL;
 
 void wrapper_log(const char *fmt, ...) {
     if (!g_logfile) {
-        g_logfile = fopen("d3d11_wrapper.log", "w");
+        /* Try log/ subdirectory first (created by td5_plat_log_init),
+         * fall back to current directory */
+        g_logfile = fopen("log\\wrapper.log", "w");
+        if (!g_logfile)
+            g_logfile = fopen("d3d11_wrapper.log", "w");
         if (!g_logfile) return;
         setbuf(g_logfile, NULL); /* unbuffered for crash safety */
     }
@@ -394,9 +398,9 @@ HRESULT WINAPI DirectDrawCreate(GUID *driver, void **ddraw, void *outer)
             int nw, nh;
             char ini_path[MAX_PATH];
             GetModuleFileNameA(NULL, ini_path, MAX_PATH);
-            { char *s = strrchr(ini_path, '\\'); if (s) strcpy(s + 1, "scripts\\td5_mod.ini"); }
-            nw = GetPrivateProfileIntA("Windowed", "Width", 0, ini_path);
-            nh = GetPrivateProfileIntA("Windowed", "Height", 0, ini_path);
+            { char *s = strrchr(ini_path, '\\'); if (s) strcpy(s + 1, "td5re.ini"); }
+            nw = GetPrivateProfileIntA("Display", "Width", 0, ini_path);
+            nh = GetPrivateProfileIntA("Display", "Height", 0, ini_path);
             if (nw <= 0 || nh <= 0) {
                 nw = GetSystemMetrics(SM_CXSCREEN);
                 nh = GetSystemMetrics(SM_CYSCREEN);

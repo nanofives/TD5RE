@@ -779,10 +779,10 @@ static HRESULT __stdcall DD4_SetCooperativeLevel(WrapperDirectDraw *self, HWND h
         int init_w, init_h;
         char ini_path[MAX_PATH];
         GetModuleFileNameA(NULL, ini_path, MAX_PATH);
-        { char *s = strrchr(ini_path, '\\'); if (s) strcpy(s + 1, "scripts\\td5_mod.ini"); }
+        { char *s = strrchr(ini_path, '\\'); if (s) strcpy(s + 1, "td5re.ini"); }
 
-        init_w = GetPrivateProfileIntA("Windowed", "Width", 0, ini_path);
-        init_h = GetPrivateProfileIntA("Windowed", "Height", 0, ini_path);
+        init_w = GetPrivateProfileIntA("Display", "Width", 0, ini_path);
+        init_h = GetPrivateProfileIntA("Display", "Height", 0, ini_path);
         if (init_w <= 0 || init_h <= 0) {
             init_w = GetSystemMetrics(SM_CXSCREEN);
             init_h = GetSystemMetrics(SM_CYSCREEN);
