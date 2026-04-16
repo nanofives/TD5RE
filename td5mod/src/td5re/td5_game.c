@@ -1800,6 +1800,13 @@ int td5_game_run_race_frame(void) {
          * this gate stays valid because the counter still advances per sub-tick. */
         for (i = 0; i < TD5_MAX_RACER_SLOTS; i++) {
             if (s_slot_state[i].state == 3) continue; /* disabled */
+            /* Race timer: matches UpdateVehicleActor @ 0x00406650 +0x34c
+             * increment — once per sub-tick, gated on actor+0x328 (finish).
+             * Sub-tick loop only runs with paused=0, so the countdown gate
+             * is implicit (the countdown path has its own `continue`). */
+            if (s_metrics[i].post_finish_metric_base == 0) {
+                s_metrics[i].cumulative_timer++;
+            }
             tick_pending_finish_timer(i);
             accumulate_speed_bonus(i);
             decay_ultimate_timer(i);
@@ -2280,8 +2287,12 @@ static void advance_pending_finish_state(int slot, uint32_t sim_delta) {
     /* Already finished */
     if (s_slot_state[slot].companion_1 != 0) return;
 
-    /* Increment cumulative timer */
-    m->cumulative_timer++;
+    /* Race timer increment is driven per sub-tick in td5_game_run_race_frame
+     * (see the per-slot block after sync_actor_race_metrics). Originally the
+     * write at UpdateVehicleActor +0x34c runs once per sub-tick gated on the
+     * countdown-cleared gate and actor+0x328==0, so it must not fire here
+     * (this path runs once per render frame, which made the HUD timer accrue
+     * countdown ticks and run at render-rate instead of the 30 Hz sim rate). */
 
     /* Circuit branch — verbatim port of CheckRaceCompletionState circuit
      * body @ 0x00409E80 / LAB_0040A014. The original uses:
