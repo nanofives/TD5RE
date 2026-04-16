@@ -37,6 +37,7 @@ set(TD5RE_HEADERS
     td5_camera.h
     td5_vfx.h
     td5_fmv.h
+    td5_trace.h
 )
 
 set(TD5RE_SOURCES
@@ -57,6 +58,7 @@ set(TD5RE_SOURCES
     td5_camera.c
     td5_vfx.c
     td5_fmv.c
+    td5_trace.c
     td5_platform_win32.c
 )
 
