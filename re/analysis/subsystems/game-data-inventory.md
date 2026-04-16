@@ -77,10 +77,8 @@ data/
 ├── sound/
 │   └── SOUND.ZIP              1,431,675 B     Shared ambient/collision SFX (25 WAVs)
 │
-├── assets/                                     [Extracted assets -- not original game data]
-├── td5_dump/                                   [Analysis dumps]
-├── td5_png/                                    [Converted PNGs]
-└── td5_png_clean/                              [Cleaned PNGs]
+├── assets/                                     [All extracted game assets — runtime directory]
+└── td5_dump/                                   [Analysis dumps]
 ```
 
 ---
