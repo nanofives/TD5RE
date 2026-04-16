@@ -28,6 +28,7 @@
 #ifndef TD5_LEVEL_FORMATS_H
 #define TD5_LEVEL_FORMATS_H
 
+#include <stddef.h>
 #include <stdint.h>
 
 #pragma pack(push, 1)  /* exact binary layout required -- no compiler padding */
@@ -207,8 +208,15 @@ typedef struct TD5_StripSpan {
     int32_t  origin_z;          /* +0x14: world origin Z (absolute integer coordinate). */
 } TD5_StripSpan;
 
-/* Compile-time size check */
-typedef char _TD5_StripSpan_size_check[sizeof(TD5_StripSpan) == TD5_STRIP_SPAN_STRIDE ? 1 : -1];
+_Static_assert(sizeof(TD5_StripVertex) == 0x06, "TD5_StripVertex must stay 6 bytes");
+_Static_assert(sizeof(TD5_StripSpan) == TD5_STRIP_SPAN_STRIDE, "TD5_StripSpan size drifted");
+_Static_assert(offsetof(TD5_StripSpan, span_type) == 0x00, "TD5_StripSpan.span_type offset drifted");
+_Static_assert(offsetof(TD5_StripSpan, left_vertex_idx) == 0x04, "TD5_StripSpan.left_vertex_idx offset drifted");
+_Static_assert(offsetof(TD5_StripSpan, right_vertex_idx) == 0x06, "TD5_StripSpan.right_vertex_idx offset drifted");
+_Static_assert(offsetof(TD5_StripSpan, forward_link) == 0x08, "TD5_StripSpan.forward_link offset drifted");
+_Static_assert(offsetof(TD5_StripSpan, backward_link) == 0x0A, "TD5_StripSpan.backward_link offset drifted");
+_Static_assert(offsetof(TD5_StripSpan, origin_x) == 0x0C, "TD5_StripSpan.origin_x offset drifted");
+_Static_assert(offsetof(TD5_StripSpan, origin_z) == 0x14, "TD5_StripSpan.origin_z offset drifted");
 
 /* ========================================================================
  * 3. TD5_StripHeader -- STRIP.DAT file header (5 dwords = 20 bytes)
@@ -281,8 +289,14 @@ typedef struct TD5_LevelInf {
     uint8_t  padding_63;            /* +0x63: zero padding to 0x64 boundary */
 } TD5_LevelInf;
 
-/* Compile-time size check: 100 bytes = 0x64 */
-typedef char _TD5_LevelInf_size_check[sizeof(TD5_LevelInf) == 0x64 ? 1 : -1];
+_Static_assert(sizeof(TD5_LevelInf) == 0x64, "TD5_LevelInf size drifted from 0x64");
+_Static_assert(offsetof(TD5_LevelInf, track_type) == 0x00, "TD5_LevelInf.track_type offset drifted");
+_Static_assert(offsetof(TD5_LevelInf, checkpoint_count) == 0x08, "TD5_LevelInf.checkpoint_count offset drifted");
+_Static_assert(offsetof(TD5_LevelInf, checkpoint_spans) == 0x0C, "TD5_LevelInf.checkpoint_spans offset drifted");
+_Static_assert(offsetof(TD5_LevelInf, weather_type) == 0x28, "TD5_LevelInf.weather_type offset drifted");
+_Static_assert(offsetof(TD5_LevelInf, density_pairs) == 0x34, "TD5_LevelInf.density_pairs offset drifted");
+_Static_assert(offsetof(TD5_LevelInf, total_span_count) == 0x58, "TD5_LevelInf.total_span_count offset drifted");
+_Static_assert(offsetof(TD5_LevelInf, fog_enabled) == 0x5C, "TD5_LevelInf.fog_enabled offset drifted");
 
 /* ========================================================================
  * 5. TD5_WeatherDensityZone -- defined above (forward declaration)
@@ -325,8 +339,9 @@ typedef struct TD5_CheckpointMetadata {
                                      *        Last entry always has time_bonus = 0. */
 } TD5_CheckpointMetadata;
 
-/* Compile-time size check: 24 bytes */
-typedef char _TD5_CheckpointMetadata_size_check[sizeof(TD5_CheckpointMetadata) == 24 ? 1 : -1];
+_Static_assert(sizeof(TD5_CheckpointMetadata) == 24, "TD5_CheckpointMetadata size drifted");
+_Static_assert(offsetof(TD5_CheckpointMetadata, initial_time) == 0x02, "TD5_CheckpointMetadata.initial_time offset drifted");
+_Static_assert(offsetof(TD5_CheckpointMetadata, checkpoints) == 0x04, "TD5_CheckpointMetadata.checkpoints offset drifted");
 
 /* ========================================================================
  * 8. TD5_CheckpointTable -- CHECKPT.NUM format (96 bytes = 4x6 int32 matrix)
@@ -357,8 +372,7 @@ typedef struct TD5_CheckpointTable {
                                      */
 } TD5_CheckpointTable;
 
-/* Compile-time size check: 96 bytes = 0x60 */
-typedef char _TD5_CheckpointTable_size_check[sizeof(TD5_CheckpointTable) == 0x60 ? 1 : -1];
+_Static_assert(sizeof(TD5_CheckpointTable) == 0x60, "TD5_CheckpointTable size drifted from 0x60");
 
 /* ========================================================================
  * 9. TD5_TrafficBusEntry -- TRAFFIC.BUS spawn record (4 bytes)
@@ -427,8 +441,7 @@ typedef struct TD5_TrackLightEntry {
                                     *        Material/surface rendering flag. */
 } TD5_TrackLightEntry;
 
-/* Compile-time size check: 36 bytes = 0x24 */
-typedef char _TD5_TrackLightEntry_size_check[sizeof(TD5_TrackLightEntry) == 0x24 ? 1 : -1];
+_Static_assert(sizeof(TD5_TrackLightEntry) == 0x24, "TD5_TrackLightEntry size drifted from 0x24");
 
 /* ========================================================================
  * 11. TD5_TextureCacheEntry -- Texture streaming cache entry (8 bytes)
@@ -472,8 +485,7 @@ typedef struct TD5_StaticHedEntry {
                                  *        Used by UploadRaceTexturePage and BindRaceTexturePage. */
 } TD5_StaticHedEntry;
 
-/* Compile-time size check: 64 bytes = 0x40 */
-typedef char _TD5_StaticHedEntry_size_check[sizeof(TD5_StaticHedEntry) == 0x40 ? 1 : -1];
+_Static_assert(sizeof(TD5_StaticHedEntry) == 0x40, "TD5_StaticHedEntry size drifted from 0x40");
 
 /* ========================================================================
  * 13. TD5_TexturePageMeta -- Per-page metadata from static.hed (16 bytes = 0x10)
@@ -498,8 +510,7 @@ typedef struct TD5_TexturePageMeta {
                                      *        (DAT_004c3d04): mode 0 uses min(src,tgt). */
 } TD5_TexturePageMeta;
 
-/* Compile-time size check: 16 bytes = 0x10 */
-typedef char _TD5_TexturePageMeta_size_check[sizeof(TD5_TexturePageMeta) == 0x10 ? 1 : -1];
+_Static_assert(sizeof(TD5_TexturePageMeta) == 0x10, "TD5_TexturePageMeta size drifted from 0x10");
 
 /* ========================================================================
  * 14. TD5_StaticHedHeader -- static.hed file header (8 bytes)
@@ -655,8 +666,7 @@ typedef struct TD5_HighScoreEntry {
     uint32_t top_speed;     /* +0x1C: top speed (display units) */
 } TD5_HighScoreEntry;
 
-/* Compile-time size check: 32 bytes = 0x20 */
-typedef char _TD5_HighScoreEntry_size_check[sizeof(TD5_HighScoreEntry) == 0x20 ? 1 : -1];
+_Static_assert(sizeof(TD5_HighScoreEntry) == 0x20, "TD5_HighScoreEntry size drifted from 0x20");
 
 /* ========================================================================
  * 18. TD5_NpcRacerGroup -- NPC racer group record (164 bytes = 0xA4) NEW wave3
@@ -687,8 +697,9 @@ typedef struct TD5_NpcRacerGroup {
                             /* +0x04: 5 high-score slots (5 x 32 = 160 bytes) */
 } TD5_NpcRacerGroup;
 
-/* Compile-time size check: 164 bytes = 0xA4 */
-typedef char _TD5_NpcRacerGroup_size_check[sizeof(TD5_NpcRacerGroup) == 0xA4 ? 1 : -1];
+_Static_assert(sizeof(TD5_NpcRacerGroup) == 0xA4, "TD5_NpcRacerGroup size drifted from 0xA4");
+_Static_assert(offsetof(TD5_NpcRacerGroup, group_type) == 0x00, "TD5_NpcRacerGroup.group_type offset drifted");
+_Static_assert(offsetof(TD5_NpcRacerGroup, entries) == 0x04, "TD5_NpcRacerGroup.entries offset drifted");
 
 /* ========================================================================
  * 19. TD5_CameraPreset -- Chase camera preset (16 bytes = 0x10) NEW wave3
@@ -716,8 +727,7 @@ typedef struct TD5_CameraPreset {
     uint32_t reserved;          /* +0x0C: unused (always 0) */
 } TD5_CameraPreset;
 
-/* Compile-time size check: 16 bytes = 0x10 */
-typedef char _TD5_CameraPreset_size_check[sizeof(TD5_CameraPreset) == 0x10 ? 1 : -1];
+_Static_assert(sizeof(TD5_CameraPreset) == 0x10, "TD5_CameraPreset size drifted from 0x10");
 
 #pragma pack(pop)
 

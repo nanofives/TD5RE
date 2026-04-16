@@ -12,6 +12,7 @@
 #ifndef TD5_MESH_RESOURCE_H
 #define TD5_MESH_RESOURCE_H
 
+#include <stddef.h>
 #include <stdint.h>
 
 /* ======================================================================
@@ -139,6 +140,24 @@ typedef struct D3DSubmittedVertex {
     float    tu;                    /* +0x18: texture U */
     float    tv;                    /* +0x1C: texture V */
 } D3DSubmittedVertex;
+
+_Static_assert(sizeof(MeshResourceHeader) == 0x38, "MeshResourceHeader size drifted from 0x38");
+_Static_assert(offsetof(MeshResourceHeader, command_count) == 0x04, "MeshResourceHeader.command_count offset drifted");
+_Static_assert(offsetof(MeshResourceHeader, commands_offset) == 0x2C, "MeshResourceHeader.commands_offset offset drifted");
+_Static_assert(offsetof(MeshResourceHeader, vertices_offset) == 0x30, "MeshResourceHeader.vertices_offset offset drifted");
+_Static_assert(offsetof(MeshResourceHeader, normals_offset) == 0x34, "MeshResourceHeader.normals_offset offset drifted");
+_Static_assert(sizeof(PrimitiveCommand) == 0x10, "PrimitiveCommand size drifted from 0x10");
+_Static_assert(offsetof(PrimitiveCommand, triangle_count) == 0x08, "PrimitiveCommand.triangle_count offset drifted");
+_Static_assert(offsetof(PrimitiveCommand, vertex_data_ptr) == 0x0C, "PrimitiveCommand.vertex_data_ptr offset drifted");
+_Static_assert(sizeof(MeshVertex) == 0x2C, "MeshVertex size drifted from 0x2C");
+_Static_assert(offsetof(MeshVertex, view_x) == 0x0C, "MeshVertex.view_x offset drifted");
+_Static_assert(offsetof(MeshVertex, lighting) == 0x18, "MeshVertex.lighting offset drifted");
+_Static_assert(offsetof(MeshVertex, tex_u) == 0x1C, "MeshVertex.tex_u offset drifted");
+_Static_assert(sizeof(VertexNormal) == 0x10, "VertexNormal size drifted from 0x10");
+_Static_assert(offsetof(VertexNormal, visible_flag) == 0x0C, "VertexNormal.visible_flag offset drifted");
+_Static_assert(sizeof(D3DSubmittedVertex) == 0x20, "D3DSubmittedVertex size drifted from 0x20");
+_Static_assert(offsetof(D3DSubmittedVertex, diffuse) == 0x10, "D3DSubmittedVertex.diffuse offset drifted");
+_Static_assert(offsetof(D3DSubmittedVertex, tu) == 0x18, "D3DSubmittedVertex.tu offset drifted");
 
 /* ======================================================================
  * MODELS.DAT File Format
