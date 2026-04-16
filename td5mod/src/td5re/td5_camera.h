@@ -174,6 +174,7 @@ void OrientCameraTowardTarget(int *target_pos, unsigned int yaw_offset);
 
 void td5_camera_update_chase(TD5_Actor *actor, int player, int view_index);
 void td5_camera_set_preset(int preset_index);
+void td5_camera_set_rear_view(int view, int active);
 void td5_camera_update_trackside(TD5_Actor *actor, int view_index);
 void td5_camera_update_transition_state(int player, int view_index);
 void td5_camera_update_transition_timer(void);

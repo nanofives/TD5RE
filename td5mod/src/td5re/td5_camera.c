@@ -1896,6 +1896,16 @@ void td5_camera_set_preset(int pi)
     }
 }
 
+void td5_camera_set_rear_view(int view, int active)
+{
+    /* Rear view = 180° yaw offset (0x800 in 4096-unit circle).
+     * Only applied in chase mode (presetMode 0); bumper/trackside
+     * paths set their own g_camYawOffset. */
+    if (g_raceCameraPresetMode[view & 1] == 0) {
+        g_camYawOffset[view & 1] = active ? 0x800 : 0;
+    }
+}
+
 void td5_camera_update_trackside(TD5_Actor *a, int vi)
 {
     UpdateTracksideCamera((int)a, vi);

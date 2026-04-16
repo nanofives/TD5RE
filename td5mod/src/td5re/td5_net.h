@@ -48,5 +48,9 @@ int  td5_net_is_host(void);
 int  td5_net_get_player_count(void);
 int  td5_net_is_active(void);
 int  td5_net_is_slot_active(int slot);  /* dpu_exref[0xBCC + slot*4]: 1=local, 0=remote/empty */
+int  td5_net_local_slot(void);
+int  td5_net_is_connection_lost(void);
+int  td5_net_get_enum_session_count(void);
+const char *td5_net_get_enum_session_name(int index);
 
 #endif /* TD5_NET_H */

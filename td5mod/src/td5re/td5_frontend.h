@@ -58,6 +58,9 @@ int  td5_frontend_display_loop(void);
 int  td5_frontend_init_resources(void);
 void td5_frontend_release_resources(void);
 
+/* --- Auto-race (skip frontend, launch from INI settings) --- */
+void td5_frontend_auto_race_setup(void);
+
 /* --- UI rendering helpers --- */
 void td5_frontend_render_ui_rects(void);
 void td5_frontend_flush_sprite_blits(void);

@@ -283,4 +283,8 @@ int  td5_input_enumerate_devices(void);
 void td5_input_set_device(int player, int device_index);
 const char *td5_input_get_device_name(int index);
 
+/** Get the controller type for a player slot.
+ *  Returns 0=keyboard, 1=gamepad, 2=joystick/wheel. */
+int td5_input_get_device_type(int player);
+
 #endif /* TD5_INPUT_H */
