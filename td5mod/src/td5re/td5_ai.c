@@ -1493,60 +1493,22 @@ void td5_ai_update_track_behavior(int slot) {
     /* 3. Throttle/brake decision */
     threshold_result = td5_ai_update_route_threshold(slot);
 
-    (void)steer_weight; /* unused — direct heading control below */
-
-    /* 5. Steering: direct heading control via angular velocity.
+    /* 5. Steering: band-based steering-command controller.
      *
-     * The original's band-based system (0x4340C0) accumulates steer corrections,
-     * but the port's deviation baseline (~0 vs original's 0x800) and amplified
-     * bicycle model yaw torque cause divergent accumulation. Direct heading
-     * control bypasses both issues by setting angular_velocity_yaw proportional
-     * to the heading error and keeping STEERING_CMD = 0.
+     * Faithful port of UpdateActorSteeringBias @ 0x004340C0. Writes to
+     * actor+0x30C (STEERING_CMD) only, never to +0x1C4 (angular_velocity_yaw).
+     * Original dispatches on threshold result:
+     *   threshold != 0 → weight = 0x10000  [CONFIRMED @ 0x00435392]
+     *   threshold == 0 → weight = 0x20000  [CONFIRMED @ 0x0043539F]
      *
-     * No speed gate: the original UpdateActorSteeringBias @ 0x004340C0 runs
-     * every tick regardless of longitudinal speed. A previous gate
-     * (abs_speed < 0x1800 = 24.0 in 24.8 fp) blocked steering until the car
-     * was moving at ≈24 m/s, which never happens in the first seconds of a
-     * race — AI accelerated straight off the spawn line. The PD output is
-     * clamped to ±1500 so a stationary car cannot spin out.
-     *
-     * Pause gate: skip the omega write while g_td5.paused=1 (countdown /
-     * pause menu). Original UpdateVehicleActor @ 0x00406650 gates all
-     * dynamics behind g_gamePaused==0, so AI-driven yaw writes do not fire
-     * during countdown [CONFIRMED @ 0x00406650]. The port's IntegrateVehicle
-     * PoseAndContacts path at td5_physics.c:3076-3078 integrates
-     * angular_velocity_yaw → euler_accum.yaw EVERY tick (no pause gate —
-     * matches original 0x00405E80), so any non-zero omega written here
-     * during countdown visibly rotates the car in place over the 3 s grid
-     * hold. */
-    {
-        int32_t left_dev = rs[RS_LEFT_DEVIATION];
-        int32_t right_dev = rs[RS_RIGHT_DEVIATION];
-        int32_t signed_delta;
-        int32_t omega_prev;
-        int32_t desired_omega;
-
-        if (left_dev < right_dev) {
-            signed_delta = -left_dev;
-        } else {
-            signed_delta = right_dev;
-        }
-
-        omega_prev = ACTOR_I32(actor, 0x1C4);
-        desired_omega = signed_delta * 12 - (omega_prev >> 8) * 6;
-        if (desired_omega > 1500) desired_omega = 1500;
-        if (desired_omega < -1500) desired_omega = -1500;
-        if (!g_td5.paused) {
-            ACTOR_I32(actor, 0x1C4) = desired_omega;
-            ACTOR_I32(actor, ACTOR_STEERING_CMD) = 0;
-        } else {
-            ACTOR_I32(actor, 0x1C4) = 0;
-            ACTOR_I32(actor, ACTOR_STEERING_CMD) = 0;
-            TD5_LOG_D(LOG_TAG,
-                      "countdown: slot=%d omega forced to 0 (dev_L=%d dev_R=%d)",
-                      slot, left_dev, right_dev);
-        }
-    }
+     * Omega is NOT touched here. Angular velocity evolves from the bicycle
+     * model in UpdateAIVehicleDynamics @ 0x00404EC0, which at v=0 produces
+     * ~0 torque and therefore ~0 omega, so the countdown grid-hold period
+     * naturally leaves actors still. */
+    steer_weight = (threshold_result != 0) ? 0x10000 : 0x20000;
+    td5_ai_update_steering_bias(rs, steer_weight);
+    TD5_LOG_I(LOG_TAG, "track_behavior: slot=%d thr=%d weight=0x%X",
+              slot, threshold_result, steer_weight);
 }
 
 /* ========================================================================
