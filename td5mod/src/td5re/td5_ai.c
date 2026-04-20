@@ -1151,12 +1151,18 @@ int td5_ai_advance_track_script(int *rs) {
             rs[RS_SCRIPT_FLAGS] &= ~0x04;
             ACTOR_I32(actor, ACTOR_STEERING_CMD) = 0;
         } else {
-            /* Apply leftward steering: +0x4000 per tick, max 0x19000 */
+            /* Apply leftward steering: +0x4000 per tick, max 0x19000.
+             * [CONFIRMED @ 0x004370A0] original falls through to opcode
+             * switch after this increment — does NOT return 0. The
+             * previous `return 0` was port-fabricated and pinned
+             * STEERING_CMD at +0x19000 forever, preventing opcode 0
+             * (script-terminator) from ever clearing the script. */
             int32_t sc = ACTOR_I32(actor, ACTOR_STEERING_CMD);
             sc += 0x4000;
             if (sc > 0x19000) sc = 0x19000;
             ACTOR_I32(actor, ACTOR_STEERING_CMD) = sc;
-            return 0; /* block until aligned */
+            TD5_LOG_I(LOG_TAG, "script_flag04: slot=%d sc=%d hdelta=0x%X",
+                      slot, sc, hdelta);
         }
     }
 
@@ -1170,11 +1176,14 @@ int td5_ai_advance_track_script(int *rs) {
             rs[RS_SCRIPT_FLAGS] &= ~0x08;
             ACTOR_I32(actor, ACTOR_STEERING_CMD) = 0;
         } else {
+            /* [CONFIRMED @ 0x004370A0] symmetric mirror of flag 0x04 —
+             * no return 0 in original. */
             int32_t sc = ACTOR_I32(actor, ACTOR_STEERING_CMD);
             sc -= 0x4000;
             if (sc < -0x19000) sc = -0x19000;
             ACTOR_I32(actor, ACTOR_STEERING_CMD) = sc;
-            return 0; /* block */
+            TD5_LOG_I(LOG_TAG, "script_flag08: slot=%d sc=%d hdelta=0x%X",
+                      slot, sc, hdelta);
         }
     }
 
@@ -1372,8 +1381,11 @@ void td5_ai_update_track_behavior(int slot) {
         adjusted = (adjusted - 0x800U) & 0xFFF;
         hdelta = (int32_t)(-(int32_t)adjusted) & 0xFFF;
 
-        if (hdelta > 0x800 && hdelta <= 0xCE0) {
-            TD5_LOG_D(LOG_TAG, "recovery: slot=%d hdelta=0x%X heading=0x%X route=0x%X",
+        /* [CONFIRMED @ 0x00434FE0] decomp: if ((800 < uVar3) && (uVar3 < 0xce0))
+         * — 800 is DECIMAL (= 0x320), upper is strict <. Port previously had
+         * 0x800 and <=, treating Ghidra's decimal render as hex. */
+        if (hdelta > 0x320 && hdelta < 0xCE0) {
+            TD5_LOG_I(LOG_TAG, "recovery: slot=%d hdelta=0x%X heading=0x%X route=0x%X",
                       slot, hdelta, heading & 0xFFF, route_heading & 0xFFF);
             /* Significant misalignment: assign initial recovery script [8, 9, 0] */
             rs[RS_SCRIPT_BASE_PTR] = (int32_t)(intptr_t)g_script_init_recovery;
