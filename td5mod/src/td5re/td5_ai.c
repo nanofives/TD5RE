@@ -1330,19 +1330,14 @@ void td5_ai_update_track_behavior(int slot) {
     if (g_td5.time_trial_enabled)
         return;
 
-    /* Countdown: pass through throttle but let the full steering cascade
-     * run. [CONFIRMED: the original at 0x00434FE0 has NO countdown gate —
-     * it runs the full cascade every tick. The dynamics are paused so
-     * velocity stays 0, but the band-based steering accumulates corrections.
-     * This pre-loads STEERING_CMD to the ±0x18000 clamp before the race
-     * starts, giving the car a ready-to-go turn angle on the first active
-     * tick. Without this, the first tick starts from steer=0 and the
-     * correction spike causes the bicycle model to saturate omega.] */
-    if (g_td5.paused) {
-        ACTOR_I16(actor, ACTOR_ENCOUNTER_STEER) = (int16_t)g_actor_route_steer_bias[slot];
-        ACTOR_U8(actor, ACTOR_BRAKE_FLAG) = 0;
-        /* Fall through to run the full steering cascade during countdown */
-    }
+    /* No countdown pre-seed: the original at 0x00434FE0 has NO countdown
+     * gate and NO paused-branch write of encounter_steering_cmd (+0x33E) /
+     * brake_flag (+0x36D) — the cascade below reaches
+     * td5_ai_update_route_threshold which writes the same
+     * g_actor_route_steer_bias[slot] → encounter_steering_cmd on the
+     * coasting/normal branch (see td5_ai.c:968-969). Keeping an explicit
+     * pre-seed here was redundant with the original and raced with the
+     * cascade output during countdown. */
 
     /* --- Script check: if a script is active, run it --- */
     if (rs[RS_SCRIPT_BASE_PTR] != 0) {
