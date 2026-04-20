@@ -108,6 +108,9 @@ int td5re_init(void) {
     TD5_LOG_I("td5re", "render dims synced: %dx%d", g_render_width, g_render_height);
     g_td5.gravity_constant = TD5_GRAVITY_NORMAL;
     g_td5.difficulty = TD5_DIFFICULTY_NORMAL;
+    /* Mirrors original's gRaceDifficultyTier .data init @ 0x00463210.
+     * Snapshot value = 2 [CONFIRMED via Ghidra + Frida runtime 2026-04-20]. */
+    g_td5.difficulty_tier = 2;
     g_td5.viewport_count = 1;
     g_td5.intro_movie_pending = saved_intro;
     g_td5.frontend_init_pending = 1;    /* MUST be 1 so MENU state inits resources */

@@ -1520,9 +1520,13 @@ static void frontend_init_race_schedule(void) {
         }
     } else {
         /* === Path 3: Default (single race, all other types) [CONFIRMED @ 0x0040dac0] ===
-         * Pick from difficulty tier table: rand() % 6 into row[g_td5.difficulty].
-         * Only 3 real tier rows exist (0-2); rows 3-7 overlap gExtCarIdToTypeIndex. */
-        int tier = (int)g_td5.difficulty;
+         * Pick from difficulty tier table: rand() % 6 into row[gRaceDifficultyTier].
+         * Original uses gRaceDifficultyTier (@ 0x00463210), NOT the user's
+         * difficulty setting — they are distinct globals. Tier is set in
+         * ConfigureGameTypeFlags by game_type, default 2 for single-race.
+         * [CONFIRMED @ 0x0040DD17 decomp + Frida runtime 2026-04-20 showed
+         * tier-2 cars picked for AI on single-race path.] */
+        int tier = g_td5.difficulty_tier;
         if (tier < 0 || tier > 2) tier = 2; /* clamp to valid tiers */
         for (i = start_slot; i < TD5_MAX_RACER_SLOTS; i++) {
             int ext_id;
@@ -2376,6 +2380,20 @@ static int ConfigureGameTypeFlags(void) {
     g_td5.traffic_enabled = 0;
     g_td5.special_encounter_enabled = 0;
     g_td5.race_rule_variant = 0;
+
+    /* AI-car tier per original's ConfigureGameTypeFlags @ 0x00410CA0.
+     * Mapping: 1/2→0, 3/4/5→1, 6/7→2. Cases 0/8/9 leave prior value
+     * (default 2, set at boot to match original's .data init of
+     * gRaceDifficultyTier @ 0x00463210). [CONFIRMED via Ghidra + Frida
+     * runtime capture 2026-04-20.] */
+    switch (s_selected_game_type) {
+        case 1: case 2:             g_td5.difficulty_tier = 0; break;
+        case 3: case 4: case 5:     g_td5.difficulty_tier = 1; break;
+        case 6: case 7:             g_td5.difficulty_tier = 2; break;
+        default: /* 0, 8, 9: keep prior */ break;
+    }
+    TD5_LOG_I(LOG_TAG, "ConfigureGameTypeFlags: game_type=%d tier=%d",
+              s_selected_game_type, g_td5.difficulty_tier);
 
     switch (s_selected_game_type) {
     case 0: /* Single Race -- user preferences apply */
