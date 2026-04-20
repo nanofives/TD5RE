@@ -2078,6 +2078,9 @@ static void update_position_recursive(int16_t *track_state, int32_t pos_x, int32
             track_state[2]++;
             if (track_state[2] > track_state[3])
                 track_state[3] = track_state[2];
+            /* Original appends -1 to sub_lane post-step.
+             * [CONFIRMED @ 0x004440F0 case 0x01: `cVar15 + ... + (-1)`] */
+            sub_lane -= 1;
             break;
 
         case 2: /* Right */
@@ -2093,6 +2096,7 @@ static void update_position_recursive(int16_t *track_state, int32_t pos_x, int32
             track_state[2]++;
             if (track_state[2] > track_state[3])
                 track_state[3] = track_state[2];
+            sub_lane -= 1;  /* -1 bias after forward step */
             new_span = resolve_neighbor(span_idx, &sub_lane, 0x02, pos_x, pos_z);
             span_idx = new_span;
             track_state[0] = (int16_t)new_span;
@@ -2103,6 +2107,9 @@ static void update_position_recursive(int16_t *track_state, int32_t pos_x, int32
             span_idx = new_span;
             track_state[0] = (int16_t)new_span;
             track_state[2]--;
+            /* Original appends +1 to sub_lane post-step.
+             * [CONFIRMED @ 0x004440F0 case 0x04: `cVar15 + ... + '\x01'`] */
+            sub_lane += 1;
             break;
 
         case 6: /* Right + Backward */
@@ -2113,6 +2120,7 @@ static void update_position_recursive(int16_t *track_state, int32_t pos_x, int32
             span_idx = new_span;
             track_state[0] = (int16_t)new_span;
             track_state[2]--;
+            sub_lane += 1;  /* +1 bias after backward step */
             break;
 
         case 8: /* Left */
@@ -2128,6 +2136,7 @@ static void update_position_recursive(int16_t *track_state, int32_t pos_x, int32
             track_state[2]++;
             if (track_state[2] > track_state[3])
                 track_state[3] = track_state[2];
+            sub_lane -= 1;  /* -1 bias after forward step */
             new_span = resolve_neighbor(span_idx, &sub_lane, 0x08, pos_x, pos_z);
             span_idx = new_span;
             track_state[0] = (int16_t)new_span;
@@ -2138,6 +2147,7 @@ static void update_position_recursive(int16_t *track_state, int32_t pos_x, int32
             span_idx = new_span;
             track_state[0] = (int16_t)new_span;
             track_state[2]--;
+            sub_lane += 1;  /* +1 bias after backward step */
             new_span = resolve_neighbor(span_idx, &sub_lane, 0x08, pos_x, pos_z);
             span_idx = new_span;
             track_state[0] = (int16_t)new_span;
