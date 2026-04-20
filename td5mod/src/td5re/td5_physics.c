@@ -3099,6 +3099,66 @@ static void integrate_traffic_pose(TD5_Actor *actor)
     }
 }
 
+/* Forward decl — AngleFromVector12 lives in td5_render.c (0x40A720 equiv) */
+extern int AngleFromVector12(int x, int z);
+
+/* ========================================================================
+ * T2: TransformTrackVertexByMatrix equivalent (@ 0x00446030)
+ *
+ * Derives display_angle_roll and display_angle_pitch from the four per-wheel
+ * ground-contact positions (actor+0xF0, written by refresh_wheel_contacts)
+ * plus the four per-wheel suspension deflections (actor+0x2DC).
+ *
+ * Formula is a literal transcription of 0x00446037..0x0044612F x86
+ * (two independent Ghidra passes, see T2 research log). All arithmetic is
+ * 32-bit signed. SAR by 8 after each intermediate matches SAR instructions
+ * at 0x446089/0x44608E/0x44608F/0x4460F4/0x4460F7/0x446103.
+ *
+ * The write to roll uses dz (front/rear-driven axis per original's wheel
+ * ordering), write to pitch uses dx (left/right-driven axis). Semantic
+ * labels "roll"/"pitch" match the original's field layout at +0x208/+0x20C;
+ * whether this corresponds to the conventional pitch/roll axes depends on
+ * the original binary's wheel index convention (not verified).
+ * ======================================================================== */
+static void td5_physics_attitude_from_wheels(const TD5_Actor *actor,
+                                             int16_t *out_roll,
+                                             int16_t *out_pitch)
+{
+    const int32_t *wcp = (const int32_t *)&actor->wheel_contact_pos[0];
+    const int32_t *sp  = actor->wheel_suspension_pos;
+
+    /* Numerators (height spreads + suspension deflection contributions) */
+    int32_t dx = wcp[1] - wcp[4] - wcp[10] + wcp[7]
+               + sp[0] - sp[1] + sp[2] - sp[3];       /* pitch numerator */
+    int32_t dz = wcp[1] + wcp[4] - wcp[7] - wcp[10]
+               + sp[0] + sp[1] - sp[2] - sp[3];       /* roll numerator */
+
+    /* Cross spans (hypotenuse arguments — X/Z separations between wheel pairs) */
+    int32_t crAp = wcp[0] - wcp[3] + wcp[6] - wcp[9];    /* pitch X span */
+    int32_t crBp = wcp[2] - wcp[5] + wcp[8] - wcp[11];   /* pitch Z span */
+    int32_t crAr = wcp[0] + wcp[3] - wcp[6] - wcp[9];    /* roll X span  */
+    int32_t crBr = wcp[2] + wcp[5] - wcp[8] - wcp[11];   /* roll Z span  */
+
+    dx   >>= 8;
+    dz   >>= 8;
+    crAp >>= 8;
+    crBp >>= 8;
+    crAr >>= 8;
+    crBr >>= 8;
+
+    int32_t hyp_p = td5_isqrt(crAp * crAp + crBp * crBp);
+    int32_t hyp_r = td5_isqrt(crAr * crAr + crBr * crBr);
+
+    *out_pitch = (int16_t)(AngleFromVector12(-dx, hyp_p) & 0xFFF);
+    *out_roll  = (int16_t)(AngleFromVector12(-dz, hyp_r) & 0xFFF);
+}
+
+/* Helper: signed-wrap a 12-bit delta into [-2048, +2047], matching the
+ * `(((new - old - 0x800) & 0xFFF) - 0x800)` pattern at 0x00405ED8-0x00405F10. */
+static inline int32_t td5_physics_wrap_angle_delta(int32_t new_angle, int32_t old_angle) {
+    return (int32_t)(((new_angle - old_angle - 0x800) & 0xFFF) - 0x800);
+}
+
 /* ========================================================================
  * Integration: IntegrateVehiclePoseAndContacts (0x405E80)
  *
@@ -3110,6 +3170,13 @@ void td5_physics_integrate_pose(TD5_Actor *actor)
 {
     /* Save previous Y for suspension delta */
     actor->prev_frame_y_position = actor->world_pos.y;
+
+    /* T2: Save pre-integration display roll/pitch for delta-based angular
+     * velocity update. Matches IntegrateVehiclePoseAndContacts @ 0x00405E80
+     * — angular_velocity_roll/pitch are recomputed from wrap(new - old)*256
+     * each tick after TransformTrackVertexByMatrix. */
+    int16_t t2_old_disp_roll  = actor->display_angles.roll;
+    int16_t t2_old_disp_pitch = actor->display_angles.pitch;
 
     /* 1. Apply gravity to velocity Y — UNCONDITIONAL, matching
      * IntegrateVehiclePoseAndContacts @ 0x00405EDE. The suspension_response
@@ -3217,6 +3284,79 @@ void td5_physics_integrate_pose(TD5_Actor *actor)
      * 1=airborne), so save the inverted version (1=grounded) before the call. */
     s_prev_grounded_mask[actor->slot_index & 0x0F] = (~actor->wheel_contact_bitmask) & 0x0F;
     td5_physics_refresh_wheel_contacts(actor);
+
+    /* T2: Wheel-contact attitude feedback — literal port of
+     * TransformTrackVertexByMatrix @ 0x00446030 called from
+     * IntegrateVehiclePoseAndContacts @ 0x00405E80.
+     *
+     * 1. Compute new_roll, new_pitch from the freshly refreshed
+     *    wheel_contact_pos[] heights + wheel_suspension_pos[] deflections.
+     * 2. Derive angular_velocity_roll/pitch as signed-wrapped 12-bit delta,
+     *    scaled by 256, clamped to ±6000 (matches 0x00405F0A-0x00405F2C).
+     * 3. Override display_angles.roll/pitch with the wheel-derived values
+     *    (overrides the euler_accum-derived values written at step 4 above).
+     * 4. Update euler_accum.roll/pitch so the next tick's integration starts
+     *    from the wheel-corrected attitude.
+     * 5. Rebuild rotation_matrix from the corrected display_angles so
+     *    downstream ground-snap and next-tick refresh use the right matrix. */
+    {
+        int16_t new_roll  = 0;
+        int16_t new_pitch = 0;
+        td5_physics_attitude_from_wheels(actor, &new_roll, &new_pitch);
+
+        int32_t d_roll  = td5_physics_wrap_angle_delta((int32_t)new_roll,
+                                                       (int32_t)t2_old_disp_roll) * 0x100;
+        int32_t d_pitch = td5_physics_wrap_angle_delta((int32_t)new_pitch,
+                                                       (int32_t)t2_old_disp_pitch) * 0x100;
+        if (d_roll  >  6000) d_roll  =  6000;
+        if (d_roll  < -6000) d_roll  = -6000;
+        if (d_pitch >  6000) d_pitch =  6000;
+        if (d_pitch < -6000) d_pitch = -6000;
+
+        actor->angular_velocity_roll  = d_roll;
+        actor->angular_velocity_pitch = d_pitch;
+        actor->display_angles.roll    = new_roll;
+        actor->display_angles.pitch   = new_pitch;
+        actor->euler_accum.roll       = (int32_t)new_roll  << 8;
+        actor->euler_accum.pitch      = (int32_t)new_pitch << 8;
+
+        /* Rebuild rotation_matrix from corrected display_angles.
+         * Matches original 0x00405E80's second call to BuildRotationMatrixFromAngles. */
+        int32_t roll_a  = actor->display_angles.roll  & 0xFFF;
+        int32_t yaw_a   = actor->display_angles.yaw   & 0xFFF;
+        int32_t pitch_a = actor->display_angles.pitch & 0xFFF;
+
+        int32_t cr = cos_fixed12(roll_a);
+        int32_t sr = sin_fixed12(roll_a);
+        int32_t cy = cos_fixed12(yaw_a);
+        int32_t sy = sin_fixed12(yaw_a);
+        int32_t cp = cos_fixed12(pitch_a);
+        int32_t sp2 = sin_fixed12(pitch_a);
+
+        float s = 1.0f / 4096.0f;
+        actor->rotation_matrix.m[0] = (float)(((sp2 * sy >> 12) * sr >> 12) + ((cp * cy) >> 12)) * s;
+        actor->rotation_matrix.m[1] = (float)(((cp  * sy >> 12) * sr >> 12) - ((sp2 * cy) >> 12)) * s;
+        actor->rotation_matrix.m[2] = (float)((sy * cr) >> 12) * s;
+        actor->rotation_matrix.m[3] = (float)((sp2 * cr) >> 12) * s;
+        actor->rotation_matrix.m[4] = (float)((cp  * cr) >> 12) * s;
+        actor->rotation_matrix.m[5] = (float)(-sr) * s;
+        actor->rotation_matrix.m[6] = (float)(((sp2 * cy >> 12) * sr >> 12) - ((cp * sy) >> 12)) * s;
+        actor->rotation_matrix.m[7] = (float)(((cp  * cy >> 12) * sr >> 12) + ((sp2 * sy) >> 12)) * s;
+        actor->rotation_matrix.m[8] = (float)((cy * cr) >> 12) * s;
+
+        /* One-line per-tick diagnostic for the player car only */
+        if (actor->slot_index == 0) {
+            static int s_t2_log_frame = 0;
+            if ((s_t2_log_frame++ % 120) == 0) {
+                TD5_LOG_I(LOG_TAG,
+                    "T2 attitude slot0: new_roll=%d new_pitch=%d "
+                    "old_roll=%d old_pitch=%d d_roll=%d d_pitch=%d",
+                    (int)new_roll, (int)new_pitch,
+                    (int)t2_old_disp_roll, (int)t2_old_disp_pitch,
+                    d_roll, d_pitch);
+            }
+        }
+    }
 
     /* DIAGNOSTIC: log player car (slot 0) physics state once per 30 frames */
     if (actor->slot_index == 0) {
