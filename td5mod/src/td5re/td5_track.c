@@ -2278,37 +2278,52 @@ void td5_track_update_probe_position(TD5_TrackProbeState *probe,
  * ======================================================================== */
 
 /**
- * Cross-product triangle half test.
- * Returns which half of the quad diagonal the point falls in.
- * 0 = lower-left triangle, 1 = upper-right triangle.
+ * Diagonal cross-product test. All three branches of
+ * ComputeActorTrackContactNormalExtended @ 0x004457E0 (left-edge,
+ * right-edge, and interior) share the SAME cross formula — verified at
+ * the disasm level: the left-edge path at 0x004458b3..0x004458f4 falls
+ * through into the shared tail at 0x00445970 which computes the cross
+ * identically to the interior path at 0x004459d2..0x004459e2.
+ *
+ *   cross = (v[ri+1].x - v[li].x) * (local_z - v[li].z)
+ *         - (v[ri+1].z - v[li].z) * (local_x - v[li].x)
+ *
+ * Branch rule (also shared, verified at both 0x00445983 and 0x004459e6
+ * via JLE): `cross > 0` → triangle `(li, ri+1, li+1)`;
+ * `cross <= 0` → triangle `(li, ri, ri+1)`.
+ * [CONFIRMED @ 0x00445970..0x00445975, 0x004459d2..0x004459e6]
  */
-static int classify_triangle_half(const TD5_StripSpan *sp, int sub_lane,
-                                   int32_t local_x, int32_t local_z)
+static int64_t diagonal_cross(int vl0_idx, int vr1_idx,
+                              int32_t local_x, int32_t local_z)
 {
-    TD5_StripVertex *vl0, *vr1;
-    int32_t dx, dz;
-
-    /* Test against the diagonal from vl0 to vr1 */
-    vl0 = vertex_at(sp->left_vertex_index + sub_lane);
-    vr1 = vertex_at(sp->right_vertex_index + sub_lane + 1);
-
-    dx = (int32_t)vr1->x - (int32_t)vl0->x;
-    dz = (int32_t)vr1->z - (int32_t)vl0->z;
-
-    /* Cross product to determine side:
-     * cross = dx * (local_z - vl0->z) - dz * (local_x - vl0->x) */
-    {
-        int64_t cross = (int64_t)dx * (int64_t)(local_z - (int32_t)vl0->z)
-                       - (int64_t)dz * (int64_t)(local_x - (int32_t)vl0->x);
-        return (cross > 0) ? 1 : 0;
-    }
+    TD5_StripVertex *vli  = vertex_at(vl0_idx);
+    TD5_StripVertex *vri1 = vertex_at(vr1_idx);
+    int32_t dx = (int32_t)vri1->x - (int32_t)vli->x;
+    int32_t dz = (int32_t)vri1->z - (int32_t)vli->z;
+    return (int64_t)dx * (int64_t)(local_z - (int32_t)vli->z)
+         - (int64_t)dz * (int64_t)(local_x - (int32_t)vli->x);
 }
 
 /**
  * Compute barycentric height from a triangle defined by 3 vertices.
- * Uses plane equation: height = va.y + ((px - va.x)*nx + (pz - va.z)*nz) / ny
+ * Port of ComputeTrackTriangleBarycentricsWithNormal @ 0x00445A70.
+ *
+ * Uses a higher-precision (>>4) int32 normal for the plane solve and
+ * a separate (>>12) int16 normal for the output. The int32-path for
+ * the plane solve preserves more bits than the original's int16-
+ * truncated normal would — empirically this stays closer to the
+ * original's output on inclined spans (tested on Honolulu full-race).
+ * An attempt to match the original's int16 truncation exactly regressed
+ * 5/6 slots on Honolulu — likely the original's ConvertFloatVec3-
+ * ToShortAnglesB uses FPU/saturation semantics we haven't yet decoded.
+ *
+ * Degenerate handling: `if (ny == 0) ny = 1;` — matches the original's
+ * saturate-and-divide rather than skipping the plane solve. Previous
+ * `|ny|<16 -> return va.y` fallback was too eager and flattened tilted
+ * triangles the original would sample.
  *
  * Returns height in 24.8 fixed-point.
+ * [CONFIRMED @ 0x00445A70 for the formula; precision is a deviation]
  */
 static int32_t triangle_height(int va_idx, int vb_idx, int vc_idx,
                                 int32_t origin_x, int32_t origin_y, int32_t origin_z,
@@ -2325,7 +2340,6 @@ static int32_t triangle_height(int va_idx, int vb_idx, int vc_idx,
     vb = vertex_at(vb_idx);
     vc = vertex_at(vc_idx);
 
-    /* Edge vectors from A to B and A to C */
     e1x = (int32_t)vb->x - (int32_t)va->x;
     e1y = (int32_t)vb->y - (int32_t)va->y;
     e1z = (int32_t)vb->z - (int32_t)va->z;
@@ -2334,103 +2348,144 @@ static int32_t triangle_height(int va_idx, int vb_idx, int vc_idx,
     e2y = (int32_t)vc->y - (int32_t)va->y;
     e2z = (int32_t)vc->z - (int32_t)va->z;
 
-    /* Cross product -> surface normal (int64 to prevent overflow from
-     * int16 edge vectors: e.g., 30000 * 30000 = 900M > INT32_MAX) */
+    /* Cross product at >>4 precision — int32, no truncation. Used for
+     * the plane solve (division with dx/dz gives correct plane slope). */
     nx = (int32_t)(((int64_t)e1y * e2z - (int64_t)e1z * e2y) >> 4);
     ny = (int32_t)(((int64_t)e1z * e2x - (int64_t)e1x * e2z) >> 4);
     nz = (int32_t)(((int64_t)e1x * e2y - (int64_t)e1y * e2x) >> 4);
 
-    /* If ny is too small, the triangle is nearly vertical — the plane
-     * equation would produce an enormous height. Return the vertex Y
-     * directly as the best available estimate. */
-    if (ny > -16 && ny < 16) {
-        return (int32_t)va->y;
-    }
+    /* Degenerate: if the truncated int16 normal's Y would be zero,
+     * the original sets it to 1 and divides. Check against the ny
+     * range the int16 cast would zero (|ny_>>12| < 1 == |ny_>>4| < 256).
+     * Below this threshold we saturate to match. */
+    if (ny > -256 && ny < 256)
+        ny = (ny >= 0) ? 256 : -256;
 
-    /* Position relative to vertex A in span-local coordinates */
+    /* Plane equation. Algebraically equivalent to the original's
+     *   y = va.y + ((va.x - local.x)*nx + (va.z - local.z)*nz)/ny
+     * once signs are distributed across dx/dz. */
     dx = (pos_x >> 8) - origin_x - (int32_t)va->x;
     dz = (pos_z >> 8) - origin_z - (int32_t)va->z;
 
-    /* Plane equation: y = va.y - (dx * nx + dz * nz) / ny
-     * Returns height in integer world units (same scale as vertex Y). */
-    height = (int32_t)va->y - (int32_t)(((int64_t)dx * nx + (int64_t)dz * nz) / ny);
+    height = (int32_t)va->y
+           - (int32_t)(((int64_t)dx * nx + (int64_t)dz * nz) / ny);
 
-    /* Output normal if requested (normalized to int16 range) */
+    /* Output normal at >>12 int16 precision — matches the original's
+     * ConvertFloatVec3ToShortAnglesB consumer interface. */
     if (out_normal) {
-        /* Re-compute normal with higher precision shift for normal output */
-        int32_t hnx = (e1y * e2z - e1z * e2y) >> 12;
-        int32_t hny = (e1z * e2x - e1x * e2z) >> 12;
-        int32_t hnz = (e1x * e2y - e1y * e2x) >> 12;
+        int32_t hnx = (int32_t)(((int64_t)e1y * e2z - (int64_t)e1z * e2y) >> 12);
+        int32_t hny = (int32_t)(((int64_t)e1z * e2x - (int64_t)e1x * e2z) >> 12);
+        int32_t hnz = (int32_t)(((int64_t)e1x * e2y - (int64_t)e1y * e2x) >> 12);
         if (hny == 0) hny = 1;
-
-        /* Store as int16 normalized components */
-        out_normal[0] = (int16_t)(hnx);
-        out_normal[1] = (int16_t)(hny);
-        out_normal[2] = (int16_t)(hnz);
+        out_normal[0] = (int16_t)hnx;
+        out_normal[1] = (int16_t)hny;
+        out_normal[2] = (int16_t)hnz;
     }
 
-    /* Return height in 24.8 fixed-point */
     return (origin_y + height) << 8;
 }
 
+/**
+ * Literal port of ComputeActorTrackContactNormalExtended @ 0x004457E0.
+ *
+ * Three-way dispatch on sub_lane position within the span's lane range:
+ *   sub_lane == 0               -> LEFT EDGE
+ *   sub_lane == lane_count - 1  -> RIGHT EDGE
+ *   otherwise                   -> INTERIOR
+ *
+ * Within each branch, per-type rules select which 3 quad vertices form
+ * the triangle passed to ComputeTrackTriangleBarycentricsWithNormal.
+ * Triangle sets come from verified Ghidra transcription of 0x004457E0.
+ *
+ * span_type 0 is a no-op at the edges (the original returns without
+ * writing *out_y). For the port we return `origin_y << 8` so the caller
+ * still gets a sensible-ish value, and we zero out_normal to preserve
+ * the "default flat normal" assumption callers rely on.
+ * [CONFIRMED @ 0x004457E0]
+ */
 static int32_t probe_span_lane_height(const TD5_StripSpan *sp, int sub_lane,
                                        int32_t world_x, int32_t world_z,
                                        int16_t *out_normal)
 {
     int32_t local_x, local_z;
-    int half;
     int vl0, vl1, vr0, vr1;
     int va, vb, vc;
     int max_lane;
+    int type;
+    int64_t cross;
 
     if (!sp)
         return 0;
 
+    type = sp->span_type;
     max_lane = span_lane_count(sp) - 1;
-    if (max_lane < 0)
-        max_lane = 0;
-    if (sub_lane < 0)
-        sub_lane = 0;
-    if (sub_lane > max_lane)
-        sub_lane = max_lane;
+    if (max_lane < 0) max_lane = 0;
+    if (sub_lane < 0) sub_lane = 0;
+    if (sub_lane > max_lane) sub_lane = max_lane;
 
     get_quad_vertices(sp, sub_lane, &vl0, &vl1, &vr0, &vr1);
 
     local_x = (world_x >> 8) - sp->origin_x;
     local_z = (world_z >> 8) - sp->origin_z;
 
-    switch (sp->span_type) {
-    case 1: case 2: case 5:
-    case 8: case 9: case 10: case 11:
-        half = classify_triangle_half(sp, sub_lane, local_x, local_z);
-        if (half == 0) {
-            va = vl0; vb = vl1; vc = vr0;
-        } else {
-            va = vl1; vb = vr1; vc = vr0;
-        }
-        break;
+    if (sub_lane == 0) {
+        /* LEFT EDGE — table 3, rows for sub_lane==0 */
+        switch (type) {
+        case 1: case 2: case 5:
+        case 8: case 9: case 10: case 11:
+            cross = diagonal_cross(vl0, vr1, local_x, local_z);
+            if (cross > 0) { va = vl0; vb = vr1; vc = vl1; }
+            else           { va = vl0; vb = vr0; vc = vr1; }
+            break;
 
-    case 3: case 4:
-        half = classify_triangle_half(sp, sub_lane, local_x, local_z);
-        if (half == 0) {
-            va = vl0; vb = vl1; vc = vr1;
-        } else {
-            va = vl0; vb = vr1; vc = vr0;
-        }
-        break;
+        case 3: case 4:
+            /* Unconditional (li+1, ri, ri+1). [CONFIRMED @ 0x004458f7] */
+            va = vl1; vb = vr0; vc = vr1;
+            break;
 
-    case 6: case 7:
-        half = classify_triangle_half(sp, sub_lane, local_x, local_z);
-        if (half == 0) {
-            va = vr0; vb = vr1; vc = vl0;
-        } else {
-            va = vr1; vb = vl1; vc = vl0;
-        }
-        break;
+        case 6: case 7:
+            /* Unconditional (li, ri+1, li+1). [CONFIRMED @ 0x004459e8] */
+            va = vl0; vb = vr1; vc = vl1;
+            break;
 
-    default:
-        va = vl0; vb = vl1; vc = vr0;
-        break;
+        case 0:
+        default:
+            /* Original returns without writing — no triangle pick. */
+            if (out_normal) { out_normal[0] = 0; out_normal[1] = 4096; out_normal[2] = 0; }
+            return (int32_t)sp->origin_y << 8;
+        }
+    } else if (sub_lane == max_lane) {
+        /* RIGHT EDGE — table 3, rows for sub_lane==lane_count-1 */
+        switch (type) {
+        case 1: case 3: case 6:
+        case 8: case 9: case 10: case 11:
+            cross = diagonal_cross(vl0, vr1, local_x, local_z);
+            if (cross > 0) { va = vl0; vb = vr1; vc = vl1; }
+            else           { va = vl0; vb = vr0; vc = vr1; }
+            break;
+
+        case 2: case 4:
+            /* Unconditional (li, ri, ri+1). [CONFIRMED @ 0x004459f9] */
+            va = vl0; vb = vr0; vc = vr1;
+            break;
+
+        case 5: case 7:
+            /* Unconditional (li, ri, li+1). [CONFIRMED @ 0x0044598c] */
+            va = vl0; vb = vr0; vc = vl1;
+            break;
+
+        case 0:
+        default:
+            if (out_normal) { out_normal[0] = 0; out_normal[1] = 4096; out_normal[2] = 0; }
+            return (int32_t)sp->origin_y << 8;
+        }
+    } else {
+        /* INTERIOR — single unconditional path, span_type NOT consulted.
+         * Applies to ALL types including 0.
+         * [CONFIRMED @ 0x0044599b..0x004459e6] */
+        cross = diagonal_cross(vl0, vr1, local_x, local_z);
+        if (cross > 0) { va = vl0; vb = vr1; vc = vl1; }
+        else           { va = vl0; vb = vr0; vc = vr1; }
     }
 
     return triangle_height(va, vb, vc,
