@@ -1758,17 +1758,26 @@ int td5_game_run_race_frame(void) {
             tick_race_countdown();
             g_td5.sim_time_accumulator -= TD5_TICK_ACCUMULATOR_ONE;
             ticks_this_frame++;
-            /* Counter gated on countdown fully expired (gate==0), matching
-             * original check at 0x42BAA1. During active countdown the gate
-             * is non-zero and the counter stays at 0; on the clearing tick
-             * the gate becomes 0 and the counter increments to 1 with a
-             * paused-physics snapshot already in place. */
+            /* Trace BEFORE counter++: Frida emits post_progress on
+             * UpdateRaceCameraTransitionTimer.onEnter @ 0x42BA3A, which
+             * fires BEFORE the counter bump at 0x42BAA1. Matching that
+             * order means the post_progress row for the clearing sub-tick
+             * carries counter=0 (paused physics snapshot, sim_tick=0),
+             * and counter=1 first appears on the NEXT sub-tick — which
+             * has already run non-paused physics once. That's how the
+             * original binary's sim_tick=1 post_progress row has
+             * non-zero AI velocities. Previously the port bumped the
+             * counter on the clearing sub-tick BEFORE emitting, so its
+             * sim_tick=1 post_progress captured the paused-physics state
+             * instead. [RE basis: 0x42B7C7 UpdateRaceActors →
+             * 0x42BA0C ResolveVehicleContacts → 0x42BA3A
+             * UpdateRaceCameraTransitionTimer onEnter (trace emit) →
+             * 0x42BAA1 counter++] */
+            td5_game_trace_stage(g_td5.paused ? "countdown" : "post_progress",
+                                 ticks_this_frame);
             if (!g_td5.paused) {
                 g_td5.simulation_tick_counter++;
-                TD5_LOG_I(LOG_TAG, "Race countdown cleared on sub-tick — counter=1, sim_tick=1 snapshot is paused physics (matches original 0x42BAA1)");
-                td5_game_trace_stage("post_progress", ticks_this_frame);
-            } else {
-                td5_game_trace_stage("countdown", ticks_this_frame);
+                TD5_LOG_I(LOG_TAG, "Race countdown cleared on sub-tick — counter now 1, next sub-tick runs unpaused physics");
             }
             continue;
         }
@@ -1790,11 +1799,32 @@ int td5_game_run_race_frame(void) {
          * AI then physics each tick, so encounter_steering_cmd (+0x33E) is
          * written before td5_physics_update_ai @ 0x00404EC0 reads it
          * (throttle gate > 0x20 at 0x404EF4). */
-        td5_game_trace_stage("pre_ai", ticks_this_frame);
+        /* Trace-stage labels match the Frida reference:
+         *   pre_physics = UpdateRaceActors.onEnter      @ 0x42B7C7
+         *   post_physics = ResolveVehicleContacts.onEnter @ 0x42BA0C
+         *     (after per-actor dynamics, before inter-actor contact resolve)
+         *   post_ai = ResolveVehicleContacts.onLeave    @ 0x42BA0C
+         *     (after dynamics + contact resolve, the first point the
+         *      original binary's per-tick post-physics state is stable)
+         *
+         * Port's td5_physics_tick already runs per-actor dynamics followed
+         * by inter-actor contact resolution in one call — there is no
+         * split point to emit a distinct post_physics. For now post_physics
+         * and post_ai emit at the same point (after td5_physics_tick),
+         * both carrying the same actor state; the comparator keys by
+         * (sim_tick, stage, kind, id) so having both labels means /diff-race
+         * with either --stage post_ai or --stage post_physics lines up
+         * with the reference.
+         *
+         * Previously port emitted "post_ai" BEFORE physics, which made
+         * /diff-race --stage post_ai (or the default post_progress via
+         * upstream propagation) show all AI slots with vel=0 at sim_tick=1
+         * while the reference had the full post-tick state. */
+        td5_game_trace_stage("pre_physics", ticks_this_frame);
         td5_ai_tick();
-        td5_game_trace_stage("post_ai", ticks_this_frame);
         td5_physics_tick();
         td5_game_trace_stage("post_physics", ticks_this_frame);
+        td5_game_trace_stage("post_ai", ticks_this_frame);
 
         /* Wanted mode: decay target-tracker marker per sub-tick
          * (DecayTrackedActorMarkerIntensity @ 0x43D7E0) */
@@ -1876,9 +1906,12 @@ int td5_game_run_race_frame(void) {
 
         /* --- Consume one tick --- */
         g_td5.sim_time_accumulator -= TD5_TICK_ACCUMULATOR_ONE;
-        g_td5.simulation_tick_counter++;
         ticks_this_frame++;
+        /* post_progress emits with pre-increment counter — matches Frida's
+         * UpdateRaceCameraTransitionTimer.onEnter @ 0x42BA3A, which fires
+         * BEFORE the counter bump at 0x42BAA1. */
         td5_game_trace_stage("post_progress", ticks_this_frame);
+        g_td5.simulation_tick_counter++;
     }
 
     /* Compute sub-tick interpolation fraction for camera/VFX rendering.
