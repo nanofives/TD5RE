@@ -1188,23 +1188,30 @@ static inline void vertex_world_pos(const TD5_StripSpan *sp,
 }
 
 /**
- * Per-span-type vertex index offsets from original binary (0x474E40/41).
- * Junction span types shift one side's vertex base by -1.
- * Indexed by span_type: [left_offset, right_offset].
+ * Per-span-type vertex index offsets from original binary.
+ * [CONFIRMED @ 0x00473c68] raw DAT_00473c68 int32[8][2] table values.
+ * Column 0 is used by SampleTrackTargetPoint (0x00434800) as the offset
+ * applied to left_vertex_index to pick the interpolation "right" vertex.
+ * Prior port values diverged at types 2, 4, 5, 6, 7 — observed effect was
+ * that AI look-ahead target at slot 1 spawn on Moscow gave dx/dz only
+ * ~5000 units forward instead of ~80000 (15× short). Table alone only
+ * fixes this if the actor's target-span type hits one of the corrected
+ * rows; the primary spin-out cause is the missing junction-remap walk
+ * around td5_ai.c:1411 (NOT yet implemented).
  */
 static const int8_t k_span_vertex_offsets[12][2] = {
-    /* type  0 */ {  0,  0 },  /* sentinel start */
-    /* type  1 */ {  0,  0 },  /* normal */
-    /* type  2 */ {  0,  0 },  /* normal */
-    /* type  3 */ { -1,  0 },  /* junction (left shift) */
-    /* type  4 */ { -1,  0 },  /* junction (left shift) */
-    /* type  5 */ {  0,  0 },  /* normal variant */
-    /* type  6 */ {  0, -1 },  /* junction (right shift) */
-    /* type  7 */ {  0, -1 },  /* junction (right shift) */
-    /* type  8 */ {  0,  0 },  /* forward junction */
-    /* type  9 */ {  0,  0 },  /* sentinel wrap-start */
-    /* type 10 */ {  0,  0 },  /* sentinel wrap-end */
-    /* type 11 */ {  0,  0 },  /* reverse junction */
+    /* type  0 */ {  0,  0 },
+    /* type  1 */ {  0,  0 },
+    /* type  2 */ { -1,  0 },
+    /* type  3 */ { -1,  0 },
+    /* type  4 */ { -2,  0 },
+    /* type  5 */ { -1,  0 },
+    /* type  6 */ { -1, -1 },
+    /* type  7 */ { -2, -1 },
+    /* type  8 */ {  0,  0 },
+    /* type  9 */ {  0,  0 },
+    /* type 10 */ {  0,  0 },
+    /* type 11 */ {  0,  0 },
 };
 
 /**

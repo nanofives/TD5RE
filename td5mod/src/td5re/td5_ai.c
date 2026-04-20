@@ -1339,6 +1339,18 @@ void td5_ai_update_track_behavior(int slot) {
     if (g_td5.time_trial_enabled)
         return;
 
+    /* AI probe (debug-level): state matching frida_ai_probe.js for side-by-side
+     * diff. Keep at TD5_LOG_D to avoid flooding INFO logs. Match fields with
+     * tools/frida_ai_probe.js UAB onLeave sample. */
+    TD5_LOG_D(LOG_TAG, "ai_probe: slot=%d yaw=%d steer=%d wx=%d wz=%d lspd=%d ld=%d rd=%d",
+              slot,
+              ACTOR_I32(actor, ACTOR_YAW_ACCUM),
+              ACTOR_I32(actor, ACTOR_STEERING_CMD),
+              ACTOR_I32(actor, 0x1FC),
+              ACTOR_I32(actor, 0x204),
+              ACTOR_I32(actor, 0x314),
+              rs[RS_LEFT_DEVIATION], rs[RS_RIGHT_DEVIATION]);
+
     /* No countdown pre-seed: the original at 0x00434FE0 has NO countdown
      * gate and NO paused-branch write of encounter_steering_cmd (+0x33E) /
      * brake_flag (+0x36D) — the cascade below reaches
@@ -1456,6 +1468,11 @@ void td5_ai_update_track_behavior(int slot) {
                     int32_t actor_z = ACTOR_I32(actor, ACTOR_WORLD_POS_Z);
                     int32_t dx = (target_x - actor_x) >> 8;
                     int32_t dz = (target_z - actor_z) >> 8;
+
+                    /* target_probe (debug-level): AI look-ahead target per tick. */
+                    TD5_LOG_D(LOG_TAG, "target_probe: slot=%d span=%d tspan=%d rb=%d tx=%d tz=%d dx=%d dz=%d lat_bias=%d",
+                              slot, (int)span, target_span, route_byte,
+                              target_x, target_z, dx, dz, lateral_bias);
 
                     /* (d) Compute target angle using atan2 equivalent
                      * [CONFIRMED @ 0x4352CB-0x435336: no +0x800 on target]
