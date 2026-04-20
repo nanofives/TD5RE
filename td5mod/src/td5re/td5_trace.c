@@ -217,13 +217,18 @@ void td5_trace_write_actor(uint32_t frame_index, uint32_t sim_tick, const char *
         return;
     }
 
+    /* The 7 metric_* schema columns are port-only bookkeeping — the original
+     * binary has no equivalent actor fields, and tools/frida_race_trace.js
+     * writes literal "0,0,0,0,0,0,0," for them (line 344-345). Emitting
+     * zeros here keeps the comparator from reporting spurious divergences
+     * on columns that have no reference data. */
     td5_trace_write_prefix(frame_index, sim_tick, stage, "actor", state->slot);
     fprintf(s_trace_fp,
             "%d,0,0,0,0,0,0.000000,0.000000,0.000000,0,0,0,"
             "%d,%d,%d,%d,"
             "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
             "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%u,%u,%u,%u,%u,%u,"
-            "%d,%u,%d,%d,%d,%d,%d,"
+            "0,0,0,0,0,0,0,"
             "0,0,0,0.000000,0.000000,0.000000\n",
             (int)g_td5.game_state,
             state->slot_state,
@@ -259,14 +264,36 @@ void td5_trace_write_actor(uint32_t frame_index, uint32_t sim_tick, const char *
             (unsigned int)state->vehicle_mode,
             (unsigned int)state->track_contact_flag,
             (unsigned int)state->wheel_contact_mask,
-            (unsigned int)state->race_position,
-            state->metric_checkpoint_index,
-            (unsigned int)state->metric_checkpoint_mask,
-            state->metric_normalized_span,
-            state->metric_timer_ticks,
-            state->metric_display_position,
-            state->metric_speed_bonus,
-            state->metric_top_speed);
+            (unsigned int)state->race_position);
+}
+
+void td5_trace_write_call(uint32_t sim_tick, const char *fn_name,
+                          int n_args, const int32_t *args,
+                          int has_ret, int32_t ret)
+{
+    if (!td5_trace_is_enabled() || !s_calls_fp || !fn_name) {
+        return;
+    }
+    if (n_args < 0) n_args = 0;
+    if (n_args > TD5_TRACE_CALL_MAX_ARGS) n_args = TD5_TRACE_CALL_MAX_ARGS;
+
+    uint32_t call_idx = td5_trace_next_call_idx_internal(fn_name, sim_tick);
+
+    int32_t padded[TD5_TRACE_CALL_MAX_ARGS];
+    for (int i = 0; i < TD5_TRACE_CALL_MAX_ARGS; ++i) {
+        padded[i] = (i < n_args && args) ? args[i] : 0;
+    }
+
+    fprintf(s_calls_fp,
+            "%u,%s,%u,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d\n",
+            (unsigned int)sim_tick,
+            fn_name,
+            (unsigned int)call_idx,
+            n_args,
+            (int)padded[0], (int)padded[1], (int)padded[2], (int)padded[3],
+            (int)padded[4], (int)padded[5], (int)padded[6], (int)padded[7],
+            has_ret ? 1 : 0,
+            (int)(has_ret ? ret : 0));
 }
 
 void td5_trace_write_call(uint32_t sim_tick, const char *fn_name,

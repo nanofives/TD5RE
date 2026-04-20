@@ -808,10 +808,14 @@ int td5_game_init_race_session(void) {
     TD5_LOG_I(LOG_TAG, "InitRace step 9/19: sky mesh/static resources prepared");
 
     /* ---- Step 10: Initialize race vehicle runtime ---- */
-    /* Initialize per-actor race metrics */
+    /* Initialize per-actor race metrics.
+     * s_metrics[i].display_position stays 0 (from memset) — original's
+     * equivalent field is only written by UpdateRaceOrder @ 0x0042F5B0
+     * at sim_tick>=1, not at init. Only s_race_order[] seeds identity
+     * (that's the original's g_raceOrderTable, which IS initialized to
+     * 0..5 before first UpdateRaceOrder). */
     memset(s_metrics, 0, sizeof(s_metrics));
     for (int i = 0; i < TD5_MAX_RACER_SLOTS; i++) {
-        s_metrics[i].display_position = (int16_t)i;
         s_race_order[i] = (uint8_t)i;
     }
     TD5_LOG_I(LOG_TAG, "InitRace step 10/19: race metrics/runtime arrays reset");
@@ -1066,12 +1070,10 @@ int td5_game_init_race_session(void) {
                       sub_lane);
         }
 
-        /* Seed initial race_position from spawn order (original seeds at init) */
-        for (int s = 0; s < racer_count; s++) {
-            TD5_Actor *a = (TD5_Actor *)(s_actor_memory + (size_t)s * TD5_ACTOR_STRIDE);
-            a->race_position = (uint8_t)s;
-            a->prev_race_position = (uint8_t)s;
-        }
+        /* race_position (+0x383) stays 0 at init — original leaves it zero until
+         * UpdateRaceOrder @ 0x0042F5B0 writes it at sim_tick>=1 [CONFIRMED via
+         * research: only store to +0x383 is the indexed write in UpdateRaceOrder,
+         * preceded by the 0xE2-dword memset in InitializeRaceVehicleRuntime]. */
 
         TD5_LOG_I(LOG_TAG, "InitRace step 11/19: actors spawned and runtime bound count=%d",
                   spawn_count);

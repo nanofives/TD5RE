@@ -4744,7 +4744,7 @@ void td5_physics_init_vehicle_runtime(void)
         actor->surface_contact_flags = 0;
         actor->grip_reduction = 0xFF;
         actor->prev_race_position = 0;
-        actor->race_position = (uint8_t)slot;
+        actor->race_position = 0;  /* +0x383 stays 0 until UpdateRaceOrder writes at sim_tick>=1 [CONFIRMED @ 0x0042F5B0] */
         actor->max_gear_index = 6;
 
         /* --- Load wheel positions from car definition (cardef 0x40-0x5F) ---
