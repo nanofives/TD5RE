@@ -20,6 +20,7 @@
 #include "td5_physics.h"
 #include "td5_ai.h"
 #include "td5_platform.h"
+#include "td5_trace.h"
 #include "../../../re/include/td5_actor_struct.h"
 #include "td5re.h"
 #include <string.h>
@@ -77,16 +78,12 @@ int     g_track_type_mode       = 0;
 #define TRAFFIC_SLOT_BASE       6
 
 /**
- * Per-span-type vertex offset LUT (DAT_00474e40/41).
- * Index by span_type (0-11). Pairs: [left_offset, right_offset].
- * These control which vertices form the quad corners for each span type.
+ * Per-span-type vertex offset LUT — REMOVED 2026-04-20.
+ * The single source of truth is `k_span_vertex_offsets[12][2]` below
+ * (DAT_00474e40/41 verified). The prior s_vtx_offset_left/right pair
+ * held wrong values ({0,0,0,3,3,0,3,3,0,0,0,0} on the right) that
+ * didn't match the binary and were never read anyway.
  */
-static const int8_t s_vtx_offset_left[12] = {
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
-};
-static const int8_t s_vtx_offset_right[12] = {
-    0, 0, 0, 3, 3, 0, 3, 3, 0, 0, 0, 0
-};
 
 /**
  * Per-span-type edge mask LUT (DAT_00474e28/29).
@@ -1704,11 +1701,23 @@ static uint8_t compute_boundary_bits(int span_idx, int sub_lane,
     lane_count = span_lane_count(sp);
     if (lane_count < 1) lane_count = 1;
 
+    /* Apply per-span-type lane offset (DAT_00474e40 left / DAT_00474e41 right).
+     * Types 3,4 use left=-1; types 5,6 use right=-1. All others 0.
+     * Without this, junction-end-cap spans hit the wrong vertex pair and
+     * the cross tests fire false positives.
+     * [CONFIRMED @ 0x00444208-0x00444336, LUT verified at 0x00474e40] */
+    int left_off  = 0;
+    int right_off = 0;
+    if (sp->span_type >= 0 && sp->span_type < 12) {
+        left_off  = k_span_vertex_offsets[sp->span_type][0];
+        right_off = k_span_vertex_offsets[sp->span_type][1];
+    }
+
     /* Get the 4 corner vertices for this sub-lane */
-    vl0 = vertex_at(sp->left_vertex_index + sub_lane);
-    vl1 = vertex_at(sp->left_vertex_index + sub_lane + 1);
-    vr0 = vertex_at(sp->right_vertex_index + sub_lane);
-    vr1 = vertex_at(sp->right_vertex_index + sub_lane + 1);
+    vl0 = vertex_at(sp->left_vertex_index  + left_off  + sub_lane);
+    vl1 = vertex_at(sp->left_vertex_index  + left_off  + sub_lane + 1);
+    vr0 = vertex_at(sp->right_vertex_index + right_off + sub_lane);
+    vr1 = vertex_at(sp->right_vertex_index + right_off + sub_lane + 1);
 
     /* Convert to world-space XZ (24.8 fixed-point) */
     ox = sp->origin_x << 8;
@@ -1732,27 +1741,28 @@ static uint8_t compute_boundary_bits(int span_idx, int sub_lane,
     if (sub_lane >= lane_count - 1)
         edge_mask &= s_edge_mask_last[sp->span_type];
 
-    /* Test each edge. Cross product sign > 0 means outside. */
+    /* Test each edge. Cross product sign > 0 means outside.
+     * Bit-to-edge mapping verified at disasm level in 0x00444208..0x00444336:
+     *   0x01 FORWARD  = R0 -> L0  (near edge, traversed right-to-left)
+     *   0x02 RIGHT    = R1 -> R0  (right side, traversed far-to-near)
+     *   0x04 BACKWARD = L1 -> R1  (far edge, traversed left-to-right)
+     *   0x08 LEFT     = L0 -> L1  (left side, traversed near-to-far)
+     * Previously bits 0x01 and 0x04 had their edges swapped (port tested
+     * L1->R1 for forward and R0->L0 for backward), producing a false
+     * positive on every tick that made the walker drift monotonically
+     * forward to span max_sp-1 and clamp. */
 
-    /* Edge 0 (forward): left1 -> right1 (the "far" edge) */
-    if ((edge_mask & 0x01) && edge_cross(lx1, lz1, rx1, rz1, pos_x, pos_z) > 0)
-        result |= 0x01;
+    if ((edge_mask & 0x01) && edge_cross(rx0, rz0, lx0, lz0, pos_x, pos_z) > 0)
+        result |= 0x01;  /* FORWARD: R0 -> L0 */
 
-    /* Edge 1 (right): right1 -> right0 (far-right to near-right)
-     * Cross > 0 means P is to the +X side (outside right wall).
-     * Previously rx0→rx1 gave false positives for inside points. */
     if ((edge_mask & 0x02) && edge_cross(rx1, rz1, rx0, rz0, pos_x, pos_z) > 0)
-        result |= 0x02;
+        result |= 0x02;  /* RIGHT: R1 -> R0 */
 
-    /* Edge 2 (backward): right0 -> left0 (the "near" edge) */
-    if ((edge_mask & 0x04) && edge_cross(rx0, rz0, lx0, lz0, pos_x, pos_z) > 0)
-        result |= 0x04;
+    if ((edge_mask & 0x04) && edge_cross(lx1, lz1, rx1, rz1, pos_x, pos_z) > 0)
+        result |= 0x04;  /* BACKWARD: L1 -> R1 */
 
-    /* Edge 3 (left): left0 -> left1 (near-left to far-left)
-     * Cross > 0 means P is to the -X side (outside left wall).
-     * Previously lx1→lx0 gave false positives for inside points. */
     if ((edge_mask & 0x08) && edge_cross(lx0, lz0, lx1, lz1, pos_x, pos_z) > 0)
-        result |= 0x08;
+        result |= 0x08;  /* LEFT: L0 -> L1 */
 
     return result;
 }
@@ -2068,6 +2078,9 @@ static void update_position_recursive(int16_t *track_state, int32_t pos_x, int32
             track_state[2]++;
             if (track_state[2] > track_state[3])
                 track_state[3] = track_state[2];
+            /* Original appends -1 to sub_lane post-step.
+             * [CONFIRMED @ 0x004440F0 case 0x01: `cVar15 + ... + (-1)`] */
+            sub_lane -= 1;
             break;
 
         case 2: /* Right */
@@ -2083,6 +2096,7 @@ static void update_position_recursive(int16_t *track_state, int32_t pos_x, int32
             track_state[2]++;
             if (track_state[2] > track_state[3])
                 track_state[3] = track_state[2];
+            sub_lane -= 1;  /* -1 bias after forward step */
             new_span = resolve_neighbor(span_idx, &sub_lane, 0x02, pos_x, pos_z);
             span_idx = new_span;
             track_state[0] = (int16_t)new_span;
@@ -2093,6 +2107,9 @@ static void update_position_recursive(int16_t *track_state, int32_t pos_x, int32
             span_idx = new_span;
             track_state[0] = (int16_t)new_span;
             track_state[2]--;
+            /* Original appends +1 to sub_lane post-step.
+             * [CONFIRMED @ 0x004440F0 case 0x04: `cVar15 + ... + '\x01'`] */
+            sub_lane += 1;
             break;
 
         case 6: /* Right + Backward */
@@ -2103,6 +2120,7 @@ static void update_position_recursive(int16_t *track_state, int32_t pos_x, int32
             span_idx = new_span;
             track_state[0] = (int16_t)new_span;
             track_state[2]--;
+            sub_lane += 1;  /* +1 bias after backward step */
             break;
 
         case 8: /* Left */
@@ -2118,6 +2136,7 @@ static void update_position_recursive(int16_t *track_state, int32_t pos_x, int32
             track_state[2]++;
             if (track_state[2] > track_state[3])
                 track_state[3] = track_state[2];
+            sub_lane -= 1;  /* -1 bias after forward step */
             new_span = resolve_neighbor(span_idx, &sub_lane, 0x08, pos_x, pos_z);
             span_idx = new_span;
             track_state[0] = (int16_t)new_span;
@@ -2128,6 +2147,7 @@ static void update_position_recursive(int16_t *track_state, int32_t pos_x, int32
             span_idx = new_span;
             track_state[0] = (int16_t)new_span;
             track_state[2]--;
+            sub_lane += 1;  /* +1 bias after backward step */
             new_span = resolve_neighbor(span_idx, &sub_lane, 0x08, pos_x, pos_z);
             span_idx = new_span;
             track_state[0] = (int16_t)new_span;
@@ -2381,6 +2401,11 @@ static int32_t triangle_height(int va_idx, int vb_idx, int vc_idx,
         out_normal[1] = (int16_t)hny;
         out_normal[2] = (int16_t)hnz;
     }
+
+    TD5_TRACE_CALL_RET("triangle_bary", height,
+                       (int32_t)(int16_t)va_idx,
+                       (int32_t)(int16_t)vb_idx,
+                       (int32_t)(int16_t)vc_idx);
 
     return (origin_y + height) << 8;
 }
