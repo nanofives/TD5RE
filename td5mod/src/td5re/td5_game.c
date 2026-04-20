@@ -214,36 +214,86 @@ static int32_t s_levelinf_checkpoint_config;   /* +0x08 from LEVELINF.DAT */
 static int32_t s_levelinf_track_subvariant;  /* +0x54: 36 for race, -1 for cup */
 static int32_t s_levelinf_span_count;        /* +0x58: track ring length (redundant with STRIP.DAT) */
 
-/* Hardcoded checkpoint timing table extracted from binary at 0x46CBB0.
- * 26 records (track_index 0..25), each 12 uint16s = 24 bytes.
- * Pointer table at 0x46CF6C uses 1-based indexing; here we use 0-based. */
-static const uint16_t k_checkpoint_table[26][12] = {
-    {5,25659,  869,15360, 1511,11520, 2061,15360, 2618,10240, 3074,    0}, /* 0:DragStrip */
-    {5,17979,  826,11520, 1429, 5120, 1652, 7680, 1926,15360, 2516,    0}, /* 1:Jamaica */
-    {5,20539,  768,17920, 1379,16640, 2090,16640, 2776,11520, 3221,    0}, /* 2:HouseOfBez */
-    {5,17979,  623,12800, 1175,15360, 1751, 8960, 2181, 8960, 2552,    0}, /* 3:Newcastle */
-    {5,17979,  747, 7680, 1006,12800, 1533,14080, 1978,17920, 2754,    0}, /* 4:Hawaii */
-    {5,16699,  609,10240, 1029,10240, 1560,12800, 2140,16640, 2567,    0}, /* 5:Italy */
-    {5,17979,  556,17920, 1113,14080, 1663,14080, 2305,23040, 3060,    0}, /* 6:Jordan */
-    {5,20539,  715, 8960,  989, 8960, 1212,14080, 1815,12800, 2508,    0}, /* 7:Cheddar */
-    {5,15419,  585,19200, 1271,20480, 1982,17920, 2593,17920, 3282,    0}, /* 8:Moscow */
-    {5,15419,  466, 8960,  896,12800, 1472,14080, 2024,12800, 2528,    0}, /* 9:BlueRidge */
-    {5,21819,  901,10240, 1346,11520, 1873, 7680, 2132,14080, 2755,    0}, /*10:Scotland */
-    {5,15419,  519,15360, 1099,11520, 1630, 7680, 2050, 8960, 2523,    0}, /*11:Tokyo */
-    {5,17979,  651,14080, 1128,12800, 1599,14080, 2115,11520, 2574,    0}, /*12:Sydney */
-    {5,10299,  486,10240, 1057,11520, 1655, 8960, 2071,11520, 2658,    0}, /*13:Honolulu */
-    {5,17979,  660,15360, 1297,14080, 1840,10240, 2193,12800, 2656,    0}, /*14:Munich */
-    {5,23099,  629,10240, 1182,11520, 1608,12800, 2211,14080, 2644,    0}, /*15:Washington */
-    {5,17979,  685,16640, 1446,11520, 1842,12800, 2281,17920, 2988,    0}, /*16:Kyoto */
-    {5,16699,  606,15360, 1122,12800, 1593,16640, 2070,15360, 2610,    0}, /*17:Bern */
-    {5,15419,  665,10240, 1081,12800, 1679,11520, 2250,11520, 2635,    0}, /*18:SanFrancisco */
-    {5,17979,  583,11520,  936,14080, 1479,17920, 2116,14080, 2657,    0}, /*19:Keswick */
-    {5,16699,  544,19200, 1147,11520, 1573,14080, 2126,14080, 2684,    0}, /*20:Cup21 */
-    {5,23099,  827,12800, 1266,12800, 1662,19200, 2423,15360, 2989,    0}, /*21:Cup22 */
-    {5,17979,  738, 7680, 1116,14080, 1707,10240, 2094,11520, 2649,    0}, /*22:Cup23 */
-    {5,17979,  694, 8960, 1081,16640, 1672, 8960, 2050,17920, 2668,    0}, /*23:Cup24 */
-    {5,30779,  106,10240, 1511,11520, 2061,12800, 2618,14080, 3120,    0}, /*24:Cup25 */
-    {5,30779,   25,10240, 1511,11520, 2061,12800, 2618,14080, 3120,    0}, /*25:Cup26 */
+/* Hardcoded checkpoint timing table extracted from DAT_0046CBB0.
+ * 40 records, each 12 uint16s = 24 bytes (record_count × 0x18 = 0x3C0 bytes,
+ * table ends at 0x0046CF70 which is the pointer-array base DAT_0046CF6C+4).
+ *
+ * Indexing: the original binary routes schedule_index → pool_id (via
+ * gScheduleToPoolIndex @ 0x00466894) → g_trackPoolIndex (via
+ * gTrackPoolSpanCountTable @ 0x00466D50) → record_idx = g_trackPoolIndex - 1.
+ *
+ * k_schedule_to_checkpoint_index below collapses that two-stage chain for
+ * the 19 UI schedule slots (schedule 19 = drag race, hardcoded). Comments
+ * label each record with the schedule slot that actually reaches it, not
+ * with the sequential record order. */
+static const uint16_t k_checkpoint_table[40][12] = {
+    {5,25659,  869,15360, 1511,11520, 2061,15360, 2618,10240, 3074,    0}, /* 0  ← sched 10 Keswick */
+    {5,25659,  826,11520, 1429, 5120, 1652, 7680, 1926,15360, 2516,    0}, /* 1  ← sched 11 SanFrancisco */
+    {5,20539,  768,17920, 1379,16640, 2090,16640, 2776,11520, 3221,    0}, /* 2  ← sched 12 Bern */
+    {5,17979,  623,12800, 1175,15360, 1751, 8960, 2181, 8960, 2552,    0}, /* 3  ← sched 13 Kyoto */
+    {5,17979,  747, 7680, 1006,12800, 1533,14080, 1978,17920, 2754,    0}, /* 4  ← sched 14 Washington */
+    {5,16699,  609,10240, 1029,10240, 1560,12800, 2140,16640, 2567,    0}, /* 5  ← sched 15 Munich */
+    {5,17979,  556,17920, 1113,14080, 1663,14080, 2305,23040, 3060,    0}, /* 6 */
+    {5,20539,  715, 8960,  989, 8960, 1212,14080, 1815,12800, 2508,    0}, /* 7 */
+    {5,15419,  585,19200, 1271,20480, 1982,17920, 2593,17920, 3282,    0}, /* 8 */
+    {5,15419,  466, 8960,  896,12800, 1472,14080, 2024,12800, 2528,    0}, /* 9 */
+    {5,21819,  901,10240, 1346,11520, 1873, 7680, 2132,14080, 2755,    0}, /*10 */
+    {5,15419,  519,15360, 1099,11520, 1630, 7680, 2050, 8960, 2523,    0}, /*11 */
+    {5,17979,  651,14080, 1128,12800, 1599,14080, 2115,11520, 2574,    0}, /*12 ← sched  8 Honolulu */
+    {5,10299,  486,10240, 1057,11520, 1655, 8960, 2071,11520, 2658,    0}, /*13 ← sched  2 Sydney */
+    {5,17979,  660,15360, 1297,14080, 1840,10240, 2193,12800, 2656,    0}, /*14 ← sched  9 Tokyo */
+    {5,23099,  629,10240, 1182,11520, 1608,12800, 2211,14080, 2644,    0}, /*15 ← sched  1 Scotland */
+    {5,17979,  685,16640, 1446,11520, 1842,12800, 2281,17920, 2988,    0}, /*16 ← sched  3 BlueRidge */
+    {5,16699,  606,15360, 1122,12800, 1593,16640, 2070,15360, 2610,    0}, /*17 */
+    {5,15419,  665,10240, 1081,12800, 1679,11520, 2250,11520, 2635,    0}, /*18 */
+    {5,17979,  583,11520,  936,14080, 1479,17920, 2116,14080, 2657,    0}, /*19 */
+    {5,16699,  544,19200, 1147,11520, 1573,14080, 2126,14080, 2684,    0}, /*20 */
+    {5,23099,  827,12800, 1266,12800, 1662,19200, 2423,15360, 2989,    0}, /*21 */
+    {5,17979,  738, 7680, 1116,14080, 1707,10240, 2094,11520, 2649,    0}, /*22 ← sched  0 Moscow */
+    {5,17979,  694, 8960, 1081,16640, 1672, 8960, 2050,17920, 2668,    0}, /*23 */
+    {5,30779,  106,10240, 1511,11520, 2061,12800, 2618,14080, 3120,    0}, /*24 ← sched 16 Cheddar */
+    {5,30779,   25,10240, 1511,11520, 2061,12800, 2618,14080, 3120,    0}, /*25 ← sched  4 Jordan */
+    {5,30779,  119,10240, 1511,11520, 2061,12800, 2618,14080, 3120,    0}, /*26 ← sched  7 Italy */
+    {5,30779,   56,10240, 1511,11520, 2061,12800, 2618,14080, 3120,    0}, /*27 ← sched  6 Hawaii */
+    {5,30779,  116,10240, 1511,11520, 2061,12800, 2618,14080, 3120,    0}, /*28 ← sched  5 Newcastle */
+    {1,30779,  204,    0,    0,    0,    0,    0,    0,    0,    0,    0}, /*29 */
+    {1,30779,  204,    0,    0,    0,    0,    0,    0,    0,    0,    0}, /*30 */
+    {5,30779,  119,10240, 1511,11520, 2061,12800, 2618,14080, 3120,    0}, /*31 */
+    {5,30779,   56,10240, 1511,11520, 2061,12800, 2618,14080, 3120,    0}, /*32 */
+    {5,30779,  119,10240, 1511,11520, 2061,12800, 2618,14080, 3120,    0}, /*33 */
+    {5,30779,   56,10240, 1511,11520, 2061,12800, 2618,14080, 3120,    0}, /*34 */
+    {5,30779,  116,10240, 1511,11520, 2061,12800, 2618,14080, 3120,    0}, /*35 */
+    {5,30779,   47,10240, 1511,11520, 2061,12800, 2618,14080, 3120,    0}, /*36 ← sched 18 HouseOfBez */
+    {5,30779,   47,10240, 1511,11520, 2061,12800, 2618,14080, 3120,    0}, /*37 */
+    {5,30779,   35,10240, 1511,11520, 2061,12800, 2618,14080, 3120,    0}, /*38 ← sched 17 Jamaica */
+    {5,30779,   35,10240, 1511,11520, 2061,12800, 2618,14080, 3120,    0}, /*39 */
+};
+
+/* schedule_index → checkpoint record index.
+ * Derived from the original's two-stage lookup:
+ *   pool_id = gScheduleToPoolIndex[schedule_index]
+ *   record_idx = gTrackPoolSpanCountTable[pool_id] - 1
+ * 19 UI schedule slots (slot 19 is drag race; hardcoded elsewhere). */
+static const uint8_t k_schedule_to_checkpoint_index[19] = {
+    22, /* 0  Moscow */
+    15, /* 1  Scotland */
+    13, /* 2  Sydney */
+    16, /* 3  BlueRidge */
+    25, /* 4  Jordan */
+    28, /* 5  Newcastle */
+    27, /* 6  Hawaii */
+    26, /* 7  Italy */
+    12, /* 8  Honolulu */
+    14, /* 9  Tokyo */
+     0, /*10  Keswick */
+     1, /*11  SanFrancisco */
+     2, /*12  Bern */
+     3, /*13  Kyoto */
+     4, /*14  Washington */
+     5, /*15  Munich */
+    24, /*16  Cheddar */
+    38, /*17  Jamaica */
+    36, /*18  HouseOfBez */
 };
 
 /* Benchmark state */
@@ -1162,11 +1212,16 @@ int td5_game_init_race_session(void) {
     /* ---- Step 20: Load checkpoint timing from hardcoded table (0x46CBB0) ---- */
     {
         int tidx = g_td5.track_index;
+        int record_idx = -1;
         memset(&s_active_checkpoint, 0, sizeof(s_active_checkpoint));
-        if (tidx >= 0 && tidx < 26) {
-            memcpy(&s_active_checkpoint, k_checkpoint_table[tidx], 24);
-            TD5_LOG_I(LOG_TAG, "Checkpoint record loaded: track=%d count=%d initial_time=%u",
-                      tidx, (int)s_active_checkpoint.checkpoint_count,
+        if (tidx >= 0 && tidx < (int)(sizeof(k_schedule_to_checkpoint_index) /
+                                      sizeof(k_schedule_to_checkpoint_index[0]))) {
+            record_idx = k_schedule_to_checkpoint_index[tidx];
+        }
+        if (record_idx >= 0 && record_idx < 40) {
+            memcpy(&s_active_checkpoint, k_checkpoint_table[record_idx], 24);
+            TD5_LOG_I(LOG_TAG, "Checkpoint record loaded: track=%d record=%d count=%d initial_time=%u",
+                      tidx, record_idx, (int)s_active_checkpoint.checkpoint_count,
                       (unsigned)s_active_checkpoint.initial_time);
             for (int ci = 0; ci < (int)s_active_checkpoint.checkpoint_count && ci < 5; ci++) {
                 TD5_LOG_I(LOG_TAG, "  checkpoint[%d]: span_threshold=%u time_bonus=%u",
