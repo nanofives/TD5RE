@@ -3343,9 +3343,19 @@ int SinFixed12bit(int angle) {
 }
 
 int AngleFromVector12(int x, int z) {
+    /* Original AngleFromVector12 @ 0x0040A720 is a LUT-based arctan using the
+     * 1024-entry int16 table at DAT_00463214, effectively returning the
+     * round-to-nearest integer angle in 12-bit units (0..0xFFF = full circle).
+     * The atan2-based port rounded toward zero via (int) cast, producing a
+     * consistent ±1 off-by-one vs the LUT for most input vectors — which
+     * propagated to disp_yaw at /diff-race sim_tick=1 post_ai (orig=3824 vs
+     * port=3823 across every actor, every tick). lround matches the LUT's
+     * round-half-away-from-zero behavior closely enough to close the gap
+     * for the observed spawn-heading inputs. If residuals remain, port the
+     * full DAT_00463214 LUT (0x400 int16 entries = 2048 bytes). */
     double rad = atan2((double)x, (double)z);
-    int angle = (int)(rad * (4096.0 / (2.0 * M_PI)));
-    return angle & 0xFFF;
+    long angle = lround(rad * (4096.0 / (2.0 * M_PI)));
+    return (int)(angle & 0xFFF);
 }
 
 float td5_cos_12bit(uint32_t angle) {
