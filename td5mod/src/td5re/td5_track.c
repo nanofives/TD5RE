@@ -2278,19 +2278,23 @@ void td5_track_update_probe_position(TD5_TrackProbeState *probe,
  * ======================================================================== */
 
 /**
- * Diagonal cross-product test with `v[li]` as reference.
- * Used for the interior (0 < sub_lane < lane_count - 1) branch and the
- * right-edge (sub_lane == lane_count - 1) branch of
- * ComputeActorTrackContactNormalExtended @ 0x004457E0.
+ * Diagonal cross-product test. All three branches of
+ * ComputeActorTrackContactNormalExtended @ 0x004457E0 (left-edge,
+ * right-edge, and interior) share the SAME cross formula — verified at
+ * the disasm level: the left-edge path at 0x004458b3..0x004458f4 falls
+ * through into the shared tail at 0x00445970 which computes the cross
+ * identically to the interior path at 0x004459d2..0x004459e2.
  *
- *   cross = (v[li+1_R].x - v[li].x) * (local_z - v[li].z)
- *         - (v[li+1_R].z - v[li].z) * (local_x - v[li].x)
+ *   cross = (v[ri+1].x - v[li].x) * (local_z - v[li].z)
+ *         - (v[ri+1].z - v[li].z) * (local_x - v[li].x)
  *
- * (where `li+1_R` is `ri+1`, i.e. the lane-offset-adjusted right+1 vertex.)
- * [CONFIRMED @ 0x0044592e..0x004459e6]
+ * Branch rule (also shared, verified at both 0x00445983 and 0x004459e6
+ * via JLE): `cross > 0` → triangle `(li, ri+1, li+1)`;
+ * `cross <= 0` → triangle `(li, ri, ri+1)`.
+ * [CONFIRMED @ 0x00445970..0x00445975, 0x004459d2..0x004459e6]
  */
-static int64_t diagonal_cross_li_ref(int vl0_idx, int vr1_idx,
-                                     int32_t local_x, int32_t local_z)
+static int64_t diagonal_cross(int vl0_idx, int vr1_idx,
+                              int32_t local_x, int32_t local_z)
 {
     TD5_StripVertex *vli  = vertex_at(vl0_idx);
     TD5_StripVertex *vri1 = vertex_at(vr1_idx);
@@ -2301,47 +2305,25 @@ static int64_t diagonal_cross_li_ref(int vl0_idx, int vr1_idx,
 }
 
 /**
- * Diagonal cross-product test with `v[ri+1]` as reference.
- * Used for the left-edge (sub_lane == 0) branch of 0x004457E0 for span
- * types 1, 2, 5, 8-11.
- *
- *   cross = (v[li].x - v[ri+1].x) * (local_z - v[ri+1].z)
- *         - (v[li].z - v[ri+1].z) * (local_x - v[ri+1].x)
- *
- * Mathematically this evaluates to `-diagonal_cross_li_ref(...)` for the
- * same quad, but the original keeps them as two distinct code paths so
- * we do too — byte-exact match to 0x004458c6..0x00445983.
- * [CONFIRMED @ 0x004458b3]
- */
-static int64_t diagonal_cross_ri1_ref(int vl0_idx, int vr1_idx,
-                                      int32_t local_x, int32_t local_z)
-{
-    TD5_StripVertex *vli  = vertex_at(vl0_idx);
-    TD5_StripVertex *vri1 = vertex_at(vr1_idx);
-    int32_t dx = (int32_t)vli->x  - (int32_t)vri1->x;
-    int32_t dz = (int32_t)vli->z  - (int32_t)vri1->z;
-    return (int64_t)dx * (int64_t)(local_z - (int32_t)vri1->z)
-         - (int64_t)dz * (int64_t)(local_x - (int32_t)vri1->x);
-}
-
-/**
  * Compute barycentric height from a triangle defined by 3 vertices.
- * Literal port of ComputeTrackTriangleBarycentricsWithNormal @ 0x00445A70.
+ * Port of ComputeTrackTriangleBarycentricsWithNormal @ 0x00445A70.
  *
- * Original uses a SINGLE >>12-shifted int16-truncated normal for BOTH the
- * output normal AND the plane solve. The int16 truncation is load-bearing:
- * on inclined triangles, the small truncated ny produces amplified plane
- * slopes, which is the source of the ~87k FP per-wheel Y spread the
- * original emits on non-flat spans. A higher-precision path (>>4 int32)
- * averages that amplification away and produces a flatter Y cluster than
- * the original — the exact symptom that blocks T2b attitude-from-wheels
- * and the T3 per-slot residuals.
+ * Uses a higher-precision (>>4) int32 normal for the plane solve and
+ * a separate (>>12) int16 normal for the output. The int32-path for
+ * the plane solve preserves more bits than the original's int16-
+ * truncated normal would — empirically this stays closer to the
+ * original's output on inclined spans (tested on Honolulu full-race).
+ * An attempt to match the original's int16 truncation exactly regressed
+ * 5/6 slots on Honolulu — likely the original's ConvertFloatVec3-
+ * ToShortAnglesB uses FPU/saturation semantics we haven't yet decoded.
  *
- * Degenerate handling is `if (ny == 0) ny = 1;` — the original divides
- * even on near-vertical triangles, producing a large-but-finite Y.
+ * Degenerate handling: `if (ny == 0) ny = 1;` — matches the original's
+ * saturate-and-divide rather than skipping the plane solve. Previous
+ * `|ny|<16 -> return va.y` fallback was too eager and flattened tilted
+ * triangles the original would sample.
  *
  * Returns height in 24.8 fixed-point.
- * [CONFIRMED @ 0x00445A70]
+ * [CONFIRMED @ 0x00445A70 for the formula; precision is a deviation]
  */
 static int32_t triangle_height(int va_idx, int vb_idx, int vc_idx,
                                 int32_t origin_x, int32_t origin_y, int32_t origin_z,
@@ -2350,7 +2332,7 @@ static int32_t triangle_height(int va_idx, int vb_idx, int vc_idx,
 {
     TD5_StripVertex *va, *vb, *vc;
     int32_t e1x, e1y, e1z, e2x, e2y, e2z;
-    int16_t nx, ny, nz;
+    int32_t nx, ny, nz;
     int32_t dx, dz;
     int32_t height;
 
@@ -2358,9 +2340,6 @@ static int32_t triangle_height(int va_idx, int vb_idx, int vc_idx,
     vb = vertex_at(vb_idx);
     vc = vertex_at(vc_idx);
 
-    /* Edge vectors vb - va and vc - va. cross(vb-va, vc-va) equals
-     * cross(va-vb, va-vc) (both double-negations cancel), so the normal
-     * direction matches the original's e1=va-vb, e2=va-vc formulation. */
     e1x = (int32_t)vb->x - (int32_t)va->x;
     e1y = (int32_t)vb->y - (int32_t)va->y;
     e1z = (int32_t)vb->z - (int32_t)va->z;
@@ -2369,37 +2348,39 @@ static int32_t triangle_height(int va_idx, int vb_idx, int vc_idx,
     e2y = (int32_t)vc->y - (int32_t)va->y;
     e2z = (int32_t)vc->z - (int32_t)va->z;
 
-    /* Cross product, then >>12, then truncate to int16. One precision
-     * path for both plane solve and output normal — matching original. */
-    {
-        int32_t raw_nx = (int32_t)(((int64_t)e1y * e2z - (int64_t)e1z * e2y) >> 12);
-        int32_t raw_ny = (int32_t)(((int64_t)e1z * e2x - (int64_t)e1x * e2z) >> 12);
-        int32_t raw_nz = (int32_t)(((int64_t)e1x * e2y - (int64_t)e1y * e2x) >> 12);
-        nx = (int16_t)raw_nx;
-        ny = (int16_t)raw_ny;
-        nz = (int16_t)raw_nz;
-    }
+    /* Cross product at >>4 precision — int32, no truncation. Used for
+     * the plane solve (division with dx/dz gives correct plane slope). */
+    nx = (int32_t)(((int64_t)e1y * e2z - (int64_t)e1z * e2y) >> 4);
+    ny = (int32_t)(((int64_t)e1z * e2x - (int64_t)e1x * e2z) >> 4);
+    nz = (int32_t)(((int64_t)e1x * e2y - (int64_t)e1y * e2x) >> 4);
 
-    /* Degenerate: ny==0 means the truncated normal is horizontal.
-     * Original saturates to 1 rather than skipping the division. */
-    if (ny == 0)
-        ny = 1;
+    /* Degenerate: if the truncated int16 normal's Y would be zero,
+     * the original sets it to 1 and divides. Check against the ny
+     * range the int16 cast would zero (|ny_>>12| < 1 == |ny_>>4| < 256).
+     * Below this threshold we saturate to match. */
+    if (ny > -256 && ny < 256)
+        ny = (ny >= 0) ? 256 : -256;
 
-    if (out_normal) {
-        out_normal[0] = nx;
-        out_normal[1] = ny;
-        out_normal[2] = nz;
-    }
-
-    /* Plane equation. local = (pos>>8) - origin, then plane_y in
-     * span-local units = va.y - ((local.x-va.x)*nx + (local.z-va.z)*nz)/ny
-     * which is algebraically equivalent to the original's
-     * va.y + ((va.x-local.x)*nx + (va.z-local.z)*nz)/ny. */
+    /* Plane equation. Algebraically equivalent to the original's
+     *   y = va.y + ((va.x - local.x)*nx + (va.z - local.z)*nz)/ny
+     * once signs are distributed across dx/dz. */
     dx = (pos_x >> 8) - origin_x - (int32_t)va->x;
     dz = (pos_z >> 8) - origin_z - (int32_t)va->z;
 
     height = (int32_t)va->y
            - (int32_t)(((int64_t)dx * nx + (int64_t)dz * nz) / ny);
+
+    /* Output normal at >>12 int16 precision — matches the original's
+     * ConvertFloatVec3ToShortAnglesB consumer interface. */
+    if (out_normal) {
+        int32_t hnx = (int32_t)(((int64_t)e1y * e2z - (int64_t)e1z * e2y) >> 12);
+        int32_t hny = (int32_t)(((int64_t)e1z * e2x - (int64_t)e1x * e2z) >> 12);
+        int32_t hnz = (int32_t)(((int64_t)e1x * e2y - (int64_t)e1y * e2x) >> 12);
+        if (hny == 0) hny = 1;
+        out_normal[0] = (int16_t)hnx;
+        out_normal[1] = (int16_t)hny;
+        out_normal[2] = (int16_t)hnz;
+    }
 
     return (origin_y + height) << 8;
 }
@@ -2452,8 +2433,7 @@ static int32_t probe_span_lane_height(const TD5_StripSpan *sp, int sub_lane,
         switch (type) {
         case 1: case 2: case 5:
         case 8: case 9: case 10: case 11:
-            /* Diagonal test with v[ri+1] reference. cross>0 -> T1; cross<=0 -> T2. */
-            cross = diagonal_cross_ri1_ref(vl0, vr1, local_x, local_z);
+            cross = diagonal_cross(vl0, vr1, local_x, local_z);
             if (cross > 0) { va = vl0; vb = vr1; vc = vl1; }
             else           { va = vl0; vb = vr0; vc = vr1; }
             break;
@@ -2479,8 +2459,7 @@ static int32_t probe_span_lane_height(const TD5_StripSpan *sp, int sub_lane,
         switch (type) {
         case 1: case 3: case 6:
         case 8: case 9: case 10: case 11:
-            /* Diagonal test with v[li] reference. cross>0 -> T1; cross<=0 -> T2. */
-            cross = diagonal_cross_li_ref(vl0, vr1, local_x, local_z);
+            cross = diagonal_cross(vl0, vr1, local_x, local_z);
             if (cross > 0) { va = vl0; vb = vr1; vc = vl1; }
             else           { va = vl0; vb = vr0; vc = vr1; }
             break;
@@ -2504,7 +2483,7 @@ static int32_t probe_span_lane_height(const TD5_StripSpan *sp, int sub_lane,
         /* INTERIOR — single unconditional path, span_type NOT consulted.
          * Applies to ALL types including 0.
          * [CONFIRMED @ 0x0044599b..0x004459e6] */
-        cross = diagonal_cross_li_ref(vl0, vr1, local_x, local_z);
+        cross = diagonal_cross(vl0, vr1, local_x, local_z);
         if (cross > 0) { va = vl0; vb = vr1; vc = vl1; }
         else           { va = vl0; vb = vr0; vc = vr1; }
     }
