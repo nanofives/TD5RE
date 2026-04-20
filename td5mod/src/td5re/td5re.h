@@ -119,6 +119,12 @@ typedef struct TD5_GlobalState {
     TD5_GameState   game_state;
     TD5_GameType    game_type;
     TD5_Difficulty  difficulty;
+    /* AI-car tier row (0..2) — mirrors original's gRaceDifficultyTier
+     * @ 0x00463210. Set from game_type in ConfigureGameTypeFlags per the
+     * original's switch at 0x00410CA0. Indexes s_difficulty_tier_cars[].
+     * Default = 2 (matches original's runtime boot state on single-race
+     * path — [CONFIRMED via Frida 2026-04-20]). */
+    int             difficulty_tier;
     TD5_WeatherType weather;
 
     /* Flags */
