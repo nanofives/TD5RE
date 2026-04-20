@@ -682,8 +682,13 @@ void td5_physics_update_player(TD5_Actor *actor)
     /* Lateral = dot(velocity, heading_right) */
     int32_t v_lat  = (vx * cos_h - vz * sin_h) >> 12;
 
-    actor->longitudinal_speed = v_long;
-    actor->lateral_speed = v_lat;
+    /* NOTE: `actor->longitudinal_speed` / `lateral_speed` are NOT written
+     * here. The original UpdatePlayerVehicleDynamics @ 0x00404030 writes
+     * both fields at its TAIL, using (a) the POST-drag PRE-force velocity
+     * (captured above in `vx`/`vz`) and (b) for the lateral field, the
+     * front-axle-frame forward projection minus a yaw-rate-induced term,
+     * NOT the chassis-right projection. See the dispatch block near the
+     * force-writeback for the faithful compute. */
 
     /* --- 7/8/9/10/11. On-ground vs airborne gate — matches original 0x404030:
      *   if (surface_contact_flags != 0) → ON-GROUND:
@@ -1210,55 +1215,72 @@ void td5_physics_update_player(TD5_Actor *actor)
     actor->linear_velocity_x += player_fx;
     actor->linear_velocity_z += player_fz;
 
-    /* --- 14a. Re-project longitudinal/lateral speeds from the POST-force
-     * world velocity. The original writes these at the tail of
-     * UpdatePlayerVehicleDynamics @ 0x00404030 — but not always as plain
-     * body-frame projections. For grounded cars the drivetrain layout
-     * (phys_data+0x76 = sVar2) decides which field(s) get the body-frame
-     * value and which get the CRGT-encoded (RPM-inverted) pseudo-speed.
+    /* --- 14a. Write longitudinal/lateral speeds at UpdatePlayerVehicleDynamics
+     * tail. Two bugs fixed here (T7):
      *
-     * [CONFIRMED via 2026-04-11 Ghidra decomp of 0x00404030 + 0x00403C80 +
-     * 0x0042EDF0 (research agent).]  The encode/decode closed loop
-     * explains why the port's plain body-frame write produced a ~131×
-     * mismatch against the original's +0x314 (64256 vs 489).
+     * BUG B — velocity input was POST-force. Original at 0x00404030 computes
+     *   uVar12 (chassis forward) and uVar37 (front-axle-frame forward minus
+     *   yaw-rate term) from the POST-DRAG PRE-FORCE velocity — i.e. the
+     *   `linear_velocity_x/_z` state BEFORE the per-wheel force add-back at
+     *   0x00404D66 / 0x00404D7E. The port was reading post-force velocity
+     *   (after `actor->linear_velocity_x += player_fx` above), which doubled
+     *   the long_speed magnitude at throttle-forward ticks (orig=59904 vs
+     *   port=122880 at sim_tick=4). Switched to the function-scoped `vx`/`vz`
+     *   locals captured at the top of this function (post-drag, pre-force).
+     *
+     * BUG A — lateral_speed (+0x318) was chassis-right projection; original
+     *   writes the FRONT-AXLE-FRAME FORWARD projection minus a yaw-rate-
+     *   induced term. For a near-straight car this yields a small positive
+     *   value (orig=912 at sim_tick=4), whereas chassis-right yields ~0
+     *   (port=-1). Exact formula [CONFIRMED @ 0x00404030 decomp]:
+     *     uVar37 = (sin(h+s)*vx + cos(h+s)*vz) >> 12
+     *            - (sin(s) * front_weight * angular_velocity_yaw >> 12) / 0x28c
+     *   where sin/cos ports: sin_s/cos_s = sin/cos(yaw+steer), sin_sr = sin(steer),
+     *   front_weight = PHYS_S(0x28), and 0x28c (652) is a physics-units
+     *   scaling divisor kept verbatim from the original.
      *
      *   sVar2 | longitudinal_speed (+0x314) | lateral_speed (+0x318)
      *   ------+-----------------------------+------------------------
-     *     1   | CRGT(engine, gear_ratio)    | body-frame Vlat
+     *     1   | CRGT(engine, gear_ratio)    | front-axle Vlat'
      *     2   | body-frame Vlong            | CRGT(engine, gear_ratio)
      *     3   | CRGT(engine, gear_ratio)    | CRGT(engine, gear_ratio)
      *
-     * Airborne cars (surface_contact_flags == 0) unconditionally get the
-     * body-frame projection on both fields — same as the port's prior
-     * behaviour. */
+     * Airborne cars (surface_contact_flags == 0) get both fields as plain
+     * projections (no CRGT dispatch). [CONFIRMED @ 0x00404030] */
     {
-        int64_t post_vx = actor->linear_velocity_x;
-        int64_t post_vz = actor->linear_velocity_z;
-        int32_t body_vlong = (int32_t)((post_vx * sin_h + post_vz * cos_h) >> 12);
-        int32_t body_vlat  = (int32_t)((post_vx * cos_h - post_vz * sin_h) >> 12);
+        /* Pre-force velocity (vx/vz captured at line 677-678, post-drag). */
+        int64_t pre_vx = vx;
+        int64_t pre_vz = vz;
+
+        /* uVar12 — chassis forward projection. */
+        int32_t body_vlong = (int32_t)((pre_vx * sin_h + pre_vz * cos_h) >> 12);
+
+        /* uVar37 — front-axle-frame forward minus yaw-rate correction. */
+        int32_t raw_front = (int32_t)(((int64_t)sin_s * pre_vx + (int64_t)cos_s * pre_vz) >> 12);
+        int64_t yaw_term_q12 = (int64_t)sin_sr * front_weight * actor->angular_velocity_yaw;
+        int32_t yaw_term = (int32_t)((yaw_term_q12 >> 12) / 0x28c);
+        int32_t body_vlat = raw_front - yaw_term;
 
         if (actor->surface_contact_flags != 0) {
             /* Drivetrain dispatch per UpdatePlayerVehicleDynamics @ 0x00404030:
-             * sVar2=1 (RWD): CRGT(speed=body_vlong) → long_speed; lat=body_vlat
-             * sVar2=2 (FWD): CRGT(speed=body_vlat)  → lat_speed;  long=body_vlong
-             * sVar2=3 (AWD): CRGT(speed=(long+lat)/2) → BOTH fields
-             * [CONFIRMED via 2026-04-11 Ghidra pass — the `speed_in` passed
-             *  to CRGT is the drivetrain-appropriate velocity component.] */
+             * sVar2=1 (RWD): CRGT(body_vlong) → long; lat=body_vlat (front-axle form)
+             * sVar2=2 (FWD): CRGT(body_vlat)  → lat;  long=body_vlong
+             * sVar2=3 (AWD): CRGT((long+lat)/2) → BOTH */
             int32_t dt_layout = (int32_t)PHYS_S(actor, 0x76);
             switch (dt_layout) {
-            case 1: {  /* RWD */
+            case 1: {
                 int32_t crgt = compute_reverse_gear_torque(actor, body_vlong);
                 actor->longitudinal_speed = crgt;
                 actor->lateral_speed      = body_vlat;
                 break;
             }
-            case 2: {  /* FWD */
+            case 2: {
                 int32_t crgt = compute_reverse_gear_torque(actor, body_vlat);
                 actor->lateral_speed      = crgt;
                 actor->longitudinal_speed = body_vlong;
                 break;
             }
-            case 3: {  /* AWD */
+            case 3: {
                 int32_t crgt = compute_reverse_gear_torque(actor, (body_vlong + body_vlat) / 2);
                 actor->longitudinal_speed = crgt;
                 actor->lateral_speed      = crgt;
@@ -1272,6 +1294,13 @@ void td5_physics_update_player(TD5_Actor *actor)
         } else {
             actor->longitudinal_speed = body_vlong;
             actor->lateral_speed      = body_vlat;
+        }
+
+        if (actor->slot_index == 0 && (actor->frame_counter % 60u) == 0u) {
+            TD5_LOG_I(LOG_TAG,
+                      "body_speeds: long=%d lat=%d (vlong=%d vlat=%d yaw_term=%d)",
+                      actor->longitudinal_speed, actor->lateral_speed,
+                      body_vlong, body_vlat, yaw_term);
         }
     }
 
