@@ -3229,6 +3229,62 @@ int td5_track_sample_target_point(int span_index, int route_byte,
 }
 
 /* ========================================================================
+ * Target-span junction remap
+ * Port of the walker inside UpdateActorTrackBehavior @
+ * 0x00435180-0x00435260. Only runs when actor's route_ptr != LEFT.TRK
+ * (LEFT is the canonical route that uses linear span advance).
+ * ======================================================================== */
+int td5_track_apply_target_span_remap(int lin_span, int is_canonical_route)
+{
+    /* Wrap lin into [0, span_count). Mirrors original's JL/SUB at 0x004351F2. */
+    int target_span;
+    int lin;
+    int i;
+
+    if (s_span_count <= 0) return lin_span;
+
+    lin = lin_span;
+    if (lin >= s_span_count) lin -= s_span_count;
+    if (lin < 0) lin += s_span_count;
+    target_span = lin;
+
+    /* Canonical (LEFT) route skips the walker — linear advance only. */
+    if (is_canonical_route) return target_span;
+
+    if (!s_jump_entries || s_jump_entry_count <= 0) return target_span;
+
+    for (i = 0; i < s_jump_entry_count; ++i) {
+        /* [CONFIRMED @ 0x00435218] walker field layout (stride 6, per entry):
+         *   u16 remap_dst           at +0
+         *   u16 remap_end_exclusive at +2
+         *   u16 range_lo            at +4
+         * DO NOT confuse with the port's other walkers at td5_track.c:2013 and
+         * td5_track.c:2829 which (currently) treat +0 as start-of-range — those
+         * are separate code paths for branch-return handling; this walker uses
+         * the authoritative Ghidra-confirmed layout for AI target remapping. */
+        const uint8_t *entry = s_jump_entries + i * 6;
+        uint32_t remap_dst     = *(const uint16_t *)(entry + 0);
+        uint32_t remap_end_exc = *(const uint16_t *)(entry + 2);
+        uint32_t range_lo      = *(const uint16_t *)(entry + 4);
+        int len = (int)remap_end_exc - (int)remap_dst;
+        int range_hi;
+        int cand;
+
+        if (len <= 0) continue;
+        range_hi = (int)range_lo + len - 1;
+
+        if (lin < (int)range_lo || lin > range_hi) continue;
+
+        cand = ((int)remap_dst - (int)range_lo) + lin;
+        if (cand != -1) target_span = cand;
+        /* Original breaks on first range match regardless of cand sentinel. */
+        break;
+    }
+
+    return target_span;
+}
+
+/* ========================================================================
  * Signed spline distance (0x434670)
  *   route_lane       - route lane offset (subtracted from segment_distance)
  *

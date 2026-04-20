@@ -566,9 +566,13 @@ void td5_ai_init_race_actor_runtime(void) {
         rs[RS_RECOVERY_STAGE] = 0;
         rs[RS_DIRECTION_POLARITY] = 0;
 
-        if (g_actor_base) {
-            selector = (ACTOR_U8(actor_ptr(i), ACTOR_SUB_LANE_INDEX) >= 2u) ? 1 : 0;
-        }
+        /* [CONFIRMED via InitializeRaceActorRuntime @ 0x00432e60 decomp]
+         * Route-table selection is by slot parity, not sub_lane:
+         *   (slot & 1) == 1 (odd)  → LEFT.TRK  (selector 0, canonical)
+         *   (slot & 1) == 0 (even) → RIGHT.TRK (selector 1, junction remap active)
+         * Prior port used `sub_lane >= 2` which left ALL slots on LEFT and
+         * silently disabled the AI junction-remap walker (td5_ai.c:~1440). */
+        selector = (i & 1) ? 0 : 1;
         rs[RS_ROUTE_TABLE_SELECTOR] = selector;
         rs[RS_ROUTE_TABLE_PTR] = (int32_t)(intptr_t)g_route_tables[selector];
         g_last_logged_opcode[i] = -1;
@@ -1431,8 +1435,23 @@ void td5_ai_update_track_behavior(int slot) {
         int16_t span = ACTOR_I16(actor, ACTOR_SPAN_RAW);
         int span_count = td5_track_get_span_count();
         if (span_count > 0 && span >= 0) {
-            /* (a) Target span: 4 spans ahead, wrapped [CONFIRMED @ 0x43514D] */
-            int target_span = ((int)span + 4) % span_count;
+            /* (a) Target span: 4 spans ahead, then remap through junction
+             * table when the actor is NOT on the LEFT.TRK (canonical) route.
+             * [CONFIRMED @ 0x00435180-0x00435260] Original walks
+             * DAT_004c3da0 (= STRIP.DAT +0x14/+0x18) to jump across track
+             * junctions to a physically-farther span; without this, the AI
+             * target_angle is computed against a too-close point, producing
+             * tiny first-tick deviations that land outside the cascade's
+             * direct-add band and prevent the port from reaching the
+             * saturated→wrap→stable oscillation regime the original uses.
+             *
+             * `is_canonical_route` = rs[RS_ROUTE_TABLE_SELECTOR] == 0
+             * which the init path at td5_ai.c:573 maps to g_route_tables[0]
+             * (LEFT.TRK). Original gates on pointer equality to DAT_004afb58
+             * (LEFT.TRK blob ptr) — same intent. */
+            int is_canonical = (rs[RS_ROUTE_TABLE_SELECTOR] == 0);
+            int lin_span = ((int)span + 4) % span_count;
+            int target_span = td5_track_apply_target_span_remap(lin_span, is_canonical);
 
             /* Spline progress update (original also does this) */
             {
@@ -1470,9 +1489,9 @@ void td5_ai_update_track_behavior(int slot) {
                     int32_t dz = (target_z - actor_z) >> 8;
 
                     /* target_probe (debug-level): AI look-ahead target per tick. */
-                    TD5_LOG_D(LOG_TAG, "target_probe: slot=%d span=%d tspan=%d rb=%d tx=%d tz=%d dx=%d dz=%d lat_bias=%d",
-                              slot, (int)span, target_span, route_byte,
-                              target_x, target_z, dx, dz, lateral_bias);
+                    TD5_LOG_D(LOG_TAG, "target_probe: slot=%d span=%d lin=%d tspan=%d rb=%d tx=%d tz=%d dx=%d dz=%d sel=%d",
+                              slot, (int)span, lin_span, target_span, route_byte,
+                              target_x, target_z, dx, dz, (int)rs[RS_ROUTE_TABLE_SELECTOR]);
 
                     /* (d) Compute target angle using atan2 equivalent
                      * [CONFIRMED @ 0x4352CB-0x435336: no +0x800 on target]
