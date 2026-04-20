@@ -520,8 +520,25 @@ void td5_physics_update_vehicle_actor(TD5_Actor *actor)
             }
         }
     } else if (g_game_paused) {
-        /* Paused: only update engine RPM display */
+        /* Paused: only update engine RPM display.
+         *
+         * Original UpdateVehicleActor @ 0x00406650 paused branch:
+         *   UpdateVehicleEngineSpeedSmoothed(actor);
+         *   if (<AI-slot predicate>)
+         *       actor->engine_speed_accum = (cardef[0x72] << 1) / 3;
+         *
+         * The predicate as decompiled reads (g_selectedGameType != 0 &&
+         * slot_state != 1). Empirically the `(redline*2)/3` AI pin DOES
+         * fire during /diff-race single-race runs on slots that haven't
+         * begun AI dynamics yet (trace slots 3/5 on Moscow land at exactly
+         * 7400 = 11100*2/3). So the port's condition on game_type is
+         * dropped here — gate only on the slot being a non-player racer,
+         * which matches the observed trace. [RE basis: 0x004068B3-0x004068CB] */
         update_engine_speed_smoothed(actor);
+        if (actor->slot_index < 6 && g_race_slot_state[actor->slot_index] != 1) {
+            int32_t redline = (int32_t)PHYS_S(actor, 0x72);
+            actor->engine_speed_accum = (redline << 1) / 3;
+        }
     }
 
     /* 7. Integrate pose and contacts.
