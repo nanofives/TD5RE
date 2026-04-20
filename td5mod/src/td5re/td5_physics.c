@@ -4179,27 +4179,20 @@ void td5_physics_reset_actor_state(TD5_Actor *actor)
     actor->vehicle_mode = 0;
     actor->damage_lockout = 0;
 
-    /* The game sets world_pos.y = 0xC0000000 (sentinel) at spawn,
-     * expecting integrate_pose to ground-snap it. But with the correct
-     * force formula (no >>8 shift), the huge wheel_y - ground_y delta
-     * flags all wheels airborne and the snap never fires. Fix: probe
-     * the ground at the actor's XZ and set world_pos.y BEFORE running
-     * integrate_pose, so the car starts at the correct height. */
-    {
-        int32_t gy = 0;
-        int g_surf = 0;
-        int span = actor->track_span_raw;
-        if (span >= 0 && span < g_td5.track_span_ring_length &&
-            td5_track_probe_height(actor->world_pos.x, actor->world_pos.z,
-                                    span, &gy, &g_surf)) {
-            actor->world_pos.y = gy;
-            TD5_LOG_I(LOG_TAG, "reset_actor_state: probed Y=%d (span=%d) for actor %p",
-                      gy, span, (void *)actor);
-        } else {
-            TD5_LOG_W(LOG_TAG, "reset_actor_state: probe failed span=%d for actor %p, "
-                      "keeping Y=%d", span, (void *)actor, actor->world_pos.y);
-        }
-    }
+    /* Match original ResetVehicleActorState @ 0x00405D70: write the
+     * sentinel world_pos.y = -0x40000000 and let IntegrateVehiclePoseAndContacts
+     * ground-snap via the per-wheel refresh_wheel_contacts -> wheel_contact_pos
+     * averaging path. force = (sentinel - ground_y) + gravity is hugely
+     * negative (< 0x801), so the grounded branch in refresh_wheel_contacts
+     * snaps wheel_contact_pos[i].y = ground_y, and integrate_pose then
+     * averages those 4 per-wheel values into world_pos.y.
+     *
+     * Prior implementation probed at chassis XZ and wrote world_pos.y
+     * before integrate — that sampled ONE terrain point instead of the
+     * 4 rotated wheel XZs, causing per-slot Y deltas that scaled with
+     * grid offset (slot 1 -12416, slot 2 +4736, slot 4 -8000, ...).
+     * [CONFIRMED @ 0x00405D70] */
+    actor->world_pos.y = (int32_t)0xC0000000;
 
     /* Convert positions to float for render */
     actor->render_pos.x = (float)actor->world_pos.x * (1.0f / 256.0f);
