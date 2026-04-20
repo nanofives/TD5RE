@@ -224,13 +224,12 @@ void td5_trace_write_actor(uint32_t frame_index, uint32_t sim_tick, const char *
      * on columns that have no reference data. */
     td5_trace_write_prefix(frame_index, sim_tick, stage, "actor", state->slot);
     fprintf(s_trace_fp,
-            "%d,0,0,0,0,0,0.000000,0.000000,0.000000,0,0,0,"
+            "0,0,0,0,0,0,0.000000,0.000000,0.000000,0,0,0,"
             "%d,%d,%d,%d,"
             "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
             "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%u,%u,%u,%u,%u,%u,"
             "0,0,0,0,0,0,0,"
             "0,0,0,0.000000,0.000000,0.000000\n",
-            (int)g_td5.game_state,
             state->slot_state,
             state->slot_companion_1,
             state->slot_companion_2,
