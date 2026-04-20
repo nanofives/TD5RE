@@ -28,6 +28,10 @@
 #include "td5_vfx.h"
 #include "td5_trace.h"
 
+int td5_trace_current_sim_tick(void) {
+    return g_td5.simulation_tick_counter;
+}
+
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>

@@ -93,4 +93,50 @@ void td5_trace_write_actor(uint32_t frame_index, uint32_t sim_tick, const char *
 void td5_trace_write_view(uint32_t frame_index, uint32_t sim_tick, const char *stage,
                           const TD5_TraceViewState *state);
 
+/* -------- call trace (for diff-race hook specs) ----------------------------
+ * Emits one row per function invocation, keyed by (sim_tick, fn_name,
+ * call_idx). Mirrors Frida-side Interceptor.attach output so the comparator
+ * can diff both sides using the same schema. Up to 8 int32 args + optional
+ * return value. See re/trace-hooks/README.md.
+ *
+ * call_idx is assigned internally by td5_trace_write_call: it tracks a
+ * per-(sim_tick, fn_name) counter so the Nth call to the same function in
+ * the same sim tick gets the same key on both sides.
+ */
+
+#define TD5_TRACE_CALL_MAX_ARGS 8
+
+void td5_trace_write_call(uint32_t sim_tick, const char *fn_name,
+                          int n_args, const int32_t *args,
+                          int has_ret, int32_t ret);
+
+/* Helper exposed for the macros (defined in td5_game.c so td5_trace.c avoids
+ * pulling in the full td5re.h for a single counter field). */
+int td5_trace_current_sim_tick(void);
+
+/* Variadic convenience macros. Zero runtime cost when tracing is disabled.
+ * Requires at least one arg; pass a dummy 0 if the function is nullary.
+ *
+ *     TD5_TRACE_CALL_ENTER("suspension_step", actor_idx, wheel);
+ *     ... body ...
+ *     TD5_TRACE_CALL_RET  ("suspension_step", result, actor_idx, wheel);
+ */
+#define TD5_TRACE_CALL_ENTER(_name, _a0, ...) \
+    do { if (td5_trace_is_enabled()) { \
+        int32_t _td5_args[] = { (int32_t)(_a0), ##__VA_ARGS__ }; \
+        td5_trace_write_call( \
+            (uint32_t)td5_trace_current_sim_tick(), (_name), \
+            (int)(sizeof(_td5_args) / sizeof(_td5_args[0])), \
+            _td5_args, 0, 0); \
+    } } while (0)
+
+#define TD5_TRACE_CALL_RET(_name, _ret, _a0, ...) \
+    do { if (td5_trace_is_enabled()) { \
+        int32_t _td5_args[] = { (int32_t)(_a0), ##__VA_ARGS__ }; \
+        td5_trace_write_call( \
+            (uint32_t)td5_trace_current_sim_tick(), (_name), \
+            (int)(sizeof(_td5_args) / sizeof(_td5_args[0])), \
+            _td5_args, 1, (int32_t)(_ret)); \
+    } } while (0)
+
 #endif /* TD5_TRACE_H */
