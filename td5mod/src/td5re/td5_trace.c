@@ -296,35 +296,6 @@ void td5_trace_write_call(uint32_t sim_tick, const char *fn_name,
             (int)(has_ret ? ret : 0));
 }
 
-void td5_trace_write_call(uint32_t sim_tick, const char *fn_name,
-                          int n_args, const int32_t *args,
-                          int has_ret, int32_t ret)
-{
-    if (!td5_trace_is_enabled() || !s_calls_fp || !fn_name) {
-        return;
-    }
-    if (n_args < 0) n_args = 0;
-    if (n_args > TD5_TRACE_CALL_MAX_ARGS) n_args = TD5_TRACE_CALL_MAX_ARGS;
-
-    uint32_t call_idx = td5_trace_next_call_idx_internal(fn_name, sim_tick);
-
-    int32_t padded[TD5_TRACE_CALL_MAX_ARGS];
-    for (int i = 0; i < TD5_TRACE_CALL_MAX_ARGS; ++i) {
-        padded[i] = (i < n_args && args) ? args[i] : 0;
-    }
-
-    fprintf(s_calls_fp,
-            "%u,%s,%u,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d\n",
-            (unsigned int)sim_tick,
-            fn_name,
-            (unsigned int)call_idx,
-            n_args,
-            (int)padded[0], (int)padded[1], (int)padded[2], (int)padded[3],
-            (int)padded[4], (int)padded[5], (int)padded[6], (int)padded[7],
-            has_ret ? 1 : 0,
-            (int)(has_ret ? ret : 0));
-}
-
 void td5_trace_write_view(uint32_t frame_index, uint32_t sim_tick, const char *stage,
                           const TD5_TraceViewState *state)
 {
