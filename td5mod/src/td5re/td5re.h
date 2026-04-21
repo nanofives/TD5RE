@@ -228,6 +228,11 @@ typedef struct TD5_GlobalState {
         int  loaded;  /* 1 once INI has been read */
         /* AutoRace: skip frontend, launch race immediately with INI settings */
         int  auto_race;             /* 1 = auto-start race on launch */
+        /* Shift every actor's spawn span by this many units along the track
+         * ring (mirrors the Frida InitializeActorTrackPose hook in
+         * re/tools/quickrace/td5_quickrace_hook.js). Only read from the
+         * shared quickrace INI when skip_frontend=1. 0 = vanilla grid. */
+        int  start_span_offset;
         /* Enable benchmark mode: redirects main-menu button 2 to TD5_GAMESTATE_BENCHMARK.
          * Matches the dead-code path in TD5_d3d.exe gated by app+0x170 (always 0 in
          * the shipped binary). Default 0 = button 2 is 2-player, matching the
@@ -238,6 +243,15 @@ typedef struct TD5_GlobalState {
          * When set, slot 0 is driven by td5_ai_update_race_actors and the
          * human input-to-actor path is skipped, exactly like demo mode. */
         int  player_is_ai;
+        /* Logging — gates for the platform multi-file logger and the D3D
+         * ddraw_wrapper log. Defaults preserve current behavior. Flip to
+         * compare A/B perf without touching the build. */
+        int  log_enabled;     /* master switch (1=on) */
+        int  log_min_level;   /* 0=DEBUG 1=INFO 2=WARN 3=ERROR */
+        int  log_frontend;    /* frontend.log (frontend, hud, save, input) */
+        int  log_race;        /* race.log (game, physics, ai, track, camera, vfx) */
+        int  log_engine;      /* engine.log (render, asset, platform, sound, net, fmv) */
+        int  log_wrapper;     /* wrapper.log (D3D11 ddraw shim) */
     } ini;
 
 } TD5_GlobalState;

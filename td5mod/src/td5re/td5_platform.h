@@ -356,6 +356,17 @@ void td5_plat_log_init(void);
  *  subsystem logs into the same folder. */
 const char *td5_plat_log_dir(void);
 
+/** Configure runtime log filters. Called by main.c after INI is parsed.
+ *  When `enabled` is 0 the logger drops every message before any formatting
+ *  cost. `min_level` filters TD5_LOG_* by severity (default INFO). `cat_mask`
+ *  is a bitmask over (1<<TD5_LOG_CAT_*) — bit 0 = frontend, bit 1 = race,
+ *  bit 2 = engine. Defaults preserve current behavior (all categories on,
+ *  min level INFO). */
+#define TD5_LOG_CAT_BIT_FRONTEND (1u << 0)
+#define TD5_LOG_CAT_BIT_RACE     (1u << 1)
+#define TD5_LOG_CAT_BIT_ENGINE   (1u << 2)
+void td5_plat_log_set_filters(int enabled, int min_level, unsigned int cat_mask);
+
 #define TD5_LOG_D(mod, ...) td5_plat_log(TD5_LOG_DEBUG, mod, __VA_ARGS__)
 #define TD5_LOG_I(mod, ...) td5_plat_log(TD5_LOG_INFO,  mod, __VA_ARGS__)
 #define TD5_LOG_W(mod, ...) td5_plat_log(TD5_LOG_WARN,  mod, __VA_ARGS__)

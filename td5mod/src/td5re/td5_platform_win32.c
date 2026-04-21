@@ -90,6 +90,15 @@ static TD5_LogFile s_log_files[TD5_LOG_CAT_COUNT];
 static char s_log_dir[512];
 static int  s_log_initialized = 0;
 
+/* Runtime log filters (set via td5_plat_log_set_filters from main.c after INI
+ * parse). Defaults match the historic behavior: master on, INFO and above,
+ * all three categories enabled. */
+static int          s_log_enabled   = 1;
+static int          s_log_min_level = TD5_LOG_INFO;
+static unsigned int s_log_cat_mask  = TD5_LOG_CAT_BIT_FRONTEND |
+                                      TD5_LOG_CAT_BIT_RACE     |
+                                      TD5_LOG_CAT_BIT_ENGINE;
+
 /* Audio */
 #define MAX_AUDIO_BUFFERS  256
 #define MAX_AUDIO_CHANNELS 64
@@ -2652,6 +2661,13 @@ const char *td5_plat_log_dir(void)
     return s_log_dir;
 }
 
+void td5_plat_log_set_filters(int enabled, int min_level, unsigned int cat_mask)
+{
+    s_log_enabled   = enabled ? 1 : 0;
+    s_log_min_level = min_level;
+    s_log_cat_mask  = cat_mask;
+}
+
 void td5_plat_log(TD5_LogLevel level, const char *module, const char *fmt, ...)
 {
     char buf[2048];
@@ -2662,8 +2678,17 @@ void td5_plat_log(TD5_LogLevel level, const char *module, const char *fmt, ...)
 
     if (!fmt) return;
 
-    /* Skip DEBUG messages at runtime for performance */
-    if (level < TD5_LOG_INFO) return;
+    /* Fast-path gating — bail before any formatting cost.
+     *  - Errors are NEVER suppressed (still go to stdout below); they're rare
+     *    and we don't want a perf-A/B run to silently swallow crashes.
+     *  - Master switch off → drop everything except errors.
+     *  - Below configured min_level → drop. */
+    if (level < TD5_LOG_ERROR) {
+        if (!s_log_enabled) return;
+        if ((int)level < s_log_min_level) return;
+        cat = td5_log_classify_module(module);
+        if (!(s_log_cat_mask & (1u << cat))) return;
+    }
 
     off = snprintf(buf, sizeof(buf), "[%s][%s] ",
         (level >= 0 && level <= 3) ? s_log_level_names[level] : "???",

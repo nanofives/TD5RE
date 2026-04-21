@@ -32,6 +32,13 @@
  * Debug logging
  * ======================================================================== */
 
+/* Runtime gate. Default 1 (matches historic behavior). Call from main.c after
+ * INI parse to silence the wrapper before Backend_Init opens log/wrapper.log.
+ * Prototype is unconditional so callers compiled without WRAPPER_DEBUG (e.g.
+ * main.c, td5_platform_win32.c) can still link against the wrapper archive,
+ * which is always built with WRAPPER_DEBUG defined. */
+void wrapper_set_enabled(int enabled);
+
 #ifdef WRAPPER_DEBUG
 void wrapper_log(const char *fmt, ...);
 #define WRAPPER_LOG(fmt, ...) wrapper_log(fmt, ##__VA_ARGS__)

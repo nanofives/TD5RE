@@ -13,10 +13,20 @@
  * File-based debug logger
  * ======================================================================== */
 
+/* Runtime gate — always defined so callers compiled without WRAPPER_DEBUG
+ * can still link. Has no observable effect when WRAPPER_DEBUG is off, since
+ * wrapper_log itself is then a no-op. */
+static int g_log_enabled = 1;
+
+void wrapper_set_enabled(int enabled) {
+    g_log_enabled = enabled ? 1 : 0;
+}
+
 #ifdef WRAPPER_DEBUG
 static FILE *g_logfile = NULL;
 
 void wrapper_log(const char *fmt, ...) {
+    if (!g_log_enabled) return;
     if (!g_logfile) {
         /* Try log/ subdirectory first (created by td5_plat_log_init),
          * fall back to current directory */

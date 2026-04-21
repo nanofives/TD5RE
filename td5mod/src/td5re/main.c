@@ -238,12 +238,16 @@ static int td5_load_shared_quickrace_ini(void)
     g_td5.ini.default_car =
         GetPrivateProfileIntA("car", "car",
                               g_td5.ini.default_car, path);
+    g_td5.ini.start_span_offset =
+        GetPrivateProfileIntA("race", "start_span_offset", 0, path);
     g_td5.ini.auto_race  = 1;
     g_td5.ini.skip_intro = 1;
 
-    dbglog("  -> auto_race=1 skip_intro=1 type=%d track=%d car=%d laps=%d",
+    dbglog("  -> auto_race=1 skip_intro=1 type=%d track=%d car=%d laps=%d "
+           "start_span_offset=%d",
            g_td5.ini.default_game_type, g_td5.ini.default_track,
-           g_td5.ini.default_car, g_td5.ini.laps);
+           g_td5.ini.default_car, g_td5.ini.laps,
+           g_td5.ini.start_span_offset);
     return 1;
 }
 
@@ -325,11 +329,35 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     g_td5.ini.race_trace_max_sim_ticks =
         td5_ini_int("Trace", "RaceTraceMaxSimTicks", 0);
 
+    /* Logging — defaults preserve historic behavior (master on, INFO+, all
+     * categories on, wrapper on). Flip to A/B-test perf without rebuilding. */
+    g_td5.ini.log_enabled   = td5_ini_int("Logging", "Enabled",  1);
+    g_td5.ini.log_min_level = td5_ini_int("Logging", "MinLevel", 1);
+    g_td5.ini.log_frontend  = td5_ini_int("Logging", "Frontend", 1);
+    g_td5.ini.log_race      = td5_ini_int("Logging", "Race",     1);
+    g_td5.ini.log_engine    = td5_ini_int("Logging", "Engine",   1);
+    g_td5.ini.log_wrapper   = td5_ini_int("Logging", "Wrapper",  1);
+
     g_td5.ini.loaded = 1;
 
     /* Shared quick-race INI overlay (re/tools/quickrace/td5_quickrace.ini).
      * Applied AFTER td5re.ini so skip_frontend=1 wins over AutoRace=0. */
     td5_load_shared_quickrace_ini();
+
+    /* Apply log filters now — Backend_Init runs after this and is the heaviest
+     * wrapper-log emitter, so silencing here lets the perf A/B reflect startup
+     * cost too, not just the steady-state race loop. */
+    {
+        unsigned int cat_mask = 0;
+        if (g_td5.ini.log_frontend) cat_mask |= TD5_LOG_CAT_BIT_FRONTEND;
+        if (g_td5.ini.log_race)     cat_mask |= TD5_LOG_CAT_BIT_RACE;
+        if (g_td5.ini.log_engine)   cat_mask |= TD5_LOG_CAT_BIT_ENGINE;
+        td5_plat_log_set_filters(g_td5.ini.log_enabled,
+                                 g_td5.ini.log_min_level, cat_mask);
+        /* Wrapper is gated by master AND its own per-sink switch — same
+         * convention as the platform log categories. */
+        wrapper_set_enabled(g_td5.ini.log_enabled && g_td5.ini.log_wrapper);
+    }
 
     dbglog("=== td5re.ini loaded from: %s ===", s_ini_path);
     dbglog("  [Display] Width=%d Height=%d Windowed=%d", width, height, windowed);
@@ -348,6 +376,10 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
            g_td5.ini.race_trace_enabled, g_td5.ini.race_trace_slot,
            g_td5.ini.race_trace_max_frames, g_td5.ini.auto_throttle,
            g_td5.ini.trace_fast_forward, g_td5.ini.race_trace_max_sim_ticks);
+    dbglog("  [Logging] Enabled=%d MinLevel=%d Frontend=%d Race=%d Engine=%d Wrapper=%d",
+           g_td5.ini.log_enabled, g_td5.ini.log_min_level,
+           g_td5.ini.log_frontend, g_td5.ini.log_race,
+           g_td5.ini.log_engine, g_td5.ini.log_wrapper);
 
     if (width <= 0 || height <= 0) {
         width  = GetSystemMetrics(SM_CXSCREEN);
