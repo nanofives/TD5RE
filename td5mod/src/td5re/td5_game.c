@@ -804,12 +804,13 @@ int td5_game_init_race_session(void) {
      * the render loop at td5_render.c:1647 silently skips every traffic
      * actor even though td5_ai + td5_physics are ticking them.
      *
-     * The original binary uses a per-track 6-entry model-index table at
-     * 0x00474D74 to pick which traffic models appear on each track. That
-     * table has not been fully decoded yet — for now, load models 0..5
-     * into slots 6..11 as a deterministic fallback. Per-track selection
-     * is a cosmetic refinement (which cars appear, not whether they
-     * appear). [UNCERTAIN: per-track model table not decoded]
+     * Model selection now uses the original's two-level lookup chain via
+     * td5_asset_resolve_traffic_model_index: per-track row in DAT_00474ce8
+     * selected via DAT_00474d74[g_trackPoolIndex]. Resolver returns -1
+     * when the track's pool index >= 25, matching the original guard
+     * @ 0x004435ad (`iVar15 < 0x19`) which gates a zero-sized traffic
+     * allocation. [UNCERTAIN: reverse-direction flag not yet plumbed;
+     * defaulting forward.]
      *
      * Gate mirrors the original 0x0042AA10 forced-off conditions:
      * network / split-screen already cleared g_td5.traffic_enabled above;
@@ -819,16 +820,28 @@ int td5_game_init_race_session(void) {
         && !g_td5.drag_race_enabled
         && !g_td5.network_active
         && g_td5.split_screen_mode == 0) {
+        int traffic_loaded = 0;
         for (int ti = 0; ti < 6; ti++) {
             int traffic_slot  = TD5_MAX_RACER_SLOTS + ti;  /* slots 6..11 */
-            int traffic_model = ti;                         /* fallback: 0..5 */
-            if (!td5_asset_load_traffic_model(traffic_model, traffic_slot)) {
+            int traffic_model = td5_asset_resolve_traffic_model_index(
+                g_td5.track_index, /*reverse=*/0, ti);
+            if (traffic_model < 0) {
+                TD5_LOG_I(LOG_TAG,
+                          "InitRace step 5b: track_index=%d slot_in_pool=%d has no traffic model (pool_idx>=25 or unavailable)",
+                          g_td5.track_index, ti);
+                continue;
+            }
+            if (td5_asset_load_traffic_model(traffic_model, traffic_slot)) {
+                traffic_loaded++;
+            } else {
                 TD5_LOG_W(LOG_TAG,
                           "InitRace step 5b: traffic slot %d (model %d) load failed",
                           traffic_slot, traffic_model);
             }
         }
-        TD5_LOG_I(LOG_TAG, "InitRace step 5b/19: traffic vehicle assets loaded");
+        TD5_LOG_I(LOG_TAG,
+                  "InitRace step 5b/19: traffic vehicle assets loaded (%d/6 slots, track_index=%d)",
+                  traffic_loaded, g_td5.track_index);
     } else {
         TD5_LOG_I(LOG_TAG,
                   "InitRace step 5b/19: traffic disabled (traffic_enabled=%d time_trial=%d drag=%d net=%d split=%d)",
