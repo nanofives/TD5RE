@@ -2133,6 +2133,15 @@ static void update_position_recursive(int16_t *track_state, int32_t pos_x, int32
     int sub_lane = (int)((int8_t *)track_state)[12];
     int new_span;
     int iter;
+    /* Compound-case atomic flag. The original's UpdateActorTrackPosition
+     * returns after one step — each case handler is terminal. Single-bit
+     * cases (1/2/4/8) in the port iterate for multi-span moves, but the
+     * compound cases (3/6/9/0xC) now resolve their own retest internally,
+     * so they must exit after one step to match the original and to avoid
+     * re-entering the same REJECT branch on an unchanged (span, sub_lane)
+     * → TRACK_MAX_RECURSION → brute-force fallback that mis-places the
+     * actor far from its true span (breaks wall_contact dispatch). */
+    int compound_done = 0;
 
     /* Save state snapshot so we can roll back on non-convergence.
      * If the boundary walk doesn't converge in TRACK_MAX_RECURSION steps,
@@ -2175,6 +2184,7 @@ static void update_position_recursive(int16_t *track_state, int32_t pos_x, int32
                    *   mask & 0x08 == 0
                    *     or cross2 <= 0         → advance,   sub = new_sub - 1
                    *   else                     → REJECT,    sub = OLD - 1, keep OLD span */
+            compound_done = 1;
             int old_span = span_idx;
             int old_sub  = sub_lane;
             int stepped_sub = sub_lane;
@@ -2236,6 +2246,7 @@ static void update_position_recursive(int16_t *track_state, int32_t pos_x, int32
                    *   cross1 <= 0 or mask1 & 0x04 == 0  → advance, sub = new_sub
                    *   mask2 & 0x08 == 0 or cross2 <= 0  → advance, sub = new_sub + 1
                    *   else                              → REJECT,  sub = OLD + 1 */
+            compound_done = 1;
             int old_span = span_idx;
             int old_sub  = sub_lane;
             int stepped_sub = sub_lane;
@@ -2305,6 +2316,7 @@ static void update_position_recursive(int16_t *track_state, int32_t pos_x, int32
                    *   mask & 0x02 == 0 or
                    *     cross2 <= 0            → advance, sub = new_sub - 1
                    *   else                     → REJECT,  sub = OLD - 1 */
+            compound_done = 1;
             int old_span = span_idx;
             int old_sub  = sub_lane;
             int stepped_sub = sub_lane;
@@ -2359,6 +2371,7 @@ static void update_position_recursive(int16_t *track_state, int32_t pos_x, int32
                     *   cross1 <= 0 or mask1 & 0x04 == 0  → advance, sub = new_sub
                     *   mask2 & 0x02 == 0 or cross2 <= 0  → advance, sub = new_sub + 1
                     *   else                              → REJECT,  sub = OLD + 1 */
+            compound_done = 1;
             int old_span = span_idx;
             int old_sub  = sub_lane;
             int stepped_sub = sub_lane;
@@ -2439,9 +2452,15 @@ static void update_position_recursive(int16_t *track_state, int32_t pos_x, int32
 
         /* Write back sub-lane after each transition */
         ((int8_t *)track_state)[12] = (int8_t)sub_lane;
+
+        /* Compound cases 3/6/9/0xC are atomic — matches original's one-
+         * step-per-call semantics (function returns after each case path
+         * per pass-4 disasm). Exit the loop now. */
+        if (compound_done)
+            break;
     }
 
-    if (iter >= TRACK_MAX_RECURSION) {
+    if (!compound_done && iter >= TRACK_MAX_RECURSION) {
         /* Non-convergence: boundary walk failed. Restore snapshot, then
          * do a brute-force nearest-span search in a ±SEARCH_RADIUS window
          * around the saved span to find the correct span by XZ distance. */
