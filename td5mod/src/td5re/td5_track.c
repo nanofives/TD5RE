@@ -79,7 +79,7 @@ int     g_track_type_mode       = 0;
 
 /**
  * Per-span-type vertex offset LUT — REMOVED 2026-04-20.
- * The single source of truth is `k_span_vertex_offsets[12][2]` below
+ * The single source of truth is `k_quad_vertex_offsets[12][2]` below
  * (DAT_00474e40/41 verified). The prior s_vtx_offset_left/right pair
  * held wrong values ({0,0,0,3,3,0,3,3,0,0,0,0} on the right) that
  * didn't match the binary and were never read anyway.
@@ -512,6 +512,21 @@ void td5_track_resolve_wall_contacts(TD5_Actor *actor)
 
     if (!actor || !s_span_array || !s_vertex_table) return;
 
+    /* Per-probe sub_lane gate — added 2026-04-21 in session
+     * fix-1776777642-12165 to match original 0x00406CC0 semantics.
+     *
+     * Ghidra confirmed 0x00406CC0 only writes a wall impulse when a
+     * probe's sub_lane is at the strip extremity:
+     *   sub_lane == 0              → l_wall test (strip entry edge)
+     *   sub_lane >= lane_count - 1 → r_wall test (strip exit  edge)
+     * Middle sub_lanes fall through with no writes. Without this gate
+     * the port's transverse-edge geometry falsely fires at mid-strip
+     * probe positions — Newcastle (level 29) reproduced this at chassis
+     * span ~122, producing a pen=-30 clamp bounce ~1.8s after countdown.
+     *
+     * See the l_hit_count / r_hit_count guards and the Pass-2 per-probe
+     * guards below. */
+
     /* Traffic actors (slots 6+) skip lateral wall checks entirely.
      * This function is port-specific (original has no mid-strip lateral walls).
      * Traffic follows fixed AI paths and doesn't need containment.
@@ -552,14 +567,14 @@ void td5_track_resolve_wall_contacts(TD5_Actor *actor)
      * as "outside" both walls, creating invisible barriers mid-road. */
     if (type != 1 && type != 2 && type != 5) return;
 
-    /* Skip wall checks on branch road spans (index >= ring_length).
-     * Branch roads are typically narrow (1-2 lanes) and their vertex
-     * layout produces false-positive wall contacts on BOTH sides of the
-     * car simultaneously (probe 0/1 on RIGHT, probe 2/3 on LEFT, d=-30
-     * identical), creating invisible walls that trap the car. The
-     * original has no lateral wall system at all — this is port-specific.
-     * Forward/reverse boundary contacts still run on branch spans. */
-    if (span_idx >= g_td5.track_span_ring_length) return;
+    /* Branch spans (index >= ring_length) previously skipped this function
+     * because the stale (no-gate) logic produced simultaneous LEFT+RIGHT
+     * false-positives on the narrow 2-lane branches. With the sub_lane
+     * extremity gate now in place (below), only probes at sub_lane==0 or
+     * sub_lane>=lane_count-1 contribute, and the 2+ probe vote filters
+     * single-wheel hits. That eliminates the original false-positive
+     * pattern, so we run walls on branches too — the user needs branch
+     * containment. */
 
     int lane_count = span_lane_count(sp);
     if (lane_count < 1) lane_count = 1;
@@ -687,6 +702,16 @@ void td5_track_resolve_wall_contacts(TD5_Actor *actor)
         int32_t px = probe_block[pi].x >> 8;
         int32_t pz = probe_block[pi].z >> 8;
 
+        /* Per-probe sub_lane extremity gate — matches original 0x00406CC0
+         * branch1 / branch2 dispatch. The probe's wheel_probes[pi]
+         * sub_lane_index is set by the boundary walker; sub_lane==0 is
+         * the strip-entry edge, sub_lane==lane_count-1 is the strip-exit
+         * edge. Probes at interior sub_lanes contribute nothing —
+         * matches the original's fall-through for middle sub_lanes. */
+        int probe_sub_lane = (int)actor->wheel_probes[pi].sub_lane_index;
+        int l_extremity = (probe_sub_lane == 0);
+        int r_extremity = (probe_sub_lane >= lane_count - 1);
+
         if (l_par.ok) {
             int32_t rel_x = px - l_par.base_x - sp->origin_x;
             int32_t rel_z = pz - l_par.base_z - sp->origin_z;
@@ -694,8 +719,8 @@ void td5_track_resolve_wall_contacts(TD5_Actor *actor)
             int32_t d = (int32_t)((dot + ((dot >> 63) & 0xFFF)) >> 12);
             if (d < -30) d = -30;
             probe_l_d[pi] = d;
-            probe_l_ok[pi] = 1;
-            if (d < WALL_DEAD_ZONE) {
+            probe_l_ok[pi] = l_extremity;
+            if (l_extremity && d < WALL_DEAD_ZONE) {
                 l_hit_count++;
                 if (d < l_deepest) l_deepest = d;
             }
@@ -707,16 +732,17 @@ void td5_track_resolve_wall_contacts(TD5_Actor *actor)
             int32_t d = (int32_t)((dot + ((dot >> 63) & 0xFFF)) >> 12);
             if (d < -30) d = -30;
             probe_r_d[pi] = d;
-            probe_r_ok[pi] = 1;
-            if (d < WALL_DEAD_ZONE) {
+            probe_r_ok[pi] = r_extremity;
+            if (r_extremity && d < WALL_DEAD_ZONE) {
                 r_hit_count++;
                 if (d < r_deepest) r_deepest = d;
             }
         }
 
         if (diag_slot0) {
-            TD5_LOG_I(LOG_TAG, "wall_diag slot0 p%d span=%d L:d=%d R:d=%d probe=(%d,%d)",
-                      pi, span_idx, probe_l_d[pi], probe_r_d[pi], px, pz);
+            TD5_LOG_I(LOG_TAG, "wall_diag slot0 p%d span=%d sub=%d L:d=%d R:d=%d probe=(%d,%d)",
+                      pi, span_idx, probe_sub_lane,
+                      probe_l_d[pi], probe_r_d[pi], px, pz);
         }
     }
 
@@ -1883,25 +1909,48 @@ static int resolve_neighbor(int span_idx, int *sub_lane, uint8_t crossing_bit,
                    * sub_lane < next_span.lane_count → main road (span+1)
                    * sub_lane >= next_span.lane_count → branch (link_next)
                    *
-                   * [FIX 2026-04-20]: main-road continuation leaves sub_lane
-                   * UNCHANGED. Only the default (non-junction) case applies
-                   * the h_offset delta. The original's case-1 junction path
-                   * does not adjust sub_lane on the main-road fall-through. */
+                   * Port deviation from the literal original: the walker's
+                   * iterative *sub_lane state drifts over multi-span
+                   * traversal (uniform -1 on case 1, +h_offset on case 2,
+                   * etc.) and by the time we reach the junction it no
+                   * longer reflects the actor's true lateral position.
+                   * The original ALSO drifts its sub_lane arithmetically
+                   * but apparently maintains consistency via the exact
+                   * byte-level dispatch order we haven't replicated.
+                   *
+                   * Workaround: recompute the effective sub_lane from the
+                   * actor's XZ position projected against this junction
+                   * span's lateral axis (compute_effective_sublane) and
+                   * use THAT for the main-vs-branch decision. Verified
+                   * 2026-04-21 on Newcastle (level 29, span 128, fwd=635):
+                   * the iterative *sub_lane reached span 128 with value 2
+                   * or 3 from a drive where the probe's real sub_lane was
+                   * 1, causing the walker to route INTO the branch
+                   * sentinel span 635 (type-9) and the car to fall through
+                   * the ground because branch geometry isn't resolved.
+                   * Geometric sub_lane at the same moment returns 1,
+                   * routing correctly to span 129. */
             int next_idx = span_idx + 1;
+            int effective_sub = compute_effective_sublane(span_idx, pos_x, pos_z);
             if (next_idx >= 0 && next_idx < s_span_count) {
                 int next_lanes = span_lane_count(&s_span_array[next_idx]);
-                if (*sub_lane < next_lanes) {
-                    /* Main road — sub_lane unchanged */
+                if (effective_sub < next_lanes) {
+                    /* Main road — adopt the geometric sub_lane so
+                     * downstream bookkeeping starts clean. */
                     new_span = next_idx;
+                    *sub_lane = effective_sub;
                 } else {
                     /* Branch road */
                     new_span = (int)sp->link_next;
                     if (new_span >= 0 && new_span < s_span_count) {
-                        int dest_lanes = span_lane_count(&s_span_array[new_span]);
-                        *sub_lane += dest_lanes - cur_lane_count;
-                        /* junction_fwd branch taken */
+                        /* Branch lane = effective_sub - next_lanes
+                         * (lanes [next_lanes, cur_lane_count) on the
+                         * junction fold into [0, dest_lanes) on the
+                         * branch). */
+                        *sub_lane = effective_sub - next_lanes;
                     } else {
                         new_span = next_idx; /* fallback to main */
+                        *sub_lane = effective_sub;
                     }
                 }
             }
@@ -1927,16 +1976,23 @@ static int resolve_neighbor(int span_idx, int *sub_lane, uint8_t crossing_bit,
 
     case 0x02: /* Right (forward + lateral) */
         switch (sp->span_type) {
-        case 8: { /* JUNCTION_FWD: branch decision same as 0x01 */
+        case 8: { /* JUNCTION_FWD: branch decision same as 0x01
+                   * (geometric sub_lane override — see case 0x01 type-8) */
             int next_idx = span_idx + 1;
+            int effective_sub = compute_effective_sublane(span_idx, pos_x, pos_z);
             if (next_idx >= 0 && next_idx < s_span_count) {
                 int next_lanes = span_lane_count(&s_span_array[next_idx]);
-                if (*sub_lane < next_lanes) {
+                if (effective_sub < next_lanes) {
                     new_span = next_idx;
+                    *sub_lane = effective_sub;
                 } else {
                     new_span = (int)sp->link_next;
-                    if (new_span < 0 || new_span >= s_span_count)
+                    if (new_span >= 0 && new_span < s_span_count) {
+                        *sub_lane = effective_sub - next_lanes;
+                    } else {
                         new_span = next_idx;
+                        *sub_lane = effective_sub;
+                    }
                 }
             } else {
                 new_span = span_idx + 1;
@@ -1961,25 +2017,27 @@ static int resolve_neighbor(int span_idx, int *sub_lane, uint8_t crossing_bit,
         switch (sp->span_type) {
         case 11: { /* JUNCTION_BWD [CONFIRMED @ 0x4440F0 case 4]:
                     * sub_lane >= prev_span.lane_count → branch (link_prev)
-                    * sub_lane < prev_span.lane_count → main road (span-1) */
+                    * sub_lane < prev_span.lane_count → main road (span-1)
+                    *
+                    * Geometric sub_lane override — see case 0x01 type-8
+                    * for the rationale (iterative *sub_lane drifts). */
             int prev_idx = span_idx - 1;
+            int effective_sub = compute_effective_sublane(span_idx, pos_x, pos_z);
             if (prev_idx >= 0 && prev_idx < s_span_count) {
                 int prev_lanes = span_lane_count(&s_span_array[prev_idx]);
-                if (*sub_lane >= prev_lanes) {
+                if (effective_sub >= prev_lanes) {
                     /* Branch road */
                     new_span = (int)sp->link_prev;
                     if (new_span >= 0 && new_span < s_span_count) {
-                        int dest_lanes = span_lane_count(&s_span_array[new_span]);
-                        *sub_lane += dest_lanes - cur_lane_count;
-                        /* junction_bwd branch taken */
+                        *sub_lane = effective_sub - prev_lanes;
                     } else {
                         new_span = prev_idx; /* fallback to main */
+                        *sub_lane = effective_sub;
                     }
                 } else {
                     /* Main road */
                     new_span = prev_idx;
-                    int dest_h = span_height_offset(&s_span_array[prev_idx]);
-                    *sub_lane += h_offset - dest_h;
+                    *sub_lane = effective_sub;
                 }
             }
             break;
@@ -2003,16 +2061,23 @@ static int resolve_neighbor(int span_idx, int *sub_lane, uint8_t crossing_bit,
 
     case 0x08: /* Left (backward + lateral) */
         switch (sp->span_type) {
-        case 11: { /* JUNCTION_BWD: branch decision same as 0x04 */
+        case 11: { /* JUNCTION_BWD: branch decision same as 0x04
+                    * (geometric sub_lane override — see case 0x01 type-8) */
             int prev_idx = span_idx - 1;
+            int effective_sub = compute_effective_sublane(span_idx, pos_x, pos_z);
             if (prev_idx >= 0 && prev_idx < s_span_count) {
                 int prev_lanes = span_lane_count(&s_span_array[prev_idx]);
-                if (*sub_lane >= prev_lanes) {
+                if (effective_sub >= prev_lanes) {
                     new_span = (int)sp->link_prev;
-                    if (new_span < 0 || new_span >= s_span_count)
+                    if (new_span >= 0 && new_span < s_span_count) {
+                        *sub_lane = effective_sub - prev_lanes;
+                    } else {
                         new_span = prev_idx;
+                        *sub_lane = effective_sub;
+                    }
                 } else {
                     new_span = prev_idx;
+                    *sub_lane = effective_sub;
                 }
             } else {
                 new_span = span_idx - 1;
@@ -2157,7 +2222,8 @@ static void update_position_recursive(int16_t *track_state, int32_t pos_x, int32
             break; /* Actor is within the current quad */
 
         switch (bits) {
-        case 1: /* Forward */
+        case 1: { /* Forward */
+            int prev_type = s_span_array[span_idx].span_type;
             new_span = resolve_neighbor(span_idx, &sub_lane, 0x01, pos_x, pos_z);
             span_idx = new_span;
             track_state[0] = (int16_t)new_span;
@@ -2165,9 +2231,26 @@ static void update_position_recursive(int16_t *track_state, int32_t pos_x, int32
             if (track_state[2] > track_state[3])
                 track_state[3] = track_state[2];
             /* Original appends -1 to sub_lane post-step.
-             * [CONFIRMED @ 0x004440F0 case 0x01: `cVar15 + ... + (-1)`] */
+             * [CONFIRMED @ 0x004440F0 case 0x01: `cVar15 + ... + (-1)`]
+             *
+             * Exception for junction transitions (type 8): resolve_neighbor
+             * already set sub_lane to the geometrically correct value on the
+             * new span. Applying the uniform -1 here drives it negative and
+             * corrupts the next iteration's boundary test on the branch span
+             * (observed Newcastle span 635 type-9 entry at sub_lane=-1,
+             * reading vertices outside the span's quad). Match the original's
+             * behavior: it runs a SINGLE step per call (return after write)
+             * so the -1 only affects the stored sub_lane, not the walker's
+             * internal state. We simulate that by breaking out of the loop
+             * after any junction transition and applying -1 only for
+             * non-junction case-1 steps. */
+            if (prev_type == 8) {
+                ((int8_t *)track_state)[12] = (int8_t)sub_lane;
+                return;
+            }
             sub_lane -= 1;
             break;
+        }
 
         case 2: /* Right */
             new_span = resolve_neighbor(span_idx, &sub_lane, 0x02, pos_x, pos_z);
@@ -2191,8 +2274,8 @@ static void update_position_recursive(int16_t *track_state, int32_t pos_x, int32
             int new_span_fwd = resolve_neighbor(span_idx, &stepped_sub, 0x01, pos_x, pos_z);
             TD5_StripSpan *nsp = &s_span_array[new_span_fwd];
             int nt = (nsp->span_type >= 0 && nsp->span_type < 12) ? nsp->span_type : 0;
-            int e40_base = (int)nsp->left_vertex_index  + k_span_vertex_offsets[nt][0];
-            int e41_base = (int)nsp->right_vertex_index + k_span_vertex_offsets[nt][1];
+            int e40_base = (int)nsp->left_vertex_index  + k_quad_vertex_offsets[nt][0];
+            int e41_base = (int)nsp->right_vertex_index + k_quad_vertex_offsets[nt][1];
             int64_t cross1 = compound_cross(nsp,
                                             e40_base + stepped_sub,
                                             e41_base + stepped_sub,
@@ -2228,15 +2311,22 @@ static void update_position_recursive(int16_t *track_state, int32_t pos_x, int32
             break;
         }
 
-        case 4: /* Backward */
+        case 4: { /* Backward */
+            int prev_type = s_span_array[span_idx].span_type;
             new_span = resolve_neighbor(span_idx, &sub_lane, 0x04, pos_x, pos_z);
             span_idx = new_span;
             track_state[0] = (int16_t)new_span;
             track_state[2]--;
             /* Original appends +1 to sub_lane post-step.
-             * [CONFIRMED @ 0x004440F0 case 0x04: `cVar15 + ... + '\x01'`] */
+             * [CONFIRMED @ 0x004440F0 case 0x04: `cVar15 + ... + '\x01'`]
+             * Exception for junction transitions — see case 1 comment. */
+            if (prev_type == 11) {
+                ((int8_t *)track_state)[12] = (int8_t)sub_lane;
+                return;
+            }
             sub_lane += 1;
             break;
+        }
 
         case 6: { /* Right + Backward compound bits — ORIGINAL DOES FWD PRIMARY
                    * [CONFIRMED @ 0x00444CB5 INC probe[2], pass-4 Ghidra].
@@ -2254,8 +2344,8 @@ static void update_position_recursive(int16_t *track_state, int32_t pos_x, int32
             TD5_StripSpan *nsp = &s_span_array[new_span_fwd];
             int nt = (nsp->span_type >= 0 && nsp->span_type < 12) ? nsp->span_type : 0;
             int lc_new = span_lane_count(nsp);
-            int e40_base = (int)nsp->left_vertex_index  + k_span_vertex_offsets[nt][0];
-            int e41_base = (int)nsp->right_vertex_index + k_span_vertex_offsets[nt][1];
+            int e40_base = (int)nsp->left_vertex_index  + k_quad_vertex_offsets[nt][0];
+            int e41_base = (int)nsp->right_vertex_index + k_quad_vertex_offsets[nt][1];
             uint8_t mask1 = (stepped_sub < lc_new - 1) ? 0x0F : s_edge_mask_last[nt];
             if ((mask1 & 0x04) == 0) {
                 span_idx = new_span_fwd;
@@ -2323,8 +2413,8 @@ static void update_position_recursive(int16_t *track_state, int32_t pos_x, int32
             int new_span_fwd = resolve_neighbor(span_idx, &stepped_sub, 0x01, pos_x, pos_z);
             TD5_StripSpan *nsp = &s_span_array[new_span_fwd];
             int nt = (nsp->span_type >= 0 && nsp->span_type < 12) ? nsp->span_type : 0;
-            int e40_base = (int)nsp->left_vertex_index  + k_span_vertex_offsets[nt][0];
-            int e41_base = (int)nsp->right_vertex_index + k_span_vertex_offsets[nt][1];
+            int e40_base = (int)nsp->left_vertex_index  + k_quad_vertex_offsets[nt][0];
+            int e41_base = (int)nsp->right_vertex_index + k_quad_vertex_offsets[nt][1];
             /* case-9 primary cross: v_a=e41 (psVar3), v_b=e40 (psVar2) */
             int64_t cross1 = compound_cross(nsp,
                                             e41_base + stepped_sub,
@@ -2379,8 +2469,8 @@ static void update_position_recursive(int16_t *track_state, int32_t pos_x, int32
             TD5_StripSpan *nsp = &s_span_array[new_span_back];
             int nt = (nsp->span_type >= 0 && nsp->span_type < 12) ? nsp->span_type : 0;
             int lc_new = span_lane_count(nsp);
-            int e40_base = (int)nsp->left_vertex_index  + k_span_vertex_offsets[nt][0];
-            int e41_base = (int)nsp->right_vertex_index + k_span_vertex_offsets[nt][1];
+            int e40_base = (int)nsp->left_vertex_index  + k_quad_vertex_offsets[nt][0];
+            int e41_base = (int)nsp->right_vertex_index + k_quad_vertex_offsets[nt][1];
             uint8_t mask1 = (stepped_sub < lc_new - 1) ? 0x0F : s_edge_mask_last[nt];
             if ((mask1 & 0x04) == 0) {
                 span_idx = new_span_back;

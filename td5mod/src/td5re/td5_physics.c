@@ -3864,10 +3864,22 @@ void td5_physics_refresh_wheel_contacts(TD5_Actor *actor)
         int probe_span = actor->wheel_probes[i].span_index;
         int probe_ok = 0;
 
-        if (probe_span < 0 || probe_span >= g_td5.track_span_ring_length)
-            probe_span = actor->track_span_raw;
-        if (probe_span < 0 || probe_span >= g_td5.track_span_ring_length)
-            probe_span = 0;  /* absolute fallback */
+        /* Per-wheel probe span bounds check.
+         *
+         * Use the FULL physical span count (td5_track_get_span_count) — branch
+         * spans are indices [ring_length, s_span_count) and must be probed
+         * directly, not rejected. The earlier `probe_span >= ring_length`
+         * fallback mis-classified branch spans as invalid and forced every
+         * wheel to read ground_y from span 0, which on Newcastle made all
+         * wheels report force > 0x800 → airborne bitmask 0x0F → chassis
+         * Y-snap skipped → car freefell through the branch road. */
+        {
+            int max_sp = td5_track_get_span_count();
+            if (probe_span < 0 || probe_span >= max_sp)
+                probe_span = actor->track_span_raw;
+            if (probe_span < 0 || probe_span >= max_sp)
+                probe_span = 0;  /* absolute fallback */
+        }
 
         /* Use the wheel probe's own sub_lane for height computation.
          * The original (0x403720 → 0x4457E0) passes the per-wheel probe
