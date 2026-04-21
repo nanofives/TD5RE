@@ -201,4 +201,19 @@ int32_t td5_track_compute_spline_position(int span_index, int segment_distance,
 int  td5_track_sample_target_point(int span_index, int route_byte,
                                     int *out_x, int *out_z, int lateral_bias);
 
+/* --- AI target span remap (0x00435180-0x00435260 inside UpdateActorTrackBehavior)
+ * Remaps a linear-advanced span index through the STRIP.DAT junction table
+ * when the actor is on a non-canonical route (i.e. NOT the LEFT.TRK route).
+ * Record layout per [CONFIRMED @ 0x00435218] walker disasm:
+ *   +0 u16 remap_dst
+ *   +2 u16 remap_end_exclusive
+ *   +4 u16 range_lo
+ * Match condition: range_lo <= lin <= range_lo + (remap_end_excl - remap_dst) - 1.
+ * Remap formula: cand = (remap_dst - range_lo) + lin. If cand == -1 sentinel,
+ * remap is suppressed and lin is returned unchanged. Walker exits on first
+ * match (break semantics).
+ * Pass `is_canonical_route=1` when the actor's route_ptr equals LEFT.TRK (the
+ * walker is skipped in that case). */
+int  td5_track_apply_target_span_remap(int lin_span, int is_canonical_route);
+
 #endif /* TD5_TRACK_H */

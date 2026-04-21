@@ -1188,23 +1188,30 @@ static inline void vertex_world_pos(const TD5_StripSpan *sp,
 }
 
 /**
- * Per-span-type vertex index offsets from original binary (0x474E40/41).
- * Junction span types shift one side's vertex base by -1.
- * Indexed by span_type: [left_offset, right_offset].
+ * Per-span-type vertex index offsets from original binary.
+ * [CONFIRMED @ 0x00473c68] raw DAT_00473c68 int32[8][2] table values.
+ * Column 0 is used by SampleTrackTargetPoint (0x00434800) as the offset
+ * applied to left_vertex_index to pick the interpolation "right" vertex.
+ * Prior port values diverged at types 2, 4, 5, 6, 7 — observed effect was
+ * that AI look-ahead target at slot 1 spawn on Moscow gave dx/dz only
+ * ~5000 units forward instead of ~80000 (15× short). Table alone only
+ * fixes this if the actor's target-span type hits one of the corrected
+ * rows; the primary spin-out cause is the missing junction-remap walk
+ * around td5_ai.c:1411 (NOT yet implemented).
  */
 static const int8_t k_span_vertex_offsets[12][2] = {
-    /* type  0 */ {  0,  0 },  /* sentinel start */
-    /* type  1 */ {  0,  0 },  /* normal */
-    /* type  2 */ {  0,  0 },  /* normal */
-    /* type  3 */ { -1,  0 },  /* junction (left shift) */
-    /* type  4 */ { -1,  0 },  /* junction (left shift) */
-    /* type  5 */ {  0,  0 },  /* normal variant */
-    /* type  6 */ {  0, -1 },  /* junction (right shift) */
-    /* type  7 */ {  0, -1 },  /* junction (right shift) */
-    /* type  8 */ {  0,  0 },  /* forward junction */
-    /* type  9 */ {  0,  0 },  /* sentinel wrap-start */
-    /* type 10 */ {  0,  0 },  /* sentinel wrap-end */
-    /* type 11 */ {  0,  0 },  /* reverse junction */
+    /* type  0 */ {  0,  0 },
+    /* type  1 */ {  0,  0 },
+    /* type  2 */ { -1,  0 },
+    /* type  3 */ { -1,  0 },
+    /* type  4 */ { -2,  0 },
+    /* type  5 */ { -1,  0 },
+    /* type  6 */ { -1, -1 },
+    /* type  7 */ { -2, -1 },
+    /* type  8 */ {  0,  0 },
+    /* type  9 */ {  0,  0 },
+    /* type 10 */ {  0,  0 },
+    /* type 11 */ {  0,  0 },
 };
 
 /**
@@ -3219,6 +3226,62 @@ int td5_track_sample_target_point(int span_index, int route_byte,
     if (out_x) *out_x = result_x;
     if (out_z) *out_z = result_z;
     return 1;
+}
+
+/* ========================================================================
+ * Target-span junction remap
+ * Port of the walker inside UpdateActorTrackBehavior @
+ * 0x00435180-0x00435260. Only runs when actor's route_ptr != LEFT.TRK
+ * (LEFT is the canonical route that uses linear span advance).
+ * ======================================================================== */
+int td5_track_apply_target_span_remap(int lin_span, int is_canonical_route)
+{
+    /* Wrap lin into [0, span_count). Mirrors original's JL/SUB at 0x004351F2. */
+    int target_span;
+    int lin;
+    int i;
+
+    if (s_span_count <= 0) return lin_span;
+
+    lin = lin_span;
+    if (lin >= s_span_count) lin -= s_span_count;
+    if (lin < 0) lin += s_span_count;
+    target_span = lin;
+
+    /* Canonical (LEFT) route skips the walker — linear advance only. */
+    if (is_canonical_route) return target_span;
+
+    if (!s_jump_entries || s_jump_entry_count <= 0) return target_span;
+
+    for (i = 0; i < s_jump_entry_count; ++i) {
+        /* [CONFIRMED @ 0x00435218] walker field layout (stride 6, per entry):
+         *   u16 remap_dst           at +0
+         *   u16 remap_end_exclusive at +2
+         *   u16 range_lo            at +4
+         * DO NOT confuse with the port's other walkers at td5_track.c:2013 and
+         * td5_track.c:2829 which (currently) treat +0 as start-of-range — those
+         * are separate code paths for branch-return handling; this walker uses
+         * the authoritative Ghidra-confirmed layout for AI target remapping. */
+        const uint8_t *entry = s_jump_entries + i * 6;
+        uint32_t remap_dst     = *(const uint16_t *)(entry + 0);
+        uint32_t remap_end_exc = *(const uint16_t *)(entry + 2);
+        uint32_t range_lo      = *(const uint16_t *)(entry + 4);
+        int len = (int)remap_end_exc - (int)remap_dst;
+        int range_hi;
+        int cand;
+
+        if (len <= 0) continue;
+        range_hi = (int)range_lo + len - 1;
+
+        if (lin < (int)range_lo || lin > range_hi) continue;
+
+        cand = ((int)remap_dst - (int)range_lo) + lin;
+        if (cand != -1) target_span = cand;
+        /* Original breaks on first range match regardless of cand sentinel. */
+        break;
+    }
+
+    return target_span;
 }
 
 /* ========================================================================

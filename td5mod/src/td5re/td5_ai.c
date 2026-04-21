@@ -566,9 +566,13 @@ void td5_ai_init_race_actor_runtime(void) {
         rs[RS_RECOVERY_STAGE] = 0;
         rs[RS_DIRECTION_POLARITY] = 0;
 
-        if (g_actor_base) {
-            selector = (ACTOR_U8(actor_ptr(i), ACTOR_SUB_LANE_INDEX) >= 2u) ? 1 : 0;
-        }
+        /* [CONFIRMED via InitializeRaceActorRuntime @ 0x00432e60 decomp]
+         * Route-table selection is by slot parity, not sub_lane:
+         *   (slot & 1) == 1 (odd)  → LEFT.TRK  (selector 0, canonical)
+         *   (slot & 1) == 0 (even) → RIGHT.TRK (selector 1, junction remap active)
+         * Prior port used `sub_lane >= 2` which left ALL slots on LEFT and
+         * silently disabled the AI junction-remap walker (td5_ai.c:~1440). */
+        selector = (i & 1) ? 0 : 1;
         rs[RS_ROUTE_TABLE_SELECTOR] = selector;
         rs[RS_ROUTE_TABLE_PTR] = (int32_t)(intptr_t)g_route_tables[selector];
         g_last_logged_opcode[i] = -1;
@@ -1151,12 +1155,18 @@ int td5_ai_advance_track_script(int *rs) {
             rs[RS_SCRIPT_FLAGS] &= ~0x04;
             ACTOR_I32(actor, ACTOR_STEERING_CMD) = 0;
         } else {
-            /* Apply leftward steering: +0x4000 per tick, max 0x19000 */
+            /* Apply leftward steering: +0x4000 per tick, max 0x19000.
+             * [CONFIRMED @ 0x004370A0] original falls through to opcode
+             * switch after this increment — does NOT return 0. The
+             * previous `return 0` was port-fabricated and pinned
+             * STEERING_CMD at +0x19000 forever, preventing opcode 0
+             * (script-terminator) from ever clearing the script. */
             int32_t sc = ACTOR_I32(actor, ACTOR_STEERING_CMD);
             sc += 0x4000;
             if (sc > 0x19000) sc = 0x19000;
             ACTOR_I32(actor, ACTOR_STEERING_CMD) = sc;
-            return 0; /* block until aligned */
+            TD5_LOG_I(LOG_TAG, "script_flag04: slot=%d sc=%d hdelta=0x%X",
+                      slot, sc, hdelta);
         }
     }
 
@@ -1170,11 +1180,14 @@ int td5_ai_advance_track_script(int *rs) {
             rs[RS_SCRIPT_FLAGS] &= ~0x08;
             ACTOR_I32(actor, ACTOR_STEERING_CMD) = 0;
         } else {
+            /* [CONFIRMED @ 0x004370A0] symmetric mirror of flag 0x04 —
+             * no return 0 in original. */
             int32_t sc = ACTOR_I32(actor, ACTOR_STEERING_CMD);
             sc -= 0x4000;
             if (sc < -0x19000) sc = -0x19000;
             ACTOR_I32(actor, ACTOR_STEERING_CMD) = sc;
-            return 0; /* block */
+            TD5_LOG_I(LOG_TAG, "script_flag08: slot=%d sc=%d hdelta=0x%X",
+                      slot, sc, hdelta);
         }
     }
 
@@ -1330,6 +1343,18 @@ void td5_ai_update_track_behavior(int slot) {
     if (g_td5.time_trial_enabled)
         return;
 
+    /* AI probe (debug-level): state matching frida_ai_probe.js for side-by-side
+     * diff. Keep at TD5_LOG_D to avoid flooding INFO logs. Match fields with
+     * tools/frida_ai_probe.js UAB onLeave sample. */
+    TD5_LOG_D(LOG_TAG, "ai_probe: slot=%d yaw=%d steer=%d wx=%d wz=%d lspd=%d ld=%d rd=%d",
+              slot,
+              ACTOR_I32(actor, ACTOR_YAW_ACCUM),
+              ACTOR_I32(actor, ACTOR_STEERING_CMD),
+              ACTOR_I32(actor, 0x1FC),
+              ACTOR_I32(actor, 0x204),
+              ACTOR_I32(actor, 0x314),
+              rs[RS_LEFT_DEVIATION], rs[RS_RIGHT_DEVIATION]);
+
     /* No countdown pre-seed: the original at 0x00434FE0 has NO countdown
      * gate and NO paused-branch write of encounter_steering_cmd (+0x33E) /
      * brake_flag (+0x36D) — the cascade below reaches
@@ -1372,8 +1397,11 @@ void td5_ai_update_track_behavior(int slot) {
         adjusted = (adjusted - 0x800U) & 0xFFF;
         hdelta = (int32_t)(-(int32_t)adjusted) & 0xFFF;
 
-        if (hdelta > 0x800 && hdelta <= 0xCE0) {
-            TD5_LOG_D(LOG_TAG, "recovery: slot=%d hdelta=0x%X heading=0x%X route=0x%X",
+        /* [CONFIRMED @ 0x00434FE0] decomp: if ((800 < uVar3) && (uVar3 < 0xce0))
+         * — 800 is DECIMAL (= 0x320), upper is strict <. Port previously had
+         * 0x800 and <=, treating Ghidra's decimal render as hex. */
+        if (hdelta > 0x320 && hdelta < 0xCE0) {
+            TD5_LOG_I(LOG_TAG, "recovery: slot=%d hdelta=0x%X heading=0x%X route=0x%X",
                       slot, hdelta, heading & 0xFFF, route_heading & 0xFFF);
             /* Significant misalignment: assign initial recovery script [8, 9, 0] */
             rs[RS_SCRIPT_BASE_PTR] = (int32_t)(intptr_t)g_script_init_recovery;
@@ -1407,8 +1435,23 @@ void td5_ai_update_track_behavior(int slot) {
         int16_t span = ACTOR_I16(actor, ACTOR_SPAN_RAW);
         int span_count = td5_track_get_span_count();
         if (span_count > 0 && span >= 0) {
-            /* (a) Target span: 4 spans ahead, wrapped [CONFIRMED @ 0x43514D] */
-            int target_span = ((int)span + 4) % span_count;
+            /* (a) Target span: 4 spans ahead, then remap through junction
+             * table when the actor is NOT on the LEFT.TRK (canonical) route.
+             * [CONFIRMED @ 0x00435180-0x00435260] Original walks
+             * DAT_004c3da0 (= STRIP.DAT +0x14/+0x18) to jump across track
+             * junctions to a physically-farther span; without this, the AI
+             * target_angle is computed against a too-close point, producing
+             * tiny first-tick deviations that land outside the cascade's
+             * direct-add band and prevent the port from reaching the
+             * saturated→wrap→stable oscillation regime the original uses.
+             *
+             * `is_canonical_route` = rs[RS_ROUTE_TABLE_SELECTOR] == 0
+             * which the init path at td5_ai.c:573 maps to g_route_tables[0]
+             * (LEFT.TRK). Original gates on pointer equality to DAT_004afb58
+             * (LEFT.TRK blob ptr) — same intent. */
+            int is_canonical = (rs[RS_ROUTE_TABLE_SELECTOR] == 0);
+            int lin_span = ((int)span + 4) % span_count;
+            int target_span = td5_track_apply_target_span_remap(lin_span, is_canonical);
 
             /* Spline progress update (original also does this) */
             {
@@ -1444,6 +1487,11 @@ void td5_ai_update_track_behavior(int slot) {
                     int32_t actor_z = ACTOR_I32(actor, ACTOR_WORLD_POS_Z);
                     int32_t dx = (target_x - actor_x) >> 8;
                     int32_t dz = (target_z - actor_z) >> 8;
+
+                    /* target_probe (debug-level): AI look-ahead target per tick. */
+                    TD5_LOG_D(LOG_TAG, "target_probe: slot=%d span=%d lin=%d tspan=%d rb=%d tx=%d tz=%d dx=%d dz=%d sel=%d",
+                              slot, (int)span, lin_span, target_span, route_byte,
+                              target_x, target_z, dx, dz, (int)rs[RS_ROUTE_TABLE_SELECTOR]);
 
                     /* (d) Compute target angle using atan2 equivalent
                      * [CONFIRMED @ 0x4352CB-0x435336: no +0x800 on target]
