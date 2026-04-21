@@ -992,6 +992,20 @@ int td5_game_init_race_session(void) {
         if (start_span <= 0)
             start_span = (track_span_count > 0) ? track_span_count : 1;
 
+        /* Shared quickrace INI `start_span_offset`: mirrors the Frida hook
+         * on InitializeActorTrackPose (0x00434350) which additively shifts
+         * every actor's span arg. Wraps at the span ring length so negative
+         * or ring-overshooting offsets behave like the hook does. */
+        if (g_td5.ini.start_span_offset != 0 && track_span_count > 0) {
+            int shifted = start_span + g_td5.ini.start_span_offset;
+            while (shifted < 0)           shifted += track_span_count;
+            while (shifted >= track_span_count) shifted -= track_span_count;
+            TD5_LOG_I(LOG_TAG,
+                      "Grid start shifted by start_span_offset=%d: %d -> %d",
+                      g_td5.ini.start_span_offset, start_span, shifted);
+            start_span = shifted;
+        }
+
         /* Publish start_span as g_trackStartSpanIndex — consumed by the
          * circuit 4-case sector dispatch in advance_pending_finish_state
          * (verbatim port of CheckRaceCompletionState @ 0x00409E80). */

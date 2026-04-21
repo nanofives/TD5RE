@@ -47,6 +47,8 @@ TD5RE_EXE = REPO / "td5re.exe"
 LOG_DIR = REPO / "log"
 ORIG_CSV = LOG_DIR / "race_trace_original.csv"
 PORT_CSV = LOG_DIR / "race_trace.csv"
+ORIG_CALLS_CSV = LOG_DIR / "calls_trace_original.csv"
+PORT_CALLS_CSV = LOG_DIR / "calls_trace.csv"
 
 
 def parse_args():
@@ -59,6 +61,12 @@ def parse_args():
                     help="0=single race (default); see quickrace.ini for others")
     ap.add_argument("--laps", type=int, default=1,
                     help="circuit laps (capture only ~3 s so 1 is plenty)")
+    ap.add_argument("--start-span-offset", type=int, default=0,
+                    help="shift every actor's spawn span by this many units "
+                         "along the track ring. Forwarded to the shared "
+                         "quickrace INI's [race] start_span_offset. Both the "
+                         "Frida hook on InitializeActorTrackPose and the port "
+                         "spawn loop apply it. Default 0 = vanilla grid.")
     ap.add_argument("--seconds", type=float, default=15.0,
                     help="in-game race seconds to capture after countdown ends. "
                          "At 30 Hz sim rate this becomes sim_tick = seconds * 30 "
@@ -88,6 +96,13 @@ def parse_args():
                     help="per-field float tolerance for the comparator")
     ap.add_argument("--keep-traces", action="store_true",
                     help="do not rename the CSVs after the run")
+    ap.add_argument("--hooks", default=None,
+                    help="path to a hook-specs YAML/JSON file "
+                         "(see re/trace-hooks/README.md). Frida attaches to "
+                         "the listed functions; the port emits matching rows "
+                         "via TD5_TRACE_CALL_ENTER/RET macros. Comparator will "
+                         "diff the calls_trace CSVs in addition to the main "
+                         "race_trace CSVs.")
     return ap.parse_args()
 
 
@@ -171,6 +186,8 @@ def patch_quickrace_ini(args):
     raw = _set(r"^track\s*=.*$",         f"track = {args.track}", raw)
     raw = _set(r"^laps\s*=.*$",          f"laps = {args.laps}", raw)
     raw = _set(r"^car\s*=.*$",           f"car = {args.car}", raw)
+    raw = _set(r"^start_span_offset\s*=.*$",
+               f"start_span_offset = {args.start_span_offset}", raw)
     QUICKRACE_INI.write_text(raw, encoding="utf-8")
 
 
@@ -182,6 +199,8 @@ def run_original(args):
     """Spawn TD5_d3d.exe with quickrace + trace, wait for auto-exit."""
     if ORIG_CSV.exists():
         ORIG_CSV.unlink()
+    if ORIG_CALLS_CSV.exists():
+        ORIG_CALLS_CSV.unlink()
     sim_tick_cap = int(args.seconds * 30)
     cmd = [
         sys.executable, "-u", str(QUICKRACE_PY),
@@ -190,6 +209,8 @@ def run_original(args):
         "--trace-max-sim-tick", str(sim_tick_cap),
         "--trace-auto-exit",
     ]
+    if args.hooks:
+        cmd += ["--hook-specs", str(args.hooks)]
     print(f"[diff_race] running original: {' '.join(cmd)}")
     # Give the spawn + race a generous timeout proportional to the seconds arg.
     timeout = max(45, int(args.seconds * 4) + 20)
@@ -213,6 +234,8 @@ def run_port(args):
         try:
             if PORT_CSV.exists():
                 PORT_CSV.unlink()
+            if PORT_CALLS_CSV.exists():
+                PORT_CALLS_CSV.unlink()
             break
         except PermissionError:
             time.sleep(0.2)
@@ -291,6 +314,29 @@ def run_compare(args):
     return subprocess.run(cmd, cwd=str(REPO))
 
 
+def run_compare_calls(args):
+    """Run a second comparator pass on calls_trace_*.csv when --hooks is set.
+    Uses a separate key schema (sim_tick, fn_name, call_idx) and diffs every
+    arg_N column plus ret/has_ret. Float-tol is still applied in case args
+    contain reinterpret-cast float bits that match closely enough."""
+    if not args.hooks:
+        return None
+    if not ORIG_CALLS_CSV.exists() or not PORT_CALLS_CSV.exists():
+        print("[diff_race] calls_trace CSVs missing — skipping calls compare")
+        print(f"  original: exists={ORIG_CALLS_CSV.exists()} ({ORIG_CALLS_CSV})")
+        print(f"  port:     exists={PORT_CALLS_CSV.exists()} ({PORT_CALLS_CSV})")
+        return None
+    cmd = [
+        sys.executable, "-u", str(COMPARE_PY),
+        str(ORIG_CALLS_CSV), str(PORT_CALLS_CSV),
+        "--key-fields", "sim_tick,fn_name,call_idx",
+        "--float-tol", str(args.float_tol),
+        "--dedupe", args.dedupe,
+    ]
+    print(f"[diff_race] comparing calls: {' '.join(cmd)}")
+    return subprocess.run(cmd, cwd=str(REPO))
+
+
 # ---------------------------------------------------------------------------
 # main
 # ---------------------------------------------------------------------------
@@ -314,11 +360,17 @@ def main():
 
         print(f"[diff_race] scenario: car={args.car} track={args.track} "
               f"game_type={args.game_type} laps={args.laps} "
+              f"start_span_offset={args.start_span_offset} "
               f"seconds={args.seconds} (sim_tick_cap={int(args.seconds * 30)})")
 
         run_original(args)
         run_port(args)
         compare = run_compare(args)
+        calls_compare = run_compare_calls(args)
+        if calls_compare and calls_compare.returncode != 0 and compare.returncode == 0:
+            # If the main compare passed but the calls compare found a
+            # divergence, surface that as the overall failure.
+            compare = calls_compare
 
     finally:
         restore(TD5RE_INI, td5re_snap)

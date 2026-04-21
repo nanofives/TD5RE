@@ -1188,29 +1188,57 @@ static inline void vertex_world_pos(const TD5_StripSpan *sp,
 }
 
 /**
- * Per-span-type vertex index offsets from original binary DAT_00473c68.
- * Column 0 is read by SampleTrackTargetPoint (0x00434836) as the offset
- * applied to (left_vertex_index + lane_count) to pick the interpolation
- * "right" vertex. Column 1 is read by OTHER functions (0x4345E4,
- * 0x4346A3, 0x00434764) — not this function — so its semantics are
- * currently unverified and untouched here.
+ * Per-span-type vertex index offsets — DAT_00473c68 (int32, stride 8).
+ * Read by SampleTrackTargetPoint (0x00434836) ONLY: col[0] applied to
+ * (left_vertex_index + lane_count) to pick the 2-vertex interpolation
+ * "right" vertex. Col[1] is not read by this function.
  *
- * Column 0 verified [CONFIRMED @ 0x00473C68 via memory_read, xref @ 0x00434836]
+ * Col 0 verified [CONFIRMED @ 0x00473C68 via memory_read, xref @ 0x00434836]
  * against original binary 2026-04-20:
  *   row: 0  1  2  3  4  5  6  7  8  9 10 11
  *   val: 0  0 -1 -1 -2  0  0  0  0  0  0  0
- * Prior port had col[0] = { 0, 0, -1, -1, -2, -1, -1, -2, 0, 0, 0, 0 } —
- * rows 5/6/7 were off. The -1 and -2 at those types made the "right"
- * vertex collapse onto the "left" vertex for AI look-ahead on junction
- * spans, which produced a zero edge delta and left only the origin_x/z
- * contribution (≈1/15 of the full interpolated target).
  */
-static const int8_t k_span_vertex_offsets[12][2] = {
+static const int8_t k_target_vertex_offsets[12][2] = {
     /* type  0 */ {  0,  0 },
     /* type  1 */ {  0,  0 },
     /* type  2 */ { -1,  0 },
     /* type  3 */ { -1,  0 },
     /* type  4 */ { -2,  0 },
+    /* type  5 */ {  0,  0 },
+    /* type  6 */ {  0,  0 },
+    /* type  7 */ {  0,  0 },
+    /* type  8 */ {  0,  0 },
+    /* type  9 */ {  0,  0 },
+    /* type 10 */ {  0,  0 },
+    /* type 11 */ {  0,  0 },
+};
+
+/**
+ * Per-span-type vertex index offsets — DAT_00474E40 / DAT_00474E41
+ * (int8 pairs, stride 2). Read by InitActorTrackSegmentPlacement
+ * (0x00445F10) when averaging 4 vertices (near+near+1 + far+far+1) to
+ * place the actor in world space at spawn and ground-snap.
+ *
+ * Col 0 ("near" / left rail offset)  = DAT_00474E40
+ * Col 1 ("far"  / right rail offset) = DAT_00474E41
+ *
+ * [CONFIRMED @ 0x00474E40 via memory_read, xref @ 0x00445F23/0x00445F2E]:
+ *   row:   0   1   2   3   4   5   6   7   8   9  10  11
+ *   col0:  0   0   0  -1  -1   0   0   0   0   0   0   0
+ *   col1:  0   0   0   0   0   0  -1  -1   0   0   0   0
+ *
+ * This differs from DAT_00473C68 at types 2 and 4 (+0/+1 shift vs +1/+2
+ * in the AI-target table). Conflating them caused Moscow spawn at span
+ * offsets that land on type-2/4 spans to read vertex indices 1–2 apart
+ * from the original, placing the actor hundreds of thousands of world
+ * units off the intended edge.
+ */
+static const int8_t k_quad_vertex_offsets[12][2] = {
+    /* type  0 */ {  0,  0 },
+    /* type  1 */ {  0,  0 },
+    /* type  2 */ {  0,  0 },
+    /* type  3 */ { -1,  0 },
+    /* type  4 */ { -1,  0 },
     /* type  5 */ {  0,  0 },
     /* type  6 */ {  0, -1 },
     /* type  7 */ {  0, -1 },
@@ -1223,7 +1251,8 @@ static const int8_t k_span_vertex_offsets[12][2] = {
 /**
  * Get the 4 corner vertex indices for a span quad at a given sub-lane.
  * Returns: vl0, vl1 (left pair), vr0, vr1 (right pair).
- * Applies per-span-type vertex index offsets for junction geometry.
+ * Applies DAT_00474E40/E41 per-span-type offsets — this is the spawn /
+ * ground-snap / world-pose semantic, NOT the AI-target-point semantic.
  */
 static void get_quad_vertices(const TD5_StripSpan *sp, int sub_lane,
                                int *vl0, int *vl1, int *vr0, int *vr1)
@@ -1231,8 +1260,8 @@ static void get_quad_vertices(const TD5_StripSpan *sp, int sub_lane,
     int type = sp->span_type;
     int left_off = 0, right_off = 0;
     if (type >= 0 && type < 12) {
-        left_off  = k_span_vertex_offsets[type][0];
-        right_off = k_span_vertex_offsets[type][1];
+        left_off  = k_quad_vertex_offsets[type][0];
+        right_off = k_quad_vertex_offsets[type][1];
     }
     int li = left_off  + sp->left_vertex_index  + sub_lane;
     int ri = right_off + sp->right_vertex_index + sub_lane;
@@ -1715,15 +1744,12 @@ static uint8_t compute_boundary_bits(int span_idx, int sub_lane,
     if (lane_count < 1) lane_count = 1;
 
     /* Apply per-span-type lane offset (DAT_00474e40 left / DAT_00474e41 right).
-     * Types 3,4 use left=-1; types 5,6 use right=-1. All others 0.
-     * Without this, junction-end-cap spans hit the wrong vertex pair and
-     * the cross tests fire false positives.
      * [CONFIRMED @ 0x00444208-0x00444336, LUT verified at 0x00474e40] */
     int left_off  = 0;
     int right_off = 0;
     if (sp->span_type >= 0 && sp->span_type < 12) {
-        left_off  = k_span_vertex_offsets[sp->span_type][0];
-        right_off = k_span_vertex_offsets[sp->span_type][1];
+        left_off  = k_quad_vertex_offsets[sp->span_type][0];
+        right_off = k_quad_vertex_offsets[sp->span_type][1];
     }
 
     /* Get the 4 corner vertices for this sub-lane */
@@ -3177,11 +3203,12 @@ int td5_track_sample_target_point(int span_index, int route_byte,
      * `pbVar1[3] & 0xf`] — do not clamp to >=1 here. */
     lane_count = span_lane_count(sp);
 
-    /* Span-type vertex offset [CONFIRMED @ 0x00434836: DAT_00473c68]
-     * Uses the left column of k_span_vertex_offsets for the right-side vertex */
+    /* Span-type vertex offset [CONFIRMED @ 0x00434836: DAT_00473c68].
+     * This is the AI-target-point table, distinct from the spawn/ground-snap
+     * k_quad_vertex_offsets (DAT_00474E40). */
     type_offset = 0;
     if (sp->span_type >= 0 && sp->span_type < 12)
-        type_offset = k_span_vertex_offsets[sp->span_type][0];
+        type_offset = k_target_vertex_offsets[sp->span_type][0];
 
     /* Two-vertex lookup [CONFIRMED @ 0x00434803-0x00434862]
      * left  = vertex_table[left_vertex_index]
