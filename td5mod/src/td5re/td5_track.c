@@ -1188,16 +1188,22 @@ static inline void vertex_world_pos(const TD5_StripSpan *sp,
 }
 
 /**
- * Per-span-type vertex index offsets from original binary.
- * [CONFIRMED @ 0x00473c68] raw DAT_00473c68 int32[8][2] table values.
- * Column 0 is used by SampleTrackTargetPoint (0x00434800) as the offset
- * applied to left_vertex_index to pick the interpolation "right" vertex.
- * Prior port values diverged at types 2, 4, 5, 6, 7 — observed effect was
- * that AI look-ahead target at slot 1 spawn on Moscow gave dx/dz only
- * ~5000 units forward instead of ~80000 (15× short). Table alone only
- * fixes this if the actor's target-span type hits one of the corrected
- * rows; the primary spin-out cause is the missing junction-remap walk
- * around td5_ai.c:1411 (NOT yet implemented).
+ * Per-span-type vertex index offsets from original binary DAT_00473c68.
+ * Column 0 is read by SampleTrackTargetPoint (0x00434836) as the offset
+ * applied to (left_vertex_index + lane_count) to pick the interpolation
+ * "right" vertex. Column 1 is read by OTHER functions (0x4345E4,
+ * 0x4346A3, 0x00434764) — not this function — so its semantics are
+ * currently unverified and untouched here.
+ *
+ * Column 0 verified [CONFIRMED @ 0x00473C68 via memory_read, xref @ 0x00434836]
+ * against original binary 2026-04-20:
+ *   row: 0  1  2  3  4  5  6  7  8  9 10 11
+ *   val: 0  0 -1 -1 -2  0  0  0  0  0  0  0
+ * Prior port had col[0] = { 0, 0, -1, -1, -2, -1, -1, -2, 0, 0, 0, 0 } —
+ * rows 5/6/7 were off. The -1 and -2 at those types made the "right"
+ * vertex collapse onto the "left" vertex for AI look-ahead on junction
+ * spans, which produced a zero edge delta and left only the origin_x/z
+ * contribution (≈1/15 of the full interpolated target).
  */
 static const int8_t k_span_vertex_offsets[12][2] = {
     /* type  0 */ {  0,  0 },
@@ -1205,9 +1211,9 @@ static const int8_t k_span_vertex_offsets[12][2] = {
     /* type  2 */ { -1,  0 },
     /* type  3 */ { -1,  0 },
     /* type  4 */ { -2,  0 },
-    /* type  5 */ { -1,  0 },
-    /* type  6 */ { -1, -1 },
-    /* type  7 */ { -2, -1 },
+    /* type  5 */ {  0,  0 },
+    /* type  6 */ {  0, -1 },
+    /* type  7 */ {  0, -1 },
     /* type  8 */ {  0,  0 },
     /* type  9 */ {  0,  0 },
     /* type 10 */ {  0,  0 },
@@ -3166,18 +3172,18 @@ int td5_track_sample_target_point(int span_index, int route_byte,
     if (sp->span_type == 9 || sp->span_type == 10)
         return 0;
 
-    /* Lane count from geometry metadata (low nibble of byte +0x03)
-     * [CONFIRMED @ 0x434836] */
+    /* Lane count from geometry metadata (low nibble of byte +0x03).
+     * Original reads the raw nibble with no clamp [CONFIRMED @ 0x00434836:
+     * `pbVar1[3] & 0xf`] — do not clamp to >=1 here. */
     lane_count = span_lane_count(sp);
-    if (lane_count < 1) lane_count = 1;
 
-    /* Span-type vertex offset [CONFIRMED @ 0x434836: DAT_00473c68]
+    /* Span-type vertex offset [CONFIRMED @ 0x00434836: DAT_00473c68]
      * Uses the left column of k_span_vertex_offsets for the right-side vertex */
     type_offset = 0;
     if (sp->span_type >= 0 && sp->span_type < 12)
         type_offset = k_span_vertex_offsets[sp->span_type][0];
 
-    /* Two-vertex lookup [CONFIRMED @ 0x434803-0x434862]
+    /* Two-vertex lookup [CONFIRMED @ 0x00434803-0x00434862]
      * left  = vertex_table[left_vertex_index]
      * right = vertex_table[left_vertex_index + type_offset + lane_count] */
     v_left  = vertex_at((int)sp->left_vertex_index);
@@ -3225,6 +3231,27 @@ int td5_track_sample_target_point(int span_index, int route_byte,
 
     if (out_x) *out_x = result_x;
     if (out_z) *out_z = result_z;
+
+    /* Temporary diagnostic: first few calls dump the full field set so we
+     * can cross-check against a Frida capture of the original's 0x00434800.
+     * Remove once the Moscow slot-1 target numbers match. */
+    {
+        static int s_probe_count = 0;
+        if (s_probe_count < 16) {
+            s_probe_count++;
+            TD5_LOG_I(LOG_TAG,
+                "target_point_probe span=%d type=%d lvi=%d lc=%d toff=%d "
+                "ox=%d oz=%d vl=(%d,%d) vr=(%d,%d) rb=%d lb=%d rx=%d rz=%d",
+                span_index, (int)sp->span_type,
+                (int)sp->left_vertex_index, lane_count, type_offset,
+                (int)sp->origin_x, (int)sp->origin_z,
+                (int)v_left->x,  (int)v_left->z,
+                (int)v_right->x, (int)v_right->z,
+                route_byte, lateral_bias,
+                result_x, result_z);
+        }
+    }
+
     return 1;
 }
 
