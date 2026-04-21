@@ -1488,10 +1488,14 @@ void td5_ai_update_track_behavior(int slot) {
                     int32_t dx = (target_x - actor_x) >> 8;
                     int32_t dz = (target_z - actor_z) >> 8;
 
-                    /* target_probe (debug-level): AI look-ahead target per tick. */
-                    TD5_LOG_D(LOG_TAG, "target_probe: slot=%d span=%d lin=%d tspan=%d rb=%d tx=%d tz=%d dx=%d dz=%d sel=%d",
+                    /* target_probe: AI look-ahead target per tick.
+                     * Upgraded to INFO for /fix session 1776736681 — diagnoses
+                     * Moscow spin-out (dx ~5000 vs orig ~80000). Revert to
+                     * TD5_LOG_D once the 15× symptom is understood. */
+                    TD5_LOG_I(LOG_TAG, "target_probe: slot=%d span=%d lin=%d tspan=%d rb=%d tx=%d tz=%d dx=%d dz=%d sel=%d actor=(%d,%d)",
                               slot, (int)span, lin_span, target_span, route_byte,
-                              target_x, target_z, dx, dz, (int)rs[RS_ROUTE_TABLE_SELECTOR]);
+                              target_x, target_z, dx, dz, (int)rs[RS_ROUTE_TABLE_SELECTOR],
+                              actor_x, actor_z);
 
                     /* (d) Compute target angle using atan2 equivalent
                      * [CONFIRMED @ 0x4352CB-0x435336: no +0x800 on target]
