@@ -1752,66 +1752,102 @@ void td5_physics_update_ai(TD5_Actor *actor)
 
 void td5_physics_update_traffic(TD5_Actor *actor)
 {
+    /* Literal port of IntegrateVehicleFrictionForces @ 0x004438F0.
+     * Transcribed from Ghidra decompilation; every SAR uses
+     * truncate-toward-zero rounding: (x + ((x>>31)&mask)) >> shift. */
 
-    /* Fixed drag: 0x10/4096 per axis */
-    int32_t vx = actor->linear_velocity_x;
-    int32_t vz = actor->linear_velocity_z;
+    #define SAR12(x) (((x) + (((x) >> 31) & 0xFFF)) >> 12)
+    #define SAR10(x) (((x) + (((x) >> 31) & 0x3FF)) >> 10)
+    #define SAR8_U8(x) (((x) + (((x) >> 31) & 0xFF)) >> 8)
 
-    /* Velocity damping: 16/4096 per frame */
-    int32_t round_x = (vx >= 0) ? 0x800 : -0x800;
-    int32_t round_z = (vz >= 0) ? 0x800 : -0x800;
-    vx -= (vx * 0x10 + round_x) >> 12;
-    vz -= (vz * 0x10 + round_z) >> 12;
+    /* 1. Velocity drag — v -= trunc(v*16 / 4096). [@ 0x00443900-0x00443932] */
+    int32_t t = actor->linear_velocity_x * 0x10;
+    int32_t vx = actor->linear_velocity_x - SAR12(t);
+    t = actor->linear_velocity_z * 0x10;
+    int32_t vz = actor->linear_velocity_z - SAR12(t);
+    actor->linear_velocity_z = vz;
 
-    /* 2-axle bicycle model with fixed grip constants */
-    int32_t heading = (actor->euler_accum.yaw >> 8) & 0xFFF;
-    int32_t cos_h = cos_fixed12(heading);
-    int32_t sin_h = sin_fixed12(heading);
+    int32_t yaw_vel = actor->angular_velocity_yaw;  /* iVar1 — used RAW */
+    uint32_t yaw12 = (uint32_t)actor->euler_accum.yaw >> 8;
+    actor->linear_velocity_x = vx;
 
-    int32_t v_long = (vx * sin_h + vz * cos_h) >> 12;
-    int32_t v_lat  = (vx * cos_h - vz * sin_h) >> 12;
+    /* 2. Steering & trig [@ 0x00443958-0x00443999] */
+    int32_t steer_raw = actor->steering_command;
+    uint32_t steer12 = (uint32_t)SAR8_U8(steer_raw);
 
-    actor->longitudinal_speed = v_long;
-    actor->lateral_speed = v_lat;
+    int32_t cos_h  = cos_fixed12(yaw12 & 0xFFF);
+    int32_t sin_h  = sin_fixed12(yaw12 & 0xFFF);
+    int32_t cos_hs = cos_fixed12((yaw12 + steer12) & 0xFFF);
+    int32_t sin_hs = sin_fixed12((yaw12 + steer12) & 0xFFF);
+    int32_t cos_s  = cos_fixed12(steer12 & 0xFFF);
+    int32_t sin_s  = sin_fixed12(steer12 & 0xFFF);
 
-    /* Steering from AI route: actor+0x30C */
-    int32_t steer = actor->steering_command >> 8;
-    int32_t steer_heading = (heading + steer) & 0xFFF;
-    int32_t cos_s = cos_fixed12(steer_heading);
-    int32_t sin_s = sin_fixed12(steer_heading);
+    int32_t throttle = (int32_t)actor->encounter_steering_cmd * 4;  /* iVar9 */
 
-    /* Front axle: grip = 0x271 */
-    int32_t front_slip = (v_lat * cos_s - v_long * sin_s) >> 12;
-    int32_t front_force = -(front_slip * 0x271) >> 8;
-    /* Clamp to [-0x800, +0x800] */
-    if (front_force > 0x800) front_force = 0x800;
-    if (front_force < -0x800) front_force = -0x800;
+    /* 3. Body-frame velocity [@ 0x004439BB-0x004439EC] */
+    int32_t lat_body  = SAR12(cos_h * vx - sin_h * vz);  /* iVar14 */
+    int32_t long_body = SAR12(cos_h * vz + sin_h * vx);  /* iVar10 */
 
-    /* Rear axle: grip = 0x14C */
-    int32_t rear_force = -(v_lat * 0x14C) >> 8;
-    if (rear_force > 0x800) rear_force = 0x800;
-    if (rear_force < -0x800) rear_force = -0x800;
+    /* 4. Steering-inertia denom iVar16_denom [@ 0x004439F3-0x00443A44] */
+    int32_t a = SAR12(cos_s * 0x271) * cos_s;
+    int32_t b = SAR12(sin_s * 0x14C) * sin_s;
+    int32_t denom = SAR12(a) + SAR12(b);
+    if (denom == 0) denom = 1;  /* safety (should never hit in practice) */
 
-    /* Traffic throttle: actor+0x33E * 4 */
-    int32_t throttle_cmd = (int32_t)actor->encounter_steering_cmd * 4;
-    int32_t long_force = throttle_cmd;
+    /* 5. Front-axle force iVar15 [@ 0x00443A47-0x00443AC4].
+     * iVar11 = yaw_vel * 0x114 (RAW yaw_vel, NO prior shift). */
+    int32_t iVar11 = yaw_vel * 0x114;
+    int32_t front_num = iVar11 + lat_body * 400;
+    int32_t iVar15_pre = SAR10(front_num) * 800;
+    int32_t num_a = throttle + long_body;
+    int32_t num_a_14c = num_a * 0x14C;
+    int32_t iVar15 = (SAR12(num_a_14c) * sin_s - SAR12(iVar15_pre) * cos_s) / denom;
 
-    /* Yaw from lateral imbalance (simplified: no inertia lookup) */
-    int32_t yaw_delta = (front_force - rear_force) >> 4;
-    if (yaw_delta > TD5_YAW_TORQUE_MAX) yaw_delta = TD5_YAW_TORQUE_MAX;
-    if (yaw_delta < -TD5_YAW_TORQUE_MAX) yaw_delta = -TD5_YAW_TORQUE_MAX;
-    actor->angular_velocity_yaw += yaw_delta;
+    /* 6. Rear-axle force iVar16_force [@ 0x00443AC6-0x00443B7C] */
+    int32_t rear_p1 = ((yaw_vel * 400) / 0x28C - lat_body) * 0xAF;
+    int32_t iVar1_rear = SAR12(rear_p1) * sin_s;  /* note: stored unshifted at this stage */
+    int32_t num_a_13 = num_a * 0x13;
+    int32_t iVar2_rear = SAR12(num_a_13) * cos_s;
+    int32_t iVar11_rear = iVar11 + lat_body * -400;
+    int32_t iVar12_s1 = SAR10(iVar11_rear) * 800;
+    int32_t iVar12_s2 = SAR12(iVar12_s1) * cos_s;
+    int32_t iVar16_force = (SAR12(iVar12_s2) * cos_s
+                          + (SAR12(iVar1_rear) - SAR12(iVar2_rear)) * sin_s) / denom;
 
-    /* Total lateral + longitudinal -> world frame */
-    int32_t total_lat = front_force + rear_force;
-    int32_t fx = (long_force * sin_h + total_lat * cos_h) >> 12;
-    int32_t fz = (long_force * cos_h - total_lat * sin_h) >> 12;
+    /* 7. Clamp [-0x800, +0x800] [@ 0x00443B80-0x00443BBA] */
+    if (iVar15 > 0x800)  iVar15 = 0x800;
+    if (iVar15 < -0x800) iVar15 = -0x800;
+    if (iVar16_force > 0x800)  iVar16_force = 0x800;
+    if (iVar16_force < -0x800) iVar16_force = -0x800;
 
-    actor->linear_velocity_x = vx + fx;
-    actor->linear_velocity_z = vz + fz;
+    /* 8. Yaw torque [@ 0x00443BBA-0x00443BEE] */
+    int32_t yaw_torque = (SAR12(cos_s * 400) * iVar15
+                        + iVar16_force * -400) / 0x114;
+    actor->angular_velocity_yaw += yaw_torque;
 
-    /* ApplyDampedSuspensionForce for pitch/roll */
-    apply_damped_suspension_force(actor, total_lat, long_force);
+    /* 9. World-frame velocity update [@ 0x00443BF4-0x00443C8F]
+     * Front uses cos_hs/sin_hs (heading+steer), rear uses cos_h/sin_h. */
+    actor->linear_velocity_x = vx
+        + SAR12(iVar15 * cos_hs)
+        + SAR12(iVar16_force * cos_h)
+        + SAR12(throttle * sin_h);
+    actor->linear_velocity_z = vz
+        - SAR12(iVar15 * sin_hs)
+        - SAR12(iVar16_force * sin_h)
+        + SAR12(throttle * cos_h);
+
+    /* 10. Suspension force [@ 0x00443C95] */
+    apply_damped_suspension_force(actor, iVar15 + iVar16_force, throttle);
+
+    /* 11. Integrate XZ, yaw, longitudinal_speed [@ 0x00443CBF-0x00443CDE] */
+    actor->world_pos.x += actor->linear_velocity_x;
+    actor->world_pos.z += actor->linear_velocity_z;
+    actor->euler_accum.yaw += actor->angular_velocity_yaw;
+    actor->longitudinal_speed = long_body;
+
+    #undef SAR12
+    #undef SAR10
+    #undef SAR8_U8
 }
 
 /* ========================================================================
@@ -2608,28 +2644,17 @@ void td5_physics_resolve_vehicle_contacts(void)
                     continue;
                 }
 
-                /* Dispatch rule from 0x409150 ResolveVehicleContacts:
-                 * Full OBB only when BOTH actors are in normal state
-                 * (vehicle_mode == 0) AND neither is in max damage lockout
-                 * (damage_lockout < 0x0F). Otherwise use the sphere path
-                 * (ResolveSimpleActorSeparation).
+                /* Dispatch rule from 0x00409150 ResolveVehicleContacts
+                 * [CONFIRMED]: Full OBB path when BOTH actors have
+                 * field_0x379 == 0 (normal) AND field_0x37c < 0x0F.
+                 * Otherwise use sphere separation.
                  *
-                 * Traffic slots (6-11) should always hit the sphere path —
-                 * in the original, UpdateTrafficActorMotion flips them to
-                 * vehicle_mode == 1 (scripted motion). The port never lands
-                 * that write, so traffic stays at vehicle_mode == 0 and a
-                 * vehicle_mode-only check would fall through to OBB. Use
-                 * slot_index >= 6 as the traffic identifier directly — it is
-                 * populated unconditionally at spawn and matches the
-                 * original's intent (traffic is always scripted).
-                 *
-                 * TODO: find and land the missing vehicle_mode = 1 write for
-                 * traffic actors; then this can simplify to vehicle_mode-only. */
-                int a_scripted = (a->slot_index >= 6) ||
-                                 (a->vehicle_mode != 0) ||
+                 * Traffic (slots 6-11) runs the FULL OBB path in the
+                 * original — `UpdateTrafficActorMotion`'s cVar3==0 branch
+                 * leaves field_0x379 at 0. Gating on slot_index was wrong. */
+                int a_scripted = (a->vehicle_mode != 0) ||
                                  (a->damage_lockout >= 0x0F);
-                int b_scripted = (b->slot_index >= 6) ||
-                                 (b->vehicle_mode != 0) ||
+                int b_scripted = (b->vehicle_mode != 0) ||
                                  (b->damage_lockout >= 0x0F);
 
                 if (i == 0 || j == 0) {
@@ -2683,11 +2708,9 @@ static void resolve_collision_pair(TD5_Actor *a, TD5_Actor *b, int idx_a, int id
     if (!a || !b) return;
     if (!a->car_definition_ptr || !b->car_definition_ptr) return;
 
-    int a_scripted = (a->slot_index >= 6) ||
-                     (a->vehicle_mode != 0) ||
+    int a_scripted = (a->vehicle_mode != 0) ||
                      (a->damage_lockout >= 0x0F);
-    int b_scripted = (b->slot_index >= 6) ||
-                     (b->vehicle_mode != 0) ||
+    int b_scripted = (b->vehicle_mode != 0) ||
                      (b->damage_lockout >= 0x0F);
 
     if (a_scripted || b_scripted) {
@@ -3030,18 +3053,13 @@ void td5_physics_update_suspension_response(TD5_Actor *actor)
 
 static void integrate_traffic_pose(TD5_Actor *actor)
 {
-    /* 1. Integrate X/Z position from velocity — no gravity, no Y integration.
-     * [CONFIRMED @ 0x443CD0-0x443CE8: IntegrateVehicleFrictionForces
-     *  writes world_pos_x += vel_x, world_pos_z += vel_z, no Y touch] */
-    actor->world_pos.x += actor->linear_velocity_x;
-    actor->world_pos.z += actor->linear_velocity_z;
+    /* XZ + yaw integration is done by td5_physics_update_traffic
+     * (inside the IntegrateVehicleFrictionForces port, matching original
+     * @ 0x00443CBF/CCD/CD7). This function handles only Y ground-snap
+     * and display-angle derivation, matching UpdateTrafficVehiclePose
+     * @ 0x00443CF0. */
 
-    /* 2. Integrate yaw ONLY from angular velocity.
-     * [CONFIRMED @ 0x443ED0: original only integrates yaw euler accum for traffic.
-     *  Roll/pitch display angles come from surface normal, not accumulators.] */
-    actor->euler_accum.yaw += actor->angular_velocity_yaw;
-
-    /* 3. Update chassis track position from new world XZ.
+    /* Update chassis track position from new world XZ.
      * [CONFIRMED @ 0x443D40: UpdateTrafficVehiclePose calls UpdateActorTrackPosition] */
     {
         td5_track_update_actor_position(actor);
@@ -3063,12 +3081,16 @@ static void integrate_traffic_pose(TD5_Actor *actor)
         int32_t ground_y = td5_track_compute_contact_height_with_normal(
             span, lane, actor->world_pos.x, actor->world_pos.z, surface_normal);
 
-        /* Add car height offset: signed int16 at car_definition + 0x86, shifted left 8.
-         * For traffic, this is min_y of the mesh (negative), so <<8 produces a
-         * negative value that lowers the body center toward the wheels. */
+        /* Car height offset: signed int16 at car_definition + 0x86, shifted left 8.
+         * Original (Y-DOWN): `ADD [world_pos_y], ECX` with ECX = MOVSX cdef[0x86] << 8
+         * (negative → moves Y more negative → above ground in Y-DOWN).
+         *
+         * Port renders with Y-UP convention (as shown by track normal Y-sign
+         * inversion required at line 3143 to get roll=0 on flat ground), so
+         * we SUBTRACT the raw offset to lift the car above ground. */
         if (actor->car_definition_ptr) {
             int32_t height_offset = (int32_t)CDEF_S(actor, 0x86) << 8;
-            ground_y += height_offset;
+            ground_y -= height_offset;
         }
 
         actor->world_pos.y = ground_y;
@@ -3092,15 +3114,15 @@ static void integrate_traffic_pose(TD5_Actor *actor)
         int32_t rotated_z = (nx * sy + nz * cy) >> 12;
 
         /* Roll from surface normal + longitudinal suspension correction.
-         * Original formula: AngleFromVector12(-rotated_z, -normal_y)
-         * The original binary uses Y-down convention where surface normal ny < 0
-         * for "up". Our port's normals have ny > 0 for "up", so we use
-         * atan2(-rotated_z, ny) to get roll=0 on flat ground. */
-        int32_t roll_from_normal = atan2_fixed12(-rotated_z, ny);
+         * Original formula: AngleFromVector12(-rotated_z, -normal_y).
+         * triangle_height produces Y-down normals matching the original
+         * (ny < 0 for "up"), so we negate ny to get roll=0 on flat ground. */
+        int32_t roll_from_normal = atan2_fixed12(-rotated_z, -ny);
         int32_t susp_roll_corr = actor->wheel_suspension_pos[1] >> 8;
         actor->display_angles.roll = (int16_t)((roll_from_normal - susp_roll_corr) & 0xFFF);
 
-        /* Pitch from surface normal + lateral suspension correction */
+        /* Pitch from surface normal + lateral suspension correction. mag_xz
+         * is the sqrt of (rotated_x^2 + ny^2) regardless of ny's sign. */
         int32_t mag_xz = td5_isqrt(rotated_x * rotated_x + ny * ny);
         int32_t pitch_from_normal = atan2_fixed12(rotated_x, mag_xz);
         int32_t susp_pitch_corr = actor->wheel_suspension_pos[0] >> 8;
@@ -4858,6 +4880,17 @@ void td5_physics_init_vehicle_runtime(void)
         TD5_Actor *actor = (TD5_Actor *)(g_actor_table_base + (size_t)slot * TD5_ACTOR_STRIDE);
 
         bind_default_vehicle_tuning(actor, slot);
+
+        /* Traffic-only: force cdef+0x88 (mass) to 0x20 regardless of what
+         * carparam.dat supplies. Mirrors the original's init-time write at
+         * 0x0042F235 (`MOV word ptr [EAX + 0x88], 0x0020`). Without this,
+         * traffic cars use whatever carparam provides (observed 0x400=1024)
+         * and the V2V impulse solver produces a 64× mass imbalance vs
+         * player=16, making players stick to traffic cars on contact. */
+        if (slot >= TD5_MAX_RACER_SLOTS && actor->car_definition_ptr) {
+            int16_t *cd = (int16_t *)actor->car_definition_ptr;
+            cd[0x88 / 2] = 0x20;
+        }
 
         /* --- Difficulty scaling (from InitializeRaceVehicleRuntime 0x42F140) ---
          * Apply in-place multipliers to physics table fields per difficulty.

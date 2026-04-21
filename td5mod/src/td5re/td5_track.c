@@ -79,7 +79,7 @@ int     g_track_type_mode       = 0;
 
 /**
  * Per-span-type vertex offset LUT — REMOVED 2026-04-20.
- * The single source of truth is `k_span_vertex_offsets[12][2]` below
+ * The single source of truth is `k_quad_vertex_offsets[12][2]` below
  * (DAT_00474e40/41 verified). The prior s_vtx_offset_left/right pair
  * held wrong values ({0,0,0,3,3,0,3,3,0,0,0,0} on the right) that
  * didn't match the binary and were never read anyway.
@@ -2191,8 +2191,8 @@ static void update_position_recursive(int16_t *track_state, int32_t pos_x, int32
             int new_span_fwd = resolve_neighbor(span_idx, &stepped_sub, 0x01, pos_x, pos_z);
             TD5_StripSpan *nsp = &s_span_array[new_span_fwd];
             int nt = (nsp->span_type >= 0 && nsp->span_type < 12) ? nsp->span_type : 0;
-            int e40_base = (int)nsp->left_vertex_index  + k_span_vertex_offsets[nt][0];
-            int e41_base = (int)nsp->right_vertex_index + k_span_vertex_offsets[nt][1];
+            int e40_base = (int)nsp->left_vertex_index  + k_quad_vertex_offsets[nt][0];
+            int e41_base = (int)nsp->right_vertex_index + k_quad_vertex_offsets[nt][1];
             int64_t cross1 = compound_cross(nsp,
                                             e40_base + stepped_sub,
                                             e41_base + stepped_sub,
@@ -2254,8 +2254,8 @@ static void update_position_recursive(int16_t *track_state, int32_t pos_x, int32
             TD5_StripSpan *nsp = &s_span_array[new_span_fwd];
             int nt = (nsp->span_type >= 0 && nsp->span_type < 12) ? nsp->span_type : 0;
             int lc_new = span_lane_count(nsp);
-            int e40_base = (int)nsp->left_vertex_index  + k_span_vertex_offsets[nt][0];
-            int e41_base = (int)nsp->right_vertex_index + k_span_vertex_offsets[nt][1];
+            int e40_base = (int)nsp->left_vertex_index  + k_quad_vertex_offsets[nt][0];
+            int e41_base = (int)nsp->right_vertex_index + k_quad_vertex_offsets[nt][1];
             uint8_t mask1 = (stepped_sub < lc_new - 1) ? 0x0F : s_edge_mask_last[nt];
             if ((mask1 & 0x04) == 0) {
                 span_idx = new_span_fwd;
@@ -2323,8 +2323,8 @@ static void update_position_recursive(int16_t *track_state, int32_t pos_x, int32
             int new_span_fwd = resolve_neighbor(span_idx, &stepped_sub, 0x01, pos_x, pos_z);
             TD5_StripSpan *nsp = &s_span_array[new_span_fwd];
             int nt = (nsp->span_type >= 0 && nsp->span_type < 12) ? nsp->span_type : 0;
-            int e40_base = (int)nsp->left_vertex_index  + k_span_vertex_offsets[nt][0];
-            int e41_base = (int)nsp->right_vertex_index + k_span_vertex_offsets[nt][1];
+            int e40_base = (int)nsp->left_vertex_index  + k_quad_vertex_offsets[nt][0];
+            int e41_base = (int)nsp->right_vertex_index + k_quad_vertex_offsets[nt][1];
             /* case-9 primary cross: v_a=e41 (psVar3), v_b=e40 (psVar2) */
             int64_t cross1 = compound_cross(nsp,
                                             e41_base + stepped_sub,
@@ -2379,8 +2379,8 @@ static void update_position_recursive(int16_t *track_state, int32_t pos_x, int32
             TD5_StripSpan *nsp = &s_span_array[new_span_back];
             int nt = (nsp->span_type >= 0 && nsp->span_type < 12) ? nsp->span_type : 0;
             int lc_new = span_lane_count(nsp);
-            int e40_base = (int)nsp->left_vertex_index  + k_span_vertex_offsets[nt][0];
-            int e41_base = (int)nsp->right_vertex_index + k_span_vertex_offsets[nt][1];
+            int e40_base = (int)nsp->left_vertex_index  + k_quad_vertex_offsets[nt][0];
+            int e41_base = (int)nsp->right_vertex_index + k_quad_vertex_offsets[nt][1];
             uint8_t mask1 = (stepped_sub < lc_new - 1) ? 0x0F : s_edge_mask_last[nt];
             if ((mask1 & 0x04) == 0) {
                 span_idx = new_span_back;
