@@ -2924,117 +2924,156 @@ static inline int32_t arith_round_shift(int32_t x, int32_t mask, int32_t shift)
 
 void td5_physics_update_suspension_response(TD5_Actor *actor)
 {
-    /* bVar1: current-frame airborne mask (1=airborne). In the original this is
-     * read from 0x37C; in the port we use the current wheel_contact_bitmask. */
-    uint8_t bVar1 = actor->wheel_contact_bitmask;
-    /* bVar2: previous-frame GROUNDED mask (1=grounded), saved by integrate_pose
-     * before refresh_wheel_contacts overwrites wheel_contact_bitmask. */
-    uint8_t bVar2 = s_prev_grounded_mask[actor->slot_index & 0x0F];
+    /* Faithful port of UpdateVehicleSuspensionResponse @ 0x004057F0.
+     *
+     * HISTORY: this is a restore of commit e97669e's literal port, which
+     * had been replaced (between then and 2026-04-21) with a pragmatic
+     * ground-probe P-controller + 1/16 decay. That replacement produced
+     * an exaggerated uphill-roll bug: on positive pitch slopes the
+     * P-controller's target and the decay-to-zero both pulled the same
+     * direction (runaway), while downhill they opposed (self-resets).
+     * Research agent 2026-04-21 confirmed:
+     *   - No asymmetric term exists in the original 0x004057F0.
+     *   - T2 block in IntegrateVehiclePoseAndContacts @ 0x00405E80 OVERWRITES
+     *     angular_velocity_{roll,pitch} each tick; 0x004057F0 ADDS a small
+     *     per-tick correction clamped ±4000. That pair is self-limiting.
+     *   - Port T2 block already matches original exactly (±6000 clamp,
+     *     wrap*0x100 delta). So restoring the faithful 0x004057F0 add-step
+     *     reinstates the T2-dominates-with-corrective pattern.
+     *
+     * Two masks are needed:
+     *   lock = current-frame AIRBORNE mask (1=airborne). Original reads
+     *          from +0x37C (damage_lockout). Port live equivalent is
+     *          wheel_contact_bitmask after refresh.
+     *   grnd = previous-frame GROUNDED mask (1=grounded). Original reads
+     *          from +0x37D (wheel_contact_bitmask, which after refresh
+     *          holds the prior tick's value). Port snapshots this as
+     *          s_prev_grounded_mask[slot] in integrate_pose before refresh
+     *          overwrites the live bitmask.
+     *
+     * Struct layout source: decomp @ 0x00405884/0x00405888 shows the loop
+     * reads sVar3=psVar11[-0x22], sVar4=psVar11[-0x20] where psVar11 walks
+     * +0x254-style stride of 4 shorts/wheel, giving actor+0x210/+0x214 for
+     * wheel 0 — matches the `arms` pointer below. wcv at +0x250 stride 4
+     * shorts; gap_270 at +0x270 same stride.
+     */
+    const uint8_t lock = actor->wheel_contact_bitmask;
+    const uint8_t grnd = s_prev_grounded_mask[actor->slot_index & 0x0F];
 
-    if (bVar1 == 0x0F) {
-        /* All four wheels airborne — original 0x004057F0 skips the entire
-         * body-torque pass. Angular velocity carries freely (takeoff spin
-         * preserved); gravity is applied in integrate_pose and is NOT
-         * added back here. [CONFIRMED @ 0x004057F0 early-return on bVar1==0xF] */
+    if (lock == 0x0F) {
+        /* All four wheels airborne — early-return matches original
+         * 0x00405809; gravity stays subtracted (not added back). */
         return;
     }
 
-    /* Gravity add-back: cancels the subtract in integrate_pose for grounded cars. */
-    actor->linear_velocity_y += g_gravity_constant;
+    int32_t pitch_grav = 0;     /* local_50 */
+    int32_t roll_grav  = 0;     /* local_5c */
+    int32_t pitch_spr  = 0;     /* local_64 */
+    int32_t roll_spr   = 0;     /* local_60 */
+    int32_t bounce     = 0;     /* local_78 */
+    int32_t cnt_active   = 0;   /* local_4c — non-locked wheels */
+    int32_t cnt_grounded = 0;   /* local_58 — wheels also grounded prev tick */
 
-    /* ---------- Target-angle spring-damper for body roll/pitch ----------
-     *
-     * Gated on !g_game_paused so the parked car doesn't tilt during
-     * countdown — the height-diff proportional chase would drive
-     * angular_velocity from spurious per-wheel ground asymmetry before
-     * the race starts.
-     *
-     * Instead of the original's per-wheel normal torque accumulation (which
-     * requires a full body-space transform chain to produce stable forces),
-     * compute target roll/pitch directly from wheel ground heights, then
-     * drive angular velocity with a critically-damped spring.
-     *
-     * Wheel layout: 0=FL, 1=FR, 2=RL, 3=RR
-     * Roll  = height difference between left/right sides
-     * Pitch = height difference between front/rear
-     */
-    /* ---------- Target-angle tilt with probed ground + decay ----------
-     *
-     * Pragmatic stabilizer for visual chassis tilt. The literal-port of the
-     * original's per-wheel torque (formerly here, see git history)
-     * accumulates angular velocity unboundedly with no in-loop damping —
-     * the original likely relies on the spring term's *0x100 amplification
-     * for counter-balance, but unit scales differ in the port and produce
-     * runaway in either direction.
-     *
-     * Approach instead:
-     *   1. Probe the GROUND height (not wheel_contact_pos.y, which wobbles
-     *      with suspension swing) at each wheel's XZ. On flat ground all
-     *      four heights are equal → no tilt. On slopes / banked turns →
-     *      front-rear and left-right deltas drive the target.
-     *   2. P controller + explicit decay on angular_velocity so it CAN'T
-     *      run away even if target wobbles.
-     *
-     * Wheel layout: 0=FL, 1=FR, 2=RL, 3=RR. */
-    int32_t gy[4];
-    int grounded = 0;
+    const int16_t *arms = (const int16_t *)((const uint8_t *)actor + 0x210);
+    const int16_t *wcv  = (const int16_t *)((const uint8_t *)actor + 0x250);
+    const int16_t *wfdh = (const int16_t *)((const uint8_t *)actor + 0x270);
+
     for (int i = 0; i < 4; i++) {
-        int32_t probe_y = 0;
-        int probe_surf = 0;
-        int probe_span = actor->wheel_probes[i].span_index;
-        if (probe_span < 0) probe_span = actor->track_span_raw;
-        if (td5_track_probe_height(actor->wheel_contact_pos[i].x,
-                                   actor->wheel_contact_pos[i].z,
-                                   probe_span, &probe_y, &probe_surf)) {
-            gy[i] = probe_y;
-            grounded++;
-        } else {
-            gy[i] = actor->world_pos.y;
+        const uint8_t bit = (uint8_t)(1u << i);
+        if (lock & bit) continue;            /* skip airborne wheel entirely */
+
+        const int16_t lat  = arms[i * 4 + 0];   /* sVar3, lateral arm  */
+        const int16_t loni = arms[i * 4 + 2];   /* sVar4, longitudinal */
+
+        /* g_view = Y component of (transposed body matrix) · wcv[i] —
+         * matches `ConvertFloatVec3ToShortAngles(wcv, &local_38)` reading
+         * local_36. rotate_vec_world_y projects via {m[1],m[4],m[7]},
+         * which equals row 1 of the transposed body matrix. */
+        int16_t cn[3] = { wcv[i * 4 + 0], wcv[i * 4 + 1], wcv[i * 4 + 2] };
+        const int32_t y_view = (int32_t)rotate_vec_world_y(actor, cn);
+
+        /* g_scaled is (Y · gravity) >> 12; signed-divide rounding via
+         * arith_round_shift matches original's SAR-with-bias idiom. */
+        const int32_t g_scaled = arith_round_shift(y_view * g_gravity_constant, 0xFFF, 12);
+
+        pitch_grav += g_scaled * (int32_t)loni;   /* +=, longitudinal arm */
+        roll_grav  -= g_scaled * (int32_t)lat;    /* -=, lateral arm (NOTE sign) */
+        ++cnt_active;
+
+        if (grnd & bit) {
+            /* Spring damping from frame-to-frame wheel motion projected
+             * onto the contact normal. wfdh and wcv share +0x250-style
+             * 4-short-per-wheel layout; both X,Y,Z at offsets 0,1,2. */
+            int32_t dot =   (int32_t)wfdh[i * 4 + 0] * (int32_t)wcv[i * 4 + 0]
+                          + (int32_t)wfdh[i * 4 + 1] * (int32_t)wcv[i * 4 + 1]
+                          + (int32_t)wfdh[i * 4 + 2] * (int32_t)wcv[i * 4 + 2];
+            dot = arith_round_shift(dot, 0xFFF, 12);   /* signed >>12 */
+
+            pitch_spr += (dot * (int32_t)loni) * -0x100;   /* note minus */
+            roll_spr  += (dot * (int32_t)lat ) *  0x100;
+            bounce    += dot >> 1;                         /* signed SAR 1 */
+            ++cnt_grounded;
         }
     }
 
-    /* Decay angular velocity every tick (1/16 = 6.25%/tick ≈ 0.5s settle).
-     * This is the safety net that makes target-angle wobble survivable. */
-    actor->angular_velocity_roll  -= actor->angular_velocity_roll  >> 4;
-    actor->angular_velocity_pitch -= actor->angular_velocity_pitch >> 4;
+    if (cnt_grounded > 0) {
+        pitch_spr /= cnt_grounded;
+        roll_spr  /= cnt_grounded;
+        bounce    /= cnt_grounded;
+    }
 
-    if (grounded == 4) {
-        int32_t left_avg  = (gy[0] + gy[2]) / 2;
-        int32_t right_avg = (gy[1] + gy[3]) / 2;
-        int32_t front_avg = (gy[0] + gy[1]) / 2;
-        int32_t rear_avg  = (gy[2] + gy[3]) / 2;
+    /* PlayVehicleSoundAtPosition(0x17, bounce*50, ...) call from the
+     * original is omitted — sound side is stubbed elsewhere. */
 
-        const int16_t *wda0 = (const int16_t *)((const uint8_t *)actor + 0x210);
-        int32_t half_track = wda0[2];
-        int32_t half_wbase = wda0[0];
-        if (half_track < 0) half_track = -half_track;
-        if (half_wbase < 0) half_wbase = -half_wbase;
-        if (half_track < 32) half_track = 32;
-        if (half_wbase < 32) half_wbase = 32;
+    const int32_t roll_term  = (cnt_active > 0)
+        ? (roll_spr  + roll_grav  / cnt_active) / 0x4B0    /* /1200 */
+        : roll_spr  / 0x4B0;
+    const int32_t pitch_term = (cnt_active > 0)
+        ? (pitch_spr + pitch_grav / cnt_active) / 0x226    /* /550 */
+        : pitch_spr / 0x226;
 
-        int32_t fwdbk_hdiff  = (front_avg - rear_avg) >> 8;
-        int32_t leftrt_hdiff = (left_avg  - right_avg) >> 8;
+    actor->angular_velocity_roll  += roll_term;
+    actor->angular_velocity_pitch += pitch_term;
 
-        int32_t target_roll  = -(fwdbk_hdiff  * 326) / (2 * half_wbase);
-        int32_t target_pitch =  (leftrt_hdiff * 326) / (2 * half_track);
+    /* Y-velocity update: bounce + gravity restored. Original adds
+     * gravity back here, cancelling the subtract at top of integrate_pose
+     * for grounded cars. */
+    actor->linear_velocity_y += bounce + g_gravity_constant;
 
-        if (target_roll  >  0x100) target_roll  =  0x100;
-        if (target_roll  < -0x100) target_roll  = -0x100;
-        if (target_pitch >  0x100) target_pitch =  0x100;
-        if (target_pitch < -0x100) target_pitch = -0x100;
-
-        int32_t err_r = (target_roll  << 8) - actor->euler_accum.roll;
-        int32_t err_p = (target_pitch << 8) - actor->euler_accum.pitch;
-
-        actor->angular_velocity_roll  += err_r >> 6;   /* gentle P gain */
-        actor->angular_velocity_pitch += err_p >> 6;
-
-        if (actor->slot_index == 0 && (actor->frame_counter % 60u) == 0u) {
-            TD5_LOG_I(LOG_TAG,
-                      "susp_tilt: tgt_r=%d tgt_p=%d gnd=%d av_r=%d av_p=%d",
-                      target_roll, target_pitch, grounded,
-                      actor->angular_velocity_roll, actor->angular_velocity_pitch);
+    if (cnt_grounded > 0) {
+        /* Per-pattern angular velocity clamps [CONFIRMED @ 0x00405a6a..
+         * 0x00405af4]. Switch keys on grnd (previous-frame GROUNDED),
+         * NOT lock. Bitmasks 7,11,13,14,15 fall through with NO clamp. */
+        const int32_t LIM = 4000;   /* 0xFA0 */
+        switch (grnd) {
+            case 0: case 1: case 2: case 4: case 6: case 8: case 9:
+                if (actor->angular_velocity_roll  >  LIM) actor->angular_velocity_roll  =  LIM;
+                if (actor->angular_velocity_roll  < -LIM) actor->angular_velocity_roll  = -LIM;
+                if (actor->angular_velocity_pitch >  LIM) actor->angular_velocity_pitch =  LIM;
+                if (actor->angular_velocity_pitch < -LIM) actor->angular_velocity_pitch = -LIM;
+                break;
+            case 3: case 12:
+                if (actor->angular_velocity_roll  >  LIM) actor->angular_velocity_roll  =  LIM;
+                if (actor->angular_velocity_roll  < -LIM) actor->angular_velocity_roll  = -LIM;
+                break;
+            case 5: case 10:
+                if (actor->angular_velocity_pitch >  LIM) actor->angular_velocity_pitch =  LIM;
+                if (actor->angular_velocity_pitch < -LIM) actor->angular_velocity_pitch = -LIM;
+                break;
+            default: /* 7,11,13,14,15 — no clamp */
+                break;
         }
+    }
+
+    if (actor->slot_index == 0 && (actor->frame_counter % 60u) == 0u) {
+        TD5_LOG_I(LOG_TAG,
+                  "susp_resp slot0: lock=0x%02x grnd=0x%02x cnt=%d/%d "
+                  "p_grav=%d r_grav=%d p_spr=%d r_spr=%d bounce=%d "
+                  "av_r=%d av_p=%d vy=%d",
+                  (int)lock, (int)grnd, cnt_active, cnt_grounded,
+                  pitch_grav, roll_grav, pitch_spr, roll_spr, bounce,
+                  actor->angular_velocity_roll, actor->angular_velocity_pitch,
+                  actor->linear_velocity_y);
     }
 }
 
