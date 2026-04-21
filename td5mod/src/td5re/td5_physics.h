@@ -89,10 +89,13 @@ void td5_physics_set_collisions(int enabled);
 void td5_physics_apply_collision_impulse(TD5_Actor *a, TD5_Actor *b);
 void td5_physics_resolve_vehicle_contacts(void);
 
-/* --- Wall collision response (FUN_00406980) --- */
+/* --- Wall collision response (FUN_00406980) ---
+ * probe_x_fp8 / probe_z_fp8: probe world position in 24.8 fixed point.
+ * Required to compute the lever-arm tangential offset that drives the
+ * yaw alignment impulse (iVar9 in decomp). */
 void td5_physics_wall_response(TD5_Actor *actor, int32_t wall_angle,
                                int32_t penetration, int side,
-                               int32_t normal_x, int32_t normal_z, int32_t normal_mag);
+                               int32_t probe_x_fp8, int32_t probe_z_fp8);
 
 /* --- Pose rebuild callback (UpdateVehiclePoseFromPhysicsState) ---
  * Rebuilds rotation matrix + render_pos + wheel contacts from current
