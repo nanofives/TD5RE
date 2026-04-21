@@ -208,26 +208,25 @@ static int32_t atan2_fixed12(int32_t dx, int32_t dz)
  *   side        - 0=left boundary, 1=left inner, 2=right inner
  * ======================================================================== */
 
-/* Wall-to-vehicle inertia constant = 1,500,000 [CONFIRMED @ 0x463200] */
+/* Wall-to-vehicle inertia constant = 1,500,000 [CONFIRMED @ DAT_00463200] */
 #define V2W_INERTIA_K       1500000
-/* Angular divisor matching V2V = 0x28C (652) [CONFIRMED @ 0x406a60] */
+/* Angular divisor shared with V2V = 0x28C (652) [CONFIRMED @ 0x406a66] */
 #define ANGULAR_DIVISOR_W   0x28C
+/* Impulse numerator scale factor [CONFIRMED @ 0x406aae] */
+#define V2W_NUM_SCALE       0x1100
 
 void td5_physics_wall_response(TD5_Actor *actor, int32_t wall_angle,
                                int32_t penetration, int side,
-                               int32_t normal_x, int32_t normal_z, int32_t normal_mag)
+                               int32_t probe_x_fp8, int32_t probe_z_fp8)
 {
-    /* Compute wall normal (perpendicular to wall direction) */
+    /* wall tangent direction (cos,sin); the wall normal is (-sin, cos). */
     int32_t cos_w = cos_fixed12(wall_angle);
     int32_t sin_w = sin_fixed12(wall_angle);
 
-    /* Push actor position out of wall.
-     * [CONFIRMED @ 0x4069a1-0x4069d7]: original passes raw NEGATIVE penetration
-     * as the magnitude parameter. The arithmetic sin_w * (negative - 4) naturally
-     * reverses the push direction via the negative sign, pushing the car back
-     * toward the road.  Previous code pre-negated the magnitude, which flipped
-     * the push direction — cars sailed through walls instead of bouncing back. */
-    int32_t push = penetration - 4;  /* penetration < 0 → push < 0 */
+    /* Push actor position out of wall along the wall normal.
+     * [CONFIRMED @ 0x4069a1-0x4069d7]: push = penetration - 4, negative →
+     * outward. Arithmetic-right-shift by 4 with sign-bit round mask. */
+    int32_t push = penetration - 4;
     {
         int64_t px = (int64_t)sin_w * push;
         int64_t pz = (int64_t)cos_w * push;
@@ -235,75 +234,86 @@ void td5_physics_wall_response(TD5_Actor *actor, int32_t wall_angle,
         actor->world_pos.z += (int32_t)((pz + ((pz >> 63) & 0xF)) >> 4);
     }
 
-    /* Decompose velocity into wall-parallel and wall-perpendicular components
-     * [CONFIRMED @ 0x4069cc] */
+    /* Lever arm iVar9 = (actor_center - probe) dot wall_tangent, both sides
+     * divided by 256 first to avoid overflow before the >>12.
+     * [CONFIRMED @ 0x00406A04-0x00406A60]. POST-push positions are used
+     * because actor->world_pos was already updated above. */
+    int32_t arm_x_int = (actor->world_pos.x - probe_x_fp8) >> 8;
+    int32_t arm_z_int = (actor->world_pos.z - probe_z_fp8) >> 8;
+    int32_t iVar9 = ((int64_t)arm_z_int * sin_w + (int64_t)arm_x_int * cos_w) >> 12;
+
+    /* Decompose velocity into wall-tangent (v_para, iVar4) and
+     * wall-normal (v_perp, iVar10) components [CONFIRMED @ 0x4069cc]. */
     int32_t vx = actor->linear_velocity_x;
     int32_t vz = actor->linear_velocity_z;
+    int32_t v_para = ((int64_t)vx * cos_w + (int64_t)vz * sin_w) >> 12;
+    int32_t v_perp = ((int64_t)vz * cos_w - (int64_t)vx * sin_w) >> 12;
 
-    /* parallel = dot(vel, wall_direction) = vx*cos_w + vz*sin_w */
-    /* perpendicular = dot(vel, wall_normal) = -vx*sin_w + vz*cos_w */
-    int32_t v_para = (vx * cos_w + vz * sin_w) >> 12;
-    int32_t v_perp = (-vx * sin_w + vz * cos_w) >> 12;
+    /* iVar11 = contact-point normal velocity (center normal vel + rotation
+     * contribution at the lever arm). [CONFIRMED @ 0x00406A60-0x00406A66] */
+    int32_t iVar11 = (actor->angular_velocity_yaw / ANGULAR_DIVISOR_W) * iVar9 + v_perp;
 
-    /* Apply impulse when perpendicular velocity is non-negative (moving into wall
-     * or along it). Original uses JS (jump-if-sign) at 0x406a78 to SKIP impulse
-     * when combined < 0, meaning impulse fires when combined >= 0.
-     * [CONFIRMED @ 0x406a76-0x406a78] */
-    if (v_perp >= 0) {
-        int32_t v_into_wall = v_perp;  /* positive magnitude */
+    int32_t impulse = 0;
+    int32_t new_v_para = v_para;
+    int32_t new_v_perp = v_perp;
 
-        /* --- Angular impulse from lever arm [CONFIRMED @ 0x406a60-0x406b75] ---
-         * Lever arm = angular_velocity_yaw / ANGULAR_DIVISOR_W
-         * impulse = (-inertia * v_into_wall) / (arm^2 + inertia) */
-        int32_t inertia = V2W_INERTIA_K;
-        int32_t arm = actor->angular_velocity_yaw / ANGULAR_DIVISOR_W;
-        int64_t denom = (int64_t)arm * arm + (int64_t)inertia;
-        if (denom == 0) denom = 1;
-        int32_t impulse = (int32_t)(-(int64_t)inertia * v_into_wall / denom);
+    /* Early-out when separating [CONFIRMED @ 0x00406A72-0x00406A78]:
+     * skip impulse + tangential damping, fall through to rotate velocity back. */
+    if (iVar11 >= 0) {
+        /* Impulse numerator = ((K>>8) * -0x1100) >> 12, numerator full =
+         * num * iVar11. [CONFIRMED @ 0x00406A86-0x00406ACB] */
+        int32_t num = (((V2W_INERTIA_K >> 8) * -V2W_NUM_SCALE) >> 12);
 
-        /* Update angular velocity: yaw += (impulse * arm) / (inertia / ANGULAR_DIVISOR)
-         * [CONFIRMED @ 0x406b75] */
-        int32_t inertia_ang = inertia / ANGULAR_DIVISOR_W;
-        if (inertia_ang == 0) inertia_ang = 1;
-        actor->angular_velocity_yaw += (impulse * arm) / inertia_ang;
+        /* Denominator = (iVar9^2 + K) >> 8. [CONFIRMED @ 0x00406AAE-0x00406AD2] */
+        int64_t denom64 = ((int64_t)iVar9 * iVar9 + (int64_t)V2W_INERTIA_K) >> 8;
+        if (denom64 == 0) denom64 = 1;
+        impulse = (int32_t)((int64_t)num * iVar11 / denom64);
 
-        /* Reflect perpendicular velocity with damping.
-         * Parallel velocity also damped: (v_impact*2 + 0x800 - v_para/64) * 0x180 >> 11
-         * [CONFIRMED @ 0x406af6] */
-        int32_t v_abs_para = v_para < 0 ? -v_para : v_para;
-        int32_t para_damp = (v_into_wall * 2 + 0x800 - v_abs_para / 64);
-        if (para_damp < 0) para_damp = 0;
-        para_damp = (para_damp * 0x180) >> 11;
-        if (para_damp > v_abs_para) para_damp = v_abs_para;
+        new_v_perp = v_perp + impulse;
 
-        /* Reduce parallel velocity magnitude by damping amount */
-        if (v_para > 0)
-            v_para -= para_damp;
-        else
-            v_para += para_damp;
+        /* Tangential damping: sign-branched on v_para. tmp * 0x180 >> 11
+         * with the clamp-to-zero crossover rule.
+         * [CONFIRMED @ 0x00406AE2-0x00406B69] */
+        int32_t v_para_round = v_para >> 6;  /* signed shift; arithmetic-round */
+        int32_t tmp;
+        if (v_para < 1) {
+            tmp = (iVar11 * 2 + 0x800) - v_para_round;
+            int32_t delta = (tmp * 0x180) >> 11;
+            new_v_para = v_para + delta;
+            if (new_v_para < 1) new_v_para = 0;
+        } else {
+            tmp = v_para_round + 0x800 + iVar11 * 2;
+            int32_t delta = (tmp * 0x180) >> 11;
+            new_v_para = v_para - delta;
+            if (new_v_para < 0) new_v_para = 0;
+        }
 
-        /* Perpendicular becomes a small bounce: scale by impulse response */
-        v_perp = v_into_wall >> 3;  /* small outward bounce */
+        /* Angular velocity update: ω += (impulse * iVar9) / (K / 0x28C).
+         * K / 0x28C = 1500000 / 652 = 2300 (integer). This is the yaw
+         * alignment kick: with iVar9 non-zero (probe not at CoM along wall),
+         * the sign of impulse drives the car toward tangential alignment.
+         * [CONFIRMED @ 0x00406B6B-0x00406B7A] */
+        int32_t ang_div = V2W_INERTIA_K / ANGULAR_DIVISOR_W;  /* 2300 */
+        if (ang_div == 0) ang_div = 1;
+        actor->angular_velocity_yaw += (impulse * iVar9) / ang_div;
     }
 
-    /* Reconstruct world velocity from parallel + reflected perpendicular
-     * [CONFIRMED @ 0x406a10]: vel = parallel * wall_dir + perp * wall_normal */
-    actor->linear_velocity_x = (v_para * cos_w - v_perp * sin_w) >> 12;
-    actor->linear_velocity_z = (v_para * sin_w + v_perp * cos_w) >> 12;
+    /* Rotate (new_v_para, new_v_perp) back to world basis [CONFIRMED @ 0x406a10] */
+    actor->linear_velocity_x = ((int64_t)new_v_para * cos_w - (int64_t)new_v_perp * sin_w) >> 12;
+    actor->linear_velocity_z = ((int64_t)new_v_para * sin_w + (int64_t)new_v_perp * cos_w) >> 12;
 
-    /* Clamp yaw angular velocity */
-    if (actor->angular_velocity_yaw > 6000) actor->angular_velocity_yaw = 6000;
-    if (actor->angular_velocity_yaw < -6000) actor->angular_velocity_yaw = -6000;
+    /* No ±6000 yaw clamp here — original has none inside 0x406980.
+     * [CONFIRMED — no write to actor+0x1C4 after LAB_00406B6B] */
 
-    /* Set track contact flag [CONFIRMED @ 0x406d7e/0x406e4e].
-     * Forward/Reverse handlers pass side=-1 because the original's
-     * ApplyTrackSurfaceForceToActor branch for flag=0 does NOT write
-     * field_0x37b at all. */
+    /* Track contact flag: Forward/Reverse handlers pass side=-1 (no write).
+     * [CONFIRMED @ 0x406d7e/0x406e4e] */
     if (side >= 0)
         actor->track_contact_flag = (uint8_t)(side + 1);
 
-    TD5_LOG_I(LOG_TAG, "wall_response: side=%d pen=%d angle=%d v_para=%d v_perp=%d yaw=%d",
-              side, penetration, wall_angle, v_para, v_perp, actor->angular_velocity_yaw);
+    TD5_LOG_I(LOG_TAG,
+              "wall_response: side=%d pen=%d angle=%d arm=%d iVar11=%d imp=%d vpara=%d vperp=%d yaw=%d",
+              side, penetration, wall_angle, iVar9, iVar11, impulse,
+              new_v_para, new_v_perp, actor->angular_velocity_yaw);
 }
 
 /* ========================================================================

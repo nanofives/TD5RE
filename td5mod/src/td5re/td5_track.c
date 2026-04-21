@@ -731,7 +731,7 @@ void td5_track_resolve_wall_contacts(TD5_Actor *actor)
             double rad = atan2((double)l_par.nnx, (double)(-l_par.nnz));
             int32_t wall_angle = (int32_t)(rad * (4096.0 / (2.0 * 3.14159265358979323846))) & 0xFFF;
             td5_physics_wall_response(actor, wall_angle, probe_l_d[pi], 1,
-                                      l_par.nnx, l_par.nnz, 4096);
+                                      probe_block[pi].x, probe_block[pi].z);
             td5_physics_rebuild_pose(actor);
             TD5_LOG_I(LOG_TAG, "wall_contact: slot=%d probe=%d LEFT span=%d d=%d angle=%d n=%d",
                       actor->slot_index, pi, span_idx, probe_l_d[pi], wall_angle, l_hit_count);
@@ -741,7 +741,7 @@ void td5_track_resolve_wall_contacts(TD5_Actor *actor)
             double rad = atan2((double)r_par.nnx, (double)(-r_par.nnz));
             int32_t wall_angle = (int32_t)(rad * (4096.0 / (2.0 * 3.14159265358979323846))) & 0xFFF;
             td5_physics_wall_response(actor, wall_angle, probe_r_d[pi], 2,
-                                      r_par.nnx, r_par.nnz, 4096);
+                                      probe_block[pi].x, probe_block[pi].z);
             td5_physics_rebuild_pose(actor);
             TD5_LOG_I(LOG_TAG, "wall_contact: slot=%d probe=%d RIGHT span=%d d=%d angle=%d n=%d",
                       actor->slot_index, pi, span_idx, probe_r_d[pi], wall_angle, r_hit_count);
@@ -900,7 +900,8 @@ static void fwd_rev_resolve_contact(TD5_Actor *actor,
 
     /* side=-1 -> wall_response skips the track_contact_flag write, matching
      * the original's flag=0 branch of ApplyTrackSurfaceForceToActor. */
-    td5_physics_wall_response(actor, wall_angle, pen, -1, nnx, nnz, 4096);
+    td5_physics_wall_response(actor, wall_angle, pen, -1,
+                              probe_block[pi].x, probe_block[pi].z);
     td5_physics_rebuild_pose(actor);
 
     TD5_LOG_I(LOG_TAG, "%s_contact: slot=%d probe=%d boundary=%d pen=%d angle=%d",
