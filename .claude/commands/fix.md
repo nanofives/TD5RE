@@ -160,7 +160,9 @@ Using the research summary from Step 1, make the code changes **in the worktree 
    ```
    (`$$` expands to the shell PID, giving a unique `build_<pid>/` intermediate dir inside this worktree)
 3. Fix any compile errors (up to 2 attempts).
-4. Report the result to the user: what was found, what was changed, build status, and the worktree path so they can inspect or manually launch it.
+4. Run the **single-track runtime probe** (see [Testing the build](#testing-the-build-ini--log-loop)) — fast sanity check on Moscow before the multi-track sweep.
+5. **Run the multi-track CSV bundle sweep** (see [Multi-track CSV bundle sweep](#multi-track-csv-bundle-sweep-mandatory)) — this is **mandatory** for any fix touching race / AI / physics / camera / track / HUD code. Skip only when the fix is pure frontend/asset/build-tooling.
+6. Report the result to the user: what was found, what was changed, build status, the worktree path so they can inspect or manually launch, AND the bundle path at `tools/frida_csv/${SESSION_TAG}/`.
 
 #### MANDATORY: Verbose Uncertainty Disclosure
 
@@ -224,6 +226,7 @@ fi
 git commit -m "fix: <one-line description from $ARGUMENTS>
 
 RE basis: <function name(s) and Ghidra address(es) from Step 1>
+CSV bundle: tools/frida_csv/${SESSION_TAG}/  (Moscow + Newcastle + <random track name>)
 
 Co-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>"
 ```
@@ -231,8 +234,9 @@ Co-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>"
 Rules for this step:
 - Use `git add` with explicit file paths, never `git add .` or `git add -A`.
 - The commit subject must start with `fix:` and match the original `$ARGUMENTS` description.
+- The body must cite the RE basis AND the bundle path from the multi-track sweep so a future bisect can reproduce the runs.
 - **Do NOT push and do NOT merge to master yet.** The whole point of the worktree is that multiple candidate fixes can coexist unmerged.
-- Report to the user: the worktree path, the branch name, what was changed, and how to run it (`${WORKTREE_DIR}/td5re.exe`). End with an explicit prompt: *"Merge this into master and delete the worktree? (yes / keep for more testing)"*.
+- Report to the user: the worktree path, the branch name, what was changed, how to run it (`${WORKTREE_DIR}/td5re.exe`), AND the bundle dir. End with an explicit prompt: *"Merge this into master and delete the worktree? (yes / keep for more testing)"*.
 
 ### Step 4: Merge into master + delete worktree (only on user approval)
 
@@ -394,7 +398,18 @@ git branch -D "${SESSION_TAG}"          # -D because it was never merged
 
 Ask the user to confirm before running the `-D` variant.
 
-**CRITICAL — junction safety:** Teardown must go through `git worktree remove`, never `rm -rf "${WORKTREE_DIR}"`. The worktree contains junctions (`original/`, `re/assets/*/`, `td5mod/deps/mingw/`) that point back into the main tree. A recursive `rm` from git-bash or PowerShell `Remove-Item -Recurse` will follow those junctions and **destroy the real data in the main tree**. `git worktree remove` knows how to unlink junctions without touching their targets; `--force` is still safe in this regard. If you must clean up manually (e.g. `git worktree remove` fails), delete each junction individually with `cmd //c rmdir "<path>"` (not `/s`) before removing the worktree dir.
+**CRITICAL — junction safety:** Teardown must go through `git worktree remove`, never `rm -rf "${WORKTREE_DIR}"`. The worktree contains a junction at `td5mod/deps/mingw/` that points back into the main tree (753 MB MinGW toolchain). A recursive `rm` from git-bash or PowerShell `Remove-Item -Recurse` will follow that junction and **destroy the toolchain in the main tree**.
+
+**`git worktree remove --force` is NOT safe with this junction.** Empirically confirmed on 2026-04-16 and again on 2026-04-20: when a worktree has uncommitted files (td5re.ini tweaks, log/, build artifacts) plain `git worktree remove` refuses, and the agent reaches for `--force` — which traverses the mingw junction and wipes main's toolchain. Before EVERY `git worktree remove --force`, pre-unlink the junction:
+
+```bash
+cmd //c "rmdir \"$(cygpath -w "${WORKTREE_DIR}")\\td5mod\\deps\\mingw\""   # no /s — removes only the junction
+git worktree remove --force "${WORKTREE_DIR}"                              # safe now, junction is gone
+```
+
+As of 2026-04-20 main's `td5mod/deps/mingw/` has the READ-ONLY attribute set via `attrib +R /S /D` so a forgotten pre-unlink step fails with EACCES instead of silently wiping the toolchain. Do not clear that attribute.
+
+**ALSO CRITICAL — never `rm` a junction inside the worktree, even ad-hoc.** This trap fires outside teardown too: if you see `${WORKTREE_DIR}/td5mod/deps/mingw` listed by MSYS as a `symlink` (because git-bash renders Windows junctions that way), DO NOT `rm -f` it to "clean it up before recreating". Bash's `rm` follows junctions into their target and empties the destination. The 2026-04-15 incident: agent ran `rm -f "${WORKTREE_DIR}/td5mod/deps/mingw"` to recreate a junction → emptied main's `td5mod/deps/mingw/` → had to re-extract `td5mod/deps/mingw-i686.7z` to restore. The `~/bin/rm` wrapper now refuses paths under main's `td5mod/deps/mingw`, but the wrapper resolves through junctions, so the worktree path is also blocked. To unlink a junction safely, use `cmd //c "rmdir <path>"` (no `/s`) — Windows `rmdir` removes the junction without recursing into it. Recovery if the toolchain is wiped: `cd td5mod/deps && rm -rf mingw && 7z x mingw-i686.7z -y && mv mingw32 mingw/`.
 
 ## Testing the build (INI + log loop)
 
@@ -415,12 +430,13 @@ Because every `/fix` session runs in its own worktree, your INI tweaks and log o
 | `[Game]` | `DebugOverlay` | `1` | **Always on** — on-screen counters must be visible every run |
 | `[Game]` | `DefaultTrack` | `0` (Moscow) | Default unless `$ARGUMENTS` names another track — see below |
 | `[GameOptions]` | `PlayerIsAI` | `0` | **Default off** — user drives manually. Only flip to `1` if the fix is specifically about attract-mode / AI-slot-0 / `/diff-race` behavior |
+| `[Logging]` | `Enabled` | `1` | **Mandatory for `/fix`** — master `td5re.ini` default is `0` (perf baseline). Without this flip the post-run log reads in **Logging Rules** below see only `[session start]`. Leave `Wrapper = 0` unless you're actually debugging the D3D shim |
 
 **Track selection rule:** Parse `$ARGUMENTS` for a track name. If it mentions one of the quickrace mapping entries (Moscow, Edinburgh, Sydney, Blue Ridge, Jarash, Newcastle, Maui, Courmayeur, Honolulu, Tokyo, Keswick, San Francisco, Bern, Kyoto, Washington, Munich, Cheddar, Montego, Bez, Drag Strip), look up its index in `re/tools/quickrace/td5_quickrace.ini` and set `DefaultTrack` accordingly. Otherwise use `0` (Moscow). Moscow is the default because it's the reference track used by `/diff-race` and every regression baseline.
 
 **PlayerIsAI exception:** Do NOT auto-flip to `1`. The only cases where you should ever set `PlayerIsAI = 1` in `/fix` are when the user explicitly asks to test AI behavior on slot 0 (attract-mode parity, AI rubber-banding, script VM). Never for general physics / camera / HUD / render fixes.
 
-The worktree INI is seeded from the committed master copy, which usually has these keys at the wrong defaults — so the full set of edits is needed on every fresh worktree. Do NOT launch the exe until all five keys are written to disk.
+The worktree INI is seeded from the committed master copy, which usually has these keys at the wrong defaults — so the full set of edits is needed on every fresh worktree. Do NOT launch the exe until all six keys are written to disk.
 
 Useful keys for fix-validation runs:
 
@@ -436,6 +452,9 @@ Useful keys for fix-validation runs:
 | `[Trace]` | `RaceTraceSlot` | Which actor slot to record |
 | `[Trace]` | `RaceTraceMaxFrames` | Cap trace length |
 | `[Trace]` | `AutoThrottle = 1` | Hold throttle automatically once the race starts |
+| `[Logging]` | `Enabled = 1` | **Required** — turn on the centralized logger so `engine.log` / `race.log` / `frontend.log` populate (otherwise post-run reads see only `[session start]`) |
+| `[Logging]` | `MinLevel` | `0`=DEBUG, `1`=INFO (default), `2`=WARN, `3`=ERROR. Bump to `2` to keep WRN/ERR but kill the INF spam |
+| `[Logging]` | `Frontend` / `Race` / `Engine` / `Wrapper` | Per-sink gates. Turn off the categories you didn't touch to keep the log lean. `Wrapper` is the biggest emitter — leave at `0` unless debugging the D3D shim |
 
 For deeper scenarios (specific track + car + game type without touching `td5re.ini`), the shared launcher INI at `re/tools/quickrace/td5_quickrace.ini` overlays on top — see `[reference_quickrace_launcher.md]` for the full track/car tables. **Reminder:** the shared overlay runs *after* `td5re.ini` and silently overwrites overlapping keys.
 
@@ -573,6 +592,145 @@ This keeps the worktree's runtime state bit-for-bit identical to what the user s
 ### Read the log to verify the fix
 
 After the harness exits, read the relevant log under `log/` (see the table in **Logging Rules** below). Match your edits to the right log file, read the tail (last 100–200 lines), and grep for the `TD5_LOG_I` lines you added. If the log contradicts the expected behavior, iterate — do NOT guess at runtime state when the log can tell you. For physics/AI fixes, also inspect `log/race_trace.csv` directly.
+
+## Multi-track CSV bundle sweep (mandatory)
+
+**Why:** A single-track test misses symptoms that only show up on other geometry. A Ghidra-correct fix can look "no effect" on Moscow because Moscow's spawn spans never hit the corrected code path. Multi-track coverage catches this; per-fix co-located CSV bundles make post-hoc bisection possible. See `feedback_fix_multi_track_frida.md` for the reasoning.
+
+**When to run:** After the single-track runtime probe looks sane, BEFORE the Step 3 commit. Mandatory for any fix touching `td5_physics.c`, `td5_ai.c`, `td5_track.c`, `td5_camera.c`, `td5_game.c`, `td5_vfx.c`, or `td5_hud.c`. Skip only when the fix is pure frontend / asset / build-tooling.
+
+### The trio
+
+| Slot | Track | Index | Why |
+|------|-------|-------|-----|
+| 1 | Moscow | `0` | Point-to-point; regression baseline, matches /diff-race default |
+| 2 | Newcastle | `5` | Circuit; exercises lap-wrap, checkpoint array, circuit AI branch |
+| 3 | Random | pick from `{1,2,3,4,6,7,8,9,10,11,12,13,14,15,16,17,18}` | Widens coverage over time; seed from `SESSION_TAG` so parallel sessions don't collide |
+
+**Seeding the random pick:**
+```bash
+RANDOM_POOL=(1 2 3 4 6 7 8 9 10 11 12 13 14 15 16 17 18)
+SEED=$(( $(echo "${SESSION_TAG}" | cksum | awk '{print $1}') ))
+RANDOM_IDX=${RANDOM_POOL[$(( SEED % ${#RANDOM_POOL[@]} ))]}
+# Also capture a human-readable name for the bundle filename:
+declare -A TRACK_NAMES=(
+    [0]=moscow [1]=edinburgh [2]=sydney [3]=blueridge [4]=jarash [5]=newcastle
+    [6]=maui [7]=courmayeur [8]=honolulu [9]=tokyo [10]=keswick [11]=sanfrancisco
+    [12]=bern [13]=kyoto [14]=washington [15]=munich [16]=cheddar [17]=montego
+    [18]=bez [19]=dragstrip
+)
+RANDOM_NAME="${TRACK_NAMES[${RANDOM_IDX}]}"
+```
+
+### Bundle layout
+
+Bundles live in the MAIN tree (so they survive worktree teardown). Each `/fix` session writes exactly one bundle dir named after its session tag:
+
+```
+tools/frida_csv/
+    fix-1776736681-282344/
+        original_track0_moscow.csv       # Frida hook on TD5_d3d.exe
+        fix_track0_moscow.csv            # port's log/race_trace.csv
+        original_track5_newcastle.csv
+        fix_track5_newcastle.csv
+        original_track<N>_<name>.csv     # the random pick
+        fix_track<N>_<name>.csv
+        meta.json                        # session tag, branch, commit, trio, timestamps
+```
+
+### Sweep procedure
+
+Loop over the trio. For each iteration, `TRACK_N` is the track index and `TRACK_NAME` is the slug from the `TRACK_NAMES` map above (e.g. `moscow`, `newcastle`, `munich`).
+
+```bash
+BUNDLE_DIR="C:/Users/maria/Desktop/Proyectos/TD5RE/tools/frida_csv/${SESSION_TAG}"
+mkdir -p "${BUNDLE_DIR}"
+
+for entry in "0:moscow" "5:newcastle" "${RANDOM_IDX}:${RANDOM_NAME}"; do
+    TRACK_N="${entry%%:*}"
+    TRACK_NAME="${entry##*:}"
+    echo "=== Sweep track=${TRACK_N} (${TRACK_NAME}) ==="
+
+    # --- Port side: run the worktree's td5re.exe with DefaultTrack=N ---
+    # Use the Edit tool to set [Game] DefaultTrack=${TRACK_N} in the
+    # worktree INI; keep AutoRace=1, AutoThrottle=1, RaceTrace=1,
+    # RaceTraceSlot=-1, RaceTraceMaxFrames=300 from the baseline config.
+    cd "${WORKTREE_DIR}"
+    rm -f log/race_trace.csv
+    TD5RE_WINDOW_TITLE="TD5RE [${SESSION_TAG}] ${TRACK_NAME}_track${TRACK_N}" powershell.exe -Command "
+    Start-Process -FilePath '.\td5re.exe' -PassThru | ForEach-Object {
+        \$proc = \$_
+        Start-Sleep -Seconds 20   # 20s covers countdown + ~14s of race
+        \$proc.CloseMainWindow() | Out-Null
+        Start-Sleep -Seconds 2
+        if (!\$proc.HasExited) { \$proc.Kill() }
+    }"
+    cp log/race_trace.csv "${BUNDLE_DIR}/fix_track${TRACK_N}_${TRACK_NAME}.csv"
+
+    # --- Original side: run TD5_d3d.exe under Frida from main ---
+    cd C:/Users/maria/Desktop/Proyectos/TD5RE
+    rm -f log/race_trace_original.csv
+    python re/tools/quickrace/td5_quickrace.py --trace --trace-auto-exit \
+        --set race.track=${TRACK_N} --set race.car=0 --set race.game_type=0 --set race.laps=1 \
+        --trace-max-frames 300
+    cp log/race_trace_original.csv "${BUNDLE_DIR}/original_track${TRACK_N}_${TRACK_NAME}.csv"
+
+    # --- Sanity check: both sides must produce a non-empty CSV ---
+    PORT_ROWS=$(wc -l < "${BUNDLE_DIR}/fix_track${TRACK_N}_${TRACK_NAME}.csv")
+    ORIG_ROWS=$(wc -l < "${BUNDLE_DIR}/original_track${TRACK_N}_${TRACK_NAME}.csv")
+    echo "track=${TRACK_N} (${TRACK_NAME}): port=${PORT_ROWS} rows, original=${ORIG_ROWS} rows"
+    if [ "${PORT_ROWS}" -lt 50 ] || [ "${ORIG_ROWS}" -lt 50 ]; then
+        echo "WARN: short CSV on track=${TRACK_N}; inspect worktree log/engine.log for cause"
+    fi
+done
+```
+
+The quickrace Python + `tools/frida_race_trace.js` already emit the canonical CSV schema that pairs 1:1 with the port's `log/race_trace.csv`. Do NOT reimplement the Frida side inline.
+
+3. **Confirm both CSVs are non-empty** — ≥ 50 rows each. A zero-row side means the harness died before the trace flushed; investigate (missing windowed patch, DDraw proxy unrenamed, Frida attach race) and retry that track.
+
+### Write `meta.json`
+
+```bash
+cat > "${BUNDLE_DIR}/meta.json" <<EOF
+{
+    "session_tag": "${SESSION_TAG}",
+    "branch": "${SESSION_TAG}",
+    "worktree": "${WORKTREE_DIR}",
+    "fix_description": "<one-line from $ARGUMENTS>",
+    "trio": [
+        {"index": 0, "name": "moscow", "kind": "point-to-point"},
+        {"index": 5, "name": "newcastle", "kind": "circuit"},
+        {"index": ${RANDOM_IDX}, "name": "${RANDOM_NAME}", "kind": "random"}
+    ],
+    "captured_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+    "card": {"car": 0, "game_type": 0, "laps": 1, "frames": 300}
+}
+EOF
+```
+
+### Prune to 10 newest bundles
+
+After writing the new bundle, prune older `fix-*` dirs under `tools/frida_csv/` so only the 10 newest survive (by directory mtime):
+
+```bash
+cd C:/Users/maria/Desktop/Proyectos/TD5RE/tools/frida_csv
+# ls -dt sorts by mtime descending; keep first 10, delete the rest.
+ls -dt fix-*/ 2>/dev/null | tail -n +11 | while read dir; do
+    echo "Pruning old bundle: ${dir}"
+    rm -rf "${dir%/}"
+done
+```
+
+### Do NOT run `/diff-race` inline
+
+The sweep's job is to produce the CSV bundle, not to diff it. Leave interpretation to `/diff-race` (which knows how to consume the bundle layout). Report to the user that the bundle is ready at `tools/frida_csv/${SESSION_TAG}/` and recommend `/diff-race bundle=${SESSION_TAG}` as the next step if they want a comparator pass.
+
+### Troubleshooting the sweep
+
+- **Port CSV empty on some tracks** — the worktree's td5re.exe might crash on specific tracks (e.g. spin-out locks the car in place and `simulation_tick_counter` never advances). Capture whatever rows did flush (the CSV is written incrementally); a short CSV is still a data point.
+- **Original CSV empty** — common causes: `original/DDraw.dll` not renamed to `DDraw.dll.td5re_wrapper`, windowed-mode patch not applied, Frida attach race. See `/diff-race`'s Step 1 notes for the full checklist.
+- **Random picks colliding across parallel `/fix` sessions** — SESSION_TAG includes the PID (`$$`), so two simultaneous runs always hash to different seeds. If you see two bundles with the same random index anyway, that's fine — both still cover Moscow + Newcastle distinctly.
 
 ## Logging Rules
 

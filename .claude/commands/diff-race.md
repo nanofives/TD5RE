@@ -4,12 +4,17 @@ Capture race traces from the original `TD5_d3d.exe` and the `td5re.exe` source
 port for the same scenario, diff them with the canonical comparator, and
 report the first divergence so a `/fix` can target it.
 
-**Usage:** `/diff-race [car=N] [track=N] [game_type=N] [laps=N] [frames=N] [fields=a,b,c] [stage=post_physics] [kind=actor] [float-tol=0.001]`
+**Usage:**
+- Live capture + diff (single track, interactive):
+  `/diff-race [car=N] [track=N] [game_type=N] [laps=N] [frames=N] [fields=a,b,c] [stage=post_physics] [kind=actor] [float-tol=0.001] [hooks=PATH.yaml]`
+- Diff an existing `/fix` CSV bundle (no capture — reuses what /fix already produced):
+  `/diff-race bundle=<SESSION_TAG> [track=N] [fields=a,b,c] [stage=S] [kind=K] [float-tol=F]`
 
 All arguments are optional. Defaults:
 - `car=0` (1998 Dodge Viper), `track=0` (Moscow, rain+fog), `game_type=0` (single race), `laps=1`
 - `frames=300` — 160 tick countdown (0xA000/0x100 @ 30 Hz = 5.33 s) + ~3 s race window + margin
 - Comparator defaults to diffing everything with `float-tol=0.001`
+- `bundle=<tag>` — no live capture; reads CSVs from `tools/frida_csv/<tag>/`. Defaults to diffing ALL three tracks in the bundle; narrow with `track=N`.
 
 ## Workflow
 
@@ -35,11 +40,93 @@ logic — it already:
 - Restores both INI snapshots no matter what.
 
 Parse `$ARGUMENTS` into `--car`, `--track`, `--game-type`, `--laps`,
-`--frames`, `--fields`, `--stage`, `--kind`, `--float-tol` and invoke:
+`--frames`, `--fields`, `--stage`, `--kind`, `--float-tol`, `--hooks` and
+invoke:
 
 ```bash
-python tools/diff_race.py --car N --track N [--frames N] [--fields a,b,c] [--stage S] [--kind K] [--float-tol F]
+python tools/diff_race.py --car N --track N [--frames N] [--fields a,b,c] [--stage S] [--kind K] [--float-tol F] [--hooks PATH]
 ```
+
+### Step 1b: Bundle mode (`bundle=<SESSION_TAG>`)
+
+When `$ARGUMENTS` contains `bundle=<tag>`, skip the live capture entirely and diff the CSV pairs that `/fix` already produced under `tools/frida_csv/<tag>/`. This is the default way to evaluate a `/fix` candidate across the Moscow + Newcastle + random trio without re-spawning either binary.
+
+```bash
+BUNDLE_DIR="C:/Users/maria/Desktop/Proyectos/TD5RE/tools/frida_csv/${BUNDLE_TAG}"
+if [ ! -d "${BUNDLE_DIR}" ]; then
+    echo "Bundle not found: ${BUNDLE_DIR}"
+    echo "Available bundles:"
+    ls -dt tools/frida_csv/fix-*/ 2>/dev/null | head -10
+    exit 1
+fi
+
+# Read meta.json for the trio the bundle captured.
+python - <<PY
+import json, pathlib
+meta = json.loads(pathlib.Path("${BUNDLE_DIR}/meta.json").read_text())
+for t in meta["trio"]:
+    print(f"{t['index']}\t{t['name']}\t{t['kind']}")
+PY
+```
+
+For each track in the bundle (filtered by `track=N` if the user passed one):
+
+```bash
+ORIG="${BUNDLE_DIR}/original_track${TRACK_N}_${TRACK_NAME}.csv"
+PORT="${BUNDLE_DIR}/fix_track${TRACK_N}_${TRACK_NAME}.csv"
+
+# Sanity: both sides must exist AND have > 50 rows.
+for f in "${ORIG}" "${PORT}"; do
+    [ -f "${f}" ] || { echo "Missing: ${f}"; continue 2; }
+    rows=$(wc -l < "${f}")
+    [ "${rows}" -gt 50 ] || { echo "Too short (${rows} rows): ${f}"; continue 2; }
+done
+
+python tools/compare_race_trace.py "${ORIG}" "${PORT}" \
+    ${FIELDS:+--fields ${FIELDS}} \
+    ${STAGE:+--stage ${STAGE}} \
+    ${KIND:+--kind ${KIND}} \
+    ${FLOAT_TOL:+--float-tol ${FLOAT_TOL}}
+```
+
+**Report format in bundle mode:** produce a compact per-track summary, e.g.:
+
+```
+Bundle fix-1776736681-282344 (branch fix-1776736681-282344, commit de22a8a)
+  Moscow    (track=0)  — earliest mismatch: sim_tick=12 field=world_pos_y Δ=234  → td5_physics.c
+  Newcastle (track=5)  — no divergence in 312 rows
+  Munich    (track=15) — earliest mismatch: sim_tick=7  field=vel_x        Δ=0.18 → td5_physics.c
+```
+
+Do NOT re-run the comparator against a track that's already clean; say "no divergence" once and move on.
+
+### Custom Ghidra-function hooks (`hooks=PATH.yaml`)
+
+When the user passes `hooks=re/trace-hooks/<spec>.yaml`, the Frida side
+attaches `Interceptor.attach` hooks to each listed function and emits one
+row per invocation to `log/calls_trace_original.csv`. The port emits
+matching rows to `log/calls_trace.csv` whenever a `TD5_TRACE_CALL_ENTER` /
+`TD5_TRACE_CALL_RET` macro fires in the C source. The orchestrator runs a
+second comparator pass on those two CSVs keyed by
+`(sim_tick, fn_name, call_idx)`.
+
+**User workflow:**
+
+1. Write a YAML spec under `re/trace-hooks/` (see
+   `re/trace-hooks/README.md` + `example_suspension.yaml`). Each hook
+   entry needs `name`, `original_rva`, `args` (count 0..8), optional
+   `capture_return`.
+2. Insert `TD5_TRACE_CALL_ENTER("<name>", arg0, arg1, ...)` at the
+   entry of the port's equivalent C function — matching the spec's
+   `name`. Optionally also `TD5_TRACE_CALL_RET("<name>", retval, arg0,
+   arg1, ...)` at every return path. Rebuild the port.
+3. Run `/diff-race hooks=re/trace-hooks/<spec>.yaml [other flags]`.
+4. Inspect comparator output for per-call arg/ret divergences.
+
+Do NOT add the macros yourself on behalf of the user — they belong in
+whatever function the user is actively investigating. Your job when the
+skill is invoked with `hooks=...` is only to pass it through to
+`diff_race.py`.
 
 ### Step 2: Interpret the output
 
@@ -90,6 +177,10 @@ mismatch, and stops. The user decides whether to invoke `/fix` next.
   reads game data out of `original/` via relative paths.
 - Run `diff_race.py` through bash from the repo root (`cd` is handled
   inside the script via `REPO = HERE.parent`).
+- In bundle mode, do NOT mutate `tools/frida_csv/<tag>/` — it's the
+  read-only artifact of a `/fix` session. If a bundle is missing a track
+  or the CSVs look truncated, tell the user to re-run the `/fix` sweep;
+  do NOT attempt to regenerate the bundle from `/diff-race`.
 - If `diff_race.py` fails with `original trace missing` or `port trace
   missing`, the run died before the trace flushed. Check:
   - Is the windowed-mode patch applied to the original? (`re/patches/patch_windowed_*.py`)
