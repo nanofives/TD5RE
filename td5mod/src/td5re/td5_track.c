@@ -1881,15 +1881,18 @@ static int resolve_neighbor(int span_idx, int *sub_lane, uint8_t crossing_bit,
         switch (sp->span_type) {
         case 8: { /* JUNCTION_FWD [CONFIRMED @ 0x4440F0 case 1]:
                    * sub_lane < next_span.lane_count → main road (span+1)
-                   * sub_lane >= next_span.lane_count → branch (link_next) */
+                   * sub_lane >= next_span.lane_count → branch (link_next)
+                   *
+                   * [FIX 2026-04-20]: main-road continuation leaves sub_lane
+                   * UNCHANGED. Only the default (non-junction) case applies
+                   * the h_offset delta. The original's case-1 junction path
+                   * does not adjust sub_lane on the main-road fall-through. */
             int next_idx = span_idx + 1;
             if (next_idx >= 0 && next_idx < s_span_count) {
                 int next_lanes = span_lane_count(&s_span_array[next_idx]);
                 if (*sub_lane < next_lanes) {
-                    /* Main road */
+                    /* Main road — sub_lane unchanged */
                     new_span = next_idx;
-                    int dest_h = span_height_offset(&s_span_array[next_idx]);
-                    *sub_lane += h_offset - dest_h;
                 } else {
                     /* Branch road */
                     new_span = (int)sp->link_next;
@@ -2085,6 +2088,40 @@ static int resolve_neighbor(int span_idx, int *sub_lane, uint8_t crossing_bit,
 }
 
 /**
+ * Compound-case cross-product helper. Computes
+ *   cross = (b.x - a.x)*(pos.z - a.z) - (b.z - a.z)*(pos.x - a.x)
+ * using span-origin-relative 24.8 fixed-point coordinates. v_a_idx and
+ * v_b_idx are indices into the shared vertex pool; span origin supplies
+ * the world-space offset. This mirrors the cross used by the original's
+ * compound retest blocks (0x00444920 / 0x00444DAF / 0x0044517F /
+ * 0x004453E7), which reconstruct it from psVar2/psVar3/psVar5 word reads.
+ */
+static int64_t compound_cross(const TD5_StripSpan *sp,
+                               int v_a_idx, int v_b_idx,
+                               int32_t pos_x, int32_t pos_z)
+{
+    TD5_StripVertex *va;
+    TD5_StripVertex *vb;
+    int32_t ox, oz, ax, az, bx, bz;
+    int64_t dx, dz, ex, ez;
+
+    va = vertex_at(v_a_idx);
+    vb = vertex_at(v_b_idx);
+    if (!va || !vb) return 0;
+    ox = sp->origin_x << 8;
+    oz = sp->origin_z << 8;
+    ax = ox + ((int32_t)va->x << 8);
+    az = oz + ((int32_t)va->z << 8);
+    bx = ox + ((int32_t)vb->x << 8);
+    bz = oz + ((int32_t)vb->z << 8);
+    dx = (int64_t)(bx - ax);
+    dz = (int64_t)(bz - az);
+    ex = (int64_t)(pos_x - ax);
+    ez = (int64_t)(pos_z - az);
+    return dx * ez - dz * ex;
+}
+
+/**
  * Iterative boundary traversal matching original FUN_004440f0 switch logic.
  * Handles compound crossings (diagonal movement) in a single step.
  * Bitmask: bit0=forward(1), bit1=right(2), bit2=backward(4), bit3=left(8).
@@ -2096,6 +2133,15 @@ static void update_position_recursive(int16_t *track_state, int32_t pos_x, int32
     int sub_lane = (int)((int8_t *)track_state)[12];
     int new_span;
     int iter;
+    /* Compound-case atomic flag. The original's UpdateActorTrackPosition
+     * returns after one step — each case handler is terminal. Single-bit
+     * cases (1/2/4/8) in the port iterate for multi-span moves, but the
+     * compound cases (3/6/9/0xC) now resolve their own retest internally,
+     * so they must exit after one step to match the original and to avoid
+     * re-entering the same REJECT branch on an unchanged (span, sub_lane)
+     * → TRACK_MAX_RECURSION → brute-force fallback that mis-places the
+     * actor far from its true span (breaks wall_contact dispatch). */
+    int compound_done = 0;
 
     /* Save state snapshot so we can roll back on non-convergence.
      * If the boundary walk doesn't converge in TRACK_MAX_RECURSION steps,
@@ -2129,18 +2175,58 @@ static void update_position_recursive(int16_t *track_state, int32_t pos_x, int32
             track_state[0] = (int16_t)new_span;
             break;
 
-        case 3: /* Forward + Right */
-            new_span = resolve_neighbor(span_idx, &sub_lane, 0x01, pos_x, pos_z);
-            span_idx = new_span;
-            track_state[0] = (int16_t)new_span;
-            track_state[2]++;
-            if (track_state[2] > track_state[3])
-                track_state[3] = track_state[2];
-            sub_lane -= 1;  /* -1 bias after forward step */
-            new_span = resolve_neighbor(span_idx, &sub_lane, 0x02, pos_x, pos_z);
-            span_idx = new_span;
-            track_state[0] = (int16_t)new_span;
+        case 3: { /* Forward + Right — single FWD step + post-step retest
+                   * [CONFIRMED @ 0x00444920-0x004449BD, pass-4 Ghidra]:
+                   * Primary cross on NEW span's lateral edge at new_sub
+                   * (e40[new_sub] → e41[new_sub]). Secondary cross on
+                   * e41 column at (new_sub-1, new_sub). Three outcomes:
+                   *   cross1 <= 0              → advance,   sub = new_sub
+                   *   mask & 0x08 == 0
+                   *     or cross2 <= 0         → advance,   sub = new_sub - 1
+                   *   else                     → REJECT,    sub = OLD - 1, keep OLD span */
+            compound_done = 1;
+            int old_span = span_idx;
+            int old_sub  = sub_lane;
+            int stepped_sub = sub_lane;
+            int new_span_fwd = resolve_neighbor(span_idx, &stepped_sub, 0x01, pos_x, pos_z);
+            TD5_StripSpan *nsp = &s_span_array[new_span_fwd];
+            int nt = (nsp->span_type >= 0 && nsp->span_type < 12) ? nsp->span_type : 0;
+            int e40_base = (int)nsp->left_vertex_index  + k_span_vertex_offsets[nt][0];
+            int e41_base = (int)nsp->right_vertex_index + k_span_vertex_offsets[nt][1];
+            int64_t cross1 = compound_cross(nsp,
+                                            e40_base + stepped_sub,
+                                            e41_base + stepped_sub,
+                                            pos_x, pos_z);
+            if (cross1 <= 0) {
+                span_idx = new_span_fwd;
+                sub_lane = stepped_sub;
+                track_state[0] = (int16_t)new_span_fwd;
+                track_state[2]++;
+                if (track_state[2] > track_state[3]) track_state[3] = track_state[2];
+                break;
+            }
+            uint8_t mask = (stepped_sub > 1) ? 0x0F : s_edge_mask_first[nt];
+            int64_t cross2 = 0;
+            if (mask & 0x08) {
+                cross2 = compound_cross(nsp,
+                                        e41_base + stepped_sub - 1,
+                                        e41_base + stepped_sub,
+                                        pos_x, pos_z);
+            }
+            if ((mask & 0x08) == 0 || cross2 <= 0) {
+                span_idx = new_span_fwd;
+                sub_lane = stepped_sub - 1;
+                track_state[0] = (int16_t)new_span_fwd;
+                track_state[2]++;
+                if (track_state[2] > track_state[3]) track_state[3] = track_state[2];
+                break;
+            }
+            /* REJECT */
+            span_idx = old_span;
+            sub_lane = old_sub - 1;
+            track_state[0] = (int16_t)old_span;
             break;
+        }
 
         case 4: /* Backward */
             new_span = resolve_neighbor(span_idx, &sub_lane, 0x04, pos_x, pos_z);
@@ -2152,16 +2238,67 @@ static void update_position_recursive(int16_t *track_state, int32_t pos_x, int32
             sub_lane += 1;
             break;
 
-        case 6: /* Right + Backward */
-            new_span = resolve_neighbor(span_idx, &sub_lane, 0x02, pos_x, pos_z);
-            span_idx = new_span;
-            track_state[0] = (int16_t)new_span;
-            new_span = resolve_neighbor(span_idx, &sub_lane, 0x04, pos_x, pos_z);
-            span_idx = new_span;
-            track_state[0] = (int16_t)new_span;
-            track_state[2]--;
-            sub_lane += 1;  /* +1 bias after backward step */
+        case 6: { /* Right + Backward compound bits — ORIGINAL DOES FWD PRIMARY
+                   * [CONFIRMED @ 0x00444CB5 INC probe[2], pass-4 Ghidra].
+                   * Primary cross on NEW span's lateral edge at (new_sub+1)
+                   * (e40[new_sub+1] → e41[new_sub+1]). Secondary cross on
+                   * e40 column at (new_sub+1, new_sub+2). Outcomes:
+                   *   cross1 <= 0 or mask1 & 0x04 == 0  → advance, sub = new_sub
+                   *   mask2 & 0x08 == 0 or cross2 <= 0  → advance, sub = new_sub + 1
+                   *   else                              → REJECT,  sub = OLD + 1 */
+            compound_done = 1;
+            int old_span = span_idx;
+            int old_sub  = sub_lane;
+            int stepped_sub = sub_lane;
+            int new_span_fwd = resolve_neighbor(span_idx, &stepped_sub, 0x01, pos_x, pos_z);
+            TD5_StripSpan *nsp = &s_span_array[new_span_fwd];
+            int nt = (nsp->span_type >= 0 && nsp->span_type < 12) ? nsp->span_type : 0;
+            int lc_new = span_lane_count(nsp);
+            int e40_base = (int)nsp->left_vertex_index  + k_span_vertex_offsets[nt][0];
+            int e41_base = (int)nsp->right_vertex_index + k_span_vertex_offsets[nt][1];
+            uint8_t mask1 = (stepped_sub < lc_new - 1) ? 0x0F : s_edge_mask_last[nt];
+            if ((mask1 & 0x04) == 0) {
+                span_idx = new_span_fwd;
+                sub_lane = stepped_sub;
+                track_state[0] = (int16_t)new_span_fwd;
+                track_state[2]++;
+                if (track_state[2] > track_state[3]) track_state[3] = track_state[2];
+                break;
+            }
+            int64_t cross1 = compound_cross(nsp,
+                                            e40_base + stepped_sub + 1,
+                                            e41_base + stepped_sub + 1,
+                                            pos_x, pos_z);
+            if (cross1 <= 0) {
+                span_idx = new_span_fwd;
+                sub_lane = stepped_sub;
+                track_state[0] = (int16_t)new_span_fwd;
+                track_state[2]++;
+                if (track_state[2] > track_state[3]) track_state[3] = track_state[2];
+                break;
+            }
+            uint8_t mask2 = ((stepped_sub + 1) < lc_new - 1) ? 0x0F : s_edge_mask_last[nt];
+            int64_t cross2 = 0;
+            if (mask2 & 0x08) {
+                cross2 = compound_cross(nsp,
+                                        e40_base + stepped_sub + 1,
+                                        e40_base + stepped_sub + 2,
+                                        pos_x, pos_z);
+            }
+            if ((mask2 & 0x08) == 0 || cross2 <= 0) {
+                span_idx = new_span_fwd;
+                sub_lane = stepped_sub + 1;
+                track_state[0] = (int16_t)new_span_fwd;
+                track_state[2]++;
+                if (track_state[2] > track_state[3]) track_state[3] = track_state[2];
+                break;
+            }
+            /* REJECT */
+            span_idx = old_span;
+            sub_lane = old_sub + 1;
+            track_state[0] = (int16_t)old_span;
             break;
+        }
 
         case 8: /* Left */
             new_span = resolve_neighbor(span_idx, &sub_lane, 0x08, pos_x, pos_z);
@@ -2169,29 +2306,122 @@ static void update_position_recursive(int16_t *track_state, int32_t pos_x, int32
             track_state[0] = (int16_t)new_span;
             break;
 
-        case 9: /* Forward + Left */
-            new_span = resolve_neighbor(span_idx, &sub_lane, 0x01, pos_x, pos_z);
-            span_idx = new_span;
-            track_state[0] = (int16_t)new_span;
-            track_state[2]++;
-            if (track_state[2] > track_state[3])
-                track_state[3] = track_state[2];
-            sub_lane -= 1;  /* -1 bias after forward step */
-            new_span = resolve_neighbor(span_idx, &sub_lane, 0x08, pos_x, pos_z);
-            span_idx = new_span;
-            track_state[0] = (int16_t)new_span;
+        case 9: { /* Forward + Left — FWD primary + post-step retest
+                   * [CONFIRMED @ 0x00445134-0x004451FB, pass-4 Ghidra]:
+                   * Primary cross uses SWAPPED roles vs case 3: psVar2=e40,
+                   * psVar3=e41. Secondary cross on e41 column with orientation
+                   * (v_a=cur, v_b=prev) → sign opposite case 3's secondary.
+                   * Outcomes:
+                   *   cross1 <= 0              → advance, sub = new_sub
+                   *   mask & 0x02 == 0 or
+                   *     cross2 <= 0            → advance, sub = new_sub - 1
+                   *   else                     → REJECT,  sub = OLD - 1 */
+            compound_done = 1;
+            int old_span = span_idx;
+            int old_sub  = sub_lane;
+            int stepped_sub = sub_lane;
+            int new_span_fwd = resolve_neighbor(span_idx, &stepped_sub, 0x01, pos_x, pos_z);
+            TD5_StripSpan *nsp = &s_span_array[new_span_fwd];
+            int nt = (nsp->span_type >= 0 && nsp->span_type < 12) ? nsp->span_type : 0;
+            int e40_base = (int)nsp->left_vertex_index  + k_span_vertex_offsets[nt][0];
+            int e41_base = (int)nsp->right_vertex_index + k_span_vertex_offsets[nt][1];
+            /* case-9 primary cross: v_a=e41 (psVar3), v_b=e40 (psVar2) */
+            int64_t cross1 = compound_cross(nsp,
+                                            e41_base + stepped_sub,
+                                            e40_base + stepped_sub,
+                                            pos_x, pos_z);
+            if (cross1 <= 0) {
+                span_idx = new_span_fwd;
+                sub_lane = stepped_sub;
+                track_state[0] = (int16_t)new_span_fwd;
+                track_state[2]++;
+                if (track_state[2] > track_state[3]) track_state[3] = track_state[2];
+                break;
+            }
+            uint8_t mask = (stepped_sub > 1) ? 0x0F : s_edge_mask_first[nt];
+            int64_t cross2 = 0;
+            if (mask & 0x02) {
+                /* case-9 secondary cross: v_a=cur, v_b=prev (opposite case 3) */
+                cross2 = compound_cross(nsp,
+                                        e41_base + stepped_sub,
+                                        e41_base + stepped_sub - 1,
+                                        pos_x, pos_z);
+            }
+            if ((mask & 0x02) == 0 || cross2 <= 0) {
+                span_idx = new_span_fwd;
+                sub_lane = stepped_sub - 1;
+                track_state[0] = (int16_t)new_span_fwd;
+                track_state[2]++;
+                if (track_state[2] > track_state[3]) track_state[3] = track_state[2];
+                break;
+            }
+            /* REJECT */
+            span_idx = old_span;
+            sub_lane = old_sub - 1;
+            track_state[0] = (int16_t)old_span;
             break;
+        }
 
-        case 12: /* Backward + Left */
-            new_span = resolve_neighbor(span_idx, &sub_lane, 0x04, pos_x, pos_z);
-            span_idx = new_span;
-            track_state[0] = (int16_t)new_span;
-            track_state[2]--;
-            sub_lane += 1;  /* +1 bias after backward step */
-            new_span = resolve_neighbor(span_idx, &sub_lane, 0x08, pos_x, pos_z);
-            span_idx = new_span;
-            track_state[0] = (int16_t)new_span;
+        case 12: { /* Backward + Left — BACK primary + post-step retest
+                    * [CONFIRMED @ 0x004452A5 DEC probe[2], pass-4 Ghidra].
+                    * Primary cross same vertices as case 6, but mask2 tests
+                    * bit 0x02 (not 0x08), secondary cross is e41 column at
+                    * (new_sub+2, new_sub+1) with v_a=nextnext, v_b=cur — sign
+                    * opposite case 6's secondary. Outcomes:
+                    *   cross1 <= 0 or mask1 & 0x04 == 0  → advance, sub = new_sub
+                    *   mask2 & 0x02 == 0 or cross2 <= 0  → advance, sub = new_sub + 1
+                    *   else                              → REJECT,  sub = OLD + 1 */
+            compound_done = 1;
+            int old_span = span_idx;
+            int old_sub  = sub_lane;
+            int stepped_sub = sub_lane;
+            int new_span_back = resolve_neighbor(span_idx, &stepped_sub, 0x04, pos_x, pos_z);
+            TD5_StripSpan *nsp = &s_span_array[new_span_back];
+            int nt = (nsp->span_type >= 0 && nsp->span_type < 12) ? nsp->span_type : 0;
+            int lc_new = span_lane_count(nsp);
+            int e40_base = (int)nsp->left_vertex_index  + k_span_vertex_offsets[nt][0];
+            int e41_base = (int)nsp->right_vertex_index + k_span_vertex_offsets[nt][1];
+            uint8_t mask1 = (stepped_sub < lc_new - 1) ? 0x0F : s_edge_mask_last[nt];
+            if ((mask1 & 0x04) == 0) {
+                span_idx = new_span_back;
+                sub_lane = stepped_sub;
+                track_state[0] = (int16_t)new_span_back;
+                track_state[2]--;
+                break;
+            }
+            int64_t cross1 = compound_cross(nsp,
+                                            e40_base + stepped_sub + 1,
+                                            e41_base + stepped_sub + 1,
+                                            pos_x, pos_z);
+            if (cross1 <= 0) {
+                span_idx = new_span_back;
+                sub_lane = stepped_sub;
+                track_state[0] = (int16_t)new_span_back;
+                track_state[2]--;
+                break;
+            }
+            uint8_t mask2 = ((stepped_sub + 1) < lc_new - 1) ? 0x0F : s_edge_mask_last[nt];
+            int64_t cross2 = 0;
+            if (mask2 & 0x02) {
+                /* case-C secondary cross: v_a=e41[+2], v_b=e41[+1] (opposite case 6) */
+                cross2 = compound_cross(nsp,
+                                        e41_base + stepped_sub + 2,
+                                        e41_base + stepped_sub + 1,
+                                        pos_x, pos_z);
+            }
+            if ((mask2 & 0x02) == 0 || cross2 <= 0) {
+                span_idx = new_span_back;
+                sub_lane = stepped_sub + 1;
+                track_state[0] = (int16_t)new_span_back;
+                track_state[2]--;
+                break;
+            }
+            /* REJECT */
+            span_idx = old_span;
+            sub_lane = old_sub + 1;
+            track_state[0] = (int16_t)old_span;
             break;
+        }
 
         default:
             /* Unhandled compound case — resolve forward/backward first, then lateral */
@@ -2222,9 +2452,15 @@ static void update_position_recursive(int16_t *track_state, int32_t pos_x, int32
 
         /* Write back sub-lane after each transition */
         ((int8_t *)track_state)[12] = (int8_t)sub_lane;
+
+        /* Compound cases 3/6/9/0xC are atomic — matches original's one-
+         * step-per-call semantics (function returns after each case path
+         * per pass-4 disasm). Exit the loop now. */
+        if (compound_done)
+            break;
     }
 
-    if (iter >= TRACK_MAX_RECURSION) {
+    if (!compound_done && iter >= TRACK_MAX_RECURSION) {
         /* Non-convergence: boundary walk failed. Restore snapshot, then
          * do a brute-force nearest-span search in a ±SEARCH_RADIUS window
          * around the saved span to find the correct span by XZ distance. */
