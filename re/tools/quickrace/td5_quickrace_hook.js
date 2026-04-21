@@ -32,6 +32,11 @@ var RVA = {
     g_twoPlayerModeEnabled:                0x000962a0,
     g_networkSessionActive:                0x00097324,
     g_returnToScreenIndex:                 0x00096350,
+    g_dragOpponentCarIndex:                0x00063e08,   // DAT_00463e08 — drag-race opponent
+
+    // Live-hook sites (used when start_span_offset != 0 or trace_track_load)
+    InitializeActorTrackPose:              0x00034350,   // (slot, span, lane, flag) __cdecl
+    LoadTrackRuntimeData:                  0x0002fb90,   // (levelZipNumber)          __cdecl
 };
 
 var cfg = {
@@ -42,7 +47,10 @@ var cfg = {
     car: 0,
     paint: 0,
     transmission: 0,
+    start_span_offset: 0,
+    opponent_car: 0,
     verbose: false,
+    trace_track_load: false,
 };
 
 var launched = false;
@@ -50,6 +58,8 @@ var __quickrace_replacement = null;     // keep-alive for NativeCallback
 var __quickrace_legalsNoop = null;      // keep-alive for ShowLegalScreens no-op
 var __quickrace_introNoop = null;       // keep-alive for PlayIntroMovie no-op
 var __quickrace_setScreenHook = null;   // keep-alive for Interceptor.attach
+var __quickrace_spawnHook = null;       // keep-alive for InitializeActorTrackPose
+var __quickrace_loadTrackHook = null;   // keep-alive for LoadTrackRuntimeData
 
 function log(msg) {
     send({kind: 'log', msg: msg});
@@ -118,6 +128,14 @@ function install() {
 
         wi('g_returnToScreenIndex', -1);
 
+        // Drag-race opponent — only meaningful when the game type picks up
+        // the drag-race init path. Written unconditionally because the field
+        // is also the 2P P2-car slot and zeroing/refreshing it on race entry
+        // matches the vanilla frontend snapshot behavior.
+        if (cfg.game_type === 9) {
+            wi('g_dragOpponentCarIndex', cfg.opponent_car);
+        }
+
         vlog('calling ConfigureGameTypeFlags()');
         ConfigureGameTypeFlags();
         vlog('calling InitializeRaceSeriesSchedule()');
@@ -173,6 +191,48 @@ function install() {
     // main-menu attract-mode timer, etc.).
     addrOf.g_currentScreenFnPtr.writePointer(addrOf.ScreenMainMenuAnd1PRaceFlow);
     log('quickrace: g_currentScreenFnPtr forced to main-menu replacement');
+
+    // InitializeActorTrackPose(slot, span, lane, flag) — __cdecl, args on stack.
+    // When start_span_offset != 0, rewrite the span arg so every actor spawns
+    // further down the span ring (offsets are additive; the -3/-6/-9/-12/-15
+    // grid spacing is preserved). The function rebuilds heading, route
+    // progress, lateral offset, and physics state entirely from the new span,
+    // so no further state has to be patched.
+    // Also used as the hook site for trace_track_load's per-spawn logging.
+    if (cfg.start_span_offset !== 0 || cfg.trace_track_load) {
+        __quickrace_spawnHook = Interceptor.attach(addrOf.InitializeActorTrackPose, {
+            onEnter: function (args) {
+                var esp = this.context.esp;
+                var slot = esp.add(4).readU32();
+                var span = esp.add(8).readS16();
+                if (cfg.start_span_offset !== 0) {
+                    var newSpan = (span + cfg.start_span_offset) & 0xffff;
+                    esp.add(8).writeS16(newSpan);
+                    if (cfg.trace_track_load) {
+                        log('pose slot=' + slot + ': span ' + span + ' -> ' + newSpan);
+                    }
+                } else if (cfg.trace_track_load) {
+                    log('pose slot=' + slot + ': span=' + span);
+                }
+            }
+        });
+        log('quickrace: spawn hook installed (start_span_offset=' +
+            cfg.start_span_offset + ')');
+    }
+
+    // LoadTrackRuntimeData(levelZipNumber) — logs which level%03d.zip the
+    // race actually resolved to. Key signal for confirming track=-1 goes to
+    // drag strip (level030) vs any surprises from the schedule table.
+    if (cfg.trace_track_load) {
+        __quickrace_loadTrackHook = Interceptor.attach(addrOf.LoadTrackRuntimeData, {
+            onEnter: function (args) {
+                var n = this.context.esp.add(4).readU32();
+                var pad = ('000' + n).slice(-3);
+                log('LoadTrackRuntimeData(' + n + ') -> level' + pad + '.zip');
+            }
+        });
+        log('quickrace: track-load trace hook installed');
+    }
 }
 
 recv('cfg', function (msg) {
