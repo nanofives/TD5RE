@@ -1203,42 +1203,19 @@ int td5_sound_load_frontend_sfx(void)
 
         TD5_LOG_I(LOG_TAG, "Frontend WAV load begin: name=%s slot=%d", path, slot);
 
-        /* Open ZIP, find entry, read WAV data */
-        TD5_Archive *arc = td5_asset_open_archive(zip_path);
-        if (!arc) {
-            TD5_LOG_W(LOG_TAG, "cannot open %s", zip_path);
+        /* td5_asset_open_and_read tries loose-file fallback (re/assets/sounds/<name>)
+         * before falling back to the ZIP. The OO archive API would silently fail
+         * here because shipped builds extract Sounds.zip into re/assets/sounds/. */
+        int read_size = 0;
+        void *buf = td5_asset_open_and_read(entry_name, zip_path, &read_size);
+        if (!buf || read_size <= 0) {
+            TD5_LOG_W(LOG_TAG, "Frontend WAV load failed: name=%s slot=%d (file not found)",
+                      entry_name, slot);
+            if (buf) free(buf);
             continue;
         }
 
-        int size = td5_asset_get_entry_size(arc, entry_name);
-        if (size <= 0) {
-            TD5_LOG_W(LOG_TAG, "No File -- %s -- %d", entry_name, slot);
-            td5_asset_close_archive(arc);
-            continue;
-        }
-
-        void *buf = td5_asset_alloc((size_t)size);
-        if (!buf) {
-            td5_asset_close_archive(arc);
-            continue;
-        }
-
-        int read_size = td5_asset_read_entry(arc, entry_name, buf, size);
-        td5_asset_close_archive(arc);
-        if (read_size <= 0) {
-            TD5_LOG_E(LOG_TAG, "Frontend WAV read failed: name=%s slot=%d size=%d result=%d",
-                      entry_name, slot, size, read_size);
-            td5_asset_free(buf);
-            continue;
-        }
-
-        /* Load into platform audio buffer (one-shot, no duplicates).
-         * Original: DXSound::LoadBuffer(data, slot, 0) loads directly into
-         * the given slot index. Our platform layer uses td5_plat_audio_load_wav
-         * which returns a sequential buffer ID -- same pattern as
-         * sound_load_wav_from_zip() used for vehicle/ambient loading.
-         * The platform layer is responsible for mapping buffer IDs to the
-         * correct DXSound slot indices when built against DirectSound. */
+        /* Load into platform audio buffer (one-shot, no duplicates). */
         int buffer_id = td5_plat_audio_load_wav(buf, (size_t)read_size);
         if (buffer_id < 0) {
             TD5_LOG_E(LOG_TAG, "Frontend WAV load failed: name=%s slot=%d bytes=%d",
@@ -1249,7 +1226,7 @@ int td5_sound_load_frontend_sfx(void)
                       entry_name, buffer_id, slot, read_size);
         }
 
-        td5_asset_free(buf);
+        free(buf);
     }
 
     return 1;
@@ -1413,32 +1390,14 @@ static int sound_load_wav_from_zip(const char *wav_name, const char *zip_path,
     TD5_LOG_I(LOG_TAG, "WAV load attempt begin: name=%s zip=%s slot=%d loop=%d dup=%d",
               wav_name, zip_path, slot, loop, duplicates);
 
-    TD5_Archive *arc = td5_asset_open_archive(zip_path);
-    if (!arc) {
-        TD5_LOG_W(LOG_TAG, "cannot open archive %s for %s", zip_path, wav_name);
-        return -1;
-    }
-
-    int size = td5_asset_get_entry_size(arc, wav_name);
-    if (size <= 0) {
-        TD5_LOG_W(LOG_TAG, "%s not found in %s", wav_name, zip_path);
-        td5_asset_close_archive(arc);
-        return -1;
-    }
-
-    void *buf = td5_asset_alloc((size_t)size);
-    if (!buf) {
-        TD5_LOG_E(LOG_TAG, "alloc failed for %s (%d bytes)", wav_name, size);
-        td5_asset_close_archive(arc);
-        return -1;
-    }
-
-    int read_size = td5_asset_read_entry(arc, wav_name, buf, size);
-    td5_asset_close_archive(arc);
-    if (read_size <= 0) {
-        TD5_LOG_E(LOG_TAG, "read failed for %s from %s (size=%d result=%d)",
-                  wav_name, zip_path, size, read_size);
-        td5_asset_free(buf);
+    /* td5_asset_open_and_read handles loose-file fallback (re/assets/<subfolder>/<name>)
+     * before reaching for the ZIP. Builds ship extracted assets, so the ZIP open
+     * always fails and the OO archive API would never get past it. */
+    int read_size = 0;
+    void *buf = td5_asset_open_and_read(wav_name, zip_path, &read_size);
+    if (!buf || read_size <= 0) {
+        TD5_LOG_W(LOG_TAG, "WAV not found: name=%s zip=%s slot=%d", wav_name, zip_path, slot);
+        if (buf) free(buf);
         return -1;
     }
 
@@ -1456,7 +1415,7 @@ static int sound_load_wav_from_zip(const char *wav_name, const char *zip_path,
                   wav_name, buffer_id, slot, read_size, loop, duplicates);
     }
 
-    td5_asset_free(buf);
+    free(buf);
     return buffer_id;
 }
 
