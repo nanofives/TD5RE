@@ -3872,16 +3872,15 @@ static void update_vehicle_pose_from_physics(TD5_Actor *actor)
         int corr_count = 0;
         uint8_t gnd_mask = actor->wheel_contact_bitmask;
 
-        int32_t susp_href_world = 0;
-        {
-            int32_t href = (int32_t)CDEF_S(actor, 0x82);
-            if (href != 0) {
-                int32_t href_local = (href * 0xB5) >> 8;
-                float rot4 = actor->rotation_matrix.m[4];
-                susp_href_world = (int32_t)(href_local * rot4 * 256.0f);
-            }
-        }
-
+        /* NOTE: no susp_href correction here. The original's ground-snap
+         * (IntegrateVehiclePoseAndContacts @ 0x00405E80, secondary snap at
+         * UpdateVehiclePoseFromPhysicsState @ 0x004063A0) does NOT add a
+         * scalar susp_href term to corr_sum. It folds the susp_href offset
+         * into the per-wheel rotated Y via the pre-subtract / post-add
+         * pattern in refresh_wheel_contacts (td5_physics.c:3930-3970). A
+         * port-invented `susp_href_world = href_local * m[4] * 256.0f`
+         * was previously computed here but never used (dead code) — now
+         * deleted to keep intent clear. */
         for (int i = 0; i < 4; i++) {
             if (!(gnd_mask & (1 << i))) {
                 int32_t g_y = 0;
@@ -5141,19 +5140,20 @@ void td5_physics_init_vehicle_runtime(void)
          * threshold. The init snap MUST run regardless — it's placing the
          * car on the road, not simulating physics. */
         actor->wheel_contact_bitmask = 0;
-        /* Apply ground-snap correction with suspension height reference offset */
+        /* Apply ground-snap correction. Original init path
+         * (InitializeActorTrackPose @ 0x00434350 → ResetVehicleActorState
+         * @ 0x00405D70 → IntegrateVehiclePoseAndContacts @ 0x00405E80) does
+         * NOT pre-lift chassis_y by a susp_href scalar term. susp_href is
+         * folded into the per-wheel rotated Y via refresh_wheel_contacts'
+         * pre-subtract/post-add pattern; adding it again here double-counts
+         * and produces an orientation-dependent spawn Y bias (because the
+         * port-invented term multiplied by m[4], which varies with tilt).
+         * On tilted spawn terrain this kicked the suspension into launch
+         * transients → "sometimes rolls out of control on slopes" user
+         * symptom. [CONFIRMED no analog in 0x00406283-0x0040628B] */
         {
             int64_t corr_sum = 0;
             int corr_count = 0;
-            int32_t susp_href_world = 0;
-            {
-                int32_t href = (int32_t)CDEF_S(actor, 0x82);
-                if (href != 0) {
-                    int32_t href_local = (href * 0xB5) >> 8;
-                    float rot4 = actor->rotation_matrix.m[4];
-                    susp_href_world = (int32_t)(href_local * rot4 * 256.0f);
-                }
-            }
             for (int i = 0; i < 4; i++) {
                 if (!(actor->wheel_contact_bitmask & (1 << i))) {
                     int32_t g_y = 0;
@@ -5162,8 +5162,7 @@ void td5_physics_init_vehicle_runtime(void)
                     if (td5_track_probe_height(actor->wheel_contact_pos[i].x,
                                                actor->wheel_contact_pos[i].z,
                                                g_span, &g_y, &g_surf)) {
-                        corr_sum += (int64_t)g_y - (int64_t)actor->wheel_contact_pos[i].y
-                                  + (int64_t)susp_href_world;
+                        corr_sum += (int64_t)g_y - (int64_t)actor->wheel_contact_pos[i].y;
                         corr_count++;
                     }
                 }
