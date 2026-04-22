@@ -1682,15 +1682,13 @@ void td5_physics_update_ai(TD5_Actor *actor)
         if (yaw_torque < -TD5_YAW_TORQUE_MAX) yaw_torque = -TD5_YAW_TORQUE_MAX;
 
         actor->angular_velocity_yaw += yaw_torque;
-
-        /* Clamp AI angular velocity to ±1500 to prevent the bicycle
-         * model's amplified yaw torque from causing uncontrolled spin.
-         * The AI steering sets omega directly, then physics adds torque;
-         * this clamp ensures the combined result stays manageable. */
-        if (actor->angular_velocity_yaw > 1500)
-            actor->angular_velocity_yaw = 1500;
-        if (actor->angular_velocity_yaw < -1500)
-            actor->angular_velocity_yaw = -1500;
+        /* No additional omega clamp here — original FUN_00404EC0 has only
+         * the per-tick torque clamp ±0x578 above and the slip-yaw damping
+         * ±0x200 correction below. A previous ±1500 clamp here was masking
+         * the cascade-undershoot symptom (port's sin12 vs original's
+         * -cos12 in the steering fine-band) and broke the cascade's
+         * saturate→sign-flip damping cycle. [Verified: search across
+         * FUN_00404EC0/FUN_004340c0/FUN_0040a700 finds no ±1500 clamp]. */
     }
 
     /* --- 10. World-frame force application [CONFIRMED @ 0x4056C4-0x405762]
