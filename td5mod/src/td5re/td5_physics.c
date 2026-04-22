@@ -1117,7 +1117,20 @@ void td5_physics_update_player(TD5_Actor *actor)
 
     /* --- 13. Tire slip circle via isqrt (per axle) ---
      * Grip limit scaled by tire grip coefficient (tuning 0x2C).
-     * Original at 0x4048xx: grip_limit = (axle_grip_sum * tuning[0x2C]) >> 8 */
+     * [CONFIRMED @ 0x004049xx]: grip_limit = (axle_grip_sum * tuning[0x2C]) >> 8
+     * No halving of axle_grip_sum — decomp reads:
+     *   iVar28 = (local_3c + local_10) * (int)sVar1;  // sVar1 = tuning[0x2C]
+     *   local_28 = (iVar28 + round_bias) >> 8;         // stays in 24.8 scale
+     *
+     * Port previously halved (grip_sum >> 1), which scaled grip_limit to half
+     * of the original and made drift/slide trigger at ~2x lower lateral force.
+     *
+     * TODO: the original's slip-circle block also scales grip_limit by
+     * (slip_speed_mag * tuning[0x7C]) inside `if (surface_contact_flags & 1/2)`
+     * gates (SQRT denominator term). That branch is [UNCERTAIN] — partial
+     * decomp only. Without it, drift bleed-off is still abrupt compared to the
+     * original's progressive grip loss. Left as follow-up once the full
+     * 0x4049xx-0x404AAE block is verbatim-decomped. */
     int32_t tire_grip_coeff = (int32_t)PHYS_S(actor, 0x2C);
     {
         /* Front axle slip circle */
@@ -1125,7 +1138,7 @@ void td5_physics_update_player(TD5_Actor *actor)
         int32_t flo16 = front_long >> 4;
         int32_t combined_sq = fl16 * fl16 + flo16 * flo16;
         int32_t combined = td5_isqrt(combined_sq) << 4;
-        int32_t grip_limit_f = ((grip[0] + grip[1]) >> 1);
+        int32_t grip_limit_f = (grip[0] + grip[1]);
         if (tire_grip_coeff != 0)
             grip_limit_f = (grip_limit_f * tire_grip_coeff) >> 8;
         grip_limit_f <<= 8;
@@ -1142,7 +1155,7 @@ void td5_physics_update_player(TD5_Actor *actor)
         int32_t rlo16 = rear_long >> 4;
         combined_sq = rl16 * rl16 + rlo16 * rlo16;
         combined = td5_isqrt(combined_sq) << 4;
-        int32_t grip_limit_r = ((grip[2] + grip[3]) >> 1);
+        int32_t grip_limit_r = (grip[2] + grip[3]);
         if (tire_grip_coeff != 0)
             grip_limit_r = (grip_limit_r * tire_grip_coeff) >> 8;
         grip_limit_r <<= 8;
@@ -1152,6 +1165,69 @@ void td5_physics_update_player(TD5_Actor *actor)
             rear_lat_force = ((grip_limit_r << 8) / combined * rear_lat_force) >> 8;
         } else {
             actor->rear_axle_slip_excess = 0;
+        }
+    }
+
+    /* --- 13a. current_slip_metric (+0x33C) — faithful port @ 0x004049BA/0x00404A80.
+     * Decomp writes the slip-metric INSIDE the slip-circle block, gated per
+     * axle-contact bit. Both axles write the SAME field — rear overwrites
+     * front when both bits are set, so the rear-axle slip wins.
+     *
+     *   field_0x33c = 0;                                        // zero-init
+     *   if (surface_contact_flags & 1)                           // FRONT axle
+     *       field_0x33c = (short)(abs(longitudinal_speed
+     *                            - max(uVar12, 0)) >> 8);
+     *   if (surface_contact_flags & 2)                           // REAR axle
+     *       field_0x33c = (short)(abs(lateral_speed
+     *                            - max(uVar37, 0)) >> 8);
+     *
+     * uVar12 = chassis-forward body velocity ((cos(h)*vz + sin(h)*vx) >> 12).
+     * uVar37 = front-axle-forward velocity minus yaw-rate-induced term
+     *          ((cos(h+s)*vz + sin(h+s)*vx) >> 12 - sin(s)*front_weight*yaw / 0x28c / 4096).
+     *
+     * MUST run here (before force writeback at L1242-1243, before
+     * longitudinal_speed/lateral_speed are overwritten in the tail body_speeds
+     * block) so that actor->longitudinal_speed / lateral_speed still hold the
+     * PREVIOUS tick's values — same as the decomp reads. vx/vz at this point
+     * are post-drag / pre-force, matching the original's slip-circle reads.
+     *
+     * The port previously wrote `actor->current_slip_metric = abs(lateral_speed)>>8`
+     * at the end of the tick, after lateral_speed had already been updated for
+     * this tick. That collapsed slip to ~0 in straight-line driving AND used
+     * the wrong value (post-update), so tire smoke / tracks never triggered
+     * during actual drift. [CONFIRMED @ 0x004049BA-0x00404A09 via verbatim
+     * decomp] */
+    {
+        int32_t slip_mag = 0;
+        uint8_t scf = actor->surface_contact_flags;
+
+        if (scf & 1) {
+            /* uVar12 — chassis-forward body velocity (pre-force vx/vz). */
+            int32_t body_vlong = (vx * sin_h + vz * cos_h) >> 12;
+            int32_t pos_vlong  = (body_vlong < 0) ? 0 : body_vlong;
+            int32_t delta = actor->longitudinal_speed - pos_vlong;
+            int32_t abs_d = (delta < 0) ? -delta : delta;
+            slip_mag = abs_d >> 8;
+        }
+        if (scf & 2) {
+            /* uVar37 — front-axle-forward projection minus yaw-rate term. */
+            int32_t raw_front = (int32_t)(((int64_t)sin_s * vx + (int64_t)cos_s * vz) >> 12);
+            int64_t yaw_q12 = (int64_t)sin_sr * front_weight * actor->angular_velocity_yaw;
+            int32_t yaw_term = (int32_t)((yaw_q12 >> 12) / 0x28c);
+            int32_t body_vlat = raw_front - yaw_term;
+            int32_t pos_vlat  = (body_vlat < 0) ? 0 : body_vlat;
+            int32_t delta = actor->lateral_speed - pos_vlat;
+            int32_t abs_d = (delta < 0) ? -delta : delta;
+            slip_mag = abs_d >> 8;   /* rear overwrites front — matches decomp */
+        }
+        if (slip_mag > 0x7FFF) slip_mag = 0x7FFF;
+        actor->current_slip_metric = (int16_t)slip_mag;
+
+        if (actor->slot_index == 0 && (actor->frame_counter % 60u) == 0u) {
+            TD5_LOG_I(LOG_TAG,
+                      "SLIP: scf=0x%X slip=%d long=%d lat=%d",
+                      (unsigned)scf, slip_mag,
+                      actor->longitudinal_speed, actor->lateral_speed);
         }
     }
 
@@ -1412,6 +1488,44 @@ void td5_physics_update_player(TD5_Actor *actor)
     /* --- 17. ApplyMissingWheelVelocityCorrection --- */
     td5_physics_missing_wheel_correction(actor);
 
+    /* --- 17a. Wheelspin override — gear==2 launch burnout.
+     * [CONFIRMED @ 0x00404E1C-0x00404E56]:
+     *   if (current_gear == 2
+     *       && 0x12c00 < ((((engine_speed_accum - 400) * 0x1000) / 0x2d)
+     *                      / tuning[0x32]) * 0x100 - uVar12
+     *       && encounter_steering_cmd >= 0x80) {
+     *       actor->surface_contact_flags = tuning[0x76];   // drivetrain axle mask
+     *   }
+     *
+     * Meaning: when sitting on the line in 1st gear with high RPM and the
+     * steering input is past centre (>=0x80 in the 0x00-0xFF range), flip
+     * surface_contact_flags to the drivetrain layout byte (1=rear-driven,
+     * 2=front-driven, 3=AWD). The tire-effect emitters read that field at
+     * UpdateTireTrackEmitters @ 0x0043FAE0 to decide which axles lay rubber,
+     * which gives the classic TD5 launch-burnout smoke on the driven wheels.
+     *
+     * Uses the pre-force v_long captured at L708 — the decomp's uVar12 at
+     * this address still holds body-forward of pre-force vx/vz (it is never
+     * reassigned after the slip-circle). tuning[0x32] is the 1st-gear ratio
+     * short; guard against 0 to avoid SIGFPE. */
+    {
+        int32_t gear_ratio = (int32_t)PHYS_S(actor, 0x32);
+        if (actor->current_gear == 2 && gear_ratio != 0 && actor->encounter_steering_cmd >= 0x80) {
+            int32_t engine_term = (((actor->engine_speed_accum - 400) * 0x1000) / 0x2d) / gear_ratio;
+            int32_t delta = engine_term * 0x100 - v_long;
+            if (delta > 0x12c00) {
+                uint8_t dt_mask = (uint8_t)PHYS_S(actor, 0x76);
+                actor->surface_contact_flags = dt_mask;
+                if (actor->slot_index == 0 && (actor->frame_counter % 30u) == 0u) {
+                    TD5_LOG_I(LOG_TAG,
+                              "WHEELSPIN: gear=%d rpm=%d delta=%d dt_mask=0x%X",
+                              actor->current_gear, actor->engine_speed_accum,
+                              delta, (unsigned)dt_mask);
+                }
+            }
+        }
+    }
+
     /* Tire slip accumulators — drive the wheel billboard rotation visuals
      * via RenderVehicleWheelBillboards (0x446F00).
      * [CONFIRMED @ UpdatePlayerVehicleDynamics 0x404030, near the end]:
@@ -1428,17 +1542,11 @@ void td5_physics_update_player(TD5_Actor *actor)
         actor->accumulated_tire_slip_z += (int16_t)(actor->longitudinal_speed >> 8);
     }
 
-    /* current_slip_metric (+0x33C) = abs(tire_slip) >> 8 — struct header
-     * documents this as the source for tire squeal SFX and, via
-     * UpdateRearTireEffects @ 0x43F7E0, the smoke-spawn probability
-     * (rand()%50 < slip/2) and tire-track intensity (slip >> 2). The
-     * original binary writes this every physics tick; we were leaving it
-     * at zero, so smoke/tire marks never spawned. */
-    {
-        int32_t slip = abs(actor->lateral_speed) >> 8;
-        if (slip > 0x7FFF) slip = 0x7FFF;
-        actor->current_slip_metric = (int16_t)slip;
-    }
+    /* NOTE: current_slip_metric (+0x33C) is now written inside the slip-circle
+     * block (see section 13a above) per the original's structure at
+     * 0x004049BA/0x00404A80. Do NOT write it again here — the earlier
+     * `abs(lateral_speed)>>8` tail-write used the wrong values (post-update)
+     * and collapsed slip to near-zero in normal driving. */
 }
 
 /* ========================================================================
