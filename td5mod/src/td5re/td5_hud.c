@@ -2428,11 +2428,44 @@ void td5_hud_render_minimap(int actor_slot)
      */
     int local_a4 = start_span;
     int seg_rendered = 0;
+    int branch_rendered = 0;
     int skip_bounds = 0, skip_vtx = 0, skip_aabb = 0;
+
+    /* Current primary segment index (local_90 in the original).
+     * Scan the primary rows to find the segment that contains start_span.
+     * [CONFIRMED @ 0x43A335-0x43A470] — original uses this index throughout
+     * the loop to read seg_end (for far_idx clamp) and seg_branch (for the
+     * second branch-quad draw). */
+    int cur_seg = 0;
+    for (int k = 0; k < s_minimap_seg_branch_start; k++) {
+        if ((int)s_minimap_seg_end[k] >= local_a4) { cur_seg = k; break; }
+        cur_seg = k + 1;
+    }
+    if (cur_seg >= s_minimap_seg_branch_start) {
+        cur_seg = s_minimap_seg_branch_start - 1;
+        if (cur_seg < 0) cur_seg = 0;
+    }
+
     for (int i = 0; span_base && vert_base && i < 0x30; i++) {
+        /* Pre-iter segment advance [CONFIRMED @ 0x43A426]:
+         * while (seg_end[cur_seg] < local_a4) cur_seg++ */
+        while (cur_seg + 1 < s_minimap_seg_branch_start &&
+               (int)s_minimap_seg_end[cur_seg] < local_a4) {
+            cur_seg++;
+        }
+
         int near_idx = local_a4;
         int far_idx  = near_idx + 5;
-        local_a4 = far_idx + 1; /* advance by 6 */
+
+        /* Clamp far_idx to current segment end [CONFIRMED @ 0x43A426-0x43A44E]:
+         * if (seg_end[cur_seg] <= far_idx) uVar15 = seg_end[cur_seg] */
+        if (cur_seg < s_minimap_seg_branch_start &&
+            (int)s_minimap_seg_end[cur_seg] <= far_idx) {
+            far_idx = (int)s_minimap_seg_end[cur_seg];
+            if (far_idx < near_idx) far_idx = near_idx;
+        }
+
+        local_a4 = far_idx + 1; /* advance by up to 6 */
 
         if (near_idx < 0 || far_idx < 0 ||
             near_idx >= g_strip_span_count ||
@@ -2504,8 +2537,9 @@ void td5_hud_render_minimap(int actor_slot)
         if (fr_y < min_y) min_y = fr_y; if (fr_y > max_y) max_y = fr_y;
         if (bl_y < min_y) min_y = bl_y; if (bl_y > max_y) max_y = bl_y;
         if (br_y < min_y) min_y = br_y; if (br_y > max_y) max_y = br_y;
-        if (max_x < s_minimap_x || min_x > mm_r ||
-            max_y < s_minimap_y || min_y > mm_b) {
+        int primary_culled = (max_x < s_minimap_x || min_x > mm_r ||
+                              max_y < s_minimap_y || min_y > mm_b);
+        if (primary_culled) {
             /* Log first culled quad per frame for diagnostics */
             if (skip_aabb == 0 && seg_rendered == 0) {
                 static int s_aabb_log_ctr = 0;
@@ -2517,29 +2551,154 @@ void td5_hud_render_minimap(int actor_slot)
                               offset_x, offset_z, ox_n, oz_n);
                 }
             }
-            skip_aabb++; continue;
+            skip_aabb++;
+        } else {
+            /* TL=front-left, BL=back-left, BR=back-right, TR=front-right */
+            hud_build_quad_warped(
+                &map_quad, HUD_WHITE_TEX_PAGE,
+                fl_x, fl_y,  /* TL */
+                bl_x, bl_y,  /* BL */
+                br_x, br_y,  /* BR */
+                fr_x, fr_y,  /* TR */
+                0.0f, 0.0f, 0.0f, 0.0f,
+                0xFF9A9A9A,
+                HUD_DEPTH
+            );
+            hud_submit_quad(&map_quad);
+            seg_rendered++;
         }
 
-        /* TL=front-left, BL=back-left, BR=back-right, TR=front-right */
-        hud_build_quad_warped(
-            &map_quad, HUD_WHITE_TEX_PAGE,
-            fl_x, fl_y,  /* TL */
-            bl_x, bl_y,  /* BL */
-            br_x, br_y,  /* BR */
-            fr_x, fr_y,  /* TR */
-            0.0f, 0.0f, 0.0f, 0.0f,
-            0xFF9A9A9A,
-            HUD_DEPTH
-        );
-        hud_submit_quad(&map_quad);
-        seg_rendered++;
+        /* Branch-quad draw [Ghidra @ 0x43A6E8-0x43A6FC, derived].
+         *   if (seg_branch[cur_seg] != -1) {
+         *       delta  = seg_branch[cur_seg] - seg_start[cur_seg];
+         *       b_near = local_a4 + delta;
+         *       b_far  = uVar15  + delta;
+         *       <build second quad from spans [b_near] and [b_far]>
+         *       <submit>
+         *   }
+         *
+         * Delta is the strip-index offset from primary span to the parallel
+         * branch span: if primary seg K is at [start_K, end_K] and its branch
+         * link is br, the branch spans live at [br, br + (end_K - start_K)].
+         * Walking primary at local_a4 = start_K + k, the parallel branch
+         * span is br + k = local_a4 + (br - start_K).
+         *
+         * Restricted to primary rows (cur_seg < branch_start) so appended
+         * back-link rows (seg_branch[new] = seg_start[K] per init) don't
+         * double-fire. */
+        if (cur_seg < s_minimap_seg_branch_start &&
+            s_minimap_seg_branch[cur_seg] != (int16_t)-1) {
+            int delta = (int)s_minimap_seg_branch[cur_seg]
+                      - (int)s_minimap_seg_start[cur_seg];
+            int b_near = near_idx + delta;
+            int b_far  = far_idx  + delta;
+
+            if (b_near >= 0 && b_far >= 0 &&
+                b_near < g_strip_span_count &&
+                b_far  < g_strip_span_count) {
+                uint8_t *bsn = span_base + b_near * 24;
+                uint8_t *bsf = span_base + b_far  * 24;
+
+                int32_t box_n = *(int32_t *)(bsn + 0x0C);
+                int32_t boz_n = *(int32_t *)(bsn + 0x14);
+                int32_t box_f = *(int32_t *)(bsf + 0x0C);
+                int32_t boz_f = *(int32_t *)(bsf + 0x14);
+
+                uint16_t bvi_n_l = *(uint16_t *)(bsn + 0x04);
+                uint8_t  btype_n = bsn[0];
+                uint8_t  bnib_n  = bsn[3] & 0x0F;
+                int32_t  bcol0   = s_minimap_vtx_delta_col0[btype_n & 0x07];
+                int32_t  bvi_n_r = (int32_t)bvi_n_l + (int32_t)bnib_n + bcol0;
+
+                uint16_t bvi_f_l = *(uint16_t *)(bsf + 0x06);
+                uint8_t  btype_f = bsf[0];
+                uint8_t  bnib_f  = bsf[3] & 0x0F;
+                int32_t  bcol1   = s_minimap_vtx_delta_col1[btype_f & 0x07];
+                int32_t  bvi_f_r = (int32_t)bvi_f_l + (int32_t)bnib_f + bcol1;
+
+                if (bvi_n_r >= 0 && bvi_f_r >= 0) {
+                    int16_t *bvn_l = (int16_t *)(vert_base + (uint32_t)bvi_n_l * 6);
+                    int16_t *bvn_r = (int16_t *)(vert_base + (uint32_t)bvi_n_r * 6);
+                    int16_t *bvf_l = (int16_t *)(vert_base + (uint32_t)bvi_f_l * 6);
+                    int16_t *bvf_r = (int16_t *)(vert_base + (uint32_t)bvi_f_r * 6);
+
+                    float bwx_fl = (float)((int)bvn_l[0] + box_n) + offset_x;
+                    float bwz_fl = (float)((int)bvn_l[2] + boz_n) + offset_z;
+                    float bwx_fr = (float)((int)bvn_r[0] + box_n) + offset_x;
+                    float bwz_fr = (float)((int)bvn_r[2] + boz_n) + offset_z;
+                    float bwx_bl = (float)((int)bvf_l[0] + box_f) + offset_x;
+                    float bwz_bl = (float)((int)bvf_l[2] + boz_f) + offset_z;
+                    float bwx_br = (float)((int)bvf_r[0] + box_f) + offset_x;
+                    float bwz_br = (float)((int)bvf_r[2] + boz_f) + offset_z;
+
+                    float bmx_fl = (bwx_fl * cos_h + bwz_fl * sin_h) * s_minimap_world_scale_x;
+                    float bmy_fl = (bwz_fl * cos_h - bwx_fl * sin_h) * s_minimap_world_scale_y;
+                    float bmx_fr = (bwx_fr * cos_h + bwz_fr * sin_h) * s_minimap_world_scale_x;
+                    float bmy_fr = (bwz_fr * cos_h - bwx_fr * sin_h) * s_minimap_world_scale_y;
+                    float bmx_bl = (bwx_bl * cos_h + bwz_bl * sin_h) * s_minimap_world_scale_x;
+                    float bmy_bl = (bwz_bl * cos_h - bwx_bl * sin_h) * s_minimap_world_scale_y;
+                    float bmx_br = (bwx_br * cos_h + bwz_br * sin_h) * s_minimap_world_scale_x;
+                    float bmy_br = (bwz_br * cos_h - bwx_br * sin_h) * s_minimap_world_scale_y;
+
+                    float bfl_x = mm_cx + bmx_fl, bfl_y = mm_cy + bmy_fl;
+                    float bfr_x = mm_cx + bmx_fr, bfr_y = mm_cy + bmy_fr;
+                    float bbl_x = mm_cx + bmx_bl, bbl_y = mm_cy + bmy_bl;
+                    float bbr_x = mm_cx + bmx_br, bbr_y = mm_cy + bmy_br;
+
+                    float b_min_x = bfl_x, b_max_x = bfl_x;
+                    float b_min_y = bfl_y, b_max_y = bfl_y;
+                    if (bfr_x < b_min_x) b_min_x = bfr_x; if (bfr_x > b_max_x) b_max_x = bfr_x;
+                    if (bbl_x < b_min_x) b_min_x = bbl_x; if (bbl_x > b_max_x) b_max_x = bbl_x;
+                    if (bbr_x < b_min_x) b_min_x = bbr_x; if (bbr_x > b_max_x) b_max_x = bbr_x;
+                    if (bfr_y < b_min_y) b_min_y = bfr_y; if (bfr_y > b_max_y) b_max_y = bfr_y;
+                    if (bbl_y < b_min_y) b_min_y = bbl_y; if (bbl_y > b_max_y) b_max_y = bbl_y;
+                    if (bbr_y < b_min_y) b_min_y = bbr_y; if (bbr_y > b_max_y) b_max_y = bbr_y;
+
+                    if (!(b_max_x < s_minimap_x || b_min_x > mm_r ||
+                          b_max_y < s_minimap_y || b_min_y > mm_b)) {
+                        hud_build_quad_warped(
+                            &map_quad, HUD_WHITE_TEX_PAGE,
+                            bfl_x, bfl_y,
+                            bbl_x, bbl_y,
+                            bbr_x, bbr_y,
+                            bfr_x, bfr_y,
+                            0.0f, 0.0f, 0.0f, 0.0f,
+                            0xFF9A9A9A,
+                            HUD_DEPTH
+                        );
+                        hud_submit_quad(&map_quad);
+                        if (branch_rendered == 0) {
+                            static int s_first_branch_ctr = 0;
+                            if ((s_first_branch_ctr++ % 60) == 0) {
+                                TD5_LOG_I(LOG_TAG,
+                                    "minimap branch: cur_seg=%d start=%d end=%d link=%d delta=%d near=%d->b_near=%d far=%d->b_far=%d",
+                                    cur_seg,
+                                    (int)s_minimap_seg_start[cur_seg],
+                                    (int)s_minimap_seg_end[cur_seg],
+                                    (int)s_minimap_seg_branch[cur_seg],
+                                    delta, near_idx, b_near, far_idx, b_far);
+                            }
+                        }
+                        branch_rendered++;
+                    }
+                }
+            }
+        }
     }
     {
         static int s_mm_log_counter = 0;
         if ((s_mm_log_counter++ % 60) == 0) {
-            TD5_LOG_I(LOG_TAG, "minimap: span=%d remap=%d start=%d rendered=%d skip_bounds=%d skip_vtx=%d skip_aabb=%d total=%d",
-                      (int)player_span, remapped_span, start_span, seg_rendered,
-                      skip_bounds, skip_vtx, skip_aabb, g_strip_span_count);
+            TD5_LOG_I(LOG_TAG, "minimap: span=%d remap=%d start=%d last_a4=%d cur_seg=%d(start=%d end=%d link=%d) primary=%d branch=%d skip_bounds=%d skip_vtx=%d skip_aabb=%d primaries=%d branches=%d total=%d",
+                      (int)player_span, remapped_span, start_span, local_a4,
+                      cur_seg,
+                      (cur_seg < s_minimap_seg_branch_start ? (int)s_minimap_seg_start[cur_seg] : -1),
+                      (cur_seg < s_minimap_seg_branch_start ? (int)s_minimap_seg_end[cur_seg] : -1),
+                      (cur_seg < s_minimap_seg_branch_start ? (int)s_minimap_seg_branch[cur_seg] : -1),
+                      seg_rendered, branch_rendered,
+                      skip_bounds, skip_vtx, skip_aabb,
+                      (int)s_minimap_seg_branch_start,
+                      (int)s_minimap_seg_primary_end - (int)s_minimap_seg_branch_start,
+                      g_strip_span_count);
         }
     }
 
@@ -2779,19 +2938,29 @@ void td5_hud_init_minimap_layout(void)
     s_minimap_seg_primary_end = seg_count + 1;
     s_minimap_seg_branch_start = s_minimap_seg_primary_end;
 
-    /* Expand branch segments into the table */
+    /* Append branch-mirror rows [CONFIRMED @ 0x43B770-0x43B798 in
+     * InitializeMinimapLayout]. For each primary row K with seg_branch[K] != -1:
+     *   seg_start[new]  = br                   = seg_branch[K]
+     *   seg_end[new]    = br + primary_length  = br + (seg_end[K] - seg_start[K])
+     *   seg_branch[new] = seg_start[K]         (back-link to parent primary)
+     * The primary row K's seg_end is NOT overwritten. */
     int branch_write = s_minimap_seg_primary_end;
     for (int i = 0; i < s_minimap_seg_primary_end; i++) {
-        if (s_minimap_seg_branch[i] != -1) {
-            int16_t br = s_minimap_seg_branch[i];
-            int16_t delta = s_minimap_seg_end[i] - s_minimap_seg_start[i];
-            s_minimap_seg_end[branch_write - 1] = br; /* link end */
-            s_minimap_seg_start[branch_write] = br + delta;
-            s_minimap_seg_end[branch_write] = s_minimap_seg_start[i];
+        if (s_minimap_seg_branch[i] != (int16_t)-1) {
+            int16_t br    = s_minimap_seg_branch[i];
+            int16_t plen  = s_minimap_seg_end[i] - s_minimap_seg_start[i];
+            s_minimap_seg_start[branch_write]  = br;
+            s_minimap_seg_end[branch_write]    = br + plen;
+            s_minimap_seg_branch[branch_write] = s_minimap_seg_start[i];
             branch_write++;
         }
     }
     s_minimap_seg_primary_end = branch_write;
+
+    TD5_LOG_I(LOG_TAG, "minimap_init: seg_table primaries=%d branches_appended=%d total_spans=%d",
+              (int)s_minimap_seg_branch_start,
+              (int)(s_minimap_seg_primary_end - s_minimap_seg_branch_start),
+              g_strip_span_count);
 }
 
 /* ========================================================================
