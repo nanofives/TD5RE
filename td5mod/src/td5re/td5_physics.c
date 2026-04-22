@@ -63,8 +63,8 @@ typedef struct OBB_CornerData {
     int16_t proj_z;     /* corner position in TARGET's local frame (Z) */
     int16_t pen_x;      /* penetration depth along X axis */
     int16_t pen_z;      /* penetration depth along Z axis */
-    int16_t own_x;      /* corner position in PENETRATOR's own local frame (X) */
-    int16_t own_z;      /* corner position in PENETRATOR's own local frame (Z) */
+    int16_t own_x;      /* rotated corner offset from penetrator's center, in TARGET's frame (X) */
+    int16_t own_z;      /* rotated corner offset from penetrator's center, in TARGET's frame (Z) */
 } OBB_CornerData;
 
 static void resolve_collision_pair(TD5_Actor *a, TD5_Actor *b, int idx_a, int idx_b);
@@ -1986,9 +1986,17 @@ static int obb_corner_test(TD5_Actor *a, TD5_Actor *b,
             result |= (1 << i);
             corners[i].proj_x = (int16_t)cx;
             corners[i].proj_z = (int16_t)cz;
-            /* Store B's corner in B's own local frame (the penetrator's frame) */
-            corners[i].own_x = (int16_t)b_corners_lx[i];
-            corners[i].own_z = (int16_t)b_corners_lz[i];
+            /* contactData[2,3] = rotated corner offset in target's frame
+             * [CONFIRMED @ 0x00408763/0x00408771]: original stores
+             *   contactData[2] = iVar27 - sVar1 = corner_in_A - B_center_in_A
+             *   contactData[3] = iVar28 - sVar2
+             * i.e. the penetrator's static corner ROTATED by (heading_b-heading_a)
+             * but WITHOUT the A→B translation. Equivalent to (cx - local_dx,
+             * cz - local_dz). Previously stored raw unrotated b_corners_lx/lz,
+             * which gave the impulse solver a wrong-orientation lever arm for
+             * any non-aligned-heading contact. */
+            corners[i].own_x = (int16_t)(cx - local_dx);
+            corners[i].own_z = (int16_t)(cz - local_dz);
             /* Penetration depth along each face normal (signed).
              * Minimum |pen| identifies the closest face. */
             int32_t pen_right = half_w_a  - cx;     /* to +X face */
@@ -2023,9 +2031,11 @@ static int obb_corner_test(TD5_Actor *a, TD5_Actor *b,
             result |= (1 << (i + 4));
             corners[i + 4].proj_x = (int16_t)cx;
             corners[i + 4].proj_z = (int16_t)cz;
-            /* Store A's corner in A's own local frame (the penetrator's frame) */
-            corners[i + 4].own_x = (int16_t)a_corners_lx[i];
-            corners[i + 4].own_z = (int16_t)a_corners_lz[i];
+            /* Symmetric second half: rotated corner offset in B's frame.
+             * [CONFIRMED @ 0x004089EB] — original applies the same subtraction
+             * with sVar1/sVar2 = A_center in B's frame. */
+            corners[i + 4].own_x = (int16_t)(cx - local2_dx);
+            corners[i + 4].own_z = (int16_t)(cz - local2_dz);
             int32_t pen_right = half_w_b  - cx;
             int32_t pen_left  = cx + half_w_b;
             int32_t pen_front = front_z_b - cz;
@@ -2079,9 +2089,11 @@ static int obb_corner_test(TD5_Actor *a, TD5_Actor *b,
  * Caller interface: (penetrator, target, corner_idx, corner, heading, impactForce).
  * impactForce is now passed from the caller's position-based binary search.
  * Internally, "A" = target (frame owner whose yaw = angle), "B" = penetrator.
- * Contact data from OBB corner test:
- *   cx_A, cz_A = corner->proj_x, proj_z   (corner in TARGET's frame)
- *   cx_B, cz_B = corner->own_x, own_z     (corner in PENETRATOR's own frame)
+ * Contact data from OBB corner test [CONFIRMED @ 0x00408570]:
+ *   cx_A, cz_A = corner->proj_x, proj_z   (corner in TARGET's frame, WITH translation)
+ *   cx_B, cz_B = corner->own_x, own_z     (rotated corner OFFSET from penetrator's
+ *                                          center, expressed in TARGET's frame —
+ *                                          proj minus A→B center translation)
  * ======================================================================== */
 
 #define V2V_NUM_SCALE        0x1100
@@ -2129,13 +2141,16 @@ static void apply_collision_response(TD5_Actor *penetrator, TD5_Actor *target,
     int32_t local_4c = (vxB * cos_a - vzB * sin_a) >> 12;  /* B tangent */
     int32_t local_44 = (vxB * sin_a + vzB * cos_a) >> 12;  /* B normal  */
 
-    /* --- Unpack contactData --- */
-    /* cx_A, cz_A = corner position in TARGET's (A's) local frame.
-     * cx_B, cz_B = corner position in PENETRATOR's (B's) own local frame.
-     * The original (0x408570) emits both frame positions directly.
-     * Previous port synthesized cx_B from penetration depth, which gave
-     * wrong signs and caused the XOR rejection check to reject valid
-     * approaching contacts. */
+    /* --- Unpack contactData [CONFIRMED @ 0x00408570 stores] --- */
+    /* cx_A, cz_A = corner position in TARGET's (A's) frame (WITH A→B translation).
+     * cx_B, cz_B = rotated corner OFFSET from penetrator's (B's) center, in A's frame.
+     *              i.e. the penetrator's static carbox corner rotated by
+     *              (heading_b - heading_a), no translation.
+     * Original stores 'contactData[2] = contactData[0] - B_center_in_A.x' at
+     * 0x00408763 (SUB), i.e. the pre-translation rotated corner. Using the
+     * unrotated static corner here gave the mass polynomial and angular
+     * contribution the wrong lever-arm orientation whenever cars impacted at
+     * a heading delta, leaving relative velocity and impulse sign noisy. */
     int32_t cx_A = (int32_t)corner->proj_x;
     int32_t cz_A = (int32_t)corner->proj_z;
     int32_t cx_B = (int32_t)corner->own_x;
