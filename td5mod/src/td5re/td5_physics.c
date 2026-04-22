@@ -1516,10 +1516,8 @@ void td5_physics_update_ai(TD5_Actor *actor)
     int32_t vz = actor->linear_velocity_z;
     int32_t v_long = (vx * sin_h + vz * cos_h) >> 12;
 
-    /* Lateral speed with yaw-rate correction [CONFIRMED @ 0x4050EF-0x405146]
-     * raw_lat = (cos_s * vz + sin_s * vx) >> 12
-     * yaw_corr = ((sin_d * front_weight * yaw_rate) >> 12) / 0x28C
-     * lateral_speed = raw_lat - yaw_corr */
+    /* Body-frame lateral velocity for INTERNAL bicycle solve consumption.
+     * The bicycle's mass-matrix uses this as v_lat (with yaw_corr applied). */
     int32_t raw_lat = (cos_h * vx - sin_h * vz) >> 12;
     int32_t yaw_rate = actor->angular_velocity_yaw;
     int32_t inertia = PHYS_I(actor, 0x20);
@@ -1528,8 +1526,22 @@ void td5_physics_update_ai(TD5_Actor *actor)
     int32_t yaw_corr = ((sin_d * front_weight) >> 12) * yaw_rate / 0x28C;
     int32_t v_lat = raw_lat - yaw_corr;
 
+    /* Field +0x314 = body-frame longitudinal velocity (v_long). Port matches
+     * original [verified via Frida runtime probe 2026-04-22]. */
     actor->longitudinal_speed = v_long;
-    actor->lateral_speed = v_lat;
+
+    /* Field +0x318 is NOT body-frame lateral. The original writes the
+     * STEERED-frame longitudinal velocity minus yaw_corr_sin to +0x318
+     * [VERIFIED via Frida runtime probe 2026-04-22 against FUN_00404EC0
+     *  on TD5_d3d.exe; formula:
+     *    f318 = (sin_s*vx + cos_s*vz) >> 12 - ((sin_d*Wf) >> 12) * omega / 0x28C
+     *  matches with diff=0 on every early-tick row in
+     *  log/bicycle_probe_original.csv].
+     *
+     * Downstream consumers of +0x318 (slip accumulator, force feedback, HUD,
+     * trace) were getting the wrong value when port wrote body-lat - yaw_corr. */
+    int32_t steered_long = (sin_s * vx + cos_s * vz) >> 12;
+    actor->lateral_speed = steered_long - yaw_corr;
 
     /* --- 6. Engine pipeline [CONFIRMED @ 0x4051A0] --- */
     int32_t throttle = (int32_t)actor->encounter_steering_cmd;
@@ -1568,16 +1580,27 @@ void td5_physics_update_ai(TD5_Actor *actor)
                 rear_drive  = drive_torque >> 1;
             }
         } else {
-            /* Brake path: torque opposing current velocity.
-             * Same double-negation fix as player path — no sign flip needed,
-             * bf is already negative when braking forward. */
-            int32_t bf = (brake_front * throttle) >> 8;
-            int32_t br = (brake_rear  * throttle) >> 8;
+            /* Brake path: force OPPOSES motion direction.
+             *
+             * Previous logic took `bf = brake_front * throttle / 256` literally.
+             * With AI brake (throttle=-256), bf was always negative regardless
+             * of motion direction. Once v_long crossed zero through deceleration,
+             * the sustained negative force kept accelerating the car backward
+             * — a runaway loop when AI script opcode 8 (wait-for-stop) was
+             * waiting on |v_long| < 0x100.
+             *
+             * Compute brake magnitude from |throttle|, apply against motion.
+             * Existing half_spd clamp still bounds force to a fraction of
+             * current speed, so braking smoothly approaches zero as car
+             * stops. */
+            int32_t abs_throttle = throttle < 0 ? -throttle : throttle;
+            int32_t bf_mag = (brake_front * abs_throttle) >> 8;
+            int32_t br_mag = (brake_rear  * abs_throttle) >> 8;
             int32_t half_spd = abs_speed >> 1;
-            int32_t neg_bf = bf < 0 ? -bf : bf;
-            int32_t neg_br = br < 0 ? -br : br;
-            if (neg_bf > half_spd) bf = (bf < 0) ? -half_spd : half_spd;
-            if (neg_br > half_spd) br = (br < 0) ? -half_spd : half_spd;
+            if (bf_mag > half_spd) bf_mag = half_spd;
+            if (br_mag > half_spd) br_mag = half_spd;
+            int32_t bf = (v_long > 0) ? -bf_mag : bf_mag;
+            int32_t br = (v_long > 0) ? -br_mag : br_mag;
             front_drive = bf >> 1;
             rear_drive  = br >> 1;
         }
@@ -1685,25 +1708,30 @@ void td5_physics_update_ai(TD5_Actor *actor)
         }
     }
 
-    /* --- 9. Yaw torque [CONFIRMED @ 0x405620-0x4056A6]
-     * yaw_torque = ((cos_d * Wf >> 12) * rear_lat - front_lat * Wr) / inertia_div */
+    /* --- 9. Yaw torque [CONFIRMED @ 0x405620-0x4056A6 via round-3 pcode]
+     * Original: yaw_torque = ((sin(steer) * Wf >> 12) * FRONT_lat - REAR_lat * Wr) / inertia_div
+     *
+     * Fixed two bugs that previously cancelled:
+     *  - Trig was cos_d, original calls FUN_0040a6e0(steer) = sin12 (NOT FUN_0040a700)
+     *  - Lat operands were swapped: original puts FRONT_lat with the trig*Wf
+     *    coefficient and REAR_lat with Wr; port had them reversed
+     * Force-app pairings at lines 1697-1700 (rear_lat↔body, front_lat↔steered)
+     * are already correct and unchanged. */
     {
-        int32_t yaw_torque = (int32_t)(((int64_t)(cos_d * front_weight >> 12) * rear_lat
-                             - (int64_t)front_lat * rear_weight) / inertia_div);
+        int32_t yaw_torque = (int32_t)(((int64_t)(sin_d * front_weight >> 12) * front_lat
+                             - (int64_t)rear_lat * rear_weight) / inertia_div);
 
         if (yaw_torque > TD5_YAW_TORQUE_MAX) yaw_torque = TD5_YAW_TORQUE_MAX;
         if (yaw_torque < -TD5_YAW_TORQUE_MAX) yaw_torque = -TD5_YAW_TORQUE_MAX;
 
         actor->angular_velocity_yaw += yaw_torque;
-
-        /* Clamp AI angular velocity to ±1500 to prevent the bicycle
-         * model's amplified yaw torque from causing uncontrolled spin.
-         * The AI steering sets omega directly, then physics adds torque;
-         * this clamp ensures the combined result stays manageable. */
-        if (actor->angular_velocity_yaw > 1500)
-            actor->angular_velocity_yaw = 1500;
-        if (actor->angular_velocity_yaw < -1500)
-            actor->angular_velocity_yaw = -1500;
+        /* No additional omega clamp here — original FUN_00404EC0 has only
+         * the per-tick torque clamp ±0x578 above and the slip-yaw damping
+         * ±0x200 correction below. A previous ±1500 clamp here was masking
+         * the cascade-undershoot symptom (port's sin12 vs original's
+         * -cos12 in the steering fine-band) and broke the cascade's
+         * saturate→sign-flip damping cycle. [Verified: search across
+         * FUN_00404EC0/FUN_004340c0/FUN_0040a700 finds no ±1500 clamp]. */
     }
 
     /* --- 10. World-frame force application [CONFIRMED @ 0x4056C4-0x405762]

@@ -228,6 +228,7 @@ static void ai_update_single_racer(int slot);
 static void ai_update_single_traffic(int slot);
 static int32_t ai_cos_fixed12(int32_t angle);
 static int32_t ai_sin_fixed12(int32_t angle);
+static int32_t ai_neg_cos_fixed12(int32_t angle);
 static void td5_ai_refresh_route_state_slot(int slot);
 static int32_t ai_angle_from_vector(int32_t dx, int32_t dz);
 
@@ -241,6 +242,18 @@ static int32_t ai_cos_fixed12(int32_t angle) {
 static int32_t ai_sin_fixed12(int32_t angle) {
     double rad = (double)(angle & 0xFFF) * (2.0 * 3.14159265358979323846 / 4096.0);
     return (int32_t)(sin(rad) * 4096.0);
+}
+
+/* Mirrors original FUN_0040a700 @ 0x0040a700:
+ *   return LUT[(arg - 0x400) & 0xFFF]  with LUT == sin12 table
+ *   = sin((arg - 0x400) & 0xFFF) = -cos(arg)
+ * Used by the steering cascade fine-deviation band. The negative-cosine shape
+ * is what makes small deviations produce LARGE cascade outputs that saturate
+ * STEERING_CMD to ±0x18000; the saturated value then biases the next-tick
+ * heading estimate enough to flip the deviation sign, producing the
+ * self-stabilizing oscillator that the original relies on. */
+static int32_t ai_neg_cos_fixed12(int32_t angle) {
+    return ai_sin_fixed12((angle - 0x400) & 0xFFF);
 }
 
 /* ========================================================================
@@ -851,17 +864,24 @@ void td5_ai_update_steering_bias(int *route_state, int32_t steer_weight) {
             }
             if (left_dev < 0x100) {
                 /* Normal mode, fine deviation: proportional correction.
-                 * Original uses CosFixed12 [CONFIRMED @ 0x4340C0: FUN_0040a700]
-                 * which works with 0x800 baseline (cos(small)≈max). Port uses
-                 * SinFixed12 because the operating point is near delta=0 where
-                 * sin(0)=0 prevents overshoot. The port lacks the boundary
-                 * pre-loop that stabilizes the original's cos-based correction.
-                 * TODO: revert to cos once boundary system is ported. */
-                int32_t t   = ai_sin_fixed12(left_dev);
+                 * [CONFIRMED @ 0x4340C0, FUN_0040a700 body @ 0x0040a700]
+                 * Original calls FUN_0040a700(raw_deviation), which looks up
+                 * LUT[(arg - 0x400) & 0xFFF] against the sin12 table — i.e.
+                 * -cos(arg). For small deviation (arg≈0) this returns ≈-1.0
+                 * (raw -0xFB3 for arg=0x80), which saturates STEERING_CMD to
+                 * ±0x18000 in 1-2 ticks. The saturated value then biases
+                 * actor_heading via (yaw_accum + steering_cmd) >> 8 in the
+                 * next deviation calc at 0x435338, flipping the deviation
+                 * past the sign-flip threshold. That self-stabilizing cycle
+                 * IS the AI's damping mechanism — there is no separate
+                 * boundary pre-loop. */
+                int32_t t   = ai_neg_cos_fixed12(left_dev);
                 int32_t mul = t * param_2;
                 ACTOR_I32(actor, ACTOR_STEERING_CMD) =
                     ACTOR_I32(actor, ACTOR_STEERING_CMD)
                     + ((mul + ((mul >> 31) & 0xFFF)) >> 12);
+                TD5_LOG_I(LOG_TAG, "cascade_left_fine: slot=%d L=%d w=%d t=%d",
+                          slot, left_dev, param_2, t);
                 goto clamp_end;
             }
             /* 0x100 <= left_dev < 0x401: direct add param_2 */
@@ -889,12 +909,14 @@ void td5_ai_update_steering_bias(int *route_state, int32_t steer_weight) {
             /* fall through: write -iVar3 as new bias */
         } else {
             if (right_dev < 0x100) {
-                /* SinFixed12 — see left fine band comment above */
-                int32_t t   = ai_sin_fixed12(right_dev);
+                /* -cos via FUN_0040a700 mirror — see left fine-band comment */
+                int32_t t   = ai_neg_cos_fixed12(right_dev);
                 int32_t mul = t * param_2;
                 ACTOR_I32(actor, ACTOR_STEERING_CMD) =
                     ACTOR_I32(actor, ACTOR_STEERING_CMD)
                     - ((mul + ((mul >> 31) & 0xFFF)) >> 12);
+                TD5_LOG_I(LOG_TAG, "cascade_right_fine: slot=%d R=%d w=%d t=%d",
+                          slot, right_dev, param_2, t);
                 goto clamp_end;
             }
             /* 0x100 <= right_dev < 0x401: direct sub param_2 */
@@ -1474,10 +1496,27 @@ void td5_ai_update_track_behavior(int slot) {
                 int route_byte = 128; /* default: center of span */
                 int lateral_bias = rs[RS_TRACK_OFFSET_BIAS];
 
+                /* Route byte uses PRE-junction-remap span (lin_span =
+                 * current_span + 4 wrapped), NOT the post-remap target_span.
+                 * [CONFIRMED @ 0x00435260-0x00435280 in FUN_00434FE0]:
+                 *
+                 *   iVar4 = *local_14 + 4;            // PRE-remap
+                 *   if (DAT_004c3d90 <= iVar4)
+                 *     iVar4 = (*local_14 - DAT_004c3d90) + 4;
+                 *   FUN_00434800(iVar10,              // GEOMETRY = post-remap
+                 *                (uint)*(byte *)(iVar4*3 + *piVar1),
+                 *                ...);                // ROUTE_BYTE = pre-remap
+                 *
+                 * Geometry is sampled from the junction-aware span; lateral
+                 * lane interpolation is read from the unremapped table. Using
+                 * target_span here aimed the AI at the wrong lane offset on
+                 * junction spans. */
                 const uint8_t *route_bytes = (const uint8_t *)(intptr_t)rs[RS_ROUTE_TABLE_PTR];
                 if (route_bytes) {
-                    route_byte = (int)route_bytes[(size_t)(unsigned)target_span * 3u];
+                    route_byte = (int)route_bytes[(size_t)(unsigned)lin_span * 3u];
                 }
+                TD5_LOG_I(LOG_TAG, "route_byte_pick: slot=%d lin=%d tspan=%d rb=%d",
+                          slot, lin_span, target_span, route_byte);
 
                 if (td5_track_sample_target_point(target_span, route_byte,
                                                    &target_x, &target_z, lateral_bias)) {
