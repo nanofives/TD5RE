@@ -1567,16 +1567,27 @@ void td5_physics_update_ai(TD5_Actor *actor)
                 rear_drive  = drive_torque >> 1;
             }
         } else {
-            /* Brake path: torque opposing current velocity.
-             * Same double-negation fix as player path — no sign flip needed,
-             * bf is already negative when braking forward. */
-            int32_t bf = (brake_front * throttle) >> 8;
-            int32_t br = (brake_rear  * throttle) >> 8;
+            /* Brake path: force OPPOSES motion direction.
+             *
+             * Previous logic took `bf = brake_front * throttle / 256` literally.
+             * With AI brake (throttle=-256), bf was always negative regardless
+             * of motion direction. Once v_long crossed zero through deceleration,
+             * the sustained negative force kept accelerating the car backward
+             * — a runaway loop when AI script opcode 8 (wait-for-stop) was
+             * waiting on |v_long| < 0x100.
+             *
+             * Compute brake magnitude from |throttle|, apply against motion.
+             * Existing half_spd clamp still bounds force to a fraction of
+             * current speed, so braking smoothly approaches zero as car
+             * stops. */
+            int32_t abs_throttle = throttle < 0 ? -throttle : throttle;
+            int32_t bf_mag = (brake_front * abs_throttle) >> 8;
+            int32_t br_mag = (brake_rear  * abs_throttle) >> 8;
             int32_t half_spd = abs_speed >> 1;
-            int32_t neg_bf = bf < 0 ? -bf : bf;
-            int32_t neg_br = br < 0 ? -br : br;
-            if (neg_bf > half_spd) bf = (bf < 0) ? -half_spd : half_spd;
-            if (neg_br > half_spd) br = (br < 0) ? -half_spd : half_spd;
+            if (bf_mag > half_spd) bf_mag = half_spd;
+            if (br_mag > half_spd) br_mag = half_spd;
+            int32_t bf = (v_long > 0) ? -bf_mag : bf_mag;
+            int32_t br = (v_long > 0) ? -br_mag : br_mag;
             front_drive = bf >> 1;
             rear_drive  = br >> 1;
         }
