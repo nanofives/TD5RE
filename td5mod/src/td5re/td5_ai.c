@@ -1496,10 +1496,27 @@ void td5_ai_update_track_behavior(int slot) {
                 int route_byte = 128; /* default: center of span */
                 int lateral_bias = rs[RS_TRACK_OFFSET_BIAS];
 
+                /* Route byte uses PRE-junction-remap span (lin_span =
+                 * current_span + 4 wrapped), NOT the post-remap target_span.
+                 * [CONFIRMED @ 0x00435260-0x00435280 in FUN_00434FE0]:
+                 *
+                 *   iVar4 = *local_14 + 4;            // PRE-remap
+                 *   if (DAT_004c3d90 <= iVar4)
+                 *     iVar4 = (*local_14 - DAT_004c3d90) + 4;
+                 *   FUN_00434800(iVar10,              // GEOMETRY = post-remap
+                 *                (uint)*(byte *)(iVar4*3 + *piVar1),
+                 *                ...);                // ROUTE_BYTE = pre-remap
+                 *
+                 * Geometry is sampled from the junction-aware span; lateral
+                 * lane interpolation is read from the unremapped table. Using
+                 * target_span here aimed the AI at the wrong lane offset on
+                 * junction spans. */
                 const uint8_t *route_bytes = (const uint8_t *)(intptr_t)rs[RS_ROUTE_TABLE_PTR];
                 if (route_bytes) {
-                    route_byte = (int)route_bytes[(size_t)(unsigned)target_span * 3u];
+                    route_byte = (int)route_bytes[(size_t)(unsigned)lin_span * 3u];
                 }
+                TD5_LOG_I(LOG_TAG, "route_byte_pick: slot=%d lin=%d tspan=%d rb=%d",
+                          slot, lin_span, target_span, route_byte);
 
                 if (td5_track_sample_target_point(target_span, route_byte,
                                                    &target_x, &target_z, lateral_bias)) {
