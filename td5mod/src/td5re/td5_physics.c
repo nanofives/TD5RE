@@ -555,7 +555,15 @@ void td5_physics_update_vehicle_actor(TD5_Actor *actor)
      * Traffic (slot >= 6) uses a dedicated path that skips gravity and
      * per-wheel ground snap — the original never calls IntegrateVehiclePoseAndContacts
      * for traffic [CONFIRMED @ 0x443ED0]. Instead, UpdateTrafficVehiclePose sets Y
-     * absolutely from barycentric track height each tick. */
+     * absolutely from barycentric track height each tick.
+     *
+     * Dispatch note: the original NEVER routes traffic through UpdateVehicleActor
+     * either — UpdateRaceActors @ 0x00436a70 dispatches slot>=6 through
+     * UpdateTrafficRoutePlan (0x00435e80) + UpdateTrafficActorMotion (0x00443ed0)
+     * directly. The port consolidates these into the slot>=6 sub-path of this
+     * function, which achieves equivalent semantics as long as the sub-path
+     * mirrors UpdateTrafficActorMotion's tick order (route-plan → friction →
+     * traffic pose, no wall resolvers). */
     if (actor->slot_index >= 6) {
         integrate_traffic_pose(actor);
     } else {
@@ -566,17 +574,22 @@ void td5_physics_update_vehicle_actor(TD5_Actor *actor)
     }
 
     /* 8. Track wall contact resolution (FUN_004070E0 -> FUN_00406F50 -> FUN_00406CC0)
-     * Check wheel probes against span edges and push car back if outside.
-     * Called after pose integration, matching original UpdateVehicleActor order:
-     *   Reverse boundary -> Forward boundary -> Lateral (left/right).
-     * [CONFIRMED @ 0x4068c8 + 0x406650 callsite order] */
-    if (actor->vehicle_mode == 0) {
+     * Racers only (slots 0-5). The original NEVER calls wall resolvers for
+     * traffic — traffic is dispatched through UpdateTrafficRoutePlan +
+     * UpdateTrafficActorMotion (in UpdateRaceActors @ 0x00436a70) and those
+     * paths have ZERO callers of FUN_004070E0/F50/CC0. Containment for
+     * traffic is purely via steering: route-plan computes lane-deviation
+     * (rs +0x58/+0x5c) -> UpdateActorSteeringBias -> steering_command.
+     * [CONFIRMED @ 0x00436a70 + callers-of FUN_004070E0/F50/CC0]
+     *
+     * Running these resolvers on traffic was already a no-op in practice
+     * (resolve_wall_contacts has its own slot>=6 early-out at td5_track.c:536,
+     * and fwd_rev_resolve_contact uses stale probe positions for traffic
+     * which pass the pen>=0 test and return without contact) — but the
+     * guard here keeps the port faithful to the original's dispatch. */
+    if (actor->vehicle_mode == 0 && actor->slot_index < 6) {
         td5_track_resolve_reverse_contacts(actor);
         td5_track_resolve_forward_contacts(actor);
-        /* Lateral wall check — re-enabled now that junction branching works.
-         * The original has no mid-strip lateral walls; containment is
-         * topological via the span walker. This port-specific check adds
-         * road-edge walls for types 1/2/5 only (safe geometry). */
         td5_track_resolve_wall_contacts(actor);
     }
 

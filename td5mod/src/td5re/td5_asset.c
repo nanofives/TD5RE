@@ -1303,10 +1303,24 @@ TD5_StaticHedEntry *td5_asset_find_entry_by_name(
  * The actual linking happens at build time. For now we provide the
  * load function framework. */
 
-/* Forward-direction filenames (original string constants) */
-static const char *s_strip_names[2]   = { "STRIP.DAT",   "STRIPB.DAT"   };
-static const char *s_left_names[2]    = { "LEFT.TRK",    "LEFTB.TRK"    };
-static const char *s_right_names[2]   = { "RIGHT.TRK",   "RIGHTB.TRK"   };
+/* Track-asset filenames — picked by direction, not as case-variant fallbacks.
+ *
+ * The original picks ONE filename per slot from the pointer table at
+ * 0x004673B8 (forward) / 0x004673C8 (reverse), indexed by
+ * gReverseTrackDirection @ 0x004AAF54. The ZIP always contains both B and
+ * non-B variants, so a "load the first that exists" fallback silently
+ * picks the forward file even when racing reverse — that's the bug the
+ * original's per-direction pointer table avoids. Port mirrors that here.
+ * [CONFIRMED @ 0x0042FB90 LoadTrackRuntimeData selector]
+ */
+static const char *s_strip_fwd[1]   = { "STRIP.DAT"   };
+static const char *s_strip_rev[1]   = { "STRIPB.DAT"  };
+static const char *s_left_fwd[1]    = { "LEFT.TRK"    };
+static const char *s_left_rev[1]    = { "LEFTB.TRK"   };
+static const char *s_right_fwd[1]   = { "RIGHT.TRK"   };
+static const char *s_right_rev[1]   = { "RIGHTB.TRK"  };
+static const char *s_traffic_fwd[1] = { "TRAFFIC.BUS" };
+static const char *s_traffic_rev[1] = { "TRAFFICB.BUS" };
 /** Wrapper texture-page limit. Must match td5_platform_win32.c. */
 #define TD5_TRACK_TEXTURE_PAGE_LIMIT 1024
 
@@ -1798,13 +1812,20 @@ int td5_asset_load_level(int track_index)
 
     /* g_track_environment_config is now defined at file scope above */
 
-    /*
-     * The reverse direction flag would come from the game state.
-     * For now we load the forward files if present and fall back to a
-     * renderer-owned placeholder display list when the archive is missing.
-     */
+    /* Pick forward or reverse asset filename based on game state.
+     * [CONFIRMED @ 0x0042FB90 LoadTrackRuntimeData + 0x0042AA10 InitializeRaceSession]
+     * writers of gReverseTrackDirection land here through the frontend's
+     * "Direction" toggle (stored into g_td5.reverse_direction). */
+    const int is_reverse = g_td5.reverse_direction ? 1 : 0;
+    const char **strip_names   = is_reverse ? s_strip_rev   : s_strip_fwd;
+    const char **left_names    = is_reverse ? s_left_rev    : s_left_fwd;
+    const char **right_names   = is_reverse ? s_right_rev   : s_right_fwd;
+    const char **traffic_names = is_reverse ? s_traffic_rev : s_traffic_fwd;
+    TD5_LOG_I(LOG_TAG, "load_level: reverse_direction=%d track_index=%d — picking %s / %s / %s / %s",
+              is_reverse, track_index,
+              strip_names[0], left_names[0], right_names[0], traffic_names[0]);
 
-    strip_data = load_first_available_level_entry(track_index, s_strip_names, 2,
+    strip_data = load_first_available_level_entry(track_index, strip_names, 1,
                                                   &strip_sz, strip_source, sizeof(strip_source));
     if (!strip_data || strip_sz <= 0) {
         TD5_LOG_W(LOG_TAG, "no STRIP.DAT found in %s, using placeholder track", zip_path);
@@ -1814,8 +1835,8 @@ int td5_asset_load_level(int track_index)
         ok = td5_track_load_strip(strip_data, (size_t)strip_sz) ? ok : 0;
     }
 
-    left_data = load_first_available_level_entry(track_index, s_left_names, 2, &left_sz, NULL, 0);
-    right_data = load_first_available_level_entry(track_index, s_right_names, 2, &right_sz, NULL, 0);
+    left_data = load_first_available_level_entry(track_index, left_names, 1, &left_sz, NULL, 0);
+    right_data = load_first_available_level_entry(track_index, right_names, 1, &right_sz, NULL, 0);
     if ((left_data && left_sz > 0) || (right_data && right_sz > 0)) {
         if (!td5_track_load_routes(left_data, (size_t)left_sz,
                                    right_data, (size_t)right_sz)) {
@@ -1893,12 +1914,11 @@ int td5_asset_load_level(int track_index)
      * never render. Buffer is held across the race via s_traffic_queue_buf
      * and freed on the next td5_asset_load_level call. */
     {
-        static const char *s_traffic_bus_names[2] = { "TRAFFIC.BUS", "traffic.bus" };
         int bus_sz = 0;
         free(s_traffic_queue_buf);
         s_traffic_queue_buf = NULL;
         td5_ai_set_traffic_queue(NULL, 0);
-        void *bus_data = load_first_available_level_entry(track_index, s_traffic_bus_names, 2,
+        void *bus_data = load_first_available_level_entry(track_index, traffic_names, 1,
                                                           &bus_sz, NULL, 0);
         if (bus_data && bus_sz >= 4) {
             s_traffic_queue_buf = (uint8_t *)bus_data; /* ownership transferred */
