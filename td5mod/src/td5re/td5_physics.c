@@ -2776,11 +2776,17 @@ void td5_physics_integrate_suspension(TD5_Actor *actor, int32_t accel_x, int32_t
     /* ---- Per-wheel pass (4 wheels) ---- */
     for (int i = 0; i < 4; i++) {
         /* Lever arm from chassis centre to this wheel's contact position,
-         * in world units (wheel_world_positions_hires is in FP with the
-         * same scale as world_pos>>8 after the bias). Exactly matches
-         * original: `(piVar10[X] - (world_pos.X >> 8)) * accel_X`. */
-        const int32_t arm_x = actor->wheel_world_positions_hires[i].x - wpx_scaled;
-        const int32_t arm_z = actor->wheel_world_positions_hires[i].z - wpz_scaled;
+         * in world units. Original (0x00403A20):
+         *   arm = wheel_world_positions_hires[i] - (world_pos >> 8)
+         * Port stores wheel_world_positions_hires in 24.8 FP (vfx consumes
+         * that scale at td5_vfx.c:1367), so shift down here to match the
+         * original's world-unit arithmetic. Without the >>8, arm magnitudes
+         * hit ~10M and spring_term blows past int32, producing per-tick
+         * suspension jumps — historically masked by a port-local VEL_CAP
+         * (now removed below). [From commit e97669e; regressed between then
+         * and HEAD; restored 2026-04-22 to fix wheel oscillation on slopes.] */
+        const int32_t arm_x = (actor->wheel_world_positions_hires[i].x >> 8) - wpx_scaled;
+        const int32_t arm_z = (actor->wheel_world_positions_hires[i].z >> 8) - wpz_scaled;
 
         int32_t proj = arm_x * accel_x + arm_z * accel_z;
         int32_t spring_term = (proj >> 8) * k_spring;
@@ -2794,21 +2800,18 @@ void td5_physics_integrate_suspension(TD5_Actor *actor, int32_t accel_x, int32_t
         int32_t vel_damp = new_vel * k_vel_damp;
         new_vel = new_vel - (pos_damp >> 8) - (vel_damp >> 8);
 
-        /* Deadzone: suppresses micro-oscillation at rest */
+        /* Deadzone: suppresses micro-oscillation at rest. Matches original
+         * 0x00403A20's |new_vel| < 0x10 dead-zone. No per-tick VEL_CAP —
+         * original relies only on this deadzone plus the post-add travel-
+         * limit clamp below. A previous port-local VEL_CAP=0x100 was
+         * removed because it was a workaround for the lever-arm unit bug
+         * (now fixed above). Re-introducing it silences legitimate
+         * restoring transients and makes the front suspension saturate
+         * one side ahead of the other, producing nose-up asymmetric tilt
+         * and the steady-slope wheel oscillation (susp_vel=12000)
+         * observed 2026-04-21. */
         if (new_vel > -0x10 && new_vel < 0x10)
             new_vel = 0;
-
-        /* Rate limit per-tick velocity change. Without this, small lateral
-         * accel spikes during steering drive `spring_term` large enough to
-         * produce multi-thousand 24.8-FP susp_pos swings in a single tick,
-         * which cascade through refresh_wheel_contacts (body_wy includes
-         * susp_pos>>8) into ground-snap new_y jumps — visible micro-jumps
-         * when steering. Clamp `new_vel` to ±VEL_CAP so susp_pos moves
-         * smoothly. TODO: verify original's cardef[0x62] (spring k) scaling
-         * via runtime capture — may currently be over-amplified. */
-        const int32_t VEL_CAP = 0x100;  /* ±256 per tick = ±1 body unit/sec */
-        if (new_vel >  VEL_CAP) new_vel =  VEL_CAP;
-        if (new_vel < -VEL_CAP) new_vel = -VEL_CAP;
 
         actor->wheel_spring_dv[i] = new_vel;
         int32_t new_pos = actor->wheel_suspension_pos[i] + new_vel;
@@ -2826,14 +2829,17 @@ void td5_physics_integrate_suspension(TD5_Actor *actor, int32_t accel_x, int32_t
     /* ---- Central chassis pass ----
      * The original averages the front-axle contact (wheels 0+1) x and z
      * to derive the lever arm for the body-level suspension. No load
-     * term, no deadzone; same spring/damping constants; travel clamp
-     * is 2x the per-wheel limit (hardcoded 0x4000 when limit is 0x2000
-     * in the original decomp — we use *2 so it tracks tuning data). */
+     * term, no deadzone; same spring/damping constants; travel clamp is
+     * the SAME cardef+0x64 as per-wheel (NOT doubled — verified @
+     * 0x00403A20 `iVar7 = (int)*(short *)(param_2 + 100)`, used
+     * directly without *2). [From commit e97669e; regressed between
+     * then and HEAD; restored 2026-04-22.] */
     {
+        /* Same FP→world-unit shift as per-wheel arm above. */
         const int32_t front_mid_x =
-            (actor->wheel_world_positions_hires[1].x + actor->wheel_world_positions_hires[0].x) / 2;
+            ((actor->wheel_world_positions_hires[1].x + actor->wheel_world_positions_hires[0].x) >> 1) >> 8;
         const int32_t front_mid_z =
-            (actor->wheel_world_positions_hires[1].z + actor->wheel_world_positions_hires[0].z) / 2;
+            ((actor->wheel_world_positions_hires[1].z + actor->wheel_world_positions_hires[0].z) >> 1) >> 8;
 
         const int32_t arm_x = front_mid_x - wpx_scaled;
         const int32_t arm_z = front_mid_z - wpz_scaled;
@@ -2851,12 +2857,11 @@ void td5_physics_integrate_suspension(TD5_Actor *actor, int32_t accel_x, int32_t
         actor->center_suspension_pos = new_pos;
         actor->center_suspension_vel = new_vel;
 
-        const int32_t center_lim = k_travel_lim * 2;
-        if (new_pos > center_lim) {
-            actor->center_suspension_pos = center_lim;
+        if (new_pos > k_travel_lim) {
+            actor->center_suspension_pos = k_travel_lim;
             actor->center_suspension_vel = 0;
-        } else if (new_pos < -center_lim) {
-            actor->center_suspension_pos = -center_lim;
+        } else if (new_pos < -k_travel_lim) {
+            actor->center_suspension_pos = -k_travel_lim;
             actor->center_suspension_vel = 0;
         }
     }
