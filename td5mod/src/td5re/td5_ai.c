@@ -228,7 +228,6 @@ static void ai_update_single_racer(int slot);
 static void ai_update_single_traffic(int slot);
 static int32_t ai_cos_fixed12(int32_t angle);
 static int32_t ai_sin_fixed12(int32_t angle);
-static int32_t ai_neg_cos_fixed12(int32_t angle);
 static void td5_ai_refresh_route_state_slot(int slot);
 static int32_t ai_angle_from_vector(int32_t dx, int32_t dz);
 
@@ -242,18 +241,6 @@ static int32_t ai_cos_fixed12(int32_t angle) {
 static int32_t ai_sin_fixed12(int32_t angle) {
     double rad = (double)(angle & 0xFFF) * (2.0 * 3.14159265358979323846 / 4096.0);
     return (int32_t)(sin(rad) * 4096.0);
-}
-
-/* Mirrors original FUN_0040a700 @ 0x0040a700:
- *   return LUT[(arg - 0x400) & 0xFFF]  with LUT == sin12 table
- *   = sin((arg - 0x400) & 0xFFF) = -cos(arg)
- * Used by the steering cascade fine-deviation band. The negative-cosine shape
- * is what makes small deviations produce LARGE cascade outputs that saturate
- * STEERING_CMD to ±0x18000; the saturated value then biases the next-tick
- * heading estimate enough to flip the deviation sign, producing the
- * self-stabilizing oscillator that the original relies on. */
-static int32_t ai_neg_cos_fixed12(int32_t angle) {
-    return ai_sin_fixed12((angle - 0x400) & 0xFFF);
 }
 
 /* ========================================================================
@@ -864,18 +851,15 @@ void td5_ai_update_steering_bias(int *route_state, int32_t steer_weight) {
             }
             if (left_dev < 0x100) {
                 /* Normal mode, fine deviation: proportional correction.
-                 * [CONFIRMED @ 0x4340C0, FUN_0040a700 body @ 0x0040a700]
-                 * Original calls FUN_0040a700(raw_deviation), which looks up
-                 * LUT[(arg - 0x400) & 0xFFF] against the sin12 table — i.e.
-                 * -cos(arg). For small deviation (arg≈0) this returns ≈-1.0
-                 * (raw -0xFB3 for arg=0x80), which saturates STEERING_CMD to
-                 * ±0x18000 in 1-2 ticks. The saturated value then biases
-                 * actor_heading via (yaw_accum + steering_cmd) >> 8 in the
-                 * next deviation calc at 0x435338, flipping the deviation
-                 * past the sign-flip threshold. That self-stabilizing cycle
-                 * IS the AI's damping mechanism — there is no separate
-                 * boundary pre-loop. */
-                int32_t t   = ai_neg_cos_fixed12(left_dev);
+                 * [CONFIRMED @ 0x4340C0 via 0x0040a700, and LUT init
+                 * BuildSinCosLookupTables @ 0x0040a650]
+                 * Original calls FUN_0040a700(raw_deviation) = SinFixed12bit.
+                 * DAT_00483984 is a COSINE table (init stores cos(i*step)*4096),
+                 * so LUT[(arg - 0x400) & 0xFFF] = cos(arg - π/2) = +sin(arg).
+                 * For small deviation the return is ≈ arg, producing a
+                 * proportional correction. sin(0) = 0 → aligned car (left=0xFFF
+                 * right=0 fires this branch via the right mirror) stays put. */
+                int32_t t   = ai_sin_fixed12(left_dev);
                 int32_t mul = t * param_2;
                 ACTOR_I32(actor, ACTOR_STEERING_CMD) =
                     ACTOR_I32(actor, ACTOR_STEERING_CMD)
@@ -909,8 +893,10 @@ void td5_ai_update_steering_bias(int *route_state, int32_t steer_weight) {
             /* fall through: write -iVar3 as new bias */
         } else {
             if (right_dev < 0x100) {
-                /* -cos via FUN_0040a700 mirror — see left fine-band comment */
-                int32_t t   = ai_neg_cos_fixed12(right_dev);
+                /* +sin via FUN_0040a700 mirror — see left fine-band comment.
+                 * Aligned car (delta=0) -> LEFT=0xFFF, RIGHT=0: this path
+                 * fires with sin(0)=0 → no correction → car stays aligned. */
+                int32_t t   = ai_sin_fixed12(right_dev);
                 int32_t mul = t * param_2;
                 ACTOR_I32(actor, ACTOR_STEERING_CMD) =
                     ACTOR_I32(actor, ACTOR_STEERING_CMD)
