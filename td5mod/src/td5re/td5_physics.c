@@ -2804,11 +2804,17 @@ void td5_physics_integrate_suspension(TD5_Actor *actor, int32_t accel_x, int32_t
     /* ---- Per-wheel pass (4 wheels) ---- */
     for (int i = 0; i < 4; i++) {
         /* Lever arm from chassis centre to this wheel's contact position,
-         * in world units (wheel_world_positions_hires is in FP with the
-         * same scale as world_pos>>8 after the bias). Exactly matches
-         * original: `(piVar10[X] - (world_pos.X >> 8)) * accel_X`. */
-        const int32_t arm_x = actor->wheel_world_positions_hires[i].x - wpx_scaled;
-        const int32_t arm_z = actor->wheel_world_positions_hires[i].z - wpz_scaled;
+         * in world units. Original (0x00403A20):
+         *   arm = wheel_world_positions_hires[i] - (world_pos >> 8)
+         * Port stores wheel_world_positions_hires in 24.8 FP (vfx consumes
+         * that scale at td5_vfx.c:1367), so shift down here to match the
+         * original's world-unit arithmetic. Without the >>8, arm magnitudes
+         * hit ~10M and spring_term blows past int32, producing per-tick
+         * suspension jumps — historically masked by a port-local VEL_CAP
+         * (now removed below). [From commit e97669e; regressed between then
+         * and HEAD; restored 2026-04-22 to fix wheel oscillation on slopes.] */
+        const int32_t arm_x = (actor->wheel_world_positions_hires[i].x >> 8) - wpx_scaled;
+        const int32_t arm_z = (actor->wheel_world_positions_hires[i].z >> 8) - wpz_scaled;
 
         int32_t proj = arm_x * accel_x + arm_z * accel_z;
         int32_t spring_term = (proj >> 8) * k_spring;
@@ -2822,21 +2828,18 @@ void td5_physics_integrate_suspension(TD5_Actor *actor, int32_t accel_x, int32_t
         int32_t vel_damp = new_vel * k_vel_damp;
         new_vel = new_vel - (pos_damp >> 8) - (vel_damp >> 8);
 
-        /* Deadzone: suppresses micro-oscillation at rest */
+        /* Deadzone: suppresses micro-oscillation at rest. Matches original
+         * 0x00403A20's |new_vel| < 0x10 dead-zone. No per-tick VEL_CAP —
+         * original relies only on this deadzone plus the post-add travel-
+         * limit clamp below. A previous port-local VEL_CAP=0x100 was
+         * removed because it was a workaround for the lever-arm unit bug
+         * (now fixed above). Re-introducing it silences legitimate
+         * restoring transients and makes the front suspension saturate
+         * one side ahead of the other, producing nose-up asymmetric tilt
+         * and the steady-slope wheel oscillation (susp_vel=12000)
+         * observed 2026-04-21. */
         if (new_vel > -0x10 && new_vel < 0x10)
             new_vel = 0;
-
-        /* Rate limit per-tick velocity change. Without this, small lateral
-         * accel spikes during steering drive `spring_term` large enough to
-         * produce multi-thousand 24.8-FP susp_pos swings in a single tick,
-         * which cascade through refresh_wheel_contacts (body_wy includes
-         * susp_pos>>8) into ground-snap new_y jumps — visible micro-jumps
-         * when steering. Clamp `new_vel` to ±VEL_CAP so susp_pos moves
-         * smoothly. TODO: verify original's cardef[0x62] (spring k) scaling
-         * via runtime capture — may currently be over-amplified. */
-        const int32_t VEL_CAP = 0x100;  /* ±256 per tick = ±1 body unit/sec */
-        if (new_vel >  VEL_CAP) new_vel =  VEL_CAP;
-        if (new_vel < -VEL_CAP) new_vel = -VEL_CAP;
 
         actor->wheel_spring_dv[i] = new_vel;
         int32_t new_pos = actor->wheel_suspension_pos[i] + new_vel;
@@ -2854,14 +2857,17 @@ void td5_physics_integrate_suspension(TD5_Actor *actor, int32_t accel_x, int32_t
     /* ---- Central chassis pass ----
      * The original averages the front-axle contact (wheels 0+1) x and z
      * to derive the lever arm for the body-level suspension. No load
-     * term, no deadzone; same spring/damping constants; travel clamp
-     * is 2x the per-wheel limit (hardcoded 0x4000 when limit is 0x2000
-     * in the original decomp — we use *2 so it tracks tuning data). */
+     * term, no deadzone; same spring/damping constants; travel clamp is
+     * the SAME cardef+0x64 as per-wheel (NOT doubled — verified @
+     * 0x00403A20 `iVar7 = (int)*(short *)(param_2 + 100)`, used
+     * directly without *2). [From commit e97669e; regressed between
+     * then and HEAD; restored 2026-04-22.] */
     {
+        /* Same FP→world-unit shift as per-wheel arm above. */
         const int32_t front_mid_x =
-            (actor->wheel_world_positions_hires[1].x + actor->wheel_world_positions_hires[0].x) / 2;
+            ((actor->wheel_world_positions_hires[1].x + actor->wheel_world_positions_hires[0].x) >> 1) >> 8;
         const int32_t front_mid_z =
-            (actor->wheel_world_positions_hires[1].z + actor->wheel_world_positions_hires[0].z) / 2;
+            ((actor->wheel_world_positions_hires[1].z + actor->wheel_world_positions_hires[0].z) >> 1) >> 8;
 
         const int32_t arm_x = front_mid_x - wpx_scaled;
         const int32_t arm_z = front_mid_z - wpz_scaled;
@@ -2879,12 +2885,11 @@ void td5_physics_integrate_suspension(TD5_Actor *actor, int32_t accel_x, int32_t
         actor->center_suspension_pos = new_pos;
         actor->center_suspension_vel = new_vel;
 
-        const int32_t center_lim = k_travel_lim * 2;
-        if (new_pos > center_lim) {
-            actor->center_suspension_pos = center_lim;
+        if (new_pos > k_travel_lim) {
+            actor->center_suspension_pos = k_travel_lim;
             actor->center_suspension_vel = 0;
-        } else if (new_pos < -center_lim) {
-            actor->center_suspension_pos = -center_lim;
+        } else if (new_pos < -k_travel_lim) {
+            actor->center_suspension_pos = -k_travel_lim;
             actor->center_suspension_vel = 0;
         }
     }
@@ -2925,19 +2930,59 @@ void td5_physics_integrate_suspension(TD5_Actor *actor, int32_t accel_x, int32_t
  *   Clamp roll/pitch to ±4000 per bitmask switch table.
  * ======================================================================== */
 
-/* Rotate a 3-component int16 body-space vector to world-space Y component.
- * Uses second column of rotation matrix: {m[1], m[4], m[7]}.
- * This matches FUN_0042E2E0's second output (offset +2) which uses
- * row 1 of the transposed matrix = column 1 of the original matrix.
- * Returns int16 result (saturated). */
-static int16_t rotate_vec_world_y(const TD5_Actor *actor, const int16_t v[3])
+/* Y-component projection of a body-space vector into world space.
+ * Uses ROW 1 of the body→world rotation matrix: {m[3], m[4], m[5]}.
+ *
+ * [CONFIRMED @ 0x0042E2E0] ConvertFloatVec3ToShortAngles Y output:
+ *   Y = v[0]*M[+0xC] + v[1]*M[+0x10] + v[2]*M[+0x14]
+ *     = v[0]*M[3]    + v[1]*M[4]     + v[2]*M[5]   (row-major float[9])
+ *
+ * Callers that pass `actor->rotation_matrix` directly (via
+ * LoadRenderRotationMatrix without prior transpose) get body→world.
+ * In port: td5_physics_integrate_pose ground-snap tail (line ~3618) —
+ * src = per-wheel body offset, producing world-space Y for chassis
+ * correction averaging. */
+static int16_t rotate_body_to_world_y(const TD5_Actor *actor, const int16_t v[3])
 {
-    /* m[1] = col1_row0, m[4] = col1_row1, m[7] = col1_row2 */
+    float m3 = actor->rotation_matrix.m[3];
+    float m4 = actor->rotation_matrix.m[4];
+    float m5 = actor->rotation_matrix.m[5];
+    float result = (float)v[0] * m3 + (float)v[1] * m4 + (float)v[2] * m5;
+    if (result >  32767.0f) return  32767;
+    if (result < -32768.0f) return -32768;
+    return (int16_t)(int32_t)result;
+}
+
+/* Y-component projection of a world-space vector into body space.
+ * Uses COLUMN 1 of body→world matrix = ROW 1 of body^T = {m[1], m[4], m[7]}.
+ *
+ * [CONFIRMED @ 0x004057FA] UpdateVehicleSuspensionResponse calls
+ * `TransposeMatrix3x3(&actor->rotation_m00, local_30)` then
+ * `LoadRenderRotationMatrix(local_30)`, so the subsequent
+ * `ConvertFloatVec3ToShortAngles(wcv, ...)` reads ROW 1 of the TRANSPOSE =
+ * COLUMN 1 of the original matrix.
+ *
+ * Semantically this is world→body: wcv is a world-space surface normal,
+ * the output Y is the body-frame Y component of that normal — used to
+ * compute the gravity projection onto body Y for the per-wheel torque
+ * accumulator.
+ *
+ * Caller: td5_physics_update_suspension_response (line ~3022) with
+ * src = actor->wheel_contact_velocities[i] (wcv, world-space normal).
+ *
+ * HISTORY: originally this helper WAS col-1 (correct for susp_response
+ * via transpose semantics). A 2026-04-22 Ghidra re-pass against
+ * ConvertFloatVec3ToShortAngles mistakenly flagged col-1 as wrong and
+ * switched it to row-1 — that fixed the ground-snap callsite (which had
+ * been silently broken) but broke this one. Now split: each call site
+ * reads the matrix the way the original's transpose-or-not pairing
+ * implies. */
+static int16_t rotate_world_to_body_y(const TD5_Actor *actor, const int16_t v[3])
+{
     float m1 = actor->rotation_matrix.m[1];
     float m4 = actor->rotation_matrix.m[4];
     float m7 = actor->rotation_matrix.m[7];
     float result = (float)v[0] * m1 + (float)v[1] * m4 + (float)v[2] * m7;
-    /* Saturate to int16 range */
     if (result >  32767.0f) return  32767;
     if (result < -32768.0f) return -32768;
     return (int16_t)(int32_t)result;
@@ -2952,117 +2997,158 @@ static inline int32_t arith_round_shift(int32_t x, int32_t mask, int32_t shift)
 
 void td5_physics_update_suspension_response(TD5_Actor *actor)
 {
-    /* bVar1: current-frame airborne mask (1=airborne). In the original this is
-     * read from 0x37C; in the port we use the current wheel_contact_bitmask. */
-    uint8_t bVar1 = actor->wheel_contact_bitmask;
-    /* bVar2: previous-frame GROUNDED mask (1=grounded), saved by integrate_pose
-     * before refresh_wheel_contacts overwrites wheel_contact_bitmask. */
-    uint8_t bVar2 = s_prev_grounded_mask[actor->slot_index & 0x0F];
+    /* Faithful port of UpdateVehicleSuspensionResponse @ 0x004057F0.
+     *
+     * HISTORY: this is a restore of commit e97669e's literal port, which
+     * had been replaced (between then and 2026-04-21) with a pragmatic
+     * ground-probe P-controller + 1/16 decay. That replacement produced
+     * an exaggerated uphill-roll bug: on positive pitch slopes the
+     * P-controller's target and the decay-to-zero both pulled the same
+     * direction (runaway), while downhill they opposed (self-resets).
+     * Research agent 2026-04-21 confirmed:
+     *   - No asymmetric term exists in the original 0x004057F0.
+     *   - T2 block in IntegrateVehiclePoseAndContacts @ 0x00405E80 OVERWRITES
+     *     angular_velocity_{roll,pitch} each tick; 0x004057F0 ADDS a small
+     *     per-tick correction clamped ±4000. That pair is self-limiting.
+     *   - Port T2 block already matches original exactly (±6000 clamp,
+     *     wrap*0x100 delta). So restoring the faithful 0x004057F0 add-step
+     *     reinstates the T2-dominates-with-corrective pattern.
+     *
+     * Two masks are needed:
+     *   lock = current-frame AIRBORNE mask (1=airborne). Original reads
+     *          from +0x37C (damage_lockout). Port live equivalent is
+     *          wheel_contact_bitmask after refresh.
+     *   grnd = previous-frame GROUNDED mask (1=grounded). Original reads
+     *          from +0x37D (wheel_contact_bitmask, which after refresh
+     *          holds the prior tick's value). Port snapshots this as
+     *          s_prev_grounded_mask[slot] in integrate_pose before refresh
+     *          overwrites the live bitmask.
+     *
+     * Struct layout source: decomp @ 0x00405884/0x00405888 shows the loop
+     * reads sVar3=psVar11[-0x22], sVar4=psVar11[-0x20] where psVar11 walks
+     * +0x254-style stride of 4 shorts/wheel, giving actor+0x210/+0x214 for
+     * wheel 0 — matches the `arms` pointer below. wcv at +0x250 stride 4
+     * shorts; gap_270 at +0x270 same stride.
+     */
+    const uint8_t lock = actor->wheel_contact_bitmask;
+    const uint8_t grnd = s_prev_grounded_mask[actor->slot_index & 0x0F];
 
-    if (bVar1 == 0x0F) {
-        /* All four wheels airborne — original 0x004057F0 skips the entire
-         * body-torque pass. Angular velocity carries freely (takeoff spin
-         * preserved); gravity is applied in integrate_pose and is NOT
-         * added back here. [CONFIRMED @ 0x004057F0 early-return on bVar1==0xF] */
+    if (lock == 0x0F) {
+        /* All four wheels airborne — early-return matches original
+         * 0x00405809; gravity stays subtracted (not added back). */
         return;
     }
 
-    /* Gravity add-back: cancels the subtract in integrate_pose for grounded cars. */
-    actor->linear_velocity_y += g_gravity_constant;
+    int32_t pitch_grav = 0;     /* local_50 */
+    int32_t roll_grav  = 0;     /* local_5c */
+    int32_t pitch_spr  = 0;     /* local_64 */
+    int32_t roll_spr   = 0;     /* local_60 */
+    int32_t bounce     = 0;     /* local_78 */
+    int32_t cnt_active   = 0;   /* local_4c — non-locked wheels */
+    int32_t cnt_grounded = 0;   /* local_58 — wheels also grounded prev tick */
 
-    /* ---------- Target-angle spring-damper for body roll/pitch ----------
-     *
-     * Gated on !g_game_paused so the parked car doesn't tilt during
-     * countdown — the height-diff proportional chase would drive
-     * angular_velocity from spurious per-wheel ground asymmetry before
-     * the race starts.
-     *
-     * Instead of the original's per-wheel normal torque accumulation (which
-     * requires a full body-space transform chain to produce stable forces),
-     * compute target roll/pitch directly from wheel ground heights, then
-     * drive angular velocity with a critically-damped spring.
-     *
-     * Wheel layout: 0=FL, 1=FR, 2=RL, 3=RR
-     * Roll  = height difference between left/right sides
-     * Pitch = height difference between front/rear
-     */
-    /* ---------- Target-angle tilt with probed ground + decay ----------
-     *
-     * Pragmatic stabilizer for visual chassis tilt. The literal-port of the
-     * original's per-wheel torque (formerly here, see git history)
-     * accumulates angular velocity unboundedly with no in-loop damping —
-     * the original likely relies on the spring term's *0x100 amplification
-     * for counter-balance, but unit scales differ in the port and produce
-     * runaway in either direction.
-     *
-     * Approach instead:
-     *   1. Probe the GROUND height (not wheel_contact_pos.y, which wobbles
-     *      with suspension swing) at each wheel's XZ. On flat ground all
-     *      four heights are equal → no tilt. On slopes / banked turns →
-     *      front-rear and left-right deltas drive the target.
-     *   2. P controller + explicit decay on angular_velocity so it CAN'T
-     *      run away even if target wobbles.
-     *
-     * Wheel layout: 0=FL, 1=FR, 2=RL, 3=RR. */
-    int32_t gy[4];
-    int grounded = 0;
+    const int16_t *arms = (const int16_t *)((const uint8_t *)actor + 0x210);
+    const int16_t *wcv  = (const int16_t *)((const uint8_t *)actor + 0x250);
+    const int16_t *wfdh = (const int16_t *)((const uint8_t *)actor + 0x270);
+
     for (int i = 0; i < 4; i++) {
-        int32_t probe_y = 0;
-        int probe_surf = 0;
-        int probe_span = actor->wheel_probes[i].span_index;
-        if (probe_span < 0) probe_span = actor->track_span_raw;
-        if (td5_track_probe_height(actor->wheel_contact_pos[i].x,
-                                   actor->wheel_contact_pos[i].z,
-                                   probe_span, &probe_y, &probe_surf)) {
-            gy[i] = probe_y;
-            grounded++;
-        } else {
-            gy[i] = actor->world_pos.y;
+        const uint8_t bit = (uint8_t)(1u << i);
+        if (lock & bit) continue;            /* skip airborne wheel entirely */
+
+        const int16_t lat  = arms[i * 4 + 0];   /* sVar3, lateral arm  */
+        const int16_t loni = arms[i * 4 + 2];   /* sVar4, longitudinal */
+
+        /* g_view = Y component of (transposed body matrix) · wcv[i] —
+         * matches `ConvertFloatVec3ToShortAngles(wcv, &local_38)` reading
+         * local_36. `rotate_world_to_body_y` reads {m[1],m[4],m[5]/m[7]} —
+         * = row 1 of body^T = column 1 of body matrix — matching the
+         * original's TransposeMatrix3x3 + LoadRenderRotationMatrix +
+         * ConvertFloatVec3ToShortAngles sequence at 0x004057FA-0x004058D8. */
+        int16_t cn[3] = { wcv[i * 4 + 0], wcv[i * 4 + 1], wcv[i * 4 + 2] };
+        const int32_t y_view = (int32_t)rotate_world_to_body_y(actor, cn);
+
+        /* g_scaled is (Y · gravity) >> 12; signed-divide rounding via
+         * arith_round_shift matches original's SAR-with-bias idiom. */
+        const int32_t g_scaled = arith_round_shift(y_view * g_gravity_constant, 0xFFF, 12);
+
+        pitch_grav += g_scaled * (int32_t)loni;   /* +=, longitudinal arm */
+        roll_grav  -= g_scaled * (int32_t)lat;    /* -=, lateral arm (NOTE sign) */
+        ++cnt_active;
+
+        if (grnd & bit) {
+            /* Spring damping from frame-to-frame wheel motion projected
+             * onto the contact normal. wfdh and wcv share +0x250-style
+             * 4-short-per-wheel layout; both X,Y,Z at offsets 0,1,2. */
+            int32_t dot =   (int32_t)wfdh[i * 4 + 0] * (int32_t)wcv[i * 4 + 0]
+                          + (int32_t)wfdh[i * 4 + 1] * (int32_t)wcv[i * 4 + 1]
+                          + (int32_t)wfdh[i * 4 + 2] * (int32_t)wcv[i * 4 + 2];
+            dot = arith_round_shift(dot, 0xFFF, 12);   /* signed >>12 */
+
+            pitch_spr += (dot * (int32_t)loni) * -0x100;   /* note minus */
+            roll_spr  += (dot * (int32_t)lat ) *  0x100;
+            bounce    += dot >> 1;                         /* signed SAR 1 */
+            ++cnt_grounded;
         }
     }
 
-    /* Decay angular velocity every tick (1/16 = 6.25%/tick ≈ 0.5s settle).
-     * This is the safety net that makes target-angle wobble survivable. */
-    actor->angular_velocity_roll  -= actor->angular_velocity_roll  >> 4;
-    actor->angular_velocity_pitch -= actor->angular_velocity_pitch >> 4;
+    if (cnt_grounded > 0) {
+        pitch_spr /= cnt_grounded;
+        roll_spr  /= cnt_grounded;
+        bounce    /= cnt_grounded;
+    }
 
-    if (grounded == 4) {
-        int32_t left_avg  = (gy[0] + gy[2]) / 2;
-        int32_t right_avg = (gy[1] + gy[3]) / 2;
-        int32_t front_avg = (gy[0] + gy[1]) / 2;
-        int32_t rear_avg  = (gy[2] + gy[3]) / 2;
+    /* PlayVehicleSoundAtPosition(0x17, bounce*50, ...) call from the
+     * original is omitted — sound side is stubbed elsewhere. */
 
-        const int16_t *wda0 = (const int16_t *)((const uint8_t *)actor + 0x210);
-        int32_t half_track = wda0[2];
-        int32_t half_wbase = wda0[0];
-        if (half_track < 0) half_track = -half_track;
-        if (half_wbase < 0) half_wbase = -half_wbase;
-        if (half_track < 32) half_track = 32;
-        if (half_wbase < 32) half_wbase = 32;
+    const int32_t roll_term  = (cnt_active > 0)
+        ? (roll_spr  + roll_grav  / cnt_active) / 0x4B0    /* /1200 */
+        : roll_spr  / 0x4B0;
+    const int32_t pitch_term = (cnt_active > 0)
+        ? (pitch_spr + pitch_grav / cnt_active) / 0x226    /* /550 */
+        : pitch_spr / 0x226;
 
-        int32_t fwdbk_hdiff  = (front_avg - rear_avg) >> 8;
-        int32_t leftrt_hdiff = (left_avg  - right_avg) >> 8;
+    actor->angular_velocity_roll  += roll_term;
+    actor->angular_velocity_pitch += pitch_term;
 
-        int32_t target_roll  = -(fwdbk_hdiff  * 326) / (2 * half_wbase);
-        int32_t target_pitch =  (leftrt_hdiff * 326) / (2 * half_track);
+    /* Y-velocity update: bounce + gravity restored. Original adds
+     * gravity back here, cancelling the subtract at top of integrate_pose
+     * for grounded cars. */
+    actor->linear_velocity_y += bounce + g_gravity_constant;
 
-        if (target_roll  >  0x100) target_roll  =  0x100;
-        if (target_roll  < -0x100) target_roll  = -0x100;
-        if (target_pitch >  0x100) target_pitch =  0x100;
-        if (target_pitch < -0x100) target_pitch = -0x100;
-
-        int32_t err_r = (target_roll  << 8) - actor->euler_accum.roll;
-        int32_t err_p = (target_pitch << 8) - actor->euler_accum.pitch;
-
-        actor->angular_velocity_roll  += err_r >> 6;   /* gentle P gain */
-        actor->angular_velocity_pitch += err_p >> 6;
-
-        if (actor->slot_index == 0 && (actor->frame_counter % 60u) == 0u) {
-            TD5_LOG_I(LOG_TAG,
-                      "susp_tilt: tgt_r=%d tgt_p=%d gnd=%d av_r=%d av_p=%d",
-                      target_roll, target_pitch, grounded,
-                      actor->angular_velocity_roll, actor->angular_velocity_pitch);
+    if (cnt_grounded > 0) {
+        /* Per-pattern angular velocity clamps [CONFIRMED @ 0x00405a6a..
+         * 0x00405af4]. Switch keys on grnd (previous-frame GROUNDED),
+         * NOT lock. Bitmasks 7,11,13,14,15 fall through with NO clamp. */
+        const int32_t LIM = 4000;   /* 0xFA0 */
+        switch (grnd) {
+            case 0: case 1: case 2: case 4: case 6: case 8: case 9:
+                if (actor->angular_velocity_roll  >  LIM) actor->angular_velocity_roll  =  LIM;
+                if (actor->angular_velocity_roll  < -LIM) actor->angular_velocity_roll  = -LIM;
+                if (actor->angular_velocity_pitch >  LIM) actor->angular_velocity_pitch =  LIM;
+                if (actor->angular_velocity_pitch < -LIM) actor->angular_velocity_pitch = -LIM;
+                break;
+            case 3: case 12:
+                if (actor->angular_velocity_roll  >  LIM) actor->angular_velocity_roll  =  LIM;
+                if (actor->angular_velocity_roll  < -LIM) actor->angular_velocity_roll  = -LIM;
+                break;
+            case 5: case 10:
+                if (actor->angular_velocity_pitch >  LIM) actor->angular_velocity_pitch =  LIM;
+                if (actor->angular_velocity_pitch < -LIM) actor->angular_velocity_pitch = -LIM;
+                break;
+            default: /* 7,11,13,14,15 — no clamp */
+                break;
         }
+    }
+
+    if (actor->slot_index == 0 && (actor->frame_counter % 60u) == 0u) {
+        TD5_LOG_I(LOG_TAG,
+                  "susp_resp slot0: lock=0x%02x grnd=0x%02x cnt=%d/%d "
+                  "p_grav=%d r_grav=%d p_spr=%d r_spr=%d bounce=%d "
+                  "av_r=%d av_p=%d vy=%d",
+                  (int)lock, (int)grnd, cnt_active, cnt_grounded,
+                  pitch_grav, roll_grav, pitch_spr, roll_spr, bounce,
+                  actor->angular_velocity_roll, actor->angular_velocity_pitch,
+                  actor->linear_velocity_y);
     }
 }
 
@@ -3419,8 +3505,30 @@ void td5_physics_integrate_pose(TD5_Actor *actor)
         if (d_pitch >  6000) d_pitch =  6000;
         if (d_pitch < -6000) d_pitch = -6000;
 
-        actor->angular_velocity_roll  = d_roll;
-        actor->angular_velocity_pitch = d_pitch;
+        /* GATE: only propagate the wheel-delta into angular_velocity when
+         * the wheel-contact state is STABLE this tick — i.e. the current
+         * airborne mask equals the previous-frame airborne mask. On slope
+         * transitions / bumps the mask oscillates and the wheel-derived
+         * angle jumps discontinuously; feeding that delta into av would
+         * amplify the next tick's integration (euler_accum += av) before
+         * T2 hard-overwrites euler_accum, producing the exaggerated slope
+         * response the user observed. display_angles and euler_accum
+         * writes remain UNCONDITIONAL (original does the same).
+         *
+         * [CONFIRMED @ 0x00405FF9 CMP [ESI+0x37C] == [ESI+0x37D]
+         *                0x0040600A JNZ skips ONLY the av writes.
+         *  +0x37C = damage_lockout = current-frame airborne mask
+         *  +0x37D = wheel_contact_bitmask (original) = previous-frame airborne
+         *          (snapshotted by refresh_wheel_contacts @ 0x004037D5).]
+         *
+         * Port polarity: actor->wheel_contact_bitmask = current airborne;
+         * s_prev_grounded_mask[slot] = previous GROUNDED (inverted), so
+         * invert back with ~...&0x0F to get previous airborne. */
+        uint8_t prev_airborne = (~s_prev_grounded_mask[actor->slot_index & 0x0F]) & 0x0F;
+        if (actor->wheel_contact_bitmask == prev_airborne) {
+            actor->angular_velocity_roll  = d_roll;
+            actor->angular_velocity_pitch = d_pitch;
+        }
         actor->display_angles.roll    = new_roll;
         actor->display_angles.pitch   = new_pitch;
         actor->euler_accum.roll       = (int32_t)new_roll  << 8;
@@ -3551,9 +3659,12 @@ void td5_physics_integrate_pose(TD5_Actor *actor)
             int16_t body_wy = (int16_t)((int32_t)cwy - sp_div - susp_offset);
 
             /* [FIX #3] rotate the full short[3] body-offset vector through
-             * the actor's rotation matrix and take the Y component. */
+             * the actor's rotation matrix and take the Y component. Uses
+             * body→world (row 1 of matrix) — matches original's direct
+             * LoadRenderRotationMatrix (no transpose) at 0x00406135 /
+             * 0x004061EA before ConvertFloatVec3ToShortAngles. */
             int16_t src[3] = { cwx, body_wy, cwz };
-            int16_t rot_y = rotate_vec_world_y(actor, src);
+            int16_t rot_y = rotate_body_to_world_y(actor, src);
 
             int32_t wheel_y = actor->wheel_contact_pos[i].y;
             contact_y_sum += (int64_t)(wheel_y + (int32_t)rot_y * -0x100);
@@ -3633,14 +3744,19 @@ void td5_physics_integrate_pose(TD5_Actor *actor)
                     actor->prev_frame_y_position != (int32_t)0xC0000000) {
                     int32_t snap_vy = new_y - actor->prev_frame_y_position
                                      - g_gravity_constant;
-                    /* Clamp snap-derived velocity to prevent launch-to-infinity.
-                     * The spawn sentinel Y (0xC0000000) or a bad terrain lookup
-                     * can produce new_y - prev_y deltas of ~1 billion, setting
-                     * vel_y so high that gravity (1900/tick) can never recover.
-                     * 200000 ≈ 780 world units/tick — far beyond any normal
-                     * terrain change rate. */
-                    if (snap_vy > 200000) snap_vy = 200000;
-                    if (snap_vy < -200000) snap_vy = -200000;
+                    /* Clamp snap-derived velocity to realistic per-tick motion.
+                     * Legitimate max: 100mph (160 units/tick horizontal) on a
+                     * 30° grade → ~80 units/tick vertical → ~20480 FP. A 40°
+                     * slope at 150mph → ~38000 FP. The live-run log observed
+                     * ±52992 on Newcastle slopes, producing a visible "bounce"
+                     * on uphill entry and "sloppy settle" on downhill→flat.
+                     * ±30000 FP ≈ 117 units/tick = 7000 units/sec vertical —
+                     * tight enough to suppress glitch-level spikes, loose
+                     * enough for any real race-track grade. Previous 200000
+                     * was a leftover spawn-sentinel safeguard, way too loose
+                     * for runtime clamping. */
+                    if (snap_vy > 30000)  snap_vy =  30000;
+                    if (snap_vy < -30000) snap_vy = -30000;
                     if (actor->slot_index == 0 &&
                         (snap_vy > 100000 || snap_vy < -100000 ||
                          (actor->frame_counter % 60u) == 0u)) {
@@ -3784,16 +3900,15 @@ static void update_vehicle_pose_from_physics(TD5_Actor *actor)
         int corr_count = 0;
         uint8_t gnd_mask = actor->wheel_contact_bitmask;
 
-        int32_t susp_href_world = 0;
-        {
-            int32_t href = (int32_t)CDEF_S(actor, 0x82);
-            if (href != 0) {
-                int32_t href_local = (href * 0xB5) >> 8;
-                float rot4 = actor->rotation_matrix.m[4];
-                susp_href_world = (int32_t)(href_local * rot4 * 256.0f);
-            }
-        }
-
+        /* NOTE: no susp_href correction here. The original's ground-snap
+         * (IntegrateVehiclePoseAndContacts @ 0x00405E80, secondary snap at
+         * UpdateVehiclePoseFromPhysicsState @ 0x004063A0) does NOT add a
+         * scalar susp_href term to corr_sum. It folds the susp_href offset
+         * into the per-wheel rotated Y via the pre-subtract / post-add
+         * pattern in refresh_wheel_contacts (td5_physics.c:3930-3970). A
+         * port-invented `susp_href_world = href_local * m[4] * 256.0f`
+         * was previously computed here but never used (dead code) — now
+         * deleted to keep intent clear. */
         for (int i = 0; i < 4; i++) {
             if (!(gnd_mask & (1 << i))) {
                 int32_t g_y = 0;
@@ -4013,10 +4128,18 @@ void td5_physics_refresh_wheel_contacts(TD5_Actor *actor)
                 int32_t dx = actor->wheel_contact_pos[i].x - s_prev_wheel_tx[slot][i];
                 int32_t dy = actor->wheel_contact_pos[i].y - s_prev_wheel_ty[slot][i];
                 int32_t dz = actor->wheel_contact_pos[i].z - s_prev_wheel_tz[slot][i];
-                /* Clamp deltas: if any component exceeds ±100k (~390 world units,
-                 * well above max single-frame travel), zero it — indicates teleport
-                 * or init transient, not physical motion. */
-                #define CLAMP_DELTA(v) ((v) > 100000 ? 0 : (v) < -100000 ? 0 : (v))
+                /* Clamp deltas: if any component exceeds ±20k FP (~78 world units/tick),
+                 * zero it — indicates teleport (wall collision response, span
+                 * rebind, spawn transient) rather than physical motion. The
+                 * faithful update_suspension_response computes gap_270 · wcv as
+                 * the spring excitation + bounce accumulator, so a single
+                 * teleport delta produces launch-sized vy impulses (observed
+                 * vy=+80773, bounce=197, pitch_spr=39M on uphill transitions
+                 * when clamp was ±100k). ±20k ≈ 78 world units/tick is already
+                 * well above any legal single-tick wheel motion at racing
+                 * speeds. Restored from commit e97669e; had been reverted to
+                 * ±100k between then and HEAD. */
+                #define CLAMP_DELTA(v) ((v) > 20000 ? 0 : (v) < -20000 ? 0 : (v))
                 dx = CLAMP_DELTA(dx); dy = CLAMP_DELTA(dy); dz = CLAMP_DELTA(dz);
                 #undef CLAMP_DELTA
                 g270[0] = (int16_t)arith_round_shift(dx, 0xFF, 8);
@@ -5045,19 +5168,20 @@ void td5_physics_init_vehicle_runtime(void)
          * threshold. The init snap MUST run regardless — it's placing the
          * car on the road, not simulating physics. */
         actor->wheel_contact_bitmask = 0;
-        /* Apply ground-snap correction with suspension height reference offset */
+        /* Apply ground-snap correction. Original init path
+         * (InitializeActorTrackPose @ 0x00434350 → ResetVehicleActorState
+         * @ 0x00405D70 → IntegrateVehiclePoseAndContacts @ 0x00405E80) does
+         * NOT pre-lift chassis_y by a susp_href scalar term. susp_href is
+         * folded into the per-wheel rotated Y via refresh_wheel_contacts'
+         * pre-subtract/post-add pattern; adding it again here double-counts
+         * and produces an orientation-dependent spawn Y bias (because the
+         * port-invented term multiplied by m[4], which varies with tilt).
+         * On tilted spawn terrain this kicked the suspension into launch
+         * transients → "sometimes rolls out of control on slopes" user
+         * symptom. [CONFIRMED no analog in 0x00406283-0x0040628B] */
         {
             int64_t corr_sum = 0;
             int corr_count = 0;
-            int32_t susp_href_world = 0;
-            {
-                int32_t href = (int32_t)CDEF_S(actor, 0x82);
-                if (href != 0) {
-                    int32_t href_local = (href * 0xB5) >> 8;
-                    float rot4 = actor->rotation_matrix.m[4];
-                    susp_href_world = (int32_t)(href_local * rot4 * 256.0f);
-                }
-            }
             for (int i = 0; i < 4; i++) {
                 if (!(actor->wheel_contact_bitmask & (1 << i))) {
                     int32_t g_y = 0;
@@ -5066,8 +5190,7 @@ void td5_physics_init_vehicle_runtime(void)
                     if (td5_track_probe_height(actor->wheel_contact_pos[i].x,
                                                actor->wheel_contact_pos[i].z,
                                                g_span, &g_y, &g_surf)) {
-                        corr_sum += (int64_t)g_y - (int64_t)actor->wheel_contact_pos[i].y
-                                  + (int64_t)susp_href_world;
+                        corr_sum += (int64_t)g_y - (int64_t)actor->wheel_contact_pos[i].y;
                         corr_count++;
                     }
                 }
