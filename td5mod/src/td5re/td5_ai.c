@@ -1954,13 +1954,81 @@ void td5_ai_update_traffic_route_plan(int slot) {
     ACTOR_I16(actor, ACTOR_ENCOUNTER_STEER) = 0x3C;
     ACTOR_U8(actor, ACTOR_BRAKE_FLAG) = 0;
 
-    /* --- Stage 5: Compute next target span ---
-     * For same-direction: look ahead (span + 1)
-     * For oncoming: look behind (span - 1)
-     * The actual world-space target point computation is handled by
-     * the track module (SampleTrackTargetPoint). Here we just update
-     * the route heading reference for steering. */
-    /* (Route heading is maintained by external track sampling) */
+    /* --- Stage 5: Compute target span and deviation
+     * [CONFIRMED @ 0x00436147-0x00436432]
+     *
+     * Original UpdateTrafficRoutePlan computes LEFT/RIGHT deviation to the
+     * next-span waypoint and writes them to route_state +0x58/+0x5c (=
+     * RS_LEFT_DEVIATION/RS_RIGHT_DEVIATION). UpdateActorSteeringBias @
+     * 0x004340C0 then reads these and writes steering_command (+0x30C).
+     *
+     * Without this block the steering_bias call in Stage 6 reads zero
+     * deviations and applies no correction — traffic drives in a straight
+     * line and clips walls on curves.
+     *
+     * Traffic peek-ahead is span+1 forward / span-1 reverse (racer uses
+     * span+4). Same alt-route remap + same decomposition as racer AI. */
+    {
+        int16_t span_cur = ACTOR_I16(actor, ACTOR_SPAN_RAW);
+        int span_count = td5_track_get_span_count();
+        if (span_count > 0 && span_cur >= 0) {
+            int lin_span;
+            if (polarity == 0) {
+                lin_span = ((int)span_cur + 1) % span_count;
+            } else {
+                lin_span = (int)span_cur - 1;
+                if (lin_span < 0) lin_span += span_count;
+            }
+
+            int is_canonical = (rs[RS_ROUTE_TABLE_SELECTOR] == 0);
+            int target_span = td5_track_apply_target_span_remap(lin_span,
+                                                                 is_canonical);
+
+            int target_x = 0, target_z = 0;
+            int route_byte = 128;
+            int lateral_bias = rs[RS_TRACK_OFFSET_BIAS];
+
+            const uint8_t *route_bytes =
+                (const uint8_t *)(intptr_t)rs[RS_ROUTE_TABLE_PTR];
+            if (route_bytes) {
+                route_byte = (int)route_bytes[(size_t)(unsigned)target_span * 3u];
+            }
+
+            if (td5_track_sample_target_point(target_span, route_byte,
+                                              &target_x, &target_z,
+                                              lateral_bias)) {
+                int32_t actor_x = ACTOR_I32(actor, ACTOR_WORLD_POS_X);
+                int32_t actor_z = ACTOR_I32(actor, ACTOR_WORLD_POS_Z);
+                int32_t dx = (target_x - actor_x) >> 8;
+                int32_t dz = (target_z - actor_z) >> 8;
+
+                int32_t target_angle = ai_angle_from_vector(dx, dz) & 0xFFF;
+
+                int32_t yaw   = ACTOR_I32(actor, ACTOR_YAW_ACCUM);
+                int32_t steer = ACTOR_I32(actor, ACTOR_STEERING_CMD);
+                int32_t actor_heading = ((yaw + steer) >> 8) & 0xFFF;
+
+                int32_t delta = actor_heading - target_angle;
+                int32_t abs_delta = delta < 0 ? -delta : delta;
+                if (delta >= 0) {
+                    rs[RS_LEFT_DEVIATION]  = 0xFFF - abs_delta;
+                    rs[RS_RIGHT_DEVIATION] = delta;
+                } else {
+                    rs[RS_LEFT_DEVIATION]  = abs_delta;
+                    rs[RS_RIGHT_DEVIATION] = delta + 0xFFF;
+                }
+
+                if ((g_ai_frame_counter % 60u) == 0u) {
+                    TD5_LOG_I(LOG_TAG,
+                              "traffic_dev: slot=%d span=%d tspan=%d rb=%d "
+                              "ta=0x%X hd=0x%X delta=%d L=%d R=%d",
+                              slot, (int)span_cur, target_span, route_byte,
+                              target_angle, actor_heading, delta,
+                              rs[RS_LEFT_DEVIATION], rs[RS_RIGHT_DEVIATION]);
+                }
+            }
+        }
+    }
 
     /* --- Stage 6: Steering --- */
     td5_ai_update_steering_bias(rs, 0x8000);
