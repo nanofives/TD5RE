@@ -1503,10 +1503,8 @@ void td5_physics_update_ai(TD5_Actor *actor)
     int32_t vz = actor->linear_velocity_z;
     int32_t v_long = (vx * sin_h + vz * cos_h) >> 12;
 
-    /* Lateral speed with yaw-rate correction [CONFIRMED @ 0x4050EF-0x405146]
-     * raw_lat = (cos_s * vz + sin_s * vx) >> 12
-     * yaw_corr = ((sin_d * front_weight * yaw_rate) >> 12) / 0x28C
-     * lateral_speed = raw_lat - yaw_corr */
+    /* Body-frame lateral velocity for INTERNAL bicycle solve consumption.
+     * The bicycle's mass-matrix uses this as v_lat (with yaw_corr applied). */
     int32_t raw_lat = (cos_h * vx - sin_h * vz) >> 12;
     int32_t yaw_rate = actor->angular_velocity_yaw;
     int32_t inertia = PHYS_I(actor, 0x20);
@@ -1515,8 +1513,22 @@ void td5_physics_update_ai(TD5_Actor *actor)
     int32_t yaw_corr = ((sin_d * front_weight) >> 12) * yaw_rate / 0x28C;
     int32_t v_lat = raw_lat - yaw_corr;
 
+    /* Field +0x314 = body-frame longitudinal velocity (v_long). Port matches
+     * original [verified via Frida runtime probe 2026-04-22]. */
     actor->longitudinal_speed = v_long;
-    actor->lateral_speed = v_lat;
+
+    /* Field +0x318 is NOT body-frame lateral. The original writes the
+     * STEERED-frame longitudinal velocity minus yaw_corr_sin to +0x318
+     * [VERIFIED via Frida runtime probe 2026-04-22 against FUN_00404EC0
+     *  on TD5_d3d.exe; formula:
+     *    f318 = (sin_s*vx + cos_s*vz) >> 12 - ((sin_d*Wf) >> 12) * omega / 0x28C
+     *  matches with diff=0 on every early-tick row in
+     *  log/bicycle_probe_original.csv].
+     *
+     * Downstream consumers of +0x318 (slip accumulator, force feedback, HUD,
+     * trace) were getting the wrong value when port wrote body-lat - yaw_corr. */
+    int32_t steered_long = (sin_s * vx + cos_s * vz) >> 12;
+    actor->lateral_speed = steered_long - yaw_corr;
 
     /* --- 6. Engine pipeline [CONFIRMED @ 0x4051A0] --- */
     int32_t throttle = (int32_t)actor->encounter_steering_cmd;
