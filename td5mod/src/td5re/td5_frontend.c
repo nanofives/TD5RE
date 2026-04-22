@@ -276,6 +276,7 @@ static int  s_prev_escape_state;
 static int  s_mouse_click_latched;
 static int  s_mouse_confirm_button = -1;
 static int  s_mouse_hover_button  = -1;
+static int  s_prev_mouse_hover_button = -1;
 static uint32_t s_mouse_confirm_until;
 static int  s_mouse_flash_button = -1;
 static uint32_t s_mouse_flash_until;
@@ -1065,6 +1066,7 @@ static void frontend_reset_buttons(void) {
     s_button_index = -1;
     s_mouse_confirm_button = -1;
     s_mouse_hover_button  = -1;
+    s_prev_mouse_hover_button = -1;
     s_mouse_flash_button = -1;
     s_prev_mouse_x = -1;
     s_prev_mouse_y = -1;
@@ -1921,7 +1923,7 @@ static void frontend_poll_input(void) {
             s_buttons[s_selected_button].active && !s_buttons[s_selected_button].disabled) {
             s_button_index = s_selected_button;
             s_input_ready = 1;
-            frontend_play_sfx(4);
+            frontend_play_sfx(3);
             TD5_LOG_I(LOG_TAG, "Button pressed: index=%d label=\"%s\" source=keyboard",
                       s_button_index, s_buttons[s_button_index].label);
         } else {
@@ -1973,7 +1975,7 @@ static void frontend_poll_input(void) {
                     s_mouse_flash_button = i;
                     s_mouse_flash_until = now + 180;
                     s_mouse_confirm_button = -1;
-                    frontend_play_sfx(4);
+                    frontend_play_sfx(3);
                     TD5_LOG_I(LOG_TAG, "Button pressed: index=%d label=\"%s\" source=mouse",
                               s_button_index, s_buttons[s_button_index].label);
                 }
@@ -2002,6 +2004,15 @@ static void frontend_poll_input(void) {
                 break;
             }
         }
+        /* Original UpdateFrontendDisplayModeSelection (0x426580 @ 0x004268e2)
+         * plays Play(1) = Ping3 each time the cursor enters a different button.
+         * Gated on hover-index change AND new index >= 0 (cursor over a real
+         * button). Empty-area moves don't emit anything. */
+        if (s_mouse_hover_button >= 0 &&
+            s_mouse_hover_button != s_prev_mouse_hover_button) {
+            frontend_play_sfx(1);
+        }
+        s_prev_mouse_hover_button = s_mouse_hover_button;
     }
     s_prev_mouse_x = s_mouse_x;
     s_prev_mouse_y = s_mouse_y;
@@ -2660,7 +2671,8 @@ void td5_frontend_set_screen(TD5_ScreenIndex index) {
     g_td5.frontend_inner_state = 0;
     g_td5.frontend_frame_counter = 0;
 
-    frontend_play_sfx(5);
+    /* Original SetFrontendScreen (0x00414610) is silent — per-screen state-0
+     * code emits its own Play(N). Playing here doubled the main-menu Whoosh. */
     TD5_LOG_I(LOG_TAG, "Screen transition: %d -> %d", (int)previous, (int)index);
     s_logged_screen = (TD5_ScreenIndex)-1;
     s_logged_inner_state = -1;
@@ -6881,6 +6893,9 @@ static void Screen_CarSelection(void) {
 
     case 14: /* Car preview slide-in from right, 25 frames (~833ms @30fps) — 0x40DFC0 state 14 */
         if (frontend_update_timed_animation(0x19, 833) >= 1.0f) {
+            /* Original 0x40DFC0 case 0xE @ 0x0040EE3F plays Play(4) once when
+             * frame_counter == 0x19 (slide-in complete) — fires every car cycle. */
+            frontend_play_sfx(4);
             s_inner_state = 7; /* return to interaction */
         }
         break;
