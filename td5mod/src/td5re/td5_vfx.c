@@ -247,6 +247,35 @@ static float    s_tiremark_u0, s_tiremark_v0;
 static float    s_tiremark_u1, s_tiremark_v1;
 static float    s_tiremark_page;
 
+/* ------------------------------------------------------------------------
+ * Tire mark ring buffer (float world-space quads).
+ *
+ * Parallel to the faithful-but-broken int16 strip builder above: whenever a
+ * wheel slips hard enough to spawn smoke, we also push one small textured
+ * quad centred on the wheel with a perpendicular half-axis. The ring ages
+ * entries per tick, fades alpha, and evicts after TM_LIFETIME frames. Render
+ * projects each live quad to screen space using the same path as HUD
+ * translucent quads.
+ *
+ * Float storage avoids the int16 vertex overflow that was eating the strip
+ * builder on large tracks (~300k world units on e.g. Moscow).
+ * ---------------------------------------------------------------------- */
+#define TD5_VFX_TM_RING_SIZE    256
+#define TD5_VFX_TM_LIFETIME     480   /* ticks (60fps -> 8s) */
+#define TD5_VFX_TM_FADE_START   240   /* start fading after 4s */
+
+typedef struct VfxTireMark {
+    float    wx, wy, wz;     /* wheel world position (float units) */
+    float    perp_x, perp_z; /* perpendicular to heading, length = half-width */
+    float    fwd_x, fwd_z;   /* heading direction, length = half-length */
+    uint16_t lifetime;       /* tick counter since spawn */
+    uint8_t  intensity;      /* starting alpha (0-255) */
+    uint8_t  active;         /* 1 = live, 0 = free */
+} VfxTireMark;
+
+static VfxTireMark s_tire_marks[TD5_VFX_TM_RING_SIZE];
+static int         s_tire_mark_cursor;
+
 /* --- Smoke sprite pool (used by LEVELINF smoke flag) --- */
 static VfxSpriteQuad    *s_smoke_pool;         /* per-actor sprite quads */
 static float             s_smoke_page_id;
@@ -449,9 +478,12 @@ void td5_vfx_shutdown(void) {
     TD5_LOG_I("vfx", "VFX system shutdown");
 }
 
+static void vfx_tire_marks_update(void);
+
 void td5_vfx_tick(void) {
     s_vfx_debug_frame++;
     td5_vfx_update_tire_tracks();
+    vfx_tire_marks_update();
     td5_vfx_advance_billboard_anims();
 
     /* UpdateRaceParticleEffects @ 0x429790 runs once per view per sim tick;
@@ -1669,6 +1701,163 @@ void td5_vfx_render_tire_tracks(void) {
     }
 }
 
+/* ========================================================================
+ * Float tire-mark ring (parallel to the int16 strip builder above)
+ * ======================================================================== */
+
+/**
+ * Push a tire mark quad centred at the wheel. `heading` is in 12-bit angle
+ * units (0..4096 = full circle). `half_width` / `half_length` are world-unit
+ * extents of the quad.
+ */
+static void vfx_tire_mark_spawn(int32_t wx_fp, int32_t wy_fp, int32_t wz_fp,
+                                int heading12, float half_width, float half_length,
+                                uint8_t intensity)
+{
+    int idx = s_tire_mark_cursor;
+    s_tire_mark_cursor = (s_tire_mark_cursor + 1) % TD5_VFX_TM_RING_SIZE;
+
+    VfxTireMark *m = &s_tire_marks[idx];
+    m->wx = (float)wx_fp * FP_TO_FLOAT;
+    m->wy = (float)wy_fp * FP_TO_FLOAT;
+    m->wz = (float)wz_fp * FP_TO_FLOAT;
+
+    /* heading12 is in 0..4095 units where 4096 = full circle. Convert to
+     * radians for sinf/cosf. */
+    float angle_rad = (float)(heading12 & 0xFFF) * (6.28318530718f / 4096.0f);
+    float sin_h = sinf(angle_rad);
+    float cos_h = cosf(angle_rad);
+
+    m->fwd_x  = sin_h * half_length;
+    m->fwd_z  = cos_h * half_length;
+    m->perp_x = -cos_h * half_width;
+    m->perp_z =  sin_h * half_width;
+
+    m->lifetime  = 0;
+    m->intensity = intensity;
+    m->active    = 1;
+}
+
+/**
+ * Age all live tire marks one tick. Evict expired entries.
+ */
+static void vfx_tire_marks_update(void)
+{
+    for (int i = 0; i < TD5_VFX_TM_RING_SIZE; i++) {
+        VfxTireMark *m = &s_tire_marks[i];
+        if (!m->active) continue;
+        m->lifetime++;
+        if (m->lifetime >= TD5_VFX_TM_LIFETIME) {
+            m->active = 0;
+        }
+    }
+}
+
+/**
+ * Render all live tire marks as translucent textured quads projected to
+ * screen. Uses the same submit path as HUD translucent quads.
+ */
+void td5_vfx_render_tire_marks(void)
+{
+    extern void td5_render_submit_translucent(uint16_t *quad_data);
+    extern float g_cameraBasis[9];
+    extern float g_render_width_f;
+    extern float g_render_height_f;
+
+    float cam_x, cam_y, cam_z;
+    td5_camera_get_position(&cam_x, &cam_y, &cam_z);
+
+    float focal = g_render_width_f * 0.5f / 0.41421356f;
+    float center_x = g_render_width_f * 0.5f;
+    float center_y = g_render_height_f * 0.5f;
+    float far_clip = 10000.0f;
+    float near_clip = 1.0f;
+
+    int tt_tw = 256, tt_th = 256;
+    td5_plat_render_get_texture_dims((int)s_tiremark_page, &tt_tw, &tt_th);
+    float tm_u0 = s_tiremark_u0 / (float)tt_tw;
+    float tm_v0 = s_tiremark_v0 / (float)tt_th;
+    float tm_u1 = s_tiremark_u1 / (float)tt_tw;
+    float tm_v1 = s_tiremark_v1 / (float)tt_th;
+
+    int alive = 0, submitted = 0;
+
+    for (int i = 0; i < TD5_VFX_TM_RING_SIZE; i++) {
+        VfxTireMark *m = &s_tire_marks[i];
+        if (!m->active) continue;
+        alive++;
+
+        /* Fade alpha linearly from intensity to 0 after TM_FADE_START. */
+        uint8_t alpha = m->intensity;
+        if (m->lifetime > TD5_VFX_TM_FADE_START) {
+            int remaining = TD5_VFX_TM_LIFETIME - m->lifetime;
+            int fade_len = TD5_VFX_TM_LIFETIME - TD5_VFX_TM_FADE_START;
+            alpha = (uint8_t)((int)m->intensity * remaining / fade_len);
+        }
+        if (alpha == 0) continue;
+
+        /* Four world-space corners: centre +/- fwd/perp. Y stays at wheel
+         * anchor (road-flush after a -20 offset like the strip builder). */
+        float cy = m->wy - 20.0f - cam_y;
+        float corners[4][3] = {
+            { m->wx - m->fwd_x - m->perp_x, 0.0f, m->wz - m->fwd_z - m->perp_z }, /* trailing-L */
+            { m->wx - m->fwd_x + m->perp_x, 0.0f, m->wz - m->fwd_z + m->perp_z }, /* trailing-R */
+            { m->wx + m->fwd_x + m->perp_x, 0.0f, m->wz + m->fwd_z + m->perp_z }, /* leading-R */
+            { m->wx + m->fwd_x - m->perp_x, 0.0f, m->wz + m->fwd_z - m->perp_z }, /* leading-L */
+        };
+
+        float sx[4], sy[4], sz[4], srhw[4];
+        int all_visible = 1;
+        for (int v = 0; v < 4; v++) {
+            float wx = corners[v][0] - cam_x;
+            float wy = cy;
+            float wz = corners[v][2] - cam_z;
+            float vx = wx * g_cameraBasis[0] + wy * g_cameraBasis[1] + wz * g_cameraBasis[2];
+            float vy = wx * g_cameraBasis[3] + wy * g_cameraBasis[4] + wz * g_cameraBasis[5];
+            float vz = wx * g_cameraBasis[6] + wy * g_cameraBasis[7] + wz * g_cameraBasis[8];
+            if (vz <= near_clip) { all_visible = 0; break; }
+            float inv_z = 1.0f / vz;
+            sx[v]   = vx * focal * inv_z + center_x;
+            sy[v]   = -vy * focal * inv_z + center_y;
+            sz[v]   = vz * (1.0f / far_clip);
+            srhw[v] = inv_z;
+        }
+        if (!all_visible) continue;
+
+        /* Modulate with dark grey scaled by alpha so tire marks are black-ish
+         * on light roads regardless of texture fallback used. */
+        uint8_t val = (uint8_t)((int)alpha * 0x30 / 0x80);
+        uint32_t color = ((uint32_t)alpha << 24) | ((uint32_t)val << 16)
+                       | ((uint32_t)val << 8)    | (uint32_t)val;
+
+        VfxSpriteQuad q;
+        memset(&q, 0, sizeof(q));
+        q.geometry_ptr = 0;
+        q.vertex_count = 4;
+
+        q.v0_x = sx[0]; q.v0_y = sy[0]; q.v0_z = sz[0]; q.v0_rhw = srhw[0];
+        q.v0_color = color; q.v0_u = tm_u0; q.v0_v = tm_v0;
+        q.v1_x = sx[1]; q.v1_y = sy[1]; q.v1_z = sz[1]; q.v1_rhw = srhw[1];
+        q.v1_color = color; q.v1_u = tm_u1; q.v1_v = tm_v0;
+        q.v2_x = sx[2]; q.v2_y = sy[2]; q.v2_z = sz[2]; q.v2_rhw = srhw[2];
+        q.v2_color = color; q.v2_u = tm_u1; q.v2_v = tm_v1;
+        q.v3_x = sx[3]; q.v3_y = sy[3]; q.v3_z = sz[3]; q.v3_rhw = srhw[3];
+        q.v3_color = color; q.v3_u = tm_u0; q.v3_v = tm_v1;
+
+        q.tex_u0 = s_tiremark_u0; q.tex_v0 = s_tiremark_v0;
+        q.tex_u1 = s_tiremark_u1; q.tex_v1 = s_tiremark_v1;
+        q.texture_page = s_tiremark_page;
+
+        td5_render_submit_translucent((uint16_t *)&q);
+        submitted++;
+    }
+
+    static uint32_t tm_log = 0;
+    if ((tm_log++ % 60u) == 0u && alive > 0) {
+        TD5_LOG_I(LOG_TAG, "tire marks: alive=%d submitted=%d", alive, submitted);
+    }
+}
+
 /**
  * UpdateTireTrackEmitterDispatch (0x43FAE0)
  *
@@ -1854,6 +2043,25 @@ static void vfx_update_rear_tire_effects(TD5_Actor *actor, uint8_t contact_flags
         vfx_spawn_smoke_at_position(actor, fwx, fwy, fwz, 1, s_current_view_index);
     }
 
+    /* Tire mark quad spawn (float ring buffer, bypasses the int16 strip
+     * builder above). Deterministic per-tick so the trail is continuous,
+     * gated by slip >= 8 so marks only appear during actual slide. Intensity
+     * scales with slip magnitude so a stronger drift leaves darker marks. */
+    if (lateral_slip >= 8) {
+        uint32_t yaw_acc;
+        memcpy(&yaw_acc, ap + 0x1F4, sizeof(yaw_acc));
+        int heading12 = (int)((yaw_acc >> 8) & 0xFFF);
+        int intensity_tm = (int)lateral_slip * 4;
+        if (intensity_tm < 0x60) intensity_tm = 0x60;
+        if (intensity_tm > 0xFF) intensity_tm = 0xFF;
+        for (int w = 2; w <= 3; w++) {
+            int32_t wx, wy, wz;
+            vfx_read_wheel_world_pos(actor, w, &wx, &wy, &wz);
+            vfx_tire_mark_spawn(wx, wy, wz, heading12, 18.0f, 14.0f,
+                                (uint8_t)intensity_tm);
+        }
+    }
+
     /* Set track intensity proportional to slip: lateral_slip >> 2 */
     uint8_t intensity = (uint8_t)((uint16_t)lateral_slip >> 2);
 
@@ -1923,6 +2131,22 @@ static void vfx_update_front_tire_effects(TD5_Actor *actor, uint8_t contact_flag
 
         vfx_spawn_smoke_at_position(actor, fwx, fwy, fwz, 0, s_current_view_index);
         vfx_spawn_smoke_at_position(actor, fwx, fwy, fwz, 1, s_current_view_index);
+    }
+
+    /* Tire mark quad spawn (front wheels 0,1). See rear path for notes. */
+    if (lateral_slip >= 8) {
+        uint32_t yaw_acc;
+        memcpy(&yaw_acc, ap + 0x1F4, sizeof(yaw_acc));
+        int heading12 = (int)((yaw_acc >> 8) & 0xFFF);
+        int intensity_tm = (int)lateral_slip * 4;
+        if (intensity_tm < 0x60) intensity_tm = 0x60;
+        if (intensity_tm > 0xFF) intensity_tm = 0xFF;
+        for (int w = 0; w <= 1; w++) {
+            int32_t wx, wy, wz;
+            vfx_read_wheel_world_pos(actor, w, &wx, &wy, &wz);
+            vfx_tire_mark_spawn(wx, wy, wz, heading12, 18.0f, 14.0f,
+                                (uint8_t)intensity_tm);
+        }
     }
 
     /* Set track intensity */

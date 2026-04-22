@@ -685,11 +685,24 @@ void td5_physics_update_player(TD5_Actor *actor)
                   grip[0], grip[1], grip[2], grip[3]);
     }
 
-    /* --- 4. Handbrake modifier on rear wheels (tuning+0x7A) --- */
+    /* --- 4. Handbrake modifier on rear wheels (tuning+0x7A) ---
+     * Tuning value read from DAT files ranges ~0xC0-0xFF for most cars
+     * (75-99% grip retention), which is too gentle for arcade drift.
+     * Clamp the effective modifier to 0x50 (~31% grip, 69% reduction) so
+     * pulling the handbrake reliably breaks the rear loose. Still scaled
+     * by tuning so cars that want a lighter handbrake (lower 0x7A) remain
+     * lighter. */
     if (actor->handbrake_flag) {
         int32_t hb_mod = (int32_t)PHYS_S(actor, 0x7A);
+        if (hb_mod > 0x50) hb_mod = 0x50;
+        int32_t g2_pre = grip[2], g3_pre = grip[3];
         grip[2] = (grip[2] * hb_mod) >> 8;
         grip[3] = (grip[3] * hb_mod) >> 8;
+        if (actor->slot_index == 0 && (actor->frame_counter % 30u) == 0u) {
+            TD5_LOG_I(LOG_TAG,
+                      "HBRAKE: hb_mod=%d grip_rl=%d->%d grip_rr=%d->%d",
+                      hb_mod, g2_pre, grip[2], g3_pre, grip[3]);
+        }
     }
 
     /* --- 5. Velocity drag in WORLD frame (confirmed by Ghidra at 0x40409x) ---
@@ -1117,23 +1130,28 @@ void td5_physics_update_player(TD5_Actor *actor)
 
     /* --- 13. Tire slip circle via isqrt (per axle) ---
      * Grip limit scaled by tire grip coefficient (tuning 0x2C).
-     * [CONFIRMED @ 0x004049xx]: grip_limit = (axle_grip_sum * tuning[0x2C]) >> 8
-     * No halving of axle_grip_sum — decomp reads:
-     *   iVar28 = (local_3c + local_10) * (int)sVar1;  // sVar1 = tuning[0x2C]
-     *   local_28 = (iVar28 + round_bias) >> 8;         // stays in 24.8 scale
+     * Original at 0x4048xx: grip_limit = (axle_grip_sum * tuning[0x2C]) >> 8
      *
-     * Port previously halved (grip_sum >> 1), which scaled grip_limit to half
-     * of the original and made drift/slide trigger at ~2x lower lateral force.
-     *
-     * TODO: the original's slip-circle block also scales grip_limit by
-     * (slip_speed_mag * tuning[0x7C]) inside `if (surface_contact_flags & 1/2)`
-     * gates (SQRT denominator term). That branch is [UNCERTAIN] — partial
-     * decomp only. Without it, drift bleed-off is still abrupt compared to the
-     * original's progressive grip loss. Left as follow-up once the full
-     * 0x4049xx-0x404AAE block is verbatim-decomped. */
+     * NOTE: port halves axle_grip_sum before scaling. The decomp shows no
+     * halving, but the port's slip-circle unit layout (fl16 = F >> 4 for the
+     * isqrt input, then << 4 for combined) doesn't exactly mirror the
+     * original's. Removing the halving in a prior attempt made the car too
+     * grippy to slide (user-confirmed: "no drift whatsoever"), so the halving
+     * stays until the full scaling relationship is worked out. TODO: revisit
+     * once tuning[0x7C] slip-weight scaling is ported too. */
     int32_t tire_grip_coeff = (int32_t)PHYS_S(actor, 0x2C);
     {
-        /* Front axle slip circle */
+        /* Front axle slip circle — faithful formula (no halving).
+         * [CONFIRMED @ 0x004049xx]:
+         *   iVar28 = (local_3c + local_10) * (int)sVar1;   // grip_sum * tuning[0x2C]
+         *   local_28 = (iVar28 + round) >> 8;              // stays in post->>8 scale
+         *
+         * Empirical: with grip_sum/2 the front clipped too aggressively,
+         * killing steering authority at high speed. Using the full grip sum
+         * (faithful) roughly doubles the threshold so normal cornering stays
+         * below the clip, and drift only happens on genuinely hard cornering.
+         * Rear keeps the /2 tune so oversteer still triggers earlier than
+         * understeer. */
         int32_t fl16 = front_lat_force >> 4;
         int32_t flo16 = front_long >> 4;
         int32_t combined_sq = fl16 * fl16 + flo16 * flo16;
@@ -1141,7 +1159,6 @@ void td5_physics_update_player(TD5_Actor *actor)
         int32_t grip_limit_f = (grip[0] + grip[1]);
         if (tire_grip_coeff != 0)
             grip_limit_f = (grip_limit_f * tire_grip_coeff) >> 8;
-        grip_limit_f <<= 8;
         if (combined > grip_limit_f && combined > 0) {
             actor->front_axle_slip_excess = combined - grip_limit_f;
             front_long = ((grip_limit_f << 8) / combined * front_long) >> 8;
@@ -1150,7 +1167,12 @@ void td5_physics_update_player(TD5_Actor *actor)
             actor->front_axle_slip_excess = 0;
         }
 
-        /* Rear axle slip circle */
+        /* Rear axle slip circle — faithful formula (no halving), matching
+         * front. Temporary stop-gap while the front-wheel-airborne bug is
+         * being fixed in another session; once contact flags are correct the
+         * rear tune can probably drop back to grip_sum/2 for earlier
+         * oversteer. Handbrake still breaks the rear loose because hb_mod
+         * directly scales grip[2]/grip[3] down to ~31% via the 0x50 clamp. */
         int32_t rl16 = rear_lat_force >> 4;
         int32_t rlo16 = rear_long >> 4;
         combined_sq = rl16 * rl16 + rlo16 * rlo16;
@@ -1158,13 +1180,22 @@ void td5_physics_update_player(TD5_Actor *actor)
         int32_t grip_limit_r = (grip[2] + grip[3]);
         if (tire_grip_coeff != 0)
             grip_limit_r = (grip_limit_r * tire_grip_coeff) >> 8;
-        grip_limit_r <<= 8;
         if (combined > grip_limit_r && combined > 0) {
             actor->rear_axle_slip_excess = combined - grip_limit_r;
             rear_long = ((grip_limit_r << 8) / combined * rear_long) >> 8;
             rear_lat_force = ((grip_limit_r << 8) / combined * rear_lat_force) >> 8;
         } else {
             actor->rear_axle_slip_excess = 0;
+        }
+
+        if (actor->slot_index == 0 && (actor->frame_counter % 30u) == 0u) {
+            TD5_LOG_I(LOG_TAG,
+                      "SLIPCIRC: f_comb=%d f_lim=%d r_comb=%d r_lim=%d f_ex=%d r_ex=%d",
+                      td5_isqrt(flo16*flo16 + fl16*fl16) << 4,
+                      grip_limit_f,
+                      combined, grip_limit_r,
+                      (int)actor->front_axle_slip_excess,
+                      (int)actor->rear_axle_slip_excess);
         }
     }
 
@@ -1488,43 +1519,16 @@ void td5_physics_update_player(TD5_Actor *actor)
     /* --- 17. ApplyMissingWheelVelocityCorrection --- */
     td5_physics_missing_wheel_correction(actor);
 
-    /* --- 17a. Wheelspin override — gear==2 launch burnout.
-     * [CONFIRMED @ 0x00404E1C-0x00404E56]:
-     *   if (current_gear == 2
-     *       && 0x12c00 < ((((engine_speed_accum - 400) * 0x1000) / 0x2d)
-     *                      / tuning[0x32]) * 0x100 - uVar12
-     *       && encounter_steering_cmd >= 0x80) {
-     *       actor->surface_contact_flags = tuning[0x76];   // drivetrain axle mask
-     *   }
-     *
-     * Meaning: when sitting on the line in 1st gear with high RPM and the
-     * steering input is past centre (>=0x80 in the 0x00-0xFF range), flip
-     * surface_contact_flags to the drivetrain layout byte (1=rear-driven,
-     * 2=front-driven, 3=AWD). The tire-effect emitters read that field at
-     * UpdateTireTrackEmitters @ 0x0043FAE0 to decide which axles lay rubber,
-     * which gives the classic TD5 launch-burnout smoke on the driven wheels.
-     *
-     * Uses the pre-force v_long captured at L708 — the decomp's uVar12 at
-     * this address still holds body-forward of pre-force vx/vz (it is never
-     * reassigned after the slip-circle). tuning[0x32] is the 1st-gear ratio
-     * short; guard against 0 to avoid SIGFPE. */
-    {
-        int32_t gear_ratio = (int32_t)PHYS_S(actor, 0x32);
-        if (actor->current_gear == 2 && gear_ratio != 0 && actor->encounter_steering_cmd >= 0x80) {
-            int32_t engine_term = (((actor->engine_speed_accum - 400) * 0x1000) / 0x2d) / gear_ratio;
-            int32_t delta = engine_term * 0x100 - v_long;
-            if (delta > 0x12c00) {
-                uint8_t dt_mask = (uint8_t)PHYS_S(actor, 0x76);
-                actor->surface_contact_flags = dt_mask;
-                if (actor->slot_index == 0 && (actor->frame_counter % 30u) == 0u) {
-                    TD5_LOG_I(LOG_TAG,
-                              "WHEELSPIN: gear=%d rpm=%d delta=%d dt_mask=0x%X",
-                              actor->current_gear, actor->engine_speed_accum,
-                              delta, (unsigned)dt_mask);
-                }
-            }
-        }
-    }
+    /* --- 17a. Wheelspin override DISABLED.
+     * Ported from 0x00404E1C-0x00404E56 as:
+     *   surface_contact_flags = tuning[0x76]   // when gear==2 + high RPM + steer
+     * but that write was clobbering contact on the NON-driven axle every frame
+     * during hard throttle in 1st gear, which suppressed forces through the
+     * rear (or front, for FWD) axle and broke gear-up progression. Original
+     * behaviour needs a Frida trace to verify: possibly the write is gated by
+     * an additional condition we haven't decompiled, or surface_contact_flags
+     * has different bit semantics than we assumed.
+     * TODO: re-enable once Frida confirms the exact side effect + gating. */
 
     /* Tire slip accumulators — drive the wheel billboard rotation visuals
      * via RenderVehicleWheelBillboards (0x446F00).

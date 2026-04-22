@@ -2219,11 +2219,14 @@ void td5_hud_render_overlays(float dt)
         td5_hud_queue_text(0, 8, dbg_y, 0, "RPM: %d  GEAR: %d", rpm, (int)gear);
         dbg_y += dbg_dy;
 
-        /* Steering command + brake flag */
+        /* Steering command + brake flag + handbrake flag */
         int32_t steer = *(int32_t *)(dbg_a + 0x30C);
         uint8_t brake = dbg_a[0x36D];
-        td5_hud_queue_text(0, 8, dbg_y, 0, "STEER: %d  BRAKE: %s",
-                           steer, brake ? "ON" : "OFF");
+        uint8_t hbrake = dbg_a[0x36E];
+        int16_t slip_metric = *(int16_t *)(dbg_a + 0x33C);
+        td5_hud_queue_text(0, 8, dbg_y, 0, "STEER: %d  BRAKE: %s  HBRAKE: %s  SLIP: %d",
+                           steer, brake ? "ON" : "OFF", hbrake ? "ON" : "OFF",
+                           (int)slip_metric);
         dbg_y += dbg_dy;
 
         /* Suspension: roll (center) and pitch (wheel[0]) positions */
