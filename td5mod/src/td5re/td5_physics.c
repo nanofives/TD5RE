@@ -1672,11 +1672,18 @@ void td5_physics_update_ai(TD5_Actor *actor)
         }
     }
 
-    /* --- 9. Yaw torque [CONFIRMED @ 0x405620-0x4056A6]
-     * yaw_torque = ((cos_d * Wf >> 12) * rear_lat - front_lat * Wr) / inertia_div */
+    /* --- 9. Yaw torque [CONFIRMED @ 0x405620-0x4056A6 via round-3 pcode]
+     * Original: yaw_torque = ((sin(steer) * Wf >> 12) * FRONT_lat - REAR_lat * Wr) / inertia_div
+     *
+     * Fixed two bugs that previously cancelled:
+     *  - Trig was cos_d, original calls FUN_0040a6e0(steer) = sin12 (NOT FUN_0040a700)
+     *  - Lat operands were swapped: original puts FRONT_lat with the trig*Wf
+     *    coefficient and REAR_lat with Wr; port had them reversed
+     * Force-app pairings at lines 1697-1700 (rear_lat↔body, front_lat↔steered)
+     * are already correct and unchanged. */
     {
-        int32_t yaw_torque = (int32_t)(((int64_t)(cos_d * front_weight >> 12) * rear_lat
-                             - (int64_t)front_lat * rear_weight) / inertia_div);
+        int32_t yaw_torque = (int32_t)(((int64_t)(sin_d * front_weight >> 12) * front_lat
+                             - (int64_t)rear_lat * rear_weight) / inertia_div);
 
         if (yaw_torque > TD5_YAW_TORQUE_MAX) yaw_torque = TD5_YAW_TORQUE_MAX;
         if (yaw_torque < -TD5_YAW_TORQUE_MAX) yaw_torque = -TD5_YAW_TORQUE_MAX;
