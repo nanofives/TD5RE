@@ -902,9 +902,9 @@ void td5_plat_input_poll(int slot, TD5_InputState *out)
         #define K_DOWN(sc) (s_keyboard[(sc)] & 0x80)
 
         if (slot == 0) {
-            /* Player 1: arrow keys + original defaults
-             * Original defaults: Left/Right/Up/Down, Q=handbrake,
-             * RCtrl=horn, A=gear up, Z=gear down, T=camera, X=rear view */
+            /* Player 1: arrow keys + modern defaults
+             * Space=handbrake (held), Q kept as alternate, RCtrl=horn,
+             * A=gear up, Z=gear down, T=camera, X=rear view */
             if (K_DOWN(DIK_LEFT))                     bits |= TD5_INPUT_STEER_LEFT;
             if (K_DOWN(DIK_RIGHT))                    bits |= TD5_INPUT_STEER_RIGHT;
             if (K_DOWN(DIK_UP))                       bits |= TD5_INPUT_THROTTLE;
@@ -912,11 +912,11 @@ void td5_plat_input_poll(int slot, TD5_InputState *out)
             if (K_DOWN(DIK_A))                        bits |= TD5_INPUT_GEAR_UP;
             if (K_DOWN(DIK_Z))                        bits |= TD5_INPUT_GEAR_DOWN;
             if (K_DOWN(DIK_RCONTROL))                 bits |= TD5_INPUT_HORN;
+            if (K_DOWN(DIK_SPACE))                    bits |= TD5_INPUT_HANDBRAKE;
             if (K_DOWN(DIK_Q))                        bits |= TD5_INPUT_HANDBRAKE;
             if (K_DOWN(DIK_T))                        bits |= TD5_INPUT_CAMERA_CHANGE;
             if (K_DOWN(DIK_X))                        bits |= TD5_INPUT_REAR_VIEW;
             /* Modern alternates for convenience */
-            if (K_DOWN(DIK_SPACE))                    bits |= TD5_INPUT_HORN;
             if (K_DOWN(DIK_LSHIFT))                   bits |= TD5_INPUT_GEAR_DOWN;
             if (K_DOWN(DIK_RSHIFT))                   bits |= TD5_INPUT_GEAR_UP;
         } else {

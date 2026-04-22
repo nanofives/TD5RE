@@ -2076,6 +2076,7 @@ int td5_game_run_race_frame(void) {
 
         /* VFX: tire tracks, particles */
         td5_vfx_render_tire_tracks();
+        td5_vfx_render_tire_marks();
         td5_vfx_draw_particles(vp);
         td5_render_flush_translucent();
         td5_render_flush_projected_buckets();

@@ -87,6 +87,7 @@ void td5_vfx_render_ambient_streaks(TD5_Actor *actor, float sim_budget,
 
 void td5_vfx_update_tire_tracks(void);
 void td5_vfx_render_tire_tracks(void);
+void td5_vfx_render_tire_marks(void);
 void td5_vfx_update_tire_track_emitters(TD5_Actor *actor);
 
 /* ========================================================================

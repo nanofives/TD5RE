@@ -653,11 +653,13 @@ void td5_input_update_player_control(int slot)
             }
         }
 
-        /* Handbrake (bit 0x100000) */
+        /* Handbrake (bit 0x100000) — level-triggered via K_DOWN, so the flag
+         * stays set for as long as Space is held. No throttle / reverse
+         * override: a drift handbrake cuts rear grip via tuning+0x7A, it does
+         * NOT brake the car or shift to reverse. The physics path already
+         * halves grip[2]/grip[3] while actor->handbrake_flag is set. */
         if (bits & 0x100000u) {
-            s_throttle[slot] = (int16_t)0xFF00;
             s_handbrake[slot] = 1;
-            s_reverse_req[slot] = 1;
         }
     }
 
@@ -739,6 +741,11 @@ void td5_input_update_player_control(int slot)
             *(int16_t *)(a + 0x33E) = s_throttle[slot];
             /* 0x36D: brake_flag (byte) */
             a[0x36D] = s_brake[slot];
+            /* 0x36E: handbrake_flag (byte) — was missing; without it physics
+             * never sees the Q-key handbrake input, so rear-wheel grip
+             * reduction in td5_physics_update_player (tuning+0x7A) never
+             * fires and no drift-induced tire marks appear. */
+            a[0x36E] = s_handbrake[slot];
             /* 0x378: auto gearbox flag [CONFIRMED @ original input path]
              * Original: actor+0x378 = ~(bits >> 28) & 1
              * bit 28 clear = normal driving → auto_gearbox = 1
@@ -750,11 +757,16 @@ void td5_input_update_player_control(int slot)
     if (slot == 0) {
         s_control_log_counter++;
         if ((s_control_log_counter % 30u) == 0u) {
+            uint8_t actor_hb = 0;
+            {
+                TD5_Actor *a_dbg = td5_game_get_actor(0);
+                if (a_dbg) actor_hb = ((uint8_t *)a_dbg)[0x36E];
+            }
             TD5_LOG_I(LOG_TAG,
-                      "Player control p0: steering=%d throttle=%d brake=%u bits=0x%08X analog_y=%d",
+                      "Player control p0: steer=%d thr=%d brake=%u hb=%u actor_hb=%u bits=0x%08X",
                       (int)s_steering_cmd[0], (int)s_throttle[0],
-                      (unsigned int)s_brake[0], (unsigned int)s_control_bits[0],
-                      (int)((s_control_bits[0] >> 9) & 0x1FF));
+                      (unsigned int)s_brake[0], (unsigned int)s_handbrake[0],
+                      (unsigned int)actor_hb, (unsigned int)s_control_bits[0]);
         }
     }
 }
