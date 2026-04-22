@@ -3430,8 +3430,30 @@ void td5_physics_integrate_pose(TD5_Actor *actor)
         if (d_pitch >  6000) d_pitch =  6000;
         if (d_pitch < -6000) d_pitch = -6000;
 
-        actor->angular_velocity_roll  = d_roll;
-        actor->angular_velocity_pitch = d_pitch;
+        /* GATE: only propagate the wheel-delta into angular_velocity when
+         * the wheel-contact state is STABLE this tick — i.e. the current
+         * airborne mask equals the previous-frame airborne mask. On slope
+         * transitions / bumps the mask oscillates and the wheel-derived
+         * angle jumps discontinuously; feeding that delta into av would
+         * amplify the next tick's integration (euler_accum += av) before
+         * T2 hard-overwrites euler_accum, producing the exaggerated slope
+         * response the user observed. display_angles and euler_accum
+         * writes remain UNCONDITIONAL (original does the same).
+         *
+         * [CONFIRMED @ 0x00405FF9 CMP [ESI+0x37C] == [ESI+0x37D]
+         *                0x0040600A JNZ skips ONLY the av writes.
+         *  +0x37C = damage_lockout = current-frame airborne mask
+         *  +0x37D = wheel_contact_bitmask (original) = previous-frame airborne
+         *          (snapshotted by refresh_wheel_contacts @ 0x004037D5).]
+         *
+         * Port polarity: actor->wheel_contact_bitmask = current airborne;
+         * s_prev_grounded_mask[slot] = previous GROUNDED (inverted), so
+         * invert back with ~...&0x0F to get previous airborne. */
+        uint8_t prev_airborne = (~s_prev_grounded_mask[actor->slot_index & 0x0F]) & 0x0F;
+        if (actor->wheel_contact_bitmask == prev_airborne) {
+            actor->angular_velocity_roll  = d_roll;
+            actor->angular_velocity_pitch = d_pitch;
+        }
         actor->display_angles.roll    = new_roll;
         actor->display_angles.pitch   = new_pitch;
         actor->euler_accum.roll       = (int32_t)new_roll  << 8;
@@ -3644,14 +3666,19 @@ void td5_physics_integrate_pose(TD5_Actor *actor)
                     actor->prev_frame_y_position != (int32_t)0xC0000000) {
                     int32_t snap_vy = new_y - actor->prev_frame_y_position
                                      - g_gravity_constant;
-                    /* Clamp snap-derived velocity to prevent launch-to-infinity.
-                     * The spawn sentinel Y (0xC0000000) or a bad terrain lookup
-                     * can produce new_y - prev_y deltas of ~1 billion, setting
-                     * vel_y so high that gravity (1900/tick) can never recover.
-                     * 200000 ≈ 780 world units/tick — far beyond any normal
-                     * terrain change rate. */
-                    if (snap_vy > 200000) snap_vy = 200000;
-                    if (snap_vy < -200000) snap_vy = -200000;
+                    /* Clamp snap-derived velocity to realistic per-tick motion.
+                     * Legitimate max: 100mph (160 units/tick horizontal) on a
+                     * 30° grade → ~80 units/tick vertical → ~20480 FP. A 40°
+                     * slope at 150mph → ~38000 FP. The live-run log observed
+                     * ±52992 on Newcastle slopes, producing a visible "bounce"
+                     * on uphill entry and "sloppy settle" on downhill→flat.
+                     * ±30000 FP ≈ 117 units/tick = 7000 units/sec vertical —
+                     * tight enough to suppress glitch-level spikes, loose
+                     * enough for any real race-track grade. Previous 200000
+                     * was a leftover spawn-sentinel safeguard, way too loose
+                     * for runtime clamping. */
+                    if (snap_vy > 30000)  snap_vy =  30000;
+                    if (snap_vy < -30000) snap_vy = -30000;
                     if (actor->slot_index == 0 &&
                         (snap_vy > 100000 || snap_vy < -100000 ||
                          (actor->frame_counter % 60u) == 0u)) {
@@ -4024,10 +4051,18 @@ void td5_physics_refresh_wheel_contacts(TD5_Actor *actor)
                 int32_t dx = actor->wheel_contact_pos[i].x - s_prev_wheel_tx[slot][i];
                 int32_t dy = actor->wheel_contact_pos[i].y - s_prev_wheel_ty[slot][i];
                 int32_t dz = actor->wheel_contact_pos[i].z - s_prev_wheel_tz[slot][i];
-                /* Clamp deltas: if any component exceeds ±100k (~390 world units,
-                 * well above max single-frame travel), zero it — indicates teleport
-                 * or init transient, not physical motion. */
-                #define CLAMP_DELTA(v) ((v) > 100000 ? 0 : (v) < -100000 ? 0 : (v))
+                /* Clamp deltas: if any component exceeds ±20k FP (~78 world units/tick),
+                 * zero it — indicates teleport (wall collision response, span
+                 * rebind, spawn transient) rather than physical motion. The
+                 * faithful update_suspension_response computes gap_270 · wcv as
+                 * the spring excitation + bounce accumulator, so a single
+                 * teleport delta produces launch-sized vy impulses (observed
+                 * vy=+80773, bounce=197, pitch_spr=39M on uphill transitions
+                 * when clamp was ±100k). ±20k ≈ 78 world units/tick is already
+                 * well above any legal single-tick wheel motion at racing
+                 * speeds. Restored from commit e97669e; had been reverted to
+                 * ±100k between then and HEAD. */
+                #define CLAMP_DELTA(v) ((v) > 20000 ? 0 : (v) < -20000 ? 0 : (v))
                 dx = CLAMP_DELTA(dx); dy = CLAMP_DELTA(dy); dz = CLAMP_DELTA(dz);
                 #undef CLAMP_DELTA
                 g270[0] = (int16_t)arith_round_shift(dx, 0xFF, 8);
