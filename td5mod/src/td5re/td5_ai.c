@@ -1681,7 +1681,19 @@ void td5_ai_recycle_traffic_actor(void) {
             q_span = (int16_t)(qp[0] | (qp[1] << 8));
         }
 
-        if (q_span == -1) return; /* end of queue */
+        if (q_span == -1) {
+            /* Commit the advanced cursor even on early-return, matching
+             * RecycleTrafficActorFromQueue @ 0x004353F3 which writes
+             * DAT_004b08b8 = psVar7 unconditionally after the pre-scan.
+             * Without this the port re-scans the same rejected prefix
+             * every recycle tick, causing the traffic queue to stall
+             * instead of advancing toward fresh entries. */
+            g_traffic_queue_ptr = qp;
+            TD5_LOG_I(LOG_TAG,
+                      "recycle: pre-scan hit end-of-queue sentinel, committed cursor=%p",
+                      (const void *)qp);
+            return;
+        }
 
         /* Reinitialize the recycled slot from this queue entry */
         {
