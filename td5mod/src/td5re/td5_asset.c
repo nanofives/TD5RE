@@ -2497,6 +2497,131 @@ int td5_asset_load_traffic_model(int model_index, int slot)
 }
 
 /* ========================================================================
+ * Traffic Model Selection -- chain from track_index to model_index
+ *
+ * Mirrors the two-level lookup inside LoadRaceVehicleAssets @ 0x00443280:
+ *
+ *   schedule_index = track_index  (port maps 1:1, -1 = drag strip)
+ *   pool_row       = gScheduleToPoolIndex[schedule_index]        (0x00466894)
+ *   pool_idx       = gTrackPoolSpanCountTable[pool_row]          (0x00466D50, forward)
+ *                    or gTrackPoolReverseSpanCountTable[pool_row] (0x00466E3C, reverse)
+ *   row            = DAT_00474d74[pool_idx]                      (0x00474D74)
+ *   model_index    = DAT_00474ce8[row][slot_in_pool]             (0x00474CE8)
+ *
+ * Original gates the load with `pool_idx < 0x19` (@ 0x004435ad region): when
+ * the pool index is >= 25, the per-slot size query returns 0 and the traffic
+ * archive read is skipped. The port's resolver returns -1 for that case so
+ * the caller can skip loading.
+ *
+ * All tables are byte-for-byte transcribed from memory_read of TD5_d3d.exe.
+ * ======================================================================== */
+
+/* gScheduleToPoolIndex @ 0x00466894 — 20 signed-byte entries.
+ * Original decomp casts to (char), so these are int8_t. Observed values are
+ * all positive, but signedness could matter for hypothetical higher entries. */
+static const int8_t s_schedule_to_pool_index[20] = {
+    /*  0 MOSCOW     */ 11, /*  1 EDINBURGH  */  9, /*  2 SYDNEY     */  7,
+    /*  3 BLUE RIDGE */ 10, /*  4 JARASH     */ 13, /*  5 NEWCASTLE  */ 16,
+    /*  6 MAUI       */ 15, /*  7 COURMAYEUR */ 14, /*  8 HONOLULU   */  6,
+    /*  9 TOKYO      */  8, /* 10 KESWICK    */  0, /* 11 SF         */  1,
+    /* 12 BERN       */  2, /* 13 KYOTO      */  3, /* 14 WASHINGTON */  4,
+    /* 15 MUNICH     */  5, /* 16 CHEDDAR    */ 12, /* 17 MONTEGO    */ 18,
+    /* 18 BEZ        */ 17, /* 19 (invalid)  */ 19,
+};
+
+/* gTrackPoolSpanCountTable @ 0x00466D50 — 18 int32 entries. */
+static const int32_t s_track_pool_span_count_table[18] = {
+     1,  2,  3,  4,  5,  6, 13, 14, 15,
+    16, 17, 23, 25, 26, 27, 28, 29, 37,
+};
+
+/* gTrackPoolReverseSpanCountTable @ 0x00466E3C — 15 int32 entries,
+ * with -1 sentinels at indices 12..14 (reverse is unavailable for those). */
+static const int32_t s_track_pool_reverse_span_count_table[15] = {
+     7,  8,  9, 10, 11, 12,
+    18, 19, 20, 21, 22, 24,
+    -1, -1, -1,
+};
+
+/* DAT_00474d74 @ 0x00474D74 — 25 int32 entries mapping pool_idx to
+ * a row in s_traffic_model_table[][]. Entry [0] = 30 is the benchmark
+ * sentinel (out-of-range against the 6-row model table). */
+static const int32_t s_traffic_pool_to_row[25] = {
+    30,  0,  1,  2,  3,  4,  5,  0,  1,  2,  3,  4,  5,
+     1,  5,  3,  0,  4,  1,  5,  3,  0,  4,  2,  2,
+};
+
+/* DAT_00474ce8 @ 0x00474CE8 — 6 rows of 6 traffic model indices
+ * (values resolve to "model%d.prr" inside traffic.zip).
+ * Row 5's last dword (0x1e) aliases s_traffic_pool_to_row[0]=30 at 0x00474D74. */
+static const int32_t s_traffic_model_table[6][6] = {
+    /* row 0 */ {  1,  2,  3,  0,  4,  5 },
+    /* row 1 */ {  7,  8,  9,  6, 10, 11 },
+    /* row 2 */ { 13, 14, 15, 12, 16, 17 },
+    /* row 3 */ {  7, 19,  9, 18, 11, 20 },
+    /* row 4 */ { 22, 20, 23, 21, 19, 24 },
+    /* row 5 */ { 26, 27, 28, 25, 29, 30 },
+};
+
+int td5_asset_resolve_traffic_model_index(int track_index, int reverse, int slot_in_pool)
+{
+    if (slot_in_pool < 0 || slot_in_pool >= 6) {
+        TD5_LOG_W(LOG_TAG, "traffic resolve: slot_in_pool=%d out of range", slot_in_pool);
+        return -1;
+    }
+
+    /* Drag strip path @ 0x0042AD21: schedule_index < 0 forces g_trackPoolIndex = 30,
+     * which fails the `< 0x19` traffic gate — no models loaded. */
+    if (track_index < 0) {
+        return -1;
+    }
+    if (track_index >= (int)(sizeof(s_schedule_to_pool_index) / sizeof(s_schedule_to_pool_index[0]))) {
+        TD5_LOG_W(LOG_TAG, "traffic resolve: track_index=%d past schedule table", track_index);
+        return -1;
+    }
+
+    int pool_row = (int)s_schedule_to_pool_index[track_index];
+    int pool_idx;
+
+    if (reverse) {
+        if (pool_row < 0 || pool_row >= (int)(sizeof(s_track_pool_reverse_span_count_table) / sizeof(int32_t))) {
+            TD5_LOG_W(LOG_TAG, "traffic resolve: track=%d reverse pool_row=%d OOB",
+                      track_index, pool_row);
+            return -1;
+        }
+        pool_idx = s_track_pool_reverse_span_count_table[pool_row];
+        if (pool_idx < 0) {
+            /* -1 sentinel: reverse unavailable for this track. */
+            return -1;
+        }
+    } else {
+        if (pool_row < 0 || pool_row >= (int)(sizeof(s_track_pool_span_count_table) / sizeof(int32_t))) {
+            TD5_LOG_W(LOG_TAG, "traffic resolve: track=%d forward pool_row=%d OOB",
+                      track_index, pool_row);
+            return -1;
+        }
+        pool_idx = s_track_pool_span_count_table[pool_row];
+    }
+
+    /* Original guard: `if (iVar15 < 0x19)` — pool_idx >= 25 means no traffic
+     * models are loaded (size query returns 0, archive read is skipped). */
+    if (pool_idx >= 25) {
+        return -1;
+    }
+    if (pool_idx < 0) {
+        return -1;
+    }
+
+    int row = s_traffic_pool_to_row[pool_idx];
+    if (row < 0 || row >= 6) {
+        /* Out of range of the 6-row model table. Treat as no-traffic. */
+        return -1;
+    }
+
+    return s_traffic_model_table[row][slot_in_pool];
+}
+
+/* ========================================================================
  * Mipmap Builder -- ParseAndDecodeCompressedTrackData (0x430D30)
  *
  * Generates a mipmap chain by box-filtering from source dimensions
