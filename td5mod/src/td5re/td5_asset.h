@@ -239,6 +239,21 @@ const char *td5_asset_get_car_zip_path(int car_index);
  */
 int td5_asset_load_traffic_model(int model_index, int slot);
 
+/**
+ * Resolve the traffic model index for a given race slot (0..5) based on the
+ * active track. Mirrors the two-level lookup chain inside
+ * LoadRaceVehicleAssets @ 0x00443280:
+ *   gScheduleToPoolIndex[track_index] -> pool_row
+ *   gTrackPoolSpanCountTable[pool_row] (or Reverse variant) -> pool_idx
+ *   DAT_00474d74[pool_idx] -> row
+ *   DAT_00474ce8[row][slot_in_pool] -> model_index
+ *
+ * Returns the model index (0..30) in traffic.zip, or -1 when the track has
+ * no traffic pool (original behavior: pool_idx >= 25 gates the size query
+ * and causes zero-sized allocation, effectively skipping model load).
+ */
+int td5_asset_resolve_traffic_model_index(int track_index, int reverse, int slot_in_pool);
+
 /* ========================================================================
  * Mipmap Generation
  * ======================================================================== */
