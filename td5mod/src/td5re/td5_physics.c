@@ -2902,43 +2902,59 @@ void td5_physics_integrate_suspension(TD5_Actor *actor, int32_t accel_x, int32_t
  *   Clamp roll/pitch to ±4000 per bitmask switch table.
  * ======================================================================== */
 
-/* Rotate a 3-component int16 body-space vector to world-space Y component.
- * Uses ROW 1 of the row-major rotation matrix: {m[3], m[4], m[5]}.
+/* Y-component projection of a body-space vector into world space.
+ * Uses ROW 1 of the body→world rotation matrix: {m[3], m[4], m[5]}.
  *
- * [CONFIRMED @ 0x0042E2E0] ConvertFloatVec3ToShortAngles Y output is:
+ * [CONFIRMED @ 0x0042E2E0] ConvertFloatVec3ToShortAngles Y output:
  *   Y = v[0]*M[+0xC] + v[1]*M[+0x10] + v[2]*M[+0x14]
- *     = v[0]*M[3]    + v[1]*M[4]     + v[2]*M[5]          (row-major float[9])
- * which is row 1 of `g_currentRenderTransform` = `&actor->rotation_m00` via
- * LoadRenderRotationMatrix at 0x00406135/0x004061EA. The port's
- * BuildRotationMatrixFromAngles lays out the matrix row-major identically.
+ *     = v[0]*M[3]    + v[1]*M[4]     + v[2]*M[5]   (row-major float[9])
  *
- * PREVIOUS BUG: this helper used {m[1], m[4], m[7]} = COLUMN 1. On flat
- * ground with identity-near rotation, column 1 == row 1 = {0,1,0}, so the
- * bug was invisible — the car settled perfectly on flat. But on a tilted
- * chassis (any yaw+pitch combination), row 1 ≠ column 1; the per-wheel
- * ground-snap correction `wheel_y + rot_y * -0x100` failed to cancel the
- * per-wheel `wheel_contact_pos[i].y = chassis_y + rot[3,4,5]·body_offset_i`
- * algebra. Result: each wheel ended up at a different offset from its
- * ground_y, feeding ±force into the per-wheel spring every tick, so the
- * car NEVER settled on a constant hill — the exact user-observed symptom.
- *
- * Helper is called from:
- *   - td5_physics_integrate_pose ground-snap tail (line ~3586):
- *       src = per-wheel body offset → correction for chassis_y derivation.
- *   - td5_physics_update_suspension_response (line ~2995):
- *       src = wheel_contact_velocities[i] (wcv, the surface normal).
- * Both need ROW 1 — the original's ConvertFloatVec3ToShortAngles is called
- * identically in both paths.
- *
- * Returns int16 result (saturated). */
-static int16_t rotate_vec_world_y(const TD5_Actor *actor, const int16_t v[3])
+ * Callers that pass `actor->rotation_matrix` directly (via
+ * LoadRenderRotationMatrix without prior transpose) get body→world.
+ * In port: td5_physics_integrate_pose ground-snap tail (line ~3618) —
+ * src = per-wheel body offset, producing world-space Y for chassis
+ * correction averaging. */
+static int16_t rotate_body_to_world_y(const TD5_Actor *actor, const int16_t v[3])
 {
-    /* m[3] = row1_col0, m[4] = row1_col1, m[5] = row1_col2 */
     float m3 = actor->rotation_matrix.m[3];
     float m4 = actor->rotation_matrix.m[4];
     float m5 = actor->rotation_matrix.m[5];
     float result = (float)v[0] * m3 + (float)v[1] * m4 + (float)v[2] * m5;
-    /* Saturate to int16 range */
+    if (result >  32767.0f) return  32767;
+    if (result < -32768.0f) return -32768;
+    return (int16_t)(int32_t)result;
+}
+
+/* Y-component projection of a world-space vector into body space.
+ * Uses COLUMN 1 of body→world matrix = ROW 1 of body^T = {m[1], m[4], m[7]}.
+ *
+ * [CONFIRMED @ 0x004057FA] UpdateVehicleSuspensionResponse calls
+ * `TransposeMatrix3x3(&actor->rotation_m00, local_30)` then
+ * `LoadRenderRotationMatrix(local_30)`, so the subsequent
+ * `ConvertFloatVec3ToShortAngles(wcv, ...)` reads ROW 1 of the TRANSPOSE =
+ * COLUMN 1 of the original matrix.
+ *
+ * Semantically this is world→body: wcv is a world-space surface normal,
+ * the output Y is the body-frame Y component of that normal — used to
+ * compute the gravity projection onto body Y for the per-wheel torque
+ * accumulator.
+ *
+ * Caller: td5_physics_update_suspension_response (line ~3022) with
+ * src = actor->wheel_contact_velocities[i] (wcv, world-space normal).
+ *
+ * HISTORY: originally this helper WAS col-1 (correct for susp_response
+ * via transpose semantics). A 2026-04-22 Ghidra re-pass against
+ * ConvertFloatVec3ToShortAngles mistakenly flagged col-1 as wrong and
+ * switched it to row-1 — that fixed the ground-snap callsite (which had
+ * been silently broken) but broke this one. Now split: each call site
+ * reads the matrix the way the original's transpose-or-not pairing
+ * implies. */
+static int16_t rotate_world_to_body_y(const TD5_Actor *actor, const int16_t v[3])
+{
+    float m1 = actor->rotation_matrix.m[1];
+    float m4 = actor->rotation_matrix.m[4];
+    float m7 = actor->rotation_matrix.m[7];
+    float result = (float)v[0] * m1 + (float)v[1] * m4 + (float)v[2] * m7;
     if (result >  32767.0f) return  32767;
     if (result < -32768.0f) return -32768;
     return (int16_t)(int32_t)result;
@@ -3016,10 +3032,12 @@ void td5_physics_update_suspension_response(TD5_Actor *actor)
 
         /* g_view = Y component of (transposed body matrix) · wcv[i] —
          * matches `ConvertFloatVec3ToShortAngles(wcv, &local_38)` reading
-         * local_36. rotate_vec_world_y projects via {m[1],m[4],m[7]},
-         * which equals row 1 of the transposed body matrix. */
+         * local_36. `rotate_world_to_body_y` reads {m[1],m[4],m[5]/m[7]} —
+         * = row 1 of body^T = column 1 of body matrix — matching the
+         * original's TransposeMatrix3x3 + LoadRenderRotationMatrix +
+         * ConvertFloatVec3ToShortAngles sequence at 0x004057FA-0x004058D8. */
         int16_t cn[3] = { wcv[i * 4 + 0], wcv[i * 4 + 1], wcv[i * 4 + 2] };
-        const int32_t y_view = (int32_t)rotate_vec_world_y(actor, cn);
+        const int32_t y_view = (int32_t)rotate_world_to_body_y(actor, cn);
 
         /* g_scaled is (Y · gravity) >> 12; signed-divide rounding via
          * arith_round_shift matches original's SAR-with-bias idiom. */
@@ -3613,9 +3631,12 @@ void td5_physics_integrate_pose(TD5_Actor *actor)
             int16_t body_wy = (int16_t)((int32_t)cwy - sp_div - susp_offset);
 
             /* [FIX #3] rotate the full short[3] body-offset vector through
-             * the actor's rotation matrix and take the Y component. */
+             * the actor's rotation matrix and take the Y component. Uses
+             * body→world (row 1 of matrix) — matches original's direct
+             * LoadRenderRotationMatrix (no transpose) at 0x00406135 /
+             * 0x004061EA before ConvertFloatVec3ToShortAngles. */
             int16_t src[3] = { cwx, body_wy, cwz };
-            int16_t rot_y = rotate_vec_world_y(actor, src);
+            int16_t rot_y = rotate_body_to_world_y(actor, src);
 
             int32_t wheel_y = actor->wheel_contact_pos[i].y;
             contact_y_sum += (int64_t)(wheel_y + (int32_t)rot_y * -0x100);
