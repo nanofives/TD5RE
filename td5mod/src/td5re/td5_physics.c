@@ -2903,17 +2903,41 @@ void td5_physics_integrate_suspension(TD5_Actor *actor, int32_t accel_x, int32_t
  * ======================================================================== */
 
 /* Rotate a 3-component int16 body-space vector to world-space Y component.
- * Uses second column of rotation matrix: {m[1], m[4], m[7]}.
- * This matches FUN_0042E2E0's second output (offset +2) which uses
- * row 1 of the transposed matrix = column 1 of the original matrix.
+ * Uses ROW 1 of the row-major rotation matrix: {m[3], m[4], m[5]}.
+ *
+ * [CONFIRMED @ 0x0042E2E0] ConvertFloatVec3ToShortAngles Y output is:
+ *   Y = v[0]*M[+0xC] + v[1]*M[+0x10] + v[2]*M[+0x14]
+ *     = v[0]*M[3]    + v[1]*M[4]     + v[2]*M[5]          (row-major float[9])
+ * which is row 1 of `g_currentRenderTransform` = `&actor->rotation_m00` via
+ * LoadRenderRotationMatrix at 0x00406135/0x004061EA. The port's
+ * BuildRotationMatrixFromAngles lays out the matrix row-major identically.
+ *
+ * PREVIOUS BUG: this helper used {m[1], m[4], m[7]} = COLUMN 1. On flat
+ * ground with identity-near rotation, column 1 == row 1 = {0,1,0}, so the
+ * bug was invisible — the car settled perfectly on flat. But on a tilted
+ * chassis (any yaw+pitch combination), row 1 ≠ column 1; the per-wheel
+ * ground-snap correction `wheel_y + rot_y * -0x100` failed to cancel the
+ * per-wheel `wheel_contact_pos[i].y = chassis_y + rot[3,4,5]·body_offset_i`
+ * algebra. Result: each wheel ended up at a different offset from its
+ * ground_y, feeding ±force into the per-wheel spring every tick, so the
+ * car NEVER settled on a constant hill — the exact user-observed symptom.
+ *
+ * Helper is called from:
+ *   - td5_physics_integrate_pose ground-snap tail (line ~3586):
+ *       src = per-wheel body offset → correction for chassis_y derivation.
+ *   - td5_physics_update_suspension_response (line ~2995):
+ *       src = wheel_contact_velocities[i] (wcv, the surface normal).
+ * Both need ROW 1 — the original's ConvertFloatVec3ToShortAngles is called
+ * identically in both paths.
+ *
  * Returns int16 result (saturated). */
 static int16_t rotate_vec_world_y(const TD5_Actor *actor, const int16_t v[3])
 {
-    /* m[1] = col1_row0, m[4] = col1_row1, m[7] = col1_row2 */
-    float m1 = actor->rotation_matrix.m[1];
+    /* m[3] = row1_col0, m[4] = row1_col1, m[5] = row1_col2 */
+    float m3 = actor->rotation_matrix.m[3];
     float m4 = actor->rotation_matrix.m[4];
-    float m7 = actor->rotation_matrix.m[7];
-    float result = (float)v[0] * m1 + (float)v[1] * m4 + (float)v[2] * m7;
+    float m5 = actor->rotation_matrix.m[5];
+    float result = (float)v[0] * m3 + (float)v[1] * m4 + (float)v[2] * m5;
     /* Saturate to int16 range */
     if (result >  32767.0f) return  32767;
     if (result < -32768.0f) return -32768;
