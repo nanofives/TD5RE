@@ -2384,11 +2384,17 @@ void td5_hud_render_minimap(int actor_slot)
         }
     }
 
-    /* Branch remap [CONFIRMED @ 0x43A350]: when the player is on a branch
-     * segment (player_span >= g_strip_span_count), remap back into the primary
-     * track range using the segment table built during init. */
+    /* Branch remap [CONFIRMED @ 0x43A311-0x43A38E]: when the player is on a
+     * branch segment (player_span >= ring_length, i.e. past the main road),
+     * remap back into the primary track range using the appended rows of the
+     * segment table. Original tests DAT_004c3d90 (ring_length = main road
+     * count) NOT the total span count — branch spans live past the main road
+     * in the strip, so the correct gate is ring_length, not g_strip_span_count
+     * (which includes branches). */
+    int ring_length = g_td5.track_span_ring_length;
+    if (ring_length <= 0) ring_length = g_strip_span_count;
     int remapped_span = (int)player_span;
-    if (remapped_span >= g_strip_span_count &&
+    if (remapped_span >= ring_length &&
         s_minimap_seg_branch_start < s_minimap_seg_primary_end) {
         for (int si = s_minimap_seg_branch_start;
              si < s_minimap_seg_primary_end; si++) {
