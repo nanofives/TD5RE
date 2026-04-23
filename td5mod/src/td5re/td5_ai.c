@@ -978,10 +978,24 @@ int td5_ai_update_route_threshold(int slot) {
     int32_t *route_table = (int32_t *)rs[RS_ROUTE_TABLE_PTR];
     int16_t span = ACTOR_I16(actor, ACTOR_SPAN_RAW);
     int threshold = 0xFF; /* default: no limit */
+    int heading_byte = 0; /* route-heading byte, used as junction sentinel */
 
     if (route_table) {
         uint8_t *route_bytes = (uint8_t *)route_table;
         threshold = route_bytes[span * 3 + 2];
+        heading_byte = route_bytes[span * 3 + 1];
+    }
+
+    /* Junction-zone override: if the route-heading byte is near-zero, this
+     * span is a route TRANSITION zone (e.g. Moscow RIGHT.TRK around span
+     * 498 where rb[span*3+1] = 1). The threshold byte at such spans is
+     * also zero/near-zero, which would trigger emergency brake or scaled
+     * slowdown on genuinely mid-track locations. Treat junction-zone
+     * spans as "no limit" and let the AI accelerate through.
+     * Port-only guard; the original either tolerates this via a different
+     * routing/recovery interaction or has meaningful data at these bytes. */
+    if (heading_byte < 4) {
+        threshold = 0xFF;
     }
 
     if (threshold == 0x00) {
@@ -1419,13 +1433,25 @@ void td5_ai_update_track_behavior(int slot) {
      * RS[0x18] stores velocity dot product (forward track component). */
     route_heading = ai_route_heading_for_actor(rs, actor);
 
-    /* Skip recovery when route heading byte is 0 (no heading data).
-     * Some tracks (e.g. level014 spans 0-174) have heading_byte=0 in the
-     * route file. With route_heading=0 the recovery formula always fires
-     * (comparing against a nonsense reference), trapping AI in an infinite
-     * recovery→normal→recovery loop. The normal target-point steering
-     * at step 2 handles guidance without heading data. */
-    if (route_heading != 0) {
+    /* Skip recovery when route-heading byte is 0 OR near-zero (< 4).
+     * Near-zero bytes occur at route TRANSITION zones (junction entries/
+     * exits) on non-canonical routes like Moscow RIGHT.TRK span 498 where
+     * the route byte is 1, producing route_heading=0x10 — a nonsense
+     * reference that pins the actor in recovery. Widening the guard to
+     * catch rb < 4 (heading < 0x41 = 5.7°) skips the check in those
+     * zones; the target-point cascade at step 2 still handles guidance
+     * across the junction. Port-only guard; the original tolerates the
+     * same junction-zone null-byte via a different recovery-handling
+     * mechanism we haven't fully RE'd yet. */
+    int32_t rb_current = 0;
+    {
+        const uint8_t *rbs = (const uint8_t *)(intptr_t)rs[RS_ROUTE_TABLE_PTR];
+        int16_t sp_current = ACTOR_I16(actor, ACTOR_SPAN_RAW);
+        if (rbs && sp_current >= 0) {
+            rb_current = (int32_t)rbs[(size_t)(unsigned)sp_current * 3u + 1u];
+        }
+    }
+    if (rb_current >= 4) {
         /* Original FUN_00434FE0: adjusts for expected 0x800 offset between actor
          * yaw (atan2+0x800) and route heading (route_byte<<4), then checks if
          * the residual misalignment exceeds threshold.
