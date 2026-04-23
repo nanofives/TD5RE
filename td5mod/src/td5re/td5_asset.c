@@ -2347,7 +2347,6 @@ int td5_asset_load_vehicle(int car_index, int slot)
      * Allocation: pages 800 + slot*2 = skin, 800 + slot*2 + 1 = hub.
      * 6 slots → pages 800-811, well above any track's page_count (<600). */
 #define TD5_CAR_TEXTURE_PAGE_BASE 800
-#define TD5_CAR_MESH_SKIN_ID  7
 #define TD5_CAR_MESH_HUB_ID   8
     {
         int skin_page = TD5_CAR_TEXTURE_PAGE_BASE + slot * 2;
@@ -2369,20 +2368,21 @@ int td5_asset_load_vehicle(int car_index, int slot)
                 TD5_LOG_W(LOG_TAG, "vehicle slot=%d: carhub0 PNG not found in %s", slot, zip_path);
         }
 
-        /* Patch PrimitiveCmd page IDs: 7→skin, 8→chassis underside
-         * [CONFIRMED @ 0x44374D] original patches cmd[1] page to CHASSIS
-         * atlas entry texture_slot, NOT to the hub texture.
-         * [CONFIRMED @ 0x443794-0x4437B9] original remaps cmd[1] UVs into
-         * the CHASSIS sprite sub-region on the static atlas page. */
+        /* Patch PrimitiveCmd page IDs: cmd[0]→skin, cmd[1]→chassis underside.
+         * [CONFIRMED @ 0x443280 LoadRaceVehicleAssets] original patches cmd[0]
+         * and cmd[1] by INDEX, not by existing page_id — cmd[0] gets the skin
+         * atlas page (`uVar2 + slot/2`), cmd[1] gets the CHASSIS sprite page
+         * via PatchModelUVCoordsForTrackLighting @ 0x44374D. The ss1 (Shelby
+         * Series 1) himodel.dat ships with cmd[0].page_id=36 instead of the
+         * usual 7 — an index-based patch handles it, a page_id==7 check does
+         * not (body would render with track texture 36 instead of carskin0). */
         mesh->texture_page_id = (int16_t)skin_page;
         TD5_PrimitiveCmd *cmds = (TD5_PrimitiveCmd *)(uintptr_t)mesh->commands_offset;
         TD5_MeshVertex *base_verts = (TD5_MeshVertex *)(uintptr_t)mesh->vertices_offset;
         int vert_cursor = 0;
         for (int c = 0; c < mesh->command_count; c++) {
             int vert_count = cmds[c].triangle_count * 3 + cmds[c].quad_count * 4;
-            if (cmds[c].texture_page_id == TD5_CAR_MESH_SKIN_ID) {
-                cmds[c].texture_page_id = (int16_t)skin_page;
-            } else if (cmds[c].texture_page_id == TD5_CAR_MESH_HUB_ID) {
+            if (cmds[c].texture_page_id == TD5_CAR_MESH_HUB_ID) {
                 /* Underside polygons → CHASSIS sprite on static atlas page
                  * [CONFIRMED @ 0x44374D, 0x443794-0x4437B9] */
                 cmds[c].texture_page_id = (int16_t)s_chassis_page;
@@ -2398,6 +2398,11 @@ int td5_asset_load_vehicle(int car_index, int slot)
                 TD5_LOG_I(LOG_TAG, "vehicle slot=%d cmd[%d]: remapped %d verts to chassis page=%d uv=(%.3f,%.3f)+(%.3f,%.3f)",
                           slot, c, vert_count, s_chassis_page,
                           s_chassis_uv_x, s_chassis_uv_y, s_chassis_uv_w, s_chassis_uv_h);
+            } else {
+                /* Every non-chassis command is the body skin. Most cars ship
+                 * with page_id=7 here; ss1 ships with 36. Patch unconditionally
+                 * so the mesh always points at the per-slot skin page. */
+                cmds[c].texture_page_id = (int16_t)skin_page;
             }
             vert_cursor += vert_count;
         }
