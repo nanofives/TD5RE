@@ -207,8 +207,32 @@ static int32_t g_encounter_ref_slot;                /* 0x4B0630 */
 /* Per-car torque triplets table (9 cars x 3 dwords at 0x466F90) */
 static int32_t g_car_torque_triplets[9 * 3];
 
-/* AI physics template (128 bytes at 0x473DB0) */
-static uint8_t g_ai_physics_template[128];
+/* AI physics template (128 bytes at 0x473DB0 in TD5_d3d.exe) — verbatim
+ * copy of the original binary's global AI tuning data. Used by the
+ * UpdateAIVehicleDynamics bicycle solve for all AI slots; the port
+ * previously pointed AI slots' tuning_data_ptr at per-slot carparam.dat,
+ * which gave DIFFERENT Wf/Wr/I values and flipped the sign of
+ * D = (Wf*Wr - I) >> 10 in the bicycle solve. That flipped the sign of
+ * front_lat at v≈0 with saturated steer, which is what drove the
+ * positive-feedback yaw spin symptom. */
+static uint8_t g_ai_physics_template[128] = {
+    0xA0, 0x00, 0xC0, 0x00, 0xD8, 0x00, 0xE0, 0x00,  /* +0x00 torque curve */
+    0xE4, 0x00, 0xE8, 0x00, 0xEC, 0x00, 0xF0, 0x00,  /* +0x08 */
+    0xF4, 0x00, 0xF8, 0x00, 0xFC, 0x00, 0x00, 0x01,  /* +0x10 */
+    0x00, 0x01, 0x00, 0x01, 0x00, 0x01, 0x00, 0x01,  /* +0x18 */
+    0x20, 0xBF, 0x02, 0x00, 0xC0, 0x5D, 0x00, 0x00,  /* +0x20 I=180000 half_wb=24000 */
+    0x90, 0x01, 0x90, 0x01, 0xAC, 0x0D, 0xF0, 0x0A,  /* +0x28 Wf=400 Wr=400 grip=3500 */
+    0x00, 0x00, 0xC4, 0x09, 0x3A, 0x07, 0x5A, 0x05,  /* +0x30 gear ratios */
+    0xF2, 0x03, 0xEE, 0x02, 0x26, 0x02, 0x0F, 0x27,  /* +0x38 */
+    0x00, 0x00, 0x64, 0x19, 0x64, 0x19, 0x64, 0x19,  /* +0x40 */
+    0x64, 0x19, 0x64, 0x19, 0x0F, 0x27, 0x0F, 0x27,  /* +0x48 */
+    0x00, 0x00, 0x00, 0x00, 0xCC, 0x10, 0xCC, 0x10,  /* +0x50 */
+    0xCC, 0x10, 0xCC, 0x10, 0xCC, 0x10, 0x32, 0x00,  /* +0x58 */
+    0x28, 0x00, 0x1E, 0x00, 0x00, 0x20, 0x18, 0x00,  /* +0x60 */
+    0x64, 0x00, 0x2C, 0x01, 0xB8, 0x0B, 0x58, 0x02,  /* +0x68 steer=0x100 brake=0x2C1? speedlim=0x0BB8 */
+    0x58, 0x02, 0xE8, 0x1C, 0x2A, 0x04, 0x03, 0x00,  /* +0x70 */
+    0x50, 0x00, 0xA0, 0x00, 0xA0, 0x00, 0x00, 0x00,  /* +0x78 */
+};
 
 /* Difficulty tier (0/1/2) */
 static int32_t g_race_difficulty_tier;
@@ -226,9 +250,13 @@ static uint32_t g_ai_frame_counter;
 
 static void ai_update_single_racer(int slot);
 static void ai_update_single_traffic(int slot);
+
+uint8_t *td5_ai_get_physics_template(void) {
+    return g_ai_physics_template;
+}
+
 static int32_t ai_cos_fixed12(int32_t angle);
 static int32_t ai_sin_fixed12(int32_t angle);
-static int32_t ai_neg_cos_fixed12(int32_t angle);
 static void td5_ai_refresh_route_state_slot(int slot);
 static int32_t ai_angle_from_vector(int32_t dx, int32_t dz);
 
@@ -242,18 +270,6 @@ static int32_t ai_cos_fixed12(int32_t angle) {
 static int32_t ai_sin_fixed12(int32_t angle) {
     double rad = (double)(angle & 0xFFF) * (2.0 * 3.14159265358979323846 / 4096.0);
     return (int32_t)(sin(rad) * 4096.0);
-}
-
-/* Mirrors original FUN_0040a700 @ 0x0040a700:
- *   return LUT[(arg - 0x400) & 0xFFF]  with LUT == sin12 table
- *   = sin((arg - 0x400) & 0xFFF) = -cos(arg)
- * Used by the steering cascade fine-deviation band. The negative-cosine shape
- * is what makes small deviations produce LARGE cascade outputs that saturate
- * STEERING_CMD to ±0x18000; the saturated value then biases the next-tick
- * heading estimate enough to flip the deviation sign, producing the
- * self-stabilizing oscillator that the original relies on. */
-static int32_t ai_neg_cos_fixed12(int32_t angle) {
-    return ai_sin_fixed12((angle - 0x400) & 0xFFF);
 }
 
 /* ========================================================================
@@ -864,18 +880,15 @@ void td5_ai_update_steering_bias(int *route_state, int32_t steer_weight) {
             }
             if (left_dev < 0x100) {
                 /* Normal mode, fine deviation: proportional correction.
-                 * [CONFIRMED @ 0x4340C0, FUN_0040a700 body @ 0x0040a700]
-                 * Original calls FUN_0040a700(raw_deviation), which looks up
-                 * LUT[(arg - 0x400) & 0xFFF] against the sin12 table — i.e.
-                 * -cos(arg). For small deviation (arg≈0) this returns ≈-1.0
-                 * (raw -0xFB3 for arg=0x80), which saturates STEERING_CMD to
-                 * ±0x18000 in 1-2 ticks. The saturated value then biases
-                 * actor_heading via (yaw_accum + steering_cmd) >> 8 in the
-                 * next deviation calc at 0x435338, flipping the deviation
-                 * past the sign-flip threshold. That self-stabilizing cycle
-                 * IS the AI's damping mechanism — there is no separate
-                 * boundary pre-loop. */
-                int32_t t   = ai_neg_cos_fixed12(left_dev);
+                 * [CONFIRMED @ 0x4340C0 via 0x0040a700, and LUT init
+                 * BuildSinCosLookupTables @ 0x0040a650]
+                 * Original calls FUN_0040a700(raw_deviation) = SinFixed12bit.
+                 * DAT_00483984 is a COSINE table (init stores cos(i*step)*4096),
+                 * so LUT[(arg - 0x400) & 0xFFF] = cos(arg - π/2) = +sin(arg).
+                 * For small deviation the return is ≈ arg, producing a
+                 * proportional correction. sin(0) = 0 → aligned car (left=0xFFF
+                 * right=0 fires this branch via the right mirror) stays put. */
+                int32_t t   = ai_sin_fixed12(left_dev);
                 int32_t mul = t * param_2;
                 ACTOR_I32(actor, ACTOR_STEERING_CMD) =
                     ACTOR_I32(actor, ACTOR_STEERING_CMD)
@@ -909,8 +922,10 @@ void td5_ai_update_steering_bias(int *route_state, int32_t steer_weight) {
             /* fall through: write -iVar3 as new bias */
         } else {
             if (right_dev < 0x100) {
-                /* -cos via FUN_0040a700 mirror — see left fine-band comment */
-                int32_t t   = ai_neg_cos_fixed12(right_dev);
+                /* +sin via FUN_0040a700 mirror — see left fine-band comment.
+                 * Aligned car (delta=0) -> LEFT=0xFFF, RIGHT=0: this path
+                 * fires with sin(0)=0 → no correction → car stays aligned. */
+                int32_t t   = ai_sin_fixed12(right_dev);
                 int32_t mul = t * param_2;
                 ACTOR_I32(actor, ACTOR_STEERING_CMD) =
                     ACTOR_I32(actor, ACTOR_STEERING_CMD)
@@ -963,10 +978,24 @@ int td5_ai_update_route_threshold(int slot) {
     int32_t *route_table = (int32_t *)rs[RS_ROUTE_TABLE_PTR];
     int16_t span = ACTOR_I16(actor, ACTOR_SPAN_RAW);
     int threshold = 0xFF; /* default: no limit */
+    int heading_byte = 0; /* route-heading byte, used as junction sentinel */
 
     if (route_table) {
         uint8_t *route_bytes = (uint8_t *)route_table;
         threshold = route_bytes[span * 3 + 2];
+        heading_byte = route_bytes[span * 3 + 1];
+    }
+
+    /* Junction-zone override: if the route-heading byte is near-zero, this
+     * span is a route TRANSITION zone (e.g. Moscow RIGHT.TRK around span
+     * 498 where rb[span*3+1] = 1). The threshold byte at such spans is
+     * also zero/near-zero, which would trigger emergency brake or scaled
+     * slowdown on genuinely mid-track locations. Treat junction-zone
+     * spans as "no limit" and let the AI accelerate through.
+     * Port-only guard; the original either tolerates this via a different
+     * routing/recovery interaction or has meaningful data at these bytes. */
+    if (heading_byte < 4) {
+        threshold = 0xFF;
     }
 
     if (threshold == 0x00) {
@@ -1404,13 +1433,25 @@ void td5_ai_update_track_behavior(int slot) {
      * RS[0x18] stores velocity dot product (forward track component). */
     route_heading = ai_route_heading_for_actor(rs, actor);
 
-    /* Skip recovery when route heading byte is 0 (no heading data).
-     * Some tracks (e.g. level014 spans 0-174) have heading_byte=0 in the
-     * route file. With route_heading=0 the recovery formula always fires
-     * (comparing against a nonsense reference), trapping AI in an infinite
-     * recovery→normal→recovery loop. The normal target-point steering
-     * at step 2 handles guidance without heading data. */
-    if (route_heading != 0) {
+    /* Skip recovery when route-heading byte is 0 OR near-zero (< 4).
+     * Near-zero bytes occur at route TRANSITION zones (junction entries/
+     * exits) on non-canonical routes like Moscow RIGHT.TRK span 498 where
+     * the route byte is 1, producing route_heading=0x10 — a nonsense
+     * reference that pins the actor in recovery. Widening the guard to
+     * catch rb < 4 (heading < 0x41 = 5.7°) skips the check in those
+     * zones; the target-point cascade at step 2 still handles guidance
+     * across the junction. Port-only guard; the original tolerates the
+     * same junction-zone null-byte via a different recovery-handling
+     * mechanism we haven't fully RE'd yet. */
+    int32_t rb_current = 0;
+    {
+        const uint8_t *rbs = (const uint8_t *)(intptr_t)rs[RS_ROUTE_TABLE_PTR];
+        int16_t sp_current = ACTOR_I16(actor, ACTOR_SPAN_RAW);
+        if (rbs && sp_current >= 0) {
+            rb_current = (int32_t)rbs[(size_t)(unsigned)sp_current * 3u + 1u];
+        }
+    }
+    if (rb_current >= 4) {
         /* Original FUN_00434FE0: adjusts for expected 0x800 offset between actor
          * yaw (atan2+0x800) and route heading (route_byte<<4), then checks if
          * the residual misalignment exceeds threshold.
