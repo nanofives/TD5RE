@@ -1026,10 +1026,11 @@ int td5_game_init_race_session(void) {
         if (start_span <= 0)
             start_span = (track_span_count > 0) ? track_span_count : 1;
 
-        /* Shared quickrace INI `start_span_offset`: mirrors the Frida hook
-         * on InitializeActorTrackPose (0x00434350) which additively shifts
-         * every actor's span arg. Wraps at the span ring length so negative
-         * or ring-overshooting offsets behave like the hook does. */
+        /* StartSpanOffset (td5re.ini [Game] or --StartSpanOffset=N): mirrors
+         * the Frida hook on InitializeActorTrackPose (0x00434350) which
+         * additively shifts every actor's span arg. Wraps at the span ring
+         * length so negative or ring-overshooting offsets behave like the
+         * hook does. */
         if (g_td5.ini.start_span_offset != 0 && track_span_count > 0) {
             int shifted = start_span + g_td5.ini.start_span_offset;
             while (shifted < 0)           shifted += track_span_count;
@@ -1228,7 +1229,7 @@ int td5_game_init_race_session(void) {
 
     /* ---- Step 18: Upload race texture pages to GPU ---- */
     td5_asset_load_race_texture_pages();
-    td5_render_load_environs_textures();
+    td5_render_load_environs_textures(td5_asset_level_number(g_td5.track_index));
     TD5_LOG_I(LOG_TAG, "InitRace step 18/19: race texture pages + environs uploaded");
 
     /* ---- Step 19: Initialize HUD, pause menu overlay ---- */

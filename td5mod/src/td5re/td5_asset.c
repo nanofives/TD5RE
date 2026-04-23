@@ -2199,42 +2199,72 @@ int td5_asset_load_race_texture_pages(void)
  * Environment / Reflection Texture Loading (0x42F990)
  * ======================================================================== */
 
-int td5_asset_load_environs_pages(int page_base, int max_pages, int *out_pages)
+#include "td5_environs_table.inc"
+
+int td5_asset_load_environs_pages(int level_number, int page_base, int max_pages, int *out_pages)
 {
     /*
      * LoadEnvironmentTexturePages (0x42F990):
-     * Loads environment textures for the chrome/reflection projection
-     * effect on car bodies. Pre-extracted PNGs in re/assets/environs/.
+     * Loads the per-track environment textures for the chrome/reflection
+     * projection effect on car bodies. The name list + count come from the
+     * exe's per-track pointer table at 0x0046bb1c, mirrored in
+     * td5_environs_table.inc by re/tools/extract_environs_table.py.
+     *
+     * `level_number` is the level ZIP number (1..39), i.e. the same index
+     * LoadTrackTextureSet passes to InitializeTrackStripMetadata.
      */
-    static const char *s_envmap_names[] = {
-        "re/assets/environs/SUN.png",
-        "re/assets/environs/TREE.png",
-        "re/assets/environs/MSUN.png",
-        "re/assets/environs/BRIDGE.png"
-    };
     int loaded = 0;
+    const TD5_EnvironsTrack *t;
 
-    for (int i = 0; i < max_pages && i < 4; i++) {
+    if (level_number < 0 || level_number >= TD5_ENVIRONS_TRACK_COUNT) {
+        TD5_LOG_W(LOG_TAG, "environs: level %d out of range", level_number);
+        return 0;
+    }
+
+    t = &td5_environs_per_track[level_number];
+    if (t->count <= 0) {
+        TD5_LOG_I(LOG_TAG, "environs: level %d has no entries", level_number);
+        return 0;
+    }
+
+    for (int i = 0; i < t->count && i < max_pages && i < 4; i++) {
         void *pixels = NULL;
         int w = 0, h = 0;
         int page_id = page_base + i;
+        char png_path[128];
+        const char *tga = t->e[i].name;
+        char stem[32];
+        const char *dot;
+        size_t n;
 
-        if (!td5_asset_decode_png_rgba32(s_envmap_names[i], &pixels, &w, &h)) {
-            TD5_LOG_W(LOG_TAG, "environs: failed to load %s", s_envmap_names[i]);
+        if (!tga || !tga[0]) continue;
+
+        /* Strip .tga/.TGA extension to get the stem, then build the PNG path. */
+        dot = strrchr(tga, '.');
+        n = dot ? (size_t)(dot - tga) : strlen(tga);
+        if (n >= sizeof(stem)) n = sizeof(stem) - 1;
+        memcpy(stem, tga, n);
+        stem[n] = '\0';
+        snprintf(png_path, sizeof(png_path), "re/assets/environs/%s.png", stem);
+
+        if (!td5_asset_decode_png_rgba32(png_path, &pixels, &w, &h)) {
+            TD5_LOG_W(LOG_TAG, "environs: failed to load %s", png_path);
             continue;
         }
 
         alpha_bleed_rgb((uint8_t *)pixels, w, h);
 
         if (td5_plat_render_upload_texture(page_id, pixels, w, h, 2)) {
-            /* Register as semi-transparent (type 2) so the render pipeline
-             * uses the correct blend preset when binding this page. */
+            /* flag 3 (SUN*) uses the sun/alpha projection preset; flag 1 is
+             * the default solid environment reflection. The port maps both
+             * to transparency type 2 for now -- faithful preset selection is
+             * a follow-up once the blend paths are unified. */
             td5_asset_set_page_transparency(page_id, 2);
             if (out_pages)
                 out_pages[loaded] = page_id;
             loaded++;
-            TD5_LOG_I(LOG_TAG, "environs: loaded %s -> page %d (%dx%d)",
-                      s_envmap_names[i], page_id, w, h);
+            TD5_LOG_I(LOG_TAG, "environs: level=%d entry=%d %s -> page %d (%dx%d, flag=%d)",
+                      level_number, i, png_path, page_id, w, h, t->e[i].flag);
         }
 
         stbi_image_free(pixels);

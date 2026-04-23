@@ -540,6 +540,43 @@ def convert_tpages(assets_dir, output_dir, dry_run=False):
     return entries + level_entries
 
 
+# Dev leftovers shipped in the 1998 frontend.zip but never referenced by
+# TD5_d3d.exe (verified via Ghidra string search 2026-04-23). Kept in
+# re/unused_assets/ for archaeology; do not emit PNGs into re/assets/.
+UNUSED_TGA_STEMS = {
+    # frontend.zip leftovers (Ghidra-verified 0 refs in TD5_d3d.exe):
+    'controllerso',
+    'copy of controllers',
+    'oldbodytext',
+    'untitled-1',
+    'mainfont',
+    'smalfont',
+    'tick',
+    '3d sound',
+    'arrowbuttons',
+    'logo',
+    'netmenu',
+    'racemenu',
+    'small td5 wht',
+    'explogo',
+    'inprog',
+    'player1text',
+    'player2text',
+    # environs.zip leftovers: shipped in the zip but never selected by the
+    # per-track environs pointer table @ 0x0046bb1c (raw byte search: 0 refs
+    # in TD5_d3d.exe). See td5_environs_table.inc for the active set.
+    'atre1',
+    'htun1',
+    'mbrd1',
+    'mbwl1',
+    'msun',
+    'nbrd2',
+    'qtun1',
+    'sbrd1',
+    'sunbkp',
+}
+
+
 def convert_tga_files(assets_dir, output_dir, dry_run=False):
     """Convert TGA files from cars, levels, frontend, traffic, etc."""
     entries = []
@@ -565,6 +602,8 @@ def convert_tga_files(assets_dir, output_dir, dry_run=False):
         for root, dirs, files in os.walk(src_path):
             for fname in sorted(files):
                 if not fname.lower().endswith('.tga'):
+                    continue
+                if os.path.splitext(fname)[0].lower() in UNUSED_TGA_STEMS:
                     continue
 
                 tga_path = os.path.join(root, fname)

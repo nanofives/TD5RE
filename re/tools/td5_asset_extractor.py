@@ -56,8 +56,10 @@ ZIP_MAPPINGS = [
     ("loading.zip",                     "loading",             False),
     # Legal screens
     ("legals.zip",                      "legals",              False),
-    # Cup data
-    ("Cup.zip",                         "cup",                 False),
+    # Cup.zip is an installer payload (Config.td5/CupData.td5 + M2DX.dll +
+    # Language.dll + TD5.ini + Uninst.isu). Neither TD5_d3d.exe nor td5re.exe
+    # loads from it; savegames are read/written from the working directory.
+    # Preserved in re/unused_assets/cup/ for archaeology; not extracted here.
     # Frontend UI
     ("Front End/frontend.zip",          "frontend",            False),
     # Frontend extras

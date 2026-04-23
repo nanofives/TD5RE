@@ -201,11 +201,14 @@ int td5_asset_load_track_textures(int track_index);
 int td5_asset_load_race_texture_pages(void);
 
 /**
- * Load environment/reflection texture PNGs from re/assets/environs/.
- * Uploads up to max_pages PNGs to GPU starting at page_base.
+ * Load per-track environment/reflection texture PNGs from re/assets/environs/.
+ * The name list + count for each level come from the exe's per-track table at
+ * 0x0046bb1c (mirrored in td5_environs_table.inc). level_number is the level
+ * ZIP number (1..39), matching td5_asset_level_number()'s output.
+ * Uploads up to min(count, max_pages, 4) PNGs to GPU starting at page_base.
  * Returns number of pages loaded, fills out_pages[] with D3D page IDs.
  */
-int td5_asset_load_environs_pages(int page_base, int max_pages, int *out_pages);
+int td5_asset_load_environs_pages(int level_number, int page_base, int max_pages, int *out_pages);
 
 /**
  * Get loaded CHECKPT.NUM data (up to 96 bytes, first 24 = active record).
