@@ -128,15 +128,15 @@ typedef struct TD5_CupDataBuffer {
     /* 0x0100 */ uint32_t actor_state[TD5_CUP_ACTOR_DWORDS];               /* 12656 bytes -- 6 slots x 0x388 */
     /* 0x3270 */ uint32_t slot_state[TD5_CUP_SLOT_STATE_DWORDS];           /* 24 bytes */
     /* 0x3288 */ uint32_t masters_schedule_base;
-    /* 0x328C */ uint32_t cup_sub_state_b;                                   /* VERIFIED: 0x48F310, addr calc 0x493E38-0x490BAC=0x328C */
-    /* 0x3290 */ uint32_t cup_sub_state_a;                                   /* VERIFIED: 0x48F314, addr calc 0x493E3C-0x490BAC=0x3290 */
-    /* 0x3294 */ uint16_t cup_sub_word_a;                                    /* VERIFIED: 0x48F318, addr calc 0x493E40-0x490BAC=0x3294 (2 bytes, not 4) */
-    /* 0x3296 */ uint8_t  cup_sub_byte_a;                                    /* VERIFIED: 0x48F31A, addr calc 0x493E42-0x490BAC=0x3296 */
+    /* 0x328C */ uint32_t p2_cup_schedule_index;                                   /* VERIFIED: 0x48F310, addr calc 0x493E38-0x490BAC=0x328C */
+    /* 0x3290 */ uint32_t p1_cup_schedule_index;                                   /* VERIFIED: 0x48F314, addr calc 0x493E3C-0x490BAC=0x3290 */
+    /* 0x3294 */ uint16_t p1_cup_completion_bitmask;                                    /* VERIFIED: 0x48F318, addr calc 0x493E40-0x490BAC=0x3294 (2 bytes, not 4) */
+    /* 0x3296 */ uint8_t  p1_selected_cup_id;                                    /* VERIFIED: 0x48F31A, addr calc 0x493E42-0x490BAC=0x3296 */
     /* 0x3297 */ uint32_t masters_encounter_flags;                           /* VERIFIED: 0x48F324, addr calc 0x493E43-0x490BAC=0x3297 */
-    /* 0x329B */ uint32_t cup_sub_state_c;                                   /* VERIFIED: 0x48F328, addr calc 0x493E47-0x490BAC=0x329B */
-    /* 0x329F */ uint32_t cup_sub_state_d;                                   /* VERIFIED: 0x48F32C, addr calc 0x493E4B-0x490BAC=0x329F */
-    /* 0x32A3 */ uint16_t cup_sub_word_b;                                    /* VERIFIED: 0x48F330, addr calc 0x493E4F-0x490BAC=0x32A3 */
-    /* 0x32A5 */ uint8_t  cup_sub_byte_b;                                    /* VERIFIED: 0x48F332, addr calc 0x493E51-0x490BAC=0x32A5 */
+    /* 0x329B */ uint32_t p1_masters_unlock_bitmask;                                   /* VERIFIED: 0x48F328, addr calc 0x493E47-0x490BAC=0x329B */
+    /* 0x329F */ uint32_t p2_masters_unlock_bitmask;                                   /* VERIFIED: 0x48F32C, addr calc 0x493E4B-0x490BAC=0x329F */
+    /* 0x32A3 */ uint16_t p2_cup_completion_bitmask;                                    /* VERIFIED: 0x48F330, addr calc 0x493E4F-0x490BAC=0x32A3 */
+    /* 0x32A5 */ uint8_t  p2_cup_lock_flag;                                    /* VERIFIED: 0x48F332, addr calc 0x493E51-0x490BAC=0x32A5 */
     /* Remaining bytes to fill 0x32A6... */
 } TD5_CupDataBuffer;
 #pragma pack(pop)
@@ -501,15 +501,15 @@ static uint32_t s_race_results[0x1E];                         /* 0x48D988 */
 static uint32_t s_actor_table[0xC5C];                         /* 0x4AB108 */
 static uint32_t s_slot_state[6];                              /* 0x4AADF4 */
 static uint32_t s_masters_schedule_base;                      /* 0x48F30C */
-static uint32_t s_cup_sub_state_a;                            /* 0x48F314 */
-static uint32_t s_cup_sub_state_b;                            /* 0x48F310 */
-static uint8_t  s_cup_sub_byte_a;                             /* 0x48F31A */
-static uint16_t s_cup_sub_word_a;                             /* 0x48F318 */
-static uint32_t s_cup_sub_state_c;                            /* 0x48F328 */
+static uint32_t s_p1_cup_schedule_index;                            /* 0x48F314 */
+static uint32_t s_p2_cup_schedule_index;                            /* 0x48F310 */
+static uint8_t  s_p1_selected_cup_id;                             /* 0x48F31A */
+static uint16_t s_p1_cup_completion_bitmask;                             /* 0x48F318 */
+static uint32_t s_p1_masters_unlock_bitmask;                            /* 0x48F328 */
 static uint32_t s_masters_encounter_flags;                    /* 0x48F324 */
-static uint32_t s_cup_sub_state_d;                            /* 0x48F32C */
-static uint16_t s_cup_sub_word_b;                             /* 0x48F330 */
-static uint8_t  s_cup_sub_byte_b;                             /* 0x48F332 */
+static uint32_t s_p2_masters_unlock_bitmask;                            /* 0x48F32C */
+static uint16_t s_p2_cup_completion_bitmask;                             /* 0x48F330 */
+static uint8_t  s_p2_cup_lock_flag;                             /* 0x48F332 */
 
 /* Cross-references restored from within the schedule region. */
 static uint32_t s_cup_progress_marker;                        /* 0x48F364 */
@@ -906,26 +906,26 @@ static void cup_serialize_to_buffer(void)
      *
      * Original addresses -> buffer offsets:
      *   0x493E34 - 0x490BAC = 0x3288  (masters_schedule_base = 0x48F30C)
-     *   0x493E3C - 0x490BAC = 0x3290  (cup_sub_state_a = 0x48F314)
-     *   0x493E38 - 0x490BAC = 0x328C  (cup_sub_state_b = 0x48F310)  -- NOTE: 0x328C not 0x3294
-     *   0x493E42 - 0x490BAC = 0x3296  (cup_sub_byte_a  = 0x48F31A)
-     *   0x493E40 - 0x490BAC = 0x3294  (cup_sub_word_a  = 0x48F318)  -- NOTE: 0x3294 not 0x3297
-     *   0x493E47 - 0x490BAC = 0x329B  (cup_sub_state_c = 0x48F328)
+     *   0x493E3C - 0x490BAC = 0x3290  (p1_cup_schedule_index = 0x48F314)
+     *   0x493E38 - 0x490BAC = 0x328C  (p2_cup_schedule_index = 0x48F310)  -- NOTE: 0x328C not 0x3294
+     *   0x493E42 - 0x490BAC = 0x3296  (p1_selected_cup_id  = 0x48F31A)
+     *   0x493E40 - 0x490BAC = 0x3294  (p1_cup_completion_bitmask  = 0x48F318)  -- NOTE: 0x3294 not 0x3297
+     *   0x493E47 - 0x490BAC = 0x329B  (p1_masters_unlock_bitmask = 0x48F328)
      *   0x493E43 - 0x490BAC = 0x3297  (masters_encounter_flags = 0x48F324)
-     *   0x493E4B - 0x490BAC = 0x329F  (sub_word_b region = 0x48F32C)
-     *   0x493E4F - 0x490BAC = 0x32A3  (cup_sub_word_b = 0x48F330)
-     *   0x493E51 - 0x490BAC = 0x32A5  (cup_sub_byte_b = 0x48F332)
+     *   0x493E4B - 0x490BAC = 0x329F  (p2_masters_unlock_bitmask = 0x48F32C)
+     *   0x493E4F - 0x490BAC = 0x32A3  (p2_cup_completion_bitmask = 0x48F330)
+     *   0x493E51 - 0x490BAC = 0x32A5  (p2_cup_lock_flag = 0x48F332)
      */
     write_le32(buf + 0x3288, s_masters_schedule_base);
-    write_le32(buf + 0x328C, s_cup_sub_state_b);
-    write_le32(buf + 0x3290, s_cup_sub_state_a);
-    write_le16(buf + 0x3294, s_cup_sub_word_a);
-    buf[0x3296] = s_cup_sub_byte_a;
+    write_le32(buf + 0x328C, s_p2_cup_schedule_index);
+    write_le32(buf + 0x3290, s_p1_cup_schedule_index);
+    write_le16(buf + 0x3294, s_p1_cup_completion_bitmask);
+    buf[0x3296] = s_p1_selected_cup_id;
     write_le32(buf + 0x3297, s_masters_encounter_flags);
-    write_le32(buf + 0x329B, s_cup_sub_state_c);
-    write_le32(buf + 0x329F, s_cup_sub_state_d); /* VERIFIED: 0x48F32C, addr calc 0x493E4B-0x490BAC=0x329F */
-    write_le16(buf + 0x32A3, s_cup_sub_word_b);
-    buf[0x32A5] = s_cup_sub_byte_b;
+    write_le32(buf + 0x329B, s_p1_masters_unlock_bitmask);
+    write_le32(buf + 0x329F, s_p2_masters_unlock_bitmask); /* VERIFIED: 0x48F32C, addr calc 0x493E4B-0x490BAC=0x329F */
+    write_le16(buf + 0x32A3, s_p2_cup_completion_bitmask);
+    buf[0x32A5] = s_p2_cup_lock_flag;
 
     /* Compute CRC-32 over the entire buffer with placeholder at offset +0x0C. */
     /* The original sets bytes [0x0C..0x0F] to placeholder before CRC. */
@@ -1057,15 +1057,15 @@ static int cup_deserialize_from_buffer(void)
 
     /* Masters/cup sub-state fields (tail region). */
     s_masters_schedule_base   = read_le32(buf + 0x3288);
-    s_cup_sub_state_b         = read_le32(buf + 0x328C);
-    s_cup_sub_state_a         = read_le32(buf + 0x3290);
-    s_cup_sub_word_a          = read_le16(buf + 0x3294);
-    s_cup_sub_byte_a          = buf[0x3296];
+    s_p2_cup_schedule_index         = read_le32(buf + 0x328C);
+    s_p1_cup_schedule_index         = read_le32(buf + 0x3290);
+    s_p1_cup_completion_bitmask          = read_le16(buf + 0x3294);
+    s_p1_selected_cup_id          = buf[0x3296];
     s_masters_encounter_flags = read_le32(buf + 0x3297);
-    s_cup_sub_state_c         = read_le32(buf + 0x329B);
-    s_cup_sub_state_d         = read_le32(buf + 0x329F); /* VERIFIED: 0x48F32C */
-    s_cup_sub_word_b          = read_le16(buf + 0x32A3);
-    s_cup_sub_byte_b          = buf[0x32A5];
+    s_p1_masters_unlock_bitmask         = read_le32(buf + 0x329B);
+    s_p2_masters_unlock_bitmask         = read_le32(buf + 0x329F); /* VERIFIED: 0x48F32C */
+    s_p2_cup_completion_bitmask          = read_le16(buf + 0x32A3);
+    s_p2_cup_lock_flag          = buf[0x32A5];
 
     /* Cross-references within the schedule region.
      * These are at fixed offsets from the schedule base (buf + 0x10):
