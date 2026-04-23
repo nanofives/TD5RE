@@ -36,6 +36,14 @@ int  td5_ai_init(void);
 void td5_ai_shutdown(void);
 void td5_ai_tick(void);
 
+/* Returns a pointer to the 128-byte AI physics tuning template (DAT_00473DB0
+ * in TD5_d3d.exe). Shared across all AI slots in the original. Used by the
+ * physics init to point AI actors' tuning_data_ptr at this instead of each
+ * slot's per-car carparam.dat tuning — the original bicycle solve was built
+ * around these Wf=400/Wr=400/I=180000 values and flipping to per-car tuning
+ * flipped the sign of D in the bicycle-solve matrix. */
+uint8_t *td5_ai_get_physics_template(void);
+
 /* --- Per-actor AI update --- */
 void td5_ai_update_track_behavior(int slot);
 void td5_ai_update_steering_bias(int *route_state, int32_t steer_weight);

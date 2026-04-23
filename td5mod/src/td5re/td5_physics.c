@@ -35,7 +35,9 @@
  * 0x409150  ResolveVehicleContacts              -- IMPLEMENTED
  */
 
+#include <stdio.h>
 #include "td5_physics.h"
+#include "td5_ai.h"
 #include "td5_track.h"
 #include "td5_render.h"   /* td5_render_get_vehicle_mesh */
 #include "td5_platform.h"
@@ -1578,6 +1580,32 @@ void td5_physics_update_ai(TD5_Actor *actor)
     int16_t *phys = get_phys(actor);
     if (!phys) return;
 
+    /* DIAG 2026-04-23: port-side bicycle probe CSV, matching schema of
+     * log/bicycle_probe_original.csv from tools/frida_bicycle_probe.js.
+     * Writes pre/post actor state per AI tick for slots 1-5. Remove once
+     * the port/original divergence is isolated. */
+    int32_t probe_slot = actor->slot_index;
+    int probe_enabled = (probe_slot >= 1 && probe_slot <= 5);
+    int32_t probe_pre_vx = 0, probe_pre_vz = 0, probe_pre_omega = 0;
+    int32_t probe_pre_yaw = 0, probe_pre_steer = 0;
+    int16_t probe_pre_thr = 0;
+    int32_t probe_pre_f314 = 0, probe_pre_f318 = 0;
+    int16_t probe_Wf = 0, probe_Wr = 0;
+    int32_t probe_I = 0;
+    if (probe_enabled) {
+        probe_pre_vx    = actor->linear_velocity_x;
+        probe_pre_vz    = actor->linear_velocity_z;
+        probe_pre_omega = actor->angular_velocity_yaw;
+        probe_pre_yaw   = actor->euler_accum.yaw;
+        probe_pre_steer = actor->steering_command;
+        probe_pre_thr   = actor->encounter_steering_cmd;
+        probe_pre_f314  = actor->longitudinal_speed;
+        probe_pre_f318  = actor->lateral_speed;
+        probe_Wf = PHYS_S(actor, 0x28);
+        probe_Wr = PHYS_S(actor, 0x2A);
+        probe_I  = PHYS_I(actor, 0x20);
+    }
+
     /* --- 1. Single surface probe (chassis center only) --- */
     uint8_t surface = actor->surface_type_chassis;
 
@@ -1836,30 +1864,27 @@ void td5_physics_update_ai(TD5_Actor *actor)
         }
     }
 
-    /* --- 9. Yaw torque [CONFIRMED @ 0x405620-0x4056A6 via round-3 pcode]
-     * Original: yaw_torque = ((sin(steer) * Wf >> 12) * FRONT_lat - REAR_lat * Wr) / inertia_div
+    /* --- 9. Yaw torque [CONFIRMED @ 0x00405680-0x004056A0 via Ghidra 2026-04-23]
+     * Original: M = ((cos(steer) * Wf) >> 12) * rear_lat - front_lat * Wr) / (I / 0x28c)
      *
-     * Fixed two bugs that previously cancelled:
-     *  - Trig was cos_d, original calls FUN_0040a6e0(steer) = sin12 (NOT FUN_0040a700)
-     *  - Lat operands were swapped: original puts FRONT_lat with the trig*Wf
-     *    coefficient and REAR_lat with Wr; port had them reversed
-     * Force-app pairings at lines 1697-1700 (rear_lat↔body, front_lat↔steered)
-     * are already correct and unchanged. */
+     * Previous port state (sin + un-swapped) had TWO compounding bugs:
+     *  - Trig was sin_d, original calls FUN_0040a6e0 = cos_d (LUT at DAT_00483984
+     *    is a COS table — verified via BuildSinCosLookupTables @ 0x0040a650).
+     *  - Port's local variable names "front_lat" and "rear_lat" are swapped
+     *    vs the original's local_40 (front_lat, flows into term -local_40*Wr)
+     *    and local_44 (rear_lat, flows into term cos*Wf*local_44). See
+     *    Frida probe comparison in todo_ai_countdown_steer_accumulation.md.
+     *
+     * Tuning offsets 0x28, 0x2a, 0x20 are lever arms a, b and yaw inertia I
+     * respectively — confusingly named front_weight/rear_weight in port. */
     {
-        int32_t yaw_torque = (int32_t)(((int64_t)(sin_d * front_weight >> 12) * front_lat
-                             - (int64_t)rear_lat * rear_weight) / inertia_div);
+        int32_t yaw_torque = (int32_t)(((int64_t)(cos_d * front_weight >> 12) * rear_lat
+                             - (int64_t)front_lat * rear_weight) / inertia_div);
 
         if (yaw_torque > TD5_YAW_TORQUE_MAX) yaw_torque = TD5_YAW_TORQUE_MAX;
         if (yaw_torque < -TD5_YAW_TORQUE_MAX) yaw_torque = -TD5_YAW_TORQUE_MAX;
 
         actor->angular_velocity_yaw += yaw_torque;
-        /* No additional omega clamp here — original FUN_00404EC0 has only
-         * the per-tick torque clamp ±0x578 above and the slip-yaw damping
-         * ±0x200 correction below. A previous ±1500 clamp here was masking
-         * the cascade-undershoot symptom (port's sin12 vs original's
-         * -cos12 in the steering fine-band) and broke the cascade's
-         * saturate→sign-flip damping cycle. [Verified: search across
-         * FUN_00404EC0/FUN_004340c0/FUN_0040a700 finds no ±1500 clamp]. */
     }
 
     /* --- 10. World-frame force application [CONFIRMED @ 0x4056C4-0x405762]
@@ -1913,6 +1938,11 @@ void td5_physics_update_ai(TD5_Actor *actor)
         if (slip > 0x7FFF) slip = 0x7FFF;
         actor->current_slip_metric = (int16_t)slip;
     }
+
+    (void)probe_enabled; (void)probe_pre_vx; (void)probe_pre_vz;
+    (void)probe_pre_omega; (void)probe_pre_yaw; (void)probe_pre_steer;
+    (void)probe_pre_thr; (void)probe_pre_f314; (void)probe_pre_f318;
+    (void)probe_Wf; (void)probe_Wr; (void)probe_I; (void)probe_slot;
 }
 
 /* ========================================================================
@@ -5376,6 +5406,36 @@ static void bind_default_vehicle_tuning(TD5_Actor *actor, int slot)
 
     tuning = s_default_tuning[slot];
     cardef = s_default_cardef[slot];
+
+    /* AI slots (1..5) use the GLOBAL AI physics template (DAT_00473DB0 in
+     * the original), not the per-slot carparam.dat. Frida probe 2026-04-23
+     * confirmed original AI slots all read Wf=400, Wr=400, I=180000 from
+     * this template. Using per-car carparam gave Wf=420, I=160000 which
+     * flipped the sign of D in the bicycle solve.
+     *
+     * The template is scaled by difficulty/tier at
+     * td5_ai_init_race_actor_runtime, so it's finalized by the time actors
+     * spawn. Cardef still comes from carparam.dat (for bounding box, etc.)
+     * because only tuning is AI-specific in the original.
+     *
+     * Slot 0 stays on carparam (it's the player). Slots 6-11 (traffic) also
+     * stay on carparam — they don't run through FUN_00404EC0. */
+    if (slot >= 1 && slot < TD5_MAX_RACER_SLOTS) {
+        uint8_t *ai_tmpl = td5_ai_get_physics_template();
+        if (ai_tmpl) {
+            memcpy(tuning, ai_tmpl, 0x80);
+            if (s_carparam_loaded[slot]) {
+                memcpy(cardef, s_loaded_cardef[slot], 0x8C);
+            }
+            actor->tuning_data_ptr = tuning;
+            actor->car_definition_ptr = cardef;
+            TD5_LOG_I(LOG_TAG, "bind_tuning slot=%d: using AI template (Wf=%d Wr=%d I=%d)",
+                      slot, *(int16_t *)(tuning + 0x28),
+                      *(int16_t *)(tuning + 0x2A),
+                      *(int32_t *)(tuning + 0x20));
+            return;
+        }
+    }
 
     /* If carparam.dat was loaded for this slot, use it directly */
     if (slot < TD5_MAX_TOTAL_ACTORS && s_carparam_loaded[slot]) {
