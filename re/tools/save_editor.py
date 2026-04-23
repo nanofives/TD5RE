@@ -29,7 +29,7 @@ CONFIG_SIZE = 5351
 CUPDATA_SIZE = 12966
 
 CONFIG_KEY = b"Outta Mah Face !! "          # 18 bytes (space before !!)
-CUPDATA_KEY = b"Steve Snake says : No Cheating! "  # 31 bytes
+CUPDATA_KEY = b"Steve Snake says : No Cheating! "  # 32 bytes (trailing space)
 
 CRC_PLACEHOLDER = bytes([0x10, 0x00, 0x00, 0x00])
 
@@ -142,7 +142,10 @@ def recompute_crc(plain: bytearray, ftype: str) -> bytearray:
 # ---------------------------------------------------------------------------
 
 def parse_npc_entry(data: bytes, offset: int) -> dict:
-    name_raw = data[offset:offset + 13]
+    # Name field is 16 bytes total (not 13). Some original entries contain
+    # non-ASCII bytes in positions 13-15 — preserve them as raw hex so roundtrip
+    # is byte-identical even when we can't interpret them.
+    name_raw = data[offset:offset + 16]
     name = name_raw.split(b"\x00")[0].decode("ascii", errors="replace")
     car_sprite_id = struct.unpack_from("<I", data, offset + 0x10)[0]
     car_index = struct.unpack_from("<I", data, offset + 0x14)[0]
@@ -150,6 +153,7 @@ def parse_npc_entry(data: bytes, offset: int) -> dict:
     best_race_ms = struct.unpack_from("<I", data, offset + 0x1C)[0]
     return {
         "name": name,
+        "_name_raw_hex": name_raw.hex(),
         "car_sprite_id": car_sprite_id,
         "car_index": car_index,
         "best_lap_ms": best_lap_ms,
@@ -295,12 +299,11 @@ def parse_cupdata(plain: bytearray) -> dict:
         results.append(struct.unpack_from("<I", plain, 0x88 + i * 4)[0])
     d["race_results"] = results
 
-    # Actor state summary (6 slots x 0x388 bytes at offset 0x100)
-    # Only extract key fields, not the full 12624-byte blob
+    # Actor state (14 slots x 0x388 bytes at offset 0x100, total 12656 bytes).
+    # Stored as hex strings; too large to field-decode here.
     actor_slots = []
-    for s in range(6):
+    for s in range(14):
         slot_off = 0x100 + s * 0x388
-        # Just store as hex -- too large and complex to fully parse here
         actor_slots.append(plain[slot_off:slot_off + 0x388].hex())
     d["actor_slots_hex"] = actor_slots
 
@@ -310,16 +313,25 @@ def parse_cupdata(plain: bytearray) -> dict:
         slot_states.append(struct.unpack_from("<I", plain, 0x3270 + s * 4)[0])
     d["slot_states"] = slot_states
 
-    # Masters state + cup sub-state
-    d["masters_opponent_base"] = struct.unpack_from("<I", plain, 0x3288)[0]
-    d["cup_substate_a"] = struct.unpack_from("<I", plain, 0x3290)[0]
-    d["cup_substate_b"] = struct.unpack_from("<I", plain, 0x3294)[0]
-    d["cup_substate_byte_a"] = plain[0x3296]
-    d["cup_substate_word_a"] = struct.unpack_from("<H", plain, 0x3297)[0]
-    d["cup_substate_c"] = struct.unpack_from("<I", plain, 0x329B)[0]
-    d["masters_encounter_flags"] = struct.unpack_from("<I", plain, 0x329F)[0]
-    d["cup_substate_word_b"] = struct.unpack_from("<H", plain, 0x32A3)[0]
-    d["cup_substate_byte_b"] = plain[0x32A5]
+    # Tail region (0x3288-0x32A5): Masters state + P1/P2 cup pairs.
+    # Field offsets, widths, and P1/P2 pairing verified against port's
+    # TD5_CupDataBuffer and Ghidra xrefs.
+    d["masters_schedule_base"]     = struct.unpack_from("<I", plain, 0x3288)[0]
+    d["p2_cup_schedule_index"]     = struct.unpack_from("<I", plain, 0x328C)[0]
+    d["p1_cup_schedule_index"]     = struct.unpack_from("<I", plain, 0x3290)[0]
+    d["p1_cup_completion_bitmask"] = struct.unpack_from("<H", plain, 0x3294)[0]
+    d["p1_selected_cup_id"]        = plain[0x3296]
+    d["masters_encounter_flags"]   = struct.unpack_from("<I", plain, 0x3297)[0]
+    d["p1_masters_unlock_bitmask"] = struct.unpack_from("<I", plain, 0x329B)[0]
+    d["p2_masters_unlock_bitmask"] = struct.unpack_from("<I", plain, 0x329F)[0]
+    d["p2_cup_completion_bitmask"] = struct.unpack_from("<H", plain, 0x32A3)[0]
+    d["p2_cup_lock_flag"]          = plain[0x32A5]
+
+    # Schedule cross-refs (overlap with race_schedule[6/12/18/24]).
+    d["cup_progress_marker"] = struct.unpack_from("<I", plain, 0x28)[0]
+    d["cup_cross_ref_1"]     = struct.unpack_from("<I", plain, 0x40)[0]
+    d["cup_cross_ref_2"]     = struct.unpack_from("<I", plain, 0x58)[0]
+    d["cup_cross_ref_3"]     = struct.unpack_from("<I", plain, 0x70)[0]
 
     return d
 
@@ -410,10 +422,17 @@ def rebuild_config(d: dict, plain: bytearray) -> bytearray:
             struct.pack_into("<I", buf, goff, int(group.get("header", 0)))
             for e, entry in enumerate(group.get("entries", [])[:5]):
                 eoff = goff + 0x04 + e * 0x20
-                # Name (13 bytes, NUL-padded)
-                name_bytes = entry.get("name", "").encode("ascii")[:13]
-                buf[eoff:eoff + 13] = name_bytes.ljust(13, b"\x00")
-                buf[eoff + 13:eoff + 16] = b"\x00\x00\x00"  # padding
+                # Name (16 bytes). Prefer raw hex if present (preserves
+                # non-ASCII bytes from the original binary for lossless
+                # roundtrip); otherwise encode the ASCII name, NUL-pad.
+                if "_name_raw_hex" in entry:
+                    nb = bytes.fromhex(entry["_name_raw_hex"])[:16]
+                    buf[eoff:eoff + len(nb)] = nb
+                    if len(nb) < 16:
+                        buf[eoff + len(nb):eoff + 16] = b"\x00" * (16 - len(nb))
+                else:
+                    name_bytes = entry.get("name", "").encode("ascii")[:16]
+                    buf[eoff:eoff + 16] = name_bytes.ljust(16, b"\x00")
                 struct.pack_into("<I", buf, eoff + 0x10, int(entry.get("car_sprite_id", 0)))
                 struct.pack_into("<I", buf, eoff + 0x14, int(entry.get("car_index", 0)))
                 struct.pack_into("<I", buf, eoff + 0x18, int(entry.get("best_lap_ms", 0)))
@@ -479,7 +498,7 @@ def rebuild_cupdata(d: dict, plain: bytearray) -> bytearray:
             struct.pack_into("<I", buf, 0x88 + i * 4, int(v))
 
     if "actor_slots_hex" in d:
-        for s, hexstr in enumerate(d["actor_slots_hex"][:6]):
+        for s, hexstr in enumerate(d["actor_slots_hex"][:14]):
             slot_off = 0x100 + s * 0x388
             slot_data = bytes.fromhex(hexstr)
             buf[slot_off:slot_off + len(slot_data)] = slot_data
@@ -488,24 +507,58 @@ def rebuild_cupdata(d: dict, plain: bytearray) -> bytearray:
         for s, v in enumerate(d["slot_states"][:6]):
             struct.pack_into("<I", buf, 0x3270 + s * 4, int(v))
 
-    if "masters_opponent_base" in d:
-        struct.pack_into("<I", buf, 0x3288, int(d["masters_opponent_base"]))
-    if "cup_substate_a" in d:
-        struct.pack_into("<I", buf, 0x3290, int(d["cup_substate_a"]))
-    if "cup_substate_b" in d:
-        struct.pack_into("<I", buf, 0x3294, int(d["cup_substate_b"]))
-    if "cup_substate_byte_a" in d:
-        buf[0x3296] = int(d["cup_substate_byte_a"])
-    if "cup_substate_word_a" in d:
-        struct.pack_into("<H", buf, 0x3297, int(d["cup_substate_word_a"]))
-    if "cup_substate_c" in d:
-        struct.pack_into("<I", buf, 0x329B, int(d["cup_substate_c"]))
-    if "masters_encounter_flags" in d:
-        struct.pack_into("<I", buf, 0x329F, int(d["masters_encounter_flags"]))
-    if "cup_substate_word_b" in d:
-        struct.pack_into("<H", buf, 0x32A3, int(d["cup_substate_word_b"]))
-    if "cup_substate_byte_b" in d:
-        buf[0x32A5] = int(d["cup_substate_byte_b"])
+    # Tail region. Accept both new P1/P2 names and legacy cup_substate_* aliases
+    # for backward compatibility with older JSON exports. Note: legacy labels at
+    # 0x3294 and 0x329F had wrong widths/fields, so those are NOT aliased through.
+    def _take(primary, *aliases):
+        if primary in d:
+            return d[primary]
+        for a in aliases:
+            if a in d:
+                return d[a]
+        return None
+
+    v = _take("masters_schedule_base", "masters_opponent_base")
+    if v is not None:
+        struct.pack_into("<I", buf, 0x3288, int(v))
+    v = _take("p2_cup_schedule_index")
+    if v is not None:
+        struct.pack_into("<I", buf, 0x328C, int(v))
+    v = _take("p1_cup_schedule_index", "cup_substate_a")
+    if v is not None:
+        struct.pack_into("<I", buf, 0x3290, int(v))
+    v = _take("p1_cup_completion_bitmask")  # legacy cup_substate_b had wrong width, drop
+    if v is not None:
+        struct.pack_into("<H", buf, 0x3294, int(v) & 0xFFFF)
+    v = _take("p1_selected_cup_id", "cup_substate_byte_a")
+    if v is not None:
+        buf[0x3296] = int(v) & 0xFF
+    v = _take("masters_encounter_flags")  # legacy cup_substate_word_a was wrong width/field
+    if v is not None:
+        struct.pack_into("<I", buf, 0x3297, int(v))
+    v = _take("p1_masters_unlock_bitmask", "cup_substate_c")
+    if v is not None:
+        struct.pack_into("<I", buf, 0x329B, int(v))
+    v = _take("p2_masters_unlock_bitmask")  # legacy masters_encounter_flags at 0x329F was MISLABELED
+    if v is not None:
+        struct.pack_into("<I", buf, 0x329F, int(v))
+    v = _take("p2_cup_completion_bitmask", "cup_substate_word_b")
+    if v is not None:
+        struct.pack_into("<H", buf, 0x32A3, int(v) & 0xFFFF)
+    v = _take("p2_cup_lock_flag", "cup_substate_byte_b")
+    if v is not None:
+        buf[0x32A5] = int(v) & 0xFF
+
+    # Schedule cross-refs (overlap with race_schedule[6/12/18/24]; applied AFTER
+    # race_schedule above so they take precedence on round-trip).
+    for key, off in [
+        ("cup_progress_marker", 0x28),
+        ("cup_cross_ref_1",     0x40),
+        ("cup_cross_ref_2",     0x58),
+        ("cup_cross_ref_3",     0x70),
+    ]:
+        if key in d:
+            struct.pack_into("<I", buf, off, int(d[key]))
 
     return buf
 
@@ -555,9 +608,11 @@ CONFIG_VIRTUAL_FIELDS = {
 }
 
 CUPDATA_QUICK_FIELDS = {
+    # Header flags (0x00-0x0B)
     "game_type":             (0x00, 1, "u8"),
     "race_index":            (0x01, 1, "u8"),
     "npc_group_index":       (0x02, 1, "u8"),
+    "track_opponent_state":  (0x03, 1, "u8"),
     "race_rule_variant":     (0x04, 1, "u8"),
     "time_trial_flag":       (0x05, 1, "u8"),
     "wanted_flag":           (0x06, 1, "u8"),
@@ -566,13 +621,46 @@ CUPDATA_QUICK_FIELDS = {
     "traffic_enabled":       (0x09, 1, "u8"),
     "encounter_enabled":     (0x0A, 1, "u8"),
     "circuit_lap_count":     (0x0B, 1, "u8"),
+    # Schedule cross-refs (embedded in race_schedule region at [6/12/18/24])
+    "cup_progress_marker":   (0x28,   4, "u32"),  # player grid/qualifying position
+    "cup_cross_ref_1":       (0x40,   4, "u32"),  # player selected car ID
+    "cup_cross_ref_2":       (0x58,   4, "u32"),  # extended car ID (paint/variant)
+    "cup_cross_ref_3":       (0x70,   4, "u32"),  # weather/env flag
+    # Tail region (Masters state + P1/P2 cup pairs, 0x3288-0x32A5)
+    "masters_schedule_base":       (0x3288, 4, "u32"),
+    "p2_cup_schedule_index":       (0x328C, 4, "u32"),
+    "p1_cup_schedule_index":       (0x3290, 4, "u32"),
+    "p1_cup_completion_bitmask":   (0x3294, 2, "u16"),  # bits 0-14 = 15 cups
+    "p1_selected_cup_id":          (0x3296, 1, "u8"),   # 0-14=id, 0x20=locked, 0x24=champ, 0xFF=invalid
+    "masters_encounter_flags":     (0x3297, 4, "u32"),
+    "p1_masters_unlock_bitmask":   (0x329B, 4, "u32"),
+    "p2_masters_unlock_bitmask":   (0x329F, 4, "u32"),
+    "p2_cup_completion_bitmask":   (0x32A3, 2, "u16"),
+    "p2_cup_lock_flag":            (0x32A5, 1, "u8"),   # 0=available, nonzero=locked
+}
+
+CUPDATA_VIRTUAL_FIELDS = {
+    "clear_cup_progress",
+    "unlock_all_cups_p1",
+    "unlock_all_cups_p2",
 }
 
 def apply_virtual_field(buf: bytearray, ftype: str, field: str, value: int):
     """Apply a virtual field that modifies multiple bytes."""
-    if ftype != "config":
-        raise ValueError(f"Virtual field '{field}' only applies to Config.td5")
+    if field in CONFIG_VIRTUAL_FIELDS:
+        if ftype != "config":
+            raise ValueError(f"Virtual field '{field}' applies to Config.td5, not {ftype}")
+        _apply_config_virtual(buf, field, value)
+        return
+    if field in CUPDATA_VIRTUAL_FIELDS:
+        if ftype != "cupdata":
+            raise ValueError(f"Virtual field '{field}' applies to CupData.td5, not {ftype}")
+        _apply_cupdata_virtual(buf, field, value)
+        return
+    raise ValueError(f"Unknown virtual field '{field}'")
 
+
+def _apply_config_virtual(buf: bytearray, field: str, value: int):
     if field == "unlock_all_cars":
         if value:
             buf[0x148D] = 1  # all_cars_unlocked flag
@@ -606,14 +694,38 @@ def apply_virtual_field(buf: bytearray, ftype: str, field: str, value: int):
             print("  Cup tier reset to 0 (Championship/Era only).")
 
     elif field == "unlock_everything":
+        _apply_config_virtual(buf, "unlock_all_cars",   1 if value else 0)
+        _apply_config_virtual(buf, "unlock_all_tracks", 1 if value else 0)
+        _apply_config_virtual(buf, "unlock_all_cups",   1 if value else 0)
+
+
+def _apply_cupdata_virtual(buf: bytearray, field: str, value: int):
+    if field == "clear_cup_progress":
+        # Zero header flags, schedule, results, and tail region. Leave the
+        # actor_state (0x100-0x326F) + slot_state (0x3270-0x3287) alone since
+        # those are the actor table dump — a fresh spawn will populate them.
+        for off in range(0x00, 0x0C):
+            buf[off] = 0
+        for off in range(0x10, 0x100):  # schedule + results
+            buf[off] = 0
+        for off in range(0x3288, 0x32A6):  # tail region
+            buf[off] = 0
+        buf[0] = 0xFF  # game_type=0xFF -> "no active cup"
+        print("  Cup progress cleared (game_type set to 0xFF / None).")
+    elif field == "unlock_all_cups_p1":
         if value:
-            apply_virtual_field(buf, ftype, "unlock_all_cars", 1)
-            apply_virtual_field(buf, ftype, "unlock_all_tracks", 1)
-            apply_virtual_field(buf, ftype, "unlock_all_cups", 1)
+            struct.pack_into("<H", buf, 0x3294, 0x7FFF)  # bits 0-14 = 15 cups
+            print("  P1 cup completion bitmask set to 0x7FFF (all 15 cups).")
         else:
-            apply_virtual_field(buf, ftype, "unlock_all_cars", 0)
-            apply_virtual_field(buf, ftype, "unlock_all_tracks", 0)
-            apply_virtual_field(buf, ftype, "unlock_all_cups", 0)
+            struct.pack_into("<H", buf, 0x3294, 0)
+            print("  P1 cup completion bitmask cleared.")
+    elif field == "unlock_all_cups_p2":
+        if value:
+            struct.pack_into("<H", buf, 0x32A3, 0x7FFF)
+            print("  P2 cup completion bitmask set to 0x7FFF (all 15 cups).")
+        else:
+            struct.pack_into("<H", buf, 0x32A3, 0)
+            print("  P2 cup completion bitmask cleared.")
 
 # ---------------------------------------------------------------------------
 # Display helpers
@@ -734,6 +846,26 @@ def display_cupdata(d: dict):
     print("  --- Slot States ---")
     for i, s in enumerate(d["slot_states"]):
         print(f"    slot {i}: 0x{s:08X}")
+    print()
+
+    print("  --- Schedule Cross-refs ---")
+    print(f"    cup_progress_marker         = {d['cup_progress_marker']} (player grid position)")
+    print(f"    cup_cross_ref_1             = {d['cup_cross_ref_1']} (selected car ID)")
+    print(f"    cup_cross_ref_2             = {d['cup_cross_ref_2']} (extended car ID / paint)")
+    print(f"    cup_cross_ref_3             = {d['cup_cross_ref_3']} (weather/env flag)")
+    print()
+
+    print("  --- Masters / Cup Tail ---")
+    print(f"    masters_schedule_base       = 0x{d['masters_schedule_base']:08X}")
+    print(f"    masters_encounter_flags     = 0x{d['masters_encounter_flags']:08X}")
+    print(f"    P1 cup schedule index       = {d['p1_cup_schedule_index']}")
+    print(f"    P1 cup completion bitmask   = 0x{d['p1_cup_completion_bitmask']:04X}")
+    print(f"    P1 selected cup ID          = 0x{d['p1_selected_cup_id']:02X}")
+    print(f"    P1 masters unlock bitmask   = 0x{d['p1_masters_unlock_bitmask']:08X}")
+    print(f"    P2 cup schedule index       = {d['p2_cup_schedule_index']}")
+    print(f"    P2 cup completion bitmask   = 0x{d['p2_cup_completion_bitmask']:04X}")
+    print(f"    P2 cup lock flag            = {d['p2_cup_lock_flag']}")
+    print(f"    P2 masters unlock bitmask   = 0x{d['p2_masters_unlock_bitmask']:08X}")
 
 # ---------------------------------------------------------------------------
 # CLI commands
@@ -825,23 +957,27 @@ def cmd_set(args):
     value = int(args.value, 0)  # supports hex (0x...) and decimal
 
     # Check virtual fields first
-    if field in CONFIG_VIRTUAL_FIELDS:
+    if field in CONFIG_VIRTUAL_FIELDS or field in CUPDATA_VIRTUAL_FIELDS:
         apply_virtual_field(plain, ftype, field, value)
     else:
         # Lookup in quick-field tables
         table = CONFIG_QUICK_FIELDS if ftype == "config" else CUPDATA_QUICK_FIELDS
+        virt = CONFIG_VIRTUAL_FIELDS if ftype == "config" else CUPDATA_VIRTUAL_FIELDS
         if field not in table:
-            all_fields = sorted(list(table.keys()) | (CONFIG_VIRTUAL_FIELDS if ftype == "config" else set()))
+            all_fields = sorted(set(table.keys()) | virt)
             print(f"Unknown field '{field}'. Available fields:")
             for f in all_fields:
                 print(f"  {f}")
             sys.exit(1)
 
         offset, size, dtype = table[field]
-        old_val = struct.unpack_from("<I" if dtype == "u32" else "B", plain, offset)[0]
+        fmt = {"u32": "<I", "u16": "<H", "u8": "B"}[dtype]
+        old_val = struct.unpack_from(fmt, plain, offset)[0]
         if dtype == "u32":
-            struct.pack_into("<I", plain, offset, value)
-        else:
+            struct.pack_into("<I", plain, offset, value & 0xFFFFFFFF)
+        elif dtype == "u16":
+            struct.pack_into("<H", plain, offset, value & 0xFFFF)
+        else:  # u8
             plain[offset] = value & 0xFF
         print(f"  {field}: {old_val} -> {value}")
 
@@ -868,8 +1004,13 @@ def cmd_fields(args):
     else:
         print("CupData.td5 fields:")
         print()
+        print("  --- Direct Fields ---")
         for name, (off, size, dtype) in sorted(CUPDATA_QUICK_FIELDS.items(), key=lambda x: x[1][0]):
-            print(f"    {name:25s}  offset=0x{off:04X}  size={size}  type={dtype}")
+            print(f"    {name:30s}  offset=0x{off:04X}  size={size}  type={dtype}")
+        print()
+        print("  --- Virtual Fields (batch operations) ---")
+        for name in sorted(CUPDATA_VIRTUAL_FIELDS):
+            print(f"    {name}")
 
 # ---------------------------------------------------------------------------
 # Main
@@ -881,15 +1022,26 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""\
 examples:
-  %(prog)s info Config.td5                          Show all fields
-  %(prog)s decrypt Config.td5 --out config.bin      Decrypt to raw binary
-  %(prog)s encrypt config.bin --out Config.td5      Re-encrypt from raw binary
-  %(prog)s export Config.td5 --json config.json     Export to JSON
-  %(prog)s import config.json --out Config.td5      Import from JSON
-  %(prog)s set Config.td5 unlock_all_cars 1         Unlock all cars
-  %(prog)s set Config.td5 sfx_volume 80             Set SFX volume to 80
-  %(prog)s set Config.td5 difficulty 2              Set difficulty to Hard
-  %(prog)s fields config                            List all editable fields
+  %(prog)s info Config.td5                            Show all fields
+  %(prog)s decrypt Config.td5 --out config.bin        Decrypt to raw binary
+  %(prog)s encrypt config.bin --out Config.td5        Re-encrypt from raw binary
+  %(prog)s export Config.td5 --json config.json       Export to JSON
+  %(prog)s import config.json --out Config.td5        Import from JSON
+
+  Config.td5 edits:
+  %(prog)s set Config.td5 unlock_all_cars 1           Unlock all cars
+  %(prog)s set Config.td5 sfx_volume 80               Set SFX volume
+  %(prog)s set Config.td5 difficulty 2                Set difficulty to Hard
+  %(prog)s set Config.td5 unlock_everything 1         Cars + tracks + cups
+
+  CupData.td5 edits:
+  %(prog)s set CupData.td5 clear_cup_progress 1       Reset active cup
+  %(prog)s set CupData.td5 unlock_all_cups_p1 1       P1 all-cups bitmask
+  %(prog)s set CupData.td5 cup_progress_marker 3      Set P1 grid position
+  %(prog)s set CupData.td5 p1_selected_cup_id 2       Pick P1 cup ID
+
+  %(prog)s fields config                              List Config.td5 fields
+  %(prog)s fields cupdata                             List CupData.td5 fields
 """)
     sub = parser.add_subparsers(dest="command", required=True)
 
