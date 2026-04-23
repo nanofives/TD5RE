@@ -271,21 +271,37 @@ void td5_physics_wall_response(TD5_Actor *actor, int32_t wall_angle,
 
         new_v_perp = v_perp + impulse;
 
-        /* Tangential damping: sign-branched on v_para. tmp * 0x180 >> 11
-         * with the clamp-to-zero crossover rule.
-         * [CONFIRMED @ 0x00406AE2-0x00406B69] */
+        /* Tangential damping — asm-faithful asymmetry [CONFIRMED via asm
+         * 0x00406B0B-0x00406B69]:
+         *   v_para >  0 branch: new_v_para = v_para - delta, clamped to 0
+         *                       if the subtraction crosses sign (JNS at
+         *                       0x00406B33 → zero at 0x00406B69).
+         *   v_para <= 0 branch: new_v_para = v_para + delta, NO CLAMP
+         *                       (TEST/JLE at 0x00406B65 jumps straight to
+         *                       the rotate-back code with whatever value).
+         *
+         * The asymmetry is what lets the wall REDIRECT sideways-sliding
+         * impacts: a glancing crash with negative tangential v_para gets
+         * +delta added, often flipping v_para positive — the "wall-friction
+         * reorient" effect. Clamping that branch to 0 (as the port did
+         * before 2026-04-23) zeroed the lateral slide and stopped the car
+         * dead on every sideways hit.
+         *
+         * Branch order matches the asm (positive first) so the missing
+         * clamp on the negative branch stays visually obvious. */
         int32_t v_para_round = v_para >> 6;  /* signed shift; arithmetic-round */
         int32_t tmp;
-        if (v_para < 1) {
-            tmp = (iVar11 * 2 + 0x800) - v_para_round;
-            int32_t delta = (tmp * 0x180) >> 11;
-            new_v_para = v_para + delta;
-            if (new_v_para < 1) new_v_para = 0;
-        } else {
+        if (v_para > 0) {
             tmp = v_para_round + 0x800 + iVar11 * 2;
             int32_t delta = (tmp * 0x180) >> 11;
             new_v_para = v_para - delta;
             if (new_v_para < 0) new_v_para = 0;
+        } else {
+            tmp = (iVar11 * 2 + 0x800) - v_para_round;
+            int32_t delta = (tmp * 0x180) >> 11;
+            new_v_para = v_para + delta;
+            /* No clamp — original asm at 0x00406B65 jumps to rotate-back
+             * regardless of new_v_para's sign. */
         }
 
         /* Angular velocity update: ω += (impulse * iVar9) / (K / 0x28C).

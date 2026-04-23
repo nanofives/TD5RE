@@ -686,28 +686,25 @@ void td5_track_resolve_wall_contacts(TD5_Actor *actor)
         }
     }
 
-    /* Two-pass approach to filter single-probe false positives.
-     * Pass 1: compute all probes' penetrations against both walls.
-     * Pass 2: only fire impulse if 2+ probes hit the SAME wall with
-     *         genuine penetration. Single-probe hits are typically
-     *         caused by geometry edge cases (lane-count transitions,
-     *         narrow spans, walker lag) — not real wall contact. */
-    const int32_t WALL_DEAD_ZONE = -10;
+    /* Per-probe pass: matches original 0x00406CC0 dispatch — fires
+     * ApplyTrackSurfaceForceToActor the moment a probe crosses any edge
+     * (cross-product < 0). No dead zone, no penetration clamp, no probe
+     * voting in the original [CONFIRMED @ 0x00406980 / 0x00406D58]. The
+     * artificial gates this used to have (WALL_DEAD_ZONE=-10, d<-30 clamp,
+     * l/r_hit_count >= 2) delayed and capped the impulse, producing the
+     * "car clips half its hood through wall before pushback" symptom.
+     * Removed 2026-04-23 per fix branch fix-1776949418-4995. */
     int32_t probe_l_d[4] = {0}, probe_r_d[4] = {0};
     int probe_l_ok[4] = {0}, probe_r_ok[4] = {0};
-    int l_hit_count = 0, r_hit_count = 0;
-    int32_t l_deepest = 0, r_deepest = 0;
 
     for (int pi = 0; pi < 4; pi++) {
         int32_t px = probe_block[pi].x >> 8;
         int32_t pz = probe_block[pi].z >> 8;
 
         /* Per-probe sub_lane extremity gate — matches original 0x00406CC0
-         * branch1 / branch2 dispatch. The probe's wheel_probes[pi]
-         * sub_lane_index is set by the boundary walker; sub_lane==0 is
-         * the strip-entry edge, sub_lane==lane_count-1 is the strip-exit
-         * edge. Probes at interior sub_lanes contribute nothing —
-         * matches the original's fall-through for middle sub_lanes. */
+         * branch1 / branch2 dispatch [CONFIRMED @ 0x00406CFC / 0x00406D88].
+         * sub_lane==0 → l_wall test (strip entry); sub_lane>=lane_count-1
+         * → r_wall test (strip exit). Interior sub_lanes fall through. */
         int probe_sub_lane = (int)actor->wheel_probes[pi].sub_lane_index;
         int l_extremity = (probe_sub_lane == 0);
         int r_extremity = (probe_sub_lane >= lane_count - 1);
@@ -717,26 +714,16 @@ void td5_track_resolve_wall_contacts(TD5_Actor *actor)
             int32_t rel_z = pz - l_par.base_z - sp->origin_z;
             int64_t dot = (int64_t)rel_x * l_par.nnx + (int64_t)rel_z * l_par.nnz;
             int32_t d = (int32_t)((dot + ((dot >> 63) & 0xFFF)) >> 12);
-            if (d < -30) d = -30;
             probe_l_d[pi] = d;
             probe_l_ok[pi] = l_extremity;
-            if (l_extremity && d < WALL_DEAD_ZONE) {
-                l_hit_count++;
-                if (d < l_deepest) l_deepest = d;
-            }
         }
         if (r_par.ok) {
             int32_t rel_x = px - r_par.base_x - sp->origin_x;
             int32_t rel_z = pz - r_par.base_z - sp->origin_z;
             int64_t dot = (int64_t)rel_x * r_par.nnx + (int64_t)rel_z * r_par.nnz;
             int32_t d = (int32_t)((dot + ((dot >> 63) & 0xFFF)) >> 12);
-            if (d < -30) d = -30;
             probe_r_d[pi] = d;
             probe_r_ok[pi] = r_extremity;
-            if (r_extremity && d < WALL_DEAD_ZONE) {
-                r_hit_count++;
-                if (d < r_deepest) r_deepest = d;
-            }
         }
 
         if (diag_slot0) {
@@ -746,31 +733,37 @@ void td5_track_resolve_wall_contacts(TD5_Actor *actor)
         }
     }
 
-    /* Pass 2: apply impulses only if 2+ probes hit the same wall. */
+    /* Apply impulses per-probe. Original 0x00406CC0 dispatches one
+     * ApplyTrackSurfaceForceToActor call per probe-edge crossing — no
+     * voting, no aggregate. Each probe that's outside its wall fires its
+     * own impulse + position-push the same tick the cross-product turns
+     * negative [CONFIRMED @ 0x00406CDA-0x00406F1F]. */
     for (int pi = 0; pi < 4; pi++) {
-        /* Skip probe if both walls say it's outside (degenerate span). */
+        /* Skip probe if both walls say it's outside (degenerate span):
+         * firing both impulses would push the actor in opposite directions
+         * and still trap it inside an invisible barrier. */
         if (probe_l_ok[pi] && probe_r_ok[pi] &&
             probe_l_d[pi] < 0 && probe_r_d[pi] < 0)
             continue;
 
-        if (probe_l_ok[pi] && probe_l_d[pi] < WALL_DEAD_ZONE && l_hit_count >= 2) {
+        if (probe_l_ok[pi] && probe_l_d[pi] < 0) {
             double rad = atan2((double)l_par.nnx, (double)(-l_par.nnz));
             int32_t wall_angle = (int32_t)(rad * (4096.0 / (2.0 * 3.14159265358979323846))) & 0xFFF;
             td5_physics_wall_response(actor, wall_angle, probe_l_d[pi], 1,
                                       probe_block[pi].x, probe_block[pi].z);
             td5_physics_rebuild_pose(actor);
-            TD5_LOG_I(LOG_TAG, "wall_contact: slot=%d probe=%d LEFT span=%d d=%d angle=%d n=%d",
-                      actor->slot_index, pi, span_idx, probe_l_d[pi], wall_angle, l_hit_count);
+            TD5_LOG_I(LOG_TAG, "wall_contact: slot=%d probe=%d LEFT span=%d d=%d angle=%d",
+                      actor->slot_index, pi, span_idx, probe_l_d[pi], wall_angle);
         }
 
-        if (probe_r_ok[pi] && probe_r_d[pi] < WALL_DEAD_ZONE && r_hit_count >= 2) {
+        if (probe_r_ok[pi] && probe_r_d[pi] < 0) {
             double rad = atan2((double)r_par.nnx, (double)(-r_par.nnz));
             int32_t wall_angle = (int32_t)(rad * (4096.0 / (2.0 * 3.14159265358979323846))) & 0xFFF;
             td5_physics_wall_response(actor, wall_angle, probe_r_d[pi], 2,
                                       probe_block[pi].x, probe_block[pi].z);
             td5_physics_rebuild_pose(actor);
-            TD5_LOG_I(LOG_TAG, "wall_contact: slot=%d probe=%d RIGHT span=%d d=%d angle=%d n=%d",
-                      actor->slot_index, pi, span_idx, probe_r_d[pi], wall_angle, r_hit_count);
+            TD5_LOG_I(LOG_TAG, "wall_contact: slot=%d probe=%d RIGHT span=%d d=%d angle=%d",
+                      actor->slot_index, pi, span_idx, probe_r_d[pi], wall_angle);
         }
     }
 }
