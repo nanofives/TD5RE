@@ -1739,27 +1739,30 @@ void td5_physics_update_ai(TD5_Actor *actor)
         td5_physics_update_engine_speed(actor);
     }
 
-    /* Double drive forces for bicycle model input [CONFIRMED @ 0x405285] */
-    front_drive *= 2;
-    rear_drive  *= 2;
+    /* Double drive forces for bicycle model input [CONFIRMED @ 0x405285].
+     * Original has drive = torque/4 pre-LAB, then *2 = drive/2 post-LAB.
+     * Port's pre-LAB had drive = torque/2, so undo one of the *2 by /2 to
+     * match original's drive/2 magnitude entering the bicycle solve. */
+    front_drive = front_drive;  /* iVar18 (from local_40 * 2 in original) */
+    rear_drive  = rear_drive;   /* local_3c (from local_3c * 2) */
 
-    /* --- 7. Coupled bicycle model lateral forces [CONFIRMED @ 0x40529D-0x4054F7]
+    /* --- 7. Coupled bicycle model lateral forces — VERBATIM port of
+     * FUN_00404EC0 @ 0x00405285-0x004054F3. Variable names match the
+     * Ghidra decomp exactly (iVar13..iVar17, local_40, local_44) so shifts
+     * and operand orderings can be cross-checked line-by-line.
      *
-     * Mass-matrix inversion with front/rear coupling:
-     *   A = (Wr^2 + I) >> 10
-     *   B = (Wf + Wr)^2 >> 10
-     *   D = (Wf*Wr - I) >> 10
-     *   det = B*cos_d^2 + A*sin_d^2  (each mult >>12)
+     * Semantic mapping (verified via the yaw_torque formula at the bottom
+     * of the function, where cos_d*Wf pairs with local_44):
+     *   local_44 → FRONT_LAT (Ff) — paired with cos_d*Wf in yaw moment
+     *   local_40 → REAR_LAT  (Fr) — paired with Wr
      *
-     *   yaw_term = (I / 0x28C) * omega
-     *   yaw_lat  = (Wr * omega) / 0x28C - v_lat
+     * Prior port labelled these in reverse, which is why every previous
+     * "sign flip" / "operand swap" attempt only half-worked.
      *
-     *   FRONT_LAT = [yaw_lat*D*cos_d*sin_d + (Ff*cos_d+Fr+v_long)*D*cos_d
-     *              + D*Ff*sin_d^2 + (yaw_term - v_lat*Wf)*(Wf+Wr)*cos_d^2] / det
-     *
-     *   REAR_LAT  = [((Wf+2*Wr)*Wf - I)>>10 * Ff*cos_d + (Fr+v_long)*A
-     *              - (v_lat*Wr + yaw_term)*(Wf+Wr)*cos_d] / det
+     * Sign-bias pattern `(x + (x>>31 & MASK)) >> SHIFT` is Ghidra's
+     * round-toward-zero arithmetic shift. Kept verbatim via the SBR macro.
      */
+    #define SBR(x, mask, shift) (((int32_t)((x) + (((x) >> 31) & (mask))) >> (shift)))
     int32_t front_lat, rear_lat;
     {
         int32_t Wf = front_weight;
@@ -1767,35 +1770,61 @@ void td5_physics_update_ai(TD5_Actor *actor)
         int32_t I  = inertia;
         int32_t omega = yaw_rate;
 
-        int32_t A = ((int64_t)Wr * Wr + I) >> 10;
-        int32_t B = ((int64_t)(Wf + Wr) * (Wf + Wr)) >> 10;
-        int32_t D = ((int64_t)Wf * Wr - I) >> 10;
-
-        /* Determinant: B*cos_d^2 + A*sin_d^2 (each product >>12) */
-        int32_t cos_d2 = (cos_d * cos_d) >> 12;
-        int32_t sin_d2 = (sin_d * sin_d) >> 12;
-        int32_t det = (int32_t)(((int64_t)B * cos_d2 + (int64_t)A * sin_d2) >> 12);
+        /* Determinant `local_44` (reused var — same name as original). */
+        int32_t iVar4  = SBR((int64_t)Wr * Wr + I, 0x3FF, 10);                    /* A  */
+        int32_t iVar13 = SBR((int64_t)(Wr + Wf) * (Wr + Wf), 0x3FF, 10) * cos_d;   /* B*cos_d */
+                iVar13 = SBR(iVar13, 0xFFF, 12) * cos_d;                           /* B*cos_d² */
+        int32_t iVar14 = iVar4 * sin_d;                                            /* A*sin_d */
+                iVar14 = SBR(iVar14, 0xFFF, 12) * sin_d;                           /* A*sin_d² */
+        int32_t det = SBR(iVar13, 0xFFF, 12) + SBR(iVar14, 0xFFF, 12);             /* local_44 */
         if (det == 0) det = 1;
 
-        int32_t yaw_term = inertia_div * omega;
-        int32_t yaw_lat  = (Wr * omega) / 0x28C - v_lat;
+        /* D coefficient `iVar14` (reused var). */
+                iVar14 = SBR((int64_t)Wr * Wf - I, 0x3FF, 10);                     /* D */
 
-        /* Front lateral force */
-        int64_t f_num = 0;
-        f_num += (int64_t)yaw_lat * D * ((int64_t)cos_d * sin_d >> 12) >> 12;
-        f_num += (int64_t)((int64_t)(front_drive * cos_d >> 12) + rear_drive + v_long) * D * cos_d >> 24;
-        f_num += (int64_t)D * front_drive * sin_d2 >> 24;
-        f_num += (int64_t)(yaw_term - (int64_t)v_lat * Wf) * (Wf + Wr) * cos_d2 >> 24;
-        front_lat = (int32_t)(f_num / det);
+        /* yaw_term `iVar15`, yaw_corr `iVar16` (reused). */
+        int32_t iVar15 = (I / 0x28C) * omega;                                      /* yaw_term */
+        int32_t iVar16 = SBR(I, 0x3FF, 10) * (((int32_t)(Wr * omega)) / 0x28C - v_lat); /* (I>>10)*(Wr*ω/652 - v_lat) */
+                iVar16 = SBR(iVar16, 0xFFF, 12) * sin_d;
 
-        /* Rear lateral force */
-        int32_t rear_cross = (int32_t)(((int64_t)(Wf + 2 * Wr) * Wf - I) >> 10);
-        int64_t r_num = 0;
-        r_num += (int64_t)rear_cross * front_drive * cos_d >> 24;
-        r_num += (int64_t)(rear_drive + v_long) * A;
-        r_num -= (int64_t)((int64_t)v_lat * Wr + yaw_term) * (Wf + Wr) * cos_d >> 24;
-        rear_lat = (int32_t)(r_num / det);
+        /* iVar13 drive+vlong cos term. Original operands: local_3c = front_drive
+         * (paired with cos_d inside), iVar18 = rear_drive (unpaired). */
+                iVar13 = (SBR(front_drive * cos_d, 0xFFF, 12) + rear_drive + v_long) * iVar14;  /* *D */
+                iVar13 = SBR(iVar13, 0xFFF, 12) * cos_d;
+
+        /* iVar14 reused for D*front_drive*sin_d² (original uses local_3c = front_drive). */
+                iVar14 = iVar14 * front_drive;
+                iVar14 = SBR(iVar14, 0xFFF, 12) * sin_d;
+                iVar14 = SBR(iVar14, 0xFFF, 12) * sin_d;
+
+        /* iVar17 = (yaw_term - v_lat*Wf) >> 10 * (Wf+Wr) >> 12 * cos_d. */
+        int32_t iVar17 = iVar15 - v_lat * Wf;
+                iVar17 = SBR(iVar17, 0x3FF, 10) * (Wr + Wf);
+                iVar17 = SBR(iVar17, 0xFFF, 12) * cos_d;
+
+        /* local_40 (REAR_LAT in this physics convention). */
+        int32_t local_40_var = (SBR(iVar17, 0xFFF, 12) * cos_d +
+                                (SBR(iVar16, 0xFFF, 12) +
+                                 SBR(iVar13, 0xFFF, 12) +
+                                 SBR(iVar14, 0xFFF, 12)) * sin_d) / det;
+
+        /* Rear-cross coefficient for local_44 (FRONT_LAT). Original uses
+         * local_3c = front_drive in the rear_cross product, and iVar18 =
+         * rear_drive in the (drive + v_long) * A term. */
+        int32_t iVar16b = SBR((Wf + 2 * Wr) * Wf - I, 0x3FF, 10) * front_drive;
+        int32_t iVar4b  = SBR(iVar16b, 0xFFF, 12) * cos_d + (rear_drive + v_long) * iVar4; /* iVar4 = A */
+                iVar15  = v_lat * Wr + iVar15;                                               /* v_lat*Wr + yaw_term */
+                iVar16b = SBR(iVar15, 0x3FF, 10) * (Wr + Wf);
+
+        /* local_44 (FRONT_LAT). */
+        int32_t local_44_var = (SBR(iVar4b, 0xFFF, 12) * sin_d -
+                                SBR(iVar16b, 0xFFF, 12) * cos_d) / det;
+
+        /* Expose in port's naming: front_lat = FRONT, rear_lat = REAR. */
+        front_lat = local_44_var;
+        rear_lat  = local_40_var;
     }
+    #undef SBR
 
     /* --- 8. Slip circle with sqrt [CONFIRMED @ 0x405518-0x405580] --- */
     {
@@ -1837,27 +1866,16 @@ void td5_physics_update_ai(TD5_Actor *actor)
         }
     }
 
-    /* --- 9. Yaw torque [CONFIRMED @ 0x00405680-0x004056A0 via Ghidra 2026-04-23]
-     * Original: M = ((cos(steer) * Wf) >> 12) * rear_lat - front_lat * Wr) / (I / 0x28c)
-     *
-     * Port's bicycle solve is missing the sin_d factor on the rear_lat drive
-     * term, so the solve produces oversized yaw_torque that ramps omega up
-     * unchecked (peaks ~7400 rad-units vs original's ~800). Frida probe
-     * 2026-04-23 verified this divergence.
-     *
-     * Port-only stabilizers until full bicycle solve is re-ported:
-     *   - sin_d scaling at the use-site (damps at small steer)
-     *   - /8 divider on computed yaw_torque (magnitude match vs original)
-     *   - explicit omega damping -omega/16 per tick (replaces missing
-     *     damping terms in the bicycle solve that otherwise emerge naturally
-     *     via the (yaw_D + v_lat*Wr) term in the original's formula)
-     * */
+    /* --- 9. Yaw torque [VERBATIM @ 0x00405680-0x004056A0]
+     * Original: M = (((cos_d * Wf) >> 12) * FRONT_LAT - REAR_LAT * Wr) / (I / 0x28c)
+     * With the corrected front/rear semantic mapping (local_44 = front_lat,
+     * local_40 = rear_lat), this matches the standard bicycle-model yaw
+     * moment formula a·Fyf·cos(δ) − b·Fyr. Port-only stabilizers (/8
+     * scaling, omega damping) removed — if the bicycle-solve port is
+     * correct, the natural magnitude should match the original's. */
     {
-        int32_t scaled_rear_lat = (int32_t)(((int64_t)rear_lat * sin_d) >> 12);
-        int32_t yaw_torque = (int32_t)(((int64_t)(cos_d * front_weight >> 12) * scaled_rear_lat
-                             - (int64_t)front_lat * rear_weight) / inertia_div);
-        yaw_torque >>= 3;
-        yaw_torque -= yaw_rate >> 4;
+        int32_t yaw_torque = (int32_t)(((int64_t)((cos_d * front_weight + ((cos_d * front_weight) >> 31 & 0xFFF)) >> 12) * front_lat
+                             - (int64_t)rear_lat * rear_weight) / inertia_div);
 
         if (yaw_torque > TD5_YAW_TORQUE_MAX) yaw_torque = TD5_YAW_TORQUE_MAX;
         if (yaw_torque < -TD5_YAW_TORQUE_MAX) yaw_torque = -TD5_YAW_TORQUE_MAX;
@@ -5603,26 +5621,6 @@ void td5_physics_set_paused(int paused)
 {
     if (g_game_paused != paused) {
         TD5_LOG_I(LOG_TAG, "Physics paused=%d", paused);
-        /* Countdown → race transition: the port's cascade converges
-         * STEERING_CMD to a non-zero value during the grid hold (physics
-         * is paused, yaw fixed, cascade still runs in td5_ai_tick). That
-         * pre-accumulated steer + the bicycle-solve at v≈0 throws the AI
-         * into an asymmetric yaw that the cascade can't un-wind — observed
-         * as cars drifting consistently in one direction for 100+ race
-         * ticks (100% of cascade outputs in first 100 ticks were negative
-         * via Frida probe). Reset STEERING_CMD across all AI-driven slots
-         * on the unpause transition so the race begins with zero steer
-         * bias. Non-faithful vs original but required until the full
-         * bicycle solve is ported. */
-        if (g_game_paused == 1 && paused == 0) {
-            for (int s = 0; s < TD5_MAX_RACER_SLOTS; s++) {
-                TD5_Actor *a = (TD5_Actor *)(g_actor_table_base + (size_t)s * TD5_ACTOR_STRIDE);
-                if (g_race_slot_state[s] == 0) {
-                    a->steering_command = 0;
-                }
-            }
-            TD5_LOG_I(LOG_TAG, "Race start: AI STEERING_CMD zeroed across all AI slots");
-        }
         g_game_paused = paused;
     }
 }
