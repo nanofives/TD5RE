@@ -2988,18 +2988,23 @@ void td5_render_update_projection_effect(int slot, TD5_Actor *actor)
      *      (1=planar/velocity, 3=world-position/sun) and page_slot picks which
      *      uploaded environs texture to sample.
      *
-     * The actual SetProjectionEffectState mode-1 and mode-3 UV formulas aren't
-     * ported yet -- the port's mesh projection applies only the mode-2 yaw-UV
-     * rotation. Until those modes are implemented, we record the selected mode
-     * in pe->sub_mode so render_vehicle_reflection_overlay can dispatch later,
-     * and fall back to mode-2 UVs when sub_mode != 2.
+     * REGRESSION NOTE (fix-1777005786-333220): commit dfef6ff (feat: per-track
+     * environs dispatch + full projection-effect UV port) started driving the
+     * PLAYER CAR reflection's sub_mode and texture_page directly from the
+     * per-zone flag/page_slot table. On Moscow that makes slot 0 run mode 1
+     * (planar) or mode 3 (world-anchor) — the port's synthesized UV formulas
+     * for those modes produce high-frequency UV wrapping across the car body
+     * (user-visible as "tiny white dots on the car surface"). Ghidra research
+     * (fix-1777005786-333220, ApplyMeshProjectionEffect @ 0x0043DEC0) did not
+     * verify the exact mode-1/mode-3 UV constants byte-for-byte — so the
+     * safe revert is to hold sub_mode at 2 and texture_page at s_envmap_pages[0]
+     * (pre-dfef6ff visual) while still walking the zones so
+     * ApplyTrackLightingForVehicleSegment keeps working. A TODO tracks
+     * implementing the faithful mode-1/3 UV formulas against a Frida capture
+     * of the original's slot-0 projection state.
      */
     ProjectionEffectState *pe;
-    int zone_idx, light_index;
     int yaw_12bit;
-    int page;
-    int flag;
-    const TD5_EnvironsTrack *env;
 
     if (slot < 0 || slot >= TD5_ACTOR_MAX_TOTAL_SLOTS || !actor)
         return;
@@ -3007,45 +3012,20 @@ void td5_render_update_projection_effect(int slot, TD5_Actor *actor)
     pe = &s_proj_effect[slot];
     yaw_12bit = actor->display_angles.yaw & 0xFFF;
 
-    /* --- Resolve light_index via the current zone --- */
-    zone_idx = update_actor_light_zone(slot, (int)(int16_t)actor->track_span_raw);
-    if (zone_idx < 0 || s_environs_level < 0 ||
-        s_environs_level >= TD5_ENVIRONS_TRACK_COUNT) {
-        /* Fallback: first environs page, mode 2 (original pre-port behaviour). */
-        pe->sub_mode    = 2;
-        pe->texture_page = (s_envmap_page_count > 0) ? s_envmap_pages[0] : -1;
-        pe->cos_heading = CosFloat12bit((unsigned int)((-yaw_12bit) & 0xFFF));
-        pe->sin_heading = SinFloat12bit((-yaw_12bit) & 0xFFF);
-        return;
-    }
-    light_index = td5_light_zones[td5_light_zone_track[s_environs_level].first + zone_idx].light_index;
-    if (light_index < 0 || light_index > 3) light_index = 0;
+    /* Walk the per-track light zones so the lighting subsystem's zone cache
+     * (s_actor_light_zone[slot]) is kept up-to-date. Return value is ignored
+     * here because the reflection overlay intentionally does not pick a mode
+     * from the zone flag — see the REGRESSION NOTE above. */
+    (void)update_actor_light_zone(slot, (int)(int16_t)actor->track_span_raw);
 
-    env = &td5_environs_per_track[s_environs_level];
-    flag = env->e[light_index].flag;
+    /* Pre-dfef6ff behaviour: always mode 2 (yaw-rotated chrome) on the first
+     * loaded environs page. This is the visual the user validated before the
+     * regression. */
+    pe->sub_mode     = 2;
+    pe->texture_page = (s_envmap_page_count > 0) ? s_envmap_pages[0] : -1;
 
-    /* Page selection via the per-entry page_slot[] aliasing table (mirrors
-     * ConfigureActorProjectionEffect @ 0x0040CBE2:
-     *   page_id = DAT_004aee10[+0x04 + lightIndex*4]
-     * Multiple zones can map to the same environs page (e.g. Kenya has
-     * page_slot = [0,1,1,2] so lightIndex 1 and 2 both sample KTRE1). */
-    {
-        int page_idx = env->page_slot[light_index];
-        if (page_idx < 0)             page_idx = 0;
-        if (page_idx >= env->count)   page_idx = env->count - 1;
-        page = (s_envmap_page_count > 0) ? s_envmap_pages[page_idx] : -1;
-    }
-
-    pe->sub_mode     = flag;
-    pe->texture_page = page;
-
-    /* --- Mode-specific state population
-     * (SetProjectionEffectState @ 0x0043E210 body, per-mode branches) --- */
-    /* All modes cache the actor's interpolated world position (scaled by the
-     * render-space fraction 1/256 = g_worldToRenderScale). Mode 3 uses it as
-     * the projection anchor; mode 2 adds the XZ components as a per-mesh UV
-     * bias (the original reads *(float*)(mesh_resource + 0x1c / +0x24) -- for
-     * vehicles that's the same as actor world pos). */
+    /* Cache actor world position (rendered in world units = world_pos/256)
+     * for the mode-2 UV bias term in apply_mesh_projection_effect. */
     {
         extern float g_subTickFraction;
         const float fp_scale = 1.0f / 256.0f;
@@ -3057,22 +3037,20 @@ void td5_render_update_projection_effect(int slot, TD5_Actor *actor)
                         (float)actor->world_pos.z) * fp_scale;
     }
 
-    if (flag == 1) {
-        /* Mode 1 (planar / velocity-scrolled): scroll_offset accumulates the
-         * forward-velocity component each frame. The original writes 1.0/0.0
-         * into the cos/sin slots here as an identity basis. */
-        float cos_y = CosFloat12bit((unsigned int)(yaw_12bit & 0xFFF));
-        float sin_y = SinFloat12bit((unsigned int)(yaw_12bit & 0xFFF));
-        pe->cos_heading = 1.0f;
-        pe->sin_heading = 0.0f;
-        pe->scroll_offset +=
-            (sin_y * (float)actor->linear_velocity_x +
-             cos_y * (float)actor->linear_velocity_z) * (1.0f / 8192.0f);
-    } else {
-        /* Modes 2 and 3: cache cos/sin(-yaw) so the UV math can rotate model
-         * coords into the view frame. Mode 3 also uses the anchor above. */
-        pe->cos_heading = CosFloat12bit((unsigned int)((-yaw_12bit) & 0xFFF));
-        pe->sin_heading = SinFloat12bit((unsigned int)((-yaw_12bit) & 0xFFF));
+    pe->cos_heading = CosFloat12bit((unsigned int)((-yaw_12bit) & 0xFFF));
+    pe->sin_heading = SinFloat12bit((unsigned int)((-yaw_12bit) & 0xFFF));
+
+    /* mode-1's scroll_offset accumulator is unused while sub_mode is held
+     * at 2; leave it alone so a future mode-1 reactivation resumes cleanly. */
+
+    {
+        static int s_proj_log_count = 0;
+        if (slot == 0 && (s_proj_log_count < 5 || (s_proj_log_count % 300) == 0)) {
+            TD5_LOG_I(LOG_TAG,
+                      "proj_effect: slot=%d mode=%d page=%d (forced mode2 to avoid dots regression)",
+                      slot, pe->sub_mode, pe->texture_page);
+        }
+        if (slot == 0) s_proj_log_count++;
     }
 }
 
