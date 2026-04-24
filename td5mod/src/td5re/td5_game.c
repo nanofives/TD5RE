@@ -2436,19 +2436,26 @@ static void advance_pending_finish_state(int slot, uint32_t sim_delta) {
      * (this path runs once per render frame, which made the HUD timer accrue
      * countdown ticks and run at render-rate instead of the 30 Hz sim rate). */
 
-    /* Circuit branch — verbatim port of CheckRaceCompletionState circuit
-     * body @ 0x00409E80 / LAB_0040A014. The original uses:
-     *   - actor+0x82 (span_norm) as the progress index into the track ring
-     *   - actor+0x336 (progress_mask, here m->checkpoint_bitmask) as a
-     *     4-state sector latch: 0 → 1 → 3 → 7 → 0x0F → (lap end) → 0
-     *   - actor+0x37E (checkpoint_index, here m->checkpoint_index) as the
-     *     lap counter
-     *   - g_trackStartSpanIndex (g_td5.track_start_span_index) as the
-     *     start-line anchor span
-     *   - g_trackTotalSpanCount (g_td5.track_span_ring_length) as the ring
-     *     length
-     * Start-line test: span_norm within [start-1, start+1] AND mask==0x0F.
-     * Sector boundaries step by (ring - 2*start) / 5 from (2*start + 1). */
+    /* Circuit branch — faithful port of CheckRaceCompletionState circuit
+     * body @ 0x00409E80 (condition gTrackIsCircuit!=0 && g_selectedGameType==0),
+     * sector dispatch at LAB_0040A014, finish-state seeding at 0x00409FC0.
+     *
+     * Actor offsets (read via psVar5 = (short*)&actor[0x336]):
+     *   psVar5[-0x15a] (+0x082) int16  track_span_normalized   — progress index (iVar13)
+     *   psVar5[-0x11]  (+0x314) int32  longitudinal_speed       — finish denom source
+     *   psVar5[-0x07]  (+0x328) int32  finish_time              — zero while racing
+     *   psVar5[-0x01]  (+0x334) int16  finish_time_aux          — finish denominator
+     *   psVar5[ 0x00]  (+0x336) int16  finish_time_subtick      — sector bitmask 0/1/3/7/0xF,
+     *                                                              overwritten on finish
+     *   psVar5[ 0x0b]  (+0x34C) int16  timing_frame_counter     — current race tick counter
+     *   psVar5[ 0x0c]  (+0x34E) int16[9] checkpoint_split_times — per-lap delta array
+     *   psVar5[ 0x24]  (+0x37E) uint8  checkpoint_count         — lap counter (byte)
+     *
+     * Globals:
+     *   g_trackStartSpanIndex (g_td5.track_start_span_index)  — start-line anchor
+     *   g_trackTotalSpanCount (g_td5.track_span_ring_length)  — ring length
+     *   gCircuitLapCount      (g_td5.circuit_lap_count)       — laps to finish
+     */
     if (g_td5.track_type == TD5_TRACK_CIRCUIT) {
         int32_t track_start = g_td5.track_start_span_index;
         int32_t total_spans = g_td5.track_span_ring_length;
@@ -2457,16 +2464,45 @@ static void advance_pending_finish_state(int slot, uint32_t sim_delta) {
             return;
         }
 
-        /* Start-line / lap-complete test @ 0x00409F78.
-         * The original reads actor+0x82 here (span_norm), not span_accum. */
+        /* ---------------------------------------------------------------
+         * Split-time delta loop @ 0x00409E98 — runs unconditionally
+         * before any lap/sector logic, every tick, every unfinished actor.
+         *
+         *   splits[lap]  = timing_frame_counter;        // seed current
+         *   for (i = 0; i < lap; i++) {
+         *       splits[lap] -= splits[i];               // subtract priors
+         *   }
+         *
+         * At steady state: splits[lap] holds the DELTA ticks of the
+         * currently-running lap (cumulative - sum of completed-lap deltas).
+         * When the lap increments below, the slot freezes with its final
+         * delta and splits[lap+1] takes over. Port's ActorRaceMetric
+         * mirrors actor+0x34E as lap_split_times[8] (8 shorts = 16 bytes);
+         * the original had 9 slots at +0x34E..+0x35D. Clamp the index.
+         * --------------------------------------------------------------- */
+        {
+            int lap = (int)m->checkpoint_index;
+            if (lap >= 0 && lap < 8) {
+                m->lap_split_times[lap] = (int16_t)m->cumulative_timer;
+                for (int i = 0; i < lap; i++) {
+                    m->lap_split_times[lap] -= m->lap_split_times[i];
+                }
+            }
+        }
+
+        /* ---------------------------------------------------------------
+         * Start-line / lap-complete test @ 0x00409F78.
+         * The original reads *psVar5 as a full int16 from actor+0x336 and
+         * compares to 0xF literally. Port's uint8_t checkpoint_bitmask is
+         * value-equivalent (never exceeds 0xF). Note: lap increment and
+         * bitmask reset BOTH happen before the finish gate — that is, the
+         * lap counter is already advanced when we check for finish.
+         * --------------------------------------------------------------- */
         if ((int32_t)actor_span >= (track_start - 1) &&
             (int32_t)actor_span <= (track_start + 1) &&
             m->checkpoint_bitmask == 0x0F) {
-            /* Store split for the just-completed lap before advancing */
-            if (m->checkpoint_index >= 0 && m->checkpoint_index < 8) {
-                m->lap_split_times[m->checkpoint_index] =
-                    (int16_t)m->cumulative_timer;
-            }
+            /* lap++; bitmask = 0. DO NOT write split here — the delta loop
+             * above has already captured it into lap_split_times[lap]. */
             m->checkpoint_index++;
             m->checkpoint_bitmask = 0;
             m->normalized_span = actor_span;
@@ -2475,17 +2511,44 @@ static void advance_pending_finish_state(int slot, uint32_t sim_delta) {
                       "Circuit lap complete: slot=%d lap=%d span=%d",
                       slot, m->checkpoint_index, (int)actor_span);
 
-            if (m->checkpoint_index >= g_td5.circuit_lap_count) {
-                /* Finish: seed post-finish metrics and promote state.
-                 * Original @ 0x00409FC0-0x00409FF3:
-                 *   actor+0x328 = actor+0x34C (metric_base)
-                 *   actor+0x334 = clamp(actor+0x314 >> 8, min 1)
-                 *   actor+0x336 = (track_sub_progress * 0x5DC) / actor+0x334
-                 *   slot.companion_1 = 1, slot.state = 2, slot.companion_2 = 2 */
-                m->post_finish_metric_base = m->cumulative_timer;
+            if ((uint8_t)m->checkpoint_index == (uint8_t)g_td5.circuit_lap_count) {
+                /* Finish state seeding @ 0x00409FC0.
+                 * Gated on actor+0x328 == 0 (finish_time still zero).
+                 *
+                 *   actor+0x328  = (uint)(ushort) actor+0x34C     // finish_time
+                 *   iVar        = (longitudinal_speed + sign) >> 8
+                 *   actor+0x334 = max(iVar, 1)                     // finish denom
+                 *   actor+0x336 = (track_sub_progress * 0x5DC) / finish_denom
+                 *   slot.companion_state_1 = 1
+                 *   slot.state             = 2
+                 *   slot.companion_state_2 = 2
+                 *
+                 * [UNCERTAIN] track_sub_progress is not mirrored in the
+                 * port. gActorTrackSubProgress @ 0x004afc3c is a per-slot
+                 * int32 (stride 0x11C) written by route/traffic code and
+                 * consumed here for sub-tick tie-breaking. Writing 0 for
+                 * the numerator matches the port's current behaviour and
+                 * leaves lap-count and timer correct. */
+                if (m->post_finish_metric_base == 0) {
+                    m->post_finish_metric_base = m->cumulative_timer;
+
+                    /* finish_denom: clamp(longitudinal_speed>>8, min 1).
+                     * Original signed-right-shift with sign correction
+                     * matches arithmetic divide-by-256. */
+                    int32_t ls = (actor->longitudinal_speed + ((actor->longitudinal_speed >> 31) & 0xFFu));
+                    int32_t denom = ls >> 8;
+                    if (denom < 1) denom = 1;
+
+                    /* Mirror into actor so UpdateRaceOrder / results-screen
+                     * consumers see the same values the original wrote. */
+                    actor->finish_time         = m->cumulative_timer;
+                    actor->finish_time_aux     = (int16_t)denom;
+                    actor->finish_time_subtick = 0;   /* track_sub_progress not mirrored */
+                }
                 s_slot_state[slot].companion_1 = 1;
                 s_slot_state[slot].companion_2 = 2;
                 s_slot_state[slot].state = 2;
+
                 TD5_LOG_I(LOG_TAG,
                           "Actor finish: slot=%d mode=circuit lap=%d timer=%d span=%d",
                           slot, m->checkpoint_index, m->cumulative_timer,
@@ -2493,16 +2556,21 @@ static void advance_pending_finish_state(int slot, uint32_t sim_delta) {
             }
         }
 
-        /* 4-case sector bitmask dispatch @ LAB_0040A014.
+        /* ---------------------------------------------------------------
+         * 4-case sector bitmask dispatch @ LAB_0040A014.
          *   remaining = total - 2*start
-         *   boundary_n = 2*start + 1 + n * (remaining / 5)   for n = 0..3
-         * Each sector promotes the mask only if the previous sector latched.
-         * This enforces going around the track in one direction to legally
-         * reach mask==0x0F and trip the start-line lap increment above. */
+         *   boundary  = 2*start + 1         (sector 0)
+         *   step      = remaining / 5       (integer, signed)
+         *   boundary_n = boundary + n*step  (n = 0..3)
+         * Each sector promotes the mask only if the previous sector
+         * latched (0→1, 1→3, 3→7, 7→0xF). This enforces one-direction
+         * travel — a spun-out car moving backward cannot skip sectors to
+         * reach 0xF and illegitimately trip the start-line lap increment.
+         * --------------------------------------------------------------- */
         {
             int32_t remaining = total_spans - track_start * 2;
             int32_t boundary  = track_start * 2 + 1;
-            int32_t step      = (remaining > 0) ? (remaining / 5) : 0;
+            int32_t step      = remaining / 5;   /* matches orig; signed div */
 
             for (int sector = 0; sector < 4; sector++) {
                 if ((int32_t)actor_span >= (boundary - 2) &&
