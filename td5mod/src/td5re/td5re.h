@@ -230,8 +230,9 @@ typedef struct TD5_GlobalState {
         int  auto_race;             /* 1 = auto-start race on launch */
         /* Shift every actor's spawn span by this many units along the track
          * ring (mirrors the Frida InitializeActorTrackPose hook in
-         * re/tools/quickrace/td5_quickrace_hook.js). Only read from the
-         * shared quickrace INI when skip_frontend=1. 0 = vanilla grid. */
+         * re/tools/quickrace/td5_quickrace_hook.js). Read from td5re.ini
+         * [Game] StartSpanOffset, overridable via --StartSpanOffset=N on the
+         * command line. 0 = vanilla grid. */
         int  start_span_offset;
         /* Enable benchmark mode: redirects main-menu button 2 to TD5_GAMESTATE_BENCHMARK.
          * Matches the dead-code path in TD5_d3d.exe gated by app+0x170 (always 0 in

@@ -158,97 +158,156 @@ static int td5_ini_int(const char *section, const char *key, int fallback)
 }
 
 /* ------------------------------------------------------------------------
- * Shared quick-race INI (re/tools/quickrace/td5_quickrace.ini)
+ * Command-line override parser
  *
- * Same file the original-game Frida launcher reads. When td5re finds it and
- * [launcher] skip_frontend=1, override the td5re.ini race defaults and flip
- * on auto_race + skip_intro so the main-loop jumps straight into the race.
+ * Accepts `--Key=N` tokens on the command line to override any key read
+ * from td5re.ini. Applied AFTER the INI loads, so precedence is
+ * CLI > td5re.ini > compiled defaults. Useful for one-off tests without
+ * editing the INI (parallel runs, CI, skill invocations).
+ *
+ * Example:
+ *   td5re.exe --DefaultTrack=15 --DefaultGameType=0 --AutoRace=1
+ *
+ * Keys are case-insensitive and match the INI names verbatim. Values are
+ * integers (atoi). Unknown keys log a warning and are ignored. Width,
+ * Height and Windowed live as locals in WinMain and are updated via
+ * out-params. `--Help` / `-h` logs the full key list and exits.
  * ------------------------------------------------------------------------ */
-/* Parse a loose boolean: accepts 1/0, true/false, yes/no, on/off (any case). */
-static int td5_ini_parse_bool(const char *s, int fallback)
+typedef struct {
+    const char *name;
+    int        *target;
+} CliOverride;
+
+static int td5_apply_cli_overrides(const char *cmdline,
+                                   int *pwidth, int *pheight, int *pwindowed)
 {
-    if (!s || !*s) return fallback;
-    if (s[0] == '1') return 1;
-    if (s[0] == '0') return 0;
-    if (s[0] == 't' || s[0] == 'T' || s[0] == 'y' || s[0] == 'Y') return 1;
-    if (s[0] == 'f' || s[0] == 'F' || s[0] == 'n' || s[0] == 'N') return 0;
-    if ((s[0] == 'o' || s[0] == 'O') && (s[1] == 'n' || s[1] == 'N')) return 1;
-    if ((s[0] == 'o' || s[0] == 'O') && (s[1] == 'f' || s[1] == 'F')) return 0;
-    return fallback;
-}
-
-static int td5_load_shared_quickrace_ini(void)
-{
-    char exe_dir[MAX_PATH];
-    DWORD n = GetModuleFileNameA(NULL, exe_dir, MAX_PATH);
-    if (n == 0 || n >= MAX_PATH) {
-        dbglog("Shared INI: GetModuleFileNameA failed (n=%lu)", n);
-        return 0;
-    }
-
-    char *sl = exe_dir + n;
-    while (sl > exe_dir && *sl != '\\' && *sl != '/') sl--;
-    if (sl > exe_dir) *sl = '\0';
-
-    char path[MAX_PATH];
-    int found = 0;
-
-    /* Candidate locations, in preference order:
-     *   1. <exe_dir>\td5_quickrace.ini                      (next to the exe)
-     *   2. <exe_dir>\re\tools\quickrace\td5_quickrace.ini   (exe at repo root)
-     *   3. <exe_dir>\..\re\tools\quickrace\td5_quickrace.ini (exe one level down)
-     */
-    const char *rel_paths[] = {
-        "\\td5_quickrace.ini",
-        "\\re\\tools\\quickrace\\td5_quickrace.ini",
-        "\\..\\re\\tools\\quickrace\\td5_quickrace.ini",
+    CliOverride table[] = {
+        /* Display */
+        { "Fogging",              &g_td5.ini.fog_enabled },
+        { "SpeedUnits",           &g_td5.ini.speed_units },
+        { "CameraDamping",        &g_td5.ini.camera_damping },
+        /* Audio */
+        { "SFXVolume",            &g_td5.ini.sfx_volume },
+        { "MusicVolume",          &g_td5.ini.music_volume },
+        { "SFXMode",              &g_td5.ini.sfx_mode },
+        /* GameOptions */
+        { "Laps",                 &g_td5.ini.laps },
+        { "CheckpointTimers",     &g_td5.ini.checkpoint_timers },
+        { "Traffic",              &g_td5.ini.traffic },
+        { "Cops",                 &g_td5.ini.cops },
+        { "Difficulty",           &g_td5.ini.difficulty },
+        { "Dynamics",             &g_td5.ini.dynamics },
+        { "Collisions",           &g_td5.ini.collisions },
+        { "PlayerIsAI",           &g_td5.ini.player_is_ai },
+        /* Game */
+        { "DefaultCar",           &g_td5.ini.default_car },
+        { "DefaultTrack",         &g_td5.ini.default_track },
+        { "DefaultGameType",      &g_td5.ini.default_game_type },
+        { "SkipIntro",            &g_td5.ini.skip_intro },
+        { "DebugOverlay",         &g_td5.ini.debug_overlay },
+        { "AutoRace",             &g_td5.ini.auto_race },
+        { "StartSpanOffset",      &g_td5.ini.start_span_offset },
+        /* Trace */
+        { "RaceTrace",            &g_td5.ini.race_trace_enabled },
+        { "RaceTraceSlot",        &g_td5.ini.race_trace_slot },
+        { "RaceTraceMaxFrames",   &g_td5.ini.race_trace_max_frames },
+        { "AutoThrottle",         &g_td5.ini.auto_throttle },
+        { "TraceFastForward",     &g_td5.ini.trace_fast_forward },
+        { "RaceTraceMaxSimTicks", &g_td5.ini.race_trace_max_sim_ticks },
+        /* Logging */
+        { "LogEnabled",           &g_td5.ini.log_enabled },
+        { "LogMinLevel",          &g_td5.ini.log_min_level },
+        { "LogFrontend",          &g_td5.ini.log_frontend },
+        { "LogRace",              &g_td5.ini.log_race },
+        { "LogEngine",            &g_td5.ini.log_engine },
+        { "LogWrapper",           &g_td5.ini.log_wrapper },
     };
-    size_t i;
-    for (i = 0; i < sizeof(rel_paths) / sizeof(rel_paths[0]); ++i) {
-        _snprintf(path, sizeof(path), "%s%s", exe_dir, rel_paths[i]);
-        path[sizeof(path) - 1] = '\0';
-        if (GetFileAttributesA(path) != INVALID_FILE_ATTRIBUTES) {
-            found = 1;
-            break;
+    const size_t table_n = sizeof(table) / sizeof(table[0]);
+    int n_applied = 0;
+
+    if (!cmdline || !*cmdline) return 0;
+
+    const char *p = cmdline;
+    while (*p) {
+        while (*p == ' ' || *p == '\t') p++;
+        if (!*p) break;
+
+        const char *start = p;
+        while (*p && *p != ' ' && *p != '\t') p++;
+        size_t tok_len = (size_t)(p - start);
+
+        if (tok_len < 2 || start[0] != '-') {
+            dbglog("  CLI: skipping bare token '%.*s'", (int)tok_len, start);
+            continue;
+        }
+        /* Accept --key=val; single-dash -h/--help shows usage. */
+        if (tok_len == 2 && start[1] == 'h') goto show_help;
+        if (tok_len >= 6 && _strnicmp(start, "--help", 6) == 0) goto show_help;
+        if (start[1] != '-') {
+            dbglog("  CLI: skipping '%.*s' (need --Key=Val)",
+                   (int)tok_len, start);
+            continue;
+        }
+
+        const char *key = start + 2;
+        size_t key_max = tok_len - 2;
+        const char *eq = memchr(key, '=', key_max);
+        if (!eq) {
+            dbglog("  CLI: skipping '%.*s' (no '=' separator)",
+                   (int)tok_len, start);
+            continue;
+        }
+        size_t klen = (size_t)(eq - key);
+        int val = atoi(eq + 1);
+
+        /* Special cases — Width/Height/Windowed are WinMain locals. */
+        if (klen == 5 && _strnicmp(key, "Width", 5) == 0) {
+            *pwidth = val;
+            dbglog("  CLI override: Width=%d", val);
+            n_applied++;
+            continue;
+        }
+        if (klen == 6 && _strnicmp(key, "Height", 6) == 0) {
+            *pheight = val;
+            dbglog("  CLI override: Height=%d", val);
+            n_applied++;
+            continue;
+        }
+        if (klen == 8 && _strnicmp(key, "Windowed", 8) == 0) {
+            *pwindowed = val;
+            dbglog("  CLI override: Windowed=%d", val);
+            n_applied++;
+            continue;
+        }
+
+        size_t i;
+        int matched = 0;
+        for (i = 0; i < table_n; ++i) {
+            if (strlen(table[i].name) == klen &&
+                _strnicmp(key, table[i].name, klen) == 0) {
+                *table[i].target = val;
+                dbglog("  CLI override: %s=%d", table[i].name, val);
+                matched = 1;
+                n_applied++;
+                break;
+            }
+        }
+        if (!matched) {
+            dbglog("  CLI: unknown key '%.*s' (ignored)", (int)klen, key);
         }
     }
+    return n_applied;
 
-    if (!found) {
-        dbglog("Shared INI: not found in any candidate path (exe_dir=%s)", exe_dir);
-        return 0;
+show_help:
+    {
+        size_t i;
+        dbglog("td5re.exe CLI overrides (--Key=N, case-insensitive):");
+        dbglog("  --Width=N --Height=N --Windowed=N");
+        for (i = 0; i < table_n; ++i) {
+            dbglog("  --%s=N", table[i].name);
+        }
     }
-
-    /* skip_frontend accepts 1/0, true/false, yes/no — use string read then parse. */
-    char skip_str[16] = {0};
-    GetPrivateProfileStringA("launcher", "skip_frontend", "0",
-                             skip_str, sizeof(skip_str), path);
-    int skip = td5_ini_parse_bool(skip_str, 0);
-    dbglog("Shared INI: %s (skip_frontend='%s' -> %d)", path, skip_str, skip);
-    if (!skip) return 0;
-
-    g_td5.ini.default_game_type =
-        GetPrivateProfileIntA("race", "game_type",
-                              g_td5.ini.default_game_type, path);
-    g_td5.ini.default_track =
-        GetPrivateProfileIntA("race", "track",
-                              g_td5.ini.default_track, path);
-    g_td5.ini.laps =
-        GetPrivateProfileIntA("race", "laps",
-                              g_td5.ini.laps, path);
-    g_td5.ini.default_car =
-        GetPrivateProfileIntA("car", "car",
-                              g_td5.ini.default_car, path);
-    g_td5.ini.start_span_offset =
-        GetPrivateProfileIntA("race", "start_span_offset", 0, path);
-    g_td5.ini.auto_race  = 1;
-    g_td5.ini.skip_intro = 1;
-
-    dbglog("  -> auto_race=1 skip_intro=1 type=%d track=%d car=%d laps=%d "
-           "start_span_offset=%d",
-           g_td5.ini.default_game_type, g_td5.ini.default_track,
-           g_td5.ini.default_car, g_td5.ini.laps,
-           g_td5.ini.start_span_offset);
-    return 1;
+    return n_applied;
 }
 
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
@@ -267,7 +326,6 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
 
     (void)hInstance;
     (void)hPrevInstance;
-    (void)lpCmdLine;
     (void)nCmdShow;
 
     SetUnhandledExceptionFilter(td5_crash_handler);
@@ -320,6 +378,10 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     /* Auto-race: skip frontend entirely, launch race with INI settings */
     g_td5.ini.auto_race             = td5_ini_int("Game", "AutoRace", 0);
 
+    /* Additive span shift for every actor spawn — mirrors the Frida hook on
+     * InitializeActorTrackPose (0x00434350). 0 = vanilla grid. */
+    g_td5.ini.start_span_offset     = td5_ini_int("Game", "StartSpanOffset", 0);
+
     /* Trace */
     g_td5.ini.race_trace_enabled    = td5_ini_int("Trace", "RaceTrace", 0);
     g_td5.ini.race_trace_slot       = td5_ini_int("Trace", "RaceTraceSlot", -1);
@@ -340,9 +402,14 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
 
     g_td5.ini.loaded = 1;
 
-    /* Shared quick-race INI overlay (re/tools/quickrace/td5_quickrace.ini).
-     * Applied AFTER td5re.ini so skip_frontend=1 wins over AutoRace=0. */
-    td5_load_shared_quickrace_ini();
+    /* CLI overrides run AFTER the INI so `--DefaultTrack=15` wins over the
+     * INI value. Pass lpCmdLine (may be empty) — width/height/windowed are
+     * updated in-place since they are locals below. */
+    {
+        int n_cli = td5_apply_cli_overrides(lpCmdLine, &width, &height, &windowed);
+        if (n_cli > 0)
+            dbglog("=== %d CLI override(s) applied ===", n_cli);
+    }
 
     /* Apply log filters now — Backend_Init runs after this and is the heaviest
      * wrapper-log emitter, so silencing here lets the perf A/B reflect startup
@@ -369,9 +436,10 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
            g_td5.ini.laps, g_td5.ini.checkpoint_timers, g_td5.ini.traffic,
            g_td5.ini.cops, g_td5.ini.difficulty, g_td5.ini.dynamics, g_td5.ini.collisions,
            g_td5.ini.player_is_ai);
-    dbglog("  [Game]    Car=%d Track=%d GameType=%d SkipIntro=%d DebugOverlay=%d AutoRace=%d",
+    dbglog("  [Game]    Car=%d Track=%d GameType=%d SkipIntro=%d DebugOverlay=%d AutoRace=%d StartSpanOffset=%d",
            g_td5.ini.default_car, g_td5.ini.default_track, g_td5.ini.default_game_type,
-           g_td5.ini.skip_intro, g_td5.ini.debug_overlay, g_td5.ini.auto_race);
+           g_td5.ini.skip_intro, g_td5.ini.debug_overlay, g_td5.ini.auto_race,
+           g_td5.ini.start_span_offset);
     dbglog("  [Trace]   RaceTrace=%d Slot=%d MaxFrames=%d AutoThrottle=%d FastFwd=%d SimTickCap=%d",
            g_td5.ini.race_trace_enabled, g_td5.ini.race_trace_slot,
            g_td5.ini.race_trace_max_frames, g_td5.ini.auto_throttle,
