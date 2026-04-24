@@ -2375,10 +2375,21 @@ static int check_race_completion(uint32_t sim_delta) {
 static void tick_pending_finish_timer(int slot) {
     ActorRaceMetric *m = &s_metrics[slot];
 
-    /* Original gate: only runs when g_specialEncounterType != 0 (P2P) and
-     * !g_replayModeFlag and slot state == '\x01' and !camera transition.
-     * Approximate via port's flags: special_encounter_enabled covers P2P
-     * when s_active_checkpoint.checkpoint_count > 0.  */
+    /* Original AdvancePendingFinishState @ 0x0040A2B0 gate, verbatim:
+     *   gRaceSlotStateTable.slot[uVar1].state == '\x01'   (racing)
+     *   && gRaceCameraTransitionGate == 0                 (countdown done)
+     *   && g_replayModeFlag == 0                          (not replaying)
+     *   && *(int *)(param_1 + 0x328) == 0                 (finish_time unset)
+     *   && g_specialEncounterType != 0                    (P2P MODE ONLY)
+     *
+     * The port's sub-tick loop already runs this path only when
+     * g_td5.paused == 0 (post-countdown), so the gRaceCameraTransitionGate
+     * gate is implicit. But the g_specialEncounterType gate was missing:
+     * without it, the decrement fired on every track (point-to-point AND
+     * circuit) and even when encounters were disabled — which is why
+     * Moscow showed pending_finish=17979 sliding down by -2 per sub-tick.
+     * [CONFIRMED @ 0x0040A2DC: if (g_specialEncounterType != 0 && ...).] */
+    if (g_td5.special_encounter_enabled == 0) return;  /* non-P2P -> no decrement */
     if (s_active_checkpoint.checkpoint_count == 0) return;
     if (s_slot_state[slot].state != 1) return;
     if (s_slot_state[slot].companion_1 != 0) return;  /* already finished */
@@ -2660,15 +2671,28 @@ static void adjust_checkpoint_timers(int slot) {
 
     int is_slot_zero = (slot == 0);
 
-    /* Step 1 — scale table in place, gated on slot 0 */
+    /* Step 1 — scale table in place, gated on slot 0.
+     * Original AdjustCheckpointTimersByDifficulty @ 0x0040A530 reads
+     * gRaceDifficultyTier (@ 0x00463210, .data-initialized to 2 = Hard),
+     * NOT the user-selected difficulty. The port mirrors this via
+     * g_td5.difficulty_tier (initialized to 2 in td5re.c). Previously
+     * the port read g_td5.difficulty (user-selected, default Normal=1),
+     * which caused an unintended 1.1× scale on the Hard-tier default
+     * binary state. [CONFIRMED @ 0x0040A55A reads gRaceDifficultyTier,
+     * 0x0040A57F scales *12/10, 0x0040A5AF scales *11/10.] */
     if (is_slot_zero) {
-        switch (g_td5.difficulty) {
-        case TD5_DIFFICULTY_EASY:   numerator = 12; break;  /* +20% */
-        case TD5_DIFFICULTY_NORMAL: numerator = 11; break;  /* +10% */
-        case TD5_DIFFICULTY_HARD:
+        switch (g_td5.difficulty_tier) {
+        case 0: numerator = 12; break;  /* tier 0 (Easy AI):   +20% */
+        case 1: numerator = 11; break;  /* tier 1 (Normal AI): +10% */
+        case 2:
         default:
-            numerator = 10; break;                           /* no change */
+            numerator = 10; break;       /* tier 2 (Hard AI):  no change */
         }
+        TD5_LOG_I(LOG_TAG,
+                  "adjust_checkpoint_timers: tier=%d scale=%d/10 initial_time=%d -> scaled=%d",
+                  g_td5.difficulty_tier, numerator,
+                  (int)s_active_checkpoint.initial_time,
+                  (int)((int)s_active_checkpoint.initial_time * numerator / denominator));
         if (numerator != denominator) {
             s_active_checkpoint.initial_time =
                 (uint16_t)((int)s_active_checkpoint.initial_time *
