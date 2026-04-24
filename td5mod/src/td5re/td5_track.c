@@ -3103,26 +3103,30 @@ void td5_track_compute_heading(TD5_Actor *actor)
         break;
     }
 
-    /* Original calls AngleFromVector12 (0x40A720, integer LUT) at 0x00434501
-     * with `yaw = (angle + 0x800) << 8`. Port's shared AngleFromVector12
-     * (td5_render.c:3345) is atan2(x,z)-based and the dx/dz computed above
-     * is the LATERAL R→L vector (right rail → left rail), 90° CCW of road
-     * forward. Adding +0x800 rotates lateral_R→L into the rendered car's
-     * forward and feeds physics drive direction the same forward, so visual
-     * + drive stay aligned.
+    /* The original calls AngleFromVector12 (0x40A720, LUT-based) with a
+     * +0x800 literal at 0x00434501. Port's AngleFromVector12 (td5_render.c:
+     * 4101) is atan2-based, and the two diverge by 180° for the dx/dz sign
+     * patterns at real spawn spans — so the port's correct offset is
+     * +0x400, not +0x800. See memory todo_spawn_heading_90_off.md.
      *
-     * History: an earlier +0x400 attempt made the (sin, cos) numerically
-     * match the track-walk (dx, dz) vector, but that was the LATERAL
-     * direction — the rendered car body, shadow, and chase camera all read
-     * yaw through a YXZ rotation matrix that needs the FORWARD direction,
-     * which is +0x400 further (= +0x800 total). Under +0x400 the visual
-     * was 90° CW; bumping to +0x800 aligns visual and drive. */
+     * Geometry: (dx, dz) above is 2·(left_mid − right_mid) = the LATERAL
+     * R→L track vector (not forward). Port's atan2 returns an angle `a`
+     * where (sin a, cos a) = (dx, dz)/|v|, so yaw=a makes the model +Z
+     * axis point along lateral_R→L. Forward is 90°-CW of lateral_R→L,
+     * which in this angle convention (0→+Z, +0x400→+X = CW) is a+0x400.
+     * Using +0x800 added an extra 180° → the rendered car faced 90° CW
+     * of track forward at spawn (disp_yaw=3824 vs correct 2799 at span
+     * 111, verified in port race_trace.csv 2026-04-24).
+     *
+     * History: commit 702d4762 (2026-04-15) bumped this to +0x800 believing
+     * +0x400 left the car 90° CW visually. That diagnosis was mistaken —
+     * +0x800 is the actually-wrong state the user is now reporting. */
     angle = AngleFromVector12(dx, dz) & 0xFFF;
 
     TD5_LOG_I(LOG_TAG, "compute_heading: span=%d type=%d dx=%d dz=%d "
               "lateral_angle=%d yaw=%d",
               span_idx, sp->span_type, dx, dz, angle,
-              (angle + 0x800) & 0xFFF);
+              (angle + 0x400) & 0xFFF);
 
     /* Write heading to actor's heading_normal at +0x290 (as int16[3]) */
     heading_normal = (int16_t *)((uint8_t *)actor + 0x290);
@@ -3130,9 +3134,10 @@ void td5_track_compute_heading(TD5_Actor *actor)
     heading_normal[1] = 0;
     heading_normal[2] = (int16_t)dz;
 
-    /* Store yaw to euler accumulator at +0x1F4. Offset matches the original's
-     * +0x800 literal at 0x00434501. */
-    *(int32_t *)((uint8_t *)actor + 0x1F4) = (angle + 0x800) << 8;
+    /* Store yaw to euler accumulator at +0x1F4. +0x400 (not +0x800) because
+     * port's atan2 AngleFromVector12 differs 180° from the original's LUT
+     * for real spawn-span inputs — see the block comment above. */
+    *(int32_t *)((uint8_t *)actor + 0x1F4) = (angle + 0x400) << 8;
 }
 
 /* ========================================================================
