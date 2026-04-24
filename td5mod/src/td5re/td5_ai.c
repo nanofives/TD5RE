@@ -76,8 +76,9 @@
 
 #define ACTOR_STRIDE              0x388
 
-#define ACTOR_SPAN_RAW            0x080   /* int16 */
-#define ACTOR_SPAN_NORMALIZED     0x082   /* int16 */
+#define ACTOR_SPAN_RAW            0x080   /* int16: raw span index — JUMPS at junction remap */
+#define ACTOR_SPAN_NORMALIZED     0x082   /* int16: wrapped-but-not-remapped span for route-table indexing */
+#define ACTOR_SPAN_ACCUM          0x084   /* int16: monotonically-accumulated span; immune to remap */
 #define ACTOR_SUB_LANE_INDEX      0x08C   /* byte  */
 #define ACTOR_YAW_ACCUM           0x1F4   /* int32 */
 #define ACTOR_STEERING_CMD        0x30C   /* int32 */
@@ -291,10 +292,15 @@ static int32_t ai_angle_from_vector(int32_t dx, int32_t dz) {
 }
 
 /* Compute route heading from route table for a given actor span.
- * Matches inline computation at 0x43503A in the original. */
+ * Matches inline computation at 0x43503A in the original, which reads
+ * span_normalized (+0x82), NOT span_raw (+0x80). Post-junction-remap the
+ * two diverge by thousands (e.g. 499→2790 on Moscow); indexing the route
+ * table with raw returns heading bytes for the wrong ring position and
+ * makes the recovery-misalignment check at 0x00434FE0 fire at every
+ * branch entry — the visible symptom is the AI braking into the turn. */
 static int32_t ai_route_heading_for_actor(const int32_t *rs, const char *actor) {
     const uint8_t *rb = (const uint8_t *)(intptr_t)rs[RS_ROUTE_TABLE_PTR];
-    int16_t sp = ACTOR_I16(actor, ACTOR_SPAN_RAW);
+    int16_t sp = ACTOR_I16(actor, ACTOR_SPAN_NORMALIZED);
     if (rb && sp >= 0) {
         return (((int)rb[(size_t)(unsigned)sp * 3u + 1u] * 0x102C) >> 8) & 0xFFF;
     }
@@ -406,7 +412,14 @@ static void td5_ai_refresh_route_state_slot(int slot) {
         return;
     }
 
-    span = ACTOR_I16(actor, ACTOR_SPAN_RAW);
+    /* Original UpdateActorTrackBehavior @ 0x00435022/0x00435039 reads
+     * actor->span_normalized (+0x82), NOT span_raw (+0x80). span_norm is the
+     * wrapped-but-not-branch-remapped index consistent with the route-table
+     * layout; using span_raw picks up the post-remap jump (e.g. 499→2790 at
+     * Moscow's first branch), which clamps to the tail of the route table and
+     * reads a heading ~180° off the car's motion — flipping fwd_comp sign and
+     * triggering the emergency-brake path post-branch. */
+    span = ACTOR_I16(actor, ACTOR_SPAN_NORMALIZED);
     if (span < 0) {
         span = 0;
     } else if ((size_t)span >= route_count) {
@@ -496,8 +509,13 @@ void td5_ai_compute_rubber_band(void) {
 
     /* Time trial: no rubber band (scales are zero from init) */
 
-    /* Get player 0 span position */
-    player0_span = (int16_t)ACTOR_I16(actor_ptr(0), ACTOR_SPAN_RAW);
+    /* Get player 0 span position.
+     * Original ComputeAIRubberBandThrottle @ 0x00432DEE reads actor+0x84
+     * (span_accum, monotonically-increasing). Using span_raw (+0x80) instead
+     * makes delta = ai_span - player0_span jump by +/-2291 across a junction
+     * remap (e.g. 499→2790 at Moscow branch 1), saturating the rubber-band
+     * modifier for every AI slot whose raw span hasn't remapped yet. */
+    player0_span = (int16_t)ACTOR_I16(actor_ptr(0), ACTOR_SPAN_ACCUM);
 
     racer_count = TD5_MAX_RACER_SLOTS;
     if (g_active_actor_count < racer_count)
@@ -508,7 +526,7 @@ void td5_ai_compute_rubber_band(void) {
         if (g_slot_state[i] != 0) /* skip non-AI (player/finished) */
             continue;
 
-        ai_span = (int16_t)ACTOR_I16(actor_ptr(i), ACTOR_SPAN_RAW);
+        ai_span = (int16_t)ACTOR_I16(actor_ptr(i), ACTOR_SPAN_ACCUM);
         delta = ai_span - player0_span;
 
         if (delta < 0) {
@@ -1446,7 +1464,10 @@ void td5_ai_update_track_behavior(int slot) {
     int32_t rb_current = 0;
     {
         const uint8_t *rbs = (const uint8_t *)(intptr_t)rs[RS_ROUTE_TABLE_PTR];
-        int16_t sp_current = ACTOR_I16(actor, ACTOR_SPAN_RAW);
+        /* Same span_norm convention as ai_route_heading_for_actor — the
+         * route table is indexed by the wrapped ring position, not the
+         * post-remap raw span. */
+        int16_t sp_current = ACTOR_I16(actor, ACTOR_SPAN_NORMALIZED);
         if (rbs && sp_current >= 0) {
             rb_current = (int32_t)rbs[(size_t)(unsigned)sp_current * 3u + 1u];
         }

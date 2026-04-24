@@ -1202,22 +1202,32 @@ static inline void vertex_world_pos(const TD5_StripSpan *sp,
  * (left_vertex_index + lane_count) to pick the 2-vertex interpolation
  * "right" vertex. Col[1] is not read by this function.
  *
- * Col 0 verified [CONFIRMED @ 0x00473C68 via memory_read, xref @ 0x00434836]
- * against original binary 2026-04-20:
+ * Col 0 verified [CONFIRMED @ 0x00473C68 via independent memory_read on
+ * fresh Ghidra session 2026-04-23]:
  *   row: 0  1  2  3  4  5  6  7  8  9 10 11
- *   val: 0  0 -1 -1 -2  0  0  0  0  0  0  0
+ *   val: 0  0  0 -1 -1 -2  0 -1 -1 -2  0  0
+ *
+ * Prior 2026-04-20 comment claimed {-1,-1,-2} at types 2/3/4, missing the
+ * second {-1,-1,-2} block at types 7/8/9. That was wrong in both halves:
+ *   - First block shifted by -1 (bit 2/3/4 vs actual 3/4/5)
+ *   - Second block omitted entirely
+ * Effect: SampleTrackTargetPoint picked the wrong right-end vertex on
+ * junction-entry spans, so AI cars with high route_byte (RIGHT.TRK slots
+ * 0/2/4) chased a corrupted target while LEFT.TRK cars (route_byte=0,
+ * interpolation stays at left_vertex) drove fine. See
+ * todo_ai_right_route_branches.md.
  */
 static const int8_t k_target_vertex_offsets[12][2] = {
     /* type  0 */ {  0,  0 },
     /* type  1 */ {  0,  0 },
-    /* type  2 */ { -1,  0 },
+    /* type  2 */ {  0,  0 },
     /* type  3 */ { -1,  0 },
-    /* type  4 */ { -2,  0 },
-    /* type  5 */ {  0,  0 },
+    /* type  4 */ { -1,  0 },
+    /* type  5 */ { -2,  0 },
     /* type  6 */ {  0,  0 },
-    /* type  7 */ {  0,  0 },
-    /* type  8 */ {  0,  0 },
-    /* type  9 */ {  0,  0 },
+    /* type  7 */ { -1,  0 },
+    /* type  8 */ { -1,  0 },
+    /* type  9 */ { -2,  0 },
     /* type 10 */ {  0,  0 },
     /* type 11 */ {  0,  0 },
 };
@@ -1583,6 +1593,25 @@ int td5_track_load_strip(const void *data, size_t size)
                   : 0),
               s_jump_entry_count,
               s_secondary_count);
+
+    /* Span-type histogram for RIGHT.TRK-route debugging — one-shot at load.
+     * The k_target_vertex_offsets fix changes behavior only for span_type in
+     * {3,4,5,7,8,9}. If Moscow's branch entries sit on other types, the fix
+     * won't help the zig-zag symptom and we need to keep investigating. */
+    {
+        int type_counts[16] = {0};
+        for (int i = 0; i < s_span_count; i++) {
+            unsigned t = (unsigned)s_span_array[i].span_type;
+            if (t < 16) type_counts[t]++;
+        }
+        TD5_LOG_I(LOG_TAG,
+                  "Span-type histogram: t0=%d t1=%d t2=%d t3=%d t4=%d t5=%d "
+                  "t6=%d t7=%d t8=%d t9=%d t10=%d t11=%d",
+                  type_counts[0], type_counts[1], type_counts[2],
+                  type_counts[3], type_counts[4], type_counts[5],
+                  type_counts[6], type_counts[7], type_counts[8],
+                  type_counts[9], type_counts[10], type_counts[11]);
+    }
 
     return 1;
 }
