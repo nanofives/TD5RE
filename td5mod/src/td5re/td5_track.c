@@ -171,17 +171,6 @@ static TD5_TrafficBusEntry *s_traffic_bus = NULL;
 static int              s_traffic_bus_count = 0;
 static int              s_traffic_cursor = 0;
 
-/** Lighting state */
-static TD5_TrackLightEntry *s_lighting_table = NULL;
-static int              s_lighting_entry_count = 0;
-
-/** Per-slot directional light state */
-static int              s_light_enabled[TD5_TRACK_LIGHT_SLOTS];
-static float            s_light_dir[TD5_TRACK_LIGHT_SLOTS][3]; /* xyz direction * intensity */
-
-/** Per-actor lighting zone cache (which zone each actor is in) */
-static int              s_actor_light_zone[TD5_MAX_TOTAL_ACTORS];
-
 /** Race order array: sorted slot indices by position (6 bytes) */
 static uint8_t          s_race_order[TD5_MAX_RACER_SLOTS];
 
@@ -3739,12 +3728,16 @@ int32_t td5_track_compute_spline_position(int span_index, int segment_distance,
 /* ========================================================================
  * Track Lighting (0x430150 / 0x42CE90)
  *
- * Zone-based lighting with 3 blend modes:
- *   Mode 0: Instant -- direct set of ambient + diffuse + direction
- *   Mode 1: Interpolated -- blends between zone start/end lighting
- *   Mode 2: Multi-directional -- extended blend with end-side interpolation
+ * Per-vehicle zone-driven 3-light + ambient basis. Implementation moved to
+ * td5_render_apply_track_lighting() in td5_render.c (2026-04-23): the prior
+ * skeleton in this file used wrong struct offsets, was never wired to a
+ * populated zone table, and wrote to a parallel set of globals that the
+ * mesh-vertex-lighting pass did not read. The new code reuses the per-track
+ * zone array generated in td5_light_zones_table.inc and writes directly to
+ * s_light_dirs[]/s_ambient_intensity which the renderer already consumes.
  * ======================================================================== */
-
+#if 0 /* legacy skeleton -- intentionally retained as a #if-0 block until the
+       * historical RE notes inside it are migrated into the new code. */
 /**
  * SetTrackLightDirectionContribution (0x42E130).
  * Configures one of 3 directional light slots.
@@ -3939,19 +3932,7 @@ void td5_track_apply_segment_lighting(TD5_Actor *actor, int view_index)
     }
 }
 
-/**
- * UpdateActiveTrackLightDirections (0x42CE90).
- * Updates the global light direction state used by the renderer.
- * Called after all actors' lighting has been resolved.
- */
-void td5_track_update_light_directions(void)
-{
-    /* Light directions are maintained in s_light_dir[] and s_light_enabled[].
-     * The renderer reads these to configure its directional light state.
-     * This function is a no-op in the source port as the state is updated
-     * directly during apply_segment_lighting. In the original, this copied
-     * from per-actor state to the global rendering light slots. */
-}
+#endif /* legacy track-lighting skeleton */
 
 /* ========================================================================
  * Race Order (0x42F5B0 UpdateRaceOrder)
@@ -4660,13 +4641,6 @@ int td5_track_load_runtime_data(int track_index, int reverse)
         }
     }
 
-    /* Clear actor lighting zones */
-    memset(s_actor_light_zone, 0, sizeof(s_actor_light_zone));
-
-    /* Clear directional lights */
-    memset(s_light_enabled, 0, sizeof(s_light_enabled));
-    memset(s_light_dir, 0, sizeof(s_light_dir));
-
     /* Ensure renderer-owned fallback geometry is always available even when
      * the level archive is missing or the real display-list builder has not
      * been wired in yet. */
@@ -4856,9 +4830,6 @@ int td5_track_init(void)
     free_models_dat_runtime();
 
     memset(s_race_order, 0, sizeof(s_race_order));
-    memset(s_light_enabled, 0, sizeof(s_light_enabled));
-    memset(s_light_dir, 0, sizeof(s_light_dir));
-    memset(s_actor_light_zone, 0, sizeof(s_actor_light_zone));
     memset(s_models, 0, sizeof(s_models));
 
     s_span_array = NULL;
@@ -4885,8 +4856,6 @@ int td5_track_init(void)
     s_traffic_bus = NULL;
     s_traffic_bus_count = 0;
     s_traffic_cursor = 0;
-    s_lighting_table = NULL;
-    s_lighting_entry_count = 0;
     s_model_count = 0;
     g_strip_span_count = 0;
     g_strip_total_segments = 0;
@@ -4936,9 +4905,6 @@ void td5_track_shutdown(void)
     }
     s_traffic_bus_count = 0;
     s_traffic_cursor = 0;
-
-    s_lighting_table = NULL;
-    s_lighting_entry_count = 0;
 }
 
 /**

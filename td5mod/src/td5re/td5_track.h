@@ -149,9 +149,10 @@ int  td5_track_get_span_center_world(int span_index,
 int  td5_track_get_span_lane_world(int span_index, int sub_lane,
                                     int *out_x, int *out_y, int *out_z);
 
-/* --- Lighting --- */
-void td5_track_apply_segment_lighting(TD5_Actor *actor, int view_index);
-void td5_track_update_light_directions(void);
+/* --- Lighting ---
+ * Per-vehicle zone-driven lighting now lives in td5_render.c as
+ * td5_render_apply_track_lighting(); td5_track no longer exposes any
+ * lighting helpers. */
 
 /* --- Track wall contact resolution (FUN_00406CC0) ---
  * Checks all 4 wheel probes against span edge boundaries.

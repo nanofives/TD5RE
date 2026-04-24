@@ -1734,7 +1734,12 @@ void td5_render_actors_for_view(int view_index)
                     continue;
             }
 
-            td5_track_apply_segment_lighting(actor, view_index);
+            /* (Lighting moved below to td5_render_apply_track_lighting,
+             * which writes to the s_light_dirs[] basis ComputeMeshVertexLighting
+             * actually consumes. The earlier td5_track_apply_segment_lighting
+             * skeleton was a dead branch -- wrong struct offsets, never wired
+             * to a populated table, and writing to a parallel set of globals
+             * the renderer did not read.) */
 
             /* Original (0x40C120): compute interpolated render position.
              * render_pos = (world_pos + linear_velocity * g_subTickFraction) / 256.
@@ -1764,6 +1769,11 @@ void td5_render_actors_for_view(int view_index)
             (void)depth;
 
             td5_render_transform_mesh_vertices(mesh);
+            /* Per-actor track-zone driven 3-light + ambient basis (mirrors
+             * ApplyTrackLightingForVehicleSegment @ 0x00430150). Must run
+             * BEFORE compute_vertex_lighting since that's the consumer of
+             * s_light_dirs[]/s_ambient_intensity. */
+            td5_render_apply_track_lighting(slot, actor);
             td5_render_compute_vertex_lighting(mesh);
 
             /* Shadow before car mesh — car body + wheels paint over it via
@@ -2421,6 +2431,549 @@ static int update_actor_light_zone(int slot, int track_span)
 
     s_actor_light_zone[slot] = (uint8_t)idx;
     return idx;
+}
+
+/* ========================================================================
+ * Track Lighting -- ApplyTrackLightingForVehicleSegment @ 0x00430150
+ *
+ * Per-vehicle zone-driven 3-light + ambient basis.
+ * Each per-track zone (TD5_LightZone, td5_light_zones_table.inc) carries:
+ *   dir[3]      static directional vector (world frame, scaled to ~4096)
+ *   weight[3]   per-channel directional weight bytes
+ *   amb[3]      per-channel ambient bytes
+ *   pos_off[2]  XY world-space bias added to track-vertex sample positions
+ *   blend_mode  0=static, 1=transition (blend at edges, sample mid),
+ *               2=multi-sample mid-zone, 3=full-zone half/half blend
+ *   spacing     stride for vertex sampling (cases 1/2)
+ *   sub_mode    case-2 vertex pick: 0=left edge, 1=right edge, 2=midpoint
+ *   multiplier  attenuation multiplier (cases 1/2)
+ *
+ * The original calls SetTrackLightDirectionContribution(slot,dir,R,G,B) up to
+ * 3 times to populate world-frame contributions, ComputeAverageDepth(R,G,B)
+ * to set the scalar ambient, and finally UpdateActiveTrackLightDirections to
+ * transform contributions into body frame. ComputeMeshVertexLighting then
+ * does per-vertex dot products against body-frame normals.
+ * ======================================================================== */
+
+/* Convert 24.8 fixed-point world coord to int16 with round-toward-zero for
+ * negatives. Mirrors the (x + (x>>31 & 0xff)) >> 8 idiom in the original. */
+static inline int16_t tl_fp_to_short(int32_t fp)
+{
+    return (int16_t)((fp + ((fp >> 31) & 0xFF)) >> 8);
+}
+
+/* Mirrors ConvertFloatVec4ToShortAngles @ 0x0042CDB0:
+ *   - reads 3 input shorts (x,y,z)
+ *   - normalizes to a 4096-scale unit vector and writes back to out[0..2]
+ *   - returns the SQUARED magnitude (mag^2) as an int -- callers use it as a
+ *     squared-distance metric for attenuation. */
+static int tl_normalize_4096(const int16_t in[3], int16_t out[3])
+{
+    float fx = (float)in[0];
+    float fy = (float)in[1];
+    float fz = (float)in[2];
+    float mag2 = fx*fx + fy*fy + fz*fz;
+    if (mag2 <= 0.0f) {
+        out[0] = 0; out[1] = 0; out[2] = 0;
+        return 0;
+    }
+    float scale = 4096.0f / sqrtf(mag2);
+    out[0] = (int16_t)(int32_t)(fx * scale);
+    out[1] = (int16_t)(int32_t)(fy * scale);
+    out[2] = (int16_t)(int32_t)(fz * scale);
+    return (int)mag2;
+}
+
+/* Per-frame 3-slot contribution accumulator (one set per actor pass). */
+typedef struct {
+    int   enabled;       /* 0 = slot disabled, 1 = active */
+    float vec_world[3];  /* world-frame contribution dir scaled by intensity */
+} TL_Contribution;
+
+static TL_Contribution s_tl_contrib[3];
+static int             s_tl_ambient;  /* scalar ambient byte (post-ComputeAverageDepth) */
+
+/* SetTrackLightDirectionContribution @ 0x0042E130:
+ *   intensity = avg(R,G,B); contribution_world = dir * intensity * (1/1024).
+ *   All-zero RGB disables the slot. */
+static void tl_set_contrib(int slot, const int16_t dir[3], int r, int g, int b)
+{
+    if (slot < 0 || slot >= 3) return;
+    if (r == 0 && g == 0 && b == 0) {
+        s_tl_contrib[slot].enabled = 0;
+        s_tl_contrib[slot].vec_world[0] = 0.0f;
+        s_tl_contrib[slot].vec_world[1] = 0.0f;
+        s_tl_contrib[slot].vec_world[2] = 0.0f;
+        return;
+    }
+    s_tl_contrib[slot].enabled = 1;
+    float intensity = (float)(r + g + b) / 3.0f;
+    s_tl_contrib[slot].vec_world[0] = (float)dir[0] * intensity * (1.0f / 1024.0f);
+    s_tl_contrib[slot].vec_world[1] = (float)dir[1] * intensity * (1.0f / 1024.0f);
+    s_tl_contrib[slot].vec_world[2] = (float)dir[2] * intensity * (1.0f / 1024.0f);
+}
+
+/* ComputeAverageDepth @ 0x0043E7B0: scalar ambient = (R+G+B)/3 byte. */
+static void tl_set_depth(int r, int g, int b)
+{
+    s_tl_ambient = (r + g + b) / 3;
+}
+
+/* UpdateActiveTrackLightDirections @ 0x0042CE90:
+ *   For each slot, transform its world-frame contribution into body frame
+ *   via M^T (port matrix layout: m[0..2]=row0, m[3..5]=row1, m[6..8]=row2,
+ *   so column j = {m[j], m[j+3], m[j+6]}). Disabled slots fall back to the
+ *   default zero vector (DAT_004ab0f8/0fc/100 verified zero in memory). */
+static void tl_commit_to_render_globals(const TD5_Actor *actor)
+{
+    const float *m = actor->rotation_matrix.m;
+    for (int s = 0; s < 3; s++) {
+        if (s_tl_contrib[s].enabled) {
+            float cx = s_tl_contrib[s].vec_world[0];
+            float cy = s_tl_contrib[s].vec_world[1];
+            float cz = s_tl_contrib[s].vec_world[2];
+            s_light_dirs[s*3 + 0] = cx * m[0] + cy * m[3] + cz * m[6];
+            s_light_dirs[s*3 + 1] = cx * m[1] + cy * m[4] + cz * m[7];
+            s_light_dirs[s*3 + 2] = cx * m[2] + cy * m[5] + cz * m[8];
+        } else {
+            s_light_dirs[s*3 + 0] = 0.0f;
+            s_light_dirs[s*3 + 1] = 0.0f;
+            s_light_dirs[s*3 + 2] = 0.0f;
+        }
+    }
+    s_ambient_intensity = (float)s_tl_ambient;
+}
+
+/* Per-actor lighting fallback used when no zone can be resolved. */
+static void tl_apply_fallback(void)
+{
+    for (int s = 0; s < 3; s++) {
+        s_tl_contrib[s].enabled = 0;
+        s_tl_contrib[s].vec_world[0] = 0.0f;
+        s_tl_contrib[s].vec_world[1] = 0.0f;
+        s_tl_contrib[s].vec_world[2] = 0.0f;
+    }
+    s_tl_ambient = TD5_LIGHTING_MIN;
+}
+
+/* Bounds-checked accessor for the per-track-zone array. */
+static const TD5_LightZone *tl_zone_at(int track_first, int track_count, int idx)
+{
+    if (idx < 0 || idx >= track_count) return NULL;
+    return &td5_light_zones[track_first + idx];
+}
+
+/* BlendTrackLightEntryFromStart @ 0x0042FE20.
+ *   Fades the previous zone's directional contribution out as the actor
+ *   crosses from the previous zone into the current zone (via the strip-edge
+ *   perpendicular at zone->span_lo). Ambient blends prev -> curr.
+ *
+ *   max_dist is the projected-distance cap (in strip-perpendicular units).
+ *   At the boundary, prev dominates; deeper into curr, contribution decays. */
+static void tl_blend_from_start(const TD5_Actor *actor,
+                                const TD5_LightZone *prev,
+                                const TD5_LightZone *curr,
+                                int max_dist)
+{
+    if (!actor || !prev || !curr || max_dist <= 0) return;
+
+    const TD5_StripSpan *sp = td5_track_get_span((int)curr->span_lo);
+    if (!sp) return;
+    /* "Right edge" of the strip-vertex span = vertex(right_vertex_index - 1).
+     * The original walks right_vertex (== last_vertex in original code) and
+     * then accesses (last_vertex - 1) for the cross-edge calculation. */
+    int right_idx = (int)sp->right_vertex_index - 1;
+    if (right_idx < 0) return;
+    const TD5_StripVertex *vL = td5_track_get_vertex((int)sp->left_vertex_index);
+    const TD5_StripVertex *vR = td5_track_get_vertex(right_idx);
+    if (!vL || !vR) return;
+
+    /* Build the strip's edge-perpendicular vector (XZ-plane 90deg rotation
+     * of (vL - vR)) and normalize to 4096-scale. */
+    int16_t edge_in[3] = {
+        (int16_t)((int)vL->z - (int)vR->z),
+        0,
+        (int16_t)((int)vR->x - (int)vL->x),
+    };
+    int16_t edge[3];
+    (void)tl_normalize_4096(edge_in, edge);
+
+    /* Project actor's offset onto the perpendicular. The perpendicular is
+     * oriented so that positive dot = behind the boundary (= prev zone side);
+     * the original negates and clamps to [0, max_dist] for the curr-side
+     * weight, leaving max_dist - clamped as the prev-side weight. */
+    int16_t actor_x = tl_fp_to_short(actor->world_pos.x);
+    int16_t actor_z = tl_fp_to_short(actor->world_pos.z);
+    int dx = (int)((int16_t)(actor_x - (int16_t)sp->origin_x) - vR->x);
+    int dz = (int)((int16_t)(actor_z - (int16_t)sp->origin_z) - vR->z);
+    int dot = dz * (int)edge[2] + dx * (int)edge[0];
+    int dist_curr = -((dot + ((dot >> 31) & 0xFFF)) >> 12);
+    if (dist_curr < 0)            dist_curr = 0;
+    if (dist_curr > max_dist)     dist_curr = max_dist;
+    int dist_prev = max_dist - dist_curr;
+
+    /* Ambient blends prev -> curr. */
+    tl_set_depth(
+        ((int)prev->amb_r * dist_prev + (int)curr->amb_r * dist_curr) / max_dist,
+        ((int)prev->amb_g * dist_prev + (int)curr->amb_g * dist_curr) / max_dist,
+        ((int)prev->amb_b * dist_prev + (int)curr->amb_b * dist_curr) / max_dist);
+
+    /* Slot 0: prev's directional contribution scaled down as we move away. */
+    {
+        int16_t prev_dir[3] = { prev->dir_x, prev->dir_y, prev->dir_z };
+        tl_set_contrib(0, prev_dir,
+            (int)prev->weight_r * dist_prev / max_dist,
+            (int)prev->weight_g * dist_prev / max_dist,
+            (int)prev->weight_b * dist_prev / max_dist);
+    }
+    /* Slots 1/2: disabled (original passes curr->dir with all-zero weights). */
+    {
+        int16_t curr_dir[3] = { curr->dir_x, curr->dir_y, curr->dir_z };
+        tl_set_contrib(1, curr_dir, 0, 0, 0);
+        tl_set_contrib(2, curr_dir, 0, 0, 0);
+    }
+}
+
+/* BlendTrackLightEntryFromEnd @ 0x0042FFC0.
+ *   Symmetric to BlendStart but uses the strip RIGHT AFTER zone->span_hi
+ *   (i.e. the next zone's first strip) and blends curr -> next as the actor
+ *   approaches the zone end. */
+static void tl_blend_from_end(const TD5_Actor *actor,
+                              const TD5_LightZone *curr,
+                              const TD5_LightZone *next,
+                              int max_dist)
+{
+    if (!actor || !curr || !next || max_dist <= 0) return;
+
+    /* Original reads strip[span_hi + 1] via byte +0x1c (= 0x18 + 0x4) of the
+     * span_hi strip record. Use the next strip directly. */
+    const TD5_StripSpan *sp = td5_track_get_span((int)curr->span_hi + 1);
+    if (!sp) return;
+    int right_idx = (int)sp->right_vertex_index - 1;
+    if (right_idx < 0) return;
+    const TD5_StripVertex *vL = td5_track_get_vertex((int)sp->left_vertex_index);
+    const TD5_StripVertex *vR = td5_track_get_vertex(right_idx);
+    if (!vL || !vR) return;
+
+    int16_t edge_in[3] = {
+        (int16_t)((int)vL->z - (int)vR->z),
+        0,
+        (int16_t)((int)vR->x - (int)vL->x),
+    };
+    int16_t edge[3];
+    (void)tl_normalize_4096(edge_in, edge);
+
+    int16_t actor_x = tl_fp_to_short(actor->world_pos.x);
+    int16_t actor_z = tl_fp_to_short(actor->world_pos.z);
+    int dx = (int)((int16_t)(actor_x - (int16_t)sp->origin_x) - vR->x);
+    int dz = (int)((int16_t)(actor_z - (int16_t)sp->origin_z) - vR->z);
+    int dot = dz * (int)edge[2] + dx * (int)edge[0];
+    /* BlendEnd does NOT negate -- the perpendicular orientation here puts the
+     * boundary at dot=0 from the inside, growing positive as the actor moves
+     * back into the zone. */
+    int dist_curr = (dot + ((dot >> 31) & 0xFFF)) >> 12;
+    if (dist_curr < 0)            dist_curr = 0;
+    if (dist_curr > max_dist)     dist_curr = max_dist;
+    int dist_next = max_dist - dist_curr;
+
+    tl_set_depth(
+        ((int)curr->amb_r * dist_curr + (int)next->amb_r * dist_next) / max_dist,
+        ((int)curr->amb_g * dist_curr + (int)next->amb_g * dist_next) / max_dist,
+        ((int)curr->amb_b * dist_curr + (int)next->amb_b * dist_next) / max_dist);
+
+    /* Slot 0: next zone's directional contribution scaled by closeness to
+     * the boundary (dist_next grows as actor approaches span_hi). */
+    {
+        int16_t next_dir[3] = { next->dir_x, next->dir_y, next->dir_z };
+        tl_set_contrib(0, next_dir,
+            (int)next->weight_r * dist_next / max_dist,
+            (int)next->weight_g * dist_next / max_dist,
+            (int)next->weight_b * dist_next / max_dist);
+    }
+    {
+        int16_t curr_dir[3] = { curr->dir_x, curr->dir_y, curr->dir_z };
+        tl_set_contrib(1, curr_dir, 0, 0, 0);
+        tl_set_contrib(2, curr_dir, 0, 0, 0);
+    }
+}
+
+/* Compute one mid-zone vertex sample's contribution (case 1 / case 2 inner).
+ *   sample_pos = strip_origin + chosen_vertex (+ pos_off_y on Y component)
+ *   dir = (sample_pos - actor_pos) normalized to 4096
+ *   atten = clamp(0x1000 - (mag^2 * multiplier) >> 14, 0, 0x1000)
+ *   slot contribution = dir * atten * (weight/4096) per channel */
+static void tl_sample_contrib(int slot,
+                              const TD5_Actor *actor,
+                              const int sample_pos[3],
+                              int weight_r, int weight_g, int weight_b,
+                              int multiplier)
+{
+    int16_t actor_x = tl_fp_to_short(actor->world_pos.x);
+    int16_t actor_y = tl_fp_to_short(actor->world_pos.y);
+    int16_t actor_z = tl_fp_to_short(actor->world_pos.z);
+
+    int16_t dir_in[3] = {
+        (int16_t)(sample_pos[0] - (int)actor_x),
+        (int16_t)(sample_pos[1] - (int)actor_y),
+        (int16_t)(sample_pos[2] - (int)actor_z),
+    };
+    int16_t dir[3];
+    int mag2 = tl_normalize_4096(dir_in, dir);
+
+    int atten = (mag2 * multiplier + (((mag2 * multiplier) >> 31) & 0x3FFF)) >> 14;
+    if (atten < 0x1001) atten = 0x1000 - atten;
+    else                atten = 0;
+
+    /* (atten * weight) >> 12 with round-toward-zero for negatives.
+     * atten is non-negative here so the sign-fixup is a no-op, but the
+     * pattern is preserved for parity with the original. */
+    int wr = (atten * weight_r + (((atten * weight_r) >> 31) & 0xFFF)) >> 12;
+    int wg = (atten * weight_g + (((atten * weight_g) >> 31) & 0xFFF)) >> 12;
+    int wb = (atten * weight_b + (((atten * weight_b) >> 31) & 0xFFF)) >> 12;
+    tl_set_contrib(slot, dir, wr, wg, wb);
+}
+
+/* Resolve a strip's chosen vertex per case-2 sub_mode (0=left edge,
+ * 1=right edge (right_vertex_index - 1), 2=midpoint). Returns 0 on failure. */
+static int tl_pick_strip_vertex(const TD5_StripSpan *sp, int sub_mode,
+                                int *out_vx, int *out_vy, int *out_vz)
+{
+    if (!sp) return 0;
+    const TD5_StripVertex *vL = td5_track_get_vertex((int)sp->left_vertex_index);
+    int right_idx = (int)sp->right_vertex_index - 1;
+    const TD5_StripVertex *vR = (right_idx >= 0) ? td5_track_get_vertex(right_idx) : NULL;
+    if (!vL || !vR) return 0;
+
+    switch (sub_mode) {
+    case 0:
+        *out_vx = vL->x; *out_vy = vL->y; *out_vz = vL->z;
+        return 1;
+    case 1:
+        *out_vx = vR->x; *out_vy = vR->y; *out_vz = vR->z;
+        return 1;
+    case 2:
+        *out_vx = (vL->x + vR->x) / 2;
+        *out_vy = (vL->y + vR->y) / 2;
+        *out_vz = (vL->z + vR->z) / 2;
+        return 1;
+    default:
+        return 0;
+    }
+}
+
+/* Case 1 mid-span: 2 contribution samples taken from the LEFT edge and the
+ * RIGHT edge of one spacing-aligned strip. */
+static int tl_apply_case1_midspan(const TD5_Actor *actor, const TD5_LightZone *zone, int span)
+{
+    int spacing = (int)zone->spacing;
+    if (spacing == 0) return 0;
+    int pos_off_x = (int)zone->pos_off_x;
+    int pos_off_y = (int)zone->pos_off_y;
+    int multiplier = (int)zone->multiplier;
+    int weight_r = (int)zone->weight_r;
+    int weight_g = (int)zone->weight_g;
+    int weight_b = (int)zone->weight_b;
+
+    /* Snap span to the nearest spacing-grid sample relative to pos_off_x.
+     * Mirrors ((spacing/2 - pos_off_x + span) / spacing) * spacing + pos_off_x. */
+    int aligned = ((spacing / 2 - pos_off_x + span) / spacing) * spacing + pos_off_x;
+    const TD5_StripSpan *sp = td5_track_get_span(aligned);
+    if (!sp) return 0;
+    /* Right edge index from packed lane-count nibble. */
+    int right_lane = (((const uint8_t *)sp)[3]) & 0x0F;
+    int right_idx = (int)sp->left_vertex_index + right_lane;
+    const TD5_StripVertex *vL = td5_track_get_vertex((int)sp->left_vertex_index);
+    const TD5_StripVertex *vR = td5_track_get_vertex(right_idx);
+    if (!vL || !vR) return 0;
+
+    int sample0[3] = {
+        (int)vL->x + (int)(int16_t)sp->origin_x,
+        (int)vL->y + (int)(int16_t)sp->origin_y + pos_off_y,
+        (int)vL->z + (int)(int16_t)sp->origin_z,
+    };
+    int sample1[3] = {
+        (int)vR->x + (int)(int16_t)sp->origin_x,
+        (int)vR->y + (int)(int16_t)sp->origin_y + pos_off_y,
+        (int)vR->z + (int)(int16_t)sp->origin_z,
+    };
+
+    tl_sample_contrib(0, actor, sample0, weight_r, weight_g, weight_b, multiplier);
+    tl_sample_contrib(1, actor, sample1, weight_r, weight_g, weight_b, multiplier);
+    /* Slot 2 disabled. */
+    {
+        int16_t dummy[3] = { zone->dir_x, zone->dir_y, zone->dir_z };
+        tl_set_contrib(2, dummy, 0, 0, 0);
+    }
+    tl_set_depth((int)zone->amb_r, (int)zone->amb_g, (int)zone->amb_b);
+    return 1;
+}
+
+/* Case 2 mid-zone: 3 contribution samples taken from (prev, curr, next) strips
+ * at +/- spacing relative to the spacing-aligned center, each sample selecting
+ * the chosen vertex (sub_mode: 0/1/2). */
+static int tl_apply_case2(const TD5_Actor *actor, const TD5_LightZone *zone, int span)
+{
+    int spacing = (int)zone->spacing;
+    if (spacing == 0) return 0;
+    int pos_off_x = (int)zone->pos_off_x;
+    int pos_off_y = (int)zone->pos_off_y;
+    int sub_mode = (int)zone->sub_mode;
+    int multiplier = (int)zone->multiplier;
+    int weight_r = (int)zone->weight_r;
+    int weight_g = (int)zone->weight_g;
+    int weight_b = (int)zone->weight_b;
+
+    int aligned = ((spacing / 2 - pos_off_x + span) / spacing) * spacing + pos_off_x;
+
+    for (int s = 0; s < 3; s++) {
+        int strip_idx = aligned + (s - 1) * spacing;
+        const TD5_StripSpan *sp = td5_track_get_span(strip_idx);
+        if (!sp) return 0;
+        int vx, vy, vz;
+        if (!tl_pick_strip_vertex(sp, sub_mode, &vx, &vy, &vz)) return 0;
+        int sample_pos[3] = {
+            vx + (int)(int16_t)sp->origin_x,
+            vy + (int)(int16_t)sp->origin_y + pos_off_y,
+            vz + (int)(int16_t)sp->origin_z,
+        };
+        tl_sample_contrib(s, actor, sample_pos, weight_r, weight_g, weight_b, multiplier);
+    }
+    tl_set_depth((int)zone->amb_r, (int)zone->amb_g, (int)zone->amb_b);
+    return 1;
+}
+
+/* Static-zone case 0: single contribution slot with the zone's stored dir +
+ * weights, scalar ambient = avg of amb bytes. */
+static void tl_apply_case0(const TD5_LightZone *zone)
+{
+    int16_t dir[3] = { zone->dir_x, zone->dir_y, zone->dir_z };
+    tl_set_contrib(0, dir, (int)zone->weight_r, (int)zone->weight_g, (int)zone->weight_b);
+    tl_set_contrib(1, dir, 0, 0, 0);
+    tl_set_contrib(2, dir, 0, 0, 0);
+    tl_set_depth((int)zone->amb_r, (int)zone->amb_g, (int)zone->amb_b);
+}
+
+void td5_render_apply_track_lighting(int slot, TD5_Actor *actor)
+{
+    if (!actor || slot < 0 || slot >= TD5_ACTOR_MAX_TOTAL_SLOTS) {
+        tl_apply_fallback();
+        s_ambient_intensity = (float)s_tl_ambient;
+        for (int i = 0; i < 9; i++) s_light_dirs[i] = 0.0f;
+        return;
+    }
+    if (s_environs_level < 0 || s_environs_level >= TD5_LIGHT_ZONE_TRACK_COUNT) {
+        tl_apply_fallback();
+        s_ambient_intensity = (float)s_tl_ambient;
+        for (int i = 0; i < 9; i++) s_light_dirs[i] = 0.0f;
+        return;
+    }
+
+    int span = (int)(int16_t)actor->track_span_raw;
+    if (span < 0) {
+        tl_apply_fallback();
+        s_ambient_intensity = (float)s_tl_ambient;
+        for (int i = 0; i < 9; i++) s_light_dirs[i] = 0.0f;
+        return;
+    }
+
+    int zone_idx = update_actor_light_zone(slot, span);
+    if (zone_idx < 0) {
+        tl_apply_fallback();
+        s_ambient_intensity = (float)s_tl_ambient;
+        for (int i = 0; i < 9; i++) s_light_dirs[i] = 0.0f;
+        return;
+    }
+
+    int track_first = td5_light_zone_track[s_environs_level].first;
+    int track_count = td5_light_zone_track[s_environs_level].count;
+    const TD5_LightZone *zone = tl_zone_at(track_first, track_count, zone_idx);
+    if (!zone) {
+        tl_apply_fallback();
+        tl_commit_to_render_globals(actor);
+        return;
+    }
+
+    /* Dispatch on blend_mode (zone +0x18). */
+    int handled = 0;
+    switch (zone->blend_mode) {
+    case 0:
+        tl_apply_case0(zone);
+        handled = 1;
+        break;
+    case 1: {
+        /* Edges (within 3 spans of either end) blend with neighbour zones;
+         * mid-span uses the 2-vertex sample loop. */
+        if (span - (int)zone->span_lo < 3) {
+            const TD5_LightZone *prev = tl_zone_at(track_first, track_count, zone_idx - 1);
+            if (prev) {
+                tl_blend_from_start(actor, prev, zone, 0x800);
+                handled = 1;
+            }
+        } else if ((int)zone->span_hi - span < 3) {
+            const TD5_LightZone *next = tl_zone_at(track_first, track_count, zone_idx + 1);
+            if (next) {
+                tl_blend_from_end(actor, zone, next, 0x800);
+                handled = 1;
+            }
+        } else {
+            handled = tl_apply_case1_midspan(actor, zone, span);
+        }
+        break;
+    }
+    case 2:
+        /* Original case 2 falls through to the LAB_00430914 mid-zone loop
+         * unconditionally with edge guards: <3 spans into start -> BlendStart,
+         * <3 spans from end -> BlendEnd; otherwise multi-sample. */
+        if (span - (int)zone->span_lo < 3) {
+            const TD5_LightZone *prev = tl_zone_at(track_first, track_count, zone_idx - 1);
+            if (prev) {
+                tl_blend_from_start(actor, prev, zone, 0x800);
+                handled = 1;
+            }
+        } else if ((int)zone->span_hi - span < 3) {
+            const TD5_LightZone *next = tl_zone_at(track_first, track_count, zone_idx + 1);
+            if (next) {
+                tl_blend_from_end(actor, zone, next, 0x800);
+                handled = 1;
+            }
+        } else {
+            handled = tl_apply_case2(actor, zone, span);
+        }
+        break;
+    case 3: {
+        /* Half/half full-zone blend: first half uses BlendStart with width-
+         * scaled max distance, second half uses BlendEnd. */
+        int width = (int)zone->span_hi - (int)zone->span_lo + 1;
+        if (width < 1) width = 1;
+        int max_dist = width * 0x200;
+        if (span - (int)zone->span_lo < width / 2) {
+            const TD5_LightZone *prev = tl_zone_at(track_first, track_count, zone_idx - 1);
+            if (prev) {
+                tl_blend_from_start(actor, prev, zone, max_dist);
+                handled = 1;
+            }
+        } else {
+            const TD5_LightZone *next = tl_zone_at(track_first, track_count, zone_idx + 1);
+            if (next) {
+                tl_blend_from_end(actor, zone, next, max_dist);
+                handled = 1;
+            }
+        }
+        break;
+    }
+    default:
+        break;
+    }
+
+    if (!handled) {
+        /* Any path that couldn't resolve required strip/vertex data falls
+         * back to the static case-0 fields so the chassis still gets sane
+         * lighting -- matches the spirit of the original's logged "spacing
+         * zero" early-out (which leaves the previous frame's basis intact). */
+        tl_apply_case0(zone);
+    }
+
+    tl_commit_to_render_globals(actor);
 }
 
 void td5_render_update_projection_effect(int slot, TD5_Actor *actor)

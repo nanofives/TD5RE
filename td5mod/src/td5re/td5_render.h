@@ -85,6 +85,15 @@ void td5_render_transform_vec3(const float *in, float *out);
 void td5_render_transform_mesh_vertices(TD5_MeshHeader *mesh);
 void td5_render_compute_vertex_lighting(TD5_MeshHeader *mesh);
 
+/* Per-actor track-zone driven lighting basis update.
+ * Walks the per-track light-zone array for `actor->track_span_raw`, picks the
+ * directional vector + ambient color from the current zone, transforms the
+ * world-frame contribution into body space via the actor's rotation matrix,
+ * and writes s_light_dirs[]/s_ambient_intensity for the next call to
+ * td5_render_compute_vertex_lighting(). Mirrors
+ * ApplyTrackLightingForVehicleSegment @ 0x00430150. */
+void td5_render_apply_track_lighting(int slot, TD5_Actor *actor);
+
 /* --- Frustum culling --- */
 int  td5_render_is_sphere_visible(float cx, float cy, float cz, float radius);
 int  td5_render_test_mesh_frustum(TD5_MeshHeader *mesh, float *out_depth);
