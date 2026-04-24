@@ -244,6 +244,16 @@ void td5_physics_wall_response(TD5_Actor *actor, int32_t wall_angle,
                                int32_t penetration, int side,
                                int32_t probe_x_fp8, int32_t probe_z_fp8)
 {
+    /* Pre-impulse attitude snapshot (slot 0) — lets us see whether wall
+     * response is the proximate trigger of a pitch/roll spike. */
+    int32_t pre_av_roll  = actor->angular_velocity_roll;
+    int32_t pre_av_pitch = actor->angular_velocity_pitch;
+    int32_t pre_av_yaw   = actor->angular_velocity_yaw;
+    int32_t pre_disp_r   = actor->display_angles.roll;
+    int32_t pre_disp_p   = actor->display_angles.pitch;
+    int32_t pre_pos_y    = actor->world_pos.y;
+    uint8_t pre_bm       = actor->wheel_contact_bitmask;
+
     /* wall tangent direction (cos,sin); the wall normal is (-sin, cos). */
     int32_t cos_w = cos_fixed12(wall_angle);
     int32_t sin_w = sin_fixed12(wall_angle);
@@ -355,6 +365,18 @@ void td5_physics_wall_response(TD5_Actor *actor, int32_t wall_angle,
               "wall_response: side=%d pen=%d angle=%d arm=%d iVar11=%d imp=%d vpara=%d vperp=%d yaw=%d",
               side, penetration, wall_angle, iVar9, iVar11, impulse,
               new_v_para, new_v_perp, actor->angular_velocity_yaw);
+
+    if (actor->slot_index == 0) {
+        TD5_LOG_I(LOG_TAG,
+                  "wall_delta slot0: bm=0x%02x pos_y=%d pre{ar=%d ap=%d ay=%d dr=%d dp=%d} "
+                  "post{ar=%d ap=%d ay=%d dr=%d dp=%d}",
+                  (int)pre_bm, pre_pos_y,
+                  pre_av_roll, pre_av_pitch, pre_av_yaw,
+                  pre_disp_r, pre_disp_p,
+                  actor->angular_velocity_roll, actor->angular_velocity_pitch,
+                  actor->angular_velocity_yaw,
+                  (int)actor->display_angles.roll, (int)actor->display_angles.pitch);
+    }
 }
 
 /* ========================================================================
@@ -4073,6 +4095,32 @@ void td5_physics_integrate_pose(TD5_Actor *actor)
      * The target-angle spring-damper block inside is gated on !g_game_paused
      * internally so the parked car doesn't tilt during countdown. */
     td5_physics_update_suspension_response(actor);
+
+    /* SPIKE TRIGGER: log full attitude state when av_roll or av_pitch
+     * exceeds ±3000 in magnitude. Catches the "car goes nuts on wall +
+     * uphill" scenario without flooding the log during normal driving. */
+    if (actor->slot_index == 0) {
+        int32_t ar = actor->angular_velocity_roll;
+        int32_t ap = actor->angular_velocity_pitch;
+        if (ar > 3000 || ar < -3000 || ap > 3000 || ap < -3000) {
+            TD5_LOG_I(LOG_TAG,
+                "spike slot0: t=%u bm=0x%02x pos_y=%d vy=%d "
+                "av{r=%d p=%d y=%d} disp{r=%d p=%d y=%d} "
+                "eacc{r=%d p=%d} susp_pos=[%d %d %d %d] contact_y=[%d %d %d %d]",
+                (unsigned)actor->frame_counter,
+                (int)actor->wheel_contact_bitmask,
+                actor->world_pos.y, actor->linear_velocity_y,
+                ar, ap, actor->angular_velocity_yaw,
+                (int)actor->display_angles.roll,
+                (int)actor->display_angles.pitch,
+                (int)actor->display_angles.yaw,
+                actor->euler_accum.roll, actor->euler_accum.pitch,
+                actor->wheel_suspension_pos[0], actor->wheel_suspension_pos[1],
+                actor->wheel_suspension_pos[2], actor->wheel_suspension_pos[3],
+                actor->wheel_contact_pos[0].y, actor->wheel_contact_pos[1].y,
+                actor->wheel_contact_pos[2].y, actor->wheel_contact_pos[3].y);
+        }
+    }
 
     if (actor->slot_index == 0 && (actor->frame_counter % 60u) == 0u) {
         TD5_LOG_D(LOG_TAG, "Integrate actor0: pos=(%d,%d,%d)",
