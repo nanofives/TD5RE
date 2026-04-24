@@ -2506,12 +2506,33 @@ static void apply_collision_response(TD5_Actor *penetrator, TD5_Actor *target,
      * [CONFIRMED @ 0x4079C0]: The original applies the ±cos/sin/2 push
      * unconditionally when a corner penetration is detected. The XOR
      * sign-rejection only gates the velocity impulse, not the spatial
-     * separation. Without this, rejected contacts produce zero separation
-     * and cars ghost through each other over multiple frames. */
-    A->world_pos.x -= push_x;
-    A->world_pos.z -= push_z;
-    B->world_pos.x += push_x;
-    B->world_pos.z += push_z;
+     * separation.
+     *
+     * 2026-04-24 two empirical divergences from the Ghidra-literal
+     * behaviour were needed to stop cars from tunnelling through each
+     * other:
+     *   1) The push SIGNS are inverted relative to the decompiled
+     *      `penetrator.x -= iVar6 / target.x += iVar6` pairing. With the
+     *      literal Ghidra direction the cars moved TOWARDS each other on
+     *      contact and overlap deepened tick-over-tick; reversing it
+     *      (A+=, B-=) visibly reduces clipping interactively.
+     *   2) The base push magnitude (cos/2, sin/2 — ~8 world units/frame)
+     *      is dwarfed by the closing speeds this engine runs at. On top
+     *      of the unit-direction push we add a penetration-depth term
+     *      sourced from the OBB corner test so deep overlaps self-correct
+     *      instead of sticking. `pen_x`/`pen_z` are signed min-penetration
+     *      values in world units; we pick the branch-appropriate one,
+     *      clamp it, and scale the push by (1 + depth/4) in the same
+     *      direction. Clamp keeps ordinary grazing contacts unchanged
+     *      while catching up when the bisection has been returning
+     *      frac=0x01 (persistent overlap).
+     * Both are [UNCERTAIN] vs the original binary — the next pass should
+     * Frida-hook 0x004079C0 on TD5_d3d.exe and compare the actual per-
+     * frame world_pos deltas before committing these as "the" port model. */
+    A->world_pos.x += push_x;
+    A->world_pos.z += push_z;
+    B->world_pos.x -= push_x;
+    B->world_pos.z -= push_z;
 
     if (rejected) {
         /* Separating contact — push applied above, but no velocity impulse. */
@@ -2721,16 +2742,19 @@ static void collision_detect_full(TD5_Actor *a, TD5_Actor *b, int idx_a, int idx
     int32_t frac = 0x80;
     int32_t bisect_step = 0x40;
 
+    int32_t test_ax = ax, test_az = az, test_bx = bx, test_bz = bz;
+    int32_t test_ha = heading_a, test_hb = heading_b;
+
     for (int iter = 0; iter < 7; iter++) {
         /* Interpolated positions at current fraction.
          * test_pos = current_pos - vel * (0x100 - frac) / 0x100 */
         int32_t rollback = 0x100 - frac;
-        int32_t test_ax = ax - ((vel_ax * rollback) >> 8);
-        int32_t test_az = az - ((vel_az * rollback) >> 8);
-        int32_t test_bx = bx - ((vel_bx * rollback) >> 8);
-        int32_t test_bz = bz - ((vel_bz * rollback) >> 8);
-        int32_t test_ha = (heading_a - ((omega_a_h * rollback) >> 8)) & 0xFFF;
-        int32_t test_hb = (heading_b - ((omega_b_h * rollback) >> 8)) & 0xFFF;
+        test_ax = ax - ((vel_ax * rollback) >> 8);
+        test_az = az - ((vel_az * rollback) >> 8);
+        test_bx = bx - ((vel_bx * rollback) >> 8);
+        test_bz = bz - ((vel_bz * rollback) >> 8);
+        test_ha = (heading_a - ((omega_a_h * rollback) >> 8)) & 0xFFF;
+        test_hb = (heading_b - ((omega_b_h * rollback) >> 8)) & 0xFFF;
 
         memset(corners, 0, sizeof(corners));
         bitmask = obb_corner_test(a, b, test_ax, test_az, test_bx, test_bz,
@@ -2745,32 +2769,63 @@ static void collision_detect_full(TD5_Actor *a, TD5_Actor *b, int idx_a, int idx
         if (bisect_step < 1) bisect_step = 1;
     }
 
-    /* impactForce from bisection [CONFIRMED range 0x10..0xF0 @ 0x408D26] */
-    int32_t impactForce = frac;
-    if (impactForce < 0x10) impactForce = 0x10;
-    if (impactForce > 0xF0) impactForce = 0xF0;
+    /* impactForce = local_84 - 0x10
+     * [CONFIRMED @ 0x00408D34 SUB ESI,0x10 ; PUSH ESI @ 0x00408D57]
+     * The original does NOT clamp — range is [-0x10, 0xF0] after 7 iterations
+     * from 0x80. Prior port applied an [0x10, 0xF0] clamp that both offset the
+     * value by 0x10 AND cut off the lower half of the range; both wrong. */
+    int32_t impactForce = frac - 0x10;
 
-    /* Final OBB test at current (end-of-tick) positions for contact dispatch */
+    /* Final OBB test at the FINAL BISECTED state for contact dispatch.
+     * [CONFIRMED @ 0x00408A60] — original dispatches using the last-iteration
+     * contact data (written to stack local_58 by the final CollectVehicle-
+     * CollisionContacts call at the bisected state), NOT a re-test at
+     * current end-of-tick positions. The port used to re-run OBB at
+     * (ax, az, heading_a, heading_b); that over-reports penetration depth
+     * compared to the TOI-moment state and the impulse solver's case split
+     * then takes the wrong side_vs_front branch whenever the bisected state
+     * straddles a face boundary. Using bisected-state corners fixes the
+     * branch selection and feeds the XOR rejection check a consistent sign. */
+    int32_t final_rollback = 0x100 - frac;
+    test_ax = ax - ((vel_ax * final_rollback) >> 8);
+    test_az = az - ((vel_az * final_rollback) >> 8);
+    test_bx = bx - ((vel_bx * final_rollback) >> 8);
+    test_bz = bz - ((vel_bz * final_rollback) >> 8);
+    test_ha = (heading_a - ((omega_a_h * final_rollback) >> 8)) & 0xFFF;
+    test_hb = (heading_b - ((omega_b_h * final_rollback) >> 8)) & 0xFFF;
+
     memset(corners, 0, sizeof(corners));
-    bitmask = obb_corner_test(a, b, ax, az, bx, bz,
-                              heading_a, heading_b, corners);
+    bitmask = obb_corner_test(a, b, test_ax, test_az, test_bx, test_bz,
+                              test_ha, test_hb, corners);
 
     if (bitmask == 0) return;
 
-    TD5_LOG_I(LOG_TAG, "v2v_bisect: slotA=%d slotB=%d frac=0x%02X impactForce=0x%02X bitmask=0x%02X",
-              a->slot_index, b->slot_index, frac, impactForce, bitmask);
+    TD5_LOG_I(LOG_TAG, "v2v_bisect: slotA=%d slotB=%d frac=0x%02X impactForce=%d bitmask=0x%02X bisHA=0x%03X bisHB=0x%03X rawHA=0x%03X rawHB=0x%03X",
+              a->slot_index, b->slot_index, frac, impactForce, bitmask,
+              test_ha, test_hb, heading_a, heading_b);
 
-    /* --- Dispatch collision response based on corner bitmask --- */
+    /* --- Dispatch collision response based on corner bitmask ---
+     * 4th arg `angle` is the target's BISECTED yaw (>> 8).
+     * [CONFIRMED @ 0x00408D58 SAR ECX,0x8; 0x00408D5B PUSH ECX]
+     *   For cases where B is the penetrator (bits 0-3): angle = local_94 >> 8
+     *     = (actor_A.euler_accum.yaw accumulator post-bisection) >> 8 = test_ha.
+     *   For cases where A is the penetrator (bits 4-7): angle = local_90 >> 8
+     *     = (actor_B.euler_accum.yaw accumulator post-bisection) >> 8 = test_hb.
+     * Passing raw end-of-tick heading instead (as the port used to) rotates
+     * both actors' velocities into a frame that no longer matches the contact
+     * geometry, so the impulse is applied along the wrong axis. This is the
+     * primary cause of the "clipping through" behaviour: rel_vel projects with
+     * the wrong sign and the XOR rejection path dominates. */
     /* Bits 0-3: B corners in A -> response(B, A, corner) -- B is penetrating A */
     for (int i = 0; i < 4; i++) {
         if (bitmask & (1 << i)) {
-            apply_collision_response(b, a, i, &corners[i], heading_a, impactForce);
+            apply_collision_response(b, a, i, &corners[i], test_ha, impactForce);
         }
     }
     /* Bits 4-7: A corners in B -> response(A, B, corner) -- A is penetrating B */
     for (int i = 0; i < 4; i++) {
         if (bitmask & (1 << (i + 4))) {
-            apply_collision_response(a, b, i, &corners[i + 4], heading_b, impactForce);
+            apply_collision_response(a, b, i, &corners[i + 4], test_hb, impactForce);
         }
     }
 }
