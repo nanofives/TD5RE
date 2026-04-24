@@ -10,6 +10,7 @@
 
 #include "td5_frontend.h"
 #include "td5_asset.h"
+#include "td5_game.h"
 #include "td5_input.h"
 #include "td5_physics.h"
 #include "td5_net.h"
@@ -4002,6 +4003,142 @@ static void frontend_render_high_score_overlay(float sx, float sy) {
     }
 }
 
+/* ============================================================================
+ * frontend_render_race_results_overlay
+ * Per-frame draw for TD5_SCREEN_RACE_RESULTS (original FUN_00422480).
+ *
+ * RE basis:
+ *   - Panel surface 0x198 x 0x188 = 408 x 392 px, black-filled.
+ *     [CONFIRMED @ 0x004225F7 CreateTrackedFrontendSurface]
+ *   - Panel centered at (canvas_w/2 - 0xA8, canvas_h/2 - 0x9F).
+ *   - Column-header source surface differs per game_type:
+ *     types <1: SNK_ResultsTxt+0x40;  7: SNK_DRResultsTxt;  8: SNK_CCResultsTxt;
+ *     1/6: SNK_ResultsTxt;  2-5: three SNK_ResultsTxt sub-strips;  9: skips rows.
+ *   - Original has no per-frame render sibling — panel+label are queued via
+ *     QueueFrontendOverlayRect from the state-machine body each tick.
+ *     The port collapses this into this overlay dispatched from
+ *     td5_frontend_render_ui_rects.
+ *
+ * [UNCERTAIN] Panel alpha: original uses opaque BltColorFillToSurface(0,0,0);
+ * port uses 0xE0 so the gallery background stays dimly visible.
+ * [UNCERTAIN] Column layout: simplified POS/DRIVER/CAR/TIME columns —
+ * SNK_* string-surface pipeline not wired up in the port.
+ * ========================================================================== */
+static void frontend_render_race_results_overlay(float sx, float sy) {
+    /* State gate: panel is created at state 0, first drawn at state 3
+     * (slide-in) and persists through states 4-0xB plus 0xD-0x14. */
+    if (s_inner_state < 3 || s_inner_state == 0xC) return;
+
+    /* Panel 408x392 centered in 640x480 canvas space */
+    const float canvas_w = 640.0f, canvas_h = 480.0f;
+    const float panel_w = 408.0f, panel_h = 392.0f;
+    float panel_x = (canvas_w - panel_w) * 0.5f * sx;
+    float panel_y = (canvas_h - panel_h) * 0.5f * sy;
+    float pw = panel_w * sx;
+    float ph = panel_h * sy;
+
+    if (s_white_tex_page >= 0) {
+        /* Dark translucent panel body (see [UNCERTAIN] above) */
+        fe_draw_quad(panel_x, panel_y, pw, ph, 0xE0000000,
+                     s_white_tex_page, 0, 0, 1, 1);
+
+        /* Gold border (1.5px scaled) */
+        float bw = 1.5f * sx;
+        float bh = 1.5f * sy;
+        uint32_t border = 0xFFFFCC44;
+        fe_draw_quad(panel_x, panel_y,              pw, bh,  border, s_white_tex_page, 0, 0, 1, 1);
+        fe_draw_quad(panel_x, panel_y + ph - bh,    pw, bh,  border, s_white_tex_page, 0, 0, 1, 1);
+        fe_draw_quad(panel_x, panel_y,              bw, ph,  border, s_white_tex_page, 0, 0, 1, 1);
+        fe_draw_quad(panel_x + pw - bw, panel_y,    bw, ph,  border, s_white_tex_page, 0, 0, 1, 1);
+    }
+
+    /* Title selection based on selected_game_type (mirrors the
+     * per-game-type column-header branches at 0x0042260E-0x00422774) */
+    const char *title = "RACE RESULTS";
+    if (s_selected_game_type >= 1 && s_selected_game_type <= 6)
+        title = "CUP RACE RESULTS";
+    else if (s_selected_game_type == 7)
+        title = "DRAG RESULTS";
+    else if (s_selected_game_type == 8)
+        title = "CUP CHALLENGE RESULTS";
+    else if (s_selected_game_type == 9)
+        title = "TIME TRIAL RESULTS";
+
+    float title_w = fe_measure_text(title, sx);
+    fe_draw_text(panel_x + (pw - title_w) * 0.5f, panel_y + 14.0f * sy,
+                 title, 0xFFFFCC44, sx, sy);
+
+    /* During state 0xD+ the panel is reused as the main-menu backdrop,
+     * so hide the results table (buttons are drawn on top by the
+     * generic button loop in td5_frontend_render_ui_rects). */
+    if (s_inner_state >= 0x0D) return;
+
+    /* --- Results table --- */
+    int kph = td5_save_get_speed_units();
+    (void)kph;
+
+    float ts = 0.75f;
+    uint32_t hdr_color = 0xFFCCCCCC;
+    float hdr_y = panel_y + 52.0f * sy;
+    float col_pos  = panel_x + 20.0f  * sx;
+    float col_name = panel_x + 62.0f  * sx;
+    float col_car  = panel_x + 180.0f * sx;
+    float col_time = panel_x + 300.0f * sx;
+
+    fe_draw_text(col_pos,  hdr_y, "POS",    hdr_color, sx * ts, sy * ts);
+    fe_draw_text(col_name, hdr_y, "DRIVER", hdr_color, sx * ts, sy * ts);
+    fe_draw_text(col_car,  hdr_y, "CAR",    hdr_color, sx * ts, sy * ts);
+    fe_draw_text(col_time, hdr_y, "TIME",   hdr_color, sx * ts, sy * ts);
+
+    /* Enumerate slots 0..5, emit one row per slot with a valid actor. */
+    float row_y = panel_y + 84.0f * sy;
+    float row_h = 24.0f * sy;
+    int row = 0;
+    for (int slot = 0; slot < TD5_MAX_RACER_SLOTS; slot++) {
+        TD5_Actor *a = td5_game_get_actor(slot);
+        if (!a) continue;
+
+        float y = row_y + (float)row * row_h;
+        uint32_t row_color = (slot == 0) ? 0xFFFFCC44 : 0xFFE0E0E0;
+        char buf[64];
+
+        snprintf(buf, sizeof(buf), "%d", row + 1);
+        fe_draw_text(col_pos, y, buf, row_color, sx * ts, sy * ts);
+
+        snprintf(buf, sizeof(buf), (slot == 0) ? "PLAYER" : "CPU %d", slot);
+        fe_draw_text(col_name, y, buf, row_color, sx * ts, sy * ts);
+
+        {
+            int car_idx = (slot == 0) ? s_selected_car : 0;
+            const char *cname = frontend_get_car_display_name(car_idx);
+            char cname_buf[18];
+            strncpy(cname_buf, cname ? cname : "", sizeof(cname_buf) - 1);
+            cname_buf[sizeof(cname_buf) - 1] = '\0';
+            fe_draw_text(col_car, y, cname_buf, row_color, sx * ts, sy * ts);
+        }
+
+        {
+            int32_t ticks = td5_game_get_race_timer(slot, 0);
+            if (ticks <= 0) {
+                snprintf(buf, sizeof(buf), "DNF");
+            } else {
+                frontend_format_score_time(buf, sizeof(buf), ticks, 0);
+            }
+            fe_draw_text(col_time, y, buf, row_color, sx * ts, sy * ts);
+        }
+
+        row++;
+    }
+
+    /* Footer hint during interactive state 6 */
+    if (s_inner_state == 6) {
+        const char *hint = "Press OK to continue";
+        float hw = fe_measure_text(hint, sx * 0.7f);
+        fe_draw_text(panel_x + (pw - hw) * 0.5f, panel_y + ph - 28.0f * sy,
+                     hint, 0xFFAAAAAA, sx * 0.7f, sy * 0.7f);
+    }
+}
+
 static void frontend_render_extras_gallery_overlay(float sx, float sy) {
     /* Black background fills entire viewport */
     if (s_white_tex_page >= 0) {
@@ -4278,6 +4415,9 @@ void td5_frontend_render_ui_rects(void) {
         break;
     case TD5_SCREEN_EXTRAS_GALLERY:
         frontend_render_extras_gallery_overlay(sx, sy);
+        break;
+    case TD5_SCREEN_RACE_RESULTS:
+        frontend_render_race_results_overlay(sx, sy);
         break;
     default:
         break;
@@ -7372,7 +7512,9 @@ static void Screen_RaceResults(void) {
     switch (s_inner_state) {
     case 0: /* Init & routing: sort results, create panel */
         frontend_init_return_screen(TD5_SCREEN_RACE_RESULTS);
-        TD5_LOG_D(LOG_TAG, "RaceResults: state 0 - init/sort");
+        frontend_reset_buttons();
+        TD5_LOG_I(LOG_TAG, "RaceResults: state 0 - init, game_type=%d",
+                  s_selected_game_type);
 
         /* Sort results by game type:
          * Types 1/6: by secondary metric desc
@@ -7387,11 +7529,17 @@ static void Screen_RaceResults(void) {
             s_results_rerace_flag = 1;
         }
 
-        /* Create 0x198 x 0x188 results panel */
-        /* Draw column headers based on game type:
-         * Normal: SNK_ResultsTxt
-         * Cup: SNK_CCResultsTxt
-         * Drag: SNK_DRResultsTxt */
+        /* Panel body is drawn per-frame by frontend_render_race_results_overlay.
+         *
+         * Original @ 0x0042278B creates a 520x32 blank click-catcher button
+         * (idx 0) + 96x32 SNK_OkButTxt (idx 1); state 6 exits on button_index<2.
+         * Port creates only the OK button: the blank spacer renders as a huge
+         * visible rect in the port's live-draw model, and a single confirm
+         * button (idx 0) satisfies state 6's exit check.
+         *
+         * Explicit-placed at panel bottom: center_x - 48 = 272, y = 400.
+         * Width 0x60 = 96 per SNK_OkButTxt dimensions @ 0x004227A0. */
+        frontend_create_button("OK", FE_CENTER_X - 48, 400, 0x60, 0x20);
 
         /* If player disqualified/DNF -> route to cup failed */
         s_results_cup_complete = 0;
@@ -7422,13 +7570,17 @@ static void Screen_RaceResults(void) {
         s_inner_state = 6;
         break;
 
-    case 6: /* Interactive: L/R browse racer slots (0-5), confirm exits */
+    case 6: /* Interactive: L/R browse racer slots (0-5), confirm exits.
+             * Original @ 0x004229DA: button_index >= 0 && < 2 -> state 0x0B. */
         if (s_input_ready) {
             if (s_arrow_input != 0) {
                 /* Cycle through racer slots, skip inactive */
                 /* Drag race: only 2 slots */
             }
-            if (s_button_index == 0) { /* confirm -> exit */
+            if (s_button_index >= 0 && s_button_index < 2) { /* confirm -> exit */
+                TD5_LOG_I(LOG_TAG, "RaceResults: state 6 -> 0x0B (confirm, btn=%d)",
+                          s_button_index);
+                s_anim_tick = 0;
                 s_inner_state = 0x0B;
             }
         }
@@ -7453,12 +7605,19 @@ static void Screen_RaceResults(void) {
         s_inner_state = 0x0C;
         break;
 
-    case 0x0C: /* Cleanup: release all surfaces */
+    case 0x0C: /* Cleanup: release all surfaces & the state-0 OK button.
+                * Original @ 0x00422CEE: ReleaseTrackedFrontendSurface + clear
+                * button table. Port collapses to frontend_reset_buttons. */
+        frontend_reset_buttons();
         s_inner_state = 0x0D;
         break;
 
-    case 0x0D: /* Post-results menu: create context-dependent buttons */
-        TD5_LOG_D(LOG_TAG, "RaceResults: state 0xD - post-results menu");
+    case 0x0D: /* Post-results menu: create context-dependent buttons.
+                * Button dims 0x120 x 0x20 (288x32), not port's prior 0xE0.
+                * Y offsets -0x8F/-0x5F/-0x2F/+1/+0x31 from canvas center
+                * (step 0x30 = 48). [CONFIRMED @ 0x004231D6-0x0042323C] */
+        TD5_LOG_I(LOG_TAG, "RaceResults: state 0xD - building menu (game_type=%d)",
+                  s_selected_game_type);
 
         if (s_network_active) {
             /* Network: skip to lobby or main menu */
@@ -7466,32 +7625,48 @@ static void Screen_RaceResults(void) {
             return;
         }
 
-        if (s_selected_game_type < 1 || s_selected_game_type == 7 || s_selected_game_type == 9) {
-            /* Quick Race / Time Trial / Drag: 5 buttons */
-            frontend_create_button("Race Again",      -0xE0, 0, 0xE0, 0x20);
-            frontend_create_button("View Replay",     -0xE0, 0, 0xE0, 0x20);
-            frontend_create_button("View Race Data",  -0xE0, 0, 0xE0, 0x20);
-            frontend_create_button("Select New Car",  -0xE0, 0, 0xE0, 0x20);
-            frontend_create_button("Quit",            -0xE0, 0, 0xE0, 0x20);
-        } else {
-            /* Cup Race (types 1-6): 5 buttons */
-            int next_valid = ConfigureGameTypeFlags();
-            frontend_create_button("Next Cup Race",   -0xE0, 0, 0xE0, 0x20);
-            frontend_create_button("View Replay",     -0xE0, 0, 0xE0, 0x20);
-            frontend_create_button("View Race Data",  -0xE0, 0, 0xE0, 0x20);
-            frontend_create_button("Save Race Status",-0xE0, 0, 0xE0, 0x20);
-            frontend_create_button("Quit",            -0xE0, 0, 0xE0, 0x20);
+        {
+            const int RR_BX = FE_CENTER_X - 0x90;     /* 0x120 / 2 = 0x90 */
+            const int RR_BW = 0x120;                  /* 288 */
+            const int RR_BH = 0x20;                   /* 32 */
+            const int RR_Y0 = FE_CENTER_Y - 0x8F;     /* 97 */
+            const int RR_Y1 = FE_CENTER_Y - 0x5F;     /* 145 */
+            const int RR_Y2 = FE_CENTER_Y - 0x2F;     /* 193 */
+            const int RR_Y3 = FE_CENTER_Y + 0x01;     /* 241 */
+            const int RR_Y4 = FE_CENTER_Y + 0x31;     /* 289 */
 
-            if (!next_valid) {
-                /* Grey out "Next Cup Race" and "Save" -- cup complete */
-                s_results_cup_complete = 1;
-            }
+            if (s_selected_game_type < 1 || s_selected_game_type == 7 || s_selected_game_type == 9) {
+                /* Quick Race / Time Trial / Drag */
+                frontend_create_button("Race Again",      RR_BX, RR_Y0, RR_BW, RR_BH);
+                frontend_create_button("View Replay",     RR_BX, RR_Y1, RR_BW, RR_BH);
+                frontend_create_button("View Race Data",  RR_BX, RR_Y2, RR_BW, RR_BH);
+                frontend_create_button("Select New Car",  RR_BX, RR_Y3, RR_BW, RR_BH);
+                frontend_create_button("Quit",            RR_BX, RR_Y4, RR_BW, RR_BH);
+            } else {
+                /* Cup Race (types 1-6) */
+                int next_valid = ConfigureGameTypeFlags();
+                frontend_create_button("Next Cup Race",    RR_BX, RR_Y0, RR_BW, RR_BH);
+                frontend_create_button("View Replay",      RR_BX, RR_Y1, RR_BW, RR_BH);
+                frontend_create_button("View Race Data",   RR_BX, RR_Y2, RR_BW, RR_BH);
+                frontend_create_button("Save Race Status", RR_BX, RR_Y3, RR_BW, RR_BH);
 
-            /* Masters (type 5): special progression */
-            if (s_selected_game_type == 5 && !s_results_rerace_flag &&
-                s_race_within_series != 9) {
-                s_inner_state = 0x15;
-                return;
+                if (!next_valid) {
+                    /* Cup-complete path @ 0x00422FD8: last button is "OK",
+                     * g_frontendButtonIndex=1, s_results_cup_complete=1. */
+                    frontend_create_button("OK", RR_BX, RR_Y4, RR_BW, RR_BH);
+                    s_results_cup_complete = 1;
+                } else {
+                    frontend_create_button("Quit", RR_BX, RR_Y4, RR_BW, RR_BH);
+                }
+
+                /* Masters (type 5): special progression (PRE-EXISTING branch
+                 * reused verbatim; flag inversion from original is
+                 * tracked in prior memory and not touched by this fix) */
+                if (s_selected_game_type == 5 && !s_results_rerace_flag &&
+                    s_race_within_series != 9) {
+                    s_inner_state = 0x15;
+                    return;
+                }
             }
         }
 
