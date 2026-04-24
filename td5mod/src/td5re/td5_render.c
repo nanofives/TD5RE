@@ -2275,98 +2275,118 @@ int td5_render_bind_texture_page(int page_id)
 
 /* --- Environment Map UV Generation (0x43DEC0) --- */
 
+/* g_projectionDepthBias mirrors the original's integer at 0x00467368.
+ * ConfigureProjectionForViewport @ 0x0043E7E0 writes 0x1000 (= 4096) at
+ * race init; trackside camera presets 0 and 6 overwrite it with a clamped
+ * per-frame depth value (clamp floor 0x1000). For chase/cockpit/default
+ * cameras it persists at 0x1000 — which is what the reflection overlay
+ * will see on Moscow. Mode-3 UV math divides 16.0 by this. */
+int g_projectionDepthBias = 0x1000;
+
 /**
  * ApplyMeshProjectionEffect (0x43DEC0):
- * Overwrites vertex proj_u/proj_v fields based on projection mode.
+ * Overwrites the mesh's per-vertex proj_u/proj_v based on the slot's
+ * projection mode (set earlier by SetProjectionEffectState @ 0x0043E210).
  *
- * Mode 1 (water/scroll): UV from world X/Z + accumulated offset.
- *   proj_u = vertex.x * 0.000667 + 0.5      [CONFIRMED @ 0x43DF0F]
- *   proj_v = (scroll + vertex.z) * 0.001333  [CONFIRMED @ 0x43DF0F]
+ *   Mode 1  (planar scroll; used for trees / tunnels / bridges):
+ *     U = pos_x * (1/1500) + 0.5                                 [_DAT_0045d774, _DAT_0045d5d0]
+ *     V = (scroll + pos_z) * (1/750)                             [_DAT_0045d770]
+ *     Primitive-gated by normals[i].visible_flag (original reads iVar14+0xC).
  *
- * Mode 2 (chrome/car reflection):
- *   proj_u = (cos*vx - sin*vz + mesh_pos_x_scaled) * (1/2048)  [CONFIRMED @ 0x43DF80]
- *   proj_v = (vz*cos + sin*vx + mesh_pos_z_scaled) * (1/1024)  [CONFIRMED @ 0x43DF80]
- *   cos/sin from -(euler_yaw >> 8) heading rotation.
- *   mesh_pos_x_scaled = mesh->origin_x * (1/8192)
- *   mesh_pos_z_scaled = mesh->origin_z * (1/8192)
+ *   Mode 2  (yaw-rotated chrome; dead code on real tracks, retained for completeness):
+ *     U = (cos*pos_x - sin*pos_z + mesh.origin_x * 1/8192) * 1/2048  [_DAT_0045d778, _DAT_0045d77c]
+ *     V = (cos*pos_z + sin*pos_x + mesh.origin_z * 1/8192) * 1/1024  [_DAT_0045d6a0]
+ *
+ *   Mode 3  (world-anchor sphere-map; used for SUN zone on Moscow et al.):
+ *     anchor_view = basis · (slot.anchor_world - camera_world)
+ *     depth       = 16.0 / g_projectionDepthBias   (= 16/4096 = 0.00390625)
+ *     U = (n.x * m[0] + m[1]*n.y + m[2]*n.z) * 0.375  +  (vert.view_x - anchor_view.x) * depth  +  0.625
+ *     V = (n.x * m[3] + m[4]*n.y + m[5]*n.z) * 0.375  +  (vert.view_y - anchor_view.y) * depth  +  0.75
+ *     where n = per-vertex MODEL-SPACE NORMAL (from normals_offset, stride 16 bytes;
+ *     the original's pfVar9 buffer in mode 3), m = g_currentRenderTransform rows 0/1
+ *     (the model-to-view rotation = s_render_transform), basis = camera world-to-view
+ *     rotation (= s_camera_basis = DAT_004aafe0 at runtime). [_DAT_0045d788 = 0.375,
+ *     _DAT_0045d784 = 0.625, _DAT_0045d780 = 0.75, _DAT_0045d628 = 16.0]
+ *
+ *     Key: the rotated term uses the vertex NORMAL (unit vector), so it contributes
+ *     at most ±0.375 to the UV — the "sphere map" dominant term. Previous port tried
+ *     to use model-space POSITION here and produced the "tiny white dots" regression.
  */
-void td5_render_apply_mesh_projection_effect(TD5_MeshVertex *verts, int count, int slot)
+void td5_render_apply_mesh_projection_effect(TD5_MeshHeader *mesh, int slot)
 {
-    /* Mirrors ApplyMeshProjectionEffect @ 0x0043DEC0. The per-mode UV
-     * formulas use the same constants as the exe:
-     *   mode 1 U = vX * (1/1500)    + 0.5                     [DAT_0045d774, DAT_0045d5d0]
-     *   mode 1 V = (scroll + vZ)   * (1/750)                  [DAT_0045d770]
-     *   mode 2 U = (cos*vX - sin*vZ + mesh_origX*fp) * (1/2048)   [DAT_0045d778, DAT_0045d77c]
-     *   mode 2 V = (cos*vZ + sin*vX + mesh_origZ*fp) * (1/1024)   [DAT_0045d6a0]
-     *   mode 3   = world-anchor projection through g_currentRenderTransform
-     *              + DAT_004aafe0 basis (NOT PORTED -- falls back to mode 2).
-     */
     const ProjectionEffectState *pe;
-    int mode, i;
+    TD5_MeshVertex  *verts;
+    TD5_VertexNormal *normals;
+    int vert_count, mode, i;
 
-    if (!verts || count <= 0) return;
+    if (!mesh) return;
     if (slot < 0 || slot >= TD5_ACTOR_MAX_TOTAL_SLOTS) return;
     pe = &s_proj_effect[slot];
     mode = pe->sub_mode;
 
+    verts      = (TD5_MeshVertex  *)(uintptr_t)mesh->vertices_offset;
+    normals    = (TD5_VertexNormal *)(uintptr_t)mesh->normals_offset;
+    vert_count = mesh->total_vertex_count;
+    if (!verts || vert_count <= 0) return;
+
     if (mode == 1) {
+        /* _DAT_0045d774 = 1/1500 ≈ 0.00066666, _DAT_0045d5d0 = 0.5,
+         * _DAT_0045d770 = 1/750 ≈ 0.00133333. scroll = slot+0x08 accumulator. */
         float scroll = pe->scroll_offset;
-        for (i = 0; i < count; i++) {
-            float vx = (float)verts[i].pos_x;
-            float vz = (float)verts[i].pos_z;
-            verts[i].proj_u = vx * (1.0f / 1500.0f) + 0.5f;
-            verts[i].proj_v = (scroll + vz) * (1.0f / 750.0f);
+        for (i = 0; i < vert_count; i++) {
+            /* Original gates the primitive by normals[i].visible_flag != 0.
+             * With no primitive-level loop structure exposed here we gate per-vertex
+             * for an equivalent visual — invisible vertices retain prior UVs. */
+            if (normals && normals[i].visible_flag == 0) continue;
+            verts[i].proj_u = verts[i].pos_x * (1.0f / 1500.0f) + 0.5f;
+            verts[i].proj_v = (scroll + verts[i].pos_z) * (1.0f / 750.0f);
         }
-    } else if (mode == 3) {
-        /* Mode 3: world-anchor projection. The anchor (actor world position)
-         * is transformed into view space, then per-vertex UV is:
-         *   U = (view_rot_row0 · vert) * 0.375 + (mesh_tx_view - anchor_vx) * (16 / g_projectionDepthBias) + 0.625
-         *   V = (view_rot_row1 · vert) * 0.375 + (mesh_ty_view - anchor_vy) * (16 / 1)               + 0.75
-         * s_render_transform carries the active model-to-view basis + translation
-         * (rows at m[0..8], view-space translation at m[9..11]). s_camera_basis
-         * is the pure camera rotation, used to project the world-space anchor
-         * delta into view space. [CONFIRMED @ ApplyMeshProjectionEffect 0x0043DEC0] */
-        extern float g_cameraPos[3];   /* td5_camera.c */
-        const float *mv  = s_render_transform.m;
-        const float *cam = s_camera_basis;
-        float dx = pe->anchor_x - g_cameraPos[0];
-        float dy = pe->anchor_y - g_cameraPos[1];
-        float dz = pe->anchor_z - g_cameraPos[2];
-        float ax = cam[0] * dx + cam[1] * dy + cam[2] * dz;  /* view-space anchor */
-        float ay = cam[3] * dx + cam[4] * dy + cam[5] * dz;
-        float mesh_tx = mv[9];                               /* view-space mesh translation */
-        float mesh_ty = mv[10];
-        const float rot_scale   = 0.375f;      /* _DAT_0045d788 */
-        const float depth_scale = 16.0f;       /* _DAT_0045d628 / g_projectionDepthBias(=1) */
-        const float bias_u      = 0.625f;      /* _DAT_0045d784 */
-        const float bias_v      = 0.75f;       /* _DAT_0045d780 */
-        for (i = 0; i < count; i++) {
-            float vx = (float)verts[i].pos_x;
-            float vy = (float)verts[i].pos_y;
-            float vz = (float)verts[i].pos_z;
-            float view_x = mv[0] * vx + mv[1] * vy + mv[2] * vz;
-            float view_y = mv[3] * vx + mv[4] * vy + mv[5] * vz;
-            verts[i].proj_u = view_x * rot_scale + (mesh_tx - ax) * depth_scale + bias_u;
-            verts[i].proj_v = view_y * rot_scale + (mesh_ty - ay) * depth_scale + bias_v;
-        }
-    } else /* mode 2 (default) */ {
-        /* U = (cos*vX - sin*vZ + actor_world_x * 1/8192) * 1/2048     [_DAT_0045d778]
-         * V = (cos*vZ + sin*vX + actor_world_z * 1/8192) * 1/1024     [_DAT_0045d6a0]
-         * The bias brings the chrome reflection's phase in sync with the car's
-         * world motion so the highlight doesn't appear fixed to the body. */
+    } else if (mode == 2) {
+        /* _DAT_0045d778 = 1/2048, _DAT_0045d6a0 = 1/1024, _DAT_0045d77c = 1/8192.
+         * The mesh-origin bias comes from mesh header +0x1C/+0x24 in the original;
+         * our TD5_MeshHeader has those as origin_x/y/z at the same offsets. */
         float cos_h  = pe->cos_heading;
         float sin_h  = pe->sin_heading;
-        /* pe->anchor_x/z are actor_world * g_worldToRenderScale (=1/256).
-         * The mode-2 bias wants actor_world * 1/8192, i.e. anchor * (1/32). */
-        float bias_u = pe->anchor_x * (1.0f / 32.0f);
-        float bias_v = pe->anchor_z * (1.0f / 32.0f);
-        for (i = 0; i < count; i++) {
-            float vx = (float)verts[i].pos_x;
-            float vz = (float)verts[i].pos_z;
+        float bias_u = mesh->origin_x * (1.0f / 8192.0f);
+        float bias_v = mesh->origin_z * (1.0f / 8192.0f);
+        for (i = 0; i < vert_count; i++) {
+            if (normals && normals[i].visible_flag == 0) continue;
+            float vx = verts[i].pos_x;
+            float vz = verts[i].pos_z;
             verts[i].proj_u = (cos_h * vx - sin_h * vz + bias_u) * (1.0f / 2048.0f);
             verts[i].proj_v = (vz * cos_h + sin_h * vx + bias_v) * (1.0f / 1024.0f);
         }
+    } else if (mode == 3) {
+        extern float g_cameraPos[3];   /* td5_camera.c */
+        const float *mv  = s_render_transform.m;
+        const float *cam = s_camera_basis;
+        /* Anchor in view space: TransformVector3ByBasis(DAT_004aafe0, slot.anchor - camera_world).
+         * The port's s_camera_basis mirrors DAT_004aafe0 (camera world-to-view rotation). */
+        float dx = pe->anchor_x - g_cameraPos[0];
+        float dy = pe->anchor_y - g_cameraPos[1];
+        float dz = pe->anchor_z - g_cameraPos[2];
+        float anchor_vx = cam[0] * dx + cam[1] * dy + cam[2] * dz;
+        float anchor_vy = cam[3] * dx + cam[4] * dy + cam[5] * dz;
+        const float rot_scale   = 0.375f;                                 /* _DAT_0045d788 */
+        const float depth_scale = 16.0f / (float)g_projectionDepthBias;   /* _DAT_0045d628 / g_projectionDepthBias */
+        const float bias_u      = 0.625f;                                 /* _DAT_0045d784 */
+        const float bias_v      = 0.75f;                                  /* _DAT_0045d780 */
+
+        if (!normals) {
+            /* Mesh has no per-vertex normals — skip mode-3 silently. */
+            return;
+        }
+        for (i = 0; i < vert_count; i++) {
+            float nx = normals[i].nx;
+            float ny = normals[i].ny;
+            float nz = normals[i].nz;
+            float u_rot = (nx * mv[0] + mv[1] * ny + mv[2] * nz) * rot_scale;
+            float v_rot = (nx * mv[3] + mv[4] * ny + mv[5] * nz) * rot_scale;
+            verts[i].proj_u = u_rot + (verts[i].view_x - anchor_vx) * depth_scale + bias_u;
+            verts[i].proj_v = v_rot + (verts[i].view_y - anchor_vy) * depth_scale + bias_v;
+        }
     }
+    /* mode 0 or unknown: leave proj_u/proj_v untouched. */
 }
 
 /* --- Environs Texture Loading --- */
@@ -2979,32 +2999,26 @@ void td5_render_apply_track_lighting(int slot, TD5_Actor *actor)
 void td5_render_update_projection_effect(int slot, TD5_Actor *actor)
 {
     /*
-     * ConfigureActorProjectionEffect (0x40CBD0) + SetProjectionEffectState (0x43E210):
-     *   1. UpdateActorTrackLightState walks zones to find the one covering the
-     *      actor's current track_span_raw, then calls ConfigureActorProjectionEffect
-     *      with zone.light_index.
-     *   2. ConfigureActorProjectionEffect reads page_slot[light_index] + flag[light_index]
-     *      from the per-track environs struct; the flag picks the projection mode
-     *      (1=planar/velocity, 3=world-position/sun) and page_slot picks which
-     *      uploaded environs texture to sample.
+     * UpdateActorTrackLightState (0x40CD10) -> ConfigureActorProjectionEffect (0x40CBD0)
+     * -> SetProjectionEffectState (0x43E210).
      *
-     * REGRESSION NOTE (fix-1777005786-333220): commit dfef6ff (feat: per-track
-     * environs dispatch + full projection-effect UV port) started driving the
-     * PLAYER CAR reflection's sub_mode and texture_page directly from the
-     * per-zone flag/page_slot table. On Moscow that makes slot 0 run mode 1
-     * (planar) or mode 3 (world-anchor) — the port's synthesized UV formulas
-     * for those modes produce high-frequency UV wrapping across the car body
-     * (user-visible as "tiny white dots on the car surface"). Ghidra research
-     * (fix-1777005786-333220, ApplyMeshProjectionEffect @ 0x0043DEC0) did not
-     * verify the exact mode-1/mode-3 UV constants byte-for-byte — so the
-     * safe revert is to hold sub_mode at 2 and texture_page at s_envmap_pages[0]
-     * (pre-dfef6ff visual) while still walking the zones so
-     * ApplyTrackLightingForVehicleSegment keeps working. A TODO tracks
-     * implementing the faithful mode-1/3 UV formulas against a Frida capture
-     * of the original's slot-0 projection state.
+     * Walks per-track zones to resolve the actor's light_index, then reads
+     * flag[light_index] + page_slot[light_index] from the environs table and
+     * writes to the slot's 0x20-byte projection state:
+     *   mode 1 (flag=1, planar): slot.+0x00=1.0, slot.+0x04=0.0, slot.+0x08 += (sin·a + cos·b)·1/8192
+     *   mode 2 (flag=2, chrome): slot.+0x00=cos(yaw), slot.+0x04=sin(yaw) — DEAD on real tracks
+     *     (InitializeTrackStripMetadata @ 0x42FAD0 never writes 2 into the flag table)
+     *   mode 3 (flag=3, world-anchor): slot.+0x14/18/1c = anchor world xyz
+     * Every mode also writes slot.+0x0C=mode and slot.+0x10=angle_tag.
+     *
+     * ApplyMeshProjectionEffect @ 0x43DEC0 later reads slot.+0x0C to dispatch,
+     * and slot.+0x00/04/08/14/18/1c as mode-specific inputs.
      */
     ProjectionEffectState *pe;
+    int zone_idx, light_index;
     int yaw_12bit;
+    int flag;
+    const TD5_EnvironsTrack *env;
 
     if (slot < 0 || slot >= TD5_ACTOR_MAX_TOTAL_SLOTS || !actor)
         return;
@@ -3012,20 +3026,32 @@ void td5_render_update_projection_effect(int slot, TD5_Actor *actor)
     pe = &s_proj_effect[slot];
     yaw_12bit = actor->display_angles.yaw & 0xFFF;
 
-    /* Walk the per-track light zones so the lighting subsystem's zone cache
-     * (s_actor_light_zone[slot]) is kept up-to-date. Return value is ignored
-     * here because the reflection overlay intentionally does not pick a mode
-     * from the zone flag — see the REGRESSION NOTE above. */
-    (void)update_actor_light_zone(slot, (int)(int16_t)actor->track_span_raw);
+    zone_idx = update_actor_light_zone(slot, (int)(int16_t)actor->track_span_raw);
+    if (zone_idx < 0 || s_environs_level < 0 ||
+        s_environs_level >= TD5_ENVIRONS_TRACK_COUNT) {
+        /* No zone: fall back to mode 2 on the first environs page. */
+        pe->sub_mode     = 2;
+        pe->texture_page = (s_envmap_page_count > 0) ? s_envmap_pages[0] : -1;
+        pe->cos_heading  = CosFloat12bit((unsigned int)((-yaw_12bit) & 0xFFF));
+        pe->sin_heading  = SinFloat12bit((unsigned int)((-yaw_12bit) & 0xFFF));
+        return;
+    }
+    light_index = td5_light_zones[td5_light_zone_track[s_environs_level].first + zone_idx].light_index;
+    if (light_index < 0 || light_index > 3) light_index = 0;
+    env = &td5_environs_per_track[s_environs_level];
+    flag = env->e[light_index].flag;
 
-    /* Pre-dfef6ff behaviour: always mode 2 (yaw-rotated chrome) on the first
-     * loaded environs page. This is the visual the user validated before the
-     * regression. */
-    pe->sub_mode     = 2;
-    pe->texture_page = (s_envmap_page_count > 0) ? s_envmap_pages[0] : -1;
+    /* Texture page via the per-entry page_slot[] aliasing table. */
+    {
+        int page_idx = env->page_slot[light_index];
+        if (page_idx < 0)           page_idx = 0;
+        if (page_idx >= env->count) page_idx = env->count - 1;
+        pe->texture_page = (s_envmap_page_count > 0) ? s_envmap_pages[page_idx] : -1;
+    }
+    pe->sub_mode = flag;
 
-    /* Cache actor world position (rendered in world units = world_pos/256)
-     * for the mode-2 UV bias term in apply_mesh_projection_effect. */
+    /* Cache the interpolated actor world position in world units.
+     * Mode 3 uses this as the sphere-map anchor; modes 1/2 leave anchor unused. */
     {
         extern float g_subTickFraction;
         const float fp_scale = 1.0f / 256.0f;
@@ -3037,18 +3063,36 @@ void td5_render_update_projection_effect(int slot, TD5_Actor *actor)
                         (float)actor->world_pos.z) * fp_scale;
     }
 
-    pe->cos_heading = CosFloat12bit((unsigned int)((-yaw_12bit) & 0xFFF));
-    pe->sin_heading = SinFloat12bit((unsigned int)((-yaw_12bit) & 0xFFF));
-
-    /* mode-1's scroll_offset accumulator is unused while sub_mode is held
-     * at 2; leave it alone so a future mode-1 reactivation resumes cleanly. */
+    if (flag == 1) {
+        /* Mode-1 accumulator: slot.+0x08 += (sin(yaw)·px + cos(yaw)·pz) · 1/8192.
+         * The original's param_3 for this call is [UNCERTAIN] — whichever 3-float
+         * vector ConfigureActorProjectionEffect passes. The port uses the actor's
+         * linear velocity components, consistent with the mode's "forward scroll"
+         * semantic: the scroll advances with forward motion so tree/tunnel
+         * billboards drift past. Switching to world_pos here would cause the
+         * accumulator to jump by world-pos-sized amounts per frame (unusable). */
+        float cos_y = CosFloat12bit((unsigned int)(yaw_12bit & 0xFFF));
+        float sin_y = SinFloat12bit((unsigned int)(yaw_12bit & 0xFFF));
+        pe->cos_heading   = 1.0f;
+        pe->sin_heading   = 0.0f;
+        pe->scroll_offset += (sin_y * (float)actor->linear_velocity_x +
+                              cos_y * (float)actor->linear_velocity_z) * (1.0f / 8192.0f);
+    } else {
+        /* Modes 2 and 3: store cos/sin(-yaw). Mode 2 reads them as UV rotators.
+         * Mode 3 doesn't directly read them but the original always writes them
+         * alongside the anchor/mode fields in SetProjectionEffectState. */
+        pe->cos_heading = CosFloat12bit((unsigned int)((-yaw_12bit) & 0xFFF));
+        pe->sin_heading = SinFloat12bit((unsigned int)((-yaw_12bit) & 0xFFF));
+    }
 
     {
         static int s_proj_log_count = 0;
-        if (slot == 0 && (s_proj_log_count < 5 || (s_proj_log_count % 300) == 0)) {
+        if (slot == 0 && (s_proj_log_count < 8 || (s_proj_log_count % 300) == 0)) {
             TD5_LOG_I(LOG_TAG,
-                      "proj_effect: slot=%d mode=%d page=%d (forced mode2 to avoid dots regression)",
-                      slot, pe->sub_mode, pe->texture_page);
+                      "proj_effect: slot=%d light_idx=%d flag=%d mode=%d page=%d "
+                      "anchor=(%.1f,%.1f,%.1f) scroll=%.3f",
+                      slot, light_index, flag, pe->sub_mode, pe->texture_page,
+                      pe->anchor_x, pe->anchor_y, pe->anchor_z, pe->scroll_offset);
         }
         if (slot == 0) s_proj_log_count++;
     }
@@ -3087,8 +3131,9 @@ static void render_vehicle_reflection_overlay(TD5_MeshHeader *mesh, int slot)
 
     /* Mode dispatch happens inside apply_mesh_projection_effect based on
      * this slot's pe->sub_mode (1=planar, 2=yaw-UV, 3=world-anchor). Mode 3
-     * still falls back to the mode-2 formula inside the helper. */
-    td5_render_apply_mesh_projection_effect(verts, vert_count, slot);
+     * reads normals[] from mesh->normals_offset, so the helper now takes the
+     * whole mesh header. */
+    td5_render_apply_mesh_projection_effect(mesh, slot);
 
     /* Render the mesh with the environs texture and translucent blend.
      * Original uses a separate mesh with command_count=1, but we

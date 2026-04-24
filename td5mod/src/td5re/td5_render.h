@@ -141,7 +141,7 @@ int  td5_render_bind_texture_page(int page_id);
 
 /* --- Vehicle Projection Effect / Chrome Reflection (0x43DEC0) --- */
 int  td5_render_load_environs_textures(int level_number);
-void td5_render_apply_mesh_projection_effect(TD5_MeshVertex *verts, int count, int slot);
+void td5_render_apply_mesh_projection_effect(TD5_MeshHeader *mesh, int slot);
 void td5_render_update_projection_effect(int slot, TD5_Actor *actor);
 
 /* --- 4-Pass Race Rendering (0x40B070) --- */
