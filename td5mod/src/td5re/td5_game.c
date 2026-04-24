@@ -1027,23 +1027,32 @@ int td5_game_init_race_session(void) {
             start_span = (track_span_count > 0) ? track_span_count : 1;
 
         /* StartSpanOffset (td5re.ini [Game] or --StartSpanOffset=N): mirrors
-         * the Frida hook on InitializeActorTrackPose (0x00434350) which
-         * additively shifts every actor's span arg. Wraps at the span ring
-         * length so negative or ring-overshooting offsets behave like the
-         * hook does. */
-        if (g_td5.ini.start_span_offset != 0 && track_span_count > 0) {
-            int shifted = start_span + g_td5.ini.start_span_offset;
-            while (shifted < 0)           shifted += track_span_count;
-            while (shifted >= track_span_count) shifted -= track_span_count;
+         * the Frida hook on InitializeActorTrackPose (0x00434350) which does
+         *   esp.add(8).writeS16((span + offset) & 0xFFFF)
+         * That's 16-bit signed wraparound, matching the original's own
+         * signed-short arithmetic in InitializeRaceSession @ 0x0042aa10:
+         *   sVar12 = (short)g_trackStartSpanIndex + -0xF;  // signed short wrap
+         *   InitializeActorTrackPose(..., sVar12, ...);
+         * The previous port wrapped mod track_span_count which sanitized
+         * behavior the original never had — causing ~270u z divergence on
+         * negative offsets and ~5.7k y divergence on ring-overshoot offsets.
+         *
+         * Do NOT apply the offset to the base start_span here. The base stays
+         * at its circuit/non-circuit table value and gets published to
+         * g_trackStartSpanIndex unchanged (matches 0x0042b076 WRITE — the
+         * original never mutates g_trackStartSpanIndex after the table load).
+         * Per-slot application happens in the spawn loop below, sign-extended
+         * to 16 bits exactly like the Frida writeS16 path. */
+        if (g_td5.ini.start_span_offset != 0) {
             TD5_LOG_I(LOG_TAG,
-                      "Grid start shifted by start_span_offset=%d: %d -> %d",
-                      g_td5.ini.start_span_offset, start_span, shifted);
-            start_span = shifted;
+                      "start_span_offset=%d will be applied per-slot (16-bit sign-extended)",
+                      g_td5.ini.start_span_offset);
         }
 
         /* Publish start_span as g_trackStartSpanIndex — consumed by the
          * circuit 4-case sector dispatch in advance_pending_finish_state
-         * (verbatim port of CheckRaceCompletionState @ 0x00409E80). */
+         * (verbatim port of CheckRaceCompletionState @ 0x00409E80). This
+         * holds the unshifted base — matches original 0x0042b076. */
         g_td5.track_start_span_index = start_span;
 
         /* Drag race does NOT derive from start_span — it uses hardcoded
@@ -1063,11 +1072,28 @@ int td5_game_init_race_session(void) {
             TD5_StripSpan *sp;
 
             if (track_span_count > 0) {
-                span_index = start_span + span_offsets[slot];
-                while (span_index < 0)
-                    span_index += track_span_count;
-                while (span_index >= track_span_count)
-                    span_index -= track_span_count;
+                /* Match original @ 0x0042aa10: plain signed-short arithmetic.
+                 * sVar12 = (short)g_trackStartSpanIndex + <slot_offset>.
+                 * Adds start_span_offset here (not to base) so the Frida hook
+                 * semantics apply per-slot, exactly like writeS16() does.
+                 * After summing in int32, sign-extend via (int16_t) cast —
+                 * that IS the 16-bit wraparound the original/hook produce. */
+                int raw = start_span + span_offsets[slot] + g_td5.ini.start_span_offset;
+                span_index = (int)(int16_t)(raw & 0xFFFF);
+                /* Keep a tight wrap ONLY for the common case where the
+                 * resulting index is out of bounds for the current ring —
+                 * the span-record lookup rejects negatives and would fall
+                 * back to span=1. Remap via mod so the offset still lands
+                 * on a valid span when it's well-defined (not in the UB
+                 * region the original quietly reads garbage from). */
+                if (span_index < 0 || span_index >= track_span_count) {
+                    int m = span_index % track_span_count;
+                    if (m < 0) m += track_span_count;
+                    TD5_LOG_I(LOG_TAG,
+                              "spawn span wrap: slot=%d raw=%d masked=%d ring=%d -> %d",
+                              slot, raw, span_index, track_span_count, m);
+                    span_index = m;
+                }
             } else {
                 span_index = 1;
             }
