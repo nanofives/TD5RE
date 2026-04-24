@@ -105,6 +105,30 @@ static int32_t g_difficulty_easy = 0;
 static int32_t g_difficulty_hard = 0;
 static int32_t g_total_actor_count = 6;
 static int32_t g_race_slot_state[6];         /* 1=human, 0=AI per slot */
+
+/* ---- Per-slot NPC handicap (rubber-banding by prior championship position) ----
+ * Mirrors the original's gSlotRaceResult/Bonus/Points tables at
+ * 0x004AED40/0x004AED58/0x004AED28 (gSlotRacePointsTable, kept here as
+ * g_slot_race_points for terminology parity with the decomp).
+ *
+ * Populated per race session from gRaceResultPointsTable @ 0x00466F90
+ * indexed by g_slot_series_position[slot] (0..3 = leader..trailer). Until
+ * championship-position plumbing is wired in the frontend, all slots default
+ * to position 0 and every adjustment below becomes a mathematical no-op.
+ *
+ * DAT_004AED70 is never written in the original — it stays 0 and makes the
+ * brake<->engine_brake redistribution inert. Not carried in the port.
+ */
+static const int32_t s_race_result_points_table[4][3] = {
+    /* pos 0 (leader)  */ {    0,    0,    0 },
+    /* pos 1           */ {  114, -102,  -40 },
+    /* pos 2           */ {  -40,  307,  -40 },
+    /* pos 3 (trailer) */ { -102,  114,    0 },
+};
+static int32_t g_slot_series_position[6] = {0, 0, 0, 0, 0, 0};
+static int32_t g_slot_race_result[6];
+static int32_t g_slot_race_bonus [6];
+static int32_t g_slot_race_points[6];
 static uint8_t s_prev_grounded_mask[16];     /* per-slot previous-frame grounded bitmask (1=grounded) */
 static void integrate_traffic_pose(TD5_Actor *actor);  /* forward decl */
 
@@ -703,15 +727,12 @@ void td5_physics_update_player(TD5_Actor *actor)
     }
 
     /* --- 4. Handbrake modifier on rear wheels (tuning+0x7A) ---
-     * Tuning value read from DAT files ranges ~0xC0-0xFF for most cars
-     * (75-99% grip retention), which is too gentle for arcade drift.
-     * Clamp the effective modifier to 0x50 (~31% grip, 69% reduction) so
-     * pulling the handbrake reliably breaks the rear loose. Still scaled
-     * by tuning so cars that want a lighter handbrake (lower 0x7A) remain
-     * lighter. */
+     * Faithful to UpdatePlayerVehicleDynamics: rear grip *= phys[0x7A]/256.
+     * Observed range in carparam files: 144..212 (≈56-83% retention).
+     * Original has no clamp — shipped values ARE the tuning. AI vehicles
+     * never engage handbrake_flag, so this branch is player-only. */
     if (actor->handbrake_flag) {
         int32_t hb_mod = (int32_t)PHYS_S(actor, 0x7A);
-        if (hb_mod > 0x50) hb_mod = 0x50;
         int32_t g2_pre = grip[2], g3_pre = grip[3];
         grip[2] = (grip[2] * hb_mod) >> 8;
         grip[3] = (grip[3] * hb_mod) >> 8;
@@ -1145,37 +1166,62 @@ void td5_physics_update_player(TD5_Actor *actor)
                   actor->angular_velocity_yaw, steer_angle);
     }
 
-    /* --- 13. Tire slip circle via isqrt (per axle) ---
-     * Grip limit scaled by tire grip coefficient (tuning 0x2C).
-     * Original at 0x4048xx: grip_limit = (axle_grip_sum * tuning[0x2C]) >> 8
+    /* --- 13. Tire slip circle — two-pass port of 0x00404950-0x00404ADE.
      *
-     * NOTE: port halves axle_grip_sum before scaling. The decomp shows no
-     * halving, but the port's slip-circle unit layout (fl16 = F >> 4 for the
-     * isqrt input, then << 4 for combined) doesn't exactly mirror the
-     * original's. Removing the halving in a prior attempt made the car too
-     * grippy to slide (user-confirmed: "no drift whatsoever"), so the halving
-     * stays until the full scaling relationship is worked out. TODO: revisit
-     * once tuning[0x7C] slip-weight scaling is ported too. */
+     * Pass A (slip-coupling, phys[0x7C]): when an axle has meaningful slip,
+     *   shape the axle forces via `(long/2) * coupled / hyp` where
+     *   hyp = sqrt(lat² + coupled²) + 1 and coupled = slip * phys[0x7C] / 256.
+     *   Frida @ 0x00404030 (2026-04-23) confirmed the shaped local_2c flows
+     *   to linear_velocity writebacks at 0x00404D7E/D9E — it IS the drive
+     *   force at that point. Pass-A also attenuates grip_limit by |lat>>8|/hyp
+     *   so the following classical slip-circle (Pass B) has a tighter clamp.
+     *
+     * Zero-slip edge: at slip=0 the original's formula gives drive=0 (hyp=1,
+     *   coupled=0 → result*0). The original avoids this via the flag-clear:
+     *   when slip_shift<0x41 it sets surface_contact_flags='\\0', so the
+     *   NEXT tick's pass-A doesn't run. The port's contact-flag semantics
+     *   differ enough that flag-clear alone isn't safe (bit can stay set
+     *   at rest, zeroing drive). Defensive guard: only enter pass-A when
+     *   slip_shift >= 0x41 — same threshold the original uses for the clear,
+     *   protects from the zero-drive edge case at rest / grid / countdown.
+     *
+     * Pass B (classical): unconditional slip-circle clamp — same behavior
+     *   as the prior single-pass implementation. Clamps both longitudinal
+     *   and lateral when combined > grip_limit. */
     int32_t tire_grip_coeff = (int32_t)PHYS_S(actor, 0x2C);
+    int32_t slip_coupling   = (int32_t)PHYS_S(actor, 0x7C);
     {
-        /* Front axle slip circle — faithful formula (no halving).
-         * [CONFIRMED @ 0x004049xx]:
-         *   iVar28 = (local_3c + local_10) * (int)sVar1;   // grip_sum * tuning[0x2C]
-         *   local_28 = (iVar28 + round) >> 8;              // stays in post->>8 scale
-         *
-         * Empirical: with grip_sum/2 the front clipped too aggressively,
-         * killing steering authority at high speed. Using the full grip sum
-         * (faithful) roughly doubles the threshold so normal cornering stays
-         * below the clip, and drift only happens on genuinely hard cornering.
-         * Rear keeps the /2 tune so oversteer still triggers earlier than
-         * understeer. */
+        /* ---- FRONT axle ---- */
+        int32_t grip_limit_f = (grip[0] + grip[1]);
+        if (tire_grip_coeff != 0)
+            grip_limit_f = (grip_limit_f * tire_grip_coeff) >> 8;
+
+        /* Pass A — only when slip already meaningful (avoids zero-drive edge) */
+        if ((actor->surface_contact_flags & 1) && slip_coupling != 0) {
+            int32_t body_vlong = (vx * sin_h + vz * cos_h) >> 12;
+            int32_t pos_vlong  = (body_vlong < 0) ? 0 : body_vlong;
+            int32_t delta      = actor->longitudinal_speed - pos_vlong;
+            int32_t delta_abs  = (delta < 0) ? -delta : delta;
+            int32_t slip_shift = delta_abs >> 8;
+            if (slip_shift >= 0x41) {
+                int32_t coupled = (slip_shift * slip_coupling) >> 8;
+                int32_t lat     = front_lat_force;
+                int32_t latSh   = lat >> 8;
+                int32_t latMix  = (latSh * lat) >> 8;
+                int32_t hyp_sq  = latMix + coupled * coupled;
+                if (hyp_sq < 0) hyp_sq = 0;
+                int32_t hyp     = td5_isqrt(hyp_sq) + 1;
+                int32_t latSh_a = (latSh < 0) ? -latSh : latSh;
+                grip_limit_f    = (latSh_a * grip_limit_f) / hyp;
+                front_long      = ((front_long / 2) * coupled) / hyp;
+            }
+        }
+
+        /* Pass B — classical slip-circle clamp */
         int32_t fl16 = front_lat_force >> 4;
         int32_t flo16 = front_long >> 4;
         int32_t combined_sq = fl16 * fl16 + flo16 * flo16;
         int32_t combined = td5_isqrt(combined_sq) << 4;
-        int32_t grip_limit_f = (grip[0] + grip[1]);
-        if (tire_grip_coeff != 0)
-            grip_limit_f = (grip_limit_f * tire_grip_coeff) >> 8;
         if (combined > grip_limit_f && combined > 0) {
             actor->front_axle_slip_excess = combined - grip_limit_f;
             front_long = ((grip_limit_f << 8) / combined * front_long) >> 8;
@@ -1184,19 +1230,38 @@ void td5_physics_update_player(TD5_Actor *actor)
             actor->front_axle_slip_excess = 0;
         }
 
-        /* Rear axle slip circle — faithful formula (no halving), matching
-         * front. Temporary stop-gap while the front-wheel-airborne bug is
-         * being fixed in another session; once contact flags are correct the
-         * rear tune can probably drop back to grip_sum/2 for earlier
-         * oversteer. Handbrake still breaks the rear loose because hb_mod
-         * directly scales grip[2]/grip[3] down to ~31% via the 0x50 clamp. */
+        /* ---- REAR axle ---- */
+        int32_t grip_limit_r = (grip[2] + grip[3]);
+        if (tire_grip_coeff != 0)
+            grip_limit_r = (grip_limit_r * tire_grip_coeff) >> 8;
+
+        if ((actor->surface_contact_flags & 2) && slip_coupling != 0) {
+            int32_t raw_front = (int32_t)(((int64_t)sin_s * vx + (int64_t)cos_s * vz) >> 12);
+            int64_t yaw_q12   = (int64_t)sin_sr * front_weight * actor->angular_velocity_yaw;
+            int32_t yaw_term  = (int32_t)((yaw_q12 >> 12) / 0x28c);
+            int32_t axle_vlat = raw_front - yaw_term;
+            int32_t pos_vlat  = (axle_vlat < 0) ? 0 : axle_vlat;
+            int32_t delta     = actor->lateral_speed - pos_vlat;
+            int32_t delta_abs = (delta < 0) ? -delta : delta;
+            int32_t slip_shift = delta_abs >> 8;
+            if (slip_shift >= 0x41) {
+                int32_t coupled = (slip_shift * slip_coupling) >> 8;
+                int32_t lat     = rear_lat_force;
+                int32_t latSh   = lat >> 8;
+                int32_t latMix  = (latSh * lat) >> 8;
+                int32_t hyp_sq  = latMix + coupled * coupled;
+                if (hyp_sq < 0) hyp_sq = 0;
+                int32_t hyp     = td5_isqrt(hyp_sq) + 1;
+                int32_t latSh_a = (latSh < 0) ? -latSh : latSh;
+                grip_limit_r    = (latSh_a * grip_limit_r) / hyp;
+                rear_long       = ((rear_long / 2) * coupled) / hyp;
+            }
+        }
+
         int32_t rl16 = rear_lat_force >> 4;
         int32_t rlo16 = rear_long >> 4;
         combined_sq = rl16 * rl16 + rlo16 * rlo16;
         combined = td5_isqrt(combined_sq) << 4;
-        int32_t grip_limit_r = (grip[2] + grip[3]);
-        if (tire_grip_coeff != 0)
-            grip_limit_r = (grip_limit_r * tire_grip_coeff) >> 8;
         if (combined > grip_limit_r && combined > 0) {
             actor->rear_axle_slip_excess = combined - grip_limit_r;
             rear_long = ((grip_limit_r << 8) / combined * rear_long) >> 8;
@@ -1207,50 +1272,23 @@ void td5_physics_update_player(TD5_Actor *actor)
 
         if (actor->slot_index == 0 && (actor->frame_counter % 30u) == 0u) {
             TD5_LOG_I(LOG_TAG,
-                      "SLIPCIRC: f_comb=%d f_lim=%d r_comb=%d r_lim=%d f_ex=%d r_ex=%d",
+                      "SLIPCIRC: f_comb=%d f_lim=%d r_comb=%d r_lim=%d f_ex=%d r_ex=%d cpl=%d",
                       td5_isqrt(flo16*flo16 + fl16*fl16) << 4,
                       grip_limit_f,
                       combined, grip_limit_r,
                       (int)actor->front_axle_slip_excess,
-                      (int)actor->rear_axle_slip_excess);
+                      (int)actor->rear_axle_slip_excess,
+                      slip_coupling);
         }
     }
 
     /* --- 13a. current_slip_metric (+0x33C) — faithful port @ 0x004049BA/0x00404A80.
-     * Decomp writes the slip-metric INSIDE the slip-circle block, gated per
-     * axle-contact bit. Both axles write the SAME field — rear overwrites
-     * front when both bits are set, so the rear-axle slip wins.
-     *
-     *   field_0x33c = 0;                                        // zero-init
-     *   if (surface_contact_flags & 1)                           // FRONT axle
-     *       field_0x33c = (short)(abs(longitudinal_speed
-     *                            - max(uVar12, 0)) >> 8);
-     *   if (surface_contact_flags & 2)                           // REAR axle
-     *       field_0x33c = (short)(abs(lateral_speed
-     *                            - max(uVar37, 0)) >> 8);
-     *
-     * uVar12 = chassis-forward body velocity ((cos(h)*vz + sin(h)*vx) >> 12).
-     * uVar37 = front-axle-forward velocity minus yaw-rate-induced term
-     *          ((cos(h+s)*vz + sin(h+s)*vx) >> 12 - sin(s)*front_weight*yaw / 0x28c / 4096).
-     *
-     * MUST run here (before force writeback at L1242-1243, before
-     * longitudinal_speed/lateral_speed are overwritten in the tail body_speeds
-     * block) so that actor->longitudinal_speed / lateral_speed still hold the
-     * PREVIOUS tick's values — same as the decomp reads. vx/vz at this point
-     * are post-drag / pre-force, matching the original's slip-circle reads.
-     *
-     * The port previously wrote `actor->current_slip_metric = abs(lateral_speed)>>8`
-     * at the end of the tick, after lateral_speed had already been updated for
-     * this tick. That collapsed slip to ~0 in straight-line driving AND used
-     * the wrong value (post-update), so tire smoke / tracks never triggered
-     * during actual drift. [CONFIRMED @ 0x004049BA-0x00404A09 via verbatim
-     * decomp] */
+     * Rear overwrites front when both contact bits set. */
     {
         int32_t slip_mag = 0;
         uint8_t scf = actor->surface_contact_flags;
 
         if (scf & 1) {
-            /* uVar12 — chassis-forward body velocity (pre-force vx/vz). */
             int32_t body_vlong = (vx * sin_h + vz * cos_h) >> 12;
             int32_t pos_vlong  = (body_vlong < 0) ? 0 : body_vlong;
             int32_t delta = actor->longitudinal_speed - pos_vlong;
@@ -1258,7 +1296,6 @@ void td5_physics_update_player(TD5_Actor *actor)
             slip_mag = abs_d >> 8;
         }
         if (scf & 2) {
-            /* uVar37 — front-axle-forward projection minus yaw-rate term. */
             int32_t raw_front = (int32_t)(((int64_t)sin_s * vx + (int64_t)cos_s * vz) >> 12);
             int64_t yaw_q12 = (int64_t)sin_sr * front_weight * actor->angular_velocity_yaw;
             int32_t yaw_term = (int32_t)((yaw_q12 >> 12) / 0x28c);
@@ -1266,17 +1303,10 @@ void td5_physics_update_player(TD5_Actor *actor)
             int32_t pos_vlat  = (body_vlat < 0) ? 0 : body_vlat;
             int32_t delta = actor->lateral_speed - pos_vlat;
             int32_t abs_d = (delta < 0) ? -delta : delta;
-            slip_mag = abs_d >> 8;   /* rear overwrites front — matches decomp */
+            slip_mag = abs_d >> 8;
         }
         if (slip_mag > 0x7FFF) slip_mag = 0x7FFF;
         actor->current_slip_metric = (int16_t)slip_mag;
-
-        if (actor->slot_index == 0 && (actor->frame_counter % 60u) == 0u) {
-            TD5_LOG_I(LOG_TAG,
-                      "SLIP: scf=0x%X slip=%d long=%d lat=%d",
-                      (unsigned)scf, slip_mag,
-                      actor->longitudinal_speed, actor->lateral_speed);
-        }
     }
 
     /* --- 14. Yaw torque, clamp [-0x578, +0x578] ---
@@ -3093,7 +3123,8 @@ void td5_physics_integrate_suspension(TD5_Actor *actor, int32_t accel_x, int32_t
  *     local_5c -= iVar8 * sVar3   (pitch accumulator)
  *     local_4c++                   (grounded wheel count)
  *
- *     If wheel was also grounded previous frame (bVar2 & (1<<i)):
+ *     If wheel was AIRBORNE previous frame (bVar2 & (1<<i), i.e. just
+ *     landed this tick — bVar2 = [ESI+0x37D] = prev airborne mask):
  *       spring_dot   = gap_270[i][0]*wcv[0] + gap_270[i][1]*wcv[1] + gap_270[i][2]*wcv[2]
  *       spring_force = arith_round_shift(spring_dot, 0xFFF, 12)
  *       local_64    += spring_force * sVar4 * -0x100  (roll spring)
@@ -3193,14 +3224,19 @@ void td5_physics_update_suspension_response(TD5_Actor *actor)
      *     reinstates the T2-dominates-with-corrective pattern.
      *
      * Two masks are needed:
-     *   lock = current-frame AIRBORNE mask (1=airborne). Original reads
-     *          from +0x37C (damage_lockout). Port live equivalent is
-     *          wheel_contact_bitmask after refresh.
-     *   grnd = previous-frame GROUNDED mask (1=grounded). Original reads
-     *          from +0x37D (wheel_contact_bitmask, which after refresh
-     *          holds the prior tick's value). Port snapshots this as
-     *          s_prev_grounded_mask[slot] in integrate_pose before refresh
-     *          overwrites the live bitmask.
+     *   lock     = current-frame AIRBORNE mask (1=airborne). Original reads
+     *              [ESI+0x37C]. Port live equivalent is
+     *              actor->wheel_contact_bitmask after refresh.
+     *   prev_air = previous-frame AIRBORNE mask (1=airborne). Original
+     *              reads [ESI+0x37D] — refresh overwrites +0x37D ← old
+     *              +0x37C at its top, so after refresh +0x37D holds last
+     *              tick's airborne mask. Port reconstructs by inverting
+     *              s_prev_grounded_mask[slot] (which was captured pre-
+     *              refresh from the PREVIOUS frame's wheel_contact_bitmask).
+     *
+     * NOTE polarity: both masks are AIRBORNE (1=airborne). Prior port
+     * mixed GROUNDED/AIRBORNE conventions and got BOTH the spring gate
+     * and the pattern clamp switch-key wrong. Fixed 2026-04-24.
      *
      * Struct layout source: decomp @ 0x00405884/0x00405888 shows the loop
      * reads sVar3=psVar11[-0x22], sVar4=psVar11[-0x20] where psVar11 walks
@@ -3209,12 +3245,34 @@ void td5_physics_update_suspension_response(TD5_Actor *actor)
      * shorts; gap_270 at +0x270 same stride.
      */
     const uint8_t lock = actor->wheel_contact_bitmask;
-    const uint8_t grnd = s_prev_grounded_mask[actor->slot_index & 0x0F];
+    /* prev_air = previous-frame AIRBORNE mask (bVar2 in original @ +0x37D).
+     * After refresh_wheel_contacts, the original's +0x37D holds the old
+     * value of +0x37C (= last-frame airborne). Port snapshots
+     * s_prev_grounded_mask[slot] = ~(last-frame airborne) BEFORE refresh,
+     * so we invert to reconstruct prev_air.
+     *
+     * HISTORY: prior port named this `grnd` and treated it as previous-
+     * frame GROUNDED. That polarity was wrong in TWO places:
+     *   (1) spring-dot gate @ 0x004058E4 fires when wheel was AIRBORNE last
+     *       frame (i.e. just landed this tick), not when grounded. Port
+     *       was firing the spring impulse on every grounded frame, which
+     *       continuously amplified tiny per-tick Y fluctuations into
+     *       roll_spr/pitch_spr — matches user's "very sensitive of Y" bug.
+     *   (2) pattern-clamp switch @ 0x00405A6A keys on +0x37D directly.
+     *       Port's inverted key matches the complement pattern set.
+     * 2026-04-24 research agent confirmed both polarities at the cited
+     * disassembly addresses. */
+    const uint8_t prev_air = (uint8_t)((~s_prev_grounded_mask[actor->slot_index & 0x0F]) & 0x0F);
 
     if (lock == 0x0F) {
         /* All four wheels airborne — early-return matches original
          * 0x00405809; gravity stays subtracted (not added back). */
         return;
+    }
+
+    if (actor->slot_index == 0 && (actor->frame_counter % 60u) == 0u) {
+        TD5_LOG_I(LOG_TAG, "susp_resp_enter slot0: lock=0x%02x prev_air=0x%02x",
+                  (int)lock, (int)prev_air);
     }
 
     int32_t pitch_grav = 0;     /* local_50 */
@@ -3253,10 +3311,17 @@ void td5_physics_update_suspension_response(TD5_Actor *actor)
         roll_grav  -= g_scaled * (int32_t)lat;    /* -=, lateral arm (NOTE sign) */
         ++cnt_active;
 
-        if (grnd & bit) {
-            /* Spring damping from frame-to-frame wheel motion projected
-             * onto the contact normal. wfdh and wcv share +0x250-style
-             * 4-short-per-wheel layout; both X,Y,Z at offsets 0,1,2. */
+        if (prev_air & bit) {
+            /* Landing-impulse spring: fires ONLY for wheels that were
+             * AIRBORNE last frame (just landed this tick). Literal port of
+             * `if ((bVar2 & uVar7) != 0)` @ 0x004058E4 where bVar2 =
+             * [ESI+0x37D] = previous-frame airborne mask. This is an
+             * impulsive correction tied to touchdown, NOT a per-frame
+             * spring damper.
+             *
+             * wfdh and wcv share +0x270 / +0x250 layout (4 shorts per
+             * wheel). dot(wfdh[i], wcv[i]) scaled by per-wheel body arms
+             * goes into pitch_spr/roll_spr/bounce. */
             int32_t dot =   (int32_t)wfdh[i * 4 + 0] * (int32_t)wcv[i * 4 + 0]
                           + (int32_t)wfdh[i * 4 + 1] * (int32_t)wcv[i * 4 + 1]
                           + (int32_t)wfdh[i * 4 + 2] * (int32_t)wcv[i * 4 + 2];
@@ -3266,6 +3331,15 @@ void td5_physics_update_suspension_response(TD5_Actor *actor)
             roll_spr  += (dot * (int32_t)lat ) *  0x100;
             bounce    += dot >> 1;                         /* signed SAR 1 */
             ++cnt_grounded;
+
+            if (actor->slot_index == 0) {
+                TD5_LOG_I(LOG_TAG,
+                    "susp_resp landing_impulse slot0: wheel=%d dot=%d "
+                    "lat=%d loni=%d pitch_spr+=%d roll_spr+=%d",
+                    i, dot, (int)lat, (int)loni,
+                    (dot * (int32_t)loni) * -0x100,
+                    (dot * (int32_t)lat)  *  0x100);
+            }
         }
     }
 
@@ -3295,10 +3369,16 @@ void td5_physics_update_suspension_response(TD5_Actor *actor)
 
     if (cnt_grounded > 0) {
         /* Per-pattern angular velocity clamps [CONFIRMED @ 0x00405a6a..
-         * 0x00405af4]. Switch keys on grnd (previous-frame GROUNDED),
-         * NOT lock. Bitmasks 7,11,13,14,15 fall through with NO clamp. */
+         * 0x00405af4]. Original switches on bVar2 = [ESI+0x37D] =
+         * previous-frame AIRBORNE mask. Bitmasks 7,11,13,14,15 fall
+         * through with NO clamp.
+         *
+         * HISTORY: prior port keyed on `grnd` (previous-frame GROUNDED),
+         * which matched the COMPLEMENT pattern set (case 0 in port =
+         * all airborne, case 0 in original = all grounded). Polarity
+         * fixed 2026-04-24. */
         const int32_t LIM = 4000;   /* 0xFA0 */
-        switch (grnd) {
+        switch (prev_air) {
             case 0: case 1: case 2: case 4: case 6: case 8: case 9:
                 if (actor->angular_velocity_roll  >  LIM) actor->angular_velocity_roll  =  LIM;
                 if (actor->angular_velocity_roll  < -LIM) actor->angular_velocity_roll  = -LIM;
@@ -3320,10 +3400,10 @@ void td5_physics_update_suspension_response(TD5_Actor *actor)
 
     if (actor->slot_index == 0 && (actor->frame_counter % 60u) == 0u) {
         TD5_LOG_I(LOG_TAG,
-                  "susp_resp slot0: lock=0x%02x grnd=0x%02x cnt=%d/%d "
+                  "susp_resp slot0: lock=0x%02x prev_air=0x%02x cnt=%d/%d "
                   "p_grav=%d r_grav=%d p_spr=%d r_spr=%d bounce=%d "
                   "av_r=%d av_p=%d vy=%d",
-                  (int)lock, (int)grnd, cnt_active, cnt_grounded,
+                  (int)lock, (int)prev_air, cnt_active, cnt_grounded,
                   pitch_grav, roll_grav, pitch_spr, roll_spr, bounce,
                   actor->angular_velocity_roll, actor->angular_velocity_pitch,
                   actor->linear_velocity_y);
@@ -3659,6 +3739,22 @@ void td5_physics_integrate_pose(TD5_Actor *actor)
      * TransformTrackVertexByMatrix @ 0x00446030 called from
      * IntegrateVehiclePoseAndContacts @ 0x00405E80.
      *
+     * CASE GATING [CONFIRMED @ 0x00405FDE switch on [ESI+0x37C]]:
+     * The original's switch skips T2 entirely for current-airborne masks
+     * {7, 11, 13, 14, 15} (3+ wheels airborne) — with only one wheel on
+     * the ground the 4-wheel height-spread solver produces garbage
+     * (isqrt of a small hypotenuse vs a huge Y numerator → runaway
+     * pitch/roll). Port previously ran this unconditionally, which matches
+     * the user's "sometimes rolls out of control on steep slopes" symptom
+     * (partial 2026-04-22 residual). 2026-04-24: added gate.
+     *
+     * Cases {0,1,2,4,6,8,9} call TransformTrackVertexByMatrix @ 0x00446030
+     * (full 4-wheel solver — byte-faithful in attitude_from_wheels).
+     * Cases {3,5,10,12} call reduced B/C solvers @ 0x00446140 / 0x004461C0
+     * (not decompiled). Port falls back to the full solver for those;
+     * likely over-corrects a single axle but less catastrophic than the
+     * 3+-airborne garbage path. Decompile + split solver is a followup.
+     *
      * 1. Compute new_roll, new_pitch from the freshly refreshed
      *    wheel_contact_pos[] heights + wheel_suspension_pos[] deflections.
      * 2. Derive angular_velocity_roll/pitch as signed-wrapped 12-bit delta,
@@ -3669,6 +3765,14 @@ void td5_physics_integrate_pose(TD5_Actor *actor)
      *    from the wheel-corrected attitude.
      * 5. Rebuild rotation_matrix from the corrected display_angles so
      *    downstream ground-snap and next-tick refresh use the right matrix. */
+    uint8_t t2_lock = actor->wheel_contact_bitmask;
+    int t2_skip = (t2_lock == 7 || t2_lock == 11 || t2_lock == 13 ||
+                   t2_lock == 14 || t2_lock == 15);
+    if (actor->slot_index == 0 && t2_skip) {
+        TD5_LOG_I(LOG_TAG, "T2 skip slot0: lock=0x%02x (3+ airborne)",
+                  (int)t2_lock);
+    }
+    if (!t2_skip)
     {
         int16_t new_roll  = 0;
         int16_t new_pitch = 0;
@@ -5209,6 +5313,17 @@ void td5_physics_init_vehicle_runtime(void)
      * differ from in-race transforms and cause huge gap_270 transients. */
     memset(s_prev_wheel_valid, 0, sizeof(s_prev_wheel_valid));
 
+    /* Populate per-slot handicap tables from gRaceResultPointsTable indexed
+     * by each slot's prior championship position. See declaration above. */
+    for (int s = 0; s < 6; s++) {
+        int pos = g_slot_series_position[s];
+        if (pos < 0) pos = 0;
+        if (pos > 3) pos = 3;
+        g_slot_race_result[s] = s_race_result_points_table[pos][0];
+        g_slot_race_bonus [s] = s_race_result_points_table[pos][1];
+        g_slot_race_points[s] = s_race_result_points_table[pos][2];
+    }
+
     total = td5_game_get_total_actor_count();
     if (total <= 0) {
         return;
@@ -5270,6 +5385,105 @@ void td5_physics_init_vehicle_runtime(void)
                     write_i16((uint8_t *)phys, 0x78, (int16_t)(ss << 1));
                 }
                 /* Easy: no scaling (raw carparam values used as-is) */
+            }
+        }
+
+        /* --- Per-slot NPC handicap (faithful port of InitializeRaceVehicleRuntime
+         * @ 0x42F140 gRaceSlotState==1 branch) ---
+         * Applies rubber-banding derived from the slot's prior championship
+         * position. For position 0 (default/leader) all adjustments are
+         * no-ops because race_result = race_bonus = race_points = 0.
+         *
+         * Gear count assumed 8 (R,N,1-6) — all shipped TD5 vehicles use this.
+         * If a modded car defines fewer, the triangular loop denom guard below
+         * prevents div-by-zero.
+         *
+         * actor+0x324 AI pacing bias: the original modifies this field inside
+         * the positive-racePoints branch below. The port does not yet have a
+         * mirror field on TD5_Actor — skipping that single line is inert while
+         * race_points defaults to 0. TODO: wire when championship mode lands. */
+        if (slot < 6 && g_race_slot_state[slot] == 1) {
+            int16_t *phys = (int16_t *)actor->tuning_data_ptr;
+            if (phys) {
+                const int32_t race_result = g_slot_race_result[slot];
+                const int32_t race_bonus  = g_slot_race_bonus [slot];
+                const int32_t race_points = g_slot_race_points[slot];
+                const int     gears       = 8;  /* R+N+6 forward */
+
+                /* (1) brake/engine_brake redistribution — DAT_004AED70 is always
+                 * zero in the original so the delta is always 0. Omitted. */
+
+                /* (2) Torque-curve triangular fade over forward gears.
+                 * Starts at phys+0x32 (gear index 2 = 1st forward) and walks
+                 * `gears - 2` entries. Weight runs denom..0, divided by denom.
+                 * For race_result < 1 (negative/zero), divide by 0x300 and use
+                 * signed div. For race_result >= 1 use >>9 with round-to-zero. */
+                if (gears > 3) {
+                    const int denom = gears - 3;
+                    const int n     = gears - 2;
+                    for (int i = 0; i < n; i++) {
+                        const int weight = denom - i;
+                        int32_t entry = (int32_t)PHYS_S(actor, 0x32 + i * 2);
+                        int32_t prod;
+                        if (race_result < 1) {
+                            prod = ((entry * race_result) / 0x300) * weight / denom;
+                        } else {
+                            int32_t mul = entry * race_result;
+                            prod = ((mul + ((mul >> 31) & 0x1FF)) >> 9) * weight / denom;
+                        }
+                        write_i16((uint8_t *)phys, 0x32 + i * 2,
+                                  (int16_t)(entry + prod));
+                    }
+                }
+
+                /* (3a) top_speed_limit *= (race_bonus + 0x800) / 2048 */
+                {
+                    int32_t top = (int32_t)PHYS_S(actor, 0x74);
+                    int32_t n1  = (race_bonus + 0x800) * top;
+                    write_i16((uint8_t *)phys, 0x74,
+                              (int16_t)((n1 + ((n1 >> 31) & 0x7FF)) >> 11));
+                }
+                /* (3b) gear_ratio_table[gears-1] and [gears-2] top-gear rescale */
+                {
+                    int32_t denom1 = race_bonus + 0x800;
+                    if (denom1 != 0) {
+                        int32_t top = (int32_t)PHYS_S(actor, 0x2C + gears * 2);
+                        write_i16((uint8_t *)phys, 0x2C + gears * 2,
+                                  (int16_t)((top << 11) / denom1));
+                    }
+                    int32_t denom2 = race_bonus + 0x1000;
+                    if (denom2 != 0) {
+                        int32_t top2 = (int32_t)PHYS_S(actor, 0x2A + gears * 2);
+                        write_i16((uint8_t *)phys, 0x2A + gears * 2,
+                                  (int16_t)((top2 << 12) / denom2));
+                    }
+                }
+                /* (3c) damping_low_speed *= (0x200 - race_bonus) / 512 */
+                {
+                    int32_t dlo = (int32_t)PHYS_S(actor, 0x6A);
+                    int32_t n2  = (0x200 - race_bonus) * dlo;
+                    write_i16((uint8_t *)phys, 0x6A,
+                              (int16_t)((n2 + ((n2 >> 31) & 0x1FF)) >> 9));
+                }
+
+                /* (4) drag_coefficient adjustment via race_points */
+                {
+                    int32_t drag = (int32_t)PHYS_S(actor, 0x2C);
+                    int32_t adj;
+                    if (race_points < 0) {
+                        /* Signed /0x300 with trunc-to-zero adjustment idiom */
+                        int32_t mul = drag * race_points;
+                        int64_t prod64 = (int64_t)mul * 0x2AAAAAABLL;
+                        int32_t sign_adj = (int32_t)(prod64 >> 63);
+                        adj = (mul / 0x300) + (mul >> 31) - sign_adj;
+                    } else {
+                        int32_t mul = drag * race_points;
+                        adj = (mul + ((mul >> 31) & 0x1FF)) >> 9;
+                        /* TODO: actor+0x324 AI pacing bias increment —
+                         * skipped until port adds the field. */
+                    }
+                    write_i16((uint8_t *)phys, 0x2C, (int16_t)(drag + adj));
+                }
             }
         }
 
@@ -5640,6 +5854,14 @@ void td5_physics_set_race_slot_state(int slot, int is_human)
         TD5_LOG_I(LOG_TAG, "Slot %d physics mode: %s", slot,
                   is_human ? "player" : "AI");
     }
+}
+
+void td5_physics_set_slot_series_position(int slot, int position)
+{
+    if (slot < 0 || slot >= 6) return;
+    if (position < 0) position = 0;
+    if (position > 3) position = 3;
+    g_slot_series_position[slot] = position;
 }
 
 void td5_physics_load_carparam(int slot, const uint8_t *data_268)

@@ -109,6 +109,12 @@ void td5_physics_set_paused(int paused); /* 1=countdown (RPM only), 0=full sim *
 void td5_physics_set_xz_freeze(int freeze); /* 1=freeze XZ pos (countdown), 0=normal */
 void td5_physics_set_race_slot_state(int slot, int is_human); /* 1=player, 0=AI */
 
+/* Per-slot championship position (0=leader, 3=trailer). Drives the
+ * rubber-banding tuning adjustments in td5_physics_init_vehicle_runtime.
+ * Default 0 for all slots (no handicap). Call from the frontend/championship
+ * progression code before td5_physics_init_vehicle_runtime(). */
+void td5_physics_set_slot_series_position(int slot, int position);
+
 /* Load per-car physics tuning from carparam.dat (268 bytes).
  * Must be called before td5_physics_init_vehicle_runtime(). */
 void td5_physics_load_carparam(int slot, const uint8_t *data_268);
