@@ -1471,33 +1471,74 @@ static void frontend_init_race_schedule(void) {
         TD5_LOG_I(LOG_TAG, "InitRaceSchedule: P2 slot1 ext_id=%d", s_p2_car);
     }
 
-    /* Skip the wall-clock reseed during race-trace runs so /diff-race gets
-     * deterministic AI ext_id picks. The original's quickrace hook never
-     * calls srand() — it relies on the process-default RNG state. */
-    if (!g_td5.ini.race_trace_enabled) {
+    /* RNG state for AI ext_id picks.
+     *
+     * Original path (quickrace hook, non-trace):
+     *   - InitializeFrontendResourcesAndState @ 0x00414740 calls srand(timeGetTime())
+     *     TWICE and then consumes at least one rand() via a `rand() % 7` CD-track
+     *     pick loop. That advances the CRT _holdrand to a time-dependent state.
+     *   - InitializeRaceSeriesSchedule @ 0x0040dac0 itself does NOT call srand;
+     *     it only STORES timeGetTime() into a global (g_randomSeedForRace).
+     *   - AI car picks consume _holdrand from that point.
+     *
+     * Under /diff-race the Frida trace script seeds g_randomSeedForRace /
+     * g_raceSessionRandomSeed to 0x1A2B3C4D but does NOT touch CRT _holdrand
+     * (per-thread TLS offset unknown — see tools/frida_race_trace.js:40). So
+     * the original's AI picks are still driven by timeGetTime(), and the
+     * Frida-captured sequence ({1,0,3,4,5} in 2026-04-20 memory) is one
+     * non-deterministic sample.
+     *
+     * Port strategy:
+     *   - Outside /diff-race: srand(timeGetTime()) to get per-launch variety
+     *     and burn one rand() to approximate the original's CD-track pick.
+     *   - Under /diff-race (race_trace_enabled=1): srand with a fixed,
+     *     documented seed. This guarantees repeatable AI picks run-to-run
+     *     AND — paired with a matching Frida-side srand hook in a future
+     *     pass — lets both sides reach zero-delta. Without that Frida
+     *     companion, the two sides still differ in absolute car IDs but the
+     *     port's sequence is stable and comparable.
+     *
+     * [CONFIRMED @ 0x00414740, 0x0040dac0, 0x0042aa33 (the real srand via
+     *  mislabeled __set_new_handler).] */
+    if (g_td5.ini.race_trace_enabled) {
+        srand(0x1A2B3C4D);
+    } else {
         srand(timeGetTime());
     }
+    /* Approximate the original's CD-track-pick rand() burn from
+     * InitializeFrontendResourcesAndState @ 0x00414a78:
+     *   do { rand() % 7; } while (== g_selectedCdTrackIndex);
+     * With a fresh seed both sides start with cdTrack = -1 (default),
+     * so the first rand() always exits the loop. One rand() consumed. */
+    (void)rand();
 
     if (s_selected_game_type == 2) {
         /* === Path 1: Quick Race (gameType == 2, Era) [CONFIRMED @ 0x0040dac0] ===
-         * Random ext_id in 0..7; if player car > 7, shift to 8..15 (class match).
-         * Dedup: reject if any active slot already has this ext_id. */
+         * Original loop body consumes THREE rand() calls per iteration:
+         *   rand #1 -> ext_id (& 7, optionally +8 if player car > 7)
+         *   rand #2 -> variant (& 3)
+         *   rand #3 -> discard
+         * On dedup collision, the whole block re-runs and consumes 3 more
+         * rands. Port previously had variant outside the loop — see the
+         * default path comment below for why that matters. */
         for (i = start_slot; i < TD5_MAX_RACER_SLOTS; i++) {
             int ext_id;
+            int variant;
             int attempts = 0;
             do {
-                ext_id = rand() & 7;
+                ext_id  = rand() & 7;                   /* rand #1 */
+                variant = rand() & 3;                   /* rand #2 (variant) */
+                (void)rand();                           /* rand #3 (discard) */
                 if (s_selected_car > 7)
                     ext_id += 8;
-                rand(); /* third rand() call discarded per original */
                 if (++attempts > 100) break; /* safety */
             } while (frontend_ai_ext_id_taken(ext_id, slot_ext_id, slot_active,
                                                TD5_MAX_RACER_SLOTS));
             slot_active[i]  = 1;
             slot_ext_id[i]  = ext_id;
-            slot_variant[i] = rand() & 3;
-            TD5_LOG_I(LOG_TAG, "InitRaceSchedule: quick-race slot%d ext_id=%d var=%d",
-                      i, ext_id, slot_variant[i]);
+            slot_variant[i] = variant;
+            TD5_LOG_I(LOG_TAG, "InitRaceSchedule: quick-race slot%d ext_id=%d var=%d attempts=%d",
+                      i, ext_id, slot_variant[i], attempts);
         }
     } else if (s_selected_game_type == 5) {
         /* === Path 2: Cup/Masters (gameType == 5) [CONFIRMED @ 0x0040dac0] ===
@@ -1523,29 +1564,43 @@ static void frontend_init_race_schedule(void) {
         }
     } else {
         /* === Path 3: Default (single race, all other types) [CONFIRMED @ 0x0040dac0] ===
-         * Pick from difficulty tier table: rand() % 6 into row[gRaceDifficultyTier].
-         * Original uses gRaceDifficultyTier (@ 0x00463210), NOT the user's
-         * difficulty setting — they are distinct globals. Tier is set in
-         * ConfigureGameTypeFlags by game_type, default 2 for single-race.
-         * [CONFIRMED @ 0x0040DD17 decomp + Frida runtime 2026-04-20 showed
-         * tier-2 cars picked for AI on single-race path.] */
+         * Faithful port of the original's loop structure. Each iteration of
+         * the outer do/while body consumes THREE rand() calls in a specific
+         * order:
+         *   rand #1 -> tier_idx (mod 6 into row[gRaceDifficultyTier])
+         *   rand #2 -> variant  (& 3)
+         *   rand #3 -> discard  (return value thrown away)
+         * When the chosen ext_id collides with an already-claimed slot, the
+         * outer do/while RE-RUNS for the same slot — consuming ANOTHER 3
+         * rand() calls. Only when the dedup check passes are the slot fields
+         * written and the loop advances to the next slot.
+         *
+         * This is structurally distinct from the previous port version which
+         * placed `slot_variant[i] = rand() & 3` OUTSIDE the do/while — on
+         * collision retry, the previous port consumed 2 rands where the
+         * original consumes 3, desyncing the rand() sequence.
+         *
+         * [CONFIRMED @ 0x0040dac0 body structure — decomp shows iVar6=rand();
+         * uVar1=rand()&3; rand(); {dedup scan}; retry-on-collision path]. */
         int tier = g_td5.difficulty_tier;
         if (tier < 0 || tier > 2) tier = 2; /* clamp to valid tiers */
         for (i = start_slot; i < TD5_MAX_RACER_SLOTS; i++) {
             int ext_id;
+            int variant;
             int attempts = 0;
             do {
-                int tier_idx = rand() % 6;
+                int tier_idx = rand() % 6;              /* rand #1 */
+                variant      = rand() & 3;              /* rand #2 (variant) */
+                (void)rand();                           /* rand #3 (discard) */
                 ext_id = s_difficulty_tier_cars[tier][tier_idx];
-                rand(); /* third rand() call discarded per original */
                 if (++attempts > 100) break;
             } while (frontend_ai_ext_id_taken(ext_id, slot_ext_id, slot_active,
                                                TD5_MAX_RACER_SLOTS));
             slot_active[i]  = 1;
             slot_ext_id[i]  = ext_id;
-            slot_variant[i] = rand() & 3;
-            TD5_LOG_I(LOG_TAG, "InitRaceSchedule: default slot%d tier=%d ext_id=%d var=%d",
-                      i, tier, ext_id, slot_variant[i]);
+            slot_variant[i] = variant;
+            TD5_LOG_I(LOG_TAG, "InitRaceSchedule: default slot%d tier=%d ext_id=%d var=%d attempts=%d",
+                      i, tier, ext_id, slot_variant[i], attempts);
         }
     }
 
