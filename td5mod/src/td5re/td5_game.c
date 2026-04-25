@@ -2583,7 +2583,10 @@ static void advance_pending_finish_state(int slot, uint32_t sim_delta) {
                     actor->finish_time_subtick = 0;   /* track_sub_progress not mirrored */
                 }
                 s_slot_state[slot].companion_1 = 1;
-                s_slot_state[slot].companion_2 = 2;
+                /* [CONFIRMED @ 0x00409FCC] Original: param_1[1]='\x01' (companion_2=1),
+                 * NOT 2. P2P branch at 0x0040A180 also writes '\x01'. Circuit was
+                 * incorrectly setting companion_2=2. */
+                s_slot_state[slot].companion_2 = 1;
                 s_slot_state[slot].state = 2;
 
                 TD5_LOG_I(LOG_TAG,
