@@ -258,7 +258,7 @@ int  td5_input_read_frame(uint32_t *word0, uint32_t *word1);
 
 int  td5_input_ff_init(void);
 void td5_input_ff_shutdown(void);
-void td5_input_ff_update(int magnitude);
+void td5_input_ff_update(void);  /* top-level dispatcher: calls ff_update_player for each active slot [CONFIRMED @ 0x0042C470] */
 void td5_input_ff_stop(void);
 
 /** Configure per-slot FF controller assignments. (0x428880) */

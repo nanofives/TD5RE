@@ -24,6 +24,7 @@
 #include "td5_platform.h"
 #include "td5_asset.h"
 #include "td5re.h"
+#include "td5_vfx.h"
 
 /* Full actor struct needed for field-level access (engine speed, slip, position) */
 #include "../../../re/include/td5_actor_struct.h"
@@ -217,6 +218,11 @@ static int s_siren_refreshed;          /* Original: DAT_004c3844 */
 /** Per-viewport skid playing state. Original: DAT_004c3768. */
 static int s_skid_playing[2];
 
+/** Per-viewport rain sound playing state.
+ *  [CONFIRMED @ 0x00440B00]: DAT_004c3768 tracks whether rain has been started
+ *  per viewport ("if DAT_004c3768 != 0 → already playing"). */
+static int s_rain_playing[2];
+
 /** Per-viewport skid intensity. Original: DAT_004c3de0. */
 static int s_skid_intensity[2];
 
@@ -332,6 +338,8 @@ int td5_sound_init_race_resources(void)
     s_siren_refreshed       = 0;
     s_skid_playing[0]       = 0;
     s_skid_playing[1]       = 0;
+    s_rain_playing[0]       = 0;
+    s_rain_playing[1]       = 0;
     s_skid_intensity[0]     = 0;
     s_skid_intensity[1]     = 0;
     s_viewport_audio_state  = 0;
@@ -435,9 +443,11 @@ int td5_sound_load_vehicle_bank(const char *car_dir, int vehicle_index,
     /* Load Horn.wav into slot base+2 (one-shot, 2 duplicates) */
     sound_load_wav_from_zip("Horn.wav", car_dir, base_slot + 2, 0, 2);
 
-    /* Reset skid and siren flags */
+    /* Reset skid, rain, and siren flags */
     s_skid_playing[0]   = 0;
     s_skid_playing[1]   = 0;
+    s_rain_playing[0]   = 0;
+    s_rain_playing[1]   = 0;
     s_siren_refreshed   = 0;
     s_siren_active_flag = 0;
 
@@ -492,8 +502,60 @@ int td5_sound_load_ambient(void)
 
 void td5_sound_update_ambient(void)
 {
-    /* Ambient update is handled within td5_sound_update_audio_mix() as
-     * part of the per-frame mixer pass (rain, siren, etc.). */
+    /* ----------------------------------------------------------------
+     * UpdateVehicleAudioMix ambient weather section [CONFIRMED @ 0x00440B00]
+     *
+     * Per-viewport rain sound management.  In the original this runs
+     * inside UpdateVehicleAudioMix for the "viewer vehicle" iteration.
+     * The port calls it as a separate step from RunRaceFrame so it
+     * executes once per frame after the main audio mix.
+     *
+     * Sound slots (from LoadRaceAmbientSoundBuffers [CONFIRMED @ 0x00441C60]):
+     *   slot 18 (0x12): Rain.wav  — looped rain loop start channel
+     *   slot 19 (0x13): second ambient layer — rain volume channel
+     *
+     * [CONFIRMED @ 0x00440B00]:
+     *   g_weatherActiveCountView0/1 → td5_vfx_get_weather_active_count(vp)
+     *   g_weatherType               → td5_vfx_get_weather_type()
+     *   DAT_004c3768 (per-viewport) → s_rain_playing[vp]
+     * ---------------------------------------------------------------- */
+
+    int num_passes  = (g_td5.split_screen_mode != 0) ? 2 : 1;
+    int slot_offset = 0;
+
+    for (int vp = 0; vp < num_passes; vp++) {
+        int pan = (g_td5.split_screen_mode == 0) ? 0 : (vp == 0 ? -10000 : 10000);
+        int weather_count = td5_vfx_get_weather_active_count(vp);
+        int weather_type  = td5_vfx_get_weather_type();
+
+        /* [CONFIRMED @ 0x00440B00]: Start rain if count>=1 AND not yet
+         * playing AND weather==RAIN (0).  Play at volume=0 (silent start). */
+        if (weather_count >= 1 && !s_rain_playing[vp] && weather_type == 0) {
+            slot_play(slot_offset + 0x12, 1, 0, pan, TD5_SOUND_FREQ_22050);
+            s_rain_playing[vp] = 1;
+            TD5_LOG_I(LOG_TAG, "ambient: rain start vp=%d count=%d",
+                      vp, weather_count);
+        } else if (weather_count == 0 && s_rain_playing[vp]) {
+            /* [CONFIRMED @ 0x00440B00]: Stop rain when count drops to zero. */
+            slot_stop(slot_offset + 0x13);
+            s_rain_playing[vp] = 0;
+            TD5_LOG_I(LOG_TAG, "ambient: rain stop vp=%d", vp);
+        }
+
+        /* [CONFIRMED @ 0x00440B00]: Modulate rain volume by particle count.
+         * Volume = clamp(weather_count, 0, 0x7f). */
+        if (weather_count > 0 && weather_type == 0) {
+            int rain_vol = weather_count;
+            if (rain_vol > 0x7F) rain_vol = 0x7F;
+            slot_modify(slot_offset + 0x13, rain_vol, pan, TD5_SOUND_FREQ_22050);
+            if ((s_audio_mix_log_counter % 60u) == 0u) {
+                TD5_LOG_D(LOG_TAG, "ambient: rain vp=%d vol=%d count=%d",
+                          vp, rain_vol, weather_count);
+            }
+        }
+
+        slot_offset = TD5_SOUND_DUP_OFFSET;
+    }
 }
 
 /* ========================================================================

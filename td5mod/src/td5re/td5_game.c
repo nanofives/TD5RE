@@ -2312,6 +2312,9 @@ int td5_game_run_race_frame(void) {
         }
     }
     td5_sound_update_audio_mix();
+    /* [CONFIRMED @ 0x00440B00]: ambient weather (rain) sound runs each
+     * frame after the vehicle audio mix, gated by weather particle density. */
+    td5_sound_update_ambient();
     td5_sound_tick();
 
     /* End scene and present */

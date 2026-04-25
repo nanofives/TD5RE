@@ -326,11 +326,10 @@ void td5_input_poll_race_session(void)
         }
     }
 
-    /* Force feedback update for local players */
-    td5_input_ff_update_player(0);
-    if (s_active_players > 1) {
-        td5_input_ff_update_player(1);
-    }
+    /* Force feedback update for local players.
+     * [CONFIRMED @ 0x0042C470]: UpdateControllerForceFeedback called here
+     * inside PollRaceSessionInput in original RunRaceFrame. */
+    td5_input_ff_update();
 
     /* Record input (delta-compressed, strip camera/escape bits) */
     td5_input_write_frame(s_control_bits[0], s_control_bits[1], 1);
@@ -1048,10 +1047,28 @@ void td5_input_ff_shutdown(void)
     memset(&s_ff, 0, sizeof(s_ff));
 }
 
-void td5_input_ff_update(int magnitude)
+/* ========================================================================
+ * td5_input_ff_update  (top-level FF dispatcher)
+ *
+ * Called once per race frame from PollRaceSessionInput (0x0042C470).
+ * [CONFIRMED @ 0x0042C470]: UpdateControllerForceFeedback(0) is called
+ * from within PollRaceSessionInput for single-player; in net play the
+ * local slot index is passed instead.
+ *
+ * The magnitude parameter is not used here — per-player force magnitude
+ * is computed from actor state inside td5_input_ff_update_player.
+ * ======================================================================== */
+void td5_input_ff_update(void)
 {
-    TD5_LOG_I(LOG_TAG, "FF start: slot=0 magnitude=%d", magnitude);
-    td5_plat_ff_constant(0, magnitude);
+    /* Dispatch per-player FF update for all active local players.
+     * [CONFIRMED @ 0x0042C470]: UpdateControllerForceFeedback dispatched
+     * inside PollRaceSessionInput for slot 0 (single-player) or the
+     * local participant slot (network). */
+    td5_input_ff_update_player(0);
+    if (s_active_players > 1) {
+        td5_input_ff_update_player(1);
+    }
+    TD5_LOG_D(LOG_TAG, "FF dispatcher: players=%d", s_active_players);
 }
 
 void td5_input_ff_stop(void)
