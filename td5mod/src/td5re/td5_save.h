@@ -103,6 +103,10 @@ const uint8_t *td5_save_get_npc_table(void);
 /** Returns pointer to a specific NPC group (0-25). NULL if out of range. */
 const TD5_NpcGroup *td5_save_get_npc_group(int group_index);
 
+/** Returns mutable pointer to a specific NPC group for in-place name-entry write.
+ *  [CONFIRMED @ 0x00413BC0 case 4]: original writes directly into g_npcRacerGroupTable. */
+TD5_NpcGroup *td5_save_get_npc_group_mutable(int group_index);
+
 /** Returns the speed-units setting (0=MPH, 1=KPH). */
 int td5_save_get_speed_units(void);
 

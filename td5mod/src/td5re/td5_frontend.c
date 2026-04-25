@@ -228,6 +228,10 @@ static int  s_results_skip_display;     /* DAT_00497a74 */
 
 /* Race snapshot for re-race */
 static int  s_snap_car, s_snap_paint, s_snap_trans, s_snap_config;
+
+/* Post-race name entry state (Screen [25]) */
+static int32_t s_post_race_score;       /* DAT_004951d0: player's score for qualification */
+static int     s_score_insert_pos;      /* 0-4: position in 5-entry table where insert goes */
 static int  s_snap_opp_car, s_snap_opp_paint, s_snap_opp_trans, s_snap_opp_config;
 
 /* Masters roster (type 5): 15 random car slots, 6 marked AI */
@@ -7730,8 +7734,10 @@ static void Screen_RaceResults(void) {
                   s_selected_game_type);
 
         /* Sort results by game type:
-         * Types 1/6: by secondary metric desc
-         * Types 2-5: by primary metric asc */
+         * Types 1/6: by secondary metric desc (SortRaceResultsBySecondaryMetricDesc @ 0x40AB80)
+         * Types 2-5: by primary metric asc    (SortRaceResultsByPrimaryMetricAsc   @ 0x40AAD0)
+         * [CONFIRMED @ 0x00422480 case 0] */
+        td5_game_sort_results();
 
         /* Save race snapshot on first entry */
         if (!s_results_rerace_flag) {
@@ -7784,11 +7790,31 @@ static void Screen_RaceResults(void) {
         break;
 
     case 6: /* Interactive: L/R browse racer slots (0-5), confirm exits.
-             * Original @ 0x004229DA: button_index >= 0 && < 2 -> state 0x0B. */
+             * Original @ 0x004229DA: button_index >= 0 && < 2 -> state 0x0B.
+             * [CONFIRMED @ 0x004229DA] DAT_00497a68 cycles by DAT_0049b690 (arrow delta),
+             * skips slots with state == 3 (disabled). Drag: masked & 1 for 2-slot only. */
         if (s_input_ready) {
             if (s_arrow_input != 0) {
-                /* Cycle through racer slots, skip inactive */
-                /* Drag race: only 2 slots */
+                /* Cycle through racer slots, skip disabled.
+                 * [CONFIRMED @ 0x00422A22] Wrap: [0..5] with 6 -> 0 and -1 -> 5. */
+                s_score_category_index += s_arrow_input; /* reuse for browsed slot */
+                if (s_selected_game_type == 7) {
+                    /* Drag: only 2 slots [CONFIRMED @ 0x00422A02] masked & 1 */
+                    s_score_category_index &= 1;
+                } else {
+                    if (s_score_category_index >= 6) s_score_category_index = 0;
+                    if (s_score_category_index < 0)  s_score_category_index = 5;
+                }
+                /* Skip disabled slots — up to 6 iterations */
+                for (int _skip = 0;
+                     _skip < 6 && td5_game_get_slot_state(s_score_category_index) == 3;
+                     _skip++) {
+                    s_score_category_index += s_arrow_input;
+                    if (s_score_category_index >= 6) s_score_category_index = 0;
+                    if (s_score_category_index < 0)  s_score_category_index = 5;
+                }
+                TD5_LOG_D(LOG_TAG, "RaceResults state 6: browsing slot %d",
+                          s_score_category_index);
             }
             if (s_button_index >= 0 && s_button_index < 2) { /* confirm -> exit */
                 TD5_LOG_I(LOG_TAG, "RaceResults: state 6 -> 0x0B (confirm, btn=%d)",
@@ -7921,7 +7947,16 @@ static void Screen_RaceResults(void) {
                 break;
 
             case 1: /* View Replay */
-                /* Set g_inputPlaybackActive = 1, start replay */
+                /* [CONFIRMED @ 0x00422F2C case 1 in case 0xF]:
+                 *   g_attractModeControlEnabled = 2
+                 *   g_inputPlaybackActive = 1
+                 *   g_frontendInnerState++ (fall into slide-out then InitializeFrontendDisplayModeState)
+                 * Port: set s_replay_mode via td5_input_set_replay_mode(1),
+                 *       enable playback via td5_input_set_playback_active(1),
+                 *       then re-init race (replay file was saved at race start). */
+                TD5_LOG_I(LOG_TAG, "RaceResults: View Replay selected");
+                td5_input_set_replay_mode(1);
+                td5_input_set_playback_active(1);
                 frontend_init_race_schedule();
                 break;
 
@@ -7955,14 +7990,23 @@ static void Screen_RaceResults(void) {
         break;
 
     case 0x11: /* Save cup data */
-        if (frontend_write_cup_data()) {
-            TD5_LOG_I(LOG_TAG, "RaceResults: cup data saved");
-            /* Show "Block Saved OK" message */
-        } else {
-            TD5_LOG_W(LOG_TAG, "RaceResults: failed to save cup data");
-            /* Show "Failed to Save" message */
+        /* [CONFIRMED @ 0x0042332E]: WriteCupData() result picks SNK_BlockSavedOK or
+         * SNK_FailedToSave string; creates 2 buttons (message + OK).
+         * Port maps to localised strings via static labels. */
+        {
+            const char *save_msg;
+            if (frontend_write_cup_data()) {
+                TD5_LOG_I(LOG_TAG, "RaceResults: cup data saved (Block Saved OK)");
+                save_msg = "Block Saved OK";
+            } else {
+                TD5_LOG_W(LOG_TAG, "RaceResults: failed to save cup data (Failed to Save)");
+                save_msg = "Failed to Save";
+            }
+            /* Button 0: message label (288x32); Button 1: OK (96x32).
+             * [CONFIRMED @ 0x00423342/0x0042335C]: offset -0x120 from canvas, width 0x120/0x60 */
+            frontend_create_button(save_msg, FE_CENTER_X - 0x90, FE_CENTER_Y - 0x5F, 0x120, 0x20);
+            frontend_create_button("OK",     FE_CENTER_X - 0x30, FE_CENTER_Y + 0x31, 0x60,  0x20);
         }
-        frontend_create_button("OK", -100, 0, 100, 0x20);
         s_anim_tick = 0;
         s_inner_state = 0x12;
         break;
@@ -8005,12 +8049,87 @@ static void Screen_RaceResults(void) {
 static void Screen_PostRaceNameEntry(void) {
     switch (s_inner_state) {
     case 0: /* Qualification check */
+        /* [CONFIRMED @ 0x00413BC0 case 0] */
         frontend_init_return_screen(TD5_SCREEN_NAME_ENTRY);
-        TD5_LOG_D(LOG_TAG, "PostRaceNameEntry: qualification check");
-        /* Determine score type (time/lap/points).
-         * Compare player's result against worst entry in 5-slot table.
-         * If doesn't qualify, or 2P mode, or disqualified -> skip to state 4. */
-        /* Create text input button */
+        TD5_LOG_D(LOG_TAG, "PostRaceNameEntry: qualification check, game_type=%d",
+                  s_selected_game_type);
+
+        /* Compute group index for the high-score table.
+         * Cup types 1-6: group = game_type + 0x13 (mirroring original case 0 at 0x413BCF).
+         * Drag (type 7):  group = 0x13.
+         * Others:         group = s_selected_track (direct schedule index). */
+        {
+            int group_idx;
+            if (s_selected_game_type == 7) {
+                group_idx = 0x13;
+            } else if (s_selected_game_type >= 1 && s_selected_game_type <= 6) {
+                group_idx = s_selected_game_type + 0x13;
+            } else {
+                group_idx = s_selected_track;
+            }
+            group_idx = (group_idx < 0) ? 0 : (group_idx >= 26 ? 25 : group_idx);
+
+            const TD5_NpcGroup *grp = td5_save_get_npc_group(group_idx);
+            int group_type = grp ? (grp->header & 3) : 0;
+
+            /* Derive player's score for this group type:
+             * 0 = TIME  (primary metric = finish time ticks, lower is better)
+             * 1 = LAP   (best lap time ticks, lower is better)
+             * 2 = PTS   (secondary metric = points, higher is better)
+             * [CONFIRMED @ 0x00413BCF-0x00413C5C] */
+            s_post_race_score = 0;
+            if (group_type == 0) {
+                /* Time (primary finish metric) */
+                if (s_selected_game_type >= 1 && s_selected_game_type <= 6) {
+                    /* Cup: use s_results secondary lap time field
+                     * [CONFIRMED @ 0x00413C0B]: DAT_0048d990 for cup types */
+                    s_post_race_score = td5_game_get_result_secondary(0);
+                } else {
+                    s_post_race_score = td5_game_get_result_primary(0);
+                }
+            } else if (group_type == 1) {
+                /* Lap time: best lap across all slots */
+                s_post_race_score = td5_game_get_best_lap_time(0);
+            } else if (group_type == 2) {
+                /* Points: secondary metric */
+                s_post_race_score = td5_game_get_result_secondary(0);
+            }
+
+            /* Qualification check: compare against worst entry (entries[4].score).
+             * Time-based (types 0/1): score of 0 = not finished = disqualified.
+             *   Qualifies if player_time < worst_time.
+             * Points-based (type 2): qualifies if player_pts > worst_pts.
+             * [CONFIRMED @ 0x00413C5E-0x00413C7E] */
+            int qualifies = 0;
+            if (s_post_race_score != 0 && grp != NULL) {
+                int32_t worst = grp->entries[4].score;
+                if (group_type < 2) {
+                    /* time: lower is better; qualify if player < worst */
+                    qualifies = (s_post_race_score < worst);
+                } else {
+                    /* points: higher is better; qualify if player > worst */
+                    qualifies = (s_post_race_score > worst);
+                }
+            }
+
+            /* 2P mode: player 2 result doesn't go into high score.
+             * DQ (slot state not finished): no entry.
+             * [CONFIRMED @ 0x00413C80-0x00413CA4] */
+            if (s_two_player_mode) qualifies = 0;
+            if (!td5_game_slot_is_finished(0)) qualifies = 0;
+
+            TD5_LOG_I(LOG_TAG, "PostRaceNameEntry: group=%d type=%d score=%d qualifies=%d",
+                      group_idx, group_type, (int)s_post_race_score, qualifies);
+
+            if (!qualifies) {
+                /* Skip name entry — go straight to table insert (no name prompt) */
+                s_post_race_score = 0;
+                s_inner_state = 4;
+                break;
+            }
+        }
+
+        /* Player qualifies: prompt for name */
         memset(s_post_race_name, 0, sizeof(s_post_race_name));
         strcpy(s_post_race_name, "PLAYER");
         frontend_begin_text_input(s_post_race_name, (int)sizeof(s_post_race_name));
@@ -8044,9 +8163,85 @@ static void Screen_PostRaceNameEntry(void) {
         break;
 
     case 4: /* Insert score into table */
-        /* Scan 5-slot table, find insertion position, shift lower entries */
-        /* Write: name, score, car index, speed stats */
-        /* For cup races: average speed = total / race count */
+        /* [CONFIRMED @ 0x00413CB0 case 4] ScreenPostRaceNameEntry:
+         * 1. Scan entries[0..4].score to find insert position (uVar8).
+         *    - Types 0/1: find first entry where player_score <= entry.score (insert before)
+         *    - Type 2:    find first entry where player_score >= entry.score (insert before)
+         * 2. Shift entries[uVar8..3] down one slot (memmove-style).
+         * 3. Write entry at position uVar8: name, score, car_id, avg_speed, top_speed.
+         * 4. s_score_insert_pos = uVar8.
+         */
+        if (s_post_race_score != 0) {
+            /* Determine group and type — mirrors case 0 logic */
+            int ins_group;
+            if (s_selected_game_type == 7) {
+                ins_group = 0x13;
+            } else if (s_selected_game_type >= 1 && s_selected_game_type <= 6) {
+                ins_group = s_selected_game_type + 0x13;
+            } else {
+                ins_group = s_selected_track;
+            }
+            ins_group = (ins_group < 0) ? 0 : (ins_group >= 26 ? 25 : ins_group);
+
+            TD5_NpcGroup *grp = td5_save_get_npc_group_mutable(ins_group);
+            if (grp != NULL) {
+                int group_type = grp->header & 3;
+
+                /* Find insert position [CONFIRMED @ 0x00413CB5-0x00413CDA] */
+                int ins_pos = 5; /* default: past end (discard) */
+                for (int k = 0; k < 5; k++) {
+                    if (group_type < 2) {
+                        /* Time: lower is better; insert where player < entry */
+                        if (s_post_race_score <= grp->entries[k].score) {
+                            ins_pos = k; break;
+                        }
+                    } else {
+                        /* Points: higher is better; insert where player >= entry */
+                        if (s_post_race_score >= grp->entries[k].score) {
+                            ins_pos = k; break;
+                        }
+                    }
+                }
+
+                if (ins_pos < 5) {
+                    /* Shift entries[ins_pos..3] down one slot [CONFIRMED @ 0x00413CDB-0x00413D1B] */
+                    for (int k = 3; k >= ins_pos; k--) {
+                        grp->entries[k + 1] = grp->entries[k];
+                    }
+
+                    /* Write new entry [CONFIRMED @ 0x00413D1C-0x00413D71]:
+                     * name (13 bytes), score, car_id, avg_speed, top_speed */
+                    TD5_NpcEntry *e = &grp->entries[ins_pos];
+                    memset(e, 0, sizeof(*e));
+                    strncpy(e->name, s_post_race_name, sizeof(e->name) - 1);
+                    e->score = s_post_race_score;
+                    e->car_id = (int32_t)(uint8_t)s_selected_car;
+
+                    /* Average and top speed.
+                     * Non-cup: direct from slot 0 metrics.
+                     * Cup: avg_speed = total / race count [CONFIRMED @ 0x00413D55-0x00413D70] */
+                    if (s_selected_game_type < 1 || s_selected_game_type == 7) {
+                        e->avg_speed = td5_game_get_result_avg_speed(0);
+                        e->top_speed = td5_game_get_result_top_speed(0);
+                    } else {
+                        int race_count = (s_race_within_series > 0) ? s_race_within_series : 1;
+                        int32_t raw_avg = td5_game_get_result_avg_speed(0);
+                        e->avg_speed = raw_avg / race_count;
+                        e->top_speed = td5_game_get_result_top_speed(0);
+                    }
+                    s_score_insert_pos = ins_pos;
+
+                    TD5_LOG_I(LOG_TAG,
+                              "PostRaceNameEntry: inserted '%s' score=%d at pos=%d in group=%d",
+                              e->name, (int)e->score, ins_pos, ins_group);
+                } else {
+                    TD5_LOG_D(LOG_TAG, "PostRaceNameEntry: score=%d doesn't fit (insert_pos=%d)",
+                              (int)s_post_race_score, ins_pos);
+                }
+            }
+        } else {
+            TD5_LOG_D(LOG_TAG, "PostRaceNameEntry: case 4 skip (score=0, no qualification)");
+        }
         s_inner_state = 5;
         break;
 

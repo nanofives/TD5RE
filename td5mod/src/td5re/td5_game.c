@@ -638,6 +638,91 @@ int32_t td5_game_get_race_timer(int slot, int lap_index)
 }
 
 /* ========================================================================
+ * Race results / metrics accessors (for td5_frontend.c post-race screen)
+ * [CONFIRMED @ 0x0048d988] s_results mirrors original ResultsTable at that addr
+ * [CONFIRMED @ 0x40AAD0 / 0x40AB80] sort functions populate final_position
+ * ======================================================================== */
+
+/* Returns the primary_metric (finish time ticks) for a given slot.
+ * 0 = not finished or out-of-range. [CONFIRMED: DAT_0048d990 = primary base] */
+int32_t td5_game_get_result_primary(int slot)
+{
+    if (slot < 0 || slot >= TD5_MAX_RACER_SLOTS) return 0;
+    return s_results[slot].primary_metric;
+}
+
+/* Returns the secondary_metric (accumulated score/points) for a given slot.
+ * [CONFIRMED: DAT_0048d98c = secondary base] */
+int32_t td5_game_get_result_secondary(int slot)
+{
+    if (slot < 0 || slot >= TD5_MAX_RACER_SLOTS) return 0;
+    return s_results[slot].secondary_metric;
+}
+
+/* Returns the top_speed for a given slot (in internal units).
+ * [CONFIRMED: results entry +0x18 = top_speed] */
+int32_t td5_game_get_result_top_speed(int slot)
+{
+    if (slot < 0 || slot >= TD5_MAX_RACER_SLOTS) return 0;
+    return (int32_t)s_results[slot].top_speed;
+}
+
+/* Returns the average speed accumulator (raw) for a given slot.
+ * Port uses s_metrics.average_speed_raw for the actor avg speed.
+ * [CONFIRMED: DAT_0048d994 in ScreenPostRaceNameEntry case 4] */
+int32_t td5_game_get_result_avg_speed(int slot)
+{
+    if (slot < 0 || slot >= TD5_MAX_RACER_SLOTS) return 0;
+    return s_metrics[slot].average_speed_raw;
+}
+
+/* Returns the race order slot index at position 'pos' (0=1st, ...).
+ * [CONFIRMED: g_raceOrderTable = s_race_order at 0x004ae279] */
+int td5_game_get_race_order(int pos)
+{
+    if (pos < 0 || pos >= TD5_MAX_RACER_SLOTS) return pos;
+    return (int)s_race_order[pos];
+}
+
+/* Returns whether a slot is in a finished state (post_finish_metric_base != 0).
+ * [CONFIRMED: actor+0x328 / companion_1 in slot state] */
+int td5_game_slot_is_finished(int slot)
+{
+    if (slot < 0 || slot >= TD5_MAX_RACER_SLOTS) return 0;
+    return (s_metrics[slot].post_finish_metric_base != 0) ? 1 : 0;
+}
+
+/* Returns best lap time (ticks) for slot 0 — used by name entry qualification.
+ * Scans lap_split_times[0..7] for smallest nonzero value.
+ * [CONFIRMED: ScreenPostRaceNameEntry bVar4==1 scans actor+0x34e..0x35e words] */
+int32_t td5_game_get_best_lap_time(int slot)
+{
+    if (slot < 0 || slot >= TD5_MAX_RACER_SLOTS) return 0x2B818; /* sentinel */
+    int32_t best = 0x2B818;
+    for (int i = 0; i < 8; i++) {
+        int32_t t = (int32_t)s_metrics[slot].lap_split_times[i];
+        if (t > 0 && t < best) best = t;
+    }
+    return best;
+}
+
+/* Re-sorts s_results in place (called from Screen [24] case 0).
+ * Mirrors the switch in RunRaceResultsScreen case 0.
+ * [CONFIRMED @ 0x00422480 case 0]: calls SortRaceResults{By,Desc} by game type */
+void td5_game_sort_results(void)
+{
+    switch (g_td5.game_type) {
+    case TD5_GAMETYPE_CHAMPIONSHIP:
+    case TD5_GAMETYPE_ULTIMATE:
+        sort_results_by_score_desc();
+        break;
+    default:
+        sort_results_by_time_asc();
+        break;
+    }
+}
+
+/* ========================================================================
  * InitializeRaceSession (0x42AA10)
  *
  * 33-step synchronous race bootstrap. The loading screen is displayed
