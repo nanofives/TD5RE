@@ -432,6 +432,7 @@ void td5_ai_correct_spawn_heading(int slot) {
     ACTOR_I32(actor, ACTOR_YAW_ACCUM) = route_heading << 8;
 }
 
+
 void td5_ai_refresh_route_state(void) {
     int slot_count = g_active_actor_count;
 
