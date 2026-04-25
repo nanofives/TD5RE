@@ -2158,9 +2158,11 @@ void td5_hud_render_overlays(float dt)
         td5_hud_render_minimap(actor_slot);
     }
 
-    /* Restore full-screen viewport */
+    /* Restore full-screen viewport and projection center.
+     * Passing half-dims restores the projection origin to screen center, matching
+     * RunRaceFrame's per-frame SetProjectionCenterOffset(gViewportCenterX, Y). */
     td5_render_set_clip_rect(0.0f, (float)g_render_width, 0.0f, (float)g_render_height);
-    td5_render_set_projection_center((float)g_render_width, (float)g_render_height);
+    td5_render_set_projection_center(g_render_width_f * 0.5f, g_render_height_f * 0.5f);
 
     /* Flush queued text glyphs */
     td5_hud_flush_text();
@@ -2312,8 +2314,7 @@ void td5_hud_render_minimap(int actor_slot)
         s_minimap_width * 0.5f + s_minimap_x,
         s_minimap_height * 0.5f + s_minimap_y);
 
-    /* Minimap screen center — used for all coord offsets below since
-     * td5_render_set_projection_center is a stub (no-op in source port). */
+    /* Minimap screen center — used directly for 2D coord offsets below. */
     float mm_cx = s_minimap_width * 0.5f + s_minimap_x;
     float mm_cy = s_minimap_height * 0.5f + s_minimap_y;
 

@@ -3909,14 +3909,6 @@ static void render_vehicle_wheel_billboards(TD5_Actor *actor, int slot)
     }
 }
 
-void td5_render_project_vehicle_shadow(float pos_x, float pos_y, float pos_z,
-                                        float half_w, float half_l, int tex_page)
-{
-    (void)pos_x; (void)pos_y; (void)pos_z;
-    (void)half_w; (void)half_l; (void)tex_page;
-    /* Legacy stub — shadow rendering now handled by render_vehicle_shadow_quad() */
-}
-
 /* --- Sky --- */
 
 #define SKY_TEXTURE_PAGE 1020
@@ -4423,8 +4415,14 @@ void td5_render_set_clip_rect(float left, float right, float top, float bottom) 
     td5_plat_render_set_clip_rect(ileft, itop, iright, ibottom);
 }
 
+/* SetProjectionCenterOffset @ 0x0043E8E0 — writes cx/cy to the globals that
+ * every projection formula reads (port: s_center_x / s_center_y).
+ * Called per-frame by RunRaceFrame for each viewport, and by the minimap path
+ * for the inset render. Restore to screen center after the minimap pass.
+ * [CONFIRMED @ 0x0043E8E0] */
 void td5_render_set_projection_center(float cx, float cy) {
-    (void)cx; (void)cy;
+    s_center_x = cx;
+    s_center_y = cy;
 }
 
 /* RecomputeTracksideProjectionScale @ 0x0043E900 -- update frustum plane normals
