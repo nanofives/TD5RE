@@ -2446,8 +2446,12 @@ static int frontend_validate_cup_checksum(void) {
     return td5_save_is_cup_valid(NULL);
 }
 
-/* Placeholder: delete cup data file */
+/* Delete cup data file.
+ * [CONFIRMED @ 0x423ACD]: original calls _unlink(CupData.td5) directly in
+ * ScreenCupWonDialog case 0. Port delegates to td5_plat_file_delete which
+ * wraps DeleteFileA — semantically identical. */
 static void frontend_delete_cup_data(void) {
+    TD5_LOG_I(LOG_TAG, "frontend_delete_cup_data: removing CupData.td5");
     td5_plat_file_delete("CupData.td5");
 }
 
@@ -8841,7 +8845,14 @@ static void Screen_PostRaceNameEntry(void) {
     case 12: /* Slide-out: 16 frames */
         s_anim_tick += 2;
         if (s_anim_tick >= 16) {
-            /* For cup types (1-7): reset re-race flag */
+            /* Persist high-score table to Config.td5.
+             * [CONFIRMED @ 0x413BC0 case 4]: original writes into g_npcRacerGroupTable
+             * (part of the Config block serialized by WritePackedConfigTd5 @ 0x40F8D0).
+             * Port's case 4 already updated the in-memory NpcGroup; we flush here so
+             * the entry survives across sessions. */
+            TD5_LOG_I(LOG_TAG, "PostRaceNameEntry: persisting high score to Config.td5");
+            td5_save_write_config(NULL);
+
             td5_frontend_set_screen(TD5_SCREEN_MAIN_MENU);
         }
         break;

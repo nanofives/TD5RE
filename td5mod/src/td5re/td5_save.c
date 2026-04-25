@@ -1489,6 +1489,29 @@ int td5_save_apply_cup_unlocks(int game_type)
 {
     int count = 0;
 
+    /* Placement validation gate.
+     * [CONFIRMED @ 0x421DA0 AwardCupCompletionUnlocks]:
+     *   Original checks gRaceSlotStateTable.slot[0].companion_state_2 == 1 (finished, placed)
+     *   AND g_actorRuntimeState.slot._899_1_ == 0 (not disqualified).
+     * Port equivalent: slot 0 must be finished and not in a DNQ state (state != 3).
+     * game_type must also be in cup range 1-6; types 7/8/9/0 use per-track unlock
+     * via AwardCupCompletionUnlocks which maps by schedule index, not game_type.
+     * For game_type == -1 (refresh-only), skip placement check and fall through. */
+    if (game_type != -1) {
+        if (game_type < 1 || game_type > 6) {
+            TD5_LOG_D(LOG_TAG, "apply_cup_unlocks: game_type=%d not in cup range, skip", game_type);
+            return 0;
+        }
+        if (!td5_game_slot_is_finished(0)) {
+            TD5_LOG_W(LOG_TAG, "apply_cup_unlocks: slot 0 not finished, skip unlocks");
+            return 0;
+        }
+        if (td5_game_get_slot_state(0) == 3) {
+            TD5_LOG_W(LOG_TAG, "apply_cup_unlocks: slot 0 disqualified (state=3), skip unlocks");
+            return 0;
+        }
+    }
+
     /* Apply unlocks based on the cup that was just won */
     switch (game_type) {
     case 1: /* Championship */
