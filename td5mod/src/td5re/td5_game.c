@@ -1901,27 +1901,25 @@ int td5_game_run_race_frame(void) {
                 int key_right = td5_plat_input_key_pressed(0xCD);
                 int key_enter = td5_plat_input_key_pressed(0x1C);
 
-                /* Navigation: 5 selectable items (View / Music / Sound / Continue / Exit) */
+                /* Navigation: 5 selectable items (CD Music / SFX / Audio3 / Continue / Exit).
+                 * [CONFIRMED @ 0x0043BF70] RunAudioOptionsOverlay: 5 rows total. */
                 if (key_down  && !s_prev_down)  s_pause_menu_cursor = (s_pause_menu_cursor + 1) % 5;
                 if (key_up    && !s_prev_up)    s_pause_menu_cursor = (s_pause_menu_cursor + 4) % 5;
 
-                /* Left/right adjusts sliders for rows 0-2 (View / Music / Sound).
-                 * CONTINUOUS while held (not edge-triggered) — matches original binary
-                 * RunAudioOptionsOverlay (0x43BF70): slider[cursor] += 0.02 per frame. */
+                /* Left/right adjusts sliders for rows 0-2 (CD Music / SFX / Audio3).
+                 * [CONFIRMED @ 0x0043BF70] CONTINUOUS while held — slider[cursor] += 0.02 per frame.
+                 * Row 0=CD music (DAT_004B135C), Row 1=SFX (DXSound::GetVolume),
+                 * Row 2=third audio (DAT_004B1364 — no port equivalent, no-op). */
                 if (s_pause_menu_cursor < 3) {
                     if (key_right) {
-                        if (s_pause_menu_cursor == 0) {
-                            td5_save_set_view_distance(td5_save_get_view_distance() + 0.02f);
-                            TD5_LOG_I(LOG_TAG, "view_dist: slider -> %.2f", td5_save_get_view_distance());
-                        } else if (s_pause_menu_cursor == 1) td5_save_set_music_volume(td5_save_get_music_volume() + 2);
-                        else                               td5_save_set_sfx_volume(td5_save_get_sfx_volume() + 2);
+                        if      (s_pause_menu_cursor == 0) td5_save_set_music_volume(td5_save_get_music_volume() + 2);
+                        else if (s_pause_menu_cursor == 1) td5_save_set_sfx_volume(td5_save_get_sfx_volume() + 2);
+                        /* cursor == 2: third audio — no port equivalent */
                     }
                     if (key_left) {
-                        if (s_pause_menu_cursor == 0) {
-                            td5_save_set_view_distance(td5_save_get_view_distance() - 0.02f);
-                            TD5_LOG_I(LOG_TAG, "view_dist: slider -> %.2f", td5_save_get_view_distance());
-                        } else if (s_pause_menu_cursor == 1) td5_save_set_music_volume(td5_save_get_music_volume() - 2);
-                        else                               td5_save_set_sfx_volume(td5_save_get_sfx_volume() - 2);
+                        if      (s_pause_menu_cursor == 0) td5_save_set_music_volume(td5_save_get_music_volume() - 2);
+                        else if (s_pause_menu_cursor == 1) td5_save_set_sfx_volume(td5_save_get_sfx_volume() - 2);
+                        /* cursor == 2: third audio — no port equivalent */
                     }
                 }
 
@@ -1950,11 +1948,10 @@ int td5_game_run_race_frame(void) {
             }
 
             /* Update graphical overlay (SELBOX + sliders).
-             * Row 0=View (stub: 0.5), Row 1=Music, Row 2=Sound */
-            float view_frac  = td5_save_get_view_distance();
-            float music_frac = (float)td5_save_get_music_volume()  / 100.0f;
+             * [CONFIRMED @ 0x0043BF70] Row 0=CD Music, Row 1=SFX, Row 2=Audio3 (0.5f placeholder). */
+            float music_frac = (float)td5_save_get_music_volume() / 100.0f;
             float sfx_frac   = (float)td5_save_get_sfx_volume()   / 100.0f;
-            td5_hud_update_pause_overlay(s_pause_menu_cursor, view_frac, music_frac, sfx_frac);
+            td5_hud_update_pause_overlay(s_pause_menu_cursor, music_frac, sfx_frac, 0.5f);
 
             g_td5.sim_time_accumulator -= TD5_TICK_ACCUMULATOR_ONE;
             ticks_this_frame++;

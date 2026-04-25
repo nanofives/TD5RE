@@ -1291,17 +1291,17 @@ static void frontend_cd_play(int track) {
 /*
  * frontend_draw_string / frontend_draw_small_string
  *
- * Original binary draws into an offscreen DirectDraw surface via
- * DrawFrontendLocalizedStringToSurface @ 0x00424560 (__cdecl, params:
- *   (byte *str, int x, int y, int *surface)).
- * The port has no offscreen surfaces for dialog boxes; dialog text is
- * rendered live in td5_frontend_render_ui_rects via dedicated overlay
- * functions (frontend_render_cup_failed_overlay etc.).
+ * [CONFIRMED @ 0x00424110] DrawFrontendFontStringPrimary: 12×12 glyph atlas,
+ * 21 columns. col = (c-0x20) % 21 * 12, row = (c-0x20) / 21 * 12. Advance
+ * from g_smallFontAdvance[c]. Renders to g_primaryWorkSurface via vtable +0x1C.
+ * [CONFIRMED @ 0x004241E0] Secondary variant: same atlas, renders to
+ * g_secondaryWorkSurface at y+8. Callers include ScreenGameOptions (0x41F990),
+ * ScreenDisplayOptions (0x420400), ScreenOptionsHub (0x41D890).
  *
- * These stubs exist for call-site compatibility only — they are intentionally
- * no-ops because all dialog text paths have been moved to the render overlay.
- * [CONFIRMED: call sites removed from screen state machines in favour of
- *  render-side overlays added 2026-04-25]
+ * Port verdict: ZERO call sites exist for these stubs. All screen state machines
+ * in the port use frontend_create_button() for option labels, which routes through
+ * the draw queue / td5_frontend_render_ui_rects. The original's offscreen-surface
+ * rendering path has been superseded. No-op stubs are CORRECT for the port.
  */
 static void frontend_draw_string(int surface, const char *str_id, int x, int y) {
     (void)surface; (void)str_id; (void)x; (void)y;
@@ -5132,8 +5132,15 @@ static void Screen_LocalizationInit(void) {
         frontend_init_return_screen(TD5_SCREEN_LOCALIZATION_INIT);
         TD5_LOG_I(LOG_TAG, "ScreenLocalizationInit: first entry, loading resources");
 
-        /* [INFERRED] Load LANGUAGE.DLL string table (M2DX — stub in port) */
-        /* [INFERRED] Load car ZIP path table from gCarZipPathTable (handled in td5_asset.c) */
+        /* [CONFIRMED @ 0x4269D0] LANGUAGE.DLL is a static PE import; SNK_LangDLL_exref[8]
+         * holds a language-selection byte (English=0). The original reads localized car
+         * spec strings (name, engine-type, top-speed, units) from each car ZIP archive
+         * using the language index to select an archive entry name, then sscanf's 12 tokens
+         * into DAT_0049b90c (stride 0x330, 17 rows). Archive entry names for language 0
+         * are UNCERTAIN (auStackY_2d8 stack array — content not in decompilation of 0x4269D0).
+         * Port substitution: frontend_get_car_display_name() reads config.nfo per car for
+         * names; engine/speed spec strings not loaded (archive entry name unknown). */
+        /* [CONFIRMED @ 0x4269D0] Car ZIP path table: handled in td5_asset.c */
         /* [CONFIRMED @ 0x426F80]: LoadPackedConfigTd5() reads config.td5 settings */
         /* [INFERRED] Enumerate display modes (handled in td5_render.c) */
         /* [CONFIRMED @ 0x427081]: Seed controller/input state from DXInput joystick exports
