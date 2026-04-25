@@ -3838,8 +3838,31 @@ void td5_physics_integrate_pose(TD5_Actor *actor)
      * 5. Rebuild rotation_matrix from the corrected display_angles so
      *    downstream ground-snap and next-tick refresh use the right matrix. */
     uint8_t t2_lock = actor->wheel_contact_bitmask;
-    int t2_skip = (t2_lock == 7 || t2_lock == 11 || t2_lock == 13 ||
-                   t2_lock == 14 || t2_lock == 15);
+
+    /* Per-axis solver dispatch — [CONFIRMED @ 0x00405E80 switch(damage_lockout)]:
+     *
+     *   cases 0,1,2,4,6,8,9  → TransformTrackVertexByMatrix  @ 0x00446030 (full)
+     *   cases 3, 12          → TransformTrackVertexByMatrixC @ 0x004461C0 (PITCH only)
+     *   cases 5, 10          → TransformTrackVertexByMatrixB @ 0x00446140 (ROLL only)
+     *   cases 7,11,13,14,15  → NOT IN SWITCH — T2 entirely skipped
+     *
+     * The B/C variants use IDENTICAL per-axis formulas to the full solver
+     * (verified 2026-04-24 Ghidra byte-diff at listed addresses); the ONLY
+     * difference is that they SKIP writing the inactive axis.
+     *
+     * Prior port ran the full solver on masks 3/5/10/12 and wrote BOTH
+     * axes unconditionally. On steep slopes where one axle lifts (mask=12
+     * rear-airborne or mask=5 diagonal), the port's unconditional roll/
+     * pitch overwrite introduced noise the original leaves untouched —
+     * matches the user's "sometimes rolls out of control on steep slopes"
+     * residual after the 2026-04-22 6-fix chain. */
+    int t2_full  = (t2_lock == 0 || t2_lock == 1 || t2_lock == 2 ||
+                    t2_lock == 4 || t2_lock == 6 || t2_lock == 8 ||
+                    t2_lock == 9);
+    int t2_pitch_only = (t2_lock == 3  || t2_lock == 12);  /* C variant */
+    int t2_roll_only  = (t2_lock == 5  || t2_lock == 10);  /* B variant */
+    int t2_skip  = !(t2_full || t2_pitch_only || t2_roll_only);
+
     if (actor->slot_index == 0 && t2_skip) {
         TD5_LOG_I(LOG_TAG, "T2 skip slot0: lock=0x%02x (3+ airborne)",
                   (int)t2_lock);
@@ -3850,46 +3873,40 @@ void td5_physics_integrate_pose(TD5_Actor *actor)
         int16_t new_pitch = 0;
         td5_physics_attitude_from_wheels(actor, &new_roll, &new_pitch);
 
-        int32_t d_roll  = td5_physics_wrap_angle_delta((int32_t)new_roll,
-                                                       (int32_t)t2_old_disp_roll) * 0x100;
-        int32_t d_pitch = td5_physics_wrap_angle_delta((int32_t)new_pitch,
-                                                       (int32_t)t2_old_disp_pitch) * 0x100;
-        if (d_roll  >  6000) d_roll  =  6000;
-        if (d_roll  < -6000) d_roll  = -6000;
-        if (d_pitch >  6000) d_pitch =  6000;
-        if (d_pitch < -6000) d_pitch = -6000;
-
-        /* GATE: only propagate the wheel-delta into angular_velocity when
-         * the wheel-contact state is STABLE this tick — i.e. the current
-         * airborne mask equals the previous-frame airborne mask. On slope
-         * transitions / bumps the mask oscillates and the wheel-derived
-         * angle jumps discontinuously; feeding that delta into av would
-         * amplify the next tick's integration (euler_accum += av) before
-         * T2 hard-overwrites euler_accum, producing the exaggerated slope
-         * response the user observed. display_angles and euler_accum
-         * writes remain UNCONDITIONAL (original does the same).
-         *
-         * [CONFIRMED @ 0x00405FF9 CMP [ESI+0x37C] == [ESI+0x37D]
-         *                0x0040600A JNZ skips ONLY the av writes.
-         *  +0x37C = damage_lockout = current-frame airborne mask
-         *  +0x37D = wheel_contact_bitmask (original) = previous-frame airborne
-         *          (snapshotted by refresh_wheel_contacts @ 0x004037D5).]
-         *
-         * Port polarity: actor->wheel_contact_bitmask = current airborne;
-         * s_prev_grounded_mask[slot] = previous GROUNDED (inverted), so
-         * invert back with ~...&0x0F to get previous airborne. */
         uint8_t prev_airborne = (~s_prev_grounded_mask[actor->slot_index & 0x0F]) & 0x0F;
-        if (actor->wheel_contact_bitmask == prev_airborne) {
-            actor->angular_velocity_roll  = d_roll;
-            actor->angular_velocity_pitch = d_pitch;
-        }
-        actor->display_angles.roll    = new_roll;
-        actor->display_angles.pitch   = new_pitch;
-        actor->euler_accum.roll       = (int32_t)new_roll  << 8;
-        actor->euler_accum.pitch      = (int32_t)new_pitch << 8;
+        int mask_stable = (actor->wheel_contact_bitmask == prev_airborne);
 
-        /* Rebuild rotation_matrix from corrected display_angles.
-         * Matches original 0x00405E80's second call to BuildRotationMatrixFromAngles. */
+        /* ROLL axis: written only for full solver OR roll-only (B variant). */
+        if (t2_full || t2_roll_only) {
+            int32_t d_roll = td5_physics_wrap_angle_delta((int32_t)new_roll,
+                                                          (int32_t)t2_old_disp_roll) * 0x100;
+            if (d_roll >  6000) d_roll =  6000;
+            if (d_roll < -6000) d_roll = -6000;
+            /* [CONFIRMED @ 0x00405FF9] gate angular_velocity on mask stability. */
+            if (mask_stable) {
+                actor->angular_velocity_roll = d_roll;
+            }
+            actor->display_angles.roll = new_roll;
+            actor->euler_accum.roll    = (int32_t)new_roll << 8;
+        }
+
+        /* PITCH axis: written only for full solver OR pitch-only (C variant). */
+        if (t2_full || t2_pitch_only) {
+            int32_t d_pitch = td5_physics_wrap_angle_delta((int32_t)new_pitch,
+                                                           (int32_t)t2_old_disp_pitch) * 0x100;
+            if (d_pitch >  6000) d_pitch =  6000;
+            if (d_pitch < -6000) d_pitch = -6000;
+            if (mask_stable) {
+                actor->angular_velocity_pitch = d_pitch;
+            }
+            actor->display_angles.pitch = new_pitch;
+            actor->euler_accum.pitch    = (int32_t)new_pitch << 8;
+        }
+
+        /* Rebuild rotation_matrix from the (possibly partially updated)
+         * display_angles. Matches original 0x00405E80's second call to
+         * BuildRotationMatrixFromAngles — runs unconditionally after the
+         * switch for all non-skipped cases. */
         int32_t roll_a  = actor->display_angles.roll  & 0xFFF;
         int32_t yaw_a   = actor->display_angles.yaw   & 0xFFF;
         int32_t pitch_a = actor->display_angles.pitch & 0xFFF;
@@ -3916,12 +3933,15 @@ void td5_physics_integrate_pose(TD5_Actor *actor)
         if (actor->slot_index == 0) {
             static int s_t2_log_frame = 0;
             if ((s_t2_log_frame++ % 120) == 0) {
+                const char *variant = t2_full ? "FULL" :
+                                      t2_pitch_only ? "C_pitch_only" :
+                                      t2_roll_only  ? "B_roll_only"  : "?";
                 TD5_LOG_I(LOG_TAG,
-                    "T2 attitude slot0: new_roll=%d new_pitch=%d "
-                    "old_roll=%d old_pitch=%d d_roll=%d d_pitch=%d",
+                    "T2 attitude slot0: lock=0x%02x variant=%s new_roll=%d new_pitch=%d "
+                    "old_roll=%d old_pitch=%d",
+                    (int)t2_lock, variant,
                     (int)new_roll, (int)new_pitch,
-                    (int)t2_old_disp_roll, (int)t2_old_disp_pitch,
-                    d_roll, d_pitch);
+                    (int)t2_old_disp_roll, (int)t2_old_disp_pitch);
             }
         }
     }
