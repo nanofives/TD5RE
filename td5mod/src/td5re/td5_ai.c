@@ -994,6 +994,16 @@ clamp_end:
  *          0 if coasting/accelerating (caller passes 0x20000).
  * ======================================================================== */
 
+/* Public accessor for per-slot route state block.
+ * Used by td5_physics.c traffic heading computation.
+ * Returns NULL if slot is out of range or state not initialised. */
+int32_t *td5_ai_get_route_state(int slot)
+{
+    if (!g_route_state_base) return NULL;
+    if (slot < 0 || slot >= TD5_MAX_TOTAL_ACTORS) return NULL;
+    return route_state(slot);
+}
+
 int td5_ai_update_route_threshold(int slot) {
     int32_t *rs = route_state(slot);
     char *actor  = actor_ptr(slot);

@@ -133,6 +133,7 @@ static uint8_t s_prev_grounded_mask[16];     /* per-slot previous-frame grounded
 static void integrate_traffic_pose(TD5_Actor *actor);  /* forward decl */
 static void process_traffic_segment_edge(TD5_Actor *actor, int slot);  /* forward decl */
 static void process_traffic_route_advance(TD5_Actor *actor, int slot);  /* forward decl */
+static void process_traffic_forward_checkpoint_pass(TD5_Actor *actor, int slot);  /* forward decl */
 
 /* Per-slot previous-frame wheel transform results (pre-snap) for gap_270 delta.
  * Using post-snap positions causes huge Y deltas because snap Y != transform Y. */
@@ -640,6 +641,7 @@ void td5_physics_update_vehicle_actor(TD5_Actor *actor)
          * routing — and drives straight through track walls. */
         int _ts = actor->slot_index;
         process_traffic_route_advance(actor, _ts);
+        process_traffic_forward_checkpoint_pass(actor, _ts);  /* [CONFIRMED @ 0x443ED0] */
         process_traffic_segment_edge(actor, _ts);
     } else {
         /* Racer path: full gravity + per-wheel ground snap.
@@ -3879,6 +3881,86 @@ static void process_traffic_route_advance(TD5_Actor *actor, int slot)
 
     if (pen < 0) {
         apply_simple_track_surface_force(actor, edge_angle, pen);
+    }
+}
+
+/* ProcessActorForwardCheckpointPass — port of 0x004076C0.
+ *
+ * Forward-sentinel counterpart of process_traffic_route_advance.
+ * Tests whether traffic has crossed the forward boundary span (near the
+ * START of the ring, not the end) and applies a push impulse back into
+ * the playable region.
+ *
+ * Key differences from ProcessActorRouteAdvance (0x407840):
+ *   - Trigger:  span == fwd_sentinel + 1  (vs rev_sentinel - 1)
+ *   - Strip:    strip[fwd_sentinel]        (vs strip[rev_sentinel])
+ *   - Vertices: psVar2=left_base, psVar3=left_base+lane_count (NOT reversed)
+ *
+ * [CONFIRMED @ 0x4076C0] if (*(short*)(actor+0x80) == DAT_00483954 + 1)
+ * [CONFIRMED @ 0x443ED0] called after ProcessActorRouteAdvance, before
+ *                         ProcessActorSegmentTransition.
+ */
+static void process_traffic_forward_checkpoint_pass(TD5_Actor *actor, int slot)
+{
+    int fwd_sentinel = td5_track_get_fwd_sentinel();
+    if (fwd_sentinel < 0) return;  /* {-1} placeholder disables handler */
+
+    /* Trigger: actor is one span PAST the forward sentinel */
+    int span_idx = (int)actor->track_span_raw;
+    if (span_idx != fwd_sentinel + 1) return;
+
+    /* Use the strip at fwd_sentinel for the boundary edge
+     * [CONFIRMED @ 0x4076E8: iVar1 = g_trackStripRecords + DAT_00483954 * 0x18] */
+    TD5_StripSpan *sp = td5_track_get_span(fwd_sentinel);
+    if (!sp) return;
+
+    int32_t *car_def = (int32_t *)actor->car_definition_ptr;
+    if (!car_def) return;
+
+    int16_t car_half_w = (int16_t)((*(uint32_t *)((uint8_t *)car_def + 0x0C)) & 0xFFFF);
+    int16_t car_half_l = (int16_t)((*(uint32_t *)((uint8_t *)car_def + 0x08)) & 0xFFFF);
+
+    uint32_t hd = traffic_route_heading_delta(slot);
+    hd &= 0x7FF;
+    if (hd > 0x3FF) hd = 0x7FF - hd;
+    int32_t cos_hd = cos_fixed12((int32_t)hd);
+    int32_t sin_hd = sin_fixed12((int32_t)hd);
+
+    /* Vertex ordering: NOT reversed (psVar2=left_base, psVar3=left_base+lane_count)
+     * [CONFIRMED @ 0x407708-0x40771C in 0x4076C0]:
+     *   uVar6 = left_vertex_index
+     *   psVar2 = vertex[uVar6]                 (left base)
+     *   psVar3 = vertex[uVar6 + lane_count]    (right end)
+     * Compare ProcessActorRouteAdvance which swaps: psVar2=right, psVar3=left. */
+    int sub = (int)(int8_t)actor->track_sub_lane_index;
+    if (sub < 0) sub = 0;
+    int lane_count = (int)(sp->surface_attribute & 0xF);
+    if (sub >= lane_count) sub = lane_count - 1;
+
+    int li_idx = (int)sp->left_vertex_index + sub;
+    int ri_idx = (int)sp->left_vertex_index + lane_count;  /* end vertex (NOT right_vertex_index) */
+
+    TD5_StripVertex *vl = td5_track_get_vertex(li_idx);
+    TD5_StripVertex *vr = td5_track_get_vertex(ri_idx);
+    if (!vl || !vr) return;
+
+    /* Actor position relative to sentinel span origin */
+    int32_t rel_x = (actor->world_pos.x >> 8) - sp->origin_x;
+    int32_t rel_z = (actor->world_pos.z >> 8) - sp->origin_z;
+
+    uint32_t edge_angle;
+    int32_t pen = traffic_edge_pen(
+        (int32_t)vl->x, (int32_t)vl->z,
+        (int32_t)vr->x, (int32_t)vr->z,
+        rel_x, rel_z,
+        (int32_t)car_half_w, (int32_t)car_half_l,
+        cos_hd, sin_hd,
+        &edge_angle);
+
+    if (pen < 0) {
+        apply_simple_track_surface_force(actor, edge_angle, pen);
+        /* Original calls UpdateTrafficVehiclePose again after push;
+         * port's integrate_traffic_pose runs at end of tick — skip redundant rebuild. */
     }
 }
 

@@ -2661,11 +2661,50 @@ static void advance_pending_finish_state(int slot, uint32_t sim_delta) {
                     int32_t denom = ls >> 8;
                     if (denom < 1) denom = 1;
 
+                    /* gActorTrackSubProgress @ 0x004afc3c: per-slot int32, stride 0x11C.
+                     * Sub-span fractional progress 0..255, used for sub-tick tie-breaking.
+                     * [CONFIRMED @ 0x00409F76] formula: actor+0x336 = (sub_prog * 0x5DC) / denom
+                     *
+                     * The port approximates this by projecting the actor's world XZ position
+                     * onto the current span's longitudinal axis (from the span's left vertex
+                     * to the left vertex of the next span, clamped to 0..255).
+                     * This faithfully captures the spatial meaning of sub-span progress
+                     * at finish-line crossing. [INFERRED from UpdateTrafficRoutePlan read:
+                     * span*0x100 + gActorTrackSubProgress = composite track progress.] */
+                    int32_t sub_prog = 0;
+                    {
+                        int span_i = (int)actor->track_span_raw;
+                        TD5_StripSpan *sp_cur  = td5_track_get_span(span_i);
+                        TD5_StripSpan *sp_next = td5_track_get_span(span_i + 1);
+                        if (sp_cur && sp_next) {
+                            TD5_StripVertex *vl0 = td5_track_get_vertex((int)sp_cur->left_vertex_index);
+                            TD5_StripVertex *vl1 = td5_track_get_vertex((int)sp_next->left_vertex_index);
+                            if (vl0 && vl1) {
+                                /* Span longitudinal axis vector (in strip-local 16-bit units) */
+                                int32_t ax = (int32_t)vl1->x - (int32_t)vl0->x;
+                                int32_t az = (int32_t)vl1->z - (int32_t)vl0->z;
+                                int64_t len2 = (int64_t)ax * ax + (int64_t)az * az;
+                                if (len2 > 0) {
+                                    /* Actor position relative to span origin (strip-local units) */
+                                    int32_t rx = (actor->world_pos.x >> 8) - (int32_t)sp_cur->origin_x - (int32_t)vl0->x;
+                                    int32_t rz = (actor->world_pos.z >> 8) - (int32_t)sp_cur->origin_z - (int32_t)vl0->z;
+                                    /* Dot product / length² gives fractional progress 0..1,
+                                     * scaled to 0..255 to match gActorTrackSubProgress range. */
+                                    int64_t dot = (int64_t)rx * ax + (int64_t)rz * az;
+                                    int32_t prog256 = (int32_t)((dot * 256) / len2);
+                                    if (prog256 < 0)   prog256 = 0;
+                                    if (prog256 > 255) prog256 = 255;
+                                    sub_prog = prog256;
+                                }
+                            }
+                        }
+                    }
+
                     /* Mirror into actor so UpdateRaceOrder / results-screen
                      * consumers see the same values the original wrote. */
                     actor->finish_time         = m->cumulative_timer;
                     actor->finish_time_aux     = (int16_t)denom;
-                    actor->finish_time_subtick = 0;   /* track_sub_progress not mirrored */
+                    actor->finish_time_subtick = (int16_t)((sub_prog * 0x5DC) / denom);
                 }
                 s_slot_state[slot].companion_1 = 1;
                 /* [CONFIRMED @ 0x00409FCC] Original: param_1[1]='\x01' (companion_2=1),
