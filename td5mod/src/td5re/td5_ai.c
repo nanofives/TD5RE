@@ -2056,19 +2056,37 @@ void td5_ai_update_traffic_route_plan(int slot) {
     ACTOR_U8(actor, ACTOR_BRAKE_FLAG) = 0;
 
     /* --- Stage 5: Compute target span and deviation
-     * [CONFIRMED @ 0x00436147-0x00436432]
+     * [CONFIRMED @ 0x00435F0A-0x004364CA]
      *
      * Original UpdateTrafficRoutePlan computes LEFT/RIGHT deviation to the
      * next-span waypoint and writes them to route_state +0x58/+0x5c (=
      * RS_LEFT_DEVIATION/RS_RIGHT_DEVIATION). UpdateActorSteeringBias @
      * 0x004340C0 then reads these and writes steering_command (+0x30C).
      *
-     * Without this block the steering_bias call in Stage 6 reads zero
-     * deviations and applies no correction — traffic drives in a straight
-     * line and clips walls on curves.
+     * CRITICAL: the original calls InitActorTrackSegmentPlacement @ 0x00445F10
+     * for the target point, NOT SampleTrackTargetPoint @ 0x00434800. These are
+     * two DIFFERENT geometries:
+     *   - InitActorTrackSegmentPlacement: 4-vertex barycenter of the sub_lane
+     *     cell at (target_span, sub_lane_index). Uses DAT_00474E40 (spawn
+     *     table). Traffic uses this. Port equivalent: td5_track_get_span_lane_world.
+     *   - SampleTrackTargetPoint: route_byte interpolation between left rail
+     *     and left+lane_count vertex of the whole span. Uses DAT_00473C68 (AI
+     *     target table). AI racers use this. Port equivalent: td5_track_sample_target_point.
      *
-     * Traffic peek-ahead is span+1 forward / span-1 reverse (racer uses
-     * span+4). Same alt-route remap + same decomposition as racer AI. */
+     * The prior port routed traffic through sample_target_point, so traffic
+     * aimed at the road center instead of its assigned sub-lane. On multi-lane
+     * Moscow segments this pulled the chasing target into the opposite lane,
+     * which drives the bicycle-model steering_command toward the neighbouring
+     * rail and clips walls. The original also does NOT apply RS_TRACK_OFFSET_BIAS
+     * (peer-avoidance perpendicular offset) to the traffic target — that is a
+     * racer-only behaviour inside 0x00434800.
+     *
+     * Traffic peek-ahead is span+1 forward / span-1 reverse (racer uses span+4).
+     * Same alt-route remap + same decomposition as racer AI. Target sub_lane
+     * is the current actor sub_lane (+0x8C) — the strip-type-dependent ±1
+     * adjustments at 0x004361B8-0x0043621B/0x0043627C-0x004362FB only fire on
+     * lane-count mismatches between adjacent strips, which are rare and
+     * covered by the common-path default. */
     {
         int16_t span_cur = ACTOR_I16(actor, ACTOR_SPAN_RAW);
         int span_count = td5_track_get_span_count();
@@ -2085,19 +2103,14 @@ void td5_ai_update_traffic_route_plan(int slot) {
             int target_span = td5_track_apply_target_span_remap(lin_span,
                                                                  is_canonical);
 
-            int target_x = 0, target_z = 0;
-            int route_byte = 128;
-            int lateral_bias = rs[RS_TRACK_OFFSET_BIAS];
+            /* Target sub_lane: matches the original's default (common) branch
+             * at LAB_0043614c where `local_4 = current_sub_lane`. */
+            int target_sub_lane = (int)ACTOR_U8(actor, ACTOR_SUB_LANE_INDEX);
 
-            const uint8_t *route_bytes =
-                (const uint8_t *)(intptr_t)rs[RS_ROUTE_TABLE_PTR];
-            if (route_bytes) {
-                route_byte = (int)route_bytes[(size_t)(unsigned)target_span * 3u];
-            }
+            int target_x = 0, target_y = 0, target_z = 0;
 
-            if (td5_track_sample_target_point(target_span, route_byte,
-                                              &target_x, &target_z,
-                                              lateral_bias)) {
+            if (td5_track_get_span_lane_world(target_span, target_sub_lane,
+                                              &target_x, &target_y, &target_z)) {
                 int32_t actor_x = ACTOR_I32(actor, ACTOR_WORLD_POS_X);
                 int32_t actor_z = ACTOR_I32(actor, ACTOR_WORLD_POS_Z);
                 int32_t dx = (target_x - actor_x) >> 8;
@@ -2121,9 +2134,9 @@ void td5_ai_update_traffic_route_plan(int slot) {
 
                 if ((g_ai_frame_counter % 60u) == 0u) {
                     TD5_LOG_I(LOG_TAG,
-                              "traffic_dev: slot=%d span=%d tspan=%d rb=%d "
+                              "traffic_dev: slot=%d span=%d tspan=%d sublane=%d "
                               "ta=0x%X hd=0x%X delta=%d L=%d R=%d",
-                              slot, (int)span_cur, target_span, route_byte,
+                              slot, (int)span_cur, target_span, target_sub_lane,
                               target_angle, actor_heading, delta,
                               rs[RS_LEFT_DEVIATION], rs[RS_RIGHT_DEVIATION]);
                 }
