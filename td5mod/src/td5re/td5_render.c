@@ -1918,40 +1918,6 @@ void td5_render_configure_projection(int width, int height)
     }
 }
 
-/* ========================================================================
- * 0x43E900 -- RecomputeTracksideProjectionScale (partial port equivalent)
- *
- * In the original: resets projection center offsets to 0, then recomputes
- * frustum plane normals using the *current* g_projectionDepth and cached
- * viewport dimensions. Called from UpdateTracksideCamera / UpdateSplineTracksideCamera
- * after g_depthFovFactor changes.
- *
- * In the original g_projectionDepth = viewport_width * 0.5625 (set in
- * ConfigureProjectionForViewport and never changed by the trackside path).
- * So the frustum normals are identical to what ConfigureProjectionForViewport
- * already computed. This function is therefore idempotent in practice.
- *
- * Port mapping: the frustum normals (s_frustum_h_cos/sin, s_frustum_v_cos/sin)
- * are identical before and after this call because s_focal_length does not
- * change. We recompute them from existing state to match the original's intent.
- * [CONFIRMED @ 0x0043E900]
- * ======================================================================== */
-void td5_render_recompute_frustum_normals(void)
-{
-    float half_w = (float)s_viewport_width  * 0.5f;
-    float half_h = (float)s_viewport_height * 0.5f;
-
-    /* Horizontal frustum half-plane normals (matches ConfigureProjectionForViewport) */
-    float h_len = sqrtf(half_w * half_w + s_focal_length * s_focal_length);
-    s_frustum_h_cos =  s_focal_length / h_len;
-    s_frustum_h_sin = -half_w / h_len;
-
-    /* Vertical frustum half-plane normals */
-    float v_len = sqrtf(half_h * half_h + s_focal_length * s_focal_length);
-    s_frustum_v_cos =  s_focal_length / v_len;
-    s_frustum_v_sin = -half_h / v_len;
-}
-
 /* --- Translucent Primitive Pipeline --- */
 
 void td5_render_init_translucent_pipeline(void)
@@ -4459,6 +4425,24 @@ void td5_render_set_clip_rect(float left, float right, float top, float bottom) 
 
 void td5_render_set_projection_center(float cx, float cy) {
     (void)cx; (void)cy;
+}
+
+/* RecomputeTracksideProjectionScale @ 0x0043E900 -- update frustum plane normals
+ * when the trackside camera changes g_depthFovFactor (projection depth).
+ * Formula mirrors original: h_len = sqrt(W^2*0.25 + depth^2), etc.
+ * [CONFIRMED @ 0x0043E900] */
+void td5_render_recompute_frustum_for_trackside(void) {
+    extern int   g_depthFovFactor; /* camera.c: projection scale, 0x1000=identity */
+    extern float g_projFovScale;   /* camera.c: 1/4096 */
+    float depth = s_focal_length * (float)g_depthFovFactor * g_projFovScale;
+    float w = (float)s_viewport_width;
+    float h = (float)s_viewport_height;
+    float h_len = sqrtf(w * w * 0.25f + depth * depth);
+    float v_len = sqrtf(h * h * 0.25f + depth * depth);
+    s_frustum_h_cos =  depth / h_len;
+    s_frustum_h_sin = -(w / (h_len + h_len));
+    s_frustum_v_cos =  depth / v_len;
+    s_frustum_v_sin = -(h / (v_len + v_len));
 }
 
 void td5_render_radial_pulse(float dt) { (void)dt; }
