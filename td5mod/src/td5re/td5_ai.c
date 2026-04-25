@@ -161,7 +161,8 @@ static int32_t g_active_actor_count;
 /* Traffic recovery stage per slot (0=normal, 1-7=recovering) */
 static int32_t g_traffic_recovery_stage[TD5_MAX_TOTAL_ACTORS];
 
-/* Lateral avoidance direction state (0x4B08B0) */
+/* Lateral avoidance direction toggle (0x4B08B0): 0=push negative, 1=push positive.
+ * Persistent; flips only when peer reaches a lane boundary (sub_lane==0 or ==lane_count). */
 static int32_t g_lateral_avoidance_direction;
 
 /* Track script program banks (hardcoded .rdata at 0x473CD4-0x473D18) */
@@ -1203,11 +1204,6 @@ int td5_ai_find_offset_peer(int *route_state_ptr) {
         if (dist < best_dist) {
             best_dist = dist;
             best_slot = i;
-            /* Record whether the peer is on the outer or inner lane */
-            if (ACTOR_U8(actor_ptr(i), ACTOR_SUB_LANE_INDEX) > self_lane)
-                g_lateral_avoidance_direction = 1;  /* peer outer */
-            else
-                g_lateral_avoidance_direction = -1; /* peer inner */
         }
     }
 
@@ -1229,17 +1225,32 @@ void td5_ai_update_track_offset_bias(int slot) {
         int16_t peer_span = ACTOR_I16(actor_ptr(peer), ACTOR_SPAN_RAW);
         int32_t dist = peer_span - self_span;
         int32_t push;
+        uint8_t peer_lane;
+        int lane_count;
 
         if (dist < 1) dist = 1;
         if (dist > 0x28) dist = 0x28;
         push = 0x29 - dist;
 
-        if (g_lateral_avoidance_direction > 0) {
-            /* Peer is outer -> push inward (negative offset) */
-            rs[RS_TRACK_OFFSET_BIAS] -= push;
-        } else {
-            /* Peer is inner -> push outward (positive offset) */
+        /* Update direction toggle [CONFIRMED @ 0x4349A4, 0x4349C5]:
+         * toggle=1 → positive push; flips to 0 when peer reaches inner boundary (sub_lane==0).
+         * toggle=0 → negative push; flips to 1 when peer reaches outer boundary (sub_lane==lane_count). */
+        peer_lane  = ACTOR_U8(actor_ptr(peer), ACTOR_SUB_LANE_INDEX);
+        lane_count = td5_track_get_span_lane_count((int)self_span);
+
+        if (g_lateral_avoidance_direction == 1) {
+            if (peer_lane == 0) {
+                g_lateral_avoidance_direction = 0;
+                TD5_LOG_I(LOG_TAG, "offset_bias: slot=%d toggle→0 peer_lane=0", slot);
+            }
             rs[RS_TRACK_OFFSET_BIAS] += push;
+        } else {
+            if (lane_count > 0 && (int)peer_lane >= lane_count) {
+                g_lateral_avoidance_direction = 1;
+                TD5_LOG_I(LOG_TAG, "offset_bias: slot=%d toggle→1 peer_lane=%d lane_count=%d",
+                          slot, (int)peer_lane, lane_count);
+            }
+            rs[RS_TRACK_OFFSET_BIAS] -= push;
         }
     } else {
         /* No peer: decay toward zero at 8 units/tick */
@@ -1253,17 +1264,6 @@ void td5_ai_update_track_offset_bias(int slot) {
         }
         rs[RS_TRACK_OFFSET_BIAS] = bias;
     }
-
-    /* Port-only safeguard: clamp to ±0x200 to prevent runaway accumulation.
-     * The original @ 0x434900 has no explicit clamp but its peer-search
-     * (0x4337E0) + direction-toggle on DAT_004b08b0 keeps bias oscillating
-     * around zero. The port's simplified find_offset_peer always returns
-     * a peer and never toggles direction, so without this clamp bias grows
-     * unboundedly (observed ~7000 after 15s), which pulls the sampled
-     * target point far perpendicular to the track and saturates AI steer.
-     * TODO: port the original's toggle logic for bit-accurate behavior. */
-    if (rs[RS_TRACK_OFFSET_BIAS] >  0x200) rs[RS_TRACK_OFFSET_BIAS] =  0x200;
-    if (rs[RS_TRACK_OFFSET_BIAS] < -0x200) rs[RS_TRACK_OFFSET_BIAS] = -0x200;
 }
 
 /* ========================================================================
@@ -1919,9 +1919,9 @@ void td5_ai_recycle_traffic_actor(void) {
             /* Set direction polarity from flags bit 0 */
             rs[RS_DIRECTION_POLARITY] = q_flags & 1;
 
-            /* Route table selection: lane < span's lane count -> LEFT, else RIGHT */
-            /* Simplified: use lane index directly */
-            rs[RS_ROUTE_TABLE_SELECTOR] = (q_lane >= 2) ? 1 : 0;
+            /* Route table selection [CONFIRMED @ 0x43551A]:
+             * q_lane < span_lane_count → LEFT route (selector=0), else RIGHT (selector=1) */
+            rs[RS_ROUTE_TABLE_SELECTOR] = ((int)q_lane >= td5_track_get_span_lane_count((int)q_span)) ? 1 : 0;
 
             /* Place the actor at the queue span — full world placement */
             ACTOR_I16(a, ACTOR_SPAN_RAW) = q_span;
@@ -2032,8 +2032,9 @@ void td5_ai_init_traffic_actors(void) {
         /* Direction polarity from flags bit 0 */
         rs[RS_DIRECTION_POLARITY] = q_flags & 1;
 
-        /* Route table selection */
-        rs[RS_ROUTE_TABLE_SELECTOR] = (q_lane >= 2) ? 1 : 0;
+        /* Route table selection [CONFIRMED @ 0x43551A]:
+         * q_lane < span_lane_count → LEFT route (selector=0), else RIGHT (selector=1) */
+        rs[RS_ROUTE_TABLE_SELECTOR] = ((int)q_lane >= td5_track_get_span_lane_count((int)q_span)) ? 1 : 0;
 
         /* Place on track — set all 4 span tracking fields like racer spawn */
         ACTOR_I16(a, ACTOR_SPAN_RAW) = q_span;
@@ -2322,54 +2323,62 @@ void td5_ai_update_traffic_route_plan(int slot) {
     peer = td5_ai_find_nearest_route_peer(rs);
 
     if (peer != slot) {
-        /* Peer found: compute closing rate and brake if needed */
+        /* Peer found — faithful TTC formula [CONFIRMED @ 0x4364E0–0x43656E] */
         char *peer_actor = actor_ptr(peer);
         int16_t self_span = ACTOR_I16(actor, ACTOR_SPAN_RAW);
         int16_t peer_span = ACTOR_I16(peer_actor, ACTOR_SPAN_RAW);
-        int32_t span_delta, self_speed, peer_speed, speed_delta;
-        int32_t ttc;
+        int32_t self_speed, peer_speed, speed_delta;
+        int32_t span_diff_dir; /* direction-adjusted span difference (raw spans) */
+        int32_t iVar14;        /* combined progress delta: (spans * 0x100) */
+        int32_t iVar7, iVar13; /* intermediate TTC and final TTC */
+        int32_t speed_shifted; /* self_speed >> 10 with arithmetic rounding */
 
+        self_speed  = g_actor_forward_track_component[slot];
+        peer_speed  = g_actor_forward_track_component[peer];
+        speed_delta = self_speed - peer_speed; /* iVar8 in original */
+
+        /* Direction-adjusted span difference */
         if (polarity == 0) {
-            span_delta = peer_span - self_span;
+            span_diff_dir = (int32_t)peer_span - (int32_t)self_span;
         } else {
-            span_delta = self_span - peer_span;
+            span_diff_dir = (int32_t)self_span - (int32_t)peer_span;
         }
 
-        if (span_delta < 1) span_delta = 1;
-
-        self_speed = g_actor_forward_track_component[slot];
-        peer_speed = g_actor_forward_track_component[peer];
-        speed_delta = self_speed - peer_speed;
-
-        /* Time-to-collision estimate:
-         * ttc = (span_delta * peer_speed * 0x5DC) /
-         *       (speed_delta + span_delta * 0x5DC) / self_speed
-         * Simplified: check if closing and close enough to brake */
-        if (speed_delta > 0 && self_speed > 0) {
-            ttc = (span_delta * 0x5DC) / (speed_delta > 0 ? speed_delta : 1);
-            ttc = (ttc * peer_speed) / (self_speed > 0 ? self_speed : 1);
-        } else {
-            ttc = 0x2EE00; /* default: far away, no braking needed */
+        /* Proximity gate [CONFIRMED @ 0x43646A]: if peer within 4 spans and moving, brake now */
+        if (span_diff_dir > -4 && self_speed > 0) {
+            ACTOR_U8(actor, ACTOR_BRAKE_FLAG) = 1;
+            ACTOR_I16(actor, ACTOR_ENCOUNTER_STEER) = (int16_t)0xFF00; /* -256 */
+            TD5_LOG_I(LOG_TAG, "ttc_brake: slot=%d proximity gate span_diff=%d", slot, span_diff_dir);
+            goto ttc_done;
         }
 
-        /* Brake if within closing distance */
-        {
-            int32_t cur_speed_thresh = self_speed >> 10;
-            int32_t ttc_thresh = ttc;
+        /* Combined progress delta (sub_progress approximated as 0) */
+        iVar14 = span_diff_dir * 0x100;
 
-            if (cur_speed_thresh > 0 && ttc_thresh > 0) {
-                int32_t diff = cur_speed_thresh - ttc_thresh;
-                if (diff < 0) diff = -diff;
+        /* TTC formula [CONFIRMED @ 0x4364EE]:
+         * iVar7 = ((iVar14 * peer_speed * 0x5DC) / speed_delta + iVar14 * 0x5DC) / self_speed
+         * Right-shift by 8 with arithmetic rounding → iVar13 */
+        if (speed_delta != 0 && self_speed != 0) {
+            int64_t tmp = ((int64_t)iVar14 * peer_speed * 0x5DC) / speed_delta
+                        + (int64_t)iVar14 * 0x5DC;
+            iVar7  = (int32_t)(tmp / self_speed);
+            iVar13 = (iVar7 + ((int32_t)iVar7 >> 31 & 0xFF)) >> 8;
+        } else {
+            iVar13 = 0x2EE00; /* no closing rate — far away */
+        }
 
-                if (diff < 8 && speed_delta > 0) {
-                    /* Brake! */
-                    ACTOR_U8(actor, ACTOR_BRAKE_FLAG) = 1;
-                    ACTOR_I16(actor, ACTOR_ENCOUNTER_STEER) = (int16_t)(-0x100);
-                }
-            }
+        /* self_speed arithmetic right-shift by 10 [CONFIRMED @ 0x436561] */
+        speed_shifted = (self_speed + (self_speed >> 31 & 0x3FF)) >> 10;
+
+        /* Brake condition [CONFIRMED @ 0x436561–0x43656E]:
+         * ttc - 8 <= speed_shifted  &&  ttc >= 0  &&  self_speed > 0 */
+        if (iVar13 - 8 <= speed_shifted && iVar13 > -1 && self_speed > 0) {
+            ACTOR_U8(actor, ACTOR_BRAKE_FLAG) = 1;
+            ACTOR_I16(actor, ACTOR_ENCOUNTER_STEER) = (int16_t)0xFF00; /* -256 */
+            TD5_LOG_I(LOG_TAG, "ttc_brake: slot=%d ttc=%d spd_shifted=%d", slot, iVar13, speed_shifted);
         }
     }
-    /* If no peer found (peer == slot), ttc defaults to 0x2EE00 -> no brake */
+ttc_done:;
 }
 
 /* ========================================================================
