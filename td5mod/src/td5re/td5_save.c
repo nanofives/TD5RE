@@ -1349,6 +1349,14 @@ const TD5_NpcGroup *td5_save_get_npc_group(int group_index)
     return (const TD5_NpcGroup *)(s_npc_group_table + group_index * TD5_CONFIG_NPC_GROUP_SIZE);
 }
 
+/* Returns a mutable pointer to the specified NPC group for name-entry insert.
+ * [CONFIRMED @ 0x00413BC0 case 4] original writes directly to g_npcRacerGroupTable. */
+TD5_NpcGroup *td5_save_get_npc_group_mutable(int group_index)
+{
+    if (group_index < 0 || group_index >= TD5_CONFIG_NPC_GROUPS) return NULL;
+    return (TD5_NpcGroup *)(s_npc_group_table + group_index * TD5_CONFIG_NPC_GROUP_SIZE);
+}
+
 int td5_save_get_speed_units(void)
 {
     return (int)s_speed_units;

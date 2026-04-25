@@ -77,6 +77,22 @@ int32_t td5_game_get_race_timer(int slot, int lap_index);
 int td5_game_get_player_slot(int viewport);
 int td5_game_is_split_screen(void);
 
+/* --- Post-race results accessors (for Screen [24]/[25]) ---
+ * [CONFIRMED @ 0x0040AAD0/0x0040AB80] sort populates s_results
+ * [CONFIRMED @ 0x00413BC0] ScreenPostRaceNameEntry reads these fields */
+int32_t td5_game_get_result_primary(int slot);   /* finish time ticks */
+int32_t td5_game_get_result_secondary(int slot); /* accumulated points */
+int32_t td5_game_get_result_top_speed(int slot); /* top speed raw units */
+int32_t td5_game_get_result_avg_speed(int slot); /* average speed raw units */
+int     td5_game_get_race_order(int pos);         /* slot index at finish position pos */
+int     td5_game_slot_is_finished(int slot);      /* 1 if post_finish_metric_base != 0 */
+int32_t td5_game_get_best_lap_time(int slot);     /* best lap ticks, lap-type tracks */
+
+/* Re-sort s_results in place using the current game_type's metric.
+ * Called from Screen [24] case 0 to mirror RunRaceResultsScreen behaviour.
+ * [CONFIRMED @ 0x00422480 case 0] */
+void td5_game_sort_results(void);
+
 /* --- Split-Screen Steering Balance (0x4036B0) --- */
 void td5_game_update_split_screen_balance(void);
 
