@@ -64,6 +64,9 @@ void td5_ai_set_route_tables(const uint8_t *left_route, size_t left_size,
 void td5_ai_refresh_route_state(void);
 void td5_ai_init_race_actor_runtime(void);
 
+/* --- Route state accessor (for cross-module use by td5_physics traffic heading) --- */
+int32_t *td5_ai_get_route_state(int slot);
+
 /* --- Traffic --- */
 void td5_ai_recycle_traffic_actor(void);
 void td5_ai_init_traffic_actors(void);
