@@ -64,6 +64,10 @@ void td5_ai_set_route_tables(const uint8_t *left_route, size_t left_size,
 void     td5_ai_refresh_route_state(void);
 void     td5_ai_init_race_actor_runtime(void);
 int32_t *td5_ai_get_route_state(int slot);
+/* Correct an AI actor's spawn heading to match the LEFT.TRK route byte.
+ * Called from td5_game.c after td5_track_compute_heading() for AI slots.
+ * Prevents the recovery-script loop that keeps throttle=0 forever. */
+void td5_ai_correct_spawn_heading(int slot);
 
 /* --- Traffic --- */
 void td5_ai_recycle_traffic_actor(void);

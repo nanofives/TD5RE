@@ -843,6 +843,30 @@ int td5_game_init_race_session(void) {
                   "Drag race: slots %d..5 set to state=3 (decoration) split=%d",
                   decoration_start, g_td5.split_screen_mode);
     }
+    /* Cop Chase (game_type 8): original sets g_racerCount=2 for all non-zero
+     * game types [CONFIRMED @ InitializeRaceActorRuntime 0x00432E60:
+     *   if (g_selectedGameType != 0) g_racerCount = 2].
+     * Slots 2..5 are disabled [CONFIRMED @ InitializeRaceSession 0x0042AB91:
+     *   if (TVar16 != 0) slots 2..5 set to state=3].
+     * Only slot 0 (player) and slot 1 (cop AI) are active.
+     * Slot 1 uses standard UpdateActorTrackBehavior (route following) to
+     * pursue the player along the track — the "cop pursuit" is implicit in
+     * the rubber-band / route system keeping slot 1 behind slot 0.
+     *
+     * The wanted-mode AI gate in UpdateRaceActors reads gWantedDamageStateTable
+     * per slot [CONFIRMED @ 0x00436E1D]: blocks track-behavior only when
+     * mode=ON AND damage_table[slot]==0. Original initialises the table to
+     * 0x1000 per slot in InitializeWantedHudOverlays [CONFIRMED @ 0x0043D2FC:
+     *   _gWantedDamageStateTable = 0x10001000].
+     * Port uses ACTOR_ENCOUNTER_STATE (offset 0x384) in place of the separate
+     * damage table — initialize it to 0x1000 so cops run from tick 1. */
+    if (g_td5.wanted_mode_enabled) {
+        for (int i = 2; i < TD5_MAX_RACER_SLOTS; i++) {
+            s_slot_state[i].state = 3;  /* disabled — matches original */
+        }
+        TD5_LOG_I(LOG_TAG,
+                  "Cop Chase: slots 2..5 disabled (original racerCount=2 for game_type!=0)");
+    }
     /* Player-as-AI autopilot: mirrors original attract-mode at
      * InitializeRaceSession 0x0042ACCF, which writes
      *   slot[0].state = 1 - (g_attractModeDemoActive | g_benchmarkModeActive)
@@ -865,9 +889,19 @@ int td5_game_init_race_session(void) {
     g_game_type = g_td5.game_type;
     g_split_screen_mode = g_td5.split_screen_mode;
     g_replay_mode = s_replay_mode;
-    g_racer_count = g_td5.time_trial_enabled
-                    ? (g_td5.split_screen_mode > 0 ? 2 : 1)
-                    : TD5_MAX_RACER_SLOTS;
+    /* Racer count:
+     *   Time trial: 1 (or 2 in split-screen)
+     *   Cop Chase (wanted) / any non-zero game_type: 2
+     *     [CONFIRMED @ InitializeRaceActorRuntime 0x00432E60:
+     *      if (g_selectedGameType != 0) g_racerCount = 2]
+     *   Normal race: 6 */
+    if (g_td5.time_trial_enabled) {
+        g_racer_count = (g_td5.split_screen_mode > 0) ? 2 : 1;
+    } else if (g_td5.wanted_mode_enabled) {
+        g_racer_count = 2;  /* slot 0 = player, slot 1 = cop AI */
+    } else {
+        g_racer_count = TD5_MAX_RACER_SLOTS;
+    }
 
     /* ---- Step 4: Load track runtime data ---- */
     /* NOTE: td5_asset_load_level sets g_td5.track_type from LEVELINF.DAT,
@@ -1293,6 +1327,18 @@ int td5_game_init_race_session(void) {
              * at the start of each physics tick. Starting at 0 is correct.
              * [CONFIRMED @ 0x405D70 / 0x434350 decompilation] */
             td5_track_compute_heading((TD5_Actor *)actor);
+
+            /* For AI slots, correct the geometry-derived heading to match the
+             * LEFT.TRK route byte.  The geometry heading at Moscow spawn spans
+             * is ~1050 angle units off from the route heading, which immediately
+             * fires the recovery-script loop in td5_ai_update_track_behavior
+             * and keeps throttle=0 forever.
+             * Player slots (state==1) do not run through the route-heading
+             * check, so no correction is needed for them. */
+            if (s_slot_state[slot].state == 0) {
+                td5_ai_correct_spawn_heading(slot);
+            }
+
             td5_physics_reset_actor_state((TD5_Actor *)actor);
 
             /* Restore span_raw to the spawn span after reset.

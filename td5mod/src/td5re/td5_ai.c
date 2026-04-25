@@ -371,6 +371,75 @@ void td5_ai_set_route_tables(const uint8_t *left_route, size_t left_size,
     td5_ai_refresh_route_state();
 }
 
+/** Public accessor — route state pointer for a given slot.
+ *  Called by td5_physics.c traffic_route_heading_delta. */
+int32_t *td5_ai_get_route_state(int slot) {
+    if (slot < 0 || slot >= TD5_MAX_TOTAL_ACTORS || !g_route_state_base)
+        return NULL;
+    return route_state(slot);
+}
+
+/**
+ * Correct an AI actor's spawn heading to match the LEFT.TRK route byte.
+ *
+ * Problem: td5_track_compute_heading writes a geometry-derived heading that
+ * is ~1050 angle units off from what the LEFT.TRK route byte expects.  This
+ * causes td5_ai_update_track_behavior to enter the recovery-script loop on
+ * every tick from the very first frame because hdelta > 0x320 (800 decimal)
+ * is immediately true.  With v=0 the bicycle model cannot generate yaw
+ * torque, so the script never successfully turns the car, and the recovery
+ * fires forever → throttle stays 0 → cop never moves.
+ *
+ * Fix: after compute_heading seeds the yaw accumulator from geometry, re-seed
+ * it from the route-byte heading instead.  route_bytes[span*3+1] encodes the
+ * expected 12-bit heading as route_heading = (rb * 0x102C) >> 8.  Writing
+ * that value to ACTOR_YAW_ACCUM (shift left 8 to match the 20-bit accum
+ * convention) places the car at exactly the heading the route cascade expects,
+ * suppressing the recovery check.
+ *
+ * Called from td5_game.c immediately after td5_track_compute_heading() for
+ * AI racer slots (state == 0).  Only acts when the route table is available.
+ *
+ * [CONFIRMED need @ race.log "recovery: slot=1 hdelta=0x41A heading=0xB90
+ *  route=0xFAA" — same delta for every tick of the race, car never moves]
+ */
+void td5_ai_correct_spawn_heading(int slot) {
+    int32_t *rs;
+    const uint8_t *route_bytes;
+    int16_t span;
+    int32_t rb, route_heading;
+    char *actor;
+
+    if (slot < 0 || slot >= TD5_MAX_RACER_SLOTS || !g_route_state_base)
+        return;
+
+    rs = route_state(slot);
+    if (!rs) return;
+
+    route_bytes = (const uint8_t *)(intptr_t)rs[RS_ROUTE_TABLE_PTR];
+    if (!route_bytes) return;
+
+    actor = actor_ptr(slot);
+    span = ACTOR_I16(actor, ACTOR_SPAN_RAW);
+    if (span < 0) return;
+
+    rb = (int32_t)route_bytes[(size_t)(unsigned)span * 3u + 1u];
+    if (rb < 4) return; /* junction-zone sentinel: skip */
+
+    /* Same formula as ai_route_heading_for_actor [CONFIRMED @ td5_ai.c:305]:
+     * route_heading = (rb * 0x102C) >> 8 */
+    route_heading = ((rb * 0x102C) >> 8) & 0xFFF;
+
+    TD5_LOG_I(LOG_TAG,
+              "correct_spawn_heading: slot=%d span=%d rb=%d geom_yaw=%d route_yaw=%d",
+              slot, (int)span, (int)rb,
+              ACTOR_I32(actor, ACTOR_YAW_ACCUM) >> 8,
+              route_heading);
+
+    /* Write route heading to the 20-bit yaw accumulator (<<8 = 12→20 bit) */
+    ACTOR_I32(actor, ACTOR_YAW_ACCUM) = route_heading << 8;
+}
+
 void td5_ai_refresh_route_state(void) {
     int slot_count = g_active_actor_count;
 
@@ -801,6 +870,26 @@ void td5_ai_init_race_actor_runtime(void) {
             g_rb_ahead_range  = 0x50;   /* 80  */
             break;
         }
+    }
+
+    /* Cop Chase (wanted_mode): initialize ACTOR_ENCOUNTER_STATE for AI cop
+     * slots to 0x1000 so they are not blocked by the wanted-mode gate in
+     * ai_update_single_racer.
+     *
+     * Original keeps a separate gWantedDamageStateTable (int16[6]) and
+     * initialises it to 0x1000 per slot in InitializeWantedHudOverlays
+     * [CONFIRMED @ 0x0043D2FC: _gWantedDamageStateTable = 0x10001000].
+     * Port overloads ACTOR_ENCOUNTER_STATE (offset 0x384) for the same gate
+     * check. Initialize to 0x1000 for all active cop slots (slot 1, since
+     * racer_count=2 and slot 0 is the player). */
+    if (g_td5.wanted_mode_enabled) {
+        for (int i = 0; i < TD5_MAX_RACER_SLOTS; i++) {
+            char *actor = actor_ptr(i);
+            ACTOR_I32(actor, ACTOR_ENCOUNTER_STATE) = 0x1000;
+        }
+        TD5_LOG_I(LOG_TAG,
+                  "Cop Chase: initialized ACTOR_ENCOUNTER_STATE=0x1000 for all racer slots "
+                  "(mirrors gWantedDamageStateTable init @ 0x0043D2FC)");
     }
 
     /* Initialize encounter globals */
