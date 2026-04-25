@@ -5150,51 +5150,51 @@ void td5_physics_clamp_attitude(TD5_Actor *actor)
     if (roll > 0x800) roll -= 0x1000;
     if (pitch > 0x800) pitch -= 0x1000;
 
+    /* Hard-clamp / MODE-0 exceeded thresholds [CONFIRMED @ FUN_00405B40 0x405B63] */
     int32_t roll_limit  = 0x355;
     int32_t pitch_limit = 0x3A4;
 
-    int32_t exceeded = 0;
-    if (roll > roll_limit || roll < -roll_limit) exceeded = 1;
-    if (pitch > pitch_limit || pitch < -pitch_limit) exceeded = 1;
-
-    if (!exceeded) return;
-
-    if (0) {
-        /* Recovery mode disabled — the source port's simplified suspension
-         * creates slow pitch/roll drift that eventually exceeds attitude
-         * limits during normal driving, triggering the 59-frame recovery
-         * teleport. In the original, this only fires during actual crashes.
-         * Hard-clamp instead (fall through to else branch). */
+    if (g_collisions_enabled == 0) {
+        /* MODE 0 (collisions ON): original sets recovery flag (actor+0x379=1) when
+         * |roll| > 0x355 or |pitch| > 0x3A4, then copies rotation matrix via
+         * FUN_0042E1E0 to actor+0x150/+0x180. Port maps this to vehicle_mode=1
+         * (59-frame recovery ticker). [CONFIRMED @ FUN_00405B40 0x405B5D]
+         *
+         * Disabled: port's suspension equilibrium drift holds pitch ≈ ±935 on flat
+         * ground (7 units above the 932 limit), triggering recovery teleport on every
+         * actor every ~61 frames during normal driving. Fix pending suspension
+         * equilibrium correction (reference_port_ride_height_offset.md). */
     } else {
-        /* Mode 1 (collisions OFF): hard clamp */
-        /* Soft nudge: if approaching limit, add correction */
+        /* MODE 1 (collisions OFF): soft nudge then hard clamp.
+         * Soft nudge threshold: 0x27F roll, 0x2BB pitch [CONFIRMED @ 0x405BEE]
+         * Hard clamp threshold: 0x355 roll, 0x3A4 pitch [CONFIRMED @ 0x405B63] */
+        int32_t roll_nudge  = 0x27F;
+        int32_t pitch_nudge = 0x2BB;
+
+        if (roll <= roll_nudge && roll >= -roll_nudge &&
+            pitch <= pitch_nudge && pitch >= -pitch_nudge)
+            return;
+
+        if (roll > roll_nudge)  actor->angular_velocity_roll  -= 0x200;
+        if (roll < -roll_nudge) actor->angular_velocity_roll  += 0x200;
         if (roll > roll_limit) {
-            actor->angular_velocity_roll -= 0x200;
-            if (roll > roll_limit + 0x40) {
-                actor->angular_velocity_roll = 0;
-                actor->euler_accum.roll = roll_limit << 8;
-            }
+            actor->angular_velocity_roll = 0;
+            actor->euler_accum.roll = roll_limit << 8;
         }
         if (roll < -roll_limit) {
-            actor->angular_velocity_roll += 0x200;
-            if (roll < -(roll_limit + 0x40)) {
-                actor->angular_velocity_roll = 0;
-                actor->euler_accum.roll = (-roll_limit) << 8;
-            }
+            actor->angular_velocity_roll = 0;
+            actor->euler_accum.roll = (-roll_limit) << 8;
         }
+
+        if (pitch > pitch_nudge)  actor->angular_velocity_pitch -= 0x200;
+        if (pitch < -pitch_nudge) actor->angular_velocity_pitch += 0x200;
         if (pitch > pitch_limit) {
-            actor->angular_velocity_pitch -= 0x200;
-            if (pitch > pitch_limit + 0x40) {
-                actor->angular_velocity_pitch = 0;
-                actor->euler_accum.pitch = pitch_limit << 8;
-            }
+            actor->angular_velocity_pitch = 0;
+            actor->euler_accum.pitch = pitch_limit << 8;
         }
         if (pitch < -pitch_limit) {
-            actor->angular_velocity_pitch += 0x200;
-            if (pitch < -(pitch_limit + 0x40)) {
-                actor->angular_velocity_pitch = 0;
-                actor->euler_accum.pitch = (-pitch_limit) << 8;
-            }
+            actor->angular_velocity_pitch = 0;
+            actor->euler_accum.pitch = (-pitch_limit) << 8;
         }
     }
 }
@@ -6015,17 +6015,13 @@ void td5_physics_init_vehicle_runtime(void)
         /* --- Per-slot NPC handicap (faithful port of InitializeRaceVehicleRuntime
          * @ 0x42F140 gRaceSlotState==1 branch) ---
          * Applies rubber-banding derived from the slot's prior championship
-         * position. For position 0 (default/leader) all adjustments are
-         * no-ops because race_result = race_bonus = race_points = 0.
+         * position. s_race_result_points_table row 0 (default) is all zeros so
+         * every adjustment is a no-op when championship position is not set.
+         * Call td5_physics_set_slot_series_position() from frontend to enable.
          *
          * Gear count assumed 8 (R,N,1-6) — all shipped TD5 vehicles use this.
          * If a modded car defines fewer, the triangular loop denom guard below
-         * prevents div-by-zero.
-         *
-         * actor+0x324 AI pacing bias: the original modifies this field inside
-         * the positive-racePoints branch below. The port does not yet have a
-         * mirror field on TD5_Actor — skipping that single line is inert while
-         * race_points defaults to 0. TODO: wire when championship mode lands. */
+         * prevents div-by-zero. */
         if (slot < 6 && g_race_slot_state[slot] == 1) {
             int16_t *phys = (int16_t *)actor->tuning_data_ptr;
             if (phys) {
@@ -6103,8 +6099,15 @@ void td5_physics_init_vehicle_runtime(void)
                     } else {
                         int32_t mul = drag * race_points;
                         adj = (mul + ((mul >> 31) & 0x1FF)) >> 9;
-                        /* TODO: actor+0x324 AI pacing bias increment —
-                         * skipped until port adds the field. */
+                        /* AI pacing bias at actor+0x324 — same >>9 rounding idiom
+                         * [CONFIRMED @ ~0x42F54F]: *(int32*)(actor+0x324) +=
+                         * (pacing * race_points + rounding) >> 9 */
+                        {
+                            int32_t pacing = *(int32_t *)((uint8_t *)actor + 0x324);
+                            int32_t pm = pacing * race_points;
+                            *(int32_t *)((uint8_t *)actor + 0x324) =
+                                pacing + ((pm + ((pm >> 31) & 0x1FF)) >> 9);
+                        }
                     }
                     write_i16((uint8_t *)phys, 0x2C, (int16_t)(drag + adj));
                 }
