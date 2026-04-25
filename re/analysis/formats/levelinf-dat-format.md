@@ -9,7 +9,7 @@
 
 ```c
 struct LevelInfoDat {  // 100 bytes total
-    /* +0x00 */ uint32_t track_type;          // 0 = circuit, 1 = point-to-point
+    /* +0x00 */ uint32_t track_type;          // 0 = point-to-point, 1 = circuit (verified objdump 2026-04-24)
     /* +0x04 */ uint32_t smoke_enable;         // 1 = enable tire smoke sprites, 0 = disabled
     /* +0x08 */ uint32_t checkpoint_count;     // Number of checkpoint stages (1-7)
     /* +0x0c */ uint32_t checkpoint_spans[7];  // Span index for each checkpoint (0-padded)
@@ -34,7 +34,7 @@ struct LevelInfoDat {  // 100 bytes total
 ## Field Details
 
 ### track_type (+0x00)
-Read at VA 0x42ae6b. When == 1, sets `DAT_00466e94 = 1` (enables circuit-mode checkpoint tracking) and clears `DAT_004b0fa8`.
+Read at VA 0x42ae6b. When == 1, sets `DAT_00466e94 = 1` (enables circuit-mode checkpoint tracking) and clears `DAT_004b0fa8`. **Value 1 = circuit (lapped), value 0 = point-to-point.** Verified by objdump @ `0x42AE6F mov [0x466e94], edi` with `EDI=1` and asset survey (2026-04-24): `+0x00==0` on the 12 P2P tracks (Moscow/Edinburgh/Sydney/BlueRidge/Honolulu/Tokyo/Keswick/SF/Bern/Kyoto/Washington/Munich) and `+0x00==1` on the 7 circuit tracks (Jarash/Newcastle/Maui/Courmayeur/Cheddar/Montego/Bez).
 
 ### smoke_enable (+0x04)
 Read at VA 0x401410 by `InitializeRaceSmokeSpritePool`. When == 1, loads the "smoke" sprite from the texture archive and allocates per-actor smoke pool (racer_count * 0x170 bytes).

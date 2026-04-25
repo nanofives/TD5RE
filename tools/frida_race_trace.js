@@ -33,12 +33,15 @@ var TRACE_MAX_SIM_TICK = 0;      // 0 = unlimited; N = stop when g_simulationTic
 // Safety guards (raceConfirmed + INNER_TICK_MAX_PER_FRAME) still in effect.
 var ENABLE_INNER_TICK_HOOKS = true;
 
-// Deterministic RNG seeding — the binary does NOT call srand; it maintains its
-// own race-RNG scaffolding at three globals (confirmed via Ghidra symbol audit
-// 2026-04-13). We overwrite those when raceConfirmed first flips, so slot-1+
-// spawn state becomes run-to-run identical.
-// NOTE: CRT _holdrand is NOT seeded (per-thread TLS offset unknown); if AI
-// still drifts, revisit via TLS read of _ptiddata.
+// Deterministic RNG seeding — the binary does NOT call srand from its own code;
+// it maintains its own race-RNG scaffolding at three globals (confirmed via
+// Ghidra symbol audit 2026-04-13). We overwrite those when raceConfirmed first
+// flips, so slot-1+ spawn state becomes run-to-run identical.
+// CRT _holdrand IS seeded — but by the quickrace hook (td5_quickrace_hook.js),
+// which calls _srand(0x1A2B3C4D) @ RVA 0x4814a just before
+// InitializeRaceSeriesSchedule. That timing is load-bearing: AI-car selection
+// inside the schedule init uses rand(), and seeding at race-frame-begin (here)
+// would be too late. Launcher auto-sets cfg.seed_crt when --trace is passed.
 var DETERMINISTIC_SEED  = true;
 var FIXED_SEED_VALUE    = 0x1A2B3C4D;   // arbitrary fixed 32-bit constant
 
@@ -54,6 +57,15 @@ var BRAKE_OUTPUT_PATH   = "C:\\Users\\maria\\Desktop\\Proyectos\\TD5RE\\log\\rac
 // array so contactData[2,3] "own_x/own_z" semantics can be resolved.
 var CAPTURE_CONTACTS    = true;
 var CONTACTS_OUTPUT_PATH = "C:\\Users\\maria\\Desktop\\Proyectos\\TD5RE\\log\\race_trace_contacts_original.csv";
+
+// -- Call-trace hook specs (filled by the launcher via patch_trace_script) --
+// Each entry: {name: str, original_rva: hex int, args: int (count, 0..8),
+//              capture_return: bool}. `args` is the number of int32 stack
+// args to capture (__stdcall/__cdecl assumed; on x86 args[0]..args[n-1] are
+// at [esp+4] onward at Interceptor.attach onEnter).
+// Emits rows to CALLS_OUTPUT_PATH keyed (sim_tick, fn_name, call_idx).
+var HOOK_SPECS = [];
+var CALLS_OUTPUT_PATH = "C:\\Users\\maria\\Desktop\\Proyectos\\TD5RE\\log\\calls_trace_original.csv";
 // AUTO_THROTTLE re-added 2026-04-10 with the CORRECT bit mask.
 // Per Ghidra decomp of UpdatePlayerVehicleControlState at 0x402E60 [CONFIRMED]:
 //   0x01 = RIGHT
@@ -89,6 +101,7 @@ var ADDR_UpdateRaceParticles    = ptr(0x429790);  // VFX
 var ADDR_NormalizeWrapState     = ptr(0x443FB0);  // wrap norm (last sim op)
 var ADDR_EndRaceScene           = ptr(0x40AE00);  // end scene
 var ADDR_UpdateVehicleAudioMix  = ptr(0x440B00);  // audio mix (near end of frame)
+var ADDR_UpdateRaceCameraTransitionTimer = ptr(0x40A490);  // last per-tick callee before counter inc; safe 5-byte prologue
 // Added 2026-04-13 for brake/RPM/contact capture (Cluster 4 harness upgrade).
 var ADDR_UpdatePlayerVehicleDynamics     = ptr(0x404030);  // per-actor physics tick
 var ADDR_UpdateEngineSpeedAccumulator    = ptr(0x42EDF0);  // RPM accumulator (callee of above)
@@ -151,6 +164,22 @@ var G_raceOrderArray       = ptr(0x4AE278);
 var fileHandle = null;
 var brakeFileHandle = null;
 var contactsFileHandle = null;
+var callsFileHandle = null;
+
+// Per-sim-tick call-index table, reset when sim_tick changes. Mirrors the
+// port's td5_trace.c s_call_idx_table logic so both sides assign the same
+// call_idx for the Nth call to fn_name in sim_tick T.
+var callIdxTick = -1;
+var callIdxCounts = {};  // fn_name -> next index
+function nextCallIdx(fnName, simTick) {
+    if (simTick !== callIdxTick) {
+        callIdxTick = simTick;
+        callIdxCounts = {};
+    }
+    var c = callIdxCounts[fnName] || 0;
+    callIdxCounts[fnName] = c + 1;
+    return c;
+}
 var framesStarted = 0;
 var lastFrameIndex = -1;
 var enabled = false;
@@ -436,6 +465,19 @@ function init() {
         }
     }
 
+    // Open the calls trace CSV (always opened; unused if HOOK_SPECS empty).
+    callsFileHandle = new File(CALLS_OUTPUT_PATH, "w");
+    if (callsFileHandle !== null) {
+        callsFileHandle.write(
+            "sim_tick,fn_name,call_idx,n_args,arg_0,arg_1,arg_2,arg_3," +
+            "arg_4,arg_5,arg_6,arg_7,has_ret,ret\n"
+        );
+        callsFileHandle.flush();
+        console.log("[trace] Calls trace: " + CALLS_OUTPUT_PATH);
+    } else {
+        console.log("[trace] WARN: Could not open " + CALLS_OUTPUT_PATH);
+    }
+
     enabled = true;
     framesStarted = 0;
     lastFrameIndex = -1;
@@ -443,8 +485,11 @@ function init() {
     fridaFrameCounter = 0;
     raceConfirmed = false;
     rngSeededThisRace = false;
+    callIdxTick = -1;
+    callIdxCounts = {};
 
     installHooks();
+    installHookSpecs();
 
     // Auto-throttle: clamp player 1 control bits on PollRaceSessionInput onLeave
     // so the original binary's car accelerates like td5re (with its [Trace]
@@ -643,6 +688,12 @@ function shutdown() {
         contactsFileHandle = null;
         console.log("[trace] Contacts trace closed");
     }
+    if (callsFileHandle !== null) {
+        callsFileHandle.flush();
+        callsFileHandle.close();
+        callsFileHandle = null;
+        console.log("[trace] Calls trace closed");
+    }
 }
 
 function seedGameRng() {
@@ -705,6 +756,81 @@ function safeAttach(name, addr, callbacks) {
         console.log("[trace] Hooked " + name + " at " + addr);
     } catch (e) {
         console.log("[trace] SKIP " + name + " at " + addr + ": " + e.message);
+    }
+}
+
+// ============================================================================
+// Generic hook-spec installer (diff-race custom hooks)
+// ============================================================================
+
+function writeCallRow(simTick, fnName, callIdx, args, hasRet, retVal) {
+    if (callsFileHandle === null) return;
+    var padded = [];
+    for (var i = 0; i < 8; ++i) {
+        padded.push(i < args.length ? (args[i] | 0) : 0);
+    }
+    var line = simTick + "," + fnName + "," + callIdx + "," + args.length;
+    for (var j = 0; j < 8; ++j) line += "," + padded[j];
+    line += "," + (hasRet ? 1 : 0) + "," + (hasRet ? (retVal | 0) : 0) + "\n";
+    callsFileHandle.write(line);
+}
+
+function installHookSpecs() {
+    if (!HOOK_SPECS || HOOK_SPECS.length === 0) return;
+    console.log("[trace] Installing " + HOOK_SPECS.length + " custom hook spec(s)");
+    for (var i = 0; i < HOOK_SPECS.length; ++i) {
+        var spec = HOOK_SPECS[i];
+        var name = spec.name;
+        var rva  = spec.original_rva;
+        var nArgs = spec.args | 0;
+        var cap  = !!spec.capture_return;
+        // YAML's `original_rva` is the absolute VA as Ghidra displays it
+        // (e.g. 0x00445A70). Convert to an offset from module base before
+        // adding, since BASE.add(0x00445A70) would overflow past the
+        // module and produce access violations.
+        var baseInt = BASE.toUInt32();
+        var offset  = rva >= baseInt ? (rva - baseInt) : rva;
+        var addr = BASE.add(offset);
+        (function (name, nArgs, cap, addr) {
+            try {
+                Interceptor.attach(addr, {
+                    onEnter: function (args) {
+                        // Only emit during live race (avoids menu noise).
+                        try { if (readS32(G_gameState) !== 2) return; } catch (e) { return; }
+                        if (!raceConfirmed) return;
+                        var simTick = readS32(G_simulationTickCounter);
+                        var captured = [];
+                        for (var k = 0; k < nArgs && k < 8; ++k) {
+                            try { captured.push(args[k].toInt32()); }
+                            catch (e) { captured.push(0); }
+                        }
+                        var idx = nextCallIdx(name, simTick);
+                        this._td5_call_simTick = simTick;
+                        this._td5_call_idx = idx;
+                        this._td5_call_args = captured;
+                        if (!cap) {
+                            writeCallRow(simTick, name, idx, captured, false, 0);
+                        }
+                    },
+                    onLeave: function (retval) {
+                        if (!cap) return;
+                        if (typeof this._td5_call_simTick === 'undefined') return;
+                        var retInt = 0;
+                        try { retInt = retval.toInt32(); } catch (e) { retInt = 0; }
+                        writeCallRow(
+                            this._td5_call_simTick, name,
+                            this._td5_call_idx, this._td5_call_args,
+                            true, retInt
+                        );
+                    }
+                });
+                console.log("[trace] Hook spec: " + name + " @ rva=" + rva +
+                            " args=" + nArgs + " ret=" + (cap ? "yes" : "no"));
+            } catch (e) {
+                console.log("[trace] Hook spec SKIP " + name + " @ " + addr +
+                            ": " + e.message);
+            }
+        })(name, nArgs, cap, addr);
     }
 }
 
@@ -878,20 +1004,34 @@ function installHooks() {
         }
     });
 
-    safeAttach("UpdateRaceOrder", ADDR_UpdateRaceOrder, {
+    // UpdateRaceOrder @ 0x42F5B0 is UNSAFE for Frida's Interceptor: its 5-byte
+    // prologue (PUSH ECX/EBX/ESI/EDI + XOR ESI,ESI) has an internal CONDITIONAL_JUMP
+    // from 0x42F62B targeting 0x42F5B4 — the loop-top label sits inside the region
+    // Frida overwrites with its JMP trampoline. Installing the hook hangs the
+    // game at the first sim-tick. [verified via Ghidra 2026-04-20]
+    //
+    // Workaround: emit post_track on UpdateTireTrackPool onLeave (fires once per
+    // tick, just before UpdateRaceOrder) and post_progress on
+    // UpdateRaceCameraTransitionTimer onEnter (fires once per tick, after
+    // UpdateRaceOrder + cameras + particles — the last callee before
+    // g_simulationTickCounter increments).
+    safeAttach("UpdateTireTrackPool", ADDR_UpdateTireTrackPool, {
         onLeave: function (retval) {
             try {
-                // Guard 1: actor memory not valid until first frame_begin fired.
                 if (!raceConfirmed) return;
-                // Guard 2: game must still be in race state.
-                var gs = readS32(G_gameState);
-                if (gs !== 2) return;
-                // Guard 3: cap I/O burst from large time-accumulator residuals.
+                if (readS32(G_gameState) !== 2) return;
                 if (simTicksThisFrame >= INNER_TICK_MAX_PER_FRAME) return;
                 traceStage("post_track");
-                // post_progress: UpdateRaceOrder is the last sim-tick operation
-                // inside the inner loop before NormalizeWrapState (which is
-                // outside the loop and too small to hook safely).
+            } catch (e) {}
+        }
+    });
+
+    safeAttach("UpdateRaceCameraTransitionTimer", ADDR_UpdateRaceCameraTransitionTimer, {
+        onEnter: function (args) {
+            try {
+                if (!raceConfirmed) return;
+                if (readS32(G_gameState) !== 2) return;
+                if (simTicksThisFrame >= INNER_TICK_MAX_PER_FRAME) return;
                 simTicksThisFrame++;
                 traceStage("post_progress");
             } catch (e) {}

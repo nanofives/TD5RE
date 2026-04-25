@@ -1870,8 +1870,9 @@ int td5_asset_load_level(int track_index)
             g_td5.track_type = (circuit_flag == 1) ? TD5_TRACK_CIRCUIT : TD5_TRACK_POINT_TO_POINT;
             g_track_environment_config = (uint8_t *)levelinf_data;
             levelinf_data = NULL; /* ownership transferred; do not free */
-            TD5_LOG_I(LOG_TAG, "LEVELINF.DAT loaded: track_type=%d (circuit_flag=%d)",
-                      g_td5.track_type, circuit_flag);
+            TD5_LOG_I(LOG_TAG, "LEVELINF.DAT loaded: track_type=%s (circuit_flag=%d)",
+                      g_td5.track_type == TD5_TRACK_CIRCUIT ? "CIRCUIT" : "P2P",
+                      circuit_flag);
         } else {
             TD5_LOG_W(LOG_TAG, "missing or short %s in %s, defaulting to circuit", levelinf_name, zip_path);
             g_td5.track_type = TD5_TRACK_CIRCUIT;

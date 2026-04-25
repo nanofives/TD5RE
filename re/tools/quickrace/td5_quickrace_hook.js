@@ -37,6 +37,20 @@ var RVA = {
     // Live-hook sites (used when start_span_offset != 0 or trace_track_load)
     InitializeActorTrackPose:              0x00034350,   // (slot, span, lane, flag) __cdecl
     LoadTrackRuntimeData:                  0x0002fb90,   // (levelZipNumber)          __cdecl
+
+    // CRT srand — Ghidra mis-labels as __set_new_handler at 0x0044814a; verified
+    // via decompile (Issue 9 /fix agent 2026-04-24). Seeding _holdrand here before
+    // InitializeRaceSeriesSchedule aligns the Frida harness's CRT RNG state with
+    // the port's srand(0x1A2B3C4D) seeding, enabling byte-exact AI-car selection
+    // parity between the port and the Frida-captured original trace.
+    _srand:                                0x0004814a,   // void __cdecl _srand(unsigned int)
+
+    // player_is_ai: slot[0].state stays 1 (human) for race-end detection,
+    // HUD, camera, and every other consumer. It is flipped to 0 ONLY for
+    // the duration of UpdateRaceActors so the per-tick actor dispatch
+    // takes the AI branch for slot 0, then restored to 1 on return.
+    UpdateRaceActors:                      0x00036a70,
+    slot0_state_byte:                      0x000AADF4,  // gRaceSlotStateTable.slot[0].state
 };
 
 var cfg = {
@@ -51,6 +65,21 @@ var cfg = {
     opponent_car: 0,
     verbose: false,
     trace_track_load: false,
+    /* player_is_ai: windows slot[0].state=0 to just the body of
+     * UpdateRaceActors so the AI dispatch fires for slot 0, then
+     * restores state=1 on return. Race-end detection / HUD / camera /
+     * humanPlayerCount all continue to see slot 0 as the normal human,
+     * so they do not mistake an AI-driven slot 0 for "all humans
+     * finished" and auto-complete the race. Mirrors td5re.ini
+     * [GameOptions] PlayerIsAI=1. */
+    player_is_ai: false,
+    /* seed_crt: if true, call _srand(crt_seed) before
+     * InitializeRaceSeriesSchedule so the CRT rand() sequence used by the
+     * AI-car selection loop matches the port's when race_trace_enabled=1.
+     * Required for byte-exact diff of AI slot cars (Issue 9 follow-up).
+     * Python launcher auto-enables this when --trace is passed. */
+    seed_crt: false,
+    crt_seed: 0x1A2B3C4D,
 };
 
 var launched = false;
@@ -60,6 +89,7 @@ var __quickrace_introNoop = null;       // keep-alive for PlayIntroMovie no-op
 var __quickrace_setScreenHook = null;   // keep-alive for Interceptor.attach
 var __quickrace_spawnHook = null;       // keep-alive for InitializeActorTrackPose
 var __quickrace_loadTrackHook = null;   // keep-alive for LoadTrackRuntimeData
+var __quickrace_updActorsHook = null;      // keep-alive: UpdateRaceActors slot[0] window
 
 function log(msg) {
     send({kind: 'log', msg: msg});
@@ -90,6 +120,11 @@ function install() {
         addrOf.InitializeRaceSeriesSchedule, 'void', [], 'stdcall');
     var InitializeFrontendDisplayModeState = new NativeFunction(
         addrOf.InitializeFrontendDisplayModeState, 'void', [], 'stdcall');
+
+    // CRT srand — seeded before InitializeRaceSeriesSchedule so the AI-car
+    // selection loop pulls from the same sequence the port does under the
+    // matching deterministic-seed configuration.
+    var _srand = new NativeFunction(addrOf._srand, 'void', ['uint32'], 'cdecl');
 
     function wi(name, val) {
         addrOf[name].writeInt(val);
@@ -138,8 +173,18 @@ function install() {
 
         vlog('calling ConfigureGameTypeFlags()');
         ConfigureGameTypeFlags();
+
+        // Seed the CRT _holdrand with the same fixed value the port uses when
+        // race_trace_enabled=1. Guarded by cfg.seed_crt so non-trace quickrace
+        // runs keep their normal timeGetTime()-seeded behavior.
+        if (cfg.seed_crt) {
+            vlog('calling _srand(0x' + cfg.crt_seed.toString(16) + ')');
+            _srand(cfg.crt_seed >>> 0);
+        }
+
         vlog('calling InitializeRaceSeriesSchedule()');
         InitializeRaceSeriesSchedule();
+
         vlog('calling InitializeFrontendDisplayModeState()');
         InitializeFrontendDisplayModeState();
         log('quickrace: race launch sequence complete');
@@ -191,6 +236,23 @@ function install() {
     // main-menu attract-mode timer, etc.).
     addrOf.g_currentScreenFnPtr.writePointer(addrOf.ScreenMainMenuAnd1PRaceFlow);
     log('quickrace: g_currentScreenFnPtr forced to main-menu replacement');
+
+    // player_is_ai: scope slot[0].state=0 to the body of UpdateRaceActors
+    // only. Per-tick dispatch takes the AI branch for slot 0, then we
+    // restore state=1 on return so everything else — race-end detection,
+    // HUD, camera, humanPlayerCount readers — continues to treat slot 0
+    // as a normal human and does not short-circuit the race.
+    if (cfg.player_is_ai) {
+        __quickrace_updActorsHook = Interceptor.attach(addrOf.UpdateRaceActors, {
+            onEnter: function () {
+                addrOf.slot0_state_byte.writeU8(0);
+            },
+            onLeave: function () {
+                addrOf.slot0_state_byte.writeU8(1);
+            }
+        });
+        log('quickrace: player_is_ai=1 — slot[0].state windowed to 0 inside UpdateRaceActors');
+    }
 
     // InitializeActorTrackPose(slot, span, lane, flag) — __cdecl, args on stack.
     // When start_span_offset != 0, rewrite the span arg so every actor spawns

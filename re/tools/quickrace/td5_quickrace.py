@@ -43,7 +43,7 @@ INT_FIELDS = {
     "car":  ["car", "paint", "transmission"],
     "drag": ["opponent_car"],
 }
-BOOL_FIELDS = {"launcher": ["verbose", "trace_track_load"]}
+BOOL_FIELDS = {"launcher": ["verbose", "trace_track_load", "player_is_ai"]}
 
 
 def load_ini(path):
@@ -59,6 +59,7 @@ def load_ini(path):
         "opponent_car": 0,
         "verbose": False,
         "trace_track_load": False,
+        "player_is_ai": False,
     }
     for section, fields in INT_FIELDS.items():
         if cp.has_section(section):
@@ -87,7 +88,7 @@ def apply_overrides(cfg, overrides):
             _section, field = key.split(".", 1)
         else:
             field = key
-        if field in ("verbose", "trace_track_load"):
+        if field in ("verbose", "trace_track_load", "player_is_ai"):
             cfg[field] = val.lower() in ("1", "true", "yes", "on")
         else:
             try:
@@ -219,6 +220,10 @@ def main():
                     help="path to a YAML/JSON hook-specs file (see "
                          "re/trace-hooks/README.md); injected into the trace "
                          "script as HOOK_SPECS so Frida attaches per-fn hooks")
+    ap.add_argument("--extra-script", action="append", default=[],
+                    help="additional Frida JS script(s) to inject into the "
+                         "same session (repeatable). Loaded after the hook + "
+                         "trace scripts. Use for ad-hoc probes.")
     args = ap.parse_args()
 
     cfg, ini_exe = load_ini(args.ini)
@@ -246,6 +251,16 @@ def main():
     script.on("message", on_message)
     script.load()
 
+    # When --trace is active we align the Frida harness's CRT _holdrand with
+    # the port's deterministic seed so the AI-car selection in
+    # InitializeRaceSeriesSchedule draws from the matching sequence. Without
+    # this the Frida capture's AI-car set diverges from the port's even when
+    # td5re.ini [Trace] RaceTraceEnabled=1 is set. See:
+    #   todo_ai_spawn_world_y_divergence.md (Issue 9 follow-up)
+    if args.trace:
+        cfg.setdefault("seed_crt", True)
+        cfg.setdefault("crt_seed", 0x1A2B3C4D)
+
     script.post({"type": "cfg", "cfg": cfg})
 
     trace_script = None
@@ -271,6 +286,18 @@ def main():
         trace_script = session.create_script(trace_source)
         trace_script.on("message", on_message)
         trace_script.load()
+
+    extra_scripts = []
+    for extra_path in args.extra_script:
+        if not os.path.exists(extra_path):
+            sys.exit(f"--extra-script not found: {extra_path}")
+        with open(extra_path, "r", encoding="utf-8") as f:
+            extra_source = f.read()
+        print(f"[launcher] injecting extra script: {extra_path}")
+        es = session.create_script(extra_source)
+        es.on("message", on_message)
+        es.load()
+        extra_scripts.append(es)
 
     if args.no_resume:
         print("[launcher] --no-resume set, process still suspended")
