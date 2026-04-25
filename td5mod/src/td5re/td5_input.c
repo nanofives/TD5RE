@@ -23,6 +23,7 @@
 #include "td5re.h"
 #include "td5_game.h"
 #include "td5_camera.h"
+#include "td5_ai.h"
 
 /* Defined in td5_game.c */
 extern int td5_game_is_wanted_mode(void);
@@ -149,6 +150,9 @@ static TD5_FFGameState s_ff;
 
 static int s_escape_muted = 0;
 static int s_escape_fade_active = 0;
+
+/* F3 key edge-detection latch [CONFIRMED @ 0x42C6FC: DAT_004aaf93] */
+static uint8_t s_f3_held = 0;
 
 /* ========================================================================
  * Helper: clamp int to range
@@ -341,9 +345,15 @@ post_poll:
                   (unsigned int)s_control_bits[0]);
     }
 
-    /* Check F3 key for keyboard camera cycling (scan code 0x3D) */
+    /* F3 key edge detection [CONFIRMED @ 0x42C6FC-0x42C71F in FUN_0042C470].
+     * Original: rising edge sets DAT_004aaf93 (latch), falling edge clears
+     * latch and pulses DAT_004aadf0=1. Reader (FUN_0042b580 main loop) clears
+     * DAT_004aadf0 immediately with no other action — effectively dead code. */
     if (td5_plat_input_key_pressed(0x3D)) {
-        /* Camera cycle logic placeholder -- original toggles a flag */
+        s_f3_held = 1;
+    } else if (s_f3_held) {
+        s_f3_held = 0;
+        TD5_LOG_D(LOG_TAG, "F3 release: camera cycle pulse (no-op in original)");
     }
 
     /* Escape handling: trigger race exit fade */
@@ -633,7 +643,12 @@ void td5_input_update_player_control(int slot)
                 }
             }
         } else if (encounter_active) {
-            /* Encounter steering override -- placeholder */
+            /* FUN_00434BA0 [CONFIRMED @ 0x434BA0] UpdateSpecialEncounterControl.
+             * In the original, this modifies the cop (encounter) actor's heading/
+             * brake — it does NOT set the player's throttle/brake directly.
+             * Player control values carry forward from the previous frame. */
+            td5_ai_update_encounter_control(slot);
+            TD5_LOG_D(LOG_TAG, "encounter_control: slot=%d", slot);
         } else {
             /* No brake: reset throttle_state to forward [CONFIRMED @ 0x403180] */
             s_brake[slot] = 0;
@@ -685,8 +700,18 @@ void td5_input_update_player_control(int slot)
     } else if (s_gear_debounce[slot] == 0) {
         /* Gear up (bit 0x400000) */
         if (bits & 0x400000u) {
-            if (s_gear[slot] < 7) {  /* placeholder max gear */
-                s_gear[slot]++;
+            /* Max gear from actor+0x36C [CONFIRMED @ 0x4035E0, DAT_004ab474].
+             * Original condition: (uint8_t)actor[0x36B] < (uint8_t)(actor[0x36C]-1) */
+            {
+                TD5_Actor *a_gear = td5_game_get_actor(slot);
+                uint8_t max_gear = a_gear ? ((uint8_t *)a_gear)[0x36C] : 8u;
+                if (max_gear == 0) max_gear = 8u;  /* guard: uninitialized actor */
+                if (s_gear[slot] < (uint8_t)(max_gear - 1u)) {
+                    s_gear[slot]++;
+                    TD5_LOG_I(LOG_TAG, "gear up: slot=%d gear=%d max=%d",
+                              slot, (int)s_gear[slot], (int)max_gear);
+                    /* TODO: call FUN_0042EEA0(actor, car_config) side effect here */
+                }
             }
             s_gear_debounce[slot] = TD5_INPUT_GEAR_DEBOUNCE;
         }
