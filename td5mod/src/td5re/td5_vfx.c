@@ -2643,3 +2643,22 @@ void td5_vfx_render_wheel_billboards(int view_index)
      * compatibility but does nothing. */
     (void)view_index;
 }
+
+/* ========================================================================
+ * Weather state accessors (for td5_sound_update_ambient)
+ *
+ * [CONFIRMED @ 0x00440B00] UpdateVehicleAudioMix reads g_weatherActiveCountView0
+ * (per-viewport particle density) and g_weatherType to gate rain sound.
+ * Mapped to the port's per-view s_weather_active_count array and s_weather_type.
+ * ======================================================================== */
+
+int td5_vfx_get_weather_active_count(int view_index)
+{
+    int vi = view_index & 1;
+    return s_weather_active_count[vi];
+}
+
+int td5_vfx_get_weather_type(void)
+{
+    return s_weather_type;
+}

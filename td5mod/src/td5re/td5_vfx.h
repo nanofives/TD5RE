@@ -110,4 +110,15 @@ void td5_vfx_render_taillights(int actor_index);
 
 void td5_vfx_advance_billboard_anims(void);
 
+/* ========================================================================
+ * Weather state accessors (used by td5_sound_update_ambient)
+ *
+ * [CONFIRMED @ 0x00440B00]: UpdateVehicleAudioMix reads per-view weather
+ * particle active count (g_weatherActiveCountView0) and g_weatherType
+ * to gate rain sound playback/volume.
+ * ======================================================================== */
+
+int  td5_vfx_get_weather_active_count(int view_index);
+int  td5_vfx_get_weather_type(void);
+
 #endif /* TD5_VFX_H */
