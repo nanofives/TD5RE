@@ -563,38 +563,29 @@ void td5_physics_update_vehicle_actor(TD5_Actor *actor)
          * IntegrateScriptedVehicleMotion for 59 frames, then calls
          * ResetVehicleActorState to respawn the car.
          *
-         * Simplified implementation: damp velocities and recover after 59 frames. */
+         * Partial port: gravity + linear damping confirmed from
+         * IntegrateScriptedVehicleMotion @ 0x00409D20-0x00409D66.
+         * Angular velocity damping removed — original overwrites them from
+         * Euler decomposition of recovery_target matrix, does NOT damp.
+         * Teleport removed — original ResetVehicleActorState has no teleport.
+         * Missing: RefreshScriptedVehicleTransforms rotation-matrix advance
+         * (MultiplyRotationMatrices3x3); requires recovery_target_m00 / saved_orientation_m00
+         * subsystem not yet ported. */
         actor->frame_counter++;
 
-        /* Damp velocities (original: v -= v >> 8 each frame) */
-        actor->linear_velocity_x -= actor->linear_velocity_x >> 8;
-        actor->linear_velocity_z -= actor->linear_velocity_z >> 8;
-        actor->angular_velocity_yaw -= actor->angular_velocity_yaw >> 4;
-        actor->angular_velocity_roll -= actor->angular_velocity_roll >> 4;
-        actor->angular_velocity_pitch -= actor->angular_velocity_pitch >> 4;
+        /* Linear velocity damping [CONFIRMED @ 0x00409D20-0x00409D3B]:
+         * v -= (v + (v>>31 & 0xFF)) >> 8  (sign-extending divide-by-256) */
+        actor->linear_velocity_x -= (actor->linear_velocity_x + (actor->linear_velocity_x >> 31 & 0xFF)) >> 8;
+        actor->linear_velocity_z -= (actor->linear_velocity_z + (actor->linear_velocity_z >> 31 & 0xFF)) >> 8;
 
-        if (actor->frame_counter > 0x3B) {  /* 59 frames */
+        /* Gravity on Y velocity [CONFIRMED @ 0x00409D3C-0x00409D52]:
+         * IntegrateScriptedVehicleMotion subtracts gGravityConstant each tick */
+        actor->linear_velocity_y -= g_gravity_constant;
+
+        if (actor->frame_counter > 0x3B) {  /* 59 frames [CONFIRMED @ 0x00409DD0] */
             TD5_LOG_I(LOG_TAG, "mode1 recovery: slot=%d resetting after %d frames",
                       actor->slot_index, actor->frame_counter);
             td5_physics_reset_actor_state(actor);
-
-            /* Teleport to current track span (same as OOB recovery) */
-            int wx = 0, wy = 0, wz = 0;
-            int sub_lane = (int)actor->track_sub_lane_index;
-            int span = actor->track_span_raw;
-            if (td5_track_get_span_lane_world(span, sub_lane, &wx, &wy, &wz)) {
-                /* td5_track_get_span_lane_world returns 24.8 FP directly */
-                actor->world_pos.x = wx;
-                actor->world_pos.y = wy;
-                actor->world_pos.z = wz;
-                /* Set heading to match track direction at this span.
-                 * td5_track_compute_heading writes euler_accum.yaw on the actor. */
-                td5_track_compute_heading(actor);
-                actor->euler_accum.roll = 0;
-                actor->euler_accum.pitch = 0;
-                TD5_LOG_I(LOG_TAG, "mode1 teleport: slot=%d span=%d pos=(%d,%d,%d)",
-                          actor->slot_index, span, wx, wy, wz);
-            }
         }
     } else if (g_game_paused) {
         /* Paused: only update engine RPM display.
@@ -923,10 +914,7 @@ void td5_physics_update_player(TD5_Actor *actor)
              * Original clamps against uVar37 = velocity projected onto the
              * steered-front-wheel axis: ((cos(yaw+steer)*vz + sin(yaw+steer)*vx)>>12)
              * minus a yaw-rate correction term [CONFIRMED @ 0x404441-0x404481].
-             * When steer≈0, uVar37 ≡ body longitudinal speed (v_long). We
-             * approximate with v_long here; this matches the original exactly
-             * when driving straight and diverges only under heavy steering.
-             * TODO: faithful uVar37 with steered-axle projection + yaw-rate.
+             * When steer≈0, uVar37 ≡ body longitudinal speed (v_long).
              * Previously this clamped against |v_lat|, which collapsed to 0
              * when driving straight and killed all braking force. */
             int32_t bf = (brake_front * throttle) >> 8;
@@ -948,8 +936,20 @@ void td5_physics_update_player(TD5_Actor *actor)
                 int32_t cos_sh = cos_fixed12(steer_h);
                 int32_t sin_sh = sin_fixed12(steer_h);
                 int32_t v_steer_axis = (cos_sh * vz + sin_sh * vx) >> 12;
+
+                /* Yaw-rate correction [CONFIRMED @ 0x00404441-0x00404481]:
+                 * uVar37 -= (sin(steer_raw) * tuning[0x28] * angular_velocity_yaw >> 12) / 0x28C
+                 * Use original's unsigned steer angle (undo port negation convention). */
+                {
+                    int32_t steer_raw = (-steer_angle) & 0xFFF;
+                    int32_t sin_sr = sin_fixed12(steer_raw);
+                    int32_t yaw_corr = (sin_sr * (int32_t)PHYS_S(actor, 0x28) * actor->angular_velocity_yaw) >> 12;
+                    yaw_corr /= ANGULAR_DIVISOR_W;
+                    v_steer_axis -= yaw_corr;
+                }
+
                 int32_t abs_vsa = v_steer_axis < 0 ? -v_steer_axis : v_steer_axis;
-                int32_t cap = abs_vsa << 1;
+                int32_t cap = abs_vsa;  /* RE parity: no <<1 doubling */
                 int32_t clamped = abs_bf < cap ? abs_bf : cap;
                 bf = (bf < 0) ? -(int32_t)clamped : (int32_t)clamped;
             }
@@ -1603,16 +1603,26 @@ void td5_physics_update_player(TD5_Actor *actor)
     /* --- 17. ApplyMissingWheelVelocityCorrection --- */
     td5_physics_missing_wheel_correction(actor);
 
-    /* --- 17a. Wheelspin override DISABLED.
-     * Ported from 0x00404E1C-0x00404E56 as:
-     *   surface_contact_flags = tuning[0x76]   // when gear==2 + high RPM + steer
-     * but that write was clobbering contact on the NON-driven axle every frame
-     * during hard throttle in 1st gear, which suppressed forces through the
-     * rear (or front, for FWD) axle and broke gear-up progression. Original
-     * behaviour needs a Frida trace to verify: possibly the write is gated by
-     * an additional condition we haven't decompiled, or surface_contact_flags
-     * has different bit semantics than we assumed.
-     * TODO: re-enable once Frida confirms the exact side effect + gating. */
+    /* --- 17a. Wheelspin override [CONFIRMED @ 0x00404E00-0x00404E1C].
+     * Three-condition gate: gear==2, RPM-derived wheelspin exceeds threshold,
+     * and throttle > 0x7F. When all true: surface_contact_flags = tuning[0x76]
+     * (drivetrain type byte) — marks only the driven axle in contact.
+     * uVar12 at this site is longitudinal_speed [UNCERTAIN — Ghidra reuses the
+     * variable name; steering_cmd>>8 is the alternative interpretation]. */
+    {
+        int32_t gear_ratio = (int32_t)PHYS_S(actor, 0x32);
+        if (gear_ratio != 0) {
+            int32_t rpm_norm = (((actor->engine_speed_accum - 400) * 0x1000) / 0x2d) / gear_ratio;
+            int32_t wheelspin = rpm_norm * 0x100 - actor->longitudinal_speed;
+            if (actor->current_gear == 2 &&
+                wheelspin > 0x12C00 &&
+                (int32_t)(uint8_t)actor->encounter_steering_cmd > 0x7F) {
+                TD5_LOG_I(LOG_TAG, "wheelspin: slot=%d rpm_norm=%d wsp=%d scf=%d->tuning[0x76]",
+                          actor->slot_index, rpm_norm, wheelspin, actor->surface_contact_flags);
+                actor->surface_contact_flags = (uint8_t)PHYS_S(actor, 0x76);
+            }
+        }
+    }
 
     /* Tire slip accumulators — drive the wheel billboard rotation visuals
      * via RenderVehicleWheelBillboards (0x446F00).
