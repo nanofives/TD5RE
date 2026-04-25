@@ -1563,44 +1563,54 @@ static void frontend_init_race_schedule(void) {
 
     /* RNG state for AI ext_id picks.
      *
-     * Original path (quickrace hook, non-trace):
+     * Original path (non-trace / live frontend):
      *   - InitializeFrontendResourcesAndState @ 0x00414740 calls srand(timeGetTime())
-     *     TWICE and then consumes at least one rand() via a `rand() % 7` CD-track
-     *     pick loop. That advances the CRT _holdrand to a time-dependent state.
-     *   - InitializeRaceSeriesSchedule @ 0x0040dac0 itself does NOT call srand;
-     *     it only STORES timeGetTime() into a global (g_randomSeedForRace).
-     *   - AI car picks consume _holdrand from that point.
+     *     TWICE, then burns 1+ rand() for the CD-track pick loop.
+     *   - InitializeRaceSeriesSchedule @ 0x0040dac0 does NOT call srand —
+     *     it only stores timeGetTime() into g_randomSeedForRace.
+     *   - AI car picks consume _holdrand from that time-dependent state.
      *
-     * Under /diff-race the Frida trace script seeds g_randomSeedForRace /
-     * g_raceSessionRandomSeed to 0x1A2B3C4D but does NOT touch CRT _holdrand
-     * (per-thread TLS offset unknown — see tools/frida_race_trace.js:40). So
-     * the original's AI picks are still driven by timeGetTime(), and the
-     * Frida-captured sequence ({1,0,3,4,5} in 2026-04-20 memory) is one
-     * non-deterministic sample.
-     *
-     * Port strategy:
-     *   - Outside /diff-race: srand(timeGetTime()) to get per-launch variety
-     *     and burn one rand() to approximate the original's CD-track pick.
-     *   - Under /diff-race (race_trace_enabled=1): srand with a fixed,
-     *     documented seed. This guarantees repeatable AI picks run-to-run
-     *     AND — paired with a matching Frida-side srand hook in a future
-     *     pass — lets both sides reach zero-delta. Without that Frida
-     *     companion, the two sides still differ in absolute car IDs but the
-     *     port's sequence is stable and comparable.
-     *
-     * [CONFIRMED @ 0x00414740, 0x0040dac0, 0x0042aa33 (the real srand via
-     *  mislabeled __set_new_handler).] */
+     * Trace path (race_trace_enabled=1 + Frida --trace):
+     *   - Frida hook (td5_quickrace_hook.js) calls _srand(0x1A2B3C4D) with
+     *     ZERO preamble rand() calls before InitializeRaceSeriesSchedule().
+     *   - Port calls srand(0x1A2B3C4D) with ZERO preamble burns.
+     *   - Both sides start AI-car selection from rand #1 → identical picks.
+     * [CONFIRMED @ td5_quickrace_hook.js:180-186, td5_quickrace.py:261] */
     if (g_td5.ini.race_trace_enabled) {
+        /* Under race_trace_enabled the Frida quickrace hook calls
+         * _srand(0x1A2B3C4D) IMMEDIATELY before InitializeRaceSeriesSchedule()
+         * with zero preamble rand() calls between them (hook bypasses
+         * InitializeFrontendResourcesAndState entirely).
+         * [CONFIRMED @ re/tools/quickrace/td5_quickrace_hook.js:180-186]
+         * [CONFIRMED @ re/tools/quickrace/td5_quickrace.py:261 — seed_crt=True
+         *  is auto-set when --trace is passed to the Python launcher]
+         *
+         * The port must therefore start from rand #1 (no preamble burns) to
+         * match the original's AI-car selection sequence. The 1-burn below
+         * that approximates the CD-track-pick loop must be SKIPPED here —
+         * it belonged to the non-trace path where InitializeFrontendResourcesAndState
+         * fires and consumes 1+ rand() calls before InitializeRaceSeriesSchedule.
+         *
+         * Skipping 1 burn under race_trace_enabled aligns the rand() index
+         * sequence for slots 1-5 with the Frida-captured original sequence,
+         * enabling the same AI cars to be selected on both sides and thus
+         * zero-delta spawn world_y at tick=0.
+         * [CONFIRMED via disassembly of InitializeRaceSession @ 0x0042aa5f-0x0042aa80:
+         *  srand(seed) at 0x42aa52 → 12 seed-table rand()s → 1 extra rand()
+         *  → loading screen pick — all happen AFTER AI car selection] */
         srand(0x1A2B3C4D);
+        /* No burn: Frida hook has no preamble rand() before schedule call */
     } else {
         srand(timeGetTime());
+        /* Approximate the original's CD-track-pick rand() burn from
+         * InitializeFrontendResourcesAndState @ 0x00414a78:
+         *   do { rand() % 7; } while (== g_selectedCdTrackIndex);
+         * With a fresh seed both sides start with cdTrack = -1 (default),
+         * so the first rand() always exits the loop. One rand() consumed.
+         * [CONFIRMED @ 0x00414740, 0x0040dac0, 0x0042aa33 (the real srand via
+         *  mislabeled __set_new_handler).] */
+        (void)rand();
     }
-    /* Approximate the original's CD-track-pick rand() burn from
-     * InitializeFrontendResourcesAndState @ 0x00414a78:
-     *   do { rand() % 7; } while (== g_selectedCdTrackIndex);
-     * With a fresh seed both sides start with cdTrack = -1 (default),
-     * so the first rand() always exits the loop. One rand() consumed. */
-    (void)rand();
 
     if (s_selected_game_type == 2) {
         /* === Path 1: Quick Race (gameType == 2, Era) [CONFIRMED @ 0x0040dac0] ===
