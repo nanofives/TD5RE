@@ -755,7 +755,47 @@ int td5_game_init_race_session(void) {
         g_td5.special_encounter_enabled = 0;
     }
 
+    /* ---- Step 0: Reseed CRT + fill race random seed table ---- */
+    /* Original InitializeRaceSession @ 0x0042aa51-0x0042aa80:
+     *   PUSH g_raceSessionRandomSeed; CALL srand          -- 0x42aa51
+     *   ESI = 0x4aadbc; loop: rand() → [ESI]; ESI+=4      -- 0x42aa5f-0x42aa6f
+     *   while ESI < 0x4aadec (12 entries = 0x30 bytes)
+     *   rand()                                             -- 0x42aa73 (extra)
+     *   EDX = EDX % 20; push EDX → sprintf "load%02d.tga" -- 0x42aa78-0x42aa80
+     *
+     * g_raceRandomSeedTable: 0x4aadbc..0x4aadec = 12 int32 entries.
+     * The 13th rand() (the extra one after the loop) provides the loading
+     * screen index via IDIV 20 — that rand() IS the display_loading_screen_tga
+     * call's rand() in the port (which calls rand()%20 internally).
+     *
+     * Port's g_raceSessionRandomSeed equivalent: use timeGetTime() outside
+     * trace mode (matches original's non-deterministic path); 0x1A2B3C4D
+     * under race_trace_enabled (matches the Frida hook's seed_crt path).
+     * [CONFIRMED @ 0x0042aa10 disassembly; InitializeRaceSession body]
+     *
+     * The 12 seed-table rand() calls advance CRT _holdrand state before the
+     * loading screen rand() and any subsequent race-runtime rand() consumers
+     * (BuildRaceResultsTable @ 0x40A8C0 uses rand() & 0x1F, etc.). */
+    {
+        uint32_t session_seed = g_td5.ini.race_trace_enabled
+                                ? (uint32_t)0x1A2B3C4D
+                                : (uint32_t)GetTickCount();
+        srand(session_seed);
+        /* Drain 12 entries to advance CRT state (port doesn't have the
+         * DAT_004aadbc global table but must step _holdrand the same way) */
+        for (int i = 0; i < 12; i++) {
+            (void)rand();
+        }
+        TD5_LOG_I(LOG_TAG,
+                  "InitRace step 0/19: CRT reseeded (seed=0x%08X) + 12 seed-table rands drained",
+                  session_seed);
+    }
+
     /* ---- Step 1: Display random loading screen TGA (rand()%20) ---- */
+    /* The 13th rand() (after the 12 seed-table fills above) is the one
+     * the original uses for the loading screen index via IDIV 20. This call
+     * internally does rand()%20, which is that 13th rand() in the sequence.
+     * [CONFIRMED @ 0x0042aa73-0x0042aa80: extra rand(); IDIV ECX(=0x14)] */
     display_loading_screen_tga();
     TD5_LOG_I(LOG_TAG, "InitRace step 1/19: loading screen displayed for track=%d",
               g_td5.track_index);
