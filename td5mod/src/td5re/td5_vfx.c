@@ -140,17 +140,21 @@ typedef struct VfxParticleSlot {
  * ======================================================================== */
 
 typedef struct VfxTireTrackSlot {
-    int16_t  vertices[4][3];        /* +0x00: 4 corner vertices (int16 x,y,z) = 24 bytes */
-    int16_t  prev_verts[4][3];      /* +0x18: previous frame corners = 24 bytes */
-    uint8_t  quad_data[0x98];       /* +0x30: sprite quad template data */
-    /* --- Control block at +0xD8 --- */
-    uint8_t  control;               /* +0xD8: bit0=allocated, bit1=has_geometry */
-    uint8_t  intensity;             /* +0xD9: current mark intensity (0-255) */
-    uint16_t lifetime;              /* +0xDA: tick counter since creation */
-    int32_t  anchor_x;              /* +0xDC: world X (24.8 fixed) */
-    int32_t  anchor_y;              /* +0xE0: world Y */
-    int32_t  anchor_z;              /* +0xE4: world Z */
-    uint32_t direction_hash;        /* +0xE8: heading angle hash */
+    /* [CONFIRMED @ 0x43EB50] Original stores 4 vertex pairs as int16 world-units.
+     * Port uses int32 24.8 fixed-point to avoid int16 overflow on large tracks
+     * (~300k world-unit coords on Moscow overflow int16 = 32767 max).
+     * vertices[0/1] = trailing edge (left/right), vertices[2/3] = leading edge (left/right). */
+    int32_t  vertices[4][3];        /* 4 corner vertices (24.8 FP x,y,z) */
+    int32_t  prev_anchor[3];        /* previous anchor position (24.8 FP x,y,z) */
+    uint8_t  quad_data[0x98];       /* sprite quad template data (layout matches original) */
+    /* --- Control block --- */
+    uint8_t  control;               /* bit0=allocated, bit1=has_geometry */
+    uint8_t  intensity;             /* current mark intensity (0-255) */
+    uint16_t lifetime;              /* tick counter since creation */
+    int32_t  anchor_x;              /* world X (24.8 fixed) [CONFIRMED @ 0x43EB50 +0xDC] */
+    int32_t  anchor_y;              /* world Y              [CONFIRMED @ 0x43EB50 +0xE0] */
+    int32_t  anchor_z;              /* world Z              [CONFIRMED @ 0x43EB50 +0xE4] */
+    uint32_t direction_hash;        /* heading angle hash   [CONFIRMED @ 0x43EB50 +0xE8] */
 } VfxTireTrackSlot;
 
 /* ========================================================================
@@ -1453,30 +1457,33 @@ void td5_vfx_update_tire_tracks(void) {
          * (vfx_update_tire_track_emitters). Here we only use the stored anchor
          * position which was set by vfx_set_emitter_anchor_from_wheel. */
 
-        /* Compute heading direction from position delta (24.8 fixed) */
-        int32_t dx = slot->anchor_x - (int32_t)(slot->prev_verts[0][0] << 8);
-        int32_t dz = slot->anchor_z - (int32_t)(slot->prev_verts[0][2] << 8);
+        /* Compute heading direction from position delta (24.8 fixed).
+         * [CONFIRMED @ 0x43EB50] Original: iVar15 = field_0xf0 - slot->anchor_x (24.8 delta).
+         * prev_anchor stores previous anchor in 24.8 directly. */
+        int32_t dx = slot->anchor_x - slot->prev_anchor[0];
+        int32_t dz = slot->anchor_z - slot->prev_anchor[2];
 
-        /* Compute perpendicular offset for strip width:
-         * width * cos/sin of heading, normalized by travel distance */
+        /* Compute perpendicular offset for strip width.
+         * [CONFIRMED @ 0x43EB50] Uses AngleFromVector12 + CosFixed12/SinFixed12.
+         * Port equivalent: normalize (dx,dz) and take perpendicular. */
         int32_t w = (int32_t)desc->width;
-        int32_t len = td5_isqrt(dx * dx + dz * dz);
+        /* Work in integer world units (>> 8 from 24.8) for isqrt precision */
+        int32_t dx8 = dx >> 8;
+        int32_t dz8 = dz >> 8;
+        int32_t len = td5_isqrt(dx8 * dx8 + dz8 * dz8);
         if (len > 0) {
-            int32_t perp_x = (-dz * w) / len;
-            int32_t perp_z = ( dx * w) / len;
+            /* Perpendicular vector in world units: (-dz, dx) normalized * w */
+            int32_t perp_x8 = (-dz8 * w) / len;   /* world units */
+            int32_t perp_z8 = ( dx8 * w) / len;
 
-            /* Build strip vertices: 4 corners forming a quad segment.
-             * vertices[0],[1] = previous position (trailing edge)
-             * vertices[2],[3] = current position (leading edge)
-             * Y coordinate = anchor Y for road-flush placement */
-            float anchor_fx = (float)slot->anchor_x * FP_TO_FLOAT;
-            float anchor_fy = (float)slot->anchor_y * FP_TO_FLOAT;
-            float anchor_fz = (float)slot->anchor_z * FP_TO_FLOAT;
-            float perp_fx = (float)perp_x * FP_TO_FLOAT;
-            float perp_fz = (float)perp_z * FP_TO_FLOAT;
+            /* Convert perp to 24.8 for vertex storage */
+            int32_t perp_x = perp_x8 << 8;
+            int32_t perp_z = perp_z8 << 8;
 
-            /* Copy current leading edge to trailing edge (previous frame's
-             * leading edge becomes this frame's trailing edge) */
+            /* [CONFIRMED @ 0x43EB50] Roll trailing edge from previous leading edge
+             * each tick, so the strip grows one segment per update. On first frame
+             * (no prior geometry) trailing edge = current anchor (degenerate single
+             * segment; safe because degenerate quads are invisible). */
             if (slot->control & 2) {
                 /* Already has geometry: shift leading edge to trailing */
                 slot->vertices[0][0] = slot->vertices[2][0];
@@ -1486,40 +1493,38 @@ void td5_vfx_update_tire_tracks(void) {
                 slot->vertices[1][1] = slot->vertices[3][1];
                 slot->vertices[1][2] = slot->vertices[3][2];
             } else {
-                /* First geometry frame: trailing edge = previous anchor */
-                float prev_fx = (float)slot->prev_verts[0][0];
-                float prev_fy = anchor_fy;
-                float prev_fz = (float)slot->prev_verts[0][2];
-                slot->vertices[0][0] = (int16_t)(prev_fx - perp_fx);
-                slot->vertices[0][1] = (int16_t)(prev_fy);
-                slot->vertices[0][2] = (int16_t)(prev_fz - perp_fz);
-                slot->vertices[1][0] = (int16_t)(prev_fx + perp_fx);
-                slot->vertices[1][1] = (int16_t)(prev_fy);
-                slot->vertices[1][2] = (int16_t)(prev_fz + perp_fz);
+                /* First geometry frame: trailing edge = current anchor ±perp
+                 * (will coincide with leading edge → degenerate but harmless) */
+                slot->vertices[0][0] = slot->anchor_x - perp_x;
+                slot->vertices[0][1] = slot->anchor_y;
+                slot->vertices[0][2] = slot->anchor_z - perp_z;
+                slot->vertices[1][0] = slot->anchor_x + perp_x;
+                slot->vertices[1][1] = slot->anchor_y;
+                slot->vertices[1][2] = slot->anchor_z + perp_z;
             }
 
-            /* Leading edge: current anchor +/- perpendicular */
-            slot->vertices[2][0] = (int16_t)(anchor_fx - perp_fx);
-            slot->vertices[2][1] = (int16_t)(anchor_fy);
-            slot->vertices[2][2] = (int16_t)(anchor_fz - perp_fz);
-            slot->vertices[3][0] = (int16_t)(anchor_fx + perp_fx);
-            slot->vertices[3][1] = (int16_t)(anchor_fy);
-            slot->vertices[3][2] = (int16_t)(anchor_fz + perp_fz);
+            /* Leading edge: current anchor +/- perpendicular (24.8) */
+            slot->vertices[2][0] = slot->anchor_x - perp_x;
+            slot->vertices[2][1] = slot->anchor_y;
+            slot->vertices[2][2] = slot->anchor_z - perp_z;
+            slot->vertices[3][0] = slot->anchor_x + perp_x;
+            slot->vertices[3][1] = slot->anchor_y;
+            slot->vertices[3][2] = slot->anchor_z + perp_z;
 
             slot->control |= 2; /* has_geometry flag */
         }
 
-        /* Save current anchor as previous for next frame delta computation */
-        slot->prev_verts[0][0] = (int16_t)((float)slot->anchor_x * FP_TO_FLOAT);
-        slot->prev_verts[0][2] = (int16_t)((float)slot->anchor_z * FP_TO_FLOAT);
+        /* Save current anchor as previous (24.8 directly — no scale conversion)
+         * [FIX] Previous code stored anchor/256 as int16 then tried to recover by <<8,
+         * which caused scale confusion. Now store 24.8 directly. */
+        slot->prev_anchor[0] = slot->anchor_x;
+        slot->prev_anchor[1] = slot->anchor_y;
+        slot->prev_anchor[2] = slot->anchor_z;
 
         /* Check if direction changed enough to warrant a new pool slot
-         * Original: ((old_heading ^ new_heading) & 0xFFFFFF80) != 0 */
+         * [CONFIRMED @ 0x43EB50] Original: ((old_heading ^ new_heading) & 0xFFFFFF80) != 0 */
         uint32_t new_hash = (uint32_t)(dx & 0xFFFFFF80);
         if ((slot->direction_hash ^ new_hash) & 0xFFFFFF80u) {
-            /* Direction changed: mark current slot as finalized and
-             * acquire a new one. The caller will handle reallocation
-             * on the next emitter update cycle. */
             slot->direction_hash = new_hash;
         }
     }
@@ -1538,12 +1543,18 @@ void td5_vfx_update_tire_tracks(void) {
  * and submits translucent quads with road-flush Y offset.
  */
 void td5_vfx_render_tire_tracks(void) {
-    /* TODO: tire track strip geometry has multiple bugs:
-     * - Degenerate quads (v0 == v2, zero-area strips)
-     * - Per-frame gravity sinks anchor_y indefinitely
-     * - No SKIDMARK texture in static.hed (FADEWHT fallback)
-     * Disabled until the strip builder in update_tire_tracks is fixed. */
-    return;
+    /* [CONFIRMED @ 0x43F210] RenderTireTrackPool: iterates 80 slots, ages lifetime,
+     * fades after 300 ticks, expires at 600 ticks, projects 4 world-space vertices
+     * via TransformVector3ByBasis + WriteTransformedShortVector, submits as translucent.
+     *
+     * FIXES applied:
+     * - [CONFIRMED @ 0x43F210] Original _DAT_0045d6ac is applied to view-space Y in
+     *   the quad template (screen-pixel bias), NOT world-space gravity. Port was
+     *   decrementing anchor_y per frame — REMOVED.
+     * - [CONFIRMED @ 0x43EB50] Vertex storage changed from int16 (overflow at >32767
+     *   world units, e.g. Moscow ~300k) to int32 24.8 FP.
+     * - [INFERRED] SKIDMARK not in static.hed; FADEWHT fallback is acceptable —
+     *   vertex color modulation makes marks dark regardless of texture. */
 
     extern void td5_render_submit_translucent(uint16_t *quad_data);
     extern float g_cameraBasis[9];
@@ -1555,10 +1566,6 @@ void td5_vfx_render_tire_tracks(void) {
     int tt_alive = 0, tt_submitted = 0;
 
     if (!s_tire_track_pool) return;
-
-    /* Per-frame gravity constant (applied to Y of each active mark).
-     * Original: subtracts a small gravity offset per frame. */
-    static const float PARTICLE_GRAVITY_PER_FRAME = 0.25f;
 
     /* Get camera position for view-space transformation */
     float cam_x, cam_y, cam_z;
@@ -1579,17 +1586,17 @@ void td5_vfx_render_tire_tracks(void) {
         if ((slot->control & 2) == 0) continue;
         tt_alive++;
 
-        /* Age the lifetime counter */
+        /* Age the lifetime counter [CONFIRMED @ 0x43F210] */
         slot->lifetime++;
 
-        /* Expire after 600 ticks */
+        /* Expire after 600 ticks [CONFIRMED @ 0x43F210] */
         if (slot->lifetime > TD5_VFX_TIRE_TRACK_LIFETIME) {
             slot->control = 0;
             continue;
         }
 
         /* Fade after 300 ticks: decrement intensity by 1 per tick.
-         * Skip fade if bit 3 (0x08) is set in control flags (persistent marks). */
+         * [CONFIRMED @ 0x43F210] bit 3 (0x08 in uVar4 >> 3) = no-fade flag. */
         if (slot->lifetime > TD5_VFX_TIRE_TRACK_FADE_START) {
             if (!(slot->control & 0x08)) {
                 if (slot->intensity > 0) {
@@ -1611,25 +1618,26 @@ void td5_vfx_render_tire_tracks(void) {
             continue;
 
         /* Project 4 world-space vertices to screen space.
-         * Each vertex is int16 (x,y,z) in float-scale world units.
-         * Transform: world -> camera-relative -> view (via basis matrix) -> screen */
+         * [CONFIRMED @ 0x43F210] Original calls WriteTransformedShortVector on
+         * each of the 4 slot vertex pairs. Port equivalent: FP_TO_FLOAT converts
+         * 24.8 to float world units, then camera-relative, then basis-rotated.
+         * [FIX] Vertices are now int32 24.8 FP (not int16) — no overflow on
+         * large tracks. Y uses anchor_y directly (no world-space gravity decrement). */
         float sx[4], sy[4], sz[4], srhw[4];
         int all_visible = 1;
 
         for (int v = 0; v < 4; v++) {
-            /* World position from int16 vertices */
-            float wx = (float)slot->vertices[v][0];
-            float wy = (float)slot->vertices[v][1] + TRACK_Y_OFFSET;
-            float wz = (float)slot->vertices[v][2];
+            /* World position from 24.8 fixed-point vertices [FIX: was int16] */
+            float wx = (float)slot->vertices[v][0] * FP_TO_FLOAT;
+            float wy = (float)slot->vertices[v][1] * FP_TO_FLOAT;
+            float wz = (float)slot->vertices[v][2] * FP_TO_FLOAT;
 
             /* Camera-relative */
             float cx = wx - cam_x;
             float cy = wy - cam_y;
             float cz = wz - cam_z;
 
-            /* Apply view rotation via the real per-frame camera basis
-             * (g_cameraBasis is written by td5_camera.c; the older
-             * g_renderBasisMatrix is a stale identity). */
+            /* Apply view rotation via the real per-frame camera basis */
             float vx = cx * g_cameraBasis[0] + cy * g_cameraBasis[1] + cz * g_cameraBasis[2];
             float vy = cx * g_cameraBasis[3] + cy * g_cameraBasis[4] + cz * g_cameraBasis[5];
             float vz = cx * g_cameraBasis[6] + cy * g_cameraBasis[7] + cz * g_cameraBasis[8];
@@ -1645,8 +1653,12 @@ void td5_vfx_render_tire_tracks(void) {
 
         if (!all_visible) continue;
 
-        /* Apply gravity to Y coordinates (subtract per-frame gravity constant) */
-        slot->anchor_y -= (int32_t)(PARTICLE_GRAVITY_PER_FRAME * 256.0f);
+        /* [FIX] Removed world-space gravity decrement (anchor_y -= ...).
+         * [CONFIRMED @ 0x43F210] Original applies _DAT_0045d6ac to the view-space
+         * Y floats INSIDE the quad template (+0x38/+0x64/+0xBC/+0x90), which is a
+         * per-frame screen-pixel Y drift, NOT a world-space vertical fall.
+         * In the port's projection path we do not need this at all — the wheel
+         * anchor Y is already at ground level and does not need adjustment. */
 
         uint8_t val = slot->intensity;
         if (val < 0x30) val = 0x30;
