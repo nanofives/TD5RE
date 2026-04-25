@@ -107,6 +107,9 @@ TD5_MeshHeader *td5_render_get_vehicle_mesh(int slot);
 
 /* --- Projection --- */
 void td5_render_configure_projection(int width, int height);
+/* Recompute frustum plane normals from current viewport + focal state.
+ * Equivalent to the original's RecomputeTracksideProjectionScale (0x43E900). */
+void td5_render_recompute_frustum_normals(void);
 
 /**
  * Transform a model-space point through the current render transform
