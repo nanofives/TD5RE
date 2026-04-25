@@ -371,10 +371,6 @@ void td5_ai_set_route_tables(const uint8_t *left_route, size_t left_size,
     td5_ai_refresh_route_state();
 }
 
-int32_t *td5_ai_get_route_state(int slot) {
-    return route_state(slot);
-}
-
 void td5_ai_refresh_route_state(void) {
     int slot_count = g_active_actor_count;
 
@@ -994,15 +990,6 @@ clamp_end:
  *          0 if coasting/accelerating (caller passes 0x20000).
  * ======================================================================== */
 
-/* Public accessor for per-slot route state block.
- * Used by td5_physics.c traffic heading computation.
- * Returns NULL if slot is out of range or state not initialised. */
-int32_t *td5_ai_get_route_state(int slot)
-{
-    if (!g_route_state_base) return NULL;
-    if (slot < 0 || slot >= TD5_MAX_TOTAL_ACTORS) return NULL;
-    return route_state(slot);
-}
 
 int td5_ai_update_route_threshold(int slot) {
     int32_t *rs = route_state(slot);
@@ -2658,11 +2645,3 @@ void td5_ai_update_actor(int slot) {
     }
 }
 
-/* Route state accessor — exposes the per-slot route state row to physics.
- * [CONFIRMED @ 0x4AFB60]: g_route_state_base + slot * RS_STRIDE_DWORDS */
-int32_t *td5_ai_get_route_state(int slot)
-{
-    if (!g_route_state_base) return NULL;
-    if (slot < 0 || slot >= TD5_MAX_TOTAL_ACTORS) return NULL;
-    return g_route_state_base + slot * RS_STRIDE_DWORDS;
-}
