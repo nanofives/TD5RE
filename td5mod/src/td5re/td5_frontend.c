@@ -1221,13 +1221,29 @@ static void frontend_cd_play(int track) {
 
 /* --- Text Rendering (simple bitmap font) --- */
 
+/*
+ * frontend_draw_string / frontend_draw_small_string
+ *
+ * Original binary draws into an offscreen DirectDraw surface via
+ * DrawFrontendLocalizedStringToSurface @ 0x00424560 (__cdecl, params:
+ *   (byte *str, int x, int y, int *surface)).
+ * The port has no offscreen surfaces for dialog boxes; dialog text is
+ * rendered live in td5_frontend_render_ui_rects via dedicated overlay
+ * functions (frontend_render_cup_failed_overlay etc.).
+ *
+ * These stubs exist for call-site compatibility only — they are intentionally
+ * no-ops because all dialog text paths have been moved to the render overlay.
+ * [CONFIRMED: call sites removed from screen state machines in favour of
+ *  render-side overlays added 2026-04-25]
+ */
 static void frontend_draw_string(int surface, const char *str_id, int x, int y) {
     (void)surface; (void)str_id; (void)x; (void)y;
-    /* Text rendering via font atlas — implemented in render_ui_rects below */
+    /* No-op: dialog text rendered live in td5_frontend_render_ui_rects */
 }
 
 static void frontend_draw_small_string(int surface, const char *str_id, int x, int y) {
     (void)surface; (void)str_id; (void)x; (void)y;
+    /* No-op: small-text paths rendered live in td5_frontend_render_ui_rects */
 }
 
 /* --- Draw Queue --- */
@@ -2108,6 +2124,10 @@ static void fe_draw_text_centered(float center_x, float y, const char *text,
 static void frontend_fill_rect(int layer, int x, int y, int w, int h, uint32_t color);
 static void fe_draw_option_arrows(int btn_idx, float sx, float sy);
 static void frontend_load_bg_gallery(void);
+/* Forward declarations for dialog text overlay renderers */
+static void frontend_render_legal_copyright_overlay(float sx, float sy);
+static void frontend_render_cup_failed_overlay(float sx, float sy);
+static void frontend_render_session_locked_overlay(float sx, float sy);
 
 static void frontend_begin_text_input(char *buffer, int capacity) {
     memset(&s_text_input_ctx, 0, sizeof(s_text_input_ctx));
@@ -4399,6 +4419,127 @@ static void fe_draw_quad(float x, float y, float w, float h,
     td5_plat_render_draw_tris(verts, 4, indices, 6);
 }
 
+/* ========================================================================
+ * frontend_render_legal_copyright_overlay
+ *
+ * Draws "TEST DRIVE 5 COPYRIGHT 1998" tiled down the screen.
+ * Original: DrawFrontendLocalizedStringSecondary @ 0x00424390 (__cdecl),
+ *   params (byte *str, uint x, int y). Called in a loop:
+ *     x = g_frontendCanvasW / 10  (≈64 at 640px)
+ *     y starts at 0x20 (32px), increments by 0x20 (32px) per row
+ *     loop condition: row < (g_frontendCanvasH - 0x20) / 0x20
+ * [CONFIRMED @ ScreenLegalCopyright 0x004274A0 case 0]
+ * [CONFIRMED: string "TEST DRIVE 5 COPYRIGHT 1998" @ 0x00466808 Language.dll]
+ * ======================================================================== */
+static void frontend_render_legal_copyright_overlay(float sx, float sy) {
+    /* Copyright string [CONFIRMED @ 0x00466808] */
+    static const char k_copyright[] = "TEST DRIVE 5 COPYRIGHT 1998";
+    /* x = canvasW/10 scaled; original uses integer pixel coords on 640px canvas */
+    float draw_x = (640.0f / 10.0f) * sx;  /* = 64 * sx [CONFIRMED] */
+    float row_h  = 32.0f * sy;              /* 0x20 pixel row height [CONFIRMED] */
+    float start_y = 32.0f * sy;             /* y starts at 0x20 = 32 [CONFIRMED] */
+    /* Number of rows: (canvasH - 0x20) >> 5 = (480 - 32) / 32 = 14 [CONFIRMED] */
+    int rows = (int)((480.0f - 32.0f) / 32.0f);
+    for (int r = 0; r < rows; r++) {
+        float y = start_y + (float)r * row_h;
+        fe_draw_text(draw_x, y, k_copyright, 0xFFFFFFFF, sx, sy);
+    }
+}
+
+/* ========================================================================
+ * frontend_render_cup_failed_overlay
+ *
+ * Draws the "Sorry / You Failed / To Win / [cup type]" dialog centered
+ * on screen. Original renders into a 0x198x0x70 (408x112) DirectDraw
+ * surface via DrawFrontendLocalizedStringToSurface x4; port draws live.
+ *
+ * Dialog position (states 4-5): center = (canvasW/2, canvasH/2),
+ *   overlay rect at (center_x - 0xa8, center_y - 0x8f) per:
+ *   QueueFrontendOverlayRect(uVar2-0xa8, uVar3-0x8f, ...) [CONFIRMED @ 0x4237F0]
+ *   = (320 - 168, 240 - 143) = (152, 97) on 640x480.
+ *
+ * Text Y offsets within dialog surface [CONFIRMED @ ScreenCupFailedDialog]:
+ *   SNK_SorryTxt       y = 0x00  → "SORRY"
+ *   SNK_YouFailedTxt   y = 0x1c  → "YOU FAILED"
+ *   SNK_ToWinTxt       y = 0x38  → "TO WIN"
+ *   SNK_RaceTypeText   y = 0x54  → cup type name (game_type 1-6)
+ *
+ * Race type names for game_type 1-6 from Language.dll [CONFIRMED]:
+ *   1=CHAMPIONSHIP CUP, 2=ERA CUP, 3=CHALLENGE CUP
+ *   4=PITBULL CUP,      5=MASTERS CUP, 6=ULTIMATE CUP
+ * ======================================================================== */
+static const char *k_cup_type_names[7] = {
+    "",                  /* 0: unused */
+    "CHAMPIONSHIP CUP",  /* 1 [CONFIRMED Language.dll] */
+    "ERA CUP",           /* 2 [CONFIRMED Language.dll] */
+    "CHALLENGE CUP",     /* 3 [CONFIRMED Language.dll] */
+    "PITBULL CUP",       /* 4 [CONFIRMED Language.dll] */
+    "MASTERS CUP",       /* 5 [CONFIRMED Language.dll] */
+    "ULTIMATE CUP",      /* 6 [CONFIRMED Language.dll] */
+};
+
+static void frontend_render_cup_failed_overlay(float sx, float sy) {
+    /* Only draw during states 4-5 (dialog visible) [CONFIRMED @ 0x4237F0] */
+    if (s_inner_state < 4) return;
+
+    /* Dialog box screen position:
+     * dialog_x = screen_cx - 0xa8 = 320 - 168 = 152 [CONFIRMED @ QueueFrontendOverlayRect]
+     * dialog_y = screen_cy - 0x8f = 240 - 143 = 97   [CONFIRMED]
+     * dialog_w = 0x198 = 408, dialog_h = 0x70 = 112  [CONFIRMED @ CreateTrackedFrontendSurface] */
+    float dlg_x = (320.0f - 168.0f) * sx;
+    float dlg_y = (240.0f - 143.0f) * sy;
+    float dlg_w = 408.0f * sx;
+    float dlg_h = 112.0f * sy;
+    float dlg_cx = dlg_x + dlg_w * 0.5f;  /* center x of dialog for text centering */
+
+    /* Dialog background — original BltColorFillToSurface fills to black [CONFIRMED] */
+    td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
+    fe_draw_quad(dlg_x, dlg_y, dlg_w, dlg_h, 0xCC000000u, -1, 0,0,1,1);
+
+    /* Text lines [CONFIRMED string values from Language/English/Language.dll] */
+    /* Line 0: "SORRY" at dialog-relative y=0x00 (0px) */
+    fe_draw_text_centered(dlg_cx, dlg_y + 0.0f  * sy, "SORRY",      0xFFFFFFFF, sx, sy);
+    /* Line 1: "YOU FAILED" at dialog-relative y=0x1c (28px) */
+    fe_draw_text_centered(dlg_cx, dlg_y + 28.0f * sy, "YOU FAILED", 0xFFFFFFFF, sx, sy);
+    /* Line 2: "TO WIN" at dialog-relative y=0x38 (56px) */
+    fe_draw_text_centered(dlg_cx, dlg_y + 56.0f * sy, "TO WIN",     0xFFFFFFFF, sx, sy);
+    /* Line 3: race type name at dialog-relative y=0x54 (84px) */
+    if (s_selected_game_type >= 1 && s_selected_game_type <= 6) {
+        fe_draw_text_centered(dlg_cx, dlg_y + 84.0f * sy,
+                              k_cup_type_names[s_selected_game_type], 0xFFFFFFFF, sx, sy);
+    }
+
+    td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
+}
+
+/* ========================================================================
+ * frontend_render_session_locked_overlay
+ *
+ * Draws "Sorry / Session Locked" dialog. Identical structure to
+ * CupFailed but only 2 text lines.
+ * [CONFIRMED @ ScreenSessionLockedDialog 0x0041D630]
+ * ======================================================================== */
+static void frontend_render_session_locked_overlay(float sx, float sy) {
+    /* Only draw during states 4-5 (dialog visible) [CONFIRMED @ 0x41D630] */
+    if (s_inner_state < 4) return;
+
+    float dlg_x = (320.0f - 168.0f) * sx;
+    float dlg_y = (240.0f - 143.0f) * sy;
+    float dlg_w = 408.0f * sx;
+    float dlg_h = 112.0f * sy;
+    float dlg_cx = dlg_x + dlg_w * 0.5f;
+
+    td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
+    fe_draw_quad(dlg_x, dlg_y, dlg_w, dlg_h, 0xCC000000u, -1, 0,0,1,1);
+
+    /* "SORRY" at y=0x00 [CONFIRMED Language.dll: SorryTxt = "SORRY"] */
+    fe_draw_text_centered(dlg_cx, dlg_y + 0.0f  * sy, "SORRY",          0xFFFFFFFF, sx, sy);
+    /* "SESSION LOCKED" at y=0x38=56 [CONFIRMED Language.dll: SeshLockedTxt = "SESSION LOCKED"] */
+    fe_draw_text_centered(dlg_cx, dlg_y + 56.0f * sy, "SESSION LOCKED", 0xFFFFFFFF, sx, sy);
+
+    td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
+}
+
 void td5_frontend_render_ui_rects(void) {
     int screen_w = 0, screen_h = 0;
     uint32_t now = td5_plat_time_ms();
@@ -4473,6 +4614,19 @@ void td5_frontend_render_ui_rects(void) {
         break;
     case TD5_SCREEN_RACE_RESULTS:
         frontend_render_race_results_overlay(sx, sy);
+        break;
+    /* Dialog overlays: text drawn live since port has no offscreen surfaces */
+    case TD5_SCREEN_LEGAL_COPYRIGHT:
+        /* "TEST DRIVE 5 COPYRIGHT 1998" tiled [CONFIRMED @ 0x004274A0] */
+        frontend_render_legal_copyright_overlay(sx, sy);
+        break;
+    case TD5_SCREEN_CUP_FAILED:
+        /* "Sorry / You Failed / To Win / [cup]" dialog [CONFIRMED @ 0x004237F0] */
+        frontend_render_cup_failed_overlay(sx, sy);
+        break;
+    case TD5_SCREEN_SESSION_LOCKED:
+        /* "Sorry / Session Locked" dialog [CONFIRMED @ 0x0041D630] */
+        frontend_render_session_locked_overlay(sx, sy);
         break;
     default:
         break;
@@ -5001,7 +5155,11 @@ static void Screen_LegalCopyright(void) {
     case 0: /* Load + draw */
         frontend_init_return_screen(TD5_SCREEN_LEGAL_COPYRIGHT);
         frontend_load_tga("Front_End/LegalScreen.tga", "Front_End/FrontEnd.zip");
-        /* Draw "TEST_DRIVE_5_COPYRIGHT_1998" */
+        /* Copyright text drawn live in render overlay via
+         * DrawFrontendLocalizedStringSecondary @ 0x00424390.
+         * Original renders "TEST DRIVE 5 COPYRIGHT 1998" [CONFIRMED @ 0x00466808]
+         * at x=canvasW/10, y=0x20 (32px) and repeats each row down the screen.
+         * Port renders it in frontend_render_legal_copyright_overlay below. */
         s_anim_tick = 0;
         s_inner_state = 1;
         break;
@@ -7947,8 +8105,15 @@ static void Screen_CupFailed(void) {
         frontend_init_return_screen(TD5_SCREEN_CUP_FAILED);
         TD5_LOG_D(LOG_TAG, "CupFailed: init");
         frontend_load_tga("Front_End/MainMenu.tga", "Front_End/FrontEnd.zip");
-        /* Create 0x198 x 0x70 dialog surface */
-        /* Draw 4 lines: Sorry / You Failed / To Win / [race type name] */
+        /* Dialog 0x198x0x70 (408x112) rendered live in
+         * frontend_render_cup_failed_overlay (called from render_ui_rects).
+         * Original: CreateTrackedFrontendSurface(0x198,0x70) @ DAT_0049628c,
+         * then DrawFrontendLocalizedStringToSurface x4 for:
+         *   SNK_SorryTxt     y=0x00 ("SORRY")           [CONFIRMED Language.dll]
+         *   SNK_YouFailedTxt y=0x1c ("YOU FAILED")       [CONFIRMED Language.dll]
+         *   SNK_ToWinTxt     y=0x38 ("TO WIN")           [CONFIRMED Language.dll]
+         *   SNK_RaceTypeText y=0x54 ([cup type name])    [CONFIRMED @ 0x4237F0]
+         * [CONFIRMED @ ScreenCupFailedDialog 0x004237F0] */
         frontend_create_button("OK", -100, 0, 100, 0x20);
         s_anim_tick = 0;
         s_inner_state = 1;
@@ -8090,8 +8255,13 @@ static void Screen_SessionLocked(void) {
         frontend_init_return_screen(TD5_SCREEN_SESSION_LOCKED);
         TD5_LOG_D(LOG_TAG, "SessionLocked: init");
         frontend_load_tga("Front_End/MainMenu.tga", "Front_End/FrontEnd.zip");
-        /* Create 0x198 x 0x70 dialog */
-        /* Draw: SNK_SorryTxt (y=0), SNK_SeshLockedTxt (y=0x38) */
+        /* Dialog 0x198x0x70 (408x112) rendered live in
+         * frontend_render_session_locked_overlay (called from render_ui_rects).
+         * Original: identical structure to CupFailed — CreateTrackedFrontendSurface,
+         * then DrawFrontendLocalizedStringToSurface x2 for:
+         *   SNK_SorryTxt     y=0x00 ("SORRY")          [CONFIRMED Language.dll]
+         *   SNK_SeshLockedTxt y=0x38 ("SESSION LOCKED") [CONFIRMED Language.dll]
+         * [CONFIRMED @ ScreenSessionLockedDialog 0x0041D630] */
         frontend_create_button("OK", -100, 0, 100, 0x20);
         s_anim_tick = 0;
         s_inner_state = 1;
