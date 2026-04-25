@@ -1745,70 +1745,84 @@ void td5_physics_update_ai(TD5_Actor *actor)
     int32_t speed_limit = (int32_t)PHYS_S(actor, 0x74) << 8;
     int32_t abs_speed = v_long < 0 ? -v_long : v_long;
 
-    /* On-ground vs airborne gate — mirrors the update_player restructure.
-     * surface_contact_flags != 0 → on-ground: drive or brake torque.
-     * else → airborne: engine update only, no wheel force.
+    /* Drivetrain dispatch — verbatim port of UpdateAIVehicleDynamics @ 0x004051A0.
+     * Original has NO surface_contact_flags gate; the flag is ONLY written in
+     * UpdatePlayerVehicleDynamics and is always 0 for AI slots.
+     * [CONFIRMED via Ghidra decomp 0x00404EC0 — no such branch exists]
      *
-     * Previous code used (!brake && throttle != 0) and fell into a coast
-     * path with a -32 fallback that produced lateral impulses on idle
-     * stationary AI cars at sim_tick=1 (slot 1 Cluster A residual observed
-     * 2026-04-11). The original's 0x404EC0 gates drivetrain on ground
-     * contact and only uses -32 as a local engine-decel scalar, never as
-     * a wheel-drive input. */
-    if (actor->surface_contact_flags != 0) {
-        /* --- ON-GROUND branch --- */
-        /* Original 0x404EC0 skips gear+engine when throttle==0 */
-        if (actor->encounter_steering_cmd != 0) {
+     * Original branch structure:
+     *   if (brake_flag == 0) {
+     *       if (throttle != 0) { gear/engine/drive; goto LAB_00405285; }
+     *       LAB_004051c7: throttle = -32;  // idle decel scalar
+     *   } else if (throttle == 0) { goto LAB_004051c7; }
+     *   // brake path: uses 'throttle' (may be -32 for idle)
+     *   UpdateEngineSpeedAccumulator();
+     *   front_drive = clamp(Wr * throttle / 256, -(|v_long|/2), +(|v_long|/2)) / 2
+     *   rear_drive  = clamp(Wf * throttle / 256, -(|v_long|/2), +(|v_long|/2)) / 2
+     *   LAB_00405285: [bicycle solve uses front_drive * 2, rear_drive * 2]
+     *
+     * The -32 idle path: stationary car has v_long=0 → half_spd clamp = 0,
+     * so both front/rear_drive end up 0. No net force for idle stationary AI. */
+    if (!actor->brake_flag) {
+        if (throttle != 0) {
+            /* Drive path: gear shift, engine update, torque */
             td5_physics_auto_gear_select(actor);
             td5_physics_update_engine_speed(actor);
-        }
-
-        if (!actor->brake_flag) {
-            /* Drive path: compute_drive_torque returns 0 at idle throttle
-             * via the actor+0x33e multiply in ComputeDriveTorqueFromGearCurve
-             * (0x42F030). An idle stationary AI gets front/rear_drive=0. */
             drive_torque = td5_physics_compute_drive_torque(actor);
-            if (abs_speed <= speed_limit) {
-                front_drive = drive_torque >> 1;
-                rear_drive  = drive_torque >> 1;
+            /* Original @ 0x40521C: local_40 = (torque + (torque>>31 & 3)) >> 2
+             * local_3c = local_40; then skips to LAB_00405285 which does *2. */
+            front_drive = (drive_torque + ((drive_torque >> 31) & 3)) >> 2;
+            rear_drive  = front_drive;
+            if (v_long > speed_limit) {
+                front_drive = 0;
+                rear_drive  = 0;
             }
+            /* Fall through to bicycle (goto LAB_00405285 in original) */
         } else {
-            /* Brake path: force OPPOSES motion direction.
-             *
-             * Previous logic took `bf = brake_front * throttle / 256` literally.
-             * With AI brake (throttle=-256), bf was always negative regardless
-             * of motion direction. Once v_long crossed zero through deceleration,
-             * the sustained negative force kept accelerating the car backward
-             * — a runaway loop when AI script opcode 8 (wait-for-stop) was
-             * waiting on |v_long| < 0x100.
-             *
-             * Compute brake magnitude from |throttle|, apply against motion.
-             * Existing half_spd clamp still bounds force to a fraction of
-             * current speed, so braking smoothly approaches zero as car
-             * stops. */
-            int32_t abs_throttle = throttle < 0 ? -throttle : throttle;
-            int32_t bf_mag = (brake_front * abs_throttle) >> 8;
-            int32_t br_mag = (brake_rear  * abs_throttle) >> 8;
-            int32_t half_spd = abs_speed >> 1;
-            if (bf_mag > half_spd) bf_mag = half_spd;
-            if (br_mag > half_spd) br_mag = half_spd;
-            int32_t bf = (v_long > 0) ? -bf_mag : bf_mag;
-            int32_t br = (v_long > 0) ? -br_mag : br_mag;
-            front_drive = bf >> 1;
-            rear_drive  = br >> 1;
+            /* Idle: set throttle = -32 (LAB_004051c7), fall into brake path */
+            throttle = -0x20;
+            goto ai_brake_path;
         }
     } else {
-        /* --- AIRBORNE branch ---
-         * Only update engine RPM; leave front_drive / rear_drive at 0. */
+        if (throttle == 0) {
+            /* brake_flag set but throttle=0: also use -32 (LAB_004051c7) */
+            throttle = -0x20;
+        }
+    ai_brake_path:;
+        /* Brake path [original @ 0x004051D5-0x00405282].
+         * Original formula: local_40 = (Wr*throttle + (Wr*throttle>>31 & 0xFF)) >> 8
+         *   then clamp to [-|v_long|/2, +|v_long|/2], divide by 2.
+         * Same for local_3c with Wf (note: Wr=rear, Wf=front — swapped vs names).
+         * Verified: original uses rear_weight for local_40 (local_3c divides by 2
+         * in the final step), front_weight for local_3c. */
         td5_physics_update_engine_speed(actor);
+        {
+            int32_t half_spd = abs_speed >> 1;
+            /* local_3c = clamp((Wr * throttle) >> 8, -half_spd, half_spd) / 2 */
+            int32_t rc = rear_weight * throttle;
+            int32_t r_raw = (rc + ((rc >> 31) & 0xFF)) >> 8;
+            if (r_raw > half_spd)  r_raw =  half_spd;
+            if (r_raw < -half_spd) r_raw = -half_spd;
+            rear_drive = r_raw / 2;
+            /* local_40 = clamp((Wf * throttle) >> 8, -(|v_long|/2), +(|v_long|/2)) / 2 */
+            int32_t fc = front_weight * throttle;
+            int32_t f_raw = (fc + ((fc >> 31) & 0xFF)) >> 8;
+            int32_t half_vlong = v_long / 2;
+            if (half_vlong < 0) half_vlong = -half_vlong;
+            if (f_raw > half_vlong)  f_raw =  half_vlong;
+            if (f_raw < -half_vlong) f_raw = -half_vlong;
+            front_drive = f_raw / 2;
+        }
     }
+    /* LAB_00405285: original doubles both values before bicycle solve */
 
-    /* Double drive forces for bicycle model input [CONFIRMED @ 0x405285].
-     * Original has drive = torque/4 pre-LAB, then *2 = drive/2 post-LAB.
-     * Port's pre-LAB had drive = torque/2, so undo one of the *2 by /2 to
-     * match original's drive/2 magnitude entering the bicycle solve. */
-    front_drive = front_drive;  /* iVar18 (from local_40 * 2 in original) */
-    rear_drive  = rear_drive;   /* local_3c (from local_3c * 2) */
+    /* LAB_00405285: original doubles local_40 (front) and local_3c (rear)
+     * before the bicycle solve [CONFIRMED @ 0x00405285].
+     * The drive path already stored torque/4; brake path stored clamp/2.
+     * Both get *2 here, yielding torque/2 or clamp/1 respectively. */
+    front_drive = front_drive * 2;  /* iVar18 = local_40 * 2 */
+    rear_drive  = rear_drive  * 2;  /* local_3c = local_3c * 2 */
+
 
     /* --- 7. Coupled bicycle model lateral forces — VERBATIM port of
      * FUN_00404EC0 @ 0x00405285-0x004054F3. Variable names match the
