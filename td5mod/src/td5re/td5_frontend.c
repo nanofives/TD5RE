@@ -8277,9 +8277,14 @@ static void Screen_PostRaceHighScore(void) {
 
     case 8: /* Slide-out (~500ms) */
         if (frontend_update_timed_animation(16, 267) >= 1.0f) {
-            /* Return to caller or init race */
+            /* Return to caller or init race.
+             * When s_return_screen == -1: original calls InitializeFrontendDisplayModeState
+             * which unconditionally calls WritePackedConfigTd5 to flush high-score table.
+             * [CONFIRMED @ 0x00413b60 / 0x00414aa0] */
             if (s_return_screen == -1) {
                 frontend_init_race_schedule();
+                TD5_LOG_I(LOG_TAG, "PostRaceHighScore: writing config (high-score flush)");
+                td5_save_write_config(NULL);
             } else {
                 td5_frontend_set_screen(TD5_SCREEN_MAIN_MENU);
             }
@@ -8931,10 +8936,16 @@ static void Screen_CupWon(void) {
         TD5_LOG_D(LOG_TAG, "CupWon: init -- deleting CupData.td5");
         frontend_delete_cup_data();
 
-        /* Apply cup unlock progression and save to Config.td5 */
+        /* Apply cup unlock progression and save to Config.td5.
+         * Original AwardCupCompletionUnlocks checks companion_state_2 == 1 (player
+         * finished, not DNF) before proceeding. [CONFIRMED @ 0x00421da0] */
         {
-            int new_unlocks = td5_save_apply_cup_unlocks((int)s_selected_game_type);
-            TD5_LOG_I(LOG_TAG, "CupWon: game_type=%d new_unlocks=%d", (int)s_selected_game_type, new_unlocks);
+            int new_unlocks = 0;
+            if (td5_game_slot_is_finished(0)) {
+                new_unlocks = td5_save_apply_cup_unlocks((int)s_selected_game_type);
+            }
+            TD5_LOG_I(LOG_TAG, "CupWon: game_type=%d finished=%d new_unlocks=%d",
+                      (int)s_selected_game_type, td5_game_slot_is_finished(0), new_unlocks);
 
             /* Persist updated unlock state */
             td5_save_write_config(NULL);
