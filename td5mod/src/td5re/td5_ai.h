@@ -88,9 +88,6 @@ void td5_ai_pre_tick(void);
 /* --- Per-actor AI dispatch (call before physics for each slot) --- */
 void td5_ai_update_actor(int slot);
 
-/* --- Route state accessor (used by traffic heading calc in physics) --- */
-int32_t *td5_ai_get_route_state(int slot);
-
 /* ========================================================================
  * Route State Array (per-actor, stride 0x47 dwords = 0x11C bytes)
  *

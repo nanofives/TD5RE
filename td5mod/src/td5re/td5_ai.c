@@ -112,6 +112,8 @@ static inline int32_t *route_state(int slot) {
 
 /* Public accessor used by td5_physics.c */
 int32_t *td5_ai_get_route_state(int slot) {
+    if (slot < 0 || slot >= TD5_MAX_TOTAL_ACTORS || !g_route_state_base)
+        return NULL;
     return route_state(slot);
 }
 
@@ -2046,13 +2048,39 @@ void td5_ai_update_traffic_route_plan(int slot) {
             g_traffic_recovery_stage[slot] = 1;
     }
 
-    /* --- Stage 3: Edge-of-track / recovery bail-out --- */
+    /* --- Stage 3: Edge-of-track / recovery bail-out ---
+     * [CONFIRMED @ 0x00435F48-0x00435F68]
+     *
+     * Original condition (Ghidra):
+     *   sVar5 = field_0x80 (ACTOR_SPAN_RAW)
+     *   bail if: ((sVar5 < 3 || g_trackTotalSpanCount - 8 <= sVar5) &&
+     *             gActorRouteTableSelector == 0)
+     *         || (recovery_stage != 0 || DAT_004afc50 != 0)
+     *
+     * The original bails when:
+     *   - Span is near start (<3) or near main-road end (within 8 spans)
+     *     AND the actor is on the canonical/LEFT route (selector==0).
+     *     This prevents traffic from running off the end of the main ring
+     *     OR from looping back if it somehow reaches span 0/1.
+     *     Actors on the alternate/RIGHT route (selector!=0) skip this gate —
+     *     they may legitimately sit at low span numbers if the branch exits
+     *     at a low main-road index.
+     *   - OR the actor is in recovery or has a pending encounter override.
+     *
+     * The previous port used `span <= 1` unconditionally, which is wrong:
+     *   - It fired too early (braking at span==2, original allows down to 3)
+     *   - It did NOT gate on route-table-selector, so actors on RIGHT route
+     *     near span 0 braked incorrectly at junction exits.
+     *   - It did NOT catch the near-end case (ring_length - 8), so actors
+     *     sometimes drove off the sentinel into garbage spans. */
     {
-        int16_t span = ACTOR_I16(actor, ACTOR_SPAN_RAW);
+        int16_t span_raw = ACTOR_I16(actor, ACTOR_SPAN_RAW);
         int recovery = g_traffic_recovery_stage[slot];
+        int ring_length = td5_track_get_ring_length();
+        int near_edge = (span_raw < 3 || (ring_length > 0 && span_raw >= ring_length - 8));
+        int on_canonical = (rs[RS_ROUTE_TABLE_SELECTOR] == 0);
 
-        /* If near span 0/end, on alternate route, already recovering, or special */
-        if (span <= 1 || recovery != 0 || rs[RS_RECOVERY_STAGE] != 0) {
+        if ((near_edge && on_canonical) || recovery != 0 || rs[RS_RECOVERY_STAGE] != 0) {
             /* Brake and return */
             ACTOR_U8(actor, ACTOR_BRAKE_FLAG) = 1;
             ACTOR_I16(actor, ACTOR_ENCOUNTER_STEER) = 0;
@@ -2091,20 +2119,36 @@ void td5_ai_update_traffic_route_plan(int slot) {
      * racer-only behaviour inside 0x00434800.
      *
      * Traffic peek-ahead is span+1 forward / span-1 reverse (racer uses span+4).
-     * Same alt-route remap + same decomposition as racer AI. Target sub_lane
-     * is the current actor sub_lane (+0x8C) — the strip-type-dependent ±1
-     * adjustments at 0x004361B8-0x0043621B/0x0043627C-0x004362FB only fire on
-     * lane-count mismatches between adjacent strips, which are rare and
-     * covered by the common-path default. */
+     *
+     * BUG FIXED (2026-04-25): The original uses field_0x82 (ACTOR_SPAN_NORMALIZED)
+     * for the jump-table lookup, NOT field_0x80 (ACTOR_SPAN_RAW). On branch roads
+     * the raw span holds the branch index (>= ring_length) while the normalized
+     * span is the main-road equivalent — using raw caused the remap walker to miss
+     * every entry (branch indices are always outside the main-road range_lo values).
+     * [CONFIRMED @ 0x00435F6A: Ghidra "iVar14 = field_0x82; iVar8 = iVar14 + 1"]
+     *
+     * BUG FIXED (2026-04-25): When the remap walker finds a branch match AND the
+     * actor's raw span (field_0x80) is still on main road (< ring_length) AND the
+     * branch target span is also on main road (<= ring_length), the original adjusts
+     * sub_lane by (current_sub_lane - cur_span_lane_count). This accounts for the
+     * lane-count difference between the junction span and the branch entry span so
+     * that the traffic actor aims at the correct sub_lane cell.
+     * [CONFIRMED @ 0x004361C0-0x004361D8: Ghidra "local_4 -= uVar6" path]
+     *
+     * Sub_lane ±1 adjustments at 0x004361B8/0x0043627C only fire on lane-count
+     * mismatches between adjacent strips, which are rare. */
     {
-        int16_t span_cur = ACTOR_I16(actor, ACTOR_SPAN_RAW);
+        int16_t span_norm = ACTOR_I16(actor, ACTOR_SPAN_NORMALIZED); /* field_0x82 */
+        int16_t span_raw  = ACTOR_I16(actor, ACTOR_SPAN_RAW);        /* field_0x80 */
         int span_count = td5_track_get_span_count();
-        if (span_count > 0 && span_cur >= 0) {
+        int ring_length = td5_track_get_ring_length();
+        if (span_count > 0 && span_norm >= 0) {
             int lin_span;
             if (polarity == 0) {
-                lin_span = ((int)span_cur + 1) % span_count;
+                /* [CONFIRMED @ 0x00435F6A] iVar14=field_0x82; iVar8 = iVar14 + 1 */
+                lin_span = ((int)span_norm + 1) % span_count;
             } else {
-                lin_span = (int)span_cur - 1;
+                lin_span = (int)span_norm - 1;
                 if (lin_span < 0) lin_span += span_count;
             }
 
@@ -2112,9 +2156,26 @@ void td5_ai_update_traffic_route_plan(int slot) {
             int target_span = td5_track_apply_target_span_remap(lin_span,
                                                                  is_canonical);
 
-            /* Target sub_lane: matches the original's default (common) branch
-             * at LAB_0043614c where `local_4 = current_sub_lane`. */
+            /* Target sub_lane: start with current sub_lane (default path). */
             int target_sub_lane = (int)ACTOR_U8(actor, ACTOR_SUB_LANE_INDEX);
+
+            /* [CONFIRMED @ 0x004361B8-0x004361D8]
+             * When the remap found a branch target AND the actor is still on the
+             * main road (raw < ring_length) AND the target is also within main road
+             * bounds (target <= ring_length), adjust sub_lane by subtracting the
+             * current span's lane count. This shifts the target cell to match
+             * the branch entry sub_lane index.
+             * Condition "iVar7 <= g_trackTotalSpanCount" in Ghidra uses <=, meaning
+             * the branch target must be <= ring_length (inclusive, since ring_length
+             * is the first branch index). */
+            if (target_span != lin_span &&          /* remap actually fired */
+                (int)span_raw < ring_length &&       /* actor on main road */
+                target_span <= ring_length) {        /* target on/at branch edge */
+                int cur_lane_count = td5_track_get_span_lane_count((int)span_norm);
+                if (cur_lane_count > 0 && target_sub_lane >= cur_lane_count) {
+                    target_sub_lane -= cur_lane_count;
+                }
+            }
 
             int target_x = 0, target_y = 0, target_z = 0;
 
@@ -2143,10 +2204,10 @@ void td5_ai_update_traffic_route_plan(int slot) {
 
                 if ((g_ai_frame_counter % 60u) == 0u) {
                     TD5_LOG_I(LOG_TAG,
-                              "traffic_dev: slot=%d span=%d tspan=%d sublane=%d "
+                              "traffic_dev: slot=%d raw=%d norm=%d tspan=%d sublane=%d "
                               "ta=0x%X hd=0x%X delta=%d L=%d R=%d",
-                              slot, (int)span_cur, target_span, target_sub_lane,
-                              target_angle, actor_heading, delta,
+                              slot, (int)span_raw, (int)span_norm, target_span,
+                              target_sub_lane, target_angle, actor_heading, delta,
                               rs[RS_LEFT_DEVIATION], rs[RS_RIGHT_DEVIATION]);
                 }
             }
