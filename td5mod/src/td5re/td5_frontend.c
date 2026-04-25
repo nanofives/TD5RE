@@ -131,6 +131,37 @@ static int  s_start_race_request;       /* 0x495248               */
 static int  s_start_race_confirm;       /* 0x49524C               */
 static int  s_attract_idle_counter;     /* g_attractModeIdleCounter */
 static uint32_t s_attract_idle_timestamp;
+static int  s_attract_demo_active;      /* g_attractModeDemoActive @ 0x495254 */
+
+/* -----------------------------------------------------------------------
+ * Screen [19] MusicTestExtras — state shared between state machine + render
+ * ----------------------------------------------------------------------- */
+static int s_music_test_track_idx;      /* 0..11; mirrors g_selectedCdTrackIndex @ 0x465e14 */
+
+/* Band names and song titles for tracks 0..11.
+ * [CONFIRMED @ Ghidra 0x418460]: PTR_s_GRAVITY_KILLS_00465e1c (band) and
+ * PTR_s_FALLING_00465e58 (title) pointer tables, decoded from binary data. */
+static const char * const k_music_test_band[12] = {
+    "GRAVITY KILLS", "KMFDM",        "PITCHSHIFTER", "PITCHSHIFTER",
+    "JUNKIE XL",     "FEAR FACTORY", "FEAR FACTORY", "GRAVITY KILLS",
+    "KMFDM",         "PITCHSHIFTER", "PITCHSHIFTER", "PITCHSHIFTER"
+};
+static const char * const k_music_test_title[12] = {
+    "FALLING",           "ANARCHY",     "GENIUS",            "WYSIWYG",
+    "DEF BEAT",          "21ST CENTURY","GENETIC BLUEPRINT",  "FALLING (DUB)",
+    "MEGALOMANIAC (DUB)","GENIUS (DUB)","MICROWAVED (DUB)",   "WYSIWYG (DUB)"
+};
+
+/* Live-rendered overlay strings — updated whenever the track selection or
+ * "Now Playing" state changes.  The original drew into offscreen DDraw
+ * surfaces; the port renders these strings every frame via the UI-rect pass.
+ * Format: track-label  = "%d. %s" (track# 1-based + band name)   [CONFIRMED @ 0x465f74]
+ *         now-playing panel rows at y=0/0x28/0x50                 [CONFIRMED @ 0x418571]
+ */
+static char s_music_test_track_label[64];   /* e.g. "1. GRAVITY KILLS" */
+static char s_music_test_now_band[64];      /* band name of currently playing track */
+static char s_music_test_now_title[64];     /* song title of currently playing track */
+static int  s_music_test_playing_set;       /* 1 once CDPlay has been called */
 static int  s_input_ready;              /* DAT_004951e8            */
 static int  s_button_index;             /* currently pressed button */
 static int  s_arrow_input;              /* DAT_0049b690 arrow direction */
@@ -3564,6 +3595,66 @@ static void frontend_render_sound_options_overlay(float sx, float sy) {
     td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
 }
 
+static void frontend_music_test_update_track_label(void) {
+    int idx = s_music_test_track_idx;
+    if (idx < 0)  idx = 0;
+    if (idx > 11) idx = 11;
+    /* format: "%d. %s" [CONFIRMED @ 0x465f74: "%d. %s"] */
+    snprintf(s_music_test_track_label, sizeof(s_music_test_track_label),
+             "%d. %s", idx + 1, k_music_test_band[idx]);
+}
+
+static void frontend_music_test_update_now_playing(int idx) {
+    if (idx < 0)  idx = 0;
+    if (idx > 11) idx = 11;
+    snprintf(s_music_test_now_band,  sizeof(s_music_test_now_band),
+             "%s", k_music_test_band[idx]);
+    snprintf(s_music_test_now_title, sizeof(s_music_test_now_title),
+             "%s", k_music_test_title[idx]);
+    s_music_test_playing_set = 1;
+}
+
+/* ========================================================================
+ * Music Test overlay: track-name label + Now Playing panel.
+ *
+ * Original (0x418460) drew into two offscreen DDraw surfaces:
+ *   DAT_0049628c  (0x170 x 0x28)  — track-name label, format "%d. %s"
+ *   DAT_00496400  (0x170 x 0x78)  — now-playing panel:
+ *       y=0:    "NOW PLAYING" header
+ *       y=0x28: band name
+ *       y=0x50: song title
+ * Port renders these as live text in the UI-rect pass (no offscreen surfaces).
+ *
+ * Layout derived from QueueFrontendOverlayRect calls in case 4/5/6:
+ *   track-name panel: x = canvasW/2 - 0x32,  y = canvasH/2 - 0x8f  (≈320-50, 240-143)
+ *   now-playing panel:x = canvasW/2 - 0x0c,  y = canvasH/2 - 0x3f  (≈320-12, 240-63)
+ * [CONFIRMED @ 0x418527-0x41853E: QueueFrontendOverlayRect offsets]
+ * ======================================================================== */
+static void frontend_render_music_test_overlay(float sx, float sy) {
+    float cx = 320.0f * sx;
+    float cy = 240.0f * sy;
+
+    if (!s_anim_complete) return;
+
+    /* Track-name label: drawn at track-name surface top-left */
+    if (s_music_test_track_label[0]) {
+        float x = (cx - 0x32 * sx);
+        float y = (cy - 0x8f * sy);
+        fe_draw_text(x, y, s_music_test_track_label, 0xFFFFFFFF, sx, sy);
+    }
+
+    /* Now-playing panel: shown after user confirms a track */
+    if (s_music_test_playing_set) {
+        float x  = cx - 0x0c * sx;
+        float y0 = cy - 0x3f * sy;
+        float y1 = y0 + 0x28 * sy;
+        float y2 = y0 + 0x50 * sy;
+        fe_draw_text(x, y0, "NOW PLAYING", 0xFFCCCCCC, sx * 0.8f, sy * 0.8f);
+        fe_draw_text(x, y1, s_music_test_now_band,  0xFFFFFFFF, sx, sy);
+        fe_draw_text(x, y2, s_music_test_now_title, 0xFFFFFFFF, sx, sy);
+    }
+}
+
 static void frontend_render_two_player_options_overlay(float sx, float sy) {
     const char *on_off[] = { "OFF", "ON" };
 
@@ -4619,6 +4710,9 @@ void td5_frontend_render_ui_rects(void) {
     case TD5_SCREEN_SOUND_OPTIONS:
         frontend_render_sound_options_overlay(sx, sy);
         break;
+    case TD5_SCREEN_MUSIC_TEST:
+        frontend_render_music_test_overlay(sx, sy);
+        break;
     case TD5_SCREEN_DISPLAY_OPTIONS:
         frontend_render_display_options_overlay(sx, sy);
         break;
@@ -4893,6 +4987,7 @@ int td5_frontend_init(void) {
     s_start_race_confirm = 0;
     s_attract_idle_counter = 0;
     s_attract_idle_timestamp = td5_plat_time_ms();
+    s_attract_demo_active = 0;
     s_flow_context = 0;
     s_selected_game_type = -1;
     s_race_within_series = 0;
@@ -5113,13 +5208,16 @@ static void Screen_AttractModeDemo(void) {
     switch (s_inner_state) {
     case 0: /* Set attract mode flag */
         frontend_init_return_screen(TD5_SCREEN_ATTRACT_MODE);
-        /* DAT_00495254 = 1 */
+        /* [CONFIRMED @ 0x4275B1] g_attractModeDemoActive = 1 */
+        s_attract_demo_active = 1;
         frontend_present_buffer();
         frontend_set_cursor_visible(1);
         s_inner_state = 1;
         break;
 
     case 1: /* Release frontend buttons from main menu */
+        /* [CONFIRMED @ 0x4275B7] ReleaseFrontendDisplayModeButtons() */
+        frontend_reset_buttons();
         s_inner_state = 2;
         break;
 
@@ -7304,20 +7402,28 @@ static void Screen_ControllerBinding(void) {
  * States: 9
  * ======================================================================== */
 
-static int s_music_test_track_idx; /* 0..11 */
-
 static void Screen_MusicTestExtras(void) {
     switch (s_inner_state) {
     case 0: /* Fade transition + init */
         frontend_init_return_screen(TD5_SCREEN_MUSIC_TEST);
         TD5_LOG_D(LOG_TAG, "MusicTestExtras: init");
-        /* Release gallery images, load band photos */
-        /* Create title, track name surface, now-playing surface */
-        /* Draw initial track info */
+        /* [CONFIRMED @ 0x418460 case 0]:
+         *   ReleaseExtrasGalleryImageSurfaces() + LoadExtrasBandGalleryImages()
+         *   CreateMenuStringLabelSurface(6) → DAT_00496358 (title surface)
+         *   CreateTrackedFrontendSurface(0x170,0x28) → DAT_0049628c (track-name)
+         *   CreateTrackedFrontendSurface(0x170,0x78) → DAT_00496400 (now-playing)
+         *   Initial draw: sprintf "%d. %s" + NowPlayingTxt + band + title into surfaces
+         * Port: no offscreen surfaces — strings are rendered live every frame via
+         * frontend_render_music_test_overlay. Initialise them here. */
         frontend_load_tga("Front_End/MainMenu.tga", "Front_End/FrontEnd.zip");
         frontend_create_button("Select Track", -0xE0, 0, 0xE0, 0x20);
         frontend_create_button("OK",           -0xE0, 0, 0xE0, 0x20);
         s_music_test_track_idx = 0;
+        s_music_test_playing_set = 0;
+        s_music_test_now_band[0]  = '\0';
+        s_music_test_now_title[0] = '\0';
+        frontend_music_test_update_track_label();   /* "1. GRAVITY KILLS" */
+        TD5_LOG_D(LOG_TAG, "MusicTestExtras: track_label='%s'", s_music_test_track_label);
         s_anim_tick = 0;
         s_inner_state = 1;
         break;
@@ -7343,16 +7449,28 @@ static void Screen_MusicTestExtras(void) {
         if (s_input_ready) {
             int delta = frontend_option_delta();
             if (s_button_index == 0 && delta != 0) {
-                /* Cycle track index 0..11 */
+                /* Cycle track index 0..11.
+                 * [CONFIRMED @ 0x4186A8]: g_selectedCdTrackIndex += DAT_0049b690 (arrow dir),
+                 *   clamped 0..11; then BltColorFillToSurface + sprintf "%d. %s" redrawn
+                 *   into DAT_0049628c (track-name surface). Port: update label string. */
                 s_music_test_track_idx += delta;
-                if (s_music_test_track_idx < 0) s_music_test_track_idx = 11;
+                if (s_music_test_track_idx < 0)  s_music_test_track_idx = 11;
                 if (s_music_test_track_idx > 11) s_music_test_track_idx = 0;
-                /* Redraw track name surface */
+                frontend_music_test_update_track_label();
+                TD5_LOG_D(LOG_TAG, "MusicTestExtras: cycle -> '%s'", s_music_test_track_label);
             }
             if (s_button_index == 0 && s_arrow_input == 0) {
-                /* Confirm "Select Track" -> play CD audio */
+                /* Confirm "Select Track" -> play CD audio.
+                 * [CONFIRMED @ 0x41864E]: DXSound::CDPlay(g_selectedCdTrackIndex+2, 1)
+                 *   then redraw DAT_00496400 (now-playing surface):
+                 *   row y=0:    "NOW PLAYING" text (SNK_NowPlayingTxt_exref)
+                 *   row y=0x28: band name  (PTR_s_GRAVITY_KILLS_00465e1c[idx])
+                 *   row y=0x50: song title (PTR_s_FALLING_00465e58[idx])
+                 * Port: record now-playing strings; render overlay draws them live. */
                 frontend_cd_play(s_music_test_track_idx);
-                /* Update "Now Playing" with band name + song title */
+                frontend_music_test_update_now_playing(s_music_test_track_idx);
+                TD5_LOG_D(LOG_TAG, "MusicTestExtras: now playing '%s' / '%s'",
+                          s_music_test_now_band, s_music_test_now_title);
             }
             if (s_button_index == 1) { /* OK */
                 /* Set fade value for transition, exit to Sound Options */
