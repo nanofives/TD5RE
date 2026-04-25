@@ -10,6 +10,8 @@
 #include "td5_track.h"
 #include "td5_game.h"
 #include "td5_platform.h"
+#include "td5_render.h"
+#include "td5_hud.h"
 #include "td5re.h"
 
 #define LOG_TAG "camera"
@@ -142,6 +144,7 @@ static int s_flyin_preset_reloaded[2] = {0, 0};
 extern int    g_actorSlotForView[2];     /* td5_game.c */
 extern int    g_actorBaseAddr;           /* td5_game.c */
 extern uint8_t *g_actor_table_base;      /* td5_game.c */
+extern int    g_game_type;               /* td5_game.c — g_selectedGameType equivalent */
 int    g_trackType              = 0;
 unsigned char g_actorAliveTable[12] = {0};
 int    g_lookLeftRight[2]       = {0};
@@ -2089,13 +2092,90 @@ void EvaluateCubicSpline3D(int *out_pos, int *spline_state, int t) {
     }
 }
 
-void RecomputeTracksideProjectionScale(void) { }
-
-void UpdateCameraTransitionHudIndicator(int view, int actor_index) {
-    (void)view; (void)actor_index;
+/* ========================================================================
+ * 0x43E900 -- RecomputeTracksideProjectionScale
+ *
+ * Resets the projection center offsets to zero and recomputes frustum plane
+ * normals from the current viewport width/height and focal length.
+ * Called by UpdateTracksideCamera + UpdateSplineTracksideCamera after
+ * g_depthFovFactor changes, to keep the frustum cull planes consistent.
+ *
+ * Original: uses g_projectionDepth (= width * 0.5625, set at viewport init)
+ * and g_cachedViewportWidth/Height with _g_inverseQuarterScale=0.25.
+ * Port: delegates to td5_render_recompute_frustum_normals() which uses
+ * the same stored s_focal_length + s_viewport_width/height values.
+ * [CONFIRMED @ 0x0043E900]
+ * ======================================================================== */
+void RecomputeTracksideProjectionScale(void)
+{
+    td5_render_recompute_frustum_normals();
 }
 
-uint32_t td5_compute_heading_delta(void *route_entry) {
-    (void)route_entry;
-    return 0;
+/* ========================================================================
+ * 0x40A260 -- UpdateCameraTransitionHudIndicator
+ *
+ * Sets the per-view HUD indicator (countdown/position digit) during the
+ * race-start fly-in camera transition.
+ *
+ * When game_type == 0 (circuit race): indicator = actor[actor_index].race_position + 2
+ * Otherwise (cup/drag/etc.): indicator = 0 (hidden)
+ *
+ * Original: SetRaceHudIndicatorState(view, actor[slot].+0x383 + 2)
+ * Port: td5_hud_set_indicator_state(view, race_position + 2)
+ * [CONFIRMED @ 0x0040A260]
+ * ======================================================================== */
+void UpdateCameraTransitionHudIndicator(int view, int actor_index)
+{
+    if (g_game_type == 0) {
+        /* Circuit race: show race position (+2 to map 1st..6th to indicator slots 3..8) */
+        uint8_t *actor_bytes = (uint8_t *)((char *)&g_actorBaseAddr + (uint32_t)actor_index * 0x388u);
+        uint8_t race_pos = actor_bytes[0x383];
+        td5_hud_set_indicator_state(view, (int)(race_pos + 2));
+    } else {
+        td5_hud_set_indicator_state(view, 0);
+    }
+}
+
+/* ========================================================================
+ * 0x434040 -- ComputeActorRouteHeadingDelta (port entry: td5_compute_heading_delta)
+ *
+ * Computes the signed heading difference between the actor's current heading
+ * and its target route heading, returned as a 12-bit wrapped value [0..4095].
+ * A value in (0x3FF, 0xC00) indicates >90 degrees off — used by the HUD
+ * wrong-way detector.
+ *
+ * Formula (12-bit angle system, full circle = 0x1000):
+ *   slot        = route_entry[RS_SLOT_INDEX=0x35]        (actor slot index)
+ *   route_base  = route_entry[RS_ROUTE_TABLE_PTR=0x00]   (route table pointer)
+ *   actor_hdg   = actor[slot].+0x1F4 >> 8                (packed 12-bit heading)
+ *   span_idx    = *(int16_t*)(actor[slot].+0x82)         (current span index)
+ *   tgt_byte    = *(uint8_t*)(route_base + span_idx*3+1) (byte heading from route)
+ *   tgt_hdg     = (tgt_byte * 0x102c) >> 8              (scaled to 12-bit)
+ *   delta       = actor_hdg - tgt_hdg
+ *   return      = (-delta - 0x800) & 0xFFF              (wrapped, negated)
+ *                 [double-wrap matches original: negation of signed diff]
+ * [CONFIRMED @ 0x00434040]
+ * ======================================================================== */
+uint32_t td5_compute_heading_delta(void *route_entry)
+{
+    int32_t *rs   = (int32_t *)route_entry;
+    int      slot = rs[0x35];       /* RS_SLOT_INDEX */
+    int      route_base = rs[0];    /* RS_ROUTE_TABLE_PTR — raw int (pointer-sized) */
+
+    if (slot < 0 || slot >= 12 || g_actorBaseAddr == 0 || route_base == 0)
+        return 0;
+
+    char    *actor      = (char *)&g_actorBaseAddr + (uint32_t)slot * 0x388u;
+    int      actor_hdg  = *(int *)(actor + 0x1F4) >> 8;
+    int16_t  span_idx   = *(int16_t *)(actor + 0x82);
+
+    /* Target heading byte from route table, scaled to 12-bit angle */
+    uint8_t  tgt_byte   = *(uint8_t *)(route_base + (int)span_idx * 3 + 1);
+    int      tgt_hdg    = ((uint32_t)tgt_byte * 0x102cu) >> 8;
+
+    /* Signed 12-bit difference, negated and wrapped */
+    uint32_t diff  = (uint32_t)(actor_hdg - tgt_hdg);
+    uint32_t wrap1 = (diff  - 0x800u) & 0xFFFu;
+    uint32_t wrap2 = (wrap1 - 0x800u) & 0xFFFu;
+    return (uint32_t)(-(int32_t)wrap2) & 0xFFFu;
 }
