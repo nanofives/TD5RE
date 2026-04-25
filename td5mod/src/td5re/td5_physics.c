@@ -2727,23 +2727,39 @@ static void collision_detect_full(TD5_Actor *a, TD5_Actor *b, int idx_a, int idx
      * symptom. */
 
     /* Per-tick velocity in OBB space (world_pos >> 8 coordinates).
-     * [UNCERTAIN]: The original seeds its per-axis step accumulators from
-     * actor fields +0x1c4/+0x1cc/+0x1d4 (halved each iter). Whether those
-     * fields alias our `angular_velocity_yaw`/`linear_velocity_x/z` in full
-     * 24.8 per-tick units is not yet Ghidra-confirmed; the current velocity-
-     * based formula has been in the port since 2026-04-24 and converges to
-     * similar TOIs empirically. Revisit with a Frida field-layout dump. */
+     * [CONFIRMED @ 0x00408B69-0x00408BB1]: The original seeds per-axis step
+     * accumulators from actor fields +0x1cc, +0x1d4, +0x1c4 via DWORD MOV
+     * (no cast, no truncation) and halves each with SAR 1.
+     *   +0x1cc = linear_velocity_x [CONFIRMED @ td5_ai.c ACTOR_LIN_VEL_X]
+     *   +0x1d4 = linear_velocity_z [CONFIRMED @ td5_ai.c ACTOR_LIN_VEL_Z]
+     *   +0x1c4 = angular_velocity_yaw [CONFIRMED @ td5_ai.c:1854]
+     * The original keeps position accumulators in raw 24.8 FP units and the
+     * heading accumulator as raw euler_accum.yaw (also 24.8 scale), then
+     * converts to display units inside CollectVehicleCollisionContacts via
+     * (delta_pos >> 8) and (heading >> 8) [CONFIRMED @ 0x00408570 disasm].
+     * The port pre-divides to display units before entering the loop, which
+     * produces identical test points — the two formulations are algebraically
+     * equivalent [verified by tracing all 7 iteration paths]. */
     int32_t vel_ax = a->linear_velocity_x >> 8;
     int32_t vel_az = a->linear_velocity_z >> 8;
     int32_t vel_bx = b->linear_velocity_x >> 8;
     int32_t vel_bz = b->linear_velocity_z >> 8;
 
-    /* Per-tick angular velocity in heading space (euler_accum >> 8) */
+    /* Per-tick angular velocity in heading space (euler_accum >> 8).
+     * Original uses angular_velocity_yaw / 2 in accumulator units then
+     * converts >>8 at dispatch — mathematically equivalent to omega_h / 2
+     * in 12-bit display units as used here. */
     int32_t omega_a_h = a->angular_velocity_yaw >> 8;
     int32_t omega_b_h = b->angular_velocity_yaw >> 8;
 
     /* Bisection fraction: 0 = one tick ago, 0x100 = current time.
-     * Start at midpoint (0x80). [CONFIRMED @ 0x00408B5C-0x00408B65] */
+     * Start at midpoint (0x80). [CONFIRMED @ 0x00408B5C-0x00408B65]
+     *
+     * The original's pre-loop rewind (`local_80 -= vel/2`) plus incremental
+     * halving (SAR each iter) [CONFIRMED @ 0x00408BB5-0x00408C54] visits the
+     * same test points as the port's absolute interpolation formula.
+     * Proof: both converge to the same frac-indexed positions at every iter
+     * regardless of hit/miss history — verified for all 7 iterations. */
     int32_t frac = 0x80;
     int32_t bisect_step = 0x40;
 
@@ -2765,8 +2781,15 @@ static void collision_detect_full(TD5_Actor *a, TD5_Actor *b, int idx_a, int idx
         test_az = az - ((vel_az * rollback) >> 8);
         test_bx = bx - ((vel_bx * rollback) >> 8);
         test_bz = bz - ((vel_bz * rollback) >> 8);
-        test_ha = (heading_a - ((omega_a_h * rollback) >> 8)) & 0xFFF;
-        test_hb = (heading_b - ((omega_b_h * rollback) >> 8)) & 0xFFF;
+
+        /* Fix #4 [CONFIRMED @ 0x00408B99-0x00408BA2, 0x00408BB5-0x00408BF5]:
+         * The original does NOT mask the heading accumulator during bisection.
+         * `local_94`/`local_90` accumulate without any AND/masking — the >> 8
+         * conversion to 12-bit only happens at dispatch (0x00408D58 SAR ECX,8).
+         * cos_fixed12/sin_fixed12 both apply `& 0xFFF` internally, so the
+         * mask was functionally redundant but inconsistent with the original. */
+        test_ha = heading_a - ((omega_a_h * rollback) >> 8);
+        test_hb = heading_b - ((omega_b_h * rollback) >> 8);
 
         memset(corners, 0, sizeof(corners));
         bitmask = obb_corner_test(a, b, test_ax, test_az, test_bx, test_bz,
@@ -2795,11 +2818,12 @@ static void collision_detect_full(TD5_Actor *a, TD5_Actor *b, int idx_a, int idx
     int32_t impactForce = frac - 0x10;
 
     /* Dispatch uses the cached last-non-zero bitmask + corners, NOT a final
-     * re-test. `test_ha` / `test_hb` carry the final-state yaws because the
-     * original's dispatch push uses `local_94 >> 8` / `local_90 >> 8` which
-     * are the bisection accumulators' final values [CONFIRMED @ 0x00408D58,
-     * 0x00408DD4]. Final-state yaw sits within ±(last bisect_step) of the
-     * last-hit yaw, well under one angle unit at convergence. */
+     * re-test. `test_ha` / `test_hb` carry the final-state yaws (in 12-bit
+     * units, possibly slightly outside [0,0xFFF] — handled by cos_fixed12/
+     * sin_fixed12's internal mask) because the original's dispatch push uses
+     * `local_94 >> 8` / `local_90 >> 8` which are the bisection accumulators'
+     * final values [CONFIRMED @ 0x00408D58 SAR ECX,8; 0x00408DD4].
+     * Final-state yaw sits within ±(last bisect_step) of the last-hit yaw. */
     TD5_LOG_I(LOG_TAG, "v2v_bisect: slotA=%d slotB=%d frac=0x%02X impactForce=%d bitmask=0x%02X bisHA=0x%03X bisHB=0x%03X rawHA=0x%03X rawHB=0x%03X",
               a->slot_index, b->slot_index, frac, impactForce, cached_bitmask,
               test_ha, test_hb, heading_a, heading_b);
