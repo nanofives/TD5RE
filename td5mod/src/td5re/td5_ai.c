@@ -371,14 +371,6 @@ void td5_ai_set_route_tables(const uint8_t *left_route, size_t left_size,
     td5_ai_refresh_route_state();
 }
 
-/** Public accessor — route state pointer for a given slot.
- *  Called by td5_physics.c traffic_route_heading_delta. */
-int32_t *td5_ai_get_route_state(int slot) {
-    if (slot < 0 || slot >= TD5_MAX_TOTAL_ACTORS || !g_route_state_base)
-        return NULL;
-    return route_state(slot);
-}
-
 /**
  * Correct an AI actor's spawn heading to match the LEFT.TRK route byte.
  *
