@@ -140,21 +140,28 @@ typedef struct VfxParticleSlot {
  * ======================================================================== */
 
 typedef struct VfxTireTrackSlot {
-    /* [CONFIRMED @ 0x43EB50] Original stores 4 vertex pairs as int16 world-units.
-     * Port uses int32 24.8 fixed-point to avoid int16 overflow on large tracks
-     * (~300k world-unit coords on Moscow overflow int16 = 32767 max).
-     * vertices[0/1] = trailing edge (left/right), vertices[2/3] = leading edge (left/right). */
-    int32_t  vertices[4][3];        /* 4 corner vertices (24.8 FP x,y,z) */
-    int32_t  prev_anchor[3];        /* previous anchor position (24.8 FP x,y,z) */
-    uint8_t  quad_data[0x98];       /* sprite quad template data (layout matches original) */
-    /* --- Control block --- */
-    uint8_t  control;               /* bit0=allocated, bit1=has_geometry */
-    uint8_t  intensity;             /* current mark intensity (0-255) */
-    uint16_t lifetime;              /* tick counter since creation */
-    int32_t  anchor_x;              /* world X (24.8 fixed) [CONFIRMED @ 0x43EB50 +0xDC] */
-    int32_t  anchor_y;              /* world Y              [CONFIRMED @ 0x43EB50 +0xE0] */
-    int32_t  anchor_z;              /* world Z              [CONFIRMED @ 0x43EB50 +0xE4] */
-    uint32_t direction_hash;        /* heading angle hash   [CONFIRMED @ 0x43EB50 +0xE8] */
+    /* +0x00: trailing-edge anchor (previous frame's anchor_x/y/z).
+     * int32 24.8 FP — avoids the int16 overflow that plagued the original
+     * vertex[] arrays (Moscow world X ≈ 42 786 m overflows int16 = 32 767). */
+    int32_t  trail_x;               /* +0x00 */
+    int32_t  trail_y;               /* +0x04 */
+    int32_t  trail_z;               /* +0x08 */
+    /* +0x0C: perpendicular half-width vector in 24.8 FP.
+     * Computed from (dx,dz) × width / len in UpdateTireTrackEmitters. */
+    int32_t  perp_x;                /* +0x0C */
+    int32_t  perp_z;                /* +0x10 */
+    int32_t  _pad0;                 /* +0x14 */
+    int32_t  _reserved[6];         /* +0x18: was prev_verts; keep for size compat */
+    /* --- Sprite quad blob (was at +0x30; size corrected from 0x98 → 0xA8) --- */
+    uint8_t  quad_data[0xA8];       /* +0x30 */
+    /* --- Control block at +0xD8 --- */
+    uint8_t  control;               /* +0xD8: bit0=allocated, bit1=has_geometry */
+    uint8_t  intensity;             /* +0xD9: current mark intensity (0-255) */
+    uint16_t lifetime;              /* +0xDA: tick counter since creation */
+    int32_t  anchor_x;              /* +0xDC: world X (24.8 fixed) */
+    int32_t  anchor_y;              /* +0xE0: world Y */
+    int32_t  anchor_z;              /* +0xE4: world Z */
+    uint32_t direction_hash;        /* +0xE8: heading angle hash */
 } VfxTireTrackSlot;
 
 /* ========================================================================
@@ -246,7 +253,7 @@ static VfxEmitterDesc    s_emitter_descs[TD5_MAX_TOTAL_ACTORS * 4]; /* per-wheel
 static int               s_emitter_desc_count;
 static int               s_tire_track_cursor;  /* roving allocation cursor */
 
-/* Tire mark UV coords -- loaded from SKIDMARK sprite or fallback to SMOKE dark variant */
+/* Tire mark UV coords -- loaded from SEMICOL sprite (confirmed @ 0x4743F4/0x43E997) */
 static float    s_tiremark_u0, s_tiremark_v0;
 static float    s_tiremark_u1, s_tiremark_v1;
 static float    s_tiremark_page;
@@ -571,21 +578,16 @@ void td5_vfx_init_race_particles(void) {
         s_smoke_variant_uv[i][4] = s_smoke_page;
     }
 
-    /* Look up SKIDMARK sprite for tire marks. TD5's static.hed does not
-     * include one — the original binary likely drew tire marks procedurally
-     * or used a level-specific texture. Fall back to FADEWHT (a 4x4 white
-     * quad in tpage4 at 220,32) so the vertex color dominates the
-     * modulation and we can draw semi-transparent dark strips. */
-    TD5_AtlasEntry *skidmark = td5_asset_find_atlas_entry(NULL, "SKIDMARK");
+    /* Original texture: "SEMICOL" confirmed @ 0x4743F4 (PUSH string ptr at 0x43E997).
+     * Fall back to FADEWHT if SEMICOL is absent from the atlas. */
+    TD5_AtlasEntry *skidmark = td5_asset_find_atlas_entry(NULL, "SEMICOL");
     if (vfx_atlas_entry_valid(skidmark)) {
         vfx_extract_sprite_uvs(skidmark,
                                 &s_tiremark_u0, &s_tiremark_v0,
                                 &s_tiremark_u1, &s_tiremark_v1,
                                 &s_tiremark_page);
+        TD5_LOG_I(LOG_TAG, "tire tracks: SEMICOL atlas entry found");
     } else {
-        /* Use FADEWHT — pure white 4x4 region on tpage4, alpha=0x80 after
-         * speedo keying. A white texture lets the vertex color dominate
-         * modulation so we can draw any tire-mark color we want. */
         TD5_AtlasEntry *fadewht = td5_asset_find_atlas_entry(NULL, "FADEWHT");
         if (vfx_atlas_entry_valid(fadewht)) {
             vfx_extract_sprite_uvs(fadewht,
@@ -597,7 +599,7 @@ void td5_vfx_init_race_particles(void) {
             s_tiremark_u1 = 1.5f;  s_tiremark_v1 = 1.5f;
             s_tiremark_page = (float)(700 + 4);
         }
-        TD5_LOG_I(LOG_TAG, "SKIDMARK not in static.hed; using FADEWHT as tire-mark base");
+        TD5_LOG_I(LOG_TAG, "tire tracks: SEMICOL not in atlas; using FADEWHT fallback");
     }
 
     TD5_LOG_I(LOG_TAG,
@@ -1393,7 +1395,7 @@ static int vfx_acquire_tire_track_emitter(int wheel_id, int actor_slot,
 
     slot->control = 1;  /* allocated, no geometry yet */
     slot->lifetime = 0;
-    slot->intensity = width;
+    slot->intensity = alpha;  /* alpha = initial opacity; width = perpendicular half-span */
 
     return found;
 }
@@ -1427,6 +1429,15 @@ static void vfx_set_emitter_anchor_from_wheel(TD5_Actor *actor, int wheel_index,
     slot->anchor_x = wx;
     slot->anchor_y = wy;
     slot->anchor_z = wz;
+
+    /* Seed trail from current position so first-frame delta ≈ 0.
+     * Without this, trail = 0 → dx spans world origin to vehicle
+     * → trailing edge placed at world origin, stretching a degenerate quad. */
+    slot->trail_x = wx;
+    slot->trail_y = wy;
+    slot->trail_z = wz;
+    slot->perp_x = 0;
+    slot->perp_z = 0;
 }
 
 /**
@@ -1453,76 +1464,42 @@ void td5_vfx_update_tire_tracks(void) {
 
         VfxTireTrackSlot *slot = &s_tire_track_pool[slot_idx];
 
-        /* The actor pointer is resolved during the per-vehicle update dispatch
-         * (vfx_update_tire_track_emitters). Here we only use the stored anchor
-         * position which was set by vfx_set_emitter_anchor_from_wheel. */
+        /* Refresh anchor from the live wheel position each frame.
+         * anchor_x/y/z is set once at acquisition; we must update it here
+         * so the trail delta tracks actual wheel movement. */
+        if (g_actor_table_base) {
+            uint8_t *ap = g_actor_table_base + (size_t)desc->actor_slot * TD5_ACTOR_STRIDE;
+            int32_t wx, wy, wz;
+            vfx_read_wheel_world_pos((TD5_Actor *)ap, (int)desc->wheel_id, &wx, &wy, &wz);
+            slot->anchor_x = wx;
+            slot->anchor_y = wy;
+            slot->anchor_z = wz;
+        }
 
-        /* Compute heading direction from position delta (24.8 fixed).
-         * [CONFIRMED @ 0x43EB50] Original: iVar15 = field_0xf0 - slot->anchor_x (24.8 delta).
-         * prev_anchor stores previous anchor in 24.8 directly. */
-        int32_t dx = slot->anchor_x - slot->prev_anchor[0];
-        int32_t dz = slot->anchor_z - slot->prev_anchor[2];
+        /* Movement delta in 24.8 FP from trailing anchor to current anchor */
+        int32_t dx = slot->anchor_x - slot->trail_x;
+        int32_t dz = slot->anchor_z - slot->trail_z;
 
-        /* Compute perpendicular offset for strip width.
-         * [CONFIRMED @ 0x43EB50] Uses AngleFromVector12 + CosFixed12/SinFixed12.
-         * Port equivalent: normalize (dx,dz) and take perpendicular. */
+        /* Compute perpendicular half-width vector.
+         * w = emitter desc width byte (raw units that match 24.8 FP scale).
+         * perp = (-dz, dx) / |delta| * w  → stored in 24.8 FP. */
         int32_t w = (int32_t)desc->width;
         /* Work in integer world units (>> 8 from 24.8) for isqrt precision */
         int32_t dx8 = dx >> 8;
         int32_t dz8 = dz >> 8;
         int32_t len = td5_isqrt(dx8 * dx8 + dz8 * dz8);
         if (len > 0) {
-            /* Perpendicular vector in world units: (-dz, dx) normalized * w */
-            int32_t perp_x8 = (-dz8 * w) / len;   /* world units */
-            int32_t perp_z8 = ( dx8 * w) / len;
-
-            /* Convert perp to 24.8 for vertex storage */
-            int32_t perp_x = perp_x8 << 8;
-            int32_t perp_z = perp_z8 << 8;
-
-            /* [CONFIRMED @ 0x43EB50] Roll trailing edge from previous leading edge
-             * each tick, so the strip grows one segment per update. On first frame
-             * (no prior geometry) trailing edge = current anchor (degenerate single
-             * segment; safe because degenerate quads are invisible). */
-            if (slot->control & 2) {
-                /* Already has geometry: shift leading edge to trailing */
-                slot->vertices[0][0] = slot->vertices[2][0];
-                slot->vertices[0][1] = slot->vertices[2][1];
-                slot->vertices[0][2] = slot->vertices[2][2];
-                slot->vertices[1][0] = slot->vertices[3][0];
-                slot->vertices[1][1] = slot->vertices[3][1];
-                slot->vertices[1][2] = slot->vertices[3][2];
-            } else {
-                /* First geometry frame: trailing edge = current anchor ±perp
-                 * (will coincide with leading edge → degenerate but harmless) */
-                slot->vertices[0][0] = slot->anchor_x - perp_x;
-                slot->vertices[0][1] = slot->anchor_y;
-                slot->vertices[0][2] = slot->anchor_z - perp_z;
-                slot->vertices[1][0] = slot->anchor_x + perp_x;
-                slot->vertices[1][1] = slot->anchor_y;
-                slot->vertices[1][2] = slot->anchor_z + perp_z;
-            }
-
-            /* Leading edge: current anchor +/- perpendicular (24.8) */
-            slot->vertices[2][0] = slot->anchor_x - perp_x;
-            slot->vertices[2][1] = slot->anchor_y;
-            slot->vertices[2][2] = slot->anchor_z - perp_z;
-            slot->vertices[3][0] = slot->anchor_x + perp_x;
-            slot->vertices[3][1] = slot->anchor_y;
-            slot->vertices[3][2] = slot->anchor_z + perp_z;
-
+            slot->perp_x = (-dz * w) / len;
+            slot->perp_z = ( dx * w) / len;
             slot->control |= 2; /* has_geometry flag */
         }
 
-        /* Save current anchor as previous (24.8 directly — no scale conversion)
-         * [FIX] Previous code stored anchor/256 as int16 then tried to recover by <<8,
-         * which caused scale confusion. Now store 24.8 directly. */
-        slot->prev_anchor[0] = slot->anchor_x;
-        slot->prev_anchor[1] = slot->anchor_y;
-        slot->prev_anchor[2] = slot->anchor_z;
+        /* Advance trail to current anchor so next frame's delta is correct */
+        slot->trail_x = slot->anchor_x;
+        slot->trail_y = slot->anchor_y;
+        slot->trail_z = slot->anchor_z;
 
-        /* Check if direction changed enough to warrant a new pool slot
-         * [CONFIRMED @ 0x43EB50] Original: ((old_heading ^ new_heading) & 0xFFFFFF80) != 0 */
+        /* Direction-change hash for potential slot reallocation */
         uint32_t new_hash = (uint32_t)(dx & 0xFFFFFF80);
         if ((slot->direction_hash ^ new_hash) & 0xFFFFFF80u) {
             slot->direction_hash = new_hash;
@@ -1544,17 +1521,15 @@ void td5_vfx_update_tire_tracks(void) {
  */
 void td5_vfx_render_tire_tracks(void) {
     /* [CONFIRMED @ 0x43F210] RenderTireTrackPool: iterates 80 slots, ages lifetime,
-     * fades after 300 ticks, expires at 600 ticks, projects 4 world-space vertices
-     * via TransformVector3ByBasis + WriteTransformedShortVector, submits as translucent.
+     * fades after 300 ticks, expires at 600 ticks, reconstructs 4 world-space corners
+     * from anchor/trail/perp, submits as translucent quads.
      *
      * FIXES applied:
-     * - [CONFIRMED @ 0x43F210] Original _DAT_0045d6ac is applied to view-space Y in
-     *   the quad template (screen-pixel bias), NOT world-space gravity. Port was
-     *   decrementing anchor_y per frame — REMOVED.
-     * - [CONFIRMED @ 0x43EB50] Vertex storage changed from int16 (overflow at >32767
-     *   world units, e.g. Moscow ~300k) to int32 24.8 FP.
-     * - [INFERRED] SKIDMARK not in static.hed; FADEWHT fallback is acceptable —
-     *   vertex color modulation makes marks dark regardless of texture. */
+     * - [CONFIRMED @ 0x43F210] Per-frame anchor_y decrement removed (was gravity sink).
+     * - [CONFIRMED @ 0x4743F4] Texture "SEMICOL" (not "SKIDMARK" which doesn't exist).
+     * - Frustum test passes world-space coords (is_sphere_visible subtracts cam internally).
+     * - Struct redesigned: trail_x/y/z + perp_x/z replace int16 vertex arrays (overflow fix). */
+
 
     extern void td5_render_submit_translucent(uint16_t *quad_data);
     extern float g_cameraBasis[9];
@@ -1608,29 +1583,40 @@ void td5_vfx_render_tire_tracks(void) {
         /* Skip invisible marks */
         if (slot->intensity == 0) continue;
 
-        /* Transform world anchor to view space for frustum test */
-        float view_x = (float)slot->anchor_x * FP_TO_FLOAT - cam_x;
-        float view_y = (float)slot->anchor_y * FP_TO_FLOAT - cam_y;
-        float view_z = (float)slot->anchor_z * FP_TO_FLOAT - cam_z;
-
-        /* Apply frustum test: skip if behind camera or too far */
-        if (!td5_render_is_sphere_visible(view_x, view_y, view_z, 50.0f))
+        /* Frustum test: is_sphere_visible expects world-space (it subtracts
+         * the camera position internally — do NOT pre-subtract cam here). */
+        float ws_x = (float)slot->anchor_x * FP_TO_FLOAT;
+        float ws_y = (float)slot->anchor_y * FP_TO_FLOAT;
+        float ws_z = (float)slot->anchor_z * FP_TO_FLOAT;
+        if (!td5_render_is_sphere_visible(ws_x, ws_y, ws_z, 50.0f))
             continue;
 
-        /* Project 4 world-space vertices to screen space.
-         * [CONFIRMED @ 0x43F210] Original calls WriteTransformedShortVector on
-         * each of the 4 slot vertex pairs. Port equivalent: FP_TO_FLOAT converts
-         * 24.8 to float world units, then camera-relative, then basis-rotated.
-         * [FIX] Vertices are now int32 24.8 FP (not int16) — no overflow on
-         * large tracks. Y uses anchor_y directly (no world-space gravity decrement). */
+        /* Reconstruct 4 world corners from anchor/trail/perp (all 24.8 FP).
+         * v0=trail-left  v1=trail-right  v2=lead-right  v3=lead-left */
+        float lead_x  = (float)slot->anchor_x * FP_TO_FLOAT;
+        float lead_y  = (float)slot->anchor_y * FP_TO_FLOAT;
+        float lead_z  = (float)slot->anchor_z * FP_TO_FLOAT;
+        float trail_x = (float)slot->trail_x  * FP_TO_FLOAT;
+        float trail_y = (float)slot->trail_y  * FP_TO_FLOAT;
+        float trail_z = (float)slot->trail_z  * FP_TO_FLOAT;
+        float px      = (float)slot->perp_x   * FP_TO_FLOAT;
+        float pz      = (float)slot->perp_z   * FP_TO_FLOAT;
+
+        float wpos[4][3] = {
+            { trail_x - px, trail_y, trail_z - pz }, /* v0: trail-left  */
+            { trail_x + px, trail_y, trail_z + pz }, /* v1: trail-right */
+            { lead_x  + px, lead_y,  lead_z  + pz }, /* v2: lead-right  */
+            { lead_x  - px, lead_y,  lead_z  - pz }, /* v3: lead-left   */
+        };
+
+        /* Project 4 world corners to screen space */
         float sx[4], sy[4], sz[4], srhw[4];
         int all_visible = 1;
 
         for (int v = 0; v < 4; v++) {
-            /* World position from 24.8 fixed-point vertices [FIX: was int16] */
-            float wx = (float)slot->vertices[v][0] * FP_TO_FLOAT;
-            float wy = (float)slot->vertices[v][1] * FP_TO_FLOAT;
-            float wz = (float)slot->vertices[v][2] * FP_TO_FLOAT;
+            float wx = wpos[v][0];
+            float wy = wpos[v][1];
+            float wz = wpos[v][2];
 
             /* Camera-relative */
             float cx = wx - cam_x;
@@ -1652,13 +1638,6 @@ void td5_vfx_render_tire_tracks(void) {
         }
 
         if (!all_visible) continue;
-
-        /* [FIX] Removed world-space gravity decrement (anchor_y -= ...).
-         * [CONFIRMED @ 0x43F210] Original applies _DAT_0045d6ac to the view-space
-         * Y floats INSIDE the quad template (+0x38/+0x64/+0xBC/+0x90), which is a
-         * per-frame screen-pixel Y drift, NOT a world-space vertical fall.
-         * In the port's projection path we do not need this at all — the wheel
-         * anchor Y is already at ground level and does not need adjustment. */
 
         uint8_t val = slot->intensity;
         if (val < 0x30) val = 0x30;
