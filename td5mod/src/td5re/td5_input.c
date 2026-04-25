@@ -1102,8 +1102,10 @@ void td5_input_ff_configure(const int *assignments, int count)
  *   2. Terrain vibration (effect slot 3) -- modulated by surface type
  *
  * Reads vehicle state:
- *   actor+0x318 = lateral force (steering feedback value)
- *   actor+0x370 = surface type index (for terrain coefficient lookup)
+ *   actor+0x318 = lat_speed (lateral body-frame velocity, int32 24.8 FP)
+ *                 [CONFIRMED @ 0x4288E0]: g_actorRuntimeState.slot.field_0x318
+ *   actor+0x370 = surface type byte (index into g_terrain_ff_coefficients[13])
+ *                 [CONFIRMED @ 0x4288E0]: cast to uint then used as LUT index
  * ======================================================================== */
 
 void td5_input_ff_update_player(int slot)
@@ -1117,20 +1119,26 @@ void td5_input_ff_update_player(int slot)
     /* ---- Steering resistance (slot 0) ---- */
 
     /*
-     * Original reads actor+0x318 (lateral velocity / steering force).
-     * For the stub, we use a placeholder.  The physics module will
-     * provide the real value via a getter.
+     * [CONFIRMED @ 0x4288E0]: iVar2 = *(int*)(actor + slot*0x388 + 0x318)
+     * This is lat_speed — body-frame lateral velocity (int32, 24.8 FP).
+     * Negative values are reflected: iVar2 = iVar2 * -2
+     * Then clamped to 300000.
+     * Original passes through __ftol (no-op for integer input).
      */
-    int lateral_force = 0; /* placeholder: actor.gap_0310+8 */
+    int lateral_force = 0;
+    if (g_actor_table_base) {
+        uint8_t *actor = g_actor_table_base + (size_t)slot * TD5_ACTOR_STRIDE;
+        lateral_force = *(int32_t *)(actor + 0x318); /* lat_speed */
+    }
 
     if (lateral_force < 0) {
-        lateral_force = -lateral_force * 2;  /* asymmetric feel */
+        lateral_force = lateral_force * -2;  /* asymmetric feel [CONFIRMED @ 0x4288E0] */
     }
     if (lateral_force > TD5_INPUT_FF_STEER_CLAMP) {
         lateral_force = TD5_INPUT_FF_STEER_CLAMP;
     }
 
-    int steer_mag = lateral_force; /* float conversion in original via __ftol */
+    int steer_mag = lateral_force; /* __ftol in original: integer value, no conversion needed */
 
     if (!s_ff.steer_effect_started[js_idx]) {
         /* First-time play: start the effect */
@@ -1144,10 +1152,16 @@ void td5_input_ff_update_player(int slot)
     /* ---- Terrain vibration (slot 3) ---- */
 
     /*
-     * Original reads actor+0x370 (surface type byte) and looks up
-     * the terrain coefficient from g_terrain_ff_coefficients[].
+     * [CONFIRMED @ 0x4288E0]: (uint)(byte)(actor + slot*0x388 + 0x370)
+     * Surface type byte — indexes into DAT_00466afc = g_terrain_ff_coefficients[13].
+     * Formula: iVar2 = (0x1e - iVar2/10000) * coeff[surface_type]
+     * where iVar2 is the already-clamped lateral_force.
      */
-    int surface_type = 0; /* placeholder */
+    int surface_type = 0;
+    if (g_actor_table_base) {
+        uint8_t *actor = g_actor_table_base + (size_t)slot * TD5_ACTOR_STRIDE;
+        surface_type = (int)(uint8_t)(actor[0x370]); /* surface type [CONFIRMED @ 0x4288E0] */
+    }
     if (surface_type < 0) surface_type = 0;
     if (surface_type > 12) surface_type = 12;
 

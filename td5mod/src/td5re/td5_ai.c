@@ -110,6 +110,11 @@ static inline int32_t *route_state(int slot) {
     return g_route_state_base + slot * RS_STRIDE_DWORDS;
 }
 
+/* Public accessor used by td5_physics.c */
+int32_t *td5_ai_get_route_state(int slot) {
+    return route_state(slot);
+}
+
 static inline char *actor_ptr(int slot) {
     return g_actor_base + slot * ACTOR_STRIDE;
 }

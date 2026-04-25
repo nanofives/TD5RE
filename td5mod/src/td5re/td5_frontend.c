@@ -287,10 +287,17 @@ static int  s_mouse_flash_button = -1;
 static uint32_t s_mouse_flash_until;
 
 /* Fade state */
-static int  s_fade_active;
-static int  s_fade_progress;     /* 0..255 */
-static int  s_fade_direction;    /* 1 = in, -1 = out */
-static int  s_fade_table_index;
+static int      s_fade_active;
+static int      s_fade_progress;     /* 0..255 */
+static int      s_fade_direction;    /* 1 = in, -1 = out */
+static int      s_fade_table_index;
+/*
+ * Fade overlay color (RGB only, alpha is driven by s_fade_progress).
+ * [CONFIRMED @ 0x411750 InitFrontendFadeColor]: original stores
+ *   DAT_00494fc4 = param_1 >> 3 & 0x1f1f1f  (packed B/G/R channel levels)
+ * We store the raw ARGB word and extract RGB in the renderer.
+ */
+static uint32_t s_fade_color;        /* packed 0x00RRGGBB from caller */
 static int  s_gallery_pic_index;
 static int  s_gallery_pic_surface;
 static int  s_gallery_visited_mask;
@@ -1400,7 +1407,12 @@ static void frontend_init_fade(int color) {
     s_fade_active = 1;
     s_fade_progress = 0;
     s_fade_direction = 1;
-    (void)color;
+    /*
+     * [CONFIRMED @ 0x411750 InitFrontendFadeColor]: color is a packed ARGB/RGB
+     * word whose B/G/R channels are stored as luma multipliers after >> 3 & 0x1f.
+     * Port: store raw 0x00RRGGBB for use in frontend_render_fade.
+     */
+    s_fade_color = (uint32_t)color & 0x00FFFFFFu;
 }
 
 static int frontend_render_fade(void) {
@@ -1418,7 +1430,9 @@ static int frontend_render_fade(void) {
         FE_DrawCmd *cmd = &s_draw_queue[s_draw_queue_count++];
         cmd->type = FE_CMD_RECT;
         cmd->x = 0; cmd->y = 0; cmd->w = screen_w; cmd->h = screen_h;
-        cmd->color = (alpha << 24) | 0x000000;
+        /* Use s_fade_color (set by frontend_init_fade) for the overlay RGB.
+         * Alpha is driven by fade progress [CONFIRMED @ 0x411750 / 0x411780]. */
+        cmd->color = (alpha << 24) | (s_fade_color & 0x00FFFFFFu);
         cmd->tex_page = -1;
     }
     return 0;
