@@ -2577,3 +2577,12 @@ void td5_ai_update_actor(int slot) {
         ai_update_single_traffic(slot);
     }
 }
+
+/* Route state accessor — exposes the per-slot route state row to physics.
+ * [CONFIRMED @ 0x4AFB60]: g_route_state_base + slot * RS_STRIDE_DWORDS */
+int32_t *td5_ai_get_route_state(int slot)
+{
+    if (!g_route_state_base) return NULL;
+    if (slot < 0 || slot >= TD5_MAX_TOTAL_ACTORS) return NULL;
+    return g_route_state_base + slot * RS_STRIDE_DWORDS;
+}
