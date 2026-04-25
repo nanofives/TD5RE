@@ -44,6 +44,9 @@ void td5_ai_tick(void);
  * flipped the sign of D in the bicycle-solve matrix. */
 uint8_t *td5_ai_get_physics_template(void);
 
+/* --- Route state accessor (public for td5_physics.c) --- */
+int32_t *td5_ai_get_route_state(int slot);
+
 /* --- Per-actor AI update --- */
 void td5_ai_update_track_behavior(int slot);
 void td5_ai_update_steering_bias(int *route_state, int32_t steer_weight);

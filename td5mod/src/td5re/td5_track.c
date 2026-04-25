@@ -4710,6 +4710,19 @@ int td5_track_get_ring_length(void)
     return g_td5.track_span_ring_length;
 }
 
+/**
+ * Return the lane count (low nibble of byte +0x03) for the span at span_index.
+ * Returns 1 if the span is invalid or has a zero nibble.
+ * Used by UpdateTrafficRoutePlan sub_lane adjustment when entering a branch.
+ */
+int td5_track_get_span_lane_count(int span_index)
+{
+    if (!s_span_array || span_index < 0 || span_index >= s_span_count)
+        return 1;
+    int lc = span_lane_count(&s_span_array[span_index]);
+    return lc < 1 ? 1 : lc;
+}
+
 int td5_track_branch_to_junction(int span_idx)
 {
     /* If span_idx is on a branch road (>= ring_length), find its main-road
