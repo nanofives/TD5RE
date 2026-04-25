@@ -5045,9 +5045,81 @@ void ComputeActorTrackContactNormal(short *probe, int *pos, int *out_y) {
     *out_y = (int)height;
 }
 
-/* Stub — TODO: implement from Ghidra decompilation */
+/*
+ * td5_track_get_primary_route_heading — compute track-forward heading for a span.
+ *
+ * RE basis: InitializeActorTrackPose (0x00434350) + ComputeActorTrackHeading
+ *           (0x00435CE0). Both inline the same heading computation:
+ *
+ *   1. Load strip record at g_trackStripRecords + span_index * 0x18.
+ *      [CONFIRMED @ 0x00434380: *0x18 stride used in both functions]
+ *   2. Strip byte[0] = span_type; ushort[2] = left_vertex_index (+4);
+ *      ushort[3] = right_vertex_index (+6). [CONFIRMED @ 0x00434390]
+ *   3. Vertex pool: entry i = short[3]{x,y,z} at +i*6 bytes.
+ *      [CONFIRMED @ 0x00434390: (uint)*(ushort*)(puVar1+4)*6]
+ *   4. dx/dz computed by span_type switch (cases 1/2/5, 3/4, 6/7).
+ *      [CONFIRMED @ 0x00434408/0x00434410/0x00434450]
+ *   5. Signed divide-by-4 rounding toward zero.
+ *      [CONFIRMED @ 0x00434408: (v + (v>>31 & 3)) >> 2]
+ *   6. AngleFromVector12(dx, dz) & 0xFFF returns a 12-bit heading.
+ *      [CONFIRMED @ 0x004344D0/0x00434501 in InitializeActorTrackPose]
+ *
+ * Returns the lateral (right→left) heading of the span in 12-bit angle units
+ * (0x000–0xFFF = full circle). Forward heading is this value + 0x400.
+ * Returns 0 on invalid span.
+ */
 int td5_track_get_primary_route_heading(int span_index)
 {
-    (void)span_index;
-    return 0;
+    TD5_StripSpan   *sp;
+    TD5_StripVertex *vl0, *vl1, *vr0, *vr1;
+    int32_t dx, dz;
+
+    if (!s_span_array || !s_vertex_table)
+        return 0;
+    if (span_index < 0 || span_index >= s_span_count)
+        return 0;
+
+    sp = &s_span_array[span_index];
+
+    /* Base vertices — sub_lane NOT added [CONFIRMED @ 0x00434390] */
+    vl0 = vertex_at(sp->left_vertex_index);
+    vl1 = vertex_at(sp->left_vertex_index + 1);
+    vr0 = vertex_at(sp->right_vertex_index);
+    vr1 = vertex_at(sp->right_vertex_index + 1);
+
+    switch (sp->span_type) {
+    case 1: case 2: case 5:
+    case 8: case 9: case 10: case 11:
+        /* [CONFIRMED @ 0x00434408] standard quad */
+        dx = ((int32_t)vl1->x - (int32_t)vr1->x) - (int32_t)vr0->x + (int32_t)vl0->x;
+        dz = ((int32_t)vl1->z - (int32_t)vr1->z) - (int32_t)vr0->z + (int32_t)vl0->z;
+        dx = (dx + ((dx >> 31) & 3)) >> 2;
+        dz = (dz + ((dz >> 31) & 3)) >> 2;
+        break;
+    case 3: case 4:
+        /* [CONFIRMED @ 0x00434410] diagonal — right+2 vertex */
+        {
+            TD5_StripVertex *vr2 = vertex_at(sp->right_vertex_index + 2);
+            dx = ((int32_t)vl1->x - (int32_t)vr2->x) - (int32_t)vr1->x + (int32_t)vl0->x;
+            dz = ((int32_t)vl1->z - (int32_t)vr2->z) - (int32_t)vr1->z + (int32_t)vl0->z;
+        }
+        dx = (dx + ((dx >> 31) & 3)) >> 2;
+        dz = (dz + ((dz >> 31) & 3)) >> 2;
+        break;
+    case 6: case 7:
+        /* [CONFIRMED @ 0x00434450] reversed winding — left+2 vertex */
+        {
+            TD5_StripVertex *vl2 = vertex_at(sp->left_vertex_index + 2);
+            dx = ((int32_t)vl2->x - (int32_t)vr1->x) + (int32_t)vl1->x - (int32_t)vr0->x;
+            dz = ((int32_t)vl2->z - (int32_t)vr1->z) + (int32_t)vl1->z - (int32_t)vr0->z;
+        }
+        dx = (dx + ((dx >> 31) & 3)) >> 2;
+        dz = (dz + ((dz >> 31) & 3)) >> 2;
+        break;
+    default:
+        dx = 0; dz = 1;
+        break;
+    }
+
+    return AngleFromVector12(dx, dz) & 0xFFF;
 }
