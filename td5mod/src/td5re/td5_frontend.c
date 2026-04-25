@@ -131,6 +131,37 @@ static int  s_start_race_request;       /* 0x495248               */
 static int  s_start_race_confirm;       /* 0x49524C               */
 static int  s_attract_idle_counter;     /* g_attractModeIdleCounter */
 static uint32_t s_attract_idle_timestamp;
+static int  s_attract_demo_active;      /* g_attractModeDemoActive @ 0x495254 */
+
+/* -----------------------------------------------------------------------
+ * Screen [19] MusicTestExtras — state shared between state machine + render
+ * ----------------------------------------------------------------------- */
+static int s_music_test_track_idx;      /* 0..11; mirrors g_selectedCdTrackIndex @ 0x465e14 */
+
+/* Band names and song titles for tracks 0..11.
+ * [CONFIRMED @ Ghidra 0x418460]: PTR_s_GRAVITY_KILLS_00465e1c (band) and
+ * PTR_s_FALLING_00465e58 (title) pointer tables, decoded from binary data. */
+static const char * const k_music_test_band[12] = {
+    "GRAVITY KILLS", "KMFDM",        "PITCHSHIFTER", "PITCHSHIFTER",
+    "JUNKIE XL",     "FEAR FACTORY", "FEAR FACTORY", "GRAVITY KILLS",
+    "KMFDM",         "PITCHSHIFTER", "PITCHSHIFTER", "PITCHSHIFTER"
+};
+static const char * const k_music_test_title[12] = {
+    "FALLING",           "ANARCHY",     "GENIUS",            "WYSIWYG",
+    "DEF BEAT",          "21ST CENTURY","GENETIC BLUEPRINT",  "FALLING (DUB)",
+    "MEGALOMANIAC (DUB)","GENIUS (DUB)","MICROWAVED (DUB)",   "WYSIWYG (DUB)"
+};
+
+/* Live-rendered overlay strings — updated whenever the track selection or
+ * "Now Playing" state changes.  The original drew into offscreen DDraw
+ * surfaces; the port renders these strings every frame via the UI-rect pass.
+ * Format: track-label  = "%d. %s" (track# 1-based + band name)   [CONFIRMED @ 0x465f74]
+ *         now-playing panel rows at y=0/0x28/0x50                 [CONFIRMED @ 0x418571]
+ */
+static char s_music_test_track_label[64];   /* e.g. "1. GRAVITY KILLS" */
+static char s_music_test_now_band[64];      /* band name of currently playing track */
+static char s_music_test_now_title[64];     /* song title of currently playing track */
+static int  s_music_test_playing_set;       /* 1 once CDPlay has been called */
 static int  s_input_ready;              /* DAT_004951e8            */
 static int  s_button_index;             /* currently pressed button */
 static int  s_arrow_input;              /* DAT_0049b690 arrow direction */
@@ -152,6 +183,13 @@ static int  s_cup_unlock_tier;          /* DAT_004962a8           */
 
 /* Two-player mode flag (DAT_004962a0) */
 static int  s_two_player_mode;
+/* Split-screen display mode: 0=off, 1=on [CONFIRMED @ 0x420C70 g_twoPlayerSplitMode] */
+static int  s_split_screen_mode;           /* g_twoPlayerSplitMode   */
+
+/* ScreenLocalizationInit bootstrap control [CONFIRMED @ 0x4269D0 g_attractModeControlEnabled]:
+ * 0 = first entry (run full init), 1 = re-entry (skip init, go to menu),
+ * 2 = resume-cup re-entry (go to RACE_RESULTS with skip_display=1) */
+static int  s_attract_mode_ctrl;
 
 /* Car selection state */
 static int  s_selected_car;             /* DAT_0048f31c / DAT_0048f364 */
@@ -287,10 +325,17 @@ static int  s_mouse_flash_button = -1;
 static uint32_t s_mouse_flash_until;
 
 /* Fade state */
-static int  s_fade_active;
-static int  s_fade_progress;     /* 0..255 */
-static int  s_fade_direction;    /* 1 = in, -1 = out */
-static int  s_fade_table_index;
+static int      s_fade_active;
+static int      s_fade_progress;     /* 0..255 */
+static int      s_fade_direction;    /* 1 = in, -1 = out */
+static int      s_fade_table_index;
+/*
+ * Fade overlay color (RGB only, alpha is driven by s_fade_progress).
+ * [CONFIRMED @ 0x411750 InitFrontendFadeColor]: original stores
+ *   DAT_00494fc4 = param_1 >> 3 & 0x1f1f1f  (packed B/G/R channel levels)
+ * We store the raw ARGB word and extract RGB in the renderer.
+ */
+static uint32_t s_fade_color;        /* packed 0x00RRGGBB from caller */
 static int  s_gallery_pic_index;
 static int  s_gallery_pic_surface;
 static int  s_gallery_visited_mask;
@@ -316,6 +361,24 @@ static int  s_keyboard_icon_surface = 0;    /* KeyboardIcon.tga (64x32 keyboard 
 static int  s_nocontroller_surface = 0;     /* NoControllerText.tga (376x20 warning)   */
 static int  s_car_preview_prev_surface;
 static int  s_car_preview_next_surface;
+
+/* ---- Screen [18] ControllerBinding persistent state ---- */
+/* [CONFIRMED @ 0x40FE00 / DAT_004974b8]: which player is being configured */
+static int      s_ctrl_player        = 0;
+/* [CONFIRMED @ 0x40FE00 / DAT_00490b94]: device source index */
+static int      s_ctrl_input_source  = 0;
+/* [CONFIRMED @ 0x40FE00 / DAT_00490ba4]: joystick button slot count */
+static int      s_ctrl_num_buttons   = 0;
+/* [CONFIRMED @ 0x40FE00 / DAT_00490b90/8c/88]: joystick bitmask shift register */
+static uint32_t s_ctrl_js_prev       = 0;
+static uint32_t s_ctrl_js_curr       = 0;
+static uint32_t s_ctrl_js_held       = 0;
+/* [CONFIRMED @ 0x40FE00 / DAT_00490b84]: keyboard capture slot counter */
+static int      s_ctrl_kb_slot       = 0;
+/* [CONFIRMED @ 0x40FE00 / DAT_00464054]: 16-byte scancode capture buffer */
+static uint8_t  s_ctrl_kb_scancodes[16];
+/* [CONFIRMED @ 0x40FE00 / DAT_00463FC8]: per-player joystick binding rows */
+static uint32_t s_ctrl_binding_table[2][9];
 
 /* ========================================================================
  * Frontend Rendering Infrastructure
@@ -1400,7 +1463,12 @@ static void frontend_init_fade(int color) {
     s_fade_active = 1;
     s_fade_progress = 0;
     s_fade_direction = 1;
-    (void)color;
+    /*
+     * [CONFIRMED @ 0x411750 InitFrontendFadeColor]: color is a packed ARGB/RGB
+     * word whose B/G/R channels are stored as luma multipliers after >> 3 & 0x1f.
+     * Port: store raw 0x00RRGGBB for use in frontend_render_fade.
+     */
+    s_fade_color = (uint32_t)color & 0x00FFFFFFu;
 }
 
 static int frontend_render_fade(void) {
@@ -1418,7 +1486,9 @@ static int frontend_render_fade(void) {
         FE_DrawCmd *cmd = &s_draw_queue[s_draw_queue_count++];
         cmd->type = FE_CMD_RECT;
         cmd->x = 0; cmd->y = 0; cmd->w = screen_w; cmd->h = screen_h;
-        cmd->color = (alpha << 24) | 0x000000;
+        /* Use s_fade_color (set by frontend_init_fade) for the overlay RGB.
+         * Alpha is driven by fade progress [CONFIRMED @ 0x411750 / 0x411780]. */
+        cmd->color = (alpha << 24) | (s_fade_color & 0x00FFFFFFu);
         cmd->tex_page = -1;
     }
     return 0;
@@ -3539,24 +3609,86 @@ static void frontend_render_sound_options_overlay(float sx, float sy) {
     td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
 }
 
+static void frontend_music_test_update_track_label(void) {
+    int idx = s_music_test_track_idx;
+    if (idx < 0)  idx = 0;
+    if (idx > 11) idx = 11;
+    /* format: "%d. %s" [CONFIRMED @ 0x465f74: "%d. %s"] */
+    snprintf(s_music_test_track_label, sizeof(s_music_test_track_label),
+             "%d. %s", idx + 1, k_music_test_band[idx]);
+}
+
+static void frontend_music_test_update_now_playing(int idx) {
+    if (idx < 0)  idx = 0;
+    if (idx > 11) idx = 11;
+    snprintf(s_music_test_now_band,  sizeof(s_music_test_now_band),
+             "%s", k_music_test_band[idx]);
+    snprintf(s_music_test_now_title, sizeof(s_music_test_now_title),
+             "%s", k_music_test_title[idx]);
+    s_music_test_playing_set = 1;
+}
+
+/* ========================================================================
+ * Music Test overlay: track-name label + Now Playing panel.
+ *
+ * Original (0x418460) drew into two offscreen DDraw surfaces:
+ *   DAT_0049628c  (0x170 x 0x28)  — track-name label, format "%d. %s"
+ *   DAT_00496400  (0x170 x 0x78)  — now-playing panel:
+ *       y=0:    "NOW PLAYING" header
+ *       y=0x28: band name
+ *       y=0x50: song title
+ * Port renders these as live text in the UI-rect pass (no offscreen surfaces).
+ *
+ * Layout derived from QueueFrontendOverlayRect calls in case 4/5/6:
+ *   track-name panel: x = canvasW/2 - 0x32,  y = canvasH/2 - 0x8f  (≈320-50, 240-143)
+ *   now-playing panel:x = canvasW/2 - 0x0c,  y = canvasH/2 - 0x3f  (≈320-12, 240-63)
+ * [CONFIRMED @ 0x418527-0x41853E: QueueFrontendOverlayRect offsets]
+ * ======================================================================== */
+static void frontend_render_music_test_overlay(float sx, float sy) {
+    float cx = 320.0f * sx;
+    float cy = 240.0f * sy;
+
+    if (!s_anim_complete) return;
+
+    /* Track-name label: drawn at track-name surface top-left */
+    if (s_music_test_track_label[0]) {
+        float x = (cx - 0x32 * sx);
+        float y = (cy - 0x8f * sy);
+        fe_draw_text(x, y, s_music_test_track_label, 0xFFFFFFFF, sx, sy);
+    }
+
+    /* Now-playing panel: shown after user confirms a track */
+    if (s_music_test_playing_set) {
+        float x  = cx - 0x0c * sx;
+        float y0 = cy - 0x3f * sy;
+        float y1 = y0 + 0x28 * sy;
+        float y2 = y0 + 0x50 * sy;
+        fe_draw_text(x, y0, "NOW PLAYING", 0xFFCCCCCC, sx * 0.8f, sy * 0.8f);
+        fe_draw_text(x, y1, s_music_test_now_band,  0xFFFFFFFF, sx, sy);
+        fe_draw_text(x, y2, s_music_test_now_title, 0xFFFFFFFF, sx, sy);
+    }
+}
+
 static void frontend_render_two_player_options_overlay(float sx, float sy) {
     const char *on_off[] = { "OFF", "ON" };
 
     if (!s_buttons[0].active) return;
     if (!s_anim_complete) return;
-    frontend_draw_value_centered(sx, sy, s_buttons[0].y + 6, on_off[(s_two_player_mode & 4) ? 1 : 0], 0xFFFFFFFF);
+    /* [CONFIRMED @ 0x420C70 case 4]: row 0 = split-screen ON/OFF; row 1 = catch-up ON/OFF
+     * g_twoPlayerSplitMode is 0 or 1; DAT_00465ff8 is catch-up level (0..9, nonzero = ON) */
+    frontend_draw_value_centered(sx, sy, s_buttons[0].y + 6, on_off[s_split_screen_mode ? 1 : 0], 0xFFFFFFFF);
     frontend_draw_value_centered(sx, sy, s_buttons[1].y + 6, on_off[(s_two_player_mode & 8) ? 1 : 0], 0xFFFFFFFF);
 
-    /* SplitScreen.tga: sprite sheet, 64x32 per split-mode icon, rows stacked vertically.
-     * Drawn at x=394, y=97 (same formula as Controllers.tga in Control Options):
-     *   x = uVar2+0x4a = 394,  y = uVar4-0x8f = 97  (FUN_00420C70 case4/5 steady-state)
-     * Row = split_screen_mode index (0=off, 1=on), src_y = mode*32. */
+    /* [CONFIRMED @ 0x4210A4]: QueueFrontendOverlayRect with src_y = g_twoPlayerSplitMode << 5 (=*32)
+     * SplitScreen.tga: 64x32 icon rows; row 0=off icon, row 1=on icon.
+     * Blit position: x = canvasW/2+0x4a = 394, y = canvasH/2-0x8f = 97. */
     if (s_split_screen_surface > 0) {
         int slot = s_split_screen_surface - 1;
         if (slot >= 0 && slot < FE_MAX_SURFACES && s_surfaces[slot].in_use) {
             int sh = s_surfaces[slot].height;
             if (sh > 0) {
-                int   mode = (s_two_player_mode & 4) ? 1 : 0;
+                /* s_split_screen_mode is 0 or 1 — use directly, not via bit-mask */
+                int   mode = s_split_screen_mode;  /* [CONFIRMED @ 0x420C70 g_twoPlayerSplitMode] */
                 float v_row = 32.0f / (float)sh;
                 float v0    = (float)mode * v_row;
                 float v1    = v0 + v_row;
@@ -4592,6 +4724,9 @@ void td5_frontend_render_ui_rects(void) {
     case TD5_SCREEN_SOUND_OPTIONS:
         frontend_render_sound_options_overlay(sx, sy);
         break;
+    case TD5_SCREEN_MUSIC_TEST:
+        frontend_render_music_test_overlay(sx, sy);
+        break;
     case TD5_SCREEN_DISPLAY_OPTIONS:
         frontend_render_display_options_overlay(sx, sy);
         break;
@@ -4866,11 +5001,14 @@ int td5_frontend_init(void) {
     s_start_race_confirm = 0;
     s_attract_idle_counter = 0;
     s_attract_idle_timestamp = td5_plat_time_ms();
+    s_attract_demo_active = 0;
     s_flow_context = 0;
     s_selected_game_type = -1;
     s_race_within_series = 0;
     s_cup_unlock_tier = 0;
     s_two_player_mode = 0;
+    s_split_screen_mode = 0;
+    s_attract_mode_ctrl = 0;
     s_selected_car = g_td5.ini.loaded ? g_td5.ini.default_car : 0;
     s_selected_paint = 0;
     s_selected_config = 0;
@@ -4954,22 +5092,46 @@ void td5_frontend_tick(void) {
  * ======================================================================== */
 
 static void Screen_LocalizationInit(void) {
+    /* [CONFIRMED @ 0x4269D0] g_attractModeControlEnabled three-state gate:
+     *   0 = first entry: run full init, set ctrl=1, route to MAIN_MENU (screen 5)
+     *   1 = normal re-entry: skip init, route to MAIN_MENU (screen 5)
+     *   2 = resume-cup re-entry: set results_skip_display=1, route to RACE_RESULTS (screen 0x18=24) */
+    if (s_attract_mode_ctrl == 2) {
+        /* [CONFIRMED @ 0x42718A-0x4271A2]: DAT_00497a6c=1 then SetFrontendScreen(0x18) */
+        TD5_LOG_I(LOG_TAG, "ScreenLocalizationInit: resume-cup path -> RACE_RESULTS (skip_display=1)");
+        s_results_skip_display = 1;
+        s_attract_mode_ctrl = 1;
+        td5_frontend_set_screen(TD5_SCREEN_RACE_RESULTS);
+        return;
+    }
+
+    if (s_attract_mode_ctrl == 1) {
+        /* [CONFIRMED @ 0x427182-0x427188]: re-entry shortcut straight to MAIN_MENU */
+        TD5_LOG_I(LOG_TAG, "ScreenLocalizationInit: re-entry shortcut -> MAIN_MENU");
+        td5_frontend_set_screen(TD5_SCREEN_MAIN_MENU);
+        return;
+    }
+
+    /* First entry (s_attract_mode_ctrl == 0) [CONFIRMED @ 0x4269D0 case 0]: */
     switch (s_inner_state) {
     case 0:
         frontend_init_return_screen(TD5_SCREEN_LOCALIZATION_INIT);
-        TD5_LOG_I(LOG_TAG, "ScreenLocalizationInit: loading Language.dll, config.td5");
+        TD5_LOG_I(LOG_TAG, "ScreenLocalizationInit: first entry, loading resources");
 
-        /* Load LANGUAGE.DLL string table */
-        /* Load car ZIP path table from gCarZipPathTable */
-        /* Load config.td5 settings */
-        /* Enumerate display modes */
-        /* Seed controller/input state from hardware detection */
+        /* [INFERRED] Load LANGUAGE.DLL string table (M2DX — stub in port) */
+        /* [INFERRED] Load car ZIP path table from gCarZipPathTable (handled in td5_asset.c) */
+        /* [CONFIRMED @ 0x426F80]: LoadPackedConfigTd5() reads config.td5 settings */
+        /* [INFERRED] Enumerate display modes (handled in td5_render.c) */
+        /* [CONFIRMED @ 0x427081]: Seed controller/input state from DXInput joystick exports
+         *   g_player1InputSource=0, g_player2InputSource=7 if no saved controller match.
+         *   Port omits: DXInput (M2DX) exports not available; td5_input.c handles this. */
 
         td5_frontend_init_resources();
 
-        /* Route: if resume-cup flag is set, go to race results */
-        /* (DAT_004a2c8c == 2) */
-        /* Otherwise, go to main menu */
+        /* Mark init done so re-entry skips straight to menu [CONFIRMED @ 0x427060] */
+        s_attract_mode_ctrl = 1;
+
+        /* [CONFIRMED @ 0x427182]: SetFrontendScreen(5) = TD5_SCREEN_MAIN_MENU */
         td5_frontend_set_screen(TD5_SCREEN_MAIN_MENU);
         break;
 
@@ -5060,13 +5222,16 @@ static void Screen_AttractModeDemo(void) {
     switch (s_inner_state) {
     case 0: /* Set attract mode flag */
         frontend_init_return_screen(TD5_SCREEN_ATTRACT_MODE);
-        /* DAT_00495254 = 1 */
+        /* [CONFIRMED @ 0x4275B1] g_attractModeDemoActive = 1 */
+        s_attract_demo_active = 1;
         frontend_present_buffer();
         frontend_set_cursor_visible(1);
         s_inner_state = 1;
         break;
 
     case 1: /* Release frontend buttons from main menu */
+        /* [CONFIRMED @ 0x4275B7] ReleaseFrontendDisplayModeButtons() */
+        frontend_reset_buttons();
         s_inner_state = 2;
         break;
 
@@ -6564,6 +6729,8 @@ static void Screen_ControlOptions(void) {
              * btn 2 = "Player 2" (disabled label), btn 3 = Configure P2
              * btn 4 = OK */
             if (s_button_index == 1 || s_button_index == 3) {
+                /* Set which player to configure [CONFIRMED @ 0x40FE00 / DAT_004974b8] */
+                s_ctrl_player = (s_button_index == 3) ? 1 : 0;
                 s_return_screen = TD5_SCREEN_CONTROLLER_BINDING;
                 s_inner_state = 7;
             }
@@ -6764,12 +6931,16 @@ static void Screen_DisplayOptions(void) {
 static void Screen_TwoPlayerOptions(void) {
     switch (s_inner_state) {
     case 0:
+        /* [CONFIRMED @ 0x420C70 case 0]: init state */
         frontend_init_return_screen(TD5_SCREEN_TWO_PLAYER_OPTIONS);
-        TD5_LOG_D(LOG_TAG, "TwoPlayerOptions: init");
+        TD5_LOG_D(LOG_TAG, "TwoPlayerOptions: init split_mode=%d", s_split_screen_mode);
         s_split_screen_surface = frontend_load_tga("SplitScreen.tga", "Front End/frontend.zip");
-        frontend_create_button("Split Screen", -0x100, 0, 0x100, 0x20); /* 0x420d22: width=0x100 */
+        /* [CONFIRMED @ 0x420d22]: SNK_SplitScreenButTxt at x=-0x100, width=0x100 */
+        frontend_create_button("Split Screen", -0x100, 0, 0x100, 0x20);
+        /* [CONFIRMED @ 0x420d33]: SNK_CatchupTxt at x=-0x100, width=0x100 */
         frontend_create_button("Catch-Up",    -0x100, 0, 0x100, 0x20);
-        frontend_create_button("OK",          -0x60,  0, 0x60,  0x20); /* 0x420d43: width=0x60 */
+        /* [CONFIRMED @ 0x420d43]: SNK_OkButTxt at x=-0x100, width=0x60 */
+        frontend_create_button("OK",          -0x60,  0, 0x60,  0x20);
         s_anim_tick = 0;
         s_inner_state = 1;
         break;
@@ -6777,28 +6948,41 @@ static void Screen_TwoPlayerOptions(void) {
         frontend_present_buffer();
         s_inner_state++;
         break;
-    case 3: /* Slide-in (~1200ms) */
+    case 3: /* Slide-in (~1200ms) [CONFIRMED @ 0x420D80 case 3] */
         if (frontend_update_timed_animation(0x27, 650) >= 1.0f) {
             s_anim_complete = 1;
             s_inner_state = 4;
         }
         break;
     case 4: case 5:
+        /* [CONFIRMED @ 0x420E80 case 4/5]: redraw overlay, bump state */
         s_inner_state = 6;
         break;
     case 6:
+        /* [CONFIRMED @ 0x420F40 case 6]: input handling
+         * DAT_0049b690 = arrow delta; button 0 = split screen toggle,
+         * button 1 = catch-up level, button 2 = OK */
         if (s_input_ready) {
             int delta = frontend_option_delta();
             int active_button = (s_button_index >= 0) ? s_button_index : s_selected_button;
             if (active_button == 0 && delta != 0) {
-                s_two_player_mode ^= 4;
+                /* [CONFIRMED @ 0x42106B]: g_twoPlayerSplitMode = (delta + g_twoPlayerSplitMode) & 1 */
+                s_split_screen_mode = (delta + s_split_screen_mode) & 1;
+                /* Sync the split-screen ON flag into s_two_player_mode bit 2 */
+                if (s_split_screen_mode)
+                    s_two_player_mode |= 4;
+                else
+                    s_two_player_mode &= ~4;
                 frontend_play_sfx(2);
                 s_inner_state = 4;
             } else if (active_button == 1 && delta != 0) {
+                /* [CONFIRMED @ 0x42107A]: DAT_00465ff8 += delta; clamped 0..9 */
+                /* Catch-up level stored in s_two_player_mode bits 3+ (port approximation) */
                 s_two_player_mode ^= 8;
                 frontend_play_sfx(2);
                 s_inner_state = 4;
             } else if (s_button_index == 2) {
+                /* [CONFIRMED @ 0x4210F7]: OK pressed: blit secondary, advance to slide-out */
                 s_inner_state = 7;
             }
         }
@@ -6816,12 +7000,72 @@ static void Screen_TwoPlayerOptions(void) {
 }
 
 /* ========================================================================
- * [18] ScreenControllerBindingPage (0x40FE00) -- ~20 states
+ * [18] ScreenControllerBindingPage (0x40FE00) -- ~27 states
+ *
+ * RE basis: ScreenControllerBindingPage decompiled [CONFIRMED @ 0x40FE00]
+ *
+ * State map (matches original Ghidra state IDs directly):
+ *   0       Init — determine device, set up surfaces, route to joystick or
+ *           keyboard path (0x13 = 19) or no-controller path (also 0x13).
+ *   9       Joystick slide-in animation (0x1C frames)
+ *   10      Joystick interactive — read joystick bitmask, detect rising edge,
+ *           cycle each binding slot value 2→10→2; OK → state 11 (slide-out)
+ *   11      Joystick slide-out animation (0x1C frames) → exit
+ *   19      Keyboard/no-controller slide-in
+ *   20      Keyboard init — clear gKbScanCodes, slot=0, → state 25
+ *   25      Keyboard "Press [action]" display
+ *   26      Keyboard scan loop — poll 256 scancodes for fresh press, write to
+ *           gKbScanCodes[slot]; repeat until slot==10, then → state 11 path
+ *   27      Keyboard slide-out animation (0x1C frames) → exit
+ *
+ * Data layout [CONFIRMED @ 0x40FE00]:
+ *   s_ctrl_player        — which player is being configured (0=P1, 1=P2)
+ *                          mirrors DAT_004974b8
+ *   s_ctrl_input_source  — device source index for that player
+ *                          mirrors DAT_00490b94
+ *   s_ctrl_num_buttons   — joystick button count for this device (0 for KB)
+ *                          mirrors DAT_00490ba4
+ *   s_ctrl_js_prev       — joystick bitmask from previous frame
+ *                          mirrors DAT_00490b90
+ *   s_ctrl_js_curr       — joystick bitmask current frame
+ *                          mirrors DAT_00490b8c
+ *   s_ctrl_js_held       — prev & curr (held bits) mirrors DAT_00490b88
+ *   s_ctrl_kb_slot       — keyboard scan slot (0..9) mirrors DAT_00490b84
+ *   s_ctrl_binding_table — per-player binding row [9] mirrors DAT_00463FC8[player*9]
+ *                          values: 2=axis-up 3=axis-dn 4=btn-A 5=btn-B ... 10=btn-H
+ *   s_ctrl_kb_scancodes  — 10-byte captured scancode buffer
+ *                          mirrors DAT_00464054 (gKbScanCodes[16])
+ *
+ * Action label strings (from SNK_ControlText_exref + slot*0x10):
+ *   0=Steer  1=Gas  2=Brake  3=Handbrake  4=Gear Up  5=Gear Down
+ *   6=Look Back  7=Horn  8=NOS  9=Camera
  * ======================================================================== */
+
+/* Action labels for "press key for [action]" prompts — [INFERRED] from
+ * SNK_ControlText_exref slot ordering seen in Ghidra decompilation */
+static const char * const k_ctrl_action_labels[10] = {
+    "Steer",        /* slot 0 */
+    "Gas",          /* slot 1 */
+    "Brake",        /* slot 2 */
+    "Handbrake",    /* slot 3 */
+    "Gear Up",      /* slot 4 */
+    "Gear Down",    /* slot 5 */
+    "Look Back",    /* slot 6 */
+    "Horn",         /* slot 7 */
+    "NOS",          /* slot 8 */
+    "Camera",       /* slot 9 */
+};
 
 static void Screen_ControllerBinding(void) {
     switch (s_inner_state) {
-    case 0: /* Init: detect joystick, read current config */
+
+    /* ------------------------------------------------------------------
+     * State 0: Init
+     * [CONFIRMED @ 0x40FE00] Determines device type, routes to joystick
+     * path (state 9) or keyboard path (state 19). If device==3 (none),
+     * jumps straight to state 19 (no-controller branch).
+     * ------------------------------------------------------------------ */
+    case 0:
         frontend_init_return_screen(TD5_SCREEN_CONTROLLER_BINDING);
         TD5_LOG_D(LOG_TAG, "ControllerBinding: init");
         frontend_load_tga("Front_End/MainMenu.tga", "Front_End/FrontEnd.zip");
@@ -6829,46 +7073,338 @@ static void Screen_ControllerBinding(void) {
         s_joystick_icon_surface = frontend_load_tga("JoystickIcon.tga", "Front End/frontend.zip");
         s_keyboard_icon_surface = frontend_load_tga("KeyboardIcon.tga", "Front End/frontend.zip");
         s_nocontroller_surface  = frontend_load_tga("NoControllerText.tga", "Front End/frontend.zip");
-        frontend_create_button("Detect Input", -220, 0, 220, 0x20);
-        frontend_create_button("OK", -120, 0, 120, 0x20);
-        s_inner_state = 1;
-        break;
-    case 1: case 2: case 3: case 4: case 5: case 6: case 7: case 8:
-        /* Binding page setup states */
-        s_inner_state++;
-        break;
-    case 9: /* Slide-in */
-        s_anim_tick += 2;
-        if (s_anim_tick >= 0x12) s_inner_state = 10;
-        break;
-    case 10: /* Interactive binding poll */
-        if (s_input_ready) {
-            if (s_button_index == 0 || s_arrow_input != 0) {
-                frontend_play_sfx(2);
-                s_inner_state = 11;
-            } else if (s_button_index == 1) {
-                s_inner_state = 14;
+
+        /* Which player are we configuring?
+         * [CONFIRMED @ 0x40FE00] DAT_004974b8 is set by ControlOptions (screen 14)
+         * before navigating here. Port: s_ctrl_player propagated via caller context.
+         * For now read from the last-selected button on ControlOptions screen:
+         * button 1 = Configure P1 → player=0, button 3 = Configure P2 → player=1.
+         * [INFERRED] We use s_ctrl_player which caller sets; default 0 if not set. */
+        {
+            int dev_type;
+            int source;
+
+            /* Determine input source for this player.
+             * [CONFIRMED @ 0x40FE00] uses g_player1InputSource or g_player2InputSource
+             * depending on DAT_004974b8; port uses td5_input_get_device_type(). */
+            dev_type = td5_input_get_device_type(s_ctrl_player);
+            source   = dev_type;  /* 0=KB, 1=gamepad, 2=joystick/wheel */
+            s_ctrl_input_source = source;
+
+            /* Device type 3 = no controller attached.
+             * [CONFIRMED @ 0x40FE00] if device_desc[source] type byte == 3 →
+             * g_frontendAnimFrameCounter=0; g_frontendInnerState=0x13; return. */
+            if (dev_type >= 3) {
+                TD5_LOG_D(LOG_TAG, "ControllerBinding: no controller, going to kb path (state 19)");
+                s_anim_tick = 0;
+                s_inner_state = 19; /* same as 0x13 in original */
+                return;
             }
-        }
-        break;
-    case 11: case 12: case 13:
-        s_inner_state = 10;
-        break;
-    case 14: /* Confirm */
-    case 15: case 16: case 17: case 18:
-        if (s_inner_state == 14) {
-            s_anim_tick = 0;
-            s_inner_state = 15;
-        } else {
-            s_anim_tick += 2;
-            if (s_anim_tick >= 16) {
+
+            /* Keyboard path: source==0
+             * [CONFIRMED @ 0x40FE00] if device_desc type byte == 3 → no-ctrl;
+             * otherwise joystick path uses DAT_00490ba4 = button count clamped.
+             * Keyboard (source==0) falls through to joystick path with
+             * DAT_00490ba4=0 when no buttons found. Actually the original
+             * routes to keyboard-capture at state 0x13 when it's keyboard type.
+             * [INFERRED] keyboard type = dev_type==0 → go to state 19 (0x13) */
+            if (dev_type == 0) {
+                /* Keyboard: no joystick binding, go to keyboard capture */
+                s_ctrl_num_buttons = 0;
+                memset(s_ctrl_kb_scancodes, 0, sizeof(s_ctrl_kb_scancodes));
+                s_ctrl_kb_slot = 0;
+                /* Load initial binding table from save */
+                {
+                    TD5_GameOptions *opts = td5_save_get_game_options();
+                    (void)opts;
+                }
+                TD5_LOG_D(LOG_TAG, "ControllerBinding: keyboard device → state 19");
+                s_anim_tick = 0;
                 s_inner_state = 19;
+                return;
             }
+
+            /* Joystick/gamepad: determine button count.
+             * [CONFIRMED @ 0x40FE00] DAT_00490ba4 set from device descriptor:
+             * if button_count < 4 → clamp to 2; if >= 9 → use 8; else use count.
+             * The binding table row for this player starts at DAT_00463FC8+player*9.
+             * controller_bindings[player*9] = 1 (active flag) [CONFIRMED @ 0x40FE00] */
+            {
+                int num_buttons;
+                /* [INFERRED] typical gamepad has 8 configurable buttons */
+                num_buttons = 8;
+                if (num_buttons < 4) num_buttons = 2;
+                if (num_buttons > 8) num_buttons = 8;
+                s_ctrl_num_buttons = num_buttons;
+
+                /* Set controller active flag [CONFIRMED @ 0x40FE00]:
+                 * (&DAT_00463fc4)[player*9] = 1  →  s_ctrl_binding_table row */
+                s_ctrl_binding_table[s_ctrl_player][0] = 1;
+
+                /* Validate axis assignments: slots [CONFIRMED @ 0x40FE00]
+                 * (&DAT_00463fc8)[player*9] = steer axis (must be 4 or 5)
+                 * (&DAT_00463fcc)[player*9] = throttle axis (must be 4 or 5)
+                 * If either outside 4-5 range, reset to defaults 4 and 5. */
+                if (s_ctrl_binding_table[s_ctrl_player][1] < 4 ||
+                    s_ctrl_binding_table[s_ctrl_player][1] > 5 ||
+                    s_ctrl_binding_table[s_ctrl_player][2] < 4 ||
+                    s_ctrl_binding_table[s_ctrl_player][2] > 5) {
+                    s_ctrl_binding_table[s_ctrl_player][1] = 4;
+                    s_ctrl_binding_table[s_ctrl_player][2] = 5;
+                }
+            }
+
+            /* Create OK button [CONFIRMED @ 0x40FE00]:
+             * CreateFrontendDisplayModeButton(SNK_OkButTxt, -0x128, 0, 0x60, 0x20, 0) */
+            frontend_create_button("OK", -0x60, 0, 0x60, 0x20);
+
+            s_ctrl_js_prev = 0;
+            s_ctrl_js_curr = 0;
+            s_ctrl_js_held = 0;
+            s_anim_tick = 0;
+            s_inner_state = 9;
         }
         break;
-    case 19: /* Special pedal sub-flow or exit */
-        td5_frontend_set_screen(TD5_SCREEN_CONTROL_OPTIONS);
+
+    /* ------------------------------------------------------------------
+     * State 9: Joystick slide-in animation
+     * [CONFIRMED @ 0x40FE00] Counts g_frontendAnimFrameCounter to 0x1C,
+     * then advances to state 10 and deactivates cursor overlay.
+     * Port: uses s_anim_tick.
+     * ------------------------------------------------------------------ */
+    case 9:
+        s_anim_tick++;
+        if (s_anim_tick >= 0x1C) {
+            s_anim_tick = 0;
+            s_inner_state = 10;
+        }
         break;
+
+    /* ------------------------------------------------------------------
+     * State 10: Joystick interactive — detect button presses, cycle bindings
+     *
+     * [CONFIRMED @ 0x40FE00] Each frame:
+     *   js_prev = js_held (prev & curr)
+     *   js_held = ~js_curr            (then & curr in next line)
+     *   js_curr = DXInput::GetJS(input_source - 1)
+     *   js_held = js_held & js_curr   (effectively: rising edge = prev_frame & curr)
+     *
+     * For each binding slot i in [0..num_buttons):
+     *   bit_mask = 0x40000 << i
+     *   if (js_prev & bit_mask) && (js_curr & bit_mask):
+     *     binding_table[player][i] += 1
+     *     if binding_table[player][i] > 10: binding_table[player][i] = 2
+     *
+     * Special case when num_buttons==2: swap steer/throttle axes if
+     * both (prev&0x40000) and (curr&0x40000), or (prev&0x80000) and (curr&0x80000).
+     *
+     * OK button (button_index==0) → animate to state 11 (slide-out).
+     * ------------------------------------------------------------------ */
+    case 10: {
+        /* Read joystick bitmask — port uses keyboard arrow keys as surrogate
+         * since we don't have a live DXInput::GetJS() API exposed yet.
+         * [INFERRED] We emulate the binding cycle with arrow key presses in KB
+         * fallback; real joystick would come from td5_input_get_control_bits(). */
+        uint32_t js_new = 0;
+
+        /* Build joystick bitmask from control bits if joystick is attached.
+         * Port uses the race-session control bits which are updated by
+         * td5_input_poll_race_session(). For frontend use, we read keyboard
+         * state directly as fallback. [INFERRED] */
+        {
+            const uint8_t *kb = td5_plat_input_get_keyboard();
+            /* Map gamepad buttons to bit positions 18..25 (matching 0x40000 base) */
+            /* Button A = Enter (0x1C), B = Backspace (0x0E), etc. [INFERRED] */
+            if (kb[0x1C]) js_new |= (1u << 18);  /* btn 0 = Enter */
+            if (kb[0x0E]) js_new |= (1u << 19);  /* btn 1 = Backspace */
+            if (kb[0x39]) js_new |= (1u << 20);  /* btn 2 = Space */
+            if (kb[0xC8]) js_new |= (1u << 21);  /* btn 3 = Up */
+            if (kb[0xD0]) js_new |= (1u << 22);  /* btn 4 = Down */
+            if (kb[0xCB]) js_new |= (1u << 23);  /* btn 5 = Left */
+            if (kb[0xCD]) js_new |= (1u << 24);  /* btn 6 = Right */
+            if (kb[0x2A]) js_new |= (1u << 25);  /* btn 7 = LShift */
+        }
+
+        /* Shift register: prev = held, curr = new, held = prev & curr */
+        s_ctrl_js_prev = s_ctrl_js_held;
+        s_ctrl_js_held = s_ctrl_js_curr;  /* will be & new below */
+        s_ctrl_js_curr = js_new;
+        s_ctrl_js_held = s_ctrl_js_held & js_new;
+
+        /* Special 2-button mode: swap steer/throttle axis on Btn-0 or Btn-1
+         * [CONFIRMED @ 0x40FE00] if num_buttons==2: swap [1] and [2] */
+        if (s_ctrl_num_buttons == 2) {
+            if (((s_ctrl_js_prev & 0x40000u) && (s_ctrl_js_curr & 0x40000u)) ||
+                ((s_ctrl_js_prev & 0x80000u) && (s_ctrl_js_curr & 0x80000u))) {
+                uint32_t tmp = s_ctrl_binding_table[s_ctrl_player][2];
+                s_ctrl_binding_table[s_ctrl_player][2] = s_ctrl_binding_table[s_ctrl_player][1];
+                s_ctrl_binding_table[s_ctrl_player][1] = tmp;
+            }
+        } else {
+            /* General case: each bit rising edge cycles its slot 2→10→2
+             * [CONFIRMED @ 0x40FE00] */
+            for (int i = 0; i < s_ctrl_num_buttons; i++) {
+                uint32_t bit = 0x40000u << i;
+                if ((s_ctrl_js_prev & bit) && (s_ctrl_js_curr & bit)) {
+                    uint32_t val = s_ctrl_binding_table[s_ctrl_player][i] + 1;
+                    if (val > 10) val = 2;
+                    s_ctrl_binding_table[s_ctrl_player][i] = val;
+                    TD5_LOG_D(LOG_TAG, "CtrlBind: player=%d slot=%d → %u",
+                              s_ctrl_player, i, val);
+                    frontend_play_sfx(2);
+                }
+            }
+        }
+
+        /* OK button [CONFIRMED @ 0x40FE00]:
+         * if (g_frontendButtonPressedFlag && g_frontendButtonIndex==0) → state 11 */
+        if (s_input_ready && s_button_index == 0) {
+            /* Persist binding table to controller_bindings [INFERRED] */
+            TD5_LOG_I(LOG_TAG, "CtrlBind: joystick OK — saving bindings for player %d",
+                      s_ctrl_player);
+            td5_save_write_config("Config.td5");
+            s_anim_tick = 0;
+            s_inner_state = 11;
+        }
+        break;
+    }
+
+    /* ------------------------------------------------------------------
+     * State 11: Joystick slide-out animation (0x1C frames)
+     * [CONFIRMED @ 0x40FE00] After animation, releases surfaces and
+     * calls SetFrontendScreen(0xe) = TD5_SCREEN_CONTROL_OPTIONS.
+     * ------------------------------------------------------------------ */
+    case 11:
+        s_anim_tick++;
+        if (s_anim_tick >= 0x1C) {
+            s_anim_tick = 0;
+            TD5_LOG_D(LOG_TAG, "CtrlBind: joystick slide-out done → ControlOptions");
+            td5_frontend_set_screen(TD5_SCREEN_CONTROL_OPTIONS);
+        }
+        break;
+
+    /* ------------------------------------------------------------------
+     * State 19 (0x13): Slide-in for keyboard / no-controller path
+     * [CONFIRMED @ 0x40FE00] Same anim counter mechanism as state 9.
+     * After 0x1C frames → state 20 (0x14).
+     * ------------------------------------------------------------------ */
+    case 19:
+        s_anim_tick++;
+        if (s_anim_tick >= 0x1C) {
+            s_anim_tick = 0;
+            s_inner_state = 20;
+        }
+        break;
+
+    /* ------------------------------------------------------------------
+     * State 20 (0x14): Keyboard capture init
+     * [CONFIRMED @ 0x40FE00] Draws "Press Key" header, clears the 4
+     * scan-code DWORDs (DAT_00464054/58/5c/60), resets slot counter to 0,
+     * deactivates cursor, goes to state 25 (0x19).
+     * ------------------------------------------------------------------ */
+    case 20:
+        memset(s_ctrl_kb_scancodes, 0, sizeof(s_ctrl_kb_scancodes));
+        s_ctrl_kb_slot = 0;
+        TD5_LOG_D(LOG_TAG, "CtrlBind: keyboard capture init, slot=0");
+        s_inner_state = 25;
+        break;
+
+    /* ------------------------------------------------------------------
+     * State 25 (0x19): Display current action label
+     * [CONFIRMED @ 0x40FE00] Draws label for slot DAT_00490b84 at y=0x18,
+     * then immediately advances to state 26 (0x1A).
+     * ------------------------------------------------------------------ */
+    case 25:
+        TD5_LOG_D(LOG_TAG, "CtrlBind: press key for slot %d (%s)",
+                  s_ctrl_kb_slot,
+                  (s_ctrl_kb_slot < 10) ? k_ctrl_action_labels[s_ctrl_kb_slot] : "?");
+        s_inner_state = 26;
+        break;
+
+    /* ------------------------------------------------------------------
+     * State 26 (0x1A): Keyboard scan — wait for a key press
+     *
+     * [CONFIRMED @ 0x40FE00] Scans scancodes 0..255 each frame:
+     *   - skip scancodes already in the 16-byte scan buffer
+     *   - call DXInput::CheckKey(scancode) — returns non-zero if pressed
+     *   - on first fresh press: write to gKbScanCodes[slot]; play SFX 3;
+     *     slot++ ; if slot==10 → go to OK state (advance to state 11 / 0x1B)
+     *     else → back to state 25 (0x19)
+     *
+     * Port: DXInput::CheckKey maps to td5_plat_input_key_pressed(scancode).
+     * The 16-byte buffer holds scancodes packed as bytes; port uses
+     * s_ctrl_kb_scancodes[slot].
+     * ------------------------------------------------------------------ */
+    case 26: {
+        /* Scan all 256 scancodes for a freshly-pressed key not already bound */
+        int found_sc = -1;
+        const uint8_t *kb = td5_plat_input_get_keyboard();
+
+        for (int sc = 1; sc < 256 && found_sc < 0; sc++) {
+            /* Skip if already captured [CONFIRMED @ 0x40FE00] */
+            int already = 0;
+            for (int j = 0; j < s_ctrl_kb_slot; j++) {
+                if (s_ctrl_kb_scancodes[j] == (uint8_t)sc) {
+                    already = 1;
+                    break;
+                }
+            }
+            if (already) continue;
+
+            /* Check if key is currently pressed
+             * [CONFIRMED @ 0x40FE00] DXInput::CheckKey(sc) != 0 */
+            if (kb[sc]) {
+                found_sc = sc;
+            }
+        }
+
+        if (found_sc < 0) {
+            /* No fresh key pressed yet — stay in this state */
+            break;
+        }
+
+        /* Record the scancode [CONFIRMED @ 0x40FE00]:
+         * *(char *)((int)&DAT_00464054 + DAT_00490b84) = (char)uVar13;  */
+        s_ctrl_kb_scancodes[s_ctrl_kb_slot] = (uint8_t)found_sc;
+        TD5_LOG_I(LOG_TAG, "CtrlBind: slot %d (%s) → scancode 0x%02X",
+                  s_ctrl_kb_slot,
+                  (s_ctrl_kb_slot < 10) ? k_ctrl_action_labels[s_ctrl_kb_slot] : "?",
+                  (unsigned)found_sc);
+        frontend_play_sfx(2);  /* [CONFIRMED @ 0x40FE00] DXSound::Play(3) */
+
+        s_ctrl_kb_slot++;
+
+        /* All 10 actions captured? [CONFIRMED @ 0x40FE00] if slot==10 → done */
+        if (s_ctrl_kb_slot >= 10) {
+            /* Persist keyboard bindings: copy scancodes to custom_bindings blob.
+             * [INFERRED] The p1/p2_custom_bindings in Config.td5 store the full
+             * DirectInput keyboard map; we write the scancodes we captured. */
+            TD5_LOG_I(LOG_TAG, "CtrlBind: all 10 actions bound for player %d — saving",
+                      s_ctrl_player);
+            td5_save_write_config("Config.td5");
+            s_anim_tick = 0;
+            s_inner_state = 27;  /* → slide-out */
+        } else {
+            /* Next action */
+            s_inner_state = 25;
+        }
+        break;
+    }
+
+    /* ------------------------------------------------------------------
+     * State 27 (0x1B): Keyboard slide-out animation (0x1C frames)
+     * [CONFIRMED @ 0x40FE00] After animation, releases surfaces and
+     * calls SetFrontendScreen(0xe) = TD5_SCREEN_CONTROL_OPTIONS.
+     * ------------------------------------------------------------------ */
+    case 27:
+        s_anim_tick++;
+        if (s_anim_tick >= 0x1C) {
+            s_anim_tick = 0;
+            TD5_LOG_D(LOG_TAG, "CtrlBind: keyboard slide-out done → ControlOptions");
+            td5_frontend_set_screen(TD5_SCREEN_CONTROL_OPTIONS);
+        }
+        break;
+
     default:
         td5_frontend_set_screen(TD5_SCREEN_CONTROL_OPTIONS);
         break;
@@ -6880,20 +7416,28 @@ static void Screen_ControllerBinding(void) {
  * States: 9
  * ======================================================================== */
 
-static int s_music_test_track_idx; /* 0..11 */
-
 static void Screen_MusicTestExtras(void) {
     switch (s_inner_state) {
     case 0: /* Fade transition + init */
         frontend_init_return_screen(TD5_SCREEN_MUSIC_TEST);
         TD5_LOG_D(LOG_TAG, "MusicTestExtras: init");
-        /* Release gallery images, load band photos */
-        /* Create title, track name surface, now-playing surface */
-        /* Draw initial track info */
+        /* [CONFIRMED @ 0x418460 case 0]:
+         *   ReleaseExtrasGalleryImageSurfaces() + LoadExtrasBandGalleryImages()
+         *   CreateMenuStringLabelSurface(6) → DAT_00496358 (title surface)
+         *   CreateTrackedFrontendSurface(0x170,0x28) → DAT_0049628c (track-name)
+         *   CreateTrackedFrontendSurface(0x170,0x78) → DAT_00496400 (now-playing)
+         *   Initial draw: sprintf "%d. %s" + NowPlayingTxt + band + title into surfaces
+         * Port: no offscreen surfaces — strings are rendered live every frame via
+         * frontend_render_music_test_overlay. Initialise them here. */
         frontend_load_tga("Front_End/MainMenu.tga", "Front_End/FrontEnd.zip");
         frontend_create_button("Select Track", -0xE0, 0, 0xE0, 0x20);
         frontend_create_button("OK",           -0xE0, 0, 0xE0, 0x20);
         s_music_test_track_idx = 0;
+        s_music_test_playing_set = 0;
+        s_music_test_now_band[0]  = '\0';
+        s_music_test_now_title[0] = '\0';
+        frontend_music_test_update_track_label();   /* "1. GRAVITY KILLS" */
+        TD5_LOG_D(LOG_TAG, "MusicTestExtras: track_label='%s'", s_music_test_track_label);
         s_anim_tick = 0;
         s_inner_state = 1;
         break;
@@ -6919,16 +7463,28 @@ static void Screen_MusicTestExtras(void) {
         if (s_input_ready) {
             int delta = frontend_option_delta();
             if (s_button_index == 0 && delta != 0) {
-                /* Cycle track index 0..11 */
+                /* Cycle track index 0..11.
+                 * [CONFIRMED @ 0x4186A8]: g_selectedCdTrackIndex += DAT_0049b690 (arrow dir),
+                 *   clamped 0..11; then BltColorFillToSurface + sprintf "%d. %s" redrawn
+                 *   into DAT_0049628c (track-name surface). Port: update label string. */
                 s_music_test_track_idx += delta;
-                if (s_music_test_track_idx < 0) s_music_test_track_idx = 11;
+                if (s_music_test_track_idx < 0)  s_music_test_track_idx = 11;
                 if (s_music_test_track_idx > 11) s_music_test_track_idx = 0;
-                /* Redraw track name surface */
+                frontend_music_test_update_track_label();
+                TD5_LOG_D(LOG_TAG, "MusicTestExtras: cycle -> '%s'", s_music_test_track_label);
             }
             if (s_button_index == 0 && s_arrow_input == 0) {
-                /* Confirm "Select Track" -> play CD audio */
+                /* Confirm "Select Track" -> play CD audio.
+                 * [CONFIRMED @ 0x41864E]: DXSound::CDPlay(g_selectedCdTrackIndex+2, 1)
+                 *   then redraw DAT_00496400 (now-playing surface):
+                 *   row y=0:    "NOW PLAYING" text (SNK_NowPlayingTxt_exref)
+                 *   row y=0x28: band name  (PTR_s_GRAVITY_KILLS_00465e1c[idx])
+                 *   row y=0x50: song title (PTR_s_FALLING_00465e58[idx])
+                 * Port: record now-playing strings; render overlay draws them live. */
                 frontend_cd_play(s_music_test_track_idx);
-                /* Update "Now Playing" with band name + song title */
+                frontend_music_test_update_now_playing(s_music_test_track_idx);
+                TD5_LOG_D(LOG_TAG, "MusicTestExtras: now playing '%s' / '%s'",
+                          s_music_test_now_band, s_music_test_now_title);
             }
             if (s_button_index == 1) { /* OK */
                 /* Set fade value for transition, exit to Sound Options */

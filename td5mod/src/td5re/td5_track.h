@@ -106,6 +106,7 @@ int  td5_track_load_runtime_data(int track_index, int reverse);
 /* --- Span access --- */
 int              td5_track_get_span_count(void);
 int              td5_track_get_ring_length(void);
+int              td5_track_get_span_lane_count(int span_index);
 int              td5_track_branch_to_junction(int span_idx);
 int              td5_track_get_fwd_sentinel(void);
 TD5_StripSpan   *td5_track_get_span(int index);
