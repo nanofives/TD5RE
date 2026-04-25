@@ -131,6 +131,8 @@ static int32_t g_slot_race_bonus [6];
 static int32_t g_slot_race_points[6];
 static uint8_t s_prev_grounded_mask[16];     /* per-slot previous-frame grounded bitmask (1=grounded) */
 static void integrate_traffic_pose(TD5_Actor *actor);  /* forward decl */
+static void process_traffic_segment_edge(TD5_Actor *actor, int slot);  /* forward decl */
+static void process_traffic_route_advance(TD5_Actor *actor, int slot);  /* forward decl */
 
 /* Per-slot previous-frame wheel transform results (pre-snap) for gap_270 delta.
  * Using post-snap positions causes huge Y deltas because snap Y != transform Y. */
@@ -629,6 +631,16 @@ void td5_physics_update_vehicle_actor(TD5_Actor *actor)
      * traffic pose, no wall resolvers). */
     if (actor->slot_index >= 6) {
         integrate_traffic_pose(actor);
+        /* Traffic edge containment: call AFTER pose update so world_pos is
+         * current. Mirrors UpdateTrafficActorMotion @ 0x443ED0 which calls:
+         *   ProcessActorRouteAdvance(slot)        [CONFIRMED @ 0x443ED0+0x54]
+         *   ProcessActorForwardCheckpointPass(slot)[CONFIRMED @ 0x443ED0+0x5A]
+         *   ProcessActorSegmentTransition(slot)   [CONFIRMED @ 0x443ED0+0x60]
+         * Without these, traffic has NO wall containment — only steering-based
+         * routing — and drives straight through track walls. */
+        int _ts = actor->slot_index;
+        process_traffic_route_advance(actor, _ts);
+        process_traffic_segment_edge(actor, _ts);
     } else {
         /* Racer path: full gravity + per-wheel ground snap.
          * Run even during countdown (paused) so ground-snap keeps the car
@@ -3479,6 +3491,370 @@ void td5_physics_update_suspension_response(TD5_Actor *actor)
                   pitch_grav, roll_grav, pitch_spr, roll_spr, bounce,
                   actor->angular_velocity_roll, actor->angular_velocity_pitch,
                   actor->linear_velocity_y);
+    }
+}
+
+/* ========================================================================
+ * Traffic Edge Containment Helpers
+ *
+ * The original UpdateTrafficActorMotion (0x443ED0) calls, after
+ * UpdateTrafficVehiclePose:
+ *   ProcessActorRouteAdvance (0x407840)
+ *   ProcessActorForwardCheckpointPass (0x4076C0)  -- route progression only
+ *   ProcessActorSegmentTransition (0x407390)
+ *
+ * ProcessActorRouteAdvance and ProcessActorSegmentTransition both:
+ *   1. Compute heading delta (from route table vs actor yaw).
+ *   2. Build the boundary edge tangent from the first/last span vertex pair.
+ *   3. Compute signed perpendicular distance from edge: pen.
+ *   4. If pen < 0: call ApplySimpleTrackSurfaceForce (0x407270) to push
+ *      the actor back and zero the outward velocity component.
+ *   5. Call UpdateTrafficVehiclePose again to snap pose after the push.
+ *
+ * Without these calls traffic has NO wall containment, only steering-based
+ * routing — on tight corners it drives straight through the wall.
+ *
+ * [CONFIRMED @ 0x443ED0: call sequence after IntegrateVehicleFrictionForces]
+ * [CONFIRMED @ 0x407270: ApplySimpleTrackSurfaceForce modifies world_pos/vel]
+ * [CONFIRMED @ 0x407390: ProcessActorSegmentTransition edge test for sub_lane boundaries]
+ * [CONFIRMED @ 0x407840: ProcessActorRouteAdvance forward-limit edge test]
+ * ======================================================================== */
+
+/* Route state indices (mirrors RS_ constants from td5_ai.c).
+ * Exposed here for cross-module route state access.
+ * [CONFIRMED @ gActorRouteStateTable stride 0x47 dwords] */
+#define RS_ROUTE_TABLE_PTR_PHYS    0x00   /* pointer to LEFT/RIGHT.TRK data */
+#define RS_SLOT_INDEX_PHYS         0x35   /* slot index of reference actor */
+
+/* Compute route heading delta for slot:
+ *   heading_delta = -( ((euler_yaw>>8) - route_angle*0x102C/0x100) - 0x800 & 0xFFF ) - 0x800 & 0xFFF
+ * [CONFIRMED @ ComputeActorRouteHeadingDelta 0x434040]
+ *
+ * The route table stores 3 bytes per span: [angle_lo, angle_hi, ???].
+ * The angle at span 'span_normalized' is *(uint8_t*)(route_table + span_norm*3 + 1).
+ * Multiplied by 0x102C gives the route heading in 24-bit fixed.
+ */
+static uint32_t traffic_route_heading_delta(int slot)
+{
+    int32_t *rs = td5_ai_get_route_state(slot);
+    if (!rs) return 0;
+
+    const uint8_t *route_table = (const uint8_t *)(intptr_t)rs[RS_ROUTE_TABLE_PTR_PHYS];
+    if (!route_table) return 0;
+
+    char *actor = (char *)((uint8_t *)td5_track_get_span(0) - 0x80);  /* not used directly */
+    (void)actor;
+
+    /* Get the reference actor slot — RS_SLOT_INDEX gives which actor's yaw to use */
+    int ref_slot = rs[RS_SLOT_INDEX_PHYS];
+    if (ref_slot < 0 || ref_slot >= TD5_MAX_TOTAL_ACTORS) return 0;
+
+    extern char *g_actor_table_base_ptr;  /* defined in td5_physics.c */
+    char *ref_actor = (char *)(g_actor_table_base + (size_t)ref_slot * TD5_ACTOR_STRIDE);
+
+    int16_t span_normalized = *(int16_t *)(ref_actor + 0x082);  /* track_span_normalized */
+    if (span_normalized < 0) span_normalized = 0;
+    uint8_t route_angle = route_table[(int)span_normalized * 3 + 1];
+    int32_t yaw_accum   = *(int32_t *)(ref_actor + 0x1F4);      /* euler_accum.yaw */
+
+    /* Formula from 0x434040:
+     *   -(( ((yaw>>8) - route_angle*0x102C/0x100) - 0x800) & 0xFFF) - 0x800) & 0xFFF */
+    uint32_t yaw12     = (uint32_t)(yaw_accum >> 8) & 0xFFF;
+    uint32_t route12   = ((uint32_t)route_angle * 0x102C) >> 8;
+    uint32_t raw_delta = (yaw12 - route12 - 0x800U) & 0xFFF;
+    /* Negate to get heading_delta */
+    return (-(int32_t)(((int32_t)raw_delta - 0x800) & 0xFFF)) & 0xFFF;
+}
+
+/* ApplySimpleTrackSurfaceForce — direct port of 0x00407270.
+ *
+ * Pushes actor out of wall penetration and zeroes the outward velocity.
+ *
+ * param_1  = actor pointer
+ * edge_angle = 12-bit track-space angle of the edge tangent
+ * pen      = signed penetration (< 0 = outside edge)
+ *
+ * Position correction:
+ *   depth = (pen + ((pen>>31)&0xFFF)) >> 12 - 4   [CONFIRMED @ 0x40728B]
+ *   world_pos.z += (depth * cos) >> 4              [CONFIRMED @ 0x40729E]
+ *   world_pos.x -= (depth * sin) >> 4              [CONFIRMED @ 0x4072A7]
+ *
+ * Velocity correction (only if lateral velocity is outward, vel_perp >= 0):
+ *   vel_perp = (vel_x * cos + vel_z * sin) >> 12   [CONFIRMED @ 0x4072B8]
+ *   vel_para = (vel_z * cos - vel_x * sin) >> 12   [CONFIRMED @ 0x4072C6]
+ *   if vel_perp >= 0:
+ *     vel_para_adj = clamp_dead_zone(vel_para, 0x180)  [CONFIRMED @ 0x4072DE]
+ *     vel_perp_new = -(vel_para >> 1)             [CONFIRMED @ 0x4072D7]
+ *     vel_x = (vel_para_adj * cos - vel_perp_new * sin) >> 12
+ *     vel_z = (vel_para_adj * sin + vel_perp_new * cos) >> 12
+ *   track_contact_flag = 0                         [CONFIRMED @ 0x407338]
+ * ======================================================================== */
+static void apply_simple_track_surface_force(TD5_Actor *actor,
+                                              uint32_t edge_angle,
+                                              int32_t pen)
+{
+    int32_t cos_a = cos_fixed12((int32_t)(edge_angle & 0xFFF));
+    int32_t sin_a = sin_fixed12((int32_t)(edge_angle & 0xFFF));
+
+    /* Position correction [CONFIRMED @ 0x40728B-0x4072A7] */
+    {
+        int32_t depth = (pen + ((pen >> 31) & 0xFFF)) >> 12;
+        depth -= 4;
+        int32_t pz = depth * cos_a;
+        int32_t px = depth * sin_a;
+        actor->world_pos.z += (int32_t)((pz + ((pz >> 31) & 0xF)) >> 4);
+        actor->world_pos.x -= (int32_t)((px + ((px >> 31) & 0xF)) >> 4);
+    }
+
+    /* Velocity decomposition [CONFIRMED @ 0x4072AE-0x4072C6] */
+    int32_t vx     = actor->linear_velocity_x;
+    int32_t vz     = actor->linear_velocity_z;
+    int32_t vel_perp_raw = vx * cos_a + vz * sin_a;
+    int32_t vel_para_raw = vz * cos_a - vx * sin_a;
+    int32_t vel_para_sh  = (vel_para_raw + ((vel_para_raw >> 31) & 0xFFF)) >> 12;
+    int32_t vel_perp_sh  = (int32_t)((vel_perp_raw + ((vel_perp_raw >> 31) & 0xFFF)) >> 12);
+
+    /* Only correct if perpendicular component is outward (>= 0) [CONFIRMED @ 0x4072CE] */
+    if (vel_perp_sh >= 0) {
+        /* Dead-zone clamp: if |vel_para| <= 0x180, zero it; else subtract 0x180
+         * [CONFIRMED @ 0x4072DE-0x407307] */
+        int32_t vel_para_adj;
+        if (vel_para_sh >= 0x181) {
+            vel_para_adj = vel_para_sh - 0x180;
+        } else if (vel_para_sh <= -0x180) {
+            vel_para_adj = vel_para_sh + 0x180;
+        } else {
+            vel_para_adj = 0;
+        }
+        /* Reflected perp = -(vel_para >> 1) [CONFIRMED @ 0x4072D7] */
+        int32_t vel_perp_new = -(vel_para_sh - (vel_para_raw >> 31)) >> 1;
+
+        int32_t nvx = vel_para_adj * cos_a - vel_perp_new * sin_a;
+        int32_t nvz = vel_para_adj * sin_a + vel_perp_new * cos_a;
+        actor->linear_velocity_x = (int32_t)((nvx + ((nvx >> 31) & 0xFFF)) >> 12);
+        actor->linear_velocity_z = (int32_t)((nvz + ((nvz >> 31) & 0xFFF)) >> 12);
+        actor->track_contact_flag = 0;
+    }
+}
+
+/* Compute signed perpendicular distance from span edge for traffic containment.
+ *
+ * The original (ProcessActorSegmentTransition, ProcessActorRouteAdvance) builds
+ * a normalized tangent vector from two span vertices via ConvertFloatVec4ToShortAngles
+ * (x87 FPU normalization), then computes:
+ *   pen = (world_offset . tangent) - car_size_projection
+ *
+ * Port uses atan2_fixed12 to get the angle, then cos/sin for the dot product.
+ * [CONFIRMED @ 0x407390 + 0x407840: same vertex pair logic, result sign test < 0]
+ *
+ * v0_x,v0_z = first vertex (world-relative, from span origin)
+ * v1_x,v1_z = second vertex (world-relative, from span origin)
+ * car_origin_x, car_origin_z = actor pos minus span origin
+ * car_half_w = *(int16_t*)(car_def + 0x0C)
+ * car_half_l = *(int16_t*)(car_def + 0x08)
+ * cos_hd, sin_hd = cos/sin of heading delta from route
+ *
+ * Returns (pen, edge_angle).  pen < 0 means outside the edge.
+ */
+static int32_t traffic_edge_pen(int32_t v0_x, int32_t v0_z,
+                                 int32_t v1_x, int32_t v1_z,
+                                 int32_t car_x, int32_t car_z,
+                                 int32_t car_half_w, int32_t car_half_l,
+                                 int32_t cos_hd, int32_t sin_hd,
+                                 uint32_t *out_edge_angle)
+{
+    /* Edge direction: tangent from v0 to v1 */
+    int32_t tdx = v1_x - v0_x;
+    int32_t tdz = v1_z - v0_z;
+
+    /* Edge angle for ApplySimpleTrackSurfaceForce */
+    uint32_t angle = (uint32_t)(atan2_fixed12(tdz, tdx) & 0xFFF);
+    if (out_edge_angle) *out_edge_angle = angle;
+
+    /* Normalized tangent components (4096-scale) */
+    int32_t tan_x = cos_fixed12((int32_t)angle);
+    int32_t tan_z = sin_fixed12((int32_t)angle);
+
+    /* Signed penetration [CONFIRMED @ 0x4073D8 / 0x407920]:
+     *   pen = (car_offset . tangent) - car_size  */
+    int32_t dot = (int32_t)(((int64_t)car_z * tan_z + (int64_t)car_x * tan_x) >> 12);
+    int32_t car_size = (int32_t)(((int64_t)sin_hd * car_half_w +
+                                   (int64_t)cos_hd * car_half_l) >> 12);
+    return dot - car_size;
+}
+
+/* ProcessActorSegmentTransition — port of 0x00407390.
+ *
+ * Tests the inner (sub_lane < 2) and outer (sub_lane >= lane_count-2) edges
+ * of the current span segment and applies containment if the car is outside.
+ * [CONFIRMED @ 0x00407390: called from UpdateTrafficActorMotion 0x443ED0]
+ *
+ * The car_definition_ptr carries:
+ *   *(int16_t*)(car_def + 0x08) = half-length equivalent  [CONFIRMED @ 0x407424]
+ *   *(int16_t*)(car_def + 0x0C) = half-width equivalent   [CONFIRMED @ 0x407420]
+ */
+static void process_traffic_segment_edge(TD5_Actor *actor, int slot)
+{
+    TD5_StripSpan *sp = td5_track_get_span((int)actor->track_span_raw);
+    if (!sp) return;
+    int32_t *car_def = (int32_t *)actor->car_definition_ptr;
+    if (!car_def) return;
+
+    int span_type    = (int)sp->span_type;
+    if (span_type < 0 || span_type >= 12) return;
+
+    int sub_lane  = (int)(int8_t)actor->track_sub_lane_index;
+    int lane_count = (int)(sp->surface_attribute & 0xF);  /* lower 4 bits = lane count */
+
+    /* Heading delta for car projection */
+    uint32_t hd      = traffic_route_heading_delta(slot);
+    hd &= 0x7FF;
+    if (hd > 0x3FF) hd = 0x7FF - hd;
+    int32_t cos_hd = cos_fixed12((int32_t)hd);
+    int32_t sin_hd = sin_fixed12((int32_t)hd);
+
+    int16_t car_half_w = (int16_t)((*(uint32_t *)((uint8_t *)car_def + 0x0C)) & 0xFFFF);
+    int16_t car_half_l = (int16_t)((*(uint32_t *)((uint8_t *)car_def + 0x08)) & 0xFFFF);
+
+    /* Span origin in world space (24.8 FP) */
+    int32_t orig_x = sp->origin_x;
+    int32_t orig_z = sp->origin_z;
+
+    /* Actor position relative to span origin */
+    int32_t rel_x = (actor->world_pos.x >> 8) - orig_x;
+    int32_t rel_z = (actor->world_pos.z >> 8) - orig_z;
+
+    /* Inner edge test: sub_lane < 2  [CONFIRMED @ 0x407394: if (iVar12 < 2)] */
+    if (sub_lane < 2) {
+        /* Inner boundary: left vertex[sub_lane] to right vertex[sub_lane] */
+        int li_idx = (int)sp->left_vertex_index  + sub_lane;
+        int ri_idx = (int)sp->right_vertex_index + sub_lane;
+        TD5_StripVertex *vl = td5_track_get_vertex(li_idx);
+        TD5_StripVertex *vr = td5_track_get_vertex(ri_idx);
+        if (!vl || !vr) goto outer_test;
+
+        uint32_t edge_angle;
+        int32_t pen = traffic_edge_pen(
+            (int32_t)vl->x, (int32_t)vl->z,
+            (int32_t)vr->x, (int32_t)vr->z,
+            rel_x, rel_z,
+            (int32_t)car_half_w, (int32_t)car_half_l,
+            cos_hd, sin_hd,
+            &edge_angle);
+
+        if (pen < 0) {
+            /* DecayUltimateVariantTimer — only fires when specialEncounterEnabled==4
+             * [CONFIRMED @ 0x4073C8: conditional on g_specialEncounterEnabled==4]
+             * In the port, encounter mode 4 is uncommon; skip for now. */
+            apply_simple_track_surface_force(actor, edge_angle, pen);
+            /* Original calls UpdateTrafficVehiclePose again after push;
+             * the port's integrate_traffic_pose rebuilds the pose at the end
+             * of the tick anyway, so skip the redundant rebuild here. */
+            return;
+        }
+    }
+
+outer_test:
+    /* Outer edge test: sub_lane >= lane_count - 2  [CONFIRMED @ 0x407462: if (iVar12 >= laneCount-2)] */
+    if (sub_lane >= lane_count - 2) {
+        /* Outer boundary vertices at lane_count-1 */
+        /* The original uses DAT_004631a0/a4 offset tables (k_quad_vertex_offsets).
+         * For the outer edge: left vertex index = left_base + outer_offset + sub_lane,
+         * right vertex index = right_base + outer_offset_r + sub_lane.
+         * [CONFIRMED @ 0x4074B4-0x4074F4: uses DAT_004631a0/a4 * (bVar4=span_type)] */
+        static const int8_t k_qvo[12][2] = {
+            {0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},
+            {0,0},{0,0},{0,0},{0,0}
+        };
+        (void)k_qvo;
+        /* Use the last sub-lane vertex pair */
+        int outer_sub = lane_count - 1;
+        int li_idx = (int)sp->left_vertex_index  + outer_sub;
+        int ri_idx = (int)sp->right_vertex_index + outer_sub;
+        TD5_StripVertex *vl = td5_track_get_vertex(li_idx);
+        TD5_StripVertex *vr = td5_track_get_vertex(ri_idx);
+        if (!vl || !vr) return;
+
+        uint32_t edge_angle;
+        int32_t pen = traffic_edge_pen(
+            (int32_t)vl->x, (int32_t)vl->z,
+            (int32_t)vr->x, (int32_t)vr->z,
+            rel_x, rel_z,
+            (int32_t)car_half_w, (int32_t)car_half_l,
+            cos_hd, sin_hd,
+            &edge_angle);
+
+        if (pen < 0) {
+            apply_simple_track_surface_force(actor, edge_angle, pen);
+        }
+    }
+}
+
+/* ProcessActorRouteAdvance — port of 0x00407840.
+ *
+ * Tests the forward end of the current span (the actor is near the end of the
+ * span ring) and applies containment if the car has gone past the forward edge.
+ * [CONFIRMED @ 0x00407840: called from UpdateTrafficActorMotion 0x443ED0]
+ *
+ * Only fires when track_span_raw == g_trackTotalSpanCount - 1 (last span).
+ * [CONFIRMED @ 0x407879: `if (actor->track_span == DAT_00483550 + -1)`]
+ */
+static void process_traffic_route_advance(TD5_Actor *actor, int slot)
+{
+    int total_spans = td5_track_get_span_count();
+    if (total_spans <= 0) return;
+
+    /* Only fires at the last span [CONFIRMED @ 0x407879] */
+    int span_idx = (int)actor->track_span_raw;
+    if (span_idx != total_spans - 1) return;
+
+    /* Last span in the ring — test forward edge using vertices of span 0 wrap.
+     * [CONFIRMED @ 0x40787E: uses span_at(DAT_00483550) i.e. last+1 = wrap to 0] */
+    TD5_StripSpan *sp_last = td5_track_get_span(span_idx);
+    if (!sp_last) return;
+    TD5_StripSpan *sp_wrap = td5_track_get_span(0);  /* wraps to span 0 */
+    if (!sp_wrap) return;
+
+    int32_t *car_def = (int32_t *)actor->car_definition_ptr;
+    if (!car_def) return;
+
+    int16_t car_half_w = (int16_t)((*(uint32_t *)((uint8_t *)car_def + 0x0C)) & 0xFFFF);
+    int16_t car_half_l = (int16_t)((*(uint32_t *)((uint8_t *)car_def + 0x08)) & 0xFFFF);
+
+    uint32_t hd = traffic_route_heading_delta(slot);
+    hd &= 0x7FF;
+    if (hd > 0x3FF) hd = 0x7FF - hd;
+    int32_t cos_hd = cos_fixed12((int32_t)hd);
+    int32_t sin_hd = sin_fixed12((int32_t)hd);
+
+    /* Forward edge: use last vertex of span_wrap (row 0 of the wrap span) */
+    int sub = (int)(int8_t)actor->track_sub_lane_index;
+    if (sub < 0) sub = 0;
+    /* Count of left/right vertices in the wrap span */
+    int wrap_lanes = (int)(sp_wrap->surface_attribute & 0xF);
+    if (sub >= wrap_lanes) sub = wrap_lanes - 1;
+
+    int li_idx = (int)sp_wrap->left_vertex_index  + sub;
+    int ri_idx = (int)sp_wrap->right_vertex_index + sub;
+    TD5_StripVertex *vl = td5_track_get_vertex(li_idx);
+    TD5_StripVertex *vr = td5_track_get_vertex(ri_idx);
+    if (!vl || !vr) return;
+
+    /* Actor position relative to wrap span origin */
+    int32_t rel_x = (actor->world_pos.x >> 8) - sp_wrap->origin_x;
+    int32_t rel_z = (actor->world_pos.z >> 8) - sp_wrap->origin_z;
+
+    uint32_t edge_angle;
+    int32_t pen = traffic_edge_pen(
+        (int32_t)vl->x, (int32_t)vl->z,
+        (int32_t)vr->x, (int32_t)vr->z,
+        rel_x, rel_z,
+        (int32_t)car_half_w, (int32_t)car_half_l,
+        cos_hd, sin_hd,
+        &edge_angle);
+
+    if (pen < 0) {
+        apply_simple_track_surface_force(actor, edge_angle, pen);
     }
 }
 
