@@ -61,8 +61,9 @@ void td5_ai_compute_rubber_band(void);
 void td5_ai_bind_actor_table(void *actor_base);
 void td5_ai_set_route_tables(const uint8_t *left_route, size_t left_size,
                              const uint8_t *right_route, size_t right_size);
-void td5_ai_refresh_route_state(void);
-void td5_ai_init_race_actor_runtime(void);
+void     td5_ai_refresh_route_state(void);
+void     td5_ai_init_race_actor_runtime(void);
+int32_t *td5_ai_get_route_state(int slot);
 
 /* --- Traffic --- */
 void td5_ai_recycle_traffic_actor(void);

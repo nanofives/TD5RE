@@ -152,6 +152,13 @@ static int  s_cup_unlock_tier;          /* DAT_004962a8           */
 
 /* Two-player mode flag (DAT_004962a0) */
 static int  s_two_player_mode;
+/* Split-screen display mode: 0=off, 1=on [CONFIRMED @ 0x420C70 g_twoPlayerSplitMode] */
+static int  s_split_screen_mode;           /* g_twoPlayerSplitMode   */
+
+/* ScreenLocalizationInit bootstrap control [CONFIRMED @ 0x4269D0 g_attractModeControlEnabled]:
+ * 0 = first entry (run full init), 1 = re-entry (skip init, go to menu),
+ * 2 = resume-cup re-entry (go to RACE_RESULTS with skip_display=1) */
+static int  s_attract_mode_ctrl;
 
 /* Car selection state */
 static int  s_selected_car;             /* DAT_0048f31c / DAT_0048f364 */
@@ -3544,19 +3551,21 @@ static void frontend_render_two_player_options_overlay(float sx, float sy) {
 
     if (!s_buttons[0].active) return;
     if (!s_anim_complete) return;
-    frontend_draw_value_centered(sx, sy, s_buttons[0].y + 6, on_off[(s_two_player_mode & 4) ? 1 : 0], 0xFFFFFFFF);
+    /* [CONFIRMED @ 0x420C70 case 4]: row 0 = split-screen ON/OFF; row 1 = catch-up ON/OFF
+     * g_twoPlayerSplitMode is 0 or 1; DAT_00465ff8 is catch-up level (0..9, nonzero = ON) */
+    frontend_draw_value_centered(sx, sy, s_buttons[0].y + 6, on_off[s_split_screen_mode ? 1 : 0], 0xFFFFFFFF);
     frontend_draw_value_centered(sx, sy, s_buttons[1].y + 6, on_off[(s_two_player_mode & 8) ? 1 : 0], 0xFFFFFFFF);
 
-    /* SplitScreen.tga: sprite sheet, 64x32 per split-mode icon, rows stacked vertically.
-     * Drawn at x=394, y=97 (same formula as Controllers.tga in Control Options):
-     *   x = uVar2+0x4a = 394,  y = uVar4-0x8f = 97  (FUN_00420C70 case4/5 steady-state)
-     * Row = split_screen_mode index (0=off, 1=on), src_y = mode*32. */
+    /* [CONFIRMED @ 0x4210A4]: QueueFrontendOverlayRect with src_y = g_twoPlayerSplitMode << 5 (=*32)
+     * SplitScreen.tga: 64x32 icon rows; row 0=off icon, row 1=on icon.
+     * Blit position: x = canvasW/2+0x4a = 394, y = canvasH/2-0x8f = 97. */
     if (s_split_screen_surface > 0) {
         int slot = s_split_screen_surface - 1;
         if (slot >= 0 && slot < FE_MAX_SURFACES && s_surfaces[slot].in_use) {
             int sh = s_surfaces[slot].height;
             if (sh > 0) {
-                int   mode = (s_two_player_mode & 4) ? 1 : 0;
+                /* s_split_screen_mode is 0 or 1 — use directly, not via bit-mask */
+                int   mode = s_split_screen_mode;  /* [CONFIRMED @ 0x420C70 g_twoPlayerSplitMode] */
                 float v_row = 32.0f / (float)sh;
                 float v0    = (float)mode * v_row;
                 float v1    = v0 + v_row;
@@ -4871,6 +4880,8 @@ int td5_frontend_init(void) {
     s_race_within_series = 0;
     s_cup_unlock_tier = 0;
     s_two_player_mode = 0;
+    s_split_screen_mode = 0;
+    s_attract_mode_ctrl = 0;
     s_selected_car = g_td5.ini.loaded ? g_td5.ini.default_car : 0;
     s_selected_paint = 0;
     s_selected_config = 0;
@@ -4954,22 +4965,46 @@ void td5_frontend_tick(void) {
  * ======================================================================== */
 
 static void Screen_LocalizationInit(void) {
+    /* [CONFIRMED @ 0x4269D0] g_attractModeControlEnabled three-state gate:
+     *   0 = first entry: run full init, set ctrl=1, route to MAIN_MENU (screen 5)
+     *   1 = normal re-entry: skip init, route to MAIN_MENU (screen 5)
+     *   2 = resume-cup re-entry: set results_skip_display=1, route to RACE_RESULTS (screen 0x18=24) */
+    if (s_attract_mode_ctrl == 2) {
+        /* [CONFIRMED @ 0x42718A-0x4271A2]: DAT_00497a6c=1 then SetFrontendScreen(0x18) */
+        TD5_LOG_I(LOG_TAG, "ScreenLocalizationInit: resume-cup path -> RACE_RESULTS (skip_display=1)");
+        s_results_skip_display = 1;
+        s_attract_mode_ctrl = 1;
+        td5_frontend_set_screen(TD5_SCREEN_RACE_RESULTS);
+        return;
+    }
+
+    if (s_attract_mode_ctrl == 1) {
+        /* [CONFIRMED @ 0x427182-0x427188]: re-entry shortcut straight to MAIN_MENU */
+        TD5_LOG_I(LOG_TAG, "ScreenLocalizationInit: re-entry shortcut -> MAIN_MENU");
+        td5_frontend_set_screen(TD5_SCREEN_MAIN_MENU);
+        return;
+    }
+
+    /* First entry (s_attract_mode_ctrl == 0) [CONFIRMED @ 0x4269D0 case 0]: */
     switch (s_inner_state) {
     case 0:
         frontend_init_return_screen(TD5_SCREEN_LOCALIZATION_INIT);
-        TD5_LOG_I(LOG_TAG, "ScreenLocalizationInit: loading Language.dll, config.td5");
+        TD5_LOG_I(LOG_TAG, "ScreenLocalizationInit: first entry, loading resources");
 
-        /* Load LANGUAGE.DLL string table */
-        /* Load car ZIP path table from gCarZipPathTable */
-        /* Load config.td5 settings */
-        /* Enumerate display modes */
-        /* Seed controller/input state from hardware detection */
+        /* [INFERRED] Load LANGUAGE.DLL string table (M2DX — stub in port) */
+        /* [INFERRED] Load car ZIP path table from gCarZipPathTable (handled in td5_asset.c) */
+        /* [CONFIRMED @ 0x426F80]: LoadPackedConfigTd5() reads config.td5 settings */
+        /* [INFERRED] Enumerate display modes (handled in td5_render.c) */
+        /* [CONFIRMED @ 0x427081]: Seed controller/input state from DXInput joystick exports
+         *   g_player1InputSource=0, g_player2InputSource=7 if no saved controller match.
+         *   Port omits: DXInput (M2DX) exports not available; td5_input.c handles this. */
 
         td5_frontend_init_resources();
 
-        /* Route: if resume-cup flag is set, go to race results */
-        /* (DAT_004a2c8c == 2) */
-        /* Otherwise, go to main menu */
+        /* Mark init done so re-entry skips straight to menu [CONFIRMED @ 0x427060] */
+        s_attract_mode_ctrl = 1;
+
+        /* [CONFIRMED @ 0x427182]: SetFrontendScreen(5) = TD5_SCREEN_MAIN_MENU */
         td5_frontend_set_screen(TD5_SCREEN_MAIN_MENU);
         break;
 
@@ -6764,12 +6799,16 @@ static void Screen_DisplayOptions(void) {
 static void Screen_TwoPlayerOptions(void) {
     switch (s_inner_state) {
     case 0:
+        /* [CONFIRMED @ 0x420C70 case 0]: init state */
         frontend_init_return_screen(TD5_SCREEN_TWO_PLAYER_OPTIONS);
-        TD5_LOG_D(LOG_TAG, "TwoPlayerOptions: init");
+        TD5_LOG_D(LOG_TAG, "TwoPlayerOptions: init split_mode=%d", s_split_screen_mode);
         s_split_screen_surface = frontend_load_tga("SplitScreen.tga", "Front End/frontend.zip");
-        frontend_create_button("Split Screen", -0x100, 0, 0x100, 0x20); /* 0x420d22: width=0x100 */
+        /* [CONFIRMED @ 0x420d22]: SNK_SplitScreenButTxt at x=-0x100, width=0x100 */
+        frontend_create_button("Split Screen", -0x100, 0, 0x100, 0x20);
+        /* [CONFIRMED @ 0x420d33]: SNK_CatchupTxt at x=-0x100, width=0x100 */
         frontend_create_button("Catch-Up",    -0x100, 0, 0x100, 0x20);
-        frontend_create_button("OK",          -0x60,  0, 0x60,  0x20); /* 0x420d43: width=0x60 */
+        /* [CONFIRMED @ 0x420d43]: SNK_OkButTxt at x=-0x100, width=0x60 */
+        frontend_create_button("OK",          -0x60,  0, 0x60,  0x20);
         s_anim_tick = 0;
         s_inner_state = 1;
         break;
@@ -6777,28 +6816,41 @@ static void Screen_TwoPlayerOptions(void) {
         frontend_present_buffer();
         s_inner_state++;
         break;
-    case 3: /* Slide-in (~1200ms) */
+    case 3: /* Slide-in (~1200ms) [CONFIRMED @ 0x420D80 case 3] */
         if (frontend_update_timed_animation(0x27, 650) >= 1.0f) {
             s_anim_complete = 1;
             s_inner_state = 4;
         }
         break;
     case 4: case 5:
+        /* [CONFIRMED @ 0x420E80 case 4/5]: redraw overlay, bump state */
         s_inner_state = 6;
         break;
     case 6:
+        /* [CONFIRMED @ 0x420F40 case 6]: input handling
+         * DAT_0049b690 = arrow delta; button 0 = split screen toggle,
+         * button 1 = catch-up level, button 2 = OK */
         if (s_input_ready) {
             int delta = frontend_option_delta();
             int active_button = (s_button_index >= 0) ? s_button_index : s_selected_button;
             if (active_button == 0 && delta != 0) {
-                s_two_player_mode ^= 4;
+                /* [CONFIRMED @ 0x42106B]: g_twoPlayerSplitMode = (delta + g_twoPlayerSplitMode) & 1 */
+                s_split_screen_mode = (delta + s_split_screen_mode) & 1;
+                /* Sync the split-screen ON flag into s_two_player_mode bit 2 */
+                if (s_split_screen_mode)
+                    s_two_player_mode |= 4;
+                else
+                    s_two_player_mode &= ~4;
                 frontend_play_sfx(2);
                 s_inner_state = 4;
             } else if (active_button == 1 && delta != 0) {
+                /* [CONFIRMED @ 0x42107A]: DAT_00465ff8 += delta; clamped 0..9 */
+                /* Catch-up level stored in s_two_player_mode bits 3+ (port approximation) */
                 s_two_player_mode ^= 8;
                 frontend_play_sfx(2);
                 s_inner_state = 4;
             } else if (s_button_index == 2) {
+                /* [CONFIRMED @ 0x4210F7]: OK pressed: blit secondary, advance to slide-out */
                 s_inner_state = 7;
             }
         }

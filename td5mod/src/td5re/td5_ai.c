@@ -364,6 +364,10 @@ void td5_ai_set_route_tables(const uint8_t *left_route, size_t left_size,
     td5_ai_refresh_route_state();
 }
 
+int32_t *td5_ai_get_route_state(int slot) {
+    return route_state(slot);
+}
+
 void td5_ai_refresh_route_state(void) {
     int slot_count = g_active_actor_count;
 
