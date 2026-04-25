@@ -917,9 +917,11 @@ void td5_sound_update_audio_mix(void)
                 /* ---- Skid sound management ---- */
                 int skid_val = s_skid_intensity[pass];
                 if (skid_val > 0 && s_skid_playing[pass] == 0 && s_race_end_flag == 0) {
-                    /* Start skid loop */
-                    if (!slot_is_playing(slot_offset + 0x12)) {
-                        slot_play(slot_offset + 0x12, 1, 0, pan, TD5_SOUND_FREQ_22050);
+                    /* Start skid loop — slot 0x13 = SkidBit.wav [CONFIRMED @ 0x4413D1] */
+                    if (!slot_is_playing(slot_offset + 0x13)) {
+                        slot_play(slot_offset + 0x13, 1, 0, pan, TD5_SOUND_FREQ_22050);
+                        TD5_LOG_I(LOG_TAG, "Skid start: pass=%d slot=%d skid_val=%d",
+                                  pass, slot_offset + 0x13, skid_val);
                     }
                     s_skid_playing[pass] = 1;
                 }
