@@ -57,6 +57,7 @@ extern void *g_actor_base;
 extern uint8_t *g_actor_table_base;
 
 int td5_game_get_total_actor_count(void);
+int td5_game_is_wanted_mode(void);
 
 /* OBB corner test output: per-corner penetration data */
 typedef struct OBB_CornerData {
@@ -2595,6 +2596,15 @@ static void apply_collision_response(TD5_Actor *penetrator, TD5_Actor *target,
               "cxA=%d czA=%d cxB=%d czB=%d imp=%d mag=%d toi=%d",
               is_side_branch, A->slot_index, B->slot_index, mass_A, mass_B,
               cx_A, cz_A, cx_B, cz_B, impulse, impact_mag, impactForce);
+
+    /* Wanted mode (cop chase): player ramming a stationary cop engages pursuit.
+     * Threshold 10000 filters noise while catching any real collision. */
+    if (td5_game_is_wanted_mode() && impact_mag > 10000) {
+        if (A->slot_index == 0 && B->slot_index >= 1 && B->slot_index < 6)
+            td5_ai_engage_wanted_cop(B->slot_index);
+        else if (B->slot_index == 0 && A->slot_index >= 1 && A->slot_index < 6)
+            td5_ai_engage_wanted_cop(A->slot_index);
+    }
 
     /* Traffic recovery escalation (> 50000 and slot>=6). */
     if (A->slot_index >= 6 && impact_mag > 50000 &&

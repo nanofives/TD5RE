@@ -354,6 +354,21 @@ void td5_ai_shutdown(void) {
     /* nothing to free -- all static */
 }
 
+/* Called by td5_physics.c when the player V2V-collides with a cop that has been
+ * zeroed out (e.g. by the special encounter system resetting ACTOR_ENCOUNTER_STATE).
+ * Restores ACTOR_ENCOUNTER_STATE=0x1000 so the gate at 0x436E1D passes and
+ * ensures g_slot_state is AI so the rubber-band + track-behavior dispatch run. */
+void td5_ai_engage_wanted_cop(int slot) {
+    char *actor;
+    if (slot < 1 || slot >= TD5_MAX_RACER_SLOTS) return;
+    actor = actor_ptr(slot);
+    if (!actor) return;
+    if (ACTOR_I32(actor, ACTOR_ENCOUNTER_STATE) != 0) return;
+    ACTOR_I32(actor, ACTOR_ENCOUNTER_STATE) = 0x1000;
+    g_slot_state[slot] = 0; /* ensure AI dispatch */
+    TD5_LOG_I(LOG_TAG, "wanted_mode: cop slot %d re-engaged via player ram", slot);
+}
+
 void td5_ai_bind_actor_table(void *actor_base) {
     extern void *g_route_data;
 
@@ -705,6 +720,13 @@ void td5_ai_init_race_actor_runtime(void) {
     }
     if (g_td5.split_screen_mode > 0 && racer_count > 1) {
         g_slot_state[1] = 1;
+    }
+    /* Wanted mode (cop chase): slots 2-5 are inactive (no AI, no physics dispatch).
+     * Mirrors gRaceSlotStateTable init at 0x42ABF8 for non-zero game types. */
+    if (g_td5.wanted_mode_enabled) {
+        for (int k = 2; k < TD5_MAX_RACER_SLOTS; k++)
+            g_slot_state[k] = 3;
+        TD5_LOG_I(LOG_TAG, "wanted_mode: g_slot_state[2..5] = 3 (inactive)");
     }
 
     /* --- First layer: global difficulty scaling on AI physics template ---
@@ -2644,10 +2666,13 @@ static void ai_update_single_racer(int slot) {
     switch (state) {
     case 0x00: /* AI racer */
         /* Wanted mode check [CONFIRMED @ 0x436E1D]:
-         * Original: if (g_wantedModeEnabled == 0 || *local_8 != 0)
-         * AI runs track behavior when wanted mode is OFF, or when the actor
-         * has a non-zero damage/encounter state.  Skip only when wanted mode
-         * is ON and the actor has zero encounter state. */
+         * Original: if (g_wantedModeEnabled == 0 || *gWantedDamageStateTable[slot] != 0)
+         * gWantedDamageStateTable @ 0x4BEAD4, int16 stride.
+         * Non-zero → cop pursues (UpdateActorTrackBehavior runs).
+         * Zero → cop stationary (skipped).
+         * Gate is for cop slots only (1–5); slot 0 is the player and uses a
+         * separate code path in the original (never enters UpdateActorTrackBehavior
+         * as a human), so exclude slot 0 to keep PlayerIsAI working. */
         if (g_td5.wanted_mode_enabled &&
             ACTOR_I32(actor, ACTOR_ENCOUNTER_STATE) == 0) {
             return;

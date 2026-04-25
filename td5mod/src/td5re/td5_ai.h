@@ -79,6 +79,12 @@ int  td5_ai_find_nearest_route_peer(int *route_state);
  * must outlive the race; pass NULL to clear. */
 void td5_ai_set_traffic_queue(const uint8_t *data, int size);
 
+/* --- Wanted mode (cop chase game type 8) --- */
+/* Re-engage a cop whose ACTOR_ENCOUNTER_STATE was zeroed: restores 0x1000 so
+ * the gate at 0x436E1D passes and AI track behavior runs next tick. Called
+ * from td5_physics.c on player V2V collision with a cop slot. */
+void td5_ai_engage_wanted_cop(int slot);
+
 /* --- Special encounter (cop chase) --- */
 void td5_ai_update_special_encounter(void);
 void td5_ai_update_encounter_control(int slot);

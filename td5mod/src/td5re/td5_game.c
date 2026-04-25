@@ -3541,8 +3541,11 @@ int td5_game_get_slot_state(int slot) {
 }
 int td5_game_is_replay_active(void) { return 0; }
 int td5_game_get_traffic_variant(int traffic_index) { (void)traffic_index; return 0; }
-int td5_game_get_cop_actor_index(void) { return -1; }
-int td5_game_is_wanted_mode(void) { return 0; }
+/* Slot 1 is the active pursuing cop in wanted mode (slots 2-5 are inactive).
+ * [INFERRED from slot-state init @ 0x42ABF8 + spawn layout @ 0x42B1C6] */
+int td5_game_get_cop_actor_index(void) { return g_td5.wanted_mode_enabled ? 1 : -1; }
+/* [CONFIRMED]: g_wantedModeEnabled @ 0x4AAF68 set at InitializeRaceSession */
+int td5_game_is_wanted_mode(void) { return g_td5.wanted_mode_enabled; }
 void td5_game_advance_sky_rotation(void) { }
 
 void *td5_game_heap_alloc(size_t size) {
