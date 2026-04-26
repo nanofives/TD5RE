@@ -25,6 +25,7 @@ original/
 
 # Extracted / derived game assets (copyrighted data)
 re/assets/
+re/unused_assets/
 re/td5_dump/
 re/td5_png/
 re/td5_png_clean/

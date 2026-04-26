@@ -206,6 +206,7 @@ static int td5_apply_cli_overrides(const char *cmdline,
         { "SkipIntro",            &g_td5.ini.skip_intro },
         { "DebugOverlay",         &g_td5.ini.debug_overlay },
         { "AutoRace",             &g_td5.ini.auto_race },
+        { "StartScreen",          &g_td5.ini.start_screen },
         { "StartSpanOffset",      &g_td5.ini.start_span_offset },
         /* Trace */
         { "RaceTrace",            &g_td5.ini.race_trace_enabled },
@@ -377,6 +378,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
 
     /* Auto-race: skip frontend entirely, launch race with INI settings */
     g_td5.ini.auto_race             = td5_ini_int("Game", "AutoRace", 0);
+    g_td5.ini.start_screen          = td5_ini_int("Game", "StartScreen", -1);
 
     /* Additive span shift for every actor spawn — mirrors the Frida hook on
      * InitializeActorTrackPose (0x00434350). 0 = vanilla grid. */
@@ -436,10 +438,10 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
            g_td5.ini.laps, g_td5.ini.checkpoint_timers, g_td5.ini.traffic,
            g_td5.ini.cops, g_td5.ini.difficulty, g_td5.ini.dynamics, g_td5.ini.collisions,
            g_td5.ini.player_is_ai);
-    dbglog("  [Game]    Car=%d Track=%d GameType=%d SkipIntro=%d DebugOverlay=%d AutoRace=%d StartSpanOffset=%d",
+    dbglog("  [Game]    Car=%d Track=%d GameType=%d SkipIntro=%d DebugOverlay=%d AutoRace=%d StartScreen=%d StartSpanOffset=%d",
            g_td5.ini.default_car, g_td5.ini.default_track, g_td5.ini.default_game_type,
            g_td5.ini.skip_intro, g_td5.ini.debug_overlay, g_td5.ini.auto_race,
-           g_td5.ini.start_span_offset);
+           g_td5.ini.start_screen, g_td5.ini.start_span_offset);
     dbglog("  [Trace]   RaceTrace=%d Slot=%d MaxFrames=%d AutoThrottle=%d FastFwd=%d SimTickCap=%d",
            g_td5.ini.race_trace_enabled, g_td5.ini.race_trace_slot,
            g_td5.ini.race_trace_max_frames, g_td5.ini.auto_throttle,

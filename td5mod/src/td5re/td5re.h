@@ -228,6 +228,20 @@ typedef struct TD5_GlobalState {
         int  loaded;  /* 1 once INI has been read */
         /* AutoRace: skip frontend, launch race immediately with INI settings */
         int  auto_race;             /* 1 = auto-start race on launch */
+        /* StartScreen: jump directly to a specific frontend screen on boot.
+         * -1 = normal flow (STARTUP_INIT → LOCALIZATION → LANGUAGE → LEGAL → MAIN_MENU).
+         * 0-29 = jump to that screen index after frontend resources are ready.
+         * Ignored when AutoRace=1. Use with SkipIntro=1 to bypass legal screens.
+         * Screen index map — mirrors td5_types.h TD5_ScreenIndex:
+         *   0=LocalizationInit  1=PositionerDebug  2=AttractMode    3=LanguageSelect
+         *   4=LegalCopyright    5=MainMenu         6=RaceTypeMenu   7=QuickRace
+         *   8=ConnectionBrowser 9=SessionPicker   10=CreateSession  11=NetworkLobby
+         *  12=OptionsHub       13=GameOptions     14=ControlOptions 15=SoundOptions
+         *  16=DisplayOptions   17=TwoPlayerOpts   18=ControllerBinding 19=MusicTest
+         *  20=CarSelection     21=TrackSelection  22=ExtrasGallery  23=HighScore
+         *  24=RaceResults      25=NameEntry       26=CupFailed      27=CupWon
+         *  28=StartupInit      29=SessionLocked */
+        int  start_screen;         /* -1 = normal, 0-29 = jump to screen */
         /* Shift every actor's spawn span by this many units along the track
          * ring (mirrors the Frida InitializeActorTrackPose hook in
          * re/tools/quickrace/td5_quickrace_hook.js). Read from td5re.ini

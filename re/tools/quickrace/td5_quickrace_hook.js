@@ -80,6 +80,9 @@ var cfg = {
      * Python launcher auto-enables this when --trace is passed. */
     seed_crt: false,
     crt_seed: 0x1A2B3C4D,
+    /* frontend_screen: when >= 0, jump to this screen index instead of
+     * launching a race. Race globals are NOT written. -1 = normal quickrace. */
+    frontend_screen: -1,
 };
 
 var launched = false;
@@ -120,6 +123,8 @@ function install() {
         addrOf.InitializeRaceSeriesSchedule, 'void', [], 'stdcall');
     var InitializeFrontendDisplayModeState = new NativeFunction(
         addrOf.InitializeFrontendDisplayModeState, 'void', [], 'stdcall');
+    var SetFrontendScreen = new NativeFunction(
+        addrOf.SetFrontendScreen, 'void', ['int'], 'stdcall');
 
     // CRT srand — seeded before InitializeRaceSeriesSchedule so the AI-car
     // selection loop pulls from the same sequence the port does under the
@@ -139,6 +144,15 @@ function install() {
     var replacement = new NativeCallback(function () {
         if (launched) return;
         launched = true;
+
+        // Frontend debug mode: jump to a specific screen instead of a race.
+        if (cfg.frontend_screen >= 0 && cfg.frontend_screen < 30) {
+            log('quickrace: frontend_screen=' + cfg.frontend_screen +
+                ', jumping to screen instead of launching race');
+            SetFrontendScreen(cfg.frontend_screen);
+            return;
+        }
+
         log('quickrace: launching race ' +
             'type=' + cfg.game_type +
             ' track=' + cfg.track +
@@ -237,70 +251,70 @@ function install() {
     addrOf.g_currentScreenFnPtr.writePointer(addrOf.ScreenMainMenuAnd1PRaceFlow);
     log('quickrace: g_currentScreenFnPtr forced to main-menu replacement');
 
-    // player_is_ai: scope slot[0].state=0 to the body of UpdateRaceActors
-    // only. Per-tick dispatch takes the AI branch for slot 0, then we
-    // restore state=1 on return so everything else — race-end detection,
-    // HUD, camera, humanPlayerCount readers — continues to treat slot 0
-    // as a normal human and does not short-circuit the race.
-    if (cfg.player_is_ai) {
-        __quickrace_updActorsHook = Interceptor.attach(addrOf.UpdateRaceActors, {
-            onEnter: function () {
-                addrOf.slot0_state_byte.writeU8(0);
-            },
-            onLeave: function () {
-                addrOf.slot0_state_byte.writeU8(1);
-            }
-        });
-        log('quickrace: player_is_ai=1 — slot[0].state windowed to 0 inside UpdateRaceActors');
-    }
-
     // InitializeActorTrackPose(slot, span, lane, flag) — __cdecl, args on stack.
-    // When start_span_offset != 0, rewrite the span arg so every actor spawns
-    // further down the span ring (offsets are additive; the -3/-6/-9/-12/-15
-    // grid spacing is preserved). The function rebuilds heading, route
-    // progress, lateral offset, and physics state entirely from the new span,
-    // so no further state has to be patched.
-    // Also used as the hook site for trace_track_load's per-spawn logging.
-    if (cfg.start_span_offset !== 0 || cfg.trace_track_load) {
-        __quickrace_spawnHook = Interceptor.attach(addrOf.InitializeActorTrackPose, {
-            onEnter: function (args) {
-                var esp = this.context.esp;
-                var slot = esp.add(4).readU32();
-                var span = esp.add(8).readS16();
-                if (cfg.start_span_offset !== 0) {
-                    var newSpan = (span + cfg.start_span_offset) & 0xffff;
-                    esp.add(8).writeS16(newSpan);
-                    if (cfg.trace_track_load) {
-                        log('pose slot=' + slot + ': span ' + span + ' -> ' + newSpan);
-                    }
-                } else if (cfg.trace_track_load) {
-                    log('pose slot=' + slot + ': span=' + span);
+    // Always installed; cfg.start_span_offset / cfg.trace_track_load checked at
+    // call time so the hook is in place before resume regardless of when cfg
+    // is delivered. Fires only 6 times (one per actor spawn) so overhead is nil.
+    __quickrace_spawnHook = Interceptor.attach(addrOf.InitializeActorTrackPose, {
+        onEnter: function (args) {
+            if (cfg.start_span_offset === 0 && !cfg.trace_track_load) return;
+            var esp = this.context.esp;
+            var slot = esp.add(4).readU32();
+            var span = esp.add(8).readS16();
+            if (cfg.start_span_offset !== 0) {
+                var newSpan = (span + cfg.start_span_offset) & 0xffff;
+                esp.add(8).writeS16(newSpan);
+                if (cfg.trace_track_load) {
+                    log('pose slot=' + slot + ': span ' + span + ' -> ' + newSpan);
                 }
+            } else if (cfg.trace_track_load) {
+                log('pose slot=' + slot + ': span=' + span);
             }
-        });
-        log('quickrace: spawn hook installed (start_span_offset=' +
-            cfg.start_span_offset + ')');
-    }
+        }
+    });
+    log('quickrace: spawn hook installed (start_span_offset + trace_track_load cfg-gated at runtime)');
 
-    // LoadTrackRuntimeData(levelZipNumber) — logs which level%03d.zip the
-    // race actually resolved to. Key signal for confirming track=-1 goes to
-    // drag strip (level030) vs any surprises from the schedule table.
-    if (cfg.trace_track_load) {
-        __quickrace_loadTrackHook = Interceptor.attach(addrOf.LoadTrackRuntimeData, {
-            onEnter: function (args) {
-                var n = this.context.esp.add(4).readU32();
-                var pad = ('000' + n).slice(-3);
-                log('LoadTrackRuntimeData(' + n + ') -> level' + pad + '.zip');
-            }
-        });
-        log('quickrace: track-load trace hook installed');
-    }
+    // LoadTrackRuntimeData(levelZipNumber) — always installed; trace_track_load
+    // checked at call time.
+    __quickrace_loadTrackHook = Interceptor.attach(addrOf.LoadTrackRuntimeData, {
+        onEnter: function (args) {
+            if (!cfg.trace_track_load) return;
+            var n = this.context.esp.add(4).readU32();
+            var pad = ('000' + n).slice(-3);
+            log('LoadTrackRuntimeData(' + n + ') -> level' + pad + '.zip');
+        }
+    });
+    log('quickrace: track-load hook installed (trace_track_load cfg-gated at runtime)');
+
+    // player_is_ai: always installed; cfg.player_is_ai checked at call time.
+    // Scopes slot[0].state=0 to just the body of UpdateRaceActors so AI
+    // dispatch fires for slot 0, restores state=1 on return so race-end
+    // detection / HUD / camera / humanPlayerCount keep seeing slot 0 as human.
+    __quickrace_updActorsHook = Interceptor.attach(addrOf.UpdateRaceActors, {
+        onEnter: function () {
+            if (!cfg.player_is_ai) return;
+            addrOf.slot0_state_byte.writeU8(0);
+        },
+        onLeave: function () {
+            if (!cfg.player_is_ai) return;
+            addrOf.slot0_state_byte.writeU8(1);
+        }
+    });
+    log('quickrace: UpdateRaceActors player_is_ai hook installed (cfg-gated at runtime)');
 }
 
-recv('cfg', function (msg) {
-    Object.keys(msg.cfg).forEach(function (k) { cfg[k] = msg.cfg[k]; });
-    log('quickrace: cfg received ' + JSON.stringify(cfg));
-    install();
-});
+// Install hooks synchronously at script load time (before frida.resume) so all
+// Interceptor entries are in place before the first instruction runs.
+// cfg is populated with defaults above; recv('cfg') below updates it in-place
+// before ScreenMainMenuAnd1PRaceFlow fires (game init takes ~1-2 s), so the
+// replacement function always reads the correct scenario values.
+log('quickrace: script loaded, installing hooks with default cfg');
+install();
 
-log('quickrace: script loaded, waiting for cfg');
+recv('cfg', function (msg) {
+    // Update the shared cfg object; all hooks read it at call time, so no
+    // re-installation is needed. This arrives well before the first frontend
+    // tick because process startup (WinMain + DX init) takes ~1-2 seconds.
+    Object.keys(msg.cfg).forEach(function (k) { cfg[k] = msg.cfg[k]; });
+    log('quickrace: cfg applied ' + JSON.stringify(cfg));
+});

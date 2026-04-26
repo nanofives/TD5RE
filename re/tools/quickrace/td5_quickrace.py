@@ -39,9 +39,10 @@ TRACE_JS = os.path.join(REPO_ROOT, "tools", "frida_race_trace.js")
 
 
 INT_FIELDS = {
-    "race": ["game_type", "track", "direction", "laps", "start_span_offset"],
-    "car":  ["car", "paint", "transmission"],
-    "drag": ["opponent_car"],
+    "race":     ["game_type", "track", "direction", "laps", "start_span_offset"],
+    "car":      ["car", "paint", "transmission"],
+    "drag":     ["opponent_car"],
+    "frontend": ["frontend_screen"],
 }
 BOOL_FIELDS = {"launcher": ["verbose", "trace_track_load", "player_is_ai"]}
 
@@ -57,6 +58,7 @@ def load_ini(path):
         "car": 0, "paint": 0, "transmission": 0,
         "start_span_offset": 0,
         "opponent_car": 0,
+        "frontend_screen": -1,
         "verbose": False,
         "trace_track_load": False,
         "player_is_ai": False,

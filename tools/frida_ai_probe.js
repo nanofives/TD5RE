@@ -115,11 +115,13 @@ Interceptor.attach(ADDR_UpdateActorTrackBehavior, {
             if (slot < 0) slot = routeStateSlotFromPtr(this.arg0);
         }
         this.slot = slot;
+        g_currentSlot = slot;
     },
     onLeave: function () {
         if (this.slot >= 0 && this.slot < 6) {
             emitRow("track_behavior", this.slot, 0);
         }
+        g_currentSlot = -1;
     }
 });
 
@@ -143,20 +145,33 @@ Interceptor.attach(ADDR_UpdateActorRouteThresholdState, {
 });
 
 // UpdateActorSteeringBias — cascade entry. Capture left_dev/right_dev as
-// CASCADE sees them, plus steering_weight (param_2). This is the source of
-// truth for what drives the cascade arithmetic.
+// CASCADE sees them, plus steering_weight (param_2). Tries stack args first,
+// then falls back to a persistent "current slot" set by UpdateActorTrackBehavior
+// since nested calls may use fastcall (ECX) instead of stack.
+var g_currentSlot = -1;
 Interceptor.attach(ADDR_UpdateActorSteeringBias, {
     onEnter: function (args) {
-        // cdecl per progress_ai_reimpl_session1: (int *route_state, int weight)
+        // Try stack-arg first.
         this.rs = args[0];
         this.weight = args[1].toInt32 ? args[1].toInt32() : 0;
-        this.slot = routeStateSlotFromPtr(this.rs);
+        var slotFromArg = routeStateSlotFromPtr(this.rs);
+        if (slotFromArg < 0) {
+            // Fastcall: ECX holds rs, EDX holds weight.
+            var ecxRs = this.context.ecx;
+            slotFromArg = routeStateSlotFromPtr(ecxRs);
+            if (slotFromArg >= 0) {
+                this.rs = ecxRs;
+                this.weight = this.context.edx.toInt32();
+            }
+        }
+        if (slotFromArg < 0) slotFromArg = g_currentSlot;
+        this.slot = slotFromArg;
     },
     onLeave: function () {
         if (this.slot >= 0 && this.slot < 6 && fp) {
             var simTick = readS32(G_simulationTickCounter);
             var a = actorPtr(this.slot);
-            var rs = this.rs;
+            var rs = routeStatePtr(this.slot);
             var yaw = readS32(a.add(OFF_YAW_ACCUM));
             var steer = readS32(a.add(OFF_STEERING));
             var wx = readS32(a.add(OFF_WORLD_X));

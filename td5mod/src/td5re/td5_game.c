@@ -489,6 +489,16 @@ int td5_game_tick(void) {
             g_td5.ini.auto_race = 0;  /* one-shot: don't re-trigger after race ends */
         }
 
+        /* StartScreen: jump to a specific screen on first frontend entry.
+         * Fires once after resources are ready; ignored when AutoRace consumed
+         * the boot slot above.  -1 = normal flow. */
+        if (g_td5.ini.start_screen >= 0 && g_td5.ini.start_screen < TD5_SCREEN_COUNT) {
+            TD5_LOG_I(LOG_TAG, "StartScreen=%d: jumping to screen %d",
+                      g_td5.ini.start_screen, g_td5.ini.start_screen);
+            td5_frontend_set_screen((TD5_ScreenIndex)g_td5.ini.start_screen);
+            g_td5.ini.start_screen = -1;  /* one-shot */
+        }
+
         /* Run one frame of the frontend display loop */
         td5_frontend_display_loop();
 

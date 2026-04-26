@@ -529,6 +529,26 @@ function init() {
         console.log("[trace] Auto-throttle: forcing THROTTLE_BIT (0x200) on PollRaceSessionInput");
     }
 
+    // Race-end poller: sends auto-close when the game leaves race state after the
+    // race was confirmed. RunRaceFrame is only called during gs==2, so we cannot
+    // detect the gs==2 → non-2 transition from inside it. This 500ms poller
+    // catches race-end / post-race results / return-to-menu transitions and exits
+    // the launcher immediately instead of burning through the port_wait timeout.
+    var raceEndPoller = setInterval(function () {
+        if (!raceConfirmed) return;
+        try {
+            var gs = readS32(G_gameState);
+            if (gs !== 2) {
+                console.log("[trace] Race ended (poller gs=" + gs +
+                            " raceFrames=" + raceFrameCount + "), sending auto-close");
+                clearInterval(raceEndPoller);
+                shutdown();
+                Thread.sleep(0.1);
+                send({type: "auto-close"});
+            }
+        } catch (e) {}
+    }, 500);
+
     // Windowed mode: not implemented — DDraw exclusive mode can't be reliably
     // overridden via Frida without crashing. Accept fullscreen for trace capture.
     console.log("[trace] Hooks installed, waiting for race...");

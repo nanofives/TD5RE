@@ -1,8 +1,8 @@
 # carparam.dat Physics Table Layout
 
-**Date:** 2026-03-19
+**Date:** 2026-03-19 (field map); updated 2026-04-23 (100% coverage sweep)
 **Binary:** TD5_d3d.exe (Ghidra port 8193)
-**Scope:** Complete field-by-field layout of carparam.dat (0x10C bytes), with emphasis on the 0x80-byte physics portion
+**Scope:** Complete field-by-field layout of carparam.dat (0x10C bytes). As of the 2026-04-23 coverage sweep, every byte in the file is classified: **live data** (read at runtime), **runtime-written** (file bytes overwritten at load by `ComputeVehicleSuspensionEnvelope`), **traffic-only** (read only when slot >= 6), **write-only/dead** (mutated but never consumed), or **padding** (uniformly zero with no readers).
 
 ---
 
@@ -88,15 +88,15 @@ Confidence: `confirmed` = directly traced in decompiled code with clear semantic
 | Offset | Size | Type | Name | Conf. | Evidence |
 |---|---|---|---|---|---|
 | 0x76 | 2 | short | `drivetrain_type` | confirmed | `UpdatePlayerVehicleDynamics`: branching on `sVar2 = *(short*)(phys+0x76)`. Value 1=RWD (rear torque only), 2=FWD (front torque only), 3=AWD (torque/4 per wheel). Also checked in brake path, reverse gear, and traction control code. Used in `UpdateVehicleActor` for checking drive wheels. |
-| 0x78 | 2 | short | `speed_scale_factor` | confirmed | `InitializeRaceVehicleRuntime`: `*(short*)(phys+0x78) <<= 1` (normal) or `<<= 2` (hard). Read as `*(short*)(phys+0x78)` in init and stored. Possible purpose: speed-to-RPM conversion or display multiplier. |
+| 0x78 | 2 | short | `speed_scale_factor` (write-only / dead) | confirmed dead | `InitializeRaceVehicleRuntime` @ 0x42F1AC / 0x42F2C7 / 0x42F389: `*(short*)(phys+0x78) <<= 1` (normal) or `<<= 2` (hard). **Write-only field** — 2026-04-23 sweep (full-binary xrefs on all 8 per-slot addresses, search_pcode/instructions/bytes across every plausible consumer) found zero readers. The init shift has no behavioural effect. File values: 9 distinct (32..144, all multiples of 4); no correlation with torque/redline/top-speed. Likely a designer-facing rating field whose consumer was cut from the shipping binary. |
 | 0x7A | 2 | short | `handbrake_grip_modifier` | confirmed | `UpdatePlayerVehicleDynamics`: when handbrake active (`actor+0x36E != 0`): `rear_grip_L = rear_grip_L * handbrake_grip / 256` and `rear_grip_R = rear_grip_R * handbrake_grip / 256`. Values < 256 reduce rear grip. |
-| 0x7C | 2 | short | `lateral_slip_stiffness` | strongly-suspected | `UpdatePlayerVehicleDynamics`: `sVar3 = *(short*)(phys+0x7C)` -- used in slip circle calculation near traction limit: `slip_speed = speed_display * lateral_stiffness / 256`. Determines how quickly lateral grip saturates during slides. |
+| 0x7C | 2 | short | `slip_circle_speed_coupling` (alias: `lateral_slip_stiffness`) | confirmed | Single reader at `UpdatePlayerVehicleDynamics` @ 0x404185 (`MOVSX ECX, word ptr [EBX+0x7C]`). Used symmetrically in both front-axle (flag bit 1) and rear-axle (flag bit 2) slip-circle blocks as the coupling gain weighting the along-axle speed component into the slip-circle hypotenuse denominator: `iVar = |longitudinal_slip|/256 * sVar3; hyp = sqrt(lateral_term + iVar^2) + 1; grip_scale = ... / hyp`. Higher 0x7C → slip grip saturates faster at speed. Zero reads in `UpdateAIVehicleDynamics` (AI path uses a different code branch). Empirical range across 37 cars: 32..360. |
 
-### Remaining Fields (0x7E-0x7F)
+### Padding (0x7E-0x7F)
 
 | Offset | Size | Type | Name | Conf. | Evidence |
 |---|---|---|---|---|---|
-| 0x7E | 2 | short | `(unknown_7E)` | hypothesis | No direct access found in decompiled functions. May be padding or reserved. |
+| 0x7E | 2 | short | `_pad_7E` | confirmed padding | 2026-04-23 sweep: zero readers binary-wide (full-binary `search_pcode 0x7E` + search on every suspension/dynamics/HUD consumer). All 37 `carparam.dat` files have `0x0000` at this offset. Pure 2-byte alignment pad rounding the physics table to 0x80. |
 
 ---
 
@@ -105,13 +105,16 @@ Confidence: `confirmed` = directly traced in decompiled code with clear semantic
 All offsets relative to tuning table base (= carparam.dat offset 0x00).
 The tuning table is accessed via actor+0x1B8 (`short*` offset 0xDC).
 
-### Bounding Box / Collision Geometry (0x00-0x1F)
+### Chassis Bounding Corners (0x00-0x3F)
+
+**Load-order note:** `InitializeRaceVehicleRuntime` does NOT read any byte in 0x00-0x3F before `ComputeVehicleSuspensionEnvelope` (called later in the init chain via `InitializeVehicleShadowAndWheelSpriteTemplates` @ 0x40BB70) overwrites the entire region from the loaded mesh's AABB. **For player/AI slots (0..5), the on-disk values in 0x00-0x3F are effectively dead** — they are always replaced before any runtime reader sees them. For traffic slots (>= 6), `LoadRaceVehicleAssets` copies slot-0's tuning table into the traffic slot, so traffic inherits slot-0's envelope-written bbox, and the traffic carparam.dat's own 0x00-0x3F bytes are also unused. Empirical 37-car dump confirms 0x20-0x3F bytes are rotated duplicates of 0x00-0x1F (author-precomputed mesh corners left in the file), never read.
+
+After envelope overwrite, the region holds 8 corner vertices (x, y, z, w-pad = 8 bytes each). Runtime readers of envelope-written values:
 
 | Offset | Size | Type | Name | Conf. | Evidence |
 |---|---|---|---|---|---|
-| 0x00-0x0B | 12B | short[6] | `bbox_extents_front` | strongly-suspected | `ComputeVehicleSuspensionEnvelope`: reads vertex positions from model mesh and stores bounding extents into tuning+0x00 onward. 6 shorts = 3 pairs of (x, y, z) or (min, max) per axis. |
-| 0x0C-0x17 | 12B | short[6] | `bbox_extents_rear` | strongly-suspected | Continuation of bounding volume data from `ComputeVehicleSuspensionEnvelope`. |
-| 0x18-0x1F | 8B | short[4] | `bbox_vertical` | hypothesis | Continuation of suspension envelope data. Stores min/max Y values for height. |
+| 0x00-0x1F | 32B | short[8][2] | `chassis_corners_front` (runtime-written) | confirmed | 4 corner vertices written by `ComputeVehicleSuspensionEnvelope`. Read by `CollectVehicleCollisionContacts` @ 0x408570 (offsets +0x04, +0x08, +0x14), `ApplyVehicleCollisionImpulse` @ 0x4079C0 (+0x04, +0x08, +0x14), `ProcessActorSegmentTransition` @ 0x407390 (+0x08, +0x0C at 0x407593 / 0x4075a8), `ProcessActorForwardCheckpointPass` @ 0x4076C0 (+0x08, +0x0C at 0x40742b / 0x407440 / 0x407735 / 0x40774a / 0x4078a0 / 0x4078b5). Layout: short[4] per vertex (x, y, z, w-pad); w-pad is always 0. |
+| 0x20-0x3F | 32B | short[8][2] | `chassis_corners_rear` (runtime-written, dead-on-disk) | confirmed | Continuation of corner vertex set — envelope writes, but **zero runtime readers** touch this range. File bytes are rotated duplicates of 0x00-0x1F in a different vertex ordering and are ignored at runtime. Classification: envelope-written, runtime-dead, file-dead. |
 
 ### Wheel Position Templates (0x40-0x5F)
 
@@ -122,20 +125,30 @@ The tuning table is accessed via actor+0x1B8 (`short*` offset 0xDC).
 | 0x50-0x57 | 8B | short[4] | `wheel_pos_RL` | confirmed | Third iteration. |
 | 0x58-0x5F | 8B | short[4] | `wheel_pos_RR` | confirmed | Fourth iteration. |
 
-### Extended Wheel/Axle Data (0x60-0x87)
+### Traffic Alt-Wheel Templates (0x60-0x7F)
+
+`ComputeVehicleSuspensionEnvelope` writes this 32-byte region **only when the envelope runs for a traffic slot** (`param_2 > 5`). Layout mirrors the player wheel_pos block: two alternate wheel templates at short[4] per vertex.
 
 | Offset | Size | Type | Name | Conf. | Evidence |
 |---|---|---|---|---|---|
-| 0x60-0x81 | 34B | mixed | `wheel_contact_geometry` | strongly-suspected | `RefreshVehicleWheelContactFrames` accesses `local_10[0x41]` = tuning+0x82 and `tuning+0x43` = tuning+0x86 as per-wheel vertical offset and suspension height parameters. Additional contact positions and reference heights for the 4 wheel + 4 extended probes. |
-| 0x82 | 2 | short | `suspension_height_ref` | confirmed | `RefreshVehicleWheelContactFrames`: `sVar2 = local_10[0x41]` (tuning+0x82). Scaled by `0xB5/256` and used as vertical offset subtracted from wheel contact height to determine suspension preload. Also used in `IntegrateVehiclePoseAndContacts` for vertical reference. |
-| 0x84-0x87 | 4B | mixed | `(extended_wheel_data)` | hypothesis | Likely additional contact probe offsets. |
+| 0x60-0x6F | 16B | short[2][4] | `traffic_alt_wheel_A` | confirmed | Envelope writes at 0x42F96A..0x42F97E (first alt wheel). Pair of (x, y, z, w-pad) short quads. Consumed by traffic wheel-contact refresh — player path never touches. |
+| 0x70-0x7F | 16B | short[2][4] | `traffic_alt_wheel_B` | confirmed | Envelope writes at 0x42F949..0x42F966 (second alt wheel). Same layout. |
 
-### Collision Mass (0x88-0x89)
+### Chassis Top + Suspension Reference (0x80-0x87)
+
+| Offset | Size | Type | Name | Conf. | Evidence |
+|---|---|---|---|---|---|
+| 0x80 | 2 | short | `chassis_top_y` | confirmed | Written unconditionally by `ComputeVehicleSuspensionEnvelope` (`DAT_004ae600`). Read by `ResolveSimpleActorSeparation` @ 0x409018 / 0x409025 as separation radius: `(A.y_top + B.y_top) * 3 / 4`. Also read by `ProcessActorForwardCheckpointPass` @ 0x4078bf. |
+| 0x82 | 2 | short | `suspension_height_ref` | confirmed | `RefreshVehicleWheelContactFrames`: `sVar2 = local_10[0x41]` (tuning+0x82). Scaled by `0xB5/256` and used as vertical offset subtracted from wheel contact height to determine suspension preload. Also used in `IntegrateVehiclePoseAndContacts` for vertical reference. |
+| 0x84 | 2 | short | `envelope_reference_y` | confirmed | Read by `ComputeVehicleSuspensionEnvelope` @ 0x42F7CC in the running-max FP idiom: `MOVSX ECX, [ESI+0x84]; MOVSX EDX, [ESI+0x40]; SUB ECX, EDX; float(delta) > local_max ? store`. Used to compute a per-vehicle Y extent delta against wheel_pos_FL.y (tun+0x40). Paired 0x82/0x42 handled identically at 0x42F893. The 2026-04-23 xref sweep missed this site because the base pointer is register-indexed through `LEA ESI, [slot*4 + 0x4AE580]` rather than `[actor+0x1B8]`. Port mirrors this at `td5_physics.c:5487`. |
+| 0x86 | 2 | short | `traffic_y_offset` | confirmed | Envelope writes unconditionally (`DAT_004ae606`). Read at `UpdateTrafficVehiclePose` @ 0x443D82: `*pose_y += *(tuning+0x86) << 8` — per-traffic-car vertical pose offset scaled into 24.8 FP. Player/AI path never reads. |
+
+### Collision Mass + Trailing Padding (0x88-0x8B)
 
 | Offset | Size | Type | Name | Conf. | Evidence |
 |---|---|---|---|---|---|
 | 0x88 | 2 | short | `collision_mass` | confirmed | `ApplyVehicleCollisionImpulse` (0x4079C0): `local_40 = *(short*)(*(int*)(actor+0xDC) + 0x88)` -- inverse mass term in impulse formula: `impulse = (DAT/256 * 0x1100) / ((r1^2+DAT)*mass1 + (r2^2+DAT)*mass2) / 256`. Higher values = heavier = less affected by collisions. Also set to 0x20 for traffic vehicles in init. |
-| 0x8A | 2 | short | `(unknown_8A)` | hypothesis | Last 2 bytes of tuning table. Possibly unused or padding to align 0x8C boundary. |
+| 0x8A | 2 | short | `_pad_8A` | confirmed padding | 2026-04-23 sweep: all 37 `carparam.dat` files have `0x0000`; no reader accesses this offset. 2-byte alignment pad rounding the tuning table to the 0x8C stride. |
 
 ---
 
@@ -173,44 +186,49 @@ Applied per-slot when `gRaceSlotState[slot] == 1` (human player):
 
 ## Summary: Complete carparam.dat Byte Map
 
+Legend: **[L]** live data (read as-is at runtime) · **[W]** runtime-written (envelope overwrites file bytes) · **[T]** traffic-only (read only when slot >= 6) · **[D]** write-only/dead (mutated at init, never consumed) · **[P]** padding (uniformly zero, no readers).
+
 ```
-Offset  File     Table   Size  Name
-------  ------   ------  ----  ----
-0x000   0x00     Tun+00  32B   bbox/suspension_envelope (6 extents, computed from mesh)
-0x020   0x20     Tun+20  (32B) (additional bounding/wheel reference data, partially unknown)
-0x040   0x40     Tun+40  32B   wheel_positions[4] (FL/FR/RL/RR, 8B each: x,y,z,flags)
-0x060   0x60     Tun+60  34B   extended_contact_geometry (wheel probes + vertical refs)
-0x082   0x82     Tun+82  2B    suspension_height_reference
-0x084   0x84     Tun+84  4B    (extended wheel data, unknown)
-0x088   0x88     Tun+88  2B    collision_mass (inverse mass for impulse calc)
-0x08A   0x8A     Tun+8A  2B    (unknown/padding)
+Offset  File     Table   Size  Kind  Name
+------  ------   ------  ----  ----  ----
+0x000   0x00     Tun+00  32B   [W]   chassis_corners_front (4 vertices, envelope-written, collision/checkpoint reads)
+0x020   0x20     Tun+20  32B   [W]D  chassis_corners_rear (envelope-written, zero readers, file bytes inert)
+0x040   0x40     Tun+40  32B   [L]   wheel_positions[4] (FL/FR/RL/RR, 8B each: x,y,z,w-pad)
+0x060   0x60     Tun+60  16B   [T]   traffic_alt_wheel_A (envelope writes only when slot>=6)
+0x070   0x70     Tun+70  16B   [T]   traffic_alt_wheel_B (envelope writes only when slot>=6)
+0x080   0x80     Tun+80  2B    [W]   chassis_top_y (envelope-written, separation/checkpoint reads)
+0x082   0x82     Tun+82  2B    [L]   suspension_height_ref
+0x084   0x84     Tun+84  2B    [L]   envelope_reference_y (read by ComputeVehicleSuspensionEnvelope)
+0x086   0x86     Tun+86  2B    [W]T  traffic_y_offset (envelope-written, UpdateTrafficVehiclePose only)
+0x088   0x88     Tun+88  2B    [L]   collision_mass (inverse mass for impulse calc; traffic override = 0x20)
+0x08A   0x8A     Tun+8A  2B    [P]   _pad_8A (always 0x0000; alignment to 0x8C)
 ------- physics table begins -------
-0x08C   0x8C     Phys+00 32B   torque_curve[16] (short[16], engine speed 0-8192)
-0x0AC   0xAC     Phys+20 4B    vehicle_inertia (int, yaw moment)
-0x0B0   0xB0     Phys+24 4B    half_wheelbase (int, CG to axle distance)
-0x0B4   0xB4     Phys+28 2B    front_weight_distribution (short)
-0x0B6   0xB6     Phys+2A 2B    rear_weight_distribution (short)
-0x0B8   0xB8     Phys+2C 2B    drag_coefficient (short, difficulty-scaled)
-0x0BA   0xBA     Phys+2E 16B   gear_ratio_table[8] (short[8], R/N/1-6)
-0x0CA   0xCA     Phys+3E 16B   upshift_rpm_table[8] (short[8])
-0x0DA   0xDA     Phys+4E 16B   downshift_rpm_table[8] (short[8])
-0x0EA   0xEA     Phys+5E 2B    suspension_damping (short)
-0x0EC   0xEC     Phys+60 2B    suspension_spring_rate (short)
-0x0EE   0xEE     Phys+62 2B    suspension_feedback_coupling (short)
-0x0F0   0xF0     Phys+64 2B    suspension_travel_limit (short, max displacement)
-0x0F2   0xF2     Phys+66 2B    suspension_velocity_response (short)
-0x0F4   0xF4     Phys+68 2B    drive_torque_multiplier (short, difficulty-scaled)
-0x0F6   0xF6     Phys+6A 2B    damping_low_speed (short, velocity decay at low speed)
-0x0F8   0xF8     Phys+6C 2B    damping_high_speed (short, velocity decay at high speed)
-0x0FA   0xFA     Phys+6E 2B    brake_force (short, difficulty-scaled)
-0x0FC   0xFC     Phys+70 2B    engine_brake_force (short, difficulty-scaled)
-0x0FE   0xFE     Phys+72 2B    max_rpm (short, redline / torque cutoff)
-0x100   0x100    Phys+74 2B    top_speed_limit (short, hard speed cap: val*256 > speed)
-0x102   0x102    Phys+76 2B    drivetrain_type (short: 1=RWD, 2=FWD, 3=AWD)
-0x104   0x104    Phys+78 2B    speed_scale_factor (short, difficulty-scaled: <<1 or <<2)
-0x106   0x106    Phys+7A 2B    handbrake_grip_modifier (short, <256 = reduce rear grip)
-0x108   0x108    Phys+7C 2B    lateral_slip_stiffness (short, cornering slip sensitivity)
-0x10A   0x10A    Phys+7E 2B    (unknown_7E / padding)
+0x08C   0x8C     Phys+00 32B   [L]   torque_curve[16] (short[16], engine speed 0-8192)
+0x0AC   0xAC     Phys+20 4B    [L]   vehicle_inertia (int, yaw moment)
+0x0B0   0xB0     Phys+24 4B    [L]   half_wheelbase (int, CG to axle distance)
+0x0B4   0xB4     Phys+28 2B    [L]   front_weight_distribution (short)
+0x0B6   0xB6     Phys+2A 2B    [L]   rear_weight_distribution (short)
+0x0B8   0xB8     Phys+2C 2B    [L]   drag_coefficient (short, difficulty-scaled)
+0x0BA   0xBA     Phys+2E 16B   [L]   gear_ratio_table[8] (short[8], R/N/1-6)
+0x0CA   0xCA     Phys+3E 16B   [L]   upshift_rpm_table[8] (short[8])
+0x0DA   0xDA     Phys+4E 16B   [L]   downshift_rpm_table[8] (short[8])
+0x0EA   0xEA     Phys+5E 2B    [L]   suspension_damping (short)
+0x0EC   0xEC     Phys+60 2B    [L]   suspension_spring_rate (short)
+0x0EE   0xEE     Phys+62 2B    [L]   suspension_feedback_coupling (short)
+0x0F0   0xF0     Phys+64 2B    [L]   suspension_travel_limit (short, max displacement)
+0x0F2   0xF2     Phys+66 2B    [L]   suspension_velocity_response (short)
+0x0F4   0xF4     Phys+68 2B    [L]   drive_torque_multiplier (short, difficulty-scaled)
+0x0F6   0xF6     Phys+6A 2B    [L]   damping_low_speed (short, velocity decay at low speed)
+0x0F8   0xF8     Phys+6C 2B    [L]   damping_high_speed (short, velocity decay at high speed)
+0x0FA   0xFA     Phys+6E 2B    [L]   brake_force (short, difficulty-scaled)
+0x0FC   0xFC     Phys+70 2B    [L]   engine_brake_force (short, difficulty-scaled)
+0x0FE   0xFE     Phys+72 2B    [L]   max_rpm (short, redline / torque cutoff)
+0x100   0x100    Phys+74 2B    [L]   top_speed_limit (short, hard speed cap: val*256 > speed)
+0x102   0x102    Phys+76 2B    [L]   drivetrain_type (short: 1=RWD, 2=FWD, 3=AWD)
+0x104   0x104    Phys+78 2B    [D]   speed_scale_factor (mutated <<1/<<2 at init, never read)
+0x106   0x106    Phys+7A 2B    [L]   handbrake_grip_modifier (short, <256 = reduce rear grip)
+0x108   0x108    Phys+7C 2B    [L]   slip_circle_speed_coupling (short, cornering slip sensitivity)
+0x10A   0x10A    Phys+7E 2B    [P]   _pad_7E (always 0x0000; alignment to 0x80)
 ```
 
 ---
@@ -270,11 +288,59 @@ impulse = ((DAT_00463204/256 * 0x1100)
 
 ---
 
-## Open Questions
+## Fixed-Point Scales
 
-1. **Tuning table 0x00-0x3F:** The first 64 bytes are partially overwritten by `ComputeVehicleSuspensionEnvelope` with model-derived bounding box data. Need to determine if any original carparam.dat data in this range is meaningful or always replaced.
-2. **Tuning table 0x20-0x3F:** This 32-byte region between the bbox and wheel positions is accessed by some functions but not yet traced in detail.
-3. **Physics offset 0x7E:** No access found. May be padding or reserved for future use.
-4. **Tuning offset 0x8A:** Last 2 bytes of tuning table, no access found.
-5. **Fixed-point scales:** Some fields use 8.8, others may use different scales. Exact fractional formats need per-field verification against actual carparam.dat values.
-6. **AI grip range:** AI vehicles use wider grip clamp range [0x70, 0xA0] vs player [0x38, 0x50]. Need to verify whether this is intentional balance or a different code path.
+Speed anchor (confirmed via `td5_frontend.c:3890` HUD conversions): internal speed is 24.8 FP world-units per tick. `mph = raw*256/1252`, `kph = raw*256/778`. One world unit ≈ 1 cm (wheelbase 12000 / 256 ≈ 46.9 wu ≈ 2.3 m half-wheelbase → 4.6 m wheelbase).
+
+| Field | Offset | Type | Raw range (37 cars) | Scale | Example |
+|---|---|---|---|---|---|
+| bbox_extents (runtime-written) | tun+0x00..0x1F | short×16 | -820..+860 | raw world units (~1 cm) | 310 ≈ 3.1 m |
+| wheel_pos (x,y,z) | tun+0x40..0x5F | short | -476..+520 | raw world units, `<<8` to 24.8 at runtime | FL_x = -266 ≈ -2.66 m |
+| suspension_height_ref | tun+0x82 | short | 140..190 | raw world units, scaled `*0xB5/256` ≈ 0.707 | 152 → 107 |
+| chassis_top_y | tun+0x80 | short | positive | raw world units | — |
+| collision_mass | tun+0x88 | short | 3..32 (traffic=0x20) | dimensionless inverse-mass coefficient | 16 |
+| torque_curve[16] | phys+0x00 | short×16 | 128..256 | **8.8** (0x100 = 1.0) | 256 = 1.0× |
+| vehicle_inertia | phys+0x20 | **int** | 120000..230000 | **24.8** (divisor `/0x28C` in yaw formula) | 160000 |
+| half_wheelbase | phys+0x24 | **int** | 6000..18000 | **24.8** raw world units | 12000 = 46.9 wu |
+| front_weight_dist | phys+0x28 | short | 300..500 | dimensionless (ratio numerator) | 414 |
+| rear_weight_dist | phys+0x2A | short | 300..480 | dimensionless (ratio numerator) | 397 |
+| drag_coefficient | phys+0x2C | short | 2200..2750 | **8.8** (effective divisor 4096 when combined with `>>8`) | 2600 |
+| gear_ratio[8] | phys+0x2E | short×8 | 0..3600 | **8.8** (raw/256 = ratio) | 2500/256 ≈ 9.77 |
+| upshift_rpm[8] | phys+0x3E | short×8 | 5200..9999 | **raw rpm** (9999 = "never") | 7000 |
+| downshift_rpm[8] | phys+0x4E | short×8 | 0..9999 | **raw rpm** | 3800 |
+| suspension_damping | phys+0x5E | short | 20..70 | **8.8** | 70 → 0.273 |
+| suspension_spring_rate | phys+0x60 | short | 20..55 | **8.8** | 50 → 0.195 |
+| suspension_feedback | phys+0x62 | short | 25..60 | **8.8** | 30 → 0.117 |
+| suspension_travel_limit | phys+0x64 | short | 6144..16384 | **24.8** world-unit delta | 8192 = 32 wu |
+| suspension_response | phys+0x66 | short | 16..32 | **8.8** | 16 → 0.0625 |
+| drive_torque_multiplier | phys+0x68 | short | 50..180 | **8.8** | 105 → 0.41 |
+| damping_low_speed | phys+0x6A | short | -100..800 | **8.8** (combined with surface table) | 100 |
+| damping_high_speed | phys+0x6C | short | 3000 (≈constant) | **8.8** | 3000 |
+| brake_force | phys+0x6E | short | 400..750 | **8.8** speed-units/tick² | 740 |
+| engine_brake_force | phys+0x70 | short | 400..750 | **8.8** | 740 |
+| max_rpm | phys+0x72 | short | 6200..7600 | **raw rpm** | 7400 |
+| top_speed_limit | phys+0x74 | short | 719..1159 | **raw 16.0** speed (compared against 24.8 via `<<8`) | 1149 ≈ 234 mph |
+| drivetrain_type | phys+0x76 | short | 1..3 | enum (1=RWD, 2=FWD, 3=AWD) | — |
+| handbrake_grip_modifier | phys+0x7A | short | 144..212 | **8.8** (always <256 → reduces grip) | 144 → 0.5625 |
+| slip_circle_speed_coupling | phys+0x7C | short | 32..360 | **8.8** | 256 = 1.0 |
+
+Drivetrain distribution across 37 cars: RWD (1) = 27 cars, FWD (2) = 1 car (`pit`), AWD (3) = 9 cars.
+
+---
+
+## Resolved Open Questions
+
+| # | Previous question | 2026-04-23 resolution |
+|---|---|---|
+| 1 | Tuning 0x00-0x3F file bytes meaningful or always replaced? | **Always replaced** before any reader fires. File bytes inert for all slots (player/AI/traffic). |
+| 2 | Tuning 0x20-0x3F accessed by some functions? | **No readers.** Envelope-written, runtime-dead. |
+| 3 | Physics 0x7E access? | **Confirmed padding** (all files 0x0000, zero readers). |
+| 4 | Tuning 0x8A access? | **Confirmed padding** (all files 0x0000, zero readers). |
+| 5 | Fixed-point scales per field? | **Resolved** — see table above. Three flavours: 8.8 coefficients, 24.8 for inertia/half_wheelbase/travel_limit, raw for rpms/enums. |
+| 6 | Tuning 0x60-0x87 interpretation? | **Resolved** — 0x60-0x7F are traffic-only alt-wheel templates, 0x80 is chassis_top_y, 0x84 is unused, 0x86 is traffic_y_offset. |
+| 7 | Physics 0x78 (`speed_scale_factor`) purpose? | **Write-only / dead.** Exhaustive sweep (xrefs on all 8 per-slot addresses + full-binary instruction/byte-pattern search + decompile of every plausible consumer) found zero readers. Init shift has no behavioural effect. |
+| 8 | Physics 0x7C (`slip_circle_speed_coupling`) port drive-force question? | **RESOLVED 2026-04-23.** Frida @ 0x00404030 confirmed the shaped `local_2c` at `[EBP-0x28]` (front-axle grip-weighted force) DOES flow to `linear_velocity_x/z` writebacks at 0x00404D7E/D9E — captured 918 → 457 mutation with coupling=256, slip_shift=256. Port landed in `td5_physics.c:1168-1264` with a defensive `slip_shift >= 0x41` gate that mirrors the original's flag-clear threshold; avoids the zero-drive edge at rest without needing exact contact-flag parity. |
+
+## Still Open (not carparam.dat format per se)
+
+- **AI grip clamp range:** AI vehicles use `[0x70, 0xA0]` vs player `[0x38, 0x50]`. Not a field-mapping question — it's a runtime code path difference in `UpdatePlayerVehicleDynamics` vs `UpdateAIVehicleDynamics`. Deferred to a separate AI-grip investigation.
