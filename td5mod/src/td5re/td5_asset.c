@@ -454,14 +454,15 @@ static int load_static_png_tpage(int slot)
     return 0;
 }
 
-/** Upload a 2×2 magenta placeholder for tpage slots without on-disk art. */
+/* Original LoadRaceTexturePages @ 0x00442770: silently skips upload when the
+ * static.hed pointer for a slot is zero — no placeholder, no fallback.
+ * Port uploads a 1×1 transparent-black texel so the D3D11 slot is valid and
+ * draws as invisible rather than crashing or using a stale handle. */
 static void upload_atlas_placeholder(int slot)
 {
-    static const uint8_t k_ph[16] = {
-        0xFF, 0x00, 0xFF, 0xFF,  0xFF, 0x00, 0xFF, 0xFF,
-        0xFF, 0x00, 0xFF, 0xFF,  0xFF, 0x00, 0xFF, 0xFF
-    };
-    td5_plat_render_upload_texture(STATIC_ATLAS_BASE + slot, k_ph, 2, 2, 2);
+    static const uint8_t k_null[4] = { 0x00, 0x00, 0x00, 0x00 };
+    TD5_LOG_W(LOG_TAG, "static atlas: slot %d has no on-disk art — uploading null texel", slot);
+    td5_plat_render_upload_texture(STATIC_ATLAS_BASE + slot, k_null, 1, 1, 2);
 }
 
 static void td5_asset_init_static_atlas(void)
