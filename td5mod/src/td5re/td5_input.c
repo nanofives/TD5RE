@@ -23,6 +23,7 @@
 #include "td5re.h"
 #include "td5_game.h"
 #include "td5_camera.h"
+#include "td5_ai.h"
 
 /* Defined in td5_game.c */
 extern int td5_game_is_wanted_mode(void);
@@ -149,6 +150,9 @@ static TD5_FFGameState s_ff;
 
 static int s_escape_muted = 0;
 static int s_escape_fade_active = 0;
+
+/* F3 key edge-detection latch [CONFIRMED @ 0x42C6FC: DAT_004aaf93] */
+static uint8_t s_f3_held = 0;
 
 /* ========================================================================
  * Helper: clamp int to range
@@ -341,9 +345,15 @@ post_poll:
                   (unsigned int)s_control_bits[0]);
     }
 
-    /* Check F3 key for keyboard camera cycling (scan code 0x3D) */
+    /* F3 key edge detection [CONFIRMED @ 0x42C6FC-0x42C71F in FUN_0042C470].
+     * Original: rising edge sets DAT_004aaf93 (latch), falling edge clears
+     * latch and pulses DAT_004aadf0=1. Reader (FUN_0042b580 main loop) clears
+     * DAT_004aadf0 immediately with no other action — effectively dead code. */
     if (td5_plat_input_key_pressed(0x3D)) {
-        /* Camera cycle logic placeholder -- original toggles a flag */
+        s_f3_held = 1;
+    } else if (s_f3_held) {
+        s_f3_held = 0;
+        TD5_LOG_D(LOG_TAG, "F3 release: camera cycle pulse (no-op in original)");
     }
 
     /* Escape handling: trigger race exit fade */
@@ -633,7 +643,12 @@ void td5_input_update_player_control(int slot)
                 }
             }
         } else if (encounter_active) {
-            /* Encounter steering override -- placeholder */
+            /* FUN_00434BA0 [CONFIRMED @ 0x434BA0] UpdateSpecialEncounterControl.
+             * In the original, this modifies the cop (encounter) actor's heading/
+             * brake — it does NOT set the player's throttle/brake directly.
+             * Player control values carry forward from the previous frame. */
+            td5_ai_update_encounter_control(slot);
+            TD5_LOG_D(LOG_TAG, "encounter_control: slot=%d", slot);
         } else {
             /* No brake: reset throttle_state to forward [CONFIRMED @ 0x403180] */
             s_brake[slot] = 0;
@@ -685,8 +700,65 @@ void td5_input_update_player_control(int slot)
     } else if (s_gear_debounce[slot] == 0) {
         /* Gear up (bit 0x400000) */
         if (bits & 0x400000u) {
-            if (s_gear[slot] < 7) {  /* placeholder max gear */
-                s_gear[slot]++;
+            /* Max gear from actor+0x36C [CONFIRMED @ 0x4035E0, DAT_004ab474].
+             * Original condition: (uint8_t)actor[0x36B] < (uint8_t)(actor[0x36C]-1) */
+            {
+                TD5_Actor *a_gear = td5_game_get_actor(slot);
+                uint8_t max_gear = a_gear ? ((uint8_t *)a_gear)[0x36C] : 8u;
+                if (max_gear == 0) max_gear = 8u;  /* guard: uninitialized actor */
+                if (s_gear[slot] < (uint8_t)(max_gear - 1u)) {
+                    s_gear[slot]++;
+                    TD5_LOG_I(LOG_TAG, "gear up: slot=%d gear=%d max=%d",
+                              slot, (int)s_gear[slot], (int)max_gear);
+
+                    /* FUN_0042EEA0 [CONFIRMED @ 0x42EEA0-0x42EF06]:
+                     * Gear-shift weight-transfer impulse — adds to front wheel-load
+                     * accumulators and subtracts from rear (nose-dip on upshift).
+                     * Formula: impulse = (actor[0x33E] * car_cfg[0x68] * 26 / 256)
+                     *                    * gear_lut[gear] / 256
+                     * gear_lut[8] = {0,0,256,192,128,64,32,16} @ DAT_00467394 */
+                    {
+                        static const int32_t k_gear_shift_lut[8] = {
+                            0, 0, 256, 192, 128, 64, 32, 16
+                        };
+                        uint8_t *ab = (uint8_t *)a_gear;
+                        void *car_cfg = (void *)(uintptr_t)*(uint32_t *)(ab + 0x1BC);
+                        if (car_cfg) {
+                            int spd_val = *(int16_t *)(ab + 0x33E);
+                            int rpm_s   = *(int16_t *)((uint8_t *)car_cfg + 0x68);
+                            int g       = (int)(s_gear[slot] & 7u);
+                            int v = spd_val * rpm_s * 26;
+                            v = ((v + (v >> 31 & 0xFF)) >> 8) * k_gear_shift_lut[g];
+                            v = (v + (v >> 31 & 0xFF)) >> 8;
+                            *(int32_t *)(ab + 0x2EC) += v;
+                            *(int32_t *)(ab + 0x2F0) += v;
+                            *(int32_t *)(ab + 0x2F4) -= v;
+                            *(int32_t *)(ab + 0x2F8) -= v;
+                        }
+
+                        /* Gear-2 auto-gearbox check [CONFIRMED @ FUN_00402E60]:
+                         * If RPM > 75% of redline when shifting into gear 2,
+                         * write car_config+0x76 (auto-gearbox mode byte) into
+                         * actor+0x376.
+                         * car_config+0x72 = redline RPM (int16) [INFERRED from context]
+                         * actor+0x310     = current RPM (int32) [CONFIRMED]
+                         * actor+0x376     = auto-gearbox active flag (byte) [CONFIRMED] */
+                        if (s_gear[slot] == 2 && car_cfg) {
+                            int t = *(int16_t *)((uint8_t *)car_cfg + 0x72) * 3;
+                            if (((t + (t >> 31 & 3)) >> 2) <
+                                *(int32_t *)((uint8_t *)a_gear + 0x310))
+                            {
+                                ((uint8_t *)a_gear)[0x376] =
+                                    *((uint8_t *)car_cfg + 0x76);
+                                TD5_LOG_I(LOG_TAG,
+                                    "gear2 autogear: slot=%d rpm=%d flag=0x%02X",
+                                    slot,
+                                    *(int32_t *)((uint8_t *)a_gear + 0x310),
+                                    (unsigned)*((uint8_t *)car_cfg + 0x76));
+                            }
+                        }
+                    }
+                }
             }
             s_gear_debounce[slot] = TD5_INPUT_GEAR_DEBOUNCE;
         }
