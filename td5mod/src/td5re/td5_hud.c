@@ -1034,13 +1034,14 @@ void td5_hud_draw_pause_overlay(void)
 }
 
 /* Called each frame while paused to update SELBOX position and slider thumb positions.
- * cursor: 0-4 (rows: SFX, Music, CD, Continue, Quit)
- * sfx_frac, music_frac, cd_frac: volume fractions [0.0, 1.0] */
-void td5_hud_update_pause_overlay(int cursor, float sfx_frac, float music_frac, float cd_frac)
+ * cursor: 0-4 (rows: CD Music frac / CD DSound raw / SFX DSound / Continue / Quit)
+ * [CONFIRMED @ 0x0043BF70] slider 0=DAT_004B135C (CD frac), slider 1=DAT_004B1360 (CD raw),
+ * slider 2=DAT_004B1364 (SFX DSound via GetVolume/SetVolume). */
+void td5_hud_update_pause_overlay(int cursor, float cd_music_frac, float cd_raw_frac, float sfx_frac)
 {
     float cx = g_render_width_f  * 0.5f;
     float cy = g_render_height_f * 0.5f;
-    float fracs[3] = { sfx_frac, music_frac, cd_frac };
+    float fracs[3] = { cd_music_frac, cd_raw_frac, sfx_frac };
 
     /* Move SELBOX to cursor row using atlas texture */
     if (s_pause_sel_box && s_pause_selbox_atlas) {

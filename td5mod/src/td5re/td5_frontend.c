@@ -999,20 +999,27 @@ static void frontend_get_track_display_name(int track_index, int truncate_at_com
 
 static const char *frontend_get_car_display_name(int car_index) {
     static const char *fallback = "UNKNOWN CAR";
-    char line[64];
+    char line[128];
     if (car_index < 0 || car_index >= (int)(sizeof(s_car_zip_paths) / sizeof(s_car_zip_paths[0])))
         return fallback;
     if (s_car_display_names_loaded[car_index]) return s_car_display_names[car_index];
-    if (frontend_load_text_line_from_archive("config.nfo", s_car_zip_paths[car_index], line, sizeof(line))) {
+    /* [CONFIRMED @ 0x4667A8] English archive entry = "config.eng"; token 0 = display name.
+     * Fall back to "config.nfo" (single-token) if "config.eng" is absent. */
+    if (frontend_load_text_line_from_archive("config.eng", s_car_zip_paths[car_index], line, sizeof(line))) {
+        char tok[64]; tok[0] = '\0';
+        sscanf(line, "%63s", tok);
+        if (tok[0]) frontend_copy_pretty_text(s_car_display_names[car_index], sizeof(s_car_display_names[car_index]), tok);
+    }
+    if (!s_car_display_names[car_index][0] &&
+        frontend_load_text_line_from_archive("config.nfo", s_car_zip_paths[car_index], line, sizeof(line))) {
         frontend_copy_pretty_text(s_car_display_names[car_index], sizeof(s_car_display_names[car_index]), line);
-    } else {
+    }
+    if (!s_car_display_names[car_index][0]) {
         const char *zip = strrchr(s_car_zip_paths[car_index], '/');
         frontend_copy_pretty_text(s_car_display_names[car_index], sizeof(s_car_display_names[car_index]),
                                   zip ? zip + 1 : s_car_zip_paths[car_index]);
-        {
-            char *dot = strrchr(s_car_display_names[car_index], '.');
-            if (dot) *dot = '\0';
-        }
+        char *dot = strrchr(s_car_display_names[car_index], '.');
+        if (dot) *dot = '\0';
     }
     s_car_display_names_loaded[car_index] = 1;
     return s_car_display_names[car_index][0] ? s_car_display_names[car_index] : fallback;
@@ -1291,17 +1298,17 @@ static void frontend_cd_play(int track) {
 /*
  * frontend_draw_string / frontend_draw_small_string
  *
- * Original binary draws into an offscreen DirectDraw surface via
- * DrawFrontendLocalizedStringToSurface @ 0x00424560 (__cdecl, params:
- *   (byte *str, int x, int y, int *surface)).
- * The port has no offscreen surfaces for dialog boxes; dialog text is
- * rendered live in td5_frontend_render_ui_rects via dedicated overlay
- * functions (frontend_render_cup_failed_overlay etc.).
+ * [CONFIRMED @ 0x00424110] DrawFrontendFontStringPrimary: 12×12 glyph atlas,
+ * 21 columns. col = (c-0x20) % 21 * 12, row = (c-0x20) / 21 * 12. Advance
+ * from g_smallFontAdvance[c]. Renders to g_primaryWorkSurface via vtable +0x1C.
+ * [CONFIRMED @ 0x004241E0] Secondary variant: same atlas, renders to
+ * g_secondaryWorkSurface at y+8. Callers include ScreenGameOptions (0x41F990),
+ * ScreenDisplayOptions (0x420400), ScreenOptionsHub (0x41D890).
  *
- * These stubs exist for call-site compatibility only — they are intentionally
- * no-ops because all dialog text paths have been moved to the render overlay.
- * [CONFIRMED: call sites removed from screen state machines in favour of
- *  render-side overlays added 2026-04-25]
+ * Port verdict: ZERO call sites exist for these stubs. All screen state machines
+ * in the port use frontend_create_button() for option labels, which routes through
+ * the draw queue / td5_frontend_render_ui_rects. The original's offscreen-surface
+ * rendering path has been superseded. No-op stubs are CORRECT for the port.
  */
 static void frontend_draw_string(int surface, const char *str_id, int x, int y) {
     (void)surface; (void)str_id; (void)x; (void)y;
@@ -5132,8 +5139,15 @@ static void Screen_LocalizationInit(void) {
         frontend_init_return_screen(TD5_SCREEN_LOCALIZATION_INIT);
         TD5_LOG_I(LOG_TAG, "ScreenLocalizationInit: first entry, loading resources");
 
-        /* [INFERRED] Load LANGUAGE.DLL string table (M2DX — stub in port) */
-        /* [INFERRED] Load car ZIP path table from gCarZipPathTable (handled in td5_asset.c) */
+        /* [CONFIRMED @ 0x4269D0 / 0x4267A8] LANGUAGE.DLL is a static PE import;
+         * SNK_LangDLL_exref[8] is a language-selection byte: 0x31=English, 0x32=French,
+         * 0x33=German, 0x34=Italian, 0x35=Spanish (MOVs at 0x4269DF–0x426A07).
+         * English entry name = "config.eng" [CONFIRMED @ 0x4667A8].
+         * The original reads "config.eng" per car ZIP, sscanf's 12 tokens (name + 11 spec
+         * strings) into DAT_0049b90c (stride 0x330, 17 rows).
+         * Port: frontend_get_car_display_name() tries "config.eng" (token 0 = display name)
+         * then falls back to "config.nfo". Full 12-token spec data not yet consumed. */
+        /* [CONFIRMED @ 0x4269D0] Car ZIP path table: handled in td5_asset.c */
         /* [CONFIRMED @ 0x426F80]: LoadPackedConfigTd5() reads config.td5 settings */
         /* [INFERRED] Enumerate display modes (handled in td5_render.c) */
         /* [CONFIRMED @ 0x427081]: Seed controller/input state from DXInput joystick exports
