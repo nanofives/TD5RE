@@ -185,6 +185,8 @@ static int  s_cup_unlock_tier;          /* DAT_004962a8           */
 static int  s_two_player_mode;
 /* Split-screen display mode: 0=off, 1=on [CONFIRMED @ 0x420C70 g_twoPlayerSplitMode] */
 static int  s_split_screen_mode;           /* g_twoPlayerSplitMode   */
+/* Catch-up intensity level 0..9 (0=off) [CONFIRMED @ 0x4210B3 DAT_00465ff8] */
+static int  s_catchup_level;
 
 /* ScreenLocalizationInit bootstrap control [CONFIRMED @ 0x4269D0 g_attractModeControlEnabled]:
  * 0 = first entry (run full init), 1 = re-entry (skip init, go to menu),
@@ -3698,7 +3700,7 @@ static void frontend_render_two_player_options_overlay(float sx, float sy) {
     /* [CONFIRMED @ 0x420C70 case 4]: row 0 = split-screen ON/OFF; row 1 = catch-up ON/OFF
      * g_twoPlayerSplitMode is 0 or 1; DAT_00465ff8 is catch-up level (0..9, nonzero = ON) */
     frontend_draw_value_centered(sx, sy, s_buttons[0].y + 6, on_off[s_split_screen_mode ? 1 : 0], 0xFFFFFFFF);
-    frontend_draw_value_centered(sx, sy, s_buttons[1].y + 6, on_off[(s_two_player_mode & 8) ? 1 : 0], 0xFFFFFFFF);
+    frontend_draw_value_centered(sx, sy, s_buttons[1].y + 6, on_off[s_catchup_level ? 1 : 0], 0xFFFFFFFF);
 
     /* [CONFIRMED @ 0x4210A4]: QueueFrontendOverlayRect with src_y = g_twoPlayerSplitMode << 5 (=*32)
      * SplitScreen.tga: 64x32 icon rows; row 0=off icon, row 1=on icon.
@@ -5029,6 +5031,7 @@ int td5_frontend_init(void) {
     s_cup_unlock_tier = 0;
     s_two_player_mode = 0;
     s_split_screen_mode = 0;
+    s_catchup_level     = 0;
     s_attract_mode_ctrl = 0;
     s_selected_car = g_td5.ini.loaded ? g_td5.ini.default_car : 0;
     s_selected_paint = 0;
@@ -5233,20 +5236,6 @@ static void Screen_PositionerDebugTool(void) {
  * ======================================================================== */
 
 static void Screen_AttractModeDemo(void) {
-    /* Any keypress or mouse click cancels the demo and returns to main menu */
-    {
-        const uint8_t *kb = td5_plat_input_get_keyboard();
-        if (kb) {
-            int k;
-            for (k = 1; k < 256; k++) {
-                if (kb[k] & 0x80) {
-                    td5_frontend_set_screen(TD5_SCREEN_MAIN_MENU);
-                    return;
-                }
-            }
-        }
-    }
-
     switch (s_inner_state) {
     case 0: /* Set attract mode flag */
         frontend_init_return_screen(TD5_SCREEN_ATTRACT_MODE);
@@ -7004,9 +6993,10 @@ static void Screen_TwoPlayerOptions(void) {
                 frontend_play_sfx(2);
                 s_inner_state = 4;
             } else if (active_button == 1 && delta != 0) {
-                /* [CONFIRMED @ 0x42107A]: DAT_00465ff8 += delta; clamped 0..9 */
-                /* Catch-up level stored in s_two_player_mode bits 3+ (port approximation) */
-                s_two_player_mode ^= 8;
+                /* [CONFIRMED @ 0x4210B3]: DAT_00465ff8 += delta; clamped 0..9 */
+                s_catchup_level += delta;
+                if (s_catchup_level < 0) s_catchup_level = 0;
+                if (s_catchup_level > 9) s_catchup_level = 9;
                 frontend_play_sfx(2);
                 s_inner_state = 4;
             } else if (s_button_index == 2) {
