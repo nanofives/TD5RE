@@ -3538,14 +3538,32 @@ int td5_game_get_slot_state(int slot) {
     if (slot < 0 || slot >= TD5_MAX_RACER_SLOTS) return 3;  /* disabled */
     return (int)s_slot_state[slot].state;
 }
-int td5_game_is_replay_active(void) { return 0; }
-int td5_game_get_traffic_variant(int traffic_index) { (void)traffic_index; return 0; }
+/* [CONFIRMED @ 0x40A4C9, 0x0042B27E, 0x0042BF1A]: original ORs g_inputPlaybackActive
+ * (0x466E9C) and g_replayModeFlag (0x4AAF64) at every call site. */
+int td5_game_is_replay_active(void) {
+    return td5_input_is_playback_active() || s_replay_mode;
+}
+/* [CONFIRMED @ 0x00443240 GetTrafficVehicleVariantType]: two-table lookup;
+ * returns 2 if model==0xe(14), 1 otherwise, 0 if gate fails or index==4. */
+int td5_game_get_traffic_variant(int traffic_index) {
+    if (!g_td5.traffic_enabled) return 0;
+    if (traffic_index < 0 || traffic_index >= 6 || traffic_index == 4) return 0;
+    int model = td5_asset_resolve_traffic_model_index(g_td5.track_index, 0, traffic_index);
+    if (model < 0) return 0;
+    return (model == 0xe) ? 2 : 1;
+}
 /* Slot 1 is the active pursuing cop in wanted mode (slots 2-5 are inactive).
  * [INFERRED from slot-state init @ 0x42ABF8 + spawn layout @ 0x42B1C6] */
 int td5_game_get_cop_actor_index(void) { return g_td5.wanted_mode_enabled ? 1 : -1; }
 /* [CONFIRMED]: g_wantedModeEnabled @ 0x4AAF68 set at InitializeRaceSession */
 int td5_game_is_wanted_mode(void) { return g_td5.wanted_mode_enabled; }
-void td5_game_advance_sky_rotation(void) { }
+/* [CONFIRMED @ 0x0043D7C0 AdvanceGlobalSkyRotation]: increments
+ * g_wantedTargetTrackerActive (0x004BF500) by 0x400 when not paused. */
+void td5_game_advance_sky_rotation(void) {
+    if (!s_pause_menu_active) {
+        s_wanted_target_tracker += 0x400;
+    }
+}
 
 void *td5_game_heap_alloc(size_t size) {
     return calloc(1, size);
