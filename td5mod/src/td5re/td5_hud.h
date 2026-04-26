@@ -164,7 +164,7 @@ int  td5_hud_build_metric_digits(void);
 void td5_hud_draw_status_text(int player_slot, int view_index);
 void td5_hud_render_minimap(int view_index);
 void td5_hud_draw_pause_overlay(void);
-void td5_hud_update_pause_overlay(int cursor, float cd_music_frac, float sfx_frac, float audio3_frac);
+void td5_hud_update_pause_overlay(int cursor, float cd_music_frac, float cd_raw_frac, float sfx_frac);
 void td5_hud_draw_race_fade(float progress, int direction);
 
 /* --- State control --- */

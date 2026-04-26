@@ -999,20 +999,27 @@ static void frontend_get_track_display_name(int track_index, int truncate_at_com
 
 static const char *frontend_get_car_display_name(int car_index) {
     static const char *fallback = "UNKNOWN CAR";
-    char line[64];
+    char line[128];
     if (car_index < 0 || car_index >= (int)(sizeof(s_car_zip_paths) / sizeof(s_car_zip_paths[0])))
         return fallback;
     if (s_car_display_names_loaded[car_index]) return s_car_display_names[car_index];
-    if (frontend_load_text_line_from_archive("config.nfo", s_car_zip_paths[car_index], line, sizeof(line))) {
+    /* [CONFIRMED @ 0x4667A8] English archive entry = "config.eng"; token 0 = display name.
+     * Fall back to "config.nfo" (single-token) if "config.eng" is absent. */
+    if (frontend_load_text_line_from_archive("config.eng", s_car_zip_paths[car_index], line, sizeof(line))) {
+        char tok[64]; tok[0] = '\0';
+        sscanf(line, "%63s", tok);
+        if (tok[0]) frontend_copy_pretty_text(s_car_display_names[car_index], sizeof(s_car_display_names[car_index]), tok);
+    }
+    if (!s_car_display_names[car_index][0] &&
+        frontend_load_text_line_from_archive("config.nfo", s_car_zip_paths[car_index], line, sizeof(line))) {
         frontend_copy_pretty_text(s_car_display_names[car_index], sizeof(s_car_display_names[car_index]), line);
-    } else {
+    }
+    if (!s_car_display_names[car_index][0]) {
         const char *zip = strrchr(s_car_zip_paths[car_index], '/');
         frontend_copy_pretty_text(s_car_display_names[car_index], sizeof(s_car_display_names[car_index]),
                                   zip ? zip + 1 : s_car_zip_paths[car_index]);
-        {
-            char *dot = strrchr(s_car_display_names[car_index], '.');
-            if (dot) *dot = '\0';
-        }
+        char *dot = strrchr(s_car_display_names[car_index], '.');
+        if (dot) *dot = '\0';
     }
     s_car_display_names_loaded[car_index] = 1;
     return s_car_display_names[car_index][0] ? s_car_display_names[car_index] : fallback;
@@ -5132,14 +5139,14 @@ static void Screen_LocalizationInit(void) {
         frontend_init_return_screen(TD5_SCREEN_LOCALIZATION_INIT);
         TD5_LOG_I(LOG_TAG, "ScreenLocalizationInit: first entry, loading resources");
 
-        /* [CONFIRMED @ 0x4269D0] LANGUAGE.DLL is a static PE import; SNK_LangDLL_exref[8]
-         * holds a language-selection byte (English=0). The original reads localized car
-         * spec strings (name, engine-type, top-speed, units) from each car ZIP archive
-         * using the language index to select an archive entry name, then sscanf's 12 tokens
-         * into DAT_0049b90c (stride 0x330, 17 rows). Archive entry names for language 0
-         * are UNCERTAIN (auStackY_2d8 stack array — content not in decompilation of 0x4269D0).
-         * Port substitution: frontend_get_car_display_name() reads config.nfo per car for
-         * names; engine/speed spec strings not loaded (archive entry name unknown). */
+        /* [CONFIRMED @ 0x4269D0 / 0x4267A8] LANGUAGE.DLL is a static PE import;
+         * SNK_LangDLL_exref[8] is a language-selection byte: 0x31=English, 0x32=French,
+         * 0x33=German, 0x34=Italian, 0x35=Spanish (MOVs at 0x4269DF–0x426A07).
+         * English entry name = "config.eng" [CONFIRMED @ 0x4667A8].
+         * The original reads "config.eng" per car ZIP, sscanf's 12 tokens (name + 11 spec
+         * strings) into DAT_0049b90c (stride 0x330, 17 rows).
+         * Port: frontend_get_car_display_name() tries "config.eng" (token 0 = display name)
+         * then falls back to "config.nfo". Full 12-token spec data not yet consumed. */
         /* [CONFIRMED @ 0x4269D0] Car ZIP path table: handled in td5_asset.c */
         /* [CONFIRMED @ 0x426F80]: LoadPackedConfigTd5() reads config.td5 settings */
         /* [INFERRED] Enumerate display modes (handled in td5_render.c) */
