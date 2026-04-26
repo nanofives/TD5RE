@@ -190,4 +190,14 @@ void td5_save_set_music_volume(int v);
 float td5_save_get_view_distance(void);
 void  td5_save_set_view_distance(float v);
 
+/* Controller / keyboard binding buffers — mutable pointers for binding-screen capture.
+ * td5_save_get_controller_bindings_mutable: 18 dwords (72 bytes), flat [player*9+slot].
+ * td5_save_get_p1/p2_custom_bindings_mutable: 98 dwords (392 bytes), first 16 bytes
+ *   used as uint8_t[16] keyboard scancode capture buffer for the respective player.
+ * After writing, call td5_save_write_config() to persist to Config.td5.
+ * [CONFIRMED @ 0x463FC4 / 0x4978C0 / 0x497330] */
+uint32_t *td5_save_get_controller_bindings_mutable(void);
+uint32_t *td5_save_get_p1_custom_bindings_mutable(void);
+uint32_t *td5_save_get_p2_custom_bindings_mutable(void);
+
 #endif /* TD5_SAVE_H */

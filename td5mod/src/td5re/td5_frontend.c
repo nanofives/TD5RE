@@ -7182,9 +7182,9 @@ static void Screen_ControllerBinding(void) {
                 }
             }
 
-            /* Create OK button [CONFIRMED @ 0x40FE00]:
+            /* Create OK button [CONFIRMED @ 0x00410165]:
              * CreateFrontendDisplayModeButton(SNK_OkButTxt, -0x128, 0, 0x60, 0x20, 0) */
-            frontend_create_button("OK", -0x60, 0, 0x60, 0x20);
+            frontend_create_button("OK", -0x128, 0, 0x60, 0x20);
 
             s_ctrl_js_prev = 0;
             s_ctrl_js_curr = 0;
@@ -7253,9 +7253,14 @@ static void Screen_ControllerBinding(void) {
             if (kb[0x2A]) js_new |= (1u << 25);  /* btn 7 = LShift */
         }
 
-        /* Shift register: prev = held, curr = new, held = prev & curr */
+        /* Shift register [CONFIRMED @ 0x40FE00]:
+         *   DAT_00490b90 = DAT_00490b88        (prev = old held)
+         *   DAT_00490b88 = ~DAT_00490b8c       (held = ~old curr)
+         *   DAT_00490b8c = GetJS(source-1)     (curr = new read)
+         *   DAT_00490b88 &= DAT_00490b8c       (held = ~old_curr & new_curr → rising edge)
+         * Rising-edge test below: (prev & bit) && (curr & bit) = pressed-last-held AND pressed-now */
         s_ctrl_js_prev = s_ctrl_js_held;
-        s_ctrl_js_held = s_ctrl_js_curr;  /* will be & new below */
+        s_ctrl_js_held = ~s_ctrl_js_curr;
         s_ctrl_js_curr = js_new;
         s_ctrl_js_held = s_ctrl_js_held & js_new;
 
@@ -7287,8 +7292,12 @@ static void Screen_ControllerBinding(void) {
         /* OK button [CONFIRMED @ 0x40FE00]:
          * if (g_frontendButtonPressedFlag && g_frontendButtonIndex==0) → state 11 */
         if (s_input_ready && s_button_index == 0) {
-            /* Persist binding table to controller_bindings [INFERRED] */
-            TD5_LOG_I(LOG_TAG, "CtrlBind: joystick OK — saving bindings for player %d",
+            /* Copy s_ctrl_binding_table into save module's s_controller_bindings
+             * (same 2×9 DWORD layout), then persist. Original writes to shared globals;
+             * port uses separate module statics that must be bridged at exit. */
+            memcpy(td5_save_get_controller_bindings_mutable(),
+                   s_ctrl_binding_table, sizeof(s_ctrl_binding_table));
+            TD5_LOG_I(LOG_TAG, "CtrlBind: joystick OK — saved bindings for player %d",
                       s_ctrl_player);
             td5_save_write_config("Config.td5");
             s_anim_tick = 0;
@@ -7398,16 +7407,22 @@ static void Screen_ControllerBinding(void) {
                   s_ctrl_kb_slot,
                   (s_ctrl_kb_slot < 10) ? k_ctrl_action_labels[s_ctrl_kb_slot] : "?",
                   (unsigned)found_sc);
-        frontend_play_sfx(2);  /* [CONFIRMED @ 0x40FE00] DXSound::Play(3) */
+        frontend_play_sfx(3);  /* [CONFIRMED @ 0x40FE00] DXSound::Play(3) */
 
         s_ctrl_kb_slot++;
 
         /* All 10 actions captured? [CONFIRMED @ 0x40FE00] if slot==10 → done */
         if (s_ctrl_kb_slot >= 10) {
-            /* Persist keyboard bindings: copy scancodes to custom_bindings blob.
-             * [INFERRED] The p1/p2_custom_bindings in Config.td5 store the full
-             * DirectInput keyboard map; we write the scancodes we captured. */
-            TD5_LOG_I(LOG_TAG, "CtrlBind: all 10 actions bound for player %d — saving",
+            /* Copy scancodes into save module's p1/p2_custom_bindings first
+             * 16 bytes into the start of the 392-byte custom binding buffer.
+             * Original writes to shared globals; port bridges at capture completion. */
+            {
+                uint8_t *dst = (uint8_t *)(s_ctrl_player == 0
+                    ? td5_save_get_p1_custom_bindings_mutable()
+                    : td5_save_get_p2_custom_bindings_mutable());
+                memcpy(dst, s_ctrl_kb_scancodes, 16);
+            }
+            TD5_LOG_I(LOG_TAG, "CtrlBind: all 10 actions bound for player %d — saved",
                       s_ctrl_player);
             td5_save_write_config("Config.td5");
             s_anim_tick = 0;
@@ -7458,8 +7473,10 @@ static void Screen_MusicTestExtras(void) {
          * Port: no offscreen surfaces — strings are rendered live every frame via
          * frontend_render_music_test_overlay. Initialise them here. */
         frontend_load_tga("Front_End/MainMenu.tga", "Front_End/FrontEnd.zip");
-        frontend_create_button("Select Track", -0xE0, 0, 0xE0, 0x20);
-        frontend_create_button("OK",           -0xE0, 0, 0xE0, 0x20);
+        /* [CONFIRMED @ 0x418460] CreateFrontendDisplayModeButton(SNK_SelectTrackButTxt, -0x120, 0, 0xA0, 0x20, 0)
+         *                          CreateFrontendDisplayModeButton(SNK_OkButTxt, -0x120, 0, 0x60, 0x20, 0) */
+        frontend_create_button("Select Track", -0x120, 0, 0xA0, 0x20);
+        frontend_create_button("OK",           -0x120, 0, 0x60, 0x20);
         s_music_test_track_idx = 0;
         s_music_test_playing_set = 0;
         s_music_test_now_band[0]  = '\0';
@@ -7496,8 +7513,9 @@ static void Screen_MusicTestExtras(void) {
                  *   clamped 0..11; then BltColorFillToSurface + sprintf "%d. %s" redrawn
                  *   into DAT_0049628c (track-name surface). Port: update label string. */
                 s_music_test_track_idx += delta;
-                if (s_music_test_track_idx < 0)  s_music_test_track_idx = 11;
-                if (s_music_test_track_idx > 11) s_music_test_track_idx = 0;
+                /* [CONFIRMED @ 0x4186A8] original clamps 0..0xB, does NOT wrap */
+                if (s_music_test_track_idx < 0)  s_music_test_track_idx = 0;
+                if (s_music_test_track_idx > 11) s_music_test_track_idx = 11;
                 frontend_music_test_update_track_label();
                 TD5_LOG_D(LOG_TAG, "MusicTestExtras: cycle -> '%s'", s_music_test_track_label);
             }
