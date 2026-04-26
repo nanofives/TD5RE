@@ -1464,9 +1464,14 @@ void td5_vfx_update_tire_tracks(void) {
 
         VfxTireTrackSlot *slot = &s_tire_track_pool[slot_idx];
 
-        /* Refresh anchor from the live wheel position each frame.
-         * anchor_x/y/z is set once at acquisition; we must update it here
-         * so the trail delta tracks actual wheel movement. */
+        /* Advance trail to old anchor BEFORE overwriting anchor.
+         * Render runs after this update and reads lead=anchor, trail=trail.
+         * If we advanced trail after setting anchor they'd be equal → degenerate. */
+        slot->trail_x = slot->anchor_x;
+        slot->trail_y = slot->anchor_y;
+        slot->trail_z = slot->anchor_z;
+
+        /* Refresh anchor to the live wheel position for this tick. */
         if (g_actor_table_base) {
             uint8_t *ap = g_actor_table_base + (size_t)desc->actor_slot * TD5_ACTOR_STRIDE;
             int32_t wx, wy, wz;
@@ -1474,17 +1479,17 @@ void td5_vfx_update_tire_tracks(void) {
             slot->anchor_x = wx;
             slot->anchor_y = wy;
             slot->anchor_z = wz;
+        } else {
+            /* g_actor_table_base not yet assigned — anchor stays at initial pos */
         }
 
-        /* Movement delta in 24.8 FP from trailing anchor to current anchor */
+        /* Movement delta: anchor (new) minus trail (one tick behind). */
         int32_t dx = slot->anchor_x - slot->trail_x;
         int32_t dz = slot->anchor_z - slot->trail_z;
 
-        /* Compute perpendicular half-width vector.
-         * w = emitter desc width byte (raw units that match 24.8 FP scale).
-         * perp = (-dz, dx) / |delta| * w  → stored in 24.8 FP. */
+        /* Compute perpendicular half-width vector in 24.8 FP.
+         * w = emitter desc width in same units. */
         int32_t w = (int32_t)desc->width;
-        /* Work in integer world units (>> 8 from 24.8) for isqrt precision */
         int32_t dx8 = dx >> 8;
         int32_t dz8 = dz >> 8;
         int32_t len = td5_isqrt(dx8 * dx8 + dz8 * dz8);
@@ -1493,11 +1498,6 @@ void td5_vfx_update_tire_tracks(void) {
             slot->perp_z = ( dx * w) / len;
             slot->control |= 2; /* has_geometry flag */
         }
-
-        /* Advance trail to current anchor so next frame's delta is correct */
-        slot->trail_x = slot->anchor_x;
-        slot->trail_y = slot->anchor_y;
-        slot->trail_z = slot->anchor_z;
 
         /* Direction-change hash for potential slot reallocation */
         uint32_t new_hash = (uint32_t)(dx & 0xFFFFFF80);
@@ -1539,6 +1539,7 @@ void td5_vfx_render_tire_tracks(void) {
     static uint32_t s_tt_render_frame = 0;
     int tt_log = ((s_tt_render_frame++ % 60u) == 0u);
     int tt_alive = 0, tt_submitted = 0;
+    int tt_rej_frustum = 0;
 
     if (!s_tire_track_pool) return;
 
@@ -1581,15 +1582,23 @@ void td5_vfx_render_tire_tracks(void) {
         }
 
         /* Skip invisible marks */
-        if (slot->intensity == 0) continue;
+        if (slot->intensity == 0) { continue; }
 
         /* Frustum test: is_sphere_visible expects world-space (it subtracts
          * the camera position internally — do NOT pre-subtract cam here). */
         float ws_x = (float)slot->anchor_x * FP_TO_FLOAT;
         float ws_y = (float)slot->anchor_y * FP_TO_FLOAT;
         float ws_z = (float)slot->anchor_z * FP_TO_FLOAT;
-        if (!td5_render_is_sphere_visible(ws_x, ws_y, ws_z, 50.0f))
+        int _frus = td5_render_is_sphere_visible(ws_x, ws_y, ws_z, 50.0f);
+        if (!_frus) {
+            tt_rej_frustum++;
+            if (tt_log && tt_rej_frustum == 1) {
+                TD5_LOG_I(LOG_TAG,
+                    "tire frus fail: anchor=(%.1f,%.1f,%.1f) cam=(%.1f,%.1f,%.1f)",
+                    ws_x, ws_y, ws_z, cam_x, cam_y, cam_z);
+            }
             continue;
+        }
 
         /* Reconstruct 4 world corners from anchor/trail/perp (all 24.8 FP).
          * v0=trail-left  v1=trail-right  v2=lead-right  v3=lead-left */
@@ -1637,7 +1646,7 @@ void td5_vfx_render_tire_tracks(void) {
             srhw[v] = inv_z;
         }
 
-        if (!all_visible) continue;
+        if (!all_visible) { continue; }
 
         uint8_t val = slot->intensity;
         if (val < 0x30) val = 0x30;
@@ -1687,8 +1696,8 @@ void td5_vfx_render_tire_tracks(void) {
     }
 
     if (tt_log) {
-        TD5_LOG_I(LOG_TAG, "tire render: alive=%d submitted=%d",
-                  tt_alive, tt_submitted);
+        TD5_LOG_I(LOG_TAG, "tire render: alive=%d submitted=%d rej(frus=%d)",
+                  tt_alive, tt_submitted, tt_rej_frustum);
     }
 }
 
@@ -2188,14 +2197,11 @@ static void vfx_update_front_wheel_sound_effects(TD5_Actor *actor, int speed) {
                 ((1 << w) & *(ap + 0x37C)) != 0) { /* wheel not grounded */
                 uint8_t emitter_id = *(ap + 0x371 + w);
                 if (emitter_id != 0xFF) {
-                    /* Release emitter */
-                    int desc_idx = emitter_id;
+                    int desc_idx = w + (int)slot_index * 4;
                     if (desc_idx < (int)(sizeof(s_emitter_descs)/sizeof(s_emitter_descs[0]))) {
                         s_emitter_descs[desc_idx].active = 0;
                     }
-                    if (emitter_id < TD5_VFX_TIRE_TRACK_POOL_SIZE) {
-                        s_tire_track_pool[emitter_id].control = 0;
-                    }
+                    /* Pool slot stays alive — render fn ages it out over 600 ticks */
                     *(ap + 0x371 + w) = 0xFF;
                 }
             }
@@ -2206,8 +2212,9 @@ static void vfx_update_front_wheel_sound_effects(TD5_Actor *actor, int speed) {
         if (*(ap + 0x379) != 0) { /* airborne */
             uint8_t emitter_id = *(ap + 0x371 + w);
             if (emitter_id != 0xFF) {
-                if (emitter_id < TD5_VFX_TIRE_TRACK_POOL_SIZE)
-                    s_tire_track_pool[emitter_id].control = 0;
+                int desc_idx = w + (int)slot_index * 4;
+                if (desc_idx < (int)(sizeof(s_emitter_descs)/sizeof(s_emitter_descs[0])))
+                    s_emitter_descs[desc_idx].active = 0;
                 *(ap + 0x371 + w) = 0xFF;
             }
             continue;
@@ -2285,13 +2292,11 @@ static void vfx_update_rear_wheel_sound_effects(TD5_Actor *actor, int speed) {
                 ((1 << w) & *(ap + 0x37C)) != 0) {
                 uint8_t emitter_id = *(ap + 0x371 + w);
                 if (emitter_id != 0xFF) {
-                    int desc_idx = emitter_id;
+                    int desc_idx = w + (int)slot_index * 4;
                     if (desc_idx < (int)(sizeof(s_emitter_descs)/sizeof(s_emitter_descs[0]))) {
                         s_emitter_descs[desc_idx].active = 0;
                     }
-                    if (emitter_id < TD5_VFX_TIRE_TRACK_POOL_SIZE) {
-                        s_tire_track_pool[emitter_id].control = 0;
-                    }
+                    /* Pool slot stays alive — render fn ages it out over 600 ticks */
                     *(ap + 0x371 + w) = 0xFF;
                 }
             }
@@ -2301,8 +2306,9 @@ static void vfx_update_rear_wheel_sound_effects(TD5_Actor *actor, int speed) {
         if (*(ap + 0x379) != 0) {
             uint8_t emitter_id = *(ap + 0x371 + w);
             if (emitter_id != 0xFF) {
-                if (emitter_id < TD5_VFX_TIRE_TRACK_POOL_SIZE)
-                    s_tire_track_pool[emitter_id].control = 0;
+                int desc_idx = w + (int)slot_index * 4;
+                if (desc_idx < (int)(sizeof(s_emitter_descs)/sizeof(s_emitter_descs[0])))
+                    s_emitter_descs[desc_idx].active = 0;
                 *(ap + 0x371 + w) = 0xFF;
             }
             continue;
