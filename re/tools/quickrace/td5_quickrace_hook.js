@@ -124,7 +124,7 @@ function install() {
     // CRT srand — seeded before InitializeRaceSeriesSchedule so the AI-car
     // selection loop pulls from the same sequence the port does under the
     // matching deterministic-seed configuration.
-    var _srand = new NativeFunction(addrOf._srand, 'void', ['uint32'], 'cdecl');
+    var _srand = new NativeFunction(addrOf._srand, 'void', ['uint32'], 'mscdecl');
 
     function wi(name, val) {
         addrOf[name].writeInt(val);
