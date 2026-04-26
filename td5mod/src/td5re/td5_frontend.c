@@ -5364,14 +5364,14 @@ static void Screen_LegalCopyright(void) {
     case 1: /* Fade in */
         s_anim_tick += 2;
         if (s_anim_tick >= 16) {
-            s_anim_tick = 0;
+            /* Store wall-clock start for 3-second guard [CONFIRMED @ 0x4274A0 case 1→2] */
+            s_anim_tick = (int)timeGetTime();
             s_inner_state = 2;
         }
         break;
 
-    case 2: /* 3-second timer */
-        s_anim_tick += 2;
-        if (s_input_ready || s_anim_tick >= 90) {
+    case 2: /* 3-second timer [CONFIRMED @ 0x4274A0 case 2: timeGetTime() - stored > 2999] */
+        if ((uint32_t)(timeGetTime() - (uint32_t)s_anim_tick) > 2999u) {
             s_anim_tick = 0;
             s_inner_state = 3;
         }
@@ -6968,7 +6968,7 @@ static void Screen_TwoPlayerOptions(void) {
         /* [CONFIRMED @ 0x420d33]: SNK_CatchupTxt at x=-0x100, width=0x100 */
         frontend_create_button("Catch-Up",    -0x100, 0, 0x100, 0x20);
         /* [CONFIRMED @ 0x420d43]: SNK_OkButTxt at x=-0x100, width=0x60 */
-        frontend_create_button("OK",          -0x60,  0, 0x60,  0x20);
+        frontend_create_button("OK",          -0x100, 0, 0x60,  0x20);
         s_anim_tick = 0;
         s_inner_state = 1;
         break;
@@ -8923,7 +8923,8 @@ static void Screen_CupFailed(void) {
          *   SNK_ToWinTxt     y=0x38 ("TO WIN")           [CONFIRMED Language.dll]
          *   SNK_RaceTypeText y=0x54 ([cup type name])    [CONFIRMED @ 0x4237F0]
          * [CONFIRMED @ ScreenCupFailedDialog 0x004237F0] */
-        frontend_create_button("OK", -100, 0, 100, 0x20);
+        /* [CONFIRMED @ 0x4237F0]: SNK_OkButTxt at x=-0x120 */
+        frontend_create_button("OK", -0x120, 0, 0x60, 0x20);
         s_anim_tick = 0;
         s_inner_state = 1;
         break;
@@ -8933,10 +8934,10 @@ static void Screen_CupFailed(void) {
         s_inner_state++;
         break;
 
-    case 4: /* Slide-in: 32 frames */
-        s_anim_tick += 2;
+    case 4: /* Slide-in: 32 frames [CONFIRMED @ 0x4237F0 case 4: anim==0x20 exit] */
+        s_anim_tick++;
         /* Dialog slides from right (24px/frame), button from left */
-        if (s_anim_tick >= 0x10) {
+        if (s_anim_tick >= 0x20) {
             s_inner_state = 5;
         }
         break;
@@ -9077,7 +9078,8 @@ static void Screen_SessionLocked(void) {
          *   SNK_SorryTxt     y=0x00 ("SORRY")          [CONFIRMED Language.dll]
          *   SNK_SeshLockedTxt y=0x38 ("SESSION LOCKED") [CONFIRMED Language.dll]
          * [CONFIRMED @ ScreenSessionLockedDialog 0x0041D630] */
-        frontend_create_button("OK", -100, 0, 100, 0x20);
+        /* [CONFIRMED @ 0x41D630]: SNK_OkButTxt at x=-0x120 */
+        frontend_create_button("OK", -0x120, 0, 0x60, 0x20);
         s_anim_tick = 0;
         s_inner_state = 1;
         break;
@@ -9087,9 +9089,9 @@ static void Screen_SessionLocked(void) {
         s_inner_state++;
         break;
 
-    case 4: /* Slide-in: 32 frames */
-        s_anim_tick += 2;
-        if (s_anim_tick >= 0x10) {
+    case 4: /* Slide-in: 32 frames [CONFIRMED @ 0x41D630 case 4: anim==0x20 exit] */
+        s_anim_tick++;
+        if (s_anim_tick >= 0x20) {
             s_inner_state = 5;
         }
         break;
