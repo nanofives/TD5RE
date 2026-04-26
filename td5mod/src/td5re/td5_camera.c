@@ -2097,11 +2097,11 @@ void EvaluateCubicSpline3D(int *out_pos, int *spline_state, int t) {
 }
 
 /* RecomputeTracksideProjectionScale @ 0x0043E900
- * Zeros center offsets, then recomputes frustum plane normals using current
- * g_depthFovFactor (trackside/orbit cameras change FOV via this global).
- * [CONFIRMED @ 0x0043E900] */
+ * Recomputes frustum plane normals using current g_depthFovFactor.
+ * Original also calls SetProjectionCenterOffset(0,0) here, but that is
+ * a per-frame prep step in the original's RunRaceFrame loop; in the port
+ * s_center_x/y persists at screen center and must not be zeroed. */
 void RecomputeTracksideProjectionScale(void) {
-    td5_render_set_projection_center(0.0f, 0.0f);
     td5_render_recompute_frustum_for_trackside();
 }
 
