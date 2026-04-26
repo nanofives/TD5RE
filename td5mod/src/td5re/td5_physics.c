@@ -3823,20 +3823,21 @@ static void process_traffic_segment_edge(TD5_Actor *actor, int slot)
 outer_test:
     /* Outer edge test: sub_lane >= lane_count - 2  [CONFIRMED @ 0x407462: if (iVar12 >= laneCount-2)] */
     if (sub_lane >= lane_count - 2) {
-        /* Outer boundary vertices at lane_count-1 */
-        /* The original uses DAT_004631a0/a4 offset tables (k_quad_vertex_offsets).
-         * For the outer edge: left vertex index = left_base + outer_offset + sub_lane,
-         * right vertex index = right_base + outer_offset_r + sub_lane.
-         * [CONFIRMED @ 0x4074B4-0x4074F4: uses DAT_004631a0/a4 * (bVar4=span_type)] */
-        static const int8_t k_qvo[12][2] = {
-            {0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},
-            {0,0},{0,0},{0,0},{0,0}
+        /* Outer boundary vertices at lane_count-1.
+         * Original outer test [CONFIRMED @ 0x4074B4-0x4074F4]:
+         *   psVar1 = vertex_pool[DAT_004631a0[span_type] + strip[+0x04] + outer_sub]
+         *   psVar2 = vertex_pool[DAT_004631a4[span_type] + strip[+0x06] + outer_sub]
+         * In port naming: strip[+0x04] = right_vertex_index, strip[+0x06] = left_vertex_index.
+         * DAT_004631a4 is 0 for all 12 span types [CONFIRMED @ 0x004631A0].
+         * DAT_004631a0 values [CONFIRMED @ 0x004631A0]:
+         *   span_type: 0  1  2  3  4  5  6  7  8  9 10 11 */
+        static const int8_t k_outer_left_offsets[12] = {
+            0, 0, -1, -1, -2, 0, -1, 0, -1, 0, -1, -2
         };
-        (void)k_qvo;
-        /* Use the last sub-lane vertex pair */
         int outer_sub = lane_count - 1;
-        int li_idx = (int)sp->left_vertex_index  + outer_sub;
-        int ri_idx = (int)sp->right_vertex_index + outer_sub;
+        /* li (psVar1) uses right_vertex_index + offset; ri (psVar2) uses left_vertex_index + 0 */
+        int li_idx = k_outer_left_offsets[span_type] + (int)sp->right_vertex_index + outer_sub;
+        int ri_idx = (int)sp->left_vertex_index + outer_sub;
         TD5_StripVertex *vl = td5_track_get_vertex(li_idx);
         TD5_StripVertex *vr = td5_track_get_vertex(ri_idx);
         if (!vl || !vr) return;
@@ -3851,6 +3852,7 @@ outer_test:
             &edge_angle);
 
         if (pen < 0) {
+            TD5_LOG_I("physics", "seg_edge outer push slot=%d span=%d type=%d pen=%d", slot, (int)actor->track_span_raw, span_type, (int)pen);
             apply_simple_track_surface_force(actor, edge_angle, pen);
         }
     }
