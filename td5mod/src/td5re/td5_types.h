@@ -501,8 +501,7 @@ typedef struct TD5_GameOptions {
  *  Field layout verified against binary defaults at 0x4643B8. */
 #pragma pack(push, 1)
 typedef struct TD5_NpcEntry {
-    char     name[13];              /* player name (null-terminated) */
-    uint8_t  _pad[3];
+    char     name[16];              /* player name up to 15 chars (null at +0x0F) [CONFIRMED @ 0x4140A8] */
     int32_t  score;                 /* race time in game ticks (30fps) for types 0/1/4, points for type 2 */
     int32_t  car_id;                /* car identifier (low byte used for name lookup) */
     int32_t  avg_speed;             /* average speed in raw internal units */
