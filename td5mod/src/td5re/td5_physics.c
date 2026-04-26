@@ -2607,13 +2607,15 @@ static void apply_collision_response(TD5_Actor *penetrator, TD5_Actor *target,
               is_side_branch, A->slot_index, B->slot_index, mass_A, mass_B,
               cx_A, cz_A, cx_B, cz_B, impulse, impact_mag, impactForce);
 
-    /* Wanted mode (cop chase): player ramming a stationary cop engages pursuit.
-     * Threshold 10000 filters noise while catching any real collision. */
-    if (td5_game_is_wanted_mode() && impact_mag > 10000) {
+    /* Wanted mode (cop chase): player<->cop collision awards damage score.
+     * Mirrors ApplyVehicleCollisionImpulse @ 0x40817A/0x4081BE → AwardWantedDamageScore.
+     * [CONFIRMED]: both A-is-player and B-is-player paths call AwardWantedDamageScore
+     * on the cop slot with impact magnitude. */
+    if (td5_game_is_wanted_mode()) {
         if (A->slot_index == 0 && B->slot_index >= 1 && B->slot_index < 6)
-            td5_ai_engage_wanted_cop(B->slot_index);
+            td5_ai_wanted_cop_hit(B->slot_index, impact_mag);
         else if (B->slot_index == 0 && A->slot_index >= 1 && A->slot_index < 6)
-            td5_ai_engage_wanted_cop(A->slot_index);
+            td5_ai_wanted_cop_hit(A->slot_index, impact_mag);
     }
 
     /* Traffic recovery escalation (> 50000 and slot>=6). */

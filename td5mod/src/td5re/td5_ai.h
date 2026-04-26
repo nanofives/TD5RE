@@ -80,10 +80,11 @@ int  td5_ai_find_nearest_route_peer(int *route_state);
 void td5_ai_set_traffic_queue(const uint8_t *data, int size);
 
 /* --- Wanted mode (cop chase game type 8) --- */
-/* Re-engage a cop whose ACTOR_ENCOUNTER_STATE was zeroed: restores 0x1000 so
- * the gate at 0x436E1D passes and AI track behavior runs next tick. Called
- * from td5_physics.c on player V2V collision with a cop slot. */
-void td5_ai_engage_wanted_cop(int slot);
+/* Award damage to a cop slot on player<->cop V2V collision.
+ * Mirrors AwardWantedDamageScore @ 0x43D690. Decrements gWantedDamageStateTable
+ * by 0x200 (impact<=20000) or 0x400 (impact>20000). When state reaches 0,
+ * the cop is arrested and its AI frozen. Called from td5_physics.c. */
+void td5_ai_wanted_cop_hit(int cop_slot, int32_t impact_mag);
 
 /* --- Special encounter (cop chase) --- */
 void td5_ai_update_special_encounter(void);

@@ -189,6 +189,7 @@ int td5_save_get_music_volume(void)     { return (int)s_music_volume; }
 void td5_save_set_music_volume(int v)   { if (v < 0) v = 0; if (v > 100) v = 100; s_music_volume = (uint32_t)v; }
 float td5_save_get_view_distance(void)  { return s_view_distance_frac; }
 void td5_save_set_view_distance(float v) { if (v < 0.0f) v = 0.0f; if (v > 1.0f) v = 1.0f; s_view_distance_frac = v; }
+
 static int32_t  s_display_mode;                               /* 0x466020 */
 static int32_t  s_fog_enabled;                                /* 0x466024 */
 static int32_t  s_speed_units;                                /* 0x466028 */
@@ -198,6 +199,11 @@ void td5_save_set_camera_damping(int d) { s_camera_damping = d; }
 void td5_save_set_sound_mode(int m) { s_sound_mode = m; }
 static uint32_t s_p1_custom_bindings[0x62];                   /* 0x4978C0 */
 static uint32_t s_p2_custom_bindings[0x62];                   /* 0x497330 */
+
+uint32_t *td5_save_get_controller_bindings_mutable(void) { return s_controller_bindings; }
+uint32_t *td5_save_get_p1_custom_bindings_mutable(void)  { return s_p1_custom_bindings; }
+uint32_t *td5_save_get_p2_custom_bindings_mutable(void)  { return s_p2_custom_bindings; }
+
 static uint32_t s_split_screen_mode;                          /* 0x497A5C */
 static uint32_t s_catchup_assist;                             /* 0x465FF8 */
 static uint8_t  s_camera_byte_a;                              /* 0x482F48 */
