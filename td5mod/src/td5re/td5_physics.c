@@ -1141,7 +1141,7 @@ void td5_physics_update_player(TD5_Actor *actor)
         int32_t ba_minus_I = (b_ * a_ - I_) / 1024;
         int32_t iv24 = (I_ / 0x28C) * w_;
 
-        /* A = (I/1024) * ((b*w)/652 - vx_b) / 4096 * sin(s) */
+        /* A = (I/1024) * ((b*w)/652 - raw_lat) / 4096 * sin(s) */
         int32_t t_a = (I_ / 1024) * ((b_ * w_) / 0x28C - vx_b);
         t_a = (t_a / 4096) * sin_sr;
 
@@ -1728,13 +1728,16 @@ void td5_physics_update_ai(TD5_Actor *actor)
 
     /* Body-frame lateral velocity for INTERNAL bicycle solve consumption.
      * The bicycle's mass-matrix uses this as v_lat (with yaw_corr applied). */
+    /* iVar11 in original — pure body-lateral, used verbatim in bicycle solve.
+     * yaw_corr is ONLY subtracted for actor->lateral_speed (+0x318 field).
+     * [CONFIRMED @ 0x00405285: original never subtracts yaw_corr from iVar11
+     *  before passing it into the matrix] */
     int32_t raw_lat = (cos_h * vx - sin_h * vz) >> 12;
     int32_t yaw_rate = actor->angular_velocity_yaw;
     int32_t inertia = PHYS_I(actor, 0x20);
     int32_t inertia_div = inertia / 0x28C;
     if (inertia_div == 0) inertia_div = 1;
     int32_t yaw_corr = ((sin_d * front_weight) >> 12) * yaw_rate / 0x28C;
-    int32_t v_lat = raw_lat - yaw_corr;
 
     /* Field +0x314 = body-frame longitudinal velocity (v_long). Port matches
      * original [verified via Frida runtime probe 2026-04-22]. */
@@ -1877,9 +1880,11 @@ void td5_physics_update_ai(TD5_Actor *actor)
         /* D coefficient `iVar14` (reused var). */
                 iVar14 = SBR((int64_t)Wr * Wf - I, 0x3FF, 10);                     /* D */
 
-        /* yaw_term `iVar15`, yaw_corr `iVar16` (reused). */
+        /* yaw_term `iVar15`, yaw_corr `iVar16` (reused).
+         * raw_lat = iVar11 in original — body-lateral WITHOUT yaw_corr.
+         * [CONFIRMED @ 0x00405285: original uses iVar11 here, not actor->lateral_speed] */
         int32_t iVar15 = (I / 0x28C) * omega;                                      /* yaw_term */
-        int32_t iVar16 = SBR(I, 0x3FF, 10) * (((int32_t)(Wr * omega)) / 0x28C - v_lat); /* (I>>10)*(Wr*ω/652 - v_lat) */
+        int32_t iVar16 = SBR(I, 0x3FF, 10) * (((int32_t)(Wr * omega)) / 0x28C - raw_lat); /* (I>>10)*(Wr*ω/652 - raw_lat) */
                 iVar16 = SBR(iVar16, 0xFFF, 12) * sin_d;
 
         /* iVar13 drive+vlong cos term. Original operands: local_3c = front_drive
@@ -1892,8 +1897,8 @@ void td5_physics_update_ai(TD5_Actor *actor)
                 iVar14 = SBR(iVar14, 0xFFF, 12) * sin_d;
                 iVar14 = SBR(iVar14, 0xFFF, 12) * sin_d;
 
-        /* iVar17 = (yaw_term - v_lat*Wf) >> 10 * (Wf+Wr) >> 12 * cos_d. */
-        int32_t iVar17 = iVar15 - v_lat * Wf;
+        /* iVar17 = (yaw_term - raw_lat*Wf) >> 10 * (Wf+Wr) >> 12 * cos_d. */
+        int32_t iVar17 = iVar15 - raw_lat * Wf;
                 iVar17 = SBR(iVar17, 0x3FF, 10) * (Wr + Wf);
                 iVar17 = SBR(iVar17, 0xFFF, 12) * cos_d;
 
@@ -1908,7 +1913,7 @@ void td5_physics_update_ai(TD5_Actor *actor)
          * rear_drive in the (drive + v_long) * A term. */
         int32_t iVar16b = SBR((Wf + 2 * Wr) * Wf - I, 0x3FF, 10) * front_drive;
         int32_t iVar4b  = SBR(iVar16b, 0xFFF, 12) * cos_d + (rear_drive + v_long) * iVar4; /* iVar4 = A */
-                iVar15  = v_lat * Wr + iVar15;                                               /* v_lat*Wr + yaw_term */
+                iVar15  = raw_lat * Wr + iVar15;                                              /* raw_lat*Wr + yaw_term */
                 iVar16b = SBR(iVar15, 0x3FF, 10) * (Wr + Wf);
 
         /* local_44 (FRONT_LAT). */
@@ -1930,7 +1935,7 @@ void td5_physics_update_ai(TD5_Actor *actor)
         int32_t fl4 = front_lat >> 4;
         int32_t fd4 = front_drive >> 4;
         int32_t mag_sq_f = fl4 * fl4 + fd4 * fd4;
-        int32_t mag_f = td5_isqrt(mag_sq_f);
+        int32_t mag_f = (int32_t)sqrtf((float)mag_sq_f); /* [CONFIRMED @ 0x0040554B: FILD/FSQRT/__ftol] */
         int32_t grip_limit_f = (front_load * tire_grip) >> 8;
         int32_t slip_f16 = mag_f << 4;
 
@@ -1947,7 +1952,7 @@ void td5_physics_update_ai(TD5_Actor *actor)
         int32_t rl4 = rear_lat >> 4;
         int32_t rd4 = rear_drive >> 4;
         int32_t mag_sq_r = rl4 * rl4 + rd4 * rd4;
-        int32_t mag_r = td5_isqrt(mag_sq_r);
+        int32_t mag_r = (int32_t)sqrtf((float)mag_sq_r); /* [CONFIRMED @ 0x004055D9: FILD/FSQRT/__ftol] */
         int32_t grip_limit_r = (rear_load * tire_grip) >> 8;
         int32_t slip_r16 = mag_r << 4;
 
@@ -1997,27 +2002,12 @@ void td5_physics_update_ai(TD5_Actor *actor)
         actor->angular_velocity_yaw -= damp;
     }
 
-    /* --- 12. Velocity magnitude safety clamp --- */
-    {
-        int32_t vel_cap = speed_limit * 2;
-        int32_t vxh = actor->linear_velocity_x >> 8;
-        int32_t vzh = actor->linear_velocity_z >> 8;
-        int32_t mag_sq = vxh * vxh + vzh * vzh;
-        int32_t cap_sq = (vel_cap >> 8) * (vel_cap >> 8);
-        if (mag_sq > cap_sq && mag_sq > 0) {
-            int32_t mag = td5_isqrt(mag_sq);
-            int32_t cap_h = vel_cap >> 8;
-            actor->linear_velocity_x = (int32_t)((int64_t)actor->linear_velocity_x * cap_h / mag);
-            actor->linear_velocity_z = (int32_t)((int64_t)actor->linear_velocity_z * cap_h / mag);
-        }
-    }
-
-    /* --- 13. Suspension integration ---
+    /* --- 12. Suspension integration ---
      * Pass the net world-frame velocity delta as the spring excitation
      * (matches original at 0x00404EA2 passing iVar11/iVar36). */
     td5_physics_integrate_suspension(actor, ai_fx, ai_fz);
 
-    /* --- 14. Tire slip accumulation [CONFIRMED @ 0x405768-0x40577B]
+    /* --- 13. Tire slip accumulation [CONFIRMED @ 0x405768-0x40577B]
      * Original uses += with lateral/longitudinal speed, not assignment with slip excess */
     actor->accumulated_tire_slip_x += (int16_t)(actor->lateral_speed >> 8);
     actor->accumulated_tire_slip_z += (int16_t)(actor->longitudinal_speed >> 8);
