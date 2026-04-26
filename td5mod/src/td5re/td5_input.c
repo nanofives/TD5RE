@@ -223,6 +223,7 @@ void td5_input_tick(void)
 void td5_input_set_active_players(int n)       { s_active_players = clamp_i(n, 1, 2); }
 void td5_input_set_input_source(int p, int s)   { if (p >= 0 && p < 2) s_input_source[p] = s; }
 void td5_input_set_playback_active(int v)       { s_playback_active = v; }
+int  td5_input_is_playback_active(void)         { return s_playback_active; }
 void td5_input_set_replay_mode(int v)           { s_replay_mode_flag = v; }
 void td5_input_set_nos_enabled(int v)           { s_nos_enabled = v; }
 void td5_input_set_cop_mode(int v)              { s_cop_mode = v; }
