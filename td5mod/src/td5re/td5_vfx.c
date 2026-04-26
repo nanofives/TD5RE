@@ -198,6 +198,7 @@ static void vfx_update_rear_tire_effects(TD5_Actor *actor, uint8_t contact_flags
 static void vfx_update_front_tire_effects(TD5_Actor *actor, uint8_t contact_flags);
 static void vfx_update_front_wheel_sound_effects(TD5_Actor *actor, int speed);
 static void vfx_update_rear_wheel_sound_effects(TD5_Actor *actor, int speed);
+static int  vfx_alloc_slot_index(void);
 static int  vfx_acquire_tire_track_emitter(int wheel_id, int actor_slot,
                                             int wheel_index, uint8_t alpha,
                                             uint8_t width);
@@ -1326,6 +1327,28 @@ static bool vfx_is_hard_surface(uint8_t surface_type) {
 }
 
 /**
+ * Scan the 80-slot pool for a free entry using the roving cursor.
+ * Returns slot index, or -1 if pool is fully allocated.
+ * [CONFIRMED @ 0x43F04A-0x43F0AC] Linear scan from cursor, wrap to 0.
+ */
+static int vfx_alloc_slot_index(void) {
+    if (!s_tire_track_pool) return -1;
+    for (int i = s_tire_track_cursor; i < TD5_VFX_TIRE_TRACK_POOL_SIZE; i++) {
+        if ((s_tire_track_pool[i].control & 1) == 0) {
+            s_tire_track_cursor = i;
+            return i;
+        }
+    }
+    for (int i = 0; i < TD5_VFX_TIRE_TRACK_POOL_SIZE; i++) {
+        if ((s_tire_track_pool[i].control & 1) == 0) {
+            s_tire_track_cursor = i;
+            return i;
+        }
+    }
+    return -1;
+}
+
+/**
  * AcquireTireTrackEmitter (0x43F030)
  *
  * Allocates a free slot from the 80-slot tire track pool using a roving
@@ -1335,32 +1358,7 @@ static bool vfx_is_hard_surface(uint8_t surface_type) {
 static int vfx_acquire_tire_track_emitter(int wheel_id, int actor_slot,
                                            int wheel_index, uint8_t alpha,
                                            uint8_t width) {
-    if (!s_tire_track_pool) return -1;
-
-    int found = -1;
-
-    /* Phase 1: scan forward from cursor */
-    if (s_tire_track_cursor < TD5_VFX_TIRE_TRACK_POOL_SIZE) {
-        for (int i = s_tire_track_cursor; i < TD5_VFX_TIRE_TRACK_POOL_SIZE; i++) {
-            if ((s_tire_track_pool[i].control & 1) == 0) {
-                found = i;
-                s_tire_track_cursor = i;
-                break;
-            }
-        }
-    }
-
-    /* Phase 2: wrap to start if not found */
-    if (found == -1) {
-        for (int i = 0; i < TD5_VFX_TIRE_TRACK_POOL_SIZE; i++) {
-            if ((s_tire_track_pool[i].control & 1) == 0) {
-                found = i;
-                s_tire_track_cursor = i;
-                break;
-            }
-        }
-    }
-
+    int found = vfx_alloc_slot_index();
     if (found == -1) return -1;
 
     /* Write emitter descriptor */
@@ -1471,17 +1469,16 @@ void td5_vfx_update_tire_tracks(void) {
         slot->trail_y = slot->anchor_y;
         slot->trail_z = slot->anchor_z;
 
-        /* Refresh anchor to the live wheel position for this tick. */
+        /* Refresh anchor to the live wheel position for this tick.
+         * wx/wy/wz hoisted to outer scope for use in direction-change realloc. */
+        int32_t wx = slot->anchor_x, wy = slot->anchor_y, wz = slot->anchor_z;
         if (g_actor_table_base) {
             uint8_t *ap = g_actor_table_base + (size_t)desc->actor_slot * TD5_ACTOR_STRIDE;
-            int32_t wx, wy, wz;
             vfx_read_wheel_world_pos((TD5_Actor *)ap, (int)desc->wheel_id, &wx, &wy, &wz);
             slot->anchor_x = wx;
             slot->anchor_y = wy;
             slot->anchor_z = wz;
-        } else {
-            /* g_actor_table_base not yet assigned — anchor stays at initial pos */
-        }
+        } /* else: g_actor_table_base not yet assigned — anchor stays at initial pos */
 
         /* Movement delta: anchor (new) minus trail (one tick behind). */
         int32_t dx = slot->anchor_x - slot->trail_x;
@@ -1499,9 +1496,40 @@ void td5_vfx_update_tire_tracks(void) {
             slot->control |= 2; /* has_geometry flag */
         }
 
-        /* Direction-change hash for potential slot reallocation */
-        uint32_t new_hash = (uint32_t)(dx & 0xFFFFFF80);
+        /* Direction-change reallocation [CONFIRMED @ 0x43EDA0-0x43EE4F]:
+         * When the x-velocity coarse bin changes (bit 7+), freeze old slot and
+         * start a new one so expired segments remain as historical skid marks. */
+        uint32_t new_hash = (uint32_t)(dx & 0xFFFFFF80u);
         if ((slot->direction_hash ^ new_hash) & 0xFFFFFF80u) {
+            /* Release ownership of old slot; keep bit1 so render still ages it */
+            slot->control &= 2u;
+
+            int new_idx = vfx_alloc_slot_index();
+            if (new_idx >= 0) {
+                VfxTireTrackSlot *ns = &s_tire_track_pool[new_idx];
+                memset(ns, 0, sizeof(*ns));
+                ns->anchor_x       = wx;
+                ns->anchor_y       = wy;
+                ns->anchor_z       = wz;
+                ns->trail_x        = wx;
+                ns->trail_y        = wy;
+                ns->trail_z        = wz;
+                ns->direction_hash = new_hash;
+                ns->intensity      = desc->initial_alpha;
+                ns->control        = 1u; /* allocated, no geometry yet */
+
+                desc->pool_slot = (uint8_t)new_idx;
+
+                TD5_LOG_I(LOG_TAG,
+                    "tire track realloc: desc=%d slot %d->%d hash=%08x",
+                    d, slot_idx, new_idx, new_hash);
+            } else {
+                /* Pool exhausted — reclaim old slot, just update hash */
+                slot->control |= 1u;
+                slot->direction_hash = new_hash;
+                TD5_LOG_W(LOG_TAG, "tire track pool full at desc=%d", d);
+            }
+        } else {
             slot->direction_hash = new_hash;
         }
     }
