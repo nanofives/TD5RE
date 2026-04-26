@@ -1607,13 +1607,17 @@ void td5_physics_update_player(TD5_Actor *actor)
      * Three-condition gate: gear==2, RPM-derived wheelspin exceeds threshold,
      * and throttle > 0x7F. When all true: surface_contact_flags = tuning[0x76]
      * (drivetrain type byte) — marks only the driven axle in contact.
-     * uVar12 at this site is longitudinal_speed [UNCERTAIN — Ghidra reuses the
-     * variable name; steering_cmd>>8 is the alternative interpretation]. */
+     * uVar12 = (steering_command + sign_round) >> 8 [CONFIRMED @ FUN_00404030
+     * decompilation: *(int*)(short_ptr + 0x186) = byte offset 0x30C =
+     * steering_command; the arithmetic right-shift rounding idiom matches
+     * Ghidra's (x + (x>>31 & 0xFF)) >> 8 pattern]. */
     {
         int32_t gear_ratio = (int32_t)PHYS_S(actor, 0x32);
         if (gear_ratio != 0) {
             int32_t rpm_norm = (((actor->engine_speed_accum - 400) * 0x1000) / 0x2d) / gear_ratio;
-            int32_t wheelspin = rpm_norm * 0x100 - actor->longitudinal_speed;
+            int32_t steer    = actor->steering_command;
+            int32_t uVar12   = (steer + (steer >> 31 & 0xff)) >> 8;
+            int32_t wheelspin = rpm_norm * 0x100 - uVar12;
             if (actor->current_gear == 2 &&
                 wheelspin > 0x12C00 &&
                 (int32_t)(uint8_t)actor->encounter_steering_cmd > 0x7F) {
