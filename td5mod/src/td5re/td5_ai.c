@@ -1147,29 +1147,35 @@ int td5_ai_update_route_threshold(int slot) {
     }
 
     if (threshold == 0x00) {
-        /* Emergency stop: full brake if forward > 0x80 and speed < 0x10000 */
+        /* Emergency stop: full brake if forward > 0x80 and speed < 0x10000
+         * [CONFIRMED @ 0x434AA0: steer=0xFF00, brake_flag=1, field_0x36f=1, return 1] */
         if (fwd_comp > 0x80 && speed < 0x10000) {
             ACTOR_I16(actor, ACTOR_ENCOUNTER_STEER) = (int16_t)0xFF00;
             ACTOR_U8(actor, ACTOR_BRAKE_FLAG) = 1;
+            ACTOR_U8(actor, ACTOR_THROTTLE_STATE) = 1;
             return 1;
         }
     }
 
     if (threshold > 0x00 && threshold < 0xFF) {
-        /* Scaled threshold: threshold * 0x400 / 0xFF */
+        /* Scaled threshold: suppress rubber-band steer when above speed limit.
+         * [CONFIRMED @ 0x434AA0: steer=0, brake_flag=0, field_0x36f=0, return 0]
+         * Does NOT apply brakes — only zeroes encounter steer and returns 0. */
         int32_t scaled = (threshold * 0x400) / 0xFF;
 
         if (fwd_comp >= scaled) {
-            /* Coasting: above speed threshold -- no throttle, no brake */
             ACTOR_I16(actor, ACTOR_ENCOUNTER_STEER) = 0;
             ACTOR_U8(actor, ACTOR_BRAKE_FLAG) = 0;
+            ACTOR_U8(actor, ACTOR_THROTTLE_STATE) = 0;
             return 0;
         }
     }
 
-    /* Below threshold or no limit: accelerate with rubber-band bias */
+    /* Below threshold or no limit: apply rubber-band steer bias.
+     * [CONFIRMED @ 0x434AA0: steer=default_bias, brake_flag=0, field_0x36f=0, return 0] */
     ACTOR_I16(actor, ACTOR_ENCOUNTER_STEER) = (int16_t)g_actor_route_steer_bias[slot];
     ACTOR_U8(actor, ACTOR_BRAKE_FLAG) = 0;
+    ACTOR_U8(actor, ACTOR_THROTTLE_STATE) = 0;
     return 0;
 }
 
