@@ -1236,26 +1236,20 @@ int td5_game_init_race_session(void) {
                  * Adds start_span_offset here (not to base) so the Frida hook
                  * semantics apply per-slot, exactly like writeS16() does.
                  * After summing in int32, sign-extend via (int16_t) cast —
-                 * that IS the 16-bit wraparound the original/hook produce. */
+                 * that IS the 16-bit wraparound the original/hook produce.
+                 * NO remap: original FUN_00434350 stores CX directly at
+                 * 0x00434377 with no bounds check; actor fields get the raw
+                 * int16 value even if negative. */
                 int raw = start_span + span_offsets[slot] + g_td5.ini.start_span_offset;
                 span_index = (int)(int16_t)(raw & 0xFFFF);
-                /* Keep a tight wrap ONLY for the common case where the
-                 * resulting index is out of bounds for the current ring —
-                 * the span-record lookup rejects negatives and would fall
-                 * back to span=1. Remap via mod so the offset still lands
-                 * on a valid span when it's well-defined (not in the UB
-                 * region the original quietly reads garbage from). */
-                if (span_index < 0 || span_index >= track_span_count) {
-                    int m = span_index % track_span_count;
-                    if (m < 0) m += track_span_count;
-                    TD5_LOG_I(LOG_TAG,
-                              "spawn span wrap: slot=%d raw=%d masked=%d ring=%d -> %d",
-                              slot, raw, span_index, track_span_count, m);
-                    span_index = m;
-                }
             } else {
                 span_index = 1;
             }
+            /* Preserve raw int16 value for actor field writes — matches
+             * original's MOV word ptr [EAX], CX @ 0x00434377.
+             * span_index may be updated to 1 below (fallback for world
+             * position) but actor_span stays as the signed 16-bit result. */
+            int actor_span = span_index;
 
             /* Drag race spawn override [CONFIRMED @ 0x0042b0fb, 0x0042b228]:
              *   slot 0 → span=115, lane=1 (hardcoded immediate 0x73 at 0x42b0f8)
@@ -1270,6 +1264,7 @@ int td5_game_init_race_session(void) {
                     span_index = 1;
                     sub_lane = slot - 1;
                 }
+                actor_span = span_index;  /* drag hardcodes span; actor gets that value */
                 TD5_LOG_I(LOG_TAG,
                           "Drag spawn override: slot=%d span=%d lane=%d",
                           slot, span_index, sub_lane);
@@ -1293,14 +1288,14 @@ int td5_game_init_race_session(void) {
              * decrements +0x84 from 0 to -1, td5_track_normalize_actor_wrap
              * wraps -1 to ring_length-1 (~3999), and every P2P checkpoint
              * threshold compares true at once. */
-            *(int16_t *)(actor + 0x080) = (int16_t)span_index;
-            *(int16_t *)(actor + 0x082) = (int16_t)span_index;
-            *(int16_t *)(actor + 0x084) = (int16_t)span_index;
-            *(int16_t *)(actor + 0x086) = (int16_t)span_index;
+            *(int16_t *)(actor + 0x080) = (int16_t)actor_span;
+            *(int16_t *)(actor + 0x082) = (int16_t)actor_span;
+            *(int16_t *)(actor + 0x084) = (int16_t)actor_span;
+            *(int16_t *)(actor + 0x086) = (int16_t)actor_span;
             actor[0x08C] = (uint8_t)sub_lane;
             TD5_LOG_I(LOG_TAG,
-                      "Actor spawn span: slot=%d span_index=%d sub_lane=%d",
-                      slot, span_index, sub_lane);
+                      "Actor spawn span: slot=%d actor_span=%d world_span=%d sub_lane=%d",
+                      slot, actor_span, span_index, sub_lane);
 
             if (!td5_track_get_span_lane_world(span_index, sub_lane, &world_x, &world_y, &world_z)) {
                 /* Fallback: use span origin, shift to 24.8 FP to match the
