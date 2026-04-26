@@ -253,6 +253,13 @@ static const uint8_t *g_traffic_queue_ptr;
 /* Frame counter for misc timing */
 static uint32_t g_ai_frame_counter;
 
+/* Wanted-mode damage state table (mirrors gWantedDamageStateTable @ 0x4BEAD4).
+ * int16[6], one per racer slot. Initialized to 0x1000 per slot.
+ * Decremented on player<->cop collision by 0x200 (impact<=20000) or 0x400 (impact>20000)
+ * [CONFIRMED @ AwardWantedDamageScore 0x43D690]. When slot reaches 0, cop is arrested
+ * and its AI is frozen [CONFIRMED @ UpdateRaceActors 0x436E1D gate]. */
+static int16_t g_wanted_damage_state[TD5_MAX_RACER_SLOTS];
+
 /* ========================================================================
  * Forward declarations (internal helpers)
  * ======================================================================== */
@@ -355,19 +362,37 @@ void td5_ai_shutdown(void) {
     /* nothing to free -- all static */
 }
 
-/* Called by td5_physics.c when the player V2V-collides with a cop that has been
- * zeroed out (e.g. by the special encounter system resetting ACTOR_ENCOUNTER_STATE).
- * Restores ACTOR_ENCOUNTER_STATE=0x1000 so the gate at 0x436E1D passes and
- * ensures g_slot_state is AI so the rubber-band + track-behavior dispatch run. */
-void td5_ai_engage_wanted_cop(int slot) {
+/* Award damage to a cop slot on player<->cop collision.
+ * Mirrors AwardWantedDamageScore @ 0x43D690 [CONFIRMED]:
+ *   decrement = 0x400 if impact_mag > 20000, else 0x200.
+ *   Clamp to [0, 0x1000].
+ *   When state reaches 0, cop AI is frozen (arrested).
+ * Called from td5_physics.c when player (slot 0) collides with a cop. */
+void td5_ai_wanted_cop_hit(int cop_slot, int32_t impact_mag) {
+    int16_t dec, cur;
     char *actor;
-    if (slot < 1 || slot >= TD5_MAX_RACER_SLOTS) return;
-    actor = actor_ptr(slot);
-    if (!actor) return;
-    if (ACTOR_I32(actor, ACTOR_ENCOUNTER_STATE) != 0) return;
-    ACTOR_I32(actor, ACTOR_ENCOUNTER_STATE) = 0x1000;
-    g_slot_state[slot] = 0; /* ensure AI dispatch */
-    TD5_LOG_I(LOG_TAG, "wanted_mode: cop slot %d re-engaged via player ram", slot);
+
+    if (cop_slot < 1 || cop_slot >= TD5_MAX_RACER_SLOTS) return;
+
+    dec = (impact_mag > 20000) ? (int16_t)0x400 : (int16_t)0x200;
+    cur = g_wanted_damage_state[cop_slot] - dec;
+    if (cur < 0) cur = 0;
+    g_wanted_damage_state[cop_slot] = cur;
+
+    TD5_LOG_I(LOG_TAG,
+              "wanted_damage: cop_slot=%d new_state=%d dec=%d impact=%d",
+              cop_slot, (int)cur, (int)dec, (int)impact_mag);
+
+    if (cur == 0) {
+        /* Cop arrested: freeze AI — matches original gate at 0x436E1D */
+        actor = actor_ptr(cop_slot);
+        if (actor) {
+            ACTOR_U8(actor, ACTOR_BRAKE_FLAG) = 1;
+            ACTOR_I32(actor, ACTOR_STEERING_CMD) = 0;
+            ACTOR_I16(actor, ACTOR_ENCOUNTER_STEER) = 0;
+        }
+        TD5_LOG_I(LOG_TAG, "wanted_arrest: cop slot=%d arrested", cop_slot);
+    }
 }
 
 void td5_ai_bind_actor_table(void *actor_base) {
@@ -888,23 +913,15 @@ void td5_ai_init_race_actor_runtime(void) {
         }
     }
 
-    /* Cop Chase (wanted_mode): initialize ACTOR_ENCOUNTER_STATE for AI cop
-     * slots to 0x1000 so they are not blocked by the wanted-mode gate in
-     * ai_update_single_racer.
-     *
-     * Original keeps a separate gWantedDamageStateTable (int16[6]) and
-     * initialises it to 0x1000 per slot in InitializeWantedHudOverlays
-     * [CONFIRMED @ 0x0043D2FC: _gWantedDamageStateTable = 0x10001000].
-     * Port overloads ACTOR_ENCOUNTER_STATE (offset 0x384) for the same gate
-     * check. Initialize to 0x1000 for all active cop slots (slot 1, since
-     * racer_count=2 and slot 0 is the player). */
+    /* Cop Chase (wanted_mode): initialize gWantedDamageStateTable proxy.
+     * Original: InitializeWantedHudOverlays @ 0x43D2FC sets all 6 int16 entries
+     * to 0x1000 [CONFIRMED]. Gate in UpdateRaceActors @ 0x436E1D runs the cop's
+     * UpdateActorTrackBehavior only when damage_state[slot] != 0. */
+    for (int i = 0; i < TD5_MAX_RACER_SLOTS; i++)
+        g_wanted_damage_state[i] = 0x1000;
     if (g_td5.wanted_mode_enabled) {
-        for (int i = 0; i < TD5_MAX_RACER_SLOTS; i++) {
-            char *actor = actor_ptr(i);
-            ACTOR_I32(actor, ACTOR_ENCOUNTER_STATE) = 0x1000;
-        }
         TD5_LOG_I(LOG_TAG,
-                  "Cop Chase: initialized ACTOR_ENCOUNTER_STATE=0x1000 for all racer slots "
+                  "Cop Chase: g_wanted_damage_state[0..5]=0x1000 "
                   "(mirrors gWantedDamageStateTable init @ 0x0043D2FC)");
     }
 
@@ -2687,17 +2704,14 @@ static void ai_update_single_racer(int slot) {
 
     switch (state) {
     case 0x00: /* AI racer */
-        /* Wanted mode check [CONFIRMED @ 0x436E1D]:
-         * Original: if (g_wantedModeEnabled == 0 || *gWantedDamageStateTable[slot] != 0)
-         * gWantedDamageStateTable @ 0x4BEAD4, int16 stride.
-         * Non-zero → cop pursues (UpdateActorTrackBehavior runs).
-         * Zero → cop stationary (skipped).
-         * Gate is for cop slots only (1–5); slot 0 is the player and uses a
-         * separate code path in the original (never enters UpdateActorTrackBehavior
-         * as a human), so exclude slot 0 to keep PlayerIsAI working. */
-        if (g_td5.wanted_mode_enabled &&
-            ACTOR_I32(actor, ACTOR_ENCOUNTER_STATE) == 0) {
-            return;
+        /* Wanted mode gate [CONFIRMED @ UpdateRaceActors 0x436E1D]:
+         * Original: run UpdateActorTrackBehavior only when
+         *   (g_wantedModeEnabled == 0) || (gWantedDamageStateTable[slot] != 0)
+         * Slot 0 is the player and uses a separate path in the original, so
+         * skip only cop slots (slot != 0) to keep PlayerIsAI working. */
+        if (g_td5.wanted_mode_enabled && slot != 0 &&
+            g_wanted_damage_state[slot] == 0) {
+            return; /* cop arrested — AI frozen */
         }
 
         /* Drag race: AI does not use track behavior (straight-line only) */
