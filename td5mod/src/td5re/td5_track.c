@@ -3242,6 +3242,116 @@ static void resolve_segment_boundary(int16_t *track_state)
  */
 
 /* ========================================================================
+ * ComputeTrackSpanProgress (0x004345B0)
+ *
+ * Projects the actor's 24.8 world position onto the span's longitudinal
+ * axis (right_vertex_index → right_vertex_index + lane_count + type_offset).
+ * Returns packed int64: low32 = 8-bit normalised progress (0-255 per span),
+ * high32 = remainder. Uses right_vertex_index (span+0x06), NOT left (span+0x04).
+ * [CONFIRMED @ 0x004345B0]
+ * ======================================================================== */
+int64_t td5_track_compute_span_progress(int span_index, const int32_t *actor_pos)
+{
+    const TD5_StripSpan *sp;
+    int start_vi, end_vi, type_offset, lane_count;
+    const TD5_StripVertex *v_start, *v_end;
+    int start_x, start_z, end_x, end_z, dX, dZ, span_len;
+    int ax, az, rel_x, rel_z, dot, scaled;
+
+    if (!s_span_array || !s_vertex_table ||
+        span_index < 0 || span_index >= s_span_count)
+        return 0;
+
+    sp = &s_span_array[span_index];
+
+    /* [CONFIRMED @ 0x004345E0] base vertex = *(uint16*)(span + 0x06) = right_vertex_index */
+    start_vi    = (int)(uint16_t)sp->right_vertex_index;
+    type_offset = (int)k_target_vertex_offsets[(int)sp->span_type][0];
+    lane_count  = span_lane_count(sp);
+    end_vi      = start_vi + lane_count + type_offset;
+
+    v_start = vertex_at(start_vi);
+    v_end   = vertex_at(end_vi);
+    if (!v_start || !v_end) return 0;
+
+    start_x = (int)(int16_t)v_start->x;
+    start_z = (int)(int16_t)v_start->z;  /* psVar2[2] = int16 at offset +4 [CONFIRMED] */
+    end_x   = (int)(int16_t)v_end->x;
+    end_z   = (int)(int16_t)v_end->z;
+
+    dX = end_x - start_x;
+    dZ = end_z - start_z;
+
+    /* Span length via float sqrt [CONFIRMED @ 0x00434602] */
+    span_len = (int)sqrtf((float)(dX * dX + dZ * dZ));
+    if (span_len == 0) return 0;
+
+    ax = actor_pos[0] >> 8;  /* strip 24.8 FP to integer world [CONFIRMED @ 0x00434631] */
+    az = actor_pos[2] >> 8;
+
+    /* rel pos = actor - span_origin - start_vertex [CONFIRMED @ 0x00434631-0x0043463a] */
+    rel_x = ax - (int)sp->origin_x - start_x;
+    rel_z = az - (int)sp->origin_z - start_z;
+
+    dot = rel_z * dZ + rel_x * dX;
+
+    /* Two-stage normalisation: (dot/len)<<8 then /len [CONFIRMED @ 0x0043465d] */
+    scaled = (dot / span_len) << 8;
+    return ((int64_t)(scaled % span_len) << 32) | (uint32_t)(scaled / span_len);
+}
+
+/* ========================================================================
+ * ComputeSignedTrackOffset (0x00434670)
+ *
+ * Returns the signed world-unit lateral distance between the actor's 8-bit
+ * progress value and the route byte (target lateral position).
+ * Negative when progress < route_byte (actor is inward of target).
+ * [CONFIRMED @ 0x00434670]
+ * ======================================================================== */
+int32_t td5_track_compute_signed_offset(int span_index, int progress, int route_byte)
+{
+    const TD5_StripSpan *sp;
+    int start_vi, end_vi, type_offset, lane_count;
+    const TD5_StripVertex *v_start, *v_end;
+    int start_x, start_z, end_x, end_z;
+    int delta, dX, dZ, dX_sc, dZ_sc, len, v;
+
+    if (!s_span_array || !s_vertex_table ||
+        span_index < 0 || span_index >= s_span_count)
+        return 0;
+
+    sp = &s_span_array[span_index];
+
+    /* Same vertex pair as ComputeTrackSpanProgress [CONFIRMED @ 0x00434680-0x004346b8] */
+    start_vi    = (int)(uint16_t)sp->right_vertex_index;
+    type_offset = (int)k_target_vertex_offsets[(int)sp->span_type][0];
+    lane_count  = span_lane_count(sp);
+    end_vi      = start_vi + lane_count + type_offset;
+
+    v_start = vertex_at(start_vi);
+    v_end   = vertex_at(end_vi);
+    if (!v_start || !v_end) return 0;
+
+    start_x = (int)(int16_t)v_start->x;
+    start_z = (int)(int16_t)v_start->z;
+    end_x   = (int)(int16_t)v_end->x;
+    end_z   = (int)(int16_t)v_end->z;
+
+    delta = progress - route_byte;
+
+    /* Signed >>8 with rounding [CONFIRMED @ 0x004346ca-0x004346ed] */
+    v = (end_x - start_x) * delta;
+    dX_sc = (v + ((v >> 31) & 0xFF)) >> 8;
+    v = (end_z - start_z) * delta;
+    dZ_sc = (v + ((v >> 31) & 0xFF)) >> 8;
+
+    len = (int)sqrtf((float)(dX_sc * dX_sc + dZ_sc * dZ_sc));
+
+    /* Sign from comparison [CONFIRMED @ 0x004346f5] */
+    return (progress < route_byte) ? -len : len;
+}
+
+/* ========================================================================
  * SampleTrackTargetPoint (0x434800)
  *
  * Computes world-space XZ position for AI look-ahead by interpolating

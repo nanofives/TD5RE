@@ -1341,6 +1341,16 @@ int td5_game_init_race_session(void) {
              * leave the other three at the values placed above. */
             *(int16_t *)(actor + 0x080) = (int16_t)span_index; /* span_raw   */
 
+            /* Seed RS_TRACK_PROGRESS + RS_TRACK_OFFSET_BIAS from actual spawn
+             * position [CONFIRMED @ RefreshActorTrackProgressOffset 0x004342E0].
+             * Called after span_raw and position are finalised so each racer
+             * gets a different lateral offset seed, enabling diverging lateral
+             * positions during peer avoidance. */
+            td5_ai_seed_actor_track_progress_offset(slot);
+            TD5_LOG_I(LOG_TAG, "Actor bias seed: slot=%d bias=%d progress=%d",
+                      slot, td5_ai_get_route_state(slot)[9],
+                      td5_ai_get_route_state(slot)[0x19]);
+
             TD5_LOG_I(LOG_TAG,
                       "Actor spawn: slot=%d span=%d pos=(%d,%d,%d) state=%d lane=%d",
                       slot, span_index,
