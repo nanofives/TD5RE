@@ -17,21 +17,24 @@ Trace window:
   Default cap = 300 frames (250 target + 50 frames of loading-fade margin).
 
 The orchestrator:
-  1. Snapshots td5re.ini and re/tools/quickrace/td5_quickrace.ini.
-  2. Patches both for a deterministic, skip-frontend, auto-throttle run.
+  1. Snapshots re/tools/quickrace/td5_quickrace.ini (Frida side only).
+  2. Patches the quickrace INI with the scenario so td5_quickrace.py feeds
+     the same values to the original binary's Frida hook.
   3. Runs the original via td5_quickrace.py --trace --trace-auto-exit.
-  4. Runs td5re.exe from the repo root; waits for its trace to flush.
+  4. Runs td5re.exe from the repo root with --Key=N CLI overrides carrying
+     the full scenario + trace knobs; waits for its trace to flush.
   5. Invokes compare_race_trace.py with any --fields / --float-tol passed in.
-  6. Restores the INI snapshots and prints the comparator output.
+  6. Restores the quickrace INI snapshot and prints the comparator output.
+
+td5re.ini is NOT mutated — every td5re-side knob rides on the CLI so the
+user's working INI survives the diff run untouched. Since CLI > INI, any
+key not passed on the command line still comes from the user's td5re.ini.
 
 The CSVs land at log/race_trace_original.csv and log/race_trace.csv.
 """
 
 import argparse
-import configparser
-import os
 import re
-import shutil
 import subprocess
 import sys
 import time
@@ -39,7 +42,6 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parent
-TD5RE_INI = REPO / "td5re.ini"
 QUICKRACE_INI = REPO / "re" / "tools" / "quickrace" / "td5_quickrace.ini"
 QUICKRACE_PY = REPO / "re" / "tools" / "quickrace" / "td5_quickrace.py"
 COMPARE_PY = REPO / "tools" / "compare_race_trace.py"
@@ -119,75 +121,74 @@ def restore(path: Path, blob: bytes):
         path.write_bytes(blob)
 
 
-def patch_td5re_ini(args):
-    """Ensure td5re.ini has the trace + auto-race knobs we need for one run.
+def td5re_cli_args(args):
+    """Build the --Key=N list that pins every td5re-side knob for one run.
 
-    AutoRace is forced on: `td5_frontend_auto_race_setup` was refactored on
-    2026-04-11 to mirror the original's Frida quickrace-hook sequence
-    (ConfigureGameTypeFlags → InitializeRaceSeriesSchedule →
-    InitializeFrontendDisplayModeState) and to skip the wall-clock srand
-    reseed when RaceTrace=1 so both binaries spawn with the same RNG
-    state. No more manual kickoff needed.
+    The port reads all scenario + trace knobs through the CLI overrides
+    (see reference_td5re_cli_overrides.md), so we never touch td5re.ini.
+    The defaults here mirror the faithful Frida-hook sequence on the
+    original (ConfigureGameTypeFlags → InitializeRaceSeriesSchedule →
+    InitializeFrontendDisplayModeState) and skip the wall-clock srand
+    reseed when RaceTrace=1 so both binaries spawn with the same RNG.
     """
-    cp = configparser.ConfigParser()
-    cp.optionxform = str  # preserve case
-    cp.read(TD5RE_INI, encoding="utf-8")
-    if not cp.has_section("Trace"):
-        cp.add_section("Trace")
-    cp.set("Trace", "RaceTrace", "1")
-    # -1 = all slots; must match the Frida trace script's TRACE_SLOT = -1
-    # default, otherwise the comparator keys miss every AI actor row.
-    cp.set("Trace", "RaceTraceSlot", "-1")
-    cp.set("Trace", "RaceTraceMaxFrames", str(args.port_frames))
-    cp.set("Trace", "AutoThrottle", "1")
-    # Fast-forward: inject N extra sim ticks per render frame so the port
-    # reaches the same simulated race window as the Frida-clamped original
-    # in a few seconds of wall clock. 4 means ~5 sim ticks per frame total.
-    cp.set("Trace", "TraceFastForward", "4")
-    # Sim-tick cap — stop writing rows once we have enough sim ticks to
-    # cover the common capture window. sim_tick increments at 30 Hz once
-    # the countdown ends, so N = seconds * 30 is "N in-game seconds of
-    # race after GO". The render-frame cap above is just a safety ceiling.
-    cp.set("Trace", "RaceTraceMaxSimTicks", str(int(args.seconds * 30)))
-
-    if not cp.has_section("Game"):
-        cp.add_section("Game")
-    cp.set("Game", "SkipIntro", "1")
-    # Pin scenario defaults so AutoRace reads the requested scenario even
-    # when the user's persisted td5re.ini has different ones.
-    cp.set("Game", "DefaultCar", str(args.car))
-    cp.set("Game", "DefaultTrack", str(args.track))
-    cp.set("Game", "DefaultGameType", str(args.game_type))
-
-    # Force PlayerIsAI off for the diff-race run. The user's dev setup
-    # commonly has this enabled for attract-mode testing, but it routes
-    # slot 0 through td5_physics_update_ai instead of update_player —
-    # making any fix targeting the player path invisible in the trace.
-    if not cp.has_section("GameOptions"):
-        cp.add_section("GameOptions")
-    cp.set("GameOptions", "PlayerIsAI", "0")
-    with TD5RE_INI.open("w", encoding="utf-8") as f:
-        cp.write(f)
+    sim_tick_cap = int(args.seconds * 30)
+    return [
+        # Scenario
+        f"--DefaultCar={args.car}",
+        f"--DefaultTrack={args.track}",
+        f"--DefaultGameType={args.game_type}",
+        f"--Laps={args.laps}",
+        f"--StartSpanOffset={args.start_span_offset}",
+        # Auto-race path (no frontend input)
+        "--AutoRace=1",
+        "--SkipIntro=1",
+        # AI-drive slot 0 on the port so its trace matches the Frida side,
+        # which does the same via the quickrace hook's UpdateRaceActors
+        # windowed slot[0].state=0 (see reference_frida_player_is_ai.md).
+        # Both sides routing slot 0 through their AI paths keeps the diff
+        # focused on physics/AI parity rather than input divergence.
+        "--PlayerIsAI=1",
+        # Trace knobs
+        "--RaceTrace=1",
+        # -1 = all slots; must match the Frida trace script's TRACE_SLOT=-1
+        # default, otherwise the comparator keys miss every AI actor row.
+        "--RaceTraceSlot=-1",
+        f"--RaceTraceMaxFrames={args.port_frames}",
+        # Sim-tick cap — stop writing rows once we have enough sim ticks to
+        # cover the common capture window. sim_tick increments at 30 Hz
+        # once the countdown ends, so N = seconds * 30 is "N in-game
+        # seconds of race after GO". RaceTraceMaxFrames is a safety ceiling.
+        f"--RaceTraceMaxSimTicks={sim_tick_cap}",
+        "--AutoThrottle=1",
+        # Fast-forward: inject N extra sim ticks per render frame so the
+        # port reaches the same simulated race window as the Frida-clamped
+        # original in seconds of wall-clock. 4 means ~5 sim ticks per frame.
+        "--TraceFastForward=4",
+    ]
 
 
 def patch_quickrace_ini(args):
-    """Write the shared INI with skip_frontend=true and the requested scenario."""
+    """Write the Frida-side INI with the requested scenario.
+
+    Only the original binary (via td5_quickrace.py) consumes this file now;
+    td5re.exe stopped reading it on 2026-04-22. We edit only the keys
+    td5_quickrace.py forwards to the Frida hook.
+    """
     raw = QUICKRACE_INI.read_text(encoding="utf-8")
 
     def _set(pattern: str, repl: str, text: str) -> str:
         return re.sub(pattern, repl, text, count=1, flags=re.MULTILINE)
 
-    # skip_frontend=true overlays scenario fields from this shared INI onto
-    # td5re's [Game] defaults and flips auto_race=1 on the port. Both paths
-    # now use the faithful ConfigureGameTypeFlags → schedule → display-mode
-    # sequence (see patch_td5re_ini).
-    raw = _set(r"^skip_frontend\s*=.*$", "skip_frontend = true", raw)
     raw = _set(r"^game_type\s*=.*$",     f"game_type = {args.game_type}", raw)
     raw = _set(r"^track\s*=.*$",         f"track = {args.track}", raw)
     raw = _set(r"^laps\s*=.*$",          f"laps = {args.laps}", raw)
     raw = _set(r"^car\s*=.*$",           f"car = {args.car}", raw)
     raw = _set(r"^start_span_offset\s*=.*$",
                f"start_span_offset = {args.start_span_offset}", raw)
+    # AI-drive slot 0 on the Frida side too (mirrors the port's
+    # --PlayerIsAI=1). The quickrace hook windows slot[0].state=0 inside
+    # UpdateRaceActors so AI dispatch fires for slot 0 each tick.
+    raw = _set(r"^player_is_ai\s*=.*$",  "player_is_ai = true", raw)
     QUICKRACE_INI.write_text(raw, encoding="utf-8")
 
 
@@ -242,20 +243,20 @@ def run_port(args):
     else:
         sys.exit(f"[diff_race] could not unlink {PORT_CSV}; kill td5re.exe manually")
 
-    # Sanity-check that the td5re.ini patch actually landed on disk.
-    cp = configparser.ConfigParser()
-    cp.optionxform = str
-    cp.read(TD5RE_INI, encoding="utf-8")
-    mf = cp.get("Trace", "RaceTraceMaxFrames", fallback="<missing>")
-    ar = cp.get("Game", "AutoRace", fallback="<missing>")
-    at = cp.get("Trace", "AutoThrottle", fallback="<missing>")
-    print(f"[diff_race] td5re.ini on disk: RaceTraceMaxFrames={mf} "
-          f"AutoThrottle={at} AutoRace={ar}")
+    # Build the CLI override list and echo it so engine.log divergences are
+    # traceable to exactly the flags that triggered the run.
+    cli_args = td5re_cli_args(args)
+    print(f"[diff_race] td5re.exe CLI: {' '.join(cli_args)}")
 
     # Start via PowerShell Start-Process so we get the PID back cleanly.
+    # -ArgumentList forwards the CLI flags into lpCmdLine, which
+    # td5_apply_cli_overrides() parses after td5re.ini is read.
+    ps_args = ",".join(f"'{a}'" for a in cli_args)
     ps = (
         "$p = Start-Process -FilePath "
-        f"'{TD5RE_EXE}' -WorkingDirectory '{REPO}' -PassThru; "
+        f"'{TD5RE_EXE}' -WorkingDirectory '{REPO}' "
+        f"-ArgumentList {ps_args} "
+        "-PassThru; "
         "Write-Output $p.Id"
     )
     out = subprocess.run(
@@ -351,11 +352,11 @@ def main():
 
     LOG_DIR.mkdir(exist_ok=True)
 
-    td5re_snap = snapshot(TD5RE_INI)
+    # Only the Frida-side INI needs snapshot/restore now — td5re reads its
+    # scenario from CLI overrides so its INI is never touched.
     qr_snap = snapshot(QUICKRACE_INI)
 
     try:
-        patch_td5re_ini(args)
         patch_quickrace_ini(args)
 
         print(f"[diff_race] scenario: car={args.car} track={args.track} "
@@ -373,9 +374,8 @@ def main():
             compare = calls_compare
 
     finally:
-        restore(TD5RE_INI, td5re_snap)
         restore(QUICKRACE_INI, qr_snap)
-        print("[diff_race] restored INI snapshots")
+        print("[diff_race] restored quickrace INI snapshot")
 
     return compare.returncode if compare else 1
 

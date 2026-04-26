@@ -24,20 +24,33 @@ All heavy lifting lives in `tools/diff_race.py`. Call it directly, forwarding
 the parsed arguments. Do NOT reimplement the INI patching, spawn, or compare
 logic — it already:
 
-- Snapshots `td5re.ini` and `re/tools/quickrace/td5_quickrace.ini`, patches
-  them for `skip_frontend=true`, `AutoThrottle=1`, `RaceTrace=1`,
-  `RaceTraceSlot=-1`, and the requested scenario. The port's auto-race path
-  mirrors the original's Frida quickrace hook exactly (ConfigureGameTypeFlags
-  → InitializeRaceSeriesSchedule → InitializeFrontendDisplayModeState) and
-  skips the wall-clock srand reseed whenever `RaceTrace=1`.
+- Snapshots `re/tools/quickrace/td5_quickrace.ini` (Frida-side only; td5re
+  stopped reading it on 2026-04-22) and writes the requested scenario into
+  its `[race]` / `[car]` sections so `td5_quickrace.py` forwards the same
+  values to the original binary's Frida hook.
 - Spawns `original/TD5_d3d.exe` via `re/tools/quickrace/td5_quickrace.py
   --trace --trace-auto-exit` (both the quickrace hook and
   `tools/frida_race_trace.js` load into the same Frida session).
-- Spawns `td5re.exe` from the repo root (**never** from `original/`), waits
-  for `log/race_trace.csv` to stop growing, then kills it.
+- Spawns `td5re.exe` from the repo root (**never** from `original/`) with
+  `--Key=N` CLI overrides carrying the full scenario + trace knobs
+  (`--DefaultCar`, `--DefaultTrack`, `--DefaultGameType`, `--Laps`,
+  `--StartSpanOffset`, `--AutoRace=1`, `--SkipIntro=1`, `--PlayerIsAI=1`,
+  `--RaceTrace=1`, `--RaceTraceSlot=-1`, `--RaceTraceMaxFrames=N`,
+  `--RaceTraceMaxSimTicks=N`, `--AutoThrottle=1`, `--TraceFastForward=4`).
+  Both binaries run with PlayerIsAI ON by default: the port routes slot 0
+  through `td5_physics_update_ai`, and the Frida hook windows
+  `gRaceSlotStateTable.slot[0].state=0` inside `UpdateRaceActors` so the
+  original's slot 0 runs AI too. This keeps the diff focused on physics/AI
+  parity instead of input-poll divergence. Pass `--PlayerIsAI=0` via the
+  orchestrator only when specifically probing the human-input path.
+  The port's auto-race path mirrors the original's Frida quickrace hook
+  exactly (ConfigureGameTypeFlags → InitializeRaceSeriesSchedule →
+  InitializeFrontendDisplayModeState) and skips the wall-clock srand reseed
+  whenever `RaceTrace=1`. Waits for `log/race_trace.csv` to stop growing,
+  then kills it. `td5re.ini` is never mutated.
 - Runs `tools/compare_race_trace.py log/race_trace_original.csv log/race_trace.csv`
   with the forwarded `--fields` / `--stage` / `--kind` / `--float-tol` filters.
-- Restores both INI snapshots no matter what.
+- Restores the quickrace INI snapshot no matter what.
 
 Parse `$ARGUMENTS` into `--car`, `--track`, `--game-type`, `--laps`,
 `--frames`, `--fields`, `--stage`, `--kind`, `--float-tol`, `--hooks` and
@@ -170,9 +183,13 @@ mismatch, and stops. The user decides whether to invoke `/fix` next.
 
 ## Rules
 
-- Never edit `td5re.ini` or `td5_quickrace.ini` by hand — `diff_race.py`
-  snapshot/restores them. If you hit a pre-existing leftover patched INI
-  (e.g. from a crashed earlier run), restore it from git before rerunning.
+- `td5re.ini` is NOT touched by `diff_race.py` — the port reads its
+  scenario from `--Key=N` CLI overrides. You can safely edit it in parallel
+  with a diff-race run. The quickrace INI at
+  `re/tools/quickrace/td5_quickrace.ini` IS mutated (Frida side only);
+  `diff_race.py` snapshot/restores it. If you hit a pre-existing leftover
+  patched quickrace INI (e.g. from a crashed earlier run), restore it from
+  git before rerunning.
 - Never copy `td5re.exe` into `original/`. It lives at the repo root and
   reads game data out of `original/` via relative paths.
 - Run `diff_race.py` through bash from the repo root (`cd` is handled
@@ -185,8 +202,12 @@ mismatch, and stops. The user decides whether to invoke `/fix` next.
   missing`, the run died before the trace flushed. Check:
   - Is the windowed-mode patch applied to the original? (`re/patches/patch_windowed_*.py`)
   - Is `original/DDraw.dll` renamed to `DDraw.dll.td5re_wrapper`?
-  - Does `log/engine.log` show `Shared INI: ... skip_frontend='true' -> 1`
-    and `AutoRace=1`? If not, the shared INI wasn't picked up.
+  - Does `log/engine.log` show `=== N CLI override(s) applied ===` followed
+    by `AutoRace=1` and `DefaultTrack=<expected>` in the `[Game]` dump
+    line? Missing CLI override log lines mean `lpCmdLine` didn't reach
+    `td5_apply_cli_overrides()` — inspect the PowerShell `-ArgumentList`
+    expansion in `run_port`. Needs `[Logging] Enabled=1` in the user's
+    td5re.ini for the log lines to be visible.
 - If the comparator exits 0, report "no divergence in the captured window"
   — don't fabricate a finding.
 

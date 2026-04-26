@@ -392,7 +392,19 @@ If the fix doesn't pan out and the user wants to throw it away instead of mergin
 
 ```bash
 cd C:/Users/maria/Desktop/Proyectos/TD5RE
-git worktree remove "${WORKTREE_DIR}"   # or --force if td5re.exe is still running
+
+# Always pre-unlink the mingw junction before teardown — plain `git worktree
+# remove` will refuse (dirty files), and --force follows the junction into main.
+# Use a hardcoded backslash path; $(cygpath -w ...) silently fails on this host.
+cmd //c "rmdir \"C:\\Users\\maria\\Desktop\\Proyectos\\TD5RE\\.claude\\worktrees\\${SESSION_TAG}\\td5mod\\deps\\mingw\""
+
+# MANDATORY: abort if the junction is still present — do NOT proceed to --force.
+if [ -d "${WORKTREE_DIR}/td5mod/deps/mingw" ]; then
+    echo "ERROR: pre-unlink failed — junction still live. Do NOT run --force."
+    exit 1
+fi
+
+git worktree remove --force "${WORKTREE_DIR}"
 git branch -D "${SESSION_TAG}"          # -D because it was never merged
 ```
 
@@ -400,11 +412,25 @@ Ask the user to confirm before running the `-D` variant.
 
 **CRITICAL — junction safety:** Teardown must go through `git worktree remove`, never `rm -rf "${WORKTREE_DIR}"`. The worktree contains a junction at `td5mod/deps/mingw/` that points back into the main tree (753 MB MinGW toolchain). A recursive `rm` from git-bash or PowerShell `Remove-Item -Recurse` will follow that junction and **destroy the toolchain in the main tree**.
 
-**`git worktree remove --force` is NOT safe with this junction.** Empirically confirmed on 2026-04-16 and again on 2026-04-20: when a worktree has uncommitted files (td5re.ini tweaks, log/, build artifacts) plain `git worktree remove` refuses, and the agent reaches for `--force` — which traverses the mingw junction and wipes main's toolchain. Before EVERY `git worktree remove --force`, pre-unlink the junction:
+**`git worktree remove --force` is NOT safe with this junction.** Empirically confirmed on 2026-04-16, 2026-04-20, and 2026-04-22: when a worktree has uncommitted files (td5re.ini tweaks, log/, build artifacts) plain `git worktree remove` refuses, and the agent reaches for `--force` — which traverses the mingw junction and wipes main's toolchain. Before EVERY `git worktree remove --force`, pre-unlink the junction:
 
 ```bash
-cmd //c "rmdir \"$(cygpath -w "${WORKTREE_DIR}")\\td5mod\\deps\\mingw\""   # no /s — removes only the junction
-git worktree remove --force "${WORKTREE_DIR}"                              # safe now, junction is gone
+# CRITICAL: use a hardcoded backslash path — do NOT use $(cygpath -w ...) here.
+# cygpath silently produces a "volume label syntax error" on this host, making
+# the rmdir a no-op, leaving the junction live for --force to follow. Incident
+# on 2026-04-22 confirmed this failure mode.
+cmd //c "rmdir \"C:\\Users\\maria\\Desktop\\Proyectos\\TD5RE\\.claude\\worktrees\\${SESSION_TAG}\\td5mod\\deps\\mingw\""
+
+# MANDATORY: verify the junction is gone before proceeding. If it still exists,
+# the rmdir silently failed — do NOT run --force.
+if [ -d "${WORKTREE_DIR}/td5mod/deps/mingw" ]; then
+    echo "ERROR: pre-unlink failed — ${WORKTREE_DIR}/td5mod/deps/mingw still exists."
+    echo "STOP: do NOT run git worktree remove --force. Investigate the rmdir failure."
+    echo "Try: cmd //c 'rmdir /AL' in the worktree dir to confirm the junction path."
+    exit 1
+fi
+
+git worktree remove --force "${WORKTREE_DIR}"   # safe now — junction is gone
 ```
 
 As of 2026-04-20 main's `td5mod/deps/mingw/` has the READ-ONLY attribute set via `attrib +R /S /D` so a forgotten pre-unlink step fails with EACCES instead of silently wiping the toolchain. Do not clear that attribute.
@@ -456,7 +482,7 @@ Useful keys for fix-validation runs:
 | `[Logging]` | `MinLevel` | `0`=DEBUG, `1`=INFO (default), `2`=WARN, `3`=ERROR. Bump to `2` to keep WRN/ERR but kill the INF spam |
 | `[Logging]` | `Frontend` / `Race` / `Engine` / `Wrapper` | Per-sink gates. Turn off the categories you didn't touch to keep the log lean. `Wrapper` is the biggest emitter — leave at `0` unless debugging the D3D shim |
 
-For deeper scenarios (specific track + car + game type without touching `td5re.ini`), the shared launcher INI at `re/tools/quickrace/td5_quickrace.ini` overlays on top — see `[reference_quickrace_launcher.md]` for the full track/car tables. **Reminder:** the shared overlay runs *after* `td5re.ini` and silently overwrites overlapping keys.
+For ad-hoc scenario tweaks without rewriting the worktree INI, `td5re.exe` accepts `--Key=N` CLI overrides (case-insensitive, match INI names exactly). CLI > INI > defaults, applied in `main.c:td5_apply_cli_overrides()`. Useful when two parallel `/fix` sessions want different scenarios without racing on the INI file — just vary the `-ArgumentList` on each worktree's launch. Full key list in `reference_td5re_cli_overrides.md`; track/car number tables in `re/tools/quickrace/td5_quickrace.ini` (still the reference even though td5re.exe no longer reads that INI — the Frida launcher for the original binary still does). Example: `--DefaultTrack=15 --DefaultGameType=0 --AutoRace=1`.
 
 ### Launch the game (auto-close harness)
 
