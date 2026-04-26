@@ -186,9 +186,6 @@ int  td5_track_load_routes(const void *left_data, size_t left_size,
 /* --- Wrap normalization --- */
 int  td5_track_normalize_actor_wrap(TD5_Actor *actor);
 
-/* --- Checkpoint detection --- */
-int  td5_track_check_checkpoint(TD5_Actor *actor);
-
 /* --- Route heading helpers --- */
 int  td5_track_get_primary_route_heading(int span_index);
 

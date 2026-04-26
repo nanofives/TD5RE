@@ -537,17 +537,19 @@ void td5_sound_update_ambient(void)
                       vp, weather_count);
         } else if (weather_count == 0 && s_rain_playing[vp]) {
             /* [CONFIRMED @ 0x00440B00]: Stop rain when count drops to zero. */
-            slot_stop(slot_offset + 0x13);
+            slot_stop(slot_offset + 0x12);
             s_rain_playing[vp] = 0;
             TD5_LOG_I(LOG_TAG, "ambient: rain stop vp=%d", vp);
         }
 
         /* [CONFIRMED @ 0x00440B00]: Modulate rain volume by particle count.
-         * Volume = clamp(weather_count, 0, 0x7f). */
+         * Volume = clamp(weather_count, 0, 0x7f).
+         * Slot 0x12 (Rain.wav) — NOT 0x13 (SkidBit.wav). Using 0x13 was the
+         * conflict: rain modify on 0x13 fought skid modify on 0x13 every frame. */
         if (weather_count > 0 && weather_type == 0) {
             int rain_vol = weather_count;
             if (rain_vol > 0x7F) rain_vol = 0x7F;
-            slot_modify(slot_offset + 0x13, rain_vol, pan, TD5_SOUND_FREQ_22050);
+            slot_modify(slot_offset + 0x12, rain_vol, pan, TD5_SOUND_FREQ_22050);
             if ((s_audio_mix_log_counter % 60u) == 0u) {
                 TD5_LOG_D(LOG_TAG, "ambient: rain vp=%d vol=%d count=%d",
                           vp, rain_vol, weather_count);
@@ -917,7 +919,11 @@ void td5_sound_update_audio_mix(void)
                 /* ---- Skid sound management ---- */
                 int skid_val = s_skid_intensity[pass];
                 if (skid_val > 0 && s_skid_playing[pass] == 0 && s_race_end_flag == 0) {
-                    /* Start skid loop — slot 0x13 = SkidBit.wav [CONFIRMED @ 0x4413D1] */
+                    /* Original @ 0x440B00: Play(0x12, vol=0) on skid start — silences
+                     * Rain.wav at the moment screech begins. Skid screech itself is
+                     * SkidBit.wav at slot 0x13 (Modify below). */
+                    slot_play(slot_offset + 0x12, 1, 0, pan, TD5_SOUND_FREQ_22050);
+                    /* Start SkidBit.wav loop — slot 0x13 [CONFIRMED @ 0x4413D1] */
                     if (!slot_is_playing(slot_offset + 0x13)) {
                         slot_play(slot_offset + 0x13, 1, 0, pan, TD5_SOUND_FREQ_22050);
                         TD5_LOG_I(LOG_TAG, "Skid start: pass=%d slot=%d skid_val=%d",

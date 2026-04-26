@@ -157,19 +157,9 @@ typedef struct ActorRaceMetric {
     int16_t  forward_speed;             /* current speed */
     int16_t  skid_factor;               /* current skid intensity */
     int16_t  contact_count;             /* collision count */
-    int16_t  lap_split_times[8];        /* per-lap split deltas
-                                         *
-                                         * DIVERGENCE from original (TODO, item 6 of
-                                         * checkpoint subsystem gaps). Original stores splits at
-                                         * actor+0x34E..+0x35D as a rolling 16-bit array indexed
-                                         * by circuit lap or P2P cp. The original stores the
-                                         * PREVIOUS split (or speculatively stores current span
-                                         * then normalises running deltas) — see 0x00409E98 and
-                                         * 0x00409FE0. Port stores cumulative_timer directly,
-                                         * which is wrong for results-screen display fidelity but
-                                         * benign for single-player lap counting. Rewrite to
-                                         * match actor+0x34E layout when the results screen
-                                         * needs exact per-split display. */
+    int16_t  lap_split_times[9];        /* per-lap split deltas, 9 entries mirroring actor+0x34E
+                                         * [CONFIRMED: checkpoint_split_times[9] in td5_actor_struct.h]
+                                         * Circuit: delta loop @ 0x00409E98; P2P: raw at crossing. */
 } ActorRaceMetric;
 
 static ActorRaceMetric s_metrics[TD5_MAX_RACER_SLOTS];
@@ -627,12 +617,12 @@ int td5_game_get_player_lap(int slot)
 }
 
 /* Returns cumulative race timer ticks (30/sec) for lap_index 0,
- * or the split time for lap_index 1-8. Used by HUD. */
+ * or the split time for lap_index 1-9. Used by HUD. */
 int32_t td5_game_get_race_timer(int slot, int lap_index)
 {
     if (slot < 0 || slot >= TD5_MAX_RACER_SLOTS) return 0;
     if (lap_index == 0) return s_metrics[slot].cumulative_timer;
-    if (lap_index >= 1 && lap_index <= 8)
+    if (lap_index >= 1 && lap_index <= 9)
         return (int32_t)s_metrics[slot].lap_split_times[lap_index - 1];
     return 0;
 }
@@ -693,13 +683,13 @@ int td5_game_slot_is_finished(int slot)
 }
 
 /* Returns best lap time (ticks) for slot 0 — used by name entry qualification.
- * Scans lap_split_times[0..7] for smallest nonzero value.
- * [CONFIRMED: ScreenPostRaceNameEntry bVar4==1 scans actor+0x34e..0x35e words] */
+ * Scans lap_split_times[0..8] for smallest nonzero value.
+ * [CONFIRMED: ScreenPostRaceNameEntry bVar4==1 scans actor+0x34e..0x35f words (9 entries)] */
 int32_t td5_game_get_best_lap_time(int slot)
 {
     if (slot < 0 || slot >= TD5_MAX_RACER_SLOTS) return 0x2B818; /* sentinel */
     int32_t best = 0x2B818;
-    for (int i = 0; i < 8; i++) {
+    for (int i = 0; i < 9; i++) {
         int32_t t = (int32_t)s_metrics[slot].lap_split_times[i];
         if (t > 0 && t < best) best = t;
     }
@@ -2682,12 +2672,11 @@ static void advance_pending_finish_state(int slot, uint32_t sim_delta) {
          * currently-running lap (cumulative - sum of completed-lap deltas).
          * When the lap increments below, the slot freezes with its final
          * delta and splits[lap+1] takes over. Port's ActorRaceMetric
-         * mirrors actor+0x34E as lap_split_times[8] (8 shorts = 16 bytes);
-         * the original had 9 slots at +0x34E..+0x35D. Clamp the index.
+         * mirrors actor+0x34E as lap_split_times[9] (9 shorts = 18 bytes).
          * --------------------------------------------------------------- */
         {
             int lap = (int)m->checkpoint_index;
-            if (lap >= 0 && lap < 8) {
+            if (lap >= 0 && lap < 9) {
                 m->lap_split_times[lap] = (int16_t)m->cumulative_timer;
                 for (int i = 0; i < lap; i++) {
                     m->lap_split_times[lap] -= m->lap_split_times[i];
@@ -2875,8 +2864,8 @@ static void advance_pending_finish_state(int slot, uint32_t sim_delta) {
                           (int)(int16_t)s_active_checkpoint.checkpoints[cp].time_bonus,
                           m->cumulative_timer);
 
-                /* Store split time */
-                if (cp < 8) {
+                /* Store split time — raw timing_frame_counter at crossing [CONFIRMED @ 0x00409E98] */
+                if (cp < 9) {
                     m->lap_split_times[cp] = (int16_t)m->cumulative_timer;
                 }
             }
@@ -2912,6 +2901,8 @@ static void sync_actor_race_metrics(int slot)
     actor->finish_time = m->post_finish_metric_base;
     actor->pending_finish_timer = (m->timer_ticks > 0) ? (uint16_t)m->timer_ticks : 0;
     actor->timing_frame_counter = (int16_t)m->cumulative_timer;
+    for (int i = 0; i < 9; i++)
+        actor->checkpoint_split_times[i] = m->lap_split_times[i];
 }
 
 /* ========================================================================
