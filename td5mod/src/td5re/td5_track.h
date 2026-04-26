@@ -200,6 +200,16 @@ int32_t td5_track_compute_spline_position(int span_index, int segment_distance,
 int  td5_track_sample_target_point(int span_index, int route_byte,
                                     int *out_x, int *out_z, int lateral_bias);
 
+/* --- ComputeTrackSpanProgress (0x004345B0)
+ * Projects actor 24.8 position onto span direction (right_vertex_index base).
+ * Returns packed int64: low32 = 8-bit normalised progress (0-255), high32 = rem. */
+int64_t td5_track_compute_span_progress(int span_index, const int32_t *actor_pos);
+
+/* --- ComputeSignedTrackOffset (0x00434670)
+ * Returns signed world-unit lateral distance between progress and route_byte.
+ * Negative when progress < route_byte. */
+int32_t td5_track_compute_signed_offset(int span_index, int progress, int route_byte);
+
 /* --- AI target span remap (0x00435180-0x00435260 inside UpdateActorTrackBehavior)
  * Remaps a linear-advanced span index through the STRIP.DAT junction table
  * when the actor is on a non-canonical route (i.e. NOT the LEFT.TRK route).

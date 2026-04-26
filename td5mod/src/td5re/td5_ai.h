@@ -50,6 +50,7 @@ void td5_ai_update_steering_bias(int *route_state, int32_t steer_weight);
 int  td5_ai_update_route_threshold(int slot);
 void td5_ai_update_track_offset_bias(int slot);
 int  td5_ai_find_offset_peer(int *route_state);
+void td5_ai_seed_actor_track_progress_offset(int slot);
 
 /* --- Script VM (12 opcodes) --- */
 int  td5_ai_advance_track_script(int *route_state);
