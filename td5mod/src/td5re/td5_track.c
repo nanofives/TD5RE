@@ -598,11 +598,12 @@ void td5_track_resolve_wall_contacts(TD5_Actor *actor)
      * lateral wall impulse. The multi-probe + lane-count filter papers
      * over the resulting false positives but the geometry is wrong.
      *
-     * The correct LATERAL wall lines would be:
-     *   LEFT  wall  = line from left [0] to left [lane_count]  (left rail)
-     *   RIGHT wall  = line from right[0] to right[lane_count]  (right rail)
-     * Both edges run near→far; perp is lateral across the road. TODO: port
-     * this geometry once the empirical long-lap behavior is re-validated. */
+     * Geometry corrected to longitudinal rails per original 0x406F50/0x4070E0:
+     *   0x406F50 uses *(ushort*)(span+4) = left_vertex_index = li_base as near,
+     *   li_base + lane_count_nibble = li_base + lane_count = left-far as far.
+     *   0x4070E0 mirrors with right_vertex_index = ri_base → ri_base+lane_count.
+     *   Edge runs along each rail near→far; perp is lateral across the road.
+     *   [CONFIRMED @ 0x406F96–0x406FA5, 0x407120–0x40712F] */
 
     /* For standard types (1, 2, 5) vertex offsets are always 0. */
     int li_base = (int)sp->left_vertex_index;
@@ -614,13 +615,17 @@ void td5_track_resolve_wall_contacts(TD5_Actor *actor)
         TD5_StripVertex *inside;  /* reference vertex definitely on the inside */
     };
 
+    /* LEFT wall: longitudinal left rail (li_base → li_base+lane_count = left-far).
+     * Inside ref = ri_base (right-near, clearly on road side of left rail). */
     struct wall_line l_wall = {
         vertex_at(li_base + 0),
-        vertex_at(ri_base + 0),
-        vertex_at(li_base + lane_count)
-    };
-    struct wall_line r_wall = {
         vertex_at(li_base + lane_count),
+        vertex_at(ri_base + 0)
+    };
+    /* RIGHT wall: longitudinal right rail (ri_base → ri_base+lane_count = right-far).
+     * Inside ref = li_base (left-near, clearly on road side of right rail). */
+    struct wall_line r_wall = {
+        vertex_at(ri_base + 0),
         vertex_at(ri_base + lane_count),
         vertex_at(li_base + 0)
     };
