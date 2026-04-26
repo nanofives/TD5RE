@@ -710,7 +710,54 @@ void td5_input_update_player_control(int slot)
                     s_gear[slot]++;
                     TD5_LOG_I(LOG_TAG, "gear up: slot=%d gear=%d max=%d",
                               slot, (int)s_gear[slot], (int)max_gear);
-                    /* TODO: call FUN_0042EEA0(actor, car_config) side effect here */
+
+                    /* FUN_0042EEA0 [CONFIRMED @ 0x42EEA0-0x42EF06]:
+                     * Gear-shift weight-transfer impulse — adds to front wheel-load
+                     * accumulators and subtracts from rear (nose-dip on upshift).
+                     * Formula: impulse = (actor[0x33E] * car_cfg[0x68] * 26 / 256)
+                     *                    * gear_lut[gear] / 256
+                     * gear_lut[8] = {0,0,256,192,128,64,32,16} @ DAT_00467394 */
+                    {
+                        static const int32_t k_gear_shift_lut[8] = {
+                            0, 0, 256, 192, 128, 64, 32, 16
+                        };
+                        uint8_t *ab = (uint8_t *)a_gear;
+                        void *car_cfg = (void *)(uintptr_t)*(uint32_t *)(ab + 0x1BC);
+                        if (car_cfg) {
+                            int spd_val = *(int16_t *)(ab + 0x33E);
+                            int rpm_s   = *(int16_t *)((uint8_t *)car_cfg + 0x68);
+                            int g       = (int)(s_gear[slot] & 7u);
+                            int v = spd_val * rpm_s * 26;
+                            v = ((v + (v >> 31 & 0xFF)) >> 8) * k_gear_shift_lut[g];
+                            v = (v + (v >> 31 & 0xFF)) >> 8;
+                            *(int32_t *)(ab + 0x2EC) += v;
+                            *(int32_t *)(ab + 0x2F0) += v;
+                            *(int32_t *)(ab + 0x2F4) -= v;
+                            *(int32_t *)(ab + 0x2F8) -= v;
+                        }
+
+                        /* Gear-2 auto-gearbox check [CONFIRMED @ FUN_00402E60]:
+                         * If RPM > 75% of redline when shifting into gear 2,
+                         * write car_config+0x76 (auto-gearbox mode byte) into
+                         * actor+0x376.
+                         * car_config+0x72 = redline RPM (int16) [INFERRED from context]
+                         * actor+0x310     = current RPM (int32) [CONFIRMED]
+                         * actor+0x376     = auto-gearbox active flag (byte) [CONFIRMED] */
+                        if (s_gear[slot] == 2 && car_cfg) {
+                            int t = *(int16_t *)((uint8_t *)car_cfg + 0x72) * 3;
+                            if (((t + (t >> 31 & 3)) >> 2) <
+                                *(int32_t *)((uint8_t *)a_gear + 0x310))
+                            {
+                                ((uint8_t *)a_gear)[0x376] =
+                                    *((uint8_t *)car_cfg + 0x76);
+                                TD5_LOG_I(LOG_TAG,
+                                    "gear2 autogear: slot=%d rpm=%d flag=0x%02X",
+                                    slot,
+                                    *(int32_t *)((uint8_t *)a_gear + 0x310),
+                                    (unsigned)*((uint8_t *)car_cfg + 0x76));
+                            }
+                        }
+                    }
                 }
             }
             s_gear_debounce[slot] = TD5_INPUT_GEAR_DEBOUNCE;
