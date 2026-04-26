@@ -1204,6 +1204,11 @@ int td5_ai_find_offset_peer(int *route_state_ptr) {
         if (dist < best_dist) {
             best_dist = dist;
             best_slot = i;
+            /* Set direction [CONFIRMED @ 0x433A54, 0x433CC7]:
+             * original: abs(right_edge_dist) <= abs(left_edge_dist) from span geometry.
+             * Port approximates via lane index: outer (higher lane) → 1, inner → 0. */
+            g_lateral_avoidance_direction =
+                (ACTOR_U8(actor_ptr(i), ACTOR_SUB_LANE_INDEX) > self_lane) ? 1 : 0;
         }
     }
 
@@ -1232,25 +1237,33 @@ void td5_ai_update_track_offset_bias(int slot) {
         if (dist > 0x28) dist = 0x28;
         push = 0x29 - dist;
 
-        /* Update direction toggle [CONFIRMED @ 0x4349A4, 0x4349C5]:
-         * toggle=1 → positive push; flips to 0 when peer reaches inner boundary (sub_lane==0).
-         * toggle=0 → negative push; flips to 1 when peer reaches outer boundary (sub_lane==lane_count). */
-        peer_lane  = ACTOR_U8(actor_ptr(peer), ACTOR_SUB_LANE_INDEX);
-        lane_count = td5_track_get_span_lane_count((int)self_span);
+        /* Direction toggle logic [CONFIRMED @ 0x434900]:
+         * g_lateral_avoidance_direction was just set by find_offset_peer (0x433A54/0x433CC7).
+         * toggle=1: always positive push; reset to 0 if peer sub_lane==0 (inner boundary).
+         * toggle=0: positive push unless peer sub_lane==lane_count (outer boundary),
+         *           in which case flip to 1 and apply negative push this tick. */
+        peer_lane   = ACTOR_U8(actor_ptr(peer), ACTOR_SUB_LANE_INDEX);
+        lane_count  = td5_track_get_span_lane_count((int)peer_span); /* peer's span, not self */
 
         if (g_lateral_avoidance_direction == 1) {
+            /* Right/outer side: positive push */
             if (peer_lane == 0) {
                 g_lateral_avoidance_direction = 0;
                 TD5_LOG_I(LOG_TAG, "offset_bias: slot=%d toggle→0 peer_lane=0", slot);
             }
             rs[RS_TRACK_OFFSET_BIAS] += push;
         } else {
+            /* Left/inner side */
             if (lane_count > 0 && (int)peer_lane >= lane_count) {
+                /* Outer boundary hit: flip and push negative this tick */
                 g_lateral_avoidance_direction = 1;
-                TD5_LOG_I(LOG_TAG, "offset_bias: slot=%d toggle→1 peer_lane=%d lane_count=%d",
-                          slot, (int)peer_lane, lane_count);
+                rs[RS_TRACK_OFFSET_BIAS] -= push;
+                TD5_LOG_I(LOG_TAG, "offset_bias: slot=%d toggle→1 outer boundary peer_lane=%d",
+                          slot, (int)peer_lane);
+            } else {
+                /* Below outer boundary: positive push */
+                rs[RS_TRACK_OFFSET_BIAS] += push;
             }
-            rs[RS_TRACK_OFFSET_BIAS] -= push;
         }
     } else {
         /* No peer: decay toward zero at 8 units/tick */
