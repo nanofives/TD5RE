@@ -1949,6 +1949,19 @@ static void vfx_spawn_smoke_at_position(TD5_Actor *actor, float wx, float wy,
     int vi = view_index & 1;
     uint8_t *bank = s_particle_banks[vi];
 
+    /* Frustum-cull gate. The original gates ALL smoke spawns through
+     * RenderRaceActorForView (0x0040C120) — only firing for actors that pass
+     * TestMeshAgainstViewFrustum. The port routes the tire/slip smoke chain
+     * through the sim tick (td5_game.c per-actor loop), bypassing that gate,
+     * so distant AI cars used to leave smoke trails after the car itself
+     * was culled. Restoring the visibility check at this single chokepoint
+     * matches the original's effective behavior without restructuring the
+     * sim/render boundary. Render-time entrypoints (td5_vfx_spawn_smoke,
+     * td5_vfx_spawn_rear_wheel_smoke) are already inside a frustum gate; the
+     * double-gate is harmless. */
+    if (!td5_render_is_sphere_visible(wx, wy, wz, 50.0f))
+        return;
+
     TD5_LOG_D(LOG_TAG,
               "smoke spawn: pos=(%.2f, %.2f, %.2f) variant=%d view=%d",
               wx, wy, wz, variant & 3, view_index);
