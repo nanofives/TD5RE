@@ -258,6 +258,10 @@ typedef struct TD5_GlobalState {
          * When set, slot 0 is driven by td5_ai_update_race_actors and the
          * human input-to-actor path is skipped, exactly like demo mode. */
         int  player_is_ai;
+        /* FrontendDraw: when 1, log every fe_draw_quad call to
+         * log/frontend_draw_port.csv (screen, page, x, y, w, h, color, uvs).
+         * Disabled by default — enable with FrontendDraw=1 in [Logging]. */
+        int  log_frontend_draw;
         /* Logging — gates for the platform multi-file logger and the D3D
          * ddraw_wrapper log. Defaults preserve current behavior. Flip to
          * compare A/B perf without touching the build. */

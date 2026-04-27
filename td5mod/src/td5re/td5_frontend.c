@@ -138,6 +138,12 @@ static int  s_attract_demo_active;      /* g_attractModeDemoActive @ 0x495254 */
  * ----------------------------------------------------------------------- */
 static int s_music_test_track_idx;      /* 0..11; mirrors g_selectedCdTrackIndex @ 0x465e14 */
 
+/* -----------------------------------------------------------------------
+ * fe_draw_quad render log — written when [Logging] FrontendDraw=1
+ * ----------------------------------------------------------------------- */
+static FILE *s_fe_draw_log_fp;
+static int   s_fe_draw_log_frame;
+
 /* Band names and song titles for tracks 0..11.
  * [CONFIRMED @ Ghidra 0x418460]: PTR_s_GRAVITY_KILLS_00465e1c (band) and
  * PTR_s_FALLING_00465e58 (title) pointer tables, decoded from binary data. */
@@ -1551,6 +1557,17 @@ static void frontend_init_race_schedule(void) {
                         ? s_attract_track
                         : s_selected_track;
 
+    /* Propagate split-screen selection into global state.
+     * s_split_screen_mode (0/1) is set by Screen_TwoPlayerOptions.
+     * Only apply when s_two_player_mode is active; force 0 otherwise.
+     * g_td5.viewport_count is derived later by td5_game_init_viewport_layout().
+     * g_td5.network_active=0 ensures local split-screen path is taken. */
+    g_td5.split_screen_mode = (s_two_player_mode != 0) ? s_split_screen_mode : 0;
+    g_td5.network_active    = 0;
+    TD5_LOG_I(LOG_TAG,
+              "InitRaceSchedule: split_screen_mode=%d two_player_mode=%d network_active=0",
+              g_td5.split_screen_mode, s_two_player_mode);
+
     /* Slot 0 = player, always active */
     slot_active[0]  = 1;
     slot_ext_id[0]  = s_selected_car;
@@ -2788,6 +2805,7 @@ void td5_frontend_set_screen(TD5_ScreenIndex index) {
 
     s_previous_screen = previous;
     s_current_screen = index;
+    s_fe_draw_log_frame = 0;
     s_inner_state = 0;
     s_anim_tick = 0;
     s_anim_t = 0.0f;
@@ -2863,6 +2881,7 @@ TD5_ScreenIndex td5_frontend_get_screen(void) {
  * ======================================================================== */
 
 int td5_frontend_display_loop(void) {
+    if (g_td5.ini.log_frontend_draw) s_fe_draw_log_frame++;
     /* 0. Poll platform input so s_keyboard[] is fresh for this frame */
     {
         TD5_InputState dummy;
@@ -4552,6 +4571,18 @@ static void fe_draw_button_9slice(float bx, float by, float bw, float bh,
 static void fe_draw_quad(float x, float y, float w, float h,
                          uint32_t color, int tex_page,
                          float u0, float v0, float u1, float v1) {
+    if (g_td5.ini.log_frontend_draw) {
+        if (!s_fe_draw_log_fp) {
+            CreateDirectoryA("log", NULL);
+            s_fe_draw_log_fp = fopen("log/frontend_draw_port.csv", "w");
+            if (s_fe_draw_log_fp)
+                fprintf(s_fe_draw_log_fp, "screen,frame,x,y,w,h,color,page,u0,v0,u1,v1\n");
+        }
+        if (s_fe_draw_log_fp)
+            fprintf(s_fe_draw_log_fp, "%d,%d,%.1f,%.1f,%.1f,%.1f,%08X,%d,%.4f,%.4f,%.4f,%.4f\n",
+                    (int)s_current_screen, s_fe_draw_log_frame,
+                    x, y, w, h, color, tex_page, u0, v0, u1, v1);
+    }
     TD5_D3DVertex verts[4];
     uint16_t indices[6] = {0, 1, 2, 0, 2, 3};
     memset(verts, 0, sizeof(verts));

@@ -83,6 +83,10 @@ var cfg = {
     /* frontend_screen: when >= 0, jump to this screen index instead of
      * launching a race. Race globals are NOT written. -1 = normal quickrace. */
     frontend_screen: -1,
+    /* frontend_only: when true, bypass intro/legal/language screens but do NOT
+     * replace ScreenMainMenuAnd1PRaceFlow — let the full menu run normally.
+     * Useful for frontend render capture. Overrides frontend_screen. */
+    frontend_only: false,
 };
 
 var launched = false;
@@ -136,6 +140,11 @@ function install() {
         vlog('wrote ' + name + '@' + addrOf[name] + ' = ' + val);
     }
 
+    // Save a callable pointer to the REAL ScreenMainMenuAnd1PRaceFlow before
+    // we replace it, so frontend_only mode can call through to it.
+    var realScreenMainMenu = new NativeFunction(
+        addrOf.ScreenMainMenuAnd1PRaceFlow, 'void', [], 'stdcall');
+
     // Replace ScreenMainMenuAnd1PRaceFlow with a one-shot race launcher.
     // This function is the main menu screen fn pointer — it starts being
     // ticked right after ScreenLocalizationInit sets up car ZIPs / config.td5.
@@ -144,6 +153,15 @@ function install() {
     var replacement = new NativeCallback(function () {
         if (launched) return;
         launched = true;
+
+        // frontend_only: revert to the real menu function and call through.
+        // cfg is correct here (recv('cfg') arrives well before the first tick).
+        if (cfg.frontend_only) {
+            log('quickrace: frontend_only — reverting to real ScreenMainMenuAnd1PRaceFlow');
+            Interceptor.revert(addrOf.ScreenMainMenuAnd1PRaceFlow);
+            realScreenMainMenu();
+            return;
+        }
 
         // Frontend debug mode: jump to a specific screen instead of a race.
         if (cfg.frontend_screen >= 0 && cfg.frontend_screen < 30) {

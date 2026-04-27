@@ -44,7 +44,10 @@ INT_FIELDS = {
     "drag":     ["opponent_car"],
     "frontend": ["frontend_screen"],
 }
-BOOL_FIELDS = {"launcher": ["verbose", "trace_track_load", "player_is_ai"]}
+BOOL_FIELDS = {
+    "launcher":  ["verbose", "trace_track_load", "player_is_ai"],
+    "frontend":  ["frontend_only"],
+}
 
 
 def load_ini(path):
@@ -59,6 +62,7 @@ def load_ini(path):
         "start_span_offset": 0,
         "opponent_car": 0,
         "frontend_screen": -1,
+        "frontend_only": False,
         "verbose": False,
         "trace_track_load": False,
         "player_is_ai": False,
@@ -90,7 +94,7 @@ def apply_overrides(cfg, overrides):
             _section, field = key.split(".", 1)
         else:
             field = key
-        if field in ("verbose", "trace_track_load", "player_is_ai"):
+        if field in ("verbose", "trace_track_load", "player_is_ai", "frontend_only"):
             cfg[field] = val.lower() in ("1", "true", "yes", "on")
         else:
             try:
