@@ -2385,20 +2385,67 @@ int td5_asset_load_vehicle(int car_index, int slot)
         int skin_page = TD5_CAR_TEXTURE_PAGE_BASE + slot * 2;
         int hub_page  = TD5_CAR_TEXTURE_PAGE_BASE + slot * 2 + 1;
 
-        /* Try PNG from re/assets, fall back to ZIP+TGA */
+        /* Car skin */
         {
-            char png_skin[256], png_hub[256];
-            int skin_ok = 0, hub_ok = 0;
-
+            char png_skin[256];
+            int skin_ok = 0;
             if (td5_asset_resolve_png_path("carskin0.tga", zip_path, png_skin, sizeof(png_skin)))
                 skin_ok = td5_asset_load_png_texture(skin_page, png_skin, TD5_COLORKEY_NONE);
             if (!skin_ok)
                 TD5_LOG_W(LOG_TAG, "vehicle slot=%d: carskin0 PNG not found in %s", slot, zip_path);
+        }
 
-            if (td5_asset_resolve_png_path("carhub0.tga", zip_path, png_hub, sizeof(png_hub)))
-                hub_ok = td5_asset_load_png_texture(hub_page, png_hub, TD5_COLORKEY_NONE);
+        /* Hub-cap: composite 4 animation frames into a 128×128 sprite sheet
+         * (2×2 grid of 64×64 tiles, frame&1=col, frame>>1=row).
+         * Original (LoadRaceTexturePages @ 0x442770) blits per-car CARHUB0-3.TGA
+         * into a shared WHEELS page; port uses per-slot dedicated pages.
+         * Alpha bleed applied after composite so transparent edges don't bleed
+         * black under the D3D11 LINEAR sampler. */
+        {
+            static const char *k_hub_frames[4] = {
+                "carhub0.tga", "carhub1.tga", "carhub2.tga", "carhub3.tga"
+            };
+            uint8_t *sheet = (uint8_t *)calloc(128 * 128 * 4, 1);
+            int hub_ok = 0;
+            if (sheet) {
+                int frames_ok = 0;
+                for (int fi = 0; fi < 4; fi++) {
+                    char png_frame[256];
+                    void *fp = NULL;
+                    int fw = 0, fh = 0;
+                    if (!td5_asset_resolve_png_path(k_hub_frames[fi], zip_path,
+                                                    png_frame, sizeof(png_frame)))
+                        continue;
+                    if (!td5_asset_load_png_to_buffer(png_frame, TD5_COLORKEY_NONE,
+                                                      &fp, &fw, &fh))
+                        continue;
+                    if (fw == 64 && fh == 64) {
+                        int tile_col = fi & 1;
+                        int tile_row = fi >> 1;
+                        uint8_t *src = (uint8_t *)fp;
+                        for (int r = 0; r < 64; r++) {
+                            memcpy(sheet + ((tile_row * 64 + r) * 128 + tile_col * 64) * 4,
+                                   src + r * 64 * 4, 64 * 4);
+                        }
+                        frames_ok++;
+                    } else {
+                        TD5_LOG_W(LOG_TAG, "vehicle slot=%d: %s unexpected size %dx%d",
+                                  slot, k_hub_frames[fi], fw, fh);
+                    }
+                    stbi_image_free(fp);
+                }
+                if (frames_ok > 0) {
+                    alpha_bleed_rgb(sheet, 128, 128);
+                    if (td5_plat_render_upload_texture(hub_page, sheet, 128, 128, 2))
+                        hub_ok = 1;
+                    TD5_LOG_I(LOG_TAG, "vehicle slot=%d: hub sheet %dx%d frames=%d page=%d",
+                              slot, 128, 128, frames_ok, hub_page);
+                }
+                free(sheet);
+            }
             if (!hub_ok)
-                TD5_LOG_W(LOG_TAG, "vehicle slot=%d: carhub0 PNG not found in %s", slot, zip_path);
+                TD5_LOG_W(LOG_TAG, "vehicle slot=%d: carhub composite failed for %s",
+                          slot, zip_path);
         }
 
         /* Patch PrimitiveCmd page IDs: cmd[0]→skin, cmd[1]→chassis underside.
