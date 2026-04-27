@@ -134,6 +134,14 @@ static uint32_t s_attract_idle_timestamp;
 static int  s_attract_demo_active;      /* g_attractModeDemoActive @ 0x495254 */
 
 /* -----------------------------------------------------------------------
+ * Screen [27] CupWon — persistent unlock counts for overlay renderer
+ * Set in state 0 via td5_save_apply_cup_unlocks_ex; read in states 4-5.
+ * [CONFIRMED @ 0x423A80]: original DAT_00494bb0 = car count, DAT_00494bb4 = track count.
+ * ----------------------------------------------------------------------- */
+static int s_cup_won_car_count;
+static int s_cup_won_track_count;
+
+/* -----------------------------------------------------------------------
  * Screen [19] MusicTestExtras — state shared between state machine + render
  * ----------------------------------------------------------------------- */
 static int s_music_test_track_idx;      /* 0..11; mirrors g_selectedCdTrackIndex @ 0x465e14 */
@@ -2237,6 +2245,7 @@ static void frontend_load_bg_gallery(void);
 /* Forward declarations for dialog text overlay renderers */
 static void frontend_render_legal_copyright_overlay(float sx, float sy);
 static void frontend_render_cup_failed_overlay(float sx, float sy);
+static void frontend_render_cup_won_overlay(float sx, float sy);
 static void frontend_render_session_locked_overlay(float sx, float sy);
 
 static void frontend_begin_text_input(char *buffer, int capacity) {
@@ -4704,6 +4713,67 @@ static void frontend_render_cup_failed_overlay(float sx, float sy) {
 }
 
 /* ========================================================================
+ * frontend_render_cup_won_overlay
+ *
+ * Draws "Congrats / You Have Won / [cup type] / [unlock lines]" dialog.
+ * Original renders into a 0x198×0xC4 (408×196) surface; port draws live.
+ *
+ * Dialog position (state 4-5): same offsets as CupFailed:
+ *   overlay at (center_x - 0xa8, center_y - 0x8f) [CONFIRMED @ 0x00423D4D/D51]
+ *   = (320-168, 240-143) = (152, 97) on 640×480.
+ *
+ * Text Y offsets [CONFIRMED @ ScreenCupWonDialog 0x00423A80]:
+ *   SNK_CongratsTxt     y = 0x00 (0)   — "CONGRATULATIONS"
+ *   SNK_YouHaveWonTxt   y = 0x38 (56)  — "YOU HAVE WON"
+ *   SNK_RaceTypeText    y = 0x54 (84)  — cup type name
+ *   SNK_CarsUnlocked    y = 0x8C (140) — if s_cup_won_car_count != 0  [CONFIRMED @ 0x00423BDD]
+ *   SNK_TracksUnlocked  y = 0xA8 (168) — if s_cup_won_track_count != 0 [CONFIRMED @ 0x00423C2D]
+ *
+ * Dialog height: 0xC4 = 196 (vs CupFailed's 0x70 = 112) [CONFIRMED @ 0x00423AEB/AF0]
+ * Unlock string text [UNCERTAIN — Language.dll not decompiled]:
+ *   using "NEW CARS UNLOCKED" / "NEW TRACKS UNLOCKED" as reasonable defaults.
+ * ======================================================================== */
+static void frontend_render_cup_won_overlay(float sx, float sy) {
+    char unlock_buf[64];
+
+    /* Only draw during states 4-5 (dialog visible) [CONFIRMED @ 0x00423A80] */
+    if (s_inner_state < 4) return;
+
+    /* Dialog box screen position (same offsets as CupFailed) [CONFIRMED @ 0x00423D4D] */
+    float dlg_x = (320.0f - 168.0f) * sx;
+    float dlg_y = (240.0f - 143.0f) * sy;
+    float dlg_w = 408.0f * sx;
+    float dlg_h = 196.0f * sy;  /* 0xC4 [CONFIRMED @ 0x00423AEB] */
+    float dlg_cx = dlg_x + dlg_w * 0.5f;
+
+    /* Dialog background — BltColorFillToSurface fills to black [CONFIRMED @ 0x00423B10] */
+    td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
+    fe_draw_quad(dlg_x, dlg_y, dlg_w, dlg_h, 0xCC000000u, -1, 0,0,1,1);
+
+    /* "CONGRATULATIONS" at y=0x00 [CONFIRMED @ 0x00423B2E] */
+    fe_draw_text_centered(dlg_cx, dlg_y + 0.0f  * sy, "CONGRATULATIONS", 0xFFFFFFFF, sx, sy);
+    /* "YOU HAVE WON" at y=0x38=56 [CONFIRMED @ 0x00423B52] */
+    fe_draw_text_centered(dlg_cx, dlg_y + 56.0f * sy, "YOU HAVE WON",    0xFFFFFFFF, sx, sy);
+    /* Cup type name at y=0x54=84 [CONFIRMED @ 0x00423B89] */
+    if (s_selected_game_type >= 1 && s_selected_game_type <= 6) {
+        fe_draw_text_centered(dlg_cx, dlg_y + 84.0f * sy,
+                              k_cup_type_names[s_selected_game_type], 0xFFFFFFFF, sx, sy);
+    }
+    /* Car unlock line at y=0x8C=140 [CONFIRMED @ 0x00423BDD] */
+    if (s_cup_won_car_count != 0) {
+        snprintf(unlock_buf, sizeof(unlock_buf), "%d NEW CARS UNLOCKED", s_cup_won_car_count);
+        fe_draw_text_centered(dlg_cx, dlg_y + 140.0f * sy, unlock_buf, 0xFFFFFFFF, sx, sy);
+    }
+    /* Track unlock line at y=0xA8=168 [CONFIRMED @ 0x00423C2D] */
+    if (s_cup_won_track_count != 0) {
+        snprintf(unlock_buf, sizeof(unlock_buf), "%d NEW TRACKS UNLOCKED", s_cup_won_track_count);
+        fe_draw_text_centered(dlg_cx, dlg_y + 168.0f * sy, unlock_buf, 0xFFFFFFFF, sx, sy);
+    }
+
+    td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
+}
+
+/* ========================================================================
  * frontend_render_session_locked_overlay
  *
  * Draws "Sorry / Session Locked" dialog. Identical structure to
@@ -4817,6 +4887,10 @@ void td5_frontend_render_ui_rects(void) {
     case TD5_SCREEN_CUP_FAILED:
         /* "Sorry / You Failed / To Win / [cup]" dialog [CONFIRMED @ 0x004237F0] */
         frontend_render_cup_failed_overlay(sx, sy);
+        break;
+    case TD5_SCREEN_CUP_WON:
+        /* "Congrats / You Have Won / [cup] / [unlocks]" dialog [CONFIRMED @ 0x00423A80] */
+        frontend_render_cup_won_overlay(sx, sy);
         break;
     case TD5_SCREEN_SESSION_LOCKED:
         /* "Sorry / Session Locked" dialog [CONFIRMED @ 0x0041D630] */
@@ -8993,14 +9067,21 @@ static void Screen_CupWon(void) {
 
         /* Apply cup unlock progression and save to Config.td5.
          * Original AwardCupCompletionUnlocks checks companion_state_2 == 1 (player
-         * finished, not DNF) before proceeding. [CONFIRMED @ 0x00421da0] */
+         * finished, not DNF) before proceeding. [CONFIRMED @ 0x00421da0]
+         * Store car/track counts separately for the overlay renderer.
+         * [CONFIRMED @ 0x00423A80]: DAT_00494bb0 = car count, DAT_00494bb4 = track count. */
+        s_cup_won_car_count   = 0;
+        s_cup_won_track_count = 0;
         {
             int new_unlocks = 0;
             if (td5_game_slot_is_finished(0)) {
-                new_unlocks = td5_save_apply_cup_unlocks((int)s_selected_game_type);
+                new_unlocks = td5_save_apply_cup_unlocks_ex((int)s_selected_game_type,
+                                                            &s_cup_won_car_count,
+                                                            &s_cup_won_track_count);
             }
-            TD5_LOG_I(LOG_TAG, "CupWon: game_type=%d finished=%d new_unlocks=%d",
-                      (int)s_selected_game_type, td5_game_slot_is_finished(0), new_unlocks);
+            TD5_LOG_I(LOG_TAG, "CupWon: game_type=%d finished=%d new_unlocks=%d cars=%d tracks=%d",
+                      (int)s_selected_game_type, td5_game_slot_is_finished(0),
+                      new_unlocks, s_cup_won_car_count, s_cup_won_track_count);
 
             /* Persist updated unlock state */
             td5_save_write_config(NULL);
@@ -9025,23 +9106,22 @@ static void Screen_CupWon(void) {
         }
 
         frontend_load_tga("Front_End/MainMenu.tga", "Front_End/FrontEnd.zip");
-        /* Create 0x198 x 0xC4 dialog surface */
-        /* Draw: Congrats (y=0), You Have Won (y=0x38), race type name (y=0x54) */
-        /* If unlocked car: draw at y=0x8C */
-        /* If unlocked track: draw at y=0xA8 */
-        frontend_create_button("OK", -100, 0, 100, 0x20);
+        /* Dialog 0x198×0xC4 (408×196) rendered live in frontend_render_cup_won_overlay.
+         * [CONFIRMED @ 0x00423AEB/AF0]: CreateTrackedFrontendSurface(0x198, 0xC4) */
+        /* [CONFIRMED @ 0x00423C61]: SNK_OkButTxt at x=-0x120 (was -100, wrong) */
+        frontend_create_button("OK", -0x120, 0, 0x60, 0x20);
         s_anim_tick = 0;
         s_inner_state = 1;
         break;
 
-    case 1: case 2: case 3: /* Present */
+    case 1: case 2: case 3: /* Present (3 frames) */
         frontend_present_buffer();
         s_inner_state++;
         break;
 
-    case 4: /* Slide-in: 32 frames */
-        s_anim_tick += 2;
-        if (s_anim_tick >= 0x10) {
+    case 4: /* Slide-in: 32 frames [CONFIRMED @ 0x00423D35: anim==0x20 exit, +1/frame] */
+        s_anim_tick++;
+        if (s_anim_tick >= 0x20) {
             s_inner_state = 5;
         }
         break;
