@@ -199,6 +199,8 @@ static void vfx_update_front_tire_effects(TD5_Actor *actor, uint8_t contact_flag
 static void vfx_update_front_wheel_sound_effects(TD5_Actor *actor, int speed);
 static void vfx_update_rear_wheel_sound_effects(TD5_Actor *actor, int speed);
 static int  vfx_alloc_slot_index(void);
+static void vfx_read_wheel_world_pos(TD5_Actor *actor, int wheel_index,
+                                     int32_t *out_x, int32_t *out_y, int32_t *out_z);
 static int  vfx_acquire_tire_track_emitter(int wheel_id, int actor_slot,
                                             int wheel_index, uint8_t alpha,
                                             uint8_t width);
@@ -1376,20 +1378,19 @@ static int vfx_acquire_tire_track_emitter(int wheel_id, int actor_slot,
     /* Initialize pool slot */
     VfxTireTrackSlot *slot = &s_tire_track_pool[found];
 
-    /* Copy wheel world position from actor's high-res wheel positions.
-     * Actor struct offset +0x298 = wheel_world_positions_hires[4], each 12 bytes.
-     * wheel_index selects which wheel (0=FL, 1=FR, 2=RL, 3=RR). */
-    uint8_t *actor_base = (uint8_t *)((uintptr_t)actor_slot * TD5_ACTOR_STRIDE +
-                          (uintptr_t)g_td5.total_actor_count); /* placeholder base */
-    /* Use a safer approach: read from the emitter desc's actor slot.
-     * We need the actual actor pointer -- get it via the global actor table. */
-    /* Since we only have the actor_slot index, and the caller already has
-     * the actor pointer in the tire effect functions, we read the wheel
-     * position there and pass it through the descriptor. For now, use the
-     * wheel world positions at actor+0x298 + wheel_index * 12. */
-    slot->anchor_x = 0;
-    slot->anchor_y = 0;
-    slot->anchor_z = 0;
+    /* Seed anchor from actor's live wheel position via global actor table. */
+    if (g_actor_table_base) {
+        uint8_t *actor_base = g_actor_table_base + (size_t)actor_slot * TD5_ACTOR_STRIDE;
+        vfx_read_wheel_world_pos((TD5_Actor *)actor_base, wheel_index,
+                                 &slot->anchor_x, &slot->anchor_y, &slot->anchor_z);
+        slot->trail_x = slot->anchor_x;
+        slot->trail_y = slot->anchor_y;
+        slot->trail_z = slot->anchor_z;
+    } else {
+        slot->anchor_x = 0;
+        slot->anchor_y = 0;
+        slot->anchor_z = 0;
+    }
 
     slot->control = 1;  /* allocated, no geometry yet */
     slot->lifetime = 0;

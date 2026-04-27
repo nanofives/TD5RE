@@ -1316,6 +1316,10 @@ int td5_game_init_race_session(void) {
             *(int32_t *)(actor + 0x204) = world_z;
 
             actor[0x375] = (uint8_t)slot;
+            /* Wheel emitter IDs (+0x371..+0x374): 0xFF = "no emitter acquired yet".
+             * VFX acquisition check fires only when value == 0xFF; actors start
+             * zeroed (memset above), so must be explicitly primed here. */
+            memset(actor + 0x371, 0xFF, 4);
             /* track_contact_flag (+0x37B) intentionally NOT set here.
              * Original (0x434350) never touches it during init — it is a
              * per-frame wall-contact flag set by wall_response() and cleared
