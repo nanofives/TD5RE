@@ -1850,124 +1850,60 @@ static uint8_t compute_boundary_bits(int span_idx, int sub_lane,
 }
 
 /**
- * Compute the car's effective sub_lane from its XZ position within a span.
- * Returns a value in [0, lane_count-1] based on lateral position.
- * Used for junction branch decisions when sub_lane tracking is unreliable.
- */
-static int compute_effective_sublane(int span_idx, int32_t pos_x, int32_t pos_z)
-{
-    if (span_idx < 0 || span_idx >= s_span_count) return 0;
-    const TD5_StripSpan *sp = &s_span_array[span_idx];
-    int lc = span_lane_count(sp);
-    if (lc < 2) return 0;
-
-    /* Measure lateral position as fraction across the span width.
-     * Left edge vertex = left_vertex_index[0], right edge = left_vertex_index[lc].
-     * Project car position onto the lateral axis (perpendicular to the
-     * longitudinal near→far direction). */
-    TD5_StripVertex *v0 = vertex_at((int)sp->left_vertex_index);
-    TD5_StripVertex *vN = vertex_at((int)sp->left_vertex_index + lc);
-    if (!v0 || !vN) return 0;
-
-    int32_t ox = sp->origin_x;
-    int32_t oz = sp->origin_z;
-    /* Lateral vector: v0 → vN */
-    int32_t lat_dx = (int32_t)vN->x - (int32_t)v0->x;
-    int32_t lat_dz = (int32_t)vN->z - (int32_t)v0->z;
-    int64_t lat_sq = (int64_t)lat_dx * lat_dx + (int64_t)lat_dz * lat_dz;
-    if (lat_sq == 0) return 0;
-
-    /* Project car's position (relative to v0) onto lateral axis */
-    int32_t car_rx = (pos_x >> 8) - ox - (int32_t)v0->x;
-    int32_t car_rz = (pos_z >> 8) - oz - (int32_t)v0->z;
-    int64_t proj = (int64_t)car_rx * lat_dx + (int64_t)car_rz * lat_dz;
-
-    /* Convert projection to sub_lane index */
-    int result = (int)(proj * lc / lat_sq);
-    if (result < 0) result = 0;
-    if (result >= lc) result = lc - 1;
-    return result;
-}
-
-/**
  * Resolve neighbor span index for a given crossing direction.
  * Returns the new span index (and updates sub_lane via pointer).
  */
 static int resolve_neighbor(int span_idx, int *sub_lane, uint8_t crossing_bit,
                             int32_t pos_x, int32_t pos_z)
 {
+    (void)pos_x; (void)pos_z; /* formerly used by compute_effective_sublane workaround */
     TD5_StripSpan *sp = &s_span_array[span_idx];
     int new_span = span_idx;
     int h_offset = span_height_offset(sp);
     int cur_lane_count = span_lane_count(sp);
 
-    /* Junction branch decision [CONFIRMED @ 0x4443E8, 0x4444A0]:
-     * The original decides main-road vs branch based on sub_lane:
+    /* Junction branch decision [CONFIRMED @ 0x004440F0]:
+     * The original uses running sub_lane_index (cVar15) directly for the
+     * junction routing decision — no geometric projection.
      *   Type 8 (fwd junction): sub_lane < next_span.lane_count → span+1 (main)
      *                          sub_lane >= next_span.lane_count → forward_link (branch)
      *   Type 11 (bwd junction): sub_lane < prev_span.lane_count → span-1 (main)
      *                           sub_lane >= prev_span.lane_count → backward_link (branch)
-     *
-     * HOWEVER: the port's sub_lane tracking is unreliable (h_offset adjustment
-     * doesn't produce correct lateral tracking). As a workaround, we compute
-     * the car's geometric position within the junction span to determine which
-     * side of the lane threshold the car is on. This matches the original's
-     * intent (sub_lane reflects position) without depending on broken tracking.
-     *
-     * The lane threshold divides the junction's lateral extent. The car's
-     * perpendicular distance from the left edge, as a fraction of total width,
-     * determines the effective sub_lane for the branch decision. */
+     * Branch delta: sub_lane += branch_dest_lanes - cur_lane_count [CONFIRMED]
+     * Walker appends ±1 post-step unconditionally [CONFIRMED @ 0x004440F0 cases 0x01/0x04] */
 
     switch (crossing_bit) {
     case 0x01: /* Forward */
         switch (sp->span_type) {
-        case 8: { /* JUNCTION_FWD [CONFIRMED @ 0x4440F0 case 1]:
-                   * sub_lane < next_span.lane_count → main road (span+1)
-                   * sub_lane >= next_span.lane_count → branch (link_next)
-                   *
-                   * Port deviation from the literal original: the walker's
-                   * iterative *sub_lane state drifts over multi-span
-                   * traversal (uniform -1 on case 1, +h_offset on case 2,
-                   * etc.) and by the time we reach the junction it no
-                   * longer reflects the actor's true lateral position.
-                   * The original ALSO drifts its sub_lane arithmetically
-                   * but apparently maintains consistency via the exact
-                   * byte-level dispatch order we haven't replicated.
-                   *
-                   * Workaround: recompute the effective sub_lane from the
-                   * actor's XZ position projected against this junction
-                   * span's lateral axis (compute_effective_sublane) and
-                   * use THAT for the main-vs-branch decision. Verified
-                   * 2026-04-21 on Newcastle (level 29, span 128, fwd=635):
-                   * the iterative *sub_lane reached span 128 with value 2
-                   * or 3 from a drive where the probe's real sub_lane was
-                   * 1, causing the walker to route INTO the branch
-                   * sentinel span 635 (type-9) and the car to fall through
-                   * the ground because branch geometry isn't resolved.
-                   * Geometric sub_lane at the same moment returns 1,
-                   * routing correctly to span 129. */
+        case 8: { /* JUNCTION_FWD [CONFIRMED @ 0x004440F0]:
+                   * original uses running cVar15 (sub_lane_index) directly:
+                   *   cVar15 < next_span.lane_count → main road (span+1), no delta
+                   *   cVar15 >= next_span.lane_count → branch (link_next),
+                   *     cVar15 += branch_dest_lanes - cur_lanes
+                   * threshold = pbVar1[0x1b] & 0xf = span_records[(span_idx+1)*0x18+3] & 0xf
+                   *           = span_lane_count(&s_span_array[span_idx+1]) [CONFIRMED]
+                   * walker appends -1 post-step unconditionally [CONFIRMED] */
             int next_idx = span_idx + 1;
-            int effective_sub = compute_effective_sublane(span_idx, pos_x, pos_z);
+            int sl = *sub_lane;
             if (next_idx >= 0 && next_idx < s_span_count) {
                 int next_lanes = span_lane_count(&s_span_array[next_idx]);
-                if (effective_sub < next_lanes) {
-                    /* Main road — adopt the geometric sub_lane so
-                     * downstream bookkeeping starts clean. */
+                if (sl < next_lanes) {
+                    /* Main road — no sub_lane delta; walker applies -1 */
                     new_span = next_idx;
-                    *sub_lane = effective_sub;
+                    TD5_LOG_I(LOG_TAG, "jfwd_main: span=%d sl=%d next_lanes=%d -> span=%d",
+                              span_idx, sl, next_lanes, new_span);
                 } else {
-                    /* Branch road */
+                    /* Branch road — apply dest-lane delta */
                     new_span = (int)sp->link_next;
                     if (new_span >= 0 && new_span < s_span_count) {
-                        /* Branch lane = effective_sub - next_lanes
-                         * (lanes [next_lanes, cur_lane_count) on the
-                         * junction fold into [0, dest_lanes) on the
-                         * branch). */
-                        *sub_lane = effective_sub - next_lanes;
+                        int branch_lanes = span_lane_count(&s_span_array[new_span]);
+                        sl += branch_lanes - cur_lane_count;
+                        *sub_lane = sl;
                     } else {
                         new_span = next_idx; /* fallback to main */
-                        *sub_lane = effective_sub;
                     }
+                    TD5_LOG_I(LOG_TAG, "jfwd_branch: span=%d sl=%d next_lanes=%d -> span=%d sl_new=%d",
+                              span_idx, *sub_lane, next_lanes, new_span, sl);
                 }
             }
             break;
@@ -1992,22 +1928,21 @@ static int resolve_neighbor(int span_idx, int *sub_lane, uint8_t crossing_bit,
 
     case 0x02: /* Right (forward + lateral) */
         switch (sp->span_type) {
-        case 8: { /* JUNCTION_FWD: branch decision same as 0x01
-                   * (geometric sub_lane override — see case 0x01 type-8) */
+        case 8: { /* JUNCTION_FWD: same branch decision as 0x01 [CONFIRMED @ 0x004440F0] */
             int next_idx = span_idx + 1;
-            int effective_sub = compute_effective_sublane(span_idx, pos_x, pos_z);
+            int sl = *sub_lane;
             if (next_idx >= 0 && next_idx < s_span_count) {
                 int next_lanes = span_lane_count(&s_span_array[next_idx]);
-                if (effective_sub < next_lanes) {
+                if (sl < next_lanes) {
                     new_span = next_idx;
-                    *sub_lane = effective_sub;
                 } else {
                     new_span = (int)sp->link_next;
                     if (new_span >= 0 && new_span < s_span_count) {
-                        *sub_lane = effective_sub - next_lanes;
+                        int branch_lanes = span_lane_count(&s_span_array[new_span]);
+                        sl += branch_lanes - cur_lane_count;
+                        *sub_lane = sl;
                     } else {
                         new_span = next_idx;
-                        *sub_lane = effective_sub;
                     }
                 }
             } else {
@@ -2031,29 +1966,30 @@ static int resolve_neighbor(int span_idx, int *sub_lane, uint8_t crossing_bit,
 
     case 0x04: /* Backward */
         switch (sp->span_type) {
-        case 11: { /* JUNCTION_BWD [CONFIRMED @ 0x4440F0 case 4]:
-                    * sub_lane >= prev_span.lane_count → branch (link_prev)
-                    * sub_lane < prev_span.lane_count → main road (span-1)
-                    *
-                    * Geometric sub_lane override — see case 0x01 type-8
-                    * for the rationale (iterative *sub_lane drifts). */
+        case 11: { /* JUNCTION_BWD [CONFIRMED @ 0x004440F0]:
+                    * threshold = pbVar1[-0x15] & 0xf
+                    *           = span_records[(span_idx-1)*0x18+3] & 0xf
+                    *           = span_lane_count(&s_span_array[span_idx-1]) [CONFIRMED]
+                    * cVar15 >= prev_lanes → branch (link_prev), delta applied
+                    * cVar15 <  prev_lanes → main road (span-1), no delta
+                    * walker appends +1 post-step [CONFIRMED] */
             int prev_idx = span_idx - 1;
-            int effective_sub = compute_effective_sublane(span_idx, pos_x, pos_z);
+            int sl = *sub_lane;
             if (prev_idx >= 0 && prev_idx < s_span_count) {
                 int prev_lanes = span_lane_count(&s_span_array[prev_idx]);
-                if (effective_sub >= prev_lanes) {
+                if (sl >= prev_lanes) {
                     /* Branch road */
                     new_span = (int)sp->link_prev;
                     if (new_span >= 0 && new_span < s_span_count) {
-                        *sub_lane = effective_sub - prev_lanes;
+                        int branch_lanes = span_lane_count(&s_span_array[new_span]);
+                        sl += branch_lanes - cur_lane_count;
+                        *sub_lane = sl;
                     } else {
                         new_span = prev_idx; /* fallback to main */
-                        *sub_lane = effective_sub;
                     }
                 } else {
-                    /* Main road */
+                    /* Main road — no sub_lane delta; walker applies +1 */
                     new_span = prev_idx;
-                    *sub_lane = effective_sub;
                 }
             }
             break;
@@ -2077,23 +2013,22 @@ static int resolve_neighbor(int span_idx, int *sub_lane, uint8_t crossing_bit,
 
     case 0x08: /* Left (backward + lateral) */
         switch (sp->span_type) {
-        case 11: { /* JUNCTION_BWD: branch decision same as 0x04
-                    * (geometric sub_lane override — see case 0x01 type-8) */
+        case 11: { /* JUNCTION_BWD: same branch decision as 0x04 [CONFIRMED @ 0x004440F0] */
             int prev_idx = span_idx - 1;
-            int effective_sub = compute_effective_sublane(span_idx, pos_x, pos_z);
+            int sl = *sub_lane;
             if (prev_idx >= 0 && prev_idx < s_span_count) {
                 int prev_lanes = span_lane_count(&s_span_array[prev_idx]);
-                if (effective_sub >= prev_lanes) {
+                if (sl >= prev_lanes) {
                     new_span = (int)sp->link_prev;
                     if (new_span >= 0 && new_span < s_span_count) {
-                        *sub_lane = effective_sub - prev_lanes;
+                        int branch_lanes = span_lane_count(&s_span_array[new_span]);
+                        sl += branch_lanes - cur_lane_count;
+                        *sub_lane = sl;
                     } else {
                         new_span = prev_idx;
-                        *sub_lane = effective_sub;
                     }
                 } else {
                     new_span = prev_idx;
-                    *sub_lane = effective_sub;
                 }
             } else {
                 new_span = span_idx - 1;
@@ -2212,6 +2147,7 @@ static void update_position_recursive(int16_t *track_state, int32_t pos_x, int32
 {
     int span_idx = (int)track_state[0];
     int sub_lane = (int)((int8_t *)track_state)[12];
+    if (sub_lane < 0) sub_lane = 0;  /* clamp stored -1 (from junction ±1 step) before boundary test */
     int new_span;
     int iter;
     /* Compound-case atomic flag. The original's UpdateActorTrackPosition
@@ -2246,25 +2182,18 @@ static void update_position_recursive(int16_t *track_state, int32_t pos_x, int32
             track_state[2]++;
             if (track_state[2] > track_state[3])
                 track_state[3] = track_state[2];
-            /* Original appends -1 to sub_lane post-step.
+            /* Original appends -1 to sub_lane post-step unconditionally,
+             * including for junction (type 8) transitions.
              * [CONFIRMED @ 0x004440F0 case 0x01: `cVar15 + ... + (-1)`]
-             *
-             * Exception for junction transitions (type 8): resolve_neighbor
-             * already set sub_lane to the geometrically correct value on the
-             * new span. Applying the uniform -1 here drives it negative and
-             * corrupts the next iteration's boundary test on the branch span
-             * (observed Newcastle span 635 type-9 entry at sub_lane=-1,
-             * reading vertices outside the span's quad). Match the original's
-             * behavior: it runs a SINGLE step per call (return after write)
-             * so the -1 only affects the stored sub_lane, not the walker's
-             * internal state. We simulate that by breaking out of the loop
-             * after any junction transition and applying -1 only for
-             * non-junction case-1 steps. */
+             * resolve_neighbor now uses the running sub_lane (not geometric
+             * projection) so the -1 applies cleanly.  The early return keeps
+             * single-step semantics matching the original — negative stored
+             * values are clamped to 0 at the next call's walker entry. */
+            sub_lane -= 1;
             if (prev_type == 8) {
                 ((int8_t *)track_state)[12] = (int8_t)sub_lane;
                 return;
             }
-            sub_lane -= 1;
             break;
         }
 
@@ -2333,14 +2262,14 @@ static void update_position_recursive(int16_t *track_state, int32_t pos_x, int32
             span_idx = new_span;
             track_state[0] = (int16_t)new_span;
             track_state[2]--;
-            /* Original appends +1 to sub_lane post-step.
-             * [CONFIRMED @ 0x004440F0 case 0x04: `cVar15 + ... + '\x01'`]
-             * Exception for junction transitions — see case 1 comment. */
+            /* Original appends +1 to sub_lane post-step unconditionally,
+             * including for junction (type 11) transitions.
+             * [CONFIRMED @ 0x004440F0 case 0x04: `cVar15 + ... + '\x01'`] */
+            sub_lane += 1;
             if (prev_type == 11) {
                 ((int8_t *)track_state)[12] = (int8_t)sub_lane;
                 return;
             }
-            sub_lane += 1;
             break;
         }
 

@@ -134,6 +134,14 @@ static uint32_t s_attract_idle_timestamp;
 static int  s_attract_demo_active;      /* g_attractModeDemoActive @ 0x495254 */
 
 /* -----------------------------------------------------------------------
+ * Screen [27] CupWon — persistent unlock counts for overlay renderer
+ * Set in state 0 via td5_save_apply_cup_unlocks_ex; read in states 4-5.
+ * [CONFIRMED @ 0x423A80]: original DAT_00494bb0 = car count, DAT_00494bb4 = track count.
+ * ----------------------------------------------------------------------- */
+static int s_cup_won_car_count;
+static int s_cup_won_track_count;
+
+/* -----------------------------------------------------------------------
  * Screen [19] MusicTestExtras — state shared between state machine + render
  * ----------------------------------------------------------------------- */
 static int s_music_test_track_idx;      /* 0..11; mirrors g_selectedCdTrackIndex @ 0x465e14 */
@@ -387,6 +395,38 @@ static int      s_ctrl_kb_slot       = 0;
 static uint8_t  s_ctrl_kb_scancodes[16];
 /* [CONFIRMED @ 0x40FE00 / DAT_00463FC8]: per-player joystick binding rows */
 static uint32_t s_ctrl_binding_table[2][9];
+
+/* Action label strings for keyboard capture prompt (SNK_ControlText slots 0-9)
+ * [CONFIRMED @ 0x40FE00 case 0x19]: index = s_ctrl_kb_slot (0..9)
+ * Strings from LANGUAGE.DLL SNK_ControlText at offsets 0..9 * 0x10.
+ * Content [UNCERTAIN]: LANGUAGE.DLL not in binary; names estimated from slot order. */
+static const char * const k_ctrl_action_labels[10] = {
+    "Steer",        /* slot 0 */
+    "Gas",          /* slot 1 */
+    "Brake",        /* slot 2 */
+    "Handbrake",    /* slot 3 */
+    "Gear Up",      /* slot 4 */
+    "Gear Down",    /* slot 5 */
+    "Look Back",    /* slot 6 */
+    "Horn",         /* slot 7 */
+    "NOS",          /* slot 8 */
+    "Camera",       /* slot 9 */
+};
+
+/* Display labels for joystick binding values 2-10
+ * [CONFIRMED @ 0x40FE00 case 10]: values cycle 2..10 via SNK_ControlText[value*16].
+ * Content [UNCERTAIN]: fetched from LANGUAGE.DLL at runtime; port uses placeholder names. */
+static const char * const k_js_value_labels[9] = {
+    "Axis+",  /* value 2 */
+    "Axis-",  /* value 3 */
+    "Btn1",   /* value 4 */
+    "Btn2",   /* value 5 */
+    "Btn3",   /* value 6 */
+    "Btn4",   /* value 7 */
+    "Btn5",   /* value 8 */
+    "Btn6",   /* value 9 */
+    "Btn7",   /* value 10 */
+};
 
 /* ========================================================================
  * Frontend Rendering Infrastructure
@@ -2239,6 +2279,7 @@ static void frontend_load_bg_gallery(void);
 /* Forward declarations for dialog text overlay renderers */
 static void frontend_render_legal_copyright_overlay(float sx, float sy);
 static void frontend_render_cup_failed_overlay(float sx, float sy);
+static void frontend_render_cup_won_overlay(float sx, float sy);
 static void frontend_render_session_locked_overlay(float sx, float sy);
 
 static void frontend_begin_text_input(char *buffer, int capacity) {
@@ -3533,6 +3574,12 @@ static void frontend_render_quick_race_overlay(float sx, float sy) {
     track_locked = (!s_cheat_unlock_all && !s_network_active &&
                     s_selected_track >= 0 && s_selected_track < 26 &&
                     s_track_lock_table[s_selected_track] != 0);
+    if (s_track_preview_surface > 0) {
+        /* Right of button column (buttons end ~x=376); same coords as TrackSelection preview. */
+        fe_draw_surface_rect(s_track_preview_surface,
+                             412.0f * sx, 128.0f * sy,
+                             152.0f * sx, 224.0f * sy, 0xFFFFFFFF);
+    }
     frontend_draw_value_text(sx, sy, 140, 106, car_name, 0xFFFFFFFF);
     frontend_draw_value_text(sx, sy, 140, 226, track_name, 0xFFFFFFFF);
     if (car_locked) frontend_draw_value_text(sx, sy, 398, 126, "LOCKED", 0xFFFF4444);
@@ -3846,22 +3893,23 @@ static void frontend_render_car_stats_overlay(float sx, float sy) {
      *   ENGINE  (y=256): alone                             (canvasH-0xE0)
      *   Group C (y=280): COMPRESSION, DISPLACEMENT, LAT.  (canvasH-0xC8, step 0xC)
      *   Group D (y=328): TORQUE, HP                        (canvasH-0x98, step 0xC)
-     * exp: 0=raw value, 1=layout type, 2=engine type, 3=tire pair (fi + fi+1) */
-    static const struct { const char *hdr; int fi; int exp; float y; } k_rows[] = {
-        { "LAYOUT:",       2,  1, 124.0f },
-        { "GEARS:",        3,  0, 136.0f },
-        { "PRICE:",        4,  0, 148.0f },
-        { "TIRES:",        5,  3, 160.0f },
-        { "TOP SPEED:",    7,  0, 196.0f },
-        { "0 TO 60 MPH:",  8,  0, 208.0f },
-        { "60 TO 0 MPH:",  9,  0, 220.0f },
-        { "1/4 MILE:",    10,  0, 232.0f },
-        { "ENGINE:",      11,  2, 256.0f },
-        { "COMPRESSION:", 12,  0, 280.0f },
-        { "DISPLACEMENT:",13,  0, 292.0f },
-        { "LATERAL ACC:", 14,  0, 304.0f },
-        { "TORQUE:",      15,  0, 328.0f },
-        { "HP:",          16,  0, 340.0f },
+     * exp: 0=raw value, 1=layout type, 2=engine type, 3=tire pair (fi + fi+1)
+     * sfx: unit suffix appended to raw values (English equivalents of SNK_ConfSpeed/Mph/Sec/Ft) */
+    static const struct { const char *hdr; int fi; int exp; float y; const char *sfx; } k_rows[] = {
+        { "LAYOUT:",       2,  1, 124.0f, NULL   },
+        { "GEARS:",        3,  0, 136.0f, NULL   },
+        { "PRICE:",        4,  0, 148.0f, NULL   },
+        { "TIRES:",        5,  3, 160.0f, NULL   },
+        { "TOP SPEED:",    7,  0, 196.0f, " MPH" },
+        { "0 TO 60 MPH:",  8,  0, 208.0f, " sec" },
+        { "60 TO 0 MPH:",  9,  0, 220.0f, " ft"  },
+        { "1/4 MILE:",    10,  0, 232.0f, " sec" },
+        { "ENGINE:",      11,  2, 256.0f, NULL   },
+        { "COMPRESSION:", 12,  0, 280.0f, NULL   },
+        { "DISPLACEMENT:",13,  0, 292.0f, NULL   },
+        { "LATERAL ACC:", 14,  0, 304.0f, NULL   },
+        { "TORQUE:",      15,  0, 328.0f, NULL   },
+        { "HP:",          16,  0, 340.0f, NULL   },
     };
     int n_layout = (int)(sizeof(k_stat_layout_types)/sizeof(k_stat_layout_types[0]));
     int n_engine = (int)(sizeof(k_stat_engine_types)/sizeof(k_stat_engine_types[0]));
@@ -3871,6 +3919,8 @@ static void frontend_render_car_stats_overlay(float sx, float sy) {
     float vx = hx + fe_measure_text("COMPRESSION:", tsc * sx) + 16.0f * sx;
     char val[64];
     int i;
+
+    TD5_LOG_I(LOG_TAG, "car_stats_overlay: car=%d", s_car_spec_car);
 
     for (i = 0; i < 14; i++) {
         float y = k_rows[i].y * sy;
@@ -3903,6 +3953,11 @@ static void frontend_render_car_stats_overlay(float sx, float sy) {
         }
         default:
             frontend_fmt_spec(val, sizeof(val), raw);
+            if (k_rows[i].sfx && val[0] != '\0' && val[0] != '-') {
+                size_t vl = strlen(val), sl = strlen(k_rows[i].sfx);
+                if (vl + sl + 1 < sizeof(val))
+                    memcpy(val + vl, k_rows[i].sfx, sl + 1);
+            }
             fe_draw_text(vx, y, val, 0xFFFFFFFF, tsc * sx, tsc * sy);
             break;
         }
@@ -4096,9 +4151,7 @@ static void frontend_render_control_options_overlay(float sx, float sy) {
 static void frontend_render_controller_binding_overlay(float sx, float sy) {
     if (!s_anim_complete) return;
 
-    /* Determine which icon to show based on detected controller type.
-     * Query the input module for the active device type on player 0.
-     * 0 = keyboard, 1 = joypad/gamepad, 2 = joystick/wheel. */
+    /* Controller type icon [CONFIRMED @ 0x40FE00]: per-type TGA centered at y=120 */
     int controller_type = td5_input_get_device_type(0);
     int icon_surface = s_keyboard_icon_surface;
     if (controller_type == 1) icon_surface = s_joypad_icon_surface;
@@ -4117,6 +4170,76 @@ static void frontend_render_controller_binding_overlay(float sx, float sy) {
                          0.0f, 0.0f, 1.0f, 1.0f);
             td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
         }
+    }
+
+    /* ---------------------------------------------------------------
+     * Joystick binding list — active during state 10 (interactive).
+     *
+     * [CONFIRMED @ 0x40FE00 case 10]:
+     *   Action label at x=0xa0 (160) on 448×216 surface.
+     *   Row y = uStack_14 + 0x20 + i * 0x18, where
+     *   uStack_14 = iVar13 + num_buttons * (-12) + 0x9a.
+     * [UNCERTAIN] iVar13=0 assumed; surface blit origin = canvas (96,130).
+     * --------------------------------------------------------------- */
+    if (s_ctrl_input_source != 0 && s_inner_state == 10) {
+        float origin_x  = 96.0f * sx;
+        float col_act_x = (96.0f + 160.0f) * sx;
+        int   num = s_ctrl_num_buttons;
+        float surf_y0   = (float)(num * (-12) + 154 + 32);  /* within 448×216 surface */
+        float y_first   = (surf_y0 + 130.0f) * sy;
+        float ts = 0.75f;
+
+        fe_draw_text(origin_x,          y_first - 20.0f * sy, "BUTTON", 0xFF888888, sx*ts, sy*ts);
+        fe_draw_text(col_act_x,         y_first - 20.0f * sy, "ACTION", 0xFF888888, sx*ts, sy*ts);
+
+        for (int i = 0; i < num; i++) {
+            float row_y = y_first + (float)(i * 24) * sy;
+            if (row_y > 450.0f * sy) break;
+
+            char btn_name[8];
+            snprintf(btn_name, sizeof(btn_name), "BTN%d", i + 1);
+            fe_draw_text(origin_x, row_y, btn_name, 0xFFBBBBBB, sx*ts, sy*ts);
+
+            uint32_t bval = s_ctrl_binding_table[s_ctrl_player][i];
+            const char *aname = "---";
+            if (bval >= 2 && bval <= 10)
+                aname = k_js_value_labels[bval - 2];
+            fe_draw_text(col_act_x, row_y, aname, 0xFFFFFFFF, sx*ts, sy*ts);
+        }
+        TD5_LOG_D(LOG_TAG, "CtrlBind overlay: joystick path, player=%d num=%d",
+                  s_ctrl_player, num);
+    }
+
+    /* ---------------------------------------------------------------
+     * Keyboard capture prompt — shown during states 20/25/26/27.
+     *
+     * [CONFIRMED @ 0x40FE00 case 0x19]: action label drawn at y=0x18 (24)
+     * on 448×64 header surface; one label at a time per slot.
+     * [UNCERTAIN] Surface blit origin estimated at canvas y=130.
+     * Shows: "PRESS KEY FOR: [ACTION]" + progress counter.
+     * --------------------------------------------------------------- */
+    if (s_ctrl_input_source == 0 &&
+        (s_inner_state == 20 || s_inner_state == 25 ||
+         s_inner_state == 26 || s_inner_state == 27)) {
+        float cx = 320.0f * sx;
+
+        static const char k_prompt[] = "PRESS KEY FOR:";
+        float pw = fe_measure_text(k_prompt, sx);
+        fe_draw_text(cx - pw * 0.5f, 150.0f * sy, k_prompt, 0xFFCCCCCC, sx, sy);
+
+        int slot_idx = s_ctrl_kb_slot;
+        if (slot_idx >= 10) slot_idx = 9;
+        const char *aname = k_ctrl_action_labels[slot_idx];
+        float aw = fe_measure_text(aname, sx * 1.3f);
+        fe_draw_text(cx - aw * 0.5f, 178.0f * sy, aname, 0xFFFFFFFF, sx * 1.3f, sy * 1.3f);
+
+        char prog[16];
+        snprintf(prog, sizeof(prog), "%d / 10", s_ctrl_kb_slot);
+        float pgw = fe_measure_text(prog, sx * 0.8f);
+        fe_draw_text(cx - pgw * 0.5f, 210.0f * sy, prog, 0xFF999999, sx * 0.8f, sy * 0.8f);
+
+        TD5_LOG_D(LOG_TAG, "CtrlBind overlay: keyboard path, slot=%d action=%s",
+                  s_ctrl_kb_slot, aname);
     }
 }
 
@@ -4706,6 +4829,67 @@ static void frontend_render_cup_failed_overlay(float sx, float sy) {
 }
 
 /* ========================================================================
+ * frontend_render_cup_won_overlay
+ *
+ * Draws "Congrats / You Have Won / [cup type] / [unlock lines]" dialog.
+ * Original renders into a 0x198×0xC4 (408×196) surface; port draws live.
+ *
+ * Dialog position (state 4-5): same offsets as CupFailed:
+ *   overlay at (center_x - 0xa8, center_y - 0x8f) [CONFIRMED @ 0x00423D4D/D51]
+ *   = (320-168, 240-143) = (152, 97) on 640×480.
+ *
+ * Text Y offsets [CONFIRMED @ ScreenCupWonDialog 0x00423A80]:
+ *   SNK_CongratsTxt     y = 0x00 (0)   — "CONGRATULATIONS"
+ *   SNK_YouHaveWonTxt   y = 0x38 (56)  — "YOU HAVE WON"
+ *   SNK_RaceTypeText    y = 0x54 (84)  — cup type name
+ *   SNK_CarsUnlocked    y = 0x8C (140) — if s_cup_won_car_count != 0  [CONFIRMED @ 0x00423BDD]
+ *   SNK_TracksUnlocked  y = 0xA8 (168) — if s_cup_won_track_count != 0 [CONFIRMED @ 0x00423C2D]
+ *
+ * Dialog height: 0xC4 = 196 (vs CupFailed's 0x70 = 112) [CONFIRMED @ 0x00423AEB/AF0]
+ * Unlock string text [UNCERTAIN — Language.dll not decompiled]:
+ *   using "NEW CARS UNLOCKED" / "NEW TRACKS UNLOCKED" as reasonable defaults.
+ * ======================================================================== */
+static void frontend_render_cup_won_overlay(float sx, float sy) {
+    char unlock_buf[64];
+
+    /* Only draw during states 4-5 (dialog visible) [CONFIRMED @ 0x00423A80] */
+    if (s_inner_state < 4) return;
+
+    /* Dialog box screen position (same offsets as CupFailed) [CONFIRMED @ 0x00423D4D] */
+    float dlg_x = (320.0f - 168.0f) * sx;
+    float dlg_y = (240.0f - 143.0f) * sy;
+    float dlg_w = 408.0f * sx;
+    float dlg_h = 196.0f * sy;  /* 0xC4 [CONFIRMED @ 0x00423AEB] */
+    float dlg_cx = dlg_x + dlg_w * 0.5f;
+
+    /* Dialog background — BltColorFillToSurface fills to black [CONFIRMED @ 0x00423B10] */
+    td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
+    fe_draw_quad(dlg_x, dlg_y, dlg_w, dlg_h, 0xCC000000u, -1, 0,0,1,1);
+
+    /* "CONGRATULATIONS" at y=0x00 [CONFIRMED @ 0x00423B2E] */
+    fe_draw_text_centered(dlg_cx, dlg_y + 0.0f  * sy, "CONGRATULATIONS", 0xFFFFFFFF, sx, sy);
+    /* "YOU HAVE WON" at y=0x38=56 [CONFIRMED @ 0x00423B52] */
+    fe_draw_text_centered(dlg_cx, dlg_y + 56.0f * sy, "YOU HAVE WON",    0xFFFFFFFF, sx, sy);
+    /* Cup type name at y=0x54=84 [CONFIRMED @ 0x00423B89] */
+    if (s_selected_game_type >= 1 && s_selected_game_type <= 6) {
+        fe_draw_text_centered(dlg_cx, dlg_y + 84.0f * sy,
+                              k_cup_type_names[s_selected_game_type], 0xFFFFFFFF, sx, sy);
+    }
+    /* Car unlock line at y=0x8C=140 [CONFIRMED @ 0x00423BDD] */
+    if (s_cup_won_car_count != 0) {
+        snprintf(unlock_buf, sizeof(unlock_buf), "%d NEW CARS UNLOCKED", s_cup_won_car_count);
+        fe_draw_text_centered(dlg_cx, dlg_y + 140.0f * sy, unlock_buf, 0xFFFFFFFF, sx, sy);
+    }
+    /* Track unlock line at y=0xA8=168 [CONFIRMED @ 0x00423C2D] */
+    if (s_cup_won_track_count != 0) {
+        snprintf(unlock_buf, sizeof(unlock_buf), "%d NEW TRACKS UNLOCKED", s_cup_won_track_count);
+        fe_draw_text_centered(dlg_cx, dlg_y + 168.0f * sy, unlock_buf, 0xFFFFFFFF, sx, sy);
+    }
+
+    td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
+}
+
+/* ========================================================================
  * frontend_render_session_locked_overlay
  *
  * Draws "Sorry / Session Locked" dialog. Identical structure to
@@ -4823,6 +5007,10 @@ void td5_frontend_render_ui_rects(void) {
     case TD5_SCREEN_CUP_FAILED:
         /* "Sorry / You Failed / To Win / [cup]" dialog [CONFIRMED @ 0x004237F0] */
         frontend_render_cup_failed_overlay(sx, sy);
+        break;
+    case TD5_SCREEN_CUP_WON:
+        /* "Congrats / You Have Won / [cup] / [unlocks]" dialog [CONFIRMED @ 0x00423A80] */
+        frontend_render_cup_won_overlay(sx, sy);
         break;
     case TD5_SCREEN_SESSION_LOCKED:
         /* "Sorry / Session Locked" dialog [CONFIRMED @ 0x0041D630] */
@@ -5184,10 +5372,12 @@ static void Screen_LocalizationInit(void) {
          * SNK_LangDLL_exref[8] is a language-selection byte: 0x31=English, 0x32=French,
          * 0x33=German, 0x34=Italian, 0x35=Spanish (MOVs at 0x4269DF–0x426A07).
          * English entry name = "config.eng" [CONFIRMED @ 0x4667A8].
-         * The original reads "config.eng" per car ZIP, sscanf's 12 tokens (name + 11 spec
-         * strings) into DAT_0049b90c (stride 0x330, 17 rows).
-         * Port: frontend_get_car_display_name() tries "config.eng" (token 0 = display name)
-         * then falls back to "config.nfo". Full 12-token spec data not yet consumed. */
+         * The original reads "config.eng" per car ZIP, sscanf's 17 tokens into
+         * DAT_0049b90c (stride 0x330, 17 rows × 0x30 bytes each).
+         * Port: re/assets/cars/<car>/config.nfo has the same 17-token layout (extracted
+         * from the original ZIPs). frontend_load_car_spec_fields() reads all 17 tokens;
+         * frontend_render_car_stats_overlay() displays them on the Stats sub-screen
+         * (car-select state 15, button 2 "Stats"). */
         /* [CONFIRMED @ 0x4269D0] Car ZIP path table: handled in td5_asset.c */
         /* [CONFIRMED @ 0x426F80]: LoadPackedConfigTd5() reads config.td5 settings */
         /* [INFERRED] Enumerate display modes (handled in td5_render.c) */
@@ -5918,6 +6108,7 @@ static void Screen_QuickRaceMenu(void) {
         frontend_create_button("OK",           120, 377,  96, 32);
         frontend_create_button("Back",         232, 377, 112, 32);
 
+        frontend_load_selected_track_preview();
         /* Init left/right arrows on buttons 0 and 1 */
         s_anim_tick = 0;
         s_inner_state = 1;
@@ -5963,6 +6154,7 @@ static void Screen_QuickRaceMenu(void) {
                 TD5_LOG_I(LOG_TAG, "QuickRace track cycle: s_selected_track=%d level=%d name=%s",
                           s_selected_track, td5_asset_level_number(s_selected_track),
                           frontend_get_track_name(s_selected_track));
+                frontend_load_selected_track_preview();
                 frontend_play_sfx(2); /* ping2.wav cycle */
             }
             if (s_button_index == 2) { /* OK */
@@ -7097,21 +7289,6 @@ static void Screen_TwoPlayerOptions(void) {
  *   6=Look Back  7=Horn  8=NOS  9=Camera
  * ======================================================================== */
 
-/* Action labels for "press key for [action]" prompts — [INFERRED] from
- * SNK_ControlText_exref slot ordering seen in Ghidra decompilation */
-static const char * const k_ctrl_action_labels[10] = {
-    "Steer",        /* slot 0 */
-    "Gas",          /* slot 1 */
-    "Brake",        /* slot 2 */
-    "Handbrake",    /* slot 3 */
-    "Gear Up",      /* slot 4 */
-    "Gear Down",    /* slot 5 */
-    "Look Back",    /* slot 6 */
-    "Horn",         /* slot 7 */
-    "NOS",          /* slot 8 */
-    "Camera",       /* slot 9 */
-};
-
 static void Screen_ControllerBinding(void) {
     switch (s_inner_state) {
 
@@ -7232,6 +7409,7 @@ static void Screen_ControllerBinding(void) {
         s_anim_tick++;
         if (s_anim_tick >= 0x1C) {
             s_anim_tick = 0;
+            s_anim_complete = 1;
             s_inner_state = 10;
         }
         break;
@@ -7357,6 +7535,7 @@ static void Screen_ControllerBinding(void) {
         s_anim_tick++;
         if (s_anim_tick >= 0x1C) {
             s_anim_tick = 0;
+            s_anim_complete = 1;
             s_inner_state = 20;
         }
         break;
@@ -7900,7 +8079,10 @@ static void Screen_CarSelection(void) {
         s_inner_state = 7;
         break;
 
-    case 17: /* Info sub-screen: render SNK_Info_Values (10 entries) */
+    case 17: /* Info sub-screen [0x40DFC0 state 0x11]: draws 10 strings from
+              * SNK_Info_Values_exref (Language.dll export, 10 × char* pointers,
+              * centered via MeasureOrCenterFrontendString [CONFIRMED @ 0x0040F184]).
+              * Language.dll is unavailable in the port; fall through to return. */
         s_inner_state = 18;
         break;
 
@@ -8999,14 +9181,21 @@ static void Screen_CupWon(void) {
 
         /* Apply cup unlock progression and save to Config.td5.
          * Original AwardCupCompletionUnlocks checks companion_state_2 == 1 (player
-         * finished, not DNF) before proceeding. [CONFIRMED @ 0x00421da0] */
+         * finished, not DNF) before proceeding. [CONFIRMED @ 0x00421da0]
+         * Store car/track counts separately for the overlay renderer.
+         * [CONFIRMED @ 0x00423A80]: DAT_00494bb0 = car count, DAT_00494bb4 = track count. */
+        s_cup_won_car_count   = 0;
+        s_cup_won_track_count = 0;
         {
             int new_unlocks = 0;
             if (td5_game_slot_is_finished(0)) {
-                new_unlocks = td5_save_apply_cup_unlocks((int)s_selected_game_type);
+                new_unlocks = td5_save_apply_cup_unlocks_ex((int)s_selected_game_type,
+                                                            &s_cup_won_car_count,
+                                                            &s_cup_won_track_count);
             }
-            TD5_LOG_I(LOG_TAG, "CupWon: game_type=%d finished=%d new_unlocks=%d",
-                      (int)s_selected_game_type, td5_game_slot_is_finished(0), new_unlocks);
+            TD5_LOG_I(LOG_TAG, "CupWon: game_type=%d finished=%d new_unlocks=%d cars=%d tracks=%d",
+                      (int)s_selected_game_type, td5_game_slot_is_finished(0),
+                      new_unlocks, s_cup_won_car_count, s_cup_won_track_count);
 
             /* Persist updated unlock state */
             td5_save_write_config(NULL);
@@ -9031,23 +9220,22 @@ static void Screen_CupWon(void) {
         }
 
         frontend_load_tga("Front_End/MainMenu.tga", "Front_End/FrontEnd.zip");
-        /* Create 0x198 x 0xC4 dialog surface */
-        /* Draw: Congrats (y=0), You Have Won (y=0x38), race type name (y=0x54) */
-        /* If unlocked car: draw at y=0x8C */
-        /* If unlocked track: draw at y=0xA8 */
-        frontend_create_button("OK", -100, 0, 100, 0x20);
+        /* Dialog 0x198×0xC4 (408×196) rendered live in frontend_render_cup_won_overlay.
+         * [CONFIRMED @ 0x00423AEB/AF0]: CreateTrackedFrontendSurface(0x198, 0xC4) */
+        /* [CONFIRMED @ 0x00423C61]: SNK_OkButTxt at x=-0x120 (was -100, wrong) */
+        frontend_create_button("OK", -0x120, 0, 0x60, 0x20);
         s_anim_tick = 0;
         s_inner_state = 1;
         break;
 
-    case 1: case 2: case 3: /* Present */
+    case 1: case 2: case 3: /* Present (3 frames) */
         frontend_present_buffer();
         s_inner_state++;
         break;
 
-    case 4: /* Slide-in: 32 frames */
-        s_anim_tick += 2;
-        if (s_anim_tick >= 0x10) {
+    case 4: /* Slide-in: 32 frames [CONFIRMED @ 0x00423D35: anim==0x20 exit, +1/frame] */
+        s_anim_tick++;
+        if (s_anim_tick >= 0x20) {
             s_inner_state = 5;
         }
         break;
