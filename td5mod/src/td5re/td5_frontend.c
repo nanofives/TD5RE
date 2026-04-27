@@ -1600,11 +1600,15 @@ static void frontend_init_race_schedule(void) {
                         : s_selected_track;
 
     /* Propagate split-screen selection into global state.
-     * s_split_screen_mode (0/1) is set by Screen_TwoPlayerOptions.
-     * Only apply when s_two_player_mode is active; force 0 otherwise.
+     * s_split_screen_mode (0/1) is set by Screen_TwoPlayerOptions:
+     *   0 = horizontal split, 1 = vertical split (mirrors gSplitScreenMode @ 0x497A5C).
+     * Apply +1 to convert to td5_game_init_viewport_layout case values:
+     *   case 1 = horizontal, case 2 = vertical  (case 0 = single player).
+     * This matches the original: gRaceViewportLayoutMode = gSplitScreenMode + 1
+     * [CONFIRMED @ 0x42AE1E: gRaceViewportLayoutMode = (char)DAT_00497a5c + 1]
      * g_td5.viewport_count is derived later by td5_game_init_viewport_layout().
      * g_td5.network_active=0 ensures local split-screen path is taken. */
-    g_td5.split_screen_mode = (s_two_player_mode != 0) ? s_split_screen_mode : 0;
+    g_td5.split_screen_mode = (s_two_player_mode != 0) ? (s_split_screen_mode + 1) : 0;
     g_td5.network_active    = 0;
     TD5_LOG_I(LOG_TAG,
               "InitRaceSchedule: split_screen_mode=%d two_player_mode=%d network_active=0",
