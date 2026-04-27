@@ -26,7 +26,6 @@
 #include "td5_ai.h"
 
 /* Defined in td5_game.c */
-extern int td5_game_is_wanted_mode(void);
 extern int    g_actorSlotForView[2];
 extern uint8_t *g_actor_table_base;
 
@@ -452,7 +451,13 @@ void td5_input_update_player_control(int slot)
             speed_sq = *(int32_t *)(abytes + 0x31C) >> 8;
             vehicle_stopped = (speed < 100) ? 1 : 0;
         }
-        encounter_active = td5_game_is_wanted_mode();
+        /* Per-slot encounter latch [CONFIRMED @ 0x00403180].
+         * Original gate: gActorSpecialEncounterActive[slot * 0x11c] != 0.
+         * Bug pre-fix: used td5_game_is_wanted_mode() (a global mode flag),
+         * which is true for the entire Cop Chase session. That routed every
+         * frame into the encounter-control branch below and prevented the
+         * normal throttle write — Cop Chase player car never accelerated. */
+        encounter_active = td5_ai_is_encounter_active(slot);
     }
 
     int steer_rate_denom;
