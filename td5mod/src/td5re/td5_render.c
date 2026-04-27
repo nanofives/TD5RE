@@ -3570,12 +3570,11 @@ static void render_vehicle_brake_lights(const TD5_Actor *actor, int slot)
  *   rim_radius = cardef+0x82 * 0.76171875 (195/256, DAT_0045D7AC)
  *   axle_halfw = cardef+0x84 (raw int16, no scaling)
  *
- * NOTE: The original additionally runtime-patches WHEELS tpage cells with
- * per-car CARHUB_N.TGA blits (LoadRaceTexturePages @ 0x442770) and draws a
- * second per-frame animated hub-cap quad using those cells. The source
- * port loads per-car carhub to dedicated pages (800+slot*2+1,
- * td5_asset.c:2137) but wiring that texture into the billboard pipeline
- * is left as a follow-up — see TODO below.
+ * NOTE: The original runtime-patches WHEELS tpage cells with per-car
+ * CARHUB0-3.TGA blits (LoadRaceTexturePages @ 0x442770) and draws an
+ * animated hub-cap quad using those cells.  The port composites all 4
+ * frames into a 128×128 sprite sheet (2×2 of 64×64 tiles) per slot on
+ * page 800+slot*2+1 (td5_asset.c, LoadRaceTexturePages analog).
  */
 #define WHEEL_SEGMENTS       8
 #define WHEEL_RADIUS_SCALE   0.76171875f  /* 195/256, from DAT_0045D7AC */
@@ -3804,10 +3803,6 @@ static void render_vehicle_wheel_billboards(TD5_Actor *actor, int slot)
         if (spin_frame > 3) spin_frame = 3;
         int spin_col = spin_frame & 1;
         int spin_row = spin_frame >> 1;
-        float hub_u0 = ((float)(spin_col * 32) + 0.5f) / 64.0f;
-        float hub_v0 = ((float)(spin_row * 32) + 0.5f) / 64.0f;
-        float hub_u1 = ((float)(spin_col * 32 + 31) + 0.5f) / 64.0f;
-        float hub_v1 = ((float)(spin_row * 32 + 31) + 0.5f) / 64.0f;
         {
             /* Hub-cap disc: center vertex + 8 perimeter vertices (at the same
              * rim_radius as the tyre ring) drawn as a triangle fan. The
@@ -3827,10 +3822,11 @@ static void render_vehicle_wheel_billboards(TD5_Actor *actor, int slot)
             float rot_sin = (w < 2) ? front_sin : rear_sin;
             float hub_r  = rim_radius;
 
-            /* Hub texture: 32x32 tile inside a 64x64 carhub page. */
-            const float hub_cu = ((float)(spin_col * 32 + 16)) / 64.0f;
-            const float hub_cv = ((float)(spin_row * 32 + 16)) / 64.0f;
-            const float hub_ru = 15.5f / 64.0f;
+            /* Hub texture: 64x64 tile inside the 128x128 carhub sheet.
+             * Tile col = frame&1, row = frame>>1 [CONFIRMED @ 0x004470C0]. */
+            const float hub_cu = ((float)(spin_col * 64 + 32)) / 128.0f;
+            const float hub_cv = ((float)(spin_row * 64 + 32)) / 128.0f;
+            const float hub_ru = 31.5f / 128.0f;
 
             static const float k_hub_unit_y[8] = {
                 1.0f,  0.70710678f,  0.0f, -0.70710678f,
@@ -3914,7 +3910,6 @@ static void render_vehicle_wheel_billboards(TD5_Actor *actor, int slot)
                 td5_plat_render_bind_texture(hub_page);
                 td5_plat_render_draw_tris(hub, 9, hub_idx, 48);
             }
-            (void)hub_u0; (void)hub_u1; (void)hub_v0; (void)hub_v1;
         }
     }
 }
