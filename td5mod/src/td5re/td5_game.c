@@ -989,12 +989,14 @@ int td5_game_init_race_session(void) {
      * selected via DAT_00474d74[g_trackPoolIndex]. Resolver returns -1
      * when the track's pool index >= 25, matching the original guard
      * @ 0x004435ad (`iVar15 < 0x19`) which gates a zero-sized traffic
-     * allocation. [UNCERTAIN: reverse-direction flag not yet plumbed;
-     * defaulting forward.]
+     * allocation.
      *
      * Gate mirrors the original 0x0042AA10 forced-off conditions:
      * network / split-screen already cleared g_td5.traffic_enabled above;
-     * time-trial and drag-race don't spawn traffic actors. */
+     * time-trial and drag-race don't spawn traffic actors.
+     * Reverse-direction flag (TRAFFIC.BUS entry flags bit 0) is applied in
+     * td5_ai_init_traffic_actors / td5_ai_recycle_traffic_actor via +0x80000
+     * heading offset [CONFIRMED @ 0x00435786, 0x00435C00]. */
     if (g_td5.traffic_enabled
         && !g_td5.time_trial_enabled
         && !g_td5.drag_race_enabled
