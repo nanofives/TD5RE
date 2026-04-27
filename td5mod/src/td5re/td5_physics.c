@@ -1183,24 +1183,6 @@ void td5_physics_update_player(TD5_Actor *actor)
         front_lat_force = local_c_num / denom;  /* no negation [CONFIRMED @ 0x00404B93] */
     }
 
-    /* Tuning departure: while braking on-ground, halve the lateral tire
-     * forces before they're rotated into world-frame velocity. The coupled
-     * bicycle model generates large cornering forces when steering, which
-     * get added on top of the rear longitudinal brake force and produce a
-     * ~9x-stronger per-tick deceleration than straight-line braking
-     * (observed in log/race.log FORCE_BRK entries: straight fz≈-593,
-     * steering fx=5414 fz=-888). This made brake feel uneven between
-     * straight and turning. Halving f_lat / r_lat flattens the asymmetry
-     * while preserving some cornering bite so the car still carves when
-     * trail-braking. Not RE-faithful — save as TODO for /diff-race
-     * investigation whether the original's coupled solve really produces
-     * these magnitudes or if a slip-circle / grip-limit upstream bug
-     * inflates them. */
-    if (actor->brake_flag && actor->surface_contact_flags != 0) {
-        front_lat_force >>= 1;
-        rear_lat_force  >>= 1;
-    }
-
     if (actor->slot_index == 0 && (actor->frame_counter % 120u) == 0u) {
         TD5_LOG_I(LOG_TAG,
                   "LATFORCE: f_lat=%d r_lat=%d vx_b=%d vz_b=%d w=%d steer=%d",
