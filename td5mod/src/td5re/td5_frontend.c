@@ -639,7 +639,9 @@ static float frontend_update_timed_animation(int max_tick, uint32_t duration_ms)
 
 static const char *frontend_get_title_tga_for_screen(TD5_ScreenIndex screen) {
     switch (screen) {
-    case TD5_SCREEN_MAIN_MENU: return "MainMenuText.TGA";
+    /* SelectCompCarText.tga (540x20) — confirmed overlay for MainMenu @ 0x41572A.
+     * Original: FUN_00412e30(0) loads this via FUN_00425660 at x=(screenW/2-200)=120. */
+    case TD5_SCREEN_MAIN_MENU: return "SelectCompCarText.tga";
     case TD5_SCREEN_RACE_TYPE_MENU: return "RaceMenuText.TGA";
     case TD5_SCREEN_QUICK_RACE: return "QuickRaceText.tga";
     case TD5_SCREEN_OPTIONS_HUB: return "OptionsText.tga";
@@ -4767,6 +4769,10 @@ void td5_frontend_render_ui_rects(void) {
         frontend_render_bg_gallery(sx, sy);
 
     switch (s_current_screen) {
+    case TD5_SCREEN_MAIN_MENU:
+        /* SelectCompCarText.tga (540×20) overlay drawn via title texture system above.
+         * No additional per-screen overlay needed — original only has the text strip. */
+        break;
     case TD5_SCREEN_RACE_TYPE_MENU:
         frontend_render_race_type_description(sx, sy);
         break;
