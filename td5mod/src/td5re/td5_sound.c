@@ -1084,7 +1084,11 @@ void td5_sound_update_audio_mix(void)
 
                 /* Start the engine loop if not yet started */
                 if (s_traffic_engine_state[t_state_idx] == 0) {
-                    slot_play(t - 6 + 0x1F + slot_offset, 1, 0, 0, 1000);
+                    /* 0x441845: slot = abs_actor_index + slot_offset + 0x1F
+                     * abs_actor_index for traffic[0] = 6, giving slot 37 = TD5_SOUND_TRAFFIC_SLOT_BASE */
+                    int play_slot = t + 0x1F + slot_offset;
+                    TD5_LOG_I(LOG_TAG, "traffic engine start: actor=%d play_slot=%d (pass=%d)", t, play_slot, pass);
+                    slot_play(play_slot, 1, 0, 0, 1000);
                     s_traffic_engine_state[t_state_idx] = 1;
                 }
 
