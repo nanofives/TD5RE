@@ -842,21 +842,16 @@ void UpdateTracksideOrbitCamera(int actor, int is_active, int view)
         orient[1] = (short)((unsigned int)g_camElevationAngleFP[v] >> 8);
         orient[2] = (short)(int)(-(CosFloat12bit(heading) * radius_scaled) + 0.5f);
 
-        /* Transform through actor's rotation matrix.
-         * DISABLED: same sin/cos convention bug as in UpdateChaseCamera.
-         * See comment there for details. */
-#if 0
+        /* Transform orient through actor's rotation matrix.
+         * [CONFIRMED @ 0x401950]: original calls LoadRenderRotationMatrix
+         * with actor+0x120 then ConvertFloatVec3ToShortAngles. */
         LoadRenderRotationMatrix((float *)(actor + 0x120));
         {
             short out_ang[4];
             ConvertFloatVec3ToShortAngles(orient, out_ang);
-
             g_camOrientShort[v][0] = out_ang[0];
             g_camOrientShort[v][1] = out_ang[1];
         }
-#endif
-        g_camOrientShort[v][0] = orient[0];
-        g_camOrientShort[v][1] = orient[1];
     }
 
     /* Smooth height */

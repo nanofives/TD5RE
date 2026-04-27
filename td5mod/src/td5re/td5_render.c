@@ -1755,12 +1755,25 @@ void td5_render_actors_for_view(int view_index)
                 render_pos.z = interp_z * (1.0f / 256.0f);
             }
 
-            /* Original (0x40C1E2-0x40C25E) builds an interpolated rotation from
-             * display_angles + angular_velocity * (1/256 * g_subTickFraction).
-             * BuildRotationMatrixFromAngles has known axis-order issues for some
-             * tracks, so fall back to the physics-step rotation matrix for now.
-             * The position interpolation alone handles most of the visual lag. */
-            mat3x3_mul(s_camera_basis, actor->rotation_matrix.m, view_rot.m);
+            /* Original (0x40C1E2-0x40C25E): vehicle_mode==0 builds an
+             * interpolated rotation; vehicle_mode!=0 (traffic/recovery) uses
+             * the stored physics-step matrix directly.
+             * Interpolation: angles[i] = display_angles[i] + ang_vel[i]*(1/256)*frac
+             * Order: [roll+0x208, yaw+0x20A, pitch+0x20C] → BuildRotationMatrixFromAngles.
+             * [CONFIRMED: scale=1/256 @ DAT_004749D0; field order @ 0x40C1E2] */
+            if (actor->vehicle_mode != 0) {
+                mat3x3_mul(s_camera_basis, actor->rotation_matrix.m, view_rot.m);
+            } else {
+                extern float g_subTickFraction;
+                float interp_mat[9];
+                short interp[3];
+                float ifrac = g_subTickFraction * (1.0f / 256.0f);
+                interp[0] = actor->display_angles.roll  + (short)(int)(actor->angular_velocity_roll  * ifrac + 0.5f);
+                interp[1] = actor->display_angles.yaw   + (short)(int)(actor->angular_velocity_yaw   * ifrac + 0.5f);
+                interp[2] = actor->display_angles.pitch + (short)(int)(actor->angular_velocity_pitch * ifrac + 0.5f);
+                BuildRotationMatrixFromAngles(interp_mat, interp);
+                mat3x3_mul(s_camera_basis, interp_mat, view_rot.m);
+            }
             td5_render_load_rotation(&view_rot);
             td5_render_load_translation(&render_pos);
 
