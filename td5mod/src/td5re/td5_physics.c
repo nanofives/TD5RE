@@ -1011,10 +1011,15 @@ void td5_physics_update_player(TD5_Actor *actor)
             if (abs_speed <= speed_limit) {
                 switch (dt_type) {
                 case 1: /* RWD */
+                    /* Original airborne RWD (0x404576-0x404592): SAR ECX,1 then MOV [EBP-0x18] only.
+                     * Only ONE rear wheel slot receives torque/2; wheel_drive[3] stays 0
+                     * (zero-initialised at line 829). Writing both gives 2× vz vs original.
+                     * [CONFIRMED by Ghidra agent: single MOV in RWD airborne path] */
                     wheel_drive[2] = drive_torque >> 1;
-                    wheel_drive[3] = drive_torque >> 1;
                     break;
                 case 2: /* FWD */
+                    /* Original airborne FWD (0x404594-0x4045AE): writes [EBP-0x4] and [EBP+0x8]
+                     * — both front slots. [CONFIRMED] */
                     wheel_drive[0] = drive_torque >> 1;
                     wheel_drive[1] = drive_torque >> 1;
                     break;
