@@ -7308,11 +7308,12 @@ static void Screen_ControllerBinding(void) {
         s_nocontroller_surface  = frontend_load_tga("NoControllerText.tga", "Front End/frontend.zip");
 
         /* Which player are we configuring?
-         * [CONFIRMED @ 0x40FE00] DAT_004974b8 is set by ControlOptions (screen 14)
-         * before navigating here. Port: s_ctrl_player propagated via caller context.
-         * For now read from the last-selected button on ControlOptions screen:
-         * button 1 = Configure P1 → player=0, button 3 = Configure P2 → player=1.
-         * [INFERRED] We use s_ctrl_player which caller sets; default 0 if not set. */
+         * s_ctrl_player is the direct port of DAT_004974b8.
+         * ScreenControlOptions writes 0 (P1) or 1 (P2) before calling
+         * td5_frontend_set_screen(TD5_SCREEN_CONTROLLER_BINDING).
+         * [CONFIRMED @ 0x0041e6c3]: button 1 → DAT_004974b8 = 0
+         * [CONFIRMED @ 0x0041e71d]: button 3 → DAT_004974b8 = 1 */
+        TD5_LOG_I(LOG_TAG, "ControllerBinding: player=%d", s_ctrl_player);
         {
             int dev_type;
             int source;
