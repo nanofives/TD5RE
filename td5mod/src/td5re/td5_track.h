@@ -210,6 +210,15 @@ int64_t td5_track_compute_span_progress(int span_index, const int32_t *actor_pos
  * Negative when progress < route_byte. */
 int32_t td5_track_compute_signed_offset(int span_index, int progress, int route_byte);
 
+/* --- Track globals (defined in td5_track.c) --- */
+extern int       g_track_is_circuit;
+extern int       g_track_type_mode;
+extern int       g_strip_span_count;
+extern int       g_strip_total_segments;
+extern void     *g_strip_span_base;
+extern void     *g_strip_vertex_base;
+extern uint16_t *g_checkpoint_array;
+
 /* --- AI target span remap (0x00435180-0x00435260 inside UpdateActorTrackBehavior)
  * Remaps a linear-advanced span index through the STRIP.DAT junction table
  * when the actor is on a non-canonical route (i.e. NOT the LEFT.TRK route).

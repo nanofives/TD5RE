@@ -191,4 +191,21 @@ void td5_render_draw_sky(void);
 /* --- Billboard animation --- */
 void td5_render_advance_billboard_anims(void);
 
+/* --- HUD / sprite pipeline --- */
+/* 0x432BD0: Build sprite quad template from layout params */
+void td5_render_build_sprite_quad(int *params);
+/* 0x4315B0: Submit immediate translucent primitive */
+void td5_render_submit_translucent(uint16_t *quad_data);
+void td5_render_submit_translucent_low_ref(uint16_t *quad_data);
+/* 0x43E640: Set viewport clip rect */
+void td5_render_set_clip_rect(float left, float right, float top, float bottom);
+/* 0x439E60: Render radial pulse overlay effect */
+void td5_render_radial_pulse(float dt);
+
+/* --- Render dimension globals (defined in td5_render.c) --- */
+extern float g_render_width_f;
+extern float g_render_height_f;
+extern int   g_render_width;
+extern int   g_render_height;
+
 #endif /* TD5_RENDER_H */

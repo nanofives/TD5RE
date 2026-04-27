@@ -73,6 +73,22 @@ int td5_game_get_total_actor_count(void);
 int td5_game_get_player_lap(int slot);
 int32_t td5_game_get_race_timer(int slot, int lap_index);
 
+/* 0x430CF0: Allocate from game heap */
+void *td5_game_heap_alloc(size_t size);
+
+/* --- Game state globals (defined in td5_game.c) --- */
+extern int      g_replay_mode;
+extern int      g_wanted_mode_enabled;
+extern int      g_special_encounter;
+extern int      g_race_rule_variant;
+extern int      g_game_type;
+extern int      g_split_screen_mode;
+extern int      g_racer_count;
+extern float    g_instant_fps;
+extern uint32_t g_tick_counter;
+extern int      g_actor_slot_map[2];
+extern void    *g_actor_pool;
+
 /* --- Split-screen --- */
 int td5_game_get_player_slot(int viewport);
 int td5_game_is_split_screen(void);
