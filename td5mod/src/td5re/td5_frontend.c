@@ -4362,7 +4362,8 @@ static void frontend_render_race_results_overlay(float sx, float sy) {
         fe_draw_text(col_name, y, buf, row_color, sx * ts, sy * ts);
 
         {
-            int car_idx = (slot == 0) ? s_selected_car : 0;
+            int car_idx = (slot == 0) ? s_selected_car : g_td5.ai_car_indices[slot];
+            if (car_idx < 0 || car_idx > 36) car_idx = 0;
             const char *cname = frontend_get_car_display_name(car_idx);
             char cname_buf[18];
             strncpy(cname_buf, cname ? cname : "", sizeof(cname_buf) - 1);
