@@ -2158,31 +2158,28 @@ void td5_render_advance_texture_ages(void)
     }
 }
 
-/* Switch render preset only for additive (type 3) pages — and restore
- * opaque when leaving them. Types 0/1/2 are left to the caller's preset
- * (the world pass sets OPAQUE_LINEAR once at start, which has alpha_ref=1
- * so color-keyed pages discard their keyed pixels correctly).
+/* Dispatch render preset per tpage transparency type.
+ * BindRaceTexturePage @ 0x0040B660 switch:
+ *   type 0 → ALPHABLENDENABLE=0 (opaque)                  [CONFIRMED @ 0x0040B6B0]
+ *   type 1 → ALPHABLENDENABLE=1, SRCALPHA/INVSRCALPHA     [CONFIRMED @ 0x0040B6CC]
+ *   type 2 → same D3D state as type 1                     [CONFIRMED @ 0x0040B6CC, same case]
+ *   type 3 → ALPHABLENDENABLE=1, ONE/ONE (additive)       [CONFIRMED @ 0x0040B6E8]
  *
- * Forcing TRANSLUCENT_ANISO for type 1/2 was wrong: it disabled z-write
- * and turned on alpha blend for the entire opaque world, causing z-order
- * tearing on track geometry and washed-out / flickering car rendering.
- * The original BindRaceTexturePage @ 0x40B660 only sets blend state when
- * the type actually changes between successive binds, and the case-2
- * branch we don't need at all because the alpha_ref=1 path handles
- * color-keyed (type 1) pages correctly already. */
+ * Types 1 and 2 share the same D3D blend state but differ in pixel alpha:
+ *   type 1 = binary 0/255 → OPAQUE_LINEAR (alpha_ref=1 discards 0-alpha pixels)
+ *   type 2 = uniform 0x80 → TRANSLUCENT_ANISO (blend enabled for 50% opacity)
+ *
+ * We call set_preset unconditionally and rely on the wrapper's per-draw
+ * ApplyStateCache to avoid redundant GPU state changes. */
 static void td5_render_apply_page_blend_preset(int page_id)
 {
-    static int s_in_additive = 0;
     int t = td5_asset_get_page_transparency(page_id);
-    if (t == 3) {
-        if (!s_in_additive) {
-            td5_plat_render_set_preset(TD5_PRESET_ADDITIVE);
-            s_in_additive = 1;
-        }
-    } else if (s_in_additive) {
-        td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
-        s_in_additive = 0;
-    }
+    TD5_RenderPreset p;
+    if (t == 3)      p = TD5_PRESET_ADDITIVE;
+    else if (t == 2) p = TD5_PRESET_TRANSLUCENT_ANISO;
+    else             p = TD5_PRESET_OPAQUE_LINEAR;
+    td5_plat_render_set_preset(p);
+    TD5_LOG_D(LOG_TAG, "page_blend_preset: page=%d type=%d preset=%d", page_id, t, (int)p);
 }
 
 int td5_render_bind_texture_page(int page_id)

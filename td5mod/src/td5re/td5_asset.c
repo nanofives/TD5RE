@@ -2259,8 +2259,9 @@ int td5_asset_load_environs_pages(int level_number, int page_base, int max_pages
         if (td5_plat_render_upload_texture(page_id, pixels, w, h, 2)) {
             /* flag 3 (SUN*) uses the sun/alpha projection preset; flag 1 is
              * the default solid environment reflection. The port maps both
-             * to transparency type 2 for now -- faithful preset selection is
-             * a follow-up once the blend paths are unified. */
+             * to transparency type 2 (50% alpha, TRANSLUCENT_ANISO blend).
+             * Faithful flag→type dispatch is a follow-up (needs Ghidra RE of
+             * the environs bind function to determine flag 1 vs 3 mapping). */
             td5_asset_set_page_transparency(page_id, 2);
             if (out_pages)
                 out_pages[loaded] = page_id;
