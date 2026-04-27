@@ -3844,22 +3844,23 @@ static void frontend_render_car_stats_overlay(float sx, float sy) {
      *   ENGINE  (y=256): alone                             (canvasH-0xE0)
      *   Group C (y=280): COMPRESSION, DISPLACEMENT, LAT.  (canvasH-0xC8, step 0xC)
      *   Group D (y=328): TORQUE, HP                        (canvasH-0x98, step 0xC)
-     * exp: 0=raw value, 1=layout type, 2=engine type, 3=tire pair (fi + fi+1) */
-    static const struct { const char *hdr; int fi; int exp; float y; } k_rows[] = {
-        { "LAYOUT:",       2,  1, 124.0f },
-        { "GEARS:",        3,  0, 136.0f },
-        { "PRICE:",        4,  0, 148.0f },
-        { "TIRES:",        5,  3, 160.0f },
-        { "TOP SPEED:",    7,  0, 196.0f },
-        { "0 TO 60 MPH:",  8,  0, 208.0f },
-        { "60 TO 0 MPH:",  9,  0, 220.0f },
-        { "1/4 MILE:",    10,  0, 232.0f },
-        { "ENGINE:",      11,  2, 256.0f },
-        { "COMPRESSION:", 12,  0, 280.0f },
-        { "DISPLACEMENT:",13,  0, 292.0f },
-        { "LATERAL ACC:", 14,  0, 304.0f },
-        { "TORQUE:",      15,  0, 328.0f },
-        { "HP:",          16,  0, 340.0f },
+     * exp: 0=raw value, 1=layout type, 2=engine type, 3=tire pair (fi + fi+1)
+     * sfx: unit suffix appended to raw values (English equivalents of SNK_ConfSpeed/Mph/Sec/Ft) */
+    static const struct { const char *hdr; int fi; int exp; float y; const char *sfx; } k_rows[] = {
+        { "LAYOUT:",       2,  1, 124.0f, NULL   },
+        { "GEARS:",        3,  0, 136.0f, NULL   },
+        { "PRICE:",        4,  0, 148.0f, NULL   },
+        { "TIRES:",        5,  3, 160.0f, NULL   },
+        { "TOP SPEED:",    7,  0, 196.0f, " MPH" },
+        { "0 TO 60 MPH:",  8,  0, 208.0f, " sec" },
+        { "60 TO 0 MPH:",  9,  0, 220.0f, " ft"  },
+        { "1/4 MILE:",    10,  0, 232.0f, " sec" },
+        { "ENGINE:",      11,  2, 256.0f, NULL   },
+        { "COMPRESSION:", 12,  0, 280.0f, NULL   },
+        { "DISPLACEMENT:",13,  0, 292.0f, NULL   },
+        { "LATERAL ACC:", 14,  0, 304.0f, NULL   },
+        { "TORQUE:",      15,  0, 328.0f, NULL   },
+        { "HP:",          16,  0, 340.0f, NULL   },
     };
     int n_layout = (int)(sizeof(k_stat_layout_types)/sizeof(k_stat_layout_types[0]));
     int n_engine = (int)(sizeof(k_stat_engine_types)/sizeof(k_stat_engine_types[0]));
@@ -3869,6 +3870,8 @@ static void frontend_render_car_stats_overlay(float sx, float sy) {
     float vx = hx + fe_measure_text("COMPRESSION:", tsc * sx) + 16.0f * sx;
     char val[64];
     int i;
+
+    TD5_LOG_I(LOG_TAG, "car_stats_overlay: car=%d", s_car_spec_car);
 
     for (i = 0; i < 14; i++) {
         float y = k_rows[i].y * sy;
@@ -3901,6 +3904,11 @@ static void frontend_render_car_stats_overlay(float sx, float sy) {
         }
         default:
             frontend_fmt_spec(val, sizeof(val), raw);
+            if (k_rows[i].sfx && val[0] != '\0' && val[0] != '-') {
+                size_t vl = strlen(val), sl = strlen(k_rows[i].sfx);
+                if (vl + sl + 1 < sizeof(val))
+                    memcpy(val + vl, k_rows[i].sfx, sl + 1);
+            }
             fe_draw_text(vx, y, val, 0xFFFFFFFF, tsc * sx, tsc * sy);
             break;
         }
@@ -5178,10 +5186,12 @@ static void Screen_LocalizationInit(void) {
          * SNK_LangDLL_exref[8] is a language-selection byte: 0x31=English, 0x32=French,
          * 0x33=German, 0x34=Italian, 0x35=Spanish (MOVs at 0x4269DF–0x426A07).
          * English entry name = "config.eng" [CONFIRMED @ 0x4667A8].
-         * The original reads "config.eng" per car ZIP, sscanf's 12 tokens (name + 11 spec
-         * strings) into DAT_0049b90c (stride 0x330, 17 rows).
-         * Port: frontend_get_car_display_name() tries "config.eng" (token 0 = display name)
-         * then falls back to "config.nfo". Full 12-token spec data not yet consumed. */
+         * The original reads "config.eng" per car ZIP, sscanf's 17 tokens into
+         * DAT_0049b90c (stride 0x330, 17 rows × 0x30 bytes each).
+         * Port: re/assets/cars/<car>/config.nfo has the same 17-token layout (extracted
+         * from the original ZIPs). frontend_load_car_spec_fields() reads all 17 tokens;
+         * frontend_render_car_stats_overlay() displays them on the Stats sub-screen
+         * (car-select state 15, button 2 "Stats"). */
         /* [CONFIRMED @ 0x4269D0] Car ZIP path table: handled in td5_asset.c */
         /* [CONFIRMED @ 0x426F80]: LoadPackedConfigTd5() reads config.td5 settings */
         /* [INFERRED] Enumerate display modes (handled in td5_render.c) */
@@ -7894,7 +7904,10 @@ static void Screen_CarSelection(void) {
         s_inner_state = 7;
         break;
 
-    case 17: /* Info sub-screen: render SNK_Info_Values (10 entries) */
+    case 17: /* Info sub-screen [0x40DFC0 state 0x11]: draws 10 strings from
+              * SNK_Info_Values_exref (Language.dll export, 10 × char* pointers,
+              * centered via MeasureOrCenterFrontendString [CONFIRMED @ 0x0040F184]).
+              * Language.dll is unavailable in the port; fall through to return. */
         s_inner_state = 18;
         break;
 
