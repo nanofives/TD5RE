@@ -1918,20 +1918,28 @@ int td5_game_run_race_frame(void) {
                 if (key_up    && !s_prev_up)    s_pause_menu_cursor = (s_pause_menu_cursor + 4) % 5;
 
                 /* Left/right adjusts sliders for rows 0-2.
-                 * [CONFIRMED @ 0x0043BF70] CONTINUOUS while held — slider[cursor] += 0.02 per frame.
-                 * Row 0=CD music fraction (DAT_004B135C) → music_volume
-                 * Row 1=CD DSound raw vol (DAT_004B1360, DXSound::CDGetVolume) → music_volume (port has one CD control)
-                 * Row 2=SFX DSound vol (DAT_004B1364, DXSound::GetVolume/SetVolume) → sfx_volume */
+                 * [CONFIRMED @ 0x0043C211] CONTINUOUS while held — (&DAT_004B135C)[cursor] ± 0.02f, clamp [0,1].
+                 * Row 0 "VIEW"  (DAT_004B135C) → [0x00466EA8] view distance, no audio call [0x0043C379]
+                 * Row 1 "MUSIC" (DAT_004B1360) → DXSound::CDSetVolume(frac*0xFFFF)        [0x0043C390]
+                 * Row 2 "SOUND" (DAT_004B1364) → DXSound::SetVolume  (frac*0xFFFF) master [0x0043C3A8] */
                 if (s_pause_menu_cursor < 3) {
-                    if (key_right) {
-                        if      (s_pause_menu_cursor == 0) td5_save_set_music_volume(td5_save_get_music_volume() + 2);
-                        else if (s_pause_menu_cursor == 1) td5_save_set_music_volume(td5_save_get_music_volume() + 2);
-                        else                               td5_save_set_sfx_volume(td5_save_get_sfx_volume() + 2);
-                    }
-                    if (key_left) {
-                        if      (s_pause_menu_cursor == 0) td5_save_set_music_volume(td5_save_get_music_volume() - 2);
-                        else if (s_pause_menu_cursor == 1) td5_save_set_music_volume(td5_save_get_music_volume() - 2);
-                        else                               td5_save_set_sfx_volume(td5_save_get_sfx_volume() - 2);
+                    int delta = key_right ? +1 : (key_left ? -1 : 0);
+                    if (delta) {
+                        if (s_pause_menu_cursor == 0) {
+                            float v = td5_save_get_view_distance() + (float)delta * 0.02f;
+                            td5_save_set_view_distance(v);
+                            TD5_LOG_I(LOG_TAG, "Pause slider VIEW: %.2f", td5_save_get_view_distance());
+                        } else if (s_pause_menu_cursor == 1) {
+                            int v = td5_save_get_music_volume() + delta * 2;
+                            td5_save_set_music_volume(v);
+                            td5_sound_set_music_volume(td5_save_get_music_volume());
+                            TD5_LOG_I(LOG_TAG, "Pause slider MUSIC: %d", td5_save_get_music_volume());
+                        } else {
+                            int v = td5_save_get_sfx_volume() + delta * 2;
+                            td5_save_set_sfx_volume(v);
+                            td5_sound_set_sfx_volume(td5_save_get_sfx_volume());
+                            TD5_LOG_I(LOG_TAG, "Pause slider SOUND: %d", td5_save_get_sfx_volume());
+                        }
                     }
                 }
 
@@ -1960,11 +1968,12 @@ int td5_game_run_race_frame(void) {
             }
 
             /* Update graphical overlay (SELBOX + sliders).
-             * [CONFIRMED @ 0x0043BF70] Row 0=CD music frac, Row 1=CD DSound raw, Row 2=SFX DSound.
-             * Port maps both CD rows to music_volume (single CD control); row 2 = sfx_volume. */
+             * [CONFIRMED @ 0x0043C0E5] Row 0=VIEW (DAT_004B135C → 0x00466EA8),
+             * Row 1=MUSIC (DAT_004B1360), Row 2=SOUND (DAT_004B1364). */
+            float view_frac  = td5_save_get_view_distance();
             float music_frac = (float)td5_save_get_music_volume() / 100.0f;
             float sfx_frac   = (float)td5_save_get_sfx_volume()   / 100.0f;
-            td5_hud_update_pause_overlay(s_pause_menu_cursor, music_frac, music_frac, sfx_frac);
+            td5_hud_update_pause_overlay(s_pause_menu_cursor, view_frac, music_frac, sfx_frac);
 
             g_td5.sim_time_accumulator -= TD5_TICK_ACCUMULATOR_ONE;
             ticks_this_frame++;
