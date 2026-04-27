@@ -396,6 +396,38 @@ static uint8_t  s_ctrl_kb_scancodes[16];
 /* [CONFIRMED @ 0x40FE00 / DAT_00463FC8]: per-player joystick binding rows */
 static uint32_t s_ctrl_binding_table[2][9];
 
+/* Action label strings for keyboard capture prompt (SNK_ControlText slots 0-9)
+ * [CONFIRMED @ 0x40FE00 case 0x19]: index = s_ctrl_kb_slot (0..9)
+ * Strings from LANGUAGE.DLL SNK_ControlText at offsets 0..9 * 0x10.
+ * Content [UNCERTAIN]: LANGUAGE.DLL not in binary; names estimated from slot order. */
+static const char * const k_ctrl_action_labels[10] = {
+    "Steer",        /* slot 0 */
+    "Gas",          /* slot 1 */
+    "Brake",        /* slot 2 */
+    "Handbrake",    /* slot 3 */
+    "Gear Up",      /* slot 4 */
+    "Gear Down",    /* slot 5 */
+    "Look Back",    /* slot 6 */
+    "Horn",         /* slot 7 */
+    "NOS",          /* slot 8 */
+    "Camera",       /* slot 9 */
+};
+
+/* Display labels for joystick binding values 2-10
+ * [CONFIRMED @ 0x40FE00 case 10]: values cycle 2..10 via SNK_ControlText[value*16].
+ * Content [UNCERTAIN]: fetched from LANGUAGE.DLL at runtime; port uses placeholder names. */
+static const char * const k_js_value_labels[9] = {
+    "Axis+",  /* value 2 */
+    "Axis-",  /* value 3 */
+    "Btn1",   /* value 4 */
+    "Btn2",   /* value 5 */
+    "Btn3",   /* value 6 */
+    "Btn4",   /* value 7 */
+    "Btn5",   /* value 8 */
+    "Btn6",   /* value 9 */
+    "Btn7",   /* value 10 */
+};
+
 /* ========================================================================
  * Frontend Rendering Infrastructure
  *
@@ -4111,9 +4143,7 @@ static void frontend_render_control_options_overlay(float sx, float sy) {
 static void frontend_render_controller_binding_overlay(float sx, float sy) {
     if (!s_anim_complete) return;
 
-    /* Determine which icon to show based on detected controller type.
-     * Query the input module for the active device type on player 0.
-     * 0 = keyboard, 1 = joypad/gamepad, 2 = joystick/wheel. */
+    /* Controller type icon [CONFIRMED @ 0x40FE00]: per-type TGA centered at y=120 */
     int controller_type = td5_input_get_device_type(0);
     int icon_surface = s_keyboard_icon_surface;
     if (controller_type == 1) icon_surface = s_joypad_icon_surface;
@@ -4132,6 +4162,76 @@ static void frontend_render_controller_binding_overlay(float sx, float sy) {
                          0.0f, 0.0f, 1.0f, 1.0f);
             td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
         }
+    }
+
+    /* ---------------------------------------------------------------
+     * Joystick binding list — active during state 10 (interactive).
+     *
+     * [CONFIRMED @ 0x40FE00 case 10]:
+     *   Action label at x=0xa0 (160) on 448×216 surface.
+     *   Row y = uStack_14 + 0x20 + i * 0x18, where
+     *   uStack_14 = iVar13 + num_buttons * (-12) + 0x9a.
+     * [UNCERTAIN] iVar13=0 assumed; surface blit origin = canvas (96,130).
+     * --------------------------------------------------------------- */
+    if (s_ctrl_input_source != 0 && s_inner_state == 10) {
+        float origin_x  = 96.0f * sx;
+        float col_act_x = (96.0f + 160.0f) * sx;
+        int   num = s_ctrl_num_buttons;
+        float surf_y0   = (float)(num * (-12) + 154 + 32);  /* within 448×216 surface */
+        float y_first   = (surf_y0 + 130.0f) * sy;
+        float ts = 0.75f;
+
+        fe_draw_text(origin_x,          y_first - 20.0f * sy, "BUTTON", 0xFF888888, sx*ts, sy*ts);
+        fe_draw_text(col_act_x,         y_first - 20.0f * sy, "ACTION", 0xFF888888, sx*ts, sy*ts);
+
+        for (int i = 0; i < num; i++) {
+            float row_y = y_first + (float)(i * 24) * sy;
+            if (row_y > 450.0f * sy) break;
+
+            char btn_name[8];
+            snprintf(btn_name, sizeof(btn_name), "BTN%d", i + 1);
+            fe_draw_text(origin_x, row_y, btn_name, 0xFFBBBBBB, sx*ts, sy*ts);
+
+            uint32_t bval = s_ctrl_binding_table[s_ctrl_player][i];
+            const char *aname = "---";
+            if (bval >= 2 && bval <= 10)
+                aname = k_js_value_labels[bval - 2];
+            fe_draw_text(col_act_x, row_y, aname, 0xFFFFFFFF, sx*ts, sy*ts);
+        }
+        TD5_LOG_D(LOG_TAG, "CtrlBind overlay: joystick path, player=%d num=%d",
+                  s_ctrl_player, num);
+    }
+
+    /* ---------------------------------------------------------------
+     * Keyboard capture prompt — shown during states 20/25/26/27.
+     *
+     * [CONFIRMED @ 0x40FE00 case 0x19]: action label drawn at y=0x18 (24)
+     * on 448×64 header surface; one label at a time per slot.
+     * [UNCERTAIN] Surface blit origin estimated at canvas y=130.
+     * Shows: "PRESS KEY FOR: [ACTION]" + progress counter.
+     * --------------------------------------------------------------- */
+    if (s_ctrl_input_source == 0 &&
+        (s_inner_state == 20 || s_inner_state == 25 ||
+         s_inner_state == 26 || s_inner_state == 27)) {
+        float cx = 320.0f * sx;
+
+        static const char k_prompt[] = "PRESS KEY FOR:";
+        float pw = fe_measure_text(k_prompt, sx);
+        fe_draw_text(cx - pw * 0.5f, 150.0f * sy, k_prompt, 0xFFCCCCCC, sx, sy);
+
+        int slot_idx = s_ctrl_kb_slot;
+        if (slot_idx >= 10) slot_idx = 9;
+        const char *aname = k_ctrl_action_labels[slot_idx];
+        float aw = fe_measure_text(aname, sx * 1.3f);
+        fe_draw_text(cx - aw * 0.5f, 178.0f * sy, aname, 0xFFFFFFFF, sx * 1.3f, sy * 1.3f);
+
+        char prog[16];
+        snprintf(prog, sizeof(prog), "%d / 10", s_ctrl_kb_slot);
+        float pgw = fe_measure_text(prog, sx * 0.8f);
+        fe_draw_text(cx - pgw * 0.5f, 210.0f * sy, prog, 0xFF999999, sx * 0.8f, sy * 0.8f);
+
+        TD5_LOG_D(LOG_TAG, "CtrlBind overlay: keyboard path, slot=%d action=%s",
+                  s_ctrl_kb_slot, aname);
     }
 }
 
@@ -7175,21 +7275,6 @@ static void Screen_TwoPlayerOptions(void) {
  *   6=Look Back  7=Horn  8=NOS  9=Camera
  * ======================================================================== */
 
-/* Action labels for "press key for [action]" prompts — [INFERRED] from
- * SNK_ControlText_exref slot ordering seen in Ghidra decompilation */
-static const char * const k_ctrl_action_labels[10] = {
-    "Steer",        /* slot 0 */
-    "Gas",          /* slot 1 */
-    "Brake",        /* slot 2 */
-    "Handbrake",    /* slot 3 */
-    "Gear Up",      /* slot 4 */
-    "Gear Down",    /* slot 5 */
-    "Look Back",    /* slot 6 */
-    "Horn",         /* slot 7 */
-    "NOS",          /* slot 8 */
-    "Camera",       /* slot 9 */
-};
-
 static void Screen_ControllerBinding(void) {
     switch (s_inner_state) {
 
@@ -7310,6 +7395,7 @@ static void Screen_ControllerBinding(void) {
         s_anim_tick++;
         if (s_anim_tick >= 0x1C) {
             s_anim_tick = 0;
+            s_anim_complete = 1;
             s_inner_state = 10;
         }
         break;
@@ -7435,6 +7521,7 @@ static void Screen_ControllerBinding(void) {
         s_anim_tick++;
         if (s_anim_tick >= 0x1C) {
             s_anim_tick = 0;
+            s_anim_complete = 1;
             s_inner_state = 20;
         }
         break;
