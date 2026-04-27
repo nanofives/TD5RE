@@ -91,6 +91,9 @@ void td5_ai_wanted_cop_hit(int cop_slot, int32_t impact_mag);
 void td5_ai_update_special_encounter(void);
 void td5_ai_update_encounter_control(int slot);
 
+/* 0x434040: Compute actor route heading delta */
+uint32_t td5_compute_heading_delta(void *route_entry);
+
 /* --- Master dispatcher --- */
 void td5_ai_update_race_actors(void);
 

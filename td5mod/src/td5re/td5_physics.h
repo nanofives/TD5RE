@@ -119,4 +119,10 @@ void td5_physics_set_slot_series_position(int slot, int position);
  * Must be called before td5_physics_init_vehicle_runtime(). */
 void td5_physics_load_carparam(int slot, const uint8_t *data_268);
 
+/* --- 12-bit angle trig utilities --- */
+/* 0x40A6A0: Cos from 12-bit angle (4096 = 360 degrees), returns float */
+float td5_cos_12bit(uint32_t angle);
+/* 0x40A6C0: Sin from 12-bit angle (4096 = 360 degrees), returns float */
+float td5_sin_12bit(uint32_t angle);
+
 #endif /* TD5_PHYSICS_H */

@@ -26,6 +26,10 @@
 #include "td5_asset.h"
 #include "td5_render.h"
 #include "td5_track.h"
+#include "td5_game.h"
+#include "td5_save.h"
+#include "td5_physics.h"
+#include "td5_ai.h"
 #include "td5re.h"
 
 #include <stdlib.h>
@@ -35,51 +39,6 @@
 #include <math.h>
 
 #define LOG_TAG "hud"
-
-/* ========================================================================
- * Forward declarations for external functions not yet in headers
- * (These correspond to original binary functions called by the HUD)
- * ======================================================================== */
-
-/* 0x442CF0: Find archive entry by name, returns atlas entry pointer */
-extern TD5_AtlasEntry *td5_asset_find_atlas_entry(void *context, const char *name);
-
-/* 0x430CF0: Allocate from game heap */
-extern void *td5_game_heap_alloc(size_t size);
-
-/* Returns completed lap index (0-based) for the given actor slot */
-extern int td5_game_get_player_lap(int slot);
-
-/* Returns race timer ticks (30/sec) for lap_index=0, or split time for 1-8 */
-extern int32_t td5_game_get_race_timer(int slot, int lap_index);
-
-/* Returns the configured circuit lap count from saved options */
-extern int td5_save_get_circuit_lap_count(void);
-
-/* 0x432BD0: Build sprite quad template from layout params */
-extern void td5_render_build_sprite_quad(int *params);
-
-/* 0x4315B0: Submit immediate translucent primitive for rendering */
-extern void td5_render_submit_translucent(uint16_t *quad_data);
-extern void td5_render_submit_translucent_low_ref(uint16_t *quad_data);
-
-/* 0x43E640: Set viewport clip rect */
-extern void td5_render_set_clip_rect(float left, float right, float top, float bottom);
-
-/* 0x43E8E0: Set viewport projection center */
-extern void td5_render_set_projection_center(float cx, float cy);
-
-/* 0x439E60: Render radial pulse overlay effect */
-extern void td5_render_radial_pulse(float dt);
-
-/* 0x40A6A0: Cos from 12-bit angle (4096 = 360 degrees), returns float */
-extern float td5_cos_12bit(uint32_t angle);
-
-/* 0x40A6C0: Sin from 12-bit angle (4096 = 360 degrees), returns float */
-extern float td5_sin_12bit(uint32_t angle);
-
-/* 0x434040: Compute actor route heading delta */
-extern uint32_t td5_compute_heading_delta(void *route_entry);
 
 /* ========================================================================
  * HUD-owned globals (migrated from td5re_stubs.c)
@@ -146,36 +105,6 @@ const char **g_pause_page_strings[8] = {
     s_eng_pause_strings, NULL, NULL, NULL, NULL, NULL, NULL, NULL
 };
 const int g_pause_page_sizes[8] = { 256, 0, 0, 0, 0, 0, 0, 0 };
-
-/* ========================================================================
- * External game state references
- * ======================================================================== */
-
-extern int     g_replay_mode;            /* td5_game.c */
-extern int     g_wanted_mode_enabled;    /* td5_game.c */
-extern int     g_special_encounter;      /* td5_game.c */
-extern int     g_race_rule_variant;      /* td5_game.c */
-extern int     g_game_type;              /* td5_game.c */
-extern int     g_split_screen_mode;      /* td5_game.c */
-extern int     g_racer_count;            /* td5_game.c */
-extern float   g_render_width_f;         /* td5_render.c */
-extern float   g_render_height_f;        /* td5_render.c */
-extern int     g_render_width;           /* td5_render.c */
-extern int     g_render_height;          /* td5_render.c */
-extern int     g_track_is_circuit;       /* td5_track.c */
-extern int     g_track_type_mode;        /* td5_track.c */
-extern float   g_instant_fps;            /* td5_game.c */
-extern uint32_t g_tick_counter;          /* td5_game.c */
-
-extern int     g_actor_slot_map[2];      /* td5_game.c */
-extern void   *g_actor_pool;             /* td5_game.c */
-
-extern int     g_strip_span_count;       /* td5_track.c */
-extern int     g_strip_total_segments;   /* td5_track.c */
-extern void   *g_strip_span_base;        /* td5_track.c */
-extern void   *g_strip_vertex_base;      /* td5_track.c */
-
-extern uint16_t *g_checkpoint_array;     /* td5_track.c */
 
 /* ========================================================================
  * Module-local state
@@ -325,9 +254,6 @@ static const uint8_t s_char_remap[128] = {
     /* 0x7B-0x7F */
     0x1F,0x1F,0x1F,0x1F, 0x1F
 };
-
-/* Pause menu glyph width table (per-character, loaded from original binary) */
-extern const int8_t g_pause_glyph_widths[256]; /* 0x4660C8 */
 
 /* ========================================================================
  * Helper: Build a sprite quad parameter block

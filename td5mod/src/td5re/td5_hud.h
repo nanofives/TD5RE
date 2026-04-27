@@ -175,4 +175,8 @@ void td5_hud_queue_text(int font_index, int x, int y, int centered,
                          const char *fmt, ...);
 void td5_hud_flush_text(void);
 
+/* --- HUD-owned globals (defined in td5_hud.c) --- */
+/* Pause-menu font glyph widths — extracted from original binary at 0x4660C8 */
+extern const int8_t g_pause_glyph_widths[256];
+
 #endif /* TD5_HUD_H */
