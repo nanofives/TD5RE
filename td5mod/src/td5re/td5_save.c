@@ -1491,9 +1491,9 @@ void td5_save_get_track_lock_table(uint8_t *out_track_locks, int count)
  *   Tracks 20-25: locked (cup tracks)
  * ======================================================================== */
 
-int td5_save_apply_cup_unlocks(int game_type)
+int td5_save_apply_cup_unlocks_ex(int game_type, int *cars_out, int *tracks_out)
 {
-    int count = 0;
+    int car_count = 0, track_count = 0;
 
     /* Placement validation gate.
      * [CONFIRMED @ 0x421DA0 AwardCupCompletionUnlocks]:
@@ -1506,14 +1506,20 @@ int td5_save_apply_cup_unlocks(int game_type)
     if (game_type != -1) {
         if (game_type < 1 || game_type > 6) {
             TD5_LOG_D(LOG_TAG, "apply_cup_unlocks: game_type=%d not in cup range, skip", game_type);
+            if (cars_out)   *cars_out   = 0;
+            if (tracks_out) *tracks_out = 0;
             return 0;
         }
         if (!td5_game_slot_is_finished(0)) {
             TD5_LOG_W(LOG_TAG, "apply_cup_unlocks: slot 0 not finished, skip unlocks");
+            if (cars_out)   *cars_out   = 0;
+            if (tracks_out) *tracks_out = 0;
             return 0;
         }
         if (td5_game_get_slot_state(0) == 3) {
             TD5_LOG_W(LOG_TAG, "apply_cup_unlocks: slot 0 disqualified (state=3), skip unlocks");
+            if (cars_out)   *cars_out   = 0;
+            if (tracks_out) *tracks_out = 0;
             return 0;
         }
     }
@@ -1525,15 +1531,15 @@ int td5_save_apply_cup_unlocks(int game_type)
             s_cup_tier |= 0x01;
         }
         /* Unlock cars 23, 24 (Dodge Viper GTS-R, McLaren F1 GTR) */
-        if (s_car_locks[23] != 0) { s_car_locks[23] = 0; count++; }
-        if (s_car_locks[24] != 0) { s_car_locks[24] = 0; count++; }
+        if (s_car_locks[23] != 0) { s_car_locks[23] = 0; car_count++; }
+        if (s_car_locks[24] != 0) { s_car_locks[24] = 0; car_count++; }
         /* Unlock cup track 20 */
-        if (s_track_locks[20] == 0) { s_track_locks[20] = 1; count++; }
+        if (s_track_locks[20] == 0) { s_track_locks[20] = 1; track_count++; }
         break;
 
     case 2: /* Era */
         /* Unlock car 25 (Lister Storm) */
-        if (s_car_locks[25] != 0) { s_car_locks[25] = 0; count++; }
+        if (s_car_locks[25] != 0) { s_car_locks[25] = 0; car_count++; }
         break;
 
     case 3: /* Challenge */
@@ -1541,11 +1547,11 @@ int td5_save_apply_cup_unlocks(int game_type)
             s_cup_tier |= 0x02;
         }
         /* Unlock cars 26, 27 (Panoz Esperante GTR-1, Mercedes CLK-GTR) */
-        if (s_car_locks[26] != 0) { s_car_locks[26] = 0; count++; }
-        if (s_car_locks[27] != 0) { s_car_locks[27] = 0; count++; }
+        if (s_car_locks[26] != 0) { s_car_locks[26] = 0; car_count++; }
+        if (s_car_locks[27] != 0) { s_car_locks[27] = 0; car_count++; }
         /* Unlock cup tracks 21, 22 */
-        if (s_track_locks[21] == 0) { s_track_locks[21] = 1; count++; }
-        if (s_track_locks[22] == 0) { s_track_locks[22] = 1; count++; }
+        if (s_track_locks[21] == 0) { s_track_locks[21] = 1; track_count++; }
+        if (s_track_locks[22] == 0) { s_track_locks[22] = 1; track_count++; }
         break;
 
     case 4: /* Pitbull */
@@ -1553,24 +1559,24 @@ int td5_save_apply_cup_unlocks(int game_type)
             s_cup_tier |= 0x04;
         }
         /* Unlock cars 28, 29 (Porsche 911 GT1, Toyota GT-One) */
-        if (s_car_locks[28] != 0) { s_car_locks[28] = 0; count++; }
-        if (s_car_locks[29] != 0) { s_car_locks[29] = 0; count++; }
+        if (s_car_locks[28] != 0) { s_car_locks[28] = 0; car_count++; }
+        if (s_car_locks[29] != 0) { s_car_locks[29] = 0; car_count++; }
         /* Unlock cup tracks 23, 24 */
-        if (s_track_locks[23] == 0) { s_track_locks[23] = 1; count++; }
-        if (s_track_locks[24] == 0) { s_track_locks[24] = 1; count++; }
+        if (s_track_locks[23] == 0) { s_track_locks[23] = 1; track_count++; }
+        if (s_track_locks[24] == 0) { s_track_locks[24] = 1; track_count++; }
         break;
 
     case 5: /* Masters */
         /* Unlock cars 30, 31 (Nissan R390 GT1, BMW V12 LMR) */
-        if (s_car_locks[30] != 0) { s_car_locks[30] = 0; count++; }
-        if (s_car_locks[31] != 0) { s_car_locks[31] = 0; count++; }
+        if (s_car_locks[30] != 0) { s_car_locks[30] = 0; car_count++; }
+        if (s_car_locks[31] != 0) { s_car_locks[31] = 0; car_count++; }
         /* Unlock cup track 25 */
-        if (s_track_locks[25] == 0) { s_track_locks[25] = 1; count++; }
+        if (s_track_locks[25] == 0) { s_track_locks[25] = 1; track_count++; }
         break;
 
     case 6: /* Drag */
         /* Unlock car 32 (unlocks access to hidden car index 32) */
-        if (s_car_locks[32] != 0) { s_car_locks[32] = 0; count++; }
+        if (s_car_locks[32] != 0) { s_car_locks[32] = 0; car_count++; }
         break;
 
     default:
@@ -1592,8 +1598,15 @@ int td5_save_apply_cup_unlocks(int game_type)
         s_max_unlocked_car = max_car;
     }
 
-    TD5_LOG_I(LOG_TAG, "apply_cup_unlocks: game_type=%d tier=0x%02X max_car=%u new_unlocks=%d",
-              game_type, (unsigned)s_cup_tier, (unsigned)s_max_unlocked_car, count);
+    TD5_LOG_I(LOG_TAG, "apply_cup_unlocks: game_type=%d tier=0x%02X max_car=%u cars=%d tracks=%d",
+              game_type, (unsigned)s_cup_tier, (unsigned)s_max_unlocked_car, car_count, track_count);
 
-    return count;
+    if (cars_out)   *cars_out   = car_count;
+    if (tracks_out) *tracks_out = track_count;
+    return car_count + track_count;
+}
+
+int td5_save_apply_cup_unlocks(int game_type)
+{
+    return td5_save_apply_cup_unlocks_ex(game_type, NULL, NULL);
 }
