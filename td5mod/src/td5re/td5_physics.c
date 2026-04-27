@@ -3804,10 +3804,14 @@ static void process_traffic_segment_edge(TD5_Actor *actor, int slot)
             &edge_angle);
 
         if (pen < 0) {
-            /* DecayUltimateVariantTimer — only fires when specialEncounterEnabled==4
-             * [CONFIRMED @ 0x4073C8: conditional on g_specialEncounterEnabled==4]
-             * In the port, encounter mode 4 is uncommon; skip for now. */
             apply_simple_track_surface_force(actor, edge_angle, pen);
+            /* DecayUltimateVariantTimer [CONFIRMED @ 0x0040A440]:
+             * encounter mode 4 erodes the actor's clean_driving_score by 1
+             * per wall-contact tick, but only while the actor is still racing. */
+            if (g_td5.special_encounter_enabled == 4 && actor->finish_time == 0) {
+                if (actor->clean_driving_score > 0) actor->clean_driving_score -= 1;
+                if (actor->clean_driving_score < 0) actor->clean_driving_score  = 0;
+            }
             /* Original calls UpdateTrafficVehiclePose again after push;
              * the port's integrate_traffic_pose rebuilds the pose at the end
              * of the tick anyway, so skip the redundant rebuild here. */
@@ -3849,6 +3853,11 @@ outer_test:
         if (pen < 0) {
             TD5_LOG_I("physics", "seg_edge outer push slot=%d span=%d type=%d pen=%d", slot, (int)actor->track_span_raw, span_type, (int)pen);
             apply_simple_track_surface_force(actor, edge_angle, pen);
+            /* DecayUltimateVariantTimer [CONFIRMED @ 0x0040A440] — same as inner-edge */
+            if (g_td5.special_encounter_enabled == 4 && actor->finish_time == 0) {
+                if (actor->clean_driving_score > 0) actor->clean_driving_score -= 1;
+                if (actor->clean_driving_score < 0) actor->clean_driving_score  = 0;
+            }
         }
     }
 }
