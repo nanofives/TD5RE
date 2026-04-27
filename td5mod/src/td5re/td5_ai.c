@@ -1197,9 +1197,15 @@ int td5_ai_update_route_threshold(int slot) {
  * ======================================================================== */
 
 /**
- * FindActorTrackOffsetPeer: scan all actors on the same route band for the
- * nearest one ahead within 0x28 spans whose lateral range overlaps.
- * Returns peer slot index, or -1 if none found.
+ * FindActorTrackOffsetPeer: scan all actors for the nearest one ahead within
+ * 0x28 spans. Same-route peers trigger direction calculation; cross-route peers
+ * trigger a route-table swap on self [CONFIRMED @ 0x00433861/0x0043387F].
+ *
+ * Cross-route swap [CONFIRMED @ 0x00433861-0x004338A8]:
+ *   If self on g_route_tables[0]: rs[0x0F]→rs[0x09], ptr←g_route_tables[1],
+ *     rs[0x12]→rs[0x15], rs[0x13]→rs[0x14].
+ *   If self on g_route_tables[1]: rs[0x0E]→rs[0x09], ptr←g_route_tables[0],
+ *     rs[0x10]→rs[0x15], rs[0x11]→rs[0x14].
  *
  * Direction formula [CONFIRMED @ 0x00433C7C-0x00433CBE]:
  *   mid = (RS[21][peer] + RS[20][peer]) / 2
@@ -1229,13 +1235,41 @@ int td5_ai_find_offset_peer(int *route_state_ptr) {
         if (i == slot) continue;
 
         peer_rs = route_state(i);
-        if (peer_rs[RS_ROUTE_TABLE_SELECTOR] != self_selector) continue;
 
         peer_span = ACTOR_I16(actor_ptr(i), ACTOR_SPAN_RAW);
         dist = peer_span - self_span;
 
         /* Must be ahead (positive distance), within 0x28 spans */
         if (dist <= 0 || dist >= 0x29) continue;
+
+        if (peer_rs[RS_ROUTE_TABLE_SELECTOR] != self_selector) {
+            /* Cross-route peer in range: swap self's route table to match peer.
+             * Only swap for the closest cross-route peer found so far.
+             * [CONFIRMED @ 0x00433861/0x0043387F/0x00433889] */
+            if (dist < best_dist) {
+                int32_t cur_ptr = route_state_ptr[RS_ROUTE_TABLE_PTR];
+                if (cur_ptr == (int32_t)(intptr_t)g_route_tables[0]) {
+                    /* On primary → switch to secondary [CONFIRMED @ 0x0043386C/0x00433875] */
+                    route_state_ptr[RS_TRACK_OFFSET_BIAS]  = route_state_ptr[RS_LEFT_BOUNDARY_B];
+                    route_state_ptr[RS_ROUTE_TABLE_PTR]    = (int32_t)(intptr_t)g_route_tables[1];
+                    route_state_ptr[RS_ACTIVE_UPPER_BOUND] = route_state_ptr[RS_RIGHT_EXTENT_A];
+                    route_state_ptr[RS_ACTIVE_LOWER_BOUND] = route_state_ptr[RS_RIGHT_EXTENT_B];
+                } else {
+                    /* On secondary → switch to primary [CONFIRMED @ 0x0043387C/0x00433885] */
+                    route_state_ptr[RS_TRACK_OFFSET_BIAS]  = route_state_ptr[RS_LEFT_BOUNDARY_A];
+                    route_state_ptr[RS_ROUTE_TABLE_PTR]    = (int32_t)(intptr_t)g_route_tables[0];
+                    route_state_ptr[RS_ACTIVE_UPPER_BOUND] = route_state_ptr[RS_RIGHT_BOUNDARY_A];
+                    route_state_ptr[RS_ACTIVE_LOWER_BOUND] = route_state_ptr[RS_RIGHT_BOUNDARY_B];
+                }
+                self_selector ^= 1;
+                route_state_ptr[RS_ROUTE_TABLE_SELECTOR] = self_selector;
+                best_dist = dist;
+                best_slot = i;
+                TD5_LOG_I(LOG_TAG, "find_offset_peer: slot=%d cross-route swap to sel=%d peer=%d dist=%d bias=%d",
+                          slot, self_selector, i, dist, route_state_ptr[RS_TRACK_OFFSET_BIAS]);
+            }
+            continue;
+        }
 
         if (dist < best_dist) {
             int32_t bounds_lo, bounds_hi, mid_peer, piVar5;
@@ -1278,16 +1312,18 @@ int td5_ai_find_offset_peer(int *route_state_ptr) {
 
 /**
  * UpdateActorTrackOffsetBias: adjust lateral offset for peer avoidance.
- *   If peer found: direction toggle from field_0x8C vs strip lane count,
- *                  direction==1 → NEGATIVE push, direction==0 → POSITIVE push.
- *   If no peer: offset decays toward 0 at 8 units/tick
  *
  * [CONFIRMED @ 0x004349A0-0x00434A97]:
- *   direction==1: if peer field_0x8C==0 → flip to 0, positive push
+ *   DAT_004b08b0 read @ 0x0043497C (mid-function, after peer found).
+ *   direction==1: if peer field_0x8C==0 → set direction=0, positive push
  *                 otherwise             → negative push (bias += dist - 0x29)
  *   direction==0: if peer field_0x8C != strip[3]&0xF → positive push
- *                 otherwise             → flip to 1, negative push
- * field_0x8C = ACTOR_SUB_LANE_INDEX, strip[3]&0xF = span_lane_count(peer's span)
+ *                 otherwise             → set direction=1, negative push
+ *   Both branches: dist = clamp(dist, 1, 0x28). [CONFIRMED @ 0x004349D1/0x00434A5E]
+ *   Branch A (positive): bias += (0x29 - dist) [CONFIRMED @ 0x00434A6F]
+ *   Branch B (negative): bias += (dist - 0x29) [CONFIRMED @ 0x00434A8E]
+ * field_0x8C = ACTOR_SUB_LANE_INDEX, strip[3]&0xF = peer's span lane count
+ * [CONFIRMED @ 0x004349A0/0x00434A09]
  */
 void td5_ai_update_track_offset_bias(int slot) {
     int32_t *rs = route_state(slot);
@@ -1298,29 +1334,49 @@ void td5_ai_update_track_offset_bias(int slot) {
         int16_t self_span  = ACTOR_I16(self, ACTOR_SPAN_RAW);
         int16_t peer_span  = ACTOR_I16(actor_ptr(peer), ACTOR_SPAN_RAW);
         int32_t dist = peer_span - self_span;
-        int32_t push;
         uint8_t peer_sub_lane;
         int peer_span_lc;
+        int do_positive;
 
-        if (dist < 1) dist = 1;
+        /* dist = clamp(dist, 1, 0x28) [CONFIRMED @ 0x004349D1/0x004349DA/0x00434A5E] */
+        if (dist < 1)    dist = 1;
         if (dist > 0x28) dist = 0x28;
-        push = 0x29 - dist; /* positive value: push = 1..0x29 */
 
-        /* peer field_0x8C [CONFIRMED @ 0x004349A0]: ACTOR_SUB_LANE_INDEX */
+        /* peer field_0x8C [CONFIRMED @ 0x004349A0/0x00434A0D] */
         peer_sub_lane = ACTOR_U8(actor_ptr(peer), ACTOR_SUB_LANE_INDEX);
-        /* strip[3]&0xF [CONFIRMED @ 0x004349A0]: lane count from peer's current span */
+        /* strip[3]&0xF from peer's span [CONFIRMED @ 0x00434A09] */
         peer_span_lc  = td5_track_get_span_lane_count((int)peer_span);
 
         if (g_lateral_avoidance_direction == 1) {
-            /* direction==1: NEGATIVE push (dist - 0x29 is negative) */
-            rs[RS_TRACK_OFFSET_BIAS] += (dist - 0x29);
-            TD5_LOG_I(LOG_TAG, "offset_bias: slot=%d dir1 neg push=%d bias=%d",
-                      slot, (dist - 0x29), rs[RS_TRACK_OFFSET_BIAS]);
+            /* direction==1 sub-condition: field_0x8C==0? [CONFIRMED @ 0x004349A8] */
+            if (peer_sub_lane == 0) {
+                g_lateral_avoidance_direction = 0; /* flip [CONFIRMED @ 0x004349AC] */
+                do_positive = 1;
+            } else {
+                do_positive = 0;
+            }
         } else {
-            /* direction==0: POSITIVE push */
-            rs[RS_TRACK_OFFSET_BIAS] += push;
-            TD5_LOG_I(LOG_TAG, "offset_bias: slot=%d dir0 pos push=%d bias=%d",
-                      slot, push, rs[RS_TRACK_OFFSET_BIAS]);
+            /* direction==0 sub-condition: field_0x8C != strip_lc? [CONFIRMED @ 0x00434A16] */
+            if (peer_sub_lane != (uint8_t)peer_span_lc) {
+                do_positive = 1;
+            } else {
+                g_lateral_avoidance_direction = 1; /* flip [CONFIRMED @ 0x00434A1A] */
+                do_positive = 0;
+            }
+        }
+
+        if (do_positive) {
+            /* Branch A: positive push [CONFIRMED @ 0x00434A6F] */
+            rs[RS_TRACK_OFFSET_BIAS] += (0x29 - dist);
+            TD5_LOG_I(LOG_TAG, "offset_bias: slot=%d pos push=%d sub_lane=%u lc=%d bias=%d",
+                      slot, (0x29 - dist), peer_sub_lane, peer_span_lc,
+                      rs[RS_TRACK_OFFSET_BIAS]);
+        } else {
+            /* Branch B: negative push [CONFIRMED @ 0x00434A8E] */
+            rs[RS_TRACK_OFFSET_BIAS] += (dist - 0x29);
+            TD5_LOG_I(LOG_TAG, "offset_bias: slot=%d neg push=%d sub_lane=%u lc=%d bias=%d",
+                      slot, (dist - 0x29), peer_sub_lane, peer_span_lc,
+                      rs[RS_TRACK_OFFSET_BIAS]);
         }
 
         /* Clamp bias to ±0x600 to prevent runaway [port-side guard] */
@@ -1329,10 +1385,10 @@ void td5_ai_update_track_offset_bias(int slot) {
 
     }
     /* No peer in range: leave bias unchanged.
-     * A decay-toward-zero branch here destroyed seeded biases during the
-     * ~386-tick countdown phase before any peer is within the 0x29-span
-     * search radius, zeroing all lane-spread information before the race
-     * even started. Original 0x434900 decomp shows no equivalent decay. */
+     * Original has an 8/tick decay-toward-zero when FindActorTrackOffsetPeer
+     * returns self-slot, but the port uses -1 for "no peer" which skips that
+     * path. The decay was confirmed to zero seeded biases during the ~386-tick
+     * countdown; keeping it disabled preserves the lane-spread fix. */
 }
 
 /* ========================================================================
@@ -2117,13 +2173,23 @@ void td5_ai_recycle_traffic_actor(void) {
             ACTOR_U8(a, ACTOR_BRAKE_FLAG) = 0;
             ACTOR_U8(a, ACTOR_VEHICLE_MODE) = 0;
 
-            rs[RS_TRACK_OFFSET_BIAS] = 0;
+            /* Update route table pointer to match the newly-assigned selector
+             * before seeding, so the seed reads the correct route bytes. */
+            rs[RS_ROUTE_TABLE_PTR] = (int32_t)(intptr_t)g_route_tables[rs[RS_ROUTE_TABLE_SELECTOR] & 1];
+
+            /* Seed track-progress offset via RefreshActorTrackProgressOffset.
+             * Original calls this in both branches of RecycleTrafficActorFromQueue
+             * [CONFIRMED — two call sites in decompilation]; bias is NOT zeroed
+             * directly, it is written exclusively by the seed call. */
+            td5_ai_seed_actor_track_progress_offset(best_slot);
+
             rs[RS_SCRIPT_FLAGS] = 0;
             rs[RS_RECOVERY_STAGE] = 0;
 
             TD5_LOG_I(LOG_TAG,
-                      "Traffic recycled: slot=%d from_span=%d to_span=%d lane=%u flags=0x%02X pos=(%d,%d,%d)",
+                      "Traffic recycled: slot=%d from_span=%d to_span=%d lane=%u flags=0x%02X bias=%d pos=(%d,%d,%d)",
                       best_slot, old_span, q_span, q_lane, q_flags,
+                      rs[RS_TRACK_OFFSET_BIAS],
                       ACTOR_I32(a, ACTOR_WORLD_POS_X),
                       *(int32_t *)(a + 0x200),
                       ACTOR_I32(a, ACTOR_WORLD_POS_Z));
