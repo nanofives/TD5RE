@@ -80,6 +80,7 @@
 #define ACTOR_SPAN_NORMALIZED     0x082   /* int16: wrapped-but-not-remapped span for route-table indexing */
 #define ACTOR_SPAN_ACCUM          0x084   /* int16: monotonically-accumulated span; immune to remap */
 #define ACTOR_SUB_LANE_INDEX      0x08C   /* byte  */
+#define ACTOR_CAR_DEF_PTR         0x1B8   /* void*: car definition pointer (bounding box, mass) */
 #define ACTOR_YAW_ACCUM           0x1F4   /* int32 */
 #define ACTOR_STEERING_CMD        0x30C   /* int32 */
 #define ACTOR_LONGITUDINAL_SPEED  0x314   /* int32 */
@@ -1195,9 +1196,10 @@ int td5_ai_update_route_threshold(int slot) {
  *   abs_right = abs((self_bounds_hi - mid) + 32 + piVar5)
  *   abs_left  = abs((self_bounds_lo - mid) - 32 + piVar5)
  *   DAT_004b08b0 = (abs_right <= abs_left) ? 1 : 0
- * where piVar5 = rs_self[RS_TRACK_OFFSET_BIAS] and self_bounds from actor+0x1B8.
- * [UNCERTAIN]: actor+0x1B8 not yet set in port; using RS_ACTIVE_LOWER/UPPER_BOUND
- * for self as approximation (both zero → direction defaults to 1 on first tick).
+ * where piVar5 = rs_self[RS_TRACK_OFFSET_BIAS], self_bounds from actor+0x1B8:
+ *   bounds_lo = cardef[0] = *(int16_t*)(cardef+0x00) [CONFIRMED @ 0x004337E0]
+ *   bounds_hi = cardef[4] = *(int16_t*)(cardef+0x08) [CONFIRMED @ 0x004337E0]
+ * mid uses peer route-state RS[20]/RS[21] [CONFIRMED @ 0x00433C7C].
  */
 int td5_ai_find_offset_peer(int *route_state_ptr) {
     int slot = route_state_ptr[RS_SLOT_INDEX];
@@ -1233,11 +1235,22 @@ int td5_ai_find_offset_peer(int *route_state_ptr) {
             best_slot = i;
 
             /* Direction via abs-compare [CONFIRMED @ 0x00433C7C-0x00433CBE]:
-             * bounds_lo/hi = self's lateral band endpoints (actor+0x1B8 in original;
-             * approximated as RS_ACTIVE_LOWER/UPPER_BOUND here — both are 0 until
-             * UpdateRaceActors populates them, so formula defaults to direction=1). */
-            bounds_lo = (int32_t)(int16_t)route_state_ptr[RS_ACTIVE_LOWER_BOUND];
-            bounds_hi = (int32_t)(int16_t)route_state_ptr[RS_ACTIVE_UPPER_BOUND];
+             * bounds_lo/hi = self's lateral extents from cardef at actor+0x1B8.
+             * cardef[0]=*(int16_t*)(cardef+0x00), cardef[4]=*(int16_t*)(cardef+0x08)
+             * [CONFIRMED @ 0x004337E0]. mid uses peer route-state RS[20]/RS[21]. */
+            {
+                int16_t *self_cd = (int16_t *)ACTOR_I32(self, ACTOR_CAR_DEF_PTR);
+                if (self_cd) {
+                    bounds_lo = (int32_t)self_cd[0]; /* cardef+0x00 */
+                    bounds_hi = (int32_t)self_cd[4]; /* cardef+0x08 */
+                    TD5_LOG_I(LOG_TAG, "find_offset_peer: slot=%d cardef lo=%d hi=%d",
+                              slot, bounds_lo, bounds_hi);
+                } else {
+                    bounds_lo = -100;
+                    bounds_hi =  100;
+                    TD5_LOG_W(LOG_TAG, "find_offset_peer: slot=%d no cardef", slot);
+                }
+            }
             mid_peer  = ((int32_t)(int16_t)peer_rs[RS_ACTIVE_LOWER_BOUND]
                        + (int32_t)(int16_t)peer_rs[RS_ACTIVE_UPPER_BOUND]) / 2;
             piVar5    = route_state_ptr[RS_TRACK_OFFSET_BIAS];
