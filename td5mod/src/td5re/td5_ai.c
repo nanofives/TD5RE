@@ -512,6 +512,16 @@ static void td5_ai_refresh_route_state_slot(int slot) {
 
     rs = route_state(slot);
     actor = actor_ptr(slot);
+
+    /* Per-tick branch-vs-main selector update [CONFIRMED @ 0x00436A9E].
+     * Original UpdateRaceActors sets gActorRouteTableSelector=1 when
+     * span_raw > g_trackTotalSpanCount (actor on branch road), =0 otherwise. */
+    {
+        int ring_len = td5_track_get_ring_length();
+        int span_raw_val = (int)(int16_t)ACTOR_I16(actor, ACTOR_SPAN_RAW);
+        rs[RS_ROUTE_TABLE_SELECTOR] = (ring_len > 0 && span_raw_val >= ring_len) ? 1 : 0;
+    }
+
     selector = rs[RS_ROUTE_TABLE_SELECTOR] & 1;
     route_table = g_route_tables[selector];
     route_count = g_route_table_sizes[selector] / 3u;
@@ -2035,9 +2045,25 @@ void td5_ai_recycle_traffic_actor(void) {
             /* Set direction polarity from flags bit 0 */
             rs[RS_DIRECTION_POLARITY] = q_flags & 1;
 
-            /* Route table selection [CONFIRMED @ 0x43551A]:
-             * q_lane < span_lane_count → LEFT route (selector=0), else RIGHT (selector=1) */
-            rs[RS_ROUTE_TABLE_SELECTOR] = ((int)q_lane >= td5_track_get_span_lane_count((int)q_span)) ? 1 : 0;
+            /* Route table selection + alt-route span remap [CONFIRMED @ 0x43551A, 0x00435310]:
+             * q_lane < span_lane_count → LEFT route (selector=0), use queue span directly.
+             * q_lane >= span_lane_count → RIGHT route (selector=1), remap span via jump
+             * table and adjust sub_lane by subtracting span_lane_count. */
+            {
+                int lc = td5_track_get_span_lane_count((int)q_span);
+                if ((int)q_lane >= lc) {
+                    rs[RS_ROUTE_TABLE_SELECTOR] = 1;
+                    int remapped = td5_track_apply_target_span_remap((int)q_span, 0);
+                    if (remapped != (int)q_span && remapped >= 0) {
+                        TD5_LOG_I(LOG_TAG, "recycle slot=%d: alt-route remap span %d->%d lane %d->%d",
+                                  best_slot, (int)q_span, remapped, (int)q_lane, (int)q_lane - lc);
+                        q_span = (int16_t)remapped;
+                        q_lane = (uint8_t)((int)q_lane - lc);
+                    }
+                } else {
+                    rs[RS_ROUTE_TABLE_SELECTOR] = 0;
+                }
+            }
 
             /* Place the actor at the queue span — full world placement */
             ACTOR_I16(a, ACTOR_SPAN_RAW) = q_span;
@@ -2148,9 +2174,25 @@ void td5_ai_init_traffic_actors(void) {
         /* Direction polarity from flags bit 0 */
         rs[RS_DIRECTION_POLARITY] = q_flags & 1;
 
-        /* Route table selection [CONFIRMED @ 0x43551A]:
-         * q_lane < span_lane_count → LEFT route (selector=0), else RIGHT (selector=1) */
-        rs[RS_ROUTE_TABLE_SELECTOR] = ((int)q_lane >= td5_track_get_span_lane_count((int)q_span)) ? 1 : 0;
+        /* Route table selection + alt-route span remap [CONFIRMED @ 0x43551A, 0x00435940]:
+         * q_lane < span_lane_count → LEFT route (selector=0), use queue span directly.
+         * q_lane >= span_lane_count → RIGHT route (selector=1), remap span via jump
+         * table and adjust sub_lane by subtracting span_lane_count. */
+        {
+            int lc = td5_track_get_span_lane_count((int)q_span);
+            if ((int)q_lane >= lc) {
+                rs[RS_ROUTE_TABLE_SELECTOR] = 1;
+                int remapped = td5_track_apply_target_span_remap((int)q_span, 0);
+                if (remapped != (int)q_span && remapped >= 0) {
+                    TD5_LOG_I(LOG_TAG, "init_traffic slot=%d: alt-route remap span %d->%d lane %d->%d",
+                              i, (int)q_span, remapped, (int)q_lane, (int)q_lane - lc);
+                    q_span = (int16_t)remapped;
+                    q_lane = (uint8_t)((int)q_lane - lc);
+                }
+            } else {
+                rs[RS_ROUTE_TABLE_SELECTOR] = 0;
+            }
+        }
 
         /* Place on track — set all 4 span tracking fields like racer spawn */
         ACTOR_I16(a, ACTOR_SPAN_RAW) = q_span;
