@@ -5295,6 +5295,8 @@ int td5_frontend_init(void) {
         s_sound_option_music_volume = g_td5.ini.music_volume;
         s_sound_option_sfx_mode     = g_td5.ini.sfx_mode;
         td5_save_set_sound_mode(g_td5.ini.sfx_mode);
+        td5_save_set_sfx_volume(s_sound_option_sfx_volume);
+        td5_save_set_music_volume(s_sound_option_music_volume);
         td5_sound_set_sfx_volume(s_sound_option_sfx_volume);
         td5_sound_set_music_volume(s_sound_option_music_volume);
         td5_physics_set_collisions(g_td5.ini.collisions);
@@ -7054,11 +7056,13 @@ static void Screen_SoundOptions(void) {
                     s_sound_option_sfx_volume += delta * 5;
                     if (s_sound_option_sfx_volume < 0) s_sound_option_sfx_volume = 0;
                     if (s_sound_option_sfx_volume > 100) s_sound_option_sfx_volume = 100;
+                    td5_save_set_sfx_volume(s_sound_option_sfx_volume);
                     td5_sound_set_sfx_volume(s_sound_option_sfx_volume);
                 } else if (active_button == 2) {
                     s_sound_option_music_volume += delta * 5;
                     if (s_sound_option_music_volume < 0) s_sound_option_music_volume = 0;
                     if (s_sound_option_music_volume > 100) s_sound_option_music_volume = 100;
+                    td5_save_set_music_volume(s_sound_option_music_volume);
                     td5_sound_set_music_volume(s_sound_option_music_volume);
                 }
                 frontend_play_sfx(2);
