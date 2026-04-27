@@ -831,17 +831,29 @@ int td5_game_init_race_session(void) {
     }
     /* Drag race: slots uVar18..5 forced to state=3 (decoration).
      * [CONFIRMED @ InitializeRaceSession 0x0042ac8e + uVar18 init 0x0042ac66]
-     * uVar18 = (g_twoPlayerModeEnabled != 0) + 1, so SP drag uVar18=1 →
-     * slots 1..5 all decoration (zero live AI); 2P drag uVar18=2 →
-     * slots 2..5 decoration. */
+     * Original: uVar18 = (g_twoPlayerModeEnabled != 0) + 1 → SP drag spawns
+     * only slot 0 active, slots 1..5 all decoration; 2P drag keeps slot 1
+     * active (P2) and slots 2..5 decoration.
+     *
+     * [PORT ENHANCEMENT — diverges from original]
+     * The port's CarSelection screen runs a 2-pass loop for game_type==9
+     * (drag race) so the user picks TWO cars. InitializeRaceSeriesSchedule
+     * @ td5_frontend.c:1628 then loads s_p2_car into slot[1].ext_id and
+     * line ~966 loads slot 1's mesh + sound bank. Keeping slot 1 at
+     * decoration_start=1 (faithful) leaves that fully-prepared slot inert
+     * at span=1 (parked at the strip start), which is the bug the user
+     * reports as "no car beside me, two stationary cars at the back."
+     * Force decoration_start=2 in drag mode regardless of split-screen so
+     * slot 1 stays state=0 (AI in SP) or state=1 (P2 in 2P split) — making
+     * the 2-pass CarSelect actually produce a 2-car race. */
     if (g_td5.drag_race_enabled) {
-        int decoration_start = (g_td5.split_screen_mode > 0) ? 2 : 1;
+        int decoration_start = 2;
         for (int i = decoration_start; i < TD5_MAX_RACER_SLOTS; i++) {
             s_slot_state[i].state = 3;
         }
         TD5_LOG_I(LOG_TAG,
-                  "Drag race: slots %d..5 set to state=3 (decoration) split=%d",
-                  decoration_start, g_td5.split_screen_mode);
+                  "Drag race: slot 1 active (slot1.state=%d), slots %d..5 decoration (split=%d)",
+                  s_slot_state[1].state, decoration_start, g_td5.split_screen_mode);
     }
     /* Cop Chase (game_type 8): original sets g_racerCount=2 for all non-zero
      * game types [CONFIRMED @ InitializeRaceActorRuntime 0x00432E60:
@@ -1257,11 +1269,23 @@ int td5_game_init_race_session(void) {
              *   slot 0 → span=115, lane=1 (hardcoded immediate 0x73 at 0x42b0f8)
              *   slots 1..5 → span=1, lane=(slot-1) via LAB_0042B228 override.
              * Flip flag is 0 for all — no secondary 180° rotation [CONFIRMED
-             * @ 0x0043450e: param_4 == 0 skips the flip branch]. */
+             * @ 0x0043450e: param_4 == 0 skips the flip branch].
+             *
+             * [PORT ENHANCEMENT — diverges from original]
+             * Slot 1 spawns alongside slot 0 at the start line (span=115)
+             * instead of the original's span=1 (decoration-park). Pairs with
+             * the decoration_start=2 change above so the 2nd CarSelect car
+             * (or P2 in split-screen) lines up next to the player on the
+             * grid, matching how a drag race actually works. lane=2 keeps it
+             * to the right of slot 0's lane=1; level030.zip provides 3+
+             * lanes, so lane=2 is a valid drag-strip lane. */
             if (drag_mode_spawn) {
                 if (slot == 0) {
                     span_index = 115;
                     sub_lane = 1;
+                } else if (slot == 1) {
+                    span_index = 115;
+                    sub_lane = 2;
                 } else {
                     span_index = 1;
                     sub_lane = slot - 1;
