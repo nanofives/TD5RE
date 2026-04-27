@@ -4317,6 +4317,20 @@ void td5_physics_integrate_pose(TD5_Actor *actor)
     s_prev_grounded_mask[actor->slot_index & 0x0F] = (~actor->wheel_contact_bitmask) & 0x0F;
     td5_physics_refresh_wheel_contacts(actor);
 
+    /* Mirror current airborne mask into damage_lockout (+0x37C).
+     * Original writes the freshly-computed contact mask into +0x37C at
+     * 0x004039B9 inside RefreshVehicleWheelContactFrames. Port writes the
+     * equivalent live mask to +0x37D (wheel_contact_bitmask) instead,
+     * leaving +0x37C dead. Without this, the gate at td5_physics_update_
+     * vehicle_actor (state0f_damping trigger) and several other reads of
+     * damage_lockout never fire, killing the tumble-recovery angular
+     * damping (state0f_damping decays ω_roll/pitch by 1/16 per frame). */
+    actor->damage_lockout = actor->wheel_contact_bitmask;
+    if (actor->wheel_contact_bitmask == 0x0F) {
+        TD5_LOG_I(LOG_TAG, "tumble_gate: slot=%d wcb=0x0F dlk=0x0F afc=%d",
+                  actor->slot_index, actor->airborne_frame_counter);
+    }
+
     /* T2: Wheel-contact attitude feedback — literal port of
      * TransformTrackVertexByMatrix @ 0x00446030 called from
      * IntegrateVehiclePoseAndContacts @ 0x00405E80.
