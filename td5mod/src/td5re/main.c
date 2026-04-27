@@ -395,6 +395,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
 
     /* Logging — defaults preserve historic behavior (master on, INFO+, all
      * categories on, wrapper on). Flip to A/B-test perf without rebuilding. */
+    g_td5.ini.log_frontend_draw = td5_ini_int("Logging", "FrontendDraw", 0);
     g_td5.ini.log_enabled   = td5_ini_int("Logging", "Enabled",  1);
     g_td5.ini.log_min_level = td5_ini_int("Logging", "MinLevel", 1);
     g_td5.ini.log_frontend  = td5_ini_int("Logging", "Frontend", 1);
