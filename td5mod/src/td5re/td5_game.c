@@ -2226,12 +2226,26 @@ int td5_game_run_race_frame(void) {
     /* Begin scene */
     td5_render_begin_scene();
 
+    /* Clear backbuffer once before any viewport renders.
+     * Moved out of td5_render_actors_for_view so the split-screen P2 pass
+     * does not wipe P1's already-rendered half.
+     * [RE: RunRaceFrame 0x42B580 — single BeginScene/EndScene pair, one clear] */
+    td5_plat_render_clear(0xFF4080C0u);
+
     /* For each viewport: camera setup, sky, track, actors, vfx, hud */
     for (int vp = 0; vp < g_td5.viewport_count; vp++) {
-        /* Set viewport rectangle */
+        /* Set viewport rectangle + scissor.
+         * Viewport maps NDC to screen-space; scissor prevents geometry from
+         * one half bleeding into the other. ScissorEnable=TRUE is set globally
+         * in the D3D11 rasterizer state so RSSetScissorRects is always active.
+         * [RE: SetProjectedClipRect per view @ InitializeRaceViewportLayout 0x42C2B0] */
         td5_plat_render_set_viewport(
             s_viewports[vp].x, s_viewports[vp].y,
             s_viewports[vp].w, s_viewports[vp].h);
+        td5_plat_render_set_clip_rect(
+            s_viewports[vp].x, s_viewports[vp].y,
+            s_viewports[vp].x + s_viewports[vp].w,
+            s_viewports[vp].y + s_viewports[vp].h);
 
         /* Camera transition state */
         {
@@ -2308,6 +2322,17 @@ int td5_game_run_race_frame(void) {
          * but once 65a4fea wired hardware scissor, it left the minimap rect
          * active across the speedo/tach/digit/countdown draws that follow in
          * render_overlays — clipping every HUD element on non-circuit tracks. */
+    }
+
+    /* Reset viewport and scissor to full-screen before HUD overlays.
+     * After the per-viewport loop the last viewport's clip rect is still active;
+     * HUD elements (speedo, divider, minimap) must render over the full screen.
+     * [RE: post-render SetProjectedClipRect(fullscreen) @ RunRaceFrame 0x42B580] */
+    {
+        int fw = g_td5.render_width;
+        int fh = g_td5.render_height;
+        td5_plat_render_set_viewport(0, 0, fw, fh);
+        td5_plat_render_set_clip_rect(0, 0, fw, fh);
     }
 
     /* Full-screen HUD overlay (speedometer, lap counter, etc.) */

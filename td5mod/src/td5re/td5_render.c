@@ -1636,7 +1636,10 @@ void td5_render_actors_for_view(int view_index)
     int player_span = 0;
     int player_branch_span = -1;
     {
-        TD5_Actor *player = td5_game_get_actor(0);
+        /* Use the actor assigned to this viewport for cull center.
+         * In split-screen, viewport 1 follows P2 (slot 1), not P1 (slot 0).
+         * [CONFIRMED @ RunRaceFrame 0x42BB2E: each view culls from its player's span] */
+        TD5_Actor *player = td5_game_get_actor(td5_game_get_player_slot(view_index));
         if (player) {
             player_span = (int)player->track_span_raw;
             /* If on a branch road, use the junction's main-road span as
@@ -1662,9 +1665,6 @@ void td5_render_actors_for_view(int view_index)
      * td5_render_configure_projection only runs when viewport dimensions change,
      * so without this the render camera stays frozen at its initial position. */
     update_render_camera_from_game();
-
-    /* Always clear the backbuffer so previous frames don't bleed through */
-    td5_plat_render_clear(0xFF4080C0u);
 
     /* Draw sky panorama behind all geometry */
     td5_render_draw_sky();
@@ -1918,8 +1918,10 @@ void td5_render_configure_projection(int width, int height)
     s_frustum_v_cos =  s_focal_length / v_len;
     s_frustum_v_sin = -half_h / v_len;
 
-    /* Configure platform viewport */
-    td5_plat_render_set_viewport(0, 0, width, height);
+    /* Platform viewport is already set by the caller with the correct x,y offset.
+     * Do NOT call td5_plat_render_set_viewport here — it would reset x,y to (0,0)
+     * and break split-screen where viewport 1 has a non-zero origin.
+     * [RE basis: original SetProjectionCenterOffset only changes center, not clip rect] */
     update_render_camera_from_game();
 
     {
