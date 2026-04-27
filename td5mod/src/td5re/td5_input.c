@@ -428,17 +428,15 @@ void td5_input_update_player_control(int slot)
     /*
      * Speed-dependent steering rate and limit.
      *
-     * The original code reads:
-     *   speed = abs(actor.velocity >> 8)  (actor+0x314)
-     *   speed_sq = actor.velocity_sq >> 8 (actor+0x31C)
+     * Original reads (0x402EBF-0x402ECD):
+     *   speed     = abs(actor+0x314) >> 8  (longitudinal_speed, signed 24.8 FP)
+     *   speed_sq  = actor+0x31C >> 8       (front_axle_slip_excess, written each tick)
      *
-     * Without live actor data we use placeholder values.
-     * The real integration happens when the physics module calls this
-     * function and provides the actor state.  For the stub we compute
-     * with speed=0 which gives maximum steering authority.
+     * steer_rate_denom = (speed * 0x40) / (speed_sq^2 + 0x40)
+     *   No slip:   denom = speed   → rate = NUM/(speed+0x40), slower at high speed.
+     *   High slip: denom → 0       → rate = NUM/0x40, faster corrections while sliding.
+     * [CONFIRMED @ 0x402EC1: IMUL EBX,EAX — single square of speed_sq]
      */
-
-    /* Read live speed from actor physics state */
     int speed = 0;
     int speed_sq = 0;
     int vehicle_stopped = 1;
@@ -447,12 +445,11 @@ void td5_input_update_player_control(int slot)
         TD5_Actor *actor = td5_game_get_actor(slot);
         if (actor) {
             uint8_t *abytes = (uint8_t *)actor;
-            /* +0x314 = lateral_speed (int32), same field the original reads */
+            /* +0x314 = longitudinal_speed (int32, signed 24.8 FP) */
             int32_t raw_speed = *(int32_t *)(abytes + 0x314);
             speed = (raw_speed < 0 ? -raw_speed : raw_speed) >> 8;
-            /* +0x31C = velocity_sq (int32), pre-computed by physics */
+            /* +0x31C = front_axle_slip_excess (int32), written by player physics each tick */
             speed_sq = *(int32_t *)(abytes + 0x31C) >> 8;
-            /* Vehicle is stopped if speed is below threshold */
             vehicle_stopped = (speed < 100) ? 1 : 0;
         }
         encounter_active = td5_game_is_wanted_mode();
@@ -702,11 +699,15 @@ void td5_input_update_player_control(int slot)
         /* Gear up (bit 0x400000) */
         if (bits & 0x400000u) {
             /* Max gear from actor+0x36C [CONFIRMED @ 0x4035E0, DAT_004ab474].
-             * Original condition: (uint8_t)actor[0x36B] < (uint8_t)(actor[0x36C]-1) */
+             * Original condition: (uint8_t)actor[0x36B] < (uint8_t)(actor[0x36C]-1)
+             * Original reads actor[0x36B] for current gear; port must sync from
+             * the live actor so physics auto-gear updates are visible here. */
             {
                 TD5_Actor *a_gear = td5_game_get_actor(slot);
                 uint8_t max_gear = a_gear ? ((uint8_t *)a_gear)[0x36C] : 8u;
                 if (max_gear == 0) max_gear = 8u;  /* guard: uninitialized actor */
+                /* Sync current gear from live actor [CONFIRMED @ 0x402E60] */
+                if (a_gear) s_gear[slot] = ((uint8_t *)a_gear)[0x36B];
                 if (s_gear[slot] < (uint8_t)(max_gear - 1u)) {
                     s_gear[slot]++;
                     TD5_LOG_I(LOG_TAG, "gear up: slot=%d gear=%d max=%d",
@@ -759,6 +760,9 @@ void td5_input_update_player_control(int slot)
                             }
                         }
                     }
+                    /* Write new gear back to actor so physics sees manual shift
+                     * [CONFIRMED @ 0x402E60: original writes actor[0x36B]] */
+                    if (a_gear) ((uint8_t *)a_gear)[0x36B] = s_gear[slot];
                 }
             }
             s_gear_debounce[slot] = TD5_INPUT_GEAR_DEBOUNCE;
@@ -766,11 +770,15 @@ void td5_input_update_player_control(int slot)
 
         /* Gear down (bit 0x800000) */
         if (bits & 0x800000u) {
+            TD5_Actor *a_gdn = td5_game_get_actor(slot);
+            /* Sync current gear from live actor before down-shift check */
+            if (a_gdn) s_gear[slot] = ((uint8_t *)a_gdn)[0x36B];
             if (s_gear[slot] > 0) {
                 /* Downshift RPM protection would go here --
                  * checks if RPM would exceed redline.
                  * Deferred to physics module. */
                 s_gear[slot]--;
+                if (a_gdn) ((uint8_t *)a_gdn)[0x36B] = s_gear[slot];
             }
             s_gear_debounce[slot] = TD5_INPUT_GEAR_DEBOUNCE;
         }
