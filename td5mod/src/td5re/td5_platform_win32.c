@@ -624,6 +624,23 @@ int td5_plat_apply_display_mode(int width, int height, int bpp)
         s_window_w   = width;
         s_window_h   = height;
         s_window_bpp = bpp;
+
+        /* 6. Sync the source-port render-dim globals so race-side viewport
+         *    setup, HUD layout, VFX projection and the debug overlay text
+         *    follow the new client size. These are set once at startup in
+         *    td5_render.c / td5re_init and otherwise never touched. The
+         *    g_td5.render_width/height mirror is updated via the helper
+         *    in td5re.c so we don't have to pull td5re.h in here. */
+        {
+            extern float g_render_width_f, g_render_height_f;
+            extern int   g_render_width,   g_render_height;
+            extern void  td5re_set_render_dims(int w, int h);
+            g_render_width      = width;
+            g_render_height     = height;
+            g_render_width_f    = (float)width;
+            g_render_height_f   = (float)height;
+            td5re_set_render_dims(width, height);
+        }
         return 1;
     }
 
