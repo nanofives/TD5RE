@@ -525,11 +525,104 @@ int td5_plat_enum_display_modes(TD5_DisplayMode *modes, int max_count)
 
 int td5_plat_apply_display_mode(int width, int height, int bpp)
 {
-    /* In windowed mode, don't change the desktop resolution.
-     * Just record the desired dimensions for the render target. */
+    if (width <= 0 || height <= 0) return 0;
+
+    /* In windowed mode: leave the desktop alone but resize the actual game
+     * window, the DXGI swap chain, and the wrapper backbuffer so the game's
+     * viewport math, the swap chain and the visible client area stay
+     * consistent with the user's selection. */
     if (!s_fullscreen) {
-        s_window_w = width;
-        s_window_h = height;
+        if (width == s_window_w && height == s_window_h && bpp == s_window_bpp) {
+            return 1;
+        }
+
+        TD5_LOG_I(LOG_TAG,
+                  "apply_display_mode: windowed %dx%d bpp=%d (was %dx%d bpp=%d) hwnd=%p",
+                  width, height, bpp, s_window_w, s_window_h, s_window_bpp,
+                  (void*)s_hwnd);
+
+        /* 1. Resize the visible Win32 window so client area = width x height.
+         *    Use the live style/ex_style so any future window-style additions
+         *    keep producing the right outer size. */
+        if (s_hwnd) {
+            RECT wr;
+            DWORD style    = (DWORD)GetWindowLongA(s_hwnd, GWL_STYLE);
+            DWORD ex_style = (DWORD)GetWindowLongA(s_hwnd, GWL_EXSTYLE);
+            wr.left = 0; wr.top = 0;
+            wr.right = width; wr.bottom = height;
+            AdjustWindowRectEx(&wr, style, FALSE, ex_style);
+            SetWindowPos(s_hwnd, NULL, 0, 0,
+                         wr.right - wr.left, wr.bottom - wr.top,
+                         SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+            TD5_LOG_I(LOG_TAG, "  SetWindowPos: client=%dx%d outer=%dx%d",
+                      width, height, wr.right - wr.left, wr.bottom - wr.top);
+        }
+
+        /* 2. Tell the wrapper its new client size. Backend_Reset reads
+         *    target_width/height for the swap-chain ResizeBuffers call in
+         *    windowed mode. */
+        g_backend.target_width  = width;
+        g_backend.target_height = height;
+
+        /* 3. ResizeBuffers + recreate swap_rtv / depth_dsv / viewport at the
+         *    new size. Backend_Reset uses target_width/height (just set) for
+         *    the actual RT dimensions when windowed; the width/height args
+         *    are only stored on g_backend. */
+        if (g_backend.swap_chain) {
+            int reset_w = g_backend.width  > 0 ? g_backend.width  : width;
+            int reset_h = g_backend.height > 0 ? g_backend.height : height;
+            if (!Backend_Reset(reset_w, reset_h, bpp, 1)) {
+                TD5_LOG_E(LOG_TAG, "  Backend_Reset FAILED");
+                return 0;
+            }
+            TD5_LOG_I(LOG_TAG, "  Backend_Reset OK: swap chain -> %dx%d", width, height);
+        }
+
+        /* 4. Recreate the wrapper's offscreen 3D backbuffer at the new size
+         *    so td5_plat_render_clear / set_viewport / set_clip_rect (which
+         *    query backbuffer->width/height) and the standalone
+         *    backbuffer-SRV->swap-chain present blit all match the swap chain.
+         *    Mirrors main.c's startup creation. */
+        if (g_backend.standalone) {
+            WrapperSurface *new_bb = WrapperSurface_Create(
+                (DWORD)width, (DWORD)height, (DWORD)bpp,
+                DDSCAPS_OFFSCREENPLAIN | DDSCAPS_3DDEVICE);
+            if (new_bb) {
+                WrapperSurface *old_bb = g_backend.backbuffer;
+                g_backend.backbuffer = new_bb;
+                if (old_bb && old_bb->vtbl && old_bb->vtbl->Release) {
+                    old_bb->vtbl->Release(old_bb);
+                }
+                TD5_LOG_I(LOG_TAG, "  backbuffer recreated at %dx%d", width, height);
+            } else {
+                TD5_LOG_W(LOG_TAG,
+                          "  backbuffer recreate FAILED at %dx%d - keeping old",
+                          width, height);
+            }
+        }
+
+        /* 5. Refresh wrapper frontend-scaling state. Frontend renders at the
+         *    640x480 design resolution and scales to native; only the native
+         *    side changes here. */
+        g_backend.fe_scale.native_w = width;
+        g_backend.fe_scale.native_h = height;
+        if (g_backend.fe_scale.virtual_w > 0 &&
+            g_backend.fe_scale.virtual_h > 0 &&
+            width  > g_backend.fe_scale.virtual_w &&
+            height > g_backend.fe_scale.virtual_h) {
+            g_backend.fe_scale.scale_x =
+                (float)width  / (float)g_backend.fe_scale.virtual_w;
+            g_backend.fe_scale.scale_y =
+                (float)height / (float)g_backend.fe_scale.virtual_h;
+            g_backend.fe_scale.enabled = 1;
+        } else {
+            g_backend.fe_scale.scale_x = 1.0f;
+            g_backend.fe_scale.scale_y = 1.0f;
+            g_backend.fe_scale.enabled = 0;
+        }
+
+        s_window_w   = width;
+        s_window_h   = height;
         s_window_bpp = bpp;
         return 1;
     }

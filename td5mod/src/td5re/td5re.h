@@ -277,6 +277,7 @@ typedef struct TD5_GlobalState {
         int  log_race;        /* race.log (game, physics, ai, track, camera, vfx) */
         int  log_engine;      /* engine.log (render, asset, platform, sound, net, fmv) */
         int  log_wrapper;     /* wrapper.log (D3D11 ddraw shim) */
+        int  test_resolution_cycle; /* if >0, main loop cycles 3 windowed resolutions to validate apply_display_mode */
     } ini;
 
 } TD5_GlobalState;
