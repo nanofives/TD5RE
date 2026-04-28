@@ -2000,12 +2000,28 @@ static void frontend_init_display_mode_state(void) {
     td5_plat_get_window_size(&width, &height);
     bpp = 16;
     if (s_display_mode_count > 0) {
-        int idx = frontend_find_display_mode_index(width, height, bpp);
+        /* [CONFIRMED @ 0x004270A9 ScreenLocalizationInit] Original seeds
+         * gConfiguredDisplayModeOrdinal = gSelectedDisplayModeOrdinal (loaded
+         * from packed config), then reconciles by searching for 640x480x16
+         * if the saved table mismatches the live enumerated list.
+         *
+         * Port: prefer the saved ordinal so the cursor reflects the user's
+         * last choice when DisplayOptions opens. Fall back to the current
+         * window size, then to entry 0. */
+        int saved = td5_save_get_display_mode();
+        int idx = -1;
+        if (saved >= 0 && saved < s_display_mode_count) {
+            idx = saved;
+        } else {
+            idx = frontend_find_display_mode_index(width, height, bpp);
+        }
         if (idx >= 0) {
             s_display_mode_index = idx;
         } else if (s_display_mode_index < 0 || s_display_mode_index >= s_display_mode_count) {
             s_display_mode_index = 0;
         }
+        TD5_LOG_I(LOG_TAG, "Display mode init: saved_ordinal=%d resolved_idx=%d (window=%dx%d)",
+                  saved, s_display_mode_index, width, height);
     } else {
         s_display_mode_index = 0;
     }
@@ -5617,6 +5633,18 @@ static void Screen_MainMenu(void) {
         frontend_load_tga("Front_End/MainMenu.tga", "Front_End/FrontEnd.zip");
         s_anim_complete = 0;
 
+        /* [CONFIRMED @ 0x004155DE ScreenMainMenuAnd1PRaceFlow case 0] Original
+         * copies the GameOptions shadow (DAT_00466000, range 0..3) into the
+         * live runtime lap count: gCircuitLapCount = DAT_00466000 + 1.
+         * Without this seed, a fresh boot leaves circuit_lap_count=0 and the
+         * HUD's "%d/%d" lap label renders as "1/0". The original re-applies
+         * this on every main-menu entry; ConfigureGameTypeFlags later may
+         * overwrite it for cup tiers (case 2 hard-sets to 4), but the
+         * baseline must be primed here so single races and quickrace work. */
+        g_td5.circuit_lap_count = s_game_option_laps + 1;
+        TD5_LOG_I(LOG_TAG, "MainMenu: seeded circuit_lap_count=%d (laps_option=%d)",
+                  g_td5.circuit_lap_count, s_game_option_laps);
+
         /* Apply saved options from config shadow into live globals */
         /* Configure controller bindings for both player slots */
 
@@ -7090,9 +7118,14 @@ static void Screen_DisplayOptions(void) {
     switch (s_inner_state) {
     case 0:
         frontend_init_return_screen(TD5_SCREEN_DISPLAY_OPTIONS);
-        TD5_LOG_D(LOG_TAG, "DisplayOptions: init");
+        TD5_LOG_D(LOG_TAG, "DisplayOptions: init (display_mode_index=%d, count=%d)",
+                  s_display_mode_index, s_display_mode_count);
         frontend_load_tga("Front_End/MainMenu.tga", "Front_End/FrontEnd.zip");
-        frontend_init_display_mode_state();
+        /* [CONFIRMED @ 0x00420400 ScreenDisplayOptions case 0] Original does
+         * NOT re-enumerate the display-mode list here — that's done once at
+         * boot by ScreenLocalizationInit. Re-deriving the index from the
+         * current window dimensions every entry would clobber the user's
+         * last selection (which is restored from config.td5 at boot). */
         frontend_create_button("Resolution",    -0x120, 0, 0x120, 0x20); /* 0x420484: width=0x120 */
         frontend_create_button("Fogging",       -0x120, 0, 0x120, 0x20);
         frontend_create_button("Speed Readout", -0x120, 0, 0x120, 0x20);
@@ -7133,6 +7166,10 @@ static void Screen_DisplayOptions(void) {
                     s_display_modes[s_display_mode_index].width,
                     s_display_modes[s_display_mode_index].height,
                     s_display_modes[s_display_mode_index].bpp);
+                /* Persist the cursor's new position so it survives a save/load
+                 * round trip (matches gSelectedDisplayModeOrdinal write at
+                 * 0x00420400 case 6). */
+                td5_save_set_display_mode(s_display_mode_index);
                 changed = 1;
             } else if (active_button == 1 && delta != 0) {
                 s_display_fog_enabled = !s_display_fog_enabled;
@@ -7831,10 +7868,25 @@ static void Screen_CarSelection(void) {
             s_car_roster_max = 36;
             break;
         default:
+            /* [CONFIRMED @ 0x0040E8F8 CarSelectionScreenStateMachine case 7]
+             * Original wrap-around in non-COPS mode is gated on
+             * DAT_004962ac/DAT_00463e6d: when DAT_004962ac == 0 (the common
+             * case — no runtime writer in the decomp) the upper bound is
+             * 0x20 (32), excluding police indices 0x21..0x24. Police are
+             * only reachable when DAT_004962ac is set (Cop Chase / network
+             * special) or when game_type == 8 (handled above).
+             *
+             * Port: cap the default roster at 32 so police indices stay out
+             * of normal cycling regardless of unlock state. The cheat
+             * "unlock all" path still extends to 36 only when paired with
+             * the network-special context (matches the original's "both
+             * flags must be set" gate at 0x0042140B). */
             if (s_network_active) {
                 s_car_roster_max = s_cheat_unlock_all ? 36 : 32;
             } else {
-                s_car_roster_max = s_total_unlocked_cars - 1;
+                int upper = s_total_unlocked_cars - 1;
+                if (upper > 32) upper = 32;
+                s_car_roster_max = upper;
             }
             break;
         }
@@ -8580,6 +8632,36 @@ static void Screen_RaceResults(void) {
         frontend_reset_buttons();
         TD5_LOG_I(LOG_TAG, "RaceResults: state 0 - init, game_type=%d",
                   s_selected_game_type);
+
+        /* [CONFIRMED @ 0x004224B6 RunRaceResultsScreen case 0] Early-route to
+         * Screen_CupFailed (TD5_SCREEN_CUP_FAILED, 0x1a) when the player has
+         * been eliminated mid-cup. The original has two parallel paths:
+         *
+         *   1) game_type == 4 + slot_state[0]+0x383 != 0 (game-type-4-only)
+         *   2) !network && results_skip_display != 1 && 1 <= game_type < 7
+         *      && (slot_state[0].companion_state_2 == 2 ||
+         *          actor_state.slot[0]+0x328 == 0)
+         *
+         * Both jump straight to TD5_SCREEN_CUP_FAILED with return_screen = 5
+         * (TD5_SCREEN_MAIN_MENU). Without this, exiting a cup mid-progression
+         * skips the failure dialog entirely and dumps the player back to the
+         * main menu. The port reaches TD5_SCREEN_CUP_FAILED only via the
+         * explicit Quit button at case 0x10 — which doesn't fire when the
+         * cup-failed condition is detected automatically. */
+        if (!s_network_active &&
+            !s_results_skip_display &&
+            s_selected_game_type >= 1 && s_selected_game_type < 7 &&
+            (td5_game_get_slot_companion_2(0) == 2 ||
+             !td5_game_slot_is_finished(0))) {
+            TD5_LOG_I(LOG_TAG, "RaceResults: cup-fail early-route "
+                      "(game_type=%d companion_2=%d finished=%d) -> CUP_FAILED",
+                      s_selected_game_type,
+                      td5_game_get_slot_companion_2(0),
+                      td5_game_slot_is_finished(0));
+            s_return_screen = TD5_SCREEN_MAIN_MENU;
+            td5_frontend_set_screen(TD5_SCREEN_CUP_FAILED);
+            return;
+        }
 
         /* Sort results by game type:
          * Types 1/6: by secondary metric desc (SortRaceResultsBySecondaryMetricDesc @ 0x40AB80)

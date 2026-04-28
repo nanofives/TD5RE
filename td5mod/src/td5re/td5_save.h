@@ -122,6 +122,12 @@ void td5_save_set_sound_mode(int mode);
 /** Returns the configured circuit lap count (2/4/6/8). */
 int td5_save_get_circuit_lap_count(void);
 
+/** Returns the saved display-mode ordinal (config.td5 byte 0xBD).
+ *  Mirrors gSelectedDisplayModeOrdinal @ 0x00497334 — the index into the
+ *  enumerated display-mode list selected by the user. */
+int  td5_save_get_display_mode(void);
+void td5_save_set_display_mode(int ordinal);
+
 /* ========================================================================
  * Unlock system
  *

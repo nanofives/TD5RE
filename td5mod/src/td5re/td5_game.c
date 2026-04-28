@@ -692,6 +692,17 @@ int td5_game_slot_is_finished(int slot)
     return (s_metrics[slot].post_finish_metric_base != 0) ? 1 : 0;
 }
 
+/* Returns the companion_2 byte for a slot. Mirrors
+ * gRaceSlotStateTable.slot[i].companion_state_2 (offset +2 in the 4-byte slot
+ * record at original VA 0x004a8898). Used by Screen_RaceResults case 0 to
+ * detect the "eliminated mid-cup" condition (companion_2 == 2).
+ * [CONFIRMED @ 0x004224B6 RunRaceResultsScreen — reads gRaceSlotStateTable.slot[0].companion_state_2] */
+int td5_game_get_slot_companion_2(int slot)
+{
+    if (slot < 0 || slot >= TD5_MAX_RACER_SLOTS) return 0;
+    return (int)s_slot_state[slot].companion_2;
+}
+
 /* Returns best lap time (ticks) for slot 0 — used by name entry qualification.
  * Scans lap_split_times[0..8] for smallest nonzero value.
  * [CONFIRMED: ScreenPostRaceNameEntry bVar4==1 scans actor+0x34e..0x35f words (9 entries)] */
