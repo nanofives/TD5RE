@@ -494,43 +494,38 @@ void td5_track_get_span_edges(int span_index,
  * See reference_v2w_function_semantics.md for full background.
  * ======================================================================== */
 
+/* td5_track_resolve_wall_contacts — port-specific lateral wall synthesis.
+ *
+ * The original TD5_d3d.exe has NO generic mid-strip lateral wall impulse —
+ * 0x00406CC0 is a sub-lane-extremity transverse-edge boundary check (rumble
+ * strips at strip start/end), and 0x00406F50/0x004070E0 only test the LEFT
+ * rail of a single per-level fence strip. Lateral containment in the original
+ * is supposed to be topological via 0x004440F0 + state-0x0F off-track damping.
+ *
+ * The port keeps an explicit lateral-rail check (this function) because the
+ * topological path alone produces no visible feedback when the car drifts off
+ * the road, and users expect walls to behave like walls. The function tests
+ * each wheel probe geometrically against the left and right rails of the
+ * actor's chassis span and applies a wall_response impulse when a probe is
+ * outside the rail (d < 0 after auto-flip toward the inside reference).
+ *
+ * History:
+ *   - 2026-04-21: added per-probe sub_lane extremity gate intended to mirror
+ *     0x00406CC0 dispatch. The gate was wrong because 0x00406CC0 uses
+ *     transverse edges (perp = along-road) while this function uses
+ *     longitudinal rails (perp = lateral). The gate created the
+ *     "invisible right-lane wall trap" — every probe in the rightmost
+ *     sub-lane fired the right wall, regardless of whether it had actually
+ *     crossed the rail.
+ *   - 2026-04-28: gate removed. Wall fires purely on geometric d < 0,
+ *     matching the function's actual semantics (lateral rail containment),
+ *     not the original's 0x00406CC0 (which it never resembled). The
+ *     strip-type filter (1/2/5) still rejects irregular vertex layouts
+ *     (transition/reversed/junction/sentinel) where the rail edge produces
+ *     inverted normals.
+ */
+#if 1
 void td5_track_resolve_wall_contacts(TD5_Actor *actor)
-{
-    /* Disabled 2026-04-28 (fix-1777408127-59867).
-     *
-     * The original TD5_d3d.exe has NO generic mid-strip lateral wall impulse
-     * [CONFIRMED via Ghidra cross-reference search of 0x00406980]. The three
-     * call sites that reach ApplyTrackSurfaceForceToActor are:
-     *   - 0x00406CC0 branch 1: sub_lane==0 transverse edge (NOT lateral),
-     *   - 0x00406CC0 branch 2: sub_lane==lane-1 transverse edge (NOT lateral),
-     *   - 0x00406F50 / 0x004070E0: per-level fence strip (LEFT rail only,
-     *     gated by DAT_00483954 / DAT_00483550).
-     *
-     * The port's prior body synthesized a longitudinal-rail lateral wall
-     * everywhere, which is not faithful. With sub_lane==0 firing LEFT and
-     * sub_lane>=lane-1 firing RIGHT, on multi-lane spans the rightmost
-     * sub-lane probe always crossed the right rail (the road's actual edge),
-     * trapping the player in an "invisible right-lane wall". Disabling this
-     * function restores faithful behavior — lateral containment is purely
-     * topological via UpdateActorTrackPosition (0x004440F0) + state-0x0F
-     * off-track damping.
-     *
-     * The function is kept as an early-return stub so existing callers
-     * (td5_physics, debug overlays) compile unchanged.
-     *
-     * RE basis:
-     *   - 0x00406CC0 sub-lane-extremity boundary [CONFIRMED @ 0x00406CFC, 0x00406D88]
-     *   - 0x00406980 ApplyTrackSurfaceForceToActor [CONFIRMED @ 0x00406988]
-     *   - DAT_004631a0/a4 vertex-offset table [CONFIRMED @ 0x004631a0]
-     *   - reference_v2w_function_semantics.md (memory). */
-    (void)actor;
-    return;
-}
-
-/* Legacy port-specific lateral wall synthesis — disabled. Body kept under
- * #if 0 for reference; do NOT re-enable without faithful 0x00406CC0 port. */
-#if 0
-void td5_track_resolve_wall_contacts_LEGACY_DISABLED(TD5_Actor *actor)
 {
     static uint32_t s_wall_tick = 0;
     int diag_slot0 = 0;
@@ -651,17 +646,37 @@ void td5_track_resolve_wall_contacts_LEGACY_DISABLED(TD5_Actor *actor)
         TD5_StripVertex *inside;  /* reference vertex definitely on the inside */
     };
 
-    /* LEFT wall: longitudinal left rail (li_base → li_base+lane_count = left-far).
-     * Inside ref = ri_base (right-near, clearly on road side of left rail). */
+    /* Strip vertex layout (corrected 2026-04-28 fix-1777408127-59867):
+     *   left_vertex_index   = NEAR transverse row (vertices walk laterally
+     *                         left→right as +i, NOT along rail)
+     *   right_vertex_index  = FAR  transverse row
+     *   lane_count          = LATERAL lane count (surface_attribute & 0xF)
+     *
+     * So:
+     *   li_base + 0           = NW corner (near, leftmost)
+     *   li_base + lane_count  = NE corner (near, rightmost)
+     *   ri_base + 0           = SW corner (far,  leftmost)
+     *   ri_base + lane_count  = SE corner (far,  rightmost)
+     *
+     * Prior interpretation walked +i along a "rail" longitudinally; that
+     * produced TRANSVERSE edges (NW→NE) and an along-road perpendicular,
+     * which manifested as walls perpendicular to the driving direction
+     * firing on every spawn. Corrected geometry uses the road's actual
+     * left/right rails — edges between NEAR and FAR rows at the leftmost
+     * and rightmost lateral positions. */
+
+    /* LEFT rail: edge from NW (li_base+0) to SW (ri_base+0). Runs along
+     * driving direction. Inside ref = NE corner (li_base+lane_count) — on
+     * the road side of the left rail. */
     struct wall_line l_wall = {
         vertex_at(li_base + 0),
-        vertex_at(li_base + lane_count),
-        vertex_at(ri_base + 0)
-    };
-    /* RIGHT wall: longitudinal right rail (ri_base → ri_base+lane_count = right-far).
-     * Inside ref = li_base (left-near, clearly on road side of right rail). */
-    struct wall_line r_wall = {
         vertex_at(ri_base + 0),
+        vertex_at(li_base + lane_count)
+    };
+    /* RIGHT rail: edge from NE (li_base+lane_count) to SE (ri_base+lane_count).
+     * Inside ref = NW corner (li_base+0) — on the road side of the right rail. */
+    struct wall_line r_wall = {
+        vertex_at(li_base + lane_count),
         vertex_at(ri_base + lane_count),
         vertex_at(li_base + 0)
     };
@@ -731,13 +746,12 @@ void td5_track_resolve_wall_contacts_LEGACY_DISABLED(TD5_Actor *actor)
         int32_t px = probe_block[pi].x >> 8;
         int32_t pz = probe_block[pi].z >> 8;
 
-        /* Per-probe sub_lane extremity gate — matches original 0x00406CC0
-         * branch1 / branch2 dispatch [CONFIRMED @ 0x00406CFC / 0x00406D88].
-         * sub_lane==0 → l_wall test (strip entry); sub_lane>=lane_count-1
-         * → r_wall test (strip exit). Interior sub_lanes fall through. */
-        int probe_sub_lane = (int)actor->wheel_probes[pi].sub_lane_index;
-        int l_extremity = (probe_sub_lane == 0);
-        int r_extremity = (probe_sub_lane >= lane_count - 1);
+        /* Geometric-only gate (2026-04-28 fix-1777408127-59867):
+         * Wall fires on d < 0 regardless of sub_lane. The prior sub_lane
+         * extremity gate was a misapplied attempt to mirror 0x00406CC0
+         * (which has different geometry) and trapped the rightmost-lane
+         * probes against the right rail. */
+        (void)lane_count;
 
         if (l_par.ok) {
             int32_t rel_x = px - l_par.base_x - sp->origin_x;
@@ -745,7 +759,7 @@ void td5_track_resolve_wall_contacts_LEGACY_DISABLED(TD5_Actor *actor)
             int64_t dot = (int64_t)rel_x * l_par.nnx + (int64_t)rel_z * l_par.nnz;
             int32_t d = (int32_t)((dot + ((dot >> 63) & 0xFFF)) >> 12);
             probe_l_d[pi] = d;
-            probe_l_ok[pi] = l_extremity;
+            probe_l_ok[pi] = 1;
         }
         if (r_par.ok) {
             int32_t rel_x = px - r_par.base_x - sp->origin_x;
@@ -753,12 +767,12 @@ void td5_track_resolve_wall_contacts_LEGACY_DISABLED(TD5_Actor *actor)
             int64_t dot = (int64_t)rel_x * r_par.nnx + (int64_t)rel_z * r_par.nnz;
             int32_t d = (int32_t)((dot + ((dot >> 63) & 0xFFF)) >> 12);
             probe_r_d[pi] = d;
-            probe_r_ok[pi] = r_extremity;
+            probe_r_ok[pi] = 1;
         }
 
         if (diag_slot0) {
-            TD5_LOG_I(LOG_TAG, "wall_diag slot0 p%d span=%d sub=%d L:d=%d R:d=%d probe=(%d,%d)",
-                      pi, span_idx, probe_sub_lane,
+            TD5_LOG_I(LOG_TAG, "wall_diag slot0 p%d span=%d L:d=%d R:d=%d probe=(%d,%d)",
+                      pi, span_idx,
                       probe_l_d[pi], probe_r_d[pi], px, pz);
         }
     }
