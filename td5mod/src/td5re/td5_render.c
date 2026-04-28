@@ -1724,13 +1724,18 @@ void td5_render_actors_for_view(int view_index)
             if (!actor || !mesh)
                 continue;
 
-            /* Drag race: only render actors with non-zero slot state.
-             * Original RenderRaceActorsForView @ 0x40BD26: in drag mode,
-             * iterates racer slots but skips `slot.state == 0` (absent AI).
-             * [RE basis: deep decomp pass, state-gated loop] */
+            /* Drag race: skip decoration slots (state==3). Originally this
+             * gate skipped state==0 (faithful to RenderRaceActorsForView @
+             * 0x40BD26 "absent AI" semantics where original drag had only
+             * state==1 and state==3 slots). Port enhancement keeps slot 1
+             * AI as state==0 so physics/AI tick it, so the gate is inverted
+             * to skip state==3 instead. The mesh==NULL check above already
+             * catches state==3 slots (their assets aren't loaded), making
+             * this a defense-in-depth check that also prevents stale-mesh
+             * rendering across race transitions. */
             if (drag_mode && slot < TD5_MAX_RACER_SLOTS) {
                 int ss = td5_game_get_slot_state(slot);
-                if (ss == 0)
+                if (ss == 3)
                     continue;
             }
 

@@ -8160,6 +8160,38 @@ static void Screen_CarSelection(void) {
             return;
         }
 
+        /* Cup-style modes (game_type 1..6): predefined track schedule —
+         * SKIP TrackSelection and launch the race directly with the cup's
+         * scheduled track.
+         * [CONFIRMED @ 0x0040f744 LAB_0040f78b — original CarSelectionScreen
+         *  case 0x1A path for any g_selectedGameType in {1..6} calls
+         *  InitializeRaceSeriesSchedule + InitializeFrontendDisplayModeState
+         *  directly with no SetFrontendScreen.]
+         * Without this branch the port falls through to the generic
+         * td5_frontend_set_screen(s_return_screen) at the bottom (which case 4
+         * OK sets to TRACK_SELECTION), forcing cup users into a track picker
+         * the original game never showed. The cup schedule track index lives
+         * at s_cup_schedules[game_type-1][race_within_series] (CONFIRMED @
+         * 0x464098, see s_cup_schedules definition above). */
+        if (s_selected_game_type >= 1 && s_selected_game_type <= 6 &&
+            !s_two_player_mode &&
+            s_return_screen == TD5_SCREEN_TRACK_SELECTION) {
+            int sched_idx = s_selected_game_type - 1;
+            if (s_race_within_series >= 0 && s_race_within_series < 13) {
+                int sched_track = s_cup_schedules[sched_idx][s_race_within_series];
+                if (sched_track >= 0 && sched_track != 99) {
+                    s_selected_track = sched_track;
+                }
+            }
+            s_selected_car = actual_car;
+            TD5_LOG_I(LOG_TAG,
+                      "CarSelect: cup game_type=%d race=%d track=%d -> skip track select, init schedule",
+                      s_selected_game_type, s_race_within_series, s_selected_track);
+            frontend_init_race_schedule();
+            frontend_init_display_mode_state();
+            return;
+        }
+
         /* Drag-race 2-pass CarSelect [CONFIRMED @ 0x0040f744].
          * Original: game_type==7 (=drag race there) && pass_marker==0 → re-enter
          * CarSelect with pass_marker=1, showing "CAR 2". After pass 2, skip

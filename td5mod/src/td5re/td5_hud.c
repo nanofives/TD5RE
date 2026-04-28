@@ -2640,8 +2640,23 @@ void td5_hud_render_minimap(int actor_slot)
         }
     }
 
-    /* Render racer dot markers */
+    /* Render racer dot markers.
+     *
+     * Skip slots in state==3 (decoration) so drag-race decoration slots
+     * 2-5 (parked at span=1 by the spawn override) don't show up as
+     * minimap dots at the back wall. Without this gate the player saw
+     * "two cars at the back of the strip" — actually 4 minimap dots for
+     * slots 2-5 piled on top of each other since their lanes (0-3) are
+     * within minimap dot size. [CONFIRMED via render diagnostic 2026-04-28]
+     *
+     * The original [@ 0x00432EAE InitializeRaceActorRuntime] sets
+     * g_racerCount=2 for game_type!=0 which prunes the loop bound to 2
+     * for drag/cup/etc. The port keeps g_racer_count=6 for cup/wanted
+     * (they need to draw all opponents), so per-slot state filtering
+     * is the correct port-side equivalent. */
     for (int r = 0; r < g_racer_count; r++) {
+        if (r < TD5_MAX_RACER_SLOTS && td5_game_get_slot_state(r) == 3)
+            continue;
         int16_t racer_span = actor_span_index(r);
         int span_delta;
         if (g_track_is_circuit) {
