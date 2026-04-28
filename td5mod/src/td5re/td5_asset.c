@@ -2395,57 +2395,29 @@ int td5_asset_load_vehicle(int car_index, int slot)
                 TD5_LOG_W(LOG_TAG, "vehicle slot=%d: carskin0 PNG not found in %s", slot, zip_path);
         }
 
-        /* Hub-cap: composite 4 animation frames into a 128×128 sprite sheet
-         * (2×2 grid of 64×64 tiles, frame&1=col, frame>>1=row).
-         * Original (LoadRaceTexturePages @ 0x442770) blits per-car CARHUB0-3.TGA
-         * into a shared WHEELS page; port uses per-slot dedicated pages.
-         * Alpha bleed applied after composite so transparent edges don't bleed
-         * black under the D3D11 LINEAR sampler. */
+        /* Hub-cap: Pitbull's carhubN.png is ALREADY a 4-frame motion-blur
+         * sheet — 64×64 RGBA containing four 32×32 sub-frames in a 2×2 layout.
+         * carhub0..carhub3.png are byte-identical (md5 verified) — likely 4
+         * file aliases for the 4 wheels. Load carhub0.png as a single 64×64
+         * page and the renderer samples one 32×32 sub-tile per spin frame.
+         *
+         * Commit 259c57b incorrectly composited all 4 (identical) PNGs into
+         * 128×128 treating each PNG as ONE frame — each "tile" then contained
+         * the whole 4-frame sheet, rendering as "4 wheels in one" with golden
+         * tint from LINEAR sampling across sub-frame boundaries. */
         {
-            static const char *k_hub_frames[4] = {
-                "carhub0.tga", "carhub1.tga", "carhub2.tga", "carhub3.tga"
-            };
-            uint8_t *sheet = (uint8_t *)calloc(128 * 128 * 4, 1);
+            char png_hub[256];
             int hub_ok = 0;
-            if (sheet) {
-                int frames_ok = 0;
-                for (int fi = 0; fi < 4; fi++) {
-                    char png_frame[256];
-                    void *fp = NULL;
-                    int fw = 0, fh = 0;
-                    if (!td5_asset_resolve_png_path(k_hub_frames[fi], zip_path,
-                                                    png_frame, sizeof(png_frame)))
-                        continue;
-                    if (!td5_asset_load_png_to_buffer(png_frame, TD5_COLORKEY_NONE,
-                                                      &fp, &fw, &fh))
-                        continue;
-                    if (fw == 64 && fh == 64) {
-                        int tile_col = fi & 1;
-                        int tile_row = fi >> 1;
-                        uint8_t *src = (uint8_t *)fp;
-                        for (int r = 0; r < 64; r++) {
-                            memcpy(sheet + ((tile_row * 64 + r) * 128 + tile_col * 64) * 4,
-                                   src + r * 64 * 4, 64 * 4);
-                        }
-                        frames_ok++;
-                    } else {
-                        TD5_LOG_W(LOG_TAG, "vehicle slot=%d: %s unexpected size %dx%d",
-                                  slot, k_hub_frames[fi], fw, fh);
-                    }
-                    stbi_image_free(fp);
-                }
-                if (frames_ok > 0) {
-                    alpha_bleed_rgb(sheet, 128, 128);
-                    if (td5_plat_render_upload_texture(hub_page, sheet, 128, 128, 2))
-                        hub_ok = 1;
-                    TD5_LOG_I(LOG_TAG, "vehicle slot=%d: hub sheet %dx%d frames=%d page=%d",
-                              slot, 128, 128, frames_ok, hub_page);
-                }
-                free(sheet);
+            if (td5_asset_resolve_png_path("carhub0.tga", zip_path,
+                                           png_hub, sizeof(png_hub))) {
+                hub_ok = td5_asset_load_png_texture(hub_page, png_hub, TD5_COLORKEY_NONE);
             }
             if (!hub_ok)
-                TD5_LOG_W(LOG_TAG, "vehicle slot=%d: carhub composite failed for %s",
+                TD5_LOG_W(LOG_TAG, "vehicle slot=%d: carhub0 load failed for %s",
                           slot, zip_path);
+            else
+                TD5_LOG_I(LOG_TAG, "vehicle slot=%d: carhub0 page=%d (64x64, 2x2 sub-frames)",
+                          slot, hub_page);
         }
 
         /* Patch PrimitiveCmd page IDs: cmd[0]→skin, cmd[1]→chassis underside.

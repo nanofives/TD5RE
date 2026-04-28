@@ -3839,11 +3839,15 @@ static void render_vehicle_wheel_billboards(TD5_Actor *actor, int slot)
             float rot_sin = (w < 2) ? front_sin : rear_sin;
             float hub_r  = rim_radius;
 
-            /* Hub texture: 64x64 tile inside the 128x128 carhub sheet.
-             * Tile col = frame&1, row = frame>>1 [CONFIRMED @ 0x004470C0]. */
-            const float hub_cu = ((float)(spin_col * 64 + 32)) / 128.0f;
-            const float hub_cv = ((float)(spin_row * 64 + 32)) / 128.0f;
-            const float hub_ru = 31.5f / 128.0f;
+            /* Hub texture: carhubN.png is a 64×64 sheet of four 32×32
+             * sub-frames in a 2×2 layout. Tile col = frame&1, row = frame>>1
+             * [CONFIRMED @ 0x004470C0]. UV samples a 30/64-half-width window
+             * (1-texel margin) centered on the chosen sub-tile, so the
+             * wrapper's LINEAR_WRAP sampler can't blend adjacent sub-frames
+             * at the disc perimeter. */
+            const float hub_cu = ((float)(spin_col * 32 + 16)) / 64.0f;
+            const float hub_cv = ((float)(spin_row * 32 + 16)) / 64.0f;
+            const float hub_ru = 15.0f / 64.0f;
 
             static const float k_hub_unit_y[8] = {
                 1.0f,  0.70710678f,  0.0f, -0.70710678f,
