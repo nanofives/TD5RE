@@ -762,18 +762,19 @@ void td5_vfx_draw_particles(int view_index) {
             int16_t sh = PSLOT_RD16(slot, PSLOT_SIZE_H);
             world_half_w = (float)sw * FP_TO_FLOAT;  /* /256.0 */
             world_half_h = (float)sh * FP_TO_FLOAT;
-            if (world_half_w < 8.0f) world_half_w = 8.0f;
-            if (world_half_h < 8.0f) world_half_h = 8.0f;
         } else {
             world_half_w = 30.0f;
             world_half_h = 30.0f;
         }
+        /* No min/max clamps: original DRAW callback (0x004297D0) and its
+         * BuildSpriteQuadTemplate (0x00432bd0) submit the perspective-divided
+         * corners directly with no FCOM/min/max — distant smoke shrinks
+         * sub-pixel and visually vanishes, matching the cars at the same
+         * distance. The earlier 6-px screen floor + 8-unit world floor were
+         * port-only additions that kept smoke trails visible past where the
+         * spawning car was already too small to see. */
         float half_w = world_half_w * focal * inv_z;
         float half_h = world_half_h * focal * inv_z;
-        if (half_w < 6.0f) half_w = 6.0f;
-        if (half_h < 6.0f) half_h = 6.0f;
-        if (half_w > 200.0f) half_w = 200.0f;
-        if (half_h > 200.0f) half_h = 200.0f;
 
         /* Normalize texel UVs to [0,1] for the D3D11 sampler. Static atlas
          * pages are 256x256; query actual dimensions so hi-res replacement
@@ -1948,6 +1949,19 @@ static void vfx_spawn_smoke_at_position(TD5_Actor *actor, float wx, float wy,
 {
     int vi = view_index & 1;
     uint8_t *bank = s_particle_banks[vi];
+
+    /* Frustum-cull gate. The original gates ALL smoke spawns through
+     * RenderRaceActorForView (0x0040C120) — only firing for actors that pass
+     * TestMeshAgainstViewFrustum. The port routes the tire/slip smoke chain
+     * through the sim tick (td5_game.c per-actor loop), bypassing that gate,
+     * so distant AI cars used to leave smoke trails after the car itself
+     * was culled. Restoring the visibility check at this single chokepoint
+     * matches the original's effective behavior without restructuring the
+     * sim/render boundary. Render-time entrypoints (td5_vfx_spawn_smoke,
+     * td5_vfx_spawn_rear_wheel_smoke) are already inside a frustum gate; the
+     * double-gate is harmless. */
+    if (!td5_render_is_sphere_visible(wx, wy, wz, 50.0f))
+        return;
 
     TD5_LOG_D(LOG_TAG,
               "smoke spawn: pos=(%.2f, %.2f, %.2f) variant=%d view=%d",
