@@ -83,8 +83,16 @@ void BuildRotationMatrixFromAngles(float *out, short *angles);
  * Original frustum far-cull (0x0042D48E): round(3.0 * 65000) = 195000.
  * Source port uses far_cull as depth range so all geometry within frustum maps to [0,1]. */
 #define DEFAULT_NEAR_CLIP   1.0f
-#define DEFAULT_FAR_CLIP    400000.0f
-#define DEFAULT_FAR_CULL    400000.0f
+/* Distance-based far cull is a port-only addition. Original gates view distance
+ * purely by span count (RunRaceFrame 0x42BB2E clamps to gViewportLayoutMaxSpans
+ * = 0x40, then doubles → 128 spans max single-screen). Port extends the span
+ * window to 256 (4x original), but a distance-based cull at 400000 was clipping
+ * the far end of that window for tracks with long ~2000-unit spans (256 spans
+ * forward = ~512k world units, well past 400k). Bump to 1,000,000 so distance
+ * culling stays out of the way of the span window; D24 z-buffer with linear z
+ * has ~16 units/z-step at far=1M, still no z-fighting risk on track meshes. */
+#define DEFAULT_FAR_CLIP    1000000.0f
+#define DEFAULT_FAR_CULL    1000000.0f
 
 /** Billboard depth sort stride sizes (bytes) */
 #define BILLBOARD_TRI_STRIDE  0x84
@@ -1662,8 +1670,8 @@ void td5_render_actors_for_view(int view_index)
         static int s_view_dist_logged = 0;
         if (!s_view_dist_logged) {
             TD5_LOG_I(LOG_TAG,
-                      "view distance: frac=%.2f max_spans=%d half_window=%d (visible window=%d spans)",
-                      view_dist_frac, VIEW_DIST_MAX_SPANS, half_window, half_window * 2);
+                      "view distance: frac=%.2f max_spans=%d half_window=%d (visible window=%d spans) far_cull=%.0f",
+                      view_dist_frac, VIEW_DIST_MAX_SPANS, half_window, half_window * 2, s_far_cull);
             s_view_dist_logged = 1;
         }
     }
@@ -1835,9 +1843,16 @@ void td5_render_actors_for_view(int view_index)
             td5_render_prepared_mesh(mesh);
 
             /* Chrome/envmap reflection overlay (0x40C120 second pass).
-             * Original gates on `actor_00 == 0` — only the player car gets
-             * the reflection pass. [CONFIRMED @ 0x40C120 second-pass branch] */
-            if (s_proj_effect_mode == 2 && slot == 0) {
+             * Original (RenderRaceActorForView @ 0x0040c120) gates on
+             * `actor_00 == 0` — only the player car (slot 0) gets the reflection
+             * pass. Port deviation: extend to all racer slots (0..5) per user
+             * request; AI cars now share the player's chrome mesh
+             * (g_playerReflectionMeshResource @ 0x004c3d40 is a single global,
+             * not per-slot). Traffic actors render through a different inlined
+             * path in RenderRaceActorsForView and are intentionally left without
+             * reflection. [RE basis: agent confirmed mesh is global, gate is
+             * slot==0 in original — this is a deliberate visual enhancement.] */
+            if (s_proj_effect_mode == 2 && slot < TD5_MAX_RACER_SLOTS) {
                 td5_render_update_projection_effect(slot, actor);
                 render_vehicle_reflection_overlay(mesh, slot);
             }
