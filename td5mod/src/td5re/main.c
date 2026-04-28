@@ -208,6 +208,7 @@ static int td5_apply_cli_overrides(const char *cmdline,
         { "AutoRace",             &g_td5.ini.auto_race },
         { "StartScreen",          &g_td5.ini.start_screen },
         { "StartSpanOffset",      &g_td5.ini.start_span_offset },
+        { "DefaultReverse",       &g_td5.ini.default_reverse },
         /* Trace */
         { "RaceTrace",            &g_td5.ini.race_trace_enabled },
         { "RaceTraceSlot",        &g_td5.ini.race_trace_slot },
@@ -383,6 +384,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     /* Additive span shift for every actor spawn — mirrors the Frida hook on
      * InitializeActorTrackPose (0x00434350). 0 = vanilla grid. */
     g_td5.ini.start_span_offset     = td5_ini_int("Game", "StartSpanOffset", 0);
+    g_td5.ini.default_reverse       = td5_ini_int("Game", "DefaultReverse", 0);
 
     /* Trace */
     g_td5.ini.race_trace_enabled    = td5_ini_int("Trace", "RaceTrace", 0);

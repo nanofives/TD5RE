@@ -4592,10 +4592,31 @@ void *td5_track_get_display_list(int span_index)
      * Original render loop (0x42baf4) converts span_index to display list
      * index with >> 2 (divide by 4), mapping ~2789 spans to ~698 entries.
      * Original lookup (0x431260): return *(uint*)(table_base + dl_index * 8)
-     * [CONFIRMED @ 0x42baf4: SHR by 2; table count stored at 0x4aaee0] */
+     * [CONFIRMED @ 0x42baf4: SHR by 2; gModelsDatEntryTable @ 0x004AEE60]
+     *
+     * Reverse-direction mirror [CONFIRMED @ 0x0042BB80-0x0042BB97 RunRaceFrame]:
+     *   if (gReverseTrackDirection) eff = g_trackTotalSpanCount - span_index;
+     *   else                        eff = span_index;
+     *   dl_index = eff >> 2;
+     * MODELS.DAT is loaded once per level (forward index) and shared across
+     * directions; in reverse, the strip walker hands back STRIPB.DAT span
+     * indices which must be re-mapped into the forward-frame MODELS.DAT slot
+     * before the >>2.  Without the mirror, reverse renders MODELS.DAT
+     * geometry from forward span_index>>2, which can be ~1.5M world units
+     * away from the player and gets frustum-culled (Sydney-reverse 0/256). */
     if (s_models_blob && s_models_entry_offsets &&
         s_models_display_list_count > 0 && span_index >= 0) {
-        int dl_index = span_index >> 2;  /* ~4 spans per display list block */
+        int eff_index = span_index;
+        /* Reverse-direction mirror operates on the main-road ring length
+         * (g_trackTotalSpanCount in the original = STRIP/STRIPB header[1]),
+         * NOT on the physical span count (which includes branches).
+         * Branch spans (>= ring_length) keep their raw index — they fall
+         * through to the STRIP fallback below since branch geometry isn't
+         * in MODELS.DAT anyway. */
+        int ring = g_td5.track_span_ring_length;
+        if (g_td5.reverse_direction && ring > 0 && span_index < ring)
+            eff_index = ring - 1 - span_index;
+        int dl_index = eff_index >> 2;  /* ~4 spans per display list block */
         if (dl_index >= 0 && dl_index < s_models_display_list_count) {
             uint32_t off = s_models_entry_offsets[dl_index];
             if (off != 0)
