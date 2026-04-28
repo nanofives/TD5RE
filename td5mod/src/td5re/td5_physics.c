@@ -546,6 +546,9 @@ void td5_physics_update_vehicle_actor(TD5_Actor *actor)
 
         if (actor->damage_lockout == 0x0F && actor->airborne_frame_counter >= 3) {
             /* Stunned/damping recovery mode */
+            TD5_LOG_I(LOG_TAG, "state0f_enter: slot=%d afc=%d av_roll=%d av_pitch=%d",
+                      actor->slot_index, actor->airborne_frame_counter,
+                      actor->angular_velocity_roll, actor->angular_velocity_pitch);
             td5_physics_state0f_damping(actor);
         } else if (actor->slot_index < 6 && g_race_slot_state[actor->slot_index]) {
             /* Human player */
@@ -4316,6 +4319,31 @@ void td5_physics_integrate_pose(TD5_Actor *actor)
      * 1=airborne), so save the inverted version (1=grounded) before the call. */
     s_prev_grounded_mask[actor->slot_index & 0x0F] = (~actor->wheel_contact_bitmask) & 0x0F;
     td5_physics_refresh_wheel_contacts(actor);
+
+    /* Mirror current airborne mask into damage_lockout (+0x37C).
+     * Original writes the freshly-computed contact mask into +0x37C at
+     * 0x004039B9 inside RefreshVehicleWheelContactFrames. Port writes the
+     * equivalent live mask to +0x37D (wheel_contact_bitmask) instead,
+     * leaving +0x37C dead. Without this, the gate at td5_physics_update_
+     * vehicle_actor (state0f_damping trigger) and several other reads of
+     * damage_lockout never fire, killing the tumble-recovery angular
+     * damping (state0f_damping decays ω_roll/pitch by 1/16 per frame). */
+    actor->damage_lockout = actor->wheel_contact_bitmask;
+
+    /* Increment airborne_frame_counter (+0x360) when all 4 wheels airborne.
+     * [CONFIRMED @ 0x0040634B]: original does INC word ptr [ESI+0x360]
+     * inside the per-wheel averaging loop of IntegrateVehiclePoseAndContacts,
+     * reached only when the grounded-wheel count is 0 — equivalently
+     * damage_lockout == 0x0F. NO reset instruction exists in the binary
+     * (exhaustive search): the counter monotonically grows during sustained
+     * airborne, and simply stops growing when any wheel grounds (the INC
+     * isn't reached). State0f_damping at td5_physics.c:547 fires when
+     * afc >= 3 AND dlk == 0x0F (CMP at 0x00406835 + JL/JNZ at 0x0040683D). */
+    if (actor->wheel_contact_bitmask == 0x0F) {
+        actor->airborne_frame_counter++;
+        TD5_LOG_I(LOG_TAG, "tumble_gate: slot=%d wcb=0x0F dlk=0x0F afc=%d",
+                  actor->slot_index, actor->airborne_frame_counter);
+    }
 
     /* T2: Wheel-contact attitude feedback — literal port of
      * TransformTrackVertexByMatrix @ 0x00446030 called from
