@@ -363,6 +363,17 @@ void td5_ai_shutdown(void) {
     /* nothing to free -- all static */
 }
 
+/* Per-slot encounter latch accessor [CONFIRMED @ 0x00403180].
+ * Original UpdatePlayerVehicleControlState gates the encounter-control branch
+ * on a per-slot field at gActorSpecialEncounterActive[slot * 0x11c], NOT on
+ * the global g_wantedModeEnabled. Without this distinction, the port routed
+ * every Cop Chase frame into td5_ai_update_encounter_control, blocking the
+ * player's throttle write to actor+0x33E. */
+int td5_ai_is_encounter_active(int slot) {
+    if (slot < 0 || slot >= TD5_MAX_TOTAL_ACTORS) return 0;
+    return g_encounter_active[slot] != 0;
+}
+
 /* Award damage to a cop slot on player<->cop collision.
  * Mirrors AwardWantedDamageScore @ 0x43D690 [CONFIRMED]:
  *   decrement = 0x400 if impact_mag > 20000, else 0x200.

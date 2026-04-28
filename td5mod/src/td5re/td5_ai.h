@@ -90,6 +90,12 @@ void td5_ai_wanted_cop_hit(int cop_slot, int32_t impact_mag);
 /* --- Special encounter (cop chase) --- */
 void td5_ai_update_special_encounter(void);
 void td5_ai_update_encounter_control(int slot);
+/* Per-slot encounter latch (g_encounter_active[slot] != 0) [CONFIRMED @ 0x00403180].
+ * Original gates the player-input encounter-control branch on a per-slot field
+ * at stride 0x11c, NOT on the global g_wantedModeEnabled flag. Mirroring that
+ * here so the player's throttle write is not blocked for the entire Cop Chase
+ * session (only while a tracked encounter is actually engaged). */
+int  td5_ai_is_encounter_active(int slot);
 
 /* 0x434040: Compute actor route heading delta */
 uint32_t td5_compute_heading_delta(void *route_entry);
