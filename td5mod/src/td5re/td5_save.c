@@ -1373,6 +1373,22 @@ int td5_save_get_circuit_lap_count(void)
     return (int)s_circuit_lap_count;
 }
 
+/* [CONFIRMED @ 0x00427156 ScreenLocalizationInit] Original seeds
+ * gConfiguredDisplayModeOrdinal from gSelectedDisplayModeOrdinal (loaded from
+ * config.td5 by LoadPackedConfigTd5 @ 0x0040FB60). The port persists this
+ * field as s_display_mode at byte 0xBD; expose it so the frontend can seed
+ * its runtime selector at boot instead of recomputing it from the live
+ * window dimensions every time DisplayOptions opens. */
+int td5_save_get_display_mode(void)
+{
+    return (int)s_display_mode;
+}
+
+void td5_save_set_display_mode(int v)
+{
+    s_display_mode = v;
+}
+
 /* ========================================================================
  * Unlock System
  *

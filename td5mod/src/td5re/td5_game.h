@@ -54,6 +54,14 @@ int  td5_game_is_local_participant(int slot);
  * Used by the renderer to skip disabled slots in drag race. */
 int  td5_game_get_slot_state(int slot);
 
+/* Returns the companion_2 byte for a slot (offset +2 in the slot record).
+ * Used by Screen_RaceResults to detect cup elimination (value == 2). */
+int  td5_game_get_slot_companion_2(int slot);
+
+/* Returns 1 iff the actor at slot has posted a finish score
+ * (post_finish_metric_base != 0); 0 otherwise. */
+int  td5_game_slot_is_finished(int slot);
+
 /* --- Timing --- */
 void td5_game_update_frame_timing(void);
 float td5_game_get_fps(void);
