@@ -83,8 +83,8 @@ void BuildRotationMatrixFromAngles(float *out, short *angles);
  * Original frustum far-cull (0x0042D48E): round(3.0 * 65000) = 195000.
  * Source port uses far_cull as depth range so all geometry within frustum maps to [0,1]. */
 #define DEFAULT_NEAR_CLIP   1.0f
-#define DEFAULT_FAR_CLIP    195000.0f
-#define DEFAULT_FAR_CULL    195000.0f
+#define DEFAULT_FAR_CLIP    400000.0f
+#define DEFAULT_FAR_CULL    400000.0f
 
 /** Billboard depth sort stride sizes (bytes) */
 #define BILLBOARD_TRI_STRIDE  0x84
@@ -1632,7 +1632,7 @@ void td5_render_actors_for_view(int view_index)
      * exceeds the original's (64 + 25 quarter-span = ~89 effective) trailing reach,
      * so no explicit offset is needed. [RE basis: research agent confirmed the
      * architectural coverage — task #9 resolved by doubled window.] */
-#define VIEW_DIST_MAX_SPANS 128
+#define VIEW_DIST_MAX_SPANS 256
     int player_span = 0;
     int player_branch_span = -1;
     {
@@ -1657,6 +1657,16 @@ void td5_render_actors_for_view(int view_index)
     float view_dist_frac = td5_save_get_view_distance();
     int half_window = (int)((view_dist_frac * 0.85f + 0.15f) * (float)VIEW_DIST_MAX_SPANS);
     if (half_window < 1) half_window = 1;
+
+    {
+        static int s_view_dist_logged = 0;
+        if (!s_view_dist_logged) {
+            TD5_LOG_I(LOG_TAG,
+                      "view distance: frac=%.2f max_spans=%d half_window=%d (visible window=%d spans)",
+                      view_dist_frac, VIEW_DIST_MAX_SPANS, half_window, half_window * 2);
+            s_view_dist_logged = 1;
+        }
+    }
 
     int actor_render_count = 0;
     int actor_meshes_submitted = 0;
