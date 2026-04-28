@@ -496,6 +496,42 @@ void td5_track_get_span_edges(int span_index,
 
 void td5_track_resolve_wall_contacts(TD5_Actor *actor)
 {
+    /* Disabled 2026-04-28 (fix-1777408127-59867).
+     *
+     * The original TD5_d3d.exe has NO generic mid-strip lateral wall impulse
+     * [CONFIRMED via Ghidra cross-reference search of 0x00406980]. The three
+     * call sites that reach ApplyTrackSurfaceForceToActor are:
+     *   - 0x00406CC0 branch 1: sub_lane==0 transverse edge (NOT lateral),
+     *   - 0x00406CC0 branch 2: sub_lane==lane-1 transverse edge (NOT lateral),
+     *   - 0x00406F50 / 0x004070E0: per-level fence strip (LEFT rail only,
+     *     gated by DAT_00483954 / DAT_00483550).
+     *
+     * The port's prior body synthesized a longitudinal-rail lateral wall
+     * everywhere, which is not faithful. With sub_lane==0 firing LEFT and
+     * sub_lane>=lane-1 firing RIGHT, on multi-lane spans the rightmost
+     * sub-lane probe always crossed the right rail (the road's actual edge),
+     * trapping the player in an "invisible right-lane wall". Disabling this
+     * function restores faithful behavior — lateral containment is purely
+     * topological via UpdateActorTrackPosition (0x004440F0) + state-0x0F
+     * off-track damping.
+     *
+     * The function is kept as an early-return stub so existing callers
+     * (td5_physics, debug overlays) compile unchanged.
+     *
+     * RE basis:
+     *   - 0x00406CC0 sub-lane-extremity boundary [CONFIRMED @ 0x00406CFC, 0x00406D88]
+     *   - 0x00406980 ApplyTrackSurfaceForceToActor [CONFIRMED @ 0x00406988]
+     *   - DAT_004631a0/a4 vertex-offset table [CONFIRMED @ 0x004631a0]
+     *   - reference_v2w_function_semantics.md (memory). */
+    (void)actor;
+    return;
+}
+
+/* Legacy port-specific lateral wall synthesis — disabled. Body kept under
+ * #if 0 for reference; do NOT re-enable without faithful 0x00406CC0 port. */
+#if 0
+void td5_track_resolve_wall_contacts_LEGACY_DISABLED(TD5_Actor *actor)
+{
     static uint32_t s_wall_tick = 0;
     int diag_slot0 = 0;
 
@@ -761,6 +797,7 @@ void td5_track_resolve_wall_contacts(TD5_Actor *actor)
         }
     }
 }
+#endif /* legacy wall_contacts disabled */
 
 /* ========================================================================
  * Forward / Reverse track-segment contact handlers
@@ -2496,51 +2533,37 @@ static void update_position_recursive(int16_t *track_state, int32_t pos_x, int32
     }
 
     if (!compound_done && iter >= TRACK_MAX_RECURSION) {
-        /* Non-convergence: boundary walk failed. Restore snapshot, then
-         * do a brute-force nearest-span search in a ±SEARCH_RADIUS window
-         * around the saved span to find the correct span by XZ distance. */
+        /* Non-convergence: boundary walk did not settle within
+         * TRACK_MAX_RECURSION steps. Restore the saved state and leave the
+         * track position unchanged for this tick — matches the original's
+         * single-pass-per-call semantics.
+         *
+         * The previous port-specific brute-force ±32-span nearest-span
+         * search (removed 2026-04-28) was warping the chassis_span by up
+         * to 32 spans per tick whenever the actor was at a span boundary
+         * with multi-bit crossings the recursion couldn't resolve. That
+         * warp:
+         *   1. Caused the visible "warp forward at the furthest point on
+         *      each lane" symptom (Symptom 2 of fix-1777408127-59867).
+         *   2. Bumped track_state[3] (high_water) by the warp delta,
+         *      which then propagated into UpdateRaceOrder and prevented
+         *      the lap-complete gate `track_start-1 <= span <=
+         *      track_start+1` from ever latching, killing finish detection
+         *      (Symptom 3, cascade).
+         *
+         * Original 0x004440F0 [CONFIRMED via Ghidra full-body decomp,
+         * fix-1777408127-59867] is single-pass with no fallback — if the
+         * boundary cross-products don't resolve cleanly, the function
+         * simply returns and the next tick retries with the new world_pos.
+         *
+         * RE basis: original 0x004440F0 has no ±N-span search loop, no
+         * span-center distance metric, and no track_state[2]/track_state[3]
+         * write-back outside the per-case bodies. */
+        TD5_LOG_W(LOG_TAG,
+                  "walker_nonconverge: span=%d sub=%d pos=(%d,%d) — keeping prior state",
+                  (int)saved_state[0], (int)((int8_t *)saved_state)[12],
+                  pos_x >> 8, pos_z >> 8);
         memcpy(track_state, saved_state, 16);
-
-        int search_center = (int)saved_state[0];
-        int best_span = search_center;
-        int64_t best_dist = INT64_MAX;
-        int search_lo = search_center - 32;
-        int search_hi = search_center + 32;
-        if (search_lo < 0) search_lo = 0;
-        if (search_hi >= s_span_count) search_hi = s_span_count - 1;
-
-        /* Convert position to world units for comparison with span centers */
-        int32_t wx = pos_x >> 8;
-        int32_t wz = pos_z >> 8;
-
-        for (int si = search_lo; si <= search_hi; si++) {
-            int cx = 0, cy = 0, cz = 0;
-            /* Inline span center: use origin + first vertex midpoint for speed */
-            const TD5_StripSpan *tsp = &s_span_array[si];
-            if (tsp->span_type == 9 || tsp->span_type == 10) continue;
-            TD5_StripVertex *v0 = vertex_at(tsp->left_vertex_index);
-            TD5_StripVertex *v1 = vertex_at(tsp->right_vertex_index);
-            if (!v0 || !v1) continue;
-            cx = tsp->origin_x + ((int32_t)v0->x + (int32_t)v1->x) / 2;
-            cz = tsp->origin_z + ((int32_t)v0->z + (int32_t)v1->z) / 2;
-
-            int64_t dx = (int64_t)(wx - cx);
-            int64_t dz = (int64_t)(wz - cz);
-            int64_t dist = dx * dx + dz * dz;
-            if (dist < best_dist) {
-                best_dist = dist;
-                best_span = si;
-            }
-        }
-
-        if (best_span != search_center) {
-            track_state[0] = (int16_t)best_span;
-            /* Update accumulated span counter based on direction of movement */
-            int16_t delta = (int16_t)(best_span - search_center);
-            track_state[2] += delta;
-            if (track_state[2] > track_state[3])
-                track_state[3] = track_state[2];
-        }
     }
 }
 
