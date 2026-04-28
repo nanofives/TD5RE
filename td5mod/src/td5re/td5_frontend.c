@@ -1821,7 +1821,11 @@ void td5_frontend_auto_race_setup(void) {
     s_selected_game_type = g_td5.ini.default_game_type;
     s_selected_paint     = 0;
     s_selected_transmission = 0;
-    s_track_direction    = 0;
+    s_track_direction    = g_td5.ini.default_reverse ? 1 : 0;
+    g_td5.reverse_direction = s_track_direction;
+    TD5_LOG_I(LOG_TAG, "AutoRace: track_direction=%s (DefaultReverse=%d)",
+              s_track_direction ? "Backwards" : "Forwards",
+              g_td5.ini.default_reverse);
 
     /* Apply game options from INI */
     s_game_option_laps              = g_td5.ini.laps;

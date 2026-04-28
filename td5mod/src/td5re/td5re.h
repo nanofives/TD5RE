@@ -248,6 +248,12 @@ typedef struct TD5_GlobalState {
          * [Game] StartSpanOffset, overridable via --StartSpanOffset=N on the
          * command line. 0 = vanilla grid. */
         int  start_span_offset;
+        /* Force AutoRace track direction to backwards (s_track_direction=1).
+         * 0 = forwards (default). 1 = backwards, picks STRIPB.DAT/LEFTB.TRK/
+         * RIGHTB.TRK/TRAFFICB.BUS in td5_asset_load_level. Only consumed by
+         * td5_frontend_auto_race_setup; the manual frontend Direction toggle
+         * is unaffected. Test override only — no equivalent in the original. */
+        int  default_reverse;
         /* Enable benchmark mode: redirects main-menu button 2 to TD5_GAMESTATE_BENCHMARK.
          * Matches the dead-code path in TD5_d3d.exe gated by app+0x170 (always 0 in
          * the shipped binary). Default 0 = button 2 is 2-player, matching the
