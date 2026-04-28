@@ -1797,10 +1797,9 @@ void td5_render_actors_for_view(int view_index)
             td5_render_prepared_mesh(mesh);
 
             /* Chrome/envmap reflection overlay (0x40C120 second pass).
-             * Original: after normal mesh, if mode==2, renders reflection
-             * mesh for the player car (slot 0). We apply to all racer slots
-             * for visual consistency. */
-            if (s_proj_effect_mode == 2 && slot < TD5_MAX_RACER_SLOTS) {
+             * Original gates on `actor_00 == 0` — only the player car gets
+             * the reflection pass. [CONFIRMED @ 0x40C120 second-pass branch] */
+            if (s_proj_effect_mode == 2 && slot == 0) {
                 td5_render_update_projection_effect(slot, actor);
                 render_vehicle_reflection_overlay(mesh, slot);
             }
@@ -2173,23 +2172,31 @@ void td5_render_advance_texture_ages(void)
     }
 }
 
+/* Set when the reflection overlay is mid-draw so type-2 pages (env-map) do
+ * not switch the preset away from the manually-set ADDITIVE. Without this,
+ * the per-bind preset switch overrides ADDITIVE with TRANSLUCENT_ANISO and
+ * the reflection paints opaquely over the car body (bug: "cars render only
+ * the reflection texture"). */
+static int s_in_reflection_overlay = 0;
+
 /* Dispatch render preset per tpage transparency type.
  * BindRaceTexturePage @ 0x0040B660 switch:
  *   type 0 → ALPHABLENDENABLE=0 (opaque)                  [CONFIRMED @ 0x0040B6B0]
  *   type 1 → ALPHABLENDENABLE=1, SRCALPHA/INVSRCALPHA     [CONFIRMED @ 0x0040B6CC]
- *   type 2 → same D3D state as type 1                     [CONFIRMED @ 0x0040B6CC, same case]
+ *   type 2 → same D3D state as type 1, no ZWRITE write    [CONFIRMED @ 0x0040B6CC, same case]
  *   type 3 → ALPHABLENDENABLE=1, ONE/ONE (additive)       [CONFIRMED @ 0x0040B6E8]
  *
  * Types 1 and 2 share the same D3D blend state but differ in pixel alpha:
  *   type 1 = binary 0/255 → OPAQUE_LINEAR (alpha_ref=1 discards 0-alpha pixels)
  *   type 2 = uniform 0x80 → TRANSLUCENT_ANISO (blend enabled for 50% opacity)
  *
- * We call set_preset unconditionally and rely on the wrapper's per-draw
- * ApplyStateCache to avoid redundant GPU state changes. */
+ * Reflection overlay carve-out: when s_in_reflection_overlay is set, the
+ * caller has explicitly chosen ADDITIVE for chrome highlights — keep it. */
 static void td5_render_apply_page_blend_preset(int page_id)
 {
     int t = td5_asset_get_page_transparency(page_id);
     TD5_RenderPreset p;
+    if (s_in_reflection_overlay) return; /* preserve caller's ADDITIVE preset */
     if (t == 3)      p = TD5_PRESET_ADDITIVE;
     else if (t == 2) p = TD5_PRESET_TRANSLUCENT_ANISO;
     else             p = TD5_PRESET_OPAQUE_LINEAR;
@@ -3171,7 +3178,14 @@ static void render_vehicle_reflection_overlay(TD5_MeshHeader *mesh, int slot)
     /* Additive blend for the reflection overlay.
      * Chrome reflections ADD light on top of the car body color, making
      * highlights brighter/whiter — matching the original's visual style.
-     * ADDITIVE preset: src=ONE, dst=ONE, z_test=1, z_write=0. */
+     * ADDITIVE preset: src=ONE, dst=ONE, z_test=1, z_write=0.
+     *
+     * The s_in_reflection_overlay flag suppresses td5_render_apply_page_blend_preset
+     * from overriding ADDITIVE during the reflection draw — env-map pages are
+     * type 2 (TRANSLUCENT_ANISO normally), and without this flag the per-bind
+     * switch would re-set the preset to TRANSLUCENT mid-draw, painting the
+     * env-map opaquely over the body (bug: "cars only show reflection"). */
+    s_in_reflection_overlay = 1;
     td5_plat_render_set_preset(TD5_PRESET_ADDITIVE);
 
     /* Save and override vertex lighting + UVs for the reflection pass.
@@ -3217,6 +3231,7 @@ static void render_vehicle_reflection_overlay(TD5_MeshHeader *mesh, int slot)
     }
 
     /* Restore opaque preset for subsequent geometry */
+    s_in_reflection_overlay = 0;
     td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
 }
 
@@ -3824,11 +3839,15 @@ static void render_vehicle_wheel_billboards(TD5_Actor *actor, int slot)
             float rot_sin = (w < 2) ? front_sin : rear_sin;
             float hub_r  = rim_radius;
 
-            /* Hub texture: 64x64 tile inside the 128x128 carhub sheet.
-             * Tile col = frame&1, row = frame>>1 [CONFIRMED @ 0x004470C0]. */
-            const float hub_cu = ((float)(spin_col * 64 + 32)) / 128.0f;
-            const float hub_cv = ((float)(spin_row * 64 + 32)) / 128.0f;
-            const float hub_ru = 31.5f / 128.0f;
+            /* Hub texture: carhubN.png is a 64×64 sheet of four 32×32
+             * sub-frames in a 2×2 layout. Tile col = frame&1, row = frame>>1
+             * [CONFIRMED @ 0x004470C0]. UV samples a 30/64-half-width window
+             * (1-texel margin) centered on the chosen sub-tile, so the
+             * wrapper's LINEAR_WRAP sampler can't blend adjacent sub-frames
+             * at the disc perimeter. */
+            const float hub_cu = ((float)(spin_col * 32 + 16)) / 64.0f;
+            const float hub_cv = ((float)(spin_row * 32 + 16)) / 64.0f;
+            const float hub_ru = 15.0f / 64.0f;
 
             static const float k_hub_unit_y[8] = {
                 1.0f,  0.70710678f,  0.0f, -0.70710678f,
