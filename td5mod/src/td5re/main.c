@@ -223,6 +223,9 @@ static int td5_apply_cli_overrides(const char *cmdline,
         { "LogRace",              &g_td5.ini.log_race },
         { "LogEngine",            &g_td5.ini.log_engine },
         { "LogWrapper",           &g_td5.ini.log_wrapper },
+        /* Test hook: cycle resolutions in the main loop to validate
+         * apply_display_mode without manual menu navigation. */
+        { "TestResolutionCycle",  &g_td5.ini.test_resolution_cycle },
     };
     const size_t table_n = sizeof(table) / sizeof(table[0]);
     int n_applied = 0;
@@ -656,6 +659,34 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
 
         { static int frame_count = 0; frame_count++;
           if (frame_count <= 10) dbglog("Frame %d: state=%d", frame_count, g_td5.game_state); }
+
+        /* TestResolutionCycle: validate apply_display_mode without manual menu
+         * navigation. Cycles through 4 windowed resolutions across the first
+         * ~600 frames, then leaves the game at the final size. */
+        if (g_td5.ini.test_resolution_cycle) {
+            static int rc_frame = 0;
+            static int rc_step = 0;
+            static const struct { int w, h; const char *label; } rc_modes[] = {
+                {  800, 600, "800x600"   },
+                { 1024, 768, "1024x768"  },
+                { 1280, 720, "1280x720"  },
+                {  640, 480, "640x480"   },
+            };
+            const int rc_steps = (int)(sizeof(rc_modes) / sizeof(rc_modes[0]));
+            const int rc_step_frames = 120; /* ~4s per step at 30 Hz */
+            const int rc_warmup     = 60;  /* let init settle */
+            rc_frame++;
+            if (rc_frame > rc_warmup && rc_step < rc_steps &&
+                ((rc_frame - rc_warmup) % rc_step_frames) == 0) {
+                int w = rc_modes[rc_step].w, h = rc_modes[rc_step].h;
+                dbglog("[TEST] frame=%d step=%d -> apply_display_mode(%s)",
+                       rc_frame, rc_step, rc_modes[rc_step].label);
+                if (!td5_plat_apply_display_mode(w, h, DEFAULT_BPP)) {
+                    dbglog("[TEST] step=%d FAILED %s", rc_step, rc_modes[rc_step].label);
+                }
+                rc_step++;
+            }
+        }
 
         /* Run one frame of the game state machine.
          * td5re_frame() drives the FSM (INTRO -> MENU -> RACE -> BENCHMARK)

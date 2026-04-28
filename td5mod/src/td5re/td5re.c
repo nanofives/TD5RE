@@ -85,6 +85,14 @@ uint32_t td5_crc32(const uint8_t *data, size_t len) {
  * Master Entry Points
  * ======================================================================== */
 
+/* Mirror render dimensions into g_td5 from outside td5re.c (used by the
+ * platform layer's apply_display_mode so race-side code that reads
+ * g_td5.render_width/height follows live resolution changes). */
+void td5re_set_render_dims(int w, int h) {
+    if (w > 0) g_td5.render_width  = w;
+    if (h > 0) g_td5.render_height = h;
+}
+
 int td5re_init(void) {
     /* Preserve settings injected by main.c before memset */
     int saved_w = g_td5.render_width;
