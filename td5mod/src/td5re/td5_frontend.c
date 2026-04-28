@@ -679,9 +679,7 @@ static float frontend_update_timed_animation(int max_tick, uint32_t duration_ms)
 
 static const char *frontend_get_title_tga_for_screen(TD5_ScreenIndex screen) {
     switch (screen) {
-    /* SelectCompCarText.tga (540x20) — confirmed overlay for MainMenu @ 0x41572A.
-     * Original: FUN_00412e30(0) loads this via FUN_00425660 at x=(screenW/2-200)=120. */
-    case TD5_SCREEN_MAIN_MENU: return "SelectCompCarText.tga";
+    case TD5_SCREEN_MAIN_MENU: return "MainMenuText.TGA";
     case TD5_SCREEN_RACE_TYPE_MENU: return "RaceMenuText.TGA";
     case TD5_SCREEN_QUICK_RACE: return "QuickRaceText.tga";
     case TD5_SCREEN_OPTIONS_HUB: return "OptionsText.tga";
@@ -3578,12 +3576,6 @@ static void frontend_render_quick_race_overlay(float sx, float sy) {
     track_locked = (!s_cheat_unlock_all && !s_network_active &&
                     s_selected_track >= 0 && s_selected_track < 26 &&
                     s_track_lock_table[s_selected_track] != 0);
-    if (s_track_preview_surface > 0) {
-        /* Right of button column (buttons end ~x=376); same coords as TrackSelection preview. */
-        fe_draw_surface_rect(s_track_preview_surface,
-                             412.0f * sx, 128.0f * sy,
-                             152.0f * sx, 224.0f * sy, 0xFFFFFFFF);
-    }
     frontend_draw_value_text(sx, sy, 140, 106, car_name, 0xFFFFFFFF);
     frontend_draw_value_text(sx, sy, 140, 226, track_name, 0xFFFFFFFF);
     if (car_locked) frontend_draw_value_text(sx, sy, 398, 126, "LOCKED", 0xFFFF4444);
@@ -4957,10 +4949,6 @@ void td5_frontend_render_ui_rects(void) {
         frontend_render_bg_gallery(sx, sy);
 
     switch (s_current_screen) {
-    case TD5_SCREEN_MAIN_MENU:
-        /* SelectCompCarText.tga (540×20) overlay drawn via title texture system above.
-         * No additional per-screen overlay needed — original only has the text strip. */
-        break;
     case TD5_SCREEN_RACE_TYPE_MENU:
         frontend_render_race_type_description(sx, sy);
         break;
@@ -6114,7 +6102,6 @@ static void Screen_QuickRaceMenu(void) {
         frontend_create_button("OK",           120, 377,  96, 32);
         frontend_create_button("Back",         232, 377, 112, 32);
 
-        frontend_load_selected_track_preview();
         /* Init left/right arrows on buttons 0 and 1 */
         s_anim_tick = 0;
         s_inner_state = 1;
@@ -6160,7 +6147,6 @@ static void Screen_QuickRaceMenu(void) {
                 TD5_LOG_I(LOG_TAG, "QuickRace track cycle: s_selected_track=%d level=%d name=%s",
                           s_selected_track, td5_asset_level_number(s_selected_track),
                           frontend_get_track_name(s_selected_track));
-                frontend_load_selected_track_preview();
                 frontend_play_sfx(2); /* ping2.wav cycle */
             }
             if (s_button_index == 2) { /* OK */
