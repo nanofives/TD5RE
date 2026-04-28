@@ -776,6 +776,17 @@ void td5_ai_init_race_actor_runtime(void) {
             g_slot_state[k] = 3;
         TD5_LOG_I(LOG_TAG, "wanted_mode: g_slot_state[2..5] = 3 (inactive)");
     }
+    /* Drag race: slots 2..5 are decoration (no AI dispatch). Mirrors the
+     * same override in td5_game.c:849-857 so the two parallel slot-state
+     * tables stay consistent. Without this, the synthetic drag driver in
+     * ai_update_single_racer case 0x00 fires for slots 2..5 too — and
+     * those slots have no spawned actor, so the drive command lands on
+     * uninitialized memory. */
+    if (g_td5.drag_race_enabled) {
+        for (int k = 2; k < TD5_MAX_RACER_SLOTS; k++)
+            g_slot_state[k] = 3;
+        TD5_LOG_I(LOG_TAG, "drag_race: g_slot_state[2..5] = 3 (inactive)");
+    }
 
     /* --- First layer: global difficulty scaling on AI physics template ---
      *
@@ -2919,8 +2930,33 @@ static void ai_update_single_racer(int slot) {
             return; /* cop arrested — AI frozen */
         }
 
-        /* Drag race: AI does not use track behavior (straight-line only) */
+        /* Drag race: synthetic full-throttle straight-line driver.
+         *
+         * Original [CONFIRMED @ 0x0042AC85-AC97 + 0x00436FA0..0x0043703F]:
+         * spawns slots 1..5 as state=3 (decoration) and the drag-mode
+         * dispatcher in UpdateRaceActors skips UpdateVehicleActor for
+         * state==3. So the original has no AI driver in drag — slots
+         * 1..5 are static cosmetic cars at the strip start.
+         *
+         * Port diverges at td5_game.c:849-857 (decoration_start=2) to give
+         * SP a real 2-car race. That leaves slot 1 at state=0 (AI), so
+         * physics ticks but no command writer runs (UpdateActorTrackBehavior
+         * is gated off here to mirror original drag mode). Physics reads
+         * encounter_steering_cmd (+0x33E) as throttle [CONFIRMED @
+         * td5_physics.c:830] — left at 0, slot idles.
+         *
+         * Drag strip is a single straight span: pin full throttle, zero
+         * steer, no brake. Once slot 1 crosses the finish, state flips
+         * to 0x02 (finished) and the brake branch below takes over. */
         if (g_td5.drag_race_enabled) {
+            ACTOR_I16(actor, ACTOR_ENCOUNTER_STEER) = (int16_t)0xFF;
+            ACTOR_I32(actor, ACTOR_STEERING_CMD) = 0;
+            ACTOR_U8(actor, ACTOR_BRAKE_FLAG) = 0;
+            if ((g_td5.simulation_tick_counter % 60u) == 0u) {
+                TD5_LOG_I(LOG_TAG,
+                    "drag_ai_drive: slot=%d throttle=0xFF steer=0 brake=0",
+                    slot);
+            }
             return;
         }
 
