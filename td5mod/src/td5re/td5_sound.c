@@ -23,6 +23,7 @@
 #include "td5_sound.h"
 #include "td5_platform.h"
 #include "td5_asset.h"
+#include "td5_game.h"  /* td5_game_get_player_slot, is_replay_active, etc. */
 #include "td5re.h"
 #include "td5_vfx.h"
 
@@ -231,34 +232,6 @@ static int s_viewport_audio_state;
 
 /** Race end flag (suppresses new sounds during fade-out). Original: DAT_004c3de8. */
 static int s_race_end_flag;
-
-/* ========================================================================
- * External state accessed from other modules (via g_td5)
- * ======================================================================== */
-
-/** Get actor pointer by slot index. Declared extern -- provided by td5_game. */
-extern TD5_Actor *td5_game_get_actor(int slot);
-
-/** Get the player slot index for a given viewport. */
-extern int td5_game_get_player_slot(int viewport);
-
-/** Check if replay mode is active. */
-extern int td5_game_is_replay_active(void);
-
-/** Get total actor count (racers + traffic). */
-extern int td5_game_get_total_actor_count(void);
-
-/** Get the traffic vehicle engine variant type (0/1/2). */
-extern int td5_game_get_traffic_variant(int traffic_index);
-
-/** Get the wanted/cop actor index (-1 if none). */
-extern int td5_game_get_cop_actor_index(void);
-
-/** Check if wanted mode is enabled. */
-extern int td5_game_is_wanted_mode(void);
-
-/** Advance sky rotation visual effect for wanted mode. */
-extern void td5_game_advance_sky_rotation(void);
 
 /* ========================================================================
  * Forward declarations (internal helpers)

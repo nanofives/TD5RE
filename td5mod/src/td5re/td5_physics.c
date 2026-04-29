@@ -39,6 +39,7 @@
 #include "td5_ai.h"
 #include "td5_track.h"
 #include "td5_render.h"   /* td5_render_get_vehicle_mesh */
+#include "td5_game.h"     /* td5_game_get_total_actor_count, td5_game_is_wanted_mode */
 #include "td5_platform.h"
 #include "td5re.h"
 
@@ -52,12 +53,8 @@
 
 #define LOG_TAG "physics"
 
-extern void *g_actor_pool;
 extern void *g_actor_base;
 extern uint8_t *g_actor_table_base;
-
-int td5_game_get_total_actor_count(void);
-int td5_game_is_wanted_mode(void);
 
 /* OBB corner test output: per-corner penetration data */
 typedef struct OBB_CornerData {
@@ -4152,9 +4149,6 @@ static void integrate_traffic_pose(TD5_Actor *actor)
                   (int)actor->display_angles.roll, (int)actor->display_angles.pitch);
     }
 }
-
-/* Forward decl — AngleFromVector12 lives in td5_render.c (0x40A720 equiv) */
-extern int AngleFromVector12(int x, int z);
 
 /* ========================================================================
  * T2: TransformTrackVertexByMatrix equivalent (@ 0x00446030)

@@ -160,6 +160,12 @@ int  td5_track_get_span_lane_world(int span_index, int sub_lane,
  * Calls td5_physics_wall_response for each penetration. */
 void td5_track_resolve_wall_contacts(TD5_Actor *actor);
 
+/* --- Debug overlay: emit wall/rail wireframe lines for spans near the
+ * given span index. Lines are pushed via td5_render_debug_line_world().
+ * Caller is responsible for flushing via td5_render_debug_lines_flush().
+ * span_radius is the number of spans before/after `center_span` to draw. */
+void td5_track_debug_emit_collision_lines(int center_span, int span_radius);
+
 /* --- Forward/Reverse boundary contact resolution ---
  * FUN_00406F50 / FUN_004070E0 — check probes against the track's
  * forward-/reverse-side boundary sentinel strips. The two sentinels
@@ -233,5 +239,9 @@ extern uint16_t *g_checkpoint_array;
  * Pass `is_canonical_route=1` when the actor's route_ptr equals LEFT.TRK (the
  * walker is skipped in that case). */
 int  td5_track_apply_target_span_remap(int lin_span, int is_canonical_route);
+
+/* --- Per-probe contact helpers (0x4440F0 region, defined in td5_track.c) --- */
+void UpdateActorTrackPosition(short *probe, int *pos);
+void ComputeActorTrackContactNormal(short *probe, int *pos, int *out_y);
 
 #endif /* TD5_TRACK_H */

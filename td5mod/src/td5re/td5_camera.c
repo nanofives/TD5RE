@@ -11,11 +11,9 @@
 #include "td5_track.h"
 #include "td5_game.h"
 #include "td5_platform.h"
-#include "td5_render.h"
 #include "td5_hud.h"
+#include "td5_ai.h"     /* td5_compute_heading_delta */
 #include "td5re.h"
-
-#define LOG_TAG "camera"
 
 #include <math.h>
 #include <stdlib.h>
@@ -27,37 +25,11 @@ static const char *trackside_behavior_name(int btype);
 
 extern int g_replay_mode;
 
-/* ========================================================================
- * External functions (defined in other modules, linked at build time)
- * ======================================================================== */
-
-/* Trig (td5_render.c) */
-extern float  CosFloat12bit(unsigned int angle);
-extern float  SinFloat12bit(int angle);
-extern int    CosFixed12bit(unsigned int angle);
-extern int    SinFixed12bit(int angle);
-extern int    AngleFromVector12(int x, int z);
-
-/* Matrix math (td5_render.c) */
-extern void MultiplyRotationMatrices3x3(float *A, float *B, float *out);
-extern void TransformVector3ByBasis(float *matrix, void *vec, int *out);
-extern void BuildRotationMatrixFromAngles(float *out, short *angles);
-extern void ConvertFloatVec3ToShortAngles(short *in, short *out);
-extern void LoadRenderRotationMatrix(float *matrix);
-
-/* Track position (td5_track.c) */
-extern void UpdateActorTrackPosition(short *probe, int *pos);
-extern void ComputeActorTrackContactNormal(short *probe, int *pos, int *out_y);
-
-/* HUD (td5_hud.c) */
-extern void td5_hud_set_indicator_state(int view_index, int value);
-
 /* Forward declarations for functions defined at end of this file */
 void BuildCubicSpline3D(int *spline_state, int control_points);
 void EvaluateCubicSpline3D(int *out_pos, int *spline_state, int t);
 void RecomputeTracksideProjectionScale(void);
 void UpdateCameraTransitionHudIndicator(int view, int actor_index);
-uint32_t td5_compute_heading_delta(void *route_entry);
 
 /* ========================================================================
  * Camera Globals (migrated from td5re_stubs.c — owned by this module)

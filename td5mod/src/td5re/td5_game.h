@@ -120,4 +120,11 @@ void td5_game_sort_results(void);
 /* --- Split-Screen Steering Balance (0x4036B0) --- */
 void td5_game_update_split_screen_balance(void);
 
+/* --- Wanted-mode / replay / traffic accessors (0x40A2B0 region) --- */
+int  td5_game_is_replay_active(void);
+int  td5_game_get_traffic_variant(int traffic_index);
+int  td5_game_get_cop_actor_index(void);
+int  td5_game_is_wanted_mode(void);
+void td5_game_advance_sky_rotation(void);
+
 #endif /* TD5_GAME_H */

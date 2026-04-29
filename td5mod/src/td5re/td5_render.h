@@ -118,6 +118,20 @@ void td5_render_recompute_frustum_for_trackside(void);
 int td5_render_transform_and_project(float mx, float my, float mz,
                                      float *sx, float *sy, float *sz, float *rhw);
 
+/* --- Debug line overlay (collision wireframe) ---
+ * Submits world-space line segments. Each call appends one segment to an
+ * internal batch. Call td5_render_debug_lines_flush() once per frame after
+ * the main world pass to render and reset the batch.
+ *
+ * argb is a 32-bit packed color (0xAARRGGBB); alpha is ignored (lines draw
+ * opaque) but must be 0xFF for vertex-color modulation to land at full
+ * intensity. */
+void td5_render_debug_line_world(float x0, float y0, float z0,
+                                 float x1, float y1, float z1,
+                                 uint32_t argb);
+void td5_render_debug_lines_flush(void);
+void td5_render_debug_lines_reset(void);
+
 /* --- Translucent pipeline --- */
 void td5_render_init_translucent_pipeline(void);
 void td5_render_queue_translucent_batch(void *record);
@@ -207,5 +221,19 @@ extern float g_render_width_f;
 extern float g_render_height_f;
 extern int   g_render_width;
 extern int   g_render_height;
+
+/* --- Math helpers (defined in td5_render.c) ---
+ * 12-bit angle trig + rotation/basis utilities used by camera, physics, track.
+ * Original 0x43DA80..0x43DEC0 region. */
+float CosFloat12bit(unsigned int angle);
+float SinFloat12bit(int angle);
+int   CosFixed12bit(unsigned int angle);
+int   SinFixed12bit(int angle);
+int   AngleFromVector12(int x, int z);
+void  MultiplyRotationMatrices3x3(float *A, float *B, float *out);
+void  TransformVector3ByBasis(float *matrix, void *vec, int *out);
+void  BuildRotationMatrixFromAngles(float *out, short *angles);
+void  ConvertFloatVec3ToShortAngles(short *in, short *out);
+void  LoadRenderRotationMatrix(float *matrix);
 
 #endif /* TD5_RENDER_H */
