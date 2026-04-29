@@ -2612,26 +2612,45 @@ static void apply_collision_response(TD5_Actor *penetrator, TD5_Actor *target,
         B->damage_lockout++;
     }
 
-    /* Heavy impact (> 90000) with collisions enabled: visual scatter.
-     * Original uses GetDamageRulesStub() RNG + traffic orientation rebuild;
-     * we use a deterministic approximation here. */
+    /* Heavy impact (> 90000) with collisions enabled: scatter kick.
+     * [CONFIRMED @ 0x4082F2, 0x4082FC, 0x40844A, 0x408455]: original
+     * ApplyVehicleCollisionImpulse high-impact branch writes
+     *   actor->angular_velocity_{roll,pitch,yaw} += RNG % angle - angle/2
+     * (RNG via GetDamageRulesStub modulo angle). Port previously wrote
+     * (scatter>>2 - scatter>>3) into euler_accum.{roll,pitch}, which
+     * jumps the angle accumulator directly — bypassing the per-pattern
+     * ±4000 clamp at the next suspension_response tail and integrating
+     * uncontrollably across consecutive impacts. Switch to writing
+     * angular_velocity instead, so the integrator's clamps apply.
+     *
+     * Gate variable mismatch noted but not fixed: original gates on
+     * g_cameraMode==0 (normal play); port has no g_cameraMode equivalent
+     * yet so the gate stays as the inverted g_collisions_enabled==0
+     * condition until a faithful camera-mode flag is introduced. */
     if (impact_mag > 90000 && g_collisions_enabled == 0) {
         int32_t scatter = impact_mag / 4;
         if (scatter > 0x7FFF) scatter = 0x7FFF;
+        int32_t kick_r = (scatter >> 2) - (scatter >> 3);
+        int32_t kick_p = (scatter >> 1) - scatter;
+        int32_t kick_y = (scatter >> 1) - (scatter >> 2);
         if (A->slot_index < 6) {
-            A->euler_accum.roll  += (scatter >> 2) - (scatter >> 3);
-            A->euler_accum.pitch += (scatter >> 1) - scatter;
+            A->angular_velocity_roll  += kick_r;
+            A->angular_velocity_pitch += kick_p;
+            A->angular_velocity_yaw   += kick_y;
             int32_t lift_a = impact_mag / 6;
             if (lift_a > 200000) lift_a = 200000;
             A->linear_velocity_y  = lift_a;
         }
         if (B->slot_index < 6) {
-            B->euler_accum.roll  -= (scatter >> 2) - (scatter >> 3);
-            B->euler_accum.pitch -= (scatter >> 1) - scatter;
+            B->angular_velocity_roll  -= kick_r;
+            B->angular_velocity_pitch -= kick_p;
+            B->angular_velocity_yaw   -= kick_y;
             int32_t lift_b = impact_mag / 6;
             if (lift_b > 200000) lift_b = 200000;
             B->linear_velocity_y  = lift_b;
         }
+        TD5_LOG_I(LOG_TAG, "v2v_heavy_scatter: A=%d B=%d mag=%d kick_r=%d kick_p=%d kick_y=%d",
+                  A->slot_index, B->slot_index, impact_mag, kick_r, kick_p, kick_y);
     }
 }
 
@@ -4689,11 +4708,13 @@ void td5_physics_integrate_pose(TD5_Actor *actor)
     /* 8b. OOB recovery disabled — was teleporting cars due to suspension
      * instability rather than genuine out-of-bounds conditions. */
 
-    /* 9. Clamp angular velocity deltas to +/- 6000 per frame */
+    /* 9. Clamp angular velocity deltas to +/- 6000 per frame.
+     * [CONFIRMED @ 0x405F0A-0x405F2C, 0x406058-0x40607B]: original T2 block
+     * clamps roll and pitch only — yaw is NOT clamped here. The yaw clamp
+     * was a port addition that throttled spin recovery after V2V hits and
+     * hard cornering; removing it restores faithful behavior. */
     if (actor->angular_velocity_roll > 6000) actor->angular_velocity_roll = 6000;
     if (actor->angular_velocity_roll < -6000) actor->angular_velocity_roll = -6000;
-    if (actor->angular_velocity_yaw > 6000) actor->angular_velocity_yaw = 6000;
-    if (actor->angular_velocity_yaw < -6000) actor->angular_velocity_yaw = -6000;
     if (actor->angular_velocity_pitch > 6000) actor->angular_velocity_pitch = 6000;
     if (actor->angular_velocity_pitch < -6000) actor->angular_velocity_pitch = -6000;
 
