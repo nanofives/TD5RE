@@ -3611,7 +3611,6 @@ static uint32_t traffic_route_heading_delta(int slot)
     int ref_slot = rs[RS_SLOT_INDEX_PHYS];
     if (ref_slot < 0 || ref_slot >= TD5_MAX_TOTAL_ACTORS) return 0;
 
-    extern char *g_actor_table_base_ptr;  /* defined in td5_physics.c */
     char *ref_actor = (char *)(g_actor_table_base + (size_t)ref_slot * TD5_ACTOR_STRIDE);
 
     int16_t span_normalized = *(int16_t *)(ref_actor + 0x082);  /* track_span_normalized */
@@ -4251,7 +4250,6 @@ void td5_physics_integrate_pose(TD5_Actor *actor)
      * Without this, track_span_raw stays at 0 and wall checks use the
      * wrong span — the primary reason collisions don't work. */
     {
-        int16_t prev_span = actor->track_span_raw;
         td5_track_update_actor_position(actor);
 
         /* Guard against span walker overflow. The walker can jump to out-of-
@@ -4980,7 +4978,6 @@ void td5_physics_refresh_wheel_contacts(TD5_Actor *actor)
         int32_t ground_y = 0;
         int surface_type = actor->surface_type_chassis;
         int probe_span = actor->wheel_probes[i].span_index;
-        int probe_ok = 0;
 
         /* Per-wheel probe span bounds check.
          *
@@ -5017,7 +5014,6 @@ void td5_physics_refresh_wheel_contacts(TD5_Actor *actor)
                 actor->wheel_contact_pos[i].x,
                 actor->wheel_contact_pos[i].z,
                 span_normal);
-            probe_ok = 1;
             if (!resolved_surface_valid) {
                 resolved_surface = surface_type;
                 resolved_surface_valid = 1;

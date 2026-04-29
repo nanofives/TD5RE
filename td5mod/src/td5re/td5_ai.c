@@ -514,7 +514,6 @@ static void td5_ai_refresh_route_state_slot(int slot) {
     int16_t span;
     int32_t route_heading;
     int32_t forward_heading;
-    int32_t actor_heading;
 
     if (!g_route_state_base || !g_actor_base ||
         slot < 0 || slot >= TD5_MAX_TOTAL_ACTORS) {
@@ -2646,7 +2645,6 @@ ttc_done:;
 void td5_ai_update_special_encounter(void) {
     char *player;
     int32_t player_span, player_speed, player_fwd;
-    int32_t *enc_rs;
 
     if (!g_encounter_enabled) return;
 
@@ -2662,7 +2660,6 @@ void td5_ai_update_special_encounter(void) {
 
     /* --- No active encounter: check spawn conditions --- */
     if (g_encounter_tracked_handle == -1) {
-        int32_t *slot9_rs = route_state(9);
         int16_t slot9_span;
         int32_t span_delta;
 

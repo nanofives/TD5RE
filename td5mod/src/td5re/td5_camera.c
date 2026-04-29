@@ -519,7 +519,6 @@ void UpdateChaseCamera(int actor, int do_track_heading, int view)
     short cam_angles[4];
     short transformed_angles[4]; /* needs 3 for ConvertFloatVec3ToShortAngles */
     unsigned int look_angle;
-    int i;
     int height_delta;
     short fx, fz;
     float magnitude;
@@ -835,7 +834,6 @@ void UpdateTracksideOrbitCamera(int actor, int is_active, int view)
         unsigned int orbit_vis = (unsigned int)(g_camYawOffset[v] - (int)vis_angle);
         float radius = g_camCurrentRadius[v];
 
-        int cam_idx = v * 3;
         g_camOrbitOffset[v][0] = (int)(CosFloat12bit(orbit_vis) * radius + 0.5f);
         g_camOrbitOffset[v][1] = g_camStoredPitch[v];
         g_camOrbitOffset[v][2] = (int)(-(CosFloat12bit((unsigned int)orbit_vis) * radius) + 0.5f);
@@ -901,7 +899,6 @@ void UpdateVehicleRelativeCamera(int actor, int view)
     int v = view;
     short *cached = g_camCachedAngles[v];
     short target_pitch, target_yaw, target_roll;
-    short cur_pitch, cur_yaw, cur_roll;
     short delta;
     short cam_angles[3];
     int cam_pos[3];
@@ -1287,7 +1284,6 @@ void UpdateStaticTracksideCamera(int actor, int view)
 {
     int v = view;
     int span_addr, vtx_addr;
-    int cam_idx = v * 3;
     int target[3];
 
     span_addr = g_spanTable + g_camAnchorSpan[v] * 0x18;
@@ -1441,7 +1437,6 @@ void UpdateTracksideCamera(int actor, int view)
         /* Static with dynamic FOV */
         int span_addr = g_spanTable + g_camAnchorSpan[v] * 0x18;
         int vtx_base  = g_vertexTable + (unsigned short)*(short *)(span_addr + 4) * 6;
-        int cam_idx   = v * 3;
         int target[3];
         int dist_scaled, proj_scale;
 
