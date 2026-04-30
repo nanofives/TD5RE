@@ -55,3 +55,21 @@ scripts/td5_dump/
 ck.txt
 step19.txt
 ghidra_pool/
+
+# Build/headless transient outputs
+build_chk*.txt
+build_out.txt
+**/build_chk*.txt
+log/
+TD5_headless.gpr
+TD5_headless.rep/
+
+# Ghidra headless run leftovers
+**/tmp_ghidra/
+headless_*.txt
+**/headless_*.txt
+**/headless_err.txt
+**/headless_out.txt
+**/sound_traffic_out.txt
+**/traffic_audio_out*.txt
+**/wheel_headless_err.txt
