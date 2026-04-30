@@ -26,10 +26,10 @@ static const char *trackside_behavior_name(int btype);
 extern int g_replay_mode;
 
 /* Forward declarations for functions defined at end of this file */
-void BuildCubicSpline3D(int *spline_state, int control_points);
-void EvaluateCubicSpline3D(int *out_pos, int *spline_state, int t);
-void RecomputeTracksideProjectionScale(void);
-void UpdateCameraTransitionHudIndicator(int view, int actor_index);
+static void BuildCubicSpline3D(int *spline_state, int control_points);
+static void EvaluateCubicSpline3D(int *out_pos, int *spline_state, int t);
+static void RecomputeTracksideProjectionScale(void);
+static void UpdateCameraTransitionHudIndicator(int view, int actor_index);
 
 /* ========================================================================
  * Camera Globals (migrated from td5re_stubs.c — owned by this module)
@@ -1986,7 +1986,7 @@ void td5_camera_get_basis(float *right, float *up, float *forward)
  * Spline Functions (migrated from td5re_stubs.c)
  * ======================================================================== */
 
-void BuildCubicSpline3D(int *spline_state, int control_points) {
+static void BuildCubicSpline3D(int *spline_state, int control_points) {
     /*
      * Catmull-Rom spline builder (0x441F90).
      * Input: 4 control points at control_points, each 3 ints (X,Y,Z in 8.8 fixed).
@@ -2032,7 +2032,7 @@ void BuildCubicSpline3D(int *spline_state, int control_points) {
     }
 }
 
-void EvaluateCubicSpline3D(int *out_pos, int *spline_state, int t) {
+static void EvaluateCubicSpline3D(int *out_pos, int *spline_state, int t) {
     /*
      * Catmull-Rom spline evaluator (0x442090).
      * t is 12-bit fixed-point: 0 = start, 0xFFF = end.
@@ -2063,14 +2063,14 @@ void EvaluateCubicSpline3D(int *out_pos, int *spline_state, int t) {
  * Original also calls SetProjectionCenterOffset(0,0) here, but that is
  * a per-frame prep step in the original's RunRaceFrame loop; in the port
  * s_center_x/y persists at screen center and must not be zeroed. */
-void RecomputeTracksideProjectionScale(void) {
+static void RecomputeTracksideProjectionScale(void) {
     td5_render_recompute_frustum_for_trackside();
 }
 
 /* UpdateCameraTransitionHudIndicator @ 0x0040A260
  * Single-race: indicator = actor race_position+0x383 + 2; other modes: 0.
  * [CONFIRMED @ 0x0040A260] */
-void UpdateCameraTransitionHudIndicator(int view, int actor_index) {
+static void UpdateCameraTransitionHudIndicator(int view, int actor_index) {
     char *actor;
     if (g_actorBaseAddr == 0) return;
     actor = (char *)(uintptr_t)(uint32_t)g_actorBaseAddr +
