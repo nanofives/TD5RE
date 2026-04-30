@@ -433,6 +433,34 @@ fi
 git worktree remove --force "${WORKTREE_DIR}"   # safe now — junction is gone
 ```
 
+**Stale-build janitor (2026-04-29).** After the worktree is gone, sweep
+any orphan `build_<pid>/` dirs from main's `td5mod/src/td5re/`. These
+are leftovers from an earlier /fix variant (or any path that ran
+`./build_standalone.bat <numeric-arg>` from main). The canonical
+`build/` is preserved; only purely-numeric `build_NNNN/` dirs are
+removed. Named variants (e.g. `build_ttfonts/`) are left alone in case
+they were created on purpose.
+
+```bash
+# Bounded sweep — main tree only, numeric-suffix only, NEVER recurses
+# through junctions because we only target one fixed directory.
+shopt -s nullglob
+for d in /c/Users/maria/Desktop/Proyectos/TD5RE/td5mod/src/td5re/build_[0-9]*/; do
+    # Sanity: name must be entirely build_<digits>; reject anything else
+    base=$(basename "$d")
+    if [[ "$base" =~ ^build_[0-9]+$ ]]; then
+        rm -rf "$d"
+    fi
+done
+shopt -u nullglob
+```
+
+This step is **idempotent**: if no orphans exist, it's a no-op. It
+runs even when the worktree was clean — the cost is one `ls` worth of
+work and the upside is bounded recovery (single /fix run created
+~5 MB of orphans before this guard; the historical accumulation was
+~6 GB by 2026-04-29).
+
 As of 2026-04-20 main's `td5mod/deps/mingw/` has the READ-ONLY attribute set via `attrib +R /S /D` so a forgotten pre-unlink step fails with EACCES instead of silently wiping the toolchain. Do not clear that attribute.
 
 **ALSO CRITICAL — never `rm` a junction inside the worktree, even ad-hoc.** This trap fires outside teardown too: if you see `${WORKTREE_DIR}/td5mod/deps/mingw` listed by MSYS as a `symlink` (because git-bash renders Windows junctions that way), DO NOT `rm -f` it to "clean it up before recreating". Bash's `rm` follows junctions into their target and empties the destination. The 2026-04-15 incident: agent ran `rm -f "${WORKTREE_DIR}/td5mod/deps/mingw"` to recreate a junction → emptied main's `td5mod/deps/mingw/` → had to re-extract `td5mod/deps/mingw-i686.7z` to restore. The `~/bin/rm` wrapper now refuses paths under main's `td5mod/deps/mingw`, but the wrapper resolves through junctions, so the worktree path is also blocked. To unlink a junction safely, use `cmd //c "rmdir <path>"` (no `/s`) — Windows `rmdir` removes the junction without recursing into it. Recovery if the toolchain is wiped: `cd td5mod/deps && rm -rf mingw && 7z x mingw-i686.7z -y && mv mingw32 mingw/`.
@@ -696,8 +724,18 @@ for entry in "0:moscow" "5:newcastle" "${RANDOM_IDX}:${RANDOM_NAME}"; do
     # --- Original side: run TD5_d3d.exe under Frida from main ---
     cd C:/Users/maria/Desktop/Proyectos/TD5RE
     rm -f log/race_trace_original.csv
+    # Pin the shared INI fields that /re and ad-hoc frontend probes commonly leave
+    # in a state that silently breaks /fix Frida runs:
+    #   - frontend.frontend_only=true  → hook stays in the menu, no race launches
+    #   - race.start_span_offset=N>0   → spawn moves N spans down the track
+    #   - launcher.player_is_ai=true   → slot 0 driven by AI (skews physics traces)
+    # Always override these explicitly so the sweep is deterministic regardless of
+    # what's currently on disk in re/tools/quickrace/td5_quickrace.ini.
     python re/tools/quickrace/td5_quickrace.py --trace --trace-auto-exit \
         --set race.track=${TRACK_N} --set race.car=0 --set race.game_type=0 --set race.laps=1 \
+        --set race.start_span_offset=0 \
+        --set frontend.frontend_only=false \
+        --set launcher.player_is_ai=false \
         --trace-max-frames 300
     cp log/race_trace_original.csv "${BUNDLE_DIR}/original_track${TRACK_N}_${TRACK_NAME}.csv"
 
