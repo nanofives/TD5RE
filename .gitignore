@@ -32,7 +32,7 @@ re/td5_png_clean/
 
 # Large RE tools / cloned repos (not project source)
 pyghidra_projects/
-tools/
+/tools/
 
 # MinGW toolchain (753 MB — install via MSYS2 or deps/mingw-i686.7z)
 td5mod/deps/mingw/
