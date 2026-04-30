@@ -32,7 +32,7 @@ re/td5_png_clean/
 
 # Large RE tools / cloned repos (not project source)
 pyghidra_projects/
-tools/
+/tools/
 
 # MinGW toolchain (753 MB — install via MSYS2 or deps/mingw-i686.7z)
 td5mod/deps/mingw/
@@ -55,3 +55,21 @@ scripts/td5_dump/
 ck.txt
 step19.txt
 ghidra_pool/
+
+# Build/headless transient outputs
+build_chk*.txt
+build_out.txt
+**/build_chk*.txt
+log/
+TD5_headless.gpr
+TD5_headless.rep/
+
+# Ghidra headless run leftovers
+**/tmp_ghidra/
+headless_*.txt
+**/headless_*.txt
+**/headless_err.txt
+**/headless_out.txt
+**/sound_traffic_out.txt
+**/traffic_audio_out*.txt
+**/wheel_headless_err.txt

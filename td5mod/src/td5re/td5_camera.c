@@ -11,11 +11,9 @@
 #include "td5_track.h"
 #include "td5_game.h"
 #include "td5_platform.h"
-#include "td5_render.h"
 #include "td5_hud.h"
+#include "td5_ai.h"     /* td5_compute_heading_delta */
 #include "td5re.h"
-
-#define LOG_TAG "camera"
 
 #include <math.h>
 #include <stdlib.h>
@@ -27,37 +25,11 @@ static const char *trackside_behavior_name(int btype);
 
 extern int g_replay_mode;
 
-/* ========================================================================
- * External functions (defined in other modules, linked at build time)
- * ======================================================================== */
-
-/* Trig (td5_render.c) */
-extern float  CosFloat12bit(unsigned int angle);
-extern float  SinFloat12bit(int angle);
-extern int    CosFixed12bit(unsigned int angle);
-extern int    SinFixed12bit(int angle);
-extern int    AngleFromVector12(int x, int z);
-
-/* Matrix math (td5_render.c) */
-extern void MultiplyRotationMatrices3x3(float *A, float *B, float *out);
-extern void TransformVector3ByBasis(float *matrix, void *vec, int *out);
-extern void BuildRotationMatrixFromAngles(float *out, short *angles);
-extern void ConvertFloatVec3ToShortAngles(short *in, short *out);
-extern void LoadRenderRotationMatrix(float *matrix);
-
-/* Track position (td5_track.c) */
-extern void UpdateActorTrackPosition(short *probe, int *pos);
-extern void ComputeActorTrackContactNormal(short *probe, int *pos, int *out_y);
-
-/* HUD (td5_hud.c) */
-extern void td5_hud_set_indicator_state(int view_index, int value);
-
 /* Forward declarations for functions defined at end of this file */
-void BuildCubicSpline3D(int *spline_state, int control_points);
-void EvaluateCubicSpline3D(int *out_pos, int *spline_state, int t);
-void RecomputeTracksideProjectionScale(void);
-void UpdateCameraTransitionHudIndicator(int view, int actor_index);
-uint32_t td5_compute_heading_delta(void *route_entry);
+static void BuildCubicSpline3D(int *spline_state, int control_points);
+static void EvaluateCubicSpline3D(int *out_pos, int *spline_state, int t);
+static void RecomputeTracksideProjectionScale(void);
+static void UpdateCameraTransitionHudIndicator(int view, int actor_index);
 
 /* ========================================================================
  * Camera Globals (migrated from td5re_stubs.c — owned by this module)
@@ -547,7 +519,6 @@ void UpdateChaseCamera(int actor, int do_track_heading, int view)
     short cam_angles[4];
     short transformed_angles[4]; /* needs 3 for ConvertFloatVec3ToShortAngles */
     unsigned int look_angle;
-    int i;
     int height_delta;
     short fx, fz;
     float magnitude;
@@ -863,7 +834,6 @@ void UpdateTracksideOrbitCamera(int actor, int is_active, int view)
         unsigned int orbit_vis = (unsigned int)(g_camYawOffset[v] - (int)vis_angle);
         float radius = g_camCurrentRadius[v];
 
-        int cam_idx = v * 3;
         g_camOrbitOffset[v][0] = (int)(CosFloat12bit(orbit_vis) * radius + 0.5f);
         g_camOrbitOffset[v][1] = g_camStoredPitch[v];
         g_camOrbitOffset[v][2] = (int)(-(CosFloat12bit((unsigned int)orbit_vis) * radius) + 0.5f);
@@ -929,7 +899,6 @@ void UpdateVehicleRelativeCamera(int actor, int view)
     int v = view;
     short *cached = g_camCachedAngles[v];
     short target_pitch, target_yaw, target_roll;
-    short cur_pitch, cur_yaw, cur_roll;
     short delta;
     short cam_angles[3];
     int cam_pos[3];
@@ -1315,7 +1284,6 @@ void UpdateStaticTracksideCamera(int actor, int view)
 {
     int v = view;
     int span_addr, vtx_addr;
-    int cam_idx = v * 3;
     int target[3];
 
     span_addr = g_spanTable + g_camAnchorSpan[v] * 0x18;
@@ -1469,7 +1437,6 @@ void UpdateTracksideCamera(int actor, int view)
         /* Static with dynamic FOV */
         int span_addr = g_spanTable + g_camAnchorSpan[v] * 0x18;
         int vtx_base  = g_vertexTable + (unsigned short)*(short *)(span_addr + 4) * 6;
-        int cam_idx   = v * 3;
         int target[3];
         int dist_scaled, proj_scale;
 
@@ -2019,7 +1986,7 @@ void td5_camera_get_basis(float *right, float *up, float *forward)
  * Spline Functions (migrated from td5re_stubs.c)
  * ======================================================================== */
 
-void BuildCubicSpline3D(int *spline_state, int control_points) {
+static void BuildCubicSpline3D(int *spline_state, int control_points) {
     /*
      * Catmull-Rom spline builder (0x441F90).
      * Input: 4 control points at control_points, each 3 ints (X,Y,Z in 8.8 fixed).
@@ -2065,7 +2032,7 @@ void BuildCubicSpline3D(int *spline_state, int control_points) {
     }
 }
 
-void EvaluateCubicSpline3D(int *out_pos, int *spline_state, int t) {
+static void EvaluateCubicSpline3D(int *out_pos, int *spline_state, int t) {
     /*
      * Catmull-Rom spline evaluator (0x442090).
      * t is 12-bit fixed-point: 0 = start, 0xFFF = end.
@@ -2096,14 +2063,14 @@ void EvaluateCubicSpline3D(int *out_pos, int *spline_state, int t) {
  * Original also calls SetProjectionCenterOffset(0,0) here, but that is
  * a per-frame prep step in the original's RunRaceFrame loop; in the port
  * s_center_x/y persists at screen center and must not be zeroed. */
-void RecomputeTracksideProjectionScale(void) {
+static void RecomputeTracksideProjectionScale(void) {
     td5_render_recompute_frustum_for_trackside();
 }
 
 /* UpdateCameraTransitionHudIndicator @ 0x0040A260
  * Single-race: indicator = actor race_position+0x383 + 2; other modes: 0.
  * [CONFIRMED @ 0x0040A260] */
-void UpdateCameraTransitionHudIndicator(int view, int actor_index) {
+static void UpdateCameraTransitionHudIndicator(int view, int actor_index) {
     char *actor;
     if (g_actorBaseAddr == 0) return;
     actor = (char *)(uintptr_t)(uint32_t)g_actorBaseAddr +

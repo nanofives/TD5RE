@@ -39,6 +39,7 @@
 #include "td5_ai.h"
 #include "td5_track.h"
 #include "td5_render.h"   /* td5_render_get_vehicle_mesh */
+#include "td5_game.h"     /* td5_game_get_total_actor_count, td5_game_is_wanted_mode */
 #include "td5_platform.h"
 #include "td5re.h"
 
@@ -52,12 +53,8 @@
 
 #define LOG_TAG "physics"
 
-extern void *g_actor_pool;
 extern void *g_actor_base;
 extern uint8_t *g_actor_table_base;
-
-int td5_game_get_total_actor_count(void);
-int td5_game_is_wanted_mode(void);
 
 /* OBB corner test output: per-corner penetration data */
 typedef struct OBB_CornerData {
@@ -3614,7 +3611,6 @@ static uint32_t traffic_route_heading_delta(int slot)
     int ref_slot = rs[RS_SLOT_INDEX_PHYS];
     if (ref_slot < 0 || ref_slot >= TD5_MAX_TOTAL_ACTORS) return 0;
 
-    extern char *g_actor_table_base_ptr;  /* defined in td5_physics.c */
     char *ref_actor = (char *)(g_actor_table_base + (size_t)ref_slot * TD5_ACTOR_STRIDE);
 
     int16_t span_normalized = *(int16_t *)(ref_actor + 0x082);  /* track_span_normalized */
@@ -4153,9 +4149,6 @@ static void integrate_traffic_pose(TD5_Actor *actor)
     }
 }
 
-/* Forward decl — AngleFromVector12 lives in td5_render.c (0x40A720 equiv) */
-extern int AngleFromVector12(int x, int z);
-
 /* ========================================================================
  * T2: TransformTrackVertexByMatrix equivalent (@ 0x00446030)
  *
@@ -4257,7 +4250,6 @@ void td5_physics_integrate_pose(TD5_Actor *actor)
      * Without this, track_span_raw stays at 0 and wall checks use the
      * wrong span — the primary reason collisions don't work. */
     {
-        int16_t prev_span = actor->track_span_raw;
         td5_track_update_actor_position(actor);
 
         /* Guard against span walker overflow. The walker can jump to out-of-
@@ -4986,7 +4978,6 @@ void td5_physics_refresh_wheel_contacts(TD5_Actor *actor)
         int32_t ground_y = 0;
         int surface_type = actor->surface_type_chassis;
         int probe_span = actor->wheel_probes[i].span_index;
-        int probe_ok = 0;
 
         /* Per-wheel probe span bounds check.
          *
@@ -5023,7 +5014,6 @@ void td5_physics_refresh_wheel_contacts(TD5_Actor *actor)
                 actor->wheel_contact_pos[i].x,
                 actor->wheel_contact_pos[i].z,
                 span_normal);
-            probe_ok = 1;
             if (!resolved_surface_valid) {
                 resolved_surface = surface_type;
                 resolved_surface_valid = 1;
