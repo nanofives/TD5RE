@@ -279,6 +279,14 @@ static char s_chat_input_buffer[64];    /* DAT_004972cc */
 static int  s_results_button;           /* DAT_00497a64 */
 static int  s_results_rerace_flag;      /* DAT_00497a78 */
 static int  s_results_cup_complete;     /* DAT_00497a70 */
+/* P7 PANEL fix — sprite-rect slide offset for screen 24 results panel.
+ * [CONFIRMED @ 0x00422480 cases 7..10 + 0xB] Original animates the panel
+ * surface (DAT_0049628c) via QueueFrontendOverlayRect with a per-state
+ * x-coordinate formula. Port has no MoveFrontendSpriteRect / sprite-rect
+ * array; instead we accumulate a render-side x offset that overlays panel_x
+ * in frontend_render_race_results_overlay. Reset to 0 on state 6 entry. */
+static int  s_results_panel_slide_x;
+static int  s_results_panel_slide_dir;   /* +1 = right (next), -1 = left (prev) */
 static int  s_results_skip_display;     /* DAT_00497a74 */
 
 /* Race snapshot for re-race */
@@ -4510,7 +4518,10 @@ static void frontend_render_race_results_overlay(float sx, float sy) {
     /* Panel 408x392 centered in 640x480 canvas space */
     const float canvas_w = 640.0f, canvas_h = 480.0f;
     const float panel_w = 408.0f, panel_h = 392.0f;
-    float panel_x = (canvas_w - panel_w) * 0.5f * sx;
+    /* P7 PANEL fix: apply per-state slide offset accumulated by states
+     * 7/8/9/10 (L/R browse) and 0xB (exit). Zero during interactive (state 6)
+     * and resting display (states 4/5). */
+    float panel_x = ((canvas_w - panel_w) * 0.5f + (float)s_results_panel_slide_x) * sx;
     float panel_y = (canvas_h - panel_h) * 0.5f * sy;
     float pw = panel_w * sx;
     float ph = panel_h * sy;
@@ -9072,37 +9083,30 @@ static void Screen_RaceResults(void) {
     case 6: /* Interactive: L/R browse racer slots (0-5), confirm exits.
              * Original @ 0x004229DA: button_index >= 0 && < 2 -> state 0x0B.
              * [CONFIRMED @ 0x004229DA] DAT_00497a68 cycles by DAT_0049b690 (arrow delta),
-             * skips slots with state == 3 (disabled). Drag: masked & 1 for 2-slot only. */
+             * skips slots with state == 3 (disabled). Drag: masked & 1 for 2-slot only.
+             * P7 PANEL fix: arrow input now triggers state 7 (right) or 9 (left)
+             * for the slide-out animation; the actual slot cycle happens
+             * between out- and in-slide so the new slot's data is visible
+             * only as the panel re-enters from the opposite side. */
+        s_results_panel_slide_x = 0;  /* clean rest position while in interactive */
         if (s_input_ready) {
             if (s_arrow_input != 0) {
-                /* Cycle through racer slots, skip disabled.
-                 * [CONFIRMED @ 0x00422A22] Wrap: [0..5] with 6 -> 0 and -1 -> 5. */
-                s_score_category_index += s_arrow_input; /* reuse for browsed slot */
-                if (s_selected_game_type == 7) {
-                    /* Drag: only 2 slots [CONFIRMED @ 0x00422A02] masked & 1 */
-                    s_score_category_index &= 1;
-                } else {
-                    if (s_score_category_index >= 6) s_score_category_index = 0;
-                    if (s_score_category_index < 0)  s_score_category_index = 5;
-                }
-                /* Skip disabled slots — up to 6 iterations */
-                for (int _skip = 0;
-                     _skip < 6 && td5_game_get_slot_state(s_score_category_index) == 3;
-                     _skip++) {
-                    s_score_category_index += s_arrow_input;
-                    if (s_score_category_index >= 6) s_score_category_index = 0;
-                    if (s_score_category_index < 0)  s_score_category_index = 5;
-                }
-                TD5_LOG_D(LOG_TAG, "RaceResults state 6: browsing slot %d",
-                          s_score_category_index);
+                s_results_panel_slide_dir = (s_arrow_input > 0) ? +1 : -1;
+                s_anim_tick = 0;
+                /* Right arrow → state 7 (panel exits right), Left → state 9
+                 * (panel exits left). */
+                s_inner_state = (s_arrow_input > 0) ? 7 : 9;
+                TD5_LOG_D(LOG_TAG,
+                          "RaceResults state 6: arrow=%d -> slide-out state %d",
+                          s_arrow_input, s_inner_state);
+                break;
             }
             /* [CONFIRMED @ 0x004229DA] Original wraps the button-press exit
              * in `if (DAT_0049b690 == 0)` — i.e. only honor the confirm when
              * no arrow input is also queued. Without the gate a paired
              * arrow-and-click exits the browser before s_score_category_index
              * has updated, which the original avoids. */
-            if (s_arrow_input == 0 &&
-                s_button_index >= 0 && s_button_index < 2) { /* confirm -> exit */
+            if (s_button_index >= 0 && s_button_index < 2) { /* confirm -> exit */
                 TD5_LOG_I(LOG_TAG, "RaceResults: state 6 -> 0x0B (confirm, btn=%d)",
                           s_button_index);
                 s_anim_tick = 0;
@@ -9111,23 +9115,111 @@ static void Screen_RaceResults(void) {
         }
         break;
 
-    case 7: case 8: /* Slide left animation: 17 frames */
+    case 7: /* Right slide-OUT: panel exits right edge. 17 frames.
+             * [CONFIRMED @ 0x00422480 case 7] Original formula:
+             *   panel_x = g_frontendAnimFrameCounter * 0x20 + 0x2a + iVar4
+             * Step +0x20 (32 px/frame), end counter == 0x11 (17). At end:
+             *   DrawRaceDataSummaryPanel(DAT_00497a68);  // re-fill with new slot
+             *   counter = 0; state++;                    // -> state 8
+             * Port uses s_anim_tick stepping +2 from 0..0x11. */
         s_anim_tick += 2;
-        if (s_anim_tick >= 17) {
-            s_inner_state = 6; /* back to interactive */
+        s_results_panel_slide_x = s_anim_tick * 0x20;  /* +0..+0x220 */
+        if (s_anim_tick >= 0x11) {
+            /* Cycle slot index now (mid-slide) — new data visible on slide-in.
+             * [CONFIRMED @ 0x00422A22] Wrap: [0..5] with 6 -> 0 and -1 -> 5. */
+            s_score_category_index += s_results_panel_slide_dir;
+            if (s_selected_game_type == 7) {
+                s_score_category_index &= 1;  /* drag 2-slot mask */
+            } else {
+                if (s_score_category_index >= 6) s_score_category_index = 0;
+                if (s_score_category_index < 0)  s_score_category_index = 5;
+            }
+            /* Skip disabled slots */
+            for (int _skip = 0;
+                 _skip < 6 && td5_game_get_slot_state(s_score_category_index) == 3;
+                 _skip++) {
+                s_score_category_index += s_results_panel_slide_dir;
+                if (s_score_category_index >= 6) s_score_category_index = 0;
+                if (s_score_category_index < 0)  s_score_category_index = 5;
+            }
+            TD5_LOG_D(LOG_TAG, "RaceResults: slid out right, now slot=%d",
+                      s_score_category_index);
+            s_anim_tick = 0;
+            s_inner_state = 8;
         }
         break;
 
-    case 9: case 10: /* Slide right animation: 17 frames */
+    case 8: /* Left slide-IN: panel enters from left edge. 17 frames.
+             * [CONFIRMED @ 0x00422480 case 8] Original formula:
+             *   panel_x = counter * 0x20 + -0x1f6 + iVar4
+             * At counter=0 panel is off-screen left (-0x1f6 + iVar4 ~ -382);
+             * at counter=0x11 it reaches rest x. Port: offset progresses
+             * from -0x220 → 0. */
         s_anim_tick += 2;
-        if (s_anim_tick >= 17) {
+        s_results_panel_slide_x = -((0x11 - s_anim_tick) * 0x20);  /* -0x220..0 */
+        if (s_anim_tick >= 0x11) {
+            s_results_panel_slide_x = 0;
             s_inner_state = 6;
         }
         break;
 
-    case 0x0B: /* Exit slide-out: 17 frames */
-        s_anim_tick = 0;
-        s_inner_state = 0x0C;
+    case 9: /* Left slide-OUT: panel exits left edge. 17 frames.
+             * [CONFIRMED @ 0x00422480 case 9] Original formula:
+             *   panel_x = iVar4 + counter * -0x20 + 0x2a
+             * Step -0x20 per frame; same DrawRaceDataSummaryPanel re-fill
+             * trigger at counter==0x11. */
+        s_anim_tick += 2;
+        s_results_panel_slide_x = -(s_anim_tick * 0x20);  /* 0..-0x220 */
+        if (s_anim_tick >= 0x11) {
+            s_score_category_index += s_results_panel_slide_dir;
+            if (s_selected_game_type == 7) {
+                s_score_category_index &= 1;
+            } else {
+                if (s_score_category_index >= 6) s_score_category_index = 0;
+                if (s_score_category_index < 0)  s_score_category_index = 5;
+            }
+            for (int _skip = 0;
+                 _skip < 6 && td5_game_get_slot_state(s_score_category_index) == 3;
+                 _skip++) {
+                s_score_category_index += s_results_panel_slide_dir;
+                if (s_score_category_index >= 6) s_score_category_index = 0;
+                if (s_score_category_index < 0)  s_score_category_index = 5;
+            }
+            TD5_LOG_D(LOG_TAG, "RaceResults: slid out left, now slot=%d",
+                      s_score_category_index);
+            s_anim_tick = 0;
+            s_inner_state = 10;
+        }
+        break;
+
+    case 10: /* Right slide-IN: panel enters from right edge. 17 frames.
+              * [CONFIRMED @ 0x00422480 case 10] Original formula:
+              *   panel_x = iVar4 + counter * -0x20 + 0x24a
+              * At counter=0 panel is off-screen right (+0x220 from rest);
+              * at counter=0x11 reaches rest. */
+        s_anim_tick += 2;
+        s_results_panel_slide_x = (0x11 - s_anim_tick) * 0x20;  /* +0x220..0 */
+        if (s_anim_tick >= 0x11) {
+            s_results_panel_slide_x = 0;
+            s_inner_state = 6;
+        }
+        break;
+
+    case 0x0B: /* Exit slide-out: 17 frames.
+                * [CONFIRMED @ 0x00422480 case 0xB] Original simultaneously
+                * slides panel right (step +0x30) and title left (step -0x20).
+                * Port animates the panel via slide_x; the title strip is
+                * gated to states 3..0xB by the P1 fix and disappears at
+                * state 0xC, so its X slide is approximated by the existing
+                * Y-slide-out path that fires when the FSM exits the
+                * table-browse window. */
+        s_anim_tick += 2;
+        s_results_panel_slide_x = s_anim_tick * 0x30;  /* +0..+0x330 */
+        if (s_anim_tick >= 0x11) {
+            s_results_panel_slide_x = 0;
+            s_anim_tick = 0;
+            s_inner_state = 0x0C;
+        }
         break;
 
     case 0x0C: /* Cleanup: release tracked surfaces + clear button table.
