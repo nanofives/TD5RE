@@ -126,6 +126,10 @@ To open Ghidra in any context (skills, subagents, ad-hoc):
 2. `project_program_open_existing(project_location=".../ghidra_pool", project_name="TD5_pool2", program_name="TD5_d3d.exe", read_only=true)`
 3. After done: `bash scripts/ghidra_pool.sh cleanup`
 
+## Debug shortcuts (in-race)
+
+- **F12** — toggle the collision-wireframe overlay (white = wall rails, cyan = span boundaries, yellow = player's current span). Mirrors `td5re.ini [Debug] Collisions` and `--DebugCollisions=N`.
+
 ## Known issues / current work
 
 See `td5mod/src/td5re/EXPECTED_BEHAVIOR.md` for full behavioral spec.

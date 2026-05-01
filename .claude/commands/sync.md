@@ -1,69 +1,126 @@
-# TD5RE Account Sync
+# Account Sync (current project)
 
-Sync conversations, memory, and relevant config from the current Claude account to another account directory.
+Sync the current project's memory and session history between two Claude account directories. The project is determined by the working directory at the time the skill runs — whichever folder Claude Code was started in.
 
-## Source and destination
+## Usage
 
-- **Source**: The current account directory (detect from `~/.claude-account*` based on which account is active — check `$CLAUDE_CONFIG_DIR` or infer from the `.credentials.json` that matches the running session).
-- **Destination**: `C:\Users\maria\.claude-account1`
-
-Both accounts share the same project directory: `C:\Users\maria\Desktop\Proyectos\TD5RE`
-
-The project-scoped subdirectory inside each account is:
-`projects/C--Users-maria-Desktop-Proyectos-TD5RE/`
-
-## What to sync
-
-Run these rsync/copy operations (use robocopy or cp -r since we're on Windows with bash):
-
-### 1. Memory files (most important)
-Sync all memory `.md` files from the source project memory dir to the destination project memory dir.
 ```
-SOURCE: <source_account>/projects/C--Users-maria-Desktop-Proyectos-TD5RE/memory/
-DEST:   <dest_account>/projects/C--Users-maria-Desktop-Proyectos-TD5RE/memory/
+/sync <source> <dest>
 ```
-- Copy all `.md` files, overwriting older versions
-- Do NOT delete files in dest that don't exist in source (account1 may have its own memories)
+
+`<source>` and `<dest>` are account numbers: `1`, `2`, or `3` (mapping to `~/.claude-account1`, `~/.claude-account2`, `~/.claude-account3`).
+
+Examples:
+- `/sync 3 2` — pull from account3 into account2
+- `/sync 2 1` — push from account2 to account1
+- `/sync 1 3` — copy account1's project state into account3
+
+If the user gives ambiguous input (e.g. "from claude3"), ask which destination they mean.
+
+## Project resolution (dynamic)
+
+Derive the per-account project subdirectory name from `$PWD` at runtime:
+
+```bash
+# On Windows + Git Bash:
+PROJECT_DIR=$(cygpath -w "$PWD" | sed 's|[:\\/]|-|g')
+# Example: C:\Users\maria\Desktop\Proyectos\TD5RE → C--Users-maria-Desktop-Proyectos-TD5RE
+```
+
+This matches Claude Code's own encoding (colons, backslashes, and forward slashes all become `-`).
+
+The full per-account project path is then:
+```
+~/.claude-account<N>/projects/$PROJECT_DIR/
+```
+
+Echo the resolved `$PROJECT_DIR` to the user before copying so they can confirm it's the project they expect.
+
+## Scope — PROJECT ONLY
+
+This sync **only touches files inside the current project's subdirectory** of each account:
+
+```
+~/.claude-accountN/projects/$PROJECT_DIR/
+```
+
+Anything outside that subdirectory (other projects, account-level config, etc.) is **never read or modified**.
+
+Specifically, the sync **does NOT touch**:
+- `history.jsonl` (global shell history — cross-project)
+- `plans/` (global, no project tagging)
+- `tasks/` (global, indexed by UUID, no project tagging)
+- `settings.json`, `.credentials.json` (account-specific)
+- `cache/`, `telemetry/`, `plugins/`, `backups/`, etc.
+- Any other `projects/<other-project>/` subdirectory
+
+If the user explicitly asks to also sync global history/plans/tasks, warn them that this affects all projects on the destination account, then ask for confirmation before proceeding.
+
+## What gets synced (project-scoped only)
+
+### 1. Memory files
+```
+SOURCE: ~/.claude-account<source>/projects/$PROJECT_DIR/memory/*.md
+DEST:   ~/.claude-account<dest>/projects/$PROJECT_DIR/memory/
+```
+- Copy all `.md` files, **overwriting** files with the same name in dest.
+- **Never delete** files in dest that don't exist in source (dest may have its own memories).
 
 ### 2. Session history (conversation logs)
-Sync session `.jsonl` files and their companion directories from the source project dir to dest.
 ```
-SOURCE: <source_account>/projects/C--Users-maria-Desktop-Proyectos-TD5RE/*.jsonl
-SOURCE: <source_account>/projects/C--Users-maria-Desktop-Proyectos-TD5RE/*/  (session subdirs)
-DEST:   <dest_account>/projects/C--Users-maria-Desktop-Proyectos-TD5RE/
+SOURCE: ~/.claude-account<source>/projects/$PROJECT_DIR/*.jsonl
+SOURCE: ~/.claude-account<source>/projects/$PROJECT_DIR/*/  (session subdirs)
+DEST:   ~/.claude-account<dest>/projects/$PROJECT_DIR/
 ```
-- Only copy sessions that don't already exist in dest (skip if `.jsonl` already present)
-- This avoids re-copying large files needlessly
-
-### 3. Global history
-```
-SOURCE: <source_account>/history.jsonl
-DEST:   <dest_account>/history.jsonl
-```
-- Append new entries from source that aren't in dest (or just overwrite if source is newer)
-
-### 4. Plans and tasks
-```
-SOURCE: <source_account>/plans/
-DEST:   <dest_account>/plans/
-SOURCE: <source_account>/tasks/
-DEST:   <dest_account>/tasks/
-```
+- **Append-only**: skip files already present in dest.
+- Avoids re-copying large session logs.
 
 ## Execution
 
-1. First, identify the source account dir. The current session is running from one of `~/.claude-account1`, `~/.claude-account2`, or `~/.claude-account3`. Check which one by looking at the environment or reading `.credentials.json` files.
+1. Parse `<source>` and `<dest>` from the user's args. Validate both are `1`, `2`, or `3` and not the same.
 
-2. Create any missing destination directories with `mkdir -p`.
+2. Resolve the project dir name dynamically:
+   ```bash
+   PROJECT_DIR=$(cygpath -w "$PWD" | sed 's|[:\\/]|-|g')
+   ```
+   If `cygpath` is unavailable (non-Windows), fall back to:
+   ```bash
+   PROJECT_DIR=$(echo "$PWD" | sed 's|[:\\/]|-|g')
+   ```
 
-3. Run the copies using `cp` commands in bash. Show a summary of what was synced:
-   - Number of memory files copied/updated
-   - Number of sessions copied
-   - Whether history was updated
+3. Resolve full paths:
+   ```
+   SRC=~/.claude-account<source>/projects/$PROJECT_DIR
+   DST=~/.claude-account<dest>/projects/$PROJECT_DIR
+   ```
 
-4. Report the total size transferred.
+4. Verify `SRC` exists. If not, abort with a clear error showing `$PROJECT_DIR` (so the user can sanity-check the resolution).
 
-## Important
-- Never overwrite `.credentials.json` or `settings.json` — those are account-specific
-- Never delete anything in the destination
-- If the destination project dir doesn't exist, create it
+5. Show a **dry-run summary** before copying. Echo:
+   - The resolved `$PROJECT_DIR` ("syncing project: `<name>`")
+   - Source and dest account numbers
+   - How many memory `.md` files would be overwritten in dest (with names)
+   - How many memory `.md` files are new (not in dest)
+   - How many session `.jsonl` files would be copied (skipping existing)
+   - Ask the user to confirm before proceeding (unless they pre-confirmed).
+
+6. Run the copies:
+   - `mkdir -p` any missing dest subdirectories.
+   - `cp -f` for memory files (overwrite).
+   - `cp -n` for session files (no-clobber, skip existing).
+
+7. Report:
+   - Project: `$PROJECT_DIR`
+   - Memory files: N overwritten, M added new
+   - Sessions: K copied, L skipped (already existed)
+   - Total bytes transferred
+
+## Safety rules (hard rules)
+
+- **Never** read or write any path outside `~/.claude-account<source|dest>/projects/$PROJECT_DIR/` by default.
+- **Never** overwrite `.credentials.json`, `settings.json`, or any account-root file.
+- **Never** delete anything in the destination.
+- **Never** sync `history.jsonl`, `plans/`, or `tasks/` without explicit user opt-in and a warning that these are cross-project.
+- **Never** touch any other `projects/<other-project>/` subdirectory — only the current `$PROJECT_DIR`.
+- If `<source>` and `<dest>` resolve to the same path, abort.
+- If `$PROJECT_DIR` resolves to something empty or suspicious (e.g. just `-` or `--`), abort and show the raw `$PWD` for debugging.

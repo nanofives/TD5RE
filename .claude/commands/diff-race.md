@@ -6,15 +6,44 @@ report the first divergence so a `/fix` can target it.
 
 **Usage:**
 - Live capture + diff (single track, interactive):
-  `/diff-race [car=N] [track=N] [game_type=N] [laps=N] [frames=N] [fields=a,b,c] [stage=post_physics] [kind=actor] [float-tol=0.001] [hooks=PATH.yaml]`
+  `/diff-race [profile=NAME[,NAME...]] [car=N] [track=N] [game_type=N] [laps=N] [frames=N] [fields=a,b,c] [stage=post_physics] [kind=actor] [float-tol=0.001] [hooks=PATH.yaml]`
 - Diff an existing `/fix` CSV bundle (no capture — reuses what /fix already produced):
-  `/diff-race bundle=<SESSION_TAG> [track=N] [fields=a,b,c] [stage=S] [kind=K] [float-tol=F]`
+  `/diff-race bundle=<SESSION_TAG> [profile=NAME] [track=N] [fields=a,b,c] [stage=S] [kind=K] [float-tol=F]`
+- List the profile catalog (no race run):
+  `/diff-race list-profiles`
 
 All arguments are optional. Defaults:
+- `profile=core` — minimal baseline pulse: position + race progress per actor at `post_progress`. Excludes harness noise (frame counter, slot_state asymmetry, view_target unset on Frida, sim_accum drift). Override per session with `profile=physics` (or `physics,track`, etc.).
 - `car=0` (1998 Dodge Viper), `track=0` (Moscow, rain+fog), `game_type=0` (single race), `laps=1`
 - `frames=300` — 160 tick countdown (0xA000/0x100 @ 30 Hz = 5.33 s) + ~3 s race window + margin
-- Comparator defaults to diffing everything with `float-tol=0.001`
+- `float-tol=0.001` (or whatever the chosen profile pins)
 - `bundle=<tag>` — no live capture; reads CSVs from `tools/frida_csv/<tag>/`. Defaults to diffing ALL three tracks in the bundle; narrow with `track=N`.
+
+## Profile catalog
+
+Profiles are curated `(fields, stage, kind)` slices that target one subsystem. Source of truth: `tools/diff_profiles.py`. Run `python tools/diff_profiles.py list` for the live catalog. Multiple profiles compose: `profile=physics,track` unions their fields and joins their stages/kinds.
+
+| Profile | Lens | Kind | Stage |
+|---|---|---|---|
+| `core` (default) | "Did anything fundamental drift?" — pos + race progress | actor | post_progress |
+| `physics` | Per-tick physics: pos/vel/angles/slip/contact | actor | post_physics |
+| `physics_full` | Physics + driver commands + display angles | actor | post_physics |
+| `vehicle` | Drivetrain + ground contact (gear, mode, mask, speeds) | actor | post_physics |
+| `steering` | Steer command vs body/display yaw + lat speed | actor | post_ai |
+| `ai` | AI command output (steer, engine, span, race_pos) | actor | post_ai |
+| `track` | Span (raw/norm/accum/high) + contact + mask | actor | post_track |
+| `progress` | Race position, lap metrics, finish accounting | actor | post_progress |
+| `hud` | What the speedo/minimap/timer reads | actor | post_progress |
+| `spawn` | Tick-0 grid snapshot | actor | frame_begin |
+| `slot_state` | Slot bookkeeping (state, comp1/2, view_target) | actor | post_progress |
+| `view` | Camera world + camera local pos | view | frame_end |
+| `display` | Render-time display angles (smoothed) | actor | frame_end |
+| `frontend` | Game-state FSM: state, paused, fade, countdown | frame | frame_begin |
+| `viewport` | Split-screen layout: count, mode | frame | frame_begin |
+
+**To extend the library:** add an entry to `PROFILES` in `tools/diff_profiles.py`. Pick fields lean — the comparator's first-mismatch break (line 192 of `compare_race_trace.py`) hides every field after the first divergent one, so noisy columns mask real signal.
+
+**Explicit overrides still work:** `--fields`/`--stage`/`--kind`/`--float-tol` (the underlying CLI flags) and the corresponding `fields=`/`stage=`/`kind=`/`float-tol=` skill arguments override the profile-resolved values for that one run. Use this when probing a single column inside a broader profile (e.g. `profile=physics fields=world_x` to isolate one signal at the physics-stage slice).
 
 ## Workflow
 
@@ -24,13 +53,28 @@ All heavy lifting lives in `tools/diff_race.py`. Call it directly, forwarding
 the parsed arguments. Do NOT reimplement the INI patching, spawn, or compare
 logic — it already:
 
-- Snapshots `re/tools/quickrace/td5_quickrace.ini` (Frida-side only; td5re
-  stopped reading it on 2026-04-22) and writes the requested scenario into
-  its `[race]` / `[car]` sections so `td5_quickrace.py` forwards the same
-  values to the original binary's Frida hook.
-- Spawns `original/TD5_d3d.exe` via `re/tools/quickrace/td5_quickrace.py
-  --trace --trace-auto-exit` (both the quickrace hook and
-  `tools/frida_race_trace.js` load into the same Frida session).
+- Forwards scenario as first-class CLI flags to `td5_quickrace.py`
+  (`--track`, `--car`, `--game-type`, `--laps`, `--start-span-offset`,
+  `--player-is-ai`). The Frida hook receives them via
+  `script.post({type:'cfg', cfg})`. **`td5_quickrace.ini` is NEVER mutated**
+  so two parallel `/diff-race` (or `/fix`) sessions can run different
+  scenarios concurrently without colliding on shared launcher state.
+- Launches `original/TD5_d3d.exe` via `re/tools/quickrace/td5_quickrace.py
+  --trace --trace-auto-exit --csv-out <per-session-path>` (both the
+  quickrace hook and `tools/frida_race_trace.js` load into the same Frida
+  session; the trace script's `OUTPUT_PATH` constant is rewritten on
+  injection so each session writes to its own CSV).
+  **Win11-safe launch path:** `td5_quickrace.py` no longer uses
+  `frida.spawn()` — that path triggers an M2DX.dll NULL-deref at +0x144B
+  during DirectSound init on this box (see memory:
+  `reference_m2dx_crash_2026-04-29.md`). Default behavior is now
+  `cmd /c start "" TD5_d3d.exe` followed by a 10 ms-interval poll on
+  `frida.get_local_device().enumerate_processes()` until the PID appears,
+  then `frida.attach(pid)`. This catches the process before
+  `RunMainGameLoop` reaches `GAMESTATE_INTRO`, so the hook's no-op
+  replacement of `ShowLegalScreens` / `PlayIntroMovie` actually fires
+  (otherwise the legals/intro plays before Frida attaches). Pass
+  `--spawn` to opt back into the historical `frida.spawn()` path.
 - Spawns `td5re.exe` from the repo root (**never** from `original/`) with
   `--Key=N` CLI overrides carrying the full scenario + trace knobs
   (`--DefaultCar`, `--DefaultTrack`, `--DefaultGameType`, `--Laps`,
@@ -50,15 +94,25 @@ logic — it already:
   then kills it. `td5re.ini` is never mutated.
 - Runs `tools/compare_race_trace.py log/race_trace_original.csv log/race_trace.csv`
   with the forwarded `--fields` / `--stage` / `--kind` / `--float-tol` filters.
-- Restores the quickrace INI snapshot no matter what.
 
-Parse `$ARGUMENTS` into `--car`, `--track`, `--game-type`, `--laps`,
-`--frames`, `--fields`, `--stage`, `--kind`, `--float-tol`, `--hooks` and
-invoke:
+Parse `$ARGUMENTS` into `--profile`, `--car`, `--track`, `--game-type`,
+`--laps`, `--frames`, `--fields`, `--stage`, `--kind`, `--float-tol`,
+`--hooks` and invoke:
 
 ```bash
-python tools/diff_race.py --car N --track N [--frames N] [--fields a,b,c] [--stage S] [--kind K] [--float-tol F] [--hooks PATH]
+python tools/diff_race.py [--profile NAME[,NAME]] --car N --track N [--frames N] [--fields a,b,c] [--stage S] [--kind K] [--float-tol F] [--hooks PATH]
 ```
+
+If the user passed `list-profiles` (with or without other args), short-circuit:
+
+```bash
+python tools/diff_race.py --list-profiles
+```
+
+Profile resolution order inside the orchestrator:
+1. The selected profile(s) provide default `fields`/`stage`/`kind` (and optionally `float-tol`).
+2. Any explicit `--fields`/`--stage`/`--kind`/`--float-tol` flag overrides the profile-resolved value for that one knob.
+3. The orchestrator prints the resolved slice (`profile=… stage=… kind=… fields=…`) so the user can see what was actually diffed.
 
 ### Step 1b: Bundle mode (`bundle=<SESSION_TAG>`)
 
@@ -94,6 +148,26 @@ for f in "${ORIG}" "${PORT}"; do
     rows=$(wc -l < "${f}")
     [ "${rows}" -gt 50 ] || { echo "Too short (${rows} rows): ${f}"; continue 2; }
 done
+
+# If a profile was passed, resolve it via diff_profiles before invoking the comparator.
+# Otherwise, fall back to whatever explicit fields/stage/kind/float-tol were passed.
+if [ -n "${PROFILE:-}" ]; then
+    eval "$(python - <<PY
+import shlex, sys
+sys.path.insert(0, "tools")
+import diff_profiles
+r = diff_profiles.resolve(diff_profiles.parse_profile_arg("${PROFILE}"))
+print(f"PROF_FIELDS={shlex.quote(r['fields'])}")
+print(f"PROF_STAGE={shlex.quote(r['stage'])}")
+print(f"PROF_KIND={shlex.quote(r['kind'])}")
+print(f"PROF_FLOAT_TOL={r['float_tol'] if r['float_tol'] is not None else ''}")
+PY
+)"
+    FIELDS="${FIELDS:-$PROF_FIELDS}"
+    STAGE="${STAGE:-$PROF_STAGE}"
+    KIND="${KIND:-$PROF_KIND}"
+    FLOAT_TOL="${FLOAT_TOL:-$PROF_FLOAT_TOL}"
+fi
 
 python tools/compare_race_trace.py "${ORIG}" "${PORT}" \
     ${FIELDS:+--fields ${FIELDS}} \
@@ -183,13 +257,16 @@ mismatch, and stops. The user decides whether to invoke `/fix` next.
 
 ## Rules
 
-- `td5re.ini` is NOT touched by `diff_race.py` — the port reads its
-  scenario from `--Key=N` CLI overrides. You can safely edit it in parallel
-  with a diff-race run. The quickrace INI at
-  `re/tools/quickrace/td5_quickrace.ini` IS mutated (Frida side only);
-  `diff_race.py` snapshot/restores it. If you hit a pre-existing leftover
-  patched quickrace INI (e.g. from a crashed earlier run), restore it from
-  git before rerunning.
+- Neither `td5re.ini` nor `re/tools/quickrace/td5_quickrace.ini` is
+  mutated. Both binaries receive their scenario via CLI flags (port:
+  `--Key=N` overrides; Frida side: first-class flags forwarded to the
+  hook via `script.post`). You can safely edit either INI in parallel
+  with a diff-race run, and multiple `/diff-race` (or `/fix`) sessions
+  can run concurrently with different scenarios. Pass `--session-tag
+  <tag>` to also separate the four CSV outputs
+  (`log/race_trace_<tag>.csv` etc.); the port honors
+  `TD5RE_RACE_TRACE_PATH` / `TD5RE_CALLS_TRACE_PATH` env vars set by
+  the orchestrator.
 - Never copy `td5re.exe` into `original/`. It lives at the repo root and
   reads game data out of `original/` via relative paths.
 - Run `diff_race.py` through bash from the repo root (`cd` is handled
