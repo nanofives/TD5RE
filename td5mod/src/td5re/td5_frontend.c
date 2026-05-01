@@ -3492,6 +3492,26 @@ static int frontend_get_button_anim_state(int *out_mode, int *out_tick, int *out
         if (s_inner_state == 3) { mode = FE_BUTTON_ANIM_IN;  max_tick = 0x27; }
         else if (s_inner_state == 8) { mode = FE_BUTTON_ANIM_OUT; max_tick = 16; }
         break;
+    case TD5_SCREEN_RACE_RESULTS:
+        /* P7 — button slide-in/out for the post-race menu (states 0xE / 0x10).
+         * [CONFIRMED @ 0x00422480 case 0xE / 0x10]
+         *   state 0xE: 5 buttons slide in over 32 frames (counter ends == 0x20).
+         *     even idx (0,2,4): from left, x_base + counter*0x18
+         *     odd  idx (1,3):   from right, x_base + counter*-0x18
+         *   state 0x10: 5 buttons slide out over 32 frames (mirror).
+         * Port runs s_anim_tick at +=2 from 0..0x10 (8 ticks @ +2 each = 32-frame
+         * span in original units) so max_tick is 0x10 here. The base/offscreen
+         * delta is handled by the generic frontend_get_button_anim_x logic
+         * (odd idx → +640 offscreen, even idx → -640 offscreen).
+         *
+         * NOTE: states 3/0xB also animate sprites in the original — but those
+         * are panel+title sprites, not the click-catcher/OK buttons. Animating
+         * the buttons here would make them slide instead of staying parked at
+         * y=400 during table-browse. Title slide is handled separately by
+         * frontend_get_title_render_y. */
+        if (s_inner_state == 0x0E) { mode = FE_BUTTON_ANIM_IN;  max_tick = 0x10; }
+        else if (s_inner_state == 0x10) { mode = FE_BUTTON_ANIM_OUT; max_tick = 0x10; }
+        break;
     default:
         break;
     }
@@ -3521,6 +3541,16 @@ static int frontend_screen_has_button_anim(void) {
     case TD5_SCREEN_CAR_SELECTION:
     case TD5_SCREEN_TRACK_SELECTION:
     case TD5_SCREEN_HIGH_SCORE:
+        /* TD5_SCREEN_RACE_RESULTS deliberately NOT listed: only its post-race
+         * MENU buttons (states 0xE / 0x10) animate, while the click-catcher /
+         * OK buttons used during the table-browse sub-flow (states 0..0xB)
+         * stay at fixed positions. Listing screen 24 here would make
+         * frontend_get_button_anim_x return offscreen_x for all states where
+         * frontend_get_button_anim_state() is FE_BUTTON_ANIM_NONE — i.e. it
+         * would push the click-catcher and OK off-screen during state 1..6.
+         * The 0xE/0x10 menu animation still works because frontend_get_button
+         * _anim_state() returns mode=IN/OUT for those states, regardless of
+         * the screen's presence in this allowlist. */
         return 1;
     default:
         return 0;
@@ -4497,24 +4527,69 @@ static void frontend_render_race_results_overlay(float sx, float sy) {
      * generic button loop in td5_frontend_render_ui_rects). */
     if (s_inner_state >= 0x0D) return;
 
-    /* --- Results table --- */
-    int kph = td5_save_get_speed_units();
-    (void)kph;
+    /* --- P4 — Per-game-type results panel ---
+     * [CONFIRMED @ 0x00422480 case 0 game_type ladder] Original branches on
+     * g_selectedGameType, drawing different SNK_*ResultsTxt 32-byte string
+     * rows from a (char[N][0x20]) array. The actual string content lives in
+     * LANGUAGE.DLL and is NOT in TD5_d3d.exe; we use English approximations
+     * ([UNCERTAIN-LANG] tags) for column headers — the row coordinates and
+     * column structure mirror the original DrawRaceDataSummaryPanel
+     * (@ 0x00421e90) verbatim:
+     *   - Right column data block at panel-relative x=0x118 (280 px)
+     *   - Y rows step 0x18 (24 px), starting Y depends on game_type
+     *   - Per-slot single-row focus: original blits row data only for
+     *     DAT_00497a68 (currently-browsed slot, mapped to s_score_category_index)
+     *
+     * Layout decisions:
+     *   - All game_types: POS / DRIVER / CAR / TIME stays as the universal
+     *     base header (closest to SNK_ResultsTxt+0x40 default labels)
+     *   - Cup (1..6): adds "POINTS" column (reads secondary_metric)
+     *   - Cop Chase (8): adds "WANTED" column (slot wanted_kills)
+     *   - Drag (7) / Drag Race (9): drops POS, just DRIVER / CAR / TIME
+     *     (drag is heads-up, position is implicit)
+     *   - State 7-10 (browse arrows): highlight focused slot row */
+
+    int gt = (int)s_selected_game_type;
+    int is_cup       = (gt >= 1 && gt <= 6);
+    int is_drag      = (gt == 7 || gt == 9);
+    int is_cop_chase = (gt == 8);
+
+    int focus_slot = s_score_category_index;
+    if (focus_slot < 0 || focus_slot >= TD5_MAX_RACER_SLOTS) focus_slot = 0;
 
     float ts = 0.75f;
     uint32_t hdr_color = 0xFFCCCCCC;
-    float hdr_y = panel_y + 52.0f * sy;
-    float col_pos  = panel_x + 20.0f  * sx;
-    float col_name = panel_x + 62.0f  * sx;
-    float col_car  = panel_x + 180.0f * sx;
-    float col_time = panel_x + 300.0f * sx;
+    /* Header Y matches original step starting at 0x30 (cup) or 0x48 (cop)
+     * or 0x60 (single/drag/etc). Use a unified ~Y=48 for the port header
+     * to keep panel geometry stable across game types. */
+    float hdr_y = panel_y + 48.0f * sy;
 
-    fe_draw_text(col_pos,  hdr_y, "POS",    hdr_color, sx * ts, sy * ts);
-    fe_draw_text(col_name, hdr_y, "DRIVER", hdr_color, sx * ts, sy * ts);
-    fe_draw_text(col_car,  hdr_y, "CAR",    hdr_color, sx * ts, sy * ts);
-    fe_draw_text(col_time, hdr_y, "TIME",   hdr_color, sx * ts, sy * ts);
+    float col_pos     = panel_x +  20.0f * sx;
+    float col_name    = panel_x +  62.0f * sx;
+    float col_car     = panel_x + 180.0f * sx;
+    float col_time    = panel_x + 280.0f * sx;
+    float col_extra   = panel_x + 360.0f * sx;  /* Cup PTS / CopChase WANTED */
 
-    /* Enumerate slots 0..5, emit one row per slot with a valid actor. */
+    /* Header titles — [UNCERTAIN-LANG] strings. Row layout matches Ghidra
+     * confirmation of which columns each mode displays. */
+    if (is_drag) {
+        fe_draw_text(col_name,  hdr_y, "DRIVER", hdr_color, sx * ts, sy * ts);
+        fe_draw_text(col_car,   hdr_y, "CAR",    hdr_color, sx * ts, sy * ts);
+        fe_draw_text(col_time,  hdr_y, "TIME",   hdr_color, sx * ts, sy * ts);
+    } else {
+        fe_draw_text(col_pos,   hdr_y, "POS",    hdr_color, sx * ts, sy * ts);
+        fe_draw_text(col_name,  hdr_y, "DRIVER", hdr_color, sx * ts, sy * ts);
+        fe_draw_text(col_car,   hdr_y, "CAR",    hdr_color, sx * ts, sy * ts);
+        fe_draw_text(col_time,  hdr_y, "TIME",   hdr_color, sx * ts, sy * ts);
+        if (is_cup)        fe_draw_text(col_extra, hdr_y, "PTS",    hdr_color, sx * ts, sy * ts);
+        if (is_cop_chase)  fe_draw_text(col_extra, hdr_y, "WANTED", hdr_color, sx * ts, sy * ts);
+    }
+
+    /* Per-slot row rendering — drag mode skips POS column.
+     * [CONFIRMED] original DrawRaceDataSummaryPanel only blits ONE slot's data
+     * (DAT_00497a68) at fixed Y rows. The port retains the multi-row enumeration
+     * for now since the underlying surface model differs (port has no panel
+     * surface to clear/refill on browse). The browsed slot is highlighted. */
     float row_y = panel_y + 84.0f * sy;
     float row_h = 24.0f * sy;
     int row = 0;
@@ -4522,12 +4597,33 @@ static void frontend_render_race_results_overlay(float sx, float sy) {
         TD5_Actor *a = td5_game_get_actor(slot);
         if (!a) continue;
 
+        /* Drag mode shows only 2 slots (player + opponent); Ghidra @ 0x00422A02
+         * confirms drag uses (s_score_category_index & 1). */
+        if (is_drag && row >= 2) break;
+
         float y = row_y + (float)row * row_h;
-        uint32_t row_color = (slot == 0) ? 0xFFFFCC44 : 0xFFE0E0E0;
+
+        /* Highlight focus slot (state 6 browse): brighter color when focused. */
+        uint32_t row_color;
+        if (slot == focus_slot && s_inner_state == 6) {
+            row_color = 0xFFFFFFFF;  /* white = focused */
+        } else if (slot == 0) {
+            row_color = 0xFFFFCC44;  /* gold = player */
+        } else {
+            row_color = 0xFFE0E0E0;  /* light grey = AI */
+        }
+
         char buf[64];
 
-        snprintf(buf, sizeof(buf), "%d", row + 1);
-        fe_draw_text(col_pos, y, buf, row_color, sx * ts, sy * ts);
+        if (!is_drag) {
+            int finish_pos = td5_game_get_finish_position(slot);
+            if (finish_pos >= 0 && td5_game_slot_is_finished(slot)) {
+                snprintf(buf, sizeof(buf), "%d", finish_pos + 1);  /* display 1-based */
+            } else {
+                snprintf(buf, sizeof(buf), "-");
+            }
+            fe_draw_text(col_pos, y, buf, row_color, sx * ts, sy * ts);
+        }
 
         snprintf(buf, sizeof(buf), (slot == 0) ? "PLAYER" : "CPU %d", slot);
         fe_draw_text(col_name, y, buf, row_color, sx * ts, sy * ts);
@@ -4552,12 +4648,18 @@ static void frontend_render_race_results_overlay(float sx, float sy) {
             fe_draw_text(col_time, y, buf, row_color, sx * ts, sy * ts);
         }
 
+        if (is_cup) {
+            snprintf(buf, sizeof(buf), "%d", (int)td5_game_get_result_secondary(slot));
+            fe_draw_text(col_extra, y, buf, row_color, sx * ts, sy * ts);
+        }
+
         row++;
     }
 
     /* Footer hint during interactive state 6 */
     if (s_inner_state == 6) {
-        const char *hint = "Press OK to continue";
+        const char *hint = is_drag ? "Press OK to continue"
+                                   : "L/R to browse  -  OK to continue";
         float hw = fe_measure_text(hint, sx * 0.7f);
         fe_draw_text(panel_x + (pw - hw) * 0.5f, panel_y + ph - 28.0f * sy,
                      hint, 0xFFAAAAAA, sx * 0.7f, sy * 0.7f);
@@ -5249,7 +5351,18 @@ void td5_frontend_render_ui_rects(void) {
 
     /* (text overlay rendering deferred to font system) */
 
-    if (frontend_ensure_title_texture(s_current_screen)) {
+    /* P1 — title strip gating for Screen [24] RaceResults.
+     * [CONFIRMED @ 0x00422480 states 3..0xB queue title; states 0xD..0x14 do not]
+     * Original only queues the title surface during the table-browse sub-flow
+     * (states 3..0xB). Once state 0xC releases the surface and 0xD builds the
+     * post-race menu, the title disappears. Other screens render the strip
+     * for their entire lifetime, so the suppression is screen-24-specific. */
+    int title_visible = 1;
+    if (s_current_screen == TD5_SCREEN_RACE_RESULTS) {
+        title_visible = (s_inner_state >= 3 && s_inner_state <= 0x0B) ? 1 : 0;
+    }
+
+    if (title_visible && frontend_ensure_title_texture(s_current_screen)) {
         int page = s_title_tex_page[s_current_screen];
         int title_w = s_title_tex_w[s_current_screen];
         int title_h = s_title_tex_h[s_current_screen];
@@ -8732,6 +8845,11 @@ static void Screen_RaceResults(void) {
         TD5_LOG_I(LOG_TAG, "RaceResults: state 0 - init, game_type=%d",
                   s_selected_game_type);
 
+        /* P8 — DXSound::Play(5) on screen entry.
+         * [CONFIRMED @ 0x00422480 case 0] Original calls DXSound::Play(5) near
+         * the end of state 0 init, before g_frontendInnerState advances. */
+        frontend_play_sfx(5);
+
         /* P2 (plan_screen24) — MainMenu.tga backdrop. Original case 0 calls
          * LoadTgaToFrontendSurface16bpp("MainMenu.tga", "FrontEnd.zip") then
          * CopyPrimaryFrontendBufferToSecondary so the post-race UI overlays
@@ -8842,6 +8960,11 @@ static void Screen_RaceResults(void) {
         }
         s_anim_tick += 2;
         if (s_anim_tick >= 0x12) {
+            /* P8 — DXSound::Play(4) on slide-in completion.
+             * [CONFIRMED @ 0x00422480 case 3] Original fires Play(4) inside
+             * the AdvanceFrontendTickAndCheckReady ready-branch immediately
+             * before g_frontendInnerState++. */
+            frontend_play_sfx(4);
             s_inner_state = 4;
         }
         break;
@@ -8911,9 +9034,23 @@ static void Screen_RaceResults(void) {
         s_inner_state = 0x0C;
         break;
 
-    case 0x0C: /* Cleanup: release all surfaces & the state-0 OK button.
-                * Original @ 0x00422CEE: ReleaseTrackedFrontendSurface + clear
-                * button table. Port collapses to frontend_reset_buttons. */
+    case 0x0C: /* Cleanup: release tracked surfaces + clear button table.
+                * P9 — [CONFIRMED @ 0x00422CEE] original body:
+                *   DAT_0049628c = ReleaseTrackedFrontendSurface(DAT_0049628c);
+                *   DAT_00496358 = ReleaseTrackedFrontendSurface(DAT_00496358);
+                *   ReleaseFrontendDisplayModeButtons();
+                *   g_frontendInnerState++;
+                * Port has no analog of those tracked surfaces — the panel
+                * (DAT_0049628c, 408×392) is rendered fresh each frame from
+                * frontend_render_race_results_overlay via fe_draw_text + the
+                * MainMenu.tga backdrop (P2), not allocated through
+                * CreateTrackedFrontendSurface, so there is nothing to release.
+                * The title (DAT_00496358) maps to ResultsText.tga which is
+                * cached persistently in s_title_tex_page[] and reused on
+                * re-entry; releasing it here would force a re-decode on every
+                * round-trip. So state 0xC collapses to button-table reset.
+                * State 0x14 transitions to 0xD (NOT 0xC per the [Ghidra
+                * 2026-05-01 RE: agent corrected the plan]) — no double-free. */
         frontend_reset_buttons();
         s_inner_state = 0x0D;
         break;
@@ -9050,18 +9187,43 @@ static void Screen_RaceResults(void) {
                 }
                 break;
 
-            case 4: /* Quit */
-                if (s_selected_game_type < 1 || s_selected_game_type == 7 || s_selected_game_type == 9) {
-                    /* Go to name entry */
-                    td5_frontend_set_screen(TD5_SCREEN_NAME_ENTRY);
-                } else {
-                    /* Check cup completion */
-                    if (s_results_cup_complete) {
-                        td5_frontend_set_screen(TD5_SCREEN_CUP_WON);
+            case 4: /* Quit
+                     * P6 — Quit branch fidelity. [CONFIRMED @ 0x004233E0
+                     * dispatch on DAT_00497a64 == 4] Original dispatches FOUR
+                     * branches; the prior port collapsed them to TWO and got
+                     * the cup-won/failed inversion wrong:
+                     *
+                     *   game_type < 1 (single):
+                     *     AwardCupCompletionUnlocks(); SetFrontendScreen(0x19)
+                     *   game_type >= 1, DAT_00497a70 == 0  (cup mid-progress):
+                     *     SetFrontendScreen(5)            // back to MainMenu
+                     *   cup, DAT_00497a70 != 0, DAT_0048d988._2_2_ == 0  (won):
+                     *     g_returnToScreenIndex = 0x19;   SetFrontendScreen(0x1B)
+                     *   cup, DAT_00497a70 != 0, DAT_0048d988._2_2_ != 0  (failed):
+                     *     g_returnToScreenIndex = 0x19;   SetFrontendScreen(0x1A)
+                     *
+                     * DAT_0048d988._2_2_ is the int16 at +2 of s_results[0]
+                     * — i.e. final_position. 0 = 1st place (won), nonzero =
+                     * not 1st (failed). DAT_00497a70 is s_results_cup_complete,
+                     * set in state 0xD when ConfigureGameTypeFlags()==0.
+                     * AwardCupCompletionUnlocks @ 0x00421DA0 grants unlock flags;
+                     * Screen_CupWon already invokes the port equivalent
+                     * (td5_save_apply_cup_unlocks_ex) on its own entry, so the
+                     * single-race quit path here only needs the screen jump.
+                     * Game types 7 (Drag) and 9 (Drag Race) fall under "cup"
+                     * here because the dispatch only special-cases <1, NOT 7/9. */
+                    if (s_selected_game_type < 1) {
+                        td5_frontend_set_screen(TD5_SCREEN_NAME_ENTRY);  /* 0x19 */
+                    } else if (!s_results_cup_complete) {
+                        td5_frontend_set_screen(TD5_SCREEN_MAIN_MENU);   /* 5 */
                     } else {
-                        td5_frontend_set_screen(TD5_SCREEN_CUP_FAILED);
+                        s_return_screen = TD5_SCREEN_NAME_ENTRY;         /* 0x19 */
+                        if (td5_game_get_finish_position(0) == 0) {
+                            td5_frontend_set_screen(TD5_SCREEN_CUP_WON);    /* 0x1B */
+                        } else {
+                            td5_frontend_set_screen(TD5_SCREEN_CUP_FAILED); /* 0x1A */
+                        }
                     }
-                }
                 break;
             }
         }
