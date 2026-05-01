@@ -8666,6 +8666,16 @@ static void Screen_RaceResults(void) {
         TD5_LOG_I(LOG_TAG, "RaceResults: state 0 - init, game_type=%d",
                   s_selected_game_type);
 
+        /* P2 (plan_screen24) — MainMenu.tga backdrop. Original case 0 calls
+         * LoadTgaToFrontendSurface16bpp("MainMenu.tga", "FrontEnd.zip") then
+         * CopyPrimaryFrontendBufferToSecondary so the post-race UI overlays
+         * the main-menu artwork. Without it the bg-gallery slideshow floats
+         * on a black clear — visually empty. Every other screen handler
+         * loads this same TGA as its s_background_surface (see e.g.
+         * Screen_MainMenu state 0); we mirror that to give screen 24 a
+         * faithful backdrop. */
+        frontend_load_tga("Front_End/MainMenu.tga", "Front_End/FrontEnd.zip");
+
         /* [CONFIRMED @ 0x004224B6 RunRaceResultsScreen case 0] Early-route to
          * Screen_CupFailed (TD5_SCREEN_CUP_FAILED, 0x1a) when the player has
          * been eliminated mid-cup. The original has two parallel paths:
