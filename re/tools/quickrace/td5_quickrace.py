@@ -126,12 +126,22 @@ def on_message(msg, data):
 
 
 def patch_trace_script(source: str, max_frames: int, max_sim_tick: int,
-                       hook_specs: list | None = None) -> str:
+                       hook_specs: list | None = None,
+                       csv_out: str | None = None,
+                       brake_csv_out: str | None = None,
+                       contacts_csv_out: str | None = None,
+                       calls_csv_out: str | None = None) -> str:
     """Rewrite TRACE_MAX_FRAMES / TRACE_MAX_SIM_TICK constants in the trace script.
 
     If hook_specs is provided, also injects the JSON-encoded spec array as the
     script's HOOK_SPECS global so the Frida side can install custom Interceptor
     hooks via its installHookSpecs() helper.
+
+    If any of the *_csv_out paths are provided, rewrites the matching hardcoded
+    OUTPUT_PATH / BRAKE_OUTPUT_PATH / CONTACTS_OUTPUT_PATH / CALLS_OUTPUT_PATH
+    constants so parallel sessions can write to per-session CSVs without
+    stomping on each other's output. Paths are JSON-quoted so backslashes
+    and other Windows path characters land in the JS string correctly.
     """
     source = re.sub(
         r"var\s+TRACE_MAX_FRAMES\s*=\s*\d+;",
@@ -155,6 +165,27 @@ def patch_trace_script(source: str, max_frames: int, max_sim_tick: int,
             source,
             count=1,
         )
+
+    # Per-session CSV path rewrites. The trace script declares each constant
+    # as `var <NAME> = "<absolute path>";` near the top; we match the var
+    # binding and replace the literal with a JSON-quoted alternative.
+    import json as _json
+    csv_subs = [
+        (csv_out,          "OUTPUT_PATH"),
+        (brake_csv_out,    "BRAKE_OUTPUT_PATH"),
+        (contacts_csv_out, "CONTACTS_OUTPUT_PATH"),
+        (calls_csv_out,    "CALLS_OUTPUT_PATH"),
+    ]
+    for new_path, var_name in csv_subs:
+        if not new_path:
+            continue
+        quoted = _json.dumps(new_path)  # JSON-quoted JS string literal
+        pat = r"var\s+" + var_name + r"\s*=\s*\"[^\"]*\";"
+        # re.sub interprets backslashes in the replacement as backreferences;
+        # use a lambda to pass the replacement verbatim so JSON-escaped
+        # backslashes survive into the JS source.
+        replacement = f"var {var_name} = {quoted};"
+        source = re.sub(pat, lambda _m: replacement, source, count=1)
     return source
 
 
@@ -205,11 +236,40 @@ def load_hook_specs(path: str) -> list:
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--ini", default=DEFAULT_INI, help="ini path")
+    ap.add_argument("--no-ini", action="store_true",
+                    help="skip td5_quickrace.ini entirely; use only built-in "
+                         "defaults + explicit CLI flags. Use this for "
+                         "orchestrated runs (diff_race.py, /fix, automated "
+                         "probes) so the launcher is hermetically sealed "
+                         "from INI contamination by parallel interactive "
+                         "sessions. The INI's `frontend_only=true` from a "
+                         "stale interactive session was the previous source "
+                         "of 'launches into main menu' surprises.")
     ap.add_argument("--set", dest="overrides", action="append", default=[],
                     help="override e.g. race.track=5 (repeatable)")
     ap.add_argument("--exe", default=None, help="override launcher.exe")
     ap.add_argument("--no-resume", action="store_true",
                     help="leave process suspended after injection")
+    ap.add_argument("--attach-pid", dest="attach_pid", type=int, default=None,
+                    help="attach to an already-running TD5_d3d.exe by PID "
+                         "instead of frida.spawn(). Use when the spawn path "
+                         "crashes (e.g., Win11 M2DX init regression) — "
+                         "launch the game manually first, then pass its PID. "
+                         "Skips frida.resume() and does NOT kill the process "
+                         "on exit.")
+    ap.add_argument("--attach-name", dest="attach_name", default=None,
+                    help="like --attach-pid but locate the PID by process "
+                         "name (default: TD5_d3d.exe). Picks the first match.")
+    ap.add_argument("--spawn", action="store_true",
+                    help="force the historical frida.spawn() launch path. "
+                         "BROKEN on Win11 — trips an M2DX.dll NULL-deref at "
+                         "+0x144B during DirectSound init (see memory: "
+                         "reference_m2dx_crash_2026-04-29.md). The default "
+                         "is now attach-mode: if the target isn't running, "
+                         "the launcher does `cmd /c start \"\" <exe>` and "
+                         "polls until the PID appears. Use --spawn only on "
+                         "non-Win11 boxes or when explicitly diagnosing "
+                         "spawn-path behavior.")
     ap.add_argument("--trace", action="store_true",
                     help="also inject tools/frida_race_trace.js into the same "
                          "Frida session; writes log/race_trace_original.csv")
@@ -230,10 +290,103 @@ def main():
                     help="additional Frida JS script(s) to inject into the "
                          "same session (repeatable). Loaded after the hook + "
                          "trace scripts. Use for ad-hoc probes.")
+
+    # First-class scenario flags. These bypass the INI entirely so parallel
+    # sessions can run different scenarios without colliding on the shared
+    # td5_quickrace.ini file. Precedence (low → high): INI defaults → --set
+    # overrides → these named flags. Any flag left at None falls through.
+    sc = ap.add_argument_group("scenario (overrides INI without mutating it)")
+    sc.add_argument("--track", type=int, default=None,
+                    help="track schedule index (overrides INI [race].track)")
+    sc.add_argument("--car", type=int, default=None,
+                    help="car id (overrides INI [car].car)")
+    sc.add_argument("--game-type", dest="game_type", type=int, default=None,
+                    help="game type 0..n (overrides INI [race].game_type)")
+    sc.add_argument("--laps", type=int, default=None,
+                    help="circuit laps (overrides INI [race].laps)")
+    sc.add_argument("--direction", type=int, default=None,
+                    help="track direction 0|1 (overrides INI [race].direction)")
+    sc.add_argument("--start-span-offset", dest="start_span_offset",
+                    type=int, default=None,
+                    help="grid spawn span offset (overrides INI [race].start_span_offset)")
+    sc.add_argument("--paint", type=int, default=None,
+                    help="car paint index (overrides INI [car].paint)")
+    sc.add_argument("--transmission", type=int, default=None,
+                    help="transmission 0|1 (overrides INI [car].transmission)")
+    sc.add_argument("--opponent-car", dest="opponent_car",
+                    type=int, default=None,
+                    help="opponent car id (overrides INI [opponent].car)")
+    sc.add_argument("--player-is-ai", dest="player_is_ai",
+                    type=lambda v: v.lower() in ("1", "true", "yes", "on"),
+                    default=None,
+                    help="route slot 0 through AI dispatch (true|false; "
+                         "overrides INI [launcher].player_is_ai)")
+    sc.add_argument("--frontend-only", dest="frontend_only",
+                    type=lambda v: v.lower() in ("1", "true", "yes", "on"),
+                    default=None,
+                    help="bypass intro/legal but let the menu run (true|false)")
+    sc.add_argument("--frontend-screen", dest="frontend_screen",
+                    type=int, default=None,
+                    help="jump to frontend screen N instead of launching a race")
+    sc.add_argument("--seed-crt", dest="seed_crt",
+                    type=lambda v: v.lower() in ("1", "true", "yes", "on"),
+                    default=None,
+                    help="call _srand(crt_seed) before InitializeRaceSeriesSchedule")
+    sc.add_argument("--crt-seed", dest="crt_seed",
+                    type=lambda s: int(s, 0), default=None,
+                    help="CRT seed value when --seed-crt is true (default 0x1A2B3C4D)")
+    sc.add_argument("--verbose", dest="verbose",
+                    type=lambda v: v.lower() in ("1", "true", "yes", "on"),
+                    default=None,
+                    help="enable hook verbose logging (true|false)")
+    sc.add_argument("--trace-track-load", dest="trace_track_load",
+                    type=lambda v: v.lower() in ("1", "true", "yes", "on"),
+                    default=None,
+                    help="log LoadTrackRuntimeData + spawn pose calls (true|false)")
+
+    # Per-session output path overrides — let parallel sessions write to
+    # different CSVs without stomping on each other's results. When set,
+    # patch_trace_script() rewrites the matching OUTPUT_PATH constant in the
+    # trace script before injection.
+    co = ap.add_argument_group("per-session output paths (parallel-safe)")
+    co.add_argument("--csv-out", dest="csv_out", default=None,
+                    help="absolute path for the main race trace CSV "
+                         "(default: log/race_trace_original.csv)")
+    co.add_argument("--brake-csv-out", dest="brake_csv_out", default=None,
+                    help="absolute path for race_trace_brake_original.csv")
+    co.add_argument("--contacts-csv-out", dest="contacts_csv_out", default=None,
+                    help="absolute path for race_trace_contacts_original.csv")
+    co.add_argument("--calls-csv-out", dest="calls_csv_out", default=None,
+                    help="absolute path for calls_trace_original.csv")
+
     args = ap.parse_args()
 
-    cfg, ini_exe = load_ini(args.ini)
+    if args.no_ini:
+        # Built-in defaults only — same shape as load_ini's `out` dict.
+        cfg = {
+            "game_type": 0, "track": 0, "direction": 0, "laps": 3,
+            "car": 0, "paint": 0, "transmission": 0,
+            "start_span_offset": 0,
+            "opponent_car": 0,
+            "frontend_screen": -1,
+            "frontend_only": False,
+            "verbose": False,
+            "trace_track_load": False,
+            "player_is_ai": False,
+        }
+        ini_exe = "TD5_d3d.exe"
+        print("[launcher] --no-ini: skipping td5_quickrace.ini, using built-in defaults")
+    else:
+        cfg, ini_exe = load_ini(args.ini)
     apply_overrides(cfg, args.overrides)
+    # First-class scenario flags win over INI + --set; None = unset (fall through).
+    for k in ("track", "car", "game_type", "laps", "direction",
+              "start_span_offset", "paint", "transmission", "opponent_car",
+              "player_is_ai", "frontend_only", "frontend_screen",
+              "seed_crt", "crt_seed", "verbose", "trace_track_load"):
+        v = getattr(args, k, None)
+        if v is not None:
+            cfg[k] = v
     exe_name = args.exe or ini_exe
 
     exe_path = os.path.join(ORIGINAL_DIR, exe_name)
@@ -247,10 +400,59 @@ def main():
 
     print(f"[launcher] ini: {args.ini}")
     print(f"[launcher] cfg: {cfg}")
-    print(f"[launcher] spawning: {exe_path}")
 
-    pid = frida.spawn(exe_path, cwd=ORIGINAL_DIR)
-    print(f"[launcher] pid: {pid}")
+    # Default to attach-mode (auto-launch detached, then poll for the PID)
+    # because frida.spawn() is broken on Win11 — the spawned child's audio
+    # session inheritance trips M2DX.dll's DirectSound init at +0x144B.
+    # Pass --spawn to force the historical frida.spawn() path.
+    if not args.spawn and args.attach_pid is None and args.attach_name is None:
+        args.attach_name = exe_name
+    attach_mode = args.attach_pid is not None or args.attach_name is not None
+    if attach_mode:
+        if args.attach_pid is not None:
+            pid = args.attach_pid
+        else:
+            target_name = (args.attach_name or "TD5_d3d.exe").lower()
+            # frida 16+ removed the module-level enumerate_processes(); the
+            # local device is the right entry point on Windows.
+            device = frida.get_local_device()
+            def _find_pid():
+                return [p for p in device.enumerate_processes()
+                        if p.name.lower() == target_name]
+            matches = _find_pid()
+            if not matches:
+                # Auto-launch via Explorer-style detached spawn (avoids the
+                # Win11 M2DX init crash that kills frida.spawn()) and then
+                # poll for the new PID. Polling at ~10ms intervals lets us
+                # attach BEFORE RunMainGameLoop hits GAMESTATE_INTRO and
+                # invokes ShowLegalScreens / PlayIntroMovie — those hooks
+                # only fire if our Interceptor.replace() is installed first.
+                print(f"[launcher] no running {target_name!r}; "
+                      f"detached-launching {exe_name} from {ORIGINAL_DIR}")
+                subprocess.run(
+                    ["cmd", "/c", "start", "", exe_name],
+                    cwd=ORIGINAL_DIR, check=True,
+                )
+                deadline = time.monotonic() + 10.0
+                while time.monotonic() < deadline:
+                    matches = _find_pid()
+                    if matches:
+                        break
+                    time.sleep(0.01)
+                else:
+                    sys.exit(f"[launcher] {target_name!r} did not appear "
+                             f"within 10s of detached launch")
+                print(f"[launcher] caught new pid in "
+                      f"{(time.monotonic() - (deadline - 10.0)) * 1000:.0f} ms")
+            pid = matches[0].pid
+            if len(matches) > 1:
+                print(f"[launcher] warning: {len(matches)} processes match "
+                      f"{target_name!r}; attaching to first (pid={pid})")
+        print(f"[launcher] attaching to pid: {pid}")
+    else:
+        print(f"[launcher] spawning: {exe_path}")
+        pid = frida.spawn(exe_path, cwd=ORIGINAL_DIR)
+        print(f"[launcher] pid: {pid}")
 
     session = frida.attach(pid)
     script = session.create_script(js_source)
@@ -284,7 +486,11 @@ def main():
                   f"{args.hook_specs}")
         trace_source = patch_trace_script(
             trace_source, args.trace_max_frames, args.trace_max_sim_tick,
-            hook_specs=hook_specs)
+            hook_specs=hook_specs,
+            csv_out=args.csv_out,
+            brake_csv_out=args.brake_csv_out,
+            contacts_csv_out=args.contacts_csv_out,
+            calls_csv_out=args.calls_csv_out)
         print(f"[launcher] injecting trace script "
               f"(max_frames={args.trace_max_frames} "
               f"max_sim_tick={args.trace_max_sim_tick}"
@@ -305,7 +511,9 @@ def main():
         es.load()
         extra_scripts.append(es)
 
-    if args.no_resume:
+    if attach_mode:
+        print("[launcher] attached to running process; skipping resume")
+    elif args.no_resume:
         print("[launcher] --no-resume set, process still suspended")
     else:
         frida.resume(pid)
@@ -348,7 +556,10 @@ def main():
         while True:
             time.sleep(0.5)
             if args.trace_auto_exit and g_auto_close:
-                print("[launcher] trace auto-close; detaching and killing target")
+                if attach_mode:
+                    print("[launcher] trace auto-close; detaching (process kept alive)")
+                else:
+                    print("[launcher] trace auto-close; detaching and killing target")
                 break
     except KeyboardInterrupt:
         print("\n[launcher] detaching")
@@ -357,7 +568,9 @@ def main():
             session.detach()
         except Exception:
             pass
-        if args.trace_auto_exit:
+        # In attach mode the process belongs to the user (manually launched).
+        # Never kill it — the user closes it themselves.
+        if args.trace_auto_exit and not attach_mode:
             try:
                 frida.kill(pid)
             except Exception:
