@@ -3561,8 +3561,16 @@ static float frontend_get_title_render_y(float sy) {
     int mode = FE_BUTTON_ANIM_NONE;
     int tick = 0;
     int max_tick = 0;
-    float base_y = 12.0f;   /* resting Y (matches render code) */
-    float hidden_y = -80.0f; /* above screen — title slides down from top */
+    /* Phase 1 — title slide constants from Frida capture
+     * re/tools/frida_main_menu_capture.log (2026-05-01, 1164 frames).
+     * Original Queue*FrontendSpriteBlit logs show the 248×20 title strip
+     * starts at dy=-135 at slide-in tick 0 and advances +4 px/frame for
+     * 39 frames (max_tick=0x27), landing at dy=-135 + 39*4 = 21.
+     * Linear-interp in this function with these endpoints reduces to
+     * y = -135 + 4*tick, matching the original frame-for-frame.
+     * [CONFIRMED — dx=120, dy progression -135→21 in capture] */
+    float base_y   =   21.0f;  /* resting Y at end of slide-in */
+    float hidden_y = -135.0f;  /* off-screen start Y */
     float t;
 
     if (!frontend_get_button_anim_state(&mode, &tick, &max_tick)) {
