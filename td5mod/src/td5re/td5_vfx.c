@@ -1896,13 +1896,18 @@ void td5_vfx_render_tire_marks(void)
  * appropriate front/rear tire effect and sound functions.
  *
  * Gated by DAT_004aad60 == 0 (disabled during replays or pause).
- */
-void td5_vfx_update_tire_track_emitters(TD5_Actor *actor) {
+ *
+ * Called per-actor per-view from td5_render_actors_for_view (mirrors original
+ * RenderRaceActorForView @ 0x0040C120 LAB_0040c7ba). view_index drives the
+ * per-view smoke particle bank used by vfx_spawn_smoke_at_position. */
+void td5_vfx_update_tire_track_emitters(TD5_Actor *actor, int view_index) {
     if (!actor) return;
 
     /* Guard: disabled during replays/pause
      * Original: if (DAT_004aad60 != 0) return; */
     if (g_td5.paused) return;
+
+    s_current_view_index = view_index;
 
     uint8_t *ap = (uint8_t *)actor;
 
