@@ -224,6 +224,10 @@ typedef struct {
     /* Texture state */
     ID3D11ShaderResourceView    *current_srv;  /* Currently bound texture SRV */
 
+    /* 1x1 white texture used by the debug-line path (PS_MODULATE * white = vertex color) */
+    ID3D11Texture2D             *white_tex;
+    ID3D11ShaderResourceView    *white_srv;
+
     /* Shaders */
     ID3D11VertexShader      *vs_pretransformed;
     ID3D11VertexShader      *vs_fullscreen;

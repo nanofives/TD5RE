@@ -588,6 +588,35 @@ static int Backend_CreateDynamicBuffers(void)
 
     WRAPPER_LOG("CreateDynamicBuffers: VB=%uKB IB=%uKB, CBs created",
         DYNAMIC_VB_SIZE/1024, DYNAMIC_IB_SIZE/1024);
+
+    /* 1x1 white texture for the debug-line path. PS_MODULATE multiplies the
+     * sampled texel by the diffuse vertex color, so a white texel yields the
+     * raw vertex color — exactly what we want for solid-color line overlays. */
+    {
+        D3D11_TEXTURE2D_DESC td;
+        D3D11_SUBRESOURCE_DATA srd;
+        UINT pixel = 0xFFFFFFFFu;
+        ZeroMemory(&td, sizeof(td));
+        td.Width = 1; td.Height = 1; td.MipLevels = 1; td.ArraySize = 1;
+        td.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+        td.SampleDesc.Count = 1;
+        td.Usage = D3D11_USAGE_IMMUTABLE;
+        td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        srd.pSysMem = &pixel;
+        srd.SysMemPitch = 4;
+        srd.SysMemSlicePitch = 0;
+        hr = ID3D11Device_CreateTexture2D(g_backend.device, &td, &srd, &g_backend.white_tex);
+        if (FAILED(hr)) {
+            WRAPPER_LOG("CreateDynamicBuffers: white_tex FAILED hr=0x%08lX", hr);
+            return 0;
+        }
+        hr = ID3D11Device_CreateShaderResourceView(g_backend.device,
+            (ID3D11Resource*)g_backend.white_tex, NULL, &g_backend.white_srv);
+        if (FAILED(hr)) {
+            WRAPPER_LOG("CreateDynamicBuffers: white_srv FAILED hr=0x%08lX", hr);
+            return 0;
+        }
+    }
     return 1;
 }
 

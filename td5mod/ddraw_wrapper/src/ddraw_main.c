@@ -237,6 +237,16 @@ void Backend_Shutdown(void)
         g_backend.dynamic_ib = NULL;
     }
 
+    /* Debug-line 1x1 white */
+    if (g_backend.white_srv) {
+        ID3D11ShaderResourceView_Release(g_backend.white_srv);
+        g_backend.white_srv = NULL;
+    }
+    if (g_backend.white_tex) {
+        ID3D11Texture2D_Release(g_backend.white_tex);
+        g_backend.white_tex = NULL;
+    }
+
     /* Release constant buffers */
     if (g_backend.cb_viewport) {
         ID3D11Buffer_Release(g_backend.cb_viewport);
