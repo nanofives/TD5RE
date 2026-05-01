@@ -140,6 +140,21 @@ static int32_t s_prev_wheel_ty[12][4];  /* [slot][wheel] Y transform result */
 static int32_t s_prev_wheel_tz[12][4];  /* [slot][wheel] Z transform result */
 static uint8_t s_prev_wheel_valid[12];  /* per-slot: 1 if previous transform is valid */
 
+/* Per-slot rotated wheel-Y world offset, captured INSIDE
+ * td5_physics_refresh_wheel_contacts at the same moment wheel_contact_pos[i].y
+ * is computed (pre-snap). Consumed by the chassis ground-snap tail in
+ * update_vehicle_pose_from_physics to mirror the original's
+ *   local_10 = sum(wheel_probe_y - rotated_wheel_y_offset) / count
+ * form @ 0x004063A0 — replacing a port-invented re-probe loop that called
+ * td5_track_probe_height(x, z, actor->track_span_raw, ...) for every
+ * grounded wheel. The re-probe used the chassis span for all wheels and
+ * a heuristic lane picker; with the per-wheel walker fixed (single-step,
+ * 2026-05-01) the wheel_contact_pos values are already correct, so the
+ * faithful sum form gives a stable chassis Y on slope onsets. Replacing
+ * the re-probe alone (without the walker fix) made the launch worse
+ * because the walker was over-advancing wheels and feeding bad ground_y. */
+static int32_t s_wheel_offset_y_world[16][4];
+
 /* V2V inertia constant = 500,000 (DAT_00463204) */
 #define V2V_INERTIA_K       500000
 /* V2W inertia constant = 1,500,000 (DAT_00463200) */
@@ -4897,36 +4912,44 @@ static void update_vehicle_pose_from_physics(TD5_Actor *actor)
     /* Refresh wheel contacts */
     td5_physics_refresh_wheel_contacts(actor);
 
-    /* Ground-snap: same suspension height reference compensation as IntegratePose */
+    /* Chassis ground snap — faithful port of the tail of
+     *   UpdateVehiclePoseFromPhysicsState @ 0x004063A0
+     *
+     *     local_10 = sum_over_grounded(wheel_probe_y - rotated_wheel_y_offset)
+     *              / count;
+     *     world_pos.y = local_10;          // absolute assignment, NOT delta
+     *
+     * Inputs (post-refresh):
+     *   wheel_contact_pos[i].y == ground_y           (refresh snapped it for
+     *                                                 grounded wheels @ td5_physics.c:5210)
+     *   s_wheel_offset_y_world[slot][i]               (rotated body→world Y offset,
+     *                                                 pre-snap, captured in refresh)
+     *
+     * Replaces a port-invented `td5_track_probe_height(x, z, chassis_span)`
+     * re-probe that used the chassis span for every wheel and a heuristic
+     * lane picker disjoint from the per-wheel walker. With the per-wheel
+     * walker fixed to single-step (2026-05-01), the wheel_contact_pos
+     * values are themselves the correct ground heights at each wheel's own
+     * span/lane, and the original's straight `sum/count` form lands a
+     * stable chassis on slope onsets without the spurious +896 FP per-tick
+     * launch the re-probe produced at Moscow span 196 (Frida-localized).
+     *
+     * "Grounded" = wheel_contact_bitmask bit clear (1=airborne). On total
+     * airborne (count==0) world_pos.y is left alone. */
     {
-        int64_t corr_sum = 0;
-        int corr_count = 0;
-        uint8_t gnd_mask = actor->wheel_contact_bitmask;
-
-        /* NOTE: no susp_href correction here. The original's ground-snap
-         * (IntegrateVehiclePoseAndContacts @ 0x00405E80, secondary snap at
-         * UpdateVehiclePoseFromPhysicsState @ 0x004063A0) does NOT add a
-         * scalar susp_href term to corr_sum. It folds the susp_href offset
-         * into the per-wheel rotated Y via the pre-subtract / post-add
-         * pattern in refresh_wheel_contacts (td5_physics.c:3930-3970). A
-         * port-invented `susp_href_world = href_local * m[4] * 256.0f`
-         * was previously computed here but never used (dead code) — now
-         * deleted to keep intent clear. */
+        int slot = actor->slot_index;
+        if (slot < 0 || slot >= 16) slot = 0;
+        uint8_t lock = actor->wheel_contact_bitmask;
+        int64_t target_sum = 0;
+        int target_count = 0;
         for (int i = 0; i < 4; i++) {
-            if (!(gnd_mask & (1 << i))) {
-                int32_t g_y = 0;
-                int g_surf = 0;
-                int g_span = actor->track_span_raw;
-                if (td5_track_probe_height(actor->wheel_contact_pos[i].x,
-                                           actor->wheel_contact_pos[i].z,
-                                           g_span, &g_y, &g_surf)) {
-                    corr_sum += (int64_t)g_y - (int64_t)actor->wheel_contact_pos[i].y;
-                    corr_count++;
-                }
-            }
+            if (lock & (1 << i)) continue;        /* airborne — skip */
+            target_sum += (int64_t)actor->wheel_contact_pos[i].y
+                        - (int64_t)s_wheel_offset_y_world[slot][i];
+            target_count++;
         }
-        if (corr_count > 0) {
-            actor->world_pos.y += (int32_t)(corr_sum / corr_count);
+        if (target_count > 0) {
+            actor->world_pos.y = (int32_t)(target_sum / target_count);
             actor->render_pos.y = (float)actor->world_pos.y * (1.0f / 256.0f);
         }
     }
@@ -5009,6 +5032,10 @@ void td5_physics_refresh_wheel_contacts(TD5_Actor *actor)
         actor->wheel_contact_pos[i].x = actor->world_pos.x + (int32_t)(world_x * 256.0f);
         actor->wheel_contact_pos[i].y = actor->world_pos.y + (int32_t)(world_y * 256.0f);
         actor->wheel_contact_pos[i].z = actor->world_pos.z + (int32_t)(world_z * 256.0f);
+
+        /* Stash the rotated wheel-Y offset (pre-snap, world FP scale) for
+         * use by update_vehicle_pose_from_physics's chassis ground snap. */
+        s_wheel_offset_y_world[slot & 0x0F][i] = (int32_t)(world_y * 256.0f);
 
         /* Per-probe track position update [CONFIRMED @ 0x403720].
          * Original calls FUN_004440F0 per probe with probe's own world pos.
