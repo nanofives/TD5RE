@@ -45,6 +45,32 @@ int  td5_physics_init(void);
 void td5_physics_shutdown(void);
 void td5_physics_tick(void);
 
+/* --- Sub-tick render interpolation ---
+ * The 30 Hz sim tick is decoupled from the render loop (typically 60+ Hz under
+ * VSync), so between two ticks the renderer needs a smooth pose for everything
+ * anchored to an actor (camera target, HUD speedometer, shadow blob, exhaust /
+ * tire smoke, audio panning). The body-mesh draw at td5_render.c:1786 uses
+ * world_pos + linear_velocity * g_subTickFraction (faithful to the original
+ * @ 0x40C164-0x40C1D4), but actor->render_pos itself was snap-set to
+ * world_pos / 256 each tick, leaving every other consumer reading a stale
+ * snapped value. That mismatch produces visible rubber-band between the car
+ * body and its attached effects.
+ *
+ * The pattern below is the standard fixed-timestep with interpolation:
+ *   1. snapshot world_pos -> prev_world_pos at the top of every sim tick
+ *      (BEFORE physics integration moves world_pos)
+ *   2. after the sim loop drains and g_subTickFraction is computed, lerp
+ *      actor->render_pos = prev + (cur - prev) * frac, then convert /256 to
+ *      float. The result is "the position 1 tick ago, advanced forward by
+ *      g_subTickFraction of a tick" -- accurate during acceleration and
+ *      contact response in a way velocity-extrapolation cannot be.
+ *   3. seed prev_world_pos = world_pos at race init so the first interpolated
+ *      frame doesn't lerp from a zeroed prev.
+ */
+void td5_physics_snapshot_prev_world_pos(void);
+void td5_physics_seed_prev_world_pos(void);
+void td5_physics_apply_render_interpolation(float subtick_fraction);
+
 /* --- Per-actor update (master dispatcher) --- */
 void td5_physics_update_vehicle_actor(TD5_Actor *actor);
 

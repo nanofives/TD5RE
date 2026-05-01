@@ -467,6 +467,53 @@ void td5_physics_shutdown(void)
     /* No dynamic resources to free */
 }
 
+/* Per-actor previous-tick world position. Captured at the top of each
+ * td5_physics_tick (BEFORE world_pos changes), consumed by
+ * td5_physics_apply_render_interpolation after the sim loop drains. */
+static TD5_Vec3_Fixed s_prev_world_pos[TD5_MAX_TOTAL_ACTORS];
+
+void td5_physics_snapshot_prev_world_pos(void)
+{
+    if (!g_actor_table_base) return;
+    int total = td5_game_get_total_actor_count();
+    if (total > TD5_MAX_TOTAL_ACTORS) total = TD5_MAX_TOTAL_ACTORS;
+    for (int slot = 0; slot < total; ++slot) {
+        TD5_Actor *actor = (TD5_Actor *)(g_actor_table_base + (size_t)slot * TD5_ACTOR_STRIDE);
+        s_prev_world_pos[slot] = actor->world_pos;
+    }
+}
+
+void td5_physics_seed_prev_world_pos(void)
+{
+    /* Race-init seed: zero the table, then snapshot current world_pos so the
+     * first interpolation pass before any tick fires lerps current->current. */
+    memset(s_prev_world_pos, 0, sizeof(s_prev_world_pos));
+    td5_physics_snapshot_prev_world_pos();
+}
+
+void td5_physics_apply_render_interpolation(float subtick_fraction)
+{
+    if (!g_actor_table_base) return;
+    if (subtick_fraction < 0.0f) subtick_fraction = 0.0f;
+    if (subtick_fraction > 1.0f) subtick_fraction = 1.0f;
+
+    int total = td5_game_get_total_actor_count();
+    if (total > TD5_MAX_TOTAL_ACTORS) total = TD5_MAX_TOTAL_ACTORS;
+
+    const float kInv256 = 1.0f / 256.0f;
+    for (int slot = 0; slot < total; ++slot) {
+        TD5_Actor *actor = (TD5_Actor *)(g_actor_table_base + (size_t)slot * TD5_ACTOR_STRIDE);
+        const TD5_Vec3_Fixed *prev = &s_prev_world_pos[slot];
+        const TD5_Vec3_Fixed *cur  = &actor->world_pos;
+        float dx = (float)(cur->x - prev->x);
+        float dy = (float)(cur->y - prev->y);
+        float dz = (float)(cur->z - prev->z);
+        actor->render_pos.x = ((float)prev->x + dx * subtick_fraction) * kInv256;
+        actor->render_pos.y = ((float)prev->y + dy * subtick_fraction) * kInv256;
+        actor->render_pos.z = ((float)prev->z + dz * subtick_fraction) * kInv256;
+    }
+}
+
 void td5_physics_tick(void)
 {
     int total;
@@ -483,6 +530,11 @@ void td5_physics_tick(void)
     if (total > TD5_MAX_TOTAL_ACTORS) {
         total = TD5_MAX_TOTAL_ACTORS;
     }
+
+    /* Snapshot world_pos -> prev_world_pos BEFORE any per-actor integration.
+     * Sub-tick render interpolation lerps prev -> cur using g_subTickFraction
+     * once the sim loop drains for this render frame. */
+    td5_physics_snapshot_prev_world_pos();
 
     s_physics_tick_counter++;
     if ((s_physics_tick_counter % 60u) == 0u) {
