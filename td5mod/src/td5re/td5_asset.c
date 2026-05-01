@@ -65,6 +65,23 @@ uint8_t            *g_track_environment_config = NULL;
 static uint8_t      s_checkpoint_data[96];
 static int          s_checkpoint_data_size = 0;
 
+/* Per-page texture-source remap. Default identity; permuted in
+ * reverse-direction mode using CHECKPT.NUM page-id pairs.
+ *
+ * Mirrors the runtime swap performed by the original at
+ *   RemapCheckpointOrderForTrackDirection @ 0x0042FD70
+ *   SwapIndexedRuntimeEntries             @ 0x0040B530
+ * which exchanges entries in the texture-cache header arrays
+ * (DAT_0048dc40+4 page-pointer table and +0xc per-page descriptor
+ * table). The port has no separate cache header — pages upload
+ * straight to GPU slots keyed by raw page index. Equivalent effect:
+ * when the upload loop emits slot S, source the bytes from page
+ * s_page_remap[S]. Identity in forward mode; permuted in reverse so
+ * the gantry mesh's baked page-id dereferences the swapped (start
+ * ↔ finish) banner texture data. */
+static int s_page_remap[1024];
+static int s_page_remap_active = 0;
+
 /* Holds the TRAFFIC.BUS payload for the active level. Owned by this TU;
  * freed on the next td5_asset_load_level call. td5_ai keeps a read-only
  * pointer into this buffer — do not free until a new level loads. */
@@ -2001,6 +2018,86 @@ const void *td5_asset_get_checkpoint_data(int *out_size)
 }
 
 /* ========================================================================
+ * Reverse-Direction Texture Page Swap (0x0042FD70 + 0x0040B530)
+ *
+ * Builds s_page_remap[] from CHECKPT.NUM. Identity in forward mode.
+ * In reverse mode, walks the 24-int CHECKPT.NUM image as 6 columns of
+ * 4 entries (column-major access: ints[col*4 + row]). Discriminator at
+ * int[20] selects:
+ *   == -1  →  4-col variant: swap (col0[i], col4[i]) and (col1[i], col3[i])
+ *   != -1  →  5-col variant: swap (col0[i], col5[i]),
+ *                                 (col1[i], col4[i]),
+ *                                 (col2[i], col3[i])
+ * Each entry is a TEXTURES.DAT page index; -1 entries are skipped.
+ * ======================================================================== */
+
+static void td5_asset_reset_texture_page_remap(void)
+{
+    int n = (int)(sizeof(s_page_remap) / sizeof(s_page_remap[0]));
+    for (int i = 0; i < n; i++) s_page_remap[i] = i;
+    s_page_remap_active = 0;
+}
+
+int td5_asset_texture_page_remap_source(int slot)
+{
+    int n = (int)(sizeof(s_page_remap) / sizeof(s_page_remap[0]));
+    if (slot < 0 || slot >= n) return slot;
+    return s_page_remap[slot];
+}
+
+static void td5_asset_swap_remap_pair(int a, int b)
+{
+    int n = (int)(sizeof(s_page_remap) / sizeof(s_page_remap[0]));
+    if (a < 0 || b < 0 || a >= n || b >= n) return;
+    int t = s_page_remap[a];
+    s_page_remap[a] = s_page_remap[b];
+    s_page_remap[b] = t;
+}
+
+void td5_asset_apply_reverse_texture_swap(void)
+{
+    td5_asset_reset_texture_page_remap();
+
+    if (!g_td5.reverse_direction) return;
+    if (s_checkpoint_data_size < 96) {
+        TD5_LOG_W(LOG_TAG,
+                  "reverse texture swap skipped: CHECKPT.NUM too short (%d bytes)",
+                  s_checkpoint_data_size);
+        return;
+    }
+
+    const int32_t *cols = (const int32_t *)s_checkpoint_data;  /* 24 ints */
+    int discriminator = cols[20];
+    int swap_count = 0;
+
+    for (int row = 0; row < 4; row++) {
+        int c0 = cols[0 * 4 + row];
+        int c1 = cols[1 * 4 + row];
+        int c2 = cols[2 * 4 + row];
+        int c3 = cols[3 * 4 + row];
+        int c4 = cols[4 * 4 + row];
+        int c5 = cols[5 * 4 + row];
+
+        if (discriminator == -1) {
+            /* 4-col variant */
+            if (c0 != -1 && c4 != -1) { td5_asset_swap_remap_pair(c0, c4); swap_count++; }
+            if (c1 != -1 && c3 != -1) { td5_asset_swap_remap_pair(c1, c3); swap_count++; }
+        } else {
+            /* 5-col variant */
+            if (c0 != -1 && c5 != -1) { td5_asset_swap_remap_pair(c0, c5); swap_count++; }
+            if (c1 != -1 && c4 != -1) { td5_asset_swap_remap_pair(c1, c4); swap_count++; }
+            if (c2 != -1 && c3 != -1) { td5_asset_swap_remap_pair(c2, c3); swap_count++; }
+        }
+    }
+
+    s_page_remap_active = (swap_count > 0);
+    TD5_LOG_I(LOG_TAG,
+              "reverse texture swap: variant=%s pairs=%d (reverse_direction=%d, discriminator=%d)",
+              discriminator == -1 ? "4col" : "5col",
+              swap_count, g_td5.reverse_direction, discriminator);
+}
+
+/* ========================================================================
  * Track Texture Loading
  * ======================================================================== */
 
@@ -2027,6 +2124,11 @@ int td5_asset_load_track_textures(int track_index)
     if (page_count <= 0)
         page_count = TD5_TRACK_TEXTURE_PAGE_LIMIT;
 
+    /* Build the reverse-direction page-remap table from CHECKPT.NUM.
+     * Identity when reverse_direction == 0. Must run before any code
+     * uses td5_asset_texture_page_remap_source() below. */
+    td5_asset_apply_reverse_texture_swap();
+
     /* Even though pixel data comes from PNGs, the per-page transparency
      * type byte (raw TEXTURES.DAT byte +3 of each page descriptor) is
      * still needed by the renderer to pick the right blend preset.
@@ -2039,7 +2141,9 @@ int td5_asset_load_track_textures(int track_index)
         const uint32_t *offsets = (const uint32_t *)((const uint8_t *)tex_data + 4);
         int additive_count = 0;
         for (int p = 0; p < page_count; p++) {
-            uint32_t off = offsets[p];
+            int src = td5_asset_texture_page_remap_source(p);
+            if (src < 0 || src >= page_count) src = p;
+            uint32_t off = offsets[src];
             if (off + 4 > (uint32_t)tex_sz) continue;
             uint8_t page_type = ((const uint8_t *)tex_data)[off + 3];
             td5_asset_set_page_transparency(p, (int)page_type);
@@ -2053,8 +2157,10 @@ int td5_asset_load_track_textures(int track_index)
     }
 
     for (int page = 0; page < page_count && page < TD5_TRACK_TEXTURE_PAGE_LIMIT; page++) {
+        int src = td5_asset_texture_page_remap_source(page);
+        if (src < 0 || src >= TD5_TRACK_TEXTURE_PAGE_LIMIT) src = page;
         char png_path[512];
-        if (td5_asset_build_track_texture_png_path(track_index, page,
+        if (td5_asset_build_track_texture_png_path(track_index, src,
                                                    png_path, sizeof(png_path))) {
             if (td5_asset_upload_png_texture_page(page, png_path, NULL)) {
                 loaded_count++;
@@ -2132,12 +2238,20 @@ int td5_asset_load_race_texture_pages(void)
     uint32_t *offsets = (uint32_t *)(tex_data + 4);
     int loaded_count = 0;
 
+    /* Apply CHECKPT.NUM-driven page swap when racing in reverse direction.
+     * Mirrors RemapCheckpointOrderForTrackDirection @ 0x0042FD70 — see
+     * td5_asset_apply_reverse_texture_swap. Identity when forward. */
+    td5_asset_apply_reverse_texture_swap();
+
     /* Temp BGRA buffer for one 64x64 page */
     uint8_t *rgba = (uint8_t *)malloc(64 * 64 * 4);
     if (!rgba) { free(tex_data); return 0; }
 
     for (uint32_t pg = 0; pg < page_count; pg++) {
-        uint32_t off = offsets[pg];
+        int src_i = td5_asset_texture_page_remap_source((int)pg);
+        if (src_i < 0 || (uint32_t)src_i >= page_count) src_i = (int)pg;
+        uint32_t src = (uint32_t)src_i;
+        uint32_t off = offsets[src];
         if (off + 8 > (uint32_t)tex_size) continue;
 
         uint8_t *page_ptr = tex_data + off;

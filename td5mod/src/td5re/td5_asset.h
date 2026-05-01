@@ -201,6 +201,22 @@ int td5_asset_load_track_textures(int track_index);
 int td5_asset_load_race_texture_pages(void);
 
 /**
+ * Build the reverse-direction texture-page remap from CHECKPT.NUM.
+ * Mirrors RemapCheckpointOrderForTrackDirection @ 0x0042FD70 +
+ * SwapIndexedRuntimeEntries @ 0x0040B530. Identity in forward mode.
+ * Called automatically by td5_asset_load_track_textures and
+ * td5_asset_load_race_texture_pages.
+ */
+void td5_asset_apply_reverse_texture_swap(void);
+
+/**
+ * Returns the source TEXTURES.DAT page that should fill destination
+ * GPU slot `slot` (after the reverse-direction swap is applied).
+ * Identity if no swap is active or `slot` is out of range.
+ */
+int td5_asset_texture_page_remap_source(int slot);
+
+/**
  * Load per-track environment/reflection texture PNGs from re/assets/environs/.
  * The name list + count for each level come from the exe's per-track table at
  * 0x0046bb1c (mirrored in td5_environs_table.inc). level_number is the level
