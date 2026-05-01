@@ -69,6 +69,7 @@ ZLIB_LIB="../../deps/mingw/mingw32/i686-w64-mingw32/lib"
 | `td5_render.c` | Software transform, frustum cull, mesh dispatch |
 | `td5_vfx.c` | Particles, tire tracks, smoke, weather, billboards |
 | `td5_frontend.c` | 30-entry screen table, navigation FSM |
+| `td5_frontend_button_cache.c` | CPU-baked 224×64 main-menu button surfaces (Phase 6 parity) |
 | `td5_hud.c` | Speedometer, minimap, timers, text overlay |
 | `td5_asset.c` | ZIP archive, TGA decode, mesh prepare |
 | `td5_save.c` | Config.td5, CupData.td5, XOR encryption |
