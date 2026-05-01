@@ -1254,6 +1254,30 @@ void td5_render_compute_vertex_lighting(TD5_MeshHeader *mesh)
 
 /* --- Frustum Culling --- */
 
+/* Diagnostic counters for view-distance investigation. */
+static int   s_dbg_sphere_tested = 0;
+static int   s_dbg_sphere_passed = 0;
+static int   s_dbg_rej_near      = 0;
+static int   s_dbg_rej_far       = 0;
+static int   s_dbg_rej_horiz     = 0;
+static int   s_dbg_rej_vert      = 0;
+static float s_dbg_max_pass_vz   = 0.0f;
+static float s_dbg_max_test_vz   = 0.0f;
+
+void td5_render_dump_view_dist_stats(void)
+{
+    TD5_LOG_I(LOG_TAG,
+        "VIEWDIST stats: tested=%d passed=%d max_pass_vz=%.0f max_test_vz=%.0f "
+        "rej_near=%d rej_far=%d rej_h=%d rej_v=%d (s_far_cull=%.0f)",
+        s_dbg_sphere_tested, s_dbg_sphere_passed,
+        s_dbg_max_pass_vz, s_dbg_max_test_vz,
+        s_dbg_rej_near, s_dbg_rej_far, s_dbg_rej_horiz, s_dbg_rej_vert,
+        s_far_cull);
+    s_dbg_sphere_tested = s_dbg_sphere_passed = 0;
+    s_dbg_rej_near = s_dbg_rej_far = s_dbg_rej_horiz = s_dbg_rej_vert = 0;
+    s_dbg_max_pass_vz = s_dbg_max_test_vz = 0.0f;
+}
+
 int td5_render_is_sphere_visible(float cx, float cy, float cz, float radius)
 {
     /*
@@ -1279,34 +1303,33 @@ int td5_render_is_sphere_visible(float cx, float cy, float cz, float radius)
     float vy = dx * s_camera_basis[3] + dy * s_camera_basis[4] + dz * s_camera_basis[5];
     float vz = dx * s_camera_basis[6] + dy * s_camera_basis[7] + dz * s_camera_basis[8];
 
-    /* Near plane test: sphere must extend past near clip */
-    if (vz + radius <= s_near_clip)
-        return 0;
+    s_dbg_sphere_tested++;
+    if (vz > s_dbg_max_test_vz) s_dbg_max_test_vz = vz;
 
-    /* Far plane test: sphere must not be entirely beyond far cull (195000, 0x0042D48E) */
-    if (vz - radius >= s_far_cull)
-        return 0;
+    /* Near plane test: sphere must extend past near clip */
+    if (vz + radius <= s_near_clip) { s_dbg_rej_near++; return 0; }
+
+    /* Far plane test: sphere must not be entirely beyond far cull */
+    if (vz - radius >= s_far_cull) { s_dbg_rej_far++; return 0; }
 
     /* Left/right frustum planes (horizontal) */
     /* Plane normal = (h_cos, 0, h_sin), distance from origin = 0 */
     float h_dist = s_frustum_h_cos * vx + s_frustum_h_sin * vz;
-    if (h_dist > radius)
-        return 0;
+    if (h_dist > radius) { s_dbg_rej_horiz++; return 0; }
 
     /* Check negative side (right plane is mirrored) */
     float h_dist_neg = -s_frustum_h_cos * vx + s_frustum_h_sin * vz;
-    if (h_dist_neg > radius)
-        return 0;
+    if (h_dist_neg > radius) { s_dbg_rej_horiz++; return 0; }
 
     /* Top/bottom frustum planes (vertical) */
     float v_dist = s_frustum_v_cos * vy + s_frustum_v_sin * vz;
-    if (v_dist > radius)
-        return 0;
+    if (v_dist > radius) { s_dbg_rej_vert++; return 0; }
 
     float v_dist_neg = -s_frustum_v_cos * vy + s_frustum_v_sin * vz;
-    if (v_dist_neg > radius)
-        return 0;
+    if (v_dist_neg > radius) { s_dbg_rej_vert++; return 0; }
 
+    s_dbg_sphere_passed++;
+    if (vz > s_dbg_max_pass_vz) s_dbg_max_pass_vz = vz;
     return 1; /* visible */
 }
 
@@ -1640,7 +1663,21 @@ void td5_render_actors_for_view(int view_index)
      * exceeds the original's (64 + 25 quarter-span = ~89 effective) trailing reach,
      * so no explicit offset is needed. [RE basis: research agent confirmed the
      * architectural coverage — task #9 resolved by doubled window.] */
-#define VIEW_DIST_MAX_SPANS 256
+/* Asymmetric span window. The original used a symmetric ±MaxSpans window
+ * (max 64 each side, single-screen), but on long Moscow-style point-to-point
+ * tracks the player's perception of "view distance" is dominated by FORWARD
+ * reach. Backward visibility is mostly frustum-culled anyway.
+ *
+ * Empirical measurement (VIEWDIST stats, 2026-05-01): Moscow spans are
+ * ~320 world-units long on average. With FWD_SPANS=1024 the maximum
+ * mesh vz observed across an entire frame was 328,485 — i.e. the forward
+ * span window IS the actual horizon gate, NOT s_far_cull (which never
+ * rejected a single mesh at 1M). Bumping FWD_SPANS proportionally
+ * extends the visible horizon up to span_count (3500 on Moscow). At
+ * 4096 fwd we feed all spans of a typical level; spans past span_count
+ * are silently no-op'd by the index-window check. */
+#define VIEW_DIST_FWD_SPANS  1024
+#define VIEW_DIST_BACK_SPANS 256
     int player_span = 0;
     int player_branch_span = -1;
     {
@@ -1663,16 +1700,21 @@ void td5_render_actors_for_view(int view_index)
         }
     }
     float view_dist_frac = td5_save_get_view_distance();
-    int half_window = (int)((view_dist_frac * 0.85f + 0.15f) * (float)VIEW_DIST_MAX_SPANS);
-    if (half_window < 1) half_window = 1;
+    float frac_scaled = view_dist_frac * 0.85f + 0.15f;
+    int fwd_window  = (int)(frac_scaled * (float)VIEW_DIST_FWD_SPANS);
+    int back_window = (int)(frac_scaled * (float)VIEW_DIST_BACK_SPANS);
+    if (fwd_window  < 1) fwd_window  = 1;
+    if (back_window < 1) back_window = 1;
 
+    /* far_cull is now slider-driven inside td5_render_configure_projection
+     * so it applies to track render too, not just actor cull. */
     {
-        static int s_view_dist_logged = 0;
-        if (!s_view_dist_logged) {
+        static float s_view_dist_last = -1.0f;
+        if (view_dist_frac != s_view_dist_last) {
             TD5_LOG_I(LOG_TAG,
-                      "view distance: frac=%.2f max_spans=%d half_window=%d (visible window=%d spans) far_cull=%.0f",
-                      view_dist_frac, VIEW_DIST_MAX_SPANS, half_window, half_window * 2, s_far_cull);
-            s_view_dist_logged = 1;
+                      "view distance: frac=%.2f fwd=%d back=%d far_cull=%.0f",
+                      view_dist_frac, fwd_window, back_window, s_far_cull);
+            s_view_dist_last = view_dist_frac;
         }
     }
 
@@ -1729,12 +1771,18 @@ void td5_render_actors_for_view(int view_index)
                 if (delta >  half_ring) delta -= ring;
                 if (delta < -half_ring) delta += ring;
             }
-            int visible = (delta <= half_window && delta >= -half_window);
-            /* If on a branch, also render spans near the branch index */
+            /* delta>0 = ahead in track direction (use fwd_window),
+             * delta<0 = behind (use back_window). */
+            int visible = (delta <= fwd_window && delta >= -back_window);
+            /* If on a branch, also render spans near the branch index. Use the
+             * smaller back_window radius for the trailing direction so branch
+             * trails behind don't extend beyond what the main player path
+             * would show. */
             if (!visible && player_branch_span >= 0) {
                 int bdelta = span_index - player_branch_span;
-                if (bdelta < 0) bdelta = -bdelta;
-                visible = (bdelta <= half_window);
+                int bdelta_abs = bdelta < 0 ? -bdelta : bdelta;
+                int branch_radius = (bdelta >= 0) ? fwd_window : back_window;
+                visible = (bdelta_abs <= branch_radius);
             }
             if (!visible) continue;
         }
@@ -1958,10 +2006,23 @@ void td5_render_configure_projection(int width, int height)
     s_focal_length = (float)width * 0.5625f;
     s_inv_focal    = 1.0f / s_focal_length;
 
-    /* Near/far clip */
+    /* Near/far clip. far_cull is driven by the pause-menu VIEW slider so
+     * the player can dial back render distance for performance. The slider
+     * MUST be applied here (inside configure_projection) — track + scenery
+     * render before td5_render_actors_for_view in the per-viewport flow,
+     * so applying the slider only inside actors_for_view (as an earlier
+     * iteration did) leaves the track horizon stuck at DEFAULT_FAR_CULL
+     * regardless of slider position. far_clip stays at the constant max
+     * to keep z-buffer depth distribution stable across slider moves. */
     s_near_clip = DEFAULT_NEAR_CLIP;
     s_far_clip  = DEFAULT_FAR_CLIP;
-    s_far_cull  = DEFAULT_FAR_CULL;
+    {
+        const float MIN_FAR_CULL = 5000.0f;
+        const float MAX_FAR_CULL = (float)DEFAULT_FAR_CULL;
+        float frac = td5_save_get_view_distance();
+        if (frac < 0.0f) frac = 0.0f; else if (frac > 1.0f) frac = 1.0f;
+        s_far_cull = MIN_FAR_CULL + (MAX_FAR_CULL - MIN_FAR_CULL) * frac;
+    }
 
     /* Horizontal frustum half-plane normals */
     float half_w = (float)width * 0.5f;
@@ -1987,6 +2048,18 @@ void td5_render_configure_projection(int width, int height)
         TD5_LOG_I(LOG_TAG,
                   "projection configured: %dx%d focal=%.1f near=%.1f far=%.1f far_cull=%.1f fov=%.2f",
                   width, height, s_focal_length, s_near_clip, s_far_clip, s_far_cull, fov_deg);
+    }
+
+    /* Dump accumulated cull stats every 5 frames. Stats reflect the
+     * PREVIOUS frame(s)' mesh-visibility tests; dump first, then reset
+     * happens inside the dump fn. */
+    {
+        static int s_dump_counter = 0;
+        s_dump_counter++;
+        if (s_dump_counter >= 5) {
+            s_dump_counter = 0;
+            td5_render_dump_view_dist_stats();
+        }
     }
 }
 

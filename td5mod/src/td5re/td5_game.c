@@ -1940,7 +1940,15 @@ int td5_game_run_race_frame(void) {
         s_prev_esc_state = esc_now;
         if (esc_edge && !s_pause_menu_active) {
             s_pause_menu_active = 1;
-            s_pause_menu_cursor = 3;  /* default to CONTINUE */
+            s_pause_menu_cursor = 0;  /* default to VIEW so LEFT/RIGHT
+                                       * immediately moves the view-distance
+                                       * slider without forcing the user to
+                                       * UP-arrow first. The original defaulted
+                                       * to CONTINUE (row 3); that made
+                                       * dismiss-with-ENTER one keypress, but
+                                       * hid the slider behind 3 UP presses.
+                                       * Slider responsiveness wins. */
+            TD5_LOG_I(LOG_TAG, "Pause menu opened (cursor=VIEW row 0)");
         }
         if (s_pause_menu_active) {
             /* Process pause menu input ONCE per frame (not per tick) to avoid
@@ -1967,6 +1975,17 @@ int td5_game_run_race_frame(void) {
                  * Row 0 "VIEW"  (DAT_004B135C) → [0x00466EA8] view distance, no audio call [0x0043C379]
                  * Row 1 "MUSIC" (DAT_004B1360) → DXSound::CDSetVolume(frac*0xFFFF)        [0x0043C390]
                  * Row 2 "SOUND" (DAT_004B1364) → DXSound::SetVolume  (frac*0xFFFF) master [0x0043C3A8] */
+                /* Diagnostic: log every frame when L/R is held during pause,
+                 * so we can confirm input reaches this code path. */
+                if (key_left || key_right) {
+                    static int s_pause_input_seq = 0;
+                    if ((s_pause_input_seq++ & 0x07) == 0) {  /* throttle 1-in-8 */
+                        TD5_LOG_I(LOG_TAG,
+                                  "PAUSE input: cursor=%d L=%d R=%d (slider gate cursor<3: %s)",
+                                  s_pause_menu_cursor, key_left, key_right,
+                                  s_pause_menu_cursor < 3 ? "PASS" : "BLOCKED");
+                    }
+                }
                 if (s_pause_menu_cursor < 3) {
                     int delta = key_right ? +1 : (key_left ? -1 : 0);
                     if (delta) {

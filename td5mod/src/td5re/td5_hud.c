@@ -970,6 +970,17 @@ void td5_hud_update_pause_overlay(int cursor, float view_dist_frac, float music_
     float cy = g_render_height_f * 0.5f;
     float fracs[3] = { view_dist_frac, music_frac, sfx_frac };
 
+    {
+        static float s_last_view_frac = -1.0f;
+        static int s_last_cursor = -1;
+        if (view_dist_frac != s_last_view_frac || cursor != s_last_cursor) {
+            TD5_LOG_I("hud", "PAUSE OVERLAY: cursor=%d view_dist_frac=%.3f music=%.2f sfx=%.2f",
+                      cursor, view_dist_frac, music_frac, sfx_frac);
+            s_last_view_frac = view_dist_frac;
+            s_last_cursor    = cursor;
+        }
+    }
+
     /* Move SELBOX to cursor row using atlas texture */
     if (s_pause_sel_box && s_pause_selbox_atlas) {
         float row_y = s_pause_selbox_base_y + (float)cursor * 16.0f;
