@@ -1514,7 +1514,7 @@ int td5_hud_build_metric_digits(void)
         s_metric_value = (uint32_t)actor_pending_finish_hi(actor_slot);
         break;
     case TD5_METRIC_FPS:
-        s_metric_value = (uint32_t)(g_instant_fps + 0.5f);
+        s_metric_value = (uint32_t)(g_td5.instant_fps + 0.5f);
         break;
     case TD5_METRIC_ODOMETER: {
         /* 4-digit display, needs extra thousands digit quad */
@@ -2160,14 +2160,18 @@ void td5_hud_render_overlays(float dt)
 
     /* Debug overlay (gated by td5re.ini DebugOverlay setting) */
     if (g_td5.ini.debug_overlay) {
-        /* FPS sampled once per second */
+        /* FPS sampled once per real second. dt is normalized 30 Hz units
+         * (seconds * 30), so divide by 30 to recover seconds before
+         * accumulating to a 1.0-second window. */
         static float s_dbg_fps = 0.0f;
         static float s_dbg_fps_accum = 0.0f;
         static int   s_dbg_fps_frames = 0;
-        s_dbg_fps_accum += dt;
+        s_dbg_fps_accum += dt * (1.0f / 30.0f);
         s_dbg_fps_frames++;
         if (s_dbg_fps_accum >= 1.0f) {
             s_dbg_fps = (float)s_dbg_fps_frames / s_dbg_fps_accum;
+            TD5_LOG_I(LOG_TAG, "debug_overlay fps_window: frames=%d accum_s=%.3f fps=%.1f",
+                      s_dbg_fps_frames, s_dbg_fps_accum, s_dbg_fps);
             s_dbg_fps_accum = 0.0f;
             s_dbg_fps_frames = 0;
         }

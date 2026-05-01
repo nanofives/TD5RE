@@ -53,7 +53,6 @@ int     g_replay_mode           = 0;
 int     g_wanted_mode_enabled   = 0;
 int     g_special_encounter     = 0;
 int     g_race_rule_variant     = 0;
-float   g_instant_fps           = 30.0f;
 uint32_t g_tick_counter         = 0;
 int     g_special_render_mode   = 0;
 int     g_pending_finish_timer  = 0;
