@@ -73,3 +73,11 @@ headless_*.txt
 **/sound_traffic_out.txt
 **/traffic_audio_out*.txt
 **/wheel_headless_err.txt
+
+# Python bytecode caches
+__pycache__/
+**/__pycache__/
+*.pyc
+
+# Active /fix worktrees (per-session scratch, not project state)
+.claude/worktrees/
