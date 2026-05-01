@@ -514,6 +514,15 @@ static inline uint16_t actor_lap_time(int slot, int lap_index)
     return (uint16_t)td5_game_get_race_timer(slot, lap_index);
 }
 
+/* Original BuildRaceHudMetricDigits @ 0x004397b0 case 0:
+ *   gHudMetricValue = (uint)(*(ushort *)(actor + 0x344) >> 8);
+ * actor+0x344 is pending_finish_timer (the P2P checkpoint countdown). */
+static inline uint16_t actor_pending_finish_hi(int slot)
+{
+    uint8_t *a = (uint8_t *)actor_ptr(slot);
+    return (uint16_t)(*(uint16_t *)(a + 0x344) >> 8);
+}
+
 static inline uint8_t actor_route_index(int slot)
 {
     uint8_t *a = (uint8_t *)actor_ptr(slot);
@@ -1497,7 +1506,12 @@ int td5_hud_build_metric_digits(void)
     /* Select metric value based on display mode */
     switch (g_hud_metric_mode) {
     case TD5_METRIC_FINISH_TIMER:
-        s_metric_value = (uint32_t)actor_lap_time(actor_slot, 0);
+        /* Original BuildRaceHudMetricDigits case 0 @ 0x004397d8:
+         *   gHudMetricValue = (uint)(*(ushort *)(actor + 0x344) >> 8);
+         * Reads the pending_finish_timer hi-byte (P2P countdown), NOT
+         * the cumulative lap timer. The bit-0x40 dispatch is gated on
+         * g_special_encounter so this only runs in P2P races. */
+        s_metric_value = (uint32_t)actor_pending_finish_hi(actor_slot);
         break;
     case TD5_METRIC_FPS:
         s_metric_value = (uint32_t)(g_instant_fps + 0.5f);
@@ -1519,7 +1533,7 @@ int td5_hud_build_metric_digits(void)
         uint8_t *view_base = s_hud_prim_storage;
         hud_build_quad(
             view_base + 0x734,
-            2, s_numbers_atlas->texture_page,
+            0, s_numbers_atlas->texture_page,  /* mode 0: write screen positions every call (port has no layout-init step that mode=2 would rely on) */
             0.0f, 0.0f, 0.0f, 0.0f,
             u0, v0, u0 + 15.0f, v0 + 23.0f,
             0xFFFFFFFF, HUD_DEPTH
@@ -1538,6 +1552,23 @@ int td5_hud_build_metric_digits(void)
     /* Extract and display 3 digits (hundreds, tens, ones) */
     uint32_t val = s_metric_value % 1000;
 
+    /* Screen positions — sprites are 16w × 24h. Top-center of view 0:
+     * three digits side by side, hundreds left of tens left of ones,
+     * total width 48px centered on the viewport half-width.
+     *
+     * The original initializes these positions during HUD layout setup
+     * and the per-frame BuildRaceHudMetricDigits only updates UVs —
+     * port has no equivalent layout step, so we set positions inline
+     * each call. This is a known port-shape divergence; user-visible
+     * result is identical (digits at the right place). */
+    TD5_HudViewLayout *vl0 = &s_view_layout[0];
+    float center_x = vl0->vp_left + vl0->half_width;
+    float dy0 = vl0->vp_top + 8.0f;
+    float dy1 = dy0 + 23.0f;
+    float dx_h0 = center_x - 24.0f;  /* hundreds */
+    float dx_t0 = center_x - 8.0f;   /* tens */
+    float dx_o0 = center_x + 8.0f;   /* ones */
+
     /* Hundreds */
     {
         uint32_t d = val / 100;
@@ -1549,8 +1580,8 @@ int td5_hud_build_metric_digits(void)
         uint8_t *view_base = s_hud_prim_storage;
         hud_build_quad(
             view_base + 0x454,
-            2, s_numbers_atlas->texture_page,
-            0.0f, 0.0f, 0.0f, 0.0f,
+            0, s_numbers_atlas->texture_page,  /* mode 0: write screen positions every call (port has no layout-init step that mode=2 would rely on) */
+            dx_h0, dy0, dx_h0 + 15.0f, dy1,
             u0, v0, u0 + 15.0f, v0 + 23.0f,
             0xFFFFFFFF, HUD_DEPTH
         );
@@ -1568,8 +1599,8 @@ int td5_hud_build_metric_digits(void)
         uint8_t *view_base = s_hud_prim_storage;
         hud_build_quad(
             view_base + 0x50C,
-            2, s_numbers_atlas->texture_page,
-            0.0f, 0.0f, 0.0f, 0.0f,
+            0, s_numbers_atlas->texture_page,  /* mode 0: write screen positions every call (port has no layout-init step that mode=2 would rely on) */
+            dx_t0, dy0, dx_t0 + 15.0f, dy1,
             u0, v0, u0 + 15.0f, v0 + 23.0f,
             0xFFFFFFFF, HUD_DEPTH
         );
@@ -1586,8 +1617,8 @@ int td5_hud_build_metric_digits(void)
         uint8_t *view_base = s_hud_prim_storage;
         hud_build_quad(
             view_base + 0x5C4,
-            2, s_numbers_atlas->texture_page,
-            0.0f, 0.0f, 0.0f, 0.0f,
+            0, s_numbers_atlas->texture_page,  /* mode 0: write screen positions every call (port has no layout-init step that mode=2 would rely on) */
+            dx_o0, dy0, dx_o0 + 15.0f, dy1,
             u0, v0, u0 + 15.0f, v0 + 23.0f,
             0xFFFFFFFF, HUD_DEPTH
         );
@@ -1656,8 +1687,12 @@ void td5_hud_draw_status_text(int player_slot, int view_index)
         }
     }
 
-    /* Time trial / special encounter timers */
-    if (g_special_encounter != 0 || g_td5.time_trial_enabled) {
+    /* Time trial timer — text "TIME mm:ss.hhh" at top-left.
+     * In P2P races (g_special_encounter), the canonical readout is the
+     * 3-digit dialed countdown widget (bit 0x40 metric-digits dispatch
+     * below) so we don't draw the cumulative text timer here — that
+     * duplicated/overlapped the position label. */
+    if (g_td5.time_trial_enabled) {
         /* Main player timer */
         int actor_slot = g_actor_slot_map[view_index];
         uint16_t time_raw = actor_lap_time(actor_slot, 0);
@@ -2011,8 +2046,25 @@ void td5_hud_render_overlays(float dt)
             hud_submit_quad(view_base + GEAR_QUAD_OFF);
         }
 
-        /* --- Bit 6: Metric digit display --- */
-        if ((flags & TD5_HUD_METRIC_DIGITS) && s_numbers_atlas != NULL) {
+        /* --- Bit 6: Metric digit display ---
+         * Original RenderRaceHudOverlays @ 0x004391CC gates this on
+         * g_specialEncounterType != 0 — the metric-digits widget is
+         * the P2P checkpoint countdown sprite block (digits at quad
+         * offsets +0x115/+0x143/+0x171, +0x1cd in odometer mode). */
+        {
+            static int s_log_div = 0;
+            if ((++s_log_div % 60) == 0) {
+                TD5_LOG_I(LOG_TAG,
+                          "metric-digits gate: flags=0x%08X bit40=%d se=%d atlas=%p mode=%d val=%u",
+                          (unsigned int)flags,
+                          (int)((flags & TD5_HUD_METRIC_DIGITS) != 0),
+                          g_special_encounter,
+                          (void *)s_numbers_atlas,
+                          g_hud_metric_mode,
+                          (unsigned int)s_metric_value);
+            }
+        }
+        if ((flags & TD5_HUD_METRIC_DIGITS) && g_special_encounter != 0 && s_numbers_atlas != NULL) {
             int metric_ok = td5_hud_build_metric_digits();
             if (metric_ok) {
                 /* Submit the 4th digit if in odometer mode */

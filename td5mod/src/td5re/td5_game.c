@@ -782,6 +782,40 @@ int td5_game_init_race_session(void) {
         g_td5.special_encounter_enabled = 0;
     }
 
+    /* Resolve g_special_encounter (port mirror of g_specialEncounterType
+     * @ 0x004B0FA8). This is the runtime gate read by both the HUD timer
+     * widget (RenderRaceHudOverlays @ 0x004391CC) and the per-actor timer
+     * decrement (AdvancePendingFinishState @ 0x0040A2DC). Distinct from
+     * g_td5.special_encounter_enabled, which is the encoded
+     * gSpecialEncounterEnabled/Cops mirror used by AI/physics for spawn
+     * gating.
+     *
+     * Original writers per InitializeRaceSession @ 0x0042AA10:
+     *   0x0042ABE0  network active            -> 0
+     *   0x0042AD06  wanted mode               -> 0
+     *   0x0042AD7F  no schedule               -> 0
+     *   0x0042ADAC  selectedGameType != 0     -> 0
+     *   0x0042ADD3  attract demo              -> 0
+     *   0x0042AE75  circuit track (LEVELINF)  -> 0
+     *   else: keep DAT_00466004 (checkpoint-timers user toggle, default 1).
+     *
+     * Port equivalent: start from g_td5.checkpoint_timers_enabled and apply
+     * the same zero conditions. */
+    g_special_encounter = g_td5.checkpoint_timers_enabled ? 1 : 0;
+    if (g_td5.network_active)        g_special_encounter = 0;
+    if (g_td5.split_screen_mode > 0) g_special_encounter = 0;
+    if (g_td5.wanted_mode_enabled)   g_special_encounter = 0;
+    if (g_td5.game_type != 0)        g_special_encounter = 0;
+    if (g_track_is_circuit)          g_special_encounter = 0;
+    TD5_LOG_I(LOG_TAG,
+              "InitRace: g_special_encounter=%d (cp_timers=%d gt=%d circuit=%d "
+              "net=%d split=%d wanted=%d cops/se_enabled=%d)",
+              g_special_encounter,
+              g_td5.checkpoint_timers_enabled, (int)g_td5.game_type,
+              g_track_is_circuit, g_td5.network_active,
+              g_td5.split_screen_mode, g_td5.wanted_mode_enabled,
+              g_td5.special_encounter_enabled);
+
     /* ---- Step 0: Reseed CRT + fill race random seed table ---- */
     /* Original InitializeRaceSession @ 0x0042aa51-0x0042aa80:
      *   PUSH g_raceSessionRandomSeed; CALL srand          -- 0x42aa51
@@ -2722,24 +2756,61 @@ static void tick_pending_finish_timer(int slot) {
      *   && *(int *)(param_1 + 0x328) == 0                 (finish_time unset)
      *   && g_specialEncounterType != 0                    (P2P MODE ONLY)
      *
-     * The port's sub-tick loop already runs this path only when
-     * g_td5.paused == 0 (post-countdown), so the gRaceCameraTransitionGate
-     * gate is implicit. But the g_specialEncounterType gate was missing:
-     * without it, the decrement fired on every track (point-to-point AND
-     * circuit) and even when encounters were disabled — which is why
-     * Moscow showed pending_finish=17979 sliding down by -2 per sub-tick.
+     * Port mirror of g_specialEncounterType is g_special_encounter
+     * (resolved per-race in td5_game_init_race_session). Previously this
+     * gate read g_td5.special_encounter_enabled, which is wired to the
+     * COPS toggle in the frontend (td5_frontend.c:2681) and is therefore
+     * the wrong global — when cops were OFF the timer never decremented
+     * and the race never finished via the timer path.
      * [CONFIRMED @ 0x0040A2DC: if (g_specialEncounterType != 0 && ...).] */
-    if (g_td5.special_encounter_enabled == 0) return;  /* non-P2P -> no decrement */
+    if (g_special_encounter == 0) return;  /* non-P2P -> no decrement */
     if (s_active_checkpoint.checkpoint_count == 0) return;
     if (s_slot_state[slot].state != 1) return;
     if (s_slot_state[slot].companion_1 != 0) return;  /* already finished */
     if (m->post_finish_metric_base != 0) return;       /* already scored */
     if (m->timer_ticks <= 0) return;                   /* already expired */
 
-    /* Per-tick decrement matches the hi/lo bank in the original. Port combines
-     * hi and lo into a single int16; subtracting 2 per tick models the low
-     * byte -= 2 operation and the carry into the high byte is implicit. */
-    m->timer_ticks -= 2;
+    /* Diagnostic: log slot 0's timer once a second so we can confirm decrement
+     * cadence + observe the run-up to underflow. Removeable once timer behavior
+     * is verified across tracks. */
+    if (slot == 0) {
+        static int s_log_div = 0;
+        if ((++s_log_div % 30) == 0) {
+            TD5_LOG_I(LOG_TAG,
+                      "tick_pending_finish: slot=0 timer_ticks=%d cp_count=%d cp_idx=%d",
+                      (int)m->timer_ticks,
+                      (int)s_active_checkpoint.checkpoint_count,
+                      (int)m->checkpoint_index);
+        }
+    }
+
+    /* Faithful port of original AdvancePendingFinishState @ 0x0040A2DC:
+     *   uVar6 = uVar5 - 2; if (uVar6 < 0) { uVar6 = uVar5 + 0x39; uVar2--; }
+     *   *(ushort*)(actor+0x344) = CONCAT11(uVar2, uVar6);
+     *
+     * uVar5 = lo byte, uVar2 = hi byte. The wrap uVar5 + 0x39 (57) means
+     * lo cycles 0..58 even / 1..59 odd → 30 sub-ticks per hi-decrement →
+     * hi-byte = SECONDS at 30 Hz. The previous flat `-= 2` decremented
+     * timer_ticks correctly in raw count but made the displayed hi-byte
+     * tick at ~0.23/sec instead of 1/sec. */
+    {
+        uint16_t t = (uint16_t)m->timer_ticks;
+        int hi = (int)((t >> 8) & 0xFF);
+        int lo = (int)(t & 0xFF);
+        int new_lo = lo - 2;
+        if (new_lo < 0) {
+            new_lo = lo + 0x39;
+            if (hi == 0) {
+                /* Hi-byte underflow → race-finish path below. */
+                m->timer_ticks = 0;
+            } else {
+                hi -= 1;
+                m->timer_ticks = (int16_t)(((uint16_t)hi << 8) | (uint8_t)new_lo);
+            }
+        } else {
+            m->timer_ticks = (int16_t)(((uint16_t)hi << 8) | (uint8_t)new_lo);
+        }
+    }
 
     if (m->timer_ticks <= 0) {
         /* Timer expired - race-fail-on-timeout. Equivalent to the original's
