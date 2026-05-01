@@ -4146,20 +4146,28 @@ void td5_render_draw_sky(void)
 
     /* --- 3D dome rendering (sky.prr) [CONFIRMED @ 0x0042bdf7-0x0042c044] ---
      * Original applies camera rotation only (no translation) to sky dome mesh,
-     * then dispatches via the standard mesh pipeline. */
-    if (s_sky_mesh) {
+     * then dispatches via the standard mesh pipeline.
+     *
+     * DISABLED — root cause of "view distance way shorter than configured":
+     * the dome's vertices are camera-centered (translation=0), so they get
+     * very small camera-space Z values, and the wrapper's deferred state-
+     * cache apply path silently keeps z_write=1 alive across the dome's
+     * batch flush regardless of TD5_PRESET_SKY. Tiny depth values written
+     * by the dome z-reject all distant track spans the next frame.
+     *
+     * Multiple plumbing attempts (TD5_PRESET_SKY z_test=0/z_write=0, then
+     * z_test=1/z_write=0, s_in_sky_draw carve-out blocking the page-type
+     * remap in flush_immediate_internal, z_func=ALWAYS distinct DS state
+     * object) all failed in the wrapper's apply path. Falling through to
+     * the 2D panoramic quad below restores the pre-e9f659e behaviour: sky
+     * drawn at depth_z=0.999 — track at any nearer depth always passes
+     * LESSEQUAL and draws on top. View distance is bounded only by the
+     * configured cull window again. */
+    if (0 && s_sky_mesh) {
         TD5_Mat3x3 sky_rot;
-
-        /* Camera basis IS the rotation — sky has identity model rotation */
         for (int i = 0; i < 9; i++)
             sky_rot.m[i] = s_camera_basis[i];
-
         td5_render_load_rotation(&sky_rot);
-        /* Sky dome is camera-centered: translation must be zero in view space.
-         * Do NOT use td5_render_load_translation() — it subtracts camera_pos,
-         * which would offset the dome to world origin.
-         * Original LoadRenderTranslation (0x43DC20) is a pure memcpy with no
-         * camera subtraction; the subtraction lives in ApplyMeshResourceRenderTransform. */
         s_render_transform.m[9]  = 0.0f;
         s_render_transform.m[10] = 0.0f;
         s_render_transform.m[11] = 0.0f;
