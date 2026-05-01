@@ -92,7 +92,6 @@ extern int      g_race_rule_variant;
 extern int      g_game_type;
 extern int      g_split_screen_mode;
 extern int      g_racer_count;
-extern float    g_instant_fps;
 extern uint32_t g_tick_counter;
 extern int      g_actor_slot_map[2];
 extern void    *g_actor_pool;
