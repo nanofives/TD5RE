@@ -2372,12 +2372,19 @@ void td5_plat_render_set_preset(TD5_RenderPreset preset)
         break;
 
     case TD5_PRESET_SKY:
-        /* Sky dome: opaque texture, no depth test, no depth write — sky must
-         * always be drawn behind everything else without occluding it. The
-         * dome mesh is camera-centered (zero translation), so its vertex Z
-         * values are small and would otherwise z-reject distant track. */
+        /* Sky dome: opaque texture, depth test ON but depth write OFF.
+         * Sky is drawn first into a freshly-cleared depth buffer (all far),
+         * so every sky pixel passes LESS_EQUAL. By NOT writing depth, the
+         * dome's small camera-centered Z values do not enter the buffer,
+         * which means later track meshes can still pass their own depth
+         * test (track Z < cleared far) and overdraw the sky.
+         *
+         * Previous fix used z_test=0 too, but that made sky pixels paint
+         * with no depth-test interaction, and combined with the deferred
+         * mesh-dispatch order let the sky overdraw the track. z_test=1
+         * with z_write=0 is the standard skybox pattern. */
         s->blend_enable      = 0;
-        s->z_enable          = 0;
+        s->z_enable          = 1;
         s->z_write           = 0;
         s->mag_filter        = 2; /* LINEAR */
         s->min_filter        = 2;

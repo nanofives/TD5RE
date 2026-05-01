@@ -1677,10 +1677,18 @@ void td5_render_actors_for_view(int view_index)
     update_render_camera_from_game();
 
     /* Draw sky panorama behind all geometry. Sky uses TD5_PRESET_SKY
-     * (z_test=0, z_write=0) so its dome geometry — drawn camera-centered
-     * with small Z values — does not occlude distant track spans. */
+     * (z_test=1, z_write=0) so the dome — drawn camera-centered with small
+     * Z values — does not write its depth into the buffer, letting later
+     * track meshes pass their own depth test against the cleared far value.
+     *
+     * IMPORTANT: the immediate batch buffer is state-deferred (state
+     * applied at flush time, not at submit time). Without an explicit
+     * flush after the sky draw, the next preset change to OPAQUE_LINEAR
+     * silently overrides the SKY state, and sky pixels end up flushed
+     * with z_write=1 — re-introducing the "sky occludes track" bug. */
     td5_plat_render_set_preset(TD5_PRESET_SKY);
     td5_render_draw_sky();
+    td5_render_flush_immediate_batch();
 
     /* Set render preset for track geometry (enables texture sampling) */
     td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
@@ -4029,6 +4037,32 @@ void td5_render_draw_sky(void)
 {
     if (!s_sky_loaded) return;
 
+    /* DIAGNOSTIC: write sky path + first few mesh opcodes into the window
+     * title once so it shows regardless of the [Logging] gate. */
+    {
+        static int s_sky_diag_logged = 0;
+        if (!s_sky_diag_logged) {
+            HWND hw = (HWND)td5_plat_get_native_window();
+            char title[256];
+            if (s_sky_mesh) {
+                int cmd_count = s_sky_mesh->command_count;
+                TD5_PrimitiveCmd *cmds = (TD5_PrimitiveCmd *)(uintptr_t)s_sky_mesh->commands_offset;
+                int op[6] = {-1,-1,-1,-1,-1,-1};
+                if (cmds && cmd_count > 0) {
+                    int n = cmd_count < 6 ? cmd_count : 6;
+                    for (int i = 0; i < n; i++) op[i] = cmds[i].dispatch_type;
+                }
+                snprintf(title, sizeof(title),
+                         "SKY DIAG | 3D DOME path | cmd_count=%d | opcodes={%d,%d,%d,%d,%d,%d}",
+                         cmd_count, op[0], op[1], op[2], op[3], op[4], op[5]);
+            } else {
+                snprintf(title, sizeof(title), "SKY DIAG | 2D FALLBACK path");
+            }
+            if (hw) SetWindowTextA(hw, title);
+            s_sky_diag_logged = 1;
+        }
+    }
+
     /* --- 3D dome rendering (sky.prr) [CONFIRMED @ 0x0042bdf7-0x0042c044] ---
      * Original applies camera rotation only (no translation) to sky dome mesh,
      * then dispatches via the standard mesh pipeline. */
@@ -4095,7 +4129,7 @@ void td5_render_draw_sky(void)
         verts[3].diffuse = 0xFFFFFFFF; verts[3].tex_u = u0; verts[3].tex_v = 1.0f;
 
         flush_immediate_internal();
-        td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
+        td5_plat_render_set_preset(TD5_PRESET_SKY);
         td5_plat_render_bind_texture(s_sky_page);
         td5_plat_render_draw_tris(verts, 4, indices, 6);
         s_scene_has_renderer_geometry = 1;
