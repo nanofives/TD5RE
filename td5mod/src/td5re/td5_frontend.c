@@ -4431,36 +4431,12 @@ static void frontend_render_race_results_overlay(float sx, float sy) {
     float pw = panel_w * sx;
     float ph = panel_h * sy;
 
-    if (s_white_tex_page >= 0) {
-        /* Dark translucent panel body (see [UNCERTAIN] above) */
-        fe_draw_quad(panel_x, panel_y, pw, ph, 0xE0000000,
-                     s_white_tex_page, 0, 0, 1, 1);
-
-        /* Gold border (1.5px scaled) */
-        float bw = 1.5f * sx;
-        float bh = 1.5f * sy;
-        uint32_t border = 0xFFFFCC44;
-        fe_draw_quad(panel_x, panel_y,              pw, bh,  border, s_white_tex_page, 0, 0, 1, 1);
-        fe_draw_quad(panel_x, panel_y + ph - bh,    pw, bh,  border, s_white_tex_page, 0, 0, 1, 1);
-        fe_draw_quad(panel_x, panel_y,              bw, ph,  border, s_white_tex_page, 0, 0, 1, 1);
-        fe_draw_quad(panel_x + pw - bw, panel_y,    bw, ph,  border, s_white_tex_page, 0, 0, 1, 1);
-    }
-
-    /* Title selection based on selected_game_type (mirrors the
-     * per-game-type column-header branches at 0x0042260E-0x00422774) */
-    const char *title = "RACE RESULTS";
-    if (s_selected_game_type >= 1 && s_selected_game_type <= 6)
-        title = "CUP RACE RESULTS";
-    else if (s_selected_game_type == 7)
-        title = "DRAG RESULTS";
-    else if (s_selected_game_type == 8)
-        title = "CUP CHALLENGE RESULTS";
-    else if (s_selected_game_type == 9)
-        title = "TIME TRIAL RESULTS";
-
-    float title_w = fe_measure_text(title, sx);
-    fe_draw_text(panel_x + (pw - title_w) * 0.5f, panel_y + 14.0f * sy,
-                 title, 0xFFFFCC44, sx, sy);
+    /* Original screen 24 has no panel body / border / inner title — the
+     * frontend's standard banner already labels the screen. The previous
+     * port-only decorations (gold-bordered translucent box + duplicated
+     * "RACE RESULTS" header) were a visual stand-in and didn't match the
+     * original capture. Keep only the results table below. */
+    (void)pw; (void)ph; (void)panel_x; (void)panel_y;
 
     /* During state 0xD+ the panel is reused as the main-menu backdrop,
      * so hide the results table (buttons are drawn on top by the
