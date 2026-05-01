@@ -1,0 +1,23 @@
+# ComputeTrackTriangleBarycentricsWithNormal @ 0x00445A70
+#
+# Called by ComputeActorTrackContactNormalExtended @ 0x004457E0 for
+# per-wheel ground sampling. Args: (short va, short vb, short vc,
+# int *pos_xyz, short *out_normal). Returns int32 plane_y in span-
+# local integer units (pre-origin).
+#
+# Port-side: triangle_height in td5_track.c emits:
+#   name = "triangle_bary"
+#   args = va_idx, vb_idx, vc_idx
+#   ret  = height (pre-origin, span-local)
+
+hooks:
+  - name: triangle_bary
+    original_rva: 0x00445A70
+    args: 3
+    capture_return: true
+    port_symbol: triangle_height
+    notes: |
+      Diff target: verify triangle pick (via 3 vertex indices) and
+      plane solve (via return value) match between port and original.
+      A diff in args = wrong triangle picked upstream in 0x004457E0.
+      A diff in return with matching args = arithmetic precision gap.

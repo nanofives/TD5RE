@@ -1,0 +1,102 @@
+frames captured : 1170
+call records    : 12823
+errs            : 0
+
+Screen runs (screen) -> frames:
+  StartupInit                         5 frames  starting frame 0
+  LocalizationInit                    1 frames  starting frame 5
+  MainMenu                         1164 frames  starting frame 6
+
+Per-call totals across capture window:
+   10501  QueueFrontendSpriteBlit
+    2285  QueueFrontendOverlayRect
+    1170  FlushFrontendSpriteBlits
+    1169  UpdateFrontendDisplayModeSelection
+      16  DrawFrontendButtonBackground
+      16  DrawFrontendLocalizedStringToSurface
+       8  CreateFrontendDisplayModeButton
+       2  PresentPrimaryFrontendBufferViaCopy
+       1  ResetFrontendOverlayState
+       1  FillPrimaryFrontendRect
+       1  ReleaseFrontendDisplayModeButtons
+       1  CreateMenuStringLabelSurface
+       1  CopyPrimaryFrontendBufferToSecondary
+
+Main-menu run: MainMenu length=1164 frames
+   10430  (  8.96/frame)  QueueFrontendSpriteBlit
+    2282  (  1.96/frame)  QueueFrontendOverlayRect
+    1164  (  1.00/frame)  UpdateFrontendDisplayModeSelection
+    1164  (  1.00/frame)  FlushFrontendSpriteBlits
+      14  (  0.01/frame)  DrawFrontendButtonBackground
+      14  (  0.01/frame)  DrawFrontendLocalizedStringToSurface
+       7  (  0.01/frame)  CreateFrontendDisplayModeButton
+       2  (  0.00/frame)  PresentPrimaryFrontendBufferViaCopy
+       1  (  0.00/frame)  CreateMenuStringLabelSurface
+       1  (  0.00/frame)  CopyPrimaryFrontendBufferToSecondary
+
+First 60 string-rendering calls (with strings):
+  f   0 StartupInit    DrawFrontendButtonBackground             {'kind': 'call', 'name': 'DrawFrontendButtonBackground', 'frame': 0, 'screen': 'StartupInit'}
+  f   0 StartupInit    DrawFrontendButtonBackground             {'kind': 'call', 'name': 'DrawFrontendButtonBackground', 'frame': 0, 'screen': 'StartupInit'}
+  f   0 StartupInit    DrawFrontendLocalizedStringToSurface     {'x': 13071044, 'y': 29, 'surf': '0x0', 'str': '�Ӊs\x18E\x08\x0cPF�\x03\x01�����������p\x1e\x02C�\x0f��\x19�������@��\x03\x10����H�\x03�F�\x03�\x1f\x06C�\x10��T�D�5�_�d�3�d�.�', 'kind': 'call', 'name': 'DrawFrontendLocalizedStringToSurface', 'frame': 0, 'screen': 'StartupInit'}
+  f   0 StartupInit    DrawFrontendLocalizedStringToSurface     {'x': 13071044, 'y': 29, 'surf': '0x20', 'str': '�Ӊs\x18E\x08\x0cPF�\x03\x01�����������p\x1e\x02C�\x0f��\x19�������@��\x03\x10����H�\x03�F�\x03�\x1f\x06C�\x10��T�D�5�_�d�3�d�.�', 'kind': 'call', 'name': 'DrawFrontendLocalizedStringToSurface', 'frame': 0, 'screen': 'StartupInit'}
+  f   6 MainMenu       CreateMenuStringLabelSurface             {'str': None, 'color': 31744, 'kind': 'call', 'name': 'CreateMenuStringLabelSurface', 'frame': 6, 'screen': 'MainMenu'}
+  f   6 MainMenu       DrawFrontendButtonBackground             {'kind': 'call', 'name': 'DrawFrontendButtonBackground', 'frame': 6, 'screen': 'MainMenu'}
+  f   6 MainMenu       DrawFrontendButtonBackground             {'kind': 'call', 'name': 'DrawFrontendButtonBackground', 'frame': 6, 'screen': 'MainMenu'}
+  f   6 MainMenu       DrawFrontendLocalizedStringToSurface     {'x': 13071608, 'y': 41, 'surf': '0x0', 'str': '�Ӊs(H\x08\x0c�Vc�\x01�����������e\\lC�\x14��C�:�\\�W�I�N�D�O�W�S�����a\\`C�\x15������hWc���������', 'kind': 'call', 'name': 'DrawFrontendLocalizedStringToSurface', 'frame': 6, 'screen': 'MainMenu'}
+  f   6 MainMenu       DrawFrontendLocalizedStringToSurface     {'x': 13071608, 'y': 41, 'surf': '0x20', 'str': '�Ӊs(H\x08\x0c�Vc�\x01�����������e\\lC�\x14��C�:�\\�W�I�N�D�O�W�S�����a\\`C�\x15������hWc���������', 'kind': 'call', 'name': 'DrawFrontendLocalizedStringToSurface', 'frame': 6, 'screen': 'MainMenu'}
+  f   6 MainMenu       DrawFrontendButtonBackground             {'kind': 'call', 'name': 'DrawFrontendButtonBackground', 'frame': 6, 'screen': 'MainMenu'}
+  f   6 MainMenu       DrawFrontendButtonBackground             {'kind': 'call', 'name': 'DrawFrontendButtonBackground', 'frame': 6, 'screen': 'MainMenu'}
+  f   6 MainMenu       DrawFrontendLocalizedStringToSurface     {'x': 13071620, 'y': 38, 'surf': '0x0', 'str': '�Ӊsp=\x08\x0c(Wc�\x01������������]HC�\x1b��HYc��Xc�N�\x02�\x18�d�\x0c\x06�������]LC�\x1c��C�:�\\�W�I�N�D�O�', 'kind': 'call', 'name': 'DrawFrontendLocalizedStringToSurface', 'frame': 6, 'screen': 'MainMenu'}
+  f   6 MainMenu       DrawFrontendLocalizedStringToSurface     {'x': 13071620, 'y': 38, 'surf': '0x20', 'str': '�Ӊsp=\x08\x0c(Wc�\x01������������]HC�\x1b��HYc��Xc�N�\x02�\x18�d�\x0c\x06�������]LC�\x1c��C�:�\\�W�I�N�D�O�', 'kind': 'call', 'name': 'DrawFrontendLocalizedStringToSurface', 'frame': 6, 'screen': 'MainMenu'}
+  f   6 MainMenu       DrawFrontendButtonBackground             {'kind': 'call', 'name': 'DrawFrontendButtonBackground', 'frame': 6, 'screen': 'MainMenu'}
+  f   6 MainMenu       DrawFrontendButtonBackground             {'kind': 'call', 'name': 'DrawFrontendButtonBackground', 'frame': 6, 'screen': 'MainMenu'}
+  f   6 MainMenu       DrawFrontendLocalizedStringToSurface     {'x': 13071632, 'y': 31, 'surf': '0x0', 'str': '�ӉsXQ\x08\x0c\x08Xc�\x01������������]�C�\x1f��DB_PASSWORD=postgres123��]�C� ��(Xc�hUc���������', 'kind': 'call', 'name': 'DrawFrontendLocalizedStringToSurface', 'frame': 6, 'screen': 'MainMenu'}
+  f   6 MainMenu       DrawFrontendLocalizedStringToSurface     {'x': 13071632, 'y': 31, 'surf': '0x20', 'str': '�ӉsXQ\x08\x0c\x08Xc�\x01������������]�C�\x1f��DB_PASSWORD=postgres123��]�C� ��(Xc�hUc���������', 'kind': 'call', 'name': 'DrawFrontendLocalizedStringToSurface', 'frame': 6, 'screen': 'MainMenu'}
+  f   6 MainMenu       DrawFrontendButtonBackground             {'kind': 'call', 'name': 'DrawFrontendButtonBackground', 'frame': 6, 'screen': 'MainMenu'}
+  f   6 MainMenu       DrawFrontendButtonBackground             {'kind': 'call', 'name': 'DrawFrontendButtonBackground', 'frame': 6, 'screen': 'MainMenu'}
+  f   6 MainMenu       DrawFrontendLocalizedStringToSurface     {'x': 13071656, 'y': 53, 'surf': '0x0', 'str': '�Ӊs\x18E\x08\x0c�Xc�\x01������������]�C� ��(Xc�hUc������������������]�C�!���/=sLd=s\x01�������', 'kind': 'call', 'name': 'DrawFrontendLocalizedStringToSurface', 'frame': 6, 'screen': 'MainMenu'}
+  f   6 MainMenu       DrawFrontendLocalizedStringToSurface     {'x': 13071656, 'y': 53, 'surf': '0x20', 'str': '�Ӊs\x18E\x08\x0c�Xc�\x01������������]�C� ��(Xc�hUc������������������]�C�!���/=sLd=s\x01�������', 'kind': 'call', 'name': 'DrawFrontendLocalizedStringToSurface', 'frame': 6, 'screen': 'MainMenu'}
+
+First 30 CreateFrontendDisplayModeButton calls:
+  f   0 StartupInit    {'w': 13071044, 'h': -288, 'str': None, 'kind': 'call', 'name': 'CreateFrontendDisplayModeButton', 'frame': 0, 'screen': 'StartupInit'}
+  f   6 MainMenu       {'w': 13071608, 'h': -224, 'str': None, 'kind': 'call', 'name': 'CreateFrontendDisplayModeButton', 'frame': 6, 'screen': 'MainMenu'}
+  f   6 MainMenu       {'w': 13071620, 'h': -224, 'str': None, 'kind': 'call', 'name': 'CreateFrontendDisplayModeButton', 'frame': 6, 'screen': 'MainMenu'}
+  f   6 MainMenu       {'w': 13071632, 'h': -224, 'str': None, 'kind': 'call', 'name': 'CreateFrontendDisplayModeButton', 'frame': 6, 'screen': 'MainMenu'}
+  f   6 MainMenu       {'w': 13071656, 'h': -224, 'str': None, 'kind': 'call', 'name': 'CreateFrontendDisplayModeButton', 'frame': 6, 'screen': 'MainMenu'}
+  f   6 MainMenu       {'w': 13071668, 'h': -224, 'str': None, 'kind': 'call', 'name': 'CreateFrontendDisplayModeButton', 'frame': 6, 'screen': 'MainMenu'}
+  f   6 MainMenu       {'w': 13071188, 'h': -224, 'str': None, 'kind': 'call', 'name': 'CreateFrontendDisplayModeButton', 'frame': 6, 'screen': 'MainMenu'}
+  f   6 MainMenu       {'w': 13071200, 'h': -224, 'str': None, 'kind': 'call', 'name': 'CreateFrontendDisplayModeButton', 'frame': 6, 'screen': 'MainMenu'}
+
+First 30 sprite-blit dest rects (in Main Menu):
+  f   6 dst=(-224,0)-(0,0) src=(224,32) surf=0x0
+  f   6 dst=(-224,0)-(0,0) src=(224,32) surf=0x0
+  f   6 dst=(-224,0)-(0,0) src=(224,32) surf=0x0
+  f   6 dst=(-224,0)-(0,0) src=(224,32) surf=0x0
+  f   6 dst=(-224,0)-(0,0) src=(224,32) surf=0x0
+  f   6 dst=(-224,0)-(0,0) src=(224,32) surf=0x0
+  f   6 dst=(-224,0)-(0,0) src=(224,32) surf=0x0
+  f   7 dst=(-224,0)-(0,0) src=(224,32) surf=0x0
+  f   7 dst=(-224,0)-(0,0) src=(224,32) surf=0x0
+  f   7 dst=(-224,0)-(0,0) src=(224,32) surf=0x0
+  f   7 dst=(-224,0)-(0,0) src=(224,32) surf=0x0
+  f   7 dst=(-224,0)-(0,0) src=(224,32) surf=0x0
+  f   7 dst=(-224,0)-(0,0) src=(224,32) surf=0x0
+  f   7 dst=(-224,0)-(0,0) src=(224,32) surf=0x0
+  f   8 dst=(-224,0)-(0,0) src=(224,32) surf=0x0
+  f   8 dst=(-224,0)-(0,0) src=(224,32) surf=0x0
+  f   8 dst=(-224,0)-(0,0) src=(224,32) surf=0x0
+  f   8 dst=(-224,0)-(0,0) src=(224,32) surf=0x0
+  f   8 dst=(-224,0)-(0,0) src=(224,32) surf=0x0
+  f   8 dst=(-224,0)-(0,0) src=(224,32) surf=0x0
+  f   8 dst=(-224,0)-(0,0) src=(224,32) surf=0x0
+  f   9 dst=(-482,93)-(0,0) src=(224,32) surf=0x0
+  f   9 dst=(734,133)-(0,0) src=(224,32) surf=0x0
+  f   9 dst=(-482,173)-(0,0) src=(224,32) surf=0x0
+  f   9 dst=(734,213)-(0,0) src=(224,32) surf=0x0
+  f   9 dst=(-482,253)-(0,0) src=(224,32) surf=0x0
+  f   9 dst=(734,293)-(0,0) src=(224,32) surf=0x0
+  f   9 dst=(-482,333)-(0,0) src=(224,32) surf=0x0
+  f   9 dst=(120,-135)-(0,0) src=(248,20) surf=0x0
+  f  10 dst=(-466,93)-(0,0) src=(224,32) surf=0x0
+
+First 30 fill-rect calls (during MainMenu):

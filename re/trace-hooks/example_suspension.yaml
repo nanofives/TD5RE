@@ -1,0 +1,22 @@
+# Example hook spec — per-wheel suspension step.
+#
+# Add TD5_TRACE_CALL_ENTER/RET to the port's equivalent function
+# (td5_physics_suspension_step or whatever you named it) before running
+# /diff-race hooks=re/trace-hooks/example_suspension.yaml
+#
+# Original function signature (from Ghidra):
+#   void __cdecl td5_physics_suspension_step(
+#       int actor_idx, int wheel_idx, int is_rear)
+# Return: signed int (new wheel_y in 24.8 fp)
+
+hooks:
+  - name: suspension_step
+    original_rva: 0x00403A20
+    args: 3
+    capture_return: true
+    port_symbol: td5_physics_suspension_step
+    notes: |
+      RE session 2026-04-16 landed this verbatim (see
+      todo_suspension_reimpl.md). Use this spec when tweaking the spring
+      curve or damper clamps — any divergence in wheel_y per tick will
+      show up in arg/ret diffs.
