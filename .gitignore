@@ -81,3 +81,11 @@ __pycache__/
 
 # Active /fix worktrees (per-session scratch, not project state)
 .claude/worktrees/
+
+# verify/ runtime output (snap.ps1 is the tool; PNGs/logs are stale per-run)
+verify/td5re_*.png
+verify/td5re_*.log
+verify/*.log
+
+# Ghidra project clones inside research-archive (DB state, not research)
+re/tools/research-archive/tmp_ghidra_proj/
