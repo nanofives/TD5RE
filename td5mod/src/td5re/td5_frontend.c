@@ -1329,8 +1329,15 @@ static void frontend_release_button(int handle) {
 }
 
 static void frontend_set_cursor_visible(int visible) {
-    /* Original menu states pass 0 while interactive and 1 during transitions. */
-    s_cursor_visible = !visible;
+    /* Phase 5 — direct semantics. visible=1 shows cursor, visible=0 hides.
+     * Previous code did `s_cursor_visible = !visible` to match the original
+     * binary's inverted ActivateFrontendCursorOverlay/DeactivateFrontend
+     * CursorOverlay convention (state during interactive == "active" ==
+     * 1 == suppress button highlight ≈ show cursor). The double-negation
+     * was a footgun — calling set_cursor_visible(1) hid the cursor.
+     * Operator flipped here and ALL 12 callers' arguments inverted in the
+     * same commit so the net behavior is unchanged. */
+    s_cursor_visible = visible;
 }
 
 static void frontend_render_cursor(void); /* forward decl — impl after draw queue types */
@@ -5510,7 +5517,7 @@ static void Screen_AttractModeDemo(void) {
         /* [CONFIRMED @ 0x4275B1] g_attractModeDemoActive = 1 */
         s_attract_demo_active = 1;
         frontend_present_buffer();
-        frontend_set_cursor_visible(1);
+        frontend_set_cursor_visible(0);
         s_inner_state = 1;
         break;
 
@@ -5691,7 +5698,7 @@ static void Screen_MainMenu(void) {
         frontend_create_button("High Scores", -0xE0, 0, 0xE0, 0x20);
         frontend_create_button("Exit",        -0xE0, 0, 0xE0, 0x20);
 
-        frontend_set_cursor_visible(1);
+        frontend_set_cursor_visible(0);
         frontend_play_sfx(5); /* menu ready */
         s_inner_state = 1;
         break;
@@ -5709,7 +5716,7 @@ static void Screen_MainMenu(void) {
 
     case 3: /* Slide-in animation: 7 buttons alternating L/R, title descends. 39 frames. */
         if (frontend_update_timed_animation(0x27, 650) >= 1.0f) {
-            frontend_set_cursor_visible(0);
+            frontend_set_cursor_visible(1);
             frontend_play_sfx(4); /* ready chime */
             s_anim_complete = 1;
             s_inner_state = 4;
@@ -5845,7 +5852,7 @@ static void Screen_MainMenu(void) {
         break;
 
     case 8: /* Slide-out prep: keep the software cursor visible for the next frontend screen */
-        frontend_set_cursor_visible(0);
+        frontend_set_cursor_visible(1);
         frontend_play_sfx(5);
         frontend_begin_timed_animation();
         s_inner_state = 9;
@@ -6230,7 +6237,7 @@ static void Screen_QuickRaceMenu(void) {
         break;
 
     case 5: /* Prep slide-out */
-        frontend_set_cursor_visible(1);
+        frontend_set_cursor_visible(0);
         frontend_play_sfx(5);
         frontend_begin_timed_animation();
         s_inner_state = 6;
@@ -6861,7 +6868,7 @@ static void Screen_OptionsHub(void) {
         break;
 
     case 7: /* Slide-out prep */
-        frontend_set_cursor_visible(1);
+        frontend_set_cursor_visible(0);
         frontend_play_sfx(5);
         frontend_begin_timed_animation();
         s_inner_state = 8;
@@ -8173,7 +8180,7 @@ static void Screen_CarSelection(void) {
         break;
 
     case 0x14: /* Prep slide-out */
-        frontend_set_cursor_visible(0);
+        frontend_set_cursor_visible(1);
         frontend_play_sfx(5);
         frontend_begin_timed_animation();
         s_inner_state = 0x15;
@@ -8577,7 +8584,7 @@ static void Screen_PostRaceHighScore(void) {
         /* Create nav button + OK button */
         frontend_create_button(NULL, 115,  93, 520, 32);  /* nav bar: x=115, y=93 */
         frontend_create_button("OK", 120, 416,  96, 32);  /* OK button at bottom */
-        frontend_set_cursor_visible(1);
+        frontend_set_cursor_visible(0);
         frontend_play_sfx(5);
         s_score_category_index = 0;
         s_anim_tick = 0;
@@ -8592,7 +8599,7 @@ static void Screen_PostRaceHighScore(void) {
 
     case 3: /* Slide-in: 39 frames */
         if (frontend_update_timed_animation(0x27, 650) >= 1.0f) {
-            frontend_set_cursor_visible(0);
+            frontend_set_cursor_visible(1);
             frontend_play_sfx(4);
             s_anim_complete = 1;
             s_inner_state = 4;
@@ -8620,7 +8627,7 @@ static void Screen_PostRaceHighScore(void) {
         break;
 
     case 7: /* Prep slide-out */
-        frontend_set_cursor_visible(1);
+        frontend_set_cursor_visible(0);
         frontend_play_sfx(5);
         frontend_begin_timed_animation();
         s_inner_state = 8;
