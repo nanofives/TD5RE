@@ -2714,8 +2714,9 @@ static int64_t diagonal_cross(int vl0_idx, int vr1_idx,
  *      [CONFIRMED @ 0x00445B16-0x00445B2C: SAR ECX/EDI/EDX, 0xc]
  *   4. ConvertFloatVec3ToShortAnglesB (0x0042CD40) — renormalize via FPU:
  *        len  = sqrt(nx² + ny² + nz²)
- *        un[i] = (int16) trunc(n[i] * 4096.0 / len)   // K=4096 [UNCERTAIN]
+ *        un[i] = (int16) trunc(n[i] * 4096.0 / len)
  *      [CONFIRMED @ 0x0042CD40-0x0042CDA8: FILD/FDIVR/FMUL/__ftol-truncate]
+ *      [CONFIRMED @ 0x00467374 = 0x45800000 = 4096.0f, dumped 2026-05-01]
  *   5. if (un[1] == 0) un[1] = 1 — only the exact-zero case
  *      [CONFIRMED @ 0x00445B3F-0x00445B4C, on the int16 unit-Y after step 4]
  *   6. height = ((va.z - local_z) * un[2] + (va.x - local_x) * un[0]) / un[1]
@@ -2728,9 +2729,8 @@ static int64_t diagonal_cross(int vl0_idx, int vr1_idx,
  * spurious chassis-Y rise (see tools/frida_csv/fix-1777656380-129050).
  *
  * Note: K=4096 is the conventional TD5 12-bit-fixed-point grain (matches
- * angle full-circle = 0x1000). The exact constant at 0x00467374 was not
- * dumped — if it differs, the int16-truncation grain shifts proportionally
- * but the algebra is K-invariant for non-truncating cases.
+ * angle full-circle = 0x1000). Dumped 2026-05-01: bytes at 0x00467374 are
+ * 00 00 80 45 = 0x45800000 = IEEE-754 4096.0f. [CONFIRMED]
  *
  * Returns height in 24.8 fixed-point.
  */
