@@ -3518,10 +3518,31 @@ static float frontend_get_button_anim_x(int button_index, float base_x) {
     int tick = 0;
     int max_tick = 0;
     float t;
-    /* Race Type menu: all buttons slide from left (original behavior).
+    /* Phase 4 — slide-in trajectory pinned to Frida-captured original.
+     * [CONFIRMED via re/tools/frida_main_menu_capture.log 2026-05-01:
+     *  even-row buttons start at dx=-482 and slide right to dx=126;
+     *  odd-row buttons start at dx=734 and slide left to dx=126;
+     *  step is +/-16 px/frame for 38 frames; total displacement 608 px.]
+     *
+     * For MAIN_MENU specifically, anchor the slide endpoints to Frida data
+     * regardless of the per-button x stored in s_buttons[i] (which is
+     * computed from FE_BTN_LEFT_OFFSET=0xD2 → x=110, off by 16 vs Frida's
+     * x=126). Other screens keep the legacy +/-640 / button-x defaults
+     * because their original endpoints have not been Frida-confirmed.
+     *
+     * Race Type menu: all buttons slide from left (original behavior).
      * Other screens: odd buttons from right, even from left. */
-    float offscreen_x = (s_current_screen == TD5_SCREEN_RACE_TYPE_MENU) ? -640.0f :
-                        (button_index & 1) ? 640.0f : -640.0f;
+    float offscreen_x;
+    if (s_current_screen == TD5_SCREEN_MAIN_MENU) {
+        const float MM_OFFSCREEN_DELTA = 608.0f;
+        offscreen_x = (button_index & 1)
+                          ? (base_x + MM_OFFSCREEN_DELTA)
+                          : (base_x - MM_OFFSCREEN_DELTA);
+    } else if (s_current_screen == TD5_SCREEN_RACE_TYPE_MENU) {
+        offscreen_x = -640.0f;
+    } else {
+        offscreen_x = (button_index & 1) ? 640.0f : -640.0f;
+    }
 
     if (!frontend_get_button_anim_state(&mode, &tick, &max_tick)) {
         /* Before the intro animation completes, keep buttons at their off-screen
@@ -3533,7 +3554,9 @@ static float frontend_get_button_anim_x(int button_index, float base_x) {
     }
 
     /* Use continuous s_anim_t for smooth sub-frame motion at any frame rate.
-     * The integer s_anim_tick is only kept for game-logic compatibility. */
+     * The integer s_anim_tick is only kept for game-logic compatibility.
+     * With max_tick=39 and offscreen=base±608, this matches the original's
+     * +/-16 px/frame discrete motion to <0.5 px error per frame. */
     t = s_anim_t;
     if (mode == FE_BUTTON_ANIM_IN) {
         return base_x + (offscreen_x - base_x) * (1.0f - t);
@@ -3551,7 +3574,16 @@ static void frontend_get_button_render_rect(int button_index, float sx, float sy
         if (out_h) *out_h = 0.0f;
         return;
     }
-    if (out_x) *out_x = frontend_get_button_anim_x(button_index, (float)s_buttons[button_index].x) * sx;
+    /* Phase 4 — base x override for MAIN_MENU.
+     * Auto-layout uses FE_CENTER_X - FE_BTN_LEFT_OFFSET = 320 - 210 = 110,
+     * but Frida-captured original holds main-menu buttons at dx=126
+     * (offset 0xC2 = 194). Override the base only for MainMenu so other
+     * screens keep their existing layout. */
+    float base_x = (float)s_buttons[button_index].x;
+    if (s_current_screen == TD5_SCREEN_MAIN_MENU && s_buttons[button_index].x == FE_CENTER_X - FE_BTN_LEFT_OFFSET) {
+        base_x = (float)(FE_CENTER_X - 0xC2);  /* 320 - 194 = 126 [CONFIRMED via Frida] */
+    }
+    if (out_x) *out_x = frontend_get_button_anim_x(button_index, base_x) * sx;
     if (out_y) *out_y = (float)s_buttons[button_index].y * sy;
     if (out_w) *out_w = (float)s_buttons[button_index].w * sx;
     if (out_h) *out_h = (float)s_buttons[button_index].h * sy;
