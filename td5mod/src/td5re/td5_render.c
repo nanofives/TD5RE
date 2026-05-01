@@ -1642,6 +1642,20 @@ TD5_MeshHeader *td5_render_get_vehicle_mesh(int slot)
     return s_vehicle_meshes[slot];
 }
 
+/* When set, td5_render_apply_page_blend_preset skips its preset override so
+ * the caller-installed TD5_PRESET_SKY (z_test=1, z_write=0) survives the
+ * batch flush. Without this, the page-type→preset remap inside
+ * flush_immediate_internal silently rewrites the sky's depth state to
+ * OPAQUE_LINEAR (z_write=1), which makes the dome occlude distant track.
+ *
+ * Definition lives here — ABOVE the writer in td5_render_actors_for_view —
+ * so the file-scope static is in scope at the first reference. C requires
+ * file-scope identifiers to be declared before first use; upstream commit
+ * 994ab68 placed it below the writer, which fails to compile. The reader
+ * (td5_render_apply_page_blend_preset) appears even later and remains
+ * correctly in scope. */
+static int s_in_sky_draw = 0;
+
 void td5_render_actors_for_view(int view_index)
 {
     /*
@@ -2309,13 +2323,6 @@ void td5_render_advance_texture_ages(void)
  * the reflection paints opaquely over the car body (bug: "cars render only
  * the reflection texture"). */
 static int s_in_reflection_overlay = 0;
-
-/* When set, td5_render_apply_page_blend_preset skips its preset override so
- * the caller-installed TD5_PRESET_SKY (z_test=1, z_write=0) survives the
- * batch flush. Without this, the page-type→preset remap inside
- * flush_immediate_internal silently rewrites the sky's depth state to
- * OPAQUE_LINEAR (z_write=1), which makes the dome occlude distant track. */
-static int s_in_sky_draw = 0;
 
 /* Dispatch render preset per tpage transparency type.
  * BindRaceTexturePage @ 0x0040B660 switch:
