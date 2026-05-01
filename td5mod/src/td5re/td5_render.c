@@ -1850,6 +1850,49 @@ void td5_render_actors_for_view(int view_index)
                     continue;
             }
 
+            /* Span-distance actor cull (mirrors original RenderRaceActorForView
+             * @ 0x0040C2FD): for non-owner actors, compute |delta_spans| with
+             * ring wrap and skip body+wheel+smoke render when delta >= cull
+             * window. Tire-track emitter still runs in the post-loop pass
+             * below for the view owner, matching LAB_0040c7ba's owner-only gate.
+             *
+             * Original window: gRaceTrackSpanCullWindow @ 0x004AAEF4, written
+             * each frame in RunRaceFrame @ 0x42BB72 as
+             *   min(ftol((v*0.85+0.15)*max), max) * 2
+             * with max=64 fullscreen / 32 split-screen and v from 0x466ea8
+             * (default 0.65 → cullWindow=90; v=1.0 → 128 fullscreen / 64 split).
+             *
+             * Port reuses fwd_window — view-distance scaled, defaulting to
+             * 1024 — as a symmetric abs window so the actor cull stays
+             * coupled to the port's enlarged track-span horizon. Pinning to
+             * the faithful ~90 would leave a ~10× gap between visible track
+             * geometry and visible AI cars. [CONFIRMED @ 0x40C2FD; writer @
+             * 0x42BB72; actor span at +0x82] */
+            if (slot != camera_target_slot && slot < TD5_MAX_RACER_SLOTS) {
+                TD5_Actor *owner = td5_game_get_actor(camera_target_slot);
+                if (owner) {
+                    int actor_span = (int)actor->track_span_normalized;
+                    int owner_span = (int)owner->track_span_normalized;
+                    int delta = actor_span - owner_span;
+                    int ring = td5_track_get_ring_length();
+                    if (ring > 0) {
+                        int half = ring / 2;
+                        if (delta >  half) delta -= ring;
+                        if (delta < -half) delta += ring;
+                    }
+                    int delta_abs = delta < 0 ? -delta : delta;
+                    if (delta_abs >= fwd_window) {
+                        static uint32_t s_cull_log = 0;
+                        if ((s_cull_log++ % 600u) == 0u) {
+                            TD5_LOG_I(LOG_TAG,
+                                      "actor span-cull: view=%d slot=%d delta=%d window=%d",
+                                      view_index, slot, delta_abs, fwd_window);
+                        }
+                        continue;
+                    }
+                }
+            }
+
             /* (Lighting moved below to td5_render_apply_track_lighting,
              * which writes to the s_light_dirs[] basis ComputeMeshVertexLighting
              * actually consumes. The earlier td5_track_apply_segment_lighting
@@ -1952,6 +1995,25 @@ void td5_render_actors_for_view(int view_index)
                       view_index, slot,
                       render_pos.x, render_pos.y, render_pos.z,
                       (void *)mesh);
+        }
+
+        /* Per-view tire-track emitter dispatch (UpdateTireTrackEmitters
+         * @ 0x43FAE0). Original RenderRaceActorForView LAB_0040c7ba body:
+         *   if (actor_00 == *(&gPrimarySelectedSlot + view_idx))
+         *       UpdateTireTrackEmitters(actor);
+         * Only the view-owning actor runs the tire-effect chain — AI cars
+         * never reach it. Body+wheel+smoke render still iterates all actors
+         * above; only the slip-derived smoke + skid-mark spawn is owner-only.
+         * [CONFIRMED @ 0x40C7BA: actor==local_18 gate]
+         *
+         * function_callers confirms 0x43FAE0 has exactly one caller (0x40C120)
+         * and UpdateRear/FrontTireEffects each have one caller (0x43FAE0).
+         * No sim-tick path in the original. */
+        if (camera_target_slot >= 0 && camera_target_slot < TD5_MAX_RACER_SLOTS) {
+            TD5_Actor *owner_actor = td5_game_get_actor(camera_target_slot);
+            if (owner_actor && td5_game_get_slot_state(camera_target_slot) != 3) {
+                td5_vfx_update_tire_track_emitters(owner_actor, view_index);
+            }
         }
     }
 

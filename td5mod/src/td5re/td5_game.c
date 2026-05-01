@@ -2212,19 +2212,14 @@ int td5_game_run_race_frame(void) {
         /* --- VFX tick (tire tracks, particle lifetimes) --- */
         td5_vfx_tick();
 
-        /* --- Per-actor tire smoke / track emitter dispatch ---
-         * Original: UpdateTireTrackEmitterDispatch @ 0x43FAE0 fired per
-         * vehicle from the sim-tick loop. Reads drivetrain layout and
-         * calls update_rear/front_tire_effects, which spawn slip smoke.
-         * Without this loop no actor ever requests smoke spawns. */
-        for (i = 0; i < TD5_MAX_RACER_SLOTS; i++) {
-            TD5_Actor *tire_actor;
-            if (s_slot_state[i].state == 3) continue; /* disabled */
-            tire_actor = td5_game_get_actor(i);
-            if (tire_actor) {
-                td5_vfx_update_tire_track_emitters(tire_actor);
-            }
-        }
+        /* --- Per-actor tire-track emitter dispatch moved to render path ---
+         * Original: UpdateTireTrackEmitterDispatch @ 0x43FAE0 has a SINGLE
+         * caller — RenderRaceActorForView @ 0x0040C120 (LAB_0040c7ba). Sim
+         * tick only runs UpdateTireTrackPool() (per-slot intensity decay),
+         * NOT the per-actor emit step. Dispatch now happens in
+         * td5_render_actors_for_view, gated per view, so smoke spawns into
+         * the correct per-view particle bank.
+         * [CONFIRMED @ 0x40C120 + 0x43FAE0 function_callers]. */
 
         /* --- Update race order (bubble sort by span position) --- */
         update_race_order();
