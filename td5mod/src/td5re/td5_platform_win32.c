@@ -2269,6 +2269,7 @@ void td5_plat_render_set_preset(TD5_RenderPreset preset)
         s->blend_enable = 0;
         s->z_enable     = 1;
         s->z_write      = 1;
+        s->z_func       = 0; /* LESSEQUAL — explicit reset so SKY's ALWAYS doesn't leak */
         s->mag_filter   = 2; /* LINEAR */
         s->min_filter   = 2;
         s->texblend_mode = D3DTBLEND_MODULATE;
@@ -2282,6 +2283,7 @@ void td5_plat_render_set_preset(TD5_RenderPreset preset)
         s->dest_blend   = D3D6BLEND_INVSRCALPHA;
         s->z_enable     = 0; /* 2D overlay: no depth test, draw order = z-order */
         s->z_write      = 0;
+        s->z_func       = 0;
         s->mag_filter   = 2;
         s->min_filter   = 2;
         s->texblend_mode = D3DTBLEND_MODULATEALPHA;
@@ -2300,6 +2302,7 @@ void td5_plat_render_set_preset(TD5_RenderPreset preset)
         s->dest_blend   = D3D6BLEND_INVSRCALPHA;
         s->z_enable     = 1;
         s->z_write      = 0;
+        s->z_func       = 0;
         s->mag_filter   = 2;
         s->min_filter   = 2;
         s->texblend_mode = D3DTBLEND_MODULATEALPHA;
@@ -2311,6 +2314,7 @@ void td5_plat_render_set_preset(TD5_RenderPreset preset)
         s->blend_enable = 0;
         s->z_enable     = 1;
         s->z_write      = 1;
+        s->z_func       = 0;
         s->mag_filter   = 2;
         s->min_filter   = 2;
         s->texblend_mode = D3DTBLEND_MODULATE;
@@ -2324,6 +2328,7 @@ void td5_plat_render_set_preset(TD5_RenderPreset preset)
         s->dest_blend   = D3D6BLEND_INVSRCALPHA;
         s->z_enable     = 0;
         s->z_write      = 0;
+        s->z_func       = 0;
         s->mag_filter   = 0; /* POINT — no bilinear bleed into transparent border pixels */
         s->min_filter   = 0;
         s->texblend_mode = D3DTBLEND_MODULATEALPHA;
@@ -2342,6 +2347,7 @@ void td5_plat_render_set_preset(TD5_RenderPreset preset)
         s->dest_blend   = D3D6BLEND_INVSRCALPHA;
         s->z_enable     = 1;
         s->z_write      = 0;
+        s->z_func       = 0;
         s->mag_filter   = 0;
         s->min_filter   = 0;
         s->texblend_mode = D3DTBLEND_MODULATEALPHA;
@@ -2364,6 +2370,7 @@ void td5_plat_render_set_preset(TD5_RenderPreset preset)
         s->dest_blend        = D3D6BLEND_ONE;
         s->z_enable          = 1;
         s->z_write           = 0;
+        s->z_func            = 0;
         s->mag_filter        = 2; /* LINEAR */
         s->min_filter        = 2;
         s->texblend_mode     = D3DTBLEND_MODULATE;
@@ -2372,20 +2379,26 @@ void td5_plat_render_set_preset(TD5_RenderPreset preset)
         break;
 
     case TD5_PRESET_SKY:
-        /* Sky dome: opaque texture, depth test ON but depth write OFF.
-         * Sky is drawn first into a freshly-cleared depth buffer (all far),
-         * so every sky pixel passes LESS_EQUAL. By NOT writing depth, the
-         * dome's small camera-centered Z values do not enter the buffer,
-         * which means later track meshes can still pass their own depth
-         * test (track Z < cleared far) and overdraw the sky.
+        /* Sky dome — faithful match to original SetRaceRenderStatePreset(0)
+         * @ 0x0040b070 case 0 (final fallthrough block 0x40b0d8-0x40b0e9):
+         *   D3DRS_ZFUNC        (0x17) = 8 (D3DCMP_ALWAYS)  [CONFIRMED @ 0x0040b0d8]
+         *   D3DRS_ZWRITEENABLE (0x0E) = 0                  [CONFIRMED @ 0x0040b0e1]
          *
-         * Previous fix used z_test=0 too, but that made sky pixels paint
-         * with no depth-test interaction, and combined with the deferred
-         * mesh-dispatch order let the sky overdraw the track. z_test=1
-         * with z_write=0 is the standard skybox pattern. */
+         * The original's sky vertices use the same depth formula as track
+         * (screen_z = (view_z - 64.0) * 1.5259e-5), so the dome's projected
+         * depth values are tiny for camera-centered geometry. The reason
+         * this doesn't occlude track is purely because z_func=ALWAYS makes
+         * the depth comparison vacuous AND z_write=0 leaves the cleared
+         * far value in the buffer. Track follows with ZFUNC=LESSEQUAL +
+         * ZWRITE=1 (every other preset above resets z_func=0).
+         *
+         * In the wrapper (d3d11_backend.c:1102), z_func=1 + z_write=0 maps
+         * to a distinct DSV (DS_Z_ON_WRITE_OFF_ALWAYS) so the cache cannot
+         * hide a missed apply. */
         s->blend_enable      = 0;
         s->z_enable          = 1;
         s->z_write           = 0;
+        s->z_func            = 1; /* ALWAYS — sky never fails depth test */
         s->mag_filter        = 2; /* LINEAR */
         s->min_filter        = 2;
         s->texblend_mode     = D3DTBLEND_MODULATE;
