@@ -361,40 +361,83 @@ static int load_static_r5g6b5_tpage(int slot)
     }
     fclose(f);
 
-    /* Static tpage .dat files are runtime dumps.  Detect byte order:
-     * - XRGB dumps (e.g. tpage4) have byte[0]=0xFF for every pixel
-     *   (X pad always set).  Layout: [0]=X, [1]=R, [2]=G, [3]=B.
-     * - BGRA dumps (e.g. tpage0-3) store normal B,G,R,A byte order.
-     * Both need black colorkey applied for proper transparency. */
+    /* Static tpage .dat files are runtime dumps from UploadRaceTexturePage
+     * (0x0040B590).  Two layouts are observed depending on the format_mode
+     * the original passed to M2DX:
+     *
+     * - "ARGB" layout (format_mode=1 dumps from older builds): every non-zero
+     *   pixel has byte[0]=0xFF as the alpha/marker byte.
+     *   Channel layout: [0]=A/X, [1]=R, [2]=G, [3]=B.
+     *
+     * - "GRXB" layout (format_mode=1 dumps from newer builds, e.g.
+     *   tpage4.dat): every non-zero pixel has byte[2]=0xFF as the marker.
+     *   Channel layout: [0]=G, [1]=R, [2]=X, [3]=B.  This is the layout the
+     *   game's slot-4 alpha-fixup at 0x0040B59B then rewrites byte[0] of
+     *   into 0x00/0x80 — so byte[0] is overwritten as alpha after fixup, but
+     *   the original color byte[0] equals byte[1] for grayscale art (SMOKE,
+     *   SPEEDO) where R≈G.
+     *
+     * - "BGRA" layout: legacy fallback when neither marker pattern holds.
+     *
+     * Detection is run over only the non-zero pixels — fully transparent
+     * pixels (all four bytes 0) would otherwise disqualify the marker. */
     {
-        int is_xrgb = 1;
-        for (int i = 0; i < npx && is_xrgb; i++) {
-            if (bgra[i * 4] != 0xFF) is_xrgb = 0;
+        int is_argb = 1;          /* byte[0] == 0xFF marker */
+        int is_grxb = 1;          /* byte[2] == 0xFF marker */
+        int nonzero_count = 0;
+        for (int i = 0; i < npx; i++) {
+            uint8_t b0 = bgra[i * 4 + 0];
+            uint8_t b1 = bgra[i * 4 + 1];
+            uint8_t b2 = bgra[i * 4 + 2];
+            uint8_t b3 = bgra[i * 4 + 3];
+            if (!b0 && !b1 && !b2 && !b3) continue;   /* transparent */
+            nonzero_count++;
+            if (b0 != 0xFF) is_argb = 0;
+            if (b2 != 0xFF) is_grxb = 0;
         }
+        /* GRXB takes precedence when both seem to match (rare): the actual
+         * tpage4.dat shipped today is GRXB, never ARGB-with-byte[2]=0xFF. */
+        const char *fmt_name = "BGRA";
+        if (nonzero_count > 0 && is_grxb) fmt_name = "GRXB";
+        else if (nonzero_count > 0 && is_argb) fmt_name = "ARGB";
+        else { is_grxb = 0; is_argb = 0; }
+
+        int is_alpha_page = (slot < s_page_metadata_count)
+                            ? (s_page_metadata[slot].transparency_flag != 0)
+                            : (slot == 4 || slot == 5 || slot == 12);
 
         for (int i = 0; i < npx; i++) {
             uint8_t r, g, b;
-            if (is_xrgb) {
-                r = bgra[i * 4 + 1];
-                g = bgra[i * 4 + 2];
-                b = bgra[i * 4 + 3];
+            uint8_t b0 = bgra[i * 4 + 0];
+            uint8_t b1 = bgra[i * 4 + 1];
+            uint8_t b2 = bgra[i * 4 + 2];
+            uint8_t b3 = bgra[i * 4 + 3];
+            if (is_grxb) {
+                /* tpage4.dat / tpage5.dat / tpage12.dat layout:
+                 * byte[2]=0xFF marker; bytes carry G,R,X,B. */
+                g = b0;
+                r = b1;
+                b = b3;
+            } else if (is_argb) {
+                /* tpage0.dat / older dumps: byte[0]=0xFF, then R,G,B. */
+                r = b1;
+                g = b2;
+                b = b3;
             } else {
-                b = bgra[i * 4 + 0];
-                g = bgra[i * 4 + 1];
-                r = bgra[i * 4 + 2];
+                /* Plain BGRA (rare). */
+                b = b0;
+                g = b1;
+                r = b2;
             }
-            /* Alpha mode from page metadata [CONFIRMED @ 0x0040b590]:
-             *   transparency_flag==0: opaque (LoadRGBS24), black colorkey
-             *   transparency_flag==2: alpha (LoadRGBS32), semi-transparent
-             * Page 4 (speedo) is special: alpha=0x80 for non-black pixels. */
+            /* Alpha rule from UploadRaceTexturePage @ 0x0040B59B:
+             *   slot 4: byte[1]+byte[2]+byte[3]==0 → alpha=0, else alpha=0x80
+             * Apply same 0x80 rule to other format_mode=1 slots (5,12) per
+             * is_alpha_page metadata; opaque pages get black colorkey. */
             uint8_t a;
-            int is_alpha_page = (slot < s_page_metadata_count)
-                                ? (s_page_metadata[slot].transparency_flag != 0)
-                                : (slot == 4 || slot == 5 || slot == 12);
             if (slot == 4) {
-                a = ((int)r + (int)g + (int)b == 0) ? 0x00 : 0x80;
+                a = ((int)b1 + (int)b2 + (int)b3 == 0) ? 0x00 : 0x80;
             } else if (is_alpha_page) {
-                a = (r < 8 && g < 8 && b < 8) ? 0x00 : 0xFF;
+                a = (r < 8 && g < 8 && b < 8) ? 0x00 : 0x80;
             } else {
                 a = (r < 8 && g < 8 && b < 8) ? 0x00 : 0xFF;
             }
@@ -404,8 +447,8 @@ static int load_static_r5g6b5_tpage(int slot)
             bgra[i * 4 + 3] = a;
         }
 
-        TD5_LOG_D(LOG_TAG, "static atlas: tpage%d.dat format=%s",
-                  slot, is_xrgb ? "XRGB" : "BGRA");
+        TD5_LOG_I(LOG_TAG, "static atlas: tpage%d.dat slot=%d format=%s nonzero=%d",
+                  file_idx, slot, fmt_name, nonzero_count);
     }
 
     td5_plat_render_upload_texture(STATIC_ATLAS_BASE + slot, bgra, w, h, 2);
