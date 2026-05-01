@@ -1671,6 +1671,10 @@ int td5_game_init_race_session(void) {
     TD5_LOG_I(LOG_TAG, "Camera seeded: pos=(%.1f, %.1f, %.1f)",
               g_cameraPos[0], g_cameraPos[1], g_cameraPos[2]);
 
+    /* Seed prev_world_pos so the first sub-tick render interpolation pass
+     * (before any sim tick has fired) lerps current->current = no jump. */
+    td5_physics_seed_prev_world_pos();
+
     TD5_LOG_I(LOG_TAG, "InitializeRaceSession: complete (%d actors)",
               g_td5.total_actor_count);
     return 1;
@@ -2220,6 +2224,16 @@ int td5_game_run_race_frame(void) {
         if (g_subTickFraction > 1.0f) g_subTickFraction = 1.0f;
         TD5_LOG_D(LOG_TAG, "subTickFraction=%.4f accum=0x%X ticks=%d",
                   g_subTickFraction, g_td5.sim_time_accumulator, ticks_this_frame);
+
+        /* Sub-tick render-position interpolation: lerp every actor's
+         * prev_world_pos -> world_pos by g_subTickFraction and write into
+         * actor->render_pos. The body-mesh draw at td5_render.c:1786 uses
+         * its own velocity-extrapolation (faithful to original 0x40C164),
+         * but the camera, HUD, shadows, smoke, and audio all read
+         * actor->render_pos -- without this pass they stay snapped at the
+         * last sim-tick position while the body mesh slides forward,
+         * producing the rubber-band wobble at render rates above 30 Hz. */
+        td5_physics_apply_render_interpolation(g_subTickFraction);
 
         /* Re-finalize chase camera position with the freshly computed
          * subtick fraction. Without this call, at render rates above the
