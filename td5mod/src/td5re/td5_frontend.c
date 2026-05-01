@@ -4527,139 +4527,235 @@ static void frontend_render_race_results_overlay(float sx, float sy) {
      * generic button loop in td5_frontend_render_ui_rects). */
     if (s_inner_state >= 0x0D) return;
 
-    /* --- P4 — Per-game-type results panel ---
-     * [CONFIRMED @ 0x00422480 case 0 game_type ladder] Original branches on
-     * g_selectedGameType, drawing different SNK_*ResultsTxt 32-byte string
-     * rows from a (char[N][0x20]) array. The actual string content lives in
-     * LANGUAGE.DLL and is NOT in TD5_d3d.exe; we use English approximations
-     * ([UNCERTAIN-LANG] tags) for column headers — the row coordinates and
-     * column structure mirror the original DrawRaceDataSummaryPanel
-     * (@ 0x00421e90) verbatim:
-     *   - Right column data block at panel-relative x=0x118 (280 px)
-     *   - Y rows step 0x18 (24 px), starting Y depends on game_type
-     *   - Per-slot single-row focus: original blits row data only for
-     *     DAT_00497a68 (currently-browsed slot, mapped to s_score_category_index)
+    /* --- P4 LANG fix — Single-slot stat sheet (faithful) ---
+     * [CONFIRMED @ 0x00421e90 DrawRaceDataSummaryPanel + 0x00422480 case 0]
+     * Original screen 24 panel is a SINGLE-SLOT stat sheet, not a multi-slot
+     * leaderboard table. Layout:
+     *   - Left column @ panel x=0:    row LABEL strings (drawn ONCE by case 0,
+     *     filled from SNK_ResultsTxt / SNK_DRResultsTxt / SNK_CCResultsTxt
+     *     per-game-type ladder).
+     *   - Right column @ panel x=0x118 (280 px): per-slot VALUES, drawn by
+     *     DrawRaceDataSummaryPanel(DAT_00497a68 == s_score_category_index).
+     *     The right column is cleared and re-filled when the user uses L/R
+     *     to browse to a new slot (states 7..10 panel-slide L/R).
      *
-     * Layout decisions:
-     *   - All game_types: POS / DRIVER / CAR / TIME stays as the universal
-     *     base header (closest to SNK_ResultsTxt+0x40 default labels)
-     *   - Cup (1..6): adds "POINTS" column (reads secondary_metric)
-     *   - Cop Chase (8): adds "WANTED" column (slot wanted_kills)
-     *   - Drag (7) / Drag Race (9): drops POS, just DRIVER / CAR / TIME
-     *     (drag is heads-up, position is implicit)
-     *   - State 7-10 (browse arrows): highlight focused slot row */
+     * Row labels EXTRACTED VERBATIM from original/Language.dll:
+     *   SNK_ResultsTxt    @ DLL RVA=0x7720 (char[32][0x20])
+     *   SNK_DRResultsTxt  @ DLL RVA=0x78C0
+     *   SNK_CCResultsTxt  @ DLL RVA=0x7840
+     * (The prior commit's hardcoded English column headers POS/DRIVER/CAR/TIME
+     * were a port-only invention that did not exist in the original — they
+     * are removed by this commit.)
+     *
+     * Per-game-type label ladder mirrors RunRaceResultsScreen 0x00422480
+     * case 0: source offsets, Y rows, and step sizes confirmed verbatim.
+     *
+     * Driver name + car name lines above the stat list are a port-only
+     * addition (the original puts those values in the right column at
+     * specific row Y positions; the port's per-slot accessor model is
+     * cleaner with a single header band). */
 
     int gt = (int)s_selected_game_type;
-    int is_cup       = (gt >= 1 && gt <= 6);
-    int is_drag      = (gt == 7 || gt == 9);
-    int is_cop_chase = (gt == 8);
 
     int focus_slot = s_score_category_index;
     if (focus_slot < 0 || focus_slot >= TD5_MAX_RACER_SLOTS) focus_slot = 0;
+    /* Drag-mode mask matches Ghidra @ 0x00422A02: (s_score_category_index & 1). */
+    if (gt == 7 || gt == 9) focus_slot &= 1;
 
-    float ts = 0.75f;
-    uint32_t hdr_color = 0xFFCCCCCC;
-    /* Header Y matches original step starting at 0x30 (cup) or 0x48 (cop)
-     * or 0x60 (single/drag/etc). Use a unified ~Y=48 for the port header
-     * to keep panel geometry stable across game types. */
-    float hdr_y = panel_y + 48.0f * sy;
+    /* Row index into the panel's vertical stat list. The original spaces rows
+     * at Y = 0x30..0xE8 (cup) or 0x48..0x90 (cop) or 0x60..0xD8 (single/drag),
+     * step 0x18. We bake this into a helper struct and a per-game-type table. */
+    enum {
+        LBL_CUP_POSITION,        /* SNK_ResultsTxt[0]   "CUP POSITION" */
+        LBL_CUP_POINTS,          /* SNK_ResultsTxt[1]   "CUP POINTS" */
+        LBL_AVG_SPEED,           /* SNK_ResultsTxt[2]   "AVERAGE SPEED" */
+        LBL_TOP_SPEED,           /* SNK_ResultsTxt[3]   "TOP SPEED" */
+        LBL_FINISH_POSITION,     /* SNK_ResultsTxt[4]   "FINISH POSITION" */
+        LBL_HIGHEST_POSITION,    /* SNK_ResultsTxt[5]   "HIGHEST POSITION" */
+        LBL_TOTAL_TIME,          /* SNK_ResultsTxt[6]   "TOTAL TIME" */
+        LBL_CHECKPOINT_TIMERS,   /* SNK_ResultsTxt[7]   "CHECKPOINT TIMERS" */
+        LBL_CUP_TIME,            /* SNK_ResultsTxt[8]   "CUP TIME"  (only cups 2-5) */
+        LBL_ARRESTS,             /* SNK_CCResultsTxt[0] "ARRESTS" */
+        LBL_POINTS               /* SNK_CCResultsTxt[3] "POINTS" */
+    };
 
-    float col_pos     = panel_x +  20.0f * sx;
-    float col_name    = panel_x +  62.0f * sx;
-    float col_car     = panel_x + 180.0f * sx;
-    float col_time    = panel_x + 280.0f * sx;
-    float col_extra   = panel_x + 360.0f * sx;  /* Cup PTS / CopChase WANTED */
+    /* Localized row label strings — extracted from Language.dll on 2026-05-01.
+     * Indexed by the LBL_* enum. Match exact bytes from RVA dumps (see commit
+     * message). Language switching for non-English would re-bake this table
+     * from the appropriate Language.dll variant. */
+    static const char *const k_results_labels[] = {
+        [LBL_CUP_POSITION]      = "CUP POSITION",
+        [LBL_CUP_POINTS]        = "CUP POINTS",
+        [LBL_AVG_SPEED]         = "AVERAGE SPEED",
+        [LBL_TOP_SPEED]         = "TOP SPEED",
+        [LBL_FINISH_POSITION]   = "FINISH POSITION",
+        [LBL_HIGHEST_POSITION]  = "HIGHEST POSITION",
+        [LBL_TOTAL_TIME]        = "TOTAL TIME",
+        [LBL_CHECKPOINT_TIMERS] = "CHECKPOINT TIMERS",
+        [LBL_CUP_TIME]          = "CUP TIME",
+        [LBL_ARRESTS]           = "ARRESTS",
+        [LBL_POINTS]            = "POINTS",
+    };
 
-    /* Header titles — [UNCERTAIN-LANG] strings. Row layout matches Ghidra
-     * confirmation of which columns each mode displays. */
-    if (is_drag) {
-        fe_draw_text(col_name,  hdr_y, "DRIVER", hdr_color, sx * ts, sy * ts);
-        fe_draw_text(col_car,   hdr_y, "CAR",    hdr_color, sx * ts, sy * ts);
-        fe_draw_text(col_time,  hdr_y, "TIME",   hdr_color, sx * ts, sy * ts);
-    } else {
-        fe_draw_text(col_pos,   hdr_y, "POS",    hdr_color, sx * ts, sy * ts);
-        fe_draw_text(col_name,  hdr_y, "DRIVER", hdr_color, sx * ts, sy * ts);
-        fe_draw_text(col_car,   hdr_y, "CAR",    hdr_color, sx * ts, sy * ts);
-        fe_draw_text(col_time,  hdr_y, "TIME",   hdr_color, sx * ts, sy * ts);
-        if (is_cup)        fe_draw_text(col_extra, hdr_y, "PTS",    hdr_color, sx * ts, sy * ts);
-        if (is_cop_chase)  fe_draw_text(col_extra, hdr_y, "WANTED", hdr_color, sx * ts, sy * ts);
+    /* Per-game-type label sequence, terminated by -1. Y position is row*0x18
+     * relative to the row block start. Order + content matches the per-
+     * game-type ladder in case 0 of 0x00422480. */
+    static const int k_rows_single[]   = { LBL_AVG_SPEED, LBL_TOP_SPEED, LBL_FINISH_POSITION,
+                                           LBL_HIGHEST_POSITION, LBL_TOTAL_TIME, LBL_CHECKPOINT_TIMERS, -1 };
+    static const int k_rows_cup_1_6[]  = { LBL_CUP_POSITION, LBL_CUP_POINTS, LBL_AVG_SPEED, LBL_TOP_SPEED,
+                                           LBL_FINISH_POSITION, LBL_HIGHEST_POSITION, LBL_TOTAL_TIME,
+                                           LBL_CHECKPOINT_TIMERS, -1 };
+    static const int k_rows_cup_2_5[]  = { LBL_CUP_POSITION, LBL_CUP_TIME, LBL_AVG_SPEED, LBL_TOP_SPEED,
+                                           LBL_FINISH_POSITION, LBL_HIGHEST_POSITION, LBL_TOTAL_TIME,
+                                           LBL_CHECKPOINT_TIMERS, -1 };
+    static const int k_rows_drag[]     = { LBL_TOTAL_TIME, LBL_TOP_SPEED, LBL_FINISH_POSITION, -1 };
+    static const int k_rows_cop[]      = { LBL_ARRESTS, LBL_AVG_SPEED, LBL_TOP_SPEED, LBL_POINTS, -1 };
+    /* Drag race (gt==9) skips Y=0x90 (FINISH_POSITION) and Y=0xA8
+     * (HIGHEST_POSITION) per the case-9 conditional in 0x00422480. */
+    static const int k_rows_drag_race[] = { LBL_AVG_SPEED, LBL_TOP_SPEED, LBL_TOTAL_TIME,
+                                            LBL_CHECKPOINT_TIMERS, -1 };
+
+    const int *rows;
+    if (gt == 7)               rows = k_rows_drag;
+    else if (gt == 8)          rows = k_rows_cop;
+    else if (gt == 9)          rows = k_rows_drag_race;
+    else if (gt == 1 || gt == 6) rows = k_rows_cup_1_6;
+    else if (gt >= 2 && gt <= 5) rows = k_rows_cup_2_5;
+    else                       rows = k_rows_single;
+
+    /* Geometry: panel-local x=12 (left col label) + x=280 (right col value).
+     * Base Y depends on game_type — preserved from original ladder. */
+    float text_scale = 0.75f;
+    float pad_x      = 24.0f;
+    float left_col   = panel_x + pad_x * sx;
+    float right_col  = panel_x + 280.0f * sx;
+
+    int kph = td5_save_get_speed_units();
+    int unit_kph = (kph != 0);
+
+    /* Driver / car header band (port-only addition, x-stretch full width). */
+    {
+        char hdr_buf[80];
+        const char *driver_name = (focus_slot == 0) ? "PLAYER" : "OPPONENT";
+        if (focus_slot != 0) {
+            /* Use slot index for opponent label when more than 1 AI exists. */
+            static char opp_buf[16];
+            snprintf(opp_buf, sizeof(opp_buf), "CPU %d", focus_slot);
+            driver_name = opp_buf;
+        }
+        int car_idx = (focus_slot == 0) ? s_selected_car : g_td5.ai_car_indices[focus_slot];
+        if (car_idx < 0 || car_idx > 36) car_idx = 0;
+        const char *cname = frontend_get_car_display_name(car_idx);
+        snprintf(hdr_buf, sizeof(hdr_buf), "%s  -  %s", driver_name,
+                 cname ? cname : "");
+        uint32_t hdr_color = (focus_slot == 0) ? 0xFFFFCC44 : 0xFFFFFFFF;
+        fe_draw_text(left_col, panel_y + 32.0f * sy, hdr_buf, hdr_color,
+                     sx * text_scale, sy * text_scale);
     }
 
-    /* Per-slot row rendering — drag mode skips POS column.
-     * [CONFIRMED] original DrawRaceDataSummaryPanel only blits ONE slot's data
-     * (DAT_00497a68) at fixed Y rows. The port retains the multi-row enumeration
-     * for now since the underlying surface model differs (port has no panel
-     * surface to clear/refill on browse). The browsed slot is highlighted. */
-    float row_y = panel_y + 84.0f * sy;
-    float row_h = 24.0f * sy;
-    int row = 0;
-    for (int slot = 0; slot < TD5_MAX_RACER_SLOTS; slot++) {
-        TD5_Actor *a = td5_game_get_actor(slot);
-        if (!a) continue;
+    /* Stat list */
+    float row_block_y = panel_y + 84.0f * sy;
+    float row_step    = 24.0f * sy;
+    uint32_t lbl_color = 0xFFCCCCCC;
+    uint32_t val_color = 0xFFFFFFFF;
 
-        /* Drag mode shows only 2 slots (player + opponent); Ghidra @ 0x00422A02
-         * confirms drag uses (s_score_category_index & 1). */
-        if (is_drag && row >= 2) break;
+    int row_idx = 0;
+    for (int i = 0; rows[i] != -1; i++) {
+        int label_id = rows[i];
+        float y = row_block_y + (float)row_idx * row_step;
 
-        float y = row_y + (float)row * row_h;
+        /* Left column: localized label. */
+        fe_draw_text(left_col, y, k_results_labels[label_id], lbl_color,
+                     sx * text_scale, sy * text_scale);
 
-        /* Highlight focus slot (state 6 browse): brighter color when focused. */
-        uint32_t row_color;
-        if (slot == focus_slot && s_inner_state == 6) {
-            row_color = 0xFFFFFFFF;  /* white = focused */
-        } else if (slot == 0) {
-            row_color = 0xFFFFCC44;  /* gold = player */
-        } else {
-            row_color = 0xFFE0E0E0;  /* light grey = AI */
+        /* Right column: per-slot value derived from accessors. */
+        char val_buf[32];
+        switch (label_id) {
+        case LBL_CUP_POSITION: {
+            /* Original reads (&DAT_004660b4)[slot+0x14*0x14+0x2] — a cup-position
+             * lookup table that the port has not surfaced. Use final_position+1
+             * as a coarse fallback (cup position == finish position for the
+             * final cup race). */
+            int fp = td5_game_get_finish_position(focus_slot);
+            if (fp >= 0) snprintf(val_buf, sizeof(val_buf), "%d", fp + 1);
+            else         snprintf(val_buf, sizeof(val_buf), "-");
+            break;
         }
-
-        char buf[64];
-
-        if (!is_drag) {
-            int finish_pos = td5_game_get_finish_position(slot);
-            if (finish_pos >= 0 && td5_game_slot_is_finished(slot)) {
-                snprintf(buf, sizeof(buf), "%d", finish_pos + 1);  /* display 1-based */
-            } else {
-                snprintf(buf, sizeof(buf), "-");
-            }
-            fe_draw_text(col_pos, y, buf, row_color, sx * ts, sy * ts);
+        case LBL_CUP_POINTS:
+            snprintf(val_buf, sizeof(val_buf), "%d",
+                     (int)td5_game_get_result_secondary(focus_slot));
+            break;
+        case LBL_CUP_TIME: {
+            int32_t t = td5_game_get_result_primary(focus_slot);
+            if (t > 0) frontend_format_score_time(val_buf, sizeof(val_buf), t, 0);
+            else       snprintf(val_buf, sizeof(val_buf), "-");
+            break;
         }
-
-        snprintf(buf, sizeof(buf), (slot == 0) ? "PLAYER" : "CPU %d", slot);
-        fe_draw_text(col_name, y, buf, row_color, sx * ts, sy * ts);
-
-        {
-            int car_idx = (slot == 0) ? s_selected_car : g_td5.ai_car_indices[slot];
-            if (car_idx < 0 || car_idx > 36) car_idx = 0;
-            const char *cname = frontend_get_car_display_name(car_idx);
-            char cname_buf[18];
-            strncpy(cname_buf, cname ? cname : "", sizeof(cname_buf) - 1);
-            cname_buf[sizeof(cname_buf) - 1] = '\0';
-            fe_draw_text(col_car, y, cname_buf, row_color, sx * ts, sy * ts);
+        case LBL_AVG_SPEED: {
+            int spd = (int)td5_game_get_result_avg_speed(focus_slot);
+            snprintf(val_buf, sizeof(val_buf), "%d %s",
+                     frontend_convert_speed(spd, unit_kph),
+                     unit_kph ? "KPH" : "MPH");
+            break;
         }
-
-        {
-            int32_t ticks = td5_game_get_race_timer(slot, 0);
-            if (ticks <= 0) {
-                snprintf(buf, sizeof(buf), "DNF");
-            } else {
-                frontend_format_score_time(buf, sizeof(buf), ticks, 0);
-            }
-            fe_draw_text(col_time, y, buf, row_color, sx * ts, sy * ts);
+        case LBL_TOP_SPEED: {
+            int spd = (int)td5_game_get_result_top_speed(focus_slot);
+            snprintf(val_buf, sizeof(val_buf), "%d %s",
+                     frontend_convert_speed(spd, unit_kph),
+                     unit_kph ? "KPH" : "MPH");
+            break;
         }
-
-        if (is_cup) {
-            snprintf(buf, sizeof(buf), "%d", (int)td5_game_get_result_secondary(slot));
-            fe_draw_text(col_extra, y, buf, row_color, sx * ts, sy * ts);
+        case LBL_FINISH_POSITION: {
+            int fp = td5_game_get_finish_position(focus_slot);
+            if (fp >= 0 && td5_game_slot_is_finished(focus_slot))
+                snprintf(val_buf, sizeof(val_buf), "%d", fp + 1);
+            else
+                snprintf(val_buf, sizeof(val_buf), "DNF");
+            break;
         }
-
-        row++;
+        case LBL_HIGHEST_POSITION:
+            /* Original reads from cup-progression state not surfaced in port. */
+            snprintf(val_buf, sizeof(val_buf), "-");
+            break;
+        case LBL_TOTAL_TIME: {
+            int32_t t = td5_game_get_race_timer(focus_slot, 0);
+            if (t > 0) frontend_format_score_time(val_buf, sizeof(val_buf), t, 0);
+            else       snprintf(val_buf, sizeof(val_buf), "-");
+            break;
+        }
+        case LBL_CHECKPOINT_TIMERS: {
+            /* Original loops a short[] at slot+0x34e until *psVar2==0 or row
+             * Y >= 0x150 — i.e. as many lap splits as exist. The port emits
+             * the best lap time as a single value (slot's per-lap split list
+             * is owned by td5_game; expanding to individual splits here would
+             * hide labels behind a big block). Keep one summary line. */
+            int32_t best = td5_game_get_best_lap_time(focus_slot);
+            if (best > 0) frontend_format_score_time(val_buf, sizeof(val_buf), best, 0);
+            else          snprintf(val_buf, sizeof(val_buf), "-");
+            break;
+        }
+        case LBL_ARRESTS:
+            /* DAT_004660cc / wanted_kills not surfaced via accessor. */
+            snprintf(val_buf, sizeof(val_buf), "0");
+            break;
+        case LBL_POINTS:
+            snprintf(val_buf, sizeof(val_buf), "%d",
+                     (int)td5_game_get_result_secondary(focus_slot));
+            break;
+        default:
+            val_buf[0] = '\0';
+            break;
+        }
+        fe_draw_text(right_col, y, val_buf, val_color,
+                     sx * text_scale, sy * text_scale);
+        row_idx++;
     }
 
     /* Footer hint during interactive state 6 */
     if (s_inner_state == 6) {
-        const char *hint = is_drag ? "Press OK to continue"
-                                   : "L/R to browse  -  OK to continue";
+        const char *hint = (gt == 7 || gt == 9)
+                             ? "Press OK to continue"
+                             : "L/R to browse  -  OK to continue";
         float hw = fe_measure_text(hint, sx * 0.7f);
         fe_draw_text(panel_x + (pw - hw) * 0.5f, panel_y + ph - 28.0f * sy,
                      hint, 0xFFAAAAAA, sx * 0.7f, sy * 0.7f);
