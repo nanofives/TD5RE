@@ -2191,9 +2191,17 @@ static int64_t compound_cross(const TD5_StripSpan *sp,
  * Iterative boundary traversal matching original FUN_004440f0 switch logic.
  * Handles compound crossings (diagonal movement) in a single step.
  * Bitmask: bit0=forward(1), bit1=right(2), bit2=backward(4), bit3=left(8).
+ *
+ * `single_step`: when nonzero, exit after the FIRST single-bit case (1/2/4/8)
+ * fires — matches original 0x004440F0 "one-step-per-call" semantics. Compound
+ * cases (3/6/9/0xC) already exit after one step via compound_done. Used by
+ * the per-wheel walker (`td5_track_update_probe_position`) to prevent
+ * front wheels from over-advancing 2-3 spans per tick on slope onsets,
+ * which produced spurious +1792 FP ground-probe deltas at Moscow span 196
+ * front-wheel projections (Frida-localized 2026-05-01).
  */
 static void update_position_recursive(int16_t *track_state, int32_t pos_x, int32_t pos_z,
-                                       int depth)
+                                       int depth, int single_step)
 {
     int span_idx = (int)track_state[0];
     int sub_lane = (int)((int8_t *)track_state)[12];
@@ -2543,6 +2551,18 @@ static void update_position_recursive(int16_t *track_state, int32_t pos_x, int32
          * per pass-4 disasm). Exit the loop now. */
         if (compound_done)
             break;
+
+        /* When called from the per-wheel walker, exit after a single step
+         * regardless of which case fired. The per-wheel forward projection
+         * can carry a wheel across 2-3 span boundaries in one tick when
+         * the chassis is at speed; allowing the loop to chase those
+         * boundaries lands the wheel on a span 2-3 ahead of where the
+         * original would walk to (originals' 0x004440F0 is one-step-per-
+         * call). On slope onsets this produced +1792 FP spurious chassis-Y
+         * launches at Moscow span 196 front wheels. The chassis walker
+         * passes single_step=0 and continues iterating. */
+        if (single_step)
+            break;
     }
 
     if (!compound_done && iter >= TRACK_MAX_RECURSION) {
@@ -2602,7 +2622,10 @@ void td5_track_update_actor_position(TD5_Actor *actor)
     pos_x = *(int32_t *)((uint8_t *)actor + 0x1FC); /* world_pos.x */
     pos_z = *(int32_t *)((uint8_t *)actor + 0x204); /* world_pos.z */
 
-    update_position_recursive(track_state, pos_x, pos_z, 0);
+    /* Chassis walker: keep multi-step iteration (single_step=0) so the chassis
+     * span can catch up after large per-tick world_pos jumps (V2V push,
+     * spawn). Per-wheel walker uses single_step=1 below. */
+    update_position_recursive(track_state, pos_x, pos_z, 0, /*single_step=*/0);
 
     if ((uintptr_t)actor == (uintptr_t)0x004AB108u) {
         s_actor_position_log_counter++;
@@ -2632,8 +2655,16 @@ void td5_track_update_probe_position(TD5_TrackProbeState *probe,
 
     /* TD5_TrackProbeState layout matches the int16_t[8] layout expected
      * by update_position_recursive: [0]=span_index, [1]=normalized,
-     * [2]=accumulated, [3]=high_water, ... [6]=sub_lane_index (byte 12) */
-    update_position_recursive((int16_t *)probe, world_x, world_z, 0);
+     * [2]=accumulated, [3]=high_water, ... [6]=sub_lane_index (byte 12)
+     *
+     * single_step=1: match original 0x004440F0's per-wheel one-step-per-call
+     * semantics. Without this, the port's wheel walker can advance 2-3 spans
+     * per tick when the wheel's forward projection (~474 world units ahead of
+     * chassis) crosses multiple span boundaries, causing the wheel to read
+     * ground from a span ahead of where the original would. On slope onsets
+     * this produces +1792 FP spurious chassis-Y launches. Frida-localized at
+     * Moscow span 196 front wheels (2026-05-01). */
+    update_position_recursive((int16_t *)probe, world_x, world_z, 0, /*single_step=*/1);
 }
 
 /* ========================================================================
