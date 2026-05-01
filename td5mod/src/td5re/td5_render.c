@@ -1853,18 +1853,21 @@ void td5_render_actors_for_view(int view_index)
             /* Span-distance actor cull (mirrors original RenderRaceActorForView
              * @ 0x0040C2FD): for non-owner actors, compute |delta_spans| with
              * ring wrap and skip body+wheel+smoke render when delta >= cull
-             * window. Original's window comes from gRaceTrackSpanCullWindow @
-             * 0x004AAEF4 (written each frame in RunRaceFrame @ 0x42BB72 as
-             * 2*min(fp, gViewportLayoutMaxSpans[layout])). Port reuses
-             * fwd_window — view-distance scaled, defaulting to 1024 — as a
-             * symmetric abs window so this gate moves in lock-step with the
-             * existing track-span cull. Tire-track emitter still runs in the
-             * post-loop pass below regardless of this skip, matching the
-             * original LAB_0040c7ba goto-tail semantic.
-             * [CONFIRMED @ 0x40C2FD writer 0x42BB72 actor span at +0x82]
+             * window. Tire-track emitter still runs in the post-loop pass
+             * below for the view owner, matching LAB_0040c7ba's owner-only gate.
              *
-             * Owner slot is exempt — the camera-preset gate later in this
-             * loop is the original's owner-side skip path. */
+             * Original window: gRaceTrackSpanCullWindow @ 0x004AAEF4, written
+             * each frame in RunRaceFrame @ 0x42BB72 as
+             *   min(ftol((v*0.85+0.15)*max), max) * 2
+             * with max=64 fullscreen / 32 split-screen and v from 0x466ea8
+             * (default 0.65 → cullWindow=90; v=1.0 → 128 fullscreen / 64 split).
+             *
+             * Port reuses fwd_window — view-distance scaled, defaulting to
+             * 1024 — as a symmetric abs window so the actor cull stays
+             * coupled to the port's enlarged track-span horizon. Pinning to
+             * the faithful ~90 would leave a ~10× gap between visible track
+             * geometry and visible AI cars. [CONFIRMED @ 0x40C2FD; writer @
+             * 0x42BB72; actor span at +0x82] */
             if (slot != camera_target_slot && slot < TD5_MAX_RACER_SLOTS) {
                 TD5_Actor *owner = td5_game_get_actor(camera_target_slot);
                 if (owner) {
@@ -1994,23 +1997,23 @@ void td5_render_actors_for_view(int view_index)
                       (void *)mesh);
         }
 
-        /* Per-actor tire-track emitter dispatch (UpdateTireTrackEmitters
-         * @ 0x43FAE0). Original calls this from RenderRaceActorForView at
-         * LAB_0040c7ba — runs once per actor per view, AFTER the body/wheel/
-         * smoke render gates. Even cull/preset-skipped actors reach this
-         * tail, so the dispatch is gated only by slot-state (state==3 means
-         * disabled / not present in the original's RenderRaceActorsForView
-         * iteration filter at 0x40BD26).
+        /* Per-view tire-track emitter dispatch (UpdateTireTrackEmitters
+         * @ 0x43FAE0). Original RenderRaceActorForView LAB_0040c7ba body:
+         *   if (actor_00 == *(&gPrimarySelectedSlot + view_idx))
+         *       UpdateTireTrackEmitters(actor);
+         * Only the view-owning actor runs the tire-effect chain — AI cars
+         * never reach it. Body+wheel+smoke render still iterates all actors
+         * above; only the slip-derived smoke + skid-mark spawn is owner-only.
+         * [CONFIRMED @ 0x40C7BA: actor==local_18 gate]
          *
-         * Port previously dispatched from sim-tick td5_game.c, but Ghidra
-         * function_callers confirms 0x43FAE0 has a SINGLE caller — 0x40C120.
-         * Sim only runs UpdateTireTrackPool (per-slot intensity decay).
-         * [CONFIRMED @ 0x40C120 + 0x43FAE0 callers] */
-        for (int slot = 0; slot < TD5_MAX_RACER_SLOTS; slot++) {
-            TD5_Actor *actor = td5_game_get_actor(slot);
-            if (!actor) continue;
-            if (td5_game_get_slot_state(slot) == 3) continue;
-            td5_vfx_update_tire_track_emitters(actor, view_index);
+         * function_callers confirms 0x43FAE0 has exactly one caller (0x40C120)
+         * and UpdateRear/FrontTireEffects each have one caller (0x43FAE0).
+         * No sim-tick path in the original. */
+        if (camera_target_slot >= 0 && camera_target_slot < TD5_MAX_RACER_SLOTS) {
+            TD5_Actor *owner_actor = td5_game_get_actor(camera_target_slot);
+            if (owner_actor && td5_game_get_slot_state(camera_target_slot) != 3) {
+                td5_vfx_update_tire_track_emitters(owner_actor, view_index);
+            }
         }
     }
 
