@@ -495,6 +495,12 @@ int td5_game_tick(void) {
         if (g_td5.ini.start_screen >= 0 && g_td5.ini.start_screen < TD5_SCREEN_COUNT) {
             TD5_LOG_I(LOG_TAG, "StartScreen=%d: jumping to screen %d",
                       g_td5.ini.start_screen, g_td5.ini.start_screen);
+            /* Natural flow runs init_resources via Screen_LocalizationInit.
+             * StartScreen bypasses that; load resources directly so fonts,
+             * the white fallback page, and the bg gallery are present on
+             * the first tick of the target screen. Idempotent: each loader
+             * has an internal guard. */
+            td5_frontend_init_resources();
             td5_frontend_set_screen((TD5_ScreenIndex)g_td5.ini.start_screen);
             g_td5.ini.start_screen = -1;  /* one-shot */
         }

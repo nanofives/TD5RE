@@ -8654,23 +8654,15 @@ static void Screen_RaceResults(void) {
             s_results_rerace_flag = 1;
         }
 
-        /* Panel body is drawn per-frame by frontend_render_race_results_overlay.
-         *
-         * Original @ 0x0042278B creates a 520x32 blank click-catcher button
-         * (idx 0) + 96x32 SNK_OkButTxt (idx 1); state 6 exits on button_index<2.
-         * Port creates only the OK button: the blank spacer renders as a huge
-         * visible rect in the port's live-draw model, and a single confirm
-         * button (idx 0) satisfies state 6's exit check.
-         *
-         * Explicit-placed at panel bottom: center_x - 48 = 272, y = 400.
-         * Width 0x60 = 96 per SNK_OkButTxt dimensions @ 0x004227A0. */
-        frontend_create_button("OK", FE_CENTER_X - 48, 400, 0x60, 0x20);
-
-        /* If player disqualified/DNF -> route to cup failed */
+        /* Skip the positions-table sub-flow on entry — original screen 24
+         * lands the user on the 5-button post-race menu, not the per-slot
+         * positions browser. The browser is reachable via the View Race
+         * Data button (case 2 of state 0x10) which seeds state 1 with the
+         * OK click-catcher. State 0xD builds the menu directly. */
         s_results_cup_complete = 0;
         s_results_skip_display = 0;
         s_anim_tick = 0;
-        s_inner_state = 1;
+        s_inner_state = 0x0D;
         break;
 
     case 1: case 2: /* Present buffer, reset counter */
@@ -8866,9 +8858,18 @@ static void Screen_RaceResults(void) {
                 frontend_init_race_schedule();
                 break;
 
-            case 2: /* View Race Data / High Score Table */
-                td5_frontend_set_screen(TD5_SCREEN_HIGH_SCORE);
-                break;
+            case 2: /* View Race Data — show per-slot positions table.
+                     * Tear down the menu, plant the OK click-catcher used
+                     * by state 6 to exit, and seed state 1 (present-buffer
+                     * → slide-in → interactive browse). State 6 confirm
+                     * routes back through 0xB → 0xC → 0xD which rebuilds
+                     * the menu. */
+                frontend_reset_buttons();
+                frontend_create_button("OK", FE_CENTER_X - 48, 400, 0x60, 0x20);
+                s_results_skip_display = 0;
+                s_anim_tick = 0;
+                s_inner_state = 1;
+                return;
 
             case 3: /* Save Race Status / Select New Car */
                 if (s_selected_game_type >= 1 && s_selected_game_type <= 6) {
