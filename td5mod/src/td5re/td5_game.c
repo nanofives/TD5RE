@@ -698,6 +698,16 @@ int td5_game_slot_is_finished(int slot)
     return (s_metrics[slot].post_finish_metric_base != 0) ? 1 : 0;
 }
 
+/* 0-based finish position for a slot (0=1st, 1=2nd, ...).
+ * [CONFIRMED @ 0x004233E0 dispatch] mirrors DAT_0048d988._2_2_ — the int16 at
+ * offset +2 of s_results entry (stride 0x14 = 20 bytes), written by the sort
+ * functions at 0x40AAD0/0x40AB80. Returns -1 if unsorted (still 0 from BSS). */
+int td5_game_get_finish_position(int slot)
+{
+    if (slot < 0 || slot >= TD5_MAX_RACER_SLOTS) return -1;
+    return (int)s_results[slot].final_position;
+}
+
 /* Returns the companion_2 byte for a slot. Mirrors
  * gRaceSlotStateTable.slot[i].companion_state_2 (offset +2 in the 4-byte slot
  * record at original VA 0x004a8898). Used by Screen_RaceResults case 0 to

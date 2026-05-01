@@ -110,6 +110,7 @@ int32_t td5_game_get_result_top_speed(int slot); /* top speed raw units */
 int32_t td5_game_get_result_avg_speed(int slot); /* average speed raw units */
 int     td5_game_get_race_order(int pos);         /* slot index at finish position pos */
 int     td5_game_slot_is_finished(int slot);      /* 1 if post_finish_metric_base != 0 */
+int     td5_game_get_finish_position(int slot);   /* 0-based finish position (0 = 1st), -1 if not set */
 int32_t td5_game_get_best_lap_time(int slot);     /* best lap ticks, lap-type tracks */
 
 /* Re-sort s_results in place using the current game_type's metric.
