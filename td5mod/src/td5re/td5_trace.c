@@ -8,6 +8,7 @@
 #include "td5re.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #define LOG_TAG "trace"
@@ -96,7 +97,17 @@ void td5_trace_init(void)
         return;
     }
 
-    snprintf(path, sizeof(path), "%srace_trace.csv", td5_plat_log_dir());
+    /* Per-session CSV path override. The /diff-race orchestrator sets this
+     * to log/race_trace_<session-tag>.csv when running multiple sessions in
+     * parallel so their traces don't stomp on each other's output. When
+     * unset (the common interactive case) we fall back to the default
+     * log/race_trace.csv. */
+    const char *override_path = getenv("TD5RE_RACE_TRACE_PATH");
+    if (override_path && *override_path) {
+        snprintf(path, sizeof(path), "%s", override_path);
+    } else {
+        snprintf(path, sizeof(path), "%srace_trace.csv", td5_plat_log_dir());
+    }
     s_trace_fp = fopen(path, "w");
     if (!s_trace_fp) {
         TD5_LOG_E(LOG_TAG, "Failed to open race trace output: %s", path);
@@ -107,11 +118,17 @@ void td5_trace_init(void)
     fflush(s_trace_fp);
     s_trace_enabled = 1;
 
-    /* Open the separate calls-trace CSV. Schema matches the Frida side. */
+    /* Open the separate calls-trace CSV. Schema matches the Frida side.
+     * Honors TD5RE_CALLS_TRACE_PATH for parallel-session safety. */
     {
         char calls_path[640];
-        snprintf(calls_path, sizeof(calls_path), "%scalls_trace.csv",
-                 td5_plat_log_dir());
+        const char *override_calls = getenv("TD5RE_CALLS_TRACE_PATH");
+        if (override_calls && *override_calls) {
+            snprintf(calls_path, sizeof(calls_path), "%s", override_calls);
+        } else {
+            snprintf(calls_path, sizeof(calls_path), "%scalls_trace.csv",
+                     td5_plat_log_dir());
+        }
         s_calls_fp = fopen(calls_path, "w");
         if (s_calls_fp) {
             fputs("sim_tick,fn_name,call_idx,n_args,arg_0,arg_1,arg_2,arg_3,"
