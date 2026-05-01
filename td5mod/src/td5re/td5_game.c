@@ -2774,10 +2774,33 @@ static void tick_pending_finish_timer(int slot) {
         }
     }
 
-    /* Per-tick decrement matches the hi/lo bank in the original. Port combines
-     * hi and lo into a single int16; subtracting 2 per tick models the low
-     * byte -= 2 operation and the carry into the high byte is implicit. */
-    m->timer_ticks -= 2;
+    /* Faithful port of original AdvancePendingFinishState @ 0x0040A2DC:
+     *   uVar6 = uVar5 - 2; if (uVar6 < 0) { uVar6 = uVar5 + 0x39; uVar2--; }
+     *   *(ushort*)(actor+0x344) = CONCAT11(uVar2, uVar6);
+     *
+     * uVar5 = lo byte, uVar2 = hi byte. The wrap uVar5 + 0x39 (57) means
+     * lo cycles 0..58 even / 1..59 odd → 30 sub-ticks per hi-decrement →
+     * hi-byte = SECONDS at 30 Hz. The previous flat `-= 2` decremented
+     * timer_ticks correctly in raw count but made the displayed hi-byte
+     * tick at ~0.23/sec instead of 1/sec. */
+    {
+        uint16_t t = (uint16_t)m->timer_ticks;
+        int hi = (int)((t >> 8) & 0xFF);
+        int lo = (int)(t & 0xFF);
+        int new_lo = lo - 2;
+        if (new_lo < 0) {
+            new_lo = lo + 0x39;
+            if (hi == 0) {
+                /* Hi-byte underflow → race-finish path below. */
+                m->timer_ticks = 0;
+            } else {
+                hi -= 1;
+                m->timer_ticks = (int16_t)(((uint16_t)hi << 8) | (uint8_t)new_lo);
+            }
+        } else {
+            m->timer_ticks = (int16_t)(((uint16_t)hi << 8) | (uint8_t)new_lo);
+        }
+    }
 
     if (m->timer_ticks <= 0) {
         /* Timer expired - race-fail-on-timeout. Equivalent to the original's
