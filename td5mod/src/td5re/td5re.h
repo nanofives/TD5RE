@@ -210,6 +210,7 @@ typedef struct TD5_GlobalState {
         int  default_game_type;
         int  skip_intro;
         int  debug_overlay;
+        int  debug_collisions;   /* 1 = draw wireframe of track wall/span geometry */
         /* Trace */
         int  race_trace_enabled;
         int  race_trace_slot;

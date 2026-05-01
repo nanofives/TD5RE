@@ -20,6 +20,7 @@
 #include "td5_physics.h"
 #include "td5_ai.h"
 #include "td5_platform.h"
+#include "td5_render.h"
 #include "td5_trace.h"
 #include "../../../re/include/td5_actor_struct.h"
 #include "td5re.h"
@@ -28,8 +29,6 @@
 #include <math.h>
 
 #define LOG_TAG "track"
-
-extern int AngleFromVector12(int x, int z);
 
 static uint32_t s_actor_position_log_counter = 0;
 static uint32_t s_probe_log_counter = 0;
@@ -4933,4 +4932,97 @@ int td5_track_get_primary_route_heading(int span_index)
     }
 
     return AngleFromVector12(dx, dz) & 0xFFF;
+}
+
+/* ========================================================================
+ * Debug overlay: collision wireframe
+ *
+ * Emits world-space line segments showing the rail and transverse edges of
+ * spans within ±span_radius of center_span. The same geometry is what the
+ * wall-contact resolvers test probes against, so this is a live view of the
+ * collision world as the physics layer sees it.
+ *
+ * Color scheme:
+ *   white   — left/right rails (the actual wall edges)
+ *   cyan    — transverse near/far edges (span boundaries)
+ *   yellow  — current player span (highlighted on top of white/cyan)
+ * ======================================================================== */
+
+static inline void emit_strip_line(const TD5_StripSpan *sp,
+                                   const TD5_StripVertex *a,
+                                   const TD5_StripVertex *b,
+                                   uint32_t argb)
+{
+    if (!a || !b) return;
+    float ax = (float)((int32_t)sp->origin_x + (int32_t)a->x);
+    float ay = (float)((int32_t)sp->origin_y + (int32_t)a->y);
+    float az = (float)((int32_t)sp->origin_z + (int32_t)a->z);
+    float bx = (float)((int32_t)sp->origin_x + (int32_t)b->x);
+    float by = (float)((int32_t)sp->origin_y + (int32_t)b->y);
+    float bz = (float)((int32_t)sp->origin_z + (int32_t)b->z);
+    td5_render_debug_line_world(ax, ay, az, bx, by, bz, argb);
+}
+
+static void emit_span_wireframe(int span_index, uint32_t rail_color,
+                                uint32_t cross_color)
+{
+    if (span_index < 0 || span_index >= s_span_count) return;
+    const TD5_StripSpan *sp = &s_span_array[span_index];
+
+    /* Skip sentinels / non-geometry spans. */
+    if (sp->span_type == 9 || sp->span_type == 10) return;
+
+    int lane_count = span_lane_count(sp);
+    if (lane_count < 1) lane_count = 1;
+
+    int li = (int)sp->left_vertex_index;
+    int ri = (int)sp->right_vertex_index;
+
+    /* Layout (corrected 2026-04-28):
+     *   li_base + i   = NEAR row, i in [0..lane_count] (left→right)
+     *   ri_base + i   = FAR  row */
+    TD5_StripVertex *nw = vertex_at(li + 0);
+    TD5_StripVertex *ne = vertex_at(li + lane_count);
+    TD5_StripVertex *sw = vertex_at(ri + 0);
+    TD5_StripVertex *se = vertex_at(ri + lane_count);
+
+    /* Left rail (NW→SW) and right rail (NE→SE) — the actual wall edges. */
+    emit_strip_line(sp, nw, sw, rail_color);
+    emit_strip_line(sp, ne, se, rail_color);
+
+    /* Transverse edges (NW→NE, SW→SE) — span boundaries. */
+    emit_strip_line(sp, nw, ne, cross_color);
+    emit_strip_line(sp, sw, se, cross_color);
+
+    /* Inner sub-lane separators (cosmetic, helps visualize lane count). */
+    for (int i = 1; i < lane_count; i++) {
+        TD5_StripVertex *n = vertex_at(li + i);
+        TD5_StripVertex *s = vertex_at(ri + i);
+        emit_strip_line(sp, n, s, 0xFF404040u);
+    }
+}
+
+void td5_track_debug_emit_collision_lines(int center_span, int span_radius)
+{
+    if (!s_span_array || !s_vertex_table || s_span_count <= 0) return;
+    if (span_radius < 0) span_radius = 0;
+    if (span_radius > s_span_count) span_radius = s_span_count;
+
+    const uint32_t RAIL_COLOR  = 0xFFFFFFFFu; /* white */
+    const uint32_t CROSS_COLOR = 0xFF00FFFFu; /* cyan */
+    const uint32_t PLAYER_RAIL = 0xFFFFFF00u; /* yellow */
+    const uint32_t PLAYER_CROSS = 0xFFFFA000u;/* amber */
+
+    int lo = center_span - span_radius;
+    int hi = center_span + span_radius;
+    if (lo < 0) lo = 0;
+    if (hi >= s_span_count) hi = s_span_count - 1;
+
+    for (int s = lo; s <= hi; s++) {
+        if (s == center_span) continue;
+        emit_span_wireframe(s, RAIL_COLOR, CROSS_COLOR);
+    }
+    /* Player span last so it draws on top of any overlapping neighbors. */
+    if (center_span >= 0 && center_span < s_span_count)
+        emit_span_wireframe(center_span, PLAYER_RAIL, PLAYER_CROSS);
 }

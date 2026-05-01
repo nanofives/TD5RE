@@ -205,6 +205,7 @@ static int td5_apply_cli_overrides(const char *cmdline,
         { "DefaultGameType",      &g_td5.ini.default_game_type },
         { "SkipIntro",            &g_td5.ini.skip_intro },
         { "DebugOverlay",         &g_td5.ini.debug_overlay },
+        { "DebugCollisions",      &g_td5.ini.debug_collisions },
         { "AutoRace",             &g_td5.ini.auto_race },
         { "StartScreen",          &g_td5.ini.start_screen },
         { "StartSpanOffset",      &g_td5.ini.start_span_offset },
@@ -369,6 +370,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     g_td5.ini.default_game_type = td5_ini_int("Game", "DefaultGameType", 0);
     g_td5.ini.skip_intro        = td5_ini_int("Game", "SkipIntro", 1);
     g_td5.ini.debug_overlay     = td5_ini_int("Game", "DebugOverlay", 0);
+    g_td5.ini.debug_collisions  = td5_ini_int("Debug", "Collisions", 0);
 
     /* Benchmark mode: enables main-menu button 2 → TD5_GAMESTATE_BENCHMARK path.
      * Matches the original's dead-code button-2 branch (app+0x170 is never written

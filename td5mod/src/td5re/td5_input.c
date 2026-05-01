@@ -356,6 +356,20 @@ post_poll:
         TD5_LOG_D(LOG_TAG, "F3 release: camera cycle pulse (no-op in original)");
     }
 
+    /* F12 — toggle the collision-wireframe overlay (DIK_F12 = 0x58). Rising
+     * edge only so a held key doesn't strobe the flag. Mirrors the
+     * --DebugCollisions CLI / [Debug] Collisions INI setting. */
+    {
+        static int s_prev_f12 = 0;
+        int f12_now = td5_plat_input_key_pressed(0x58);
+        if (f12_now && !s_prev_f12) {
+            g_td5.ini.debug_collisions = !g_td5.ini.debug_collisions;
+            TD5_LOG_I(LOG_TAG, "F12: collision wireframe %s",
+                      g_td5.ini.debug_collisions ? "ON" : "OFF");
+        }
+        s_prev_f12 = f12_now;
+    }
+
     /* Escape handling: trigger race exit fade */
     if ((s_control_bits[0] & 0x40000000u) != 0 &&
         !s_escape_muted &&

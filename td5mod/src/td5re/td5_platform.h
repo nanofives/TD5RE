@@ -295,6 +295,13 @@ void td5_plat_render_end_scene(void);
 void td5_plat_render_draw_tris(const TD5_D3DVertex *verts, int vertex_count,
                                 const uint16_t *indices, int index_count);
 
+/** Draw pre-transformed lines (LINELIST, no texture, vertex color only).
+ *  vert_count must be even — each consecutive pair forms one line segment.
+ *  Used by the debug-collision overlay; depth test on, depth write off,
+ *  no blending, no fog. Bypasses the regular state cache; the next call to
+ *  td5_plat_render_draw_tris re-binds standard state. */
+void td5_plat_render_draw_lines(const TD5_D3DVertex *verts, int vert_count);
+
 /** Set render state preset (0-3). */
 void td5_plat_render_set_preset(TD5_RenderPreset preset);
 

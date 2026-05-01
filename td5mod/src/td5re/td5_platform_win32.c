@@ -2196,6 +2196,70 @@ void td5_plat_render_draw_tris(const TD5_D3DVertex *verts, int vertex_count,
     }
 }
 
+void td5_plat_render_draw_lines(const TD5_D3DVertex *verts, int vert_count)
+{
+    ID3D11DeviceContext *ctx = g_backend.context;
+    D3D11_MAPPED_SUBRESOURCE mapped;
+    UINT stride = TD5_VERTEX_STRIDE;
+    UINT offset = 0;
+    HRESULT hr;
+
+    if (!ctx || !verts || vert_count < 2) return;
+    if (!g_backend.white_srv) return;
+    if ((size_t)vert_count * stride > g_backend.dynamic_vb_size) return;
+
+    hr = ID3D11DeviceContext_Map(ctx, (ID3D11Resource *)g_backend.dynamic_vb,
+        0, D3D11_MAP_WRITE_DISCARD, 0, &mapped);
+    if (FAILED(hr)) return;
+    memcpy(mapped.pData, verts, (size_t)vert_count * stride);
+    ID3D11DeviceContext_Unmap(ctx, (ID3D11Resource *)g_backend.dynamic_vb, 0);
+
+    ID3D11DeviceContext_IASetVertexBuffers(ctx, 0, 1, &g_backend.dynamic_vb,
+                                           &stride, &offset);
+    ID3D11DeviceContext_IASetInputLayout(ctx, g_backend.input_layout);
+    ID3D11DeviceContext_IASetPrimitiveTopology(ctx,
+        D3D11_PRIMITIVE_TOPOLOGY_LINELIST);
+
+    ID3D11DeviceContext_VSSetShader(ctx, g_backend.vs_pretransformed, NULL, 0);
+    ID3D11DeviceContext_VSSetConstantBuffers(ctx, 0, 1, &g_backend.cb_viewport);
+
+    /* PS_MODULATE * white texel = vertex color. Disable fog and alpha test
+     * via a fresh fog CB upload bounded to this draw. */
+    ID3D11DeviceContext_PSSetShader(ctx, g_backend.ps_shaders[PS_MODULATE], NULL, 0);
+    ID3D11DeviceContext_PSSetShaderResources(ctx, 0, 1, &g_backend.white_srv);
+    ID3D11DeviceContext_PSSetSamplers(ctx, 0, 1, &g_backend.sampler_states[SAMP_POINT_CLAMP]);
+    ID3D11DeviceContext_PSSetConstantBuffers(ctx, 0, 1, &g_backend.cb_fog);
+    {
+        FogCB fog = {0};
+        fog.fogEnabled = 0;
+        fog.alphaTestEnabled = 0;
+        fog.alphaRef = 0.0f;
+        ID3D11DeviceContext_UpdateSubresource(ctx,
+            (ID3D11Resource*)g_backend.cb_fog, 0, NULL, &fog, 0, 0);
+    }
+
+    ID3D11DeviceContext_RSSetState(ctx, g_backend.rs_state);
+    /* Z test on (so lines occlude correctly), Z write off (don't poison depth
+     * for subsequent overlays), no blend. */
+    ID3D11DeviceContext_OMSetDepthStencilState(ctx,
+        g_backend.ds_states[DS_Z_ON_WRITE_OFF], 0);
+    ID3D11DeviceContext_OMSetBlendState(ctx,
+        g_backend.blend_states[BLEND_OPAQUE], NULL, 0xFFFFFFFF);
+
+    ID3D11DeviceContext_Draw(ctx, (UINT)vert_count, 0);
+
+    /* Invalidate cached state-object indices so the next ApplyStateCache
+     * actually re-binds (current_* values must mismatch what we just set). */
+    g_backend.state.current_blend_idx = -1;
+    g_backend.state.current_ds_idx    = -1;
+    g_backend.state.current_samp_idx  = -1;
+    g_backend.state.current_ps_idx    = -1;
+    g_backend.state.dirty = 1;
+    /* Force texture rebind on next draw — current_srv was overwritten with white. */
+    g_backend.current_srv = NULL;
+    s_last_bound_texture_page = -1;
+}
+
 void td5_plat_render_set_preset(TD5_RenderPreset preset)
 {
     RenderStateCache *s = &g_backend.state;
