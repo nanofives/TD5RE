@@ -21,14 +21,17 @@
 #include <stdlib.h>
 #include <ctype.h>
 
+#include "td5_asset.h"
 #include "td5_platform.h"
 
 #define LOG_TAG "frontend"
 
-/* Texture page range for cached button surfaces. Sits below
- * SHARED_PAGE_BG_GALLERY (888) so it doesn't collide with any other
- * shared page. Pages 880..887. */
-#define BTNCACHE_PAGE_BASE 880
+/* Texture page range for cached button surfaces. Pages 940..955 sit
+ * above the frontend surface pool (900..931) and the title-strip pool
+ * (931..939) and below the 1024-page hard limit, with no collisions
+ * against the wheel-hub range (800..823) or the other shared assets
+ * (894..899, 888..892). */
+#define BTNCACHE_PAGE_BASE 940
 
 /* ButtonBits.png 9-slice geometry (mirror of fe_draw_button_9slice).
  * Source layout from FUN_00425b60: two columns (left 26px, right 28px),
@@ -47,12 +50,25 @@ typedef struct {
     int      page;          /* texture page (BTNCACHE_PAGE_BASE + index), or -1 */
     int      texw;          /* full texture width (== half_w) */
     int      texh;          /* full texture height (== 2 * half_h) */
+    int      half_w;
     int      half_h;
     uint32_t *pixels;       /* BGRA32, retained for device-reset recovery */
     char     label[64];
 } BtnCacheSlot;
 
 static BtnCacheSlot s_slots[TD5_FE_BTNCACHE_MAX];
+
+/* Retained ButtonBits + BodyText source BGRA buffers. Loaded once on
+ * first ensure_page() call; held until shutdown so re-bakes triggered
+ * by screen transitions are cheap (just CPU compositing, no PNG decode). */
+static struct {
+    uint32_t *bb_pixels;
+    int       bbw, bbh;
+    uint32_t *font_pixels;
+    int       fw, fh;
+    int       attempted; /* 1 if we already tried to load (success or fail) */
+    int       loaded;    /* 1 if both buffers are valid */
+} s_src;
 
 /* ------------------------------------------------------------------ helpers */
 
@@ -63,7 +79,7 @@ static void slot_release_pixels(BtnCacheSlot *s) {
     }
     s->page = -1;
     s->texw = s->texh = 0;
-    s->half_h = 0;
+    s->half_w = s->half_h = 0;
     s->label[0] = '\0';
 }
 
@@ -130,10 +146,13 @@ static void composite_half(uint32_t *dst, int dw, int dh, int yo,
         /* Top strip between corners */
         fill_rect(dst, dw, dh, BB_LW, yo,
                   bw - BB_LW - BB_RW, bh, fill);
-        /* Left column between corners */
+        /* Left column between TL/BL corners (asymmetric: tl_h=13, bl_h=9) */
         fill_rect(dst, dw, dh, 0, yo + tl_h,
                   BB_LW, bh - tl_h - bl_h, fill);
-        /* Right column between corners */
+        /* Right column between TR/BR corners (asymmetric: tr_h=9, br_h=13).
+         * Must use the right-column y bounds, NOT the left's, otherwise rows
+         * yo+9..yo+12 stay alpha=0 and the LINEAR-filtered draw shows a 4-row
+         * gap on the right side of the button. */
         fill_rect(dst, dw, dh, bw - BB_RW, yo + tr_h,
                   BB_RW, bh - tr_h - br_h, fill);
     }
@@ -150,10 +169,17 @@ static void composite_half(uint32_t *dst, int dw, int dh, int yo,
         }
     }
 
-    /* Vertical edge tiles (4 px tall, full column width). */
+    /* Vertical edge tiles. Left and right use ASYMMETRIC corner heights
+     * (mirrors the runtime fe_draw_button_9slice which has two separate
+     * loops). Single shared loop is wrong: it leaves a 4-row gap on the
+     * right column (rows yo+9..yo+12 in state 1) because the right
+     * column's TR corner is only 9 px tall but the loop's y-min uses the
+     * left column's tl_h=13. */
     for (int y = yo + tl_h; y < yo + bh - bl_h; y += BB_TILE) {
         blit_rect(dst, dw, dh, 0, y,
                   bb, bbw, bbh, 0, yb, BB_LW, BB_TILE);
+    }
+    for (int y = yo + tr_h; y < yo + bh - br_h; y += BB_TILE) {
         blit_rect(dst, dw, dh, bw - BB_RW, y,
                   bb, bbw, bbh, BB_RX, yb, BB_RW, BB_TILE);
     }
@@ -244,6 +270,7 @@ int td5_fe_btncache_bake_button(int index, const char *label, int w, int h,
     }
     s->texw = texw;
     s->texh = texh;
+    s->half_w = w;
     s->half_h = h;
     strncpy(s->label, label ? label : "", sizeof(s->label) - 1);
     s->label[sizeof(s->label) - 1] = '\0';
@@ -277,6 +304,72 @@ int td5_fe_btncache_get_page(int index, const char *label) {
     if (s->page < 0 || !s->pixels) return -1;
     if (label && strcmp(s->label, label) != 0) return -1;
     return s->page;
+}
+
+static int load_source_pixels(void) {
+    if (s_src.loaded) return 1;
+    if (s_src.attempted) return 0;  /* one-shot retry guard */
+    s_src.attempted = 1;
+
+    void *bb = NULL;
+    int bbw = 0, bbh = 0;
+    if (!td5_asset_load_png_to_buffer("re/assets/frontend/ButtonBits.png",
+                                       TD5_COLORKEY_BLACK, &bb, &bbw, &bbh)) {
+        TD5_LOG_W(LOG_TAG, "btncache: ButtonBits.png load failed");
+        return 0;
+    }
+    void *fp = NULL;
+    int fw = 0, fh = 0;
+    if (!td5_asset_load_png_to_buffer("re/assets/frontend/BodyText.png",
+                                       TD5_COLORKEY_BLACK, &fp, &fw, &fh)) {
+        TD5_LOG_W(LOG_TAG, "btncache: BodyText.png load failed");
+        free(bb);
+        return 0;
+    }
+    s_src.bb_pixels = (uint32_t *)bb;
+    s_src.bbw = bbw;
+    s_src.bbh = bbh;
+    s_src.font_pixels = (uint32_t *)fp;
+    s_src.fw = fw;
+    s_src.fh = fh;
+    s_src.loaded = 1;
+    TD5_LOG_I(LOG_TAG, "btncache: source pixels loaded BB=%dx%d Font=%dx%d",
+              bbw, bbh, fw, fh);
+    return 1;
+}
+
+int td5_fe_btncache_ensure_page(int index, const char *label, int w, int h,
+                                const uint8_t *glyph_advance) {
+    if (index < 0 || index >= TD5_FE_BTNCACHE_MAX) return -1;
+    if (w <= 0 || h <= 0 || !label || !glyph_advance) return -1;
+
+    BtnCacheSlot *s = &s_slots[index];
+    /* Cache hit: page valid AND label matches AND dims match. */
+    if (s->page >= 0 && s->pixels &&
+        s->half_w == w && s->half_h == h &&
+        strcmp(s->label, label) == 0) {
+        return s->page;
+    }
+
+    if (!load_source_pixels()) return -1;
+
+    if (!td5_fe_btncache_bake_button(index, label, w, h,
+                                     (const uint8_t *)s_src.bb_pixels,
+                                     s_src.bbw, s_src.bbh,
+                                     (const uint8_t *)s_src.font_pixels,
+                                     s_src.fw, s_src.fh,
+                                     glyph_advance)) {
+        return -1;
+    }
+    return s->page;
+}
+
+void td5_fe_btncache_release_sources(void) {
+    if (s_src.bb_pixels)   { free(s_src.bb_pixels);   s_src.bb_pixels = NULL; }
+    if (s_src.font_pixels) { free(s_src.font_pixels); s_src.font_pixels = NULL; }
+    s_src.bbw = s_src.bbh = s_src.fw = s_src.fh = 0;
+    s_src.loaded = 0;
+    s_src.attempted = 0;
 }
 
 void td5_fe_btncache_recover(void) {

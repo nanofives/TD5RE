@@ -3388,6 +3388,8 @@ void td5_frontend_release_resources(void) {
     TD5_LOG_I(LOG_TAG, "ReleaseFrontendResources");
     /* Release all loaded surfaces, fonts, work buffers */
     for (int i = 0; i < FE_MAX_SURFACES; i++) s_surfaces[i].in_use = 0;
+    td5_fe_btncache_reset();
+    td5_fe_btncache_release_sources();
     s_font_page = -1;
     s_cursor_tex_page = -1;
     s_cursor_w = 0; s_cursor_h = 0;
@@ -5111,15 +5113,28 @@ void td5_frontend_render_ui_rects(void) {
         else if (focused || flash_active)     bb_state = 0;
         else                                   bb_state = 1;
 
+        /* Eligibility for surface caching: any active, non-disabled,
+         * non-selector button with a non-empty static label. Selectors
+         * draw arrows + value text on top of the frame and would need a
+         * different cache layout; disabled buttons render with state 2
+         * (gray) which isn't baked. */
         int cache_page = -1;
-        if (s_current_screen == TD5_SCREEN_MAIN_MENU && !s_buttons[i].disabled
-            && !s_buttons[i].is_selector) {
-            cache_page = td5_fe_btncache_get_page(i, s_buttons[i].label);
+        if (!s_buttons[i].disabled && !s_buttons[i].is_selector
+            && s_buttons[i].label[0] && s_font_page >= 0) {
+            cache_page = td5_fe_btncache_ensure_page(i, s_buttons[i].label,
+                                                    s_buttons[i].w, s_buttons[i].h,
+                                                    s_font_glyph_advance);
         }
 
         if (cache_page >= 0) {
-            float v0 = (bb_state == 0) ? 0.5f : 0.0f;
-            float v1 = (bb_state == 0) ? 1.0f : 0.5f;
+            /* Cache is 224x64 with halves stacked at row 32. Inset v at
+             * the half boundary by half a texel so LINEAR filtering does
+             * not blend row 31 (other half) with row 32. u stays at the
+             * cache edges -- corners fully cover cols 0..25 and 196..223
+             * with opaque content, so there is no need to inset u. */
+            const float kV = 0.5f / 64.0f;
+            float v0 = (bb_state == 0) ? (0.5f + kV) : 0.0f;
+            float v1 = (bb_state == 0) ? 1.0f         : (0.5f - kV);
             td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
             fe_draw_quad(bx, by, bw, bh, 0xFFFFFFFF, cache_page,
                          0.0f, v0, 1.0f, v1);
@@ -5674,57 +5689,6 @@ static void Screen_LegalCopyright(void) {
 }
 
 /* ========================================================================
- * Main-menu button surface bake (Phase 6).
- *
- * After the 7 buttons are created at Screen_MainMenu case 0, load fresh
- * BGRA32 buffers for ButtonBits.png and BodyText.png and bake each
- * button's 224x64 cache (top half = state 1 unselected, bottom half =
- * state 0 selected). Per-frame button rendering then collapses to one
- * fe_draw_quad per button.
- *
- * Mirrors the original CreateFrontendDisplayModeButton (0x00425DE0)
- * called 7x at MainMenu init. Decoupled from the Phase 1-5 work so it
- * can be gated independently.
- * ======================================================================== */
-
-static void frontend_bake_main_menu_buttons(void) {
-    void *bb_pixels = NULL;
-    int bbw = 0, bbh = 0;
-    if (!td5_asset_load_png_to_buffer("re/assets/frontend/ButtonBits.png",
-                                       TD5_COLORKEY_BLACK, &bb_pixels, &bbw, &bbh)) {
-        TD5_LOG_W(LOG_TAG, "btncache bake: ButtonBits.png load failed");
-        return;
-    }
-
-    void *font_pixels = NULL;
-    int fw = 0, fh = 0;
-    if (!td5_asset_load_png_to_buffer("re/assets/frontend/BodyText.png",
-                                       TD5_COLORKEY_BLACK, &font_pixels, &fw, &fh)) {
-        TD5_LOG_W(LOG_TAG, "btncache bake: BodyText.png load failed");
-        free(bb_pixels);
-        return;
-    }
-
-    int baked = 0;
-    for (int i = 0; i < FE_MAX_BUTTONS && i < TD5_FE_BTNCACHE_MAX; i++) {
-        if (!s_buttons[i].active || s_buttons[i].is_selector) continue;
-        if (!s_buttons[i].label[0]) continue;
-        if (s_buttons[i].w <= 0 || s_buttons[i].h <= 0) continue;
-        if (td5_fe_btncache_bake_button(i, s_buttons[i].label,
-                                        s_buttons[i].w, s_buttons[i].h,
-                                        (const uint8_t *)bb_pixels, bbw, bbh,
-                                        (const uint8_t *)font_pixels, fw, fh,
-                                        s_font_glyph_advance)) {
-            baked++;
-        }
-    }
-    TD5_LOG_I(LOG_TAG, "btncache bake: %d main-menu buttons cached", baked);
-
-    free(bb_pixels);
-    free(font_pixels);
-}
-
-/* ========================================================================
  * [5] ScreenMainMenuAnd1PRaceFlow (0x415490)
  * States: 24 (0x00 - 0x17)
  *
@@ -5772,11 +5736,10 @@ static void Screen_MainMenu(void) {
         frontend_create_button("High Scores", -0xE0, 0, 0xE0, 0x20);
         frontend_create_button("Exit",        -0xE0, 0, 0xE0, 0x20);
 
-        /* Phase 6: bake each button's 224x64 cached surface so per-frame
-         * rendering becomes one fe_draw_quad per button instead of a
-         * 9-slice + per-glyph fan. Mirrors CreateFrontendDisplayModeButton
-         * (0x00425DE0) called 7x at MainMenu init in the original. */
-        frontend_bake_main_menu_buttons();
+        /* Phase 6: per-button surface cache is populated lazily by the
+         * render path on first draw of each button -- no per-screen bake
+         * call needed. Caches survive screen transitions; label changes
+         * trigger automatic re-bake via td5_fe_btncache_ensure_page. */
 
         frontend_set_cursor_visible(0);
         frontend_play_sfx(5); /* menu ready */
