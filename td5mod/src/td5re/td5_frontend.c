@@ -4974,14 +4974,37 @@ void td5_frontend_render_ui_rects(void) {
     float sw = (float)screen_w;
     float sh = (float)screen_h;
 
-    /* Begin scene for frontend rendering */
-    td5_plat_render_clear(0xFF101020);
+    /* Phase 7 (RE: original main-menu loop, Frida 2026-05-01 1164-frame
+     * capture): the original issues zero per-frame fills/clears in steady
+     * state. FillPrimaryFrontendRect (0x00423ED0) has only 2 callers and
+     * neither is per-frame: InitializeFrontendPresentationState (0x00424E40)
+     * runs once at app startup, CarSelectionScreenStateMachine (0x0040DFC0)
+     * is unrelated. Screen_MainMenu (0x00415490) does no fill in any state.
+     * Skip the clear when a full-canvas BG surface is loaded — the BG quad
+     * below paints every pixel opaquely. Keep the clear as a fallback when
+     * no full-canvas BG is loaded (otherwise stale pixels would show through). */
+    int has_full_bg = 0;
+    int bg_slot = -1;
+    if (s_background_surface > 0) {
+        int slot = s_background_surface - 1;
+        if (slot >= 0 && slot < FE_MAX_SURFACES && s_surfaces[slot].in_use &&
+            frontend_surface_is_background_like(s_surfaces[slot].width, s_surfaces[slot].height)) {
+            has_full_bg = 1;
+            bg_slot = slot;
+        }
+    }
+    if (!has_full_bg) {
+        td5_plat_render_clear(0xFF101020);
+    }
     td5_plat_render_begin_scene();
     td5_plat_render_set_viewport(0, 0, screen_w, screen_h);
     td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
 
     /* Draw background TGA if one is loaded */
-    if (s_background_surface > 0) {
+    if (has_full_bg) {
+        fe_draw_quad(0, 0, sw, sh, 0xFFFFFFFF,
+                    s_surfaces[bg_slot].tex_page, 0, 0, 1, 1);
+    } else if (s_background_surface > 0) {
         int slot = s_background_surface - 1;
         if (slot >= 0 && slot < FE_MAX_SURFACES && s_surfaces[slot].in_use) {
             fe_draw_quad(0, 0, sw, sh, 0xFFFFFFFF,
