@@ -1678,17 +1678,21 @@ void td5_render_actors_for_view(int view_index)
 
     /* Draw sky panorama behind all geometry. Sky uses TD5_PRESET_SKY
      * (z_test=1, z_write=0) so the dome — drawn camera-centered with small
-     * Z values — does not write its depth into the buffer, letting later
-     * track meshes pass their own depth test against the cleared far value.
+     * Z values — does not write depth, letting later track meshes pass
+     * their own depth test against the cleared far value.
      *
-     * IMPORTANT: the immediate batch buffer is state-deferred (state
-     * applied at flush time, not at submit time). Without an explicit
-     * flush after the sky draw, the next preset change to OPAQUE_LINEAR
-     * silently overrides the SKY state, and sky pixels end up flushed
-     * with z_write=1 — re-introducing the "sky occludes track" bug. */
+     * Two state-leak guards are required:
+     *   1. s_in_sky_draw blocks td5_render_apply_page_blend_preset from
+     *      remapping the SKY preset to OPAQUE_LINEAR based on the sky
+     *      page's transparency type when the batch flushes.
+     *   2. An explicit flush AFTER the draw commits sky pixels with the
+     *      SKY state, before the next set_preset(OPAQUE_LINEAR) takes
+     *      effect at the following flush. */
+    s_in_sky_draw = 1;
     td5_plat_render_set_preset(TD5_PRESET_SKY);
     td5_render_draw_sky();
     td5_render_flush_immediate_batch();
+    s_in_sky_draw = 0;
 
     /* Set render preset for track geometry (enables texture sampling) */
     td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
@@ -2218,6 +2222,13 @@ void td5_render_advance_texture_ages(void)
  * the reflection texture"). */
 static int s_in_reflection_overlay = 0;
 
+/* When set, td5_render_apply_page_blend_preset skips its preset override so
+ * the caller-installed TD5_PRESET_SKY (z_test=1, z_write=0) survives the
+ * batch flush. Without this, the page-type→preset remap inside
+ * flush_immediate_internal silently rewrites the sky's depth state to
+ * OPAQUE_LINEAR (z_write=1), which makes the dome occlude distant track. */
+static int s_in_sky_draw = 0;
+
 /* Dispatch render preset per tpage transparency type.
  * BindRaceTexturePage @ 0x0040B660 switch:
  *   type 0 → ALPHABLENDENABLE=0 (opaque)                  [CONFIRMED @ 0x0040B6B0]
@@ -2236,6 +2247,7 @@ static void td5_render_apply_page_blend_preset(int page_id)
     int t = td5_asset_get_page_transparency(page_id);
     TD5_RenderPreset p;
     if (s_in_reflection_overlay) return; /* preserve caller's ADDITIVE preset */
+    if (s_in_sky_draw)           return; /* preserve caller's SKY preset */
     if (t == 3)      p = TD5_PRESET_ADDITIVE;
     else if (t == 2) p = TD5_PRESET_TRANSLUCENT_ANISO;
     else             p = TD5_PRESET_OPAQUE_LINEAR;
@@ -4036,32 +4048,6 @@ void td5_render_load_sky(const char *path)
 void td5_render_draw_sky(void)
 {
     if (!s_sky_loaded) return;
-
-    /* DIAGNOSTIC: write sky path + first few mesh opcodes into the window
-     * title once so it shows regardless of the [Logging] gate. */
-    {
-        static int s_sky_diag_logged = 0;
-        if (!s_sky_diag_logged) {
-            HWND hw = (HWND)td5_plat_get_native_window();
-            char title[256];
-            if (s_sky_mesh) {
-                int cmd_count = s_sky_mesh->command_count;
-                TD5_PrimitiveCmd *cmds = (TD5_PrimitiveCmd *)(uintptr_t)s_sky_mesh->commands_offset;
-                int op[6] = {-1,-1,-1,-1,-1,-1};
-                if (cmds && cmd_count > 0) {
-                    int n = cmd_count < 6 ? cmd_count : 6;
-                    for (int i = 0; i < n; i++) op[i] = cmds[i].dispatch_type;
-                }
-                snprintf(title, sizeof(title),
-                         "SKY DIAG | 3D DOME path | cmd_count=%d | opcodes={%d,%d,%d,%d,%d,%d}",
-                         cmd_count, op[0], op[1], op[2], op[3], op[4], op[5]);
-            } else {
-                snprintf(title, sizeof(title), "SKY DIAG | 2D FALLBACK path");
-            }
-            if (hw) SetWindowTextA(hw, title);
-            s_sky_diag_logged = 1;
-        }
-    }
 
     /* --- 3D dome rendering (sky.prr) [CONFIRMED @ 0x0042bdf7-0x0042c044] ---
      * Original applies camera rotation only (no translation) to sky dome mesh,
