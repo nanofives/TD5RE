@@ -1,0 +1,1061 @@
+Server: {'name': 'ghidra_headless_mcp', 'version': '0.1.0'}
+Open: ok session_id=505894408c434c89a2e63b9ed897bea9 read_only=True
+session_id: 505894408c434c89a2e63b9ed897bea9
+
+======================================================================
+1. DECOMP CarSelectionScreenStateMachine @ 0x40DFC0
+======================================================================
+
+/* WARNING: Globals starting with '_' overlap smaller symbols at the same address */
+
+void CarSelectionScreenStateMachine(void)
+
+{
+  undefined3 extraout_var;
+  uint uVar1;
+  uint uVar2;
+  int iVar3;
+  int iVar4;
+  int iVar5;
+  uint uVar6;
+  int iVar7;
+  uint uVar8;
+  int iVar9;
+  uint uVar10;
+  int iVar11;
+  bool bVar12;
+  code *pcVar13;
+  char *pcVar14;
+  int *piVar15;
+  int iVar16;
+  int local_94;
+  byte local_80 [128];
+  
+  uVar2 = g_frontendCanvasW;
+  uVar6 = g_frontendCanvasH;
+  uVar8 = g_frontendCanvasW >> 1;
+  uVar10 = g_frontendCanvasH >> 1;
+  iVar9 = uVar8 - 0x11a;
+  iVar11 = uVar10 - 0x9f;
+  uVar1 = g_frontendCanvasW - 0x198;
+  iVar16 = g_frontendCanvasH - 0x164;
+  if ((DAT_00497a74 != 0) || (iVar3 = uVar8 - 0x112, DAT_004962bc != 0)) {
+    iVar3 = uVar8 - 0xde;
+  }
+  iVar7 = g_frontendInnerState;
+  switch(g_frontendInnerState) {
+  case 0:
+    if (g_selectedGameType == 5) {
+      iVar16 = 0;
+      do {
+        if (DAT_0048f31c == (&DAT_0048f30c)[iVar16]) break;
+        iVar16 = iVar16 + 1;
+      } while (iVar16 < 0xf);
+      if (iVar16 == 0xf) {
+        iVar16 = 0;
+      }
+      iVar16 = iVar16 + -1;
+      do {
+        iVar16 = iVar16 + 1;
+        if (iVar16 < 0) {
+          iVar16 = 0xe;
+        }
+        else if (iVar16 == 0xf) {
+          iVar16 = 0;
+        }
+      } while ((&DAT_0048f324)[iVar16] != '\0');
+      DAT_0048f31c = (int)(&DAT_0048f30c)[iVar16];
+LAB_0040e07b:
+      if (((DAT_004962ac != 0) && (DAT_00496298 != 0)) || (iVar16 = 0x20, DAT_00463e6d == '\0')) {
+        iVar16 = DAT_00463e0c;
+      }
+LAB_0040e0a0:
+      if (iVar16 < g_selectedCarIndex) {
+        g_selectedCarIndex = 0;
+      }
+      if (iVar16 < DAT_00463e08) {
+        DAT_00463e08 = 0;
+      }
+      if (iVar16 < DAT_0048f31c) {
+        DAT_0048f31c = 0;
+      }
+    }
+    else {
+      if (g_selectedGameType != 8) {
+        if (g_selectedGameType != 2) goto LAB_0040e07b;
+        iVar16 = 0xf;
+        goto LAB_0040e0a0;
+      }
+      if (DAT_0048f31c < 0x21) {
+        DAT_0048f31c = 0x24;
+      }
+      else if (0x24 < DAT_0048f31c) {
+        DAT_0048f31c = 0x21;
+      }
+    }
+    g_frontendScreenTransitionFlag = 1;
+    if (DAT_0048f380 == 0) {
+      if ((g_twoPlayerModeEnabled & 3) == 1) {
+        DAT_00496358 = CreateMenuStringLabelSurface(0xb);
+        DAT_0048f334 = DAT_0048f370;
+        DAT_0048f31c = g_selectedCarIndex;
+        DAT_0048f308 = DAT_0048f368;
+        DAT_0048f378 = 0;
+        DAT_0048f338 = 0;
+      }
+      else {
+        if ((g_twoPlayerModeEnabled & 3) != 2) {
+          iVar16 = 9;
+          goto LAB_0040e1b4;
+        }
+        DAT_00496358 = CreateMenuStringLabelSurface(0xc);
+        DAT_0048f334 = DAT_0048f374;
+        DAT_0048f31c = DAT_00463e08;
+        DAT_0048f308 = DAT_0048f36c;
+        DAT_0048f37c = 0;
+        DAT_0048f338 = 0;
+      }
+    }
+    else {
+      iVar16 = 0xd;
+LAB_0040e1b4:
+      DAT_00496358 = CreateMenuStringLabelSurface(iVar16);
+    }
+    DAT_0048f34c = LoadFrontendTgaSurfaceFromArchive
+                             (s_Front_End_CarSelBar1_tga_00463f68,s_Front_End_FrontEnd_zip_00463f84)
+    ;
+    DAT_0048f350 = LoadFrontendTgaSurfaceFromArchive
+                             (s_Front_End_CarSelCurve_tga_00463f4c,s_Front_End_FrontEnd_zip_00463f84
+                             );
+    DAT_0048f354 = LoadFrontendTgaSurfaceFromArchive
+                             (s_Front_End_CarSelTopBar_tga_00463f30,
+                              s_Front_End_FrontEnd_zip_00463f84);
+    _DAT_0048f35c =
+         LoadFrontendTgaSurfaceFromArchive
+                   (s_Front_End_GraphBars_tga_00463f18,s_Front_End_FrontEnd_zip_00463f84);
+    ActivateFrontendCursorOverlay();
+    RenderTgaToFrontendSurface(g_smallTextSurface);
+    SetSurfaceColorKeyFromRGB(g_smallTextSurface,0);
+    g_frontendInnerState = g_frontendInnerState + 1;
+    DAT_0048f360 = 0;
+    if (((g_twoPlayerModeEnabled & 4) == 0) && (DAT_0048f380 == 0)) {
+      DXSound::Play(8);
+      iVar7 = g_frontendInnerState;
+    }
+    else {
+      g_frontendInnerState = 3;
+      iVar7 = g_frontendInnerState;
+    }
+    break;
+  case 1:
+    g_frontendAnimFrameCounter = 0;
+    iVar7 = g_frontendInnerState + 1;
+    break;
+  case 2:
+    if (g_frontendAnimFrameCounter == g_frontendCanvasW - 0x20 >> 3) {
+      QueueFrontendOverlayRect
+                (g_frontendCanvasW + g_frontendAnimFrameCounter * -8 + 4,0,0,0,0x18,0x198,0,
+                 (int)DAT_0048f34c);
+      QueueFrontendOverlayRect
+                (g_frontendCanvasW + g_frontendAnimFrameCounter * -8 + 4,0x198,0,0,0x50,0x38,0,
+                 (int)DAT_0048f350);
+      DeferFrontendBackgroundRestore();
+      g_frontendInnerState = g_frontendInnerState + 1;
+    }
+    else {
+      QueueFrontendOverlayRect
+                (g_frontendCanvasW + g_frontendAnimFrameCounter * -8 + -4,0,0,0,0x18,0x198,0,
+                 (int)DAT_0048f34c);
+      QueueFrontendOverlayRect
+                (g_frontendCanvasW + g_frontendAnimFrameCounter * -8 + -4,0x198,0,0,0x50,0x38,0,
+                 (int)DAT_0048f350);
+      DeferFrontendBackgroundRestore();
+    }
+    if (g_frontendAnimFrameCounter * 8 < 0x215) {
+      iVar16 = g_frontendAnimFrameCounter * 8 - 0x214;
+    }
+    else {
+      iVar16 = 0;
+    }
+    QueueFrontendOverlayRect(iVar16,0x2d,0,0,0x214,0x24,0,(int)DAT_0048f354);
+    iVar7 = g_frontendInnerState;
+    break;
+  case 3:
+    PresentPrimaryFrontendBuffer();
+    CopyPrimaryFrontendBufferToSecondary();
+    g_frontendInnerState = g_frontendInnerState + 1;
+    iVar7 = g_frontendInnerState;
+    break;
+  case 4:
+    g_twoPlayerModeEnabled = g_twoPlayerModeEnabled & 3;
+    PresentPrimaryFrontendBufferViaCopy();
+    DAT_0048f354 = (int *)ReleaseTrackedFrontendSurface(DAT_0048f354);
+    DAT_0048f350 = (int *)ReleaseTrackedFrontendSurface(DAT_0048f350);
+    DAT_0048f34c = (int *)ReleaseTrackedFrontendSurface(DAT_0048f34c);
+    CreateFrontendDisplayModeButton((byte *)SNK_CarButTxt_exref,-0xa8,0,0xa8,0x20,0);
+    CreateFrontendDisplayModeButton((byte *)SNK_PaintButTxt_exref,-0xa8,0,0xa8,0x20,0);
+    CreateFrontendDisplayModeButton((byte *)SNK_ConfigButTxt_exref,-0xa8,0,0xa8,0x20,0);
+    bVar12 = g_selectedGameType != 7;
+    if (bVar12) {
+      CreateFrontendDisplayModeButton((byte *)SNK_AutoButTxt_exref,-0xa8,0,0xa8,0x20,0);
+    }
+    else {
+      CreateFrontendDisplayModePreviewButton((byte *)SNK_ManualButTxt_exref,-0xa8,0,0xa8,0x20,0);
+    }
+    DAT_0048f338 = (uint)!bVar12;
+    CreateFrontendDisplayModeButton((byte *)SNK_OkButTxt_exref,-0x40,0,0x40,0x20,0);
+    if ((DAT_00497a74 == 0) && (DAT_004962bc == 0)) {
+      CreateFrontendDisplayModeButton((byte *)SNK_BackButTxt_exref,-0x60,0,0x60,0x20,0);
+      g_frontendEscKeyButtonIndex = 5;
+    }
+    else {
+      g_frontendEscKeyButtonIndex = 4;
+    }
+    InitializeFrontendDisplayModeArrows(0,1);
+    InitializeFrontendDisplayModeArrows(1,1);
+    SetFrontendInlineStringTable((char *)SNK_CarSelect_MT1_exref,0xffffffe0,4);
+    if (DAT_004962d4 == 3) {
+      pcVar13 = SNK_CarSelect_Ex_exref;
+      if (g_twoPlayerModeEnabled != 1) {
+        pcVar13 = SNK_CarSelect_Ex_exref + 0x20;
+      }
+      SetFrontendInlineStringEntry(0xb,pcVar13);
+    }
+    DXSound::Play(9);
+    DXSound::Play(5);
+    g_frontendAnimFrameCounter = 0;
+    iVar7 = g_frontendInnerState + 1;
+    break;
+  case 5:
+    MoveFrontendSpriteRect
+              (0,iVar9 + g_frontendAnimFrameCounter * -0x20 + 0x308,
+               g_frontendAnimFrameCounter * 0x10 + -0x128 + iVar11);
+    MoveFrontendSpriteRect
+              (1,iVar9 + g_frontendAnimFrameCounter * -0x20 + 0x308,
+               (uVar10 - 0xdf) + g_frontendAnimFrameCounter * 8);
+    MoveFrontendSpriteRect(2,iVar9 + g_frontendAnimFrameCounter * -0x20 + 0x308,uVar10 + 9);
+    MoveFrontendSpriteRect
+              (3,iVar9 + g_frontendAnimFrameCounter * -0x20 + 0x308,
+               iVar11 + g_frontendAnimFrameCounter * -8 + 400);
+    MoveFrontendSpriteRect
+              (4,iVar3 + g_frontendAnimFrameCounter * -0x20 + 0x300,
+               iVar11 + g_frontendAnimFrameCounter * -0x10 + 0x278);
+    if ((DAT_00497a74 == 0) && (DAT_004962bc == 0)) {
+      MoveFrontendSpriteRect
+                (5,iVar9 + g_frontendAnimFrameCounter * -0x20 + 0x350,
+                 iVar11 + g_frontendAnimFrameCounter * -0x10 + 0x278);
+    }
+    QueueFrontendOverlayRect
+              (uVar8 - 0x110,(g_frontendAnimFrameCounter * 5 - DAT_004962cc) + -0xb8 + iVar11,0,0,
+               DAT_004962c4,DAT_004962c8,0,(int)DAT_00496358);
+    iVar7 = g_frontendInnerState;
+    if (g_frontendAnimFrameCounter == 0x18) {
+      DXSound::Play(4);
+      iVar7 = g_frontendInnerState + 1;
+    }
+    break;
+  case 6:
+    QueueFrontendOverlayRect
+              (uVar8 - 0x110,(iVar11 - DAT_004962cc) + -0x40,0,0,DAT_004962c4,DAT_004962c8,0,
+               (int)DAT_00496358);
+    bVar12 = AdvanceFrontendTickAndCheckReady();
+    iVar7 = g_frontendInnerState;
+    if (CONCAT31(extraout_var,bVar12) != 0) {
+      DeactivateFrontendCursorOverlay();
+      g_frontendAnimFrameCounter = 0;
+      g_frontendInnerState = 10;
+      iVar7 = g_frontendInnerState;
+    }
+    break;
+  case 7:
+    DrawCarSelectionPreviewOverlay(iVar9,iVar11,uVar1,iVar16,0);
+    if (DAT_0049b690 != 0) {
+      if (g_frontendButtonIndex == 0) {
+        if (g_selectedGameType == 5) {
+          iVar16 = 0;
+          do {
+            if (DAT_0048f31c == (&DAT_0048f30c)[iVar16]) break;
+            iVar16 = iVar16 + 1;
+          } while (iVar16 < 0xf);
+          if (iVar16 == 0xf) {
+            iVar16 = 0;
+          }
+          iVar9 = DAT_0049b690;
+          if (DAT_0049b690 == 0) {
+            iVar16 = iVar16 + -1;
+            iVar9 = 1;
+          }
+          do {
+            iVar16 = iVar16 + iVar9;
+            if (iVar16 < 0) {
+              iVar16 = 0xe;
+            }
+            else if (iVar16 == 0xf) {
+              iVar16 = 0;
+            }
+          } while ((&DAT_0048f324)[iVar16] != '\0');
+          DAT_0048f31c = (int)(&DAT_0048f30c)[iVar16];
+          g_frontendInnerState = 10;
+        }
+        else {
+          DAT_0048f31c = DAT_0048f31c + DAT_0049b690;
+          DAT_0048f308 = 0;
+          DAT_0048f334 = 0;
+          if (g_selectedGameType == 2) {
+            if (-1 < DAT_0048f31c) {
+              if (DAT_0048f31c == 0x10) goto LAB_0040e94a;
+              goto LAB_0040e951;
+            }
+            DAT_0048f31c = 0xf;
+            g_frontendInnerState = 10;
+          }
+          else if (g_selectedGameType == 8) {
+            if (DAT_0048f31c < 0x21) {
+              DAT_0048f31c = 0x24;
+              g_frontendInnerState = 10;
+            }
+            else {
+              if (DAT_0048f31c < 0x25) goto LAB_0040e951;
+              DAT_0048f31c = 0x21;
+              g_frontendInnerState = 10;
+            }
+          }
+          else if (DAT_00496298 == 0) {
+            if (DAT_0048f31c < 0) {
+              DAT_0048f31c = DAT_00463e0c + -1;
+            }
+            if (DAT_0048f31c == DAT_00463e0c) {
+LAB_0040e94a:
+              DAT_0048f31c = 0;
+            }
+LAB_0040e951:
+            g_frontendInnerState = 10;
+          }
+          else if ((DAT_004962ac == 0) && (DAT_00463e6d != '\0')) {
+            if (-1 < DAT_0048f31c) {
+              if (DAT_0048f31c == 0x21) goto LAB_0040e94a;
+              goto LAB_0040e951;
+            }
+            DAT_0048f31c = 0x20;
+            g_frontendInnerState = 10;
+          }
+          else {
+            if (-1 < DAT_0048f31c) {
+              if (DAT_0048f31c == 0x25) goto LAB_0040e94a;
+              goto LAB_0040e951;
+            }
+            DAT_0048f31c = 0x24;
+            g_frontendInnerState = 10;
+          }
+        }
+      }
+      else if (g_frontendButtonIndex == 1) {
+        if ((DAT_0048f31c < 0x1c) || (0x24 < DAT_0048f31c)) {
+          DAT_0048f308 = DAT_0048f308 + DAT_0049b690;
+          if (DAT_0048f308 < 0) {
+            DAT_0048f308 = 3;
+            g_frontendInnerState = 10;
+          }
+          else {
+            if (DAT_0048f308 == 4) {
+              DAT_0048f308 = 0;
+            }
+            g_frontendInnerState = 10;
+          }
+        }
+      }
+      else if (g_frontendButtonIndex == 2) {
+        DAT_0048f334 = DAT_0048f334 + DAT_0049b690;
+        if (DAT_0048f334 < 0) {
+          DAT_0048f334 = 3;
+        }
+        else if (DAT_0048f334 == 4) {
+          DAT_0048f334 = 0;
+        }
+        g_frontendAnimFrameCounter = 0;
+        g_frontendInnerState = 0xf;
+      }
+    }
+    if (DAT_004962bc == 2) {
+      g_returnToScreenIndex = -1;
+      g_frontendInnerState = 0x14;
+    }
+    iVar7 = g_frontendInnerState;
+    if (g_frontendButtonPressedFlag != 0) {
+      if (g_frontendButtonIndex == 4) {
+        if ((((*(char *)((int)&DAT_00463e4c + DAT_0048f31c) == '\0') || (DAT_00496298 != 0)) ||
+            (g_selectedGameType == 8)) || (g_selectedGameType == 5)) {
+          g_returnToScreenIndex = -1;
+          g_frontendInnerState = 0x14;
+          iVar7 = g_frontendInnerState;
+          if (g_selectedGameType == 5) {
+            iVar16 = 0;
+            do {
+              if (DAT_0048f31c == (&DAT_0048f30c)[iVar16]) break;
+              iVar16 = iVar16 + 1;
+            } while (iVar16 < 0xf);
+            if (iVar16 == 0xf) {
+              DAT_0048f31c = (int)DAT_0048f30c;
+              iVar16 = 0;
+            }
+            (&DAT_0048f324)[iVar16] = 2;
+            iVar7 = g_frontendInnerState;
+          }
+          break;
+        }
+        DXSound::Play(10);
+      }
+      if (g_frontendButtonIndex == 5) {
+        g_returnToScreenIndex = 6;
+        g_frontendInnerState = 0x14;
+        iVar7 = g_frontendInnerState;
+      }
+      else if (g_frontendButtonIndex == 2) {
+        g_frontendAnimFrameCounter = 0;
+        g_frontendInnerState = 0xf;
+        iVar7 = g_frontendInnerState;
+      }
+      else {
+        iVar7 = g_frontendInnerState;
+        if (g_frontendButtonIndex == 3) {
+          DAT_0048f338 = DAT_0048f338 ^ 1;
+          if (DAT_0048f338 == 0) {
+            RebuildFrontendButtonSurface(3);
+            iVar7 = g_frontendInnerState;
+          }
+          else {
+            RebuildFrontendButtonSurface(3);
+            iVar7 = g_frontendInnerState;
+          }
+        }
+      }
+    }
+    break;
+  case 8:
+    DrawCarSelectionPreviewOverlay(iVar9,iVar11,uVar1,iVar16,0);
+    BlitFrontendCachedRect(iVar9,uVar10 - 0x97,g_frontendCanvasW - iVar9,0x20);
+    iVar7 = g_frontendInnerState;
+    if (g_frontendAnimFrameCounter == 2) {
+      g_frontendInnerState = 7;
+      iVar7 = g_frontendInnerState;
+    }
+    break;
+  case 10:
+    FillPrimaryFrontendRect(0x5c,uVar1,iVar16,0x198,300);
+    DrawCarSelectionPreviewOverlay(iVar9,iVar11,uVar1,iVar16,0);
+    if (DAT_0048f358 == (int *)0x0) {
+      g_frontendInnerState = 0xc;
+      iVar7 = g_frontendInnerState;
+    }
+    else {
+      g_frontendAnimFrameCounter = 0;
+      DXSound::Play(5);
+      iVar7 = g_frontendInnerState + 1;
+    }
+    break;
+  case 0xb:
+  case 0x15:
+    DrawCarSelectionPreviewOverlay(iVar9,iVar11,uVar1,iVar16,0xb);
+    bVar12 = g_frontendAnimFrameCounter == 0x15;
+    goto LAB_0040f63a;
+  case 0xc:
+    DAT_0048f358 = (int *)ReleaseTrackedFrontendSurface(DAT_0048f358);
+    DrawCarSelectionPreviewOverlay(iVar9,iVar11,uVar1,iVar16,0);
+    sprintf_game(local_80,(byte *)s_CarPic_d_tga_00463f08);
+    DAT_0048f358 = LoadFrontendTgaSurfaceFromArchive
+                             ((LPCSTR)local_80,
+                              (&gCarZipPathTable)[(char)(&gExtCarIdToTypeIndex)[DAT_0048f31c]]);
+    if (DAT_0048f360 != 0) {
+      CopyPrimaryFrontendRectToSecondary(uVar1,iVar16,0x198,300);
+      DAT_0048f360 = 0;
+    }
+    iVar16 = uVar10 - 0x97;
+    g_frontendAnimFrameCounter = 0;
+    BlitSecondaryFrontendRectToPrimary(iVar9,iVar16,g_frontendCanvasW - iVar9,0x40);
+    sprintf_game(local_80,(byte *)s__s__s_00463f00);
+    uVar1 = MeasureOrCenterFrontendLocalizedString(local_80,iVar9,g_frontendCanvasW);
+    DrawFrontendLocalizedStringPrimary(local_80,uVar1,iVar16);
+    if (g_selectedGameType == 2) {
+      pcVar13 = SNK_BeastTxt_exref;
+      if (DAT_0048f31c < 8) {
+        pcVar13 = SNK_BeautyTxt_exref;
+      }
+LAB_0040ec9c:
+      DrawFrontendLocalizedStringPrimary((byte *)pcVar13,uVar8 - 0xea,uVar10 - 0x77);
+    }
+    else if ((((*(char *)((int)&DAT_00463e4c + DAT_0048f31c) != '\0') && (DAT_00496298 == 0)) &&
+             (g_selectedGameType != 8)) && (pcVar13 = SNK_LockedTxt_exref, g_selectedGameType != 5))
+    goto LAB_0040ec9c;
+    BlitFrontendCachedRect(iVar9,iVar16,g_frontendCanvasW - iVar9,0x40);
+    DXSound::Play(5);
+    iVar7 = g_frontendInnerState + 1;
+    break;
+  case 0xd:
+    DrawCarSelectionPreviewOverlay(iVar9,iVar11,uVar1,iVar16,1);
+    BlitFrontendCachedRect(iVar9,uVar10 - 0x97,g_frontendCanvasW - iVar9,0x40);
+    iVar7 = g_frontendInnerState + 1;
+    break;
+  case 0xe:
+    DrawCarSelectionPreviewOverlay(iVar9,iVar11,uVar1,iVar16,0xe);
+    iVar7 = g_frontendInnerState;
+    if (g_frontendAnimFrameCounter == 0x19) {
+      DXSound::Play(4);
+      g_frontendInnerState = 7;
+      iVar7 = g_frontendInnerState;
+    }
+    break;
+  case 0xf:
+    BlitSecondaryFrontendRectToPrimary(iVar9,uVar10 - 0x97,g_frontendCanvasW - iVar9,0x20);
+    sprintf_game(local_80,(byte *)s__s__s_00463f00);
+    uVar2 = MeasureOrCenterFrontendLocalizedString(local_80,iVar9,g_frontendCanvasW);
+    DrawFrontendLocalizedStringPrimary(local_80,uVar2,uVar10 - 0x97);
+    BlitFrontendCachedRect(iVar9,uVar10 - 0x97,g_frontendCanvasW - iVar9,0x20);
+    DrawCarSelectionPreviewOverlay(iVar9,iVar11,uVar1,iVar16,0);
+    if (DAT_0048f360 == 0) {
+      if (g_frontendAnimFrameCounter == 1) {
+        RenderTgaWithColorKeyToSurface(DAT_0048f358,0xff);
+        RenderTgaWithColorKeyToSurface(DAT_0048f358,0xff);
+      }
+      if (g_frontendAnimFrameCounter == 3) {
+        PresentSecondaryFrontendRect(uVar1,iVar16,0x198,300);
+        PresentPrimaryFrontendRect(uVar1,iVar16,0x198,300);
+        g_frontendAnimFrameCounter = g_frontendAnimFrameCounter + 1;
+      }
+      iVar7 = g_frontendInnerState;
+      if (g_frontendAnimFrameCounter != 4) break;
+    }
+    else {
+      CopyPrimaryFrontendRectToSecondary(uVar1,iVar16,0x198,300);
+      g_frontendAnimFrameCounter = 4;
+    }
+    iVar9 = 0;
+    iVar11 = 0;
+    local_94 = iVar16;
+    do {
+      if ((**(byte **)(SNK_Config_Hdrs_exref + iVar11) != 0x2a) &&
+         (iVar3 = DrawFrontendSmallFontStringToSurface
+                            (*(byte **)(SNK_Config_Hdrs_exref + iVar11),uVar1,local_94,
+                             g_secondaryWorkSurface), iVar9 <= iVar3)) {
+        iVar9 = iVar3;
+      }
+      local_94 = local_94 + 0xc;
+      iVar11 = iVar11 + 4;
+    } while (iVar11 < 0x10);
+    iVar11 = uVar6 - 0x11c;
+    iVar3 = 0x10;
+    local_94 = iVar11;
+    do {
+      if ((**(byte **)(SNK_Config_Hdrs_exref + iVar3) != 0x2a) &&
+         (iVar7 = DrawFrontendSmallFontStringToSurface
+                            (*(byte **)(SNK_Config_Hdrs_exref + iVar3),uVar1,local_94,
+                             g_secondaryWorkSurface), iVar9 <= iVar7)) {
+        iVar9 = iVar7;
+      }
+      local_94 = local_94 + 0xc;
+      iVar3 = iVar3 + 4;
+    } while (iVar3 < 0x20);
+    iVar3 = DrawFrontendSmallFontStringToSurface
+                      (*(byte **)(SNK_Config_Hdrs_exref + 0x20),uVar1,uVar6 - 0xe0,
+                       g_secondaryWorkSurface);
+    if (iVar9 <= iVar3) {
+      iVar9 = iVar3;
+    }
+    iVar3 = uVar6 - 200;
+    iVar7 = 0x24;
+    local_94 = iVar3;
+    do {
+      if ((**(byte **)(SNK_Config_Hdrs_exref + iVar7) != 0x2a) &&
+         (iVar4 = DrawFrontendSmallFontStringToSurface
+                            (*(byte **)(SNK_Config_Hdrs_exref + iVar7),uVar1,local_94,
+                             g_secondaryWorkSurface), iVar9 <= iVar4)) {
+        iVar9 = iVar4;
+      }
+      local_94 = local_94 + 0xc;
+      iVar7 = iVar7 + 4;
+    } while (iVar7 < 0x30);
+    iVar7 = uVar6 - 0x98;
+    iVar4 = 0x30;
+    local_94 = iVar7;
+    do {
+      iVar5 = DrawFrontendSmallFontStringToSurface
+                        (*(byte **)(SNK_Config_Hdrs_exref + iVar4),uVar1,local_94,
+                         g_secondaryWorkSurface);
+      if (iVar9 <= iVar5) {
+        iVar9 = iVar5;
+      }
+      local_94 = local_94 + 0xc;
+      iVar4 = iVar4 + 4;
+    } while (iVar4 < 0x38);
+    iVar4 = 0;
+    local_94 = iVar16;
+    do {
+      if (**(char **)(SNK_Config_Hdrs_exref + iVar4 * 4) != '*') {
+        DrawFrontendSmallFontStringToSurface
+                  (&DAT_0049b6fc +
+                   (iVar4 + (char)(&gExtCarIdToTypeIndex)[DAT_0048f31c] * 0x11) * 0x30,
+                   iVar9 + 0x10 + uVar1,local_94,g_secondaryWorkSurface);
+      }
+      iVar4 = iVar4 + 1;
+      local_94 = local_94 + 0xc;
+    } while (iVar4 < 4);
+    uVar1 = iVar9 + 0x10 + uVar1;
+    DrawFrontendSmallFontStringToSurface
+              (&DAT_0049b7bc + (char)(&gExtCarIdToTypeIndex)[DAT_0048f31c] * 0x330,uVar1,
+               uVar6 - 0x134,g_secondaryWorkSurface);
+    iVar16 = 4;
+    do {
+      if (**(char **)(SNK_Config_Hdrs_exref + iVar16 * 4) != '*') {
+        DrawFrontendSmallFontStringToSurface
+                  (&DAT_0049b72c +
+                   (iVar16 + (char)(&gExtCarIdToTypeIndex)[DAT_0048f31c] * 0x11) * 0x30,uVar1,iVar11
+                   ,g_secondaryWorkSurface);
+      }
+      iVar16 = iVar16 + 1;
+      iVar11 = iVar11 + 0xc;
+    } while (iVar16 < 8);
+    DrawFrontendSmallFontStringToSurface
+              (&DAT_0049b8ac + (char)(&gExtCarIdToTypeIndex)[DAT_0048f31c] * 0x330,uVar1,
+               uVar6 - 0xe0,g_secondaryWorkSurface);
+    iVar16 = 9;
+    do {
+      if (**(char **)(SNK_Config_Hdrs_exref + iVar16 * 4) != '*') {
+        DrawFrontendSmallFontStringToSurface
+                  (&DAT_0049b72c +
+                   (iVar16 + (char)(&gExtCarIdToTypeIndex)[DAT_0048f31c] * 0x11) * 0x30,uVar1,iVar3,
+                   g_secondaryWorkSurface);
+      }
+      iVar16 = iVar16 + 1;
+      iVar3 = iVar3 + 0xc;
+    } while (iVar16 < 0xc);
+    iVar16 = 0xc;
+    do {
+      DrawFrontendSmallFontStringToSurface
+                (&DAT_0049b72c +
+                 (iVar16 + (char)(&gExtCarIdToTypeIndex)[DAT_0048f31c] * 0x11) * 0x30,uVar1,iVar7,
+                 g_secondaryWorkSurface);
+      iVar16 = iVar16 + 1;
+      iVar7 = iVar7 + 0xc;
+    } while (iVar16 < 0xe);
+    DXSound::Play(4);
+    iVar7 = g_frontendInnerState + 1;
+    break;
+  case 0x10:
+    DAT_0048f360 = 1;
+    goto LAB_0040f2ad;
+  case 0x11:
+    DrawCarSelectionPreviewOverlay(iVar9,iVar11,uVar1,iVar16,0);
+    if (DAT_0048f360 == 0) {
+      if (g_frontendAnimFrameCounter == 1) {
+        RenderTgaWithColorKeyToSurface(DAT_0048f358,0xff);
+        RenderTgaWithColorKeyToSurface(DAT_0048f358,0xff);
+      }
+      if (g_frontendAnimFrameCounter == 3) {
+        PresentSecondaryFrontendRect(uVar1,iVar16,0x198,300);
+        PresentPrimaryFrontendRect(uVar1,iVar16,0x198,300);
+        g_frontendAnimFrameCounter = g_frontendAnimFrameCounter + 1;
+      }
+      iVar7 = g_frontendInnerState;
+      if (g_frontendAnimFrameCounter != 4) break;
+    }
+    else {
+      CopyPrimaryFrontendRectToSecondary(uVar1,iVar16,0x198,300);
+      g_frontendAnimFrameCounter = 4;
+    }
+    iVar9 = 0;
+    do {
+      iVar11 = iVar16;
+      piVar15 = g_secondaryWorkSurface;
+      uVar6 = MeasureOrCenterFrontendString(*(byte **)(SNK_Info_Values_exref + iVar9),uVar1,uVar2);
+      DrawFrontendSmallFontStringToSurface
+                (*(byte **)(SNK_Info_Values_exref + iVar9),uVar6,iVar11,piVar15);
+      iVar9 = iVar9 + 4;
+      iVar16 = iVar16 + 0xc;
+    } while (iVar9 < 0x28);
+    DXSound::Play(4);
+    iVar7 = g_frontendInnerState + 1;
+    break;
+  case 0x12:
+    DAT_0048f360 = 2;
+LAB_0040f2ad:
+    _DAT_0048f320 = 0;
+    DrawCarSelectionPreviewOverlay(iVar9,iVar11,uVar1,iVar16,0);
+    g_frontendInnerState = 7;
+    iVar7 = g_frontendInnerState;
+    break;
+  case 0x14:
+    ActivateFrontendCursorOverlay();
+    FillPrimaryFrontendRect(0x5c,uVar1,iVar16,0x198,300);
+    DrawCarSelectionPreviewOverlay(iVar9,iVar11,uVar1,iVar16,0);
+    DXSound::Play(5);
+    g_frontendAnimFrameCounter = 0;
+    iVar7 = g_frontendInnerState + 1;
+    break;
+  case 0x16:
+  case 0x17:
+    if ((DAT_0048f358 != (int *)0x0) &&
+       (DAT_0048f358 = (int *)ReleaseTrackedFrontendSurface(DAT_0048f358), DAT_0048f360 != 0)) {
+      CopyPrimaryFrontendRectToSecondary(uVar1,iVar16,0x198,300);
+      DAT_0048f360 = 0;
+    }
+    DrawCarSelectionPreviewOverlay(iVar9,iVar11,uVar1,iVar16,0);
+    g_frontendAnimFrameCounter = 0;
+    PresentSecondaryFrontendRectViaCopy(0,0,g_frontendCanvasW,g_frontendCanvasH);
+    BlitSecondaryFrontendRectToPrimary(0,0,g_frontendCanvasW,g_frontendCanvasH);
+    DXSound::Play(5);
+    iVar7 = g_frontendInnerState + 1;
+    break;
+  case 0x18:
+    MoveFrontendSpriteRect
+              (0,g_frontendAnimFrameCounter * 0x20 + 8 + iVar9,
+               iVar11 + g_frontendAnimFrameCounter * -0x10 + 0x58);
+    MoveFrontendSpriteRect
+              (1,g_frontendAnimFrameCounter * 0x20 + 8 + iVar9,
+               iVar11 + g_frontendAnimFrameCounter * -8 + 0x80);
+    MoveFrontendSpriteRect(2,g_frontendAnimFrameCounter * 0x20 + 8 + iVar9,uVar10 + 9);
+    MoveFrontendSpriteRect
+              (3,g_frontendAnimFrameCounter * 0x20 + 8 + iVar9,
+               uVar10 + 0x31 + g_frontendAnimFrameCounter * 8);
+    MoveFrontendSpriteRect
+              (4,g_frontendAnimFrameCounter * 0x20 + iVar3,
+               g_frontendAnimFrameCounter * 0x10 + 0xf8 + iVar11);
+    if ((DAT_00497a74 == 0) && (DAT_004962bc == 0)) {
+      MoveFrontendSpriteRect
+                (5,g_frontendAnimFrameCounter * 0x20 + 0x50 + iVar9,
+                 g_frontendAnimFrameCounter * 0x10 + 0xf8 + iVar11);
+    }
+    DrawCarSelectionPreviewOverlay(iVar9,iVar11,uVar1,iVar16,0x18);
+    iVar7 = g_frontendInnerState;
+    if (g_frontendAnimFrameCounter != 0x18) break;
+    if (DAT_004962d4 == 1) {
+      if ((g_returnToScreenIndex != -1) || (DAT_00497a74 != 0)) goto LAB_0040f52f;
+      if ((g_selectedGameType == 0) || (7 < g_selectedGameType)) {
+LAB_0040f51e:
+        pcVar14 = s_Front_End_TrackSelect_tga_00463ee4;
+        goto LAB_0040f534;
+      }
+      ClearBackbufferWithColor(0);
+    }
+    else {
+      if (DAT_004962d4 == 3) {
+        if (g_returnToScreenIndex == -1) {
+          pcVar14 = s_Front_End_TrackSelect_tga_00463ee4;
+          goto LAB_0040f534;
+        }
+      }
+      else if ((((DAT_004962d4 == 4) && (g_returnToScreenIndex == -1)) && (DAT_004962c0 == 1)) &&
+              (g_selectedGameType == 0)) goto LAB_0040f51e;
+LAB_0040f52f:
+      pcVar14 = s_Front_End_MainMenu_tga_00463ecc;
+LAB_0040f534:
+      LoadTgaToFrontendSurface16bpp(pcVar14,s_Front_End_FrontEnd_zip_00463f84);
+    }
+    ResetFrontendInlineStringTable();
+    iVar7 = g_frontendInnerState + 1;
+    g_frontendAnimFrameCounter = 0;
+    if ((g_twoPlayerModeEnabled != 1) && ((g_selectedGameType != 7 || (DAT_0048f380 != 0)))) {
+      if ((g_twoPlayerModeEnabled == 2) || (DAT_0048f380 == 1)) {
+        DAT_0048f36c = DAT_0048f308;
+        DAT_00463e08 = DAT_0048f31c;
+        DAT_0048f374 = DAT_0048f334;
+        DAT_0048f37c = DAT_0048f338;
+        if (g_returnToScreenIndex != -1) {
+          g_frontendInnerState = g_frontendInnerState + 2;
+          iVar7 = g_frontendInnerState;
+        }
+      }
+      else {
+        g_selectedCarIndex = DAT_0048f31c;
+        DAT_0048f368 = DAT_0048f308;
+        DAT_0048f370 = DAT_0048f334;
+        DAT_0048f378 = DAT_0048f338;
+        g_frontendInnerState = iVar7;
+        DXSound::Play(5);
+        iVar7 = g_frontendInnerState;
+      }
+      break;
+    }
+    g_selectedCarIndex = DAT_0048f31c;
+    DAT_0048f378 = DAT_0048f338;
+    DAT_0048f368 = DAT_0048f308;
+    DAT_0048f370 = DAT_0048f334;
+    bVar12 = g_returnToScreenIndex == -1;
+    g_frontendInnerState = iVar7;
+LAB_0040f63a:
+    iVar7 = g_frontendInnerState;
+    if (bVar12) {
+      g_frontendInnerState = g_frontendInnerState + 1;
+      iVar7 = g_frontendInnerState;
+    }
+    break;
+  case 0x19:
+    iVar16 = g_frontendCanvasH + g_frontendAnimFrameCounter * -0x18;
+    iVar9 = 0x18;
+    if (1 < g_frontendAnimFrameCounter) {
+      iVar9 = 0x30;
+    }
+    if (iVar16 == -0x18) {
+      iVar16 = 0;
+      g_frontendInnerState = g_frontendInnerState + 1;
+      iVar9 = 0x18;
+    }
+    BlitFrontendCachedRect(0,iVar16,g_frontendCanvasW,iVar9);
+    iVar7 = g_frontendInnerState;
+    break;
+  case 0x1a:
+    ReleaseFrontendDisplayModeButtons();
+    ActivateFrontendCursorOverlay();
+    if (g_twoPlayerModeEnabled != 0) {
+      DAT_004962dc = (int *)ReleaseTrackedFrontendSurface(DAT_004962dc);
+    }
+    DAT_00496358 = (int *)ReleaseTrackedFrontendSurface(DAT_00496358);
+    RenderTgaToFrontendSurface(g_smallTextSurface);
+    SetSurfaceColorKeyFromRGB(g_smallTextSurface,0xffffff);
+    if (g_returnToScreenIndex == -1) {
+      if (DAT_004962bc == 0) {
+        if (DAT_004962d4 == 2) {
+          iVar16 = 0x18;
+        }
+        else {
+          if (DAT_004962d4 == 1) {
+            if ((g_selectedGameType == 5) || (g_selectedGameType == 0)) {
+              if (DAT_00497a74 != 0) {
+                iVar16 = 0x18;
+                goto LAB_0040f821;
+              }
+              if (g_selectedGameType != 0) goto LAB_0040f744;
+LAB_0040f781:
+              iVar16 = 0x15;
+            }
+            else {
+LAB_0040f744:
+              if (7 < g_selectedGameType) goto LAB_0040f781;
+              if ((g_selectedGameType != 7) || (DAT_0048f380 != 0)) {
+                if (DAT_00497a74 != 0) {
+                  iVar16 = 0x18;
+                  goto LAB_0040f821;
+                }
+                DAT_0048f380 = 0;
+                InitializeRaceSeriesSchedule();
+                InitializeFrontendDisplayModeState();
+                goto LAB_0040f78b;
+              }
+              DAT_0048f380 = 1;
+              iVar16 = 0x14;
+            }
+            SetFrontendScreen(iVar16);
+          }
+LAB_0040f78b:
+          if (DAT_004962d4 == 3) {
+            if (g_twoPlayerModeEnabled == 1) {
+              g_twoPlayerModeEnabled = 6;
+              iVar16 = 0x14;
+            }
+            else {
+              iVar16 = 0x15;
+            }
+            SetFrontendScreen(iVar16);
+          }
+          iVar7 = g_frontendInnerState;
+          if ((DAT_004962d4 != 4) || (DAT_004962c0 != 1)) break;
+          if (g_selectedGameType != 0) {
+            CreateFrontendNetworkSession();
+            iVar7 = g_frontendInnerState;
+            break;
+          }
+          iVar16 = 0x15;
+        }
+      }
+      else {
+        iVar16 = 0xb;
+      }
+    }
+    else {
+      if (DAT_004962d4 == 1) {
+        SetFrontendScreen(6);
+      }
+      if (DAT_004962d4 == 4) {
+        SetFrontendScreen(10);
+      }
+      iVar7 = g_frontendInnerState;
+      if (DAT_004962d4 != 3) break;
+      if (g_twoPlayerModeEnabled == 1) {
+        iVar16 = 5;
+      }
+      else {
+        g_twoPlayerModeEnabled = 5;
+        iVar16 = 0x14;
+      }
+    }
+LAB_0040f821:
+    SetFrontendScreen(iVar16);
+    iVar7 = g_frontendInnerState;
+  }
+  g_frontendInnerState = iVar7;
+  if (DAT_004962bc == 1) {
+    ProcessFrontendNetworkMessages();
+  }
+  if (DAT_00497328 != 0) {
+    DAT_004962bc = 2;
+    DXPlay::Destroy();
+  }
+  return;
+}
+
+
+
+======================================================================
+2. CALLEES of CarSelectionScreenStateMachine @ 0x40DFC0
+======================================================================
+ok session_id=505894408c434c89a2e63b9ed897bea9 count=45
+Structured callees: []
+
+======================================================================
+3. FUNCTION SEARCHES
+======================================================================
+  NOT FOUND: FillPrimaryFrontendRect
+  NOT FOUND: Copy16BitSurfaceRect
+  NOT FOUND: FillRect
+  NOT FOUND: FillFrontendRect
+  NOT FOUND: DrawFilledRect
+  NOT FOUND: FillSurface
+  NOT FOUND: ClearSurface
+  NOT FOUND: RenderFill
+
+======================================================================
+4. SYMBOL SEARCHES
+======================================================================
+  search 'Fill': {
+  "case_sensitive": false,
+  "count": 1,
+  "defined_strings_only": false,
+  "encoding": "utf-8",
+  "end": null,
+  "items": [
+    {
+      "address": "00466060",
+      "data_type": "/string",
+      "kind": "defined_string",
+      "length": 25,
+      "value": "Front End\\VolumeFill.tga"
+    }
+  ],
+  "query": "Fill",
+  "session_id": "505894408c434c89a2e63b9ed897bea9",
+  "start": null
+}
+  search 'Rect': {
+  "case_sensitive": false,
+  "count": 12,
+  "defined_strings_only": false,
+  "encoding": "utf-8",
+  "end": null,
+  "items": [
+    {
+      "address": "00466d1c",
+      "data_type": "/string",
+      "kind": "defined_string",
+      "length": 16,
+      "value": "DirectX %d APIs"
+    },
+    {
+      "address": "004814d8",
+      "data_type": "/string",
+      "kind": "defined_string",
+      "length": 36,
+      "value": "A Direct X internal error occurred."
+    },
+    {
+      "address": "004814fc",
+   
+  search 'Clear': {
+  "case_sensitive": false,
+  "count": 3,
+  "defined_strings_only": false,
+  "encoding": "utf-8",
+  "end": null,
+  "items": [
+    {
+      "address": "0045fdb4",
+      "data_type": "/TerminatedCString",
+      "kind": "defined_string",
+      "length": 25,
+      "value": "?bClearScreen@DXD3D@@2HA"
+    },
+    {
+      "address": "0045fdee",
+      "data_type": "/TerminatedCString",
+      "kind": "defined_string",
+      "length": 30,
+      "value": "?ClearAll@DXD3DTexture@@SAHXZ"
+    },
+    {
+      "a
+  search 'Copy': {
+  "case_sensitive": false,
+  "count": 1,
+  "defined_strings_only": false,
+  "encoding": "utf-8",
+  "end": null,
+  "items": [
+    {
+      "address": "00466808",
+      "data_type": "/string",
+      "kind": "defined_string",
+      "length": 28,
+      "value": "TEST DRIVE 5 COPYRIGHT 1998"
+    }
+  ],
+  "query": "Copy",
+  "session_id": "505894408c434c89a2e63b9ed897bea9",
+  "start": null
+}
+  search 'Blit': {
+  "case_sensitive": false,
+  "count": 0,
+  "defined_strings_only": false,
+  "encoding": "utf-8",
+  "end": null,
+  "items": [],
+  "query": "Blit",
+  "session_id": "505894408c434c89a2e63b9ed897bea9",
+  "start": null
+}
+
+======================================================================
+5. DECOMPILE FILL FUNCTIONS
+======================================================================
+FillPrimaryFrontendRect: searching by symbol...
+symbol.by_name result: {
+  "count": 1,
+  "exact": false,
+  "items": [
+    {
+      "address": "00423ed0",
+      "external": false,
+      "id": 1087,
+      "name": "FillPrimaryFrontendRect",
+      "namespace": "Global",
+      "primary": true,
+      "short_name": "FillPrimaryFrontendRect",
+      "source_type": "USER_DEFINED",
+      "symbol_type": "Function"
+    }
+  ],
+  "limit": 20,
+  "query": "FillPrimaryFrontendRect",
+  "session_id": "505894408c434c89a2e63b9ed897bea9",
+  "total": 1
+}
+
+======================================================================
+6. FUNCTION LIST - scan for fill/rect/copy names
+======================================================================
+
+======================================================================
+7. DECOMPILE Copy16BitSurfaceRect
+======================================================================
+Copy16BitSurfaceRect: ok session_id=505894408c434c89a2e63b9ed897bea9 count=1 total=1 limit=20
+
+======================================================================
+DONE
+======================================================================

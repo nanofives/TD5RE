@@ -1,0 +1,445 @@
+session_id: 1c259ac94e4446e78209a19a699184dc
+
+======================================================================
+1. CODE UNIT AT 0x40ead7 (call site #1 in CarSelSM case 10)
+======================================================================
+SC: {
+  "address": "0040ead7",
+  "code_unit": {
+    "address": "0040ead7",
+    "bytes": "e8f4530100",
+    "kind": "InstructionDB",
+    "label": null,
+    "length": 5,
+    "max_address": "0040eadb",
+    "min_address": "0040ead7",
+    "mnemonic": "CALL",
+    "text": "CALL 0x00423ed0"
+  },
+  "session_id": "1c259ac94e4446e78209a19a699184dc"
+}
+Txt: ok session_id=1c259ac94e4446e78209a19a699184dc
+0x40eac0: SC={
+  "address": "0040eac0",
+  "code_unit": null,
+  "session_id": "1c259ac94e4446e78209a19a699184dc"
+} | ok session_id=1c259ac94e4446e78209a19a699184dc
+0x40eac5: SC={
+  "address": "0040eac5",
+  "code_unit": null,
+  "session_id": "1c259ac94e4446e78209a19a699184dc"
+} | ok session_id=1c259ac94e4446e78209a19a699184dc
+0x40eacc: SC={
+  "address": "0040eacc",
+  "code_unit": null,
+  "session_id": "1c259ac94e4446e78209a19a699184dc"
+} | ok session_id=1c259ac94e4446e78209a19a699184dc
+0x40ead1: SC={
+  "address": "0040ead1",
+  "code_unit": null,
+  "session_id": "1c259ac94e4446e78209a19a699184dc"
+} | ok session_id=1c259ac94e4446e78209a19a699184dc
+0x40ead7: SC={
+  "address": "0040ead7",
+  "code_unit": {
+    "address": "0040ead7",
+    "bytes": "e8f4530100",
+    "kind": "InstructionDB",
+    "label": null,
+    "length": 5,
+    "max_address": "0040eadb",
+    "m | ok session_id=1c259ac94e4446e78209a19a699184dc
+
+======================================================================
+2. CODE UNIT AT 0x40f2e7 (call site #2 in CarSelSM case 0x14)
+======================================================================
+0x40f2d0: SC={
+  "address": "0040f2d0",
+  "code_unit": null,
+  "session_id": "1c259ac94e4446e78209a19a699184dc"
+} | ok session_id=1c259ac94e4446e78209a19a699184dc
+0x40f2d5: SC={
+  "address": "0040f2d5",
+  "code_unit": null,
+  "session_id": "1c259ac94e4446e78209a19a699184dc"
+} | ok session_id=1c259ac94e4446e78209a19a699184dc
+0x40f2dc: SC={
+  "address": "0040f2dc",
+  "code_unit": null,
+  "session_id": "1c259ac94e4446e78209a19a699184dc"
+} | ok session_id=1c259ac94e4446e78209a19a699184dc
+0x40f2e2: SC={
+  "address": "0040f2e2",
+  "code_unit": null,
+  "session_id": "1c259ac94e4446e78209a19a699184dc"
+} | ok session_id=1c259ac94e4446e78209a19a699184dc
+0x40f2e7: SC={
+  "address": "0040f2e7",
+  "code_unit": {
+    "address": "0040f2e7",
+    "bytes": "e8e44b0100",
+    "kind": "InstructionDB",
+    "label": null,
+    "length": 5,
+    "max_address": "0040f2eb",
+    "m | ok session_id=1c259ac94e4446e78209a19a699184dc
+
+======================================================================
+3. DECOMP InitializeFrontendPresentationState @ 0x424e40
+======================================================================
+
+/* WARNING: Removing unreachable block (ram,0x0042505a) */
+/* WARNING: Removing unreachable block (ram,0x00425041) */
+/* WARNING: Removing unreachable block (ram,0x004250e5) */
+/* WARNING: Globals starting with '_' overlap smaller symbols at the same address */
+/* Frontend presentation bootstrap. Uses DX::app + 0x150 to distinguish fullscreen from windowed
+   presentation behavior: windowed mode updates the client origin from the app window handle, while
+   fullscreen mode may allocate an intermediate presentation surface if direct primary-surface
+   presentation is unavailable. */
+
+void InitializeFrontendPresentationState(void)
+
+{
+  undefined4 *puVar1;
+  int iVar2;
+  uint uVar3;
+  BOOL BVar4;
+  int iVar5;
+  bool bVar6;
+  byte in_AF;
+  byte in_TF;
+  byte in_IF;
+  byte in_NT;
+  byte in_AC;
+  byte in_VIF;
+  byte in_VIP;
+  byte in_ID;
+  uint uVar7;
+  longlong lVar8;
+  undefined8 uVar9;
+  int local_3c;
+  undefined4 local_38;
+  int local_34;
+  int local_30;
+  uint local_2c;
+  int local_28;
+  LARGE_INTEGER local_24;
+  LARGE_INTEGER local_1c;
+  LARGE_INTEGER local_14;
+  uint local_c;
+  uint local_8;
+  
+  local_34 = g_frontendCanvasW;
+  local_3c = 0;
+  local_38 = 0;
+  local_30 = g_frontendCanvasH;
+  DAT_00497abc = 0;
+  DAT_00497ab8 = 0;
+  if (*(int *)(g_appExref + 0x150) == 0) {
+    ClientToScreen(*(HWND *)g_appExref,(LPPOINT)&DAT_00497ab8);
+  }
+  DAT_004951ec = 1;
+  FillPrimaryFrontendRect(0,0,0,g_frontendCanvasW,g_frontendCanvasH);
+  Copy16BitSurfaceRect(0,0,g_primaryWorkSurface,&local_3c,0x10);
+  iVar2 = (**(code **)(*g_primaryWorkSurface + 0x34))(g_primaryWorkSurface,2);
+  while (iVar2 == -0x7789fde4) {
+    iVar2 = (**(code **)(*g_primaryWorkSurface + 0x34))(g_primaryWorkSurface,2);
+  }
+  bVar6 = ((byte)*(undefined4 *)(dd_exref + 0xf40) & 0x10) == 0x10;
+  g_frontendHardwareFlipEnabled = (uint)bVar6;
+  if (*(int *)(g_appExref + 0x150) == 0) {
+    g_frontendHardwareFlipEnabled = 1;
+  }
+  else if (!bVar6) {
+    g_frontendBackSurfacePtr = CreateTrackedFrontendSurface(g_frontendCanvasW,g_frontendCanvasH);
+  }
+  DAT_004951ec = 1;
+  timeGetTime();
+  local_8 = 0;
+  do {
+    Copy16BitSurfaceRect(0,0,g_primaryWorkSurface,&local_3c,0x10);
+    Copy16BitSurfaceRect(0,0,g_primaryWorkSurface,&local_3c,0x11);
+    local_8 = local_8 + 1;
+  } while (local_8 < 0xc);
+  iVar2 = (**(code **)(*g_primaryWorkSurface + 0x34))(g_primaryWorkSurface,2);
+  while (iVar2 == -0x7789fde4) {
+    iVar2 = (**(code **)(*g_primaryWorkSurface + 0x34))(g_primaryWorkSurface,2);
+  }
+  timeGetTime();
+  DAT_004951ec = 0;
+  timeGetTime();
+  local_8 = 0;
+  do {
+    Copy16BitSurfaceRect(0,0,g_primaryWorkSurface,&local_3c,0x10);
+    Copy16BitSurfaceRect(0,0,g_primaryWorkSurface,&local_3c,0x11);
+    local_8 = local_8 + 1;
+  } while (local_8 < 0xc);
+  timeGetTime();
+  DAT_004951ec = 1;
+  DAT_00497aa0 = 0x20202020;
+  DAT_00497aa4 = 0x20202020;
+  DAT_00497aa8 = 0x20202020;
+  _DAT_00497aac = 0;
+  DAT_00497ab0 = 0;
+  uVar7 = (uint)(in_NT & 1) * 0x4000 | (uint)(in_IF & 1) * 0x200 | (uint)(in_TF & 1) * 0x100 | 0x40
+          | (uint)(in_AF & 1) * 0x10 | 4 | (uint)(in_ID & 1) * 0x200000 |
+          (uint)(in_VIP & 1) * 0x100000 | (uint)(in_VIF & 1) * 0x80000 | (uint)(in_AC & 1) * 0x40000
+  ;
+  uVar3 = uVar7 ^ 0x200000;
+  if (((uint)((uVar3 & 0x4000) != 0) * 0x4000 | (uint)((uVar3 & 0x200) != 0) * 0x200 |
+       (uint)((uVar3 & 0x100) != 0) * 0x100 | (uint)((uVar3 & 0x40) != 0) * 0x40 |
+       (uint)((uVar3 & 0x10) != 0) * 0x10 | (uint)((uVar3 & 4) != 0) * 4 |
+       (uint)((uVar3 & 0x200000) != 0) * 0x200000 | (uint)((uVar3 & 0x40000) != 0) * 0x40000) !=
+      uVar7) {
+    iVar2 = cpuid_basic_info(0);
+    DAT_00497aa0 = *(undefined4 *)(iVar2 + 4);
+    DAT_00497aa4 = *(undefined4 *)(iVar2 + 8);
+    DAT_00497aa8 = *(undefined4 *)(iVar2 + 0xc);
+    puVar1 = (undefined4 *)cpuid_Version_info(1);
+    _DAT_00497aac = *puVar1;
+    DAT_00497ab0 = puVar1[2];
+  }
+  DAT_00495234 = DAT_00497ab0 >> 0x17 & 1;
+  if ((DAT_00497ab0 & 0x10) == 0) {
+    _DAT_004951d4 = 0;
+  }
+  else {
+    _DAT_004951d4 = 1;
+    BVar4 = QueryPerformanceFrequency(&local_14);
+    if (BVar4 != 0) {
+      uVar9 = rdtsc();
+      local_28 = (int)((ulonglong)uVar9 >> 0x20);
+      local_2c = (uint)uVar9;
+      QueryPerformanceCounter(&local_24);
+      do {
+        QueryPerformanceCounter(&local_1c);
+        bVar6 = local_1c.s.LowPart < local_24.s.LowPart;
+        iVar5 = local_1c.s.LowPart - local_24._0_4_;
+        iVar2 = local_1c.s.HighPart - local_24._4_4_;
+        lVar8 = __alldiv(local_14.s.LowPart,local_14.s.HighPart,5,0);
+      } while (CONCAT44(iVar2 - (uint)bVar6,iVar5) < lVar8);
+      uVar9 = rdtsc();
+      local_8 = (uint)((ulonglong)uVar9 >> 0x20);
+      local_c = (uint)uVar9;
+      lVar8 = __allmul(local_c - local_2c,(local_8 - local_28) - (uint)(local_c < local_2c),
+                       local_14.s.LowPart,local_14.s.HighPart);
+      uVar9 = __alldiv((uint)lVar8,(uint)((ulonglong)lVar8 >> 0x20),
+                       local_1c.s.LowPart - local_24._0_4_,
+                       (local_1c.s.HighPart - local_24._4_4_) -
+                       (uint)(local_1c.s.LowPart < local_24.s.LowPart));
+      uVar9 = __alldiv((uint)uVar9,(uint)((ulonglong)uVar9 >> 0x20),1000000,0);
+      _DAT_00497ac8 = (undefined4)uVar9;
+      goto LAB_00425145;
+    }
+  }
+  _DAT_00497ac8 = 0;
+LAB_00425145:
+  sprintf_game(&DAT_00497ac0,&DAT_0046661c);
+  return;
+}
+
+
+
+======================================================================
+4. FIND+DECOMP PresentSecondaryFrontendRect
+======================================================================
+Address: 00424c10
+
+/* Presents a rectangle from the secondary frontend work buffer to the active frontend presentation
+   target via Copy16BitSurfaceRect. */
+
+void __cdecl PresentSecondaryFrontendRectViaCopy(int param_1,int param_2,int param_3,int param_4)
+
+{
+  int local_10;
+  int local_c;
+  int local_8;
+  int local_4;
+  
+  local_8 = param_3 + param_1;
+  local_4 = param_4 + param_2;
+  local_10 = param_1;
+  local_c = param_2;
+  Copy16BitSurfaceRect(param_1,param_2,g_secondaryWorkSurface,&local_10,0x10);
+  return;
+}
+
+
+
+======================================================================
+5. FIND+DECOMP PresentPrimaryFrontendRect
+======================================================================
+Address: 00424d40
+
+/* Presents a rectangle from the primary frontend work buffer to the active frontend presentation
+   target DAT_00495220. */
+
+void __cdecl PresentPrimaryFrontendRect(int param_1,int param_2,int param_3,int param_4)
+
+{
+  int local_10;
+  int local_c;
+  int local_8;
+  int local_4;
+  
+  local_8 = param_3 + param_1;
+  local_4 = param_4 + param_2;
+  local_10 = param_1;
+  local_c = param_2;
+  (**(code **)(*g_primaryWorkSurface + 0x1c))
+            (g_primaryWorkSurface,param_1,param_2,g_frontendBackSurfacePtr,&local_10,0x10);
+  return;
+}
+
+
+
+======================================================================
+6. FIND+DECOMP CopyPrimaryFrontendBufferToSecondary
+======================================================================
+Address: 00424b30
+
+/* Copies the full primary frontend work buffer into the secondary work buffer using the current
+   frontend virtual size. */
+
+void CopyPrimaryFrontendBufferToSecondary(void)
+
+{
+  undefined4 local_10;
+  undefined4 local_c;
+  undefined4 local_8;
+  undefined4 local_4;
+  
+  local_8 = g_frontendCanvasW;
+  local_10 = 0;
+  local_c = 0;
+  local_4 = g_frontendCanvasH;
+  (**(code **)(*g_secondaryWorkSurface + 0x1c))
+            (g_secondaryWorkSurface,0,0,g_primaryWorkSurface,&local_10,0x10);
+  return;
+}
+
+
+
+======================================================================
+7. FIND+DECOMP PresentPrimaryFrontendBufferViaCopy
+======================================================================
+Address: 00424af0
+
+/* Presents the full primary frontend work buffer to the active frontend presentation target via
+   Copy16BitSurfaceRect, which handles the software/copy path. */
+
+void PresentPrimaryFrontendBufferViaCopy(void)
+
+{
+  int local_10 [3];
+  undefined4 local_4;
+  
+  local_10[2] = g_frontendCanvasW;
+  local_4 = g_frontendCanvasH;
+  local_10[0] = 0;
+  local_10[1] = 0;
+  Copy16BitSurfaceRect(0,0,g_primaryWorkSurface,local_10,0x10);
+  return;
+}
+
+
+
+======================================================================
+8. PCODE at call sites
+======================================================================
+pcode at 0x40ead7: {
+  "address": "0040ead7",
+  "instruction": "CALL 0x00423ed0",
+  "ops": [
+    {
+      "inputs": [
+        {
+          "address": "register:00000010",
+          "constant": false,
+          "register": true,
+          "size": 4,
+          "space": "register",
+          "unique": false
+        },
+        {
+          "address": "const:00000004",
+          "constant": true,
+          "register": false,
+          "size": 4,
+          "space": "const",
+          "unique": false
+        }
+      ],
+    
+pcode at 0x40f2e7: {
+  "address": "0040f2e7",
+  "instruction": "CALL 0x00423ed0",
+  "ops": [
+    {
+      "inputs": [
+        {
+          "address": "register:00000010",
+          "constant": false,
+          "register": true,
+          "size": 4,
+          "space": "register",
+          "unique": false
+        },
+        {
+          "address": "const:00000004",
+          "constant": true,
+          "register": false,
+          "size": 4,
+          "space": "const",
+          "unique": false
+        }
+      ],
+    
+
+======================================================================
+9. FIND+DECOMP QueueFrontendOverlayRect
+======================================================================
+Address: 00425660
+
+/* Queues a frontend sprite/overlay rectangle into the pending draw list with destination bounds,
+   source bounds, color, surface handle, and derived sprite metadata. */
+
+void __cdecl
+QueueFrontendOverlayRect
+          (int param_1,int param_2,int param_3,int param_4,int param_5,int param_6,
+          undefined4 param_7,int param_8)
+
+{
+  int iVar1;
+  undefined4 uVar2;
+  int iVar3;
+  
+  iVar3 = DAT_00498718;
+  if (-1 < param_3) {
+    iVar1 = DAT_00498718 * 0x34;
+    (&DAT_00498f40)[DAT_00498718 * 0xd] = param_1;
+    (&DAT_00498f44)[iVar3 * 0xd] = param_2;
+    *(int *)(&DAT_00498f48 + iVar1) = param_1 + param_5;
+    *(int *)(&DAT_00498f4c + iVar1) = param_2 + param_6;
+    (&DAT_00498f50)[iVar3 * 0xd] = param_3;
+    (&DAT_00498f54)[iVar3 * 0xd] = param_4;
+    (&DAT_00498f58)[iVar3 * 0xd] = param_3 + param_5;
+    (&DAT_00498f5c)[iVar3 * 0xd] = param_4 + param_6;
+    (&DAT_00498f60)[iVar3 * 0xd] = param_7;
+    (&DAT_00498f64)[iVar3 * 0xd] = param_8;
+    uVar2 = GetFrontendSurfaceRegistryId(param_8);
+    iVar3 = DAT_00498718 + 1;
+    (&DAT_00498f68)[DAT_00498718 * 0xd] = uVar2;
+    if (0x40 < iVar3) {
+      Msg(s_FE__Out_of_Sprites__004666f0);
+      return;
+    }
+    DAT_00498718 = iVar3;
+    (&DAT_00498f50)[iVar3 * 0xd] = 0xffffffff;
+  }
+  return;
+}
+
+
+
+=== DONE ===

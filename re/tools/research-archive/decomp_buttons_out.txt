@@ -1,0 +1,172 @@
+=== 0x00424560 ===
+Name: DrawFrontendLocalizedStringToSurface
+
+int __cdecl DrawFrontendLocalizedStringToSurface(byte *param_1,int param_2,int param_3,int *param_4)
+
+{
+  byte bVar1;
+  int iVar2;
+  uint uVar3;
+  byte *pbVar4;
+  int local_10;
+  int local_c;
+  int local_8;
+  int local_4;
+  
+  if (SNK_LangDLL_exref[8] != (code)0x30) {
+    iVar2 = DrawFrontendFontStringToSurface(param_1,param_2,param_3,param_4);
+    return iVar2;
+  }
+  if (param_1 == (byte *)0x0) {
+    return 0;
+  }
+  bVar1 = *param_1;
+  pbVar4 = param_1;
+  iVar2 = param_2;
+  while (bVar1 != 0) {
+    uVar3 = (uint)bVar1;
+    param_1 = (byte *)(uVar3 - 0x20);
+    local_c = ((uint)param_1 / 10) * 0x18;
+    local_4 = local_c + 0x18;
+    local_10 = ((uint)param_1 % 10) * 0x18;
+    pbVar4 = pbVar4 + 1;
+    local_8 = (int)*(char *)((int)&PTR_DAT_004660c8 + uVar3);
+    if ('\x17' < *(char *)((int)&PTR_DAT_004660c8 + uVar3)) {
+      local_8 = 0x18;
+    }
+    local_8 = local_8 + local_10;
+    (**(code **)(*param_4 + 0x1c))(param_4,iVar2,param_3,g_bodyTextFontSurface,&local_10,0x11);
+    iVar2 = iVar2 + *(char *)((int)&PTR_DAT_004660c8 + uVar3);
+    bVar1 = *pbVar4;
+  }
+  return ((iVar2 - (char)param_1[0x4660e8]) - param_2) + 0x18;
+}
+
+
+
+=== 0x00425b60 ===
+Name: DrawFrontendButtonBackground
+
+/* Draws one of the framed button background styles into a frontend button surface for normal,
+   mirrored, or preview variants. */
+
+void __cdecl
+DrawFrontendButtonBackground
+          (int *param_1,int param_2,undefined4 param_3,undefined4 param_4,int param_5)
+
+{
+  int iVar1;
+  int iVar2;
+  undefined4 ***pppuStack_58;
+  int iStack_54;
+  undefined4 **ppuStack_50;
+  int iStack_4c;
+  int iStack_48;
+  undefined4 uStack_44;
+  int **ppiStack_40;
+  uint uStack_3c;
+  int *piStack_38;
+  int iStack_34;
+  int iStack_30;
+  undefined4 uStack_2c;
+  int *piStack_28;
+  int iStack_24;
+  uint uVar3;
+  int local_10;
+  uint local_c;
+  undefined4 local_8;
+  int local_4;
+  
+  iStack_24 = 0x10;
+  piStack_28 = &local_10;
+  uStack_2c = DAT_00496268;
+  iVar2 = param_5 * 0x20;
+  local_c = iVar2 + 6;
+  iStack_30 = param_2;
+  local_4 = iVar2 + 0x13;
+  iStack_34 = 0;
+  piStack_38 = param_1;
+  local_10 = 0;
+  local_8 = 0x1a;
+  uStack_3c = 0x425bad;
+  (**(code **)(*param_1 + 0x1c))();
+  local_10 = param_5 * 0xc;
+  piStack_28 = (int *)(local_10 + 0x16);
+  iStack_24 = 0x60;
+  iVar1 = 0x1a;
+  if (0x36 < local_c) {
+    do {
+      uStack_3c = 0x10;
+      ppiStack_40 = &piStack_28;
+      uStack_44 = DAT_00496268;
+      iStack_48 = param_2;
+      ppuStack_50 = (undefined4 **)param_1;
+      iStack_54 = 0x425bf8;
+      iStack_4c = iVar1;
+      (**(code **)(*param_1 + 0x1c))();
+      uVar3 = iVar1 + 0x20;
+      iVar1 = iVar1 + 4;
+    } while (uVar3 < local_c);
+  }
+  iStack_24 = iVar2 + 6;
+  uStack_3c = 0x10;
+  iStack_4c = local_c - 0x1c;
+  ppiStack_40 = &piStack_28;
+  uStack_44 = DAT_00496268;
+  iStack_48 = param_2;
+  ppuStack_50 = (undefined4 **)param_1;
+  piStack_28 = (int *)0x1c;
+  iStack_54 = 0x425c45;
+  (**(code **)(*param_1 + 0x1c))();
+  iStack_34 = iVar2 + 4;
+  ppiStack_40 = (int **)0x0;
+  piStack_38 = (int *)0x1a;
+  uVar3 = 0x16;
+  uStack_3c = iVar2;
+  do {
+    iStack_54 = 0x10;
+    pppuStack_58 = &ppiStack_40;
+    (**(code **)(*param_1 + 0x1c))(param_1,0,param_2 + -9 + uVar3,DAT_00496268);
+    uVar3 = uVar3 + 4;
+  } while (uVar3 < 0x38);
+  iStack_34 = iVar2 + 4;
+  ppiStack_40 = (int **)0x1c;
+  piStack_38 = (int *)0x38;
+  uVar3 = 0x16;
+  uStack_3c = iVar2;
+  do {
+    iStack_54 = 0x10;
+    pppuStack_58 = &ppiStack_40;
+    (**(code **)(*param_1 + 0x1c))(param_1,uStack_2c,param_2 + -0xd + uVar3,DAT_00496268);
+    uVar3 = uVar3 + 4;
+  } while (uVar3 < 0x38);
+  iStack_54 = 0x10;
+  pppuStack_58 = &ppiStack_40;
+  uStack_3c = iVar2 + 0x15;
+  iStack_34 = iVar2 + 0x1e;
+  ppiStack_40 = (int **)0x0;
+  piStack_38 = (int *)0x1a;
+  (**(code **)(*param_1 + 0x1c))(param_1,0,param_2 + 0x2f,DAT_00496268);
+  pppuStack_58 = (undefined4 ***)(ppiStack_40 + 7);
+  ppuStack_50 = ppiStack_40 + 8;
+  iStack_54 = 0x60;
+  iStack_4c = 100;
+  iStack_34 = 0x1a;
+  if (0x36 < uStack_3c) {
+    do {
+      (**(code **)(*param_1 + 0x1c))
+                (param_1,iStack_34,param_2 + 0x34,DAT_00496268,&pppuStack_58,0x10);
+      iVar1 = iStack_34 + 4;
+      uVar3 = iStack_34 + 0x20;
+      iStack_34 = iVar1;
+    } while (uVar3 < uStack_3c);
+  }
+  iStack_54 = iVar2 + 0x11;
+  iStack_4c = iVar2 + 0x1e;
+  pppuStack_58 = (undefined4 ***)0x1c;
+  ppuStack_50 = (undefined4 **)0x38;
+  (**(code **)(*param_1 + 0x1c))(param_1,uStack_44,param_2 + 0x2b,DAT_00496268,&pppuStack_58,0x10);
+  return;
+}
+
+

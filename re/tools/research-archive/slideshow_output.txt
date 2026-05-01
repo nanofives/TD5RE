@@ -1,0 +1,377 @@
+2026-04-02 19:47:08 INFO  (LoggingInitialization) Using log config file: jar:file:/C:/Users/maria/Desktop/Proyectos/TD5RE/ghidra_12.0.3_PUBLIC/Ghidra/Framework/Generic/lib/Generic.jar!/generic.log4j.xml  
+2026-04-02 19:47:08 INFO  (LoggingInitialization) Using log file: C:\Users\maria\Desktop\Proyectos\TD5RE\re\tools\slideshow_output.txt  
+2026-04-02 19:47:08 INFO  (Preferences) Loading user preferences: C:\Users\maria\AppData\Roaming\ghidra\ghidra_12.0.3_PUBLIC\preferences  
+2026-04-02 19:47:08 INFO  (ClassSearcher) Searching for classes...  
+2026-04-02 19:47:09 INFO  (ClassSearcher) Class search complete (794 ms)  
+2026-04-02 19:47:09 INFO  (DefaultSSLContextInitializer) Initializing SSL Context  
+2026-04-02 19:47:09 INFO  (SecureRandomFactory) Initializing Random Number Generator...  
+2026-04-02 19:47:09 INFO  (SecureRandomFactory) Random Number Generator initialization complete: SHA1PRNG  
+2026-04-02 19:47:09 INFO  (DefaultTrustManagerFactory) Trust manager disabled, cacerts have not been set  
+2026-04-02 19:47:10 INFO  (AnalyzeHeadless) Headless startup complete (2176 ms)  
+2026-04-02 19:47:10 INFO  (ClassSearcher) Class searcher loaded 58 extension points (18 false positives)  
+2026-04-02 19:47:10 INFO  (HeadlessAnalyzer) HEADLESS Script Paths:
+    C:\Users\maria\Desktop\Proyectos\TD5RE\ghidra_12.0.3_PUBLIC\Ghidra\Features\Base\ghidra_scripts
+    C:\Users\maria\Desktop\Proyectos\TD5RE\ghidra_12.0.3_PUBLIC\Ghidra\Features\BytePatterns\ghidra_scripts
+    C:\Users\maria\Desktop\Proyectos\TD5RE\ghidra_12.0.3_PUBLIC\Ghidra\Features\Decompiler\ghidra_scripts
+    C:\Users\maria\Desktop\Proyectos\TD5RE\ghidra_12.0.3_PUBLIC\Ghidra\Features\GnuDemangler\ghidra_scripts
+    C:\Users\maria\Desktop\Proyectos\TD5RE\ghidra_12.0.3_PUBLIC\Ghidra\Features\SystemEmulation\ghidra_scripts
+    C:\Users\maria\Desktop\Proyectos\TD5RE\ghidra_12.0.3_PUBLIC\Ghidra\Features\SwiftDemangler\ghidra_scripts
+    C:\Users\maria\Desktop\Proyectos\TD5RE\ghidra_12.0.3_PUBLIC\Ghidra\Features\WildcardAssembler\ghidra_scripts
+    C:\Users\maria\Desktop\Proyectos\TD5RE\re\tools
+    C:\Users\maria\Desktop\Proyectos\TD5RE\ghidra_12.0.3_PUBLIC\Ghidra\Features\Jython\ghidra_scripts
+    C:\Users\maria\Desktop\Proyectos\TD5RE\ghidra_12.0.3_PUBLIC\Ghidra\Features\BSim\ghidra_scripts
+    C:\Users\maria\AppData\Roaming\ghidra\ghidra_12.0.3_PUBLIC\Extensions\GhidrAssistMCP\ghidra_scripts
+    C:\Users\maria\Desktop\Proyectos\TD5RE\ghidra_12.0.3_PUBLIC\Ghidra\Features\PDB\ghidra_scripts
+    C:\Users\maria\Desktop\Proyectos\TD5RE\ghidra_12.0.3_PUBLIC\Ghidra\Debug\Debugger\ghidra_scripts
+    C:\Users\maria\Desktop\Proyectos\TD5RE\ghidra_12.0.3_PUBLIC\Ghidra\Features\DecompilerDependent\ghidra_scripts
+    C:\Users\maria\Desktop\Proyectos\TD5RE\ghidra_12.0.3_PUBLIC\Ghidra\Debug\Debugger-rmi-trace\ghidra_scripts
+    C:\Users\maria\Desktop\Proyectos\TD5RE\ghidra_12.0.3_PUBLIC\Ghidra\Features\FileFormats\ghidra_scripts
+    C:\Users\maria\Desktop\Proyectos\TD5RE\ghidra_12.0.3_PUBLIC\Ghidra\Features\MicrosoftCodeAnalyzer\ghidra_scripts
+    C:\Users\maria\Desktop\Proyectos\TD5RE\ghidra_12.0.3_PUBLIC\Ghidra\Processors\Atmel\ghidra_scripts
+    C:\Users\maria\Desktop\Proyectos\TD5RE\ghidra_12.0.3_PUBLIC\Ghidra\Features\VersionTracking\ghidra_scripts
+    C:\Users\maria\Desktop\Proyectos\TD5RE\ghidra_12.0.3_PUBLIC\Ghidra\Features\PyGhidra\ghidra_scripts
+    C:\Users\maria\Desktop\Proyectos\TD5RE\ghidra_12.0.3_PUBLIC\Ghidra\Features\FunctionID\ghidra_scripts
+    C:\Users\maria\Desktop\Proyectos\TD5RE\ghidra_12.0.3_PUBLIC\Ghidra\Processors\PIC\ghidra_scripts
+    C:\Users\maria\Desktop\Proyectos\TD5RE\ghidra_12.0.3_PUBLIC\Ghidra\Processors\DATA\ghidra_scripts
+    C:\Users\maria\Desktop\Proyectos\TD5RE\ghidra_12.0.3_PUBLIC\Ghidra\Processors\8051\ghidra_scripts
+    C:\Users\maria\Desktop\Proyectos\TD5RE\ghidra_12.0.3_PUBLIC\Ghidra\Processors\JVM\ghidra_scripts  
+2026-04-02 19:47:10 INFO  (HeadlessAnalyzer) HEADLESS: execution starts  
+2026-04-02 19:47:10 INFO  (HeadlessAnalyzer) Opening existing project: C:\Users\maria\Desktop\Proyectos\TD5RE\TD5_headless  
+2026-04-02 19:47:10 INFO  (HeadlessProject) Opening project: C:\Users\maria\Desktop\Proyectos\TD5RE\TD5_headless  
+2026-04-02 19:47:10 ERROR (HeadlessAnalyzer) Abort due to Headless analyzer error: ghidra.framework.store.LockException: Unable to lock project! C:\Users\maria\Desktop\Proyectos\TD5RE\TD5_headless java.io.IOException: ghidra.framework.store.LockException: Unable to lock project! C:\Users\maria\Desktop\Proyectos\TD5RE\TD5_headless
+	at ghidra.app.util.headless.HeadlessAnalyzer.openProject(HeadlessAnalyzer.java:1815)
+	at ghidra.app.util.headless.HeadlessAnalyzer.processLocal(HeadlessAnalyzer.java:433)
+	at ghidra.app.util.headless.AnalyzeHeadless.launch(AnalyzeHeadless.java:199)
+	at ghidra.GhidraLauncher.launch(GhidraLauncher.java:81)
+	at ghidra.Ghidra.main(Ghidra.java:54)
+Caused by: ghidra.framework.store.LockException: Unable to lock project! C:\Users\maria\Desktop\Proyectos\TD5RE\TD5_headless
+	at ghidra.framework.data.DefaultProjectData.getProjectLock(DefaultProjectData.java:354)
+	at ghidra.framework.data.DefaultProjectData.initLock(DefaultProjectData.java:324)
+	at ghidra.framework.data.DefaultProjectData.init(DefaultProjectData.java:316)
+	at ghidra.framework.data.DefaultProjectData.<init>(DefaultProjectData.java:119)
+	at ghidra.framework.project.DefaultProject.<init>(DefaultProject.java:116)
+	at ghidra.app.util.headless.HeadlessAnalyzer$HeadlessProject.<init>(HeadlessAnalyzer.java:1856)
+	at ghidra.app.util.headless.HeadlessAnalyzer.openProject(HeadlessAnalyzer.java:1809)
+	... 4 more
+ 
+2026-04-02 19:47:24 INFO  (LoggingInitialization) Using log config file: jar:file:/C:/Users/maria/Desktop/Proyectos/TD5RE/ghidra_12.0.3_PUBLIC/Ghidra/Framework/Generic/lib/Generic.jar!/generic.log4j.xml  
+2026-04-02 19:47:24 INFO  (LoggingInitialization) Using log file: C:\Users\maria\Desktop\Proyectos\TD5RE\re\tools\slideshow_output.txt  
+2026-04-02 19:47:24 INFO  (Preferences) Loading user preferences: C:\Users\maria\AppData\Roaming\ghidra\ghidra_12.0.3_PUBLIC\preferences  
+2026-04-02 19:47:24 INFO  (ClassSearcher) Searching for classes...  
+2026-04-02 19:47:25 INFO  (ClassSearcher) Class search complete (952 ms)  
+2026-04-02 19:47:25 INFO  (DefaultSSLContextInitializer) Initializing SSL Context  
+2026-04-02 19:47:25 INFO  (SecureRandomFactory) Initializing Random Number Generator...  
+2026-04-02 19:47:25 INFO  (SecureRandomFactory) Random Number Generator initialization complete: SHA1PRNG  
+2026-04-02 19:47:25 INFO  (DefaultTrustManagerFactory) Trust manager disabled, cacerts have not been set  
+2026-04-02 19:47:25 INFO  (AnalyzeHeadless) Headless startup complete (2321 ms)  
+2026-04-02 19:47:25 INFO  (ClassSearcher) Class searcher loaded 58 extension points (18 false positives)  
+2026-04-02 19:47:26 INFO  (HeadlessAnalyzer) HEADLESS Script Paths:
+    C:\Users\maria\Desktop\Proyectos\TD5RE\ghidra_12.0.3_PUBLIC\Ghidra\Features\Base\ghidra_scripts
+    C:\Users\maria\Desktop\Proyectos\TD5RE\ghidra_12.0.3_PUBLIC\Ghidra\Features\BytePatterns\ghidra_scripts
+    C:\Users\maria\Desktop\Proyectos\TD5RE\ghidra_12.0.3_PUBLIC\Ghidra\Features\Decompiler\ghidra_scripts
+    C:\Users\maria\Desktop\Proyectos\TD5RE\ghidra_12.0.3_PUBLIC\Ghidra\Features\GnuDemangler\ghidra_scripts
+    C:\Users\maria\Desktop\Proyectos\TD5RE\ghidra_12.0.3_PUBLIC\Ghidra\Features\SystemEmulation\ghidra_scripts
+    C:\Users\maria\Desktop\Proyectos\TD5RE\ghidra_12.0.3_PUBLIC\Ghidra\Features\SwiftDemangler\ghidra_scripts
+    C:\Users\maria\Desktop\Proyectos\TD5RE\ghidra_12.0.3_PUBLIC\Ghidra\Features\WildcardAssembler\ghidra_scripts
+    C:\Users\maria\Desktop\Proyectos\TD5RE\re\tools
+    C:\Users\maria\Desktop\Proyectos\TD5RE\ghidra_12.0.3_PUBLIC\Ghidra\Features\Jython\ghidra_scripts
+    C:\Users\maria\Desktop\Proyectos\TD5RE\ghidra_12.0.3_PUBLIC\Ghidra\Features\BSim\ghidra_scripts
+    C:\Users\maria\AppData\Roaming\ghidra\ghidra_12.0.3_PUBLIC\Extensions\GhidrAssistMCP\ghidra_scripts
+    C:\Users\maria\Desktop\Proyectos\TD5RE\ghidra_12.0.3_PUBLIC\Ghidra\Features\PDB\ghidra_scripts
+    C:\Users\maria\Desktop\Proyectos\TD5RE\ghidra_12.0.3_PUBLIC\Ghidra\Debug\Debugger\ghidra_scripts
+    C:\Users\maria\Desktop\Proyectos\TD5RE\ghidra_12.0.3_PUBLIC\Ghidra\Features\DecompilerDependent\ghidra_scripts
+    C:\Users\maria\Desktop\Proyectos\TD5RE\ghidra_12.0.3_PUBLIC\Ghidra\Debug\Debugger-rmi-trace\ghidra_scripts
+    C:\Users\maria\Desktop\Proyectos\TD5RE\ghidra_12.0.3_PUBLIC\Ghidra\Features\FileFormats\ghidra_scripts
+    C:\Users\maria\Desktop\Proyectos\TD5RE\ghidra_12.0.3_PUBLIC\Ghidra\Features\MicrosoftCodeAnalyzer\ghidra_scripts
+    C:\Users\maria\Desktop\Proyectos\TD5RE\ghidra_12.0.3_PUBLIC\Ghidra\Processors\Atmel\ghidra_scripts
+    C:\Users\maria\Desktop\Proyectos\TD5RE\ghidra_12.0.3_PUBLIC\Ghidra\Features\VersionTracking\ghidra_scripts
+    C:\Users\maria\Desktop\Proyectos\TD5RE\ghidra_12.0.3_PUBLIC\Ghidra\Features\PyGhidra\ghidra_scripts
+    C:\Users\maria\Desktop\Proyectos\TD5RE\ghidra_12.0.3_PUBLIC\Ghidra\Features\FunctionID\ghidra_scripts
+    C:\Users\maria\Desktop\Proyectos\TD5RE\ghidra_12.0.3_PUBLIC\Ghidra\Processors\PIC\ghidra_scripts
+    C:\Users\maria\Desktop\Proyectos\TD5RE\ghidra_12.0.3_PUBLIC\Ghidra\Processors\DATA\ghidra_scripts
+    C:\Users\maria\Desktop\Proyectos\TD5RE\ghidra_12.0.3_PUBLIC\Ghidra\Processors\8051\ghidra_scripts
+    C:\Users\maria\Desktop\Proyectos\TD5RE\ghidra_12.0.3_PUBLIC\Ghidra\Processors\JVM\ghidra_scripts  
+2026-04-02 19:47:26 INFO  (HeadlessAnalyzer) HEADLESS: execution starts  
+2026-04-02 19:47:26 INFO  (HeadlessAnalyzer) Creating temporary project: C:\Users\maria\Desktop\Proyectos\TD5RE\re\ghidra_tmp_proj\slideshow_analysis  
+2026-04-02 19:47:26 INFO  (DefaultProject) Creating project: C:\Users\maria\Desktop\Proyectos\TD5RE\re\ghidra_tmp_proj\slideshow_analysis  
+2026-04-02 19:47:26 INFO  (HeadlessAnalyzer) REPORT: Processing input files:   
+2026-04-02 19:47:26 INFO  (HeadlessAnalyzer)      project: C:\Users\maria\Desktop\Proyectos\TD5RE\re\ghidra_tmp_proj\slideshow_analysis  
+2026-04-02 19:47:26 INFO  (HeadlessAnalyzer) IMPORTING: file:///C:/Users/maria/Desktop/Proyectos/TD5RE/original/TD5_d3d.exe  
+2026-04-02 19:47:27 INFO  (ProgramLoader) Using Loader: Portable Executable (PE)  
+2026-04-02 19:47:27 INFO  (ProgramLoader) Using Language/Compiler: x86:LE:32:default:windows  
+2026-04-02 19:47:27 INFO  (ProgramLoader) Using Library Search Path: [., C:\WINDOWS\SysWOW64, C:\Program Files\Microsoft\jdk-21.0.10.7-hotspot\bin, C:\WINDOWS\Sun\Java\bin, C:\WINDOWS\system32, C:\WINDOWS, C:\Users\maria\bin, C:\Program Files\Git\mingw64\bin, C:\Program Files\Git\usr\local\bin, C:\Program Files\Git\usr\bin, C:\Python314\Scripts, C:\Python314, C:\Program Files\Microsoft\jdk-17.0.16.8-hotspot\bin, C:\WINDOWS\System32\Wbem, C:\WINDOWS\System32\WindowsPowerShell\v1.0, C:\WINDOWS\System32\OpenSSH, C:\Program Files\NVIDIA Corporation\NVIDIA App\NvDLISR, C:\Program Files (x86)\NVIDIA Corporation\PhysX\Common, C:\Program Files\dotnet, C:\Program Files (x86)\Windows Kits\10\Windows Performance Toolkit, C:\Program Files\Git\cmd, C:\ProgramData\chocolatey\bin, C:\Program Files\Redis, C:\Program Files\Go\bin, C:\Program Files\Docker\Docker\resources\bin, C:\Program Files\nodejs, C:\Users\maria\AppData\Roaming\krita\ai_diffusion\server\uv, C:\Users\maria\AppData\Local\Microsoft\WindowsApps, C:\Users\maria\AppData\Local\Programs\Microsoft VS Code\bin, C:\Users\maria\.lmstudio\bin, C:\Users\maria\.local\bin, C:\Users\maria\go\bin, C:\users\maria\appdata\local\packages\pythonsoftwarefoundation.python.3.13_qbz5n2kfra8p0\localcache\local-packages\python313\scripts, C:\Users\maria\AppData\Local\Python\bin, C:\Users\maria\AppData\Local\Microsoft\WinGet\Links, C:\Users\maria\AppData\Roaming\npm, C:\Users\maria\AppData\Local\Programs\codebase-memory-mcp, C:\Program Files\Git\usr\bin\vendor_perl, C:\Program Files\Git\usr\bin\core_perl]  
+2026-04-02 19:47:28 DEBUG (WEVTResourceDataType) Error processing Provider Element.  
+2026-04-02 19:47:30 WARN  (ExportDataDirectory) Invalid or missing function at 100c028c  
+2026-04-02 19:47:30 DEBUG (WEVTResourceDataType) Error processing Provider Element.  
+2026-04-02 19:47:31 DEBUG (WEVTResourceDataType) Error processing Provider Element.  
+2026-04-02 19:47:31 INFO  (ProgramLoader) Additional info:
+Loading file:///C:/Users/maria/Desktop/Proyectos/TD5RE/original/TD5_d3d.exe?MD5=4cb6efd048db17604e29b3b99766dc3e...
+------------------------------------------------
+
+Searching 36 paths for library DSOUND.DLL...
+Loading file:///C:/Windows/SysWOW64/dsound.dll?MD5=01286b04eaa5e130e210e686fec8a2ba...
+[dsound.dll]: failed to create WEVTResource at 1006f498: Failed to resolve data length for WEVTResource
+Using existing exports file: C:\Users\maria\AppData\Roaming\ghidra\ghidra_12.0.3_PUBLIC\symbols\win32\dsound.exports
+Library not saved to project.
+------------------------------------------------
+
+Searching 36 paths for library KERNEL32.DLL...
+Loading file:///C:/Windows/SysWOW64/kernel32.dll?MD5=0de4b67526d63b15fe8437a467bc6235...
+Using existing exports file: C:\Users\maria\AppData\Roaming\ghidra\ghidra_12.0.3_PUBLIC\symbols\win32\kernel32.exports
+WARNING: Existing exports file may not be an exact match.
+Library not saved to project.
+------------------------------------------------
+
+Searching 36 paths for library LANGUAGE.DLL...
+Loading file:///C:/Users/maria/Desktop/Proyectos/TD5RE/original/Language.dll?MD5=e7293d4232cdce7a333de738a14d31f8...
+Created exports file: C:\Users\maria\AppData\Roaming\ghidra\ghidra_12.0.3_PUBLIC\symbols\win32\language.exports
+Library not saved to project.
+------------------------------------------------
+
+Searching 36 paths for library M2DX.DLL...
+Loading file:///C:/Users/maria/Desktop/Proyectos/TD5RE/original/M2DX.dll?MD5=3aee1253ee64c81c8dde2153aaadcf68...
+Created exports file: C:\Users\maria\AppData\Roaming\ghidra\ghidra_12.0.3_PUBLIC\symbols\win32\m2dx.exports
+Library not saved to project.
+------------------------------------------------
+
+Searching 36 paths for library USER32.DLL...
+Loading file:///C:/Windows/SysWOW64/user32.dll?MD5=695395ad71666a47f78199a2e4ed54a7...
+[user32.dll]: failed to create WEVTResource at 100d9a70: Failed to resolve data length for WEVTResource
+Using existing exports file: C:\Users\maria\AppData\Roaming\ghidra\ghidra_12.0.3_PUBLIC\symbols\win32\user32.exports
+WARNING: Existing exports file may not be an exact match.
+Library not saved to project.
+------------------------------------------------
+
+Searching 36 paths for library WINMM.DLL...
+Loading file:///C:/Windows/SysWOW64/winmm.dll?MD5=5a55e4b74a2bf6f2ac5cd9b903a91d83...
+[winmm.dll]: failed to create WEVTResource at 1002b310: Failed to resolve data length for WEVTResource
+Using existing exports file: C:\Users\maria\AppData\Roaming\ghidra\ghidra_12.0.3_PUBLIC\symbols\win32\winmm.exports
+Library not saved to project.
+------------------------------------------------
+
+Applying cached symbols from M2DX.DLL
+Applying cached symbols from LANGUAGE.DLL
+Applying C:\Users\maria\AppData\Roaming\ghidra\ghidra_12.0.3_PUBLIC\symbols\win32\kernel32.exports
+Applying C:\Users\maria\AppData\Roaming\ghidra\ghidra_12.0.3_PUBLIC\symbols\win32\user32.exports
+Applying C:\Users\maria\AppData\Roaming\ghidra\ghidra_12.0.3_PUBLIC\symbols\win32\winmm.exports
+Applying C:\Users\maria\AppData\Roaming\ghidra\ghidra_12.0.3_PUBLIC\symbols\win32\dsound.exports
+Linking the External Programs of 'TD5_d3d.exe' to imported libraries...
+  [M2DX.DLL] -> not found in project
+  [LANGUAGE.DLL] -> not found in project
+  [KERNEL32.DLL] -> not found in project
+  [USER32.DLL] -> not found in project
+  [WINMM.DLL] -> not found in project
+  [DSOUND.DLL] -> not found in project
+------------------------------------------------
+
+  
+2026-04-02 19:47:31 INFO  (HeadlessAnalyzer) IMPORTING: Loaded 0 additional files  
+2026-04-02 19:47:31 INFO  (HeadlessAnalyzer) ANALYZING all memory and code: file:///C:/Users/maria/Desktop/Proyectos/TD5RE/original/TD5_d3d.exe  
+2026-04-02 19:47:31 WARN  (NoReturnFunctionAnalyzer) Ignoring leading '_' chars on no-return name '___raise_securityfailure' specified in file: C:\Users\maria\Desktop\Proyectos\TD5RE\ghidra_12.0.3_PUBLIC\Ghidra\Features\Base\data\PEFunctionsThatDoNotReturn  
+2026-04-02 19:47:31 WARN  (NoReturnFunctionAnalyzer) Ignoring leading '_' chars on no-return name '___report_rangecheckfailure' specified in file: C:\Users\maria\Desktop\Proyectos\TD5RE\ghidra_12.0.3_PUBLIC\Ghidra\Features\Base\data\PEFunctionsThatDoNotReturn  
+2026-04-02 19:47:31 INFO  (PdbUniversalAnalyzer) Skipping PDB processing: missing PDB information in program metadata  
+2026-04-02 19:47:49 INFO  (PackedDatabaseCache) Packed database cache: C:\Users\maria\AppData\Local\ghidra\packed-db-cache  
+2026-04-02 19:47:49 DEBUG (PackedDatabaseCache) Using cached packed database: C:\Users\maria\Desktop\Proyectos\TD5RE\ghidra_12.0.3_PUBLIC\Ghidra\Features\Base\data\typeinfo\win32\windows_vs12_32.gdt  
+2026-04-02 19:47:50 INFO  (ApplyDataArchiveAnalyzer) Applied data type archive: windows_vs12_32  
+2026-04-02 19:47:50 INFO  (ApplyDataArchiveAnalyzer) Applied data type archive: windows_vs12_32  
+2026-04-02 19:47:59 INFO  (AutoAnalysisManager) -----------------------------------------------------
+    ASCII Strings                              0.331 secs
+    Apply Data Archives                        0.471 secs
+    Call Convention ID                         0.005 secs
+    Call-Fixup Installer                       0.020 secs
+    Create Address Tables                      0.109 secs
+    Create Address Tables - One Time           0.131 secs
+    Create Function                            0.274 secs
+    Data Reference                             0.116 secs
+    Decompiler Parameter ID                    6.288 secs
+    Decompiler Switch Analysis                12.960 secs
+    Demangler Microsoft                        0.069 secs
+    Disassemble                                0.061 secs
+    Disassemble Entry Points                   0.487 secs
+    Embedded Media                             0.019 secs
+    External Entry References                  0.000 secs
+    Function ID                                0.488 secs
+    Function Start Pre Search                  0.016 secs
+    Function Start Search                      0.053 secs
+    Function Start Search After Code           0.027 secs
+    Function Start Search After Data           0.019 secs
+    Function Start Search delayed - One Time   0.002 secs
+    Non-Returning Functions - Discovered       0.210 secs
+    Non-Returning Functions - Known            0.006 secs
+    PDB Universal                              0.002 secs
+    Reference                                  0.164 secs
+    Scalar Operand References                  0.384 secs
+    Shared Return Calls                        0.153 secs
+    Stack                                      1.984 secs
+    Subroutine References                      0.136 secs
+    Subroutine References - One Time           0.003 secs
+    Windows x86 PE Exception Handling          0.012 secs
+    Windows x86 PE RTTI Analyzer               0.051 secs
+    Windows x86 Thread Environment Block (TEB) Analyzer     0.014 secs
+    WindowsResourceReference                   0.473 secs
+    X86 Function Callee Purge                  0.056 secs
+    x86 Constant Reference Analyzer            2.486 secs
+-----------------------------------------------------
+     Total Time   28 secs
+-----------------------------------------------------
+  
+2026-04-02 19:47:59 INFO  (HeadlessAnalyzer) REPORT: Analysis succeeded for file: file:///C:/Users/maria/Desktop/Proyectos/TD5RE/original/TD5_d3d.exe  
+2026-04-02 19:47:59 INFO  (HeadlessAnalyzer) REPORT: Execute script: ExtractSlideshowData.java   
+2026-04-02 19:48:01 INFO  (HeadlessAnalyzer) SCRIPT: C:\Users\maria\Desktop\Proyectos\TD5RE\re\tools\ExtractSlideshowData.java  
+2026-04-02 19:48:01 INFO  (GhidraScript) ExtractSlideshowData.java> === TD5 Frontend Slideshow Analysis ===  
+2026-04-02 19:48:01 INFO  (GhidraScript) ExtractSlideshowData.java> Program: TD5_d3d.exe  
+2026-04-02 19:48:02 INFO  (GhidraScript) ExtractSlideshowData.java> 
+=== FUNCTION SEARCH (slide/background/frontend/anim/attract) ===  
+2026-04-02 19:48:02 INFO  (GhidraScript) ExtractSlideshowData.java> 
+=== DECOMPILED FUNCTIONS ===  
+2026-04-02 19:48:02 INFO  (GhidraScript) ExtractSlideshowData.java> 
+--- ScreenMainMenuAnd1PRaceFlow @ 0x00415490: NO FUNCTION ---  
+2026-04-02 19:48:02 INFO  (GhidraScript) ExtractSlideshowData.java> 
+--- RunAttractModeDemoScreen @ 0x004275a0: NO FUNCTION ---  
+2026-04-02 19:48:02 INFO  (GhidraScript) ExtractSlideshowData.java> 
+--- RunFrontendDisplayLoop @ 00414b50 ---  
+2026-04-02 19:48:02 INFO  (GhidraScript) ExtractSlideshowData.java>   
+2026-04-02 19:48:02 INFO  (GhidraScript) ExtractSlideshowData.java> /* WARNING: Globals starting with '_' overlap smaller symbols at the same address */  
+2026-04-02 19:48:02 INFO  (GhidraScript) ExtractSlideshowData.java>   
+2026-04-02 19:48:02 INFO  (GhidraScript) ExtractSlideshowData.java> void FUN_00414b50(void)  
+2026-04-02 19:48:02 INFO  (GhidraScript) ExtractSlideshowData.java>   
+2026-04-02 19:48:02 INFO  (GhidraScript) ExtractSlideshowData.java> {  
+2026-04-02 19:48:02 INFO  (GhidraScript) ExtractSlideshowData.java>   int iVar1;  
+2026-04-02 19:48:02 INFO  (GhidraScript) ExtractSlideshowData.java>   undefined4 uVar2;  
+2026-04-02 19:48:02 INFO  (GhidraScript) ExtractSlideshowData.java>   int iVar3;  
+2026-04-02 19:48:02 INFO  (GhidraScript) ExtractSlideshowData.java>   char *pcVar4;  
+2026-04-02 19:48:02 INFO  (GhidraScript) ExtractSlideshowData.java>   byte bVar5;  
+2026-04-02 19:48:02 INFO  (GhidraScript) ExtractSlideshowData.java>   uint uVar6;  
+2026-04-02 19:48:02 INFO  (GhidraScript) ExtractSlideshowData.java>   uint uVar7;  
+2026-04-02 19:48:02 INFO  (GhidraScript) ExtractSlideshowData.java>   int **ppiVar8;  
+2026-04-02 19:48:02 INFO  (GhidraScript) ExtractSlideshowData.java>   int *apiStack_80 [32];  
+2026-04-02 19:48:02 INFO  (GhidraScript) ExtractSlideshowData.java>     
+2026-04-02 19:48:02 INFO  (GhidraScript) ExtractSlideshowData.java>   apiStack_80[0] = *(int **)(dd_exref + 4);  
+2026-04-02 19:48:02 INFO  (GhidraScript) ExtractSlideshowData.java>   iVar1 = (**(code **)(*apiStack_80[0] + 0x60))();  
+2026-04-02 19:48:02 INFO  (GhidraScript) ExtractSlideshowData.java>   if (iVar1 == -0x7789fe3e) {  
+2026-04-02 19:48:02 INFO  (GhidraScript) ExtractSlideshowData.java>     (**(code **)(**(int **)(dd_exref + 4) + 0x6c))(*(int **)(dd_exref + 4));  
+2026-04-02 19:48:02 INFO  (GhidraScript) ExtractSlideshowData.java>     DAT_00495218 = 3;  
+2026-04-02 19:48:02 INFO  (GhidraScript) ExtractSlideshowData.java> LAB_00414b8c:  
+2026-04-02 19:48:02 INFO  (GhidraScript) ExtractSlideshowData.java>     FUN_00424b80(0,0,0x280,0x1e0);  
+2026-04-02 19:48:02 INFO  (GhidraScript) ExtractSlideshowData.java>     DAT_00495218 = DAT_00495218 + -1;  
+2026-04-02 19:48:02 INFO  (GhidraScript) ExtractSlideshowData.java>   }  
+2026-04-02 19:48:02 INFO  (GhidraScript) ExtractSlideshowData.java>   else if (DAT_00495218 != 0) goto LAB_00414b8c;  
+2026-04-02 19:48:02 INFO  (GhidraScript) ExtractSlideshowData.java>   if (DAT_00495248 != 0) {  
+2026-04-02 19:48:02 INFO  (GhidraScript) ExtractSlideshowData.java>     return;  
+2026-04-02 19:48:02 INFO  (GhidraScript) ExtractSlideshowData.java>   }  
+2026-04-02 19:48:02 INFO  (GhidraScript) ExtractSlideshowData.java>   DAT_004951f8 = ~(DAT_0049520c & DAT_00495214);  
+2026-04-02 19:48:02 INFO  (GhidraScript) ExtractSlideshowData.java>   DAT_0049520c = DAT_00495214;  
+2026-04-02 19:48:02 INFO  (GhidraScript) ExtractSlideshowData.java>   DAT_00495214 = DXInputGetKBStick(0);  
+2026-04-02 19:48:02 INFO  (GhidraScript) ExtractSlideshowData.java>   DAT_004951f8 = DAT_004951f8 & DAT_0049520c & DAT_00495214;  
+2026-04-02 19:48:02 INFO  (GhidraScript) ExtractSlideshowData.java>   DAT_00495258 = ~*(uint *)(app_exref + 0x108);  
+2026-04-02 19:48:02 INFO  (GhidraScript) ExtractSlideshowData.java>   DXInput::GetMouse();  
+2026-04-02 19:48:02 INFO  (GhidraScript) ExtractSlideshowData.java>   DAT_00495258 = DAT_00495258 & *(uint *)(app_exref + 0x108);  
+2026-04-02 19:48:02 INFO  (GhidraScript) ExtractSlideshowData.java>   DAT_00498714 = 0;  
+2026-04-02 19:48:02 INFO  (GhidraScript) ExtractSlideshowData.java>   uVar6 = DAT_00495208 - *(int *)(app_exref + 0x104) >> 0x1f;  
+2026-04-02 19:48:02 INFO  (GhidraScript) ExtractSlideshowData.java>   uVar7 = DAT_00495210 - *(int *)(app_exref + 0x100) >> 0x1f;  
+2026-04-02 19:48:02 INFO  (GhidraScript) ExtractSlideshowData.java>   if ((8 < (int)(((DAT_00495208 - *(int *)(app_exref + 0x104) ^ uVar6) - uVar6) +  
+2026-04-02 19:48:02 INFO  (GhidraScript) ExtractSlideshowData.java>                 ((DAT_00495210 - *(int *)(app_exref + 0x100) ^ uVar7) - uVar7))) ||  
+2026-04-02 19:48:02 INFO  (GhidraScript) ExtractSlideshowData.java>      (DAT_00495258 != 0)) {  
+2026-04-02 19:48:02 INFO  (GhidraScript) ExtractSlideshowData.java>     DAT_00498714 = 1;  
+2026-04-02 19:48:02 INFO  (GhidraScript) ExtractSlideshowData.java>   }  
+2026-04-02 19:48:02 INFO  (GhidraScript) ExtractSlideshowData.java>   if (DAT_00498710 == 1) {  
+2026-04-02 19:48:02 INFO  (GhidraScript) ExtractSlideshowData.java>     DAT_00495210 = *(int *)(app_exref + 0x100);  
+2026-04-02 19:48:02 INFO  (GhidraScript) ExtractSlideshowData.java>     DAT_00495208 = *(int *)(app_exref + 0x104);  
+2026-04-02 19:48:02 INFO  (GhidraScript) ExtractSlideshowData.java>   }  
+2026-04-02 19:48:02 INFO  (GhidraScript) ExtractSlideshowData.java>   FUN_00425170();  
+2026-04-02 19:48:02 INFO  (GhidraScript) ExtractSlideshowData.java>   (*DAT_00495238)();  
+2026-04-02 19:48:02 INFO  (GhidraScript) ExtractSlideshowData.java>   if (DAT_0049524c != 0) {  
+2026-04-02 19:48:02 INFO  (GhidraScript) ExtractSlideshowData.java>     return;  
+2026-04-02 19:48:02 INFO  (GhidraScript) ExtractSlideshowData.java>   }  
+2026-04-02 19:48:02 INFO  (GhidraScript) ExtractSlideshowData.java>   FUN_00418450();  
+2026-04-02 19:48:02 INFO  (GhidraScript) ExtractSlideshowData.java>   if ((DAT_0049b68c == 0) && (DAT_00498710 == 1)) {  
+2026-04-02 19:48:02 INFO  (GhidraScript) ExtractSlideshowData.java>     FUN_00425660(*(int *)(app_exref + 0x100),*(int *)(app_exref + 0x104),0,0,0x16,0x1e,0xff0000,  
+2026-04-02 19:48:02 INFO  (GhidraScript) ExtractSlideshowData.java>                  DAT_00496280);  
+2026-04-02 19:48:02 INFO  (GhidraScript) ExtractSlideshowData.java>   }  
+2026-04-02 19:48:02 INFO  (GhidraScript) ExtractSlideshowData.java>   FUN_00425a30();  
+2026-04-02 19:48:02 INFO  (GhidraScript) ExtractSlideshowData.java>   FUN_00425540();  
+2026-04-02 19:48:02 INFO  (GhidraScript) ExtractSlideshowData.java>   if (DAT_0049523c == 0) {  
+2026-04-02 19:48:02 INFO  (GhidraScript) ExtractSlideshowData.java>     (**(code **)(**(int **)dd_exref + 0x58))(*(int **)dd_exref,1,0);  
+2026-04-02 19:48:02 INFO  (GhidraScript) ExtractSlideshowData.java>     FUN_00425360();  
+2026-04-02 19:48:02 INFO  (GhidraScript) ExtractSlideshowData.java>   }  
+2026-04-02 19:48:02 INFO  (GhidraScript) ExtractSlideshowData.java>   else {  
+2026-04-02 19:48:02 INFO  (GhidraScript) ExtractSlideshowData.java>     DXDraw::Flip(1);  
+2026-04-02 19:48:02 INFO  (GhidraScript) ExtractSlideshowData.java>     ppiVar8 = apiStack_80;  
+2026-04-02 19:48:02 INFO  (GhidraScript) ExtractSlideshowData.java>     for (iVar1 = 0x1f; iVar1 != 0; iVar1 = iVar1 + -1) {  
+2026-04-02 19:48:02 INFO  (GhidraScript) ExtractSlideshowData.java>       *ppiVar8 = (int *)0x0;  
+2026-04-02 19:48:02 INFO  (GhidraScript) ExtractSlideshowData.java>       ppiVar8 = ppiVar8 + 1;  
+2026-04-02 19:48:02 INFO  (GhidraScript) ExtractSlideshowData.java>     }  
+2026-04-02 19:48:02 INFO  (GhidraScript) ExtractSlideshowData.java>     apiStack_80[0] = (int *)0x7c;  
+2026-04-02 19:48:02 INFO  (GhidraScript) ExtractSlideshowData.java>     iVar1 = (**(code **)(*DAT_00495220 + 100))(DAT_00495220,0,apiStack_80,1,0);  
+2026-04-02 19:48:02 INFO  (GhidraScript) ExtractSlideshowData.java>     if (iVar1 != 0) {  
+2026-04-02 19:48:02 INFO  (GhidraScript) ExtractSlideshowData.java>       uVar2 = DXErrorToString(iVar1);  
+2026-04-02 19:48:02 INFO  (GhidraScript) ExtractSlideshowData.java>       Msg(s_Lock_failed_in_SNK_ScreenDump____004658a4,uVar2);  
+2026-04-02 19:48:02 INFO  (GhidraScript) ExtractSlideshowData.java>       goto LAB_00414d87;  
+2026-04-02 19:48:02 INFO  (GhidraScript) ExtractSlideshowData.java>     }  
+2026-04-02 19:48:02 INFO  (GhidraScript) ExtractSlideshowData.java>     (**(code **)(*DAT_00495220 + 0x80))(DAT_00495220,0);  
+2026-04-02 19:48:02 INFO  (GhidraScript) ExtractSlideshowData.java>   }  
+2026-04-02 19:48:02 INFO  (GhidraScript) ExtractSlideshowData.java>   DAT_004951fc = DAT_004951fc ^ 1;  
+2026-04-02 19:48:02 INFO  (GhidraScript) ExtractSlideshowData.java> LAB_00414d87:  
+2026-04-02 19:48:02 INFO  (GhidraScript) ExtractSlideshowData.java>   FUN_00426580();  
+2026-04-02 19:48:02 INFO  (GhidraScript) ExtractSlideshowData.java>   iVar1 = DXInput::CheckKey(1);  
+2026-04-02 19:48:02 INFO  (GhidraScript) ExtractSlideshowData.java>   if ((iVar1 != 0) && (DAT_004654a0 != -1)) {  
+2026-04-02 19:48:02 INFO  (GhidraScript) ExtractSlideshowData.java>     DAT_00495240 = DAT_004654a0;  
+2026-04-02 19:48:02 INFO  (GhidraScript) ExtractSlideshowData.java>     DAT_004951e8 = 1;  
+2026-04-02 19:48:02 INFO  (GhidraScript) ExtractSlideshowData.java>   }  
+2026-04-02 19:48:02 INFO  (GhidraScript) ExtractSlideshowData.java>   if (DAT_00495238 == (code *)PTR_LAB_004655f4) {  
+2026-04-02 19:48:02 INFO  (GhidraScript) ExtractSlideshowData.java>     iVar1 = 0;  
+2026-04-02 19:48:02 INFO  (GhidraScript) ExtractSlideshowData.java>     do {  
+2026-04-02 19:48:02 INFO  (GhidraScript) ExtractSlideshowData.java>       iVar3 = DXInput::CheckKey((uint)(byte)(&DAT_004654a4)  
+2026-04-02 19:48:02 INFO  (GhidraScript) ExtractSlideshowData.java>                                             [iVar1 * 0x28 + (uint)(byte)(&DAT_004951f0)[iVar1]]);  
+2026-04-02 19:48:02 INFO  (GhidraScript) ExtractSlideshowData.java>       if ((iVar3 != 0) &&  
+2026-04-02 19:48:02 INFO  (GhidraScript) ExtractSlideshowData.java>          ((&DAT_004951f0)[iVar1] = (&DAT_004951f0)[iVar1] + '\x01',  
+2026-04-02 19:48:02 INFO  (GhidraScript) ExtractSlideshowData.java>          (&DAT_004654a4)[iVar1 * 0x28 + (uint)(byte)(&DAT_004951f0)[iVar1]] == -1)) {  
+2026-04-02 19:48:02 INFO  (GhidraScript) ExtractSlideshowData.java>         *(uint *)(&PTR_DAT_00465594)[iVar1] =  
+2026-04-02 19:48:02 INFO  (GhidraScript) ExtractSlideshowData.java>              *(uint *)(&PTR_DAT_00465594)[iVar1] ^ (&DAT_004655ac)[iVar1];  
+2026-04-02 19:48:02 INFO  (GhidraScript) ExtractSlideshowData.java>         if (*(int *)(&PTR_DAT_00465594)[iVar1] == 0) {  
+2026-04-02 19:48:02 INFO  (GhidraScript) ExtractSlideshowData.java>           iVar1 = 5;  
+2026-04-02 19:48:02 INFO  (GhidraScript) ExtractSlideshowData.java>         }  
+2026-04-02 19:48:02 INFO  (GhidraScript) ExtractSlideshowData.java>         else {  
+2026-04-02 19:48:02 INFO  (GhidraScript) ExtractSlideshowData.java>           iVar1 = 4;  
+2026-04-02 19:48:02 INFO  (GhidraScript) ExtractSlideshowData.java>         }  
+2026-04-02 19:48:02 INFO  (GhidraScript) ExtractSlideshowData.java>         DXSound::Play(iVar1);  
+2026-04-02 19:48:02 INFO  (GhidraScript) ExtractSlideshowData.java>         iVar3 = DAT_004962b4;  
+2026-04-02 19:48:02 INFO  (GhidraScript) ExtractSlideshowData.java>         _DAT_004951f0 = 0;  
+2026-04-02 19:48:02 INFO  (GhidraScript) ExtractSlideshowData.java>         _DAT_004951f4 = 0;  
+2026-04-02 19:48:02 INFO  (GhidraScript) ExtractSlideshowData.java>         iVar1 = 0;  
+2026-04-02 19:48:02 INFO  (GhidraScript) ExtractSlideshowData.java>         pcVar4 = (char *)&DAT_004643b8;  
+2026-04-02 19:48:02 INFO  (GhidraScript) ExtractSlideshowData.java>         do {  
+2026-04-02 19:48:02 INFO  (GhidraScript) ExtractSlideshowData.java>           if (*pcVar4 == '\0') {  
+2026-04-02 19:48:02 INFO  (GhidraScript) ExtractSlideshowData.java>             if (iVar3 == 0) {  
+2026-04-02 19:48:02 INFO  (GhidraScript) ExtractSlideshowData.java>               bVar5 = *(byte *)((int)&DAT_004a2c9c + iVar1) & 1;  
+2026-04-02 19:48:02 INFO  (GhidraScript) ExtractSlideshowData.java>             }  
+2026-04-02 19:48:02 INFO  (GhidraScript) ExtractSlideshowData.java>             else {  
+2026-04-02 19:48:02 INFO  (GhidraScript) ExtractSlideshowData.java>               bVar5 = *(byte *)((int)&DAT_004a2c9c + iVar1) | 2;  
+2026-04-02 19:48:02 INFO  (GhidraScript) ExtractSlideshowData.java>             }  
+2026-04-02 19:48:02 INFO  (GhidraScript) ExtractSlideshowData.java>             *(byte *)((int)&DAT_004a2c9c + iVar1) = bVar5;  
+2026-04-02 19:48:02 INFO  (GhidraScript) ExtractSlideshowData.java>           }  
+2026-04-02 19:48:02 INFO  (GhidraScript) ExtractSlideshowData.java>   ... (30 more lines)  
+2026-04-02 19:48:02 INFO  (GhidraScript) ExtractSlideshowData.java> 
+--- ScreenExtrasGallery @ 0x00417d50: NO FUNCTION ---  
+2026-04-02 19:48:02 INFO  (GhidraScript) ExtractSlideshowData.java> 
+--- SetFrontendScreen @ 00414610 ---  
+2026-04-02 19:48:02 INFO  (GhidraScript) ExtractSlideshowData.java>   
+2026-04-02 19:48:02 INFO  (GhidraScript) ExtractSlideshowData.java> void __cdecl FUN_00414610(int param_1)  
+2026-04-02 19:48:02 INFO  (GhidraScript) ExtractSlideshowData.java>   
+2026-04-02 19:48:02 INFO  (GhidraScript) ExtractSlideshowData.java> {  
+2026-04-02 19:48:02 INFO  (GhidraScript) ExtractSlideshowData.java>   DAT_00495204 = 0;  
+2026-04-02 19:48:02 INFO  (GhidraScript) ExtractSlideshowData.java>   DAT_0049522c = 0;  
+2026-04-02 19:48:02 INFO  (GhidraScript) ExtractSlideshowData.java>   DAT_00495238 = (&PTR_LAB_004655c4)[param_1];  
+2026-04-02 19:48:02 INFO  (GhidraScript) ExtractSlideshowData.java>   DAT_004951e0 = timeGetTime();  
+2026-04-02 19:48:02 INFO  (GhidraScript) ExtractSlideshowData.java>   return;  
+2026-04-02 19:48:02 INFO  (GhidraScript) ExtractSlideshowData.java> }  
+2026-04-02 19:48:02 INFO  (GhidraScript) ExtractSlideshowData.java>   
+2026-04-02 19:48:02 INFO  (GhidraScript) ExtractSlideshowData.java> 
+=== GLOBAL SYMBOLS SEARCH ===  
+2026-04-02 19:48:02 INFO  (GhidraScript) ExtractSlideshowData.java> 
+=== DONE ===  
+2026-04-02 19:48:02 INFO  (HeadlessAnalyzer) ANALYZING changes made by post scripts: file:///C:/Users/maria/Desktop/Proyectos/TD5RE/original/TD5_d3d.exe  
+2026-04-02 19:48:02 INFO  (HeadlessAnalyzer) REPORT: Post-analysis succeeded for file: file:///C:/Users/maria/Desktop/Proyectos/TD5RE/original/TD5_d3d.exe  
+2026-04-02 19:48:02 INFO  (LocalFileSystem) /TD5_d3d.exe: file created (maria)  
+2026-04-02 19:48:02 INFO  (HeadlessAnalyzer) REPORT: Save succeeded for: /TD5_d3d.exe (slideshow_analysis:/TD5_d3d.exe)  
+2026-04-02 19:48:02 INFO  (HeadlessAnalyzer) REPORT: Import succeeded  

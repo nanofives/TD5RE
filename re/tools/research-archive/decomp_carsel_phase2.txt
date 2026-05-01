@@ -1,0 +1,273 @@
+Server: {'name': 'ghidra_headless_mcp', 'version': '0.1.0'}
+session_id: 923c38da6d0b41e483492116ab443ed5
+
+======================================================================
+1. DECOMP FillPrimaryFrontendRect @ 0x423ed0
+======================================================================
+
+/* Fills a rectangle on the primary frontend work surface using the current frontend pixel format.
+   InitializeFrontendPresentationState uses this with DAT_00495228/DAT_00495200 to clear the full
+   frontend virtual screen. */
+
+undefined4 __cdecl
+FillPrimaryFrontendRect(uint param_1,int param_2,int param_3,int param_4,int param_5)
+
+{
+  uint uVar1;
+  int local_74;
+  int local_70;
+  int local_6c;
+  int local_68;
+  undefined4 local_64 [14];
+  undefined4 uStack_2c;
+  uint local_14;
+  
+  local_74 = param_2;
+  local_6c = param_2 + param_4;
+  local_70 = param_3;
+  local_68 = param_3 + param_5;
+  local_64[0] = 100;
+  local_14 = 0;
+  if (DAT_0049525c == 0xf) {
+    uVar1 = (param_1 >> 3 & 0x1f0000 | param_1 & 0xf800) >> 3;
+  }
+  else {
+    if (DAT_0049525c != 0x10) goto LAB_00423f67;
+    uVar1 = (param_1 >> 3 & 0x1f0000 | param_1 & 0xf800) >> 2;
+  }
+  local_14 = (uVar1 | param_1 & 0xf8) >> 3;
+LAB_00423f67:
+  (**(code **)(*g_primaryWorkSurface + 0x14))(g_primaryWorkSurface,&local_74,0,0,0x400,local_64);
+  return uStack_2c;
+}
+
+
+
+======================================================================
+2. FIND DrawCarSelectionPreviewOverlay
+======================================================================
+SC: {
+  "count": 1,
+  "exact": false,
+  "items": [
+    {
+      "address": "0040ddc0",
+      "external": false,
+      "id": 2965,
+      "name": "DrawCarSelectionPreviewOverlay",
+      "namespace": "Global",
+      "primary": true,
+      "short_name": "DrawCarSelectionPreviewOverlay",
+      "source_type": "USER_DEFINED",
+      "symbol_type": "Function"
+    }
+  ],
+  "limit": 20,
+  "query": "DrawCarSelectionPreviewOverlay",
+  "session_id": "923c38da6d0b41e483492116ab443ed5",
+  "total": 1
+}
+Address: 0040ddc0
+
+--- Decompile DrawCarSelectionPreviewOverlay ---
+
+void __cdecl
+DrawCarSelectionPreviewOverlay(int param_1,int param_2,int param_3,int param_4,int param_5)
+
+{
+  int iVar1;
+  
+  if (param_5 == 0x18) {
+    iVar1 = param_1 + 10 + g_frontendAnimFrameCounter * 0x28;
+  }
+  else {
+    iVar1 = param_1 + 10;
+  }
+  QueueFrontendOverlayRect
+            (iVar1,(param_2 - DAT_004962cc) + -0x40,0,0,DAT_004962c4,DAT_004962c8,0,DAT_00496358);
+  if (DAT_0048f360 == 0) {
+    if (DAT_0048f358 != 0) {
+      if (param_5 == 0) {
+        QueueFrontendOverlayRect
+                  (g_frontendCanvasW + -0x198,g_frontendCanvasH + -0x164,0,0,0x198,0x118,0x5a,
+                   DAT_0048f358);
+        return;
+      }
+      if (param_5 == 0xb) {
+        QueueFrontendOverlayRect
+                  (g_frontendAnimFrameCounter * 0x20 + -0x198 + g_frontendCanvasW,
+                   g_frontendCanvasH + -0x164,0,0,0x198,0x118,0x5a,DAT_0048f358);
+        return;
+      }
+      if (param_5 == 0xe) {
+        QueueFrontendOverlayRect
+                  (g_frontendCanvasW + g_frontendAnimFrameCounter * -0x40 + 0x4a8,
+                   g_frontendCanvasH + -0x164,0,0,0x198,0x118,0x5a,DAT_0048f358);
+      }
+    }
+  }
+  else {
+    if (param_5 == 0) {
+      QueueFrontendOverlayRect
+                (param_3,param_4,param_3,param_4,0x198,300,0xffffff,g_secondaryWorkSurface);
+      return;
+    }
+    if (param_5 == 0xb) {
+      QueueFrontendOverlayRect
+                (g_frontendAnimFrameCounter * 0x20 + param_3,param_4,param_3,param_4,0x198,300,
+                 0xffffff,g_secondaryWorkSurface);
+      return;
+    }
+  }
+  return;
+}
+
+
+
+======================================================================
+3. LISTING CODE UNITS for FillPrimaryFrontendRect CALLS
+======================================================================
+References TO FillPrimaryFrontendRect (0x423ed0):
+SC: {
+  "address": "00423ed0",
+  "count": 3,
+  "items": [
+    {
+      "external": false,
+      "from": "00424ea4",
+      "operand_index": 0,
+      "primary": true,
+      "reference_type": "UNCONDITIONAL_CALL",
+      "to": "00423ed0"
+    },
+    {
+      "external": false,
+      "from": "0040ead7",
+      "operand_index": 0,
+      "primary": true,
+      "reference_type": "UNCONDITIONAL_CALL",
+      "to": "00423ed0"
+    },
+    {
+      "external": false,
+      "from": "0040f2e7",
+      "operand_index": 0,
+      "primary": true,
+      "reference_type": "UNCONDITIONAL_CALL",
+      "to": "00423ed0"
+    }
+  ],
+  "session_id": "923c38da6d0b41e483492116ab443ed5"
+}
+
+======================================================================
+4. CALLERS of FillPrimaryFrontendRect @ 0x423ed0
+======================================================================
+SC: {
+  "count": 2,
+  "function_start": "00423ed0",
+  "items": [
+    {
+      "body_end": "0040f85a",
+      "body_start": "0040dfc0",
+      "calling_convention": "__stdcall",
+      "entry_point": "0040dfc0",
+      "external": false,
+      "name": "CarSelectionScreenStateMachine",
+      "signature": "undefined __stdcall CarSelectionScreenStateMachine(void)",
+      "thunk": false
+    },
+    {
+      "body_end": "00425163",
+      "body_start": "00424e40",
+      "calling_convention": "__stdcall",
+      "entry_point": "00424e40",
+      "external": false,
+      "name": "InitializeFrontendPresentationState",
+      "signature": "undefined __stdcall InitializeFrontendPresentationState(void)",
+      "thunk": false
+    }
+  ],
+  "session_id": "923c38da6d0b41e483492116ab443ed5"
+}
+
+======================================================================
+5. PCODE for CarSelectionScreenStateMachine (find fill calls)
+======================================================================
+search.constants 0x423ed0: {
+  "count": 0,
+  "end": null,
+  "items": [],
+  "query": 4341456,
+  "session_id": "923c38da6d0b41e483492116ab443ed5",
+  "start": null
+}
+
+======================================================================
+6. LISTING CODE UNITS around CarSelSM (case 10 area)
+======================================================================
+SC: {
+  "error": "got an unexpected keyword argument 'start_address'"
+}
+
+======================================================================
+7. SEARCH INSTRUCTIONS: call to FillPrimaryFrontendRect
+======================================================================
+SC: {
+  "error": "missing a required argument: 'query'"
+}
+pcode search: {
+  "error": "missing a required argument: 'query'"
+}
+
+======================================================================
+8. FIND CopyPrimaryFrontendRectToSecondary
+======================================================================
+Address: 00424bc0
+
+/* Copies a rectangle from the primary frontend work buffer into the secondary work buffer. */
+
+void __cdecl CopyPrimaryFrontendRectToSecondary(int param_1,int param_2,int param_3,int param_4)
+
+{
+  int local_10;
+  int local_c;
+  int local_8;
+  int local_4;
+  
+  local_8 = param_3 + param_1;
+  local_4 = param_4 + param_2;
+  local_10 = param_1;
+  local_c = param_2;
+  (**(code **)(*g_secondaryWorkSurface + 0x1c))
+            (g_secondaryWorkSurface,param_1,param_2,g_primaryWorkSurface,&local_10,0x10);
+  return;
+}
+
+
+
+======================================================================
+9. FIND PresentPrimaryFrontendBuffer
+======================================================================
+Address: 00424af0
+
+/* Presents the full primary frontend work buffer to the active frontend presentation target via
+   Copy16BitSurfaceRect, which handles the software/copy path. */
+
+void PresentPrimaryFrontendBufferViaCopy(void)
+
+{
+  int local_10 [3];
+  undefined4 local_4;
+  
+  local_10[2] = g_frontendCanvasW;
+  local_4 = g_frontendCanvasH;
+  local_10[0] = 0;
+  local_10[1] = 0;
+  Copy16BitSurfaceRect(0,0,g_primaryWorkSurface,local_10,0x10);
+  return;
+}
+
+
+
+=== DONE ===

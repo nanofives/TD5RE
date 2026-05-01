@@ -1,0 +1,934 @@
+2026-04-02 19:49:12 INFO  (LoggingInitialization) Using log config file: jar:file:/C:/Users/maria/Desktop/Proyectos/TD5RE/ghidra_12.0.3_PUBLIC/Ghidra/Framework/Generic/lib/Generic.jar!/generic.log4j.xml  
+2026-04-02 19:49:12 INFO  (LoggingInitialization) Using log file: C:\Users\maria\Desktop\Proyectos\TD5RE\re\tools\slideshow2_output.txt  
+2026-04-02 19:49:12 INFO  (Preferences) Loading user preferences: C:\Users\maria\AppData\Roaming\ghidra\ghidra_12.0.3_PUBLIC\preferences  
+2026-04-02 19:49:12 INFO  (ClassSearcher) Searching for classes...  
+2026-04-02 19:49:13 INFO  (ClassSearcher) Class search complete (847 ms)  
+2026-04-02 19:49:13 INFO  (DefaultSSLContextInitializer) Initializing SSL Context  
+2026-04-02 19:49:13 INFO  (SecureRandomFactory) Initializing Random Number Generator...  
+2026-04-02 19:49:13 INFO  (SecureRandomFactory) Random Number Generator initialization complete: SHA1PRNG  
+2026-04-02 19:49:13 INFO  (DefaultTrustManagerFactory) Trust manager disabled, cacerts have not been set  
+2026-04-02 19:49:13 INFO  (AnalyzeHeadless) Headless startup complete (2323 ms)  
+2026-04-02 19:49:13 INFO  (ClassSearcher) Class searcher loaded 58 extension points (18 false positives)  
+2026-04-02 19:49:13 INFO  (HeadlessAnalyzer) HEADLESS Script Paths:
+    C:\Users\maria\Desktop\Proyectos\TD5RE\ghidra_12.0.3_PUBLIC\Ghidra\Features\Base\ghidra_scripts
+    C:\Users\maria\Desktop\Proyectos\TD5RE\ghidra_12.0.3_PUBLIC\Ghidra\Features\BytePatterns\ghidra_scripts
+    C:\Users\maria\Desktop\Proyectos\TD5RE\ghidra_12.0.3_PUBLIC\Ghidra\Features\Decompiler\ghidra_scripts
+    C:\Users\maria\Desktop\Proyectos\TD5RE\ghidra_12.0.3_PUBLIC\Ghidra\Features\GnuDemangler\ghidra_scripts
+    C:\Users\maria\Desktop\Proyectos\TD5RE\ghidra_12.0.3_PUBLIC\Ghidra\Features\SystemEmulation\ghidra_scripts
+    C:\Users\maria\Desktop\Proyectos\TD5RE\ghidra_12.0.3_PUBLIC\Ghidra\Features\SwiftDemangler\ghidra_scripts
+    C:\Users\maria\Desktop\Proyectos\TD5RE\ghidra_12.0.3_PUBLIC\Ghidra\Features\WildcardAssembler\ghidra_scripts
+    C:\Users\maria\Desktop\Proyectos\TD5RE\re\tools
+    C:\Users\maria\Desktop\Proyectos\TD5RE\ghidra_12.0.3_PUBLIC\Ghidra\Features\Jython\ghidra_scripts
+    C:\Users\maria\Desktop\Proyectos\TD5RE\ghidra_12.0.3_PUBLIC\Ghidra\Features\BSim\ghidra_scripts
+    C:\Users\maria\AppData\Roaming\ghidra\ghidra_12.0.3_PUBLIC\Extensions\GhidrAssistMCP\ghidra_scripts
+    C:\Users\maria\Desktop\Proyectos\TD5RE\ghidra_12.0.3_PUBLIC\Ghidra\Features\PDB\ghidra_scripts
+    C:\Users\maria\Desktop\Proyectos\TD5RE\ghidra_12.0.3_PUBLIC\Ghidra\Debug\Debugger\ghidra_scripts
+    C:\Users\maria\Desktop\Proyectos\TD5RE\ghidra_12.0.3_PUBLIC\Ghidra\Features\DecompilerDependent\ghidra_scripts
+    C:\Users\maria\Desktop\Proyectos\TD5RE\ghidra_12.0.3_PUBLIC\Ghidra\Debug\Debugger-rmi-trace\ghidra_scripts
+    C:\Users\maria\Desktop\Proyectos\TD5RE\ghidra_12.0.3_PUBLIC\Ghidra\Features\FileFormats\ghidra_scripts
+    C:\Users\maria\Desktop\Proyectos\TD5RE\ghidra_12.0.3_PUBLIC\Ghidra\Features\MicrosoftCodeAnalyzer\ghidra_scripts
+    C:\Users\maria\Desktop\Proyectos\TD5RE\ghidra_12.0.3_PUBLIC\Ghidra\Processors\Atmel\ghidra_scripts
+    C:\Users\maria\Desktop\Proyectos\TD5RE\ghidra_12.0.3_PUBLIC\Ghidra\Features\VersionTracking\ghidra_scripts
+    C:\Users\maria\Desktop\Proyectos\TD5RE\ghidra_12.0.3_PUBLIC\Ghidra\Features\PyGhidra\ghidra_scripts
+    C:\Users\maria\Desktop\Proyectos\TD5RE\ghidra_12.0.3_PUBLIC\Ghidra\Features\FunctionID\ghidra_scripts
+    C:\Users\maria\Desktop\Proyectos\TD5RE\ghidra_12.0.3_PUBLIC\Ghidra\Processors\PIC\ghidra_scripts
+    C:\Users\maria\Desktop\Proyectos\TD5RE\ghidra_12.0.3_PUBLIC\Ghidra\Processors\DATA\ghidra_scripts
+    C:\Users\maria\Desktop\Proyectos\TD5RE\ghidra_12.0.3_PUBLIC\Ghidra\Processors\8051\ghidra_scripts
+    C:\Users\maria\Desktop\Proyectos\TD5RE\ghidra_12.0.3_PUBLIC\Ghidra\Processors\JVM\ghidra_scripts  
+2026-04-02 19:49:13 INFO  (HeadlessAnalyzer) HEADLESS: execution starts  
+2026-04-02 19:49:13 INFO  (HeadlessAnalyzer) Creating temporary project: C:\Users\maria\Desktop\Proyectos\TD5RE\re\ghidra_tmp_proj\slideshow_analysis2  
+2026-04-02 19:49:14 INFO  (DefaultProject) Creating project: C:\Users\maria\Desktop\Proyectos\TD5RE\re\ghidra_tmp_proj\slideshow_analysis2  
+2026-04-02 19:49:14 INFO  (HeadlessAnalyzer) REPORT: Processing input files:   
+2026-04-02 19:49:14 INFO  (HeadlessAnalyzer)      project: C:\Users\maria\Desktop\Proyectos\TD5RE\re\ghidra_tmp_proj\slideshow_analysis2  
+2026-04-02 19:49:14 INFO  (HeadlessAnalyzer) IMPORTING: file:///C:/Users/maria/Desktop/Proyectos/TD5RE/original/TD5_d3d.exe  
+2026-04-02 19:49:15 INFO  (ProgramLoader) Using Loader: Portable Executable (PE)  
+2026-04-02 19:49:15 INFO  (ProgramLoader) Using Language/Compiler: x86:LE:32:default:windows  
+2026-04-02 19:49:15 INFO  (ProgramLoader) Using Library Search Path: [., C:\WINDOWS\SysWOW64, C:\Program Files\Microsoft\jdk-21.0.10.7-hotspot\bin, C:\WINDOWS\Sun\Java\bin, C:\WINDOWS\system32, C:\WINDOWS, C:\Users\maria\bin, C:\Program Files\Git\mingw64\bin, C:\Program Files\Git\usr\local\bin, C:\Program Files\Git\usr\bin, C:\Python314\Scripts, C:\Python314, C:\Program Files\Microsoft\jdk-17.0.16.8-hotspot\bin, C:\WINDOWS\System32\Wbem, C:\WINDOWS\System32\WindowsPowerShell\v1.0, C:\WINDOWS\System32\OpenSSH, C:\Program Files\NVIDIA Corporation\NVIDIA App\NvDLISR, C:\Program Files (x86)\NVIDIA Corporation\PhysX\Common, C:\Program Files\dotnet, C:\Program Files (x86)\Windows Kits\10\Windows Performance Toolkit, C:\Program Files\Git\cmd, C:\ProgramData\chocolatey\bin, C:\Program Files\Redis, C:\Program Files\Go\bin, C:\Program Files\Docker\Docker\resources\bin, C:\Program Files\nodejs, C:\Users\maria\AppData\Roaming\krita\ai_diffusion\server\uv, C:\Users\maria\AppData\Local\Microsoft\WindowsApps, C:\Users\maria\AppData\Local\Programs\Microsoft VS Code\bin, C:\Users\maria\.lmstudio\bin, C:\Users\maria\.local\bin, C:\Users\maria\go\bin, C:\users\maria\appdata\local\packages\pythonsoftwarefoundation.python.3.13_qbz5n2kfra8p0\localcache\local-packages\python313\scripts, C:\Users\maria\AppData\Local\Python\bin, C:\Users\maria\AppData\Local\Microsoft\WinGet\Links, C:\Users\maria\AppData\Roaming\npm, C:\Users\maria\AppData\Local\Programs\codebase-memory-mcp, C:\Program Files\Git\usr\bin\vendor_perl, C:\Program Files\Git\usr\bin\core_perl]  
+2026-04-02 19:49:16 DEBUG (WEVTResourceDataType) Error processing Provider Element.  
+2026-04-02 19:49:17 WARN  (ExportDataDirectory) Invalid or missing function at 100c028c  
+2026-04-02 19:49:17 DEBUG (WEVTResourceDataType) Error processing Provider Element.  
+2026-04-02 19:49:18 DEBUG (WEVTResourceDataType) Error processing Provider Element.  
+2026-04-02 19:49:18 INFO  (ProgramLoader) Additional info:
+Loading file:///C:/Users/maria/Desktop/Proyectos/TD5RE/original/TD5_d3d.exe?MD5=4cb6efd048db17604e29b3b99766dc3e...
+------------------------------------------------
+
+Searching 36 paths for library DSOUND.DLL...
+Loading file:///C:/Windows/SysWOW64/dsound.dll?MD5=01286b04eaa5e130e210e686fec8a2ba...
+[dsound.dll]: failed to create WEVTResource at 1006f498: Failed to resolve data length for WEVTResource
+Using existing exports file: C:\Users\maria\AppData\Roaming\ghidra\ghidra_12.0.3_PUBLIC\symbols\win32\dsound.exports
+Library not saved to project.
+------------------------------------------------
+
+Searching 36 paths for library KERNEL32.DLL...
+Loading file:///C:/Windows/SysWOW64/kernel32.dll?MD5=0de4b67526d63b15fe8437a467bc6235...
+Using existing exports file: C:\Users\maria\AppData\Roaming\ghidra\ghidra_12.0.3_PUBLIC\symbols\win32\kernel32.exports
+WARNING: Existing exports file may not be an exact match.
+Library not saved to project.
+------------------------------------------------
+
+Searching 36 paths for library LANGUAGE.DLL...
+Loading file:///C:/Users/maria/Desktop/Proyectos/TD5RE/original/Language.dll?MD5=e7293d4232cdce7a333de738a14d31f8...
+Created exports file: C:\Users\maria\AppData\Roaming\ghidra\ghidra_12.0.3_PUBLIC\symbols\win32\language.exports
+Library not saved to project.
+------------------------------------------------
+
+Searching 36 paths for library M2DX.DLL...
+Loading file:///C:/Users/maria/Desktop/Proyectos/TD5RE/original/M2DX.dll?MD5=3aee1253ee64c81c8dde2153aaadcf68...
+Created exports file: C:\Users\maria\AppData\Roaming\ghidra\ghidra_12.0.3_PUBLIC\symbols\win32\m2dx.exports
+Library not saved to project.
+------------------------------------------------
+
+Searching 36 paths for library USER32.DLL...
+Loading file:///C:/Windows/SysWOW64/user32.dll?MD5=695395ad71666a47f78199a2e4ed54a7...
+[user32.dll]: failed to create WEVTResource at 100d9a70: Failed to resolve data length for WEVTResource
+Using existing exports file: C:\Users\maria\AppData\Roaming\ghidra\ghidra_12.0.3_PUBLIC\symbols\win32\user32.exports
+WARNING: Existing exports file may not be an exact match.
+Library not saved to project.
+------------------------------------------------
+
+Searching 36 paths for library WINMM.DLL...
+Loading file:///C:/Windows/SysWOW64/winmm.dll?MD5=5a55e4b74a2bf6f2ac5cd9b903a91d83...
+[winmm.dll]: failed to create WEVTResource at 1002b310: Failed to resolve data length for WEVTResource
+Using existing exports file: C:\Users\maria\AppData\Roaming\ghidra\ghidra_12.0.3_PUBLIC\symbols\win32\winmm.exports
+Library not saved to project.
+------------------------------------------------
+
+Applying cached symbols from M2DX.DLL
+Applying cached symbols from LANGUAGE.DLL
+Applying C:\Users\maria\AppData\Roaming\ghidra\ghidra_12.0.3_PUBLIC\symbols\win32\kernel32.exports
+Applying C:\Users\maria\AppData\Roaming\ghidra\ghidra_12.0.3_PUBLIC\symbols\win32\user32.exports
+Applying C:\Users\maria\AppData\Roaming\ghidra\ghidra_12.0.3_PUBLIC\symbols\win32\winmm.exports
+Applying C:\Users\maria\AppData\Roaming\ghidra\ghidra_12.0.3_PUBLIC\symbols\win32\dsound.exports
+Linking the External Programs of 'TD5_d3d.exe' to imported libraries...
+  [M2DX.DLL] -> not found in project
+  [LANGUAGE.DLL] -> not found in project
+  [KERNEL32.DLL] -> not found in project
+  [USER32.DLL] -> not found in project
+  [WINMM.DLL] -> not found in project
+  [DSOUND.DLL] -> not found in project
+------------------------------------------------
+
+  
+2026-04-02 19:49:18 INFO  (HeadlessAnalyzer) IMPORTING: Loaded 0 additional files  
+2026-04-02 19:49:18 INFO  (HeadlessAnalyzer) ANALYZING all memory and code: file:///C:/Users/maria/Desktop/Proyectos/TD5RE/original/TD5_d3d.exe  
+2026-04-02 19:49:18 WARN  (NoReturnFunctionAnalyzer) Ignoring leading '_' chars on no-return name '___raise_securityfailure' specified in file: C:\Users\maria\Desktop\Proyectos\TD5RE\ghidra_12.0.3_PUBLIC\Ghidra\Features\Base\data\PEFunctionsThatDoNotReturn  
+2026-04-02 19:49:18 WARN  (NoReturnFunctionAnalyzer) Ignoring leading '_' chars on no-return name '___report_rangecheckfailure' specified in file: C:\Users\maria\Desktop\Proyectos\TD5RE\ghidra_12.0.3_PUBLIC\Ghidra\Features\Base\data\PEFunctionsThatDoNotReturn  
+2026-04-02 19:49:18 INFO  (PdbUniversalAnalyzer) Skipping PDB processing: missing PDB information in program metadata  
+2026-04-02 19:49:36 INFO  (PackedDatabaseCache) Packed database cache: C:\Users\maria\AppData\Local\ghidra\packed-db-cache  
+2026-04-02 19:49:36 DEBUG (PackedDatabaseCache) Using cached packed database: C:\Users\maria\Desktop\Proyectos\TD5RE\ghidra_12.0.3_PUBLIC\Ghidra\Features\Base\data\typeinfo\win32\windows_vs12_32.gdt  
+2026-04-02 19:49:36 INFO  (ApplyDataArchiveAnalyzer) Applied data type archive: windows_vs12_32  
+2026-04-02 19:49:36 INFO  (ApplyDataArchiveAnalyzer) Applied data type archive: windows_vs12_32  
+2026-04-02 19:49:47 INFO  (AutoAnalysisManager) -----------------------------------------------------
+    ASCII Strings                              0.436 secs
+    Apply Data Archives                        0.537 secs
+    Call Convention ID                         0.004 secs
+    Call-Fixup Installer                       0.019 secs
+    Create Address Tables                      0.116 secs
+    Create Address Tables - One Time           0.123 secs
+    Create Function                            0.235 secs
+    Data Reference                             0.104 secs
+    Decompiler Parameter ID                    6.725 secs
+    Decompiler Switch Analysis                11.976 secs
+    Demangler Microsoft                        0.073 secs
+    Disassemble                                0.052 secs
+    Disassemble Entry Points                   0.316 secs
+    Embedded Media                             0.012 secs
+    External Entry References                  0.000 secs
+    Function ID                                0.521 secs
+    Function Start Pre Search                  0.009 secs
+    Function Start Search                      0.054 secs
+    Function Start Search After Code           0.027 secs
+    Function Start Search After Data           0.019 secs
+    Function Start Search delayed - One Time   0.001 secs
+    Non-Returning Functions - Discovered       0.141 secs
+    Non-Returning Functions - Known            0.005 secs
+    PDB Universal                              0.001 secs
+    Reference                                  0.185 secs
+    Scalar Operand References                  0.473 secs
+    Shared Return Calls                        0.135 secs
+    Stack                                      2.800 secs
+    Subroutine References                      0.139 secs
+    Subroutine References - One Time           0.003 secs
+    Windows x86 PE Exception Handling          0.009 secs
+    Windows x86 PE RTTI Analyzer               0.055 secs
+    Windows x86 Thread Environment Block (TEB) Analyzer     0.009 secs
+    WindowsResourceReference                   0.430 secs
+    X86 Function Callee Purge                  0.081 secs
+    x86 Constant Reference Analyzer            2.786 secs
+-----------------------------------------------------
+     Total Time   28 secs
+-----------------------------------------------------
+  
+2026-04-02 19:49:47 INFO  (HeadlessAnalyzer) REPORT: Analysis succeeded for file: file:///C:/Users/maria/Desktop/Proyectos/TD5RE/original/TD5_d3d.exe  
+2026-04-02 19:49:47 INFO  (HeadlessAnalyzer) REPORT: Execute script: FindSlideshowFuncs.java   
+2026-04-02 19:49:49 INFO  (HeadlessAnalyzer) SCRIPT: C:\Users\maria\Desktop\Proyectos\TD5RE\re\tools\FindSlideshowFuncs.java  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java> === TD5 Frontend Slideshow - Function Discovery ===  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java> 
+=== FUNCTION DISCOVERY ===  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>   Found function at 00414b50 (query: 0x414b50): size=997  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>   Found function at 00414610 (query: 0x414610): size=41  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java> 
+=== FRONTEND FUNCTION RANGE (0x414000 - 0x428000) ===  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>   00414610  size=41  FUN_00414610  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>   00414640  size=242  FUN_00414640  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>   00414740  size=848  FUN_00414740  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>   00414a90  size=191  FUN_00414a90  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>   00414b50  size=997  FUN_00414b50  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>   004183b0  size=82  FUN_004183b0  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>   00418410  size=26  FUN_00418410  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>   00418430  size=21  FUN_00418430  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>   00418450  size=1  FUN_00418450  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>   00418c60  size=225  FUN_00418c60  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>   00419b30  size=444  FUN_00419b30  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>   0041a530  size=312  FUN_0041a530  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>   0041a670  size=307  FUN_0041a670  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>   0041b390  size=137  FUN_0041b390  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>   0041b420  size=495  FUN_0041b420  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>   0041b610  size=1732  FUN_0041b610  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>   0041bd00  size=813  FUN_0041bd00  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>   0041c030  size=753  FUN_0041c030  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>   0041d840  size=79  FUN_0041d840  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>   00421da0  size=177  FUN_00421da0  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>   00421e90  size=1494  FUN_00421e90  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>   00423db0  size=137  FUN_00423db0  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>   00423e40  size=141  FUN_00423e40  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>   00423ed0  size=189  FUN_00423ed0  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>   00423f90  size=189  FUN_00423f90  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>   00424050  size=191  FUN_00424050  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>   00424110  size=205  FUN_00424110  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>   004241e0  size=205  FUN_004241e0  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>   004242b0  size=222  FUN_004242b0  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>   00424390  size=222  FUN_00424390  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>   00424470  size=229  FUN_00424470  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>   00424560  size=246  FUN_00424560  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>   00424660  size=218  FUN_00424660  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>   00424740  size=335  FUN_00424740  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>   00424890  size=76  FUN_00424890  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>   004248e0  size=357  FUN_004248e0  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>   00424a50  size=150  FUN_00424a50  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>   00424af0  size=58  FUN_00424af0  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>   00424b30  size=65  FUN_00424b30  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>   00424b80  size=64  FUN_00424b80  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>   00424bc0  size=75  FUN_00424bc0  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>   00424c10  size=64  FUN_00424c10  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>   00424c50  size=75  FUN_00424c50  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>   00424ca0  size=65  FUN_00424ca0  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>   00424cf0  size=75  FUN_00424cf0  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>   00424d40  size=75  FUN_00424d40  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>   00424d90  size=171  FUN_00424d90  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>   00424e40  size=804  FUN_00424e40  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>   00425170  size=42  FUN_00425170  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>   004251a0  size=441  FUN_004251a0  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>   00425360  size=368  FUN_00425360  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>   004254d0  size=36  FUN_004254d0  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>   00425500  size=60  FUN_00425500  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>   00425540  size=278  FUN_00425540  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>   00425660  size=206  FUN_00425660  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>   00425730  size=369  FUN_00425730  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>   004258b0  size=11  FUN_004258b0  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>   004258c0  size=21  FUN_004258c0  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>   004258e0  size=13  FUN_004258e0  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>   004258f0  size=191  FUN_004258f0  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>   004259b0  size=23  FUN_004259b0  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>   004259d0  size=90  FUN_004259d0  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>   00425a30  size=294  FUN_00425a30  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>   00425b60  size=632  FUN_00425b60  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>   00425de0  size=765  FUN_00425de0  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>   004260e0  size=59  FUN_004260e0  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>   00426120  size=314  FUN_00426120  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>   00426260  size=295  FUN_00426260  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>   00426390  size=80  FUN_00426390  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>   004263e0  size=241  FUN_004263e0  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>   004264e0  size=90  FUN_004264e0  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>   00426540  size=64  FUN_00426540  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>   00426580  size=1095  FUN_00426580  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java> 
+=== DECOMPILE KEY FUNCTIONS ===  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java> 
+--- RunFrontendDisplayLoop (0x414b50) @ 00414b50 (size=997) ---  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>   
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java> /* WARNING: Globals starting with '_' overlap smaller symbols at the same address */  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>   
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java> void FUN_00414b50(void)  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>   
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java> {  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>   int iVar1;  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>   undefined4 uVar2;  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>   int iVar3;  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>   char *pcVar4;  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>   byte bVar5;  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>   uint uVar6;  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>   uint uVar7;  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>   int **ppiVar8;  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>   int *apiStack_80 [32];  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>     
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>   apiStack_80[0] = *(int **)(dd_exref + 4);  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>   iVar1 = (**(code **)(*apiStack_80[0] + 0x60))();  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>   if (iVar1 == -0x7789fe3e) {  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>     (**(code **)(**(int **)(dd_exref + 4) + 0x6c))(*(int **)(dd_exref + 4));  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>     DAT_00495218 = 3;  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java> LAB_00414b8c:  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>     FUN_00424b80(0,0,0x280,0x1e0);  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>     DAT_00495218 = DAT_00495218 + -1;  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>   }  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>   else if (DAT_00495218 != 0) goto LAB_00414b8c;  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>   if (DAT_00495248 != 0) {  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>     return;  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>   }  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>   DAT_004951f8 = ~(DAT_0049520c & DAT_00495214);  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>   DAT_0049520c = DAT_00495214;  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>   DAT_00495214 = DXInputGetKBStick(0);  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>   DAT_004951f8 = DAT_004951f8 & DAT_0049520c & DAT_00495214;  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>   DAT_00495258 = ~*(uint *)(app_exref + 0x108);  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>   DXInput::GetMouse();  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>   DAT_00495258 = DAT_00495258 & *(uint *)(app_exref + 0x108);  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>   DAT_00498714 = 0;  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>   uVar6 = DAT_00495208 - *(int *)(app_exref + 0x104) >> 0x1f;  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>   uVar7 = DAT_00495210 - *(int *)(app_exref + 0x100) >> 0x1f;  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>   if ((8 < (int)(((DAT_00495208 - *(int *)(app_exref + 0x104) ^ uVar6) - uVar6) +  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>                 ((DAT_00495210 - *(int *)(app_exref + 0x100) ^ uVar7) - uVar7))) ||  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>      (DAT_00495258 != 0)) {  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>     DAT_00498714 = 1;  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>   }  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>   if (DAT_00498710 == 1) {  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>     DAT_00495210 = *(int *)(app_exref + 0x100);  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>     DAT_00495208 = *(int *)(app_exref + 0x104);  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>   }  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>   FUN_00425170();  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>   (*DAT_00495238)();  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>   if (DAT_0049524c != 0) {  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>     return;  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>   }  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>   FUN_00418450();  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>   if ((DAT_0049b68c == 0) && (DAT_00498710 == 1)) {  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>     FUN_00425660(*(int *)(app_exref + 0x100),*(int *)(app_exref + 0x104),0,0,0x16,0x1e,0xff0000,  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>                  DAT_00496280);  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>   }  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>   FUN_00425a30();  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>   FUN_00425540();  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>   if (DAT_0049523c == 0) {  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>     (**(code **)(**(int **)dd_exref + 0x58))(*(int **)dd_exref,1,0);  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>     FUN_00425360();  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>   }  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>   else {  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>     DXDraw::Flip(1);  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>     ppiVar8 = apiStack_80;  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>     for (iVar1 = 0x1f; iVar1 != 0; iVar1 = iVar1 + -1) {  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>       *ppiVar8 = (int *)0x0;  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>       ppiVar8 = ppiVar8 + 1;  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>     }  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>     apiStack_80[0] = (int *)0x7c;  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>     iVar1 = (**(code **)(*DAT_00495220 + 100))(DAT_00495220,0,apiStack_80,1,0);  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>     if (iVar1 != 0) {  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>       uVar2 = DXErrorToString(iVar1);  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>       Msg(s_Lock_failed_in_SNK_ScreenDump____004658a4,uVar2);  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>       goto LAB_00414d87;  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>     }  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>     (**(code **)(*DAT_00495220 + 0x80))(DAT_00495220,0);  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>   }  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>   DAT_004951fc = DAT_004951fc ^ 1;  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java> LAB_00414d87:  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>   FUN_00426580();  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>   iVar1 = DXInput::CheckKey(1);  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>   if ((iVar1 != 0) && (DAT_004654a0 != -1)) {  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>     DAT_00495240 = DAT_004654a0;  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>     DAT_004951e8 = 1;  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>   }  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>   if (DAT_00495238 == (code *)PTR_LAB_004655f4) {  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>     iVar1 = 0;  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>     do {  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>       iVar3 = DXInput::CheckKey((uint)(byte)(&DAT_004654a4)  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>                                             [iVar1 * 0x28 + (uint)(byte)(&DAT_004951f0)[iVar1]]);  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>       if ((iVar3 != 0) &&  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>          ((&DAT_004951f0)[iVar1] = (&DAT_004951f0)[iVar1] + '\x01',  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>          (&DAT_004654a4)[iVar1 * 0x28 + (uint)(byte)(&DAT_004951f0)[iVar1]] == -1)) {  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>         *(uint *)(&PTR_DAT_00465594)[iVar1] =  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>              *(uint *)(&PTR_DAT_00465594)[iVar1] ^ (&DAT_004655ac)[iVar1];  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>         if (*(int *)(&PTR_DAT_00465594)[iVar1] == 0) {  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>           iVar1 = 5;  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>         }  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>         else {  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>           iVar1 = 4;  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>         }  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>         DXSound::Play(iVar1);  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>         iVar3 = DAT_004962b4;  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>         _DAT_004951f0 = 0;  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>         _DAT_004951f4 = 0;  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>         iVar1 = 0;  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>         pcVar4 = (char *)&DAT_004643b8;  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>         do {  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>           if (*pcVar4 == '\0') {  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>             if (iVar3 == 0) {  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>               bVar5 = *(byte *)((int)&DAT_004a2c9c + iVar1) & 1;  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>             }  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>             else {  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>               bVar5 = *(byte *)((int)&DAT_004a2c9c + iVar1) | 2;  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>             }  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>             *(byte *)((int)&DAT_004a2c9c + iVar1) = bVar5;  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>           }  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>           pcVar4 = pcVar4 + 0xa4;  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>           iVar1 = iVar1 + 1;  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>         } while ((int)pcVar4 < 0x464fe4);  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>       }  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>       iVar1 = iVar1 + 1;  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>     } while (iVar1 < 6);  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>   }  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>   else {  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>     _DAT_004951f0 = 0;  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>     _DAT_004951f4 = 0;  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>   }  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>   DAT_0049522c = DAT_0049522c + 1;  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>   if (((DAT_00495238 == (code *)PTR_LAB_004655d8) &&  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>       (DAT_00495224 = timeGetTime(), 50000 < DAT_00495224 - DAT_004951e0)) && (DAT_0048f2fc < -0xf))  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>   {  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>     do {  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>       iVar1 = _rand();  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>       DAT_00490ba8 = iVar1 % 0x13;  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>     } while (*(char *)((int)&DAT_004668b0 + DAT_00490ba8) != '\0');  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>     DAT_004951dc = 1;  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>     DAT_00495204 = 0;  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>     DAT_0049522c = 0;  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>     DAT_00495238 = (code *)PTR_LAB_004655cc;  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>     timeGetTime();  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>     DAT_004951e0 = DAT_00495224;  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>     DAT_004a2c8c = 1;  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>   }  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>   return;  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java> }  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>   
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java> 
+--- SetFrontendScreen (0x414610) @ 00414610 (size=41) ---  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>   
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java> void __cdecl FUN_00414610(int param_1)  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>   
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java> {  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>   DAT_00495204 = 0;  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>   DAT_0049522c = 0;  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>   DAT_00495238 = (&PTR_LAB_004655c4)[param_1];  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>   DAT_004951e0 = timeGetTime();  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>   return;  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java> }  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>   
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java> 
+--- ScreenMainMenuAnd1PRaceFlow (0x415490): NOT FOUND ---  
+2026-04-02 19:49:49 INFO  (GhidraScript) FindSlideshowFuncs.java>   Created function at 00415490  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java> 
+--- ScreenMainMenuAnd1PRaceFlow (0x415490) @ 00415490 (size=5011) ---  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>   
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java> /* WARNING: Globals starting with '_' overlap smaller symbols at the same address */  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>   
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java> void FUN_00415490(void)  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>   
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java> {  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>   byte *pbVar1;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>   bool bVar2;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>   int iVar3;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>   undefined3 extraout_var;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>   undefined3 extraout_var_00;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>   uint uVar4;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>   int iVar5;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>   uint uVar6;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>   int iVar7;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>   code *pcVar8;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>   int *piVar9;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>   uint uStack_8;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>     
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>   uVar6 = DAT_00495228 >> 1;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>   uVar4 = DAT_00495200 >> 1;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>   iVar7 = uVar6 - 0xd2;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>   iVar5 = uVar4 - 0x9f;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>   switch(DAT_00495204) {  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>   case 0:  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>     DAT_0048f380 = 0;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>     DAT_004aaf68 = 0;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>     DAT_004aaf6c = 0;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>     DAT_004a2c98 = 0;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>     DAT_00497328 = 0;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>     DAT_00497324 = 0;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>     DAT_004962bc = 0;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>     DAT_004962c0 = 0;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>     DAT_00497a78 = 0;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>     DAT_00497a74 = 0;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>     DAT_0049636c = 0;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>     DAT_00494bb0 = 0;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>     DAT_00494bb4 = 0;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>     DAT_004a2c8c = 2;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>     DAT_00494bb8 = 0;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>     uStack_8 = 0;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>     do {  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>       iVar5 = DAT_00497a58;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>       if (((uStack_8 == 0) || (iVar5 = DAT_00465ff4, uStack_8 == 1)) && (iVar5 != 0)) {  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>         iVar5 = uStack_8 * 0x40;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>         *(undefined4 *)(Configure_exref + iVar5) = 1;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>         *(undefined4 *)(Configure_exref + iVar5 + 4) = 2;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>         *(undefined4 *)(Configure_exref + iVar5 + 8) = 0x200;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>         uVar4 = 0;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>         *(undefined4 *)(Configure_exref + iVar5 + 0xc) = 0x400;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>         iVar7 = 0x10;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>         do {  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>           if (uStack_8 == 0) {  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>             iVar3 = 0x40000 <<  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>                     ((char)*(undefined4 *)(s_Config_td5_00463fb0 + iVar7 + 8) - 2U & 0x1f);  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>             if ((DAT_00497a58 == 0) ||  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>                (uVar4 < *(uint *)(JoystickButtonC_exref + DAT_00497a58 * 4 + -4))) {  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>               if (iVar3 < 0x400001) {  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>                 if (iVar3 != 0x400000) {  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>                   if (iVar3 < 0x100001) {  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>                     if (iVar3 == 0x100000) goto LAB_004157ef;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>                     if (iVar3 == 0x40000) {  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>                       *(undefined4 *)(Configure_exref + iVar7) = 0x200;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>                     }  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>                     else {  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>                       if (iVar3 != 0x80000) goto LAB_004157ed;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>                       *(undefined4 *)(Configure_exref + iVar7) = 0x400;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>                     }  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>                   }  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>                   else {  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>                     if (iVar3 == 0x200000) goto LAB_004157ef;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>                     *(undefined4 *)(Configure_exref + iVar7) = 0;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>                   }  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>                   goto LAB_00415878;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>                 }  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>               }  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>               else if (((iVar3 != 0x800000) && (iVar3 != 0x1000000)) && (iVar3 != 0x2000000))  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>               goto LAB_004157ed;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>             }  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>             else {  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java> LAB_004157ed:  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>               iVar3 = 0;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>             }  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java> LAB_004157ef:  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>             *(int *)(Configure_exref + iVar7) = iVar3;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>           }  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>           else {  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>             iVar3 = 0x40000 << ((char)*(undefined4 *)(iVar7 + 0x463fdc) - 2U & 0x1f);  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>             if ((DAT_00465ff4 == 0) ||  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>                (uVar4 < *(uint *)(JoystickButtonC_exref + DAT_00465ff4 * 4 + -4))) {  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>               if (iVar3 < 0x400001) {  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>                 if (iVar3 != 0x400000) {  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>                   if (iVar3 < 0x100001) {  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>                     if (iVar3 != 0x100000) {  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>                       if (iVar3 == 0x40000) {  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>                         iVar3 = 0x200;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>                       }  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>                       else {  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>                         if (iVar3 != 0x80000) goto LAB_0041586c;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>                         iVar3 = 0x400;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>                       }  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>                     }  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>                   }  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>                   else if (iVar3 != 0x200000) goto LAB_0041586c;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>                 }  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>               }  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>               else if (((iVar3 != 0x800000) && (iVar3 != 0x1000000)) && (iVar3 != 0x2000000))  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>               goto LAB_0041586c;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>             }  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>             else {  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java> LAB_0041586c:  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>               iVar3 = 0;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>             }  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>             *(int *)(Configure_exref + iVar7 + 0x40) = iVar3;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>           }  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java> LAB_00415878:  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>           iVar7 = iVar7 + 4;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>           uVar4 = uVar4 + 1;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>         } while (iVar7 < 0x30);  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>         iVar5 = iVar5 + 0x30;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>         iVar7 = 4;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>         do {  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>           *(undefined4 *)(Configure_exref + iVar5) = 0;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>           iVar5 = iVar5 + 4;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>           iVar7 = iVar7 + -1;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>         } while (iVar7 != 0);  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>       }  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>       else {  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>         uVar4 = 0;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>         iVar5 = uStack_8 << 6;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>         do {  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>           pbVar1 = (byte *)((int)&DAT_00464054 + uVar4);  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>           uVar4 = uVar4 + 1;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>           *(uint *)(Configure_exref + iVar5) = (uint)*pbVar1;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>           iVar5 = iVar5 + 4;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>         } while (uVar4 < 0x10);  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>       }  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>       uStack_8 = uStack_8 + 1;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>       if (1 < uStack_8) {  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>         DAT_00466e98 = DAT_00466024;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>         DAT_0046320c = DAT_0046600c;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>         DAT_004b11c4 = DAT_00466028;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>         DAT_00463090 = DAT_0046602c * 7 + 5;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>         DAT_00463188 = DAT_00466018 ^ 1;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>         DAT_004aad8c = DAT_00466008;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>         DAT_00466e8c = DAT_00466000 + 1;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>         DAT_004b0fa8 = DAT_00466004;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>         DAT_0048301c = DAT_00465ff8;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>         DAT_004aaf84 = DAT_00466014;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>         DAT_00463210 = DAT_00466010;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>         DXSound::SetVolume((DAT_00465fec * 0xfc00) / 100 & 0xfc00);  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>         DXSound::CDSetVolume((DAT_00465ff0 * 0xfc00) / 100 & 0xfc00);  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>         DAT_004aaf74 = 0;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>         DAT_004951dc = 0;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>         DAT_00496358 = FUN_00412e30(0);  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>         FUN_004125b0(s_Front_End_MainMenu_tga_00463ecc,s_Front_End_FrontEnd_zip_00463f84);  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>         FUN_00424b30();  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>         FUN_00425de0((byte *)SNK_RaceMenuButTxt_exref,-0xe0,0,0xe0,0x20,0);  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>         FUN_00425de0((byte *)SNK_QuickRaceButTxt_exref,-0xe0,0,0xe0,0x20,0);  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>         pcVar8 = SNK_TimeDemoButTxt_exref;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>         if (*(int *)(app_exref + 0x170) == 0) {  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>           pcVar8 = SNK_TwoPlayerButTxt_exref;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>         }  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>         FUN_00425de0((byte *)pcVar8,-0xe0,0,0xe0,0x20,0);  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>         FUN_00425de0((byte *)SNK_NetPlayButTxt_exref,-0xe0,0,0xe0,0x20,0);  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>         FUN_00425de0((byte *)SNK_OptionsButTxt_exref,-0xe0,0,0xe0,0x20,0);  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>         FUN_00425de0((byte *)SNK_HiScoreButTxt_exref,-0xe0,0,0xe0,0x20,0);  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>         FUN_00425de0((byte *)SNK_ExitButTxt_exref,-0xe0,0,0xe0,0x20,0);  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>         DAT_004654a0 = 6;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>         FUN_004258c0();  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>         FUN_004183b0((char *)SNK_MainMenu_MT_exref,0,0);  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>         FUN_004129b0(DAT_00496270);  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>         FUN_00412b00(DAT_00496270,0);  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>         DAT_004962a0 = 0;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>         DXSound::Play(5);  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>         DAT_00495204 = DAT_00495204 + 1;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>         return;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>       }  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>     } while( true );  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>   case 1:  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>   case 2:  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>     FUN_00424af0();  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>     DAT_0049522c = 0;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>     DAT_00495204 = DAT_00495204 + 1;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>     return;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>   case 3:  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>     FUN_004259d0(0,(DAT_0049522c + 0xfffffda) * 0x10 + iVar7,uVar4 - 0x93);  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>     FUN_004259d0(1,iVar7 + DAT_0049522c * -0x10 + 0x280,uVar4 - 0x6b);  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>     FUN_004259d0(2,(DAT_0049522c + 0xfffffda) * 0x10 + iVar7,uVar4 - 0x43);  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>     FUN_004259d0(3,iVar7 + DAT_0049522c * -0x10 + 0x280,uVar4 - 0x1b);  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>     FUN_004259d0(4,(DAT_0049522c + 0xfffffda) * 0x10 + iVar7,uVar4 + 0xd);  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>     FUN_004259d0(5,iVar7 + DAT_0049522c * -0x10 + 0x280,uVar4 + 0x35);  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>     FUN_004259d0(6,(DAT_0049522c + 0xfffffda) * 0x10 + iVar7,uVar4 + 0x5d);  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>     FUN_00425660(uVar6 - 200,((DAT_0049522c * 4 + -0xdc) - DAT_004962cc) + iVar5,0,0,DAT_004962c4,  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>                  DAT_004962c8,0,(int)DAT_00496358);  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>     if (DAT_0049522c == 0x27) {  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>       DAT_0049522c = 0x26;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>       bVar2 = FUN_004259b0();  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>       if (CONCAT31(extraout_var,bVar2) != 0) {  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>         FUN_004258e0();  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>   ... (301 more lines)  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java> 
+--- RunAttractModeDemoScreen (0x4275a0): NOT FOUND ---  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>   Created function at 004275a0  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java> 
+--- RunAttractModeDemoScreen (0x4275a0) @ 004275a0 (size=114) ---  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>   
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java> void FUN_004275a0(void)  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>   
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java> {  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>   switch(DAT_00495204) {  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>   case 0:  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>     DAT_00495254 = 1;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>     FUN_00424ca0();  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>     FUN_004258c0();  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>     DAT_00495204 = DAT_00495204 + 1;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>     break;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>   case 1:  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>     FUN_00426390();  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>     DAT_00495204 = DAT_00495204 + 1;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>     return;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>   case 2:  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>   case 3:  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>     FUN_00424af0();  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>     DAT_00495204 = DAT_00495204 + 1;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>     return;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>   case 4:  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>     FUN_00411750(0);  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>     DAT_00495204 = DAT_00495204 + 1;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>     return;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>   case 5:  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>     FUN_00411780();  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>     if (DAT_00494fc0 == 0) {  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>       FUN_0040dac0();  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>       FUN_00414a90();  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>       return;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>     }  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>   }  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>   return;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java> }  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>   
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java> 
+--- ScreenExtrasGallery (0x417d50): NOT FOUND ---  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>   Created function at 00417d50  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java> 
+--- ScreenExtrasGallery (0x417d50) @ 00417d50 (size=1597) ---  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>   
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java> /* WARNING: Globals starting with '_' overlap smaller symbols at the same address */  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>   
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java> void FUN_00417d50(void)  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>   
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java> {  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>   uint uVar1;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>   int iVar2;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>   int iVar3;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>   undefined4 uVar4;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>   code *pcVar5;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>   undefined4 uVar6;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>   int *piVar7;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>   undefined4 uStack_10;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>   int iStack_c;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>   undefined4 uStack_8;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>   int iStack_4;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>     
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>   iVar2 = DAT_00496360;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>   switch(DAT_00495204) {  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>   case 0:  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>     if (DAT_0048f2fc < -0xf) {  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>       DAT_00495204 = DAT_00495204 + 1;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>     }  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>     if (0xc0 < DAT_0048f2fc) {  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>       DAT_0048f2fc = 0x100 - DAT_0048f2fc;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>     }  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>     if (0x40 < DAT_0048f2fc) {  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>       DAT_0048f2fc = 0x40;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>       return;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>     }  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>     break;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>   case 1:  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>     DAT_004951dc = 1;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>     FUN_004258c0();  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>     DAT_00496360 = 0;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>     DAT_00496354 = 0;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>     _DAT_004962e0 =  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>          FUN_004122f0(s_Front_End_Extras_Bob_tga_00465dd4,s_Front_End_Extras_Mugshots_zip_00465df0);  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>     _DAT_004962e4 =  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>          FUN_004122f0(s_Front_End_Extras_Gareth_tga_00465db8,  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>                       s_Front_End_Extras_Mugshots_zip_00465df0);  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>     _DAT_004962e8 =  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>          FUN_004122f0(s_Front_End_Extras_Snake_tga_00465d9c,s_Front_End_Extras_Mugshots_zip_00465df0  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>                      );  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>     _DAT_004962ec =  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>          FUN_004122f0(s_Front_End_Extras_MikeT_tga_00465d80,s_Front_End_Extras_Mugshots_zip_00465df0  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>                      );  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>     _DAT_004962f0 =  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>          FUN_004122f0(s_Front_End_Extras_Chris_tga_00465d64,s_Front_End_Extras_Mugshots_zip_00465df0  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>                      );  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>     _DAT_004962f4 =  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>          FUN_004122f0(s_Front_End_Extras_Headley_tga_00465d44,  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>                       s_Front_End_Extras_Mugshots_zip_00465df0);  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>     _DAT_004962f8 =  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>          FUN_004122f0(s_Front_End_Extras_Steve_tga_00465d28,s_Front_End_Extras_Mugshots_zip_00465df0  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>                      );  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>     _DAT_004962fc =  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>          FUN_004122f0(s_Front_End_Extras_Rich_tga_00465d0c,s_Front_End_Extras_Mugshots_zip_00465df0)  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>     ;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>     _DAT_00496300 =  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>          FUN_004122f0(s_Front_End_Extras_Mike_tga_00465cf0,s_Front_End_Extras_Mugshots_zip_00465df0)  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>     ;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>     _DAT_00496304 =  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>          FUN_004122f0(s_Front_End_Extras_Bez_tga_00465cd4,s_Front_End_Extras_Mugshots_zip_00465df0);  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>     _DAT_00496308 =  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>          FUN_004122f0(s_Front_End_Extras_Les_tga_00465cb8,s_Front_End_Extras_Mugshots_zip_00465df0);  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>     _DAT_0049630c =  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>          FUN_004122f0(s_Front_End_Extras_TonyP_tga_00465c9c,s_Front_End_Extras_Mugshots_zip_00465df0  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>                      );  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>     _DAT_00496310 =  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>          FUN_004122f0(s_Front_End_Extras_JohnS_tga_00465c80,s_Front_End_Extras_Mugshots_zip_00465df0  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>                      );  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>     _DAT_00496314 =  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>          FUN_004122f0(s_Front_End_Extras_DavidT_tga_00465c64,  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>                       s_Front_End_Extras_Mugshots_zip_00465df0);  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>     _DAT_00496318 =  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>          FUN_004122f0(s_Front_End_Extras_TonyC_tga_00465c48,s_Front_End_Extras_Mugshots_zip_00465df0  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>                      );  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>     _DAT_0049631c =  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>          FUN_004122f0(s_Front_End_Extras_DaveyB_tga_00465c2c,  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>                       s_Front_End_Extras_Mugshots_zip_00465df0);  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>     _DAT_00496320 =  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>          FUN_004122f0(s_Front_End_Extras_ChrisD_tga_00465c10,  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>                       s_Front_End_Extras_Mugshots_zip_00465df0);  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>     _DAT_00496324 =  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>          FUN_004122f0(s_Front_End_Extras_Slade_tga_00465bf4,s_Front_End_Extras_Mugshots_zip_00465df0  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>                      );  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>     _DAT_00496328 =  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>          FUN_004122f0(s_Front_End_Extras_Matt_tga_00465bd8,s_Front_End_Extras_Mugshots_zip_00465df0)  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>     ;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>     _DAT_0049632c =  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>          FUN_004122f0(s_Front_End_Extras_Marie_tga_00465bbc,s_Front_End_Extras_Mugshots_zip_00465df0  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>                      );  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>     _DAT_00496330 =  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>          FUN_004122f0(s_Front_End_Extras_JFK_tga_00465ba0,s_Front_End_Extras_Mugshots_zip_00465df0);  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>     _DAT_00496334 =  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>          FUN_004122f0(s_Front_End_Extras_Daz_tga_00465b84,s_Front_End_Extras_Mugshots_zip_00465df0);  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>     _DAT_00496338 =  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>          FUN_00412030(s_Front_End_Extras_Legals1_tga_00465b64,  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>                       s_Front_End_Extras_Mugshots_zip_00465df0);  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>     _DAT_0049633c =  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>          FUN_00412030(s_Front_End_Extras_Legals2_tga_00465b44,  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>                       s_Front_End_Extras_Mugshots_zip_00465df0);  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>     _DAT_00496340 =  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>          FUN_00412030(s_Front_End_Extras_Legals3_tga_00465b24,  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>                       s_Front_End_Extras_Mugshots_zip_00465df0);  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>     _DAT_00496344 =  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>          FUN_00412030(s_Front_End_Extras_Legals4_tga_00465b04,  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>                       s_Front_End_Extras_Mugshots_zip_00465df0);  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>     _DAT_00496348 =  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>          FUN_00412030(s_Front_End_Extras_Legals5_tga_00465ae4,  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>                       s_Front_End_Extras_Mugshots_zip_00465df0);  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>     DAT_00496364 = 0;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>     DAT_00495204 = DAT_00495204 + 1;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>     return;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>   case 2:  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>   case 3:  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>   case 4:  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>   case 5:  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>     DAT_00495204 = DAT_00495204 + 1;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>     return;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>   case 6:  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>     FUN_00423e40(0);  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>     DAT_0049522c = 0x27f;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>     DAT_00495204 = DAT_00495204 + 1;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>     return;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>   case 7:  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>     if ((((DAT_004951f8 & 0x40000) != 0) || (DAT_00495258 != 0)) || (DAT_00496354 == 0xb)) {  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>       DXWin::CleanUpAndPostQuit();  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>       return;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>     }  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>     if (0x27f < DAT_0049522c) {  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>       DAT_0049522c = DAT_0049522c - 0x280;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>     }  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>     if (DAT_0049522c < 0x140) {  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>       FUN_00425660(0xcc,0x60,0,DAT_0049522c,0x140,0x140 - DAT_0049522c,0,(int)DAT_00496264);  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>       if (DAT_0049522c != 0) {  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>         iVar3 = 0x140;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>         iVar2 = 0x1a0 - DAT_0049522c;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>         uVar1 = DAT_0049522c;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java> LAB_0041817e:  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>         FUN_00425660(0xcc,iVar2,iVar3,0,0x140,uVar1,0,(int)DAT_00496264);  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>       }  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>     }  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>     else {  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>       FUN_00425660(0xcc,0x60,0x140,DAT_0049522c - 0x140,0x140,0x280 - DAT_0049522c,0,  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>                    (int)DAT_00496264);  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>       if (DAT_0049522c != 0x140) {  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>         uVar1 = DAT_0049522c - 0x140;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>         iVar3 = 0;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>         iVar2 = 0x2e0 - DAT_0049522c;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>         goto LAB_0041817e;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>       }  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>     }  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>     iVar2 = DAT_00496360;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>     if ((DAT_0049522c & 0x1f) == 0) {  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>       if (SNK_CreditsText_exref[DAT_00496360 * 0x18] == (code)0x23) {  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>         if (DAT_0049522c < 0x140) {  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>           iStack_c = DAT_00496364 * 0x20;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>           iStack_4 = iStack_c + 0x20;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>           uStack_10 = 0;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>           uStack_8 = 0x140;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>           FUN_00423f90(0,0x140,DAT_0049522c,0x140,0x20);  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>           iVar2 = *DAT_00496264;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>           uVar6 = *(undefined4 *)  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>                    (&DAT_004961dc + (char)SNK_CreditsText_exref[DAT_00496360 * 0x18 + 1] * 4);  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>           uVar4 = 0x140;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>           uVar1 = DAT_0049522c;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>         }  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>         else {  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>           iStack_c = DAT_00496364 * 0x20;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>           iStack_4 = iStack_c + 0x20;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>           uStack_10 = 0;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>           uStack_8 = 0x140;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>           FUN_00423f90(0,0,DAT_0049522c - 0x140,0x140,0x20);  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>           iVar2 = *DAT_00496264;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>           uVar6 = *(undefined4 *)  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>                    (&DAT_004961dc + (char)SNK_CreditsText_exref[DAT_00496360 * 0x18 + 1] * 4);  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>           uVar1 = DAT_0049522c - 0x140;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>           uVar4 = 0;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>         }  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>         (**(code **)(iVar2 + 0x1c))(DAT_00496264,uVar4,uVar1,uVar6,&uStack_10,0x11);  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>         DAT_00496364 = DAT_00496364 + 1;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>         iVar2 = DAT_00496360;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>         if (DAT_00496364 == 7) {  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>           DAT_00496364 = 0;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>           DAT_00496360 = DAT_00496360 + 1;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>           return;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>         }  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>       }  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>       else {  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>         if (DAT_0049522c < 0x140) {  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>           FUN_00423f90(0,0x140,DAT_0049522c,0x140,0x20);  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>           uVar1 = DAT_0049522c;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>           piVar7 = DAT_00496264;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>           iVar2 = FUN_00424a50((byte *)(SNK_CreditsText_exref + DAT_00496360 * 0x18),0x140,0x280);  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>           pcVar5 = SNK_CreditsText_exref + DAT_00496360 * 0x18;  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>         }  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>         else {  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>   ... (19 more lines)  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java> 
+=== STRING SEARCH FOR SLIDESHOW CONTENT ===  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>   0x4602a5  "Pick@DXPlay@@SAHH@Z"  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>   0x460e8b  "MainMenu_Ex@@3PADA"  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>   0x460f11  "MainMenu_MT@@3PADA"  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>   0x463f0b  "Pic%d.tga"  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>   0x467329  "Picture"  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>   0x463c9a  "Extras\pic5.tga"  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>   0x463cb6  "Extras\pic4.tga"  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>   0x463cd2  "Extras\pic3.tga"  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>   0x463cee  "Extras\pic2.tga"  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>   0x463d0a  "Extras\pic1.tga"  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>   0x463d26  "Extras\Extras.zip"  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>   0x463d2d  "Extras.zip"  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>   0x463d42  "Extras\PitchShifter.tga"  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>   0x463d66  "Extras\KMFDM.tga"  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>   0x463d82  "Extras\Junkie XL.tga"  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>   0x463da2  "Extras\Gravity Kills.tga"  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>   0x463dc6  "Extras\Fear Factory.tga"  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>   0x46585f  "Extras.tga"  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>   0x465aee  "Extras\Legals5.tga"  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>   0x465b0e  "Extras\Legals4.tga"  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>   0x465b2e  "Extras\Legals3.tga"  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>   0x465b4e  "Extras\Legals2.tga"  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>   0x465b6e  "Extras\Legals1.tga"  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>   0x465b8e  "Extras\Daz.tga"  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>   0x465baa  "Extras\JFK.tga"  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>   0x465bc6  "Extras\Marie.tga"  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>   0x465be2  "Extras\Matt.tga"  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>   0x465bfe  "Extras\Slade.tga"  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>   0x465c1a  "Extras\ChrisD.tga"  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>   0x465c36  "Extras\DaveyB.tga"  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>   0x465c52  "Extras\TonyC.tga"  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>   0x465c6e  "Extras\DavidT.tga"  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>   0x465c8a  "Extras\JohnS.tga"  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>   0x465ca6  "Extras\TonyP.tga"  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>   0x465cc2  "Extras\Les.tga"  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>   0x465cde  "Extras\Bez.tga"  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>   0x465cfa  "Extras\Mike.tga"  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>   0x465d16  "Extras\Rich.tga"  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>   0x465d32  "Extras\Steve.tga"  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>   0x465d4e  "Extras\Headley.tga"  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>   0x465d6e  "Extras\Chris.tga"  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>   0x465d8a  "Extras\MikeT.tga"  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>   0x465da6  "Extras\Snake.tga"  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>   0x465dc2  "Extras\Gareth.tga"  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>   0x465dde  "Extras\Bob.tga"  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>   0x465dfa  "Extras\Mugshots.zip"  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>   0x463f8e  "FrontEnd.zip"  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>   0x474c1d  "FrontEndLoop."  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>   0x463ed6  "MainMenu.tga"  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java>   0x4643a8  "MainMenuText"  
+2026-04-02 19:49:51 INFO  (GhidraScript) FindSlideshowFuncs.java> 
+=== DONE ===  
+2026-04-02 19:49:51 INFO  (HeadlessAnalyzer) ANALYZING changes made by post scripts: file:///C:/Users/maria/Desktop/Proyectos/TD5RE/original/TD5_d3d.exe  
+2026-04-02 19:49:53 INFO  (AutoAnalysisManager) -----------------------------------------------------
+    Call Convention ID                         0.000 secs
+    Call-Fixup Installer                       0.000 secs
+    Decompiler Parameter ID                    1.751 secs
+    Function Start Search                      0.000 secs
+    Shared Return Calls                        0.004 secs
+    Stack                                      0.042 secs
+    X86 Function Callee Purge                  0.001 secs
+-----------------------------------------------------
+     Total Time   1 secs
+-----------------------------------------------------
+  
+2026-04-02 19:49:53 INFO  (HeadlessAnalyzer) REPORT: Post-analysis succeeded for file: file:///C:/Users/maria/Desktop/Proyectos/TD5RE/original/TD5_d3d.exe  
+2026-04-02 19:49:53 INFO  (LocalFileSystem) /TD5_d3d.exe: file created (maria)  
+2026-04-02 19:49:53 INFO  (HeadlessAnalyzer) REPORT: Save succeeded for: /TD5_d3d.exe (slideshow_analysis2:/TD5_d3d.exe)  
+2026-04-02 19:49:53 INFO  (HeadlessAnalyzer) REPORT: Import succeeded  

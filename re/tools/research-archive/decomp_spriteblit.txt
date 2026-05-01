@@ -1,0 +1,176 @@
+Found 3 target functions:
+  00425540 FlushFrontendSpriteBlits
+  00425730 QueueFrontendSpriteBlit
+  004263e0 RenderFrontendDisplayModeHighlight
+
+============================================================
+FUNCTION: 00425540 FlushFrontendSpriteBlits
+============================================================
+
+/* Restores the previous frame's saved background rectangles, renders highlight/overlay
+   contributions, then executes all queued frontend sprite blits while saving the underlying
+   destination areas for the next frame. */
+
+void FlushFrontendSpriteBlits(void)
+
+{
+  int *piVar1;
+  int iVar2;
+  int *piVar3;
+  int *piVar4;
+  
+  if (DAT_00498704 == 0) {
+    piVar3 = (int *)(&DAT_00498720 + g_frontendFrameToggle * 0x410);
+    iVar2 = 0;
+    do {
+      if (*piVar3 == -1) break;
+      Copy16BitSurfaceRect(*piVar3,piVar3[1],g_primaryWorkSurface,piVar3,0x10);
+      piVar3 = piVar3 + 4;
+      iVar2 = iVar2 + 1;
+    } while (iVar2 < 0x40);
+  }
+  else {
+    DAT_00498704 = DAT_00498704 + -1;
+  }
+  piVar4 = (int *)(&DAT_00498720 + g_frontendFrameToggle * 0x410);
+  *piVar4 = -1;
+  UpdateExtrasGalleryDisplay();
+  RenderFrontendDisplayModeHighlight();
+  iVar2 = 0;
+  piVar3 = (int *)&DAT_00497ad4;
+  do {
+    if (piVar3[3] == -1) break;
+    piVar1 = &DAT_00494fd4;
+    do {
+      if (piVar3[9] == 0) break;
+      if ((piVar3[9] == piVar1[-1]) && (piVar3[10] == *piVar1)) {
+        *piVar4 = piVar3[-1];
+        piVar4[1] = *piVar3;
+        piVar4[2] = piVar3[1];
+        piVar4[3] = piVar3[2];
+        (**(code **)(*(int *)piVar3[9] + 0x74))((int *)piVar3[9],8,piVar3 + 7);
+        Copy16BitSurfaceRect(*piVar4,piVar4[1],(int *)piVar3[9],piVar3 + 3,0x11);
+        piVar4 = piVar4 + 4;
+        break;
+      }
+      piVar1 = piVar1 + 2;
+    } while ((int)piVar1 < 0x4951d4);
+    piVar3 = piVar3 + 0xc;
+    iVar2 = iVar2 + 1;
+  } while (iVar2 < 0x40);
+  *piVar4 = -1;
+  DAT_00497ae0 = 0xffffffff;
+  DAT_00498718 = 0;
+  DAT_0049b680 = 0;
+  return;
+}
+
+
+
+============================================================
+FUNCTION: 00425730 QueueFrontendSpriteBlit
+============================================================
+
+/* Queues one clipped frontend sprite blit into the pending sprite-draw list, converting color
+   constants for the active frontend pixel format and storing source/destination rectangles plus
+   surface metadata. */
+
+void __cdecl
+QueueFrontendSpriteBlit
+          (int param_1,int param_2,int param_3,int param_4,int param_5,int param_6,int param_7,
+          undefined4 param_8,undefined4 param_9)
+
+{
+  int iVar1;
+  uint uVar2;
+  int iVar3;
+  bool bVar4;
+  
+  if (param_1 < 0) {
+    param_3 = param_3 - param_1;
+    param_5 = param_5 + param_1;
+    param_1 = 0;
+  }
+  if (g_frontendCanvasW < param_1 + param_5) {
+    param_5 = g_frontendCanvasW - param_1;
+  }
+  if (param_5 < 1) {
+    return;
+  }
+  if (param_2 < 0) {
+    param_4 = param_4 - param_2;
+    param_6 = param_6 + param_2;
+    param_2 = 0;
+  }
+  if (g_frontendCanvasH < param_2 + param_6) {
+    param_6 = g_frontendCanvasH - param_2;
+  }
+  if (param_6 < 1) {
+    return;
+  }
+  iVar1 = DAT_0049b680 * 0x30;
+  *(int *)(&DAT_00497ad0 + iVar1) = param_1;
+  *(int *)(&DAT_00497ad4 + iVar1) = param_2;
+  *(int *)(&DAT_00497ad8 + iVar1) = param_1 + param_5;
+  *(int *)(&DAT_00497adc + iVar1) = param_2 + param_6;
+  (&DAT_00497ae0)[DAT_0049b680 * 0xc] = param_3;
+  *(int *)(&DAT_00497ae4 + iVar1) = param_4;
+  *(int *)(&DAT_00497ae8 + iVar1) = param_3 + param_5;
+  iVar3 = DAT_0049525c;
+  bVar4 = DAT_0049525c == 0xf;
+  *(int *)(&DAT_00497aec + iVar1) = param_4 + param_6;
+  if (bVar4) {
+    uVar2 = ((param_7 >> 0x13 & 0x1fU) << 5 | param_7 >> 0xb & 0x1fU) << 5;
+  }
+  else {
+    if (iVar3 != 0x10) goto LAB_00425846;
+    uVar2 = ((param_7 >> 0x13 & 0x1fU) << 5 | param_7 >> 0xb & 0x1fU) << 6;
+  }
+  *(uint *)(&DAT_00497af0 + iVar1) = uVar2 | param_7 >> 3 & 0x1fU;
+LAB_00425846:
+  *(undefined4 *)(&DAT_00497af4 + iVar1) = *(undefined4 *)(&DAT_00497af0 + iVar1);
+  iVar3 = DAT_0049b680 + 1;
+  (&DAT_00497af8)[DAT_0049b680 * 0xc] = param_8;
+  (&DAT_00497afc)[DAT_0049b680 * 0xc] = param_9;
+  if (iVar3 < 0x41) {
+    DAT_0049b680 = iVar3;
+    (&DAT_00497ae0)[iVar3 * 0xc] = 0xffffffff;
+    return;
+  }
+  Msg(s_FE__Out_of_Sprites__004666f0);
+  return;
+}
+
+
+
+============================================================
+FUNCTION: 004263e0 RenderFrontendDisplayModeHighlight
+============================================================
+
+/* Renders the rectangular highlight frame around the currently hovered display-mode button when the
+   frontend is in the interactive resolution-selection state. */
+
+void RenderFrontendDisplayModeHighlight(void)
+
+{
+  int iVar1;
+  
+  iVar1 = DAT_00498700;
+  if ((DAT_00498700 != -1) && (g_frontendCursorOverlayHidden == 0)) {
+    BltColorFillToSurface
+              (0xc000,(&DAT_00499c78)[DAT_00498700 * 0xd] + 0x14,
+               (&DAT_00499c7c)[DAT_00498700 * 0xd] + 4,(&DAT_00499c90)[DAT_00498700 * 0xd] + -0x28,2
+               ,g_frontendBackSurfacePtr);
+    BltColorFillToSurface
+              (0xc000,(&DAT_00499c78)[iVar1 * 0xd] + 0x14,(&DAT_00499c84)[iVar1 * 0xd] + -6,
+               (&DAT_00499c90)[iVar1 * 0xd] + -0x28,2,g_frontendBackSurfacePtr);
+    BltColorFillToSurface
+              (0xc000,(&DAT_00499c78)[iVar1 * 0xd] + 0x14,(&DAT_00499c7c)[iVar1 * 0xd] + 4,2,
+               (&DAT_00499c94)[iVar1 * 0xd] + -10,g_frontendBackSurfacePtr);
+    BltColorFillToSurface
+              (0xc000,(&DAT_00499c80)[iVar1 * 0xd] + -0x16,(&DAT_00499c7c)[iVar1 * 0xd] + 4,2,
+               (&DAT_00499c94)[iVar1 * 0xd] + -10,g_frontendBackSurfacePtr);
+  }
+  return;
+}
+

@@ -1,0 +1,8 @@
+Project opened: TD5_mcp
+Programs in project:
+  TD5_d3d.exe @ /TD5_d3d.exe
+Program opened: TD5_d3d.exe
+Image base: 00400000
+Function count: 113
+Function at 0x40DFC0: NOT FOUND
+First 20 functions:

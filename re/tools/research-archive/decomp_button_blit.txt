@@ -1,0 +1,1702 @@
+Functions referencing button table (0x00499c9c): 4
+  00425a30 RenderFrontendUiRects
+  00426120 RebuildFrontendButtonSurface
+  00426260 InitializeFrontendDisplayModeArrows
+  00426390 ReleaseFrontendDisplayModeButtons
+
+Functions matching name patterns: 21
+  00411780 RenderFrontendFadeEffect
+  00411a70 RenderFrontendFadeOutEffect
+  00412d50 MeasureOrDrawFrontendFontString
+  00419b30 RenderFrontendSessionBrowser
+  0041a530 RenderFrontendCreateSessionNameInput
+  0041a670 RenderFrontendLobbyChatInput
+  0041b420 RenderFrontendLobbyStatusPanel
+  0041bd00 RenderFrontendLobbyChatPanel
+  00424110 DrawFrontendFontStringPrimary
+  004241e0 DrawFrontendFontStringSecondary
+  004242b0 DrawFrontendLocalizedStringPrimary
+  00424390 DrawFrontendLocalizedStringSecondary
+  00424470 DrawFrontendFontStringToSurface
+  00424560 DrawFrontendLocalizedStringToSurface
+  00424660 DrawFrontendSmallFontStringToSurface
+  00424740 DrawFrontendClippedStringToSurface
+  004248e0 DrawFrontendWrappedStringLine
+  00424b80 BlitFrontendCachedRect
+  00425a30 RenderFrontendUiRects
+  00425b60 DrawFrontendButtonBackground
+  004263e0 RenderFrontendDisplayModeHighlight
+
+============================================================
+FUNCTION: 00411780 RenderFrontendFadeEffect
+============================================================
+
+void RenderFrontendFadeEffect(void)
+
+{
+  undefined4 uVar1;
+  int iVar2;
+  uint uVar3;
+  uint uVar4;
+  uint *puVar5;
+  undefined4 *puVar6;
+  undefined4 local_98 [9];
+  int local_74;
+  uint local_1c;
+  uint *local_18;
+  int local_14;
+  int local_10;
+  int local_c;
+  uint local_8;
+  
+  local_10 = 0;
+  local_14 = 0;
+  local_c = g_frontendCanvasW;
+  if (DAT_00494fc8 < 0x40) {
+    uVar4 = 0;
+  }
+  else {
+    uVar4 = DAT_00494fc8 - 0x40;
+  }
+  uVar3 = DAT_00494fc8;
+  if (g_frontendCanvasH < DAT_00494fc8) {
+    uVar3 = g_frontendCanvasH;
+  }
+  if (uVar4 <= g_frontendCanvasH) {
+    if (1 < uVar4) {
+      local_10 = uVar4 - 2;
+    }
+    local_8 = uVar4 + 0x40;
+    if ((int)g_frontendCanvasH < (int)local_8) {
+      local_8 = g_frontendCanvasH;
+    }
+    local_1c = (uVar3 - uVar4) * g_frontendCanvasW >> 1;
+    if (local_1c != 0) {
+      puVar6 = local_98;
+      for (iVar2 = 0x1f; iVar2 != 0; iVar2 = iVar2 + -1) {
+        *puVar6 = 0;
+        puVar6 = puVar6 + 1;
+      }
+      local_98[0] = 0x7c;
+      iVar2 = (**(code **)(*g_primaryWorkSurface + 100))(g_primaryWorkSurface,0,local_98,1,0);
+      if (iVar2 != 0) {
+        uVar1 = DXErrorToString(iVar2);
+        Msg(s_Lock_1__failed_in_SNK_BarFadeToR_0046412c,uVar1);
+        return;
+      }
+      local_18 = (uint *)(local_74 + g_frontendCanvasW * uVar4 * 2);
+      uVar4 = local_1c;
+      puVar5 = local_18;
+      if (DAT_0049525c == 0x10) {
+        do {
+          uVar3 = *puVar5;
+          uVar3 = CONCAT31((int3)((((uint)(byte)(&DAT_00494bc0)
+                                                [(uint)DAT_00494fc4 << 5 | uVar3 & 0x1f] |
+                                    (uint)(byte)(&DAT_00494bc0)
+                                                [(uint)DAT_00494fc5 << 5 | uVar3 >> 6 & 0x1f] << 6 |
+                                   (uint)(byte)(&DAT_00494bc0)
+                                               [(uint)DAT_00494fc6 << 5 | uVar3 >> 0xb & 0x1f] <<
+                                   0xb) << 0x10) >> 8),
+                           (&DAT_00494bc0)[(uint)DAT_00494fc4 << 5 | uVar3 >> 0x10 & 0x1f]) |
+                  (uint)(byte)(&DAT_00494bc0)[(uint)DAT_00494fc5 << 5 | uVar3 >> 0x16 & 0x1f] << 6 |
+                  (uint)(byte)(&DAT_00494bc0)[(uint)DAT_00494fc6 << 5 | uVar3 >> 0x1b] << 0xb;
+          *puVar5 = uVar3 >> 0x10 | uVar3 << 0x10;
+          uVar4 = uVar4 - 1;
+          puVar5 = puVar5 + 1;
+        } while (uVar4 != 0);
+      }
+      uVar4 = local_1c;
+      puVar5 = local_18;
+      if (DAT_0049525c == 0xf) {
+        do {
+          uVar3 = *puVar5;
+          uVar3 = CONCAT31((int3)((((uint)(byte)(&DAT_00494bc0)
+                                                [(uint)DAT_00494fc4 << 5 | uVar3 & 0x1f] |
+                                    (uint)(byte)(&DAT_00494bc0)
+                                                [(uint)DAT_00494fc5 << 5 | uVar3 >> 5 & 0x1f] << 5 |
+                                   (uint)(byte)(&DAT_00494bc0)
+                                               [(uint)DAT_00494fc6 << 5 | uVar3 >> 10 & 0x1f] << 10)
+                                  << 0x10) >> 8),
+                           (&DAT_00494bc0)[(uint)DAT_00494fc4 << 5 | uVar3 >> 0x10 & 0x1f]) |
+                  (uint)(byte)(&DAT_00494bc0)[(uint)DAT_00494fc5 << 5 | uVar3 >> 0x15 & 0x1f] << 5 |
+                  (uint)(byte)(&DAT_00494bc0)[(uint)DAT_00494fc6 << 5 | uVar3 >> 0x1a & 0x1f] << 10;
+          *puVar5 = uVar3 >> 0x10 | uVar3 << 0x10;
+          uVar4 = uVar4 - 1;
+          puVar5 = puVar5 + 1;
+        } while (uVar4 != 0);
+      }
+      (**(code **)(*g_primaryWorkSurface + 0x80))(g_primaryWorkSurface,0);
+      Copy16BitSurfaceRect(0,local_10,g_primaryWorkSurface,&local_14,0x10);
+    }
+    DAT_00494fc8 = DAT_00494fc8 + 2;
+    return;
+  }
+  DAT_00494fc0 = 0;
+  return;
+}
+
+
+
+============================================================
+FUNCTION: 00411a70 RenderFrontendFadeOutEffect
+============================================================
+
+void RenderFrontendFadeOutEffect(void)
+
+{
+  uint uVar1;
+  uint uVar2;
+  int iVar3;
+  undefined4 uVar4;
+  int iVar5;
+  ushort uVar6;
+  ushort uVar7;
+  uint uVar8;
+  uint *puVar9;
+  undefined4 *puVar10;
+  undefined4 local_9c [9];
+  int local_78;
+  uint local_20;
+  uint *local_1c;
+  int local_18;
+  int local_14;
+  int local_10;
+  uint local_c;
+  uint *local_8;
+  
+  local_18 = 0;
+  local_10 = g_frontendCanvasW;
+  if (DAT_00494fc8 < 0x40) {
+    uVar8 = 0;
+  }
+  else {
+    uVar8 = DAT_00494fc8 - 0x40;
+  }
+  uVar2 = DAT_00494fc8;
+  if (g_frontendCanvasH < DAT_00494fc8) {
+    uVar2 = g_frontendCanvasH;
+  }
+  if (g_frontendCanvasH < uVar8) {
+    DAT_00494fc0 = 0;
+    return;
+  }
+  if (uVar8 < 2) {
+    local_14 = 0;
+  }
+  else {
+    local_14 = uVar8 - 2;
+  }
+  local_c = uVar8 + 0x40;
+  if ((int)g_frontendCanvasH < (int)local_c) {
+    local_c = g_frontendCanvasH;
+  }
+  local_20 = (uVar2 - uVar8) * g_frontendCanvasW >> 1;
+  if (local_20 != 0) {
+    puVar10 = local_9c;
+    for (iVar5 = 0x1f; iVar5 != 0; iVar5 = iVar5 + -1) {
+      *puVar10 = 0;
+      puVar10 = puVar10 + 1;
+    }
+    local_9c[0] = 0x7c;
+    iVar3 = (**(code **)(*g_primaryWorkSurface + 100))(g_primaryWorkSurface,0,local_9c,1,0);
+    iVar5 = local_78;
+    if (iVar3 != 0) {
+      uVar4 = DXErrorToString(iVar3);
+      Msg(s_Lock_1__failed_in_SNK_BarFadeToI_00464180,uVar4);
+      return;
+    }
+    puVar10 = local_9c;
+    for (iVar3 = 0x1f; iVar3 != 0; iVar3 = iVar3 + -1) {
+      *puVar10 = 0;
+      puVar10 = puVar10 + 1;
+    }
+    local_9c[0] = 0x7c;
+    iVar3 = (**(code **)(*g_secondaryWorkSurface + 100))(g_secondaryWorkSurface,0,local_9c,1,0);
+    if (iVar3 != 0) {
+      uVar4 = DXErrorToString(iVar3);
+      Msg(s_Lock_2__failed_in_SNK_BarFadeToI_00464154,uVar4);
+      return;
+    }
+    iVar3 = g_frontendCanvasW * uVar8 * 2;
+    local_1c = (uint *)(iVar5 + iVar3);
+    local_8 = (uint *)(iVar3 + local_78);
+    uVar8 = local_20;
+    puVar9 = local_1c;
+    if (DAT_0049525c == 0x10) {
+      do {
+        uVar2 = *puVar9;
+        uVar1 = *local_8;
+        local_8 = local_8 + 1;
+        uVar6 = CONCAT11((char)(uVar2 >> 6),(&DAT_00494bc0)[(uVar1 & 0x1f) << 5 | uVar2 & 0x1f]) &
+                0x1fff;
+        iVar5 = (uVar1 >> 6 & 0x1f) << 5;
+        uVar7 = CONCAT11((char)(uVar2 >> 0x16),
+                         (&DAT_00494bc0)[(uVar1 >> 0x10 & 0x1f) << 5 | uVar2 >> 0x10 & 0x1f]) &
+                0x1fff;
+        iVar3 = (uVar1 >> 0x16 & 0x1f) << 5;
+        *puVar9 = ((uint)(byte)(&DAT_00494bc0)[(uVar1 >> 0x1b) << 5 | uVar2 >> 0x1b] << 0xb |
+                  uVar7 & 0x1f |
+                  ((byte)(&DAT_00494bc0)
+                         [CONCAT31((int3)((uint)iVar3 >> 8),(byte)iVar3 | (byte)(uVar7 >> 8))] &
+                  0x1f) << 6) << 0x10 |
+                  uVar6 & 0x1f |
+                  ((byte)(&DAT_00494bc0)
+                         [CONCAT31((int3)((uint)iVar5 >> 8),(byte)iVar5 | (byte)(uVar6 >> 8))] &
+                  0x1f) << 6 |
+                  (uint)(byte)(&DAT_00494bc0)[(uVar1 >> 0xb & 0x1f) << 5 | uVar2 >> 0xb & 0x1f] <<
+                  0xb;
+        uVar8 = uVar8 - 1;
+        puVar9 = puVar9 + 1;
+      } while (uVar8 != 0);
+    }
+    uVar8 = local_20;
+    puVar9 = local_1c;
+    if (DAT_0049525c == 0xf) {
+      do {
+        uVar2 = *puVar9;
+        uVar1 = *local_8;
+        local_8 = local_8 + 1;
+        uVar6 = CONCAT11((char)(uVar2 >> 5),(&DAT_00494bc0)[(uVar1 & 0x1f) << 5 | uVar2 & 0x1f]) &
+                0x1fff;
+        iVar5 = (uVar1 >> 5 & 0x1f) << 5;
+        uVar7 = CONCAT11((char)(uVar2 >> 0x15),
+                         (&DAT_00494bc0)[(uVar1 >> 0x10 & 0x1f) << 5 | uVar2 >> 0x10 & 0x1f]) &
+                0x1fff;
+        iVar3 = (uVar1 >> 0x15 & 0x1f) << 5;
+        *puVar9 = ((uint)(byte)(&DAT_00494bc0)[(uVar1 >> 0x1a & 0x1f) << 5 | uVar2 >> 0x1a & 0x1f]
+                   << 10 | uVar7 & 0x1f |
+                           ((byte)(&DAT_00494bc0)
+                                  [CONCAT31((int3)((uint)iVar3 >> 8),
+                                            (byte)iVar3 | (byte)(uVar7 >> 8))] & 0x1f) << 5) << 0x10
+                  | uVar6 & 0x1f |
+                    ((byte)(&DAT_00494bc0)
+                           [CONCAT31((int3)((uint)iVar5 >> 8),(byte)iVar5 | (byte)(uVar6 >> 8))] &
+                    0x1f) << 5 |
+                    (uint)(byte)(&DAT_00494bc0)[(uVar1 >> 10 & 0x1f) << 5 | uVar2 >> 10 & 0x1f] <<
+                    10;
+        uVar8 = uVar8 - 1;
+        puVar9 = puVar9 + 1;
+      } while (uVar8 != 0);
+    }
+    (**(code **)(*g_secondaryWorkSurface + 0x80))(g_secondaryWorkSurface,0);
+    (**(code **)(*g_primaryWorkSurface + 0x80))(g_primaryWorkSurface,0);
+    Copy16BitSurfaceRect(0,local_14,g_primaryWorkSurface,&local_18,0x10);
+  }
+  DAT_00494fc8 = DAT_00494fc8 + 2;
+  return;
+}
+
+
+
+============================================================
+FUNCTION: 00412d50 MeasureOrDrawFrontendFontString
+============================================================
+
+int __cdecl
+MeasureOrDrawFrontendFontString(byte *param_1,uint param_2,undefined4 param_3,int *param_4)
+
+{
+  uint uVar1;
+  byte bVar2;
+  uint uVar3;
+  uint uVar4;
+  int local_10;
+  int local_c;
+  int local_8;
+  int local_4;
+  
+  if (param_1 == (byte *)0x0) {
+    return 0;
+  }
+  bVar2 = *param_1;
+  uVar4 = param_2;
+  uVar1 = param_2;
+  while (bVar2 != 0) {
+    uVar3 = (uint)bVar2;
+    uVar4 = uVar3 - 0x20;
+    local_c = (uVar4 / 7) * 0x24;
+    local_4 = local_c + 0x24;
+    local_10 = (uVar4 % 7) * 0x24;
+    local_8 = (char)(&g_largeFontAdvance)[uVar3] + local_10;
+    param_1 = param_1 + 1;
+    if (param_4 != (int *)0x0) {
+      (**(code **)(*param_4 + 0x1c))(param_4,uVar1,param_3,g_menuFontSurface,&local_10,0x11);
+    }
+    uVar1 = (char)(&g_largeFontAdvance)[uVar3] + -1 + uVar1;
+    bVar2 = *param_1;
+  }
+  return ((uVar1 - (int)(char)(&g_largeFontDisplay)[uVar4]) - param_2) + 0x24;
+}
+
+
+
+============================================================
+FUNCTION: 00419b30 RenderFrontendSessionBrowser
+============================================================
+
+/* Frontend session-browser redraw. Uses dpu_exref session rows of size 0x84 starting at +0x164:
+   session name at +0x164, secondary text at +0x1a0, player-count pair at +0x1dc/+0x1e0, and
+   game-type index at +0x1e4. */
+
+void RenderFrontendSessionBrowser(void)
+
+{
+  int iVar1;
+  int iVar2;
+  int iVar3;
+  uint uVar4;
+  code *pcVar5;
+  int iVar6;
+  int iVar7;
+  int iVar8;
+  undefined1 local_8 [8];
+  
+  if ((DAT_0049730c & 1) == 0) {
+    iVar1 = 0x9c;
+    iVar7 = 0x9c;
+    uVar4 = 0x392152;
+  }
+  else {
+    iVar1 = 0x1c;
+    iVar7 = 0x1c;
+    uVar4 = 0;
+  }
+  BltColorFillToSurface(uVar4,0x20,iVar7,0x1b0,0x5e,DAT_00497314);
+  iVar7 = *(int *)(dpu_exref + 0xbfc) + 1;
+  if (3 < iVar7) {
+    iVar7 = 4;
+  }
+  iVar3 = 0;
+  if (0 < iVar7) {
+    iVar2 = iVar1 + 0x10;
+    do {
+      uVar4 = 0xa0;
+      g_smallFontSurface = g_smallTextSurface;
+      if (DAT_00497038 + iVar3 == 0) {
+        iVar6 = 0x20;
+        pcVar5 = SNK_NewSessionTxt_exref;
+        iVar8 = iVar1 + 0x10;
+      }
+      else {
+        DrawFrontendClippedStringToSurface
+                  ((byte *)(dpu_exref + (DAT_00497038 + iVar3) * 0x84 + 0x164),0x20,iVar2,
+                   DAT_00497314,0xa0);
+        DrawFrontendClippedStringToSurface
+                  ((byte *)(dpu_exref + (DAT_00497038 + iVar3) * 0x84 + 0x1a0),0xc6,iVar2,
+                   DAT_00497314,0xa0);
+        DrawFrontendClippedStringToSurface
+                  ((byte *)(SNK_GameTypeTxt_exref +
+                           *(int *)(dpu_exref + (DAT_00497038 + iVar3) * 0x84 + 0x1e4) * 0x10),0x16c
+                   ,iVar2,DAT_00497314,0x3c);
+        sprintf_game(local_8,(byte *)s__d__d_00465f94);
+        uVar4 = 0x24;
+        iVar6 = 0x1b2;
+        pcVar5 = (code *)local_8;
+        iVar8 = iVar2;
+      }
+      DrawFrontendClippedStringToSurface((byte *)pcVar5,iVar6,iVar8,DAT_00497314,uVar4);
+      iVar3 = iVar3 + 1;
+      iVar2 = iVar2 + 0x10;
+    } while (iVar3 < iVar7);
+  }
+  NoOpHookStub();
+  DAT_0049730c = DAT_0049730c + 1;
+  *(undefined4 *)(dpu_exref + 0xc04) = 0;
+  return;
+}
+
+
+
+============================================================
+FUNCTION: 0041a530 RenderFrontendCreateSessionNameInput
+============================================================
+
+/* Frontend text-entry renderer for the create-session flow. Enables DXInput ANSI mode only while
+   the name field is active, calls GetString on the shared tagSTRINGSTRUCT at DAT_004969c0, redraws
+   the clipped text, and blinks a caret based on the measured glyph width. */
+
+void RenderFrontendCreateSessionNameInput(void)
+
+{
+  byte bVar1;
+  byte *pbVar2;
+  int iVar3;
+  uint uVar4;
+  int iVar5;
+  
+  if (g_frontendButtonIndex == 0) {
+    DXInput::SetAnsi(1);
+    DXInput::GetString((tagSTRINGSTRUCT *)&DAT_004969c0);
+  }
+  else {
+    DXInput::SetAnsi(0);
+  }
+  if ((DAT_0049730c & 1) == 0) {
+    iVar5 = 0x68;
+    iVar3 = 0x5c;
+    uVar4 = 0x392152;
+  }
+  else {
+    iVar5 = 0x28;
+    iVar3 = 0x1c;
+    uVar4 = 0;
+  }
+  BltColorFillToSurface(uVar4,0x14,iVar5,0x198,0x10,DAT_00497314);
+  g_smallFontSurface = g_smallTextSurface;
+  DrawFrontendClippedStringToSurface(DAT_004969c0,0x14,iVar3 + 0xc,DAT_00497314,0x198);
+  if (((g_frontendButtonIndex == 0) && ((g_frontendAnimFrameCounter & 0x20) == 0)) &&
+     (DAT_004969d0 != 2)) {
+    uVar4 = 0;
+    pbVar2 = DAT_004969c0;
+    iVar5 = DAT_004969cc;
+    if (DAT_004969cc != 0) {
+      do {
+        bVar1 = *pbVar2;
+        if (bVar1 != 0) {
+          pbVar2 = pbVar2 + 1;
+          uVar4 = uVar4 + (int)(char)(&g_smallFontDisplay)[(char)(bVar1 - 0x20)];
+        }
+        iVar5 = iVar5 + -1;
+      } while (iVar5 != 0);
+      if (0x195 < uVar4) goto LAB_0041a63d;
+    }
+    BltColorFillToSurface(0xff00,uVar4 + 0x14,iVar3 + 0xc,2,0x10,DAT_00497314);
+  }
+LAB_0041a63d:
+  if (DAT_004969d0 != 0) {
+    DXSound::Play(3);
+    g_frontendAnimFrameCounter = 0;
+  }
+  NoOpHookStub();
+  DAT_0049730c = DAT_0049730c + 1;
+  return;
+}
+
+
+
+============================================================
+FUNCTION: 0041a670 RenderFrontendLobbyChatInput
+============================================================
+
+/* Frontend live text-entry renderer used by the network lobby message/status line. It uses the same
+   DXInput ANSI queue and shared tagSTRINGSTRUCT editor block at DAT_004969c0 as the create-session
+   flow, but targets the lobby input surface and width limits. */
+
+void RenderFrontendLobbyChatInput(void)
+
+{
+  byte bVar1;
+  byte *pbVar2;
+  int iVar3;
+  uint uVar4;
+  int iVar5;
+  
+  if (g_frontendButtonIndex == 0) {
+    DXInput::SetAnsi(1);
+    DXInput::GetString((tagSTRINGSTRUCT *)&DAT_004969c0);
+  }
+  else {
+    DXInput::SetAnsi(0);
+  }
+  if ((DAT_0049730c & 1) == 0) {
+    iVar5 = 0x1c;
+    iVar3 = 0x18;
+    uVar4 = 0x392152;
+  }
+  else {
+    iVar5 = 4;
+    iVar3 = 0;
+    uVar4 = 0;
+  }
+  BltColorFillToSurface(uVar4,0x18,iVar5,0x1a0,0x10,DAT_00497318);
+  g_smallFontSurface = g_smallTextSurface;
+  DrawFrontendClippedStringToSurface(DAT_004969c0,0x18,iVar3 + 4,DAT_00497318,0x1a0);
+  if (((g_frontendButtonIndex == 0) && ((g_frontendAnimFrameCounter & 0x20) == 0)) &&
+     (DAT_004969d0 != 2)) {
+    uVar4 = 0;
+    pbVar2 = DAT_004969c0;
+    iVar5 = DAT_004969cc;
+    if (DAT_004969cc != 0) {
+      do {
+        bVar1 = *pbVar2;
+        if (bVar1 != 0) {
+          pbVar2 = pbVar2 + 1;
+          uVar4 = uVar4 + (int)(char)(&g_smallFontDisplay)[(char)(bVar1 - 0x20)];
+        }
+        iVar5 = iVar5 + -1;
+      } while (iVar5 != 0);
+      if (0x19d < uVar4) goto LAB_0041a778;
+    }
+    BltColorFillToSurface(0xff00,uVar4 + 0x18,iVar3 + 4,2,0x10,DAT_00497318);
+  }
+LAB_0041a778:
+  if (DAT_004969d0 != 0) {
+    DXSound::Play(3);
+    g_frontendAnimFrameCounter = 0;
+  }
+  NoOpHookStub();
+  DAT_0049730c = DAT_0049730c + 1;
+  return;
+}
+
+
+
+============================================================
+FUNCTION: 0041b420 RenderFrontendLobbyStatusPanel
+============================================================
+
+/* Frontend multiplayer status panel redraw. Uses dpu_exref + 0xa64 as 0x3c-byte player-name rows,
+   dpu_exref + 0xbcc as per-slot active/local flags, dpu_exref + 0xbe4 as highlighted host slot,
+   dpu_exref + 0xbe8 as local slot, and dpu_exref + 0xa28 as the current session name/header string.
+    */
+
+void RenderFrontendLobbyStatusPanel(void)
+
+{
+  code *pcVar1;
+  int iVar2;
+  int iVar3;
+  uint uVar4;
+  int *piVar5;
+  
+  BltColorFillToSurface(0,0x10,0x1c,0xc0,0x60,DAT_0049731c);
+  piVar5 = &DAT_00496980;
+  iVar3 = 0;
+  iVar2 = 0;
+  uVar4 = 0x1c;
+  pcVar1 = dpu_exref;
+  do {
+    if (*(int *)((int)(piVar5 + -0x12576d) + (int)pcVar1) != 0) {
+      if (iVar3 == *(int *)(pcVar1 + 0xbe4)) {
+        g_smallFontSurface = g_smallTextbSurface;
+      }
+      else {
+        g_smallFontSurface = g_smallTextSurface;
+      }
+      DrawFrontendClippedStringToSurface
+                ((byte *)(pcVar1 + iVar2 + 0xa64),0x10,uVar4,DAT_0049731c,0x96);
+      DrawFrontendClippedStringToSurface
+                ((byte *)(SNK_NetPlayStatMsg_exref + *piVar5 * 10),0xae,uVar4,DAT_0049731c,0x22);
+      pcVar1 = dpu_exref;
+    }
+    uVar4 = uVar4 + 0x10;
+    iVar3 = iVar3 + 1;
+    iVar2 = iVar2 + 0x3c;
+    piVar5 = piVar5 + 1;
+  } while (uVar4 < 0x7c);
+  BltColorFillToSurface(0,0,0,0x1e0,0x20,DAT_00497310);
+  g_smallFontSurface = g_smallTextbSurface;
+  DrawFrontendSmallFontStringToSurface((byte *)SNK_TxtSession_exref,0,3,DAT_00497310);
+  DrawFrontendSmallFontStringToSurface((byte *)SNK_TxtPlayer_exref,0,0x10,DAT_00497310);
+  g_smallFontSurface = g_smallTextSurface;
+  if (*(int *)(dpu_exref + 0xbe4) == *(int *)(dpu_exref + 0xbe8)) {
+    iVar2 = DrawFrontendClippedStringToSurface
+                      ((byte *)(dpu_exref + *(int *)(dpu_exref + 0xbe8) * 0x3c + 0xa64),0x60,0x10,
+                       DAT_00497310,0x138);
+    g_smallFontSurface = g_smallTextbSurface;
+    DrawFrontendSmallFontStringToSurface((byte *)SNK_TxtBhostB_exref,iVar2 + 0x68,0x10,DAT_00497310)
+    ;
+    g_smallFontSurface = g_smallTextSurface;
+  }
+  else {
+    DrawFrontendClippedStringToSurface
+              ((byte *)(dpu_exref + *(int *)(dpu_exref + 0xbe8) * 0x3c + 0xa64),0x60,0x10,
+               DAT_00497310,0x180);
+  }
+  DrawFrontendClippedStringToSurface((byte *)(dpu_exref + 0xa28),0x60,3,DAT_00497310,0x180);
+  return;
+}
+
+
+
+============================================================
+FUNCTION: 0041bd00 RenderFrontendLobbyChatPanel
+============================================================
+
+/* WARNING: Type propagation algorithm not settling */
+
+void RenderFrontendLobbyChatPanel(void)
+
+{
+  undefined4 uVar1;
+  int iVar2;
+  int iVar3;
+  uint uVar4;
+  byte *pbVar5;
+  byte *pbVar6;
+  int iVar7;
+  undefined4 *puVar8;
+  byte *pbVar9;
+  byte *pbVar10;
+  undefined4 local_124 [4];
+  byte *local_114;
+  int local_100;
+  undefined4 local_a8 [4];
+  byte *local_98;
+  int local_84;
+  byte *local_2c;
+  int local_28;
+  uint local_24;
+  uint local_20;
+  byte *local_1c;
+  byte *local_18;
+  byte *local_14;
+  byte *local_10;
+  int local_c;
+  undefined2 local_8;
+  undefined1 local_6;
+  
+  local_8 = DAT_00465fc0;
+  iVar7 = 0;
+  local_6 = DAT_00465fc2;
+  if (DAT_0049640c != 0) {
+    DAT_0049640c = 0;
+    BltColorFillToSurface(0,0x18,0x1a,0x1d0,0x60,DAT_00497314);
+    local_20 = DAT_00496408;
+    if (5 < DAT_00496408) {
+      local_20 = 6;
+    }
+    if (0 < (int)local_20) {
+      local_10 = (byte *)((int)&DAT_00496410 + 1);
+      do {
+        pbVar6 = local_10;
+        if (iVar7 == 6) {
+          puVar8 = local_a8;
+          for (iVar7 = 0x1f; iVar7 != 0; iVar7 = iVar7 + -1) {
+            *puVar8 = 0;
+            puVar8 = puVar8 + 1;
+          }
+          local_a8[0] = 0x7c;
+          local_c = 5;
+          iVar7 = (**(code **)(*DAT_00497314 + 100))(DAT_00497314,0,local_a8,1,0);
+          if (iVar7 == 0) {
+            local_14 = local_98;
+            local_18 = (byte *)(local_84 + 0x30 +
+                               ((int)(local_98 + ((int)local_98 >> 0x1f & 3)) >> 2) * 0x68);
+            local_1c = (byte *)(local_84 + 0x30 +
+                               ((int)(local_98 + ((int)local_98 >> 0x1f & 3)) >> 2) * 0xa8);
+            iVar7 = 0x50;
+            pbVar6 = local_1c;
+            pbVar10 = local_18;
+            do {
+              pbVar5 = pbVar6;
+              pbVar9 = pbVar10;
+              for (iVar2 = 0xe8; iVar2 != 0; iVar2 = iVar2 + -1) {
+                *(undefined4 *)pbVar9 = *(undefined4 *)pbVar5;
+                pbVar5 = pbVar5 + 4;
+                pbVar9 = pbVar9 + 4;
+              }
+              pbVar10 = pbVar10 + (int)local_98;
+              pbVar6 = pbVar6 + (int)local_98;
+              iVar7 = iVar7 + -1;
+            } while (iVar7 != 0);
+            (**(code **)(*DAT_00497314 + 0x80))(DAT_00497314,0);
+            BltColorFillToSurface(0,0x18,0x6a,0x1d0,0x10,DAT_00497314);
+            pbVar6 = local_10;
+            iVar7 = local_c;
+          }
+          else {
+            uVar1 = DXErrorToString(iVar7);
+            Msg(s_Lock_failed_in_SNK_ScrollChat____00465f9c,uVar1);
+            iVar7 = local_c;
+          }
+        }
+        if ((char)pbVar6[-1] < '\x06') {
+          g_smallFontSurface = g_smallTextSurface;
+          iVar3 = iVar7 * 0x10 + 0x1a;
+          iVar2 = DrawFrontendClippedStringToSurface
+                            ((byte *)(dpu_exref + (char)pbVar6[-1] * 0x3c + 0xa64),0x18,iVar3,
+                             DAT_00497314,0x96);
+          iVar3 = DrawFrontendClippedStringToSurface
+                            ((byte *)&local_8,iVar2 + 0x18,iVar3,DAT_00497314,0x18);
+          iVar2 = iVar2 + iVar3;
+          pbVar6 = local_10;
+        }
+        else {
+          g_smallFontSurface = g_smallTextbSurface;
+          iVar2 = 0;
+        }
+        local_14 = pbVar6;
+        if (*pbVar6 == 0) {
+          iVar7 = iVar7 + 1;
+          local_10 = pbVar6;
+        }
+        else {
+          uVar4 = 0x1d0 - iVar2;
+          local_28 = iVar2 + 0x18;
+          local_24 = uVar4;
+          do {
+            if (iVar7 == 6) {
+              puVar8 = local_124;
+              for (iVar7 = 0x1f; iVar7 != 0; iVar7 = iVar7 + -1) {
+                *puVar8 = 0;
+                puVar8 = puVar8 + 1;
+              }
+              local_124[0] = 0x7c;
+              local_c = 5;
+              iVar7 = (**(code **)(*DAT_00497314 + 100))(DAT_00497314,0,local_124,1,0);
+              if (iVar7 == 0) {
+                local_1c = local_114;
+                local_18 = (byte *)(local_100 + 0x30 +
+                                   ((int)(local_114 + ((int)local_114 >> 0x1f & 3)) >> 2) * 0x68);
+                local_2c = (byte *)(local_100 + 0x30 +
+                                   ((int)(local_114 + ((int)local_114 >> 0x1f & 3)) >> 2) * 0xa8);
+                iVar7 = 0x50;
+                pbVar6 = local_2c;
+                pbVar10 = local_18;
+                do {
+                  pbVar5 = pbVar6;
+                  pbVar9 = pbVar10;
+                  for (iVar2 = 0xe8; iVar2 != 0; iVar2 = iVar2 + -1) {
+                    *(undefined4 *)pbVar9 = *(undefined4 *)pbVar5;
+                    pbVar5 = pbVar5 + 4;
+                    pbVar9 = pbVar9 + 4;
+                  }
+                  pbVar10 = pbVar10 + (int)local_114;
+                  pbVar6 = pbVar6 + (int)local_114;
+                  iVar7 = iVar7 + -1;
+                } while (iVar7 != 0);
+                (**(code **)(*DAT_00497314 + 0x80))(DAT_00497314,0);
+                BltColorFillToSurface(0,0x18,0x6a,0x1d0,0x10,DAT_00497314);
+                uVar4 = local_24;
+                iVar7 = local_c;
+              }
+              else {
+                uVar1 = DXErrorToString(iVar7);
+                Msg(s_Lock_failed_in_SNK_ScrollChat____00465f9c,uVar1);
+                iVar7 = local_c;
+              }
+            }
+            local_14 = DrawFrontendWrappedStringLine
+                                 (local_14,local_28,iVar7 * 0x10 + 0x1a,DAT_00497314,uVar4);
+            iVar7 = iVar7 + 1;
+          } while (*local_14 != 0);
+        }
+        local_10 = local_10 + 0xc4;
+        local_20 = local_20 - 1;
+      } while (local_20 != 0);
+    }
+  }
+  return;
+}
+
+
+
+============================================================
+FUNCTION: 00424110 DrawFrontendFontStringPrimary
+============================================================
+
+/* Draws a frontend string onto the primary work surface using the 12x12 frontend font atlas in
+   DAT_0049626c. */
+
+int __cdecl DrawFrontendFontStringPrimary(byte *param_1,uint param_2,int param_3)
+
+{
+  byte bVar1;
+  uint uVar2;
+  uint uVar3;
+  int local_10;
+  int local_c;
+  int local_8;
+  int local_4;
+  
+  if (param_1 == (byte *)0x0) {
+    return 0;
+  }
+  bVar1 = *param_1;
+  uVar3 = param_2;
+  uVar2 = param_2;
+  while (bVar1 != 0) {
+    uVar3 = bVar1 - 0x20;
+    local_10 = (uVar3 % 0x15) * 0xc;
+    local_c = (uVar3 / 0x15) * 0xc;
+    local_8 = local_10 + 0xc;
+    local_4 = local_c + 0xc;
+    param_1 = param_1 + 1;
+    (**(code **)(*g_primaryWorkSurface + 0x1c))
+              (g_primaryWorkSurface,uVar2,param_3 + 8,g_bodyTextFontSurface,&local_10,0x11);
+    uVar2 = uVar2 + (int)(char)(&g_smallFontAdvance)[bVar1];
+    bVar1 = *param_1;
+  }
+  return ((uVar2 - (int)(char)(&g_smallFontDisplay)[uVar3]) - param_2) + 0x18;
+}
+
+
+
+============================================================
+FUNCTION: 004241e0 DrawFrontendFontStringSecondary
+============================================================
+
+/* Draws a frontend string onto the secondary work surface using the 12x12 frontend font atlas in
+   DAT_0049626c. */
+
+int __cdecl DrawFrontendFontStringSecondary(byte *param_1,uint param_2,int param_3)
+
+{
+  byte bVar1;
+  uint uVar2;
+  uint uVar3;
+  int local_10;
+  int local_c;
+  int local_8;
+  int local_4;
+  
+  if (param_1 == (byte *)0x0) {
+    return 0;
+  }
+  bVar1 = *param_1;
+  uVar3 = param_2;
+  uVar2 = param_2;
+  while (bVar1 != 0) {
+    uVar3 = bVar1 - 0x20;
+    local_10 = (uVar3 % 0x15) * 0xc;
+    local_c = (uVar3 / 0x15) * 0xc;
+    local_8 = local_10 + 0xc;
+    local_4 = local_c + 0xc;
+    param_1 = param_1 + 1;
+    (**(code **)(*g_secondaryWorkSurface + 0x1c))
+              (g_secondaryWorkSurface,uVar2,param_3 + 8,g_bodyTextFontSurface,&local_10,0x11);
+    uVar2 = uVar2 + (int)(char)(&g_smallFontAdvance)[bVar1];
+    bVar1 = *param_1;
+  }
+  return ((uVar2 - (int)(char)(&g_smallFontDisplay)[uVar3]) - param_2) + 0x18;
+}
+
+
+
+============================================================
+FUNCTION: 004242b0 DrawFrontendLocalizedStringPrimary
+============================================================
+
+/* Draws a localized frontend string onto the primary work surface. Uses an alternate 24x24 glyph
+   layout when the language DLL selects the wide-font mode. */
+
+int __cdecl DrawFrontendLocalizedStringPrimary(byte *param_1,uint param_2,int param_3)
+
+{
+  byte bVar1;
+  int iVar2;
+  uint uVar3;
+  byte *pbVar4;
+  int local_10;
+  int local_c;
+  int local_8;
+  int local_4;
+  
+  if (SNK_LangDLL_exref[8] != (code)0x30) {
+    iVar2 = DrawFrontendFontStringPrimary(param_1,param_2,param_3);
+    return iVar2;
+  }
+  if (param_1 == (byte *)0x0) {
+    return 0;
+  }
+  bVar1 = *param_1;
+  pbVar4 = param_1;
+  uVar3 = param_2;
+  while (bVar1 != 0) {
+    param_1 = (byte *)(bVar1 - 0x20);
+    local_10 = ((uint)param_1 % 10) * 0x18;
+    local_c = ((uint)param_1 / 10) * 0x18;
+    local_8 = local_10 + 0x18;
+    local_4 = local_c + 0x18;
+    pbVar4 = pbVar4 + 1;
+    (**(code **)(*g_primaryWorkSurface + 0x1c))
+              (g_primaryWorkSurface,uVar3,param_3,g_bodyTextFontSurface,&local_10,0x11);
+    uVar3 = uVar3 + (int)*(char *)((int)&PTR_DAT_004660c8 + (uint)bVar1);
+    bVar1 = *pbVar4;
+  }
+  return ((uVar3 - (int)(char)param_1[0x4660e8]) - param_2) + 0x18;
+}
+
+
+
+============================================================
+FUNCTION: 00424390 DrawFrontendLocalizedStringSecondary
+============================================================
+
+/* Draws a localized frontend string onto the secondary work surface. Uses an alternate 24x24 glyph
+   layout when the language DLL selects the wide-font mode. */
+
+int __cdecl DrawFrontendLocalizedStringSecondary(byte *param_1,uint param_2,int param_3)
+
+{
+  byte bVar1;
+  int iVar2;
+  uint uVar3;
+  byte *pbVar4;
+  int local_10;
+  int local_c;
+  int local_8;
+  int local_4;
+  
+  if (SNK_LangDLL_exref[8] != (code)0x30) {
+    iVar2 = DrawFrontendFontStringSecondary(param_1,param_2,param_3);
+    return iVar2;
+  }
+  if (param_1 == (byte *)0x0) {
+    return 0;
+  }
+  bVar1 = *param_1;
+  pbVar4 = param_1;
+  uVar3 = param_2;
+  while (bVar1 != 0) {
+    param_1 = (byte *)(bVar1 - 0x20);
+    local_10 = ((uint)param_1 % 10) * 0x18;
+    local_c = ((uint)param_1 / 10) * 0x18;
+    local_8 = local_10 + 0x18;
+    local_4 = local_c + 0x18;
+    pbVar4 = pbVar4 + 1;
+    (**(code **)(*g_secondaryWorkSurface + 0x1c))
+              (g_secondaryWorkSurface,uVar3,param_3,g_bodyTextFontSurface,&local_10,0x11);
+    uVar3 = uVar3 + (int)*(char *)((int)&PTR_DAT_004660c8 + (uint)bVar1);
+    bVar1 = *pbVar4;
+  }
+  return ((uVar3 - (int)(char)param_1[0x4660e8]) - param_2) + 0x18;
+}
+
+
+
+============================================================
+FUNCTION: 00424470 DrawFrontendFontStringToSurface
+============================================================
+
+/* Draws a frontend font string to an arbitrary destination surface, applying per-character vertical
+   offsets from DAT_004663e4. */
+
+int __cdecl DrawFrontendFontStringToSurface(byte *param_1,int param_2,int param_3,int *param_4)
+
+{
+  byte bVar1;
+  int iVar2;
+  uint uVar3;
+  uint uVar4;
+  int local_10;
+  int local_c;
+  int local_8;
+  int local_4;
+  
+  if (param_1 == (byte *)0x0) {
+    return 0;
+  }
+  bVar1 = *param_1;
+  uVar4 = param_3 + 8U;
+  iVar2 = param_2;
+  while (bVar1 != 0) {
+    uVar3 = (uint)bVar1;
+    uVar4 = uVar3 - 0x20;
+    local_10 = (uVar4 % 0x15) * 0xc;
+    local_8 = local_10 + 0xc;
+    local_c = (uVar4 / 0x15) * 0xc;
+    local_4 = local_c + 0xc;
+    param_1 = param_1 + 1;
+    (**(code **)(*param_4 + 0x1c))
+              (param_4,iVar2,(int)(char)(&g_smallFontYOffset)[uVar3] + param_3 + 8U,
+               g_bodyTextFontSurface,&local_10,0x11);
+    iVar2 = iVar2 + (char)(&g_smallFontAdvance)[uVar3];
+    bVar1 = *param_1;
+  }
+  return ((iVar2 - (char)(&g_smallFontDisplay)[uVar4]) - param_2) + 0xc;
+}
+
+
+
+============================================================
+FUNCTION: 00424560 DrawFrontendLocalizedStringToSurface
+============================================================
+
+int __cdecl DrawFrontendLocalizedStringToSurface(byte *param_1,int param_2,int param_3,int *param_4)
+
+{
+  byte bVar1;
+  int iVar2;
+  uint uVar3;
+  byte *pbVar4;
+  int local_10;
+  int local_c;
+  int local_8;
+  int local_4;
+  
+  if (SNK_LangDLL_exref[8] != (code)0x30) {
+    iVar2 = DrawFrontendFontStringToSurface(param_1,param_2,param_3,param_4);
+    return iVar2;
+  }
+  if (param_1 == (byte *)0x0) {
+    return 0;
+  }
+  bVar1 = *param_1;
+  pbVar4 = param_1;
+  iVar2 = param_2;
+  while (bVar1 != 0) {
+    uVar3 = (uint)bVar1;
+    param_1 = (byte *)(uVar3 - 0x20);
+    local_c = ((uint)param_1 / 10) * 0x18;
+    local_4 = local_c + 0x18;
+    local_10 = ((uint)param_1 % 10) * 0x18;
+    pbVar4 = pbVar4 + 1;
+    local_8 = (int)*(char *)((int)&PTR_DAT_004660c8 + uVar3);
+    if ('\x17' < *(char *)((int)&PTR_DAT_004660c8 + uVar3)) {
+      local_8 = 0x18;
+    }
+    local_8 = local_8 + local_10;
+    (**(code **)(*param_4 + 0x1c))(param_4,iVar2,param_3,g_bodyTextFontSurface,&local_10,0x11);
+    iVar2 = iVar2 + *(char *)((int)&PTR_DAT_004660c8 + uVar3);
+    bVar1 = *pbVar4;
+  }
+  return ((iVar2 - (char)param_1[0x4660e8]) - param_2) + 0x18;
+}
+
+
+
+============================================================
+FUNCTION: 00424660 DrawFrontendSmallFontStringToSurface
+============================================================
+
+/* Draws a small frontend font string to an arbitrary destination surface using the secondary font
+   atlas DAT_0049627c. */
+
+int __cdecl
+DrawFrontendSmallFontStringToSurface(byte *param_1,uint param_2,int param_3,int *param_4)
+
+{
+  byte bVar1;
+  uint uVar2;
+  uint uVar3;
+  uint uVar4;
+  int local_10;
+  int local_c;
+  int local_8;
+  int local_4;
+  
+  if (param_1 == (byte *)0x0) {
+    return 0;
+  }
+  bVar1 = *param_1;
+  uVar4 = param_2;
+  uVar2 = param_2;
+  while (bVar1 != 0) {
+    uVar3 = (uint)bVar1;
+    uVar4 = uVar3 - 0x20;
+    local_10 = (uVar4 % 0x15) * 0xc;
+    local_8 = local_10 + 0xc;
+    local_c = (uVar4 / 0x15) * 0xc;
+    local_4 = local_c + 0xc;
+    param_1 = param_1 + 1;
+    (**(code **)(*param_4 + 0x1c))
+              (param_4,uVar2,(char)(&g_smallFontYOffset)[uVar3] + param_3,g_smallFontSurface,
+               &local_10,0x11);
+    uVar2 = uVar2 + (int)(char)(&g_smallFontAdvance)[uVar3];
+    bVar1 = *param_1;
+  }
+  return ((uVar2 - (int)(char)(&g_smallFontDisplay)[uVar4]) - param_2) + 0xc;
+}
+
+
+
+============================================================
+FUNCTION: 00424740 DrawFrontendClippedStringToSurface
+============================================================
+
+/* Draws a clipped frontend string to an arbitrary surface. Control codes below 0x20 use
+   DAT_00496288; printable glyphs come from the small-font atlas. */
+
+int __cdecl
+DrawFrontendClippedStringToSurface(byte *param_1,int param_2,int param_3,int *param_4,uint param_5)
+
+{
+  byte bVar1;
+  int iVar2;
+  byte *pbVar3;
+  int iVar4;
+  byte *pbVar5;
+  int local_10;
+  int local_c;
+  uint local_8;
+  int local_4;
+  
+  if (param_1 == (byte *)0x0) {
+    return 0;
+  }
+  bVar1 = *param_1;
+  iVar4 = param_2;
+  pbVar5 = param_1;
+  if (bVar1 == 0) {
+    return 0;
+  }
+  do {
+    pbVar3 = (byte *)(uint)bVar1;
+    if ((int)param_5 < 1) break;
+    param_1 = param_1 + 1;
+    if (pbVar3 < (byte *)0x20) {
+      local_8 = 0xc;
+      if (param_5 < 0xc) {
+        local_8 = param_5;
+      }
+      local_c = ((int)pbVar3 * 3 + -0x4b) * 4;
+      local_4 = local_c + 0xc;
+      local_10 = 0;
+      if (DAT_00496288 != 0) {
+        (**(code **)(*param_4 + 0x1c))(param_4,iVar4,param_3 + 2,DAT_00496288,&local_10,0x11);
+      }
+      iVar4 = iVar4 + 0xc;
+      iVar2 = -0xc;
+      pbVar5 = pbVar3;
+    }
+    else {
+      pbVar5 = pbVar3 + -0x20;
+      local_8 = 0xc;
+      if (param_5 < 0xc) {
+        local_8 = param_5;
+      }
+      local_10 = ((uint)pbVar5 % 0x15) * 0xc;
+      local_8 = local_10 + local_8;
+      local_c = ((uint)pbVar5 / 0x15) * 0xc;
+      local_4 = local_c + 0xc;
+      (**(code **)(*param_4 + 0x1c))
+                (param_4,iVar4,(char)pbVar3[0x4663e4] + param_3,g_smallFontSurface,&local_10,0x11);
+      iVar4 = iVar4 + (char)pbVar3[0x4662d0];
+      iVar2 = -(int)(char)pbVar3[0x4662d0];
+    }
+    param_5 = param_5 + iVar2;
+    bVar1 = *param_1;
+  } while (bVar1 != 0);
+  return ((iVar4 - (char)pbVar5[0x4662f0]) - param_2) + 0xc;
+}
+
+
+
+============================================================
+FUNCTION: 004248e0 DrawFrontendWrappedStringLine
+============================================================
+
+/* Draws as much of the next wrapped frontend text segment as fits within the remaining width budget
+   and returns the next source pointer. */
+
+byte * __cdecl
+DrawFrontendWrappedStringLine(byte *param_1,int param_2,int param_3,int *param_4,uint param_5)
+
+{
+  byte bVar1;
+  int iVar2;
+  uint uVar3;
+  byte *pbVar4;
+  int iVar5;
+  uint uVar6;
+  uint uVar7;
+  byte *pbVar8;
+  byte local_100 [256];
+  
+  if (param_1 == (byte *)0x0) {
+    return (byte *)0x0;
+  }
+  bVar1 = *param_1;
+  uVar6 = param_5;
+  while( true ) {
+    if (bVar1 == 0) {
+      return param_1;
+    }
+    pbVar8 = param_1;
+    if (bVar1 == 0x20) {
+      local_100[0] = bVar1;
+      pbVar8 = param_1 + 1;
+    }
+    uVar3 = (uint)(bVar1 == 0x20);
+    bVar1 = *pbVar8;
+    while ((bVar1 != 0 && (bVar1 != 0x20))) {
+      local_100[uVar3] = bVar1;
+      pbVar4 = pbVar8 + 1;
+      uVar3 = uVar3 + 1;
+      pbVar8 = pbVar8 + 1;
+      bVar1 = *pbVar4;
+    }
+    uVar7 = 0;
+    local_100[uVar3] = 0;
+    pbVar4 = local_100;
+    bVar1 = local_100[0];
+    if (&stack0x00000000 != (undefined1 *)0x100) {
+      while (bVar1 != 0) {
+        bVar1 = *pbVar4;
+        pbVar4 = pbVar4 + 1;
+        if (bVar1 < 0x20) {
+          uVar7 = uVar7 + 0xc;
+        }
+        else {
+          uVar7 = uVar7 + (int)(char)(&g_smallFontAdvance)[bVar1];
+        }
+        bVar1 = *pbVar4;
+      }
+    }
+    if ((int)uVar6 < (int)uVar7) break;
+    DrawFrontendClippedStringToSurface(local_100,param_2,param_3,param_4,uVar7);
+    bVar1 = *pbVar8;
+    param_2 = param_2 + uVar7;
+    uVar6 = uVar6 - uVar7;
+    param_1 = pbVar8;
+  }
+  if ((int)uVar7 <= (int)param_5) {
+    if (*param_1 != 0x20) {
+      return param_1;
+    }
+    return param_1 + 1;
+  }
+  uVar3 = 0;
+  iVar5 = 0;
+  if (0 < (int)uVar6) {
+    iVar2 = -(int)param_1;
+    do {
+      bVar1 = *param_1;
+      iVar5 = iVar5 + 1;
+      param_1[(int)(local_100 + iVar2)] = bVar1;
+      param_1 = param_1 + 1;
+      if ((char)bVar1 < ' ') {
+        uVar3 = uVar3 + 0xc;
+      }
+      else {
+        uVar3 = uVar3 + (int)(char)(&g_smallFontDisplay)[(char)(bVar1 - 0x20)];
+      }
+    } while ((int)uVar3 < (int)uVar6);
+  }
+  if ((int)uVar6 < (int)uVar3) {
+    param_1 = param_1 + -1;
+    iVar5 = iVar5 + -1;
+    uVar3 = uVar6;
+  }
+  local_100[iVar5] = 0;
+  DrawFrontendClippedStringToSurface(local_100,param_2,param_3,param_4,uVar3);
+  return param_1;
+}
+
+
+
+============================================================
+FUNCTION: 00424b80 BlitFrontendCachedRect
+============================================================
+
+/* Copies a rectangular region from the cached frontend background surface into the active frontend
+   target surface. */
+
+void __cdecl BlitFrontendCachedRect(int param_1,int param_2,int param_3,int param_4)
+
+{
+  int local_10;
+  int local_c;
+  int local_8;
+  int local_4;
+  
+  local_8 = param_3 + param_1;
+  local_4 = param_4 + param_2;
+  local_10 = param_1;
+  local_c = param_2;
+  Copy16BitSurfaceRect(param_1,param_2,g_primaryWorkSurface,&local_10,0x10);
+  return;
+}
+
+
+
+============================================================
+FUNCTION: 00425a30 RenderFrontendUiRects
+============================================================
+
+/* Renders queued frontend overlay rectangles, menu item rectangles, and sprite rectangles by
+   iterating their descriptor tables and issuing the shared draw helper for each active entry. */
+
+void RenderFrontendUiRects(void)
+
+{
+  int iVar1;
+  int iVar2;
+  undefined4 *puVar3;
+  int iVar4;
+  
+  if (DAT_00498708 == 1) {
+    iVar4 = 0;
+    puVar3 = &DAT_0049a9a4;
+    do {
+      if ((g_frontendCursorOverlayHidden == 1) || (iVar4 != DAT_0049870c)) {
+        iVar2 = 0;
+      }
+      else {
+        iVar2 = puVar3[-2] - puVar3[-4];
+      }
+      iVar1 = puVar3[-5];
+      if (iVar1 != -1) {
+        QueueFrontendSpriteBlit
+                  (puVar3[-9],puVar3[-8],iVar1,puVar3[-4] + iVar2,puVar3[-3] - iVar1,
+                   puVar3[-2] - puVar3[-4],puVar3[-1],*puVar3,puVar3[1]);
+      }
+      puVar3 = puVar3 + 0xd;
+      iVar4 = iVar4 + 1;
+    } while ((int)puVar3 < 0x49b6a4);
+  }
+  iVar4 = 0;
+  puVar3 = &DAT_00499c9c;
+  do {
+    if ((g_frontendCursorOverlayHidden == 1) || (iVar4 != g_frontendButtonIndex)) {
+      iVar2 = 0;
+    }
+    else {
+      iVar2 = puVar3[-2] - puVar3[-4];
+    }
+    iVar1 = puVar3[-5];
+    if (iVar1 != -1) {
+      QueueFrontendSpriteBlit
+                (puVar3[-9],puVar3[-8],iVar1,puVar3[-4] + iVar2,puVar3[-3] - iVar1,
+                 puVar3[-2] - puVar3[-4],puVar3[-1],*puVar3,puVar3[1]);
+    }
+    puVar3 = puVar3 + 0xd;
+    iVar4 = iVar4 + 1;
+  } while ((int)puVar3 < 0x49a99c);
+  puVar3 = &DAT_00498f64;
+  do {
+    iVar4 = puVar3[-5];
+    if (iVar4 == -1) {
+      DAT_00498f50 = 0xffffffff;
+      return;
+    }
+    QueueFrontendSpriteBlit
+              (puVar3[-9],puVar3[-8],iVar4,puVar3[-4],puVar3[-3] - iVar4,puVar3[-2] - puVar3[-4],
+               puVar3[-1],*puVar3,puVar3[1]);
+    puVar3 = puVar3 + 0xd;
+  } while ((int)puVar3 < 0x499c64);
+  DAT_00498f50 = 0xffffffff;
+  return;
+}
+
+
+
+============================================================
+FUNCTION: 00425b60 DrawFrontendButtonBackground
+============================================================
+
+/* Draws one of the framed button background styles into a frontend button surface for normal,
+   mirrored, or preview variants. */
+
+void __cdecl
+DrawFrontendButtonBackground
+          (int *param_1,int param_2,undefined4 param_3,undefined4 param_4,int param_5)
+
+{
+  int iVar1;
+  int iVar2;
+  undefined4 ***pppuStack_58;
+  int iStack_54;
+  undefined4 **ppuStack_50;
+  int iStack_4c;
+  int iStack_48;
+  undefined4 uStack_44;
+  int **ppiStack_40;
+  uint uStack_3c;
+  int *piStack_38;
+  int iStack_34;
+  int iStack_30;
+  undefined4 uStack_2c;
+  int *piStack_28;
+  int iStack_24;
+  uint uVar3;
+  int local_10;
+  uint local_c;
+  undefined4 local_8;
+  int local_4;
+  
+  iStack_24 = 0x10;
+  piStack_28 = &local_10;
+  uStack_2c = DAT_00496268;
+  iVar2 = param_5 * 0x20;
+  local_c = iVar2 + 6;
+  iStack_30 = param_2;
+  local_4 = iVar2 + 0x13;
+  iStack_34 = 0;
+  piStack_38 = param_1;
+  local_10 = 0;
+  local_8 = 0x1a;
+  uStack_3c = 0x425bad;
+  (**(code **)(*param_1 + 0x1c))();
+  local_10 = param_5 * 0xc;
+  piStack_28 = (int *)(local_10 + 0x16);
+  iStack_24 = 0x60;
+  iVar1 = 0x1a;
+  if (0x36 < local_c) {
+    do {
+      uStack_3c = 0x10;
+      ppiStack_40 = &piStack_28;
+      uStack_44 = DAT_00496268;
+      iStack_48 = param_2;
+      ppuStack_50 = (undefined4 **)param_1;
+      iStack_54 = 0x425bf8;
+      iStack_4c = iVar1;
+      (**(code **)(*param_1 + 0x1c))();
+      uVar3 = iVar1 + 0x20;
+      iVar1 = iVar1 + 4;
+    } while (uVar3 < local_c);
+  }
+  iStack_24 = iVar2 + 6;
+  uStack_3c = 0x10;
+  iStack_4c = local_c - 0x1c;
+  ppiStack_40 = &piStack_28;
+  uStack_44 = DAT_00496268;
+  iStack_48 = param_2;
+  ppuStack_50 = (undefined4 **)param_1;
+  piStack_28 = (int *)0x1c;
+  iStack_54 = 0x425c45;
+  (**(code **)(*param_1 + 0x1c))();
+  iStack_34 = iVar2 + 4;
+  ppiStack_40 = (int **)0x0;
+  piStack_38 = (int *)0x1a;
+  uVar3 = 0x16;
+  uStack_3c = iVar2;
+  do {
+    iStack_54 = 0x10;
+    pppuStack_58 = &ppiStack_40;
+    (**(code **)(*param_1 + 0x1c))(param_1,0,param_2 + -9 + uVar3,DAT_00496268);
+    uVar3 = uVar3 + 4;
+  } while (uVar3 < 0x38);
+  iStack_34 = iVar2 + 4;
+  ppiStack_40 = (int **)0x1c;
+  piStack_38 = (int *)0x38;
+  uVar3 = 0x16;
+  uStack_3c = iVar2;
+  do {
+    iStack_54 = 0x10;
+    pppuStack_58 = &ppiStack_40;
+    (**(code **)(*param_1 + 0x1c))(param_1,uStack_2c,param_2 + -0xd + uVar3,DAT_00496268);
+    uVar3 = uVar3 + 4;
+  } while (uVar3 < 0x38);
+  iStack_54 = 0x10;
+  pppuStack_58 = &ppiStack_40;
+  uStack_3c = iVar2 + 0x15;
+  iStack_34 = iVar2 + 0x1e;
+  ppiStack_40 = (int **)0x0;
+  piStack_38 = (int *)0x1a;
+  (**(code **)(*param_1 + 0x1c))(param_1,0,param_2 + 0x2f,DAT_00496268);
+  pppuStack_58 = (undefined4 ***)(ppiStack_40 + 7);
+  ppuStack_50 = ppiStack_40 + 8;
+  iStack_54 = 0x60;
+  iStack_4c = 100;
+  iStack_34 = 0x1a;
+  if (0x36 < uStack_3c) {
+    do {
+      (**(code **)(*param_1 + 0x1c))
+                (param_1,iStack_34,param_2 + 0x34,DAT_00496268,&pppuStack_58,0x10);
+      iVar1 = iStack_34 + 4;
+      uVar3 = iStack_34 + 0x20;
+      iStack_34 = iVar1;
+    } while (uVar3 < uStack_3c);
+  }
+  iStack_54 = iVar2 + 0x11;
+  iStack_4c = iVar2 + 0x1e;
+  pppuStack_58 = (undefined4 ***)0x1c;
+  ppuStack_50 = (undefined4 **)0x38;
+  (**(code **)(*param_1 + 0x1c))(param_1,uStack_44,param_2 + 0x2b,DAT_00496268,&pppuStack_58,0x10);
+  return;
+}
+
+
+
+============================================================
+FUNCTION: 00426120 RebuildFrontendButtonSurface
+============================================================
+
+/* Rebuilds an existing display-mode button surface in place for the current pixel format, redraws
+   its frame/text styling, and resets its per-button animation state. */
+
+void __cdecl RebuildFrontendButtonSurface(int param_1)
+
+{
+  uint uVar1;
+  uint uVar2;
+  int iVar3;
+  int iVar4;
+  int iVar5;
+  int *piVar6;
+  int *piVar7;
+  undefined4 uStack_8c;
+  undefined4 *puStack_88;
+  undefined4 local_74;
+  undefined4 local_70;
+  uint local_6c;
+  int local_68;
+  undefined4 local_64 [14];
+  undefined4 uStack_2c;
+  byte *pbStack_24;
+  undefined4 local_14;
+  
+  puStack_88 = local_64;
+  uStack_8c = 0x400;
+  piVar7 = (int *)(&DAT_00499c9c)[param_1 * 0xd];
+  uVar1 = (&DAT_00499c90)[param_1 * 0xd];
+  iVar5 = (&DAT_00499c94)[param_1 * 0xd];
+  local_14 = 0;
+  local_74 = 0;
+  local_70 = 0;
+  local_64[0] = 100;
+  local_6c = uVar1;
+  local_68 = iVar5;
+  (**(code **)(*piVar7 + 0x14))(piVar7,&local_74,0,0);
+  if (DAT_0049525c == 0xf) {
+    uStack_2c = 0x1c8a;
+  }
+  else if (DAT_0049525c == 0x10) {
+    uStack_2c = 0x390a;
+  }
+  puStack_88 = (undefined4 *)((int)puStack_88 + iVar5);
+  (**(code **)(*piVar7 + 0x14))(piVar7,&uStack_8c,0,0,0x400,&stack0xffffff84);
+  DrawFrontendButtonBackground(piVar7,0,uVar1,iVar5,1);
+  DrawFrontendButtonBackground(piVar7,iVar5,uVar1,iVar5,0);
+  if (pbStack_24 != (byte *)0x0) {
+    uVar2 = MeasureOrCenterFrontendLocalizedString(pbStack_24,0,0);
+    if (uVar2 <= uVar1) {
+      iVar4 = 0;
+      piVar6 = piVar7;
+      iVar3 = MeasureOrCenterFrontendLocalizedString(pbStack_24,0,uVar1);
+      DrawFrontendLocalizedStringToSurface(pbStack_24,iVar3,iVar4,piVar6);
+      iVar3 = MeasureOrCenterFrontendLocalizedString(pbStack_24,0,uVar1);
+      DrawFrontendLocalizedStringToSurface(pbStack_24,iVar3,iVar5,piVar7);
+    }
+  }
+  (&DAT_00499ca8)[param_1 * 0xd] = 0;
+  return;
+}
+
+
+
+============================================================
+FUNCTION: 00426260 InitializeFrontendDisplayModeArrows
+============================================================
+
+/* Draws the left/right arrow sprites onto a display-mode button entry and marks that button as
+   arrow-capable in the frontend button flags table. */
+
+void __cdecl InitializeFrontendDisplayModeArrows(int param_1,int param_2)
+
+{
+  int iVar1;
+  int *piVar2;
+  int unaff_EBX;
+  int iVar3;
+  undefined4 **ppuStack_58;
+  undefined4 uStack_54;
+  int *piStack_50;
+  int iStack_4c;
+  int iStack_48;
+  undefined4 uStack_44;
+  undefined4 **ppuStack_40;
+  undefined4 uStack_3c;
+  int *piStack_38;
+  int iStack_34;
+  int iStack_30;
+  undefined4 uStack_2c;
+  undefined4 *puStack_28;
+  undefined4 uStack_24;
+  undefined4 local_10;
+  undefined4 local_c;
+  undefined4 local_8;
+  undefined4 local_4;
+  
+  iVar1 = (&DAT_00499c88)[param_1 * 0xd];
+  iVar3 = ((&DAT_00499c94)[param_1 * 0xd] + -8) / 2;
+  piVar2 = (int *)(&DAT_00499c9c)[param_1 * 0xd];
+  local_10 = 0;
+  local_c = 0;
+  local_8 = 0xc;
+  local_4 = 9;
+  if (param_2 != 0) {
+    local_c = 0x12;
+    local_4 = 0x1b;
+  }
+  uStack_24 = 0x11;
+  puStack_28 = &local_10;
+  uStack_2c = DAT_00496284;
+  uStack_3c = 0x4262de;
+  piStack_38 = piVar2;
+  iStack_34 = iVar1 + 7;
+  iStack_30 = iVar3;
+  (**(code **)(*piVar2 + 0x1c))();
+  iStack_48 = iVar3 + unaff_EBX;
+  uStack_3c = 0x11;
+  ppuStack_40 = &puStack_28;
+  uStack_44 = DAT_00496284;
+  uStack_54 = 0x4262ff;
+  piStack_50 = piVar2;
+  iStack_4c = iVar1 + 7;
+  (**(code **)(*piVar2 + 0x1c))();
+  iVar1 = (&DAT_00499c90)[param_1 * 0xd];
+  ppuStack_40 = (undefined4 **)0x0;
+  uStack_3c = 9;
+  piStack_38 = (int *)0xc;
+  iStack_34 = 0x12;
+  if (puStack_28 != (undefined4 *)0x0) {
+    uStack_3c = 0x1b;
+    iStack_34 = 0x24;
+  }
+  uStack_54 = 0x11;
+  ppuStack_58 = &ppuStack_40;
+  (**(code **)(*piVar2 + 0x1c))(piVar2,iVar1 + -0x12,iVar3,DAT_00496284);
+  (**(code **)(*piVar2 + 0x1c))(piVar2,iVar1 + -0x12,uStack_44,DAT_00496284,&ppuStack_58,0x11);
+  *(uint *)(&DAT_00499ca4 + param_1 * 0x34) = *(uint *)(&DAT_00499ca4 + param_1 * 0x34) | 2;
+  return;
+}
+
+
+
+============================================================
+FUNCTION: 00426390 ReleaseFrontendDisplayModeButtons
+============================================================
+
+/* WARNING: Globals starting with '_' overlap smaller symbols at the same address */
+/* Releases all active display-mode button surfaces from the frontend button table and clears the
+   current resolution-selection state. */
+
+void ReleaseFrontendDisplayModeButtons(void)
+
+{
+  int *piVar1;
+  
+  piVar1 = &DAT_00499c88;
+  do {
+    if (*piVar1 != -1) {
+      if ((*(byte *)(piVar1 + 7) & 1) != 0) {
+        ReleaseTrackedFrontendSurface((int *)piVar1[5]);
+      }
+      *piVar1 = -1;
+    }
+    piVar1 = piVar1 + 0xd;
+  } while ((int)piVar1 < 0x49a988);
+  g_frontendButtonPressedFlag = 0;
+  g_frontendButtonIndex = 0;
+  _DAT_0049a97c = 0xffffffff;
+  g_frontendEscKeyButtonIndex = 0xffffffff;
+  return;
+}
+
+
+
+============================================================
+FUNCTION: 004263e0 RenderFrontendDisplayModeHighlight
+============================================================
+
+/* Renders the rectangular highlight frame around the currently hovered display-mode button when the
+   frontend is in the interactive resolution-selection state. */
+
+void RenderFrontendDisplayModeHighlight(void)
+
+{
+  int iVar1;
+  
+  iVar1 = DAT_00498700;
+  if ((DAT_00498700 != -1) && (g_frontendCursorOverlayHidden == 0)) {
+    BltColorFillToSurface
+              (0xc000,(&DAT_00499c78)[DAT_00498700 * 0xd] + 0x14,
+               (&DAT_00499c7c)[DAT_00498700 * 0xd] + 4,(&DAT_00499c90)[DAT_00498700 * 0xd] + -0x28,2
+               ,g_frontendBackSurfacePtr);
+    BltColorFillToSurface
+              (0xc000,(&DAT_00499c78)[iVar1 * 0xd] + 0x14,(&DAT_00499c84)[iVar1 * 0xd] + -6,
+               (&DAT_00499c90)[iVar1 * 0xd] + -0x28,2,g_frontendBackSurfacePtr);
+    BltColorFillToSurface
+              (0xc000,(&DAT_00499c78)[iVar1 * 0xd] + 0x14,(&DAT_00499c7c)[iVar1 * 0xd] + 4,2,
+               (&DAT_00499c94)[iVar1 * 0xd] + -10,g_frontendBackSurfacePtr);
+    BltColorFillToSurface
+              (0xc000,(&DAT_00499c80)[iVar1 * 0xd] + -0x16,(&DAT_00499c7c)[iVar1 * 0xd] + 4,2,
+               (&DAT_00499c94)[iVar1 * 0xd] + -10,g_frontendBackSurfacePtr);
+  }
+  return;
+}
+
