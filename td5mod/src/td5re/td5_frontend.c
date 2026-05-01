@@ -10,6 +10,7 @@
 
 #include "td5_frontend.h"
 #include "td5_asset.h"
+#include "td5_frontend_button_cache.h"
 #include "td5_game.h"
 #include "td5_input.h"
 #include "td5_physics.h"
@@ -2510,6 +2511,10 @@ static void frontend_recover_surfaces(void) {
 
         TD5_LOG_W(LOG_TAG, "surface recovery: no PNG for %s", s_surfaces[i].source_name);
     }
+
+    /* Phase 6: re-upload baked main-menu button cache textures so the
+     * cached pages survive native-resolution / device reset events. */
+    td5_fe_btncache_recover();
 }
 static void frontend_post_quit(void) {
     g_td5.quit_requested = 1;
@@ -5095,38 +5100,56 @@ void td5_frontend_render_ui_rects(void) {
          * [INFERRED from frontend-rendering-internals.md §6 + Frida capture
          *  showing per-button surface ID is constant; the swap is by surface
          *  half (top/bottom) selected by focus, not by interpolated color.] */
-        if (s_buttonbits_tex_page >= 0 && s_buttonbits_w > 0 && s_buttonbits_h > 0) {
+        /* Phase 6: prefer the baked button cache (single quad per button)
+         * when available. The cache holds both halves stacked vertically
+         * (top = state 1 unselected, bottom = state 0 selected); UV picks
+         * by focus. Disabled state still falls through to the per-frame
+         * 9-slice path because state 2 isn't baked. */
+        int bb_state;
+        int focused = (i == s_selected_button);
+        if (s_buttons[i].disabled)            bb_state = 2;
+        else if (focused || flash_active)     bb_state = 0;
+        else                                   bb_state = 1;
+
+        int cache_page = -1;
+        if (s_current_screen == TD5_SCREEN_MAIN_MENU && !s_buttons[i].disabled
+            && !s_buttons[i].is_selector) {
+            cache_page = td5_fe_btncache_get_page(i, s_buttons[i].label);
+        }
+
+        if (cache_page >= 0) {
+            float v0 = (bb_state == 0) ? 0.5f : 0.0f;
+            float v1 = (bb_state == 0) ? 1.0f : 0.5f;
+            td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
+            fe_draw_quad(bx, by, bw, bh, 0xFFFFFFFF, cache_page,
+                         0.0f, v0, 1.0f, v1);
+            td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
+        } else if (s_buttonbits_tex_page >= 0 && s_buttonbits_w > 0 && s_buttonbits_h > 0) {
             /* No opaque fill — original blits button surface to screen with
              * DDBLT_KEYSRC (black = transparent). We draw only the 9-slice
              * frame with alpha blending; background shows through naturally. */
-            int bb_state;
-            int focused = (i == s_selected_button);
-            if (s_buttons[i].disabled)            bb_state = 2;
-            else if (focused || flash_active)     bb_state = 0;
-            else                                   bb_state = 1;
-
             td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
-            /* Gold/selected state: fill button interior with dark purple (R=57,G=33,B=82).
-             * Original CreateFrontendDisplayModeButton (0x425DE0) applied COLORFILL with
-             * RGB565 0x390A ≈ this color before BltFasting the ButtonBits frame columns.
-             * Blue/unselected center is black = transparent via SRCCOLORKEY = correct. */
             fe_draw_button_9slice(bx, by, bw, bh, bb_state, sx, sy);
             td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
 
+            if (s_buttons[i].label[0] && s_font_page >= 0) {
+                float text_w = fe_measure_text(s_buttons[i].label, sx);
+                float tx = bx + (bw - text_w) * 0.5f;
+                float ty = by;
+                uint32_t text_color = 0xFFFFFFFF;
+                if (s_buttons[i].disabled) text_color = 0xFF888888;
+                fe_draw_text(tx, ty, s_buttons[i].label, text_color, sx, sy);
+            }
         } else {
             fe_draw_quad(bx, by, bw, bh, bg_color, -1, 0, 0, 1, 1);
-        }
-
-        /* Button label text — original draws into cached surface at Y=0,
-         * horizontally centered. Font: BodyText.tga, 24x24 cells,
-         * red colorkey → alpha=0 for transparent background. */
-        if (s_buttons[i].label[0] && s_font_page >= 0) {
-            float text_w = fe_measure_text(s_buttons[i].label, sx);
-            float tx = bx + (bw - text_w) * 0.5f;
-            float ty = by;  /* original draws label at Y=0 on pre-baked surface (FUN_00424560) */
-            uint32_t text_color = 0xFFFFFFFF;
-            if (s_buttons[i].disabled) text_color = 0xFF888888;
-            fe_draw_text(tx, ty, s_buttons[i].label, text_color, sx, sy);
+            if (s_buttons[i].label[0] && s_font_page >= 0) {
+                float text_w = fe_measure_text(s_buttons[i].label, sx);
+                float tx = bx + (bw - text_w) * 0.5f;
+                float ty = by;
+                uint32_t text_color = 0xFFFFFFFF;
+                if (s_buttons[i].disabled) text_color = 0xFF888888;
+                fe_draw_text(tx, ty, s_buttons[i].label, text_color, sx, sy);
+            }
         }
 
         /* Green highlight border (RenderFrontendDisplayModeHighlight 0x4263e0).
@@ -5651,6 +5674,57 @@ static void Screen_LegalCopyright(void) {
 }
 
 /* ========================================================================
+ * Main-menu button surface bake (Phase 6).
+ *
+ * After the 7 buttons are created at Screen_MainMenu case 0, load fresh
+ * BGRA32 buffers for ButtonBits.png and BodyText.png and bake each
+ * button's 224x64 cache (top half = state 1 unselected, bottom half =
+ * state 0 selected). Per-frame button rendering then collapses to one
+ * fe_draw_quad per button.
+ *
+ * Mirrors the original CreateFrontendDisplayModeButton (0x00425DE0)
+ * called 7x at MainMenu init. Decoupled from the Phase 1-5 work so it
+ * can be gated independently.
+ * ======================================================================== */
+
+static void frontend_bake_main_menu_buttons(void) {
+    void *bb_pixels = NULL;
+    int bbw = 0, bbh = 0;
+    if (!td5_asset_load_png_to_buffer("re/assets/frontend/ButtonBits.png",
+                                       TD5_COLORKEY_BLACK, &bb_pixels, &bbw, &bbh)) {
+        TD5_LOG_W(LOG_TAG, "btncache bake: ButtonBits.png load failed");
+        return;
+    }
+
+    void *font_pixels = NULL;
+    int fw = 0, fh = 0;
+    if (!td5_asset_load_png_to_buffer("re/assets/frontend/BodyText.png",
+                                       TD5_COLORKEY_BLACK, &font_pixels, &fw, &fh)) {
+        TD5_LOG_W(LOG_TAG, "btncache bake: BodyText.png load failed");
+        free(bb_pixels);
+        return;
+    }
+
+    int baked = 0;
+    for (int i = 0; i < FE_MAX_BUTTONS && i < TD5_FE_BTNCACHE_MAX; i++) {
+        if (!s_buttons[i].active || s_buttons[i].is_selector) continue;
+        if (!s_buttons[i].label[0]) continue;
+        if (s_buttons[i].w <= 0 || s_buttons[i].h <= 0) continue;
+        if (td5_fe_btncache_bake_button(i, s_buttons[i].label,
+                                        s_buttons[i].w, s_buttons[i].h,
+                                        (const uint8_t *)bb_pixels, bbw, bbh,
+                                        (const uint8_t *)font_pixels, fw, fh,
+                                        s_font_glyph_advance)) {
+            baked++;
+        }
+    }
+    TD5_LOG_I(LOG_TAG, "btncache bake: %d main-menu buttons cached", baked);
+
+    free(bb_pixels);
+    free(font_pixels);
+}
+
+/* ========================================================================
  * [5] ScreenMainMenuAnd1PRaceFlow (0x415490)
  * States: 24 (0x00 - 0x17)
  *
@@ -5697,6 +5771,12 @@ static void Screen_MainMenu(void) {
         frontend_create_button("Options",     -0xE0, 0, 0xE0, 0x20);
         frontend_create_button("High Scores", -0xE0, 0, 0xE0, 0x20);
         frontend_create_button("Exit",        -0xE0, 0, 0xE0, 0x20);
+
+        /* Phase 6: bake each button's 224x64 cached surface so per-frame
+         * rendering becomes one fe_draw_quad per button instead of a
+         * 9-slice + per-glyph fan. Mirrors CreateFrontendDisplayModeButton
+         * (0x00425DE0) called 7x at MainMenu init in the original. */
+        frontend_bake_main_menu_buttons();
 
         frontend_set_cursor_visible(0);
         frontend_play_sfx(5); /* menu ready */

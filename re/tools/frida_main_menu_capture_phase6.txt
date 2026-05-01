@@ -1,0 +1,38 @@
+Frontend Main Menu — Phase 6 acceptance capture (port td5re.exe)
+================================================================
+
+Captured: 2026-05-01 (worktree fix-1777656043-116843, Phase 6 button surface cache).
+Source: log/frontend_draw_port.csv from a 12-second main-menu-only run
+(td5re.ini AutoRace=0, PlayerIsAI=0, FrontendDraw=1).
+
+Steady-state main-menu (screen=5) per-frame fe_draw_quad count: 10
+Pre-Phase-6 baseline: ~140 (per plan_frontend_mainmenu_parity.md gate).
+
+Per-frame breakdown (sampled frame 1700, all post-slide-in steady frames identical):
+
+  page  rect             role
+  ----  ---------------  -----------------------------------------------
+   900  640 x 480 @ 0,0   MainMenu.tga full-screen background
+   888  392 x 158        BgGallery slide-in image (rotates between 5 pics)
+   880  224 x  32        button 0 "Race Menu"     (focused, UV bottom half)
+   881  224 x  32        button 1 "Quick Race"    (unfocused, UV top half)
+   882  224 x  32        button 2 "Two Player"    (unfocused)
+   883  224 x  32        button 3 "Net Play"      (unfocused)
+   884  224 x  32        button 4 "Options"       (unfocused)
+   885  224 x  32        button 5 "High Scores"   (unfocused)
+   886  224 x  32        button 6 "Exit"          (unfocused)
+   931  248 x  20        title strip MainMenuText.tga
+  ----  ---------------  -----------------------------------------------
+  total: 10 quads/frame
+
+Notes:
+- Cursor (page 896) is hidden during slide-in and idle; would add 1 quad
+  when visible, matching the gate's "+ cursor" allowance.
+- Each focused-button frame swap is a UV change (top/bottom half) on the
+  same cache page. No re-bake; bb_state continues to drive the discrete
+  swap from Phase 3.
+- Cache pages 880..886 are uploaded once at Screen_MainMenu case 0 from
+  CPU-side BGRA buffers composited via fe_draw_button_9slice's exact
+  source coordinates plus DrawFrontendLocalizedStringToSurface's glyph
+  layout (24×24 cells, centered horizontally, top-aligned at y=0 / y=h).
+- frontend_recover_surfaces re-uploads cached pixels on device reset.
