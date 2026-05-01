@@ -1850,6 +1850,46 @@ void td5_render_actors_for_view(int view_index)
                     continue;
             }
 
+            /* Span-distance actor cull (mirrors original RenderRaceActorForView
+             * @ 0x0040C2FD): for non-owner actors, compute |delta_spans| with
+             * ring wrap and skip body+wheel+smoke render when delta >= cull
+             * window. Original's window comes from gRaceTrackSpanCullWindow @
+             * 0x004AAEF4 (written each frame in RunRaceFrame @ 0x42BB72 as
+             * 2*min(fp, gViewportLayoutMaxSpans[layout])). Port reuses
+             * fwd_window — view-distance scaled, defaulting to 1024 — as a
+             * symmetric abs window so this gate moves in lock-step with the
+             * existing track-span cull. Tire-track emitter still runs in the
+             * post-loop pass below regardless of this skip, matching the
+             * original LAB_0040c7ba goto-tail semantic.
+             * [CONFIRMED @ 0x40C2FD writer 0x42BB72 actor span at +0x82]
+             *
+             * Owner slot is exempt — the camera-preset gate later in this
+             * loop is the original's owner-side skip path. */
+            if (slot != camera_target_slot && slot < TD5_MAX_RACER_SLOTS) {
+                TD5_Actor *owner = td5_game_get_actor(camera_target_slot);
+                if (owner) {
+                    int actor_span = (int)actor->track_span_normalized;
+                    int owner_span = (int)owner->track_span_normalized;
+                    int delta = actor_span - owner_span;
+                    int ring = td5_track_get_ring_length();
+                    if (ring > 0) {
+                        int half = ring / 2;
+                        if (delta >  half) delta -= ring;
+                        if (delta < -half) delta += ring;
+                    }
+                    int delta_abs = delta < 0 ? -delta : delta;
+                    if (delta_abs >= fwd_window) {
+                        static uint32_t s_cull_log = 0;
+                        if ((s_cull_log++ % 600u) == 0u) {
+                            TD5_LOG_I(LOG_TAG,
+                                      "actor span-cull: view=%d slot=%d delta=%d window=%d",
+                                      view_index, slot, delta_abs, fwd_window);
+                        }
+                        continue;
+                    }
+                }
+            }
+
             /* (Lighting moved below to td5_render_apply_track_lighting,
              * which writes to the s_light_dirs[] basis ComputeMeshVertexLighting
              * actually consumes. The earlier td5_track_apply_segment_lighting
@@ -1952,6 +1992,25 @@ void td5_render_actors_for_view(int view_index)
                       view_index, slot,
                       render_pos.x, render_pos.y, render_pos.z,
                       (void *)mesh);
+        }
+
+        /* Per-actor tire-track emitter dispatch (UpdateTireTrackEmitters
+         * @ 0x43FAE0). Original calls this from RenderRaceActorForView at
+         * LAB_0040c7ba — runs once per actor per view, AFTER the body/wheel/
+         * smoke render gates. Even cull/preset-skipped actors reach this
+         * tail, so the dispatch is gated only by slot-state (state==3 means
+         * disabled / not present in the original's RenderRaceActorsForView
+         * iteration filter at 0x40BD26).
+         *
+         * Port previously dispatched from sim-tick td5_game.c, but Ghidra
+         * function_callers confirms 0x43FAE0 has a SINGLE caller — 0x40C120.
+         * Sim only runs UpdateTireTrackPool (per-slot intensity decay).
+         * [CONFIRMED @ 0x40C120 + 0x43FAE0 callers] */
+        for (int slot = 0; slot < TD5_MAX_RACER_SLOTS; slot++) {
+            TD5_Actor *actor = td5_game_get_actor(slot);
+            if (!actor) continue;
+            if (td5_game_get_slot_state(slot) == 3) continue;
+            td5_vfx_update_tire_track_emitters(actor, view_index);
         }
     }
 
