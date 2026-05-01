@@ -8666,6 +8666,16 @@ static void Screen_RaceResults(void) {
         TD5_LOG_I(LOG_TAG, "RaceResults: state 0 - init, game_type=%d",
                   s_selected_game_type);
 
+        /* P2 (plan_screen24) — MainMenu.tga backdrop. Original case 0 calls
+         * LoadTgaToFrontendSurface16bpp("MainMenu.tga", "FrontEnd.zip") then
+         * CopyPrimaryFrontendBufferToSecondary so the post-race UI overlays
+         * the main-menu artwork. Without it the bg-gallery slideshow floats
+         * on a black clear — visually empty. Every other screen handler
+         * loads this same TGA as its s_background_surface (see e.g.
+         * Screen_MainMenu state 0); we mirror that to give screen 24 a
+         * faithful backdrop. */
+        frontend_load_tga("Front_End/MainMenu.tga", "Front_End/FrontEnd.zip");
+
         /* [CONFIRMED @ 0x004224B6 RunRaceResultsScreen case 0] Early-route to
          * Screen_CupFailed (TD5_SCREEN_CUP_FAILED, 0x1a) when the player has
          * been eliminated mid-cup. The original has two parallel paths:
@@ -8711,15 +8721,25 @@ static void Screen_RaceResults(void) {
             s_results_rerace_flag = 1;
         }
 
-        /* Skip the positions-table sub-flow on entry — original screen 24
-         * lands the user on the 5-button post-race menu, not the per-slot
-         * positions browser. The browser is reachable via the View Race
-         * Data button (case 2 of state 0x10) which seeds state 1 with the
-         * OK click-catcher. State 0xD builds the menu directly. */
+        /* [CONFIRMED @ 0x00422480 case 0 tail] Build the click-catcher + OK
+         * button pair, then advance to state 1. The original places them at
+         * (-0x208, 0, 0x208, 0x20) and (-0x208, 0, 0x60, 0x20) — both off the
+         * left edge of the canvas — and slides them in via MoveFrontendSpriteRect
+         * during state 3 (P7 of plan_screen24, not in this slice). Until the
+         * sprite-rect animation lands we plant them at their on-screen rest
+         * positions: 520x32 invisible click-catcher centred at y=400 with the
+         * 96x32 OK button overlaid in the centre. Both indices satisfy the
+         * state-6 exit gate (s_button_index >= 0 && < 2), so clicking either
+         * the OK button or anywhere along the catcher row returns to the
+         * post-race menu. The state-3 gate below short-circuits to state 0xC
+         * when no race data is present (fresh StartScreen=24 land on menu;
+         * post-race natural flow runs the table sub-flow). */
         s_results_cup_complete = 0;
         s_results_skip_display = 0;
         s_anim_tick = 0;
-        s_inner_state = 0x0D;
+        frontend_create_button(NULL, FE_CENTER_X - 0x104, 400, 0x208, 0x20);
+        frontend_create_button("OK", FE_CENTER_X -   0x30, 400, 0x60,  0x20);
+        s_inner_state = 1;
         break;
 
     case 1: case 2: /* Present buffer, reset counter */
@@ -8728,15 +8748,35 @@ static void Screen_RaceResults(void) {
         s_inner_state++;
         break;
 
-    case 3: /* Slide-in: 39 frames */
+    case 3: /* Slide-in: 39 frames.
+             * [CONFIRMED @ 0x004228EC case 3 head] First three statements
+             * gate the slide-in itself. The original short-circuits to
+             * state 0xC (cleanup -> 0xD menu) when ANY of:
+             *   - DAT_00497a74 != 0    (s_results_skip_display)
+             *   - slot[0].companion_state_2 == 2  (player disqualified)
+             *   - actor.slot._808_4_ == 0         (no race finished)
+             * The `slot._808_4_ == 0` clause is what makes a fresh
+             * SetFrontendScreen(0x18) — i.e. --StartScreen=24 or a Frida
+             * frontend_screen=24 hop — land directly on the post-race menu:
+             * no actor data has been written, so the table sub-flow is
+             * skipped. After a real race the finish flag is set and the
+             * gate falls through, so the table animates in normally. */
+        if (s_results_skip_display ||
+            td5_game_get_slot_companion_2(0) == 2 ||
+            !td5_game_slot_is_finished(0)) {
+            TD5_LOG_I(LOG_TAG,
+                      "RaceResults: state 3 early-exit gate fired "
+                      "(skip=%d companion_2=%d finished=%d) -> 0xC",
+                      s_results_skip_display,
+                      td5_game_get_slot_companion_2(0),
+                      td5_game_slot_is_finished(0));
+            s_results_skip_display = 0;
+            s_inner_state = 0x0C;
+            break;
+        }
         s_anim_tick += 2;
         if (s_anim_tick >= 0x12) {
-            /* If skip flag or disqualified, jump to cleanup */
-            if (s_results_skip_display) {
-                s_inner_state = 0x0C;
-            } else {
-                s_inner_state = 4;
-            }
+            s_inner_state = 4;
         }
         break;
 
@@ -8771,7 +8811,13 @@ static void Screen_RaceResults(void) {
                 TD5_LOG_D(LOG_TAG, "RaceResults state 6: browsing slot %d",
                           s_score_category_index);
             }
-            if (s_button_index >= 0 && s_button_index < 2) { /* confirm -> exit */
+            /* [CONFIRMED @ 0x004229DA] Original wraps the button-press exit
+             * in `if (DAT_0049b690 == 0)` — i.e. only honor the confirm when
+             * no arrow input is also queued. Without the gate a paired
+             * arrow-and-click exits the browser before s_score_category_index
+             * has updated, which the original avoids. */
+            if (s_arrow_input == 0 &&
+                s_button_index >= 0 && s_button_index < 2) { /* confirm -> exit */
                 TD5_LOG_I(LOG_TAG, "RaceResults: state 6 -> 0x0B (confirm, btn=%d)",
                           s_button_index);
                 s_anim_tick = 0;
@@ -8915,17 +8961,19 @@ static void Screen_RaceResults(void) {
                 frontend_init_race_schedule();
                 break;
 
-            case 2: /* View Race Data — show per-slot positions table.
-                     * Tear down the menu, plant the OK click-catcher used
-                     * by state 6 to exit, and seed state 1 (present-buffer
-                     * → slide-in → interactive browse). State 6 confirm
-                     * routes back through 0xB → 0xC → 0xD which rebuilds
-                     * the menu. */
-                frontend_reset_buttons();
-                frontend_create_button("OK", FE_CENTER_X - 48, 400, 0x60, 0x20);
-                s_results_skip_display = 0;
-                s_anim_tick = 0;
-                s_inner_state = 1;
+            case 2: /* View Race Data — re-enter screen 24 from state 0.
+                     * [CONFIRMED @ 0x00423110 case 0x10 dispatch on
+                     * DAT_00497a64 == 2] Original simply calls
+                     * SetFrontendScreen(0x18) — which IS this screen,
+                     * 0x18 == 24 == TD5_SCREEN_RACE_RESULTS. Re-entry runs
+                     * state 0 again: snapshot restore, sort, button rebuild,
+                     * then states 1..3 take the table path because the
+                     * state-3 gate above does not fire (race actor data
+                     * is still populated). The previous port "invention"
+                     * (manual button reset + state=1 seed) skipped the
+                     * sort/snapshot and could leak stale buttons across
+                     * cycles; faithful re-entry replaces all of that. */
+                td5_frontend_set_screen(TD5_SCREEN_RACE_RESULTS);
                 return;
 
             case 3: /* Save Race Status / Select New Car */
