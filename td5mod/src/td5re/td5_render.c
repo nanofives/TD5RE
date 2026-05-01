@@ -1754,6 +1754,14 @@ void td5_render_actors_for_view(int view_index)
      *      effect at the following flush. */
     s_in_sky_draw = 1;
     td5_plat_render_set_preset(TD5_PRESET_SKY);
+    {
+        static int s_sky_preset_logged = 0;
+        if (!s_sky_preset_logged) {
+            TD5_LOG_I(LOG_TAG,
+                      "sky preset: z_func=ALWAYS z_write=0 (matches original SetRaceRenderStatePreset(0) @ 0x40b070)");
+            s_sky_preset_logged = 1;
+        }
+    }
     td5_render_draw_sky();
     td5_render_flush_immediate_batch();
     s_in_sky_draw = 0;
@@ -4145,32 +4153,44 @@ void td5_render_draw_sky(void)
     if (!s_sky_loaded) return;
 
     /* --- 3D dome rendering (sky.prr) [CONFIRMED @ 0x0042bdf7-0x0042c044] ---
-     * Original applies camera rotation only (no translation) to sky dome mesh,
-     * then dispatches via the standard mesh pipeline.
+     * Original RunRaceFrame sky block (0x0042bdf1-0x0042be45) sequence:
+     *   1. ApplyMeshResourceRenderTransform(gSkyMeshResource) — rotation only
+     *   2. TransformMeshVerticesToView(gSkyMeshResource)
+     *   3. SetRaceRenderStatePreset(0) → ZFUNC=ALWAYS, ZWRITE=0
+     *      [CONFIRMED @ 0x0040b0d8 (ZFUNC=8), 0x0040b0e1 (ZWRITE=0)]
+     *   4. RenderPreparedMeshResource(gSkyMeshResource)
+     *   5. SetRaceRenderStatePreset(1) → ZFUNC=LESSEQUAL, ZWRITE=1
+     *      [CONFIRMED @ 0x0040b0a3 (ZFUNC=4), 0x0040b0b1 (ZWRITE=1)]
      *
-     * DISABLED — root cause of "view distance way shorter than configured":
-     * the dome's vertices are camera-centered (translation=0), so they get
-     * very small camera-space Z values, and the wrapper's deferred state-
-     * cache apply path silently keeps z_write=1 alive across the dome's
-     * batch flush regardless of TD5_PRESET_SKY. Tiny depth values written
-     * by the dome z-reject all distant track spans the next frame.
+     * The caller in td5_render_actors_for_view installs TD5_PRESET_SKY
+     * (z_func=1/ALWAYS, z_write=0) BEFORE entering this function and
+     * suppresses the page-blend remap via s_in_sky_draw, so the dome's
+     * batch flush keeps the SKY depth-state. Track render that follows
+     * installs TD5_PRESET_OPAQUE_LINEAR which explicitly resets z_func=0
+     * (LESSEQUAL) and z_write=1.
      *
-     * Multiple plumbing attempts (TD5_PRESET_SKY z_test=0/z_write=0, then
-     * z_test=1/z_write=0, s_in_sky_draw carve-out blocking the page-type
-     * remap in flush_immediate_internal, z_func=ALWAYS distinct DS state
-     * object) all failed in the wrapper's apply path. Falling through to
-     * the 2D panoramic quad below restores the pre-e9f659e behaviour: sky
-     * drawn at depth_z=0.999 — track at any nearer depth always passes
-     * LESSEQUAL and draws on top. View distance is bounded only by the
-     * configured cull window again. */
-    if (0 && s_sky_mesh) {
+     * The dome's projected screen_z values are tiny (camera-centered
+     * geometry, vz close to camera) — but ZFUNC=ALWAYS makes the depth
+     * comparison vacuous and ZWRITE=0 leaves the cleared far value in
+     * the buffer, so distant track spans still pass their own LESSEQUAL
+     * test against the cleared depth. */
+    if (s_sky_mesh) {
         TD5_Mat3x3 sky_rot;
+
+        /* Camera basis IS the rotation — sky has identity model rotation */
         for (int i = 0; i < 9; i++)
             sky_rot.m[i] = s_camera_basis[i];
+
         td5_render_load_rotation(&sky_rot);
+
+        /* Sky dome is camera-centered: translation is zero in view space.
+         * Original ApplyMeshResourceRenderTransform stores rotated mesh
+         * +0x1c..+0x24, which are zero for sky.prr at runtime. Do NOT use
+         * td5_render_load_translation() — it subtracts camera_pos. */
         s_render_transform.m[9]  = 0.0f;
         s_render_transform.m[10] = 0.0f;
         s_render_transform.m[11] = 0.0f;
+
         td5_render_transform_mesh_vertices(s_sky_mesh);
         td5_render_prepared_mesh(s_sky_mesh);
         s_scene_has_renderer_geometry = 1;
