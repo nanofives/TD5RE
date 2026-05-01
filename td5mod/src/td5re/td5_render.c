@@ -1659,12 +1659,20 @@ void td5_render_actors_for_view(int view_index)
     if (half_window < 1) half_window = 1;
 
     {
-        static int s_view_dist_logged = 0;
-        if (!s_view_dist_logged) {
-            TD5_LOG_I(LOG_TAG,
-                      "view distance: frac=%.2f max_spans=%d half_window=%d (visible window=%d spans)",
-                      view_dist_frac, VIEW_DIST_MAX_SPANS, half_window, half_window * 2);
-            s_view_dist_logged = 1;
+        /* TEST 2: live slider plumbing probe — write current frac into the window title
+         * every 15 frames so user can see whether moving the VIEW slider in the pause
+         * menu actually changes view_dist_frac. */
+        static int s_view_dist_log_counter = 0;
+        s_view_dist_log_counter++;
+        if ((s_view_dist_log_counter % 15) == 0) {
+            HWND hw = (HWND)td5_plat_get_native_window();
+            if (hw) {
+                char title[256];
+                snprintf(title, sizeof(title),
+                         "TEST 2 - SLIDER PLUMBING | frac=%.3f half_window=%d/%d spans",
+                         view_dist_frac, half_window, VIEW_DIST_MAX_SPANS);
+                SetWindowTextA(hw, title);
+            }
         }
     }
 
@@ -1723,6 +1731,14 @@ void td5_render_actors_for_view(int view_index)
     {
         int total_actors = td5_game_get_total_actor_count();
         int drag_mode = g_td5.drag_race_enabled;
+
+        /* Cinematic-camera smoke bypass (parity follow-up): original at 0x40C120
+         * skips the smoke spawn chain for the actor under cinematic camera when
+         * g_raceCameraPresetMode[view] != 0. Without this gate the camera-target
+         * car keeps emitting exhaust/tire smoke through cutscene-style views. */
+        extern int g_raceCameraPresetMode[2];
+        int camera_target_slot   = td5_game_get_player_slot(view_index);
+        int camera_preset_active = (g_raceCameraPresetMode[view_index & 1] != 0);
 
         for (int slot = 0; slot < total_actors; slot++) {
             TD5_Actor *actor = td5_game_get_actor(slot);
@@ -1827,9 +1843,14 @@ void td5_render_actors_for_view(int view_index)
 
             /* Smoke effects (0x40C120 tail): called per visible actor per frame.
              * SpawnRearWheelSmokeEffects (0x401330) — burnout hardpoint smoke
-             * SpawnVehicleSmokeSprite (0x429CF0) — general exhaust smoke */
-            td5_vfx_spawn_rear_wheel_smoke(actor, view_index);
-            td5_vfx_spawn_smoke(actor);
+             * SpawnVehicleSmokeSprite (0x429CF0) — general exhaust smoke
+             * Skip for the camera-target actor when this view is in cinematic
+             * preset mode (g_raceCameraPresetMode[view] != 0) — matches the
+             * original gate at 0x40C120. */
+            if (!(slot == camera_target_slot && camera_preset_active)) {
+                td5_vfx_spawn_rear_wheel_smoke(actor, view_index);
+                td5_vfx_spawn_smoke(actor);
+            }
 
             actor_render_count++;
             actor_meshes_submitted++;
@@ -4623,3 +4644,18 @@ int     g_render_width          = 640;
 int     g_render_height         = 480;
 
 float   g_renderBasisMatrix[12] = { 1,0,0, 0,1,0, 0,0,1, 0,0,0 };
+
+/* ========================================================================
+ * Debug line overlay — placeholder stubs.
+ * Wired up by td5_track collision-wireframe overlay (F12). Real renderer
+ * not yet ported; calls are no-ops so the build links cleanly.
+ * ======================================================================== */
+void td5_render_debug_line_world(float x0, float y0, float z0,
+                                 float x1, float y1, float z1,
+                                 uint32_t argb) {
+    (void)x0; (void)y0; (void)z0;
+    (void)x1; (void)y1; (void)z1;
+    (void)argb;
+}
+void td5_render_debug_lines_flush(void) {}
+void td5_render_debug_lines_reset(void) {}
