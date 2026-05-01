@@ -2706,22 +2706,33 @@ static int64_t diagonal_cross(int vl0_idx, int vr1_idx,
  * Compute barycentric height from a triangle defined by 3 vertices.
  * Port of ComputeTrackTriangleBarycentricsWithNormal @ 0x00445A70.
  *
- * Uses a higher-precision (>>4) int32 normal for the plane solve and
- * a separate (>>12) int16 normal for the output. The int32-path for
- * the plane solve preserves more bits than the original's int16-
- * truncated normal would — empirically this stays closer to the
- * original's output on inclined spans (tested on Honolulu full-race).
- * An attempt to match the original's int16 truncation exactly regressed
- * 5/6 slots on Honolulu — likely the original's ConvertFloatVec3-
- * ToShortAnglesB uses FPU/saturation semantics we haven't yet decoded.
+ * Faithful sequence (verified 2026-05-01 against live Ghidra decomp):
+ *   1. e1 = vb - va, e2 = vc - va — int32 (sign-extended int16 vertices)
+ *   2. cross = (e1y*e2z - e1z*e2y, e1z*e2x - e1x*e2z, e1x*e2y - e1y*e2x)
+ *      — int32 multiply (matches CrossProduct3i @ 0x0042EA70)
+ *   3. n[i] = cross[i] >> 12 — int32, sign-preserving
+ *      [CONFIRMED @ 0x00445B16-0x00445B2C: SAR ECX/EDI/EDX, 0xc]
+ *   4. ConvertFloatVec3ToShortAnglesB (0x0042CD40) — renormalize via FPU:
+ *        len  = sqrt(nx² + ny² + nz²)
+ *        un[i] = (int16) trunc(n[i] * 4096.0 / len)   // K=4096 [UNCERTAIN]
+ *      [CONFIRMED @ 0x0042CD40-0x0042CDA8: FILD/FDIVR/FMUL/__ftol-truncate]
+ *   5. if (un[1] == 0) un[1] = 1 — only the exact-zero case
+ *      [CONFIRMED @ 0x00445B3F-0x00445B4C, on the int16 unit-Y after step 4]
+ *   6. height = ((va.z - local_z) * un[2] + (va.x - local_x) * un[0]) / un[1]
+ *             + va.y, then << 8
+ *      [CONFIRMED @ 0x00445B52-0x00445B89: int32 IMULs, signed CDQ;IDIV]
  *
- * Degenerate handling: `if (ny == 0) ny = 1;` — matches the original's
- * saturate-and-divide rather than skipping the plane solve. Previous
- * `|ny|<16 -> return va.y` fallback was too eager and flattened tilted
- * triangles the original would sample.
+ * The previous port used `cross >> 4` raw + `±256` saturation as the divisor,
+ * which produced a different quantization of the plane slope at slope-onset
+ * spans. Frida-localized 2026-05-01 at Moscow span 196 front-wheel +1792 FP
+ * spurious chassis-Y rise (see tools/frida_csv/fix-1777656380-129050).
+ *
+ * Note: K=4096 is the conventional TD5 12-bit-fixed-point grain (matches
+ * angle full-circle = 0x1000). The exact constant at 0x00467374 was not
+ * dumped — if it differs, the int16-truncation grain shifts proportionally
+ * but the algebra is K-invariant for non-truncating cases.
  *
  * Returns height in 24.8 fixed-point.
- * [CONFIRMED @ 0x00445A70 for the formula; precision is a deviation]
  */
 static int32_t triangle_height(int va_idx, int vb_idx, int vc_idx,
                                 int32_t origin_x, int32_t origin_y, int32_t origin_z,
@@ -2731,8 +2742,10 @@ static int32_t triangle_height(int va_idx, int vb_idx, int vc_idx,
     TD5_StripVertex *va, *vb, *vc;
     int32_t e1x, e1y, e1z, e2x, e2y, e2z;
     int32_t nx, ny, nz;
+    int16_t unx, uny, unz;
     int32_t dx, dz;
     int32_t height;
+    double len;
 
     va = vertex_at(va_idx);
     vb = vertex_at(vb_idx);
@@ -2746,38 +2759,41 @@ static int32_t triangle_height(int va_idx, int vb_idx, int vc_idx,
     e2y = (int32_t)vc->y - (int32_t)va->y;
     e2z = (int32_t)vc->z - (int32_t)va->z;
 
-    /* Cross product at >>4 precision — int32, no truncation. Used for
-     * the plane solve (division with dx/dz gives correct plane slope). */
-    nx = (int32_t)(((int64_t)e1y * e2z - (int64_t)e1z * e2y) >> 4);
-    ny = (int32_t)(((int64_t)e1z * e2x - (int64_t)e1x * e2z) >> 4);
-    nz = (int32_t)(((int64_t)e1x * e2y - (int64_t)e1y * e2x) >> 4);
+    /* int32 cross then >>12 — matches 0x00445B16-0x00445B2C SAR sequence. */
+    nx = (e1y * e2z - e1z * e2y) >> 12;
+    ny = (e1z * e2x - e1x * e2z) >> 12;
+    nz = (e1x * e2y - e1y * e2x) >> 12;
 
-    /* Degenerate: if the truncated int16 normal's Y would be zero,
-     * the original sets it to 1 and divides. Check against the ny
-     * range the int16 cast would zero (|ny_>>12| < 1 == |ny_>>4| < 256).
-     * Below this threshold we saturate to match. */
-    if (ny > -256 && ny < 256)
-        ny = (ny >= 0) ? 256 : -256;
+    /* FPU unit-renormalize to length 4096, truncate-toward-zero to int16. */
+    len = sqrt((double)nx * (double)nx
+             + (double)ny * (double)ny
+             + (double)nz * (double)nz);
+    if (len > 0.0) {
+        unx = (int16_t)(int32_t)((double)nx * 4096.0 / len);
+        uny = (int16_t)(int32_t)((double)ny * 4096.0 / len);
+        unz = (int16_t)(int32_t)((double)nz * 4096.0 / len);
+    } else {
+        unx = 0; uny = 0; unz = 0;
+    }
 
-    /* Plane equation. Algebraically equivalent to the original's
-     *   y = va.y + ((va.x - local.x)*nx + (va.z - local.z)*nz)/ny
-     * once signs are distributed across dx/dz. */
+    /* Post-conversion exact-zero guard on the int16 unit-Y. */
+    if (uny == 0) uny = 1;
+
+    /* dx/dz are local coords relative to (origin + va). Algebra:
+     *   port:  va.y - (dx*unx + dz*unz)/uny
+     *   orig:  va.y + ((va.x-local_x)*unx + (va.z-local_z)*unz)/uny
+     * with local_x = (pos_x>>8) - origin_x → identical via sign distribution. */
     dx = (pos_x >> 8) - origin_x - (int32_t)va->x;
     dz = (pos_z >> 8) - origin_z - (int32_t)va->z;
 
     height = (int32_t)va->y
-           - (int32_t)(((int64_t)dx * nx + (int64_t)dz * nz) / ny);
+           - ((dx * (int32_t)unx + dz * (int32_t)unz) / (int32_t)uny);
 
-    /* Output normal at >>12 int16 precision — matches the original's
-     * ConvertFloatVec3ToShortAnglesB consumer interface. */
+    /* Same int16 unit normal as the divisor — original re-reads from param_5. */
     if (out_normal) {
-        int32_t hnx = (int32_t)(((int64_t)e1y * e2z - (int64_t)e1z * e2y) >> 12);
-        int32_t hny = (int32_t)(((int64_t)e1z * e2x - (int64_t)e1x * e2z) >> 12);
-        int32_t hnz = (int32_t)(((int64_t)e1x * e2y - (int64_t)e1y * e2x) >> 12);
-        if (hny == 0) hny = 1;
-        out_normal[0] = (int16_t)hnx;
-        out_normal[1] = (int16_t)hny;
-        out_normal[2] = (int16_t)hnz;
+        out_normal[0] = unx;
+        out_normal[1] = uny;
+        out_normal[2] = unz;
     }
 
     TD5_TRACE_CALL_RET("triangle_bary", height,
