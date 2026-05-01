@@ -5046,15 +5046,25 @@ void td5_frontend_render_ui_rects(void) {
         /* Button background: 9-slice frame from ButtonBits.tga (56x100).
          * Original FUN_00425b60 pre-renders to a cached surface using BltFast
          * with SRCCOLORKEY. We draw live each frame.
-         * State 0 = gold/selected, 1 = blue/unselected, 2 = disabled. */
+         * State 0 = gold/selected, 1 = blue/unselected, 2 = disabled.
+         *
+         * Phase 3 — Highlight is a discrete frame swap, not a color lerp.
+         * The original swaps to the pre-baked highlight half of the button's
+         * cached surface the moment focus changes; the 0..6 ramp counter
+         * drives the separate green-outline overlay (RenderFrontendDisplay
+         * ModeHighlight 0x4263E0), not the gold/blue interior swap.
+         * [INFERRED from frontend-rendering-internals.md §6 + Frida capture
+         *  showing per-button surface ID is constant; the swap is by surface
+         *  half (top/bottom) selected by focus, not by interpolated color.] */
         if (s_buttonbits_tex_page >= 0 && s_buttonbits_w > 0 && s_buttonbits_h > 0) {
             /* No opaque fill — original blits button surface to screen with
              * DDBLT_KEYSRC (black = transparent). We draw only the 9-slice
              * frame with alpha blending; background shows through naturally. */
             int bb_state;
-            if (s_buttons[i].disabled)                               bb_state = 2;
-            else if (flash_active || s_buttons[i].highlight_ramp == 6) bb_state = 0;
-            else                                                     bb_state = 1;
+            int focused = (i == s_selected_button);
+            if (s_buttons[i].disabled)            bb_state = 2;
+            else if (focused || flash_active)     bb_state = 0;
+            else                                   bb_state = 1;
 
             td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
             /* Gold/selected state: fill button interior with dark purple (R=57,G=33,B=82).
