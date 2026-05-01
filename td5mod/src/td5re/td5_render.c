@@ -1659,20 +1659,12 @@ void td5_render_actors_for_view(int view_index)
     if (half_window < 1) half_window = 1;
 
     {
-        /* TEST 2: live slider plumbing probe — write current frac into the window title
-         * every 15 frames so user can see whether moving the VIEW slider in the pause
-         * menu actually changes view_dist_frac. */
-        static int s_view_dist_log_counter = 0;
-        s_view_dist_log_counter++;
-        if ((s_view_dist_log_counter % 15) == 0) {
-            HWND hw = (HWND)td5_plat_get_native_window();
-            if (hw) {
-                char title[256];
-                snprintf(title, sizeof(title),
-                         "TEST 2 - SLIDER PLUMBING | frac=%.3f half_window=%d/%d spans",
-                         view_dist_frac, half_window, VIEW_DIST_MAX_SPANS);
-                SetWindowTextA(hw, title);
-            }
+        static int s_view_dist_logged = 0;
+        if (!s_view_dist_logged) {
+            TD5_LOG_I(LOG_TAG,
+                      "view distance: frac=%.2f max_spans=%d half_window=%d (visible window=%d spans)",
+                      view_dist_frac, VIEW_DIST_MAX_SPANS, half_window, half_window * 2);
+            s_view_dist_logged = 1;
         }
     }
 
@@ -1684,7 +1676,10 @@ void td5_render_actors_for_view(int view_index)
      * so without this the render camera stays frozen at its initial position. */
     update_render_camera_from_game();
 
-    /* Draw sky panorama behind all geometry */
+    /* Draw sky panorama behind all geometry. Sky uses TD5_PRESET_SKY
+     * (z_test=0, z_write=0) so its dome geometry — drawn camera-centered
+     * with small Z values — does not occlude distant track spans. */
+    td5_plat_render_set_preset(TD5_PRESET_SKY);
     td5_render_draw_sky();
 
     /* Set render preset for track geometry (enables texture sampling) */

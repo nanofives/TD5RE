@@ -2370,6 +2370,21 @@ void td5_plat_render_set_preset(TD5_RenderPreset preset)
         s->alpha_test_enable = 1;
         s->alpha_ref         = 1;
         break;
+
+    case TD5_PRESET_SKY:
+        /* Sky dome: opaque texture, no depth test, no depth write — sky must
+         * always be drawn behind everything else without occluding it. The
+         * dome mesh is camera-centered (zero translation), so its vertex Z
+         * values are small and would otherwise z-reject distant track. */
+        s->blend_enable      = 0;
+        s->z_enable          = 0;
+        s->z_write           = 0;
+        s->mag_filter        = 2; /* LINEAR */
+        s->min_filter        = 2;
+        s->texblend_mode     = D3DTBLEND_MODULATE;
+        s->alpha_test_enable = 1;
+        s->alpha_ref         = 1;
+        break;
     }
 
     g_backend.alpha_blend_enabled = s->blend_enable;

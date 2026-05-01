@@ -266,7 +266,8 @@ typedef enum TD5_RenderPreset {
     TD5_PRESET_OPAQUE_LINEAR      = 3,  /* Opaque, linear filter */
     TD5_PRESET_TRANSLUCENT_POINT  = 4,  /* Translucent, point (nearest-neighbour) filter */
     TD5_PRESET_ADDITIVE           = 5,  /* Additive (ONE/ONE) — type-3 tpages: lights, glows */
-    TD5_PRESET_SHADOW             = 6   /* Shadow: translucent, z_test=1, z_write=0, point filter */
+    TD5_PRESET_SHADOW             = 6,  /* Shadow: translucent, z_test=1, z_write=0, point filter */
+    TD5_PRESET_SKY                = 7   /* Sky dome: opaque, z_test=0, z_write=0, linear filter */
 } TD5_RenderPreset;
 
 /** Mesh primitive dispatch opcodes */
