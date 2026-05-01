@@ -1449,9 +1449,29 @@ static void vfx_set_emitter_anchor_from_wheel(TD5_Actor *actor, int wheel_index,
  * pool slots when the vehicle changes direction or the current slot ages.
  */
 void td5_vfx_update_tire_tracks(void) {
+    /* Faithful port of UpdateTireTrackEmitters @ 0x0043EB50.
+     *
+     * Per-tick model — confirmed via Ghidra (Pass 1+2):
+     *  - `slot->trail_*` is the FROZEN trailing-edge of the strip segment, set
+     *    once when motion begins and never moved again on this slot.
+     *  - `slot->anchor_*` is the moving leading-edge: tracks the live wheel
+     *    position while the descriptor still owns this slot.
+     *  - `slot->perp_*` is the half-width perpendicular: seeded once at the
+     *    first-motion tick from the spawn-direction, frozen thereafter.
+     *  - When realloc fires the descriptor's pool_slot moves to a new slot;
+     *    the old slot's anchor stops moving (no more writers) and renders as
+     *    a static historical mark until lifetime > 600.
+     *
+     * Realloc trigger [CONFIRMED @ 0x0043ED7E]:
+     *    ((slot->direction_hash ^ angle12) & 0xFFFFFF80) != 0
+     *  OR slot->lifetime > (3 - speedClass)
+     * where speedClass = clamp(abs(actor[+0x314]) >> 0xF, 1, 3) [CONFIRMED @ 0x0043EBA8].
+     * Lifetime is incremented in render (RenderTireTrackPool 0x0043F210). */
+
     if (!s_tire_track_pool) return;
 
     int active_emitters = 0;
+    int reallocs_this_tick = 0;
 
     for (int d = 0; d < (int)(sizeof(s_emitter_descs) / sizeof(s_emitter_descs[0]));
          d++) {
@@ -1464,80 +1484,118 @@ void td5_vfx_update_tire_tracks(void) {
 
         VfxTireTrackSlot *slot = &s_tire_track_pool[slot_idx];
 
-        /* Advance trail to old anchor BEFORE overwriting anchor.
-         * Render runs after this update and reads lead=anchor, trail=trail.
-         * If we advanced trail after setting anchor they'd be equal → degenerate. */
-        slot->trail_x = slot->anchor_x;
-        slot->trail_y = slot->anchor_y;
-        slot->trail_z = slot->anchor_z;
+        /* Per-tick alpha ramp: descriptor +6 (current) → +5 (target) by ±1.
+         * Port stores current in `initial_alpha` (+4) and target in `target_alpha`
+         * (+5). Field name swap vs original is harmless — only this loop reads them. */
+        if (desc->initial_alpha < desc->target_alpha) desc->initial_alpha++;
+        else if (desc->initial_alpha > desc->target_alpha) desc->initial_alpha--;
 
-        /* Refresh anchor to the live wheel position for this tick.
-         * wx/wy/wz hoisted to outer scope for use in direction-change realloc. */
+        /* Read live wheel world position. */
         int32_t wx = slot->anchor_x, wy = slot->anchor_y, wz = slot->anchor_z;
         if (g_actor_table_base) {
             uint8_t *ap = g_actor_table_base + (size_t)desc->actor_slot * TD5_ACTOR_STRIDE;
             vfx_read_wheel_world_pos((TD5_Actor *)ap, (int)desc->wheel_id, &wx, &wy, &wz);
-            slot->anchor_x = wx;
-            slot->anchor_y = wy;
-            slot->anchor_z = wz;
-        } /* else: g_actor_table_base not yet assigned — anchor stays at initial pos */
-
-        /* Movement delta: anchor (new) minus trail (one tick behind). */
-        int32_t dx = slot->anchor_x - slot->trail_x;
-        int32_t dz = slot->anchor_z - slot->trail_z;
-
-        /* Compute perpendicular half-width vector in 24.8 FP.
-         * w = emitter desc width in same units. */
-        int32_t w = (int32_t)desc->width;
-        int32_t dx8 = dx >> 8;
-        int32_t dz8 = dz >> 8;
-        int32_t len = td5_isqrt(dx8 * dx8 + dz8 * dz8);
-        if (len > 0) {
-            slot->perp_x = (-dz * w) / len;
-            slot->perp_z = ( dx * w) / len;
-            slot->control |= 2; /* has_geometry flag */
         }
 
-        /* Direction-change reallocation [CONFIRMED @ 0x43EDA0-0x43EE4F]:
-         * When the x-velocity coarse bin changes (bit 7+), freeze old slot and
-         * start a new one so expired segments remain as historical skid marks. */
-        uint32_t new_hash = (uint32_t)(dx & 0xFFFFFF80u);
-        if ((slot->direction_hash ^ new_hash) & 0xFFFFFF80u) {
-            /* Release ownership of old slot; keep bit1 so render still ages it */
+        /* Speed class: clamp(|actor[+0x314]| >> 0xF, 1, 3). Maps to realloc
+         * threshold (3 - speedClass) — fast vehicles realloc every tick, slow
+         * every 3rd tick. */
+        int32_t speedClass = 1;
+        if (g_actor_table_base) {
+            int32_t lspd = 0;
+            uint8_t *ap = g_actor_table_base + (size_t)desc->actor_slot * TD5_ACTOR_STRIDE;
+            memcpy(&lspd, ap + 0x314, 4);
+            int32_t abs_lspd = (lspd < 0) ? -lspd : lspd;
+            speedClass = abs_lspd >> 0xF;
+            if (speedClass < 1) speedClass = 1;
+            if (speedClass > 3) speedClass = 3;
+        }
+
+        /* Cumulative motion since spawn (trail = frozen spawn position once
+         * geometry is established; before that, trail == anchor so dx=0). */
+        int32_t dx = wx - slot->trail_x;
+        int32_t dz = wz - slot->trail_z;
+        int32_t dx8 = dx >> 8;
+        int32_t dz8 = dz >> 8;
+
+        /* 12-bit angle from cumulative motion vector. AngleFromVector12
+         * convention: (vertical, horizontal) → atan2(dz, dx). */
+        uint32_t angle12 = 0;
+        if (dx8 != 0 || dz8 != 0) {
+            angle12 = (uint32_t)AngleFromVector12(dz8, dx8);
+        }
+
+        /* Realloc decision — only check after geometry has been established;
+         * an un-seeded slot has no meaningful direction_hash to compare. */
+        int realloc_now = 0;
+        if ((slot->control & 2u) != 0u) {
+            if (((slot->direction_hash ^ angle12) & 0xFFFFFF80u) != 0u) realloc_now = 1;
+            if ((int)slot->lifetime > (3 - (int)speedClass)) realloc_now = 1;
+        }
+
+        if (realloc_now) {
+            /* Freeze old slot: clear bit0 (released), keep bit1 (render still
+             * ages it). [CONFIRMED @ 0x0043EE26: control &= 2] */
             slot->control &= 2u;
 
             int new_idx = vfx_alloc_slot_index();
             if (new_idx >= 0) {
                 VfxTireTrackSlot *ns = &s_tire_track_pool[new_idx];
                 memset(ns, 0, sizeof(*ns));
-                ns->anchor_x       = wx;
-                ns->anchor_y       = wy;
-                ns->anchor_z       = wz;
-                ns->trail_x        = wx;
-                ns->trail_y        = wy;
-                ns->trail_z        = wz;
-                ns->direction_hash = new_hash;
+                /* Anchor (lead) and trail collapse at spawn; trail freezes on
+                 * the first-motion tick below. */
+                ns->anchor_x = wx; ns->anchor_y = wy; ns->anchor_z = wz;
+                ns->trail_x  = wx; ns->trail_y  = wy; ns->trail_z  = wz;
+                ns->perp_x = 0; ns->perp_z = 0;
+                ns->direction_hash = angle12;
                 ns->intensity      = desc->initial_alpha;
                 ns->control        = 1u; /* allocated, no geometry yet */
-
+                ns->lifetime       = 0;
                 desc->pool_slot = (uint8_t)new_idx;
-
-                TD5_LOG_I(LOG_TAG,
-                    "tire track realloc: desc=%d slot %d->%d hash=%08x",
-                    d, slot_idx, new_idx, new_hash);
+                slot     = ns;
+                slot_idx = new_idx;
+                reallocs_this_tick++;
             } else {
-                /* Pool exhausted — reclaim old slot, just update hash */
+                /* Pool exhausted: leave the old slot in its frozen state
+                 * (control bit1 still set, ages out via render). Restore bit0
+                 * so this descriptor keeps writing into the same slot until
+                 * the pool drains. Reset lifetime + direction_hash so we
+                 * don't keep re-firing the realloc condition every tick. */
                 slot->control |= 1u;
-                slot->direction_hash = new_hash;
-                TD5_LOG_W(LOG_TAG, "tire track pool full at desc=%d", d);
+                slot->lifetime = 0;
+                slot->direction_hash = angle12;
+                if ((s_vfx_debug_frame % 60u) == 0u) {
+                    TD5_LOG_W(LOG_TAG, "tire track pool full at desc=%d", d);
+                }
             }
-        } else {
-            slot->direction_hash = new_hash;
         }
+
+        /* Update the (possibly new) active slot. Two phases:
+         *  - First-motion tick (control bit1 still 0 and we now have nonzero
+         *    cumulative motion): seed perp + direction_hash from current angle,
+         *    set bit1, leave trail at spawn (already there).
+         *  - Anchor (lead position) always tracks the live wheel pos. */
+        if ((slot->control & 2u) == 0u) {
+            int32_t w = (int32_t)desc->width;
+            int32_t len = td5_isqrt(dx8 * dx8 + dz8 * dz8);
+            if (len > 0 && w > 0) {
+                slot->perp_x = (-dz * w) / len;
+                slot->perp_z = ( dx * w) / len;
+                slot->direction_hash = angle12;
+                slot->control |= 2u;
+            }
+        }
+        /* Anchor follows the wheel each tick on the active slot only. Once
+         * realloc moves desc->pool_slot to a new index, this slot's anchor
+         * stops being written → it freezes as a historical mark. */
+        slot->anchor_x = wx;
+        slot->anchor_y = wy;
+        slot->anchor_z = wz;
     }
 
     if ((s_vfx_debug_frame % 60u) == 0u) {
-        TD5_LOG_D(LOG_TAG, "tire tracks update: active_emitters=%d", active_emitters);
+        TD5_LOG_I(LOG_TAG, "tire tracks update: active_emitters=%d reallocs=%d",
+                  active_emitters, reallocs_this_tick);
     }
 }
 
