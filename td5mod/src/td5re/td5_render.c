@@ -78,21 +78,12 @@ float CosFloat12bit(unsigned int angle);
 float SinFloat12bit(int angle);
 void BuildRotationMatrixFromAngles(float *out, short *angles);
 
-/** Near/far clip defaults.
- * Original depth normalization (0x00473bcc): depth = (vz - 64) / 65472, far = 65536.
- * Original frustum far-cull (0x0042D48E): round(3.0 * 65000) = 195000.
- * Source port uses far_cull as depth range so all geometry within frustum maps to [0,1]. */
+/** Near/far clip defaults — restored to Ghidra-confirmed originals.
+ * Depth normalization (0x00473bcc): depth = (vz - 64) / 65472, far = 65536.
+ * Frustum far-cull (0x0042D48E): round(3.0 * 65000) = 195000. */
 #define DEFAULT_NEAR_CLIP   1.0f
-/* Distance-based far cull is a port-only addition. Original gates view distance
- * purely by span count (RunRaceFrame 0x42BB2E clamps to gViewportLayoutMaxSpans
- * = 0x40, then doubles → 128 spans max single-screen). Port extends the span
- * window to 256 (4x original), but a distance-based cull at 400000 was clipping
- * the far end of that window for tracks with long ~2000-unit spans (256 spans
- * forward = ~512k world units, well past 400k). Bump to 1,000,000 so distance
- * culling stays out of the way of the span window; D24 z-buffer with linear z
- * has ~16 units/z-step at far=1M, still no z-fighting risk on track meshes. */
-#define DEFAULT_FAR_CLIP    1000000.0f
-#define DEFAULT_FAR_CULL    1000000.0f
+#define DEFAULT_FAR_CLIP    65536.0f
+#define DEFAULT_FAR_CULL    195000.0f
 
 /** Billboard depth sort stride sizes (bytes) */
 #define BILLBOARD_TRI_STRIDE  0x84
@@ -1682,16 +1673,13 @@ void td5_render_actors_for_view(int view_index)
  * tracks the player's perception of "view distance" is dominated by FORWARD
  * reach. Backward visibility is mostly frustum-culled anyway.
  *
- * Empirical measurement (VIEWDIST stats, 2026-05-01): Moscow spans are
- * ~320 world-units long on average. With FWD_SPANS=1024 the maximum
- * mesh vz observed across an entire frame was 328,485 — i.e. the forward
- * span window IS the actual horizon gate, NOT s_far_cull (which never
- * rejected a single mesh at 1M). Bumping FWD_SPANS proportionally
- * extends the visible horizon up to span_count (3500 on Moscow). At
- * 4096 fwd we feed all spans of a typical level; spans past span_count
- * are silently no-op'd by the index-window check. */
-#define VIEW_DIST_FWD_SPANS  1024
-#define VIEW_DIST_BACK_SPANS 256
+ * Restored to Ghidra-confirmed original (RunRaceFrame @ 0x42BB2E):
+ * gViewportLayoutMaxSpans = 0x40 (64), doubled = 128 spans single-screen.
+ * Forward and back are symmetric in the original — split here as 64/64 to
+ * preserve the asymmetric-window plumbing without exceeding the original
+ * total of 128. */
+#define VIEW_DIST_FWD_SPANS  64
+#define VIEW_DIST_BACK_SPANS 64
     int player_span = 0;
     int player_branch_span = -1;
     {

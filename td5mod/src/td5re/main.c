@@ -753,7 +753,36 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
         /* Run one frame of the game state machine.
          * td5re_frame() drives the FSM (INTRO -> MENU -> RACE -> BENCHMARK)
          * and calls td5_plat_present() internally at the end of each frame. */
-        td5re_frame();
+        {
+            uint32_t t0 = td5_plat_time_ms();
+            td5re_frame();
+            uint32_t t1 = td5_plat_time_ms();
+            uint32_t dt = t1 - t0;
+
+            /* 1-second window: track min/avg/max of full td5re_frame() ms.
+             * Logs once per real second so we can name the hot phase without
+             * flooding. Tag "main" routes to log/engine.log. */
+            static uint32_t s_perf_window_start = 0;
+            static uint32_t s_perf_min = 0xFFFFFFFFu;
+            static uint32_t s_perf_max = 0;
+            static uint32_t s_perf_sum = 0;
+            static uint32_t s_perf_count = 0;
+            if (s_perf_window_start == 0) s_perf_window_start = t1;
+            if (dt < s_perf_min) s_perf_min = dt;
+            if (dt > s_perf_max) s_perf_max = dt;
+            s_perf_sum += dt;
+            s_perf_count++;
+            if (t1 - s_perf_window_start >= 1000) {
+                uint32_t avg = (s_perf_count > 0) ? (s_perf_sum / s_perf_count) : 0;
+                dbglog("perf frame_ms: count=%u min=%u avg=%u max=%u game_state=%d",
+                       s_perf_count, s_perf_min, avg, s_perf_max, g_td5.game_state);
+                s_perf_window_start = t1;
+                s_perf_min = 0xFFFFFFFFu;
+                s_perf_max = 0;
+                s_perf_sum = 0;
+                s_perf_count = 0;
+            }
+        }
 
 
         /* Also check the global quit flag */
