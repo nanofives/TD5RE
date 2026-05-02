@@ -638,7 +638,7 @@ void td5_physics_update_vehicle_actor(TD5_Actor *actor)
         if (actor->race_position < eff_grip)
             eff_grip = actor->race_position;
 
-        if (actor->damage_lockout == 0x0F && actor->airborne_frame_counter >= 3) {
+        if (actor->wheel_contact_bitmask == 0x0F && actor->airborne_frame_counter >= 3) {
             /* Stunned/damping recovery mode */
             TD5_LOG_I(LOG_TAG, "state0f_enter: slot=%d afc=%d av_roll=%d av_pitch=%d",
                       actor->slot_index, actor->airborne_frame_counter,
@@ -3139,9 +3139,9 @@ void td5_physics_resolve_vehicle_contacts(void)
                  * original — `UpdateTrafficActorMotion`'s cVar3==0 branch
                  * leaves field_0x379 at 0. Gating on slot_index was wrong. */
                 int a_scripted = (a->vehicle_mode != 0) ||
-                                 (a->damage_lockout >= 0x0F);
+                                 (a->wheel_contact_bitmask >= 0x0F);
                 int b_scripted = (b->vehicle_mode != 0) ||
-                                 (b->damage_lockout >= 0x0F);
+                                 (b->wheel_contact_bitmask >= 0x0F);
 
                 if (i == 0 || j == 0) {
                     s_v2v_slot0_pair_count++;
@@ -3195,9 +3195,9 @@ static void resolve_collision_pair(TD5_Actor *a, TD5_Actor *b, int idx_a, int id
     if (!a->car_definition_ptr || !b->car_definition_ptr) return;
 
     int a_scripted = (a->vehicle_mode != 0) ||
-                     (a->damage_lockout >= 0x0F);
+                     (a->wheel_contact_bitmask >= 0x0F);
     int b_scripted = (b->vehicle_mode != 0) ||
-                     (b->damage_lockout >= 0x0F);
+                     (b->wheel_contact_bitmask >= 0x0F);
 
     if (a_scripted || b_scripted) {
         collision_detect_simple(a, b);
@@ -4434,24 +4434,17 @@ void td5_physics_integrate_pose(TD5_Actor *actor)
 
     /* 7. Save previous-frame grounded mask, then refresh wheel contacts.
      * suspension_response needs "was grounded last frame" for the spring
-     * damping path. refresh overwrites wheel_contact_bitmask (airborne polarity:
-     * 1=airborne), so save the inverted version (1=grounded) before the call. */
+     * damping path. Refresh writes the live airborne mask into +0x37C
+     * (wheel_contact_bitmask, 1=airborne) and snapshots the prior tick's
+     * value into +0x37D (damage_lockout) at entry. This side-channel
+     * remains for compatibility with consumers that already use it; +0x37D
+     * also now carries the OLD mask in airborne polarity. */
     s_prev_grounded_mask[actor->slot_index & 0x0F] = (~actor->wheel_contact_bitmask) & 0x0F;
     td5_physics_refresh_wheel_contacts(actor);
 
     /* Inner-tick trace post_refresh: deprecated — td5_trace_write_physics
      * was dropped by merge 1acd3fb in favor of the modular MOD_PHYSICS API.
      * Stubbed out until rewritten against the new emission path. */
-
-    /* Mirror current airborne mask into damage_lockout (+0x37C).
-     * Original writes the freshly-computed contact mask into +0x37C at
-     * 0x004039B9 inside RefreshVehicleWheelContactFrames. Port writes the
-     * equivalent live mask to +0x37D (wheel_contact_bitmask) instead,
-     * leaving +0x37C dead. Without this, the gate at td5_physics_update_
-     * vehicle_actor (state0f_damping trigger) and several other reads of
-     * damage_lockout never fire, killing the tumble-recovery angular
-     * damping (state0f_damping decays ω_roll/pitch by 1/16 per frame). */
-    actor->damage_lockout = actor->wheel_contact_bitmask;
 
     /* Increment airborne_frame_counter (+0x360) when all 4 wheels airborne.
      * [CONFIRMED @ 0x0040634B]: original does INC word ptr [ESI+0x360]
@@ -4711,20 +4704,12 @@ void td5_physics_integrate_pose(TD5_Actor *actor)
              * signed-IDIV result (MOV [ESI+0x200], EAX at 0x00406307). */
             int32_t new_y = (int32_t)(contact_y_sum / contact_count);
 
-            /* Reject ground snap if new_y is wildly different from prev_y.
-             * The span walker can overflow to out-of-bounds spans, producing
-             * garbage terrain heights (47M vs -800K). The per-wheel span
-             * clamp catches most cases, but some height functions return
-             * stale/wrong values even for in-bounds spans at track edges.
-             * 2M ≈ 7800 world units — well beyond any real terrain step.
-             * Skip the check when prev_y is the spawn sentinel (0xC0000000)
-             * since the first ground snap is always a huge legitimate delta. */
-            if (actor->prev_frame_y_position != (int32_t)0xC0000000) {
-                int32_t snap_delta = new_y - actor->prev_frame_y_position;
-                if (snap_delta > 2000000 || snap_delta < -2000000) {
-                    new_y = actor->prev_frame_y_position;
-                }
-            }
+            /* No snap-delta clamp. Original at 0x00406300 directly writes
+             * world_pos.y from the contact-Y average without bounding the
+             * delta vs prev_frame_y_position; the +0x37D OLD-mask gate
+             * below is the original's only filter on this write. The prior
+             * port's ±2M clamp was a workaround for the +0x37C/+0x37D
+             * semantic reversal that has since been corrected. */
 
             /* Chassis Y-snap. No chassis-level airborne override here —
              * the per-wheel airborne bits written by refresh_wheel_contacts
@@ -4785,26 +4770,20 @@ void td5_physics_integrate_pose(TD5_Actor *actor)
                 static const uint8_t k_mode_gate[16] = {
                     1,1,1,0, 1,0,0,0, 1,0,0,0, 0,0,0,0
                 };
-                uint8_t new_mask  = *(const uint8_t *)((const uint8_t *)actor + 0x37C);
+                uint8_t new_mask  = actor->wheel_contact_bitmask;
                 uint8_t prev_mask = (~s_prev_grounded_mask[actor->slot_index & 0x0F]) & 0x0F;
                 if (k_mode_gate[new_mask & 0xF] &&
                     (prev_mask & (new_mask ^ 0x0F)) == 0 &&
                     actor->prev_frame_y_position != (int32_t)0xC0000000) {
                     int32_t snap_vy = new_y - actor->prev_frame_y_position
                                      - g_gravity_constant;
-                    /* Clamp snap-derived velocity to realistic per-tick motion.
-                     * Legitimate max: 100mph (160 units/tick horizontal) on a
-                     * 30° grade → ~80 units/tick vertical → ~20480 FP. A 40°
-                     * slope at 150mph → ~38000 FP. The live-run log observed
-                     * ±52992 on Newcastle slopes, producing a visible "bounce"
-                     * on uphill entry and "sloppy settle" on downhill→flat.
-                     * ±30000 FP ≈ 117 units/tick = 7000 units/sec vertical —
-                     * tight enough to suppress glitch-level spikes, loose
-                     * enough for any real race-track grade. Previous 200000
-                     * was a leftover spawn-sentinel safeguard, way too loose
-                     * for runtime clamping. */
-                    if (snap_vy > 30000)  snap_vy =  30000;
-                    if (snap_vy < -30000) snap_vy = -30000;
+                    /* No clamp. Original at 0x0040630D-0x00406335 writes the
+                     * raw delta-minus-gravity unconditionally once the gate
+                     * passes; ±30000 was a port-only workaround for the
+                     * +0x37C/+0x37D semantic reversal that gated the snap
+                     * every tick. With the OLD-mask now correctly held in
+                     * +0x37D, the gate fires only on stable wheel sets and
+                     * the unclamped delta is faithful. */
                     if (actor->slot_index == 0 &&
                         (snap_vy > 100000 || snap_vy < -100000 ||
                          (actor->frame_counter % 60u) == 0u)) {
@@ -5027,6 +5006,15 @@ void td5_physics_refresh_wheel_contacts(TD5_Actor *actor)
     float *rot = actor->rotation_matrix.m;
     int resolved_surface = actor->surface_type_chassis;
     int resolved_surface_valid = 0;
+
+    /* Entry snapshot: copy prior-tick airborne mask (+0x37C) into the OLD
+     * slot (+0x37D). Matches original 0x00403793/0x004037D5:
+     *   MOV CL, byte ptr [ESI+0x37C]
+     *   MOV byte ptr [ESI+0x37D], CL
+     * The per-wheel loop below will overwrite +0x37C with the freshly-
+     * computed mask; +0x37D retains the OLD value for downstream gates
+     * (velocity-snap @ 0x004060CE/D4, tumble-recovery transition logic). */
+    actor->damage_lockout = actor->wheel_contact_bitmask;
 
     /* Step 1 (original 0x403720): copy chassis track position to each wheel probe.
      * Without this, wheel_probes[i].span_index stays at 0 (memset init) and

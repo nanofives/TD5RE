@@ -2236,8 +2236,8 @@ void td5_hud_render_overlays(float dt)
         /* Collision / contact state */
         uint8_t wall_flag    = dbg_a[0x37B];  /* track_contact_flag: 0=none, 1=wall, 2=edge */
         uint8_t veh_mode     = dbg_a[0x379];  /* vehicle_mode: 0=normal, 1=recovery */
-        uint8_t dmg_lockout  = dbg_a[0x37C];  /* damage_lockout counter */
-        uint8_t wheel_contact = dbg_a[0x37D]; /* per-wheel ground contact bits */
+        uint8_t wheel_contact = dbg_a[0x37C]; /* wheel airborne mask THIS tick (NEW) */
+        uint8_t dmg_lockout   = dbg_a[0x37D]; /* wheel airborne mask PREV tick (OLD snapshot) */
         uint8_t surface_flags = dbg_a[0x376]; /* surface contact (bit0=rear, bit1=front) */
         int32_t slip_f = *(int32_t *)(dbg_a + 0x31C); /* front axle slip excess */
         int32_t slip_r = *(int32_t *)(dbg_a + 0x320); /* rear axle slip excess */
