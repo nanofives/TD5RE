@@ -2536,8 +2536,14 @@ static void apply_collision_response(TD5_Actor *penetrator, TD5_Actor *target,
 
     if (is_side_branch) {
         /* --- SIDE BRANCH (LAB_00407B7F) --- */
-        if (cx_A - cx_B >= 0) { push_x = -cos_a / 2; push_z =  sin_a / 2; }
-        else                  { push_x =  cos_a / 2; push_z = -sin_a / 2; }
+        /* [CONFIRMED @ 0x00407B7F-0x00407BB5]: predicate is
+         *     cx_A == cx_B || cx_A - cx_B < 0   (i.e. cx_A <= cx_B)
+         * iVar6 holds the cos channel, iVar14 holds the sin channel.
+         * Push writes at 0x00407BB7-0x00407BDB are A.x -= iVar6, A.z -= iVar14,
+         * B.x += iVar6, B.z += iVar14 (see apply block below).
+         * push_x mirrors iVar6, push_z mirrors iVar14. */
+        if (cx_A <= cx_B) { push_x = -cos_a / 2; push_z =  sin_a / 2; }
+        else              { push_x =  cos_a / 2; push_z = -sin_a / 2; }
 
         int64_t denom = ((int64_t)cz_B * cz_B + INERTIA_K_64) * mass_A
                       + ((int64_t)cz_A * cz_A + INERTIA_K_64) * mass_B;
@@ -2563,8 +2569,14 @@ static void apply_collision_response(TD5_Actor *penetrator, TD5_Actor *target,
         }
     } else {
         /* --- FRONT/REAR BRANCH (LAB_00407B2D) --- */
-        if (cz_A - cz_B >= 0) { push_x = -sin_a / 2; push_z = -cos_a / 2; }
-        else                  { push_x =  sin_a / 2; push_z =  cos_a / 2; }
+        /* [CONFIRMED @ 0x00407D5F-0x00407D6E]: predicate is
+         *     cz_A == cz_B || cz_A - cz_B < 0   (i.e. cz_A <= cz_B)
+         * iVar14 holds the sin channel, iVar6 holds the cos channel.
+         * Push writes at 0x00407D70-0x00407D94 are A.x -= iVar14, A.z -= iVar6,
+         * B.x += iVar14, B.z += iVar6 (note operand cross vs SIDE).
+         * push_x mirrors iVar14, push_z mirrors iVar6. */
+        if (cz_A <= cz_B) { push_x = -sin_a / 2; push_z = -cos_a / 2; }
+        else              { push_x =  sin_a / 2; push_z =  cos_a / 2; }
 
         int64_t denom = ((int64_t)cx_B * cx_B + INERTIA_K_64) * mass_A
                       + ((int64_t)cx_A * cx_A + INERTIA_K_64) * mass_B;
@@ -2590,22 +2602,17 @@ static void apply_collision_response(TD5_Actor *penetrator, TD5_Actor *target,
     }
 
     /* Apply positional push BEFORE rejection check.
-     * [CONFIRMED @ 0x00407BB7-0x00407BDB]: The ±cos/sin/2 push is applied
-     * unconditionally whenever a corner penetration is detected; the XOR
-     * sign-rejection below only gates the velocity impulse, not the push.
-     *
-     * Net direction matches Ghidra: `actorA -= iVar6; actorB += iVar6`
-     * where actorA = TARGET (frame-owner, this function's A) and
-     * actorB = PENETRATOR (this function's B). The port's push_x
-     * encoding uses the OPPOSITE sign of Ghidra's iVar6 (see the ± in
-     * 2452/2479) and is applied with OPPOSITE operators (A +=, B -=),
-     * which cancels out to the same net outcome as the original. No
-     * magnitude scaling — the original applies exactly cos/2 + sin/2
-     * world units per penetrating corner per tick. */
-    A->world_pos.x += push_x;
-    A->world_pos.z += push_z;
-    B->world_pos.x -= push_x;
-    B->world_pos.z -= push_z;
+     * [CONFIRMED @ 0x00407BB7-0x00407BDB (SIDE) + 0x00407D70-0x00407D94 (FRONT)]:
+     *     A.x -= iVar6/iVar14;  A.z -= iVar14/iVar6;
+     *     B.x += iVar6/iVar14;  B.z += iVar14/iVar6;
+     * push_x/push_z carry the iVar sign per the per-branch assignments above
+     * (cosmetic line-for-line match to the decomp; supersedes the earlier
+     * algebraically-equivalent A+=, B-= encoding). The XOR rejection below
+     * only gates the velocity impulse, not the push. */
+    A->world_pos.x -= push_x;
+    A->world_pos.z -= push_z;
+    B->world_pos.x += push_x;
+    B->world_pos.z += push_z;
 
     if (rejected) {
         /* Separating contact — push applied above, but no velocity impulse. */
