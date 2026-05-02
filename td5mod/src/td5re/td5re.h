@@ -284,6 +284,7 @@ typedef struct TD5_GlobalState {
         int  log_engine;      /* engine.log (render, asset, platform, sound, net, fmv) */
         int  log_wrapper;     /* wrapper.log (D3D11 ddraw shim) */
         int  test_resolution_cycle; /* if >0, main loop cycles 3 windowed resolutions to validate apply_display_mode */
+        int  test_cup_roundtrip; /* if >0, run td5_save_test_cup_roundtrip() during startup and exit with the result */
     } ini;
 
 } TD5_GlobalState;

@@ -124,6 +124,31 @@
 #define TD5_CONFIG_XOR_KEY          "Outta Mah Face !! "
 #define TD5_CUPDATA_XOR_KEY         "Steve Snake says : No Cheating! "
 
+/* TD5RE divergent CupData overlay (port-only).
+ * Original CupData.td5 saves 14 actors via flat memcpy at buf+0x100; each
+ * actor stores raw pointers at +0x1B0/+0x1B8/+0x1BC (himodel, tuning,
+ * physics) that dangle if .data relocates between save and load. The
+ * port appends an overlay after the original 12966-byte payload that
+ * persists the 6 racer-slot car_index values, letting the loader
+ * re-resolve pointers via the asset registry.
+ *
+ * Overlay layout at file offset 12966 (= 0x32A6):
+ *   +0x00  char  magic[8]   = "TD5RE_v1"
+ *   +0x08  int32 car_index[6]   (slot 0 = player, slots 1..5 = AI)
+ * Total overlay size: 32 bytes. Extended file size: 12998 bytes.
+ *
+ * Loader detects format by file size: 12966 = original (legacy), 12998 =
+ * extended. Both pass through the same CRC-32 check (CRC domain follows
+ * the actual buffer size). */
+#define TD5_CUPDATA_OVERLAY_OFFSET  TD5_CUPDATA_FILE_SIZE   /* 0x32A6 */
+#define TD5_CUPDATA_OVERLAY_MAGIC   "TD5RE_v1"
+#define TD5_CUPDATA_OVERLAY_MAGIC_LEN 8
+#define TD5_CUPDATA_OVERLAY_NUM_SLOTS 6
+#define TD5_CUPDATA_OVERLAY_SIZE    (TD5_CUPDATA_OVERLAY_MAGIC_LEN + \
+                                     TD5_CUPDATA_OVERLAY_NUM_SLOTS * 4)
+#define TD5_CUPDATA_EXT_FILE_SIZE   (TD5_CUPDATA_FILE_SIZE + \
+                                     TD5_CUPDATA_OVERLAY_SIZE)
+
 /* ========================================================================
  * Network Constants
  * ======================================================================== */
