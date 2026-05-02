@@ -4439,16 +4439,9 @@ void td5_physics_integrate_pose(TD5_Actor *actor)
     s_prev_grounded_mask[actor->slot_index & 0x0F] = (~actor->wheel_contact_bitmask) & 0x0F;
     td5_physics_refresh_wheel_contacts(actor);
 
-    /* Inner-tick trace: emit a "post_refresh" row for slot 0 capturing the
-     * inputs to T2/suspension before they run. Lets the diff comparator
-     * localize whether the residual is in refresh (load_accum + wheel.y)
-     * or in the downstream integrator. */
-    if (actor->slot_index == 0 && td5_trace_is_enabled()) {
-        td5_trace_write_physics(0,
-                                (uint32_t)g_td5.simulation_tick_counter,
-                                "post_refresh",
-                                (const struct TD5_Actor *)actor);
-    }
+    /* Inner-tick trace post_refresh: deprecated — td5_trace_write_physics
+     * was dropped by merge 1acd3fb in favor of the modular MOD_PHYSICS API.
+     * Stubbed out until rewritten against the new emission path. */
 
     /* Mirror current airborne mask into damage_lockout (+0x37C).
      * Original writes the freshly-computed contact mask into +0x37C at
@@ -4612,15 +4605,7 @@ void td5_physics_integrate_pose(TD5_Actor *actor)
         }
     }
 
-    /* Inner-tick trace: emit "post_t2" after the attitude-from-wheels block.
-     * Captures display_angles + euler_accum AFTER T2 wrote them. Pairs with
-     * post_refresh to localize whether T2 itself is the divergent step. */
-    if (actor->slot_index == 0 && td5_trace_is_enabled()) {
-        td5_trace_write_physics(0,
-                                (uint32_t)g_td5.simulation_tick_counter,
-                                "post_t2",
-                                (const struct TD5_Actor *)actor);
-    }
+    /* Inner-tick trace post_t2: deprecated — see post_refresh stub above. */
 
     /* DIAGNOSTIC: log player car (slot 0) physics state once per 30 frames */
     if (actor->slot_index == 0) {
@@ -4850,15 +4835,7 @@ void td5_physics_integrate_pose(TD5_Actor *actor)
     if (actor->angular_velocity_pitch > 6000) actor->angular_velocity_pitch = 6000;
     if (actor->angular_velocity_pitch < -6000) actor->angular_velocity_pitch = -6000;
 
-    /* Inner-tick trace: emit "post_snap" after chassis ground-snap and
-     * velocity-snap have run. Captures the world_y / vy that get fed to
-     * suspension_response. Pairs with post_t2 to isolate snap math. */
-    if (actor->slot_index == 0 && td5_trace_is_enabled()) {
-        td5_trace_write_physics(0,
-                                (uint32_t)g_td5.simulation_tick_counter,
-                                "post_snap",
-                                (const struct TD5_Actor *)actor);
-    }
+    /* Inner-tick trace post_snap: deprecated — see post_refresh stub above. */
 
     /* 10. Update suspension response.
      * UNCONDITIONAL, matching original 0x00405E80 which always calls

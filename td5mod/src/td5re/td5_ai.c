@@ -42,7 +42,17 @@
 #define RS_ROUTE_TABLE_PTR        0x00
 #define RS_ROUTE_TABLE_SELECTOR   0x03
 #define RS_DEFAULT_THROTTLE       0x04
-#define RS_TRACK_OFFSET_BIAS      0x09
+/* RS dword 0x0B (byte 0x2C) per Ghidra: gActorRouteStateTable+0x2C =
+ * DAT_004afb84[slot*0x47] [CONFIRMED @ 0x00434332]. Previously 0x09 in the
+ * port — confirmed wrong via Frida target_probe on Moscow TT slot 0:
+ *   port:     dx=-2111 dz=4658  (target on LEFT of actor)
+ *   original: dx=+4722 dz=2136  (target on RIGHT of actor)
+ * Because the bias was stored in port RS[0x09] but original reads RS[0x0B],
+ * the port's SampleTrackTargetPoint received a different lateral_bias than
+ * the original, shifting the target sample point and flipping the sign of
+ * dx. Downstream this produced ~10× the steering bias on slot 0 in solo
+ * scenarios. Fix: align the port to the original's storage convention. */
+#define RS_TRACK_OFFSET_BIAS      0x0B
 #define RS_LEFT_BOUNDARY_A        0x0E
 #define RS_LEFT_BOUNDARY_B        0x0F
 #define RS_RIGHT_BOUNDARY_A       0x10
@@ -1458,8 +1468,13 @@ void td5_ai_seed_actor_track_progress_offset(int slot)
          * maps positive-bias → direction=0 → positive push, negative → direction=1 →
          * negative push.  To get divergence, selector=0 (LEFT.TRK) cars need a
          * NEGATIVE starting bias so the peer-avoidance drives them leftward. */
-        if (rs[RS_ROUTE_TABLE_SELECTOR] == 0)
-            bias = -bias;
+        /* Bias stored AS-IS, matching original `ComputeSignedTrackOffset @ 0x00434670`
+         * which returns the value without negation. The previous port-only
+         * `if (selector == 0) bias = -bias;` was a lane-spread enhancement that
+         * diverged from the original and produced a sign-flipped lateral target on
+         * Moscow TT slot 0 (port dx=-2097 vs original dx=+4722 confirmed via Frida
+         * target_probe). Combined with the corrected tangent direction in
+         * td5_track_sample_target_point, this restores parity. */
         rs[RS_TRACK_OFFSET_BIAS] = bias;
     }
 
@@ -1722,9 +1737,10 @@ void td5_ai_update_track_behavior(int slot) {
     int threshold_result;
     int32_t steer_weight;
 
-    /* Time trial: skip AI track behavior entirely */
-    if (g_td5.time_trial_enabled)
-        return;
+    /* Time trial used to skip AI track behavior entirely (slot 0 was assumed
+     * human). With PlayerIsAI=1 we deliberately route slot 0 through the AI,
+     * so the gate is removed — racer_count is already 1 in TT, so only slot 0
+     * reaches this function anyway. */
 
     /* AI probe (debug-level): state matching frida_ai_probe.js for side-by-side
      * diff. Keep at TD5_LOG_D to avoid flooding INFO logs. Match fields with

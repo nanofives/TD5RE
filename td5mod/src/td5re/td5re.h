@@ -139,6 +139,12 @@ typedef struct TD5_GlobalState {
 
     /* Race configuration */
     int  time_trial_enabled;
+    /* Solo-synth mode: user-facing "Time Trial" with the engine running as
+     * plain single race (game_type=0) plus slots 1..5 forced INACTIVE. Mirrors
+     * the Frida TT-synth applied to the original via td5_quickrace_hook.js so
+     * /diff-race captures apples-to-apples physics on slot 0. Set by
+     * ConfigureGameTypeFlags case 7. */
+    int  solo_mode_synth;
     int  wanted_mode_enabled;
     int  drag_race_enabled;
     int  traffic_enabled;

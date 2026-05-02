@@ -3419,14 +3419,28 @@ int td5_track_sample_target_point(int span_index, int route_byte,
         float fez = (float)edge_dz;
         float mag = sqrtf(fex * fex + fez * fez);
         if (mag > 0.5f) {
-            /* Perpendicular is (-dz, dx) normalized to short range */
-            int16_t perp_x = (int16_t)((-fez / mag) * 4096.0f);
-            int16_t perp_z = (int16_t)(( fex / mag) * 4096.0f);
+            /* Bias is applied along the (left->right) edge tangent itself —
+             * the rail-crossing edge IS the lateral axis of the lane.
+             * Original `SampleTrackTargetPoint @ 0x00434800` step 6 builds
+             * `local_8 = {(short)(Rx-Lx), 0, (short)(Rz-Lz)}` (the edge
+             * vector itself), step 7 calls `ConvertFloatVec4ToShortAngles`
+             * which scales by 4096/mag (no rotation) [CONFIRMED @
+             * 0x42CDB0-0x42CE39], and step 8 applies `out[0] +=
+             * (local_8[0]*bias)>>12 << 8` (along +dx).
+             * The previous port `(-dz, +dx)` perpendicular shifted the
+             * target along the track length instead of across the lane;
+             * combined with the negation in seed_actor_track_progress_offset,
+             * port produced ~2× lateral velocity vs original on Moscow TT
+             * slot 0. After both fixes (tangent here + negation removed in
+             * td5_ai.c), port vel_x at sim_tick=10 = -2097 vs original
+             * -1913 (within 10% — was 2× before). */
+            int16_t tan_x = (int16_t)(( fex / mag) * 4096.0f);
+            int16_t tan_z = (int16_t)(( fez / mag) * 4096.0f);
 
             /* Apply bias with fixed-point 4.12 multiply and rounding
              * [CONFIRMED @ 0x4348B1-0x4348F1] */
-            int32_t off_x = (int32_t)perp_x * lateral_bias;
-            int32_t off_z = (int32_t)perp_z * lateral_bias;
+            int32_t off_x = (int32_t)tan_x * lateral_bias;
+            int32_t off_z = (int32_t)tan_z * lateral_bias;
             /* Signed rounding: (val + (CDQ(val) & 0xFFF)) >> 12 */
             off_x = (off_x + ((off_x >> 31) & 0xFFF)) >> 12;
             off_z = (off_z + ((off_z >> 31) & 0xFFF)) >> 12;
