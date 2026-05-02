@@ -4353,37 +4353,36 @@ void td5_physics_integrate_pose(TD5_Actor *actor)
     actor->display_angles.yaw   = (int16_t)((actor->euler_accum.yaw >> 8) & 0xFFF);
     actor->display_angles.pitch = (int16_t)((actor->euler_accum.pitch >> 8) & 0xFFF);
 
-    /* 5. Build rotation matrix from euler angles (float boundary).
+    /* 5. Build rotation matrix from euler angles in FLOAT precision.
      *
-     * Original (0x42E1E0): Ry(yaw) * Rx(roll) * Rz(pitch) — YXZ order.
-     * angles[0]=roll applied as X rotation, angles[1]=yaw as Y, angles[2]=pitch as Z.
-     * This matches BuildRotationMatrixFromAngles in td5_render.c. */
+     * Original (0x42E1E0): Ry(yaw) * Rx(roll) * Rz(pitch) — YXZ order, all
+     * trig multiplications in 80-bit FPU. Earlier port used integer Q12
+     * with `>> 12` truncations after each multiply — those LSB losses
+     * propagated through `body_wy * m[4]` in chassis-snap and produced a
+     * +128 FP averaged delta in world_pos.y at sim_tick=1.
+     * [E1 / 2026-05-02 — physics_trace.csv ground-truth diff] */
     {
         int32_t roll_a  = actor->display_angles.roll  & 0xFFF;
         int32_t yaw_a   = actor->display_angles.yaw   & 0xFFF;
-        int32_t pitch_a = actor->display_angles.pitch  & 0xFFF;
+        int32_t pitch_a = actor->display_angles.pitch & 0xFFF;
 
-        int32_t cr = cos_fixed12(roll_a);
-        int32_t sr = sin_fixed12(roll_a);
-        int32_t cy = cos_fixed12(yaw_a);
-        int32_t sy = sin_fixed12(yaw_a);
-        int32_t cp = cos_fixed12(pitch_a);
-        int32_t sp = sin_fixed12(pitch_a);
+        const float k = 1.0f / 4096.0f;
+        float cr = (float)cos_fixed12(roll_a)  * k;
+        float sr = (float)sin_fixed12(roll_a)  * k;
+        float cy = (float)cos_fixed12(yaw_a)   * k;
+        float sy = (float)sin_fixed12(yaw_a)   * k;
+        float cp = (float)cos_fixed12(pitch_a) * k;
+        float sp = (float)sin_fixed12(pitch_a) * k;
 
-        /* Ry(yaw) * Rx(roll) * Rz(pitch) — verified against Ghidra 0x42E1E0 */
-        float s = 1.0f / 4096.0f;
-
-        actor->rotation_matrix.m[0] = (float)(((sp * sy >> 12) * sr >> 12) + ((cp * cy) >> 12)) * s;
-        actor->rotation_matrix.m[1] = (float)(((cp * sy >> 12) * sr >> 12) - ((sp * cy) >> 12)) * s;
-        actor->rotation_matrix.m[2] = (float)((sy * cr) >> 12) * s;
-
-        actor->rotation_matrix.m[3] = (float)((sp * cr) >> 12) * s;
-        actor->rotation_matrix.m[4] = (float)((cp * cr) >> 12) * s;
-        actor->rotation_matrix.m[5] = (float)(-sr) * s;
-
-        actor->rotation_matrix.m[6] = (float)(((sp * cy >> 12) * sr >> 12) - ((cp * sy) >> 12)) * s;
-        actor->rotation_matrix.m[7] = (float)(((cp * cy >> 12) * sr >> 12) + ((sp * sy) >> 12)) * s;
-        actor->rotation_matrix.m[8] = (float)((cy * cr) >> 12) * s;
+        actor->rotation_matrix.m[0] = sp * sy * sr + cp * cy;
+        actor->rotation_matrix.m[1] = cp * sy * sr - sp * cy;
+        actor->rotation_matrix.m[2] = sy * cr;
+        actor->rotation_matrix.m[3] = sp * cr;
+        actor->rotation_matrix.m[4] = cp * cr;
+        actor->rotation_matrix.m[5] = -sr;
+        actor->rotation_matrix.m[6] = sp * cy * sr - cp * sy;
+        actor->rotation_matrix.m[7] = cp * cy * sr + sp * sy;
+        actor->rotation_matrix.m[8] = cy * cr;
     }
 
     /* 6. Compute render position (world_pos / 256 as float) */
@@ -4520,30 +4519,28 @@ void td5_physics_integrate_pose(TD5_Actor *actor)
         }
 
         /* Rebuild rotation_matrix from the (possibly partially updated)
-         * display_angles. Matches original 0x00405E80's second call to
-         * BuildRotationMatrixFromAngles — runs unconditionally after the
-         * switch for all non-skipped cases. */
+         * display_angles in float precision (E1 fix — see line ~4361). */
         int32_t roll_a  = actor->display_angles.roll  & 0xFFF;
         int32_t yaw_a   = actor->display_angles.yaw   & 0xFFF;
         int32_t pitch_a = actor->display_angles.pitch & 0xFFF;
 
-        int32_t cr = cos_fixed12(roll_a);
-        int32_t sr = sin_fixed12(roll_a);
-        int32_t cy = cos_fixed12(yaw_a);
-        int32_t sy = sin_fixed12(yaw_a);
-        int32_t cp = cos_fixed12(pitch_a);
-        int32_t sp2 = sin_fixed12(pitch_a);
+        const float k = 1.0f / 4096.0f;
+        float cr = (float)cos_fixed12(roll_a)  * k;
+        float sr = (float)sin_fixed12(roll_a)  * k;
+        float cy = (float)cos_fixed12(yaw_a)   * k;
+        float sy = (float)sin_fixed12(yaw_a)   * k;
+        float cp = (float)cos_fixed12(pitch_a) * k;
+        float sp = (float)sin_fixed12(pitch_a) * k;
 
-        float s = 1.0f / 4096.0f;
-        actor->rotation_matrix.m[0] = (float)(((sp2 * sy >> 12) * sr >> 12) + ((cp * cy) >> 12)) * s;
-        actor->rotation_matrix.m[1] = (float)(((cp  * sy >> 12) * sr >> 12) - ((sp2 * cy) >> 12)) * s;
-        actor->rotation_matrix.m[2] = (float)((sy * cr) >> 12) * s;
-        actor->rotation_matrix.m[3] = (float)((sp2 * cr) >> 12) * s;
-        actor->rotation_matrix.m[4] = (float)((cp  * cr) >> 12) * s;
-        actor->rotation_matrix.m[5] = (float)(-sr) * s;
-        actor->rotation_matrix.m[6] = (float)(((sp2 * cy >> 12) * sr >> 12) - ((cp * sy) >> 12)) * s;
-        actor->rotation_matrix.m[7] = (float)(((cp  * cy >> 12) * sr >> 12) + ((sp2 * sy) >> 12)) * s;
-        actor->rotation_matrix.m[8] = (float)((cy * cr) >> 12) * s;
+        actor->rotation_matrix.m[0] = sp * sy * sr + cp * cy;
+        actor->rotation_matrix.m[1] = cp * sy * sr - sp * cy;
+        actor->rotation_matrix.m[2] = sy * cr;
+        actor->rotation_matrix.m[3] = sp * cr;
+        actor->rotation_matrix.m[4] = cp * cr;
+        actor->rotation_matrix.m[5] = -sr;
+        actor->rotation_matrix.m[6] = sp * cy * sr - cp * sy;
+        actor->rotation_matrix.m[7] = cp * cy * sr + sp * sy;
+        actor->rotation_matrix.m[8] = cy * cr;
 
         /* One-line per-tick diagnostic for the player car only */
         if (actor->slot_index == 0) {
@@ -4896,25 +4893,24 @@ static void update_vehicle_pose_from_physics(TD5_Actor *actor)
         int32_t yaw_a   = actor->display_angles.yaw   & 0xFFF;
         int32_t pitch_a = actor->display_angles.pitch  & 0xFFF;
 
-        int32_t cr = cos_fixed12(roll_a);
-        int32_t sr = sin_fixed12(roll_a);
-        int32_t cy = cos_fixed12(yaw_a);
-        int32_t sy = sin_fixed12(yaw_a);
-        int32_t cp = cos_fixed12(pitch_a);
-        int32_t sp = sin_fixed12(pitch_a);
+        /* Float-precision matrix build (E1 fix — see line ~4361). */
+        const float k = 1.0f / 4096.0f;
+        float cr = (float)cos_fixed12(roll_a)  * k;
+        float sr = (float)sin_fixed12(roll_a)  * k;
+        float cy = (float)cos_fixed12(yaw_a)   * k;
+        float sy = (float)sin_fixed12(yaw_a)   * k;
+        float cp = (float)cos_fixed12(pitch_a) * k;
+        float sp = (float)sin_fixed12(pitch_a) * k;
 
-        float s = 1.0f / 4096.0f;
-
-        /* Ry(yaw) * Rx(roll) * Rz(pitch) — same as integrate_pose */
-        actor->rotation_matrix.m[0] = (float)(((sp * sy >> 12) * sr >> 12) + ((cp * cy) >> 12)) * s;
-        actor->rotation_matrix.m[1] = (float)(((cp * sy >> 12) * sr >> 12) - ((sp * cy) >> 12)) * s;
-        actor->rotation_matrix.m[2] = (float)((sy * cr) >> 12) * s;
-        actor->rotation_matrix.m[3] = (float)((sp * cr) >> 12) * s;
-        actor->rotation_matrix.m[4] = (float)((cp * cr) >> 12) * s;
-        actor->rotation_matrix.m[5] = (float)(-sr) * s;
-        actor->rotation_matrix.m[6] = (float)(((sp * cy >> 12) * sr >> 12) - ((cp * sy) >> 12)) * s;
-        actor->rotation_matrix.m[7] = (float)(((cp * cy >> 12) * sr >> 12) + ((sp * sy) >> 12)) * s;
-        actor->rotation_matrix.m[8] = (float)((cy * cr) >> 12) * s;
+        actor->rotation_matrix.m[0] = sp * sy * sr + cp * cy;
+        actor->rotation_matrix.m[1] = cp * sy * sr - sp * cy;
+        actor->rotation_matrix.m[2] = sy * cr;
+        actor->rotation_matrix.m[3] = sp * cr;
+        actor->rotation_matrix.m[4] = cp * cr;
+        actor->rotation_matrix.m[5] = -sr;
+        actor->rotation_matrix.m[6] = sp * cy * sr - cp * sy;
+        actor->rotation_matrix.m[7] = cp * cy * sr + sp * sy;
+        actor->rotation_matrix.m[8] = cy * cr;
     }
 
     /* Render position */
@@ -5031,24 +5027,36 @@ void td5_physics_refresh_wheel_contacts(TD5_Actor *actor)
             (href_x181 + (int32_t)((uint32_t)(href_x181 >> 31) & 0xFFu)) >> 8;
         wy = (int32_t)(int16_t)(wy - sp_div - href_preload);
 
-        /* Transform by body rotation matrix and scale to world coords (<<8) */
-        int32_t world_x = (int32_t)(rot[0] * wx + rot[1] * wy + rot[2] * wz);
-        int32_t world_y = (int32_t)(rot[3] * wx + rot[4] * wy + rot[5] * wz);
-        int32_t world_z = (int32_t)(rot[6] * wx + rot[7] * wy + rot[8] * wz);
+        /* Faithful port of TransformShortVec3ByRenderMatrixRounded @ 0x0042EB10
+         * followed by `<<8` in 0x00403720. The original transform consumes
+         * float render_pos (= world_pos/256.0f) and FISTPs the integer result;
+         * the `<<8` then forces wheel_contact_pos to a multiple of 256 in
+         * 24.8 FP. Earlier port path truncated `(rot*body)` then added
+         * world_pos directly (preserving its low 8 bits), producing wheel
+         * positions that aren't multiples of 256 — every chassis-snap then
+         * inherited those leaked low bits and produced the +128 FP world_y
+         * delta + ~263..1017 FP wheel XZ deltas observed in physics_trace.csv.
+         * [E2 / 2026-05-02 ground-truth diff finding] */
+        float fx = rot[0] * (float)wx + rot[1] * (float)wy + rot[2] * (float)wz
+                 + actor->render_pos.x;
+        float fy = rot[3] * (float)wx + rot[4] * (float)wy + rot[5] * (float)wz
+                 + actor->render_pos.y;
+        float fz = rot[6] * (float)wx + rot[7] * (float)wy + rot[8] * (float)wz
+                 + actor->render_pos.z;
+        int32_t world_x = (int32_t)nearbyintf(fx);  /* round-half-to-even, mirrors x87 FISTP */
+        int32_t world_y = (int32_t)nearbyintf(fy);
+        int32_t world_z = (int32_t)nearbyintf(fz);
+        actor->wheel_contact_pos[i].x = world_x << 8;
+        actor->wheel_contact_pos[i].y = world_y << 8;
+        actor->wheel_contact_pos[i].z = world_z << 8;
 
-        /* Add to chassis world position, scaling to 24.8 fixed-point.
-         * Original (0x403720): integer matrix (4096-scale) * offset >> 12,
-         * then << 8 to convert to 24.8 world units.
-         * Float path: matrix is pre-divided by 4096, so multiply by 256
-         * to match the original's >> 12 << 8 = >> 4 = * 256/4096.
-         * [CONFIRMED @ 0x403720, RE analysis line 624] */
-        actor->wheel_contact_pos[i].x = actor->world_pos.x + (int32_t)(world_x * 256.0f);
-        actor->wheel_contact_pos[i].y = actor->world_pos.y + (int32_t)(world_y * 256.0f);
-        actor->wheel_contact_pos[i].z = actor->world_pos.z + (int32_t)(world_z * 256.0f);
-
-        /* Stash the rotated wheel-Y offset (pre-snap, world FP scale) for
-         * use by update_vehicle_pose_from_physics's chassis ground snap. */
-        s_wheel_offset_y_world[slot & 0x0F][i] = (int32_t)(world_y * 256.0f);
+        /* Stash the rotated wheel-Y offset (delta from chassis world_y, post-<<8)
+         * for use by integrate_pose's chassis ground snap. The original snap
+         * formula: `world_pos.y = avg(wheel.y - rotated_y*256)`. With the new
+         * wheel.y already including world_pos.y additively, the delta we need
+         * is `wheel.y - world_pos.y` = the rotated body offset alone. */
+        s_wheel_offset_y_world[slot & 0x0F][i] =
+            actor->wheel_contact_pos[i].y - actor->world_pos.y;
 
         /* Per-probe track position update [CONFIRMED @ 0x403720].
          * Original calls FUN_004440F0 per probe with probe's own world pos.
