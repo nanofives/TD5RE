@@ -3372,7 +3372,12 @@ static int16_t rotate_body_to_world_y(const TD5_Actor *actor, const int16_t v[3]
     float result = (float)v[0] * m3 + (float)v[1] * m4 + (float)v[2] * m5;
     if (result >  32767.0f) return  32767;
     if (result < -32768.0f) return -32768;
-    return (int16_t)(int32_t)result;
+    /* Original (ConvertFloatVec3ToShortAngles @ 0x0042E2E0) uses x87 FISTP
+     * which rounds-to-nearest-even by default. C cast `(int32_t)float` is
+     * trunc-toward-zero — produces ±1 LSB drift on negative non-integer
+     * intermediates that propagated into chassis-snap's averaged world_y.
+     * lrintf honors FE_TONEAREST. */
+    return (int16_t)lrintf(result);
 }
 
 /* Y-component projection of a world-space vector into body space.
@@ -5037,26 +5042,33 @@ void td5_physics_refresh_wheel_contacts(TD5_Actor *actor)
          * inherited those leaked low bits and produced the +128 FP world_y
          * delta + ~263..1017 FP wheel XZ deltas observed in physics_trace.csv.
          * [E2 / 2026-05-02 ground-truth diff finding] */
-        float fx = rot[0] * (float)wx + rot[1] * (float)wy + rot[2] * (float)wz
-                 + actor->render_pos.x;
-        float fy = rot[3] * (float)wx + rot[4] * (float)wy + rot[5] * (float)wz
-                 + actor->render_pos.y;
-        float fz = rot[6] * (float)wx + rot[7] * (float)wy + rot[8] * (float)wz
-                 + actor->render_pos.z;
-        int32_t world_x = (int32_t)nearbyintf(fx);  /* round-half-to-even, mirrors x87 FISTP */
-        int32_t world_y = (int32_t)nearbyintf(fy);
-        int32_t world_z = (int32_t)nearbyintf(fz);
+        /* Step A: body-only rotated offset (no render_pos add). This is the
+         * input to ConvertFloatVec3ToShortAngles @ 0x0042E2E0 which produces
+         * the int16 stash at actor+0x230+8*i used by chassis-snap as
+         * `puVar8[1] * -0x100`. Original int16-truncates each component via
+         * x87 FISTP (round-to-nearest-even) then writes 3 shorts. */
+        float bx = rot[0] * (float)wx + rot[1] * (float)wy + rot[2] * (float)wz;
+        float by = rot[3] * (float)wx + rot[4] * (float)wy + rot[5] * (float)wz;
+        float bz = rot[6] * (float)wx + rot[7] * (float)wy + rot[8] * (float)wz;
+
+        /* Step B: full world position via TransformShortVec3ByRenderMatrixRounded
+         * @ 0x0042EB10 → FISTP(rot*body + render_pos), then `<<8` to 24.8 FP.
+         * Forces wheel_contact_pos to be a multiple of 256. */
+        int32_t world_x = (int32_t)lrintf(bx + actor->render_pos.x);
+        int32_t world_y = (int32_t)lrintf(by + actor->render_pos.y);
+        int32_t world_z = (int32_t)lrintf(bz + actor->render_pos.z);
         actor->wheel_contact_pos[i].x = world_x << 8;
         actor->wheel_contact_pos[i].y = world_y << 8;
         actor->wheel_contact_pos[i].z = world_z << 8;
 
-        /* Stash the rotated wheel-Y offset (delta from chassis world_y, post-<<8)
-         * for use by integrate_pose's chassis ground snap. The original snap
-         * formula: `world_pos.y = avg(wheel.y - rotated_y*256)`. With the new
-         * wheel.y already including world_pos.y additively, the delta we need
-         * is `wheel.y - world_pos.y` = the rotated body offset alone. */
+        /* Step C: stash int16-truncated body-rotated Y for chassis-snap.
+         * Original `ConvertFloatVec3ToShortAngles @ 0x0042E2E0` writes
+         * `(short)__ftol(by)` to actor+0x232+8*i; chassis-snap then reads
+         * MOVSX EAX, [EBP+2]; SHL EAX, 8 → effectively `(int16)round(by) * 256`.
+         * Port stashes the equivalent in s_wheel_offset_y_world for the
+         * integrator's chassis-snap loop in update_vehicle_pose_from_physics. */
         s_wheel_offset_y_world[slot & 0x0F][i] =
-            actor->wheel_contact_pos[i].y - actor->world_pos.y;
+            (int32_t)(int16_t)lrintf(by) * 256;
 
         /* Per-probe track position update [CONFIRMED @ 0x403720].
          * Original calls FUN_004440F0 per probe with probe's own world pos.
