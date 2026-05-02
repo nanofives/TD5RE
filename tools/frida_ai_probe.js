@@ -222,13 +222,66 @@ Interceptor.attach(ADDR_AngleFromVector12, {
     }
 });
 
-console.log("[ai_probe] Hooks installed at track_behavior=0x434FE0 threshold=0x434AA0 cascade=0x4340C0 afv=0x40A720");
+// ============================================================================
+// UpdateAIVehicleDynamics (0x00404EC0) onLeave — captures the +0x318 writeback
+// alongside its inputs, so we can verify whether the original's lateral_speed
+// at saturated steer matches the port's value.
+//
+// Offsets (verified against tools/frida_race_trace.js):
+//   +0x1C4 = euler_accum.yaw     (heading)
+//   +0x1CC = linear_velocity_x   (vx, post-drag after this fn returns)
+//   +0x1D4 = linear_velocity_z   (vz, post-drag)
+//   +0x1D8 = angular_velocity_yaw  [UNCERTAIN — adjacent slot to yaw]
+//   +0x30C = steering_command
+//   +0x314 = longitudinal_speed
+//   +0x318 = lateral_speed       (the field under investigation)
+// ============================================================================
+
+var ADDR_UpdateAIVehicleDynamics = ptr(0x00404EC0);
+var dynFp = null;
+try {
+    dynFp = new File("C:\\Users\\maria\\Desktop\\Proyectos\\TD5RE\\log\\ai_dynamics_probe_original.csv", "w");
+    dynFp.write("sim_tick,slot,heading,steer_cmd,vx,vz,ang_vel_yaw,long_speed,lat_speed\n");
+    dynFp.flush();
+    console.log("[ai_probe] Writing log/ai_dynamics_probe_original.csv");
+} catch (e) {
+    console.log("[ai_probe] dyn probe open failed: " + e);
+}
+
+Interceptor.attach(ADDR_UpdateAIVehicleDynamics, {
+    onEnter: function (args) {
+        // __cdecl: actor* at [esp+4] -> args[0].
+        this.actor = args[0];
+        var slot = actorSlotFromPtr(this.actor);
+        this.slot = slot;
+    },
+    onLeave: function () {
+        if (!dynFp) return;
+        if (this.slot < 0 || this.slot >= 6) return;
+        var simTick = readS32(G_simulationTickCounter);
+        var a = this.actor;
+        var heading = readS32(a.add(0x1C4));
+        var steer   = readS32(a.add(0x30C));
+        var vx      = readS32(a.add(0x1CC));
+        var vz      = readS32(a.add(0x1D4));
+        var omega   = readS32(a.add(0x1D8));
+        var lspd    = readS32(a.add(0x314));
+        var latS    = readS32(a.add(0x318));
+        dynFp.write(simTick + "," + this.slot + "," + heading + "," + steer + "," +
+                    vx + "," + vz + "," + omega + "," + lspd + "," + latS + "\n");
+    }
+});
+
+console.log("[ai_probe] Hooks installed at track_behavior=0x434FE0 threshold=0x434AA0 cascade=0x4340C0 afv=0x40A720 dyn=0x404EC0");
 
 // Periodic flush — otherwise rows buffer until process exit.
 var flushCount = 0;
 var flushTimer = setInterval(function () {
     if (fp) {
         try { fp.flush(); } catch (e) {}
+    }
+    if (dynFp) {
+        try { dynFp.flush(); } catch (e) {}
     }
     flushCount++;
 }, 250);
@@ -239,6 +292,10 @@ Script.bindWeak(globalThis, function () {
     if (fp) {
         try { fp.flush(); fp.close(); } catch (e) {}
         fp = null;
+    }
+    if (dynFp) {
+        try { dynFp.flush(); dynFp.close(); } catch (e) {}
+        dynFp = null;
     }
     clearInterval(flushTimer);
 });
