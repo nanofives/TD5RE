@@ -51,6 +51,30 @@ var RVA = {
     // takes the AI branch for slot 0, then restored to 1 on return.
     UpdateRaceActors:                      0x00036a70,
     slot0_state_byte:                      0x000AADF4,  // gRaceSlotStateTable.slot[0].state
+
+    // Time-Trial trap: in InitializeRaceSession (0x0042aa10) the block at
+    //   if (TVar16 != 0) { g_trackTextureIndex = 0x1e; g_trackPoolIndex = 0x1e; }
+    // overrides the loaded track to drag-strip pool 30 whenever
+    // g_selectedGameType != 0. The frontend normally sidesteps this by setting
+    // g_selectedScheduleIndex < 0 for non-single-race modes; the Frida hook
+    // bypasses the frontend and feeds raw values, so for cfg.game_type==7
+    // (Time Trials) we flip the guard JZ to JMP so the trap is always skipped
+    // and the requested track loads.
+    InitializeRaceSession:                 0x0002aa10,
+    slot1_state_byte:                      0x000AADF8,  // gRaceSlotStateTable.slot[1].state
+
+    // The "TT trap" flag in InitializeRaceSession (decompiled as TVar16)
+    // is *not* g_selectedGameType — Ghidra mislabeled it. The real source
+    // is loaded into EBP at 0x0042abbd:  MOV EBP, [0x004aaf6c].
+    // ConfigureGameTypeFlags writes it:
+    //   - early gate (gt != 7):   [0x004aaf6c] = 0
+    //   - case 7  (TT):           [0x004aaf6c] = 1
+    // No other writers in the binary. So this flag is *uniquely* the TT bit,
+    // which is why every other game_type loads Moscow correctly while gt=7
+    // forces drag-pool 30. Clearing it in our hook *after* ConfigureGameTypeFlags
+    // (so the TT side-effects are kept) but *before* InitializeRaceSession
+    // runs lets TT load the requested track.
+    g_timeTrialFlag:                       0x000AAF6C,
 };
 
 var cfg = {
@@ -97,6 +121,8 @@ var __quickrace_setScreenHook = null;   // keep-alive for Interceptor.attach
 var __quickrace_spawnHook = null;       // keep-alive for InitializeActorTrackPose
 var __quickrace_loadTrackHook = null;   // keep-alive for LoadTrackRuntimeData
 var __quickrace_updActorsHook = null;      // keep-alive: UpdateRaceActors slot[0] window
+var __quickrace_initSessionHook = null;    // keep-alive: InitializeRaceSession TT slot[1] suppress
+var __quickrace_ttSpawnHook = null;        // keep-alive: TT slot 0 spawn redirect off span 0x73
 
 function log(msg) {
     send({kind: 'log', msg: msg});
@@ -203,6 +229,23 @@ function install() {
             wi('g_dragOpponentCarIndex', cfg.opponent_car);
         }
 
+        // "Time Trials" (cfg.game_type === 7) — the engine's real TT path
+        // can't be safely reached through the Frida hook (it routes through
+        // the drag-pool trap + a hardcoded slot-0 spawn at span 0x73 + a
+        // mode-switch latch path that initialises render globals). Instead
+        // we synthesize the *behavior* of TT (player-solo, no AI rear-ends)
+        // by:
+        //   a) Letting the setup pair (ConfigureGameTypeFlags +
+        //      InitializeRaceSeriesSchedule) see game_type=7 so the TT
+        //      flags (no traffic, tier 2, preset 3) and the 2-slot
+        //      schedule mask are committed.
+        //   b) Flipping g_selectedGameType back to 0 *before*
+        //      InitializeRaceSession runs so it takes the proven
+        //      single-race spawn path — proper grid, all 6 actors
+        //      InitializeActorTrackPose'd, geometry renders.
+        //   c) Forcing slots 1..5 to state=3 (INACTIVE) on the way out
+        //      so no AI ticks for them and slot 0 has nobody to ram into.
+
         vlog('calling ConfigureGameTypeFlags()');
         ConfigureGameTypeFlags();
 
@@ -219,6 +262,33 @@ function install() {
 
         vlog('calling InitializeFrontendDisplayModeState()');
         InitializeFrontendDisplayModeState();
+
+        // Time Trials post-setup. ConfigureGameTypeFlags has set the TT
+        // flags (preset=3, tier=2, no traffic, [g_timeTrialFlag]=1) and
+        // InitializeRaceSeriesSchedule has built the 2-slot table.
+        // Now we:
+        //   - Clear g_timeTrialFlag so InitializeRaceSession's drag-pool
+        //     trap (gated on EBP=[g_timeTrialFlag]) doesn't fire — the
+        //     requested track loads instead of pool 30.
+        //   - Flip g_selectedGameType to 0 so the spawn block takes the
+        //     proven single-race grid path, avoiding the broken hardcoded
+        //     span 0x73 / lane 1 TT spawn that's only valid on drag strip.
+        //   - Hook InitializeRaceSession.onLeave to force slots 1..5 to
+        //     state=3 (INACTIVE) so the player runs solo (no AI rear-ends).
+        if (cfg.game_type === 7) {
+            wi('g_timeTrialFlag', 0);
+            wi('g_selectedGameType', 0);
+            __quickrace_initSessionHook = Interceptor.attach(
+                addrOf.InitializeRaceSession, {
+                    onLeave: function () {
+                        for (var i = 0; i < 5; i++) {
+                            addrOf.slot1_state_byte.add(i * 4).writeU8(3);
+                        }
+                        vlog('TT-synth: slots 1..5 state forced to 3 (inactive)');
+                    }
+                });
+            log('quickrace: TT post-setup — cleared trap flag, gt->0, slots 1..5 will be INACTIVE');
+        }
         log('quickrace: race launch sequence complete');
     }, 'void', [], 'stdcall');
 

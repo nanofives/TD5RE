@@ -2762,22 +2762,29 @@ static int ConfigureGameTypeFlags(void) {
         g_td5.special_encounter_enabled = 1;
         break;
 
-    case 7: /* Time Trials
-             *
-             * [DIVERGENCE from original @ 0x410CA0 case 7]
-             * Original clears g_selectedGameType back to 0 after setting the
-             * tier/overlay flags — time trial is identified at runtime purely
-             * by (gRaceDifficultyTier==2 && !traffic && !encounter &&
-             * g_raceOverlayPresetMode==3). The port keeps game_type=7 and
-             * uses an explicit time_trial_enabled flag for clarity. No runtime
-             * code currently tests game_type==7 for mode dispatch. */
-        g_td5.time_trial_enabled = 1;
+    case 7: /* Time Trials — synthesized as plain single race + slots 1..5
+             * inactive, mirroring the Frida TT-synth on the original side
+             * (re/tools/quickrace/td5_quickrace_hook.js). Without this, the
+             * port runs TT-specific AI paths (g_active_actor_count=1,
+             * racer_count=1, rubber-banding scales=0) while the original (via
+             * the Frida synth) runs plain single-race AI for slot 0 with
+             * 5 inactive opponents. Apples-to-oranges AI commands → ~2× vel_x
+             * divergence in /diff-race. By keeping time_trial_enabled=0 and
+             * routing through gt=0 we make both sides take the same AI/physics
+             * path, with solo behavior produced by the slot-state suppression
+             * (see td5_game.c init_race below). */
+        g_td5.solo_mode_synth = 1;
         g_td5.difficulty = TD5_DIFFICULTY_HARD;
         g_td5.traffic_enabled = 0;
         g_td5.special_encounter_enabled = 0;
         g_td5.circuit_lap_count = 1;           /* single lap on circuits */
         g_td5.checkpoint_timers_enabled = 1;   /* enable P2P checkpoint timers */
         td5_physics_set_collisions(0);         /* no collisions (solo) */
+        g_td5.game_type = TD5_GAMETYPE_SINGLE_RACE;  /* runtime sees gt=0 */
+        TD5_LOG_I(LOG_TAG,
+                  "ConfigureGameTypeFlags case 7: TT synth — game_type 7 -> 0, "
+                  "time_trial_enabled=0, solo_mode_synth=1 "
+                  "(mirrors Frida TT-synth in td5_quickrace_hook.js)");
         break;
 
     case 8: /* Cop Chase */

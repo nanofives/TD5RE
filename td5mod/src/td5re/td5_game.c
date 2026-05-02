@@ -882,6 +882,19 @@ int td5_game_init_race_session(void) {
         s_slot_state[1].state = 3;  /* disabled */
         TD5_LOG_I(LOG_TAG, "Time trial single-player: slot 1 disabled");
     }
+    /* Solo synth (user-facing TT, see ConfigureGameTypeFlags case 7): force
+     * slots 1..5 to state=3 (INACTIVE) so the player runs alone without
+     * AI rear-ends. Mirrors the Frida hook's onLeave InitializeRaceSession
+     * suppressor on the original side. The runtime AI/physics paths see
+     * single race (game_type=0) so both sides take the same code path. */
+    if (g_td5.solo_mode_synth && g_td5.split_screen_mode == 0) {
+        for (int i = 1; i < TD5_MAX_RACER_SLOTS; i++) {
+            s_slot_state[i].state = 3;  /* inactive */
+        }
+        TD5_LOG_I(LOG_TAG,
+                  "Solo synth: slots 1..5 forced INACTIVE "
+                  "(mirrors Frida TT-synth on original)");
+    }
     /* Mark unused racer slots as disabled based on the current mode */
     {
         int racer_slot_count = g_td5.time_trial_enabled ? 2 : TD5_MAX_RACER_SLOTS;
