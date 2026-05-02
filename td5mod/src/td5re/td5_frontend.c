@@ -8505,22 +8505,50 @@ static void Screen_CarSelection(void) {
         int actual_car = (s_selected_game_type == 5) ?
                          s_masters_roster[s_selected_car] : s_selected_car;
 
-        /* Two-player flow dispatch */
-        if ((s_two_player_mode & 3) == 1) {
-            /* P1 selected: save P1 choices, re-enter for P2 */
-            s_selected_car = actual_car; /* finalize */
-            s_two_player_mode = 6; /* set bit flags for P2 round */
-            td5_frontend_set_screen(TD5_SCREEN_CAR_SELECTION);
-            return;
-        }
-        if ((s_two_player_mode & 3) == 2) {
-            /* P2 selected: save P2 choices, proceed to track selection */
-            s_p2_car = actual_car;
-            s_p2_paint = s_selected_paint;
-            s_p2_config = s_selected_config;
-            s_p2_transmission = s_selected_transmission;
-            td5_frontend_set_screen(TD5_SCREEN_TRACK_SELECTION);
-            return;
+        /* Two-player flow dispatch [CONFIRMED @ 0x0040DFC0 case 0x1A].
+         * Original gates the 2P advance on g_returnToScreenIndex == -1 (OK
+         * was pressed); Back has its own arm at lines 880-887 of the archived
+         * decomp. The port mirrors this by gating on s_return_screen ==
+         * TRACK_SELECTION (case 4 OK sets that; case 5 Back sets
+         * RACE_TYPE_MENU). Without the gate, Back from P1 falls into the
+         * P1→P2 branch and re-enters CarSelection — exactly the user-reported
+         * "back moves forward" loop. */
+        if (s_two_player_mode != 0) {
+            if (s_return_screen == TD5_SCREEN_TRACK_SELECTION) {
+                /* OK */
+                if ((s_two_player_mode & 3) == 1) {
+                    /* P1 selected: save P1 choices, re-enter for P2 */
+                    s_selected_car = actual_car; /* finalize */
+                    s_two_player_mode = 6; /* set bit flags for P2 round */
+                    TD5_LOG_I(LOG_TAG, "CarSelect 2P: P1 OK car=%d → re-enter for P2", actual_car);
+                    td5_frontend_set_screen(TD5_SCREEN_CAR_SELECTION);
+                    return;
+                }
+                if ((s_two_player_mode & 3) == 2) {
+                    /* P2 selected: save P2 choices, proceed to track selection */
+                    s_p2_car = actual_car;
+                    s_p2_paint = s_selected_paint;
+                    s_p2_config = s_selected_config;
+                    s_p2_transmission = s_selected_transmission;
+                    TD5_LOG_I(LOG_TAG, "CarSelect 2P: P2 OK car=%d → TrackSelection", actual_car);
+                    td5_frontend_set_screen(TD5_SCREEN_TRACK_SELECTION);
+                    return;
+                }
+            } else {
+                /* Back [CONFIRMED @ 0x0040DFC0 lines 880-887].
+                 * mode==1 (P1) → MainMenu. mode!=1 (P2 with mode=6) →
+                 * sentinel mode=5, re-enter CarSelection so user can
+                 * re-pick P1's car. */
+                if (s_two_player_mode == 1) {
+                    TD5_LOG_I(LOG_TAG, "CarSelect 2P: P1 Back → MainMenu");
+                    td5_frontend_set_screen(TD5_SCREEN_MAIN_MENU);
+                    return;
+                }
+                s_two_player_mode = 5;
+                TD5_LOG_I(LOG_TAG, "CarSelect 2P: P2 Back → CarSelection (mode=5)");
+                td5_frontend_set_screen(TD5_SCREEN_CAR_SELECTION);
+                return;
+            }
         }
 
         /* Cup-style modes (game_type 1..6): predefined track schedule —
