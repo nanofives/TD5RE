@@ -94,29 +94,27 @@ def parse_args():
                          "(real cap is --seconds via RaceTraceMaxSimTicks)")
     ap.add_argument("--port-wait", type=float, default=20.0,
                     help="hard cap seconds to wait for td5re.exe trace to flush")
-    # comparator knobs — defaults are driven by --profile; pass --fields/
-    # --stage/--kind explicitly to override the profile slice.
+    # comparator knobs — defaults are driven by --profile; pass
+    # --modules/--stages/--fields explicitly to override the profile slice.
     ap.add_argument("--profile", default="core",
                     help="comma-separated profile names from tools/diff_profiles.py "
-                         "(default: core). Each profile is a curated "
-                         "(fields, stage, kind) slice for one subsystem "
-                         "(physics, ai, track, view, frontend, hud, …). "
-                         "Multiple profiles compose: their fields union and "
-                         "their stages/kinds join. Run `python tools/diff_profiles.py list` "
-                         "to see the catalog.")
+                         "(default: core). Each profile resolves to a "
+                         "(modules, stages, fields) slice for one subsystem. "
+                         "Multiple profiles compose. Run "
+                         "`python tools/diff_profiles.py list` for the catalog.")
     ap.add_argument("--list-profiles", action="store_true",
                     help="print the profile catalog and exit (no race run).")
-    ap.add_argument("--stage", default=None,
-                    help="comparator --stage filter. Overrides the profile-resolved "
-                         "stage when set. Comma list is allowed.")
-    ap.add_argument("--kind", default=None,
-                    help="comparator --kind filter. Overrides the profile-resolved "
-                         "kind when set. Comma list is allowed.")
+    ap.add_argument("--modules", default=None,
+                    help="comma list of trace modules to capture + diff "
+                         "(frame,pose,motion,track,controls,progress,view,calls). "
+                         "Overrides the profile-resolved modules.")
+    ap.add_argument("--stages", default=None,
+                    help="comma list of stages to keep within each module CSV. "
+                         "Overrides the profile-resolved stages.")
     ap.add_argument("--fields", default=None,
-                    help="comma-separated field allowlist passed to compare_race_trace.py. "
-                         "Overrides the profile-resolved fields when set.")
-    ap.add_argument("--key-fields", default="sim_tick,stage,kind,id",
-                    help="comparator --key-fields (default ignores render-frame drift)")
+                    help="comma-separated non-key field allowlist applied to "
+                         "every per-module compare. Overrides the "
+                         "profile-resolved fields when set.")
     ap.add_argument("--dedupe", default="first", choices=("first", "error"),
                     help="comparator --dedupe mode (default first)")
     ap.add_argument("--float-tol", type=float, default=None,
@@ -199,20 +197,27 @@ def td5re_cli_args(args):
         # seconds of race after GO". RaceTraceMaxFrames is a safety ceiling.
         f"--RaceTraceMaxSimTicks={sim_tick_cap}",
         "--AutoThrottle=1",
-        # Fast-forward: inject N extra sim ticks per render frame so the
-        # port reaches the same simulated race window as the Frida-clamped
-        # original in seconds of wall-clock. 4 means ~5 sim ticks per frame.
-        "--TraceFastForward=4",
+        # Fast-forward: speed multiplier for sim time vs wall clock. 4.0
+        # means 4x sim throughput so the port reaches the same simulated
+        # race window as the Frida-clamped original in ~25% the wall time.
+        "--TraceFastForward=4.0",
+        # Modular trace selection — only emit the per-module rows the
+        # current profile asks for.
+        f"--TraceModules={args.modules}",
+        f"--TraceStages={args.stages}",
     ]
 
 
-def quickrace_cli_args(args, original_csv: Path):
+def quickrace_cli_args(args, paths):
     """Build the td5_quickrace.py CLI for the original binary side.
 
     Forwards scenario as first-class flags (--track / --car / --game-type /
     --laps / --start-span-offset / --player-is-ai), so the Frida-side INI
     is NEVER mutated. The hook reads these via script.post({type:'cfg'}).
-    --csv-out points the trace script at the per-session output path.
+    Per-module CSV destinations and the modules/stages mask are all passed
+    via --modules/--stages/--module-csv-base; the launcher patches the
+    Frida script's MODULE_PATHS / MODULE_MASK / STAGE_MASK constants in
+    place before injection.
     """
     sim_tick_cap = int(args.seconds * 30)
     cmd = [
@@ -235,8 +240,14 @@ def quickrace_cli_args(args, original_csv: Path):
         "--player-is-ai", "true" if args.player_is_ai else "false",
         "--frontend-only", "false",
         "--frontend-screen", "-1",
-        # Per-session CSV path
-        "--csv-out", str(original_csv),
+        # Modular trace selection. The launcher resolves per-module paths
+        # under <base>_<module>.csv (e.g. log/race_trace_original_pose.csv)
+        # and patches MODULE_PATHS in the Frida script.
+        "--trace-modules", args.modules,
+        "--trace-stages",  args.stages,
+        "--module-csv-base", str(paths["base_original"]),
+        # Calls trace stays in its own file with the legacy schema.
+        "--calls-csv-out", str(paths["calls_original"]),
     ]
     if args.hooks:
         cmd += ["--hook-specs", str(args.hooks)]
@@ -247,19 +258,48 @@ def quickrace_cli_args(args, original_csv: Path):
     return cmd
 
 
+# Modules whose row schemas live in the main per-module CSV table (i.e. NOT
+# the calls trace, which has its own separate file). Used by csv_paths +
+# the comparator dispatcher.
+SIM_MODULES = ("frame", "pose", "motion", "track",
+               "controls", "progress", "view")
+
+
 def csv_paths(args):
-    """Resolve the four CSV destinations for this run, honoring --session-tag."""
-    return {
-        "original":      _csv_path("race_trace_original",       args.session_tag),
-        "port":          _csv_path("race_trace",                args.session_tag),
-        "calls_original":_csv_path("calls_trace_original",      args.session_tag),
-        "calls_port":    _csv_path("calls_trace",               args.session_tag),
+    """Resolve every CSV destination for this run, honoring --session-tag.
+
+    Returns a dict keyed:
+      base_original / base_port — directory + stem prefix; each side appends
+                                  ``_<module>.csv``.
+      original_<mod> / port_<mod>  for every module in SIM_MODULES.
+      calls_original / calls_port  for the function-call trace.
+    """
+    base_orig = _csv_path("race_trace_original", args.session_tag).with_suffix("")
+    base_port = _csv_path("race_trace",          args.session_tag).with_suffix("")
+    out = {
+        "base_original":  base_orig,
+        "base_port":      base_port,
+        "calls_original": _csv_path("calls_trace_original", args.session_tag),
+        "calls_port":     _csv_path("calls_trace",          args.session_tag),
     }
+    for mod in SIM_MODULES:
+        out[f"original_{mod}"] = base_orig.parent / f"{base_orig.name}_{mod}.csv"
+        out[f"port_{mod}"]     = base_port.parent / f"{base_port.name}_{mod}.csv"
+    return out
 
 
 # ---------------------------------------------------------------------------
 # Run helpers
 # ---------------------------------------------------------------------------
+
+def _active_modules(args):
+    """Return the modules selected for this run (sim modules only — calls
+    is handled separately via --hooks)."""
+    if not args.modules or args.modules in ("*", ""):
+        return list(SIM_MODULES)
+    asked = [m.strip() for m in args.modules.split(",") if m.strip() and m.strip() != "*"]
+    return [m for m in asked if m in SIM_MODULES]
+
 
 def run_original(args, paths):
     """Launch TD5_d3d.exe (detached) + attach Frida; wait for auto-exit.
@@ -272,65 +312,71 @@ def run_original(args, paths):
     process name. This function does that automatically when the caller
     didn't pass --attach-pid / --attach-name. Pass either flag to override.
     """
-    orig_csv = paths["original"]
-    if orig_csv.exists():
-        orig_csv.unlink()
+    # Wipe stale per-module CSVs so we never silently compare a fresh run
+    # against an old companion file from a previous diff session.
+    for mod in _active_modules(args):
+        p = paths[f"original_{mod}"]
+        if p.exists():
+            p.unlink()
 
-    # td5_quickrace.py defaults to attach-mode (auto-launches detached and
-    # polls for the PID) so Frida hooks install BEFORE GAMESTATE_INTRO runs
-    # ShowLegalScreens. No pre-launch needed here.
-    cmd = quickrace_cli_args(args, orig_csv)
+    cmd = quickrace_cli_args(args, paths)
     print(f"[diff_race] running original: {' '.join(cmd)}")
-    # Give the spawn + race a generous timeout proportional to the seconds arg.
     timeout = max(45, int(args.seconds * 4) + 20)
     proc = subprocess.run(cmd, cwd=str(REPO), timeout=timeout)
     if proc.returncode not in (0, None):
         print(f"[diff_race] quickrace launcher exit {proc.returncode}")
-    if not orig_csv.exists():
-        sys.exit(f"[diff_race] original trace missing after run: {orig_csv}")
-    size = orig_csv.stat().st_size
-    print(f"[diff_race] original trace: {orig_csv} ({size} bytes)")
+    # Verify at least one expected module CSV materialized — the Frida side
+    # may have closed early on a race-end transition; we surface that here
+    # rather than letting the comparator complain about missing files.
+    found = [m for m in _active_modules(args) if paths[f"original_{m}"].exists()]
+    if not found:
+        sys.exit(f"[diff_race] no original trace files materialized "
+                 f"(expected under {paths['base_original']}_*.csv)")
+    for m in found:
+        p = paths[f"original_{m}"]
+        print(f"[diff_race] original {m}: {p} ({p.stat().st_size} bytes)")
 
 
 def run_port(args, paths):
     """Spawn td5re.exe from repo root, wait for trace to flush, kill."""
-    port_csv = paths["port"]
+    active = _active_modules(args)
     port_calls_csv = paths["calls_port"]
-    # Don't blindly taskkill /F /IM td5re.exe — that would also kill any
-    # parallel --session-tag run. We track the PID we spawn below and kill
-    # only that. If a previous crashed run still holds this session's CSV
-    # open, the unlink retry loop below surfaces the problem.
-    # Retry unlink a few times in case the zombie process is still flushing.
+
+    # Wipe stale module CSVs so a previous run's data can't leak into
+    # this comparison. Retry unlink a few times — the previous td5re may
+    # still be flushing on slow disks.
     for _ in range(10):
         try:
-            if port_csv.exists():
-                port_csv.unlink()
+            for mod in active:
+                p = paths[f"port_{mod}"]
+                if p.exists():
+                    p.unlink()
             if port_calls_csv.exists():
                 port_calls_csv.unlink()
             break
         except PermissionError:
             time.sleep(0.2)
     else:
-        sys.exit(f"[diff_race] could not unlink {port_csv}; kill td5re.exe manually")
+        sys.exit(f"[diff_race] could not unlink stale port traces under "
+                 f"{paths['base_port']}_*.csv; kill td5re.exe manually")
 
-    # Build the CLI override list and echo it so engine.log divergences are
-    # traceable to exactly the flags that triggered the run.
     cli_args = td5re_cli_args(args)
     print(f"[diff_race] td5re.exe CLI: {' '.join(cli_args)}")
 
-    # Start via PowerShell Start-Process so we get the PID back cleanly.
-    # -ArgumentList forwards the CLI flags into lpCmdLine, which
-    # td5_apply_cli_overrides() parses after td5re.ini is read.
-    # Per-session env vars override the default log/race_trace.csv +
-    # log/calls_trace.csv paths so parallel diff_race runs don't stomp on
-    # each other's port-side traces. td5_trace_init reads them via getenv.
+    # Per-module env-var overrides for the port-side trace destinations.
+    # td5_trace.c's module_open() reads TD5RE_TRACE_<MOD>_PATH (uppercase)
+    # before falling back to log/race_trace_<mod>.csv. Calls trace uses
+    # the legacy TD5RE_CALLS_TRACE_PATH.
+    env_lines = []
+    for mod in active:
+        env_lines.append(
+            f"$env:TD5RE_TRACE_{mod.upper()}_PATH = '{paths[f'port_{mod}']}'; "
+        )
+    env_lines.append(f"$env:TD5RE_CALLS_TRACE_PATH = '{port_calls_csv}'; ")
+
     ps_args = ",".join(f"'{a}'" for a in cli_args)
-    env_assigns = (
-        f"$env:TD5RE_RACE_TRACE_PATH = '{port_csv}'; "
-        f"$env:TD5RE_CALLS_TRACE_PATH = '{port_calls_csv}'; "
-    )
     ps = (
-        env_assigns +
+        "".join(env_lines) +
         "$p = Start-Process -FilePath "
         f"'{TD5RE_EXE}' -WorkingDirectory '{REPO}' "
         f"-ArgumentList {ps_args} "
@@ -347,70 +393,110 @@ def run_port(args, paths):
     pid_int = int(pid)
     print(f"[diff_race] spawned td5re.exe pid={pid_int}; waiting {args.port_wait:.0f}s for trace")
 
-    # Poll CSV growth as a readiness signal in addition to the fixed wait.
+    # Stability poll on the largest active module CSV — if its size is
+    # stable for ~2 s we treat the run as done. Larger files take the
+    # longest to flush so they're the right end-of-write signal.
+    def _stability_target():
+        existing = [paths[f"port_{m}"] for m in active if paths[f"port_{m}"].exists()]
+        if not existing:
+            return None
+        return max(existing, key=lambda p: p.stat().st_size)
+
     deadline = time.monotonic() + args.port_wait
     last_size = -1
     stable_ticks = 0
     while time.monotonic() < deadline:
         time.sleep(1.0)
-        cur = port_csv.stat().st_size if port_csv.exists() else 0
+        target = _stability_target()
+        cur = target.stat().st_size if target else 0
         if cur == last_size and cur > 0:
             stable_ticks += 1
-            if stable_ticks >= 2:  # ~2 seconds of stability = trace done
+            if stable_ticks >= 2:
                 break
         else:
             stable_ticks = 0
             last_size = cur
 
-    # Kill the game regardless.
     subprocess.run(
         ["taskkill.exe", "/F", "/PID", str(pid_int)],
         capture_output=True, text=True,
     )
-    if not port_csv.exists():
-        sys.exit(f"[diff_race] port trace missing after run: {port_csv}")
-    size = port_csv.stat().st_size
-    print(f"[diff_race] port trace: {port_csv} ({size} bytes)")
+    found = [m for m in active if paths[f"port_{m}"].exists()]
+    if not found:
+        sys.exit(f"[diff_race] no port trace files materialized "
+                 f"(expected under {paths['base_port']}_*.csv)")
+    for m in found:
+        p = paths[f"port_{m}"]
+        print(f"[diff_race] port {m}: {p} ({p.stat().st_size} bytes)")
 
 
 def resolve_profile(args):
-    """Apply the --profile selection to the comparator knobs.
+    """Apply the --profile selection to the orchestrator knobs.
 
-    Profile-resolved fields/stage/kind/float-tol fill in only when the user
-    didn't pass an explicit override. Mutates ``args`` in place and returns
-    the resolved profile dict for logging.
+    Profile-resolved modules/stages/fields/float-tol fill in only when the
+    user didn't pass an explicit override. Mutates ``args`` in place and
+    returns the resolved profile dict for logging.
     """
     profile_names = diff_profiles.parse_profile_arg(args.profile)
     resolved = diff_profiles.resolve(profile_names)
+    if args.modules is None:
+        args.modules = resolved["modules"] or "*"
+    if args.stages is None:
+        args.stages = resolved["stages"] or "*"
     if args.fields is None:
         args.fields = resolved["fields"]
-    if args.stage is None:
-        args.stage = resolved["stage"]
-    if args.kind is None:
-        args.kind = resolved["kind"]
     if args.float_tol is None:
         args.float_tol = resolved["float_tol"] if resolved["float_tol"] is not None else 0.001
     return resolved
 
 
 def run_compare(args, paths):
-    cmd = [
-        sys.executable, "-u", str(COMPARE_PY),
-        str(paths["original"]), str(paths["port"]),
-        "--float-tol", str(args.float_tol),
-    ]
-    if args.fields:
-        cmd += ["--fields", args.fields]
-    if args.stage:
-        cmd += ["--stage", args.stage]
-    if args.kind:
-        cmd += ["--kind", args.kind]
-    if args.key_fields:
-        cmd += ["--key-fields", args.key_fields]
-    if args.dedupe:
-        cmd += ["--dedupe", args.dedupe]
-    print(f"[diff_race] comparing: {' '.join(cmd)}")
-    return subprocess.run(cmd, cwd=str(REPO))
+    """Run compare_race_trace.py once per active sim module. Each module's
+    CSVs use a distinct narrow key schema (see diff_profiles.MODULE_KEYS)
+    so the comparator is invoked with the right --key-fields per module.
+
+    Returns a CompletedProcess stand-in whose returncode is the union of
+    every per-module returncode (zero only if every module passed)."""
+    overall_rc = 0
+    for mod in _active_modules(args):
+        orig = paths[f"original_{mod}"]
+        port = paths[f"port_{mod}"]
+        if not orig.exists() or not port.exists():
+            print(f"[diff_race] {mod}: skipping — file missing "
+                  f"(orig={orig.exists()} port={port.exists()})")
+            overall_rc = overall_rc or 1
+            continue
+        key_fields = ",".join(diff_profiles.MODULE_KEYS[mod])
+        cmd = [
+            sys.executable, "-u", str(COMPARE_PY),
+            str(orig), str(port),
+            "--float-tol", str(args.float_tol),
+            "--key-fields", key_fields,
+        ]
+        # Profile-resolved fields are a UNION across the active modules; the
+        # comparator runs per-module with that module's narrow schema, so we
+        # must intersect to drop fields that don't belong to this module.
+        # Empty intersection ⇒ skip --fields entirely (compare every column
+        # in this module's schema).
+        if args.fields:
+            wanted = [f for f in args.fields.split(",") if f]
+            allowed = set(diff_profiles.MODULE_COLUMNS.get(mod, []))
+            kept = [f for f in wanted if f in allowed]
+            if kept:
+                cmd += ["--fields", ",".join(kept)]
+        if args.stages and args.stages not in ("*", ""):
+            cmd += ["--stage", args.stages]
+        if args.dedupe:
+            cmd += ["--dedupe", args.dedupe]
+        print(f"[diff_race] comparing {mod}: {' '.join(cmd)}")
+        rc = subprocess.run(cmd, cwd=str(REPO)).returncode
+        overall_rc = overall_rc or rc
+
+    class _Result:
+        pass
+    r = _Result()
+    r.returncode = overall_rc
+    return r
 
 
 def run_compare_calls(args, paths):
@@ -470,12 +556,12 @@ def main():
           f"player_is_ai={args.player_is_ai}"
           + (f" tag={args.session_tag}" if args.session_tag else ""))
     print(f"[diff_race] profile={','.join(resolved['profiles'])} "
-          f"stage={args.stage} kind={args.kind} "
+          f"modules={args.modules} stages={args.stages} "
           f"float_tol={args.float_tol} "
-          f"fields={args.fields}")
+          f"fields={args.fields or '(all)'}")
     print(f"[diff_race] CSV paths:")
     for k, v in paths.items():
-        print(f"  {k:>16s} = {v}")
+        print(f"  {k:>20s} = {v}")
 
     run_original(args, paths)
     run_port(args, paths)

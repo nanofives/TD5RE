@@ -216,11 +216,16 @@ typedef struct TD5_GlobalState {
         int  race_trace_slot;
         int  race_trace_max_frames;
         int  auto_throttle;         /* 1 = force full throttle for slot 0 */
-        int  trace_fast_forward;    /* N = inject N extra sim ticks per render frame
-                                     * during trace capture (0 = real-time).
-                                     * Mirrors the Frida-side sim budget clamp so the
-                                     * diff-race skill runs in seconds instead of
-                                     * minutes. */
+        float trace_fast_forward;   /* Speed multiplier during trace capture.
+                                     * 1.0 = real-time (default), 2.0 = 2x,
+                                     * 0.5 = half-speed, N = Nx. Implemented by
+                                     * scaling the normalized frame dt before
+                                     * it feeds the sim accumulator. Mirrors
+                                     * the Frida-side sim budget clamp so the
+                                     * diff-race skill runs in seconds instead
+                                     * of minutes. <= 0 is treated as 1.0. */
+        unsigned int trace_module_mask;  /* bitmask of TD5_TRACE_MOD_* flags */
+        unsigned int trace_stage_mask;   /* bitmask of TD5_TRACE_STG_* flags */
         int  race_trace_max_sim_ticks; /* stop the trace after N sim ticks; 0 = no cap.
                                      * Paired with trace_fast_forward so the skill can
                                      * cap the port's workload at the same simulated

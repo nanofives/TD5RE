@@ -30,6 +30,7 @@
 /* TD5RE headers */
 #include "td5re.h"
 #include "td5_platform.h"
+#include "td5_trace.h"
 
 /* Wrapper backend types and functions */
 #include "../../ddraw_wrapper/src/wrapper.h"
@@ -157,6 +158,27 @@ static int td5_ini_int(const char *section, const char *key, int fallback)
     return GetPrivateProfileIntA(section, key, fallback, s_ini_path);
 }
 
+static float td5_ini_float(const char *section, const char *key, float fallback)
+{
+    char buf[32];
+    char fb[32];
+    snprintf(fb, sizeof(fb), "%g", fallback);
+    DWORD n = GetPrivateProfileStringA(section, key, fb, buf, sizeof(buf), s_ini_path);
+    if (n == 0 || n >= sizeof(buf)) return fallback;
+    return (float)atof(buf);
+}
+
+/* Reads a free-form string into out (zero-terminated). Returns 1 if the
+ * key was present, 0 if missing/empty (out then holds the fallback). */
+static int td5_ini_str(const char *section, const char *key,
+                       const char *fallback, char *out, size_t out_n)
+{
+    DWORD n = GetPrivateProfileStringA(section, key,
+                                       fallback ? fallback : "",
+                                       out, (DWORD)out_n, s_ini_path);
+    return (n > 0);
+}
+
 /* ------------------------------------------------------------------------
  * Command-line override parser
  *
@@ -215,7 +237,6 @@ static int td5_apply_cli_overrides(const char *cmdline,
         { "RaceTraceSlot",        &g_td5.ini.race_trace_slot },
         { "RaceTraceMaxFrames",   &g_td5.ini.race_trace_max_frames },
         { "AutoThrottle",         &g_td5.ini.auto_throttle },
-        { "TraceFastForward",     &g_td5.ini.trace_fast_forward },
         { "RaceTraceMaxSimTicks", &g_td5.ini.race_trace_max_sim_ticks },
         /* Logging */
         { "LogEnabled",           &g_td5.ini.log_enabled },
@@ -282,6 +303,31 @@ static int td5_apply_cli_overrides(const char *cmdline,
         if (klen == 8 && _strnicmp(key, "Windowed", 8) == 0) {
             *pwindowed = val;
             dbglog("  CLI override: Windowed=%d", val);
+            n_applied++;
+            continue;
+        }
+
+        /* Float-valued overrides handled separately from the int table. */
+        if (klen == 16 && _strnicmp(key, "TraceFastForward", 16) == 0) {
+            float fval = (float)atof(eq + 1);
+            g_td5.ini.trace_fast_forward = fval;
+            dbglog("  CLI override: TraceFastForward=%g", fval);
+            n_applied++;
+            continue;
+        }
+
+        /* CSV-string overrides for modular trace selection. */
+        if (klen == 12 && _strnicmp(key, "TraceModules", 12) == 0) {
+            g_td5.ini.trace_module_mask = td5_trace_parse_modules(eq + 1);
+            dbglog("  CLI override: TraceModules=%s -> mask=0x%x",
+                   eq + 1, g_td5.ini.trace_module_mask);
+            n_applied++;
+            continue;
+        }
+        if (klen == 11 && _strnicmp(key, "TraceStages", 11) == 0) {
+            g_td5.ini.trace_stage_mask = td5_trace_parse_stages(eq + 1);
+            dbglog("  CLI override: TraceStages=%s -> mask=0x%x",
+                   eq + 1, g_td5.ini.trace_stage_mask);
             n_applied++;
             continue;
         }
@@ -396,9 +442,22 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     g_td5.ini.race_trace_slot       = td5_ini_int("Trace", "RaceTraceSlot", -1);
     g_td5.ini.race_trace_max_frames = td5_ini_int("Trace", "RaceTraceMaxFrames", 600);
     g_td5.ini.auto_throttle         = td5_ini_int("Trace", "AutoThrottle", 0);
-    g_td5.ini.trace_fast_forward    = td5_ini_int("Trace", "TraceFastForward", 0);
+    g_td5.ini.trace_fast_forward    = td5_ini_float("Trace", "TraceFastForward", 1.0f);
     g_td5.ini.race_trace_max_sim_ticks =
         td5_ini_int("Trace", "RaceTraceMaxSimTicks", 0);
+
+    /* Modular trace selection. Defaults to all modules / all stages so an
+     * unconfigured trace captures everything (matches the legacy schema's
+     * coverage). /fix passes a narrowed CSV via --TraceModules / --TraceStages
+     * so its sessions only emit the rows the fix actually needs. */
+    {
+        char buf[256];
+        td5_ini_str("Trace", "Modules", "*", buf, sizeof(buf));
+        g_td5.ini.trace_module_mask = td5_trace_parse_modules(buf);
+
+        td5_ini_str("Trace", "Stages", "*", buf, sizeof(buf));
+        g_td5.ini.trace_stage_mask = td5_trace_parse_stages(buf);
+    }
 
     /* Logging — defaults preserve historic behavior (master on, INFO+, all
      * categories on, wrapper on). Flip to A/B-test perf without rebuilding. */
@@ -450,10 +509,11 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
            g_td5.ini.default_car, g_td5.ini.default_track, g_td5.ini.default_game_type,
            g_td5.ini.skip_intro, g_td5.ini.debug_overlay, g_td5.ini.auto_race,
            g_td5.ini.start_screen, g_td5.ini.start_span_offset);
-    dbglog("  [Trace]   RaceTrace=%d Slot=%d MaxFrames=%d AutoThrottle=%d FastFwd=%d SimTickCap=%d",
+    dbglog("  [Trace]   RaceTrace=%d Slot=%d MaxFrames=%d AutoThrottle=%d FastFwd=%g SimTickCap=%d Modules=0x%x Stages=0x%x",
            g_td5.ini.race_trace_enabled, g_td5.ini.race_trace_slot,
            g_td5.ini.race_trace_max_frames, g_td5.ini.auto_throttle,
-           g_td5.ini.trace_fast_forward, g_td5.ini.race_trace_max_sim_ticks);
+           g_td5.ini.trace_fast_forward, g_td5.ini.race_trace_max_sim_ticks,
+           g_td5.ini.trace_module_mask, g_td5.ini.trace_stage_mask);
     dbglog("  [Logging] Enabled=%d MinLevel=%d Frontend=%d Race=%d Engine=%d Wrapper=%d",
            g_td5.ini.log_enabled, g_td5.ini.log_min_level,
            g_td5.ini.log_frontend, g_td5.ini.log_race,

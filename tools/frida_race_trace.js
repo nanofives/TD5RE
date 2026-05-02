@@ -80,8 +80,20 @@ var CALLS_OUTPUT_PATH = "C:\\Users\\maria\\Desktop\\Proyectos\\TD5RE\\log\\calls
 // the port (with [Trace] AutoThrottle=1) accelerates forward, producing a
 // false world_x divergence.
 var AUTO_THROTTLE = true;
-// Absolute path so it works regardless of process CWD
+// Legacy single-CSV output path (no longer written by default — kept so
+// patch_trace_script's regex still has something to rewrite if a caller
+// passes --csv-out without --module-csv-base for a one-off legacy capture).
 var OUTPUT_PATH      = "C:\\Users\\maria\\Desktop\\Proyectos\\TD5RE\\log\\race_trace_original.csv";
+
+// ----------------------------------------------------------------------------
+// Modular trace selection — set by td5_quickrace.py patch_trace_script via
+// --trace-modules / --trace-stages / --module-csv-base. Mirrors the port's
+// [Trace] Modules= / Stages= INI keys so original-side CSVs match the
+// port's narrow per-module schema. Defaults capture all modules + stages.
+// ----------------------------------------------------------------------------
+var MODULE_MASK_CSV  = "*";  // "frame,pose,motion,..." or "*"
+var STAGE_MASK_CSV   = "*";  // "post_physics,post_track,..." or "*"
+var MODULE_CSV_BASE  = "C:\\Users\\maria\\Desktop\\Proyectos\\TD5RE\\log\\race_trace_original";
 
 // ============================================================================
 // Original binary addresses (TD5_d3d.exe, image base 0x00400000)
@@ -224,19 +236,94 @@ function selectedSlot(slot) {
 // CSV output
 // ============================================================================
 
-var CSV_HEADER =
-    "frame,sim_tick,stage,kind,id," +
-    "game_state,paused,pause_menu,fade_state,countdown_timer,sim_accum,sim_budget,frame_dt,instant_fps,viewport_count,split_mode,ticks_this_frame," +
-    "slot_state,slot_comp1,slot_comp2,view_target," +
-    "world_x,world_y,world_z,vel_x,vel_y,vel_z,ang_roll,ang_yaw,ang_pitch,disp_roll,disp_yaw,disp_pitch," +
-    "span_raw,span_norm,span_accum,span_high,steer,engine,long_speed,lat_speed,front_slip,rear_slip,finish_time,accum_distance,pending_finish,gear,vehicle_mode,track_contact,wheel_mask,race_pos," +
-    "metric_checkpoint,metric_mask,metric_norm_span,metric_timer,metric_display_pos,metric_speed_bonus,metric_top_speed," +
-    "cam_world_x,cam_world_y,cam_world_z,cam_x,cam_y,cam_z\n";
+// ----------------------------------------------------------------------------
+// Modular per-module CSV table — schema MUST match td5_trace.c headers
+// exactly so compare_race_trace.py can pair (frame, sim_tick, stage, slot)
+// rows from both sides with identical columns.
+// ----------------------------------------------------------------------------
+var MOD_FRAME    = 0x01, MOD_POSE    = 0x02, MOD_MOTION   = 0x04,
+    MOD_TRACK    = 0x08, MOD_CONTROLS= 0x10, MOD_PROGRESS = 0x20,
+    MOD_VIEW     = 0x40, MOD_CALLS   = 0x80, MOD_ALL      = 0xFF;
 
-function writeRow(line) {
-    if (fileHandle !== null) {
-        fileHandle.write(line);
+var STG_FRAME_BEGIN   = 1<<0, STG_PRE_PHYSICS  = 1<<1, STG_POST_PHYSICS  = 1<<2,
+    STG_POST_AI       = 1<<3, STG_POST_TRACK   = 1<<4, STG_POST_CAMERA   = 1<<5,
+    STG_POST_PROGRESS = 1<<6, STG_FRAME_END    = 1<<7, STG_PAUSE_MENU    = 1<<8,
+    STG_COUNTDOWN     = 1<<9, STG_ALL          = 0xFFFF;
+
+var MODULE_TABLE = [
+    { mask: MOD_FRAME,    name: "frame",
+      header: "frame,sim_tick,stage,game_state,paused,pause_menu,fade_state,countdown_timer,sim_accum,sim_budget,frame_dt,instant_fps,viewport_count,split_mode,ticks_this_frame",
+      stages: STG_FRAME_BEGIN | STG_FRAME_END | STG_PAUSE_MENU | STG_COUNTDOWN | STG_POST_PROGRESS,
+      fp: null },
+    { mask: MOD_POSE,     name: "pose",
+      header: "frame,sim_tick,stage,slot,world_x,world_y,world_z,ang_roll,ang_yaw,ang_pitch,disp_roll,disp_yaw,disp_pitch",
+      stages: STG_POST_PHYSICS, fp: null },
+    { mask: MOD_MOTION,   name: "motion",
+      header: "frame,sim_tick,stage,slot,vel_x,vel_y,vel_z,long_speed,lat_speed,front_slip,rear_slip",
+      stages: STG_PRE_PHYSICS | STG_POST_PHYSICS, fp: null },
+    { mask: MOD_TRACK,    name: "track",
+      header: "frame,sim_tick,stage,slot,span_raw,span_norm,span_accum,span_high,track_contact,wheel_mask",
+      stages: STG_POST_TRACK | STG_POST_PHYSICS, fp: null },
+    { mask: MOD_CONTROLS, name: "controls",
+      header: "frame,sim_tick,stage,slot,slot_state,steering,engine,gear,vehicle_mode",
+      stages: STG_POST_AI | STG_PRE_PHYSICS, fp: null },
+    { mask: MOD_PROGRESS, name: "progress",
+      header: "frame,sim_tick,stage,slot,race_pos,finish_time,accum_distance,pending_finish,metric_checkpoint,metric_mask,metric_norm_span,metric_timer,metric_display_pos,metric_speed_bonus,metric_top_speed",
+      stages: STG_POST_PROGRESS | STG_FRAME_END, fp: null },
+    { mask: MOD_VIEW,     name: "view",
+      header: "frame,sim_tick,stage,view_index,actor_slot,cam_world_x,cam_world_y,cam_world_z",
+      stages: STG_POST_CAMERA | STG_FRAME_END, fp: null },
+];
+
+var moduleMask = MOD_ALL;
+var stageMask  = STG_ALL;
+
+function parseModuleMask(csv) {
+    if (!csv || csv === "*") return MOD_ALL;
+    var byName = { frame: MOD_FRAME, pose: MOD_POSE, motion: MOD_MOTION,
+                   track: MOD_TRACK, controls: MOD_CONTROLS,
+                   progress: MOD_PROGRESS, view: MOD_VIEW, calls: MOD_CALLS };
+    var m = 0;
+    csv.split(",").forEach(function (tok) {
+        tok = tok.trim().toLowerCase();
+        if (byName.hasOwnProperty(tok)) m |= byName[tok];
+    });
+    return m || MOD_ALL;
+}
+function parseStageMask(csv) {
+    if (!csv || csv === "*") return STG_ALL;
+    var byName = { frame_begin: STG_FRAME_BEGIN, pre_physics: STG_PRE_PHYSICS,
+                   post_physics: STG_POST_PHYSICS, post_ai: STG_POST_AI,
+                   post_track: STG_POST_TRACK, post_camera: STG_POST_CAMERA,
+                   post_progress: STG_POST_PROGRESS, frame_end: STG_FRAME_END,
+                   pause_menu: STG_PAUSE_MENU, countdown: STG_COUNTDOWN };
+    var m = 0;
+    csv.split(",").forEach(function (tok) {
+        tok = tok.trim().toLowerCase();
+        if (byName.hasOwnProperty(tok)) m |= byName[tok];
+    });
+    return m || STG_ALL;
+}
+
+function moduleByMask(mask) {
+    for (var i = 0; i < MODULE_TABLE.length; i++) {
+        if (MODULE_TABLE[i].mask === mask) return MODULE_TABLE[i];
     }
+    return null;
+}
+
+function moduleActive(mask, stageBit) {
+    if (!enabled) return false;
+    if (!(moduleMask & mask)) return false;
+    if (stageBit === STG_ALL) return true;
+    if (!(stageMask & stageBit)) return false;
+    var m = moduleByMask(mask);
+    return m && m.fp && (m.stages & stageBit);
+}
+
+function emitTo(mask, line) {
+    var m = moduleByMask(mask);
+    if (m && m.fp) m.fp.write(line);
 }
 
 function beginFrame(frameIndex) {
@@ -254,14 +341,16 @@ function beginFrame(frameIndex) {
     return true;
 }
 
-function writePrefix(frameIndex, simTick, stage, kind, id) {
-    return frameIndex + "," + simTick + "," + stage + "," + kind + "," + id + ",";
-}
-
-function writeFrameRow(frameIndex, simTick, stage) {
+// ----------------------------------------------------------------------------
+// Per-module row emitters. Each writes to its own file with the schema in
+// MODULE_TABLE; all share the (frame, sim_tick, stage[, slot|view_index])
+// prefix matching the port's td5_trace.c emit_* functions.
+// ----------------------------------------------------------------------------
+function emitFrameRow(frameIndex, simTick, stage, stageBit) {
+    if (!moduleActive(MOD_FRAME, stageBit)) return;
     var gs       = readS32(G_gameState);
     var paused   = readS32(G_gamePaused);
-    var fadeState = 0; // G_raceEndFadeState address uncertain, zero for now
+    var fadeState = 0; // G_raceEndFadeState address uncertain
     var simAccum = readU32(G_simTimeAccumulator);
     var simBudget= readFloat(G_simTickBudget);
     var frameDt  = readFloat(G_normalizedFrameDt);
@@ -269,140 +358,141 @@ function writeFrameRow(frameIndex, simTick, stage) {
     var vpCount  = readS32(G_viewCount);
     var splitMode= readS32(G_splitscreenCount);
 
-    var prefix = writePrefix(frameIndex, simTick, stage, "frame", 0);
-    var line = prefix +
+    var line =
+        frameIndex + "," + simTick + "," + stage + "," +
         gs + "," + paused + ",0," + fadeState + ",0," +
-        simAccum + "," + simBudget.toFixed(6) + "," + frameDt.toFixed(6) + "," + fps.toFixed(6) + "," +
-        vpCount + "," + splitMode + "," + simTicksThisFrame + "," +
-        // actor fields (zeros for frame row)
-        "0,0,0,0," +
-        "0,0,0,0,0,0,0,0,0,0,0,0," +
-        "0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0," +
-        "0,0,0,0,0,0,0," +
-        // view fields (zeros)
-        "0,0,0,0.000000,0.000000,0.000000\n";
-    writeRow(line);
+        simAccum + "," + simBudget.toFixed(6) + "," +
+        frameDt.toFixed(6) + "," + fps.toFixed(6) + "," +
+        vpCount + "," + splitMode + "," + simTicksThisFrame + "\n";
+    emitTo(MOD_FRAME, line);
 }
 
-function writeActorRow(frameIndex, simTick, stage, slot) {
+function emitPoseRow(frameIndex, simTick, stage, stageBit, slot) {
+    if (!moduleActive(MOD_POSE, stageBit)) return;
     var a = actorPtr(slot);
-    var ss = slotStatePtr(slot);
-
-    var slotState = readU8(ss);
-    var comp1     = readU8(ss.add(1));
-    var comp2     = readU8(ss.add(2));
-
-    // view target: -1 if not viewed
-    var viewTarget = -1;
-    // We don't have the actorSlotForView address confirmed, so skip exact matching
-
-    var worldX  = readS32(a.add(0x1FC));
-    var worldY  = readS32(a.add(0x200));
-    var worldZ  = readS32(a.add(0x204));
-    var velX    = readS32(a.add(0x1CC));
-    var velY    = readS32(a.add(0x1D0));
-    var velZ    = readS32(a.add(0x1D4));
-    var angRoll = readS32(a.add(0x1C0));
-    var angYaw  = readS32(a.add(0x1C4));
-    var angPitch= readS32(a.add(0x1C8));
-    var dispRoll = readS16(a.add(0x208));
-    var dispYaw  = readS16(a.add(0x20A));
-    var dispPitch= readS16(a.add(0x20C));
-    var spanRaw  = readS16(a.add(0x080));
-    var spanNorm = readS16(a.add(0x082));
-    var spanAccum= readS16(a.add(0x084));
-    var spanHigh = readS16(a.add(0x086));
-    var steer    = readS32(a.add(0x30C));
-    var engine   = readS32(a.add(0x310));
-    var longSpd  = readS32(a.add(0x314));
-    var latSpd   = readS32(a.add(0x318));
-    var frontSlip= readS32(a.add(0x31C));
-    var rearSlip = readS32(a.add(0x320));
-    var finishT  = readS32(a.add(0x328));
-    var accumDist= readS32(a.add(0x32C));
-    var pendFin  = readU16(a.add(0x344));
-    var gear     = readU8(a.add(0x36B));
-    var vehMode  = readU8(a.add(0x379));
-    var trkContact= readU8(a.add(0x37B));
-    var wheelMask= readU8(a.add(0x37D));
-    var racePos  = readU8(a.add(0x383));
-
-    // Metrics: in the original binary these are in a separate table,
-    // not embedded in the actor. We emit zeros for now -- the key
-    // physics/position fields are the important comparison targets.
-    var prefix = writePrefix(frameIndex, simTick, stage, "actor", slot);
-    var line = prefix +
-        // frame fields (zeros for actor row)
-        "0,0,0,0,0,0,0.000000,0.000000,0.000000,0,0,0," +
-        // actor fields
-        slotState + "," + comp1 + "," + comp2 + "," + viewTarget + "," +
-        worldX + "," + worldY + "," + worldZ + "," +
-        velX + "," + velY + "," + velZ + "," +
-        angRoll + "," + angYaw + "," + angPitch + "," +
-        dispRoll + "," + dispYaw + "," + dispPitch + "," +
-        spanRaw + "," + spanNorm + "," + spanAccum + "," + spanHigh + "," +
-        steer + "," + engine + "," + longSpd + "," + latSpd + "," +
-        frontSlip + "," + rearSlip + "," + finishT + "," + accumDist + "," +
-        pendFin + "," + gear + "," + vehMode + "," + trkContact + "," + wheelMask + "," + racePos + "," +
-        // metric fields (zeros -- original metrics table address TBD)
-        "0,0,0,0,0,0,0," +
-        // view fields (zeros)
-        "0,0,0,0.000000,0.000000,0.000000\n";
-    writeRow(line);
+    var line =
+        frameIndex + "," + simTick + "," + stage + "," + slot + "," +
+        readS32(a.add(0x1FC)) + "," + readS32(a.add(0x200)) + "," + readS32(a.add(0x204)) + "," +
+        readS32(a.add(0x1C0)) + "," + readS32(a.add(0x1C4)) + "," + readS32(a.add(0x1C8)) + "," +
+        readS16(a.add(0x208)) + "," + readS16(a.add(0x20A)) + "," + readS16(a.add(0x20C)) + "\n";
+    emitTo(MOD_POSE, line);
 }
 
-function writeViewRow(frameIndex, simTick, stage, vpIndex) {
-    // Per-viewport camera world position (24.8 fixed-point int[3])
+function emitMotionRow(frameIndex, simTick, stage, stageBit, slot) {
+    if (!moduleActive(MOD_MOTION, stageBit)) return;
+    var a = actorPtr(slot);
+    var line =
+        frameIndex + "," + simTick + "," + stage + "," + slot + "," +
+        readS32(a.add(0x1CC)) + "," + readS32(a.add(0x1D0)) + "," + readS32(a.add(0x1D4)) + "," +
+        readS32(a.add(0x314)) + "," + readS32(a.add(0x318)) + "," +
+        readS32(a.add(0x31C)) + "," + readS32(a.add(0x320)) + "\n";
+    emitTo(MOD_MOTION, line);
+}
+
+function emitTrackRow(frameIndex, simTick, stage, stageBit, slot) {
+    if (!moduleActive(MOD_TRACK, stageBit)) return;
+    var a = actorPtr(slot);
+    var line =
+        frameIndex + "," + simTick + "," + stage + "," + slot + "," +
+        readS16(a.add(0x080)) + "," + readS16(a.add(0x082)) + "," +
+        readS16(a.add(0x084)) + "," + readS16(a.add(0x086)) + "," +
+        readU8 (a.add(0x37B)) + "," + readU8 (a.add(0x37D)) + "\n";
+    emitTo(MOD_TRACK, line);
+}
+
+function emitControlsRow(frameIndex, simTick, stage, stageBit, slot) {
+    if (!moduleActive(MOD_CONTROLS, stageBit)) return;
+    var a  = actorPtr(slot);
+    var ss = slotStatePtr(slot);
+    var line =
+        frameIndex + "," + simTick + "," + stage + "," + slot + "," +
+        readU8(ss) + "," +
+        readS32(a.add(0x30C)) + "," + readS32(a.add(0x310)) + "," +
+        readU8 (a.add(0x36B)) + "," + readU8 (a.add(0x379)) + "\n";
+    emitTo(MOD_CONTROLS, line);
+}
+
+function emitProgressRow(frameIndex, simTick, stage, stageBit, slot) {
+    if (!moduleActive(MOD_PROGRESS, stageBit)) return;
+    var a = actorPtr(slot);
+    // The original binary stores the metric_* fields in a separate table
+    // whose layout is not yet RE'd. Emitting zeros keeps the comparator
+    // from flagging spurious divergences on those columns until the table
+    // address is resolved.
+    var line =
+        frameIndex + "," + simTick + "," + stage + "," + slot + "," +
+        readU8 (a.add(0x383)) + "," + readS32(a.add(0x328)) + "," +
+        readS32(a.add(0x32C)) + "," + readU16(a.add(0x344)) + "," +
+        "0,0,0,0,0,0,0\n";
+    emitTo(MOD_PROGRESS, line);
+}
+
+function emitViewRow(frameIndex, simTick, stage, stageBit, vpIndex) {
+    if (!moduleActive(MOD_VIEW, stageBit)) return;
     var camBase = G_camWorldPosFixed.add(vpIndex * 12);
-    var cwx = readS32(camBase);
-    var cwy = readS32(camBase.add(4));
-    var cwz = readS32(camBase.add(8));
-    var cx = cwx / 256.0;
-    var cy = cwy / 256.0;
-    var cz = cwz / 256.0;
-
     var actorSlot = 0; // default to player for view 0
-
-    var prefix = writePrefix(frameIndex, simTick, stage, "view", vpIndex);
-    var line = prefix +
-        // frame fields (zeros)
-        "0,0,0,0,0,0,0.000000,0.000000,0.000000,0,0,0," +
-        // actor fields (zeros except view_target)
-        "0,0,0," + actorSlot + "," +
-        "0,0,0,0,0,0,0,0,0,0,0,0," +
-        "0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0," +
-        "0,0,0,0,0,0,0," +
-        // view fields
-        cwx + "," + cwy + "," + cwz + "," +
-        cx.toFixed(6) + "," + cy.toFixed(6) + "," + cz.toFixed(6) + "\n";
-    writeRow(line);
+    var line =
+        frameIndex + "," + simTick + "," + stage + "," + vpIndex + "," + actorSlot + "," +
+        readS32(camBase) + "," + readS32(camBase.add(4)) + "," + readS32(camBase.add(8)) + "\n";
+    emitTo(MOD_VIEW, line);
 }
 
 // ============================================================================
 // Stage snapshot -- mirrors td5_game_trace_stage() in the source port
 // ============================================================================
 
+function stageBitFromName(stage) {
+    switch (stage) {
+        case "frame_begin":   return STG_FRAME_BEGIN;
+        case "pre_physics":   return STG_PRE_PHYSICS;
+        case "post_physics":  return STG_POST_PHYSICS;
+        case "post_ai":       return STG_POST_AI;
+        case "post_track":    return STG_POST_TRACK;
+        case "post_camera":   return STG_POST_CAMERA;
+        case "post_progress": return STG_POST_PROGRESS;
+        case "frame_end":     return STG_FRAME_END;
+        case "pause_menu":    return STG_PAUSE_MENU;
+        case "countdown":     return STG_COUNTDOWN;
+    }
+    return STG_ALL;
+}
+
 function traceStage(stage) {
     if (!enabled) return;
 
     var frameIndex = fridaFrameCounter;
     var simTick    = readS32(G_simulationTickCounter);
+    var stageBit   = stageBitFromName(stage);
 
     if (!beginFrame(frameIndex)) return;
 
-    // Frame row
-    writeFrameRow(frameIndex, simTick, stage);
+    emitFrameRow(frameIndex, simTick, stage, stageBit);
 
-    // Actor rows — all 6 racer slots, no state filter
-    for (var i = 0; i < 6; i++) {
-        if (!selectedSlot(i)) continue;
-        writeActorRow(frameIndex, simTick, stage, i);
+    // Skip the per-actor read loop entirely if no slot-bound module wants
+    // this stage. Mirrors td5_game.c's `any_slot_module` short-circuit and
+    // saves 6 actor-table dereferences on stages that only feed the frame
+    // / view CSVs.
+    var anySlot = moduleActive(MOD_POSE, stageBit) ||
+                  moduleActive(MOD_MOTION, stageBit) ||
+                  moduleActive(MOD_TRACK, stageBit) ||
+                  moduleActive(MOD_CONTROLS, stageBit) ||
+                  moduleActive(MOD_PROGRESS, stageBit);
+    if (anySlot) {
+        for (var i = 0; i < 6; i++) {
+            if (!selectedSlot(i)) continue;
+            emitPoseRow    (frameIndex, simTick, stage, stageBit, i);
+            emitMotionRow  (frameIndex, simTick, stage, stageBit, i);
+            emitTrackRow   (frameIndex, simTick, stage, stageBit, i);
+            emitControlsRow(frameIndex, simTick, stage, stageBit, i);
+            emitProgressRow(frameIndex, simTick, stage, stageBit, i);
+        }
     }
 
-    // View rows
-    var vpCount = readS32(G_viewCount);
-    for (var vp = 0; vp < vpCount && vp < 2; vp++) {
-        writeViewRow(frameIndex, simTick, stage, vp);
+    if (moduleActive(MOD_VIEW, stageBit)) {
+        var vpCount = readS32(G_viewCount);
+        for (var vp = 0; vp < vpCount && vp < 2; vp++) {
+            emitViewRow(frameIndex, simTick, stage, stageBit, vp);
+        }
     }
 }
 
@@ -412,17 +502,36 @@ function traceStage(stage) {
 
 function init() {
     console.log("[trace] Initializing race trace hooks on TD5_d3d.exe");
-    console.log("[trace] Output: " + OUTPUT_PATH);
     console.log("[trace] Slot filter: " + (TRACE_SLOT < 0 ? "all" : TRACE_SLOT));
     console.log("[trace] Max frames: " + (TRACE_MAX_FRAMES > 0 ? TRACE_MAX_FRAMES : "unlimited"));
 
-    fileHandle = new File(OUTPUT_PATH, "w");
-    if (fileHandle === null) {
-        console.log("[trace] ERROR: Could not open " + OUTPUT_PATH);
-        return;
+    moduleMask = parseModuleMask(MODULE_MASK_CSV);
+    stageMask  = parseStageMask(STAGE_MASK_CSV);
+    console.log("[trace] modules='" + MODULE_MASK_CSV + "' (mask=0x" + moduleMask.toString(16) + ")");
+    console.log("[trace] stages ='" + STAGE_MASK_CSV  + "' (mask=0x" + stageMask.toString(16)  + ")");
+    console.log("[trace] csv base=" + MODULE_CSV_BASE);
+
+    // Open per-module CSVs. File path = "<base>_<module>.csv".
+    var anyOpen = false;
+    for (var i = 0; i < MODULE_TABLE.length; i++) {
+        var m = MODULE_TABLE[i];
+        if (!(moduleMask & m.mask)) continue;
+        var path = MODULE_CSV_BASE + "_" + m.name + ".csv";
+        m.fp = new File(path, "w");
+        if (m.fp === null) {
+            console.log("[trace] ERROR: cannot open " + path);
+            continue;
+        }
+        m.fp.write(m.header + "\n");
+        m.fp.flush();
+        anyOpen = true;
+        console.log("[trace] " + m.name + " trace: " + path);
     }
-    writeRow(CSV_HEADER);
-    fileHandle.flush();
+    if (!anyOpen) {
+        console.log("[trace] WARN: no module files opened — module mask = 0x" + moduleMask.toString(16));
+    }
+    // Legacy single-CSV path stays NULL — emitters route through MODULE_TABLE.
+    fileHandle = null;
 
     if (CAPTURE_BRAKE_TRACE) {
         brakeFileHandle = new File(BRAKE_OUTPUT_PATH, "w");
@@ -690,11 +799,17 @@ function hookDDrawExports(ddrawBase) {
 
 function shutdown() {
     enabled = false;
+    for (var i = 0; i < MODULE_TABLE.length; i++) {
+        var m = MODULE_TABLE[i];
+        if (m.fp !== null) {
+            try { m.fp.flush(); m.fp.close(); } catch (e) {}
+            m.fp = null;
+        }
+    }
+    console.log("[trace] Per-module CSVs closed (" + framesStarted + " frames captured)");
     if (fileHandle !== null) {
-        fileHandle.flush();
-        fileHandle.close();
+        try { fileHandle.flush(); fileHandle.close(); } catch (e) {}
         fileHandle = null;
-        console.log("[trace] Trace file closed (" + framesStarted + " frames captured)");
     }
     if (brakeFileHandle !== null) {
         brakeFileHandle.flush();

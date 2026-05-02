@@ -502,15 +502,53 @@ Useful keys for fix-validation runs:
 | `[Game]` | `DebugOverlay = 1` | On-screen counters for physics/render |
 | `[GameOptions]` | `Laps`, `Traffic`, `Cops`, `Difficulty`, `Collisions`, `Dynamics` | Race-rules toggles |
 | `[GameOptions]` | `PlayerIsAI = 1` | Slot 0 driven by AI (mirrors original demo mode) — **disable for /diff-race** so player-path fixes are visible |
-| `[Trace]` | `RaceTrace = 1` | Emit `log/race_trace.csv` |
+| `[Trace]` | `RaceTrace = 1` | Emit per-module `log/race_trace_*.csv` files |
 | `[Trace]` | `RaceTraceSlot` | Which actor slot to record |
 | `[Trace]` | `RaceTraceMaxFrames` | Cap trace length |
 | `[Trace]` | `AutoThrottle = 1` | Hold throttle automatically once the race starts |
+| `[Trace]` | `Modules` | CSV subset of `frame,pose,motion,track,controls,progress,view,calls` (or `*`) — narrow per fix focus |
+| `[Trace]` | `Stages` | CSV subset of `frame_begin,pre_physics,post_physics,post_ai,post_track,post_camera,post_progress,frame_end,pause_menu,countdown` (or `*`) |
+| `[Trace]` | `TraceFastForward` | Speed multiplier for trace runs (`1.0`=real-time, `4.0`=4x, `0.5`=half) |
 | `[Logging]` | `Enabled = 1` | **Required** — turn on the centralized logger so `engine.log` / `race.log` / `frontend.log` populate (otherwise post-run reads see only `[session start]`) |
 | `[Logging]` | `MinLevel` | `0`=DEBUG, `1`=INFO (default), `2`=WARN, `3`=ERROR. Bump to `2` to keep WRN/ERR but kill the INF spam |
 | `[Logging]` | `Frontend` / `Race` / `Engine` / `Wrapper` | Per-sink gates. Turn off the categories you didn't touch to keep the log lean. `Wrapper` is the biggest emitter — leave at `0` unless debugging the D3D shim |
 
 For ad-hoc scenario tweaks without rewriting the worktree INI, `td5re.exe` accepts `--Key=N` CLI overrides (case-insensitive, match INI names exactly). CLI > INI > defaults, applied in `main.c:td5_apply_cli_overrides()`. Useful when two parallel `/fix` sessions want different scenarios without racing on the INI file — just vary the `-ArgumentList` on each worktree's launch. Full key list in `reference_td5re_cli_overrides.md`; track/car number tables in `re/tools/quickrace/td5_quickrace.ini` (still the reference even though td5re.exe no longer reads that INI — the Frida launcher for the original binary still does). Example: `--DefaultTrack=15 --DefaultGameType=0 --AutoRace=1`.
+
+### Pick trace modules + stages from the fix focus (MANDATORY)
+
+The trace harness is modular: each module emits its own `log/race_trace_<module>.csv`. **Picking only the modules + stages relevant to the fix is mandatory** — capturing all eight modules at every stage at 30 Hz × 6 actors costs real FPS and floods the comparator with columns the fix doesn't touch.
+
+Before launching, classify `$ARGUMENTS` into ONE of the focus buckets below and write the matching `Modules` + `Stages` lines into `${WORKTREE_DIR}/td5re.ini` `[Trace]`. If the fix straddles two buckets, union them. If you are genuinely unsure, default to `physics` — it is the largest sensible superset for race-frame work.
+
+| Focus | Trigger keywords in `$ARGUMENTS` | `Modules` | `Stages` |
+|---|---|---|---|
+| `physics` | physics, suspension, integrator, friction, gravity, velocity, spring, damper | `pose,motion,track,frame` | `pre_physics,post_physics,post_track` |
+| `collision` | collision, V2V, wall, contact, clipping, push, impulse | `pose,motion,track` | `post_physics,post_track` |
+| `ai` | AI, route, branch, steering, rubber-band, script VM, target | `controls,motion,track` | `post_ai,pre_physics,post_physics` |
+| `controls` | input, throttle, brake, gear, transmission, handbrake | `controls,motion` | `pre_physics,post_physics` |
+| `camera` | camera, chase, orbit, view, FOV, trackside, spline | `view,pose,frame` | `post_camera,post_physics,frame_end` |
+| `progress` | checkpoint, lap, finish, position, race-order, timer | `progress,track,frame` | `post_progress,post_track,frame_end` |
+| `frontend` | frontend, menu, screen, button, HUD, overlay, dialog, language, gallery | `frame` | `frame_begin,frame_end` (often skip Frida capture entirely — see `feedback_fix_render_only_skip_frida.md`) |
+| `render-only` | render, draw, UV, atlas, blit, texture, dispatch, tpage | `frame` | `frame_end` |
+| `audio` | audio, sound, FX, music, mix, DSound | `frame,controls` | `frame_end,post_progress` |
+
+Example INI block for a physics fix:
+```ini
+[Trace]
+RaceTrace = 1
+RaceTraceSlot = 0
+RaceTraceMaxFrames = 600
+AutoThrottle = 1
+TraceFastForward = 4.0
+RaceTraceMaxSimTicks = 450
+Modules = pose,motion,track,frame
+Stages = pre_physics,post_physics,post_track
+```
+
+For a render-only fix, set `Modules = frame` and `Stages = frame_end` — most render bugs are visible in the screenshot loop without per-tick CSV at all, and you can skip the original-side Frida capture (`feedback_fix_render_only_skip_frida.md`).
+
+`--TraceModules=` and `--TraceStages=` CLI overrides accept the same CSV syntax and beat the worktree INI, so parallel sessions can capture different focus buckets without racing on the INI file.
 
 ### Launch the game (auto-close harness)
 
@@ -647,6 +685,71 @@ This keeps the worktree's runtime state bit-for-bit identical to what the user s
 
 After the harness exits, read the relevant log under `log/` (see the table in **Logging Rules** below). Match your edits to the right log file, read the tail (last 100–200 lines), and grep for the `TD5_LOG_I` lines you added. If the log contradicts the expected behavior, iterate — do NOT guess at runtime state when the log can tell you. For physics/AI fixes, also inspect `log/race_trace.csv` directly.
 
+## Frida preflight (HARD STOP — required before any original-binary launch)
+
+**Why:** `re/tools/quickrace/td5_quickrace.ini` is shared mutable state. A previous `/re` or interactive session may have left it pointed at a frontend screen, a non-zero spawn offset, `frontend_only=true`, or `player_is_ai=true` — in which case the Frida-side Original CSV captured by the sweep below is **garbage** (no race ever runs, or runs on the wrong scenario / wrong driver). A single empty/stale Original CSV silently invalidates the whole fix's evidence basis. `/diff-race` is protected via `--no-ini`; `/fix` is not, so we gate it here.
+
+**Run this check before EVERY sweep, even when the sweep already passes `--set` overrides** — the goal is to catch surprise drift, not to second-guess the overrides.
+
+```bash
+QR_INI="C:/Users/maria/Desktop/Proyectos/TD5RE/re/tools/quickrace/td5_quickrace.ini"
+
+# Read the four fields that silently break the sweep when non-default.
+SCREEN=$(awk -F= '/^[[:space:]]*frontend_screen[[:space:]]*=/    {gsub(/[[:space:]]/,"",$2); print $2; exit}' "${QR_INI}")
+ONLY=$(awk -F= '/^[[:space:]]*frontend_only[[:space:]]*=/        {gsub(/[[:space:]]/,"",$2); print $2; exit}' "${QR_INI}")
+OFFSET=$(awk -F= '/^[[:space:]]*start_span_offset[[:space:]]*=/  {gsub(/[[:space:]]/,"",$2); print $2; exit}' "${QR_INI}")
+PISAI=$(awk -F= '/^[[:space:]]*player_is_ai[[:space:]]*=/        {gsub(/[[:space:]]/,"",$2); print $2; exit}' "${QR_INI}")
+
+DRIFT=()
+[ "${SCREEN:-X}" != "-1" ]    && DRIFT+=("frontend_screen=${SCREEN} (must be -1 — anything else jumps the original to that frontend screen, NO race runs)")
+[ "${ONLY:-X}"   != "false" ] && DRIFT+=("frontend_only=${ONLY} (must be false — true keeps the original in the menu, NO race runs)")
+[ "${OFFSET:-0}" != "0" ]     && DRIFT+=("start_span_offset=${OFFSET} (must be 0 — non-zero shifts the spawn down-track and breaks tick-0 parity with the port)")
+[ "${PISAI:-X}"  != "false" ] && DRIFT+=("launcher.player_is_ai=${PISAI} (must be false unless this fix is specifically about AI slot 0; otherwise physics traces are skewed)")
+
+if [ "${#DRIFT[@]}" -gt 0 ]; then
+    echo "FRIDA PREFLIGHT FAILED — ${QR_INI} has non-default knobs:"
+    printf '  - %s\n' "${DRIFT[@]}"
+    echo ""
+    echo "These will silently corrupt the Original CSV in the sweep below."
+    echo ""
+fi
+```
+
+**Decision rules** when `DRIFT` is non-empty:
+
+1. **Default action — STOP and ask the user, verbatim:**
+   ```
+   FRIDA PREFLIGHT FAILED — re/tools/quickrace/td5_quickrace.ini has non-default knobs:
+     <bullet list of the DRIFT items printed above>
+
+   These knobs are usually leftovers from a /re or interactive session.
+   For this /fix, do you want me to:
+     (a) Reset the INI to safe defaults
+         (frontend_screen=-1, frontend_only=false, start_span_offset=0, player_is_ai=false)
+         and proceed with the sweep [DEFAULT for any physics/AI/track/camera/HUD fix]
+     (b) Keep these knobs because this /fix is specifically testing them
+         (e.g. frontend rendering, mid-track spawn, AI-on-slot-0 parity).
+         Confirm which knobs are intentional.
+     (c) Abort this /fix.
+   ```
+
+2. **Never silently proceed.** The `--set` overrides in the sweep loop *do* mask the INI for that specific run, but proceeding without surfacing the drift hides the fact that the user's environment is in an unexpected state — and any side-channel Frida probe (e.g. `--extra-script`, manual relaunch) the user adds later will still inherit the bad INI.
+
+3. **If the user picks (a) "reset",** rewrite the four keys in place using `Edit`:
+   ```
+   Edit ${QR_INI}: frontend_screen = -1
+   Edit ${QR_INI}: frontend_only = false
+   Edit ${QR_INI}: start_span_offset = 0
+   Edit ${QR_INI}: player_is_ai = false
+   ```
+   Then re-run the preflight block and confirm `DRIFT` is empty before proceeding.
+
+4. **If the user picks (b) "keep",** they MUST name which knobs are intentional. Print the resulting plan back to them ("OK, keeping `frontend_only=true` because this fix targets the main menu; resetting the other three.") and edit the non-confirmed ones to safe defaults before the sweep.
+
+5. **If the user picks (c) "abort",** stop the workflow cleanly. Leave the worktree alone — the user can resume later or tear it down with the **Abandoning a worktree** recipe.
+
+**Skip exception:** Frontend / asset / build-tooling fixes that have already declared they are skipping the multi-track sweep entirely (per Step 2 rule 5) also skip this preflight — there is no Frida launch to protect.
+
 ## Multi-track CSV bundle sweep (mandatory)
 
 **Why:** A single-track test misses symptoms that only show up on other geometry. A Ghidra-correct fix can look "no effect" on Moscow because Moscow's spawn spans never hit the corrected code path. Multi-track coverage catches this; per-fix co-located CSV bundles make post-hoc bisection possible. See `feedback_fix_multi_track_frida.md` for the reasoning.
@@ -735,8 +838,9 @@ for entry in "0:moscow" "5:newcastle" "${RANDOM_IDX}:${RANDOM_NAME}"; do
         --set race.track=${TRACK_N} --set race.car=0 --set race.game_type=0 --set race.laps=1 \
         --set race.start_span_offset=0 \
         --set frontend.frontend_only=false \
+        --set frontend.frontend_screen=-1 \
         --set launcher.player_is_ai=false \
-        --trace-max-frames 300
+        --trace-max-frames 300 --max-runtime 90
     cp log/race_trace_original.csv "${BUNDLE_DIR}/original_track${TRACK_N}_${TRACK_NAME}.csv"
 
     # --- Sanity check: both sides must produce a non-empty CSV ---
@@ -750,6 +854,12 @@ done
 ```
 
 The quickrace Python + `tools/frida_race_trace.js` already emit the canonical CSV schema that pairs 1:1 with the port's `log/race_trace.csv`. Do NOT reimplement the Frida side inline.
+
+**Auto-close is mandatory.** Every invocation of `td5_quickrace.py` from `/fix` (or any orchestrated context) MUST have at least one of:
+- `--trace --trace-auto-exit` — the trace script signals close once `RaceTraceMaxFrames` / `RaceTraceMaxSimTicks` fires.
+- `--max-runtime <SECONDS>` — wall-clock cap. Default in the launcher is `180`, but the sweep pins `--max-runtime 90` per track so a stuck Frida session can't hold a worktree's td5re.exe / TD5_d3d.exe past the bundle window.
+
+Never pass `--max-runtime 0` from `/fix` — that disables the cap and lets a hung TD5_d3d.exe survive the session, which blocks worktree teardown and silently corrupts the next sweep iteration. `--max-runtime 0` is reserved for interactive Ghidra/Frida debugging, where the user is supervising the process by hand.
 
 3. **Confirm both CSVs are non-empty** — ≥ 50 rows each. A zero-row side means the harness died before the trace flushed; investigate (missing windowed patch, DDraw proxy unrenamed, Frida attach race) and retry that track.
 

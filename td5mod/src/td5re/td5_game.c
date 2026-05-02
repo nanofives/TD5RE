@@ -1749,7 +1749,8 @@ int td5_game_init_race_session(void) {
  * Called at stage boundaries inside the race frame loop.
  * ======================================================================== */
 
-static void td5_game_trace_stage(const char *stage, int ticks_this_frame)
+static void td5_game_trace_stage_impl(const char *stage, unsigned int stage_bit,
+                                      int ticks_this_frame)
 {
     uint32_t frame = g_tick_counter;
     uint32_t sim_tick = (uint32_t)g_td5.simulation_tick_counter;
@@ -1779,97 +1780,146 @@ static void td5_game_trace_stage(const char *stage, int ticks_this_frame)
     if (!td5_trace_begin_frame(frame))
         return;
 
-    /* Frame row */
-    {
-        TD5_TraceFrameState fs;
-        fs.game_state           = (int)g_td5.game_state;
-        fs.paused               = g_td5.paused;
-        fs.pause_menu_active    = s_pause_menu_active;
-        fs.fade_state           = g_td5.race_end_fade_state;
-        fs.countdown_timer      = s_race_countdown_state;
-        fs.sim_time_accumulator = g_td5.sim_time_accumulator;
-        fs.sim_tick_budget      = g_td5.sim_tick_budget;
-        fs.frame_dt             = g_td5.normalized_frame_dt;
-        fs.instant_fps          = g_td5.instant_fps;
-        fs.viewport_count       = g_td5.viewport_count;
-        fs.split_screen_mode    = g_td5.split_screen_mode;
-        fs.ticks_this_frame     = ticks_this_frame;
-        td5_trace_write_frame(frame, sim_tick, stage, &fs);
+    /* Frame row -- one per stage call, no actor loop. */
+    if (td5_trace_active(TD5_TRACE_MOD_FRAME, stage_bit)) {
+        TD5_TraceFrameRow fr;
+        fr.game_state           = (int)g_td5.game_state;
+        fr.paused               = g_td5.paused;
+        fr.pause_menu_active    = s_pause_menu_active;
+        fr.fade_state           = g_td5.race_end_fade_state;
+        fr.countdown_timer      = s_race_countdown_state;
+        fr.sim_time_accumulator = g_td5.sim_time_accumulator;
+        fr.sim_tick_budget      = g_td5.sim_tick_budget;
+        fr.frame_dt             = g_td5.normalized_frame_dt;
+        fr.instant_fps          = g_td5.instant_fps;
+        fr.viewport_count       = g_td5.viewport_count;
+        fr.split_screen_mode    = g_td5.split_screen_mode;
+        fr.ticks_this_frame     = ticks_this_frame;
+        td5_trace_emit_frame(frame, sim_tick, stage, &fr);
     }
 
-    /* Actor rows */
-    for (int i = 0; i < TD5_MAX_RACER_SLOTS; i++) {
-        if (!td5_trace_selected_slot(i))
-            continue;
-        if (s_slot_state[i].state == 3)
-            continue;  /* disabled */
+    /* Per-actor rows. The actor loop only runs if at least one slot-bound
+     * module is active for this stage — otherwise we skip the actor->bytes
+     * casts entirely. */
+    int any_slot_module =
+        td5_trace_active(TD5_TRACE_MOD_POSE,     stage_bit) ||
+        td5_trace_active(TD5_TRACE_MOD_MOTION,   stage_bit) ||
+        td5_trace_active(TD5_TRACE_MOD_TRACK,    stage_bit) ||
+        td5_trace_active(TD5_TRACE_MOD_CONTROLS, stage_bit) ||
+        td5_trace_active(TD5_TRACE_MOD_PROGRESS, stage_bit);
 
-        TD5_Actor *actor = td5_game_get_actor(i);
-        if (!actor) continue;
-        uint8_t *a = (uint8_t *)actor;
+    if (any_slot_module) {
+        for (int i = 0; i < TD5_MAX_RACER_SLOTS; i++) {
+            if (!td5_trace_selected_slot(i))
+                continue;
+            if (s_slot_state[i].state == 3)
+                continue;  /* disabled */
 
-        TD5_TraceActorState as;
-        as.slot                  = i;
-        as.slot_state            = s_slot_state[i].state;
-        as.slot_companion_1      = s_slot_state[i].companion_1;
-        as.slot_companion_2      = s_slot_state[i].companion_2;
-        as.view_target           = (g_actorSlotForView[0] == i) ? 0
-                                 : (g_actorSlotForView[1] == i) ? 1 : -1;
-        as.world_x               = *(int32_t *)(a + 0x1FC);
-        as.world_y               = *(int32_t *)(a + 0x200);
-        as.world_z               = *(int32_t *)(a + 0x204);
-        as.vel_x                 = *(int32_t *)(a + 0x1CC);
-        as.vel_y                 = *(int32_t *)(a + 0x1D0);
-        as.vel_z                 = *(int32_t *)(a + 0x1D4);
-        as.ang_roll              = *(int32_t *)(a + 0x1C0);
-        as.ang_yaw               = *(int32_t *)(a + 0x1C4);
-        as.ang_pitch             = *(int32_t *)(a + 0x1C8);
-        as.disp_roll             = *(int16_t *)(a + 0x208);
-        as.disp_yaw              = *(int16_t *)(a + 0x20A);
-        as.disp_pitch            = *(int16_t *)(a + 0x20C);
-        as.span_raw              = *(int16_t *)(a + 0x080);
-        as.span_norm             = *(int16_t *)(a + 0x082);
-        as.span_accum            = *(int16_t *)(a + 0x084);
-        as.span_high             = *(int16_t *)(a + 0x086);
-        as.steering_cmd          = *(int32_t *)(a + 0x30C);
-        as.engine_speed          = *(int32_t *)(a + 0x310);
-        as.long_speed            = *(int32_t *)(a + 0x314);
-        as.lat_speed             = *(int32_t *)(a + 0x318);
-        as.front_slip            = *(int32_t *)(a + 0x31C);
-        as.rear_slip             = *(int32_t *)(a + 0x320);
-        as.finish_time           = *(int32_t *)(a + 0x328);
-        as.accum_distance        = *(int32_t *)(a + 0x32C);
-        as.pending_finish_timer  = *(uint16_t *)(a + 0x344);
-        as.current_gear          = *(uint8_t *)(a + 0x36B);
-        as.vehicle_mode          = *(uint8_t *)(a + 0x379);
-        as.track_contact_flag    = *(uint8_t *)(a + 0x37B);
-        as.wheel_contact_mask    = *(uint8_t *)(a + 0x37D);
-        as.race_position         = *(uint8_t *)(a + 0x383);
+            TD5_Actor *actor = td5_game_get_actor(i);
+            if (!actor) continue;
+            uint8_t *a = (uint8_t *)actor;
 
-        as.metric_checkpoint_index  = s_metrics[i].checkpoint_index;
-        as.metric_checkpoint_mask   = s_metrics[i].checkpoint_bitmask;
-        as.metric_normalized_span   = s_metrics[i].normalized_span;
-        as.metric_timer_ticks       = s_metrics[i].timer_ticks;
-        as.metric_display_position  = s_metrics[i].display_position;
-        as.metric_speed_bonus       = s_metrics[i].speed_bonus;
-        as.metric_top_speed         = s_metrics[i].top_speed;
+            if (td5_trace_active(TD5_TRACE_MOD_POSE, stage_bit)) {
+                TD5_TracePoseRow r;
+                r.slot       = i;
+                r.world_x    = *(int32_t *)(a + 0x1FC);
+                r.world_y    = *(int32_t *)(a + 0x200);
+                r.world_z    = *(int32_t *)(a + 0x204);
+                r.ang_roll   = *(int32_t *)(a + 0x1C0);
+                r.ang_yaw    = *(int32_t *)(a + 0x1C4);
+                r.ang_pitch  = *(int32_t *)(a + 0x1C8);
+                r.disp_roll  = *(int16_t *)(a + 0x208);
+                r.disp_yaw   = *(int16_t *)(a + 0x20A);
+                r.disp_pitch = *(int16_t *)(a + 0x20C);
+                td5_trace_emit_pose(frame, sim_tick, stage, &r);
+            }
 
-        td5_trace_write_actor(frame, sim_tick, stage, &as);
+            if (td5_trace_active(TD5_TRACE_MOD_MOTION, stage_bit)) {
+                TD5_TraceMotionRow r;
+                r.slot       = i;
+                r.vel_x      = *(int32_t *)(a + 0x1CC);
+                r.vel_y      = *(int32_t *)(a + 0x1D0);
+                r.vel_z      = *(int32_t *)(a + 0x1D4);
+                r.long_speed = *(int32_t *)(a + 0x314);
+                r.lat_speed  = *(int32_t *)(a + 0x318);
+                r.front_slip = *(int32_t *)(a + 0x31C);
+                r.rear_slip  = *(int32_t *)(a + 0x320);
+                td5_trace_emit_motion(frame, sim_tick, stage, &r);
+            }
+
+            if (td5_trace_active(TD5_TRACE_MOD_TRACK, stage_bit)) {
+                TD5_TraceTrackRow r;
+                r.slot               = i;
+                r.span_raw           = *(int16_t *)(a + 0x080);
+                r.span_norm          = *(int16_t *)(a + 0x082);
+                r.span_accum         = *(int16_t *)(a + 0x084);
+                r.span_high          = *(int16_t *)(a + 0x086);
+                r.track_contact_flag = *(uint8_t *)(a + 0x37B);
+                r.wheel_contact_mask = *(uint8_t *)(a + 0x37D);
+                td5_trace_emit_track(frame, sim_tick, stage, &r);
+            }
+
+            if (td5_trace_active(TD5_TRACE_MOD_CONTROLS, stage_bit)) {
+                TD5_TraceControlsRow r;
+                r.slot         = i;
+                r.slot_state   = s_slot_state[i].state;
+                r.steering_cmd = *(int32_t *)(a + 0x30C);
+                r.engine_speed = *(int32_t *)(a + 0x310);
+                r.current_gear = *(uint8_t *)(a + 0x36B);
+                r.vehicle_mode = *(uint8_t *)(a + 0x379);
+                td5_trace_emit_controls(frame, sim_tick, stage, &r);
+            }
+
+            if (td5_trace_active(TD5_TRACE_MOD_PROGRESS, stage_bit)) {
+                TD5_TraceProgressRow r;
+                r.slot                     = i;
+                r.race_position            = *(uint8_t *)(a + 0x383);
+                r.finish_time              = *(int32_t *)(a + 0x328);
+                r.accum_distance           = *(int32_t *)(a + 0x32C);
+                r.pending_finish_timer     = *(uint16_t *)(a + 0x344);
+                r.metric_checkpoint_index  = s_metrics[i].checkpoint_index;
+                r.metric_checkpoint_mask   = s_metrics[i].checkpoint_bitmask;
+                r.metric_normalized_span   = s_metrics[i].normalized_span;
+                r.metric_timer_ticks       = s_metrics[i].timer_ticks;
+                r.metric_display_position  = s_metrics[i].display_position;
+                r.metric_speed_bonus       = s_metrics[i].speed_bonus;
+                r.metric_top_speed         = s_metrics[i].top_speed;
+                td5_trace_emit_progress(frame, sim_tick, stage, &r);
+            }
+        }
     }
 
     /* View rows */
-    for (int vp = 0; vp < g_td5.viewport_count && vp < 2; vp++) {
-        TD5_TraceViewState vs;
-        vs.view_index   = vp;
-        vs.actor_slot   = g_actorSlotForView[vp];
-        vs.cam_world_x  = g_camWorldPos[vp][0];
-        vs.cam_world_y  = g_camWorldPos[vp][1];
-        vs.cam_world_z  = g_camWorldPos[vp][2];
-        vs.cam_x        = (float)g_camWorldPos[vp][0] / 256.0f;
-        vs.cam_y        = (float)g_camWorldPos[vp][1] / 256.0f;
-        vs.cam_z        = (float)g_camWorldPos[vp][2] / 256.0f;
-        td5_trace_write_view(frame, sim_tick, stage, &vs);
+    if (td5_trace_active(TD5_TRACE_MOD_VIEW, stage_bit)) {
+        for (int vp = 0; vp < g_td5.viewport_count && vp < 2; vp++) {
+            TD5_TraceViewRow r;
+            r.view_index   = vp;
+            r.actor_slot   = g_actorSlotForView[vp];
+            r.cam_world_x  = g_camWorldPos[vp][0];
+            r.cam_world_y  = g_camWorldPos[vp][1];
+            r.cam_world_z  = g_camWorldPos[vp][2];
+            td5_trace_emit_view(frame, sim_tick, stage, &r);
+        }
     }
+}
+
+/* Map stage strings to bitmask + dispatch. Each call site below the FSM
+ * uses the string + bit pair so the gate is computed once per stage. */
+static void td5_game_trace_stage(const char *stage, int ticks_this_frame)
+{
+    unsigned int stage_bit = 0;
+    if      (!strcmp(stage, "frame_begin"))   stage_bit = TD5_TRACE_STG_FRAME_BEGIN;
+    else if (!strcmp(stage, "pre_physics"))   stage_bit = TD5_TRACE_STG_PRE_PHYSICS;
+    else if (!strcmp(stage, "post_physics"))  stage_bit = TD5_TRACE_STG_POST_PHYSICS;
+    else if (!strcmp(stage, "post_ai"))       stage_bit = TD5_TRACE_STG_POST_AI;
+    else if (!strcmp(stage, "post_track"))    stage_bit = TD5_TRACE_STG_POST_TRACK;
+    else if (!strcmp(stage, "post_camera"))   stage_bit = TD5_TRACE_STG_POST_CAMERA;
+    else if (!strcmp(stage, "post_progress")) stage_bit = TD5_TRACE_STG_POST_PROGRESS;
+    else if (!strcmp(stage, "frame_end"))     stage_bit = TD5_TRACE_STG_FRAME_END;
+    else if (!strcmp(stage, "pause_menu"))    stage_bit = TD5_TRACE_STG_PAUSE_MENU;
+    else if (!strcmp(stage, "countdown"))     stage_bit = TD5_TRACE_STG_COUNTDOWN;
+    else                                      stage_bit = TD5_TRACE_STG_ALL;
+    td5_game_trace_stage_impl(stage, stage_bit, ticks_this_frame);
 }
 
 /* ========================================================================
@@ -1953,8 +2003,8 @@ int td5_game_run_race_frame(void) {
     s_pause_input_done = 0;  /* allow pause input once this frame */
 
     const int max_ticks_per_frame =
-        (g_td5.ini.race_trace_enabled && g_td5.ini.trace_fast_forward > 0)
-            ? (g_td5.ini.trace_fast_forward + 8)
+        (g_td5.ini.trace_fast_forward > 1.0f)
+            ? ((int)g_td5.ini.trace_fast_forward + 8)
             : 4;
 
     {
@@ -3522,29 +3572,33 @@ void td5_game_update_frame_timing(void) {
     /* Normalized frame delta time: 1.0 = one 30 Hz simulation tick. */
     frame_dt_seconds = (float)delta_ms / 1000.0f;
     frame_dt_normalized = frame_dt_seconds * 30.0f;
+
+    /* TraceFastForward is a speed multiplier — 1.0 = real-time (default),
+     * 2.0 = 2x, 0.5 = half-speed, N = Nx — implemented by scaling the
+     * normalized frame dt that feeds the sim accumulator. <=0 is treated as
+     * 1.0 (legacy "off" sentinel). Applied unconditionally so it works for
+     * casual play, not just race-trace capture. */
+    if (g_td5.ini.trace_fast_forward > 0.0f) {
+        frame_dt_normalized *= g_td5.ini.trace_fast_forward;
+    }
     g_td5.normalized_frame_dt = frame_dt_normalized;
 
-    /* Per-frame simulation budget in normalized tick units. */
+    /* Per-frame simulation budget in normalized tick units. The spiral cap
+     * scales with the multiplier so 4x doesn't get crushed back to 4
+     * ticks/frame. */
     g_td5.sim_tick_budget = frame_dt_normalized;
-    if (g_td5.sim_tick_budget > TD5_MAX_SIM_BUDGET) {
-        g_td5.sim_tick_budget = TD5_MAX_SIM_BUDGET;
+    {
+        float budget_cap = TD5_MAX_SIM_BUDGET;
+        if (g_td5.ini.trace_fast_forward > 1.0f) {
+            budget_cap *= g_td5.ini.trace_fast_forward;
+        }
+        if (g_td5.sim_tick_budget > budget_cap) {
+            g_td5.sim_tick_budget = budget_cap;
+        }
     }
 
     /* Convert normalized frame time to the 16.16 tick accumulator. */
     g_td5.sim_time_accumulator += td5_game_normalized_dt_to_accum(frame_dt_normalized);
-
-    /* Trace fast-forward: inject N extra sim ticks per render frame so the
-     * diff-race skill runs in seconds instead of minutes. The Frida side
-     * achieves the same effect by clamping g_simTickBudget >= 1.0 in the
-     * original. Only active when race-trace capture is enabled AND
-     * TraceFastForward > 0 in the [Trace] section of td5re.ini. */
-    if (g_td5.ini.race_trace_enabled && g_td5.ini.trace_fast_forward > 0) {
-        g_td5.sim_time_accumulator +=
-            (uint32_t)g_td5.ini.trace_fast_forward * TD5_TICK_ACCUMULATOR_ONE;
-        if (g_td5.sim_tick_budget < (float)g_td5.ini.trace_fast_forward) {
-            g_td5.sim_tick_budget = (float)g_td5.ini.trace_fast_forward;
-        }
-    }
 
     /* Benchmark mode: force constant sim budget for deterministic timing */
     if (g_td5.benchmark_active) {

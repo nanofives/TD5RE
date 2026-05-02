@@ -6,9 +6,9 @@ report the first divergence so a `/fix` can target it.
 
 **Usage:**
 - Live capture + diff (single track, interactive):
-  `/diff-race [profile=NAME[,NAME...]] [car=N] [track=N] [game_type=N] [laps=N] [frames=N] [fields=a,b,c] [stage=post_physics] [kind=actor] [float-tol=0.001] [hooks=PATH.yaml]`
+  `/diff-race [profile=NAME[,NAME...]] [car=N] [track=N] [game_type=N] [laps=N] [frames=N] [modules=pose,motion] [stages=post_physics] [fields=a,b,c] [float-tol=0.001] [hooks=PATH.yaml]`
 - Diff an existing `/fix` CSV bundle (no capture — reuses what /fix already produced):
-  `/diff-race bundle=<SESSION_TAG> [profile=NAME] [track=N] [fields=a,b,c] [stage=S] [kind=K] [float-tol=F]`
+  `/diff-race bundle=<SESSION_TAG> [profile=NAME] [track=N] [modules=...] [stages=...] [fields=a,b,c] [float-tol=F]`
 - List the profile catalog (no race run):
   `/diff-race list-profiles`
 
@@ -21,7 +21,9 @@ All arguments are optional. Defaults:
 
 ## Profile catalog
 
-Profiles are curated `(fields, stage, kind)` slices that target one subsystem. Source of truth: `tools/diff_profiles.py`. Run `python tools/diff_profiles.py list` for the live catalog. Multiple profiles compose: `profile=physics,track` unions their fields and joins their stages/kinds.
+Profiles are curated `(modules, stages, fields)` slices that target one subsystem. Source of truth: `tools/diff_profiles.py`. Run `python tools/diff_profiles.py list` for the live catalog. Multiple profiles compose: `profile=physics,track` unions their modules + stages + fields.
+
+Each module emits its own narrow CSV (`log/race_trace_original_<mod>.csv` and `log/race_trace_<mod>.csv`); the comparator runs once per active module and joins on that module's key schema (`(frame,sim_tick,stage,slot)` for slot-bound modules, `(frame,sim_tick,stage)` for `frame`, `(frame,sim_tick,stage,view_index)` for `view`, `(sim_tick,fn_name,call_idx)` for `calls`).
 
 | Profile | Lens | Kind | Stage |
 |---|---|---|---|

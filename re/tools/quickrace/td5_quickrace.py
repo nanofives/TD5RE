@@ -130,7 +130,10 @@ def patch_trace_script(source: str, max_frames: int, max_sim_tick: int,
                        csv_out: str | None = None,
                        brake_csv_out: str | None = None,
                        contacts_csv_out: str | None = None,
-                       calls_csv_out: str | None = None) -> str:
+                       calls_csv_out: str | None = None,
+                       trace_modules: str | None = None,
+                       trace_stages:  str | None = None,
+                       module_csv_base: str | None = None) -> str:
     """Rewrite TRACE_MAX_FRAMES / TRACE_MAX_SIM_TICK constants in the trace script.
 
     If hook_specs is provided, also injects the JSON-encoded spec array as the
@@ -186,6 +189,35 @@ def patch_trace_script(source: str, max_frames: int, max_sim_tick: int,
         # backslashes survive into the JS source.
         replacement = f"var {var_name} = {quoted};"
         source = re.sub(pat, lambda _m: replacement, source, count=1)
+
+    # Modular trace selection. The Frida side declares MODULE_MASK_CSV /
+    # STAGE_MASK_CSV / MODULE_PATHS at the top of the script; we rewrite
+    # those literals so the original-side trace mirrors the port's
+    # --TraceModules / --TraceStages / per-module CSV destinations.
+    if trace_modules:
+        quoted = _json.dumps(trace_modules)
+        source = re.sub(
+            r"var\s+MODULE_MASK_CSV\s*=\s*\"[^\"]*\";",
+            lambda _m: f"var MODULE_MASK_CSV = {quoted};",
+            source, count=1,
+        )
+    if trace_stages:
+        quoted = _json.dumps(trace_stages)
+        source = re.sub(
+            r"var\s+STAGE_MASK_CSV\s*=\s*\"[^\"]*\";",
+            lambda _m: f"var STAGE_MASK_CSV = {quoted};",
+            source, count=1,
+        )
+    if module_csv_base:
+        # The Frida side reads MODULE_CSV_BASE and constructs
+        # `<base>_<module>.csv` per module at init time. JSON-quoting
+        # preserves Windows backslashes through re.sub.
+        quoted = _json.dumps(module_csv_base)
+        source = re.sub(
+            r"var\s+MODULE_CSV_BASE\s*=\s*\"[^\"]*\";",
+            lambda _m: f"var MODULE_CSV_BASE = {quoted};",
+            source, count=1,
+        )
     return source
 
 
@@ -282,6 +314,18 @@ def main():
     ap.add_argument("--trace-auto-exit", action="store_true",
                     help="exit this launcher when the trace script reports "
                          "an auto-close message (used by diff_race.py)")
+    ap.add_argument("--max-runtime", dest="max_runtime", type=int, default=180,
+                    help="hard wall-clock cap on this Frida session, in "
+                         "seconds. When the cap is hit the launcher detaches "
+                         "and (in spawn mode) kills TD5_d3d.exe — same as "
+                         "--trace-auto-exit, but works even when --trace is "
+                         "off or the trace script never signals. Default: "
+                         "180s. Pass 0 to run indefinitely (only do this for "
+                         "interactive debugging — orchestrators MUST pass a "
+                         "positive value so /fix and /diff-race can never "
+                         "leak a hung TD5_d3d.exe). The cap is enforced on "
+                         "top of --trace-auto-exit; whichever fires first "
+                         "wins.")
     ap.add_argument("--hook-specs", default=None,
                     help="path to a YAML/JSON hook-specs file (see "
                          "re/trace-hooks/README.md); injected into the trace "
@@ -358,6 +402,17 @@ def main():
                     help="absolute path for race_trace_contacts_original.csv")
     co.add_argument("--calls-csv-out", dest="calls_csv_out", default=None,
                     help="absolute path for calls_trace_original.csv")
+    co.add_argument("--trace-modules", dest="trace_modules", default=None,
+                    help="comma list of trace modules to capture "
+                         "(frame,pose,motion,track,controls,progress,view,calls). "
+                         "Mirrors the port's --TraceModules so both sides emit "
+                         "the same per-module CSVs.")
+    co.add_argument("--trace-stages", dest="trace_stages", default=None,
+                    help="comma list of stage rows to keep within each module CSV. "
+                         "Mirrors the port's --TraceStages.")
+    co.add_argument("--module-csv-base", dest="module_csv_base", default=None,
+                    help="path stem for per-module original-side CSVs. The "
+                         "Frida script appends '_<module>.csv' at runtime.")
 
     args = ap.parse_args()
 
@@ -401,13 +456,27 @@ def main():
     print(f"[launcher] ini: {args.ini}")
     print(f"[launcher] cfg: {cfg}")
 
-    # Default to attach-mode (auto-launch detached, then poll for the PID)
+    # Default to auto-spawn mode (launch detached, then poll for the new PID)
     # because frida.spawn() is broken on Win11 — the spawned child's audio
     # session inheritance trips M2DX.dll's DirectSound init at +0x144B.
     # Pass --spawn to force the historical frida.spawn() path.
-    if not args.spawn and args.attach_pid is None and args.attach_name is None:
+    #
+    # CRITICAL: in default mode we ALWAYS spawn a fresh process, even if a
+    # TD5_d3d.exe is already running. Earlier behavior was "attach to the
+    # first match systemwide", which silently hijacked another /fix or
+    # /diff-race session's process — injecting cross-session Frida scripts
+    # routinely crashed the victim. Snapshot the existing PIDs before
+    # spawning and pick only the new one. To explicitly attach to an
+    # already-running process, pass --attach-pid or --attach-name.
+    user_attach = args.attach_pid is not None or args.attach_name is not None
+    auto_spawn_default = not args.spawn and not user_attach
+    if auto_spawn_default:
         args.attach_name = exe_name
     attach_mode = args.attach_pid is not None or args.attach_name is not None
+    # Tracks whether WE spawned this PID (so we can safely kill on cleanup).
+    # User-attached processes (manual --attach-pid / --attach-name match) are
+    # never killed — they belong to the user.
+    we_own_pid = False
     if attach_mode:
         if args.attach_pid is not None:
             pid = args.attach_pid
@@ -419,39 +488,81 @@ def main():
             def _find_pid():
                 return [p for p in device.enumerate_processes()
                         if p.name.lower() == target_name]
-            matches = _find_pid()
-            if not matches:
-                # Auto-launch via Explorer-style detached spawn (avoids the
-                # Win11 M2DX init crash that kills frida.spawn()) and then
-                # poll for the new PID. Polling at ~10ms intervals lets us
-                # attach BEFORE RunMainGameLoop hits GAMESTATE_INTRO and
-                # invokes ShowLegalScreens / PlayIntroMovie — those hooks
-                # only fire if our Interceptor.replace() is installed first.
-                print(f"[launcher] no running {target_name!r}; "
-                      f"detached-launching {exe_name} from {ORIGINAL_DIR}")
+            existing = _find_pid()
+            existing_pids = {p.pid for p in existing}
+            if auto_spawn_default:
+                # Default path: always spawn fresh so concurrent sessions stay
+                # isolated. Other sessions' PIDs in `existing_pids` are left
+                # strictly alone — we filter them out of the post-spawn match.
+                if existing_pids:
+                    print(f"[launcher] {len(existing_pids)} {target_name!r} "
+                          f"process(es) already running (pids="
+                          f"{sorted(existing_pids)}); leaving them untouched "
+                          f"and spawning our own")
+                print(f"[launcher] auto-spawning {exe_name} from {ORIGINAL_DIR}")
                 subprocess.run(
                     ["cmd", "/c", "start", "", exe_name],
                     cwd=ORIGINAL_DIR, check=True,
                 )
-                deadline = time.monotonic() + 10.0
+                t0 = time.monotonic()
+                deadline = t0 + 10.0
+                new_matches = []
                 while time.monotonic() < deadline:
-                    matches = _find_pid()
-                    if matches:
+                    new_matches = [p for p in _find_pid()
+                                   if p.pid not in existing_pids]
+                    if new_matches:
                         break
                     time.sleep(0.01)
                 else:
-                    sys.exit(f"[launcher] {target_name!r} did not appear "
-                             f"within 10s of detached launch")
-                print(f"[launcher] caught new pid in "
-                      f"{(time.monotonic() - (deadline - 10.0)) * 1000:.0f} ms")
-            pid = matches[0].pid
-            if len(matches) > 1:
-                print(f"[launcher] warning: {len(matches)} processes match "
-                      f"{target_name!r}; attaching to first (pid={pid})")
+                    sys.exit(f"[launcher] auto-spawned {target_name!r} did "
+                             f"not appear within 10s (existing pids "
+                             f"{sorted(existing_pids)} ignored)")
+                pid = new_matches[0].pid
+                we_own_pid = True
+                if len(new_matches) > 1:
+                    # Two sessions racing the spawn at the same instant could
+                    # both see each other's new PID. Pick the lowest-PID one
+                    # deterministically and warn — both sessions will end up
+                    # with their own freshly-spawned process.
+                    print(f"[launcher] warning: {len(new_matches)} new "
+                          f"{target_name!r} processes appeared during spawn "
+                          f"window; attaching to lowest pid={pid}")
+                print(f"[launcher] auto-spawned new pid in "
+                      f"{(time.monotonic() - t0) * 1000:.0f} ms: {pid}")
+            else:
+                # User passed --attach-name explicitly — attach to a running
+                # process. If none exists, auto-launch as a convenience and
+                # take ownership of the spawned PID.
+                if not existing:
+                    print(f"[launcher] no running {target_name!r}; "
+                          f"detached-launching {exe_name} from {ORIGINAL_DIR}")
+                    subprocess.run(
+                        ["cmd", "/c", "start", "", exe_name],
+                        cwd=ORIGINAL_DIR, check=True,
+                    )
+                    t0 = time.monotonic()
+                    deadline = t0 + 10.0
+                    while time.monotonic() < deadline:
+                        existing = _find_pid()
+                        if existing:
+                            break
+                        time.sleep(0.01)
+                    else:
+                        sys.exit(f"[launcher] {target_name!r} did not appear "
+                                 f"within 10s of detached launch")
+                    we_own_pid = True
+                    print(f"[launcher] caught new pid in "
+                          f"{(time.monotonic() - t0) * 1000:.0f} ms")
+                pid = existing[0].pid
+                if len(existing) > 1:
+                    print(f"[launcher] warning: {len(existing)} processes "
+                          f"match {target_name!r}; attaching to first "
+                          f"(pid={pid}) — pass --attach-pid to disambiguate")
         print(f"[launcher] attaching to pid: {pid}")
     else:
         print(f"[launcher] spawning: {exe_path}")
         pid = frida.spawn(exe_path, cwd=ORIGINAL_DIR)
+        we_own_pid = True
         print(f"[launcher] pid: {pid}")
 
     session = frida.attach(pid)
@@ -490,7 +601,10 @@ def main():
             csv_out=args.csv_out,
             brake_csv_out=args.brake_csv_out,
             contacts_csv_out=args.contacts_csv_out,
-            calls_csv_out=args.calls_csv_out)
+            calls_csv_out=args.calls_csv_out,
+            trace_modules=args.trace_modules,
+            trace_stages=args.trace_stages,
+            module_csv_base=args.module_csv_base)
         print(f"[launcher] injecting trace script "
               f"(max_frames={args.trace_max_frames} "
               f"max_sim_tick={args.trace_max_sim_tick}"
@@ -552,14 +666,33 @@ def main():
         except Exception as exc:
             print(f"[launcher] focus attempt failed: {exc}")
 
+    deadline = None
+    if args.max_runtime and args.max_runtime > 0:
+        deadline = time.monotonic() + args.max_runtime
+        print(f"[launcher] max-runtime cap: {args.max_runtime}s "
+              f"(deadline = monotonic+{args.max_runtime})")
+    elif args.max_runtime == 0:
+        print("[launcher] max-runtime cap DISABLED (--max-runtime 0); "
+              "session will run until --trace-auto-exit fires or Ctrl-C")
+
+    timed_out = False
     try:
         while True:
             time.sleep(0.5)
             if args.trace_auto_exit and g_auto_close:
-                if attach_mode:
-                    print("[launcher] trace auto-close; detaching (process kept alive)")
-                else:
+                if we_own_pid:
                     print("[launcher] trace auto-close; detaching and killing target")
+                else:
+                    print("[launcher] trace auto-close; detaching (process kept alive — owned by user)")
+                break
+            if deadline is not None and time.monotonic() >= deadline:
+                timed_out = True
+                if we_own_pid:
+                    print(f"[launcher] max-runtime ({args.max_runtime}s) hit; "
+                          f"detaching and killing target")
+                else:
+                    print(f"[launcher] max-runtime ({args.max_runtime}s) hit; "
+                          f"detaching (process kept alive — owned by user)")
                 break
     except KeyboardInterrupt:
         print("\n[launcher] detaching")
@@ -568,9 +701,11 @@ def main():
             session.detach()
         except Exception:
             pass
-        # In attach mode the process belongs to the user (manually launched).
-        # Never kill it — the user closes it themselves.
-        if args.trace_auto_exit and not attach_mode:
+        # Kill only PIDs we spawned ourselves (we_own_pid). User-attached
+        # processes (manual --attach-pid / --attach-name onto a running
+        # process) belong to the user and are left alone, even on timeout.
+        # This ensures no parallel session's TD5_d3d.exe is ever killed.
+        if (args.trace_auto_exit or timed_out) and we_own_pid:
             try:
                 frida.kill(pid)
             except Exception:
