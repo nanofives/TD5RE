@@ -6381,8 +6381,34 @@ static void bind_default_vehicle_tuning(TD5_Actor *actor, int slot)
      * because only tuning is AI-specific in the original.
      *
      * Slot 0 stays on carparam (it's the player). Slots 6-11 (traffic) also
-     * stay on carparam — they don't run through FUN_00404EC0. */
-    if (slot >= 1 && slot < TD5_MAX_RACER_SLOTS) {
+     * stay on carparam — they don't run through FUN_00404EC0.
+     *
+     * DRAG-MODE EXEMPTION (port enhancement, NOT original parity):
+     * In the original, drag mode is encoded by g_dragRaceModeEnabled +
+     * g_raceOverlayPresetMode==1 (set by ConfigureGameTypeFlags @ 0x00410CA0
+     * case 9). InitializeRaceSession (0x0042AA10) reseats slots 1..5 to
+     * span=1, lane=i-1, then sets their slot.state to '\x03' (decoration).
+     * InitializeRaceActorRuntime (0x00432E60) gates the DAT_00473DB0 copy on
+     * `slot.state == 0 && g_selectedGameType == 0`, so original slots 1..5 in
+     * drag never get the AI template copied — they keep whatever bootstrap
+     * tuning pointer they had at allocation, and they never run
+     * UpdateVehicleActor (UpdateRaceActors @ 0x00436A70 skips state==3).
+     * In short: original drag has NO 2-car race at all.
+     *
+     * The port's slot-1 racing enhancement (td5_game.c decoration_start=2 +
+     * synthetic full-throttle driver in td5_ai.c:2948) makes slot 1 race as
+     * AI. Without this exemption, bind_default_vehicle_tuning would pick the
+     * AI template for slot 1 (since slot.state==0 in the port), giving slot 1
+     * +17% torque (140 vs Viper carparam 120) and 2x wheelbase (24000 vs
+     * 12000) — making the player lose every drag run by ~13% on
+     * cumulative_timer. Since the original never exercises the AI template
+     * for drag slot 1 (it's decoration), the cleanest port-side behavior for
+     * the 2-car drag enhancement is "Viper-vs-Viper" via carparam — neither
+     * original-faithful (original has no race) nor surprising (matches what
+     * the original would do for a 2P split-screen drag, where both player
+     * slots use carparam via the player path). */
+    if (slot >= 1 && slot < TD5_MAX_RACER_SLOTS &&
+        !(g_td5.drag_race_enabled && slot == 1 && s_carparam_loaded[slot])) {
         uint8_t *ai_tmpl = td5_ai_get_physics_template();
         if (ai_tmpl) {
             memcpy(tuning, ai_tmpl, 0x80);
