@@ -284,6 +284,13 @@ typedef struct TD5_GlobalState {
         int  log_engine;      /* engine.log (render, asset, platform, sound, net, fmv) */
         int  log_wrapper;     /* wrapper.log (D3D11 ddraw shim) */
         int  test_resolution_cycle; /* if >0, main loop cycles 3 windowed resolutions to validate apply_display_mode */
+        /* Replay persistence — DIVERGENT from original. M2DX DXInput in
+         * TD5_d3d.exe never opens a real file (5 methods @ 0x1000A640..0x1000A780
+         * have zero file-I/O callees, per reference_replay_td5_is_memory_only.md).
+         * Port-only feature: when 1, td5_input_write_close() flushes the
+         * input ring to replay.td5 on disk; td5_input_read_open() reads it
+         * back. Default 0 preserves faithful in-memory-only behavior. */
+        int  replay_persist_to_disk;
     } ini;
 
 } TD5_GlobalState;

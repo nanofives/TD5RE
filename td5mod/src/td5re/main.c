@@ -245,6 +245,8 @@ static int td5_apply_cli_overrides(const char *cmdline,
         { "LogRace",              &g_td5.ini.log_race },
         { "LogEngine",            &g_td5.ini.log_engine },
         { "LogWrapper",           &g_td5.ini.log_wrapper },
+        /* Replay */
+        { "PersistToDisk",        &g_td5.ini.replay_persist_to_disk },
         /* Test hook: cycle resolutions in the main loop to validate
          * apply_display_mode without manual menu navigation. */
         { "TestResolutionCycle",  &g_td5.ini.test_resolution_cycle },
@@ -469,6 +471,10 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     g_td5.ini.log_engine    = td5_ini_int("Logging", "Engine",   1);
     g_td5.ini.log_wrapper   = td5_ini_int("Logging", "Wrapper",  1);
 
+    /* Replay persistence (port-only divergence — default 0 = faithful).
+     * See td5re.h ini.replay_persist_to_disk and td5_input.c. */
+    g_td5.ini.replay_persist_to_disk = td5_ini_int("Replay", "PersistToDisk", 0);
+
     g_td5.ini.loaded = 1;
 
     /* CLI overrides run AFTER the INI so `--DefaultTrack=15` wins over the
@@ -518,6 +524,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
            g_td5.ini.log_enabled, g_td5.ini.log_min_level,
            g_td5.ini.log_frontend, g_td5.ini.log_race,
            g_td5.ini.log_engine, g_td5.ini.log_wrapper);
+    dbglog("  [Replay]  PersistToDisk=%d", g_td5.ini.replay_persist_to_disk);
 
     if (width <= 0 || height <= 0) {
         width  = GetSystemMetrics(SM_CXSCREEN);

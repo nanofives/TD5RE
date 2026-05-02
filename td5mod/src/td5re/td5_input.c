@@ -31,8 +31,33 @@ extern uint8_t *g_actor_table_base;
 
 #include <string.h>
 #include <stdlib.h>
+#include <stdio.h>
 
 #define LOG_TAG "input"
+
+/* On-disk replay file format (port-only divergence — original M2DX never
+ * persisted; see reference_replay_td5_is_memory_only.md). Little-endian.
+ *
+ *   offset  size  field
+ *   0       8     magic       = "TD5RPLY\0"
+ *   8       4     version     = 1
+ *   12      4     track_index
+ *   16      4     entry_count
+ *   20      4     last_frame_index
+ *   24      N*8   entries[entry_count]   (TD5_InputRecordEntry)
+ */
+#define TD5_REPLAY_MAGIC      "TD5RPLY"      /* 8 bytes incl. NUL */
+#define TD5_REPLAY_MAGIC_LEN  8
+#define TD5_REPLAY_VERSION    1u
+#define TD5_REPLAY_HDR_BYTES  24
+
+typedef struct TD5_ReplayFileHeader {
+    char     magic[TD5_REPLAY_MAGIC_LEN];
+    uint32_t version;
+    int32_t  track_index;
+    int32_t  entry_count;
+    int32_t  last_frame_index;
+} TD5_ReplayFileHeader;
 
 static uint32_t s_poll_log_counter = 0;
 static uint32_t s_control_log_counter = 0;
@@ -131,6 +156,13 @@ static int s_nitro_pending[2] = { 0, 0 };
 static int s_playback_active = 0;
 static int s_replay_mode_flag = 0;
 
+/* Set by write_open, cleared by write_close. When the [Replay] PersistToDisk
+ * flag is on, td5_input_shutdown uses this to flush a partial recording
+ * if the race didn't end through the normal teardown (e.g. RaceTraceMaxSimTicks
+ * quit, user closed the window mid-race). Port-only — no effect when the
+ * flag is off. */
+static int s_replay_recording_open = 0;
+
 /* ========================================================================
  * Internal State -- Recording Buffer
  * ======================================================================== */
@@ -206,6 +238,14 @@ int td5_input_init(void)
 
 void td5_input_shutdown(void)
 {
+    /* Flush any open recording when persistence is enabled. Covers exit
+     * paths that bypass the normal race-end teardown (RaceTraceMaxSimTicks
+     * quit, user closed window mid-race). No-op in faithful default mode. */
+    if (s_replay_recording_open && g_td5.ini.replay_persist_to_disk) {
+        TD5_LOG_I(LOG_TAG, "Replay shutdown: flushing partial recording");
+        td5_input_write_close();
+    }
+
     td5_input_ff_shutdown();
     td5_plat_input_shutdown();
 }
@@ -979,8 +1019,65 @@ int td5_input_write_open(const char *path)
     s_rec.last_word0 = 0;
     s_rec.last_word1 = 0;
 
+    s_replay_recording_open = 1;
     TD5_LOG_I(LOG_TAG, "Replay write open: path=%s track=%d",
               s_replay_log_path, s_rec.track_index);
+    return 1;
+}
+
+/* Flush the recorded buffer to disk in the documented file format.
+ * Port-only — gated by [Replay] PersistToDisk (default 0). Returns 1 on
+ * success, 0 on any failure (open/short-write/etc.) — the in-memory
+ * replay buffer is unaffected either way. */
+static int td5_input_replay_flush_to_disk(const char *path)
+{
+    TD5_ReplayFileHeader hdr;
+    FILE *f;
+    size_t body_bytes;
+    size_t written;
+    int32_t entries_to_write;
+
+    if (!path || !*path) return 0;
+
+    entries_to_write = s_rec.entry_count;
+    if (entries_to_write < 0) entries_to_write = 0;
+    if (entries_to_write > (int32_t)TD5_INPUT_REC_MAX_ENTRIES)
+        entries_to_write = (int32_t)TD5_INPUT_REC_MAX_ENTRIES;
+
+    memcpy(hdr.magic, TD5_REPLAY_MAGIC, TD5_REPLAY_MAGIC_LEN);
+    hdr.version          = TD5_REPLAY_VERSION;
+    hdr.track_index      = s_rec.track_index;
+    hdr.entry_count      = entries_to_write;
+    hdr.last_frame_index = s_rec.last_frame_index;
+
+    f = fopen(path, "wb");
+    if (!f) {
+        TD5_LOG_W(LOG_TAG, "Replay persist: fopen('%s') for write failed", path);
+        return 0;
+    }
+
+    written = fwrite(&hdr, 1, TD5_REPLAY_HDR_BYTES, f);
+    if (written != TD5_REPLAY_HDR_BYTES) {
+        TD5_LOG_W(LOG_TAG, "Replay persist: short header write %zu/%d",
+                  written, TD5_REPLAY_HDR_BYTES);
+        fclose(f);
+        return 0;
+    }
+
+    body_bytes = (size_t)entries_to_write * sizeof(TD5_InputRecordEntry);
+    if (body_bytes > 0) {
+        written = fwrite(s_rec.entries, 1, body_bytes, f);
+        if (written != body_bytes) {
+            TD5_LOG_W(LOG_TAG, "Replay persist: short body write %zu/%zu",
+                      written, body_bytes);
+            fclose(f);
+            return 0;
+        }
+    }
+
+    fclose(f);
+    TD5_LOG_I(LOG_TAG, "Replay persist: wrote %s (%d entries, %d frames, track=%d)",
+              path, entries_to_write, hdr.last_frame_index + 1, hdr.track_index);
     return 1;
 }
 
@@ -991,6 +1088,14 @@ void td5_input_write_close(void)
     }
     TD5_LOG_I(LOG_TAG, "Replay write close: path=%s entries=%d frames=%u",
               s_replay_log_path, s_rec.entry_count, s_rec.frame_cursor);
+
+    if (g_td5.ini.replay_persist_to_disk && s_replay_log_path[0] &&
+        strcmp(s_replay_log_path, "<memory>") != 0)
+    {
+        td5_input_replay_flush_to_disk(s_replay_log_path);
+    }
+
+    s_replay_recording_open = 0;
 }
 
 void td5_input_write_frame(uint32_t word0, uint32_t word1, int strip_mode)
@@ -1046,11 +1151,101 @@ void td5_input_write_frame(uint32_t word0, uint32_t word1, int strip_mode)
  *   DXInput::ReadClose (0x1000D370) -- stub/no-op
  * ======================================================================== */
 
+/* Load a previously persisted replay from disk into s_rec. Port-only —
+ * gated by [Replay] PersistToDisk. Returns 1 on success, 0 on any
+ * failure (missing file, bad magic, version mismatch, sanity check fail).
+ * On failure the in-memory buffer keeps whatever it had. */
+static int td5_input_replay_load_from_disk(const char *path)
+{
+    TD5_ReplayFileHeader hdr;
+    FILE *f;
+    size_t got;
+    size_t body_bytes;
+
+    if (!path || !*path) return 0;
+
+    f = fopen(path, "rb");
+    if (!f) {
+        TD5_LOG_W(LOG_TAG, "Replay load: fopen('%s') for read failed", path);
+        return 0;
+    }
+
+    got = fread(&hdr, 1, TD5_REPLAY_HDR_BYTES, f);
+    if (got != TD5_REPLAY_HDR_BYTES) {
+        TD5_LOG_W(LOG_TAG, "Replay load: short header read %zu/%d", got, TD5_REPLAY_HDR_BYTES);
+        fclose(f);
+        return 0;
+    }
+    if (memcmp(hdr.magic, TD5_REPLAY_MAGIC, TD5_REPLAY_MAGIC_LEN) != 0) {
+        TD5_LOG_W(LOG_TAG, "Replay load: bad magic in '%s'", path);
+        fclose(f);
+        return 0;
+    }
+    if (hdr.version != TD5_REPLAY_VERSION) {
+        TD5_LOG_W(LOG_TAG, "Replay load: version=%u expected=%u",
+                  hdr.version, TD5_REPLAY_VERSION);
+        fclose(f);
+        return 0;
+    }
+    if (hdr.entry_count < 0 || hdr.entry_count > (int32_t)TD5_INPUT_REC_MAX_ENTRIES) {
+        TD5_LOG_W(LOG_TAG, "Replay load: insane entry_count=%d (cap=%u)",
+                  hdr.entry_count, TD5_INPUT_REC_MAX_ENTRIES);
+        fclose(f);
+        return 0;
+    }
+    if (hdr.last_frame_index < 0 ||
+        hdr.last_frame_index > (int32_t)TD5_INPUT_REC_MAX_FRAMES) {
+        TD5_LOG_W(LOG_TAG, "Replay load: insane last_frame_index=%d", hdr.last_frame_index);
+        fclose(f);
+        return 0;
+    }
+
+    /* Replace in-memory state. memset clears the entries array so any
+     * unread tail beyond entry_count is well-defined. */
+    memset(&s_rec, 0, sizeof(s_rec));
+    s_rec.track_index      = hdr.track_index;
+    s_rec.entry_count      = hdr.entry_count;
+    s_rec.last_frame_index = hdr.last_frame_index;
+
+    body_bytes = (size_t)hdr.entry_count * sizeof(TD5_InputRecordEntry);
+    if (body_bytes > 0) {
+        got = fread(s_rec.entries, 1, body_bytes, f);
+        if (got != body_bytes) {
+            TD5_LOG_W(LOG_TAG, "Replay load: short body read %zu/%zu",
+                      got, body_bytes);
+            fclose(f);
+            memset(&s_rec, 0, sizeof(s_rec));
+            return 0;
+        }
+    }
+
+    fclose(f);
+
+    if (hdr.track_index != g_td5.track_index) {
+        TD5_LOG_W(LOG_TAG, "Replay load: track mismatch (file=%d current=%d) — "
+                  "playback will desync", hdr.track_index, g_td5.track_index);
+    }
+    TD5_LOG_I(LOG_TAG, "Replay load: read %s (%d entries, %d frames, track=%d)",
+              path, hdr.entry_count, hdr.last_frame_index + 1, hdr.track_index);
+    return 1;
+}
+
 int td5_input_read_open(const char *path)
 {
     /* Reset read cursor; the buffer already contains recorded data */
     strncpy(s_replay_log_path, path ? path : "<memory>", sizeof(s_replay_log_path) - 1);
     s_replay_log_path[sizeof(s_replay_log_path) - 1] = '\0';
+
+    /* Port-only: when persistence is enabled and a path was given, load
+     * the recorded buffer from disk before the read cursor resets. The
+     * loader replaces s_rec wholesale on success; on failure the existing
+     * in-memory buffer is kept so callers still get faithful behavior. */
+    if (g_td5.ini.replay_persist_to_disk && path && *path &&
+        strcmp(path, "<memory>") != 0)
+    {
+        td5_input_replay_load_from_disk(path);
+    }
+
     s_rec.frame_cursor = 0;
     s_rec.read_index = 0;
     s_rec.replay_word0 = 0;
