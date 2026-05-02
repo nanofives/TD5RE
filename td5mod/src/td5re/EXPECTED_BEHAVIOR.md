@@ -103,3 +103,22 @@ Use this to validate each subsystem during testing.
 | Resolution | 640x480x16 default | 640x480x32 (windowed) |
 | Cross-fade | MMX SIMD 16-bit blend | Software RGBA32 blend |
 | Snow weather | Cut feature (buffers allocated, rendering gated) | Same (faithful cut) |
+| `replay.td5` | In-memory only — M2DX DXInput's filename param is dead scaffolding (5 methods @ 0x1000A640..0x1000A780 have zero file-I/O callees) | Faithful by default. Optional disk persistence via `[Replay] PersistToDisk=1` (default `0`) — port-only feature flag |
+
+## Optional: replay.td5 disk persistence (port-only)
+
+When `[Replay] PersistToDisk=1` (or `--PersistToDisk=1`) is set, `td5_input_write_close()` flushes the recorded input ring to `replay.td5` next to the executable on race end, and `td5_input_read_open()` reads it back when entering replay mode. With the flag at its default `0`, replays remain memory-only — bit-for-bit faithful to the original M2DX behavior.
+
+File format (little-endian, total `24 + entry_count*8` bytes):
+
+```
+offset  size   field
+0       8      magic            "TD5RPLY\0"
+8       4      version          1
+12      4      track_index
+16      4      entry_count      0..19996
+20      4      last_frame_index 0..0x7FEE
+24      N*8    entries[]        TD5_InputRecordEntry { frame_and_channel u32, value u32 }
+```
+
+Loader rejects the file on bad magic, version mismatch, or out-of-range counts; on track-index mismatch it logs a WARN but loads anyway (caller must arrange a matching scenario for deterministic playback).
