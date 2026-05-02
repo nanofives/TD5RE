@@ -2105,15 +2105,9 @@ int td5_asset_load_track_textures(int track_index)
 {
     char zip_path[256];
     td5_asset_build_level_zip_path(track_index, zip_path, sizeof(zip_path));
-    const uint32_t k_white_tex[4] = {
-        0xFFFFFFFFu, 0xFFFFFFFFu,
-        0xFFFFFFFFu, 0xFFFFFFFFu
-    };
     void *tex_data = NULL;
     int tex_sz = 0;
     int page_count = 0;
-    int loaded_count = 0;
-    int missing_pages = 0;
 
     tex_data = td5_asset_open_and_read("TEXTURES.DAT", zip_path, &tex_sz);
     if (tex_data && tex_sz >= 4) {
@@ -2156,52 +2150,41 @@ int td5_asset_load_track_textures(int track_index)
         }
     }
 
-    for (int page = 0; page < page_count && page < TD5_TRACK_TEXTURE_PAGE_LIMIT; page++) {
-        int src = td5_asset_texture_page_remap_source(page);
-        if (src < 0 || src >= TD5_TRACK_TEXTURE_PAGE_LIMIT) src = page;
-        char png_path[512];
-        if (td5_asset_build_track_texture_png_path(track_index, src,
-                                                   png_path, sizeof(png_path))) {
-            if (td5_asset_upload_png_texture_page(page, png_path, NULL)) {
-                loaded_count++;
-                missing_pages = 0;
-                continue;
-            }
-        }
-
-        /* Missing or undecodable page: keep the slot visible with a white fallback. */
-        td5_plat_render_upload_texture(page, k_white_tex, 2, 2, 2);
-        missing_pages++;
-        if (tex_sz <= 0 && missing_pages >= 8 && page > 0)
-            break;
-    }
-
+    /* PNG-upload pass removed (was lines 2159-2177): the original's
+     * BuildTrackTextureCacheImpl @ 0x0040B1D0 only writes per-page CPU-side
+     * metadata (palette decode + transparency-type table) — it performs ZERO
+     * GPU uploads. The actual GPU upload happens later in
+     * td5_asset_load_race_texture_pages, which is the analog of
+     * LoadRaceTexturePages @ 0x00442770. The PNG path here was producing
+     * ~475 redundant CreateTexture2D+CreateSRV+UpdateSubresource cycles
+     * (and another ~475 2x2 fallbacks for would-be missing pages) per
+     * race start, all immediately overwritten by the .dat path.
+     *
+     * Faithful behavior: skip the upload pass entirely. Pages that the .dat
+     * path doesn't cover are intentionally left unbound (the original treats
+     * gStaticHedTextureData[i*0x10+4]==0 as "skip", not "fallback"). */
     TD5_LOG_I(LOG_TAG,
-              "track textures: %s page_count=%d loaded=%d map=page %d -> re/assets/levels/level%03d/textures/tex_%%03d.png",
-              tex_data ? "TEXTURES.DAT" : "manifest-missing",
-              page_count, loaded_count, 0, td5_asset_level_number(track_index));
+              "track textures: %s page_count=%d (metadata-only, GPU upload deferred to load_race_texture_pages — faithful to BuildTrackTextureCacheImpl @ 0x0040B1D0)",
+              tex_data ? "TEXTURES.DAT" : "manifest-missing", page_count);
 
+    int parsed = (tex_data != NULL);
     free(tex_data);
-    return loaded_count > 0;
+    return parsed;
 }
 
 int td5_asset_load_race_texture_pages(void)
 {
     /*
      * Load raw 256x256 R5G6B5 texture pages from the level ZIP archive.
-     * Original function at 0x441E40.  Each "tpage%d.dat" inside the level
-     * ZIP is 256*256*2 = 131072 bytes of raw 16-bit pixel data.
+     * Original function: LoadRaceTexturePages @ 0x00442770.  Each "tpage%d.dat"
+     * inside the level ZIP is 256*256*2 = 131072 bytes of raw 16-bit pixel data.
+     *
+     * Fallback-page upload removed: the original has no TD5_FALLBACK_TEXTURE_PAGE
+     * concept. Pages whose static.hed entry-size is zero are simply skipped
+     * (gated at 0x004427AB), leaving the slot unbound. We keep the
+     * s_fallback_texture_uploaded flag at 0 so the early-return failure paths
+     * below correctly report load failure rather than masking it.
      */
-    static const uint32_t k_white_tex[4] = {
-        0xFF5D544Cu, 0xFF6E655Cu,
-        0xFF4A433Du, 0xFF5B534Cu
-    };
-
-    /* Ensure fallback texture is always available */
-    if (!s_fallback_texture_uploaded) {
-        s_fallback_texture_uploaded = td5_plat_render_upload_texture(
-            TD5_FALLBACK_TEXTURE_PAGE, k_white_tex, 2, 2, 2);
-    }
 
     /* Load textures.dat from level ZIP.
      * Format (from Ghidra FUN_0040b1d0):
