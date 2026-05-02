@@ -123,3 +123,40 @@ offset  size   field
 ```
 
 Loader rejects the file on bad magic, version mismatch, or out-of-range counts; on track-index mismatch it logs a WARN but loads anyway (caller must arrange a matching scenario for deterministic playback).
+
+## Intentional Divergences
+
+Ports of original behaviour that were deliberately changed because the literal
+asm produced an emergent gameplay bug. Each entry documents the original rule,
+the port rule, and the acceptance criteria.
+
+### Wall response — magnitude-only soft clamp on v_para<=0 branch
+
+- **File**: `td5_physics.c:343-360` (`td5_physics_wall_response`)
+- **Original**: `FUN_00406980` @ `0x00406B0B-0x00406B69`. Both branches of the
+  tangential-damping update zero `new_v_para` on a sign-flip:
+  - `v_para > 0` branch (`0x00406B31-35`): `SUB`/`JNS` → if result < 0, fall
+    through to `XOR ECX,ECX`.
+  - `v_para <= 0` branch (`0x00406B65-69`): `TEST`/`JLE` → if result > 0, fall
+    through to `XOR ECX,ECX`.
+- **Port rule**: the `v_para > 0` branch keeps the original hard zero. The
+  `v_para <= 0` branch replaces the hard zero with a magnitude-only soft
+  clamp `|new_v_para| <= |v_para|` — sign may still flip (preserving the
+  wall-friction reorient effect that produces visible sideways slide on
+  glancing impacts), but magnitude can never grow above the incoming
+  `|v_para|`.
+- **Why diverge**: the original's hard zero on `v_para <= 0` made glancing
+  crashes stop dead. Removing the clamp entirely (the prior port behaviour)
+  introduced a head-on bug where small-negative `v_para` plus large
+  `iVar11` produced `delta >> |v_para|`, accelerating the car tangentially
+  out of nowhere. The soft clamp gives both behaviours: glancing crashes
+  retain ≥ 70% lateral velocity post-impact, head-on crashes do not
+  accelerate tangentially.
+- **Acceptance criteria**:
+  1. Glancing crashes still slide (lateral velocity retained ≥ 70%).
+  2. Head-on crashes do not accelerate tangentially.
+  3. `wall_response: soft-clamp fired` log line appears in race.log when
+     the clamp triggers (slot 0 only, to avoid spam).
+- **Related memory**: `reference_wall_response_asym_damping.md` (note: the
+  earlier "no clamp on v_para<=0" reading was incorrect; the original does
+  hard-zero on pos-flip — see Ghidra re-verify 2026-05-02).

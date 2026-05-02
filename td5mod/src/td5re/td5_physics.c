@@ -307,6 +307,8 @@ void td5_physics_wall_response(TD5_Actor *actor, int32_t wall_angle,
     int32_t impulse = 0;
     int32_t new_v_para = v_para;
     int32_t new_v_perp = v_perp;
+    int32_t pre_clamp_delta = 0;
+    int     clamp_fired = 0;
 
     /* Early-out when separating [CONFIRMED @ 0x00406A72-0x00406A78]:
      * skip impulse + tangential damping, fall through to rotate velocity back. */
@@ -322,37 +324,57 @@ void td5_physics_wall_response(TD5_Actor *actor, int32_t wall_angle,
 
         new_v_perp = v_perp + impulse;
 
-        /* Tangential damping — asm-faithful asymmetry [CONFIRMED via asm
-         * 0x00406B0B-0x00406B69]:
-         *   v_para >  0 branch: new_v_para = v_para - delta, clamped to 0
-         *                       if the subtraction crosses sign (JNS at
-         *                       0x00406B33 → zero at 0x00406B69).
-         *   v_para <= 0 branch: new_v_para = v_para + delta, NO CLAMP
-         *                       (TEST/JLE at 0x00406B65 jumps straight to
-         *                       the rotate-back code with whatever value).
+        /* Tangential damping — corrected asm reading [CONFIRMED via asm
+         * 0x00406B0B-0x00406B69, re-verified 2026-05-02]:
+         *   v_para >  0 branch: new_v_para = v_para - delta. If sign flips
+         *                       negative (SUB result < 0), JNS at 0x00406B33
+         *                       falls through to JMP 0x00406B69 → XOR ECX,ECX
+         *                       → zero. So result is clamped to 0 on neg-flip.
+         *   v_para <= 0 branch: new_v_para = v_para + delta. TEST/JLE at
+         *                       0x00406B65 takes the jump when result <= 0
+         *                       (preserve), else falls through to
+         *                       XOR ECX,ECX at 0x00406B69 → zero. So result
+         *                       is clamped to 0 on pos-flip.
          *
-         * The asymmetry is what lets the wall REDIRECT sideways-sliding
-         * impacts: a glancing crash with negative tangential v_para gets
-         * +delta added, often flipping v_para positive — the "wall-friction
-         * reorient" effect. Clamping that branch to 0 (as the port did
-         * before 2026-04-23) zeroed the lateral slide and stopped the car
-         * dead on every sideways hit.
+         * Both branches zero on sign-flip — the asymmetry is in *which*
+         * sign-flip each side cares about (positive→negative vs.
+         * negative→positive). An earlier port comment claimed v_para<=0
+         * had "no clamp", which was wrong; this re-read fixes that.
          *
-         * Branch order matches the asm (positive first) so the missing
-         * clamp on the negative branch stays visually obvious. */
+         * INTENTIONAL DIVERGENCE on v_para<=0 branch: instead of the
+         * original's hard zero-on-pos-flip, apply a magnitude-only soft
+         * clamp |new_v_para| <= |v_para|. This is *softer* than the
+         * original (allows sign-flip, preserving the wall-friction reorient
+         * effect that produced visible sideways slide on glancing impacts)
+         * but *tighter* than leaving it unclamped (kills the head-on bug
+         * where v_para small-negative + iVar11 large yields delta >> |v_para|
+         * and accelerates the car tangentially out of nowhere). The v_para>0
+         * branch is left as the faithful original (hard zero). See
+         * EXPECTED_BEHAVIOR.md "Intentional Divergences".
+         *
+         * Branch order matches the asm (positive first). */
         int32_t v_para_round = v_para >> 6;  /* signed shift; arithmetic-round */
         int32_t tmp;
         if (v_para > 0) {
             tmp = v_para_round + 0x800 + iVar11 * 2;
             int32_t delta = (tmp * 0x180) >> 11;
+            pre_clamp_delta = delta;
             new_v_para = v_para - delta;
             if (new_v_para < 0) new_v_para = 0;
         } else {
             tmp = (iVar11 * 2 + 0x800) - v_para_round;
             int32_t delta = (tmp * 0x180) >> 11;
+            pre_clamp_delta = delta;
             new_v_para = v_para + delta;
-            /* No clamp — original asm at 0x00406B65 jumps to rotate-back
-             * regardless of new_v_para's sign. */
+            /* INTENTIONAL DIVERGENCE from original 0x00406B65-69 hard zero.
+             * Magnitude-only soft clamp: |new_v_para| <= |v_para|. Sign may
+             * flip (preserves wall-friction reorient that the original kills
+             * via XOR), but magnitude can never grow above incoming |v_para|.
+             * Prevents head-on case where small-negative v_para + large
+             * iVar11 yields delta >> |v_para| and accelerates the car. */
+            int32_t v_para_mag = -v_para;  /* v_para <= 0 here, so >= 0 */
+            if (new_v_para >  v_para_mag) { new_v_para =  v_para_mag; clamp_fired = 1; }
+            if (new_v_para < -v_para_mag) { new_v_para = -v_para_mag; clamp_fired = 1; }
         }
 
         /* Angular velocity update: ω += (impulse * iVar9) / (K / 0x28C).
@@ -378,9 +400,16 @@ void td5_physics_wall_response(TD5_Actor *actor, int32_t wall_angle,
         actor->track_contact_flag = (uint8_t)(side + 1);
 
     TD5_LOG_I(LOG_TAG,
-              "wall_response: side=%d pen=%d angle=%d arm=%d iVar11=%d imp=%d vpara=%d vperp=%d yaw=%d",
+              "wall_response: side=%d pen=%d angle=%d arm=%d iVar11=%d imp=%d vpara=%d vperp=%d yaw=%d delta=%d",
               side, penetration, wall_angle, iVar9, iVar11, impulse,
-              new_v_para, new_v_perp, actor->angular_velocity_yaw);
+              new_v_para, new_v_perp, actor->angular_velocity_yaw,
+              pre_clamp_delta);
+
+    if (clamp_fired && actor->slot_index == 0) {
+        TD5_LOG_I(LOG_TAG,
+                  "wall_response: soft-clamp fired slot0 vpara_in=%d delta=%d vpara_out=%d",
+                  v_para, pre_clamp_delta, new_v_para);
+    }
 
     if (actor->slot_index == 0) {
         TD5_LOG_I(LOG_TAG,
