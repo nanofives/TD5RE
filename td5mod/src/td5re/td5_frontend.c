@@ -4109,8 +4109,6 @@ static void frontend_render_car_selection_preview(float sx, float sy) {
         float t = frontend_clamp01((float)(td5_plat_time_ms() - s_anim_start_ms) * 2.0f / 2500.0f);
         float bar_x    = 636.0f - (636.0f - 36.0f) * t;
         float topbar_x = -532.0f + 532.0f * t;
-        if (s_carsel_topbar_surface > 0)
-            fe_draw_surface_rect(s_carsel_topbar_surface, topbar_x * sx,  45.0f * sy, 532.0f * sx,  36.0f * sy, 0xFFFFFFFF);
         if (s_carsel_bar_surface > 0)
             fe_draw_surface_opaque(s_carsel_bar_surface,   bar_x * sx,   0.0f * sy,  24.0f * sx, 408.0f * sy, 0xFFFFFFFF);
         if (s_carsel_curve_surface > 0)
@@ -4119,9 +4117,10 @@ static void frontend_render_car_selection_preview(float sx, float sy) {
         td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
         fe_draw_quad((bar_x + 80.0f) * sx, 408.0f * sy, (640.0f - bar_x - 80.0f) * sx, 56.0f * sy,
                      0xFF00005C, s_white_tex_page, 0, 0, 1, 1);
-    } else {
+        /* Topbar drawn LAST so it overlays the bar/curve (z-order parity with original). */
         if (s_carsel_topbar_surface > 0)
-            fe_draw_surface_rect(s_carsel_topbar_surface,  0.0f * sx,  45.0f * sy, 532.0f * sx,  36.0f * sy, 0xFFFFFFFF);
+            fe_draw_surface_rect(s_carsel_topbar_surface, topbar_x * sx,  45.0f * sy, 532.0f * sx,  36.0f * sy, 0xFFFFFFFF);
+    } else {
         if (s_carsel_bar_surface > 0)
             fe_draw_surface_opaque(s_carsel_bar_surface,    36.0f * sx,   0.0f * sy,  24.0f * sx, 408.0f * sy, 0xFFFFFFFF);
         if (s_carsel_curve_surface > 0)
@@ -4130,6 +4129,9 @@ static void frontend_render_car_selection_preview(float sx, float sy) {
         td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
         fe_draw_quad(116.0f * sx, 408.0f * sy, 524.0f * sx, 56.0f * sy,
                      0xFF00005C, s_white_tex_page, 0, 0, 1, 1);
+        /* Topbar drawn LAST (front of bar/curve) — z-order parity with original. */
+        if (s_carsel_topbar_surface > 0)
+            fe_draw_surface_rect(s_carsel_topbar_surface,  0.0f * sx,  45.0f * sy, 532.0f * sx,  36.0f * sy, 0xFFFFFFFF);
     }
 
     if (s_inner_state == 15) {
