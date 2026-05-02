@@ -4717,18 +4717,31 @@ void td5_physics_integrate_pose(TD5_Actor *actor)
              *   (3) XOR operand also read from 0x37D, making the mask
              *       check `(x & ~x) == 0` → always true → effectively
              *       no mask check at all.
-             * Combined, the gate fired spurious velocity resets during
-             * normal driving and produced visible chase-cam shake on accel.
              *
-             * Use raw byte offsets rather than named fields because the
-             * port has named accessors (`damage_lockout`, `wheel_contact_
-             * bitmask`) whose semantics are overloaded across call sites. */
+             * 2026-05-01 follow-up: bugs (2) + (3) returned in disguise.
+             * The port's refresh_wheel_contacts mutates +0x37D in place to
+             * hold the NEW airborne mask (per-wheel writes at 5204/5207),
+             * and line 4409 copies that NEW value into +0x37C. So BOTH
+             * actor+0x37C and actor+0x37D end the refresh holding NEW —
+             * the gate `(prev_mask & (new_mask ^ 0x0F)) == 0` reduces to
+             * `(NEW & ~NEW) == 0` → always TRUE. Velocity-snap fires every
+             * tick, overriding integrated vy with a ±30000-clamped delta.
+             * On slope onsets this manifests as the chassis NOT following
+             * terrain (vertical momentum is killed, then clamped into a
+             * step that doesn't match the ground gradient).
+             *
+             * The OLD mask in airborne polarity is reconstructed from
+             * s_prev_grounded_mask[] (snapshotted pre-refresh at line 4398
+             * in grounded polarity, so we re-invert here).
+             *
+             * [CONFIRMED @ 0x00403720, 0x004039E5: original keeps +0x37D
+             * = OLD across the refresh]. */
             {
                 static const uint8_t k_mode_gate[16] = {
                     1,1,1,0, 1,0,0,0, 1,0,0,0, 0,0,0,0
                 };
                 uint8_t new_mask  = *(const uint8_t *)((const uint8_t *)actor + 0x37C);
-                uint8_t prev_mask = *(const uint8_t *)((const uint8_t *)actor + 0x37D);
+                uint8_t prev_mask = (~s_prev_grounded_mask[actor->slot_index & 0x0F]) & 0x0F;
                 if (k_mode_gate[new_mask & 0xF] &&
                     (prev_mask & (new_mask ^ 0x0F)) == 0 &&
                     actor->prev_frame_y_position != (int32_t)0xC0000000) {
