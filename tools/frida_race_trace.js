@@ -243,7 +243,9 @@ function selectedSlot(slot) {
 // ----------------------------------------------------------------------------
 var MOD_FRAME    = 0x01, MOD_POSE    = 0x02, MOD_MOTION   = 0x04,
     MOD_TRACK    = 0x08, MOD_CONTROLS= 0x10, MOD_PROGRESS = 0x20,
-    MOD_VIEW     = 0x40, MOD_CALLS   = 0x80, MOD_ALL      = 0xFF;
+    MOD_VIEW     = 0x40, MOD_CALLS   = 0x80,
+    MOD_PHYSICS  = 0x100,
+    MOD_ALL      = 0x1FF;
 
 var STG_FRAME_BEGIN   = 1<<0, STG_PRE_PHYSICS  = 1<<1, STG_POST_PHYSICS  = 1<<2,
     STG_POST_AI       = 1<<3, STG_POST_TRACK   = 1<<4, STG_POST_CAMERA   = 1<<5,
@@ -273,6 +275,29 @@ var MODULE_TABLE = [
     { mask: MOD_VIEW,     name: "view",
       header: "frame,sim_tick,stage,view_index,actor_slot,cam_world_x,cam_world_y,cam_world_z",
       stages: STG_POST_CAMERA | STG_FRAME_END, fp: null },
+    /* physics_chain: per-tick state of the gravity + ground-snap chain for
+     * slot 0 only. One row per IntegrateVehiclePoseAndContacts onLeave —
+     * the post-state has every value the diff comparator needs (world_y,
+     * vy, NEW/OLD masks, per-wheel ground contact, suspension, gap_270,
+     * wcv normal). Schema must stay exactly aligned with the port's
+     * td5_trace_write_physics() emitter so columns pair 1:1. */
+    { mask: MOD_PHYSICS,  name: "physics",
+      header: "frame,sim_tick,stage,slot,prev_y,world_y,vy," +
+              "mask_37c,mask_37d,ang_roll,ang_pitch,disp_roll,disp_pitch," +
+              "eul_roll,eul_pitch," +
+              "w0_span,w0_lane,w0_pos_x,w0_pos_y,w0_pos_z," +
+              "w0_wcv_x,w0_wcv_y,w0_wcv_z,w0_susp,w0_load," +
+              "w0_g270_x,w0_g270_y,w0_g270_z," +
+              "w1_span,w1_lane,w1_pos_x,w1_pos_y,w1_pos_z," +
+              "w1_wcv_x,w1_wcv_y,w1_wcv_z,w1_susp,w1_load," +
+              "w1_g270_x,w1_g270_y,w1_g270_z," +
+              "w2_span,w2_lane,w2_pos_x,w2_pos_y,w2_pos_z," +
+              "w2_wcv_x,w2_wcv_y,w2_wcv_z,w2_susp,w2_load," +
+              "w2_g270_x,w2_g270_y,w2_g270_z," +
+              "w3_span,w3_lane,w3_pos_x,w3_pos_y,w3_pos_z," +
+              "w3_wcv_x,w3_wcv_y,w3_wcv_z,w3_susp,w3_load," +
+              "w3_g270_x,w3_g270_y,w3_g270_z",
+      stages: STG_POST_PHYSICS, fp: null },
 ];
 
 var moduleMask = MOD_ALL;
@@ -282,7 +307,8 @@ function parseModuleMask(csv) {
     if (!csv || csv === "*") return MOD_ALL;
     var byName = { frame: MOD_FRAME, pose: MOD_POSE, motion: MOD_MOTION,
                    track: MOD_TRACK, controls: MOD_CONTROLS,
-                   progress: MOD_PROGRESS, view: MOD_VIEW, calls: MOD_CALLS };
+                   progress: MOD_PROGRESS, view: MOD_VIEW, calls: MOD_CALLS,
+                   physics: MOD_PHYSICS };
     var m = 0;
     csv.split(",").forEach(function (tok) {
         tok = tok.trim().toLowerCase();
@@ -427,6 +453,76 @@ function emitProgressRow(frameIndex, simTick, stage, stageBit, slot) {
     emitTo(MOD_PROGRESS, line);
 }
 
+/* Per-tick physics-chain capture for the gravity + ground-snap diff.
+ * Reads:
+ *   actor+0x1FC..0x204 = world_pos.x/y/z (s32)
+ *   actor+0x1CC..0x1D4 = linear_velocity_x/y/z (s32)
+ *   actor+0x1C0..0x1C8 = euler_accum.roll/yaw/pitch (s32)
+ *   actor+0x208..0x20C = display_angles.roll/yaw/pitch (s16)
+ *   actor+0x2D8        = prev_frame_y_position (s32)
+ *   actor+0x37C        = damage_lockout (NEW airborne mask after refresh)
+ *   actor+0x37D        = wheel_contact_bitmask (OLD airborne mask after refresh)
+ *   actor+0xF0+12*i    = wheel_contact_pos[i].x/y/z (3×s32)
+ *   actor+0x40+0x10*i  = per-wheel track_span_raw (s16) at +0x40 + 0x10*i
+ *   actor+0x4C+0x10*i  = per-wheel sub_lane_index (s8)
+ *   actor+0x250+8*i    = wcv[i] = wheel_contact_velocities (3×s16, stride 8)
+ *   actor+0x270+8*i    = gap_270[i] = (3×s16, stride 8)
+ *   actor+0x2DC+4*i    = wheel_suspension_pos[i] (s32, stride 4)
+ *   actor+0x2FC+4*i    = wheel_load_accum[i] (s32, stride 4)
+ *
+ * [CONFIRMED via 2026-05-01/02 Ghidra passes: 0x00403720, 0x00405E80,
+ *  0x004039B9, 0x004037D5, 0x00405FF9, 0x00405FFF.] */
+function emitPhysicsRow(frameIndex, simTick, stage, stageBit, slot) {
+    if (!moduleActive(MOD_PHYSICS, stageBit)) return;
+    var a = actorPtr(slot);
+    var parts = [
+        frameIndex, simTick, stage, slot,
+        readS32(a.add(0x2D8)),  /* prev_y */
+        readS32(a.add(0x200)),  /* world_y */
+        readS32(a.add(0x1D0)),  /* vy */
+        readU8 (a.add(0x37C)),  /* mask_37c (NEW airborne) */
+        readU8 (a.add(0x37D)),  /* mask_37d (OLD airborne) */
+        readS32(a.add(0x1C0)),  /* ang_roll (euler.roll == ang_velocity? differs) */
+        readS32(a.add(0x1C8)),  /* ang_pitch */
+        readS16(a.add(0x208)),  /* disp_roll */
+        readS16(a.add(0x20C)),  /* disp_pitch */
+        readS32(a.add(0x1C0)),  /* eul_roll (same field — schema kept for symmetry) */
+        readS32(a.add(0x1C8))   /* eul_pitch */
+    ];
+    /* Per-wheel 13 columns × 4 wheels */
+    for (var i = 0; i < 4; i++) {
+        var wcp = a.add(0xF0 + i * 12);
+        var probe = a.add(0x40 + i * 0x10);  /* per-wheel track_span_raw */
+        var lane  = a.add(0x4C + i * 0x10);  /* per-wheel sub_lane_index */
+        var wcv   = a.add(0x250 + i * 8);
+        var g270  = a.add(0x270 + i * 8);
+        var susp  = a.add(0x2DC + i * 4);
+        var load  = a.add(0x2FC + i * 4);
+        parts.push(
+            readS16(probe),
+            readS8 (lane),
+            readS32(wcp),               /* pos_x */
+            readS32(wcp.add(4)),         /* pos_y */
+            readS32(wcp.add(8)),         /* pos_z */
+            readS16(wcv),                /* wcv_x */
+            readS16(wcv.add(2)),         /* wcv_y */
+            readS16(wcv.add(4)),         /* wcv_z */
+            readS32(susp),               /* susp_pos */
+            readS32(load),               /* load_accum */
+            readS16(g270),               /* g270_x */
+            readS16(g270.add(2)),        /* g270_y */
+            readS16(g270.add(4))         /* g270_z */
+        );
+    }
+    emitTo(MOD_PHYSICS, parts.join(",") + "\n");
+}
+
+/* readS8 isn't built in to the helper set above. */
+function readS8(addr) {
+    var u = addr.readU8();
+    return (u & 0x80) ? (u - 256) : u;
+}
+
 function emitViewRow(frameIndex, simTick, stage, stageBit, vpIndex) {
     if (!moduleActive(MOD_VIEW, stageBit)) return;
     var camBase = G_camWorldPosFixed.add(vpIndex * 12);
@@ -476,7 +572,8 @@ function traceStage(stage) {
                   moduleActive(MOD_MOTION, stageBit) ||
                   moduleActive(MOD_TRACK, stageBit) ||
                   moduleActive(MOD_CONTROLS, stageBit) ||
-                  moduleActive(MOD_PROGRESS, stageBit);
+                  moduleActive(MOD_PROGRESS, stageBit) ||
+                  moduleActive(MOD_PHYSICS, stageBit);
     if (anySlot) {
         for (var i = 0; i < 6; i++) {
             if (!selectedSlot(i)) continue;
@@ -485,6 +582,7 @@ function traceStage(stage) {
             emitTrackRow   (frameIndex, simTick, stage, stageBit, i);
             emitControlsRow(frameIndex, simTick, stage, stageBit, i);
             emitProgressRow(frameIndex, simTick, stage, stageBit, i);
+            emitPhysicsRow (frameIndex, simTick, stage, stageBit, i);
         }
     }
 
