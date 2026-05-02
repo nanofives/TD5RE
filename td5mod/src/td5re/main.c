@@ -30,6 +30,7 @@
 /* TD5RE headers */
 #include "td5re.h"
 #include "td5_platform.h"
+#include "td5_save.h"
 #include "td5_trace.h"
 
 /* Wrapper backend types and functions */
@@ -250,6 +251,7 @@ static int td5_apply_cli_overrides(const char *cmdline,
         /* Test hook: cycle resolutions in the main loop to validate
          * apply_display_mode without manual menu navigation. */
         { "TestResolutionCycle",  &g_td5.ini.test_resolution_cycle },
+        { "TestCupRoundtrip",     &g_td5.ini.test_cup_roundtrip },
     };
     const size_t table_n = sizeof(table) / sizeof(table[0]);
     int n_applied = 0;
@@ -484,6 +486,18 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
         int n_cli = td5_apply_cli_overrides(lpCmdLine, &width, &height, &windowed);
         if (n_cli > 0)
             dbglog("=== %d CLI override(s) applied ===", n_cli);
+    }
+
+    /* TD5RE divergent CupData self-test. Runs before any backend or
+     * window bringup — and BEFORE the log filter override below — so
+     * the test's diagnostics are always visible regardless of the
+     * user's [Logging] Enabled choice. Set --TestCupRoundtrip=1 to
+     * invoke. Exits 0 on PASS, 2 on FAIL. */
+    if (g_td5.ini.test_cup_roundtrip > 0) {
+        dbglog("=== TestCupRoundtrip: starting ===");
+        int ok = td5_save_test_cup_roundtrip();
+        dbglog("=== TestCupRoundtrip: %s ===", ok ? "PASS" : "FAIL");
+        return ok ? 0 : 2;
     }
 
     /* Apply log filters now — Backend_Init runs after this and is the heaviest

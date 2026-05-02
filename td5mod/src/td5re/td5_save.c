@@ -16,6 +16,7 @@
 #include "td5re.h"
 #include "td5_game.h"
 #include <string.h>
+#include <stdio.h>  /* remove() in td5_save_test_cup_roundtrip */
 
 #define LOG_TAG "save"
 
@@ -161,11 +162,25 @@ typedef struct TD5_CupDataBuffer {
 /** Config.td5 serialization buffer (5351 bytes, mirrors 0x48F384). */
 static uint8_t s_config_buf[TD5_CONFIG_FILE_SIZE];
 
-/** CupData.td5 snapshot buffer (12966 bytes, mirrors 0x490BAC). */
-static uint8_t s_cup_buf[TD5_CUPDATA_FILE_SIZE];
+/** CupData.td5 snapshot buffer.
+ *
+ * Sized to TD5_CUPDATA_EXT_FILE_SIZE (12998 B) to hold both the original
+ * 12966-byte payload and the 32-byte port-only overlay (magic + 6 car
+ * indices). Original-format files (12966 B) populate only the prefix.
+ */
+static uint8_t s_cup_buf[TD5_CUPDATA_EXT_FILE_SIZE];
 
-/** CupData snapshot byte count (mirrors DAT_00494BBC). */
+/** CupData snapshot byte count (mirrors DAT_00494BBC). Either
+ *  TD5_CUPDATA_FILE_SIZE (legacy/original-format) or
+ *  TD5_CUPDATA_EXT_FILE_SIZE (port extended with overlay). */
 static uint32_t s_cup_buf_size;
+
+/** Per-slot car indices recovered from the overlay (slots 0..5). Set by
+ *  cup_deserialize_from_buffer when a valid overlay is present; pushed
+ *  into g_td5 by td5_save_sync_cup_to_game. -1 = no overlay (legacy
+ *  format), so existing g_td5 values are kept. */
+static int s_overlay_car_indices[TD5_CUPDATA_OVERLAY_NUM_SLOTS];
+static int s_overlay_present;
 
 /* -- Globals that feed into Config.td5 -- */
 static TD5_GameOptions s_game_options;                        /* 0x466000 */
@@ -996,12 +1011,42 @@ static void cup_serialize_to_buffer(void)
      * store gets folded into the CRC computation (the CRC init 0xFFFFFFFF
      * overlaps with the buffer write). Let me trust the analysis doc.
      */
+    /* TD5RE divergent overlay (port-only). Persist per-slot car indices
+     * so the loader can re-resolve actor+0x1B0/+0x1B8/+0x1BC via the
+     * asset registry instead of trusting raw pointers from the .data
+     * segment of an earlier build. See td5_types.h overlay block.
+     *
+     * Slot mapping mirrors td5_frontend.c:
+     *   slot 0       -> g_td5.car_index (player)
+     *   slot 1..5    -> g_td5.ai_car_indices[1..5]
+     * (g_td5.ai_car_indices[0] is unused.) */
+    memcpy(buf + TD5_CUPDATA_OVERLAY_OFFSET,
+           TD5_CUPDATA_OVERLAY_MAGIC, TD5_CUPDATA_OVERLAY_MAGIC_LEN);
+    {
+        uint8_t *ids = buf + TD5_CUPDATA_OVERLAY_OFFSET +
+                       TD5_CUPDATA_OVERLAY_MAGIC_LEN;
+        write_le32(ids + 0 * 4, (uint32_t)g_td5.car_index);
+        write_le32(ids + 1 * 4, (uint32_t)g_td5.ai_car_indices[1]);
+        write_le32(ids + 2 * 4, (uint32_t)g_td5.ai_car_indices[2]);
+        write_le32(ids + 3 * 4, (uint32_t)g_td5.ai_car_indices[3]);
+        write_le32(ids + 4 * 4, (uint32_t)g_td5.ai_car_indices[4]);
+        write_le32(ids + 5 * 4, (uint32_t)g_td5.ai_car_indices[5]);
+    }
+
+    /* CRC-32 over the full extended buffer (placeholder dance preserves
+     * symmetry with the original — see RestoreRaceStatusSnapshot). */
     write_le32(buf + 0x0C, TD5_CRC_PLACEHOLDER);
-    uint32_t crc = td5_save_crc32(buf, TD5_CUPDATA_FILE_SIZE);
+    uint32_t crc = td5_save_crc32(buf, TD5_CUPDATA_EXT_FILE_SIZE);
     write_le32(buf + 0x0C, crc);
 
-    /* Store snapshot size. */
-    s_cup_buf_size = TD5_CUPDATA_FILE_SIZE;
+    /* Store snapshot size — extended format. */
+    s_cup_buf_size = TD5_CUPDATA_EXT_FILE_SIZE;
+
+    TD5_LOG_I(LOG_TAG, "cup serialize: ext format, ids=[%d,%d,%d,%d,%d,%d]",
+              g_td5.car_index,
+              g_td5.ai_car_indices[1], g_td5.ai_car_indices[2],
+              g_td5.ai_car_indices[3], g_td5.ai_car_indices[4],
+              g_td5.ai_car_indices[5]);
 }
 
 /* ========================================================================
@@ -1090,6 +1135,46 @@ static int cup_deserialize_from_buffer(void)
         s_selected_game_type = 0xFFFFFFFF; /* -1 as unsigned */
     }
 
+    /* TD5RE divergent overlay parse (port-only). When the file is in
+     * extended format, the 32-byte overlay at +0x32A6 carries 6 stable
+     * car_index values that the loader uses to re-resolve actor pointer
+     * fields via the asset registry on race re-init. Defensive: also
+     * NULL the three pointer slots inside each restored racer-actor
+     * (offsets +0x1B0/+0x1B8/+0x1BC) so any stale dangling pointer in
+     * the saved blob can't be dereferenced before LoadRaceVehicleAssets
+     * + InitializeRaceActor (FUN_0042F140 in original) re-fill them. */
+    s_overlay_present = 0;
+    for (int i = 0; i < TD5_CUPDATA_OVERLAY_NUM_SLOTS; i++) {
+        s_overlay_car_indices[i] = -1;
+    }
+    if (s_cup_buf_size >= TD5_CUPDATA_EXT_FILE_SIZE &&
+        memcmp(buf + TD5_CUPDATA_OVERLAY_OFFSET,
+               TD5_CUPDATA_OVERLAY_MAGIC,
+               TD5_CUPDATA_OVERLAY_MAGIC_LEN) == 0) {
+        const uint8_t *ids = buf + TD5_CUPDATA_OVERLAY_OFFSET +
+                             TD5_CUPDATA_OVERLAY_MAGIC_LEN;
+        for (int i = 0; i < TD5_CUPDATA_OVERLAY_NUM_SLOTS; i++) {
+            s_overlay_car_indices[i] = (int)read_le32(ids + i * 4);
+        }
+        s_overlay_present = 1;
+        /* Defensive pointer-slot scrub for racer slots 0..5. */
+        for (int slot = 0; slot < TD5_CUPDATA_OVERLAY_NUM_SLOTS; slot++) {
+            uint8_t *a = (uint8_t *)s_actor_table + (size_t)slot * 0x388;
+            write_le32(a + 0x1B0, 0);
+            write_le32(a + 0x1B8, 0);
+            write_le32(a + 0x1BC, 0);
+        }
+        TD5_LOG_I(LOG_TAG,
+                  "cup deserialize: overlay applied ids=[%d,%d,%d,%d,%d,%d]",
+                  s_overlay_car_indices[0], s_overlay_car_indices[1],
+                  s_overlay_car_indices[2], s_overlay_car_indices[3],
+                  s_overlay_car_indices[4], s_overlay_car_indices[5]);
+    } else {
+        TD5_LOG_I(LOG_TAG,
+                  "cup deserialize: legacy format size=%u (no overlay)",
+                  (unsigned int)s_cup_buf_size);
+    }
+
     return 1;
 }
 
@@ -1114,8 +1199,10 @@ int td5_save_write_cup_data(const char *path)
         return 0;
     }
 
-    /* Step 2: Make an encrypted copy (original uses stack alloca). */
-    uint8_t enc_buf[TD5_CUPDATA_FILE_SIZE];
+    /* Step 2: Make an encrypted copy (original uses stack alloca).
+     * Sized for the TD5RE extended format (12998 B); covers original
+     * 12966-byte legacy too. */
+    uint8_t enc_buf[TD5_CUPDATA_EXT_FILE_SIZE];
     memcpy(enc_buf, s_cup_buf, s_cup_buf_size);
     td5_save_xor_encrypt(enc_buf, s_cup_buf_size, TD5_CUPDATA_XOR_KEY);
 
@@ -1279,6 +1366,26 @@ int td5_save_sync_cup_to_game(int *out_race_within_series)
 
     if (out_race_within_series) {
         *out_race_within_series = (int)s_race_within_series;
+    }
+
+    /* TD5RE divergent overlay -> g_td5 push. When the loaded file was an
+     * extended-format CupData.td5, push the persisted car indices into
+     * the runtime selection so InitRace's td5_asset_load_vehicle pass
+     * resolves the same cars the player saved. Legacy files leave g_td5
+     * untouched (existing fields keep whatever the frontend chose). */
+    if (s_overlay_present) {
+        g_td5.car_index             = s_overlay_car_indices[0];
+        g_td5.ai_car_indices[1]     = s_overlay_car_indices[1];
+        g_td5.ai_car_indices[2]     = s_overlay_car_indices[2];
+        g_td5.ai_car_indices[3]     = s_overlay_car_indices[3];
+        g_td5.ai_car_indices[4]     = s_overlay_car_indices[4];
+        g_td5.ai_car_indices[5]     = s_overlay_car_indices[5];
+        TD5_LOG_I(LOG_TAG,
+                  "sync_cup_to_game: overlay -> g_td5 car=%d ai=[%d,%d,%d,%d,%d]",
+                  g_td5.car_index,
+                  g_td5.ai_car_indices[1], g_td5.ai_car_indices[2],
+                  g_td5.ai_car_indices[3], g_td5.ai_car_indices[4],
+                  g_td5.ai_car_indices[5]);
     }
 
     /* Restore actor data to game module actor table. */
@@ -1625,4 +1732,212 @@ int td5_save_apply_cup_unlocks_ex(int game_type, int *cars_out, int *tracks_out)
 int td5_save_apply_cup_unlocks(int game_type)
 {
     return td5_save_apply_cup_unlocks_ex(game_type, NULL, NULL);
+}
+
+/* ========================================================================
+ * td5_save_test_cup_roundtrip  (port-only divergence self-test)
+ *
+ * Exercises the extended CupData.td5 format end-to-end: seeds known car
+ * indices, serializes + writes, wipes runtime state, reads + deserializes,
+ * and asserts that g_td5.car_index/ai_car_indices restore correctly.
+ * Returns 1 on pass, 0 on fail.
+ *
+ * Side effects: writes/deletes "test_cup_roundtrip.td5" in cwd, mutates
+ * g_td5.car_index, g_td5.ai_car_indices[6], and the entire
+ * s_actor_table. Intended to run before any race state exists.
+ * ======================================================================== */
+
+int td5_save_test_cup_roundtrip(void)
+{
+    const char *test_path = "test_cup_roundtrip.td5";
+    int pass = 1;
+
+    /* Seed g_td5 with a deterministic mix and pre-populate the actor
+     * table's pointer slots with sentinel "dangling" addresses so we can
+     * verify the post-load NULL scrub. */
+    const int saved_car      = g_td5.car_index;
+    const int saved_ai[6]    = {
+        g_td5.ai_car_indices[0], g_td5.ai_car_indices[1],
+        g_td5.ai_car_indices[2], g_td5.ai_car_indices[3],
+        g_td5.ai_car_indices[4], g_td5.ai_car_indices[5],
+    };
+
+    g_td5.car_index             = 5;
+    g_td5.ai_car_indices[0]     = 0;   /* slot 0 mirror, not persisted */
+    g_td5.ai_car_indices[1]     = 11;
+    g_td5.ai_car_indices[2]     = 22;
+    g_td5.ai_car_indices[3]     = 7;
+    g_td5.ai_car_indices[4]     = 14;
+    g_td5.ai_car_indices[5]     = 3;
+
+    memset(s_actor_table, 0, sizeof(s_actor_table));
+    for (int slot = 0; slot < 6; slot++) {
+        uint8_t *a = (uint8_t *)s_actor_table + (size_t)slot * 0x388;
+        write_le32(a + 0x1B0, 0xDEADBEEF);
+        write_le32(a + 0x1B8, 0xCAFEBABE);
+        write_le32(a + 0x1BC, 0xF00DD00D);
+    }
+
+    if (!td5_save_write_cup_data(test_path)) {
+        TD5_LOG_E(LOG_TAG, "test_cup_roundtrip: write failed");
+        pass = 0;
+        goto restore;
+    }
+
+    /* Wipe runtime state so any retained residue would be visible. */
+    g_td5.car_index = -1;
+    for (int i = 0; i < 6; i++) g_td5.ai_car_indices[i] = -1;
+    memset(s_actor_table, 0, sizeof(s_actor_table));
+    s_overlay_present = 0;
+    for (int i = 0; i < TD5_CUPDATA_OVERLAY_NUM_SLOTS; i++) {
+        s_overlay_car_indices[i] = -2;
+    }
+
+    if (!td5_save_load_cup_data(test_path)) {
+        TD5_LOG_E(LOG_TAG, "test_cup_roundtrip: load failed");
+        pass = 0;
+        goto restore;
+    }
+
+    if (!s_overlay_present) {
+        TD5_LOG_E(LOG_TAG, "test_cup_roundtrip: overlay not detected after load");
+        pass = 0;
+    }
+    if (s_cup_buf_size != TD5_CUPDATA_EXT_FILE_SIZE) {
+        TD5_LOG_E(LOG_TAG, "test_cup_roundtrip: size mismatch got=%u want=%u",
+                  (unsigned)s_cup_buf_size,
+                  (unsigned)TD5_CUPDATA_EXT_FILE_SIZE);
+        pass = 0;
+    }
+
+    /* Push overlay -> g_td5 (sync_cup_to_game would also do this). */
+    (void)td5_save_sync_cup_to_game(NULL);
+
+    const int want_car   = 5;
+    const int want_ai[6] = { 5, 11, 22, 7, 14, 3 }; /* [0]=player mirror */
+    if (g_td5.car_index != want_car) {
+        TD5_LOG_E(LOG_TAG, "test_cup_roundtrip: car_index got=%d want=%d",
+                  g_td5.car_index, want_car);
+        pass = 0;
+    }
+    /* Slots 1..5 are the only ones the overlay persists; slot 0's
+     * ai_car_indices entry is unused by the original flow and is left
+     * untouched on load (current sync_cup_to_game does not write it). */
+    for (int i = 1; i <= 5; i++) {
+        if (g_td5.ai_car_indices[i] != want_ai[i]) {
+            TD5_LOG_E(LOG_TAG,
+                      "test_cup_roundtrip: ai_car_indices[%d] got=%d want=%d",
+                      i, g_td5.ai_car_indices[i], want_ai[i]);
+            pass = 0;
+        }
+    }
+
+    /* Verify defensive pointer-slot scrub for slots 0..5. */
+    for (int slot = 0; slot < 6; slot++) {
+        const uint8_t *a = (const uint8_t *)s_actor_table +
+                           (size_t)slot * 0x388;
+        uint32_t p1B0 = read_le32(a + 0x1B0);
+        uint32_t p1B8 = read_le32(a + 0x1B8);
+        uint32_t p1BC = read_le32(a + 0x1BC);
+        if (p1B0 != 0 || p1B8 != 0 || p1BC != 0) {
+            TD5_LOG_E(LOG_TAG,
+                      "test_cup_roundtrip: slot=%d ptr scrub failed "
+                      "p1B0=0x%08X p1B8=0x%08X p1BC=0x%08X",
+                      slot, p1B0, p1B8, p1BC);
+            pass = 0;
+        }
+    }
+
+    /* Subtest 2: legacy-format compatibility. Synthesize a 12966-byte
+     * (no-overlay) CupData.td5 via direct file I/O — bypassing
+     * td5_save_write_cup_data because that always re-serializes the
+     * extended format. We re-seed cup_serialize_to_buffer, truncate
+     * the byte count + recompute CRC over the original payload only,
+     * encrypt, and write 12966 bytes directly. Then reload via the
+     * public path and verify s_overlay_present is cleared. */
+    {
+        const char *legacy_path = "test_cup_legacy.td5";
+
+        /* Re-seed g_td5 so a successful overlay-bearing write would be
+         * obviously different from a legacy load (which must NOT push
+         * overlay values). */
+        g_td5.car_index             = 9;
+        g_td5.ai_car_indices[1]     = 9;
+        g_td5.ai_car_indices[2]     = 9;
+        g_td5.ai_car_indices[3]     = 9;
+        g_td5.ai_car_indices[4]     = 9;
+        g_td5.ai_car_indices[5]     = 9;
+
+        cup_serialize_to_buffer();  /* writes 12998 with overlay + CRC */
+
+        /* Truncate to legacy size + recompute CRC over the original
+         * 12966-byte region only (mirrors what an original TD5_d3d.exe
+         * binary would have written). */
+        write_le32(s_cup_buf + 0x0C, TD5_CRC_PLACEHOLDER);
+        uint32_t legacy_crc = td5_save_crc32(s_cup_buf, TD5_CUPDATA_FILE_SIZE);
+        write_le32(s_cup_buf + 0x0C, legacy_crc);
+
+        /* Direct encrypted write of just the first 12966 bytes. */
+        uint8_t legacy_buf[TD5_CUPDATA_FILE_SIZE];
+        memcpy(legacy_buf, s_cup_buf, TD5_CUPDATA_FILE_SIZE);
+        td5_save_xor_encrypt(legacy_buf, TD5_CUPDATA_FILE_SIZE,
+                             TD5_CUPDATA_XOR_KEY);
+        TD5_File *lf = td5_plat_file_open(legacy_path, "wb");
+        size_t lwritten = lf
+            ? td5_plat_file_write(lf, legacy_buf, TD5_CUPDATA_FILE_SIZE)
+            : 0;
+        if (lf) td5_plat_file_close(lf);
+
+        if (lwritten != TD5_CUPDATA_FILE_SIZE) {
+            TD5_LOG_E(LOG_TAG,
+                      "test_cup_roundtrip[legacy]: direct write failed got=%u",
+                      (unsigned)lwritten);
+            pass = 0;
+        } else {
+            /* Wipe runtime, then load via the public path. We expect:
+             * load==1, size==12966, overlay==0. */
+            g_td5.car_index = -1;
+            for (int i = 0; i < 6; i++) g_td5.ai_car_indices[i] = -1;
+            memset(s_actor_table, 0, sizeof(s_actor_table));
+            s_overlay_present = 0;
+
+            if (!td5_save_load_cup_data(legacy_path)) {
+                TD5_LOG_E(LOG_TAG,
+                          "test_cup_roundtrip[legacy]: load failed (CRC?)");
+                pass = 0;
+            }
+            if (s_cup_buf_size != TD5_CUPDATA_FILE_SIZE) {
+                TD5_LOG_E(LOG_TAG,
+                          "test_cup_roundtrip[legacy]: size got=%u want=%u",
+                          (unsigned)s_cup_buf_size,
+                          (unsigned)TD5_CUPDATA_FILE_SIZE);
+                pass = 0;
+            }
+            if (s_overlay_present) {
+                TD5_LOG_E(LOG_TAG,
+                          "test_cup_roundtrip[legacy]: overlay falsely detected");
+                pass = 0;
+            }
+            TD5_LOG_I(LOG_TAG,
+                      "test_cup_roundtrip[legacy]: ok size=%u overlay=%d",
+                      (unsigned)s_cup_buf_size, s_overlay_present);
+        }
+
+        if (pass) remove(legacy_path);
+    }
+
+    TD5_LOG_I(LOG_TAG, "test_cup_roundtrip: %s", pass ? "PASS" : "FAIL");
+
+    /* Cleanup: leave the extended-format file in place if FAIL (for
+     * inspection), remove it on PASS so the next run starts clean. */
+    if (pass) {
+        remove(test_path);
+    }
+
+restore:
+    g_td5.car_index = saved_car;
+    for (int i = 0; i < 6; i++) g_td5.ai_car_indices[i] = saved_ai[i];
+    memset(s_actor_table, 0, sizeof(s_actor_table));
+
+    return pass;
 }

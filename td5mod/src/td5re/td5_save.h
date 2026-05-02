@@ -57,6 +57,13 @@ int  td5_save_write_config(const char *path);
 int  td5_save_load_cup_data(const char *path);
 int  td5_save_write_cup_data(const char *path);
 
+/** TD5RE divergent overlay self-test. Writes "test_cup_roundtrip.td5"
+ *  in cwd, reloads, and asserts that g_td5.car_index +
+ *  g_td5.ai_car_indices[1..5] survive the round-trip. Mutates and then
+ *  restores g_td5 + s_actor_table; safe to run before any race init.
+ *  Returns 1 on PASS, 0 on FAIL. */
+int  td5_save_test_cup_roundtrip(void);
+
 /** Validate CupData.td5 checksum without restoring state.
  *  Used to enable/disable the "Continue Cup" button.
  *  @param path         File path (NULL for default "CupData.td5").

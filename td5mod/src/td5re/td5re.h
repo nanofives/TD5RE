@@ -291,6 +291,7 @@ typedef struct TD5_GlobalState {
          * input ring to replay.td5 on disk; td5_input_read_open() reads it
          * back. Default 0 preserves faithful in-memory-only behavior. */
         int  replay_persist_to_disk;
+        int  test_cup_roundtrip; /* if >0, run td5_save_test_cup_roundtrip() during startup and exit with the result */
     } ini;
 
 } TD5_GlobalState;
