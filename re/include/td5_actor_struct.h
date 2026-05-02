@@ -203,8 +203,17 @@ typedef struct TD5_Actor {
      * Written by: RenderVehicleActorModel, RefreshVehicleWheelContactFrames
      * Read by: UpdateActorTrackSegmentContacts[Forward/Reverse]
      */
-    TD5_TrackProbeState wheel_probes[4]; /* +0x000: FL=0, FR=1, RL=2, RR=3 [CONFIRMED wave3] */
-    TD5_TrackProbeState body_probes[4];  /* +0x040: FL=4, FR=5, RL=6, RR=7 [CONFIRMED wave3] */
+    /* 2026-05-02: storage swapped to match original binary memory layout.
+     * Per Ghidra of RefreshVehicleWheelContactFrames @ 0x00403720:
+     *   - First loop (per-wheel suspension/contact) writes span/lane to
+     *     `(actor + 0x40 + 0x10*i)` — that storage is the WHEEL probe data.
+     *   - Second loop (body corners) writes to `(actor + 0x00 + 0x10*i)`.
+     * Earlier port had these inverted so the per-tick physics_trace.csv
+     * read all w?_span = 0 at the +0x40 offset. Field NAMES are preserved
+     * so call sites (`actor->wheel_probes[i]`, `actor->body_probes[i]`)
+     * remain semantically correct. Only the storage location changes. */
+    TD5_TrackProbeState body_probes[4];  /* +0x000: body corners (FL,FR,RL,RR) */
+    TD5_TrackProbeState wheel_probes[4]; /* +0x040: per-wheel suspension/contact */
 
     /* === TRACK POSITION STATE (0x080-0x08F) ==========================
      *
@@ -577,8 +586,8 @@ _Static_assert(sizeof(TD5_DisplayAngles) == 0x06, "TD5_DisplayAngles must stay 6
 _Static_assert(sizeof(TD5_EulerAccum) == 0x0C, "TD5_EulerAccum must stay 12 bytes");
 _Static_assert(sizeof(TD5_TrackProbeState) == 0x10, "TD5_TrackProbeState must stay 16 bytes");
 _Static_assert(sizeof(TD5_Actor) == TD5_ACTOR_STRIDE, "TD5_Actor size drifted from 0x388");
-_Static_assert(offsetof(TD5_Actor, wheel_probes) == 0x000, "TD5_Actor.wheel_probes offset drifted");
-_Static_assert(offsetof(TD5_Actor, body_probes) == 0x040, "TD5_Actor.body_probes offset drifted");
+_Static_assert(offsetof(TD5_Actor, body_probes) == 0x000, "TD5_Actor.body_probes offset drifted");
+_Static_assert(offsetof(TD5_Actor, wheel_probes) == 0x040, "TD5_Actor.wheel_probes offset drifted");
 _Static_assert(offsetof(TD5_Actor, track_span_raw) == 0x080, "TD5_Actor.track_span_raw offset drifted");
 _Static_assert(offsetof(TD5_Actor, track_sub_lane_index) == 0x08C, "TD5_Actor.track_sub_lane_index offset drifted");
 _Static_assert(offsetof(TD5_Actor, probe_FL) == 0x090, "TD5_Actor.probe_FL offset drifted");

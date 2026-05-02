@@ -5377,31 +5377,20 @@ void td5_physics_reset_actor_state(TD5_Actor *actor)
     /* Reset engine RPM to idle */
     actor->engine_speed_accum = TD5_ENGINE_IDLE_RPM;
 
-    /* Initialize wheel contact and suspension state.
-     * In the original, the suspension spring-damper (0x4057F0) converges
-     * wheel_suspension_pos to a steady-state value over multiple ticks.
-     * Since our spring-damper is simplified, we initialize to the
-     * steady-state deflection derived from the cardef suspension
-     * geometry. The exact value depends on the cardef spring constants;
-     * the heuristic below (susp_href / 2) produces the correct ride
-     * height for the cars tested. */
+    /* Faithful spawn init matching original ResetVehicleActorState @ 0x00405D70:
+     * zero suspension pos + spring_dv (the integrator's velocity state). Do NOT
+     * preload pos with a heuristic — the integrator (0x4057F0) settles to the
+     * correct equilibrium on the first tick from zero, producing the asymmetric
+     * front/rear positions purely from gravity-driven load_accum signs.
+     * The earlier `ss = (href*5+4)/9` heuristic produced +54/+43 FP delta vs
+     * original (frida physics_trace.csv 2026-05-02). [CONFIRMED @ 0x00405D70] */
     actor->wheel_contact_bitmask = 0;
-    {
-        int32_t href = 0;
-        uint8_t *cd = (uint8_t *)actor->car_definition_ptr;
-        if (cd) {
-            int16_t sh = *(int16_t *)(cd + 0x82);
-            href = (sh * 0xB5 + ((sh * 0xB5) >> 31 & 0xFF)) >> 8;
-        }
-        /* Steady-state deflection ≈ href * 5/9 (from trace-matching:
-         * the original's spring-damper converges susp_pos to ~59.5
-         * when href=107, giving the correct ride height). */
-        int16_t ss = (int16_t)((href * 5 + 4) / 9);
-        for (int i = 0; i < 4; i++) {
-            actor->wheel_suspension_pos[i] = ss;
-            actor->wheel_load_accum[i] = 0;
-            actor->wheel_spring_dv[i] = 0;
-        }
+    for (int i = 0; i < 4; i++) {
+        actor->wheel_suspension_pos[i] = 0;
+        actor->wheel_spring_dv[i] = 0;
+        /* wheel_load_accum (+0x2FC) NOT zeroed by original — it is populated
+         * by the upcoming td5_physics_integrate_pose -> refresh_wheel_contacts
+         * call below via `force = (wheel_y - ground_y) + g`. */
     }
     actor->center_suspension_pos = 0;
     actor->center_suspension_vel = 0;
@@ -6308,51 +6297,22 @@ void td5_physics_init_vehicle_runtime(void)
             }
         }
 
-        /* Ground-settle: build matrix, compute wheel positions, probe ground,
-         * snap world_pos.y so the car starts ON the road — without applying
-         * any gravity or velocity (which would drop the car on the first call).
-         * [CONFIRMED @ 0x42F140: original calls FUN_00405e80 for slots < 6,
-         *  but with velocity=0 the gravity in that call self-corrects.
-         *  We do it explicitly to avoid any initial impulse.] */
-        update_vehicle_pose_from_physics(actor);  /* builds matrix + render_pos */
-        td5_physics_refresh_wheel_contacts(actor); /* probes ground, snaps wheels */
-        /* Force all wheels grounded for init ground snap. At spawn,
-         * world_pos.y may be far from the track surface (sentinel/default),
-         * causing force = (wheel_y - ground_y) to exceed the airborne
-         * threshold. The init snap MUST run regardless — it's placing the
-         * car on the road, not simulating physics. */
+        /* Faithful spawn settle: zero linear+angular velocities and run the
+         * full integrator once. This places the chassis on the road via the
+         * canonical chassis-snap (0x00406283-0x00406307) which uses the per-
+         * wheel rotated body-offset Y term — the same formula that runs every
+         * tick in flight. Earlier port had a custom corr_sum block here using
+         * td5_track_probe_height that omitted the rot_y*-0x100 contribution,
+         * leaving the chassis +128 FP (0.5 world units) above the original.
+         * [CONFIRMED @ 0x42F140 → 0x00405D70 → 0x00405E80] */
+        actor->linear_velocity_x = 0;
+        actor->linear_velocity_y = 0;
+        actor->linear_velocity_z = 0;
+        actor->angular_velocity_yaw   = 0;
+        actor->angular_velocity_pitch = 0;
+        actor->angular_velocity_roll  = 0;
         actor->wheel_contact_bitmask = 0;
-        /* Apply ground-snap correction. Original init path
-         * (InitializeActorTrackPose @ 0x00434350 → ResetVehicleActorState
-         * @ 0x00405D70 → IntegrateVehiclePoseAndContacts @ 0x00405E80) does
-         * NOT pre-lift chassis_y by a susp_href scalar term. susp_href is
-         * folded into the per-wheel rotated Y via refresh_wheel_contacts'
-         * pre-subtract/post-add pattern; adding it again here double-counts
-         * and produces an orientation-dependent spawn Y bias (because the
-         * port-invented term multiplied by m[4], which varies with tilt).
-         * On tilted spawn terrain this kicked the suspension into launch
-         * transients → "sometimes rolls out of control on slopes" user
-         * symptom. [CONFIRMED no analog in 0x00406283-0x0040628B] */
-        {
-            int64_t corr_sum = 0;
-            int corr_count = 0;
-            for (int i = 0; i < 4; i++) {
-                if (!(actor->wheel_contact_bitmask & (1 << i))) {
-                    int32_t g_y = 0;
-                    int g_surf = 0;
-                    int g_span = actor->track_span_raw;
-                    if (td5_track_probe_height(actor->wheel_contact_pos[i].x,
-                                               actor->wheel_contact_pos[i].z,
-                                               g_span, &g_y, &g_surf)) {
-                        corr_sum += (int64_t)g_y - (int64_t)actor->wheel_contact_pos[i].y;
-                        corr_count++;
-                    }
-                }
-            }
-            if (corr_count > 0) {
-                actor->world_pos.y += (int32_t)(corr_sum / corr_count);
-            }
-        }
+        td5_physics_integrate_pose(actor);
         actor->render_pos.x = (float)actor->world_pos.x * (1.0f / 256.0f);
         actor->render_pos.y = (float)actor->world_pos.y * (1.0f / 256.0f);
         actor->render_pos.z = (float)actor->world_pos.z * (1.0f / 256.0f);

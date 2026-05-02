@@ -952,6 +952,16 @@ int td5_game_init_race_session(void) {
                   "InitRace: player_is_ai=1 -> slot 0 switched to AI "
                   "(mirrors 0x0042ACCF attract-mode write)");
     }
+    /* 2026-05-02: physics-trace diff knob — disable AI slots 1..5 so the
+     * trace window only contains player slot 0 dynamics with no rear-end
+     * collisions from AI catching up. Mirrors the Frida side's
+     * DISABLE_AI_SLOTS hook in frida_race_trace.js. */
+    if (getenv("TD5RE_DISABLE_AI_SLOTS")) {
+        for (int i = 1; i < TD5_MAX_RACER_SLOTS; i++) {
+            s_slot_state[i].state = 3;  /* disabled */
+        }
+        TD5_LOG_I(LOG_TAG, "InitRace: TD5RE_DISABLE_AI_SLOTS=1 -> slots 1..5 disabled");
+    }
     /* Propagate player/AI state to physics module for dynamics dispatch */
     for (int i = 0; i < TD5_MAX_RACER_SLOTS; i++) {
         td5_physics_set_race_slot_state(i, s_slot_state[i].state == 1 ? 1 : 0);
@@ -1855,6 +1865,15 @@ static void td5_game_trace_stage(const char *stage, int ticks_this_frame)
         as.metric_top_speed         = s_metrics[i].top_speed;
 
         td5_trace_write_actor(frame, sim_tick, stage, &as);
+
+        /* Physics-chain capture (slot 0, post_physics only). Schema-aligned
+         * with frida_race_trace.js MOD_PHYSICS so the comparator can diff
+         * column-by-column to localize divergences in the gravity +
+         * ground-snap pipeline. */
+        if (i == 0 && stage && strcmp(stage, "post_physics") == 0) {
+            td5_trace_write_physics(frame, sim_tick, stage,
+                                    (const struct TD5_Actor *)a);
+        }
     }
 
     /* View rows */

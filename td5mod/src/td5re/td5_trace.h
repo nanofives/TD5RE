@@ -93,6 +93,16 @@ void td5_trace_write_actor(uint32_t frame_index, uint32_t sim_tick, const char *
 void td5_trace_write_view(uint32_t frame_index, uint32_t sim_tick, const char *stage,
                           const TD5_TraceViewState *state);
 
+/* Per-tick physics-chain capture for the gravity + ground-snap diff.
+ * Schema is column-aligned with frida_race_trace.js MOD_PHYSICS so a
+ * straightforward column-by-column diff names the first divergent step.
+ * Pass a TD5_Actor * here — the function reads the same struct fields
+ * the Frida side reads from the actor table at the same byte offsets. */
+struct TD5_Actor;
+void td5_trace_write_physics(uint32_t frame_index, uint32_t sim_tick,
+                             const char *stage,
+                             const struct TD5_Actor *actor);
+
 /* -------- call trace (for diff-race hook specs) ----------------------------
  * Emits one row per function invocation, keyed by (sim_tick, fn_name,
  * call_idx). Mirrors Frida-side Interceptor.attach output so the comparator
