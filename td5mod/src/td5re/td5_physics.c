@@ -4455,7 +4455,19 @@ void td5_physics_integrate_pose(TD5_Actor *actor)
      * airborne, and simply stops growing when any wheel grounds (the INC
      * isn't reached). State0f_damping at td5_physics.c:547 fires when
      * afc >= 3 AND dlk == 0x0F (CMP at 0x00406835 + JL/JNZ at 0x0040683D). */
-    if (actor->wheel_contact_bitmask == 0x0F) {
+    if (actor->wheel_contact_bitmask == 0x0F && !g_game_paused) {
+        /* afc++ gated behind !g_game_paused so countdown ticks don't
+         * accumulate the all-airborne counter. Refresh runs every render
+         * frame including the ~190-frame pause countdown; without this
+         * gate, airborne_frame_counter would already be ≥5 by the first
+         * un-paused dispatch on Honolulu, instantly triggering the
+         * state0f damping gate at line 641 (wcb==0x0F && afc>=3) — that
+         * gate replaces update_player, so longitudinal_speed (+0x314)
+         * stays at zero through countdown into the active race. The
+         * original almost certainly does NOT increment afc during the
+         * countdown (race not active → tick loop suppressed). Verifying
+         * exact gate location in original is a follow-up; this guard
+         * preserves the desired post-countdown behavior either way. */
         actor->airborne_frame_counter++;
         TD5_LOG_I(LOG_TAG, "tumble_gate: slot=%d wcb=0x0F dlk=0x0F afc=%d",
                   actor->slot_index, actor->airborne_frame_counter);
