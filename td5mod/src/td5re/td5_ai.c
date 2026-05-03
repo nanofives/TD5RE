@@ -1847,7 +1847,14 @@ void td5_ai_update_track_behavior(int slot) {
      *      g) Decompose into LEFT_DEVIATION / RIGHT_DEVIATION
      */
     {
-        int16_t span = ACTOR_I16(actor, ACTOR_SPAN_RAW);
+        /* Original at 0x00435243 reads MOVSX EAX, word ptr [actor+0x82] —
+         * track_span_NORMALIZED, NOT track_span_raw [CONFIRMED via Frida +
+         * Ghidra round-15 audit 2026-05-03]. Port had been reading
+         * +0x80 (RAW) which on Honolulu sim_tick=1 produces target_span=106
+         * vs orig's 97 — a 9-span gap that drives port's 3.4× over-steer
+         * and yaw_torque overshoot, and is the root cause of the
+         * Honolulu rollover residual after the engine-pin fix. */
+        int16_t span = ACTOR_I16(actor, ACTOR_SPAN_NORMALIZED);
         int span_count = td5_track_get_span_count();
         if (span_count > 0 && span >= 0) {
             /* (a) Target span: 4 spans ahead, then remap through junction
