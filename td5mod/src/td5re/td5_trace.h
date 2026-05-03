@@ -36,7 +36,8 @@
 #define TD5_TRACE_MOD_PROGRESS  0x20
 #define TD5_TRACE_MOD_VIEW      0x40
 #define TD5_TRACE_MOD_CALLS     0x80
-#define TD5_TRACE_MOD_ALL       0xFF
+#define TD5_TRACE_MOD_ROTATION  0x100
+#define TD5_TRACE_MOD_ALL       0x1FF
 
 /* -------- Stage bitmask --------------------------------------------------
  * One bit per emit call site in RunRaceFrame's tick loop. Each module emits
@@ -145,6 +146,33 @@ typedef struct TD5_TraceViewRow {
     int32_t  cam_world_x, cam_world_y, cam_world_z;
 } TD5_TraceViewRow;
 
+/* Rotation row — dedicated spin/rollover diagnostics. Co-emits the
+ * full angular state (velocity + accumulator + display + airborne
+ * flags) on a single CSV row so spin events can be reconstructed
+ * without joining 3 modules.
+ *
+ * Field offsets in actor (verified against td5_actor_struct.h):
+ *   ang_vel_*  = +0x1C0/+0x1C4/+0x1C8 (int32_t per-tick angular velocity)
+ *   euler_*    = +0x1F0/+0x1F4/+0x1F8 (int32_t high-precision accumulator)
+ *   disp_*     = +0x208/+0x20A/+0x20C (int16_t 12-bit display angle)
+ *   wcb        = +0x37C (NEW airborne mask post-D2 fix; 1=airborne per wheel)
+ *   scf        = +0x376 surface_contact_flags (bit0=rear, bit1=front)
+ *   vmode      = +0x379 vehicle_mode (0=normal, 1=scripted recovery)
+ *   afc        = +0x360 airborne_frame_counter
+ *   world_y / vel_y co-emitted for vertical-trajectory correlation. */
+typedef struct TD5_TraceRotationRow {
+    int      slot;
+    int32_t  ang_vel_roll, ang_vel_yaw, ang_vel_pitch;
+    int32_t  euler_roll,   euler_yaw,   euler_pitch;
+    int16_t  disp_roll,    disp_yaw,    disp_pitch;
+    uint8_t  wcb;
+    uint8_t  scf;
+    uint8_t  vmode;
+    uint16_t afc;
+    int32_t  world_y;
+    int32_t  vel_y;
+} TD5_TraceRotationRow;
+
 void td5_trace_emit_frame   (uint32_t frame, uint32_t tick, const char *stage,
                              const TD5_TraceFrameRow *r);
 void td5_trace_emit_pose    (uint32_t frame, uint32_t tick, const char *stage,
@@ -159,6 +187,8 @@ void td5_trace_emit_progress(uint32_t frame, uint32_t tick, const char *stage,
                              const TD5_TraceProgressRow *r);
 void td5_trace_emit_view    (uint32_t frame, uint32_t tick, const char *stage,
                              const TD5_TraceViewRow *r);
+void td5_trace_emit_rotation(uint32_t frame, uint32_t tick, const char *stage,
+                             const TD5_TraceRotationRow *r);
 
 /* -------- Calls trace (unchanged schema) --------------------------------- */
 #define TD5_TRACE_CALL_MAX_ARGS 8

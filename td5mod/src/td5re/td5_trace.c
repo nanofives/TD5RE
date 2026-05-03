@@ -59,6 +59,9 @@ static ModuleFile s_modules[] = {
     { TD5_TRACE_MOD_CALLS,    "calls",    "calls",
       "sim_tick,fn_name,call_idx,n_args,arg_0,arg_1,arg_2,arg_3,arg_4,arg_5,arg_6,arg_7,has_ret,ret",
       "TD5RE_CALLS_TRACE_PATH",    NULL, NULL },
+    { TD5_TRACE_MOD_ROTATION, "rotation", "rotation",
+      "frame,sim_tick,stage,slot,ang_vel_roll,ang_vel_yaw,ang_vel_pitch,euler_roll,euler_yaw,euler_pitch,disp_roll,disp_yaw,disp_pitch,wcb,scf,vmode,afc,world_y,vel_y",
+      "TD5RE_TRACE_ROTATION_PATH", NULL, NULL },
 };
 static const int s_module_count = (int)(sizeof(s_modules) / sizeof(s_modules[0]));
 
@@ -77,6 +80,7 @@ static const struct { unsigned int mod; unsigned int stages; } s_module_stages[]
     { TD5_TRACE_MOD_PROGRESS, TD5_TRACE_STG_POST_PROGRESS | TD5_TRACE_STG_FRAME_END },
     { TD5_TRACE_MOD_VIEW,     TD5_TRACE_STG_POST_CAMERA  | TD5_TRACE_STG_FRAME_END },
     { TD5_TRACE_MOD_CALLS,    TD5_TRACE_STG_ALL },
+    { TD5_TRACE_MOD_ROTATION, TD5_TRACE_STG_PRE_PHYSICS | TD5_TRACE_STG_POST_PHYSICS },
 };
 
 /* -------- runtime state ------------------------------------------------- */
@@ -180,6 +184,7 @@ unsigned int td5_trace_parse_modules(const char *csv)
         { "progress", TD5_TRACE_MOD_PROGRESS },
         { "view",     TD5_TRACE_MOD_VIEW     },
         { "calls",    TD5_TRACE_MOD_CALLS    },
+        { "rotation", TD5_TRACE_MOD_ROTATION },
     };
     return parse_csv_mask(csv, tbl, (int)(sizeof(tbl)/sizeof(tbl[0])),
                           TD5_TRACE_MOD_ALL, "module");
@@ -431,6 +436,22 @@ void td5_trace_emit_view(uint32_t frame, uint32_t tick, const char *stage,
             (unsigned)frame, (unsigned)tick, stage ? stage : "",
             r->view_index, r->actor_slot,
             r->cam_world_x, r->cam_world_y, r->cam_world_z);
+}
+
+void td5_trace_emit_rotation(uint32_t frame, uint32_t tick, const char *stage,
+                             const TD5_TraceRotationRow *r)
+{
+    FILE *fp = fp_for(TD5_TRACE_MOD_ROTATION);
+    if (!fp || !r) return;
+    fprintf(fp,
+            "%u,%u,%s,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%u,%u,%u,%u,%d,%d\n",
+            (unsigned)frame, (unsigned)tick, stage ? stage : "",
+            r->slot,
+            r->ang_vel_roll, r->ang_vel_yaw, r->ang_vel_pitch,
+            r->euler_roll,   r->euler_yaw,   r->euler_pitch,
+            (int)r->disp_roll, (int)r->disp_yaw, (int)r->disp_pitch,
+            (unsigned)r->wcb, (unsigned)r->scf, (unsigned)r->vmode,
+            (unsigned)r->afc, r->world_y, r->vel_y);
 }
 
 /* -------- calls trace --------------------------------------------------- */
