@@ -700,7 +700,27 @@ void td5_physics_update_vehicle_actor(TD5_Actor *actor)
          * dropped here — gate only on the slot being a non-player racer,
          * which matches the observed trace. [RE basis: 0x004068B3-0x004068CB] */
         update_engine_speed_smoothed(actor);
-        if (actor->slot_index < 6 && g_race_slot_state[actor->slot_index] != 1) {
+        /* The original gates the (redline*2)/3 AI pin on
+         *   (g_selectedGameType != 0 && slot[+0x375].state != 1)
+         * [CONFIRMED @ 0x004068B3-0x004068CB via Opus 4.7 audit 2026-05-03].
+         * The prior port comment dropped the game_type gate based on a
+         * misread: the empirical 7400 (= 11100*2/3) trace landed because
+         * the test had game_type != 0, not because the gate is always on.
+         *
+         * For single-race (game_type=0), the original does NOT pin during
+         * pause — update_engine_speed_smoothed revs RPM toward redline via
+         * the throttle-driven target, ending pause near redline (6185 for
+         * Viper). The first active sub-tick slews -200 to ~5985, which
+         * exceeds gear-2 upshift_rpm (5400) → AI shifts up rapidly,
+         * dropping drive_torque. This is the ROOT CAUSE of the Honolulu
+         * 2× force overshoot tracked in todo_state0f_overfire_skips_player.md.
+         *
+         * With this gate restored, port matches original on game_type=0
+         * single-race and continues to pin AI engines on game_type!=0
+         * (championship / cup modes). */
+        if (g_game_type != 0 &&
+            actor->slot_index < 6 &&
+            g_race_slot_state[actor->slot_index] != 1) {
             int32_t redline = (int32_t)PHYS_S(actor, 0x72);
             actor->engine_speed_accum = (redline << 1) / 3;
         }
