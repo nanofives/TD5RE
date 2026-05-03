@@ -2068,25 +2068,23 @@ void td5_physics_update_ai(TD5_Actor *actor)
     }
 
     /* --- 10. World-frame force application [CONFIRMED @ 0x4056FA-0x405762]
-     * Per Ghidra raw decomp 2026-05-03 (Opus 4.7 audit):
-     *   iVar18 = front_drive (×2 once for LAB doubling)
-     *   iVar5  = cos_h, iVar6 = sin_h, iVar7 = cos_s, iVar8 = sin_s
-     *   local_3c = rear_drive (post-LAB doubled), local_44 = front_lat,
-     *   local_40 = rear_lat (reassigned)
+     * Per Ghidra raw decomp + raw asm 2026-05-03 (Opus 4.7 audit round 5):
+     *   iVar18 = rear_drive  (post-LAB doubled, paired with sin_h/cos_h)
+     *   local_3c = front_drive (post-LAB doubled, paired with sin_s/cos_s)
+     *   local_44 = FRONT_LAT (post-overwrite, paired with cos_s/sin_s — steered)
+     *   local_40 = REAR_LAT  (post-overwrite, paired with cos_h/sin_h — heading)
+     * (An earlier audit round inverted iVar18 and local_3c — disproven by
+     * raw asm at LAB_00405285 + IMUL ordering at 0x4056F1/0x405712.)
      *
-     *   ai_fx = (front_drive*sin_h + front_lat*cos_s
-     *          + rear_drive*sin_s + rear_lat*cos_h) >> 12
-     *   ai_fz = (front_drive*cos_h + rear_drive*cos_s
-     *          - front_lat*sin_s - rear_lat*sin_h) >> 12
+     *   ai_fx = (rear_drive*sin_h + rear_lat*cos_h + front_drive*sin_s + front_lat*cos_s) >> 12
+     *   ai_fz = (rear_drive*cos_h - rear_lat*sin_h + front_drive*cos_s - front_lat*sin_s) >> 12
      *
-     * Prior port had the drive-trig pairings swapped: front_drive↔sin_s and
-     * rear_drive↔sin_h. Lat pairings were already correct. With non-zero
-     * steering+heading, |sin_s|≠|sin_h|, so the swap produced a different
-     * world-frame force magnitude. Reverted to byte-faithful pairing. */
-    int32_t ai_fx = ((int64_t)front_drive * sin_h + (int64_t)front_lat * cos_s
-                   + (int64_t)rear_drive  * sin_s + (int64_t)rear_lat  * cos_h) >> 12;
-    int32_t ai_fz = ((int64_t)front_drive * cos_h + (int64_t)rear_drive  * cos_s
-                   - (int64_t)front_lat  * sin_s - (int64_t)rear_lat  * sin_h) >> 12;
+     * Front forces in steered frame (cos_s/sin_s).
+     * Rear forces in body frame (cos_h/sin_h). */
+    int32_t ai_fx = ((int64_t)rear_drive * sin_h + (int64_t)rear_lat * cos_h
+                   + (int64_t)front_drive * sin_s + (int64_t)front_lat * cos_s) >> 12;
+    int32_t ai_fz = ((int64_t)rear_drive * cos_h - (int64_t)rear_lat * sin_h
+                   + (int64_t)front_drive * cos_s - (int64_t)front_lat * sin_s) >> 12;
     actor->linear_velocity_x += ai_fx;
     actor->linear_velocity_z += ai_fz;
 
