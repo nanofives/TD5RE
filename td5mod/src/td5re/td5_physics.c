@@ -2067,13 +2067,26 @@ void td5_physics_update_ai(TD5_Actor *actor)
         actor->angular_velocity_yaw += yaw_torque;
     }
 
-    /* --- 10. World-frame force application [CONFIRMED @ 0x4056C4-0x405762]
-     * Front forces use steered heading (cos_s, sin_s).
-     * Rear forces use body heading (cos_h, sin_h). */
-    int32_t ai_fx = ((int64_t)rear_drive * sin_h + (int64_t)rear_lat * cos_h
-                   + (int64_t)front_drive * sin_s + (int64_t)front_lat * cos_s) >> 12;
-    int32_t ai_fz = ((int64_t)rear_drive * cos_h - (int64_t)rear_lat * sin_h
-                   + (int64_t)front_drive * cos_s - (int64_t)front_lat * sin_s) >> 12;
+    /* --- 10. World-frame force application [CONFIRMED @ 0x4056FA-0x405762]
+     * Per Ghidra raw decomp 2026-05-03 (Opus 4.7 audit):
+     *   iVar18 = front_drive (×2 once for LAB doubling)
+     *   iVar5  = cos_h, iVar6 = sin_h, iVar7 = cos_s, iVar8 = sin_s
+     *   local_3c = rear_drive (post-LAB doubled), local_44 = front_lat,
+     *   local_40 = rear_lat (reassigned)
+     *
+     *   ai_fx = (front_drive*sin_h + front_lat*cos_s
+     *          + rear_drive*sin_s + rear_lat*cos_h) >> 12
+     *   ai_fz = (front_drive*cos_h + rear_drive*cos_s
+     *          - front_lat*sin_s - rear_lat*sin_h) >> 12
+     *
+     * Prior port had the drive-trig pairings swapped: front_drive↔sin_s and
+     * rear_drive↔sin_h. Lat pairings were already correct. With non-zero
+     * steering+heading, |sin_s|≠|sin_h|, so the swap produced a different
+     * world-frame force magnitude. Reverted to byte-faithful pairing. */
+    int32_t ai_fx = ((int64_t)front_drive * sin_h + (int64_t)front_lat * cos_s
+                   + (int64_t)rear_drive  * sin_s + (int64_t)rear_lat  * cos_h) >> 12;
+    int32_t ai_fz = ((int64_t)front_drive * cos_h + (int64_t)rear_drive  * cos_s
+                   - (int64_t)front_lat  * sin_s - (int64_t)rear_lat  * sin_h) >> 12;
     actor->linear_velocity_x += ai_fx;
     actor->linear_velocity_z += ai_fz;
 
