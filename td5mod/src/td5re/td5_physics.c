@@ -779,18 +779,27 @@ void td5_physics_update_vehicle_actor(TD5_Actor *actor)
         td5_track_resolve_wall_contacts(actor);
     }
 
-    /* 9. Update surface_contact_flags for the NEXT tick's dynamics dispatch.
-     * Placed here (not in integrate_pose) so the init path — which calls
-     * integrate_pose once from reset_actor_state for suspension settle —
-     * doesn't seed the flag. The first post-countdown update_player reads
-     * 0 (from the spawn memset) and takes the airborne/coast branch → no
-     * drive torque applied → no tick-1 velocity impulse. From tick 2
-     * onwards the flag reflects wheel_contact_bitmask and drive torque
-     * runs normally. [RE basis: the original's surface_contact_flags is
-     * only written inside UpdatePlayerVehicleDynamics @ 0x00404030, at a
-     * late drivetrain-commit condition; leaving it at 0 at tick 1 matches
-     * the original's observed tick-1 state where vel_x=vel_z=0.] */
-    if (!g_game_paused) {
+    /* 9. Update surface_contact_flags for the NEXT tick's dynamics dispatch
+     * — HUMAN-PLAYER PATH ONLY.
+     *
+     * [RE basis: the original's surface_contact_flags is only written inside
+     * UpdatePlayerVehicleDynamics @ 0x00404030, at a late drivetrain-commit
+     * condition. AI cars in the original never have scf written — it stays
+     * at 0 from the spawn memset for the entire race.]
+     *
+     * Frida rotation_probe.csv 2026-05-03 confirmed: orig slot 0 (AI)
+     * scf=0 at every sim_tick from 1..50. Port had scf=3 from sim_tick=2
+     * onwards because this update fired for AI cars too — a port-specific
+     * deviation that flipped the AI dynamics path from airborne (scf=0)
+     * to grounded (scf=3), changing drive-torque application on tick 2+.
+     *
+     * Gated on slot_state==1 (human player) so AI slots match the
+     * original's scf=0 behavior. The player path still gets the eager
+     * update because the original's late conditional inside
+     * UpdatePlayerVehicleDynamics isn't fully ported. */
+    if (!g_game_paused &&
+        actor->slot_index < 6 &&
+        g_race_slot_state[actor->slot_index] == 1) {
         uint8_t bm = actor->wheel_contact_bitmask;
         uint8_t flags = 0;
         if (!(bm & 0x04) || !(bm & 0x08))  /* RL or RR grounded */
