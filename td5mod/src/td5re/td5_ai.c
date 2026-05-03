@@ -1410,7 +1410,15 @@ void td5_ai_update_track_offset_bias(int slot) {
                       rs[RS_TRACK_OFFSET_BIAS]);
         }
 
-        /* Clamp bias to ±0x600 to prevent runaway [port-side guard] */
+        /* Clamp bias to ±0x600 — round-24 testing showed clamp removal
+         * made Honolulu rollover WORSE (port over-corrected in the
+         * OPPOSITE direction at sim_tick=1: port av_yaw=+375 vs orig=-99).
+         * Removing the clamp let the unclamped negative bias amplify a
+         * wrong-direction effect, indicating the sign convention itself
+         * diverges between port and orig. With clamp restored, port's
+         * outcome is closer to orig (different magnitude but same direction).
+         * The sign-convention divergence is the real bug to investigate
+         * next; clamp is left as a stabilizer until that's resolved. */
         if (rs[RS_TRACK_OFFSET_BIAS] > 0x600)  rs[RS_TRACK_OFFSET_BIAS] = 0x600;
         if (rs[RS_TRACK_OFFSET_BIAS] < -0x600) rs[RS_TRACK_OFFSET_BIAS] = -0x600;
 
