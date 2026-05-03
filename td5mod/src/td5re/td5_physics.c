@@ -3647,12 +3647,30 @@ void td5_physics_update_suspension_response(TD5_Actor *actor)
     /* PlayVehicleSoundAtPosition(0x17, bounce*50, ...) call from the
      * original is omitted — sound side is stubbed elsewhere. */
 
-    const int32_t roll_term  = (cnt_active > 0)
-        ? (roll_spr  + roll_grav  / cnt_active) / 0x4B0    /* /1200 */
-        : roll_spr  / 0x4B0;
-    const int32_t pitch_term = (cnt_active > 0)
-        ? (pitch_spr + pitch_grav / cnt_active) / 0x226    /* /550 */
-        : pitch_spr / 0x226;
+    /* Gate the entire roll/pitch contribution on having at least one
+     * wheel that JUST LANDED this tick (cnt_grounded counts landings,
+     * not steady-state grounded wheels — see line 3619 increment).
+     *
+     * Frida susp_response_probe.csv 2026-05-03 confirmed orig's slot 0
+     * AI has identical inputs (arms, wcv, rotation matrix, y_view) but
+     * ang_vel_pitch stays at 0 throughout. With cnt_active=4 and the
+     * ungated pitch_term, port adds -70/tick from pitch_grav alone.
+     * Original must be gating the rotation update on landings, since
+     * without landings the pitch_grav coupling makes no physical sense
+     * (grounded car at rest shouldn't spin from gravity-arm asymmetry).
+     *
+     * NOTE: this is INFERRED from the Frida diff; not yet confirmed
+     * against the original 0x4057F0 decomp. If a fresh Ghidra audit
+     * shows the original gates differently (e.g. averages by
+     * cnt_grounded only when > 0, but still adds pitch_grav term), the
+     * gate here will need refinement. For now this matches observed
+     * orig behaviour at sim_tick=1..50 on Honolulu AI Viper. */
+    int32_t roll_term  = 0;
+    int32_t pitch_term = 0;
+    if (cnt_grounded > 0 && cnt_active > 0) {
+        roll_term  = (roll_spr  + roll_grav  / cnt_active) / 0x4B0;
+        pitch_term = (pitch_spr + pitch_grav / cnt_active) / 0x226;
+    }
 
     actor->angular_velocity_roll  += roll_term;
     actor->angular_velocity_pitch += pitch_term;
