@@ -1410,16 +1410,27 @@ void td5_ai_update_track_offset_bias(int slot) {
                       rs[RS_TRACK_OFFSET_BIAS]);
         }
 
-        /* Clamp bias to ±0x600 to prevent runaway [port-side guard] */
-        if (rs[RS_TRACK_OFFSET_BIAS] > 0x600)  rs[RS_TRACK_OFFSET_BIAS] = 0x600;
-        if (rs[RS_TRACK_OFFSET_BIAS] < -0x600) rs[RS_TRACK_OFFSET_BIAS] = -0x600;
+        /* No clamp — the original UpdateActorTrackOffsetBias @ 0x004349A0
+         * has no ±0x600 clamp. The port previously added one as a stabilizer
+         * but Frida (round 23) confirmed orig DAT_004afb84[slot 0] reaches
+         * -3650 to -4010 around the FUN_00434800 call site, well past the
+         * port's old ±0x600 = ±1536 cap. The clamped bias produced ~2.4×
+         * less lateral target offset than the original, biasing target_x
+         * toward lane center rather than the orig's far-left target. */
 
+    } else {
+        /* No peer in range: decay 8/tick toward zero
+         * [CONFIRMED @ 0x004349A0-0x00434947]. */
+        if (rs[RS_TRACK_OFFSET_BIAS] < 0) {
+            rs[RS_TRACK_OFFSET_BIAS] += 8;
+            if (rs[RS_TRACK_OFFSET_BIAS] > 0)
+                rs[RS_TRACK_OFFSET_BIAS] = 0;
+        } else if (rs[RS_TRACK_OFFSET_BIAS] > 0) {
+            rs[RS_TRACK_OFFSET_BIAS] -= 8;
+            if (rs[RS_TRACK_OFFSET_BIAS] < 0)
+                rs[RS_TRACK_OFFSET_BIAS] = 0;
+        }
     }
-    /* No peer in range: leave bias unchanged.
-     * Original has an 8/tick decay-toward-zero when FindActorTrackOffsetPeer
-     * returns self-slot, but the port uses -1 for "no peer" which skips that
-     * path. The decay was confirmed to zero seeded biases during the ~386-tick
-     * countdown; keeping it disabled preserves the lane-spread fix. */
 }
 
 /* ========================================================================
@@ -1847,7 +1858,14 @@ void td5_ai_update_track_behavior(int slot) {
      *      g) Decompose into LEFT_DEVIATION / RIGHT_DEVIATION
      */
     {
-        int16_t span = ACTOR_I16(actor, ACTOR_SPAN_RAW);
+        /* Original at 0x00435243 reads MOVSX EAX, word ptr [actor+0x82] —
+         * track_span_NORMALIZED, NOT track_span_raw [CONFIRMED via Frida +
+         * Ghidra round-15 audit 2026-05-03]. Port had been reading
+         * +0x80 (RAW) which on Honolulu sim_tick=1 produces target_span=106
+         * vs orig's 97 — a 9-span gap that drives port's 3.4× over-steer
+         * and yaw_torque overshoot, and is the root cause of the
+         * Honolulu rollover residual after the engine-pin fix. */
+        int16_t span = ACTOR_I16(actor, ACTOR_SPAN_NORMALIZED);
         int span_count = td5_track_get_span_count();
         if (span_count > 0 && span >= 0) {
             /* (a) Target span: 4 spans ahead, then remap through junction

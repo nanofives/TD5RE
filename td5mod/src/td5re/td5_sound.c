@@ -742,8 +742,8 @@ void td5_sound_update_audio_mix(void)
                 int slip_rear  = actor->rear_axle_slip_excess;
                 int slip_max   = (slip_front > slip_rear) ? slip_front : slip_rear;
 
-                /* Check stunned state */
-                if (actor->damage_lockout == 0x0F) {
+                /* Check stunned state — all-wheels-airborne mask (NEW @ +0x37C). */
+                if (actor->wheel_contact_bitmask == 0x0F) {
                     slip_max = 0;
                 }
 

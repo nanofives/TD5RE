@@ -505,8 +505,9 @@ typedef struct TD5_Actor {
                                          *         Maximum 9 checkpoints (18 bytes) */
     int16_t  airborne_frame_counter;    /* +0x360: frames with no wheel ground contact [CONFIRMED wave3]
                                          *         incremented each frame when all wheels airborne;
-                                         *         >= 3 frames + damage_lockout==0x0F triggers
-                                         *         damping recovery mode (FUN_00403d90) */
+                                         *         >= 3 frames + wheel_contact_bitmask==0x0F
+                                         *         (i.e. all wheels airborne THIS tick at +0x37C)
+                                         *         triggers damping recovery (FUN_00403d90) */
     uint8_t  gap_362[9];               /* +0x362: unknown input/state block */
 
     /* === GEAR & CONTROL FLAGS (0x36B-0x374) ========================== */
@@ -549,12 +550,19 @@ typedef struct TD5_Actor {
     uint8_t  track_contact_flag;        /* +0x37B: V2W contact flag [CONFIRMED]
                                          *         cleared each frame, set on wall collision.
                                          *         0=none, 1=left/right, 2=inner edge */
-    uint8_t  damage_lockout;            /* +0x37C: damage lockout counter [CONFIRMED]
-                                         *         0x0F = enter damping mode;
-                                         *         checked by ResolveVehicleContacts */
-    uint8_t  wheel_contact_bitmask;     /* +0x37D: per-wheel ground contact bits [CONFIRMED]
-                                         *         bit0=FL, bit1=FR, bit2=RL, bit3=RR;
-                                         *         used by IntegrateVehiclePoseAndContacts */
+    uint8_t  wheel_contact_bitmask;     /* +0x37C: per-wheel ground contact bits THIS tick (NEW).
+                                         *         bit0=FL, bit1=FR, bit2=RL, bit3=RR; 1=airborne.
+                                         *         Written at refresh exit (0x004039B9 MOV
+                                         *         [ESI+0x37C], AL); read by every downstream
+                                         *         consumer of "live wheel airborne mask". */
+    uint8_t  damage_lockout;            /* +0x37D: per-wheel ground contact bits PREV tick (OLD).
+                                         *         Snapshotted at refresh entry (0x004037D5
+                                         *         MOV [ESI+0x37D], CL ← [ESI+0x37C]) before the
+                                         *         per-wheel loop accumulates the new mask into
+                                         *         +0x37C. Original Ghidra label was
+                                         *         "damage_lockout"; semantic role is the OLD
+                                         *         snapshot used by the velocity-snap gate at
+                                         *         0x004060CE/D4 and tumble-recovery checks. */
     uint8_t  ghost_flag;                /* +0x37E: time trial ghost [CONFIRMED]
                                          *         nonzero = force zero throttle + max brake.
                                          *         NOTE: overloaded as checkpoint_count in
@@ -603,7 +611,8 @@ _Static_assert(offsetof(TD5_Actor, current_gear) == 0x36B, "TD5_Actor.current_ge
 _Static_assert(offsetof(TD5_Actor, slot_index) == 0x375, "TD5_Actor.slot_index offset drifted");
 _Static_assert(offsetof(TD5_Actor, vehicle_mode) == 0x379, "TD5_Actor.vehicle_mode offset drifted");
 _Static_assert(offsetof(TD5_Actor, track_contact_flag) == 0x37B, "TD5_Actor.track_contact_flag offset drifted");
-_Static_assert(offsetof(TD5_Actor, wheel_contact_bitmask) == 0x37D, "TD5_Actor.wheel_contact_bitmask offset drifted");
+_Static_assert(offsetof(TD5_Actor, wheel_contact_bitmask) == 0x37C, "TD5_Actor.wheel_contact_bitmask offset drifted");
+_Static_assert(offsetof(TD5_Actor, damage_lockout) == 0x37D, "TD5_Actor.damage_lockout offset drifted");
 _Static_assert(offsetof(TD5_Actor, race_position) == 0x383, "TD5_Actor.race_position offset drifted");
 
 /* ======================================================================

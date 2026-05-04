@@ -638,7 +638,7 @@ void td5_physics_update_vehicle_actor(TD5_Actor *actor)
         if (actor->race_position < eff_grip)
             eff_grip = actor->race_position;
 
-        if (actor->damage_lockout == 0x0F && actor->airborne_frame_counter >= 3) {
+        if (actor->wheel_contact_bitmask == 0x0F && actor->airborne_frame_counter >= 3) {
             /* Stunned/damping recovery mode */
             TD5_LOG_I(LOG_TAG, "state0f_enter: slot=%d afc=%d av_roll=%d av_pitch=%d",
                       actor->slot_index, actor->airborne_frame_counter,
@@ -700,7 +700,27 @@ void td5_physics_update_vehicle_actor(TD5_Actor *actor)
          * dropped here — gate only on the slot being a non-player racer,
          * which matches the observed trace. [RE basis: 0x004068B3-0x004068CB] */
         update_engine_speed_smoothed(actor);
-        if (actor->slot_index < 6 && g_race_slot_state[actor->slot_index] != 1) {
+        /* The original gates the (redline*2)/3 AI pin on
+         *   (g_selectedGameType != 0 && slot[+0x375].state != 1)
+         * [CONFIRMED @ 0x004068B3-0x004068CB via Opus 4.7 audit 2026-05-03].
+         * The prior port comment dropped the game_type gate based on a
+         * misread: the empirical 7400 (= 11100*2/3) trace landed because
+         * the test had game_type != 0, not because the gate is always on.
+         *
+         * For single-race (game_type=0), the original does NOT pin during
+         * pause — update_engine_speed_smoothed revs RPM toward redline via
+         * the throttle-driven target, ending pause near redline (6185 for
+         * Viper). The first active sub-tick slews -200 to ~5985, which
+         * exceeds gear-2 upshift_rpm (5400) → AI shifts up rapidly,
+         * dropping drive_torque. This is the ROOT CAUSE of the Honolulu
+         * 2× force overshoot tracked in todo_state0f_overfire_skips_player.md.
+         *
+         * With this gate restored, port matches original on game_type=0
+         * single-race and continues to pin AI engines on game_type!=0
+         * (championship / cup modes). */
+        if (g_game_type != 0 &&
+            actor->slot_index < 6 &&
+            g_race_slot_state[actor->slot_index] != 1) {
             int32_t redline = (int32_t)PHYS_S(actor, 0x72);
             actor->engine_speed_accum = (redline << 1) / 3;
         }
@@ -759,18 +779,27 @@ void td5_physics_update_vehicle_actor(TD5_Actor *actor)
         td5_track_resolve_wall_contacts(actor);
     }
 
-    /* 9. Update surface_contact_flags for the NEXT tick's dynamics dispatch.
-     * Placed here (not in integrate_pose) so the init path — which calls
-     * integrate_pose once from reset_actor_state for suspension settle —
-     * doesn't seed the flag. The first post-countdown update_player reads
-     * 0 (from the spawn memset) and takes the airborne/coast branch → no
-     * drive torque applied → no tick-1 velocity impulse. From tick 2
-     * onwards the flag reflects wheel_contact_bitmask and drive torque
-     * runs normally. [RE basis: the original's surface_contact_flags is
-     * only written inside UpdatePlayerVehicleDynamics @ 0x00404030, at a
-     * late drivetrain-commit condition; leaving it at 0 at tick 1 matches
-     * the original's observed tick-1 state where vel_x=vel_z=0.] */
-    if (!g_game_paused) {
+    /* 9. Update surface_contact_flags for the NEXT tick's dynamics dispatch
+     * — HUMAN-PLAYER PATH ONLY.
+     *
+     * [RE basis: the original's surface_contact_flags is only written inside
+     * UpdatePlayerVehicleDynamics @ 0x00404030, at a late drivetrain-commit
+     * condition. AI cars in the original never have scf written — it stays
+     * at 0 from the spawn memset for the entire race.]
+     *
+     * Frida rotation_probe.csv 2026-05-03 confirmed: orig slot 0 (AI)
+     * scf=0 at every sim_tick from 1..50. Port had scf=3 from sim_tick=2
+     * onwards because this update fired for AI cars too — a port-specific
+     * deviation that flipped the AI dynamics path from airborne (scf=0)
+     * to grounded (scf=3), changing drive-torque application on tick 2+.
+     *
+     * Gated on slot_state==1 (human player) so AI slots match the
+     * original's scf=0 behavior. The player path still gets the eager
+     * update because the original's late conditional inside
+     * UpdatePlayerVehicleDynamics isn't fully ported. */
+    if (!g_game_paused &&
+        actor->slot_index < 6 &&
+        g_race_slot_state[actor->slot_index] == 1) {
         uint8_t bm = actor->wheel_contact_bitmask;
         uint8_t flags = 0;
         if (!(bm & 0x04) || !(bm & 0x08))  /* RL or RR grounded */
@@ -2067,9 +2096,20 @@ void td5_physics_update_ai(TD5_Actor *actor)
         actor->angular_velocity_yaw += yaw_torque;
     }
 
-    /* --- 10. World-frame force application [CONFIRMED @ 0x4056C4-0x405762]
-     * Front forces use steered heading (cos_s, sin_s).
-     * Rear forces use body heading (cos_h, sin_h). */
+    /* --- 10. World-frame force application [CONFIRMED @ 0x4056FA-0x405762]
+     * Per Ghidra raw decomp + raw asm 2026-05-03 (Opus 4.7 audit round 5):
+     *   iVar18 = rear_drive  (post-LAB doubled, paired with sin_h/cos_h)
+     *   local_3c = front_drive (post-LAB doubled, paired with sin_s/cos_s)
+     *   local_44 = FRONT_LAT (post-overwrite, paired with cos_s/sin_s — steered)
+     *   local_40 = REAR_LAT  (post-overwrite, paired with cos_h/sin_h — heading)
+     * (An earlier audit round inverted iVar18 and local_3c — disproven by
+     * raw asm at LAB_00405285 + IMUL ordering at 0x4056F1/0x405712.)
+     *
+     *   ai_fx = (rear_drive*sin_h + rear_lat*cos_h + front_drive*sin_s + front_lat*cos_s) >> 12
+     *   ai_fz = (rear_drive*cos_h - rear_lat*sin_h + front_drive*cos_s - front_lat*sin_s) >> 12
+     *
+     * Front forces in steered frame (cos_s/sin_s).
+     * Rear forces in body frame (cos_h/sin_h). */
     int32_t ai_fx = ((int64_t)rear_drive * sin_h + (int64_t)rear_lat * cos_h
                    + (int64_t)front_drive * sin_s + (int64_t)front_lat * cos_s) >> 12;
     int32_t ai_fz = ((int64_t)rear_drive * cos_h - (int64_t)rear_lat * sin_h
@@ -3139,9 +3179,9 @@ void td5_physics_resolve_vehicle_contacts(void)
                  * original — `UpdateTrafficActorMotion`'s cVar3==0 branch
                  * leaves field_0x379 at 0. Gating on slot_index was wrong. */
                 int a_scripted = (a->vehicle_mode != 0) ||
-                                 (a->damage_lockout >= 0x0F);
+                                 (a->wheel_contact_bitmask >= 0x0F);
                 int b_scripted = (b->vehicle_mode != 0) ||
-                                 (b->damage_lockout >= 0x0F);
+                                 (b->wheel_contact_bitmask >= 0x0F);
 
                 if (i == 0 || j == 0) {
                     s_v2v_slot0_pair_count++;
@@ -3195,9 +3235,9 @@ static void resolve_collision_pair(TD5_Actor *a, TD5_Actor *b, int idx_a, int id
     if (!a->car_definition_ptr || !b->car_definition_ptr) return;
 
     int a_scripted = (a->vehicle_mode != 0) ||
-                     (a->damage_lockout >= 0x0F);
+                     (a->wheel_contact_bitmask >= 0x0F);
     int b_scripted = (b->vehicle_mode != 0) ||
-                     (b->damage_lockout >= 0x0F);
+                     (b->wheel_contact_bitmask >= 0x0F);
 
     if (a_scripted || b_scripted) {
         collision_detect_simple(a, b);
@@ -3409,12 +3449,21 @@ static int16_t rotate_body_to_world_y(const TD5_Actor *actor, const int16_t v[3]
     float result = (float)v[0] * m3 + (float)v[1] * m4 + (float)v[2] * m5;
     if (result >  32767.0f) return  32767;
     if (result < -32768.0f) return -32768;
-    /* Original (ConvertFloatVec3ToShortAngles @ 0x0042E2E0) uses x87 FISTP
-     * which rounds-to-nearest-even by default. C cast `(int32_t)float` is
-     * trunc-toward-zero — produces ±1 LSB drift on negative non-integer
-     * intermediates that propagated into chassis-snap's averaged world_y.
-     * lrintf honors FE_TONEAREST. */
-    return (int16_t)lrintf(result);
+    /* Original ConvertFloatVec3ToShortAngles @ 0x0042E2E0 calls __ftol @
+     * 0x0044817C which EXPLICITLY sets the FPU rounding mode to TRUNCATE
+     * (`OR AH, 0xC` = RC=11 = chop) before FISTP. So the orig truncates
+     * toward zero, not round-to-nearest-even. Earlier port comment claimed
+     * "FISTP rounds-to-nearest-even by default" — that's only true when
+     * RC=00 in the control word, but __ftol forces RC=11. C cast
+     * `(int32_t)float` already truncates toward zero, matching orig.
+     *
+     * Sum/4 of per-wheel rotated body-Y, scaled by -0x100, accumulates
+     * the ~±1 LSB rounding drift into the chassis world_y. The previous
+     * lrintf path produced a +128 FP world_y offset at spawn (port=58112
+     * vs orig=57984), which propagated to wheel_y at sim_tick=2 refresh
+     * → rear wheel airborne detection → chassis launch upward → Honolulu
+     * rollover root cause. [round 28: 2026-05-03] */
+    return (int16_t)(int32_t)result;
 }
 
 /* Y-component projection of a world-space vector into body space.
@@ -3607,12 +3656,30 @@ void td5_physics_update_suspension_response(TD5_Actor *actor)
     /* PlayVehicleSoundAtPosition(0x17, bounce*50, ...) call from the
      * original is omitted — sound side is stubbed elsewhere. */
 
-    const int32_t roll_term  = (cnt_active > 0)
-        ? (roll_spr  + roll_grav  / cnt_active) / 0x4B0    /* /1200 */
-        : roll_spr  / 0x4B0;
-    const int32_t pitch_term = (cnt_active > 0)
-        ? (pitch_spr + pitch_grav / cnt_active) / 0x226    /* /550 */
-        : pitch_spr / 0x226;
+    /* Gate the entire roll/pitch contribution on having at least one
+     * wheel that JUST LANDED this tick (cnt_grounded counts landings,
+     * not steady-state grounded wheels — see line 3619 increment).
+     *
+     * Frida susp_response_probe.csv 2026-05-03 confirmed orig's slot 0
+     * AI has identical inputs (arms, wcv, rotation matrix, y_view) but
+     * ang_vel_pitch stays at 0 throughout. With cnt_active=4 and the
+     * ungated pitch_term, port adds -70/tick from pitch_grav alone.
+     * Original must be gating the rotation update on landings, since
+     * without landings the pitch_grav coupling makes no physical sense
+     * (grounded car at rest shouldn't spin from gravity-arm asymmetry).
+     *
+     * NOTE: this is INFERRED from the Frida diff; not yet confirmed
+     * against the original 0x4057F0 decomp. If a fresh Ghidra audit
+     * shows the original gates differently (e.g. averages by
+     * cnt_grounded only when > 0, but still adds pitch_grav term), the
+     * gate here will need refinement. For now this matches observed
+     * orig behaviour at sim_tick=1..50 on Honolulu AI Viper. */
+    int32_t roll_term  = 0;
+    int32_t pitch_term = 0;
+    if (cnt_grounded > 0 && cnt_active > 0) {
+        roll_term  = (roll_spr  + roll_grav  / cnt_active) / 0x4B0;
+        pitch_term = (pitch_spr + pitch_grav / cnt_active) / 0x226;
+    }
 
     actor->angular_velocity_roll  += roll_term;
     actor->angular_velocity_pitch += pitch_term;
@@ -4434,24 +4501,17 @@ void td5_physics_integrate_pose(TD5_Actor *actor)
 
     /* 7. Save previous-frame grounded mask, then refresh wheel contacts.
      * suspension_response needs "was grounded last frame" for the spring
-     * damping path. refresh overwrites wheel_contact_bitmask (airborne polarity:
-     * 1=airborne), so save the inverted version (1=grounded) before the call. */
+     * damping path. Refresh writes the live airborne mask into +0x37C
+     * (wheel_contact_bitmask, 1=airborne) and snapshots the prior tick's
+     * value into +0x37D (damage_lockout) at entry. This side-channel
+     * remains for compatibility with consumers that already use it; +0x37D
+     * also now carries the OLD mask in airborne polarity. */
     s_prev_grounded_mask[actor->slot_index & 0x0F] = (~actor->wheel_contact_bitmask) & 0x0F;
     td5_physics_refresh_wheel_contacts(actor);
 
     /* Inner-tick trace post_refresh: deprecated — td5_trace_write_physics
      * was dropped by merge 1acd3fb in favor of the modular MOD_PHYSICS API.
      * Stubbed out until rewritten against the new emission path. */
-
-    /* Mirror current airborne mask into damage_lockout (+0x37C).
-     * Original writes the freshly-computed contact mask into +0x37C at
-     * 0x004039B9 inside RefreshVehicleWheelContactFrames. Port writes the
-     * equivalent live mask to +0x37D (wheel_contact_bitmask) instead,
-     * leaving +0x37C dead. Without this, the gate at td5_physics_update_
-     * vehicle_actor (state0f_damping trigger) and several other reads of
-     * damage_lockout never fire, killing the tumble-recovery angular
-     * damping (state0f_damping decays ω_roll/pitch by 1/16 per frame). */
-    actor->damage_lockout = actor->wheel_contact_bitmask;
 
     /* Increment airborne_frame_counter (+0x360) when all 4 wheels airborne.
      * [CONFIRMED @ 0x0040634B]: original does INC word ptr [ESI+0x360]
@@ -4462,7 +4522,19 @@ void td5_physics_integrate_pose(TD5_Actor *actor)
      * airborne, and simply stops growing when any wheel grounds (the INC
      * isn't reached). State0f_damping at td5_physics.c:547 fires when
      * afc >= 3 AND dlk == 0x0F (CMP at 0x00406835 + JL/JNZ at 0x0040683D). */
-    if (actor->wheel_contact_bitmask == 0x0F) {
+    if (actor->wheel_contact_bitmask == 0x0F && !g_game_paused) {
+        /* afc++ gated behind !g_game_paused so countdown ticks don't
+         * accumulate the all-airborne counter. Refresh runs every render
+         * frame including the ~190-frame pause countdown; without this
+         * gate, airborne_frame_counter would already be ≥5 by the first
+         * un-paused dispatch on Honolulu, instantly triggering the
+         * state0f damping gate at line 641 (wcb==0x0F && afc>=3) — that
+         * gate replaces update_player, so longitudinal_speed (+0x314)
+         * stays at zero through countdown into the active race. The
+         * original almost certainly does NOT increment afc during the
+         * countdown (race not active → tick loop suppressed). Verifying
+         * exact gate location in original is a follow-up; this guard
+         * preserves the desired post-countdown behavior either way. */
         actor->airborne_frame_counter++;
         TD5_LOG_I(LOG_TAG, "tumble_gate: slot=%d wcb=0x0F dlk=0x0F afc=%d",
                   actor->slot_index, actor->airborne_frame_counter);
@@ -4711,20 +4783,12 @@ void td5_physics_integrate_pose(TD5_Actor *actor)
              * signed-IDIV result (MOV [ESI+0x200], EAX at 0x00406307). */
             int32_t new_y = (int32_t)(contact_y_sum / contact_count);
 
-            /* Reject ground snap if new_y is wildly different from prev_y.
-             * The span walker can overflow to out-of-bounds spans, producing
-             * garbage terrain heights (47M vs -800K). The per-wheel span
-             * clamp catches most cases, but some height functions return
-             * stale/wrong values even for in-bounds spans at track edges.
-             * 2M ≈ 7800 world units — well beyond any real terrain step.
-             * Skip the check when prev_y is the spawn sentinel (0xC0000000)
-             * since the first ground snap is always a huge legitimate delta. */
-            if (actor->prev_frame_y_position != (int32_t)0xC0000000) {
-                int32_t snap_delta = new_y - actor->prev_frame_y_position;
-                if (snap_delta > 2000000 || snap_delta < -2000000) {
-                    new_y = actor->prev_frame_y_position;
-                }
-            }
+            /* No snap-delta clamp. Original at 0x00406300 directly writes
+             * world_pos.y from the contact-Y average without bounding the
+             * delta vs prev_frame_y_position; the +0x37D OLD-mask gate
+             * below is the original's only filter on this write. The prior
+             * port's ±2M clamp was a workaround for the +0x37C/+0x37D
+             * semantic reversal that has since been corrected. */
 
             /* Chassis Y-snap. No chassis-level airborne override here —
              * the per-wheel airborne bits written by refresh_wheel_contacts
@@ -4785,26 +4849,20 @@ void td5_physics_integrate_pose(TD5_Actor *actor)
                 static const uint8_t k_mode_gate[16] = {
                     1,1,1,0, 1,0,0,0, 1,0,0,0, 0,0,0,0
                 };
-                uint8_t new_mask  = *(const uint8_t *)((const uint8_t *)actor + 0x37C);
+                uint8_t new_mask  = actor->wheel_contact_bitmask;
                 uint8_t prev_mask = (~s_prev_grounded_mask[actor->slot_index & 0x0F]) & 0x0F;
                 if (k_mode_gate[new_mask & 0xF] &&
                     (prev_mask & (new_mask ^ 0x0F)) == 0 &&
                     actor->prev_frame_y_position != (int32_t)0xC0000000) {
                     int32_t snap_vy = new_y - actor->prev_frame_y_position
                                      - g_gravity_constant;
-                    /* Clamp snap-derived velocity to realistic per-tick motion.
-                     * Legitimate max: 100mph (160 units/tick horizontal) on a
-                     * 30° grade → ~80 units/tick vertical → ~20480 FP. A 40°
-                     * slope at 150mph → ~38000 FP. The live-run log observed
-                     * ±52992 on Newcastle slopes, producing a visible "bounce"
-                     * on uphill entry and "sloppy settle" on downhill→flat.
-                     * ±30000 FP ≈ 117 units/tick = 7000 units/sec vertical —
-                     * tight enough to suppress glitch-level spikes, loose
-                     * enough for any real race-track grade. Previous 200000
-                     * was a leftover spawn-sentinel safeguard, way too loose
-                     * for runtime clamping. */
-                    if (snap_vy > 30000)  snap_vy =  30000;
-                    if (snap_vy < -30000) snap_vy = -30000;
+                    /* No clamp. Original at 0x0040630D-0x00406335 writes the
+                     * raw delta-minus-gravity unconditionally once the gate
+                     * passes; ±30000 was a port-only workaround for the
+                     * +0x37C/+0x37D semantic reversal that gated the snap
+                     * every tick. With the OLD-mask now correctly held in
+                     * +0x37D, the gate fires only on stable wheel sets and
+                     * the unclamped delta is faithful. */
                     if (actor->slot_index == 0 &&
                         (snap_vy > 100000 || snap_vy < -100000 ||
                          (actor->frame_counter % 60u) == 0u)) {
@@ -5027,6 +5085,15 @@ void td5_physics_refresh_wheel_contacts(TD5_Actor *actor)
     float *rot = actor->rotation_matrix.m;
     int resolved_surface = actor->surface_type_chassis;
     int resolved_surface_valid = 0;
+
+    /* Entry snapshot: copy prior-tick airborne mask (+0x37C) into the OLD
+     * slot (+0x37D). Matches original 0x00403793/0x004037D5:
+     *   MOV CL, byte ptr [ESI+0x37C]
+     *   MOV byte ptr [ESI+0x37D], CL
+     * The per-wheel loop below will overwrite +0x37C with the freshly-
+     * computed mask; +0x37D retains the OLD value for downstream gates
+     * (velocity-snap @ 0x004060CE/D4, tumble-recovery transition logic). */
+    actor->damage_lockout = actor->wheel_contact_bitmask;
 
     /* Step 1 (original 0x403720): copy chassis track position to each wheel probe.
      * Without this, wheel_probes[i].span_index stays at 0 (memset init) and

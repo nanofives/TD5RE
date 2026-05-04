@@ -1818,7 +1818,8 @@ static void td5_game_trace_stage_impl(const char *stage, unsigned int stage_bit,
         td5_trace_active(TD5_TRACE_MOD_MOTION,   stage_bit) ||
         td5_trace_active(TD5_TRACE_MOD_TRACK,    stage_bit) ||
         td5_trace_active(TD5_TRACE_MOD_CONTROLS, stage_bit) ||
-        td5_trace_active(TD5_TRACE_MOD_PROGRESS, stage_bit);
+        td5_trace_active(TD5_TRACE_MOD_PROGRESS, stage_bit) ||
+        td5_trace_active(TD5_TRACE_MOD_ROTATION, stage_bit);
 
     if (any_slot_module) {
         for (int i = 0; i < TD5_MAX_RACER_SLOTS; i++) {
@@ -1880,6 +1881,28 @@ static void td5_game_trace_stage_impl(const char *stage, unsigned int stage_bit,
                 r.current_gear = *(uint8_t *)(a + 0x36B);
                 r.vehicle_mode = *(uint8_t *)(a + 0x379);
                 td5_trace_emit_controls(frame, sim_tick, stage, &r);
+            }
+
+            if (td5_trace_active(TD5_TRACE_MOD_ROTATION, stage_bit)) {
+                TD5_TraceRotationRow r;
+                r.slot          = i;
+                r.ang_vel_roll  = *(int32_t *)(a + 0x1C0);
+                r.ang_vel_yaw   = *(int32_t *)(a + 0x1C4);
+                r.ang_vel_pitch = *(int32_t *)(a + 0x1C8);
+                r.euler_roll    = *(int32_t *)(a + 0x1F0);
+                r.euler_yaw     = *(int32_t *)(a + 0x1F4);
+                r.euler_pitch   = *(int32_t *)(a + 0x1F8);
+                r.disp_roll     = *(int16_t *)(a + 0x208);
+                r.disp_yaw      = *(int16_t *)(a + 0x20A);
+                r.disp_pitch    = *(int16_t *)(a + 0x20C);
+                /* +0x37C is NEW airborne mask post-D2 fix; +0x37D is OLD/prev. */
+                r.wcb           = *(uint8_t *)(a + 0x37C);
+                r.scf           = *(uint8_t *)(a + 0x376);
+                r.vmode         = *(uint8_t *)(a + 0x379);
+                r.afc           = *(uint16_t *)(a + 0x360);
+                r.world_y       = *(int32_t *)(a + 0x200);
+                r.vel_y         = *(int32_t *)(a + 0x1D0);
+                td5_trace_emit_rotation(frame, sim_tick, stage, &r);
             }
 
             if (td5_trace_active(TD5_TRACE_MOD_PROGRESS, stage_bit)) {
