@@ -745,12 +745,29 @@ void td5_track_resolve_wall_contacts(TD5_Actor *actor)
         int32_t px = probe_block[pi].x >> 8;
         int32_t pz = probe_block[pi].z >> 8;
 
-        /* Geometric-only gate (2026-04-28 fix-1777408127-59867):
-         * Wall fires on d < 0 regardless of sub_lane. The prior sub_lane
-         * extremity gate was a misapplied attempt to mirror 0x00406CC0
-         * (which has different geometry) and trapped the rightmost-lane
-         * probes against the right rail. */
-        (void)lane_count;
+        /* Per-probe sub_lane extremity gate — restored 2026-05-04 to mirror
+         * original 0x00406CC0 dispatch [CONFIRMED @ 0x00406CC0].
+         *
+         * Despite the misleading l_wall/r_wall names, the geometry above is
+         * actually NEAR/FAR TRANSVERSE-edge construction under the rails
+         * vertex layout (li_base..li_base+lane_count walks LEFT rail
+         * NEAR->FAR; same for right):
+         *   l_wall edge = li[0]          -> ri[0]          = NEAR transverse
+         *   r_wall edge = li[lane_count] -> ri[lane_count] = FAR  transverse
+         *
+         * 0x00406CC0 dispatches exactly this gate per probe:
+         *   sub_lane <  1            -> test NEAR edge (writes l_wall)
+         *   sub_lane >= lane_count-1 -> test FAR  edge (writes r_wall)
+         *   else                     -> no edge check  (interior segments)
+         *
+         * sub_lane here is a LONGITUDINAL sub-position WITHIN the span (not
+         * a lateral lane). Without the gate every actor crossing the FAR
+         * transverse edge of any multi-segment span fires the "right wall"
+         * spuriously — the regression that broke Newcastle span 122
+         * (commit b4352e3, 2026-04-28). */
+        int probe_sub_lane = (int)actor->wheel_probes[pi].sub_lane_index;
+        int l_extremity = (probe_sub_lane < 1);
+        int r_extremity = (probe_sub_lane >= lane_count - 1);
 
         if (l_par.ok) {
             int32_t rel_x = px - l_par.base_x - sp->origin_x;
@@ -758,7 +775,7 @@ void td5_track_resolve_wall_contacts(TD5_Actor *actor)
             int64_t dot = (int64_t)rel_x * l_par.nnx + (int64_t)rel_z * l_par.nnz;
             int32_t d = (int32_t)((dot + ((dot >> 63) & 0xFFF)) >> 12);
             probe_l_d[pi] = d;
-            probe_l_ok[pi] = 1;
+            probe_l_ok[pi] = l_extremity;
         }
         if (r_par.ok) {
             int32_t rel_x = px - r_par.base_x - sp->origin_x;
@@ -766,12 +783,12 @@ void td5_track_resolve_wall_contacts(TD5_Actor *actor)
             int64_t dot = (int64_t)rel_x * r_par.nnx + (int64_t)rel_z * r_par.nnz;
             int32_t d = (int32_t)((dot + ((dot >> 63) & 0xFFF)) >> 12);
             probe_r_d[pi] = d;
-            probe_r_ok[pi] = 1;
+            probe_r_ok[pi] = r_extremity;
         }
 
         if (diag_slot0) {
-            TD5_LOG_I(LOG_TAG, "wall_diag slot0 p%d span=%d L:d=%d R:d=%d probe=(%d,%d)",
-                      pi, span_idx,
+            TD5_LOG_I(LOG_TAG, "wall_diag slot0 p%d span=%d sub=%d L:d=%d R:d=%d probe=(%d,%d)",
+                      pi, span_idx, probe_sub_lane,
                       probe_l_d[pi], probe_r_d[pi], px, pz);
         }
     }
