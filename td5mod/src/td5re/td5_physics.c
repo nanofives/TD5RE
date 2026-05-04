@@ -3579,10 +3579,22 @@ void td5_physics_update_suspension_response(TD5_Actor *actor)
                   (int)lock, (int)prev_air);
     }
 
-    int32_t pitch_grav = 0;     /* local_50 */
-    int32_t roll_grav  = 0;     /* local_5c */
-    int32_t pitch_spr  = 0;     /* local_64 */
-    int32_t roll_spr   = 0;     /* local_60 */
+    /* Naming reflects WHAT the accumulator holds, NOT which actor field it
+     * eventually feeds — orig and port disagree on that mapping (see write-
+     * back block below).
+     *
+     * loni_grav / loni_spr accumulate (g_scaled * arm2)-derived terms, where
+     * arm2 = wheel_display_angles[i][2] = body-Z (longitudinal) arm.
+     * lat_grav  / lat_spr  accumulate (g_scaled * arm0)-derived terms, where
+     * arm0 = wheel_display_angles[i][0] = body-X (lateral) arm.
+     *
+     * Original Ghidra locals: local_50=loni_grav, local_5c=lat_grav,
+     * local_64=loni_spr, local_60=lat_spr, local_78=bounce, local_4c=cnt_active,
+     * local_58=cnt_grounded. */
+    int32_t loni_grav = 0;      /* local_50 — Σ g_scaled * arm2 */
+    int32_t lat_grav  = 0;      /* local_5c — Σ -(g_scaled * arm0) */
+    int32_t loni_spr  = 0;      /* local_64 — Σ (dot * arm2) * -0x100 */
+    int32_t lat_spr   = 0;      /* local_60 — Σ (dot * arm0) * +0x100 */
     int32_t bounce     = 0;     /* local_78 */
     int32_t cnt_active   = 0;   /* local_4c — non-locked wheels */
     int32_t cnt_grounded = 0;   /* local_58 — wheels also grounded prev tick */
@@ -3611,8 +3623,14 @@ void td5_physics_update_suspension_response(TD5_Actor *actor)
          * arith_round_shift matches original's SAR-with-bias idiom. */
         const int32_t g_scaled = arith_round_shift(y_view * g_gravity_constant, 0xFFF, 12);
 
-        pitch_grav += g_scaled * (int32_t)loni;   /* +=, longitudinal arm */
-        roll_grav  -= g_scaled * (int32_t)lat;    /* -=, lateral arm (NOTE sign) */
+        /* [CONFIRMED @ 0x004058B6-0x004058D5 disasm]:
+         *   IMUL EDX, EBP   ; EDX = g_scaled * arm2 (loni)
+         *   ADD  ECX, EDX   ; local_50 (loni_grav) += g_scaled * arm2
+         *   IMUL EAX, EBX   ; EAX = g_scaled * arm0 (lat)
+         *   SUB  ECX, EAX   ; local_5c (lat_grav)  -= g_scaled * arm0
+         */
+        loni_grav += g_scaled * (int32_t)loni;    /* += longitudinal arm */
+        lat_grav  -= g_scaled * (int32_t)lat;     /* -= lateral arm (NOTE sign) */
         ++cnt_active;
 
         if (prev_air & bit) {
@@ -3631,15 +3649,18 @@ void td5_physics_update_suspension_response(TD5_Actor *actor)
                           + (int32_t)wfdh[i * 4 + 2] * (int32_t)wcv[i * 4 + 2];
             dot = arith_round_shift(dot, 0xFFF, 12);   /* signed >>12 */
 
-            pitch_spr += (dot * (int32_t)loni) * -0x100;   /* note minus */
-            roll_spr  += (dot * (int32_t)lat ) *  0x100;
+            /* Per orig 0x004058E4+ disasm (and decompile):
+             *   local_64 (loni_spr) += (dot * arm2) * -0x100
+             *   local_60 (lat_spr)  += (dot * arm0) * +0x100 */
+            loni_spr += (dot * (int32_t)loni) * -0x100;    /* arm2 with -0x100 */
+            lat_spr  += (dot * (int32_t)lat ) *  0x100;    /* arm0 with +0x100 */
             bounce    += dot >> 1;                         /* signed SAR 1 */
             ++cnt_grounded;
 
             if (actor->slot_index == 0) {
                 TD5_LOG_I(LOG_TAG,
                     "susp_resp landing_impulse slot0: wheel=%d dot=%d "
-                    "lat=%d loni=%d pitch_spr+=%d roll_spr+=%d",
+                    "lat=%d loni=%d loni_spr+=%d lat_spr+=%d",
                     i, dot, (int)lat, (int)loni,
                     (dot * (int32_t)loni) * -0x100,
                     (dot * (int32_t)lat)  *  0x100);
@@ -3648,9 +3669,9 @@ void td5_physics_update_suspension_response(TD5_Actor *actor)
     }
 
     if (cnt_grounded > 0) {
-        pitch_spr /= cnt_grounded;
-        roll_spr  /= cnt_grounded;
-        bounce    /= cnt_grounded;
+        loni_spr /= cnt_grounded;
+        lat_spr  /= cnt_grounded;
+        bounce   /= cnt_grounded;
     }
 
     /* PlayVehicleSoundAtPosition(0x17, bounce*50, ...) call from the
@@ -3664,30 +3685,44 @@ void td5_physics_update_suspension_response(TD5_Actor *actor)
      * only gates the pattern-clamp switch that follows — the WRITES
      * have already happened.
      *
-     * HISTORY: round 9 commit a4b91ac added `cnt_grounded > 0` as an
-     * extra gate on the writes themselves, INFERRED from a Frida AI-idle
-     * probe that captured ang_vel_pitch=0 on orig vs -70/tick in port.
-     * That inference was wrong: port's loni values (front=+435, rear=-394)
-     * produce non-zero pitch_grav under any valid loni asymmetry, and
-     * the original applies the resulting torque on every grounded tick.
+     * AXIS-ASSIGNMENT FIX [CONFIRMED via byte-level disasm 2026-05-04
+     * round 23, addresses 0x00405A3D + 0x00405A43]:
      *
-     * The mis-gate suppressed the gravity-arm couple under load — fine
-     * on flat ground (loni cancels left-right), but on slopes the
-     * gravity body-component projects onto the asymmetric loni arms
-     * and gives a real per-tick pitch torque the port was discarding
-     * unless a wheel happened to JUST land that tick. Result: under
-     * PlayerIsAI=0 manual drive uphill, the chassis's corrective
-     * gravity-arm couple was missing on the majority of ticks → roll
-     * accumulates without counter-torque → spiral rollover.
+     *   ORIG:  av_roll(+0x1C0)  += (loni_spr + loni_grav/cnt) / 0x4B0
+     *          av_pitch(+0x1C8) += (lat_spr  + lat_grav /cnt) / 0x226
      *
-     * Removing the gate restores byte-faithful behaviour with the
-     * pattern clamp at line 3692+ correctly continuing to gate on
-     * cnt_grounded > 0 (only the CLAMP requires landings, not the
-     * write itself). [Ghidra round 21 audit 2026-05-04, fresh
-     * disassembly of 0x004059B5-0x00405A49.] */
+     * The longitudinal-arm (loni / arm2 / wheel_display_angles[i][2])
+     * derived torque feeds AV_ROLL, and the lateral-arm (lat / arm0)
+     * derived torque feeds AV_PITCH — opposite of the standard physics
+     * convention. Ghidra disasm shows:
+     *
+     *   0x004058BB  IMUL EDX, EBP   ; EDX = g_scaled * arm2 (loni)
+     *   0x004058BE  ADD  ECX, EDX   ; local_50 += loni-derived
+     *   0x004058B8  IMUL EAX, EBX   ; EAX = g_scaled * arm0 (lat)
+     *   0x004058CC  SUB  ECX, EAX   ; local_5c -= lat-derived
+     *   0x00405A3D  MOV [EDI+0x1c0], ESI   ; av_roll  = ... + local_50/0x4B0
+     *   0x00405A43  MOV [EDI+0x1c8], EAX   ; av_pitch = ... + local_5c/0x226
+     *
+     * HISTORY: prior port (since restoration commit eb36524 2026-04-21)
+     * routed loni-derived torque into av_pitch and lat-derived torque
+     * into av_roll, mirroring standard physics — but contradicting orig.
+     * For Viper (lat values ±255 symmetric, sum=0; loni 435/-394, sum=82)
+     * the consequence under PlayerIsAI=0 manual drive on a slope was:
+     *   port:  av_pitch = -1900*82/4/0x226 ≈ -71/tick    (loni-derived)
+     *          av_roll  = 0                              (lat sum = 0)
+     *   orig:  av_pitch = 0                              (lat sum = 0)
+     *          av_roll  = -1900*82/4/0x4B0 ≈ -32/tick    (loni-derived)
+     * Frida probe confirmed orig av_pitch=0 throughout sim_tick=1..50,
+     * av_roll oscillating around -288. Math + disasm both agree.
+     *
+     * Round 22 noted the writes are unconditional once cnt_active > 0,
+     * which round 9 commit a4b91ac had over-gated on cnt_grounded > 0.
+     * That gate is now removed (correct). The axis-swap fix below sits
+     * on top: same divisors per orig, just the right inputs feeding the
+     * right outputs. */
     if (cnt_active > 0) {
-        int32_t roll_term  = (roll_spr  + roll_grav  / cnt_active) / 0x4B0;
-        int32_t pitch_term = (pitch_spr + pitch_grav / cnt_active) / 0x226;
+        int32_t roll_term  = (loni_spr + loni_grav / cnt_active) / 0x4B0;
+        int32_t pitch_term = (lat_spr  + lat_grav  / cnt_active) / 0x226;
         actor->angular_velocity_roll  += roll_term;
         actor->angular_velocity_pitch += pitch_term;
     }
@@ -3731,10 +3766,10 @@ void td5_physics_update_suspension_response(TD5_Actor *actor)
     if (actor->slot_index == 0 && (actor->frame_counter % 60u) == 0u) {
         TD5_LOG_I(LOG_TAG,
                   "susp_resp slot0: lock=0x%02x prev_air=0x%02x cnt=%d/%d "
-                  "p_grav=%d r_grav=%d p_spr=%d r_spr=%d bounce=%d "
+                  "loni_grav=%d lat_grav=%d loni_spr=%d lat_spr=%d bounce=%d "
                   "av_r=%d av_p=%d vy=%d",
                   (int)lock, (int)prev_air, cnt_active, cnt_grounded,
-                  pitch_grav, roll_grav, pitch_spr, roll_spr, bounce,
+                  loni_grav, lat_grav, loni_spr, lat_spr, bounce,
                   actor->angular_velocity_roll, actor->angular_velocity_pitch,
                   actor->linear_velocity_y);
     }
