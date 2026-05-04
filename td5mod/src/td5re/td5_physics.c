@@ -3656,33 +3656,41 @@ void td5_physics_update_suspension_response(TD5_Actor *actor)
     /* PlayVehicleSoundAtPosition(0x17, bounce*50, ...) call from the
      * original is omitted — sound side is stubbed elsewhere. */
 
-    /* Gate the entire roll/pitch contribution on having at least one
-     * wheel that JUST LANDED this tick (cnt_grounded counts landings,
-     * not steady-state grounded wheels — see line 3619 increment).
+    /* Apply roll/pitch corrective torque + Y velocity restore.
      *
-     * Frida susp_response_probe.csv 2026-05-03 confirmed orig's slot 0
-     * AI has identical inputs (arms, wcv, rotation matrix, y_view) but
-     * ang_vel_pitch stays at 0 throughout. With cnt_active=4 and the
-     * ungated pitch_term, port adds -70/tick from pitch_grav alone.
-     * Original must be gating the rotation update on landings, since
-     * without landings the pitch_grav coupling makes no physical sense
-     * (grounded car at rest shouldn't spin from gravity-arm asymmetry).
+     * [CONFIRMED @ 0x004059B5-0x00405A49] Original writes ang_vel_roll,
+     * ang_vel_pitch and lin_vel_y UNCONDITIONALLY once cnt_active > 0.
+     * The cnt_grounded > 0 condition (`JLE 0x00405AFA` at 0x00405A50)
+     * only gates the pattern-clamp switch that follows — the WRITES
+     * have already happened.
      *
-     * NOTE: this is INFERRED from the Frida diff; not yet confirmed
-     * against the original 0x4057F0 decomp. If a fresh Ghidra audit
-     * shows the original gates differently (e.g. averages by
-     * cnt_grounded only when > 0, but still adds pitch_grav term), the
-     * gate here will need refinement. For now this matches observed
-     * orig behaviour at sim_tick=1..50 on Honolulu AI Viper. */
-    int32_t roll_term  = 0;
-    int32_t pitch_term = 0;
-    if (cnt_grounded > 0 && cnt_active > 0) {
-        roll_term  = (roll_spr  + roll_grav  / cnt_active) / 0x4B0;
-        pitch_term = (pitch_spr + pitch_grav / cnt_active) / 0x226;
+     * HISTORY: round 9 commit a4b91ac added `cnt_grounded > 0` as an
+     * extra gate on the writes themselves, INFERRED from a Frida AI-idle
+     * probe that captured ang_vel_pitch=0 on orig vs -70/tick in port.
+     * That inference was wrong: port's loni values (front=+435, rear=-394)
+     * produce non-zero pitch_grav under any valid loni asymmetry, and
+     * the original applies the resulting torque on every grounded tick.
+     *
+     * The mis-gate suppressed the gravity-arm couple under load — fine
+     * on flat ground (loni cancels left-right), but on slopes the
+     * gravity body-component projects onto the asymmetric loni arms
+     * and gives a real per-tick pitch torque the port was discarding
+     * unless a wheel happened to JUST land that tick. Result: under
+     * PlayerIsAI=0 manual drive uphill, the chassis's corrective
+     * gravity-arm couple was missing on the majority of ticks → roll
+     * accumulates without counter-torque → spiral rollover.
+     *
+     * Removing the gate restores byte-faithful behaviour with the
+     * pattern clamp at line 3692+ correctly continuing to gate on
+     * cnt_grounded > 0 (only the CLAMP requires landings, not the
+     * write itself). [Ghidra round 21 audit 2026-05-04, fresh
+     * disassembly of 0x004059B5-0x00405A49.] */
+    if (cnt_active > 0) {
+        int32_t roll_term  = (roll_spr  + roll_grav  / cnt_active) / 0x4B0;
+        int32_t pitch_term = (pitch_spr + pitch_grav / cnt_active) / 0x226;
+        actor->angular_velocity_roll  += roll_term;
+        actor->angular_velocity_pitch += pitch_term;
     }
-
-    actor->angular_velocity_roll  += roll_term;
-    actor->angular_velocity_pitch += pitch_term;
 
     /* Y-velocity update: bounce + gravity restored. Original adds
      * gravity back here, cancelling the subtract at top of integrate_pose
