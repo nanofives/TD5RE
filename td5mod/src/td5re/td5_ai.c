@@ -1410,27 +1410,24 @@ void td5_ai_update_track_offset_bias(int slot) {
                       rs[RS_TRACK_OFFSET_BIAS]);
         }
 
-        /* No clamp — the original UpdateActorTrackOffsetBias @ 0x004349A0
-         * has no ±0x600 clamp. The port previously added one as a stabilizer
-         * but Frida (round 23) confirmed orig DAT_004afb84[slot 0] reaches
-         * -3650 to -4010 around the FUN_00434800 call site, well past the
-         * port's old ±0x600 = ±1536 cap. The clamped bias produced ~2.4×
-         * less lateral target offset than the original, biasing target_x
-         * toward lane center rather than the orig's far-left target. */
+        /* Clamp bias to ±0x600 — round-24 testing showed clamp removal
+         * made Honolulu rollover WORSE (port over-corrected in the
+         * OPPOSITE direction at sim_tick=1: port av_yaw=+375 vs orig=-99).
+         * Removing the clamp let the unclamped negative bias amplify a
+         * wrong-direction effect, indicating the sign convention itself
+         * diverges between port and orig. With clamp restored, port's
+         * outcome is closer to orig (different magnitude but same direction).
+         * The sign-convention divergence is the real bug to investigate
+         * next; clamp is left as a stabilizer until that's resolved. */
+        if (rs[RS_TRACK_OFFSET_BIAS] > 0x600)  rs[RS_TRACK_OFFSET_BIAS] = 0x600;
+        if (rs[RS_TRACK_OFFSET_BIAS] < -0x600) rs[RS_TRACK_OFFSET_BIAS] = -0x600;
 
-    } else {
-        /* No peer in range: decay 8/tick toward zero
-         * [CONFIRMED @ 0x004349A0-0x00434947]. */
-        if (rs[RS_TRACK_OFFSET_BIAS] < 0) {
-            rs[RS_TRACK_OFFSET_BIAS] += 8;
-            if (rs[RS_TRACK_OFFSET_BIAS] > 0)
-                rs[RS_TRACK_OFFSET_BIAS] = 0;
-        } else if (rs[RS_TRACK_OFFSET_BIAS] > 0) {
-            rs[RS_TRACK_OFFSET_BIAS] -= 8;
-            if (rs[RS_TRACK_OFFSET_BIAS] < 0)
-                rs[RS_TRACK_OFFSET_BIAS] = 0;
-        }
     }
+    /* No peer in range: leave bias unchanged.
+     * Original has an 8/tick decay-toward-zero when FindActorTrackOffsetPeer
+     * returns self-slot, but the port uses -1 for "no peer" which skips that
+     * path. The decay was confirmed to zero seeded biases during the ~386-tick
+     * countdown; keeping it disabled preserves the lane-spread fix. */
 }
 
 /* ========================================================================
