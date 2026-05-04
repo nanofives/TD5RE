@@ -3449,12 +3449,21 @@ static int16_t rotate_body_to_world_y(const TD5_Actor *actor, const int16_t v[3]
     float result = (float)v[0] * m3 + (float)v[1] * m4 + (float)v[2] * m5;
     if (result >  32767.0f) return  32767;
     if (result < -32768.0f) return -32768;
-    /* Original (ConvertFloatVec3ToShortAngles @ 0x0042E2E0) uses x87 FISTP
-     * which rounds-to-nearest-even by default. C cast `(int32_t)float` is
-     * trunc-toward-zero — produces ±1 LSB drift on negative non-integer
-     * intermediates that propagated into chassis-snap's averaged world_y.
-     * lrintf honors FE_TONEAREST. */
-    return (int16_t)lrintf(result);
+    /* Original ConvertFloatVec3ToShortAngles @ 0x0042E2E0 calls __ftol @
+     * 0x0044817C which EXPLICITLY sets the FPU rounding mode to TRUNCATE
+     * (`OR AH, 0xC` = RC=11 = chop) before FISTP. So the orig truncates
+     * toward zero, not round-to-nearest-even. Earlier port comment claimed
+     * "FISTP rounds-to-nearest-even by default" — that's only true when
+     * RC=00 in the control word, but __ftol forces RC=11. C cast
+     * `(int32_t)float` already truncates toward zero, matching orig.
+     *
+     * Sum/4 of per-wheel rotated body-Y, scaled by -0x100, accumulates
+     * the ~±1 LSB rounding drift into the chassis world_y. The previous
+     * lrintf path produced a +128 FP world_y offset at spawn (port=58112
+     * vs orig=57984), which propagated to wheel_y at sim_tick=2 refresh
+     * → rear wheel airborne detection → chassis launch upward → Honolulu
+     * rollover root cause. [round 28: 2026-05-03] */
+    return (int16_t)(int32_t)result;
 }
 
 /* Y-component projection of a world-space vector into body space.
