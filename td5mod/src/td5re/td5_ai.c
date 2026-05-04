@@ -1789,39 +1789,28 @@ void td5_ai_update_track_behavior(int slot) {
      * RS[0x18] stores velocity dot product (forward track component). */
     route_heading = ai_route_heading_for_actor(rs, actor);
 
-    /* Skip recovery when route-heading byte is 0 OR near-zero (< 4).
-     * Near-zero bytes occur at route TRANSITION zones (junction entries/
-     * exits) on non-canonical routes like Moscow RIGHT.TRK span 498 where
-     * the route byte is 1, producing route_heading=0x10 — a nonsense
-     * reference that pins the actor in recovery. Widening the guard to
-     * catch rb < 4 (heading < 0x41 = 5.7°) skips the check in those
-     * zones; the target-point cascade at step 2 still handles guidance
-     * across the junction. Port-only guard; the original tolerates the
-     * same junction-zone null-byte via a different recovery-handling
-     * mechanism we haven't fully RE'd yet. */
-    int32_t rb_current = 0;
+    /* Original FUN_00434FE0 @ 0x00434FE0 tests the heading-delta band
+     * UNCONDITIONALLY — no route-byte / rb_current pre-gate.
+     *
+     * 2026-05-04 round: a previous port-only `if (rb_current >= 4)` outer
+     * guard suppressed recovery on non-canonical-route junction-zone spans
+     * (Honolulu banked curves where AI hits the outer wall, route byte at
+     * the contact span is small). Symptom: AI cars in slot 1..5 made wall
+     * contact, drifted along the wall, never re-aligned because recovery
+     * never fired. [CONFIRMED via Ghidra audit @ 0x00434FE0 — entry tests
+     * the (800 < uVar3) && (uVar3 < 0xCE0) band immediately, no rb gate.]
+     *
+     * Original FUN_00434FE0: adjusts for expected 0x800 offset between actor
+     * yaw (atan2+0x800) and route heading (route_byte<<4), then checks if
+     * the residual misalignment exceeds threshold.
+     * Formula: uVar3 = -(((heading - route_heading - 0x800U & 0xFFF) - 0x800 & 0xFFF) & 0xFFF) */
     {
-        const uint8_t *rbs = (const uint8_t *)(intptr_t)rs[RS_ROUTE_TABLE_PTR];
-        /* Same span_norm convention as ai_route_heading_for_actor — the
-         * route table is indexed by the wrapped ring position, not the
-         * post-remap raw span. */
-        int16_t sp_current = ACTOR_I16(actor, ACTOR_SPAN_NORMALIZED);
-        if (rbs && sp_current >= 0) {
-            rb_current = (int32_t)rbs[(size_t)(unsigned)sp_current * 3u + 1u];
-        }
-    }
-    if (rb_current >= 4) {
-        /* Original FUN_00434FE0: adjusts for expected 0x800 offset between actor
-         * yaw (atan2+0x800) and route heading (route_byte<<4), then checks if
-         * the residual misalignment exceeds threshold.
-         * Formula: uVar3 = -(((heading - route_heading - 0x800U & 0xFFF) - 0x800 & 0xFFF) & 0xFFF) */
         uint32_t adjusted = (((uint32_t)(heading - route_heading) - 0x800U) & 0xFFF);
         adjusted = (adjusted - 0x800U) & 0xFFF;
         hdelta = (int32_t)(-(int32_t)adjusted) & 0xFFF;
 
         /* [CONFIRMED @ 0x00434FE0] decomp: if ((800 < uVar3) && (uVar3 < 0xce0))
-         * — 800 is DECIMAL (= 0x320), upper is strict <. Port previously had
-         * 0x800 and <=, treating Ghidra's decimal render as hex. */
+         * — 800 is DECIMAL (= 0x320), upper is strict <. */
         if (hdelta > 0x320 && hdelta < 0xCE0) {
             TD5_LOG_I(LOG_TAG, "recovery: slot=%d hdelta=0x%X heading=0x%X route=0x%X",
                       slot, hdelta, heading & 0xFFF, route_heading & 0xFFF);
