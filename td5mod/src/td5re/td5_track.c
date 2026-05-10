@@ -3105,10 +3105,21 @@ void td5_track_compute_heading(TD5_Actor *actor)
     vr0 = vertex_at(sp->right_vertex_index);
     vr1 = vertex_at(sp->right_vertex_index + 1);
 
-    /* Compute heading based on span type */
+    /* Compute heading based on span type.
+     *
+     * Original FUN_00434350 has a 7-entry jump table at 0x00434588 covering
+     * types 1..7 only; types 0 and >=8 hit the default branch
+     * (JA 0x0043448c at 0x004343C7-0x004343CA). [CONFIRMED via Ghidra
+     *  disassembly @ 0x004343C7 + 0x00434588 jump table.]
+     *
+     * Previously this switch lumped types 8..11 with case 1/2/5; that
+     * applied the standard 4-vertex formula to span types the original
+     * sends to the slot-index default. On Moscow start spans this could
+     * shift the spawn yaw by enough to push the AI's first-tick steering
+     * correction in the wrong direction. Removed 2026-05-10 in the
+     * spawn-pose /fix. */
     switch (sp->span_type) {
     case 1: case 2: case 5:
-    case 8: case 9: case 10: case 11:
         /* Standard: dx = (left1 - right1) - right0 + left0 */
         dx = ((int32_t)vl1->x - (int32_t)vr1->x) - (int32_t)vr0->x + (int32_t)vl0->x;
         dz = ((int32_t)vl1->z - (int32_t)vr1->z) - (int32_t)vr0->z + (int32_t)vl0->z;
