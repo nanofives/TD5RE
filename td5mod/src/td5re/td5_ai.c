@@ -23,6 +23,7 @@
 #include "td5_track.h"
 #include "td5_physics.h"
 #include "td5_platform.h"
+#include "td5_trace.h"
 #include "td5re.h"
 #include <string.h>
 #include <math.h>
@@ -1742,6 +1743,20 @@ void td5_ai_update_track_behavior(int slot) {
     int32_t heading, route_heading, hdelta;
     int threshold_result;
     int32_t steer_weight;
+
+    /* Calls-trace probe: capture entry state per slot per tick.
+     * Hooks YAML: re/trace-hooks/tick0_ai_chain.yaml
+     * Original RVA: 0x00434FE0 UpdateActorTrackBehavior
+     * Args layout: slot, steer_cmd, yaw_accum, span_norm, vlong, encounter_steer, throttle_byte, brake_flag */
+    TD5_TRACE_CALL_ENTER("ai_track_behavior",
+        slot,
+        ACTOR_I32(actor, ACTOR_STEERING_CMD),
+        ACTOR_I32(actor, ACTOR_YAW_ACCUM),
+        (int32_t)ACTOR_I16(actor, ACTOR_SPAN_NORMALIZED),
+        ACTOR_I32(actor, ACTOR_LONGITUDINAL_SPEED),
+        (int32_t)ACTOR_I16(actor, ACTOR_ENCOUNTER_STEER),
+        (int32_t)ACTOR_U8(actor, ACTOR_THROTTLE_STATE),
+        (int32_t)ACTOR_U8(actor, ACTOR_BRAKE_FLAG));
 
     /* Time trial used to skip AI track behavior entirely (slot 0 was assumed
      * human). With PlayerIsAI=1 we deliberately route slot 0 through the AI,

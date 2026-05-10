@@ -1773,6 +1773,24 @@ void td5_physics_update_ai(TD5_Actor *actor)
     int16_t *phys = get_phys(actor);
     if (!phys) return;
 
+    /* Calls-trace probe: capture per-slot AI dynamics entry state.
+     * Hooks YAML: re/trace-hooks/tick0_ai_chain.yaml
+     * Original RVA: 0x00404EC0 UpdateAIVehicleDynamics
+     * Args layout: slot, steer_cmd, yaw_accum, vlong, encounter_steer,
+     *              throttle_byte, brake_flag, sub_lane */
+    {
+        char *_a = (char *)actor;
+        TD5_TRACE_CALL_ENTER("ai_dynamics",
+            (int32_t)actor->slot_index,
+            *(int32_t *)(_a + 0x30C),                       /* steering_cmd */
+            *(int32_t *)(_a + 0x1F4),                       /* yaw_accum */
+            *(int32_t *)(_a + 0x314),                       /* longitudinal_speed */
+            (int32_t)*(int16_t *)(_a + 0x33E),              /* encounter_steer */
+            (int32_t)*(uint8_t *)(_a + 0x36F),              /* throttle_state */
+            (int32_t)*(uint8_t *)(_a + 0x36D),              /* brake_flag */
+            (int32_t)*(uint8_t *)(_a + 0x08C));             /* sub_lane_index */
+    }
+
     /* --- 1. Single surface probe (chassis center only) --- */
     uint8_t surface = actor->surface_type_chassis;
 
