@@ -1164,29 +1164,27 @@ int td5_ai_update_route_threshold(int slot) {
 
     /* Read the route speed-threshold byte for the current span.
      * Route table: route[span*3 + 2] = threshold byte.
-     * 0x00 = emergency, 0x01-0xFE = scaled, 0xFF = no limit. */
+     * 0x00 = emergency, 0x01-0xFE = scaled, 0xFF = no limit.
+     *
+     * Original UpdateActorRouteThresholdState @ 0x00434AB9 reads
+     * `actor[+0x82] * 3 + 2 + RS[0]` — SPAN_NORMALIZED, NOT raw +0x80.
+     * On junction-remap spans (Moscow span ~498, Newcastle circuit
+     * wrap), RAW and NORMALIZED diverge by thousands; reading the
+     * wrong byte triggered emergency-brake or scaled-throttle on
+     * genuinely mid-corner locations and drove AI toward the outer
+     * wall. The look-ahead path at td5_ai.c:1854 already uses
+     * NORMALIZED; this reader was the last RAW consumer in the AI
+     * tick. [CONFIRMED via Ghidra disassembly @ 0x00434AA0–0x00434AB9
+     * — MOVSX EAX, word ptr [actor+0x82] is the only span source]. */
     int32_t *route_table = (int32_t *)rs[RS_ROUTE_TABLE_PTR];
-    int16_t span = ACTOR_I16(actor, ACTOR_SPAN_RAW);
+    int16_t span = ACTOR_I16(actor, ACTOR_SPAN_NORMALIZED);
     int threshold = 0xFF; /* default: no limit */
-    int heading_byte = 0; /* route-heading byte, used as junction sentinel */
 
     if (route_table) {
         uint8_t *route_bytes = (uint8_t *)route_table;
         threshold = route_bytes[span * 3 + 2];
-        heading_byte = route_bytes[span * 3 + 1];
     }
-
-    /* Junction-zone override: if the route-heading byte is near-zero, this
-     * span is a route TRANSITION zone (e.g. Moscow RIGHT.TRK around span
-     * 498 where rb[span*3+1] = 1). The threshold byte at such spans is
-     * also zero/near-zero, which would trigger emergency brake or scaled
-     * slowdown on genuinely mid-track locations. Treat junction-zone
-     * spans as "no limit" and let the AI accelerate through.
-     * Port-only guard; the original either tolerates this via a different
-     * routing/recovery interaction or has meaningful data at these bytes. */
-    if (heading_byte < 4) {
-        threshold = 0xFF;
-    }
+    TD5_LOG_D(LOG_TAG, "route_threshold: slot=%d span_norm=%d thr=0x%02X", slot, span, threshold);
 
     if (threshold == 0x00) {
         /* Emergency stop: full brake if forward > 0x80 and speed < 0x10000
@@ -1771,58 +1769,66 @@ void td5_ai_update_track_behavior(int slot) {
      * pre-seed here was redundant with the original and raced with the
      * cascade output during countdown. */
 
-    /* --- Script check: if a script is active, run it --- */
-    if (rs[RS_SCRIPT_BASE_PTR] != 0) {
-        int result = td5_ai_advance_track_script(rs);
-        if (result == 0) {
-            /* Script still running (blocking): just update track progress */
-            return;
-        }
-        /* result == 1: script complete, fall through to normal AI */
-    }
-
-    /* --- Heading misalignment trigger: start recovery script --- */
-    heading = ACTOR_I32(actor, ACTOR_YAW_ACCUM) >> 8;
-
-    /* Compute route heading inline from route byte, matching original @ 0x43503A.
-     * The original does NOT read RS[0x18] here — it reads the route byte directly.
-     * RS[0x18] stores velocity dot product (forward track component). */
-    route_heading = ai_route_heading_for_actor(rs, actor);
-
-    /* Original FUN_00434FE0 @ 0x00434FE0 tests the heading-delta band
-     * UNCONDITIONALLY — no route-byte / rb_current pre-gate.
+    /* --- Game-type gate: scripts + misalignment-recovery only fire in SINGLE_RACE ---
      *
-     * 2026-05-04 round: a previous port-only `if (rb_current >= 4)` outer
-     * guard suppressed recovery on non-canonical-route junction-zone spans
-     * (Honolulu banked curves where AI hits the outer wall, route byte at
-     * the contact span is small). Symptom: AI cars in slot 1..5 made wall
-     * contact, drifted along the wall, never re-aligned because recovery
-     * never fired. [CONFIRMED via Ghidra audit @ 0x00434FE0 — entry tests
-     * the (800 < uVar3) && (uVar3 < 0xCE0) band immediately, no rb gate.]
+     * Original FUN_00434FE0 @ 0x00434FE0 has an outer
+     *   if (g_selectedGameType == 0) { script-or-trigger }
+     * gate at the function entry. Disassembly:
+     *   0x00434FE0  MOV EAX, [0x004aaf6c]    ; g_selectedGameType
+     *   0x00434FE8  TEST EAX, EAX
+     *   0x00434FF2  JNZ  0x004350a5          ; jump past both inner branches
      *
-     * Original FUN_00434FE0: adjusts for expected 0x800 offset between actor
-     * yaw (atan2+0x800) and route heading (route_byte<<4), then checks if
-     * the residual misalignment exceeds threshold.
-     * Formula: uVar3 = -(((heading - route_heading - 0x800U & 0xFFF) - 0x800 & 0xFFF) & 0xFFF) */
-    {
-        uint32_t adjusted = (((uint32_t)(heading - route_heading) - 0x800U) & 0xFFF);
-        adjusted = (adjusted - 0x800U) & 0xFFF;
-        hdelta = (int32_t)(-(int32_t)adjusted) & 0xFFF;
-
-        /* [CONFIRMED @ 0x00434FE0] decomp: if ((800 < uVar3) && (uVar3 < 0xce0))
-         * — 800 is DECIMAL (= 0x320), upper is strict <. */
-        if (hdelta > 0x320 && hdelta < 0xCE0) {
-            TD5_LOG_I(LOG_TAG, "recovery: slot=%d hdelta=0x%X heading=0x%X route=0x%X",
-                      slot, hdelta, heading & 0xFFF, route_heading & 0xFFF);
-            /* Significant misalignment: assign initial recovery script [8, 9, 0] */
-            rs[RS_SCRIPT_BASE_PTR] = (int32_t)(intptr_t)g_script_init_recovery;
-            rs[RS_SCRIPT_IP] = 0;
-            rs[RS_SCRIPT_FLAGS] = 0;
-            rs[RS_SCRIPT_FIELD_3E] = 0;
-            rs[RS_SCRIPT_FIELD_43] = 0;
-            rs[RS_SCRIPT_COUNTDOWN] = 0x96;
-            return;
+     * SINGLE_RACE = 0 in TD5_GameType. For modes != SINGLE_RACE
+     * (CHAMPIONSHIP, MASTERS, TT, COP_CHASE, DRAG_RACE, ...) the original
+     * skips both the script-execution path and the heading-misalignment
+     * recovery-script-set path, falling straight through to normal track
+     * following. Without this gate, AI in non-SINGLE_RACE modes was
+     * receiving recovery scripts the original never sets — the +0x4000
+     * per-tick steering ramp produced wall-leaning behaviour for ~150
+     * ticks regardless of contact state.
+     * [CONFIRMED via Ghidra disassembly + decompilation @ 0x00434FE0]. */
+    if (g_td5.game_type == TD5_GAMETYPE_SINGLE_RACE) {
+        /* --- Script check: if a script is active, run it --- */
+        if (rs[RS_SCRIPT_BASE_PTR] != 0) {
+            int result = td5_ai_advance_track_script(rs);
+            if (result == 0) {
+                /* Script still running (blocking): just update track progress */
+                return;
+            }
+            /* result == 1: script complete, fall through to normal AI */
         }
+
+        /* --- Heading misalignment trigger: start recovery script --- */
+        heading = ACTOR_I32(actor, ACTOR_YAW_ACCUM) >> 8;
+
+        /* Compute route heading inline from route byte, matching original @ 0x43503A. */
+        route_heading = ai_route_heading_for_actor(rs, actor);
+
+        /* Formula: uVar3 = -(((heading - route_heading - 0x800U & 0xFFF) - 0x800 & 0xFFF) & 0xFFF) */
+        {
+            uint32_t adjusted = (((uint32_t)(heading - route_heading) - 0x800U) & 0xFFF);
+            adjusted = (adjusted - 0x800U) & 0xFFF;
+            hdelta = (int32_t)(-(int32_t)adjusted) & 0xFFF;
+
+            /* [CONFIRMED @ 0x00434FE0] decomp: if ((800 < uVar3) && (uVar3 < 0xce0))
+             * — 800 is DECIMAL (= 0x320), upper is strict <. */
+            if (hdelta > 0x320 && hdelta < 0xCE0) {
+                TD5_LOG_I(LOG_TAG, "recovery: slot=%d hdelta=0x%X heading=0x%X route=0x%X gt=%d",
+                          slot, hdelta, heading & 0xFFF, route_heading & 0xFFF,
+                          (int)g_td5.game_type);
+                /* Significant misalignment: assign initial recovery script [8, 9, 0] */
+                rs[RS_SCRIPT_BASE_PTR] = (int32_t)(intptr_t)g_script_init_recovery;
+                rs[RS_SCRIPT_IP] = 0;
+                rs[RS_SCRIPT_FLAGS] = 0;
+                rs[RS_SCRIPT_FIELD_3E] = 0;
+                rs[RS_SCRIPT_FIELD_43] = 0;
+                rs[RS_SCRIPT_COUNTDOWN] = 0x96;
+                return;
+            }
+        }
+    } else {
+        /* Suppress compiler warnings for unused locals when the gate is closed. */
+        (void)heading; (void)route_heading; (void)hdelta;
     }
 
     /* --- Normal AI path following --- */
