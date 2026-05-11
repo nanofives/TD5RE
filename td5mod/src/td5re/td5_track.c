@@ -3409,8 +3409,19 @@ int td5_track_sample_target_point(int span_index, int route_byte,
         return 0;
 
     sp = &s_span_array[span_index];
-    if (sp->span_type == 9 || sp->span_type == 10)
-        return 0;
+
+    /* No span_type filter — original SampleTrackTargetPoint @ 0x00434800
+     * has no such early-out. The previous port version returned 0 for
+     * span_type 9/10 (causing the AI caller to SKIP the entire target-angle
+     * update and keep last tick's stale value). When the AI's spawn target
+     * span lands on a type-9/10 span (Moscow start spans on RIGHT.TRK can
+     * be 9/10 per the agent's k_target_vertex_offsets table audit), the
+     * port produced delta=-10 vs original delta=-101 at tick 1, a 10×
+     * geometric difference that translates into stuck-in-the-floating-
+     * wmask=0 state by span ~430. [CONFIRMED via Ghidra audit of
+     * 0x00434800-0x004348FB: no span_type filter; reads
+     * k_target_vertex_offsets[span_type] for any type 0..11 without
+     * branching out.] */
 
     /* Lane count from geometry metadata (low nibble of byte +0x03).
      * Original reads the raw nibble with no clamp [CONFIRMED @ 0x00434836:
