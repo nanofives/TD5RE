@@ -1474,12 +1474,34 @@ void td5_ai_seed_actor_track_progress_offset(int slot)
     /* Store progress [CONFIRMED @ 0x00434313: gActorTrackSpanProgress[slot*0x47]] */
     rs[RS_TRACK_PROGRESS] = progress;
 
-    /* Route byte from route table at span_norm * 3 [CONFIRMED @ 0x00434327] */
+    /* Route byte from route table at span_norm * 3 [CONFIRMED @ 0x00434327].
+     *
+     * BUT — at seed time during InitializeRaceSession, the ORIGINAL reads
+     * actor->field_0x82 (span_norm) BEFORE it has been populated from the
+     * spawn world position. The field still holds its zero/uninitialized
+     * value. The port had this field set before this seed runs, causing
+     * port to read route_table[286*3]=76 while original reads
+     * route_table[0*3]=106 (Frida-confirmed: all 6 slots get
+     * route_byte=106 during init).
+     *
+     * Result of port bug: port's seed for slot 0 produces bias=+443
+     * (progress=95 > route_byte=76 → positive); original produces
+     * bias=-297 (progress=95 < route_byte=106 → negative). Same sign-flip
+     * for slots 2 and 4. The wrong-signed bias shifts the AI's look-ahead
+     * target to the wrong side, producing the visible "AI steers slightly
+     * left into the wall" symptom on Moscow.
+     *
+     * Faithful port: read route_table[0] (matches original's
+     * uninitialized-span_norm read at seed time).
+     * [Frida-confirmed 2026-05-11: 36 init-phase ComputeSignedTrackOffset
+     * calls all pass route_byte=106 regardless of span_raw {277..292};
+     * port's per-span route_byte 75-79 was the bug.] */
     const uint8_t *route_bytes = (const uint8_t *)(intptr_t)rs[RS_ROUTE_TABLE_PTR];
     int route_byte = 0;
-    if (route_bytes && span_norm >= 0) {
-        route_byte = (int)route_bytes[(size_t)(unsigned)span_norm * 3u];
+    if (route_bytes) {
+        route_byte = (int)route_bytes[0];
     }
+    (void)span_norm;
 
     /* Store signed lateral offset [CONFIRMED @ 0x00434332: DAT_004afb84[slot*0x47]] */
     {
