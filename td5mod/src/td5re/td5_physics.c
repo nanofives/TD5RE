@@ -1085,23 +1085,38 @@ void td5_physics_update_player(TD5_Actor *actor)
             wheel_drive[1] = 0;
             wheel_drive[2] = bf >> 1;
             wheel_drive[3] = bf >> 1;
-            /* When braking on-ground at low forward speed, hand off to
-             * REVERSE drive. Original achieves this via auto_gear during
-             * airborne microbumps [CONFIRMED @ 0x42EF1C: throttle<0 → gear=0];
-             * port replicates the effect directly because ground contact is
-             * too sticky for microbumps. Tuning departure: dropped lateral
-             * velocity gate (drift during brake blocked the trigger) and
-             * raised the longitudinal threshold from 0x40 to 0x100 so reverse
-             * engages crisply at the moment forward motion stops. Clearing
-             * brake_flag here routes the next tick through the drive path,
-             * which with throttle<0 + gear=REVERSE produces reverse motion. */
-            {
-                int32_t abs_vlong = v_long < 0 ? -v_long : v_long;
-                if (abs_vlong < 0x100) {
-                    actor->current_gear = TD5_GEAR_REVERSE;
-                    actor->brake_flag = 0;
-                }
-            }
+            /* PORT-ONLY auto-reverse on near-stop REMOVED 2026-05-11.
+             *
+             * The block previously here force-switched gear to REVERSE and
+             * cleared brake_flag when `|v_long| < 0x100`, on the theory that
+             * the original's airborne-microbump auto-gear logic
+             * (0x42EF1C: throttle<0 → gear=0) couldn't fire on ground because
+             * "ground contact is too sticky".
+             *
+             * This is incompatible with AI recovery. When the AI script
+             * (op 8 = stop+wait) sets brake_flag=1 + encounter_steer=-0x100
+             * to halt the car after a wall hit, the brake DOES decelerate
+             * the car to near-zero. The auto-reverse then kicks in:
+             * - Sets gear=REVERSE, clears brake_flag
+             * - Next tick: encounter_steer=-256 routes to the DRIVE path
+             *   (brake_flag now 0), which with gear=REVERSE generates a
+             *   backward drive force
+             * - Car accelerates backward indefinitely
+             * - Recovery script's `|spd| < 0x100` wait briefly satisfies at
+             *   the gear-switch moment, then flag 0x10 clears, but car is
+             *   now moving fast in reverse — no further recovery
+             *
+             * Visible symptom: AI hits wall → brakes → "starts accelerating
+             * forwards again" but is actually moving forward in reverse-gear
+             * orientation (or backward in original orientation depending on
+             * how user perceives it). Steering frozen because subsequent
+             * recovery-script opcodes (ops 5/6 flag 0x04/0x08) require
+             * heading misalignment > 0x201, which the rapidly-moving
+             * actor doesn't satisfy stably.
+             *
+             * Removed entirely. If the original wants reverse for the AI,
+             * it goes through encounter_steer + gear management upstream
+             * — not via brake-path auto-switch. */
             if (actor->slot_index == 0 && (actor->frame_counter % 30u) == 0u) {
                 TD5_LOG_I(LOG_TAG,
                     "BRAKE: bf=%d brk_front=%d throttle=%d v_long=%d v_lat=%d wd2=%d gear=%d sf=%d",
