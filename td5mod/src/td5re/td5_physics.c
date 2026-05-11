@@ -1952,29 +1952,94 @@ void td5_physics_update_ai(TD5_Actor *actor)
             throttle = -0x20;
         }
     ai_brake_path:;
-        /* Brake path [original @ 0x004051D5-0x00405282].
-         * Original formula: local_40 = (Wr*throttle + (Wr*throttle>>31 & 0xFF)) >> 8
-         *   then clamp to [-|v_long|/2, +|v_long|/2], divide by 2.
-         * Same for local_3c with Wf (note: Wr=rear, Wf=front — swapped vs names).
-         * Verified: original uses rear_weight for local_40 (local_3c divides by 2
-         * in the final step), front_weight for local_3c. */
+        /* Brake path — verbatim port of UpdateAIVehicleDynamics @ 0x004051D5
+         * -0x00405282. Three corrections vs prior implementation:
+         *
+         * 1. Uses BRAKE coefficients (phys+0x6E front, phys+0x70 rear) for the
+         *    F_raw/R_raw products, not the axle weights (phys+0x28/0x2A). The
+         *    original explicitly reads `*(short *)(puVar2 + 0x6e)` and
+         *    `*(short *)(puVar2 + 0x70)` here.
+         *
+         * 2. Signed nested-clamp pattern (same shape as commit 600fb62 for
+         *    the player path). Preserves directional sign: brake force opposes
+         *    motion. Prior abs-clamp gave backward force on backward motion
+         *    (the "AI accelerates reverse" half of the recover-stall trap).
+         *
+         * 3. Different velocity bounds per axle:
+         *    - FRONT_DRIVE (local_3c) clamped against lateral_speed (+0x318,
+         *      steered-frame v_long minus yaw_corr). At full recovery steer,
+         *      lateral_speed < v_long → tighter clamp keeps steering authority.
+         *    - REAR_DRIVE  (local_40) clamped against body v_long (+0x314).
+         *
+         * Variable names mirror Ghidra's so the LAB_00405285 entry block is
+         * line-for-line cross-checkable with the decomp.
+         * [CONFIRMED @ 0x004051D5-0x00405282 via Ghidra read-only session.] */
         td5_physics_update_engine_speed(actor);
         {
-            int32_t half_spd = abs_speed >> 1;
-            /* local_3c = clamp((Wr * throttle) >> 8, -half_spd, half_spd) / 2 */
-            int32_t rc = rear_weight * throttle;
-            int32_t r_raw = (rc + ((rc >> 31) & 0xFF)) >> 8;
-            if (r_raw > half_spd)  r_raw =  half_spd;
-            if (r_raw < -half_spd) r_raw = -half_spd;
-            rear_drive = r_raw / 2;
-            /* local_40 = clamp((Wf * throttle) >> 8, -(|v_long|/2), +(|v_long|/2)) / 2 */
-            int32_t fc = front_weight * throttle;
-            int32_t f_raw = (fc + ((fc >> 31) & 0xFF)) >> 8;
-            int32_t half_vlong = v_long / 2;
-            if (half_vlong < 0) half_vlong = -half_vlong;
-            if (f_raw > half_vlong)  f_raw =  half_vlong;
-            if (f_raw < -half_vlong) f_raw = -half_vlong;
-            front_drive = f_raw / 2;
+            int32_t lateral_speed = actor->lateral_speed;  /* iVar18 at brake-clamp time */
+
+            /* R_raw, F_raw with truncate-toward-zero round bias */
+            int32_t R_raw = ((int32_t)brake_rear  * throttle
+                          + ((((int32_t)brake_rear  * throttle) >> 31) & 0xFF)) >> 8;
+            int32_t F_raw = ((int32_t)brake_front * throttle
+                          + ((((int32_t)brake_front * throttle) >> 31) & 0xFF)) >> 8;
+
+            /* --- FRONT clamp: bound by lateral_speed (+0x318, steered frame).
+             * Ghidra decomp:
+             *   iVar13 = -F_raw;
+             *   local_3c = -(lateral_speed/2);
+             *   iVar18 = iVar13;
+             *   if (local_3c <= iVar13) iVar18 = local_3c;
+             *   if ((iVar18 < F_raw) || (iVar4 = iVar13, iVar13 < local_3c)) {
+             *       local_3c = iVar4;  // F_raw on first leg, -F_raw on second leg
+             *   }
+             *   local_3c = local_3c / 2;
+             */
+            int32_t neg_F = -F_raw;
+            int32_t local_3c = -(lateral_speed / 2);
+            int32_t t1 = neg_F;
+            if (local_3c <= neg_F) t1 = local_3c;
+            if (t1 < F_raw) {
+                local_3c = F_raw;
+            } else if (neg_F < local_3c) {
+                local_3c = neg_F;
+            }
+            local_3c = local_3c / 2;
+
+            /* --- REAR clamp: bound by body v_long (+0x314).
+             * Ghidra decomp:
+             *   iVar4 = -(v_long/2);
+             *   iVar13 = -R_raw;
+             *   iVar18 = iVar13;
+             *   if (iVar4 <= iVar13) iVar18 = iVar4;
+             *   if (local_40 <= iVar18) {
+             *       local_40 = iVar4;
+             *       if (iVar13 < iVar4) local_40 = iVar13;
+             *   }
+             *   local_40 = local_40 / 2;
+             */
+            int32_t neg_R = -R_raw;
+            int32_t neg_half_vlong = -(v_long / 2);
+            int32_t local_40 = R_raw;
+            int32_t t2 = neg_R;
+            if (neg_half_vlong <= neg_R) t2 = neg_half_vlong;
+            if (local_40 <= t2) {
+                local_40 = neg_half_vlong;
+                if (neg_R < neg_half_vlong) local_40 = neg_R;
+            }
+            local_40 = local_40 / 2;
+
+            front_drive = local_3c;
+            rear_drive  = local_40;
+
+            if (actor->slot_index == 0 && (actor->frame_counter % 30u) == 0u) {
+                TD5_LOG_I(LOG_TAG,
+                    "AI_BRAKE: throttle=%d brk_f=%d brk_r=%d F_raw=%d R_raw=%d "
+                    "lat_spd=%d v_long=%d front_drv=%d rear_drv=%d brake_flag=%d",
+                    throttle, brake_front, brake_rear, F_raw, R_raw,
+                    lateral_speed, v_long, front_drive, rear_drive,
+                    (int)actor->brake_flag);
+            }
         }
     }
     /* LAB_00405285: original doubles both values before bicycle solve */
