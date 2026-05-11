@@ -3820,12 +3820,24 @@ void td5_physics_update_suspension_response(TD5_Actor *actor)
         int32_t pitch_term = (lat_spr  + lat_grav  / cnt_active) / 0x226;
         actor->angular_velocity_roll  += roll_term;
         actor->angular_velocity_pitch += pitch_term;
-    }
 
-    /* Y-velocity update: bounce + gravity restored. Original adds
-     * gravity back here, cancelling the subtract at top of integrate_pose
-     * for grounded cars. */
-    actor->linear_velocity_y += bounce + g_gravity_constant;
+        /* Y-velocity update: bounce + gravity restored. Original adds
+         * gravity back here, cancelling the subtract at top of integrate_pose
+         * for grounded cars.
+         *
+         * [CONFIRMED via Edinburgh wheel_contact_probe 2026-05-11]: this
+         * write MUST be inside the `cnt_active > 0` gate. Comment at line
+         * 3778 explicitly says "the original writes both ang_vel_pitch and
+         * lin_vel_y UNCONDITIONALLY once cnt_active > 0" — meaning BOTH
+         * are gated on cnt_active > 0, not "unconditional in absolute
+         * terms". When all 4 wheels are airborne (cnt_active=0), the
+         * original SKIPS this write, letting gravity from integrate_pose
+         * accumulate. The port previously placed this write OUTSIDE the
+         * gate, which cancelled gravity during airborne and produced the
+         * Edinburgh "car drifts forward at constant altitude" symptom
+         * after launching off a road bump. */
+        actor->linear_velocity_y += bounce + g_gravity_constant;
+    }
 
     if (cnt_grounded > 0) {
         /* Per-pattern angular velocity clamps [CONFIRMED @ 0x00405a6a..
