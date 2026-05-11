@@ -1657,17 +1657,51 @@ int td5_ai_advance_track_script(int *rs) {
         }
     }
 
-    /* --- Countdown timer check: cycle to next program bank when expired --- */
+    /* --- Countdown timer check: pairwise-toggle within {A,B} or {C,D} --- */
     rs[RS_SCRIPT_COUNTDOWN]--;
     if (rs[RS_SCRIPT_COUNTDOWN] < 0) {
-        /* Round-robin through 4 program banks */
-        int bank = g_script_bank_index[slot];
-        bank = (bank + 1) & 3;
-        g_script_bank_index[slot] = bank;
-
-        rs[RS_SCRIPT_BASE_PTR] = (int32_t)(intptr_t)g_script_banks[bank];
-        rs[RS_SCRIPT_IP] = 0;
-        rs[RS_SCRIPT_FLAGS] = 0;
+        /* Original @ 0x004370A0 implements PAIRWISE TOGGLE on countdown
+         * expiry, NOT round-robin:
+         *   A ↔ B  (steer-left brake  ↔  steer-right accelerate)
+         *   C ↔ D  (steer-right brake ↔  steer-left  accelerate)
+         *
+         * Op 9's auto-select picks the right pair based on hdelta + lane.
+         * Countdown-expiry alternates within that pair — preserving the
+         * "this is a left-side recovery" or "this is a right-side recovery"
+         * decision while alternating between brake-aligned and
+         * accelerate-aligned phases.
+         *
+         * Port previously rotated A→B→C→D→A which broke the recovery for
+         * sharp corners: AI hits left wall, Program A (steer-left + brake)
+         * aligns, port rotates to B (steer-right + accelerate). Original
+         * would also rotate to B, but then back to A. Port continued to
+         * C (steer-right + brake) — wrong-direction recovery for the
+         * left-side wall hit.
+         *
+         * Also: original does NOT reset RS_SCRIPT_FLAGS on rotation. Any
+         * active flag 0x02/0x04/0x08 latches across the toggle.
+         * [CONFIRMED @ 0x004370A0: only +0x3A (base_ptr), +0x3B (ip), and
+         * +0x45 (countdown) are written; +0x3D (flags) is not touched.] */
+        intptr_t cur = (intptr_t)rs[RS_SCRIPT_BASE_PTR];
+        intptr_t next = cur;
+        if (cur == (intptr_t)g_script_program_a) {
+            next = (intptr_t)g_script_program_b;
+        } else if (cur == (intptr_t)g_script_program_b) {
+            next = (intptr_t)g_script_program_a;
+        } else if (cur == (intptr_t)g_script_program_c) {
+            next = (intptr_t)g_script_program_d;
+        } else if (cur == (intptr_t)g_script_program_d) {
+            next = (intptr_t)g_script_program_c;
+        }
+        /* For anything else (uninitialized / external script) the original
+         * leaves base_ptr/ip alone — only resets the countdown. */
+        if (next != cur) {
+            rs[RS_SCRIPT_BASE_PTR] = (int32_t)next;
+            /* Original sets both +0x3a and +0x3b to the bank head address
+             * (interpreting IP as a pointer that advances). Port uses IP
+             * as an INDEX into base, so start at 0. */
+            rs[RS_SCRIPT_IP]       = 0;
+        }
         rs[RS_SCRIPT_COUNTDOWN] = 0x96; /* 150 frames */
     }
 
