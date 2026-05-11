@@ -337,21 +337,28 @@ void td5_physics_wall_response(TD5_Actor *actor, int32_t wall_angle,
          *                       XOR ECX,ECX at 0x00406B69 → zero. So result
          *                       is clamped to 0 on pos-flip.
          *
-         * Both branches zero on sign-flip — the asymmetry is in *which*
-         * sign-flip each side cares about (positive→negative vs.
-         * negative→positive). An earlier port comment claimed v_para<=0
-         * had "no clamp", which was wrong; this re-read fixes that.
+         * Both branches hard-zero on sign-flip. The asymmetry is purely in
+         * *which* sign-flip each side cares about (v_para>0 →
+         * v_para-delta, clamp to 0 on negative-flip; v_para<=0 →
+         * v_para+delta, clamp to 0 on positive-flip).
          *
-         * INTENTIONAL DIVERGENCE on v_para<=0 branch: instead of the
-         * original's hard zero-on-pos-flip, apply a magnitude-only soft
-         * clamp |new_v_para| <= |v_para|. This is *softer* than the
-         * original (allows sign-flip, preserving the wall-friction reorient
-         * effect that produced visible sideways slide on glancing impacts)
-         * but *tighter* than leaving it unclamped (kills the head-on bug
-         * where v_para small-negative + iVar11 large yields delta >> |v_para|
-         * and accelerates the car tangentially out of nowhere). The v_para>0
-         * branch is left as the faithful original (hard zero). See
-         * EXPECTED_BEHAVIOR.md "Intentional Divergences".
+         * 2026-05-10 — reverted to faithful behaviour on the v_para<=0
+         * branch. A prior port version used a magnitude-only soft clamp
+         * here (allowing sign-flip up to |incoming v_para|) under the
+         * theory that hard-zero killed wall-friction reorient. A Frida
+         * long-pass on Moscow (StartSpanOffset=175, PlayerIsAI=1, branch
+         * fix-1778394064-46915 long_span280_pass) showed the opposite
+         * effect: with the soft clamp, AI cars hit walls, then carry a
+         * sign-flipped tangential velocity that prevents them from
+         * settling parallel to the wall — they roll back, get hit again,
+         * and stall permanently at span ~430. Original AI cars in the
+         * same geometry cruise through unobstructed (slot 3 reached
+         * span 1373 vs port's 430 in 2882 ticks).
+         *
+         * Ghidra agent re-read of 0x00406B65-69 (verbatim disasm: TEST/
+         * JLE + XOR ECX,ECX) confirmed both branches hard-zero on
+         * sign-flip in the original. The earlier "no clamp on v_para<=0"
+         * memory note was a misread.
          *
          * Branch order matches the asm (positive first). */
         int32_t v_para_round = v_para >> 6;  /* signed shift; arithmetic-round */
@@ -361,21 +368,16 @@ void td5_physics_wall_response(TD5_Actor *actor, int32_t wall_angle,
             int32_t delta = (tmp * 0x180) >> 11;
             pre_clamp_delta = delta;
             new_v_para = v_para - delta;
-            if (new_v_para < 0) new_v_para = 0;
+            if (new_v_para < 0) { new_v_para = 0; clamp_fired = 1; }
         } else {
             tmp = (iVar11 * 2 + 0x800) - v_para_round;
             int32_t delta = (tmp * 0x180) >> 11;
             pre_clamp_delta = delta;
             new_v_para = v_para + delta;
-            /* INTENTIONAL DIVERGENCE from original 0x00406B65-69 hard zero.
-             * Magnitude-only soft clamp: |new_v_para| <= |v_para|. Sign may
-             * flip (preserves wall-friction reorient that the original kills
-             * via XOR), but magnitude can never grow above incoming |v_para|.
-             * Prevents head-on case where small-negative v_para + large
-             * iVar11 yields delta >> |v_para| and accelerates the car. */
-            int32_t v_para_mag = -v_para;  /* v_para <= 0 here, so >= 0 */
-            if (new_v_para >  v_para_mag) { new_v_para =  v_para_mag; clamp_fired = 1; }
-            if (new_v_para < -v_para_mag) { new_v_para = -v_para_mag; clamp_fired = 1; }
+            /* Faithful port of 0x00406B65-69: TEST EAX,EAX / JLE
+             * (jump if signed less-or-equal preserves) / fall through to
+             * XOR ECX,ECX. → clamp to 0 on positive-flip. */
+            if (new_v_para > 0) { new_v_para = 0; clamp_fired = 1; }
         }
 
         /* Angular velocity update: ω += (impulse * iVar9) / (K / 0x28C).
