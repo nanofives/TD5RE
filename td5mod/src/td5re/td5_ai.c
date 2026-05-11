@@ -43,17 +43,16 @@
 #define RS_ROUTE_TABLE_PTR        0x00
 #define RS_ROUTE_TABLE_SELECTOR   0x03
 #define RS_DEFAULT_THROTTLE       0x04
-/* RS dword 0x0B (byte 0x2C) per Ghidra: gActorRouteStateTable+0x2C =
- * DAT_004afb84[slot*0x47] [CONFIRMED @ 0x00434332]. Previously 0x09 in the
- * port — confirmed wrong via Frida target_probe on Moscow TT slot 0:
- *   port:     dx=-2111 dz=4658  (target on LEFT of actor)
- *   original: dx=+4722 dz=2136  (target on RIGHT of actor)
- * Because the bias was stored in port RS[0x09] but original reads RS[0x0B],
- * the port's SampleTrackTargetPoint received a different lateral_bias than
- * the original, shifting the target sample point and flipping the sign of
- * dx. Downstream this produced ~10× the steering bias on slot 0 in solo
- * scenarios. Fix: align the port to the original's storage convention. */
-#define RS_TRACK_OFFSET_BIAS      0x0B
+/* RS dword 0x09 (byte 0x24) per Ghidra: DAT_004afb84 (0x004afb84) is the
+ * per-slot lateral_bias array. With gActorRouteStateTable base = 0x004afb60,
+ * `0x4afb84 - 0x4afb60 = 0x24` bytes = dword index 9.
+ * [CONFIRMED via Ghidra symbol audit pass 2026-05-11 cross-checking stride
+ * against DAT_004afbb0 (+0x50 = index 20 = RS_ACTIVE_LOWER_BOUND) and
+ * gActorTrackSpanProgress (+0x64 = index 25 = RS_TRACK_PROGRESS).]
+ *
+ * A prior port revision used 0x0B with a comment that computed the offset
+ * as 0x2C — that arithmetic is wrong (0x84 - 0x60 = 0x24, not 0x2C). */
+#define RS_TRACK_OFFSET_BIAS      0x09
 #define RS_LEFT_BOUNDARY_A        0x0E
 #define RS_LEFT_BOUNDARY_B        0x0F
 #define RS_RIGHT_BOUNDARY_A       0x10
@@ -1421,12 +1420,29 @@ void td5_ai_update_track_offset_bias(int slot) {
         if (rs[RS_TRACK_OFFSET_BIAS] > 0x600)  rs[RS_TRACK_OFFSET_BIAS] = 0x600;
         if (rs[RS_TRACK_OFFSET_BIAS] < -0x600) rs[RS_TRACK_OFFSET_BIAS] = -0x600;
 
+    } else {
+        /* No peer in range: decay bias toward zero by 8/tick.
+         * [CONFIRMED @ 0x0043494C-0x0043498D] When FindActorTrackOffsetPeer
+         * returns the actor's own slot (port translates this to peer < 0),
+         * the original runs two parallel `+=8 / -=8` adjustments with a
+         * cross-clamp at zero. Per-tick magnitude change: 8.
+         *
+         * The port previously left bias unchanged in this case, citing
+         * "lane-spread fix". With this decay restored and ±0x600 clamp
+         * retained, seeded biases reduce gradually when peers separate,
+         * matching the original's transient behaviour. The ±0x600 clamp
+         * itself is port-only (no Ghidra counterpart) but is kept as a
+         * stabilizer — empirical 2026-05-11: clamp removal caused all 6
+         * AI slots to crash within 200-400 ticks. */
+        if (rs[RS_TRACK_OFFSET_BIAS] < 0) {
+            rs[RS_TRACK_OFFSET_BIAS] += 8;
+            if (rs[RS_TRACK_OFFSET_BIAS] > 0) rs[RS_TRACK_OFFSET_BIAS] = 0;
+        }
+        if (rs[RS_TRACK_OFFSET_BIAS] > 0) {
+            rs[RS_TRACK_OFFSET_BIAS] -= 8;
+            if (rs[RS_TRACK_OFFSET_BIAS] < 0) rs[RS_TRACK_OFFSET_BIAS] = 0;
+        }
     }
-    /* No peer in range: leave bias unchanged.
-     * Original has an 8/tick decay-toward-zero when FindActorTrackOffsetPeer
-     * returns self-slot, but the port uses -1 for "no peer" which skips that
-     * path. The decay was confirmed to zero seeded biases during the ~386-tick
-     * countdown; keeping it disabled preserves the lane-spread fix. */
 }
 
 /* ========================================================================
