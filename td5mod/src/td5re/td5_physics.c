@@ -6568,7 +6568,27 @@ static void bind_default_vehicle_tuning(TD5_Actor *actor, int slot)
      * original-faithful (original has no race) nor surprising (matches what
      * the original would do for a 2P split-screen drag, where both player
      * slots use carparam via the player path). */
-    if (slot >= 1 && slot < TD5_MAX_RACER_SLOTS &&
+    /* Original InitializeRaceActorRuntime @ 0x00432E60 gates the
+     * DAT_00473DB0 AI-template copy on `slot.state == 0` (NOT slot index).
+     * For slot 0 in PlayerIsAI=1 mode, g_race_slot_state[0] = 0 (AI), so
+     * the original copies the AI template — same as it does for slots 1..5.
+     *
+     * The port previously gated on `slot >= 1` which excluded slot 0
+     * unconditionally. With PlayerIsAI=1 + SINGLE_RACE, slot 0 (Viper)
+     * was using its native carparam (high torque/top speed) while the
+     * original would have given it the balanced AI template (Wf=400,
+     * Wr=400, I=180000). Result: port slot 0 reaches walls at vlong=90041
+     * vs slot 3 (car 17 with AI template) at ~78000 — the higher speed
+     * produces unrecoverable wall impacts.
+     *
+     * [CONFIRMED via Ghidra agent audit 2026-05-02 — see memory entry
+     *  reference_drag_ai_template_binding.md for the original's
+     *  `slot.state == 0 && g_selectedGameType == 0` gate.]
+     *
+     * Note: the original ALSO gates on game_type==0 (SINGLE_RACE), but
+     * the port's slots 1..5 in other modes have always used the AI
+     * template here; preserving that until a separate audit pass. */
+    if (slot < TD5_MAX_RACER_SLOTS && g_race_slot_state[slot] == 0 &&
         !(g_td5.drag_race_enabled && slot == 1 && s_carparam_loaded[slot])) {
         uint8_t *ai_tmpl = td5_ai_get_physics_template();
         if (ai_tmpl) {
