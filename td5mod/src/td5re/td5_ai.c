@@ -1594,9 +1594,26 @@ int td5_ai_advance_track_script(int *rs) {
         int32_t hdelta = (heading - route_heading) & 0xFFF;
 
         if (hdelta < 0x201 || hdelta > 0xDFF) {
-            /* Within threshold: aligned -- clear flag */
-            rs[RS_SCRIPT_FLAGS] &= ~0x04;
-            ACTOR_I32(actor, ACTOR_STEERING_CMD) = 0;
+            /* Within threshold: aligned. Original @ 0x004371D5-0x004371E6
+             * gates BOTH the flag clear AND the steering_cmd zero-write on
+             * `route_state[0x1B] < 0` (RS_SCRIPT_OFFSET_PARAM signed).
+             * Programs A/C set offset_param = -32 (negative) → clear fires.
+             * Programs B/D set offset_param = +64 (non-negative) → keep
+             * flag latched and steering_cmd preserved.
+             *
+             * Without this gate, the port unconditionally cleared
+             * steering_cmd to 0 whenever the steer-ramp aligned with the
+             * route — including under Programs B/D's forward-thrust
+             * acceleration phase. Result: AI accelerated forward but
+             * steering was zeroed → couldn't turn into the next corner.
+             * Visible symptom: "AI accelerates forward after wall hit
+             * recovery but doesn't steer" (user report 2026-05-11).
+             * [CONFIRMED via Ghidra audit @ 0x004371D5 CMP [ESI+0x6C],EBX;
+             *  JGE 0x004371E7 — both writes inside the `< 0` block.] */
+            if ((int32_t)rs[RS_SCRIPT_OFFSET_PARAM] < 0) {
+                rs[RS_SCRIPT_FLAGS] &= ~0x04;
+                ACTOR_I32(actor, ACTOR_STEERING_CMD) = 0;
+            }
         } else {
             /* Apply leftward steering: +0x4000 per tick, max 0x19000.
              * [CONFIRMED @ 0x004370A0] original falls through to opcode
@@ -1620,8 +1637,14 @@ int td5_ai_advance_track_script(int *rs) {
         int32_t hdelta = (heading - route_heading) & 0xFFF;
 
         if (hdelta < 0x201 || hdelta > 0xDFF) {
-            rs[RS_SCRIPT_FLAGS] &= ~0x08;
-            ACTOR_I32(actor, ACTOR_STEERING_CMD) = 0;
+            /* Same gating as flag 0x04 — original @ 0x004372A0-0x004372B1
+             * gates flag clear + steering_cmd=0 on `RS_SCRIPT_OFFSET_PARAM <
+             * 0`. Programs A/C (offset -32) clear; Programs B/D (offset
+             * +64) keep accumulated steering. */
+            if ((int32_t)rs[RS_SCRIPT_OFFSET_PARAM] < 0) {
+                rs[RS_SCRIPT_FLAGS] &= ~0x08;
+                ACTOR_I32(actor, ACTOR_STEERING_CMD) = 0;
+            }
         } else {
             /* [CONFIRMED @ 0x004370A0] symmetric mirror of flag 0x04 —
              * no return 0 in original. */
