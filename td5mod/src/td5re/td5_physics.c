@@ -1047,18 +1047,22 @@ void td5_physics_update_player(TD5_Actor *actor)
              * when driving straight and killed all braking force. */
             int32_t bf = (brake_front * throttle) >> 8;
             {
-                int32_t abs_bf = bf < 0 ? -bf : bf;
-                /* Faithful clamp against velocity projected onto the steered-
-                 * front-wheel axis [CONFIRMED @ 0x404441-0x404481]:
-                 *   uVar37 ≈ (cos(yaw+steer)*vz + sin(yaw+steer)*vx) >> 12
-                 * When steer=0 this equals v_long (straight-line brake works
-                 * at full strength). When steering, the projection shrinks by
-                 * roughly cos(steer), naturally weakening brake during turns —
-                 * matching the original's behavior. The yaw-rate sub-term
-                 * (sin(steer)*tuning[0x28]*avy)/0x28C is omitted — port sign
-                 * conventions differ from the binary's and getting the correction
-                 * right requires a sign audit. Cap doubled to 2x for user-
-                 * preferred stronger feel; remove the <<1 for full RE parity. */
+                /* Faithful brake-magnitude/direction clamp matching original
+                 * UpdatePlayerVehicleDynamics @ 0x004044*. Decompiled form:
+                 *   iVar11 = -bf;
+                 *   if (-vsa <= -bf) iVar11 = -vsa;
+                 *   if (bf <= iVar11) {
+                 *     bf = -bf;
+                 *     if (-vsa <= -bf) bf = -vsa;
+                 *   }
+                 * Net effect: output magnitude = min(|bf|,|vsa|), output sign
+                 * OPPOSES v_steer_axis when bf opposes vsa. The port previously
+                 * preserved bf's throttle sign, which made AI brake on a
+                 * backward-moving car ACCELERATE backward (negative wheel torque
+                 * on negative velocity) — the actual "reverses nonstop" trap
+                 * after the brake→REVERSE workaround engaged. The original's
+                 * formula correctly produces forward wheel torque to decelerate
+                 * backward motion. */
                 int32_t steer_angle = -(actor->steering_command >> 8);
                 int32_t steer_h = (heading + steer_angle) & 0xFFF;
                 int32_t cos_sh = cos_fixed12(steer_h);
@@ -1076,10 +1080,16 @@ void td5_physics_update_player(TD5_Actor *actor)
                     v_steer_axis -= yaw_corr;
                 }
 
-                int32_t abs_vsa = v_steer_axis < 0 ? -v_steer_axis : v_steer_axis;
-                int32_t cap = abs_vsa;  /* RE parity: no <<1 doubling */
-                int32_t clamped = abs_bf < cap ? abs_bf : cap;
-                bf = (bf < 0) ? -(int32_t)clamped : (int32_t)clamped;
+                int32_t neg_bf  = -bf;
+                int32_t neg_vsa = -v_steer_axis;
+                int32_t lim = neg_bf;
+                if (neg_vsa <= neg_bf) lim = neg_vsa;
+                if (bf <= lim) {
+                    bf = neg_bf;
+                    if (neg_vsa <= neg_bf) {
+                        bf = neg_vsa;
+                    }
+                }
             }
             wheel_drive[0] = 0;
             wheel_drive[1] = 0;
