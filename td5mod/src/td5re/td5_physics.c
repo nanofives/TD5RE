@@ -6097,6 +6097,12 @@ int32_t td5_physics_compute_drive_torque(TD5_Actor *actor)
     int32_t gear_ratio = (int32_t)PHYS_S(actor, 0x2E + gear * 2);
     torque = (torque * gear_ratio) >> 8;
 
+    if (actor->slot_index == 0 && (actor->frame_counter % 30u) == 0u) {
+        TD5_LOG_I(LOG_TAG,
+            "DT slot0: rpm=%d gear=%d thr=%d gr=%d tm=%d t0=%d t1=%d frac=%d torque=%d",
+            rpm, gear, throttle, gear_ratio, torque_mult, t0, t1, frac, torque);
+    }
+
     return torque;
 }
 
@@ -6679,7 +6685,30 @@ static void bind_default_vehicle_tuning(TD5_Actor *actor, int slot)
      * Note: the original ALSO gates on game_type==0 (SINGLE_RACE), but
      * the port's slots 1..5 in other modes have always used the AI
      * template here; preserving that until a separate audit pass. */
+    /* PlayerIsAI=1 (port-only test flag) sets slot 0's state to 0 BEFORE the
+     * tuning binding fires. That makes the next gate think slot 0 is a normal
+     * AI car and copies the AI template over Viper's carparam — giving slot 0
+     * a 17% higher torque_mult (140 vs 120 post-NORMAL-scaling) and 32%
+     * higher gear ratios than its actual car. The resulting +54% drive_torque
+     * overshoots the original's frida_force_player_ai parity baseline
+     * (slot_state hacked AFTER init, so tuning stays bound to Viper carparam)
+     * by ~41% in vlong growth from tick 1, which is what triggers the
+     * Edinburgh "launches off road bumps and floats" symptom.
+     *
+     * Gate exception: when slot 0 is AI because of PlayerIsAI=1, skip the AI
+     * template copy and let the carparam fallback below run. That makes
+     * PlayerIsAI=1 parity-comparable to running force_player_ai.js on
+     * TD5_d3d.exe with the same car. Slots 1..5 still get the AI template
+     * (matches original behaviour for genuine AI racers).
+     *
+     * [Edinburgh 2026-05-11: original force_player_ai run reports
+     * rpm=5985 torque_mult=120 gear_ratio=1398 drive_torque=655 at tick 1;
+     * port pre-fix reported 7185/140/1850/1011. With this gate the port
+     * should produce Viper-carparam values matching the original.] */
+    int is_player_is_ai_slot0 = (slot == 0 && g_td5.ini.player_is_ai);
+
     if (slot < TD5_MAX_RACER_SLOTS && g_race_slot_state[slot] == 0 &&
+        !is_player_is_ai_slot0 &&
         !(g_td5.drag_race_enabled && slot == 1 && s_carparam_loaded[slot])) {
         uint8_t *ai_tmpl = td5_ai_get_physics_template();
         if (ai_tmpl) {
