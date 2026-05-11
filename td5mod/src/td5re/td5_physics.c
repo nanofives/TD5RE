@@ -6280,6 +6280,22 @@ void td5_physics_init_vehicle_runtime(void)
 
         bind_default_vehicle_tuning(actor, slot);
 
+        /* AI racer slots default to AUTOMATIC gearbox (actor+0x378 = 1).
+         * The original sets 0x378 from input bits in UpdatePlayerVehicleControlState
+         * (single write site @ 0x00402e97), which never runs for AI cars; their
+         * 0x378 stays at its post-allocation value. AI cars never hit microbump
+         * gear-shift opportunities here in the port because the brake→REVERSE
+         * workaround at td5_physics_compute_drive_forces fires on every stuck
+         * stop, and the manual-gearbox dispatch only flips throttle sign without
+         * upshifting back from REVERSE — locking AI cars in nonstop reverse
+         * after any recovery brake. Setting 0x378=1 here routes them through
+         * td5_physics_auto_gear_select_no_kick which handles REVERSE→FIRST when
+         * positive throttle resumes. For slot 0 with PlayerIsAI=0, the human
+         * input path overwrites 0x378 each tick, so this init is a no-op. */
+        if (slot < TD5_MAX_RACER_SLOTS) {
+            *((uint8_t *)actor + 0x378) = 1;
+        }
+
         /* Traffic-only: force cdef+0x88 (mass) to 0x20 regardless of what
          * carparam.dat supplies. Mirrors the original's init-time write at
          * 0x0042F235 (`MOV word ptr [EAX + 0x88], 0x0020`). Without this,
