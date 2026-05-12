@@ -2930,24 +2930,34 @@ static void collision_detect_simple(TD5_Actor *a, TD5_Actor *b)
     /* Only apply if closing (dot < 0) */
     if (v_dot >= 0) return;
 
-    /* Apply half closing velocity / 16 as impulse */
-    int32_t impulse = (-v_dot) >> 5;  /* /32 = half/16 */
+    /* Faithful port of ResolveSimpleActorSeparation @ 0x00408F70
+     * [CONFIRMED 2026-05-12 via Ghidra decomp]:
+     *   iVar6 = (nx_12bit * v_proj_16) / 32
+     *   A->vel += iVar6;  B->vel -= iVar6;
+     * No mass divide in orig. Operand order is multiply-then-divide so the
+     * small projection magnitude doesn't truncate to zero.
+     *
+     * Previous port did `impulse = -v_dot >> 5` FIRST (truncating tiny
+     * closing-velocity projections to 0 or -1), then `imp_x = (impulse * nx)
+     * >> 12`, then divided by mass. That made the impulse ~260x weaker than
+     * orig at typical race speeds (orig: ~6 wu/tick separation; port: 0.023
+     * wu/tick). Cars in continuous grounded contact (slot 0+slot 4 logged
+     * 31k V2V events on Moscow) never decelerated enough to separate.
+     *
+     * Scale match: orig stores rel_v as int16 (vel>>8). Port keeps 24.8 FP.
+     * v_dot_port = v_dot_orig * 256, so divide by 8192 (instead of orig's 32)
+     * to land on the same 24.8 FP delta magnitude. */
+    int32_t impulse_scalar = -v_dot;  /* positive when closing, in 24.8 FP */
+    int32_t delta_x = (nx * impulse_scalar) >> 13;
+    int32_t delta_y = (ny * impulse_scalar) >> 13;
+    int32_t delta_z = (nz * impulse_scalar) >> 13;
 
-    int32_t mass_a = (int32_t)CDEF_S(a, 0x88);
-    int32_t mass_b = (int32_t)CDEF_S(b, 0x88);
-    if (mass_a <= 0) mass_a = 0x20;
-    if (mass_b <= 0) mass_b = 0x20;
-
-    int32_t imp_x = (impulse * nx) >> 12;
-    int32_t imp_y = (impulse * ny) >> 12;
-    int32_t imp_z = (impulse * nz) >> 12;
-
-    a->linear_velocity_x += imp_x / mass_a;
-    a->linear_velocity_y += imp_y / mass_a;
-    a->linear_velocity_z += imp_z / mass_a;
-    b->linear_velocity_x -= imp_x / mass_b;
-    b->linear_velocity_y -= imp_y / mass_b;
-    b->linear_velocity_z -= imp_z / mass_b;
+    a->linear_velocity_x += delta_x;
+    a->linear_velocity_y += delta_y;
+    a->linear_velocity_z += delta_z;
+    b->linear_velocity_x -= delta_x;
+    b->linear_velocity_y -= delta_y;
+    b->linear_velocity_z -= delta_z;
 }
 
 /* ========================================================================
