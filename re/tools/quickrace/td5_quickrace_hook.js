@@ -391,12 +391,67 @@ function install() {
     log('quickrace: UpdateRaceActors player_is_ai hook installed (cfg-gated at runtime)');
 }
 
+// =========================================================================
+// Optional harness ergonomics — only installed when cfg.harness_quiet is true
+// (set via diff_race --harness-quiet or the JSON cfg post). Each hook is
+// failure-isolated: a throw here MUST NOT prevent the race-entry hooks below
+// from being installed. Without this isolation, a transient resolve failure
+// would silently leave the original sitting in the frontend forever.
+// =========================================================================
+function installHarnessMute() {
+    try {
+        function killDsCreate(modName, expName) {
+            var p = Module.findExportByName(modName, expName);
+            if (!p) return false;
+            Interceptor.replace(p, new NativeCallback(function () {
+                return 0x88780014; // DSERR_NODRIVER
+            }, 'int32', ['pointer', 'pointer', 'pointer']));
+            return true;
+        }
+        var any = false;
+        if (killDsCreate("dsound.dll", "DirectSoundCreate8")) any = true;
+        if (killDsCreate("dsound.dll", "DirectSoundCreate"))  any = true;
+        log('quickrace: harness mute ' + (any ? 'installed' : 'SKIPPED (dsound not loaded)'));
+    } catch (e) {
+        log('quickrace: harness mute threw: ' + e.message + ' — continuing');
+    }
+}
+
+function installHarnessWindow() {
+    try {
+        var createW = Module.findExportByName("user32.dll", "CreateWindowExA");
+        var setPos  = Module.findExportByName("user32.dll", "SetWindowPos");
+        if (!createW || !setPos) {
+            log('quickrace: harness window resize SKIPPED (user32 exports missing)');
+            return;
+        }
+        var setWindowPos = new NativeFunction(setPos, 'int32',
+            ['pointer', 'pointer', 'int32', 'int32', 'int32', 'int32', 'uint32']);
+        Interceptor.attach(createW, {
+            onLeave: function (retval) {
+                try {
+                    if (retval.isNull()) return;
+                    setWindowPos(retval, NULL, 50, 50, 640, 480, 0x34);
+                } catch (_) {}
+            }
+        });
+        log('quickrace: harness window resize installed (640x480 at +50,+50)');
+    } catch (e) {
+        log('quickrace: harness window resize threw: ' + e.message + ' — continuing');
+    }
+}
+
 // Install hooks synchronously at script load time (before frida.resume) so all
 // Interceptor entries are in place before the first instruction runs.
 // cfg is populated with defaults above; recv('cfg') below updates it in-place
 // before ScreenMainMenuAnd1PRaceFlow fires (game init takes ~1-2 s), so the
 // replacement function always reads the correct scenario values.
 log('quickrace: script loaded, installing hooks with default cfg');
+// Harness ergonomics first — failure-isolated so they cannot prevent install()
+// from setting up the race-entry hooks. Both are no-ops if the relevant
+// exports aren't resolvable yet (dsound loads after WinMain).
+installHarnessMute();
+installHarnessWindow();
 install();
 
 recv('cfg', function (msg) {
