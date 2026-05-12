@@ -2646,10 +2646,16 @@ void td5_track_update_actor_position(TD5_Actor *actor)
     pos_x = *(int32_t *)((uint8_t *)actor + 0x1FC); /* world_pos.x */
     pos_z = *(int32_t *)((uint8_t *)actor + 0x204); /* world_pos.z */
 
-    /* Chassis walker: keep multi-step iteration (single_step=0) so the chassis
-     * span can catch up after large per-tick world_pos jumps (V2V push,
-     * spawn). Per-wheel walker uses single_step=1 below. */
-    update_position_recursive(track_state, pos_x, pos_z, 0, /*single_step=*/0);
+    /* Chassis walker: single-pass per call (single_step=1) — matches original
+     * 0x004440F0 which has NO outer loop, every case returns immediately.
+     * [Ghidra-verified 2026-05-12]. Earlier port used multi-pass iteration
+     * (single_step=0) which over-advanced 3 spans/call at Edinburgh span
+     * 259-260, producing bimodal contact_y → +51k vy y-snap launch chain
+     * that cascaded into the AI tumbling for the rest of the lap. Single-
+     * pass restores faithful behavior; under the original spec the chassis
+     * walker incurs at most a 1-tick lag after V2V push / spawn jumps,
+     * which the next-tick call resolves. */
+    update_position_recursive(track_state, pos_x, pos_z, 0, /*single_step=*/1);
 
     if ((uintptr_t)actor == (uintptr_t)0x004AB108u) {
         s_actor_position_log_counter++;
