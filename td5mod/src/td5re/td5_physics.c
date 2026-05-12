@@ -5518,8 +5518,38 @@ void td5_physics_refresh_wheel_contacts(TD5_Actor *actor)
                       actor->wheel_contact_bitmask);
         }
 
-        /* Store high-res wheel world position */
-        actor->wheel_world_positions_hires[i] = actor->wheel_contact_pos[i];
+        /* Store high-res wheel world position.
+         *
+         * [FIXED 2026-05-12 via Ghidra audit of 0x00403720]: the original
+         * runs TransformShortVec3ByRenderMatrixRounded TWICE — once with
+         * body_y = (cwy - sp/256 - preload) writing wheel_contact_pos
+         * (the ground-contact point), then ADDS BACK preload to body_y
+         * (giving cwy - sp/256) and transforms AGAIN, writing that to
+         * field_0x298 = wheel_world_positions_hires (the wheel hub).
+         *
+         * The two transforms produce DIFFERENT world X and Z because
+         * rot[1] * preload contributes to the rotated X and Z when the
+         * chassis is pitched/rolled. The port previously aliased
+         * wheel_world_positions_hires = wheel_contact_pos, missing this
+         * rot[1]*preload offset (~5-15 fp units at typical pitch angles
+         * for Viper's preload, accumulating into wrong suspension lever
+         * arms in td5_physics_integrate_suspension).
+         *
+         * Second transform: input body_y_no_preload = wy + href_preload
+         * (where wy already had the preload subtracted at line 5295).
+         * Same float multiplication path, same render_pos add, same <<8. */
+        {
+            float wy_hub = (float)(int32_t)(int16_t)(wy + href_preload);
+            float hub_bx = rot[0] * (float)wx + rot[1] * wy_hub + rot[2] * (float)wz;
+            float hub_by = rot[3] * (float)wx + rot[4] * wy_hub + rot[5] * (float)wz;
+            float hub_bz = rot[6] * (float)wx + rot[7] * wy_hub + rot[8] * (float)wz;
+            int32_t hub_x = (int32_t)lrintf(hub_bx + actor->render_pos.x);
+            int32_t hub_y = (int32_t)lrintf(hub_by + actor->render_pos.y);
+            int32_t hub_z = (int32_t)lrintf(hub_bz + actor->render_pos.z);
+            actor->wheel_world_positions_hires[i].x = hub_x << 8;
+            actor->wheel_world_positions_hires[i].y = hub_y << 8;
+            actor->wheel_world_positions_hires[i].z = hub_z << 8;
+        }
 
         /* Copy to probe_FL/FR/RL/RR (0x090) for wall contact detection.
          * The original RefreshVehicleWheelContactFrames writes both 0x0F0
