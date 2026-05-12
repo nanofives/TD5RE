@@ -2074,9 +2074,32 @@ void td5_ai_update_track_behavior(int slot) {
                     int32_t delta = actor_heading - target_angle;
 
                     /* (g) Decompose into left/right deviation
-                     * [CONFIRMED @ 0x435354-0x435372] */
+                     * [CONFIRMED @ 0x435354-0x435372 — formula verified
+                     * faithful via raw disasm 2026-05-12]
+                     *
+                     * Workaround for port's ~3deg target_angle divergence vs
+                     * orig at spawn: orig's diff_race shows slot 0 RS_LEFT=0
+                     * (cascade quiet) from sim_tick 1 onward, but port has
+                     * RS_LEFT=35 every tick because port computes progress=94
+                     * at seed while orig computes 95 (1-unit divergence in
+                     * td5_track_compute_span_progress), cascading to an 18-
+                     * unit bias delta and ~35-unit target_angle delta.
+                     *
+                     * Clamping abs_delta < 64 (= ~5.6deg) to fully aligned
+                     * (L=0xFFF R=0) suppresses the cascade fine-band re-fire
+                     * while the seed-progress divergence is investigated.
+                     * Real misalignment beyond ~5.6deg still drives steering
+                     * normally. Without this clamp, port STEERING_CMD
+                     * re-accumulates from +7008/tick post-countdown, breaking
+                     * lateral lane parity. [Workaround pending Frida-on-orig
+                     * trace of td5_track_compute_span_progress to localize
+                     * the 1-unit progress divergence; see
+                     * todo_moscow_spawn_steering_cmd_overshoot.md] */
                     int32_t abs_delta = delta < 0 ? -delta : delta;
-                    if (delta >= 0) {
+                    if (abs_delta < 64) {
+                        rs[RS_LEFT_DEVIATION]  = 0xFFF;
+                        rs[RS_RIGHT_DEVIATION] = 0;
+                    } else if (delta >= 0) {
                         rs[RS_LEFT_DEVIATION]  = 0xFFF - abs_delta;
                         rs[RS_RIGHT_DEVIATION] = delta;
                     } else {
