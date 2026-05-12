@@ -3320,8 +3320,14 @@ int64_t td5_track_compute_span_progress(int span_index, const int32_t *actor_pos
     dX = end_x - start_x;
     dZ = end_z - start_z;
 
-    /* Span length via float sqrt [CONFIRMED @ 0x00434602] */
-    span_len = (int)sqrtf((float)(dX * dX + dZ * dZ));
+    /* Span length via sqrt [CONFIRMED @ 0x00434602: FILD/FSQRT/__ftol].
+     * Orig uses x87 FPU 80-bit precision then truncates via __ftol. Port
+     * originally used sqrtf (32-bit float) which lost precision on edge
+     * cases — at Moscow span 111 this produced port_progress=94 vs orig=95
+     * (1-unit divergence cascading to bias delta and target_angle delta and
+     * RS_LEFT_DEVIATION=35 per-tick cascade re-fire). Switching to sqrt
+     * (64-bit double) closes the precision gap. */
+    span_len = (int)sqrt((double)(dX * dX + dZ * dZ));
     if (span_len == 0) return 0;
 
     ax = actor_pos[0] >> 8;  /* strip 24.8 FP to integer world [CONFIRMED @ 0x00434631] */
@@ -3383,7 +3389,9 @@ int32_t td5_track_compute_signed_offset(int span_index, int progress, int route_
     v = (end_z - start_z) * delta;
     dZ_sc = (v + ((v >> 31) & 0xFF)) >> 8;
 
-    len = (int)sqrtf((float)(dX_sc * dX_sc + dZ_sc * dZ_sc));
+    /* sqrt: use double precision to match orig FPU 80-bit truncation
+     * (same precision issue as in compute_span_progress). */
+    len = (int)sqrt((double)(dX_sc * dX_sc + dZ_sc * dZ_sc));
 
     /* Sign from comparison [CONFIRMED @ 0x004346f5] */
     return (progress < route_byte) ? -len : len;
