@@ -2694,7 +2694,31 @@ static void tick_race_countdown(void)
         /* XZ freeze setter intentionally not called — see init_race_session
          * note; DAT_00483030 is unused in the original. */
         s_race_countdown_state = 0;
-        TD5_LOG_I(LOG_TAG, "Race countdown complete: GO");
+
+        /* Match orig observed post-countdown state: STEERING_CMD = 0 at
+         * sim_tick 1. Diff_race 2026-05-12 (physics_full+track profile,
+         * Moscow PlayerIsAI=1) showed port slot 0 STEERING_CMD = 47680 at
+         * sim_tick 1 vs orig = 0 — accumulated by cascade fine-band firing
+         * +7008/tick during countdown because RS_LEFT_DEVIATION = 35 at
+         * spawn (not 0). orig has the same cascade fire briefly during
+         * countdown (steering=49152 captured at one mid-countdown emit row)
+         * but ends countdown with STEERING_CMD = 0 via some path I could
+         * not statically localize without Frida traces on the orig binary.
+         *
+         * This explicit zero at the countdown→race transition mirrors
+         * the observed effect: port slot 0 ang_yaw + position trajectory
+         * should align with orig from sim_tick 1 onward. If a later /fix
+         * audit finds the actual orig mechanism, replace this with the
+         * faithful path. [TODO: locate orig 0x????? STEERING_CMD reset
+         * via Frida hook on actor+0x30C writes during countdown]. */
+        for (int slot = 0; slot < TD5_MAX_RACER_SLOTS; ++slot) {
+            char *a = (char *)td5_game_get_actor(slot);
+            if (!a) continue;
+            *(int32_t *)(a + 0x30C) = 0;
+            *(int16_t *)(a + 0x33A) = 0; /* steering ramp accumulator */
+        }
+
+        TD5_LOG_I(LOG_TAG, "Race countdown complete: GO (STEERING_CMD zeroed)");
         return;
     }
 
