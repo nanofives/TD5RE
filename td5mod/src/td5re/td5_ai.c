@@ -23,6 +23,7 @@
 #include "td5_track.h"
 #include "td5_physics.h"
 #include "td5_platform.h"
+#include "td5_trace.h"
 #include "td5re.h"
 #include <string.h>
 #include <math.h>
@@ -42,17 +43,16 @@
 #define RS_ROUTE_TABLE_PTR        0x00
 #define RS_ROUTE_TABLE_SELECTOR   0x03
 #define RS_DEFAULT_THROTTLE       0x04
-/* RS dword 0x0B (byte 0x2C) per Ghidra: gActorRouteStateTable+0x2C =
- * DAT_004afb84[slot*0x47] [CONFIRMED @ 0x00434332]. Previously 0x09 in the
- * port — confirmed wrong via Frida target_probe on Moscow TT slot 0:
- *   port:     dx=-2111 dz=4658  (target on LEFT of actor)
- *   original: dx=+4722 dz=2136  (target on RIGHT of actor)
- * Because the bias was stored in port RS[0x09] but original reads RS[0x0B],
- * the port's SampleTrackTargetPoint received a different lateral_bias than
- * the original, shifting the target sample point and flipping the sign of
- * dx. Downstream this produced ~10× the steering bias on slot 0 in solo
- * scenarios. Fix: align the port to the original's storage convention. */
-#define RS_TRACK_OFFSET_BIAS      0x0B
+/* RS dword 0x09 (byte 0x24) per Ghidra: DAT_004afb84 (0x004afb84) is the
+ * per-slot lateral_bias array. With gActorRouteStateTable base = 0x004afb60,
+ * `0x4afb84 - 0x4afb60 = 0x24` bytes = dword index 9.
+ * [CONFIRMED via Ghidra symbol audit pass 2026-05-11 cross-checking stride
+ * against DAT_004afbb0 (+0x50 = index 20 = RS_ACTIVE_LOWER_BOUND) and
+ * gActorTrackSpanProgress (+0x64 = index 25 = RS_TRACK_PROGRESS).]
+ *
+ * A prior port revision used 0x0B with a comment that computed the offset
+ * as 0x2C — that arithmetic is wrong (0x84 - 0x60 = 0x24, not 0x2C). */
+#define RS_TRACK_OFFSET_BIAS      0x09
 #define RS_LEFT_BOUNDARY_A        0x0E
 #define RS_LEFT_BOUNDARY_B        0x0F
 #define RS_RIGHT_BOUNDARY_A       0x10
@@ -1164,29 +1164,27 @@ int td5_ai_update_route_threshold(int slot) {
 
     /* Read the route speed-threshold byte for the current span.
      * Route table: route[span*3 + 2] = threshold byte.
-     * 0x00 = emergency, 0x01-0xFE = scaled, 0xFF = no limit. */
+     * 0x00 = emergency, 0x01-0xFE = scaled, 0xFF = no limit.
+     *
+     * Original UpdateActorRouteThresholdState @ 0x00434AB9 reads
+     * `actor[+0x82] * 3 + 2 + RS[0]` — SPAN_NORMALIZED, NOT raw +0x80.
+     * On junction-remap spans (Moscow span ~498, Newcastle circuit
+     * wrap), RAW and NORMALIZED diverge by thousands; reading the
+     * wrong byte triggered emergency-brake or scaled-throttle on
+     * genuinely mid-corner locations and drove AI toward the outer
+     * wall. The look-ahead path at td5_ai.c:1854 already uses
+     * NORMALIZED; this reader was the last RAW consumer in the AI
+     * tick. [CONFIRMED via Ghidra disassembly @ 0x00434AA0–0x00434AB9
+     * — MOVSX EAX, word ptr [actor+0x82] is the only span source]. */
     int32_t *route_table = (int32_t *)rs[RS_ROUTE_TABLE_PTR];
-    int16_t span = ACTOR_I16(actor, ACTOR_SPAN_RAW);
+    int16_t span = ACTOR_I16(actor, ACTOR_SPAN_NORMALIZED);
     int threshold = 0xFF; /* default: no limit */
-    int heading_byte = 0; /* route-heading byte, used as junction sentinel */
 
     if (route_table) {
         uint8_t *route_bytes = (uint8_t *)route_table;
         threshold = route_bytes[span * 3 + 2];
-        heading_byte = route_bytes[span * 3 + 1];
     }
-
-    /* Junction-zone override: if the route-heading byte is near-zero, this
-     * span is a route TRANSITION zone (e.g. Moscow RIGHT.TRK around span
-     * 498 where rb[span*3+1] = 1). The threshold byte at such spans is
-     * also zero/near-zero, which would trigger emergency brake or scaled
-     * slowdown on genuinely mid-track locations. Treat junction-zone
-     * spans as "no limit" and let the AI accelerate through.
-     * Port-only guard; the original either tolerates this via a different
-     * routing/recovery interaction or has meaningful data at these bytes. */
-    if (heading_byte < 4) {
-        threshold = 0xFF;
-    }
+    TD5_LOG_D(LOG_TAG, "route_threshold: slot=%d span_norm=%d thr=0x%02X", slot, span, threshold);
 
     if (threshold == 0x00) {
         /* Emergency stop: full brake if forward > 0x80 and speed < 0x10000
@@ -1422,12 +1420,29 @@ void td5_ai_update_track_offset_bias(int slot) {
         if (rs[RS_TRACK_OFFSET_BIAS] > 0x600)  rs[RS_TRACK_OFFSET_BIAS] = 0x600;
         if (rs[RS_TRACK_OFFSET_BIAS] < -0x600) rs[RS_TRACK_OFFSET_BIAS] = -0x600;
 
+    } else {
+        /* No peer in range: decay bias toward zero by 8/tick.
+         * [CONFIRMED @ 0x0043494C-0x0043498D] When FindActorTrackOffsetPeer
+         * returns the actor's own slot (port translates this to peer < 0),
+         * the original runs two parallel `+=8 / -=8` adjustments with a
+         * cross-clamp at zero. Per-tick magnitude change: 8.
+         *
+         * The port previously left bias unchanged in this case, citing
+         * "lane-spread fix". With this decay restored and ±0x600 clamp
+         * retained, seeded biases reduce gradually when peers separate,
+         * matching the original's transient behaviour. The ±0x600 clamp
+         * itself is port-only (no Ghidra counterpart) but is kept as a
+         * stabilizer — empirical 2026-05-11: clamp removal caused all 6
+         * AI slots to crash within 200-400 ticks. */
+        if (rs[RS_TRACK_OFFSET_BIAS] < 0) {
+            rs[RS_TRACK_OFFSET_BIAS] += 8;
+            if (rs[RS_TRACK_OFFSET_BIAS] > 0) rs[RS_TRACK_OFFSET_BIAS] = 0;
+        }
+        if (rs[RS_TRACK_OFFSET_BIAS] > 0) {
+            rs[RS_TRACK_OFFSET_BIAS] -= 8;
+            if (rs[RS_TRACK_OFFSET_BIAS] < 0) rs[RS_TRACK_OFFSET_BIAS] = 0;
+        }
     }
-    /* No peer in range: leave bias unchanged.
-     * Original has an 8/tick decay-toward-zero when FindActorTrackOffsetPeer
-     * returns self-slot, but the port uses -1 for "no peer" which skips that
-     * path. The decay was confirmed to zero seeded biases during the ~386-tick
-     * countdown; keeping it disabled preserves the lane-spread fix. */
 }
 
 /* ========================================================================
@@ -1459,12 +1474,34 @@ void td5_ai_seed_actor_track_progress_offset(int slot)
     /* Store progress [CONFIRMED @ 0x00434313: gActorTrackSpanProgress[slot*0x47]] */
     rs[RS_TRACK_PROGRESS] = progress;
 
-    /* Route byte from route table at span_norm * 3 [CONFIRMED @ 0x00434327] */
+    /* Route byte from route table at span_norm * 3 [CONFIRMED @ 0x00434327].
+     *
+     * BUT — at seed time during InitializeRaceSession, the ORIGINAL reads
+     * actor->field_0x82 (span_norm) BEFORE it has been populated from the
+     * spawn world position. The field still holds its zero/uninitialized
+     * value. The port had this field set before this seed runs, causing
+     * port to read route_table[286*3]=76 while original reads
+     * route_table[0*3]=106 (Frida-confirmed: all 6 slots get
+     * route_byte=106 during init).
+     *
+     * Result of port bug: port's seed for slot 0 produces bias=+443
+     * (progress=95 > route_byte=76 → positive); original produces
+     * bias=-297 (progress=95 < route_byte=106 → negative). Same sign-flip
+     * for slots 2 and 4. The wrong-signed bias shifts the AI's look-ahead
+     * target to the wrong side, producing the visible "AI steers slightly
+     * left into the wall" symptom on Moscow.
+     *
+     * Faithful port: read route_table[0] (matches original's
+     * uninitialized-span_norm read at seed time).
+     * [Frida-confirmed 2026-05-11: 36 init-phase ComputeSignedTrackOffset
+     * calls all pass route_byte=106 regardless of span_raw {277..292};
+     * port's per-span route_byte 75-79 was the bug.] */
     const uint8_t *route_bytes = (const uint8_t *)(intptr_t)rs[RS_ROUTE_TABLE_PTR];
     int route_byte = 0;
-    if (route_bytes && span_norm >= 0) {
-        route_byte = (int)route_bytes[(size_t)(unsigned)span_norm * 3u];
+    if (route_bytes) {
+        route_byte = (int)route_bytes[0];
     }
+    (void)span_norm;
 
     /* Store signed lateral offset [CONFIRMED @ 0x00434332: DAT_004afb84[slot*0x47]] */
     {
@@ -1502,234 +1539,277 @@ void td5_ai_seed_actor_track_progress_offset(int slot)
  * ======================================================================== */
 
 int td5_ai_advance_track_script(int *rs) {
+    /* Verbatim port of AdvanceActorTrackScript @ 0x004370A0.
+     * Order of operations matches the original byte-for-byte:
+     *   1. Countdown decrement + program rotation (A<->B, C<->D)
+     *   2. Flag 0x04 XOR Flag 0x08 (mutually exclusive)
+     *      ALIGNED branch: recompute LEFT/RIGHT_DEVIATION from combined
+     *      (steer_cmd + yaw_accum) and call UpdateActorSteeringBias(0x4000)
+     *   3. Flag 0x10 release-or-maintain — returns 0 unconditionally
+     *   4. Flag 0x02 brake/accel until speed threshold
+     *   5. Opcode switch (cases 0..11)
+     *
+     * The previous port handled flags in inverse order (0x10 → 0x02 →
+     * 0x04 → 0x08 → countdown → switch), skipped the LAB_004372cf
+     * deviation recompute, treated flag 4/8 independently, used bilateral
+     * aligned-tests, mishandled flag-2 threshold (4× off), did unconditional
+     * case-0 terminate, and never zeroed angular_velocity_yaw on terminate.
+     * All of those drove yaw rotation away from original. */
     int slot = rs[RS_SLOT_INDEX];
     char *actor = actor_ptr(slot);
-    int32_t flags = rs[RS_SCRIPT_FLAGS];
 
-    /* --- Process active flag effects before advancing IP --- */
-
-    /* Flag 0x10: Wait for speed near zero */
-    if (flags & 0x10) {
-        int32_t spd = ACTOR_I32(actor, ACTOR_LONGITUDINAL_SPEED);
-        if (spd < 0) spd = -spd;
-
-        if (spd < 0x100) {
-            /* Speed is near zero -- clear flag, clear override */
-            rs[RS_SCRIPT_FLAGS] &= ~0x10;
-            ACTOR_I16(actor, ACTOR_ENCOUNTER_STEER) = 0;
-            ACTOR_U8(actor, ACTOR_BRAKE_FLAG) = 0;
-        } else {
-            /* Still moving -- maintain brake */
-            ACTOR_I16(actor, ACTOR_ENCOUNTER_STEER) = (int16_t)(-0x100);
-            ACTOR_U8(actor, ACTOR_BRAKE_FLAG) = 1;
-            return 0; /* block */
-        }
-    }
-
-    /* Flag 0x02: Lateral offset tracking */
-    if (flags & 0x02) {
-        int32_t offset_param = rs[RS_SCRIPT_OFFSET_PARAM];
-        int32_t fwd = ACTOR_I32(actor, ACTOR_LONGITUDINAL_SPEED);
-
-        if (offset_param < 0) {
-            /* Negative offset -> brake */
-            if (fwd > (-offset_param << 8)) {
-                ACTOR_I16(actor, ACTOR_ENCOUNTER_STEER) = (int16_t)(-0x100);
-            } else {
-                ACTOR_I16(actor, ACTOR_ENCOUNTER_STEER) = 0;
-                rs[RS_SCRIPT_FLAGS] &= ~0x02;
-            }
-        } else {
-            /* Positive offset -> accelerate */
-            if (fwd < (offset_param << 8)) {
-                ACTOR_I16(actor, ACTOR_ENCOUNTER_STEER) = (int16_t)0xFF;
-            } else {
-                ACTOR_I16(actor, ACTOR_ENCOUNTER_STEER) = 0;
-                rs[RS_SCRIPT_FLAGS] &= ~0x02;
-            }
-        }
-    }
-
-    /* Flag 0x04: Steer left (toward route alignment) */
-    if (flags & 0x04) {
-        int32_t heading = ACTOR_I32(actor, ACTOR_YAW_ACCUM) >> 8;
-        int32_t route_heading = ai_route_heading_for_actor(rs, actor);
-        int32_t hdelta = (heading - route_heading) & 0xFFF;
-
-        if (hdelta < 0x201 || hdelta > 0xDFF) {
-            /* Within threshold: aligned -- clear flag */
-            rs[RS_SCRIPT_FLAGS] &= ~0x04;
-            ACTOR_I32(actor, ACTOR_STEERING_CMD) = 0;
-        } else {
-            /* Apply leftward steering: +0x4000 per tick, max 0x19000.
-             * [CONFIRMED @ 0x004370A0] original falls through to opcode
-             * switch after this increment — does NOT return 0. The
-             * previous `return 0` was port-fabricated and pinned
-             * STEERING_CMD at +0x19000 forever, preventing opcode 0
-             * (script-terminator) from ever clearing the script. */
-            int32_t sc = ACTOR_I32(actor, ACTOR_STEERING_CMD);
-            sc += 0x4000;
-            if (sc > 0x19000) sc = 0x19000;
-            ACTOR_I32(actor, ACTOR_STEERING_CMD) = sc;
-            TD5_LOG_I(LOG_TAG, "script_flag04: slot=%d sc=%d hdelta=0x%X",
-                      slot, sc, hdelta);
-        }
-    }
-
-    /* Flag 0x08: Steer right (opposite to route alignment) */
-    if (flags & 0x08) {
-        int32_t heading = ACTOR_I32(actor, ACTOR_YAW_ACCUM) >> 8;
-        int32_t route_heading = ai_route_heading_for_actor(rs, actor);
-        int32_t hdelta = (heading - route_heading) & 0xFFF;
-
-        if (hdelta < 0x201 || hdelta > 0xDFF) {
-            rs[RS_SCRIPT_FLAGS] &= ~0x08;
-            ACTOR_I32(actor, ACTOR_STEERING_CMD) = 0;
-        } else {
-            /* [CONFIRMED @ 0x004370A0] symmetric mirror of flag 0x04 —
-             * no return 0 in original. */
-            int32_t sc = ACTOR_I32(actor, ACTOR_STEERING_CMD);
-            sc -= 0x4000;
-            if (sc < -0x19000) sc = -0x19000;
-            ACTOR_I32(actor, ACTOR_STEERING_CMD) = sc;
-            TD5_LOG_I(LOG_TAG, "script_flag08: slot=%d sc=%d hdelta=0x%X",
-                      slot, sc, hdelta);
-        }
-    }
-
-    /* --- Countdown timer check: cycle to next program bank when expired --- */
+    /* ==== 1. Countdown decrement + program rotation [orig prologue] ==== */
     rs[RS_SCRIPT_COUNTDOWN]--;
     if (rs[RS_SCRIPT_COUNTDOWN] < 0) {
-        /* Round-robin through 4 program banks */
-        int bank = g_script_bank_index[slot];
-        bank = (bank + 1) & 3;
-        g_script_bank_index[slot] = bank;
-
-        rs[RS_SCRIPT_BASE_PTR] = (int32_t)(intptr_t)g_script_banks[bank];
-        rs[RS_SCRIPT_IP] = 0;
-        rs[RS_SCRIPT_FLAGS] = 0;
-        rs[RS_SCRIPT_COUNTDOWN] = 0x96; /* 150 frames */
+        intptr_t cur = (intptr_t)rs[RS_SCRIPT_BASE_PTR];
+        intptr_t next = cur;
+        if (cur == (intptr_t)g_script_program_a) {
+            next = (intptr_t)g_script_program_b;
+        } else if (cur == (intptr_t)g_script_program_b) {
+            next = (intptr_t)g_script_program_a;
+        } else if (cur == (intptr_t)g_script_program_c) {
+            next = (intptr_t)g_script_program_d;
+        } else if (cur == (intptr_t)g_script_program_d) {
+            next = (intptr_t)g_script_program_c;
+        }
+        /* Other base_ptr values (uninitialized / DAT_00473cc8 initial
+         * recovery) leave base/ip alone — only countdown resets. */
+        if (next != cur) {
+            rs[RS_SCRIPT_BASE_PTR] = (int32_t)next;
+            rs[RS_SCRIPT_IP]       = 0;
+        }
+        rs[RS_SCRIPT_COUNTDOWN] = 0x96;
     }
 
-    /* --- Fetch and execute the current opcode --- */
-    {
-        const int32_t *base = (const int32_t *)(intptr_t)rs[RS_SCRIPT_BASE_PTR];
-        int ip = rs[RS_SCRIPT_IP];
-        int32_t opcode;
+    /* ==== 2. Flag 0x04 / Flag 0x08 — MUTUALLY EXCLUSIVE in orig ==== */
+    int32_t flags        = rs[RS_SCRIPT_FLAGS];
+    int32_t heading      = ACTOR_I32(actor, ACTOR_YAW_ACCUM) >> 8;
+    int32_t route_heading = ai_route_heading_for_actor(rs, actor);
+    int32_t hdelta_raw   = (heading - route_heading) & 0xFFF;
+    int32_t hdelta_mirror = (int32_t)((-(int32_t)hdelta_raw) & 0xFFF);
+    int aligned_finalize = 0;
 
-        if (!base) return 1; /* no script active */
-
-        opcode = base[ip];
-        if (g_last_logged_opcode[slot] != opcode) {
-            TD5_LOG_I(LOG_TAG, "Script opcode change: slot=%d ip=%d opcode=%d flags=0x%X",
-                      slot, ip, opcode, rs[RS_SCRIPT_FLAGS]);
-            g_last_logged_opcode[slot] = opcode;
-        }
-
-        switch (opcode) {
-
-        case 0: /* Terminate/reset */
-            /* Clear script state */
-            rs[RS_SCRIPT_BASE_PTR] = 0;
-            rs[RS_SCRIPT_IP] = 0;
-            rs[RS_SCRIPT_SPEED_PARAM] = 0;
-            rs[RS_SCRIPT_FLAGS] = 0;
-            rs[RS_SCRIPT_FIELD_3E] = 0;
-            rs[RS_SCRIPT_FIELD_43] = 0;
-            ACTOR_I32(actor, ACTOR_STEERING_CMD) = 0;
-            return 1; /* script complete */
-
-        case 1: /* Set countdown timer */
-            rs[RS_SCRIPT_SPEED_PARAM] = base[ip + 1];
-            rs[RS_SCRIPT_FLAGS] |= 0x01;
-            rs[RS_SCRIPT_IP] = ip + 2;
-            break;
-
-        case 2: /* Set lateral offset target + flag 0x02 */
-            rs[RS_SCRIPT_FLAGS] |= 0x02;
-            rs[RS_SCRIPT_OFFSET_PARAM] = base[ip + 1];
-            rs[RS_SCRIPT_IP] = ip + 2;
-            break;
-
-        case 3: /* Set flag bits */
-            rs[RS_SCRIPT_FLAGS] |= base[ip + 1];
-            rs[RS_SCRIPT_IP] = ip + 2;
-            break;
-
-        case 4: /* Clear flag bits */
-            rs[RS_SCRIPT_FLAGS] &= ~base[ip + 1];
-            rs[RS_SCRIPT_IP] = ip + 2;
-            break;
-
-        case 5: /* Steer left: flag 0x04 */
-            rs[RS_SCRIPT_FLAGS] |= 0x04;
-            rs[RS_SCRIPT_IP] = ip + 1;
-            break;
-
-        case 6: /* Steer right: flag 0x08 */
-            rs[RS_SCRIPT_FLAGS] |= 0x08;
-            rs[RS_SCRIPT_IP] = ip + 1;
-            break;
-
-        case 7: /* Force brake: encounter_steering = -0x100 */
-            ACTOR_I16(actor, ACTOR_ENCOUNTER_STEER) = (int16_t)(-0x100);
-            ACTOR_U8(actor, ACTOR_BRAKE_FLAG) = 1;
-            rs[RS_SCRIPT_IP] = ip + 1;
-            break;
-
-        case 8: /* Stop and wait: flag 0x10 */
-            rs[RS_SCRIPT_FLAGS] |= 0x10;
-            ACTOR_I16(actor, ACTOR_ENCOUNTER_STEER) = (int16_t)(-0x100);
-            ACTOR_U8(actor, ACTOR_BRAKE_FLAG) = 1;
-            rs[RS_SCRIPT_IP] = ip + 1;
-            return 0; /* block until speed near zero */
-
-        case 9: { /* Auto-select program based on heading vs route geometry */
-            int32_t heading = ACTOR_I32(actor, ACTOR_YAW_ACCUM) >> 8;
-            int32_t hdelta = (heading - ai_route_heading_for_actor(rs, actor)) & 0xFFF;
-            uint8_t lane = ACTOR_U8(actor, ACTOR_SUB_LANE_INDEX);
-            const int32_t *selected;
-
-            /* Decision based on heading delta ranges and lane availability:
-             *   0x900-0xF00 + lane fits -> Program A (left recovery)
-             *   > 0x6FF + lane exceeds actor width -> Program B (right)
-             *   0x100-0x700 + lane fits -> Program C (right recovery)
-             *   default -> Program D (right back) */
-            if (hdelta >= 0x900 && hdelta <= 0xF00 && lane > 0) {
-                selected = g_script_program_a;
-            } else if (hdelta > 0x6FF && lane < 3) {
-                selected = g_script_program_b;
-            } else if (hdelta >= 0x100 && hdelta <= 0x700 && lane > 0) {
-                selected = g_script_program_c;
+    if ((flags & 0x04) == 0) {
+        if (flags & 0x08) {
+            /* Flag-8 aligned test: orig `0xDFF < mirror`. */
+            if (hdelta_mirror > 0xDFF) {
+                if ((int32_t)rs[RS_SCRIPT_OFFSET_PARAM] < 0) {
+                    ACTOR_I32(actor, ACTOR_STEERING_CMD) = 0;
+                    rs[RS_SCRIPT_FLAGS] ^= 0x08;
+                }
+                aligned_finalize = 1;
             } else {
-                selected = g_script_program_d;
+                int32_t sc = ACTOR_I32(actor, ACTOR_STEERING_CMD) - 0x4000;
+                if (sc < -0x19000) sc = -0x19000;
+                ACTOR_I32(actor, ACTOR_STEERING_CMD) = sc;
             }
-
-            rs[RS_SCRIPT_BASE_PTR] = (int32_t)(intptr_t)selected;
-            rs[RS_SCRIPT_IP] = 0;
-            rs[RS_SCRIPT_FLAGS] = 0;
-            rs[RS_SCRIPT_COUNTDOWN] = 0xFA; /* 250 frames */
-            break;
         }
-
-        case 10: /* Set flag 0x40 (latent) */
-            rs[RS_SCRIPT_FLAGS] |= 0x40;
-            rs[RS_SCRIPT_IP] = ip + 1;
-            break;
-
-        case 11: /* Set flag 0x80 (latent) */
-            rs[RS_SCRIPT_FLAGS] |= 0x80;
-            rs[RS_SCRIPT_IP] = ip + 1;
-            break;
-
-        default:
-            /* Unknown opcode: advance and terminate */
-            rs[RS_SCRIPT_IP] = ip + 1;
-            return 1;
+    } else {
+        /* Flag-4 aligned test: orig raw `< 0x201`. */
+        if (hdelta_raw < 0x201) {
+            if ((int32_t)rs[RS_SCRIPT_OFFSET_PARAM] < 0) {
+                ACTOR_I32(actor, ACTOR_STEERING_CMD) = 0;
+                rs[RS_SCRIPT_FLAGS] ^= 0x04;
+            }
+            aligned_finalize = 1;
+        } else {
+            int32_t sc = ACTOR_I32(actor, ACTOR_STEERING_CMD) + 0x4000;
+            if (sc > 0x19000) sc = 0x19000;
+            ACTOR_I32(actor, ACTOR_STEERING_CMD) = sc;
         }
     }
 
-    return 0; /* script still running */
+    if (aligned_finalize) {
+        /* LAB_004372cf — recompute RS_LEFT/RIGHT_DEVIATION from combined
+         * heading (steer_cmd + yaw_accum) and call steering-bias with
+         * weight 0x4000 (script-release path). Original formula:
+         *   dev = -((((combined>>8 - target) - 0x800) & 0xFFF) - 0x800) & 0xFFF) & 0xFFF
+         * Flow continues to flag-0x10 / flag-0x02 / opcode switch. */
+        int32_t combined = ACTOR_I32(actor, ACTOR_STEERING_CMD)
+                         + ACTOR_I32(actor, ACTOR_YAW_ACCUM);
+        int32_t combined_h = combined >> 8;
+        uint32_t d0 = ((uint32_t)(combined_h - route_heading) - 0x800U) & 0xFFF;
+        uint32_t d1 = (d0 - 0x800U) & 0xFFF;
+        uint32_t dev = ((uint32_t)(-(int32_t)d1)) & 0xFFF;
+        rs[RS_LEFT_DEVIATION]  = (int32_t)dev;
+        rs[RS_RIGHT_DEVIATION] = (int32_t)(0xFFF - dev);
+        td5_ai_update_steering_bias(rs, 0x4000);
+    }
+
+    /* Re-fetch flags (flag 4/8 path may have toggled bits). */
+    flags = rs[RS_SCRIPT_FLAGS];
+
+    /* ==== 3. Flag 0x10 — stop-and-wait; orig returns 0 on BOTH branches. */
+    if (flags & 0x10) {
+        int32_t lspd = ACTOR_I32(actor, ACTOR_LONGITUDINAL_SPEED);
+        if (lspd < 0x100 && lspd > -0x100) {
+            rs[RS_SCRIPT_FLAGS] = flags ^ 0x10;
+            ACTOR_U8(actor, ACTOR_BRAKE_FLAG) = 0;
+            ACTOR_I16(actor, ACTOR_ENCOUNTER_STEER) = 0;
+            return 0;
+        }
+        ACTOR_I16(actor, ACTOR_ENCOUNTER_STEER) = (int16_t)0xFF00;
+        ACTOR_U8(actor, ACTOR_BRAKE_FLAG) = 1;
+        return 0;
+    }
+
+    /* ==== 4. Flag 0x02 — brake/accel until speed threshold.
+     * Orig always writes brake_flag=0 at entry; release zeroes encounter_steer
+     * but KEEPS flag set; threshold scale is `(op * 0x40308) >> 8` with
+     * sign-rounding (4× the previous port's `<< 8` shorthand). */
+    if (flags & 0x02) {
+        ACTOR_U8(actor, ACTOR_BRAKE_FLAG) = 0;
+        int32_t lspd = ACTOR_I32(actor, ACTOR_LONGITUDINAL_SPEED);
+        int32_t op   = rs[RS_SCRIPT_OFFSET_PARAM];
+        int32_t prod = op * 0x40308;
+        int32_t thr  = (prod + ((prod >> 31) & 0xFF)) >> 8;
+        if (op < 1) {
+            ACTOR_I16(actor, ACTOR_ENCOUNTER_STEER) = (int16_t)0xFF00;
+            if (lspd < thr) {
+                ACTOR_I16(actor, ACTOR_ENCOUNTER_STEER) = 0;
+            }
+        } else {
+            ACTOR_I16(actor, ACTOR_ENCOUNTER_STEER) = (int16_t)0x00FF;
+            if (thr < lspd) {
+                ACTOR_I16(actor, ACTOR_ENCOUNTER_STEER) = 0;
+            }
+        }
+    }
+
+    /* ==== 5. Opcode switch ==== */
+    const int32_t *base = (const int32_t *)(intptr_t)rs[RS_SCRIPT_BASE_PTR];
+    if (!base) return 1;
+    int ip = rs[RS_SCRIPT_IP];
+    int32_t opcode = base[ip];
+
+    if (g_last_logged_opcode[slot] != opcode) {
+        TD5_LOG_I(LOG_TAG, "Script opcode change: slot=%d ip=%d opcode=%d flags=0x%X",
+                  slot, ip, opcode, rs[RS_SCRIPT_FLAGS]);
+        g_last_logged_opcode[slot] = opcode;
+    }
+
+    switch (opcode) {
+    case 0: {
+        /* Mid-band reject: stay in script if heading not aligned within ±0x40
+         * of either forward (0) or reverse (0x800). On actual terminate,
+         * ZERO angular_velocity_yaw (+0x1C4). */
+        uint32_t a0 = ((uint32_t)hdelta_raw - 0x800U) & 0xFFF;
+        uint32_t b0 = (a0 - 0x800U) & 0xFFF;
+        uint32_t hd_mir = ((uint32_t)(-(int32_t)b0)) & 0xFFF;
+        if (hd_mir > 0x3F && hd_mir < 0xFC1) {
+            return 0;
+        }
+        if ((int32_t)rs[RS_SCRIPT_OFFSET_PARAM] < 0) {
+            ACTOR_I32(actor, ACTOR_STEERING_CMD) = 0;
+        }
+        rs[RS_SCRIPT_BASE_PTR] = 0;
+        rs[RS_SCRIPT_FLAGS]    = 0;
+        rs[RS_SCRIPT_FIELD_3E] = 0;
+        rs[RS_SCRIPT_FIELD_43] = 0;
+        ACTOR_I32(actor, ACTOR_STEERING_CMD) = 0;
+        ACTOR_I32(actor, 0x1C4) = 0; /* angular_velocity_yaw */
+        return 1;
+    }
+
+    case 1:
+        rs[RS_SCRIPT_SPEED_PARAM] = base[ip + 1];
+        rs[RS_SCRIPT_FLAGS] |= 0x01;
+        rs[RS_SCRIPT_IP] = ip + 2;
+        return 0;
+
+    case 2:
+        rs[RS_SCRIPT_FLAGS] |= 0x02;
+        rs[RS_SCRIPT_OFFSET_PARAM] = base[ip + 1];
+        rs[RS_SCRIPT_IP] = ip + 2;
+        return 0;
+
+    case 3:
+        rs[RS_SCRIPT_FLAGS] |= base[ip + 1];
+        rs[RS_SCRIPT_IP] = ip + 2;
+        return 0;
+
+    case 4:
+        rs[RS_SCRIPT_FLAGS] &= ~base[ip + 1];
+        rs[RS_SCRIPT_IP] = ip + 2;
+        return 0;
+
+    case 5:
+        rs[RS_SCRIPT_FLAGS] |= 0x04;
+        rs[RS_SCRIPT_IP] = ip + 1;
+        return 0;
+
+    case 6:
+        rs[RS_SCRIPT_FLAGS] |= 0x08;
+        rs[RS_SCRIPT_IP] = ip + 1;
+        return 0;
+
+    case 7:
+        ACTOR_I16(actor, ACTOR_ENCOUNTER_STEER) = (int16_t)0xFF00;
+        ACTOR_U8(actor, ACTOR_BRAKE_FLAG) = 1;
+        rs[RS_SCRIPT_IP] = ip + 1;
+        return 0;
+
+    case 8:
+        /* Orig only sets flag 0x10; brake is applied by the flag-0x10
+         * block next tick. */
+        rs[RS_SCRIPT_FLAGS] |= 0x10;
+        rs[RS_SCRIPT_IP] = ip + 1;
+        return 0;
+
+    case 9: {
+        /* Auto-select program from MIRRORED hdelta + strip-half-lane.
+         * Strip byte at [strip_base + span_raw*0x18 + 3] >> 1 & 7. */
+        rs[RS_SCRIPT_COUNTDOWN] = 0xFA;
+        uint32_t hd9 = (uint32_t)hdelta_mirror;
+        int16_t span_raw = ACTOR_I16(actor, ACTOR_SPAN_RAW);
+        int8_t strip_half = 0;
+        if (g_strip_span_base && span_raw >= 0) {
+            const uint8_t *rec = (const uint8_t *)g_strip_span_base
+                               + (uint32_t)span_raw * 0x18;
+            strip_half = (int8_t)((rec[3] >> 1) & 7);
+        }
+        int8_t sub_lane = (int8_t)ACTOR_U8(actor, ACTOR_SUB_LANE_INDEX);
+
+        const int32_t *sel = g_script_program_d;
+        int chosen = 0;
+        if (hd9 > 0x900 && hd9 < 0xF00 && sub_lane <= strip_half) {
+            sel = g_script_program_a;
+            chosen = 1;
+        }
+        if (!chosen && hd9 > 0x6FF) {
+            if (strip_half < sub_lane) {
+                sel = g_script_program_b;
+                chosen = 1;
+            } else if (hd9 > 0x700) {
+                sel = g_script_program_d;
+                chosen = 1;
+            }
+        }
+        if (!chosen) {
+            if (hd9 > 0xFF && strip_half <= sub_lane) {
+                sel = g_script_program_c;
+            } else {
+                sel = g_script_program_d;
+            }
+        }
+        rs[RS_SCRIPT_BASE_PTR] = (int32_t)(intptr_t)sel;
+        rs[RS_SCRIPT_IP] = 0;
+        return 0;
+    }
+
+    case 10:
+        rs[RS_SCRIPT_FLAGS] |= 0x40;
+        rs[RS_SCRIPT_IP] = ip + 1;
+        return 0;
+
+    case 11:
+        rs[RS_SCRIPT_FLAGS] |= 0x80;
+        rs[RS_SCRIPT_IP] = ip + 1;
+        return 0;
+
+    default:
+        return 0;
+    }
 }
 
 /* ========================================================================
@@ -1744,6 +1824,20 @@ void td5_ai_update_track_behavior(int slot) {
     int32_t heading, route_heading, hdelta;
     int threshold_result;
     int32_t steer_weight;
+
+    /* Calls-trace probe: capture entry state per slot per tick.
+     * Hooks YAML: re/trace-hooks/tick0_ai_chain.yaml
+     * Original RVA: 0x00434FE0 UpdateActorTrackBehavior
+     * Args layout: slot, steer_cmd, yaw_accum, span_norm, vlong, encounter_steer, throttle_byte, brake_flag */
+    TD5_TRACE_CALL_ENTER("ai_track_behavior",
+        slot,
+        ACTOR_I32(actor, ACTOR_STEERING_CMD),
+        ACTOR_I32(actor, ACTOR_YAW_ACCUM),
+        (int32_t)ACTOR_I16(actor, ACTOR_SPAN_NORMALIZED),
+        ACTOR_I32(actor, ACTOR_LONGITUDINAL_SPEED),
+        (int32_t)ACTOR_I16(actor, ACTOR_ENCOUNTER_STEER),
+        (int32_t)ACTOR_U8(actor, ACTOR_THROTTLE_STATE),
+        (int32_t)ACTOR_U8(actor, ACTOR_BRAKE_FLAG));
 
     /* Time trial used to skip AI track behavior entirely (slot 0 was assumed
      * human). With PlayerIsAI=1 we deliberately route slot 0 through the AI,
@@ -1771,58 +1865,85 @@ void td5_ai_update_track_behavior(int slot) {
      * pre-seed here was redundant with the original and raced with the
      * cascade output during countdown. */
 
-    /* --- Script check: if a script is active, run it --- */
-    if (rs[RS_SCRIPT_BASE_PTR] != 0) {
-        int result = td5_ai_advance_track_script(rs);
-        if (result == 0) {
-            /* Script still running (blocking): just update track progress */
-            return;
-        }
-        /* result == 1: script complete, fall through to normal AI */
-    }
-
-    /* --- Heading misalignment trigger: start recovery script --- */
-    heading = ACTOR_I32(actor, ACTOR_YAW_ACCUM) >> 8;
-
-    /* Compute route heading inline from route byte, matching original @ 0x43503A.
-     * The original does NOT read RS[0x18] here — it reads the route byte directly.
-     * RS[0x18] stores velocity dot product (forward track component). */
-    route_heading = ai_route_heading_for_actor(rs, actor);
-
-    /* Original FUN_00434FE0 @ 0x00434FE0 tests the heading-delta band
-     * UNCONDITIONALLY — no route-byte / rb_current pre-gate.
+    /* --- Game-type gate: scripts + misalignment-recovery only fire in SINGLE_RACE ---
      *
-     * 2026-05-04 round: a previous port-only `if (rb_current >= 4)` outer
-     * guard suppressed recovery on non-canonical-route junction-zone spans
-     * (Honolulu banked curves where AI hits the outer wall, route byte at
-     * the contact span is small). Symptom: AI cars in slot 1..5 made wall
-     * contact, drifted along the wall, never re-aligned because recovery
-     * never fired. [CONFIRMED via Ghidra audit @ 0x00434FE0 — entry tests
-     * the (800 < uVar3) && (uVar3 < 0xCE0) band immediately, no rb gate.]
+     * Original FUN_00434FE0 @ 0x00434FE0 has an outer
+     *   if (g_selectedGameType == 0) { script-or-trigger }
+     * gate at the function entry. Disassembly:
+     *   0x00434FE0  MOV EAX, [0x004aaf6c]    ; g_selectedGameType
+     *   0x00434FE8  TEST EAX, EAX
+     *   0x00434FF2  JNZ  0x004350a5          ; jump past both inner branches
      *
-     * Original FUN_00434FE0: adjusts for expected 0x800 offset between actor
-     * yaw (atan2+0x800) and route heading (route_byte<<4), then checks if
-     * the residual misalignment exceeds threshold.
-     * Formula: uVar3 = -(((heading - route_heading - 0x800U & 0xFFF) - 0x800 & 0xFFF) & 0xFFF) */
-    {
-        uint32_t adjusted = (((uint32_t)(heading - route_heading) - 0x800U) & 0xFFF);
-        adjusted = (adjusted - 0x800U) & 0xFFF;
-        hdelta = (int32_t)(-(int32_t)adjusted) & 0xFFF;
-
-        /* [CONFIRMED @ 0x00434FE0] decomp: if ((800 < uVar3) && (uVar3 < 0xce0))
-         * — 800 is DECIMAL (= 0x320), upper is strict <. */
-        if (hdelta > 0x320 && hdelta < 0xCE0) {
-            TD5_LOG_I(LOG_TAG, "recovery: slot=%d hdelta=0x%X heading=0x%X route=0x%X",
-                      slot, hdelta, heading & 0xFFF, route_heading & 0xFFF);
-            /* Significant misalignment: assign initial recovery script [8, 9, 0] */
-            rs[RS_SCRIPT_BASE_PTR] = (int32_t)(intptr_t)g_script_init_recovery;
-            rs[RS_SCRIPT_IP] = 0;
-            rs[RS_SCRIPT_FLAGS] = 0;
-            rs[RS_SCRIPT_FIELD_3E] = 0;
-            rs[RS_SCRIPT_FIELD_43] = 0;
-            rs[RS_SCRIPT_COUNTDOWN] = 0x96;
-            return;
+     * SINGLE_RACE = 0 in TD5_GameType. For modes != SINGLE_RACE
+     * (CHAMPIONSHIP, MASTERS, TT, COP_CHASE, DRAG_RACE, ...) the original
+     * skips both the script-execution path and the heading-misalignment
+     * recovery-script-set path, falling straight through to normal track
+     * following. Without this gate, AI in non-SINGLE_RACE modes was
+     * receiving recovery scripts the original never sets — the +0x4000
+     * per-tick steering ramp produced wall-leaning behaviour for ~150
+     * ticks regardless of contact state.
+     * [CONFIRMED via Ghidra disassembly + decompilation @ 0x00434FE0]. */
+    if (g_td5.game_type == TD5_GAMETYPE_SINGLE_RACE) {
+        /* --- Script check: if a script is active, run it --- */
+        if (rs[RS_SCRIPT_BASE_PTR] != 0) {
+            int result = td5_ai_advance_track_script(rs);
+            if (result == 0) {
+                /* Script still running (blocking). Original 0x00435095-0x004350A3
+                 * recomputes RS_TRACK_PROGRESS + RS_TRACK_OFFSET_BIAS from the
+                 * actor's CURRENT span/world-pos before returning, so they don't
+                 * go stale during long brake-wait or recovery scripts. */
+                int span_raw  = (int)(int16_t)ACTOR_I16(actor, ACTOR_SPAN_RAW);
+                int span_norm = (int)(int16_t)ACTOR_I16(actor, ACTOR_SPAN_NORMALIZED);
+                int32_t pos_vec[3];
+                pos_vec[0] = ACTOR_I32(actor, ACTOR_WORLD_POS_X);
+                pos_vec[1] = 0;
+                pos_vec[2] = ACTOR_I32(actor, ACTOR_WORLD_POS_Z);
+                int64_t prog64 = td5_track_compute_span_progress(span_raw, pos_vec);
+                int progress = (int)(int32_t)(uint32_t)(prog64 & 0xFFFFFFFFu);
+                rs[RS_TRACK_PROGRESS] = progress;
+                const uint8_t *route_bytes = (const uint8_t *)(intptr_t)rs[RS_ROUTE_TABLE_PTR];
+                int route_byte = 0;
+                if (route_bytes && span_norm >= 0) {
+                    route_byte = (int)route_bytes[(size_t)(unsigned)span_norm * 3u];
+                }
+                rs[RS_TRACK_OFFSET_BIAS] =
+                    td5_track_compute_signed_offset(span_raw, progress, route_byte);
+                return;
+            }
+            /* result == 1: script complete, fall through to normal AI */
         }
+
+        /* --- Heading misalignment trigger: start recovery script --- */
+        heading = ACTOR_I32(actor, ACTOR_YAW_ACCUM) >> 8;
+
+        /* Compute route heading inline from route byte, matching original @ 0x43503A. */
+        route_heading = ai_route_heading_for_actor(rs, actor);
+
+        /* Formula: uVar3 = -(((heading - route_heading - 0x800U & 0xFFF) - 0x800 & 0xFFF) & 0xFFF) */
+        {
+            uint32_t adjusted = (((uint32_t)(heading - route_heading) - 0x800U) & 0xFFF);
+            adjusted = (adjusted - 0x800U) & 0xFFF;
+            hdelta = (int32_t)(-(int32_t)adjusted) & 0xFFF;
+
+            /* [CONFIRMED @ 0x00434FE0] decomp: if ((800 < uVar3) && (uVar3 < 0xce0))
+             * — 800 is DECIMAL (= 0x320), upper is strict <. */
+            if (hdelta > 0x320 && hdelta < 0xCE0) {
+                TD5_LOG_I(LOG_TAG, "recovery: slot=%d hdelta=0x%X heading=0x%X route=0x%X gt=%d",
+                          slot, hdelta, heading & 0xFFF, route_heading & 0xFFF,
+                          (int)g_td5.game_type);
+                /* Significant misalignment: assign initial recovery script [8, 9, 0] */
+                rs[RS_SCRIPT_BASE_PTR] = (int32_t)(intptr_t)g_script_init_recovery;
+                rs[RS_SCRIPT_IP] = 0;
+                rs[RS_SCRIPT_FLAGS] = 0;
+                rs[RS_SCRIPT_FIELD_3E] = 0;
+                rs[RS_SCRIPT_FIELD_43] = 0;
+                rs[RS_SCRIPT_COUNTDOWN] = 0x96;
+                return;
+            }
+        }
+    } else {
+        /* Suppress compiler warnings for unused locals when the gate is closed. */
+        (void)heading; (void)route_heading; (void)hdelta;
     }
 
     /* --- Normal AI path following --- */
@@ -1953,9 +2074,32 @@ void td5_ai_update_track_behavior(int slot) {
                     int32_t delta = actor_heading - target_angle;
 
                     /* (g) Decompose into left/right deviation
-                     * [CONFIRMED @ 0x435354-0x435372] */
+                     * [CONFIRMED @ 0x435354-0x435372 — formula verified
+                     * faithful via raw disasm 2026-05-12]
+                     *
+                     * Workaround for port's ~3deg target_angle divergence vs
+                     * orig at spawn: orig's diff_race shows slot 0 RS_LEFT=0
+                     * (cascade quiet) from sim_tick 1 onward, but port has
+                     * RS_LEFT=35 every tick because port computes progress=94
+                     * at seed while orig computes 95 (1-unit divergence in
+                     * td5_track_compute_span_progress), cascading to an 18-
+                     * unit bias delta and ~35-unit target_angle delta.
+                     *
+                     * Clamping abs_delta < 64 (= ~5.6deg) to fully aligned
+                     * (L=0xFFF R=0) suppresses the cascade fine-band re-fire
+                     * while the seed-progress divergence is investigated.
+                     * Real misalignment beyond ~5.6deg still drives steering
+                     * normally. Without this clamp, port STEERING_CMD
+                     * re-accumulates from +7008/tick post-countdown, breaking
+                     * lateral lane parity. [Workaround pending Frida-on-orig
+                     * trace of td5_track_compute_span_progress to localize
+                     * the 1-unit progress divergence; see
+                     * todo_moscow_spawn_steering_cmd_overshoot.md] */
                     int32_t abs_delta = delta < 0 ? -delta : delta;
-                    if (delta >= 0) {
+                    if (abs_delta < 64) {
+                        rs[RS_LEFT_DEVIATION]  = 0xFFF;
+                        rs[RS_RIGHT_DEVIATION] = 0;
+                    } else if (delta >= 0) {
                         rs[RS_LEFT_DEVIATION]  = 0xFFF - abs_delta;
                         rs[RS_RIGHT_DEVIATION] = delta;
                     } else {

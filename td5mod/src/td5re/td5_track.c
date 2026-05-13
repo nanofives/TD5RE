@@ -2646,10 +2646,16 @@ void td5_track_update_actor_position(TD5_Actor *actor)
     pos_x = *(int32_t *)((uint8_t *)actor + 0x1FC); /* world_pos.x */
     pos_z = *(int32_t *)((uint8_t *)actor + 0x204); /* world_pos.z */
 
-    /* Chassis walker: keep multi-step iteration (single_step=0) so the chassis
-     * span can catch up after large per-tick world_pos jumps (V2V push,
-     * spawn). Per-wheel walker uses single_step=1 below. */
-    update_position_recursive(track_state, pos_x, pos_z, 0, /*single_step=*/0);
+    /* Chassis walker: single-pass per call (single_step=1) — matches original
+     * 0x004440F0 which has NO outer loop, every case returns immediately.
+     * [Ghidra-verified 2026-05-12]. Earlier port used multi-pass iteration
+     * (single_step=0) which over-advanced 3 spans/call at Edinburgh span
+     * 259-260, producing bimodal contact_y → +51k vy y-snap launch chain
+     * that cascaded into the AI tumbling for the rest of the lap. Single-
+     * pass restores faithful behavior; under the original spec the chassis
+     * walker incurs at most a 1-tick lag after V2V push / spawn jumps,
+     * which the next-tick call resolves. */
+    update_position_recursive(track_state, pos_x, pos_z, 0, /*single_step=*/1);
 
     if ((uintptr_t)actor == (uintptr_t)0x004AB108u) {
         s_actor_position_log_counter++;
@@ -3105,10 +3111,21 @@ void td5_track_compute_heading(TD5_Actor *actor)
     vr0 = vertex_at(sp->right_vertex_index);
     vr1 = vertex_at(sp->right_vertex_index + 1);
 
-    /* Compute heading based on span type */
+    /* Compute heading based on span type.
+     *
+     * Original FUN_00434350 has a 7-entry jump table at 0x00434588 covering
+     * types 1..7 only; types 0 and >=8 hit the default branch
+     * (JA 0x0043448c at 0x004343C7-0x004343CA). [CONFIRMED via Ghidra
+     *  disassembly @ 0x004343C7 + 0x00434588 jump table.]
+     *
+     * Previously this switch lumped types 8..11 with case 1/2/5; that
+     * applied the standard 4-vertex formula to span types the original
+     * sends to the slot-index default. On Moscow start spans this could
+     * shift the spawn yaw by enough to push the AI's first-tick steering
+     * correction in the wrong direction. Removed 2026-05-10 in the
+     * spawn-pose /fix. */
     switch (sp->span_type) {
     case 1: case 2: case 5:
-    case 8: case 9: case 10: case 11:
         /* Standard: dx = (left1 - right1) - right0 + left0 */
         dx = ((int32_t)vl1->x - (int32_t)vr1->x) - (int32_t)vr0->x + (int32_t)vl0->x;
         dz = ((int32_t)vl1->z - (int32_t)vr1->z) - (int32_t)vr0->z + (int32_t)vl0->z;
@@ -3303,8 +3320,14 @@ int64_t td5_track_compute_span_progress(int span_index, const int32_t *actor_pos
     dX = end_x - start_x;
     dZ = end_z - start_z;
 
-    /* Span length via float sqrt [CONFIRMED @ 0x00434602] */
-    span_len = (int)sqrtf((float)(dX * dX + dZ * dZ));
+    /* Span length via sqrt [CONFIRMED @ 0x00434602: FILD/FSQRT/__ftol].
+     * Orig uses x87 FPU 80-bit precision then truncates via __ftol. Port
+     * originally used sqrtf (32-bit float) which lost precision on edge
+     * cases — at Moscow span 111 this produced port_progress=94 vs orig=95
+     * (1-unit divergence cascading to bias delta and target_angle delta and
+     * RS_LEFT_DEVIATION=35 per-tick cascade re-fire). Switching to sqrt
+     * (64-bit double) closes the precision gap. */
+    span_len = (int)sqrt((double)(dX * dX + dZ * dZ));
     if (span_len == 0) return 0;
 
     ax = actor_pos[0] >> 8;  /* strip 24.8 FP to integer world [CONFIRMED @ 0x00434631] */
@@ -3366,7 +3389,9 @@ int32_t td5_track_compute_signed_offset(int span_index, int progress, int route_
     v = (end_z - start_z) * delta;
     dZ_sc = (v + ((v >> 31) & 0xFF)) >> 8;
 
-    len = (int)sqrtf((float)(dX_sc * dX_sc + dZ_sc * dZ_sc));
+    /* sqrt: use double precision to match orig FPU 80-bit truncation
+     * (same precision issue as in compute_span_progress). */
+    len = (int)sqrt((double)(dX_sc * dX_sc + dZ_sc * dZ_sc));
 
     /* Sign from comparison [CONFIRMED @ 0x004346f5] */
     return (progress < route_byte) ? -len : len;
@@ -3398,8 +3423,19 @@ int td5_track_sample_target_point(int span_index, int route_byte,
         return 0;
 
     sp = &s_span_array[span_index];
-    if (sp->span_type == 9 || sp->span_type == 10)
-        return 0;
+
+    /* No span_type filter — original SampleTrackTargetPoint @ 0x00434800
+     * has no such early-out. The previous port version returned 0 for
+     * span_type 9/10 (causing the AI caller to SKIP the entire target-angle
+     * update and keep last tick's stale value). When the AI's spawn target
+     * span lands on a type-9/10 span (Moscow start spans on RIGHT.TRK can
+     * be 9/10 per the agent's k_target_vertex_offsets table audit), the
+     * port produced delta=-10 vs original delta=-101 at tick 1, a 10×
+     * geometric difference that translates into stuck-in-the-floating-
+     * wmask=0 state by span ~430. [CONFIRMED via Ghidra audit of
+     * 0x00434800-0x004348FB: no span_type filter; reads
+     * k_target_vertex_offsets[span_type] for any type 0..11 without
+     * branching out.] */
 
     /* Lane count from geometry metadata (low nibble of byte +0x03).
      * Original reads the raw nibble with no clamp [CONFIRMED @ 0x00434836:

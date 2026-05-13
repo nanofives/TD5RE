@@ -337,21 +337,28 @@ void td5_physics_wall_response(TD5_Actor *actor, int32_t wall_angle,
          *                       XOR ECX,ECX at 0x00406B69 → zero. So result
          *                       is clamped to 0 on pos-flip.
          *
-         * Both branches zero on sign-flip — the asymmetry is in *which*
-         * sign-flip each side cares about (positive→negative vs.
-         * negative→positive). An earlier port comment claimed v_para<=0
-         * had "no clamp", which was wrong; this re-read fixes that.
+         * Both branches hard-zero on sign-flip. The asymmetry is purely in
+         * *which* sign-flip each side cares about (v_para>0 →
+         * v_para-delta, clamp to 0 on negative-flip; v_para<=0 →
+         * v_para+delta, clamp to 0 on positive-flip).
          *
-         * INTENTIONAL DIVERGENCE on v_para<=0 branch: instead of the
-         * original's hard zero-on-pos-flip, apply a magnitude-only soft
-         * clamp |new_v_para| <= |v_para|. This is *softer* than the
-         * original (allows sign-flip, preserving the wall-friction reorient
-         * effect that produced visible sideways slide on glancing impacts)
-         * but *tighter* than leaving it unclamped (kills the head-on bug
-         * where v_para small-negative + iVar11 large yields delta >> |v_para|
-         * and accelerates the car tangentially out of nowhere). The v_para>0
-         * branch is left as the faithful original (hard zero). See
-         * EXPECTED_BEHAVIOR.md "Intentional Divergences".
+         * 2026-05-10 — reverted to faithful behaviour on the v_para<=0
+         * branch. A prior port version used a magnitude-only soft clamp
+         * here (allowing sign-flip up to |incoming v_para|) under the
+         * theory that hard-zero killed wall-friction reorient. A Frida
+         * long-pass on Moscow (StartSpanOffset=175, PlayerIsAI=1, branch
+         * fix-1778394064-46915 long_span280_pass) showed the opposite
+         * effect: with the soft clamp, AI cars hit walls, then carry a
+         * sign-flipped tangential velocity that prevents them from
+         * settling parallel to the wall — they roll back, get hit again,
+         * and stall permanently at span ~430. Original AI cars in the
+         * same geometry cruise through unobstructed (slot 3 reached
+         * span 1373 vs port's 430 in 2882 ticks).
+         *
+         * Ghidra agent re-read of 0x00406B65-69 (verbatim disasm: TEST/
+         * JLE + XOR ECX,ECX) confirmed both branches hard-zero on
+         * sign-flip in the original. The earlier "no clamp on v_para<=0"
+         * memory note was a misread.
          *
          * Branch order matches the asm (positive first). */
         int32_t v_para_round = v_para >> 6;  /* signed shift; arithmetic-round */
@@ -361,21 +368,16 @@ void td5_physics_wall_response(TD5_Actor *actor, int32_t wall_angle,
             int32_t delta = (tmp * 0x180) >> 11;
             pre_clamp_delta = delta;
             new_v_para = v_para - delta;
-            if (new_v_para < 0) new_v_para = 0;
+            if (new_v_para < 0) { new_v_para = 0; clamp_fired = 1; }
         } else {
             tmp = (iVar11 * 2 + 0x800) - v_para_round;
             int32_t delta = (tmp * 0x180) >> 11;
             pre_clamp_delta = delta;
             new_v_para = v_para + delta;
-            /* INTENTIONAL DIVERGENCE from original 0x00406B65-69 hard zero.
-             * Magnitude-only soft clamp: |new_v_para| <= |v_para|. Sign may
-             * flip (preserves wall-friction reorient that the original kills
-             * via XOR), but magnitude can never grow above incoming |v_para|.
-             * Prevents head-on case where small-negative v_para + large
-             * iVar11 yields delta >> |v_para| and accelerates the car. */
-            int32_t v_para_mag = -v_para;  /* v_para <= 0 here, so >= 0 */
-            if (new_v_para >  v_para_mag) { new_v_para =  v_para_mag; clamp_fired = 1; }
-            if (new_v_para < -v_para_mag) { new_v_para = -v_para_mag; clamp_fired = 1; }
+            /* Faithful port of 0x00406B65-69: TEST EAX,EAX / JLE
+             * (jump if signed less-or-equal preserves) / fall through to
+             * XOR ECX,ECX. → clamp to 0 on positive-flip. */
+            if (new_v_para > 0) { new_v_para = 0; clamp_fired = 1; }
         }
 
         /* Angular velocity update: ω += (impulse * iVar9) / (K / 0x28C).
@@ -1045,18 +1047,22 @@ void td5_physics_update_player(TD5_Actor *actor)
              * when driving straight and killed all braking force. */
             int32_t bf = (brake_front * throttle) >> 8;
             {
-                int32_t abs_bf = bf < 0 ? -bf : bf;
-                /* Faithful clamp against velocity projected onto the steered-
-                 * front-wheel axis [CONFIRMED @ 0x404441-0x404481]:
-                 *   uVar37 ≈ (cos(yaw+steer)*vz + sin(yaw+steer)*vx) >> 12
-                 * When steer=0 this equals v_long (straight-line brake works
-                 * at full strength). When steering, the projection shrinks by
-                 * roughly cos(steer), naturally weakening brake during turns —
-                 * matching the original's behavior. The yaw-rate sub-term
-                 * (sin(steer)*tuning[0x28]*avy)/0x28C is omitted — port sign
-                 * conventions differ from the binary's and getting the correction
-                 * right requires a sign audit. Cap doubled to 2x for user-
-                 * preferred stronger feel; remove the <<1 for full RE parity. */
+                /* Faithful brake-magnitude/direction clamp matching original
+                 * UpdatePlayerVehicleDynamics @ 0x004044*. Decompiled form:
+                 *   iVar11 = -bf;
+                 *   if (-vsa <= -bf) iVar11 = -vsa;
+                 *   if (bf <= iVar11) {
+                 *     bf = -bf;
+                 *     if (-vsa <= -bf) bf = -vsa;
+                 *   }
+                 * Net effect: output magnitude = min(|bf|,|vsa|), output sign
+                 * OPPOSES v_steer_axis when bf opposes vsa. The port previously
+                 * preserved bf's throttle sign, which made AI brake on a
+                 * backward-moving car ACCELERATE backward (negative wheel torque
+                 * on negative velocity) — the actual "reverses nonstop" trap
+                 * after the brake→REVERSE workaround engaged. The original's
+                 * formula correctly produces forward wheel torque to decelerate
+                 * backward motion. */
                 int32_t steer_angle = -(actor->steering_command >> 8);
                 int32_t steer_h = (heading + steer_angle) & 0xFFF;
                 int32_t cos_sh = cos_fixed12(steer_h);
@@ -1074,10 +1080,16 @@ void td5_physics_update_player(TD5_Actor *actor)
                     v_steer_axis -= yaw_corr;
                 }
 
-                int32_t abs_vsa = v_steer_axis < 0 ? -v_steer_axis : v_steer_axis;
-                int32_t cap = abs_vsa;  /* RE parity: no <<1 doubling */
-                int32_t clamped = abs_bf < cap ? abs_bf : cap;
-                bf = (bf < 0) ? -(int32_t)clamped : (int32_t)clamped;
+                int32_t neg_bf  = -bf;
+                int32_t neg_vsa = -v_steer_axis;
+                int32_t lim = neg_bf;
+                if (neg_vsa <= neg_bf) lim = neg_vsa;
+                if (bf <= lim) {
+                    bf = neg_bf;
+                    if (neg_vsa <= neg_bf) {
+                        bf = neg_vsa;
+                    }
+                }
             }
             wheel_drive[0] = 0;
             wheel_drive[1] = 0;
@@ -1773,6 +1785,24 @@ void td5_physics_update_ai(TD5_Actor *actor)
     int16_t *phys = get_phys(actor);
     if (!phys) return;
 
+    /* Calls-trace probe: capture per-slot AI dynamics entry state.
+     * Hooks YAML: re/trace-hooks/tick0_ai_chain.yaml
+     * Original RVA: 0x00404EC0 UpdateAIVehicleDynamics
+     * Args layout: slot, steer_cmd, yaw_accum, vlong, encounter_steer,
+     *              throttle_byte, brake_flag, sub_lane */
+    {
+        char *_a = (char *)actor;
+        TD5_TRACE_CALL_ENTER("ai_dynamics",
+            (int32_t)actor->slot_index,
+            *(int32_t *)(_a + 0x30C),                       /* steering_cmd */
+            *(int32_t *)(_a + 0x1F4),                       /* yaw_accum */
+            *(int32_t *)(_a + 0x314),                       /* longitudinal_speed */
+            (int32_t)*(int16_t *)(_a + 0x33E),              /* encounter_steer */
+            (int32_t)*(uint8_t *)(_a + 0x36F),              /* throttle_state */
+            (int32_t)*(uint8_t *)(_a + 0x36D),              /* brake_flag */
+            (int32_t)*(uint8_t *)(_a + 0x08C));             /* sub_lane_index */
+    }
+
     /* --- 1. Single surface probe (chassis center only) --- */
     uint8_t surface = actor->surface_type_chassis;
 
@@ -1922,29 +1952,94 @@ void td5_physics_update_ai(TD5_Actor *actor)
             throttle = -0x20;
         }
     ai_brake_path:;
-        /* Brake path [original @ 0x004051D5-0x00405282].
-         * Original formula: local_40 = (Wr*throttle + (Wr*throttle>>31 & 0xFF)) >> 8
-         *   then clamp to [-|v_long|/2, +|v_long|/2], divide by 2.
-         * Same for local_3c with Wf (note: Wr=rear, Wf=front — swapped vs names).
-         * Verified: original uses rear_weight for local_40 (local_3c divides by 2
-         * in the final step), front_weight for local_3c. */
+        /* Brake path — verbatim port of UpdateAIVehicleDynamics @ 0x004051D5
+         * -0x00405282. Three corrections vs prior implementation:
+         *
+         * 1. Uses BRAKE coefficients (phys+0x6E front, phys+0x70 rear) for the
+         *    F_raw/R_raw products, not the axle weights (phys+0x28/0x2A). The
+         *    original explicitly reads `*(short *)(puVar2 + 0x6e)` and
+         *    `*(short *)(puVar2 + 0x70)` here.
+         *
+         * 2. Signed nested-clamp pattern (same shape as commit 600fb62 for
+         *    the player path). Preserves directional sign: brake force opposes
+         *    motion. Prior abs-clamp gave backward force on backward motion
+         *    (the "AI accelerates reverse" half of the recover-stall trap).
+         *
+         * 3. Different velocity bounds per axle:
+         *    - FRONT_DRIVE (local_3c) clamped against lateral_speed (+0x318,
+         *      steered-frame v_long minus yaw_corr). At full recovery steer,
+         *      lateral_speed < v_long → tighter clamp keeps steering authority.
+         *    - REAR_DRIVE  (local_40) clamped against body v_long (+0x314).
+         *
+         * Variable names mirror Ghidra's so the LAB_00405285 entry block is
+         * line-for-line cross-checkable with the decomp.
+         * [CONFIRMED @ 0x004051D5-0x00405282 via Ghidra read-only session.] */
         td5_physics_update_engine_speed(actor);
         {
-            int32_t half_spd = abs_speed >> 1;
-            /* local_3c = clamp((Wr * throttle) >> 8, -half_spd, half_spd) / 2 */
-            int32_t rc = rear_weight * throttle;
-            int32_t r_raw = (rc + ((rc >> 31) & 0xFF)) >> 8;
-            if (r_raw > half_spd)  r_raw =  half_spd;
-            if (r_raw < -half_spd) r_raw = -half_spd;
-            rear_drive = r_raw / 2;
-            /* local_40 = clamp((Wf * throttle) >> 8, -(|v_long|/2), +(|v_long|/2)) / 2 */
-            int32_t fc = front_weight * throttle;
-            int32_t f_raw = (fc + ((fc >> 31) & 0xFF)) >> 8;
-            int32_t half_vlong = v_long / 2;
-            if (half_vlong < 0) half_vlong = -half_vlong;
-            if (f_raw > half_vlong)  f_raw =  half_vlong;
-            if (f_raw < -half_vlong) f_raw = -half_vlong;
-            front_drive = f_raw / 2;
+            int32_t lateral_speed = actor->lateral_speed;  /* iVar18 at brake-clamp time */
+
+            /* R_raw, F_raw with truncate-toward-zero round bias */
+            int32_t R_raw = ((int32_t)brake_rear  * throttle
+                          + ((((int32_t)brake_rear  * throttle) >> 31) & 0xFF)) >> 8;
+            int32_t F_raw = ((int32_t)brake_front * throttle
+                          + ((((int32_t)brake_front * throttle) >> 31) & 0xFF)) >> 8;
+
+            /* --- FRONT clamp: bound by lateral_speed (+0x318, steered frame).
+             * Ghidra decomp:
+             *   iVar13 = -F_raw;
+             *   local_3c = -(lateral_speed/2);
+             *   iVar18 = iVar13;
+             *   if (local_3c <= iVar13) iVar18 = local_3c;
+             *   if ((iVar18 < F_raw) || (iVar4 = iVar13, iVar13 < local_3c)) {
+             *       local_3c = iVar4;  // F_raw on first leg, -F_raw on second leg
+             *   }
+             *   local_3c = local_3c / 2;
+             */
+            int32_t neg_F = -F_raw;
+            int32_t local_3c = -(lateral_speed / 2);
+            int32_t t1 = neg_F;
+            if (local_3c <= neg_F) t1 = local_3c;
+            if (t1 < F_raw) {
+                local_3c = F_raw;
+            } else if (neg_F < local_3c) {
+                local_3c = neg_F;
+            }
+            local_3c = local_3c / 2;
+
+            /* --- REAR clamp: bound by body v_long (+0x314).
+             * Ghidra decomp:
+             *   iVar4 = -(v_long/2);
+             *   iVar13 = -R_raw;
+             *   iVar18 = iVar13;
+             *   if (iVar4 <= iVar13) iVar18 = iVar4;
+             *   if (local_40 <= iVar18) {
+             *       local_40 = iVar4;
+             *       if (iVar13 < iVar4) local_40 = iVar13;
+             *   }
+             *   local_40 = local_40 / 2;
+             */
+            int32_t neg_R = -R_raw;
+            int32_t neg_half_vlong = -(v_long / 2);
+            int32_t local_40 = R_raw;
+            int32_t t2 = neg_R;
+            if (neg_half_vlong <= neg_R) t2 = neg_half_vlong;
+            if (local_40 <= t2) {
+                local_40 = neg_half_vlong;
+                if (neg_R < neg_half_vlong) local_40 = neg_R;
+            }
+            local_40 = local_40 / 2;
+
+            front_drive = local_3c;
+            rear_drive  = local_40;
+
+            if (actor->slot_index == 0 && (actor->frame_counter % 30u) == 0u) {
+                TD5_LOG_I(LOG_TAG,
+                    "AI_BRAKE: throttle=%d brk_f=%d brk_r=%d F_raw=%d R_raw=%d "
+                    "lat_spd=%d v_long=%d front_drv=%d rear_drv=%d brake_flag=%d",
+                    throttle, brake_front, brake_rear, F_raw, R_raw,
+                    lateral_speed, v_long, front_drive, rear_drive,
+                    (int)actor->brake_flag);
+            }
         }
     }
     /* LAB_00405285: original doubles both values before bicycle solve */
@@ -2835,24 +2930,34 @@ static void collision_detect_simple(TD5_Actor *a, TD5_Actor *b)
     /* Only apply if closing (dot < 0) */
     if (v_dot >= 0) return;
 
-    /* Apply half closing velocity / 16 as impulse */
-    int32_t impulse = (-v_dot) >> 5;  /* /32 = half/16 */
+    /* Faithful port of ResolveSimpleActorSeparation @ 0x00408F70
+     * [CONFIRMED 2026-05-12 via Ghidra decomp]:
+     *   iVar6 = (nx_12bit * v_proj_16) / 32
+     *   A->vel += iVar6;  B->vel -= iVar6;
+     * No mass divide in orig. Operand order is multiply-then-divide so the
+     * small projection magnitude doesn't truncate to zero.
+     *
+     * Previous port did `impulse = -v_dot >> 5` FIRST (truncating tiny
+     * closing-velocity projections to 0 or -1), then `imp_x = (impulse * nx)
+     * >> 12`, then divided by mass. That made the impulse ~260x weaker than
+     * orig at typical race speeds (orig: ~6 wu/tick separation; port: 0.023
+     * wu/tick). Cars in continuous grounded contact (slot 0+slot 4 logged
+     * 31k V2V events on Moscow) never decelerated enough to separate.
+     *
+     * Scale match: orig stores rel_v as int16 (vel>>8). Port keeps 24.8 FP.
+     * v_dot_port = v_dot_orig * 256, so divide by 8192 (instead of orig's 32)
+     * to land on the same 24.8 FP delta magnitude. */
+    int32_t impulse_scalar = -v_dot;  /* positive when closing, in 24.8 FP */
+    int32_t delta_x = (nx * impulse_scalar) >> 13;
+    int32_t delta_y = (ny * impulse_scalar) >> 13;
+    int32_t delta_z = (nz * impulse_scalar) >> 13;
 
-    int32_t mass_a = (int32_t)CDEF_S(a, 0x88);
-    int32_t mass_b = (int32_t)CDEF_S(b, 0x88);
-    if (mass_a <= 0) mass_a = 0x20;
-    if (mass_b <= 0) mass_b = 0x20;
-
-    int32_t imp_x = (impulse * nx) >> 12;
-    int32_t imp_y = (impulse * ny) >> 12;
-    int32_t imp_z = (impulse * nz) >> 12;
-
-    a->linear_velocity_x += imp_x / mass_a;
-    a->linear_velocity_y += imp_y / mass_a;
-    a->linear_velocity_z += imp_z / mass_a;
-    b->linear_velocity_x -= imp_x / mass_b;
-    b->linear_velocity_y -= imp_y / mass_b;
-    b->linear_velocity_z -= imp_z / mass_b;
+    a->linear_velocity_x += delta_x;
+    a->linear_velocity_y += delta_y;
+    a->linear_velocity_z += delta_z;
+    b->linear_velocity_x -= delta_x;
+    b->linear_velocity_y -= delta_y;
+    b->linear_velocity_z -= delta_z;
 }
 
 /* ========================================================================
@@ -3725,12 +3830,24 @@ void td5_physics_update_suspension_response(TD5_Actor *actor)
         int32_t pitch_term = (lat_spr  + lat_grav  / cnt_active) / 0x226;
         actor->angular_velocity_roll  += roll_term;
         actor->angular_velocity_pitch += pitch_term;
-    }
 
-    /* Y-velocity update: bounce + gravity restored. Original adds
-     * gravity back here, cancelling the subtract at top of integrate_pose
-     * for grounded cars. */
-    actor->linear_velocity_y += bounce + g_gravity_constant;
+        /* Y-velocity update: bounce + gravity restored. Original adds
+         * gravity back here, cancelling the subtract at top of integrate_pose
+         * for grounded cars.
+         *
+         * [CONFIRMED via Edinburgh wheel_contact_probe 2026-05-11]: this
+         * write MUST be inside the `cnt_active > 0` gate. Comment at line
+         * 3778 explicitly says "the original writes both ang_vel_pitch and
+         * lin_vel_y UNCONDITIONALLY once cnt_active > 0" — meaning BOTH
+         * are gated on cnt_active > 0, not "unconditional in absolute
+         * terms". When all 4 wheels are airborne (cnt_active=0), the
+         * original SKIPS this write, letting gravity from integrate_pose
+         * accumulate. The port previously placed this write OUTSIDE the
+         * gate, which cancelled gravity during airborne and produced the
+         * Edinburgh "car drifts forward at constant altitude" symptom
+         * after launching off a road bump. */
+        actor->linear_velocity_y += bounce + g_gravity_constant;
+    }
 
     if (cnt_grounded > 0) {
         /* Per-pattern angular velocity clamps [CONFIRMED @ 0x00405a6a..
@@ -5411,8 +5528,38 @@ void td5_physics_refresh_wheel_contacts(TD5_Actor *actor)
                       actor->wheel_contact_bitmask);
         }
 
-        /* Store high-res wheel world position */
-        actor->wheel_world_positions_hires[i] = actor->wheel_contact_pos[i];
+        /* Store high-res wheel world position.
+         *
+         * [FIXED 2026-05-12 via Ghidra audit of 0x00403720]: the original
+         * runs TransformShortVec3ByRenderMatrixRounded TWICE — once with
+         * body_y = (cwy - sp/256 - preload) writing wheel_contact_pos
+         * (the ground-contact point), then ADDS BACK preload to body_y
+         * (giving cwy - sp/256) and transforms AGAIN, writing that to
+         * field_0x298 = wheel_world_positions_hires (the wheel hub).
+         *
+         * The two transforms produce DIFFERENT world X and Z because
+         * rot[1] * preload contributes to the rotated X and Z when the
+         * chassis is pitched/rolled. The port previously aliased
+         * wheel_world_positions_hires = wheel_contact_pos, missing this
+         * rot[1]*preload offset (~5-15 fp units at typical pitch angles
+         * for Viper's preload, accumulating into wrong suspension lever
+         * arms in td5_physics_integrate_suspension).
+         *
+         * Second transform: input body_y_no_preload = wy + href_preload
+         * (where wy already had the preload subtracted at line 5295).
+         * Same float multiplication path, same render_pos add, same <<8. */
+        {
+            float wy_hub = (float)(int32_t)(int16_t)(wy + href_preload);
+            float hub_bx = rot[0] * (float)wx + rot[1] * wy_hub + rot[2] * (float)wz;
+            float hub_by = rot[3] * (float)wx + rot[4] * wy_hub + rot[5] * (float)wz;
+            float hub_bz = rot[6] * (float)wx + rot[7] * wy_hub + rot[8] * (float)wz;
+            int32_t hub_x = (int32_t)lrintf(hub_bx + actor->render_pos.x);
+            int32_t hub_y = (int32_t)lrintf(hub_by + actor->render_pos.y);
+            int32_t hub_z = (int32_t)lrintf(hub_bz + actor->render_pos.z);
+            actor->wheel_world_positions_hires[i].x = hub_x << 8;
+            actor->wheel_world_positions_hires[i].y = hub_y << 8;
+            actor->wheel_world_positions_hires[i].z = hub_z << 8;
+        }
 
         /* Copy to probe_FL/FR/RL/RR (0x090) for wall contact detection.
          * The original RefreshVehicleWheelContactFrames writes both 0x0F0
@@ -6002,6 +6149,12 @@ int32_t td5_physics_compute_drive_torque(TD5_Actor *actor)
     int32_t gear_ratio = (int32_t)PHYS_S(actor, 0x2E + gear * 2);
     torque = (torque * gear_ratio) >> 8;
 
+    if (actor->slot_index == 0 && (actor->frame_counter % 30u) == 0u) {
+        TD5_LOG_I(LOG_TAG,
+            "DT slot0: rpm=%d gear=%d thr=%d gr=%d tm=%d t0=%d t1=%d frac=%d torque=%d",
+            rpm, gear, throttle, gear_ratio, torque_mult, t0, t1, frac, torque);
+    }
+
     return torque;
 }
 
@@ -6259,6 +6412,22 @@ void td5_physics_init_vehicle_runtime(void)
         TD5_Actor *actor = (TD5_Actor *)(g_actor_table_base + (size_t)slot * TD5_ACTOR_STRIDE);
 
         bind_default_vehicle_tuning(actor, slot);
+
+        /* AI racer slots default to AUTOMATIC gearbox (actor+0x378 = 1).
+         * The original sets 0x378 from input bits in UpdatePlayerVehicleControlState
+         * (single write site @ 0x00402e97), which never runs for AI cars; their
+         * 0x378 stays at its post-allocation value. AI cars never hit microbump
+         * gear-shift opportunities here in the port because the brake→REVERSE
+         * workaround at td5_physics_compute_drive_forces fires on every stuck
+         * stop, and the manual-gearbox dispatch only flips throttle sign without
+         * upshifting back from REVERSE — locking AI cars in nonstop reverse
+         * after any recovery brake. Setting 0x378=1 here routes them through
+         * td5_physics_auto_gear_select_no_kick which handles REVERSE→FIRST when
+         * positive throttle resumes. For slot 0 with PlayerIsAI=0, the human
+         * input path overwrites 0x378 each tick, so this init is a no-op. */
+        if (slot < TD5_MAX_RACER_SLOTS) {
+            *((uint8_t *)actor + 0x378) = 1;
+        }
 
         /* Traffic-only: force cdef+0x88 (mass) to 0x20 regardless of what
          * carparam.dat supplies. Mirrors the original's init-time write at
@@ -6548,7 +6717,50 @@ static void bind_default_vehicle_tuning(TD5_Actor *actor, int slot)
      * original-faithful (original has no race) nor surprising (matches what
      * the original would do for a 2P split-screen drag, where both player
      * slots use carparam via the player path). */
-    if (slot >= 1 && slot < TD5_MAX_RACER_SLOTS &&
+    /* Original InitializeRaceActorRuntime @ 0x00432E60 gates the
+     * DAT_00473DB0 AI-template copy on `slot.state == 0` (NOT slot index).
+     * For slot 0 in PlayerIsAI=1 mode, g_race_slot_state[0] = 0 (AI), so
+     * the original copies the AI template — same as it does for slots 1..5.
+     *
+     * The port previously gated on `slot >= 1` which excluded slot 0
+     * unconditionally. With PlayerIsAI=1 + SINGLE_RACE, slot 0 (Viper)
+     * was using its native carparam (high torque/top speed) while the
+     * original would have given it the balanced AI template (Wf=400,
+     * Wr=400, I=180000). Result: port slot 0 reaches walls at vlong=90041
+     * vs slot 3 (car 17 with AI template) at ~78000 — the higher speed
+     * produces unrecoverable wall impacts.
+     *
+     * [CONFIRMED via Ghidra agent audit 2026-05-02 — see memory entry
+     *  reference_drag_ai_template_binding.md for the original's
+     *  `slot.state == 0 && g_selectedGameType == 0` gate.]
+     *
+     * Note: the original ALSO gates on game_type==0 (SINGLE_RACE), but
+     * the port's slots 1..5 in other modes have always used the AI
+     * template here; preserving that until a separate audit pass. */
+    /* PlayerIsAI=1 (port-only test flag) sets slot 0's state to 0 BEFORE the
+     * tuning binding fires. That makes the next gate think slot 0 is a normal
+     * AI car and copies the AI template over Viper's carparam — giving slot 0
+     * a 17% higher torque_mult (140 vs 120 post-NORMAL-scaling) and 32%
+     * higher gear ratios than its actual car. The resulting +54% drive_torque
+     * overshoots the original's frida_force_player_ai parity baseline
+     * (slot_state hacked AFTER init, so tuning stays bound to Viper carparam)
+     * by ~41% in vlong growth from tick 1, which is what triggers the
+     * Edinburgh "launches off road bumps and floats" symptom.
+     *
+     * Gate exception: when slot 0 is AI because of PlayerIsAI=1, skip the AI
+     * template copy and let the carparam fallback below run. That makes
+     * PlayerIsAI=1 parity-comparable to running force_player_ai.js on
+     * TD5_d3d.exe with the same car. Slots 1..5 still get the AI template
+     * (matches original behaviour for genuine AI racers).
+     *
+     * [Edinburgh 2026-05-11: original force_player_ai run reports
+     * rpm=5985 torque_mult=120 gear_ratio=1398 drive_torque=655 at tick 1;
+     * port pre-fix reported 7185/140/1850/1011. With this gate the port
+     * should produce Viper-carparam values matching the original.] */
+    int is_player_is_ai_slot0 = (slot == 0 && g_td5.ini.player_is_ai);
+
+    if (slot < TD5_MAX_RACER_SLOTS && g_race_slot_state[slot] == 0 &&
+        !is_player_is_ai_slot0 &&
         !(g_td5.drag_race_enabled && slot == 1 && s_carparam_loaded[slot])) {
         uint8_t *ai_tmpl = td5_ai_get_physics_template();
         if (ai_tmpl) {

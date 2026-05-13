@@ -1426,16 +1426,32 @@ int td5_game_init_race_session(void) {
              * [CONFIRMED @ 0x405D70 / 0x434350 decompilation] */
             td5_track_compute_heading((TD5_Actor *)actor);
 
-            /* For AI slots, correct the geometry-derived heading to match the
-             * LEFT.TRK route byte.  The geometry heading at Moscow spawn spans
-             * is ~1050 angle units off from the route heading, which immediately
-             * fires the recovery-script loop in td5_ai_update_track_behavior
-             * and keeps throttle=0 forever.
-             * Player slots (state==1) do not run through the route-heading
-             * check, so no correction is needed for them. */
-            if (s_slot_state[slot].state == 0) {
-                td5_ai_correct_spawn_heading(slot);
-            }
+            /* DO NOT post-process the geometry-derived yaw.
+             *
+             * Original InitializeActorTrackPose @ 0x00434350 writes
+             * actor[+0x1F4] = ((angle_from_geometry + 0x800) << 8) ONCE at
+             * 0x0043450a and never re-writes it; InitializeRaceSession
+             * @ 0x0042AA10 has no further +0x1F4 writes after the pose call.
+             * [CONFIRMED via Ghidra disassembly + decompilation, /fix
+             *  research session 2026-05-10.]
+             *
+             * A previous port version called td5_ai_correct_spawn_heading()
+             * here to overwrite the geometry yaw with route_bytes[span*3+1]'s
+             * encoded heading. The motivation cited was "geometry heading is
+             * ~1050 angle units off from route heading → recovery script
+             * fires every tick → throttle=0". A Frida calls-trace pass on
+             * branch fix-1778389787-4116 (PlayerIsAI=1, Moscow) showed the
+             * ORIGINAL also writes geometry-derived yaw at sim_tick=1 entry
+             * of UpdateAIVehicleDynamics and drives normally, so the gap
+             * between geometry yaw and route_byte yaw is real but tolerated
+             * by the original's recovery threshold. The override was masking
+             * a different bug (recovery-gate over-triggering on the port);
+             * with the gate now matching the original (D1/D2/D3 in commit
+             * 47bd157), the override is no longer needed and was the
+             * dominant cause of the tick-1 yaw_accum divergence
+             * (3 of 6 slots had STEERING SIGN FLIP — see
+             *  tools/frida_csv/fix-1778389787-4116/calls_trace_diff_summary.md).
+             */
 
             td5_physics_reset_actor_state((TD5_Actor *)actor);
 
@@ -2678,7 +2694,40 @@ static void tick_race_countdown(void)
         /* XZ freeze setter intentionally not called — see init_race_session
          * note; DAT_00483030 is unused in the original. */
         s_race_countdown_state = 0;
-        TD5_LOG_I(LOG_TAG, "Race countdown complete: GO");
+
+        /* Match orig observed post-countdown state: STEERING_CMD = 0 at
+         * sim_tick 1. Diff_race 2026-05-12 (physics_full+track profile,
+         * Moscow PlayerIsAI=1) showed port slot 0 STEERING_CMD = 47680 at
+         * sim_tick 1 vs orig = 0 — accumulated by cascade fine-band firing
+         * +7008/tick during countdown because RS_LEFT_DEVIATION = 35 at
+         * spawn (not 0). orig has the same cascade fire briefly during
+         * countdown (steering=49152 captured at one mid-countdown emit row)
+         * but ends countdown with STEERING_CMD = 0 via some path I could
+         * not statically localize without Frida traces on the orig binary.
+         *
+         * This explicit zero at the countdown→race transition mirrors
+         * the observed effect: port slot 0 ang_yaw + position trajectory
+         * should align with orig from sim_tick 1 onward. If a later /fix
+         * audit finds the actual orig mechanism, replace this with the
+         * faithful path. [TODO: locate orig 0x????? STEERING_CMD reset
+         * via Frida hook on actor+0x30C writes during countdown]. */
+        for (int slot = 0; slot < TD5_MAX_RACER_SLOTS; ++slot) {
+            char *a = (char *)td5_game_get_actor(slot);
+            if (!a) continue;
+            *(int32_t *)(a + 0x30C) = 0;       /* steering_command */
+            *(int16_t *)(a + 0x33A) = 0;       /* steering ramp accumulator */
+            *(int32_t *)(a + 0x1C4) = 0;       /* angular_velocity_yaw */
+            /* Re-derive RS_TRACK_PROGRESS + RS_TRACK_OFFSET_BIAS from current
+             * (unchanged-since-spawn) actor pos so peer-avoidance drift
+             * accumulated during the 160 countdown sub-ticks is wiped. orig
+             * presents fresh-spawn AI state at sim_tick 1; without this
+             * re-seed, port's RS_TRACK_OFFSET_BIAS drifts (-279 at spawn →
+             * -317+ post-countdown) and shifts the target_angle, making
+             * cascade fire hard on its first race tick. */
+            td5_ai_seed_actor_track_progress_offset(slot);
+        }
+
+        TD5_LOG_I(LOG_TAG, "Race countdown complete: GO (STEERING_CMD zeroed)");
         return;
     }
 
