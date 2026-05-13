@@ -2714,8 +2714,17 @@ static void tick_race_countdown(void)
         for (int slot = 0; slot < TD5_MAX_RACER_SLOTS; ++slot) {
             char *a = (char *)td5_game_get_actor(slot);
             if (!a) continue;
-            *(int32_t *)(a + 0x30C) = 0;
-            *(int16_t *)(a + 0x33A) = 0; /* steering ramp accumulator */
+            *(int32_t *)(a + 0x30C) = 0;       /* steering_command */
+            *(int16_t *)(a + 0x33A) = 0;       /* steering ramp accumulator */
+            *(int32_t *)(a + 0x1C4) = 0;       /* angular_velocity_yaw */
+            /* Re-derive RS_TRACK_PROGRESS + RS_TRACK_OFFSET_BIAS from current
+             * (unchanged-since-spawn) actor pos so peer-avoidance drift
+             * accumulated during the 160 countdown sub-ticks is wiped. orig
+             * presents fresh-spawn AI state at sim_tick 1; without this
+             * re-seed, port's RS_TRACK_OFFSET_BIAS drifts (-279 at spawn →
+             * -317+ post-countdown) and shifts the target_angle, making
+             * cascade fire hard on its first race tick. */
+            td5_ai_seed_actor_track_progress_offset(slot);
         }
 
         TD5_LOG_I(LOG_TAG, "Race countdown complete: GO (STEERING_CMD zeroed)");
