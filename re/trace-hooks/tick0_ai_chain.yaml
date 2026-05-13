@@ -1,0 +1,73 @@
+# Tick-0 / tick-1 AI divergence chain
+#
+# Suspect: port has slot 2/4 already at steering=-50496, engine=6185 at
+# tick 1 vs original's clean grid hold (all slots steering=0, engine=400)
+# at tick 0. Localizes whether the AI command path or the AI dynamics
+# step writes the divergent state.
+#
+# Add TD5_TRACE_CALL_ENTER macros to the port at:
+#   td5_ai.c            td5_ai_update_track_behavior(slot)        <- ai_track_behavior
+#   td5_physics.c       td5_physics_update_ai(actor)              <- ai_dynamics
+#
+# Run with player_is_ai=true on BOTH sides so slot 0 also goes through the
+# AI command path (otherwise slot 0 only appears on the port if PlayerIsAI=1).
+#
+# Args layout for both hooks:
+#   ai_track_behavior:
+#     0=slot 1=steer_cmd 2=yaw_accum 3=span_norm 4=long_speed
+#     5=encounter_steer 6=throttle_byte 7=brake_flag
+#   ai_dynamics:
+#     0=slot 1=steer_cmd 2=yaw_accum 3=long_speed 4=encounter_steer
+#     5=throttle_byte 6=brake_flag 7=sub_lane_index
+
+hooks:
+  - name: ai_track_behavior
+    original_rva: 0x00434FE0
+    args: 8
+    capture_return: false
+    port_symbol: td5_ai_update_track_behavior
+    # In the original, param_1 (slot) is on stack at [esp+0x4] on entry.
+    # Actor pointer derives from g_actorRuntimeState (base 0x4ab0a0?) +
+    # gActorTrackReferenceSlot[slot*0x47]*0x388. For diff purposes, the
+    # actor at slot N is sufficient; the Frida hook reads
+    #   actor = g_actor_base + slot * 0x388
+    # then captures the eight fields by offset.
+    actor_base: 0x004ab0a0
+    actor_stride: 0x388
+    field_offsets:
+      steer_cmd: 0x30C        # int32
+      yaw_accum: 0x1F4        # int32
+      span_norm: 0x82         # int16 (sign-extend to int32)
+      long_speed: 0x314       # int32
+      encounter_steer: 0x33E  # int16 (sign-extend)
+      throttle_byte: 0x36F    # uint8
+      brake_flag: 0x36D       # uint8
+    notes: |
+      UpdateActorTrackBehavior — top of AI tick chain. Captures the actor
+      state the function reads on entry. If port and original diverge here
+      AT TICK 0, the divergence is upstream of the AI command path
+      (spawn init or countdown gating).
+
+  - name: ai_dynamics
+    original_rva: 0x00404EC0
+    args: 8
+    capture_return: false
+    port_symbol: td5_physics_update_ai
+    # In the original, the function is called with actor pointer in ECX (or
+    # on stack — verify from disassembly). For the probe, look up the actor
+    # via the slot_index byte at +0x375 in whichever pointer is passed in.
+    # Reading slot_index byte avoids needing to know the calling convention.
+    actor_arg_index: 0        # ECX/[esp+4] at entry holds the actor pointer
+    field_offsets:
+      slot_index: 0x375       # uint8 — read this to populate arg_0
+      steer_cmd: 0x30C
+      yaw_accum: 0x1F4
+      long_speed: 0x314
+      encounter_steer: 0x33E
+      throttle_byte: 0x36F
+      brake_flag: 0x36D
+      sub_lane_index: 0x8C
+    notes: |
+      UpdateAIVehicleDynamics — the bicycle-model integrator for AI slots.
+      If ai_track_behavior matches but ai_dynamics diverges, the bug is in
+      the dynamics integrator (drag/torque/yaw) rather than the AI command.

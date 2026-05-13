@@ -263,14 +263,22 @@ def parse_profile_arg(arg: Optional[str]) -> List[str]:
 # reads MODULE_KEYS[mod] to pass --key-fields to compare_race_trace.py. Keep
 # this in sync with td5_trace.c's emitter prefixes.
 
+#   IMPORTANT — `frame` is deliberately EXCLUDED from cross-binary join keys.
+#   The original (Frida-hosted) and the port count render frames differently
+#   (port reaches sim_tick=1 at frame 208 on Honolulu where the original
+#   reaches it at frame 119), so any key containing `frame` produces an empty
+#   inner join and a vacuous "no mismatches" result that silently hides every
+#   real divergence. Confirmed 2026-05-05 against Jarash track 4: a tick-1
+#   yaw delta of 38 LSU + a roll-settling delta of 3104 LSU were entirely
+#   masked by the prior `frame,sim_tick,stage,slot` key. Keep `frame` out.
 MODULE_KEYS: Dict[str, List[str]] = {
-    "frame":    ["frame", "sim_tick", "stage"],
-    "pose":     ["frame", "sim_tick", "stage", "slot"],
-    "motion":   ["frame", "sim_tick", "stage", "slot"],
-    "track":    ["frame", "sim_tick", "stage", "slot"],
-    "controls": ["frame", "sim_tick", "stage", "slot"],
-    "progress": ["frame", "sim_tick", "stage", "slot"],
-    "view":     ["frame", "sim_tick", "stage", "view_index"],
+    "frame":    ["sim_tick", "stage"],
+    "pose":     ["sim_tick", "stage", "slot"],
+    "motion":   ["sim_tick", "stage", "slot"],
+    "track":    ["sim_tick", "stage", "slot"],
+    "controls": ["sim_tick", "stage", "slot"],
+    "progress": ["sim_tick", "stage", "slot"],
+    "view":     ["sim_tick", "stage", "view_index"],
     "calls":    ["sim_tick", "fn_name", "call_idx"],
 }
 

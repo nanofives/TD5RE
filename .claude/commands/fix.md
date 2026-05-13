@@ -149,6 +149,41 @@ Run this checklist against the research output. If any item fails, re-query the 
 5. **Atlas UV check**: Static atlas pages are 256×256 BGRA32. UV normalization = ÷256.0f for both U and V.
 6. **Fixed-point check**: 24.8 format — negative velocities look like large unsigned values (`0xFFFFFF00` = `-1.0`).
 
+### Step 1.75: Localize via function-call trace (when prior `/diff-race` showed divergence)
+
+If the bug was surfaced by a `/diff-race` run that flagged a tick-N divergence in pose / motion / track / yaw / spin, **don't skip to coding** — first localize WHICH function call inside tick N produces the bad state. This is the difference between "the chassis spins" (symptom) and "`update_susp_response` returns wrong ang_vel_roll given matching wheel-contact args" (mechanism).
+
+**Workflow:**
+
+1. From the `/diff-race` output, identify the per-actor field that diverges first (often `ang_yaw`, `ang_roll`, `vel_x`, `world_x`). The dominant Δ at the earliest sim_tick names the upstream subsystem:
+
+   | Earliest divergent field | Likely upstream function | Original RVA |
+   |--------------------------|--------------------------|--------------|
+   | `world_x` / `world_z` at tick 0 or 1 | `InitializeActorTrackPose` | `0x00434350` |
+   | `ang_roll` / `ang_pitch` settling at tick 1 | `UpdateVehicleSuspensionResponse` | `0x004057F0` |
+   | `wheel_mask` / surface flags | `RefreshVehicleWheelContactFrames` | `0x00403720` |
+   | `vel_x` / `long_speed` | `UpdatePlayerVehiclePhysics` | `0x00404760` |
+   | `track_span_*` / `sub_lane` | `UpdateActorTrackPosition` | `0x004440F0` |
+   | `ang_yaw` (no roll/pitch divergence) | AI command path → `UpdateActorTrackBehavior` | `0x00434FE0` |
+   | finish/checkpoint/race_pos | `UpdateRaceOrder` / `UpdateRaceActors` | `0x0042F5B0` / `0x00436A70` |
+
+2. Pick a YAML under `re/trace-hooks/` that covers the suspect chain (e.g. `tick1_spawn_chain.yaml` for tick-1 pose+susp+wheel chain). If none fits, write one — see `re/trace-hooks/README.md` for the spec format. **Always include 2-3 hooks**: one upstream, one mid, one downstream. A single hook at the end of the chain only tells you "the result is wrong"; the upstream hook tells you whether the inputs to that result were already wrong.
+
+3. Add `TD5_TRACE_CALL_ENTER` and `TD5_TRACE_CALL_RET` macros to the port-side equivalents (whatever is named in `port_symbol`). These are zero-cost when tracing is disabled. Keep the macros in only as long as the investigation runs — strip before commit (search the diff for `TD5_TRACE_CALL_` and remove unless gated by `#ifdef TD5_TRACE_CALLS`).
+
+4. Run `/diff-race --track <N> hooks=re/trace-hooks/<spec>.yaml profile=<lens>`. The orchestrator runs a second comparator pass on `log/calls_trace_original.csv` vs `log/calls_trace.csv` keyed by `(sim_tick, fn_name, call_idx)`.
+
+5. Read the calls-trace diff:
+   - **Upstream hook args match, downstream result diverges** → bug is inside the downstream function. Decompile that one function in Ghidra and audit against port.
+   - **Upstream hook args already differ** → bug is FURTHER upstream than this YAML covers. Add another hook one level up (e.g. if `update_susp_response`'s actor pointer has wrong roll-state on entry, hook `refresh_wheel_contacts` and the function above it).
+   - **Call counts per tick differ** → loop bound or early-out condition mismatch. Often a flag-comparison sign or off-by-one in a guard.
+
+6. Treat this as the "ground truth" for Step 2. Do NOT start coding until the calls-trace diff isolates the divergence to a specific (function, tick, slot, arg-or-retval) tuple. Without this, /fix has historically chased symptoms — patching one observable while the upstream root cause produced two more.
+
+**Always-trace rule:** If any user request mentions a runtime symptom (yaw spin, chassis launch, wrong race position, AI overshoot, finish missed) AND `/diff-race` shows divergence in the relevant module, this step is **mandatory before Step 2**. Skipping it on the assumption you "already know" what's wrong is the most common cause of failed fixes.
+
+**Worktree gotcha:** `TD5_TRACE_CALL_ENTER`/`RET` macros must be added to the port copy in `${WORKTREE_DIR}/td5mod/src/td5re/`, not the main tree. Verify before building or you'll trace the wrong binary.
+
 ### Step 2: Implement (inside the worktree)
 
 Using the research summary from Step 1, make the code changes **in the worktree you created in Step 0** — never in the main tree.
