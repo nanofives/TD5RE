@@ -448,10 +448,12 @@ function installHarnessWindow() {
 // replacement function always reads the correct scenario values.
 log('quickrace: script loaded, installing hooks with default cfg');
 // Harness ergonomics first — failure-isolated so they cannot prevent install()
-// from setting up the race-entry hooks. Both are no-ops if the relevant
-// exports aren't resolvable yet (dsound loads after WinMain).
+// from setting up the race-entry hooks. Mute is safe: stubs DirectSoundCreate
+// to fail at audio init. Window-resize hook was REMOVED 2026-05-12: it
+// resized the OS window but not the render resolution, leaving the original
+// rendering at native res cropped to 640x480 (upper-left zoom). Properly
+// forcing render res needs DirectDraw COM vtable hooks (TODO if needed).
 installHarnessMute();
-installHarnessWindow();
 install();
 
 recv('cfg', function (msg) {
