@@ -44,6 +44,7 @@
 #include "td5_trace.h"    /* inner-tick physics_trace stages */
 #include "td5_pilot_trace.h" /* precise-port pilot CSV emit for 0x00403720 */
 #include "td5_pilot_trace_00405B40.h" /* precise-port pilot CSV emit for 0x00405B40 */
+#include "td5_pilot_trace_00405D70.h" /* precise-port pilot CSV emit for 0x00405D70 */
 #include "td5re.h"
 
 /* Include the full actor struct for field-level access.
@@ -5961,116 +5962,99 @@ int td5_physics_get_collisions_flag(void)
 
 void td5_physics_reset_actor_state(TD5_Actor *actor)
 {
-    /* Zero all velocities */
-    actor->linear_velocity_x = 0;
-    actor->linear_velocity_y = 0;
-    actor->linear_velocity_z = 0;
-    actor->angular_velocity_roll = 0;
-    actor->angular_velocity_yaw = 0;
-    actor->angular_velocity_pitch = 0;
-
-    /* Zero euler pitch/roll accumulators — yaw was set by
-     * InitializeActorTrackPose (compute_heading) and must be preserved.
-     * Missing these writes caused slot 1+ spawn-pose residuals in
-     * disp_pitch / ang_pitch / disp_roll at sim_tick=1.
-     * [RE basis: ResetVehicleActorState @ 0x00405D70 zeroes the pitch
-     * and roll accumulators while leaving yaw untouched.] */
-    actor->euler_accum.roll = 0;
-    actor->euler_accum.pitch = 0;
-
-    /* Seed display angles from the accumulator so the first render frame
-     * matches the spawn yaw. integrate_pose rewrites these each tick from
-     * (euler_accum >> 8), but the initial values need to be consistent. */
-    actor->display_angles.roll = 0;
-    actor->display_angles.yaw = (int16_t)((actor->euler_accum.yaw >> 8) & 0xFFF);
-    actor->display_angles.pitch = 0;
-
-    /* Reset frame counter — used by mode1 recovery timeout. Carrying
-     * residual counts from a prior race would shorten the recovery window
-     * on respawn. [RE basis: ResetVehicleActorState zeroes the counter.] */
-    actor->frame_counter = 0;
-
-    /* Reset gear to first forward */
-    actor->current_gear = TD5_GEAR_FIRST;
-
-    /* Reset engine RPM to idle */
-    actor->engine_speed_accum = TD5_ENGINE_IDLE_RPM;
-
-    /* Faithful spawn init matching original ResetVehicleActorState @ 0x00405D70:
-     * zero suspension pos + spring_dv (the integrator's velocity state). Do NOT
-     * preload pos with a heuristic — the integrator (0x4057F0) settles to the
-     * correct equilibrium on the first tick from zero, producing the asymmetric
-     * front/rear positions purely from gravity-driven load_accum signs.
-     * The earlier `ss = (href*5+4)/9` heuristic produced +54/+43 FP delta vs
-     * original (frida physics_trace.csv 2026-05-02). [CONFIRMED @ 0x00405D70] */
-    actor->wheel_contact_bitmask = 0;
-    for (int i = 0; i < 4; i++) {
-        actor->wheel_suspension_pos[i] = 0;
-        actor->wheel_spring_dv[i] = 0;
-        /* wheel_load_accum (+0x2FC) NOT zeroed by original — it is populated
-         * by the upcoming td5_physics_integrate_pose -> refresh_wheel_contacts
-         * call below via `force = (wheel_y - ground_y) + g`. */
-    }
-    actor->center_suspension_pos = 0;
-    actor->center_suspension_vel = 0;
-
-    /* Clear slip/tire state */
-    actor->front_axle_slip_excess = 0;
-    actor->rear_axle_slip_excess = 0;
-    actor->accumulated_tire_slip_x = 0;
-    actor->accumulated_tire_slip_z = 0;
-    actor->longitudinal_speed = 0;
-    actor->lateral_speed = 0;
-    actor->current_slip_metric = 0;
-
-    /* Tire-track emitter IDs default to 0xFF (no emitter). The vfx module
-     * uses 0xFF as the "free" sentinel when checking whether to allocate
-     * a new emitter from the 80-slot pool; leaving these zero means the
-     * acquire path never fires and tire marks never appear. */
-    actor->tire_track_emitter_FL = 0xFF;
-    actor->tire_track_emitter_FR = 0xFF;
-    actor->tire_track_emitter_RL = 0xFF;
-    actor->tire_track_emitter_RR = 0xFF;
-
-    /* Clear control state */
-    actor->steering_command = 0;
-    actor->encounter_steering_cmd = 0;  /* zero throttle */
-    actor->brake_flag = 0;
-    actor->handbrake_flag = 0;
-    actor->vehicle_mode = 0;
-    actor->damage_lockout = 0;
-
-    /* Match original ResetVehicleActorState @ 0x00405D70: write the
-     * sentinel world_pos.y = -0x40000000 and let IntegrateVehiclePoseAndContacts
-     * ground-snap via the per-wheel refresh_wheel_contacts -> wheel_contact_pos
-     * averaging path. force = (sentinel - ground_y) + gravity is hugely
-     * negative (< 0x801), so the grounded branch in refresh_wheel_contacts
-     * snaps wheel_contact_pos[i].y = ground_y, and integrate_pose then
-     * averages those 4 per-wheel values into world_pos.y.
+    /* Byte-faithful port of ResetVehicleActorState @ 0x00405D70 (54 instr).
+     * Every write below corresponds to a specific store in the listing.
+     * Field-by-field map: re/analysis/pilot_00405D70_audit.md.
      *
-     * Prior implementation probed at chassis XZ and wrote world_pos.y
-     * before integrate — that sampled ONE terrain point instead of the
-     * 4 rotated wheel XZs, causing per-slot Y deltas that scaled with
-     * grid offset (slot 1 -12416, slot 2 +4736, slot 4 -8000, ...).
-     * [CONFIRMED @ 0x00405D70] */
-    actor->world_pos.y = (int32_t)0xC0000000;
+     * The original touches EXACTLY 25 unique offsets. Earlier port versions
+     * added ~16 extra writes (slip, steering, tire-track-emitter IDs,
+     * center_suspension, damage_lockout, etc.). Those are removed here —
+     * the dependent paths reinitialise those fields elsewhere, or rely on
+     * residual values surviving the reset (notably the traffic recyclers
+     * 0x004353B0 / 0x00435940 / 0x00434DA0 which expect slip/steering
+     * history to persist across the call). */
 
-    /* Convert positions to float for render */
-    actor->render_pos.x = (float)actor->world_pos.x * (1.0f / 256.0f);
-    actor->render_pos.y = (float)actor->world_pos.y * (1.0f / 256.0f);
-    actor->render_pos.z = (float)actor->world_pos.z * (1.0f / 256.0f);
+    /* Capture PRE-state for the pilot probe BEFORE any mutation. */
+    td5_pilot_trace_00405D70_enter(actor);
 
-    /* Run one integrate step to settle suspension against the ground. */
+    /* 0x405D78 / 0x405D7E — clear flag bytes */
+    actor->surface_contact_flags = 0;       /* +0x376 */
+    actor->vehicle_mode = 0;                /* +0x379 */
+
+    /* 0x405D84-DA6 — zero 6 dwords: ang_vel + lin_vel block */
+    actor->angular_velocity_roll = 0;       /* +0x1C0 */
+    actor->angular_velocity_yaw = 0;        /* +0x1C4 */
+    actor->angular_velocity_pitch = 0;      /* +0x1C8 */
+    actor->linear_velocity_x = 0;           /* +0x1CC */
+    actor->linear_velocity_y = 0;           /* +0x1D0 */
+    actor->linear_velocity_z = 0;           /* +0x1D4 */
+
+    /* 0x405DA8 — zero frame_counter (int16) */
+    actor->frame_counter = 0;               /* +0x338 */
+
+    /* 0x405DAF — zero wheel_contact_bitmask (NOT damage_lockout at 0x37D) */
+    actor->wheel_contact_bitmask = 0;       /* +0x37C */
+
+    /* 0x405DB5 — sentinel world_pos.y so the upcoming integrate ground-snaps
+     * via the per-wheel refresh_wheel_contacts -> wheel_contact_pos averaging
+     * path. force = (sentinel - ground_y) + gravity is hugely negative
+     * (< 0x801), so the grounded branch in refresh_wheel_contacts snaps
+     * wheel_contact_pos[i].y = ground_y, and integrate_pose then averages
+     * those 4 per-wheel values into world_pos.y. [CONFIRMED @ 0x00405D70] */
+    actor->world_pos.y = (int32_t)0xC0000000;   /* +0x200 */
+
+    /* 0x405DBF — gear = 2 (first forward) */
+    actor->current_gear = TD5_GEAR_FIRST;       /* +0x36B */
+
+    /* 0x405DC6 — engine_speed_accum = 0x190 (idle RPM) */
+    actor->engine_speed_accum = TD5_ENGINE_IDLE_RPM;  /* +0x310 */
+
+    /* 0x405DD0-E4 — loop: wheel_suspension_pos[0..3] and wheel_spring_dv[0..3]
+     * are zeroed. The integrator (0x4057F0) settles to the correct equilibrium
+     * on the first tick from zero, producing the asymmetric front/rear
+     * positions purely from gravity-driven load_accum signs.
+     * Earlier "preload = (href*5+4)/9" heuristic produced +54/+43 FP delta vs
+     * original (frida physics_trace.csv 2026-05-02). */
+    for (int i = 0; i < 4; i++) {
+        actor->wheel_suspension_pos[i] = 0;     /* +0x2DC + i*4 */
+        actor->wheel_spring_dv[i] = 0;          /* +0x2EC + i*4 */
+    }
+
+    /* 0x405DE6-E41 — render_pos = (float)world_pos * 1/256, interleaved with
+     * display_angles/euler_accum stores. Source-ordering interleave is for
+     * x87/integer pipeline scheduling and has no visible effect since all
+     * fields are disjoint.
+     *
+     * DAT_0045D5E8 = 0x3B800000f = 1.0f/256.0f (verified via memory_read). */
+    actor->display_angles.roll  = 0;        /* +0x208 */
+    actor->euler_accum.roll     = 0;        /* +0x1F0 */
+    actor->display_angles.pitch = 0;        /* +0x20C */
+    actor->euler_accum.pitch    = 0;        /* +0x1F8 */
+    /* SAR EAX, 8 on signed dword → low16 captured by MOV [+0x20A], AX.
+     * Original has no &0xFFF mask; keep the int16 truncate faithful. */
+    actor->display_angles.yaw = (int16_t)(actor->euler_accum.yaw >> 8);  /* +0x20A */
+
+    actor->render_pos.x = (float)actor->world_pos.x * (1.0f / 256.0f);  /* +0x144 */
+    actor->render_pos.y = (float)actor->world_pos.y * (1.0f / 256.0f);  /* +0x148 */
+    actor->render_pos.z = (float)actor->world_pos.z * (1.0f / 256.0f);  /* +0x14C */
+
+    /* 0x405E47 — CALL IntegrateVehiclePoseAndContacts (settles suspension
+     * + ground-snaps world_pos.y from the sentinel). */
     td5_physics_integrate_pose(actor);
 
-    /* Post-integrate: zero all dynamics to prevent bounce (0x405E5E-0x405E7C) */
+    /* 0x405E4C-66 — zero wheel_load_accum[0..3] after the integrate */
     for (int i = 0; i < 4; i++)
-        actor->wheel_load_accum[i] = 0;
-    actor->angular_velocity_roll = 0;
-    actor->angular_velocity_pitch = 0;
-    actor->linear_velocity_y = 0;
+        actor->wheel_load_accum[i] = 0;         /* +0x2FC + i*4 */
 
-    TD5_LOG_I(LOG_TAG, "reset_actor_state: grounded Y=%d", actor->world_pos.y);
+    /* 0x405E69-75 — re-zero a subset of dynamics overwritten by integrate */
+    actor->angular_velocity_roll  = 0;          /* +0x1C0 */
+    actor->angular_velocity_pitch = 0;          /* +0x1C8 */
+    actor->linear_velocity_y      = 0;          /* +0x1D0 */
+
+    /* === pilot trace hook ===
+     * Fires once per reset (rare event — spawn/respawn/recycle); negligible
+     * cost. Schema in tools/diff_func_trace.py reads addr=0x00405D70. */
+    td5_pilot_trace_00405D70_leave(actor);
 }
 
 /* ========================================================================
