@@ -88,8 +88,9 @@ static void resolve_collision_pair(TD5_Actor *a, TD5_Actor *b, int idx_a, int id
 static void collision_detect_full(TD5_Actor *a, TD5_Actor *b, int idx_a, int idx_b);
 static void collision_detect_simple(TD5_Actor *a, TD5_Actor *b);
 static int  obb_corner_test(TD5_Actor *a, TD5_Actor *b,
-                            int32_t ax, int32_t az, int32_t bx, int32_t bz,
-                            int32_t heading_a, int32_t heading_b,
+                            int32_t pos_a_x_fp, int32_t pos_a_z_fp,
+                            int32_t pos_b_x_fp, int32_t pos_b_z_fp,
+                            int32_t yaw_a_acc, int32_t yaw_b_acc,
                             OBB_CornerData corners[8]);
 static void apply_collision_response(TD5_Actor *penetrator, TD5_Actor *target,
                                      int corner_idx, OBB_CornerData *corner,
@@ -2688,8 +2689,9 @@ static void apply_damped_suspension_force(TD5_Actor *actor, int32_t lateral, int
  * ======================================================================== */
 
 static int obb_corner_test(TD5_Actor *a, TD5_Actor *b,
-                           int32_t ax, int32_t az, int32_t bx, int32_t bz,
-                           int32_t heading_a, int32_t heading_b,
+                           int32_t pos_a_x_fp, int32_t pos_a_z_fp,
+                           int32_t pos_b_x_fp, int32_t pos_b_z_fp,
+                           int32_t yaw_a_acc, int32_t yaw_b_acc,
                            OBB_CornerData corners[8])
 {
     int result = 0;
@@ -2702,6 +2704,37 @@ static int obb_corner_test(TD5_Actor *a, TD5_Actor *b,
     int32_t front_z_b = (int32_t)CDEF_S(b, 0x04);
     int32_t rear_z_b  = (int32_t)CDEF_S(b, 0x14);
 
+    /* [LISTING ALIGNMENT 0x00408570]: the original's
+     *   CollectVehicleCollisionContacts(int param_1, int param_2,
+     *                                   int *param_3, int *param_4, short *param_5)
+     * receives raw 24.8-fp position triplets (param_3 = &local_80 = pos triplet of A,
+     * etc.) and raw 24.8-fp euler accumulators (param_4 = &local_94 = yaw triplet),
+     * then computes:
+     *   iVar3  = (param_3[5] - param_3[2]) >> 8;          // (pos_b.z - pos_a.z) >> 8
+     *   iVar24 = (param_3[3] - *param_3) >> 8;            // (pos_b.x - pos_a.x) >> 8
+     *   uVar25 = (uint)(short)((*param_4 - param_4[1]) >> 8); // (yaw_a - yaw_b) >> 8
+     *   CosFixed12bit(*param_4 >> 8);                     // yaw_a >> 8
+     *   CosFixed12bit(param_4[1] >> 8);                   // yaw_b >> 8
+     * — i.e. the >>8 happens on the DELTA (positions) or on the raw accumulator
+     * (headings), INSIDE the callee. The prior port wrapper required the caller
+     * to pre-shift, so two callers in resolve_vehicle_collision_pair both did
+     * (pos_X >> 8) before calling. That introduced an off-by-1-LSB divergence
+     * for any pair whose fractional bytes underflowed on subtract
+     * (e.g. pos_a=255, pos_b=0: orig (0-255)>>8 = -1; pre-shifted (0>>8)-(255>>8)=0).
+     *
+     * Fix (this commit): match the listing — wrapper now takes raw 24.8 fp pos +
+     * raw 24.8 fp yaw accumulators, computes the same deltas-then-shift and
+     * raw-then-shift internally. */
+    int32_t delta_world_x = (pos_b_x_fp - pos_a_x_fp) >> 8;
+    int32_t delta_world_z = (pos_b_z_fp - pos_a_z_fp) >> 8;
+    int32_t heading_a = yaw_a_acc >> 8;            /* matches `*param_4 >> 8` */
+    int32_t heading_b = yaw_b_acc >> 8;            /* matches `param_4[1] >> 8` */
+    /* dheading derived from raw accumulator subtract then shift, matching
+     * `uVar25 = (uint)(short)((*param_4 - param_4[1]) >> 8)`. The (short) cast
+     * means the LOW 16 bits are then treated as int — equivalent in our path
+     * because cos_fixed12/sin_fixed12 mask with & 0xFFF internally. */
+    int32_t dheading_raw_shift = (yaw_a_acc - yaw_b_acc) >> 8;
+
     /* Pool15 V2V pilot trace — capture inputs at entry. */
     TD5_PilotV2VContactSnap _v2v_snap;
     int _v2v_slot_a = a ? a->slot_index : -1;
@@ -2709,22 +2742,16 @@ static int obb_corner_test(TD5_Actor *a, TD5_Actor *b,
     int _v2v_call_idx = td5_pilot_v2v_next_call_idx();
     _v2v_snap.actor_a_addr = (uint32_t)(uintptr_t)a;
     _v2v_snap.actor_b_addr = (uint32_t)(uintptr_t)b;
-    /* These ax/az/bx/bz are display-unit (>>8) world coords that the port
-     * computes in collision_detect_full. The original passes 24.8 FP and
-     * does >>8 inside CollectVehicleCollisionContacts. To compare against
-     * Frida-captured originals, we re-multiply by 0x100 here so port and
-     * orig trace columns share the same 24.8 FP scale. */
-    _v2v_snap.ax = ax << 8;
+    /* Pilot snapshot stores raw 24.8 fp coords for direct comparison with the
+     * Frida capture of the original callee. */
+    _v2v_snap.ax = pos_a_x_fp;
     _v2v_snap.ay = a ? a->world_pos.y : 0;
-    _v2v_snap.az = az << 8;
-    _v2v_snap.bx = bx << 8;
+    _v2v_snap.az = pos_a_z_fp;
+    _v2v_snap.bx = pos_b_x_fp;
     _v2v_snap.by = b ? b->world_pos.y : 0;
-    _v2v_snap.bz = bz << 8;
-    /* heading_a/b come in as 12-bit values (already & 0xFFF inside cos/sin).
-     * The original receives raw yaw_accum (24.8) and shifts down inside.
-     * Multiply back by 0x100 for cross-comparison. */
-    _v2v_snap.yaw_a_raw = heading_a << 8;
-    _v2v_snap.yaw_b_raw = heading_b << 8;
+    _v2v_snap.bz = pos_b_z_fp;
+    _v2v_snap.yaw_a_raw = yaw_a_acc;
+    _v2v_snap.yaw_b_raw = yaw_b_acc;
     _v2v_snap.cardef_a_off04 = (int16_t)front_z_a;
     _v2v_snap.cardef_a_off08 = (int16_t)half_w_a;
     _v2v_snap.cardef_a_off14 = (int16_t)rear_z_a;
@@ -2738,21 +2765,29 @@ static int obb_corner_test(TD5_Actor *a, TD5_Actor *b,
     _v2v_snap.bitmask = 0;
     td5_pilot_v2v_contact_emit_enter(&_v2v_snap, _v2v_slot_a, _v2v_slot_b, _v2v_call_idx);
 
-    /* Precompute sin/cos for each heading */
+    /* Precompute sin/cos for each heading. cos_fixed12/sin_fixed12 mask with
+     * & 0xFFF internally, so passing the raw (yaw_acc >> 8) is safe and matches
+     * the listing's CosFixed12bit(*param_4 >> 8) / CosFixed12bit(param_4[1] >> 8). */
     int32_t cos_a = cos_fixed12(heading_a);
     int32_t sin_a = sin_fixed12(heading_a);
     int32_t cos_b = cos_fixed12(heading_b);
     int32_t sin_b = sin_fixed12(heading_b);
 
-    /* Delta heading: rotation from B's frame to A's frame */
-    int32_t dheading = (heading_b - heading_a) & 0xFFF;
-    int32_t cos_d = cos_fixed12(dheading);
-    int32_t sin_d = sin_fixed12(dheading);
-
-    /* Delta heading inverse: rotation from A's frame to B's frame */
-    int32_t dheading_inv = (heading_a - heading_b) & 0xFFF;
+    /* Delta heading. Listing uses `(*param_4 - param_4[1]) >> 8` =
+     * (yaw_a - yaw_b) >> 8 = +dheading_inv (rotation from A to B).
+     * The original then feeds that uVar25 into CosFixed12bit/SinFixed12bit and
+     * uses the resulting cos/sin to rotate B's CORNERS into A's frame
+     * (= "+dheading_inv" rotates B-frame vectors into A-frame; the inverse of
+     * the orientation difference). Port's dheading_inv variable is the same. */
+    int32_t dheading_inv = dheading_raw_shift & 0xFFF;
     int32_t cos_di = cos_fixed12(dheading_inv);
     int32_t sin_di = sin_fixed12(dheading_inv);
+
+    /* For the symmetric second half (A's corners into B's frame), the rotation
+     * is the opposite sign: dheading = -dheading_inv. */
+    int32_t dheading = (-dheading_raw_shift) & 0xFFF;
+    int32_t cos_d = cos_fixed12(dheading);
+    int32_t sin_d = sin_fixed12(dheading);
 
     /* B's 4 corners in B's local frame. Layout (X=lateral, Z=forward):
      *   0 = FL  (-half_w, front_z)
@@ -2767,9 +2802,12 @@ static int obb_corner_test(TD5_Actor *a, TD5_Actor *b,
     int32_t a_corners_lz[4] = {  front_z_a, front_z_a,  rear_z_a,  rear_z_a };
 
     /* --- Test B's corners in A's OBB (bits 0-3) --- */
-    /* World-space delta from A to B */
-    int32_t delta_x = bx - ax;
-    int32_t delta_z = bz - az;
+    /* World-space delta from A to B, in display units. Listing computes this
+     * as (param_3[3] - *param_3) >> 8 and (param_3[5] - param_3[2]) >> 8,
+     * i.e. subtraction on the raw 24.8 fp THEN >>8. The previously pre-shifted
+     * (pos_b>>8) - (pos_a>>8) form drifts by 1 LSB on fractional-underflow. */
+    int32_t delta_x = delta_world_x;
+    int32_t delta_z = delta_world_z;
 
     /* Rotate delta into A's local frame.
      * [CONFIRMED @ 0x004086D0-0x004086F6]: game uses "CW from +Z" convention
@@ -2830,9 +2868,11 @@ static int obb_corner_test(TD5_Actor *a, TD5_Actor *b,
     }
 
     /* --- Test A's corners in B's OBB (bits 4-7) --- */
-    /* World-space delta from B to A */
-    int32_t delta2_x = ax - bx;
-    int32_t delta2_z = az - bz;
+    /* World-space delta from B to A = negation of the A-to-B delta. The
+     * listing's second half re-uses the same iVar3/iVar24 with sign-flipped
+     * sin/cos terms (see iVar15 = sin_b*dz - cos_b*dx at 0x004088E0). */
+    int32_t delta2_x = -delta_world_x;
+    int32_t delta2_z = -delta_world_z;
 
     /* Rotate delta into B's local frame.
      * [CONFIRMED @ second half of 0x00408570]: symmetric sign convention
@@ -3478,24 +3518,22 @@ static void collision_detect_full(TD5_Actor *a, TD5_Actor *b, int idx_a, int idx
     int32_t yaw_a_acc = a->euler_accum.yaw;
     int32_t yaw_b_acc = b->euler_accum.yaw;
 
+    /* Initial-state display-unit headings (used only for the diagnostic log
+     * below; mirrors the prior heading_a/heading_b labels). */
+    int32_t initial_heading_a = (yaw_a_acc >> 8) & 0xFFF;
+    int32_t initial_heading_b = (yaw_b_acc >> 8) & 0xFFF;
+
     /* Initial OBB test at full (end-of-tick) position.
      * [CONFIRMED @ 0x00408B27-B48]: CollectVehicleCollisionContacts is
-     * invoked here with the raw accumulators. Internally it does the >>8
-     * to display units. The port's obb_corner_test wrapper expects
-     * pre-shifted display-unit coords and 12-bit angles, so we do the
-     * conversion at the wrapper boundary — algebraically identical to
-     * the original's internal shift. */
-    int32_t ax = pos_a_x >> 8;
-    int32_t az = pos_a_z >> 8;
-    int32_t bx = pos_b_x >> 8;
-    int32_t bz = pos_b_z >> 8;
-    int32_t heading_a = (yaw_a_acc >> 8) & 0xFFF;
-    int32_t heading_b = (yaw_b_acc >> 8) & 0xFFF;
-
+     * invoked with raw 24.8-fp position triplets and raw 24.8-fp euler
+     * accumulators. The callee does (pos_b - pos_a) >> 8 and yaw_acc >> 8
+     * internally — see the wrapper header comment. Pass raw, matching the
+     * listing exactly. */
     OBB_CornerData corners[8];
     memset(corners, 0, sizeof(corners));
-    int bitmask = obb_corner_test(a, b, ax, az, bx, bz,
-                                  heading_a, heading_b, corners);
+    int bitmask = obb_corner_test(a, b,
+                                  pos_a_x, pos_a_z, pos_b_x, pos_b_z,
+                                  yaw_a_acc, yaw_b_acc, corners);
 
     if (bitmask == 0) return;  /* No overlap at full size — early-return. */
 
@@ -3536,7 +3574,10 @@ static void collision_detect_full(TD5_Actor *a, TD5_Actor *b, int idx_a, int idx
     OBB_CornerData cached_corners[8];
     memcpy(cached_corners, corners, sizeof(cached_corners));
 
-    int32_t test_ha = heading_a, test_hb = heading_b;
+    /* Display-unit heading snapshot for the dispatch path. Updated each
+     * iter from yaw_a_acc/yaw_b_acc after the wrapper call. */
+    int32_t test_ha = yaw_a_acc >> 8;
+    int32_t test_hb = yaw_b_acc >> 8;
 
     for (int iter = 0; iter < 7; iter++) {
         /* Per-iter halving [listing 0x00408C0E-0x00408C56]:
@@ -3550,20 +3591,15 @@ static void collision_detect_full(TD5_Actor *a, TD5_Actor *b, int idx_a, int idx
         step_bh  /= 2;
         local_8c /= 2;
 
-        /* Pass current raw 24.8 accumulators to the wrapper, which expects
-         * display-unit coords + 12-bit angles. The original passes raw
-         * accumulators and shifts inside CollectVehicleCollisionContacts. */
-        int32_t test_ax = pos_a_x >> 8;
-        int32_t test_az = pos_a_z >> 8;
-        int32_t test_bx = pos_b_x >> 8;
-        int32_t test_bz = pos_b_z >> 8;
-        test_ha = yaw_a_acc >> 8;
+        /* Pass current raw 24.8 accumulators to the wrapper, matching the
+         * listing exactly — callee owns the >>8 shift on delta/yaw. */
+        test_ha = yaw_a_acc >> 8;  /* snapshot for dispatch logging */
         test_hb = yaw_b_acc >> 8;
 
         memset(corners, 0, sizeof(corners));
-        int32_t result = obb_corner_test(a, b, test_ax, test_az,
-                                         test_bx, test_bz,
-                                         test_ha, test_hb, corners);
+        int32_t result = obb_corner_test(a, b,
+                                         pos_a_x, pos_a_z, pos_b_x, pos_b_z,
+                                         yaw_a_acc, yaw_b_acc, corners);
 
         /* Default direction (uVar5 == 0 / miss path, listing 0x00408CD6-0x00408D1F):
          *   move FORWARD in time — add the current half-step to positions
@@ -3633,7 +3669,7 @@ static void collision_detect_full(TD5_Actor *a, TD5_Actor *b, int idx_a, int idx
      * Final-state yaw sits within ±(last bisect_step) of the last-hit yaw. */
     TD5_LOG_I(LOG_TAG, "v2v_bisect: slotA=%d slotB=%d local_84=0x%02X impactForce=%d bitmask=0x%02X bisHA=0x%03X bisHB=0x%03X rawHA=0x%03X rawHB=0x%03X",
               a->slot_index, b->slot_index, local_84, impactForce, cached_bitmask,
-              test_ha, test_hb, heading_a, heading_b);
+              test_ha, test_hb, initial_heading_a, initial_heading_b);
 
     /* --- Dispatch collision response based on corner bitmask ---
      * 4th arg `angle` is the target's BISECTED yaw (>> 8).
