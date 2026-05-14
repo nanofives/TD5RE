@@ -6889,47 +6889,125 @@ void td5_physics_state0f_damping(TD5_Actor *actor)
  * Engine & Transmission
  * ======================================================================== */
 
-/* --- UpdateVehicleEngineSpeedSmoothed (0x42ED50) ---
+/* --- UpdateVehicleEngineSpeedSmoothed (0x0042ED50) ---
  *
- * Handles neutral/reverse gear RPM:
- * smoothly approaches idle (400) or a throttle-proportional target.
+ * Byte-faithful port of FUN_0042ED50 (RE: TD5_pool11 read-only listing,
+ * audited 2026-05-14). Mirrors the original x86 control flow line-for-line:
+ *
+ *   0x42ED50  PUSH ESI                          ; entry
+ *   0x42ED51  MOV  ESI, [ESP+8]                 ; actor
+ *   0x42ED55  MOV  EAX, [ESI+0x1bc]             ; tuning_data_ptr
+ *   0x42ED5B  MOVSX ECX, WORD [EAX+0x72]        ; ECX = redline (int)
+ *   0x42ED5F  MOV  AL,  BYTE [ESI+0x36d]        ; AL  = brake_flag
+ *   0x42ED65  TEST AL, AL
+ *   0x42ED67  JNZ  0x42ED9A                     ; brake → idle (400)
+ *   0x42ED69  MOV  DX,  WORD [ESI+0x33e]        ; DX  = encounter_steering_cmd
+ *   0x42ED70  TEST DX, DX
+ *   0x42ED73  JL   0x42ED9A                     ; throttle<0 → idle (400)
+ *   0x42ED75  MOVSX EDX, DX                     ; EDX = throttle (int)
+ *   0x42ED78  LEA  EAX, [ECX-0x190]             ; EAX = redline - 400
+ *   0x42ED7E  IMUL EAX, EDX                     ; EAX *= throttle
+ *   0x42ED81  CDQ
+ *   0x42ED82  AND  EDX, 0xff                    ; round-toward-zero bias
+ *   0x42ED88  ADD  EAX, EDX
+ *   0x42ED8A  SAR  EAX, 8                       ; >> 8 (signed, round->0)
+ *   0x42ED8D  CMP  ECX, EAX
+ *   0x42ED8F  JGE  0x42ED93
+ *   0x42ED91  MOV  EAX, ECX                     ; EAX = min(EAX, redline)
+ *   0x42ED93  ADD  EAX, 0x190                   ; target = step + 400
+ *   0x42ED98  JMP  0x42ED9F
+ *   0x42ED9A  MOV  EAX, 0x190                   ; idle target = 400
+ *   0x42ED9F  MOV  ECX, [ESI+0x310]             ; ECX = engine_speed_accum
+ *   0x42EDA5  CMP  EAX, ECX
+ *   0x42EDA7  JLE  0x42EDCA                     ; target <= rpm → down path
+ * UP path (target > rpm):
+ *   0x42EDA9  SUB  EAX, ECX                     ; EAX = target - rpm (>0)
+ *   0x42EDAB  CDQ
+ *   0x42EDAC  AND  EDX, 0xf                     ; round bias (no-op for >0)
+ *   0x42EDAF  ADD  EAX, EDX
+ *   0x42EDB1  SAR  EAX, 4                       ; step = delta >> 4
+ *   0x42EDB4  CMP  EAX, 0x190
+ *   0x42EDB9  JLE  0x42EDE1                     ; step <= 400 → store path
+ *   0x42EDBB  MOV  EAX, 0x190                   ; clamp step to 400
+ *   0x42EDC0  ADD  ECX, EAX                     ; rpm += step
+ *   0x42EDC2  MOV  [ESI+0x310], ECX             ; store
+ *   0x42EDC8  POP ESI; RET
+ * DOWN path (target <= rpm):
+ *   0x42EDCA  SUB  EAX, ECX                     ; EAX = target - rpm (<=0)
+ *   0x42EDCC  CDQ
+ *   0x42EDCD  AND  EDX, 0xf                     ; round bias = 0xf when <0
+ *   0x42EDD0  ADD  EAX, EDX
+ *   0x42EDD2  SAR  EAX, 4                       ; step = delta >> 4 (<=0)
+ *   0x42EDD5  CMP  EAX, 0xc8
+ *   0x42EDDA  JLE  0x42EDE1                     ; always-taken in practice
+ *   0x42EDDC  MOV  EAX, 0xc8                    ; (dead) clamp to 200
+ *   0x42EDE1  ADD  ECX, EAX                     ; rpm += step (negative)
+ *   0x42EDE3  MOV  [ESI+0x310], ECX             ; store
+ *   0x42EDE9  POP ESI; RET
+ *
+ * Notes preserved from prior port audit:
+ *   - No post-store clamp (rpm is not bounded against redline or 400 after
+ *     the slew — original 0x42EDC2/0x42EDE3 stores rpm unconditionally).
+ *   - Down-path clamp to 200 at 0x42EDDC is unreachable: in the down branch
+ *     EAX is the signed (target-rpm)>>4 which is <= 0, so the JLE EAX,0xc8
+ *     at 0x42EDDA is always taken. We preserve the clamp anyway so the C
+ *     mirrors the listing exactly.
+ *
+ * Field offsets verified vs td5_types.h:
+ *   +0x1bc  tuning_data_ptr        +0x310  engine_speed_accum
+ *   +0x33e  encounter_steering_cmd +0x36d  brake_flag
+ *   tuning[+0x72] = redline (int16)
  */
 static void update_engine_speed_smoothed(TD5_Actor *actor)
 {
-    int32_t rpm = actor->engine_speed_accum;
-    int32_t throttle = (int32_t)actor->encounter_steering_cmd;
+    /* MOVSX ECX, WORD [tuning+0x72]  [@ 0x42ED5B] */
     int32_t redline = (int32_t)PHYS_S(actor, 0x72);
+
     int32_t target;
-
-    if (!actor->brake_flag && throttle >= 0) {
-        target = ((redline - 400) * throttle) >> 8;
-        if (target > redline) target = redline;
-        target += 400;
+    /* TEST AL,AL / JNZ + TEST DX,DX / JL  [@ 0x42ED65, 0x42ED70] */
+    if (actor->brake_flag != 0 || (int16_t)actor->encounter_steering_cmd < 0) {
+        /* MOV EAX, 0x190  [@ 0x42ED9A] */
+        target = 0x190;
     } else {
-        target = 400; /* idle */
+        /* MOVSX EDX, DX  [@ 0x42ED75] */
+        int32_t throttle = (int32_t)(int16_t)actor->encounter_steering_cmd;
+        /* LEA EAX,[ECX-0x190]; IMUL EAX,EDX  [@ 0x42ED78,0x42ED7E] */
+        int32_t v = (redline - 0x190) * throttle;
+        /* CDQ; AND EDX,0xff; ADD EAX,EDX; SAR EAX,8  [@ 0x42ED81-0x42ED8A]
+         * Signed round-toward-zero divide by 256. */
+        v = (v + (((int32_t)((uint32_t)v >> 31) ? 0xff : 0))) >> 8;
+        /* CMP ECX,EAX / JGE / MOV EAX,ECX  [@ 0x42ED8D-0x42ED91]
+         * EAX = min(EAX, redline). */
+        if (redline < v) v = redline;
+        /* ADD EAX, 0x190  [@ 0x42ED93] */
+        target = v + 0x190;
     }
 
-    /* Asymmetric slew: approach at delta>>4, clamped to max step.
-     * Original (0x42ED80-0x42EDA0): delta>>4 smooth approach,
-     * fast slew triggers when (delta>>4) > 400 (up) or > 200 (down).
-     * [CONFIRMED @ 0x42ED92: 400 up clamp, 0x42ED88: >>4 shift] */
-    int32_t delta = rpm - target;
-    if (delta > 0) {
-        int32_t step = delta >> 4;
-        if (step > 200) step = 200;
-        rpm -= step;
-    } else if (delta < 0) {
-        int32_t step = (-delta) >> 4;
-        if (step > 400) step = 400;
-        rpm += step;
+    /* MOV ECX,[ESI+0x310]  [@ 0x42ED9F] */
+    int32_t rpm = actor->engine_speed_accum;
+
+    /* CMP EAX,ECX / JLE 0x42EDCA  [@ 0x42EDA5-0x42EDA7] */
+    int32_t step;
+    if (target > rpm) {
+        /* UP path: SUB EAX,ECX  [@ 0x42EDA9] */
+        int32_t delta = target - rpm;
+        /* CDQ; AND EDX,0xf; ADD EAX,EDX; SAR EAX,4  [@ 0x42EDAB-0x42EDB1]
+         * delta is strictly > 0 here, so the round bias is 0; plain >>4. */
+        step = (delta + (((int32_t)((uint32_t)delta >> 31) ? 0xf : 0))) >> 4;
+        /* CMP EAX,0x190 / JLE / MOV EAX,0x190  [@ 0x42EDB4-0x42EDBB] */
+        if (step > 0x190) step = 0x190;
+    } else {
+        /* DOWN path: SUB EAX,ECX  [@ 0x42EDCA] — delta <= 0 */
+        int32_t delta = target - rpm;
+        /* Round-toward-zero divide by 16 for negative delta. */
+        step = (delta + (((int32_t)((uint32_t)delta >> 31) ? 0xf : 0))) >> 4;
+        /* CMP EAX,0xc8 / JLE / MOV EAX,0xc8  [@ 0x42EDD5-0x42EDDC]
+         * Unreachable in practice — step <= 0 here — but kept for fidelity. */
+        if (step > 0xc8) step = 0xc8;
     }
 
-    /* Original @ 0x42EDC2 / 0x42EDE3 stores rpm unconditionally — NO
-     * post-store clamps. Previously the port added `if (rpm > redline)
-     * rpm = redline; if (rpm < 400) rpm = 400;` here, which blocked the
-     * natural overshoot behavior of the asymmetric slew. Removed to
-     * match the original. [CONFIRMED @ 0x42EDC2, 0x42EDE3] */
-    actor->engine_speed_accum = rpm;
+    /* ADD ECX,EAX; MOV [+0x310],ECX  [@ 0x42EDC0/EDC2 or 0x42EDE1/EDE3] */
+    actor->engine_speed_accum = rpm + step;
 }
 
 /* --- UpdateEngineSpeedAccumulator (0x42EDF0) --- */
