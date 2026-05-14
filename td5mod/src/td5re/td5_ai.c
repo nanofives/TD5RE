@@ -233,6 +233,9 @@ static int32_t g_encounter_steer_bias_latch;
 static int32_t g_encounter_route_table_selector;
 static int32_t g_encounter_phase_flag;              /* 0=acquisition, !0=tracking */
 static int32_t g_encounter_ref_slot;                /* 0x4B0630 */
+/* gSpecialEncounterMinForwardTrackComponentThreshold @ 0x4B05BC — gates the
+ * brake band in UpdateSpecialEncounterControl. Defaults to 0 in static memory. */
+static int32_t g_special_encounter_min_fwd_track_threshold;
 
 /* Per-car torque triplets table (9 cars x 3 dwords at 0x466F90) */
 static int32_t g_car_torque_triplets[9 * 3];
@@ -3648,67 +3651,152 @@ teardown:
 }
 
 /**
- * UpdateSpecialEncounterControl: per-frame active encounter override.
- * Called from UpdatePlayerVehicleControlState when encounter is active.
+ * UpdateSpecialEncounterControl  (0x00434BA0)
  *
- * Overrides player control: heading alignment check, steering/brake force.
+ * Byte-faithful port of the original __cdecl function at 0x00434BA0.
+ *
+ * Two yaw-delta computations:
+ *   Block 1: uses gActorTrackReferenceSlot[slot*0x47] which == slot (set
+ *            by InitializeRaceActorRuntime via rs[RS_SLOT_INDEX] = i), so
+ *            it reads YAW/SPAN_NORMALIZED from actor_ptr(slot) and the
+ *            route table from rs[RS_ROUTE_TABLE_PTR] of the slot.
+ *   Block 2: uses g_specialEncounterTrackedActorHandle (typically the
+ *            player target, slot 0) and the cached gSpecialEncounterRouteTable
+ *            pointer (updated each tick by UpdateSpecialTrafficEncounter).
+ *
+ * Each angle delta is folded to a 12-bit modular value via the orig idiom:
+ *     d = (((diff - 0x800) & 0xFFF) - 0x800) & 0xFFF
+ *     uVarN = (-d) & 0xFFF
+ * The 0x400 < uVarN <= 0xC00 alignment band is symmetric around the route
+ * heading: any angle inside the band counts as "facing the wrong way" and
+ * forces teardown.
+ *
+ * Fast-path writes target actor_ptr(slot), NOT actor_ptr(9). DAT_004ad152
+ * is the player's SPAN_NORMALIZED snapshot — it gates the brake band.
  */
 void td5_ai_update_encounter_control(int slot) {
-    char *actor = actor_ptr(slot);
-    char *enc   = actor_ptr(9);
-    int32_t *rs = route_state(slot);
+    char    *actor_self   = actor_ptr(slot);
+    int32_t *rs_self      = route_state(slot);
+    int      tracked      = g_encounter_tracked_handle;
+    /* DAT_004ad152 in orig = player's SPAN_NORMALIZED snapshot; UpdateSpecialTrafficEncounter
+     * keeps it equal to the current player's field_0x82 each tick. Port reads it live. */
+    int32_t  player_span_ref = (int32_t)(int16_t)ACTOR_I16(actor_ptr(0), ACTOR_SPAN_NORMALIZED);
+    /* gSpecialEncounterRouteTable in orig = cached route-table pointer of the tracked actor.
+     * Port reads the live equivalent from the tracked actor's rs[RS_ROUTE_TABLE_PTR]. */
+    const uint8_t *tracked_route_tbl = (tracked >= 0 && tracked < TD5_MAX_TOTAL_ACTORS)
+        ? (const uint8_t *)(intptr_t)route_state(tracked)[RS_ROUTE_TABLE_PTR]
+        : NULL;
+    const uint8_t *self_route_tbl = (const uint8_t *)(intptr_t)rs_self[RS_ROUTE_TABLE_PTR];
 
-    int32_t enc_heading, target_heading, hdelta_enc, hdelta_target;
     int32_t fwd_comp;
+    uint32_t uVar3, uVar1;
 
-    /* Set latches */
-    g_encounter_control_active_latch = 1;
-    g_encounter_steer_bias_latch = 0xFF00;
-
-    /* Compute heading deltas for alignment check */
-    enc_heading    = ACTOR_I32(enc, ACTOR_YAW_ACCUM) >> 8;
-    target_heading = ai_route_heading_for_actor(rs, actor);
-
-    hdelta_enc    = (enc_heading - target_heading) & 0xFFF;
-    hdelta_target = ((ACTOR_I32(actor, ACTOR_YAW_ACCUM) >> 8) - target_heading) & 0xFFF;
-
-    fwd_comp = g_actor_forward_track_component[9];
-
-    /* Alignment check: encounter stays active if forward > 8 and headings
-     * are within ~90 degrees of route direction */
-    if (fwd_comp <= 8) goto deactivate;
-
-    /* Both heading deltas must be < 0x400 or > 0xC00 (within 90 deg) */
-    if (hdelta_enc >= 0x400 && hdelta_enc <= 0xC00) goto deactivate;
-    if (hdelta_target >= 0x400 && hdelta_target <= 0xC00) goto deactivate;
-
-    /* Encounter still valid: apply steering/brake override */
+    /* --- Block 1: yaw delta of slot's own actor vs slot's route-table heading --- */
     {
-        int16_t enc_span    = ACTOR_I16(enc, ACTOR_SPAN_RAW);
-        int16_t player_span = ACTOR_I16(actor, ACTOR_SPAN_RAW);
-        int32_t span_delta  = player_span - enc_span;
+        int32_t yaw_self = ACTOR_I32(actor_self, ACTOR_YAW_ACCUM) >> 8;  /* SAR EAX,8 (signed) */
+        int16_t span_self = ACTOR_I16(actor_self, ACTOR_SPAN_NORMALIZED); /* MOVSX [+0x82] */
+        uint32_t byte_val = 0;
+        int32_t heading_off, diff;
 
-        if (fwd_comp > 0 && span_delta < 3) {
-            /* Close enough: force brake on encounter actor */
-            ACTOR_I16(enc, ACTOR_ENCOUNTER_STEER) = (int16_t)(-0x100);
-            ACTOR_U8(enc, ACTOR_BRAKE_FLAG) = 1;
-        } else {
-            ACTOR_I16(enc, ACTOR_ENCOUNTER_STEER) = 0;
+        if (self_route_tbl && span_self >= 0) {
+            /* byte at route_tbl + span*3 + 1 (XOR EBX,EBX; MOV BL,[...] = unsigned byte). */
+            byte_val = (uint32_t)self_route_tbl[(size_t)(uint16_t)span_self * 3u + 1u];
         }
+        /* heading_offset = (byte_val * 0x102C) >>s 8.  byte_val is unsigned [0,255], so
+         * the CDQ/AND/ADD/SAR idiom in the orig reduces to a plain >>8 (product is
+         * always non-negative). */
+        heading_off = (int32_t)(byte_val * 0x102Cu) >> 8;
+        diff = yaw_self - heading_off;
+        diff = (diff - 0x800) & 0xFFF;
+        diff = (diff - 0x800) & 0xFFF;
+        uVar3 = ((uint32_t)(-diff)) & 0xFFF;
+    }
+
+    /* --- Block 2: yaw delta of tracked actor vs cached gSpecialEncounterRouteTable --- */
+    {
+        int32_t yaw_tr = 0;
+        int16_t span_tr = 0;
+        uint32_t byte_val = 0;
+        int32_t heading_off, diff;
+
+        if (tracked >= 0 && tracked < TD5_MAX_TOTAL_ACTORS) {
+            char *actor_tr = actor_ptr(tracked);
+            yaw_tr  = ACTOR_I32(actor_tr, ACTOR_YAW_ACCUM) >> 8;
+            span_tr = ACTOR_I16(actor_tr, ACTOR_SPAN_NORMALIZED);
+        }
+        if (tracked_route_tbl && span_tr >= 0) {
+            byte_val = (uint32_t)tracked_route_tbl[(size_t)(uint16_t)span_tr * 3u + 1u];
+        }
+        heading_off = (int32_t)(byte_val * 0x102Cu) >> 8;
+        diff = yaw_tr - heading_off;
+        diff = (diff - 0x800) & 0xFFF;
+        diff = (diff - 0x800) & 0xFFF;
+        uVar1 = ((uint32_t)(-diff)) & 0xFFF;
+    }
+
+    fwd_comp = g_actor_forward_track_component[slot];
+
+    /* Set latches (orig writes these unconditionally before the conditional teardown). */
+    g_encounter_control_active_latch = 1;
+    g_encounter_steer_bias_latch     = 0xFF00; /* word write (MOV [...], DX where DX=0xFF00) */
+
+    /* Teardown if any of:
+     *   - fwd_comp <= 8
+     *   - 0x400 <= uVar3 <= 0xC00   (range [JL→0x434ccd] ; [JLE→teardown])
+     *   - 0x400 <= uVar1 <= 0xC00
+     */
+    if (fwd_comp <= 8) goto teardown;
+    if (!((int32_t)uVar3 < 0x400 || (int32_t)uVar3 > 0xC00)) goto teardown;
+    if (!((int32_t)uVar1 < 0x400 || (int32_t)uVar1 > 0xC00)) goto teardown;
+
+    /* Active branch:
+     *   if fwd_comp >= gSpecialEncounterMinForwardTrackComponentThreshold (orig DAT_004b05bc)
+     *      and  (DAT_004ad152 - actor[slot].SPAN_NORMALIZED) < 3
+     *      → BRAKE_FLAG = 1; ENCOUNTER_STEER = 0xFF00
+     *   else → ENCOUNTER_STEER = 0  (BRAKE_FLAG untouched)
+     */
+    {
+        int32_t span_self = (int32_t)(int16_t)ACTOR_I16(actor_self, ACTOR_SPAN_NORMALIZED);
+        int32_t span_delta = player_span_ref - span_self;
+        if (fwd_comp >= g_special_encounter_min_fwd_track_threshold && span_delta < 3) {
+            ACTOR_U8(actor_self,  ACTOR_BRAKE_FLAG)      = 1;
+            ACTOR_I16(actor_self, ACTOR_ENCOUNTER_STEER) = (int16_t)0xFF00;
+            return;
+        }
+        ACTOR_I16(actor_self, ACTOR_ENCOUNTER_STEER) = 0;
     }
     return;
 
-deactivate:
-    /* --- Encounter deactivation / teardown --- */
+teardown:
+    /* Orig: XOR EAX,EAX
+     *       MOV [ESI+0x4afbe0],EAX   (gActorSpecialEncounterActive[slot] = 0)
+     *       MOV [ESI+0x4afc5c],EAX   (gActorRouteDirectionPolarity[slot] = 0)
+     *       MOV [0x4ad40e],AX        (steer_bias_latch = 0, word)
+     *       MOV [0x4ad43d],AL        (control_active_latch = 0, byte)
+     *       MOV [0x4b05c4],EAX       (DAT_004b05c4 = 0)
+     *       MOV [0x4b05e4],EAX       (DAT_004b05e4 = 0)
+     *       MOV [0x4b05d8],-1        (tracked-handle alias; port writes g_encounter_tracked_handle)
+     *       MOV [0x4b064c],300       (g_specialEncounterCooldown)
+     *       MOV CL,[actor[slot].+0x384]; INC CL; MOV [actor[slot].+0x384],CL  (byte increment)
+     *
+     * FIXME(00434BA0): DAT_004b05c4 / DAT_004b05e4 / DAT_004b05d8 have no symbol
+     * names assigned; treating them as collapsed into the existing port state
+     * (g_encounter_tracked_handle clears them effectively via the next-tick
+     * acquire path).
+     */
     g_encounter_active[slot] = 0;
-    route_state(slot)[RS_DIRECTION_POLARITY] = 0;
+    /* gActorRouteDirectionPolarity is rs[0xFC/4 = 0x3F] in orig, distinct from
+     * the port's RS_DIRECTION_POLARITY (0x25). Both are zeroed defensively. */
+    rs_self[0x3F] = 0;
+    rs_self[RS_DIRECTION_POLARITY] = 0;
     g_encounter_steer_bias_latch = 0;
     g_encounter_control_active_latch = 0;
     g_encounter_tracked_handle = -1;
-    g_encounter_cooldown = 300; /* 300-frame cooldown */
-
-    /* Increment encounter completion counter on the player */
-    ACTOR_I32(actor, ACTOR_ENCOUNTER_STATE) += 1;
+    g_encounter_cooldown = 300;
+    /* Byte-wide increment (orig uses CL via INC). Field at +0x384 is the encounter
+     * completion counter on the slot's own actor (NOT on the player). */
+    ACTOR_U8(actor_self, ACTOR_ENCOUNTER_STATE) =
+        (uint8_t)(ACTOR_U8(actor_self, ACTOR_ENCOUNTER_STATE) + 1);
 }
 
 /* ========================================================================
