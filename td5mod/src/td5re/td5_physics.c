@@ -826,10 +826,16 @@ void td5_physics_update_vehicle_actor(TD5_Actor *actor)
  * Player 4-wheel dynamics -- UpdatePlayerVehicleDynamics (0x404030)
  * ======================================================================== */
 
+/* Pilot trace hooks (pool0 / 0x00404030) */
+extern void td5_pilot_emit_00404030_enter(const TD5_Actor *actor, uintptr_t caller_ra);
+extern void td5_pilot_emit_00404030_leave(const TD5_Actor *actor);
+
 void td5_physics_update_player(TD5_Actor *actor)
 {
     int16_t *phys = get_phys(actor);
     if (!phys) return;
+
+    td5_pilot_emit_00404030_enter(actor, (uintptr_t)__builtin_return_address(0));
 
     int32_t i;
 
@@ -1775,6 +1781,8 @@ void td5_physics_update_player(TD5_Actor *actor)
      * 0x004049BA/0x00404A80. Do NOT write it again here — the earlier
      * `abs(lateral_speed)>>8` tail-write used the wrong values (post-update)
      * and collapsed slip to near-zero in normal driving. */
+
+    td5_pilot_emit_00404030_leave(actor);
 }
 
 /* ========================================================================
