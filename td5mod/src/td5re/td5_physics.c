@@ -54,6 +54,8 @@
 #endif
 #include "td5_pilot_trace_0042EB10.h"  /* precise-port pilot trace */
 #include "td5_pilot_trace_0042EBF0.h" /* precise-port pilot CSV emit for 0x0042EBF0 */
+#ifdef TD5_PILOT_TRACE_TRAFFIC
+#include "td5_pilot_trace_traffic.h" /* precise-port pilot CSV emit for 0x004437C0 + 0x004438F0 */
 #include "td5re.h"
 
 /* Include the full actor struct for field-level access.
@@ -2432,6 +2434,10 @@ void td5_physics_update_traffic(TD5_Actor *actor)
      * Transcribed from Ghidra decompilation; every SAR uses
      * truncate-toward-zero rounding: (x + ((x>>31)&mask)) >> shift. */
 
+#ifdef TD5_PILOT_TRACE_TRAFFIC
+    td5_pilot_emit_traffic_friction_enter(actor);
+#endif
+
     #define SAR12(x) (((x) + (((x) >> 31) & 0xFFF)) >> 12)
     #define SAR10(x) (((x) + (((x) >> 31) & 0x3FF)) >> 10)
     #define SAR8_U8(x) (((x) + (((x) >> 31) & 0xFF)) >> 8)
@@ -2524,53 +2530,107 @@ void td5_physics_update_traffic(TD5_Actor *actor)
     #undef SAR12
     #undef SAR10
     #undef SAR8_U8
+
+#ifdef TD5_PILOT_TRACE_TRAFFIC
+    td5_pilot_emit_traffic_friction_leave(actor);
+#endif
 }
 
 /* ========================================================================
  * ApplyDampedSuspensionForce (0x4437C0) -- Traffic only
  *
  * Simple 2-DOF spring-damper for roll and pitch.
+ *
+ * Byte-faithful port (pool8 precise-port pilot 2026-05-14).
+ *
+ * Original (per axis):
+ *   new_pos = old_pos + old_vel                          [stored before damping]
+ *   new_vel = old_vel
+ *           + sar8_rz(-old_vel * 32)                     ; velocity damping (OLD vel)
+ *           - sar8_rz( new_pos * 32)                     ; spring restore   (NEW pos)
+ *           + sar8_rz( drive    * 128)                   ; external force
+ *   if new_pos > +CLAMP: new_pos = +CLAMP, new_vel = 0
+ *   if new_pos < -CLAMP: new_pos = -CLAMP, new_vel = 0
+ *
+ * `sar8_rz(x) = ((x < 0) ? (x + 0xFF) : x) >> 8`  — matches CDQ;AND EDX,0xFF;ADD;SAR 8.
  * ======================================================================== */
+
+static inline int32_t sar8_rz(int32_t x) {
+    /* Encodes original's CDQ + AND EDX,0xFF + ADD EAX,EDX + SAR EAX,8
+     * (round-to-zero signed divide by 256). */
+    return (x + (((int32_t)((uint32_t)x >> 31)) * 0xFF)) >> 8;
+}
 
 static void apply_damped_suspension_force(TD5_Actor *actor, int32_t lateral, int32_t longitudinal)
 {
-    /* First axis (lateral-driven): wheel_suspension_pos[0] (+0x2DC) / wheel_spring_dv[0] (+0x2EC)
-     * [CONFIRMED @ 0x4437C0-0x443838] */
-    int32_t axis0_pos = actor->wheel_suspension_pos[0];
-    int32_t axis0_vel = actor->wheel_spring_dv[0];
+#ifdef TD5_PILOT_TRACE_TRAFFIC
+    td5_pilot_emit_traffic_susp_enter(actor, lateral, longitudinal);
+#endif
 
-    axis0_vel += (lateral * 0x80) >> 8;           /* drive force */
-    axis0_vel += (axis0_vel * -0x20) >> 8;        /* velocity damping */
-    axis0_vel -= (axis0_pos * 0x20) >> 8;         /* spring force */
-    axis0_pos += axis0_vel;
+    /* === Axis 0 (lateral-driven): pos @ +0x2DC, vel @ +0x2EC, clamp ±0x2000 ===
+     * [CONFIRMED @ 0x004437C4-0x00443859] */
+    {
+        int32_t old_pos = actor->wheel_suspension_pos[0];
+        int32_t old_vel = actor->wheel_spring_dv[0];
 
-    if (axis0_pos > 0x2000) axis0_pos = 0x2000;
-    if (axis0_pos < -0x2000) axis0_pos = -0x2000;
+        /* new_pos = old_pos + old_vel  [0x004437D3-0x004437D5] */
+        int32_t new_pos = old_pos + old_vel;
+        actor->wheel_suspension_pos[0] = new_pos;
 
-    actor->wheel_suspension_pos[0] = axis0_pos;
-    actor->wheel_spring_dv[0] = axis0_vel;
+        /* new_vel = old_vel + sar8_rz(-old_vel*32) - sar8_rz(new_pos*32) + sar8_rz(drive*128)
+         *           [0x004437DB-0x00443821] */
+        int32_t new_vel = old_vel
+                        + sar8_rz(-old_vel * 32)
+                        - sar8_rz( new_pos * 32)
+                        + sar8_rz( lateral * 128);
+        actor->wheel_spring_dv[0] = new_vel;
 
-    /* Second axis (longitudinal-driven): wheel_suspension_pos[1] (+0x2E0) / wheel_spring_dv[1] (+0x2F0)
-     * [CONFIRMED @ 0x443838-0x4438EC] */
-    int32_t axis1_pos = actor->wheel_suspension_pos[1];
-    int32_t axis1_vel = actor->wheel_spring_dv[1];
+        /* Two separate if-clamps (matches listing 0x00443827-0x00443859 exactly).
+         * Algebraically equivalent to if/else-if. */
+        if (new_pos > 0x2000) {
+            actor->wheel_suspension_pos[0] = 0x2000;
+            actor->wheel_spring_dv[0] = 0;
+        }
+        if (actor->wheel_suspension_pos[0] < -0x2000) {
+            actor->wheel_suspension_pos[0] = -0x2000;
+            actor->wheel_spring_dv[0] = 0;
+        }
+    }
 
-    axis1_vel += (longitudinal * 0x80) >> 8;
-    axis1_vel += (axis1_vel * -0x20) >> 8;
-    axis1_vel -= (axis1_pos * 0x20) >> 8;
-    axis1_pos += axis1_vel;
+    /* === Axis 1 (longitudinal-driven): pos @ +0x2E0, vel @ +0x2F0, clamp ±0x4000 ===
+     * [CONFIRMED @ 0x00443859-0x004438EA] */
+    {
+        int32_t old_pos = actor->wheel_suspension_pos[1];
+        int32_t old_vel = actor->wheel_spring_dv[1];
 
-    if (axis1_pos > 0x4000) axis1_pos = 0x4000;
-    if (axis1_pos < -0x4000) axis1_pos = -0x4000;
+        int32_t new_pos = old_pos + old_vel;
+        actor->wheel_suspension_pos[1] = new_pos;
 
-    actor->wheel_suspension_pos[1] = axis1_pos;
-    actor->wheel_spring_dv[1] = axis1_vel;
+        int32_t new_vel = old_vel
+                        + sar8_rz(-old_vel * 32)
+                        - sar8_rz( new_pos * 32)
+                        + sar8_rz( longitudinal * 128);
+        actor->wheel_spring_dv[1] = new_vel;
+
+        if (new_pos > 0x4000) {
+            actor->wheel_suspension_pos[1] = 0x4000;
+            actor->wheel_spring_dv[1] = 0;
+        }
+        if (actor->wheel_suspension_pos[1] < -0x4000) {
+            actor->wheel_suspension_pos[1] = -0x4000;
+            actor->wheel_spring_dv[1] = 0;
+        }
+    }
 
     /* Original does NOT feed suspension into angular_velocity.
      * [CONFIRMED @ 0x4437C0-0x4438EC: writes only to +0x2DC/+0x2EC/+0x2E0/+0x2F0,
      *  never to angular_velocity_roll/pitch.]
      * Roll/pitch display angles are computed from surface normal + suspension
      * correction in UpdateTrafficVehiclePose, not from euler accumulators. */
+
+#ifdef TD5_PILOT_TRACE_TRAFFIC
+    td5_pilot_emit_traffic_susp_leave(actor);
+#endif
 }
 
 /* ========================================================================
