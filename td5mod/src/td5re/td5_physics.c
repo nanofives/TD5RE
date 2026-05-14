@@ -6715,55 +6715,134 @@ void td5_physics_reset_actor_state(TD5_Actor *actor)
 }
 
 /* ========================================================================
- * ApplyMissingWheelVelocityCorrection (0x403EB0)
+ * ApplyMissingWheelVelocityCorrection (0x403EB0) -- BYTE-FAITHFUL PORT
  *
- * When wheel contact is asymmetric, applies corrective velocity bias
- * to prevent unrealistic spinning.
+ * Listing-driven port of the original. When the wheel-contact bitmask at
+ * actor+0x37C is in the "asymmetric" set, subtract a velocity bias from
+ * actor+0x1C8 (angular_velocity_pitch in port naming, but the original
+ * targets it as a raw int32 dword) computed from:
+ *
+ *   1. Average of the second int16 (offset +2) of each MISSING wheel's
+ *      contact-normal slot at actor+0x230 (8-byte stride, 4 wheels).
+ *   2. Multiplied by heading_normal.y (int16 @ actor+0x292), then
+ *      round-to-zero >> 12.
+ *   3. Body-frame projection of (linear_velocity_x, linear_velocity_z)
+ *      by display_angles.yaw (int16 @ actor+0x20A): each component
+ *      round-to-zero >>8, multiplied by cos / sin, subtracted, then
+ *      round-to-zero >> 12 and clamped to [-0x200, +0x200].
+ *   4. correction = (proj_clamped * avg_norm * 4), round-to-zero >> 8.
+ *   5. actor+0x1C8 -= correction.
+ *
+ * The "break" set (jump-table 0x404014 + index table 0x40401C, verified
+ * via memory_read 2026-05-14) is {0, 1, 2, 4, 6, 8, 9, 0xF}; everything
+ * else (3, 5, 7, A, B, C, D, E, plus any mask >0xF via the JA fall-through
+ * at 0x403EC1) takes the default body. The original has no divide-by-zero
+ * guard: for the "default" masks in 0..0xF, count is always >= 1.
+ * Bitmasks > 0xF (high bits set) could theoretically zero the count and
+ * crash; the original accepts that hazard and so does this port.
  * ======================================================================== */
+
+/* Round-to-zero arithmetic shift right.
+ * Mirrors original CDQ/AND mask/ADD/SAR idiom: for negative non-divisible
+ * x, yields one unit closer to zero than plain SAR. */
+static inline int32_t mwvc_sar_rz(int32_t x, int n) {
+    int32_t mask = (1 << n) - 1;
+    return (x + ((x >> 31) & mask)) >> n;
+}
 
 void td5_physics_missing_wheel_correction(TD5_Actor *actor)
 {
-    uint8_t mask = actor->wheel_contact_bitmask;
+    uint8_t *ap = (uint8_t *)actor;
+    uint32_t mask = (uint32_t)*(uint8_t *)(ap + 0x37C);   /* zero-extended BL */
 
-    /* Only run for asymmetric patterns (not fully grounded or fully airborne) */
-    switch (mask) {
-    case 0x0: case 0x1: case 0x2: case 0x4: case 0x6: case 0x8: case 0x9: case 0xF:
-        return; /* Symmetric or fully grounded/airborne */
-    default:
-        break;
-    }
-
-    /* Average Y-position of grounded wheels */
-    int32_t avg_y = 0;
-    int32_t count = 0;
-    for (int i = 0; i < 4; i++) {
-        if (!(mask & (1 << i))) {
-            avg_y += actor->wheel_contact_pos[i].y;
-            count++;
+    /* [0x403EBE..EC1] CMP EBX,0xF / JA 0x00403ED2 -- masks > 0xF take the
+     * default body. For mask in 0..0xF, dispatch via the 16-byte index
+     * table at 0x40401C (0=break, 1=default-body). */
+    if (mask <= 0xFu) {
+        /* Index table contents verified at 0x40401C:
+         *   00 00 00 01 00 01 00 01 00 00 01 01 01 01 01 00
+         * i.e. break for mask in {0,1,2,4,6,8,9,0xF}. */
+        switch (mask) {
+        case 0x0: case 0x1: case 0x2:
+        case 0x4: case 0x6:
+        case 0x8: case 0x9:
+        case 0xF:
+            return;
+        default:
+            break;  /* fall through to default body */
         }
     }
-    if (count == 0) return;
-    avg_y /= count;
 
-    /* Compute body-frame longitudinal speed */
-    int32_t heading = (actor->euler_accum.yaw >> 8) & 0xFFF;
-    int32_t cos_h = cos_fixed12(heading);
-    int32_t sin_h = sin_fixed12(heading);
-    int32_t v_long = (actor->linear_velocity_x * sin_h +
-                      actor->linear_velocity_z * cos_h) >> 12;
+    /* --- Default body (0x403ED2..0x404012) --- */
 
-    /* Compute correction from pitch angle * speed */
-    int32_t pitch = (actor->euler_accum.pitch >> 8) & 0xFFF;
-    if (pitch > 0x800) pitch -= 0x1000;
+    /* [0x403ED2..EFE] Initialize the four globals used as scratch by the
+     * loop. The port stores them as locals; the original publishes them
+     * to DAT_004830XX but those are not read by any other function in
+     * the static call graph (verified: only this function writes them). */
+    int16_t *wcn_p = (int16_t *)(ap + 0x230);   /* DAT_00483024: wheel_contact_normals base */
+    uint32_t i_idx = 0;                          /* DAT_00483028: wheel index counter */
+    int32_t  sum   = 0;                          /* DAT_00483020: accumulator (EAX) */
+    int32_t  cnt   = 0;                          /* DAT_00483038: missing-wheel count (EDI) */
+    int16_t *hn_p  = (int16_t *)(ap + 0x290);   /* DAT_00483044: heading_normal base */
 
-    int32_t correction = (pitch * v_long) >> 12;
+    /* [0x403F03..F33] Loop: for each of 4 wheels, if its bit is clear in
+     * the mask, add wcn[i+1] (the second int16 at offset +2) to sum and
+     * increment cnt. wcn_p advances by 4 int16s (8 bytes) per iter. */
+    do {
+        uint32_t bit = 1u << (i_idx & 0x1Fu);
+        if ((mask & bit) == 0) {
+            sum += (int32_t)wcn_p[1];      /* MOVSX EBP, word ptr [EDX+0x2] */
+            cnt += 1;
+        }
+        wcn_p += 4;                         /* ADD EDX, 0x8 */
+        i_idx += 1;
+    } while (i_idx < 4);
 
-    /* Clamp correction */
-    if (correction > 0x200) correction = 0x200;
-    if (correction < -0x200) correction = -0x200;
+    /* [0x403F35..F4E] sum = (sum / cnt) * heading_normal.y, round-to-zero >> 12.
+     * IDIV is signed; cnt is always >= 1 here (asserted by the dispatch
+     * filter above for masks 0..0xF). */
+    sum = (sum / cnt) * (int32_t)hn_p[1];           /* IMUL EAX, [ESI+0x292] */
+    int32_t avg_norm = mwvc_sar_rz(sum, 12);        /* CDQ/AND 0xFFF/ADD/SAR 12 */
+    /* avg_norm == DAT_00483020 at this point */
 
-    /* Apply to pitch angular velocity */
-    actor->angular_velocity_pitch -= correction;
+    /* [0x403F51..F8D] Cos/Sin of display_angles.yaw (int16 @ +0x20A).
+     * Both calls take the same MOVSX-promoted argument. Original then
+     * stores results to DAT_00483034 (cos) and DAT_0048303C/ECX (sin). */
+    int32_t yaw = (int32_t)*(int16_t *)(ap + 0x20A);
+    int32_t cos_v = cos_fixed12(yaw);               /* CALL 0x0040A6E0 */
+    int32_t sin_v = sin_fixed12(yaw);               /* CALL 0x0040A700 */
+
+    /* [0x403F8F..FC6] Body-frame projection of (lin_vel_x @+0x1CC,
+     * lin_vel_z @+0x1D4) by yaw:
+     *
+     *     proj = ((vx + rz_mask_8) >> 8) * cos - ((vz + rz_mask_8) >> 8) * sin
+     *     proj = round_to_zero_12(proj)
+     *
+     * Each load uses round-to-zero >>8 BEFORE the IMUL, matching the
+     * CDQ/AND 0xFF/ADD/SAR 8 idiom in the listing. Note ordering: cos
+     * pairs with linear_velocity_x (the first int32 at [EDI]), sin with
+     * linear_velocity_z (the third int32 at [EDI+8]). */
+    int32_t *vel = (int32_t *)(ap + 0x1CC);         /* DAT_00483040 */
+    int32_t vx_h = mwvc_sar_rz(vel[0], 8);          /* (lin_vel_x rounded) >> 8 */
+    int32_t vz_h = mwvc_sar_rz(vel[2], 8);          /* (lin_vel_z rounded) >> 8 */
+    int32_t proj = vx_h * cos_v - vz_h * sin_v;
+    int32_t proj_clamped = mwvc_sar_rz(proj, 12);   /* CDQ/AND 0xFFF/ADD/SAR 12 */
+
+    /* [0x403FC9..FEA] Clamp proj_clamped to [-0x200, +0x200]. The original
+     * stores back to DAT_00483048 after the clamp. */
+    if (proj_clamped < -0x200) {
+        proj_clamped = -0x200;
+    } else if (proj_clamped > 0x200) {
+        proj_clamped = 0x200;
+    }
+
+    /* [0x403FEF..04005] correction = (proj_clamped * avg_norm * 4) rz>>8. */
+    int32_t prod = proj_clamped * avg_norm;
+    prod <<= 2;                                      /* SHL EAX, 0x2 */
+    int32_t correction = mwvc_sar_rz(prod, 8);       /* CDQ/AND 0xFF/ADD/SAR 8 */
+
+    /* [0x0040400A] *(int32_t *)(actor + 0x1C8) -= correction. */
+    *(int32_t *)(ap + 0x1C8) -= correction;
 }
 
 /* ========================================================================
