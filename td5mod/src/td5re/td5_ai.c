@@ -2473,185 +2473,415 @@ int td5_ai_find_nearest_route_peer(int *route_state_ptr) {
 }
 
 /**
- * RecycleTrafficActorFromQueue: find the traffic slot furthest behind the
- * player (>= 41 spans), and reinitialize it from the next queue entry
- * that is >= 40 spans ahead of the player.
+ * RecycleTrafficActorFromQueue — byte-faithful port of 0x004353B0.
  *
- * Slot 9 is protected if the encounter system is using it.
+ * Verbatim translation of TD5_d3d.exe @ 0x004353B0 disassembly (pool3
+ * 2026-05-14). Replaces the prior semantically-named port (which used
+ * wrong route-state offsets, wrote +0x82/+0x84/+0x86 directly instead
+ * of letting InitActorTrackSegmentPlacement / RSB / NormalizeWrap do
+ * it, and called helpers in the wrong direction).
+ *
+ * Listing flow:
+ *   1. Bail if g_racerCount <= 6 (no traffic).
+ *   2. Pre-scan g_traffic_queue cursor forward over entries that are
+ *      either == -1 sentinel, behind player.span_norm (+0x82), or within
+ *      0x28 spans ahead. Advance DAT_004b08b8 over rejected entries.
+ *   3. Linear scan slots 6..min(g_racerCount,12)-1: find the slot with
+ *      max (player.span_norm - traffic[i].span_norm) — store as
+ *      (best_slot, best_dist). NOTE: gate (>=0x29) is applied AFTER the
+ *      scan, not inside it. Slot 9 is NOT excluded from the scan.
+ *   4. If best_dist <= 0x28: write cursor and return.
+ *   5. If *cursor == -1: write cursor and return (queue exhausted at the
+ *      currently-pointed entry — no recyclable spawn).
+ *   6. If best_slot == 9 AND gSpecialEncounterTrackedActorHandle != -1:
+ *      write cursor and return. (This is the slot-9 protection — but
+ *      only fires when slot 9 was actually selected as best.)
+ *   7. Set route_state[best_slot] direction polarity (dword +0xFC),
+ *      route_table_ptr_index (dword +0x68) = best_slot*4+0x10.
+ *   8. Compare queue.byte_3 (sub_lane) vs g_trackStripRecords[queue_span * 0x18 + 3] & 0xf:
+ *        - queue_byte > strip_byte: LEFT branch (selector=0)
+ *            * actor+0x80 = queue_span; actor+0x8c = queue_byte (raw)
+ *            * Call InitActorTrackSegmentPlacement(actor+0x80, actor+0x1FC)
+ *            * Geometry-derive heading from strip vertex deltas (case 1-7)
+ *            * Call AngleFromVector12Full; store (angle+0x800)*0x100 to +0x1f4
+ *            * If polarity flag, add 0x80000 to yaw
+ *            * Call ResetVehicleActorState(actor)
+ *            * Call RefreshActorTrackProgressOffset(best_slot)
+ *            * Call NormalizeActorTrackWrapState(actor)
+ *        - queue_byte <= strip_byte: RIGHT branch (selector=1)
+ *            * Inline jump-table scan: queue_span in [third, third+(high-low)-1]
+ *              → remapped = queue_span + (low - third); else -1 sentinel.
+ *            * actor+0x80 = remapped; actor+0x8c = queue_byte - (strip_byte & 0xf)
+ *            * Call InitActorTrackSegmentPlacement; geometry; angle; polarity; reset.
+ *            * Call RefreshActorTrackProgressOffset(best_slot)
+ *            * Call ResolveActorSegmentBoundary(actor) (0x00443FF0)
+ *   9. Advance DAT_004b08b8 by 4 bytes (past consumed entry).
+ *  10. Zero post-call state fields (LAB_0043588d) including velocities,
+ *      steering, encounter_handle = -1, etc.
+ *
+ * NOTE on RS_DIRECTION_POLARITY: the disassembly writes to
+ * gActorRouteDirectionPolarity (0x004afc5c), which is at route_state
+ * base+0xFC = dword index 0x3F. The port's RS_DIRECTION_POLARITY macro
+ * is currently defined as 0x25 (byte 0x94), which is a different field.
+ * For byte-faithful behavior this port writes BOTH offsets (the original
+ * 0x3F and the port's 0x25) so downstream code that reads either path
+ * sees the correct polarity. FIXME: resolve the macro discrepancy globally.
+ *
+ * NOTE on ResolveActorSegmentBoundary: 0x00443FF0 is ported in unmerged
+ * branch precise-00443FF0 (SHA b99e36a) as td5_track_resolve_actor_segment_boundary.
+ * Declared __attribute__((weak)) so the port links cleanly in master
+ * (with NormalizeActorTrackWrapState as fallback) and uses the real RSB
+ * once b99e36a merges.
  */
+
+/* Forward decl, weakly linked: real symbol comes from b99e36a's
+ * td5_track.c port of ResolveActorSegmentBoundary @ 0x00443FF0.
+ * If unresolved at link time, the address is NULL and the fallback runs. */
+extern void td5_track_resolve_actor_segment_boundary(TD5_Actor *actor)
+    __attribute__((weak));
+
+/* The original 0x004353B0 inlines a span_type → vertex-offset case dispatch
+ * (cases 1/2/5, 3/4, 6/7) twice — once per LEFT/RIGHT branch — feeding
+ * AngleFromVector12Full to derive the spawn heading. In the port we instead
+ * route through td5_track_compute_heading, which implements the same
+ * geometry-from-strip atan2 contract for the actor's current span and
+ * writes the result into actor+0x1F4. The case dispatch is therefore
+ * absorbed into that helper; do not re-implement it here. */
+
 void td5_ai_recycle_traffic_actor(void) {
-    int traffic_max, i;
-    int best_slot = -1;
-    int32_t best_behind = 0;
-    int16_t player_span;
-    char *p0 = actor_ptr(0);
+    int       racer_count;
+    int       best_slot = 0;
+    int32_t   best_dist = 0;
+    int       i;
+    int       loop_max;
+    char     *p0;
+    int16_t   player_span_norm;
+    const uint8_t *qp;
+    int16_t   q_span;
+    uint8_t   q_flags;
+    uint8_t   q_byte_3;
+    char     *a;
+    int32_t  *rs;
+    uint8_t  *rs_bytes;
 
-    player_span = ACTOR_I16(p0, ACTOR_SPAN_RAW);
+    /* [0x004353b0-c1] EAX = g_racerCount; bail if <= 6. The original reads
+     * `dword ptr [0x004aaf00]` which is g_racerCount (also exposed in port
+     * as g_active_actor_count for the runtime active-slot count). */
+    racer_count = g_active_actor_count;
+    if (racer_count <= 6) return;
 
-    traffic_max = g_active_actor_count;
-    if (traffic_max > TD5_MAX_TOTAL_ACTORS)
-        traffic_max = TD5_MAX_TOTAL_ACTORS;
-
-    /* Find the traffic slot most behind the player (>= 0x29 = 41 spans) */
-    for (i = TD5_MAX_RACER_SLOTS; i < traffic_max; i++) {
-        int32_t dist;
-        int16_t ts;
-
-        /* Slot 9 protection: never recycle if encounter is active */
-        if (i == 9 && g_encounter_tracked_handle != -1) continue;
-
-        ts = ACTOR_I16(actor_ptr(i), ACTOR_SPAN_RAW);
-        dist = player_span - ts;
-
-        if (dist >= 0x29 && dist > best_behind) {
-            best_behind = dist;
-            best_slot = i;
-        }
-    }
-
-    if (best_slot < 0) return; /* nothing to recycle */
-
-    /* Scan the traffic queue for the next entry >= 40 spans ahead of player */
+    if (!g_actor_base || !g_route_state_base) return;
     if (!g_traffic_queue_ptr || !g_traffic_queue_base) return;
 
-    {
-        const uint8_t *qp = g_traffic_queue_ptr;
-        int16_t q_span;
+    /* [0x004353c9-fd] Pre-scan: advance queue cursor over entries that are
+     * not-yet-overtaken by the player. The match condition for STOPPING the
+     * scan is:
+     *   q_span == -1  (sentinel; loop exits)
+     *   OR q_span < player.span_norm   (entry is behind player → stop)
+     *   OR q_span - player.span_norm >= 0x28   (≥40 spans ahead → stop)
+     *
+     * Otherwise (q_span >= player AND ahead < 0x28): advance.
+     *
+     * NOTE: player slot's span_norm at byte offset 0x82 — read as 16-bit
+     * sign-extended value (MOV BP, word ptr [0x004ab18a]). Equivalent to
+     * actor[0]+0x82, i.e. the span_norm field. The pre-2026-05-14 port
+     * used ACTOR_SPAN_RAW (+0x80) which is the wrong field for tracks
+     * with junction remaps. */
+    p0 = actor_ptr(0);
+    player_span_norm = ACTOR_I16(p0, ACTOR_SPAN_NORMALIZED); /* +0x82 */
 
-        /* Read the span from the queue entry (first 2 bytes, little-endian int16) */
-        q_span = (int16_t)(qp[0] | (qp[1] << 8));
-
-        /* Skip entries too close or behind the player */
-        while (q_span != -1) {
-            int32_t ahead = q_span - player_span;
-            if (ahead >= 0x28) break; /* found a valid spawn point */
-
-            qp += 4; /* advance to next 4-byte record */
+    qp = g_traffic_queue_ptr;
+    q_span = (int16_t)(qp[0] | (qp[1] << 8));
+    if (q_span != -1) {
+        for (;;) {
+            int sx = (int)q_span;
+            int px = (int)player_span_norm;
+            if (sx < px) break;           /* behind player → stop */
+            if ((sx - px) >= 0x28) break; /* ≥40 ahead → stop */
+            /* fall through: too close — advance */
+            qp += 4;
             q_span = (int16_t)(qp[0] | (qp[1] << 8));
+            if (q_span == -1) break;
         }
+    }
 
-        if (q_span == -1) {
-            /* Commit the advanced cursor even on early-return, matching
-             * RecycleTrafficActorFromQueue @ 0x004353F3 which writes
-             * DAT_004b08b8 = psVar7 unconditionally after the pre-scan.
-             * Without this the port re-scans the same rejected prefix
-             * every recycle tick, causing the traffic queue to stall
-             * instead of advancing toward fresh entries. */
-            g_traffic_queue_ptr = qp;
-            TD5_LOG_I(LOG_TAG,
-                      "recycle: pre-scan hit end-of-queue sentinel, committed cursor=%p",
-                      (const void *)qp);
+    /* [0x00435401-46] Scan slots 6..min(g_racerCount,12)-1; find slot with
+     * MAX (player.span_norm - traffic[i].span_norm). The gate (>=0x29) is
+     * applied AFTER the scan, NOT inside it. The disassembly explicitly
+     * does NOT exclude slot 9 here — slot 9 is only protected later, IF
+     * it was actually selected as the winner.
+     *
+     * The original's EBX walks the actor table at slot[6]+0x82 (raw byte
+     * address 0x004ac6ba); the inner read is signed 16-bit (MOVSX). */
+    loop_max = racer_count;
+    if (loop_max > 12) loop_max = 12;
+    {
+        int psn_loop;
+        for (i = 6; i < loop_max; i++) {
+            int16_t ts;
+            int32_t dist;
+            /* Reload player.span_norm every iteration — matches original
+             * MOV BP, word ptr [0x004ab18a] at 0x00435438 inside the loop. */
+            psn_loop = (int)(int16_t)ACTOR_I16(actor_ptr(0), ACTOR_SPAN_NORMALIZED);
+            ts = ACTOR_I16(actor_ptr(i), ACTOR_SPAN_NORMALIZED);
+            dist = psn_loop - (int)ts;
+            if (dist > best_dist) {
+                best_slot = i;
+                best_dist = dist;
+            }
+        }
+    }
+
+    /* [0x00435448-4b] If best_dist <= 0x28: commit cursor and return.
+     * Original writes DAT_004b08b8 unconditionally just before bail. */
+    if (best_dist <= 0x28) {
+        g_traffic_queue_ptr = qp;
+        return;
+    }
+
+    /* [0x00435451-55] If queue cursor entry is -1 sentinel: commit cursor
+     * and return. The pre-scan may have left q_span==-1 OR may have left a
+     * valid entry; this check fires only when entry IS sentinel. */
+    if ((int16_t)(qp[0] | (qp[1] << 8)) == -1) {
+        g_traffic_queue_ptr = qp;
+        return;
+    }
+
+    /* [0x0043545b-67] Slot 9 protection: only blocks if slot 9 was chosen
+     * AND a special-encounter handle is active. */
+    if (best_slot == 9 && g_encounter_tracked_handle != -1) {
+        g_traffic_queue_ptr = qp;
+        return;
+    }
+
+    /* [0x0043546d-9c] uVar11 = best_slot * 0x11c. Write polarity and a
+     * derived field at uVar11 + 0x4afbc8. The +0x68 dword (route_state
+     * index 0x1A) holds best_slot*4+0x10 — purpose unclear; copied verbatim.
+     * The polarity field is at route_state base+0xFC (dword index 0x3F)
+     * per `gActorRouteDirectionPolarity = 0x004afc5c`. */
+    rs = route_state(best_slot);
+    rs_bytes = (uint8_t *)rs;
+    /* Refresh q_span and qp[2..3] from cursor (may have been advanced by
+     * pre-scan, then validated above). */
+    q_span   = (int16_t)(qp[0] | (qp[1] << 8));
+    q_flags  = qp[2];
+    q_byte_3 = qp[3];
+
+    /* dword at rs+0xFC = polarity (q_flags & 1) [0x0043548a]. Also writeback
+     * to the port's RS_DIRECTION_POLARITY (0x25) for consistency with the
+     * rest of the port code that reads that semantic offset. */
+    *(int32_t *)(rs_bytes + 0xFC) = (int32_t)(q_flags & 1u);
+    rs[RS_DIRECTION_POLARITY] = (int32_t)(q_flags & 1u); /* FIXME: macro offset mismatch */
+
+    /* dword at rs+0x68 = best_slot*4 + 0x10 [0x00435497]. Purpose unclear
+     * (the original uses it as some kind of slot-derived index/offset).
+     * Port verbatim. */
+    *(int32_t *)(rs_bytes + 0x68) = best_slot * 4 + 0x10;
+
+    /* [0x0043549d-af] Compare queue.byte_3 (raw sub_lane) vs strip_records
+     * [q_span * 0x18 + 3] & 0xf (strip's lane_count nibble). */
+    a = actor_ptr(best_slot);
+    {
+        const uint8_t *strip = (const uint8_t *)g_strip_span_base;
+        uint8_t strip_lane_count;
+        int     left_branch; /* 1 = LEFT (queue_byte > strip_lane), 0 = RIGHT */
+
+        if (!strip) {
+            /* Without strip records we cannot proceed; commit cursor and bail. */
+            g_traffic_queue_ptr = qp + 4;
             return;
         }
+        strip_lane_count = strip[(size_t)q_span * 0x18 + 3] & 0x0Fu;
+        left_branch = ((unsigned)strip_lane_count < (unsigned)q_byte_3) ? 1 : 0;
 
-        /* Reinitialize the recycled slot from this queue entry */
-        {
-            char *a = actor_ptr(best_slot);
-            int32_t *rs = route_state(best_slot);
-            uint8_t q_flags = qp[2];
-            uint8_t q_lane  = qp[3];
-            int16_t old_span = ACTOR_I16(a, ACTOR_SPAN_RAW);
+        if (left_branch) {
+            /* ====== LEFT branch (0x004354b5-0x004356cd, selector=0) ====== */
+            int32_t yaw_pack;
 
-            /* Set direction polarity from flags bit 0 */
-            rs[RS_DIRECTION_POLARITY] = q_flags & 1;
+            /* [0x004354bb] selector = 0 */
+            rs[RS_ROUTE_TABLE_SELECTOR] = 0;
 
-            /* Route table selection + alt-route span remap [CONFIRMED @ 0x43551A, 0x00435310]:
-             * q_lane < span_lane_count → LEFT route (selector=0), use queue span directly.
-             * q_lane >= span_lane_count → RIGHT route (selector=1), remap span via jump
-             * table and adjust sub_lane by subtracting span_lane_count. */
+            /* [0x00435541-55] actor+0x80 = queue_span; actor+0x8c = queue_byte (raw) */
+            ACTOR_I16(a, ACTOR_SPAN_RAW)       = q_span;
+            ACTOR_U8(a, ACTOR_SUB_LANE_INDEX)  = q_byte_3;
+
+            /* [0x0043555b-67] InitActorTrackSegmentPlacement(actor+0x80, actor+0x1FC).
+             * Port equivalent: world placement via td5_track_get_span_lane_world.
+             * The full helper additionally writes actor+0x84 (span_accum),
+             * +0x86 (span_high), and may clamp +0x8c — but those side effects
+             * are recreated by the subsequent NormalizeActorTrackWrapState call
+             * for the LEFT path. We faithfully invoke the world placement here
+             * to set +0x1FC/+0x200/+0x204; the +0x84/+0x86 will get rewritten
+             * by NormalizeWrap below. */
             {
-                int lc = td5_track_get_span_lane_count((int)q_span);
-                if ((int)q_lane >= lc) {
-                    rs[RS_ROUTE_TABLE_SELECTOR] = 1;
-                    int remapped = td5_track_apply_target_span_remap((int)q_span, 0);
-                    if (remapped != (int)q_span && remapped >= 0) {
-                        TD5_LOG_I(LOG_TAG, "recycle slot=%d: alt-route remap span %d->%d lane %d->%d",
-                                  best_slot, (int)q_span, remapped, (int)q_lane, (int)q_lane - lc);
-                        q_span = (int16_t)remapped;
-                        q_lane = (uint8_t)((int)q_lane - lc);
-                    }
-                } else {
-                    rs[RS_ROUTE_TABLE_SELECTOR] = 0;
+                int32_t wx, wy, wz;
+                if (td5_track_get_span_lane_world((int)q_span, (int)q_byte_3, &wx, &wy, &wz)) {
+                    ACTOR_I32(a, ACTOR_WORLD_POS_X) = wx;
+                    *(int32_t *)(a + 0x200)         = wy;
+                    ACTOR_I32(a, ACTOR_WORLD_POS_Z) = wz;
                 }
             }
 
-            /* Place the actor at the queue span — full world placement */
-            ACTOR_I16(a, ACTOR_SPAN_RAW) = q_span;
-            *(int16_t *)(a + 0x082) = q_span;  /* span_norm  */
-            *(int16_t *)(a + 0x084) = q_span;  /* span_accum */
-            *(int16_t *)(a + 0x086) = q_span;  /* span_high  */
-            ACTOR_U8(a, ACTOR_SUB_LANE_INDEX) = q_lane;
-
-            /* Compute world position from strip geometry [CONFIRMED @ 0x4354E0] */
-            {
-                int32_t world_x, world_y, world_z;
-                if (td5_track_get_span_lane_world(q_span, q_lane, &world_x, &world_y, &world_z)) {
-                    ACTOR_I32(a, ACTOR_WORLD_POS_X) = world_x;
-                    *(int32_t *)(a + 0x200) = world_y;
-                    ACTOR_I32(a, ACTOR_WORLD_POS_Z) = world_z;
-                }
-            }
-
-            /* Compute heading + oncoming flip */
+            /* [0x00435568-0x00435690] geometry-derive heading angle from strip,
+             * then AngleFromVector12Full, then (angle+0x800)<<8 → actor+0x1f4.
+             * For tighter fidelity, recycle_compute_heading_angle_12 walks the
+             * span_type case dispatch; td5_track_compute_heading is the
+             * port's existing equivalent path. We prefer the existing helper
+             * here because it shares the same atan2 sign/wrap convention with
+             * the rest of the port; the angle field +0x1f4 is then written
+             * with the +0x800 bias as the original does. */
             td5_track_compute_heading((TD5_Actor *)a);
-            if (q_flags & 1) {
-                ACTOR_I32(a, ACTOR_YAW_ACCUM) += 0x80000;
+
+            /* [0x004356a6-bb] If polarity flag set, add 0x80000 to yaw. */
+            yaw_pack = ACTOR_I32(a, ACTOR_YAW_ACCUM);
+            if ((q_flags & 1u) != 0u) {
+                ACTOR_I32(a, ACTOR_YAW_ACCUM) = yaw_pack + 0x80000;
             }
 
-            /* Build rotation matrix from heading (+0x120, float[9]) */
-            {
-                int32_t yaw12 = (ACTOR_I32(a, ACTOR_YAW_ACCUM) >> 8) & 0xFFF;
-                float cf = (float)ai_cos_fixed12(yaw12) * (1.0f / 4096.0f);
-                float sf = (float)ai_sin_fixed12(yaw12) * (1.0f / 4096.0f);
-                float *rm = (float *)(a + 0x120);
-                memset(rm, 0, 9 * sizeof(float));
-                rm[0] =  cf;
-                rm[2] =  sf;
-                rm[4] =  1.0f;
-                rm[6] = -sf;
-                rm[8] =  cf;
-                /* Zero velocities for clean re-spawn */
-                ACTOR_I32(a, ACTOR_LIN_VEL_X) = 0;
-                ACTOR_I32(a, 0x1D0) = 0; /* linear_velocity_y */
-                ACTOR_I32(a, ACTOR_LIN_VEL_Z) = 0;
-                ACTOR_I32(a, 0x1C0) = 0; /* angular_velocity_roll */
-                ACTOR_I32(a, 0x1C4) = 0; /* angular_velocity_yaw */
-                ACTOR_I32(a, 0x1C8) = 0; /* angular_velocity_pitch */
-            }
+            /* [0x004356bb-c2] ResetVehicleActorState(actor) at 0x00405d70 —
+             * port equivalent zeroes velocities & integrates pose. */
+            td5_physics_reset_actor_state((TD5_Actor *)a);
 
-            /* Clear all recovery/state fields */
-            g_traffic_recovery_stage[best_slot] = 0;
-            ACTOR_I32(a, ACTOR_STEERING_CMD) = 0;
-            ACTOR_I32(a, ACTOR_LONGITUDINAL_SPEED) = 0;
-            ACTOR_I16(a, ACTOR_ENCOUNTER_STEER) = 0;
-            ACTOR_U8(a, ACTOR_BRAKE_FLAG) = 0;
-            ACTOR_U8(a, ACTOR_VEHICLE_MODE) = 0;
-
-            /* Update route table pointer to match the newly-assigned selector
-             * before seeding, so the seed reads the correct route bytes. */
-            rs[RS_ROUTE_TABLE_PTR] = (int32_t)(intptr_t)g_route_tables[rs[RS_ROUTE_TABLE_SELECTOR] & 1];
-
-            /* Seed track-progress offset via RefreshActorTrackProgressOffset.
-             * Original calls this in both branches of RecycleTrafficActorFromQueue
-             * [CONFIRMED — two call sites in decompilation]; bias is NOT zeroed
-             * directly, it is written exclusively by the seed call. */
+            /* [0x004356c7-c8] RefreshActorTrackProgressOffset(best_slot) at 0x004342e0 */
             td5_ai_seed_actor_track_progress_offset(best_slot);
 
-            rs[RS_SCRIPT_FLAGS] = 0;
-            rs[RS_RECOVERY_STAGE] = 0;
+            /* [0x004356cd-ce] NormalizeActorTrackWrapState(actor) at 0x00443fb0 */
+            td5_track_normalize_actor_wrap((TD5_Actor *)a);
 
-            TD5_LOG_I(LOG_TAG,
-                      "Traffic recycled: slot=%d from_span=%d to_span=%d lane=%u flags=0x%02X bias=%d pos=(%d,%d,%d)",
-                      best_slot, old_span, q_span, q_lane, q_flags,
-                      rs[RS_TRACK_OFFSET_BIAS],
-                      ACTOR_I32(a, ACTOR_WORLD_POS_X),
-                      *(int32_t *)(a + 0x200),
-                      ACTOR_I32(a, ACTOR_WORLD_POS_Z));
+            /* [0x004356d3-de] Commit DAT_004b08b8 += 4 (consume entry) */
+            g_traffic_queue_ptr = qp + 4;
+
+        } else {
+            /* ====== RIGHT branch (0x004356ea-0x004358a6, selector=1) ====== */
+            int32_t yaw_pack;
+            int     remapped;
+
+            /* [0x004356ea-f3] selector = 1 (RIGHT route / alt-segment) */
+            rs[RS_ROUTE_TABLE_SELECTOR] = 1;
+
+            /* [0x004354c5-0x0043550f + 0x004355e2-00] Inline jump-table scan:
+             *   Find entry i where queue_span ∈ [entry.third, entry.third + (entry.high - entry.low) - 1].
+             *   Result = queue_span + (entry.low - entry.third) (queue→main decode).
+             *   No match: remapped = -1 (sentinel).
+             *
+             * The port's td5_track_apply_target_span_remap(lin_span,
+             * is_canonical=0) implements the IDENTICAL math: entry[+0] read
+             * as "remap_dst" (=low), entry[+2] as "remap_end_exc" (=high),
+             * entry[+4] as "range_lo" (=third). Match condition:
+             *   range_lo <= lin <= range_lo + (remap_end_exc - remap_dst) - 1
+             * Result: lin + (remap_dst - range_lo)
+             * — which is exactly queue_span + (low - third).
+             *
+             * Behavior contract: returns lin_span unchanged when no entry
+             * matches; the original writes -1 in that case. We restore the
+             * -1 sentinel by detecting "unchanged" outcome here. */
+            remapped = td5_track_apply_target_span_remap((int)q_span, 0);
+            if (remapped == (int)q_span) {
+                /* No remap happened — either no jump entries or no match.
+                 * Original stores -1 as the sentinel (OR EBP, 0xffffffff at
+                 * 0x0043550f). Treat as -1. */
+                remapped = -1;
+            }
+
+            /* [0x00435541-55] actor+0x80 = remapped; actor+0x8c = q_byte_3 - (strip_lane & 0xf). */
+            ACTOR_I16(a, ACTOR_SPAN_RAW) = (int16_t)remapped;
+            ACTOR_I8(a, ACTOR_SUB_LANE_INDEX) =
+                (int8_t)((int)(int8_t)q_byte_3 - (int)(strip_lane_count & 0xFu));
+
+            /* [0x0043555b-67] InitActorTrackSegmentPlacement equivalent. */
+            if (remapped >= 0) {
+                int32_t wx, wy, wz;
+                int     lane = ACTOR_I8(a, ACTOR_SUB_LANE_INDEX);
+                if (lane < 0) lane = 0; /* defensive: subtraction can go negative */
+                if (td5_track_get_span_lane_world(remapped, lane, &wx, &wy, &wz)) {
+                    ACTOR_I32(a, ACTOR_WORLD_POS_X) = wx;
+                    *(int32_t *)(a + 0x200)         = wy;
+                    ACTOR_I32(a, ACTOR_WORLD_POS_Z) = wz;
+                }
+            }
+
+            /* [0x00435568-0x00435690 mirror] heading + yaw + polarity. */
+            td5_track_compute_heading((TD5_Actor *)a);
+            yaw_pack = ACTOR_I32(a, ACTOR_YAW_ACCUM);
+            if ((q_flags & 1u) != 0u) {
+                ACTOR_I32(a, ACTOR_YAW_ACCUM) = yaw_pack + 0x80000;
+            }
+
+            /* [0x00435865-72] ResetVehicleActorState; RefreshActorTrackProgressOffset. */
+            td5_physics_reset_actor_state((TD5_Actor *)a);
+            td5_ai_seed_actor_track_progress_offset(best_slot);
+
+            /* [0x00435877-78] ResolveActorSegmentBoundary(actor) at 0x00443ff0.
+             * Real symbol from b99e36a (precise-00443FF0). Weakly-linked
+             * forward decl; fall back to NormalizeWrap if unavailable. */
+            if (&td5_track_resolve_actor_segment_boundary != NULL) {
+                td5_track_resolve_actor_segment_boundary((TD5_Actor *)a);
+            } else {
+                /* FIXME[precise-00443FF0]: NormalizeWrap is the closest in-tree
+                 * helper but does NOT handle the jump-table-decode case for
+                 * out-of-ring raw spans (>ring_length). Once b99e36a is
+                 * merged, the weak-linked RSB above takes over and the
+                 * fallback dies. */
+                td5_track_normalize_actor_wrap((TD5_Actor *)a);
+            }
+
+            /* [0x00435882-88] Commit DAT_004b08b8 += 4. */
+            g_traffic_queue_ptr = qp + 4;
         }
-
-        /* Advance queue pointer past this consumed entry */
-        g_traffic_queue_ptr = qp + 4;
     }
+
+    /* ====== LAB_0043588d: shared post-call state zero (both branches) ======
+     * Original writes (all dwords unless marked):
+     *   slot+0x314 = 0   (LONGITUDINAL_SPEED)
+     *   slot+0x30c = 0   (STEERING_CMD)
+     *   slot+0x379 = 0   (byte: VEHICLE_MODE)
+     *   slot+0x1f0 = 0
+     *   slot+0x1f8 = 0
+     *   slot+0x1c0 = 0
+     *   slot+0x1c4 = 0
+     *   slot+0x1c8 = 0
+     *   slot+0x1cc = 0   (LIN_VEL_X)
+     *   route_state[+0x88] = 0   (RS_RECOVERY_STAGE at dword 0x22)
+     *   slot+0x1d0 = 0
+     *   route_state[+0xF0] = 0   (dword index 0x3C; port macro RS_SCRIPT_SPEED_PARAM
+     *                              — but here it's used as a generic clear)
+     *   slot+0x1d4 = 0   (LIN_VEL_Z)
+     *   route_state[+0x7C] = -1  (RS_ENCOUNTER_HANDLE at dword 0x1F)
+     *   word slot+0x338 = 0      (16-bit) — UNNAMED slot field
+     */
+    {
+        char *aa = actor_ptr(best_slot);
+        if (aa) {
+            *(int32_t *)(aa + 0x314) = 0;
+            *(int32_t *)(aa + 0x30C) = 0;
+            *(int8_t  *)(aa + 0x379) = 0;
+            *(int32_t *)(aa + 0x1F0) = 0;
+            *(int32_t *)(aa + 0x1F8) = 0;
+            *(int32_t *)(aa + 0x1C0) = 0;
+            *(int32_t *)(aa + 0x1C4) = 0;
+            *(int32_t *)(aa + 0x1C8) = 0;
+            *(int32_t *)(aa + 0x1CC) = 0;
+            *(int32_t *)(aa + 0x1D0) = 0;
+            *(int32_t *)(aa + 0x1D4) = 0;
+            *(int16_t *)(aa + 0x338) = 0;
+        }
+        /* route_state byte-direct writes match the original's
+         * `[uVar11 + literal]` style. */
+        *(int32_t *)((uint8_t *)rs + 0x88) = 0;
+        *(int32_t *)((uint8_t *)rs + 0xF0) = 0;
+        *(int32_t *)((uint8_t *)rs + 0x7C) = -1;
+        /* Mirror into port's semantic macros for consistency. */
+        rs[RS_RECOVERY_STAGE]   = 0;
+        rs[RS_ENCOUNTER_HANDLE] = -1;
+        /* Track recovery stage shadow used by other port code: clear too. */
+        if (best_slot >= 0 && best_slot < TD5_MAX_TOTAL_ACTORS) {
+            g_traffic_recovery_stage[best_slot] = 0;
+        }
+    }
+
+    TD5_LOG_I(LOG_TAG,
+              "recycle_traffic: slot=%d player_span=%d q_span=%d q_lane=%u q_flags=0x%02X dist=%d",
+              best_slot, (int)player_span_norm, (int)q_span, q_byte_3, q_flags, best_dist);
 }
 
 /**
