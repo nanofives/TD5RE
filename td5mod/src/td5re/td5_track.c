@@ -3232,43 +3232,100 @@ void td5_track_compute_heading(TD5_Actor *actor)
 /* ========================================================================
  * Wrap Normalization (0x443FB0 NormalizeActorTrackWrapState)
  *
- * Normalizes the accumulated span counter (actor+0x84) into a wrapped
- * position modulo the total span ring length. Returns the lap count.
+ * Verbatim port of NormalizeActorTrackWrapState @ 0x00443FB0 in TD5_d3d.exe.
+ * Listing (pool0 2026-05-14):
+ *   00443fb0  MOV    ECX, [ESP + 0x4]                ; actor
+ *   00443fb4  MOV    AX,  word ptr [ECX + 0x84]      ; raw accumulated span (int16)
+ *   00443fbb  TEST   AX,  AX                         ; sign test on the 16-bit value
+ *   00443fbe  JL     0x00443fd2                      ; negative branch
+ *   00443fc0  MOVSX  EAX, AX                         ; sign-extend to 32-bit
+ *   00443fc3  CDQ
+ *   00443fc4  IDIV   dword ptr [0x004c3d90]          ; g_trackTotalSpanCount
+ *   00443fca  MOV    word ptr [ECX + 0x82], DX       ; remainder -> normalized
+ *   00443fd1  RET                                    ; EAX = quotient (laps)
+ *   00443fd2  MOVSX  EAX, AX                         ; negative path
+ *   00443fd5  PUSH   ESI
+ *   00443fd6  MOV    ESI, dword ptr [0x004c3d90]
+ *   00443fdc  CDQ
+ *   00443fdd  IDIV   ESI
+ *   00443fdf  ADD    EDX, ESI                        ; remainder + ring_length
+ *   00443fe1  MOV    word ptr [ECX + 0x82], DX       ; store (NO bounds-clamp)
+ *   00443fe8  POP    ESI
+ *   00443fe9  RET                                    ; EAX = quotient (laps, negative or 0)
+ *
+ * Critical fidelity points vs prior port:
+ *   - Divisor is g_trackTotalSpanCount (DAT_004c3d90) = hdr[1] = main-road
+ *     ring length. The port's s_span_count is the INFLATED physical span
+ *     count (includes branch-road spans) and does NOT match the original
+ *     divisor. Use s_strip_header[1] / g_td5.track_span_ring_length
+ *     instead. This mirrors the sibling fix in ResolveActorSegmentBoundary
+ *     (precise-00443FF0).
+ *   - Sign test is on the 16-bit AX value; the post-MOVSX 32-bit raw is
+ *     equivalent in C since int16_t -> int32_t preserves sign.
+ *   - Negative branch ADDs ring_length without any subsequent bounds check;
+ *     if the dividend is an exact negative multiple of ring_length, EDX is
+ *     0 and the stored value is exactly ring_length (matches original
+ *     register-level behavior; the original truncates to 16-bit on store
+ *     via MOV word ptr, DX).
+ *   - Return value is the IDIV quotient (EAX), i.e. the lap count. For
+ *     negative dividends with non-zero remainder, x86 IDIV truncates
+ *     toward zero, so a value of -1 yields quotient 0 (not -1); this
+ *     matches C's `/` operator on signed ints since C99.
+ *   - Only the +0x82 field is touched. The +0x84 raw span is NOT
+ *     modified by this function.
+ *
+ * FIXME(divergence): original has no null/zero guards. If
+ * g_trackTotalSpanCount == 0 (no track loaded), the IDIV traps. We keep
+ * a soft guard for robustness since the port is reachable from the
+ * frontend init path before STRIP.DAT is bound.
  * ======================================================================== */
 
 int td5_track_normalize_actor_wrap(TD5_Actor *actor)
 {
     int16_t *track_state;
-    int32_t raw_span;
-    int32_t ring_length;
-    int32_t wrapped, laps;
+    int32_t raw_span;       /* MOVSX EAX, AX -> int32_t from int16_t */
+    int32_t ring_length;    /* dword ptr [0x004c3d90] = g_trackTotalSpanCount */
+    int32_t quotient;
+    int32_t remainder;
 
-    if (!actor || s_span_count == 0)
+    if (!actor)
         return 0;
+
+    /* Source the divisor from hdr[1] (main-road span count, == original
+     * g_trackTotalSpanCount), NOT the inflated s_span_count. */
+    if (s_strip_header) {
+        ring_length = (int32_t)s_strip_header[1];
+    } else {
+        ring_length = (int32_t)g_td5.track_span_ring_length;
+    }
+    if (ring_length == 0)
+        return 0; /* divergence guard; see FIXME above */
 
     track_state = (int16_t *)((uint8_t *)actor + 0x80);
-    raw_span = (int32_t)track_state[2]; /* +0x84: accumulated spans (high_water) */
-    ring_length = (int32_t)s_span_count;
 
-    if (ring_length <= 0)
-        return 0;
+    /* MOV AX, word ptr [ECX + 0x84] ; MOVSX EAX, AX */
+    raw_span = (int32_t)track_state[2]; /* +0x84: raw accumulated span */
 
+    /* TEST AX,AX ; JL 0x00443fd2 -- sign-extended raw_span < 0 is
+     * equivalent to the 16-bit AX sign-bit test. */
     if (raw_span >= 0) {
-        laps = raw_span / ring_length;
-        wrapped = raw_span % ring_length;
+        /* Positive branch: IDIV by g_trackTotalSpanCount, store EDX -> +0x82,
+         * return EAX. */
+        quotient  = raw_span / ring_length;
+        remainder = raw_span % ring_length;
+        track_state[1] = (int16_t)remainder; /* MOV word ptr [ECX + 0x82], DX */
+        return (int)quotient;
     } else {
-        /* C truncates toward zero for negative dividends.
-         * Original behavior: remainder adjusted to be non-negative. */
-        laps = raw_span / ring_length;
-        wrapped = raw_span % ring_length;
-        /* When remainder is negative, shift into [0, ring_length) */
-        wrapped += ring_length;
-        if (wrapped >= ring_length)
-            wrapped -= ring_length;
+        /* Negative branch: IDIV by ring_length, then ADD EDX, ring_length,
+         * store DX. NO subsequent bounds clamp -- if remainder is 0 (raw is
+         * an exact negative multiple), DX ends up == ring_length and is
+         * stored truncated to 16-bit. */
+        quotient  = raw_span / ring_length;
+        remainder = raw_span % ring_length;
+        remainder += ring_length;
+        track_state[1] = (int16_t)remainder; /* MOV word ptr [ECX + 0x82], DX */
+        return (int)quotient;
     }
-
-    track_state[1] = (int16_t)wrapped;  /* +0x82: normalized span */
-    return (int)laps;
 }
 
 /* ========================================================================
