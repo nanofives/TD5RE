@@ -3333,21 +3333,12 @@ void td5_ai_recycle_traffic_actor(void) {
             ACTOR_U8(a, ACTOR_SUB_LANE_INDEX)  = q_byte_3;
 
             /* [0x0043555b-67] InitActorTrackSegmentPlacement(actor+0x80, actor+0x1FC).
-             * Port equivalent: world placement via td5_track_get_span_lane_world.
-             * The full helper additionally writes actor+0x84 (span_accum),
-             * +0x86 (span_high), and may clamp +0x8c — but those side effects
-             * are recreated by the subsequent NormalizeActorTrackWrapState call
-             * for the LEFT path. We faithfully invoke the world placement here
-             * to set +0x1FC/+0x200/+0x204; the +0x84/+0x86 will get rewritten
-             * by NormalizeWrap below. */
-            {
-                int32_t wx, wy, wz;
-                if (td5_track_get_span_lane_world((int)q_span, (int)q_byte_3, &wx, &wy, &wz)) {
-                    ACTOR_I32(a, ACTOR_WORLD_POS_X) = wx;
-                    *(int32_t *)(a + 0x200)         = wy;
-                    ACTOR_I32(a, ACTOR_WORLD_POS_Z) = wz;
-                }
-            }
+             * Byte-faithful port @ 0x00445F10 — writes world_pos[0..2] in 24.8 FP
+             * AND seeds actor +0x84 (span_accum) + +0x86 (span_high) from span_raw,
+             * AND clamps +0x8C (sub_lane) to (lane_count - 1) if out of range. */
+            td5_track_init_actor_segment_placement(
+                (int16_t *)(a + ACTOR_SPAN_RAW),
+                (int32_t *)(a + ACTOR_WORLD_POS_X));
 
             /* [0x00435568-0x00435690] geometry-derive heading angle from strip,
              * then AngleFromVector12Full, then (angle+0x800)<<8 → actor+0x1f4.
@@ -3415,16 +3406,13 @@ void td5_ai_recycle_traffic_actor(void) {
             ACTOR_I8(a, ACTOR_SUB_LANE_INDEX) =
                 (int8_t)((int)(int8_t)q_byte_3 - (int)(strip_lane_count & 0xFu));
 
-            /* [0x0043555b-67] InitActorTrackSegmentPlacement equivalent. */
+            /* [0x0043555b-67] InitActorTrackSegmentPlacement byte-faithful port.
+             * Seeds actor +0x84/+0x86 (span_accum/high), clamps +0x8C if sub_lane
+             * exceeds lane_nibble, writes world_pos[0..2] in 24.8 FP. */
             if (remapped >= 0) {
-                int32_t wx, wy, wz;
-                int     lane = ACTOR_I8(a, ACTOR_SUB_LANE_INDEX);
-                if (lane < 0) lane = 0; /* defensive: subtraction can go negative */
-                if (td5_track_get_span_lane_world(remapped, lane, &wx, &wy, &wz)) {
-                    ACTOR_I32(a, ACTOR_WORLD_POS_X) = wx;
-                    *(int32_t *)(a + 0x200)         = wy;
-                    ACTOR_I32(a, ACTOR_WORLD_POS_Z) = wz;
-                }
+                td5_track_init_actor_segment_placement(
+                    (int16_t *)(a + ACTOR_SPAN_RAW),
+                    (int32_t *)(a + ACTOR_WORLD_POS_X));
             }
 
             /* [0x00435568-0x00435690 mirror] heading + yaw + polarity. */
@@ -3652,28 +3640,14 @@ void td5_ai_init_traffic_actors(void) {
             ACTOR_U8(a, ACTOR_SUB_LANE_INDEX) = queue_byte3;
 
             /* 0x435b2e: InitActorTrackSegmentPlacement(&actor.span_raw, &actor.world_pos).
-             * The port's analogue is td5_track_init_actor_segment_placement.
-             * Existing port code names it differently — call the in-process
-             * sub_lane init helper via td5_track_get_span_lane_world which
-             * matches the same vertex sampling.
-             *
-             * The original function:
-             *   - Reads actor.span_raw + sub_lane → samples the lane quad
-             *     barycenter into actor.world_pos[0,1,2].
-             *   - Also clamps sub_lane if lane index out of bounds.
-             *
-             * Use td5_track_get_span_lane_world for an equivalent vertex
-             * barycenter sample, then write back into actor.world_pos. */
-            {
-                int32_t wx = 0, wy = 0, wz = 0;
-                if (g_strip_span_base) {
-                    (void)td5_track_get_span_lane_world(
-                        (int)queue_span, (int)queue_byte3, &wx, &wy, &wz);
-                }
-                ACTOR_I32(a, ACTOR_WORLD_POS_X) = wx;
-                *(int32_t *)(a + 0x200)         = wy;
-                ACTOR_I32(a, ACTOR_WORLD_POS_Z) = wz;
-            }
+             * Byte-faithful port @ 0x00445F10. Seeds:
+             *   actor+0x84 (span_accum) = span_raw
+             *   actor+0x86 (span_high)  = span_raw
+             *   actor+0x8C (sub_lane)   = clamp if >= lane_nibble
+             *   actor+0x1FC/+0x200/+0x204 = 4-vertex barycenter (24.8 FP). */
+            td5_track_init_actor_segment_placement(
+                (int16_t *)(a + ACTOR_SPAN_RAW),
+                (int32_t *)(a + ACTOR_WORLD_POS_X));
 
             /* 0x435b33-72: load strip[span] + first/second vertex pointers */
             sp = NULL;
@@ -3791,20 +3765,13 @@ void td5_ai_init_traffic_actors(void) {
             ACTOR_I16(a, ACTOR_SPAN_RAW) = remapped_span;
             ACTOR_U8(a, ACTOR_SUB_LANE_INDEX) = (uint8_t)((int)queue_byte3 - lane_count);
 
-            /* 0x00435a5e: InitActorTrackSegmentPlacement(&span_raw, &world_pos) */
-            {
-                int32_t wx = 0, wy = 0, wz = 0;
-                int rs_span = (int)(int16_t)ACTOR_I16(a, ACTOR_SPAN_RAW);
-                if (g_strip_span_base && rs_span >= 0) {
-                    (void)td5_track_get_span_lane_world(
-                        rs_span,
-                        (int)ACTOR_U8(a, ACTOR_SUB_LANE_INDEX),
-                        &wx, &wy, &wz);
-                }
-                ACTOR_I32(a, ACTOR_WORLD_POS_X) = wx;
-                *(int32_t *)(a + 0x200)         = wy;
-                ACTOR_I32(a, ACTOR_WORLD_POS_Z) = wz;
-            }
+            /* 0x00435a5e: InitActorTrackSegmentPlacement(&span_raw, &world_pos).
+             * Byte-faithful port @ 0x00445F10 — defensive guard: original has none
+             * but our table-driven path can index into NULL span pool. The helper
+             * itself early-returns with zeroed out_pos when track isn't bound. */
+            td5_track_init_actor_segment_placement(
+                (int16_t *)(a + ACTOR_SPAN_RAW),
+                (int32_t *)(a + ACTOR_WORLD_POS_X));
 
             /* 0x00435a67: ComputeActorTrackHeading(actor) → 12-bit angle.
              * Inline the original switch + AngleFromVector12 to avoid the

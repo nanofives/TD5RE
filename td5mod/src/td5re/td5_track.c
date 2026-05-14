@@ -1188,6 +1188,140 @@ int td5_track_get_span_lane_world(int span_index, int sub_lane,
     return 1;
 }
 
+/* Byte-faithful port of InitActorTrackSegmentPlacement @ 0x00445F10.
+ *
+ * Disassembly summary (push EBX/EBP/ESI, ESI = param_1 = &actor+0x80,
+ * later EBX = param_2 from [ESP+0x18]):
+ *
+ *   sVar4 = *param_1;                                              [0F BF 0E]
+ *   param_1[2] = sVar4;                                            [66 89 4E 04]
+ *   param_1[3] = sVar4;                                            [66 89 4E 06]
+ *   pbVar1 = g_trackStripRecords + sVar4 * 0x18;                   [LEA EDX+ECX*8]
+ *   iVar7 = (int)(char)param_1[6];                                 [MOVSX EAX, BYTE [ESI+0xC]]
+ *   uVar5 = *(ushort *)(pbVar1 + 4);
+ *   cVar2 = DAT_00474e40[(uint)*pbVar1 * 2];     // = k_quad_vertex_offsets[type][0]
+ *   cVar3 = DAT_00474e41[(uint)*pbVar1 * 2];     // = k_quad_vertex_offsets[type][1]
+ *   uVar6 = *(ushort *)(pbVar1 + 6);
+ *   if ((int)(pbVar1[3] & 0xf) <= iVar7) {       // sub_lane >= lane_count
+ *       iVar7 = (pbVar1[3] & 0xf) - 1;
+ *       *(char *)(param_1 + 6) = (char)iVar7;    // writeback clamp
+ *   }
+ *   iVar9 = (int)cVar3 + (uint)uVar6 + iVar7;    // right_vertex_base
+ *   iVar7 = iVar7 + (int)cVar2 + (uint)uVar5;    // left_vertex_base
+ *   iVar10 = iVar7 * 6;                          // stride 6 (3 shorts)
+ *   iVar8 = iVar9 * 6;
+ *   sum_x = vpool[iVar7+1].x + vpool[iVar9+1].x + vpool[iVar7].x + vpool[iVar9].x
+ *   x = ((sum_x << 8) + ((sum_x<<8)>>31 & 3)) >> 2 + origin_x * 0x100   [SHL/CDQ/AND/ADD/SAR pattern]
+ *   ...same for y/z using +2/+8 and +4/+10 shorts...
+ *
+ * The "+ (x>>31 & 3)" is the compiler-generated sign bias for SAR-by-2 to
+ * implement signed division by 4 that rounds toward zero — equivalent to C
+ * `int /4`. We use plain `/4` here for clarity.
+ *
+ * Side effects on the actor (via param_1 = &actor+0x80):
+ *   - +0x84 (span_accum)  <- span_raw
+ *   - +0x86 (span_high)   <- span_raw
+ *   - +0x8C (sub_lane)    <- clamped to lane_count-1 if >= lane_count
+ *
+ * Writes 24.8 fixed-point world position to out_pos[0..2]
+ * (matches actor +0x1FC/+0x200/+0x204 layout).
+ */
+/* Forward declaration — table itself is defined later in this file. */
+static const int8_t k_quad_vertex_offsets[12][2];
+
+void td5_track_init_actor_segment_placement(int16_t *actor_at_0x80, int32_t *out_pos)
+{
+    int16_t  span_raw;
+    int      span_index;
+    const TD5_StripSpan *sp;
+    int      type;
+    int      lane_nibble;
+    int      sub_lane;
+    int8_t   left_off, right_off;
+    int      left_vert_base, right_vert_base;
+    int      left_idx0, left_idx1, right_idx0, right_idx1;
+    TD5_StripVertex *vL0, *vL1, *vR0, *vR1;
+    int      sum;
+
+    if (!actor_at_0x80 || !out_pos)
+        return;
+
+    span_raw = actor_at_0x80[0];
+
+    /* 0x00445F1A-21: param_1[2] = span; param_1[3] = span (init span_accum + span_high). */
+    actor_at_0x80[2] = span_raw;
+    actor_at_0x80[3] = span_raw;
+
+    span_index = (int)span_raw;
+
+    /* Out-of-range or no track: leave out_pos zero (defensive — original
+     * dereferences strip[span] directly with no range check). */
+    if (out_pos) { out_pos[0] = 0; out_pos[1] = 0; out_pos[2] = 0; }
+
+    if (!s_span_array || !s_vertex_table ||
+        span_index < 0 || span_index >= s_span_count)
+        return;
+
+    sp = &s_span_array[span_index];
+
+    /* sub_lane: SIGN-EXTENDED char read from actor +0x8C
+     * (= (char *)(actor_at_0x80 + 6) = byte +0xC from actor_at_0x80). */
+    sub_lane = (int)*((const int8_t *)(actor_at_0x80) + 12);
+
+    type = (int)sp->span_type;
+    lane_nibble = ((const uint8_t *)sp)[3] & 0x0F;  /* (pbVar1[3] & 0xf) */
+
+    /* DAT_00474E40 / DAT_00474E41 per-type pair (spawn vertex offsets). */
+    if (type >= 0 && type < 12) {
+        left_off  = (int8_t)k_quad_vertex_offsets[type][0];
+        right_off = (int8_t)k_quad_vertex_offsets[type][1];
+    } else {
+        left_off = 0;
+        right_off = 0;
+    }
+
+    /* 0x00445F61-63: CMP EAX,EBP / JL — if lane_nibble <= sub_lane, clamp. */
+    if (lane_nibble <= sub_lane) {
+        sub_lane = lane_nibble - 1;
+        /* 0x00445F68: MOV byte ptr [ESI+0xc], AL — writeback clamped value. */
+        *((int8_t *)(actor_at_0x80) + 12) = (int8_t)sub_lane;
+    }
+
+    /* 0x00445F6B-6D:
+     *   EDX = right_off + uVar6 + sub_lane    (right_vertex_base)
+     *   EAX = sub_lane + left_off + uVar5     (left_vertex_base) */
+    left_vert_base  = sub_lane + (int)left_off  + (int)sp->left_vertex_index;
+    right_vert_base = sub_lane + (int)right_off + (int)sp->right_vertex_index;
+
+    /* Read 4 vertices: vL[base], vL[base+1], vR[base], vR[base+1]. */
+    left_idx0  = left_vert_base;
+    left_idx1  = left_vert_base + 1;
+    right_idx0 = right_vert_base;
+    right_idx1 = right_vert_base + 1;
+
+    /* Defensive bounds — original has none. */
+    if (left_idx0 < 0 || left_idx1 < 0 || right_idx0 < 0 || right_idx1 < 0)
+        return;
+
+    vL0 = vertex_at(left_idx0);
+    vL1 = vertex_at(left_idx1);
+    vR0 = vertex_at(right_idx0);
+    vR1 = vertex_at(right_idx1);
+
+    /* 0x00445F7C-FB5: out_pos[0] = ((sum_x * 0x100) / 4) + origin_x * 0x100
+     * Order matches disasm (vL1, vR1, vL0, vR0). */
+    sum = (int)vL1->x + (int)vR1->x + (int)vL0->x + (int)vR0->x;
+    out_pos[0] = ((sum << 8) / 4) + sp->origin_x * 0x100;
+
+    /* 0x00445FBD-FEB: out_pos[1] uses +0x02/+0x08 shorts (y component). */
+    sum = (int)vL0->y + (int)vL1->y + (int)vR0->y + (int)vR1->y;
+    out_pos[1] = ((sum << 8) / 4) + sp->origin_y * 0x100;
+
+    /* 0x00445FF4-025: out_pos[2] uses +0x04/+0x0a shorts (z component). */
+    sum = (int)vL1->z + (int)vL0->z + (int)vR1->z + (int)vR0->z;
+    out_pos[2] = ((sum << 8) / 4) + sp->origin_z * 0x100;
+}
+
 /* Public accessor for the span's lane-count nibble used by InitializeRaceSession
  * callers. Mirrors the raw `(byte_3 & 0x0F)` read in
  * `InitActorTrackSegmentPlacement @ 0x00445F24` for the sub_lane clamp.
