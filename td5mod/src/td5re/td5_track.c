@@ -22,6 +22,7 @@
 #include "td5_platform.h"
 #include "td5_render.h"
 #include "td5_trace.h"
+#include "td5_pilot_trace_pool15_spline.h"
 #include "../../../re/include/td5_actor_struct.h"
 #include "td5re.h"
 #include <string.h>
@@ -1277,36 +1278,47 @@ static inline void vertex_world_pos(const TD5_StripSpan *sp,
 
 /**
  * Per-span-type vertex index offsets — DAT_00473c68 (int32, stride 8).
- * Read by SampleTrackTargetPoint (0x00434836) ONLY: col[0] applied to
- * (left_vertex_index + lane_count) to pick the 2-vertex interpolation
- * "right" vertex. Col[1] is not read by this function.
+ * Stride-8 array: each "type row" has 2 columns of int32.
  *
- * Col 0 verified [CONFIRMED @ 0x00473C68 via independent memory_read on
- * fresh Ghidra session 2026-04-23]:
- *   row: 0  1  2  3  4  5  6  7  8  9 10 11
- *   val: 0  0  0 -1 -1 -2  0 -1 -1 -2  0  0
+ *   Col 0 (base 0x473c68) read by SampleTrackTargetPoint (0x00434836).
+ *   Col 1 (base 0x473c6c) read by ComputeSignedTrackOffset (0x004346A3)
+ *                              and ComputeTrackSpanProgress (0x004345E4).
  *
- * Prior 2026-04-20 comment claimed {-1,-1,-2} at types 2/3/4, missing the
- * second {-1,-1,-2} block at types 7/8/9. That was wrong in both halves:
- *   - First block shifted by -1 (bit 2/3/4 vs actual 3/4/5)
- *   - Second block omitted entirely
- * Effect: SampleTrackTargetPoint picked the wrong right-end vertex on
- * junction-entry spans, so AI cars with high route_byte (RIGHT.TRK slots
- * 0/2/4) chased a corrupted target while LEFT.TRK cars (route_byte=0,
- * interpolation stays at left_vertex) drove fine. See
- * todo_ai_right_route_branches.md.
+ * Both consumers add the value to (vertex_base + lane_count) to pick the
+ * "end" vertex for 2-vertex interpolation.
+ *
+ * [CONFIRMED @ 0x00473C68 via mcp__ghidra__memory_read pool15 2026-05-14]
+ * — Verified independently via 16-byte reads at 0x473c8c..0x473cb0 and
+ * 4-byte single reads at each suspect cell. Earlier prior-port comment
+ * had it shifted by 1 row AND used col 0 values for the col 1 consumer.
+ *
+ *   type:  0  1  2  3  4  5  6  7  8  9 10 11
+ *   col0:  0  0 -1 -1 -2  0  0  0  0  0  0  0     <- SampleTrackTargetPoint
+ *   col1:  0  0  0  0  0 -1 -1 -2  0  0  0  0     <- ComputeSignedTrackOffset
+ *                                                    + ComputeTrackSpanProgress
+ *
+ * Effect of the prior bug:
+ *   - SampleTrackTargetPoint picked the wrong right-end vertex on
+ *     type-3/4/5/7/8/9 spans (now correctly only types 2/3/4 use col0).
+ *   - ComputeSignedTrackOffset / ComputeTrackSpanProgress applied a
+ *     non-zero offset on types 3/4/5/7/8/9 where col 1 is 0 — overshoot
+ *     of 1 or 2 vertices. Now applies a non-zero offset only on
+ *     types 5/6/7.
+ *
+ * See todo_ai_right_route_branches.md for the prior symptom (Moscow
+ * RIGHT.TRK AI chase corrupted target).
  */
 static const int8_t k_target_vertex_offsets[12][2] = {
     /* type  0 */ {  0,  0 },
     /* type  1 */ {  0,  0 },
-    /* type  2 */ {  0,  0 },
+    /* type  2 */ { -1,  0 },
     /* type  3 */ { -1,  0 },
-    /* type  4 */ { -1,  0 },
-    /* type  5 */ { -2,  0 },
-    /* type  6 */ {  0,  0 },
-    /* type  7 */ { -1,  0 },
-    /* type  8 */ { -1,  0 },
-    /* type  9 */ { -2,  0 },
+    /* type  4 */ { -2,  0 },
+    /* type  5 */ {  0, -1 },
+    /* type  6 */ {  0, -1 },
+    /* type  7 */ {  0, -2 },
+    /* type  8 */ {  0,  0 },
+    /* type  9 */ {  0,  0 },
     /* type 10 */ {  0,  0 },
     /* type 11 */ {  0,  0 },
 };
@@ -3304,7 +3316,10 @@ int64_t td5_track_compute_span_progress(int span_index, const int32_t *actor_pos
 
     /* [CONFIRMED @ 0x004345E0] base vertex = *(uint16*)(span + 0x06) = right_vertex_index */
     start_vi    = (int)(uint16_t)sp->right_vertex_index;
-    type_offset = (int)k_target_vertex_offsets[(int)sp->span_type][0];
+    /* [CONFIRMED @ 0x004345E4: `[EDX*8 + 0x473c6c]` reads COL 1 of the table,
+     * not col 0 that SampleTrackTargetPoint reads.  Col 1 has non-zero
+     * values only at types 5/6/7. */
+    type_offset = (int)k_target_vertex_offsets[(int)sp->span_type][1];
     lane_count  = span_lane_count(sp);
     end_vi      = start_vi + lane_count + type_offset;
 
@@ -3368,7 +3383,9 @@ int32_t td5_track_compute_signed_offset(int span_index, int progress, int route_
 
     /* Same vertex pair as ComputeTrackSpanProgress [CONFIRMED @ 0x00434680-0x004346b8] */
     start_vi    = (int)(uint16_t)sp->right_vertex_index;
-    type_offset = (int)k_target_vertex_offsets[(int)sp->span_type][0];
+    /* [CONFIRMED @ 0x004346A3: `[EDX*8 + 0x473c6c]` reads COL 1 of the table.
+     * Non-zero values only at types 5/6/7. */
+    type_offset = (int)k_target_vertex_offsets[(int)sp->span_type][1];
     lane_count  = span_lane_count(sp);
     end_vi      = start_vi + lane_count + type_offset;
 
@@ -3394,7 +3411,11 @@ int32_t td5_track_compute_signed_offset(int span_index, int progress, int route_
     len = (int)sqrt((double)(dX_sc * dX_sc + dZ_sc * dZ_sc));
 
     /* Sign from comparison [CONFIRMED @ 0x004346f5] */
-    return (progress < route_byte) ? -len : len;
+    {
+        int32_t ret_val = (progress < route_byte) ? -len : len;
+        td5_pilot_trace_pool15_emit_signed_offset(span_index, progress, route_byte, ret_val);
+        return ret_val;
+    }
 }
 
 /* ========================================================================
@@ -3468,34 +3489,40 @@ int td5_track_sample_target_point(int span_index, int route_byte,
     int32_t result_x = (right_x - left_x) * route_byte + left_x * 0x100;
     int32_t result_z = (right_z - left_z) * route_byte + left_z * 0x100;
 
-    /* Perpendicular lateral offset [CONFIRMED @ 0x434883-0x4348F1] */
+    /* Perpendicular lateral offset [CONFIRMED @ 0x434883-0x4348F1].
+     *
+     * Builds an int16 tangent vector then applies the bias along it. The
+     * tangent is computed via ConvertFloatVec4ToShortAngles @ 0x0042CDB0,
+     * which normalises to length 4096 using x87 80-bit precision for
+     * sqrt + divide. The first output (tan_x) is computed at 80-bit
+     * precision; the scale is then truncated to 32-bit float (FST) and
+     * reused for the second output (tan_z) at 32-bit precision.
+     *
+     * Bias is applied along the (left->right) edge tangent itself — the
+     * rail-crossing edge IS the lateral axis of the lane. Original step 6
+     * builds `local_8 = {(short)(Rx-Lx), 0, (short)(Rz-Lz)}` (the edge
+     * vector); step 7 calls ConvertFloatVec4ToShortAngles which scales
+     * by 4096/mag (no rotation); step 8 applies
+     *   `out[0] += (local_8[0]*bias)>>12 << 8` (along +dx).
+     */
     if (lateral_bias != 0) {
         int32_t edge_dx = (int16_t)(right_x - left_x);
         int32_t edge_dz = (int16_t)(right_z - left_z);
 
-        /* Normalize edge direction to unit vector (ConvertFloatVec4ToShortAngles)
-         * [CONFIRMED @ 0x42CDB0] */
-        float fex = (float)edge_dx;
-        float fez = (float)edge_dz;
-        float mag = sqrtf(fex * fex + fez * fez);
-        if (mag > 0.5f) {
-            /* Bias is applied along the (left->right) edge tangent itself —
-             * the rail-crossing edge IS the lateral axis of the lane.
-             * Original `SampleTrackTargetPoint @ 0x00434800` step 6 builds
-             * `local_8 = {(short)(Rx-Lx), 0, (short)(Rz-Lz)}` (the edge
-             * vector itself), step 7 calls `ConvertFloatVec4ToShortAngles`
-             * which scales by 4096/mag (no rotation) [CONFIRMED @
-             * 0x42CDB0-0x42CE39], and step 8 applies `out[0] +=
-             * (local_8[0]*bias)>>12 << 8` (along +dx).
-             * The previous port `(-dz, +dx)` perpendicular shifted the
-             * target along the track length instead of across the lane;
-             * combined with the negation in seed_actor_track_progress_offset,
-             * port produced ~2× lateral velocity vs original on Moscow TT
-             * slot 0. After both fixes (tangent here + negation removed in
-             * td5_ai.c), port vel_x at sim_tick=10 = -2097 vs original
-             * -1913 (within 10% — was 2× before). */
-            int16_t tan_x = (int16_t)(( fex / mag) * 4096.0f);
-            int16_t tan_z = (int16_t)(( fez / mag) * 4096.0f);
+        /* Mirror ConvertFloatVec4ToShortAngles' two-precision scale:
+         *   scale_hi = 4096.0 / sqrt(double(fex² + fez²))  [80-bit equiv]
+         *   scale_lo = (float)scale_hi                     [32-bit FST]
+         * tan_x uses scale_hi (first __ftol from 80-bit ST(0));
+         * tan_z uses scale_lo (FLD of 32-bit FST value, second __ftol).
+         * [CONFIRMED @ 0x0042CE03 FST + 0x0042CE10 FLD reload]. */
+        double  fex_d = (double)edge_dx;
+        double  fez_d = (double)edge_dz;
+        double  mag_sq_d = fex_d * fex_d + fez_d * fez_d;
+        if (mag_sq_d > 0.25) {
+            double scale_hi = 4096.0 / sqrt(mag_sq_d);
+            float  scale_lo = (float)scale_hi;
+            int16_t tan_x = (int16_t)(int32_t)(scale_hi * fex_d);
+            int16_t tan_z = (int16_t)(int32_t)((float)(scale_lo * (float)edge_dz));
 
             /* Apply bias with fixed-point 4.12 multiply and rounding
              * [CONFIRMED @ 0x4348B1-0x4348F1] */
@@ -3512,26 +3539,8 @@ int td5_track_sample_target_point(int span_index, int route_byte,
     if (out_x) *out_x = result_x;
     if (out_z) *out_z = result_z;
 
-    /* Temporary diagnostic: first few calls dump the full field set so we
-     * can cross-check against a Frida capture of the original's 0x00434800.
-     * Remove once the Moscow slot-1 target numbers match. */
-    {
-        static int s_probe_count = 0;
-        if (s_probe_count < 16) {
-            s_probe_count++;
-            TD5_LOG_I(LOG_TAG,
-                "target_point_probe span=%d type=%d lvi=%d lc=%d toff=%d "
-                "ox=%d oz=%d vl=(%d,%d) vr=(%d,%d) rb=%d lb=%d rx=%d rz=%d",
-                span_index, (int)sp->span_type,
-                (int)sp->left_vertex_index, lane_count, type_offset,
-                (int)sp->origin_x, (int)sp->origin_z,
-                (int)v_left->x,  (int)v_left->z,
-                (int)v_right->x, (int)v_right->z,
-                route_byte, lateral_bias,
-                result_x, result_z);
-        }
-    }
-
+    td5_pilot_trace_pool15_emit_target_point(span_index, route_byte, lateral_bias,
+                                              result_x, result_z);
     return 1;
 }
 
@@ -3592,81 +3601,28 @@ int td5_track_apply_target_span_remap(int lin_span, int is_canonical_route)
 }
 
 /* ========================================================================
- * Signed spline distance (0x434670)
- *   route_lane       - route lane offset (subtracted from segment_distance)
+ * Signed spline distance — forwarder to td5_track_compute_signed_offset
  *
- * Returns: signed distance (positive = ahead, negative = behind)
+ * Both `td5_track_compute_spline_position` and `td5_track_compute_signed_offset`
+ * port the same listing function 0x00434670 ComputeSignedTrackOffset. The
+ * older `compute_spline_position` implementation had three divergences:
+ *   1. used `span_height_offset(sp)` (high nibble of byte+3) instead of
+ *      the type_offset table at 0x473c6c (col 1 of k_target_vertex_offsets);
+ *   2. clamped lane_count to >=1 (listing has no clamp);
+ *   3. used td5_isqrt (integer sqrt) instead of sqrt((double)) — listing
+ *      uses FILD/FSQRT/__ftol on the 32-bit mag_sq, giving x87 80-bit
+ *      precision then truncating.
+ *
+ * The newer `compute_signed_offset` is byte-faithful to the listing. Both
+ * call sites in td5_ai.c pass the same listing arguments (param_2 =
+ * "segment_distance"/"progress", param_3 = "route_lane"/"route_byte").
+ * Forwarder eliminates the duplicate while preserving the public ABI.
  * ======================================================================== */
 
 int32_t td5_track_compute_spline_position(int span_index, int segment_distance,
                                            int route_lane)
 {
-    const TD5_StripSpan *sp;
-    int lane_count;
-    int next_vertex_offset;
-    int vertex_idx_a, vertex_idx_b;
-    TD5_StripVertex *vtx_a, *vtx_b;
-    int32_t ax, az, bx, bz;
-    int32_t dx, dz;
-    int32_t t;
-    int32_t interp_x, interp_z;
-    int32_t mag_sq, mag;
-
-    if (!s_span_array || !s_vertex_table ||
-        span_index < 0 || span_index >= s_span_count)
-        return 0;
-
-    sp = &s_span_array[span_index];
-
-    /* Get current vertex index from right_vertex_index (+0x06) */
-    vertex_idx_a = (int)sp->right_vertex_index;
-
-    /* Get lane nibble from byte +0x03 (low nibble = lane count) */
-    lane_count = span_lane_count(sp);
-    if (lane_count < 1)
-        lane_count = 1;
-
-    /* Compute next vertex index:
-     * next = current + lane_count + height_offset
-     * The height_offset from the span type is encoded in the high nibble of +0x03.
-     * This matches the original zone_offset_table lookup. */
-    next_vertex_offset = lane_count + span_height_offset(sp);
-    vertex_idx_b = vertex_idx_a + next_vertex_offset;
-
-    /* Get vertex positions (x, z only -- this is 2D track-plane distance) */
-    vtx_a = vertex_at(vertex_idx_a);
-    vtx_b = vertex_at(vertex_idx_b);
-
-    if (!vtx_a || !vtx_b)
-        return 0;
-
-    ax = (int32_t)vtx_a->x;
-    az = (int32_t)vtx_a->z;
-    bx = (int32_t)vtx_b->x;
-    bz = (int32_t)vtx_b->z;
-
-    /* Direction vector from A to B */
-    dx = bx - ax;
-    dz = bz - az;
-
-    /* Interpolation parameter: how far along the segment */
-    t = segment_distance - route_lane;
-
-    /* Fixed-point interpolation with rounding toward zero:
-     * interp = (delta * t + bias) >> 8
-     * where bias = (delta * t >> 31) & 0xFF  (adds 255 for negative products) */
-    interp_x = dx * t;
-    interp_x = (interp_x + ((interp_x >> 31) & 0xFF)) >> 8;
-
-    interp_z = dz * t;
-    interp_z = (interp_z + ((interp_z >> 31) & 0xFF)) >> 8;
-
-    /* Compute magnitude */
-    mag_sq = interp_x * interp_x + interp_z * interp_z;
-    mag = td5_isqrt(mag_sq);
-
-    /* Sign: negative if behind (segment_distance < route_lane) */
-    return (segment_distance < route_lane) ? -mag : mag;
+    return td5_track_compute_signed_offset(span_index, segment_distance, route_lane);
 }
 
 /* ========================================================================
