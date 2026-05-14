@@ -6977,81 +6977,139 @@ void td5_physics_update_engine_speed(TD5_Actor *actor)
     actor->engine_speed_accum = rpm;
 }
 
+/* Round-to-zero signed divide by 256 — byte-exact port of the 0x0042EF10
+ * idiom: CDQ ; AND EDX, 0xFF ; ADD EAX, EDX ; SAR EAX, 8.
+ *
+ *   For x >= 0: plain SAR by 8 (low byte truncated).
+ *   For x <  0 with (x & 0xFF) != 0: (x + 0xFF) >> 8 — one unit closer to zero
+ *     than plain SAR (truncated division by 256). */
+static inline int32_t sar8_rz_42EF10(int32_t x) {
+    return ((x < 0) ? (x + 0xFF) : x) >> 8;
+}
+
 /* --- UpdateAutomaticGearSelection (0x0042EF10) ---
  *
- * [CONFIRMED via 2026-04-11 full Ghidra pass.] Key port-vs-original
- * corrections over the prior implementation:
+ * Byte-exact port from listing 0x0042EF10..0x0042F008 (73 instructions).
  *
- *   1. CACHED GEAR for threshold indexing. The original loads current_gear
- *      into EAX once at 0x0042EF21 and never refreshes it before the
- *      upshift/downshift index reads (`MOVSX [ESI+EAX*2+0x3e]` at 0x42EF52
- *      and `MOVSX [ESI+EAX*2+0x4e]` at 0x42EFF1). When the reverse→forward
- *      promotion writes memory (gear=2), the cached EAX stays at 0, so the
- *      upshift reads `phys[0x3E + 0]` (reverse entry), NOT `phys[0x42]`.
- *      The prior port updated its local `gear` variable in the promotion
- *      path and then used it for indexing, causing a one-tick upshift race
- *      on the first post-reverse tick.
+ * Automatic transmission FSM. Promotes reverse→first when throttle goes
+ * positive, force-reverses on negative throttle, applies upshift/downshift
+ * based on per-gear RPM thresholds, and on upshift fires a drivetrain
+ * kick across the four wheel_spring_dv slots.
  *
- *   2. DRIVETRAIN KICK into wheel_spring_dv on upshift. The original
- *      spreads a per-gear torque pulse across the four wheel force-accum
- *      slots (+0x2EC/+0x2F0/+0x2F4/+0x2F8) via the table at 0x00467394
- *      (= {0, 0, 0x100, 0xC0, 0x80, 0x40, 0x20, 0x10, 0}, indexed by the
- *      NEW post-upshift gear). FL/FR get +k, RL/RR get -k. The prior port
- *      omitted this entirely. */
+ *   actor + 0x33E  encounter_steering_cmd   int16 (signed throttle)  → EDX
+ *   actor + 0x36B  current_gear             uint8                     → AL/BL
+ *   actor + 0x310  engine_speed_accum       int32                     → EDI
+ *   actor + 0x314  longitudinal_speed       int32                     → EBX
+ *   actor + 0x2EC..0x2F8  wheel_spring_dv[4] int32 (FL/FR/RL/RR)
+ *   phys + 0x3E + gear*2  upshift threshold int16  (indexed by CACHED gear)
+ *   phys + 0x4E + gear*2  downshift threshold int16 (indexed by CACHED gear)
+ *   phys + 0x68           drive_torque_mult  int16
+ *   DAT_00467394          g_gearTorqueTable  int32[9] = {0,0,0x100,0xC0,
+ *                                            0x80,0x40,0x20,0x10,0}
+ *
+ * KEY semantics from the listing:
+ *
+ *   1. CACHED GEAR INDEXING.  At 0x0042EF1D the function `XOR EAX,EAX` then
+ *      `MOV AL,[ECX+0x36B]` zero-extends current_gear into EAX. This cached
+ *      EAX value is used for BOTH the upshift threshold read at 0x0042EF52
+ *      (`MOVSX EBX,[ESI+EAX*2+0x3E]`) and the downshift threshold read at
+ *      0x0042EFF1 (`MOVSX EDX,[ESI+EAX*2+0x4E]`), AND for the `CMP EAX,0x8`
+ *      gate at 0x0042EF5F and `CMP EAX,0x2` gate at 0x0042EFFA. The cache
+ *      is NEVER refreshed across the function body — even after the
+ *      reverse→2 promotion writes memory at 0x0042EF47, EAX stays at 0.
+ *
+ *   2. DRIVETRAIN KICK.  On upshift the original spreads a per-gear torque
+ *      pulse across wheel_spring_dv via the table at 0x00467394, indexed
+ *      by the NEW post-upshift gear (BL after INC at 0x0042EF78).
+ *      +0x2EC (FL) and +0x2F0 (FR) ADD k; +0x2F4 (RL) and +0x2F8 (RR)
+ *      SUB k. The formula is:
+ *          tmp1 = sar8_rz(phys[0x68] * throttle * 0x1A)
+ *          tmp2 = tmp1 * g_gearTorqueTable[new_gear & 0xFF]
+ *          k    = sar8_rz(tmp2)
+ */
 void td5_physics_auto_gear_select(TD5_Actor *actor)
 {
     int16_t *phys = get_phys(actor);
     if (!phys) return;
 
-    /* Cache up-front — never refresh across the function body. */
-    int32_t throttle    = (int32_t)actor->encounter_steering_cmd;
-    uint8_t gear_cached = actor->current_gear;
-    int32_t rpm         = actor->engine_speed_accum;
+    /* Listing 0x0042EF14: MOVSX EDX, [ECX+0x33E]  (signed throttle). */
+    int32_t throttle = (int32_t)actor->encounter_steering_cmd;
 
-    /* Negative throttle → force reverse and return. */
+    /* Listing 0x0042EF1D-21: XOR EAX,EAX ; MOV AL,[ECX+0x36B].
+     * EAX holds the zero-extended current_gear and is NEVER refreshed. */
+    uint32_t gear_cached = (uint32_t)actor->current_gear;
+
+    /* Listing 0x0042EF28: MOV EDI, [ECX+0x310]  (engine_speed_accum). */
+    int32_t rpm = actor->engine_speed_accum;
+
+    /* Listing 0x0042EF1F-3A: TEST EDX,EDX ; JGE 0x42EF3B.
+     * Negative throttle → write gear=0 (reverse) and RET. */
     if (throttle < 0) {
-        actor->current_gear = TD5_GEAR_REVERSE;
+        actor->current_gear = (uint8_t)0;
         return;
     }
 
-    /* Already in reverse: promote to first forward in MEMORY only when
-     * throttle > 0. Cached value is intentionally NOT updated — matches
-     * the original's non-refreshed EAX cache. */
-    if (gear_cached == TD5_GEAR_REVERSE) {
+    /* Listing 0x0042EF3B-4D: if (EAX == 0) check throttle, promote to 2.
+     *   TEST EAX,EAX ; JNZ 0x42EF4E
+     *   TEST EDX,EDX ; JLE 0x42F005   (cleanup-RET when throttle <= 0)
+     *   MOV BYTE PTR [ECX+0x36B], 0x2  (gear=2 in memory only) */
+    if (gear_cached == 0u) {
         if (throttle <= 0) return;
-        actor->current_gear = TD5_GEAR_FIRST;
-        /* gear_cached stays 0 on purpose */
+        actor->current_gear = (uint8_t)2;
+        /* gear_cached intentionally NOT refreshed — original keeps EAX=0. */
     }
 
-    /* Upshift test — indexed by gear_cached (pre-promotion). */
-    int32_t up_thresh = (int32_t)PHYS_S(actor, 0x3E + gear_cached * 2);
+    /* Listing 0x0042EF4E: MOV ESI, [ESP+0x14]  (param_2 == phys table). */
 
-    if (actor->slot_index == 0 && (actor->frame_counter % 30u) == 0u) {
-        TD5_LOG_I(LOG_TAG,
-                  "AUTO_GEAR: gear=%d rpm=%d up_thresh=%d long_spd=%d throttle=%d f378=%d",
-                  gear_cached, rpm, up_thresh, actor->longitudinal_speed,
-                  throttle, *((const uint8_t *)actor + 0x378));
-    }
+    /* Listing 0x0042EF52: MOVSX EBX, [ESI + EAX*2 + 0x3E]  upshift threshold. */
+    int32_t up_thresh = (int32_t)PHYS_S(actor, 0x3E + (int32_t)gear_cached * 2);
 
+    /* Listing 0x0042EF57-70:
+     *   CMP EDI,EBX     ; JLE 0x42EFF1  (rpm <= up_thresh → downshift branch)
+     *   CMP EAX,0x8     ; JGE 0x42EFF1  (gear_cached >= 8 signed → downshift)
+     *   MOV EBX,[ECX+0x314] ; TEST EBX,EBX ; JLE 0x42EFF1  (long_spd<=0 → ds) */
     if (rpm > up_thresh
-        && gear_cached < 8
+        && (int32_t)gear_cached < 8
         && actor->longitudinal_speed > 0) {
 
-        /* Re-load gear byte from memory (may already be 2 after promotion)
-         * and +1, matching the original's `INC BL` after a second load. */
+        /* Listing 0x0042EF72-7A: MOV BL,[ECX+0x36B] ; INC BL ; MOV
+         * [ECX+0x36B],BL.  BL is re-loaded fresh (will be 2 after promo). */
         uint8_t new_gear = (uint8_t)(actor->current_gear + 1);
         actor->current_gear = new_gear;
 
-        /* Drivetrain kick — per-gear force impulse spread across wheels.
-         * [CONFIRMED @ 0x42EFB0..0x42EFD7 raw disasm + DAT_00467394 table.] */
+        /* Listing 0x0042EF80-8D:
+         *   MOVSX EAX,[ESI+0x68]         ; phys[0x68] (drive_torque_mult)
+         *   IMUL EAX,EDX                 ; * throttle
+         *   LEA EDX,[EAX+EAX*2]          ; EDX = EAX * 3
+         *   LEA EAX,[EAX+EDX*4]          ; EAX = EAX + 12*EAX = 13*EAX
+         *   SHL EAX,1                    ; EAX = 26*EAX = EAX*0x1A
+         *
+         * Listing 0x0042EF8F-A4: CDQ ; AND EDX,0xFF ; ADD EAX,EDX ; SAR EAX,8
+         *   → first sar8_rz (truncated divide by 256). */
+        int32_t k = (int32_t)PHYS_S(actor, 0x68) * throttle * 0x1A;
+        k = sar8_rz_42EF10(k);
+
+        /* Listing 0x0042EFA7-AD: AND EBX,0xFF ; IMUL EAX,[EBX*4 + 0x467394]
+         * EBX still has new_gear in BL from the store at 0x0042EF7A; the
+         * AND masks the high bytes (leftover from the 0x314 long_spd load).
+         * Table at DAT_00467394 = {0, 0, 0x100, 0xC0, 0x80, 0x40, 0x20,
+         * 0x10, 0} (9 dwords). new_gear is bounded by the < 8 gate to
+         * [1..8], so indices 1..8 of the table are all that's reachable. */
         static const int32_t g_gear_torque_table[9] = {
             0, 0, 0x100, 0xC0, 0x80, 0x40, 0x20, 0x10, 0
         };
-        int32_t k = (int32_t)PHYS_S(actor, 0x68) * throttle * 0x1A;
-        k = ((k + ((k >> 31) & 0xFF)) >> 8)
-          * g_gear_torque_table[new_gear & 0x0F];
-        k =  (k + ((k >> 31) & 0xFF)) >> 8;
+        k = k * g_gear_torque_table[new_gear & 0xFFu];
 
+        /* Listing 0x0042EFB5-CA: MOV EBX,[ECX+0x2EC] ; CDQ ; AND EDX,0xFF ;
+         * ADD EAX,EDX ; MOV EDX,[ECX+0x2F8] ; SAR EAX,8
+         *   → second sar8_rz. */
+        k = sar8_rz_42EF10(k);
+
+        /* Listing 0x0042EFCD-E9: spread k across the four spring-dv slots.
+         *   ADD EDI,EAX ; SUB ESI,EAX ; ADD EBX,EAX ; SUB EDX,EAX
+         * with EDI=+0x2F0, ESI=+0x2F4, EBX=+0x2EC, EDX=+0x2F8 ─ so:
+         *   +0x2EC (FL) += k ; +0x2F0 (FR) += k
+         *   +0x2F4 (RL) -= k ; +0x2F8 (RR) -= k */
         actor->wheel_spring_dv[0] += k;   /* +0x2EC FL */
         actor->wheel_spring_dv[1] += k;   /* +0x2F0 FR */
         actor->wheel_spring_dv[2] -= k;   /* +0x2F4 RL */
@@ -7059,9 +7117,15 @@ void td5_physics_auto_gear_select(TD5_Actor *actor)
         return;
     }
 
-    /* Downshift test — also indexed by gear_cached. */
-    int32_t dn_thresh = (int32_t)PHYS_S(actor, 0x4E + gear_cached * 2);
-    if (rpm < dn_thresh && gear_cached > TD5_GEAR_FIRST) {
+    /* Listing 0x0042EFF1: MOVSX EDX,[ESI + EAX*2 + 0x4E]  dn_thresh
+     *                        (still indexed by CACHED gear, not refreshed). */
+    int32_t dn_thresh = (int32_t)PHYS_S(actor, 0x4E + (int32_t)gear_cached * 2);
+
+    /* Listing 0x0042EFF6-FF:
+     *   CMP EDI,EDX  ; JGE 0x42F005   (rpm >= dn_thresh → skip)
+     *   CMP EAX,0x2  ; JLE 0x42F005   (gear_cached <= 2 → skip)
+     *   DEC [ECX+0x36B] */
+    if (rpm < dn_thresh && (int32_t)gear_cached > 2) {
         actor->current_gear = (uint8_t)(actor->current_gear - 1);
     }
 }
