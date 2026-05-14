@@ -43,6 +43,9 @@
 #include "td5_platform.h"
 #include "td5_trace.h"    /* inner-tick physics_trace stages */
 #include "td5_pilot_trace.h" /* precise-port pilot CSV emit for 0x00403720 */
+#ifdef TD5_PILOT_TRACE_00409150
+#include "td5_pilot_trace_00409150.h"
+#endif
 #include "td5re.h"
 
 /* Include the full actor struct for field-level access.
@@ -3183,13 +3186,30 @@ void td5_physics_resolve_vehicle_contacts(void)
         return;
     }
 
-    total = td5_game_get_total_actor_count();
+    /* [precise-00409150 D10 2026-05-14]
+     * Listing 0x00409150-0x00409168 + 0x004091C9-CB + 0x004091F0:
+     *   MOV EDX, [0x004aaf00]   ; g_racerCount (NOT total_actor_count)
+     *   TEST EDX, EDX / JLE end
+     *
+     * Original iterates `g_racerCount` (count of racing vehicles only,
+     * excludes traffic). Port previously iterated total actor count
+     * (racers + traffic), causing traffic actors to be broadphase-included
+     * in this function. Traffic V2V is handled separately in
+     * UpdateTrafficActorMotion in the original — NOT here.
+     *
+     * Faithful behavior: iterate only g_racer_count slots. */
+    total = g_racer_count;
     if (total < 2) {
         return;
     }
     if (total > TD5_MAX_TOTAL_ACTORS) {
         total = TD5_MAX_TOTAL_ACTORS;
     }
+
+#ifdef TD5_PILOT_TRACE_00409150
+    td5_pilot_trace_00409150_enter(total);
+    int pilot_pair_idx = 0;
+#endif
 
     s_v2v_tick++;
 
@@ -3241,6 +3261,20 @@ void td5_physics_resolve_vehicle_contacts(void)
         /* Chain: actor's chain byte points to previous head */
         g_actor_aabb[i][4] = s_collision_grid[bucket];
         s_collision_grid[bucket] = (uint8_t)i;
+
+#ifdef TD5_PILOT_TRACE_00409150
+        td5_pilot_trace_00409150_phase1(i,
+                                        actor->world_pos.x >> 8,
+                                        actor->world_pos.z >> 8,
+                                        radius,
+                                        actor->track_span_normalized,
+                                        bucket,
+                                        g_actor_aabb[i][4],
+                                        g_actor_aabb[i][0],
+                                        g_actor_aabb[i][1],
+                                        g_actor_aabb[i][2],
+                                        g_actor_aabb[i][3]);
+#endif
     }
 
     /* --- Phase 2: Walk adjacent buckets for each actor --- */
@@ -3318,6 +3352,14 @@ void td5_physics_resolve_vehicle_contacts(void)
                     }
                 }
 
+#ifdef TD5_PILOT_TRACE_00409150
+                td5_pilot_trace_00409150_pair(i, j,
+                                              boff, walk_count - 1,
+                                              (a_scripted || b_scripted) ? 1 : 0,
+                                              a->vehicle_mode, a->wheel_contact_bitmask,
+                                              b->vehicle_mode, b->wheel_contact_bitmask,
+                                              pilot_pair_idx++);
+#endif
                 if (a_scripted || b_scripted) {
                     collision_detect_simple(a, b);
                 } else {
@@ -3328,6 +3370,10 @@ void td5_physics_resolve_vehicle_contacts(void)
             }
         }
     }
+
+#ifdef TD5_PILOT_TRACE_00409150
+    td5_pilot_trace_00409150_leave(pilot_pair_idx);
+#endif
 
     /* --- Phase 3: Grid reset is handled at start of next call --- */
 }
