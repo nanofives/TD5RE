@@ -53,6 +53,7 @@
 #include "td5_pilot_trace_00409150.h"
 #endif
 #include "td5_pilot_trace_0042EB10.h"  /* precise-port pilot trace */
+#include "td5_pilot_trace_0042EBF0.h" /* precise-port pilot CSV emit for 0x0042EBF0 */
 #include "td5re.h"
 
 /* Include the full actor struct for field-level access.
@@ -107,6 +108,12 @@ static int16_t s_gear_torque[16];       /* DAT_00467394: per-gear torque multipl
 
 /* --- Globals matching original binary layout --- */
 static int32_t g_gravity_constant = TD5_GRAVITY_NORMAL;
+
+/* Pilot-trace accessor — exposes g_gravity_constant to the pilot
+ * trace module without leaking the static. Read-only debug use. */
+int32_t td5_physics_dbg_get_gravity_constant(void) {
+    return g_gravity_constant;
+}
 static int32_t g_collisions_enabled = 0;     /* DAT_00463188: 0=on, 1=off */
 static int32_t g_game_paused = 0;            /* DAT_004AAD60 */
 static int32_t g_xz_freeze = 0;             /* DAT_00483030: 1=freeze XZ during countdown */
@@ -7115,48 +7122,93 @@ static int32_t compute_reverse_gear_torque(TD5_Actor *actor, int32_t speed_in)
  * Computes effective gravity vector projected onto body axes.
  * ======================================================================== */
 
+/* Byte-faithful port of FUN_0042CCD0 "StoreRoundedVector3Ints" — actually
+ * NormalizeVec3iToConstantMagnitude4096. The original FPU sequence is:
+ *   - FILD each int component → 80-bit (truncated to PC=53 by phase-1 FPU CW)
+ *   - sum = x*x + y*y + z*z   (double, FMUL/FADDP on stack)
+ *   - scale = 4096.0 / sqrt(sum)  (FSQRT + FDIVR on the float constant)
+ *   - foreach component: __ftol(scale * component) writes int (RC=11
+ *     truncate-toward-zero via FLDCW then FISTP qword)
+ *
+ * If sum == 0, the original divides by zero → returns the indefinite integer
+ * sentinel. We guard against that explicitly; in practice the four body probes
+ * are always distinct, but on tick 0 they can all be zero before init.
+ * [CONFIRMED @ 0x0042CCD0 listing 2026-05-14] */
+static void td5_normalize_vec3i_to_4096(int32_t v[3]) {
+    double x = (double)v[0];
+    double y = (double)v[1];
+    double z = (double)v[2];
+    double sum = x * x + y * y + z * z;
+    if (sum <= 0.0) {
+        v[0] = 0; v[1] = 0; v[2] = 0;
+        return;
+    }
+    double scale = 4096.0 / sqrt(sum);
+    /* C99 cast-to-int truncates toward zero — matches __ftol with RC=11. */
+    v[0] = (int32_t)(scale * x);
+    v[1] = (int32_t)(scale * y);
+    v[2] = (int32_t)(scale * z);
+}
+
 void td5_physics_compute_surface_gravity(TD5_Actor *actor)
 {
     /* Original @ 0x42EBF0: uses 4 wheel probe world positions to compute
-     * two surface tangent vectors, then cross product for surface normal.
+     * two diagonal-difference vectors of the body probes, normalizes each
+     * to length 4096, cross-products them into a tilt vector, and projects
+     * gravity onto X and Z body axes.
      *
-     * v1 = (probe_FL - probe_FR - probe_RR + probe_RL) >> 8
-     * v2 = (probe_FL - probe_RR - probe_RL + probe_FR) >> 8
-     * normal = cross(v1, v2)
-     * gravity applied to vel_x and vel_z only.
+     * Listing reference: 0x0042EBF0..0x0042ED47 (audited 2026-05-14 TD5_pool7).
      *
-     * [CONFIRMED @ 0x42EBFA-0x42ECB7: offsets +0x090, +0x09C, +0x0A8, +0x0B4] */
+     * [CONFIRMED @ 0x42EBFA-0x42ECB7: actor offsets +0x090 FL, +0x09C FR,
+     *  +0x0A8 RL, +0x0B4 RR; gravity int @ 0x00467380; mag-4096 @ 0x0046736C] */
     TD5_Vec3_Fixed *fl = &actor->probe_FL;
     TD5_Vec3_Fixed *fr = &actor->probe_FR;
     TD5_Vec3_Fixed *rl = &actor->probe_RL;
     TD5_Vec3_Fixed *rr = &actor->probe_RR;
 
-    /* v1 = FL - FR - RR + RL (lateral-ish diagonal) */
-    int32_t v1x = (fl->x - fr->x - rr->x + rl->x) >> 8;
-    int32_t v1y = (fl->y - fr->y - rr->y + rl->y) >> 8;
-    int32_t v1z = (fl->z - fr->z - rr->z + rl->z) >> 8;
+    /* Phase 1 — Diagonal-difference vectors of the 4 body probes.
+     * v1 = FL - FR - RR + RL   (per axis, then >> 8)  [SAR @ 0x42ec27 et al]
+     * v2 = FL - RR - RL + FR   (per axis, then >> 8)  [SAR @ 0x42ec86 et al]
+     * Plain arithmetic SAR — no round-toward-zero idiom here. */
+    int32_t v1[3];
+    v1[0] = (fl->x - fr->x - rr->x + rl->x) >> 8;
+    v1[1] = (fl->y - fr->y - rr->y + rl->y) >> 8;
+    v1[2] = (fl->z - fr->z - rr->z + rl->z) >> 8;
 
-    /* v2 = FL - RR - RL + FR (longitudinal-ish diagonal) */
-    int32_t v2x = (fl->x - rr->x - rl->x + fr->x) >> 8;
-    int32_t v2y = (fl->y - rr->y - rl->y + fr->y) >> 8;
-    int32_t v2z = (fl->z - rr->z - rl->z + fr->z) >> 8;
+    int32_t v2[3];
+    v2[0] = (fl->x - rr->x - rl->x + fr->x) >> 8;
+    v2[1] = (fl->y - rr->y - rl->y + fr->y) >> 8;
+    v2[2] = (fl->z - rr->z - rl->z + fr->z) >> 8;
 
-    /* Cross product -> surface normal via CrossProduct3i_FixedPoint12 @ 0x42EAC0.
-     * Original shifts by >> 12, not >> 8. The previous >> 8 produced a 16x
-     * magnitude error that injected a ~1.5 world-unit lateral impulse at
-     * spawn — root cause of Cluster A vel_x=-399 / vel_z=+895 observed on
-     * 2026-04-11. [CONFIRMED @ 0x42EAC0 CrossProduct3i_FixedPoint12] */
-    int32_t nx = (v1y * v2z - v1z * v2y) >> 12;
-    int32_t nz = (v1x * v2y - v1y * v2x) >> 12;
+    /* Pilot trace — pre-normalize snapshot (so the diff can localize Phase 1
+     * vs Phase 2 divergence if it ever recurs). Compile-out for release builds. */
+    td5_pilot_emit_0042EBF0_inputs(actor, v1, v2);
 
-    /* Project gravity onto body X and Z axes.
-     * Original @ 0x42EBF0: (gGravityConstant * n) / 2 then
-     * (ax + ((ax >> 31) & 0xfff)) >> 12  (signed round toward zero).
-     * Previous port used (g >> 1) * n which loses 1 LSB on odd n. */
-    int32_t ax = (g_gravity_constant * nx) / 2;
-    int32_t az = (g_gravity_constant * nz) / 2;
+    /* Phase 2 — Normalize both diagonals to length 4096.
+     * [CONFIRMED @ 0x42ecbf + 0x42ecd0 (CALL 0x42ccd0)] */
+    td5_normalize_vec3i_to_4096(v1);
+    td5_normalize_vec3i_to_4096(v2);
+
+    /* Phase 3 — CrossProduct3i_FixedPoint12(v1, v2):
+     *   cross[0] = (v2.z * v1.y - v1.z * v2.y) >> 12   (= v1.y*v2.z - v1.z*v2.y)
+     *   cross[1] = (v1.z * v2.x - v1.x * v2.z) >> 12   (UNUSED — no Y projection)
+     *   cross[2] = (v1.x * v2.y - v2.x * v1.y) >> 12
+     * [CONFIRMED @ 0x0042EAC0 listing 2026-05-14] */
+    int32_t cross_x = (v1[1] * v2[2] - v1[2] * v2[1]) >> 12;
+    int32_t cross_z = (v1[0] * v2[1] - v2[0] * v1[1]) >> 12;
+
+    /* Phase 4 — Project gravity onto X and Z body axes.
+     * IMUL g, cross_n  → /2 round-toward-zero (matches C99 signed `/2`).
+     * Then /4096 with round-toward-zero via `(ax + ((ax>>31)&0xfff)) >> 12`,
+     * matching the original CDQ+AND 0xfff+ADD+SAR sequence.
+     * [CONFIRMED @ 0x42eceb-0x42ed3b listing 2026-05-14] */
+    int32_t ax = (g_gravity_constant * cross_x) / 2;
+    int32_t az = (g_gravity_constant * cross_z) / 2;
     actor->linear_velocity_x += (ax + ((ax >> 31) & 0xfff)) >> 12;
     actor->linear_velocity_z += (az + ((az >> 31) & 0xfff)) >> 12;
+
+    /* Pilot trace — post-update snapshot. */
+    td5_pilot_emit_0042EBF0_outputs(actor, v1, v2, cross_x, cross_z);
 }
 
 /* ========================================================================
