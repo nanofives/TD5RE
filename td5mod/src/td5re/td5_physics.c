@@ -52,6 +52,7 @@
 #ifdef TD5_PILOT_TRACE_00409150
 #include "td5_pilot_trace_00409150.h"
 #endif
+#include "td5_pilot_trace_0042EB10.h"  /* precise-port pilot trace */
 #include "td5re.h"
 
 /* Include the full actor struct for field-level access.
@@ -5720,6 +5721,95 @@ static void update_vehicle_pose_from_physics(TD5_Actor *actor)
 }
 
 /* ========================================================================
+ * TransformShortVec3ByRenderMatrixRounded (0x0042EB10) -- byte-faithful port
+ *
+ * Original layout (from listing 0x0042EB10..0x0042EBE3):
+ *   out[0] = round(p1*M[1] + p2*M[2] + p0*M[0] + M[9])
+ *   out[1] = round(p1*M[4] + p0*M[3] + p2*M[5] + M[10])
+ *   out[2] = round(p1*M[7] + p0*M[6] + p2*M[8] + M[11])
+ *
+ * The x87 sequence per output is:
+ *   FILD p1; FMUL M[col_y]
+ *   FILD p2; FMUL M[col_z]; FADDP
+ *   FILD p0; FMUL M[col_x]; FADDP
+ *   FADD M[trans]
+ *   FSTP [tmp]   ; collapse 80→32 bit
+ *   FLD  [tmp]   ; reload as 32-bit
+ *   FISTP [out]  ; round to int32 USING THE CURRENT FPU CONTROL WORD
+ *
+ * [PILOT FINDING 2026-05-14] — empirical FPU control-word audit via the
+ * trace at log/orig/pool4_0042EB10.csv shows 99.82% of rounded outputs
+ * match `floorf` (round toward -infinity, RC=01). The 0.18% residue is
+ * 80-bit vs 64-bit accumulator divergence. The original's runtime startup
+ * therefore sets the x87 RC bits to 01 — not the Windows default 00
+ * (round-to-nearest-even).
+ *
+ * Comparison vs alternative rounding modes (6228 outputs):
+ *   round-to-nearest:        49.05%
+ *   round-down (toward -inf): 99.82%   ← matches original
+ *   round-toward-zero:       66.20%
+ *   round-up (toward +inf):   0.11%
+ *
+ * Smoking-gun example (input p=(-255,-227,435), matrix at slot-0 wcp wheel 0):
+ *   FP accumulator = 204.5853, original out2 = 204
+ *   round-to-nearest → 205 (off by 1), floor → 204 (match).
+ *
+ * NOTE on row order: outputs 1 and 2 use a DIFFERENT operand permutation
+ * than output 0 (the assembler emits "p1, p0, p2"). We match that exactly.
+ *
+ * NOTE on order-of-operations: the x87 chain accumulates at 80-bit until
+ * the final FSTP. The single `volatile float tmp` below would force a
+ * 32-bit collapse at every intermediate step. Original keeps 80-bit until
+ * the last FSTP only. Since GCC -m32 -O2 typically uses x87 too, removing
+ * the volatile lets the compiler emit the same FADDP chain.
+ *
+ * Pilot trace pool4_0042EB10.csv hooks at every call site.
+ *
+ * [CONFIRMED @ 0x0042EB10 by precise-port pilot 2026-05-14]
+ * ======================================================================== */
+
+/* Round-to-minus-infinity replacement for lrintf. Always uses floorf which
+ * is rounding mode-independent (no reliance on FPU control word). */
+static inline int32_t td5_round_toward_neg_inf_to_int32(float x) {
+    return (int32_t)floorf(x);
+}
+
+static inline void td5_transform_short_vec3_by_render_matrix_rounded(
+    const int16_t param_1[3], int32_t param_2[3], const float matrix[12])
+{
+    /* Promote int16 → int32 → float exactly (FILD-equivalent). */
+    int p0 = (int)param_1[0];
+    int p1 = (int)param_1[1];
+    int p2 = (int)param_1[2];
+    float fp0 = (float)p0;
+    float fp1 = (float)p1;
+    float fp2 = (float)p2;
+
+    /* Output 0 — operand order from listing 0x0042EB28..0x0042EB4A
+     *   ST = p1*M1 + p2*M2 + p0*M0 + M9 */
+    {
+        /* Keep accumulator at compiler-natural precision through the chain.
+         * Only collapse once via the float assignment below before FISTP. */
+        float tmp = fp1 * matrix[1] + fp2 * matrix[2] + fp0 * matrix[0] + matrix[9];
+        /* `tmp` is `float` — the assignment forces 32-bit collapse the same way
+         * the original's FSTP/FLD pair does. */
+        param_2[0] = td5_round_toward_neg_inf_to_int32(tmp);
+    }
+    /* Output 1 — operand order from listing 0x0042EB6B..0x0042EB94
+     *   ST = p1*M4 + p0*M3 + p2*M5 + M10 */
+    {
+        float tmp = fp1 * matrix[4] + fp0 * matrix[3] + fp2 * matrix[5] + matrix[10];
+        param_2[1] = td5_round_toward_neg_inf_to_int32(tmp);
+    }
+    /* Output 2 — operand order from listing 0x0042EBB1..0x0042EBD6
+     *   ST = p1*M7 + p0*M6 + p2*M8 + M11 */
+    {
+        float tmp = fp1 * matrix[7] + fp0 * matrix[6] + fp2 * matrix[8] + matrix[11];
+        param_2[2] = td5_round_toward_neg_inf_to_int32(tmp);
+    }
+}
+
+/* ========================================================================
  * RefreshVehicleWheelContactFrames (0x403720)
  *
  * Builds per-wheel contact frames for suspension/collision system.
@@ -5803,34 +5893,54 @@ void td5_physics_refresh_wheel_contacts(TD5_Actor *actor)
          * positions that aren't multiples of 256 — every chassis-snap then
          * inherited those leaked low bits and produced the +128 FP world_y
          * delta + ~263..1017 FP wheel XZ deltas observed in physics_trace.csv.
-         * [E2 / 2026-05-02 ground-truth diff finding] */
-        /* Step A: body-only rotated offset (no render_pos add). This is the
-         * input to ConvertFloatVec3ToShortAngles @ 0x0042E2E0 which produces
-         * the int16 stash at actor+0x230+8*i used by chassis-snap as
-         * `puVar8[1] * -0x100`. Original int16-truncates each component via
-         * x87 FISTP (round-to-nearest-even) then writes 3 shorts. */
-        float bx = rot[0] * (float)wx + rot[1] * (float)wy + rot[2] * (float)wz;
-        float by = rot[3] * (float)wx + rot[4] * (float)wy + rot[5] * (float)wz;
-        float bz = rot[6] * (float)wx + rot[7] * (float)wy + rot[8] * (float)wz;
+         * [E2 / 2026-05-02 ground-truth diff finding]
+         *
+         * [PRECISE-PORT PILOT 2026-05-14] — replaced the previous in-line
+         * `rot*body + render_pos` expression with the byte-faithful helper
+         * `td5_transform_short_vec3_by_render_matrix_rounded`, which mirrors
+         * the original's operand order and 80→32-bit precision collapse.
+         */
+        {
+            const int16_t body_off[3] = {
+                (int16_t)wx, (int16_t)wy, (int16_t)wz
+            };
+            float matrix[12];
+            for (int j = 0; j < 9; j++) matrix[j] = rot[j];
+            matrix[9]  = actor->render_pos.x;
+            matrix[10] = actor->render_pos.y;
+            matrix[11] = actor->render_pos.z;
+            int32_t world[3];
+            td5_transform_short_vec3_by_render_matrix_rounded(body_off, world, matrix);
+            actor->wheel_contact_pos[i].x = world[0] << 8;
+            actor->wheel_contact_pos[i].y = world[1] << 8;
+            actor->wheel_contact_pos[i].z = world[2] << 8;
 
-        /* Step B: full world position via TransformShortVec3ByRenderMatrixRounded
-         * @ 0x0042EB10 → FISTP(rot*body + render_pos), then `<<8` to 24.8 FP.
-         * Forces wheel_contact_pos to be a multiple of 256. */
-        int32_t world_x = (int32_t)lrintf(bx + actor->render_pos.x);
-        int32_t world_y = (int32_t)lrintf(by + actor->render_pos.y);
-        int32_t world_z = (int32_t)lrintf(bz + actor->render_pos.z);
-        actor->wheel_contact_pos[i].x = world_x << 8;
-        actor->wheel_contact_pos[i].y = world_y << 8;
-        actor->wheel_contact_pos[i].z = world_z << 8;
+            td5_pilot_emit_0042EB10(
+                (uint32_t)td5_trace_current_sim_tick(),
+                actor->slot_index, PILOT_0042EB10_KIND_WCP, i,
+                0x00403873u,  /* faux caller_ra matching Frida CSV column */
+                body_off, &actor->wheel_contact_pos[i],
+                body_off[0], body_off[1], body_off[2],
+                matrix, world[0], world[1], world[2]);
+        }
 
         /* Step C: stash int16-truncated body-rotated Y for chassis-snap.
          * Original `ConvertFloatVec3ToShortAngles @ 0x0042E2E0` writes
          * `(short)__ftol(by)` to actor+0x232+8*i; chassis-snap then reads
          * MOVSX EAX, [EBP+2]; SHL EAX, 8 → effectively `(int16)round(by) * 256`.
          * Port stashes the equivalent in s_wheel_offset_y_world for the
-         * integrator's chassis-snap loop in update_vehicle_pose_from_physics. */
-        s_wheel_offset_y_world[slot & 0x0F][i] =
-            (int32_t)(int16_t)lrintf(by) * 256;
+         * integrator's chassis-snap loop in update_vehicle_pose_from_physics.
+         *
+         * Recompute body-only Y (no render_pos add) in the same FADD order as
+         * 0x0042EB10 output 1: p1*M4 + p0*M3 + p2*M5. No translation add.
+         * Rounds toward -inf to match the original FPU control word. */
+        {
+            float by_tmp = (float)(int16_t)wy * rot[4]
+                         + (float)(int16_t)wx * rot[3]
+                         + (float)(int16_t)wz * rot[5];
+            s_wheel_offset_y_world[slot & 0x0F][i] =
+                (int32_t)(int16_t)floorf(by_tmp) * 256;
+        }
 
         /* Per-probe track position update [CONFIRMED @ 0x403720].
          * Original calls FUN_004440F0 per probe with probe's own world pos.
@@ -6048,6 +6158,30 @@ void td5_physics_refresh_wheel_contacts(TD5_Actor *actor)
             actor->wheel_world_positions_hires[i].x = hub_x;
             actor->wheel_world_positions_hires[i].y = hub_y;
             actor->wheel_world_positions_hires[i].z = hub_z;
+         * Same float multiplication path, same render_pos add, same <<8.
+         * [PRECISE-PORT PILOT 2026-05-14] routed through the faithful
+         * helper td5_transform_short_vec3_by_render_matrix_rounded. */
+            const int16_t body_off[3] = {
+                (int16_t)wx, (int16_t)(wy + href_preload), (int16_t)wz
+            };
+            float matrix[12];
+            for (int j = 0; j < 9; j++) matrix[j] = rot[j];
+            matrix[9]  = actor->render_pos.x;
+            matrix[10] = actor->render_pos.y;
+            matrix[11] = actor->render_pos.z;
+            int32_t hub[3];
+            td5_transform_short_vec3_by_render_matrix_rounded(body_off, hub, matrix);
+            actor->wheel_world_positions_hires[i].x = hub[0] << 8;
+            actor->wheel_world_positions_hires[i].y = hub[1] << 8;
+            actor->wheel_world_positions_hires[i].z = hub[2] << 8;
+
+            td5_pilot_emit_0042EB10(
+                (uint32_t)td5_trace_current_sim_tick(),
+                actor->slot_index, PILOT_0042EB10_KIND_HIRES, i,
+                0x0040388Au,  /* faux caller_ra matching Frida CSV column */
+                body_off, &actor->wheel_world_positions_hires[i],
+                body_off[0], body_off[1], body_off[2],
+                matrix, hub[0], hub[1], hub[2]);
         }
 
         /* Copy to probe_FL/FR/RL/RR (0x090) for wall contact detection.
