@@ -6914,54 +6914,112 @@ void td5_physics_auto_gear_select_no_kick(TD5_Actor *actor)
     }
 }
 
+/* pool13 / 0x0042F030 pilot trace hooks — extern declarations to keep the
+ * function signature unchanged. Implementation in td5_pilot_trace_0042F030.c. */
+extern void td5_pilot_emit_0042F030_enter(const TD5_Actor *actor, uintptr_t caller_ra);
+extern void td5_pilot_emit_0042F030_leave(const TD5_Actor *actor, int32_t return_value,
+                                          int32_t lut_index_used, int32_t lut_frac_used);
+
+/* Round-to-zero signed divide by 256 — byte-exact port of the 0x0042F030
+ * idiom: CDQ ; AND EDX, 0xFF ; ADD EAX, EDX ; SAR EAX, 8.
+ *
+ *   For x >= 0: plain SAR by 8 (low byte truncated).
+ *   For x <  0 with (x & 0xFF) != 0: (x + 0xFF) >> 8 — one unit closer to zero
+ *     than plain SAR (truncated division by 256).
+ *
+ * Equivalent to C99 truncated division: (int32_t)(x / 256). */
+static inline int32_t sar8_rz_42F030(int32_t x) {
+    return ((x < 0) ? (x + 0xFF) : x) >> 8;
+}
+
+/* Round-to-zero signed divide by 512 — original idiom:
+ *   CDQ ; AND EDX, 0x1FF ; ADD EAX, EDX ; SAR EAX, 9.
+ * Equivalent to C99 truncated division: (int32_t)(x / 512). */
+static inline int32_t sar9_rz_42F030(int32_t x) {
+    return ((x < 0) ? (x + 0x1FF) : x) >> 9;
+}
+
 /* --- ComputeDriveTorqueFromGearCurve (0x42F030) ---
  *
+ * Byte-exact port from listing 0x0042F030..0x0042F0FC.
+ *
  * Piecewise-linear torque curve interpolation.
+ *
+ *   actor + 0x310  engine_speed_accum  int32
+ *   actor + 0x33E  encounter_steering  int16 (signed throttle)
+ *   actor + 0x36B  current_gear        uint8 — 0x01 == neutral, early-out
+ *   tuning + 0x00..0x1F  LUT[N] int16 (per-512-rpm torque samples)
+ *   tuning + 0x2E + gear*2  gear_ratio[gear] int16
+ *   tuning + 0x68  torque_mult int16
+ *   tuning + 0x72  redline     int16; cutoff when engine_speed > redline-50
+ *
+ * Audit: re/analysis/pilot_0042F030_audit.md
  */
 int32_t td5_physics_compute_drive_torque(TD5_Actor *actor)
 {
+    /* Entry trace hook (pure-leaf function; no state to snapshot at exit). */
+    td5_pilot_emit_0042F030_enter(actor, (uintptr_t)__builtin_return_address(0));
+
     int16_t *phys = get_phys(actor);
-    if (!phys) return 0;
-
-    int32_t gear = (int32_t)actor->current_gear;
-    if (gear == 1) return 0; /* Neutral = no drive */
-
-    int32_t rpm = actor->engine_speed_accum;
-    int32_t redline = (int32_t)PHYS_S(actor, 0x72);
-
-    /* Redline cutoff */
-    if (rpm > redline - 50) return 0;
-
-    /* Drive torque multiplier */
-    int32_t torque_mult = (int32_t)PHYS_S(actor, 0x68);
-
-    /* Sample torque curve (entries every 512 RPM units, 16 entries at phys+0x00) */
-    int32_t index = rpm >> 9;
-    if (index < 0) index = 0;
-    if (index >= 15) index = 14;
-
-    int32_t t0 = ((int32_t)PHYS_S(actor, index * 2) * torque_mult) >> 8;
-    int32_t t1 = ((int32_t)PHYS_S(actor, (index + 1) * 2) * torque_mult) >> 8;
-
-    /* Linear interpolation within segment */
-    int32_t frac = rpm & 0x1FF;
-    int32_t torque = t0 + (((t1 - t0) * frac) >> 9);
-
-    /* Scale by throttle and gear ratio.
-     * Original preserves throttle sign (actor+0x33E) — negative in reverse
-     * produces negative torque, which is correct for backward motion. */
-    int32_t throttle = (int32_t)actor->encounter_steering_cmd;
-    torque = (torque * throttle) >> 8;
-
-    int32_t gear_ratio = (int32_t)PHYS_S(actor, 0x2E + gear * 2);
-    torque = (torque * gear_ratio) >> 8;
-
-    if (actor->slot_index == 0 && (actor->frame_counter % 30u) == 0u) {
-        TD5_LOG_I(LOG_TAG,
-            "DT slot0: rpm=%d gear=%d thr=%d gr=%d tm=%d t0=%d t1=%d frac=%d torque=%d",
-            rpm, gear, throttle, gear_ratio, torque_mult, t0, t1, frac, torque);
+    if (!phys) {
+        td5_pilot_emit_0042F030_leave(actor, 0, 0, 0);
+        return 0;
     }
 
+    uint8_t  gear_u8 = actor->current_gear;
+    int32_t  gear    = (int32_t)gear_u8;
+
+    /* Neutral (gear == 1) — original CMP BL,0x1 / JZ RET_ZERO at 0x0042F03B-45. */
+    if (gear_u8 == 0x01) {
+        td5_pilot_emit_0042F030_leave(actor, 0, 0, 0);
+        return 0;
+    }
+
+    int32_t rpm = actor->engine_speed_accum;
+
+    /* index = sar9_rz(rpm) — listing 0x0042F04B-58 (CDQ/AND 0x1FF/ADD/SAR 9).
+     * NO bounds clamp (original reads LUT[index] and LUT[index+1] freely). */
+    int32_t index = sar9_rz_42F030(rpm);
+
+    int32_t torque_mult = (int32_t)PHYS_S(actor, 0x68);
+
+    /* t0 = sar8_rz(LUT[index] * mult) — listing 0x0042F060-72.
+     * t1 = sar8_rz(LUT[index+1] * mult) — listing 0x0042F077-8F. */
+    int32_t lut_i  = (int32_t)PHYS_S(actor, index * 2);
+    int32_t lut_i1 = (int32_t)PHYS_S(actor, index * 2 + 2);
+    int32_t t0 = sar8_rz_42F030(lut_i  * torque_mult);
+    int32_t t1 = sar8_rz_42F030(lut_i1 * torque_mult);
+
+    /* Signed low-9-bit fraction (truncated-divide remainder mod 512).
+     * Listing 0x0042F096-A5: AND ECX,0x800001FF; if neg: DEC; OR 0xFFFFFE00; INC.
+     * Algebraically equivalent to C99 truncated remainder rpm % 512.
+     * For rpm >= 0: frac in [0, 511].
+     * For rpm <  0: frac in [-511, 0]. */
+    int32_t frac = rpm % 512;
+
+    /* lerp = sar9_rz((t1 - t0) * frac) + t0 — listing 0x0042F0A6-C0. */
+    int32_t torque = sar9_rz_42F030((t1 - t0) * frac) + t0;
+
+    /* * throttle — original at 0x0042F0C2-D0 uses sar8_rz. Throttle is signed
+     * (encounter_steering_cmd, sign-flipped by 0x42F010 for reverse gear). */
+    int32_t throttle = (int32_t)actor->encounter_steering_cmd;
+    torque = sar8_rz_42F030(torque * throttle);
+
+    /* * gear_ratio[gear] — original at 0x0042F0D2-EF uses sar8_rz on the
+     * EBX-byte-masked gear index. PHYS_S already does 16-bit signed load. */
+    int32_t gear_ratio = (int32_t)PHYS_S(actor, 0x2E + (int32_t)(uint8_t)gear_u8 * 2);
+    torque = sar8_rz_42F030(torque * gear_ratio);
+
+    /* Redline cutoff: original computes the full pipeline then CMPs EBP (raw
+     * engine_speed) against ECX (redline-50). JLE keep result; else XOR=0.
+     * The compare is signed (JLE), so rpm > redline-50 → return 0. */
+    int32_t redline = (int32_t)PHYS_S(actor, 0x72);
+    if (rpm > redline - 50) {
+        td5_pilot_emit_0042F030_leave(actor, 0, index, frac);
+        return 0;
+    }
+
+    td5_pilot_emit_0042F030_leave(actor, torque, index, frac);
     return torque;
 }
 
