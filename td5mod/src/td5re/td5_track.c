@@ -1186,6 +1186,17 @@ int td5_track_get_span_lane_world(int span_index, int sub_lane,
     return 1;
 }
 
+/* Public accessor for the span's lane-count nibble used by InitializeRaceSession
+ * callers. Mirrors the raw `(byte_3 & 0x0F)` read in
+ * `InitActorTrackSegmentPlacement @ 0x00445F24` for the sub_lane clamp.
+ * Returns 0 if the span index is out of range. */
+int td5_track_span_lane_count_at(int span_index)
+{
+    if (!s_span_array || span_index < 0 || span_index >= s_span_count)
+        return 0;
+    return span_lane_count(&s_span_array[span_index]);
+}
+
 static void rebuild_span_display_list_mapping(void)
 {
     int *mapping;
@@ -3156,9 +3167,19 @@ void td5_track_compute_heading(TD5_Actor *actor)
         dz = (dz + ((dz >> 31) & 3)) >> 2;
         break;
 
-    default:
-        dx = 0; dz = 1;
+    default: {
+        /* Original LAB_0043448c at 0x0043448C-94 reloads BOTH dx (EBX) and
+         * dz (ECX) from [ESP+0x14] = param_1 = slot. The decompiler shows
+         * `uVar7 = uVar10 = param_1` pre-init persisting into the default
+         * branch. Replicate exactly so that span types outside [1,7] yield
+         * `AngleFromVector12(slot, slot)` instead of the previous
+         * `dx=0, dz=1` port-only fabrication.
+         * [CONFIRMED @ 0x0043448C-94 disassembly in pilot pool14 session.] */
+        int slot_id = (int)((const uint8_t *)actor)[0x375];
+        dx = (int32_t)slot_id;
+        dz = (int32_t)slot_id;
         break;
+    }
     }
 
     /* Original: 4-quadrant dispatch → full-circle angle, then at LAB_00434501:

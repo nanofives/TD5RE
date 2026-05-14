@@ -25,6 +25,10 @@
 #include "td5_platform.h"
 #include "td5_net.h"
 #include "td5_save.h"
+
+#ifdef TD5_PILOT_TRACE_00434350
+#include "td5_pilot_trace_00434350.h"
+#endif
 #include "td5_vfx.h"
 #include "td5_trace.h"
 
@@ -1391,6 +1395,24 @@ int td5_game_init_race_session(void) {
             *(int16_t *)(actor + 0x082) = (int16_t)actor_span;
             *(int16_t *)(actor + 0x084) = (int16_t)actor_span;
             *(int16_t *)(actor + 0x086) = (int16_t)actor_span;
+            /* Sub-lane clamp matching InitActorTrackSegmentPlacement @ 0x445F2A-32:
+             *   if ((pbVar1[3] & 0xf) <= iVar7) { iVar7 = lane_nibble - 1;
+             *     *(char *)(param_1 + 6) = (char)iVar7; }
+             * Original writes the clamped value back into actor+0x8c so downstream
+             * consumers (route-state lookups, lane-dependent rendering) see the
+             * legal lane index. Port previously stored the raw value, leaving an
+             * over-large lane id in the actor record on tracks where the spawn
+             * table's lane (1, 2, 3) exceeds the actual span lane_count nibble.
+             * [CONFIRMED @ 0x445F2A-32 disassembly pool14 session, pilot 0x00434350.] */
+            {
+                int lane_count = td5_track_span_lane_count_at(span_index);
+                int clamped_sub_lane = sub_lane;
+                if (lane_count > 0 && clamped_sub_lane >= lane_count)
+                    clamped_sub_lane = lane_count - 1;
+                if (clamped_sub_lane < 0)
+                    clamped_sub_lane = 0;
+                sub_lane = clamped_sub_lane;
+            }
             actor[0x08C] = (uint8_t)sub_lane;
             TD5_LOG_I(LOG_TAG,
                       "Actor spawn span: slot=%d actor_span=%d world_span=%d sub_lane=%d",
@@ -1479,6 +1501,20 @@ int td5_game_init_race_session(void) {
             TD5_LOG_I(LOG_TAG, "Actor bias seed: slot=%d bias=%d progress=%d",
                       slot, td5_ai_get_route_state(slot)[9],
                       td5_ai_get_route_state(slot)[0x19]);
+
+#ifdef TD5_PILOT_TRACE_00434350
+            {
+                static int s_pilot_00434350_call_idx = 0;
+                /* param_flip = 0 mirrors original — every observed call site
+                 * passes 0 (see audit pilot_00434350_audit.md). */
+                td5_pilot_emit_00434350_row(s_pilot_00434350_call_idx++,
+                                            slot,
+                                            (int)(int16_t)actor_span,
+                                            (int)(int8_t)sub_lane,
+                                            0,
+                                            actor);
+            }
+#endif
 
             TD5_LOG_I(LOG_TAG,
                       "Actor spawn: slot=%d span=%d pos=(%d,%d,%d) state=%d lane=%d",

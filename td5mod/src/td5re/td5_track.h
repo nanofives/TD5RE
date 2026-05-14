@@ -149,6 +149,7 @@ int  td5_track_get_span_center_world(int span_index,
                                       int *out_x, int *out_y, int *out_z);
 int  td5_track_get_span_lane_world(int span_index, int sub_lane,
                                     int *out_x, int *out_y, int *out_z);
+int  td5_track_span_lane_count_at(int span_index);
 
 /* --- Lighting ---
  * Per-vehicle zone-driven lighting now lives in td5_render.c as
