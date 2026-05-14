@@ -3385,147 +3385,183 @@ static void collision_detect_full(TD5_Actor *a, TD5_Actor *b, int idx_a, int idx
         return;
     }
 
-    int32_t ax = a->world_pos.x >> 8;
-    int32_t az = a->world_pos.z >> 8;
-    int32_t bx = b->world_pos.x >> 8;
-    int32_t bz = b->world_pos.z >> 8;
+    /* [precise-00408A60 byte-faithful port 2026-05-14]
+     *
+     * The original ResolveVehicleCollisionPair (0x00408A60) keeps the
+     * bisection accumulators in RAW 24.8 fixed-point throughout — the
+     * `>> 8` conversion to display units only happens INSIDE
+     * CollectVehicleCollisionContacts at 0x00408570 and at the final
+     * dispatch push (0x00408D58 SAR ECX,8 / 0x00408DD4 SAR EDX,8).
+     *
+     * Listing 0x00408AED-0x00408B23 reads the SIX accumulator seeds via
+     * DWORD MOV directly out of the actor structs at full 24.8 scale:
+     *   local_80 / [ESP+0x2C] = actor_A.world_pos.x  (+0x1FC)
+     *   local_7c / [ESP+0x30] = actor_A.world_pos.y  (+0x200) (read but unused)
+     *   local_78 / [ESP+0x34] = actor_A.world_pos.z  (+0x204)
+     *   local_94 / [ESP+0x1C] = actor_A.euler_accum.yaw (+0x1F4)
+     *   local_74..local_6c  = actor_B mirror (B.x/y/z @ +0x1FC..+0x204)
+     *   local_90 / [ESP+0xa8 or saved] = actor_B.euler_accum.yaw
+     *
+     * Per-iter halving uses the CDQ/SUB/SAR pattern (0x00408B6F-0x00408BB1
+     * pre-loop, 0x00408C10-0x00408C56 in-loop) which is C-style signed
+     * divide-by-2 (truncate-toward-zero) — different from `>>= 1` on
+     * negative odd values by 1 LSB. We use `/= 2` to match exactly.
+     *
+     * Bisection accumulator `local_84` (sum of ±local_8c) is the analog of
+     * the port's old `frac`; impactForce = local_84 - 0x10. */
 
-    /* Get headings from euler accumulators (>> 8 for 12-bit display angle) */
-    int32_t heading_a = (a->euler_accum.yaw >> 8) & 0xFFF;
-    int32_t heading_b = (b->euler_accum.yaw >> 8) & 0xFFF;
+    /* Pre-load raw 24.8 accumulators from actor (listing 0x00408AED-0x00408B23). */
+    int32_t pos_a_x = a->world_pos.x;
+    int32_t pos_a_z = a->world_pos.z;
+    int32_t pos_b_x = b->world_pos.x;
+    int32_t pos_b_z = b->world_pos.z;
+    int32_t yaw_a_acc = a->euler_accum.yaw;
+    int32_t yaw_b_acc = b->euler_accum.yaw;
 
-    /* --- Initial OBB test at full (end-of-tick) position.
-     * [CONFIRMED @ 0x00408B48-0x00408B56]: the original's pre-loop call to
-     * CollectVehicleCollisionContacts seeds `local_88` (the cached bitmask)
-     * at current positions and early-returns when it is zero. */
+    /* Initial OBB test at full (end-of-tick) position.
+     * [CONFIRMED @ 0x00408B27-B48]: CollectVehicleCollisionContacts is
+     * invoked here with the raw accumulators. Internally it does the >>8
+     * to display units. The port's obb_corner_test wrapper expects
+     * pre-shifted display-unit coords and 12-bit angles, so we do the
+     * conversion at the wrapper boundary — algebraically identical to
+     * the original's internal shift. */
+    int32_t ax = pos_a_x >> 8;
+    int32_t az = pos_a_z >> 8;
+    int32_t bx = pos_b_x >> 8;
+    int32_t bz = pos_b_z >> 8;
+    int32_t heading_a = (yaw_a_acc >> 8) & 0xFFF;
+    int32_t heading_b = (yaw_b_acc >> 8) & 0xFFF;
+
     OBB_CornerData corners[8];
     memset(corners, 0, sizeof(corners));
     int bitmask = obb_corner_test(a, b, ax, az, bx, bz,
                                   heading_a, heading_b, corners);
 
-    if (bitmask == 0) return;  /* No overlap at full size */
+    if (bitmask == 0) return;  /* No overlap at full size — early-return. */
 
-    /* --- 7-iteration position-based binary search (matching 0x00408A60) ---
+    /* --- 7-iteration TOI binary search [listing 0x00408B5C-0x00408D23] ---
      *
-     * The original's ResolveVehicleCollisionPair sweeps actor positions and
-     * headings backward/forward in time on STACK COPIES to find the approximate
-     * moment of first contact (TOI). This produces an impactForce fraction
-     * used by the impulse solver for position rollback/re-advance.
+     * Per-axis half-step accumulators (initial = velocity/2 via CDQ/SUB/SAR
+     * at 0x00408B6F-0x00408BB1). These are raw 24.8 fp values; integer
+     * signed division by 2 (truncate-toward-zero) matches the asm pattern.
      *
-     * CRITICAL — LAST-NON-ZERO BITMASK CACHE [CONFIRMED @ 0x00408CD0]:
-     * The original caches `local_88 = uVar5` ONLY on the bitmask!=0 branch.
-     * On bitmask==0 iterations `local_88` keeps its prior value. After the
-     * 7 iterations the dispatch switch at 0x00408D48 reads `local_88`
-     * straight — there is NO post-loop CollectVehicleCollisionContacts call
-     * [CONFIRMED @ 0x00408D23-0x00408D48 direct fall-through]. So the
-     * dispatched bitmask is always the LAST iteration's non-zero result
-     * (or the pre-loop seed if all iterations missed), never a fresh
-     * end-of-loop re-test. A prior version of this port did a final re-test
-     * with `if (bitmask == 0) return;`, which silently dropped the contact
-     * whenever the 7-iter binary search converged onto the separation
-     * moment — matching the observed "cars clip through each other"
-     * symptom. */
-
-    /* Per-tick velocity in OBB space (world_pos >> 8 coordinates).
-     * [CONFIRMED @ 0x00408B69-0x00408BB1]: The original seeds per-axis step
-     * accumulators from actor fields +0x1cc, +0x1d4, +0x1c4 via DWORD MOV
-     * (no cast, no truncation) and halves each with SAR 1.
-     *   +0x1cc = linear_velocity_x [CONFIRMED @ td5_ai.c ACTOR_LIN_VEL_X]
-     *   +0x1d4 = linear_velocity_z [CONFIRMED @ td5_ai.c ACTOR_LIN_VEL_Z]
-     *   +0x1c4 = angular_velocity_yaw [CONFIRMED @ td5_ai.c:1854]
-     * The original keeps position accumulators in raw 24.8 FP units and the
-     * heading accumulator as raw euler_accum.yaw (also 24.8 scale), then
-     * converts to display units inside CollectVehicleCollisionContacts via
-     * (delta_pos >> 8) and (heading >> 8) [CONFIRMED @ 0x00408570 disasm].
-     * The port pre-divides to display units before entering the loop, which
-     * produces identical test points — the two formulations are algebraically
-     * equivalent [verified by tracing all 7 iteration paths]. */
-    int32_t vel_ax = a->linear_velocity_x >> 8;
-    int32_t vel_az = a->linear_velocity_z >> 8;
-    int32_t vel_bx = b->linear_velocity_x >> 8;
-    int32_t vel_bz = b->linear_velocity_z >> 8;
-
-    /* Per-tick angular velocity in heading space (euler_accum >> 8).
-     * Original uses angular_velocity_yaw / 2 in accumulator units then
-     * converts >>8 at dispatch — mathematically equivalent to omega_h / 2
-     * in 12-bit display units as used here. */
-    int32_t omega_a_h = a->angular_velocity_yaw >> 8;
-    int32_t omega_b_h = b->angular_velocity_yaw >> 8;
-
-    /* Bisection fraction: 0 = one tick ago, 0x100 = current time.
-     * Start at midpoint (0x80). [CONFIRMED @ 0x00408B5C-0x00408B65]
+     * Pre-loop subtraction (listing 0x00408BB5-0x00408BF5) walks the
+     * positions/headings BACK to the t=0.5 midpoint before the loop:
+     *   local_80 -= iVar12; local_78 -= iVar13; local_94 -= iVar9
+     *   local_74 -= iVar11; local_6c -= local_4; local_90 -= local_5c
      *
-     * The original's pre-loop rewind (`local_80 -= vel/2`) plus incremental
-     * halving (SAR each iter) [CONFIRMED @ 0x00408BB5-0x00408C54] visits the
-     * same test points as the port's absolute interpolation formula.
-     * Proof: both converge to the same frac-indexed positions at every iter
-     * regardless of hit/miss history — verified for all 7 iterations. */
-    int32_t frac = 0x80;
-    int32_t bisect_step = 0x40;
+     * local_84 = local_8c = 0x80 (initial centre + initial step).
+     * local_68 = 7 (loop counter). */
+    int32_t step_ax = a->linear_velocity_x   / 2;  /* iVar12 */
+    int32_t step_az = a->linear_velocity_z   / 2;  /* iVar13 */
+    int32_t step_ah = a->angular_velocity_yaw / 2; /* iVar9 — yaw step */
+    int32_t step_bx = b->linear_velocity_x   / 2;  /* iVar11 */
+    int32_t step_bz = b->linear_velocity_z   / 2;  /* local_4 */
+    int32_t step_bh = b->angular_velocity_yaw / 2; /* local_5c — B yaw step */
 
-    int32_t test_ax = ax, test_az = az, test_bx = bx, test_bz = bz;
-    int32_t test_ha = heading_a, test_hb = heading_b;
+    pos_a_x -= step_ax;
+    pos_a_z -= step_az;
+    pos_b_x -= step_bx;
+    pos_b_z -= step_bz;
+    yaw_a_acc -= step_ah;
+    yaw_b_acc -= step_bh;
 
-    /* Cache last-hit bitmask + corresponding corner data. Seeded from the
-     * pre-loop test; updated in-loop ONLY when a test reports bitmask!=0.
-     * Matches the original's `local_88` + `local_58..local_20` semantics. */
+    int32_t local_84  = 0x80;     /* bisection accumulator (-> impactForce) */
+    int32_t local_8c  = 0x80;     /* current half-step magnitude (sign chosen per-iter) */
+
+    /* Cache last-hit bitmask + corner data. Seeded from the pre-loop test
+     * (listing 0x00408B52 MOV [ESP+0x24],EAX). Loop updates it ONLY on
+     * the bitmask!=0 branch (listing 0x00408CD0). */
     int32_t        cached_bitmask = bitmask;
     OBB_CornerData cached_corners[8];
     memcpy(cached_corners, corners, sizeof(cached_corners));
 
-    for (int iter = 0; iter < 7; iter++) {
-        /* Interpolated positions at current fraction.
-         * test_pos = current_pos - vel * (0x100 - frac) / 0x100 */
-        int32_t rollback = 0x100 - frac;
-        test_ax = ax - ((vel_ax * rollback) >> 8);
-        test_az = az - ((vel_az * rollback) >> 8);
-        test_bx = bx - ((vel_bx * rollback) >> 8);
-        test_bz = bz - ((vel_bz * rollback) >> 8);
+    int32_t test_ha = heading_a, test_hb = heading_b;
 
-        /* Fix #4 [CONFIRMED @ 0x00408B99-0x00408BA2, 0x00408BB5-0x00408BF5]:
-         * The original does NOT mask the heading accumulator during bisection.
-         * `local_94`/`local_90` accumulate without any AND/masking — the >> 8
-         * conversion to 12-bit only happens at dispatch (0x00408D58 SAR ECX,8).
-         * cos_fixed12/sin_fixed12 both apply `& 0xFFF` internally, so the
-         * mask was functionally redundant but inconsistent with the original. */
-        test_ha = heading_a - ((omega_a_h * rollback) >> 8);
-        test_hb = heading_b - ((omega_b_h * rollback) >> 8);
+    for (int iter = 0; iter < 7; iter++) {
+        /* Per-iter halving [listing 0x00408C0E-0x00408C56]:
+         * each step accumulator is signed-divided by 2 (CDQ/SUB/SAR pattern).
+         * local_8c is also signed-/2 — `(int)local_8c / 2` in the decompiler. */
+        step_ax  /= 2;
+        step_az  /= 2;
+        step_ah  /= 2;
+        step_bx  /= 2;
+        step_bz  /= 2;
+        step_bh  /= 2;
+        local_8c /= 2;
+
+        /* Pass current raw 24.8 accumulators to the wrapper, which expects
+         * display-unit coords + 12-bit angles. The original passes raw
+         * accumulators and shifts inside CollectVehicleCollisionContacts. */
+        int32_t test_ax = pos_a_x >> 8;
+        int32_t test_az = pos_a_z >> 8;
+        int32_t test_bx = pos_b_x >> 8;
+        int32_t test_bz = pos_b_z >> 8;
+        test_ha = yaw_a_acc >> 8;
+        test_hb = yaw_b_acc >> 8;
 
         memset(corners, 0, sizeof(corners));
-        bitmask = obb_corner_test(a, b, test_ax, test_az, test_bx, test_bz,
-                                  test_ha, test_hb, corners);
+        int32_t result = obb_corner_test(a, b, test_ax, test_az,
+                                         test_bx, test_bz,
+                                         test_ha, test_hb, corners);
 
-        if (bitmask != 0) {
-            /* Overlap at this frac: remember this state for dispatch and
-             * step backward in time. [CONFIRMED @ 0x00408CD0 MOV [ESP+0x24],EAX] */
-            cached_bitmask = bitmask;
+        /* Default direction (uVar5 == 0 / miss path, listing 0x00408CD6-0x00408D1F):
+         *   move FORWARD in time — add the current half-step to positions
+         *   and local_84 (uVar10 = local_8c, iVar1=iVar12, etc.).
+         * Hit path (uVar5 != 0, listing 0x00408C83-0x00408CD0):
+         *   negate all step deltas (uVar10 = -local_8c, iVar1 = -iVar12...),
+         *   cache the bitmask, and apply — which steps BACK in time. */
+        int32_t dir_ax = step_ax;
+        int32_t dir_az = step_az;
+        int32_t dir_ah = step_ah;
+        int32_t dir_bx = step_bx;
+        int32_t dir_bz = step_bz;
+        int32_t dir_bh = step_bh;
+        int32_t dir_8c = local_8c;
+        if (result != 0) {
+            cached_bitmask = result;
             memcpy(cached_corners, corners, sizeof(cached_corners));
-            frac -= bisect_step;
-        } else {
-            /* No overlap: step forward in time. `cached_bitmask` and
-             * `cached_corners` retain the last-hit state. */
-            frac += bisect_step;
+            dir_ax = -step_ax;
+            dir_az = -step_az;
+            dir_ah = -step_ah;
+            dir_bx = -step_bx;
+            dir_bz = -step_bz;
+            dir_bh = -step_bh;
+            dir_8c = -local_8c;
         }
-        bisect_step >>= 1;
-        if (bisect_step < 1) bisect_step = 1;
+
+        pos_a_x  += dir_ax;
+        pos_a_z  += dir_az;
+        pos_b_x  += dir_bx;
+        pos_b_z  += dir_bz;
+        yaw_a_acc += dir_ah;
+        yaw_b_acc += dir_bh;
+        local_84  += dir_8c;
     }
 
-    /* impactForce = local_84 - 0x10
-     * [CONFIRMED @ 0x00408D34 SUB ESI,0x10 ; PUSH ESI @ 0x00408D57]
-     * The original does NOT clamp — range is [-0x10, 0xF0] after 7 iterations
-     * from 0x80. Prior port applied an [0x10, 0xF0] clamp that both offset the
-     * value by 0x10 AND cut off the lower half of the range; both wrong. */
-    int32_t impactForce = frac - 0x10;
+    /* Post-loop: refresh display-unit yaws from the FINAL raw accumulators
+     * for the dispatch impulse calls (listing 0x00408D58 SAR ECX,8 reads
+     * local_94 — the raw accumulator — and shifts; ditto 0x00408DD4 for
+     * local_90 with B's yaw). Without this the dispatch yaw would be stale
+     * from the LAST iteration's read instead of from the FINAL post-update
+     * accumulator. The original matches because it re-reads local_94/90
+     * at the dispatch site after the loop has updated them. */
+    test_ha = yaw_a_acc >> 8;
+    test_hb = yaw_b_acc >> 8;
+
+    /* impactForce = local_84 - 0x10 [listing 0x00408D34 SUB ESI,0x10].
+     * Range after 7 iters from 0x80: [-0x10, 0xEF] (no clamp). */
+    int32_t impactForce = local_84 - 0x10;
 
     /* Pool15 V2V pilot trace — emit toi-row at dispatch boundary. */
     _v2v_toi.impactForce = impactForce;
     _v2v_toi.dispatched_bitmask = (uint32_t)cached_bitmask;
     _v2v_toi.final_yaw_a_disp = test_ha;
     _v2v_toi.final_yaw_b_disp = test_hb;
-    _v2v_toi.final_ax = test_ax;
-    _v2v_toi.final_az = test_az;
-    _v2v_toi.final_bx = test_bx;
-    _v2v_toi.final_bz = test_bz;
+    _v2v_toi.final_ax = pos_a_x >> 8;
+    _v2v_toi.final_az = pos_a_z >> 8;
+    _v2v_toi.final_bx = pos_b_x >> 8;
+    _v2v_toi.final_bz = pos_b_z >> 8;
     td5_pilot_v2v_toi_emit(&_v2v_toi, idx_a, idx_b);
 
     /* Dispatch uses the cached last-non-zero bitmask + corners, NOT a final
@@ -3535,8 +3571,8 @@ static void collision_detect_full(TD5_Actor *a, TD5_Actor *b, int idx_a, int idx
      * `local_94 >> 8` / `local_90 >> 8` which are the bisection accumulators'
      * final values [CONFIRMED @ 0x00408D58 SAR ECX,8; 0x00408DD4].
      * Final-state yaw sits within ±(last bisect_step) of the last-hit yaw. */
-    TD5_LOG_I(LOG_TAG, "v2v_bisect: slotA=%d slotB=%d frac=0x%02X impactForce=%d bitmask=0x%02X bisHA=0x%03X bisHB=0x%03X rawHA=0x%03X rawHB=0x%03X",
-              a->slot_index, b->slot_index, frac, impactForce, cached_bitmask,
+    TD5_LOG_I(LOG_TAG, "v2v_bisect: slotA=%d slotB=%d local_84=0x%02X impactForce=%d bitmask=0x%02X bisHA=0x%03X bisHB=0x%03X rawHA=0x%03X rawHB=0x%03X",
+              a->slot_index, b->slot_index, local_84, impactForce, cached_bitmask,
               test_ha, test_hb, heading_a, heading_b);
 
     /* --- Dispatch collision response based on corner bitmask ---
