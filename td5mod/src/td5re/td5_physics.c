@@ -43,6 +43,7 @@
 #include "td5_platform.h"
 #include "td5_trace.h"    /* inner-tick physics_trace stages */
 #include "td5_pilot_trace.h" /* precise-port pilot CSV emit for 0x00403720 */
+#include "td5_pilot_trace_004063A0.h" /* precise-port pilot CSV emit for 0x004063A0 */
 #include "td5re.h"
 
 /* Include the full actor struct for field-level access.
@@ -5151,12 +5152,35 @@ void td5_physics_integrate_pose(TD5_Actor *actor)
 
 static void update_vehicle_pose_from_physics(TD5_Actor *actor)
 {
-    /* Convert current angles to display */
-    actor->display_angles.roll  = (int16_t)((actor->euler_accum.roll >> 8) & 0xFFF);
-    actor->display_angles.yaw   = (int16_t)((actor->euler_accum.yaw >> 8) & 0xFFF);
-    actor->display_angles.pitch = (int16_t)((actor->euler_accum.pitch >> 8) & 0xFFF);
+    /* Pilot precise-port trace — snapshot inputs at entry. */
+    td5_pilot_emit_004063A0_enter(actor, (uintptr_t)__builtin_return_address(0));
 
-    /* Rebuild rotation matrix */
+    /* Convert current angles to display.
+     *
+     * Listing 0x004063D5/3DE/3E1/3F8/401/408:
+     *   SAR EAX, 8           (arithmetic signed shift)
+     *   MOV [actor+0x208], AX (int16 truncate — NO 12-bit mask)
+     *
+     * Removed the `& 0xFFF` mask the port previously applied to all three
+     * components: for negative euler_accum values that mask flipped the
+     * sign bit into a 12-bit positive number, diverging from the original's
+     * int16 truncation. The trig helpers (cos_fixed12 / sin_fixed12) mask
+     * to 12 bits internally, so the rotation matrix is unaffected, but
+     * any external consumer of display_angles (camera, HUD, network) was
+     * reading wrong values for negative angles.
+     * [D2 — precise-port pilot 004063A0, 2026-05-14] */
+    actor->display_angles.roll  = (int16_t)(actor->euler_accum.roll  >> 8);
+    actor->display_angles.yaw   = (int16_t)(actor->euler_accum.yaw   >> 8);
+    actor->display_angles.pitch = (int16_t)(actor->euler_accum.pitch >> 8);
+
+    /* Render position — matches FILD/FMUL/FSTP sequence at 0x004063AA-0x0040641B.
+     * (Float scale = 1/256 from [0x0045D5E8].) */
+    actor->render_pos.x = (float)actor->world_pos.x * (1.0f / 256.0f);
+    actor->render_pos.y = (float)actor->world_pos.y * (1.0f / 256.0f);
+    actor->render_pos.z = (float)actor->world_pos.z * (1.0f / 256.0f);
+
+    /* Build rotation matrix #1 (first call to BuildRotationMatrixFromAngles
+     * @ 0x0042E1E0 at 0x00406421). */
     {
         int32_t roll_a  = actor->display_angles.roll  & 0xFFF;
         int32_t yaw_a   = actor->display_angles.yaw   & 0xFFF;
@@ -5182,13 +5206,106 @@ static void update_vehicle_pose_from_physics(TD5_Actor *actor)
         actor->rotation_matrix.m[8] = cy * cr;
     }
 
-    /* Render position */
-    actor->render_pos.x = (float)actor->world_pos.x * (1.0f / 256.0f);
-    actor->render_pos.y = (float)actor->world_pos.y * (1.0f / 256.0f);
-    actor->render_pos.z = (float)actor->world_pos.z * (1.0f / 256.0f);
+    /* Refresh chassis track position from updated world coords.
+     * Original 0x00406432: CALL UpdateActorTrackPosition (0x004440F0)
+     *   args: (&actor->track_span_raw @+0x80, &actor->world_pos @+0x1FC).
+     *
+     * Without this, after a V2V/wall impulse the chassis span (+0x80) stays at
+     * the pre-impulse value and downstream per-wheel probes in
+     * td5_physics_refresh_wheel_contacts copy the stale span into the wheel
+     * probes (the per-wheel walker then re-syncs but starts from the wrong
+     * span — measurable as a 1-tick lag in lateral-wall pen tests).
+     * [D1 — precise-port pilot 004063A0, 2026-05-14] */
+    td5_track_update_actor_position(actor);
 
-    /* Refresh wheel contacts */
+    /* Recompute heading-relative-to-segment short at +0x290.
+     * Original 0x00406447: CALL ComputeActorHeadingFromTrackSegment (0x00445B90)
+     *   args: (&actor->track_span_raw @+0x80, &actor->world_pos @+0x1FC,
+     *          &actor->heading_normal @+0x290).
+     *
+     * Port's td5_track_compute_heading mirrors InitializeActorTrackPose
+     * (0x00434350), not 0x00445B90 — the runtime per-tick variant uses
+     * a different vertex-pair selection + InterpolateTrackSegmentNormal
+     * sub-call. Until a faithful port of 0x00445B90 lands, the
+     * compute_heading helper is the closest functional substitute: it
+     * writes a {dx, 0, dz} normal at +0x290 derived from the same span's
+     * left/right edge vectors. Acceptable for pose-callback consumers
+     * (heading-relative downstream code); not bit-exact.
+     * [D1-partial — precise-port pilot 004063A0, 2026-05-14] */
+    td5_track_compute_heading(actor);
+
+    /* Refresh wheel contacts (CALL RefreshVehicleWheelContactFrames @ 0x00403720
+     * at 0x00406453). The wheel walker, contact-frame transforms, gap_270,
+     * and the OLD-bitmask snapshot at +0x37D all happen inside this call. */
     td5_physics_refresh_wheel_contacts(actor);
+
+    /* TODO (D3+D4 — damage_lockout switch + 2nd matrix rebuild):
+     * Original 0x00406459-0x004064E1:
+     *   switch (actor->damage_lockout @ +0x37D) {
+     *     case 0,1,2,4,6,8,9: TransformTrackVertexByMatrix  (0x00446030); writes back roll + pitch
+     *     case 5,10:          TransformTrackVertexByMatrixB (0x00446140); writes back roll only
+     *     case 3,12:          TransformTrackVertexByMatrixC (0x004461C0); writes back pitch only
+     *     case 7,11,default:  no-op
+     *   }
+     *   euler_accum_roll  = display_angle_roll  << 8   (if A or B branch)
+     *   euler_accum_pitch = display_angle_pitch << 8   (if A or C branch)
+     *   BuildRotationMatrixFromAngles(rotation_matrix, display_angles)   // 2nd build
+     *
+     * The Transform* helpers derive wheel-implied roll/pitch from the post-
+     * impulse wheel_contact_pos + wheel_suspension_pos, allowing the next
+     * physics tick to start integration at the wheel-attitude. Without this,
+     * after a collision the chassis pose remains at the impulse-applied
+     * attitude even when the wheels disagree with it.
+     *
+     * Faithful port of the three Transform* helpers requires ports of
+     * AngleFromVector12 (0x0040A720, already done in precise-trig worktree)
+     * + FUN_0044817C + an inline FSQRT-rounding path. Deferred to a
+     * follow-up precise-port worktree (precise-00446030). */
+
+    /* Second BuildRotationMatrixFromAngles call (0x004064E1).
+     * Even without the switch writeback, the original UNCONDITIONALLY rebuilds
+     * the rotation matrix here after the switch path completes. For cases
+     * where the switch is a no-op (case 7, 11, or out-of-range), this rebuild
+     * is functionally a redundant identical recomputation; for the active
+     * cases (0..6, 8..10, 12) it picks up the new wheel-derived roll/pitch.
+     *
+     * Since the port currently SKIPS the switch (D3), this 2nd rebuild
+     * regenerates the SAME matrix already built above. It is included anyway
+     * so the byte-faithful sequence is preserved for the day D3 lands.
+     * [D4 — precise-port pilot 004063A0, 2026-05-14] */
+    {
+        int32_t roll_a  = actor->display_angles.roll  & 0xFFF;
+        int32_t yaw_a   = actor->display_angles.yaw   & 0xFFF;
+        int32_t pitch_a = actor->display_angles.pitch  & 0xFFF;
+
+        const float k = 1.0f / 4096.0f;
+        float cr = (float)cos_fixed12(roll_a)  * k;
+        float sr = (float)sin_fixed12(roll_a)  * k;
+        float cy = (float)cos_fixed12(yaw_a)   * k;
+        float sy = (float)sin_fixed12(yaw_a)   * k;
+        float cp = (float)cos_fixed12(pitch_a) * k;
+        float sp = (float)sin_fixed12(pitch_a) * k;
+
+        actor->rotation_matrix.m[0] = sp * sy * sr + cp * cy;
+        actor->rotation_matrix.m[1] = cp * sy * sr - sp * cy;
+        actor->rotation_matrix.m[2] = sy * cr;
+        actor->rotation_matrix.m[3] = sp * cr;
+        actor->rotation_matrix.m[4] = cp * cr;
+        actor->rotation_matrix.m[5] = -sr;
+        actor->rotation_matrix.m[6] = sp * cy * sr - cp * sy;
+        actor->rotation_matrix.m[7] = cp * cy * sr + sp * sy;
+        actor->rotation_matrix.m[8] = cy * cr;
+    }
+
+    /* Load the rebuilt matrix into the global render matrix
+     * (LoadRenderRotationMatrix @ 0x0043DA80 at 0x0040650B). Chassis-snap's
+     * ConvertFloatVec3ToShortAngles (0x0042E2E0) reads from this global. The
+     * port's chassis-snap below uses a cached s_wheel_offset_y_world from
+     * refresh — but loading the matrix maintains parity for any other
+     * consumer that pumps body-space vectors through the global transform
+     * before the next render tick.
+     * [D5 — precise-port pilot 004063A0, 2026-05-14] */
+    LoadRenderRotationMatrix(actor->rotation_matrix.m);
 
     /* Chassis ground snap — faithful port of the tail of
      *   UpdateVehiclePoseFromPhysicsState @ 0x004063A0
@@ -5231,6 +5348,9 @@ static void update_vehicle_pose_from_physics(TD5_Actor *actor)
             actor->render_pos.y = (float)actor->world_pos.y * (1.0f / 256.0f);
         }
     }
+
+    /* Pilot precise-port trace — snapshot outputs at exit. */
+    td5_pilot_emit_004063A0_leave(actor);
 }
 
 /* ========================================================================
