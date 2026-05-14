@@ -3018,18 +3018,29 @@ static void apply_collision_response(TD5_Actor *penetrator, TD5_Actor *target,
 
     int32_t abs_cx_A   = cx_A < 0 ? -cx_A : cx_A;
     int32_t side_extent = half_w_A - abs_cx_A;
+    /* [CONFIRMED @ 0x00407B0D-10 (front) + 0x00407B65-6E (rear)]: the listing
+     * applies a CDQ; XOR; SUB abs() idiom to side_extent before comparing it
+     * against |rear_diff| or |front_diff|. Without this abs, a corner outside
+     * the box laterally (abs(cx_A) > half_w_A → side_extent < 0) would
+     * unconditionally take the SIDE branch in the port while the original
+     * would still pick FRONT/REAR based on |negative| vs depth magnitudes. */
+    int32_t abs_side_extent = side_extent < 0 ? -side_extent : side_extent;
 
     int is_side_branch;
     if (cz_A < 1) {
-        /* Rear half (cz_A <= 0) — compare distance past rear vs side */
-        int32_t rear_depth = cz_A - rear_z_A;  /* rear_z_A negative → adds |rear| */
+        /* Rear half (cz_A <= 0). [CONFIRMED @ 0x00407B7B-7D]:
+         *   CMP ECX, EAX ; ECX=|side_extent|, EAX=|cz_A - rear_z_raw|
+         *   JGE LAB_00407B2D (FRONT/REAR) — SIDE if |side_extent| < rear_depth. */
+        int32_t rear_depth = cz_A - rear_z_A;
         if (rear_depth < 0) rear_depth = -rear_depth;
-        is_side_branch = (rear_depth > side_extent);
+        is_side_branch = (rear_depth > abs_side_extent);
     } else {
-        /* Front half (cz_A > 0) — compare distance past front vs side */
+        /* Front half (cz_A > 0). [CONFIRMED @ 0x00407B29-2B]:
+         *   CMP ECX, EAX ; ECX=|side_extent|, EAX=|front_z_A - cz_A|
+         *   JL  LAB_00407B7F (SIDE) — SIDE if |side_extent| < front_depth. */
         int32_t front_depth = front_z_A - cz_A;
         if (front_depth < 0) front_depth = -front_depth;
-        is_side_branch = (side_extent < front_depth);
+        is_side_branch = (abs_side_extent < front_depth);
     }
 
     /* --- 4. Branch-specific impulse math --- */
