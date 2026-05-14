@@ -8058,15 +8058,35 @@ static void bind_default_vehicle_tuning(TD5_Actor *actor, int slot)
 }
 
 /* ========================================================================
- * ComputeVehicleSuspensionEnvelope (0x42F6D0)
+ * ComputeVehicleSuspensionEnvelope (0x0042F6D0)  -- byte-faithful port
  *
- * Iterates all mesh vertices to compute the AABB, then writes collision
- * geometry into the car definition buffer:
- *   0x00-0x1C: 4 lower corners (Y = suspension height for racers)
+ * Iterates all mesh vertices to compute axis-aligned extents, then writes
+ * collision geometry into the per-slot row of gVehicleTuningTable
+ * (in the port, mapped to actor->car_definition_ptr; carparam.dat seeds
+ *  the same 0x8C-byte cardef rows the original references via ESI =
+ *  &gVehicleTuningTable[slot*0x8c]):
+ *   0x00-0x1C: 4 lower corners (Y = -X where X = y_val for racer / max_y for traffic)
  *   0x20-0x3C: 4 upper corners (Y = max_abs_y from mesh)
  *   0x60-0x7C: simplified traffic footprint (slot >= 6 only)
  *   0x80:      bounding sphere radius
- *   0x86:      Y height value (suspension for racers, min_y for traffic)
+ *   0x86:      Y height value (X = y_val for racer / max_y for traffic)
+ *
+ * Original quirks preserved here:
+ *  - min_y (`local_10`) is computed by the loop but never read after — its
+ *    stack slot `[ESP+0x10]` is overwritten by `BX` (neg_mx) at 0x42F822
+ *    before any consumer. Earlier port versions fed min_y to traffic y_val;
+ *    that was a port-only divergence and is removed below.
+ *  - For traffic slots (param_2 >= 6), the post-loop FSTP ST0 at 0x0042F89A
+ *    is GATED by the param_2<6 branch; the original therefore reuses the
+ *    raw max_y still on x87 ST(0) as the "X" feeding the lower-corner Y,
+ *    the 0x86 store, and the sphere radius. (Racer path replaces ST(0)
+ *    with y_val via FMUL at 0x0042F8AA.)
+ *  - Multiplier constant at 0x0045D6A8 is the literal 32-bit float
+ *    0xBF350000 (-0.7070312500), NOT the C literal -0.707f (0xBF350481).
+ *    Byte-faithful spelling uses the union punning below.
+ *  - No `max_z<0` safety clamp -- the original does FSUB by 20 and uses
+ *    the raw signed value; FTOL truncates toward zero (CW set RC=11
+ *    via OR AH,0xC at 0x0044818B in __ftol).
  * ======================================================================== */
 
 void td5_physics_compute_suspension_envelope(TD5_Actor *actor, int slot)
@@ -8078,7 +8098,11 @@ void td5_physics_compute_suspension_envelope(TD5_Actor *actor, int slot)
 
     int16_t *cd = get_cardef(actor);
 
-    /* --- Iterate mesh vertices to find extents [CONFIRMED @ 0x0042f720-0x0042f7b9] --- */
+    /* --- Iterate mesh vertices to find extents [CONFIRMED @ 0x0042F720-0x0042F7B9].
+     * The original keeps fVar2 (max_y) on x87 ST(0) across iterations (loaded
+     * pre-loop from _DAT_0045D624 = 0.0f at 0x0042F6D7). The decomp shows
+     * per-axis compare/swap pattern; reordering the |y| updates next to each
+     * other here is byte-equivalent for IEEE-754 32-bit float comparisons. --- */
     float max_x = 0.0f, max_y = 0.0f, max_z = 0.0f, min_y = 0.0f;
     int vert_count = mesh->total_vertex_count;
     TD5_MeshVertex *verts = (TD5_MeshVertex *)(uintptr_t)mesh->vertices_offset;
@@ -8088,60 +8112,82 @@ void td5_physics_compute_suspension_envelope(TD5_Actor *actor, int slot)
         float vy = verts[i].pos_y;
         float vz = verts[i].pos_z;
         if ( vx > max_x) max_x =  vx;
-        if (-vx > max_x) max_x = -vx;
         if ( vy > max_y) max_y =  vy;
-        if (-vy > max_y) max_y = -vy;
         if ( vz > max_z) max_z =  vz;
+        if (-vx > max_x) max_x = -vx;
+        if (-vy > max_y) max_y = -vy;
         if (-vz > max_z) max_z = -vz;
-        if (vy < min_y)  min_y = vy;
+        if (vy < min_y)  min_y = vy;  /* dead in original; kept for symmetry */
     }
+    (void)min_y;
 
-    /* --- Racer-only width clamp [CONFIRMED @ 0x0042f7cc-0x0042f7f2] --- */
-    float y_val;  /* used for lower box Y and bounding sphere */
+    /* --- Post-loop "X" = the value the original keeps on x87 ST(0) feeding
+     * the lower-corner Y, the 0x86 store, and the sphere radius:
+     *   racer  (param_2 < 6): y_val = (cd[0x42] - cd[0x82]) * (-1/sqrt(2))
+     *   traffic(param_2 >=6): X stays as max_y (the FSTP ST0 at 0x0042F89A
+     *                         is gated out, leaving max_y still on stack).
+     * --- */
+    float y_val_x;
     if (slot < TD5_MAX_RACER_SLOTS) {
+        /* Racer width clamp [CONFIRMED @ 0x0042F7CC-0x0042F7F2] */
         float delta = (float)((int32_t)cd[0x84 / 2] - (int32_t)cd[0x40 / 2]);
         if (delta > max_x) max_x = delta;
-        /* Suspension-derived Y for lower box [CONFIRMED @ 0x0042f893-0x0042f8aa] */
-        y_val = (float)((int32_t)cd[0x42 / 2] - (int32_t)cd[0x82 / 2]) * -0.707f;
+        /* Suspension-derived Y [CONFIRMED @ 0x0042F893-0x0042F8AA].
+         * Constant at 0x0045D6A8 is exactly 0xBF350000 (-0.7070312500),
+         * NOT the C literal -0.707f (0xBF350481). */
+        const union { uint32_t u; float f; } k_neg_inv_sqrt2 = { 0xBF350000u };
+        y_val_x = (float)((int32_t)cd[0x42 / 2] - (int32_t)cd[0x82 / 2])
+                  * k_neg_inv_sqrt2.f;
     } else {
-        y_val = min_y;
+        /* Traffic: original leaves max_y on FPU stack; we mirror that. */
+        y_val_x = max_y;
     }
 
-    /* --- Add/subtract 20.0f padding [CONFIRMED @ 0x0042f7fa, 0x0042f808] --- */
+    /* --- Add/subtract 20.0f padding [CONFIRMED @ 0x0042F7FA, 0x0042F808].
+     * No safety clamp in the original -- FTOL truncates toward zero. --- */
     max_x += 20.0f;
     max_z -= 20.0f;
-    if (max_z < 0.0f) max_z = 0.0f; /* safety clamp */
 
-    /* Convert to int16 */
+    /* Convert to int16. C `(int)` cast truncates toward zero, matching
+     * the original `__ftol` (CW RC=11 then FISTP m64 at 0x00448195). */
     int16_t neg_mx = (int16_t)(int)(-max_x);
     int16_t pos_mx = (int16_t)(int)( max_x);
     int16_t my_i16 = (int16_t)(int)( max_y);
     int16_t mz_i16 = (int16_t)(int)( max_z);
     int16_t nmz_i16= (int16_t)(int)(-max_z);
-    int16_t ny_i16 = (int16_t)(int)(-y_val);
+    /* ny_i16 = (long)(-y_val_x) -- FCHS at 0x0042F8B7 negates the dup'd
+     * ST(0) before the CALL __ftol that fills uVar4_final. */
+    int16_t ny_i16 = (int16_t)(int)(-y_val_x);
 
-    /* --- Upper AABB box at offsets 0x20-0x3C [CONFIRMED @ 0x0042f827-0x0042f88d] --- */
+    /* --- Upper AABB box at offsets 0x20-0x3C [CONFIRMED @ 0x0042F827-0x0042F88D] --- */
     cd[0x20 / 2] = neg_mx;   cd[0x22 / 2] = my_i16;  cd[0x24 / 2] = mz_i16;
     cd[0x28 / 2] = pos_mx;   cd[0x2a / 2] = my_i16;  cd[0x2c / 2] = mz_i16;
     cd[0x30 / 2] = neg_mx;   cd[0x32 / 2] = my_i16;  cd[0x34 / 2] = nmz_i16;
     cd[0x38 / 2] = pos_mx;   cd[0x3a / 2] = my_i16;  cd[0x3c / 2] = nmz_i16;
 
-    /* --- Lower AABB box at offsets 0x00-0x1C [CONFIRMED @ 0x0042f8b0-0x0042f8f0] --- */
+    /* --- Lower AABB box at offsets 0x00-0x1C [CONFIRMED @ 0x0042F8B0-0x0042F8F0] --- */
     cd[0x00 / 2] = neg_mx;   cd[0x02 / 2] = ny_i16;  cd[0x04 / 2] = mz_i16;
     cd[0x08 / 2] = pos_mx;   cd[0x0a / 2] = ny_i16;  cd[0x0c / 2] = mz_i16;
     cd[0x10 / 2] = neg_mx;   cd[0x12 / 2] = ny_i16;  cd[0x14 / 2] = nmz_i16;
     cd[0x18 / 2] = pos_mx;   cd[0x1a / 2] = ny_i16;  cd[0x1c / 2] = nmz_i16;
 
-    /* --- Bounding sphere radius at 0x80 [CONFIRMED @ 0x0042f918-0x0042f921] --- */
-    float r = sqrtf(max_z * max_z + y_val * y_val + max_x * max_x);
+    /* --- Bounding sphere radius at 0x80 [CONFIRMED @ 0x0042F8F9-0x0042F921].
+     *   FLD [max_z-20]; FMUL [max_z-20]    ; (max_z-20)^2
+     *   FLD ST1; FMUL ST2; FADDP            ; + y_val_x^2
+     *   FLD [max_x+20]; FMUL [max_x+20]; FADDP
+     *   FSQRT; CALL __ftol                  ; sphere radius
+     * --- */
+    float r = sqrtf(max_z * max_z + y_val_x * y_val_x + max_x * max_x);
     cd[0x80 / 2] = (int16_t)(int)r;
 
-    /* --- Y height at 0x86 [CONFIRMED @ 0x0042f8f4-0x0042f901] --- */
-    cd[0x86 / 2] = (int16_t)(int)y_val;
+    /* --- Y height at 0x86 [CONFIRMED @ 0x0042F8F4-0x0042F901] --- */
+    cd[0x86 / 2] = (int16_t)(int)y_val_x;
 
-    /* --- Traffic simplified footprint at 0x60-0x7C [CONFIRMED @ 0x0042f928-0x0042f97e] --- */
+    /* --- Traffic simplified footprint at 0x60-0x7C [CONFIRMED @ 0x0042F928-0x0042F97E].
+     *   shrunk_x = (max_x+20) - (max_x+20) * 0.2  (i.e. (max_x+20) * 0.8)
+     *   FMUL constant at 0x0045D6A4 = 0x3E4CCCCD = 0.2f (exact). --- */
     if (slot >= TD5_MAX_RACER_SLOTS) {
-        float shrunk_x = max_x - max_x * 0.2f;  /* max_x * 0.8 */
+        float shrunk_x = max_x - max_x * 0.2f;
         int16_t neg_sx = (int16_t)(int)(-shrunk_x);
         int16_t pos_sx = (int16_t)(int)( shrunk_x);
 
@@ -8152,9 +8198,9 @@ void td5_physics_compute_suspension_envelope(TD5_Actor *actor, int slot)
     }
 
     TD5_LOG_I(LOG_TAG,
-              "suspension_envelope slot=%d: max_x=%.1f max_y=%.1f max_z=%.1f min_y=%.1f "
-              "y_val=%.1f radius=%d",
-              slot, max_x, max_y, max_z, min_y, y_val, (int)cd[0x80 / 2]);
+              "suspension_envelope slot=%d: max_x=%.1f max_y=%.1f max_z=%.1f "
+              "y_val_x=%.1f radius=%d",
+              slot, max_x, max_y, max_z, y_val_x, (int)cd[0x80 / 2]);
 }
 
 void td5_physics_set_collisions(int enabled)
