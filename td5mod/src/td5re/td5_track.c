@@ -1720,16 +1720,36 @@ int td5_track_load_strip(const void *data, size_t size)
 }
 
 /**
- * BindTrackStripRuntimePointers (0x444070)
+ * BindTrackStripRuntimePointers (0x444070) — byte-faithful port
  *
- * Patches sentinel records at the first and last MAIN ROAD span:
- *   - First span: type = 9 (SENTINEL_START), backward_link = ring_length - 1
- *   - Last main road span: type = 10 (SENTINEL_END), link at +0x10 cleared
+ * Original listing (29 instructions, 0x00444070-0x004440E0):
+ *   MOV EAX,[0x004aed90]                ; blob base ptr
+ *   MOV [0x004c3da0],EAX                ; DAT_004c3da0 = blob_ptr
+ *   MOV ECX,[EAX]; ADD ECX,EAX          ; ECX = blob + blob[0] = strip records
+ *   MOV [0x004c3d9c],ECX                ; g_trackStripRecords
+ *   MOV EDX,[EAX+8]; ADD EDX,EAX        ; EDX = blob + blob[2] = vertex pool
+ *   MOV [0x004c3d98],EDX                ; g_trackVertexPool
+ *   MOV EDX,[EAX+4]; MOV [0x004c3d90],EDX   ; g_trackTotalSpanCount = blob[1]
+ *   MOV ESI,[EAX+0x10]; MOV [0x004c3d94],ESI ; g_trackStripAttributeBasePtr (raw blob[4])
+ *   MOV EAX,[EAX+0xc]; MOV [0x004c3d8c],EAX  ; _DAT_004c3d8c = blob[3]
+ *   DEC EDX                              ; total - 1
+ *   MOV [ECX+0xa],DX                     ; span[0].link_prev = total - 1
+ *   MOV ECX,[0x004c3d9c]; MOV byte [ECX],0x9 ; span[0].span_type = 9
+ *   MOV EAX,[0x004c3d90]; LEA EDX,[EAX+EAX*2]
+ *   MOV EAX,[0x004c3d9c]
+ *   MOV word [EAX+EDX*8-0x10],0x0        ; *(uint16*)(strip + total*0x18 - 0x10)
+ *                                        ; = last-span +0x08 (link_next) cleared
+ *   MOV EAX,[0x004c3d90]; MOV EDX,[0x004c3d9c]; LEA ECX,[EAX+EAX*2]
+ *   MOV byte [EDX+ECX*8-0x18],0xa        ; *(uint8*)(strip + total*0x18 - 0x18)
+ *                                        ; = last-span +0x00 (span_type) = 10
  *
- * Uses ring_length (main road count) — NOT s_span_count (total incl branches).
- * The original reads DAT_004c3d90 which is the ring length.
- * Branch spans (>= ring_length) keep their original types (junction links
- * back to main road). [CONFIRMED @ 0x444070]
+ * Port maps the original's "g_trackTotalSpanCount" (blob[1], main road ring
+ * length) to g_td5.track_span_ring_length. s_span_count may be larger when
+ * branch spans exist past the main ring, but the sentinel patches are at
+ * (ring-1) just like the original. The blob base / span base / vertex base /
+ * attribute base globals are wired up in td5_track_load_strip above; this
+ * helper performs only the two sentinel patches that the original executes
+ * after the global wiring.
  */
 void td5_track_bind_runtime_pointers(void)
 {
@@ -1742,14 +1762,23 @@ void td5_track_bind_runtime_pointers(void)
     first = &s_span_array[0];
     last  = &s_span_array[ring - 1];
 
-    /* Patch first span: type = SENTINEL_START, backward link = last main road span */
-    first->span_type = 9;  /* TD5_SPAN_SENTINEL_START */
+    /* Patch first span:
+     *   span_type   = 9   (SENTINEL_START)  -- byte at +0x00
+     *   link_prev   = ring - 1              -- int16 at +0x0a */
+    first->span_type = 9;
     first->link_prev = (int16_t)(ring - 1);
 
-    /* Patch last main road span: type = SENTINEL_END, clear forward link area */
-    last->span_type = 10;  /* TD5_SPAN_SENTINEL_END */
-    /* The original clears the int32 at +0x10 (origin_y). */
-    last->origin_y = 0;
+    /* Patch last main road span:
+     *   span_type   = 10  (SENTINEL_END)    -- byte at +0x00
+     *   link_next   = 0                     -- uint16 at +0x08 (NOT origin_y!)
+     *
+     * Original disassembly: `MOV word ptr [EAX + EDX*0x8 + -0x10],0x0`
+     * with EDX = total*3 and EAX = strip base, so the displacement
+     * total*0x18 - 0x10 = (total-1)*0x18 + 0x08, i.e. last-span +0x08
+     * which is link_next, not +0x10 (origin_y) as the previous comment
+     * claimed. */
+    last->span_type = 10;
+    last->link_next = 0;
 
     TD5_LOG_I(LOG_TAG, "bind_runtime: sentinels at span[0]=type9, span[%d]=type10 (ring=%d total=%d)",
               ring - 1, ring, s_span_count);
