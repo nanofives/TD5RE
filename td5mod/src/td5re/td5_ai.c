@@ -4768,10 +4768,25 @@ teardown:
      *       MOV [0x4b064c],300       (g_specialEncounterCooldown)
      *       MOV CL,[actor[slot].+0x384]; INC CL; MOV [actor[slot].+0x384],CL  (byte increment)
      *
-     * FIXME(00434BA0): DAT_004b05c4 / DAT_004b05e4 / DAT_004b05d8 have no symbol
-     * names assigned; treating them as collapsed into the existing port state
-     * (g_encounter_tracked_handle clears them effectively via the next-tick
-     * acquire path).
+     * AUDIT(audit-encounter-dats, 2026-05-14): the three unlabeled DATs are
+     * fully accounted for by the existing port state:
+     *
+     *   DAT_004b05d8 = gSpecialEncounterTrackedActorHandle
+     *     → port's g_encounter_tracked_handle. Cleared to -1 on the next line
+     *       below; verified label exists in Ghidra (symbol_by_name match).
+     *
+     *   DAT_004b05e4 = g_encounter_phase_flag (port mirror exists already).
+     *     The original has only two writers, both to 0 (this teardown +
+     *     UpdateSpecialTrafficEncounter teardown at 0x00434f6d), and a single
+     *     reader at 0x00434e13 testing == 0. The variable is always 0 in
+     *     steady-state, so this redundant zero-write here is observationally
+     *     identical to omitting it. Port matches.
+     *
+     *   DAT_004b05c4 — write-only DEAD variable in the original. reference_to
+     *     finds exactly 1 reference, this MOV [0x4b05c4],EAX (always 0). No
+     *     reader anywhere in TD5_d3d.exe. Likely a vestigial latch whose
+     *     consumer was optimized out at build time. Omitting from the port
+     *     has zero behavioral effect.
      */
     g_encounter_active[slot] = 0;
     /* gActorRouteDirectionPolarity = rs[0xFC/4 = 0x3F] per UpdateSpecialEncounter-
