@@ -112,6 +112,7 @@ void td5_physics_compute_suspension_envelope(TD5_Actor *actor, int slot);
 
 /* --- Collision --- */
 void td5_physics_set_collisions(int enabled);
+int  td5_physics_get_collisions_flag(void);  /* mirror of *0x00463188 — pilot trace use */
 void td5_physics_apply_collision_impulse(TD5_Actor *a, TD5_Actor *b);
 void td5_physics_resolve_vehicle_contacts(void);
 
