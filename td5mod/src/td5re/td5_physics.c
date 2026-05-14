@@ -7216,30 +7216,64 @@ int32_t td5_physics_compute_drive_torque(TD5_Actor *actor)
     return torque;
 }
 
-/* --- ApplySteeringTorqueToWheels (0x42EEA0) ---
+/* --- ApplySteeringTorqueToWheels (0x42EEA0) ---  [byte-faithful port]
  *
- * Differential torque: FL/FR += force, RL/RR -= force.
+ * Verbatim port of FUN_0042EEA0 (0x0042EEA0..0x0042EF06). Originally the
+ * port stubbed this out to suppress a pitch-divergence symptom, but the
+ * batch precise-port mandate is byte-faithful behaviour first; downstream
+ * suspension fixes belong in their owning functions. Disassembly:
+ *
+ *   MOVSX EDX,[param2+0x68]            ; cardef/tuning short (drive-torque mult)
+ *   MOVSX EAX,[param1+0x33E]           ; actor encounter_steering_cmd (s16)
+ *   IMUL  EAX,EDX                      ; throttle * mult
+ *   LEA   EDX,[EAX+EAX*2]              ; *3
+ *   LEA   EAX,[EAX+EDX*4]              ; *(1+12) = *13
+ *   SHL   EAX,1                        ; *26 (= 0x1A)
+ *   CDQ / AND EDX,0xff / ADD EAX,EDX / SAR EAX,0x8   ; biased >>8
+ *   XOR   EDX,EDX / MOV DL,[param1+0x36B]            ; zero-ext current_gear
+ *   IMUL  EAX,[EDX*4 + 0x467394]       ; g_gearTorqueTable[gear]
+ *   CDQ / AND EDX,0xff / ADD EAX,EDX / SAR EAX,0x8   ; biased >>8
+ *   ADD   [param1+0x2EC],EAX           ; wheel_spring_dv[0] += k (FL)
+ *   ADD   [param1+0x2F0],EAX           ; wheel_spring_dv[1] += k (FR)
+ *   SUB   [param1+0x2F4],EAX           ; wheel_spring_dv[2] -= k (RL)
+ *   SUB   [param1+0x2F8],EAX           ; wheel_spring_dv[3] -= k (RR)
+ *
+ * The (x + ((x>>31)&0xff)) >> 8 idiom is the biased-toward-zero arithmetic
+ * right-shift Microsoft's compiler emits for signed /256. g_gearTorqueTable
+ * at DAT_00467394 mirrors the same LUT used inline by auto_gear_select.
  */
 void td5_physics_apply_steering_torque(TD5_Actor *actor)
 {
     int16_t *phys = get_phys(actor);
     if (!phys) return;
 
-    int32_t throttle = (int32_t)actor->encounter_steering_cmd;
-    int32_t sensitivity = (int32_t)PHYS_S(actor, 0x68);
-    int32_t gear = (int32_t)actor->current_gear;
+    /* DAT_00467394 — g_gearTorqueTable (int32[]). Indexed by current_gear
+     * read as an unsigned byte; only entries 0..8 are meaningful (0,0,
+     * 256,192,128,64,32,16,0). The original does NOT bounds-check; faithful
+     * port replicates that for gears 0..8 and zero-fills the rest to keep
+     * out-of-range gear bytes well-defined under the port. */
+    static const int32_t g_gear_torque_table[256] = {
+        [2] = 0x100,
+        [3] = 0xC0,
+        [4] = 0x80,
+        [5] = 0x40,
+        [6] = 0x20,
+        [7] = 0x10,
+        /* indices 0,1,8..255 = 0 (default) */
+    };
 
-    /* Original writes force to wheel_spring_dv[0..3] as [+,+,-,-],
-     * creating a pitch differential. However, the original's suspension
-     * reads XZ projections (not this Y-based force_accum), so steering
-     * torque never actually drives the suspension spring-damper. In the
-     * source port, this force goes directly into the suspension and
-     * causes immediate pitch divergence (62400 vs ground contact ~107).
-     * Steering already affects yaw via the separate yaw torque formula
-     * in update_player. Omit the force_accum writes. */
-    (void)throttle;
-    (void)sensitivity;
-    (void)gear;
+    int32_t throttle    = (int32_t)actor->encounter_steering_cmd;  /* +0x33E s16 */
+    int32_t torque_mult = (int32_t)PHYS_S(actor, 0x68);            /* tuning +0x68 s16 */
+
+    int32_t k = throttle * torque_mult * 0x1A;
+    k = (k + ((k >> 31) & 0xff)) >> 8;
+    k = k * g_gear_torque_table[(uint8_t)actor->current_gear];     /* +0x36B u8 */
+    k = (k + ((k >> 31) & 0xff)) >> 8;
+
+    actor->wheel_spring_dv[0] += k;   /* +0x2EC FL */
+    actor->wheel_spring_dv[1] += k;   /* +0x2F0 FR */
+    actor->wheel_spring_dv[2] -= k;   /* +0x2F4 RL */
+    actor->wheel_spring_dv[3] -= k;   /* +0x2F8 RR */
 }
 
 /* --- ApplyReverseGearThrottleSign (0x42F010) --- */
