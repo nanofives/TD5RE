@@ -135,9 +135,8 @@ int  td5_track_get_surface_type(TD5_Actor *actor, int probe_index);
 void td5_track_compute_heading(TD5_Actor *actor);
 
 /* InterpolateTrackSegmentNormal (byte-faithful port of 0x00445E30).
- * Inner helper used by ComputeActorHeadingFromTrackSegment (0x00445B90,
- * landed by precise-00445B90 worktree) to write the int16 surface normal
- * for the actor's track-segment at out_normal[0..2] (caller-side pointer
+ * Inner helper used by ComputeActorHeadingFromTrackSegment (0x00445B90) to
+ * write the int16 surface normal at out_normal[0..2] (caller-side pointer
  * to actor+0x290). Computes cross-product of (va-vb) x (va-vc), >>12,
  * FPU-normalises to length 4096.0f, truncates to int16, applies the
  * post-conversion `if (uny == 0) uny = 1` sentinel so the int16 .y
@@ -145,6 +144,22 @@ void td5_track_compute_heading(TD5_Actor *actor);
  * exactly zero. va/vb/vc are vertex indices into the strip vertex pool. */
 void td5_track_interpolate_segment_normal(int16_t va_idx, int16_t vb_idx,
                                            int16_t vc_idx, int16_t *out_normal);
+
+/* Byte-faithful port of ComputeActorHeadingFromTrackSegment @ 0x00445B90.
+ * Per-tick heading-normal writer. Reads actor's track_state at +0x80
+ * (span_idx, sub_lane), looks up the live span record, picks a triangle
+ * via a two-level (sub_lane × span_type) dispatch, and writes the
+ * normalized surface normal back to actor +0x290 (heading_normal int16[3]).
+ *
+ * Called from the per-tick pose integrators:
+ *   - IntegrateVehiclePoseAndContacts   (player/AI per tick)
+ *   - UpdateVehiclePoseFromPhysicsState (player/AI per tick)
+ *   - UpdateTrafficVehiclePose          (traffic per tick)
+ *
+ * This is distinct from td5_track_compute_heading() above, which is the
+ * SPAWN-only initializer port of 0x00434350 and writes a different vector
+ * (with heading_normal.y hard-coded to 0). */
+void td5_track_compute_runtime_heading_normal(TD5_Actor *actor);
 
 /* --- Barycentric contact --- */
 int32_t td5_track_compute_contact_height(int span_index, int sub_lane,

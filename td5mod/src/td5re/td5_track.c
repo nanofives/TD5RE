@@ -3580,6 +3580,391 @@ void td5_track_compute_heading(TD5_Actor *actor)
 }
 
 /* ========================================================================
+ * InterpolateTrackSegmentNormal (0x00445E30) - inline helper port.
+ *
+ * Verbatim port of the inner per-triangle normal-writer that
+ * ComputeActorHeadingFromTrackSegment dispatches to. The pool1 worktree
+ * (precise-00445E30) will land an extern definition with the same byte-
+ * faithful semantics; until that merges, the static helper below carries
+ * the load. When pool1 merges, this static can be removed (or kept as a
+ * file-local fast path) without changing call-site behavior.
+ *
+ *   e1 = va - vb    (int32 from int16 vertices; [CONFIRMED @ 0x00445E30])
+ *   e2 = va - vc
+ *   n  = CrossProduct3i(e1, e2)
+ *   n[i] >>= 12
+ *   ConvertFloatVec3ToShortAnglesB(n, out)   ; FPU normalize to length 4096
+ *   if (out[1] == 0) out[1] = 1              ; minimum-sentinel guard
+ *
+ * Identical math already lives inside triangle_height() above (steps 1-5);
+ * this is the same sequence without the barycentric height step.
+ * ======================================================================== */
+static void td5_track_interpolate_segment_normal_local(
+        int va_idx, int vb_idx, int vc_idx, int16_t *out_normal)
+{
+    TD5_StripVertex *va, *vb, *vc;
+    int32_t e1x, e1y, e1z, e2x, e2y, e2z;
+    int32_t nx, ny, nz;
+    int16_t unx, uny, unz;
+    double len;
+
+    if (!out_normal || !s_vertex_table)
+        return;
+
+    va = vertex_at(va_idx);
+    vb = vertex_at(vb_idx);
+    vc = vertex_at(vc_idx);
+
+    /* [CONFIRMED @ 0x00445E30 decompiler output]
+     *   local_c..local_4  = va - vb     (param_1 - param_2)
+     *   local_18..local_10 = va - vc    (param_1 - param_3)
+     * That is: e1 = va - vb, e2 = va - vc. The cross product
+     * CrossProduct3i(e1, e2) then computes the surface normal. Note that
+     * triangle_height() above uses the OPPOSITE convention (e1 = vb - va,
+     * e2 = vc - va), which flips the sign of the cross — preserved here
+     * because the original ConvertFloatVec3ToShortAnglesB normalizes to
+     * a length of 4096 in the SAME signed direction as the cross input
+     * (no abs()), so the sign matters for the heading-normal y component
+     * that downstream divides into. */
+    e1x = (int32_t)va->x - (int32_t)vb->x;
+    e1y = (int32_t)va->y - (int32_t)vb->y;
+    e1z = (int32_t)va->z - (int32_t)vb->z;
+
+    e2x = (int32_t)va->x - (int32_t)vc->x;
+    e2y = (int32_t)va->y - (int32_t)vc->y;
+    e2z = (int32_t)va->z - (int32_t)vc->z;
+
+    /* int32 cross then >>12 — matches FUN_0042EA70 + SAR sequence. */
+    nx = (e1y * e2z - e1z * e2y) >> 12;
+    ny = (e1z * e2x - e1x * e2z) >> 12;
+    nz = (e1x * e2y - e1y * e2x) >> 12;
+
+    /* FPU unit-renormalize to length 4096, truncate-toward-zero to int16
+     * [CONFIRMED @ 0x0042CD40-0x0042CDA8]. */
+    len = sqrt((double)nx * (double)nx
+             + (double)ny * (double)ny
+             + (double)nz * (double)nz);
+    if (len > 0.0) {
+        unx = (int16_t)(int32_t)((double)nx * 4096.0 / len);
+        uny = (int16_t)(int32_t)((double)ny * 4096.0 / len);
+        unz = (int16_t)(int32_t)((double)nz * 4096.0 / len);
+    } else {
+        unx = 0; uny = 0; unz = 0;
+    }
+
+    out_normal[0] = unx;
+    out_normal[1] = uny;
+    out_normal[2] = unz;
+
+    /* Post-conversion exact-zero guard — minimum sentinel that keeps the
+     * ApplyMissingWheelVelocityCorrection divide-by-y path finite.
+     * [CONFIRMED @ 0x00445E76-0x00445E83] */
+    if (out_normal[1] == 0)
+        out_normal[1] = 1;
+}
+
+/* ========================================================================
+ * ComputeActorHeadingFromTrackSegment (0x00445B90) — byte-faithful port.
+ *
+ * Per-tick heading-normal writer called from THREE pose-integrator sites:
+ *   - IntegrateVehiclePoseAndContacts (0x00405E80)  @ 0x00405fb6
+ *   - UpdateVehiclePoseFromPhysicsState (0x004063A0) @ 0x00406439
+ *   - UpdateTrafficVehiclePose (0x00443CF0)          @ 0x00443d3d
+ *
+ * Signature in original:
+ *   void __cdecl(short *track_state,   ; actor + 0x80
+ *                int   *world_pos,     ; actor + 0x1FC
+ *                short *out_normal);   ; actor + 0x290
+ *
+ * The function:
+ *   1. Reads span index = track_state[0]      (= actor +0x80 word)
+ *      Reads sub_lane   = track_state[0xC]    (= actor +0x8C byte; the
+ *      LISTING uses MOVSX EBX, byte [ESI+0xc] — i.e. a sign-extended byte
+ *      at param_1 + 0x0C, which is the lane index field. The Ghidra
+ *      decompile says `(char)param_1[6]` which is the same byte under the
+ *      short* type — verified by listing).
+ *   2. Fetches the span's vertex offsets via k_quad_vertex_offsets[type]
+ *      (= DAT_00474E40[type*2]) and writes the resolved indices back to
+ *      param_1[4] = actor +0x88 (left_index) and param_1[5] = actor +0x8A
+ *      (right_index). This *side effect* is preserved here because the
+ *      same fields are read elsewhere (e.g. by td5_track AI walkers).
+ *   3. Computes local_x = (world_x>>8) - origin_x, local_z analogously.
+ *   4. Two-level dispatch on (sub_lane vs lane_count-1 vs interior) then
+ *      span_type: chooses 3 vertex indices from {li, li+1, ri, ri+1, ri+3}
+ *      and forwards them to InterpolateTrackSegmentNormal.
+ *
+ * Dispatch tables (LUTs at 0x00445DEC, 0x00445DF8, 0x00445E04):
+ *   k_heading_left_edge_class[11]  (= byte LUT 0x00445DF8 for sub_lane==0):
+ *       type 1..0xB → class 0/1/2 (0=diag-class-A, 1=fixed-B, 2=fixed-C)
+ *   left edge final dispatch by class:
+ *       0 → diag test, true: (li, ri+1, li+1) else fall-through (li, ri, ri+1)
+ *       1 → unconditional (li+1, ri, ri+1)           [case 3,4]
+ *       2 → unconditional (li, ri+1, li+1)           [case 6,7]
+ *   right edge final dispatch on type:
+ *       1,3,6,8,9,0xA,0xB → diag test, same as left edge class 0
+ *       2,4   → fall-through (li, ri, ri+1)
+ *       5,7   → unconditional (li, ri, li+1)
+ *   interior:
+ *       always diag test, true: (li, ri+1, li+1) else (li, ri, ri+1)
+ *
+ * Type 0 hits switchD_00445c37_default and the function returns WITHOUT
+ * writing — the original leaves the stale value at +0x290 untouched.
+ * Types >= 0xC are not in the table and also hit default.
+ *
+ * [CONFIRMED via Ghidra pool0 listing 2026-05-14, body 0x00445b90..0x00445de8,
+ *  219 instructions, jump tables at 0x00445DEC/0x00445DF8/0x00445E04]
+ * ======================================================================== */
+
+/* Class indices for left-edge sub_lane==0 dispatch (byte LUT 0x00445DF8).
+ * Indexed by (span_type - 1) where span_type in [1, 0xB]. */
+static const int8_t k_heading_left_edge_class[11] = {
+    0, /* type 1 → class 0 (diag) */
+    0, /* type 2 → class 0 (diag) */
+    1, /* type 3 → class 1 (li+1, ri, ri+1) */
+    1, /* type 4 → class 1 */
+    0, /* type 5 → class 0 */
+    2, /* type 6 → class 2 (li, ri+1, li+1) */
+    2, /* type 7 → class 2 */
+    0, /* type 8 → class 0 */
+    0, /* type 9 → class 0 */
+    0, /* type 10 → class 0 */
+    0, /* type 11 → class 0 */
+};
+
+/* Local diagonal cross-product test used by the dispatch. Matches the
+ * disasm sequence at 0x00445C51..0x00445C85 (and the identical block at
+ * 0x00445CF8..0x00445D2C for the right edge, 0x00445D7C..0x00445DB0 for
+ * the interior). The test points are the vertices:
+ *   va = pool + ri*6 + 6        ; = ri + 1   (LEA EDX, [ECX+ECX*2+3] then *2)
+ *   vb = pool + li*6            ; = li
+ *   sign = (va.x - vb.x) * (local_z - vb.z) - (va.z - vb.z) * (local_x - vb.x)
+ *   if sign > 0 (JLE → skip): triangle = (li, ri+1, li+1)
+ *   else                     : triangle = (li, ri, ri+1)  [LAB_00445DD5 tail]
+ */
+static int64_t heading_diag_cross(int li_idx, int ri_plus1_idx,
+                                  int32_t local_x, int32_t local_z)
+{
+    TD5_StripVertex *vli = vertex_at(li_idx);
+    TD5_StripVertex *vri = vertex_at(ri_plus1_idx);
+    int32_t dx = (int32_t)vri->x - (int32_t)vli->x;
+    int32_t dz = (int32_t)vri->z - (int32_t)vli->z;
+    return (int64_t)dx * (int64_t)(local_z - (int32_t)vli->z)
+         - (int64_t)dz * (int64_t)(local_x - (int32_t)vli->x);
+}
+
+/* Public per-tick heading-normal writer. Pose integrators (player + AI
+ * + traffic) call this immediately after td5_track_update_actor_position
+ * to refresh actor->heading_normal at +0x290 from the live span geometry.
+ *
+ * NOTE: Distinct from td5_track_compute_heading() above, which ports
+ * 0x00434350 (spawn-only InitializeActorTrackPose) and hard-codes
+ * heading_normal[1]=0 — that path is preserved for spawn-pose callers.
+ */
+void td5_track_compute_runtime_heading_normal(TD5_Actor *actor)
+{
+    int16_t *track_state;
+    int16_t *out_normal;
+    int     span_idx;
+    int     sub_lane;
+    int8_t  type;                  /* span_type clamped to int8 (low byte) */
+    int     left_lut, right_lut;   /* lane-bias entries */
+    int     li, ri;                /* resolved left/right base indices */
+    int     lane_count_minus_1;
+    int32_t local_x, local_z;
+    int32_t world_x, world_z;
+    TD5_StripSpan *sp;
+    int     va, vb, vc;            /* selected triangle indices */
+    int     have_triangle;
+
+    if (!actor || !s_span_array || !s_vertex_table)
+        return;
+
+    track_state = (int16_t *)((uint8_t *)actor + 0x80);
+    out_normal  = (int16_t *)((uint8_t *)actor + 0x290);
+
+    /* [00445b94..00445b9b]
+     *   EDX = MOVSX word[ESI]          ; span_idx (signed 16 → 32)
+     *   EBX = MOVSX byte[ESI + 0xc]    ; sub_lane (signed 8 → 32)
+     */
+    span_idx = (int)track_state[0];
+    sub_lane = (int)((int8_t *)actor)[0x8C];
+
+    if (span_idx < 0 || span_idx >= s_span_count)
+        return;
+
+    sp = &s_span_array[span_idx];
+
+    /* [00445bae] MOV AL, byte[EDX + EDI + 3]   ; AL = packed_metadata
+     * [00445bb7] AND EAX, 0xF                  ; low nibble = lane_count
+     * [00445bb4] MOV CL, byte[EDX + EDI]       ; CL = span_type
+     * [00445bbe] MOVSX EBP, byte[0x474E40 + CL*2]  ; left lane-bias
+     */
+    type = (int8_t)sp->span_type;
+    lane_count_minus_1 = span_lane_count(sp) - 1;
+    if (lane_count_minus_1 < 0) lane_count_minus_1 = 0;
+
+    /* k_quad_vertex_offsets matches DAT_00474E40 (12 entries × 2 int8). */
+    if ((unsigned)type < 12) {
+        left_lut  = (int)k_quad_vertex_offsets[(unsigned)type][0];
+        right_lut = (int)k_quad_vertex_offsets[(unsigned)type][1];
+    } else {
+        left_lut = 0;
+        right_lut = 0;
+    }
+
+    /* [00445bcd..00445bd5]
+     *   EDI = EBX + EBP                 ; sub_lane + left_lut
+     *   EAX = (ushort)[EDX + EDI + 4]   ; left_vertex_index
+     *   AX  += EDI
+     *   [ESI + 8] = AX                  ; actor +0x88 ← resolved li
+     * [00445be9..00445bfa]
+     *   EBP = EBX + EDI(=right_lut)
+     *   DI  = (ushort)[EDX + EBP + 6]   ; right_vertex_index
+     *   CX  = DI + EBP
+     *   [ESI + 0xA] = CX                ; actor +0x8A ← resolved ri
+     */
+    li = (int)(uint16_t)sp->left_vertex_index  + sub_lane + left_lut;
+    ri = (int)(uint16_t)sp->right_vertex_index + sub_lane + right_lut;
+    track_state[4] = (int16_t)li;
+    track_state[5] = (int16_t)ri;
+
+    /* [00445bfe..00445c13]
+     *   ESI = world_x; EDI = world_z (24.8 fixed-point)
+     *   ESI = (world_x >> 8) - origin_x   ; local_x
+     *   EDI = (world_z >> 8) - origin_z   ; local_z
+     */
+    world_x = *(int32_t *)((uint8_t *)actor + 0x1FC);
+    world_z = *(int32_t *)((uint8_t *)actor + 0x204);
+    local_x = (world_x >> 8) - sp->origin_x;
+    local_z = (world_z >> 8) - sp->origin_z;
+
+    have_triangle = 0;
+    va = vb = vc = 0;
+
+    /* [00445c17..00445c19] TEST EBX, EBX ; JNZ → not-sub_lane-0 branch */
+    if (sub_lane == 0) {
+        /* [00445c1f..00445c37] LEFT-EDGE DISPATCH
+         *   EBP = type - 1; CMP EBP, 0xa; JA default → return-no-write
+         *   DL = byte[EBP + 0x445DF8]
+         *   JMP [EDX*4 + 0x445DEC]
+         */
+        int ti = (int)(uint8_t)type - 1;
+        if (ti < 0 || ti > 10) {
+            return; /* default: no write, leaves stale heading_normal */
+        }
+        int klass = (int)k_heading_left_edge_class[ti];
+        switch (klass) {
+        case 0: {
+            /* [00445c3e..00445ca8] class A:
+             * diag test (li, ri+1) — JLE → fall-through to LAB_00445dd5
+             *   sign > 0  → (li, ri+1, li+1)
+             *   sign <= 0 → (li, ri, ri+1)   [LAB_00445dd5 tail]
+             */
+            int64_t sign = heading_diag_cross(li, ri + 1, local_x, local_z);
+            if (sign > 0) {
+                va = li; vb = ri + 1; vc = li + 1;
+            } else {
+                va = li; vb = ri;     vc = ri + 1;
+            }
+            have_triangle = 1;
+            break;
+        }
+        case 1:
+            /* [00445ca9..00445cc2] class B (types 3,4):
+             * Unconditional (li+1, ri, ri+1) — pushes (EAX+1, ECX, ECX+1)
+             */
+            va = li + 1; vb = ri; vc = ri + 1;
+            have_triangle = 1;
+            break;
+        case 2:
+            /* [switchD_00445c37_caseD_6 → LAB_00445dd5 via path at 0x00445DD5]
+             * Wait — the decompiler ALSO shows this label calling
+             * (sVar4, sVar6+1, sVar4+1) = (li, ri+1, li+1). The bytes at
+             * 0x00445DEC[idx=2] would be 0x00445DB6, but reading the
+             * dispatch-table dump the third slot is 0x00445DB6 / actually
+             * 0x00445C3E for case A, 0x00445CA9 for case B, 0x00445DD5 (tail)
+             * for the case-6/7 path. From the decompile output, the
+             * "switchD_00445c37_caseD_6" label routes types 6/7 to call
+             * InterpolateTrackSegmentNormal(li, ri+1, li+1) unconditionally.
+             * That matches LEFT-EDGE case 6/7 in probe_span_lane_height.
+             * [CONFIRMED via decompile]
+             */
+            va = li; vb = ri + 1; vc = li + 1;
+            have_triangle = 1;
+            break;
+        default:
+            return;
+        }
+    } else if (sub_lane == lane_count_minus_1) {
+        /* [00445cc3..00445cde] RIGHT-EDGE DISPATCH
+         *   EDX = type - 1; CMP EDX, 0xa; JA → default (no write)
+         *   JMP [EDX*4 + 0x445E04]
+         * The right-edge LUT is dense (no byte indirection) — each type
+         * has its own pointer. The actual dispatch resolves to one of
+         * three labels:
+         *   0x00445CE5  diag test (same as left-edge class 0)
+         *   0x00445DD0  fall-through to LAB_00445dd5 (li, ri, ri+1)
+         *   0x00445D50  unconditional (li, ri, li+1)
+         */
+        switch ((int)(uint8_t)type) {
+        case 1: case 3: case 6:
+        case 8: case 9: case 10: case 11: {
+            /* [00445ce5..00445d4f] diag-class for right edge.
+             * Identical diag test to left-edge class A. */
+            int64_t sign = heading_diag_cross(li, ri + 1, local_x, local_z);
+            if (sign > 0) {
+                va = li; vb = ri + 1; vc = li + 1;
+            } else {
+                va = li; vb = ri;     vc = ri + 1;
+            }
+            have_triangle = 1;
+            break;
+        }
+        case 2: case 4:
+            /* [switchD_00445cde_caseD_2 → LAB_00445dd5] fall-through:
+             * (li, ri, ri+1). Note: original PUSHes (sVar4, sVar6, sVar6+1)
+             * via LEA EDX,[ECX+1] / PUSH EDX / PUSH ECX / PUSH EAX. */
+            va = li; vb = ri; vc = ri + 1;
+            have_triangle = 1;
+            break;
+        case 5: case 7:
+            /* [00445d50..00445d68] unconditional (li, ri, li+1).
+             * Pushes (EAX+1, ECX, EAX) → reordered as (EAX, ECX, EAX+1)
+             * by the C calling convention (right-to-left push order
+             * already matches argument order li, ri, li+1). */
+            va = li; vb = ri; vc = li + 1;
+            have_triangle = 1;
+            break;
+        default:
+            return; /* no write */
+        }
+    } else {
+        /* [00445d69..00445dcf] INTERIOR:
+         * Always runs diag test, no span_type discrimination.
+         *   sign > 0  → (li, ri+1, li+1)  [PUSH branch at 0x00445DB6]
+         *   sign <= 0 → (li, ri, ri+1)    [LAB_00445DD0 → LAB_00445DD5 tail]
+         */
+        int64_t sign = heading_diag_cross(li, ri + 1, local_x, local_z);
+        if (sign > 0) {
+            va = li; vb = ri + 1; vc = li + 1;
+        } else {
+            va = li; vb = ri;     vc = ri + 1;
+        }
+        have_triangle = 1;
+    }
+
+    if (!have_triangle)
+        return;
+
+    /* FIXME(precise-00445E30): pool1 ports InterpolateTrackSegmentNormal as
+     * an extern symbol td5_track_interpolate_segment_normal(va, vb, vc, out).
+     * Until that merges, we call the file-local
+     * td5_track_interpolate_segment_normal_local() with identical math. On
+     * merge, replace the call below with the extern and remove the local. */
+    td5_track_interpolate_segment_normal_local(va, vb, vc, out_normal);
+}
+
+/* ========================================================================
  * Wrap Normalization (0x443FB0 NormalizeActorTrackWrapState)
  *
  * Verbatim port of NormalizeActorTrackWrapState @ 0x00443FB0 in TD5_d3d.exe.

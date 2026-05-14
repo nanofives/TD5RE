@@ -5158,6 +5158,12 @@ static void integrate_traffic_pose(TD5_Actor *actor)
             actor->track_span_raw = (uint16_t)(max_span - 1);
     }
 
+    /* Refresh heading_normal at +0x290 after the chassis-walker resolves
+     * the new span. [CONFIRMED @ 0x00443d3d: UpdateTrafficVehiclePose
+     * calls ComputeActorHeadingFromTrackSegment with LEA [esi+0x290].]
+     * [precise-port pilot 00445B90, 2026-05-14] */
+    td5_track_compute_runtime_heading_normal(actor);
+
     /* 4. Set Y from barycentric track contact height + car height offset.
      * [CONFIRMED @ 0x443D58 + 0x445A1C: ComputeActorTrackContactNormalExtended
      *  writes world_pos_y = barycentric_height + origin_y * 0x100]
@@ -5400,6 +5406,16 @@ void td5_physics_integrate_pose(TD5_Actor *actor)
             }
         }
     }
+
+    /* Refresh heading_normal at +0x290 from the live span geometry.
+     * [CONFIRMED @ 0x00405fb6: IntegrateVehiclePoseAndContacts calls
+     * ComputeActorHeadingFromTrackSegment with LEA [esi+0x290].]
+     * Mirrors the trailing call inside UpdateVehiclePoseFromPhysicsState;
+     * was previously missing here, which kept heading_normal at its
+     * stale spawn-pose value (with y=0 from the old td5_track_compute_heading
+     * mapping) for the entire IntegrateVehiclePoseAndContacts code path.
+     * [precise-port pilot 00445B90, 2026-05-14] */
+    td5_track_compute_runtime_heading_normal(actor);
 
     /* 4. Convert accumulators to 12-bit display angles */
     actor->display_angles.roll  = (int16_t)((actor->euler_accum.roll >> 8) & 0xFFF);
@@ -6008,16 +6024,16 @@ static void update_vehicle_pose_from_physics(TD5_Actor *actor)
      *   args: (&actor->track_span_raw @+0x80, &actor->world_pos @+0x1FC,
      *          &actor->heading_normal @+0x290).
      *
-     * Port's td5_track_compute_heading mirrors InitializeActorTrackPose
-     * (0x00434350), not 0x00445B90 — the runtime per-tick variant uses
-     * a different vertex-pair selection + InterpolateTrackSegmentNormal
-     * sub-call. Until a faithful port of 0x00445B90 lands, the
-     * compute_heading helper is the closest functional substitute: it
-     * writes a {dx, 0, dz} normal at +0x290 derived from the same span's
-     * left/right edge vectors. Acceptable for pose-callback consumers
-     * (heading-relative downstream code); not bit-exact.
-     * [D1-partial — precise-port pilot 004063A0, 2026-05-14] */
-    td5_track_compute_heading(actor);
+     * Re-routed 2026-05-14 (precise-00445B90) to the byte-faithful
+     * runtime variant td5_track_compute_runtime_heading_normal — it
+     * writes the normalized surface normal of the picked triangle
+     * (heading_normal.y ≈ 4096 on flat track, dropping on slopes),
+     * unblocking ApplyMissingWheelVelocityCorrection which multiplies
+     * by heading_normal.y. The previous mapping to compute_heading
+     * (InitializeActorTrackPose, 0x00434350) was a SPAWN-only writer
+     * that hard-coded heading_normal[1]=0, neutering the correction.
+     * [precise-port pilot 00445B90, 2026-05-14] */
+    td5_track_compute_runtime_heading_normal(actor);
 
     /* Refresh wheel contacts (CALL RefreshVehicleWheelContactFrames @ 0x00403720
      * at 0x00406453). The wheel walker, contact-frame transforms, gap_270,
