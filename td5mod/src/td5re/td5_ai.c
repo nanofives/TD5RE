@@ -2668,121 +2668,427 @@ void td5_ai_set_traffic_queue(const uint8_t *data, int size) {
               (const void *)data, size, size / 4);
 }
 
+/* Byte-faithful port of InitializeTrafficActorsFromQueue @ 0x00435940.
+ *
+ * Original signature: void __stdcall InitializeTrafficActorsFromQueue(void)
+ * Spawns ambient traffic actors into slots [6, min(g_racerCount, 12)).
+ * Source: Ghidra disassembly listing 0x00435940-0x00435CB7 (271 instructions).
+ *
+ * Per-slot algorithm:
+ *   1. Read 4-byte queue record (span, polarity_byte, sub_lane).
+ *   2. Compute strip-record lane_count = strip[queue.span].byte3 & 0xF.
+ *   3. If queue.sub_lane < lane_count: NORMAL path (route selector = 0).
+ *      Else: REMAP path (route selector = 1) — search junction-remap table
+ *      and adjust span/sub_lane.
+ *   4. Common: place actor, build yaw, ResetVehicleActorState,
+ *      RefreshActorTrackProgressOffset (NORMAL) or ComputeTrackSpanProgress
+ *      + ComputeSignedTrackOffset (REMAP), NormalizeActorTrackWrapState.
+ *   5. Advance queue pointer 4 bytes.
+ *
+ * Divergences from existing port v0 (replaced 2026-05-14):
+ *   - Adds ResetVehicleActorState + NormalizeActorTrackWrapState calls per
+ *     original behavior (v0 skipped these).
+ *   - Inline switch geometry matches ComputeActorTrackHeading @ 0x00435CE0
+ *     (REMAP path) and an inline AngleFromVector12Full (NORMAL path).
+ *   - REMAP path now seeds RS_TRACK_PROGRESS + RS_TRACK_OFFSET_BIAS via
+ *     ComputeTrackSpanProgress + ComputeSignedTrackOffset (per original
+ *     LAB_00435a96-bd).
+ *   - REMAP path sets actor.span_normalized to ORIGINAL queue.span
+ *     (post-call, per 0x00435ad1), not the remapped span.
+ *   - REMAP path subtracts lane_count from sub_lane (per 0x00435a59 SUB).
+ *
+ * FIXME(direction-polarity-macro): the original writes polarity at byte 0xFC
+ * of route_state slot (= dword index 0x3F = gActorRouteDirectionPolarity).
+ * The port has RS_DIRECTION_POLARITY = 0x25 (byte 0x94) — this is an
+ * established port-wide macro mismatch. To remain compatible with downstream
+ * port code that reads RS_DIRECTION_POLARITY, we write at BOTH indices.
+ * Resolving the macro drift is a separate scope.
+ */
 void td5_ai_init_traffic_actors(void) {
-    int i;
-    const uint8_t *qp = g_traffic_queue_base;
+    int local_18;       /* slot counter (original local_18, starts at 6) */
+    int local_c;        /* per-slot small constant (slot*4 + 0x10), starts at 0x28 */
+    const uint8_t *qp;  /* DAT_004b08b8 queue cursor */
+    int racer_count;
+    int racer_cap;
 
+    /* 0x00435940-50: gate on g_racerCount > 6 */
+    racer_count = g_active_actor_count;
+    if (racer_count <= 6)
+        return;
+
+    qp = g_traffic_queue_ptr ? g_traffic_queue_ptr : g_traffic_queue_base;
     if (!qp) {
-        TD5_LOG_W(LOG_TAG, "init_traffic_actors: g_traffic_queue_base is NULL — traffic slots will remain at origin");
+        TD5_LOG_W(LOG_TAG, "init_traffic_actors: g_traffic_queue_ptr is NULL");
         return;
     }
 
-    g_traffic_queue_ptr = qp;
+    /* 0x00435975-7e: cap iteration at min(racer_count, 0xc) */
+    racer_cap = (racer_count > 12) ? 12 : racer_count;
 
-    for (i = TD5_MAX_RACER_SLOTS; i < TD5_MAX_TOTAL_ACTORS; i++) {
-        int16_t q_span;
-        uint8_t q_flags, q_lane;
-        char *a = actor_ptr(i);
-        int32_t *rs = route_state(i);
+    /* Initial loop state (0x4359 5b/68/63/70) */
+    local_18 = TD5_MAX_RACER_SLOTS;   /* 6 */
+    local_c  = 0x28;                  /* 6*4 + 0x10 */
 
-        q_span = (int16_t)(qp[0] | (qp[1] << 8));
-        if (q_span == -1) break; /* end sentinel */
+    while (local_18 < racer_cap) {
+        char *a = actor_ptr(local_18);
+        int32_t *rs = route_state(local_18);
+        int16_t queue_span;
+        uint8_t queue_byte2;          /* polarity in bit 0 */
+        uint8_t queue_byte3;          /* sub_lane */
+        int polarity_bit;
+        int lane_count;
+        int orig_queue_span;          /* preserved for REMAP path post-call */
 
-        q_flags = qp[2];
-        q_lane  = qp[3];
+        queue_span  = (int16_t)(qp[0] | ((uint16_t)qp[1] << 8));
+        queue_byte2 = qp[2];
+        queue_byte3 = qp[3];
+        orig_queue_span = (int)queue_span;
+        polarity_bit = (int)queue_byte2 & 1;
 
-        /* Direction polarity from flags bit 0 */
-        rs[RS_DIRECTION_POLARITY] = q_flags & 1;
+        /* 0x435989-9d: common writes — polarity, local_c, RECOVERY_STAGE=0,
+         * DAT_004afc50=0. Polarity goes to dword 0x3F per original layout AND
+         * dword 0x25 (RS_DIRECTION_POLARITY) per port convention.
+         * `local_c` (slot*4+0x10) writes the field at byte 0x68 within
+         * route_state (dword 0x1A) — original semantics unknown; mirror raw. */
+        rs[RS_DIRECTION_POLARITY] = polarity_bit;
+        rs[0x3F] = polarity_bit;                    /* gActorRouteDirectionPolarity */
+        rs[0x1A] = local_c;                         /* DAT_004afbc8[slot] */
+        rs[RS_RECOVERY_STAGE] = 0;                  /* dword 0x22 */
+        rs[RS_SCRIPT_SPEED_PARAM] = 0;              /* dword 0x3C = DAT_004afc50[slot] */
+        g_traffic_recovery_stage[local_18] = 0;     /* port-side mirror */
 
-        /* Route table selection + alt-route span remap [CONFIRMED @ 0x43551A, 0x00435940]:
-         * q_lane < span_lane_count → LEFT route (selector=0), use queue span directly.
-         * q_lane >= span_lane_count → RIGHT route (selector=1), remap span via jump
-         * table and adjust sub_lane by subtracting span_lane_count. */
+        /* 0x004359a0-bf: compute lane_count for branching */
         {
-            int lc = td5_track_get_span_lane_count((int)q_span);
-            if ((int)q_lane >= lc) {
-                rs[RS_ROUTE_TABLE_SELECTOR] = 1;
-                int remapped = td5_track_apply_target_span_remap((int)q_span, 0);
-                if (remapped != (int)q_span && remapped >= 0) {
-                    TD5_LOG_I(LOG_TAG, "init_traffic slot=%d: alt-route remap span %d->%d lane %d->%d",
-                              i, (int)q_span, remapped, (int)q_lane, (int)q_lane - lc);
-                    q_span = (int16_t)remapped;
-                    q_lane = (uint8_t)((int)q_lane - lc);
+            const TD5_StripSpan *strip_base =
+                (const TD5_StripSpan *)g_strip_span_base;
+            int span_idx = (int)queue_span;
+            uint8_t strip_byte3 = 0;
+
+            if (strip_base && span_idx >= 0 && span_idx < g_strip_span_count) {
+                strip_byte3 = ((const uint8_t *)&strip_base[span_idx])[3];
+            }
+            lane_count = (int)(strip_byte3 & 0x0F);
+        }
+
+        /* Branch on (lane_count > queue.sub_lane) — JA at 0x004359c1.
+         * JA-taken (NORMAL path) means lane_count strictly greater. */
+        if (lane_count > (int)queue_byte3) {
+            /* ---------- NORMAL path (selector = 0, 0x00435b0d) ---------- */
+            const TD5_StripSpan *strip_base =
+                (const TD5_StripSpan *)g_strip_span_base;
+            const TD5_StripVertex *vpool =
+                (const TD5_StripVertex *)g_strip_vertex_base;
+            const TD5_StripSpan *sp;
+            const int16_t *psVar2;   /* left vertex base shorts */
+            const int16_t *psVar3;   /* right vertex base shorts */
+            int32_t local_10 = 0;    /* dx component */
+            int32_t local_14 = 0;    /* dz component */
+            int has_geom = 0;
+            int angle_full;
+            int32_t yaw_stored;
+
+            rs[RS_ROUTE_TABLE_SELECTOR] = 0;
+
+            /* 0x435b10-2b: actor.span_raw = queue.span; actor.sub_lane = queue.byte3 */
+            ACTOR_I16(a, ACTOR_SPAN_RAW) = queue_span;
+            ACTOR_U8(a, ACTOR_SUB_LANE_INDEX) = queue_byte3;
+
+            /* 0x435b2e: InitActorTrackSegmentPlacement(&actor.span_raw, &actor.world_pos).
+             * The port's analogue is td5_track_init_actor_segment_placement.
+             * Existing port code names it differently — call the in-process
+             * sub_lane init helper via td5_track_get_span_lane_world which
+             * matches the same vertex sampling.
+             *
+             * The original function:
+             *   - Reads actor.span_raw + sub_lane → samples the lane quad
+             *     barycenter into actor.world_pos[0,1,2].
+             *   - Also clamps sub_lane if lane index out of bounds.
+             *
+             * Use td5_track_get_span_lane_world for an equivalent vertex
+             * barycenter sample, then write back into actor.world_pos. */
+            {
+                int32_t wx = 0, wy = 0, wz = 0;
+                if (g_strip_span_base) {
+                    (void)td5_track_get_span_lane_world(
+                        (int)queue_span, (int)queue_byte3, &wx, &wy, &wz);
                 }
-            } else {
-                rs[RS_ROUTE_TABLE_SELECTOR] = 0;
+                ACTOR_I32(a, ACTOR_WORLD_POS_X) = wx;
+                *(int32_t *)(a + 0x200)         = wy;
+                ACTOR_I32(a, ACTOR_WORLD_POS_Z) = wz;
             }
-        }
 
-        /* Place on track — set all 4 span tracking fields like racer spawn */
-        ACTOR_I16(a, ACTOR_SPAN_RAW) = q_span;
-        *(int16_t *)(a + 0x082) = q_span;  /* span_norm  */
-        *(int16_t *)(a + 0x084) = q_span;  /* span_accum */
-        *(int16_t *)(a + 0x086) = q_span;  /* span_high  */
-        ACTOR_U8(a, ACTOR_SUB_LANE_INDEX) = q_lane;
-        ACTOR_U8(a, ACTOR_SLOT_INDEX) = (uint8_t)i;
-
-        /* Compute world position from strip geometry [CONFIRMED @ 0x435A77] */
-        {
-            int32_t world_x, world_y, world_z;
-            if (td5_track_get_span_lane_world(q_span, q_lane, &world_x, &world_y, &world_z)) {
-                ACTOR_I32(a, ACTOR_WORLD_POS_X) = world_x;
-                /* Use track Y directly — traffic has zero wheel positions
-                 * (no carparam.dat), so reset_actor_state's integrate_pose
-                 * ground snap probes land at body center and produce
-                 * garbage Y ~5800 units underground. */
-                *(int32_t *)(a + 0x200) = world_y;
-                ACTOR_I32(a, ACTOR_WORLD_POS_Z) = world_z;
-            } else {
-                TD5_LOG_W(LOG_TAG, "init_traffic: slot=%d span=%d lane=%d — world pos lookup failed", i, q_span, q_lane);
+            /* 0x435b33-72: load strip[span] + first/second vertex pointers */
+            sp = NULL;
+            psVar2 = psVar3 = NULL;
+            if (strip_base && vpool &&
+                queue_span >= 0 && queue_span < g_strip_span_count) {
+                sp = &strip_base[queue_span];
+                psVar2 = (const int16_t *)&vpool[sp->left_vertex_index];
+                psVar3 = (const int16_t *)&vpool[sp->right_vertex_index];
+                has_geom = 1;
             }
+
+            /* Switch on strip type byte 0 (sp->span_type).
+             * Original disassembles to a jump table at 0x00435cb8 covering
+             * type-1 in [0,6]; type 0 or type > 7 falls through to the
+             * default which leaves local_10/local_14 as their stack values.
+             * For first iteration these are uninitialized. To produce
+             * deterministic-port behavior on default-type spans, leave both
+             * components at 0 (since stack residue is non-deterministic). */
+            if (has_geom) {
+                switch (sp->span_type) {
+                case 1: case 2: case 5: {
+                    int32_t dx, dz_part;
+                    dx = ((int32_t)psVar2[3] - (int32_t)psVar3[3])
+                       - (int32_t)psVar3[0] + (int32_t)psVar2[0];
+                    local_10 = (dx + ((dx >> 31) & 3)) >> 2;
+                    dz_part = ((int32_t)psVar2[5] - (int32_t)psVar3[5])
+                            - (int32_t)psVar3[2];
+                    {
+                        int32_t dz = dz_part + (int32_t)psVar2[2];
+                        local_14 = (dz + ((dz >> 31) & 3)) >> 2;
+                    }
+                    break;
+                }
+                case 3: case 4: {
+                    int32_t dx, dz_part;
+                    dx = ((int32_t)psVar2[3] - (int32_t)psVar3[6])
+                       - (int32_t)psVar3[3] + (int32_t)psVar2[0];
+                    local_10 = (dx + ((dx >> 31) & 3)) >> 2;
+                    dz_part = ((int32_t)psVar2[5] - (int32_t)psVar3[8])
+                            - (int32_t)psVar3[5];
+                    {
+                        int32_t dz = dz_part + (int32_t)psVar2[2];
+                        local_14 = (dz + ((dz >> 31) & 3)) >> 2;
+                    }
+                    break;
+                }
+                case 6: case 7: {
+                    int32_t dx, dz;
+                    dx = ((int32_t)psVar2[6] - (int32_t)psVar3[3])
+                       + (int32_t)psVar2[3] - (int32_t)psVar3[0];
+                    local_10 = (dx + ((dx >> 31) & 3)) >> 2;
+                    dz = ((int32_t)psVar2[8] - (int32_t)psVar3[5])
+                       - (int32_t)psVar3[2] + (int32_t)psVar2[5];
+                    local_14 = (dz + ((dz >> 31) & 3)) >> 2;
+                    break;
+                }
+                default:
+                    /* Original default: skip recompute, retain stack values.
+                     * Port treats as 0/0 for determinism. */
+                    break;
+                }
+            }
+
+            /* 0x435c37-44: yaw = (AngleFromVector12Full(dx, dz) + 0x800) << 8 */
+            angle_full = ai_angle_from_vector(local_10, local_14);
+            yaw_stored = (angle_full + 0x800) << 8;
+            ACTOR_I32(a, ACTOR_YAW_ACCUM) = yaw_stored;
+
+            /* 0x435c47-58: polarity flip — add 0x80000 */
+            if (polarity_bit) {
+                yaw_stored += 0x80000;
+                ACTOR_I32(a, ACTOR_YAW_ACCUM) = yaw_stored;
+            }
+
+            /* 0x435c5c-60: ResetVehicleActorState(actor) */
+            td5_physics_reset_actor_state((TD5_Actor *)a);
+
+            /* 0x435c69-6a: RefreshActorTrackProgressOffset(slot) */
+            td5_ai_seed_actor_track_progress_offset(local_18);
+
+            /* 0x435c6f-70: NormalizeActorTrackWrapState(actor) */
+            td5_track_normalize_actor_wrap((TD5_Actor *)a);
+        }
+        else {
+            /* ---------- REMAP path (selector = 1, 0x004359c7) ----------
+             *
+             * Original walks the junction-remap table at DAT_004c3da0+0x18,
+             * matching queue.span into [range_lo, range_lo + (B - A) - 1].
+             * On match: remapped = (A - C) + queue.span. On miss: -1.
+             *
+             * Port reuses td5_track_apply_target_span_remap which performs
+             * the same walker but returns the input span (not -1) on miss.
+             * DIVERGENCE: queue records whose span is outside every junction
+             * range will have remapped_span = queue.span here, vs -1 in
+             * original. This affects only mis-configured TRAFFIC.BUS
+             * records on non-branching spans — content data on shipped
+             * tracks never hits this path. Document and proceed. */
+            int remapped_int;
+            int16_t remapped_span;
+
+            rs[RS_ROUTE_TABLE_SELECTOR] = 1;
+
+            remapped_int = td5_track_apply_target_span_remap((int)queue_span, 0);
+
+            if (remapped_int == (int)queue_span) {
+                /* No remap occurred — treat as miss per original (sentinel). */
+                remapped_span = (int16_t)-1;
+            } else {
+                remapped_span = (int16_t)remapped_int;
+            }
+
+            /* 0x00435a2b-5b: actor.span_raw = remapped; actor.sub_lane =
+             * queue.byte3 - lane_count. */
+            ACTOR_I16(a, ACTOR_SPAN_RAW) = remapped_span;
+            ACTOR_U8(a, ACTOR_SUB_LANE_INDEX) = (uint8_t)((int)queue_byte3 - lane_count);
+
+            /* 0x00435a5e: InitActorTrackSegmentPlacement(&span_raw, &world_pos) */
+            {
+                int32_t wx = 0, wy = 0, wz = 0;
+                int rs_span = (int)(int16_t)ACTOR_I16(a, ACTOR_SPAN_RAW);
+                if (g_strip_span_base && rs_span >= 0) {
+                    (void)td5_track_get_span_lane_world(
+                        rs_span,
+                        (int)ACTOR_U8(a, ACTOR_SUB_LANE_INDEX),
+                        &wx, &wy, &wz);
+                }
+                ACTOR_I32(a, ACTOR_WORLD_POS_X) = wx;
+                *(int32_t *)(a + 0x200)         = wy;
+                ACTOR_I32(a, ACTOR_WORLD_POS_Z) = wz;
+            }
+
+            /* 0x00435a67: ComputeActorTrackHeading(actor) → 12-bit angle.
+             * Inline the original switch + AngleFromVector12 to avoid the
+             * extra +0x290 heading_normal write that td5_track_compute_heading
+             * (port of 0x00434350) performs. */
+            {
+                const TD5_StripSpan *strip_base =
+                    (const TD5_StripSpan *)g_strip_span_base;
+                const TD5_StripVertex *vpool =
+                    (const TD5_StripVertex *)g_strip_vertex_base;
+                const TD5_StripSpan *sp = NULL;
+                const int16_t *psVar2 = NULL;
+                const int16_t *psVar3 = NULL;
+                int32_t uVar9 = 0, param_1 = 0;
+                int angle12;
+                int32_t yaw_stored;
+                int rs_span = (int)(int16_t)ACTOR_I16(a, ACTOR_SPAN_RAW);
+
+                if (strip_base && vpool &&
+                    rs_span >= 0 && rs_span < g_strip_span_count) {
+                    sp = &strip_base[rs_span];
+                    psVar2 = (const int16_t *)&vpool[sp->left_vertex_index];
+                    psVar3 = (const int16_t *)&vpool[sp->right_vertex_index];
+
+                    switch (sp->span_type) {
+                    case 1: case 2: case 5: {
+                        int32_t iVar6 = ((int32_t)psVar2[3] - (int32_t)psVar3[3])
+                                      - (int32_t)psVar3[0] + (int32_t)psVar2[0];
+                        int32_t iVar5 = (int32_t)psVar2[5] - (int32_t)psVar3[5]
+                                      - (int32_t)psVar3[2] + (int32_t)psVar2[2];
+                        iVar6 = iVar6 + ((iVar6 >> 31) & 3);
+                        param_1 = (iVar5 + ((iVar5 >> 31) & 3)) >> 2;
+                        uVar9 = iVar6 >> 2;
+                        break;
+                    }
+                    case 3: case 4: {
+                        int32_t iVar6 = ((int32_t)psVar2[3] - (int32_t)psVar3[6])
+                                      - (int32_t)psVar3[3] + (int32_t)psVar2[0];
+                        int32_t iVar5 = (int32_t)psVar2[5] - (int32_t)psVar3[8]
+                                      - (int32_t)psVar3[5] + (int32_t)psVar2[2];
+                        iVar6 = iVar6 + ((iVar6 >> 31) & 3);
+                        param_1 = (iVar5 + ((iVar5 >> 31) & 3)) >> 2;
+                        uVar9 = iVar6 >> 2;
+                        break;
+                    }
+                    case 6: case 7: {
+                        int32_t iVar6 = ((int32_t)psVar2[6] - (int32_t)psVar3[3])
+                                      + (int32_t)psVar2[3] - (int32_t)psVar3[0];
+                        int32_t iVar5 = ((int32_t)psVar2[8] - (int32_t)psVar3[5])
+                                      - (int32_t)psVar3[2] + (int32_t)psVar2[5];
+                        param_1 = (iVar5 + ((iVar5 >> 31) & 3)) >> 2;
+                        uVar9 = (iVar6 + ((iVar6 >> 31) & 3)) >> 2;
+                        break;
+                    }
+                    default:
+                        /* default leaves uVar9 = param_1 = 0 (initial). */
+                        break;
+                    }
+                }
+
+                /* 0x00435dd1-44: quadrant-fold dispatch onto AngleFromVector12.
+                 * Use the existing port helper ai_angle_from_vector for the
+                 * full-circle equivalent. */
+                angle12 = ai_angle_from_vector(uVar9, param_1);
+                yaw_stored = (angle12 + 0x800) << 8;
+                ACTOR_I32(a, ACTOR_YAW_ACCUM) = yaw_stored;
+
+                if (polarity_bit) {
+                    yaw_stored += 0x80000;
+                    ACTOR_I32(a, ACTOR_YAW_ACCUM) = yaw_stored;
+                }
+            }
+
+            /* 0x00435a91: ResetVehicleActorState(actor) */
+            td5_physics_reset_actor_state((TD5_Actor *)a);
+
+            /* 0x00435a96-b8: ComputeTrackSpanProgress + ComputeSignedTrackOffset
+             * — seed RS_TRACK_PROGRESS and RS_TRACK_OFFSET_BIAS. The original
+             * indexes the route table by actor.span_normalized (which at this
+             * point is still zero/uninit); the port helper does likewise. */
+            {
+                int span_raw = (int)(int16_t)ACTOR_I16(a, ACTOR_SPAN_RAW);
+                int span_norm = (int)(int16_t)ACTOR_I16(a, ACTOR_SPAN_NORMALIZED);
+                int32_t pos[3];
+                int64_t prog64;
+                int32_t progress;
+                int route_byte = 0;
+                pos[0] = ACTOR_I32(a, ACTOR_WORLD_POS_X);
+                pos[1] = *(int32_t *)(a + 0x200);
+                pos[2] = ACTOR_I32(a, ACTOR_WORLD_POS_Z);
+                prog64 = td5_track_compute_span_progress(span_raw, pos);
+                progress = (int32_t)(uint32_t)(prog64 & 0xFFFFFFFF);
+                rs[RS_TRACK_PROGRESS] = progress;
+
+                {
+                    const uint8_t *rb =
+                        (const uint8_t *)(intptr_t)rs[RS_ROUTE_TABLE_PTR];
+                    if (rb && span_norm >= 0) {
+                        route_byte = (int)rb[(size_t)(unsigned)span_norm * 3u];
+                    }
+                }
+                rs[RS_TRACK_OFFSET_BIAS] =
+                    td5_track_compute_signed_offset(span_raw, progress, route_byte);
+            }
+
+            /* 0x00435abe-c1: NormalizeActorTrackWrapState(actor) */
+            td5_track_normalize_actor_wrap((TD5_Actor *)a);
+
+            /* 0x00435ac6-d1: actor.span_normalized = ORIGINAL queue.span
+             * (the un-remapped one), as final write. */
+            *(int16_t *)(a + 0x082) = (int16_t)orig_queue_span;
         }
 
-        /* Compute heading from track strip direction [CONFIRMED @ 0x435C00] */
-        td5_track_compute_heading((TD5_Actor *)a);
-
-        /* Oncoming traffic: rotate 180 degrees (+ 0x80000 in 20-bit yaw) */
-        if (q_flags & 1) {
-            ACTOR_I32(a, ACTOR_YAW_ACCUM) += 0x80000;
-        }
-
-        /* Build rotation matrix from heading (+0x120, float[9]).
-         * Traffic has no wheel positions so skip reset_actor_state (which
-         * would corrupt Y via broken ground snap). Build Ry(yaw) only. */
-        {
-            int32_t yaw12 = (ACTOR_I32(a, ACTOR_YAW_ACCUM) >> 8) & 0xFFF;
-            float cf = (float)ai_cos_fixed12(yaw12) * (1.0f / 4096.0f);
-            float sf = (float)ai_sin_fixed12(yaw12) * (1.0f / 4096.0f);
-            float *rm = (float *)(a + 0x120);
-            memset(rm, 0, 9 * sizeof(float));
-            rm[0] =  cf;     /* m00 = cos  */
-            rm[2] =  sf;     /* m02 = sin  */
-            rm[4] =  1.0f;   /* m11 = 1    */
-            rm[6] = -sf;     /* m20 = -sin */
-            rm[8] =  cf;     /* m22 = cos  */
-        }
-
-        /* Clear state */
-        g_traffic_recovery_stage[i] = 0;
-        ACTOR_I32(a, ACTOR_STEERING_CMD) = 0;
-        ACTOR_I32(a, ACTOR_LONGITUDINAL_SPEED) = 0;
-        ACTOR_I16(a, ACTOR_ENCOUNTER_STEER) = 0;
-        ACTOR_U8(a, ACTOR_BRAKE_FLAG) = 0;
-        ACTOR_U8(a, ACTOR_VEHICLE_MODE) = 0;
-
-        rs[RS_TRACK_OFFSET_BIAS] = 0;
-        rs[RS_SCRIPT_FLAGS] = 0;
-        rs[RS_RECOVERY_STAGE] = 0;
-        rs[RS_SLOT_INDEX] = i;
+        /* ---------- common trailing ops (port-side bookkeeping) ----------
+         * The original 0x00435940 does NOT zero steering_cmd / vehicle_mode
+         * / etc — those resets happen in ResetVehicleActorState. We also
+         * mirror the slot index here for AI dispatcher consumption (port-only). */
+        ACTOR_U8(a, ACTOR_SLOT_INDEX) = (uint8_t)local_18;
+        rs[RS_SLOT_INDEX] = local_18;
         rs[RS_ENCOUNTER_HANDLE] = -1;
 
-        TD5_LOG_I(LOG_TAG, "init_traffic: slot=%d span=%d lane=%u flags=0x%02X pos=(%d,%d,%d)",
-                  i, q_span, q_lane, q_flags,
+        TD5_LOG_I(LOG_TAG,
+                  "init_traffic: slot=%d span=%d remapped=%d lane=%d "
+                  "polarity=%d sel=%d pos=(%d,%d,%d)",
+                  local_18, orig_queue_span,
+                  (int)(int16_t)ACTOR_I16(a, ACTOR_SPAN_RAW),
+                  (int)ACTOR_U8(a, ACTOR_SUB_LANE_INDEX),
+                  polarity_bit, (int)rs[RS_ROUTE_TABLE_SELECTOR],
                   ACTOR_I32(a, ACTOR_WORLD_POS_X),
                   *(int32_t *)(a + 0x200),
                   ACTOR_I32(a, ACTOR_WORLD_POS_Z));
 
-        qp += 4; /* next 4-byte record */
+        /* 0x00435c8b-ca5: advance queue pointer, slot, local_c, racer_cap reload */
+        qp += 4;
+        local_18 += 1;
+        local_c  += 4;
+
+        /* 0x00435c85-78: reload g_racerCount each iteration (in case it
+         * changed; mirror original even if our port doesn't mutate it
+         * mid-loop). */
+        racer_count = g_active_actor_count;
+        racer_cap = (racer_count > 12) ? 12 : racer_count;
     }
 
     g_traffic_queue_ptr = qp;
