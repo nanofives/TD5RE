@@ -3462,7 +3462,16 @@ int td5_track_normalize_actor_wrap(TD5_Actor *actor)
         ring_length = (int32_t)g_td5.track_span_ring_length;
     }
     if (ring_length == 0)
-        return 0; /* divergence guard; see FIXME above */
+        return 0; /* PORT-ONLY GUARD (KEEP): original 0x00443FC4 issues
+                   * IDIV dword ptr [0x004c3d90] unconditionally and traps
+                   * if g_trackTotalSpanCount==0. Upstream invariant in
+                   * original is "STRIP.DAT was parsed before any actor
+                   * crosses this code path" (set in LoadStripFile @
+                   * 0x004444A0). Port reaches the wrap normalizer from
+                   * the FRONTEND init pass (td5_game.c spawn-actor at
+                   * menu enter) which runs BEFORE the strip file is
+                   * bound, so the guard cannot be dropped without
+                   * regressing reach analysis. */
 
     track_state = (int16_t *)((uint8_t *)actor + 0x80);
 
