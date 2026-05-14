@@ -3204,8 +3204,55 @@ deactivate:
  *   After traffic loop: UpdateSpecialTrafficEncounter
  * ======================================================================== */
 
+/* ========================================================================
+ * Pool13 pilot trace integration (0x00436A70 UpdateRaceActors).
+ * Audit: re/analysis/pilot_00436A70_audit.md.
+ *
+ * The pilot snapshot mirrors the dispatcher's input set as read by Frida
+ * from the original. Collector lives in this TU so it can access the
+ * private slot_state + actor pointer state. */
+#include "td5_pilot_trace_00436A70.h"
+
+/* Accessors used by td5_pilot_trace_00436A70.c. */
+int32_t *td5_pilot_00436A70_route_state_ptr(void) {
+    return g_route_state_base;
+}
+char *td5_pilot_00436A70_actor_base_ptr(void) {
+    return g_actor_base;
+}
+
+void td5_pilot_00436A70_collect(PilotSnapshot_00436A70 *snap) {
+    int i;
+
+    snap->network_active = g_td5.network_active ? 1 : 0;
+    snap->racer_count    = g_active_actor_count;
+    snap->drag_mode      = g_td5.drag_race_enabled ? 1 : 0;
+    snap->wanted_mode    = g_td5.wanted_mode_enabled ? 1 : 0;
+    snap->encounter_handle  = g_encounter_tracked_handle;
+    snap->encounter_enabled = g_encounter_enabled;
+    /* Port doesn't track g_trackTotalSpanCount as a single int32; use the
+     * ring length the port consults for branch detection. */
+    snap->track_total_span_count = td5_track_get_ring_length();
+
+    for (i = 0; i < PILOT_00436A70_N_SLOTS; i++) {
+        char *actor = (g_actor_base && i < TD5_MAX_TOTAL_ACTORS)
+                       ? actor_ptr(i) : NULL;
+        snap->slot_state[i]    = (int)g_slot_state[i];
+        snap->span_raw[i]      = actor ? (int)(int16_t)ACTOR_I16(actor, ACTOR_SPAN_RAW) : 0;
+        snap->span_norm[i]     = actor ? (int)(int16_t)ACTOR_I16(actor, ACTOR_SPAN_NORMALIZED) : 0;
+        snap->lin_vel_x[i]     = actor ? ACTOR_I32(actor, ACTOR_LIN_VEL_X) : 0;
+        snap->lin_vel_z[i]     = actor ? ACTOR_I32(actor, ACTOR_LIN_VEL_Z) : 0;
+        snap->world_pos_x[i]   = actor ? ACTOR_I32(actor, ACTOR_WORLD_POS_X) : 0;
+        snap->world_pos_z[i]   = actor ? ACTOR_I32(actor, ACTOR_WORLD_POS_Z) : 0;
+        snap->recovery_stage[i] = actor ? (int)(uint8_t)ACTOR_U8(actor, 0x37B) : 0;
+        snap->wanted_damage[i] = (int)g_wanted_damage_state[i];
+    }
+}
+
 void td5_ai_update_race_actors(void) {
     int i;
+
+    td5_pilot_emit_00436A70_enter();
 
     /* --- Step 1: Rubber-band already computed in td5_ai_tick --- */
     td5_ai_refresh_route_state();
@@ -3247,6 +3294,8 @@ void td5_ai_update_race_actors(void) {
         /* --- Step 4: Special encounter check --- */
         td5_ai_update_special_encounter();
     }
+
+    td5_pilot_emit_00436A70_leave();
 }
 
 /**
@@ -3305,17 +3354,37 @@ static void ai_update_single_racer(int slot) {
     case 0x01: /* Player: skip AI update */
         break;
 
-    case 0x02: /* Finished/dead: brake behavior */
+    case 0x02: /* Finished/dead: brake behavior
+                * [precise-port pool13 0x00436A70: state-2 dispatch] */
         {
             int32_t fwd = g_actor_forward_track_component[slot];
             if (fwd < 0) {
-                /* Moving backward: zero controls */
+                /* [0x00436EE0-E4] Moving backward: word ptr [ESI] = 0
+                 * ESI = &actor.+0x33E. Clear encounter_steer = 0. */
                 ACTOR_I16(actor, ACTOR_ENCOUNTER_STEER) = 0;
             } else {
-                /* Moving forward: brake */
+                /* [0x00436ED5-DD] Moving forward: brake_flag = 1,
+                 * encounter_steer = 0xFF00 (== (int16_t)-0x100). */
                 ACTOR_U8(actor, ACTOR_BRAKE_FLAG) = 1;
                 ACTOR_I16(actor, ACTOR_ENCOUNTER_STEER) = (int16_t)(-0x100);
             }
+            /* [precise-port D4 fix from pilot_00436A70_audit]
+             * Original [0x00436EE5-F5] unconditionally writes a 5-byte
+             * cluster after the fwd-comp branch:
+             *   MOV byte ptr [ESI+0x36], 0xff  ; actor+0x374
+             *   MOV byte ptr [ESI+0x35], 0xff  ; actor+0x373
+             *   MOV byte ptr [ESI+0x34], 0xff  ; actor+0x372
+             *   MOV byte ptr [ESI+0x33], 0xff  ; actor+0x371
+             *   MOV byte ptr [ESI+0x38], 0x00  ; actor+0x376
+             * ESI = &actor.+0x33E so +0x33..0x38 = actor offsets 0x371..0x376.
+             * Port previously skipped these; the cluster is faithful to the
+             * listing's unconditional path (both branches above fall through
+             * to it via JMP 0x00436EE5). */
+            ACTOR_U8(actor, 0x371) = 0xff;
+            ACTOR_U8(actor, 0x372) = 0xff;
+            ACTOR_U8(actor, 0x373) = 0xff;
+            ACTOR_U8(actor, 0x374) = 0xff;
+            ACTOR_U8(actor, 0x376) = 0x00;
         }
         break;
     }
