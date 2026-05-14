@@ -6932,45 +6932,162 @@ static void update_engine_speed_smoothed(TD5_Actor *actor)
     actor->engine_speed_accum = rpm;
 }
 
-/* --- UpdateEngineSpeedAccumulator (0x42EDF0) --- */
+/* --- UpdateEngineSpeedAccumulator (0x0042EDF0) ---
+ *
+ * Byte-faithful port of FUN_0042EDF0 (RE: TD5_pool7 read-only listing,
+ * audited 2026-05-14). Mirrors the original x86 control flow line-for-line:
+ *
+ *   0x42EDF0  PUSH ESI                          ; entry
+ *   0x42EDF1  MOV  ESI, [ESP+8]                 ; ESI = actor (param_1)
+ *   0x42EDF5  XOR  EAX, EAX
+ *   0x42EDF7  MOV  AL,  BYTE [ESI+0x36b]        ; AL  = current_gear
+ *   0x42EDFD  PUSH EDI
+ *   0x42EDFE  MOV  EDI, EAX                     ; EDI = gear (zero-extended)
+ *   0x42EE00  CMP  EDI, 0x1
+ *   0x42EE03  JNZ  0x42EE11                     ; gear != 1 → forward path
+ *   0x42EE05  PUSH ESI
+ *   0x42EE06  CALL 0x0042ed50                   ; UpdateVehicleEngineSpeedSmoothed
+ *   0x42EE0B  ADD  ESP, 0x4
+ *   0x42EE0E  POP  EDI; POP ESI; RET            ; gear==1: neutral helper + ret
+ * Forward path (gear != 1):
+ *   0x42EE11  MOV  EAX, [ESI+0x314]             ; EAX = longitudinal_speed (int32)
+ *   0x42EE17  SAR  EAX, 0x8                     ; EAX = speed >> 8 (signed arith)
+ *   0x42EE1A  CDQ                               ; EDX = sign(EAX)
+ *   0x42EE1B  XOR  EAX, EDX
+ *   0x42EE1D  SUB  EAX, EDX                     ; EAX = abs(speed >> 8)
+ *   0x42EE1F  MOV  EDX, [ESP+0x10]              ; EDX = param_2 (tuning_data_ptr)
+ *   0x42EE23  MOVSX EDX, WORD [EDX+EDI*2+0x2e]  ; EDX = gear_ratio (signed int16)
+ *   0x42EE28  MOV  ECX, [ESI+0x310]             ; ECX = engine_speed_accum (rpm)
+ *   0x42EE2E  IMUL EAX, EDX                     ; EAX *= gear_ratio
+ *   0x42EE31  LEA  EAX, [EAX+EAX*4]             ; EAX *= 5
+ *   0x42EE34  LEA  EAX, [EAX+EAX*8]             ; EAX *= 9  (cumulative *45 = 0x2D)
+ *   0x42EE37  CDQ
+ *   0x42EE38  AND  EDX, 0xfff                   ; round-toward-zero bias for SAR 12
+ *   0x42EE3E  ADD  EAX, EDX
+ *   0x42EE40  SAR  EAX, 0xc                     ; EAX = (abs*ratio*45) >> 12 (signed r->0)
+ *   0x42EE43  ADD  EAX, 0x190                   ; target = step + 400
+ *   0x42EE48  MOV  EDX, ECX                     ; EDX = rpm
+ *   0x42EE4A  SUB  EDX, EAX                     ; EDX = delta = rpm - target
+ *   0x42EE4C  CMP  EDX, 0x320
+ *   0x42EE52  JLE  0x42EE5C                     ; delta <= 0x320 → not fast-down
+ *   0x42EE54  SUB  ECX, 0xc8                    ; fast-down: rpm -= 200
+ *   0x42EE5A  JMP  0x42EE79                     ; → clamp/store
+ *   0x42EE5C  CMP  EDX, 0xfffffce0              ; (-800)
+ *   0x42EE62  JGE  0x42EE6C                     ; delta >= -800 → smooth
+ *   0x42EE64  ADD  ECX, 0xc8                    ; fast-up: rpm += 200
+ *   0x42EE6A  JMP  0x42EE79                     ; → clamp/store
+ * Smooth path (-800 <= delta <= 0x320):
+ *   0x42EE6C  SUB  EAX, ECX                     ; EAX = target - rpm (= -delta)
+ *   0x42EE6E  CDQ
+ *   0x42EE6F  AND  EDX, 0x3                     ; round-toward-zero bias for SAR 2
+ *   0x42EE72  ADD  EAX, EDX
+ *   0x42EE74  SAR  EAX, 0x2                     ; step = (target-rpm) >> 2 (signed r->0)
+ *   0x42EE77  ADD  ECX, EAX                     ; rpm += step
+ * Clamp/store:
+ *   0x42EE79  MOV  EAX, [ESI+0x1bc]             ; EAX = tuning_data_ptr (actor field)
+ *   0x42EE7F  MOVSX EAX, WORD [EAX+0x72]        ; EAX = redline (int16)
+ *   0x42EE83  CMP  ECX, EAX
+ *   0x42EE85  JLE  0x42EE89
+ *   0x42EE87  MOV  ECX, EAX                     ; rpm = min(rpm, redline)
+ *   0x42EE89  POP  EDI
+ *   0x42EE8A  MOV  [ESI+0x310], ECX             ; store rpm
+ *   0x42EE90  POP  ESI; RET
+ *
+ * Notes:
+ *   - Original takes a SECOND param (tuning_data_ptr) loaded from [ESP+0x10].
+ *     Both callers (0x00404030 UpdatePlayerVehicleDynamics, 0x00404EC0
+ *     UpdateAIVehicleDynamics) cache EBX = [actor+0x1bc] and push it as the
+ *     second arg, so param_2 == actor->tuning_data_ptr in practice. The port
+ *     uses get_phys(actor) (which reads +0x1bc) and reads the gear ratio at
+ *     phys[+0x2e + gear*2] — equivalent in effect.
+ *   - abs() is computed on the SHIFTED value (`abs(speed >> 8)`), NOT on the
+ *     raw speed. For negative speed this rounds DOWN before abs, which
+ *     differs from `abs(speed) >> 8` by 1 in the absolute-value bin for
+ *     speeds that are not a multiple of 256. The prior port used
+ *     `abs(speed) >> 8`; this version mirrors the listing.
+ *   - Both SAR steps (>>12 and >>2 in the smooth path) include the explicit
+ *     CDQ+AND+ADD round-toward-zero bias used by the original — required for
+ *     bit-exact parity on negative intermediates (the >>12 step's intermediate
+ *     EAX is unsigned in practice because abs() preceded it, so the bias is
+ *     a no-op there, but kept for structural fidelity).
+ *   - Fast-down threshold is `delta > 0x320` (i.e. >= 0x321), from
+ *     `CMP EDX,0x320; JLE smooth`. Prior port used `> 0x321` (off-by-one) —
+ *     fixed here to match the listing exactly.
+ *   - Smooth-path bias `+ (sign? 3 : 0)` before `>> 2` was missing from the
+ *     prior port; added so the divide-by-4 rounds toward zero (matters when
+ *     target < rpm by an amount not divisible by 4).
+ *   - Final clamp is UPPER-only against redline. No 400 floor (original does
+ *     not clamp the lower bound here — see 0x42EE83 single CMP/JLE/MOV).
+ *
+ * Field offsets verified vs td5_types.h:
+ *   +0x1bc  tuning_data_ptr            +0x314  longitudinal_speed
+ *   +0x310  engine_speed_accum         +0x36b  current_gear (byte)
+ *   tuning[+0x2e + gear*2] = gear_ratio (int16)
+ *   tuning[+0x72]          = redline    (int16)
+ */
 void td5_physics_update_engine_speed(TD5_Actor *actor)
 {
     int16_t *phys = get_phys(actor);
     if (!phys) return;
 
-    int32_t gear = (int32_t)actor->current_gear;
+    /* MOVZX EDI, BYTE [ESI+0x36b]  [@ 0x42EDF5-0x42EDFE] — gear is treated as
+     * an unsigned byte index (XOR EAX,EAX / MOV AL,...). */
+    int32_t gear = (int32_t)(uint32_t)(uint8_t)actor->current_gear;
 
-    /* Neutral: use smoothed idle/rev path */
+    /* CMP EDI,1 / JNZ  [@ 0x42EE00-0x42EE03] — gear==1 → neutral helper. */
     if (gear == 1) {
         update_engine_speed_smoothed(actor);
         return;
     }
 
-    /* Target RPM from speed and gear ratio */
-    int32_t abs_speed = actor->longitudinal_speed;
-    if (abs_speed < 0) abs_speed = -abs_speed;
-    int32_t gear_ratio = (int32_t)PHYS_S(actor, 0x2E + gear * 2);
+    /* MOV EAX,[ESI+0x314]  [@ 0x42EE11] */
+    int32_t lspd = actor->longitudinal_speed;
+    /* SAR EAX,8  [@ 0x42EE17] — arithmetic shift, rounds toward -inf for neg. */
+    int32_t lspd_shr8 = (int32_t)(lspd >> 8); /* signed >> in two's complement */
+    /* CDQ; XOR EAX,EDX; SUB EAX,EDX  [@ 0x42EE1A-0x42EE1D] — abs(EAX). */
+    int32_t abs_shr8 = lspd_shr8 < 0 ? -lspd_shr8 : lspd_shr8;
 
-    /* target = abs(speed/256) * gear_ratio * 0x2D / 4096 + 400 */
-    int32_t target = ((abs_speed >> 8) * gear_ratio * 0x2D) >> 12;
-    target += 400;
+    /* MOVSX EDX,WORD [param_2 + gear*2 + 0x2e]  [@ 0x42EE23] — gear ratio.
+     * param_2 is the caller-cached tuning_data_ptr (== actor->tuning_data_ptr). */
+    int32_t gear_ratio = (int32_t)PHYS_S(actor, 0x2e + gear * 2);
 
+    /* MOV ECX,[ESI+0x310]  [@ 0x42EE28] */
     int32_t rpm = actor->engine_speed_accum;
+
+    /* IMUL EAX,EDX; LEA*5; LEA*9  [@ 0x42EE2E-0x42EE34] — EAX = abs*ratio*45. */
+    int32_t prod = abs_shr8 * gear_ratio * 0x2d;
+
+    /* CDQ; AND EDX,0xfff; ADD EAX,EDX; SAR EAX,12  [@ 0x42EE37-0x42EE40]
+     * — signed round-toward-zero divide by 4096. */
+    int32_t step12 = (prod + (((int32_t)((uint32_t)prod >> 31)) ? 0xfff : 0)) >> 12;
+
+    /* ADD EAX,0x190  [@ 0x42EE43] — target = step + 400. */
+    int32_t target = step12 + 0x190;
+
+    /* MOV EDX,ECX; SUB EDX,EAX  [@ 0x42EE48-0x42EE4A] — delta = rpm - target. */
     int32_t delta = rpm - target;
 
-    /* Asymmetric slew toward target */
-    if (delta > 0x321) {
-        rpm -= 200;         /* fast downward slew */
+    /* CMP EDX,0x320 / JLE  [@ 0x42EE4C-0x42EE52] — fast-down on delta > 0x320. */
+    if (delta > 0x320) {
+        /* SUB ECX,0xc8  [@ 0x42EE54] */
+        rpm = rpm - 0xc8;
+        /* JMP clamp/store  [@ 0x42EE5A] */
     } else if (delta < -800) {
-        rpm += 200;         /* fast upward slew */
+        /* CMP EDX,-800 / JGE smooth → fall-through fast-up
+         * ADD ECX,0xc8  [@ 0x42EE64] */
+        rpm = rpm + 0xc8;
+        /* JMP clamp/store  [@ 0x42EE6A] */
     } else {
-        rpm += (target - rpm) >> 2;  /* smooth approach */
+        /* Smooth path  [@ 0x42EE6C-0x42EE77] */
+        /* SUB EAX,ECX  — EAX = target - rpm (= -delta). */
+        int32_t toward = target - rpm;
+        /* CDQ; AND EDX,3; ADD EAX,EDX; SAR EAX,2 — signed r->0 divide by 4. */
+        int32_t s = (toward + (((int32_t)((uint32_t)toward >> 31)) ? 3 : 0)) >> 2;
+        /* ADD ECX,EAX. */
+        rpm = rpm + s;
     }
 
-    /* Cap at redline — original @ 0x42EE6F-0x42EE7A clamps only the UPPER
-     * bound; it does NOT have a 400 floor. Previously the port had
-     * `if (rpm < 400) rpm = 400;` which blocked the valid low-RPM
-     * transient during shifts. [CONFIRMED @ 0x42EE7A] */
+    /* Clamp/store  [@ 0x42EE79-0x42EE90] — upper clamp at redline, no floor. */
     int32_t redline = (int32_t)PHYS_S(actor, 0x72);
     if (rpm > redline) rpm = redline;
 
