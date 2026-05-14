@@ -2025,7 +2025,7 @@ int td5_ai_advance_track_script(int *rs) {
         uint32_t hd9 = (uint32_t)hdelta_mirror;
         int16_t span_raw = ACTOR_I16(actor, ACTOR_SPAN_RAW);
         int8_t strip_half = 0;
-        if (g_strip_span_base && span_raw >= 0) {
+        if (g_strip_span_base && span_raw >= 0 && (int32_t)span_raw < g_strip_span_count) {
             const uint8_t *rec = (const uint8_t *)g_strip_span_base
                                + (uint32_t)span_raw * 0x18;
             strip_half = (int8_t)((rec[3] >> 1) & 7);
