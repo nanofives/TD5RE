@@ -2988,11 +2988,19 @@ static void apply_collision_response(TD5_Actor *penetrator, TD5_Actor *target,
     int32_t saved_omega_A = A->angular_velocity_yaw;
     int32_t saved_omega_B = B->angular_velocity_yaw;
 
-    /* Mass from cardef+0x88 (int16); clamp invalid values. */
+    /* Mass from cardef+0x88 (int16). [CONFIRMED @ 0x00407BE7, 0x00407BFE,
+     * 0x00407DA0, 0x00407DB4]: original ApplyVehicleCollisionImpulse loads
+     * mass via MOVSX with NO clamp. Upstream writers guarantee mass > 0
+     * before V2V fires: (a) racing slots 0..5 load carparam.dat into
+     * car_definition (positive int16); (b) traffic slots 6+ get an explicit
+     * mass=0x20 write at InitializeRaceVehicleRuntime+0xF5 (`MOV word ptr
+     * [EAX + 0x88], 0x20` @ 0x0042F235), mirrored in the port's
+     * traffic-init path (td5_physics.c:8116-8118). The earlier port-only
+     * `if (mass <= 0) mass = 0x20;` defensive clamp was never reachable
+     * and diverged from the byte-faithful listing. Removed per
+     * audit-v2v-mass-clamp 2026-05-14. */
     int32_t mass_A = (int32_t)CDEF_S(A, 0x88);
     int32_t mass_B = (int32_t)CDEF_S(B, 0x88);
-    if (mass_A <= 0) mass_A = 0x20;
-    if (mass_B <= 0) mass_B = 0x20;
 
     /* --- 2. Rotate both velocities into A's local (contact) frame --- */
     int32_t cos_a = cos_fixed12(angle);
