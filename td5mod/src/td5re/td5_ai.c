@@ -1151,6 +1151,24 @@ void td5_ai_init_race_actor_runtime(void) {
  * param steer_weight: 0x10000 (braking), 0x20000 (coasting), 0x4000 (script)
  * ======================================================================== */
 
+/* Pilot tracing — per-function entry/exit emitter for pool10 / 0x004340C0. */
+extern void td5_pilot_emit_004340C0_enter(int slot, const int32_t *rs,
+                                          const void *actor,
+                                          int32_t steer_weight,
+                                          const char *call_site);
+extern void td5_pilot_emit_004340C0_leave(int slot, const int32_t *rs,
+                                          const void *actor);
+
+/* Thread-local-style call-site hint. Set by each port caller immediately
+ * before invoking td5_ai_update_steering_bias() so the trace probe can
+ * attribute rows to "track_behavior", "traffic_plan", or "script_advance"
+ * (mirroring the Frida probe's return-address classification). */
+static const char *s_pilot_004340C0_callsite = "unknown";
+
+void td5_ai_pilot_004340C0_set_callsite(const char *site) {
+    s_pilot_004340C0_callsite = site ? site : "unknown";
+}
+
 void td5_ai_update_steering_bias(int *route_state, int32_t steer_weight) {
     /* Literal translation of UpdateActorSteeringBias @ 0x4340C0.
      *
@@ -1170,6 +1188,9 @@ void td5_ai_update_steering_bias(int *route_state, int32_t steer_weight) {
      */
     int   slot       = route_state[RS_SLOT_INDEX];
     char *actor      = actor_ptr(slot);
+    const char *site = s_pilot_004340C0_callsite;
+    s_pilot_004340C0_callsite = "unknown"; /* consumed; reset for next call */
+    td5_pilot_emit_004340C0_enter(slot, route_state, actor, steer_weight, site);
     int32_t iVar6    = ACTOR_I32(actor, ACTOR_LONGITUDINAL_SPEED);
     int32_t sign_mask = iVar6 >> 31;
     int32_t iVar4    = ACTOR_I32(actor, ACTOR_REAR_AXLE_SLIP) >> 8;
@@ -1283,6 +1304,8 @@ clamp_end:
     TD5_LOG_I(LOG_TAG, "steer_bias: slot=%d L=%d R=%d w=%d out=%d",
               slot, left_dev, right_dev, steer_weight,
               ACTOR_I32(actor, ACTOR_STEERING_CMD));
+
+    td5_pilot_emit_004340C0_leave(slot, route_state, actor);
 }
 
 /* ========================================================================
@@ -1774,6 +1797,7 @@ int td5_ai_advance_track_script(int *rs) {
         uint32_t dev = ((uint32_t)(-(int32_t)d1)) & 0xFFF;
         rs[RS_LEFT_DEVIATION]  = (int32_t)dev;
         rs[RS_RIGHT_DEVIATION] = (int32_t)(0xFFF - dev);
+        td5_ai_pilot_004340C0_set_callsite("script_advance");
         td5_ai_update_steering_bias(rs, 0x4000);
     }
 
@@ -2274,6 +2298,7 @@ void td5_ai_update_track_behavior(int slot) {
      * ~0 torque and therefore ~0 omega, so the countdown grid-hold period
      * naturally leaves actors still. */
     steer_weight = (threshold_result != 0) ? 0x10000 : 0x20000;
+    td5_ai_pilot_004340C0_set_callsite("track_behavior");
     td5_ai_update_steering_bias(rs, steer_weight);
     TD5_LOG_I(LOG_TAG, "track_behavior: slot=%d thr=%d weight=0x%X",
               slot, threshold_result, steer_weight);
@@ -2867,6 +2892,7 @@ void td5_ai_update_traffic_route_plan(int slot) {
     }
 
     /* --- Stage 6: Steering --- */
+    td5_ai_pilot_004340C0_set_callsite("traffic_plan");
     td5_ai_update_steering_bias(rs, 0x8000);
 
     /* --- Stage 7: Peer avoidance / yield --- */
