@@ -43,6 +43,7 @@
 #include "td5_platform.h"
 #include "td5_trace.h"    /* inner-tick physics_trace stages */
 #include "td5_pilot_trace.h" /* precise-port pilot CSV emit for 0x00403720 */
+#include "td5_pilot_trace_00405B40.h" /* precise-port pilot CSV emit for 0x00405B40 */
 #include "td5re.h"
 
 /* Include the full actor struct for field-level access.
@@ -5598,68 +5599,197 @@ void td5_physics_refresh_wheel_contacts(TD5_Actor *actor)
 }
 
 /* ========================================================================
- * ClampVehicleAttitudeLimits (0x405B40)
+ * ClampVehicleAttitudeLimits (0x405B40) — precise-port (pool4 / session 20)
  *
- * Roll limit: +/- 0x355, Pitch limit: +/- 0x3A4
- * Two modes based on collisions toggle.
+ * Listing: 0x00405B40..0x00405D65 (Ghidra TD5_pool4, 2026-05-14)
+ * Audit:   re/analysis/pilot_00405B40_audit.md
+ *
+ * Reads two 12-bit display angles (roll, pitch) and dispatches on the
+ * global at 0x00463188 (Ghidra "g_cameraMode" -- actually the user's
+ * 3D-collisions option):
+ *   *0x00463188 == 0 -> MODE-0 (matrix recovery latch)
+ *   *0x00463188 != 0 -> MODE-1 (soft nudge + hard clamp)
+ *
+ * The port mirrors g_collisions_enabled to this dword. NOTE: the SETTER
+ * `td5_physics_set_collisions(int enabled)` writes the value INVERTED vs
+ * the original ("0=on, 1=off" comment in line ~6983); that is a separate
+ * upstream binding bug. This function ports the LISTING faithfully -- it
+ * reads g_collisions_enabled with the same semantics as the original reads
+ * *0x00463188 (so the branch routing matches the LISTING, given that the
+ * port's value at this address means the same as the original's value).
  * ======================================================================== */
 
 void td5_physics_clamp_attitude(TD5_Actor *actor)
 {
-    int32_t roll  = (actor->euler_accum.roll >> 8) & 0xFFF;
-    int32_t pitch = (actor->euler_accum.pitch >> 8) & 0xFFF;
+    /* Pilot precise-port trace — emit input snapshot at entry. */
+    td5_pilot_emit_00405B40_enter(actor, (uintptr_t)__builtin_return_address(0));
 
-    /* Normalize to signed range: 0x000-0x7FF = 0 to +180, 0x800-0xFFF = -180 to 0 */
-    if (roll > 0x800) roll -= 0x1000;
-    if (pitch > 0x800) pitch -= 0x1000;
+    /* === Read 12-bit display angles + center-shift unwrap [0x00405B40-B85] ===
+     *
+     * Original: EAX = (uint16) actor->display_angle_roll  [+0x208]
+     *           ECX = (uint16) actor->display_angle_pitch [+0x20C]
+     *           iVar1 = ((EAX - 0x800) & 0xFFF) - 0x800   ; signed[-0x800..+0x7FF]
+     *           iVar2 = ((ECX - 0x800) & 0xFFF) - 0x800
+     *
+     * The center-shift unwrap maps the raw uint16 to signed [-0x800,+0x7FF].
+     * Critically, val == 0x800 maps to -0x800 (signed wrap), not +0x800.
+     * The earlier port used (val >> 8) & 0xFFF with "if (v > 0x800) v -= 0x1000"
+     * which off-by-ones at v == 0x800. */
+    int32_t raw_roll  = (uint16_t)actor->display_angles.roll;
+    int32_t raw_pitch = (uint16_t)actor->display_angles.pitch;
+    int32_t iVar1 = ((raw_roll  - 0x800) & 0xFFF) - 0x800;  /* signed roll  */
+    int32_t iVar2 = ((raw_pitch - 0x800) & 0xFFF) - 0x800;  /* signed pitch */
 
-    /* Hard-clamp / MODE-0 exceeded thresholds [CONFIRMED @ FUN_00405B40 0x405B63] */
-    int32_t roll_limit  = 0x355;
-    int32_t pitch_limit = 0x3A4;
-
-    if (g_collisions_enabled == 0) {
-        /* MODE 0 (collisions ON): original sets recovery flag (actor+0x379=1) when
-         * |roll| > 0x355 or |pitch| > 0x3A4, then copies rotation matrix via
-         * FUN_0042E1E0 to actor+0x150/+0x180. Port maps this to vehicle_mode=1
-         * (59-frame recovery ticker). [CONFIRMED @ FUN_00405B40 0x405B5D]
+    /* === Dispatch on collisions flag [0x00405B86-B88] === */
+    int branch_taken = 0;  /* 0=skip, 1=mode1, 2=mode0-latch */
+    if (g_collisions_enabled != 0) {
+        branch_taken = 1;
+        /* MODE-1: soft nudge then hard clamp [0x00405B8E-C3D].
          *
-         * Disabled: port's suspension equilibrium drift holds pitch ≈ ±935 on flat
-         * ground (7 units above the 932 limit), triggering recovery teleport on every
-         * actor every ~61 frames during normal driving. Fix pending suspension
-         * equilibrium correction (reference_port_ride_height_offset.md). */
-    } else {
-        /* MODE 1 (collisions OFF): soft nudge then hard clamp.
-         * Soft nudge threshold: 0x27F roll, 0x2BB pitch [CONFIRMED @ 0x405BEE]
-         * Hard clamp threshold: 0x355 roll, 0x3A4 pitch [CONFIRMED @ 0x405B63] */
-        int32_t roll_nudge  = 0x27F;
-        int32_t pitch_nudge = 0x2BB;
+         * Original layout is 8 straight-line independent `if`s with no
+         * combined early-out. The signed comparisons match the listing
+         * directly. Each hard-clamp branch writes BOTH the display_angles
+         * field AND the euler_accum field (the earlier port omitted the
+         * display_angles write). */
 
-        if (roll <= roll_nudge && roll >= -roll_nudge &&
-            pitch <= pitch_nudge && pitch >= -pitch_nudge)
+        /* Soft nudge: pull angular velocity back toward 0 with a fixed
+         * +/-0x200 step when |angle| > nudge threshold [0x00405B8E-CE].
+         * Original constants: ESI = +0x200, EDX = -0x200.
+         * Roll nudge bound: 0x27F (listing CMP EAX, 0xfffffd81 / 0x27f).
+         * Pitch nudge bound: 0x2BB (listing CMP ECX, 0xfffffd45 / 0x2bb). */
+        if (iVar1 < -0x27F) actor->angular_velocity_roll  += 0x200;
+        if (iVar1 >  0x27F) actor->angular_velocity_roll  += -0x200;
+        if (iVar2 < -0x2BB) actor->angular_velocity_pitch += 0x200;
+        if (iVar2 >  0x2BB) actor->angular_velocity_pitch += -0x200;
+
+        /* Hard clamp: zero omega and pin angle at +/-limit [0x00405BCE-C3D].
+         * Roll  limit: 0x355  (listing CMP EAX, 0xfffffcab / 0x355).
+         * Pitch limit: 0x3A4  (listing CMP ECX, 0xfffffc5c / 0x3a4).
+         *
+         * Both display_angle (+0x208 / +0x20C) AND euler_accum (+0x1F0 / +0x1F8)
+         * are written. euler_accum value is the display value shifted left by 8. */
+        if (iVar1 < -0x355) {
+            actor->angular_velocity_roll = 0;
+            actor->display_angles.roll   = (int16_t)0xFCAB;  /* (uint16)-0x355 */
+            actor->euler_accum.roll      = (int32_t)0xFFFCAB00; /* -0x35500 */
+        }
+        if (iVar1 >  0x355) {
+            actor->angular_velocity_roll = 0;
+            actor->display_angles.roll   = (int16_t)0x355;
+            actor->euler_accum.roll      = 0x35500;
+        }
+        if (iVar2 < -0x3A4) {
+            actor->angular_velocity_pitch = 0;
+            actor->display_angles.pitch   = (int16_t)0xFC5C;  /* (uint16)-0x3A4 */
+            actor->euler_accum.pitch      = (int32_t)0xFFFC5C00; /* -0x3A400 */
+        }
+        if (iVar2 >  0x3A4) {
+            actor->angular_velocity_pitch = 0;
+            actor->display_angles.pitch   = (int16_t)0x3A4;
+            actor->euler_accum.pitch      = 0x3A400;
+            /* original early-returns here as a compiler artifact (POP chain
+             * split); functionally equivalent to falling through to RET. */
+            td5_pilot_emit_00405B40_leave(actor, branch_taken);
             return;
-
-        if (roll > roll_nudge)  actor->angular_velocity_roll  -= 0x200;
-        if (roll < -roll_nudge) actor->angular_velocity_roll  += 0x200;
-        if (roll > roll_limit) {
-            actor->angular_velocity_roll = 0;
-            actor->euler_accum.roll = roll_limit << 8;
         }
-        if (roll < -roll_limit) {
-            actor->angular_velocity_roll = 0;
-            actor->euler_accum.roll = (-roll_limit) << 8;
-        }
-
-        if (pitch > pitch_nudge)  actor->angular_velocity_pitch -= 0x200;
-        if (pitch < -pitch_nudge) actor->angular_velocity_pitch += 0x200;
-        if (pitch > pitch_limit) {
-            actor->angular_velocity_pitch = 0;
-            actor->euler_accum.pitch = pitch_limit << 8;
-        }
-        if (pitch < -pitch_limit) {
-            actor->angular_velocity_pitch = 0;
-            actor->euler_accum.pitch = (-pitch_limit) << 8;
-        }
+        td5_pilot_emit_00405B40_leave(actor, branch_taken);
+        return;
     }
+
+    /* === MODE-0: matrix recovery latch [0x00405C5C-D65] ===
+     *
+     * If |roll| <= 0x355 AND |pitch| <= 0x3A4, no-op early return.
+     * Otherwise: build a delta-rotation matrix from (eul - omega) >> 8,
+     * post-multiply by actor->rotation_matrix, store the product in
+     * collision_spin_matrix (+0x180), snapshot rotation_matrix into
+     * saved_orientation (+0x150), set vehicle_mode=1, zero frame_counter.
+     *
+     * NOTE: the earlier port had this branch disabled with a comment
+     * about suspension equilibrium drift triggering spurious latches.
+     * Per the precise-port mandate, this function is now ported
+     * faithfully; the upstream suspension drift fix is out of scope. */
+
+    /* Inside-limits early-out [0x00405C5C-78] */
+    if (iVar1 >= -0x355 && iVar1 <= 0x355 &&
+        iVar2 >= -0x3A4 && iVar2 <= 0x3A4) {
+        td5_pilot_emit_00405B40_leave(actor, branch_taken);  /* branch_taken==0 here */
+        return;
+    }
+    branch_taken = 2;
+
+    /* Build delta-rotation angles: (eul - omega) >> 8 [0x00405C7E-CB].
+     * Original SAR is signed arithmetic shift right; signed int32 >> 8 in C
+     * is arithmetic for the platform we target (i686). The result is
+     * truncated to int16 via the `MOV word ptr [ESP+offset], reg` stores. */
+    int16_t delta_roll  = (int16_t)(((int32_t)(actor->euler_accum.roll  - actor->angular_velocity_roll))  >> 8);
+    int16_t delta_yaw   = (int16_t)(((int32_t)(actor->euler_accum.yaw   - actor->angular_velocity_yaw))   >> 8);
+    int16_t delta_pitch = (int16_t)(((int32_t)(actor->euler_accum.pitch - actor->angular_velocity_pitch)) >> 8);
+
+    /* BuildRotationMatrixFromAngles(&local_30, {delta_roll, delta_yaw, delta_pitch})
+     * [CALL 0x0042E1E0 at 0x00405CC8].  Original takes a short* with three
+     * angles laid out as roll/yaw/pitch. */
+    int16_t delta_angles[3] = { delta_roll, delta_yaw, delta_pitch };
+    float build_mat[9];
+    BuildRotationMatrixFromAngles(build_mat, delta_angles);
+
+    /* The original then shuffles the build output through `local_30..local_10`
+     * back into `local_60[0..8]`. The shuffle is identity for the port-side
+     * helper (which writes its 9-float row-major output directly into the
+     * destination buffer). Skip the shuffle.
+     *
+     * MultiplyRotationMatrices3x3(&actor->rotation_matrix, local_60, local_60)
+     * [CALL 0x0042DA10 at 0x00405D26]. */
+    float product[9];
+    MultiplyRotationMatrices3x3((float *)&actor->rotation_matrix,
+                                build_mat, product);
+
+    /* MOVSD.REP 12-dword copies [0x00405D2B-4C].
+     *
+     * Original copies 48 bytes (12 dwords) to BOTH destinations:
+     *   - +0x180 collision_spin_matrix <- product (9 floats) + 3 trailing
+     *     dwords from stack (originally the first row of the BuildRotation
+     *     output before the shuffle). The trailing 3 dwords land in
+     *     gap_1A4[12] which the actor struct marks "unused/reserved".
+     *   - +0x150 saved_orientation <- rotation_matrix (9 floats) + 3
+     *     trailing floats which are actor->render_pos at +0x144..+0x14F.
+     *     The trailing 3 dwords land in gap_174[4] + gap_178[8] which
+     *     the actor struct also marks "unused/reserved".
+     *
+     * Per static-port mandate we replicate the 48-byte copy semantics
+     * exactly via memcpy. The trailing 12 bytes are stack/render_pos
+     * residue but the original writes them, so we do too. */
+    memcpy(&actor->collision_spin_matrix, product, 9 * sizeof(float));
+    /* gap_1A4 trailing 12 bytes: original copies stack residue (the first
+     * row of the pre-shuffle BuildRotation output, which the shuffle then
+     * read into local_60). The exact values are stack garbage from the
+     * compiler's perspective, but bit-exact matching means writing the
+     * post-shuffle values that remain at the source addresses. Given the
+     * port doesn't perform the shuffle (it writes Build output directly to
+     * build_mat[0..8]), the equivalent residue is build_mat[0..2]. */
+    memcpy(((uint8_t *)&actor->collision_spin_matrix) + 9 * sizeof(float),
+           build_mat, 3 * sizeof(float));
+
+    memcpy(&actor->saved_orientation, &actor->rotation_matrix, 9 * sizeof(float));
+    /* gap_174/178 trailing 12 bytes: original copies the 12 bytes following
+     * rotation_matrix, which is render_pos (+0x144..+0x14F). */
+    memcpy(((uint8_t *)&actor->saved_orientation) + 9 * sizeof(float),
+           &actor->render_pos, 3 * sizeof(float));
+
+    /* Set recovery state flags [0x00405D4E-5D].
+     *   MOV byte ptr [EBX+0x379], 0x1   -> vehicle_mode = 1
+     *   MOV word ptr [EBX+0x338], 0x0   -> frame_counter = 0 (int16 write) */
+    actor->vehicle_mode = 1;
+    actor->frame_counter = 0;
+
+    /* Pilot precise-port trace — emit row at exit. */
+    td5_pilot_emit_00405B40_leave(actor, branch_taken);
+}
+
+/* Accessor for the pilot trace emitter to read the collisions flag without
+ * exposing the file-static g_collisions_enabled. */
+int td5_physics_get_collisions_flag(void)
+{
+    return g_collisions_enabled;
 }
 
 /* ========================================================================
