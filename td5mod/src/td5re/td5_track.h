@@ -134,6 +134,18 @@ void td5_track_update_probe_position(struct TD5_TrackProbeState *probe,
 int  td5_track_get_surface_type(TD5_Actor *actor, int probe_index);
 void td5_track_compute_heading(TD5_Actor *actor);
 
+/* InterpolateTrackSegmentNormal (byte-faithful port of 0x00445E30).
+ * Inner helper used by ComputeActorHeadingFromTrackSegment (0x00445B90,
+ * landed by precise-00445B90 worktree) to write the int16 surface normal
+ * for the actor's track-segment at out_normal[0..2] (caller-side pointer
+ * to actor+0x290). Computes cross-product of (va-vb) x (va-vc), >>12,
+ * FPU-normalises to length 4096.0f, truncates to int16, applies the
+ * post-conversion `if (uny == 0) uny = 1` sentinel so the int16 .y
+ * divisor in ApplyMissingWheelVelocityCorrection (0x00403EB0) is never
+ * exactly zero. va/vb/vc are vertex indices into the strip vertex pool. */
+void td5_track_interpolate_segment_normal(int16_t va_idx, int16_t vb_idx,
+                                           int16_t vc_idx, int16_t *out_normal);
+
 /* --- Barycentric contact --- */
 int32_t td5_track_compute_contact_height(int span_index, int sub_lane,
                                           int32_t world_x, int32_t world_z);
