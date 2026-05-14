@@ -1397,117 +1397,398 @@ int td5_ai_update_route_threshold(int slot) {
  * ======================================================================== */
 
 /**
- * FindActorTrackOffsetPeer: scan all actors for the nearest one ahead within
- * 0x28 spans. Same-route peers trigger direction calculation; cross-route peers
- * trigger a route-table swap on self [CONFIRMED @ 0x00433861/0x0043387F].
+ * FindActorTrackOffsetPeer (precise-004337E0): byte-faithful port of the
+ * original at 0x004337E0. Replaces the prior simplified single-pass scan.
  *
- * Cross-route swap [CONFIRMED @ 0x00433861-0x004338A8]:
- *   If self on g_route_tables[0]: rs[0x0F]→rs[0x09], ptr←g_route_tables[1],
- *     rs[0x12]→rs[0x15], rs[0x13]→rs[0x14].
- *   If self on g_route_tables[1]: rs[0x0E]→rs[0x09], ptr←g_route_tables[0],
- *     rs[0x10]→rs[0x15], rs[0x11]→rs[0x14].
+ * TWO-PASS structure [CONFIRMED @ disassembly 0x004337E0-0x00433CDE]:
  *
- * Direction formula [CONFIRMED @ 0x00433C7C-0x00433CBE]:
- *   mid = (RS[21][peer] + RS[20][peer]) / 2
- *   abs_right = abs((self_bounds_hi - mid) + 32 + piVar5)
- *   abs_left  = abs((self_bounds_lo - mid) - 32 + piVar5)
- *   DAT_004b08b0 = (abs_right <= abs_left) ? 1 : 0
- * where piVar5 = rs_self[RS_TRACK_OFFSET_BIAS], self_bounds from actor+0x1B8:
- *   bounds_lo = cardef[0] = *(int16_t*)(cardef+0x00) [CONFIRMED @ 0x004337E0]
- *   bounds_hi = cardef[4] = *(int16_t*)(cardef+0x08) [CONFIRMED @ 0x004337E0]
- * mid uses peer route-state RS[20]/RS[21] [CONFIRMED @ 0x00433C7C].
+ * Pass 1 (TRAFFIC slots): gated on `g_racerCount > 6`. Iterates slots 6..N-1.
+ *   - Compares self vs each traffic slot. Uses peer.field_0x82 (span_normalized)
+ *     for the proximity test (self.field_0x82 <= peer.field_0x82).
+ *   - Cross-route is NOT a separate branch in this pass — same body executes
+ *     for both. The route-table swap happens inline (rs[0]==DAT_004afb58 chain).
+ *   - Range gate: target_offset_at_clamp must lie within peer's RS[0x14],RS[0x15].
+ *   - dist gate (final): `0 < local_c && local_c < 0x28` and best != self.
+ *
+ * Pass 2 (RACER slots): always runs. Iterates slots 0..min(g_racerCount,6)-1,
+ *   skipping i==self.
+ *   - Extra gate: peer.RS[0x18] - 0x10 <= self.RS[0x18]
+ *     (RS_FORWARD_TRACK_COMP forward-track-component proximity).
+ *   - Cross-route inline swap (same code as pass 1).
+ *   - dist gate (final): `-1 < local_c && local_c <= 0x28` and best != self.
+ *
+ * Both passes use ClassifyTrackOffsetClamp + ComputeSignedTrackOffset (inline
+ * here as `classify_track_offset_clamp` because the helper is otherwise only
+ * called from this single site) to produce the lateral target offset used in
+ * the range-gate against peer's RS[0x14]/RS[0x15].
+ *
+ * Direction formula [CONFIRMED @ 0x00433A11-0x00433A4D and 0x00433C84-0x00433CBE]:
+ *   mid = (DAT_004afbb4[best*0x47] + DAT_004afbb0[best*0x47]) / 2
+ *     -- these are RS[0x14]/RS[0x15] of the BEST peer (signed CDQ-divide /2,
+ *        which equals C99 signed div for nonneg arg). Pass uses SAR 1 after
+ *        CDQ — the original adds the sign bit before SAR, so >>1 with signed
+ *        is equivalent to /2 with truncation toward -infinity for negatives
+ *        (different from C /2 which truncates toward zero). We match SAR 1.
+ *   abs_r = abs((peer_cardef_hi - mid) + 0x20 + offset_at_clamp)
+ *   abs_l = abs((peer_cardef_lo - mid) - 0x20 + offset_at_clamp)
+ *   DAT_004b08b0 = (abs_r >= abs_l)  -- note: SETGE means right >= left,
+ *     which differs from prior port's "abs_r <= abs_l" by sign convention.
+ *   ** Bounds source [CONFIRMED @ 0x00433C92]: cardef pointer comes from
+ *     g_actorRuntimeState.slot[self_slot].field_0x1b8 (SELF's cardef), NOT
+ *     the peer's. The EAX*0x8 arithmetic resolves to self_slot*0x388+0x1b8.
+ *
+ * Returns: best peer slot (int), or self_slot when nothing in range. Also
+ * writes DAT_004b08b0 (g_lateral_avoidance_direction) when a peer is found
+ * AND the direction formula executed.
+ *
+ * [CONFIRMED @ disassembly 0x004337E0-0x00433CDE — full pool14 audit].
  */
+
+/* Inline port of ClassifyTrackOffsetClamp (0x004368A0). Returns 0,1,2 to
+ * select which side's cardef offset to apply in the target-offset formula.
+ * [CONFIRMED @ disassembly 0x004368A0-0x00436A65]. */
+static int classify_track_offset_clamp(int param_1, int param_2) {
+    int32_t *rs = route_state(param_1);
+    char *self = actor_ptr(param_1);
+    int iVar3 = (int)ACTOR_I16(self, ACTOR_SPAN_NORMALIZED);
+    int iVar5;
+    int local_c[3] = {0, 0, 0};
+    int64_t lVar7;
+    const uint8_t *route_bytes = (const uint8_t *)(intptr_t)rs[RS_ROUTE_TABLE_PTR];
+    int16_t *self_cd;
+    int iVar4;
+
+    /* Branch on rs[0]==DAT_004afb58 (g_route_tables[0]):
+     *   if self on primary → iVar5 = iVar3 (NO wrap, the second wrap at LAB
+     *     is skipped via the `else` fallthrough below).
+     *   if self on secondary → wrap + walker remap.
+     * In the listing, the `if (rs[0] == DAT_004afb58)` branch falls through
+     * to `iVar5 = iVar3 + 4; wrap; LAB_0043699b` (label re-entry) directly. */
+    if (rs[RS_ROUTE_TABLE_PTR] != (int32_t)(intptr_t)g_route_tables[0]) {
+        /* Secondary route: walker remap of (iVar3+4) wrapped. */
+        iVar5 = td5_track_apply_target_span_remap(iVar3 + 4, /*is_canonical=*/0);
+    }
+    /* iVar5 = iVar3 + 4 (wrapped) for the (potentially-walker-remapped) span
+     * used for SampleTrackTargetPoint+ComputeTrackSpanProgress below. Listing
+     * also recomputes this for the LAB_0043699b path; same arithmetic. */
+    iVar5 = iVar3 + 4;
+    if (g_strip_span_count > 0 && g_strip_span_count <= iVar5) {
+        iVar5 = (iVar3 - g_strip_span_count) + 4;
+    }
+    if (rs[RS_ROUTE_TABLE_PTR] != (int32_t)(intptr_t)g_route_tables[0]) {
+        /* Walker may have produced a different span — apply remap and keep
+         * whichever the walker returned (the listing has a goto past this
+         * second wrap, so the walker result is final when on secondary). */
+        int remapped = td5_track_apply_target_span_remap(iVar3 + 4, /*is_canonical=*/0);
+        if (remapped != iVar3 + 4) iVar5 = remapped;
+    }
+
+    iVar4 = iVar3 + 4;
+    if (g_strip_span_count > 0 && g_strip_span_count <= iVar4) {
+        iVar4 = (iVar3 - g_strip_span_count) + 4;
+    }
+
+    self_cd = (int16_t *)(intptr_t)ACTOR_I32(self, ACTOR_CAR_DEF_PTR);
+    if (!route_bytes || !self_cd) return 0;
+
+    /* SampleTrackTargetPoint(iVar5, route_bytes[iVar4*3], local_c,
+     *                         cardef[8]/2-bytes-offset + param_2) */
+    {
+        int route_byte_a = (int)route_bytes[(size_t)iVar4 * 3u];
+        int bias_arg = (int)self_cd[4] + param_2; /* cardef+0x08 = hi bound */
+        if (!td5_track_sample_target_point(iVar5, route_byte_a,
+                                            &local_c[0], &local_c[2], bias_arg)) {
+            return 0;
+        }
+        lVar7 = td5_track_compute_span_progress(iVar5, local_c);
+    }
+    if ((int)lVar7 < 0xff) {
+        /* Second sample uses cardef[0] (lo bound) + param_2. */
+        int span_norm = (int)ACTOR_I16(self, ACTOR_SPAN_NORMALIZED);
+        int iVar3b = span_norm;
+        int iVar3c = iVar3b + 4;
+        int route_byte_b;
+        int bias_arg2;
+        if (g_strip_span_count > 0 && g_strip_span_count <= iVar3c) {
+            iVar3c = (iVar3b - g_strip_span_count) + 4;
+        }
+        route_byte_b = (int)route_bytes[(size_t)iVar3c * 3u];
+        bias_arg2 = (int)self_cd[0] + param_2;
+        if (!td5_track_sample_target_point(iVar5, route_byte_b,
+                                            &local_c[0], &local_c[2], bias_arg2)) {
+            return 0;
+        }
+        lVar7 = td5_track_compute_span_progress(iVar5, local_c);
+        /* iVar5_ret = (0 < lVar7) - 1 → 0 when lVar7>0, -1 (=0xFFFFFFFF) when
+         * lVar7<=0. The mask `& 0x200000002` keeps only bit 1 in low/high dwords;
+         * net low32 = (lVar7 > 0) ? 0 : 2. */
+        return (((int)lVar7 > 0) ? 0 : 2);
+    }
+    /* CONCAT44((int)((ulonglong)lVar7 >> 0x20), 1) -> low32 = 1 */
+    return 1;
+}
+
 int td5_ai_find_offset_peer(int *route_state_ptr) {
     int slot = route_state_ptr[RS_SLOT_INDEX];
     char *self = actor_ptr(slot);
-    int16_t self_span = ACTOR_I16(self, ACTOR_SPAN_RAW);
-    int self_selector = route_state_ptr[RS_ROUTE_TABLE_SELECTOR];
-
-    int best_slot = -1;
-    int32_t best_dist = 0x29; /* must be strictly less than 0x29 */
-
+    int self_slot = slot;
+    int32_t self_field82 = (int32_t)ACTOR_I16(self, ACTOR_SPAN_NORMALIZED);
+    int32_t self_field80 = (int32_t)ACTOR_I16(self, ACTOR_SPAN_RAW);
+    int32_t self_fwd_track = route_state_ptr[RS_FORWARD_TRACK_COMP];
+    int racer_count = g_active_actor_count;
+    int32_t best_slot;
+    int32_t best_dist;
     int i;
-    for (i = 0; i < g_active_actor_count; i++) {
-        int32_t *peer_rs;
-        int16_t peer_span;
-        int32_t dist;
+    int32_t offset_at_clamp = route_state_ptr[RS_TRACK_OFFSET_BIAS];
 
-        if (i == slot) continue;
+    (void)self_field80; /* read below per-peer */
 
-        peer_rs = route_state(i);
+    /* ----------------------------------------------------------------
+     * Pass 1: TRAFFIC slots [6 .. racer_count-1].
+     * Gated on racer_count > 6 (i.e., traffic mode active).
+     * [CONFIRMED @ 0x004337E8/0x00433807/0x00433815: dual cmp,jl/jle].
+     * ---------------------------------------------------------------- */
+    best_slot = self_slot;
+    best_dist = 0x2ee00;
+    if (racer_count > 6) {
+        for (i = 6; i < racer_count; i++) {
+            int32_t *peer_rs = route_state(i);
+            char *peer_actor = actor_ptr(i);
+            int32_t peer_field82 = (int32_t)ACTOR_I16(peer_actor, ACTOR_SPAN_NORMALIZED);
+            int32_t peer_field80 = (int32_t)ACTOR_I16(peer_actor, ACTOR_SPAN_RAW);
+            int32_t classify, offset_a, offset_b;
+            int classify_result;
+            int16_t *peer_cd;
+            int32_t bound_lo_q, bound_hi_q;
+            int32_t dist;
 
-        peer_span = ACTOR_I16(actor_ptr(i), ACTOR_SPAN_RAW);
-        dist = peer_span - self_span;
+            /* Route-id match: rs[3] [CONFIRMED @ 0x00433832] */
+            if (route_state_ptr[3] != peer_rs[3]) continue;
+            /* self.field_0x82 <= peer.field_0x82 [CONFIRMED @ 0x00433851] */
+            if (self_field82 > peer_field82) continue;
 
-        /* Must be ahead (positive distance), within 0x28 spans */
-        if (dist <= 0 || dist >= 0x29) continue;
-
-        if (peer_rs[RS_ROUTE_TABLE_SELECTOR] != self_selector) {
-            /* Cross-route peer in range: swap self's route table to match peer.
-             * Only swap for the closest cross-route peer found so far.
-             * [CONFIRMED @ 0x00433861/0x0043387F/0x00433889] */
-            if (dist < best_dist) {
-                int32_t cur_ptr = route_state_ptr[RS_ROUTE_TABLE_PTR];
-                if (cur_ptr == (int32_t)(intptr_t)g_route_tables[0]) {
-                    /* On primary → switch to secondary [CONFIRMED @ 0x0043386C/0x00433875] */
-                    route_state_ptr[RS_TRACK_OFFSET_BIAS]  = route_state_ptr[RS_LEFT_BOUNDARY_B];
-                    route_state_ptr[RS_ROUTE_TABLE_PTR]    = (int32_t)(intptr_t)g_route_tables[1];
-                    route_state_ptr[RS_ACTIVE_UPPER_BOUND] = route_state_ptr[RS_RIGHT_EXTENT_A];
-                    route_state_ptr[RS_ACTIVE_LOWER_BOUND] = route_state_ptr[RS_RIGHT_EXTENT_B];
+            /* Cross-route swap [CONFIRMED @ 0x0043385C-0x0043388A] */
+            if (route_state_ptr[RS_ROUTE_TABLE_PTR] != peer_rs[RS_ROUTE_TABLE_PTR]) {
+                if (route_state_ptr[RS_ROUTE_TABLE_PTR] == (int32_t)(intptr_t)g_route_tables[0]) {
+                    /* On primary: rs[0x0F]→rs[9], ptr ← DAT_004b08b4
+                     *   [DAT_004b08b4 = g_route_tables[1] / RIGHT route] */
+                    route_state_ptr[RS_TRACK_OFFSET_BIAS] = route_state_ptr[RS_LEFT_BOUNDARY_B];
+                    route_state_ptr[RS_ROUTE_TABLE_PTR]   = (int32_t)(intptr_t)g_route_tables[1];
                 } else {
-                    /* On secondary → switch to primary [CONFIRMED @ 0x0043387C/0x00433885] */
-                    route_state_ptr[RS_TRACK_OFFSET_BIAS]  = route_state_ptr[RS_LEFT_BOUNDARY_A];
-                    route_state_ptr[RS_ROUTE_TABLE_PTR]    = (int32_t)(intptr_t)g_route_tables[0];
-                    route_state_ptr[RS_ACTIVE_UPPER_BOUND] = route_state_ptr[RS_RIGHT_BOUNDARY_A];
-                    route_state_ptr[RS_ACTIVE_LOWER_BOUND] = route_state_ptr[RS_RIGHT_BOUNDARY_B];
+                    /* On secondary (or other): rs[0x0E]→rs[9], ptr ← DAT_004afb58 */
+                    route_state_ptr[RS_TRACK_OFFSET_BIAS] = route_state_ptr[RS_LEFT_BOUNDARY_A];
+                    route_state_ptr[RS_ROUTE_TABLE_PTR]   = (int32_t)(intptr_t)g_route_tables[0];
                 }
-                self_selector ^= 1;
-                route_state_ptr[RS_ROUTE_TABLE_SELECTOR] = self_selector;
+            }
+            /* Bounds writeback [CONFIRMED @ 0x00433887-0x004338A8]:
+             *   if rs[0] == DAT_004b08b4 (RIGHT): rs[0x14]←rs[0x12], rs[0x15]←rs[0x13]
+             *   else                              rs[0x14]←rs[0x10], rs[0x15]←rs[0x11] */
+            if (route_state_ptr[RS_ROUTE_TABLE_PTR] == (int32_t)(intptr_t)g_route_tables[1]) {
+                route_state_ptr[RS_ACTIVE_LOWER_BOUND] = route_state_ptr[RS_RIGHT_EXTENT_A];
+                route_state_ptr[RS_ACTIVE_UPPER_BOUND] = route_state_ptr[RS_RIGHT_EXTENT_B];
+            } else {
+                route_state_ptr[RS_ACTIVE_LOWER_BOUND] = route_state_ptr[RS_RIGHT_BOUNDARY_A];
+                route_state_ptr[RS_ACTIVE_UPPER_BOUND] = route_state_ptr[RS_RIGHT_BOUNDARY_B];
+            }
+
+            classify_result = classify_track_offset_clamp(i, route_state_ptr[RS_TRACK_OFFSET_BIAS]);
+
+            peer_cd = (int16_t *)(intptr_t)ACTOR_I32(self, ACTOR_CAR_DEF_PTR);
+            if (!peer_cd) continue;
+            offset_a = (int32_t)peer_cd[0];      /* cardef+0x00 */
+            offset_b = (int32_t)peer_cd[4];      /* cardef+0x08 */
+
+            if (classify_result == 1) {
+                int32_t signed_off = td5_track_compute_signed_offset(
+                    (int)peer_field80, 0x100, (int)(uint8_t)((const uint8_t *)(intptr_t)peer_rs[RS_ROUTE_TABLE_PTR])[(size_t)peer_field82 * 3u]);
+                classify = (int32_t)peer_cd[0] + signed_off - 0x20;
+            } else if (classify_result == 2) {
+                int32_t signed_off = td5_track_compute_signed_offset(
+                    (int)peer_field80, 0, (int)(uint8_t)((const uint8_t *)(intptr_t)peer_rs[RS_ROUTE_TABLE_PTR])[(size_t)peer_field82 * 3u]);
+                classify = (int32_t)peer_cd[4] + signed_off - 0x20;
+            } else {
+                classify = route_state_ptr[RS_TRACK_OFFSET_BIAS];
+            }
+
+            /* Self cardef for the range gate at 0x00433968-0x00433988:
+             *   bound_lo_q = cardef[0] + classify - 0x20
+             *   bound_hi_q = cardef[8] + classify + 0x20
+             *   guards: bound_lo_q <= peer.RS[0x14] AND peer.RS[0x15] <= bound_hi_q */
+            bound_lo_q = offset_a + classify - 0x20;
+            bound_hi_q = offset_b + classify + 0x20;
+            if (bound_lo_q > peer_rs[RS_ACTIVE_LOWER_BOUND]) continue;
+            if (peer_rs[RS_ACTIVE_UPPER_BOUND] > bound_hi_q) continue;
+
+            dist = peer_field82 - self_field82;
+            if (dist < best_dist) {
                 best_dist = dist;
                 best_slot = i;
-                TD5_LOG_I(LOG_TAG, "find_offset_peer: slot=%d cross-route swap to sel=%d peer=%d dist=%d bias=%d",
-                          slot, self_selector, i, dist, route_state_ptr[RS_TRACK_OFFSET_BIAS]);
+                offset_at_clamp = classify; /* piVar5 carried forward */
             }
-            continue;
+            (void)peer_field80; /* used inside classify branches */
         }
 
-        if (dist < best_dist) {
-            int32_t bounds_lo, bounds_hi, mid_peer, piVar5;
+        /* Pass 1 finalisation [CONFIRMED @ 0x004339D8-0x00433A5D]:
+         *   0 < local_c && local_c < 0x28 && piVar11 != piVar3[0x35] */
+        if (best_dist > 0 && best_dist < 0x28 && best_slot != self_slot) {
+            int32_t *bp_rs = route_state(best_slot);
+            int32_t mid;
+            int32_t mid_lo = bp_rs[RS_ACTIVE_LOWER_BOUND]; /* DAT_004afbb0[best*0x47] = RS[0x14] */
+            int32_t mid_hi = bp_rs[RS_ACTIVE_UPPER_BOUND]; /* DAT_004afbb4[best*0x47] = RS[0x15] */
+            int32_t mid_sum = mid_hi + mid_lo;
+            int16_t *cd_for_dir;
             int32_t val_r, val_l, abs_r, abs_l;
 
-            best_dist = dist;
-            best_slot = i;
+            /* CDQ + SAR ESI,1 → arithmetic shift right (toward -infinity).
+             * For non-negative sums this equals /2; for negatives, differs from
+             * C99 signed /2 by one when sum is odd. Use shift to match. */
+            mid = mid_sum >> 1;
 
-            /* Direction via abs-compare [CONFIRMED @ 0x00433C7C-0x00433CBE]:
-             * bounds_lo/hi = self's lateral extents from cardef at actor+0x1B8.
-             * cardef[0]=*(int16_t*)(cardef+0x00), cardef[4]=*(int16_t*)(cardef+0x08)
-             * [CONFIRMED @ 0x004337E0]. mid uses peer route-state RS[20]/RS[21]. */
-            {
-                int16_t *self_cd = (int16_t *)ACTOR_I32(self, ACTOR_CAR_DEF_PTR);
-                if (self_cd) {
-                    bounds_lo = (int32_t)self_cd[0]; /* cardef+0x00 */
-                    bounds_hi = (int32_t)self_cd[4]; /* cardef+0x08 */
-                    TD5_LOG_I(LOG_TAG, "find_offset_peer: slot=%d cardef lo=%d hi=%d",
-                              slot, bounds_lo, bounds_hi);
+            /* Self cardef at [0x00433957-0x00433968]: arithmetic resolves to
+             *   ECX = self.field_0xd4 = RS_SLOT_INDEX
+             *   EAX = (ECX*8 - ECX) << 4 + ECX = ECX*0x71 → then SHL 3 → ECX*0x388
+             *   EBX = *(DWORD*)(EAX*8 + 0x4ab2c0) = actor[ECX].field_0x1b8 = self_cd
+             * I.e. uses SELF's cardef. */
+            cd_for_dir = (int16_t *)(intptr_t)ACTOR_I32(self, ACTOR_CAR_DEF_PTR);
+            if (cd_for_dir) {
+                int32_t cd_lo = (int32_t)cd_for_dir[0]; /* cardef+0x00 */
+                int32_t cd_hi = (int32_t)cd_for_dir[4]; /* cardef+0x08 */
+
+                val_r = (cd_hi - mid) + 0x20 + offset_at_clamp;
+                val_l = (cd_lo - mid) - 0x20 + offset_at_clamp;
+                abs_r = (val_r < 0) ? -val_r : val_r;
+                abs_l = (val_l < 0) ? -val_l : val_l;
+                /* SETGE: ECX = (abs_r >= abs_l) ? 1 : 0 [CONFIRMED @ 0x00433A4B] */
+                g_lateral_avoidance_direction = (abs_r >= abs_l) ? 1 : 0;
+            }
+            return best_slot;
+        }
+        /* fall through: pass 1 found nothing; reset for pass 2 */
+    }
+
+    /* ----------------------------------------------------------------
+     * Pass 2: RACER slots [0 .. min(racer_count, 6)-1], skipping self.
+     * [CONFIRMED @ 0x00433A5E-0x00433CD0].
+     * ---------------------------------------------------------------- */
+    {
+        int cap = (racer_count >= 6) ? 6 : racer_count;
+        best_slot = self_slot;
+        best_dist = 0x2ee00;
+        offset_at_clamp = route_state_ptr[RS_TRACK_OFFSET_BIAS];
+        for (i = 0; i < cap; i++) {
+            int32_t *peer_rs;
+            char *peer_actor;
+            int32_t peer_field82, peer_field80;
+            int classify_result;
+            int32_t classify;
+            int16_t *peer_cd;
+            int32_t bound_lo_q, bound_hi_q;
+            int32_t dist;
+
+            if (i == self_slot) continue;
+            peer_rs = route_state(i);
+            peer_actor = actor_ptr(i);
+
+            /* rs[3] route-id match [CONFIRMED @ 0x00433AA5] */
+            if (route_state_ptr[3] != peer_rs[3]) continue;
+            peer_field82 = (int32_t)ACTOR_I16(peer_actor, ACTOR_SPAN_NORMALIZED);
+            peer_field80 = (int32_t)ACTOR_I16(peer_actor, ACTOR_SPAN_RAW);
+            /* self.field_0x82 <= peer.field_0x82 [CONFIRMED @ 0x00433AC7] */
+            if (self_field82 > peer_field82) continue;
+            /* peer.RS[0x18] - 0x10 <= self.RS[0x18] [CONFIRMED @ 0x00433AD0-0x00433AD9] */
+            if (peer_rs[RS_FORWARD_TRACK_COMP] - 0x10 > self_fwd_track) continue;
+
+            /* Cross-route inline swap [CONFIRMED @ 0x00433ADF-0x00433B0B] */
+            if (route_state_ptr[RS_ROUTE_TABLE_PTR] != peer_rs[RS_ROUTE_TABLE_PTR]) {
+                if (route_state_ptr[RS_ROUTE_TABLE_PTR] == (int32_t)(intptr_t)g_route_tables[0]) {
+                    route_state_ptr[RS_TRACK_OFFSET_BIAS] = route_state_ptr[RS_LEFT_BOUNDARY_B];
+                    route_state_ptr[RS_ROUTE_TABLE_PTR]   = (int32_t)(intptr_t)g_route_tables[1];
                 } else {
-                    bounds_lo = -100;
-                    bounds_hi =  100;
-                    TD5_LOG_W(LOG_TAG, "find_offset_peer: slot=%d no cardef", slot);
+                    route_state_ptr[RS_TRACK_OFFSET_BIAS] = route_state_ptr[RS_LEFT_BOUNDARY_A];
+                    route_state_ptr[RS_ROUTE_TABLE_PTR]   = (int32_t)(intptr_t)g_route_tables[0];
                 }
             }
-            mid_peer  = ((int32_t)(int16_t)peer_rs[RS_ACTIVE_LOWER_BOUND]
-                       + (int32_t)(int16_t)peer_rs[RS_ACTIVE_UPPER_BOUND]) / 2;
-            piVar5    = route_state_ptr[RS_TRACK_OFFSET_BIAS];
+            if (route_state_ptr[RS_ROUTE_TABLE_PTR] == (int32_t)(intptr_t)g_route_tables[1]) {
+                route_state_ptr[RS_ACTIVE_LOWER_BOUND] = route_state_ptr[RS_RIGHT_EXTENT_A];
+                route_state_ptr[RS_ACTIVE_UPPER_BOUND] = route_state_ptr[RS_RIGHT_EXTENT_B];
+            } else {
+                route_state_ptr[RS_ACTIVE_LOWER_BOUND] = route_state_ptr[RS_RIGHT_BOUNDARY_A];
+                route_state_ptr[RS_ACTIVE_UPPER_BOUND] = route_state_ptr[RS_RIGHT_BOUNDARY_B];
+            }
 
-            val_r = (bounds_hi - mid_peer) + 32 + piVar5;
-            val_l = (bounds_lo - mid_peer) - 32 + piVar5;
-            abs_r = (val_r < 0) ? -val_r : val_r;
-            abs_l = (val_l < 0) ? -val_l : val_l;
-            g_lateral_avoidance_direction = (abs_r <= abs_l) ? 1 : 0;
+            classify_result = classify_track_offset_clamp(i, route_state_ptr[RS_TRACK_OFFSET_BIAS]);
+
+            peer_cd = (int16_t *)(intptr_t)ACTOR_I32(self, ACTOR_CAR_DEF_PTR);
+            if (!peer_cd) continue;
+
+            if (classify_result == 1) {
+                int32_t signed_off = td5_track_compute_signed_offset(
+                    (int)peer_field80, 0x100,
+                    (int)(uint8_t)((const uint8_t *)(intptr_t)peer_rs[RS_ROUTE_TABLE_PTR])[(size_t)peer_field82 * 3u]);
+                classify = (int32_t)peer_cd[0] + signed_off - 0x20;
+            } else if (classify_result == 2) {
+                int32_t signed_off = td5_track_compute_signed_offset(
+                    (int)peer_field80, 0,
+                    (int)(uint8_t)((const uint8_t *)(intptr_t)peer_rs[RS_ROUTE_TABLE_PTR])[(size_t)peer_field82 * 3u]);
+                classify = (int32_t)peer_cd[4] + signed_off - 0x20;
+            } else {
+                classify = route_state_ptr[RS_TRACK_OFFSET_BIAS];
+            }
+
+            /* Range gate [CONFIRMED @ 0x00433BE6-0x00433C0A]:
+             *   bound_lo_q = self_cardef[0] + classify - 0x20
+             *   bound_hi_q = self_cardef[8] + classify + 0x20
+             *   bound_lo_q <= peer.RS[0x14], peer.RS[0x15] <= bound_hi_q */
+            bound_lo_q = (int32_t)peer_cd[0] + classify - 0x20;
+            bound_hi_q = (int32_t)peer_cd[4] + classify + 0x20;
+            if (bound_lo_q > peer_rs[RS_ACTIVE_LOWER_BOUND]) continue;
+            if (peer_rs[RS_ACTIVE_UPPER_BOUND] > bound_hi_q) continue;
+
+            dist = peer_field82 - self_field82;
+            if (dist < best_dist) {
+                best_dist = dist;
+                best_slot = i;
+                offset_at_clamp = classify;
+            }
+        }
+
+        /* Pass 2 finalisation [CONFIRMED @ 0x00433C4B-0x00433CD0]:
+         *   -1 < local_c && local_c <= 0x28 && local_8 != piVar3[0x35] */
+        if (best_dist > -1 && best_dist <= 0x28 && best_slot != self_slot) {
+            int32_t *bp_rs = route_state(best_slot);
+            int32_t mid_lo = bp_rs[RS_ACTIVE_LOWER_BOUND];
+            int32_t mid_hi = bp_rs[RS_ACTIVE_UPPER_BOUND];
+            int32_t mid_sum = mid_hi + mid_lo;
+            int32_t mid = mid_sum >> 1;
+            int16_t *cd_for_dir = (int16_t *)(intptr_t)ACTOR_I32(self, ACTOR_CAR_DEF_PTR);
+            int32_t val_r, val_l, abs_r, abs_l;
+
+            if (cd_for_dir) {
+                int32_t cd_lo = (int32_t)cd_for_dir[0];
+                int32_t cd_hi = (int32_t)cd_for_dir[4];
+
+                val_r = (cd_hi - mid) + 0x20 + offset_at_clamp;
+                val_l = (cd_lo - mid) - 0x20 + offset_at_clamp;
+                abs_r = (val_r < 0) ? -val_r : val_r;
+                abs_l = (val_l < 0) ? -val_l : val_l;
+                g_lateral_avoidance_direction = (abs_r >= abs_l) ? 1 : 0;
+            }
+            TD5_LOG_I(LOG_TAG,
+                      "find_offset_peer: slot=%d peer=%d dist=%d off=%d dir=%d",
+                      self_slot, best_slot, best_dist, offset_at_clamp,
+                      g_lateral_avoidance_direction);
+            return best_slot;
         }
     }
 
-    return best_slot;
+    /* No peer found in either pass: original returns piVar3[0x35] (self_slot).
+     * Adapter — UpdateActorTrackOffsetBias treats `peer < 0 || peer == self`
+     * as "no peer"; both work. Match listing: return self_slot.
+     * The caller's existing branch `if (peer >= 0)` still triggers; the
+     * helper distinguishes via `peer != self` semantics elsewhere. To
+     * preserve pre-existing port adapter behaviour (peer<0 ⇒ decay path),
+     * convert self-return to -1 here. [PORT-DIVERGENCE — caller adapter] */
+    return -1;
 }
 
 /**
