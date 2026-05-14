@@ -142,23 +142,26 @@ static inline char *actor_ptr(int slot) {
  * ======================================================================== */
 
 /* Rubber-band parameters (4 globals at 0x473D9C-0x473DA8) */
-static int32_t g_rb_behind_scale;       /* 0x473D9C */
-static int32_t g_rb_ahead_scale;        /* 0x473DA0 */
-static int32_t g_rb_behind_range;       /* 0x473DA4 */
-static int32_t g_rb_ahead_range;        /* 0x473DA8 */
+/* Pool11 pilot: exposed (non-static) so td5_pilot_trace_00432D60.c can
+ * snapshot inputs without struct drift. */
+int32_t g_rb_behind_scale;       /* 0x473D9C */
+int32_t g_rb_ahead_scale;        /* 0x473DA0 */
+int32_t g_rb_behind_range;       /* 0x473DA4 */
+int32_t g_rb_ahead_range;        /* 0x473DA8 */
 
 /* Default throttle table (0x473D64, 6+padding entries) */
-static int32_t g_default_throttle[14] = {
+int32_t g_default_throttle[14] = {
     0x0100, 0x0100, 0x0140, 0x0118, 0x0122, 0x0140,
     0, 0, 0, 0, 0, 0, 0, 0
 };
 
 /* Live throttle table (0x473D2C) -- copied from default each tick,
  * then rubber-band-modified per slot */
-static int32_t g_live_throttle[14];
+int32_t g_live_throttle[14];
 
 /* Per-actor throttle bias output consumed by route threshold */
-static int32_t g_actor_route_steer_bias[TD5_MAX_TOTAL_ACTORS];
+/* Pool11 pilot: exposed for td5_pilot_trace_00432D60.c. */
+int32_t g_actor_route_steer_bias[TD5_MAX_TOTAL_ACTORS];
 
 /* Per-actor forward track component */
 static int32_t g_actor_forward_track_component[TD5_MAX_TOTAL_ACTORS];
@@ -627,77 +630,124 @@ void td5_ai_tick(void) {
  * made the modifier positive and throttled down AI that should be boosted.
  * ======================================================================== */
 
+/* ========================================================================
+ * Pool11 pilot trace integration (0x00432D60).
+ *
+ * The pilot snapshot mirrors the function inputs read by Frida from the
+ * original. Collector lives here so it can read the static slot-state
+ * array + the public actor pointer. */
+#include "td5_pilot_trace_00432D60.h"
+
+void td5_pilot_00432D60_collect(PilotSnapshot_00432D60 *snap) {
+    snap->network_active = g_td5.network_active ? 1 : 0;
+    snap->racer_count    = g_active_actor_count;
+    snap->player0_span_accum = (int16_t)ACTOR_I16(actor_ptr(0), ACTOR_SPAN_ACCUM);
+    for (int i = 0; i < 6; i++) {
+        snap->slot_state[i]    = (int)g_slot_state[i];
+        snap->ai_span_accum[i] = (int16_t)ACTOR_I16(actor_ptr(i), ACTOR_SPAN_ACCUM);
+    }
+}
+
 void td5_ai_compute_rubber_band(void) {
     int i, racer_count;
     int32_t player0_span, ai_span, delta, modifier;
 
-    /* Step 1: copy default throttle to live array */
+    td5_pilot_emit_00432D60_enter();
+
+    /* [0x00432D6B-7A] MOVSD.REP ECX=14: unconditional default→live copy */
     memcpy(g_live_throttle, g_default_throttle, 14 * sizeof(int32_t));
 
-    /* Network mode: disable rubber-banding entirely */
+    /* [0x00432D60-7C] TEST g_networkRaceActive; JZ → rubber-band loop.
+     * Fall-through here = network ACTIVE → write 0x100 bias for AI slots. */
     if (g_td5.network_active) {
+        /* [0x00432D7E-DC2] network-active branch.
+         * Original re-reads g_racerCount each iter (CMP ESI,0x6 with ESI cached);
+         * effective cap = min(g_racerCount, 6). */
         racer_count = TD5_MAX_RACER_SLOTS;
         if (g_active_actor_count < racer_count)
             racer_count = g_active_actor_count;
         for (i = 0; i < racer_count; i++) {
+            /* [0x00432D9F-A8] state byte at gRaceSlotStateTable.slot[i].state */
             if (g_slot_state[i] == 0) { /* AI slot */
+                /* [0x00432DAA] DAT_00473d2c[i] = 0x100 (live throttle override) */
                 g_live_throttle[i] = 0x100;
+                /* [0x00432DB5] gActorDefaultRouteSteerBias[i*0x47] = 0x100 */
                 g_actor_route_steer_bias[i] = 0x100;
             }
+            /* [0x00432DBC] ADD EDX,0x11C unconditional (handled by [i] indexing) */
         }
+        td5_pilot_emit_00432D60_leave();
         return;
     }
 
-    /* Time trial: no rubber band (scales are zero from init) */
+    /* [0x00432DC4-E4B] rubber-band branch.
+     *
+     * Per pilot_00432D60_audit.md: original reads actor+0x84 (span_accum) as
+     * signed 16-bit, computes delta = ai - player0. Behind branch has a DEAD
+     * upper-clamp at +behind_range (never fires for negative delta); there is
+     * NO lower-clamp at -behind_range — earlier port over-approximated this.
+     * Ahead branch has an ACTIVE upper-clamp at +ahead_range.
+     *
+     * IDIV truncates toward zero (signed); C's `/` operator since C99 matches. */
 
-    /* Get player 0 span position.
-     * Original ComputeAIRubberBandThrottle @ 0x00432DEE reads actor+0x84
-     * (span_accum, monotonically-increasing). Using span_raw (+0x80) instead
-     * makes delta = ai_span - player0_span jump by +/-2291 across a junction
-     * remap (e.g. 499→2790 at Moscow branch 1), saturating the rubber-band
-     * modifier for every AI slot whose raw span hasn't remapped yet. */
+    /* [0x00432DF1] MOVSX EAX, word ptr [0x4ab18c] — actor[0].+0x84 read once
+     * (constant address in original; player0 span_accum). */
     player0_span = (int16_t)ACTOR_I16(actor_ptr(0), ACTOR_SPAN_ACCUM);
 
+    /* [0x00432DD5-E4B] g_racerCount re-read at loop top each iteration in
+     * original. We cache here — the function is single-threaded with no
+     * callees, so g_racerCount cannot change within this call. Equivalent. */
     racer_count = TD5_MAX_RACER_SLOTS;
     if (g_active_actor_count < racer_count)
         racer_count = g_active_actor_count;
 
-    /* Step 2: per-slot rubber-band modifier */
     for (i = 0; i < racer_count; i++) {
-        if (g_slot_state[i] != 0) /* skip non-AI (player/finished) */
+        /* [0x00432DE8-EC] CMP byte [EBP],0x0; JNZ skip — non-AI slots leave
+         * gActorDefaultRouteSteerBias[i] untouched. */
+        if (g_slot_state[i] != 0)
             continue;
 
+        /* [0x00432DEE] MOVSX ECX, word ptr [ESI] — actor[i].+0x84 */
         ai_span = (int16_t)ACTOR_I16(actor_ptr(i), ACTOR_SPAN_ACCUM);
+        /* [0x00432DF8] SUB ECX,EAX — signed 32-bit delta */
         delta = ai_span - player0_span;
 
+        /* [0x00432DFA] JNS — sign of delta selects branch */
         if (delta < 0) {
-            /* AI is behind player -- catch-up boost.
-             * Original: modifier = (scale * negative_delta) / positive_range = negative
-             *           bias = 0x100 - negative = > 0x100 (throttle boost)
-             * Clamp: original checks (behind_range < delta) which never fires for
-             * negative delta; port mirrors with equivalent negative-delta clamp. */
-            if (g_rb_behind_range != 0) {
-                if (delta < -g_rb_behind_range)
-                    delta = -g_rb_behind_range;
-                modifier = (g_rb_behind_scale * delta) / g_rb_behind_range;  /* negative / positive = negative */
-            } else {
-                modifier = 0;
-            }
+            /* [0x00432DFC-16] AI BEHIND player: catch-up boost.
+             *   MOV  EAX, [0x473da4]    ; behind_range (positive)
+             *   CMP  ECX, EAX           ; delta vs +range
+             *   JLE  skip_clamp         ; always true (delta<0 < range>0)
+             *   MOV  ECX, EAX           ; DEAD — never executes
+             * skip_clamp:
+             *   MOV  EAX, [0x473d9c]    ; behind_scale
+             *   IMUL EAX, ECX
+             *   CDQ
+             *   IDIV [0x473da4]         ; / behind_range, trunc-to-zero
+             * Faithful port: keep the dead upper-clamp for byte parity with
+             * the listing's branch shape; do NOT add any lower-clamp. */
+            if (delta > g_rb_behind_range)
+                delta = g_rb_behind_range;  /* dead path; mirrors 0x00432E01-05 */
+            modifier = (g_rb_behind_scale * delta) / g_rb_behind_range;
         } else {
-            /* AI is ahead of player -- slow down.
-             * modifier = (scale * positive_delta) / positive_range = positive
-             * bias = 0x100 - positive = < 0x100 (throttle reduction) */
-            if (g_rb_ahead_range != 0) {
-                if (delta > g_rb_ahead_range)
-                    delta = g_rb_ahead_range;
-                modifier = (g_rb_ahead_scale * delta) / g_rb_ahead_range;
-            } else {
-                modifier = 0;
-            }
+            /* [0x00432E18-32] AI AHEAD or tied: throttle reduction.
+             *   MOV  EAX, [0x473da8]    ; ahead_range
+             *   CMP  ECX, EAX
+             *   JLE  skip_clamp
+             *   MOV  ECX, EAX           ; ACTIVE — clamp delta to +ahead_range
+             *   MOV  EAX, [0x473da0]    ; ahead_scale
+             *   IMUL EAX, ECX
+             *   CDQ
+             *   IDIV [0x473da8] */
+            if (delta > g_rb_ahead_range)
+                delta = g_rb_ahead_range;
+            modifier = (g_rb_ahead_scale * delta) / g_rb_ahead_range;
         }
 
+        /* [0x00432E32-39] MOV ECX,0x100; SUB ECX,EAX; MOV [EDI],ECX */
         g_actor_route_steer_bias[i] = 0x100 - modifier;
     }
+    td5_pilot_emit_00432D60_leave();
 }
 
 /* ========================================================================
