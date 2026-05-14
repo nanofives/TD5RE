@@ -43,6 +43,7 @@
 #include "td5_platform.h"
 #include "td5_trace.h"    /* inner-tick physics_trace stages */
 #include "td5_pilot_trace.h" /* precise-port pilot CSV emit for 0x00403720 */
+#include "td5_pilot_trace_00405E80.h" /* precise-port pilot CSV emit for 0x00405E80 */
 #include "td5re.h"
 
 /* Include the full actor struct for field-level access.
@@ -4552,6 +4553,9 @@ static inline int32_t td5_physics_wrap_angle_delta(int32_t new_angle, int32_t ol
 
 void td5_physics_integrate_pose(TD5_Actor *actor)
 {
+    /* Pilot precise-port trace — snapshot inputs at entry (slot 0 only). */
+    td5_pilot_emit_00405E80_enter(actor, (uintptr_t)__builtin_return_address(0));
+
     /* Save previous Y for suspension delta */
     actor->prev_frame_y_position = actor->world_pos.y;
 
@@ -5140,6 +5144,9 @@ void td5_physics_integrate_pose(TD5_Actor *actor)
             }
         }
     }
+
+    /* Pilot precise-port trace — snapshot outputs at exit (slot 0 only). */
+    td5_pilot_emit_00405E80_leave(actor);
 }
 
 /* ========================================================================
