@@ -1538,6 +1538,22 @@ void td5_ai_seed_actor_track_progress_offset(int slot)
  * Returns: 0 = script still running (blocking), 1 = script complete/reset
  * ======================================================================== */
 
+#ifdef TD5_PILOT_TRACE_004370A0
+#include "td5_pilot_trace_004370A0.h"
+/* Helper to compute "ip as index": when port stores IP as a dword-index, we
+ * snapshot the index. When (legacy/orig-style) IP is a raw pointer, we
+ * subtract base_ptr and divide by 4 to recover the index. The trace tool
+ * uses this to align port and original IP values at the same canonical form. */
+static int32_t td5_pt_compute_ip_index(int32_t base_ptr, int32_t ip) {
+    /* Port semantics: ip is an index already (small unsigned int < 8). */
+    if ((uint32_t)ip < 0x100u) return ip;
+    if (base_ptr == 0) return -1;
+    intptr_t diff = (intptr_t)(uint32_t)ip - (intptr_t)(uint32_t)base_ptr;
+    if (diff < 0 || diff > 0x100 || (diff & 3) != 0) return -1;
+    return (int32_t)(diff >> 2);
+}
+#endif
+
 int td5_ai_advance_track_script(int *rs) {
     /* Verbatim port of AdvanceActorTrackScript @ 0x004370A0.
      * Order of operations matches the original byte-for-byte:
@@ -1557,6 +1573,45 @@ int td5_ai_advance_track_script(int *rs) {
      * All of those drove yaw rotation away from original. */
     int slot = rs[RS_SLOT_INDEX];
     char *actor = actor_ptr(slot);
+
+#ifdef TD5_PILOT_TRACE_004370A0
+    /* === pilot trace: capture entry state BEFORE any field mutation === */
+    TD5_PilotTrace_004370A0_Entry _pt_e = {0};
+    _pt_e.rs_addr            = (uintptr_t)rs;
+    _pt_e.slot_index         = slot;
+    _pt_e.route_table_ptr    = rs[RS_ROUTE_TABLE_PTR];
+    _pt_e.script_base_ptr    = rs[RS_SCRIPT_BASE_PTR];
+    _pt_e.script_ip          = rs[RS_SCRIPT_IP];
+    _pt_e.script_ip_index    = td5_pt_compute_ip_index(_pt_e.script_base_ptr, _pt_e.script_ip);
+    _pt_e.script_flags       = rs[RS_SCRIPT_FLAGS];
+    _pt_e.script_countdown   = rs[RS_SCRIPT_COUNTDOWN];
+    _pt_e.script_offset_param = rs[RS_SCRIPT_OFFSET_PARAM];
+    _pt_e.script_speed_param  = rs[RS_SCRIPT_SPEED_PARAM];
+    _pt_e.script_field_3e    = rs[RS_SCRIPT_FIELD_3E];
+    _pt_e.script_field_43    = rs[RS_SCRIPT_FIELD_43];
+    _pt_e.actor_yaw_accum    = ACTOR_I32(actor, ACTOR_YAW_ACCUM);
+    _pt_e.actor_steering_cmd = ACTOR_I32(actor, ACTOR_STEERING_CMD);
+    _pt_e.actor_long_speed   = ACTOR_I32(actor, ACTOR_LONGITUDINAL_SPEED);
+    _pt_e.actor_span_norm    = (int32_t)ACTOR_I16(actor, ACTOR_SPAN_NORMALIZED);
+    _pt_e.actor_span_raw     = (int32_t)ACTOR_I16(actor, ACTOR_SPAN_RAW);
+    _pt_e.actor_sub_lane     = (int32_t)(int8_t)ACTOR_U8(actor, ACTOR_SUB_LANE_INDEX);
+    _pt_e.actor_encounter_steer = (int32_t)(int16_t)ACTOR_I16(actor, ACTOR_ENCOUNTER_STEER);
+    _pt_e.actor_brake_flag   = (int32_t)ACTOR_U8(actor, ACTOR_BRAKE_FLAG);
+    _pt_e.actor_angular_velocity_yaw = ACTOR_I32(actor, 0x1C4);
+    {
+        const uint8_t *_rb = (const uint8_t *)(intptr_t)_pt_e.route_table_ptr;
+        int16_t _sp = (int16_t)_pt_e.actor_span_norm;
+        if (_rb && _sp >= 0) {
+            uint8_t _rby = _rb[(size_t)(unsigned)_sp * 3u + 1u];
+            _pt_e.route_byte_at_entry = (int32_t)_rby;
+            _pt_e.route_heading_at_entry = ((int32_t)_rby * 0x102C) >> 8;
+        } else {
+            _pt_e.route_byte_at_entry = -1;
+            _pt_e.route_heading_at_entry = 0;
+        }
+    }
+    td5_pilot_trace_004370A0_enter(&_pt_e);
+#endif
 
     /* ==== 1. Countdown decrement + program rotation [orig prologue] ==== */
     rs[RS_SCRIPT_COUNTDOWN]--;
@@ -1605,8 +1660,12 @@ int td5_ai_advance_track_script(int *rs) {
             }
         }
     } else {
-        /* Flag-4 aligned test: orig raw `< 0x201`. */
-        if (hdelta_raw < 0x201) {
+        /* Flag-4 aligned test: listing 0x004371a0-a5 tests `EAX = hd_mir`
+         * (CMP EAX,0x200 / JLE → aligned). Sibling flag-8 test above uses
+         * `hdelta_mirror > 0xDFF` (listing 0x0043726b-70). Port previously
+         * used `hdelta_raw < 0x201`; that fires on +small bias instead of
+         * the +/-small bias the mirror semantics require. pool11 D1 fix. */
+        if (hdelta_mirror < 0x201) {
             if ((int32_t)rs[RS_SCRIPT_OFFSET_PARAM] < 0) {
                 ACTOR_I32(actor, ACTOR_STEERING_CMD) = 0;
                 rs[RS_SCRIPT_FLAGS] ^= 0x04;
@@ -1639,6 +1698,37 @@ int td5_ai_advance_track_script(int *rs) {
     /* Re-fetch flags (flag 4/8 path may have toggled bits). */
     flags = rs[RS_SCRIPT_FLAGS];
 
+#ifdef TD5_PILOT_TRACE_004370A0
+    /* Macro to populate exit row + emit + return one value. Used at every
+     * return point inside this function. */
+#define PT_EMIT_AND_RETURN(retval, op, br) do {                                          \
+    TD5_PilotTrace_004370A0_Exit _pt_x = {0};                                            \
+    _pt_x.opcode_dispatched  = (op);                                                     \
+    _pt_x.branch_taken       = (br);                                                     \
+    _pt_x.script_base_ptr_out = rs[RS_SCRIPT_BASE_PTR];                                   \
+    _pt_x.script_ip_out       = rs[RS_SCRIPT_IP];                                        \
+    _pt_x.script_ip_index_out = td5_pt_compute_ip_index(                                 \
+                                   _pt_x.script_base_ptr_out, _pt_x.script_ip_out);      \
+    _pt_x.script_flags_out    = rs[RS_SCRIPT_FLAGS];                                     \
+    _pt_x.script_countdown_out = rs[RS_SCRIPT_COUNTDOWN];                                \
+    _pt_x.script_offset_param_out = rs[RS_SCRIPT_OFFSET_PARAM];                          \
+    _pt_x.script_speed_param_out  = rs[RS_SCRIPT_SPEED_PARAM];                           \
+    _pt_x.script_field_3e_out  = rs[RS_SCRIPT_FIELD_3E];                                 \
+    _pt_x.script_field_43_out  = rs[RS_SCRIPT_FIELD_43];                                 \
+    _pt_x.rs_left_deviation_out  = rs[RS_LEFT_DEVIATION];                                \
+    _pt_x.rs_right_deviation_out = rs[RS_RIGHT_DEVIATION];                               \
+    _pt_x.actor_steering_cmd_out  = ACTOR_I32(actor, ACTOR_STEERING_CMD);                \
+    _pt_x.actor_encounter_steer_out = (int32_t)(int16_t)ACTOR_I16(actor, ACTOR_ENCOUNTER_STEER); \
+    _pt_x.actor_brake_flag_out  = (int32_t)ACTOR_U8(actor, ACTOR_BRAKE_FLAG);            \
+    _pt_x.actor_angular_velocity_yaw_out = ACTOR_I32(actor, 0x1C4);                     \
+    _pt_x.return_value = (retval);                                                       \
+    td5_pilot_trace_004370A0_exit(&_pt_x);                                               \
+    return (retval);                                                                     \
+} while (0)
+#else
+#define PT_EMIT_AND_RETURN(retval, op, br) return (retval)
+#endif
+
     /* ==== 3. Flag 0x10 — stop-and-wait; orig returns 0 on BOTH branches. */
     if (flags & 0x10) {
         int32_t lspd = ACTOR_I32(actor, ACTOR_LONGITUDINAL_SPEED);
@@ -1646,11 +1736,11 @@ int td5_ai_advance_track_script(int *rs) {
             rs[RS_SCRIPT_FLAGS] = flags ^ 0x10;
             ACTOR_U8(actor, ACTOR_BRAKE_FLAG) = 0;
             ACTOR_I16(actor, ACTOR_ENCOUNTER_STEER) = 0;
-            return 0;
+            PT_EMIT_AND_RETURN(0, -1, TD5_PT_004370A0_BR_FLAG10);
         }
         ACTOR_I16(actor, ACTOR_ENCOUNTER_STEER) = (int16_t)0xFF00;
         ACTOR_U8(actor, ACTOR_BRAKE_FLAG) = 1;
-        return 0;
+        PT_EMIT_AND_RETURN(0, -1, TD5_PT_004370A0_BR_FLAG10);
     }
 
     /* ==== 4. Flag 0x02 — brake/accel until speed threshold.
@@ -1678,7 +1768,7 @@ int td5_ai_advance_track_script(int *rs) {
 
     /* ==== 5. Opcode switch ==== */
     const int32_t *base = (const int32_t *)(intptr_t)rs[RS_SCRIPT_BASE_PTR];
-    if (!base) return 1;
+    if (!base) PT_EMIT_AND_RETURN(1, -1, TD5_PT_004370A0_BR_SWITCH_DEFAULT);
     int ip = rs[RS_SCRIPT_IP];
     int32_t opcode = base[ip];
 
@@ -1697,7 +1787,7 @@ int td5_ai_advance_track_script(int *rs) {
         uint32_t b0 = (a0 - 0x800U) & 0xFFF;
         uint32_t hd_mir = ((uint32_t)(-(int32_t)b0)) & 0xFFF;
         if (hd_mir > 0x3F && hd_mir < 0xFC1) {
-            return 0;
+            PT_EMIT_AND_RETURN(0, 0, TD5_PT_004370A0_BR_SWITCH_CASE_0_BLOCK);
         }
         if ((int32_t)rs[RS_SCRIPT_OFFSET_PARAM] < 0) {
             ACTOR_I32(actor, ACTOR_STEERING_CMD) = 0;
@@ -1708,53 +1798,53 @@ int td5_ai_advance_track_script(int *rs) {
         rs[RS_SCRIPT_FIELD_43] = 0;
         ACTOR_I32(actor, ACTOR_STEERING_CMD) = 0;
         ACTOR_I32(actor, 0x1C4) = 0; /* angular_velocity_yaw */
-        return 1;
+        PT_EMIT_AND_RETURN(1, 0, TD5_PT_004370A0_BR_SWITCH_CASE_0_TERM);
     }
 
     case 1:
         rs[RS_SCRIPT_SPEED_PARAM] = base[ip + 1];
         rs[RS_SCRIPT_FLAGS] |= 0x01;
         rs[RS_SCRIPT_IP] = ip + 2;
-        return 0;
+        PT_EMIT_AND_RETURN(0, 1, TD5_PT_004370A0_BR_SWITCH_CASE_1);
 
     case 2:
         rs[RS_SCRIPT_FLAGS] |= 0x02;
         rs[RS_SCRIPT_OFFSET_PARAM] = base[ip + 1];
         rs[RS_SCRIPT_IP] = ip + 2;
-        return 0;
+        PT_EMIT_AND_RETURN(0, 2, TD5_PT_004370A0_BR_SWITCH_CASE_2);
 
     case 3:
         rs[RS_SCRIPT_FLAGS] |= base[ip + 1];
         rs[RS_SCRIPT_IP] = ip + 2;
-        return 0;
+        PT_EMIT_AND_RETURN(0, 3, TD5_PT_004370A0_BR_SWITCH_CASE_3);
 
     case 4:
         rs[RS_SCRIPT_FLAGS] &= ~base[ip + 1];
         rs[RS_SCRIPT_IP] = ip + 2;
-        return 0;
+        PT_EMIT_AND_RETURN(0, 4, TD5_PT_004370A0_BR_SWITCH_CASE_4);
 
     case 5:
         rs[RS_SCRIPT_FLAGS] |= 0x04;
         rs[RS_SCRIPT_IP] = ip + 1;
-        return 0;
+        PT_EMIT_AND_RETURN(0, 5, TD5_PT_004370A0_BR_SWITCH_CASE_5);
 
     case 6:
         rs[RS_SCRIPT_FLAGS] |= 0x08;
         rs[RS_SCRIPT_IP] = ip + 1;
-        return 0;
+        PT_EMIT_AND_RETURN(0, 6, TD5_PT_004370A0_BR_SWITCH_CASE_6);
 
     case 7:
         ACTOR_I16(actor, ACTOR_ENCOUNTER_STEER) = (int16_t)0xFF00;
         ACTOR_U8(actor, ACTOR_BRAKE_FLAG) = 1;
         rs[RS_SCRIPT_IP] = ip + 1;
-        return 0;
+        PT_EMIT_AND_RETURN(0, 7, TD5_PT_004370A0_BR_SWITCH_CASE_7);
 
     case 8:
         /* Orig only sets flag 0x10; brake is applied by the flag-0x10
          * block next tick. */
         rs[RS_SCRIPT_FLAGS] |= 0x10;
         rs[RS_SCRIPT_IP] = ip + 1;
-        return 0;
+        PT_EMIT_AND_RETURN(0, 8, TD5_PT_004370A0_BR_SWITCH_CASE_8);
 
     case 9: {
         /* Auto-select program from MIRRORED hdelta + strip-half-lane.
@@ -1794,22 +1884,25 @@ int td5_ai_advance_track_script(int *rs) {
         }
         rs[RS_SCRIPT_BASE_PTR] = (int32_t)(intptr_t)sel;
         rs[RS_SCRIPT_IP] = 0;
-        return 0;
+        PT_EMIT_AND_RETURN(0, 9, TD5_PT_004370A0_BR_SWITCH_CASE_9);
     }
 
     case 10:
         rs[RS_SCRIPT_FLAGS] |= 0x40;
         rs[RS_SCRIPT_IP] = ip + 1;
-        return 0;
+        PT_EMIT_AND_RETURN(0, 10, TD5_PT_004370A0_BR_SWITCH_CASE_10);
 
     case 11:
         rs[RS_SCRIPT_FLAGS] |= 0x80;
         rs[RS_SCRIPT_IP] = ip + 1;
-        return 0;
+        PT_EMIT_AND_RETURN(0, 11, TD5_PT_004370A0_BR_SWITCH_CASE_11);
 
     default:
-        return 0;
+        PT_EMIT_AND_RETURN(0, opcode, TD5_PT_004370A0_BR_SWITCH_DEFAULT);
     }
+#ifdef TD5_PILOT_TRACE_004370A0
+#undef PT_EMIT_AND_RETURN
+#endif
 }
 
 /* ========================================================================
