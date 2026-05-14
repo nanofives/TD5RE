@@ -257,8 +257,17 @@ static uint8_t g_ai_physics_template[128] = {
     0x50, 0x00, 0xA0, 0x00, 0xA0, 0x00, 0x00, 0x00,  /* +0x78 */
 };
 
-/* Difficulty tier (0/1/2) */
-static int32_t g_race_difficulty_tier;
+/* Difficulty tier (0/1/2) mirrors gRaceDifficultyTier @ 0x00463210.
+ * Written by ConfigureGameTypeFlags @ 0x00410CA0 (port: td5_frontend.c:2675)
+ * from game_type: 1/2→0, 3/4/5→1, 6/7→2.
+ * Pre-2026-05-14: this file-static was *never written* in the port — every
+ * race used tier=0 regardless of game type, which produced systematic AI
+ * under-performance on tier-1/2 races (pool11 0x00432D60 audit blocker #1).
+ * The fix routes through g_td5.difficulty_tier instead — keep this static
+ * removed and rely on the global TD5 state.
+ *
+ * static int32_t g_race_difficulty_tier;  -- REMOVED 2026-05-14 (precise-00432E60)
+ */
 
 /* Traffic queue pointer and base */
 static const uint8_t *g_traffic_queue_base;
@@ -765,12 +774,37 @@ void td5_ai_compute_rubber_band(void) {
  * ======================================================================== */
 
 void td5_ai_init_race_actor_runtime(void) {
-    int tier = g_race_difficulty_tier;
+    /* [CONFIRMED @ InitializeRaceActorRuntime 0x00432E60 reads gRaceDifficultyTier
+     * @ 0x00463210 throughout the Layer-2 decision tree.] The port previously
+     * read a file-static `g_race_difficulty_tier` that was never written —
+     * route through g_td5.difficulty_tier (which ConfigureGameTypeFlags writes
+     * at td5_frontend.c:2675 mirroring the original's switch at 0x00410CA0). */
+    int tier = g_td5.difficulty_tier;
     int is_circuit = (g_td5.track_type == TD5_TRACK_CIRCUIT);
     int has_traffic = g_td5.traffic_enabled;
-    int is_pitbull = (g_td5.race_rule_variant == 4);
+    /* [@ 0x00432FF0] Cop Chase ("wanted mode") branch — original gates on
+     *   [0x00466e94] gTrackIsCircuit==0 && [0x004aaf74] g_raceOverlayPresetMode==4.
+     * g_raceOverlayPresetMode=4 is set ONLY by ConfigureGameTypeFlags case 8
+     * (Cop Chase). The port's previous `is_pitbull = race_rule_variant==4`
+     * was misnamed AND wrong: race_rule_variant=4 is set by case 6 (Ultimate),
+     * not Cop Chase. */
+    int is_cop_chase = g_td5.wanted_mode_enabled;
     int is_time_trial = g_td5.time_trial_enabled;
     int racer_count;
+
+    /* Pilot trace probe (precise-00432E60): capture inputs at entry. */
+    {
+        extern void td5_pilot_emit_00432E60_enter(int, int, int, int, int, int,
+                                                  int16_t, int16_t, int16_t, int16_t, int16_t);
+        const int16_t *t_steer = (const int16_t *)(g_ai_physics_template + 0x68);
+        const int16_t *t_grip  = (const int16_t *)(g_ai_physics_template + 0x2C);
+        const int16_t *t_brake = (const int16_t *)(g_ai_physics_template + 0x6E);
+        const int16_t *t_lspdb = (const int16_t *)(g_ai_physics_template + 0x70);
+        const int16_t *t_spd   = (const int16_t *)(g_ai_physics_template + 0x74);
+        td5_pilot_emit_00432E60_enter(tier, is_circuit, has_traffic, is_cop_chase,
+                                      (int)g_td5.difficulty, is_time_trial,
+                                      *t_steer, *t_grip, *t_brake, *t_lspdb, *t_spd);
+    }
 
     if (!g_route_state_base) {
         g_route_state_base = g_route_state_storage;
@@ -848,160 +882,202 @@ void td5_ai_init_race_actor_runtime(void) {
     }
 
     /* --- First layer: global difficulty scaling on AI physics template ---
+     * Mirrors [@ 0x00432F2F..0x00432FEC] verbatim.
      *
      * Template field offsets:
-     *   +0x68 (26*4): steering factor (short)
-     *   +0x2C (11*4): base grip (short)
-     *   +0x6E:        brake force (short)
-     *   +0x70 (28*4): low-speed brake coefficient (short)
-     *   +0x74 (29*4): max speed / rev limiter (short)
+     *   +0x2C: grip / base lateral coefficient (short)
+     *   +0x68: steering factor (short)
+     *   +0x6E: brake force (short)
+     *   +0x70: low-speed brake coefficient (short)
+     *   +0x74: top speed / rev limiter (short)
      */
     {
         int16_t *steer  = (int16_t *)(g_ai_physics_template + 0x68);
         int16_t *grip   = (int16_t *)(g_ai_physics_template + 0x2C);
         int16_t *brake  = (int16_t *)(g_ai_physics_template + 0x6E);
+        int16_t *lspd_brake = (int16_t *)(g_ai_physics_template + 0x70);
 
         switch (g_td5.difficulty) {
         case TD5_DIFFICULTY_EASY:
-            /* No change */
+            /* [@ 0x00432FB4 if (gDifficultyEasy != 0)] No change (Easy). */
             break;
 
         case TD5_DIFFICULTY_NORMAL:
-            /* Steering * 0x168/256 (~88%), Grip * 300/256 (~117%) */
+            /* [@ 0x00432FBC..0x00432FEC] NORMAL: steer*0x168/256, grip*300/256 only.
+             * No brake / lspd_brake / top_spd writes here. */
             *steer = (int16_t)(((int32_t)*steer * 0x168) >> 8);
-            *grip  = (int16_t)(((int32_t)*grip  * 300)   >> 8);
+            *grip  = (int16_t)(((int32_t)*grip  * 0x12C) >> 8); /* 0x12C = 300 */
             break;
 
         case TD5_DIFFICULTY_HARD:
-            /* Steering * 0x28A/256 (~255%), Grip * 0x17C/256 (~148%),
-             * Brake * 0x1C2/256 (~177%) */
-            *steer = (int16_t)(((int32_t)*steer * 0x28A) >> 8);
-            *grip  = (int16_t)(((int32_t)*grip  * 0x17C) >> 8);
-            *brake = (int16_t)(((int32_t)*brake * 0x1C2) >> 8);
+            /* [@ 0x00432F37..0x00432FB2] HARD: 4 scaled fields. */
+            *steer      = (int16_t)(((int32_t)*steer      * 0x28A) >> 8); /* [@ 0x00432F37-57]  */
+            *grip       = (int16_t)(((int32_t)*grip       * 0x17C) >> 8); /* [@ 0x00432F5B-72]  */
+            *brake      = (int16_t)(((int32_t)*brake      * 0x1C2) >> 8); /* [@ 0x00432F76-91]  */
+            *lspd_brake = (int16_t)(((int32_t)*lspd_brake * 0x190) >> 8); /* [@ 0x00432F95-AE] 0x190=400 */
             break;
         }
     }
 
     /* --- Second layer: mode/circuit/traffic/tier decision tree ---
      *
-     * Sets: rb_behind_scale, rb_behind_range, rb_ahead_scale, rb_ahead_range
-     * Also optionally scales AI template top-speed (+0x74) and grip (+0x2C).
+     * Mirrors [@ 0x00432FF0..0x004334E1] verbatim.
+     *
+     * Every leaf writes: steer (+0x68), grip (+0x2C), brake (+0x6E)=1000,
+     *                    lspd_brake (+0x70)=1000, top_speed (+0x74)=branch_const
+     * plus the rubber-band tuples: rb_behind_scale, rb_behind_range,
+     *                              rb_ahead_scale, rb_ahead_range.
      */
+    {
+        int16_t *steer = (int16_t *)(g_ai_physics_template + 0x68);
+        int16_t *grp   = (int16_t *)(g_ai_physics_template + 0x2C);
+        int16_t *brake = (int16_t *)(g_ai_physics_template + 0x6E);
+        int16_t *lspdb = (int16_t *)(g_ai_physics_template + 0x70);
+        int16_t *spd   = (int16_t *)(g_ai_physics_template + 0x74);
 
-    if (is_time_trial) {
-        /* Time Trial: rubber-banding completely disabled */
-        g_rb_behind_scale = 0;
-        g_rb_behind_range = 0x40;
-        g_rb_ahead_scale  = 0;
-        g_rb_ahead_range  = 0x40;
-
-    } else if (is_pitbull) {
-        /* Pitbull / Mode 4 */
-        {
-            int16_t *spd = (int16_t *)(g_ai_physics_template + 0x74);
-            int16_t *grp = (int16_t *)(g_ai_physics_template + 0x2C);
-            *spd = (int16_t)(((int32_t)*spd * 0x91) >> 8);
-            *grp = (int16_t)(((int32_t)*grp * 0xB9) >> 8);
-        }
-        g_rb_behind_scale = 0x8C;   /* 140 */
-        g_rb_behind_range = 100;
-        g_rb_ahead_scale  = 0xC0;   /* 192 */
-        g_rb_ahead_range  = 0x40;   /* 64  */
-
-    } else if (is_circuit) {
-        /* Circuit races */
-        int16_t *spd = (int16_t *)(g_ai_physics_template + 0x74);
-        int16_t *grp = (int16_t *)(g_ai_physics_template + 0x2C);
-
-        switch (tier) {
-        case 0:
-            *spd = (int16_t)(((int32_t)*spd * 0x91) >> 8);
-            *grp = (int16_t)(((int32_t)*grp * 0xC8) >> 8);
-            g_rb_behind_scale = 0x8C;   /* 140 */
-            g_rb_behind_range = 100;
-            g_rb_ahead_scale  = 0xC8;   /* 200 */
-            g_rb_ahead_range  = 0x37;   /* 55  */
-            break;
-        case 1:
-            *spd = (int16_t)(((int32_t)*spd * 0xA0) >> 8);
-            *grp = (int16_t)(((int32_t)*grp * 0xEC) >> 8);
-            g_rb_behind_scale = 0x96;   /* 150 */
-            g_rb_behind_range = 100;
-            g_rb_ahead_scale  = 0xC0;   /* 192 */
-            g_rb_ahead_range  = 0x40;   /* 64  */
-            break;
-        default: /* tier 2 */
-            *spd = (int16_t)(((int32_t)*spd * 0xC3) >> 8);
-            *grp = (int16_t)(((int32_t)*grp * 0x104) >> 8);
-            g_rb_behind_scale = 0xC8;   /* 200 */
-            g_rb_behind_range = 100;
-            g_rb_ahead_scale  = 0x78;   /* 120 */
-            g_rb_ahead_range  = 0x40;   /* 64  */
-            break;
-        }
-
-    } else if (has_traffic) {
-        /* Point-to-point WITH traffic */
-        int16_t *spd = (int16_t *)(g_ai_physics_template + 0x74);
-        int16_t *grp = (int16_t *)(g_ai_physics_template + 0x2C);
-
-        switch (tier) {
-        case 0:
-            *spd = (int16_t)(((int32_t)*spd * 0xB4) >> 8);
-            /* grip stays 0x100/256 = 100% */
-            g_rb_behind_scale = 0xB4;   /* 180 */
-            g_rb_behind_range = 0x4B;   /* 75  */
-            g_rb_ahead_scale  = 0xBE;   /* 190 */
-            g_rb_ahead_range  = 100;
-            break;
-        case 1:
-            *spd = (int16_t)(((int32_t)*spd * 0xBE) >> 8);
-            *grp = (int16_t)(((int32_t)*grp * 0x10E) >> 8);
-            g_rb_behind_scale = 0xC8;   /* 200 */
-            g_rb_behind_range = 0x3C;   /* 60  */
-            g_rb_ahead_scale  = 0xBE;   /* 190 */
-            g_rb_ahead_range  = 100;
-            break;
-        default: /* tier 2 */
-            *spd = (int16_t)(((int32_t)*spd * 0xDC) >> 8);
-            *grp = (int16_t)(((int32_t)*grp * 0x122) >> 8);
-            g_rb_behind_scale = 0xDC;   /* 220 */
-            g_rb_behind_range = 0x3C;   /* 60  */
-            g_rb_ahead_scale  = 100;
-            g_rb_ahead_range  = 0x40;   /* 64  */
-            break;
-        }
-
-    } else {
-        /* Point-to-point, NO traffic */
-        int16_t *spd = (int16_t *)(g_ai_physics_template + 0x74);
-        int16_t *grp = (int16_t *)(g_ai_physics_template + 0x2C);
-
-        switch (tier) {
-        case 0:
-            *spd = (int16_t)(((int32_t)*spd * 0xAA) >> 8);
-            /* grip 0x100/256 = 100% -- no change */
-            g_rb_behind_scale = 0xA0;   /* 160 */
-            g_rb_behind_range = 100;
-            g_rb_ahead_scale  = 0x96;   /* 150 */
-            g_rb_ahead_range  = 0x50;   /* 80  */
-            break;
-        case 1:
-            *spd = (int16_t)(((int32_t)*spd * 0xB4) >> 8);
-            /* grip 0x100/256 = 100% -- no change */
-            g_rb_behind_scale = 0xC8;   /* 200 */
-            g_rb_behind_range = 0x4B;   /* 75  */
-            g_rb_ahead_scale  = 0xC0;   /* 192 */
-            g_rb_ahead_range  = 0x4B;   /* 75  */
-            break;
-        default: /* tier 2 */
-            *spd = (int16_t)(((int32_t)*spd * 0xDC) >> 8);
-            *grp = (int16_t)(((int32_t)*grp * 0x10E) >> 8);
-            g_rb_behind_scale = 0x10E;  /* 270 */
-            g_rb_behind_range = 0x41;   /* 65  */
-            g_rb_ahead_scale  = 0x96;   /* 150 */
-            g_rb_ahead_range  = 0x50;   /* 80  */
-            break;
+        if (is_time_trial) {
+            /* [@ 0x00432F01-1F] Time-Trial path — skip all template scaling,
+             * write rb_*=0/0x40/0/0x40 only. No brake/spd writes. */
+            g_rb_behind_scale = 0;
+            g_rb_behind_range = 0x40;
+            g_rb_ahead_scale  = 0;
+            g_rb_ahead_range  = 0x40;
+        } else if (!is_circuit) {
+            /* [@ 0x00432FF7 JZ 0x00433178] !circuit branch */
+            if (is_cop_chase) {
+                /* [@ 0x00433181..0x004331F0] g_raceOverlayPresetMode == 4 (Cop Chase) */
+                *steer = (int16_t)(((int32_t)*steer * 0x91) >> 8);   /* [@ 0x00433185-99] */
+                *brake = 1000;                                       /* [@ 0x004331B3] */
+                *lspdb = 1000;                                       /* [@ 0x004331B7] */
+                *spd   = 0x3A1;                                      /* [@ 0x004331BB] */
+                *grp   = (int16_t)(((int32_t)*grp   * 0xB9) >> 8);   /* [@ 0x004331A1-C4] */
+                g_rb_behind_scale = 0x8C;                            /* [@ 0x004331C8] */
+                g_rb_behind_range = 0x64;                            /* [@ 0x004331D2] */
+                g_rb_ahead_scale  = 0xC0;                            /* [@ 0x004331DC] */
+                g_rb_ahead_range  = 0x40;                            /* [@ 0x004331E6] */
+            } else if (!has_traffic) {
+                /* [@ 0x004331F5-FA reads gTrafficActorsEnabled; 0x004331FC
+                 * loads gRaceDifficultyTier; 0x00433201 JNZ → traffic-on path.
+                 * Fall through: P2P no-traffic tier dispatch. */
+                switch (tier) {
+                case 0:
+                    /* [@ 0x00433300..0x00433370 tier-0] */
+                    *steer = (int16_t)(((int32_t)*steer * 0xAA) >> 8);
+                    *brake = 1000;
+                    *lspdb = 1000;
+                    *spd   = 0x3A1;
+                    *grp   = (int16_t)(((int32_t)*grp * 0x100) >> 8); /* [@ 0x00433324] */
+                    g_rb_behind_scale = 0xA0;                          /* [@ 0x00433345] */
+                    g_rb_behind_range = 0x64;                          /* [@ 0x0043334F] */
+                    g_rb_ahead_scale  = 0x96;                          /* [@ 0x00433359] */
+                    g_rb_ahead_range  = 0x50;                          /* [@ 0x00433363] */
+                    break;
+                case 1:
+                    /* [@ 0x00433299..0x004332FB] */
+                    *steer = (int16_t)(((int32_t)*steer * 0xB4) >> 8);
+                    *brake = 1000;
+                    *lspdb = 1000;
+                    *spd   = 0x3A1;                                   /* [@ 0x004332D2] */
+                    *grp   = (int16_t)(((int32_t)*grp * 0x100) >> 8); /* [@ 0x004332B7] */
+                    g_rb_behind_scale = 0xC8;                          /* [@ 0x004332DD] */
+                    g_rb_behind_range = 0x4B;                          /* [@ 0x004332E7] */
+                    g_rb_ahead_scale  = 0xC0;                          /* [@ 0x004332EC] */
+                    g_rb_ahead_range  = 0x4B;                          /* [@ 0x004332F6] */
+                    break;
+                default: /* tier 2 */
+                    /* [@ 0x0043321E..0x00433294] */
+                    *steer = (int16_t)(((int32_t)*steer * 0xDC) >> 8);
+                    *brake = 1000;
+                    *lspdb = 1000;
+                    *spd   = 0x433;                                   /* [@ 0x0043325F] */
+                    *grp   = (int16_t)(((int32_t)*grp * 0x10E) >> 8);
+                    g_rb_behind_scale = 0x10E;                         /* [@ 0x0043326C] */
+                    g_rb_behind_range = 0x41;                          /* [@ 0x00433276] */
+                    g_rb_ahead_scale  = 0x96;                          /* [@ 0x00433280] */
+                    g_rb_ahead_range  = 0x50;                          /* [@ 0x0043328A] */
+                    break;
+                }
+            } else {
+                /* [@ 0x00433372..0x004334DF] P2P WITH traffic */
+                switch (tier) {
+                case 0:
+                    /* [@ 0x00433478..0x004334DF] */
+                    *steer = (int16_t)(((int32_t)*steer * 0xB4) >> 8);
+                    *brake = 1000;
+                    *lspdb = 1000;
+                    *spd   = 0x3A1;
+                    *grp   = (int16_t)(((int32_t)*grp * 0x100) >> 8);
+                    g_rb_behind_scale = 0xB4;
+                    g_rb_behind_range = 0x4B;
+                    g_rb_ahead_scale  = 0xBE;
+                    g_rb_ahead_range  = 0x64;
+                    break;
+                case 1:
+                    /* [@ 0x00433402..0x00433476] note unique top_spd=0x3B9 */
+                    *steer = (int16_t)(((int32_t)*steer * 0xBE) >> 8);
+                    *brake = 1000;
+                    *lspdb = 1000;
+                    *spd   = 0x3B9;                                   /* [@ 0x00433441] */
+                    *grp   = (int16_t)(((int32_t)*grp * 0x10E) >> 8);
+                    g_rb_behind_scale = 0xC8;
+                    g_rb_behind_range = 0x3C;
+                    g_rb_ahead_scale  = 0xBE;
+                    g_rb_ahead_range  = 0x64;
+                    break;
+                default: /* tier 2 */
+                    /* [@ 0x00433389..0x004333FD] */
+                    *steer = (int16_t)(((int32_t)*steer * 0xDC) >> 8);
+                    *brake = 1000;
+                    *lspdb = 1000;
+                    *spd   = 0x433;
+                    *grp   = (int16_t)(((int32_t)*grp * 0x122) >> 8);
+                    g_rb_behind_scale = 0xDC;
+                    g_rb_behind_range = 0x3C;
+                    g_rb_ahead_scale  = 0x64;
+                    g_rb_ahead_range  = 0x40;
+                    break;
+                }
+            }
+        } else {
+            /* [@ 0x00432FFD..0x00433173] CIRCUIT branch — tier dispatch */
+            switch (tier) {
+            case 0:
+                /* [@ 0x00433104..0x00433173] */
+                *steer = (int16_t)(((int32_t)*steer * 0x91) >> 8);
+                *brake = 1000;
+                *lspdb = 1000;
+                *spd   = 0x3A1;                                       /* [@ 0x0043313E] */
+                *grp   = (int16_t)(((int32_t)*grp * 0xC8) >> 8);
+                g_rb_behind_scale = 0x8C;                              /* [@ 0x0043314B] */
+                g_rb_behind_range = 0x64;                              /* [@ 0x00433155] */
+                g_rb_ahead_scale  = 0xC8;                              /* [@ 0x0043315F] */
+                g_rb_ahead_range  = 0x37;                              /* [@ 0x00433169] */
+                break;
+            case 1:
+                /* [@ 0x0043308C..0x004330FF] */
+                *steer = (int16_t)(((int32_t)*steer * 0xA0) >> 8);
+                *brake = 1000;
+                *lspdb = 1000;
+                *spd   = 0x3A1;                                       /* [@ 0x004330CA] */
+                *grp   = (int16_t)(((int32_t)*grp * 0xEC) >> 8);
+                g_rb_behind_scale = 0x96;                              /* [@ 0x004330D7] */
+                g_rb_behind_range = 0x64;                              /* [@ 0x004330E1] */
+                g_rb_ahead_scale  = 0xC0;                              /* [@ 0x004330EB] */
+                g_rb_ahead_range  = 0x40;                              /* [@ 0x004330F5] */
+                break;
+            default: /* tier 2 */
+                /* [@ 0x00433015..0x00433087] circuit tier-2 leaf */
+                *steer = (int16_t)(((int32_t)*steer * 0xC3) >> 8);
+                *brake = 1000;
+                *lspdb = 1000;
+                *spd   = 0x433;                                       /* [@ 0x00433052] */
+                *grp   = (int16_t)(((int32_t)*grp * 0x104) >> 8);
+                g_rb_behind_scale = 0xC8;                              /* [@ 0x0043305F] */
+                g_rb_behind_range = 0x64;                              /* [@ 0x00433069] */
+                g_rb_ahead_scale  = 0x78;                              /* [@ 0x00433073] */
+                g_rb_ahead_range  = 0x40;                              /* [@ 0x0043307D] */
+                break;
+            }
         }
     }
 
@@ -1039,6 +1115,21 @@ void td5_ai_init_race_actor_runtime(void) {
                   g_rb_behind_range,
                   g_rb_ahead_scale,
                   g_rb_ahead_range);
+    }
+
+    /* Pilot trace probe (precise-00432E60): capture outputs at exit. */
+    {
+        extern void td5_pilot_emit_00432E60_leave(int32_t, int32_t, int32_t, int32_t,
+                                                  int16_t, int16_t, int16_t, int16_t, int16_t, int);
+        const int16_t *t_steer = (const int16_t *)(g_ai_physics_template + 0x68);
+        const int16_t *t_grip  = (const int16_t *)(g_ai_physics_template + 0x2C);
+        const int16_t *t_brake = (const int16_t *)(g_ai_physics_template + 0x6E);
+        const int16_t *t_lspdb = (const int16_t *)(g_ai_physics_template + 0x70);
+        const int16_t *t_spd   = (const int16_t *)(g_ai_physics_template + 0x74);
+        td5_pilot_emit_00432E60_leave(g_rb_behind_scale, g_rb_behind_range,
+                                      g_rb_ahead_scale,  g_rb_ahead_range,
+                                      *t_steer, *t_grip, *t_brake, *t_lspdb, *t_spd,
+                                      g_active_actor_count);
     }
 }
 
