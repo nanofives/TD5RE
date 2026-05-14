@@ -7249,7 +7249,7 @@ void td5_physics_reverse_throttle_sign(TD5_Actor *actor)
         actor->encounter_steering_cmd = -actor->encounter_steering_cmd;
 }
 
-/* --- ComputeReverseGearTorque (0x00403C80) — full encode + engine slew ---
+/* --- ComputeReverseGearTorque (0x00403C80) — byte-faithful port ---
  *
  * Despite the Ghidra name, this function does NOT compute torque. It
  * (a) produces the RPM-encoded pseudo-speed written back as the caller's
@@ -7259,112 +7259,151 @@ void td5_physics_reverse_throttle_sign(TD5_Actor *actor)
  * updater — UpdateEngineSpeedAccumulator (UESA) runs on the airborne path
  * instead; the two are mutually exclusive per tick.
  *
- * [CONFIRMED @ 0x00403C80 via 2026-04-11 full Ghidra pass + raw disasm
- * 0x00403d2f..0x00403d75 for the three +0x310 writeback sites.]
+ * Byte-exact port from listing 0x00403C80..0x00403D82 (98 instructions).
  *
- * Target RPM:
- *   - gear == 1 (neutral): return 0, leave engine alone (early-out).
- *   - throttle >= 1 AND gear == 2 (first forward): hot target =
- *       max((speed*4) >> 8, 0) + redline - 1800, step = 400
- *   - otherwise: target = 0, step = (brake ? 800 : 400) — coast down fast.
+ * Original signature (Ghidra): __cdecl(phys *param_1, actor *param_2, int speed_in)
+ *   param_1 (EAX,[ESP+0xC])  phys/tuning ptr   — reads [+0x2E + gear*2], [+0x72]
+ *   param_2 (EDI,[ESP+0x18]) actor ptr         — reads [+0x310],[+0x33E],[+0x36B],[+0x36D]
+ *                                                writes [+0x310]
+ *   param_3      ([ESP+0x20]) signed speed_in
  *
- * Slew:
- *   cur > target: cur -= step (clamp to target if overshoot) → write A or C
- *   cur <= target - 4*step: cur += step (big-gap linear ramp) → write B
- *   cur <= target, gap <= 4*step: cur += (target - cur) / 4 (exponential) → write C
+ * Port keeps the existing (actor, speed_in) wrapper signature; `get_phys`
+ * recovers param_1.  All math/control-flow inside is line-for-line with
+ * the original.
  *
- * Return value (pseudo-speed) is the closed-form inverse of UESA's decode:
- *   encode(rpm, gear_ratio) = (((rpm - 400) * 0x1000) / 45 / gear_ratio) << 8
+ * Original logic:
+ *   gear == 1  (neutral) → iVar5 (ret_value) = 0, BUT continues to slew
+ *                          engine through the cold branch (target=0).
+ *   gear != 1            → iVar5 = ((((rpm-400)*0x1000) /45 trunc) /gear_ratio
+ *                                  trunc) << 8
  *
- * speed_in is drivetrain-dependent per UpdatePlayerVehicleDynamics @ 0x00404030:
- *   sVar2=1 (RWD): body_vlong (uVar12)
- *   sVar2=2 (FWD): body_vlat  (uVar37)
- *   sVar2=3 (AWD): (uVar12 + uVar37) / 2
- */
+ *   throttle  > 0 AND gear == 2 → hot branch:
+ *      u = sar8_rz(speed_in * 4); if (u<0) u = 0  (SETS/DEC/AND clamp)
+ *      target = u + redline - 0x708 ;  step = 200
+ *   else                          → cold branch:
+ *      target = 0; step = (brake ? 400 : 200) * 2  (i.e. 800 or 400)
+ *
+ *   Slew engine_speed_accum toward target:
+ *     if (target < engine):                              # descending (JLE label)
+ *         engine -= step
+ *         if (engine < target):  write target (clamp)
+ *         else:                  write engine (stepped)
+ *     else:                                              # ascending
+ *         if (engine < target - 4*step):  write engine + step  (big-gap ramp)
+ *         else:  engine += sar2_rz(target - engine); write engine  (exp pull)
+ *
+ *   Return iVar5 (the encoded pseudo-speed).
+ *
+ * sar8_rz / sar2_rz : C99 truncated signed division by 256 / 4. */
+static inline int32_t sar8_rz_403C80(int32_t x) {
+    /* CDQ ; AND EDX,0xFF ; ADD EAX,EDX ; SAR EAX,8.
+     * Equivalent to (int32_t)(x / 256) — truncate toward zero. */
+    return ((x < 0) ? (x + 0xFF) : x) >> 8;
+}
+static inline int32_t sar2_rz_403C80(int32_t x) {
+    /* CDQ ; AND EDX,3 ; ADD EAX,EDX ; SAR EAX,2.
+     * Equivalent to (int32_t)(x / 4). */
+    return ((x < 0) ? (x + 3) : x) >> 2;
+}
+
 static int32_t compute_reverse_gear_torque(TD5_Actor *actor, int32_t speed_in)
 {
     if (!actor) return 0;
     int16_t *phys = get_phys(actor);
     if (!phys) return 0;
+    (void)phys;  /* PHYS_S(actor, off) wraps the same dereference. */
 
-    int32_t engine = actor->engine_speed_accum;
-    int32_t gear   = (int32_t)actor->current_gear;
+    /* Stack-mirroring the listing for clarity:
+     *   ECX = engine          (rpm in/out)
+     *   EBX = gear            (BL, byte-extended)
+     *   EDX = redline (saved at [ESP+0x18])
+     *   EBP = step (200 default, kept at [ESP+0x10])
+     *   ESI = iVar5  (return value)
+     *   EAX = target  (after target-build joins)  */
+    int32_t engine  = actor->engine_speed_accum;
+    int32_t gear    = (int32_t)actor->current_gear;          /* zero-extended byte */
+    int32_t redline = (int32_t)PHYS_S(actor, 0x72);          /* MOVSX from [+0x72] */
+    int32_t step    = 200;                                    /* MOV EBP,0xC8 */
 
-    /* --- Encode pseudo-speed (return value) --- */
-    int32_t ret_value;
+    /* --- Encode pseudo-speed (iVar5 / ESI) --- */
+    int32_t iVar5;
     if (gear == 1) {
-        return 0;  /* neutral — no engine slew, no return value */
-    }
-    {
+        /* 0x00403CAF JNZ skip → XOR ESI,ESI ; JMP 0x00403CE4.
+         * Neutral SKIPS the encode but does NOT early-return; engine slew
+         * still runs through the cold branch below. */
+        iVar5 = 0;
+    } else {
         int32_t gear_ratio = (int32_t)PHYS_S(actor, 0x2E + gear * 2);
-        if (gear_ratio == 0) return 0;
+
+        /* LEA ESI,[ECX-400] ; SHL ESI,12  →  ESI = (engine - 400) * 0x1000.
+         * Then 0xB60B60B7 IMUL idiom = ESI / 45 with truncate-toward-zero
+         * via SAR 5 + sign-bit fixup (SHR 31 / ADD).
+         * Then CDQ / IDIV gear_ratio truncates toward zero. */
         int32_t num = (engine - 400) * 0x1000;
-        ret_value = ((num / 45) / gear_ratio) << 8;
+        int32_t div45 = num / 45;                            /* C99 trunc */
+        int32_t div_gr = div45 / gear_ratio;                 /* C99 trunc */
+        iVar5 = div_gr << 8;
     }
 
-    /* --- Target RPM + slew step --- */
-    int32_t throttle = (int32_t)actor->encounter_steering_cmd;  /* signed short */
-    int32_t target, step;
+    /* --- Target + step selection (0x00403CE4..0x00403D2F) --- */
+    int32_t throttle = (int32_t)actor->encounter_steering_cmd;  /* MOVSX [+0x33E] */
+    int32_t target;
 
-    if (throttle < 1) {
-        /* Cold branch: no throttle → coast target=0. */
-        int base = actor->brake_flag ? 400 : 200;
-        step = base * 2;                     /* 800 or 400 */
-        target = 0;
-    } else if (gear == 2) {
-        /* Hot branch: first-forward under throttle. Step STAYS at 200 here —
-         * the doubling is inside the cold branch only. [CONFIRMED @ 0x00403C80
-         * raw disasm: iVar4=200 default, `iVar4 * 2` only inside the cold
-         * conditional.] */
-        int32_t u = (speed_in * 4) >> 8;
-        if (u < 0) u = 0;                    /* clamp via (AND sign-1) idiom */
-        int32_t redline = (int32_t)PHYS_S(actor, 0x72);
-        target = u + redline - 1800;         /* 0x708 */
-        step = 200;
-    } else if (gear > 2 && throttle >= 1) {
-        /* Higher gears under throttle: maintain RPM proportional to speed
-         * and gear ratio. The original targets RPM=0 here and relies on
-         * airborne UESA ticks to maintain RPM. Since the port rarely goes
-         * airborne and runs auto_gear on-ground, CRGT must maintain RPM
-         * for higher gears or the car oscillates (upshift→RPM dies→downshift). */
-        int32_t gr = (int32_t)PHYS_S(actor, 0x2E + gear * 2);
-        int32_t abs_spd = speed_in < 0 ? -speed_in : speed_in;
-        target = ((abs_spd >> 8) * gr * 0x2D) >> 12;
-        target += 400;
-        step = 200;
+    if (throttle > 0 && gear == 2) {
+        /* Hot branch 0x00403CF3..0x00403D1C:
+         *   EAX = speed_in*4 ; sar8_rz ; clamp <0 → 0 ; + redline - 0x708. */
+        int32_t u = sar8_rz_403C80(speed_in * 4);
+        /* SETS DL ; DEC EDX ; AND EAX,EDX → clamp u<0 to 0. */
+        if (u < 0) u = 0;
+        target = u + redline - 0x708;
+        /* step stays at 200 (EBP unmodified on this path). */
     } else {
-        /* Reverse or neutral under throttle, or higher gears coasting: target=0. */
-        int base = actor->brake_flag ? 400 : 200;
-        step = base * 2;
+        /* Cold branch 0x00403D1E..0x00403D2F:
+         *   if (brake_flag != 0) EBP = 0x190 (400)
+         *   ADD EBP,EBP            → EBP *= 2  → 400 or 800
+         *   XOR EAX,EAX            → target = 0 */
+        if (actor->brake_flag != 0) {
+            step = 0x190;        /* 400 */
+        }
+        step = step + step;      /* 400 or 800 */
         target = 0;
     }
 
-    /* --- Slew engine_speed_accum toward target --- */
-    int32_t new_accum;
-    if (target < engine) {
-        /* Descending: linear step, clamp to target on overshoot */
-        int32_t stepped = engine - step;
-        if (stepped < target) new_accum = target;   /* write A */
-        else                  new_accum = stepped;  /* write C (dec) */
-    } else {
-        if (engine < target - 4 * step) {
-            new_accum = engine + step;                /* write B (big-gap ramp) */
+    /* --- Slew engine_speed_accum (0x00403D31..0x00403D75) --- */
+    /* CMP ECX,EAX ; JLE ascending. Note: JLE in original is SIGNED-LE.
+     * The original CMP is engine (ECX) vs target (EAX). JLE means
+     * engine <= target → take ascending branch. We invert: descending
+     * iff engine > target. */
+    if (engine > target) {
+        /* Descending 0x00403D35..0x00403D48:
+         *   SUB ECX,EBP        (engine -= step)
+         *   CMP ECX,EAX ; JGE write_dec
+         *   else: [+0x310] = EAX (clamp to target)   ; return ESI
+         *   write_dec: [+0x310] = ECX                ; return ESI */
+        engine = engine - step;
+        if (engine >= target) {
+            actor->engine_speed_accum = engine;       /* write_dec / 0x00403D75 */
         } else {
-            /* Exponential pull — C99 signed integer division rounds toward
-             * zero, matching the original's SAR+CDQ+AND 3 idiom. */
+            actor->engine_speed_accum = target;       /* clamp / 0x00403D3B */
+        }
+    } else {
+        /* Ascending 0x00403D49..0x00403D75:
+         *   EDX = step*4 ; EBX = target - step*4
+         *   CMP ECX,EBX ; JGE exp_pull
+         *   else: ECX += EBP ; [+0x310] = ECX        ; return ESI  (big-gap ramp)
+         *   exp_pull: EAX = target - engine ; sar2_rz ; ECX += EAX
+         *            [+0x310] = ECX                  ; return ESI */
+        int32_t threshold = target - step * 4;
+        if (engine < threshold) {
+            actor->engine_speed_accum = engine + step;  /* big-gap / 0x00403D5A */
+        } else {
             int32_t delta = target - engine;
-            new_accum = engine + (delta / 4);        /* write C (exp) */
+            int32_t inc   = sar2_rz_403C80(delta);
+            actor->engine_speed_accum = engine + inc;   /* exp pull / 0x00403D75 */
         }
     }
 
-    if (actor->slot_index == 0 && (actor->frame_counter % 30u) == 0u) {
-        TD5_LOG_I(LOG_TAG,
-            "CRGT: gear=%d rpm=%d->%d target=%d step=%d throttle=%d brake=%d spd_in=%d",
-            gear, engine, new_accum, target, step, throttle,
-            actor->brake_flag, speed_in);
-    }
-    actor->engine_speed_accum = new_accum;
-    return ret_value;
+    return iVar5;
 }
 
 /* ========================================================================
