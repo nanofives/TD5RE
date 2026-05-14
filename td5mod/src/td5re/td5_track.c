@@ -22,6 +22,7 @@
 #include "td5_platform.h"
 #include "td5_render.h"
 #include "td5_trace.h"
+#include "td5_pilot_trace_004440F0.h"
 #include "../../../re/include/td5_actor_struct.h"
 #include "td5re.h"
 #include <string.h>
@@ -2655,7 +2656,13 @@ void td5_track_update_actor_position(TD5_Actor *actor)
      * pass restores faithful behavior; under the original spec the chassis
      * walker incurs at most a 1-tick lag after V2V push / spawn jumps,
      * which the next-tick call resolves. */
-    update_position_recursive(track_state, pos_x, pos_z, 0, /*single_step=*/1);
+    {
+        int32_t world_pos_xz[3] = { pos_x, 0, pos_z };
+        td5_pilot_emit_004440F0_enter(track_state, world_pos_xz,
+                                      (uintptr_t)__builtin_return_address(0));
+        update_position_recursive(track_state, pos_x, pos_z, 0, /*single_step=*/1);
+        td5_pilot_emit_004440F0_leave(track_state, 0);
+    }
 
     if ((uintptr_t)actor == (uintptr_t)0x004AB108u) {
         s_actor_position_log_counter++;
@@ -2694,7 +2701,13 @@ void td5_track_update_probe_position(TD5_TrackProbeState *probe,
      * ground from a span ahead of where the original would. On slope onsets
      * this produces +1792 FP spurious chassis-Y launches. Frida-localized at
      * Moscow span 196 front wheels (2026-05-01). */
-    update_position_recursive((int16_t *)probe, world_x, world_z, 0, /*single_step=*/1);
+    {
+        int32_t world_pos_xz[3] = { world_x, 0, world_z };
+        td5_pilot_emit_004440F0_enter(probe, world_pos_xz,
+                                      (uintptr_t)__builtin_return_address(0));
+        update_position_recursive((int16_t *)probe, world_x, world_z, 0, /*single_step=*/1);
+        td5_pilot_emit_004440F0_leave(probe, 0);
+    }
 }
 
 /* ========================================================================
