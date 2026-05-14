@@ -134,6 +134,22 @@ void td5_track_update_probe_position(struct TD5_TrackProbeState *probe,
 int  td5_track_get_surface_type(TD5_Actor *actor, int probe_index);
 void td5_track_compute_heading(TD5_Actor *actor);
 
+/* Byte-faithful port of ComputeActorHeadingFromTrackSegment @ 0x00445B90.
+ * Per-tick heading-normal writer. Reads actor's track_state at +0x80
+ * (span_idx, sub_lane), looks up the live span record, picks a triangle
+ * via a two-level (sub_lane × span_type) dispatch, and writes the
+ * normalized surface normal back to actor +0x290 (heading_normal int16[3]).
+ *
+ * Called from the per-tick pose integrators:
+ *   - IntegrateVehiclePoseAndContacts   (player/AI per tick)
+ *   - UpdateVehiclePoseFromPhysicsState (player/AI per tick)
+ *   - UpdateTrafficVehiclePose          (traffic per tick)
+ *
+ * This is distinct from td5_track_compute_heading() above, which is the
+ * SPAWN-only initializer port of 0x00434350 and writes a different vector
+ * (with heading_normal.y hard-coded to 0). */
+void td5_track_compute_runtime_heading_normal(TD5_Actor *actor);
+
 /* --- Barycentric contact --- */
 int32_t td5_track_compute_contact_height(int span_index, int sub_lane,
                                           int32_t world_x, int32_t world_z);
