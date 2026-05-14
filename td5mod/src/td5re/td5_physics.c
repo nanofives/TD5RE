@@ -42,6 +42,7 @@
 #include "td5_game.h"     /* td5_game_get_total_actor_count, td5_game_is_wanted_mode */
 #include "td5_platform.h"
 #include "td5_trace.h"    /* inner-tick physics_trace stages */
+#include "td5_pilot_trace_00406980.h"  /* precise-port pilot trace */
 #include "td5re.h"
 
 /* Include the full actor struct for field-level access.
@@ -261,6 +262,21 @@ void td5_physics_wall_response(TD5_Actor *actor, int32_t wall_angle,
                                int32_t penetration, int side,
                                int32_t probe_x_fp8, int32_t probe_z_fp8)
 {
+    /* Pilot trace: capture args + pre-state. Frida probe at
+     * tools/frida_pool7_00406980.js mirrors this schema. Output:
+     * log/port/pool7_00406980.csv. The `side` parameter is the port's
+     * encoding of the original's `flags` arg (side=-1 maps to flags=0;
+     * side=1/2 maps to flags=1/2). probe_x_fp8/probe_z_fp8 stand in for
+     * the original's `forceVec[0]/forceVec[2]`. */
+    {
+        uint32_t flags_for_trace = (side < 0) ? 0u : (uint32_t)(side);
+        td5_pilot_emit_00406980_enter(actor,
+                                       probe_x_fp8, 0, probe_z_fp8,
+                                       (uint32_t)wall_angle,
+                                       penetration,
+                                       flags_for_trace);
+    }
+
     /* Pre-impulse attitude snapshot (slot 0) — lets us see whether wall
      * response is the proximate trigger of a pitch/roll spike. */
     int32_t pre_av_roll  = actor->angular_velocity_roll;
@@ -289,17 +305,26 @@ void td5_physics_wall_response(TD5_Actor *actor, int32_t wall_angle,
     /* Lever arm iVar9 = (actor_center - probe) dot wall_tangent, both sides
      * divided by 256 first to avoid overflow before the >>12.
      * [CONFIRMED @ 0x00406A04-0x00406A60]. POST-push positions are used
-     * because actor->world_pos was already updated above. */
+     * because actor->world_pos was already updated above.
+     *
+     * Original uses Borland-style round-toward-zero on the >>12: adds 0xFFF
+     * to negative values before SAR (asm: `CDQ; AND EDX,0xFFF; ADD EAX,EDX;
+     * SAR EAX,0xC`). GCC's plain `>> 12` rounds toward -inf for negatives,
+     * producing 1-unit-too-negative results. D4 audit. */
     int32_t arm_x_int = (actor->world_pos.x - probe_x_fp8) >> 8;
     int32_t arm_z_int = (actor->world_pos.z - probe_z_fp8) >> 8;
-    int32_t iVar9 = ((int64_t)arm_z_int * sin_w + (int64_t)arm_x_int * cos_w) >> 12;
+    int64_t iVar9_raw = (int64_t)arm_z_int * sin_w + (int64_t)arm_x_int * cos_w;
+    int32_t iVar9 = (int32_t)((iVar9_raw + ((iVar9_raw >> 63) & 0xFFF)) >> 12);
 
     /* Decompose velocity into wall-tangent (v_para, iVar4) and
-     * wall-normal (v_perp, iVar10) components [CONFIRMED @ 0x4069cc]. */
+     * wall-normal (v_perp, iVar10) components [CONFIRMED @ 0x4069cc].
+     * Same round-toward-zero correction on the >>12 (D2/D3/D4/D6 family). */
     int32_t vx = actor->linear_velocity_x;
     int32_t vz = actor->linear_velocity_z;
-    int32_t v_para = ((int64_t)vx * cos_w + (int64_t)vz * sin_w) >> 12;
-    int32_t v_perp = ((int64_t)vz * cos_w - (int64_t)vx * sin_w) >> 12;
+    int64_t v_para_raw = (int64_t)vx * cos_w + (int64_t)vz * sin_w;
+    int64_t v_perp_raw = (int64_t)vz * cos_w - (int64_t)vx * sin_w;
+    int32_t v_para = (int32_t)((v_para_raw + ((v_para_raw >> 63) & 0xFFF)) >> 12);
+    int32_t v_perp = (int32_t)((v_perp_raw + ((v_perp_raw >> 63) & 0xFFF)) >> 12);
 
     /* iVar11 = contact-point normal velocity (center normal vel + rotation
      * contribution at the lever arm). [CONFIRMED @ 0x00406A60-0x00406A66] */
@@ -312,13 +337,25 @@ void td5_physics_wall_response(TD5_Actor *actor, int32_t wall_angle,
     int     clamp_fired = 0;
 
     /* Early-out when separating [CONFIRMED @ 0x00406A72-0x00406A78]:
-     * skip impulse + tangential damping, fall through to rotate velocity back. */
+     * JS 0x00406CBA — when iVar11 < 0 the original jumps to the function
+     * epilogue and returns WITHOUT updating linear_velocity_x/z or
+     * angular_velocity_yaw. D1 audit: port previously fell through and
+     * rotated (new_v_para, new_v_perp) back to world basis, introducing
+     * round-off in lv_x/lv_z on separating contacts. Faithful behavior is
+     * to skip the entire writeback block when iVar11 < 0. */
     if (iVar11 >= 0) {
-        /* Impulse numerator = ((K>>8) * -0x1100) >> 12, numerator full =
-         * num * iVar11. [CONFIRMED @ 0x00406A86-0x00406ACB] */
-        int32_t num = (((V2W_INERTIA_K >> 8) * -V2W_NUM_SCALE) >> 12);
+        /* Impulse numerator = ((K>>8) * -0x1100) >> 12 with Borland round-
+         * toward-zero on the negative >>12. D2 audit. The compiler-time
+         * constant evaluation here yields a different result from the
+         * runtime add-and-shift form, but since iVar6 = -25497168 is
+         * negative, we apply (val + 0xFFF) >> 12 explicitly.
+         * [CONFIRMED @ 0x00406A86-0x00406ACB] */
+        int32_t iVar6_num = (V2W_INERTIA_K >> 8) * -V2W_NUM_SCALE;  /* -25497168 */
+        int32_t num = (iVar6_num + ((iVar6_num >> 31) & 0xFFF)) >> 12;
 
-        /* Denominator = (iVar9^2 + K) >> 8. [CONFIRMED @ 0x00406AAE-0x00406AD2] */
+        /* Denominator = (iVar9^2 + K) >> 8. [CONFIRMED @ 0x00406AAE-0x00406AD2]
+         * iVar9^2 + K is always non-negative (K>0, square>=0) so no sign-
+         * round needed; matches port's prior code. */
         int64_t denom64 = ((int64_t)iVar9 * iVar9 + (int64_t)V2W_INERTIA_K) >> 8;
         if (denom64 == 0) denom64 = 1;
         impulse = (int32_t)((int64_t)num * iVar11 / denom64);
@@ -361,17 +398,24 @@ void td5_physics_wall_response(TD5_Actor *actor, int32_t wall_angle,
          * memory note was a misread.
          *
          * Branch order matches the asm (positive first). */
-        int32_t v_para_round = v_para >> 6;  /* signed shift; arithmetic-round */
+        /* `v_para_round` mirrors the original `(v_para + (v_para>>31 &
+         * 0x3F)) >> 6` round-toward-zero pattern. D3 audit: GCC `>> 6` on
+         * negative values rounds toward -inf, off by 1 unit; original adds
+         * 0x3F before SAR. */
+        int32_t v_para_round = (v_para + ((v_para >> 31) & 0x3F)) >> 6;
         int32_t tmp;
         if (v_para > 0) {
             tmp = v_para_round + 0x800 + iVar11 * 2;
-            int32_t delta = (tmp * 0x180) >> 11;
+            /* D3 round-toward-zero on the >>11 of (tmp * 0x180). */
+            int32_t mul_raw = tmp * 0x180;
+            int32_t delta = (mul_raw + ((mul_raw >> 31) & 0x7FF)) >> 11;
             pre_clamp_delta = delta;
             new_v_para = v_para - delta;
             if (new_v_para < 0) { new_v_para = 0; clamp_fired = 1; }
         } else {
             tmp = (iVar11 * 2 + 0x800) - v_para_round;
-            int32_t delta = (tmp * 0x180) >> 11;
+            int32_t mul_raw = tmp * 0x180;
+            int32_t delta = (mul_raw + ((mul_raw >> 31) & 0x7FF)) >> 11;
             pre_clamp_delta = delta;
             new_v_para = v_para + delta;
             /* Faithful port of 0x00406B65-69: TEST EAX,EAX / JLE
@@ -388,19 +432,28 @@ void td5_physics_wall_response(TD5_Actor *actor, int32_t wall_angle,
         int32_t ang_div = V2W_INERTIA_K / ANGULAR_DIVISOR_W;  /* 2300 */
         if (ang_div == 0) ang_div = 1;
         actor->angular_velocity_yaw += (impulse * iVar9) / ang_div;
+
+        /* Rotate (new_v_para, new_v_perp) back to world basis.
+         * [CONFIRMED @ 0x406a10]. D6 audit: round-toward-zero on the >>12,
+         * matching original (val + (val>>31 & 0xFFF)) >> 12 pattern. */
+        int64_t lvx_raw = (int64_t)new_v_para * cos_w - (int64_t)new_v_perp * sin_w;
+        int64_t lvz_raw = (int64_t)new_v_para * sin_w + (int64_t)new_v_perp * cos_w;
+        actor->linear_velocity_x = (int32_t)((lvx_raw + ((lvx_raw >> 63) & 0xFFF)) >> 12);
+        actor->linear_velocity_z = (int32_t)((lvz_raw + ((lvz_raw >> 63) & 0xFFF)) >> 12);
+
+        /* No ±6000 yaw clamp here — original has none inside 0x406980.
+         * [CONFIRMED — no write to actor+0x1C4 after LAB_00406B6B] */
+
+        /* Track contact flag: Forward/Reverse handlers pass side=-1 (no write).
+         * The original wrote nothing of this kind directly inside the iVar11>=0
+         * block either — track_contact_flag is a port-only field used by the
+         * port's lateral-handler dispatch (which we have disabled). It's
+         * still useful as a per-tick "did wall fire" marker. Gated inside
+         * the iVar11>=0 branch per D1: separating contacts shouldn't flag.
+         * [CONFIRMED @ 0x406d7e/0x406e4e on the side-encoding mapping] */
+        if (side >= 0)
+            actor->track_contact_flag = (uint8_t)(side + 1);
     }
-
-    /* Rotate (new_v_para, new_v_perp) back to world basis [CONFIRMED @ 0x406a10] */
-    actor->linear_velocity_x = ((int64_t)new_v_para * cos_w - (int64_t)new_v_perp * sin_w) >> 12;
-    actor->linear_velocity_z = ((int64_t)new_v_para * sin_w + (int64_t)new_v_perp * cos_w) >> 12;
-
-    /* No ±6000 yaw clamp here — original has none inside 0x406980.
-     * [CONFIRMED — no write to actor+0x1C4 after LAB_00406B6B] */
-
-    /* Track contact flag: Forward/Reverse handlers pass side=-1 (no write).
-     * [CONFIRMED @ 0x406d7e/0x406e4e] */
-    if (side >= 0)
-        actor->track_contact_flag = (uint8_t)(side + 1);
 
     TD5_LOG_I(LOG_TAG,
               "wall_response: side=%d pen=%d angle=%d arm=%d iVar11=%d imp=%d vpara=%d vperp=%d yaw=%d delta=%d",
@@ -425,6 +478,9 @@ void td5_physics_wall_response(TD5_Actor *actor, int32_t wall_angle,
                   actor->angular_velocity_yaw,
                   (int)actor->display_angles.roll, (int)actor->display_angles.pitch);
     }
+
+    /* Pilot trace: capture post-state and emit row. */
+    td5_pilot_emit_00406980_leave(actor);
 }
 
 /* ========================================================================
