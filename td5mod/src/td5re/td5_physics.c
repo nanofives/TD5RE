@@ -43,6 +43,7 @@
 #include "td5_platform.h"
 #include "td5_trace.h"    /* inner-tick physics_trace stages */
 #include "td5_pilot_trace.h" /* precise-port pilot CSV emit for 0x00403720 */
+#include "td5_pilot_trace_00406650.h" /* precise-port pilot CSV emit for 0x00406650 */
 #include "td5re.h"
 
 /* Include the full actor struct for field-level access.
@@ -609,37 +610,83 @@ void td5_physics_update_vehicle_actor(TD5_Actor *actor)
 {
     if (!actor) return;
 
-    /* 1. Increment frame counter */
+    /* precise-port pilot 0x00406650: capture enter snapshot. */
+    td5_pilot_emit_00406650_enter(actor);
+
+    /* 1. Increment frame counter — listing 0x00406664 INC WORD ptr [+0x338]. */
     actor->frame_counter++;
 
-    /* 2. Clear per-frame flags */
+    /* 2. Clear per-frame flags — listing 0x00406673 MOV BYTE [+0x37B], 0. */
     actor->track_contact_flag = 0;
 
-    /* 3. Time trial ghost: force zero throttle if ghost flag set */
-    if (actor->ghost_flag) {
-        actor->encounter_steering_cmd = 0;
+    /* 3. Ghost reset — listing 0x0040667A-66A6:
+     *   if (g_selectedGameType != 0 && (uint8)[+0x37E] != 0) {
+     *       [+0x30C] = 0           // steering_command
+     *       [+0x33E] = 0xFF00      // encounter_steering_cmd
+     *       [+0x36D] = 1           // brake_flag
+     *   }
+     * Field 0x37E is overloaded: time-trial-ghost flag (single-race) or
+     * checkpoint_count (P2P). Original gates BOTH on game_type != 0; port
+     * previously omitted the game_type gate AND wrote wrong values.
+     * [Audit D2 — fixed 2026-05-14.] */
+    if (g_game_type != 0 && actor->ghost_flag) {
+        actor->steering_command = 0;
+        actor->encounter_steering_cmd = (int16_t)0xFF00;
         actor->brake_flag = 1;
     }
 
-    /* 4. Speed tracking: accumulate distance, track peak */
-    {
+    /* 4. Speed tracking — listing 0x004066A6-66E9, gated on finish_time == 0:
+     *     abs_spd = abs(longitudinal_speed)
+     *     accumulated_distance += abs_spd >> 8
+     *     peak_speed = max(peak_speed, (int16)(abs_spd >> 8))
+     * [Audit D3 — finish_time gate added 2026-05-14.] */
+    if (actor->finish_time == 0) {
         int32_t spd = actor->longitudinal_speed;
         if (spd < 0) spd = -spd;
-        actor->accumulated_distance += (spd >> 8);
-        if ((int16_t)(spd >> 8) > actor->peak_speed)
-            actor->peak_speed = (int16_t)(spd >> 8);
+        int32_t spd_sar8 = spd >> 8;   /* sar8_rz collapses to >>8 for spd >= 0 */
+        actor->accumulated_distance += spd_sar8;
+        if ((int16_t)spd_sar8 > actor->peak_speed)
+            actor->peak_speed = (int16_t)spd_sar8;
     }
 
-    /* 5. Attitude clamp (unless scripted mode) */
+    /* 4b. Race timer + average-speed block — listing 0x004066FB-6769:
+     *   if (gRaceCameraTransitionGate == 0 && finish_time == 0) {
+     *       if ((uint16)timing_frame_counter < 0xFFFF) timing_frame_counter++
+     *       average_speed_metric = (int16)(accumulated_distance / timing_frame_counter)
+     *       (re-update peak_speed from same abs_spd — algebraically a no-op
+     *        because nothing in between mutates longitudinal_speed)
+     *   }
+     * The port's g_game_paused mirrors both gRaceCameraTransitionGate and
+     * g_gamePaused (both are 1 during countdown, 0 during the race), so this
+     * gate uses !g_game_paused. [Audit D4 — added 2026-05-14.] */
+    if (!g_game_paused && actor->finish_time == 0) {
+        uint16_t *tc = (uint16_t *)((uint8_t *)actor + 0x34C);
+        if (*tc < 0xFFFF) (*tc)++;
+        if (*tc != 0) {
+            actor->average_speed_metric =
+                (int16_t)(actor->accumulated_distance / (int32_t)(uint32_t)*tc);
+        }
+        /* Second peak_speed update at 0x00406745-6762 — identical to the
+         * first because longitudinal_speed hasn't been mutated; skipped to
+         * avoid a redundant write that would also be visible in the trace. */
+    }
+
+    /* 5. Attitude clamp (unless scripted mode) — listing 0x0040677B-678E:
+     *     if ([+0x379] == 0) ClampVehicleAttitudeLimits(actor) */
     if (actor->vehicle_mode == 0)
         td5_physics_clamp_attitude(actor);
 
     /* 6. Dynamics dispatch */
     if (actor->vehicle_mode == 0 && !g_game_paused) {
-        /* Select effective grip: min of grip_reduction and race_position */
+        /* Select effective grip: min of grip_reduction and race_position.
+         * Listing 0x00406823-683D: AL=[+0x380]; CL=[+0x383]; if (CL < AL) AL=CL;
+         * MOV [+0x380], AL.  Original WRITES the clamped result back to
+         * actor->grip_reduction. Port previously kept it in a local only.
+         * [Audit D7 — fixed 2026-05-14.] */
         uint8_t eff_grip = actor->grip_reduction;
         if (actor->race_position < eff_grip)
             eff_grip = actor->race_position;
+        actor->grip_reduction = eff_grip;
 
         if (actor->wheel_contact_bitmask == 0x0F && actor->airborne_frame_counter >= 3) {
             /* Stunned/damping recovery mode */
@@ -647,8 +694,9 @@ void td5_physics_update_vehicle_actor(TD5_Actor *actor)
                       actor->slot_index, actor->airborne_frame_counter,
                       actor->angular_velocity_roll, actor->angular_velocity_pitch);
             td5_physics_state0f_damping(actor);
-        } else if (actor->slot_index < 6 && g_race_slot_state[actor->slot_index]) {
-            /* Human player */
+        } else if (actor->slot_index < 6 && g_race_slot_state[actor->slot_index] == 1) {
+            /* Human player — listing 0x0040685C tests `state == 1` strictly,
+             * not `state != 0`. [Audit D13 — tightened 2026-05-14.] */
             td5_physics_update_player(actor);
         } else {
             /* AI racer or traffic */
@@ -671,7 +719,29 @@ void td5_physics_update_vehicle_actor(TD5_Actor *actor)
          * Missing: RefreshScriptedVehicleTransforms rotation-matrix advance
          * (MultiplyRotationMatrices3x3); requires recovery_target_m00 / saved_orientation_m00
          * subsystem not yet ported. */
-        actor->frame_counter++;
+        /* [Audit D1 — removed double frame_counter increment 2026-05-14.]
+         * Original 0x004067A2 does NOT re-increment frame_counter inside the
+         * vehicle_mode==1 branch — the single increment at function entry
+         * (line 617 above, matching listing 0x00406664) is the only one. */
+
+        /* D11 — Scripted-mode world_pos write, listing 0x004067A8-67D9:
+         *   world_pos.x = (int16)*(+0x208) << 8
+         *   world_pos.y = (int16)*(+0x20A) << 8
+         *   world_pos.z = (int16)*(+0x20C) << 8
+         * The three shorts at +0x208/A/C alias the "display_angles" struct in
+         * the port, but the original treats them as recovery-target world
+         * coordinates during vehicle_mode==1 — the recovery animation
+         * overwrites world_pos every tick from this triple.
+         * [Audit D11 — added 2026-05-14.] */
+        {
+            uint8_t *abase = (uint8_t *)actor;
+            int16_t rx = *(int16_t *)(abase + 0x208);
+            int16_t ry = *(int16_t *)(abase + 0x20A);
+            int16_t rz = *(int16_t *)(abase + 0x20C);
+            actor->world_pos.x = (int32_t)rx << 8;
+            actor->world_pos.y = (int32_t)ry << 8;
+            actor->world_pos.z = (int32_t)rz << 8;
+        }
 
         /* Linear velocity damping [CONFIRMED @ 0x00409D20-0x00409D3B]:
          * v -= (v + (v>>31 & 0xFF)) >> 8  (sign-extending divide-by-256) */
@@ -688,44 +758,65 @@ void td5_physics_update_vehicle_actor(TD5_Actor *actor)
             td5_physics_reset_actor_state(actor);
         }
     } else if (g_game_paused) {
-        /* Paused: only update engine RPM display.
+        /* Paused branch — listing 0x00406881-690B, line-by-line.
          *
-         * Original UpdateVehicleActor @ 0x00406650 paused branch:
-         *   UpdateVehicleEngineSpeedSmoothed(actor);
-         *   if (<AI-slot predicate>)
-         *       actor->engine_speed_accum = (cardef[0x72] << 1) / 3;
+         * Order from the listing:
+         *   DL = [+0x383]                     ; race_position
+         *   [+0x381] = DL                     ; prev_race_position = race_position
+         *   UpdateVehicleEngineSpeedSmoothed(actor)
+         *   if (g_selectedGameType != 0) {
+         *       if (slot[+0x375].state != 1)
+         *           engine_speed_accum = (cardef[0x72] << 1) / 3
+         *   }
+         *   [+0x376] = 0                       ; surface_contact_flags = 0
+         *   if (slot[slotIndex].state == 1) {
+         *       cardef = [+0x1BC]
+         *       three_quart_redline = ((int16)cardef[0x72] * 3 + sgn_adj) >> 2  (round-toward-zero)
+         *       if (engine_speed_accum > three_quart_redline)
+         *           surface_contact_flags = (uint8)cardef[0x76]
+         *   }
          *
-         * The predicate as decompiled reads (g_selectedGameType != 0 &&
-         * slot_state != 1). Empirically the `(redline*2)/3` AI pin DOES
-         * fire during /diff-race single-race runs on slots that haven't
-         * begun AI dynamics yet (trace slots 3/5 on Moscow land at exactly
-         * 7400 = 11100*2/3). So the port's condition on game_type is
-         * dropped here — gate only on the slot being a non-player racer,
-         * which matches the observed trace. [RE basis: 0x004068B3-0x004068CB] */
+         * Port previously matched only the UpdateVehicleEngineSpeedSmoothed
+         * call + the AI engine pin. [Audit D5 — added prev_race_position,
+         * scf=0, scf-from-cardef-on-high-rpm 2026-05-14.] */
+
+        /* D5a — prev_race_position = race_position */
+        actor->prev_race_position = actor->race_position;
+
         update_engine_speed_smoothed(actor);
-        /* The original gates the (redline*2)/3 AI pin on
-         *   (g_selectedGameType != 0 && slot[+0x375].state != 1)
-         * [CONFIRMED @ 0x004068B3-0x004068CB via Opus 4.7 audit 2026-05-03].
-         * The prior port comment dropped the game_type gate based on a
-         * misread: the empirical 7400 (= 11100*2/3) trace landed because
-         * the test had game_type != 0, not because the gate is always on.
-         *
-         * For single-race (game_type=0), the original does NOT pin during
-         * pause — update_engine_speed_smoothed revs RPM toward redline via
-         * the throttle-driven target, ending pause near redline (6185 for
-         * Viper). The first active sub-tick slews -200 to ~5985, which
-         * exceeds gear-2 upshift_rpm (5400) → AI shifts up rapidly,
-         * dropping drive_torque. This is the ROOT CAUSE of the Honolulu
-         * 2× force overshoot tracked in todo_state0f_overfire_skips_player.md.
-         *
-         * With this gate restored, port matches original on game_type=0
-         * single-race and continues to pin AI engines on game_type!=0
-         * (championship / cup modes). */
+
+        /* D5b — AI engine pin: gate on g_selectedGameType != 0 (championship/
+         * cup modes only). [RE basis: 0x004068B3-0x004068CB] */
         if (g_game_type != 0 &&
             actor->slot_index < 6 &&
             g_race_slot_state[actor->slot_index] != 1) {
             int32_t redline = (int32_t)PHYS_S(actor, 0x72);
             actor->engine_speed_accum = (redline << 1) / 3;
+        }
+
+        /* D5c — clear surface_contact_flags */
+        actor->surface_contact_flags = 0;
+
+        /* D5d — player path: set scf from cardef[0x76] when engine > 3/4 redline.
+         * Listing 0x004068D8-690B:
+         *   if (gRaceSlotStateTable.slot[slotIndex].state == 1) {
+         *       phys = [+0x1BC]                     ; tuning_data_ptr
+         *       eax = (int16)phys[0x72]
+         *       lea eax, [eax + eax*2]              ; eax = redline * 3
+         *       cdq; and edx, 3; add eax, edx; sar eax, 2  ; round-toward-zero /4
+         *       if (engine_speed_accum > eax) [+0x376] = phys[0x76]
+         *   } */
+        if (actor->slot_index < 6 && g_race_slot_state[actor->slot_index] == 1) {
+            int16_t *phys = get_phys(actor);
+            if (phys) {
+                int32_t redline = (int32_t)PHYS_S(actor, 0x72);
+                int32_t triple = redline * 3;
+                int32_t thresh = (triple + ((triple >> 31) & 3)) >> 2;  /* /4 round-rz */
+                if (actor->engine_speed_accum > thresh) {
+                    actor->surface_contact_flags =
+                        ((uint8_t *)phys)[0x76];
+                }
+            }
         }
     }
 
@@ -820,6 +911,9 @@ void td5_physics_update_vehicle_actor(TD5_Actor *actor)
                   actor->current_gear,
                   actor->surface_type_chassis);
     }
+
+    /* precise-port pilot 0x00406650: capture leave snapshot. */
+    td5_pilot_emit_00406650_leave(actor);
 }
 
 /* ========================================================================
