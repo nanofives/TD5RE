@@ -193,6 +193,9 @@ int  td5_track_load_routes(const void *left_data, size_t left_size,
 /* --- Wrap normalization --- */
 int  td5_track_normalize_actor_wrap(TD5_Actor *actor);
 
+/* --- Segment boundary remap (0x443FF0 ResolveActorSegmentBoundary) --- */
+void td5_track_resolve_actor_segment_boundary(TD5_Actor *actor);
+
 /* --- Route heading helpers --- */
 int  td5_track_get_primary_route_heading(int span_index);
 

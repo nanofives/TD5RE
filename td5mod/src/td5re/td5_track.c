@@ -3331,35 +3331,116 @@ int td5_track_normalize_actor_wrap(TD5_Actor *actor)
 /* ========================================================================
  * Segment Boundary Remapping (0x443FF0 ResolveActorSegmentBoundary)
  *
- * Handles segment boundary discontinuities using the jump table from
- * the STRIP.DAT header for tracks with non-contiguous span numbering.
+ * Verbatim port of ResolveActorSegmentBoundary @ 0x00443FF0 in TD5_d3d.exe.
+ * Caller in original: RecycleTrafficActorFromQueue @ 0x004353B0 (only xref).
+ *
+ * Listing layout (from 0x00443FF0 disassembly, pool9 2026-05-14):
+ *   - DAT_004c3da0   = pointer to STRIP.DAT blob (== s_strip_blob).
+ *   - [strip + 0x04] = main-road span count (hdr[1], == ring_length).
+ *   - [strip + 0x14] = jump_entry_count.
+ *   - [strip + 0x18] = jump_entry[0] -- 3 shorts per entry, stride 6:
+ *                       short[0] = segment_low  (inclusive)
+ *                       short[1] = segment_high (inclusive)
+ *                       short[2] = segment_anchor (remap basis)
+ *
+ * Behavior:
+ *   1. raw = (int)(int16_t)actor[+0x80].
+ *   2. If raw <= ring_length: write raw to actor[+0x82] and actor[+0x84],
+ *      return. (Sentinel: no remap needed for in-ring spans.)
+ *   3. Else, scan the jump-entry table sequentially. The first entry where
+ *      raw is signed-in-range [low, high] determines the remap. If no
+ *      entry matches, return without writing.
+ *   4. On match for entry i:
+ *        new = raw + (anchor[i] - low[i])
+ *      then store `new` (int16) to actor[+0x82] and actor[+0x84].
+ *
+ * Critical fidelity points vs prior port (resolve_segment_boundary, unused):
+ *   - Source field is the RAW span at +0x80 (track_state[0]), not the
+ *     normalized span at +0x82.
+ *   - Compare against ring_length is on signed int values (JG semantics).
+ *   - Sentinel branch writes raw -> +0x82 AND +0x84 unconditionally for
+ *     the in-ring case (no early-return on missing jump table).
+ *   - Match arithmetic SUBTRACTS the low boundary: it's
+ *     `raw + (anchor - low)`, not `raw + remap_field`.
+ *   - When the loop exits without a match, NEITHER +0x82 nor +0x84 is
+ *     touched (the function simply returns).
  * ======================================================================== */
 
-static void resolve_segment_boundary(int16_t *track_state)
+void td5_track_resolve_actor_segment_boundary(TD5_Actor *actor)
 {
-    int i;
-    int16_t span;
-    uint16_t start, end;
-    int16_t remap;
+    int16_t *track_state;
+    int     raw_span;
+    int     ring_length;
+    int     i;
+    int     entry_count;
+    uint8_t *entry_base;
 
-    if (!s_jump_entries || s_jump_entry_count <= 0)
+    if (!actor) return;
+
+    track_state = (int16_t *)((uint8_t *)actor + 0x80);
+
+    /* Line: MOVSX EDX, word ptr [EBX + 0x80] -> sign-extended raw span. */
+    raw_span = (int)track_state[0];
+
+    /* Original reads [DAT_004c3da0 + 0x04] = hdr[1] = main-road ring length.
+     * In the port, hdr[1] is mirrored at g_td5.track_span_ring_length and
+     * also lives at s_strip_header[1] if the header pointer is bound. We
+     * prefer the runtime ring_length since the original's [+0x04] is
+     * exactly that value (s_span_count is the port's inflated physical
+     * count and does NOT match the original [+0x04]). */
+    if (s_strip_header) {
+        ring_length = (int)s_strip_header[1];
+    } else {
+        ring_length = g_td5.track_span_ring_length;
+    }
+
+    /* JG 0x0044401d == "raw > ring_length -> fall through to scan",
+     * the fallthrough taken when "raw <= ring_length" writes raw to
+     * +0x82/+0x84 and returns. */
+    if (raw_span <= ring_length) {
+        track_state[1] = (int16_t)raw_span; /* +0x82 */
+        track_state[2] = (int16_t)raw_span; /* +0x84 */
+        return;
+    }
+
+    /* Out-of-ring: scan jump table. ESI = [EDI + 0x14] = jump_entry_count.
+     * If count <= 0 the loop is skipped and the function returns without
+     * writing (XOR EAX,EAX; JLE 0x00444069). */
+    entry_count = s_jump_entry_count;
+    entry_base  = s_jump_entries;
+    if (entry_count <= 0 || !entry_base)
         return;
 
-    span = track_state[1]; /* normalized span */
+    /* ECX = EDI + 0x1a initially. puVar3[-1] = entry.low (signed short),
+     * puVar3[ 0] = entry.high (signed short). Compare semantics: JL on
+     * "raw < low" or JG on "high < raw" => keep scanning. Both are signed
+     * (the LEA / MOVZX / MOVSX dance produces zero-extended shorts that
+     * are then signed-compared as 32-bit). */
+    for (i = 0; i < entry_count; i++) {
+        const int16_t *entry = (const int16_t *)(entry_base + i * 6);
+        int low    = (int)(uint16_t)entry[0];
+        int high   = (int)(uint16_t)entry[1];
+        int anchor = (int)(int16_t)entry[2];
 
-    for (i = 0; i < s_jump_entry_count; i++) {
-        uint8_t *entry = s_jump_entries + i * 6;
-        start = *(uint16_t *)(entry + 0);
-        end   = *(uint16_t *)(entry + 2);
-        remap = *(int16_t *)(entry + 4);
+        /* Equivalent to the disassembly's:
+         *   JL (raw < low)  -> next
+         *   JLE (raw > high) inverse -> if (high < raw) next
+         *   else: MATCH (fallthrough to remap block) */
+        if (raw_span < low) continue;
+        if (high < raw_span) continue;
 
-        if ((uint16_t)span >= start && (uint16_t)span <= end) {
-            span = (int16_t)(span + remap);
-            track_state[1] = span; /* normalized */
-            track_state[2] = span; /* accumulated */
-            break;
-        }
+        /* MATCH at index i. Compute the remap:
+         *   AX = [EDI + i*6 + 0x1c]    ; anchor (third short of entry)
+         *   AX-= [EDI + i*6 + 0x18]    ; low    (first short of entry)
+         *   AX+= raw_span
+         * Store AX (16-bit truncation) to +0x82 and +0x84. */
+        int new_span = (anchor - low) + raw_span;
+        track_state[1] = (int16_t)new_span; /* +0x82 */
+        track_state[2] = (int16_t)new_span; /* +0x84 */
+        return;
     }
+    /* Loop exhausted with no match: original returns without touching
+     * +0x82/+0x84 (POP EDI/ESI/EBP/EBX; RET at 0x00444069). */
 }
 
 /* Circuit checkpoint and lap tracking removed from this module.
