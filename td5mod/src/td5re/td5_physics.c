@@ -3389,10 +3389,54 @@ static void resolve_collision_pair(TD5_Actor *a, TD5_Actor *b, int idx_a, int id
  * it produced no dynamic bounce response. Fixed here.
  * ======================================================================== */
 
+/* pool5 / 0x00403A20 pilot trace hooks — header included separately to keep
+ * the function signature unchanged. */
+extern void td5_pilot_emit_00403A20_enter(const TD5_Actor *actor, int32_t accel_x, int32_t accel_z, uintptr_t caller_ra);
+extern void td5_pilot_emit_00403A20_leave(const TD5_Actor *actor);
+
+/* Round-to-zero divide by 256 for signed int32 — byte-exact port of the
+ * 0x00403A20 CDQ; AND EDX,0xFF; ADD EAX,EDX; SAR EAX,8 idiom.
+ *
+ * For non-negative x, this matches plain `x >> 8` (arithmetic shift right).
+ * For negative x not divisible by 256, this returns one unit closer to zero
+ * than plain SAR.
+ *
+ * Example: x = -1 → plain SAR(-1, 8) = -1, sar8_rz(-1) = 0.
+ *          x = -257 → plain SAR(-257, 8) = -2, sar8_rz(-257) = -1.
+ *
+ * Original idiom semantics:
+ *   CDQ            ; EDX = sign-extend(EAX) = all 1s if EAX<0, 0 otherwise
+ *   AND EDX, 0xFF  ; → 0xFF if neg, 0 if non-neg
+ *   ADD EAX, EDX
+ *   SAR EAX, 8
+ *
+ * So bias is 0xFF for negatives, not 1. Self-validated against the
+ * captured original CSV (tools/validate_pool5_00403A20_math.py): 230/230
+ * wheel+center outputs match byte-exact across 46 calls. */
+static inline int32_t sar8_rz(int32_t x)
+{
+    int32_t bias = (x < 0) ? 0xFF : 0;
+    return (x + bias) >> 8;
+}
+
+/* Round-to-zero divide by 2 for signed int32. Mirrors the central-pass
+ * `CDQ; SUB EAX,EDX; SAR EAX,1` idiom at 0x00403B78..B95.
+ *   CDQ            ; EDX = sign(EAX) = -1 if neg, 0 if non-neg
+ *   SUB EAX, EDX   ; subtract -1 (=add 1) if negative, no-op if non-neg
+ *   SAR EAX, 1
+ */
+static inline int32_t sar1_rz(int32_t x)
+{
+    int32_t bias = (x < 0) ? -1 : 0;
+    return (x - bias) >> 1;     /* (x - (-1)) = x + 1 when negative */
+}
+
 void td5_physics_integrate_suspension(TD5_Actor *actor, int32_t accel_x, int32_t accel_z)
 {
     int16_t *phys = get_phys(actor);
     if (!phys) return;
+
+    td5_pilot_emit_00403A20_enter(actor, accel_x, accel_z, (uintptr_t)__builtin_return_address(0));
 
     /* cardef constants -- see function header.
      * Names chosen to match the original's semantic use. */
@@ -3402,49 +3446,100 @@ void td5_physics_integrate_suspension(TD5_Actor *actor, int32_t accel_x, int32_t
     const int32_t k_travel_lim = (int32_t)PHYS_S(actor, 0x64);  /* per-wheel +/- travel clamp */
     const int32_t k_load_scale = (int32_t)PHYS_S(actor, 0x66);  /* multiplier on wheel_load_accum */
 
-    const int32_t wpx_scaled = actor->world_pos.x >> 8;  /* signed fixed-point shift w/ round-to-zero */
-    const int32_t wpz_scaled = actor->world_pos.z >> 8;
+    /* world_pos >> 8 with the original's round-to-zero bias (0x00403A7D-A85
+     * and the symmetric one at 0x00403A9C-AA0). Plain SAR rounds toward -∞
+     * for negatives. */
+    const int32_t wpx_scaled = sar8_rz(actor->world_pos.x);
+    const int32_t wpz_scaled = sar8_rz(actor->world_pos.z);
 
     /* ---- Per-wheel pass (4 wheels) ---- */
     for (int i = 0; i < 4; i++) {
-        /* Lever arm from chassis centre to this wheel's contact position,
-         * in world units. Original (0x00403A20):
-         *   arm = wheel_world_positions_hires[i] - (world_pos >> 8)
-         * Port stores wheel_world_positions_hires in 24.8 FP (vfx consumes
-         * that scale at td5_vfx.c:1367), so shift down here to match the
-         * original's world-unit arithmetic. Without the >>8, arm magnitudes
-         * hit ~10M and spring_term blows past int32, producing per-tick
-         * suspension jumps — historically masked by a port-local VEL_CAP
-         * (now removed below). [From commit e97669e; regressed between then
-         * and HEAD; restored 2026-04-22 to fix wheel oscillation on slopes.] */
-        const int32_t arm_x = (actor->wheel_world_positions_hires[i].x >> 8) - wpx_scaled;
-        const int32_t arm_z = (actor->wheel_world_positions_hires[i].z >> 8) - wpz_scaled;
+        /* Lever arm from chassis centre to this wheel's contact position.
+         * Original (0x00403A7D-A88):
+         *   arm = hires - sar8_rz(world_pos)
+         * The original's hires is stored in raw world units (the 0x00403720
+         * write path does NOT apply the `<<8` that wheel_contact_pos gets —
+         * see decomp of 0x00403720: the shifts only touch piVar1=+0xF0).
+         *
+         * Port storage divergence (UPSTREAM, owned by pool1/0x00403720):
+         * the port stores wheel_world_positions_hires in 24.8 FP (the write
+         * at td5_physics.c:5580 applies `hub_x << 8`). vfx consumes that
+         * 24.8 FP scale at td5_vfx.c:1367.
+         *
+         * To make the integrator byte-exact under the port's CURRENT hires
+         * convention, we shift the port's 24.8 FP hires down to world units
+         * with `sar8_rz`. If pool1 later changes hires storage to raw (matching
+         * the original's 0x00403720 path), this `sar8_rz` becomes a no-op and
+         * must be removed.
+         *
+         * Why sar8_rz and not plain `>>8`: the port writes hires as
+         * `int32_t hub_x = lrintf(...); hires.x = hub_x << 8`. For positive
+         * hub_x, `hires.x >> 8 == hub_x` exactly. For negative hub_x not
+         * divisible by 256... actually `hub_x << 8` produces a value with the
+         * low 8 bits zero, so `hires.x >> 8 == hub_x` for both signs. So plain
+         * `>>8` would also recover hub_x exactly. BUT to match the original's
+         * arithmetic semantics on whatever values the port writes (in case
+         * the port's hires write later changes), use the round-to-zero shift
+         * which matches the original's `(x + sign_bias) >> 8` convention. */
+        const int32_t arm_x = sar8_rz(actor->wheel_world_positions_hires[i].x) - wpx_scaled;
+        const int32_t arm_z = sar8_rz(actor->wheel_world_positions_hires[i].z) - wpz_scaled;
 
+        /* proj = arm_x * accel_x + arm_z * accel_z (computed as
+         * arm_z*accel_z then ADD arm_x*accel_x in the listing — order
+         * doesn't matter for signed 32-bit add). */
         int32_t proj = arm_x * accel_x + arm_z * accel_z;
-        int32_t spring_term = (proj >> 8) * k_spring;
-        int32_t load_term   = actor->wheel_load_accum[i] * k_load_scale;
 
-        int32_t new_vel = (spring_term >> 8)
-                        + (load_term   >> 8)
+        /* spring_term = sar8_rz(proj) * k_spring
+         * [0x00403AAC-BA: MOV EAX,ECX; CDQ; AND EDX,0xFF; ADD EAX,EDX;
+         *                 SAR EAX,8; IMUL EAX, k_spring]
+         * Note: the result is held as the multiplied (not yet shifted)
+         * value; the next SAR happens later. */
+        const int32_t spring_term_x256 = sar8_rz(proj) * k_spring;
+
+        /* load_term = wheel_load_accum[i] * k_load_scale
+         * [0x00403ACA-CD: MOV EAX,[ESI+0x20]; IMUL EAX, k_load_scale]
+         * No pre-shift; the SAR comes after. */
+        const int32_t load_term_x256 = actor->wheel_load_accum[i] * k_load_scale;
+
+        /* new_vel = sar8_rz(load_term) + sar8_rz(spring_term) + wheel_spring_dv[i]
+         * [0x00403AD2-E3: CDQ; AND EDX,0xFF; ADD; SAR EAX,8 (for load_term)
+         *                 SAR ECX,8 (for spring_term — bias was added at 0x00403ABF)
+         *                 ADD ECX,EAX; ADD ECX,[ESI+0x10]]
+         *
+         * Critical: the order of the SAR-8s in the listing applies the bias
+         * to spring_term BEFORE the load_term computation overwrites the bias
+         * register. To be byte-faithful, we sar8_rz each operand separately.
+         * Algebraically equivalent because round-to-zero is per-operand. */
+        int32_t new_vel = sar8_rz(load_term_x256)
+                        + sar8_rz(spring_term_x256)
                         + actor->wheel_spring_dv[i];
 
-        int32_t pos_damp = actor->wheel_suspension_pos[i] * k_pos_damp;
-        int32_t vel_damp = new_vel * k_vel_damp;
-        new_vel = new_vel - (pos_damp >> 8) - (vel_damp >> 8);
+        /* pos_damp = sar8_rz(wheel_suspension_pos[i] * k_pos_damp)
+         * [0x00403AE6-F6: MOV EAX,[ESI]; IMUL EAX, k_pos_damp;
+         *                 CDQ; AND EDX,0xFF; ADD EAX,EDX; (held in EBP)
+         *                 ...; SAR EBP,8]
+         *
+         * vel_damp = sar8_rz(new_vel * k_vel_damp)
+         * [0x00403AF8-08: MOV EAX,ECX; IMUL EAX, k_vel_damp;
+         *                 CDQ; AND EDX,0xFF; ADD EAX,EDX; SAR EAX,8]
+         *
+         * new_vel -= vel_damp + pos_damp     [0x00403B0E-12: NEG EAX; SUB
+         *                                     EAX,EBP; ADD ECX,EAX]
+         */
+        const int32_t pos_damp_x256 = actor->wheel_suspension_pos[i] * k_pos_damp;
+        const int32_t vel_damp_x256 = new_vel * k_vel_damp;
+        new_vel = new_vel - sar8_rz(pos_damp_x256) - sar8_rz(vel_damp_x256);
 
-        /* Deadzone: suppresses micro-oscillation at rest. Matches original
-         * 0x00403A20's |new_vel| < 0x10 dead-zone. No per-tick VEL_CAP —
-         * original relies only on this deadzone plus the post-add travel-
-         * limit clamp below. A previous port-local VEL_CAP=0x100 was
-         * removed because it was a workaround for the lever-arm unit bug
-         * (now fixed above). Re-introducing it silences legitimate
-         * restoring transients and makes the front suspension saturate
-         * one side ahead of the other, producing nose-up asymmetric tilt
-         * and the steady-slope wheel oscillation (susp_vel=12000)
-         * observed 2026-04-21. */
+        /* Deadzone: |new_vel| < 0x10 → 0
+         * [0x00403B14-1E: CMP -0x10; JLE; CMP 0x10; JGE; XOR ECX,ECX]
+         * Strict inequality: -0x10 < new_vel && new_vel < 0x10. Both
+         * jumps are signed-LE/GE; CMP -0x10 + JLE jumps when new_vel <= -0x10
+         * (i.e. stays non-zero), CMP 0x10 + JGE jumps when new_vel >= 0x10. */
         if (new_vel > -0x10 && new_vel < 0x10)
             new_vel = 0;
 
+        /* Write velocity then position; clamp at +k_travel_lim then -k_travel_lim.
+         * [0x00403B24-54] */
         actor->wheel_spring_dv[i] = new_vel;
         int32_t new_pos = actor->wheel_suspension_pos[i] + new_vel;
         actor->wheel_suspension_pos[i] = new_pos;
@@ -3452,7 +3547,13 @@ void td5_physics_integrate_suspension(TD5_Actor *actor, int32_t accel_x, int32_t
         if (new_pos > k_travel_lim) {
             actor->wheel_suspension_pos[i] = k_travel_lim;
             actor->wheel_spring_dv[i] = 0;
-        } else if (new_pos < -k_travel_lim) {
+        }
+        /* Note: the original uses `if new_pos < -k_travel_lim` (not else-if),
+         * but in any single tick the new_pos can't be both > k_travel_lim
+         * and < -k_travel_lim, so else-if and a separate-if are equivalent.
+         * Listing uses a separate IF (0x00403B3C-B53 after the upper-clamp
+         * block at 0x00403B33-3B). */
+        if (actor->wheel_suspension_pos[i] < -k_travel_lim) {
             actor->wheel_suspension_pos[i] = -k_travel_lim;
             actor->wheel_spring_dv[i] = 0;
         }
@@ -3462,28 +3563,57 @@ void td5_physics_integrate_suspension(TD5_Actor *actor, int32_t accel_x, int32_t
      * The original averages the front-axle contact (wheels 0+1) x and z
      * to derive the lever arm for the body-level suspension. No load
      * term, no deadzone; same spring/damping constants; travel clamp is
-     * the SAME cardef+0x64 as per-wheel (NOT doubled — verified @
-     * 0x00403A20 `iVar7 = (int)*(short *)(param_2 + 100)`, used
-     * directly without *2). [From commit e97669e; regressed between
-     * then and HEAD; restored 2026-04-22.] */
+     * the SAME cardef+0x64 as per-wheel (NOT doubled).
+     *
+     * Listing: 0x00403B6A-C70.
+     * - (FL.z + FR.z) summed, then `CDQ; SUB EAX,EDX; SAR EAX,1` (round-to-zero /2)
+     * - Subtract sar8_rz(world_pos.z)
+     * - Multiply by accel_z
+     * - Same for x axis
+     * - Sum into proj, sar8_rz(proj) * k_spring → spring_term
+     * - new_vel = sar8_rz(spring_term) + center_suspension_vel
+     * - pos_damp = sar8_rz(center_suspension_pos * k_pos_damp)
+     * - vel_damp = sar8_rz(new_vel * k_vel_damp)
+     * - new_vel -= vel_damp + pos_damp
+     * - new_pos = center_suspension_pos + new_vel
+     * - Clamp +k_travel_lim then -k_travel_lim
+     * - NO deadzone, NO load term.
+     */
     {
-        /* Same FP→world-unit shift as per-wheel arm above. */
-        const int32_t front_mid_x =
-            ((actor->wheel_world_positions_hires[1].x + actor->wheel_world_positions_hires[0].x) >> 1) >> 8;
-        const int32_t front_mid_z =
-            ((actor->wheel_world_positions_hires[1].z + actor->wheel_world_positions_hires[0].z) >> 1) >> 8;
+        /* Original (0x00403B6A-99): front-midpoint = sar1_rz(FL + FR), then
+         * arm = front_mid - sar8_rz(world_pos). Hires is treated as already-
+         * in-world-units in the original. The port's hires is 24.8 FP, so we
+         * apply sar8_rz to bring it to world units; the sum-then-/2 commutes
+         * with the /256 scaling (both are linear), but to preserve byte-exact
+         * matching to the original's instruction order we compute /2 on the
+         * 24.8 FP sum first, then /256 of that.
+         *
+         * For port hires written as `(int32_t lrintf_result) << 8`, the low 8
+         * bits are zero, so `(FL.x + FR.x) % 256 == 0` and `sar1_rz((FL.x +
+         * FR.x))` has low 8 bits still zero (since sum/2 of two LSB-8-zero
+         * values has low 7 bits zero). Then `>>8` is exact regardless of
+         * sign. We still use the round-to-zero idiom to mirror the original. */
+        const int32_t fl_x = actor->wheel_world_positions_hires[0].x;
+        const int32_t fr_x = actor->wheel_world_positions_hires[1].x;
+        const int32_t fl_z = actor->wheel_world_positions_hires[0].z;
+        const int32_t fr_z = actor->wheel_world_positions_hires[1].z;
+
+        const int32_t mid_x_fp = sar1_rz(fl_x + fr_x);   /* 24.8 FP /2 */
+        const int32_t mid_z_fp = sar1_rz(fl_z + fr_z);
+        const int32_t front_mid_x = sar8_rz(mid_x_fp);   /* round-to-zero down to world units */
+        const int32_t front_mid_z = sar8_rz(mid_z_fp);
 
         const int32_t arm_x = front_mid_x - wpx_scaled;
         const int32_t arm_z = front_mid_z - wpz_scaled;
 
-        int32_t proj = arm_x * accel_x + arm_z * accel_z;
-        int32_t spring_term = (proj >> 8) * k_spring;
+        const int32_t proj = arm_x * accel_x + arm_z * accel_z;
+        const int32_t spring_term_x256 = sar8_rz(proj) * k_spring;
 
-        int32_t new_vel = (spring_term >> 8) + actor->center_suspension_vel;
+        int32_t new_vel = sar8_rz(spring_term_x256) + actor->center_suspension_vel;
 
-        int32_t pos_damp = actor->center_suspension_pos * k_pos_damp;
-        int32_t vel_damp = new_vel * k_vel_damp;
-        new_vel = new_vel - (pos_damp >> 8) - (vel_damp >> 8);
+        const int32_t pos_damp_x256 = actor->center_suspension_pos * k_pos_damp;
+        const int32_t vel_damp_x256 = new_vel * k_vel_damp;
+        new_vel = new_vel - sar8_rz(pos_damp_x256) - sar8_rz(vel_damp_x256);
 
         int32_t new_pos = actor->center_suspension_pos + new_vel;
         actor->center_suspension_pos = new_pos;
@@ -3492,11 +3622,14 @@ void td5_physics_integrate_suspension(TD5_Actor *actor, int32_t accel_x, int32_t
         if (new_pos > k_travel_lim) {
             actor->center_suspension_pos = k_travel_lim;
             actor->center_suspension_vel = 0;
-        } else if (new_pos < -k_travel_lim) {
+        }
+        if (actor->center_suspension_pos < -k_travel_lim) {
             actor->center_suspension_pos = -k_travel_lim;
             actor->center_suspension_vel = 0;
         }
     }
+
+    td5_pilot_emit_00403A20_leave(actor);
 }
 
 /* ========================================================================
