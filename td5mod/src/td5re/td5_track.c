@@ -59,7 +59,7 @@ int     g_track_type_mode       = 0;
  * 0x436A70  UpdateRaceActors                    -- DONE (in td5_track_tick)
  * 0x42F5B0  UpdateRaceOrder                     -- DONE
  * 0x435930  InitializeTrafficActorsFromQueue    -- DONE
- * 0x435310  RecycleTrafficActorFromQueue        -- DONE
+ * 0x4353B0  RecycleTrafficActorFromQueue        -- STUB ONLY (real port in td5_ai.c)
  * ======================================================================== */
 
 /* ========================================================================
@@ -3995,9 +3995,22 @@ void td5_track_init_traffic_from_queue(void)
 }
 
 /**
- * RecycleTrafficActorFromQueue (0x435310).
- * Despawns a traffic actor that has fallen too far behind and respawns
- * it at the next queue position ahead of the player.
+ * RecycleTrafficActorFromQueue: vestigial track-side stub.
+ *
+ * NOTE (precise-00435310 audit, 2026-05-14): the scope-file address
+ * 0x00435310 does NOT correspond to a function entry in TD5_d3d.exe.
+ * Ghidra reports 0x00435310 as an instruction inside
+ * UpdateActorTrackBehavior (0x00434FE0-0x004353AC), not a function
+ * start. The actual traffic-recycle entry lives at 0x004353B0
+ * (RecycleTrafficActorFromQueue), and the byte-faithful port of that
+ * function lives in td5_ai.c (td5_ai_recycle_traffic_actor). The
+ * call-site dispatcher (UpdateRaceActors @ 0x00436A70) is in td5_ai.c
+ * too, so the canonical home for this logic is td5_ai.c.
+ *
+ * This stub is retained only to keep external references (route-loader
+ * scaffolding) building until those callers are migrated; it performs
+ * no recycle work itself. Do not call from new code -- use
+ * td5_ai_recycle_traffic_actor() in td5_ai.c.
  */
 void td5_track_recycle_traffic_actor(void)
 {

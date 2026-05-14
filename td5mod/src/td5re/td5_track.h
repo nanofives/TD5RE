@@ -15,7 +15,7 @@
  *   0x434FE0  UpdateActorTrackBehavior (AI path-following)
  *   0x436A70  UpdateRaceActors
  *   0x435930  InitializeTrafficActorsFromQueue
- *   0x435310  RecycleTrafficActorFromQueue
+ *   0x4353B0  RecycleTrafficActorFromQueue (canonical port in td5_ai.c)
  */
 
 #ifndef TD5_TRACK_H
