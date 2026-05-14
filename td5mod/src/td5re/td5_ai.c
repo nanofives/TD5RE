@@ -1408,17 +1408,22 @@ int td5_ai_update_route_threshold(int slot) {
     int32_t span = (int32_t)ACTOR_I16(actor, ACTOR_SPAN_NORMALIZED);
 
     /* MOV AL, [EDI + EDX + 2] with EDI = span*3, EDX = rt; threshold is
-     * a zero-extended byte (XOR EAX,EAX before MOV AL). Defensive NULL
-     * guard kept from prior revision — listing dereferences unconditionally.
-     * FIXME: route_table NULL means the actor's RS[0] was never bound;
-     * caller bug. Original would page-fault. */
+     * a zero-extended byte (XOR EAX,EAX before MOV AL).
+     *
+     * PORT-ONLY NULL GUARD (KEEP): original 0x00434AFB dereferences
+     * RS[0]=route_table unconditionally. Upstream invariant in original is
+     * "RS[0] is bound to a LEFT.TRK / RIGHT.TRK throttle table during
+     * BindActorRouteState at race-start" (race-init path 0x00435F60). Port
+     * runs this AI tick from td5_game.c's menu-state benchmark path with
+     * unbound RS slots, so a NULL would fault. Behaving as "no limit"
+     * (threshold=0xFF) maps to the bias-fallback exit in original. */
     int32_t threshold;
     {
         const uint8_t *route_table = (const uint8_t *)(intptr_t)rs[RS_ROUTE_TABLE_PTR];
         if (route_table) {
             threshold = (int32_t)route_table[span * 3 + 2];
         } else {
-            threshold = 0xFF; /* defensive: behave as "no limit" */
+            threshold = 0xFF; /* port-only fallback; see KEEP comment above */
         }
     }
 
@@ -1994,14 +1999,20 @@ void td5_ai_update_track_offset_bias(int slot) {
             uint8_t strip_nibble = 0;
             int16_t peer_span_raw = ACTOR_I16(peer_actor, ACTOR_SPAN_RAW);
             const uint8_t *strips = (const uint8_t *)g_strip_span_base;
+            /* PORT-ONLY NULL GUARD (KEEP): original 0x00434A09 loads
+             * g_trackStripRecords + peer.SPAN_RAW*0x18 + 3 unconditionally.
+             * Upstream invariant in original: STRIP.DAT is parsed before
+             * any actor is alive (LoadStripFile @ 0x004444A0 from race
+             * init). Port may run AI from menu/benchmark probe paths
+             * before strips are bound. Once `strips != NULL` the
+             * peer.SPAN_RAW index is in-range by the FindActorTrackOffsetPeer
+             * contract (peer is an active actor whose SPAN_RAW was set
+             * by InitActorTrackSegmentPlacement). Bounds check REMOVED
+             * (was port-only insurance) for byte-faithfulness — original
+             * has no clamp and trusts the peer-actor invariant. */
             if (strips) {
-                /* Raw byte access mirrors the original's unchecked load.
-                 * Bounds guard is port-only insurance against malformed
-                 * peer spans; original has no such guard. */
                 int strip_idx = (int)peer_span_raw;
-                if (strip_idx >= 0 && strip_idx < g_strip_span_count) {
-                    strip_nibble = strips[strip_idx * 0x18 + 3] & 0x0F;
-                }
+                strip_nibble = strips[strip_idx * 0x18 + 3] & 0x0F;
             }
             if (peer_sub_lane != strip_nibble) {
                 do_positive = 1;
