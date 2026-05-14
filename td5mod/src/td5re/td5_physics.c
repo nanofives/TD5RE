@@ -3613,8 +3613,13 @@ static inline int32_t arith_round_shift(int32_t x, int32_t mask, int32_t shift)
     return (x + (int32_t)((uint32_t)(x >> 31) & (uint32_t)mask)) >> shift;
 }
 
+#include "td5_pilot_trace_004057F0.h"
+
 void td5_physics_update_suspension_response(TD5_Actor *actor)
 {
+    td5_pilot_emit_004057F0_enter(actor,
+                                  (uintptr_t)__builtin_return_address(0),
+                                  g_gravity_constant);
     /* Faithful port of UpdateVehicleSuspensionResponse @ 0x004057F0.
      *
      * HISTORY: this is a restore of commit e97669e's literal port, which
@@ -3676,6 +3681,7 @@ void td5_physics_update_suspension_response(TD5_Actor *actor)
     if (lock == 0x0F) {
         /* All four wheels airborne — early-return matches original
          * 0x00405809; gravity stays subtracted (not added back). */
+        td5_pilot_emit_004057F0_leave(actor);
         return;
     }
 
@@ -3759,7 +3765,12 @@ void td5_physics_update_suspension_response(TD5_Actor *actor)
              *   local_60 (lat_spr)  += (dot * arm0) * +0x100 */
             loni_spr += (dot * (int32_t)loni) * -0x100;    /* arm2 with -0x100 */
             lat_spr  += (dot * (int32_t)lat ) *  0x100;    /* arm0 with +0x100 */
-            bounce    += dot >> 1;                         /* signed SAR 1 */
+            /* [CONFIRMED @ 0x00405938-0x0040593F] CDQ + SUB EAX,EDX + SAR EAX,1
+             * implements C-style signed div-by-2 with truncation toward zero
+             * (e.g. -5/2 = -2). Previous port used `dot >> 1` which is SAR
+             * = truncation toward -inf (-5 >> 1 = -3). For negative odd dot
+             * this would diverge by 1. */
+            bounce    += dot / 2;                          /* signed div toward zero */
             ++cnt_grounded;
 
             if (actor->slot_index == 0) {
@@ -3890,6 +3901,8 @@ void td5_physics_update_suspension_response(TD5_Actor *actor)
                   actor->angular_velocity_roll, actor->angular_velocity_pitch,
                   actor->linear_velocity_y);
     }
+
+    td5_pilot_emit_004057F0_leave(actor);
 }
 
 /* ========================================================================
