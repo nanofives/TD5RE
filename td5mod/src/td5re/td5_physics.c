@@ -56,6 +56,7 @@
 #include "td5_pilot_trace_0042EBF0.h" /* precise-port pilot CSV emit for 0x0042EBF0 */
 #ifdef TD5_PILOT_TRACE_TRAFFIC
 #include "td5_pilot_trace_traffic.h" /* precise-port pilot CSV emit for 0x004437C0 + 0x004438F0 */
+#include "td5_pilot_trace_v2v_contact.h" /* pool15 V2V pilot trace */
 #include "td5re.h"
 
 /* Include the full actor struct for field-level access.
@@ -2670,6 +2671,42 @@ static int obb_corner_test(TD5_Actor *a, TD5_Actor *b,
     int32_t front_z_b = (int32_t)CDEF_S(b, 0x04);
     int32_t rear_z_b  = (int32_t)CDEF_S(b, 0x14);
 
+    /* Pool15 V2V pilot trace — capture inputs at entry. */
+    TD5_PilotV2VContactSnap _v2v_snap;
+    int _v2v_slot_a = a ? a->slot_index : -1;
+    int _v2v_slot_b = b ? b->slot_index : -1;
+    int _v2v_call_idx = td5_pilot_v2v_next_call_idx();
+    _v2v_snap.actor_a_addr = (uint32_t)(uintptr_t)a;
+    _v2v_snap.actor_b_addr = (uint32_t)(uintptr_t)b;
+    /* These ax/az/bx/bz are display-unit (>>8) world coords that the port
+     * computes in collision_detect_full. The original passes 24.8 FP and
+     * does >>8 inside CollectVehicleCollisionContacts. To compare against
+     * Frida-captured originals, we re-multiply by 0x100 here so port and
+     * orig trace columns share the same 24.8 FP scale. */
+    _v2v_snap.ax = ax << 8;
+    _v2v_snap.ay = a ? a->world_pos.y : 0;
+    _v2v_snap.az = az << 8;
+    _v2v_snap.bx = bx << 8;
+    _v2v_snap.by = b ? b->world_pos.y : 0;
+    _v2v_snap.bz = bz << 8;
+    /* heading_a/b come in as 12-bit values (already & 0xFFF inside cos/sin).
+     * The original receives raw yaw_accum (24.8) and shifts down inside.
+     * Multiply back by 0x100 for cross-comparison. */
+    _v2v_snap.yaw_a_raw = heading_a << 8;
+    _v2v_snap.yaw_b_raw = heading_b << 8;
+    _v2v_snap.cardef_a_off04 = (int16_t)front_z_a;
+    _v2v_snap.cardef_a_off08 = (int16_t)half_w_a;
+    _v2v_snap.cardef_a_off14 = (int16_t)rear_z_a;
+    _v2v_snap.cardef_b_off04 = (int16_t)front_z_b;
+    _v2v_snap.cardef_b_off08 = (int16_t)half_w_b;
+    _v2v_snap.cardef_b_off14 = (int16_t)rear_z_b;
+    memset(_v2v_snap.corner_proj_x, 0, sizeof(_v2v_snap.corner_proj_x));
+    memset(_v2v_snap.corner_proj_z, 0, sizeof(_v2v_snap.corner_proj_z));
+    memset(_v2v_snap.corner_own_x,  0, sizeof(_v2v_snap.corner_own_x));
+    memset(_v2v_snap.corner_own_z,  0, sizeof(_v2v_snap.corner_own_z));
+    _v2v_snap.bitmask = 0;
+    td5_pilot_v2v_contact_emit_enter(&_v2v_snap, _v2v_slot_a, _v2v_slot_b, _v2v_call_idx);
+
     /* Precompute sin/cos for each heading */
     int32_t cos_a = cos_fixed12(heading_a);
     int32_t sin_a = sin_fixed12(heading_a);
@@ -2703,9 +2740,18 @@ static int obb_corner_test(TD5_Actor *a, TD5_Actor *b,
     int32_t delta_x = bx - ax;
     int32_t delta_z = bz - az;
 
-    /* Rotate delta into A's local frame */
-    int32_t local_dx = (delta_x * cos_a + delta_z * sin_a) >> 12;
-    int32_t local_dz = (-delta_x * sin_a + delta_z * cos_a) >> 12;
+    /* Rotate delta into A's local frame.
+     * [CONFIRMED @ 0x004086D0-0x004086F6]: game uses "CW from +Z" convention
+     *   iVar20 = iVar6 * iVar24 - iVar7 * iVar3  (cos*delta_x - sin*delta_z)
+     *   iVar6  = iVar6 * iVar3  + iVar7 * iVar24 (sin*delta_x + cos*delta_z)
+     * Earlier port had BOTH sin terms inverted (CCW from +X / world rotated
+     * by -yaw_a). That produced false bitmask=0x28 contacts on the Jarash
+     * stationary spawn — exactly the visible-slide symptom in memory
+     * `reference_obb_corner_test_rotation_sign`. Algorithmic re-validation
+     * vs 501 captured original inputs (tools/validate_pool15_v2v_contact_math.py)
+     * dropped bitmask divergence from 66.7% to 0% with the sign flip. */
+    int32_t local_dx = (delta_x * cos_a - delta_z * sin_a) >> 12;
+    int32_t local_dz = (delta_x * sin_a + delta_z * cos_a) >> 12;
 
     for (int i = 0; i < 4; i++) {
         /* Rotate B's corner from B's local frame into A's local frame */
@@ -2749,9 +2795,11 @@ static int obb_corner_test(TD5_Actor *a, TD5_Actor *b,
     int32_t delta2_x = ax - bx;
     int32_t delta2_z = az - bz;
 
-    /* Rotate delta into B's local frame */
-    int32_t local2_dx = (delta2_x * cos_b + delta2_z * sin_b) >> 12;
-    int32_t local2_dz = (-delta2_x * sin_b + delta2_z * cos_b) >> 12;
+    /* Rotate delta into B's local frame.
+     * [CONFIRMED @ second half of 0x00408570]: symmetric sign convention
+     * — same "CW from +Z" world→local form as the B-in-A half above. */
+    int32_t local2_dx = (delta2_x * cos_b - delta2_z * sin_b) >> 12;
+    int32_t local2_dz = (delta2_x * sin_b + delta2_z * cos_b) >> 12;
 
     for (int i = 0; i < 4; i++) {
         /* Rotate A's corner from A's local frame into B's local frame */
@@ -2779,6 +2827,20 @@ static int obb_corner_test(TD5_Actor *a, TD5_Actor *b,
             corners[i + 4].pen_x = (int16_t)((pen_right < pen_left) ? pen_right : -pen_left);
             corners[i + 4].pen_z = (int16_t)((pen_front < pen_back) ? pen_front : -pen_back);
         }
+    }
+
+    /* Pool15 V2V pilot trace — capture outputs at exit. */
+    {
+        TD5_PilotV2VContactSnap _v2v_out;
+        memset(&_v2v_out, 0, sizeof(_v2v_out));
+        _v2v_out.bitmask = (uint32_t)result;
+        for (int _i = 0; _i < 8; _i++) {
+            _v2v_out.corner_proj_x[_i] = corners[_i].proj_x;
+            _v2v_out.corner_proj_z[_i] = corners[_i].proj_z;
+            _v2v_out.corner_own_x[_i]  = corners[_i].own_x;
+            _v2v_out.corner_own_z[_i]  = corners[_i].own_z;
+        }
+        td5_pilot_v2v_contact_emit_leave(&_v2v_out);
     }
 
     return result;
@@ -3217,11 +3279,35 @@ static void collision_detect_full(TD5_Actor *a, TD5_Actor *b, int idx_a, int idx
     if (!a || !b) return;
     if (!a->car_definition_ptr || !b->car_definition_ptr) return;
 
-    /* AABB pre-test from broadphase grid */
-    if (g_actor_aabb[idx_a][2] < g_actor_aabb[idx_b][0] ||
-        g_actor_aabb[idx_b][2] < g_actor_aabb[idx_a][0] ||
-        g_actor_aabb[idx_a][3] < g_actor_aabb[idx_b][1] ||
-        g_actor_aabb[idx_b][3] < g_actor_aabb[idx_a][1]) {
+    /* Pool15 V2V pilot trace — reset corner-test call counter so the next
+     * 1+7 obb_corner_test calls inside this function get event_idx 1..8. */
+    td5_pilot_v2v_reset_call_idx(idx_a, idx_b);
+    TD5_PilotV2VToiSnap _v2v_toi;
+    memset(&_v2v_toi, 0, sizeof(_v2v_toi));
+    _v2v_toi.actor_a_addr = (uint32_t)(uintptr_t)a;
+    _v2v_toi.actor_b_addr = (uint32_t)(uintptr_t)b;
+    _v2v_toi.ax = a->world_pos.x;
+    _v2v_toi.az = a->world_pos.z;
+    _v2v_toi.bx = b->world_pos.x;
+    _v2v_toi.bz = b->world_pos.z;
+    _v2v_toi.yaw_a_raw = a->euler_accum.yaw;
+    _v2v_toi.yaw_b_raw = b->euler_accum.yaw;
+    _v2v_toi.lin_vel_a_x = a->linear_velocity_x;
+    _v2v_toi.lin_vel_a_z = a->linear_velocity_z;
+    _v2v_toi.lin_vel_b_x = b->linear_velocity_x;
+    _v2v_toi.lin_vel_b_z = b->linear_velocity_z;
+    _v2v_toi.ang_vel_a_yaw = a->angular_velocity_yaw;
+    _v2v_toi.ang_vel_b_yaw = b->angular_velocity_yaw;
+
+    /* AABB pre-test from broadphase grid.
+     * [CONFIRMED @ 0x00408A92-0x00408AB7]: original uses JGE/JLE — i.e.
+     * `<=` / `>=` predicates. At exact equality the original rejects;
+     * port previously used `<` and admitted the pair. One-LSB over-
+     * approximation closed by switching `<` to `<=`. */
+    if (g_actor_aabb[idx_a][2] <= g_actor_aabb[idx_b][0] ||
+        g_actor_aabb[idx_b][2] <= g_actor_aabb[idx_a][0] ||
+        g_actor_aabb[idx_a][3] <= g_actor_aabb[idx_b][1] ||
+        g_actor_aabb[idx_b][3] <= g_actor_aabb[idx_a][1]) {
         return;
     }
 
@@ -3356,6 +3442,17 @@ static void collision_detect_full(TD5_Actor *a, TD5_Actor *b, int idx_a, int idx
      * from 0x80. Prior port applied an [0x10, 0xF0] clamp that both offset the
      * value by 0x10 AND cut off the lower half of the range; both wrong. */
     int32_t impactForce = frac - 0x10;
+
+    /* Pool15 V2V pilot trace — emit toi-row at dispatch boundary. */
+    _v2v_toi.impactForce = impactForce;
+    _v2v_toi.dispatched_bitmask = (uint32_t)cached_bitmask;
+    _v2v_toi.final_yaw_a_disp = test_ha;
+    _v2v_toi.final_yaw_b_disp = test_hb;
+    _v2v_toi.final_ax = test_ax;
+    _v2v_toi.final_az = test_az;
+    _v2v_toi.final_bx = test_bx;
+    _v2v_toi.final_bz = test_bz;
+    td5_pilot_v2v_toi_emit(&_v2v_toi, idx_a, idx_b);
 
     /* Dispatch uses the cached last-non-zero bitmask + corners, NOT a final
      * re-test. `test_ha` / `test_hb` carry the final-state yaws (in 12-bit
