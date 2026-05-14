@@ -7242,11 +7242,33 @@ void td5_physics_apply_steering_torque(TD5_Actor *actor)
     (void)gear;
 }
 
-/* --- ApplyReverseGearThrottleSign (0x42F010) --- */
+/* --- ApplyReverseGearThrottleSign (0x42F010) ---
+ *
+ * Byte-exact port from listing 0x0042F010..0x0042F02F (8 instructions).
+ *
+ *   0042f010  MOV  EAX,dword ptr [ESP + 0x4]      ; actor
+ *   0042f014  MOV  CL,byte ptr [EAX + 0x36b]      ; gear_u8 = actor->current_gear
+ *   0042f01a  TEST CL,CL
+ *   0042f01c  JNZ  0x0042f02f                     ; if gear != 0, skip
+ *   0042f01e  MOV  CX,word ptr [EAX + 0x33e]      ; thr = actor->encounter_steering_cmd
+ *   0042f025  NEG  CX                             ; thr = -thr (16-bit two's complement)
+ *   0042f028  MOV  word ptr [EAX + 0x33e],CX
+ *   0042f02f  RET
+ *
+ * Flips the signed throttle term in-place when current_gear == 0 (REVERSE) so
+ * the same forward drive-torque pipeline (0x0042F030) can be reused for
+ * backward motion. Field +0x36B is the 1-byte current_gear (REVERSE=0,
+ * NEUTRAL=1, FIRST=2, ...). Field +0x33E is the int16_t encounter_steering_cmd
+ * (also reachable as the signed-throttle source consumed by
+ * ComputeDriveTorqueFromGearCurve). 16-bit NEG matches C int16_t negation. */
 void td5_physics_reverse_throttle_sign(TD5_Actor *actor)
 {
-    if (actor->current_gear == TD5_GEAR_REVERSE)
-        actor->encounter_steering_cmd = -actor->encounter_steering_cmd;
+    /* TEST CL,CL / JNZ — early-out when gear != REVERSE (0). */
+    if (actor->current_gear != 0)
+        return;
+
+    /* NEG CX on a 16-bit word in memory — int16_t two's-complement negation. */
+    actor->encounter_steering_cmd = (int16_t)-(int32_t)actor->encounter_steering_cmd;
 }
 
 /* --- ComputeReverseGearTorque (0x00403C80) — full encode + engine slew ---
