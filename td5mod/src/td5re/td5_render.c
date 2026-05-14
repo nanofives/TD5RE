@@ -3865,7 +3865,14 @@ static void render_vehicle_wheel_billboards(TD5_Actor *actor, int slot)
     /* Read wheel dimensions from cardef (RE: 0x446E30-0x446E3C).
      *   cardef+0x82 (int16) -> raw rim value
      *     - Tire ring radius = raw * 0.76171875 (DAT_0045D7AC)
-     *   cardef+0x84 (int16) -> axle_halfw (raw, no scaling) */
+     *   cardef+0x84 (int16) -> axle_halfw (raw, no scaling)
+     *
+     * ARCHITECTURAL DIVERGENCE: original reads cardef via
+     * &gVehicleTuningTable[slot*0x8C] (DAT_004AE580). Port reads via
+     * actor->car_definition_ptr — per-actor buffer seeded from carparam.dat.
+     * Bytes byte-faithful; addressing differs. See
+     * memory/reference_arch_cardef_per_actor_indirection.md and
+     * td5_physics.c s_loaded_cardef comment block. */
     float rim_radius = WHEEL_RADIUS_DEFAULT;
     float axle_halfw = WHEEL_HALFW_DEFAULT;
     if (actor->car_definition_ptr) {
