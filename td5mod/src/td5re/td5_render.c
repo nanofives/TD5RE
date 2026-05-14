@@ -4320,24 +4320,121 @@ void td5_render_advance_billboard_anims(void)
 /* ========================================================================
  * 12-bit Trigonometry (migrated from td5re_stubs.c)
  *
- * Original game uses lookup-table trig with 12-bit angles (0-4095 = 360).
- * We provide real implementations using standard math.
+ * Original game uses a lookup table populated once by
+ * BuildSinCosLookupTables @ 0x0040A650 from FCOS in 80-bit x87 then stored
+ * as 32-bit float (g_sinCosFloatTable @ 0x00488984, 5120 entries; covers a
+ * 4096-step circle plus an extra quarter turn of padding).
+ *
+ *   CosFloat12bit(arg) : return LUT[(arg) & 0xFFF]
+ *   SinFloat12bit(arg) : return LUT[(arg - 0x400) & 0xFFF]
+ *
+ * To match byte-for-byte, the port now also computes the LUT once at startup
+ * (mirroring the original's two-step FILD/FMUL(2π)/FMUL(1/4096) x87 chain via
+ * long double on i386 MinGW) and indexes it for every call. Computing live
+ * with cos()/sin() was the previous behavior and leaked LSB drift relative
+ * to the original's static LUT.
+ *
+ * Audit: re/analysis/pilot_trig_audit.md
  * ======================================================================== */
 
+#include "td5_pilot_trace_trig.h"
+
+#define TD5_TRIG_LUT_SIZE 0x1400  /* 5120, matches original */
+
+static float  s_cosFloatTable[TD5_TRIG_LUT_SIZE];
+static int    s_cosFixedTable[TD5_TRIG_LUT_SIZE];
+static int    s_trig_lut_built = 0;
+
+/* Reference LUT extracted byte-for-byte from a running TD5_d3d.exe instance
+ * via tools/frida_pool3_trig_dump.js (one-shot read of g_sinCosFloatTable
+ * @ 0x00488984, 5120 entries × 4 bytes = 20 KB). Using the original's exact
+ * bits avoids the residual ±1 ULP drift seen even when port-side FCOS,
+ * constants, and FPU PC are all matched — likely due to a remaining x87
+ * micro-state difference (FTOP, register pollution from MinGW startup math
+ * before the LUT is built). The dump is the only way to guarantee byte
+ * equality and is also faster than computing the LUT at startup.
+ *
+ * To regenerate after a runtime LUT change in the original:
+ *   1. python re/tools/quickrace/td5_quickrace.py --no-ini ... \
+ *          --extra-script tools/frida_pool3_trig_dump.js
+ *   2. python -c "import struct; ..." > td5_trig_lut_data.c (see runbook).
+ */
+extern const uint32_t td5_trig_lut_bits[TD5_TRIG_LUT_SIZE];
+
+static void td5_trig_build_lut(void) {
+    /* Copy the embedded LUT bytes into the float LUT. The C-level cast via a
+     * union pun is byte-exact. */
+    for (int i = 0; i < TD5_TRIG_LUT_SIZE; i++) {
+        union { uint32_t u; float f; } pun;
+        pun.u = td5_trig_lut_bits[i];
+        s_cosFloatTable[i] = pun.f;
+    }
+    /* The int (FP12 fixed-point) LUT — DAT_00483984 in the original — is
+     * derived from the float LUT by `lrintf(float * 4096.0f)` using FISTP
+     * semantics (round-to-nearest-even). Build it here so CosFixed12bit /
+     * SinFixed12bit stay byte-faithful to the original's int LUT as well.
+     * Note: doing this via FISTP under PC=64 matches the original because
+     * the source float is already byte-equal. */
+    static const float SCALE_F = 4096.0f;
+    unsigned short saved_cw = 0, new_cw = 0;
+    __asm__ volatile ("fnstcw %0" : "=m" (saved_cw));
+    new_cw = (unsigned short)((saved_cw & 0xfcffu) | 0x0300u);
+    __asm__ volatile ("fldcw %0" : : "m" (new_cw));
+    for (int i = 0; i < TD5_TRIG_LUT_SIZE; i++) {
+        float v = s_cosFloatTable[i];
+        int   out;
+        __asm__ volatile (
+            "flds     %[in]       \n\t"
+            "fmuls    %[scale]    \n\t"
+            "fistpl   %[out]      \n\t"
+            : [out] "=m" (out)
+            : [in] "m" (v),
+              [scale] "m" (SCALE_F)
+            : "st", "memory"
+        );
+        s_cosFixedTable[i] = out;
+    }
+    __asm__ volatile ("fldcw %0" : : "m" (saved_cw));
+
+    s_trig_lut_built = 1;
+}
+
+static inline void td5_trig_ensure_lut(void) {
+    if (!s_trig_lut_built) td5_trig_build_lut();
+}
+
 float CosFloat12bit(unsigned int angle) {
-    return (float)cos((double)(angle & 0xFFF) * (2.0 * M_PI / 4096.0));
+    td5_trig_ensure_lut();
+    unsigned int idx = angle & 0xFFFu;
+    float v = s_cosFloatTable[idx];
+    union { float f; uint32_t u; } pun;
+    pun.f = v;
+    td5_pilot_trig_emit("cos", (int32_t)angle, pun.u, v);
+    return v;
 }
 
 float SinFloat12bit(int angle) {
-    return (float)sin((double)(angle & 0xFFF) * (2.0 * M_PI / 4096.0));
+    td5_trig_ensure_lut();
+    /* Match the original's `ADD EAX, 0xfffffc00` (32-bit signed wrap), then
+     * AND 0xfff. */
+    unsigned int shifted = ((unsigned int)angle) + 0xfffffc00u;
+    unsigned int idx = shifted & 0xFFFu;
+    float v = s_cosFloatTable[idx];
+    union { float f; uint32_t u; } pun;
+    pun.f = v;
+    td5_pilot_trig_emit("sin", (int32_t)angle, pun.u, v);
+    return v;
 }
 
 int CosFixed12bit(unsigned int angle) {
-    return (int)(cos((double)(angle & 0xFFF) * (2.0 * M_PI / 4096.0)) * 4096.0);
+    td5_trig_ensure_lut();
+    return s_cosFixedTable[angle & 0xFFFu];
 }
 
 int SinFixed12bit(int angle) {
-    return (int)(sin((double)(angle & 0xFFF) * (2.0 * M_PI / 4096.0)) * 4096.0);
+    td5_trig_ensure_lut();
+    unsigned int shifted = ((unsigned int)angle) + 0xfffffc00u;
+    return s_cosFixedTable[shifted & 0xFFFu];
 }
 
 int AngleFromVector12(int x, int z) {
