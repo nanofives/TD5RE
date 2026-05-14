@@ -7729,9 +7729,32 @@ void td5_physics_apply_steering_torque(TD5_Actor *actor)
 
     /* DAT_00467394 — g_gearTorqueTable (int32[]). Indexed by current_gear
      * read as an unsigned byte; only entries 0..8 are meaningful (0,0,
-     * 256,192,128,64,32,16,0). The original does NOT bounds-check; faithful
-     * port replicates that for gears 0..8 and zero-fills the rest to keep
-     * out-of-range gear bytes well-defined under the port. */
+     * 256,192,128,64,32,16,0).
+     *
+     * BOUNDS AUDIT (2026-05-14, fix-gear-bounds):
+     *   Every writer to actor+0x36B in TD5_d3d.exe is bounded to [0..8]:
+     *     0x40368e  player INC, gated by  gear < gear_count - 1
+     *     0x4036xx  player DEC, gated by  gear != 0
+     *     0x405dbf  ResetVehicleActorState   = 0x02 (constant)
+     *     0x42ef32  UpdateAutomaticGearSelection = 0x00 (constant)
+     *     0x42ef47  UpdateAutomaticGearSelection = 0x02 (constant)
+     *     0x42ef7a  UpdateAutomaticGearSelection INC, gated by gear < 8
+     *     0x42efff  UpdateAutomaticGearSelection DEC, gated by gear > 2
+     *   Port-side writers in td5_physics.c match those bounds line-for-line
+     *   (see td5_physics_auto_gear_select / _no_kick — INC under `< 8` gate,
+     *   DEC under `> 2` gate, plus four constant-only writes of 0 / 2).
+     *
+     *   Reachable indices in normal play: 2..7 (active forward gears) + 0
+     *   (reverse) + 8 (transient one-tick upshift result of the < 8 gate
+     *   when current_gear == 7).  Indices 1 and 9..255 are unreachable.
+     *
+     * The 256-entry zero-filled expansion below is DEFENSIVE belt-and-
+     * suspenders against any future writer that violates the [0..8] range.
+     * It is NOT required for byte-faithful behavior — the original's nine-
+     * entry table is reached at indices 0..8 only, and the port respects
+     * that. The expansion costs 988 bytes of .rodata to make an OOB read
+     * silent (returns 0 → no kick) rather than crashing on a malformed
+     * save or modded actor stream. */
     static const int32_t g_gear_torque_table[256] = {
         [2] = 0x100,
         [3] = 0xC0,
