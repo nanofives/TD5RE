@@ -5840,55 +5840,117 @@ void td5_physics_missing_wheel_correction(TD5_Actor *actor)
  * "Stunned" state: zero forces, 1/16 velocity decay per frame.
  * ======================================================================== */
 
+/* Round-to-zero arithmetic shift right.
+ * Mirrors original CDQ/AND mask/ADD/SAR idiom: for negative non-divisible x,
+ * yields one unit closer to zero than plain SAR. Listing pattern @ 0x403E00..0E,
+ * 0x403E44..4D, 0x403E60..66, 0x403E77..7F. */
+static inline int32_t state0f_sar_rz(int32_t x, int n) {
+    int32_t mask = (1 << n) - 1;
+    return (x + (((x) >> 31) & mask)) >> n;
+}
+
+#ifdef TD5_PILOT_TRACE_00403D90
+#include "td5_pilot_trace_00403D90.h"
+#endif
+
 void td5_physics_state0f_damping(TD5_Actor *actor)
 {
-    /* Keep engine alive */
+#ifdef TD5_PILOT_TRACE_00403D90
+    td5_pilot_emit_00403D90_enter(actor, (uintptr_t)__builtin_return_address(0));
+#endif
+
+    /* Keep engine alive [@ 0x403D9E CALL 0x0042ED50] */
     update_engine_speed_smoothed(actor);
 
     /* Integrate wheel suspension with zero chassis-motion excitation.
-     * Matches original 0x00403DA9 call: IntegrateWheelSuspensionTravel(
-     *   actor, cardef, 0, 0). The wheel_load_accum term still drives
-     *  the spring; previous port hack of clearing wheel_spring_dv
-     * (the velocity state!) was incorrect — removed. */
+     * [@ 0x403DA5..A9: PUSH 0; PUSH 0; PUSH cardef; PUSH actor; CALL 0x403A20] */
     td5_physics_integrate_suspension(actor, 0, 0);
 
-    /* Zero surface contact flags and slip [CONFIRMED @ 0x403DC4-0x403DD0] */
+    /* Zero surface contact flags and slip [@ 0x403DB8/DBE/DC4 — written
+     * BEFORE the cos/sin calls in the listing, but the sequence is order-
+     * independent because cos/sin use only register state]. */
     actor->surface_contact_flags = 0;
     actor->front_axle_slip_excess = 0;
     actor->rear_axle_slip_excess = 0;
 
-    /* Compute body-frame longitudinal speed */
-    int32_t heading = (actor->euler_accum.yaw >> 8) & 0xFFF;
-    int32_t cos_h = cos_fixed12(heading);
-    int32_t sin_h = sin_fixed12(heading);
-    int32_t v_long = (actor->linear_velocity_x * sin_h +
-                      actor->linear_velocity_z * cos_h) >> 12;
-    int32_t v_lat  = (actor->linear_velocity_x * cos_h -
-                      actor->linear_velocity_z * sin_h) >> 12;
+    /* Body-frame longitudinal projection.
+     *
+     * Original sources display_angle_yaw (+0x20A int16) directly, NEG it,
+     * and passes -yaw to both Cos and Sin. Then truncates vx>>8, vz>>8 to
+     * int16 BEFORE multiplying.
+     * [@ 0x403DAE MOVSX EDI, [ESI+0x20A]; 0x403DB5 NEG EDI;
+     *  0x403DCA CALL CosFixed12bit; 0x403DD2 CALL SinFixed12bit;
+     *  0x403DDD..F7 SAR+MOVSX+IMUL+SUB sequence] */
+    int32_t neg_yaw = -(int32_t)actor->display_angles.yaw;     /* +0x20A int16 */
+    int32_t cos_neg_yaw = cos_fixed12((uint32_t)neg_yaw);
+    int32_t sin_neg_yaw = sin_fixed12(neg_yaw);
 
-    int32_t roll = (actor->euler_accum.roll >> 8) & 0xFFF;
-    if (roll > 0x800) roll -= 0x1000;
+    int32_t vz_hi = (int32_t)(int16_t)((uint32_t)actor->linear_velocity_z >> 8);
+    int32_t vx_hi = (int32_t)(int16_t)((uint32_t)actor->linear_velocity_x >> 8);
 
-    /* Roll correction: if low speed and small roll, apply speed/4 to roll
-     * angular velocity. This naturally steers the car back on-road.
-     * [CONFIRMED @ 0x403DF8-0x403E58] */
-    int32_t abs_v = v_long < 0 ? -v_long : v_long;
-    int32_t abs_r = roll < 0 ? -roll : roll;
-    if (abs_v < 0x21 && abs_r < 0x7F) {
-        actor->angular_velocity_roll += v_long >> 2;
+    /* proj = (int16)(vx>>8) * cos(-yaw) - (int16)(vz>>8) * sin(-yaw)
+     * Equivalently: (vx>>8)*cos(yaw) + (vz>>8)*sin(yaw) (body-frame longitudinal)
+     * [@ 0x403DF1..F7] */
+    int32_t proj = vx_hi * cos_neg_yaw - vz_hi * sin_neg_yaw;
+
+    /* sVar2 = ROUND-TO-ZERO( proj / 4096 ), then truncated to int16
+     * [@ 0x403E02 CDQ; 0x403E03 AND EDX,0xfff; 0x403E09 ADD EAX,EDX;
+     *  0x403E0B SAR EAX,0xc] */
+    int32_t proj_rz = state0f_sar_rz(proj, 12);
+    int16_t sVar2 = (int16_t)proj_rz;
+
+    /* roll12 = (((uint16)display_angle_roll - 0x800) & 0xfff) - 0x800
+     * Folds [0,0xfff] to signed [-0x800, 0x7FF].
+     * [@ 0x403DFB MOV CX,[ESI+0x208]; 0x403E11..1D SUB/AND/SUB sequence] */
+    int32_t roll12 = (int32_t)(((uint32_t)(uint16_t)actor->display_angles.roll - 0x800u) & 0xfffu);
+    roll12 -= 0x800;
+
+    /* Gate (APPLY when |sVar2| > 0x20 AND sign-compatible |roll12| < 0x80):
+     * Listing 0x403E23..3C decision tree:
+     *   CMP AX,0x20; JLE e33        — sVar2 <= 0x20 ?
+     *     [e33] CMP AX,-0x20; JGE SKIP   — if -0x20<=sVar2<=0x20 → skip
+     *           CMP ECX,-0x80; JLE SKIP  — sVar2 < -0x20: skip if roll12 <= -0x80
+     *           else APPLY
+     *   else (sVar2 > 0x20):
+     *           CMP ECX,0x80;  JGE SKIP  — skip if roll12 >= 0x80
+     *           else APPLY
+     * @ 0x403E23..3E.
+     * NOTE: prior port had the gate INVERTED (apply on low speed). The correct
+     * semantic is "recover from sustained body-frame longitudinal drift when
+     * roll is small in the corresponding direction". */
+    int apply = 0;
+    if (sVar2 > 0x20) {
+        if (roll12 < 0x80) apply = 1;
+    } else if (sVar2 < -0x20) {
+        if (roll12 > -0x80) apply = 1;
     }
 
-    /* Decay roll and pitch angular velocities by 1/16 per frame.
-     * [CONFIRMED @ 0x403E58-0x403EA4]
-     * NOTE: yaw and linear velocities are NOT decayed — the car maintains
-     * momentum while airborne. Previous port code incorrectly decayed all
-     * three, causing airborne cars to lose speed. */
-    actor->angular_velocity_roll  -= actor->angular_velocity_roll >> 4;
-    actor->angular_velocity_pitch -= actor->angular_velocity_pitch >> 4;
+    if (apply) {
+        /* angular_velocity_roll += sar_rz(sVar2, 2)
+         * [@ 0x403E3E..52: MOV ECX,[ESI+0x1C0]; MOVSX EAX,AX; CDQ; AND EDX,3;
+         *  ADD EAX,EDX; SAR EAX,2; ADD ECX,EAX; MOV [ESI+0x1C0],ECX] */
+        actor->angular_velocity_roll += state0f_sar_rz((int32_t)sVar2, 2);
+    }
 
-    /* Accumulate slip from body-frame speeds [CONFIRMED @ 0x403E74-0x403E8C] */
-    actor->accumulated_tire_slip_x += (int16_t)(v_lat >> 8);
-    actor->accumulated_tire_slip_z += (int16_t)(v_long >> 8);
+    /* Decay roll and pitch angular velocities by 1/16 per frame with RZ rounding.
+     * [@ 0x403E58..6B: roll  — av -= sar_rz(av,4)]
+     * [@ 0x403E71..A5: pitch — same pattern, +0x1C8] */
+    actor->angular_velocity_roll  -= state0f_sar_rz(actor->angular_velocity_roll,  4);
+    actor->angular_velocity_pitch -= state0f_sar_rz(actor->angular_velocity_pitch, 4);
+
+    /* Accumulate slip from already-stored body-frame speeds.
+     * IMPORTANT: original reads lateral_speed (+0x318) / longitudinal_speed (+0x314)
+     * directly — NOT re-projecting from world velocity. Both are int32 (24.8 fp);
+     * plain SAR 8 + 16-bit truncate (DX/AX register) is used (no RZ rounding here).
+     * [@ 0x403E7F MOV EDX,[ESI+0x318]; 0x403E8A MOV EAX,[ESI+0x314];
+     *  0x403E90 SAR EDX,8; 0x403E93 ADD word[ESI+0x340],DX;
+     *  0x403E9A SAR EAX,8; 0x403E9D ADD word[ESI+0x342],AX] */
+    actor->accumulated_tire_slip_x += (int16_t)(actor->lateral_speed >> 8);
+    actor->accumulated_tire_slip_z += (int16_t)(actor->longitudinal_speed >> 8);
+
+#ifdef TD5_PILOT_TRACE_00403D90
+    td5_pilot_emit_00403D90_leave(actor);
+#endif
 }
 
 /* ========================================================================
