@@ -4539,75 +4539,148 @@ static uint32_t traffic_route_heading_delta(int slot)
     return (-(int32_t)(((int32_t)raw_delta - 0x800) & 0xFFF)) & 0xFFF;
 }
 
-/* ApplySimpleTrackSurfaceForce — direct port of 0x00407270.
+/* ApplySimpleTrackSurfaceForce — byte-faithful port of 0x00407270.
  *
- * Pushes actor out of wall penetration and zeroes the outward velocity.
+ * Pushes actor out of wall penetration and reflects the outward velocity.
  *
- * param_1  = actor pointer
- * edge_angle = 12-bit track-space angle of the edge tangent
- * pen      = signed penetration (< 0 = outside edge)
+ * Address note: scope file lists this as "TOI_substep at 0x0040728B", but
+ * 0x0040728B is mid-function (the AND EDX,0xFFF sign-correction inside the
+ * pen → depth computation). The actual function entry is 0x00407270.
  *
- * Position correction:
- *   depth = (pen + ((pen>>31)&0xFFF)) >> 12 - 4   [CONFIRMED @ 0x40728B]
- *   world_pos.z += (depth * cos) >> 4              [CONFIRMED @ 0x40729E]
- *   world_pos.x -= (depth * sin) >> 4              [CONFIRMED @ 0x4072A7]
+ * Register-level register/var mapping (from listing 0x00407270-0x0040738E):
+ *   EDI = cos = CosFixed12bit(edge_angle)      [0x00407279 CALL 0x40A6E0]
+ *   EBX = sin = SinFixed12bit(edge_angle)      [0x00407281 CALL 0x40A700]
+ *   ESI (depth) = ((pen + sign_corr(0xFFF)) >> 12) - 4   [0x0040728C-72A4]
+ *   EBP_pos (a/k/a iVar5_pos) = depth*sin sign-corrected then shifted by 4
+ *           and *negated*; added to *(actor+0x1fc) (= world_pos.x)
+ *                                                       [0x004072A9-72B7]
+ *   EAX_pos = depth*cos sign-corrected then shifted by 4;
+ *           added to *(actor+0x204) (= world_pos.z)     [0x004072BB-72D5]
  *
- * Velocity correction (only if lateral velocity is outward, vel_perp >= 0):
- *   vel_perp = (vel_x * cos + vel_z * sin) >> 12   [CONFIRMED @ 0x4072B8]
- *   vel_para = (vel_z * cos - vel_x * sin) >> 12   [CONFIRMED @ 0x4072C6]
- *   if vel_perp >= 0:
- *     vel_para_adj = clamp_dead_zone(vel_para, 0x180)  [CONFIRMED @ 0x4072DE]
- *     vel_perp_new = -(vel_para >> 1)             [CONFIRMED @ 0x4072D7]
- *     vel_x = (vel_para_adj * cos - vel_perp_new * sin) >> 12
- *     vel_z = (vel_para_adj * sin + vel_perp_new * cos) >> 12
- *   track_contact_flag = 0                         [CONFIRMED @ 0x407338]
+ *   ESI (vx) = *(actor+0x1cc) = linear_velocity_x       [0x004072BE]
+ *   ...
+ *   EBP_vel = (vx*cos + vz*sin + sign_corr(0xFFF))      [0x004072E1-72FD]
+ *           — TANGENTIAL component (along edge)
+ *   EAX_vel = (vz*cos - vx*sin + sign_corr(0xFFF))      [0x004072FF-407311]
+ *           — NORMAL/OUTWARD component (perp to edge)
+ *   After SAR by 12: EBP=tang_sh, EAX=normal_sh.
+ *
+ *   JS 0x40738A at 0x40731C → exits if NORMAL component is negative,
+ *           i.e. when vel projects INTO the wall (no work to do).
+ *   Otherwise (normal_sh >= 0):
+ *     vel_perp_new = -(normal_sh >> 1)            [0x40731E-407325]
+ *           — CDQ/SUB-EDX is a no-op here because the branch is gated
+ *             on normal_sh >= 0, so sign-bit broadcast = 0.
+ *     Dead-zone clamp on tang_sh (EBP):           [0x407327-407347]
+ *       if tang_sh >  0x180: tang_clamped = tang_sh - 0x180
+ *       elif tang_sh < -0x180: tang_clamped = tang_sh + 0x180
+ *       else: tang_clamped = 0
+ *     vx = (tang_clamped*cos - vel_perp_new*sin + sign_corr) >> 12
+ *     vz = (tang_clamped*sin + vel_perp_new*cos + sign_corr) >> 12
+ *     *(actor+0x37b) = 0  (track_contact_flag)    [0x407383]
+ *
+ * Naming reconciliation: Ghidra decompiler labels the components "perp"
+ * and "para" but the geometry is reversed from intuition — what Ghidra
+ * calls iVar4 (perp) is actually the EDGE-TANGENTIAL projection, and
+ * what it calls iVar3 (para) is the OUTWARD-NORMAL projection. We use
+ * tang_/normal_ here to match the listing semantics.
  * ======================================================================== */
 static void apply_simple_track_surface_force(TD5_Actor *actor,
                                               uint32_t edge_angle,
                                               int32_t pen)
 {
+    /* 0x00407278-0x00407286 */
     int32_t cos_a = cos_fixed12((int32_t)(edge_angle & 0xFFF));
     int32_t sin_a = sin_fixed12((int32_t)(edge_angle & 0xFFF));
 
-    /* Position correction [CONFIRMED @ 0x40728B-0x4072A7] */
+    /* 0x0040728C-0x004072A4: depth = ((pen + sign_corr) >> 12) - 4
+     *   CDQ; AND EDX,0xFFF; ADD EAX,EDX; SAR ESI,0xC; SUB ESI,0x4   */
+    int32_t depth = ((pen + ((int32_t)((uint32_t)(pen >> 31) & 0xFFFu))) >> 12) - 4;
+
+    /* 0x004072A9-0x004072B7: actor->world_pos.x += -((depth*sin + sign_corr(0xF)) >> 4)
+     *   IMUL EAX,EBX(sin); CDQ; AND EDX,0xF; ADD EAX,EDX; SAR EAX,0x4; NEG EAX;
+     *   ADD EBP,EAX  (EBP was preloaded from [ECX+0x1fc])                 */
     {
-        int32_t depth = (pen + ((pen >> 31) & 0xFFF)) >> 12;
-        depth -= 4;
-        int32_t pz = depth * cos_a;
-        int32_t px = depth * sin_a;
-        actor->world_pos.z += (int32_t)((pz + ((pz >> 31) & 0xF)) >> 4);
-        actor->world_pos.x -= (int32_t)((px + ((px >> 31) & 0xF)) >> 4);
+        int32_t prod_sin = depth * sin_a;
+        int32_t step_x   = (prod_sin + ((int32_t)((uint32_t)(prod_sin >> 31) & 0xFu))) >> 4;
+        actor->world_pos.x += -step_x;
     }
 
-    /* Velocity decomposition [CONFIRMED @ 0x4072AE-0x4072C6] */
-    int32_t vx     = actor->linear_velocity_x;
-    int32_t vz     = actor->linear_velocity_z;
-    int32_t vel_perp_raw = vx * cos_a + vz * sin_a;
-    int32_t vel_para_raw = vz * cos_a - vx * sin_a;
-    int32_t vel_para_sh  = (vel_para_raw + ((vel_para_raw >> 31) & 0xFFF)) >> 12;
-    int32_t vel_perp_sh  = (int32_t)((vel_perp_raw + ((vel_perp_raw >> 31) & 0xFFF)) >> 12);
-
-    /* Only correct if perpendicular component is outward (>= 0) [CONFIRMED @ 0x4072CE] */
-    if (vel_perp_sh >= 0) {
-        /* Dead-zone clamp: if |vel_para| <= 0x180, zero it; else subtract 0x180
-         * [CONFIRMED @ 0x4072DE-0x407307] */
-        int32_t vel_para_adj;
-        if (vel_para_sh >= 0x181) {
-            vel_para_adj = vel_para_sh - 0x180;
-        } else if (vel_para_sh <= -0x180) {
-            vel_para_adj = vel_para_sh + 0x180;
-        } else {
-            vel_para_adj = 0;
-        }
-        /* Reflected perp = -(vel_para >> 1) [CONFIRMED @ 0x4072D7] */
-        int32_t vel_perp_new = -(vel_para_sh - (vel_para_raw >> 31)) >> 1;
-
-        int32_t nvx = vel_para_adj * cos_a - vel_perp_new * sin_a;
-        int32_t nvz = vel_para_adj * sin_a + vel_perp_new * cos_a;
-        actor->linear_velocity_x = (int32_t)((nvx + ((nvx >> 31) & 0xFFF)) >> 12);
-        actor->linear_velocity_z = (int32_t)((nvz + ((nvz >> 31) & 0xFFF)) >> 12);
-        actor->track_contact_flag = 0;
+    /* 0x004072B9-0x004072D5: actor->world_pos.z += ((depth*cos + sign_corr(0xF)) >> 4)
+     *   IMUL EAX,EDI(cos); CDQ; AND EDX,0xF; ADD EAX,EDX; SAR EAX,0x4;
+     *   ADD EDX(=[ECX+0x204]),EAX                                          */
+    {
+        int32_t prod_cos = depth * cos_a;
+        int32_t step_z   = (prod_cos + ((int32_t)((uint32_t)(prod_cos >> 31) & 0xFu))) >> 4;
+        actor->world_pos.z += step_z;
     }
+
+    /* 0x004072BE / 0x004072DB-0x00407319: velocity decomposition.
+     * Note ESI=vx is loaded at 0x4072BE BEFORE the x-position write, but
+     * since world_pos.x is offset 0x1FC and linear_velocity_x is offset
+     * 0x1CC they don't alias, and the order of reads/writes is observable
+     * only through the actor struct (same outcome). */
+    int32_t vx = actor->linear_velocity_x;
+    int32_t vz = actor->linear_velocity_z;
+
+    /* EBP = (vx*cos + vz*sin) + sign_corr(0xFFF) — TANGENTIAL raw       */
+    int32_t tang_raw = vx * cos_a + vz * sin_a;
+    int32_t tang_adj = tang_raw + ((int32_t)((uint32_t)(tang_raw >> 31) & 0xFFFu));
+
+    /* EAX = (vz*cos - vx*sin) + sign_corr(0xFFF) — OUTWARD-NORMAL raw  */
+    int32_t normal_raw = vz * cos_a - vx * sin_a;
+    int32_t normal_adj = normal_raw + ((int32_t)((uint32_t)(normal_raw >> 31) & 0xFFFu));
+
+    /* SAR by 12 [0x00407316, 0x00407319] */
+    int32_t tang_sh   = tang_adj   >> 12;
+    int32_t normal_sh = normal_adj >> 12;
+
+    /* JS 0x0040738A at 0x40731C — exit when normal_sh < 0 [outward vel
+     * projects toward wall: nothing to push back]                       */
+    if (normal_sh < 0) {
+        return;
+    }
+
+    /* 0x0040731E-0x00407325: vel_perp_new = -((normal_sh - 0) >> 1)
+     *   CDQ; SUB EAX,EDX; SAR EAX,1; MOV ESI,EAX; NEG ESI
+     * Since we just gated on normal_sh >= 0, EDX = sign-broadcast = 0,
+     * so SUB EAX,EDX is a no-op. The arithmetic SAR happens BEFORE NEG,
+     * which matters when normal_sh is odd: e.g. normal_sh=5 →
+     *   asm: -(5 >> 1) = -2          (vs. (-5) >> 1 = -3)               */
+    int32_t vel_perp_new = -(normal_sh >> 1);
+
+    /* 0x00407327-0x00407347: dead-zone clamp on tang_sh (EBP)
+     *   CMP EBP,0x180; JLE -> next test; ADD EBP,-0x180; JMP done
+     *     [reached when EBP > 0x180, i.e. EBP >= 0x181]
+     *   CMP EBP,-0x180; JGE 0x40347 (XOR EBP,EBP); ADD EBP,0x180
+     *     [JGE means EBP >= -0x180 → zero;
+     *      else (EBP < -0x180): EBP += 0x180]                            */
+    int32_t tang_clamped;
+    if (tang_sh > 0x180) {
+        tang_clamped = tang_sh - 0x180;
+    } else if (tang_sh < -0x180) {
+        tang_clamped = tang_sh + 0x180;
+    } else {
+        tang_clamped = 0;
+    }
+
+    /* 0x00407349-0x0040737D: recompose velocity in world frame.
+     *   nvx = tang_clamped*cos - vel_perp_new*sin
+     *   nvz = tang_clamped*sin + vel_perp_new*cos
+     * Each summand gets sign_corr(0xFFF) before SAR by 12.               */
+    {
+        int32_t nvx_raw = tang_clamped * cos_a - vel_perp_new * sin_a;
+        int32_t nvx_adj = nvx_raw + ((int32_t)((uint32_t)(nvx_raw >> 31) & 0xFFFu));
+        actor->linear_velocity_x = nvx_adj >> 12;
+    }
+    {
+        int32_t nvz_raw = tang_clamped * sin_a + vel_perp_new * cos_a;
+        int32_t nvz_adj = nvz_raw + ((int32_t)((uint32_t)(nvz_raw >> 31) & 0xFFFu));
+        actor->linear_velocity_z = nvz_adj >> 12;
+    }
+
+    /* 0x00407383: *(actor+0x37b) = 0 — track_contact_flag */
+    actor->track_contact_flag = 0;
 }
 
 /* Compute signed perpendicular distance from span edge for traffic containment.
