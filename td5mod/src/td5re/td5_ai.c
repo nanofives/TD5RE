@@ -3072,147 +3072,363 @@ ttc_done:;
  * Lifecycle: spawn -> approach -> active -> teardown, 300-frame cooldown.
  * ======================================================================== */
 
+/* ------------------------------------------------------------------
+ * Byte-faithful port of 0x00434DA0 UpdateSpecialTrafficEncounter.
+ *
+ * Tracks acquisition and release of the special actor-9 traffic
+ * encounter (cop / police chase NPC) in modes gated by DAT_0046320c.
+ * This path is distinct from the wanted-mode flag DAT_004aaf68
+ * (ENC_WANTED_MODE), which only suppresses the engine-audio
+ * Start/Stop calls inside this function.
+ *
+ * Original-symbol mapping (TD5_d3d.exe @ 0x004XXXXX):
+ *   DAT_004b05d8  gSpecialEncounterTrackedActorHandle  → g_encounter_tracked_handle
+ *   DAT_004b055c  gSpecialEncounterRouteTable          → s_enc_route_table_ptr
+ *   DAT_004b05c0  gSpecialEncounterTrackProgress       → s_enc_track_progress
+ *   DAT_004b0580  gSpecialEncounterSignedTrackOffset   → s_enc_signed_track_offset
+ *   DAT_004b05e4  encounter phase flag (0=ACQUIRE)     → g_encounter_phase_flag
+ *   DAT_004b064c  g_specialEncounterCooldown           → g_encounter_cooldown
+ *   DAT_004b0658  teardown secondary flag              → s_enc_teardown_flag
+ *   DAT_004b0568  encounter route-table-selector ref   → g_encounter_route_table_selector
+ *   DAT_004afbe0  gActorSpecialEncounterActive (RS+0x80, stride 0x11c)
+ *                                                       → g_encounter_active[slot]
+ *   DAT_004ab18a  actor[0].span_normalized  (+0x82)
+ *   DAT_004ab41c  actor[0].longitudinal_speed (+0x314)
+ *   DAT_004ad150  actor[9].span_raw         (+0x80)
+ *   DAT_004ad152  actor[9].span_normalized  (+0x82)
+ *   DAT_004ad2cc  actor[9].world_pos_x      (+0x1fc)  — ComputeTrackSpanProgress reads [x,_,z]
+ *   DAT_004ad449  actor[9].vehicle_mode     (+0x379)
+ *   DAT_004ad0d0  actor[9] base
+ *   DAT_004afbc0  route_state[0][RS_FORWARD_TRACK_COMP] (slot 0)
+ *   DAT_004afb6c  route_state[0][RS_ROUTE_TABLE_SELECTOR]
+ *   DAT_004afb60  route_state[0][RS_ROUTE_TABLE_PTR]
+ *   DAT_004aaf68  ENC_WANTED_MODE
+ *
+ * The port keeps g_encounter_active[] as a parallel int32 array (this
+ * is what the rest of the port reads via td5_ai_is_encounter_active).
+ * The original stores it inside the route_state row at RS+0x80; the
+ * write effect is preserved logically.
+ *
+ * g_encounter_enabled is a port-only master gate fed from
+ * g_td5.special_encounter_enabled. The original has no equivalent
+ * gate at the function entry; the function is unconditionally called
+ * by 0x00436A70 UpdateRaceActors, and the encounter system is
+ * effectively idle when DAT_0046320c / DAT_004aaf68 are zero (no
+ * cop slot configured). Keeping the gate here is a no-op when the
+ * port mirrors the original's idle state but lets us hard-disable
+ * encounters from frontend config.
+ * ------------------------------------------------------------------ */
+
+/* gSpecialEncounterRouteTable: pointer to the route-table byte stream
+ * (LEFT.TRK / RIGHT.TRK) of the tracked actor. Refreshed every tick
+ * when the tracked actor's RS_ROUTE_TABLE_PTR differs from the cached
+ * value. Used as the source of the per-span lateral lane byte read
+ * at offset (span_norm * 3). */
+static const uint8_t *s_enc_route_table_ptr;
+
+/* gSpecialEncounterTrackProgress: low dword of the ComputeTrackSpanProgress
+ * return (longlong). The high dword is discarded by the original. */
+static int32_t s_enc_track_progress;
+
+/* gSpecialEncounterSignedTrackOffset: low dword of ComputeSignedTrackOffset
+ * (ulonglong) return. */
+static int32_t s_enc_signed_track_offset;
+
+/* _DAT_004b0658: secondary teardown flag. Zeroed on the >0x40 despawn
+ * path; not read elsewhere in this function. */
+static int32_t s_enc_teardown_flag;
+
+/* External symbols mapped from absolute addresses in the disassembly. */
+/* DAT_004aaf68 ENC_WANTED_MODE mirror in the port lives at
+ * g_td5.wanted_mode_enabled (int). Wrap it for byte-faithful naming. */
+#define ENC_WANTED_MODE  (g_td5.wanted_mode_enabled)
+
+/* Audio Start/Stop hooks — replace original CALL 0x440ab0 / 0x440ae0.
+ * The port currently has no equivalent slot-9 engine audio system; the
+ * calls are stubbed and the logging records the transitions for trace.
+ * FIXME(precise-00434DA0): once 0x00440AB0 / 0x00440AE0 are ported,
+ * route to those instead of stub-logging. */
+static inline void td5_enc_start_tracked_audio(int arg) {
+    (void)arg;
+    TD5_LOG_I(LOG_TAG, "enc_audio_start: arg=%d", arg);
+}
+
+static inline void td5_enc_stop_tracked_audio(void) {
+    TD5_LOG_I(LOG_TAG, "enc_audio_stop");
+}
+
+/* Forward declaration: the deterministic-sim crash-recovery state reset
+ * for actor[9]. Original is ResetVehicleActorState @ 0x00405d70.
+ * Port: td5_physics.c:td5_physics_reset_actor_state(TD5_Actor *). */
+extern void td5_physics_reset_actor_state(TD5_Actor *actor);
+
 /**
- * UpdateSpecialTrafficEncounter: spawn/despawn logic, cooldown, proximity.
- * Called from UpdateRaceActors at end of traffic loop.
+ * UpdateSpecialTrafficEncounter — byte-faithful port of 0x00434DA0.
+ * Called from UpdateRaceActors (0x00436A70) at end of traffic loop.
  */
 void td5_ai_update_special_encounter(void) {
-    char *player;
-    int32_t player_span, player_speed, player_fwd;
+    int32_t handle;
+    char *cop;        /* actor[9] */
+    char *player;     /* actor[0] */
+    int32_t cop_span_norm;     /* DAT_004ad152 — actor[9] +0x82 */
+    int16_t player_span_norm;  /* DAT_004ab18a — actor[0] +0x82 */
+    int32_t player_speed;      /* DAT_004ab41c — actor[0] +0x314 */
+    int32_t player_fwd;        /* DAT_004afbc0 — RS[0].forward_track_component */
+    int32_t player_selector;   /* DAT_004afb6c — RS[0].route_table_selector */
 
+    /* Port-only master gate (see header comment). */
     if (!g_encounter_enabled) return;
 
-    /* Decrement cooldown timer */
-    if (g_encounter_cooldown > 0) {
-        g_encounter_cooldown--;
+    /* Bind frequently-used addresses once. */
+    if (!g_actor_base) return;
+    cop    = actor_ptr(9);
+    player = actor_ptr(0);
+
+    cop_span_norm     = (int32_t)(int16_t)ACTOR_I16(cop, ACTOR_SPAN_NORMALIZED);
+    player_span_norm  =                    ACTOR_I16(player, ACTOR_SPAN_NORMALIZED);
+    player_speed      =                    ACTOR_I32(player, ACTOR_LONGITUDINAL_SPEED);
+    player_fwd        = g_actor_forward_track_component[0];
+    player_selector   = route_state(0)[RS_ROUTE_TABLE_SELECTOR];
+
+    handle = g_encounter_tracked_handle;
+
+    /* ---- Prologue (0x00434da0–0x00434e11) ----------------------------
+     * if (handle != -1 && cached_route_table_ptr !=
+     *     route_state[handle][RS_ROUTE_TABLE_PTR]) {
+     *     // route changed — refresh cached pointer + recompute
+     *     // span progress + signed track offset.
+     * }
+     * ----------------------------------------------------------------- */
+    if (handle != -1) {
+        const uint8_t *cur_rb;
+        const int32_t *handle_rs = route_state(handle);
+        cur_rb = (const uint8_t *)(intptr_t)handle_rs[RS_ROUTE_TABLE_PTR];
+        if (s_enc_route_table_ptr != cur_rb) {
+            int32_t cop_span_raw = (int32_t)(int16_t)ACTOR_I16(cop, ACTOR_SPAN_RAW);
+            int32_t *cop_xyz     = (int32_t *)(cop + ACTOR_WORLD_POS_X);
+            uint8_t lane_byte;
+
+            s_enc_route_table_ptr = cur_rb;
+
+            /* longlong ComputeTrackSpanProgress(int span, int *xyz_at_+0x1fc) */
+            s_enc_track_progress = (int32_t)td5_track_compute_span_progress(
+                cop_span_raw, cop_xyz);
+
+            /* The original passes the per-span lane byte at
+             *   route_table[ span_norm * 3 ]
+             * i.e. the BL = byte ptr [ECX + EDX*1] where ECX=span_norm,
+             * EDX = base + span_norm*2 ⇒ effective addr = base + span_norm*3. */
+            lane_byte = (cur_rb && cop_span_norm >= 0)
+                ? cur_rb[(size_t)cop_span_norm * 3u]
+                : 0;
+
+            /* ulonglong ComputeSignedTrackOffset(int span_raw, int progress, uint lane) */
+            s_enc_signed_track_offset = (int32_t)td5_track_compute_signed_offset(
+                cop_span_raw, s_enc_track_progress, (int)lane_byte);
+        }
     }
 
-    player = actor_ptr(0);
-    player_span  = (int16_t)ACTOR_I16(player, ACTOR_SPAN_RAW);
-    player_speed = ACTOR_I32(player, ACTOR_LONGITUDINAL_SPEED);
-    player_fwd   = g_actor_forward_track_component[0];
+    /* ---- Phase-flag dispatch (0x00434e13–0x00434e26) -----------------
+     * if (phase_flag != 0) {
+     *     if (handle == -1) return;
+     *     goto active_monitor;            // 0x00434f1b
+     * }
+     * if (handle != -1) goto active_monitor;
+     * // else: try to spawn the encounter
+     * ----------------------------------------------------------------- */
+    if (g_encounter_phase_flag != 0) {
+        if (handle == -1) return;
+        /* fall through to active_monitor */
+    } else if (handle == -1) {
+        /* ---- Spawn attempt (0x00434e2c–0x00434f11) ------------------ */
+        int32_t span_delta_2span;
+        int32_t player_diff_abs;
 
-    /* --- No active encounter: check spawn conditions --- */
-    if (g_encounter_tracked_handle == -1) {
-        int16_t slot9_span;
-        int32_t span_delta;
-
-        /* All conditions must be true simultaneously */
         if (g_encounter_cooldown != 0) return;
 
-        slot9_span = ACTOR_I16(actor_ptr(9), ACTOR_SPAN_RAW);
-        span_delta = player_span - slot9_span;
+        /* (int16)actor[0].span_norm - (int16)actor[9].span_norm == 2 */
+        span_delta_2span = (int32_t)(int16_t)player_span_norm - cop_span_norm;
+        if (span_delta_2span != 2) return;
 
-        /* Player must be exactly 2 spans ahead */
-        if (span_delta != 2) return;
+        /* actor[0].long_speed > 0x15638 (JLE → fail at 0x15638) */
+        if (player_speed <= 0x15638) return;
 
-        /* Speed threshold: >= 0x15639 */
-        if (player_speed < 0x15639) return;
-
-        /* Forward track component > 0 */
+        /* RS[0].forward_track_component > 0 (JLE → fail at 0) */
         if (player_fwd <= 0) return;
 
-        /* Route table match */
-        if (route_state(0)[RS_ROUTE_TABLE_SELECTOR] !=
-            g_encounter_route_table_selector) return;
+        /* RS[0].route_table_selector == DAT_004b0568 (JNZ → fail) */
+        if (player_selector != g_encounter_route_table_selector) return;
 
-        /* Span distance check: absolute delta < 0x10 (16 spans) */
+        /* The original then performs:
+         *   uVar1 = (int16)player_span_norm - (int16)player_span_norm
+         *   abs(uVar1) > 0x10 ⇒ return
+         * which is always 0, so the check passes unconditionally. Kept
+         * verbatim so the byte-faithful trace matches. */
         {
-            int32_t abs_delta = span_delta;
-            if (abs_delta < 0) abs_delta = -abs_delta;
-            if (abs_delta >= 0x10) return;
+            int32_t tmp = (int32_t)(int16_t)player_span_norm
+                        - (int32_t)(int16_t)player_span_norm;
+            player_diff_abs = (tmp < 0) ? -tmp : tmp;
+            if (player_diff_abs > 0x10) return;
         }
 
-        /* --- SPAWN --- */
-        g_encounter_tracked_handle = 0; /* target player 0 */
-        g_encounter_phase_flag = 0;     /* acquisition phase */
+        /* ===== SPAWN =====
+         * Original (0x00434e97–0x00434f11):
+         *   [0x4b05d8] = 0                       (handle = 0)
+         *   call ComputeTrackSpanProgress
+         *   [0x4b05c0] = ret_lo                  (track_progress)
+         *   call ComputeSignedTrackOffset
+         *   [0x4b0580] = ret_lo                  (signed_track_offset)
+         *   [0x4b055c] = route_state[0][0]       (cache RS[0].route_table_ptr)
+         *   ResetVehicleActorState(&actor[9])
+         *   if (ENC_WANTED_MODE == 0) StartTrackedVehicleAudio(9);
+         * Note: the prologue refresh above already cached the cop's
+         * route table when handle was != -1; on the spawn path the
+         * handle was -1, so the cached pointer is stale. The original
+         * writes route_state[0][RS_ROUTE_TABLE_PTR] (slot 0 = player).
+         */
+        {
+            int32_t cop_span_raw = (int32_t)(int16_t)ACTOR_I16(cop, ACTOR_SPAN_RAW);
+            int32_t *cop_xyz     = (int32_t *)(cop + ACTOR_WORLD_POS_X);
+            const uint8_t *rb0;
+            uint8_t lane_byte;
+
+            g_encounter_tracked_handle = 0;
+
+            s_enc_track_progress = (int32_t)td5_track_compute_span_progress(
+                cop_span_raw, cop_xyz);
+
+            /* IMPORTANT: the original reads the lane byte from the
+             * *previous* gSpecialEncounterRouteTable, then immediately
+             * overwrites it with route_state[0][RS_ROUTE_TABLE_PTR].
+             * (0x434eb8 reads MOV EDX,[0x4b055c] BEFORE 0x434eea writes.)
+             * Match exactly. */
+            rb0 = s_enc_route_table_ptr;
+            lane_byte = (rb0 && cop_span_norm >= 0)
+                ? rb0[(size_t)cop_span_norm * 3u]
+                : 0;
+
+            s_enc_signed_track_offset = (int32_t)td5_track_compute_signed_offset(
+                cop_span_raw, s_enc_track_progress, (int)lane_byte);
+
+            /* Cache RS[0].route_table_ptr (slot 0 = player) into the
+             * gSpecialEncounterRouteTable global. Subsequent ticks compare
+             * the tracked actor's RS_ROUTE_TABLE_PTR against this cache.
+             * Since the tracked actor IS slot 0 after spawn, the prologue
+             * "ptr changed" check will be false on the very next tick. */
+            s_enc_route_table_ptr = (const uint8_t *)(intptr_t)
+                                    route_state(0)[RS_ROUTE_TABLE_PTR];
+
+            td5_physics_reset_actor_state((TD5_Actor *)cop);
+        }
+
         TD5_LOG_I(LOG_TAG,
-                  "Encounter spawn: slot=9 target=%d player_span=%d slot9_span=%d speed=%d",
-                  g_encounter_tracked_handle, player_span, slot9_span, player_speed);
+                  "Encounter spawn: handle=0 player_span_norm=%d cop_span_norm=%d "
+                  "speed=%d fwd=%d sel=%d",
+                  (int)player_span_norm, cop_span_norm, player_speed,
+                  player_fwd, player_selector);
 
-        /* Reset slot 9 state */
-        {
-            char *s9 = actor_ptr(9);
-            ACTOR_I32(s9, ACTOR_STEERING_CMD) = 0;
-            ACTOR_I32(s9, ACTOR_LONGITUDINAL_SPEED) = 0;
-            ACTOR_I16(s9, ACTOR_ENCOUNTER_STEER) = 0;
-            ACTOR_U8(s9, ACTOR_BRAKE_FLAG) = 0;
-            ACTOR_U8(s9, ACTOR_VEHICLE_MODE) = 0;
-            ACTOR_I32(s9, ACTOR_ENCOUNTER_STATE) = 0;
-        }
-
-        /* StartTrackedVehicleAudio(9) would be called here */
+        if (ENC_WANTED_MODE != 0) return;
+        td5_enc_start_tracked_audio(9);
         return;
     }
 
-    /* --- Active encounter: monitor span distance for despawn --- */
+    /* ---- Active monitor (0x00434f1b–0x00434fd3) -----------------------
+     * Reached when (handle != -1). Either phase == 0 fall-through or
+     * phase != 0 explicit JNZ.
+     *
+     * if (cooldown != 0) return;
+     * cop_span = (int16)actor[handle].span_norm  // +0x82 with stride 0x388
+     * delta = cop_span - DAT_004ad152            // DAT_004ad152 = actor[9].span_norm
+     *
+     * Note: handle is set to 0 at spawn (slot 0 = player), so
+     * "actor[handle].span_norm" reads the player's span_norm and
+     * delta = player_span_norm - cop_span_norm.
+     *
+     * if (delta > 0x40 && actor[9].vehicle_mode == 0) {
+     *     teardown:
+     *       teardown_flag = 0
+     *       tracked_handle = -1
+     *       phase_flag = 0
+     *       cooldown = 300
+     *       if (ENC_WANTED_MODE == 0) StopTrackedVehicleAudio();
+     *       ResetVehicleActorState(&actor[9]);
+     *       return;
+     * }
+     *
+     * // delta <= 0x40 path:
+     * ecx = DAT_004ad152 - cop_span (= cop_span_norm - player_span_norm)
+     * if (ecx < 2) return;
+     * if (route_state[handle][RS_ROUTE_TABLE_SELECTOR] != [0x4b0568]) return;
+     * if (actor[9].vehicle_mode != 0) return;
+     * route_state[handle][0x20] = 1;             // per-slot encounter active
+     * if (ENC_WANTED_MODE == 0) StopTrackedVehicleAudio();
+     * ----------------------------------------------------------------- */
     {
-        int16_t enc_span = ACTOR_I16(actor_ptr(9), ACTOR_SPAN_RAW);
-        int32_t distance = player_span - enc_span;
+        char *tracked_actor;
+        int32_t tracked_span_norm;
+        int32_t delta;
+        uint8_t cop_mode;
 
-        /* Despawn if encounter actor > 0x40 (64) spans behind */
-        if (distance > 0x40) {
-            goto teardown;
-        }
+        if (g_encounter_cooldown != 0) return;
 
-        /* Check for encounter activation: within 1 span on matching route */
-        if (distance <= 1 && distance >= -1) {
-            int32_t *slot9_rs = route_state(9);
-            if (slot9_rs[RS_ROUTE_TABLE_SELECTOR] ==
-                route_state(0)[RS_ROUTE_TABLE_SELECTOR]) {
-                g_encounter_active[g_encounter_tracked_handle] = 1;
-                g_encounter_phase_flag = 1;
-                TD5_LOG_I(LOG_TAG,
-                          "Encounter active: target=%d distance=%d route_selector=%d",
-                          g_encounter_tracked_handle,
-                          distance,
-                          slot9_rs[RS_ROUTE_TABLE_SELECTOR]);
-                /* StopTrackedVehicleAudio() -- transition from approach to active */
+        tracked_actor     = actor_ptr(handle);
+        tracked_span_norm = (int32_t)(int16_t)ACTOR_I16(tracked_actor, ACTOR_SPAN_NORMALIZED);
+        delta             = tracked_span_norm - cop_span_norm;
+        cop_mode          = ACTOR_U8(cop, ACTOR_VEHICLE_MODE);
+
+        if (delta > 0x40 && cop_mode == 0) {
+            /* Teardown — cop is far ahead of player AND cop mode == 0. */
+            s_enc_teardown_flag        = 0;
+            g_encounter_tracked_handle = -1;
+            g_encounter_phase_flag     = 0;
+            g_encounter_cooldown       = 0x12c;   /* 300 */
+
+            if (ENC_WANTED_MODE == 0) {
+                td5_enc_stop_tracked_audio();
             }
+
+            td5_physics_reset_actor_state((TD5_Actor *)cop);
+
+            TD5_LOG_I(LOG_TAG,
+                      "Encounter despawn (delta>0x40): tracked_span=%d cop_span=%d "
+                      "delta=%d cooldown=300",
+                      tracked_span_norm, cop_span_norm, delta);
+
+            /* The original does NOT clear per-slot g_encounter_active
+             * flags or zero the control latches here — UpdateSpecial
+             * EncounterControl (0x00434BA0) handles deactivation when
+             * it next runs and finds the conditions invalid. */
+            return;
         }
 
-        /* Check if encounter actor has passed the player (1 span ahead) */
-        if (distance < -1) {
-            goto teardown;
+        /* delta <= 0x40 path — encounter activation check. */
+        {
+            int32_t ecx;
+            const int32_t *tracked_rs;
+
+            ecx = cop_span_norm - tracked_span_norm;
+            if (ecx < 2) return;
+
+            tracked_rs = route_state(handle);
+            if (tracked_rs[RS_ROUTE_TABLE_SELECTOR] !=
+                g_encounter_route_table_selector) return;
+
+            if (cop_mode != 0) return;
+
+            /* route_state[handle][0x20] = 1.
+             * Mirror to the parallel g_encounter_active[] used by the
+             * rest of the port. handle is guaranteed in [0, TD5_MAX_TOTAL_ACTORS). */
+            g_encounter_active[handle] = 1;
+
+            if (ENC_WANTED_MODE == 0) {
+                td5_enc_stop_tracked_audio();
+            }
+
+            TD5_LOG_I(LOG_TAG,
+                      "Encounter activate: handle=%d ecx=%d tracked_span=%d cop_span=%d",
+                      (int)handle, ecx, tracked_span_norm, cop_span_norm);
         }
     }
-    return;
-
-teardown:
-    /* --- TEARDOWN --- */
-    TD5_LOG_I(LOG_TAG, "Encounter despawn: target=%d cooldown=%d",
-              g_encounter_tracked_handle, 300);
-    g_encounter_phase_flag = 0;
-    g_encounter_tracked_handle = -1;
-    g_encounter_cooldown = 300; /* 300-frame cooldown */
-
-    /* Clear encounter state on slot 9 */
-    {
-        char *s9 = actor_ptr(9);
-        ACTOR_I32(s9, ACTOR_STEERING_CMD) = 0;
-        ACTOR_I32(s9, ACTOR_LONGITUDINAL_SPEED) = 0;
-        ACTOR_I16(s9, ACTOR_ENCOUNTER_STEER) = 0;
-        ACTOR_U8(s9, ACTOR_BRAKE_FLAG) = 0;
-        ACTOR_U8(s9, ACTOR_VEHICLE_MODE) = 0;
-    }
-
-    /* StopTrackedVehicleAudio() would be called here */
-
-    /* Increment encounter completion counter */
-    {
-        char *s9 = actor_ptr(9);
-        ACTOR_I32(s9, ACTOR_ENCOUNTER_STATE) += 1;
-    }
-
-    /* Clear per-actor encounter active flags */
-    {
-        int i;
-        for (i = 0; i < TD5_MAX_TOTAL_ACTORS; i++) {
-            g_encounter_active[i] = 0;
-        }
-    }
-    g_encounter_control_active_latch = 0;
-    g_encounter_steer_bias_latch = 0;
 }
 
 /**
