@@ -6784,11 +6784,40 @@ static void bind_default_vehicle_tuning(TD5_Actor *actor, int slot)
         memcpy(cardef, s_loaded_cardef[slot], 0x8C);
         actor->tuning_data_ptr = tuning;
         actor->car_definition_ptr = cardef;
-        TD5_LOG_I(LOG_TAG, "bind_tuning slot=%d: using carparam.dat data", slot);
+        TD5_LOG_I(LOG_TAG,
+                  "bind_tuning slot=%d: using carparam.dat data "
+                  "(k_pos_damp=%d k_vel_damp=%d k_spring=%d k_travel_lim=%d k_load_scale=%d)",
+                  slot,
+                  (int)*(int16_t *)(tuning + 0x5E),
+                  (int)*(int16_t *)(tuning + 0x60),
+                  (int)*(int16_t *)(tuning + 0x62),
+                  (int)*(int16_t *)(tuning + 0x64),
+                  (int)*(int16_t *)(tuning + 0x66));
         return;
     }
 
-    /* Fallback: hardcoded defaults */
+    /* Fallback: hardcoded defaults.
+     *
+     * Reaching this branch means:
+     *   (a) td5_asset_load_vehicle() didn't run for this slot, OR
+     *   (b) it ran but couldn't find carparam.dat (missing re/assets/cars/<car>/
+     *       symlink in the worktree, or zip archive missing), OR
+     *   (c) the slot is >= TD5_MAX_TOTAL_ACTORS (impossible — caller guards).
+     *
+     * Precise-port audit sessions (pool5/pool6 etc) hit case (b) because their
+     * worktrees don't have re/assets/cars/ symlinks. The captured "fallback"
+     * cardef constants (k_pos_damp=48, k_vel_damp=96, k_spring=48, k_travel_lim=384)
+     * come from the literals below — they are NOT what the live source-port
+     * uses in production. Live use loads Viper's actual carparam.dat values
+     * (50/40/30/12288 for Viper) via the branch above.
+     *
+     * Audit sessions wishing to reproduce production cardef values MUST link
+     * re/assets/cars from the main tree into their worktree, e.g.:
+     *   cmd //c "mklink /D re\\assets C:\\path\\to\\TD5RE\\re\\assets" */
+    TD5_LOG_W(LOG_TAG,
+              "bind_tuning slot=%d: FALLBACK HARDCODED DEFAULTS (s_carparam_loaded[%d]=0)"
+              " — re/assets/cars/<car>/carparam.dat was not found at runtime",
+              slot, slot);
     static const int16_t k_torque_curve[16] = {
         96, 120, 144, 168, 184, 192, 196, 192,
         184, 176, 168, 156, 144, 132, 120, 104
