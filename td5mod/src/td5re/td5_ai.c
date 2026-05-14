@@ -68,7 +68,16 @@
 #define RS_SCRIPT_OFFSET_PARAM    0x1B
 #define RS_ENCOUNTER_HANDLE       0x1F
 #define RS_RECOVERY_STAGE         0x22
-#define RS_DIRECTION_POLARITY     0x25
+/* RS_DIRECTION_POLARITY_LEGACY = 0x25 (byte 0x94): this offset is NOT a real
+ * field — the original game listing has zero references to base+0x94. The
+ * macro was port-only and reads/writes here had no effect. Kept as a
+ * compile-time alias so any leftover code paths can be audited if found; do
+ * not introduce new uses. The canonical field is RS_ROUTE_DIRECTION_POLARITY
+ * at dword index 0x3F (byte 0xFC), which corresponds to the original symbol
+ * `gActorRouteDirectionPolarity` at 0x004afc5c.
+ */
+#define RS_DIRECTION_POLARITY_LEGACY 0x25  /* DEPRECATED — do not use in new code */
+#define RS_ROUTE_DIRECTION_POLARITY  0x3F  /* gActorRouteDirectionPolarity @ 0x4afc5c */
 #define RS_SLOT_INDEX             0x35
 #define RS_SCRIPT_BASE_PTR        0x3A
 #define RS_SCRIPT_IP              0x3B
@@ -593,7 +602,11 @@ static void td5_ai_refresh_route_state_slot(int slot) {
     route_heading = (((int32_t)route_table[(size_t)span * 3u + 1u] * 0x102C) >> 8) & 0xFFF;
 
     forward_heading = route_heading;
-    if (rs[RS_DIRECTION_POLARITY] != 0) {
+    /* Polarity at dword 0x3F = gActorRouteDirectionPolarity (0x004afc5c) per
+     * UpdateTrafficRoutePlan @ 0x00435ef4 / UpdateSpecialEncounterControl
+     * teardown @ 0x00434d40. Prior port read dword 0x25 (byte 0x94) which has
+     * NO references in the original — the mirror branch was effectively dead. */
+    if (rs[RS_ROUTE_DIRECTION_POLARITY] != 0) {
         forward_heading = (forward_heading + 0x800) & 0xFFF;
     }
 
@@ -846,7 +859,7 @@ void td5_ai_init_race_actor_runtime(void) {
         rs[RS_ENCOUNTER_HANDLE] = -1;
         rs[RS_DEFAULT_THROTTLE] = g_default_throttle[i];
         rs[RS_RECOVERY_STAGE] = 0;
-        rs[RS_DIRECTION_POLARITY] = 0;
+        rs[RS_ROUTE_DIRECTION_POLARITY] = 0;
 
         /* [CONFIRMED via InitializeRaceActorRuntime @ 0x00432e60 decomp]
          * Route-table selection is by slot parity, not sub_lane:
@@ -1487,10 +1500,9 @@ int td5_ai_update_route_threshold(int slot) {
  *   - Cross-route inline swap (same code as pass 1).
  *   - dist gate (final): `-1 < local_c && local_c <= 0x28` and best != self.
  *
- * Both passes use ClassifyTrackOffsetClamp + ComputeSignedTrackOffset (inline
- * here as `classify_track_offset_clamp` because the helper is otherwise only
- * called from this single site) to produce the lateral target offset used in
- * the range-gate against peer's RS[0x14]/RS[0x15].
+ * Both passes use ClassifyTrackOffsetClamp + ComputeSignedTrackOffset (port:
+ * td5_ai_classify_track_offset_clamp, module-level helper) to produce the
+ * lateral target offset used in the range-gate against peer's RS[0x14]/RS[0x15].
  *
  * Direction formula [CONFIRMED @ 0x00433A11-0x00433A4D and 0x00433C84-0x00433CBE]:
  *   mid = (DAT_004afbb4[best*0x47] + DAT_004afbb0[best*0x47]) / 2
@@ -1514,43 +1526,72 @@ int td5_ai_update_route_threshold(int slot) {
  * [CONFIRMED @ disassembly 0x004337E0-0x00433CDE — full pool14 audit].
  */
 
-/* Inline port of ClassifyTrackOffsetClamp (0x004368A0). Returns 0,1,2 to
- * select which side's cardef offset to apply in the target-offset formula.
- * [CONFIRMED @ disassembly 0x004368A0-0x00436A65]. */
-static int classify_track_offset_clamp(int param_1, int param_2) {
+/* td5_ai_classify_track_offset_clamp: byte-faithful port of
+ * ClassifyTrackOffsetClamp @ 0x004368A0. Returns 0,1,2 to select which side's
+ * cardef offset to apply in the target-offset formula.
+ *   0 = in range (both samples produce span_progress >= 0xFF on first try
+ *       OR second sample's progress > 0).
+ *   1 = clamp against the "hi-bound" path (first sample produced progress
+ *       >= 0xFF — early-exit with low32 = 1).
+ *   2 = clamp against the "lo-bound" path (second sample's progress <= 0).
+ *
+ * Original control flow [CONFIRMED @ 0x004368A0-0x00436A65]:
+ *   if (rs[0] == DAT_004afb58)             -- primary route
+ *       iVar3 = span_norm                  -- NO walker; fall through
+ *   else                                   -- secondary route
+ *       iVar3 = span_norm
+ *       iVar5 = (iVar3 + 4) wrapped
+ *       walk DAT_004c3da0 jump table:
+ *           if a row matches iVar5: iVar5 = remap; goto LAB_0043699b
+ *   fall-through (primary OR secondary that did NOT match walker):
+ *   iVar5 = (iVar3 + 4) wrapped            -- unconditional default
+ *   LAB_0043699b:
+ *     sample using iVar5 and iVar4 (= iVar3+4 wrapped)
+ *
+ * Prior port double-applied the walker remap (called
+ * td5_track_apply_target_span_remap twice in succession on the secondary
+ * route), which could produce the wrong iVar5 if the helper is not
+ * idempotent on already-remapped spans. The original applies it ONCE.
+ */
+static int td5_ai_classify_track_offset_clamp(int param_1, int param_2) {
     int32_t *rs = route_state(param_1);
     char *self = actor_ptr(param_1);
     int iVar3 = (int)ACTOR_I16(self, ACTOR_SPAN_NORMALIZED);
     int iVar5;
+    int iVar4;
     int local_c[3] = {0, 0, 0};
     int64_t lVar7;
     const uint8_t *route_bytes = (const uint8_t *)(intptr_t)rs[RS_ROUTE_TABLE_PTR];
     int16_t *self_cd;
-    int iVar4;
+    int walker_matched = 0;
 
-    /* Branch on rs[0]==DAT_004afb58 (g_route_tables[0]):
-     *   if self on primary → iVar5 = iVar3 (NO wrap, the second wrap at LAB
-     *     is skipped via the `else` fallthrough below).
-     *   if self on secondary → wrap + walker remap.
-     * In the listing, the `if (rs[0] == DAT_004afb58)` branch falls through
-     * to `iVar5 = iVar3 + 4; wrap; LAB_0043699b` (label re-entry) directly. */
+    /* Secondary-route walker remap: ONLY on secondary, ONLY once.
+     * On primary (rs[0] == g_route_tables[0]) skip the walker entirely. */
     if (rs[RS_ROUTE_TABLE_PTR] != (int32_t)(intptr_t)g_route_tables[0]) {
-        /* Secondary route: walker remap of (iVar3+4) wrapped. */
-        iVar5 = td5_track_apply_target_span_remap(iVar3 + 4, /*is_canonical=*/0);
+        int iVar5_pre = iVar3 + 4;
+        if (g_strip_span_count > 0 && g_strip_span_count <= iVar5_pre) {
+            iVar5_pre = (iVar3 - g_strip_span_count) + 4;
+        }
+        {
+            int remapped = td5_track_apply_target_span_remap(iVar5_pre, /*is_canonical=*/0);
+            if (remapped != iVar5_pre && remapped != -1) {
+                iVar5 = remapped;
+                walker_matched = 1;
+            } else {
+                iVar5 = iVar5_pre; /* fall through to LAB_0043699b default */
+            }
+        }
+    } else {
+        iVar5 = 0; /* placeholder; set below in fall-through */
     }
-    /* iVar5 = iVar3 + 4 (wrapped) for the (potentially-walker-remapped) span
-     * used for SampleTrackTargetPoint+ComputeTrackSpanProgress below. Listing
-     * also recomputes this for the LAB_0043699b path; same arithmetic. */
-    iVar5 = iVar3 + 4;
-    if (g_strip_span_count > 0 && g_strip_span_count <= iVar5) {
-        iVar5 = (iVar3 - g_strip_span_count) + 4;
-    }
-    if (rs[RS_ROUTE_TABLE_PTR] != (int32_t)(intptr_t)g_route_tables[0]) {
-        /* Walker may have produced a different span — apply remap and keep
-         * whichever the walker returned (the listing has a goto past this
-         * second wrap, so the walker result is final when on secondary). */
-        int remapped = td5_track_apply_target_span_remap(iVar3 + 4, /*is_canonical=*/0);
-        if (remapped != iVar3 + 4) iVar5 = remapped;
+
+    /* LAB_0043699b fall-through: when walker did not match (or on primary
+     * route), iVar5 = (iVar3 + 4) wrapped. */
+    if (!walker_matched) {
+        iVar5 = iVar3 + 4;
+        if (g_strip_span_count > 0 && g_strip_span_count <= iVar5) {
+            iVar5 = (iVar3 - g_strip_span_count) + 4;
+        }
     }
 
     iVar4 = iVar3 + 4;
@@ -1562,7 +1603,7 @@ static int classify_track_offset_clamp(int param_1, int param_2) {
     if (!route_bytes || !self_cd) return 0;
 
     /* SampleTrackTargetPoint(iVar5, route_bytes[iVar4*3], local_c,
-     *                         cardef[8]/2-bytes-offset + param_2) */
+     *                         cardef[+0x08] + param_2) */
     {
         int route_byte_a = (int)route_bytes[(size_t)iVar4 * 3u];
         int bias_arg = (int)self_cd[4] + param_2; /* cardef+0x08 = hi bound */
@@ -1573,14 +1614,13 @@ static int classify_track_offset_clamp(int param_1, int param_2) {
         lVar7 = td5_track_compute_span_progress(iVar5, local_c);
     }
     if ((int)lVar7 < 0xff) {
-        /* Second sample uses cardef[0] (lo bound) + param_2. */
+        /* Second sample uses cardef[+0x00] (lo bound) + param_2. */
         int span_norm = (int)ACTOR_I16(self, ACTOR_SPAN_NORMALIZED);
-        int iVar3b = span_norm;
-        int iVar3c = iVar3b + 4;
+        int iVar3c = span_norm + 4;
         int route_byte_b;
         int bias_arg2;
         if (g_strip_span_count > 0 && g_strip_span_count <= iVar3c) {
-            iVar3c = (iVar3b - g_strip_span_count) + 4;
+            iVar3c = (span_norm - g_strip_span_count) + 4;
         }
         route_byte_b = (int)route_bytes[(size_t)iVar3c * 3u];
         bias_arg2 = (int)self_cd[0] + param_2;
@@ -1589,9 +1629,8 @@ static int classify_track_offset_clamp(int param_1, int param_2) {
             return 0;
         }
         lVar7 = td5_track_compute_span_progress(iVar5, local_c);
-        /* iVar5_ret = (0 < lVar7) - 1 → 0 when lVar7>0, -1 (=0xFFFFFFFF) when
-         * lVar7<=0. The mask `& 0x200000002` keeps only bit 1 in low/high dwords;
-         * net low32 = (lVar7 > 0) ? 0 : 2. */
+        /* (0 < lVar7) - 1 → 0 when lVar7>0, -1 (=0xFFFFFFFF) when lVar7<=0.
+         * Mask & 0x200000002 keeps only bit 1: net low32 = (lVar7 > 0) ? 0 : 2. */
         return (((int)lVar7 > 0) ? 0 : 2);
     }
     /* CONCAT44((int)((ulonglong)lVar7 >> 0x20), 1) -> low32 = 1 */
@@ -1661,7 +1700,7 @@ int td5_ai_find_offset_peer(int *route_state_ptr) {
                 route_state_ptr[RS_ACTIVE_UPPER_BOUND] = route_state_ptr[RS_RIGHT_BOUNDARY_B];
             }
 
-            classify_result = classify_track_offset_clamp(i, route_state_ptr[RS_TRACK_OFFSET_BIAS]);
+            classify_result = td5_ai_classify_track_offset_clamp(i, route_state_ptr[RS_TRACK_OFFSET_BIAS]);
 
             peer_cd = (int16_t *)(intptr_t)ACTOR_I32(self, ACTOR_CAR_DEF_PTR);
             if (!peer_cd) continue;
@@ -1786,7 +1825,7 @@ int td5_ai_find_offset_peer(int *route_state_ptr) {
                 route_state_ptr[RS_ACTIVE_UPPER_BOUND] = route_state_ptr[RS_RIGHT_BOUNDARY_B];
             }
 
-            classify_result = classify_track_offset_clamp(i, route_state_ptr[RS_TRACK_OFFSET_BIAS]);
+            classify_result = td5_ai_classify_track_offset_clamp(i, route_state_ptr[RS_TRACK_OFFSET_BIAS]);
 
             peer_cd = (int16_t *)(intptr_t)ACTOR_I32(self, ACTOR_CAR_DEF_PTR);
             if (!peer_cd) continue;
@@ -2901,13 +2940,11 @@ void td5_ai_update_track_behavior(int slot) {
 
 /* Route-state direction-polarity dword [CONFIRMED via Ghidra symbol
  * `gActorRouteDirectionPolarity` @ 0x004afc5c; route-state base 0x004afb60;
- * delta 0xfc bytes = dword index 0x3F]. This is the field tested by
- * FindNearestRoutePeer and UpdateTrafficRoutePlan to switch ahead/behind
- * peer-scan direction. It is DISTINCT from the existing port macro
- * `RS_DIRECTION_POLARITY = 0x25` which the port uses (likely with mismatched
- * semantics, audit deferred) for the route-heading mirror branch. Keep both
- * names; do not unify until callers are audited. */
-#define RS_PEER_SCAN_REVERSE      0x3F
+ * delta 0xfc bytes = dword index 0x3F]. Same field as RS_ROUTE_DIRECTION_POLARITY
+ * declared at the top of this file. FindNearestRoutePeer uses this to switch
+ * ahead/behind peer-scan direction; UpdateTrafficRoutePlan uses the same dword
+ * for the route-heading mirror branch. Both names alias the same field. */
+#define RS_PEER_SCAN_REVERSE      RS_ROUTE_DIRECTION_POLARITY
 
 int td5_ai_find_nearest_route_peer(int *route_state_ptr) {
     int self_slot = route_state_ptr[RS_SLOT_INDEX];
@@ -3233,11 +3270,13 @@ void td5_ai_recycle_traffic_actor(void) {
     q_flags  = qp[2];
     q_byte_3 = qp[3];
 
-    /* dword at rs+0xFC = polarity (q_flags & 1) [0x0043548a]. Also writeback
-     * to the port's RS_DIRECTION_POLARITY (0x25) for consistency with the
-     * rest of the port code that reads that semantic offset. */
-    *(int32_t *)(rs_bytes + 0xFC) = (int32_t)(q_flags & 1u);
-    rs[RS_DIRECTION_POLARITY] = (int32_t)(q_flags & 1u); /* FIXME: macro offset mismatch */
+    /* dword at rs+0xFC = polarity (q_flags & 1) [0x0043548a]. The original
+     * writes ONLY this dword (= gActorRouteDirectionPolarity, dword index 0x3F).
+     * Prior port also wrote dword 0x25 (RS_DIRECTION_POLARITY_LEGACY) but that
+     * field has no references in the original listing — the defensive
+     * dual-write was unnecessary. */
+    rs[RS_ROUTE_DIRECTION_POLARITY] = (int32_t)(q_flags & 1u);
+    (void)rs_bytes;
 
     /* dword at rs+0x68 = best_slot*4 + 0x10 [0x00435497]. Purpose unclear
      * (the original uses it as some kind of slot-derived index/offset).
@@ -3542,12 +3581,13 @@ void td5_ai_init_traffic_actors(void) {
         polarity_bit = (int)queue_byte2 & 1;
 
         /* 0x435989-9d: common writes — polarity, local_c, RECOVERY_STAGE=0,
-         * DAT_004afc50=0. Polarity goes to dword 0x3F per original layout AND
-         * dword 0x25 (RS_DIRECTION_POLARITY) per port convention.
+         * DAT_004afc50=0. Polarity goes to dword 0x3F (= gActorRouteDirectionPolarity
+         * @ 0x004afc5c). Prior port also wrote dword 0x25 (legacy macro) but
+         * that field has no references in the original — the dual-write was
+         * unnecessary and is now removed.
          * `local_c` (slot*4+0x10) writes the field at byte 0x68 within
          * route_state (dword 0x1A) — original semantics unknown; mirror raw. */
-        rs[RS_DIRECTION_POLARITY] = polarity_bit;
-        rs[0x3F] = polarity_bit;                    /* gActorRouteDirectionPolarity */
+        rs[RS_ROUTE_DIRECTION_POLARITY] = polarity_bit;
         rs[0x1A] = local_c;                         /* DAT_004afbc8[slot] */
         rs[RS_RECOVERY_STAGE] = 0;                  /* dword 0x22 */
         rs[RS_SCRIPT_SPEED_PARAM] = 0;              /* dword 0x3C = DAT_004afc50[slot] */
@@ -3957,7 +3997,11 @@ void td5_ai_update_traffic_route_plan(int slot) {
         int32_t tmp = route_byte_val * 0x102C;
         route_heading_shifted = (tmp + ((tmp >> 31) & 0xFF)) >> 8;
     }
-    polarity = rs[RS_DIRECTION_POLARITY];
+    /* Polarity = gActorRouteDirectionPolarity (dword 0x3F) per
+     * UpdateTrafficRoutePlan @ 0x00435ef4. Prior port read dword 0x25 which
+     * has no references in the original — the polarity branch was reading
+     * a zero-init field that was never written. */
+    polarity = rs[RS_ROUTE_DIRECTION_POLARITY];
 
     /* See 0x435EFD-0x435F18:
      *   ECX = (heading - route_heading) - 0x800           ; (signed)
@@ -4740,10 +4784,12 @@ teardown:
      * acquire path).
      */
     g_encounter_active[slot] = 0;
-    /* gActorRouteDirectionPolarity is rs[0xFC/4 = 0x3F] in orig, distinct from
-     * the port's RS_DIRECTION_POLARITY (0x25). Both are zeroed defensively. */
-    rs_self[0x3F] = 0;
-    rs_self[RS_DIRECTION_POLARITY] = 0;
+    /* gActorRouteDirectionPolarity = rs[0xFC/4 = 0x3F] per UpdateSpecialEncounter-
+     * Control teardown @ 0x00434d40 `MOV [ESI + 0x4afc5c], EAX`. Only dword 0x3F
+     * is written by the original; the prior defensive write to dword 0x25
+     * (RS_DIRECTION_POLARITY_LEGACY) targeted a field with no references in the
+     * original listing and is removed. */
+    rs_self[RS_ROUTE_DIRECTION_POLARITY] = 0;
     g_encounter_steer_bias_latch = 0;
     g_encounter_control_active_latch = 0;
     g_encounter_tracked_handle = -1;
