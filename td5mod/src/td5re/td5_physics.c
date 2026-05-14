@@ -42,6 +42,7 @@
 #include "td5_game.h"     /* td5_game_get_total_actor_count, td5_game_is_wanted_mode */
 #include "td5_platform.h"
 #include "td5_trace.h"    /* inner-tick physics_trace stages */
+#include "td5_pilot_trace.h" /* precise-port pilot CSV emit for 0x00403720 */
 #include "td5re.h"
 
 /* Include the full actor struct for field-level access.
@@ -5242,6 +5243,9 @@ static void update_vehicle_pose_from_physics(TD5_Actor *actor)
 
 void td5_physics_refresh_wheel_contacts(TD5_Actor *actor)
 {
+    /* Pilot precise-port trace — snapshot inputs at entry. */
+    td5_pilot_emit_00403720_enter(actor, (uintptr_t)__builtin_return_address(0));
+
     float *rot = actor->rotation_matrix.m;
     int resolved_surface = actor->surface_type_chassis;
     int resolved_surface_valid = 0;
@@ -5461,20 +5465,14 @@ void td5_physics_refresh_wheel_contacts(TD5_Actor *actor)
                 int32_t dx = actor->wheel_contact_pos[i].x - s_prev_wheel_tx[slot][i];
                 int32_t dy = actor->wheel_contact_pos[i].y - s_prev_wheel_ty[slot][i];
                 int32_t dz = actor->wheel_contact_pos[i].z - s_prev_wheel_tz[slot][i];
-                /* Clamp deltas: if any component exceeds ±20k FP (~78 world units/tick),
-                 * zero it — indicates teleport (wall collision response, span
-                 * rebind, spawn transient) rather than physical motion. The
-                 * faithful update_suspension_response computes gap_270 · wcv as
-                 * the spring excitation + bounce accumulator, so a single
-                 * teleport delta produces launch-sized vy impulses (observed
-                 * vy=+80773, bounce=197, pitch_spr=39M on uphill transitions
-                 * when clamp was ±100k). ±20k ≈ 78 world units/tick is already
-                 * well above any legal single-tick wheel motion at racing
-                 * speeds. Restored from commit e97669e; had been reverted to
-                 * ±100k between then and HEAD. */
-                #define CLAMP_DELTA(v) ((v) > 20000 ? 0 : (v) < -20000 ? 0 : (v))
-                dx = CLAMP_DELTA(dx); dy = CLAMP_DELTA(dy); dz = CLAMP_DELTA(dz);
-                #undef CLAMP_DELTA
+                /* No clamp on the delta. Original 0x00403720 writes
+                 * `(new - old) >> 8` with sign-extending round, NO bounds
+                 * test (decomp: `*local_28 = (short)((*piVar1 - local_c) +
+                 * (*piVar1 - local_c >> 0x1f & 0xffU) >> 8);`). Pilot Frida
+                 * capture 2026-05-13 confirms orig writes large deltas
+                 * verbatim. Prior `CLAMP_DELTA(±20000)` was an approximation
+                 * for "teleport hides launch"; removing it per the
+                 * byte-exact precise-port workflow. */
                 g270[0] = (int16_t)arith_round_shift(dx, 0xFF, 8);
                 g270[1] = (int16_t)arith_round_shift(dy, 0xFF, 8);
                 g270[2] = (int16_t)arith_round_shift(dz, 0xFF, 8);
@@ -5547,7 +5545,12 @@ void td5_physics_refresh_wheel_contacts(TD5_Actor *actor)
          *
          * Second transform: input body_y_no_preload = wy + href_preload
          * (where wy already had the preload subtracted at line 5295).
-         * Same float multiplication path, same render_pos add, same <<8. */
+         *
+         * NO `<<8` on the hires output. Original asm 0x40388A-0x40388E only
+         * shifts wheel_contact_pos (piVar8.x/y/z), NOT the hires field at
+         * actor+0x298. Confirmed via pilot Frida capture 2026-05-13:
+         * orig hires_x at tick 0 = -461 (raw world unit), port was writing
+         * -65280 = -255<<8 — i.e. shifted body offset, not unshifted world. */
         {
             float wy_hub = (float)(int32_t)(int16_t)(wy + href_preload);
             float hub_bx = rot[0] * (float)wx + rot[1] * wy_hub + rot[2] * (float)wz;
@@ -5556,9 +5559,9 @@ void td5_physics_refresh_wheel_contacts(TD5_Actor *actor)
             int32_t hub_x = (int32_t)lrintf(hub_bx + actor->render_pos.x);
             int32_t hub_y = (int32_t)lrintf(hub_by + actor->render_pos.y);
             int32_t hub_z = (int32_t)lrintf(hub_bz + actor->render_pos.z);
-            actor->wheel_world_positions_hires[i].x = hub_x << 8;
-            actor->wheel_world_positions_hires[i].y = hub_y << 8;
-            actor->wheel_world_positions_hires[i].z = hub_z << 8;
+            actor->wheel_world_positions_hires[i].x = hub_x;
+            actor->wheel_world_positions_hires[i].y = hub_y;
+            actor->wheel_world_positions_hires[i].z = hub_z;
         }
 
         /* Copy to probe_FL/FR/RL/RR (0x090) for wall contact detection.
@@ -5589,6 +5592,9 @@ void td5_physics_refresh_wheel_contacts(TD5_Actor *actor)
      * existing "bits = grounded axles" interpretation while matching the
      * original's tick-1 behavior (flag=0 → airborne branch → no drive
      * torque). See the gate block in td5_physics_integrate_pose. */
+
+    /* Pilot precise-port trace — emit row(s) at exit. */
+    td5_pilot_emit_00403720_leave(actor);
 }
 
 /* ========================================================================
