@@ -3093,15 +3093,37 @@ static void apply_collision_response(TD5_Actor *penetrator, TD5_Actor *target,
         }
     } else {
         /* --- FRONT/REAR BRANCH (LAB_00407B2D) --- */
-        /* [CONFIRMED @ 0x00407D5F-0x00407D6E]: predicate is
-         *     cz_A == cz_B || cz_A - cz_B < 0   (i.e. cz_A <= cz_B)
-         * iVar14 holds the sin channel, iVar6 holds the cos channel.
-         * Push writes at 0x00407D70-0x00407D94 are A.x -= iVar14, A.z -= iVar6,
-         * B.x += iVar14, B.z += iVar6 (note operand cross vs SIDE).
-         * push_x mirrors iVar14, push_z mirrors iVar6. */
+        /* [CONFIRMED @ 0x00407B41 (predicate JLE), 0x00407B47-0x00407B54
+         *  (else: cz_A > cz_B → +sin/2, +cos/2),
+         *  0x00407D5F-0x00407D6E (taken: cz_A <= cz_B → NEG; NEG → -sin/2, -cos/2),
+         *  0x00407D70-0x00407D94 (apply A -= ECX/EAX, B += ECX/EAX)]:
+         *
+         * Predicate is `cz_A == cz_B || cz_A - cz_B < 0` (i.e. cz_A <= cz_B).
+         * In ASM: ECX holds the iVar14 sin channel (loaded from [ESP+0x7c]=sin_a),
+         *         EAX holds the iVar6 cos channel (loaded from EDI=cos_a, where
+         *         EDI was set by CosFixed12bit @ 0x004079EB and never reloaded
+         *         through the FRONT path).
+         * Push writes at 0x00407D70-0x00407D94 are A.x -= iVar14 (sin channel),
+         * A.z -= iVar6 (cos channel), B.x += iVar14, B.z += iVar6.
+         * The /2 idiom (SUB EAX,EDX after CDQ; SAR 1) is signed
+         * round-toward-zero division by 2, which equals plain C `/2` for int32
+         * (C99/C11 truncation toward zero).
+         * Precise-port audit 2026-05-14 re-verified against decomp
+         * ApplyVehicleCollisionImpulse and listing — already byte-faithful. */
         if (cz_A <= cz_B) { push_x = -sin_a / 2; push_z = -cos_a / 2; }
         else              { push_x =  sin_a / 2; push_z =  cos_a / 2; }
 
+        /* [CONFIRMED FRONT impulse/omega vs decomp ApplyVehicleCollisionImpulse]:
+         *   denom = (cx_B^2 + K) * mass_A + (cx_A^2 + K) * mass_B
+         *   NUM_CONST / (denom >> 8) * rel_vel  →  sar12_rz → impulse
+         *   reject if  (cz_B - cz_A) ^ impulse < 0   (XOR sign mismatch)
+         *   local_50 += impulse * mass_A
+         *   local_44 -= impulse * mass_B
+         *   omega_A_delta = -(imp * mass_A * cx_A) / (K / 0x28C)   [iVar6 in decomp]
+         *   omega_B_delta =  (imp * mass_B * cx_B) / (K / 0x28C)   [iVar8 in decomp]
+         * Note the omega signs are FLIPPED vs SIDE: SIDE has +A/-B, FRONT has -A/+B.
+         * V2V_INERTIA_PER_ANG = 500000/0x28C = 766 (compile-time fold of the
+         * runtime magic-divide DAT_00463204 / 0x28C at 0x00407EC4-D7). */
         int64_t denom = ((int64_t)cx_B * cx_B + INERTIA_K_64) * mass_A
                       + ((int64_t)cx_A * cx_A + INERTIA_K_64) * mass_B;
         denom >>= 8;
