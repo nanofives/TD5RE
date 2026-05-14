@@ -1857,7 +1857,11 @@ int td5_ai_find_offset_peer(int *route_state_ptr) {
      * The caller's existing branch `if (peer >= 0)` still triggers; the
      * helper distinguishes via `peer != self` semantics elsewhere. To
      * preserve pre-existing port adapter behaviour (peer<0 ⇒ decay path),
-     * convert self-return to -1 here. [PORT-DIVERGENCE — caller adapter] */
+     * convert self-return to -1 here.
+     *
+     * [PORT-DIVERGENCE — caller adapter; intentional, behaviour-equivalent.
+     *  See memory/reference_arch_find_offset_peer_return_minus_one.md.
+     *  Do not "fix" without auditing every `peer >= 0` check in callers.] */
     return -1;
 }
 
@@ -3106,13 +3110,31 @@ int td5_ai_find_nearest_route_peer(int *route_state_ptr) {
 extern void td5_track_resolve_actor_segment_boundary(TD5_Actor *actor)
     __attribute__((weak));
 
-/* The original 0x004353B0 inlines a span_type → vertex-offset case dispatch
+/* ARCHITECTURAL DIVERGENCE — see
+ *   memory/reference_arch_recycle_heading_collapse.md
+ *
+ * The original 0x004353B0 inlines a span_type → vertex-offset case dispatch
  * (cases 1/2/5, 3/4, 6/7) twice — once per LEFT/RIGHT branch — feeding
  * AngleFromVector12Full to derive the spawn heading. In the port we instead
  * route through td5_track_compute_heading, which implements the same
  * geometry-from-strip atan2 contract for the actor's current span and
  * writes the result into actor+0x1F4. The case dispatch is therefore
- * absorbed into that helper; do not re-implement it here. */
+ * absorbed into that helper; do not re-implement it here.
+ *
+ * Static byte-equivalence audit (cases 1/2/5, 3/4, 6/7, default):
+ *  - span source: actor+0x80 (SPAN_RAW) is written with q_span (LEFT) or
+ *    remapped (RIGHT) before each helper call, matching what the original's
+ *    inline dispatch keys off.
+ *  - vertex offsets, signed div-by-4 (>>2 with sign bias), and the
+ *    (angle+0x800)<<8 writeback to +0x1F4 all match td5_track.c:3139.
+ *  - helper additionally writes actor+0x290 (heading_normal) which the
+ *    inline original may not — benign because nothing in the post-call
+ *    zero block (LAB_0043588d) reads +0x290.
+ *
+ * If you ever need to byte-diff this against the original, prototype was
+ * `recycle_compute_heading_angle_12` (mentioned in ca6e5bb commit body)
+ * but was removed pending byte-diff validation against the existing helper.
+ */
 
 void td5_ai_recycle_traffic_actor(void) {
     int       racer_count;

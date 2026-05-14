@@ -199,8 +199,27 @@ static uint8_t s_collision_grid[COLLISION_GRID_SIZE];
 static uint8_t s_default_tuning[TD5_MAX_TOTAL_ACTORS][0x80];
 static uint8_t s_default_cardef[TD5_MAX_TOTAL_ACTORS][0x90];
 static uint8_t s_carparam_loaded[TD5_MAX_TOTAL_ACTORS];  /* 1 if carparam.dat was loaded */
-static uint8_t s_loaded_cardef[TD5_MAX_TOTAL_ACTORS][0x8C]; /* carparam 0x00..0x8B */
-static uint8_t s_loaded_tuning[TD5_MAX_TOTAL_ACTORS][0x80]; /* carparam 0x8C..0x10B */
+/* ARCHITECTURAL DIVERGENCE — see memory/reference_arch_cardef_per_actor_indirection.md
+ * Original binary stores cardef bytes in a single global table:
+ *   gVehicleTuningTable @ DAT_004AE580, indexed by slot*0x8C.
+ * Original cardef readers compute &gVehicleTuningTable[slot*0x8C] directly
+ * (e.g. ComputeVehicleSuspensionEnvelope @ 0x0042F6D0 uses ESI=that address).
+ *
+ * Port instead stores the bytes here in `s_loaded_cardef[slot]` (file scope),
+ * memcpy's them into a per-actor buffer pointed to by `actor->car_definition_ptr`
+ * at race init (bind_default_vehicle_tuning below), and every cardef reader
+ * dereferences `actor->car_definition_ptr` instead of computing slot offsets.
+ *
+ * Bytes are byte-faithful; the divergence is purely the addressing scheme.
+ * Cardef writers/readers in this file (and the one render-side reader in
+ * td5_render.c) must stay consistent with the per-actor-pointer convention.
+ * Fixing requires editing every cardef reader across the codebase.
+ *
+ * Commits 9da6c15 (precise-0042F140 InitializeRaceVehicleRuntime) and
+ * cec14b6 (precise-0042F6D0 ComputeVehicleSuspensionEnvelope) both call out
+ * this mapping in their headers. */
+static uint8_t s_loaded_cardef[TD5_MAX_TOTAL_ACTORS][0x8C]; /* carparam 0x00..0x8B; row maps to gVehicleTuningTable[slot] */
+static uint8_t s_loaded_tuning[TD5_MAX_TOTAL_ACTORS][0x80]; /* carparam 0x8C..0x10B; row maps to gVehiclePhysicsTable[slot] */
 
 /* ========================================================================
  * Forward declarations for internal helpers
