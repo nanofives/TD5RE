@@ -7720,7 +7720,67 @@ void td5_physics_init_vehicle_runtime(void)
         actor->grip_reduction = 0xFF;
         actor->prev_race_position = 0;
         actor->race_position = 0;  /* +0x383 stays 0 until UpdateRaceOrder writes at sim_tick>=1 [CONFIRMED @ 0x0042F5B0] */
-        actor->max_gear_index = 6;
+
+        /* --- Initial heading: actor+0x1F4 (euler_accum.yaw) = 0xE6A00 ---
+         * Faithful port of MOV dword ptr [ESI + 0xfffffe7c], 0xe6a00 @ 0x0042F198.
+         * This is the spawn sentinel yaw that InitializeActorTrackPose
+         * (called from IntegrateVehiclePoseAndContacts) overwrites with the
+         * per-track route heading before the first sim_tick. */
+        actor->euler_accum.yaw = 0xE6A00;
+
+        /* --- Cached suspension travel: actor+0x324 = sext_i32(phys+0x78) ---
+         * Faithful port of MOVSX EDX, word ptr [EBX + 0x78]; MOV [ESI - 0x54], EDX
+         * @ 0x0042F1AC. EBX = local_c = gVehiclePhysicsTable (port's tuning_data_ptr).
+         * Field 0x78 of the physics table is the suspension/brake multiplier. */
+        if (actor->tuning_data_ptr) {
+            int16_t *phys_local = (int16_t *)actor->tuning_data_ptr;
+            actor->cached_car_suspension_travel = (int32_t)phys_local[0x78 / 2];
+        }
+
+        /* --- Tire-track emitter IDs: actor+0x371..0x374 = 0xFF ---
+         * Faithful port of the inner copy-loop write at 0x0042F1C8
+         * (MOV byte ptr [EDX], 0xff with EDX=ESI-0x7 then INC EDX each iter).
+         * Initial 0xFF marks emitter slot as unused. */
+        actor->tire_track_emitter_FL = 0xFF;
+        actor->tire_track_emitter_FR = 0xFF;
+        actor->tire_track_emitter_RL = 0xFF;
+        actor->tire_track_emitter_RR = 0xFF;
+
+        /* --- Dynamic gear-count scan: actor+0x36C = scan_count + 1 ---
+         * Faithful port of 0x0042F20C-0x0042F226:
+         *   MOV ECX, 0x2
+         *   ADD EAX, 0x42                  ; EAX = phys+0x42
+         * loop:
+         *   CMP word ptr [EAX], 0x270F     ; signed >= 9999?
+         *   JGE done
+         *   INC ECX                        ; scan_count++
+         *   ADD EAX, 0x2                   ; next entry
+         *   CMP ECX, 0x8
+         *   JL loop
+         * done:
+         *   INC CL                         ; CL = scan_count + 1
+         *   MOV byte ptr [EBP + 0x36c], CL ; actor+0x36C = result
+         *
+         * Result is the highest forward gear index (3..9). Replaces the prior
+         * hardcoded `max_gear_index = 6` which was wrong for 6-gear cars whose
+         * physics table reports CL=8 → write 9. */
+        if (slot < TD5_MAX_RACER_SLOTS && actor->tuning_data_ptr) {
+            int16_t *phys_scan = (int16_t *)actor->tuning_data_ptr;
+            int cl = 2;
+            const int16_t *p = &phys_scan[0x42 / 2];
+            while (cl < 8 && *p < 0x270F) {
+                cl++;
+                p++;
+            }
+            actor->max_gear_index = (uint8_t)(cl + 1);
+        } else {
+            /* Traffic slot: original falls through the JGE @ 0042F1F1 branch and
+             * does NOT run the gear-count scan; field stays 0 from the STOSD
+             * zero-fill. In the port, the actor block is not zeroed at runtime
+             * (re-init across races would leave stale data), so write 0
+             * explicitly to match. */
+            actor->max_gear_index = 0;
+        }
 
         /* --- Load wheel positions from car definition (cardef 0x40-0x5F) ---
          * 4 wheels x {x, y, z, pad} as int16, copied to actor->wheel_display_angles.
