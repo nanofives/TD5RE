@@ -3769,70 +3769,134 @@ void td5_ai_init_traffic_actors(void) {
  * Stage 5 (target):    Compute next target span (accounting for direction polarity)
  * Stage 6 (steer):     Call UpdateActorSteeringBias with weight 0x8000
  * Stage 7 (yield):     FindNearestRoutePeer -> brake if closing on peer
+ *
+ * [precise-00435E80] Byte-faithful port from 0x00435E80 disassembly listing.
+ * Notable fixes vs prior approximate port:
+ *   - Stage 2 reads heading/yaw_accum from the REFERENCE actor
+ *     (actor_ptr(rs[RS_SLOT_INDEX])), not from the param_1 actor. Original
+ *     dereferences EBX+0xD4 = rs[RS_SLOT_INDEX] before every per-actor read.
+ *   - Stage 2 random-recovery seed reads actor[0].world_pos_z (DAT_004ab30c),
+ *     not the local g_ai_frame_counter. Same source the original uses.
+ *   - Stage 2 special-encounter cleanup: slot==9 + !wanted_mode in
+ *     polarity==0 path stops audio AND clears handle. polarity!=0 path
+ *     stops audio only — DOES NOT clear the handle. Original asymmetric.
+ *   - Stage 3 bail-out checks rs[RS_SCRIPT_SPEED_PARAM] (DAT_004afc50) and
+ *     g_traffic_recovery_stage[slot] (DAT_004afbe8). Prior port duplicated
+ *     the recovery check and never read the script-speed-param sentinel.
+ *   - Stage 2 hdelta band check uses strict bounds (0x400, 0xC00) per the
+ *     JLE/JGE pair at 0x435F2B/0x435F32, not >= and <=.
  */
 void td5_ai_update_traffic_route_plan(int slot) {
     int32_t *rs = route_state(slot);
     char *actor  = actor_ptr(slot);
-    int32_t heading, route_heading, hdelta;
+    int  ref_slot;
+    char *ref_actor;
+    int32_t heading_shifted, route_byte_val, route_heading_shifted;
+    int32_t hdelta, hdelta_neg;
     int polarity, peer;
 
     /* --- Stage 1: Recycle --- */
     td5_ai_recycle_traffic_actor();
 
-    /* --- Stage 2: Heading misalignment check --- */
-    heading = ACTOR_I32(actor, ACTOR_YAW_ACCUM) >> 8;
-    route_heading = ai_route_heading_for_actor(rs, actor);
+    /* --- Stage 2: Heading misalignment check ---
+     * [CONFIRMED @ 0x00435EA6-0x00435FA8]
+     * The original reads ref_slot = rs[RS_SLOT_INDEX] (EBX+0xD4), then
+     * loads span_normalized + yaw_accum from actor_ptr(ref_slot). For traffic
+     * ref_slot == param_1 so behaviour is the same, but the port follows the
+     * original dispatch path. */
+    ref_slot = rs[RS_SLOT_INDEX];
+    if (ref_slot < 0 || ref_slot >= TD5_MAX_TOTAL_ACTORS) ref_slot = slot;
+    ref_actor = actor_ptr(ref_slot);
+
+    {
+        const uint8_t *rb = (const uint8_t *)(intptr_t)rs[RS_ROUTE_TABLE_PTR];
+        int16_t ref_span_norm = ACTOR_I16(ref_actor, ACTOR_SPAN_NORMALIZED);
+        if (rb && ref_span_norm >= 0) {
+            route_byte_val = (int32_t)rb[(size_t)(unsigned)ref_span_norm * 3u + 1u];
+        } else {
+            route_byte_val = 0;
+        }
+    }
+    heading_shifted       = ACTOR_I32(ref_actor, ACTOR_YAW_ACCUM) >> 8;
+    /* Original sequence at 0x435ED8-0x435EF2 computes
+     *   tmp = route_byte * 0x102C
+     *   tmp = (tmp + (tmp >> 31 & 0xFF)) >> 8
+     * which is signed div-by-256 with arithmetic rounding toward zero. */
+    {
+        int32_t tmp = route_byte_val * 0x102C;
+        route_heading_shifted = (tmp + ((tmp >> 31) & 0xFF)) >> 8;
+    }
     polarity = rs[RS_DIRECTION_POLARITY];
 
-    /* For oncoming traffic, offset the heading comparison by 0x800 (180 deg) */
-    if (polarity) {
-        hdelta = ((heading + 0x800) - route_heading) & 0xFFF;
-    } else {
-        hdelta = (heading - route_heading) & 0xFFF;
+    /* See 0x435EFD-0x435F18:
+     *   ECX = (heading - route_heading) - 0x800           ; (signed)
+     *   ECX = ECX & 0xFFF
+     *   EAX = (ECX + 0xFFFFF800) & 0xFFF  ; = (ECX - 0x800) & 0xFFF
+     *   EAX = (-EAX) & 0xFFF
+     * which is the "negated heading delta" used in the polarity==0 test. */
+    {
+        uint32_t ecx = ((uint32_t)(heading_shifted - route_heading_shifted)) - 0x800u;
+        uint32_t eax;
+        ecx &= 0xFFFu;
+        eax = (ecx - 0x800u) & 0xFFFu;
+        eax = ((uint32_t)(-(int32_t)eax)) & 0xFFFu;
+        hdelta_neg = (int32_t)eax;
     }
 
-    /* If > 90 degrees off-course (hdelta in 0x400-0xC00), enter recovery */
-    if (hdelta >= 0x400 && hdelta <= 0xC00) {
-        /* Set recovery stage to a random nonzero value 1-7 */
-        g_traffic_recovery_stage[slot] = (int)(g_ai_frame_counter & 7);
+    if (polarity == 0) {
+        hdelta = hdelta_neg;
+    } else {
+        /* 0x435F69: polarity != 0 path subtracts another 0x800 (= flip 180 deg). */
+        hdelta = (int32_t)(((uint32_t)hdelta_neg - 0x800u) & 0xFFFu);
+    }
+
+    /* Original 0x435F2B JLE 0x400 + 0x435F32 JGE 0xC00 implement strict bounds:
+     * body fires for hdelta in (0x400, 0xC00) exclusive. */
+    if (hdelta > 0x400 && hdelta < 0xC00) {
+        /* Original at 0x435F34/0x435F81: reads DAT_004ab30c = actor[0].world_pos_z
+         * (g_actor_base + 0x204). Used as a pseudo-random source for the
+         * recovery stage. */
+        int32_t seed_src = 0;
+        if (g_actor_base) {
+            seed_src = ACTOR_I32(actor_ptr(0), ACTOR_WORLD_POS_Z);
+        }
+        g_traffic_recovery_stage[slot] = (int)(seed_src & 7);
         if (g_traffic_recovery_stage[slot] == 0)
             g_traffic_recovery_stage[slot] = 1;
+        /* Slot 9 special-encounter audio cleanup. */
+        if (slot == 9) {
+            if (polarity == 0) {
+                if (!g_td5.wanted_mode_enabled) {
+                    /* StopTrackedVehicleAudio @ 0x00440AE0 — audio-only stub. */
+                }
+                /* 0x435F5D: only the polarity==0 branch clears the handle. */
+                g_encounter_tracked_handle = -1;
+            } else {
+                if (!g_td5.wanted_mode_enabled) {
+                    /* StopTrackedVehicleAudio — handle NOT cleared in this branch. */
+                }
+            }
+        }
     }
 
     /* --- Stage 3: Edge-of-track / recovery bail-out ---
-     * [CONFIRMED @ 0x00435F48-0x00435F68]
-     *
+     * [CONFIRMED @ 0x00435FAA-0x00436019]
      * Original condition (Ghidra):
-     *   sVar5 = field_0x80 (ACTOR_SPAN_RAW)
+     *   sVar5 = field_0x80 (ACTOR_SPAN_RAW)   (param_1 actor)
      *   bail if: ((sVar5 < 3 || g_trackTotalSpanCount - 8 <= sVar5) &&
-     *             gActorRouteTableSelector == 0)
-     *         || (recovery_stage != 0 || DAT_004afc50 != 0)
-     *
-     * The original bails when:
-     *   - Span is near start (<3) or near main-road end (within 8 spans)
-     *     AND the actor is on the canonical/LEFT route (selector==0).
-     *     This prevents traffic from running off the end of the main ring
-     *     OR from looping back if it somehow reaches span 0/1.
-     *     Actors on the alternate/RIGHT route (selector!=0) skip this gate —
-     *     they may legitimately sit at low span numbers if the branch exits
-     *     at a low main-road index.
-     *   - OR the actor is in recovery or has a pending encounter override.
-     *
-     * The previous port used `span <= 1` unconditionally, which is wrong:
-     *   - It fired too early (braking at span==2, original allows down to 3)
-     *   - It did NOT gate on route-table-selector, so actors on RIGHT route
-     *     near span 0 braked incorrectly at junction exits.
-     *   - It did NOT catch the near-end case (ring_length - 8), so actors
-     *     sometimes drove off the sentinel into garbage spans. */
+     *             rs[RS_ROUTE_TABLE_SELECTOR] == 0)
+     *         || rs[RS_SCRIPT_SPEED_PARAM] != 0   (DAT_004afc50)
+     *         || g_traffic_recovery_stage[slot] != 0   (DAT_004afbe8) */
     {
         int16_t span_raw = ACTOR_I16(actor, ACTOR_SPAN_RAW);
-        int recovery = g_traffic_recovery_stage[slot];
         int ring_length = td5_track_get_ring_length();
         int near_edge = (span_raw < 3 || (ring_length > 0 && span_raw >= ring_length - 8));
         int on_canonical = (rs[RS_ROUTE_TABLE_SELECTOR] == 0);
 
-        if ((near_edge && on_canonical) || recovery != 0 || rs[RS_RECOVERY_STAGE] != 0) {
-            /* Brake and return */
+        if ((near_edge && on_canonical)
+            || rs[RS_SCRIPT_SPEED_PARAM] != 0
+            || g_traffic_recovery_stage[slot] != 0) {
+            /* LAB_004366c7: brake = 1, encounter_steer = 0, return */
             ACTOR_U8(actor, ACTOR_BRAKE_FLAG) = 1;
             ACTOR_I16(actor, ACTOR_ENCOUNTER_STEER) = 0;
             return;
@@ -3932,15 +3996,23 @@ void td5_ai_update_traffic_route_plan(int slot) {
 
             if (td5_track_get_span_lane_world(target_span, target_sub_lane,
                                               &target_x, &target_y, &target_z)) {
-                int32_t actor_x = ACTOR_I32(actor, ACTOR_WORLD_POS_X);
-                int32_t actor_z = ACTOR_I32(actor, ACTOR_WORLD_POS_Z);
+                /* [CONFIRMED @ 0x00436344-0x004363EF] Original re-reads
+                 *   EAX = rs[RS_SLOT_INDEX] (= ref_slot)
+                 *   ESI = ref_actor.world_pos_x   (offset 0x1FC, DAT_004ab304)
+                 *   EAX = ref_actor.world_pos_z   (offset 0x204, DAT_004ab30c)
+                 *   EBP = &ref_actor              (DAT_004ab108 + ref_slot*0x388)
+                 * before computing target_angle and combined heading.
+                 * For traffic ref_slot == slot, but follow the original
+                 * dispatch verbatim. */
+                int32_t actor_x = ACTOR_I32(ref_actor, ACTOR_WORLD_POS_X);
+                int32_t actor_z = ACTOR_I32(ref_actor, ACTOR_WORLD_POS_Z);
                 int32_t dx = (target_x - actor_x) >> 8;
                 int32_t dz = (target_z - actor_z) >> 8;
 
                 int32_t target_angle = ai_angle_from_vector(dx, dz) & 0xFFF;
 
-                int32_t yaw   = ACTOR_I32(actor, ACTOR_YAW_ACCUM);
-                int32_t steer = ACTOR_I32(actor, ACTOR_STEERING_CMD);
+                int32_t yaw   = ACTOR_I32(ref_actor, ACTOR_YAW_ACCUM);
+                int32_t steer = ACTOR_I32(ref_actor, ACTOR_STEERING_CMD);
                 int32_t actor_heading = ((yaw + steer) >> 8) & 0xFFF;
 
                 int32_t delta = actor_heading - target_angle;
