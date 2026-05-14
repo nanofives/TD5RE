@@ -58,6 +58,7 @@
 #include "td5_pilot_trace_traffic.h" /* precise-port pilot CSV emit for 0x004437C0 + 0x004438F0 */
 #include "td5_pilot_trace_v2v_contact.h" /* pool15 V2V pilot trace */
 #include "td5_pilot_trace_v2v.h"  /* pool14_v2v precise-port pilot */
+#endif
 #include "td5re.h"
 
 /* Include the full actor struct for field-level access.
@@ -3847,31 +3848,6 @@ static void resolve_collision_pair(TD5_Actor *a, TD5_Actor *b, int idx_a, int id
 extern void td5_pilot_emit_00403A20_enter(const TD5_Actor *actor, int32_t accel_x, int32_t accel_z, uintptr_t caller_ra);
 extern void td5_pilot_emit_00403A20_leave(const TD5_Actor *actor);
 
-/* Round-to-zero divide by 256 for signed int32 — byte-exact port of the
- * 0x00403A20 CDQ; AND EDX,0xFF; ADD EAX,EDX; SAR EAX,8 idiom.
- *
- * For non-negative x, this matches plain `x >> 8` (arithmetic shift right).
- * For negative x not divisible by 256, this returns one unit closer to zero
- * than plain SAR.
- *
- * Example: x = -1 → plain SAR(-1, 8) = -1, sar8_rz(-1) = 0.
- *          x = -257 → plain SAR(-257, 8) = -2, sar8_rz(-257) = -1.
- *
- * Original idiom semantics:
- *   CDQ            ; EDX = sign-extend(EAX) = all 1s if EAX<0, 0 otherwise
- *   AND EDX, 0xFF  ; → 0xFF if neg, 0 if non-neg
- *   ADD EAX, EDX
- *   SAR EAX, 8
- *
- * So bias is 0xFF for negatives, not 1. Self-validated against the
- * captured original CSV (tools/validate_pool5_00403A20_math.py): 230/230
- * wheel+center outputs match byte-exact across 46 calls. */
-static inline int32_t sar8_rz(int32_t x)
-{
-    int32_t bias = (x < 0) ? 0xFF : 0;
-    return (x + bias) >> 8;
-}
-
 /* Round-to-zero divide by 2 for signed int32. Mirrors the central-pass
  * `CDQ; SUB EAX,EDX; SAR EAX,1` idiom at 0x00403B78..B95.
  *   CDQ            ; EDX = sign(EAX) = -1 if neg, 0 if non-neg
@@ -6385,19 +6361,6 @@ void td5_physics_refresh_wheel_contacts(TD5_Actor *actor)
          * orig hires_x at tick 0 = -461 (raw world unit), port was writing
          * -65280 = -255<<8 — i.e. shifted body offset, not unshifted world. */
         {
-            float wy_hub = (float)(int32_t)(int16_t)(wy + href_preload);
-            float hub_bx = rot[0] * (float)wx + rot[1] * wy_hub + rot[2] * (float)wz;
-            float hub_by = rot[3] * (float)wx + rot[4] * wy_hub + rot[5] * (float)wz;
-            float hub_bz = rot[6] * (float)wx + rot[7] * wy_hub + rot[8] * (float)wz;
-            int32_t hub_x = (int32_t)lrintf(hub_bx + actor->render_pos.x);
-            int32_t hub_y = (int32_t)lrintf(hub_by + actor->render_pos.y);
-            int32_t hub_z = (int32_t)lrintf(hub_bz + actor->render_pos.z);
-            actor->wheel_world_positions_hires[i].x = hub_x;
-            actor->wheel_world_positions_hires[i].y = hub_y;
-            actor->wheel_world_positions_hires[i].z = hub_z;
-         * Same float multiplication path, same render_pos add, same <<8.
-         * [PRECISE-PORT PILOT 2026-05-14] routed through the faithful
-         * helper td5_transform_short_vec3_by_render_matrix_rounded. */
             const int16_t body_off[3] = {
                 (int16_t)wx, (int16_t)(wy + href_preload), (int16_t)wz
             };
