@@ -1511,107 +1511,191 @@ int td5_ai_find_offset_peer(int *route_state_ptr) {
 }
 
 /**
- * UpdateActorTrackOffsetBias: adjust lateral offset for peer avoidance.
+ * UpdateActorTrackOffsetBias — byte-faithful port of 0x00434900.
  *
- * [CONFIRMED @ 0x004349A0-0x00434A97]:
- *   DAT_004b08b0 read @ 0x0043497C (mid-function, after peer found).
- *   direction==1: if peer field_0x8C==0 → set direction=0, positive push
- *                 otherwise             → negative push (bias += dist - 0x29)
- *   direction==0: if peer field_0x8C != strip[3]&0xF → positive push
- *                 otherwise             → set direction=1, negative push
- *   Both branches: dist = clamp(dist, 1, 0x28). [CONFIRMED @ 0x004349D1/0x00434A5E]
- *   Branch A (positive): bias += (0x29 - dist) [CONFIRMED @ 0x00434A6F]
- *   Branch B (negative): bias += (dist - 0x29) [CONFIRMED @ 0x00434A8E]
- * field_0x8C = ACTOR_SUB_LANE_INDEX, strip[3]&0xF = peer's span lane count
- * [CONFIRMED @ 0x004349A0/0x00434A09]
+ * Listing audit (precise-00434900, pool5_00434900):
+ *
+ *   0x00434900-0x00434923  CALL FindActorTrackOffsetPeer(&rs[slot]).
+ *                          Test EAX vs slotIndex: peer == self → no-peer path.
+ *
+ *   No-peer path (0x00434925-0x0043496c):
+ *     bias = rs[RS_TRACK_OFFSET_BIAS]
+ *     if (bias < 0) { bias += 8; store; if (bias > 0) bias = 0; store; }
+ *     reload bias
+ *     if (bias <= 0) return                           // RET via 0x00434a94
+ *     bias -= 8; store; if (bias >= 0) return         // RET via 0x00434a94
+ *     bias = 0; store; return                         // RET via 0x00434969
+ *
+ *   Peer path (0x0043496d-0x00434a97):
+ *     load direction = DAT_004b08b0
+ *     if (direction == 1):                            // 0x00434982/0x0043498d
+ *       BL = peer_actor.field_0x8C  (ACTOR_SUB_LANE_INDEX)   [@ 0x004349A0]
+ *       if (BL == 0):
+ *         direction = 0                                       [@ 0x004349AC]
+ *         goto LAB_004349b2 (positive push)
+ *       else:
+ *         goto common_neg (0x00434a24)
+ *     else if (direction == 0):                       // 0x004349e4 TEST ECX,ECX
+ *       EDX = peer_actor.field_0x80 (SPAN_RAW) * 3            [@ 0x004349FF]
+ *       DL  = g_strip_span_base[EDX*8 + 3]                    [@ 0x00434A09]
+ *       EDX &= 0xF
+ *       BL = peer_actor.field_0x8C  (SUB_LANE_INDEX)          [@ 0x00434A0D]
+ *       if (BL != DL):
+ *         goto LAB_004349b2 (positive push)
+ *       else:
+ *         direction = 1                                       [@ 0x00434A1A]
+ *         fall through to common_neg
+ *     else:                                          // direction not in {0,1}
+ *       goto common_neg (no flip)
+ *
+ *   LAB_004349b2 (positive push):                     [@ 0x004349B2-0x00434A78]
+ *     dist = (int)peer_actor.field_0x82 - (int)self_actor.field_0x82
+ *     if (dist > 0x28) dist = 0x28
+ *     else if (dist < 1) dist = 1
+ *     bias += (0x29 - dist); return
+ *
+ *   common_neg (negative push):                       [@ 0x00434A24-0x00434A97]
+ *     dist = (int)peer_actor.field_0x82 - (int)self_actor.field_0x82
+ *     if (dist > 0x28) dist = 0x28
+ *     else if (dist < 1) dist = 1
+ *     bias += (dist - 0x29); return
+ *
+ *   Field-offset notes (verified against listing):
+ *     0x4ab108 = g_actorRuntimeState slot base
+ *     0x4ab188 = base + 0x80  → ACTOR_SPAN_RAW (strip-table index, peer-only)
+ *     0x4ab18a = base + 0x82  → ACTOR_SPAN_NORMALIZED (distance compare, both)
+ *     0x4ab194 = base + 0x8C  → ACTOR_SUB_LANE_INDEX
+ *     0x4afb84 = rs[slot] + 0x84 = RS_TRACK_OFFSET_BIAS
+ *     0x004c3d9c = g_strip_span_base (g_trackStripRecords in Ghidra)
+ *     0x004b08b0 = g_lateral_avoidance_direction
+ *
+ *   Strip-record stride is 24 bytes (EDX*8 with EDX = span*3). byte+3 is the
+ *   geometry_metadata byte; low nibble is the span lane count (0..15).
+ *
+ * Divergences from the previous (non-faithful) port:
+ *   1. Distance used SPAN_RAW (0x80); listing uses SPAN_NORMALIZED (0x82).
+ *      The two fields differ at junction-remap spans; using RAW measured the
+ *      wrong distance at boundaries.
+ *   2. Strip lane count went through td5_track_get_span_lane_count() which
+ *      min-clamps to 1; the listing reads the raw nibble (can be 0). For
+ *      byte-faithful equality we read it raw here, with a bounds guard so
+ *      the port doesn't fault on an out-of-range peer span.
+ *   3. Removed port-only ±0x600 saturation clamp; not present in original.
+ *      Prior crashes attributed to clamp removal predate the SPAN_RAW fix
+ *      and should now be revisited downstream.
+ *   4. Negative-push branch is now reached for direction values outside
+ *      {0,1} (no flip), matching the JNZ at 0x004349E6 falling through to
+ *      common_neg without touching DAT_004b08b0.
  */
 void td5_ai_update_track_offset_bias(int slot) {
     int32_t *rs = route_state(slot);
     int peer = td5_ai_find_offset_peer(rs);
 
-    if (peer >= 0) {
-        char *self = actor_ptr(slot);
-        int16_t self_span  = ACTOR_I16(self, ACTOR_SPAN_RAW);
-        int16_t peer_span  = ACTOR_I16(actor_ptr(peer), ACTOR_SPAN_RAW);
-        int32_t dist = peer_span - self_span;
-        uint8_t peer_sub_lane;
-        int peer_span_lc;
-        int do_positive;
+    if (peer < 0) {
+        /* No-peer path [0x00434925-0x0043496c]. Two-stage zero-crossing
+         * decay: if bias <0, +=8 then clamp-at-zero; if (still) >0, -=8
+         * then clamp-at-zero. Each store/reload mirrors the listing. */
+        int32_t bias = rs[RS_TRACK_OFFSET_BIAS];
+        if (bias < 0) {
+            bias += 8;
+            rs[RS_TRACK_OFFSET_BIAS] = bias;
+            if (bias > 0) {
+                rs[RS_TRACK_OFFSET_BIAS] = 0;
+            }
+        }
+        bias = rs[RS_TRACK_OFFSET_BIAS];
+        if (bias <= 0) {
+            return; /* RET @ 0x00434a94 via JLE at 0x0043494c */
+        }
+        bias -= 8;
+        rs[RS_TRACK_OFFSET_BIAS] = bias;
+        if (bias >= 0) {
+            return; /* RET @ 0x00434a94 via JGE at 0x0043495d */
+        }
+        rs[RS_TRACK_OFFSET_BIAS] = 0;
+        return;
+    }
 
-        /* dist = clamp(dist, 1, 0x28) [CONFIRMED @ 0x004349D1/0x004349DA/0x00434A5E] */
-        if (dist < 1)    dist = 1;
-        if (dist > 0x28) dist = 0x28;
+    /* Peer-found path [0x0043496d-0x00434a97]. */
+    {
+        char *self_actor = actor_ptr(slot);
+        char *peer_actor = actor_ptr(peer);
+        int  do_positive;
+        int32_t dist;
+        int32_t direction = g_lateral_avoidance_direction;
+        uint8_t peer_sub_lane = ACTOR_U8(peer_actor, ACTOR_SUB_LANE_INDEX);
 
-        /* peer field_0x8C [CONFIRMED @ 0x004349A0/0x00434A0D] */
-        peer_sub_lane = ACTOR_U8(actor_ptr(peer), ACTOR_SUB_LANE_INDEX);
-        /* strip[3]&0xF from peer's span [CONFIRMED @ 0x00434A09] */
-        peer_span_lc  = td5_track_get_span_lane_count((int)peer_span);
-
-        if (g_lateral_avoidance_direction == 1) {
-            /* direction==1 sub-condition: field_0x8C==0? [CONFIRMED @ 0x004349A8] */
+        if (direction == 1) {
+            /* [0x00434982-0x004349AA]: if peer.SUB_LANE_INDEX == 0 then flip
+             * direction to 0 and take positive push; else take negative push
+             * (no flip). */
             if (peer_sub_lane == 0) {
-                g_lateral_avoidance_direction = 0; /* flip [CONFIRMED @ 0x004349AC] */
+                g_lateral_avoidance_direction = 0;
                 do_positive = 1;
             } else {
+                do_positive = 0;
+            }
+        } else if (direction == 0) {
+            /* [0x004349E8-0x00434A1A]: read peer's strip nibble using
+             * peer.SPAN_RAW (field_0x80); compare to peer.SUB_LANE_INDEX.
+             * Mismatch → positive push (no flip). Match → set direction=1
+             * and negative push. */
+            uint8_t strip_nibble = 0;
+            int16_t peer_span_raw = ACTOR_I16(peer_actor, ACTOR_SPAN_RAW);
+            const uint8_t *strips = (const uint8_t *)g_strip_span_base;
+            if (strips) {
+                /* Raw byte access mirrors the original's unchecked load.
+                 * Bounds guard is port-only insurance against malformed
+                 * peer spans; original has no such guard. */
+                int strip_idx = (int)peer_span_raw;
+                if (strip_idx >= 0 && strip_idx < g_strip_span_count) {
+                    strip_nibble = strips[strip_idx * 0x18 + 3] & 0x0F;
+                }
+            }
+            if (peer_sub_lane != strip_nibble) {
+                do_positive = 1;
+            } else {
+                g_lateral_avoidance_direction = 1;
                 do_positive = 0;
             }
         } else {
-            /* direction==0 sub-condition: field_0x8C != strip_lc? [CONFIRMED @ 0x00434A16] */
-            if (peer_sub_lane != (uint8_t)peer_span_lc) {
-                do_positive = 1;
-            } else {
-                g_lateral_avoidance_direction = 1; /* flip [CONFIRMED @ 0x00434A1A] */
-                do_positive = 0;
-            }
+            /* [0x004349E4-0x004349E6]: direction not in {0,1} falls through
+             * to common_neg without touching DAT_004b08b0. */
+            do_positive = 0;
+        }
+
+        /* Distance from SPAN_NORMALIZED [0x004349C0-0x004349CF, 0x00434A3B-0x00434A50].
+         * Both branches use field_0x82 (signed 16-bit). */
+        {
+            int32_t self_sn = (int32_t)ACTOR_I16(self_actor, ACTOR_SPAN_NORMALIZED);
+            int32_t peer_sn = (int32_t)ACTOR_I16(peer_actor, ACTOR_SPAN_NORMALIZED);
+            dist = peer_sn - self_sn;
+        }
+
+        /* Clamp dist to [1, 0x28]; listing orders the test as
+         *   if (dist > 0x28) dist = 0x28; else if (dist < 1) dist = 1;
+         * The else-if order matters only for unreachable dist values, but
+         * is preserved here for clarity. */
+        if (dist > 0x28) {
+            dist = 0x28;
+        } else if (dist < 1) {
+            dist = 1;
         }
 
         if (do_positive) {
-            /* Branch A: positive push [CONFIRMED @ 0x00434A6F] */
+            /* Branch A [0x00434A68-0x00434A75]: bias += (0x29 - dist). */
             rs[RS_TRACK_OFFSET_BIAS] += (0x29 - dist);
-            TD5_LOG_I(LOG_TAG, "offset_bias: slot=%d pos push=%d sub_lane=%u lc=%d bias=%d",
-                      slot, (0x29 - dist), peer_sub_lane, peer_span_lc,
+            TD5_LOG_I(LOG_TAG,
+                      "offset_bias: slot=%d pos push=%d dir=%d sub_lane=%u bias=%d",
+                      slot, (0x29 - dist), direction, peer_sub_lane,
                       rs[RS_TRACK_OFFSET_BIAS]);
         } else {
-            /* Branch B: negative push [CONFIRMED @ 0x00434A8E] */
+            /* Branch B [0x00434A83-0x00434A8E]: bias += (dist - 0x29). */
             rs[RS_TRACK_OFFSET_BIAS] += (dist - 0x29);
-            TD5_LOG_I(LOG_TAG, "offset_bias: slot=%d neg push=%d sub_lane=%u lc=%d bias=%d",
-                      slot, (dist - 0x29), peer_sub_lane, peer_span_lc,
+            TD5_LOG_I(LOG_TAG,
+                      "offset_bias: slot=%d neg push=%d dir=%d sub_lane=%u bias=%d",
+                      slot, (dist - 0x29), direction, peer_sub_lane,
                       rs[RS_TRACK_OFFSET_BIAS]);
-        }
-
-        /* Clamp bias to ±0x600 — round-24 testing showed clamp removal
-         * made Honolulu rollover WORSE (port over-corrected in the
-         * OPPOSITE direction at sim_tick=1: port av_yaw=+375 vs orig=-99).
-         * Removing the clamp let the unclamped negative bias amplify a
-         * wrong-direction effect, indicating the sign convention itself
-         * diverges between port and orig. With clamp restored, port's
-         * outcome is closer to orig (different magnitude but same direction).
-         * The sign-convention divergence is the real bug to investigate
-         * next; clamp is left as a stabilizer until that's resolved. */
-        if (rs[RS_TRACK_OFFSET_BIAS] > 0x600)  rs[RS_TRACK_OFFSET_BIAS] = 0x600;
-        if (rs[RS_TRACK_OFFSET_BIAS] < -0x600) rs[RS_TRACK_OFFSET_BIAS] = -0x600;
-
-    } else {
-        /* No peer in range: decay bias toward zero by 8/tick.
-         * [CONFIRMED @ 0x0043494C-0x0043498D] When FindActorTrackOffsetPeer
-         * returns the actor's own slot (port translates this to peer < 0),
-         * the original runs two parallel `+=8 / -=8` adjustments with a
-         * cross-clamp at zero. Per-tick magnitude change: 8.
-         *
-         * The port previously left bias unchanged in this case, citing
-         * "lane-spread fix". With this decay restored and ±0x600 clamp
-         * retained, seeded biases reduce gradually when peers separate,
-         * matching the original's transient behaviour. The ±0x600 clamp
-         * itself is port-only (no Ghidra counterpart) but is kept as a
-         * stabilizer — empirical 2026-05-11: clamp removal caused all 6
-         * AI slots to crash within 200-400 ticks. */
-        if (rs[RS_TRACK_OFFSET_BIAS] < 0) {
-            rs[RS_TRACK_OFFSET_BIAS] += 8;
-            if (rs[RS_TRACK_OFFSET_BIAS] > 0) rs[RS_TRACK_OFFSET_BIAS] = 0;
-        }
-        if (rs[RS_TRACK_OFFSET_BIAS] > 0) {
-            rs[RS_TRACK_OFFSET_BIAS] -= 8;
-            if (rs[RS_TRACK_OFFSET_BIAS] < 0) rs[RS_TRACK_OFFSET_BIAS] = 0;
         }
     }
 }
