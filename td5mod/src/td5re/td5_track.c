@@ -3034,6 +3034,193 @@ static int32_t triangle_height(int va_idx, int vb_idx, int vc_idx,
 }
 
 /**
+ * InterpolateTrackSegmentNormal — byte-faithful port of 0x00445E30.
+ *
+ * The inner helper called by ComputeActorHeadingFromTrackSegment @ 0x00445B90
+ * after that dispatcher picks 3 vertex indices (va, vb, vc) for the actor's
+ * span/sub_lane/type triple. Computes the unit normal of the triangle and
+ * stores it as int16[3] at the actor's heading_normal slot (caller-side
+ * pointer to actor+0x290), with a post-conversion `if (uny == 0) uny = 1`
+ * sentinel that is the entire reason ApplyMissingWheelVelocityCorrection ever
+ * fires in the original (the port previously wrote uny = 0 unconditionally,
+ * neutering the correction).
+ *
+ * Original disassembly (0x00445E30..0x00445F09, 67 instructions):
+ *
+ *   00445e30  SUB    ESP, 0x24
+ *   00445e33  MOVSX  EAX, word ptr [ESP + 0x28]      ; param_2 = vb_idx
+ *   00445e38  MOV    EDX, [0x004c3d98]               ; g_trackVertexPool
+ *   00445e3e  MOVSX  ECX, word ptr [ESP + 0x2c]      ; param_3 = vc_idx
+ *   00445e43  PUSH   ESI
+ *   00445e44  LEA    ECX, [ECX + ECX*2]              ; ECX = vc_idx * 3
+ *   00445e47  LEA    ECX, [EDX + ECX*2]              ; ECX = pool + vc_idx*6
+ *   00445e4a  PUSH   EDI
+ *   00445e4b  MOVSX  EDI, word ptr [ECX]             ; EDI = vc.x  (note: this is
+ *                                                    ;  later "vb" in source listing,
+ *                                                    ;  Ghidra renames psVar1 differently)
+ *   ...
+ *
+ * Decompiler view (variables renamed for clarity):
+ *
+ *   psVar1 = pool + vb_idx * 6         (= short* to vb's int16-triple)
+ *   psVar2 = pool + va_idx * 6         (= short* to va)
+ *   local_c = va.x - vb.x              (= -e1.x where e1 = vb - va)
+ *   local_8 = va.y - vb.y              (= -e1.y)
+ *   local_4 = va.z - vb.z              (= -e1.z)
+ *   iVar3   = pool + vc_idx * 6        (= short* to vc)
+ *   local_18 = va.x - vc.x             (= -e2.x)
+ *   local_14 = va.y - vc.y             (= -e2.y)
+ *   local_10 = va.z - vc.z             (= -e2.z)
+ *   CrossProduct3i(&local_c, &local_18, &local_24)  ; n = (-e1) x (-e2) = e1 x e2
+ *   local_1c = local_1c >> 0xc                       ; SAR each component
+ *   local_24 = local_24 >> 0xc                       ; (n.x, n.y, n.z) >>= 12
+ *   local_20 = local_20 >> 0xc
+ *   ConvertFloatVec3ToShortAnglesB(&local_24, param_4)
+ *      ; FILD int32 -> float, len_sq = x*x + y*y + z*z,
+ *      ; inv_norm = 4096.0f / sqrt(len_sq),
+ *      ; for each: FMUL inv_norm, __ftol (truncate-to-int32), store low int16.
+ *   if (param_4[1] == 0) param_4[1] = 1
+ *   return
+ *
+ * Key fidelity points:
+ *
+ *   - CrossProduct3i sign: orig uses (va - vb) and (va - vc) (negated edges).
+ *     `(-e1) x (-e2) = e1 x e2`, so the cross-product RESULT is byte-identical
+ *     to `(vb - va) x (vc - va)`. The port may use either pair; for minimum
+ *     surprise vs the listing this port mirrors the orig's negated-edge form.
+ *
+ *   - SAR by 12 on signed int32: arithmetic right-shift preserves sign on x86.
+ *     C's `>>` on signed int is implementation-defined but mingw/gcc lowers it
+ *     to SAR for signed types, matching the listing exactly.
+ *
+ *   - 4096.0f constant: dumped from 0x00467374 = 0x45800000 (IEEE-754 4096.0f).
+ *     The FPU loads single-precision, but x87 widens to extended (80-bit) for
+ *     the FMUL/FDIVR; the final __ftol-truncate to int32 lands the same value
+ *     as `(int32_t)(double)((double)n * 4096.0 / sqrt(len_sq))` on any modern
+ *     x86 with default rounding. The port uses double-precision math, which
+ *     preserves at least as many bits as the original x87 extended path
+ *     before truncation; truncation-toward-zero is identical to `(int16_t)
+ *     (int32_t)` cast in C.
+ *
+ *   - `__ftol` semantics: x86 MSVC runtime helper. Truncates toward zero
+ *     regardless of FPU CW rounding mode (the wrapper sets CW to RC=11 and
+ *     restores it). Matches C's `(int32_t)(double_value)` cast on x86.
+ *
+ *   - Exact-zero guard on out_normal[1] applies ONLY to the int16 unit-y
+ *     AFTER the truncation, NOT the float intermediate. This means slopes
+ *     where the y component truncates to 0 (e.g. very steep) get +1 fp12
+ *     instead of 0 -- crucial for the divide-by-uny in
+ *     ApplyMissingWheelVelocityCorrection's heading_normal[1] divisor.
+ *     [CONFIRMED @ 0x00445EF7-0x00445F02: CMP word ptr [ESI+0x2],0x0 / JNZ /
+ *      MOV word ptr [ESI+0x2],0x1]
+ *
+ *   - The orig writes ONLY through param_4 (the LEA [esi+0x290] passed by
+ *     the outer dispatcher). No actor pointer is dereferenced in this inner.
+ *
+ * This function is intentionally NOT wired up here -- the outer dispatcher
+ * (ComputeActorHeadingFromTrackSegment @ 0x00445B90) lands in a sibling
+ * worktree (precise-00445B90) and is the one that picks (va, vb, vc) and
+ * calls this helper. Until that wires, the helper is unreferenced. We keep
+ * the prototype in td5_track.h so the sibling worktree can pick it up
+ * without a re-port. */
+void td5_track_interpolate_segment_normal(int16_t va_idx, int16_t vb_idx,
+                                           int16_t vc_idx, int16_t *out_normal)
+{
+    TD5_StripVertex *va, *vb, *vc;
+    int32_t e1_neg_x, e1_neg_y, e1_neg_z;   /* local_c/8/4 = va - vb  */
+    int32_t e2_neg_x, e2_neg_y, e2_neg_z;   /* local_18/14/10 = va - vc */
+    int32_t nx, ny, nz;                      /* local_24/1c/20 */
+    double len_sq, inv_norm;
+    int16_t unx, uny, unz;
+
+    if (!out_normal || !s_vertex_table)
+        return;
+
+    /* g_trackVertexPool + idx*6 -- vertex_at clamps neither (orig doesn't
+     * either; vertex indices come from the dispatcher's vertex-base + offset
+     * arithmetic and are pre-validated upstream). */
+    va = vertex_at((int)va_idx);
+    vb = vertex_at((int)vb_idx);
+    vc = vertex_at((int)vc_idx);
+
+    /* MOVSX-then-SUB sequences at 0x00445E51..0x00445EA8.
+     * Orig computes negated edges; the cross-product of two negated vectors
+     * equals the cross-product of the originals, so this is mathematically
+     * identical to (vb-va) x (vc-va). We mirror the listing's signs to keep
+     * intermediate values comparable when stepping a Frida hook. */
+    e1_neg_x = (int32_t)va->x - (int32_t)vb->x;
+    e1_neg_y = (int32_t)va->y - (int32_t)vb->y;
+    e1_neg_z = (int32_t)va->z - (int32_t)vb->z;
+
+    e2_neg_x = (int32_t)va->x - (int32_t)vc->x;
+    e2_neg_y = (int32_t)va->y - (int32_t)vc->y;
+    e2_neg_z = (int32_t)va->z - (int32_t)vc->z;
+
+    /* CALL 0x0042EA70 CrossProduct3i(&e1_neg, &e2_neg, &n)
+     *   n.x = e1_neg.y * e2_neg.z - e1_neg.z * e2_neg.y
+     *   n.y = e1_neg.z * e2_neg.x - e1_neg.x * e2_neg.z
+     *   n.z = e1_neg.x * e2_neg.y - e1_neg.y * e2_neg.x
+     * [CONFIRMED @ 0x0042EA70-0x0042EAB4 listing.] */
+    nx = e1_neg_y * e2_neg_z - e1_neg_z * e2_neg_y;
+    ny = e1_neg_z * e2_neg_x - e1_neg_x * e2_neg_z;
+    nz = e1_neg_x * e2_neg_y - e1_neg_y * e2_neg_x;
+
+    /* SAR EAX/EDX/ECX, 0xc at 0x00445ED2/0x00445EDD/0x00445EE0.
+     * Signed int32 -> int32 arithmetic shift, preserves sign. */
+    nx >>= 12;
+    ny >>= 12;
+    nz >>= 12;
+
+    /* CALL 0x0042CD40 ConvertFloatVec3ToShortAnglesB(&n, out_normal):
+     *   len_sq = n.x^2 + n.y^2 + n.z^2  (all int32 -> float promoted)
+     *   inv_norm = 4096.0f / sqrt(len_sq)
+     *   out[0] = (int16) __ftol(n.x * inv_norm)
+     *   out[1] = (int16) __ftol(n.y * inv_norm)
+     *   out[2] = (int16) __ftol(n.z * inv_norm)
+     * [CONFIRMED @ 0x0042CD40-0x0042CDA8 listing + 0x00467374 = 4096.0f.]
+     *
+     * If len_sq == 0 (degenerate triangle: collinear or all-zero), the orig
+     * computes 1/sqrt(0) which raises FPE_FLTDIV; on the FPU this yields
+     * +Inf for the inv_norm and __ftol of (Inf * 0/n) is implementation-
+     * dependent. In practice the LEFT/RIGHT triangle dispatch never lets
+     * three collinear vertices reach this helper. The port adds a guard
+     * just to keep the divide finite -- the post-zero-guard then bumps uny
+     * to 1 and the caller continues. */
+    len_sq = (double)nx * (double)nx
+           + (double)ny * (double)ny
+           + (double)nz * (double)nz;
+    if (len_sq > 0.0) {
+        inv_norm = 4096.0 / sqrt(len_sq);
+        unx = (int16_t)(int32_t)((double)nx * inv_norm);
+        uny = (int16_t)(int32_t)((double)ny * inv_norm);
+        unz = (int16_t)(int32_t)((double)nz * inv_norm);
+    } else {
+        /* PORT-ONLY GUARD: original 0x0042CD6E FSQRT on zero yields +0 ->
+         * 0x0042CD70 FDIVR 4096.0f / 0.0 -> +Inf -> __ftol(+Inf * 0) which is
+         * UB on x86. The dispatcher upstream never legitimately produces a
+         * collinear triple for a real span/lane, so this is unreachable in
+         * the original; we set zeros and let the uny=1 guard below handle
+         * the divisor case. */
+        unx = 0;
+        uny = 0;
+        unz = 0;
+    }
+
+    /* CMP word ptr [ESI+0x2],0x0 / JNZ +6 / MOV word ptr [ESI+0x2],0x1
+     * Exact-zero sentinel on the int16 unit-Y. This is the root-cause fix
+     * for ApplyMissingWheelVelocityCorrection: the divisor (heading_normal.y)
+     * must be non-zero so the correction can fire. The orig guarantees this
+     * with the +1 fp12 bump; the port previously hard-coded uny=0 elsewhere,
+     * making every divide degenerate. [CONFIRMED @ 0x00445EF7-0x00445F02] */
+    if (uny == 0)
+        uny = 1;
+
+    out_normal[0] = unx;
+    out_normal[1] = uny;
+    out_normal[2] = unz;
+}
+
+/**
  * Literal port of ComputeActorTrackContactNormalExtended @ 0x004457E0.
  *
  * Three-way dispatch on sub_lane position within the span's lane range:
