@@ -2856,55 +2856,186 @@ void td5_ai_update_track_behavior(int slot) {
  * ======================================================================== */
 
 /**
- * FindNearestRoutePeer: search all actors for nearest same-lane,
- * same-route actor within 0x21 (33) spans.
- * Returns peer slot index, or the actor's own index if none found.
+ * FindNearestRoutePeer (precise-00433680): byte-faithful port of the original
+ * at 0x00433680. Replaces the prior simplified-by-active-count scan.
+ *
+ * [CONFIRMED @ disassembly 0x00433680-0x004337D1 — full pool6 audit.]
+ *
+ * Two near-identical loops gated on `route_state[+0xfc]` (the dword that
+ * Ghidra symbolises as `gActorRouteDirectionPolarity`, i.e. RS dword index
+ * 0x3F — NOT the field already known in this port as `RS_DIRECTION_POLARITY`
+ * which is index 0x25 and indexes a separate byte at RS+0x94 used elsewhere
+ * for the traffic heading-mirror branch). The +0xfc field controls direction
+ * sense for the peer scan: 0 → look ahead (peer ahead of self); nonzero →
+ * look behind (peer behind self).
+ *
+ * Both loops iterate the FULL 12-slot actor pool (slots 0..11), gated by the
+ * EBX/EBP < 0x4b08bc terminator at 0x0043371a/0x004337b3 — i.e. the
+ * route-state stride times 12 from base 0x004afb6c. The prior port gated on
+ * `g_active_actor_count`; the original does not.
+ *
+ * Same-actor skip: `i == self_slot` skips the slot whose RS_SLOT_INDEX
+ * (dword 0x35 = `gActorTrackReferenceSlot`) matches the caller's iVar2.
+ *
+ * Lane match: byte at actor+0x8c == self.field_0x8c.
+ *
+ * Route-table identity: dword at RS[0x00] (`gActorRouteTableSelector` =
+ * the route-table base POINTER, NOT the +0x0c selector at index 0x03)
+ * compared between self.RS[0] and peer.RS[0]. The prior port compared
+ * peer.RS[0x03] to self_selector — that was the wrong field.
+ *
+ * Distance gate: `0 < dist <= 0x20` for the final accept (TEST/JZ at
+ * 0x00433726 + CMP 0x20/JG at 0x0043372e). Prior port used `< 0x22`.
+ *
+ * Direction-relative distance:
+ *   path 1 (`*+0xfc == 0`): keep peers with peer_span >= self_span;
+ *                            dist = peer_span - self_span
+ *   path 2 (`*+0xfc != 0`): keep peers with peer_span <= self_span;
+ *                            dist = self_span - peer_span
+ *
+ * Return: `local_4` = best peer slot if (0 < best_dist <= 0x20), else iVar2
+ * (=self_slot). The original returns either iVar2 directly or via the
+ * load-from-stack at 0x00433737 / 0x004337c8; both paths share the trailing
+ * "if (best_dist == 0 || best_dist > 0x20) preserve iVar2" semantic.
  */
+
+/* Route-state direction-polarity dword [CONFIRMED via Ghidra symbol
+ * `gActorRouteDirectionPolarity` @ 0x004afc5c; route-state base 0x004afb60;
+ * delta 0xfc bytes = dword index 0x3F]. This is the field tested by
+ * FindNearestRoutePeer and UpdateTrafficRoutePlan to switch ahead/behind
+ * peer-scan direction. It is DISTINCT from the existing port macro
+ * `RS_DIRECTION_POLARITY = 0x25` which the port uses (likely with mismatched
+ * semantics, audit deferred) for the route-heading mirror branch. Keep both
+ * names; do not unify until callers are audited. */
+#define RS_PEER_SCAN_REVERSE      0x3F
+
 int td5_ai_find_nearest_route_peer(int *route_state_ptr) {
-    int slot = route_state_ptr[RS_SLOT_INDEX];
-    char *self = actor_ptr(slot);
-    int16_t self_span = ACTOR_I16(self, ACTOR_SPAN_RAW);
-    uint8_t self_lane = ACTOR_U8(self, ACTOR_SUB_LANE_INDEX);
-    int self_selector = route_state_ptr[RS_ROUTE_TABLE_SELECTOR];
-    int self_polarity = route_state_ptr[RS_DIRECTION_POLARITY];
-
-    int best_slot = slot; /* default: return own index */
-    int32_t best_dist = 0x22; /* must be < 0x22 (34) to beat */
-
+    int self_slot = route_state_ptr[RS_SLOT_INDEX];
+    int32_t scan_reverse = route_state_ptr[RS_PEER_SCAN_REVERSE];
+    int32_t self_route_ptr;
+    int16_t self_span;
+    uint8_t self_lane;
+    int32_t best_dist = 0x2ee00;   /* CONFIRMED @ 0x0043369b */
+    int best_slot = self_slot;     /* CONFIRMED: local_4 = iVar2 @ 0x00433697 */
     int i;
-    for (i = 0; i < g_active_actor_count; i++) {
-        int32_t *peer_rs;
-        int16_t peer_span;
-        int32_t dist;
 
-        if (i == slot) continue;
+    /* Bounds: required because route_state(slot) returns the storage array;
+     * disassembly bypasses bounds because EAX is read from a struct field. */
+    if (self_slot < 0 || self_slot >= TD5_MAX_TOTAL_ACTORS) {
+        return self_slot;
+    }
 
-        peer_rs = route_state(i);
+    {
+        char *self = actor_ptr(self_slot);
+        self_span = ACTOR_I16(self, ACTOR_SPAN_RAW);
+        self_lane = ACTOR_U8(self, ACTOR_SUB_LANE_INDEX);
+        self_route_ptr = route_state_ptr[RS_ROUTE_TABLE_PTR];
+    }
 
-        /* Must be same route table */
-        if (peer_rs[RS_ROUTE_TABLE_SELECTOR] != self_selector) continue;
+    if (scan_reverse == 0) {
+        /* ----------------------------------------------------------------
+         * Path 1 [CONFIRMED @ 0x004336a9-0x00433722]: forward scan.
+         * Keep peers ahead: dist = peer_span - self_span, < best_dist.
+         * ---------------------------------------------------------------- */
+        for (i = 0; i < TD5_MAX_TOTAL_ACTORS; i++) {
+            char *peer_actor;
+            int32_t *peer_rs;
+            int16_t peer_span;
+            uint8_t peer_lane;
+            int32_t dist;
 
-        /* Must be same lane */
-        if (ACTOR_U8(actor_ptr(i), ACTOR_SUB_LANE_INDEX) != self_lane) continue;
+            /* CMP EBP,EAX / JZ skip @ 0x004336b5 */
+            if (i == self_slot) continue;
 
-        peer_span = ACTOR_I16(actor_ptr(i), ACTOR_SPAN_RAW);
+            peer_actor = actor_ptr(i);
+            peer_rs = route_state(i);
 
-        /* Direction-aware distance: ahead for same-dir, behind for oncoming */
-        if (self_polarity == 0) {
-            dist = peer_span - self_span; /* same direction: ahead is positive */
-        } else {
-            dist = self_span - peer_span; /* oncoming: "behind" is ahead for us */
-        }
+            /* MOV SI,[EDI] @ 0x004336b9 → peer.field_0x80 = peer_span.
+             * MOV DX,[ECX + 0x4ab188] @ 0x004336cd → self.field_0x80 = self_span.
+             * CMP DX,SI / JG skip @ 0x004336d4 → skip if self_span > peer_span. */
+            peer_span = ACTOR_I16(peer_actor, ACTOR_SPAN_RAW);
+            if (self_span > peer_span) continue;
 
-        if (dist <= 0 || dist >= 0x22) continue;
+            /* MOV CL,[ECX + 0x4ab194] @ 0x004336d9 → self.field_0x8c = self_lane.
+             * CMP CL,[EDI + 0xc] @ 0x004336df → compare against peer.field_0x8c.
+             * JNZ skip @ 0x004336e2 → lane must match. */
+            peer_lane = ACTOR_U8(peer_actor, ACTOR_SUB_LANE_INDEX);
+            if (peer_lane != self_lane) continue;
 
-        if (dist < best_dist) {
+            /* MOV ECX,[ECX*4 + 0x4afb6c] @ 0x004336ec → self.RS[0] (route ptr).
+             * CMP ECX,[EBX] @ 0x004336f3 → compare against peer.RS[0].
+             * JNZ skip @ 0x004336f5 → route-table pointers must match. */
+            if (self_route_ptr != peer_rs[RS_ROUTE_TABLE_PTR]) continue;
+
+            /* MOVSX EDX,DX / MOVSX ECX,SI / SUB ECX,EDX @ 0x004336f7-0x004336fd
+             * → dist = (int32)peer_span - (int32)self_span.
+             * CMP ECX,best_dist / JGE skip @ 0x004336ff-0x00433703
+             * → strict less-than: skip if dist >= best_dist. */
+            dist = (int32_t)peer_span - (int32_t)self_span;
+            if (dist >= best_dist) continue;
+
             best_dist = dist;
             best_slot = i;
         }
-    }
 
-    return best_slot;
+        /* TEST ECX,ECX / JZ @ 0x00433726-0x00433728: best_dist == 0 → return self
+         * CMP ECX,0x20 / JG @ 0x0043372e-0x00433731: best_dist > 0x20 → return self
+         * MOV EAX,best_slot / RET @ 0x00433737-0x00433740: otherwise return best_slot. */
+        if (best_dist == 0)   return self_slot;
+        if (best_dist > 0x20) return self_slot;
+        return best_slot;
+    } else {
+        /* ----------------------------------------------------------------
+         * Path 2 [CONFIRMED @ 0x00433741-0x004337c1]: reverse scan.
+         * Keep peers behind: dist = self_span - peer_span, < best_dist.
+         * ---------------------------------------------------------------- */
+        for (i = 0; i < TD5_MAX_TOTAL_ACTORS; i++) {
+            char *peer_actor;
+            int32_t *peer_rs;
+            int16_t peer_span;
+            uint8_t peer_lane;
+            int32_t dist;
+
+            /* CMP EDI,EAX / JZ skip @ 0x0043374d */
+            if (i == self_slot) continue;
+
+            peer_actor = actor_ptr(i);
+            peer_rs = route_state(i);
+
+            /* MOV DL,[ESI + 0xc] @ 0x00433751 → peer.field_0x8c = peer_lane.
+             * CMP DL,[ECX + 0x4ab194] @ 0x00433765 → compare against self.field_0x8c.
+             * JNZ skip @ 0x0043376b → lane must match.
+             * (Note path 2 tests lane BEFORE span, opposite of path 1; semantics same.) */
+            peer_lane = ACTOR_U8(peer_actor, ACTOR_SUB_LANE_INDEX);
+            if (peer_lane != self_lane) continue;
+
+            /* MOV DX,[ESI] @ 0x0043376d → peer.field_0x80 = peer_span.
+             * MOV CX,[ECX + 0x4ab188] @ 0x00433770 → self.field_0x80 = self_span.
+             * CMP DX,CX / JG skip @ 0x00433777-0x0043377a → skip if peer_span > self_span. */
+            peer_span = ACTOR_I16(peer_actor, ACTOR_SPAN_RAW);
+            if (peer_span > self_span) continue;
+
+            /* MOV EBX,[EBX*4 + 0x4afb6c] @ 0x00433784 → self.RS[0].
+             * CMP EBX,[EBP] @ 0x0043378b → compare against peer.RS[0].
+             * JNZ skip @ 0x0043378e. */
+            if (self_route_ptr != peer_rs[RS_ROUTE_TABLE_PTR]) continue;
+
+            /* MOVSX EDX,DX / MOVSX ECX,CX / SUB ECX,EDX @ 0x00433790-0x00433796
+             * → dist = (int32)self_span - (int32)peer_span. */
+            dist = (int32_t)self_span - (int32_t)peer_span;
+            if (dist >= best_dist) continue;
+
+            best_dist = dist;
+            best_slot = i;
+        }
+
+        /* TEST ECX,ECX / JZ @ 0x004337bf-0x004337c1: best_dist == 0 → preserve self.
+         * CMP ECX,0x20 / JG @ 0x004337c3-0x004337c6: best_dist > 0x20 → preserve self.
+         * MOV EAX,best_slot @ 0x004337c8: otherwise return best_slot. */
+        if (best_dist == 0)   return self_slot;
+        if (best_dist > 0x20) return self_slot;
+        return best_slot;
+    }
 }
 
 /**
