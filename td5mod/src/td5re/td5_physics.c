@@ -57,6 +57,7 @@
 #ifdef TD5_PILOT_TRACE_TRAFFIC
 #include "td5_pilot_trace_traffic.h" /* precise-port pilot CSV emit for 0x004437C0 + 0x004438F0 */
 #include "td5_pilot_trace_v2v_contact.h" /* pool15 V2V pilot trace */
+#include "td5_pilot_trace_v2v.h"  /* pool14_v2v precise-port pilot */
 #include "td5re.h"
 
 /* Include the full actor struct for field-level access.
@@ -669,11 +670,21 @@ void td5_physics_tick(void)
         td5_physics_update_vehicle_actor(actor);
     }
 
-    /* Skip collision resolution during countdown — wall/vehicle impulses
-     * would accumulate in velocity without integrate_pose to dissipate them,
-     * causing cars to shoot off at race start. */
-    if (!g_game_paused)
-        td5_physics_resolve_vehicle_contacts();
+    /* Run V2V resolution UNCONDITIONALLY each sub-tick — matches
+     * RunRaceFrame @ 0x0042B580 which calls ResolveVehicleContacts every
+     * iteration of the sub-tick loop without any paused gate. The original
+     * relies on countdown V2V to gradually separate the initial OBB overlap
+     * (paired grid cars spawn ~56 units inside each other's box on circuit
+     * tracks); without these pushes, the first race-tick V2V delivers one
+     * large kick that visibly slides slot 0 sideways by +3400 units.
+     *
+     * Safe for stationary spawn: V2V impulse is (NUM/denom) * rel_vel and
+     * rel_vel is built from linear_velocity and angular_velocity (both 0
+     * during countdown), so the impulse solver produces 0; only the
+     * positional push at lines 2777-2780 fires, which converges the
+     * overlap to 0 over the 160 sub-ticks. [CONFIRMED @ 0x42B5C0 Ghidra
+     * pass 2026-05-13: no paused gate around ResolveVehicleContacts.] */
+    td5_physics_resolve_vehicle_contacts();
 }
 
 /* ========================================================================
@@ -2750,6 +2761,14 @@ static int obb_corner_test(TD5_Actor *a, TD5_Actor *b,
      * `reference_obb_corner_test_rotation_sign`. Algorithmic re-validation
      * vs 501 captured original inputs (tools/validate_pool15_v2v_contact_math.py)
      * dropped bitmask divergence from 66.7% to 0% with the sign flip. */
+    /* Rotate WORLD delta into A's local frame.
+     * [CONFIRMED @ 0x00408570 CollectVehicleCollisionContacts]:
+     *   local_dx = cos(A.yaw)*delta_x - sin(A.yaw)*delta_z
+     *   local_dz = sin(A.yaw)*delta_x + cos(A.yaw)*delta_z
+     * The game stores yaw in "CW from +Z" convention (matches AngleFromVector12
+     * argument order (dz, dx)). The earlier port formula (cos*x+sin*z, -sin*x+cos*z)
+     * was the standard math "CCW from +X" rotation and inverted slot 1's apparent
+     * position in slot 0's frame. */
     int32_t local_dx = (delta_x * cos_a - delta_z * sin_a) >> 12;
     int32_t local_dz = (delta_x * sin_a + delta_z * cos_a) >> 12;
 
@@ -2798,6 +2817,7 @@ static int obb_corner_test(TD5_Actor *a, TD5_Actor *b,
     /* Rotate delta into B's local frame.
      * [CONFIRMED @ second half of 0x00408570]: symmetric sign convention
      * — same "CW from +Z" world→local form as the B-in-A half above. */
+    /* Rotate WORLD delta into B's local frame — same "CW from +Z" convention. */
     int32_t local2_dx = (delta2_x * cos_b - delta2_z * sin_b) >> 12;
     int32_t local2_dz = (delta2_x * sin_b + delta2_z * cos_b) >> 12;
 
@@ -2898,6 +2918,30 @@ static int obb_corner_test(TD5_Actor *a, TD5_Actor *b,
 #define V2V_ANG_DIVISOR      0x28C
 #define V2V_INERTIA_PER_ANG  (V2V_INERTIA_K / V2V_ANG_DIVISOR)  /* 766 */
 
+/* Signed round-to-zero divide by 256 — matches the original's
+ * [CDQ; AND EDX,0xff; ADD EAX,EDX; SAR EAX,8] idiom used 12 times in the
+ * TOI rollback/advance halves at 0x00407F31-0x004080A6 and 0x004080C8-0x0040816B.
+ * For positive x: equivalent to x >> 8.
+ * For negative x not divisible by 256: x >> 8 rounds toward -inf, this rounds toward 0. */
+static inline int32_t v2v_sar8_rz(int32_t x) {
+    return ((x < 0) ? (x + 0xFF) : x) >> 8;
+}
+
+/* Signed round-to-zero divide by 4096 — matches the original's
+ * [CDQ; AND EDX,0xfff; ADD EAX,EDX; SAR EAX,0xc] idiom used at the four
+ * velocity-rotation sites in the prologue and the four velocity writeback
+ * sites in the tail, plus twice at the impulse-scale step. */
+static inline int32_t v2v_sar12_rz(int32_t x) {
+    return ((x < 0) ? (x + 0xFFF) : x) >> 12;
+}
+
+/* 64-bit signed round-to-zero divide by 4096 — used at the impulse final
+ * scale where (NUM_CONST / denom) * rel_vel can exceed 31 bits before the
+ * >>12 truncation. */
+static inline int32_t v2v_sar12_rz_64(int64_t x) {
+    return (int32_t)(((x < 0) ? (x + 0xFFF) : x) >> 12);
+}
+
 static void apply_collision_response(TD5_Actor *penetrator, TD5_Actor *target,
                                      int corner_idx, OBB_CornerData *corner,
                                      int32_t heading_target, int32_t impactForce)
@@ -2914,6 +2958,11 @@ static void apply_collision_response(TD5_Actor *penetrator, TD5_Actor *target,
      * (matching ResolveVehicleCollisionPair @ 0x408A60). Range [0x10, 0xF0].
      * Higher = contact near end of tick (less rollback).
      * Lower = contact early in tick (more rollback). */
+
+    /* pool14_v2v pilot trace: capture pre-state. The Frida probe captures
+     * args[0]=actorA (=slot_a=frame owner) and args[1]=actorB (=slot_b).
+     * Port's A=target=caller's `a`=slot_a → maps to Frida's actorA. */
+    td5_pilot_v2v_enter(A, B, corner, angle, impactForce);
 
     /* --- 1. Prologue: save angular velocities for delta application --- */
     int32_t saved_omega_A = A->angular_velocity_yaw;
@@ -2934,10 +2983,14 @@ static void apply_collision_response(TD5_Actor *penetrator, TD5_Actor *target,
     int32_t vxB = B->linear_velocity_x;
     int32_t vzB = B->linear_velocity_z;
 
-    int32_t local_54 = (vxA * cos_a - vzA * sin_a) >> 12;  /* A tangent */
-    int32_t local_50 = (vxA * sin_a + vzA * cos_a) >> 12;  /* A normal  */
-    int32_t local_4c = (vxB * cos_a - vzB * sin_a) >> 12;  /* B tangent */
-    int32_t local_44 = (vxB * sin_a + vzB * cos_a) >> 12;  /* B normal  */
+    /* [CONFIRMED @ 0x00407A19-29, 0x00407A3E-4D, 0x00407A69-72, 0x00407A95-AA]:
+     * each rotation step uses CDQ; AND EDX,0xfff; ADD EAX,EDX; SAR EAX,0xc —
+     * signed round-to-zero divide by 0x1000. Plain `>>12` on a negative product
+     * diverges by 1 LSB. */
+    int32_t local_54 = v2v_sar12_rz(vxA * cos_a - vzA * sin_a);  /* A tangent */
+    int32_t local_50 = v2v_sar12_rz(vxA * sin_a + vzA * cos_a);  /* A normal  */
+    int32_t local_4c = v2v_sar12_rz(vxB * cos_a - vzB * sin_a);  /* B tangent */
+    int32_t local_44 = v2v_sar12_rz(vxB * sin_a + vzB * cos_a);  /* B normal  */
 
     /* --- Unpack contactData [CONFIRMED @ 0x00408570 stores] --- */
     /* cx_A, cz_A = corner position in TARGET's (A's) frame (WITH A→B translation).
@@ -3023,8 +3076,10 @@ static void apply_collision_response(TD5_Actor *penetrator, TD5_Actor *target,
             (int32_t)(((int64_t)cz_A * saved_omega_A) / V2V_ANG_DIVISOR);
         int32_t rel_vel = ang_contrib - local_54 + local_4c;
 
+        /* [CONFIRMED @ 0x00407CB2-C1]: CDQ; AND EDX,0xfff; ADD; SAR 0xc —
+         * signed round-to-zero divide by 0x1000. */
         int64_t impulse_raw = (NUM_CONST / denom) * rel_vel;
-        impulse = (int32_t)(impulse_raw >> 12);
+        impulse = v2v_sar12_rz_64(impulse_raw);
 
         /* [CONFIRMED @ 0x4079C0 side branch]: XOR sign rejection. */
         if (((cx_B - cx_A) ^ impulse) < 0) {
@@ -3056,8 +3111,9 @@ static void apply_collision_response(TD5_Actor *penetrator, TD5_Actor *target,
             (int32_t)(((int64_t)cx_A * saved_omega_A) / V2V_ANG_DIVISOR);
         int32_t rel_vel = ang_contrib - local_50 + local_44;
 
+        /* [CONFIRMED @ 0x00407E68-7A]: same round-to-zero idiom as SIDE branch. */
         int64_t impulse_raw = (NUM_CONST / denom) * rel_vel;
-        impulse = (int32_t)(impulse_raw >> 12);
+        impulse = v2v_sar12_rz_64(impulse_raw);
 
         if (((cz_B - cz_A) ^ impulse) < 0) {
             rejected = 1;
@@ -3083,39 +3139,52 @@ static void apply_collision_response(TD5_Actor *penetrator, TD5_Actor *target,
     B->world_pos.z += push_z;
 
     if (rejected) {
-        /* Separating contact — push applied above, but no velocity impulse. */
+        /* Separating contact — push applied above, but no velocity impulse.
+         * Original returns 0 (XOR EAX,EAX at 0x00407CCD / 0x00407E86). */
         TD5_LOG_I(LOG_TAG, "v2v_reject: slot_A=%d slot_B=%d side=%d cxA=%d czA=%d cxB=%d czB=%d imp=%d push=(%d,%d)",
                   A->slot_index, B->slot_index, is_side_branch, cx_A, cz_A, cx_B, cz_B, impulse, push_x, push_z);
+        td5_pilot_v2v_leave(A, B, 0);
         return;
     }
 
-    /* --- 5. TOI rollback (before committing new velocities) --- */
+    /* --- 5. TOI rollback (before committing new velocities) ---
+     * [CONFIRMED @ 0x00407F31-F4C (A.x), F50-6E (A.z), F6F-8E (B.x),
+     *  F8F-AE (B.z), FAF-D6 (A.yaw_eul), FDE-FFD (B.yaw_eul)]:
+     * each rollback uses IMUL; CDQ; AND EDX,0xff; ADD EAX,EDX; SAR EAX,8; NEG;
+     * ADD [field], EAX — i.e. `field += -sar8_rz(toi_frac * vel)` which equals
+     * `field -= sar8_rz(toi_frac * vel)`. Plain `>>8` on a negative product
+     * diverges by 1 LSB. */
     int32_t toi_frac = 0x100 - impactForce;
 
-    A->world_pos.x -= (toi_frac * A->linear_velocity_x) >> 8;
-    A->world_pos.z -= (toi_frac * A->linear_velocity_z) >> 8;
-    A->euler_accum.yaw -= (toi_frac * A->angular_velocity_yaw) >> 8;
-    B->world_pos.x -= (toi_frac * B->linear_velocity_x) >> 8;
-    B->world_pos.z -= (toi_frac * B->linear_velocity_z) >> 8;
-    B->euler_accum.yaw -= (toi_frac * B->angular_velocity_yaw) >> 8;
+    A->world_pos.x -= v2v_sar8_rz(toi_frac * A->linear_velocity_x);
+    A->world_pos.z -= v2v_sar8_rz(toi_frac * A->linear_velocity_z);
+    A->euler_accum.yaw -= v2v_sar8_rz(toi_frac * A->angular_velocity_yaw);
+    B->world_pos.x -= v2v_sar8_rz(toi_frac * B->linear_velocity_x);
+    B->world_pos.z -= v2v_sar8_rz(toi_frac * B->linear_velocity_z);
+    B->euler_accum.yaw -= v2v_sar8_rz(toi_frac * B->angular_velocity_yaw);
 
     /* --- 6. Commit new angular velocities --- */
     A->angular_velocity_yaw = saved_omega_A + omega_A_delta;
     B->angular_velocity_yaw = saved_omega_B + omega_B_delta;
 
-    /* --- 7. Rotate tangent/normal channels back to world frame --- */
-    A->linear_velocity_x = (local_50 * sin_a + local_54 * cos_a) >> 12;
-    A->linear_velocity_z = (local_50 * cos_a - local_54 * sin_a) >> 12;
-    B->linear_velocity_x = (local_44 * sin_a + local_4c * cos_a) >> 12;
-    B->linear_velocity_z = (local_44 * cos_a - local_4c * sin_a) >> 12;
+    /* --- 7. Rotate tangent/normal channels back to world frame ---
+     * [CONFIRMED @ 0x00408027-37, 0x00408048-58, 0x00408068-78, 0x00408088-98]:
+     * each writeback uses the same CDQ; AND EDX,0xfff; SAR 0xc idiom — signed
+     * round-to-zero divide by 0x1000. */
+    A->linear_velocity_x = v2v_sar12_rz(local_50 * sin_a + local_54 * cos_a);
+    A->linear_velocity_z = v2v_sar12_rz(local_50 * cos_a - local_54 * sin_a);
+    B->linear_velocity_x = v2v_sar12_rz(local_44 * sin_a + local_4c * cos_a);
+    B->linear_velocity_z = v2v_sar12_rz(local_44 * cos_a - local_4c * sin_a);
 
-    /* --- 8. TOI re-advance (with the new post-impulse velocities) --- */
-    A->world_pos.x += (toi_frac * A->linear_velocity_x) >> 8;
-    A->world_pos.z += (toi_frac * A->linear_velocity_z) >> 8;
-    A->euler_accum.yaw += (toi_frac * A->angular_velocity_yaw) >> 8;
-    B->world_pos.x += (toi_frac * B->linear_velocity_x) >> 8;
-    B->world_pos.z += (toi_frac * B->linear_velocity_z) >> 8;
-    B->euler_accum.yaw += (toi_frac * B->angular_velocity_yaw) >> 8;
+    /* --- 8. TOI re-advance (with the new post-impulse velocities) ---
+     * [CONFIRMED @ 0x004080C8 onwards]: same round-to-zero idiom but the NEG
+     * disappears so `field += sar8_rz(toi_frac * vel)`. */
+    A->world_pos.x += v2v_sar8_rz(toi_frac * A->linear_velocity_x);
+    A->world_pos.z += v2v_sar8_rz(toi_frac * A->linear_velocity_z);
+    A->euler_accum.yaw += v2v_sar8_rz(toi_frac * A->angular_velocity_yaw);
+    B->world_pos.x += v2v_sar8_rz(toi_frac * B->linear_velocity_x);
+    B->world_pos.z += v2v_sar8_rz(toi_frac * B->linear_velocity_z);
+    B->euler_accum.yaw += v2v_sar8_rz(toi_frac * B->angular_velocity_yaw);
 
     /* --- 9. Post-impulse pose update on both --- */
     update_vehicle_pose_from_physics(A);
@@ -3191,6 +3260,10 @@ static void apply_collision_response(TD5_Actor *penetrator, TD5_Actor *target,
         TD5_LOG_I(LOG_TAG, "v2v_heavy_scatter: A=%d B=%d mag=%d kick_r=%d kick_p=%d kick_y=%d",
                   A->slot_index, B->slot_index, impact_mag, kick_r, kick_p, kick_y);
     }
+
+    /* pool14_v2v pilot trace: capture post-state at function exit.
+     * Original returns int impact_mag at 0x004084A2 RET. */
+    td5_pilot_v2v_leave(A, B, impact_mag);
 }
 
 /* ========================================================================
