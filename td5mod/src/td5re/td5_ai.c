@@ -23,6 +23,7 @@
 #include "td5_track.h"
 #include "td5_physics.h"
 #include "td5_platform.h"
+#include "td5_sound.h"
 #include "td5_trace.h"
 #include "td5re.h"
 #include <string.h>
@@ -4031,13 +4032,15 @@ void td5_ai_update_traffic_route_plan(int slot) {
         if (slot == 9) {
             if (polarity == 0) {
                 if (!g_td5.wanted_mode_enabled) {
-                    /* StopTrackedVehicleAudio @ 0x00440AE0 — audio-only stub. */
+                    /* StopTrackedVehicleAudio @ 0x00440AE0 */
+                    td5_sound_stop_tracked_vehicle_audio();
                 }
                 /* 0x435F5D: only the polarity==0 branch clears the handle. */
                 g_encounter_tracked_handle = -1;
             } else {
                 if (!g_td5.wanted_mode_enabled) {
                     /* StopTrackedVehicleAudio — handle NOT cleared in this branch. */
+                    td5_sound_stop_tracked_vehicle_audio();
                 }
             }
         }
@@ -4350,18 +4353,16 @@ static int32_t s_enc_teardown_flag;
  * g_td5.wanted_mode_enabled (int). Wrap it for byte-faithful naming. */
 #define ENC_WANTED_MODE  (g_td5.wanted_mode_enabled)
 
-/* Audio Start/Stop hooks — replace original CALL 0x440ab0 / 0x440ae0.
- * The port currently has no equivalent slot-9 engine audio system; the
- * calls are stubbed and the logging records the transitions for trace.
- * FIXME(precise-00434DA0): once 0x00440AB0 / 0x00440AE0 are ported,
- * route to those instead of stub-logging. */
+/* Audio Start/Stop hooks — wire to ported StartTrackedVehicleAudio
+ * (0x00440AB0) / StopTrackedVehicleAudio (0x00440AE0) in td5_sound.c. */
 static inline void td5_enc_start_tracked_audio(int arg) {
-    (void)arg;
     TD5_LOG_I(LOG_TAG, "enc_audio_start: arg=%d", arg);
+    td5_sound_start_tracked_vehicle_audio(arg);
 }
 
 static inline void td5_enc_stop_tracked_audio(void) {
     TD5_LOG_I(LOG_TAG, "enc_audio_stop");
+    td5_sound_stop_tracked_vehicle_audio();
 }
 
 /* Forward declaration: the deterministic-sim crash-recovery state reset
