@@ -26,6 +26,7 @@
 #include <stdlib.h>
 #include <stdarg.h>
 #include <string.h>
+#include <float.h>  /* _controlfp + _RC_DOWN / _MCW_RC for FPU rounding mode */
 
 /* TD5RE headers */
 #include "td5re.h"
@@ -383,6 +384,16 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     (void)hInstance;
     (void)hPrevInstance;
     (void)nCmdShow;
+
+    /* Match the original TD5_d3d.exe FPU control word: round-toward-minus-infinity
+     * (x87 RC=01). Empirically verified by the pool4 precise-port pilot
+     * (re/analysis/pilot_0042EB10_audit.md): 99.82% match against 6228 FISTP
+     * outputs from TransformShortVec3ByRenderMatrixRounded vs 49.05% for the
+     * default round-to-nearest-even. Without this, every `lrintf` / `(int)f` /
+     * FISTP in the simulation core is up to 1 LSB off on negative inputs,
+     * compounding tick-over-tick into the chronic drift we've been chasing.
+     * Set BEFORE anything else so logging/INI parsing don't inherit RTN. */
+    _controlfp(_RC_DOWN, _MCW_RC);
 
     SetUnhandledExceptionFilter(td5_crash_handler);
 
