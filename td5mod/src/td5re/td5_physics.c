@@ -1780,10 +1780,16 @@ void td5_physics_update_player(TD5_Actor *actor)
  * AI 2-axle dynamics -- UpdateAIVehicleDynamics (0x404EC0)
  * ======================================================================== */
 
+/* Pilot trace emitters (pool12 / precise-port workflow) */
+extern void td5_pilot_emit_00404EC0_enter(const TD5_Actor *actor, uintptr_t caller_ra);
+extern void td5_pilot_emit_00404EC0_leave(const TD5_Actor *actor);
+
 void td5_physics_update_ai(TD5_Actor *actor)
 {
     int16_t *phys = get_phys(actor);
     if (!phys) return;
+
+    td5_pilot_emit_00404EC0_enter(actor, (uintptr_t)__builtin_return_address(0));
 
     /* Calls-trace probe: capture per-slot AI dynamics entry state.
      * Hooks YAML: re/trace-hooks/tick0_ai_chain.yaml
@@ -2239,6 +2245,7 @@ void td5_physics_update_ai(TD5_Actor *actor)
         actor->current_slip_metric = (int16_t)slip;
     }
 
+    td5_pilot_emit_00404EC0_leave(actor);
 }
 
 /* ========================================================================
