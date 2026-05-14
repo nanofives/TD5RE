@@ -128,6 +128,13 @@ int32_t *td5_ai_get_route_state(int slot) {
     return route_state(slot);
 }
 
+/* Pilot trace accessor (pool9_00434FE0): used by td5_pilot_trace_00434FE0.c
+ * to compute the is_canonical_route field. Returns the LEFT.TRK table ptr
+ * (selector 0). */
+void *td5_ai_get_left_route_ptr(void) {
+    return (void *)g_route_tables[0];
+}
+
 static inline char *actor_ptr(int slot) {
     return g_actor_base + slot * ACTOR_STRIDE;
 }
@@ -1983,12 +1990,19 @@ int td5_ai_advance_track_script(int *rs) {
  * Main AI path-following tick for non-player racers and the encounter actor.
  * ======================================================================== */
 
+/* Forward decl for the pool9_00434FE0 pilot trace (precise-port workflow). */
+extern void td5_pilot_emit_00434FE0_enter(int slot, const int32_t *rs, const void *actor, int32_t game_type);
+extern void td5_pilot_emit_00434FE0_leave(int slot, const int32_t *rs, const void *actor);
+
 void td5_ai_update_track_behavior(int slot) {
     int32_t *rs = route_state(slot);
     char *actor  = actor_ptr(slot);
     int32_t heading, route_heading, hdelta;
     int threshold_result;
     int32_t steer_weight;
+
+    /* Pool9 pilot capture: entry snapshot before any state mutation. */
+    td5_pilot_emit_00434FE0_enter(slot, rs, actor, (int32_t)g_td5.game_type);
 
     /* Calls-trace probe: capture entry state per slot per tick.
      * Hooks YAML: re/trace-hooks/tick0_ai_chain.yaml
@@ -2073,6 +2087,7 @@ void td5_ai_update_track_behavior(int slot) {
                 }
                 rs[RS_TRACK_OFFSET_BIAS] =
                     td5_track_compute_signed_offset(span_raw, progress, route_byte);
+                td5_pilot_emit_00434FE0_leave(slot, rs, actor);
                 return;
             }
             /* result == 1: script complete, fall through to normal AI */
@@ -2096,13 +2111,20 @@ void td5_ai_update_track_behavior(int slot) {
                 TD5_LOG_I(LOG_TAG, "recovery: slot=%d hdelta=0x%X heading=0x%X route=0x%X gt=%d",
                           slot, hdelta, heading & 0xFFF, route_heading & 0xFFF,
                           (int)g_td5.game_type);
-                /* Significant misalignment: assign initial recovery script [8, 9, 0] */
+                /* [PRECISE-PORT D1 narrowed 2026-05-14, pool9_00434FE0]:
+                 * the original at 0x00435094-0x0043509F writes ONLY the two
+                 * pointer fields, both with the same recovery-script pointer
+                 * (DAT_00473cc8). The four extra writes (FLAGS, FIELD_3E,
+                 * FIELD_43, COUNTDOWN) had no counterpart in the listing and
+                 * may have over-aggressive interactions with the script VM
+                 * (AdvanceActorTrackScript) which is responsible for stepping
+                 * those fields itself.
+                 *
+                 *   MOV [EDI + 0x4afc48], 0x473cc8   ; RS_SCRIPT_BASE_PTR
+                 *   MOV [EDI + 0x4afc4c], 0x473cc8   ; RS_SCRIPT_IP        */
                 rs[RS_SCRIPT_BASE_PTR] = (int32_t)(intptr_t)g_script_init_recovery;
-                rs[RS_SCRIPT_IP] = 0;
-                rs[RS_SCRIPT_FLAGS] = 0;
-                rs[RS_SCRIPT_FIELD_3E] = 0;
-                rs[RS_SCRIPT_FIELD_43] = 0;
-                rs[RS_SCRIPT_COUNTDOWN] = 0x96;
+                rs[RS_SCRIPT_IP]       = (int32_t)(intptr_t)g_script_init_recovery;
+                td5_pilot_emit_00434FE0_leave(slot, rs, actor);
                 return;
             }
         }
@@ -2158,17 +2180,15 @@ void td5_ai_update_track_behavior(int slot) {
             int lin_span = ((int)span + 4) % span_count;
             int target_span = td5_track_apply_target_span_remap(lin_span, is_canonical);
 
-            /* Spline progress update (original also does this) */
-            {
-                int route_lane_val = 0;
-                int32_t seg_dist = rs[RS_FORWARD_TRACK_COMP];
-                const uint8_t *route_bytes = (const uint8_t *)(intptr_t)rs[RS_ROUTE_TABLE_PTR];
-                if (route_bytes) {
-                    route_lane_val = (int)route_bytes[(size_t)(unsigned)span * 3u];
-                }
-                rs[RS_TRACK_PROGRESS] = td5_track_compute_spline_position(
-                    (int)span, seg_dist, route_lane_val);
-            }
+            /* [PRECISE-PORT D4 removed 2026-05-14, pool9_00434FE0]: original
+             * 0x00434FE0 does NOT write rs[RS_TRACK_PROGRESS] in the normal-AI
+             * branch — that field is only written in the script-completed
+             * sub-branch via ComputeTrackSpanProgress + ComputeSignedTrackOffset.
+             * The port's extra td5_track_compute_spline_position(...) call here
+             * corrupted RS_TRACK_PROGRESS every tick (e.g. -2081 vs orig 95 at
+             * sim_tick=0), and cascaded into downstream callers that read this
+             * field. The verbatim listing path simply does NOT touch it in this
+             * branch. */
 
             /* (b) Get target world position via SampleTrackTargetPoint
              * [CONFIRMED @ 0x434800: 2-vertex interpolation with route_byte + lateral bias]
@@ -2242,29 +2262,18 @@ void td5_ai_update_track_behavior(int slot) {
                      * [CONFIRMED @ 0x435354-0x435372 — formula verified
                      * faithful via raw disasm 2026-05-12]
                      *
-                     * Workaround for port's ~3deg target_angle divergence vs
-                     * orig at spawn: orig's diff_race shows slot 0 RS_LEFT=0
-                     * (cascade quiet) from sim_tick 1 onward, but port has
-                     * RS_LEFT=35 every tick because port computes progress=94
-                     * at seed while orig computes 95 (1-unit divergence in
-                     * td5_track_compute_span_progress), cascading to an 18-
-                     * unit bias delta and ~35-unit target_angle delta.
-                     *
-                     * Clamping abs_delta < 64 (= ~5.6deg) to fully aligned
-                     * (L=0xFFF R=0) suppresses the cascade fine-band re-fire
-                     * while the seed-progress divergence is investigated.
-                     * Real misalignment beyond ~5.6deg still drives steering
-                     * normally. Without this clamp, port STEERING_CMD
-                     * re-accumulates from +7008/tick post-countdown, breaking
-                     * lateral lane parity. [Workaround pending Frida-on-orig
-                     * trace of td5_track_compute_span_progress to localize
-                     * the 1-unit progress divergence; see
-                     * todo_moscow_spawn_steering_cmd_overshoot.md] */
+                     * [PRECISE-PORT D2 removed 2026-05-14, pool9_00434FE0]:
+                     * the prior `abs_delta < 64` clamp was an explicit
+                     * workaround comment to mask a seed-progress 1-unit
+                     * divergence in td5_track_compute_span_progress. The
+                     * original at 0x00435354-0x00435372 has NO such clamp —
+                     * the listing decomposes into the two branches below
+                     * directly. Per re/analysis/precise_port_workflow.md and
+                     * feedback_precise_port_over_approximation: remove the
+                     * over-approximation, let the upstream divergence
+                     * surface so it can be fixed at source. */
                     int32_t abs_delta = delta < 0 ? -delta : delta;
-                    if (abs_delta < 64) {
-                        rs[RS_LEFT_DEVIATION]  = 0xFFF;
-                        rs[RS_RIGHT_DEVIATION] = 0;
-                    } else if (delta >= 0) {
+                    if (delta >= 0) {
                         rs[RS_LEFT_DEVIATION]  = 0xFFF - abs_delta;
                         rs[RS_RIGHT_DEVIATION] = delta;
                     } else {
@@ -2302,6 +2311,7 @@ void td5_ai_update_track_behavior(int slot) {
     td5_ai_update_steering_bias(rs, steer_weight);
     TD5_LOG_I(LOG_TAG, "track_behavior: slot=%d thr=%d weight=0x%X",
               slot, threshold_result, steer_weight);
+    td5_pilot_emit_00434FE0_leave(slot, rs, actor);
 }
 
 /* ========================================================================
