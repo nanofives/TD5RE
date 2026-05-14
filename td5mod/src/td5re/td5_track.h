@@ -149,6 +149,16 @@ int  td5_track_get_span_center_world(int span_index,
                                       int *out_x, int *out_y, int *out_z);
 int  td5_track_get_span_lane_world(int span_index, int sub_lane,
                                     int *out_x, int *out_y, int *out_z);
+
+/* Byte-faithful port of InitActorTrackSegmentPlacement @ 0x00445F10.
+ * - actor_at_0x80 must point to actor + 0x80 (span_raw int16); the helper
+ *   reads param_1[0] (span), param_1[6]/byte+12 (sub_lane), and writes back
+ *   param_1[2] (span_accum), param_1[3] (span_high), and clamped sub_lane.
+ * - out_pos receives world position in 24.8 fixed-point at out_pos[0..2]
+ *   (laid out to match actor +0x1FC/+0x200/+0x204).
+ * Used by traffic spawn (UpdateTrafficActorRecycle / InitializeTrafficActorsFromQueue). */
+void td5_track_init_actor_segment_placement(int16_t *actor_at_0x80, int32_t *out_pos);
+
 int  td5_track_span_lane_count_at(int span_index);
 
 /* --- Lighting ---
