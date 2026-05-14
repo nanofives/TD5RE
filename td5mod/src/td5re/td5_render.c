@@ -4340,20 +4340,246 @@ int SinFixed12bit(int angle) {
     return (int)(sin((double)(angle & 0xFFF) * (2.0 * M_PI / 4096.0)) * 4096.0);
 }
 
+/* AngleFromVector12 LUT — literal port of DAT_00463214 from TD5_d3d.exe.
+ *
+ * 1024 entries encode round(atan(i/1024) * 2048 / pi) for i in [0, 1023], range
+ * [0, 511]. Entry 1024 (value 0x200 = 512) sits past the declared array and is
+ * silently read by the original when param_1==param_2>0 (the diagonal of
+ * octant 1 produces idx=1024 exactly). The original binary's memory at
+ * 0x00463A14 holds 0x00 0x02 which decodes to 0x0200 — mathematically
+ * atan(1.0)*2048/pi=512 — and we mirror that here. */
+static const int16_t k_angle_from_vector12_lut[1026] = {
+       0,    1,    1,    2,    3,    3,    4,    4,    5,    6,    6,    7,    8,    8,    9,   10,
+      10,   11,   11,   12,   13,   13,   14,   15,   15,   16,   17,   17,   18,   18,   19,   20,
+      20,   21,   22,   22,   23,   24,   24,   25,   25,   26,   27,   27,   28,   29,   29,   30,
+      31,   31,   32,   32,   33,   34,   34,   35,   36,   36,   37,   38,   38,   39,   39,   40,
+      41,   41,   42,   43,   43,   44,   44,   45,   46,   46,   47,   48,   48,   49,   50,   50,
+      51,   51,   52,   53,   53,   54,   55,   55,   56,   57,   57,   58,   58,   59,   60,   60,
+      61,   62,   62,   63,   63,   64,   65,   65,   66,   67,   67,   68,   69,   69,   70,   70,
+      71,   72,   72,   73,   74,   74,   75,   75,   76,   77,   77,   78,   79,   79,   80,   80,
+      81,   82,   82,   83,   84,   84,   85,   85,   86,   87,   87,   88,   89,   89,   90,   90,
+      91,   92,   92,   93,   94,   94,   95,   95,   96,   97,   97,   98,   99,   99,  100,  100,
+     101,  102,  102,  103,  104,  104,  105,  105,  106,  107,  107,  108,  108,  109,  110,  110,
+     111,  112,  112,  113,  113,  114,  115,  115,  116,  117,  117,  118,  118,  119,  120,  120,
+     121,  121,  122,  123,  123,  124,  125,  125,  126,  126,  127,  128,  128,  129,  129,  130,
+     131,  131,  132,  132,  133,  134,  134,  135,  136,  136,  137,  137,  138,  139,  139,  140,
+     140,  141,  142,  142,  143,  143,  144,  145,  145,  146,  146,  147,  148,  148,  149,  149,
+     150,  151,  151,  152,  152,  153,  154,  154,  155,  156,  156,  157,  157,  158,  159,  159,
+     160,  160,  161,  161,  162,  163,  163,  164,  164,  165,  166,  166,  167,  167,  168,  169,
+     169,  170,  170,  171,  172,  172,  173,  173,  174,  175,  175,  176,  176,  177,  178,  178,
+     179,  179,  180,  180,  181,  182,  182,  183,  183,  184,  185,  185,  186,  186,  187,  188,
+     188,  189,  189,  190,  190,  191,  192,  192,  193,  193,  194,  195,  195,  196,  196,  197,
+     197,  198,  199,  199,  200,  200,  201,  202,  202,  203,  203,  204,  204,  205,  206,  206,
+     207,  207,  208,  208,  209,  210,  210,  211,  211,  212,  212,  213,  214,  214,  215,  215,
+     216,  216,  217,  218,  218,  219,  219,  220,  220,  221,  222,  222,  223,  223,  224,  224,
+     225,  225,  226,  227,  227,  228,  228,  229,  229,  230,  231,  231,  232,  232,  233,  233,
+     234,  234,  235,  236,  236,  237,  237,  238,  238,  239,  239,  240,  241,  241,  242,  242,
+     243,  243,  244,  244,  245,  246,  246,  247,  247,  248,  248,  249,  249,  250,  250,  251,
+     252,  252,  253,  253,  254,  254,  255,  255,  256,  256,  257,  258,  258,  259,  259,  260,
+     260,  261,  261,  262,  262,  263,  263,  264,  265,  265,  266,  266,  267,  267,  268,  268,
+     269,  269,  270,  270,  271,  272,  272,  273,  273,  274,  274,  275,  275,  276,  276,  277,
+     277,  278,  278,  279,  279,  280,  281,  281,  282,  282,  283,  283,  284,  284,  285,  285,
+     286,  286,  287,  287,  288,  288,  289,  289,  290,  290,  291,  291,  292,  293,  293,  294,
+     294,  295,  295,  296,  296,  297,  297,  298,  298,  299,  299,  300,  300,  301,  301,  302,
+     302,  303,  303,  304,  304,  305,  305,  306,  306,  307,  307,  308,  308,  309,  309,  310,
+     310,  311,  311,  312,  312,  313,  313,  314,  314,  315,  315,  316,  316,  317,  317,  318,
+     318,  319,  319,  320,  320,  321,  321,  322,  322,  323,  323,  324,  324,  325,  325,  326,
+     326,  327,  327,  328,  328,  329,  329,  330,  330,  331,  331,  332,  332,  333,  333,  334,
+     334,  335,  335,  335,  336,  336,  337,  337,  338,  338,  339,  339,  340,  340,  341,  341,
+     342,  342,  343,  343,  344,  344,  345,  345,  346,  346,  346,  347,  347,  348,  348,  349,
+     349,  350,  350,  351,  351,  352,  352,  353,  353,  354,  354,  354,  355,  355,  356,  356,
+     357,  357,  358,  358,  359,  359,  360,  360,  360,  361,  361,  362,  362,  363,  363,  364,
+     364,  365,  365,  366,  366,  366,  367,  367,  368,  368,  369,  369,  370,  370,  371,  371,
+     371,  372,  372,  373,  373,  374,  374,  375,  375,  375,  376,  376,  377,  377,  378,  378,
+     379,  379,  379,  380,  380,  381,  381,  382,  382,  383,  383,  383,  384,  384,  385,  385,
+     386,  386,  387,  387,  387,  388,  388,  389,  389,  390,  390,  390,  391,  391,  392,  392,
+     393,  393,  393,  394,  394,  395,  395,  396,  396,  397,  397,  397,  398,  398,  399,  399,
+     399,  400,  400,  401,  401,  402,  402,  402,  403,  403,  404,  404,  405,  405,  405,  406,
+     406,  407,  407,  408,  408,  408,  409,  409,  410,  410,  410,  411,  411,  412,  412,  413,
+     413,  413,  414,  414,  415,  415,  415,  416,  416,  417,  417,  417,  418,  418,  419,  419,
+     419,  420,  420,  421,  421,  422,  422,  422,  423,  423,  424,  424,  424,  425,  425,  426,
+     426,  426,  427,  427,  428,  428,  428,  429,  429,  430,  430,  430,  431,  431,  432,  432,
+     432,  433,  433,  434,  434,  434,  435,  435,  435,  436,  436,  437,  437,  437,  438,  438,
+     439,  439,  439,  440,  440,  441,  441,  441,  442,  442,  442,  443,  443,  444,  444,  444,
+     445,  445,  446,  446,  446,  447,  447,  447,  448,  448,  449,  449,  449,  450,  450,  451,
+     451,  451,  452,  452,  452,  453,  453,  454,  454,  454,  455,  455,  455,  456,  456,  457,
+     457,  457,  458,  458,  458,  459,  459,  459,  460,  460,  461,  461,  461,  462,  462,  462,
+     463,  463,  464,  464,  464,  465,  465,  465,  466,  466,  466,  467,  467,  468,  468,  468,
+     469,  469,  469,  470,  470,  470,  471,  471,  471,  472,  472,  473,  473,  473,  474,  474,
+     474,  475,  475,  475,  476,  476,  476,  477,  477,  478,  478,  478,  479,  479,  479,  480,
+     480,  480,  481,  481,  481,  482,  482,  482,  483,  483,  483,  484,  484,  484,  485,  485,
+     486,  486,  486,  487,  487,  487,  488,  488,  488,  489,  489,  489,  490,  490,  490,  491,
+     491,  491,  492,  492,  492,  493,  493,  493,  494,  494,  494,  495,  495,  495,  496,  496,
+     496,  497,  497,  497,  498,  498,  498,  499,  499,  499,  500,  500,  500,  501,  501,  501,
+     502,  502,  502,  503,  503,  503,  504,  504,  504,  505,  505,  505,  506,  506,  506,  507,
+     507,  507,  508,  508,  508,  508,  509,  509,  509,  510,  510,  510,  511,  511,  511,  512,
+    /* index 1024 -- silent past-end read by octant 1's diagonal (p1==p2>0).
+     * Original 0x00463A14 holds 0x0200 = 512 = round(atan(1)*2048/pi). */
+    512,
+    /* index 1025 -- silent past-end read by octants 5/6 only for the
+     * degenerate inputs (-1,-1) and (-1,+1). Original 0x00463A16 = 0x0000. */
+    0
+};
+
+#ifdef TD5_PILOT_TRACE_0040A720
+#include "td5_pilot_trace_0040A720.h"
+#endif
+
 int AngleFromVector12(int x, int z) {
-    /* Original AngleFromVector12 @ 0x0040A720 is a LUT-based arctan using the
-     * 1024-entry int16 table at DAT_00463214, effectively returning the
-     * round-to-nearest integer angle in 12-bit units (0..0xFFF = full circle).
-     * The atan2-based port rounded toward zero via (int) cast, producing a
-     * consistent ±1 off-by-one vs the LUT for most input vectors — which
-     * propagated to disp_yaw at /diff-race sim_tick=1 post_ai (orig=3824 vs
-     * port=3823 across every actor, every tick). lround matches the LUT's
-     * round-half-away-from-zero behavior closely enough to close the gap
-     * for the observed spawn-heading inputs. If residuals remain, port the
-     * full DAT_00463214 LUT (0x400 int16 entries = 2048 bytes). */
-    double rad = atan2((double)x, (double)z);
-    long angle = lround(rad * (4096.0 / (2.0 * M_PI)));
-    return (int)(angle & 0xFFF);
+    /* Literal port of 0x0040A720 AngleFromVector12 from TD5_d3d.exe.
+     * Convention: x = param_1 (e.g. dx, horizontal), z = param_2 (dz, vertical).
+     * Returns 12-bit angle (0..0xFFF) measured CW from +z axis.
+     *
+     * Implementation mirrors the listing octant-by-octant. The LUT-index
+     * trick `&DAT_00463214 + idx * -2` in the assembly is replicated as
+     * `k_angle_from_vector12_lut[-idx]` for the negative-quotient branches.
+     *
+     * Acceptance: byte-faithful with the original LUT — see pilot_0040A720_audit.md. */
+    const int param_1 = x;
+    const int param_2 = z;
+    int ret;
+
+    if (param_1 == 0 && param_2 == 0) {
+        ret = 0;
+    } else if (param_1 >= 0) {
+        if (param_2 > 0) {
+            if (param_1 < param_2) {
+                /* OCTANT 0: idx = (p1*1024 + p2/2)/p2 ∈ [0, 1024) */
+                int idx = (param_1 * 1024 + (param_2 >> 1)) / param_2;
+                ret = k_angle_from_vector12_lut[idx];
+            } else {
+                /* OCTANT 1: param_1 >= param_2 > 0 → idx = (p2*1024 + p1/2)/p1 ∈ [0, 1024]
+                 * Sub-test mirrors the assembly: only reach here via JLE at 0040a743,
+                 * and a separate JZ at 0040a75f returns 0 for param_1==0 (dead
+                 * because we already ruled out (0,0) and we're in p2>0). */
+                if (param_1 == 0) {
+                    ret = 0;
+                } else {
+                    int idx = (param_2 * 1024 + (param_1 >> 1)) / param_1;
+                    ret = 0x400 - k_angle_from_vector12_lut[idx];
+                }
+            }
+        } else {
+            /* param_1 >= 0, param_2 <= 0 */
+            int neg_p2 = -param_2;
+            if (neg_p2 <= param_1) {
+                /* OCTANT 2: param_1 > 0, param_2 <= 0, -p2 <= p1 (so |p2|<=p1).
+                 *   0040a7af TEST ESI,ESI; JZ 0040a731  (if param_1==0, return 0)
+                 *   0040a7b7 MOV EAX,ECX; SHL EAX,0xA    ; EAX = p2*1024 (<=0)
+                 *   0040a7bc MOV ECX,ESI; SAR ECX,1      ; ECX = p1>>1 (>0)
+                 *   0040a7c0 SUB EAX,ECX                  ; EAX = p2*1024 - (p1>>1) (<=0)
+                 *   0040a7c3 IDIV ESI                     ; /param_1 (>0); quotient <= 0
+                 *   0040a7cd SUB EDX,EAX where EDX=0x463214  ; LUT_base - 2*q → LUT[-q]
+                 *   0040a7d2 ADD EAX,0x400
+                 */
+                if (param_1 == 0) {
+                    ret = 0;
+                } else {
+                    int idx = (param_2 * 1024 - (param_1 >> 1)) / param_1;
+                    ret = 0x400 + k_angle_from_vector12_lut[-idx];
+                }
+            } else {
+                /* OCTANT 3: param_1 > 0 (we'd have hit dead-corner if ==0),
+                 * param_2 < 0, -p2 > p1. The JZ at 0040a78a tests ECX==0 (param_2):
+                 * if both p2==0 AND fell into this branch, return 0 — but we're
+                 * here only if -p2 > p1 ≥ 0, so p2<0 strictly. JZ is dead.
+                 *
+                 *   EAX = p1*1024 - (p2>>1)   ; p2<0 → -(p2>>1)>0 → num positive
+                 *   EAX /= p2                  ; quotient negative
+                 *   2*quotient subtracted from LUT_base → LUT[-quotient]
+                 *   return 0x800 - LUT[-quotient] */
+                if (param_2 == 0) {
+                    ret = 0;
+                } else {
+                    int idx = (param_1 * 1024 - (param_2 >> 1)) / param_2;
+                    ret = 0x800 - k_angle_from_vector12_lut[-idx];
+                }
+            }
+        }
+    } else {
+        /* param_1 < 0, branched at 0040a737 → 0040a7d8.
+         *   0040a7d8 TEST ECX, ECX   ; param_2 sign
+         *   0040a7da MOV EAX, ESI
+         *   0040a7dc JLE 0040a828    ; if param_2 <= 0 → 0040a828
+         */
+        if (param_2 > 0) {
+            /* param_1 < 0, param_2 > 0.
+             *   0040a7de NEG EAX       ; EAX = -param_1 (>0)
+             *   0040a7e0 CMP ECX, EAX  ; compares param_2 vs -param_1
+             *   0040a7e2 JLE 0040a807  ; take if param_2 <= -param_1 → OCTANT 6
+             */
+            int neg_p1 = -param_1;
+            if (param_2 > neg_p1) {
+                /* OCTANT 7: param_1<0, param_2>0, param_2 > -param_1
+                 *   0040a7e4 MOV EDX, ECX; SAR EDX,1  ; EDX = p2>>1
+                 *   0040a7e8 MOV EAX, ESI; SHL EAX,0xA; EAX = p1*1024 (negative)
+                 *   0040a7ed SUB EAX, EDX             ; EAX = p1*1024 - p2/2
+                 *   0040a7ef CDQ; IDIV ECX            ; /param_2 (positive); quotient negative
+                 *   0040a7f8 SHL EAX,1
+                 *   0040a7fa SUB ECX, EAX  (ECX=0x463214) ; LUT[-quotient]
+                 *   0040a7ff EAX = 0x1000
+                 *   0040a804 SUB EAX, EDX
+                 */
+                int idx = (param_1 * 1024 - (param_2 >> 1)) / param_2;
+                ret = 0x1000 - k_angle_from_vector12_lut[-idx];
+            } else {
+                /* OCTANT 6: param_1<0, param_2>0, param_2 <= -param_1.
+                 *   0040a807 MOV EAX, ECX; SHL EAX,0xA  ; EAX = p2*1024 (positive)
+                 *   0040a80c MOV ECX, ESI; SAR ECX,1    ; ECX = p1>>1 (negative)
+                 *   0040a810 SUB EAX, ECX               ; EAX = p2*1024 - p1/2 (positive larger)
+                 *   0040a813 IDIV ESI                   ; /param_1 (negative); quotient negative
+                 *   0040a81b SHL EAX,1
+                 *   0040a81d SUB EDX, EAX  (EDX=0x463214) ; LUT[-quotient]
+                 *   0040a822 ADD EAX, 0xc00
+                 */
+                int idx = (param_2 * 1024 - (param_1 >> 1)) / param_1;
+                ret = 0xc00 + k_angle_from_vector12_lut[-idx];
+            }
+        } else {
+            /* param_1 < 0, param_2 <= 0. 0040a828:
+             *   0040a828 MOV EDX, ECX
+             *   0040a82a NEG EAX       ; EAX = -param_1 (>0)
+             *   0040a82c NEG EDX       ; EDX = -param_2 (>=0)
+             *   0040a82e CMP EDX, EAX  ; compares -p2 vs -p1
+             *   0040a830 JLE 0040a857  ; take if -p2 <= -p1 → OCTANT 5
+             */
+            int neg_p1 = -param_1;
+            int neg_p2 = -param_2;
+            if (neg_p2 > neg_p1) {
+                /* OCTANT 4: param_1<0, param_2<0, -p2 > -p1 (|p2|>|p1|).
+                 * The JZ at 0040a834 fires when param_1==0 — but we're in p1<0, dead.
+                 *   0040a83a MOV EAX, ESI; SHL EAX,0xA  ; EAX = p1*1024 (negative)
+                 *   0040a83f MOV EDX, ECX; SAR EDX,1    ; EDX = p2>>1 (negative)
+                 *   0040a843 ADD EAX, EDX               ; EAX = p1*1024 + p2/2 (very negative)
+                 *   0040a846 IDIV ECX                   ; /param_2 (negative); quotient positive
+                 *   0040a849 MOVSX EAX,[EAX*2+0x463214] ; LUT[+quotient]
+                 *   0040a851 ADD EAX, 0x800
+                 */
+                if (param_1 == 0) {
+                    ret = 0;
+                } else {
+                    int idx = (param_1 * 1024 + (param_2 >> 1)) / param_2;
+                    ret = 0x800 + k_angle_from_vector12_lut[idx];
+                }
+            } else {
+                /* OCTANT 5: param_1<0, param_2<=0, -p2 <= -p1 (|p2|<=|p1|).
+                 *   0040a857 MOV EAX, ECX; SHL EAX,0xA  ; EAX = p2*1024 (<=0)
+                 *   0040a85c MOV ECX, ESI; SAR ECX,1    ; ECX = p1>>1 (negative)
+                 *   0040a860 ADD EAX, ECX               ; EAX = p2*1024 + p1/2 (very negative)
+                 *   0040a863 IDIV ESI                   ; /param_1 (negative); quotient positive
+                 *   0040a866 MOVSX EDX,[EAX*2+0x463214] ; LUT[+quotient]
+                 *   0040a86e EAX = 0xc00; SUB EAX, EDX
+                 */
+                int idx = (param_2 * 1024 + (param_1 >> 1)) / param_1;
+                ret = 0xc00 - k_angle_from_vector12_lut[idx];
+            }
+        }
+    }
+
+#ifdef TD5_PILOT_TRACE_0040A720
+    td5_pilot_trace_0040A720_call(param_1, param_2, ret);
+#endif
+    return ret;
 }
 
 float td5_cos_12bit(uint32_t angle) {
