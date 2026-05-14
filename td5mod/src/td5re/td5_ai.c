@@ -1318,75 +1318,142 @@ clamp_end:
 /* ========================================================================
  * Route Threshold State  (0x434AA0  UpdateActorRouteThresholdState)
  *
+ * Byte-faithful port of TD5_d3d.exe @ 0x00434AA0..0x00434B95
+ * (TD5_pool6, Ghidra read_only=true, 2026-05-14).
+ *
  * Throttle/brake controller operating on the route speed-threshold byte.
  * Consumes the rubber-band-modified throttle bias.
  *
- * Returns: 1 if braking (caller passes 0x10000 to steering bias),
- *          0 if coasting/accelerating (caller passes 0x20000).
- * ======================================================================== */
-
+ * Returns: 1 only on the emergency-brake branch (threshold==0 AND
+ *          fwd_comp>0x80 AND speed<0x10000); 0 on all other paths
+ *          including the slot-9 special-encounter early-exit.
+ *
+ * Listing structure (post-prologue at 0x00434ACF):
+ *
+ *   [SPECIAL-ENCOUNTER EARLY-EXIT @ 0x00434AAD-0x00434ACE]
+ *     if (slot == 9
+ *         && gSpecialEncounterTrackedActorHandle != -1
+ *         && gActorSpecialEncounterActive[tracked * 0x47] != 0)
+ *       goto early_out;            ; JNZ 0x00434B8F → ret 0, NO writes
+ *
+ *   [MAIN BODY @ 0x00434ACF-0x00434B7B]
+ *     span      = (int16_t)actor[+0x82]    ; SPAN_NORMALIZED, MOVSX
+ *     rt        = RS[0]                    ; ROUTE_TABLE_PTR
+ *     bias      = RS[4]                    ; DEFAULT_THROTTLE / steer bias
+ *     threshold = (uint8_t)rt[span*3 + 2]
+ *     if (threshold == 0) goto T0;
+ *     ; --- scaled-threshold branch ---
+ *     scaled = ((threshold << 10) * 0x80808081_signed) added/SAR(7)
+ *            = (threshold * 0x400) / 255          ; signed magic div
+ *     if (fwd_comp >= scaled) {            ; JL fallthrough
+ *       actor[+0x33E] = 0;
+ *       actor[+0x36D] = 0;
+ *       actor[+0x36F] = 0;
+ *       return 0;
+ *     }
+ *     goto fallback;
+ *   T0:
+ *     if (fwd_comp <= 0x80) goto fallback; ; JLE
+ *     if (speed   >= 0x10000) goto fallback; ; JGE
+ *     actor[+0x33E] = 0xFF00;
+ *     actor[+0x36D] = 1;
+ *     actor[+0x36F] = 1;
+ *     return 1;
+ *   fallback:                              ; 0x00434B7C
+ *     actor[+0x33E] = (int16_t)bias;
+ *     actor[+0x36D] = 0;
+ *     actor[+0x36F] = 0;
+ *   early_out:                             ; 0x00434B8F
+ *     return 0;
+ *
+ * Span source: MOVSX EAX, word [ECX + 0x4ab18a] at 0x00434AE8 with
+ * ECX = slot * 0x388. Base 0x4ab18a = g_actorRuntimeState + 0x82, so the
+ * reader uses actor[+0x82] = ACTOR_SPAN_NORMALIZED, NOT the raw +0x80.
+ * On junction-remap spans (Moscow ~498, Newcastle wrap) the wrong field
+ * triggered spurious emergency-brake / scaled-throttle gates — the
+ * normalized field is the only one safe for route-table lookups.
+ *
+ * Special-encounter early-exit: the original gates the whole writer
+ * behind the slot-9 race/traffic hijack flag so a hijacked slot 9 does
+ * not stomp the racer-AI encounter_steer / brake outputs while
+ * UpdateSpecialEncounterControl is also writing them. Port mirrors this
+ * gate exactly using g_encounter_tracked_handle / g_encounter_active[]
+ * which are this module's analogs of gSpecialEncounterTrackedActorHandle
+ * / gActorSpecialEncounterActive[slot * 0x11c]. */
 
 int td5_ai_update_route_threshold(int slot) {
-    int32_t *rs = route_state(slot);
-    char *actor  = actor_ptr(slot);
-
-    int32_t fwd_comp  = g_actor_forward_track_component[slot];
-    int32_t speed     = ACTOR_I32(actor, ACTOR_LONGITUDINAL_SPEED);
-
-    /* Read the route speed-threshold byte for the current span.
-     * Route table: route[span*3 + 2] = threshold byte.
-     * 0x00 = emergency, 0x01-0xFE = scaled, 0xFF = no limit.
-     *
-     * Original UpdateActorRouteThresholdState @ 0x00434AB9 reads
-     * `actor[+0x82] * 3 + 2 + RS[0]` — SPAN_NORMALIZED, NOT raw +0x80.
-     * On junction-remap spans (Moscow span ~498, Newcastle circuit
-     * wrap), RAW and NORMALIZED diverge by thousands; reading the
-     * wrong byte triggered emergency-brake or scaled-throttle on
-     * genuinely mid-corner locations and drove AI toward the outer
-     * wall. The look-ahead path at td5_ai.c:1854 already uses
-     * NORMALIZED; this reader was the last RAW consumer in the AI
-     * tick. [CONFIRMED via Ghidra disassembly @ 0x00434AA0–0x00434AB9
-     * — MOVSX EAX, word ptr [actor+0x82] is the only span source]. */
-    int32_t *route_table = (int32_t *)rs[RS_ROUTE_TABLE_PTR];
-    int16_t span = ACTOR_I16(actor, ACTOR_SPAN_NORMALIZED);
-    int threshold = 0xFF; /* default: no limit */
-
-    if (route_table) {
-        uint8_t *route_bytes = (uint8_t *)route_table;
-        threshold = route_bytes[span * 3 + 2];
+    /* --- Special-encounter early-exit (slot 9 only) --------------------
+     * Listing 0x00434AAD-0x00434ACE: if (slot==9 && tracked!=-1 &&
+     * gActorSpecialEncounterActive[tracked*0x47]!=0) ret 0 without writing.
+     * FIXME: port indexes g_encounter_active[] per-slot; original indexes
+     * gActorSpecialEncounterActive at stride 0x11c. Both are "is slot N
+     * currently in a special encounter?" with the same non-zero semantics. */
+    if (slot == 9
+        && g_encounter_tracked_handle != -1
+        && g_encounter_active[g_encounter_tracked_handle] != 0) {
+        return 0;
     }
-    TD5_LOG_D(LOG_TAG, "route_threshold: slot=%d span_norm=%d thr=0x%02X", slot, span, threshold);
 
-    if (threshold == 0x00) {
-        /* Emergency stop: full brake if forward > 0x80 and speed < 0x10000
-         * [CONFIRMED @ 0x434AA0: steer=0xFF00, brake_flag=1, field_0x36f=1, return 1] */
-        if (fwd_comp > 0x80 && speed < 0x10000) {
-            ACTOR_I16(actor, ACTOR_ENCOUNTER_STEER) = (int16_t)0xFF00;
-            ACTOR_U8(actor, ACTOR_BRAKE_FLAG) = 1;
-            ACTOR_U8(actor, ACTOR_THROTTLE_STATE) = 1;
-            return 1;
+    int32_t *rs    = route_state(slot);
+    char    *actor = actor_ptr(slot);
+
+    int32_t fwd_comp = g_actor_forward_track_component[slot]; /* RS[24] mirror */
+    int32_t speed    = ACTOR_I32(actor, ACTOR_LONGITUDINAL_SPEED); /* +0x31C */
+    int32_t bias     = g_actor_route_steer_bias[slot];        /* RS[4] mirror */
+
+    /* MOVSX EAX, [actor+0x82] @ 0x00434AE8 — sign-extended int16. */
+    int32_t span = (int32_t)ACTOR_I16(actor, ACTOR_SPAN_NORMALIZED);
+
+    /* MOV AL, [EDI + EDX + 2] with EDI = span*3, EDX = rt; threshold is
+     * a zero-extended byte (XOR EAX,EAX before MOV AL). Defensive NULL
+     * guard kept from prior revision — listing dereferences unconditionally.
+     * FIXME: route_table NULL means the actor's RS[0] was never bound;
+     * caller bug. Original would page-fault. */
+    int32_t threshold;
+    {
+        const uint8_t *route_table = (const uint8_t *)(intptr_t)rs[RS_ROUTE_TABLE_PTR];
+        if (route_table) {
+            threshold = (int32_t)route_table[span * 3 + 2];
+        } else {
+            threshold = 0xFF; /* defensive: behave as "no limit" */
         }
     }
 
-    if (threshold > 0x00 && threshold < 0xFF) {
-        /* Scaled threshold: suppress rubber-band steer when above speed limit.
-         * [CONFIRMED @ 0x434AA0: steer=0, brake_flag=0, field_0x36f=0, return 0]
-         * Does NOT apply brakes — only zeroes encounter steer and returns 0. */
+    TD5_LOG_D(LOG_TAG, "route_threshold: slot=%d span_norm=%d thr=0x%02X",
+              slot, (int)span, (unsigned)threshold);
+
+    if (threshold == 0) {
+        /* T0 branch @ 0x00434B45 */
+        if (fwd_comp > 0x80 && speed < 0x10000) {
+            ACTOR_I16(actor, ACTOR_ENCOUNTER_STEER) = (int16_t)0xFF00;
+            ACTOR_U8(actor, ACTOR_BRAKE_FLAG)       = 1;
+            ACTOR_U8(actor, ACTOR_THROTTLE_STATE)   = 1;
+            return 1;
+        }
+        /* fall through to fallback */
+    } else {
+        /* Scaled-threshold branch @ 0x00434B0B-0x00434B29.
+         * Magic-divide of (threshold << 10) by 0xFF:
+         *   IMUL EDI by 0x80808081 (signed) → high 32 bits → ADD EDX,EDI → SAR 7
+         *   → ADD signed-bit correction. Equivalent to signed (a/255).
+         * Since threshold ∈ [1,255] and (threshold<<10) ∈ [0x400,0x3FC00],
+         * (threshold * 0x400) / 0xFF reproduces the result on any modern compiler.
+         * At threshold==0xFF this yields 0x400 (not skipped). */
         int32_t scaled = (threshold * 0x400) / 0xFF;
 
         if (fwd_comp >= scaled) {
             ACTOR_I16(actor, ACTOR_ENCOUNTER_STEER) = 0;
-            ACTOR_U8(actor, ACTOR_BRAKE_FLAG) = 0;
-            ACTOR_U8(actor, ACTOR_THROTTLE_STATE) = 0;
+            ACTOR_U8(actor, ACTOR_BRAKE_FLAG)       = 0;
+            ACTOR_U8(actor, ACTOR_THROTTLE_STATE)   = 0;
             return 0;
         }
+        /* fall through to fallback */
     }
 
-    /* Below threshold or no limit: apply rubber-band steer bias.
-     * [CONFIRMED @ 0x434AA0: steer=default_bias, brake_flag=0, field_0x36f=0, return 0] */
-    ACTOR_I16(actor, ACTOR_ENCOUNTER_STEER) = (int16_t)g_actor_route_steer_bias[slot];
-    ACTOR_U8(actor, ACTOR_BRAKE_FLAG) = 0;
-    ACTOR_U8(actor, ACTOR_THROTTLE_STATE) = 0;
+    /* fallback @ 0x00434B7C: MOV word [...], BP — write low 16 bits of bias. */
+    ACTOR_I16(actor, ACTOR_ENCOUNTER_STEER) = (int16_t)bias;
+    ACTOR_U8(actor, ACTOR_BRAKE_FLAG)       = 0;
+    ACTOR_U8(actor, ACTOR_THROTTLE_STATE)   = 0;
     return 0;
 }
 
