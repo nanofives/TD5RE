@@ -3580,90 +3580,6 @@ void td5_track_compute_heading(TD5_Actor *actor)
 }
 
 /* ========================================================================
- * InterpolateTrackSegmentNormal (0x00445E30) - inline helper port.
- *
- * Verbatim port of the inner per-triangle normal-writer that
- * ComputeActorHeadingFromTrackSegment dispatches to. The pool1 worktree
- * (precise-00445E30) will land an extern definition with the same byte-
- * faithful semantics; until that merges, the static helper below carries
- * the load. When pool1 merges, this static can be removed (or kept as a
- * file-local fast path) without changing call-site behavior.
- *
- *   e1 = va - vb    (int32 from int16 vertices; [CONFIRMED @ 0x00445E30])
- *   e2 = va - vc
- *   n  = CrossProduct3i(e1, e2)
- *   n[i] >>= 12
- *   ConvertFloatVec3ToShortAnglesB(n, out)   ; FPU normalize to length 4096
- *   if (out[1] == 0) out[1] = 1              ; minimum-sentinel guard
- *
- * Identical math already lives inside triangle_height() above (steps 1-5);
- * this is the same sequence without the barycentric height step.
- * ======================================================================== */
-static void td5_track_interpolate_segment_normal_local(
-        int va_idx, int vb_idx, int vc_idx, int16_t *out_normal)
-{
-    TD5_StripVertex *va, *vb, *vc;
-    int32_t e1x, e1y, e1z, e2x, e2y, e2z;
-    int32_t nx, ny, nz;
-    int16_t unx, uny, unz;
-    double len;
-
-    if (!out_normal || !s_vertex_table)
-        return;
-
-    va = vertex_at(va_idx);
-    vb = vertex_at(vb_idx);
-    vc = vertex_at(vc_idx);
-
-    /* [CONFIRMED @ 0x00445E30 decompiler output]
-     *   local_c..local_4  = va - vb     (param_1 - param_2)
-     *   local_18..local_10 = va - vc    (param_1 - param_3)
-     * That is: e1 = va - vb, e2 = va - vc. The cross product
-     * CrossProduct3i(e1, e2) then computes the surface normal. Note that
-     * triangle_height() above uses the OPPOSITE convention (e1 = vb - va,
-     * e2 = vc - va), which flips the sign of the cross — preserved here
-     * because the original ConvertFloatVec3ToShortAnglesB normalizes to
-     * a length of 4096 in the SAME signed direction as the cross input
-     * (no abs()), so the sign matters for the heading-normal y component
-     * that downstream divides into. */
-    e1x = (int32_t)va->x - (int32_t)vb->x;
-    e1y = (int32_t)va->y - (int32_t)vb->y;
-    e1z = (int32_t)va->z - (int32_t)vb->z;
-
-    e2x = (int32_t)va->x - (int32_t)vc->x;
-    e2y = (int32_t)va->y - (int32_t)vc->y;
-    e2z = (int32_t)va->z - (int32_t)vc->z;
-
-    /* int32 cross then >>12 — matches FUN_0042EA70 + SAR sequence. */
-    nx = (e1y * e2z - e1z * e2y) >> 12;
-    ny = (e1z * e2x - e1x * e2z) >> 12;
-    nz = (e1x * e2y - e1y * e2x) >> 12;
-
-    /* FPU unit-renormalize to length 4096, truncate-toward-zero to int16
-     * [CONFIRMED @ 0x0042CD40-0x0042CDA8]. */
-    len = sqrt((double)nx * (double)nx
-             + (double)ny * (double)ny
-             + (double)nz * (double)nz);
-    if (len > 0.0) {
-        unx = (int16_t)(int32_t)((double)nx * 4096.0 / len);
-        uny = (int16_t)(int32_t)((double)ny * 4096.0 / len);
-        unz = (int16_t)(int32_t)((double)nz * 4096.0 / len);
-    } else {
-        unx = 0; uny = 0; unz = 0;
-    }
-
-    out_normal[0] = unx;
-    out_normal[1] = uny;
-    out_normal[2] = unz;
-
-    /* Post-conversion exact-zero guard — minimum sentinel that keeps the
-     * ApplyMissingWheelVelocityCorrection divide-by-y path finite.
-     * [CONFIRMED @ 0x00445E76-0x00445E83] */
-    if (out_normal[1] == 0)
-        out_normal[1] = 1;
-}
-
-/* ========================================================================
  * ComputeActorHeadingFromTrackSegment (0x00445B90) — byte-faithful port.
  *
  * Per-tick heading-normal writer called from THREE pose-integrator sites:
@@ -3956,12 +3872,10 @@ void td5_track_compute_runtime_heading_normal(TD5_Actor *actor)
     if (!have_triangle)
         return;
 
-    /* FIXME(precise-00445E30): pool1 ports InterpolateTrackSegmentNormal as
-     * an extern symbol td5_track_interpolate_segment_normal(va, vb, vc, out).
-     * Until that merges, we call the file-local
-     * td5_track_interpolate_segment_normal_local() with identical math. On
-     * merge, replace the call below with the extern and remove the local. */
-    td5_track_interpolate_segment_normal_local(va, vb, vc, out_normal);
+    /* InterpolateTrackSegmentNormal — byte-faithful extern from precise-00445E30
+     * (defined above in this same file). Cross-products + FPU-normalises +
+     * applies the uny=1 sentinel so heading_normal.y is never exactly zero. */
+    td5_track_interpolate_segment_normal(va, vb, vc, out_normal);
 }
 
 /* ========================================================================
