@@ -6462,8 +6462,14 @@ void td5_physics_refresh_wheel_contacts(TD5_Actor *actor)
                 actor->wheel_contact_pos[i].x,
                 actor->wheel_contact_pos[i].z,
                 span_normal);
+            /* Resolve surface_type from the probe's span+lane attributes
+             * instead of echoing the stale actor->surface_type_chassis
+             * (which is zero on tick 1 from the actor memset). Use the
+             * first probe-index 4..7 (= wheel_probes[i]) on the first
+             * valid wheel, matching the original's pattern of picking the
+             * surface from the lead grounded wheel. */
             if (!resolved_surface_valid) {
-                resolved_surface = surface_type;
+                resolved_surface = td5_track_get_surface_type(actor, 4 + i);
                 resolved_surface_valid = 1;
             }
         }
