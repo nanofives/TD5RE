@@ -2321,6 +2321,23 @@ int td5_game_run_race_frame(void) {
              * per slot; we approximate by ordering AI then physics each tick. */
             td5_ai_tick();
             td5_physics_tick();
+            /* Reset steering_command to 0 after AI runs during countdown.
+             * Frida-traced 2026-05-15 on 0x004340C0: every paused-tick AI
+             * call has actor->steering_command = 0 on entry, despite the
+             * function unconditionally writing to +0x30C. The original
+             * must zero steering_command between paused sub-ticks (likely
+             * inside UpdateRaceActors @ 0x00436A70 or via a paused-branch
+             * helper). Without this, the port accumulates 121 countdown
+             * AI ticks of +/-0x4000 cascade pushes, saturating steering
+             * to -48000 by sim_tick=1 entry while orig enters tick=1 at 0.
+             * That cascades into angular_velocity_yaw 2x, euler_accum
+             * drift, and ~6 labeled divergences on tick 1. */
+            for (i = 0; i < TD5_MAX_RACER_SLOTS; i++) {
+                if (s_slot_state[i].state == 3) continue;
+                TD5_Actor *cd_actor = td5_game_get_actor(i);
+                if (cd_actor)
+                    cd_actor->steering_command = 0;
+            }
             td5_track_tick();
             /* Chase camera runs AFTER physics — matches RunRaceFrame
              * (0x0042B580). Countdown still updates the camera so the
