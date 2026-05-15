@@ -1390,9 +1390,25 @@ int td5_game_init_race_session(void) {
              * first backward boundary crossing in update_position_recursive
              * decrements +0x84 from 0 to -1, td5_track_normalize_actor_wrap
              * wraps -1 to ring_length-1 (~3999), and every P2P checkpoint
-             * threshold compares true at once. */
+             * threshold compares true at once.
+             *
+             * Do NOT pre-seed +0x82 (span_normalized): the original
+             * InitActorTrackSegmentPlacement writes +0x80/+0x84/+0x86 only
+             * and leaves +0x82 at the zero-memset value until
+             * NormalizeActorTrackWrapState derives it on the first sub-tick.
+             * Setting it to spawn_span here made the AI's first cascade call
+             * (during countdown sub-tick=0, before any physics-integrate or
+             * wrap-normalize runs) compute target_span = span_norm+4 = 66
+             * instead of the original's 0+4 = 4. That shifted the AI target
+             * point ~14M world units east, producing target_angle=0xB38
+             * (south-southwest) vs original 0x1D0 (north-northeast). The
+             * resulting tiny delta (~10 vs ~1697) put the cascade in the
+             * fine-sin band (~+1984) instead of the mid-band emergency snap
+             * (+0x4000 = +16384), and the steering accumulator never
+             * ratcheted up to the original's ~±20000 during countdown.
+             * [Confirmed via tools/frida_pool10_004340C0.js + pool15_spline:
+             *  original sim_tick=0 paused=1 first call has L=1697, span_idx=4.] */
             *(int16_t *)(actor + 0x080) = (int16_t)actor_span;
-            *(int16_t *)(actor + 0x082) = (int16_t)actor_span;
             *(int16_t *)(actor + 0x084) = (int16_t)actor_span;
             *(int16_t *)(actor + 0x086) = (int16_t)actor_span;
             /* Sub-lane clamp matching InitActorTrackSegmentPlacement @ 0x445F2A-32:
