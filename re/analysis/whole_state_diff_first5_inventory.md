@@ -118,6 +118,46 @@ Per-tick reduction: **~42% on tick 1**.
 
 The goal anticipated `~16` per-probe labeled fields would be eliminated, dropping ~48 → <30. In practice the per-probe walker fix eliminated **mostly anonymous byte-level divergences** (probe sub-fields appear as `(?)` entries in the diff because the diff tool labels at struct-array offset, not at sub-field offset). The all-divergences count dropped by 313 (tick 1) but the **labeled** count only dropped by 8.
 
+### Update — Frida-traced steering 2x fix (commit e6622f2)
+
+Frida-traced `UpdateActorSteeringBias` (0x004340C0) on the original captured at `log/orig/pool10_004340C0.csv` revealed:
+
+- During paused (countdown) sub-ticks, the original's AI fires `UpdateActorSteeringBias` 121 times for slot 0, but every call has `actor->steering_command = 0` on entry (the engine zeroes between sub-ticks).
+- The port accumulated 121 cascade pushes during countdown, saturating `steering_command` to -47616 by `sim_tick=1` entry.
+
+Fix: after each countdown sub-tick AI run, zero `steering_command` for all racer slots (matching the original's apparent behavior; the exact mechanism — likely inside `UpdateRaceActors` 0x00436A70 or in a paused-branch helper — wasn't audited line-by-line but the net effect is identical).
+
+The cascading fixes from this:
+- `steering_command` (still slightly off but no longer 2x)
+- `angular_velocity_yaw` (-205 → -162 on tick 1)
+- `linear_velocity_x/z` (smaller magnitudes)
+- `euler_accum_yaw` (closer to original)
+
+**Labeled drop: 40 → 31** (-9 fields including cascade).
+
+### Final session result (2026-05-15)
+
+| Stage | Labeled | Total tick-1 |
+|-------|--------:|-------------:|
+| Inventory start | 48 | 742 |
+| + per-probe walker fix (probe init + contact_vertex helper + wheel walker call) | 46 | 432 |
+| + body-corner faithful port + ground-Y snap | 41 | 432 |
+| + surface_type-from-probe | 40 | 432 |
+| + countdown steering reset | **31** | **418** |
+
+### Remaining 31 — final breakdown
+
+| Cluster | Fields | Root cause | Next step |
+|---------|-------:|------------|-----------|
+| `grip_reduction`, `prev_race_position` | 2 | Port has equal-span spawn; original has staggered grid (front cars start with span_high_water 1, back cars 0). Sort by span_high_water produces race_position[0]=2 in original. | Port the staggered grid placement in `td5_physics_init_vehicle_runtime` |
+| `wheel_world_hires_*_y` (4), `wheel_suspension_pos/spring_dv` (8) | 12 | FPU precision drift (port `floorf` vs original `FISTP` round-to-nearest). Earlier experiment swapping to `lrintf` had zero effect — values are exact integers, drift is upstream in matrix multiply. | Audit `td5_physics_integrate_pose`'s float-precision rotation matrix builder |
+| `probe_FR_x`, `wheel_contact_*` (3) | 3 | Single-bit float rounding cascade | Same as above |
+| `rotation_matrix` (16-byte blob) | 1 | m[3] = exactly 0 in port (sp * cr where sp=0 from no pitch), m[3] ≈ -7e-11 in original (tiny non-zero from upstream euler.pitch drift) | Float precision audit |
+| `render_pos_x/y/z` | 3 | Sub-tick interpolation or chassis-snap not propagated to render_pos | Audit render_pos write path |
+| `angular_velocity_yaw`, `linear_velocity_x/y/z`, `euler_accum_yaw`, `world_pos_x/z` | 7 | Downstream of remaining steering residual + gravity. linear_velocity_y = -128 vs 0 means gravity isn't being added back by `UpdateVehicleSuspensionResponse` (port's surface_contact_flag gate may not be matching) | Audit suspension_response gravity-restore gate (see existing memory: `todo_suspension_gravity_gate_fix.md`) |
+| `wheel_contact_normals` (16-byte blob) | 1 | Original writes per-wheel surface normal at `actor+0x230`; port leaves zero | Find writer in original (not in `ComputeActorTrackContactNormal`) |
+| `center_suspension_pos/vel`, `prev_frame_y_position`, `steering_command` | 4 | Downstream cascades | Resolves with upstream fixes |
+
 ### Remaining 40 labeled (slot-0 tick-1) — cluster summary
 
 | Cluster | Fields | Root cause | Investigation size |
