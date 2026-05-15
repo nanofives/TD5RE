@@ -2315,6 +2315,32 @@ int td5_game_run_race_frame(void) {
                 g_td5.simulation_tick_counter++;
                 TD5_LOG_I(LOG_TAG, "Race countdown cleared on sub-tick — counter now 1, next sub-tick runs unpaused physics");
             }
+            /* --- Per-actor wrap normalization (countdown sub-tick) ---
+             * Original RunRaceFrame @ 0x0042B580 runs the
+             * NormalizeActorTrackWrapState loop at the END of EVERY
+             * sub-tick (the gRaceCameraTransitionGate gate only suppresses
+             * the simulation_tick_counter increment, not the wrap pass).
+             * On the very first sub-tick (countdown sub-tick=0), this
+             * derives actor+0x82 (span_normalized) from actor+0x84
+             * (span_accum) for the first time — seeded by
+             * td5_track_init_actor_segment_placement during spawn.
+             *
+             * Without this call in the paused branch, the next sub-tick
+             * (sim_tick=1, unpaused) reads +0x82 = 0 in its post_physics
+             * emit, causing the AI cascade to use target span 4 for every
+             * slot, saturating steering output at +16384 for all six
+             * (vs original full -23904..+40672 range).
+             * [Confirmed via diff_race Edinburgh PlayerIsAI=1: port
+             *  emitted span_norm=0 for all 6 slots at sim_tick=1; original
+             *  emits 62, 65, 68, 59, 56, 53.] */
+            for (i = 0; i < TD5_MAX_RACER_SLOTS; i++) {
+                TD5_Actor *lap_actor;
+                if (s_slot_state[i].state == 3) continue; /* disabled */
+                lap_actor = td5_game_get_actor(i);
+                if (lap_actor) {
+                    td5_track_normalize_actor_wrap(lap_actor);
+                }
+            }
             continue;
         }
         td5_physics_set_paused(0);
