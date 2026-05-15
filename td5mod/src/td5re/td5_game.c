@@ -2338,6 +2338,25 @@ int td5_game_run_race_frame(void) {
                 if (cd_actor)
                     cd_actor->steering_command = 0;
             }
+
+            /* Run update_race_order during countdown sub-ticks too.
+             * Original UpdateRaceActors @ 0x00436A70 calls UpdateRaceOrder
+             * unconditionally each sub-tick. Without this, port's
+             * g_raceOrderTable stays at identity [0..5] until tick=1,
+             * while the original's countdown walker may have established
+             * a staggered span_high_water permutation that's preserved
+             * across ticks. Per UpdateVehicleActor's paused branch
+             * (0x00406888), prev_race_position = race_position is copied
+             * each paused sub-tick, so by tick=1 entry, prev_race_position
+             * reflects the post-sort race_position from the last
+             * countdown sub-tick. */
+            update_race_order();
+            for (i = 0; i < TD5_MAX_RACER_SLOTS; i++) {
+                if (s_slot_state[i].state == 3) continue;
+                TD5_Actor *pa = td5_game_get_actor(i);
+                if (pa)
+                    pa->prev_race_position = pa->race_position;
+            }
             td5_track_tick();
             /* Chase camera runs AFTER physics — matches RunRaceFrame
              * (0x0042B580). Countdown still updates the camera so the
