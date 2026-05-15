@@ -240,6 +240,8 @@ static int td5_apply_cli_overrides(const char *cmdline,
         { "RaceTraceMaxFrames",   &g_td5.ini.race_trace_max_frames },
         { "AutoThrottle",         &g_td5.ini.auto_throttle },
         { "RaceTraceMaxSimTicks", &g_td5.ini.race_trace_max_sim_ticks },
+        { "WholeState",           &g_td5.ini.whole_state_enabled },
+        { "WholeStateMaxTicks",   &g_td5.ini.whole_state_max_ticks },
         /* Logging */
         { "LogEnabled",           &g_td5.ini.log_enabled },
         { "LogMinLevel",          &g_td5.ini.log_min_level },
@@ -460,6 +462,13 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     g_td5.ini.trace_fast_forward    = td5_ini_float("Trace", "TraceFastForward", 1.0f);
     g_td5.ini.race_trace_max_sim_ticks =
         td5_ini_int("Trace", "RaceTraceMaxSimTicks", 0);
+
+    /* Whole-state snapshot (see re/analysis/whole_state_diff_design.md).
+     * Independent of RaceTrace -- you can capture whole-state without CSVs. */
+    g_td5.ini.whole_state_enabled =
+        td5_ini_int("Trace", "WholeState", 0);
+    g_td5.ini.whole_state_max_ticks =
+        td5_ini_int("Trace", "WholeStateMaxTicks", 600);
 
     /* Modular trace selection. Defaults to all modules / all stages so an
      * unconfigured trace captures everything (matches the legacy schema's

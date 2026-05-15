@@ -8,6 +8,7 @@
  */
 
 #include "td5_trace.h"
+#include "td5_trace_whole_state.h"
 
 #include "td5_platform.h"
 #include "td5re.h"
@@ -268,6 +269,14 @@ void td5_trace_init(void)
     s_call_idx_tick = 0xffffffffu;
     s_call_idx_size = 0;
 
+    /* Whole-state snapshot is gated by its own INI flag, independent of the
+     * per-module CSV trace -- you can capture whole-state without CSVs. */
+    if (g_td5.ini.whole_state_enabled) {
+        const char *ws_path = getenv("TD5RE_WHOLE_STATE_PATH");
+        if (!ws_path || !ws_path[0]) ws_path = "log/whole_state_port.bin";
+        td5_trace_whole_state_open(ws_path, g_td5.ini.whole_state_max_ticks);
+    }
+
     if (!g_td5.ini.race_trace_enabled) {
         return;
     }
@@ -293,6 +302,7 @@ void td5_trace_shutdown(void)
         module_close(&s_modules[i]);
     }
     s_trace_open = 0;
+    td5_trace_whole_state_close();
 }
 
 int td5_trace_begin_frame(uint32_t frame_index)

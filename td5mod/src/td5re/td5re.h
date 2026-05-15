@@ -237,6 +237,13 @@ typedef struct TD5_GlobalState {
                                      * cap the port's workload at the same simulated
                                      * window the Frida side captures, instead of
                                      * burning time on sim ticks we'll never diff. */
+        /* Whole-state snapshot: tick-aligned dump of every actor byte +
+         * a globals blob, emitted at the same instant as Frida's
+         * UpdateRaceCameraTransitionTimer onEnter hook. See
+         * re/analysis/whole_state_diff_design.md and
+         * tools/diff_whole_state.py. Independent of [Trace] Modules. */
+        int  whole_state_enabled;       /* [Trace] WholeState = 1 */
+        int  whole_state_max_ticks;     /* [Trace] WholeStateMaxTicks = N (0 = unlimited) */
         int  loaded;  /* 1 once INI has been read */
         /* AutoRace: skip frontend, launch race immediately with INI settings */
         int  auto_race;             /* 1 = auto-start race on launch */
