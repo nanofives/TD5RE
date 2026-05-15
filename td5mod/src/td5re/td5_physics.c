@@ -4245,6 +4245,33 @@ void td5_physics_integrate_suspension(TD5_Actor *actor, int32_t accel_x, int32_t
  * In port: td5_physics_integrate_pose ground-snap tail (line ~3618) —
  * src = per-wheel body offset, producing world-space Y for chassis
  * correction averaging. */
+/* Full body→world short rotation matching ConvertFloatVec3ToShortAngles @
+ * 0x0042E2E0 (row-major float[9] times short[3], FPU TRUNCATE rounding via
+ * __ftol). Writes 3 shorts; saturates each component to int16.
+ *
+ * Used by the chassis-snap loop in IntegrateVehiclePoseAndContacts to
+ * populate wheel_contact_normals at +0x230+i*8 (per-wheel rotated body
+ * offset for the suspension-response consumer). The Y component matches
+ * `rotate_body_to_world_y` above. */
+static void rotate_body_to_world_vec3(const TD5_Actor *actor,
+                                      const int16_t v[3],
+                                      int16_t out[3])
+{
+    const float *m = actor->rotation_matrix.m;
+    float rx = (float)v[0] * m[0] + (float)v[1] * m[1] + (float)v[2] * m[2];
+    float ry = (float)v[0] * m[3] + (float)v[1] * m[4] + (float)v[2] * m[5];
+    float rz = (float)v[0] * m[6] + (float)v[1] * m[7] + (float)v[2] * m[8];
+    if (rx >  32767.0f) rx =  32767.0f;
+    if (rx < -32768.0f) rx = -32768.0f;
+    if (ry >  32767.0f) ry =  32767.0f;
+    if (ry < -32768.0f) ry = -32768.0f;
+    if (rz >  32767.0f) rz =  32767.0f;
+    if (rz < -32768.0f) rz = -32768.0f;
+    out[0] = (int16_t)(int32_t)rx;
+    out[1] = (int16_t)(int32_t)ry;
+    out[2] = (int16_t)(int32_t)rz;
+}
+
 static int16_t rotate_body_to_world_y(const TD5_Actor *actor, const int16_t v[3])
 {
     float m3 = actor->rotation_matrix.m[3];
@@ -5738,9 +5765,34 @@ void td5_physics_integrate_pose(TD5_Actor *actor)
              * the actor's rotation matrix and take the Y component. Uses
              * body→world (row 1 of matrix) — matches original's direct
              * LoadRenderRotationMatrix (no transpose) at 0x00406135 /
-             * 0x004061EA before ConvertFloatVec3ToShortAngles. */
+             * 0x004061EA before ConvertFloatVec3ToShortAngles.
+             *
+             * Original 0x00405E80 (Ghidra decomp pool10 2026-05-15):
+             *
+             *   ConvertFloatVec3ToShortAngles(psVar10 + -1, puVar8);
+             *
+             * where psVar10-1 = wheel_disp_angles[i] = (cwx, body_wy, cwz)
+             * and puVar8 = &actor->field_0x230 + i*8 = wheel_contact_normals[i].
+             *
+             * So the original writes all 3 rotated components to +0x230+i*8.
+             * The chassis-snap accumulator uses only puVar8[1] (the Y),
+             * but downstream suspension-response consumers read the full
+             * vector. Without this write the wheel_contact_normals stay
+             * zero (visible in whole_state_port.bin diff as the 16-byte
+             * +0x230 blob mismatching). */
             int16_t src[3] = { cwx, body_wy, cwz };
-            int16_t rot_y = rotate_body_to_world_y(actor, src);
+            int16_t rot_v3[3];
+            rotate_body_to_world_vec3(actor, src, rot_v3);
+            int16_t rot_y = rot_v3[1];
+
+            /* Write to wheel_contact_normals[i] at +0x230 + i*8 (4-short
+             * stride, 4th short is padding / unused in the original). */
+            {
+                int16_t *wcn = (int16_t *)((uint8_t *)actor + 0x230 + i * 8);
+                wcn[0] = rot_v3[0];
+                wcn[1] = rot_v3[1];
+                wcn[2] = rot_v3[2];
+            }
 
             int32_t wheel_y = actor->wheel_contact_pos[i].y;
             contact_y_sum += (int64_t)(wheel_y + (int32_t)rot_y * -0x100);
