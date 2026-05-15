@@ -2896,6 +2896,48 @@ void td5_track_update_probe_position(TD5_TrackProbeState *probe,
     }
 }
 
+/* Write per-probe contact_vertex_A/B from probe state. Mirrors the prefix
+ * of ComputeActorTrackContactNormal[Extended] at 0x00445450 / 0x004457E0:
+ *
+ *   iVar9  = probe->span_index * 0x18                       ; strip-record stride
+ *   uVar6  = *(byte *)(iVar9 + g_trackStripRecords)         ; span_type
+ *   iVar5  = strip[span].left_vertex_index
+ *          + (char)param_1[6]                                ; sub_lane_index
+ *          + (char)DAT_00474e40[type * 2]                    ; left_off LUT
+ *   param_1[4] = (short)iVar5
+ *   iVar7  = strip[span].right_vertex_index
+ *          + (char)param_1[6]
+ *          + (char)DAT_00474e41[type * 2]                    ; right_off LUT
+ *   param_1[5] = (short)iVar7
+ *
+ * The walker (UpdateActorTrackPosition) updates span_index + sub_lane;
+ * this helper writes contact_vertex_A/B that the downstream pose code
+ * (and whole-state diff) reads at probe + 0x08 / + 0x0A. The port's
+ * k_quad_vertex_offsets[][0] = DAT_00474e40, [][1] = DAT_00474e41.
+ *
+ * Whole-state diff 2026-05-15: port had contact_vertex_A/B = 0 (memset)
+ * while original had 770/779 on tick 1. */
+void td5_track_compute_probe_contact_vertices(TD5_TrackProbeState *probe)
+{
+    if (!probe || !s_span_array)
+        return;
+
+    int span_idx = (int)probe->span_index;
+    if (span_idx < 0 || span_idx >= s_span_count)
+        return;
+
+    const TD5_StripSpan *sp = &s_span_array[span_idx];
+    int type = sp->span_type;
+    int left_off = 0, right_off = 0;
+    if (type >= 0 && type < 12) {
+        left_off  = (int)k_quad_vertex_offsets[type][0];
+        right_off = (int)k_quad_vertex_offsets[type][1];
+    }
+    int sub_lane = (int)probe->sub_lane_index;
+    probe->contact_vertex_A = (int16_t)((int)sp->left_vertex_index  + sub_lane + left_off);
+    probe->contact_vertex_B = (int16_t)((int)sp->right_vertex_index + sub_lane + right_off);
+}
+
 /* ========================================================================
  * Barycentric Contact Resolution (0x4456D0 / 0x445A70)
  *

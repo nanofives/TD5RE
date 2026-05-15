@@ -131,6 +131,15 @@ const void *td5_track_get_models_display_list_raw(int index, size_t *size_out);
 void td5_track_update_actor_position(TD5_Actor *actor);
 void td5_track_update_probe_position(struct TD5_TrackProbeState *probe,
                                      int32_t world_x, int32_t world_z);
+
+/* Write the per-probe contact_vertex_A/B fields from the probe's current
+ * span_index + sub_lane_index. Mirrors the prefix of
+ * ComputeActorTrackContactNormal[Extended] (0x00445450 / 0x004457E0):
+ *   iVar5 = strip[span].left_vertex_index + sub_lane + LUT_E40[type * 2]
+ *   iVar7 = strip[span].right_vertex_index + sub_lane + LUT_E41[type * 2]
+ * Called after td5_track_update_probe_position so the (possibly walker-
+ * advanced) span_index is the one used. */
+void td5_track_compute_probe_contact_vertices(struct TD5_TrackProbeState *probe);
 int  td5_track_get_surface_type(TD5_Actor *actor, int probe_index);
 void td5_track_compute_heading(TD5_Actor *actor);
 

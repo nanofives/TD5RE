@@ -6278,28 +6278,31 @@ void td5_physics_refresh_wheel_contacts(TD5_Actor *actor)
      * (velocity-snap @ 0x004060CE/D4, tumble-recovery transition logic). */
     actor->damage_lockout = actor->wheel_contact_bitmask;
 
-    /* Step 1 (original 0x403720): copy chassis track position to each wheel probe.
-     * Without this, wheel_probes[i].span_index stays at 0 (memset init) and
-     * all height probes use span 0 instead of the car's actual span. */
+    /* Step 1 (original 0x403720): seed each probe with the actor's
+     * CURRENT span_index and sub_lane_index only. The walker (called
+     * after the position transform below) updates span_index further
+     * if the probe's world position crosses span boundaries, and also
+     * increments span_accumulated / span_high_water on forward steps.
+     *
+     * span_normalized, span_accumulated, span_high_water, contact_vertex_A,
+     * contact_vertex_B are NOT seeded here -- they carry over from the
+     * previous tick and are updated by the walker + contactNormal
+     * computation. At race start they are zero-initialized by the actor
+     * memset, matching the original's tick-1 state. Whole-state diff
+     * 2026-05-15 showed the prior init-time copies of actor->track_span_*
+     * polluted span_norm to 102 on tick 1 while the original had 0. */
     for (int i = 0; i < 4; i++) {
-        actor->wheel_probes[i].span_index       = actor->track_span_raw;
-        actor->wheel_probes[i].span_normalized   = actor->track_span_normalized;
-        actor->wheel_probes[i].span_accumulated  = actor->track_span_accumulated;
-        actor->wheel_probes[i].span_high_water   = actor->track_span_high_water;
-        actor->wheel_probes[i].sub_lane_index    = (int8_t)actor->track_sub_lane_index;
+        actor->wheel_probes[i].span_index     = actor->track_span_raw;
+        actor->wheel_probes[i].sub_lane_index = (int8_t)actor->track_sub_lane_index;
     }
 
     /* Step 1b: same for body_probes (corners). The original runs TWO
      * symmetric loops -- the second writes to actor+0x00 (body_probes).
-     * Whole-state diff 2026-05-15 showed body_probes[0..3] all zero on
-     * port vs populated on original. Without this, UpdateRaceOrder and
-     * scripted-recovery mode read empty body-corner probe state. */
+     * Without this, UpdateRaceOrder and scripted-recovery mode read
+     * empty body-corner probe state. */
     for (int i = 0; i < 4; i++) {
-        actor->body_probes[i].span_index       = actor->track_span_raw;
-        actor->body_probes[i].span_normalized   = actor->track_span_normalized;
-        actor->body_probes[i].span_accumulated  = actor->track_span_accumulated;
-        actor->body_probes[i].span_high_water   = actor->track_span_high_water;
-        actor->body_probes[i].sub_lane_index    = (int8_t)actor->track_sub_lane_index;
+        actor->body_probes[i].span_index     = actor->track_span_raw;
+        actor->body_probes[i].sub_lane_index = (int8_t)actor->track_sub_lane_index;
     }
 
     /* gap_270 uses the pre-snap transform results, not post-snap positions.
@@ -6412,6 +6415,11 @@ void td5_physics_refresh_wheel_contacts(TD5_Actor *actor)
             if (max_sp > 0 && actor->wheel_probes[i].span_index >= (int16_t)max_sp)
                 actor->wheel_probes[i].span_index = (int16_t)(max_sp - 1);
         }
+
+        /* Mirror the original's ComputeActorTrackContactNormalExtended
+         * prefix: write contact_vertex_A/B to the probe based on its
+         * (post-walker) span_index + sub_lane_index. */
+        td5_track_compute_probe_contact_vertices(&actor->wheel_probes[i]);
 
         /* Compute wheel vertical force from the probed span surface. */
         int32_t wheel_y = actor->wheel_contact_pos[i].y;
@@ -6632,20 +6640,75 @@ void td5_physics_refresh_wheel_contacts(TD5_Actor *actor)
                 matrix, hub[0], hub[1], hub[2]);
         }
 
-        /* Copy to probe_FL/FR/RL/RR (0x090) for wall contact detection.
-         * The original RefreshVehicleWheelContactFrames writes both 0x0F0
-         * (wheel_contact_pos) and 0x090 (probe_FL..RR). Without this,
-         * UpdateActorTrackSegmentContacts reads zero positions. */
-        switch (i) {
-            case 0: actor->probe_FL = actor->wheel_contact_pos[0]; break;
-            case 1: actor->probe_FR = actor->wheel_contact_pos[1]; break;
-            case 2: actor->probe_RL = actor->wheel_contact_pos[2]; break;
-            case 3: actor->probe_RR = actor->wheel_contact_pos[3]; break;
-        }
     }
 
     /* Mark this slot's pre-snap transform as valid for next frame */
     s_prev_wheel_valid[slot] = 1;
+
+    /* Original (0x00403720) runs a SECOND loop that walks each body
+     * corner probe (body_probes[0..3]) through the per-probe walker and
+     * ComputeActorTrackContactNormal, mirroring the wheel-probe loop.
+     *
+     * Body corner offsets are stored at the head of car_definition_ptr as
+     * 4 x short[4] (8-byte stride, last short ignored). Each is the body
+     * corner position in chassis-local space; transforming via the
+     * (rot, render_pos) matrix and shifting <<8 yields the corner's world
+     * position in 24.8 FP, written to actor->probe_FL/FR/RL/RR.
+     *
+     * Whole-state diff 2026-05-15: replaced the prior wheel_contact alias
+     * (which used wheel offsets instead of body corners) with a faithful
+     * port of the original's TransformShortVec3ByRenderMatrixRounded
+     * pass. The walker + ComputeActorTrackContactNormal helper write
+     * span_acc/hw and contact_vertex_A/B per body probe. */
+    if (actor->car_definition_ptr) {
+        TD5_Vec3_Fixed *body_pos[4] = {
+            &actor->probe_FL,
+            &actor->probe_FR,
+            &actor->probe_RL,
+            &actor->probe_RR,
+        };
+        const int16_t *cardef_corners = (const int16_t *)actor->car_definition_ptr;
+
+        float matrix[12];
+        for (int j = 0; j < 9; j++) matrix[j] = rot[j];
+        matrix[9]  = actor->render_pos.x;
+        matrix[10] = actor->render_pos.y;
+        matrix[11] = actor->render_pos.z;
+
+        for (int i = 0; i < 4; i++) {
+            const int16_t corner_off[3] = {
+                cardef_corners[i * 4 + 0],
+                cardef_corners[i * 4 + 1],
+                cardef_corners[i * 4 + 2],
+            };
+            int32_t world[3];
+            td5_transform_short_vec3_by_render_matrix_rounded(corner_off, world, matrix);
+            body_pos[i]->x = world[0] << 8;
+            body_pos[i]->y = world[1] << 8;
+            body_pos[i]->z = world[2] << 8;
+
+            td5_track_update_probe_position(&actor->body_probes[i],
+                                            body_pos[i]->x,
+                                            body_pos[i]->z);
+            int max_sp = td5_track_get_span_count();
+            if (max_sp > 0 && actor->body_probes[i].span_index >= (int16_t)max_sp)
+                actor->body_probes[i].span_index = (int16_t)(max_sp - 1);
+            td5_track_compute_probe_contact_vertices(&actor->body_probes[i]);
+
+            /* Original ComputeActorTrackContactNormal (0x00445450) overwrites
+             * piVar8[1] (= probe_FL/FR/RL/RR .y) with the barycentric ground
+             * height at the body corner's XZ. Use the same compute_contact_
+             * height path the wheel loop uses; pass NULL for the normal
+             * out-pointer since the body probe doesn't store one. */
+            int probe_span = actor->body_probes[i].span_index;
+            int probe_lane = actor->body_probes[i].sub_lane_index;
+            if (probe_span >= 0 && probe_span < max_sp) {
+                body_pos[i]->y = td5_track_compute_contact_height_with_normal(
+                    probe_span, probe_lane,
+                    body_pos[i]->x, body_pos[i]->z, NULL);
+            }
+        }
+    }
 
     if (resolved_surface_valid)
         actor->surface_type_chassis = (uint8_t)resolved_surface;
