@@ -2773,39 +2773,32 @@ static void tick_race_countdown(void)
          * note; DAT_00483030 is unused in the original. */
         s_race_countdown_state = 0;
 
-        /* Match orig observed post-countdown state: STEERING_CMD = 0 at
-         * sim_tick 1. Diff_race 2026-05-12 (physics_full+track profile,
-         * Moscow PlayerIsAI=1) showed port slot 0 STEERING_CMD = 47680 at
-         * sim_tick 1 vs orig = 0 — accumulated by cascade fine-band firing
-         * +7008/tick during countdown because RS_LEFT_DEVIATION = 35 at
-         * spawn (not 0). orig has the same cascade fire briefly during
-         * countdown (steering=49152 captured at one mid-countdown emit row)
-         * but ends countdown with STEERING_CMD = 0 via some path I could
-         * not statically localize without Frida traces on the orig binary.
+        /* NOTE (2026-05-14 fix(ai): target_angle): The previous
+         * port-only block here zeroed STEERING_CMD/RAMP_ACCUM/
+         * ang_velocity_yaw and re-seeded RS_TRACK_PROGRESS /
+         * RS_TRACK_OFFSET_BIAS at countdown completion. That was a
+         * workaround for the Moscow PlayerIsAI=1 over-accumulation
+         * caused by the (now-fixed) spawn-time +0x82 pre-seed bug —
+         * the cascade had been firing in the fine-sin band every
+         * countdown sub-tick with RS_LEFT_DEVIATION ≈ 35, accumulating
+         * +7008/tick × 160 ticks → 47680.
          *
-         * This explicit zero at the countdown→race transition mirrors
-         * the observed effect: port slot 0 ang_yaw + position trajectory
-         * should align with orig from sim_tick 1 onward. If a later /fix
-         * audit finds the actual orig mechanism, replace this with the
-         * faithful path. [TODO: locate orig 0x????? STEERING_CMD reset
-         * via Frida hook on actor+0x30C writes during countdown]. */
-        for (int slot = 0; slot < TD5_MAX_RACER_SLOTS; ++slot) {
-            char *a = (char *)td5_game_get_actor(slot);
-            if (!a) continue;
-            *(int32_t *)(a + 0x30C) = 0;       /* steering_command */
-            *(int16_t *)(a + 0x33A) = 0;       /* steering ramp accumulator */
-            *(int32_t *)(a + 0x1C4) = 0;       /* angular_velocity_yaw */
-            /* Re-derive RS_TRACK_PROGRESS + RS_TRACK_OFFSET_BIAS from current
-             * (unchanged-since-spawn) actor pos so peer-avoidance drift
-             * accumulated during the 160 countdown sub-ticks is wiped. orig
-             * presents fresh-spawn AI state at sim_tick 1; without this
-             * re-seed, port's RS_TRACK_OFFSET_BIAS drifts (-279 at spawn →
-             * -317+ post-countdown) and shifts the target_angle, making
-             * cascade fire hard on its first race tick. */
-            td5_ai_seed_actor_track_progress_offset(slot);
-        }
-
-        TD5_LOG_I(LOG_TAG, "Race countdown complete: GO (STEERING_CMD zeroed)");
+         * Audit of orig UpdateRaceCameraTransitionTimer @ 0x0040A490
+         * (TD5_pool0, Ghidra read_only, 2026-05-14) confirms the
+         * original NEVER touches +0x30C / +0x33A / +0x1C4 when the
+         * countdown timer reaches 0 — it only clears g_gamePaused and
+         * gRaceCameraTransitionGate. The original cascade actually
+         * accumulates +16384/tick from the mid-band emergency snap
+         * during countdown (slot 0 reaches ~16384 by sim_tick=0,
+         * ~20000 by sim_tick=1), which is the source of the
+         * post-countdown ±20000 steering range the port was trying
+         * to match WITHOUT this zero. With c698403 (no +0x82 pre-seed)
+         * + 9b7d42a (correct span_norm derivation) in place, the
+         * cascade now hits the mid-band naturally and produces the
+         * matching ±20000 range — the workaround is no longer needed
+         * and was the dominant cause of the 10× steering shortfall at
+         * sim_tick=1. */
+        TD5_LOG_I(LOG_TAG, "Race countdown complete: GO");
         return;
     }
 
