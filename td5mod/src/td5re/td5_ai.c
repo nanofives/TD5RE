@@ -1549,7 +1549,22 @@ void td5_ai_init_race_actor_runtime(void) {
         td5_ai_init_traffic_actors();
     }
 
-    td5_ai_refresh_route_state();
+    /* DO NOT call td5_ai_refresh_route_state() here. The per-slot refresh
+     * resets RS_ROUTE_TABLE_SELECTOR based on (span_raw >= ring_len), but
+     * at this point in init the actors are not yet spawned (span_raw is 0
+     * for every slot), so the call wipes the parity-based selector seeded
+     * above (slot 0/2/4 → 1, slot 1/3/5 → 0) back to 0 for all slots, then
+     * RS_ROUTE_TABLE_PTR follows the wrong selector and RS_TRACK_OFFSET_BIAS
+     * gets seeded from LEFT.TRK for the even (right-grid) slots that should
+     * be on RIGHT.TRK. The original InitializeRaceActorRuntime @ 0x00432e60
+     * does not call any refresh here — its loop tail is
+     * `local_4[0x35]=slot; ... RS[3]=parity; RS[0x1f]=-1;` then returns. The
+     * per-tick branch-vs-main re-selection happens inside UpdateRaceActors
+     * @ 0x00436A9E during actual sim ticks, after span_raw has been computed.
+     * P3 init-state diff (2026-05-15) showed this was the single biggest
+     * init-time delta — flipping every even slot's RS_ROUTE_TABLE_SELECTOR
+     * from 1 to 0 and shifting RS_TRACK_OFFSET_BIAS by ~300-370 fp8 units
+     * before the first countdown sub-tick. */
 
     for (int i = 0; i < g_active_actor_count; ++i) {
         TD5_LOG_I(LOG_TAG,
