@@ -5763,9 +5763,19 @@ void td5_physics_integrate_pose(TD5_Actor *actor)
              * the per-wheel airborne bits written by refresh_wheel_contacts
              * (force >= 0x801 @ 0x00403720) now drive downstream airborne
              * behavior. Match original 0x00406300 which snaps
-             * unconditionally once contact_count > 0. */
+             * unconditionally once contact_count > 0.
+             *
+             * [CONFIRMED via Ghidra decomp of IntegrateVehiclePoseAndContacts
+             * @ 0x00405E80, 2026-05-15]: the original writes render_pos_y
+             * exactly ONCE per tick — at the post-gravity, pre-snap step
+             * (matches our line 5468). The chassis-snap (this line) updates
+             * world_pos.y ONLY, leaving render_pos.y at the gravity-dropped
+             * value. The next frame's sub-tick interpolation pass propagates
+             * the new world_pos.y into render_pos.y via
+             * td5_physics_apply_render_interpolation. Removing the port's
+             * post-snap render_pos.y write closes the 7.4u (g/256) gap
+             * between port=226.5 and orig=219.078 on Honolulu sim_tick=1. */
             actor->world_pos.y = new_y;
-            actor->render_pos.y = (float)new_y * (1.0f / 256.0f);
 
           if (contact_count > 0) {
             /* Velocity-from-snap gate — literal port of original

@@ -186,3 +186,67 @@ The full work is multi-session. This session shipped the cheap fast wins (`wheel
 1. **B-remainder** — pilot-port `td5_track_update_probe_position` to match original per-probe walker output. ~16 fields × 5 ticks × 6 slots = ~480 diff reduction.
 2. **Wheel-contact-normals** — implement the ground-normal computation that writes `+0x230`. ~16 bytes × 5 ticks × 6 slots = ~480 diff reduction.
 3. **Initial-grid-position seed** — find what the original writes to `race_position` at race-init (before first UpdateRaceOrder); replicate in port. ~3 fields × 6 slots = 18 diff reduction but propagates into `grip_reduction` cascade.
+
+## Update — 2026-05-15 session 3 (gravity-gate audit)
+
+Continuation-prompt diagnosis claimed: "port chassis 7.4u above orig → wheels report force>0x800 → airborne bitmask 0x0F → suspension_response early-returns → gravity stays subtracted, leaving lvy=-128."
+
+**Runtime data refutes this premise**:
+
+| Tick | port wcb | orig wcb | port prev_air | orig prev_air |
+|------|---------:|---------:|--------------:|--------------:|
+|  1   |   0x00   |   0x00   |     0x00      |     0x00      |
+|  2..7|   0x00   |   0x00   |     0x00      |     0x00      |
+
+All 4 wheels are GROUNDED in both port and orig at every captured tick. The `if (lock == 0x0F)` early-return at `td5_physics.c:4380` never fires. The `if (cnt_active > 0)` branch at line 4538 DOES fire — gravity IS being added back to `linear_velocity_y` correctly.
+
+**Mathematical identity confirmed across all 7 ticks**:
+
+    linear_velocity_y_end_of_tick = world_pos.y_end - prev_frame_y_position
+
+Proof from `tools/diff_whole_state.py log/whole_state_port.bin tools/frida_csv/whole_state_original.bin --tick-range 1:8`:
+
+| Tick | port wpy/pfy/lvy | predicted | orig wpy/pfy/lvy | predicted |
+|------|------------------|-----------|------------------|-----------|
+| 1    | 57984/58112/-128 | -128 ✓    | 57984/57984/+0   | 0 ✓       |
+| 2    | 57856/57984/-128 | -128 ✓    | 57920/57984/-64  | -64 ✓     |
+| 3    | 57536/57856/-320 | -320 ✓    | 57600/57920/-320 | -320 ✓    |
+| 4    | 57536/57536/+0   | 0 ✓       | 57472/57600/-128 | -128 ✓    |
+
+Math: integrate_pose does `vy -= g; wpy += vy; wpy = new_y (snap); vy = (new_y - prev_y) - g`. Then suspension_response does `vy += bounce + g`. Net: `vy = new_y - prev_y`. The chassis-snap (td5_physics.c:5767 + 5826-5843) and suspension-restore (td5_physics.c:4559) cancel.
+
+**Real divergence**: at sim_tick=0 end (= prev_fy at tick 1):
+- port wpy = 58112
+- orig wpy = 57984
+- Δ = +128 fp = +0.5 world units
+
+The port's FIRST chassis-snap during countdown puts world_pos.y at 58112; the original's puts it at 57984. This 128-fp gap establishes the lvy=-128 at tick 1, then cascades: at tick 2 the port "catches up" to orig's wpy (port=57856, orig=57920 — now port LOWER by 64), drift continues.
+
+**Labeled fields downstream of this 128-fp spawn-y divergence** (4 fields, not 9):
+- `linear_velocity_y` (-128 vs 0)
+- `prev_frame_y_position` (58112 vs 57984)
+- `center_suspension_pos` (158 vs 162, off by 4)
+- `center_suspension_vel` (158 vs 162, off by 4)
+
+**Independent — `render_pos_y` (226.5 vs 219.078, 7.4u divergence)** turns out to be a SEPARATE port bug, not a downstream cascade:
+- port at td5_physics.c:5768 writes `render_pos.y = new_y / 256` AFTER the chassis-snap (= 57984/256 = 226.5)
+- orig writes `render_pos.y = wpy/256` ONLY BEFORE the chassis-snap (post-gravity, pre-snap), leaving `(prev_fy - g)/256 = (57984 - 1900)/256 = 219.078` ← matches the diff value exactly
+- Removing the `actor->render_pos.y = (float)new_y * (1.0f / 256.0f)` at td5_physics.c:5768 (NOT the x and z writes) would close the 7.4u gap to ~0.5u (still labeled, but accurate to ground-truth)
+
+### Conclusion
+
+The gravity-restore gate is not the bottleneck. The labeled cluster targeted by the continuation prompt actually has TWO root causes:
+
+1. **128-fp spawn-y mismatch at sim_tick=0 end** (4 labeled fields) — the FIRST chassis-snap during countdown produces a different new_y in port vs orig. new_y formula:
+   ```
+   new_y = average(wheel_contact_pos[i].y + rotate_body_to_world_y(body_offset) * -256)
+   ```
+   With wheel_contact_pos.y matching (ground_y at same X,Z), divergence is in either:
+   - Rotation matrix (port float-matrix vs original FPU 80-bit precision)
+   - Wheel body offsets (cwy - sp_div - susp_offset) — port `wheel_suspension_pos` differs from orig at tick 1 by 4-11 fp units
+   
+   Investigation requires Frida trace of original at 0x004062EE-0x00406307 during countdown sub-tick=0.
+
+2. **render_pos_y double-update** (1 labeled field, 7.4u → 0.5u improvement) — td5_physics.c:5768 over-updates render_pos.y after the chassis-snap. The orig leaves render_pos.y at the pre-snap (post-gravity) value. Low-risk single-line removal; visual impact: car body Y-renders 7.4u lower per frame, matching original.
+
+**Net potential**: ~5 labeled (29 → 24) if both fixes ship. Falls short of the 29→20 goal stated in the prompt; the remaining 4-field gap requires a different cluster (steering 2x = 6 fields, or wheel_contact_normals = 1 field, or FPU-precision wheel_world_hires_y = 4 fields).
