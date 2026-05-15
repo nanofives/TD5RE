@@ -2704,9 +2704,22 @@ void td5_ai_update_track_behavior(int slot) {
                  * those fields itself.
                  *
                  *   MOV [EDI + 0x4afc48], 0x473cc8   ; RS_SCRIPT_BASE_PTR
-                 *   MOV [EDI + 0x4afc4c], 0x473cc8   ; RS_SCRIPT_IP        */
+                 *   MOV [EDI + 0x4afc4c], 0x473cc8   ; RS_SCRIPT_IP
+                 *
+                 * IMPORTANT semantic divergence vs original RS_SCRIPT_IP:
+                 * the original at 0x00437405-0x0043740B dispatches opcodes via
+                 *   MOV EAX, [ESI + 0xec]   ; ip = raw pointer to opcode dword
+                 *   MOV ECX, [EAX]          ; *ip  (pointer-deref)
+                 * so writing the program-base pointer into rs[+0xEC] means
+                 * "ip points at opcode[0]". The PORT implements ip as an
+                 * INTEGER INDEX and dispatches via `base[ip]` (see line ~2435).
+                 * The index-equivalent of "start of program" is 0. Writing the
+                 * pointer value (0x473cc8 / ~5M) here was treated as an index
+                 * and crashed AdvanceActorTrackScript's `mov (%edx,%ebp,4),%eax`
+                 * with EBP=ip=0x5194D8, walking off into the .rdata texture
+                 * table at 0x49D1A4. Reverted to ip=0 to match port semantics. */
                 rs[RS_SCRIPT_BASE_PTR] = (int32_t)(intptr_t)g_script_init_recovery;
-                rs[RS_SCRIPT_IP]       = (int32_t)(intptr_t)g_script_init_recovery;
+                rs[RS_SCRIPT_IP]       = 0;
                 td5_pilot_emit_00434FE0_leave(slot, rs, actor);
                 return;
             }
