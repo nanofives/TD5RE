@@ -5465,19 +5465,29 @@ void td5_physics_integrate_pose(TD5_Actor *actor)
      * with `>> 12` truncations after each multiply — those LSB losses
      * propagated through `body_wy * m[4]` in chassis-snap and produced a
      * +128 FP averaged delta in world_pos.y at sim_tick=1.
-     * [E1 / 2026-05-02 — physics_trace.csv ground-truth diff] */
+     * [E1 / 2026-05-02 — physics_trace.csv ground-truth diff]
+     *
+     * 2026-05-15 PRECISION FIX: replaced `(float)cos_fixed12(a) * (1/4096)`
+     * with direct `CosFloat12bit(a)`. The earlier path went int32-truncate →
+     * float → divide, which clamps tiny `sin(small_angle)` outputs to 0
+     * (cast to int32 truncates toward zero). Original 0x0042E1E0 reads
+     * `g_sinCosFloatTable` directly as float32; for example at slot-0 tick-1
+     * with near-zero roll/pitch, the original keeps sin(small) at its
+     * float32 precision (~1e-3 .. 1e-6) while the port collapsed it to 0,
+     * producing rotation_matrix.m[3] = port=0 vs orig=−7e−11 and cascading
+     * into wheel_world_positions_hires.y off-by-1 LSB and probe_FR_x ±1
+     * world unit. [whole_state_diff slot-0 tick-1 labelled cluster, 2026-05-15] */
     {
         int32_t roll_a  = actor->display_angles.roll  & 0xFFF;
         int32_t yaw_a   = actor->display_angles.yaw   & 0xFFF;
         int32_t pitch_a = actor->display_angles.pitch & 0xFFF;
 
-        const float k = 1.0f / 4096.0f;
-        float cr = (float)cos_fixed12(roll_a)  * k;
-        float sr = (float)sin_fixed12(roll_a)  * k;
-        float cy = (float)cos_fixed12(yaw_a)   * k;
-        float sy = (float)sin_fixed12(yaw_a)   * k;
-        float cp = (float)cos_fixed12(pitch_a) * k;
-        float sp = (float)sin_fixed12(pitch_a) * k;
+        float cr = CosFloat12bit((unsigned int)roll_a);
+        float sr = SinFloat12bit(roll_a);
+        float cy = CosFloat12bit((unsigned int)yaw_a);
+        float sy = SinFloat12bit(yaw_a);
+        float cp = CosFloat12bit((unsigned int)pitch_a);
+        float sp = SinFloat12bit(pitch_a);
 
         actor->rotation_matrix.m[0] = sp * sy * sr + cp * cy;
         actor->rotation_matrix.m[1] = cp * sy * sr - sp * cy;
@@ -5633,18 +5643,20 @@ void td5_physics_integrate_pose(TD5_Actor *actor)
         }
 
         /* Rebuild rotation_matrix from the (possibly partially updated)
-         * display_angles in float precision (E1 fix — see line ~4361). */
+         * display_angles in float precision (E1 fix — see line ~4361).
+         * 2026-05-15: switched from int Q12 trig to LUT-style float trig
+         * (CosFloat12bit / SinFloat12bit) to preserve sub-Q12 magnitudes
+         * for near-zero pitch/roll. Mirrors the per-tick builder above. */
         int32_t roll_a  = actor->display_angles.roll  & 0xFFF;
         int32_t yaw_a   = actor->display_angles.yaw   & 0xFFF;
         int32_t pitch_a = actor->display_angles.pitch & 0xFFF;
 
-        const float k = 1.0f / 4096.0f;
-        float cr = (float)cos_fixed12(roll_a)  * k;
-        float sr = (float)sin_fixed12(roll_a)  * k;
-        float cy = (float)cos_fixed12(yaw_a)   * k;
-        float sy = (float)sin_fixed12(yaw_a)   * k;
-        float cp = (float)cos_fixed12(pitch_a) * k;
-        float sp = (float)sin_fixed12(pitch_a) * k;
+        float cr = CosFloat12bit((unsigned int)roll_a);
+        float sr = SinFloat12bit(roll_a);
+        float cy = CosFloat12bit((unsigned int)yaw_a);
+        float sy = SinFloat12bit(yaw_a);
+        float cp = CosFloat12bit((unsigned int)pitch_a);
+        float sp = SinFloat12bit(pitch_a);
 
         actor->rotation_matrix.m[0] = sp * sy * sr + cp * cy;
         actor->rotation_matrix.m[1] = cp * sy * sr - sp * cy;
@@ -6058,14 +6070,15 @@ static void update_vehicle_pose_from_physics(TD5_Actor *actor)
         int32_t yaw_a   = actor->display_angles.yaw   & 0xFFF;
         int32_t pitch_a = actor->display_angles.pitch  & 0xFFF;
 
-        /* Float-precision matrix build (E1 fix — see line ~4361). */
-        const float k = 1.0f / 4096.0f;
-        float cr = (float)cos_fixed12(roll_a)  * k;
-        float sr = (float)sin_fixed12(roll_a)  * k;
-        float cy = (float)cos_fixed12(yaw_a)   * k;
-        float sy = (float)sin_fixed12(yaw_a)   * k;
-        float cp = (float)cos_fixed12(pitch_a) * k;
-        float sp = (float)sin_fixed12(pitch_a) * k;
+        /* Float-precision matrix build (E1 fix — see line ~4361).
+         * 2026-05-15: switched to LUT-style float trig to preserve
+         * sub-Q12 magnitudes for near-zero angles (see line ~4625). */
+        float cr = CosFloat12bit((unsigned int)roll_a);
+        float sr = SinFloat12bit(roll_a);
+        float cy = CosFloat12bit((unsigned int)yaw_a);
+        float sy = SinFloat12bit(yaw_a);
+        float cp = CosFloat12bit((unsigned int)pitch_a);
+        float sp = SinFloat12bit(pitch_a);
 
         actor->rotation_matrix.m[0] = sp * sy * sr + cp * cy;
         actor->rotation_matrix.m[1] = cp * sy * sr - sp * cy;
