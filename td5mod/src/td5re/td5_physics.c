@@ -4042,8 +4042,11 @@ void td5_physics_integrate_suspension(TD5_Actor *actor, int32_t accel_x, int32_t
          * arithmetic semantics on whatever values the port writes (in case
          * the port's hires write later changes), use the round-to-zero shift
          * which matches the original's `(x + sign_bias) >> 8` convention. */
-        const int32_t arm_x = sar8_rz(actor->wheel_world_positions_hires[i].x) - wpx_scaled;
-        const int32_t arm_z = sar8_rz(actor->wheel_world_positions_hires[i].z) - wpz_scaled;
+        /* Hires now stored in raw world units (the <<8 was removed in
+         * 6595-6597, matching original 0x00403720 semantics). sar8_rz()
+         * is no longer needed here -- consume the value directly. */
+        const int32_t arm_x = actor->wheel_world_positions_hires[i].x - wpx_scaled;
+        const int32_t arm_z = actor->wheel_world_positions_hires[i].z - wpz_scaled;
 
         /* proj = arm_x * accel_x + arm_z * accel_z (computed as
          * arm_z*accel_z then ADD arm_x*accel_x in the listing — order
@@ -4154,15 +4157,16 @@ void td5_physics_integrate_suspension(TD5_Actor *actor, int32_t accel_x, int32_t
          * FR.x))` has low 8 bits still zero (since sum/2 of two LSB-8-zero
          * values has low 7 bits zero). Then `>>8` is exact regardless of
          * sign. We still use the round-to-zero idiom to mirror the original. */
+        /* Hires now stored in raw world units (see 6595-6597). The original's
+         * mid = (FL + FR)/2 then arm = mid - (world_pos >> 8) -- both operands
+         * already in world units; no sar8_rz pass needed. */
         const int32_t fl_x = actor->wheel_world_positions_hires[0].x;
         const int32_t fr_x = actor->wheel_world_positions_hires[1].x;
         const int32_t fl_z = actor->wheel_world_positions_hires[0].z;
         const int32_t fr_z = actor->wheel_world_positions_hires[1].z;
 
-        const int32_t mid_x_fp = sar1_rz(fl_x + fr_x);   /* 24.8 FP /2 */
-        const int32_t mid_z_fp = sar1_rz(fl_z + fr_z);
-        const int32_t front_mid_x = sar8_rz(mid_x_fp);   /* round-to-zero down to world units */
-        const int32_t front_mid_z = sar8_rz(mid_z_fp);
+        const int32_t front_mid_x = sar1_rz(fl_x + fr_x);
+        const int32_t front_mid_z = sar1_rz(fl_z + fr_z);
 
         const int32_t arm_x = front_mid_x - wpx_scaled;
         const int32_t arm_z = front_mid_z - wpz_scaled;
@@ -5224,8 +5228,11 @@ static void integrate_traffic_pose(TD5_Actor *actor)
         actor->display_angles.pitch = (int16_t)((pitch_from_normal + susp_pitch_corr) & 0xFFF);
     }
 
-    /* Yaw from euler accumulator (only axis using accumulators for traffic) */
-    actor->display_angles.yaw = (int16_t)((actor->euler_accum.yaw >> 8) & 0xFFF);
+    /* Yaw from euler accumulator (only axis using accumulators for traffic).
+     * No 0xFFF mask -- original (0x4063AA-style) truncates via int16 store
+     * only; mask flipped sign bit for negative accumulators. Matches the
+     * unmasked fix at 5978 for the player/AI integrator path. */
+    actor->display_angles.yaw = (int16_t)(actor->euler_accum.yaw >> 8);
 
     /* Keep vertical dynamics zeroed — traffic has no gravity or suspension */
     actor->linear_velocity_y = 0;
@@ -5417,10 +5424,12 @@ void td5_physics_integrate_pose(TD5_Actor *actor)
      * [precise-port pilot 00445B90, 2026-05-14] */
     td5_track_compute_runtime_heading_normal(actor);
 
-    /* 4. Convert accumulators to 12-bit display angles */
-    actor->display_angles.roll  = (int16_t)((actor->euler_accum.roll >> 8) & 0xFFF);
-    actor->display_angles.yaw   = (int16_t)((actor->euler_accum.yaw >> 8) & 0xFFF);
-    actor->display_angles.pitch = (int16_t)((actor->euler_accum.pitch >> 8) & 0xFFF);
+    /* 4. Convert accumulators to display angles. NO 0xFFF mask -- original
+     * truncates via int16 store; explicit mask flipped sign bit. Matches
+     * 5978 unmasked fix from the precise-port pilot 004063A0. */
+    actor->display_angles.roll  = (int16_t)(actor->euler_accum.roll  >> 8);
+    actor->display_angles.yaw   = (int16_t)(actor->euler_accum.yaw   >> 8);
+    actor->display_angles.pitch = (int16_t)(actor->euler_accum.pitch >> 8);
 
     /* 5. Build rotation matrix from euler angles in FLOAT precision.
      *
@@ -6280,6 +6289,19 @@ void td5_physics_refresh_wheel_contacts(TD5_Actor *actor)
         actor->wheel_probes[i].sub_lane_index    = (int8_t)actor->track_sub_lane_index;
     }
 
+    /* Step 1b: same for body_probes (corners). The original runs TWO
+     * symmetric loops -- the second writes to actor+0x00 (body_probes).
+     * Whole-state diff 2026-05-15 showed body_probes[0..3] all zero on
+     * port vs populated on original. Without this, UpdateRaceOrder and
+     * scripted-recovery mode read empty body-corner probe state. */
+    for (int i = 0; i < 4; i++) {
+        actor->body_probes[i].span_index       = actor->track_span_raw;
+        actor->body_probes[i].span_normalized   = actor->track_span_normalized;
+        actor->body_probes[i].span_accumulated  = actor->track_span_accumulated;
+        actor->body_probes[i].span_high_water   = actor->track_span_high_water;
+        actor->body_probes[i].sub_lane_index    = (int8_t)actor->track_sub_lane_index;
+    }
+
     /* gap_270 uses the pre-snap transform results, not post-snap positions.
      * Read old values from the persistent per-slot array (set at end of this
      * function from this frame's transform output, before Y-snap). */
@@ -6592,9 +6614,14 @@ void td5_physics_refresh_wheel_contacts(TD5_Actor *actor)
             matrix[11] = actor->render_pos.z;
             int32_t hub[3];
             td5_transform_short_vec3_by_render_matrix_rounded(body_off, hub, matrix);
-            actor->wheel_world_positions_hires[i].x = hub[0] << 8;
-            actor->wheel_world_positions_hires[i].y = hub[1] << 8;
-            actor->wheel_world_positions_hires[i].z = hub[2] << 8;
+            /* NO <<8 -- the original (0x40388A-0x40388E) writes the rounded
+             * world-unit value straight into actor+0x298. Comment above
+             * documents this; previous version applied the shift in error,
+             * producing values 256x too large. Verified via whole-state diff
+             * 2026-05-15: port hub<<8 = -17829120 vs original = -69644 = hub. */
+            actor->wheel_world_positions_hires[i].x = hub[0];
+            actor->wheel_world_positions_hires[i].y = hub[1];
+            actor->wheel_world_positions_hires[i].z = hub[2];
 
             td5_pilot_emit_0042EB10(
                 (uint32_t)td5_trace_current_sim_tick(),
@@ -8408,8 +8435,27 @@ void td5_physics_init_vehicle_runtime(void)
         /* --- Cached suspension travel: actor+0x324 = sext_i32(phys+0x78) ---
          * Faithful port of MOVSX EDX, word ptr [EBX + 0x78]; MOV [ESI - 0x54], EDX
          * @ 0x0042F1AC. EBX = local_c = gVehiclePhysicsTable (port's tuning_data_ptr).
-         * Field 0x78 of the physics table is the suspension/brake multiplier. */
-        if (actor->tuning_data_ptr) {
+         * Field 0x78 of the physics table is the suspension/brake multiplier.
+         *
+         * Read from s_loaded_tuning (the RAW carparam.dat content) rather
+         * than actor->tuning_data_ptr (which has already had `<<1` Normal
+         * difficulty scaling applied at line 8284). Original's cache at
+         * 0x42F1AC sees the unscaled value (=96 on Viper). Verified via
+         * whole-state diff 2026-05-15: port pre-fix cached 192 = 96<<1. */
+        /* Slot 0 with carparam.dat loaded: read RAW unscaled value (96 on
+         * Viper). Slots 1..5 take the AI-template path in bind_default which
+         * doesn't apply the `<<1` Normal-difficulty scaling to their tuning
+         * buffer, so reading the (already-AI-template) tuning_data_ptr is
+         * correct for them. Slots 6-11 (traffic) fall back to tuning_data_ptr.
+         *
+         * Whole-state diff 2026-05-15: this restriction restores slots 3/5
+         * back to their pre-fix values (which matched original's AI-template
+         * derived cache). */
+        int is_slot0_carparam = (slot == 0 && s_carparam_loaded[0]);
+        if (is_slot0_carparam) {
+            int16_t *raw_tuning = (int16_t *)s_loaded_tuning[0];
+            actor->cached_car_suspension_travel = (int32_t)raw_tuning[0x78 / 2];
+        } else if (actor->tuning_data_ptr) {
             int16_t *phys_local = (int16_t *)actor->tuning_data_ptr;
             actor->cached_car_suspension_travel = (int32_t)phys_local[0x78 / 2];
         }

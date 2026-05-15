@@ -31,6 +31,7 @@
 #endif
 #include "td5_vfx.h"
 #include "td5_trace.h"
+#include "td5_trace_whole_state.h"
 
 int td5_trace_current_sim_tick(void) {
     return g_td5.simulation_tick_counter;
@@ -1855,6 +1856,44 @@ static void td5_game_trace_stage_impl(const char *stage, unsigned int stage_bit,
         td5_trace_shutdown();
         g_td5.quit_requested = 1;
         return;
+    }
+
+    /* Whole-state snapshot -- INDEPENDENT of the per-module CSV trace.
+     * Fires before td5_trace_begin_frame so it works with [Trace] RaceTrace=0.
+     * Captures the full 6 x 0x388 actor array + a 128-byte globals blob each
+     * POST_PROGRESS tick. Counterpart: tools/frida_whole_state_snapshot.js
+     * hooks the same logical instant on the original binary.
+     *
+     * POST_PROGRESS only (skip COUNTDOWN): paused-physics countdown sub-ticks
+     * all carry sim_tick=0 so capturing them just wastes the MaxTicks budget
+     * before any actual race tick advances the counter. */
+    if ((stage_bit & TD5_TRACE_STG_POST_PROGRESS) &&
+        td5_trace_whole_state_is_open() && g_actor_table_base)
+    {
+        TD5_WholeStateGlobals ws;
+        memset(&ws, 0, sizeof(ws));
+        ws.game_state              = (int32_t)g_td5.game_state;
+        ws.game_paused             = (int32_t)g_td5.paused;
+        ws.race_end_fade_state     = (int32_t)g_td5.race_end_fade_state;
+        ws.sim_time_accumulator    = g_td5.sim_time_accumulator;
+        ws.sim_tick_budget         = g_td5.sim_tick_budget;
+        ws.simulation_tick_counter = (int32_t)g_td5.simulation_tick_counter;
+        ws.normalized_frame_dt     = g_td5.normalized_frame_dt;
+        ws.instant_fps             = g_td5.instant_fps;
+        ws.view_count              = (int32_t)g_td5.viewport_count;
+        ws.splitscreen_count       = (int32_t)g_td5.split_screen_mode;
+        for (int i = 0; i < TD5_MAX_RACER_SLOTS; i++) {
+            ws.race_slot_state_table[i] =
+                ((uint32_t)s_slot_state[i].state       <<  0) |
+                ((uint32_t)s_slot_state[i].companion_1 <<  8) |
+                ((uint32_t)s_slot_state[i].companion_2 << 16) |
+                ((uint32_t)s_slot_state[i].reserved    << 24);
+            ws.race_slot_player_flags[i] =
+                (s_slot_state[i].state == 1) ? 1 : 0;
+            ws.race_order_array[i] = s_race_order[i];
+        }
+        td5_trace_whole_state_emit(frame, sim_tick,
+                                   (const void *)g_actor_table_base, &ws);
     }
 
     if (!td5_trace_begin_frame(frame))
