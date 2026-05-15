@@ -80,6 +80,58 @@ Top-3 likely highest-leverage fixes:
 
 Each is a separate session-sized investigation per the existing precise-port workflow.
 
+## Update — 2026-05-15 session 2
+
+Shipped fixes (commits 86f7c21 + ed157cf):
+
+| # | File | Fix |
+|---|---|---|
+| 7 | `td5_physics.c:6284-6303` | Probe init loops now seed only `span_index` + `sub_lane_index` (matching original's `*(short *)actor = local_24; actor->field_0xc = local_20` writes at 0x00403720). Removed wrong `span_normalized/accumulated/high_water` seeds that polluted probes with the actor's main-track values. |
+| 8 | `td5_track.c:2898+` | New `td5_track_compute_probe_contact_vertices()` mirrors the prefix of `ComputeActorTrackContactNormal[Extended]` (0x00445450/0x004457E0) — writes `contact_vertex_A/B` to the probe from `(span_index, sub_lane_index)` via the strip vertex bases + `k_quad_vertex_offsets[type][col]`. |
+| 9 | `td5_physics.c:6404-6422` | Called the new helper after each wheel-probe walker invocation. |
+| 10 | `td5_physics.c:6657-6710` (replaces wheel-alias) | Faithful port of the original's body_probes loop (second loop in 0x00403720). Reads body corner offsets from `car_definition_ptr[0..15]` (4 × short[4], 8-byte stride), transforms via the `(rot, render_pos)` render matrix, shifts <<8 to 24.8 FP, writes to `probe_FL/FR/RL/RR`. Then calls walker + contact-vertex helper. Replaces prior alias `probe_FL = wheel_contact_pos[0]` which used wheel offsets (off by ~230-400 world units). |
+| 11 | Same loop | Overwrite `probe_*.y` with the barycentric ground height post-walker, mirroring the original's `ComputeActorTrackContactNormal` (0x00445450) which writes `*piVar8+1` with `height + strip_origin_y * 256`. |
+| 12 | `td5_physics.c:6457-6469` | Resolve `surface_type_chassis` from the probe's span+lane via `td5_track_get_surface_type(actor, 4 + i)` rather than echoing the stale (=0) `actor->surface_type_chassis`. |
+
+### Per-tick divergence reduction (Honolulu AI Viper)
+
+| Tick | Session start | After session 2 |
+|------|--------------:|----------------:|
+|   1  |           742 |             429 |
+|   2  |           843 |             524 |
+|   3  |           872 |             570 |
+|   4  |           881 |             593 |
+
+Per-tick reduction: **~42% on tick 1**.
+
+### Slot-0 tick-1 labeled count
+
+| Stage | Labeled |
+|-------|--------:|
+| Session start | 48 |
+| After probe-init fix + contact_vertex helper (8) | 46 |
+| After body-corner faithful port (9, 10) | 45 |
+| After ground-height post-walker write (11) | 41 |
+| After surface_type-from-probe fix (12) | **40** |
+
+### Why the labeled count didn't drop below 30
+
+The goal anticipated `~16` per-probe labeled fields would be eliminated, dropping ~48 → <30. In practice the per-probe walker fix eliminated **mostly anonymous byte-level divergences** (probe sub-fields appear as `(?)` entries in the diff because the diff tool labels at struct-array offset, not at sub-field offset). The all-divergences count dropped by 313 (tick 1) but the **labeled** count only dropped by 8.
+
+### Remaining 40 labeled (slot-0 tick-1) — cluster summary
+
+| Cluster | Fields | Root cause | Investigation size |
+|---------|-------:|------------|--------------------|
+| FPU precision (probe_FR_x/z, wheel_contact_FL_x, wheel_world_hires × 8, wheel_suspension/spring_dv × 8) | ~20 | Single-bit float rounding mismatch (`floorf` vs FPU `FISTP` rounding mode) | Precise-port FPU control word + per-step audit |
+| Steering 2x cascade (steering_command, angular_velocity_yaw, linear_velocity x/y/z, euler_accum_yaw) | ~6 | `UpdateActorSteeringBias` may run more than once per tick in the port | Frida-trace original on Honolulu to find call cadence |
+| Race-init state (grip_reduction, prev_race_position) | 2 | `race_position` not pre-set to starting grid position on tick 0 | Port grid-order computation from race-init |
+| Float drift (render_pos x/y/z, rotation_matrix 16 bytes) | 4 | Cumulative FPU/float-32 vs FPU/float-80 differences in matrix builder | Audit `td5_physics_integrate_pose` matrix construction |
+| Y-snap chain (center_suspension_pos/vel, prev_frame_y_position) | 3 | Likely cascades from render_pos.y / chassis-snap | Solve render_pos.y first |
+| Unported state (wheel_contact_normals 16-byte blob) | 1 | Original writes per-wheel surface normal at `actor+0x230`; port leaves zero | Find writer in original (not in ComputeActorTrackContactNormal) |
+| Misc | 4 | world_pos_x/z (small), euler_accum_yaw (small), etc | Cascade-resolve |
+
+Each cluster is a separate session-sized investigation. None are quick wins. The per-probe walker chapter is complete; the next milestone (FPU precision parity) requires precise-port matching of `td5_transform_short_vec3_by_render_matrix_rounded` against the original FISTP rounding semantics.
+
 ## Why the goal "all resolved" won't close in one session
 
 After 6 shipped fixes the remaining ~742 tick-1 divergences split as:
