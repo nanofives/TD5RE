@@ -330,7 +330,7 @@ static int32_t ai_angle_from_vector(int32_t dx, int32_t dz);
 /* Pre-loop helpers for the per-slot bias-clamp/boundary chain ported from
  * UpdateRaceActors @ 0x00436A70. Gated behind g_td5.ini.experimental_bias_clamp. */
 static void td5_ai_update_actor_track_bounds(int slot);
-static int  td5_ai_classify_track_offset_clamp(int slot, int track_offset_bias);
+static int  td5_ai_classify_track_offset_clamp_v2(int slot, int track_offset_bias);
 static int  td5_ai_remap_for_classify(int span_normalized);
 
 static int32_t ai_cos_fixed12(int32_t angle) {
@@ -922,7 +922,7 @@ static void td5_ai_refresh_route_state_slot(int slot) {
         /* Step 7-9: ClassifyTrackOffsetClamp + bias rewrite
          * [CONFIRMED @ 0x00436BFE-0x00436CFE] */
         {
-            int classify = td5_ai_classify_track_offset_clamp(
+            int classify = td5_ai_classify_track_offset_clamp_v2(
                 slot, rs[RS_TRACK_OFFSET_BIAS]);
             int16_t *cardef = (int16_t *)(intptr_t)ACTOR_I32(actor, ACTOR_CAR_DEF_PTR);
             const uint8_t *table = (const uint8_t *)(intptr_t)rs[RS_ROUTE_TABLE_PTR];
@@ -1954,7 +1954,7 @@ int td5_ai_update_route_threshold(int slot) {
  * [CONFIRMED @ disassembly 0x004337E0-0x00433CDE — full pool14 audit].
  */
 
-/* td5_ai_classify_track_offset_clamp: byte-faithful port of
+/* td5_ai_classify_track_offset_clamp_v2: byte-faithful port of
  * ClassifyTrackOffsetClamp @ 0x004368A0. Returns 0,1,2 to select which side's
  * cardef offset to apply in the target-offset formula.
  *   0 = in range (both samples produce span_progress >= 0xFF on first try
@@ -1981,7 +1981,7 @@ int td5_ai_update_route_threshold(int slot) {
  * route), which could produce the wrong iVar5 if the helper is not
  * idempotent on already-remapped spans. The original applies it ONCE.
  */
-static int td5_ai_classify_track_offset_clamp(int param_1, int param_2) {
+static int td5_ai_classify_track_offset_clamp_v2(int param_1, int param_2) {
     int32_t *rs = route_state(param_1);
     char *self = actor_ptr(param_1);
     int iVar3 = (int)ACTOR_I16(self, ACTOR_SPAN_NORMALIZED);
