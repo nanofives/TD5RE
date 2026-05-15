@@ -305,6 +305,14 @@ typedef struct TD5_GlobalState {
          * back. Default 0 preserves faithful in-memory-only behavior. */
         int  replay_persist_to_disk;
         int  test_cup_roundtrip; /* if >0, run td5_save_test_cup_roundtrip() during startup and exit with the result */
+        /* Experimental: enable the per-slot pre-loop ClassifyTrackOffsetClamp
+         * + bias-rewrite + surface/contact clamp + boundary writeback chain
+         * from UpdateRaceActors @ 0x00436A70 inside
+         * td5_ai_refresh_route_state_slot. Default 0 = current behaviour
+         * (selector + forward_track_component only). 1 = run the missing
+         * pre-loop body byte-faithfully against the original. Gated so the
+         * change can be A/B-tested per session. */
+        int  experimental_bias_clamp;
     } ini;
 
 } TD5_GlobalState;

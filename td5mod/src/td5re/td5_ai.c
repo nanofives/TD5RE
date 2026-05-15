@@ -115,7 +115,15 @@
 #define ACTOR_THROTTLE_STATE      0x36F   /* byte  */
 #define ACTOR_SLOT_INDEX          0x375   /* byte  */
 #define ACTOR_VEHICLE_MODE        0x379   /* byte  */
+#define ACTOR_TRACK_CONTACT_FLAG  0x37B   /* byte: V2W contact flag (1=wall, 2=boundary) */
 #define ACTOR_ENCOUNTER_STATE     0x384   /* int32 */
+
+/* Wheel contact probe positions (4 × Vec3_Fixed @ +0x90, stride 0x0C).
+ * Used by UpdateActorTrackBounds [CONFIRMED @ 0x004366E0-0x00436891]. */
+#define ACTOR_PROBE_FL_BASE       0x090   /* int32 x,y,z = probe_FL */
+#define ACTOR_PROBE_FR_BASE       0x09C   /* int32 x,y,z = probe_FR */
+#define ACTOR_PROBE_RL_BASE       0x0A8   /* int32 x,y,z = probe_RL */
+#define ACTOR_PROBE_RR_BASE       0x0B4   /* int32 x,y,z = probe_RR */
 
 /* ========================================================================
  * Helper accessors (cast through char* arithmetic)
@@ -318,6 +326,12 @@ static int32_t ai_cos_fixed12(int32_t angle);
 static int32_t ai_sin_fixed12(int32_t angle);
 static void td5_ai_refresh_route_state_slot(int slot);
 static int32_t ai_angle_from_vector(int32_t dx, int32_t dz);
+
+/* Pre-loop helpers for the per-slot bias-clamp/boundary chain ported from
+ * UpdateRaceActors @ 0x00436A70. Gated behind g_td5.ini.experimental_bias_clamp. */
+static void td5_ai_update_actor_track_bounds(int slot);
+static int  td5_ai_classify_track_offset_clamp(int slot, int track_offset_bias);
+static int  td5_ai_remap_for_classify(int span_normalized);
 
 static int32_t ai_cos_fixed12(int32_t angle) {
     /* Use standard math — the quadratic approximation was catastrophically
@@ -547,6 +561,249 @@ void td5_ai_refresh_route_state(void) {
     }
 }
 
+/* ========================================================================
+ * UpdateActorTrackBounds @ 0x004366E0 (port byte-faithful)
+ *
+ * Samples the actor's four wheel-contact probe positions (+0x90 .. +0xB7,
+ * stride 0x0C) against the actor's current span_raw, stores the four progress
+ * dwords into route_state scratch slots 10..13, computes min/max into RS[5]
+ * and RS[6], copies RS[7]=RS[11] / RS[8]=RS[10], and caches signed offsets
+ * (computed against both LEFT and RIGHT route tables at the min/max progress)
+ * into RS_RIGHT_BOUNDARY_A/B (0x10/0x11) and RS_RIGHT_EXTENT_A/B (0x12/0x13).
+ *
+ * The min/max + four signed-offset writes are consumed by the per-slot
+ * bias-clamp chain at 0x00436BFE-0x00436E50 and ultimately drive the four
+ * boundary writebacks (RS_LEFT/RIGHT_BOUNDARY + RS_ACTIVE_LOWER/UPPER_BOUND).
+ * ======================================================================== */
+static void td5_ai_update_actor_track_bounds(int slot) {
+    int32_t *rs;
+    char *actor;
+    int span_raw;
+    int span_norm;
+    int32_t progress[4];
+    int32_t min_p, max_p;
+    const uint8_t *left_table  = g_route_tables[0];
+    const uint8_t *right_table = g_route_tables[1];
+
+    if (!g_route_state_base || !g_actor_base ||
+        slot < 0 || slot >= TD5_MAX_TOTAL_ACTORS) {
+        return;
+    }
+
+    rs    = route_state(slot);
+    actor = actor_ptr(slot);
+    span_raw  = (int)(int16_t)ACTOR_I16(actor, ACTOR_SPAN_RAW);
+    span_norm = (int)(int16_t)ACTOR_I16(actor, ACTOR_SPAN_NORMALIZED);
+
+    /* Four wheel-contact probe ComputeTrackSpanProgress calls.
+     * [CONFIRMED @ 0x004366E0-0x00436749] — actor+0x90, +0x9C, +0xA8, +0xB4. */
+    {
+        const int probe_offsets[4] = {
+            ACTOR_PROBE_FL_BASE, ACTOR_PROBE_FR_BASE,
+            ACTOR_PROBE_RL_BASE, ACTOR_PROBE_RR_BASE
+        };
+        for (int i = 0; i < 4; ++i) {
+            int32_t *probe = (int32_t *)(actor + probe_offsets[i]);
+            int64_t prog64 = td5_track_compute_span_progress(span_raw, probe);
+            progress[i] = (int32_t)(uint32_t)(prog64 & 0xFFFFFFFFu);
+            rs[10 + i] = progress[i];  /* RS scratch 10..13 = DAT_004afb88..94 */
+        }
+    }
+
+    /* min/max scan + copy [CONFIRMED @ 0x00436798-0x004367DD]:
+     *   min  = clamp init 0x10000, max = init -0x10000
+     *   RS[5] = min, RS[6] = max
+     *   RS[7] = RS[11] (probe_FR progress)
+     *   RS[8] = RS[10] (probe_FL progress) */
+    min_p =  0x10000;
+    max_p = -0x10000;
+    for (int i = 0; i < 4; ++i) {
+        if (progress[i] < min_p) min_p = progress[i];
+        if (progress[i] > max_p) max_p = progress[i];
+    }
+    rs[5] = min_p;
+    rs[6] = max_p;
+    rs[7] = progress[1];
+    rs[8] = progress[0];
+
+    /* Four signed-offset writes [CONFIRMED @ 0x004367E0-0x00436878]:
+     *   RS[0x10] = signed_offset(span_raw, min, LEFT[span_norm*3])
+     *   RS[0x11] = signed_offset(span_raw, max, LEFT[span_norm*3])
+     *   RS[0x12] = signed_offset(span_raw, min, RIGHT[span_norm*3])
+     *   RS[0x13] = signed_offset(span_raw, max, RIGHT[span_norm*3])
+     *
+     * NB: the route_byte read is keyed on span_normalized (not span_raw)
+     * — the original reads actor->field_0x82, never +0x80, in this block. */
+    {
+        int route_byte_left  = 0;
+        int route_byte_right = 0;
+        if (left_table && span_norm >= 0) {
+            route_byte_left  = (int)left_table[(size_t)(unsigned)span_norm * 3u];
+        }
+        if (right_table && span_norm >= 0) {
+            route_byte_right = (int)right_table[(size_t)(unsigned)span_norm * 3u];
+        }
+        rs[RS_RIGHT_BOUNDARY_A] =
+            td5_track_compute_signed_offset(span_raw, min_p, route_byte_left);
+        rs[RS_RIGHT_BOUNDARY_B] =
+            td5_track_compute_signed_offset(span_raw, max_p, route_byte_left);
+        rs[RS_RIGHT_EXTENT_A] =
+            td5_track_compute_signed_offset(span_raw, min_p, route_byte_right);
+        rs[RS_RIGHT_EXTENT_B] =
+            td5_track_compute_signed_offset(span_raw, max_p, route_byte_right);
+    }
+}
+
+/* ========================================================================
+ * ClassifyTrackOffsetClamp @ 0x004368A0 (port byte-faithful)
+ *
+ * Samples the planned look-ahead position 4 spans forward (with
+ * junction-table remapping when self is on the RIGHT route) and projects it
+ * onto the next span. Returns:
+ *   0 = both samples in-range (no clamp)
+ *   1 = first sample (cardef+8 offset) projects past the span end → clamp
+ *   2 = second sample (cardef+0 offset) projects backwards → clamp
+ * Used to pick which side of the bounding box should re-seed the bias on
+ * the next sim_tick.
+ *
+ * NB: this is a probe — it does NOT mutate route state. The caller
+ * (td5_ai_refresh_route_state_slot) then rewrites RS_TRACK_OFFSET_BIAS
+ * accordingly.
+ * ======================================================================== */
+static int td5_ai_remap_for_classify(int span_normalized) {
+    /* Replicates the inline junction walk at 0x004368C8-0x00436954.
+     *   iVar5 = span_normalized + 4
+     *   if (g_trackTotalSpanCount <= iVar5):
+     *     iVar5 = (span_normalized - g_trackTotalSpanCount) + 4
+     *   walk DAT_004c3da0 jump table for a matching entry; remap inline.
+     * The port's td5_track_branch_to_junction implements the same lookup
+     * (post-wrap) for span indices >= ring_length. */
+    int ring = td5_track_get_ring_length();
+    int remapped = span_normalized + 4;
+    if (ring > 0 && ring <= remapped) {
+        remapped = (span_normalized - ring) + 4;
+    }
+    /* If post-wrap span is inside the branch range, fold back into main road
+     * (same as the original's loop body at 0x004368F0-0x00436950). */
+    if (ring > 0 && remapped >= ring) {
+        int folded = td5_track_branch_to_junction(remapped);
+        if (folded >= 0) {
+            remapped = folded;
+        }
+    }
+    return remapped;
+}
+
+static int td5_ai_classify_track_offset_clamp(int slot, int track_offset_bias) {
+    int32_t *rs;
+    char *actor;
+    int span_norm;
+    int sample_span;      /* iVar5: junction-remapped OR simple-wrap */
+    int route_byte_idx;   /* iVar4: ALWAYS simple-wrap span_norm+4 */
+    int route_byte;
+    int target_x = 0;
+    int target_z = 0;
+    int sample_progress;
+    int64_t prog64;
+    int16_t *cardef;
+    int cardef0, cardef8;
+
+    if (!g_route_state_base || !g_actor_base ||
+        slot < 0 || slot >= TD5_MAX_TOTAL_ACTORS) {
+        return 0;
+    }
+
+    rs    = route_state(slot);
+    actor = actor_ptr(slot);
+    span_norm = (int)(int16_t)ACTOR_I16(actor, ACTOR_SPAN_NORMALIZED);
+    cardef = (int16_t *)(intptr_t)ACTOR_I32(actor, ACTOR_CAR_DEF_PTR);
+    if (!cardef) {
+        return 0;
+    }
+    cardef0 = (int)cardef[0];   /* bounds_lo (LEFT-side extent) */
+    cardef8 = (int)cardef[4];   /* bounds_hi (RIGHT-side extent), at byte +0x08 */
+
+    /* Two parallel span computations. Match the original's iVar5/iVar4 split:
+     *   iVar4 = ALWAYS simple wrap of span_norm + 4
+     *   iVar5 = junction-remapped iff RIGHT-selector AND inside branch range,
+     *           else simple wrap (same as iVar4)
+     * [CONFIRMED @ 0x004368B6-0x004368FB + LAB_0043699B] */
+    {
+        int ring = td5_track_get_ring_length();
+        route_byte_idx = span_norm + 4;
+        if (ring > 0 && ring <= route_byte_idx) {
+            route_byte_idx = (span_norm - ring) + 4;
+        }
+        if (route_byte_idx < 0) route_byte_idx = 0;
+    }
+    {
+        const uint8_t *self_table = (const uint8_t *)(intptr_t)rs[RS_ROUTE_TABLE_PTR];
+        if (self_table == g_route_tables[0]) {
+            sample_span = route_byte_idx;  /* LEFT route — use simple-wrap */
+        } else {
+            sample_span = td5_ai_remap_for_classify(span_norm);
+            if (sample_span < 0) sample_span = route_byte_idx;
+        }
+    }
+    if (sample_span < 0) sample_span = 0;
+
+    /* First sample: cardef[4] (bounds_hi) + track_offset_bias offset
+     * [CONFIRMED @ 0x004369C4-0x004369F2]
+     *   route_byte = *piVar1[iVar4 * 3]    ← simple-wrap idx, NOT sample_span
+     *   SampleTrackTargetPoint(sample_span=iVar5, route_byte, ...) */
+    {
+        const uint8_t *table = (const uint8_t *)(intptr_t)rs[RS_ROUTE_TABLE_PTR];
+        if (!table) return 0;
+        route_byte = (int)table[(size_t)(unsigned)route_byte_idx * 3u];
+        if (!td5_track_sample_target_point(sample_span, route_byte,
+                                           &target_x, &target_z,
+                                           cardef8 + track_offset_bias)) {
+            return 0;
+        }
+    }
+    {
+        int32_t pos_vec[3];
+        pos_vec[0] = target_x;
+        pos_vec[1] = 0;
+        pos_vec[2] = target_z;
+        prog64 = td5_track_compute_span_progress(sample_span, pos_vec);
+        sample_progress = (int)(int32_t)(uint32_t)(prog64 & 0xFFFFFFFFu);
+    }
+    /* (int)lVar7 < 0xff → return 1 [CONFIRMED @ 0x00436A0C] */
+    if (sample_progress < 0xFF) {
+        return 1;
+    }
+
+    /* Second sample: cardef[0] (bounds_lo) + track_offset_bias offset
+     * [CONFIRMED @ 0x00436A12-0x00436A38]
+     * Note original recomputes iVar3 (span_norm) here and rebuilds iVar4 from
+     * scratch — equivalent to our cached route_byte_idx since span_norm didn't
+     * change in between. */
+    {
+        const uint8_t *table = (const uint8_t *)(intptr_t)rs[RS_ROUTE_TABLE_PTR];
+        route_byte = (int)table[(size_t)(unsigned)route_byte_idx * 3u];
+        if (!td5_track_sample_target_point(sample_span, route_byte,
+                                           &target_x, &target_z,
+                                           cardef0 + track_offset_bias)) {
+            return 0;
+        }
+    }
+    {
+        int32_t pos_vec[3];
+        pos_vec[0] = target_x;
+        pos_vec[1] = 0;
+        pos_vec[2] = target_z;
+        prog64 = td5_track_compute_span_progress(sample_span, pos_vec);
+        sample_progress = (int)(int32_t)(uint32_t)(prog64 & 0xFFFFFFFFu);
+    }
+    /* `(0 < (int)lVar7) - 1) & 0x200000002` → 2 if positive, 0 otherwise
+     * [CONFIRMED @ 0x00436A4D] */
+    if (sample_progress > 0) {
+        return 2;
+    }
+    return 0;
+}
+
 static void td5_ai_refresh_route_state_slot(int slot) {
     int32_t *rs;
     char *actor;
@@ -623,6 +880,171 @@ static void td5_ai_refresh_route_state_slot(int slot) {
         int32_t fwd_comp = (vx * sin_r + vz * cos_r) >> 12;
         rs[RS_FORWARD_TRACK_COMP] = fwd_comp;
         g_actor_forward_track_component[slot] = fwd_comp;
+    }
+
+    /* ===================================================================
+     * Pre-loop ClassifyTrackOffsetClamp chain (feature-gated)
+     *
+     * Port of the per-slot body at 0x00436B43-0x00436E50 in
+     * UpdateRaceActors. Without this block, RS_TRACK_OFFSET_BIAS follows a
+     * different trajectory across the 160 countdown sub-ticks, leaving the
+     * port with ~-1280 more bias at sim_tick=1. That delta cascades into
+     * the steering-2x family (steering_command, angular_velocity_yaw,
+     * linear_velocity_x/z, euler_accum_yaw, world_pos.x/z) plus the
+     * wheel/center suspension state.
+     *
+     * Gated behind [Trace] ExperimentalBiasClamp=1 so the change is opt-in
+     * per session (it can be reverted instantly by flipping the flag).
+     * =================================================================== */
+    if (g_td5.ini.experimental_bias_clamp != 0) {
+        int span_raw_i = (int)(int16_t)ACTOR_I16(actor, ACTOR_SPAN_RAW);
+        int span_norm_i = (int)(int16_t)ACTOR_I16(actor, ACTOR_SPAN_NORMALIZED);
+
+        /* Step 3-4: span_progress + cache in RS_TRACK_PROGRESS
+         * [CONFIRMED @ 0x00436B80-0x00436BCC] */
+        {
+            int32_t pos_vec[3];
+            pos_vec[0] = ACTOR_I32(actor, ACTOR_WORLD_POS_X);
+            pos_vec[1] = 0;
+            pos_vec[2] = ACTOR_I32(actor, ACTOR_WORLD_POS_Z);
+            int64_t prog64 = td5_track_compute_span_progress(span_raw_i, pos_vec);
+            rs[RS_TRACK_PROGRESS] = (int32_t)(uint32_t)(prog64 & 0xFFFFFFFFu);
+        }
+
+        /* Step 5: RenderTrackSegmentNearActor @ 0x00433CE0 writes RS[0x37]
+         * and RS[0x38], neither of which is consumed elsewhere in the port.
+         * Skipping it (no state effect on lateral_bias cascade). */
+
+        /* Step 6: UpdateActorTrackBounds — caches min/max progress + signed
+         * offsets that feed the boundary writebacks below. */
+        td5_ai_update_actor_track_bounds(slot);
+
+        /* Step 7-9: ClassifyTrackOffsetClamp + bias rewrite
+         * [CONFIRMED @ 0x00436BFE-0x00436CFE] */
+        {
+            int classify = td5_ai_classify_track_offset_clamp(
+                slot, rs[RS_TRACK_OFFSET_BIAS]);
+            int16_t *cardef = (int16_t *)(intptr_t)ACTOR_I32(actor, ACTOR_CAR_DEF_PTR);
+            const uint8_t *table = (const uint8_t *)(intptr_t)rs[RS_ROUTE_TABLE_PTR];
+            int route_byte_now = 0;
+            if (table && span_norm_i >= 0) {
+                route_byte_now = (int)table[(size_t)(unsigned)span_norm_i * 3u];
+            }
+            if (classify == 1 && cardef) {
+                int32_t off = td5_track_compute_signed_offset(
+                    span_raw_i, 0x100, route_byte_now);
+                rs[RS_TRACK_OFFSET_BIAS] = (int)cardef[0] + off - 0x20;
+            } else if (classify == 2 && cardef) {
+                int32_t off = td5_track_compute_signed_offset(
+                    span_raw_i, 0, route_byte_now);
+                rs[RS_TRACK_OFFSET_BIAS] = (int)cardef[4] + off + 0x20;
+            }
+        }
+
+        /* Step 10: surface_type > 0x0F → zero bias
+         * [CONFIRMED @ 0x00436D29-0x00436D67]
+         *
+         * Inline GetTrackSegmentSurfaceType @ 0x0042F100 against the actor's
+         * own span_raw + sub_lane_index (NOT body_probes[0] which port's
+         * td5_track_get_surface_type uses — those are bounding-box corners
+         * which can lag span_raw by a frame). High nibble + 0x10 sentinel
+         * → original returns >= 0x10, so the >0x0F check fires whenever the
+         * sub_lane bit is set in the strip's lane_bitmask. */
+        {
+            TD5_StripSpan *sp = td5_track_get_span(span_raw_i);
+            if (sp) {
+                uint8_t sub_lane = ACTOR_U8(actor, ACTOR_SUB_LANE_INDEX);
+                uint8_t lane_mask = sp->pad_02[0]; /* lane_bitmask at +0x02 */
+                int surface;
+                if ((lane_mask & (1u << (sub_lane & 0x1F))) != 0u) {
+                    surface = (sp->surface_attribute >> 4) | 0x10;
+                } else {
+                    surface = sp->surface_attribute & 0x0F;
+                }
+                if (surface > 0x0F) {
+                    rs[RS_TRACK_OFFSET_BIAS] = 0;
+                }
+            }
+        }
+
+        /* Step 11: track_contact_flag in {1, 2} → zero bias
+         * [CONFIRMED @ 0x00436D77-0x00436D9C] */
+        {
+            uint8_t tcf = ACTOR_U8(actor, ACTOR_TRACK_CONTACT_FLAG);
+            if (tcf == 1 || tcf == 2) {
+                rs[RS_TRACK_OFFSET_BIAS] = 0;
+            }
+        }
+
+        /* Step 12: boundary writebacks — selector and slot-class dependent.
+         * [CONFIRMED @ 0x00436DA9-0x00436E50] */
+        {
+            const uint8_t *self_table =
+                (const uint8_t *)(intptr_t)rs[RS_ROUTE_TABLE_PTR];
+            int slot_is_racer = (slot < TD5_MAX_RACER_SLOTS);
+            int slot_is_encounter_9 =
+                (slot == 9 && g_encounter_tracked_handle != -1);
+            int racer_or_encounter = slot_is_racer || slot_is_encounter_9;
+
+            if (self_table == g_route_tables[0]) {
+                /* Selector == LEFT (DAT_004afb58):
+                 *   racer    : RS_LEFT_BOUNDARY_A   = RS_TRACK_OFFSET_BIAS
+                 *   traffic  : RS_TRACK_OFFSET_BIAS = signed_offset(LEFT)
+                 *              RS_LEFT_BOUNDARY_A   = same
+                 *   both     : RS_LEFT_BOUNDARY_B   = signed_offset(RIGHT)
+                 *              RS_ACTIVE_UPPER      = RS_RIGHT_BOUNDARY_A
+                 *              RS_ACTIVE_LOWER      = RS_RIGHT_BOUNDARY_B
+                 * NB: original's `&DAT_004afbb4` / `&DAT_004afbb0` writes are
+                 *     RS[0x15] / RS[0x14] in port-index land:
+                 *     0x4afbb4 - 0x4afb60 = 0x54 → dword 0x15 = ACTIVE_UPPER_BOUND
+                 *     0x4afbb0 - 0x4afb60 = 0x50 → dword 0x14 = ACTIVE_LOWER_BOUND */
+                if (racer_or_encounter) {
+                    rs[RS_LEFT_BOUNDARY_A] = rs[RS_TRACK_OFFSET_BIAS];
+                } else if (g_route_tables[0] && span_norm_i >= 0) {
+                    int route_byte_left = (int)g_route_tables[0][
+                        (size_t)(unsigned)span_norm_i * 3u];
+                    int32_t offL = td5_track_compute_signed_offset(
+                        span_raw_i, rs[RS_TRACK_PROGRESS], route_byte_left);
+                    rs[RS_TRACK_OFFSET_BIAS] = offL;
+                    rs[RS_LEFT_BOUNDARY_A]   = offL;
+                }
+                if (g_route_tables[1] && span_norm_i >= 0) {
+                    int route_byte_right = (int)g_route_tables[1][
+                        (size_t)(unsigned)span_norm_i * 3u];
+                    rs[RS_LEFT_BOUNDARY_B] = td5_track_compute_signed_offset(
+                        span_raw_i, rs[RS_TRACK_PROGRESS], route_byte_right);
+                }
+                rs[RS_ACTIVE_UPPER_BOUND] = rs[RS_RIGHT_BOUNDARY_A];
+                rs[RS_ACTIVE_LOWER_BOUND] = rs[RS_RIGHT_BOUNDARY_B];
+            } else {
+                /* Selector == RIGHT (DAT_004b08b4):
+                 *   racer    : RS_LEFT_BOUNDARY_B   = RS_TRACK_OFFSET_BIAS
+                 *              [CONFIRMED @ 0x00436DC4: DAT_004afb9c write]
+                 *   traffic  : RS_TRACK_OFFSET_BIAS = signed_offset(RIGHT)
+                 *              RS_LEFT_BOUNDARY_B   = same
+                 *   both     : RS_LEFT_BOUNDARY_A   = signed_offset(LEFT)
+                 *              RS_ACTIVE_UPPER      = RS_RIGHT_EXTENT_A
+                 *              RS_ACTIVE_LOWER      = RS_RIGHT_EXTENT_B */
+                if (racer_or_encounter) {
+                    rs[RS_LEFT_BOUNDARY_B] = rs[RS_TRACK_OFFSET_BIAS];
+                } else if (g_route_tables[1] && span_norm_i >= 0) {
+                    int route_byte_right = (int)g_route_tables[1][
+                        (size_t)(unsigned)span_norm_i * 3u];
+                    int32_t offR = td5_track_compute_signed_offset(
+                        span_raw_i, rs[RS_TRACK_PROGRESS], route_byte_right);
+                    rs[RS_TRACK_OFFSET_BIAS] = offR;
+                    rs[RS_LEFT_BOUNDARY_B]   = offR;
+                }
+                if (g_route_tables[0] && span_norm_i >= 0) {
+                    int route_byte_left = (int)g_route_tables[0][
+                        (size_t)(unsigned)span_norm_i * 3u];
+                    rs[RS_LEFT_BOUNDARY_A] = td5_track_compute_signed_offset(
+                        span_raw_i, rs[RS_TRACK_PROGRESS], route_byte_left);
+                }
+                rs[RS_ACTIVE_UPPER_BOUND] = rs[RS_RIGHT_EXTENT_A];
+                rs[RS_ACTIVE_LOWER_BOUND] = rs[RS_RIGHT_EXTENT_B];
+            }
+        }
     }
 }
 

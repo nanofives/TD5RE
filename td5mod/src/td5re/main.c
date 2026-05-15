@@ -242,6 +242,7 @@ static int td5_apply_cli_overrides(const char *cmdline,
         { "RaceTraceMaxSimTicks", &g_td5.ini.race_trace_max_sim_ticks },
         { "WholeState",           &g_td5.ini.whole_state_enabled },
         { "WholeStateMaxTicks",   &g_td5.ini.whole_state_max_ticks },
+        { "ExperimentalBiasClamp", &g_td5.ini.experimental_bias_clamp },
         /* Logging */
         { "LogEnabled",           &g_td5.ini.log_enabled },
         { "LogMinLevel",          &g_td5.ini.log_min_level },
@@ -462,6 +463,11 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     g_td5.ini.trace_fast_forward    = td5_ini_float("Trace", "TraceFastForward", 1.0f);
     g_td5.ini.race_trace_max_sim_ticks =
         td5_ini_int("Trace", "RaceTraceMaxSimTicks", 0);
+    /* Feature flag: experimental ClassifyTrackOffsetClamp pre-loop port.
+     * See td5_ai.c:td5_ai_refresh_route_state_slot — closes the lateral_bias
+     * cascade that produces the slot-0 steering 2x divergence at sim_tick=1. */
+    g_td5.ini.experimental_bias_clamp =
+        td5_ini_int("Trace", "ExperimentalBiasClamp", 0);
 
     /* Whole-state snapshot (see re/analysis/whole_state_diff_design.md).
      * Independent of RaceTrace -- you can capture whole-state without CSVs. */
