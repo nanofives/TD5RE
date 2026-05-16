@@ -843,9 +843,15 @@ int td5_game_init_race_session(void) {
      * loading screen rand() and any subsequent race-runtime rand() consumers
      * (BuildRaceResultsTable @ 0x40A8C0 uses rand() & 0x1F, etc.). */
     {
-        uint32_t session_seed = g_td5.ini.race_trace_enabled
-                                ? (uint32_t)0x1A2B3C4D
-                                : (uint32_t)GetTickCount();
+        /* StateReplay harness needs the same deterministic seed the orig
+         * snapshot was captured with (td5_quickrace.py default
+         * crt_seed=0x1A2B3C4D). Without this, port's CRT diverges each run
+         * and any rand()-fed init field (route_table_selector etc.)
+         * randomises into sub_tick=0. */
+        uint32_t session_seed =
+            (g_td5.ini.race_trace_enabled || td5_trace_replay_active())
+                ? (uint32_t)0x1A2B3C4D
+                : (uint32_t)GetTickCount();
         srand(session_seed);
         /* Drain 12 entries to advance CRT state (port doesn't have the
          * DAT_004aadbc global table but must step _holdrand the same way) */
@@ -2326,6 +2332,31 @@ int td5_game_run_race_frame(void) {
                 if (s_slot_state[i].state == 1)
                     td5_input_update_player_control(i);
             }
+            /* Zero steering_command at the START of each paused sub-tick.
+             * Frida-traced 2026-05-15 on 0x004340C0: every paused-tick AI
+             * call has actor->steering_command = 0 on entry, despite the
+             * function unconditionally writing to +0x30C. The original must
+             * zero steering_command between paused sub-ticks (likely inside
+             * UpdateRaceActors @ 0x00436A70 or via a paused-branch helper).
+             *
+             * Resetting BEFORE AI (rather than after) preserves the AI-
+             * written value at the end-of-sub-tick snapshot, matching the
+             * orig snapshot which captures the AI-write each paused sub-tick
+             * (typically saturated cascade value 0x4000=16384). Pre-AI zero
+             * still prevents 121-tick cascade accumulation.
+             *
+             * Round 1 commit e6622f2 placed this clear post-AI; Agent F + E
+             * Round 2 independently identified the placement was wrong — the
+             * snapshot was capturing the cleared value (port=0) instead of
+             * the AI's computed value, producing universal "port=0 vs orig=
+             * non-zero" divergence on all 6 slots across all scenarios. */
+            for (i = 0; i < TD5_MAX_RACER_SLOTS; i++) {
+                if (s_slot_state[i].state == 3) continue;
+                TD5_Actor *cd_actor = td5_game_get_actor(i);
+                if (cd_actor)
+                    cd_actor->steering_command = 0;
+            }
+
             /* AI runs during countdown — matches RunRaceFrame @ 0x42B580
              * which calls UpdateRaceActors → UpdateActorTrackBehavior
              * (0x00434FE0) unconditionally per sub-tick. UpdateActorTrackBehavior
@@ -2420,23 +2451,10 @@ int td5_game_run_race_frame(void) {
                 }
             }
 
-            /* Reset steering_command to 0 after AI runs during countdown.
-             * Frida-traced 2026-05-15 on 0x004340C0: every paused-tick AI
-             * call has actor->steering_command = 0 on entry, despite the
-             * function unconditionally writing to +0x30C. The original
-             * must zero steering_command between paused sub-ticks (likely
-             * inside UpdateRaceActors @ 0x00436A70 or via a paused-branch
-             * helper). Without this, the port accumulates 121 countdown
-             * AI ticks of +/-0x4000 cascade pushes, saturating steering
-             * to -48000 by sim_tick=1 entry while orig enters tick=1 at 0.
-             * That cascades into angular_velocity_yaw 2x, euler_accum
-             * drift, and ~6 labeled divergences on tick 1. */
-            for (i = 0; i < TD5_MAX_RACER_SLOTS; i++) {
-                if (s_slot_state[i].state == 3) continue;
-                TD5_Actor *cd_actor = td5_game_get_actor(i);
-                if (cd_actor)
-                    cd_actor->steering_command = 0;
-            }
+            /* (steering_command reset moved to BEFORE td5_ai_tick() above,
+             * so the end-of-sub-tick snapshot captures the AI write rather
+             * than the cleared zero. Pre-AI zero still prevents 121-tick
+             * cascade accumulation.) */
 
             /* Run update_race_order during countdown sub-ticks too.
              * Original UpdateRaceActors @ 0x00436A70 calls UpdateRaceOrder

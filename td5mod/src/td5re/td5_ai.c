@@ -937,8 +937,18 @@ static void td5_ai_refresh_route_state_slot(int slot) {
      * snapshot-replay isolates per-tick error so the prior trajectory-diff
      * regression (21 → 30 labeled) doesn't reproduce. Per-tick the
      * boundary/bias-clamp writes track orig within ~30-200 units instead of
-     * compounding for 160 sub-ticks. */
-    if (1 /* unconditional for snapshot-replay parity */) {
+     * compounding for 160 sub-ticks.
+     *
+     * 2026-05-16 (Round 3 Wave 1, F1 follow-up): gated to slots 0..5 only.
+     * Traffic actors (slots 6..11) use a DIFFERENT init flow
+     * (RecycleTrafficActorFromQueue @ 0x004353B0 — see memory
+     * reference_arch_recycle_heading_collapse.md) and don't expect these
+     * RS_ACTIVE_LOWER/UPPER_BOUND / RS_TRACK_OFFSET_BIAS writes. Running
+     * the clamp for traffic slots was corrupting their spawn pose, route-
+     * table indexing, and V2V eligibility -- causing the regression in
+     * memory todo_traffic_through_ground_no_motion_no_collision_2026-05-16.md
+     * (traffic vehicles spawning underground, idle, no collision). */
+    if (slot < TD5_MAX_RACER_SLOTS) {
         int span_raw_i = (int)(int16_t)ACTOR_I16(actor, ACTOR_SPAN_RAW);
         int span_norm_i = (int)(int16_t)ACTOR_I16(actor, ACTOR_SPAN_NORMALIZED);
 
