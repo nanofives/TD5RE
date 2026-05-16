@@ -654,7 +654,19 @@ void td5_physics_apply_render_interpolation(float subtick_fraction)
         float dy = (float)(cur->y - prev->y);
         float dz = (float)(cur->z - prev->z);
         actor->render_pos.x = ((float)prev->x + dx * subtick_fraction) * kInv256;
-        actor->render_pos.y = ((float)prev->y + dy * subtick_fraction) * kInv256;
+        /* Y deliberately NOT interpolated. The original's integrate_pose
+         * (0x00405E80) writes render_pos.y exactly once at the pre-snap
+         * (post-gravity) step; the chassis-snap at 0x00406300 updates
+         * world_pos.y only. Lerping prev->cur world_pos.y here with
+         * subtick_fraction ~= 1.0 re-introduces the post-snap value that
+         * commit 43fa800 was eliminating -- producing the persistent
+         * slot-0 +7.42 fp8-unit render_pos.y delta vs orig. Camera/HUD
+         * readers of render_pos.y should see the pre-snap value frozen
+         * between sim ticks (orig's body-mesh draw at 0x0040C164
+         * extrapolates Y separately via velocity, doesn't touch render_pos).
+         * Interpolating X/Z only preserves the high-framerate rubber-band
+         * mitigation of commits 97c6756 / 7631b59 for slide motion.
+         * See memory todo_render_pos_y_residual_2026-05-16.md (Agent J). */
         actor->render_pos.z = ((float)prev->z + dz * subtick_fraction) * kInv256;
     }
 }
