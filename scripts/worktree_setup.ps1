@@ -26,28 +26,40 @@ if ($wt -eq $parent) {
 
 Write-Host "Setting up worktree at $wt"
 
-# 1. Junctions for parent's gitignored directories
-foreach ($sub in @('td5mod\deps','re\assets')) {
-    $src = Join-Path $parent $sub
-    $dst = Join-Path $wt $sub
-    if (-not (Test-Path $src)) {
-        Write-Host "  skip $sub (parent missing)"
-        continue
+# 1a. Junction re/assets (read-only game asset trees, safe to junction)
+$assetSrc = Join-Path $parent 're\assets'
+$assetDst = Join-Path $wt 're\assets'
+if ((Test-Path $assetSrc) -and -not (Test-Path $assetDst)) {
+    $assetParentDir = Split-Path $assetDst -Parent
+    if (-not (Test-Path $assetParentDir)) {
+        New-Item -ItemType Directory -Path $assetParentDir -Force | Out-Null
     }
-    if (Test-Path $dst) {
-        Write-Host "  ok   $sub (already linked)"
-        continue
-    }
-    $parentDir = Split-Path $dst -Parent
-    if (-not (Test-Path $parentDir)) {
-        New-Item -ItemType Directory -Path $parentDir -Force | Out-Null
-    }
-    cmd /c "mklink /J `"$dst`" `"$src`"" | Out-Null
-    if (Test-Path $dst) {
-        Write-Host "  +    $sub (junctioned)"
+    cmd /c "mklink /J `"$assetDst`" `"$assetSrc`"" | Out-Null
+    Write-Host "  +    re\assets (junctioned)"
+} elseif (Test-Path $assetDst) {
+    Write-Host "  ok   re\assets (already linked)"
+}
+
+# 1b. td5mod\deps — DO NOT JUNCTION. Worktree auto-cleanup follows junctions and
+# DELETES the parent's mingw toolchain (twice in one session, 2026-05-16).
+# Instead: patch the worktree's build_standalone.bat to point at the parent's
+# absolute mingw path. No junction = no cleanup-cascade = parent's deps safe.
+$buildBat = Join-Path $wt 'td5mod\src\td5re\build_standalone.bat'
+if (Test-Path $buildBat) {
+    $batContent = Get-Content $buildBat -Raw
+    $parentMingw = (Join-Path $parent 'td5mod\deps\mingw\mingw32\bin').Replace('\','\')
+    $parentZlibInc = (Join-Path $parent 'td5mod\deps\mingw\mingw32\i686-w64-mingw32\include')
+    if ($batContent -match '\.\.\\\.\.\\deps\\mingw\\mingw32\\bin') {
+        $newContent = $batContent `
+            -replace '\.\.\\\.\.\\deps\\mingw\\mingw32\\bin', $parentMingw `
+            -replace '\.\.\\\.\.\\deps\\mingw\\mingw32\\i686-w64-mingw32\\include', $parentZlibInc
+        Set-Content -Path $buildBat -Value $newContent -NoNewline
+        Write-Host "  +    build_standalone.bat (patched to use parent's mingw at $parentMingw)"
     } else {
-        Write-Host "  FAIL $sub" -ForegroundColor Red
+        Write-Host "  ok   build_standalone.bat (already absolute or different pattern)"
     }
+} else {
+    Write-Host "  miss td5mod\src\td5re\build_standalone.bat (not in worktree?)"
 }
 
 # 2. Copy gitignored tools/ scripts the harness needs
