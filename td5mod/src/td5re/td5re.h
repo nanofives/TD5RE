@@ -244,6 +244,14 @@ typedef struct TD5_GlobalState {
          * tools/diff_whole_state.py. Independent of [Trace] Modules. */
         int  whole_state_enabled;       /* [Trace] WholeState = 1 */
         int  whole_state_max_ticks;     /* [Trace] WholeStateMaxTicks = N (0 = unlimited) */
+        /* Snapshot-replay harness (td5_trace_replay.c). Mode parsed from
+         * [Trace] StateReplayMode = off|dump|inject|both into the integer
+         * codes 0/1/2/3 (see td5_trace_replay.c RP_MODE_*). Paths come from
+         * env vars TD5RE_STATE_REPLAY_{,DUMP_}PATH. */
+        int  state_replay_mode;
+        int  state_replay_start_frame;
+        int  state_replay_end_frame;     /* 0 = unlimited */
+        int  state_replay_max_frames;    /* 0 = unlimited (default 200) */
         int  loaded;  /* 1 once INI has been read */
         /* AutoRace: skip frontend, launch race immediately with INI settings */
         int  auto_race;             /* 1 = auto-start race on launch */

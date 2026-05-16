@@ -9,6 +9,7 @@
 
 #include "td5_trace.h"
 #include "td5_trace_whole_state.h"
+#include "td5_trace_replay.h"
 
 #include "td5_platform.h"
 #include "td5re.h"
@@ -277,6 +278,10 @@ void td5_trace_init(void)
         td5_trace_whole_state_open(ws_path, g_td5.ini.whole_state_max_ticks);
     }
 
+    /* Snapshot-replay harness: independent of WholeState. Reads its own
+     * mode/start/end/max-frames from g_td5.ini.state_replay_*. */
+    td5_trace_replay_init();
+
     if (!g_td5.ini.race_trace_enabled) {
         return;
     }
@@ -303,6 +308,7 @@ void td5_trace_shutdown(void)
     }
     s_trace_open = 0;
     td5_trace_whole_state_close();
+    td5_trace_replay_shutdown();
 }
 
 int td5_trace_begin_frame(uint32_t frame_index)

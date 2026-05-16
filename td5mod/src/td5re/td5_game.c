@@ -32,6 +32,7 @@
 #include "td5_vfx.h"
 #include "td5_trace.h"
 #include "td5_trace_whole_state.h"
+#include "td5_trace_replay.h"
 
 int td5_trace_current_sim_tick(void) {
     return g_td5.simulation_tick_counter;
@@ -1894,6 +1895,16 @@ static void td5_game_trace_stage_impl(const char *stage, unsigned int stage_bit,
         }
         td5_trace_whole_state_emit(frame, sim_tick,
                                    (const void *)g_actor_table_base, &ws);
+    }
+
+    /* Snapshot-replay harness: dump/inject per-sub-tick state at the SAME
+     * logical instant as the Frida hook on UpdateRaceCameraTransitionTimer
+     * (which fires for countdown sub-ticks too). Fire on BOTH post_progress
+     * (race ticks) and countdown (paused sub-ticks). */
+    if ((stage_bit & (TD5_TRACE_STG_POST_PROGRESS | TD5_TRACE_STG_COUNTDOWN)) &&
+        td5_trace_replay_active() && g_actor_table_base)
+    {
+        td5_trace_replay_step();
     }
 
     if (!td5_trace_begin_frame(frame))

@@ -243,6 +243,12 @@ static int td5_apply_cli_overrides(const char *cmdline,
         { "WholeState",           &g_td5.ini.whole_state_enabled },
         { "WholeStateMaxTicks",   &g_td5.ini.whole_state_max_ticks },
         { "ExperimentalBiasClamp", &g_td5.ini.experimental_bias_clamp },
+        /* StateReplayMode is also CLI-overridable but takes the integer
+         * code (0=off, 1=dump, 2=inject, 3=both) rather than the string. */
+        { "StateReplayMode",        &g_td5.ini.state_replay_mode },
+        { "StateReplayStartFrame",  &g_td5.ini.state_replay_start_frame },
+        { "StateReplayEndFrame",    &g_td5.ini.state_replay_end_frame },
+        { "StateReplayMaxFrames",   &g_td5.ini.state_replay_max_frames },
         /* Logging */
         { "LogEnabled",           &g_td5.ini.log_enabled },
         { "LogMinLevel",          &g_td5.ini.log_min_level },
@@ -475,6 +481,24 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
         td5_ini_int("Trace", "WholeState", 0);
     g_td5.ini.whole_state_max_ticks =
         td5_ini_int("Trace", "WholeStateMaxTicks", 600);
+
+    /* Snapshot-replay harness (see td5_trace_replay.{c,h}).
+     * Mode string is parsed into the int code stored in g_td5.ini.
+     * off=0 dump=1 inject=2 both=3. */
+    {
+        char buf[16];
+        td5_ini_str("Trace", "StateReplayMode", "off", buf, sizeof(buf));
+        if      (!strcmp(buf, "dump"))   g_td5.ini.state_replay_mode = 1;
+        else if (!strcmp(buf, "inject")) g_td5.ini.state_replay_mode = 2;
+        else if (!strcmp(buf, "both"))   g_td5.ini.state_replay_mode = 3;
+        else                             g_td5.ini.state_replay_mode = 0;
+    }
+    g_td5.ini.state_replay_start_frame =
+        td5_ini_int("Trace", "StateReplayStartFrame", 0);
+    g_td5.ini.state_replay_end_frame   =
+        td5_ini_int("Trace", "StateReplayEndFrame",   0);
+    g_td5.ini.state_replay_max_frames  =
+        td5_ini_int("Trace", "StateReplayMaxFrames",  200);
 
     /* Modular trace selection. Defaults to all modules / all stages so an
      * unconfigured trace captures everything (matches the legacy schema's
