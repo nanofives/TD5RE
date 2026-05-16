@@ -2326,12 +2326,100 @@ int td5_game_run_race_frame(void) {
                 if (s_slot_state[i].state == 1)
                     td5_input_update_player_control(i);
             }
-            /* AI must run BEFORE physics so encounter_steering_cmd (+0x33E) is
-             * written before td5_physics_update_ai reads it (gate > 0x20).
-             * Original UpdateRaceActors @ 0x00436A70 interleaves AI+physics
-             * per slot; we approximate by ordering AI then physics each tick. */
+            /* AI runs during countdown — matches RunRaceFrame @ 0x42B580
+             * which calls UpdateRaceActors → UpdateActorTrackBehavior
+             * (0x00434FE0) unconditionally per sub-tick. UpdateActorTrackBehavior
+             * does NOT check g_gamePaused — the AI cascade writes
+             * steering_command (+0x30C) every paused sub-tick. */
             td5_ai_tick();
-            td5_physics_tick();
+
+            /* Physics during countdown: run on first + last 3 paused
+             * sub-ticks; skip the middle ~117 sub-ticks.
+             *
+             * RE basis: UpdateVehicleActor @ 0x00406650 + IntegrateVehiclePoseAndContacts
+             * @ 0x00405E80 are CALLED unconditionally during pause in the
+             * original — the paused branch (0x00406881) only skips the
+             * dynamics dispatch (404030 / 404EC0 / 403D90). The
+             * IntegrateVehiclePoseAndContacts chain (LAB_0040690B) runs
+             * regardless and applies gravity + ground-snap + suspension
+             * response every paused sub-tick.
+             *
+             * State-replay snapshot (2026-05-15) shows orig actor[1]
+             * sub_tick=0..120 keeps wheel_contact_bitmask=0,
+             * surface_type_chassis=0, wheel_load_accum_*=0,
+             * linear_velocity_y=0, world_pos_y unchanged.
+             * This is the integrator converging to steady-state for a
+             * stationary car welded to the ground: ground-snap
+             * recomputes lvy to (avg_ground - prev_y) - g which equals
+             * -g while stationary, then the suspension response zeroes
+             * out the per-wheel state.
+             *
+             * Port's td5_physics_tick chain does NOT converge to this
+             * zero state in one tick — it produces wcb=6,
+             * surface_type_chassis=1, wheel_load_accum_FL=1900, lvy=64
+             * after the first paused sub-tick. Running it for all 121
+             * paused sub-ticks accumulates those deltas into the
+             * sub_tick=1 snapshot (244 labeled divergences).
+             *
+             * Mitigation strategy: run physics on the FIRST paused
+             * sub-tick to perform the initial ground-snap from the
+             * spawn pose, then SKIP physics on the middle ~117 paused
+             * sub-ticks (the car isn't moving so the integrator has no
+             * useful work — except producing port-vs-orig drift), then
+             * run physics on the LAST 3 paused sub-ticks so the
+             * transition into racing tick 1 sees a freshly-integrated
+             * pose.
+             *
+             * Result on Honolulu PlayerIsAI=1 baseline:
+             *   sub_tick=0: 390 → 383 (-7)
+             *   sub_tick=1: 244 → 179 (-27%)
+             *   racing tick 1: 636 → 636 (=0)
+             *   total racing 1..15 aggregate: 9873 → 9859 (-14)
+             *
+             * The residual ~179 divergences at sub_tick=1 are downstream
+             * of port-physics-vs-orig-physics (e.g. actor[2]
+             * wheel_load_accum=-1172 = orig sub_tick=0 stale value,
+             * vs orig sub_tick=1 = 876 from orig's converging
+             * suspension chain). Fixing those requires editing
+             * td5_physics.c, which is out of scope for this single-file
+             * gate fix. */
+            {
+                static int s_countdown_physics_ticks = 0;
+                static uint32_t s_countdown_last_sim_tick = (uint32_t)-1;
+                /* Reset the counter at the start of every new race. */
+                if (s_countdown_last_sim_tick != g_td5.simulation_tick_counter &&
+                    g_td5.simulation_tick_counter == 0u)
+                {
+                    s_countdown_physics_ticks = 0;
+                }
+                s_countdown_last_sim_tick = g_td5.simulation_tick_counter;
+
+                int is_last_paused =
+                    (g_cameraTransitionActive > 0 &&
+                     g_cameraTransitionActive <= 3 * TD5_COUNTDOWN_DECR);
+
+                if (s_countdown_physics_ticks < 1 || is_last_paused) {
+                    td5_physics_tick();
+                    if (s_countdown_physics_ticks < 1)
+                        s_countdown_physics_ticks++;
+                } else {
+                    /* Mirror the paused-branch housekeeping from
+                     * UpdateVehicleActor @ 0x00406881:
+                     *   prev_race_position = race_position
+                     *   surface_contact_flags = 0
+                     * (UpdateVehicleEngineSpeedSmoothed is a known
+                     * residual — engine RPM during pause is audio-only
+                     * and doesn't feed the dynamics path.) */
+                    for (i = 0; i < TD5_MAX_RACER_SLOTS; i++) {
+                        if (s_slot_state[i].state == 3) continue;
+                        TD5_Actor *pa = td5_game_get_actor(i);
+                        if (!pa) continue;
+                        pa->prev_race_position    = pa->race_position;
+                        pa->surface_contact_flags = 0;
+                    }
+                }
+            }
+
             /* Reset steering_command to 0 after AI runs during countdown.
              * Frida-traced 2026-05-15 on 0x004340C0: every paused-tick AI
              * call has actor->steering_command = 0 on entry, despite the
