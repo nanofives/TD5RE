@@ -6298,10 +6298,24 @@ static void update_vehicle_pose_from_physics(TD5_Actor *actor)
  * [CONFIRMED @ 0x0042EB10 by precise-port pilot 2026-05-14]
  * ======================================================================== */
 
-/* Round-to-minus-infinity replacement for lrintf. Always uses floorf which
- * is rounding mode-independent (no reliance on FPU control word). */
+/* Match orig's FISTP rounding behavior in TransformShortVec3ByRenderMatrixRounded
+ * @ 0x0042EB10. Orig uses raw FISTP with the default x87 control word
+ * (RC=00 = round-to-nearest-even), NOT round-toward-negative-infinity.
+ *
+ * Pre-2026-05-16: this used `floorf` to be "rounding-mode independent" but
+ * that's actively wrong -- floorf is RTNI while orig is RNE. For values
+ * near half-integers (e.g. 0.5, -0.5, 1.5) the two differ by 1 LSB, which
+ * after the post-transform `<< 8` pre-scale shows up as ±256 in the
+ * resulting fp8 coords. Agent T3 (Round 3 Wave 2 audit) confirmed via
+ * Ghidra static disasm of 0x0042EB10 that orig uses raw FISTP, not any
+ * RC-clamping prologue.
+ *
+ * lrintf uses the current FPU rounding mode, which on x87 defaults to
+ * round-to-nearest-even. TD5_d3d.exe never changes the FPU control word,
+ * so RNE is always in effect for FISTP -- and the port's lrintf inherits
+ * that same RNE by default. */
 static inline int32_t td5_round_toward_neg_inf_to_int32(float x) {
-    return (int32_t)floorf(x);
+    return (int32_t)lrintf(x);
 }
 
 static inline void td5_transform_short_vec3_by_render_matrix_rounded(
