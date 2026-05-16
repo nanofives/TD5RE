@@ -290,16 +290,41 @@ void td5_trace_replay_step(void) {
                 memcpy(dst + 0x338, saved_frame, 4);
             }
 
-            /* RS inject: RS[0] (offset 0) is route_table_ptr -- points
-             * into the port's loaded route data (LEFT.TRK/RIGHT.TRK).
-             * Preserve it per slot. */
+            /* RS inject: most fields are byte-faithful, but three are
+             * pointer-vs-index incompatible between orig and port and MUST
+             * be preserved from the port's own state:
+             *
+             *   RS_ROUTE_TABLE_PTR (index 0x00, byte offset 0x00):
+             *     orig stores absolute pointer into LEFT.TRK/RIGHT.TRK heap;
+             *     port stores absolute pointer into its own loaded data.
+             *
+             *   RS_SCRIPT_BASE_PTR (index 0x3A, byte offset 0xE8):
+             *     orig stores absolute pointer to one of DAT_00473cc8 /
+             *     g_script_program_a..d (binary .rdata); port stores
+             *     absolute pointer to its own static arrays.
+             *
+             *   RS_SCRIPT_IP (index 0x3B, byte offset 0xEC):
+             *     orig stores ABSOLUTE POINTER to current opcode word
+             *     (advanced by +4 each step). port stores INTEGER INDEX
+             *     into the base[] array (advanced by +1 each step). Copying
+             *     orig's pointer-form into port's index field makes
+             *     base[ip] walk ~5MB past the array into random memory --
+             *     hangs td5re.exe with garbage opcode dispatch.
+             *     Discovered via Moscow PlayerIsAI=1 hang investigation
+             *     2026-05-16. */
             for (int s = 0; s < RP_RS_COUNT; s++) {
                 uint8_t *dst = (uint8_t *)(rs_base) + s * RP_RS_STRIDE;
                 const uint8_t *src = rs_src + s * RP_RS_STRIDE;
                 uint8_t saved_route_ptr[4];
-                memcpy(saved_route_ptr, dst + 0x00, 4);
+                uint8_t saved_script_base[4];
+                uint8_t saved_script_ip[4];
+                memcpy(saved_route_ptr,   dst + 0x00, 4);
+                memcpy(saved_script_base, dst + 0xE8, 4);
+                memcpy(saved_script_ip,   dst + 0xEC, 4);
                 memcpy(dst, src, RP_RS_STRIDE);
-                memcpy(dst + 0x00, saved_route_ptr, 4);
+                memcpy(dst + 0x00, saved_route_ptr,   4);
+                memcpy(dst + 0xE8, saved_script_base, 4);
+                memcpy(dst + 0xEC, saved_script_ip,   4);
             }
         }
     }
