@@ -70,6 +70,8 @@ SCENARIOS = [
     Scenario("honolulu_ai_gtr",     8, 19, True),
     Scenario("edinburgh_hum_viper", 1, 0, False),
     Scenario("moscow_hum_viper",    4, 0, False),
+    Scenario("sydney_ai_viper",     2, 0, True),
+    Scenario("blueridge_ai_viper",  3, 0, True),
 ]
 
 # ---- Pool helpers (inline Python to avoid bash-from-Python quirks) ----------
