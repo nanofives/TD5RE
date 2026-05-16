@@ -34,6 +34,7 @@ re/td5_png_clean/
 pyghidra_projects/
 /tools/
 /frida_pool/
+/traces/
 
 # MinGW toolchain (753 MB — install via MSYS2 or deps/mingw-i686.7z)
 td5mod/deps/mingw/
