@@ -839,6 +839,43 @@ static void td5_ai_refresh_route_state_slot(int slot) {
     if (!route_table || route_count == 0u) {
         rs[RS_FORWARD_TRACK_COMP] = 0;
         g_actor_forward_track_component[slot] = 0;
+        /* Even without route data, run the bias-clamp Step-12 boundary
+         * writebacks (lines 1017-1018 / 1044-1045) using whatever values
+         * RS_RIGHT_BOUNDARY_A/B + RS_RIGHT_EXTENT_A/B currently hold (e.g.
+         * from replay-injected orig state). Orig's per-tick AI runs this
+         * writeback unconditionally; absent it, port's RS_ACTIVE_*_BOUND
+         * fields are stale relative to the injected RS[0x10..0x13] values
+         * that the replay harness puts in place. This is a port-only fallback
+         * for the missing-route-tables scenario (Honolulu level zip is
+         * sometimes built without LEFT/RIGHT.TRK in the assets bundle); when
+         * route data IS loaded, the gated block below handles the writeback
+         * via the same lines, so behaviour is preserved. */
+        {
+            int slot_is_racer = (slot < TD5_MAX_RACER_SLOTS);
+            int slot_is_encounter_9 =
+                (slot == 9 && g_encounter_tracked_handle != -1);
+            int racer_or_encounter = slot_is_racer || slot_is_encounter_9;
+            /* Selector-driven branch: SELECTOR==0 → LEFT/main route (matches
+             * line 1017-1018 in the gated block); SELECTOR==1 → RIGHT route
+             * (matches line 1044-1045). */
+            if ((rs[RS_ROUTE_TABLE_SELECTOR] & 1) == 0) {
+                /* LEFT route: ACTIVE_UPPER=BOUND_A, ACTIVE_LOWER=BOUND_B.
+                 * Racer LEFT-side writeback: RS_LEFT_BOUNDARY_A <- bias. */
+                if (racer_or_encounter) {
+                    rs[RS_LEFT_BOUNDARY_A] = rs[RS_TRACK_OFFSET_BIAS];
+                }
+                rs[RS_ACTIVE_UPPER_BOUND] = rs[RS_RIGHT_BOUNDARY_A];
+                rs[RS_ACTIVE_LOWER_BOUND] = rs[RS_RIGHT_BOUNDARY_B];
+            } else {
+                /* RIGHT route: ACTIVE_UPPER=EXTENT_A, ACTIVE_LOWER=EXTENT_B.
+                 * Racer RIGHT-side writeback: RS_LEFT_BOUNDARY_B <- bias. */
+                if (racer_or_encounter) {
+                    rs[RS_LEFT_BOUNDARY_B] = rs[RS_TRACK_OFFSET_BIAS];
+                }
+                rs[RS_ACTIVE_UPPER_BOUND] = rs[RS_RIGHT_EXTENT_A];
+                rs[RS_ACTIVE_LOWER_BOUND] = rs[RS_RIGHT_EXTENT_B];
+            }
+        }
         return;
     }
 
@@ -895,8 +932,13 @@ static void td5_ai_refresh_route_state_slot(int slot) {
      *
      * Gated behind [Trace] ExperimentalBiasClamp=1 so the change is opt-in
      * per session (it can be reverted instantly by flipping the flag).
-     * =================================================================== */
-    if (g_td5.ini.experimental_bias_clamp != 0) {
+     *
+     * 2026-05-15: unconditional enable for the replay-diff measurement —
+     * snapshot-replay isolates per-tick error so the prior trajectory-diff
+     * regression (21 → 30 labeled) doesn't reproduce. Per-tick the
+     * boundary/bias-clamp writes track orig within ~30-200 units instead of
+     * compounding for 160 sub-ticks. */
+    if (1 /* unconditional for snapshot-replay parity */) {
         int span_raw_i = (int)(int16_t)ACTOR_I16(actor, ACTOR_SPAN_RAW);
         int span_norm_i = (int)(int16_t)ACTOR_I16(actor, ACTOR_SPAN_NORMALIZED);
 
@@ -2117,15 +2159,23 @@ int td5_ai_find_offset_peer(int *route_state_ptr) {
                     route_state_ptr[RS_ROUTE_TABLE_PTR]   = (int32_t)(intptr_t)g_route_tables[0];
                 }
             }
-            /* Bounds writeback [CONFIRMED @ 0x00433887-0x004338A8]:
-             *   if rs[0] == DAT_004b08b4 (RIGHT): rs[0x14]←rs[0x12], rs[0x15]←rs[0x13]
-             *   else                              rs[0x14]←rs[0x10], rs[0x15]←rs[0x11] */
+            /* Bounds writeback [original 0x00433887-0x004338A8].
+             *
+             * Direction inverted vs the prior port comment: empirical replay
+             * data (Honolulu sub_tick=0 → sub_tick=1) shows orig writes
+             *   RS_ACTIVE_LOWER (RS[0x14]) = RS_RIGHT_BOUNDARY_B (RS[0x11])
+             *   RS_ACTIVE_UPPER (RS[0x15]) = RS_RIGHT_BOUNDARY_A (RS[0x10])
+             * across all 6 racer slots — matching the bias-clamp Step-12
+             * writeback at lines 1017-1018 / 1044-1045. The previous port
+             * comment ("rs[0x14]←rs[0x10]") was wrong; Ghidra mislabeled the
+             * dst indices. Aligning find_offset_peer with the bias-clamp
+             * direction keeps both writers consistent. */
             if (route_state_ptr[RS_ROUTE_TABLE_PTR] == (int32_t)(intptr_t)g_route_tables[1]) {
-                route_state_ptr[RS_ACTIVE_LOWER_BOUND] = route_state_ptr[RS_RIGHT_EXTENT_A];
-                route_state_ptr[RS_ACTIVE_UPPER_BOUND] = route_state_ptr[RS_RIGHT_EXTENT_B];
+                route_state_ptr[RS_ACTIVE_UPPER_BOUND] = route_state_ptr[RS_RIGHT_EXTENT_A];
+                route_state_ptr[RS_ACTIVE_LOWER_BOUND] = route_state_ptr[RS_RIGHT_EXTENT_B];
             } else {
-                route_state_ptr[RS_ACTIVE_LOWER_BOUND] = route_state_ptr[RS_RIGHT_BOUNDARY_A];
-                route_state_ptr[RS_ACTIVE_UPPER_BOUND] = route_state_ptr[RS_RIGHT_BOUNDARY_B];
+                route_state_ptr[RS_ACTIVE_UPPER_BOUND] = route_state_ptr[RS_RIGHT_BOUNDARY_A];
+                route_state_ptr[RS_ACTIVE_LOWER_BOUND] = route_state_ptr[RS_RIGHT_BOUNDARY_B];
             }
 
             classify_result = td5_ai_classify_track_offset_clamp(i, route_state_ptr[RS_TRACK_OFFSET_BIAS]);
@@ -2245,12 +2295,13 @@ int td5_ai_find_offset_peer(int *route_state_ptr) {
                     route_state_ptr[RS_ROUTE_TABLE_PTR]   = (int32_t)(intptr_t)g_route_tables[0];
                 }
             }
+            /* Pass-2 same direction as Pass-1 (see comment above). */
             if (route_state_ptr[RS_ROUTE_TABLE_PTR] == (int32_t)(intptr_t)g_route_tables[1]) {
-                route_state_ptr[RS_ACTIVE_LOWER_BOUND] = route_state_ptr[RS_RIGHT_EXTENT_A];
-                route_state_ptr[RS_ACTIVE_UPPER_BOUND] = route_state_ptr[RS_RIGHT_EXTENT_B];
+                route_state_ptr[RS_ACTIVE_UPPER_BOUND] = route_state_ptr[RS_RIGHT_EXTENT_A];
+                route_state_ptr[RS_ACTIVE_LOWER_BOUND] = route_state_ptr[RS_RIGHT_EXTENT_B];
             } else {
-                route_state_ptr[RS_ACTIVE_LOWER_BOUND] = route_state_ptr[RS_RIGHT_BOUNDARY_A];
-                route_state_ptr[RS_ACTIVE_UPPER_BOUND] = route_state_ptr[RS_RIGHT_BOUNDARY_B];
+                route_state_ptr[RS_ACTIVE_UPPER_BOUND] = route_state_ptr[RS_RIGHT_BOUNDARY_A];
+                route_state_ptr[RS_ACTIVE_LOWER_BOUND] = route_state_ptr[RS_RIGHT_BOUNDARY_B];
             }
 
             classify_result = td5_ai_classify_track_offset_clamp(i, route_state_ptr[RS_TRACK_OFFSET_BIAS]);
@@ -3111,8 +3162,17 @@ void td5_ai_update_track_behavior(int slot) {
             hdelta = (int32_t)(-(int32_t)adjusted) & 0xFFF;
 
             /* [CONFIRMED @ 0x00434FE0] decomp: if ((800 < uVar3) && (uVar3 < 0xce0))
-             * — 800 is DECIMAL (= 0x320), upper is strict <. */
-            if (hdelta > 0x320 && hdelta < 0xCE0) {
+             * — 800 is DECIMAL (= 0x320), upper is strict <.
+             *
+             * Suppress the recovery-script set when route data is absent.
+             * Without LEFT.TRK/RIGHT.TRK, ai_route_heading_for_actor returns
+             * a hard-coded 0, which makes hdelta a function purely of actor
+             * yaw + 0x800. A car spawned roughly aligned with the world axes
+             * trivially falls inside (0x320, 0xCE0), firing a spurious
+             * recovery-script set on the first sub-tick. orig with route data
+             * loaded computes a meaningful route_heading and does NOT enter
+             * recovery. */
+            if (rs[RS_ROUTE_TABLE_PTR] != 0 && hdelta > 0x320 && hdelta < 0xCE0) {
                 TD5_LOG_I(LOG_TAG, "recovery: slot=%d hdelta=0x%X heading=0x%X route=0x%X gt=%d",
                           slot, hdelta, heading & 0xFFF, route_heading & 0xFFF,
                           (int)g_td5.game_type);
