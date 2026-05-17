@@ -25,14 +25,17 @@ PORT_SNAP  = PROJECT_ROOT / "log" / "port_state_snapshot.bin"
 sys.path.insert(0, str(PROJECT_ROOT / "tools"))
 from run_state_replay import ini_patch, ini_restore, BASELINE_BOTH
 
-# (name, track, car, player_is_ai, round2_sub1_baseline)
+# (name, track, car, player_is_ai, round3_sub1_baseline)
 # Track IDs match the ORIGINAL game's g_selectedScheduleIndex (td5_frontend.c:636).
+# Baselines refreshed post-30d1ab9 (actual-Moscow/Jarash track-ID corrections).
 SCENARIOS = [
-    ("honolulu_ai_viper",   8, 0, 1, 146),
-    ("edinburgh_ai_viper",  1, 0, 1, 228),
-    ("sydney_ai_viper",     2, 0, 1, None),  # new in Round 3 (P1)
-    ("blueridge_ai_viper",  3, 0, 1, None),  # new in Round 3 (P1)
-    ("honolulu_hum_viper",  8, 0, 0, 216),
+    ("honolulu_ai_viper",        8, 0, 1, 146),
+    ("edinburgh_ai_viper",       1, 0, 1, 228),
+    ("sydney_ai_viper",          2, 0, 1, None),  # new in Round 3 (P1)
+    ("blueridge_ai_viper",       3, 0, 1, None),  # new in Round 3 (P1)
+    ("honolulu_hum_viper",       8, 0, 0, 216),
+    ("actual_moscow_ai_viper",   0, 0, 1, 128),   # NEW: real Moscow track=0, post-2a24dfa unblock
+    ("jarash_ai_viper",          4, 0, 1, 145),   # was mislabeled as "moscow" pre-30d1ab9
 ]
 
 
@@ -75,7 +78,7 @@ def run_capture_diff(scenario_name, track, car, player_is_ai):
     elapsed = time.monotonic() - t0
 
     if not PORT_SNAP.exists():
-        return None, f"port snapshot not produced after {elapsed:.1f}s rc={proc.returncode}"
+        return None, f"port snapshot not produced after {elapsed:.1f}s"
 
     # Diff
     diff_proc = subprocess.run(
