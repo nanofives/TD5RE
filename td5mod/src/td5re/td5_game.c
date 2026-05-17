@@ -2954,44 +2954,20 @@ static void tick_race_countdown(void)
         return;
     }
 
-    /* Decrement by 0x100 per sim tick — matches original UpdateRaceCameraTransitionTimer */
-    g_cameraTransitionActive -= TD5_COUNTDOWN_DECR;
-
-    if (g_cameraTransitionActive <= 0) {
+    /* Mirror UpdateRaceCameraTransitionTimer @ 0x0040A490:
+     *   if (timer < 0x101) { timer = 0; ResetRaceCameraSelectionState(...); }
+     *   else                 timer -= 0x100;
+     *   level = timer / 0x2800;  indicator = level + 1;
+     *   if (level == 0) g_gamePaused = 0;
+     *
+     * Orig flips pause when LEVEL transitions to 0 (timer < 0x2800), i.e. the
+     * first sub-tick where the visible indicator shows "1" — NOT when the timer
+     * fully reaches 0. The previous port logic flipped pause at timer==0,
+     * delaying the race start by ~40 sub-ticks (one full "level"). */
+    if (g_cameraTransitionActive <= TD5_COUNTDOWN_DECR) {
         g_cameraTransitionActive = 0;
-        set_countdown_indicator_state(0);
-        g_td5.paused = 0;
-        /* XZ freeze setter intentionally not called — see init_race_session
-         * note; DAT_00483030 is unused in the original. */
-        s_race_countdown_state = 0;
-
-        /* NOTE (2026-05-14 fix(ai): target_angle): The previous
-         * port-only block here zeroed STEERING_CMD/RAMP_ACCUM/
-         * ang_velocity_yaw and re-seeded RS_TRACK_PROGRESS /
-         * RS_TRACK_OFFSET_BIAS at countdown completion. That was a
-         * workaround for the Moscow PlayerIsAI=1 over-accumulation
-         * caused by the (now-fixed) spawn-time +0x82 pre-seed bug —
-         * the cascade had been firing in the fine-sin band every
-         * countdown sub-tick with RS_LEFT_DEVIATION ≈ 35, accumulating
-         * +7008/tick × 160 ticks → 47680.
-         *
-         * Audit of orig UpdateRaceCameraTransitionTimer @ 0x0040A490
-         * (TD5_pool0, Ghidra read_only, 2026-05-14) confirms the
-         * original NEVER touches +0x30C / +0x33A / +0x1C4 when the
-         * countdown timer reaches 0 — it only clears g_gamePaused and
-         * gRaceCameraTransitionGate. The original cascade actually
-         * accumulates +16384/tick from the mid-band emergency snap
-         * during countdown (slot 0 reaches ~16384 by sim_tick=0,
-         * ~20000 by sim_tick=1), which is the source of the
-         * post-countdown ±20000 steering range the port was trying
-         * to match WITHOUT this zero. With c698403 (no +0x82 pre-seed)
-         * + 9b7d42a (correct span_norm derivation) in place, the
-         * cascade now hits the mid-band naturally and produces the
-         * matching ±20000 range — the workaround is no longer needed
-         * and was the dominant cause of the 10× steering shortfall at
-         * sim_tick=1. */
-        TD5_LOG_I(LOG_TAG, "Race countdown complete: GO");
-        return;
+    } else {
+        g_cameraTransitionActive -= TD5_COUNTDOWN_DECR;
     }
 
     level = g_cameraTransitionActive / TD5_COUNTDOWN_LEVEL_DIV;
@@ -3004,6 +2980,23 @@ static void tick_race_countdown(void)
         set_countdown_indicator_state(next_indicator);
         TD5_LOG_I(LOG_TAG, "Race countdown: level=%d indicator=%d timer=0x%X",
                   level, next_indicator, g_cameraTransitionActive);
+    }
+
+    /* Race-start: orig flips g_gamePaused at level==0 (indicator "1"),
+     * not when timer hits 0. Use g_td5.paused itself as the one-shot
+     * gate so the log only fires on the actual transition. */
+    if (level == 0 && g_td5.paused) {
+        g_td5.paused = 0;
+        /* NOTE (2026-05-14): audit of orig 0x0040A490 confirmed the original
+         * does NOT touch STEERING_CMD/RAMP_ACCUM/ang_velocity_yaw or
+         * RS_TRACK_PROGRESS/RS_TRACK_OFFSET_BIAS on the level==0 transition —
+         * it only clears g_gamePaused and gRaceCameraTransitionGate.
+         * The previous port-only reset block here was a workaround for the
+         * (now-fixed) spawn-time +0x82 pre-seed bug; with c698403 + 9b7d42a
+         * in place the cascade now naturally produces the ±20000 sim_tick=1
+         * steering range. */
+        TD5_LOG_I(LOG_TAG, "Race countdown: GO at level=0 timer=0x%X",
+                  g_cameraTransitionActive);
     }
 }
 
