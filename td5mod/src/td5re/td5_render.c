@@ -3922,8 +3922,13 @@ static void render_vehicle_wheel_billboards(TD5_Actor *actor, int slot)
         float inner_off = (w & 1) ? -axle_halfw :  axle_halfw;
         float outer_off = (w & 1) ?  axle_halfw : -axle_halfw;
 
-        /* Front wheel visual steering yaw (0x446F00 uses actor+0x340/0x342).
-         * steering_command >> 8 gives 12-bit angle; convert to radians.
+        /* Front wheel visual steering yaw — orig RenderVehicleWheelBillboards
+         * @ 0x00446F00 builds matrix [cos 0 sin; 0 1 0; -sin 0 cos] from
+         * (steering_command >> 8). That matrix multiplied as M*v on local
+         * (dx, 0, dz) gives: rx = cos*dx + sin*dz, rz = -sin*dx + cos*dz
+         * (TD5's CW-from-+Z yaw convention, same as obb_corner_test fix
+         * 2026-05-13). Earlier port used the CCW-from-+X convention which
+         * inverted the visual wheel angle vs the steering input.
          * Only front wheels (w=0,1) get steering rotation. */
         float cos_s = 1.0f, sin_s = 0.0f;
         if (w < 2) {
@@ -3947,8 +3952,9 @@ static void render_vehicle_wheel_billboards(TD5_Actor *actor, int slot)
             /* Inner ring vertex (with front-wheel steering yaw) */
             {
                 float dx = inner_off, dz = cz;
-                float rx = dx * cos_s - dz * sin_s;
-                float rz = dx * sin_s + dz * cos_s;
+                /* TD5 CW-from-+Z yaw: rx = cos*dx + sin*dz, rz = -sin*dx + cos*dz */
+                float rx = dx * cos_s + dz * sin_s;
+                float rz = -dx * sin_s + dz * cos_s;
                 float px = wx + rx, py = wy + cy, pz = wz + rz;
                 float vx = px*m[0] + py*m[1] + pz*m[2] + m[9];
                 float vy = px*m[3] + py*m[4] + pz*m[5] + m[10];
@@ -3968,8 +3974,9 @@ static void render_vehicle_wheel_billboards(TD5_Actor *actor, int slot)
             /* Outer ring vertex (with front-wheel steering yaw) */
             {
                 float dx = outer_off, dz = cz;
-                float rx = dx * cos_s - dz * sin_s;
-                float rz = dx * sin_s + dz * cos_s;
+                /* TD5 CW-from-+Z yaw: rx = cos*dx + sin*dz, rz = -sin*dx + cos*dz */
+                float rx = dx * cos_s + dz * sin_s;
+                float rz = -dx * sin_s + dz * cos_s;
                 float px = wx + rx, py = wy + cy, pz = wz + rz;
                 float vx = px*m[0] + py*m[1] + pz*m[2] + m[9];
                 float vy = px*m[3] + py*m[4] + pz*m[5] + m[10];
