@@ -48,11 +48,31 @@ def build_overrides(track, car, player_is_ai):
     return out
 
 
-def run_capture_diff(scenario_name, track, car, player_is_ai):
-    """Run td5re.exe with replay-injection of the scenario, diff vs scenario."""
+def _parse_diff_stdout(stdout):
+    rows = {}
+    for line in stdout.splitlines():
+        # Lines like: "       0         0      3       370  actor[0] +0x120 rotation_matrix"
+        parts = line.split()
+        if len(parts) >= 4 and parts[0].isdigit() and parts[1].isdigit():
+            sub = int(parts[0])
+            if sub in (0, 1, 3, 10, 121, 160, 179):
+                try:
+                    count = int(parts[3])
+                    rows[sub] = count
+                except ValueError:
+                    pass
+    return rows
+
+
+def run_capture_diff(scenario_name, track, car, player_is_ai, unfiltered=False):
+    """Run td5re.exe with replay-injection of the scenario, diff vs scenario.
+
+    When unfiltered=True, also report unfiltered diff counts (EXPECTED_DIVERGENT
+    bypass). Returns (rows, rows_unfiltered_or_None, err_or_None).
+    """
     bin_path = PROJECT_ROOT / "tools" / "frida_csv" / f"state_snapshot_{scenario_name}.bin"
     if not bin_path.exists():
-        return None, f"missing scenario .bin: {bin_path.name}"
+        return None, None, f"missing scenario .bin: {bin_path.name}"
 
     env = dict(os.environ)
     env["TD5RE_STATE_REPLAY_PATH"] = str(bin_path)
@@ -83,35 +103,52 @@ def run_capture_diff(scenario_name, track, car, player_is_ai):
     elapsed = time.monotonic() - t0
 
     if not PORT_SNAP.exists():
-        return None, f"port snapshot not produced after {elapsed:.1f}s"
+        return None, None, f"port snapshot not produced after {elapsed:.1f}s"
 
-    # Diff
+    # Diff (filtered)
     diff_proc = subprocess.run(
         [sys.executable, str(PROJECT_ROOT / "tools" / "diff_replay_frames.py"),
          str(PORT_SNAP), str(bin_path)],
         cwd=str(PROJECT_ROOT), capture_output=True, text=True, timeout=60,
     )
-    # Parse sub_tick=0, sub_tick=1, sub_tick=160 (racing tick 1) field counts
-    rows = {}
-    for line in diff_proc.stdout.splitlines():
-        # Lines like: "       0         0      3       370  actor[0] +0x120 rotation_matrix"
-        parts = line.split()
-        if len(parts) >= 4 and parts[0].isdigit() and parts[1].isdigit():
-            sub = int(parts[0])
-            if sub in (0, 1, 3, 10, 160, 179):
-                try:
-                    count = int(parts[3])
-                    rows[sub] = count
-                except ValueError:
-                    pass
-    return rows, None
+    rows = _parse_diff_stdout(diff_proc.stdout)
+
+    rows_unf = None
+    if unfiltered:
+        diff_proc_u = subprocess.run(
+            [sys.executable, str(PROJECT_ROOT / "tools" / "diff_replay_frames.py"),
+             "--unfiltered", str(PORT_SNAP), str(bin_path)],
+            cwd=str(PROJECT_ROOT), capture_output=True, text=True, timeout=60,
+        )
+        rows_unf = _parse_diff_stdout(diff_proc_u.stdout)
+    return rows, rows_unf, None
 
 
 def main():
-    print(f"{'scenario':<24} {'sub0':>6} {'sub1':>6} {'sub3':>6} {'sub10':>6} {'race160':>8} {'race179':>8} {'R2 sub1':>8}  {'d R2':>6}")
-    print("-" * 100)
+    import argparse
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--unfiltered", action="store_true",
+                    help="Also report unfiltered (EXPECTED_DIVERGENT bypass) counts.")
+    ap.add_argument("--scenario", default=None,
+                    help="Run only the named scenario (else: all).")
+    args = ap.parse_args()
+
+    if args.unfiltered:
+        print(f"{'scenario':<24} "
+              f"{'sub0':>6} {'sub1':>6} {'sub3':>6} {'sub10':>6} {'sub121':>7} "
+              f"{'race160':>8} {'race179':>8} {'R2 sub1':>8}  {'d R2':>6}  | "
+              f"{'u0':>6} {'u1':>6} {'u3':>6} {'u10':>6} {'u121':>7} "
+              f"{'u160':>6} {'u179':>6}")
+    else:
+        print(f"{'scenario':<24} {'sub0':>6} {'sub1':>6} {'sub3':>6} "
+              f"{'sub10':>6} {'sub121':>7} {'race160':>8} {'race179':>8} "
+              f"{'R2 sub1':>8}  {'d R2':>6}")
+    print("-" * (180 if args.unfiltered else 100))
     for name, track, car, ai, baseline in SCENARIOS:
-        rows, err = run_capture_diff(name, track, car, ai)
+        if args.scenario and name != args.scenario:
+            continue
+        rows, rows_unf, err = run_capture_diff(
+            name, track, car, ai, unfiltered=args.unfiltered)
         if err:
             print(f"{name:<24} ERROR: {err}")
             continue
@@ -119,12 +156,28 @@ def main():
         sub1  = rows.get(1,  -1)
         sub3  = rows.get(3,  -1)
         sub10 = rows.get(10, -1)
+        sub121 = rows.get(121, -1)
         r160  = rows.get(160, -1)
         r179  = rows.get(179, -1)
         delta = (sub1 - baseline) if baseline is not None and sub1 >= 0 else None
         delta_str = f"{delta:+d}" if delta is not None else "  N/A"
         baseline_str = str(baseline) if baseline is not None else "   --"
-        print(f"{name:<24} {sub0:>6} {sub1:>6} {sub3:>6} {sub10:>6} {r160:>8} {r179:>8} {baseline_str:>8}  {delta_str:>6}")
+        if args.unfiltered and rows_unf is not None:
+            u0   = rows_unf.get(0,  -1)
+            u1   = rows_unf.get(1,  -1)
+            u3   = rows_unf.get(3,  -1)
+            u10  = rows_unf.get(10, -1)
+            u121 = rows_unf.get(121, -1)
+            u160 = rows_unf.get(160, -1)
+            u179 = rows_unf.get(179, -1)
+            print(f"{name:<24} {sub0:>6} {sub1:>6} {sub3:>6} {sub10:>6} "
+                  f"{sub121:>7} {r160:>8} {r179:>8} {baseline_str:>8}  "
+                  f"{delta_str:>6}  | {u0:>6} {u1:>6} {u3:>6} {u10:>6} "
+                  f"{u121:>7} {u160:>6} {u179:>6}")
+        else:
+            print(f"{name:<24} {sub0:>6} {sub1:>6} {sub3:>6} {sub10:>6} "
+                  f"{sub121:>7} {r160:>8} {r179:>8} {baseline_str:>8}  "
+                  f"{delta_str:>6}")
 
 
 if __name__ == "__main__":
