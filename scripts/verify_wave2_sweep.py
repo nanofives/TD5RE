@@ -63,11 +63,16 @@ def run_capture_diff(scenario_name, track, car, player_is_ai):
     # Patch INI (line-preserving)
     originals = ini_patch(TD5RE_INI, build_overrides(track, car, player_is_ai))
 
+    # Launch minimized so repeated sweep runs don't yank focus.
+    si = subprocess.STARTUPINFO()
+    si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    si.wShowWindow = 7  # SW_SHOWMINNOACTIVE
+
     t0 = time.monotonic()
     try:
         try:
             subprocess.call([str(TD5RE_EXE)], cwd=str(PROJECT_ROOT), env=env,
-                            timeout=90)
+                            timeout=90, startupinfo=si)
         except subprocess.TimeoutExpired:
             # Some scenarios on certain tracks may not auto-quit cleanly;
             # kill it and proceed -- the snapshot may still be valid.
