@@ -120,7 +120,13 @@ static int32_t g_gravity_constant = TD5_GRAVITY_NORMAL;
 int32_t td5_physics_dbg_get_gravity_constant(void) {
     return g_gravity_constant;
 }
-static int32_t g_collisions_enabled = 0;     /* DAT_00463188: 0=on, 1=off */
+static int32_t g_collisions_enabled = 0;     /* DAT_00463188 (== orig's `g_cameraMode`):
+                                                * 0 = normal play / collisions ON / no-clip OFF,
+                                                * 1 = no-clip mode / collisions OFF. The two names
+                                                * refer to the SAME dword; the user-facing INI
+                                                * "Collisions" knob is XOR'd into it (frontend at
+                                                * 0x004155BD / 0x0041DC8E). Setter `td5_physics_set_collisions`
+                                                * preserves that inversion. */
 static int32_t g_game_paused = 0;            /* DAT_004AAD60 */
 static int32_t g_xz_freeze = 0;             /* DAT_00483030: 1=freeze XZ during countdown */
 static int32_t s_dynamics_mode = 0;          /* 0=arcade, 1=simulation (0x42F7B0) */
@@ -3344,10 +3350,13 @@ static void apply_collision_response(TD5_Actor *penetrator, TD5_Actor *target,
      * uncontrollably across consecutive impacts. Switch to writing
      * angular_velocity instead, so the integrator's clamps apply.
      *
-     * Gate variable mismatch noted but not fixed: original gates on
-     * g_cameraMode==0 (normal play); port has no g_cameraMode equivalent
-     * yet so the gate stays as the inverted g_collisions_enabled==0
-     * condition until a faithful camera-mode flag is introduced. */
+     * Gate semantics [VERIFIED 2026-05-17]: original at 0x00408289 reads
+     * `if (90000 < iVar10 && g_cameraMode == 0)`. The port's
+     * `g_collisions_enabled` global lives at the SAME address (DAT_00463188)
+     * as the original's `g_cameraMode` — the names differ but the dword and
+     * its semantics match. `0 = normal play / collisions ON / no-clip OFF`
+     * in both. So `g_collisions_enabled == 0` is byte-faithful to the
+     * original's gate; "inverted" was a misreading earlier on. */
     if (impact_mag > 90000 && g_collisions_enabled == 0) {
         int32_t scatter = impact_mag / 4;
         if (scatter > 0x7FFF) scatter = 0x7FFF;
@@ -5335,7 +5344,18 @@ static void integrate_traffic_pose(TD5_Actor *actor)
  * labels "roll"/"pitch" match the original's field layout at +0x208/+0x20C;
  * whether this corresponds to the conventional pitch/roll axes depends on
  * the original binary's wheel index convention (not verified).
- * ======================================================================== */
+ *
+ * [2026-05-17 OPERAND-SOURCE AUDIT — closes body-roll TODO Item 1]
+ * The IntegrateVehiclePoseAndContacts caller at 0x00405FEC pushes:
+ *     PUSH &actor->wheel_suspension_pos_FL   ; param_3 (sp[])
+ *     PUSH &actor->field_0xf0                ; param_2 (wheel_contact_pos)
+ *     PUSH &actor->display_angle_roll        ; param_1 (out)
+ * Disassembly of 0x00446030 reads `[ESI+4/+0x10/+0x1C/+0x28]` from param_2
+ * (stride 12, offset +4) which is the Y component of each of the 4
+ * wheel_contact_pos entries. The port's `wcp[1]/wcp[4]/wcp[7]/wcp[10]`
+ * indices (int32_t pointer) map 1-to-1 to those byte offsets. The X/Z
+ * cross-spans (wcp[0]/3/6/9 and wcp[2]/5/8/11) match the listing too. */
+/* ======================================================================== */
 static void td5_physics_attitude_from_wheels(const TD5_Actor *actor,
                                              int16_t *out_roll,
                                              int16_t *out_pitch)
