@@ -588,6 +588,49 @@ void td5_track_resolve_wall_contacts(TD5_Actor *actor)
      * as "outside" both walls, creating invisible barriers mid-road. */
     if (type != 1 && type != 2 && type != 5) return;
 
+    /* Fork-adjacent guard (Wave 1 Chain A fix, 2026-05-17).
+     *
+     * The current span's type (1/2/5) is "regular quad" but its rail-vertex
+     * pair can STILL diverge into the fork branch when the link_next or
+     * link_prev neighbour is a transition/reversed/junction/sentinel type
+     * (3, 4, 6, 7, 8, 11). On Sydney sp526 and BlueRidge sp257 the rail
+     * vertices diverge enough that the auto-flip's `opp_dot` test reads
+     * the OPPOSITE-rail corner on the WRONG side of the wall edge, flipping
+     * the perp normal AWAY from the road instead of toward it.
+     *
+     * `td5_physics_wall_response` then receives a wrong-sign `wall_angle`
+     * and faithfully reflects the velocity into the lateral direction —
+     * that is exactly the observed "AI shoved sideways by an invisible
+     * wall". The same flipped normal also fails to detect penetration
+     * during AI recovery (the dot test passes with the wrong sign and
+     * `d` stays > -10 dead zone), letting the car clip through walls.
+     *
+     * Suppressing this port-only synthesizer on fork-adjacent geometry is
+     * safe: the original binary has no equivalent mid-strip lateral wall
+     * impulse here, and the topological off-track damping (state 0x0F) is
+     * what's supposed to contain the car near forks anyway. See
+     * `todo_wall_response_clamp_fix_2026-05-16.md` for the full audit.
+     *
+     * Closes: todo_wall_response_clamp_fix, todo_ai_recovery_wall_collision_missing,
+     *         todo_sydney_ai_first_divergence_span526_wall (over-shove half),
+     *         partial: todo_ai_early_turn_into_wall (wall no longer over-fires
+     *         near forks).
+     */
+    {
+        int prev_idx = (int)sp->link_prev;
+        int next_idx = (int)sp->link_next;
+        if (prev_idx >= 0 && prev_idx < s_span_count) {
+            int t = s_span_array[prev_idx].span_type;
+            if (t == 3 || t == 4 || t == 6 || t == 7 || t == 8 || t == 11)
+                return;
+        }
+        if (next_idx >= 0 && next_idx < s_span_count) {
+            int t = s_span_array[next_idx].span_type;
+            if (t == 3 || t == 4 || t == 6 || t == 7 || t == 8 || t == 11)
+                return;
+        }
+    }
+
     /* Branch spans (index >= ring_length) previously skipped this function
      * because the stale (no-gate) logic produced simultaneous LEFT+RIGHT
      * false-positives on the narrow 2-lane branches. With the sub_lane
