@@ -72,6 +72,12 @@ SCENARIOS = [
     Scenario("moscow_hum_viper",    4, 0, False),
     Scenario("sydney_ai_viper",     2, 0, True),
     Scenario("blueridge_ai_viper",  3, 0, True),
+    # CORRECTLY-NAMED scenarios per td5_frontend.c:636 mapping.
+    # The existing "moscow_ai_viper" entry above uses track=4 which is
+    # actually JARASH (pre-2026-05-16 mislabeling). Keeping it for now to
+    # not break references; new captures should use these correct names.
+    Scenario("actual_moscow_ai_viper", 0, 0, True),
+    Scenario("actual_jarash_ai_viper", 4, 0, True),
 ]
 
 # ---- Pool helpers (inline Python to avoid bash-from-Python quirks) ----------
