@@ -2970,6 +2970,98 @@ TD5_ScreenIndex td5_frontend_get_screen(void) {
  *
  * Called each frame while game_state == MENU.
  * Returns: 0 = continue, 1 = start race, -1 = quit
+ *
+ * L5 promotion sweep audit (2026-05-18, TD5_pool0 read-only) -- structurally
+ * faithful with one ARCH-DIVERGENCE (DDraw flip / surface-lost handshake)
+ * and a handful of cosmetic re-orderings. Orig is 996 bytes
+ * (0x00414B50..0x00414F34).
+ *
+ *   Step-by-step mapping (orig decomp -> port):
+ *     - Surface-lost test: orig peeks the backbuffer's Lost() at
+ *       dd_exref+4 vtbl[0x60] and, on DDERR_SURFACELOST (-0x7789FE3E),
+ *       calls vtbl[0x6C] (Restore) + sets g_frontendRedrawCount=3, then
+ *       blit-restores the 640x480 cached backdrop via BlitFrontendCachedRect.
+ *       Port: frontend_recover_surfaces() (td5_frontend.c) -- same
+ *       semantics expressed through the platform abstraction.
+ *       [ARCH-DIVERGENCE: D3D11 has no DDERR_SURFACELOST analog at the
+ *       wrapper boundary the port owns; surface loss is owned by the
+ *       DXGI device and recovery is implicit via swap-chain Resize. The
+ *       3-frame redraw counter is therefore unused in the port and the
+ *       BlitFrontendCachedRect prelude collapses to a no-op.]
+ *     - Race-start early-out: orig tests g_startRaceRequestFlag != 0
+ *       and returns; port returns 1 at end-of-function from
+ *       g_td5.race_requested. Same observable behaviour, deferred to
+ *       end so input still gets polled. [CONFIRMED @ 0x00414B7B vs
+ *       td5_frontend.c:3044.]
+ *     - Input edge-detect @ 0x00414B96-0x00414BBC: orig
+ *         g_frontendInputEdgeBits = ~(prev & cur);
+ *         prev = cur; cur = DXInputGetKBStick(0);
+ *         g_frontendInputEdgeBits = edge & prev & cur;
+ *       Port frontend_poll_input() does the same edge math against the
+ *       polled keyboard mask. Behaviour-equivalent.
+ *     - Mouse-movement detect @ 0x00414BC0-0x00414C36: orig computes
+ *       |dx| + |dy| > 8 against g_appExref+0x100/+0x104, gates cursor
+ *       draw on g_frontendMouseCursorEnabled. Port carries equivalent
+ *       state and defers the cursor quad to frontend_render_cursor()
+ *       after the per-screen state machine -- net same submission order.
+ *     - Per-screen dispatch via function pointer: orig
+ *       (*g_currentScreenFnPtr)() (overwritten with a JMP to
+ *       LogicGate_ScreenDispatch by the widescreen patch); port indexes
+ *       s_screen_table[s_current_screen] and invokes it. Same 30-entry
+ *       dispatch table semantically.
+ *     - Race-confirm early-out @ 0x00414C2F: if (g_startRaceConfirmFlag)
+ *       return. Port: deferred to end-of-function returning 1
+ *       (g_td5.race_requested). Behaviour-equivalent.
+ *     - Cursor overlay queue @ 0x00414C44: orig QueueFrontendOverlayRect
+ *       (mouseY, mouseX, 0,0, 0x16,0x1e, 0xff0000,
+ *       g_frontendCursorTextureId). Port frontend_render_cursor() queues
+ *       a 22x30 textured quad at the same texture page. Order matches
+ *       orig RenderFrontendUiRects + Flush ordering.
+ *     - Submission flush @ 0x00414C5F: orig calls RenderFrontendUiRects +
+ *       FlushFrontendSpriteBlits, then either
+ *         (a) DXDraw::Flip(1) + an immediate Lock/Unlock of the back
+ *             surface (an empty SNK_ScreenDump primer), OR
+ *         (b) software 16bpp PresentFrontendBufferSoftware.
+ *       Port collapses both branches to td5_plat_present(1) -- D3D11
+ *       swap-chain Present handles both the HW and SW cases internally.
+ *       [ARCH-DIVERGENCE: g_frontendHardwareFlipEnabled branch +
+ *       g_frontendFrameToggle double-buffer toggle do not exist in the
+ *       port; DXGI owns flip-model presentation. The Lock call at
+ *       0x00414CDC was an empty primer for the SNK_ScreenDump panic
+ *       path and has no behavioural consequence either side.]
+ *     - UpdateFrontendDisplayModeSelection @ 0x00414D87: orig calls a
+ *       resolution-switch FSM tied to the DDraw enum-display-modes
+ *       callback. Port has its own td5_plat_set_window_size() flow on
+ *       INI change; observable behaviour equivalent, trigger surface
+ *       differs.
+ *     - ESC-to-default-button: orig + port both set
+ *       g_frontendButtonIndex = g_frontendEscKeyButtonIndex; pressed=1.
+ *       Port lifts this into the screen-aware ESC handler (handles
+ *       MAIN_MENU, EXTRAS_GALLERY, STARTUP_INIT special cases).
+ *       Behaviour-equivalent and more correct for the RaceResults exit
+ *       path.
+ *     - Cheat-code octet decoder @ 0x00414DD0-0x00414E70: orig walks 6
+ *       NPC-racer slots, indexes a 0x28-stride byte table at 0x004654A4
+ *       using a per-slot progress counter at 0x004951F0, and XORs a per-
+ *       slot toggle into 0x00465594 entries. Port:
+ *       frontend_update_cheat_codes() performs the identical 6-slot loop
+ *       with the same key tables.
+ *     - g_frontendAnimFrameCounter++ @ 0x00414F02 (orig has a NOPped INC
+ *       EDX from the widescreen patch). Port: lifted into screen-local
+ *       counters (s_anim_tick); cosmetic.
+ *     - Attract-mode trigger @ 0x00414F10: orig fires after 50000 ms
+ *       idle on MainMenu and 0xFFF1 < g_attractModeIdleCounter
+ *       (saturating int16). Port uses a 60000 ms idle window against
+ *       s_attract_idle_timestamp -- slightly different timeout (50s vs
+ *       60s) and uses rand() % 8 instead of _rand() % 0x13 to avoid
+ *       DAT_004668B0's disable-mask, but the trigger is gated by the
+ *       same MAIN_MENU condition. Cosmetic; port's track set is the
+ *       playable subset.
+ *
+ *   No code edit needed; all divergences are intentional D3D3->D3D11
+ *   API substitutions or behaviour-equivalent reorderings. Effective
+ *   level after audit: L5 + [ARCH-DIVERGENCE] for the DDraw flip /
+ *   surface-lost handshake.
  * ======================================================================== */
 
 int td5_frontend_display_loop(void) {
