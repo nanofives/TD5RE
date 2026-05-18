@@ -71,6 +71,33 @@
 
 #define LOG_TAG "physics"
 
+/* ------------------------------------------------------------------------
+ * SAR-RZ (signed arithmetic shift with round-toward-zero) helpers.
+ *
+ * x86 encodes signed division by a power-of-two via:
+ *     CDQ                  ; EDX = sign(EAX) ? -1 : 0
+ *     AND EDX, (2^N - 1)   ; EDX = (sign ? 2^N-1 : 0)
+ *     ADD EAX, EDX         ; bias negative values up by (2^N-1)
+ *     SAR EAX, N           ; signed shift right
+ *
+ * Net result: divide-by-2^N with round-toward-zero (matches C signed `/`).
+ * Plain `x >> N` in C is implementation-defined; on GCC/clang it is
+ * arithmetic-shift-right which rounds toward -infinity for negative `x`,
+ * differing from x86's SAR-RZ by 1 LSB when `x < 0` and the low N bits
+ * are nonzero.
+ *
+ * Use SAR_RZ_8 / SAR_RZ_12 / SAR_RZ_6 / SAR_RZ_15 instead of plain `>>`
+ * at any site sourced from a `CDQ; AND EDX,mask; ADD; SAR` idiom in the
+ * original listing.
+ *
+ * `x` is evaluated once; safe to use with arbitrary signed int32 args.
+ * Audit citations: pilot_00404030_audit.md (D1/D2/D5/D10/D14).
+ * ------------------------------------------------------------------------ */
+#define SAR_RZ_6(x)   (((int32_t)(x) + (((int32_t)(x) >> 31) & 0x3F))   >> 6)
+#define SAR_RZ_8(x)   (((int32_t)(x) + (((int32_t)(x) >> 31) & 0xFF))   >> 8)
+#define SAR_RZ_12(x)  (((int32_t)(x) + (((int32_t)(x) >> 31) & 0xFFF))  >> 12)
+#define SAR_RZ_15(x)  (((int32_t)(x) + (((int32_t)(x) >> 31) & 0x7FFF)) >> 15)
+
 extern void *g_actor_base;
 extern uint8_t *g_actor_table_base;
 
@@ -1138,7 +1165,8 @@ void td5_physics_update_vehicle_actor(TD5_Actor *actor)
  * Player 4-wheel dynamics -- UpdatePlayerVehicleDynamics (0x404030)
  * ========================================================================
  *
- * [CONFIRMED @ 0x00404030] L5 promotion sweep audit (2026-05-18).
+ * [CONFIRMED @ 0x00404030] Byte-faithful with orig UpdatePlayerVehicleDynamics.
+ * SAR-RZ rounding fixed 2026-05-18 (L5 promotion follow-up).
  *
  * Static port audited byte-for-byte against listing 0x00404030..0x00404eb7
  * (3719 bytes / 870 instructions). The body has 15+ inline [CONFIRMED]
@@ -1146,16 +1174,20 @@ void td5_physics_update_vehicle_actor(TD5_Actor *actor)
  * structure matches the original block layout: surface probes → drag damp
  * → body-frame trig → load transfer → drivetrain dispatch → slip-circle.
  *
- * KNOWN DIVERGENCES (documented in re/analysis/pilot_00404030_audit.md):
+ * SHIPPED 2026-05-18 — D1/D2/D5/D10/D14 SAR-RZ-class LSB sites:
+ *   D1 — handbrake rear-grip mul @ 0x0040434C..0x0040436F (SAR-RZ-8).
+ *   D2 — velocity drag @ 0x004040E5..0x00404137 (SAR-RZ-8 then SAR-RZ-12).
+ *   D5 — per-wheel grip-from-load @ 0x00404253..0x004042B7 (SAR-RZ-8;
+ *        replaced the `+128 >> 8` half-to-even bias with SAR-RZ).
+ *   D10 — front_long / rear_long axle sum @ 0x004046DC..0x00404734 (SAR-RZ-8
+ *         per wheel-grip product).
+ *   D14 — front-slip yaw damping correction @ 0x00404DB6..0x00404DD5
+ *         (SAR-RZ-6 then SAR-RZ-15).
  *
- *   D1-D2  Plain SAR vs SAR_RZ at 5+ rounding sites (0/1 LSB per site;
- *          accumulates over hundreds of ticks but per-tick effect is sub-LSB).
- *   D4     All 4 wheels read same surface_type_chassis instead of
- *          per-wheel GetTrackSegmentSurfaceType (structural — only matters
- *          on mixed-surface track sections).
- *   D5     `(grip << 8 + 128) >> 8` vs sar8_rz idiom (0/1 LSB).
- *   D10    front_long / rear_long plain SAR (0/1 LSB).
- *   D14    yaw damping plain SAR (0/1 LSB).
+ * RESIDUAL KNOWN DIVERGENCES (documented in re/analysis/pilot_00404030_audit.md):
+ *   D4   All 4 wheels read same surface_type_chassis instead of per-wheel
+ *        GetTrackSegmentSurfaceType (structural — mixed-surface segments
+ *        only; upstream-blocked on RefreshVehicleWheelContactFrames audit).
  *   D3,D11,D15  audited MATCH — no divergence.
  *
  * Most known wheel_load_accum / lateral_bias divergences are UPSTREAM
@@ -1163,7 +1195,6 @@ void td5_physics_update_vehicle_actor(TD5_Actor *actor)
  * todo_playerisai_carparam_binding.md, SHIPPED 48d320a).
  *
  * Audit reference: re/analysis/pilot_00404030_audit.md (2026-05-14, pool0).
- * Effective level: L4 (byte-faithful overall; 4-5 LSB sites documented).
  */
 
 /* Pilot trace hooks (pool0 / 0x00404030) */
@@ -1217,7 +1248,11 @@ void td5_physics_update_player(TD5_Actor *actor)
     for (i = 0; i < 4; i++) {
         int32_t sf = (int32_t)s_surface_friction[surface_wheel[i] & 0x1F];
         int32_t load = (i < 2) ? front_load : rear_load;
-        grip[i] = (sf * load + 128) >> 8;
+        /* D5 — SAR-RZ-8 per axle grip [CONFIRMED @ 0x00404253-0x004042B7].
+         * Original idiom: IMUL grip_table,load; CDQ; AND EDX,0xFF; ADD; SAR 8.
+         * Prior `(sf*load + 128) >> 8` was round-half-to-even via +128 bias;
+         * port now matches x86 round-toward-zero semantics. */
+        grip[i] = SAR_RZ_8(sf * load);
         if (grip[i] < TD5_PLAYER_GRIP_MIN) grip[i] = TD5_PLAYER_GRIP_MIN;
         if (grip[i] > TD5_PLAYER_GRIP_MAX) grip[i] = TD5_PLAYER_GRIP_MAX;
     }
@@ -1237,8 +1272,10 @@ void td5_physics_update_player(TD5_Actor *actor)
     if (actor->handbrake_flag) {
         int32_t hb_mod = (int32_t)PHYS_S(actor, 0x7A);
         int32_t g2_pre = grip[2], g3_pre = grip[3];
-        grip[2] = (grip[2] * hb_mod) >> 8;
-        grip[3] = (grip[3] * hb_mod) >> 8;
+        /* D1 — SAR-RZ-8 [CONFIRMED @ 0x0040434C-0x0040436F].
+         * Original idiom: IMUL grip,hb_mod; CDQ; AND EDX,0xFF; ADD; SAR 8. */
+        grip[2] = SAR_RZ_8(grip[2] * hb_mod);
+        grip[3] = SAR_RZ_8(grip[3] * hb_mod);
         if (actor->slot_index == 0 && (actor->frame_counter % 30u) == 0u) {
             TD5_LOG_I(LOG_TAG,
                       "HBRAKE: hb_mod=%d grip_rl=%d->%d grip_rr=%d->%d",
@@ -1259,8 +1296,13 @@ void td5_physics_update_player(TD5_Actor *actor)
         else
             damp_coeff = surf_drag * 256 + (int32_t)PHYS_S(actor, 0x6A);
 
-        actor->linear_velocity_x -= ((actor->linear_velocity_x >> 8) * damp_coeff) >> 12;
-        actor->linear_velocity_z -= ((actor->linear_velocity_z >> 8) * damp_coeff) >> 12;
+        /* D2 — SAR-RZ-8 then SAR-RZ-12 [CONFIRMED @ 0x004040E5-0x00404104,
+         * 0x0040410D-0x00404137].
+         * Original idiom: CDQ; AND EDX,0xFF; ADD EAX,EDX; SAR EAX,8 (vx_h8)
+         *               ; IMUL EAX,damp; CDQ; AND EDX,0xFFF; ADD; SAR EAX,0xC.
+         * 32-bit IMUL wrap behaviour preserved (same as C int32 multiply). */
+        actor->linear_velocity_x -= SAR_RZ_12(SAR_RZ_8(actor->linear_velocity_x) * damp_coeff);
+        actor->linear_velocity_z -= SAR_RZ_12(SAR_RZ_8(actor->linear_velocity_z) * damp_coeff);
     }
 
     /* --- 6. Resolve body-frame velocities (cos/sin of heading) --- */
@@ -1582,8 +1624,11 @@ void td5_physics_update_player(TD5_Actor *actor)
     int32_t sf_fr = (int32_t)s_surface_friction[surface_wheel[1] & 0x1F];
     int32_t sf_rl = (int32_t)s_surface_friction[surface_wheel[2] & 0x1F];
     int32_t sf_rr = (int32_t)s_surface_friction[surface_wheel[3] & 0x1F];
-    int32_t front_long = ((sf_fl * wheel_drive[0]) >> 8) + ((sf_fr * wheel_drive[1]) >> 8);
-    int32_t rear_long  = ((sf_rl * wheel_drive[2]) >> 8) + ((sf_rr * wheel_drive[3]) >> 8);
+    /* D10 — SAR-RZ-8 per wheel-grip product [CONFIRMED @ 0x004046DC-0x00404734].
+     * Original idiom: IMUL grip,drive; CDQ; AND EDX,0xFF; ADD; SAR EAX,8.
+     * Plain `>> 8` rounds toward -inf for negative products (rolling reverse). */
+    int32_t front_long = SAR_RZ_8(sf_fl * wheel_drive[0]) + SAR_RZ_8(sf_fr * wheel_drive[1]);
+    int32_t rear_long  = SAR_RZ_8(sf_rl * wheel_drive[2]) + SAR_RZ_8(sf_rr * wheel_drive[3]);
 
     /* --- Coupled bicycle-model lateral force solve ---
      * Literal port of UpdatePlayerVehicleDynamics @ 0x00404A40-0x00404CCC.
@@ -2034,9 +2079,11 @@ void td5_physics_update_player(TD5_Actor *actor)
      * prevents the car from spinning. Without it, any small yaw perturbation
      * feeds back through tire slip → lateral force → more yaw torque. */
     if (actor->front_axle_slip_excess > 0) {
-        int32_t correction = (actor->angular_velocity_yaw >> 6)
+        /* D14 — SAR-RZ-6 then SAR-RZ-15 [CONFIRMED @ 0x00404DB6-0x00404DD5].
+         * Original: CDQ; AND EDX,0x3F; ADD; SAR 6 → IMUL; CDQ; AND EDX,0x7FFF; ADD; SAR 15. */
+        int32_t correction = SAR_RZ_6(actor->angular_velocity_yaw)
                            * actor->front_axle_slip_excess;
-        correction = correction >> 15;
+        correction = SAR_RZ_15(correction);
         if (correction > 0x200) correction = 0x200;
         if (correction < -0x200) correction = -0x200;
         actor->angular_velocity_yaw -= correction;
@@ -2129,7 +2176,8 @@ void td5_physics_update_player(TD5_Actor *actor)
  * AI 2-axle dynamics -- UpdateAIVehicleDynamics (0x404EC0)
  * ========================================================================
  *
- * [CONFIRMED @ 0x00404EC0] L5 promotion sweep audit (2026-05-18).
+ * [CONFIRMED @ 0x00404EC0] Byte-faithful with orig UpdateAIVehicleDynamics.
+ * SAR-RZ rounding fixed 2026-05-18 (L5 promotion follow-up).
  *
  * Static port audited byte-for-byte against listing 0x00404EC0..0x004057E5
  * (2341 bytes / ~570 instructions / 95 decompiled lines). Body structure
@@ -2140,9 +2188,10 @@ void td5_physics_update_player(TD5_Actor *actor)
  *   - AI brake formula faithful port (commit 63e9624, three-bug fix)
  *   - AI slot 0 PlayerIsAI=1 carparam exemption (commit 48d320a)
  *
- * KNOWN DIVERGENCES (re/analysis/pilot_00404EC0_audit.md):
- *   D1     Velocity drag uses plain SAR-12, original uses SAR-RZ-12 idiom
- *          (1 LSB on negative velocity drag; not yet ported, low impact).
+ * SHIPPED 2026-05-18 — D1 SAR-RZ LSB site:
+ *   D1 — velocity drag @ 0x00404F33..0x00404F91 (SAR-RZ-8 then SAR-RZ-12).
+ *
+ * RESIDUAL KNOWN DIVERGENCES (re/analysis/pilot_00404EC0_audit.md):
  *   D3     Tire-grip fallback when 0 — safety net only fires under
  *          carparam-loading regression; benign with proper Viper carparam.
  *   D4     `current_slip_metric` tail-write — DELIBERATE enhancement to
@@ -2153,7 +2202,6 @@ void td5_physics_update_player(TD5_Actor *actor)
  *   - todo_state0f_overfire_skips_player.md (AI dynamics tick overshoot)
  *
  * Audit reference: re/analysis/pilot_00404EC0_audit.md (2026-05-14, pool12).
- * Effective level: L4 (byte-faithful with D1 LSB site documented).
  */
 
 /* Pilot trace emitters (pool12 / precise-port workflow) */
@@ -2229,8 +2277,10 @@ void td5_physics_update_ai(TD5_Actor *actor)
         else
             damp_coeff = surf_drag * 256 + (int32_t)PHYS_S(actor, 0x6A);
 
-        actor->linear_velocity_x -= ((actor->linear_velocity_x >> 8) * damp_coeff) >> 12;
-        actor->linear_velocity_z -= ((actor->linear_velocity_z >> 8) * damp_coeff) >> 12;
+        /* D1 — SAR-RZ-8 then SAR-RZ-12 [CONFIRMED @ 0x00404F33-0x00404F91].
+         * Same SAR-RZ idiom as the player drag at 0x004040E5. */
+        actor->linear_velocity_x -= SAR_RZ_12(SAR_RZ_8(actor->linear_velocity_x) * damp_coeff);
+        actor->linear_velocity_z -= SAR_RZ_12(SAR_RZ_8(actor->linear_velocity_z) * damp_coeff);
     }
 
     /* --- 5. Body-frame velocities + steered-frame trig --- */
