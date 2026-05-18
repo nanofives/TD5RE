@@ -847,12 +847,21 @@ void td5_physics_run_paused_engine_step(void)
  *
  * Audited divergences (L5 promotion audit 2026-05-18):
  *
- *   1) [DEFERRED — Phase 2] AccumulateVehicleSpeedBonusScore @ 0x004066EA
- *      NOT called. Port uses per-hit decrement instead. Phase 2 agent owns
- *      restoring this call.
+ *   1) [ARCH-DIVERGENCE — AccumulateVehicleSpeedBonusScore @ 0x004066EA
+ *      effectively no-op] Port relocates this call into the td5_game.c
+ *      sub-tick loop (accumulate_speed_bonus @ td5_game.c:3567). Function
+ *      itself IS ported, but the ActorRaceMetric source fields
+ *      (forward_speed/skid_factor/contact_count) are never populated from
+ *      actor state, so the bonus stays at 0 in practice. Not a sim
+ *      divergence; scoring-side. Documented in
+ *      reference_arch_no_speed_bonus_score_2026-05-18.md.
  *
- *   2) [DEFERRED — Phase 2] AdvancePendingFinishState @ 0x0040... consolidated
- *      into td5_game.c game-tick loop. Phase 2 agent owns moving it back.
+ *   2) [CONFIRMED @ 0x0040A2B0 + L4 minor residuals] AdvancePendingFinishState
+ *      consolidated into td5_game.c game-tick loop (tick_pending_finish_timer
+ *      @ td5_game.c:3177). Core hi/lo CONCAT11 decrement + state-2 promotion
+ *      logic byte-faithful with orig disasm. 3 minor residuals filed in
+ *      todo_advance_pending_finish_state_residuals_2026-05-18.md (replay-mode
+ *      gate, transition-gate, timer-ticks early-return optimization).
  *
  *   3) [ARCH-DIVERGENCE — port-only step 9 surface_contact_flags safety net]
  *      Port writes scf at the tail of this dispatcher when slot is the human
