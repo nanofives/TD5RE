@@ -1021,7 +1021,42 @@ static void td5_ai_refresh_route_state_slot(int slot) {
 
         /* Step 5: RenderTrackSegmentNearActor @ 0x00433CE0 writes RS[0x37]
          * and RS[0x38], neither of which is consumed elsewhere in the port.
-         * Skipping it (no state effect on lateral_bias cascade). */
+         * Skipping it (no state effect on lateral_bias cascade).
+         *
+         * [L5 audit 2026-05-18, TD5_pool0 read-only]
+         *
+         * Despite the name, this is SIM math, NOT render. It is called from
+         * UpdateRaceActors @ 0x00436A70 (callers={UpdateRaceActors}, the
+         * SIM-side per-actor update loop, NOT the render pipeline). It takes
+         * the per-actor RS-table pointer (gActorRouteStateTable + slot*0x47)
+         * and writes ONLY two int32s at +0xdc/+0xe0 of that table — i.e.
+         * RS[0x37] (dword index 0xdc/4 = 55) and RS[0x38] (224/4 = 56).
+         *
+         * The body (decompiled @ 0x00433CE0):
+         *   switch on strip-type (1/2/5 vs 3/4 vs 6/7) computes
+         *     a 2x2 linear system [iVar9*iVar6 - iVar7*iVar8] = det,
+         *     RS[0x37] = (cross_num * 0x100) / det,
+         *     RS[0x38] = (cross_num2 * 0x100) / det.
+         *   The math is span-local barycentric coords ("actor's x/z relative
+         *   to the span's vertex parallelogram", scaled <<8). Per Wave 5
+         *   confidence-map notes: "computes actor's field_0xdc/0xe0 — local-
+         *   space x/z relative to span". The actor->field_0xdc and 0xe0 are
+         *   NOT actor-struct fields — they are RS_TABLE[+0xdc/+0xe0].
+         *
+         * Original-program consumer audit: zero. A program-wide instruction
+         * scan for `MOV ESI,[EBX+0xdc]` style reads returns hits only inside
+         * UpdateTrafficRoutePlan @ 0x00435E80, where EBX holds an ACTOR base
+         * (stride 0x388), NOT the RS-table — reading actor field +0xdc which
+         * is a separate, unrelated location. No instruction in the binary
+         * reads gActorRouteStateTable[+0xdc] or +0xe0.
+         *
+         * Conclusion: byte-faithful skipping is the correct port — these RS
+         * slots are dead writes in the original. Promoting to L5. If a future
+         * Frida sweep ever turns up a hidden reader (e.g. unanalyzed DLL or
+         * fastcall thunk), the math is trivial to bring online; the helper
+         * `td5_track_compute_span_progress()` already gives us the parallel
+         * primitive. Confidence map (re/analysis/ghidra_confidence_map_*.csv)
+         * should be updated to L5 + UNUSED-IN-PORT tag. */
 
         /* Step 6: UpdateActorTrackBounds — caches min/max progress + signed
          * offsets that feed the boundary writebacks below. */
