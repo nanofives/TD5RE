@@ -853,17 +853,29 @@ void td5_track_resolve_wall_contacts(TD5_Actor *actor)
         }
     }
 
-    /* Pass 2: fire wall_response only if 2+ probes hit the same edge AND
-     * each contributing probe is past WALL_DEAD_ZONE. This matches the
-     * 601f95f verified setup that prevents single-wheel boundary
-     * transitions from firing transverse-edge walls. */
+    /* Pass 2: fire wall_response when probes hit the edge AND each
+     * contributing probe is past WALL_DEAD_ZONE. The 2-vote requirement
+     * (l_hit_count >= 2 / r_hit_count >= 2) was originally added to suppress
+     * single-wheel transverse-edge false positives during forward span
+     * advancement, where a single front wheel can briefly enter sub_lane=
+     * lane_count-1 ahead of its peer.
+     *
+     * 2026-05-18: drop the 2-vote requirement for the REAR-COLLISION side
+     * (l_wall, NEAR transverse edge). Original 0x406CC0 has NO vote — each
+     * probe is tested independently. Rear wheels rarely produce the
+     * forward-advance false positive (they're the trailing edge of forward
+     * motion). User-reported "crashing from back I see car going through
+     * walls" matches the failure mode where only one rear wheel reaches
+     * l_extremity at a time during reverse-into-wall, so the 2-vote
+     * suppresses the legitimate rear collision response. Front (r_wall)
+     * side keeps the 2-vote to preserve the verified Newcastle behavior. */
     for (int pi = 0; pi < 4; pi++) {
         /* Skip degenerate span where both walls flag the same probe. */
         if (probe_l_ok[pi] && probe_r_ok[pi] &&
             probe_l_d[pi] < 0 && probe_r_d[pi] < 0)
             continue;
 
-        if (probe_l_ok[pi] && probe_l_d[pi] < WALL_DEAD_ZONE && l_hit_count >= 2) {
+        if (probe_l_ok[pi] && probe_l_d[pi] < WALL_DEAD_ZONE && l_hit_count >= 1) {
             double rad = atan2((double)l_par.nnx, (double)(-l_par.nnz));
             int32_t wall_angle = (int32_t)(rad * (4096.0 / (2.0 * 3.14159265358979323846))) & 0xFFF;
             td5_physics_wall_response(actor, wall_angle, probe_l_d[pi], 1,
