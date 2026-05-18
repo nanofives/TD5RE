@@ -7132,6 +7132,13 @@ int td5_physics_get_collisions_flag(void)
 }
 
 /* ========================================================================
+ * [CONFIRMED @ 0x00405D70] Byte-faithful with orig ResetVehicleActorState.
+ * L5 promotion 2026-05-18 (small-tier sweep). 54-instr listing match: clears
+ * 25 unique offsets (surface_contact_flags, vehicle_mode, ang/lin vel block,
+ * frame_counter, wheel_contact_bitmask, suspension_pos/spring_dv loops,
+ * euler_accum, render_pos = world_pos / 256), seeds gear=2 + rpm=400 +
+ * world_pos.y=0xC0000000 sentinel, integrates pose, then re-zeros vel subset.
+ *
  * ResetVehicleActorState (0x405D70)
  *
  * Resets vehicle to initial conditions (respawn/reset).
