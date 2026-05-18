@@ -3825,6 +3825,16 @@ static void build_results_table(void) {
 
 /* ========================================================================
  * Reset results table (0x40A880)
+ *
+ * [CONFIRMED @ 0x0040a880 ResetRaceResultsTable; L5 promotion sweep audit
+ *  2026-05-18] -- ARCH-DIVERGENCE, behaviour-equivalent.
+ *
+ * Orig per-entry zero with byte[1]=entry_idx priming, then entry[0].byte[0]=1.
+ * Port memsets to zero then sets entry[0].slot_flags=1. The orig's per-entry
+ * slot_index priming is overwritten by build_results_table() (line ~3674)
+ * before any reader observes the table, so the zero-instead-of-index init
+ * is byte-equivalent for all observable port state. See header L5 audit
+ * block (line ~107) for full rationale.
  * ======================================================================== */
 
 static void reset_results_table(void) {
