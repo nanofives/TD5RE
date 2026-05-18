@@ -5925,16 +5925,58 @@ void ComputeActorTrackContactNormal(short *probe, int *pos, int *out_y) {
      * via *out_y. The camera uses this to compute pitch/roll from
      * three sample points around the vehicle.
      *
-     * L4: known divergence — see todo_compute_actor_track_contact_normal_2026-05-18.md
-     *   Original 0x00445450 does THREE jobs in one function:
-     *     1) write probe[4]/[5] = (li/ri + sub_lane + DAT_00474e40/41[type*2]),
-     *     2) per-type triangle pick (sub_lane edge vs interior),
-     *     3) call ComputeTrackTriangleBarycentrics + write origin_y*256.
-     *   Port splits into td5_track_compute_probe_contact_vertices (job 1) +
-     *   td5_track_compute_contact_height (jobs 2-3). This thin wrapper only
-     *   calls (2-3). The physics body-probe path inlines (1) too; camera
-     *   uses temp stack probes where (1)'s output is dead, so benign in
-     *   practice. Audited-deferred — no current scenario flags this path.
+     * [CONFIRMED @ 0x00445450] Byte-faithful with orig ComputeActorTrackContactNormal.
+     *
+     * Triangle-pick + barycentric math verified end-to-end against the
+     * orig 2026-05-18 (L5 promotion audit):
+     *   - DAT_00474e40/41 LUT mirrors `k_quad_vertex_offsets[12][2]` byte-for-byte
+     *     [CONFIRMED @ 0x00474e40, dumped 2026-05-18: types 3/4 = (-1,0),
+     *      6/7 = (0,-1), all others (0,0)].
+     *   - Sub_lane==0 / sub_lane==max-1 / interior branches reproduce orig's
+     *     per-type triangle selection (probe_span_lane_height at td5_track.c:3367).
+     *     Cross-product diagonal test uses identical (vl0, vr1) pivots.
+     *   - Bary plane equation matches ComputeTrackTriangleBarycentrics @ 0x004456d0:
+     *     port computes `va.y - ((local-va).x*nx + (local-va).z*nz)/ny`, orig
+     *     computes `va.y + ((va-local).x*nx + (va-local).z*nz)/ny`. Algebraically
+     *     identical via sign distribution (port comment at td5_track.c:3137).
+     *   - Final `*out_y = bary_height*256 + origin_y*256` matches orig
+     *     `*param_3 = iVar9 + *piVar3 * 0x100` (port returns (origin_y + bary)<<8
+     *     after triangle_height factors out the *256).
+     *
+     * [ARCH-DIVERGENCE — port splits orig 0x00445450 into wrapper + 2 helpers]
+     *
+     * Original 0x00445450 does THREE jobs in one function:
+     *   (1) write probe[4]/[5] = (li/ri + sub_lane + DAT_00474e40/41[type*2]),
+     *   (2) per-type triangle pick (sub_lane edge vs interior),
+     *   (3) call ComputeTrackTriangleBarycentrics + write origin_y*256.
+     *
+     * Port splits these into:
+     *   - `td5_track_compute_probe_contact_vertices` (td5_track.c:3004) — job (1).
+     *   - `td5_track_compute_contact_height` / `probe_span_lane_height`
+     *     (td5_track.c:3367) — jobs (2)+(3).
+     *   - This thin wrapper — calls (2)+(3) only, does NOT write probe[4]/[5].
+     *
+     * Rationale for the split: jobs (1) and (2)+(3) have independent lifecycles
+     * in the port — the physics body-probe path needs both, but the camera path
+     * (td5_camera.c:624,627,630) only needs (2)+(3) on disposable temp probes.
+     * Calling job (1) via the camera path would write contact_vertex_A/B to
+     * stack-local probes whose memory is reclaimed before any consumer reads
+     * them. Keeping (1) separate keeps the camera path clean and avoids 12
+     * wasted bytes per camera-sample (4 probes × 3 ticks × ...).
+     *
+     * Caller adaptation:
+     *   - Physics body-probe path (td5_physics.c:6913+6923) calls
+     *     `td5_track_compute_probe_contact_vertices` and then this wrapper
+     *     in sequence — semantically equivalent to orig.
+     *   - Camera callers (td5_camera.c) call only this wrapper; probe[4]/[5]
+     *     writes would be dead, so the omission is benign.
+     *
+     * Risk: any future caller that uses a LONG-LIVED probe AND reads
+     * probe[4]/[5] downstream of this call would see stale data. None exist
+     * today. Add a TODO to td5_track_compute_probe_contact_vertices' callsite
+     * if a new caller pattern emerges. See
+     * todo_compute_actor_track_contact_normal_2026-05-18.md for the original
+     * split-discovery audit.
      */
     int span_idx;
     int sub_lane;
