@@ -500,6 +500,57 @@ void LoadCameraPresetForView(int actor, int force_reload, int view, int save_sta
  *
  * Main chase camera: orbit around vehicle with terrain-following,
  * damped angle tracking, height smoothing, and radius spring.
+ *
+ * [L5 promotion sweep audit 2026-05-18 — byte-equivalent (with documented
+ *  ARCH-DIVERGENCEs)]
+ *   Decompile of 0x00401590 verified semantically:
+ *     - Fly-in counter behaviour (ramp/decrement around g_flyInThreshold,
+ *       inverted clamp to 6 when actor+0x379 != 0) reproduces orig.
+ *     - Orbit visual angle = g_camYawOffset[v] - (g_camOrbitAngleFP[v]>>8)
+ *       matches DAT_00482f70 - (DAT_00482f18>>8).
+ *     - Orbit-offset sin/cos*radius (writes [0]/[2]; [1] = stored pitch)
+ *       matches orig sin/cos writes to DAT_00482ed8/edc/ee0.
+ *     - Heading integrator: 20-bit shortest-wrap, abs/5 + 5 base speed,
+ *       clamp >= 15 unless fly-in completed, integrate
+ *       (effective_speed * heading_delta) >> 8 — line-by-line match.
+ *     - Three-point terrain probe (forward-right, forward-left, backward)
+ *       uses pos_x/z + (sin/cos)*0x20 deltas — match orig local_3c..local_24.
+ *     - Look-angle = (g_camOrbitAngleFP>>8) - actor.display_angle_yaw +
+ *       g_camYawOffset — match orig uVar8 computation.
+ *     - Stored-pitch smoother = (orient[1]<<8 - stored_pitch + (>>31 & 7))
+ *       >> 3 + stored_pitch — match.
+ *     - Radius spring (sqrt(fx² + fz²) * _DAT_0045d5dc - _DAT_004749c8 *
+ *       current) + height smoother — match.
+ *   Race-start spring-reset (one-shot at g_td5.paused 1→0) lives in the
+ *   wrapper (td5_camera.c:2149-2160), not this routine — recent
+ *   fb60d3d-class fix verified by this sweep.
+ *
+ * [ARCH-DIVERGENCE — DAT_*-bank globals → named C-arrays]
+ *   Orig writes to fixed DAT addresses (DAT_00482ed8/edc/ee0/f18/f50/f54/
+ *   f60/f70/fa0/ef8/f00/f10). Port collects all per-view state into named
+ *   arrays (g_camOrbitOffset, g_camOrbitAngleFP, g_camOrientShort,
+ *   g_camHeadingDelta20, g_camYawOffset, g_camStoredPitch, g_camRotationSlot,
+ *   g_camCurrentRadius, g_camTargetHeight, g_camSmoothedHeight) indexed by
+ *   view. Wire-equivalent; only addressing differs.
+ *
+ * [ARCH-DIVERGENCE — terrain-derived pitch/roll temporarily forced to 0]
+ *   Orig computes pitch/roll via AngleFromVector12 over the three terrain
+ *   normals. Port currently zeroes both axes (cam_angles[0]=0,
+ *   cam_angles[2]=0) and only retains yaw because terrain probes return
+ *   wrong-scale values while actor coords are mixed 24.8 fp / world ints.
+ *   Tracked under todo_camera_no_slope_adjustment_2026-05-16.md — closes
+ *   when chassis-snap cascade clears the rotation_matrix divergence.
+ *
+ * [ARCH-DIVERGENCE — FPU rounding mode (ROUND vs +0.5f)]
+ *   Same FISTP-RNE vs nearest-up rounding gap as
+ *   UpdateVehicleRelativeCamera. Cosmetic only; does not feed sim.
+ *
+ * [ARCH-DIVERGENCE — split into UpdateChaseCamera + finalize_chase_pos]
+ *   Port factors the final SetCameraWorldPosition call out into
+ *   td5_camera_finalize_chase_pos so the chase position can be re-pinned
+ *   per render frame against the interpolated car mesh under 60fps render
+ *   / 30Hz sim. Orig wrote camera world position inline; identity result
+ *   when sub-tick fraction is 1.0 (per-sim-tick callsite).
  * ======================================================================== */
 
 void UpdateChaseCamera(int actor, int do_track_heading, int view)
