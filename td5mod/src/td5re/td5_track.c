@@ -2860,6 +2860,47 @@ static void update_position_recursive(int16_t *track_state, int32_t pos_x, int32
  * Updates the actor's track span position using 4-edge cross-product
  * boundary tests. On boundary crossing, transitions to the neighbor span
  * and recursively re-evaluates.
+ *
+ * [CONFIRMED @ 0x004440F0] L5 promotion sweep audit (2026-05-18).
+ *
+ * Body is the largest single function in scope at 4908 bytes
+ * (0x004440F0..0x0044541C). Pure-compute leaf — no callees. Port logic
+ * lives in static `update_position_recursive` @ td5_track.c:2457, called
+ * from both `td5_track_update_actor_position` (chassis, single_step=1)
+ * and `td5_track_update_probe_position` (per-wheel, single_step=1).
+ *
+ * SHIPPED FIXES (in master):
+ *   - single_step=1 on both chassis + probe variants matches orig's
+ *     one-step-per-call semantics [Ghidra-verified 2026-05-12].
+ *   - Junction branch decisions cases 1/4/8/11 (commit history).
+ *   - SAR usage at 0x00444164/0x0044416A — port uses plain SAR matching
+ *     orig (D1 in audit: NO ROUND-TO-ZERO IDIOM — confirmed match).
+ *
+ * KNOWN DIVERGENCES (re/analysis/pilot_004440F0_audit.md):
+ *   D2     Case 1 (FORWARD) — orig performs secondary cross-product on
+ *          previous-lane forward edge (psVar2[-3] read). Port just calls
+ *          resolve_neighbor(0x01) without the secondary retest. May
+ *          matter at lane-boundary onsets where actor barely crosses
+ *          FWD edge.
+ *   D3     Case 4 (BACKWARD) — symmetric to D2.
+ *   D4     `s_loaded_tuning` / `s_jump_entries` fallback (port-only
+ *          safety net for out-of-bounds new_span). Orig has no such
+ *          net — branches via type-8/9/10/11 dispatch.
+ *   D5     TRACK_MAX_RECURSION outer loop + saved-state rollback —
+ *          effectively a no-op at runtime (single_step=1 exits after
+ *          one iteration). Adds ~32 bytes of dead code on every call.
+ *   D6     Camera-probe stub at td5_track.c:4911 doesn't actually walk
+ *          (relies on chassis result). Not in pilot critical path.
+ *   D7     s_jump_entries heuristic branch-return remap (port-only).
+ *          Inert if upstream binds correctly.
+ *
+ * KNOWN TODO CHAIN OWNERS (cascade dependency):
+ *   - todo_jarash_spawn_span_19_vs_92_2026-05-17.md (track-walker)
+ *   - chassis-snap chain ownership (downstream consumer)
+ *
+ * Audit reference: re/analysis/pilot_004440F0_audit.md (pool10, 2026-05-14).
+ * Effective level: L4 (byte-faithful overall; D2/D3 secondary-retest
+ * gaps tracked as cascade-unwind work).
  */
 void td5_track_update_actor_position(TD5_Actor *actor)
 {
