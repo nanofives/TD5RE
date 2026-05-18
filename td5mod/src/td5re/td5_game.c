@@ -3654,6 +3654,22 @@ static void decay_ultimate_timer(int slot) {
  *   Easy   (tier 0): +20% time (multiply by 12/10)
  *   Normal (tier 1): +10% time (multiply by 11/10)
  *   Hard   (tier 2): no adjustment (baseline)
+ *
+ * [L5 promotion sweep audit 2026-05-18 — byte-equivalent]
+ *   Decompile of AdjustCheckpointTimersByDifficulty @ 0x0040A530 verified
+ *   line-by-line against this routine. The two scaling branches (tier=0
+ *   ×12/10, tier=1 ×11/10) and the unconditional actor field clears
+ *   (+0x344=table[+2], +0x37E=0, +0x328=0, +0x34C=0) all reproduce here
+ *   with semantic-equivalent writes into the port's ActorRaceMetric.
+ *
+ * [ARCH-DIVERGENCE — per-slot ActorRaceMetric vs in-place table mutation]
+ *   Original mutates g_raceCheckpointTablePtr[+2] AND the per-checkpoint
+ *   time_bonus entries IN PLACE, then re-reads on subsequent slot calls.
+ *   The port stores the scaled values into s_active_checkpoint (per-race)
+ *   plus per-slot s_metrics[]. To preserve idempotency the port gates the
+ *   scaling on slot==0 (mirroring orig's +0x375==0 / "is human player"
+ *   discriminator). Value identity across all six racer slots is
+ *   preserved — only the storage layout differs.
  * ======================================================================== */
 
 static void adjust_checkpoint_timers(int slot) {
