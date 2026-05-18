@@ -805,6 +805,19 @@ void td5_plat_heap_free(void *ptr)
         HeapFree(s_game_heap, 0, ptr);
 }
 
+/* [CONFIRMED @ 0x00430cb0 ResetGameHeap; L5 promotion sweep audit 2026-05-18]
+ * ARCH-DIVERGENCE -- two intentional deltas vs orig (both behaviour-neutral):
+ *   1) Initial size: 1 MB (port) vs 24 MB (orig). Both heaps are growable on
+ *      Win32 so the initial reservation only affects first-N-allocs latency;
+ *      td5_plat_heap_alloc never observes a failure on either size. The
+ *      sole user-visible signal would be process VA-reservation footprint at
+ *      startup, which is irrelevant for the source port's target hardware.
+ *   2) First-call gate: orig uses sentinel byte DAT_004aee4c; port uses
+ *      `if (s_game_heap)` null-check. Same semantic (one-shot destroy on
+ *      reset path; cold start skips the destroy). Header status table at
+ *      td5_game.c:95 still reads "DONE (delegates to td5_plat_heap_reset)"
+ *      — accurate at the dispatch level; this comment documents the
+ *      intra-platform deltas. */
 void td5_plat_heap_reset(void)
 {
     if (s_game_heap) {
