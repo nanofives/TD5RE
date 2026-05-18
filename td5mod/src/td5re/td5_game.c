@@ -417,7 +417,15 @@ static int      s_pause_menu_cursor;   /* 0=VIEW, 1=MUSIC, 2=SOUND, 3=CONTINUE, 
 
 /* Wanted-mode tracker marker intensity (DecayTrackedActorMarkerIntensity @ 0x43D7E0).
  * Original global g_wantedTargetTrackerActive. Decays 0x200/sub-tick, clamped to
- * [0, 0x1000]. Gate: audio-options overlay (= pause menu) pauses decay. */
+ * [0, 0x1000]. Gate: audio-options overlay (= pause menu) pauses decay.
+ *
+ * [CONFIRMED @ 0x0043d7e0 DecayTrackedActorMarkerIntensity; L5 promotion
+ *  sweep audit 2026-05-18] -- Byte-faithful port. Operations matched:
+ *    1) Gate on overlay/pause-menu (orig: g_audioOptionsOverlayActive).
+ *    2) Decrement 0x200 only when value > 0.
+ *    3) Early-return after clamp-to-zero on underflow.
+ *    4) Upper-clamp 0x1000.
+ *  Identical control flow, identical constants. */
 static int32_t  s_wanted_target_tracker;
 
 static void tick_wanted_target_tracker(void) {
