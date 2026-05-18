@@ -1764,41 +1764,100 @@ void td5_render_actors_for_view(int view_index)
     for (int i = 0; i < 9; i++)
         s_render_transform.m[i] = s_camera_basis[i];
 
-    for (int span_index = 0; span_index < span_count; span_index++) {
-        void *display_list = td5_track_get_display_list(span_index);
-        if (!display_list)
-            continue;
+    /* Per-ENTRY display-list walk — matches orig RunRaceFrame @ 0x0042b580.
+     *
+     * Orig's loop shape (transcribed from the BUILD phase of RunRaceFrame):
+     *   eff_player_span = reverse_direction
+     *                     ? gTrackTotalSpanCount - player_span
+     *                     : player_span;
+     *   start_entry = (eff_player_span - gRaceTrackSpanCullWindow) >> 2;
+     *   for (i = 0; i < gViewportLayoutEffectiveSpans; i++) {
+     *       entry_idx = start_entry + i;
+     *       // circuit:    wrap entry_idx modulo ring_length/4 (impl: SPAN modulo)
+     *       // non-circuit: clamp to [0, ring_length/4)
+     *       gTrackSpanDisplayListView0[i] = GetTrackSpanDisplayListEntry(entry_idx);
+     *   }
+     * then the render phase walks the cached array exactly once per entry.
+     *
+     * Port previously iterated per SPAN (`for span = 0..span_count`), and
+     * `td5_track_get_display_list(span_index)` divided by 4 internally — so
+     * spans n*4+0..n*4+3 all returned entry n, submitting each MODELS.DAT
+     * block ~4× per frame and inserting translucent batches into the sorted
+     * queue four times each. This refactor flips the loop to per-entry to
+     * match orig and eliminate the 4× redundancy.
+     *
+     * Branch geometry (span_index >= ring_length) is NOT in MODELS.DAT in
+     * orig and was never queried in this loop. Port currently leans on a
+     * STRIP-generated display-list fallback (td5_track.c:build_span_strip_display_list)
+     * to keep branch roads visible. That fallback path is preserved here
+     * via a secondary per-span loop guarded on player_branch_span >= 0 —
+     * dropping the STRIP fallback entirely is a separate audit work item. */
+    {
+        int ring         = td5_track_get_ring_length();
+        int total_spans  = td5_track_get_span_count();
+        int eff_player   = player_span;
+        if (g_td5.reverse_direction && ring > 0 && player_span < ring)
+            eff_player = ring - 1 - player_span;
 
-        /* Span-window cull: skip spans outside ±half_window of the player's span.
-         * Delta is wrapped into [-span_count/2, span_count/2] to handle circuit ring.
-         * When on a branch road, also accept spans near the branch span index. */
-        if (span_count > 0) {
-            int ring = td5_track_get_ring_length();
-            int delta = span_index - player_span;
-            /* Only wrap for main road spans (ring topology) */
-            if (span_index < ring) {
-                int half_ring = ring / 2;
-                if (delta >  half_ring) delta -= ring;
-                if (delta < -half_ring) delta += ring;
+        /* Signed >> 2 with round-toward-zero bias (matches orig 0x0042BBBC:
+         *   `(x + (x >> 31 & 3U)) >> 2` — the standard signed-divide-by-4
+         *   idiom). C's `>>` on signed negatives is implementation-defined
+         *   but is arithmetic on all targets we ship (gcc/i686, MSVC/x86). */
+        int back_spans  = back_window;
+        int fwd_spans   = fwd_window;
+        int start_entry = (eff_player - back_spans) >> 2;
+        int n_entries   = ((back_spans + fwd_spans) >> 2) + 1;
+
+        int ring_entries = (ring > 0) ? ((ring + 3) >> 2) : 0;
+        int is_circuit   = (g_td5.track_type == TD5_TRACK_CIRCUIT) ? 1 : 0;
+
+        for (int i = 0; i < n_entries; i++) {
+            int entry_idx = start_entry + i;
+
+            if (ring_entries > 0) {
+                if (is_circuit) {
+                    /* Circuit: wrap modulo ring_entries (matches orig's
+                     * `while (iVar8 < 0) iVar8 += ring; while (ring <= iVar8) iVar8 -= ring;`). */
+                    while (entry_idx < 0)              entry_idx += ring_entries;
+                    while (entry_idx >= ring_entries)  entry_idx -= ring_entries;
+                } else {
+                    /* Non-circuit: clamp to [0, ring_entries). Orig drops
+                     * iterations outside the range; we skip per-iter to
+                     * preserve the n_entries count semantics. */
+                    if (entry_idx < 0 || entry_idx >= ring_entries)
+                        continue;
+                }
             }
-            /* delta>0 = ahead in track direction (use fwd_window),
-             * delta<0 = behind (use back_window). */
-            int visible = (delta <= fwd_window && delta >= -back_window);
-            /* If on a branch, also render spans near the branch index. Use the
-             * smaller back_window radius for the trailing direction so branch
-             * trails behind don't extend beyond what the main player path
-             * would show. */
-            if (!visible && player_branch_span >= 0) {
-                int bdelta = span_index - player_branch_span;
-                int bdelta_abs = bdelta < 0 ? -bdelta : bdelta;
-                int branch_radius = (bdelta >= 0) ? fwd_window : back_window;
-                visible = (bdelta_abs <= branch_radius);
-            }
-            if (!visible) continue;
+
+            void *display_list = td5_track_get_display_list_entry(entry_idx);
+            if (!display_list)
+                continue;
+
+            td5_render_span_display_list(display_list);
+            rendered_spans++;
         }
 
-        td5_render_span_display_list(display_list);
-        rendered_spans++;
+        /* Branch geometry fallback (port-only, no orig equivalent).
+         * Only walks when the player is on a branch road. Uses the legacy
+         * span-indexed getter so the STRIP fallback synthesizer keeps
+         * producing per-span road quads for branch visibility.
+         *
+         * Dedup is not required here: branch spans are >= ring_length and
+         * the main-road loop above only queries entries < ring_entries,
+         * so there's no overlap with the MODELS.DAT entry walk. */
+        if (player_branch_span >= 0 && total_spans > ring) {
+            int blo = player_branch_span - back_window;
+            int bhi = player_branch_span + fwd_window;
+            if (blo < ring)         blo = ring;
+            if (bhi >= total_spans) bhi = total_spans - 1;
+            for (int span_index = blo; span_index <= bhi; span_index++) {
+                void *display_list = td5_track_get_display_list(span_index);
+                if (!display_list)
+                    continue;
+                td5_render_span_display_list(display_list);
+                rendered_spans++;
+            }
+        }
     }
 
     {

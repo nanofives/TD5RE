@@ -120,6 +120,10 @@ TD5_StripVertex *td5_track_get_vertex(int index);
 int              td5_track_is_valid_mesh_ptr(const void *ptr);
 int              td5_track_is_ptr_in_blob(const void *ptr, size_t size);
 void            *td5_track_get_display_list(int span_index);
+/* Entry-indexed MODELS.DAT lookup. Caller must pre-divide span_index by 4
+ * (orig 0x0042BBBC SHR). Replaces per-span iteration's 4× redundant block
+ * submission with orig's per-entry walk shape. */
+void            *td5_track_get_display_list_entry(int entry_index);
 
 /* --- MODELS.DAT --- */
 int  td5_track_parse_models_dat(const void *data, size_t size);
