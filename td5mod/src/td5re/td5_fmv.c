@@ -774,13 +774,32 @@ int td5_fmv_is_supported(void)
  * Original ShowLegalScreens (0x42C8E0):
  *   - Opens LEGALS.ZIP, extracts legal1.tga and legal2.tga
  *   - Displays each fullscreen for ~5000ms
- *   - Skippable via any key
+ *   - Skippable via any key (after a 400ms grace period)
  *
  * Source port version:
  *   - Looks for Legal/legal1.tga and Legal/legal2.tga (pre-extracted)
  *   - Falls back to Legals/legal1.tga, legal1.tga, etc.
  *   - Displays each for 5000ms with 500ms fade in/out
  *   - Skippable via Enter/Escape/Space (matching original skip keys)
+ *
+ * [L5 promotion sweep audit 2026-05-18 — ARCH-DIVERGENCE]
+ *   Original 0x0042C8E0 decompile compared line-by-line. Two-screen flow
+ *   (5000ms display, 400ms grace, then any-key-skip via DXInput::CheckKey
+ *   over keys 0..0xFF) is reproduced semantically. Divergences are all
+ *   architectural and intentional:
+ *     1. Asset source: original reads legal1.tga/legal2.tga from
+ *        LEGALS.ZIP via GetArchiveEntrySize/ReadArchiveEntry. Port uses
+ *        pre-extracted PNGs from re/assets/legals/ (pipeline is part of
+ *        TD5RE's PNG asset workflow).
+ *     2. Decode path: original DisplayLoadingScreenImage decodes 8/16/24
+ *        TGA via DXDraw::dd front/render surface format. Port uses
+ *        fmv_load_png + fmv_display_image through the D3D11 backend.
+ *     3. Skip detection: original polls DXInput::GetKB + CheckKey for
+ *        any of 256 scan codes after a 400ms grace. Port uses higher-
+ *        level Enter/Escape/Space (semantic equivalent, narrower set).
+ *     4. Optional fade in/out: port adds a 500ms cosmetic fade not
+ *        present in the original — additive only.
+ *   Timer math (5000ms cap) is byte-faithful.
  * ======================================================================== */
 
 /** Legal screen search paths (tried in order) */
