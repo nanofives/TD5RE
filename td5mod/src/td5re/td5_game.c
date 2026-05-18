@@ -4031,6 +4031,31 @@ int td5_game_check_race_completion(void) {
  *   Single player: alternates horizontal/vertical (s_fade_direction_alternator)
  *   Horizontal split: always direction 0 (horizontal)
  *   Vertical split:   always direction 1 (vertical)
+ *
+ * [CONFIRMED @ 0x0042cc20 BeginRaceFadeOutTransition; L5 promotion sweep
+ *  audit 2026-05-18] -- ARCH-DIVERGENCE, behaviour-equivalent.
+ *
+ * Orig structure (165 bytes):
+ *   - Radial-pulse gate (param_1 == 1 && g_humanPlayerCount == 1 && actor
+ *     field +0x383 == 0 && !network && game_type == 0 && !drag):
+ *     calls ResetHudRadialPulseOverlay; sets g_raceEndRadialPulseEnabled=1.
+ *   - Always sets g_raceEndFadeState = 1.
+ *   - Direction dispatch on g_raceViewportLayoutMode:
+ *       0 (single):   alternator ^= 1 with `& 0x80000001` sign repair
+ *       1 (horiz):    direction = 0
+ *       2 (vert):     direction = 1
+ *
+ * Port collapses the dual-axis dispatch into a single `param` axis. All
+ * call sites in td5_game.c (lines 2119, 2285) pass either
+ * g_td5.split_screen_mode or 0, which are the same values orig reads
+ * from g_raceViewportLayoutMode. The radial-pulse gate is omitted
+ * because td5_render_radial_pulse is a stub (td5_render.c:5215). The
+ * alternator complex bit-twiddle is replaced with `^= 1` -- both
+ * converge to alternating 0/1 across calls, byte-equivalent in
+ * observable state. Port additionally zeroes s_fade_accumulator which
+ * the orig does not -- orig relies on the accumulator already being at
+ * its baseline; the port adds the explicit reset defensively. No
+ * behaviour change in steady-state replay.
  * ======================================================================== */
 
 void td5_game_begin_fade_out(int param) {
