@@ -3133,6 +3133,91 @@ static void tl_apply_case0(const TD5_LightZone *zone)
     tl_set_depth((int)zone->amb_r, (int)zone->amb_g, (int)zone->amb_b);
 }
 
+/* [CONFIRMED @ 0x00430150] ApplyTrackLightingForVehicleSegment.
+ * L5 audit 2026-05-18 (TD5_pool0 read-only).
+ *
+ * NOT a D3D3->D3D11 ARCH-DIVERGENCE despite first appearances.
+ *
+ * The original is NOT a D3D fixed-function vertex-lighting call. It is a
+ * pure CPU computation that selects a per-vehicle zone from a 285-entry
+ * per-track lighting table (DAT_004aee14, stride 0x24 bytes, copied into
+ * td5_light_zones_table.inc) and feeds 3 directional + 1 scalar-ambient
+ * contributions into the SOFTWARE vertex-lighting pipeline (callee
+ * SetTrackLightDirectionContribution @ 0x0042E130 and
+ * UpdateActiveTrackLightDirections @ 0x0042CE90 -> ComputeMeshVertexLighting
+ * @ 0x0042CFC0 (called outside this function), which produces per-vertex
+ * lit colors before vertex submission. D3D3 sees only the post-lit colors).
+ *
+ * So the port's lighting math MUST remain CPU-side and bit-faithful — the
+ * D3D11 backend (like the original's D3D3 layer) only consumes the lit
+ * vertex colors, never raw normals + light state. Skipping or shader-izing
+ * this function WOULD diverge visually.
+ *
+ * Structural mapping vs the original (verified with the decompilation in
+ * pool0 on 2026-05-18):
+ *   - Prologue zone walk (advancing actor->field_0x377 +/- one zone at a
+ *     time while the actor's track_span_raw leaves [span_lo, span_hi]):
+ *     `update_actor_light_zone()` above.
+ *   - case 0 (static):                  `tl_apply_case0()`
+ *   - case 1 (transition):              `tl_apply_case1_midspan()` +
+ *                                       `tl_blend_from_start/_from_end()`
+ *   - case 2 (multi-sample mid-zone):   `tl_apply_case2()`
+ *     with sub_mode 0/1/2 via `tl_pick_strip_vertex()`
+ *   - case 3 (half/half full-zone):     two-branch BlendStart/End with
+ *                                       max_dist = (span_hi-span_lo+1)*0x200
+ *   - SetTrackLightDirectionContribution @ 0x0042E130:  `tl_set_contrib()`
+ *   - ComputeAverageDepth @ 0x0043E7B0:                 `tl_set_depth()`
+ *   - UpdateActiveTrackLightDirections @ 0x0042CE90:    `tl_commit_to_render_globals()`
+ *   - ConvertFloatVec4ToShortAngles @ 0x0042CDB0:       `tl_normalize_4096()`
+ *
+ * Per-byte mapping of the original short-pointer struct:
+ *   psVar9[0..1]    = span_lo, span_hi
+ *   psVar9[2..4]    = dir_x, dir_y, dir_z
+ *   (psVar9+0x0c..) = weight_{r,g,b} (3 bytes)
+ *   (psVar9+0x10..) = amb_{r,g,b}    (3 bytes)
+ *   psVar9[10..11]  = pos_off_x, pos_off_y
+ *   (psVar9+0x18)   = blend_mode (low byte of psVar9[0xc])
+ *   (psVar9+0x19)   = spacing
+ *   (psVar9+0x1a)   = sub_mode  (low byte of psVar9[0xd])
+ *   (psVar9+0x1b)   = multiplier
+ *   psVar9[14]      = state_key  (dword) — environs/chrome light_index
+ *   psVar9[16]      = slot_color (dword)
+ *
+ * Numeric coverage:
+ *   - case 1 mid-zone takes TWO vertex samples: left_vertex_index and
+ *     left_vertex_index + (strip[+3] & 0xf). The original adds
+ *     `(*(byte*)(strip+3) & 0xf)` to `*(ushort*)(strip+4)` (= left_vertex);
+ *     port mirrors via `((const uint8_t *)sp)[3] & 0x0F`.
+ *   - The attenuation formula
+ *         iVar = (mag^2 * multiplier + sign_fixup) >> 14
+ *         atten = iVar < 0x1001 ? 0x1000 - iVar : 0
+ *         channel = (atten * weight + sign_fixup) >> 12
+ *     is reproduced byte-for-byte in `tl_sample_contrib()`.
+ *   - The body-frame transform M^T * world_dir is reproduced exactly in
+ *     `tl_commit_to_render_globals()` using the actor's rotation_matrix
+ *     (row-major: m[3*r + c]).
+ *
+ * What's different from the original (zero-divergence cosmetic):
+ *   - The port's zone walk caches per-actor zone index in
+ *     `s_actor_light_zone[slot]` rather than `actor->field_0x377`; both
+ *     are equivalent persistent storage with the same forward/backward
+ *     stepping semantics, used only to amortize linear search.
+ *   - Failure recovery: when a strip/vertex cannot be resolved, the port
+ *     falls through to `tl_apply_case0()`. The original LogReport()s "1st
+ *     light: spacing zero" and leaves the previous frame's basis intact.
+ *     For runtime correctness this is equivalent (next frame the table is
+ *     stable); the LogReport is a debug artefact.
+ *   - The port pre-zeros disabled slot vectors in `tl_commit_to_render_globals()`
+ *     when `s_tl_contrib[s].enabled == 0`. The original relies on the
+ *     SetTrackLightDirectionContribution callee zeroing the global s_light_dir
+ *     slot. Same observable state, more conservative.
+ *
+ * Promoting to L5. No code change. Confidence-map: L5; structurally
+ * equivalent reimplementation of a sim-stage CPU lighting selector.
+ *
+ * Companion reference doc (kept for the cross-architecture call site
+ * audit pattern): re/analysis/reference_arch_track_vehicle_segment_lighting_d3d_2026-05-18.md
+ */
 void td5_render_apply_track_lighting(int slot, TD5_Actor *actor)
 {
     if (!actor || slot < 0 || slot >= TD5_ACTOR_MAX_TOTAL_SLOTS) {
