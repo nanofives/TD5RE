@@ -2329,7 +2329,19 @@ int td5_game_run_race_frame(void) {
              * engine RPM (no vehicle movement). */
             td5_physics_set_paused(1);
             for (i = 0; i < TD5_MAX_RACER_SLOTS; i++) {
-                if (s_slot_state[i].state == 1)
+                /* state==1 = player. Also run for slot 0 under PlayerIsAI=1
+                 * to mirror the orig's Frida-hook scoping at
+                 * td5_quickrace_hook.js:381 — slot[0].state=0 is scoped to
+                 * UpdateRaceActors body ONLY; UpdatePlayerVehicleControlState
+                 * fires BEFORE that with state[0]=1. Without this hybrid step,
+                 * slot 0's throttle_state / encounter_steering_cmd are never
+                 * written by the "no input" path (ts=1, enc_steer=0) before
+                 * the AI tick. Then when AI early-returns (script blocking,
+                 * e.g. Blueridge heading-misalignment recovery), the snapshot
+                 * still carries the injected sub_tick=0 values instead of the
+                 * orig's UpdatePlayerVehicleControlState outputs. */
+                if (s_slot_state[i].state == 1 ||
+                    (i == 0 && g_td5.ini.player_is_ai))
                     td5_input_update_player_control(i);
             }
             /* Zero steering_command at the START of each paused sub-tick.
@@ -2434,20 +2446,25 @@ int td5_game_run_race_frame(void) {
                     if (s_countdown_physics_ticks < 1)
                         s_countdown_physics_ticks++;
                 } else {
-                    /* Mirror the paused-branch housekeeping from
-                     * UpdateVehicleActor @ 0x00406881:
-                     *   prev_race_position = race_position
-                     *   surface_contact_flags = 0
-                     * (UpdateVehicleEngineSpeedSmoothed is a known
-                     * residual — engine RPM during pause is audio-only
-                     * and doesn't feed the dynamics path.) */
-                    for (i = 0; i < TD5_MAX_RACER_SLOTS; i++) {
-                        if (s_slot_state[i].state == 3) continue;
-                        TD5_Actor *pa = td5_game_get_actor(i);
-                        if (!pa) continue;
-                        pa->prev_race_position    = pa->race_position;
-                        pa->surface_contact_flags = 0;
-                    }
+                    /* Mirror the engine-RPM portion of orig's paused branch
+                     * (UpdateVehicleActor @ 0x00406881-0x00406908). The full
+                     * td5_physics_tick() is skipped on these middle ~117
+                     * paused sub-ticks (see comment block above), but the
+                     * engine smoother + paused housekeeping (prev_race_pos
+                     * copy, scf clear, AI engine pin, scf-from-cardef-on-
+                     * high-RPM gate) MUST run every paused sub-tick to match
+                     * orig's RPM convergence from 400 → ~1200 by sub_tick=1.
+                     *
+                     * Skipping these closed the engine_speed_accum cluster:
+                     * 42 fields across 7 scenarios at sub_tick=1 (port=400 or
+                     * 800 vs orig=1193-1200 per AI slot, smaller delta on
+                     * player slots).
+                     *
+                     * IntegrateVehiclePoseAndContacts is INTENTIONALLY still
+                     * skipped — the port's integrator does not converge to
+                     * orig's zero state during stationary countdown, which
+                     * is the reason this gate exists. */
+                    td5_physics_run_paused_engine_step();
                 }
             }
 
@@ -2539,9 +2556,14 @@ int td5_game_run_race_frame(void) {
 
         /* Input record/playback is handled inside td5_input_poll_race_session(). */
 
-        /* --- Per-slot player control update --- */
+        /* --- Per-slot player control update ---
+         * state==1 = active player. Also run for slot 0 under PlayerIsAI=1
+         * to mirror the orig's Frida-hook scoping at td5_quickrace_hook.js:381
+         * (slot[0].state=0 is scoped to UpdateRaceActors body only).
+         * See paused-branch comment above for full rationale. */
         for (i = 0; i < TD5_MAX_RACER_SLOTS; i++) {
-            if (s_slot_state[i].state == 1) {   /* active player */
+            if (s_slot_state[i].state == 1 ||
+                (i == 0 && g_td5.ini.player_is_ai)) {
                 td5_input_update_player_control(i);
             }
         }

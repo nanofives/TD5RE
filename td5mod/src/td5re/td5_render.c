@@ -3514,9 +3514,10 @@ void td5_render_crossfade_surfaces(uint32_t *dst, const uint32_t *src_a,
  *     z_write=1 and paint over the shadow where they exist in screen
  *     space, so the car correctly "occludes" the shadow without a
  *     depth test on the shadow itself.
- *   - Scale corners outward from the XZ centroid by 1.85 to approximate
- *     the unread _g_wheelSuspensionRenderScale and give the shadow a
- *     footprint larger than the raw wheel spread.
+ *   - Scale corners outward from the XZ centroid by 1.25 to match the
+ *     original's _g_wheelSuspensionRenderScale @ 0x00463B64 (1.25f) so
+ *     the shadow has the same footprint as the original render (a 1.85f
+ *     guess used until 2026-05-17 produced shadows ~1.48x linear larger).
  *   - Corners stay at wheel-contact Y; no vertical lift is needed
  *     because the shadow is painted at ground level and then occluded
  *     by the car body via draw order, not depth test.
@@ -3525,7 +3526,11 @@ void td5_render_crossfade_surfaces(uint32_t *dst, const uint32_t *src_a,
  *     car mesh is interpolated the same way at line ~1547).
  */
 #define SHADOW_VERTICAL_OFFSET  (0.0f)
-#define SHADOW_CORNER_SCALE     (1.85f)
+/* [CONFIRMED 2026-05-17] g_wheelSuspensionRenderScale @ 0x00463B64 = 1.25f.
+ * Previous port value 1.85f was an unverified guess (see commented-out
+ * reference to "the unread _g_wheelSuspensionRenderScale") and produced
+ * shadows ~1.48x linear (~2.2x area) larger than the original. */
+#define SHADOW_CORNER_SCALE     (1.25f)
 #define SHADOW_VIEW_Y_OFFSET    (-22.0f)   /* [CONFIRMED @ 0x40C5CC] push shadow below car in view-space */
 
 static int   s_shadow_lookup_done = 0;
