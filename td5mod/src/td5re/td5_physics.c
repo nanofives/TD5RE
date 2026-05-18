@@ -8074,7 +8074,12 @@ int32_t td5_physics_compute_drive_torque(TD5_Actor *actor)
     return torque;
 }
 
-/* --- ApplySteeringTorqueToWheels (0x42EEA0) ---  [byte-faithful port]
+/* [CONFIRMED @ 0x0042EEA0] Byte-faithful with orig ApplySteeringTorqueToWheels.
+ * L5 promotion 2026-05-18 (small-tier sweep). Verbatim port of 24-instr listing;
+ * throttle * tuning[+0x68] * 26, biased SAR 8, * g_gearTorqueTable[gear],
+ * biased SAR 8 → kick written FL/FR (+), RL/RR (-) on wheel_spring_dv[0..3].
+ *
+ * --- ApplySteeringTorqueToWheels (0x42EEA0) ---  [byte-faithful port]
  *
  * Verbatim port of FUN_0042EEA0 (0x0042EEA0..0x0042EF06). Originally the
  * port stubbed this out to suppress a pitch-divergence symptom, but the
