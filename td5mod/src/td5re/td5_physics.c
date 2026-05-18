@@ -7488,7 +7488,12 @@ void td5_physics_state0f_damping(TD5_Actor *actor)
  * Engine & Transmission
  * ======================================================================== */
 
-/* --- UpdateVehicleEngineSpeedSmoothed (0x0042ED50) ---
+/* [CONFIRMED @ 0x0042ED50] Byte-faithful with orig UpdateVehicleEngineSpeedSmoothed.
+ * L5 promotion 2026-05-18 (small-tier sweep). Line-for-line listing port;
+ * brake/neg-throttle → idle 400; else target = (redline-400)*throttle>>8 + 400,
+ * SAR-4 slew (up clamp 400, dead down clamp 200), upper redline clamp omitted.
+ *
+ * --- UpdateVehicleEngineSpeedSmoothed (0x0042ED50) ---
  *
  * Byte-faithful port of FUN_0042ED50 (RE: TD5_pool11 read-only listing,
  * audited 2026-05-14). Mirrors the original x86 control flow line-for-line:
