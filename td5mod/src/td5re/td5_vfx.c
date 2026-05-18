@@ -1725,6 +1725,18 @@ void td5_vfx_render_tire_tracks(void) {
             float vy = cx * g_cameraBasis[3] + cy * g_cameraBasis[4] + cz * g_cameraBasis[5];
             float vz = cx * g_cameraBasis[6] + cy * g_cameraBasis[7] + cz * g_cameraBasis[8];
 
+            /* [PRECISE-PORT @ 0x0043F3A2-0x0043F3FA] RenderTireTrackPool subtracts
+             * DAT_0045d6ac (=20.0f) from the transformed Y of all 4 quad corners
+             * (slot offsets +0x38/+0x64/+0xBC/+0x90) to lift the tire mark slightly
+             * above the ground, preventing z-fighting with the road surface.
+             *
+             * Orig view-space Y convention vs port's projection (`sy = -vy * ...`)
+             * differs by a Y-flip: port has the screen-flip baked into the
+             * projection formula, so to match the orig's screen lift we ADD here
+             * (orig subtracts in its space, but in port's Y-up view space the
+             * same visual effect requires +20.0 on vy before perspective). */
+            vy += 20.0f;
+
             /* Perspective project */
             if (vz <= near_clip) { all_visible = 0; break; }
             float inv_z = 1.0f / vz;
@@ -1736,8 +1748,12 @@ void td5_vfx_render_tire_tracks(void) {
 
         if (!all_visible) { continue; }
 
+        /* [PRECISE-PORT @ 0x0043F23B-0x0043F244] Intensity-to-color pack:
+         * local_18 = bVar3 + (bVar3<<8) + (bVar3<<16) + 0xff000000
+         * No floor in orig — intensity can fade fully to 0 (transparent gray).
+         * Port previously floored at 0x30 (~19% gray) which left a residue at
+         * end-of-life that orig clears. Removed to match orig pack-as-is. */
         uint8_t val = slot->intensity;
-        if (val < 0x30) val = 0x30;
         uint32_t color = 0xFF000000u | ((uint32_t)val << 16) |
                          ((uint32_t)val << 8) | (uint32_t)val;
 
