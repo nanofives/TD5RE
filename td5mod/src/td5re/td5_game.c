@@ -2554,6 +2554,15 @@ int td5_game_run_race_frame(void) {
         }
         td5_physics_set_paused(0);
 
+        /* Continue ticking the countdown timer through the post-paused level==0
+         * window so the "1" indicator stays visible for the full ~40 sub-ticks
+         * then hides cleanly at timer==0. Mirrors orig's per-frame call to
+         * UpdateRaceCameraTransitionTimer @ 0x0040A490 which is invoked
+         * regardless of paused state. */
+        if (g_cameraTransitionActive > 0) {
+            tick_race_countdown();
+        }
+
         /* Input record/playback is handled inside td5_input_poll_race_session(). */
 
         /* --- Per-slot player control update ---
@@ -2966,13 +2975,15 @@ static void tick_race_countdown(void)
 {
     int level, next_indicator;
 
-    if (!g_td5.paused || g_cameraTransitionActive <= 0) {
-        static int s_cd_early_logged = 0;
-        if (s_cd_early_logged < 5) {
-            TD5_LOG_W(LOG_TAG, "tick_countdown early return: paused=%d timer=%d",
-                      g_td5.paused, g_cameraTransitionActive);
-            s_cd_early_logged++;
-        }
+    /* Only the timer gate matters here. Orig UpdateRaceCameraTransitionTimer
+     * @ 0x0040A490 is called every frame regardless of paused — its
+     * entry-guard returns when timer == 0 and the function continues
+     * decrementing during the level==0 window (paused already 0). The port
+     * must mirror this so the "1" digit stays visible for the full level==0
+     * window (~40 sub-ticks) and only hides when timer fully reaches 0.
+     * Caller must arrange to invoke this from both paused and racing
+     * branches until timer expires. */
+    if (g_cameraTransitionActive <= 0) {
         return;
     }
 
@@ -3006,46 +3017,28 @@ static void tick_race_countdown(void)
 
     /* Race-start: orig flips g_gamePaused at level==0 (indicator "1"),
      * not when timer hits 0. Use g_td5.paused itself as the one-shot
-     * gate so the log only fires on the actual transition. */
+     * gate so the log only fires on the actual transition. Indicator is
+     * NOT hidden here — orig keeps "1" visible for the full ~40 sub-tick
+     * level==0 window. The hide happens below when timer fully reaches 0.
+     *
+     * NOTE (2026-05-14): audit of orig 0x0040A490 confirmed the original
+     * does NOT touch STEERING_CMD/RAMP_ACCUM/ang_velocity_yaw or
+     * RS_TRACK_PROGRESS/RS_TRACK_OFFSET_BIAS on the level==0 transition —
+     * it only clears g_gamePaused and gRaceCameraTransitionGate. */
     if (level == 0 && g_td5.paused) {
         g_td5.paused = 0;
-        /* Hide the countdown digit at the SAME transition that flips paused.
-         *
-         * Orig UpdateRaceCameraTransitionTimer @ 0x0040A490 hides the indicator
-         * on the very NEXT call after timer reaches 0, via its entry-guard:
-         *
-         *   if (g_cameraTransitionActive == 0) {
-         *       SetRaceHudIndicatorState(0,0); SetRaceHudIndicatorState(1,0);
-         *       return;
-         *   }
-         *
-         * The port can't rely on a second call: tick_race_countdown is only
-         * invoked while g_td5.paused == 1 (see main race loop ~2486), so once
-         * paused flips here we never come back. Pre-630d797 the port hid the
-         * indicator at the same g_cameraTransitionActive<=0 boundary as
-         * paused→0; commit 630d797 (race-start off-by-one) moved paused→0 to
-         * level==0 (sub_tick=121) but lost the hide-call, leaving the digit
-         * "1" sprite latched on for the rest of the race.
-         *
-         * Hiding here is visually one sub-tick earlier than orig (the orig
-         * shows "1" for one extra frame after paused→0 before the next call's
-         * entry-guard hides it), but that 1-frame transient (~33ms) is
-         * imperceptible — the user-reported regression is the digit staying
-         * on forever. Sister fix to fb60d3d (chase camera spring-reset moved
-         * from g_cameraTransitionActive==0 to !g_td5.paused).
-         *
-         * NOTE (2026-05-14): audit of orig 0x0040A490 confirmed the original
-         * does NOT touch STEERING_CMD/RAMP_ACCUM/ang_velocity_yaw or
-         * RS_TRACK_PROGRESS/RS_TRACK_OFFSET_BIAS on the level==0 transition —
-         * it only clears g_gamePaused and gRaceCameraTransitionGate.
-         * The previous port-only reset block here was a workaround for the
-         * (now-fixed) spawn-time +0x82 pre-seed bug; with c698403 + 9b7d42a
-         * in place the cascade now naturally produces the ±20000 sim_tick=1
-         * steering range. */
-        set_countdown_indicator_state(0);
-        s_race_countdown_state = 0;
         TD5_LOG_I(LOG_TAG, "Race countdown: GO at level=0 timer=0x%X",
                   g_cameraTransitionActive);
+    }
+
+    /* Hide the indicator when timer fully reaches 0, mirroring orig's
+     * entry-guard at 0x0040A490. This fires ~40 sub-ticks after the
+     * level==0 flip above so the "1" digit is visible during the entire
+     * level==0 window like in the original. */
+    if (g_cameraTransitionActive == 0 && s_race_countdown_state != 0) {
+        set_countdown_indicator_state(0);
+        s_race_countdown_state = 0;
+        TD5_LOG_I(LOG_TAG, "Race countdown: indicator hidden (timer==0)");
     }
 }
 
