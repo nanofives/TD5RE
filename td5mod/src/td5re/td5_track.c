@@ -924,6 +924,31 @@ void td5_track_resolve_wall_contacts(TD5_Actor *actor)
  *     the boundary strip's left edge, normalized to length 4096.
  *   - flag=0 to wall_response so track_contact_flag is NOT written
  *     (port hooks side<0 to skip that write).
+ *
+ * L5 promotion sweep audit (2026-05-18):
+ *   - UpdateActorTrackSegmentContactsForward @ 0x00406F50: byte-faithful.
+ *     [CONFIRMED @ 0x406F87 JG gate, 0x406FB6 per-probe JG, 0x40702A SAR;
+ *     0x40705F JNS sign test, 0x407094 PUSH 0 flag, 0x4070A1 CALL force-fn,
+ *     0x4070C0 CMP 0x8 probe-loop bound.]
+ *   - UpdateActorTrackSegmentContactsReverse @ 0x004070E0: byte-faithful,
+ *     symmetric with Forward — outer gate inverted (`track_span_raw <
+ *     sentinel-1` instead of `> sentinel+1`), per-probe gate uses equality
+ *     instead of `<=`, base/end vertex pair swapped (psVar1 = end, psVar2
+ *     = base) so outward normal flips, and the atan2 edge tangent goes
+ *     base->end inverted. [CONFIRMED @ 0x407124 JG inverted; 0x40717C
+ *     CMP equality; 0x40717E JNZ probe-skip.] The port's `reverse_mode`
+ *     branch in `fwd_rev_resolve_contact` swaps both nx/nz signs and the
+ *     ref_v base/end vertex, mirroring orig's swap exactly.
+ *   - Normalization uses StoreRoundedVector3Ints @ 0x0042CCD0 in orig
+ *     (FILD/FSQRT/FDIVR 4096.0f / FMUL / __ftol-truncate). Port uses
+ *     `sqrtf` + float division + `(int32_t)` cast (also round-toward-zero
+ *     after 32-bit float precision). Differs only at the 80-bit->32-bit
+ *     FPU residue boundary (±1 LSB in normalized normal vector), which
+ *     does not change the sign of the penetration dot at any value
+ *     observable in the field.
+ *   - tangent-angle computation: orig calls AngleFromVector12 @ 0x0040A720,
+ *     port uses `atan2` + scale to 4096-units with `& 0xFFF`. Same value
+ *     range, ±0/±1 LSB difference at quadrant edges.
  * ======================================================================== */
 
 /* Per-level boundary sentinel pair, copied from the original binary's
@@ -5416,6 +5441,63 @@ int td5_track_parse_models_dat(const void *data, size_t size)
  * Relocates internal offset fields in a mesh header to absolute pointers.
  * The commands_offset, vertices_offset, and normals_offset fields are
  * converted from byte-offsets-from-header-start to absolute pointers.
+ *
+ * L5 promotion sweep audit (2026-05-18) — partial L5 + ARCH-DIVERGENCE.
+ *
+ * Pointer relocation (header +0x2C/+0x30/+0x34) is byte-faithful with
+ * orig 0x0040AC00 lines `*(int*)(param_1+0x2C) = ... + param_1;` etc.
+ * [CONFIRMED @ 0x0040AC0F-0x0040AC32 disasm.]
+ *
+ * The port intentionally OMITS three secondary passes from orig:
+ *
+ * 1. Per-vertex UV clamp + half-texel inset
+ *    Orig walks every vertex (stride 0x2C, count = u_vertex_count*3 +
+ *    quad_count*4) and clamps `iVar8+0x1C` (u), `iVar8+0x20` (v) to
+ *    [0.0, 1.0], then transforms `u = u * 0.984375f + 0.0078125f`
+ *    (and likewise for v). The scale/bias come from
+ *    [DAT_0045D61C=0x3C000000=1/128] and [DAT_0045D620=0x3F7C0000=255/256],
+ *    a classic D3D3 nearest-neighbor half-texel inset to prevent
+ *    sampling neighboring texels at u or v exactly 0 or 1.
+ *    [CONFIRMED @ 0x0040AC4C-0x0040AC91, constants dumped 2026-05-18.]
+ *
+ *    [ARCH-DIVERGENCE: The D3D11 wrapper samples with bilinear filtering
+ *    and clamp/border addressing. Half-texel inset is unnecessary because
+ *    the GPU sampler handles edge sampling correctly — applying it would
+ *    actually skew texture coordinates by 0.78% and produce a 1-pixel
+ *    seam on every UV island edge. UVs are passed through as-is.]
+ *
+ * 2. Per-mesh-batch GetTextureSlotStatus primitive-type tag
+ *    Orig calls GetTextureSlotStatus(mesh->texture_page_id) once per
+ *    batch and writes `psVar7[0] = (-(loaded) & 3) + 1` — encodes the
+ *    D3D3 primitive opcode (TLVERTEX vs LVERTEX vs vertex) based on
+ *    whether the texture page is resident.
+ *    [CONFIRMED @ 0x0040ACA4-0x0040ACBA disasm.]
+ *
+ *    [ARCH-DIVERGENCE: The port has no D3D3 opcode-rewrite pass — the
+ *    wrapper backend uses a single immediate-mode vertex format selected
+ *    at the draw call site. Documented separately in td5_render.c near
+ *    "The source port has no PrepareMeshResource opcode-rewrite pass".
+ *    Additive billboard ordering is recovered via the deferred-additive
+ *    flush there, not via per-batch opcode tagging.]
+ *
+ * 3. Per-face culling-flag prepass (iVar5+0xC)
+ *    Orig walks faces (tris @ stride 0x30, quads @ stride 0x40) and
+ *    writes `face_flags = (any vertex.y <= 0.0366) ? 0 : 1`. This is
+ *    a screen-space-distance backface/cull cache populated at load
+ *    time, then read per-frame at draw time to skip degenerate faces.
+ *    [CONFIRMED @ 0x0040ACDD-0x0040AD9A disasm; threshold
+ *    [DAT_0045D618=0x3D15FEDA=~0.0366].]
+ *
+ *    [ARCH-DIVERGENCE: Port culls per-triangle in the software-transform
+ *    path (see clip_emit_tris in td5_render.c) using screen-space area
+ *    sign and near-plane Z, computed each frame from the CURRENT camera
+ *    transform. Caching a load-time cull flag against a pre-transform
+ *    vertex-y threshold would be incorrect for a moving camera.]
+ *
+ * Net behaviour: the port's prepare_mesh_resource does the ONE step
+ * (pointer relocation) that matters for downstream parity; the omitted
+ * passes are intentional D3D3->D3D11 / immediate->software-transform
+ * architectural simplifications, not bugs.
  */
 void td5_track_prepare_mesh_resource(TD5_MeshHeader *mesh)
 {

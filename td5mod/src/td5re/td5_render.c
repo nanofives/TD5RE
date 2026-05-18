@@ -2803,7 +2803,48 @@ static void tl_set_depth(int r, int g, int b)
  *   For each slot, transform its world-frame contribution into body frame
  *   via M^T (port matrix layout: m[0..2]=row0, m[3..5]=row1, m[6..8]=row2,
  *   so column j = {m[j], m[j+3], m[j+6]}). Disabled slots fall back to the
- *   default zero vector (DAT_004ab0f8/0fc/100 verified zero in memory). */
+ *   default zero vector (DAT_004ab0f8/0fc/100 verified zero in memory).
+ *
+ * L5 promotion sweep audit (2026-05-18) — byte-equivalent, render-side
+ * with two intentional ARCH-DIVERGENCEs.
+ *
+ *   - 3-slot M^T transform: orig computes per-slot
+ *     [DAT_004ab0d0/d4/d8] = contrib.x * m[0] + contrib.y * m[3] + contrib.z * m[6]
+ *     (and the y/z output rows likewise reading m[1,4,7] and m[2,5,8]).
+ *     Port's tl_commit_to_render_globals does the identical column-sum.
+ *     [CONFIRMED @ 0x0042CEA9-0x0042CEFA decomp lines (slot 0),
+ *     0x0042CF20-0x0042CF6B (slot 1), 0x0042CF8A-0x0042CFDA (slot 2).]
+ *
+ *   - Per-slot enable test: orig reads three sentinel globals
+ *     [DAT_004AAFD0 / D4 / D8] = `_slot_enabled[3]`, port reads
+ *     s_tl_contrib[s].enabled. Equivalent state machine — both are
+ *     set by tl_set_contrib() (orig: SetTrackLightDirectionContribution
+ *     @ 0x0042E130) and cleared when r==g==b==0.
+ *
+ *   - Disabled-slot fallback writes a default direction
+ *     [DAT_004AB0F8 / 0FC / 100], which is all-zero in the binary's
+ *     .data segment [CONFIRMED via memory_read 2026-05-18: 12 bytes of
+ *     0x00 at 0x004AB0F8]. Port writes literal 0.0f. Behaviour-equivalent.
+ *
+ *   - Slot 2's output-write order differs cosmetically (orig writes
+ *     y, z, x; port writes x, y, z). Net memory state identical because
+ *     all three locations are written before the function returns.
+ *
+ *   [ARCH-DIVERGENCE: orig takes a `float *matrix` argument (caller
+ *   passes the actor's rotation_matrix pointer). Port takes a
+ *   `const TD5_Actor *actor` and dereferences `actor->rotation_matrix.m`
+ *   internally. Same data flow, different parameter shape — caller
+ *   site is simpler and avoids a separate pointer arg.]
+ *
+ *   [ARCH-DIVERGENCE: orig writes into D3D3 fixed-function global light
+ *   state ([DAT_004AB0D0..F0] = 16 floats = 4 dxLightDir-style records
+ *   bound to the IM3 device); port writes into `s_light_dirs[9]` +
+ *   `s_ambient_intensity` consumed by ComputeMeshVertexLighting (the
+ *   per-vertex software-lit code path). Same lighting model (3-slot
+ *   directional + scalar ambient, per-vertex N dot L), different
+ *   delivery mechanism. The D3D3 light-state machinery does not exist
+ *   in the D3D11 wrapper.]
+ */
 static void tl_commit_to_render_globals(const TD5_Actor *actor)
 {
     const float *m = actor->rotation_matrix.m;
