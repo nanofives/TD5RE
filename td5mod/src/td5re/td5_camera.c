@@ -2096,24 +2096,26 @@ void td5_camera_update_transition_state(int p, int vi)
         return;
     }
 
-    /* During race-start countdown, run the transition state machine (0x401E10).
-     * This selects fly-in camera presets 10→11→12→13 based on the countdown
-     * level (g_cameraTransitionActive / 0x2800) and updates the HUD digit. */
-    if (g_cameraTransitionActive > 0) {
-        UpdateRaceCameraTransitionState((int)actor, vi);
-        return;
-    }
-
-    /* One-shot: when fly-in just ended, restore the chase camera's spring
-     * targets (orbit radius scale and height target) from preset 0 so the
-     * radius spring converges to the correct chase distance instead of
-     * decaying toward 0 from the shrunken fly-in value.
+    /* One-shot: as soon as the race starts (g_td5.paused → 0 at fly-in level
+     * 0 per 630d797), restore the chase camera's spring targets (orbit
+     * radius scale and height target) from preset 0 so the radius spring
+     * converges to the chase distance (~600 wu) instead of preset 13's
+     * fly-in pull-back distance (~3800 wu) for the remaining 40 sub-ticks
+     * of the visible "1" countdown indicator.
+     *
+     * Pre-630d797 the one-shot fired at g_cameraTransitionActive<=0, which
+     * coincided with the paused flip. Post-630d797 paused flips ~40 sub-ticks
+     * earlier (at level==0 entry) while the timer keeps shrinking; the
+     * fly-in level-0 path was pulling g_camOrbitRadiusScale toward 972800
+     * during all 40 racing sub-ticks, leaving the chase camera 6.3× too far
+     * back (visible as "camera not following / catching up slowly" right
+     * after GO).
      *
      * DON'T use LoadCameraPresetForView with force_reload — that resets
      * orbit angle, current radius, and smoothed height simultaneously,
      * causing a jarring visual jump. Instead, only update the spring
      * TARGETS and let the existing spring smooth the transition. */
-    if (!s_flyin_preset_reloaded[v]) {
+    if (!s_flyin_preset_reloaded[v] && !g_td5.paused) {
         s_flyin_preset_reloaded[v] = 1;
         g_raceCameraPresetId[v] = 0;
         g_raceCameraPresetMode[v] = 0;
@@ -2122,8 +2124,20 @@ void td5_camera_update_transition_state(int p, int vi)
         g_camOrbitRadiusScale[v] = (float)(int)p->orbit_radius_raw * g_const256;
         g_camTargetHeight[v]     = (float)(int)p->height_target_raw * g_const256;
         g_camElevationAngleFP[v] = (int)p->elevation_angle << 8;
-        TD5_LOG_I(LOG_TAG, "fly-in ended view %d: restored chase targets (radius=%.0f height=%.0f)",
-                  v, g_camOrbitRadiusScale[v], g_camTargetHeight[v]);
+        TD5_LOG_I(LOG_TAG, "race start view %d: restored chase targets (radius=%.0f height=%.0f, transitionActive=0x%X)",
+                  v, g_camOrbitRadiusScale[v], g_camTargetHeight[v], g_cameraTransitionActive);
+    }
+
+    /* During race-start countdown, run the transition state machine (0x401E10).
+     * Once the spring-reset one-shot above has fired (paused=0), skip the
+     * fly-in preset machine so it doesn't overwrite our preset-0 targets
+     * with preset-13 fly-in values during the remaining level=0 sub-ticks.
+     * The HUD countdown indicator is independently updated by
+     * tick_race_countdown() in td5_game.c, so skipping here is purely a
+     * camera-state concern. */
+    if (g_cameraTransitionActive > 0 && !s_flyin_preset_reloaded[v]) {
+        UpdateRaceCameraTransitionState((int)actor, vi);
+        return;
     }
 
     /* Route to appropriate camera based on mode */
