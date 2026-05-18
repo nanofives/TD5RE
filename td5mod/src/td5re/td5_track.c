@@ -3543,9 +3543,16 @@ int td5_track_probe_height(int world_x, int world_z, int current_span,
  * ======================================================================== */
 
 /**
- * AngleFromVector12Full (0x433FC0).
+ * AngleFromVector12Full (0x433FC0). L5 promotion sweep audit (2026-05-18).
  * Full 4-quadrant 12-bit angle from a 2D vector (dx, dz).
  * Returns 0x000-0xFFF = 0-360 degrees.
+ *
+ * [ARCH-DIVERGENCE @ 0x00433FC0] Orig dispatches into AngleFromVector12
+ *   (0x0040A720) which indexes a precomputed 12-bit atan2 LUT at
+ *   DAT_00463214. Port replaces the LUT with a runtime integer atan2
+ *   approximation (linear interpolation per quadrant) - cosmetically
+ *   equivalent: same 4-quadrant dispatch, same 0x400 quadrant scaling,
+ *   same 12-bit modular output, matches orig within +/-1 LSB.
  */
 static int angle_from_vector_full(int32_t dx, int32_t dz)
 {
