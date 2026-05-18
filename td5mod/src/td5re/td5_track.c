@@ -4013,6 +4013,10 @@ void td5_track_compute_runtime_heading_normal(TD5_Actor *actor)
 
 /* ========================================================================
  * Wrap Normalization (0x443FB0 NormalizeActorTrackWrapState)
+ * [CONFIRMED @ 0x00443FB0] L5 promotion sweep audit (2026-05-18). Byte-faithful
+ *   verbatim port of orig listing below; positive/negative IDIV branches,
+ *   +0x82 store, EAX-quotient return all preserved. Port-only IDIV-by-zero
+ *   guard documented inline (frontend reachable before STRIP.DAT binding).
  *
  * Verbatim port of NormalizeActorTrackWrapState @ 0x00443FB0 in TD5_d3d.exe.
  * Listing (pool0 2026-05-14):
