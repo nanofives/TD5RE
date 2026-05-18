@@ -5501,8 +5501,18 @@ void td5_track_dim_additive_billboard_meshes(void)
  * ======================================================================== */
 
 /**
- * InitializeTrackStripMetadata (0x42FAD0).
+ * InitializeTrackStripMetadata (0x42FAD0). L5 promotion sweep audit (2026-05-18).
  * Sets up per-strip metadata from the level data.
+ *
+ * [ARCH-DIVERGENCE @ 0x0042FAD0] Orig reads track LEVELINF.DAT blob at
+ *   DAT_004aee10 = (&DAT_0046bb1c)[track_index], then iterates 4 light
+ *   entries (offsets 0x40, 0x60, 0x80, 0xA0) and tests each entry name
+ *   prefix via _strnicmp(entry, sun_string, 3): if match, writes
+ *   light_type=3 at offset 0x14/0x18/0x1C/0x20; else writes 1. Port
+ *   stubs this out -- writes 1 unconditionally to all 4 entries, never
+ *   reads LEVELINF.DAT light-type tags. Effect: any track tagged sun
+ *   gets default ambient lighting instead of sun directional. See
+ *   todo_strip_metadata_sun_tag_stub_2026-05-18.md.
  */
 static void initialize_strip_metadata(int track_index)
 {
