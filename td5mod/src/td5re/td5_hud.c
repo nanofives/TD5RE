@@ -1761,6 +1761,135 @@ void td5_hud_draw_status_text(int player_slot, int view_index)
  * renders: position labels, timers, speedometer, needle, gear indicator,
  * speed digits, metric digits, U-turn warning, replay banner, minimap,
  * screen fade, and split-screen dividers.
+ *
+ * L5 promotion sweep audit (2026-05-18, TD5_pool0 read-only) -- master
+ * HUD dispatcher is structurally faithful to orig 3854 bytes
+ * (0x004388A0..0x004397AE). The function is large because it inlines
+ * every HUD widget; the per-widget submission order matches orig
+ * 1:1. Two ARCH-DIVERGENCEs documented.
+ *
+ * Per-widget mapping (orig flag bits in DAT_004B0BFC -> port hud flags):
+ *
+ *   Bit 0  (0x01) -- Position label
+ *     orig: QueueRaceHudFormattedText(0, vpL+8, vpT+8, 0,
+ *           s_hudFontGlyphAtlasPtr + (actor.field_0x383 * 4));
+ *     port: td5_hud_queue_text() at vp_int_left+8, vp_int_top+8 with
+ *           s_hud_string_table[pos]. byte-faithful.
+ *
+ *   Bit 1  (0x02) -- Lap-timer column (6 slots)
+ *     orig: 6-slot loop reading (actor.field_0x34C [slot 0] or
+ *           DAT_004AB454 + slot*2) as 30-Hz ticks, formatted as
+ *           "%s %02d:%02d.%02d" / "%02d:%02d.%02d" -- first slot anchors
+ *           on right-120, rest on right-80 with 16px row stride.
+ *     port: identical right-anchor layout, td5_hud_queue_text with
+ *           actor_lap_time(slot,r) -> 100/30 conversion to centiseconds.
+ *           byte-faithful.
+ *
+ *   Bit 2  (0x04) -- Speedometer (dial+needle+gear+digits)
+ *     orig: needle angle = (rpm*0xA5A)/maxRPM + 0x400; cos/sin float
+ *           LUT (CosFloat12bit, SinFloat12bit); 4-vertex quad at
+ *           +0xE7 in the quad buffer; speed_display = (long_speed *
+ *           256 + 625)/1252 [MPH] or +389/778 [KPH]; up to 3 digits
+ *           emitted right-to-left from anchor at (vp_int_right - 60,
+ *           vp_int_bottom - 23 - 8) with 17px step, 16x24 cells from
+ *           SPEEDOFONT atlas; gear quad from GEARNUMBERS @ +0xB.
+ *     port: identical formula end-to-end (engine_speed*0xA5A/max_rpm +
+ *           0x400; td5_cos_12bit / td5_sin_12bit; same MPH/KPH math at
+ *           lines 1964-1968; 3-digit anchor with sf_step at line 1976).
+ *           hud_build_quad / hud_submit_quad replace BuildSpriteQuad
+ *           Template / SubmitImmediateTranslucentPrimitive.
+ *           [CONFIRMED @ orig 0x00438A40-0x00438C40 vs td5_hud.c:1859-
+ *           2047.]
+ *
+ *   Bit 4  (0x10) -- U-turn warning + counter
+ *     orig: counter increments on cur_span < prev_span, clears on
+ *           prev_span < cur_span; flashes when counter > 2 and
+ *           heading_delta in (0x3FF, 0xC00) at 8Hz (tick & 0x1F > 8).
+ *     port: identical at lines 2082-2110 -- same span counter
+ *           semantics, same heading_delta range, same flash cadence.
+ *
+ *   Bit 6  (0x40) -- Metric/odometer digits
+ *     orig: gated on g_specialEncounterType != 0; call
+ *           BuildRaceHudMetricDigits + 3 or 4 submits at quad offsets
+ *           +0x115 / +0x143 / +0x171 (hundreds/tens/ones) + +0x1CD in
+ *           odometer mode (DAT_00473E30 == 4).
+ *     port: td5_hud_build_metric_digits() + same offset submits at
+ *           lines 2067-2079. byte-faithful.
+ *
+ *   Bit 7  (0x80) -- Total timer
+ *     orig: QueueRaceHudFormattedText(... vpL+8, vpT+0x18, "%s %d").
+ *     port: td5_hud_queue_text() at vp_int_left+8, vp_int_top+24 with
+ *           s_hud_string_table[11]. byte-faithful.
+ *
+ *   Bit 8  (0x100) -- Lap/checkpoint counter
+ *     orig: vpL+8, vpT+8, "%s %d".
+ *     port: identical at lines 1820-1826.
+ *
+ *   Bit 9  (0x200) -- Circuit-lap progress
+ *     orig: vpL+8, vpT+0x28, "%s %d/%d".
+ *     port: identical at lines 1809-1817.
+ *
+ *   Bit 31 (0x80000000) -- Replay banner
+ *     orig: SubmitImmediateTranslucentPrimitive at quad offset +0x1FB
+ *           when g_simulationTickCounter & 0x20.
+ *     port: hud_submit_quad at view_base + 0x7EC when
+ *           g_tick_counter & 0x20. byte-faithful (offset 0x7EC is the
+ *           port's expanded quad pool, same logical slot as orig
+ *           +0x1FB).
+ *
+ *   Indicator digit (countdown / finish):
+ *     orig: per-view DAT_004B11A8 entry -1 = digit index (col=%5,
+ *           row=/5), 16x24 cell from NUMBERS atlas, centered at
+ *           pfVar9[2..3] - (0x0E, 0x0C) offsets.
+ *     port: s_indicator_state[v] -> same col/row decomposition; centred
+ *           on (vp_center_x - 16*sx, vp_center_y - 24*sy). byte-faithful.
+ *
+ *   Tail of per-view loop:
+ *     orig: minimap RenderTrackMinimapOverlay (single-player + bit 0x10
+ *           + non-circuit + no race-end fade);
+ *           SetProjectedClipRect(0, render_w, 0, render_h);
+ *           SetProjectionCenterOffset(render_cx, render_cy);
+ *           FlushQueuedRaceHudText();
+ *           RenderHudRadialPulseOverlay(param_1);
+ *           if (split_screen_mode) submit divider at DAT_004B0EF8 +
+ *               mode * 0xB8.
+ *     port: same restore order -- td5_hud_render_minimap +
+ *           td5_render_set_clip_rect/center, td5_hud_flush_text,
+ *           td5_render_radial_pulse, divider quad submission. Gates
+ *           radial pulse on additional !network && !drag_race conditions
+ *           (orig RunRaceFrame @ 0x42B67F also has these gates -- the
+ *           port lifts them from the caller into the renderer; net same
+ *           observable behaviour).
+ *
+ * [ARCH-DIVERGENCE: orig BuildSpriteQuadTemplate emits 4-vertex
+ * structures into a fixed scratch region (DAT_004B0BFC + quad-offset)
+ * consumed by SubmitImmediateTranslucentPrimitive (D3D3 immediate-mode
+ * translucent primitive queue with DDraw surface keys). Port replaces
+ * the scratch ring with a per-view dynamic quad buffer
+ * (s_hud_prim_storage) consumed by hud_submit_quad ->
+ * td5_plat_render_draw_tris (D3D11 immediate-mode tri stream). Same
+ * geometry, different submission model.]
+ *
+ * [ARCH-DIVERGENCE: orig's per-view scale/layout reads from
+ * DAT_004B1160-stride table (14 floats per view); port reads from
+ * s_view_layout[TD5_HudViewLayout] structs with named fields
+ * (.vp_int_left/.scale_x/.center_x/etc). Equivalent storage, named
+ * for clarity; same indexing semantics. The DAT_004B112C / DAT_004B11B4
+ * speedo/digit atlas-anchor pointers are replaced by
+ * s_gearnumbers_atlas / s_speedofont_atlas / s_numbers_atlas struct
+ * pointers loaded at HUD init.]
+ *
+ * Cosmetic additions in port (not in orig):
+ *  - Debug overlay (g_td5.ini.debug_overlay) draws FPS + POS + YAW/
+ *    PITCH/ROLL + SPD + RPM + GEAR + STEER + SUSP + WHEELS + SPAN
+ *    text. Gated by INI; zero impact when disabled.
+ *  - hud_layout once-only INFO log at line 1748.
+ *  - speedometer per-frame INFO log at line 1892.
+ *  - metric-digits gate diagnostic log at line 2057.
+ *
+ * No code edit needed. Effective level after audit: L5 +
+ * [ARCH-DIVERGENCE] (2 items above) for D3D3 queue -> D3D11 immediate-
+ * mode and for the per-view layout table representation.
  * ======================================================================== */
 
 void td5_hud_render_overlays(float dt)
