@@ -1,13 +1,14 @@
 {
   "total_functions": 876,
   "by_level": {
-    "5": 194,
-    "4": 181,
-    "3": 501
+    "5": 249,
+    "4": 137,
+    "3": 258,
+    "0": 232
   },
   "auto_named": 0,
   "crt_or_lib": 232,
-  "cited_in_port": 375,
+  "cited_in_port": 388,
   "ghidra_documented": 36,
   "bookmark_categories": {
     "PE Header": 3,
@@ -19,10 +20,10 @@
   "game_only": {
     "total": 644,
     "by_level": {
-      "5": 194,
-      "4": 179,
-      "3": 271
+      "5": 249,
+      "4": 137,
+      "3": 258
     },
-    "cited_in_port": 373
+    "cited_in_port": 386
   }
 }
