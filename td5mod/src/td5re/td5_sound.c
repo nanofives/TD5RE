@@ -1116,6 +1116,13 @@ void td5_sound_update_audio_mix(void)
  * Used for collision and scrape sounds. Plays a spatial one-shot with
  * optional random variant selection. In split-screen, plays twice
  * (once per viewport, using the duplicate slot range for P2).
+ *
+ * L4: known divergence — see todo_play_vehicle_sound_clamp_divergence_2026-05-18.md
+ *   1) Volume-clamp boundary: port uses `volume >= 0x1000`; original tests
+ *      `param_2 == 0x1000` exact-equality (values above 0x1000 pass through).
+ *   2) FPU rounding: port uses C99 roundf (half-away-from-zero); original
+ *      ROUND macro is FISTP round-half-to-even. ±1-LSB at half-integer inputs.
+ *   Audio path — no measurable sweep impact, deferred to audio-precision pass.
  * ======================================================================== */
 
 void td5_sound_play_at_position(int base_slot, int volume, int pitch,
