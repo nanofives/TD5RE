@@ -5853,6 +5853,39 @@ const void *td5_track_get_models_display_list_raw(int index, size_t *size_out)
 }
 
 /**
+ * GetTrackSpanDisplayListEntry (0x431260) — entry-indexed precise port.
+ *
+ * Direct MODELS.DAT LUT lookup taking a PRE-DIVIDED entry index (orig's
+ * `gModelsDatEntryTable[entry*8]`, exactly 13 bytes inlined at the caller).
+ *
+ * Orig's `RunRaceFrame @ 0x0042b580` builds `gTrackSpanDisplayListView0[]`
+ * by iterating entry-by-entry — `start = (player_span - cull_window) >> 2`
+ * then `for (i = 0; i < effective_spans; i++) entry = start + i`. The
+ * legacy `td5_track_get_display_list(span_index)` below divides per call,
+ * which when paired with a per-SPAN render loop submits each MODELS.DAT
+ * block ~4× per frame (entries n*4+0..n*4+3 all map to entry n).
+ *
+ * This entry-indexed variant is the precise-port surface for the per-frame
+ * render walk. The legacy span-indexed function remains for the STRIP
+ * fallback / branch-span path (orig has no STRIP fallback — that's a
+ * separate cleanup item).
+ *
+ * Returns NULL when the entry is outside the MODELS.DAT range (caller
+ * should skip without falling back, mirroring orig's behavior).
+ */
+void *td5_track_get_display_list_entry(int entry_index)
+{
+    if (!s_models_blob || !s_models_entry_offsets || s_models_display_list_count <= 0)
+        return NULL;
+    if (entry_index < 0 || entry_index >= s_models_display_list_count)
+        return NULL;
+    uint32_t off = s_models_entry_offsets[entry_index];
+    if (off == 0)
+        return NULL;
+    return s_models_blob + off;
+}
+
+/**
  * GetTrackSpanDisplayListEntry (0x431260). L5 promotion sweep audit (2026-05-18).
  * Returns the display list (pre-built render command buffer) for a span.
  *
@@ -5861,6 +5894,11 @@ const void *td5_track_get_models_display_list_raw(int index, size_t *size_out)
  *   concerns (reverse-direction mirror at 0x0042BB80, MODELS.DAT presence
  *   gate, STRIP.DAT fallback chain) for cleaner runtime semantics.
  *   Forward + MODELS.DAT-loaded path is byte-equivalent to orig.
+ *
+ * NOTE 2026-05-18: prefer `td5_track_get_display_list_entry(entry_idx)` in
+ * the per-frame render walk to avoid 4× redundant block submission. This
+ * span-indexed entrypoint remains for the STRIP fallback / branch-span
+ * path (orig has no fallback — separate cleanup work item).
  */
 void *td5_track_get_display_list(int span_index)
 {
