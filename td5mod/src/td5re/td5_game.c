@@ -443,6 +443,105 @@ void td5_game_shutdown(void) {
  *
  * 4-state FSM: INTRO -> MENU -> RACE -> BENCHMARK
  * Called once per frame from td5re_frame().
+ *
+ * L5 promotion sweep audit (2026-05-18, TD5_pool0 read-only) -- the
+ * 4-state FSM dispatcher is structurally faithful to orig 991 bytes
+ * (0x00442170..0x0044254F). Three ARCH-DIVERGENCEs documented.
+ *
+ *   Per-state mapping (orig switch(g_gameState) -> port td5_game_tick):
+ *
+ *   case GAMESTATE_INTRO:
+ *     orig: if (g_introMoviePendingFlag) {
+ *             if (g_appExref+0x14C && !g_appExref+0x13C) {
+ *               LogReport("Playing Movie\n");
+ *               PlayIntroMovie();
+ *             }
+ *             g_introMoviePendingFlag = 0;
+ *           }
+ *           DXD3D::InitializeMemoryManagement();
+ *           DXD3D::SetRenderState();
+ *           ShowLegalScreens();
+ *           g_gameState = GAMESTATE_MENU; (fallthrough)
+ *     port: identical sequence -- intro_movie_pending guard +
+ *           td5_game_play_intro_movie() (delegates to td5_fmv) +
+ *           td5_render_init() (replaces D3D3 memory-manager init +
+ *           render-state setup) + td5_game_show_legal_screens()
+ *           (delegates to td5_fmv_show_legal_screens) + fallthrough to
+ *           MENU. Behaviour-equivalent.
+ *
+ *   case GAMESTATE_MENU:
+ *     orig: g_frontendResourceInitPending guard ->
+ *           InitializeFrontendResourcesAndState();
+ *           RunFrontendDisplayLoop();
+ *           if (g_startRaceRequestFlag || g_startRaceConfirmFlag) {
+ *             g_frontendResourceInitPending = 1; flags = 0;
+ *             InitializeRaceSession(); g_gameState = RACE;
+ *           }
+ *           g_appExref+0x16C = 1; (frontend active mirror)
+ *     port: 1:1 mapping -- frontend_init_pending +
+ *           td5_frontend_init_resources, td5_frontend_display_loop,
+ *           race_requested/race_confirmed flags + td5_game_init_race_session.
+ *           Adds AutoRace + StartScreen handling for the INI-driven test
+ *           harness (cosmetic, gated to ini.auto_race / ini.start_screen).
+ *           [ARCH-DIVERGENCE: g_appExref+0x16C mirror (frontend-active
+ *           flag fed back to the DX::app exref) does not exist in the
+ *           port -- that exref carried DDraw/DSound capability flags and
+ *           there is no consumer in the source-port equivalent. The
+ *           orig +0x180 quit latch maps to g_td5.quit_requested.]
+ *
+ *   case GAMESTATE_RACE:
+ *     orig: iVar2 = RunRaceFrame();
+ *           g_appExref+0x16C = 0;
+ *           if (iVar2) {
+ *             dd_exref+0x1730 = 0;
+ *             if (g_appExref+0x150) DXD3D::FullScreen(dd_exref+0x1690);
+ *             g_gameState = (benchmark ? BENCHMARK : MENU);
+ *             DXPlay::UnSync();
+ *           }
+ *     port: result = td5_game_run_race_frame();
+ *           result=1 -> normal completion -> RaceResults screen,
+ *           result=2 -> ESC quit -> MainMenu,
+ *           benchmark flag routes to GAMESTATE_BENCHMARK.
+ *           Behaviour-equivalent. DXPlay::UnSync analog is in
+ *           td5_net_tick() teardown (the port's net layer owns its own
+ *           synchronisation lifecycle).
+ *           [ARCH-DIVERGENCE: orig's DXD3D::FullScreen restore-on-race-
+ *           exit (gated on g_appExref+0x150 fullscreen-mode flag) is
+ *           absent -- D3D11 swap-chain mode-switch is owned by the
+ *           wrapper, not by the game's render-state.]
+ *
+ *   case GAMESTATE_BENCHMARK:
+ *     orig: g_benchmarkModeActive = 0;
+ *           if (g_benchmarkImageLoadPending) {
+ *             DX::FOpen(FPSName)
+ *             + DX::Allocate(0x50000) + DX::Allocate(0xA0000)
+ *             + DX::FRead + DX::ImageProTGA;
+ *             g_benchmarkImageLoadPending = 0;
+ *           }
+ *           IDirectDrawSurface::Lock(..., DDLOCK_NOSYSLOCK, ...) ->
+ *             manual blit 640x480 16bpp pixels into back surface ->
+ *             IDirectDrawSurface::Unlock + DXDraw::Flip;
+ *           if (DXInputGetKBStick(0)) {
+ *             DX::DeAllocate(decoded);
+ *             DX::DeAllocate(raw);
+ *             g_benchmarkImageLoadPending = 1;
+ *             g_gameState = GAMESTATE_MENU;
+ *           }
+ *     port: td5_asset_load_png_to_buffer("re/assets/benchmark.png", ...)
+ *           + td5_plat_render_upload_texture(0, pixels, w, h, 0)
+ *           + td5_plat_present(0); polls td5_plat_input_get_keyboard()
+ *           for any keypress -> back to MENU.
+ *           [ARCH-DIVERGENCE: the orig's DDraw Lock + manual 16bpp
+ *           per-row copy with bounds clipping (iVar4 < 0x280, iVar5 <
+ *           0x4B000, /2 ptr math) does not exist in D3D11. The port
+ *           uploads as a 32bpp texture and lets the swap-chain present
+ *           it. Pixel format flags 0xF800/0x7E0/0x1F (5/6/5 RGB) in the
+ *           orig Image_exref are obsolete; the port's PNG loader emits
+ *           BGRA and the upload accepts that natively.]
+ *
+ *   No code edit needed. Effective level after audit: L5 +
+ *   [ARCH-DIVERGENCE] (3 items above) for the DX::app+exref mirrors and
+ *   the DDraw Lock/blit/Flip benchmark presentation path.
  * ======================================================================== */
 
 int td5_game_tick(void) {
