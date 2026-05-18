@@ -5016,6 +5016,20 @@ static int32_t traffic_edge_pen(int32_t v0_x, int32_t v0_z,
  * The car_definition_ptr carries:
  *   *(int16_t*)(car_def + 0x08) = half-length equivalent  [CONFIRMED @ 0x407424]
  *   *(int16_t*)(car_def + 0x0C) = half-width equivalent   [CONFIRMED @ 0x407420]
+ *
+ * L4: known divergence — see todo_traffic_route_advance_lane_count_byte_2026-05-18.md
+ *   1) `lane_count = sp->surface_attribute & 0xF` reads wrong byte (+0x01);
+ *      original reads byte +0x03 (geometry_metadata low nibble = span_lane_count).
+ *   2) Inner test passes (vl=left+sub, vr=right+sub) to traffic_edge_pen, but
+ *      orig reads psVar1=right_vertex_index (+0x06) and psVar2=left_vertex_index
+ *      (+0x04) — port has v0/v1 swapped relative to orig.
+ *   3) Outer test also has v0/v1 swapped, and uses outer_sub = lane_count-1
+ *      while orig uses uVar10 = lane_count nibble itself.
+ *   4) Tangent vs rotated-normal: orig hand-rotates the edge before atan2;
+ *      port atan2s the tangent then uses cos/sin as tangent components. May
+ *      cancel partially against the swap.
+ *   Traffic-only path; gate at slot >= 6 limits blast radius. Defer to
+ *   dedicated traffic-collision audit.
  */
 static void process_traffic_segment_edge(TD5_Actor *actor, int slot)
 {
