@@ -237,6 +237,21 @@ typedef struct TD5_GlobalState {
                                      * cap the port's workload at the same simulated
                                      * window the Frida side captures, instead of
                                      * burning time on sim ticks we'll never diff. */
+        /* Whole-state snapshot: tick-aligned dump of every actor byte +
+         * a globals blob, emitted at the same instant as Frida's
+         * UpdateRaceCameraTransitionTimer onEnter hook. See
+         * re/analysis/whole_state_diff_design.md and
+         * tools/diff_whole_state.py. Independent of [Trace] Modules. */
+        int  whole_state_enabled;       /* [Trace] WholeState = 1 */
+        int  whole_state_max_ticks;     /* [Trace] WholeStateMaxTicks = N (0 = unlimited) */
+        /* Snapshot-replay harness (td5_trace_replay.c). Mode parsed from
+         * [Trace] StateReplayMode = off|dump|inject|both into the integer
+         * codes 0/1/2/3 (see td5_trace_replay.c RP_MODE_*). Paths come from
+         * env vars TD5RE_STATE_REPLAY_{,DUMP_}PATH. */
+        int  state_replay_mode;
+        int  state_replay_start_frame;
+        int  state_replay_end_frame;     /* 0 = unlimited */
+        int  state_replay_max_frames;    /* 0 = unlimited (default 200) */
         int  loaded;  /* 1 once INI has been read */
         /* AutoRace: skip frontend, launch race immediately with INI settings */
         int  auto_race;             /* 1 = auto-start race on launch */
@@ -298,6 +313,14 @@ typedef struct TD5_GlobalState {
          * back. Default 0 preserves faithful in-memory-only behavior. */
         int  replay_persist_to_disk;
         int  test_cup_roundtrip; /* if >0, run td5_save_test_cup_roundtrip() during startup and exit with the result */
+        /* Experimental: enable the per-slot pre-loop ClassifyTrackOffsetClamp
+         * + bias-rewrite + surface/contact clamp + boundary writeback chain
+         * from UpdateRaceActors @ 0x00436A70 inside
+         * td5_ai_refresh_route_state_slot. Default 0 = current behaviour
+         * (selector + forward_track_component only). 1 = run the missing
+         * pre-loop body byte-faithfully against the original. Gated so the
+         * change can be A/B-tested per session. */
+        int  experimental_bias_clamp;
     } ini;
 
 } TD5_GlobalState;

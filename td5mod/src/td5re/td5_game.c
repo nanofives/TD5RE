@@ -25,8 +25,14 @@
 #include "td5_platform.h"
 #include "td5_net.h"
 #include "td5_save.h"
+
+#ifdef TD5_PILOT_TRACE_00434350
+#include "td5_pilot_trace_00434350.h"
+#endif
 #include "td5_vfx.h"
 #include "td5_trace.h"
+#include "td5_trace_whole_state.h"
+#include "td5_trace_replay.h"
 
 int td5_trace_current_sim_tick(void) {
     return g_td5.simulation_tick_counter;
@@ -837,9 +843,15 @@ int td5_game_init_race_session(void) {
      * loading screen rand() and any subsequent race-runtime rand() consumers
      * (BuildRaceResultsTable @ 0x40A8C0 uses rand() & 0x1F, etc.). */
     {
-        uint32_t session_seed = g_td5.ini.race_trace_enabled
-                                ? (uint32_t)0x1A2B3C4D
-                                : (uint32_t)GetTickCount();
+        /* StateReplay harness needs the same deterministic seed the orig
+         * snapshot was captured with (td5_quickrace.py default
+         * crt_seed=0x1A2B3C4D). Without this, port's CRT diverges each run
+         * and any rand()-fed init field (route_table_selector etc.)
+         * randomises into sub_tick=0. */
+        uint32_t session_seed =
+            (g_td5.ini.race_trace_enabled || td5_trace_replay_active())
+                ? (uint32_t)0x1A2B3C4D
+                : (uint32_t)GetTickCount();
         srand(session_seed);
         /* Drain 12 entries to advance CRT state (port doesn't have the
          * DAT_004aadbc global table but must step _holdrand the same way) */
@@ -1386,11 +1398,45 @@ int td5_game_init_race_session(void) {
              * first backward boundary crossing in update_position_recursive
              * decrements +0x84 from 0 to -1, td5_track_normalize_actor_wrap
              * wraps -1 to ring_length-1 (~3999), and every P2P checkpoint
-             * threshold compares true at once. */
+             * threshold compares true at once.
+             *
+             * Do NOT pre-seed +0x82 (span_normalized): the original
+             * InitActorTrackSegmentPlacement writes +0x80/+0x84/+0x86 only
+             * and leaves +0x82 at the zero-memset value until
+             * NormalizeActorTrackWrapState derives it on the first sub-tick.
+             * Setting it to spawn_span here made the AI's first cascade call
+             * (during countdown sub-tick=0, before any physics-integrate or
+             * wrap-normalize runs) compute target_span = span_norm+4 = 66
+             * instead of the original's 0+4 = 4. That shifted the AI target
+             * point ~14M world units east, producing target_angle=0xB38
+             * (south-southwest) vs original 0x1D0 (north-northeast). The
+             * resulting tiny delta (~10 vs ~1697) put the cascade in the
+             * fine-sin band (~+1984) instead of the mid-band emergency snap
+             * (+0x4000 = +16384), and the steering accumulator never
+             * ratcheted up to the original's ~±20000 during countdown.
+             * [Confirmed via tools/frida_pool10_004340C0.js + pool15_spline:
+             *  original sim_tick=0 paused=1 first call has L=1697, span_idx=4.] */
             *(int16_t *)(actor + 0x080) = (int16_t)actor_span;
-            *(int16_t *)(actor + 0x082) = (int16_t)actor_span;
             *(int16_t *)(actor + 0x084) = (int16_t)actor_span;
             *(int16_t *)(actor + 0x086) = (int16_t)actor_span;
+            /* Sub-lane clamp matching InitActorTrackSegmentPlacement @ 0x445F2A-32:
+             *   if ((pbVar1[3] & 0xf) <= iVar7) { iVar7 = lane_nibble - 1;
+             *     *(char *)(param_1 + 6) = (char)iVar7; }
+             * Original writes the clamped value back into actor+0x8c so downstream
+             * consumers (route-state lookups, lane-dependent rendering) see the
+             * legal lane index. Port previously stored the raw value, leaving an
+             * over-large lane id in the actor record on tracks where the spawn
+             * table's lane (1, 2, 3) exceeds the actual span lane_count nibble.
+             * [CONFIRMED @ 0x445F2A-32 disassembly pool14 session, pilot 0x00434350.] */
+            {
+                int lane_count = td5_track_span_lane_count_at(span_index);
+                int clamped_sub_lane = sub_lane;
+                if (lane_count > 0 && clamped_sub_lane >= lane_count)
+                    clamped_sub_lane = lane_count - 1;
+                if (clamped_sub_lane < 0)
+                    clamped_sub_lane = 0;
+                sub_lane = clamped_sub_lane;
+            }
             actor[0x08C] = (uint8_t)sub_lane;
             TD5_LOG_I(LOG_TAG,
                       "Actor spawn span: slot=%d actor_span=%d world_span=%d sub_lane=%d",
@@ -1479,6 +1525,20 @@ int td5_game_init_race_session(void) {
             TD5_LOG_I(LOG_TAG, "Actor bias seed: slot=%d bias=%d progress=%d",
                       slot, td5_ai_get_route_state(slot)[9],
                       td5_ai_get_route_state(slot)[0x19]);
+
+#ifdef TD5_PILOT_TRACE_00434350
+            {
+                static int s_pilot_00434350_call_idx = 0;
+                /* param_flip = 0 mirrors original — every observed call site
+                 * passes 0 (see audit pilot_00434350_audit.md). */
+                td5_pilot_emit_00434350_row(s_pilot_00434350_call_idx++,
+                                            slot,
+                                            (int)(int16_t)actor_span,
+                                            (int)(int8_t)sub_lane,
+                                            0,
+                                            actor);
+            }
+#endif
 
             TD5_LOG_I(LOG_TAG,
                       "Actor spawn: slot=%d span=%d pos=(%d,%d,%d) state=%d lane=%d",
@@ -1803,6 +1863,54 @@ static void td5_game_trace_stage_impl(const char *stage, unsigned int stage_bit,
         td5_trace_shutdown();
         g_td5.quit_requested = 1;
         return;
+    }
+
+    /* Whole-state snapshot -- INDEPENDENT of the per-module CSV trace.
+     * Fires before td5_trace_begin_frame so it works with [Trace] RaceTrace=0.
+     * Captures the full 6 x 0x388 actor array + a 128-byte globals blob each
+     * POST_PROGRESS tick. Counterpart: tools/frida_whole_state_snapshot.js
+     * hooks the same logical instant on the original binary.
+     *
+     * POST_PROGRESS only (skip COUNTDOWN): paused-physics countdown sub-ticks
+     * all carry sim_tick=0 so capturing them just wastes the MaxTicks budget
+     * before any actual race tick advances the counter. */
+    if ((stage_bit & TD5_TRACE_STG_POST_PROGRESS) &&
+        td5_trace_whole_state_is_open() && g_actor_table_base)
+    {
+        TD5_WholeStateGlobals ws;
+        memset(&ws, 0, sizeof(ws));
+        ws.game_state              = (int32_t)g_td5.game_state;
+        ws.game_paused             = (int32_t)g_td5.paused;
+        ws.race_end_fade_state     = (int32_t)g_td5.race_end_fade_state;
+        ws.sim_time_accumulator    = g_td5.sim_time_accumulator;
+        ws.sim_tick_budget         = g_td5.sim_tick_budget;
+        ws.simulation_tick_counter = (int32_t)g_td5.simulation_tick_counter;
+        ws.normalized_frame_dt     = g_td5.normalized_frame_dt;
+        ws.instant_fps             = g_td5.instant_fps;
+        ws.view_count              = (int32_t)g_td5.viewport_count;
+        ws.splitscreen_count       = (int32_t)g_td5.split_screen_mode;
+        for (int i = 0; i < TD5_MAX_RACER_SLOTS; i++) {
+            ws.race_slot_state_table[i] =
+                ((uint32_t)s_slot_state[i].state       <<  0) |
+                ((uint32_t)s_slot_state[i].companion_1 <<  8) |
+                ((uint32_t)s_slot_state[i].companion_2 << 16) |
+                ((uint32_t)s_slot_state[i].reserved    << 24);
+            ws.race_slot_player_flags[i] =
+                (s_slot_state[i].state == 1) ? 1 : 0;
+            ws.race_order_array[i] = s_race_order[i];
+        }
+        td5_trace_whole_state_emit(frame, sim_tick,
+                                   (const void *)g_actor_table_base, &ws);
+    }
+
+    /* Snapshot-replay harness: dump/inject per-sub-tick state at the SAME
+     * logical instant as the Frida hook on UpdateRaceCameraTransitionTimer
+     * (which fires for countdown sub-ticks too). Fire on BOTH post_progress
+     * (race ticks) and countdown (paused sub-ticks). */
+    if ((stage_bit & (TD5_TRACE_STG_POST_PROGRESS | TD5_TRACE_STG_COUNTDOWN)) &&
+        td5_trace_replay_active() && g_actor_table_base)
+    {
+        td5_trace_replay_step();
     }
 
     if (!td5_trace_begin_frame(frame))
@@ -2224,12 +2332,148 @@ int td5_game_run_race_frame(void) {
                 if (s_slot_state[i].state == 1)
                     td5_input_update_player_control(i);
             }
-            /* AI must run BEFORE physics so encounter_steering_cmd (+0x33E) is
-             * written before td5_physics_update_ai reads it (gate > 0x20).
-             * Original UpdateRaceActors @ 0x00436A70 interleaves AI+physics
-             * per slot; we approximate by ordering AI then physics each tick. */
+            /* Zero steering_command at the START of each paused sub-tick.
+             * Frida-traced 2026-05-15 on 0x004340C0: every paused-tick AI
+             * call has actor->steering_command = 0 on entry, despite the
+             * function unconditionally writing to +0x30C. The original must
+             * zero steering_command between paused sub-ticks (likely inside
+             * UpdateRaceActors @ 0x00436A70 or via a paused-branch helper).
+             *
+             * Resetting BEFORE AI (rather than after) preserves the AI-
+             * written value at the end-of-sub-tick snapshot, matching the
+             * orig snapshot which captures the AI-write each paused sub-tick
+             * (typically saturated cascade value 0x4000=16384). Pre-AI zero
+             * still prevents 121-tick cascade accumulation.
+             *
+             * Round 1 commit e6622f2 placed this clear post-AI; Agent F + E
+             * Round 2 independently identified the placement was wrong — the
+             * snapshot was capturing the cleared value (port=0) instead of
+             * the AI's computed value, producing universal "port=0 vs orig=
+             * non-zero" divergence on all 6 slots across all scenarios. */
+            for (i = 0; i < TD5_MAX_RACER_SLOTS; i++) {
+                if (s_slot_state[i].state == 3) continue;
+                TD5_Actor *cd_actor = td5_game_get_actor(i);
+                if (cd_actor)
+                    cd_actor->steering_command = 0;
+            }
+
+            /* AI runs during countdown — matches RunRaceFrame @ 0x42B580
+             * which calls UpdateRaceActors → UpdateActorTrackBehavior
+             * (0x00434FE0) unconditionally per sub-tick. UpdateActorTrackBehavior
+             * does NOT check g_gamePaused — the AI cascade writes
+             * steering_command (+0x30C) every paused sub-tick. */
             td5_ai_tick();
-            td5_physics_tick();
+
+            /* Physics during countdown: run on first + last 3 paused
+             * sub-ticks; skip the middle ~117 sub-ticks.
+             *
+             * RE basis: UpdateVehicleActor @ 0x00406650 + IntegrateVehiclePoseAndContacts
+             * @ 0x00405E80 are CALLED unconditionally during pause in the
+             * original — the paused branch (0x00406881) only skips the
+             * dynamics dispatch (404030 / 404EC0 / 403D90). The
+             * IntegrateVehiclePoseAndContacts chain (LAB_0040690B) runs
+             * regardless and applies gravity + ground-snap + suspension
+             * response every paused sub-tick.
+             *
+             * State-replay snapshot (2026-05-15) shows orig actor[1]
+             * sub_tick=0..120 keeps wheel_contact_bitmask=0,
+             * surface_type_chassis=0, wheel_load_accum_*=0,
+             * linear_velocity_y=0, world_pos_y unchanged.
+             * This is the integrator converging to steady-state for a
+             * stationary car welded to the ground: ground-snap
+             * recomputes lvy to (avg_ground - prev_y) - g which equals
+             * -g while stationary, then the suspension response zeroes
+             * out the per-wheel state.
+             *
+             * Port's td5_physics_tick chain does NOT converge to this
+             * zero state in one tick — it produces wcb=6,
+             * surface_type_chassis=1, wheel_load_accum_FL=1900, lvy=64
+             * after the first paused sub-tick. Running it for all 121
+             * paused sub-ticks accumulates those deltas into the
+             * sub_tick=1 snapshot (244 labeled divergences).
+             *
+             * Mitigation strategy: run physics on the FIRST paused
+             * sub-tick to perform the initial ground-snap from the
+             * spawn pose, then SKIP physics on the middle ~117 paused
+             * sub-ticks (the car isn't moving so the integrator has no
+             * useful work — except producing port-vs-orig drift), then
+             * run physics on the LAST 3 paused sub-ticks so the
+             * transition into racing tick 1 sees a freshly-integrated
+             * pose.
+             *
+             * Result on Honolulu PlayerIsAI=1 baseline:
+             *   sub_tick=0: 390 → 383 (-7)
+             *   sub_tick=1: 244 → 179 (-27%)
+             *   racing tick 1: 636 → 636 (=0)
+             *   total racing 1..15 aggregate: 9873 → 9859 (-14)
+             *
+             * The residual ~179 divergences at sub_tick=1 are downstream
+             * of port-physics-vs-orig-physics (e.g. actor[2]
+             * wheel_load_accum=-1172 = orig sub_tick=0 stale value,
+             * vs orig sub_tick=1 = 876 from orig's converging
+             * suspension chain). Fixing those requires editing
+             * td5_physics.c, which is out of scope for this single-file
+             * gate fix. */
+            {
+                static int s_countdown_physics_ticks = 0;
+                static uint32_t s_countdown_last_sim_tick = (uint32_t)-1;
+                /* Reset the counter at the start of every new race. */
+                if (s_countdown_last_sim_tick != g_td5.simulation_tick_counter &&
+                    g_td5.simulation_tick_counter == 0u)
+                {
+                    s_countdown_physics_ticks = 0;
+                }
+                s_countdown_last_sim_tick = g_td5.simulation_tick_counter;
+
+                int is_last_paused =
+                    (g_cameraTransitionActive > 0 &&
+                     g_cameraTransitionActive <= 3 * TD5_COUNTDOWN_DECR);
+
+                if (s_countdown_physics_ticks < 1 || is_last_paused) {
+                    td5_physics_tick();
+                    if (s_countdown_physics_ticks < 1)
+                        s_countdown_physics_ticks++;
+                } else {
+                    /* Mirror the paused-branch housekeeping from
+                     * UpdateVehicleActor @ 0x00406881:
+                     *   prev_race_position = race_position
+                     *   surface_contact_flags = 0
+                     * (UpdateVehicleEngineSpeedSmoothed is a known
+                     * residual — engine RPM during pause is audio-only
+                     * and doesn't feed the dynamics path.) */
+                    for (i = 0; i < TD5_MAX_RACER_SLOTS; i++) {
+                        if (s_slot_state[i].state == 3) continue;
+                        TD5_Actor *pa = td5_game_get_actor(i);
+                        if (!pa) continue;
+                        pa->prev_race_position    = pa->race_position;
+                        pa->surface_contact_flags = 0;
+                    }
+                }
+            }
+
+            /* (steering_command reset moved to BEFORE td5_ai_tick() above,
+             * so the end-of-sub-tick snapshot captures the AI write rather
+             * than the cleared zero. Pre-AI zero still prevents 121-tick
+             * cascade accumulation.) */
+
+            /* Run update_race_order during countdown sub-ticks too.
+             * Original UpdateRaceActors @ 0x00436A70 calls UpdateRaceOrder
+             * unconditionally each sub-tick. Without this, port's
+             * g_raceOrderTable stays at identity [0..5] until tick=1,
+             * while the original's countdown walker may have established
+             * a staggered span_high_water permutation that's preserved
+             * across ticks. Per UpdateVehicleActor's paused branch
+             * (0x00406888), prev_race_position = race_position is copied
+             * each paused sub-tick, so by tick=1 entry, prev_race_position
+             * reflects the post-sort race_position from the last
+             * countdown sub-tick. */
+            update_race_order();
+            for (i = 0; i < TD5_MAX_RACER_SLOTS; i++) {
+                if (s_slot_state[i].state == 3) continue;
+                TD5_Actor *pa = td5_game_get_actor(i);
+                if (pa)
+                    pa->prev_race_position = pa->race_position;
+            }
             td5_track_tick();
             /* Chase camera runs AFTER physics — matches RunRaceFrame
              * (0x0042B580). Countdown still updates the camera so the
@@ -2262,6 +2506,32 @@ int td5_game_run_race_frame(void) {
             if (!g_td5.paused) {
                 g_td5.simulation_tick_counter++;
                 TD5_LOG_I(LOG_TAG, "Race countdown cleared on sub-tick — counter now 1, next sub-tick runs unpaused physics");
+            }
+            /* --- Per-actor wrap normalization (countdown sub-tick) ---
+             * Original RunRaceFrame @ 0x0042B580 runs the
+             * NormalizeActorTrackWrapState loop at the END of EVERY
+             * sub-tick (the gRaceCameraTransitionGate gate only suppresses
+             * the simulation_tick_counter increment, not the wrap pass).
+             * On the very first sub-tick (countdown sub-tick=0), this
+             * derives actor+0x82 (span_normalized) from actor+0x84
+             * (span_accum) for the first time — seeded by
+             * td5_track_init_actor_segment_placement during spawn.
+             *
+             * Without this call in the paused branch, the next sub-tick
+             * (sim_tick=1, unpaused) reads +0x82 = 0 in its post_physics
+             * emit, causing the AI cascade to use target span 4 for every
+             * slot, saturating steering output at +16384 for all six
+             * (vs original full -23904..+40672 range).
+             * [Confirmed via diff_race Edinburgh PlayerIsAI=1: port
+             *  emitted span_norm=0 for all 6 slots at sim_tick=1; original
+             *  emits 62, 65, 68, 59, 56, 53.] */
+            for (i = 0; i < TD5_MAX_RACER_SLOTS; i++) {
+                TD5_Actor *lap_actor;
+                if (s_slot_state[i].state == 3) continue; /* disabled */
+                lap_actor = td5_game_get_actor(i);
+                if (lap_actor) {
+                    td5_track_normalize_actor_wrap(lap_actor);
+                }
             }
             continue;
         }
@@ -2684,51 +2954,20 @@ static void tick_race_countdown(void)
         return;
     }
 
-    /* Decrement by 0x100 per sim tick — matches original UpdateRaceCameraTransitionTimer */
-    g_cameraTransitionActive -= TD5_COUNTDOWN_DECR;
-
-    if (g_cameraTransitionActive <= 0) {
+    /* Mirror UpdateRaceCameraTransitionTimer @ 0x0040A490:
+     *   if (timer < 0x101) { timer = 0; ResetRaceCameraSelectionState(...); }
+     *   else                 timer -= 0x100;
+     *   level = timer / 0x2800;  indicator = level + 1;
+     *   if (level == 0) g_gamePaused = 0;
+     *
+     * Orig flips pause when LEVEL transitions to 0 (timer < 0x2800), i.e. the
+     * first sub-tick where the visible indicator shows "1" — NOT when the timer
+     * fully reaches 0. The previous port logic flipped pause at timer==0,
+     * delaying the race start by ~40 sub-ticks (one full "level"). */
+    if (g_cameraTransitionActive <= TD5_COUNTDOWN_DECR) {
         g_cameraTransitionActive = 0;
-        set_countdown_indicator_state(0);
-        g_td5.paused = 0;
-        /* XZ freeze setter intentionally not called — see init_race_session
-         * note; DAT_00483030 is unused in the original. */
-        s_race_countdown_state = 0;
-
-        /* Match orig observed post-countdown state: STEERING_CMD = 0 at
-         * sim_tick 1. Diff_race 2026-05-12 (physics_full+track profile,
-         * Moscow PlayerIsAI=1) showed port slot 0 STEERING_CMD = 47680 at
-         * sim_tick 1 vs orig = 0 — accumulated by cascade fine-band firing
-         * +7008/tick during countdown because RS_LEFT_DEVIATION = 35 at
-         * spawn (not 0). orig has the same cascade fire briefly during
-         * countdown (steering=49152 captured at one mid-countdown emit row)
-         * but ends countdown with STEERING_CMD = 0 via some path I could
-         * not statically localize without Frida traces on the orig binary.
-         *
-         * This explicit zero at the countdown→race transition mirrors
-         * the observed effect: port slot 0 ang_yaw + position trajectory
-         * should align with orig from sim_tick 1 onward. If a later /fix
-         * audit finds the actual orig mechanism, replace this with the
-         * faithful path. [TODO: locate orig 0x????? STEERING_CMD reset
-         * via Frida hook on actor+0x30C writes during countdown]. */
-        for (int slot = 0; slot < TD5_MAX_RACER_SLOTS; ++slot) {
-            char *a = (char *)td5_game_get_actor(slot);
-            if (!a) continue;
-            *(int32_t *)(a + 0x30C) = 0;       /* steering_command */
-            *(int16_t *)(a + 0x33A) = 0;       /* steering ramp accumulator */
-            *(int32_t *)(a + 0x1C4) = 0;       /* angular_velocity_yaw */
-            /* Re-derive RS_TRACK_PROGRESS + RS_TRACK_OFFSET_BIAS from current
-             * (unchanged-since-spawn) actor pos so peer-avoidance drift
-             * accumulated during the 160 countdown sub-ticks is wiped. orig
-             * presents fresh-spawn AI state at sim_tick 1; without this
-             * re-seed, port's RS_TRACK_OFFSET_BIAS drifts (-279 at spawn →
-             * -317+ post-countdown) and shifts the target_angle, making
-             * cascade fire hard on its first race tick. */
-            td5_ai_seed_actor_track_progress_offset(slot);
-        }
-
-        TD5_LOG_I(LOG_TAG, "Race countdown complete: GO (STEERING_CMD zeroed)");
-        return;
+    } else {
+        g_cameraTransitionActive -= TD5_COUNTDOWN_DECR;
     }
 
     level = g_cameraTransitionActive / TD5_COUNTDOWN_LEVEL_DIV;
@@ -2741,6 +2980,23 @@ static void tick_race_countdown(void)
         set_countdown_indicator_state(next_indicator);
         TD5_LOG_I(LOG_TAG, "Race countdown: level=%d indicator=%d timer=0x%X",
                   level, next_indicator, g_cameraTransitionActive);
+    }
+
+    /* Race-start: orig flips g_gamePaused at level==0 (indicator "1"),
+     * not when timer hits 0. Use g_td5.paused itself as the one-shot
+     * gate so the log only fires on the actual transition. */
+    if (level == 0 && g_td5.paused) {
+        g_td5.paused = 0;
+        /* NOTE (2026-05-14): audit of orig 0x0040A490 confirmed the original
+         * does NOT touch STEERING_CMD/RAMP_ACCUM/ang_velocity_yaw or
+         * RS_TRACK_PROGRESS/RS_TRACK_OFFSET_BIAS on the level==0 transition —
+         * it only clears g_gamePaused and gRaceCameraTransitionGate.
+         * The previous port-only reset block here was a workaround for the
+         * (now-fixed) spawn-time +0x82 pre-seed bug; with c698403 + 9b7d42a
+         * in place the cascade now naturally produces the ±20000 sim_tick=1
+         * steering range. */
+        TD5_LOG_I(LOG_TAG, "Race countdown: GO at level=0 timer=0x%X",
+                  g_cameraTransitionActive);
     }
 }
 

@@ -1,0 +1,2 @@
+hooks:
+  - script: tools/frida_pool10_004340C0.js

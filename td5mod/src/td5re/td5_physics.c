@@ -42,6 +42,23 @@
 #include "td5_game.h"     /* td5_game_get_total_actor_count, td5_game_is_wanted_mode */
 #include "td5_platform.h"
 #include "td5_trace.h"    /* inner-tick physics_trace stages */
+#include "td5_pilot_trace.h" /* precise-port pilot CSV emit for 0x00403720 */
+#include "td5_pilot_trace_00405B40.h" /* precise-port pilot CSV emit for 0x00405B40 */
+#include "td5_pilot_trace_00405D70.h" /* precise-port pilot CSV emit for 0x00405D70 */
+#include "td5_pilot_trace_00405E80.h" /* precise-port pilot CSV emit for 0x00405E80 */
+#include "td5_pilot_trace_004063A0.h" /* precise-port pilot CSV emit for 0x004063A0 */
+#include "td5_pilot_trace_00406650.h" /* precise-port pilot CSV emit for 0x00406650 */
+#include "td5_pilot_trace_00406980.h"  /* precise-port pilot trace */
+#ifdef TD5_PILOT_TRACE_00409150
+#include "td5_pilot_trace_00409150.h"
+#endif
+#include "td5_pilot_trace_0042EB10.h"  /* precise-port pilot trace */
+#include "td5_pilot_trace_0042EBF0.h" /* precise-port pilot CSV emit for 0x0042EBF0 */
+#ifdef TD5_PILOT_TRACE_TRAFFIC
+#include "td5_pilot_trace_traffic.h" /* precise-port pilot CSV emit for 0x004437C0 + 0x004438F0 */
+#include "td5_pilot_trace_v2v_contact.h" /* pool15 V2V pilot trace */
+#include "td5_pilot_trace_v2v.h"  /* pool14_v2v precise-port pilot */
+#endif
 #include "td5re.h"
 
 /* Include the full actor struct for field-level access.
@@ -71,8 +88,9 @@ static void resolve_collision_pair(TD5_Actor *a, TD5_Actor *b, int idx_a, int id
 static void collision_detect_full(TD5_Actor *a, TD5_Actor *b, int idx_a, int idx_b);
 static void collision_detect_simple(TD5_Actor *a, TD5_Actor *b);
 static int  obb_corner_test(TD5_Actor *a, TD5_Actor *b,
-                            int32_t ax, int32_t az, int32_t bx, int32_t bz,
-                            int32_t heading_a, int32_t heading_b,
+                            int32_t pos_a_x_fp, int32_t pos_a_z_fp,
+                            int32_t pos_b_x_fp, int32_t pos_b_z_fp,
+                            int32_t yaw_a_acc, int32_t yaw_b_acc,
                             OBB_CornerData corners[8]);
 static void apply_collision_response(TD5_Actor *penetrator, TD5_Actor *target,
                                      int corner_idx, OBB_CornerData *corner,
@@ -96,7 +114,19 @@ static int16_t s_gear_torque[16];       /* DAT_00467394: per-gear torque multipl
 
 /* --- Globals matching original binary layout --- */
 static int32_t g_gravity_constant = TD5_GRAVITY_NORMAL;
-static int32_t g_collisions_enabled = 0;     /* DAT_00463188: 0=on, 1=off */
+
+/* Pilot-trace accessor — exposes g_gravity_constant to the pilot
+ * trace module without leaking the static. Read-only debug use. */
+int32_t td5_physics_dbg_get_gravity_constant(void) {
+    return g_gravity_constant;
+}
+static int32_t g_collisions_enabled = 0;     /* DAT_00463188 (== orig's `g_cameraMode`):
+                                                * 0 = normal play / collisions ON / no-clip OFF,
+                                                * 1 = no-clip mode / collisions OFF. The two names
+                                                * refer to the SAME dword; the user-facing INI
+                                                * "Collisions" knob is XOR'd into it (frontend at
+                                                * 0x004155BD / 0x0041DC8E). Setter `td5_physics_set_collisions`
+                                                * preserves that inversion. */
 static int32_t g_game_paused = 0;            /* DAT_004AAD60 */
 static int32_t g_xz_freeze = 0;             /* DAT_00483030: 1=freeze XZ during countdown */
 static int32_t s_dynamics_mode = 0;          /* 0=arcade, 1=simulation (0x42F7B0) */
@@ -176,8 +206,27 @@ static uint8_t s_collision_grid[COLLISION_GRID_SIZE];
 static uint8_t s_default_tuning[TD5_MAX_TOTAL_ACTORS][0x80];
 static uint8_t s_default_cardef[TD5_MAX_TOTAL_ACTORS][0x90];
 static uint8_t s_carparam_loaded[TD5_MAX_TOTAL_ACTORS];  /* 1 if carparam.dat was loaded */
-static uint8_t s_loaded_cardef[TD5_MAX_TOTAL_ACTORS][0x8C]; /* carparam 0x00..0x8B */
-static uint8_t s_loaded_tuning[TD5_MAX_TOTAL_ACTORS][0x80]; /* carparam 0x8C..0x10B */
+/* ARCHITECTURAL DIVERGENCE — see memory/reference_arch_cardef_per_actor_indirection.md
+ * Original binary stores cardef bytes in a single global table:
+ *   gVehicleTuningTable @ DAT_004AE580, indexed by slot*0x8C.
+ * Original cardef readers compute &gVehicleTuningTable[slot*0x8C] directly
+ * (e.g. ComputeVehicleSuspensionEnvelope @ 0x0042F6D0 uses ESI=that address).
+ *
+ * Port instead stores the bytes here in `s_loaded_cardef[slot]` (file scope),
+ * memcpy's them into a per-actor buffer pointed to by `actor->car_definition_ptr`
+ * at race init (bind_default_vehicle_tuning below), and every cardef reader
+ * dereferences `actor->car_definition_ptr` instead of computing slot offsets.
+ *
+ * Bytes are byte-faithful; the divergence is purely the addressing scheme.
+ * Cardef writers/readers in this file (and the one render-side reader in
+ * td5_render.c) must stay consistent with the per-actor-pointer convention.
+ * Fixing requires editing every cardef reader across the codebase.
+ *
+ * Commits 9da6c15 (precise-0042F140 InitializeRaceVehicleRuntime) and
+ * cec14b6 (precise-0042F6D0 ComputeVehicleSuspensionEnvelope) both call out
+ * this mapping in their headers. */
+static uint8_t s_loaded_cardef[TD5_MAX_TOTAL_ACTORS][0x8C]; /* carparam 0x00..0x8B; row maps to gVehicleTuningTable[slot] */
+static uint8_t s_loaded_tuning[TD5_MAX_TOTAL_ACTORS][0x80]; /* carparam 0x8C..0x10B; row maps to gVehiclePhysicsTable[slot] */
 
 /* ========================================================================
  * Forward declarations for internal helpers
@@ -261,6 +310,21 @@ void td5_physics_wall_response(TD5_Actor *actor, int32_t wall_angle,
                                int32_t penetration, int side,
                                int32_t probe_x_fp8, int32_t probe_z_fp8)
 {
+    /* Pilot trace: capture args + pre-state. Frida probe at
+     * tools/frida_pool7_00406980.js mirrors this schema. Output:
+     * log/port/pool7_00406980.csv. The `side` parameter is the port's
+     * encoding of the original's `flags` arg (side=-1 maps to flags=0;
+     * side=1/2 maps to flags=1/2). probe_x_fp8/probe_z_fp8 stand in for
+     * the original's `forceVec[0]/forceVec[2]`. */
+    {
+        uint32_t flags_for_trace = (side < 0) ? 0u : (uint32_t)(side);
+        td5_pilot_emit_00406980_enter(actor,
+                                       probe_x_fp8, 0, probe_z_fp8,
+                                       (uint32_t)wall_angle,
+                                       penetration,
+                                       flags_for_trace);
+    }
+
     /* Pre-impulse attitude snapshot (slot 0) — lets us see whether wall
      * response is the proximate trigger of a pitch/roll spike. */
     int32_t pre_av_roll  = actor->angular_velocity_roll;
@@ -289,17 +353,26 @@ void td5_physics_wall_response(TD5_Actor *actor, int32_t wall_angle,
     /* Lever arm iVar9 = (actor_center - probe) dot wall_tangent, both sides
      * divided by 256 first to avoid overflow before the >>12.
      * [CONFIRMED @ 0x00406A04-0x00406A60]. POST-push positions are used
-     * because actor->world_pos was already updated above. */
+     * because actor->world_pos was already updated above.
+     *
+     * Original uses Borland-style round-toward-zero on the >>12: adds 0xFFF
+     * to negative values before SAR (asm: `CDQ; AND EDX,0xFFF; ADD EAX,EDX;
+     * SAR EAX,0xC`). GCC's plain `>> 12` rounds toward -inf for negatives,
+     * producing 1-unit-too-negative results. D4 audit. */
     int32_t arm_x_int = (actor->world_pos.x - probe_x_fp8) >> 8;
     int32_t arm_z_int = (actor->world_pos.z - probe_z_fp8) >> 8;
-    int32_t iVar9 = ((int64_t)arm_z_int * sin_w + (int64_t)arm_x_int * cos_w) >> 12;
+    int64_t iVar9_raw = (int64_t)arm_z_int * sin_w + (int64_t)arm_x_int * cos_w;
+    int32_t iVar9 = (int32_t)((iVar9_raw + ((iVar9_raw >> 63) & 0xFFF)) >> 12);
 
     /* Decompose velocity into wall-tangent (v_para, iVar4) and
-     * wall-normal (v_perp, iVar10) components [CONFIRMED @ 0x4069cc]. */
+     * wall-normal (v_perp, iVar10) components [CONFIRMED @ 0x4069cc].
+     * Same round-toward-zero correction on the >>12 (D2/D3/D4/D6 family). */
     int32_t vx = actor->linear_velocity_x;
     int32_t vz = actor->linear_velocity_z;
-    int32_t v_para = ((int64_t)vx * cos_w + (int64_t)vz * sin_w) >> 12;
-    int32_t v_perp = ((int64_t)vz * cos_w - (int64_t)vx * sin_w) >> 12;
+    int64_t v_para_raw = (int64_t)vx * cos_w + (int64_t)vz * sin_w;
+    int64_t v_perp_raw = (int64_t)vz * cos_w - (int64_t)vx * sin_w;
+    int32_t v_para = (int32_t)((v_para_raw + ((v_para_raw >> 63) & 0xFFF)) >> 12);
+    int32_t v_perp = (int32_t)((v_perp_raw + ((v_perp_raw >> 63) & 0xFFF)) >> 12);
 
     /* iVar11 = contact-point normal velocity (center normal vel + rotation
      * contribution at the lever arm). [CONFIRMED @ 0x00406A60-0x00406A66] */
@@ -312,13 +385,25 @@ void td5_physics_wall_response(TD5_Actor *actor, int32_t wall_angle,
     int     clamp_fired = 0;
 
     /* Early-out when separating [CONFIRMED @ 0x00406A72-0x00406A78]:
-     * skip impulse + tangential damping, fall through to rotate velocity back. */
+     * JS 0x00406CBA — when iVar11 < 0 the original jumps to the function
+     * epilogue and returns WITHOUT updating linear_velocity_x/z or
+     * angular_velocity_yaw. D1 audit: port previously fell through and
+     * rotated (new_v_para, new_v_perp) back to world basis, introducing
+     * round-off in lv_x/lv_z on separating contacts. Faithful behavior is
+     * to skip the entire writeback block when iVar11 < 0. */
     if (iVar11 >= 0) {
-        /* Impulse numerator = ((K>>8) * -0x1100) >> 12, numerator full =
-         * num * iVar11. [CONFIRMED @ 0x00406A86-0x00406ACB] */
-        int32_t num = (((V2W_INERTIA_K >> 8) * -V2W_NUM_SCALE) >> 12);
+        /* Impulse numerator = ((K>>8) * -0x1100) >> 12 with Borland round-
+         * toward-zero on the negative >>12. D2 audit. The compiler-time
+         * constant evaluation here yields a different result from the
+         * runtime add-and-shift form, but since iVar6 = -25497168 is
+         * negative, we apply (val + 0xFFF) >> 12 explicitly.
+         * [CONFIRMED @ 0x00406A86-0x00406ACB] */
+        int32_t iVar6_num = (V2W_INERTIA_K >> 8) * -V2W_NUM_SCALE;  /* -25497168 */
+        int32_t num = (iVar6_num + ((iVar6_num >> 31) & 0xFFF)) >> 12;
 
-        /* Denominator = (iVar9^2 + K) >> 8. [CONFIRMED @ 0x00406AAE-0x00406AD2] */
+        /* Denominator = (iVar9^2 + K) >> 8. [CONFIRMED @ 0x00406AAE-0x00406AD2]
+         * iVar9^2 + K is always non-negative (K>0, square>=0) so no sign-
+         * round needed; matches port's prior code. */
         int64_t denom64 = ((int64_t)iVar9 * iVar9 + (int64_t)V2W_INERTIA_K) >> 8;
         if (denom64 == 0) denom64 = 1;
         impulse = (int32_t)((int64_t)num * iVar11 / denom64);
@@ -361,17 +446,24 @@ void td5_physics_wall_response(TD5_Actor *actor, int32_t wall_angle,
          * memory note was a misread.
          *
          * Branch order matches the asm (positive first). */
-        int32_t v_para_round = v_para >> 6;  /* signed shift; arithmetic-round */
+        /* `v_para_round` mirrors the original `(v_para + (v_para>>31 &
+         * 0x3F)) >> 6` round-toward-zero pattern. D3 audit: GCC `>> 6` on
+         * negative values rounds toward -inf, off by 1 unit; original adds
+         * 0x3F before SAR. */
+        int32_t v_para_round = (v_para + ((v_para >> 31) & 0x3F)) >> 6;
         int32_t tmp;
         if (v_para > 0) {
             tmp = v_para_round + 0x800 + iVar11 * 2;
-            int32_t delta = (tmp * 0x180) >> 11;
+            /* D3 round-toward-zero on the >>11 of (tmp * 0x180). */
+            int32_t mul_raw = tmp * 0x180;
+            int32_t delta = (mul_raw + ((mul_raw >> 31) & 0x7FF)) >> 11;
             pre_clamp_delta = delta;
             new_v_para = v_para - delta;
             if (new_v_para < 0) { new_v_para = 0; clamp_fired = 1; }
         } else {
             tmp = (iVar11 * 2 + 0x800) - v_para_round;
-            int32_t delta = (tmp * 0x180) >> 11;
+            int32_t mul_raw = tmp * 0x180;
+            int32_t delta = (mul_raw + ((mul_raw >> 31) & 0x7FF)) >> 11;
             pre_clamp_delta = delta;
             new_v_para = v_para + delta;
             /* Faithful port of 0x00406B65-69: TEST EAX,EAX / JLE
@@ -388,19 +480,28 @@ void td5_physics_wall_response(TD5_Actor *actor, int32_t wall_angle,
         int32_t ang_div = V2W_INERTIA_K / ANGULAR_DIVISOR_W;  /* 2300 */
         if (ang_div == 0) ang_div = 1;
         actor->angular_velocity_yaw += (impulse * iVar9) / ang_div;
+
+        /* Rotate (new_v_para, new_v_perp) back to world basis.
+         * [CONFIRMED @ 0x406a10]. D6 audit: round-toward-zero on the >>12,
+         * matching original (val + (val>>31 & 0xFFF)) >> 12 pattern. */
+        int64_t lvx_raw = (int64_t)new_v_para * cos_w - (int64_t)new_v_perp * sin_w;
+        int64_t lvz_raw = (int64_t)new_v_para * sin_w + (int64_t)new_v_perp * cos_w;
+        actor->linear_velocity_x = (int32_t)((lvx_raw + ((lvx_raw >> 63) & 0xFFF)) >> 12);
+        actor->linear_velocity_z = (int32_t)((lvz_raw + ((lvz_raw >> 63) & 0xFFF)) >> 12);
+
+        /* No ±6000 yaw clamp here — original has none inside 0x406980.
+         * [CONFIRMED — no write to actor+0x1C4 after LAB_00406B6B] */
+
+        /* Track contact flag: Forward/Reverse handlers pass side=-1 (no write).
+         * The original wrote nothing of this kind directly inside the iVar11>=0
+         * block either — track_contact_flag is a port-only field used by the
+         * port's lateral-handler dispatch (which we have disabled). It's
+         * still useful as a per-tick "did wall fire" marker. Gated inside
+         * the iVar11>=0 branch per D1: separating contacts shouldn't flag.
+         * [CONFIRMED @ 0x406d7e/0x406e4e on the side-encoding mapping] */
+        if (side >= 0)
+            actor->track_contact_flag = (uint8_t)(side + 1);
     }
-
-    /* Rotate (new_v_para, new_v_perp) back to world basis [CONFIRMED @ 0x406a10] */
-    actor->linear_velocity_x = ((int64_t)new_v_para * cos_w - (int64_t)new_v_perp * sin_w) >> 12;
-    actor->linear_velocity_z = ((int64_t)new_v_para * sin_w + (int64_t)new_v_perp * cos_w) >> 12;
-
-    /* No ±6000 yaw clamp here — original has none inside 0x406980.
-     * [CONFIRMED — no write to actor+0x1C4 after LAB_00406B6B] */
-
-    /* Track contact flag: Forward/Reverse handlers pass side=-1 (no write).
-     * [CONFIRMED @ 0x406d7e/0x406e4e] */
-    if (side >= 0)
-        actor->track_contact_flag = (uint8_t)(side + 1);
 
     TD5_LOG_I(LOG_TAG,
               "wall_response: side=%d pen=%d angle=%d arm=%d iVar11=%d imp=%d vpara=%d vperp=%d yaw=%d delta=%d",
@@ -425,6 +526,9 @@ void td5_physics_wall_response(TD5_Actor *actor, int32_t wall_angle,
                   actor->angular_velocity_yaw,
                   (int)actor->display_angles.roll, (int)actor->display_angles.pitch);
     }
+
+    /* Pilot trace: capture post-state and emit row. */
+    td5_pilot_emit_00406980_leave(actor);
 }
 
 /* ========================================================================
@@ -556,7 +660,19 @@ void td5_physics_apply_render_interpolation(float subtick_fraction)
         float dy = (float)(cur->y - prev->y);
         float dz = (float)(cur->z - prev->z);
         actor->render_pos.x = ((float)prev->x + dx * subtick_fraction) * kInv256;
-        actor->render_pos.y = ((float)prev->y + dy * subtick_fraction) * kInv256;
+        /* Y deliberately NOT interpolated. The original's integrate_pose
+         * (0x00405E80) writes render_pos.y exactly once at the pre-snap
+         * (post-gravity) step; the chassis-snap at 0x00406300 updates
+         * world_pos.y only. Lerping prev->cur world_pos.y here with
+         * subtick_fraction ~= 1.0 re-introduces the post-snap value that
+         * commit 43fa800 was eliminating -- producing the persistent
+         * slot-0 +7.42 fp8-unit render_pos.y delta vs orig. Camera/HUD
+         * readers of render_pos.y should see the pre-snap value frozen
+         * between sim ticks (orig's body-mesh draw at 0x0040C164
+         * extrapolates Y separately via velocity, doesn't touch render_pos).
+         * Interpolating X/Z only preserves the high-framerate rubber-band
+         * mitigation of commits 97c6756 / 7631b59 for slide motion.
+         * See memory todo_render_pos_y_residual_2026-05-16.md (Agent J). */
         actor->render_pos.z = ((float)prev->z + dz * subtick_fraction) * kInv256;
     }
 }
@@ -593,11 +709,21 @@ void td5_physics_tick(void)
         td5_physics_update_vehicle_actor(actor);
     }
 
-    /* Skip collision resolution during countdown — wall/vehicle impulses
-     * would accumulate in velocity without integrate_pose to dissipate them,
-     * causing cars to shoot off at race start. */
-    if (!g_game_paused)
-        td5_physics_resolve_vehicle_contacts();
+    /* Run V2V resolution UNCONDITIONALLY each sub-tick — matches
+     * RunRaceFrame @ 0x0042B580 which calls ResolveVehicleContacts every
+     * iteration of the sub-tick loop without any paused gate. The original
+     * relies on countdown V2V to gradually separate the initial OBB overlap
+     * (paired grid cars spawn ~56 units inside each other's box on circuit
+     * tracks); without these pushes, the first race-tick V2V delivers one
+     * large kick that visibly slides slot 0 sideways by +3400 units.
+     *
+     * Safe for stationary spawn: V2V impulse is (NUM/denom) * rel_vel and
+     * rel_vel is built from linear_velocity and angular_velocity (both 0
+     * during countdown), so the impulse solver produces 0; only the
+     * positional push at lines 2777-2780 fires, which converges the
+     * overlap to 0 over the 160 sub-ticks. [CONFIRMED @ 0x42B5C0 Ghidra
+     * pass 2026-05-13: no paused gate around ResolveVehicleContacts.] */
+    td5_physics_resolve_vehicle_contacts();
 }
 
 /* ========================================================================
@@ -608,37 +734,83 @@ void td5_physics_update_vehicle_actor(TD5_Actor *actor)
 {
     if (!actor) return;
 
-    /* 1. Increment frame counter */
+    /* precise-port pilot 0x00406650: capture enter snapshot. */
+    td5_pilot_emit_00406650_enter(actor);
+
+    /* 1. Increment frame counter — listing 0x00406664 INC WORD ptr [+0x338]. */
     actor->frame_counter++;
 
-    /* 2. Clear per-frame flags */
+    /* 2. Clear per-frame flags — listing 0x00406673 MOV BYTE [+0x37B], 0. */
     actor->track_contact_flag = 0;
 
-    /* 3. Time trial ghost: force zero throttle if ghost flag set */
-    if (actor->ghost_flag) {
-        actor->encounter_steering_cmd = 0;
+    /* 3. Ghost reset — listing 0x0040667A-66A6:
+     *   if (g_selectedGameType != 0 && (uint8)[+0x37E] != 0) {
+     *       [+0x30C] = 0           // steering_command
+     *       [+0x33E] = 0xFF00      // encounter_steering_cmd
+     *       [+0x36D] = 1           // brake_flag
+     *   }
+     * Field 0x37E is overloaded: time-trial-ghost flag (single-race) or
+     * checkpoint_count (P2P). Original gates BOTH on game_type != 0; port
+     * previously omitted the game_type gate AND wrote wrong values.
+     * [Audit D2 — fixed 2026-05-14.] */
+    if (g_game_type != 0 && actor->ghost_flag) {
+        actor->steering_command = 0;
+        actor->encounter_steering_cmd = (int16_t)0xFF00;
         actor->brake_flag = 1;
     }
 
-    /* 4. Speed tracking: accumulate distance, track peak */
-    {
+    /* 4. Speed tracking — listing 0x004066A6-66E9, gated on finish_time == 0:
+     *     abs_spd = abs(longitudinal_speed)
+     *     accumulated_distance += abs_spd >> 8
+     *     peak_speed = max(peak_speed, (int16)(abs_spd >> 8))
+     * [Audit D3 — finish_time gate added 2026-05-14.] */
+    if (actor->finish_time == 0) {
         int32_t spd = actor->longitudinal_speed;
         if (spd < 0) spd = -spd;
-        actor->accumulated_distance += (spd >> 8);
-        if ((int16_t)(spd >> 8) > actor->peak_speed)
-            actor->peak_speed = (int16_t)(spd >> 8);
+        int32_t spd_sar8 = spd >> 8;   /* sar8_rz collapses to >>8 for spd >= 0 */
+        actor->accumulated_distance += spd_sar8;
+        if ((int16_t)spd_sar8 > actor->peak_speed)
+            actor->peak_speed = (int16_t)spd_sar8;
     }
 
-    /* 5. Attitude clamp (unless scripted mode) */
+    /* 4b. Race timer + average-speed block — listing 0x004066FB-6769:
+     *   if (gRaceCameraTransitionGate == 0 && finish_time == 0) {
+     *       if ((uint16)timing_frame_counter < 0xFFFF) timing_frame_counter++
+     *       average_speed_metric = (int16)(accumulated_distance / timing_frame_counter)
+     *       (re-update peak_speed from same abs_spd — algebraically a no-op
+     *        because nothing in between mutates longitudinal_speed)
+     *   }
+     * The port's g_game_paused mirrors both gRaceCameraTransitionGate and
+     * g_gamePaused (both are 1 during countdown, 0 during the race), so this
+     * gate uses !g_game_paused. [Audit D4 — added 2026-05-14.] */
+    if (!g_game_paused && actor->finish_time == 0) {
+        uint16_t *tc = (uint16_t *)((uint8_t *)actor + 0x34C);
+        if (*tc < 0xFFFF) (*tc)++;
+        if (*tc != 0) {
+            actor->average_speed_metric =
+                (int16_t)(actor->accumulated_distance / (int32_t)(uint32_t)*tc);
+        }
+        /* Second peak_speed update at 0x00406745-6762 — identical to the
+         * first because longitudinal_speed hasn't been mutated; skipped to
+         * avoid a redundant write that would also be visible in the trace. */
+    }
+
+    /* 5. Attitude clamp (unless scripted mode) — listing 0x0040677B-678E:
+     *     if ([+0x379] == 0) ClampVehicleAttitudeLimits(actor) */
     if (actor->vehicle_mode == 0)
         td5_physics_clamp_attitude(actor);
 
     /* 6. Dynamics dispatch */
     if (actor->vehicle_mode == 0 && !g_game_paused) {
-        /* Select effective grip: min of grip_reduction and race_position */
+        /* Select effective grip: min of grip_reduction and race_position.
+         * Listing 0x00406823-683D: AL=[+0x380]; CL=[+0x383]; if (CL < AL) AL=CL;
+         * MOV [+0x380], AL.  Original WRITES the clamped result back to
+         * actor->grip_reduction. Port previously kept it in a local only.
+         * [Audit D7 — fixed 2026-05-14.] */
         uint8_t eff_grip = actor->grip_reduction;
         if (actor->race_position < eff_grip)
             eff_grip = actor->race_position;
+        actor->grip_reduction = eff_grip;
 
         if (actor->wheel_contact_bitmask == 0x0F && actor->airborne_frame_counter >= 3) {
             /* Stunned/damping recovery mode */
@@ -646,8 +818,9 @@ void td5_physics_update_vehicle_actor(TD5_Actor *actor)
                       actor->slot_index, actor->airborne_frame_counter,
                       actor->angular_velocity_roll, actor->angular_velocity_pitch);
             td5_physics_state0f_damping(actor);
-        } else if (actor->slot_index < 6 && g_race_slot_state[actor->slot_index]) {
-            /* Human player */
+        } else if (actor->slot_index < 6 && g_race_slot_state[actor->slot_index] == 1) {
+            /* Human player — listing 0x0040685C tests `state == 1` strictly,
+             * not `state != 0`. [Audit D13 — tightened 2026-05-14.] */
             td5_physics_update_player(actor);
         } else {
             /* AI racer or traffic */
@@ -670,7 +843,29 @@ void td5_physics_update_vehicle_actor(TD5_Actor *actor)
          * Missing: RefreshScriptedVehicleTransforms rotation-matrix advance
          * (MultiplyRotationMatrices3x3); requires recovery_target_m00 / saved_orientation_m00
          * subsystem not yet ported. */
-        actor->frame_counter++;
+        /* [Audit D1 — removed double frame_counter increment 2026-05-14.]
+         * Original 0x004067A2 does NOT re-increment frame_counter inside the
+         * vehicle_mode==1 branch — the single increment at function entry
+         * (line 617 above, matching listing 0x00406664) is the only one. */
+
+        /* D11 — Scripted-mode world_pos write, listing 0x004067A8-67D9:
+         *   world_pos.x = (int16)*(+0x208) << 8
+         *   world_pos.y = (int16)*(+0x20A) << 8
+         *   world_pos.z = (int16)*(+0x20C) << 8
+         * The three shorts at +0x208/A/C alias the "display_angles" struct in
+         * the port, but the original treats them as recovery-target world
+         * coordinates during vehicle_mode==1 — the recovery animation
+         * overwrites world_pos every tick from this triple.
+         * [Audit D11 — added 2026-05-14.] */
+        {
+            uint8_t *abase = (uint8_t *)actor;
+            int16_t rx = *(int16_t *)(abase + 0x208);
+            int16_t ry = *(int16_t *)(abase + 0x20A);
+            int16_t rz = *(int16_t *)(abase + 0x20C);
+            actor->world_pos.x = (int32_t)rx << 8;
+            actor->world_pos.y = (int32_t)ry << 8;
+            actor->world_pos.z = (int32_t)rz << 8;
+        }
 
         /* Linear velocity damping [CONFIRMED @ 0x00409D20-0x00409D3B]:
          * v -= (v + (v>>31 & 0xFF)) >> 8  (sign-extending divide-by-256) */
@@ -687,44 +882,65 @@ void td5_physics_update_vehicle_actor(TD5_Actor *actor)
             td5_physics_reset_actor_state(actor);
         }
     } else if (g_game_paused) {
-        /* Paused: only update engine RPM display.
+        /* Paused branch — listing 0x00406881-690B, line-by-line.
          *
-         * Original UpdateVehicleActor @ 0x00406650 paused branch:
-         *   UpdateVehicleEngineSpeedSmoothed(actor);
-         *   if (<AI-slot predicate>)
-         *       actor->engine_speed_accum = (cardef[0x72] << 1) / 3;
+         * Order from the listing:
+         *   DL = [+0x383]                     ; race_position
+         *   [+0x381] = DL                     ; prev_race_position = race_position
+         *   UpdateVehicleEngineSpeedSmoothed(actor)
+         *   if (g_selectedGameType != 0) {
+         *       if (slot[+0x375].state != 1)
+         *           engine_speed_accum = (cardef[0x72] << 1) / 3
+         *   }
+         *   [+0x376] = 0                       ; surface_contact_flags = 0
+         *   if (slot[slotIndex].state == 1) {
+         *       cardef = [+0x1BC]
+         *       three_quart_redline = ((int16)cardef[0x72] * 3 + sgn_adj) >> 2  (round-toward-zero)
+         *       if (engine_speed_accum > three_quart_redline)
+         *           surface_contact_flags = (uint8)cardef[0x76]
+         *   }
          *
-         * The predicate as decompiled reads (g_selectedGameType != 0 &&
-         * slot_state != 1). Empirically the `(redline*2)/3` AI pin DOES
-         * fire during /diff-race single-race runs on slots that haven't
-         * begun AI dynamics yet (trace slots 3/5 on Moscow land at exactly
-         * 7400 = 11100*2/3). So the port's condition on game_type is
-         * dropped here — gate only on the slot being a non-player racer,
-         * which matches the observed trace. [RE basis: 0x004068B3-0x004068CB] */
+         * Port previously matched only the UpdateVehicleEngineSpeedSmoothed
+         * call + the AI engine pin. [Audit D5 — added prev_race_position,
+         * scf=0, scf-from-cardef-on-high-rpm 2026-05-14.] */
+
+        /* D5a — prev_race_position = race_position */
+        actor->prev_race_position = actor->race_position;
+
         update_engine_speed_smoothed(actor);
-        /* The original gates the (redline*2)/3 AI pin on
-         *   (g_selectedGameType != 0 && slot[+0x375].state != 1)
-         * [CONFIRMED @ 0x004068B3-0x004068CB via Opus 4.7 audit 2026-05-03].
-         * The prior port comment dropped the game_type gate based on a
-         * misread: the empirical 7400 (= 11100*2/3) trace landed because
-         * the test had game_type != 0, not because the gate is always on.
-         *
-         * For single-race (game_type=0), the original does NOT pin during
-         * pause — update_engine_speed_smoothed revs RPM toward redline via
-         * the throttle-driven target, ending pause near redline (6185 for
-         * Viper). The first active sub-tick slews -200 to ~5985, which
-         * exceeds gear-2 upshift_rpm (5400) → AI shifts up rapidly,
-         * dropping drive_torque. This is the ROOT CAUSE of the Honolulu
-         * 2× force overshoot tracked in todo_state0f_overfire_skips_player.md.
-         *
-         * With this gate restored, port matches original on game_type=0
-         * single-race and continues to pin AI engines on game_type!=0
-         * (championship / cup modes). */
+
+        /* D5b — AI engine pin: gate on g_selectedGameType != 0 (championship/
+         * cup modes only). [RE basis: 0x004068B3-0x004068CB] */
         if (g_game_type != 0 &&
             actor->slot_index < 6 &&
             g_race_slot_state[actor->slot_index] != 1) {
             int32_t redline = (int32_t)PHYS_S(actor, 0x72);
             actor->engine_speed_accum = (redline << 1) / 3;
+        }
+
+        /* D5c — clear surface_contact_flags */
+        actor->surface_contact_flags = 0;
+
+        /* D5d — player path: set scf from cardef[0x76] when engine > 3/4 redline.
+         * Listing 0x004068D8-690B:
+         *   if (gRaceSlotStateTable.slot[slotIndex].state == 1) {
+         *       phys = [+0x1BC]                     ; tuning_data_ptr
+         *       eax = (int16)phys[0x72]
+         *       lea eax, [eax + eax*2]              ; eax = redline * 3
+         *       cdq; and edx, 3; add eax, edx; sar eax, 2  ; round-toward-zero /4
+         *       if (engine_speed_accum > eax) [+0x376] = phys[0x76]
+         *   } */
+        if (actor->slot_index < 6 && g_race_slot_state[actor->slot_index] == 1) {
+            int16_t *phys = get_phys(actor);
+            if (phys) {
+                int32_t redline = (int32_t)PHYS_S(actor, 0x72);
+                int32_t triple = redline * 3;
+                int32_t thresh = (triple + ((triple >> 31) & 3)) >> 2;  /* /4 round-rz */
+                if (actor->engine_speed_accum > thresh) {
+                    actor->surface_contact_flags =
+                        ((uint8_t *)phys)[0x76];
+                }
+            }
         }
     }
 
@@ -819,16 +1035,25 @@ void td5_physics_update_vehicle_actor(TD5_Actor *actor)
                   actor->current_gear,
                   actor->surface_type_chassis);
     }
+
+    /* precise-port pilot 0x00406650: capture leave snapshot. */
+    td5_pilot_emit_00406650_leave(actor);
 }
 
 /* ========================================================================
  * Player 4-wheel dynamics -- UpdatePlayerVehicleDynamics (0x404030)
  * ======================================================================== */
 
+/* Pilot trace hooks (pool0 / 0x00404030) */
+extern void td5_pilot_emit_00404030_enter(const TD5_Actor *actor, uintptr_t caller_ra);
+extern void td5_pilot_emit_00404030_leave(const TD5_Actor *actor);
+
 void td5_physics_update_player(TD5_Actor *actor)
 {
     int16_t *phys = get_phys(actor);
     if (!phys) return;
+
+    td5_pilot_emit_00404030_enter(actor, (uintptr_t)__builtin_return_address(0));
 
     int32_t i;
 
@@ -1774,16 +1999,24 @@ void td5_physics_update_player(TD5_Actor *actor)
      * 0x004049BA/0x00404A80. Do NOT write it again here — the earlier
      * `abs(lateral_speed)>>8` tail-write used the wrong values (post-update)
      * and collapsed slip to near-zero in normal driving. */
+
+    td5_pilot_emit_00404030_leave(actor);
 }
 
 /* ========================================================================
  * AI 2-axle dynamics -- UpdateAIVehicleDynamics (0x404EC0)
  * ======================================================================== */
 
+/* Pilot trace emitters (pool12 / precise-port workflow) */
+extern void td5_pilot_emit_00404EC0_enter(const TD5_Actor *actor, uintptr_t caller_ra);
+extern void td5_pilot_emit_00404EC0_leave(const TD5_Actor *actor);
+
 void td5_physics_update_ai(TD5_Actor *actor)
 {
     int16_t *phys = get_phys(actor);
     if (!phys) return;
+
+    td5_pilot_emit_00404EC0_enter(actor, (uintptr_t)__builtin_return_address(0));
 
     /* Calls-trace probe: capture per-slot AI dynamics entry state.
      * Hooks YAML: re/trace-hooks/tick0_ai_chain.yaml
@@ -2239,6 +2472,7 @@ void td5_physics_update_ai(TD5_Actor *actor)
         actor->current_slip_metric = (int16_t)slip;
     }
 
+    td5_pilot_emit_00404EC0_leave(actor);
 }
 
 /* ========================================================================
@@ -2250,6 +2484,10 @@ void td5_physics_update_traffic(TD5_Actor *actor)
     /* Literal port of IntegrateVehicleFrictionForces @ 0x004438F0.
      * Transcribed from Ghidra decompilation; every SAR uses
      * truncate-toward-zero rounding: (x + ((x>>31)&mask)) >> shift. */
+
+#ifdef TD5_PILOT_TRACE_TRAFFIC
+    td5_pilot_emit_traffic_friction_enter(actor);
+#endif
 
     #define SAR12(x) (((x) + (((x) >> 31) & 0xFFF)) >> 12)
     #define SAR10(x) (((x) + (((x) >> 31) & 0x3FF)) >> 10)
@@ -2343,53 +2581,107 @@ void td5_physics_update_traffic(TD5_Actor *actor)
     #undef SAR12
     #undef SAR10
     #undef SAR8_U8
+
+#ifdef TD5_PILOT_TRACE_TRAFFIC
+    td5_pilot_emit_traffic_friction_leave(actor);
+#endif
 }
 
 /* ========================================================================
  * ApplyDampedSuspensionForce (0x4437C0) -- Traffic only
  *
  * Simple 2-DOF spring-damper for roll and pitch.
+ *
+ * Byte-faithful port (pool8 precise-port pilot 2026-05-14).
+ *
+ * Original (per axis):
+ *   new_pos = old_pos + old_vel                          [stored before damping]
+ *   new_vel = old_vel
+ *           + sar8_rz(-old_vel * 32)                     ; velocity damping (OLD vel)
+ *           - sar8_rz( new_pos * 32)                     ; spring restore   (NEW pos)
+ *           + sar8_rz( drive    * 128)                   ; external force
+ *   if new_pos > +CLAMP: new_pos = +CLAMP, new_vel = 0
+ *   if new_pos < -CLAMP: new_pos = -CLAMP, new_vel = 0
+ *
+ * `sar8_rz(x) = ((x < 0) ? (x + 0xFF) : x) >> 8`  — matches CDQ;AND EDX,0xFF;ADD;SAR 8.
  * ======================================================================== */
+
+static inline int32_t sar8_rz(int32_t x) {
+    /* Encodes original's CDQ + AND EDX,0xFF + ADD EAX,EDX + SAR EAX,8
+     * (round-to-zero signed divide by 256). */
+    return (x + (((int32_t)((uint32_t)x >> 31)) * 0xFF)) >> 8;
+}
 
 static void apply_damped_suspension_force(TD5_Actor *actor, int32_t lateral, int32_t longitudinal)
 {
-    /* First axis (lateral-driven): wheel_suspension_pos[0] (+0x2DC) / wheel_spring_dv[0] (+0x2EC)
-     * [CONFIRMED @ 0x4437C0-0x443838] */
-    int32_t axis0_pos = actor->wheel_suspension_pos[0];
-    int32_t axis0_vel = actor->wheel_spring_dv[0];
+#ifdef TD5_PILOT_TRACE_TRAFFIC
+    td5_pilot_emit_traffic_susp_enter(actor, lateral, longitudinal);
+#endif
 
-    axis0_vel += (lateral * 0x80) >> 8;           /* drive force */
-    axis0_vel += (axis0_vel * -0x20) >> 8;        /* velocity damping */
-    axis0_vel -= (axis0_pos * 0x20) >> 8;         /* spring force */
-    axis0_pos += axis0_vel;
+    /* === Axis 0 (lateral-driven): pos @ +0x2DC, vel @ +0x2EC, clamp ±0x2000 ===
+     * [CONFIRMED @ 0x004437C4-0x00443859] */
+    {
+        int32_t old_pos = actor->wheel_suspension_pos[0];
+        int32_t old_vel = actor->wheel_spring_dv[0];
 
-    if (axis0_pos > 0x2000) axis0_pos = 0x2000;
-    if (axis0_pos < -0x2000) axis0_pos = -0x2000;
+        /* new_pos = old_pos + old_vel  [0x004437D3-0x004437D5] */
+        int32_t new_pos = old_pos + old_vel;
+        actor->wheel_suspension_pos[0] = new_pos;
 
-    actor->wheel_suspension_pos[0] = axis0_pos;
-    actor->wheel_spring_dv[0] = axis0_vel;
+        /* new_vel = old_vel + sar8_rz(-old_vel*32) - sar8_rz(new_pos*32) + sar8_rz(drive*128)
+         *           [0x004437DB-0x00443821] */
+        int32_t new_vel = old_vel
+                        + sar8_rz(-old_vel * 32)
+                        - sar8_rz( new_pos * 32)
+                        + sar8_rz( lateral * 128);
+        actor->wheel_spring_dv[0] = new_vel;
 
-    /* Second axis (longitudinal-driven): wheel_suspension_pos[1] (+0x2E0) / wheel_spring_dv[1] (+0x2F0)
-     * [CONFIRMED @ 0x443838-0x4438EC] */
-    int32_t axis1_pos = actor->wheel_suspension_pos[1];
-    int32_t axis1_vel = actor->wheel_spring_dv[1];
+        /* Two separate if-clamps (matches listing 0x00443827-0x00443859 exactly).
+         * Algebraically equivalent to if/else-if. */
+        if (new_pos > 0x2000) {
+            actor->wheel_suspension_pos[0] = 0x2000;
+            actor->wheel_spring_dv[0] = 0;
+        }
+        if (actor->wheel_suspension_pos[0] < -0x2000) {
+            actor->wheel_suspension_pos[0] = -0x2000;
+            actor->wheel_spring_dv[0] = 0;
+        }
+    }
 
-    axis1_vel += (longitudinal * 0x80) >> 8;
-    axis1_vel += (axis1_vel * -0x20) >> 8;
-    axis1_vel -= (axis1_pos * 0x20) >> 8;
-    axis1_pos += axis1_vel;
+    /* === Axis 1 (longitudinal-driven): pos @ +0x2E0, vel @ +0x2F0, clamp ±0x4000 ===
+     * [CONFIRMED @ 0x00443859-0x004438EA] */
+    {
+        int32_t old_pos = actor->wheel_suspension_pos[1];
+        int32_t old_vel = actor->wheel_spring_dv[1];
 
-    if (axis1_pos > 0x4000) axis1_pos = 0x4000;
-    if (axis1_pos < -0x4000) axis1_pos = -0x4000;
+        int32_t new_pos = old_pos + old_vel;
+        actor->wheel_suspension_pos[1] = new_pos;
 
-    actor->wheel_suspension_pos[1] = axis1_pos;
-    actor->wheel_spring_dv[1] = axis1_vel;
+        int32_t new_vel = old_vel
+                        + sar8_rz(-old_vel * 32)
+                        - sar8_rz( new_pos * 32)
+                        + sar8_rz( longitudinal * 128);
+        actor->wheel_spring_dv[1] = new_vel;
+
+        if (new_pos > 0x4000) {
+            actor->wheel_suspension_pos[1] = 0x4000;
+            actor->wheel_spring_dv[1] = 0;
+        }
+        if (actor->wheel_suspension_pos[1] < -0x4000) {
+            actor->wheel_suspension_pos[1] = -0x4000;
+            actor->wheel_spring_dv[1] = 0;
+        }
+    }
 
     /* Original does NOT feed suspension into angular_velocity.
      * [CONFIRMED @ 0x4437C0-0x4438EC: writes only to +0x2DC/+0x2EC/+0x2E0/+0x2F0,
      *  never to angular_velocity_roll/pitch.]
      * Roll/pitch display angles are computed from surface normal + suspension
      * correction in UpdateTrafficVehiclePose, not from euler accumulators. */
+
+#ifdef TD5_PILOT_TRACE_TRAFFIC
+    td5_pilot_emit_traffic_susp_leave(actor);
+#endif
 }
 
 /* ========================================================================
@@ -2415,8 +2707,9 @@ static void apply_damped_suspension_force(TD5_Actor *actor, int32_t lateral, int
  * ======================================================================== */
 
 static int obb_corner_test(TD5_Actor *a, TD5_Actor *b,
-                           int32_t ax, int32_t az, int32_t bx, int32_t bz,
-                           int32_t heading_a, int32_t heading_b,
+                           int32_t pos_a_x_fp, int32_t pos_a_z_fp,
+                           int32_t pos_b_x_fp, int32_t pos_b_z_fp,
+                           int32_t yaw_a_acc, int32_t yaw_b_acc,
                            OBB_CornerData corners[8])
 {
     int result = 0;
@@ -2429,21 +2722,90 @@ static int obb_corner_test(TD5_Actor *a, TD5_Actor *b,
     int32_t front_z_b = (int32_t)CDEF_S(b, 0x04);
     int32_t rear_z_b  = (int32_t)CDEF_S(b, 0x14);
 
-    /* Precompute sin/cos for each heading */
+    /* [LISTING ALIGNMENT 0x00408570]: the original's
+     *   CollectVehicleCollisionContacts(int param_1, int param_2,
+     *                                   int *param_3, int *param_4, short *param_5)
+     * receives raw 24.8-fp position triplets (param_3 = &local_80 = pos triplet of A,
+     * etc.) and raw 24.8-fp euler accumulators (param_4 = &local_94 = yaw triplet),
+     * then computes:
+     *   iVar3  = (param_3[5] - param_3[2]) >> 8;          // (pos_b.z - pos_a.z) >> 8
+     *   iVar24 = (param_3[3] - *param_3) >> 8;            // (pos_b.x - pos_a.x) >> 8
+     *   uVar25 = (uint)(short)((*param_4 - param_4[1]) >> 8); // (yaw_a - yaw_b) >> 8
+     *   CosFixed12bit(*param_4 >> 8);                     // yaw_a >> 8
+     *   CosFixed12bit(param_4[1] >> 8);                   // yaw_b >> 8
+     * — i.e. the >>8 happens on the DELTA (positions) or on the raw accumulator
+     * (headings), INSIDE the callee. The prior port wrapper required the caller
+     * to pre-shift, so two callers in resolve_vehicle_collision_pair both did
+     * (pos_X >> 8) before calling. That introduced an off-by-1-LSB divergence
+     * for any pair whose fractional bytes underflowed on subtract
+     * (e.g. pos_a=255, pos_b=0: orig (0-255)>>8 = -1; pre-shifted (0>>8)-(255>>8)=0).
+     *
+     * Fix (this commit): match the listing — wrapper now takes raw 24.8 fp pos +
+     * raw 24.8 fp yaw accumulators, computes the same deltas-then-shift and
+     * raw-then-shift internally. */
+    int32_t delta_world_x = (pos_b_x_fp - pos_a_x_fp) >> 8;
+    int32_t delta_world_z = (pos_b_z_fp - pos_a_z_fp) >> 8;
+    int32_t heading_a = yaw_a_acc >> 8;            /* matches `*param_4 >> 8` */
+    int32_t heading_b = yaw_b_acc >> 8;            /* matches `param_4[1] >> 8` */
+    /* dheading derived from raw accumulator subtract then shift, matching
+     * `uVar25 = (uint)(short)((*param_4 - param_4[1]) >> 8)`. The (short) cast
+     * means the LOW 16 bits are then treated as int — equivalent in our path
+     * because cos_fixed12/sin_fixed12 mask with & 0xFFF internally. */
+    int32_t dheading_raw_shift = (yaw_a_acc - yaw_b_acc) >> 8;
+
+    /* Pool15 V2V pilot trace — capture inputs at entry. */
+    TD5_PilotV2VContactSnap _v2v_snap;
+    int _v2v_slot_a = a ? a->slot_index : -1;
+    int _v2v_slot_b = b ? b->slot_index : -1;
+    int _v2v_call_idx = td5_pilot_v2v_next_call_idx();
+    _v2v_snap.actor_a_addr = (uint32_t)(uintptr_t)a;
+    _v2v_snap.actor_b_addr = (uint32_t)(uintptr_t)b;
+    /* Pilot snapshot stores raw 24.8 fp coords for direct comparison with the
+     * Frida capture of the original callee. */
+    _v2v_snap.ax = pos_a_x_fp;
+    _v2v_snap.ay = a ? a->world_pos.y : 0;
+    _v2v_snap.az = pos_a_z_fp;
+    _v2v_snap.bx = pos_b_x_fp;
+    _v2v_snap.by = b ? b->world_pos.y : 0;
+    _v2v_snap.bz = pos_b_z_fp;
+    _v2v_snap.yaw_a_raw = yaw_a_acc;
+    _v2v_snap.yaw_b_raw = yaw_b_acc;
+    _v2v_snap.cardef_a_off04 = (int16_t)front_z_a;
+    _v2v_snap.cardef_a_off08 = (int16_t)half_w_a;
+    _v2v_snap.cardef_a_off14 = (int16_t)rear_z_a;
+    _v2v_snap.cardef_b_off04 = (int16_t)front_z_b;
+    _v2v_snap.cardef_b_off08 = (int16_t)half_w_b;
+    _v2v_snap.cardef_b_off14 = (int16_t)rear_z_b;
+    memset(_v2v_snap.corner_proj_x, 0, sizeof(_v2v_snap.corner_proj_x));
+    memset(_v2v_snap.corner_proj_z, 0, sizeof(_v2v_snap.corner_proj_z));
+    memset(_v2v_snap.corner_own_x,  0, sizeof(_v2v_snap.corner_own_x));
+    memset(_v2v_snap.corner_own_z,  0, sizeof(_v2v_snap.corner_own_z));
+    _v2v_snap.bitmask = 0;
+    td5_pilot_v2v_contact_emit_enter(&_v2v_snap, _v2v_slot_a, _v2v_slot_b, _v2v_call_idx);
+
+    /* Precompute sin/cos for each heading. cos_fixed12/sin_fixed12 mask with
+     * & 0xFFF internally, so passing the raw (yaw_acc >> 8) is safe and matches
+     * the listing's CosFixed12bit(*param_4 >> 8) / CosFixed12bit(param_4[1] >> 8). */
     int32_t cos_a = cos_fixed12(heading_a);
     int32_t sin_a = sin_fixed12(heading_a);
     int32_t cos_b = cos_fixed12(heading_b);
     int32_t sin_b = sin_fixed12(heading_b);
 
-    /* Delta heading: rotation from B's frame to A's frame */
-    int32_t dheading = (heading_b - heading_a) & 0xFFF;
-    int32_t cos_d = cos_fixed12(dheading);
-    int32_t sin_d = sin_fixed12(dheading);
-
-    /* Delta heading inverse: rotation from A's frame to B's frame */
-    int32_t dheading_inv = (heading_a - heading_b) & 0xFFF;
+    /* Delta heading. Listing uses `(*param_4 - param_4[1]) >> 8` =
+     * (yaw_a - yaw_b) >> 8 = +dheading_inv (rotation from A to B).
+     * The original then feeds that uVar25 into CosFixed12bit/SinFixed12bit and
+     * uses the resulting cos/sin to rotate B's CORNERS into A's frame
+     * (= "+dheading_inv" rotates B-frame vectors into A-frame; the inverse of
+     * the orientation difference). Port's dheading_inv variable is the same. */
+    int32_t dheading_inv = dheading_raw_shift & 0xFFF;
     int32_t cos_di = cos_fixed12(dheading_inv);
     int32_t sin_di = sin_fixed12(dheading_inv);
+
+    /* For the symmetric second half (A's corners into B's frame), the rotation
+     * is the opposite sign: dheading = -dheading_inv. */
+    int32_t dheading = (-dheading_raw_shift) & 0xFFF;
+    int32_t cos_d = cos_fixed12(dheading);
+    int32_t sin_d = sin_fixed12(dheading);
 
     /* B's 4 corners in B's local frame. Layout (X=lateral, Z=forward):
      *   0 = FL  (-half_w, front_z)
@@ -2458,13 +2820,33 @@ static int obb_corner_test(TD5_Actor *a, TD5_Actor *b,
     int32_t a_corners_lz[4] = {  front_z_a, front_z_a,  rear_z_a,  rear_z_a };
 
     /* --- Test B's corners in A's OBB (bits 0-3) --- */
-    /* World-space delta from A to B */
-    int32_t delta_x = bx - ax;
-    int32_t delta_z = bz - az;
+    /* World-space delta from A to B, in display units. Listing computes this
+     * as (param_3[3] - *param_3) >> 8 and (param_3[5] - param_3[2]) >> 8,
+     * i.e. subtraction on the raw 24.8 fp THEN >>8. The previously pre-shifted
+     * (pos_b>>8) - (pos_a>>8) form drifts by 1 LSB on fractional-underflow. */
+    int32_t delta_x = delta_world_x;
+    int32_t delta_z = delta_world_z;
 
-    /* Rotate delta into A's local frame */
-    int32_t local_dx = (delta_x * cos_a + delta_z * sin_a) >> 12;
-    int32_t local_dz = (-delta_x * sin_a + delta_z * cos_a) >> 12;
+    /* Rotate delta into A's local frame.
+     * [CONFIRMED @ 0x004086D0-0x004086F6]: game uses "CW from +Z" convention
+     *   iVar20 = iVar6 * iVar24 - iVar7 * iVar3  (cos*delta_x - sin*delta_z)
+     *   iVar6  = iVar6 * iVar3  + iVar7 * iVar24 (sin*delta_x + cos*delta_z)
+     * Earlier port had BOTH sin terms inverted (CCW from +X / world rotated
+     * by -yaw_a). That produced false bitmask=0x28 contacts on the Jarash
+     * stationary spawn — exactly the visible-slide symptom in memory
+     * `reference_obb_corner_test_rotation_sign`. Algorithmic re-validation
+     * vs 501 captured original inputs (tools/validate_pool15_v2v_contact_math.py)
+     * dropped bitmask divergence from 66.7% to 0% with the sign flip. */
+    /* Rotate WORLD delta into A's local frame.
+     * [CONFIRMED @ 0x00408570 CollectVehicleCollisionContacts]:
+     *   local_dx = cos(A.yaw)*delta_x - sin(A.yaw)*delta_z
+     *   local_dz = sin(A.yaw)*delta_x + cos(A.yaw)*delta_z
+     * The game stores yaw in "CW from +Z" convention (matches AngleFromVector12
+     * argument order (dz, dx)). The earlier port formula (cos*x+sin*z, -sin*x+cos*z)
+     * was the standard math "CCW from +X" rotation and inverted slot 1's apparent
+     * position in slot 0's frame. */
+    int32_t local_dx = (delta_x * cos_a - delta_z * sin_a) >> 12;
+    int32_t local_dz = (delta_x * sin_a + delta_z * cos_a) >> 12;
 
     for (int i = 0; i < 4; i++) {
         /* Rotate B's corner from B's local frame into A's local frame */
@@ -2504,13 +2886,18 @@ static int obb_corner_test(TD5_Actor *a, TD5_Actor *b,
     }
 
     /* --- Test A's corners in B's OBB (bits 4-7) --- */
-    /* World-space delta from B to A */
-    int32_t delta2_x = ax - bx;
-    int32_t delta2_z = az - bz;
+    /* World-space delta from B to A = negation of the A-to-B delta. The
+     * listing's second half re-uses the same iVar3/iVar24 with sign-flipped
+     * sin/cos terms (see iVar15 = sin_b*dz - cos_b*dx at 0x004088E0). */
+    int32_t delta2_x = -delta_world_x;
+    int32_t delta2_z = -delta_world_z;
 
-    /* Rotate delta into B's local frame */
-    int32_t local2_dx = (delta2_x * cos_b + delta2_z * sin_b) >> 12;
-    int32_t local2_dz = (-delta2_x * sin_b + delta2_z * cos_b) >> 12;
+    /* Rotate delta into B's local frame.
+     * [CONFIRMED @ second half of 0x00408570]: symmetric sign convention
+     * — same "CW from +Z" world→local form as the B-in-A half above. */
+    /* Rotate WORLD delta into B's local frame — same "CW from +Z" convention. */
+    int32_t local2_dx = (delta2_x * cos_b - delta2_z * sin_b) >> 12;
+    int32_t local2_dz = (delta2_x * sin_b + delta2_z * cos_b) >> 12;
 
     for (int i = 0; i < 4; i++) {
         /* Rotate A's corner from A's local frame into B's local frame */
@@ -2538,6 +2925,20 @@ static int obb_corner_test(TD5_Actor *a, TD5_Actor *b,
             corners[i + 4].pen_x = (int16_t)((pen_right < pen_left) ? pen_right : -pen_left);
             corners[i + 4].pen_z = (int16_t)((pen_front < pen_back) ? pen_front : -pen_back);
         }
+    }
+
+    /* Pool15 V2V pilot trace — capture outputs at exit. */
+    {
+        TD5_PilotV2VContactSnap _v2v_out;
+        memset(&_v2v_out, 0, sizeof(_v2v_out));
+        _v2v_out.bitmask = (uint32_t)result;
+        for (int _i = 0; _i < 8; _i++) {
+            _v2v_out.corner_proj_x[_i] = corners[_i].proj_x;
+            _v2v_out.corner_proj_z[_i] = corners[_i].proj_z;
+            _v2v_out.corner_own_x[_i]  = corners[_i].own_x;
+            _v2v_out.corner_own_z[_i]  = corners[_i].own_z;
+        }
+        td5_pilot_v2v_contact_emit_leave(&_v2v_out);
     }
 
     return result;
@@ -2595,6 +2996,30 @@ static int obb_corner_test(TD5_Actor *a, TD5_Actor *b,
 #define V2V_ANG_DIVISOR      0x28C
 #define V2V_INERTIA_PER_ANG  (V2V_INERTIA_K / V2V_ANG_DIVISOR)  /* 766 */
 
+/* Signed round-to-zero divide by 256 — matches the original's
+ * [CDQ; AND EDX,0xff; ADD EAX,EDX; SAR EAX,8] idiom used 12 times in the
+ * TOI rollback/advance halves at 0x00407F31-0x004080A6 and 0x004080C8-0x0040816B.
+ * For positive x: equivalent to x >> 8.
+ * For negative x not divisible by 256: x >> 8 rounds toward -inf, this rounds toward 0. */
+static inline int32_t v2v_sar8_rz(int32_t x) {
+    return ((x < 0) ? (x + 0xFF) : x) >> 8;
+}
+
+/* Signed round-to-zero divide by 4096 — matches the original's
+ * [CDQ; AND EDX,0xfff; ADD EAX,EDX; SAR EAX,0xc] idiom used at the four
+ * velocity-rotation sites in the prologue and the four velocity writeback
+ * sites in the tail, plus twice at the impulse-scale step. */
+static inline int32_t v2v_sar12_rz(int32_t x) {
+    return ((x < 0) ? (x + 0xFFF) : x) >> 12;
+}
+
+/* 64-bit signed round-to-zero divide by 4096 — used at the impulse final
+ * scale where (NUM_CONST / denom) * rel_vel can exceed 31 bits before the
+ * >>12 truncation. */
+static inline int32_t v2v_sar12_rz_64(int64_t x) {
+    return (int32_t)(((x < 0) ? (x + 0xFFF) : x) >> 12);
+}
+
 static void apply_collision_response(TD5_Actor *penetrator, TD5_Actor *target,
                                      int corner_idx, OBB_CornerData *corner,
                                      int32_t heading_target, int32_t impactForce)
@@ -2612,15 +3037,28 @@ static void apply_collision_response(TD5_Actor *penetrator, TD5_Actor *target,
      * Higher = contact near end of tick (less rollback).
      * Lower = contact early in tick (more rollback). */
 
+    /* pool14_v2v pilot trace: capture pre-state. The Frida probe captures
+     * args[0]=actorA (=slot_a=frame owner) and args[1]=actorB (=slot_b).
+     * Port's A=target=caller's `a`=slot_a → maps to Frida's actorA. */
+    td5_pilot_v2v_enter(A, B, corner, angle, impactForce);
+
     /* --- 1. Prologue: save angular velocities for delta application --- */
     int32_t saved_omega_A = A->angular_velocity_yaw;
     int32_t saved_omega_B = B->angular_velocity_yaw;
 
-    /* Mass from cardef+0x88 (int16); clamp invalid values. */
+    /* Mass from cardef+0x88 (int16). [CONFIRMED @ 0x00407BE7, 0x00407BFE,
+     * 0x00407DA0, 0x00407DB4]: original ApplyVehicleCollisionImpulse loads
+     * mass via MOVSX with NO clamp. Upstream writers guarantee mass > 0
+     * before V2V fires: (a) racing slots 0..5 load carparam.dat into
+     * car_definition (positive int16); (b) traffic slots 6+ get an explicit
+     * mass=0x20 write at InitializeRaceVehicleRuntime+0xF5 (`MOV word ptr
+     * [EAX + 0x88], 0x20` @ 0x0042F235), mirrored in the port's
+     * traffic-init path (td5_physics.c:8116-8118). The earlier port-only
+     * `if (mass <= 0) mass = 0x20;` defensive clamp was never reachable
+     * and diverged from the byte-faithful listing. Removed per
+     * audit-v2v-mass-clamp 2026-05-14. */
     int32_t mass_A = (int32_t)CDEF_S(A, 0x88);
     int32_t mass_B = (int32_t)CDEF_S(B, 0x88);
-    if (mass_A <= 0) mass_A = 0x20;
-    if (mass_B <= 0) mass_B = 0x20;
 
     /* --- 2. Rotate both velocities into A's local (contact) frame --- */
     int32_t cos_a = cos_fixed12(angle);
@@ -2631,10 +3069,14 @@ static void apply_collision_response(TD5_Actor *penetrator, TD5_Actor *target,
     int32_t vxB = B->linear_velocity_x;
     int32_t vzB = B->linear_velocity_z;
 
-    int32_t local_54 = (vxA * cos_a - vzA * sin_a) >> 12;  /* A tangent */
-    int32_t local_50 = (vxA * sin_a + vzA * cos_a) >> 12;  /* A normal  */
-    int32_t local_4c = (vxB * cos_a - vzB * sin_a) >> 12;  /* B tangent */
-    int32_t local_44 = (vxB * sin_a + vzB * cos_a) >> 12;  /* B normal  */
+    /* [CONFIRMED @ 0x00407A19-29, 0x00407A3E-4D, 0x00407A69-72, 0x00407A95-AA]:
+     * each rotation step uses CDQ; AND EDX,0xfff; ADD EAX,EDX; SAR EAX,0xc —
+     * signed round-to-zero divide by 0x1000. Plain `>>12` on a negative product
+     * diverges by 1 LSB. */
+    int32_t local_54 = v2v_sar12_rz(vxA * cos_a - vzA * sin_a);  /* A tangent */
+    int32_t local_50 = v2v_sar12_rz(vxA * sin_a + vzA * cos_a);  /* A normal  */
+    int32_t local_4c = v2v_sar12_rz(vxB * cos_a - vzB * sin_a);  /* B tangent */
+    int32_t local_44 = v2v_sar12_rz(vxB * sin_a + vzB * cos_a);  /* B normal  */
 
     /* --- Unpack contactData [CONFIRMED @ 0x00408570 stores] --- */
     /* cx_A, cz_A = corner position in TARGET's (A's) frame (WITH A→B translation).
@@ -2661,18 +3103,29 @@ static void apply_collision_response(TD5_Actor *penetrator, TD5_Actor *target,
 
     int32_t abs_cx_A   = cx_A < 0 ? -cx_A : cx_A;
     int32_t side_extent = half_w_A - abs_cx_A;
+    /* [CONFIRMED @ 0x00407B0D-10 (front) + 0x00407B65-6E (rear)]: the listing
+     * applies a CDQ; XOR; SUB abs() idiom to side_extent before comparing it
+     * against |rear_diff| or |front_diff|. Without this abs, a corner outside
+     * the box laterally (abs(cx_A) > half_w_A → side_extent < 0) would
+     * unconditionally take the SIDE branch in the port while the original
+     * would still pick FRONT/REAR based on |negative| vs depth magnitudes. */
+    int32_t abs_side_extent = side_extent < 0 ? -side_extent : side_extent;
 
     int is_side_branch;
     if (cz_A < 1) {
-        /* Rear half (cz_A <= 0) — compare distance past rear vs side */
-        int32_t rear_depth = cz_A - rear_z_A;  /* rear_z_A negative → adds |rear| */
+        /* Rear half (cz_A <= 0). [CONFIRMED @ 0x00407B7B-7D]:
+         *   CMP ECX, EAX ; ECX=|side_extent|, EAX=|cz_A - rear_z_raw|
+         *   JGE LAB_00407B2D (FRONT/REAR) — SIDE if |side_extent| < rear_depth. */
+        int32_t rear_depth = cz_A - rear_z_A;
         if (rear_depth < 0) rear_depth = -rear_depth;
-        is_side_branch = (rear_depth > side_extent);
+        is_side_branch = (rear_depth > abs_side_extent);
     } else {
-        /* Front half (cz_A > 0) — compare distance past front vs side */
+        /* Front half (cz_A > 0). [CONFIRMED @ 0x00407B29-2B]:
+         *   CMP ECX, EAX ; ECX=|side_extent|, EAX=|front_z_A - cz_A|
+         *   JL  LAB_00407B7F (SIDE) — SIDE if |side_extent| < front_depth. */
         int32_t front_depth = front_z_A - cz_A;
         if (front_depth < 0) front_depth = -front_depth;
-        is_side_branch = (side_extent < front_depth);
+        is_side_branch = (abs_side_extent < front_depth);
     }
 
     /* --- 4. Branch-specific impulse math --- */
@@ -2720,8 +3173,10 @@ static void apply_collision_response(TD5_Actor *penetrator, TD5_Actor *target,
             (int32_t)(((int64_t)cz_A * saved_omega_A) / V2V_ANG_DIVISOR);
         int32_t rel_vel = ang_contrib - local_54 + local_4c;
 
+        /* [CONFIRMED @ 0x00407CB2-C1]: CDQ; AND EDX,0xfff; ADD; SAR 0xc —
+         * signed round-to-zero divide by 0x1000. */
         int64_t impulse_raw = (NUM_CONST / denom) * rel_vel;
-        impulse = (int32_t)(impulse_raw >> 12);
+        impulse = v2v_sar12_rz_64(impulse_raw);
 
         /* [CONFIRMED @ 0x4079C0 side branch]: XOR sign rejection. */
         if (((cx_B - cx_A) ^ impulse) < 0) {
@@ -2734,15 +3189,37 @@ static void apply_collision_response(TD5_Actor *penetrator, TD5_Actor *target,
         }
     } else {
         /* --- FRONT/REAR BRANCH (LAB_00407B2D) --- */
-        /* [CONFIRMED @ 0x00407D5F-0x00407D6E]: predicate is
-         *     cz_A == cz_B || cz_A - cz_B < 0   (i.e. cz_A <= cz_B)
-         * iVar14 holds the sin channel, iVar6 holds the cos channel.
-         * Push writes at 0x00407D70-0x00407D94 are A.x -= iVar14, A.z -= iVar6,
-         * B.x += iVar14, B.z += iVar6 (note operand cross vs SIDE).
-         * push_x mirrors iVar14, push_z mirrors iVar6. */
+        /* [CONFIRMED @ 0x00407B41 (predicate JLE), 0x00407B47-0x00407B54
+         *  (else: cz_A > cz_B → +sin/2, +cos/2),
+         *  0x00407D5F-0x00407D6E (taken: cz_A <= cz_B → NEG; NEG → -sin/2, -cos/2),
+         *  0x00407D70-0x00407D94 (apply A -= ECX/EAX, B += ECX/EAX)]:
+         *
+         * Predicate is `cz_A == cz_B || cz_A - cz_B < 0` (i.e. cz_A <= cz_B).
+         * In ASM: ECX holds the iVar14 sin channel (loaded from [ESP+0x7c]=sin_a),
+         *         EAX holds the iVar6 cos channel (loaded from EDI=cos_a, where
+         *         EDI was set by CosFixed12bit @ 0x004079EB and never reloaded
+         *         through the FRONT path).
+         * Push writes at 0x00407D70-0x00407D94 are A.x -= iVar14 (sin channel),
+         * A.z -= iVar6 (cos channel), B.x += iVar14, B.z += iVar6.
+         * The /2 idiom (SUB EAX,EDX after CDQ; SAR 1) is signed
+         * round-toward-zero division by 2, which equals plain C `/2` for int32
+         * (C99/C11 truncation toward zero).
+         * Precise-port audit 2026-05-14 re-verified against decomp
+         * ApplyVehicleCollisionImpulse and listing — already byte-faithful. */
         if (cz_A <= cz_B) { push_x = -sin_a / 2; push_z = -cos_a / 2; }
         else              { push_x =  sin_a / 2; push_z =  cos_a / 2; }
 
+        /* [CONFIRMED FRONT impulse/omega vs decomp ApplyVehicleCollisionImpulse]:
+         *   denom = (cx_B^2 + K) * mass_A + (cx_A^2 + K) * mass_B
+         *   NUM_CONST / (denom >> 8) * rel_vel  →  sar12_rz → impulse
+         *   reject if  (cz_B - cz_A) ^ impulse < 0   (XOR sign mismatch)
+         *   local_50 += impulse * mass_A
+         *   local_44 -= impulse * mass_B
+         *   omega_A_delta = -(imp * mass_A * cx_A) / (K / 0x28C)   [iVar6 in decomp]
+         *   omega_B_delta =  (imp * mass_B * cx_B) / (K / 0x28C)   [iVar8 in decomp]
+         * Note the omega signs are FLIPPED vs SIDE: SIDE has +A/-B, FRONT has -A/+B.
+         * V2V_INERTIA_PER_ANG = 500000/0x28C = 766 (compile-time fold of the
+         * runtime magic-divide DAT_00463204 / 0x28C at 0x00407EC4-D7). */
         int64_t denom = ((int64_t)cx_B * cx_B + INERTIA_K_64) * mass_A
                       + ((int64_t)cx_A * cx_A + INERTIA_K_64) * mass_B;
         denom >>= 8;
@@ -2753,8 +3230,9 @@ static void apply_collision_response(TD5_Actor *penetrator, TD5_Actor *target,
             (int32_t)(((int64_t)cx_A * saved_omega_A) / V2V_ANG_DIVISOR);
         int32_t rel_vel = ang_contrib - local_50 + local_44;
 
+        /* [CONFIRMED @ 0x00407E68-7A]: same round-to-zero idiom as SIDE branch. */
         int64_t impulse_raw = (NUM_CONST / denom) * rel_vel;
-        impulse = (int32_t)(impulse_raw >> 12);
+        impulse = v2v_sar12_rz_64(impulse_raw);
 
         if (((cz_B - cz_A) ^ impulse) < 0) {
             rejected = 1;
@@ -2780,39 +3258,52 @@ static void apply_collision_response(TD5_Actor *penetrator, TD5_Actor *target,
     B->world_pos.z += push_z;
 
     if (rejected) {
-        /* Separating contact — push applied above, but no velocity impulse. */
+        /* Separating contact — push applied above, but no velocity impulse.
+         * Original returns 0 (XOR EAX,EAX at 0x00407CCD / 0x00407E86). */
         TD5_LOG_I(LOG_TAG, "v2v_reject: slot_A=%d slot_B=%d side=%d cxA=%d czA=%d cxB=%d czB=%d imp=%d push=(%d,%d)",
                   A->slot_index, B->slot_index, is_side_branch, cx_A, cz_A, cx_B, cz_B, impulse, push_x, push_z);
+        td5_pilot_v2v_leave(A, B, 0);
         return;
     }
 
-    /* --- 5. TOI rollback (before committing new velocities) --- */
+    /* --- 5. TOI rollback (before committing new velocities) ---
+     * [CONFIRMED @ 0x00407F31-F4C (A.x), F50-6E (A.z), F6F-8E (B.x),
+     *  F8F-AE (B.z), FAF-D6 (A.yaw_eul), FDE-FFD (B.yaw_eul)]:
+     * each rollback uses IMUL; CDQ; AND EDX,0xff; ADD EAX,EDX; SAR EAX,8; NEG;
+     * ADD [field], EAX — i.e. `field += -sar8_rz(toi_frac * vel)` which equals
+     * `field -= sar8_rz(toi_frac * vel)`. Plain `>>8` on a negative product
+     * diverges by 1 LSB. */
     int32_t toi_frac = 0x100 - impactForce;
 
-    A->world_pos.x -= (toi_frac * A->linear_velocity_x) >> 8;
-    A->world_pos.z -= (toi_frac * A->linear_velocity_z) >> 8;
-    A->euler_accum.yaw -= (toi_frac * A->angular_velocity_yaw) >> 8;
-    B->world_pos.x -= (toi_frac * B->linear_velocity_x) >> 8;
-    B->world_pos.z -= (toi_frac * B->linear_velocity_z) >> 8;
-    B->euler_accum.yaw -= (toi_frac * B->angular_velocity_yaw) >> 8;
+    A->world_pos.x -= v2v_sar8_rz(toi_frac * A->linear_velocity_x);
+    A->world_pos.z -= v2v_sar8_rz(toi_frac * A->linear_velocity_z);
+    A->euler_accum.yaw -= v2v_sar8_rz(toi_frac * A->angular_velocity_yaw);
+    B->world_pos.x -= v2v_sar8_rz(toi_frac * B->linear_velocity_x);
+    B->world_pos.z -= v2v_sar8_rz(toi_frac * B->linear_velocity_z);
+    B->euler_accum.yaw -= v2v_sar8_rz(toi_frac * B->angular_velocity_yaw);
 
     /* --- 6. Commit new angular velocities --- */
     A->angular_velocity_yaw = saved_omega_A + omega_A_delta;
     B->angular_velocity_yaw = saved_omega_B + omega_B_delta;
 
-    /* --- 7. Rotate tangent/normal channels back to world frame --- */
-    A->linear_velocity_x = (local_50 * sin_a + local_54 * cos_a) >> 12;
-    A->linear_velocity_z = (local_50 * cos_a - local_54 * sin_a) >> 12;
-    B->linear_velocity_x = (local_44 * sin_a + local_4c * cos_a) >> 12;
-    B->linear_velocity_z = (local_44 * cos_a - local_4c * sin_a) >> 12;
+    /* --- 7. Rotate tangent/normal channels back to world frame ---
+     * [CONFIRMED @ 0x00408027-37, 0x00408048-58, 0x00408068-78, 0x00408088-98]:
+     * each writeback uses the same CDQ; AND EDX,0xfff; SAR 0xc idiom — signed
+     * round-to-zero divide by 0x1000. */
+    A->linear_velocity_x = v2v_sar12_rz(local_50 * sin_a + local_54 * cos_a);
+    A->linear_velocity_z = v2v_sar12_rz(local_50 * cos_a - local_54 * sin_a);
+    B->linear_velocity_x = v2v_sar12_rz(local_44 * sin_a + local_4c * cos_a);
+    B->linear_velocity_z = v2v_sar12_rz(local_44 * cos_a - local_4c * sin_a);
 
-    /* --- 8. TOI re-advance (with the new post-impulse velocities) --- */
-    A->world_pos.x += (toi_frac * A->linear_velocity_x) >> 8;
-    A->world_pos.z += (toi_frac * A->linear_velocity_z) >> 8;
-    A->euler_accum.yaw += (toi_frac * A->angular_velocity_yaw) >> 8;
-    B->world_pos.x += (toi_frac * B->linear_velocity_x) >> 8;
-    B->world_pos.z += (toi_frac * B->linear_velocity_z) >> 8;
-    B->euler_accum.yaw += (toi_frac * B->angular_velocity_yaw) >> 8;
+    /* --- 8. TOI re-advance (with the new post-impulse velocities) ---
+     * [CONFIRMED @ 0x004080C8 onwards]: same round-to-zero idiom but the NEG
+     * disappears so `field += sar8_rz(toi_frac * vel)`. */
+    A->world_pos.x += v2v_sar8_rz(toi_frac * A->linear_velocity_x);
+    A->world_pos.z += v2v_sar8_rz(toi_frac * A->linear_velocity_z);
+    A->euler_accum.yaw += v2v_sar8_rz(toi_frac * A->angular_velocity_yaw);
+    B->world_pos.x += v2v_sar8_rz(toi_frac * B->linear_velocity_x);
+    B->world_pos.z += v2v_sar8_rz(toi_frac * B->linear_velocity_z);
+    B->euler_accum.yaw += v2v_sar8_rz(toi_frac * B->angular_velocity_yaw);
 
     /* --- 9. Post-impulse pose update on both --- */
     update_vehicle_pose_from_physics(A);
@@ -2859,10 +3350,13 @@ static void apply_collision_response(TD5_Actor *penetrator, TD5_Actor *target,
      * uncontrollably across consecutive impacts. Switch to writing
      * angular_velocity instead, so the integrator's clamps apply.
      *
-     * Gate variable mismatch noted but not fixed: original gates on
-     * g_cameraMode==0 (normal play); port has no g_cameraMode equivalent
-     * yet so the gate stays as the inverted g_collisions_enabled==0
-     * condition until a faithful camera-mode flag is introduced. */
+     * Gate semantics [VERIFIED 2026-05-17]: original at 0x00408289 reads
+     * `if (90000 < iVar10 && g_cameraMode == 0)`. The port's
+     * `g_collisions_enabled` global lives at the SAME address (DAT_00463188)
+     * as the original's `g_cameraMode` — the names differ but the dword and
+     * its semantics match. `0 = normal play / collisions ON / no-clip OFF`
+     * in both. So `g_collisions_enabled == 0` is byte-faithful to the
+     * original's gate; "inverted" was a misreading earlier on. */
     if (impact_mag > 90000 && g_collisions_enabled == 0) {
         int32_t scatter = impact_mag / 4;
         if (scatter > 0x7FFF) scatter = 0x7FFF;
@@ -2888,6 +3382,10 @@ static void apply_collision_response(TD5_Actor *penetrator, TD5_Actor *target,
         TD5_LOG_I(LOG_TAG, "v2v_heavy_scatter: A=%d B=%d mag=%d kick_r=%d kick_p=%d kick_y=%d",
                   A->slot_index, B->slot_index, impact_mag, kick_r, kick_p, kick_y);
     }
+
+    /* pool14_v2v pilot trace: capture post-state at function exit.
+     * Original returns int impact_mag at 0x004084A2 RET. */
+    td5_pilot_v2v_leave(A, B, impact_mag);
 }
 
 /* ========================================================================
@@ -2976,145 +3474,212 @@ static void collision_detect_full(TD5_Actor *a, TD5_Actor *b, int idx_a, int idx
     if (!a || !b) return;
     if (!a->car_definition_ptr || !b->car_definition_ptr) return;
 
-    /* AABB pre-test from broadphase grid */
-    if (g_actor_aabb[idx_a][2] < g_actor_aabb[idx_b][0] ||
-        g_actor_aabb[idx_b][2] < g_actor_aabb[idx_a][0] ||
-        g_actor_aabb[idx_a][3] < g_actor_aabb[idx_b][1] ||
-        g_actor_aabb[idx_b][3] < g_actor_aabb[idx_a][1]) {
+    /* Pool15 V2V pilot trace — reset corner-test call counter so the next
+     * 1+7 obb_corner_test calls inside this function get event_idx 1..8. */
+    td5_pilot_v2v_reset_call_idx(idx_a, idx_b);
+    TD5_PilotV2VToiSnap _v2v_toi;
+    memset(&_v2v_toi, 0, sizeof(_v2v_toi));
+    _v2v_toi.actor_a_addr = (uint32_t)(uintptr_t)a;
+    _v2v_toi.actor_b_addr = (uint32_t)(uintptr_t)b;
+    _v2v_toi.ax = a->world_pos.x;
+    _v2v_toi.az = a->world_pos.z;
+    _v2v_toi.bx = b->world_pos.x;
+    _v2v_toi.bz = b->world_pos.z;
+    _v2v_toi.yaw_a_raw = a->euler_accum.yaw;
+    _v2v_toi.yaw_b_raw = b->euler_accum.yaw;
+    _v2v_toi.lin_vel_a_x = a->linear_velocity_x;
+    _v2v_toi.lin_vel_a_z = a->linear_velocity_z;
+    _v2v_toi.lin_vel_b_x = b->linear_velocity_x;
+    _v2v_toi.lin_vel_b_z = b->linear_velocity_z;
+    _v2v_toi.ang_vel_a_yaw = a->angular_velocity_yaw;
+    _v2v_toi.ang_vel_b_yaw = b->angular_velocity_yaw;
+
+    /* AABB pre-test from broadphase grid.
+     * [CONFIRMED @ 0x00408A92-0x00408AB7]: original uses JGE/JLE — i.e.
+     * `<=` / `>=` predicates. At exact equality the original rejects;
+     * port previously used `<` and admitted the pair. One-LSB over-
+     * approximation closed by switching `<` to `<=`. */
+    if (g_actor_aabb[idx_a][2] <= g_actor_aabb[idx_b][0] ||
+        g_actor_aabb[idx_b][2] <= g_actor_aabb[idx_a][0] ||
+        g_actor_aabb[idx_a][3] <= g_actor_aabb[idx_b][1] ||
+        g_actor_aabb[idx_b][3] <= g_actor_aabb[idx_a][1]) {
         return;
     }
 
-    int32_t ax = a->world_pos.x >> 8;
-    int32_t az = a->world_pos.z >> 8;
-    int32_t bx = b->world_pos.x >> 8;
-    int32_t bz = b->world_pos.z >> 8;
+    /* [precise-00408A60 byte-faithful port 2026-05-14]
+     *
+     * The original ResolveVehicleCollisionPair (0x00408A60) keeps the
+     * bisection accumulators in RAW 24.8 fixed-point throughout — the
+     * `>> 8` conversion to display units only happens INSIDE
+     * CollectVehicleCollisionContacts at 0x00408570 and at the final
+     * dispatch push (0x00408D58 SAR ECX,8 / 0x00408DD4 SAR EDX,8).
+     *
+     * Listing 0x00408AED-0x00408B23 reads the SIX accumulator seeds via
+     * DWORD MOV directly out of the actor structs at full 24.8 scale:
+     *   local_80 / [ESP+0x2C] = actor_A.world_pos.x  (+0x1FC)
+     *   local_7c / [ESP+0x30] = actor_A.world_pos.y  (+0x200) (read but unused)
+     *   local_78 / [ESP+0x34] = actor_A.world_pos.z  (+0x204)
+     *   local_94 / [ESP+0x1C] = actor_A.euler_accum.yaw (+0x1F4)
+     *   local_74..local_6c  = actor_B mirror (B.x/y/z @ +0x1FC..+0x204)
+     *   local_90 / [ESP+0xa8 or saved] = actor_B.euler_accum.yaw
+     *
+     * Per-iter halving uses the CDQ/SUB/SAR pattern (0x00408B6F-0x00408BB1
+     * pre-loop, 0x00408C10-0x00408C56 in-loop) which is C-style signed
+     * divide-by-2 (truncate-toward-zero) — different from `>>= 1` on
+     * negative odd values by 1 LSB. We use `/= 2` to match exactly.
+     *
+     * Bisection accumulator `local_84` (sum of ±local_8c) is the analog of
+     * the port's old `frac`; impactForce = local_84 - 0x10. */
 
-    /* Get headings from euler accumulators (>> 8 for 12-bit display angle) */
-    int32_t heading_a = (a->euler_accum.yaw >> 8) & 0xFFF;
-    int32_t heading_b = (b->euler_accum.yaw >> 8) & 0xFFF;
+    /* Pre-load raw 24.8 accumulators from actor (listing 0x00408AED-0x00408B23). */
+    int32_t pos_a_x = a->world_pos.x;
+    int32_t pos_a_z = a->world_pos.z;
+    int32_t pos_b_x = b->world_pos.x;
+    int32_t pos_b_z = b->world_pos.z;
+    int32_t yaw_a_acc = a->euler_accum.yaw;
+    int32_t yaw_b_acc = b->euler_accum.yaw;
 
-    /* --- Initial OBB test at full (end-of-tick) position.
-     * [CONFIRMED @ 0x00408B48-0x00408B56]: the original's pre-loop call to
-     * CollectVehicleCollisionContacts seeds `local_88` (the cached bitmask)
-     * at current positions and early-returns when it is zero. */
+    /* Initial-state display-unit headings (used only for the diagnostic log
+     * below; mirrors the prior heading_a/heading_b labels). */
+    int32_t initial_heading_a = (yaw_a_acc >> 8) & 0xFFF;
+    int32_t initial_heading_b = (yaw_b_acc >> 8) & 0xFFF;
+
+    /* Initial OBB test at full (end-of-tick) position.
+     * [CONFIRMED @ 0x00408B27-B48]: CollectVehicleCollisionContacts is
+     * invoked with raw 24.8-fp position triplets and raw 24.8-fp euler
+     * accumulators. The callee does (pos_b - pos_a) >> 8 and yaw_acc >> 8
+     * internally — see the wrapper header comment. Pass raw, matching the
+     * listing exactly. */
     OBB_CornerData corners[8];
     memset(corners, 0, sizeof(corners));
-    int bitmask = obb_corner_test(a, b, ax, az, bx, bz,
-                                  heading_a, heading_b, corners);
+    int bitmask = obb_corner_test(a, b,
+                                  pos_a_x, pos_a_z, pos_b_x, pos_b_z,
+                                  yaw_a_acc, yaw_b_acc, corners);
 
-    if (bitmask == 0) return;  /* No overlap at full size */
+    if (bitmask == 0) return;  /* No overlap at full size — early-return. */
 
-    /* --- 7-iteration position-based binary search (matching 0x00408A60) ---
+    /* --- 7-iteration TOI binary search [listing 0x00408B5C-0x00408D23] ---
      *
-     * The original's ResolveVehicleCollisionPair sweeps actor positions and
-     * headings backward/forward in time on STACK COPIES to find the approximate
-     * moment of first contact (TOI). This produces an impactForce fraction
-     * used by the impulse solver for position rollback/re-advance.
+     * Per-axis half-step accumulators (initial = velocity/2 via CDQ/SUB/SAR
+     * at 0x00408B6F-0x00408BB1). These are raw 24.8 fp values; integer
+     * signed division by 2 (truncate-toward-zero) matches the asm pattern.
      *
-     * CRITICAL — LAST-NON-ZERO BITMASK CACHE [CONFIRMED @ 0x00408CD0]:
-     * The original caches `local_88 = uVar5` ONLY on the bitmask!=0 branch.
-     * On bitmask==0 iterations `local_88` keeps its prior value. After the
-     * 7 iterations the dispatch switch at 0x00408D48 reads `local_88`
-     * straight — there is NO post-loop CollectVehicleCollisionContacts call
-     * [CONFIRMED @ 0x00408D23-0x00408D48 direct fall-through]. So the
-     * dispatched bitmask is always the LAST iteration's non-zero result
-     * (or the pre-loop seed if all iterations missed), never a fresh
-     * end-of-loop re-test. A prior version of this port did a final re-test
-     * with `if (bitmask == 0) return;`, which silently dropped the contact
-     * whenever the 7-iter binary search converged onto the separation
-     * moment — matching the observed "cars clip through each other"
-     * symptom. */
-
-    /* Per-tick velocity in OBB space (world_pos >> 8 coordinates).
-     * [CONFIRMED @ 0x00408B69-0x00408BB1]: The original seeds per-axis step
-     * accumulators from actor fields +0x1cc, +0x1d4, +0x1c4 via DWORD MOV
-     * (no cast, no truncation) and halves each with SAR 1.
-     *   +0x1cc = linear_velocity_x [CONFIRMED @ td5_ai.c ACTOR_LIN_VEL_X]
-     *   +0x1d4 = linear_velocity_z [CONFIRMED @ td5_ai.c ACTOR_LIN_VEL_Z]
-     *   +0x1c4 = angular_velocity_yaw [CONFIRMED @ td5_ai.c:1854]
-     * The original keeps position accumulators in raw 24.8 FP units and the
-     * heading accumulator as raw euler_accum.yaw (also 24.8 scale), then
-     * converts to display units inside CollectVehicleCollisionContacts via
-     * (delta_pos >> 8) and (heading >> 8) [CONFIRMED @ 0x00408570 disasm].
-     * The port pre-divides to display units before entering the loop, which
-     * produces identical test points — the two formulations are algebraically
-     * equivalent [verified by tracing all 7 iteration paths]. */
-    int32_t vel_ax = a->linear_velocity_x >> 8;
-    int32_t vel_az = a->linear_velocity_z >> 8;
-    int32_t vel_bx = b->linear_velocity_x >> 8;
-    int32_t vel_bz = b->linear_velocity_z >> 8;
-
-    /* Per-tick angular velocity in heading space (euler_accum >> 8).
-     * Original uses angular_velocity_yaw / 2 in accumulator units then
-     * converts >>8 at dispatch — mathematically equivalent to omega_h / 2
-     * in 12-bit display units as used here. */
-    int32_t omega_a_h = a->angular_velocity_yaw >> 8;
-    int32_t omega_b_h = b->angular_velocity_yaw >> 8;
-
-    /* Bisection fraction: 0 = one tick ago, 0x100 = current time.
-     * Start at midpoint (0x80). [CONFIRMED @ 0x00408B5C-0x00408B65]
+     * Pre-loop subtraction (listing 0x00408BB5-0x00408BF5) walks the
+     * positions/headings BACK to the t=0.5 midpoint before the loop:
+     *   local_80 -= iVar12; local_78 -= iVar13; local_94 -= iVar9
+     *   local_74 -= iVar11; local_6c -= local_4; local_90 -= local_5c
      *
-     * The original's pre-loop rewind (`local_80 -= vel/2`) plus incremental
-     * halving (SAR each iter) [CONFIRMED @ 0x00408BB5-0x00408C54] visits the
-     * same test points as the port's absolute interpolation formula.
-     * Proof: both converge to the same frac-indexed positions at every iter
-     * regardless of hit/miss history — verified for all 7 iterations. */
-    int32_t frac = 0x80;
-    int32_t bisect_step = 0x40;
+     * local_84 = local_8c = 0x80 (initial centre + initial step).
+     * local_68 = 7 (loop counter). */
+    int32_t step_ax = a->linear_velocity_x   / 2;  /* iVar12 */
+    int32_t step_az = a->linear_velocity_z   / 2;  /* iVar13 */
+    int32_t step_ah = a->angular_velocity_yaw / 2; /* iVar9 — yaw step */
+    int32_t step_bx = b->linear_velocity_x   / 2;  /* iVar11 */
+    int32_t step_bz = b->linear_velocity_z   / 2;  /* local_4 */
+    int32_t step_bh = b->angular_velocity_yaw / 2; /* local_5c — B yaw step */
 
-    int32_t test_ax = ax, test_az = az, test_bx = bx, test_bz = bz;
-    int32_t test_ha = heading_a, test_hb = heading_b;
+    pos_a_x -= step_ax;
+    pos_a_z -= step_az;
+    pos_b_x -= step_bx;
+    pos_b_z -= step_bz;
+    yaw_a_acc -= step_ah;
+    yaw_b_acc -= step_bh;
 
-    /* Cache last-hit bitmask + corresponding corner data. Seeded from the
-     * pre-loop test; updated in-loop ONLY when a test reports bitmask!=0.
-     * Matches the original's `local_88` + `local_58..local_20` semantics. */
+    int32_t local_84  = 0x80;     /* bisection accumulator (-> impactForce) */
+    int32_t local_8c  = 0x80;     /* current half-step magnitude (sign chosen per-iter) */
+
+    /* Cache last-hit bitmask + corner data. Seeded from the pre-loop test
+     * (listing 0x00408B52 MOV [ESP+0x24],EAX). Loop updates it ONLY on
+     * the bitmask!=0 branch (listing 0x00408CD0). */
     int32_t        cached_bitmask = bitmask;
     OBB_CornerData cached_corners[8];
     memcpy(cached_corners, corners, sizeof(cached_corners));
 
-    for (int iter = 0; iter < 7; iter++) {
-        /* Interpolated positions at current fraction.
-         * test_pos = current_pos - vel * (0x100 - frac) / 0x100 */
-        int32_t rollback = 0x100 - frac;
-        test_ax = ax - ((vel_ax * rollback) >> 8);
-        test_az = az - ((vel_az * rollback) >> 8);
-        test_bx = bx - ((vel_bx * rollback) >> 8);
-        test_bz = bz - ((vel_bz * rollback) >> 8);
+    /* Display-unit heading snapshot for the dispatch path. Updated each
+     * iter from yaw_a_acc/yaw_b_acc after the wrapper call. */
+    int32_t test_ha = yaw_a_acc >> 8;
+    int32_t test_hb = yaw_b_acc >> 8;
 
-        /* Fix #4 [CONFIRMED @ 0x00408B99-0x00408BA2, 0x00408BB5-0x00408BF5]:
-         * The original does NOT mask the heading accumulator during bisection.
-         * `local_94`/`local_90` accumulate without any AND/masking — the >> 8
-         * conversion to 12-bit only happens at dispatch (0x00408D58 SAR ECX,8).
-         * cos_fixed12/sin_fixed12 both apply `& 0xFFF` internally, so the
-         * mask was functionally redundant but inconsistent with the original. */
-        test_ha = heading_a - ((omega_a_h * rollback) >> 8);
-        test_hb = heading_b - ((omega_b_h * rollback) >> 8);
+    for (int iter = 0; iter < 7; iter++) {
+        /* Per-iter halving [listing 0x00408C0E-0x00408C56]:
+         * each step accumulator is signed-divided by 2 (CDQ/SUB/SAR pattern).
+         * local_8c is also signed-/2 — `(int)local_8c / 2` in the decompiler. */
+        step_ax  /= 2;
+        step_az  /= 2;
+        step_ah  /= 2;
+        step_bx  /= 2;
+        step_bz  /= 2;
+        step_bh  /= 2;
+        local_8c /= 2;
+
+        /* Pass current raw 24.8 accumulators to the wrapper, matching the
+         * listing exactly — callee owns the >>8 shift on delta/yaw. */
+        test_ha = yaw_a_acc >> 8;  /* snapshot for dispatch logging */
+        test_hb = yaw_b_acc >> 8;
 
         memset(corners, 0, sizeof(corners));
-        bitmask = obb_corner_test(a, b, test_ax, test_az, test_bx, test_bz,
-                                  test_ha, test_hb, corners);
+        int32_t result = obb_corner_test(a, b,
+                                         pos_a_x, pos_a_z, pos_b_x, pos_b_z,
+                                         yaw_a_acc, yaw_b_acc, corners);
 
-        if (bitmask != 0) {
-            /* Overlap at this frac: remember this state for dispatch and
-             * step backward in time. [CONFIRMED @ 0x00408CD0 MOV [ESP+0x24],EAX] */
-            cached_bitmask = bitmask;
+        /* Default direction (uVar5 == 0 / miss path, listing 0x00408CD6-0x00408D1F):
+         *   move FORWARD in time — add the current half-step to positions
+         *   and local_84 (uVar10 = local_8c, iVar1=iVar12, etc.).
+         * Hit path (uVar5 != 0, listing 0x00408C83-0x00408CD0):
+         *   negate all step deltas (uVar10 = -local_8c, iVar1 = -iVar12...),
+         *   cache the bitmask, and apply — which steps BACK in time. */
+        int32_t dir_ax = step_ax;
+        int32_t dir_az = step_az;
+        int32_t dir_ah = step_ah;
+        int32_t dir_bx = step_bx;
+        int32_t dir_bz = step_bz;
+        int32_t dir_bh = step_bh;
+        int32_t dir_8c = local_8c;
+        if (result != 0) {
+            cached_bitmask = result;
             memcpy(cached_corners, corners, sizeof(cached_corners));
-            frac -= bisect_step;
-        } else {
-            /* No overlap: step forward in time. `cached_bitmask` and
-             * `cached_corners` retain the last-hit state. */
-            frac += bisect_step;
+            dir_ax = -step_ax;
+            dir_az = -step_az;
+            dir_ah = -step_ah;
+            dir_bx = -step_bx;
+            dir_bz = -step_bz;
+            dir_bh = -step_bh;
+            dir_8c = -local_8c;
         }
-        bisect_step >>= 1;
-        if (bisect_step < 1) bisect_step = 1;
+
+        pos_a_x  += dir_ax;
+        pos_a_z  += dir_az;
+        pos_b_x  += dir_bx;
+        pos_b_z  += dir_bz;
+        yaw_a_acc += dir_ah;
+        yaw_b_acc += dir_bh;
+        local_84  += dir_8c;
     }
 
-    /* impactForce = local_84 - 0x10
-     * [CONFIRMED @ 0x00408D34 SUB ESI,0x10 ; PUSH ESI @ 0x00408D57]
-     * The original does NOT clamp — range is [-0x10, 0xF0] after 7 iterations
-     * from 0x80. Prior port applied an [0x10, 0xF0] clamp that both offset the
-     * value by 0x10 AND cut off the lower half of the range; both wrong. */
-    int32_t impactForce = frac - 0x10;
+    /* Post-loop: refresh display-unit yaws from the FINAL raw accumulators
+     * for the dispatch impulse calls (listing 0x00408D58 SAR ECX,8 reads
+     * local_94 — the raw accumulator — and shifts; ditto 0x00408DD4 for
+     * local_90 with B's yaw). Without this the dispatch yaw would be stale
+     * from the LAST iteration's read instead of from the FINAL post-update
+     * accumulator. The original matches because it re-reads local_94/90
+     * at the dispatch site after the loop has updated them. */
+    test_ha = yaw_a_acc >> 8;
+    test_hb = yaw_b_acc >> 8;
+
+    /* impactForce = local_84 - 0x10 [listing 0x00408D34 SUB ESI,0x10].
+     * Range after 7 iters from 0x80: [-0x10, 0xEF] (no clamp). */
+    int32_t impactForce = local_84 - 0x10;
+
+    /* Pool15 V2V pilot trace — emit toi-row at dispatch boundary. */
+    _v2v_toi.impactForce = impactForce;
+    _v2v_toi.dispatched_bitmask = (uint32_t)cached_bitmask;
+    _v2v_toi.final_yaw_a_disp = test_ha;
+    _v2v_toi.final_yaw_b_disp = test_hb;
+    _v2v_toi.final_ax = pos_a_x >> 8;
+    _v2v_toi.final_az = pos_a_z >> 8;
+    _v2v_toi.final_bx = pos_b_x >> 8;
+    _v2v_toi.final_bz = pos_b_z >> 8;
+    td5_pilot_v2v_toi_emit(&_v2v_toi, idx_a, idx_b);
 
     /* Dispatch uses the cached last-non-zero bitmask + corners, NOT a final
      * re-test. `test_ha` / `test_hb` carry the final-state yaws (in 12-bit
@@ -3123,9 +3688,9 @@ static void collision_detect_full(TD5_Actor *a, TD5_Actor *b, int idx_a, int idx
      * `local_94 >> 8` / `local_90 >> 8` which are the bisection accumulators'
      * final values [CONFIRMED @ 0x00408D58 SAR ECX,8; 0x00408DD4].
      * Final-state yaw sits within ±(last bisect_step) of the last-hit yaw. */
-    TD5_LOG_I(LOG_TAG, "v2v_bisect: slotA=%d slotB=%d frac=0x%02X impactForce=%d bitmask=0x%02X bisHA=0x%03X bisHB=0x%03X rawHA=0x%03X rawHB=0x%03X",
-              a->slot_index, b->slot_index, frac, impactForce, cached_bitmask,
-              test_ha, test_hb, heading_a, heading_b);
+    TD5_LOG_I(LOG_TAG, "v2v_bisect: slotA=%d slotB=%d local_84=0x%02X impactForce=%d bitmask=0x%02X bisHA=0x%03X bisHB=0x%03X rawHA=0x%03X rawHB=0x%03X",
+              a->slot_index, b->slot_index, local_84, impactForce, cached_bitmask,
+              test_ha, test_hb, initial_heading_a, initial_heading_b);
 
     /* --- Dispatch collision response based on corner bitmask ---
      * 4th arg `angle` is the target's BISECTED yaw (>> 8).
@@ -3182,13 +3747,30 @@ void td5_physics_resolve_vehicle_contacts(void)
         return;
     }
 
-    total = td5_game_get_total_actor_count();
+    /* [precise-00409150 D10 2026-05-14]
+     * Listing 0x00409150-0x00409168 + 0x004091C9-CB + 0x004091F0:
+     *   MOV EDX, [0x004aaf00]   ; g_racerCount (NOT total_actor_count)
+     *   TEST EDX, EDX / JLE end
+     *
+     * Original iterates `g_racerCount` (count of racing vehicles only,
+     * excludes traffic). Port previously iterated total actor count
+     * (racers + traffic), causing traffic actors to be broadphase-included
+     * in this function. Traffic V2V is handled separately in
+     * UpdateTrafficActorMotion in the original — NOT here.
+     *
+     * Faithful behavior: iterate only g_racer_count slots. */
+    total = g_racer_count;
     if (total < 2) {
         return;
     }
     if (total > TD5_MAX_TOTAL_ACTORS) {
         total = TD5_MAX_TOTAL_ACTORS;
     }
+
+#ifdef TD5_PILOT_TRACE_00409150
+    td5_pilot_trace_00409150_enter(total);
+    int pilot_pair_idx = 0;
+#endif
 
     s_v2v_tick++;
 
@@ -3240,6 +3822,20 @@ void td5_physics_resolve_vehicle_contacts(void)
         /* Chain: actor's chain byte points to previous head */
         g_actor_aabb[i][4] = s_collision_grid[bucket];
         s_collision_grid[bucket] = (uint8_t)i;
+
+#ifdef TD5_PILOT_TRACE_00409150
+        td5_pilot_trace_00409150_phase1(i,
+                                        actor->world_pos.x >> 8,
+                                        actor->world_pos.z >> 8,
+                                        radius,
+                                        actor->track_span_normalized,
+                                        bucket,
+                                        g_actor_aabb[i][4],
+                                        g_actor_aabb[i][0],
+                                        g_actor_aabb[i][1],
+                                        g_actor_aabb[i][2],
+                                        g_actor_aabb[i][3]);
+#endif
     }
 
     /* --- Phase 2: Walk adjacent buckets for each actor --- */
@@ -3317,6 +3913,14 @@ void td5_physics_resolve_vehicle_contacts(void)
                     }
                 }
 
+#ifdef TD5_PILOT_TRACE_00409150
+                td5_pilot_trace_00409150_pair(i, j,
+                                              boff, walk_count - 1,
+                                              (a_scripted || b_scripted) ? 1 : 0,
+                                              a->vehicle_mode, a->wheel_contact_bitmask,
+                                              b->vehicle_mode, b->wheel_contact_bitmask,
+                                              pilot_pair_idx++);
+#endif
                 if (a_scripted || b_scripted) {
                     collision_detect_simple(a, b);
                 } else {
@@ -3327,6 +3931,10 @@ void td5_physics_resolve_vehicle_contacts(void)
             }
         }
     }
+
+#ifdef TD5_PILOT_TRACE_00409150
+    td5_pilot_trace_00409150_leave(pilot_pair_idx);
+#endif
 
     /* --- Phase 3: Grid reset is handled at start of next call --- */
 }
@@ -3388,10 +3996,29 @@ static void resolve_collision_pair(TD5_Actor *a, TD5_Actor *b, int idx_a, int id
  * it produced no dynamic bounce response. Fixed here.
  * ======================================================================== */
 
+/* pool5 / 0x00403A20 pilot trace hooks — header included separately to keep
+ * the function signature unchanged. */
+extern void td5_pilot_emit_00403A20_enter(const TD5_Actor *actor, int32_t accel_x, int32_t accel_z, uintptr_t caller_ra);
+extern void td5_pilot_emit_00403A20_leave(const TD5_Actor *actor);
+
+/* Round-to-zero divide by 2 for signed int32. Mirrors the central-pass
+ * `CDQ; SUB EAX,EDX; SAR EAX,1` idiom at 0x00403B78..B95.
+ *   CDQ            ; EDX = sign(EAX) = -1 if neg, 0 if non-neg
+ *   SUB EAX, EDX   ; subtract -1 (=add 1) if negative, no-op if non-neg
+ *   SAR EAX, 1
+ */
+static inline int32_t sar1_rz(int32_t x)
+{
+    int32_t bias = (x < 0) ? -1 : 0;
+    return (x - bias) >> 1;     /* (x - (-1)) = x + 1 when negative */
+}
+
 void td5_physics_integrate_suspension(TD5_Actor *actor, int32_t accel_x, int32_t accel_z)
 {
     int16_t *phys = get_phys(actor);
     if (!phys) return;
+
+    td5_pilot_emit_00403A20_enter(actor, accel_x, accel_z, (uintptr_t)__builtin_return_address(0));
 
     /* cardef constants -- see function header.
      * Names chosen to match the original's semantic use. */
@@ -3401,49 +4028,103 @@ void td5_physics_integrate_suspension(TD5_Actor *actor, int32_t accel_x, int32_t
     const int32_t k_travel_lim = (int32_t)PHYS_S(actor, 0x64);  /* per-wheel +/- travel clamp */
     const int32_t k_load_scale = (int32_t)PHYS_S(actor, 0x66);  /* multiplier on wheel_load_accum */
 
-    const int32_t wpx_scaled = actor->world_pos.x >> 8;  /* signed fixed-point shift w/ round-to-zero */
-    const int32_t wpz_scaled = actor->world_pos.z >> 8;
+    /* world_pos >> 8 with the original's round-to-zero bias (0x00403A7D-A85
+     * and the symmetric one at 0x00403A9C-AA0). Plain SAR rounds toward -∞
+     * for negatives. */
+    const int32_t wpx_scaled = sar8_rz(actor->world_pos.x);
+    const int32_t wpz_scaled = sar8_rz(actor->world_pos.z);
 
     /* ---- Per-wheel pass (4 wheels) ---- */
     for (int i = 0; i < 4; i++) {
-        /* Lever arm from chassis centre to this wheel's contact position,
-         * in world units. Original (0x00403A20):
-         *   arm = wheel_world_positions_hires[i] - (world_pos >> 8)
-         * Port stores wheel_world_positions_hires in 24.8 FP (vfx consumes
-         * that scale at td5_vfx.c:1367), so shift down here to match the
-         * original's world-unit arithmetic. Without the >>8, arm magnitudes
-         * hit ~10M and spring_term blows past int32, producing per-tick
-         * suspension jumps — historically masked by a port-local VEL_CAP
-         * (now removed below). [From commit e97669e; regressed between then
-         * and HEAD; restored 2026-04-22 to fix wheel oscillation on slopes.] */
-        const int32_t arm_x = (actor->wheel_world_positions_hires[i].x >> 8) - wpx_scaled;
-        const int32_t arm_z = (actor->wheel_world_positions_hires[i].z >> 8) - wpz_scaled;
+        /* Lever arm from chassis centre to this wheel's contact position.
+         * Original (0x00403A7D-A88):
+         *   arm = hires - sar8_rz(world_pos)
+         * The original's hires is stored in raw world units (the 0x00403720
+         * write path does NOT apply the `<<8` that wheel_contact_pos gets —
+         * see decomp of 0x00403720: the shifts only touch piVar1=+0xF0).
+         *
+         * Port storage divergence (UPSTREAM, owned by pool1/0x00403720):
+         * the port stores wheel_world_positions_hires in 24.8 FP (the write
+         * at td5_physics.c:5580 applies `hub_x << 8`). vfx consumes that
+         * 24.8 FP scale at td5_vfx.c:1367.
+         *
+         * To make the integrator byte-exact under the port's CURRENT hires
+         * convention, we shift the port's 24.8 FP hires down to world units
+         * with `sar8_rz`. If pool1 later changes hires storage to raw (matching
+         * the original's 0x00403720 path), this `sar8_rz` becomes a no-op and
+         * must be removed.
+         *
+         * Why sar8_rz and not plain `>>8`: the port writes hires as
+         * `int32_t hub_x = lrintf(...); hires.x = hub_x << 8`. For positive
+         * hub_x, `hires.x >> 8 == hub_x` exactly. For negative hub_x not
+         * divisible by 256... actually `hub_x << 8` produces a value with the
+         * low 8 bits zero, so `hires.x >> 8 == hub_x` for both signs. So plain
+         * `>>8` would also recover hub_x exactly. BUT to match the original's
+         * arithmetic semantics on whatever values the port writes (in case
+         * the port's hires write later changes), use the round-to-zero shift
+         * which matches the original's `(x + sign_bias) >> 8` convention. */
+        /* Hires now stored in raw world units (the <<8 was removed in
+         * 6595-6597, matching original 0x00403720 semantics). sar8_rz()
+         * is no longer needed here -- consume the value directly. */
+        const int32_t arm_x = actor->wheel_world_positions_hires[i].x - wpx_scaled;
+        const int32_t arm_z = actor->wheel_world_positions_hires[i].z - wpz_scaled;
 
+        /* proj = arm_x * accel_x + arm_z * accel_z (computed as
+         * arm_z*accel_z then ADD arm_x*accel_x in the listing — order
+         * doesn't matter for signed 32-bit add). */
         int32_t proj = arm_x * accel_x + arm_z * accel_z;
-        int32_t spring_term = (proj >> 8) * k_spring;
-        int32_t load_term   = actor->wheel_load_accum[i] * k_load_scale;
 
-        int32_t new_vel = (spring_term >> 8)
-                        + (load_term   >> 8)
+        /* spring_term = sar8_rz(proj) * k_spring
+         * [0x00403AAC-BA: MOV EAX,ECX; CDQ; AND EDX,0xFF; ADD EAX,EDX;
+         *                 SAR EAX,8; IMUL EAX, k_spring]
+         * Note: the result is held as the multiplied (not yet shifted)
+         * value; the next SAR happens later. */
+        const int32_t spring_term_x256 = sar8_rz(proj) * k_spring;
+
+        /* load_term = wheel_load_accum[i] * k_load_scale
+         * [0x00403ACA-CD: MOV EAX,[ESI+0x20]; IMUL EAX, k_load_scale]
+         * No pre-shift; the SAR comes after. */
+        const int32_t load_term_x256 = actor->wheel_load_accum[i] * k_load_scale;
+
+        /* new_vel = sar8_rz(load_term) + sar8_rz(spring_term) + wheel_spring_dv[i]
+         * [0x00403AD2-E3: CDQ; AND EDX,0xFF; ADD; SAR EAX,8 (for load_term)
+         *                 SAR ECX,8 (for spring_term — bias was added at 0x00403ABF)
+         *                 ADD ECX,EAX; ADD ECX,[ESI+0x10]]
+         *
+         * Critical: the order of the SAR-8s in the listing applies the bias
+         * to spring_term BEFORE the load_term computation overwrites the bias
+         * register. To be byte-faithful, we sar8_rz each operand separately.
+         * Algebraically equivalent because round-to-zero is per-operand. */
+        int32_t new_vel = sar8_rz(load_term_x256)
+                        + sar8_rz(spring_term_x256)
                         + actor->wheel_spring_dv[i];
 
-        int32_t pos_damp = actor->wheel_suspension_pos[i] * k_pos_damp;
-        int32_t vel_damp = new_vel * k_vel_damp;
-        new_vel = new_vel - (pos_damp >> 8) - (vel_damp >> 8);
+        /* pos_damp = sar8_rz(wheel_suspension_pos[i] * k_pos_damp)
+         * [0x00403AE6-F6: MOV EAX,[ESI]; IMUL EAX, k_pos_damp;
+         *                 CDQ; AND EDX,0xFF; ADD EAX,EDX; (held in EBP)
+         *                 ...; SAR EBP,8]
+         *
+         * vel_damp = sar8_rz(new_vel * k_vel_damp)
+         * [0x00403AF8-08: MOV EAX,ECX; IMUL EAX, k_vel_damp;
+         *                 CDQ; AND EDX,0xFF; ADD EAX,EDX; SAR EAX,8]
+         *
+         * new_vel -= vel_damp + pos_damp     [0x00403B0E-12: NEG EAX; SUB
+         *                                     EAX,EBP; ADD ECX,EAX]
+         */
+        const int32_t pos_damp_x256 = actor->wheel_suspension_pos[i] * k_pos_damp;
+        const int32_t vel_damp_x256 = new_vel * k_vel_damp;
+        new_vel = new_vel - sar8_rz(pos_damp_x256) - sar8_rz(vel_damp_x256);
 
-        /* Deadzone: suppresses micro-oscillation at rest. Matches original
-         * 0x00403A20's |new_vel| < 0x10 dead-zone. No per-tick VEL_CAP —
-         * original relies only on this deadzone plus the post-add travel-
-         * limit clamp below. A previous port-local VEL_CAP=0x100 was
-         * removed because it was a workaround for the lever-arm unit bug
-         * (now fixed above). Re-introducing it silences legitimate
-         * restoring transients and makes the front suspension saturate
-         * one side ahead of the other, producing nose-up asymmetric tilt
-         * and the steady-slope wheel oscillation (susp_vel=12000)
-         * observed 2026-04-21. */
+        /* Deadzone: |new_vel| < 0x10 → 0
+         * [0x00403B14-1E: CMP -0x10; JLE; CMP 0x10; JGE; XOR ECX,ECX]
+         * Strict inequality: -0x10 < new_vel && new_vel < 0x10. Both
+         * jumps are signed-LE/GE; CMP -0x10 + JLE jumps when new_vel <= -0x10
+         * (i.e. stays non-zero), CMP 0x10 + JGE jumps when new_vel >= 0x10. */
         if (new_vel > -0x10 && new_vel < 0x10)
             new_vel = 0;
 
+        /* Write velocity then position; clamp at +k_travel_lim then -k_travel_lim.
+         * [0x00403B24-54] */
         actor->wheel_spring_dv[i] = new_vel;
         int32_t new_pos = actor->wheel_suspension_pos[i] + new_vel;
         actor->wheel_suspension_pos[i] = new_pos;
@@ -3451,7 +4132,13 @@ void td5_physics_integrate_suspension(TD5_Actor *actor, int32_t accel_x, int32_t
         if (new_pos > k_travel_lim) {
             actor->wheel_suspension_pos[i] = k_travel_lim;
             actor->wheel_spring_dv[i] = 0;
-        } else if (new_pos < -k_travel_lim) {
+        }
+        /* Note: the original uses `if new_pos < -k_travel_lim` (not else-if),
+         * but in any single tick the new_pos can't be both > k_travel_lim
+         * and < -k_travel_lim, so else-if and a separate-if are equivalent.
+         * Listing uses a separate IF (0x00403B3C-B53 after the upper-clamp
+         * block at 0x00403B33-3B). */
+        if (actor->wheel_suspension_pos[i] < -k_travel_lim) {
             actor->wheel_suspension_pos[i] = -k_travel_lim;
             actor->wheel_spring_dv[i] = 0;
         }
@@ -3461,28 +4148,58 @@ void td5_physics_integrate_suspension(TD5_Actor *actor, int32_t accel_x, int32_t
      * The original averages the front-axle contact (wheels 0+1) x and z
      * to derive the lever arm for the body-level suspension. No load
      * term, no deadzone; same spring/damping constants; travel clamp is
-     * the SAME cardef+0x64 as per-wheel (NOT doubled — verified @
-     * 0x00403A20 `iVar7 = (int)*(short *)(param_2 + 100)`, used
-     * directly without *2). [From commit e97669e; regressed between
-     * then and HEAD; restored 2026-04-22.] */
+     * the SAME cardef+0x64 as per-wheel (NOT doubled).
+     *
+     * Listing: 0x00403B6A-C70.
+     * - (FL.z + FR.z) summed, then `CDQ; SUB EAX,EDX; SAR EAX,1` (round-to-zero /2)
+     * - Subtract sar8_rz(world_pos.z)
+     * - Multiply by accel_z
+     * - Same for x axis
+     * - Sum into proj, sar8_rz(proj) * k_spring → spring_term
+     * - new_vel = sar8_rz(spring_term) + center_suspension_vel
+     * - pos_damp = sar8_rz(center_suspension_pos * k_pos_damp)
+     * - vel_damp = sar8_rz(new_vel * k_vel_damp)
+     * - new_vel -= vel_damp + pos_damp
+     * - new_pos = center_suspension_pos + new_vel
+     * - Clamp +k_travel_lim then -k_travel_lim
+     * - NO deadzone, NO load term.
+     */
     {
-        /* Same FP→world-unit shift as per-wheel arm above. */
-        const int32_t front_mid_x =
-            ((actor->wheel_world_positions_hires[1].x + actor->wheel_world_positions_hires[0].x) >> 1) >> 8;
-        const int32_t front_mid_z =
-            ((actor->wheel_world_positions_hires[1].z + actor->wheel_world_positions_hires[0].z) >> 1) >> 8;
+        /* Original (0x00403B6A-99): front-midpoint = sar1_rz(FL + FR), then
+         * arm = front_mid - sar8_rz(world_pos). Hires is treated as already-
+         * in-world-units in the original. The port's hires is 24.8 FP, so we
+         * apply sar8_rz to bring it to world units; the sum-then-/2 commutes
+         * with the /256 scaling (both are linear), but to preserve byte-exact
+         * matching to the original's instruction order we compute /2 on the
+         * 24.8 FP sum first, then /256 of that.
+         *
+         * For port hires written as `(int32_t lrintf_result) << 8`, the low 8
+         * bits are zero, so `(FL.x + FR.x) % 256 == 0` and `sar1_rz((FL.x +
+         * FR.x))` has low 8 bits still zero (since sum/2 of two LSB-8-zero
+         * values has low 7 bits zero). Then `>>8` is exact regardless of
+         * sign. We still use the round-to-zero idiom to mirror the original. */
+        /* Hires now stored in raw world units (see 6595-6597). The original's
+         * mid = (FL + FR)/2 then arm = mid - (world_pos >> 8) -- both operands
+         * already in world units; no sar8_rz pass needed. */
+        const int32_t fl_x = actor->wheel_world_positions_hires[0].x;
+        const int32_t fr_x = actor->wheel_world_positions_hires[1].x;
+        const int32_t fl_z = actor->wheel_world_positions_hires[0].z;
+        const int32_t fr_z = actor->wheel_world_positions_hires[1].z;
+
+        const int32_t front_mid_x = sar1_rz(fl_x + fr_x);
+        const int32_t front_mid_z = sar1_rz(fl_z + fr_z);
 
         const int32_t arm_x = front_mid_x - wpx_scaled;
         const int32_t arm_z = front_mid_z - wpz_scaled;
 
-        int32_t proj = arm_x * accel_x + arm_z * accel_z;
-        int32_t spring_term = (proj >> 8) * k_spring;
+        const int32_t proj = arm_x * accel_x + arm_z * accel_z;
+        const int32_t spring_term_x256 = sar8_rz(proj) * k_spring;
 
-        int32_t new_vel = (spring_term >> 8) + actor->center_suspension_vel;
+        int32_t new_vel = sar8_rz(spring_term_x256) + actor->center_suspension_vel;
 
-        int32_t pos_damp = actor->center_suspension_pos * k_pos_damp;
-        int32_t vel_damp = new_vel * k_vel_damp;
-        new_vel = new_vel - (pos_damp >> 8) - (vel_damp >> 8);
+        const int32_t pos_damp_x256 = actor->center_suspension_pos * k_pos_damp;
+        const int32_t vel_damp_x256 = new_vel * k_vel_damp;
+        new_vel = new_vel - sar8_rz(pos_damp_x256) - sar8_rz(vel_damp_x256);
 
         int32_t new_pos = actor->center_suspension_pos + new_vel;
         actor->center_suspension_pos = new_pos;
@@ -3491,11 +4208,14 @@ void td5_physics_integrate_suspension(TD5_Actor *actor, int32_t accel_x, int32_t
         if (new_pos > k_travel_lim) {
             actor->center_suspension_pos = k_travel_lim;
             actor->center_suspension_vel = 0;
-        } else if (new_pos < -k_travel_lim) {
+        }
+        if (actor->center_suspension_pos < -k_travel_lim) {
             actor->center_suspension_pos = -k_travel_lim;
             actor->center_suspension_vel = 0;
         }
     }
+
+    td5_pilot_emit_00403A20_leave(actor);
 }
 
 /* ========================================================================
@@ -3546,6 +4266,33 @@ void td5_physics_integrate_suspension(TD5_Actor *actor, int32_t accel_x, int32_t
  * In port: td5_physics_integrate_pose ground-snap tail (line ~3618) —
  * src = per-wheel body offset, producing world-space Y for chassis
  * correction averaging. */
+/* Full body→world short rotation matching ConvertFloatVec3ToShortAngles @
+ * 0x0042E2E0 (row-major float[9] times short[3], FPU TRUNCATE rounding via
+ * __ftol). Writes 3 shorts; saturates each component to int16.
+ *
+ * Used by the chassis-snap loop in IntegrateVehiclePoseAndContacts to
+ * populate wheel_contact_normals at +0x230+i*8 (per-wheel rotated body
+ * offset for the suspension-response consumer). The Y component matches
+ * `rotate_body_to_world_y` above. */
+static void rotate_body_to_world_vec3(const TD5_Actor *actor,
+                                      const int16_t v[3],
+                                      int16_t out[3])
+{
+    const float *m = actor->rotation_matrix.m;
+    float rx = (float)v[0] * m[0] + (float)v[1] * m[1] + (float)v[2] * m[2];
+    float ry = (float)v[0] * m[3] + (float)v[1] * m[4] + (float)v[2] * m[5];
+    float rz = (float)v[0] * m[6] + (float)v[1] * m[7] + (float)v[2] * m[8];
+    if (rx >  32767.0f) rx =  32767.0f;
+    if (rx < -32768.0f) rx = -32768.0f;
+    if (ry >  32767.0f) ry =  32767.0f;
+    if (ry < -32768.0f) ry = -32768.0f;
+    if (rz >  32767.0f) rz =  32767.0f;
+    if (rz < -32768.0f) rz = -32768.0f;
+    out[0] = (int16_t)(int32_t)rx;
+    out[1] = (int16_t)(int32_t)ry;
+    out[2] = (int16_t)(int32_t)rz;
+}
+
 static int16_t rotate_body_to_world_y(const TD5_Actor *actor, const int16_t v[3])
 {
     float m3 = actor->rotation_matrix.m[3];
@@ -3613,8 +4360,13 @@ static inline int32_t arith_round_shift(int32_t x, int32_t mask, int32_t shift)
     return (x + (int32_t)((uint32_t)(x >> 31) & (uint32_t)mask)) >> shift;
 }
 
+#include "td5_pilot_trace_004057F0.h"
+
 void td5_physics_update_suspension_response(TD5_Actor *actor)
 {
+    td5_pilot_emit_004057F0_enter(actor,
+                                  (uintptr_t)__builtin_return_address(0),
+                                  g_gravity_constant);
     /* Faithful port of UpdateVehicleSuspensionResponse @ 0x004057F0.
      *
      * HISTORY: this is a restore of commit e97669e's literal port, which
@@ -3676,6 +4428,7 @@ void td5_physics_update_suspension_response(TD5_Actor *actor)
     if (lock == 0x0F) {
         /* All four wheels airborne — early-return matches original
          * 0x00405809; gravity stays subtracted (not added back). */
+        td5_pilot_emit_004057F0_leave(actor);
         return;
     }
 
@@ -3759,7 +4512,12 @@ void td5_physics_update_suspension_response(TD5_Actor *actor)
              *   local_60 (lat_spr)  += (dot * arm0) * +0x100 */
             loni_spr += (dot * (int32_t)loni) * -0x100;    /* arm2 with -0x100 */
             lat_spr  += (dot * (int32_t)lat ) *  0x100;    /* arm0 with +0x100 */
-            bounce    += dot >> 1;                         /* signed SAR 1 */
+            /* [CONFIRMED @ 0x00405938-0x0040593F] CDQ + SUB EAX,EDX + SAR EAX,1
+             * implements C-style signed div-by-2 with truncation toward zero
+             * (e.g. -5/2 = -2). Previous port used `dot >> 1` which is SAR
+             * = truncation toward -inf (-5 >> 1 = -3). For negative odd dot
+             * this would diverge by 1. */
+            bounce    += dot / 2;                          /* signed div toward zero */
             ++cnt_grounded;
 
             if (actor->slot_index == 0) {
@@ -3890,6 +4648,8 @@ void td5_physics_update_suspension_response(TD5_Actor *actor)
                   actor->angular_velocity_roll, actor->angular_velocity_pitch,
                   actor->linear_velocity_y);
     }
+
+    td5_pilot_emit_004057F0_leave(actor);
 }
 
 /* ========================================================================
@@ -3963,75 +4723,148 @@ static uint32_t traffic_route_heading_delta(int slot)
     return (-(int32_t)(((int32_t)raw_delta - 0x800) & 0xFFF)) & 0xFFF;
 }
 
-/* ApplySimpleTrackSurfaceForce — direct port of 0x00407270.
+/* ApplySimpleTrackSurfaceForce — byte-faithful port of 0x00407270.
  *
- * Pushes actor out of wall penetration and zeroes the outward velocity.
+ * Pushes actor out of wall penetration and reflects the outward velocity.
  *
- * param_1  = actor pointer
- * edge_angle = 12-bit track-space angle of the edge tangent
- * pen      = signed penetration (< 0 = outside edge)
+ * Address note: scope file lists this as "TOI_substep at 0x0040728B", but
+ * 0x0040728B is mid-function (the AND EDX,0xFFF sign-correction inside the
+ * pen → depth computation). The actual function entry is 0x00407270.
  *
- * Position correction:
- *   depth = (pen + ((pen>>31)&0xFFF)) >> 12 - 4   [CONFIRMED @ 0x40728B]
- *   world_pos.z += (depth * cos) >> 4              [CONFIRMED @ 0x40729E]
- *   world_pos.x -= (depth * sin) >> 4              [CONFIRMED @ 0x4072A7]
+ * Register-level register/var mapping (from listing 0x00407270-0x0040738E):
+ *   EDI = cos = CosFixed12bit(edge_angle)      [0x00407279 CALL 0x40A6E0]
+ *   EBX = sin = SinFixed12bit(edge_angle)      [0x00407281 CALL 0x40A700]
+ *   ESI (depth) = ((pen + sign_corr(0xFFF)) >> 12) - 4   [0x0040728C-72A4]
+ *   EBP_pos (a/k/a iVar5_pos) = depth*sin sign-corrected then shifted by 4
+ *           and *negated*; added to *(actor+0x1fc) (= world_pos.x)
+ *                                                       [0x004072A9-72B7]
+ *   EAX_pos = depth*cos sign-corrected then shifted by 4;
+ *           added to *(actor+0x204) (= world_pos.z)     [0x004072BB-72D5]
  *
- * Velocity correction (only if lateral velocity is outward, vel_perp >= 0):
- *   vel_perp = (vel_x * cos + vel_z * sin) >> 12   [CONFIRMED @ 0x4072B8]
- *   vel_para = (vel_z * cos - vel_x * sin) >> 12   [CONFIRMED @ 0x4072C6]
- *   if vel_perp >= 0:
- *     vel_para_adj = clamp_dead_zone(vel_para, 0x180)  [CONFIRMED @ 0x4072DE]
- *     vel_perp_new = -(vel_para >> 1)             [CONFIRMED @ 0x4072D7]
- *     vel_x = (vel_para_adj * cos - vel_perp_new * sin) >> 12
- *     vel_z = (vel_para_adj * sin + vel_perp_new * cos) >> 12
- *   track_contact_flag = 0                         [CONFIRMED @ 0x407338]
+ *   ESI (vx) = *(actor+0x1cc) = linear_velocity_x       [0x004072BE]
+ *   ...
+ *   EBP_vel = (vx*cos + vz*sin + sign_corr(0xFFF))      [0x004072E1-72FD]
+ *           — TANGENTIAL component (along edge)
+ *   EAX_vel = (vz*cos - vx*sin + sign_corr(0xFFF))      [0x004072FF-407311]
+ *           — NORMAL/OUTWARD component (perp to edge)
+ *   After SAR by 12: EBP=tang_sh, EAX=normal_sh.
+ *
+ *   JS 0x40738A at 0x40731C → exits if NORMAL component is negative,
+ *           i.e. when vel projects INTO the wall (no work to do).
+ *   Otherwise (normal_sh >= 0):
+ *     vel_perp_new = -(normal_sh >> 1)            [0x40731E-407325]
+ *           — CDQ/SUB-EDX is a no-op here because the branch is gated
+ *             on normal_sh >= 0, so sign-bit broadcast = 0.
+ *     Dead-zone clamp on tang_sh (EBP):           [0x407327-407347]
+ *       if tang_sh >  0x180: tang_clamped = tang_sh - 0x180
+ *       elif tang_sh < -0x180: tang_clamped = tang_sh + 0x180
+ *       else: tang_clamped = 0
+ *     vx = (tang_clamped*cos - vel_perp_new*sin + sign_corr) >> 12
+ *     vz = (tang_clamped*sin + vel_perp_new*cos + sign_corr) >> 12
+ *     *(actor+0x37b) = 0  (track_contact_flag)    [0x407383]
+ *
+ * Naming reconciliation: Ghidra decompiler labels the components "perp"
+ * and "para" but the geometry is reversed from intuition — what Ghidra
+ * calls iVar4 (perp) is actually the EDGE-TANGENTIAL projection, and
+ * what it calls iVar3 (para) is the OUTWARD-NORMAL projection. We use
+ * tang_/normal_ here to match the listing semantics.
  * ======================================================================== */
 static void apply_simple_track_surface_force(TD5_Actor *actor,
                                               uint32_t edge_angle,
                                               int32_t pen)
 {
+    /* 0x00407278-0x00407286 */
     int32_t cos_a = cos_fixed12((int32_t)(edge_angle & 0xFFF));
     int32_t sin_a = sin_fixed12((int32_t)(edge_angle & 0xFFF));
 
-    /* Position correction [CONFIRMED @ 0x40728B-0x4072A7] */
+    /* 0x0040728C-0x004072A4: depth = ((pen + sign_corr) >> 12) - 4
+     *   CDQ; AND EDX,0xFFF; ADD EAX,EDX; SAR ESI,0xC; SUB ESI,0x4   */
+    int32_t depth = ((pen + ((int32_t)((uint32_t)(pen >> 31) & 0xFFFu))) >> 12) - 4;
+
+    /* 0x004072A9-0x004072B7: actor->world_pos.x += -((depth*sin + sign_corr(0xF)) >> 4)
+     *   IMUL EAX,EBX(sin); CDQ; AND EDX,0xF; ADD EAX,EDX; SAR EAX,0x4; NEG EAX;
+     *   ADD EBP,EAX  (EBP was preloaded from [ECX+0x1fc])                 */
     {
-        int32_t depth = (pen + ((pen >> 31) & 0xFFF)) >> 12;
-        depth -= 4;
-        int32_t pz = depth * cos_a;
-        int32_t px = depth * sin_a;
-        actor->world_pos.z += (int32_t)((pz + ((pz >> 31) & 0xF)) >> 4);
-        actor->world_pos.x -= (int32_t)((px + ((px >> 31) & 0xF)) >> 4);
+        int32_t prod_sin = depth * sin_a;
+        int32_t step_x   = (prod_sin + ((int32_t)((uint32_t)(prod_sin >> 31) & 0xFu))) >> 4;
+        actor->world_pos.x += -step_x;
     }
 
-    /* Velocity decomposition [CONFIRMED @ 0x4072AE-0x4072C6] */
-    int32_t vx     = actor->linear_velocity_x;
-    int32_t vz     = actor->linear_velocity_z;
-    int32_t vel_perp_raw = vx * cos_a + vz * sin_a;
-    int32_t vel_para_raw = vz * cos_a - vx * sin_a;
-    int32_t vel_para_sh  = (vel_para_raw + ((vel_para_raw >> 31) & 0xFFF)) >> 12;
-    int32_t vel_perp_sh  = (int32_t)((vel_perp_raw + ((vel_perp_raw >> 31) & 0xFFF)) >> 12);
-
-    /* Only correct if perpendicular component is outward (>= 0) [CONFIRMED @ 0x4072CE] */
-    if (vel_perp_sh >= 0) {
-        /* Dead-zone clamp: if |vel_para| <= 0x180, zero it; else subtract 0x180
-         * [CONFIRMED @ 0x4072DE-0x407307] */
-        int32_t vel_para_adj;
-        if (vel_para_sh >= 0x181) {
-            vel_para_adj = vel_para_sh - 0x180;
-        } else if (vel_para_sh <= -0x180) {
-            vel_para_adj = vel_para_sh + 0x180;
-        } else {
-            vel_para_adj = 0;
-        }
-        /* Reflected perp = -(vel_para >> 1) [CONFIRMED @ 0x4072D7] */
-        int32_t vel_perp_new = -(vel_para_sh - (vel_para_raw >> 31)) >> 1;
-
-        int32_t nvx = vel_para_adj * cos_a - vel_perp_new * sin_a;
-        int32_t nvz = vel_para_adj * sin_a + vel_perp_new * cos_a;
-        actor->linear_velocity_x = (int32_t)((nvx + ((nvx >> 31) & 0xFFF)) >> 12);
-        actor->linear_velocity_z = (int32_t)((nvz + ((nvz >> 31) & 0xFFF)) >> 12);
-        actor->track_contact_flag = 0;
+    /* 0x004072B9-0x004072D5: actor->world_pos.z += ((depth*cos + sign_corr(0xF)) >> 4)
+     *   IMUL EAX,EDI(cos); CDQ; AND EDX,0xF; ADD EAX,EDX; SAR EAX,0x4;
+     *   ADD EDX(=[ECX+0x204]),EAX                                          */
+    {
+        int32_t prod_cos = depth * cos_a;
+        int32_t step_z   = (prod_cos + ((int32_t)((uint32_t)(prod_cos >> 31) & 0xFu))) >> 4;
+        actor->world_pos.z += step_z;
     }
+
+    /* 0x004072BE / 0x004072DB-0x00407319: velocity decomposition.
+     * Note ESI=vx is loaded at 0x4072BE BEFORE the x-position write, but
+     * since world_pos.x is offset 0x1FC and linear_velocity_x is offset
+     * 0x1CC they don't alias, and the order of reads/writes is observable
+     * only through the actor struct (same outcome). */
+    int32_t vx = actor->linear_velocity_x;
+    int32_t vz = actor->linear_velocity_z;
+
+    /* EBP = (vx*cos + vz*sin) + sign_corr(0xFFF) — TANGENTIAL raw       */
+    int32_t tang_raw = vx * cos_a + vz * sin_a;
+    int32_t tang_adj = tang_raw + ((int32_t)((uint32_t)(tang_raw >> 31) & 0xFFFu));
+
+    /* EAX = (vz*cos - vx*sin) + sign_corr(0xFFF) — OUTWARD-NORMAL raw  */
+    int32_t normal_raw = vz * cos_a - vx * sin_a;
+    int32_t normal_adj = normal_raw + ((int32_t)((uint32_t)(normal_raw >> 31) & 0xFFFu));
+
+    /* SAR by 12 [0x00407316, 0x00407319] */
+    int32_t tang_sh   = tang_adj   >> 12;
+    int32_t normal_sh = normal_adj >> 12;
+
+    /* JS 0x0040738A at 0x40731C — exit when normal_sh < 0 [outward vel
+     * projects toward wall: nothing to push back]                       */
+    if (normal_sh < 0) {
+        return;
+    }
+
+    /* 0x0040731E-0x00407325: vel_perp_new = -((normal_sh - 0) >> 1)
+     *   CDQ; SUB EAX,EDX; SAR EAX,1; MOV ESI,EAX; NEG ESI
+     * Since we just gated on normal_sh >= 0, EDX = sign-broadcast = 0,
+     * so SUB EAX,EDX is a no-op. The arithmetic SAR happens BEFORE NEG,
+     * which matters when normal_sh is odd: e.g. normal_sh=5 →
+     *   asm: -(5 >> 1) = -2          (vs. (-5) >> 1 = -3)               */
+    int32_t vel_perp_new = -(normal_sh >> 1);
+
+    /* 0x00407327-0x00407347: dead-zone clamp on tang_sh (EBP)
+     *   CMP EBP,0x180; JLE -> next test; ADD EBP,-0x180; JMP done
+     *     [reached when EBP > 0x180, i.e. EBP >= 0x181]
+     *   CMP EBP,-0x180; JGE 0x40347 (XOR EBP,EBP); ADD EBP,0x180
+     *     [JGE means EBP >= -0x180 → zero;
+     *      else (EBP < -0x180): EBP += 0x180]                            */
+    int32_t tang_clamped;
+    if (tang_sh > 0x180) {
+        tang_clamped = tang_sh - 0x180;
+    } else if (tang_sh < -0x180) {
+        tang_clamped = tang_sh + 0x180;
+    } else {
+        tang_clamped = 0;
+    }
+
+    /* 0x00407349-0x0040737D: recompose velocity in world frame.
+     *   nvx = tang_clamped*cos - vel_perp_new*sin
+     *   nvz = tang_clamped*sin + vel_perp_new*cos
+     * Each summand gets sign_corr(0xFFF) before SAR by 12.               */
+    {
+        int32_t nvx_raw = tang_clamped * cos_a - vel_perp_new * sin_a;
+        int32_t nvx_adj = nvx_raw + ((int32_t)((uint32_t)(nvx_raw >> 31) & 0xFFFu));
+        actor->linear_velocity_x = nvx_adj >> 12;
+    }
+    {
+        int32_t nvz_raw = tang_clamped * sin_a + vel_perp_new * cos_a;
+        int32_t nvz_adj = nvz_raw + ((int32_t)((uint32_t)(nvz_raw >> 31) & 0xFFFu));
+        actor->linear_velocity_z = nvz_adj >> 12;
+    }
+
+    /* 0x00407383: *(actor+0x37b) = 0 — track_contact_flag */
+    actor->track_contact_flag = 0;
 }
 
 /* Compute signed perpendicular distance from span edge for traffic containment.
@@ -4377,6 +5210,12 @@ static void integrate_traffic_pose(TD5_Actor *actor)
             actor->track_span_raw = (uint16_t)(max_span - 1);
     }
 
+    /* Refresh heading_normal at +0x290 after the chassis-walker resolves
+     * the new span. [CONFIRMED @ 0x00443d3d: UpdateTrafficVehiclePose
+     * calls ComputeActorHeadingFromTrackSegment with LEA [esi+0x290].]
+     * [precise-port pilot 00445B90, 2026-05-14] */
+    td5_track_compute_runtime_heading_normal(actor);
+
     /* 4. Set Y from barycentric track contact height + car height offset.
      * [CONFIRMED @ 0x443D58 + 0x445A1C: ComputeActorTrackContactNormalExtended
      *  writes world_pos_y = barycentric_height + origin_y * 0x100]
@@ -4437,8 +5276,11 @@ static void integrate_traffic_pose(TD5_Actor *actor)
         actor->display_angles.pitch = (int16_t)((pitch_from_normal + susp_pitch_corr) & 0xFFF);
     }
 
-    /* Yaw from euler accumulator (only axis using accumulators for traffic) */
-    actor->display_angles.yaw = (int16_t)((actor->euler_accum.yaw >> 8) & 0xFFF);
+    /* Yaw from euler accumulator (only axis using accumulators for traffic).
+     * No 0xFFF mask -- original (0x4063AA-style) truncates via int16 store
+     * only; mask flipped sign bit for negative accumulators. Matches the
+     * unmasked fix at 5978 for the player/AI integrator path. */
+    actor->display_angles.yaw = (int16_t)(actor->euler_accum.yaw >> 8);
 
     /* Keep vertical dynamics zeroed — traffic has no gravity or suspension */
     actor->linear_velocity_y = 0;
@@ -4502,7 +5344,18 @@ static void integrate_traffic_pose(TD5_Actor *actor)
  * labels "roll"/"pitch" match the original's field layout at +0x208/+0x20C;
  * whether this corresponds to the conventional pitch/roll axes depends on
  * the original binary's wheel index convention (not verified).
- * ======================================================================== */
+ *
+ * [2026-05-17 OPERAND-SOURCE AUDIT — closes body-roll TODO Item 1]
+ * The IntegrateVehiclePoseAndContacts caller at 0x00405FEC pushes:
+ *     PUSH &actor->wheel_suspension_pos_FL   ; param_3 (sp[])
+ *     PUSH &actor->field_0xf0                ; param_2 (wheel_contact_pos)
+ *     PUSH &actor->display_angle_roll        ; param_1 (out)
+ * Disassembly of 0x00446030 reads `[ESI+4/+0x10/+0x1C/+0x28]` from param_2
+ * (stride 12, offset +4) which is the Y component of each of the 4
+ * wheel_contact_pos entries. The port's `wcp[1]/wcp[4]/wcp[7]/wcp[10]`
+ * indices (int32_t pointer) map 1-to-1 to those byte offsets. The X/Z
+ * cross-spans (wcp[0]/3/6/9 and wcp[2]/5/8/11) match the listing too. */
+/* ======================================================================== */
 static void td5_physics_attitude_from_wheels(const TD5_Actor *actor,
                                              int16_t *out_roll,
                                              int16_t *out_pitch)
@@ -4551,6 +5404,9 @@ static inline int32_t td5_physics_wrap_angle_delta(int32_t new_angle, int32_t ol
 
 void td5_physics_integrate_pose(TD5_Actor *actor)
 {
+    /* Pilot precise-port trace — snapshot inputs at entry (slot 0 only). */
+    td5_pilot_emit_00405E80_enter(actor, (uintptr_t)__builtin_return_address(0));
+
     /* Save previous Y for suspension delta */
     actor->prev_frame_y_position = actor->world_pos.y;
 
@@ -4617,10 +5473,22 @@ void td5_physics_integrate_pose(TD5_Actor *actor)
         }
     }
 
-    /* 4. Convert accumulators to 12-bit display angles */
-    actor->display_angles.roll  = (int16_t)((actor->euler_accum.roll >> 8) & 0xFFF);
-    actor->display_angles.yaw   = (int16_t)((actor->euler_accum.yaw >> 8) & 0xFFF);
-    actor->display_angles.pitch = (int16_t)((actor->euler_accum.pitch >> 8) & 0xFFF);
+    /* Refresh heading_normal at +0x290 from the live span geometry.
+     * [CONFIRMED @ 0x00405fb6: IntegrateVehiclePoseAndContacts calls
+     * ComputeActorHeadingFromTrackSegment with LEA [esi+0x290].]
+     * Mirrors the trailing call inside UpdateVehiclePoseFromPhysicsState;
+     * was previously missing here, which kept heading_normal at its
+     * stale spawn-pose value (with y=0 from the old td5_track_compute_heading
+     * mapping) for the entire IntegrateVehiclePoseAndContacts code path.
+     * [precise-port pilot 00445B90, 2026-05-14] */
+    td5_track_compute_runtime_heading_normal(actor);
+
+    /* 4. Convert accumulators to display angles. NO 0xFFF mask -- original
+     * truncates via int16 store; explicit mask flipped sign bit. Matches
+     * 5978 unmasked fix from the precise-port pilot 004063A0. */
+    actor->display_angles.roll  = (int16_t)(actor->euler_accum.roll  >> 8);
+    actor->display_angles.yaw   = (int16_t)(actor->euler_accum.yaw   >> 8);
+    actor->display_angles.pitch = (int16_t)(actor->euler_accum.pitch >> 8);
 
     /* 5. Build rotation matrix from euler angles in FLOAT precision.
      *
@@ -4629,19 +5497,29 @@ void td5_physics_integrate_pose(TD5_Actor *actor)
      * with `>> 12` truncations after each multiply — those LSB losses
      * propagated through `body_wy * m[4]` in chassis-snap and produced a
      * +128 FP averaged delta in world_pos.y at sim_tick=1.
-     * [E1 / 2026-05-02 — physics_trace.csv ground-truth diff] */
+     * [E1 / 2026-05-02 — physics_trace.csv ground-truth diff]
+     *
+     * 2026-05-15 PRECISION FIX: replaced `(float)cos_fixed12(a) * (1/4096)`
+     * with direct `CosFloat12bit(a)`. The earlier path went int32-truncate →
+     * float → divide, which clamps tiny `sin(small_angle)` outputs to 0
+     * (cast to int32 truncates toward zero). Original 0x0042E1E0 reads
+     * `g_sinCosFloatTable` directly as float32; for example at slot-0 tick-1
+     * with near-zero roll/pitch, the original keeps sin(small) at its
+     * float32 precision (~1e-3 .. 1e-6) while the port collapsed it to 0,
+     * producing rotation_matrix.m[3] = port=0 vs orig=−7e−11 and cascading
+     * into wheel_world_positions_hires.y off-by-1 LSB and probe_FR_x ±1
+     * world unit. [whole_state_diff slot-0 tick-1 labelled cluster, 2026-05-15] */
     {
         int32_t roll_a  = actor->display_angles.roll  & 0xFFF;
         int32_t yaw_a   = actor->display_angles.yaw   & 0xFFF;
         int32_t pitch_a = actor->display_angles.pitch & 0xFFF;
 
-        const float k = 1.0f / 4096.0f;
-        float cr = (float)cos_fixed12(roll_a)  * k;
-        float sr = (float)sin_fixed12(roll_a)  * k;
-        float cy = (float)cos_fixed12(yaw_a)   * k;
-        float sy = (float)sin_fixed12(yaw_a)   * k;
-        float cp = (float)cos_fixed12(pitch_a) * k;
-        float sp = (float)sin_fixed12(pitch_a) * k;
+        float cr = CosFloat12bit((unsigned int)roll_a);
+        float sr = SinFloat12bit(roll_a);
+        float cy = CosFloat12bit((unsigned int)yaw_a);
+        float sy = SinFloat12bit(yaw_a);
+        float cp = CosFloat12bit((unsigned int)pitch_a);
+        float sp = SinFloat12bit(pitch_a);
 
         actor->rotation_matrix.m[0] = sp * sy * sr + cp * cy;
         actor->rotation_matrix.m[1] = cp * sy * sr - sp * cy;
@@ -4797,18 +5675,20 @@ void td5_physics_integrate_pose(TD5_Actor *actor)
         }
 
         /* Rebuild rotation_matrix from the (possibly partially updated)
-         * display_angles in float precision (E1 fix — see line ~4361). */
+         * display_angles in float precision (E1 fix — see line ~4361).
+         * 2026-05-15: switched from int Q12 trig to LUT-style float trig
+         * (CosFloat12bit / SinFloat12bit) to preserve sub-Q12 magnitudes
+         * for near-zero pitch/roll. Mirrors the per-tick builder above. */
         int32_t roll_a  = actor->display_angles.roll  & 0xFFF;
         int32_t yaw_a   = actor->display_angles.yaw   & 0xFFF;
         int32_t pitch_a = actor->display_angles.pitch & 0xFFF;
 
-        const float k = 1.0f / 4096.0f;
-        float cr = (float)cos_fixed12(roll_a)  * k;
-        float sr = (float)sin_fixed12(roll_a)  * k;
-        float cy = (float)cos_fixed12(yaw_a)   * k;
-        float sy = (float)sin_fixed12(yaw_a)   * k;
-        float cp = (float)cos_fixed12(pitch_a) * k;
-        float sp = (float)sin_fixed12(pitch_a) * k;
+        float cr = CosFloat12bit((unsigned int)roll_a);
+        float sr = SinFloat12bit(roll_a);
+        float cy = CosFloat12bit((unsigned int)yaw_a);
+        float sy = SinFloat12bit(yaw_a);
+        float cp = CosFloat12bit((unsigned int)pitch_a);
+        float sp = SinFloat12bit(pitch_a);
 
         actor->rotation_matrix.m[0] = sp * sy * sr + cp * cy;
         actor->rotation_matrix.m[1] = cp * sy * sr - sp * cy;
@@ -4929,9 +5809,34 @@ void td5_physics_integrate_pose(TD5_Actor *actor)
              * the actor's rotation matrix and take the Y component. Uses
              * body→world (row 1 of matrix) — matches original's direct
              * LoadRenderRotationMatrix (no transpose) at 0x00406135 /
-             * 0x004061EA before ConvertFloatVec3ToShortAngles. */
+             * 0x004061EA before ConvertFloatVec3ToShortAngles.
+             *
+             * Original 0x00405E80 (Ghidra decomp pool10 2026-05-15):
+             *
+             *   ConvertFloatVec3ToShortAngles(psVar10 + -1, puVar8);
+             *
+             * where psVar10-1 = wheel_disp_angles[i] = (cwx, body_wy, cwz)
+             * and puVar8 = &actor->field_0x230 + i*8 = wheel_contact_normals[i].
+             *
+             * So the original writes all 3 rotated components to +0x230+i*8.
+             * The chassis-snap accumulator uses only puVar8[1] (the Y),
+             * but downstream suspension-response consumers read the full
+             * vector. Without this write the wheel_contact_normals stay
+             * zero (visible in whole_state_port.bin diff as the 16-byte
+             * +0x230 blob mismatching). */
             int16_t src[3] = { cwx, body_wy, cwz };
-            int16_t rot_y = rotate_body_to_world_y(actor, src);
+            int16_t rot_v3[3];
+            rotate_body_to_world_vec3(actor, src, rot_v3);
+            int16_t rot_y = rot_v3[1];
+
+            /* Write to wheel_contact_normals[i] at +0x230 + i*8 (4-short
+             * stride, 4th short is padding / unused in the original). */
+            {
+                int16_t *wcn = (int16_t *)((uint8_t *)actor + 0x230 + i * 8);
+                wcn[0] = rot_v3[0];
+                wcn[1] = rot_v3[1];
+                wcn[2] = rot_v3[2];
+            }
 
             int32_t wheel_y = actor->wheel_contact_pos[i].y;
             contact_y_sum += (int64_t)(wheel_y + (int32_t)rot_y * -0x100);
@@ -4954,9 +5859,19 @@ void td5_physics_integrate_pose(TD5_Actor *actor)
              * the per-wheel airborne bits written by refresh_wheel_contacts
              * (force >= 0x801 @ 0x00403720) now drive downstream airborne
              * behavior. Match original 0x00406300 which snaps
-             * unconditionally once contact_count > 0. */
+             * unconditionally once contact_count > 0.
+             *
+             * [CONFIRMED via Ghidra decomp of IntegrateVehiclePoseAndContacts
+             * @ 0x00405E80, 2026-05-15]: the original writes render_pos_y
+             * exactly ONCE per tick — at the post-gravity, pre-snap step
+             * (matches our line 5468). The chassis-snap (this line) updates
+             * world_pos.y ONLY, leaving render_pos.y at the gravity-dropped
+             * value. The next frame's sub-tick interpolation pass propagates
+             * the new world_pos.y into render_pos.y via
+             * td5_physics_apply_render_interpolation. Removing the port's
+             * post-snap render_pos.y write closes the 7.4u (g/256) gap
+             * between port=226.5 and orig=219.078 on Honolulu sim_tick=1. */
             actor->world_pos.y = new_y;
-            actor->render_pos.y = (float)new_y * (1.0f / 256.0f);
 
           if (contact_count > 0) {
             /* Velocity-from-snap gate — literal port of original
@@ -5139,6 +6054,9 @@ void td5_physics_integrate_pose(TD5_Actor *actor)
             }
         }
     }
+
+    /* Pilot precise-port trace — snapshot outputs at exit (slot 0 only). */
+    td5_pilot_emit_00405E80_leave(actor);
 }
 
 /* ========================================================================
@@ -5150,18 +6068,133 @@ void td5_physics_integrate_pose(TD5_Actor *actor)
 
 static void update_vehicle_pose_from_physics(TD5_Actor *actor)
 {
-    /* Convert current angles to display */
-    actor->display_angles.roll  = (int16_t)((actor->euler_accum.roll >> 8) & 0xFFF);
-    actor->display_angles.yaw   = (int16_t)((actor->euler_accum.yaw >> 8) & 0xFFF);
-    actor->display_angles.pitch = (int16_t)((actor->euler_accum.pitch >> 8) & 0xFFF);
+    /* Pilot precise-port trace — snapshot inputs at entry. */
+    td5_pilot_emit_004063A0_enter(actor, (uintptr_t)__builtin_return_address(0));
 
-    /* Rebuild rotation matrix */
+    /* Convert current angles to display.
+     *
+     * Listing 0x004063D5/3DE/3E1/3F8/401/408:
+     *   SAR EAX, 8           (arithmetic signed shift)
+     *   MOV [actor+0x208], AX (int16 truncate — NO 12-bit mask)
+     *
+     * Removed the `& 0xFFF` mask the port previously applied to all three
+     * components: for negative euler_accum values that mask flipped the
+     * sign bit into a 12-bit positive number, diverging from the original's
+     * int16 truncation. The trig helpers (cos_fixed12 / sin_fixed12) mask
+     * to 12 bits internally, so the rotation matrix is unaffected, but
+     * any external consumer of display_angles (camera, HUD, network) was
+     * reading wrong values for negative angles.
+     * [D2 — precise-port pilot 004063A0, 2026-05-14] */
+    actor->display_angles.roll  = (int16_t)(actor->euler_accum.roll  >> 8);
+    actor->display_angles.yaw   = (int16_t)(actor->euler_accum.yaw   >> 8);
+    actor->display_angles.pitch = (int16_t)(actor->euler_accum.pitch >> 8);
+
+    /* Render position — matches FILD/FMUL/FSTP sequence at 0x004063AA-0x0040641B.
+     * (Float scale = 1/256 from [0x0045D5E8].) */
+    actor->render_pos.x = (float)actor->world_pos.x * (1.0f / 256.0f);
+    actor->render_pos.y = (float)actor->world_pos.y * (1.0f / 256.0f);
+    actor->render_pos.z = (float)actor->world_pos.z * (1.0f / 256.0f);
+
+    /* Build rotation matrix #1 (first call to BuildRotationMatrixFromAngles
+     * @ 0x0042E1E0 at 0x00406421). */
     {
         int32_t roll_a  = actor->display_angles.roll  & 0xFFF;
         int32_t yaw_a   = actor->display_angles.yaw   & 0xFFF;
         int32_t pitch_a = actor->display_angles.pitch  & 0xFFF;
 
-        /* Float-precision matrix build (E1 fix — see line ~4361). */
+        /* Float-precision matrix build (E1 fix — see line ~4361).
+         * 2026-05-15: switched to LUT-style float trig to preserve
+         * sub-Q12 magnitudes for near-zero angles (see line ~4625). */
+        float cr = CosFloat12bit((unsigned int)roll_a);
+        float sr = SinFloat12bit(roll_a);
+        float cy = CosFloat12bit((unsigned int)yaw_a);
+        float sy = SinFloat12bit(yaw_a);
+        float cp = CosFloat12bit((unsigned int)pitch_a);
+        float sp = SinFloat12bit(pitch_a);
+
+        actor->rotation_matrix.m[0] = sp * sy * sr + cp * cy;
+        actor->rotation_matrix.m[1] = cp * sy * sr - sp * cy;
+        actor->rotation_matrix.m[2] = sy * cr;
+        actor->rotation_matrix.m[3] = sp * cr;
+        actor->rotation_matrix.m[4] = cp * cr;
+        actor->rotation_matrix.m[5] = -sr;
+        actor->rotation_matrix.m[6] = sp * cy * sr - cp * sy;
+        actor->rotation_matrix.m[7] = cp * cy * sr + sp * sy;
+        actor->rotation_matrix.m[8] = cy * cr;
+    }
+
+    /* Refresh chassis track position from updated world coords.
+     * Original 0x00406432: CALL UpdateActorTrackPosition (0x004440F0)
+     *   args: (&actor->track_span_raw @+0x80, &actor->world_pos @+0x1FC).
+     *
+     * Without this, after a V2V/wall impulse the chassis span (+0x80) stays at
+     * the pre-impulse value and downstream per-wheel probes in
+     * td5_physics_refresh_wheel_contacts copy the stale span into the wheel
+     * probes (the per-wheel walker then re-syncs but starts from the wrong
+     * span — measurable as a 1-tick lag in lateral-wall pen tests).
+     * [D1 — precise-port pilot 004063A0, 2026-05-14] */
+    td5_track_update_actor_position(actor);
+
+    /* Recompute heading-relative-to-segment short at +0x290.
+     * Original 0x00406447: CALL ComputeActorHeadingFromTrackSegment (0x00445B90)
+     *   args: (&actor->track_span_raw @+0x80, &actor->world_pos @+0x1FC,
+     *          &actor->heading_normal @+0x290).
+     *
+     * Re-routed 2026-05-14 (precise-00445B90) to the byte-faithful
+     * runtime variant td5_track_compute_runtime_heading_normal — it
+     * writes the normalized surface normal of the picked triangle
+     * (heading_normal.y ≈ 4096 on flat track, dropping on slopes),
+     * unblocking ApplyMissingWheelVelocityCorrection which multiplies
+     * by heading_normal.y. The previous mapping to compute_heading
+     * (InitializeActorTrackPose, 0x00434350) was a SPAWN-only writer
+     * that hard-coded heading_normal[1]=0, neutering the correction.
+     * [precise-port pilot 00445B90, 2026-05-14] */
+    td5_track_compute_runtime_heading_normal(actor);
+
+    /* Refresh wheel contacts (CALL RefreshVehicleWheelContactFrames @ 0x00403720
+     * at 0x00406453). The wheel walker, contact-frame transforms, gap_270,
+     * and the OLD-bitmask snapshot at +0x37D all happen inside this call. */
+    td5_physics_refresh_wheel_contacts(actor);
+
+    /* TODO (D3+D4 — damage_lockout switch + 2nd matrix rebuild):
+     * Original 0x00406459-0x004064E1:
+     *   switch (actor->damage_lockout @ +0x37D) {
+     *     case 0,1,2,4,6,8,9: TransformTrackVertexByMatrix  (0x00446030); writes back roll + pitch
+     *     case 5,10:          TransformTrackVertexByMatrixB (0x00446140); writes back roll only
+     *     case 3,12:          TransformTrackVertexByMatrixC (0x004461C0); writes back pitch only
+     *     case 7,11,default:  no-op
+     *   }
+     *   euler_accum_roll  = display_angle_roll  << 8   (if A or B branch)
+     *   euler_accum_pitch = display_angle_pitch << 8   (if A or C branch)
+     *   BuildRotationMatrixFromAngles(rotation_matrix, display_angles)   // 2nd build
+     *
+     * The Transform* helpers derive wheel-implied roll/pitch from the post-
+     * impulse wheel_contact_pos + wheel_suspension_pos, allowing the next
+     * physics tick to start integration at the wheel-attitude. Without this,
+     * after a collision the chassis pose remains at the impulse-applied
+     * attitude even when the wheels disagree with it.
+     *
+     * Faithful port of the three Transform* helpers requires ports of
+     * AngleFromVector12 (0x0040A720, already done in precise-trig worktree)
+     * + FUN_0044817C + an inline FSQRT-rounding path. Deferred to a
+     * follow-up precise-port worktree (precise-00446030). */
+
+    /* Second BuildRotationMatrixFromAngles call (0x004064E1).
+     * Even without the switch writeback, the original UNCONDITIONALLY rebuilds
+     * the rotation matrix here after the switch path completes. For cases
+     * where the switch is a no-op (case 7, 11, or out-of-range), this rebuild
+     * is functionally a redundant identical recomputation; for the active
+     * cases (0..6, 8..10, 12) it picks up the new wheel-derived roll/pitch.
+     *
+     * Since the port currently SKIPS the switch (D3), this 2nd rebuild
+     * regenerates the SAME matrix already built above. It is included anyway
+     * so the byte-faithful sequence is preserved for the day D3 lands.
+     * [D4 — precise-port pilot 004063A0, 2026-05-14] */
+    {
+        int32_t roll_a  = actor->display_angles.roll  & 0xFFF;
+        int32_t yaw_a   = actor->display_angles.yaw   & 0xFFF;
+        int32_t pitch_a = actor->display_angles.pitch  & 0xFFF;
+
         const float k = 1.0f / 4096.0f;
         float cr = (float)cos_fixed12(roll_a)  * k;
         float sr = (float)sin_fixed12(roll_a)  * k;
@@ -5181,13 +6214,15 @@ static void update_vehicle_pose_from_physics(TD5_Actor *actor)
         actor->rotation_matrix.m[8] = cy * cr;
     }
 
-    /* Render position */
-    actor->render_pos.x = (float)actor->world_pos.x * (1.0f / 256.0f);
-    actor->render_pos.y = (float)actor->world_pos.y * (1.0f / 256.0f);
-    actor->render_pos.z = (float)actor->world_pos.z * (1.0f / 256.0f);
-
-    /* Refresh wheel contacts */
-    td5_physics_refresh_wheel_contacts(actor);
+    /* Load the rebuilt matrix into the global render matrix
+     * (LoadRenderRotationMatrix @ 0x0043DA80 at 0x0040650B). Chassis-snap's
+     * ConvertFloatVec3ToShortAngles (0x0042E2E0) reads from this global. The
+     * port's chassis-snap below uses a cached s_wheel_offset_y_world from
+     * refresh — but loading the matrix maintains parity for any other
+     * consumer that pumps body-space vectors through the global transform
+     * before the next render tick.
+     * [D5 — precise-port pilot 004063A0, 2026-05-14] */
+    LoadRenderRotationMatrix(actor->rotation_matrix.m);
 
     /* Chassis ground snap — faithful port of the tail of
      *   UpdateVehiclePoseFromPhysicsState @ 0x004063A0
@@ -5230,6 +6265,112 @@ static void update_vehicle_pose_from_physics(TD5_Actor *actor)
             actor->render_pos.y = (float)actor->world_pos.y * (1.0f / 256.0f);
         }
     }
+
+    /* Pilot precise-port trace — snapshot outputs at exit. */
+    td5_pilot_emit_004063A0_leave(actor);
+}
+
+/* ========================================================================
+ * TransformShortVec3ByRenderMatrixRounded (0x0042EB10) -- byte-faithful port
+ *
+ * Original layout (from listing 0x0042EB10..0x0042EBE3):
+ *   out[0] = round(p1*M[1] + p2*M[2] + p0*M[0] + M[9])
+ *   out[1] = round(p1*M[4] + p0*M[3] + p2*M[5] + M[10])
+ *   out[2] = round(p1*M[7] + p0*M[6] + p2*M[8] + M[11])
+ *
+ * The x87 sequence per output is:
+ *   FILD p1; FMUL M[col_y]
+ *   FILD p2; FMUL M[col_z]; FADDP
+ *   FILD p0; FMUL M[col_x]; FADDP
+ *   FADD M[trans]
+ *   FSTP [tmp]   ; collapse 80→32 bit
+ *   FLD  [tmp]   ; reload as 32-bit
+ *   FISTP [out]  ; round to int32 USING THE CURRENT FPU CONTROL WORD
+ *
+ * [PILOT FINDING 2026-05-14] — empirical FPU control-word audit via the
+ * trace at log/orig/pool4_0042EB10.csv shows 99.82% of rounded outputs
+ * match `floorf` (round toward -infinity, RC=01). The 0.18% residue is
+ * 80-bit vs 64-bit accumulator divergence. The original's runtime startup
+ * therefore sets the x87 RC bits to 01 — not the Windows default 00
+ * (round-to-nearest-even).
+ *
+ * Comparison vs alternative rounding modes (6228 outputs):
+ *   round-to-nearest:        49.05%
+ *   round-down (toward -inf): 99.82%   ← matches original
+ *   round-toward-zero:       66.20%
+ *   round-up (toward +inf):   0.11%
+ *
+ * Smoking-gun example (input p=(-255,-227,435), matrix at slot-0 wcp wheel 0):
+ *   FP accumulator = 204.5853, original out2 = 204
+ *   round-to-nearest → 205 (off by 1), floor → 204 (match).
+ *
+ * NOTE on row order: outputs 1 and 2 use a DIFFERENT operand permutation
+ * than output 0 (the assembler emits "p1, p0, p2"). We match that exactly.
+ *
+ * NOTE on order-of-operations: the x87 chain accumulates at 80-bit until
+ * the final FSTP. The single `volatile float tmp` below would force a
+ * 32-bit collapse at every intermediate step. Original keeps 80-bit until
+ * the last FSTP only. Since GCC -m32 -O2 typically uses x87 too, removing
+ * the volatile lets the compiler emit the same FADDP chain.
+ *
+ * Pilot trace pool4_0042EB10.csv hooks at every call site.
+ *
+ * [CONFIRMED @ 0x0042EB10 by precise-port pilot 2026-05-14]
+ * ======================================================================== */
+
+/* Match orig's FISTP rounding behavior in TransformShortVec3ByRenderMatrixRounded
+ * @ 0x0042EB10. Orig uses raw FISTP with the default x87 control word
+ * (RC=00 = round-to-nearest-even), NOT round-toward-negative-infinity.
+ *
+ * Pre-2026-05-16: this used `floorf` to be "rounding-mode independent" but
+ * that's actively wrong -- floorf is RTNI while orig is RNE. For values
+ * near half-integers (e.g. 0.5, -0.5, 1.5) the two differ by 1 LSB, which
+ * after the post-transform `<< 8` pre-scale shows up as ±256 in the
+ * resulting fp8 coords. Agent T3 (Round 3 Wave 2 audit) confirmed via
+ * Ghidra static disasm of 0x0042EB10 that orig uses raw FISTP, not any
+ * RC-clamping prologue.
+ *
+ * lrintf uses the current FPU rounding mode, which on x87 defaults to
+ * round-to-nearest-even. TD5_d3d.exe never changes the FPU control word,
+ * so RNE is always in effect for FISTP -- and the port's lrintf inherits
+ * that same RNE by default. */
+static inline int32_t td5_round_toward_neg_inf_to_int32(float x) {
+    return (int32_t)lrintf(x);
+}
+
+static inline void td5_transform_short_vec3_by_render_matrix_rounded(
+    const int16_t param_1[3], int32_t param_2[3], const float matrix[12])
+{
+    /* Promote int16 → int32 → float exactly (FILD-equivalent). */
+    int p0 = (int)param_1[0];
+    int p1 = (int)param_1[1];
+    int p2 = (int)param_1[2];
+    float fp0 = (float)p0;
+    float fp1 = (float)p1;
+    float fp2 = (float)p2;
+
+    /* Output 0 — operand order from listing 0x0042EB28..0x0042EB4A
+     *   ST = p1*M1 + p2*M2 + p0*M0 + M9 */
+    {
+        /* Keep accumulator at compiler-natural precision through the chain.
+         * Only collapse once via the float assignment below before FISTP. */
+        float tmp = fp1 * matrix[1] + fp2 * matrix[2] + fp0 * matrix[0] + matrix[9];
+        /* `tmp` is `float` — the assignment forces 32-bit collapse the same way
+         * the original's FSTP/FLD pair does. */
+        param_2[0] = td5_round_toward_neg_inf_to_int32(tmp);
+    }
+    /* Output 1 — operand order from listing 0x0042EB6B..0x0042EB94
+     *   ST = p1*M4 + p0*M3 + p2*M5 + M10 */
+    {
+        float tmp = fp1 * matrix[4] + fp0 * matrix[3] + fp2 * matrix[5] + matrix[10];
+        param_2[1] = td5_round_toward_neg_inf_to_int32(tmp);
+    }
+    /* Output 2 — operand order from listing 0x0042EBB1..0x0042EBD6
+     *   ST = p1*M7 + p0*M6 + p2*M8 + M11 */
+    {
+        float tmp = fp1 * matrix[7] + fp0 * matrix[6] + fp2 * matrix[8] + matrix[11];
+        param_2[2] = td5_round_toward_neg_inf_to_int32(tmp);
+    }
 }
 
 /* ========================================================================
@@ -5242,6 +6383,9 @@ static void update_vehicle_pose_from_physics(TD5_Actor *actor)
 
 void td5_physics_refresh_wheel_contacts(TD5_Actor *actor)
 {
+    /* Pilot precise-port trace — snapshot inputs at entry. */
+    td5_pilot_emit_00403720_enter(actor, (uintptr_t)__builtin_return_address(0));
+
     float *rot = actor->rotation_matrix.m;
     int resolved_surface = actor->surface_type_chassis;
     int resolved_surface_valid = 0;
@@ -5255,15 +6399,31 @@ void td5_physics_refresh_wheel_contacts(TD5_Actor *actor)
      * (velocity-snap @ 0x004060CE/D4, tumble-recovery transition logic). */
     actor->damage_lockout = actor->wheel_contact_bitmask;
 
-    /* Step 1 (original 0x403720): copy chassis track position to each wheel probe.
-     * Without this, wheel_probes[i].span_index stays at 0 (memset init) and
-     * all height probes use span 0 instead of the car's actual span. */
+    /* Step 1 (original 0x403720): seed each probe with the actor's
+     * CURRENT span_index and sub_lane_index only. The walker (called
+     * after the position transform below) updates span_index further
+     * if the probe's world position crosses span boundaries, and also
+     * increments span_accumulated / span_high_water on forward steps.
+     *
+     * span_normalized, span_accumulated, span_high_water, contact_vertex_A,
+     * contact_vertex_B are NOT seeded here -- they carry over from the
+     * previous tick and are updated by the walker + contactNormal
+     * computation. At race start they are zero-initialized by the actor
+     * memset, matching the original's tick-1 state. Whole-state diff
+     * 2026-05-15 showed the prior init-time copies of actor->track_span_*
+     * polluted span_norm to 102 on tick 1 while the original had 0. */
     for (int i = 0; i < 4; i++) {
-        actor->wheel_probes[i].span_index       = actor->track_span_raw;
-        actor->wheel_probes[i].span_normalized   = actor->track_span_normalized;
-        actor->wheel_probes[i].span_accumulated  = actor->track_span_accumulated;
-        actor->wheel_probes[i].span_high_water   = actor->track_span_high_water;
-        actor->wheel_probes[i].sub_lane_index    = (int8_t)actor->track_sub_lane_index;
+        actor->wheel_probes[i].span_index     = actor->track_span_raw;
+        actor->wheel_probes[i].sub_lane_index = (int8_t)actor->track_sub_lane_index;
+    }
+
+    /* Step 1b: same for body_probes (corners). The original runs TWO
+     * symmetric loops -- the second writes to actor+0x00 (body_probes).
+     * Without this, UpdateRaceOrder and scripted-recovery mode read
+     * empty body-corner probe state. */
+    for (int i = 0; i < 4; i++) {
+        actor->body_probes[i].span_index     = actor->track_span_raw;
+        actor->body_probes[i].sub_lane_index = (int8_t)actor->track_sub_lane_index;
     }
 
     /* gap_270 uses the pre-snap transform results, not post-snap positions.
@@ -5313,34 +6473,54 @@ void td5_physics_refresh_wheel_contacts(TD5_Actor *actor)
          * positions that aren't multiples of 256 — every chassis-snap then
          * inherited those leaked low bits and produced the +128 FP world_y
          * delta + ~263..1017 FP wheel XZ deltas observed in physics_trace.csv.
-         * [E2 / 2026-05-02 ground-truth diff finding] */
-        /* Step A: body-only rotated offset (no render_pos add). This is the
-         * input to ConvertFloatVec3ToShortAngles @ 0x0042E2E0 which produces
-         * the int16 stash at actor+0x230+8*i used by chassis-snap as
-         * `puVar8[1] * -0x100`. Original int16-truncates each component via
-         * x87 FISTP (round-to-nearest-even) then writes 3 shorts. */
-        float bx = rot[0] * (float)wx + rot[1] * (float)wy + rot[2] * (float)wz;
-        float by = rot[3] * (float)wx + rot[4] * (float)wy + rot[5] * (float)wz;
-        float bz = rot[6] * (float)wx + rot[7] * (float)wy + rot[8] * (float)wz;
+         * [E2 / 2026-05-02 ground-truth diff finding]
+         *
+         * [PRECISE-PORT PILOT 2026-05-14] — replaced the previous in-line
+         * `rot*body + render_pos` expression with the byte-faithful helper
+         * `td5_transform_short_vec3_by_render_matrix_rounded`, which mirrors
+         * the original's operand order and 80→32-bit precision collapse.
+         */
+        {
+            const int16_t body_off[3] = {
+                (int16_t)wx, (int16_t)wy, (int16_t)wz
+            };
+            float matrix[12];
+            for (int j = 0; j < 9; j++) matrix[j] = rot[j];
+            matrix[9]  = actor->render_pos.x;
+            matrix[10] = actor->render_pos.y;
+            matrix[11] = actor->render_pos.z;
+            int32_t world[3];
+            td5_transform_short_vec3_by_render_matrix_rounded(body_off, world, matrix);
+            actor->wheel_contact_pos[i].x = world[0] << 8;
+            actor->wheel_contact_pos[i].y = world[1] << 8;
+            actor->wheel_contact_pos[i].z = world[2] << 8;
 
-        /* Step B: full world position via TransformShortVec3ByRenderMatrixRounded
-         * @ 0x0042EB10 → FISTP(rot*body + render_pos), then `<<8` to 24.8 FP.
-         * Forces wheel_contact_pos to be a multiple of 256. */
-        int32_t world_x = (int32_t)lrintf(bx + actor->render_pos.x);
-        int32_t world_y = (int32_t)lrintf(by + actor->render_pos.y);
-        int32_t world_z = (int32_t)lrintf(bz + actor->render_pos.z);
-        actor->wheel_contact_pos[i].x = world_x << 8;
-        actor->wheel_contact_pos[i].y = world_y << 8;
-        actor->wheel_contact_pos[i].z = world_z << 8;
+            td5_pilot_emit_0042EB10(
+                (uint32_t)td5_trace_current_sim_tick(),
+                actor->slot_index, PILOT_0042EB10_KIND_WCP, i,
+                0x00403873u,  /* faux caller_ra matching Frida CSV column */
+                body_off, &actor->wheel_contact_pos[i],
+                body_off[0], body_off[1], body_off[2],
+                matrix, world[0], world[1], world[2]);
+        }
 
         /* Step C: stash int16-truncated body-rotated Y for chassis-snap.
          * Original `ConvertFloatVec3ToShortAngles @ 0x0042E2E0` writes
          * `(short)__ftol(by)` to actor+0x232+8*i; chassis-snap then reads
          * MOVSX EAX, [EBP+2]; SHL EAX, 8 → effectively `(int16)round(by) * 256`.
          * Port stashes the equivalent in s_wheel_offset_y_world for the
-         * integrator's chassis-snap loop in update_vehicle_pose_from_physics. */
-        s_wheel_offset_y_world[slot & 0x0F][i] =
-            (int32_t)(int16_t)lrintf(by) * 256;
+         * integrator's chassis-snap loop in update_vehicle_pose_from_physics.
+         *
+         * Recompute body-only Y (no render_pos add) in the same FADD order as
+         * 0x0042EB10 output 1: p1*M4 + p0*M3 + p2*M5. No translation add.
+         * Rounds toward -inf to match the original FPU control word. */
+        {
+            float by_tmp = (float)(int16_t)wy * rot[4]
+                         + (float)(int16_t)wx * rot[3]
+                         + (float)(int16_t)wz * rot[5];
+            s_wheel_offset_y_world[slot & 0x0F][i] =
+                (int32_t)(int16_t)floorf(by_tmp) * 256;
+        }
 
         /* Per-probe track position update [CONFIRMED @ 0x403720].
          * Original calls FUN_004440F0 per probe with probe's own world pos.
@@ -5356,6 +6536,11 @@ void td5_physics_refresh_wheel_contacts(TD5_Actor *actor)
             if (max_sp > 0 && actor->wheel_probes[i].span_index >= (int16_t)max_sp)
                 actor->wheel_probes[i].span_index = (int16_t)(max_sp - 1);
         }
+
+        /* Mirror the original's ComputeActorTrackContactNormalExtended
+         * prefix: write contact_vertex_A/B to the probe based on its
+         * (post-walker) span_index + sub_lane_index. */
+        td5_track_compute_probe_contact_vertices(&actor->wheel_probes[i]);
 
         /* Compute wheel vertical force from the probed span surface. */
         int32_t wheel_y = actor->wheel_contact_pos[i].y;
@@ -5398,8 +6583,14 @@ void td5_physics_refresh_wheel_contacts(TD5_Actor *actor)
                 actor->wheel_contact_pos[i].x,
                 actor->wheel_contact_pos[i].z,
                 span_normal);
+            /* Resolve surface_type from the probe's span+lane attributes
+             * instead of echoing the stale actor->surface_type_chassis
+             * (which is zero on tick 1 from the actor memset). Use the
+             * first probe-index 4..7 (= wheel_probes[i]) on the first
+             * valid wheel, matching the original's pattern of picking the
+             * surface from the lead grounded wheel. */
             if (!resolved_surface_valid) {
-                resolved_surface = surface_type;
+                resolved_surface = td5_track_get_surface_type(actor, 4 + i);
                 resolved_surface_valid = 1;
             }
         }
@@ -5461,20 +6652,14 @@ void td5_physics_refresh_wheel_contacts(TD5_Actor *actor)
                 int32_t dx = actor->wheel_contact_pos[i].x - s_prev_wheel_tx[slot][i];
                 int32_t dy = actor->wheel_contact_pos[i].y - s_prev_wheel_ty[slot][i];
                 int32_t dz = actor->wheel_contact_pos[i].z - s_prev_wheel_tz[slot][i];
-                /* Clamp deltas: if any component exceeds ±20k FP (~78 world units/tick),
-                 * zero it — indicates teleport (wall collision response, span
-                 * rebind, spawn transient) rather than physical motion. The
-                 * faithful update_suspension_response computes gap_270 · wcv as
-                 * the spring excitation + bounce accumulator, so a single
-                 * teleport delta produces launch-sized vy impulses (observed
-                 * vy=+80773, bounce=197, pitch_spr=39M on uphill transitions
-                 * when clamp was ±100k). ±20k ≈ 78 world units/tick is already
-                 * well above any legal single-tick wheel motion at racing
-                 * speeds. Restored from commit e97669e; had been reverted to
-                 * ±100k between then and HEAD. */
-                #define CLAMP_DELTA(v) ((v) > 20000 ? 0 : (v) < -20000 ? 0 : (v))
-                dx = CLAMP_DELTA(dx); dy = CLAMP_DELTA(dy); dz = CLAMP_DELTA(dz);
-                #undef CLAMP_DELTA
+                /* No clamp on the delta. Original 0x00403720 writes
+                 * `(new - old) >> 8` with sign-extending round, NO bounds
+                 * test (decomp: `*local_28 = (short)((*piVar1 - local_c) +
+                 * (*piVar1 - local_c >> 0x1f & 0xffU) >> 8);`). Pilot Frida
+                 * capture 2026-05-13 confirms orig writes large deltas
+                 * verbatim. Prior `CLAMP_DELTA(±20000)` was an approximation
+                 * for "teleport hides launch"; removing it per the
+                 * byte-exact precise-port workflow. */
                 g270[0] = (int16_t)arith_round_shift(dx, 0xFF, 8);
                 g270[1] = (int16_t)arith_round_shift(dy, 0xFF, 8);
                 g270[2] = (int16_t)arith_round_shift(dz, 0xFF, 8);
@@ -5547,34 +6732,110 @@ void td5_physics_refresh_wheel_contacts(TD5_Actor *actor)
          *
          * Second transform: input body_y_no_preload = wy + href_preload
          * (where wy already had the preload subtracted at line 5295).
-         * Same float multiplication path, same render_pos add, same <<8. */
+         *
+         * NO `<<8` on the hires output. Original asm 0x40388A-0x40388E only
+         * shifts wheel_contact_pos (piVar8.x/y/z), NOT the hires field at
+         * actor+0x298. Confirmed via pilot Frida capture 2026-05-13:
+         * orig hires_x at tick 0 = -461 (raw world unit), port was writing
+         * -65280 = -255<<8 — i.e. shifted body offset, not unshifted world. */
         {
-            float wy_hub = (float)(int32_t)(int16_t)(wy + href_preload);
-            float hub_bx = rot[0] * (float)wx + rot[1] * wy_hub + rot[2] * (float)wz;
-            float hub_by = rot[3] * (float)wx + rot[4] * wy_hub + rot[5] * (float)wz;
-            float hub_bz = rot[6] * (float)wx + rot[7] * wy_hub + rot[8] * (float)wz;
-            int32_t hub_x = (int32_t)lrintf(hub_bx + actor->render_pos.x);
-            int32_t hub_y = (int32_t)lrintf(hub_by + actor->render_pos.y);
-            int32_t hub_z = (int32_t)lrintf(hub_bz + actor->render_pos.z);
-            actor->wheel_world_positions_hires[i].x = hub_x << 8;
-            actor->wheel_world_positions_hires[i].y = hub_y << 8;
-            actor->wheel_world_positions_hires[i].z = hub_z << 8;
+            const int16_t body_off[3] = {
+                (int16_t)wx, (int16_t)(wy + href_preload), (int16_t)wz
+            };
+            float matrix[12];
+            for (int j = 0; j < 9; j++) matrix[j] = rot[j];
+            matrix[9]  = actor->render_pos.x;
+            matrix[10] = actor->render_pos.y;
+            matrix[11] = actor->render_pos.z;
+            int32_t hub[3];
+            td5_transform_short_vec3_by_render_matrix_rounded(body_off, hub, matrix);
+            /* NO <<8 -- the original (0x40388A-0x40388E) writes the rounded
+             * world-unit value straight into actor+0x298. Comment above
+             * documents this; previous version applied the shift in error,
+             * producing values 256x too large. Verified via whole-state diff
+             * 2026-05-15: port hub<<8 = -17829120 vs original = -69644 = hub. */
+            actor->wheel_world_positions_hires[i].x = hub[0];
+            actor->wheel_world_positions_hires[i].y = hub[1];
+            actor->wheel_world_positions_hires[i].z = hub[2];
+
+            td5_pilot_emit_0042EB10(
+                (uint32_t)td5_trace_current_sim_tick(),
+                actor->slot_index, PILOT_0042EB10_KIND_HIRES, i,
+                0x0040388Au,  /* faux caller_ra matching Frida CSV column */
+                body_off, &actor->wheel_world_positions_hires[i],
+                body_off[0], body_off[1], body_off[2],
+                matrix, hub[0], hub[1], hub[2]);
         }
 
-        /* Copy to probe_FL/FR/RL/RR (0x090) for wall contact detection.
-         * The original RefreshVehicleWheelContactFrames writes both 0x0F0
-         * (wheel_contact_pos) and 0x090 (probe_FL..RR). Without this,
-         * UpdateActorTrackSegmentContacts reads zero positions. */
-        switch (i) {
-            case 0: actor->probe_FL = actor->wheel_contact_pos[0]; break;
-            case 1: actor->probe_FR = actor->wheel_contact_pos[1]; break;
-            case 2: actor->probe_RL = actor->wheel_contact_pos[2]; break;
-            case 3: actor->probe_RR = actor->wheel_contact_pos[3]; break;
-        }
     }
 
     /* Mark this slot's pre-snap transform as valid for next frame */
     s_prev_wheel_valid[slot] = 1;
+
+    /* Original (0x00403720) runs a SECOND loop that walks each body
+     * corner probe (body_probes[0..3]) through the per-probe walker and
+     * ComputeActorTrackContactNormal, mirroring the wheel-probe loop.
+     *
+     * Body corner offsets are stored at the head of car_definition_ptr as
+     * 4 x short[4] (8-byte stride, last short ignored). Each is the body
+     * corner position in chassis-local space; transforming via the
+     * (rot, render_pos) matrix and shifting <<8 yields the corner's world
+     * position in 24.8 FP, written to actor->probe_FL/FR/RL/RR.
+     *
+     * Whole-state diff 2026-05-15: replaced the prior wheel_contact alias
+     * (which used wheel offsets instead of body corners) with a faithful
+     * port of the original's TransformShortVec3ByRenderMatrixRounded
+     * pass. The walker + ComputeActorTrackContactNormal helper write
+     * span_acc/hw and contact_vertex_A/B per body probe. */
+    if (actor->car_definition_ptr) {
+        TD5_Vec3_Fixed *body_pos[4] = {
+            &actor->probe_FL,
+            &actor->probe_FR,
+            &actor->probe_RL,
+            &actor->probe_RR,
+        };
+        const int16_t *cardef_corners = (const int16_t *)actor->car_definition_ptr;
+
+        float matrix[12];
+        for (int j = 0; j < 9; j++) matrix[j] = rot[j];
+        matrix[9]  = actor->render_pos.x;
+        matrix[10] = actor->render_pos.y;
+        matrix[11] = actor->render_pos.z;
+
+        for (int i = 0; i < 4; i++) {
+            const int16_t corner_off[3] = {
+                cardef_corners[i * 4 + 0],
+                cardef_corners[i * 4 + 1],
+                cardef_corners[i * 4 + 2],
+            };
+            int32_t world[3];
+            td5_transform_short_vec3_by_render_matrix_rounded(corner_off, world, matrix);
+            body_pos[i]->x = world[0] << 8;
+            body_pos[i]->y = world[1] << 8;
+            body_pos[i]->z = world[2] << 8;
+
+            td5_track_update_probe_position(&actor->body_probes[i],
+                                            body_pos[i]->x,
+                                            body_pos[i]->z);
+            int max_sp = td5_track_get_span_count();
+            if (max_sp > 0 && actor->body_probes[i].span_index >= (int16_t)max_sp)
+                actor->body_probes[i].span_index = (int16_t)(max_sp - 1);
+            td5_track_compute_probe_contact_vertices(&actor->body_probes[i]);
+
+            /* Original ComputeActorTrackContactNormal (0x00445450) overwrites
+             * piVar8[1] (= probe_FL/FR/RL/RR .y) with the barycentric ground
+             * height at the body corner's XZ. Use the same compute_contact_
+             * height path the wheel loop uses; pass NULL for the normal
+             * out-pointer since the body probe doesn't store one. */
+            int probe_span = actor->body_probes[i].span_index;
+            int probe_lane = actor->body_probes[i].sub_lane_index;
+            if (probe_span >= 0 && probe_span < max_sp) {
+                body_pos[i]->y = td5_track_compute_contact_height_with_normal(
+                    probe_span, probe_lane,
+                    body_pos[i]->x, body_pos[i]->z, NULL);
+            }
+        }
+    }
 
     if (resolved_surface_valid)
         actor->surface_type_chassis = (uint8_t)resolved_surface;
@@ -5589,71 +6850,203 @@ void td5_physics_refresh_wheel_contacts(TD5_Actor *actor)
      * existing "bits = grounded axles" interpretation while matching the
      * original's tick-1 behavior (flag=0 → airborne branch → no drive
      * torque). See the gate block in td5_physics_integrate_pose. */
+
+    /* Pilot precise-port trace — emit row(s) at exit. */
+    td5_pilot_emit_00403720_leave(actor);
 }
 
 /* ========================================================================
- * ClampVehicleAttitudeLimits (0x405B40)
+ * ClampVehicleAttitudeLimits (0x405B40) — precise-port (pool4 / session 20)
  *
- * Roll limit: +/- 0x355, Pitch limit: +/- 0x3A4
- * Two modes based on collisions toggle.
+ * Listing: 0x00405B40..0x00405D65 (Ghidra TD5_pool4, 2026-05-14)
+ * Audit:   re/analysis/pilot_00405B40_audit.md
+ *
+ * Reads two 12-bit display angles (roll, pitch) and dispatches on the
+ * global at 0x00463188 (Ghidra "g_cameraMode" -- actually the user's
+ * 3D-collisions option):
+ *   *0x00463188 == 0 -> MODE-0 (matrix recovery latch)
+ *   *0x00463188 != 0 -> MODE-1 (soft nudge + hard clamp)
+ *
+ * The port mirrors g_collisions_enabled to this dword. NOTE: the SETTER
+ * `td5_physics_set_collisions(int enabled)` writes the value INVERTED vs
+ * the original ("0=on, 1=off" comment in line ~6983); that is a separate
+ * upstream binding bug. This function ports the LISTING faithfully -- it
+ * reads g_collisions_enabled with the same semantics as the original reads
+ * *0x00463188 (so the branch routing matches the LISTING, given that the
+ * port's value at this address means the same as the original's value).
  * ======================================================================== */
 
 void td5_physics_clamp_attitude(TD5_Actor *actor)
 {
-    int32_t roll  = (actor->euler_accum.roll >> 8) & 0xFFF;
-    int32_t pitch = (actor->euler_accum.pitch >> 8) & 0xFFF;
+    /* Pilot precise-port trace — emit input snapshot at entry. */
+    td5_pilot_emit_00405B40_enter(actor, (uintptr_t)__builtin_return_address(0));
 
-    /* Normalize to signed range: 0x000-0x7FF = 0 to +180, 0x800-0xFFF = -180 to 0 */
-    if (roll > 0x800) roll -= 0x1000;
-    if (pitch > 0x800) pitch -= 0x1000;
+    /* === Read 12-bit display angles + center-shift unwrap [0x00405B40-B85] ===
+     *
+     * Original: EAX = (uint16) actor->display_angle_roll  [+0x208]
+     *           ECX = (uint16) actor->display_angle_pitch [+0x20C]
+     *           iVar1 = ((EAX - 0x800) & 0xFFF) - 0x800   ; signed[-0x800..+0x7FF]
+     *           iVar2 = ((ECX - 0x800) & 0xFFF) - 0x800
+     *
+     * The center-shift unwrap maps the raw uint16 to signed [-0x800,+0x7FF].
+     * Critically, val == 0x800 maps to -0x800 (signed wrap), not +0x800.
+     * The earlier port used (val >> 8) & 0xFFF with "if (v > 0x800) v -= 0x1000"
+     * which off-by-ones at v == 0x800. */
+    int32_t raw_roll  = (uint16_t)actor->display_angles.roll;
+    int32_t raw_pitch = (uint16_t)actor->display_angles.pitch;
+    int32_t iVar1 = ((raw_roll  - 0x800) & 0xFFF) - 0x800;  /* signed roll  */
+    int32_t iVar2 = ((raw_pitch - 0x800) & 0xFFF) - 0x800;  /* signed pitch */
 
-    /* Hard-clamp / MODE-0 exceeded thresholds [CONFIRMED @ FUN_00405B40 0x405B63] */
-    int32_t roll_limit  = 0x355;
-    int32_t pitch_limit = 0x3A4;
-
-    if (g_collisions_enabled == 0) {
-        /* MODE 0 (collisions ON): original sets recovery flag (actor+0x379=1) when
-         * |roll| > 0x355 or |pitch| > 0x3A4, then copies rotation matrix via
-         * FUN_0042E1E0 to actor+0x150/+0x180. Port maps this to vehicle_mode=1
-         * (59-frame recovery ticker). [CONFIRMED @ FUN_00405B40 0x405B5D]
+    /* === Dispatch on collisions flag [0x00405B86-B88] === */
+    int branch_taken = 0;  /* 0=skip, 1=mode1, 2=mode0-latch */
+    if (g_collisions_enabled != 0) {
+        branch_taken = 1;
+        /* MODE-1: soft nudge then hard clamp [0x00405B8E-C3D].
          *
-         * Disabled: port's suspension equilibrium drift holds pitch ≈ ±935 on flat
-         * ground (7 units above the 932 limit), triggering recovery teleport on every
-         * actor every ~61 frames during normal driving. Fix pending suspension
-         * equilibrium correction (reference_port_ride_height_offset.md). */
-    } else {
-        /* MODE 1 (collisions OFF): soft nudge then hard clamp.
-         * Soft nudge threshold: 0x27F roll, 0x2BB pitch [CONFIRMED @ 0x405BEE]
-         * Hard clamp threshold: 0x355 roll, 0x3A4 pitch [CONFIRMED @ 0x405B63] */
-        int32_t roll_nudge  = 0x27F;
-        int32_t pitch_nudge = 0x2BB;
+         * Original layout is 8 straight-line independent `if`s with no
+         * combined early-out. The signed comparisons match the listing
+         * directly. Each hard-clamp branch writes BOTH the display_angles
+         * field AND the euler_accum field (the earlier port omitted the
+         * display_angles write). */
 
-        if (roll <= roll_nudge && roll >= -roll_nudge &&
-            pitch <= pitch_nudge && pitch >= -pitch_nudge)
+        /* Soft nudge: pull angular velocity back toward 0 with a fixed
+         * +/-0x200 step when |angle| > nudge threshold [0x00405B8E-CE].
+         * Original constants: ESI = +0x200, EDX = -0x200.
+         * Roll nudge bound: 0x27F (listing CMP EAX, 0xfffffd81 / 0x27f).
+         * Pitch nudge bound: 0x2BB (listing CMP ECX, 0xfffffd45 / 0x2bb). */
+        if (iVar1 < -0x27F) actor->angular_velocity_roll  += 0x200;
+        if (iVar1 >  0x27F) actor->angular_velocity_roll  += -0x200;
+        if (iVar2 < -0x2BB) actor->angular_velocity_pitch += 0x200;
+        if (iVar2 >  0x2BB) actor->angular_velocity_pitch += -0x200;
+
+        /* Hard clamp: zero omega and pin angle at +/-limit [0x00405BCE-C3D].
+         * Roll  limit: 0x355  (listing CMP EAX, 0xfffffcab / 0x355).
+         * Pitch limit: 0x3A4  (listing CMP ECX, 0xfffffc5c / 0x3a4).
+         *
+         * Both display_angle (+0x208 / +0x20C) AND euler_accum (+0x1F0 / +0x1F8)
+         * are written. euler_accum value is the display value shifted left by 8. */
+        if (iVar1 < -0x355) {
+            actor->angular_velocity_roll = 0;
+            actor->display_angles.roll   = (int16_t)0xFCAB;  /* (uint16)-0x355 */
+            actor->euler_accum.roll      = (int32_t)0xFFFCAB00; /* -0x35500 */
+        }
+        if (iVar1 >  0x355) {
+            actor->angular_velocity_roll = 0;
+            actor->display_angles.roll   = (int16_t)0x355;
+            actor->euler_accum.roll      = 0x35500;
+        }
+        if (iVar2 < -0x3A4) {
+            actor->angular_velocity_pitch = 0;
+            actor->display_angles.pitch   = (int16_t)0xFC5C;  /* (uint16)-0x3A4 */
+            actor->euler_accum.pitch      = (int32_t)0xFFFC5C00; /* -0x3A400 */
+        }
+        if (iVar2 >  0x3A4) {
+            actor->angular_velocity_pitch = 0;
+            actor->display_angles.pitch   = (int16_t)0x3A4;
+            actor->euler_accum.pitch      = 0x3A400;
+            /* original early-returns here as a compiler artifact (POP chain
+             * split); functionally equivalent to falling through to RET. */
+            td5_pilot_emit_00405B40_leave(actor, branch_taken);
             return;
-
-        if (roll > roll_nudge)  actor->angular_velocity_roll  -= 0x200;
-        if (roll < -roll_nudge) actor->angular_velocity_roll  += 0x200;
-        if (roll > roll_limit) {
-            actor->angular_velocity_roll = 0;
-            actor->euler_accum.roll = roll_limit << 8;
         }
-        if (roll < -roll_limit) {
-            actor->angular_velocity_roll = 0;
-            actor->euler_accum.roll = (-roll_limit) << 8;
-        }
-
-        if (pitch > pitch_nudge)  actor->angular_velocity_pitch -= 0x200;
-        if (pitch < -pitch_nudge) actor->angular_velocity_pitch += 0x200;
-        if (pitch > pitch_limit) {
-            actor->angular_velocity_pitch = 0;
-            actor->euler_accum.pitch = pitch_limit << 8;
-        }
-        if (pitch < -pitch_limit) {
-            actor->angular_velocity_pitch = 0;
-            actor->euler_accum.pitch = (-pitch_limit) << 8;
-        }
+        td5_pilot_emit_00405B40_leave(actor, branch_taken);
+        return;
     }
+
+    /* === MODE-0: matrix recovery latch [0x00405C5C-D65] ===
+     *
+     * If |roll| <= 0x355 AND |pitch| <= 0x3A4, no-op early return.
+     * Otherwise: build a delta-rotation matrix from (eul - omega) >> 8,
+     * post-multiply by actor->rotation_matrix, store the product in
+     * collision_spin_matrix (+0x180), snapshot rotation_matrix into
+     * saved_orientation (+0x150), set vehicle_mode=1, zero frame_counter.
+     *
+     * NOTE: the earlier port had this branch disabled with a comment
+     * about suspension equilibrium drift triggering spurious latches.
+     * Per the precise-port mandate, this function is now ported
+     * faithfully; the upstream suspension drift fix is out of scope. */
+
+    /* Inside-limits early-out [0x00405C5C-78] */
+    if (iVar1 >= -0x355 && iVar1 <= 0x355 &&
+        iVar2 >= -0x3A4 && iVar2 <= 0x3A4) {
+        td5_pilot_emit_00405B40_leave(actor, branch_taken);  /* branch_taken==0 here */
+        return;
+    }
+    branch_taken = 2;
+
+    /* Build delta-rotation angles: (eul - omega) >> 8 [0x00405C7E-CB].
+     * Original SAR is signed arithmetic shift right; signed int32 >> 8 in C
+     * is arithmetic for the platform we target (i686). The result is
+     * truncated to int16 via the `MOV word ptr [ESP+offset], reg` stores. */
+    int16_t delta_roll  = (int16_t)(((int32_t)(actor->euler_accum.roll  - actor->angular_velocity_roll))  >> 8);
+    int16_t delta_yaw   = (int16_t)(((int32_t)(actor->euler_accum.yaw   - actor->angular_velocity_yaw))   >> 8);
+    int16_t delta_pitch = (int16_t)(((int32_t)(actor->euler_accum.pitch - actor->angular_velocity_pitch)) >> 8);
+
+    /* BuildRotationMatrixFromAngles(&local_30, {delta_roll, delta_yaw, delta_pitch})
+     * [CALL 0x0042E1E0 at 0x00405CC8].  Original takes a short* with three
+     * angles laid out as roll/yaw/pitch. */
+    int16_t delta_angles[3] = { delta_roll, delta_yaw, delta_pitch };
+    float build_mat[9];
+    BuildRotationMatrixFromAngles(build_mat, delta_angles);
+
+    /* The original then shuffles the build output through `local_30..local_10`
+     * back into `local_60[0..8]`. The shuffle is identity for the port-side
+     * helper (which writes its 9-float row-major output directly into the
+     * destination buffer). Skip the shuffle.
+     *
+     * MultiplyRotationMatrices3x3(&actor->rotation_matrix, local_60, local_60)
+     * [CALL 0x0042DA10 at 0x00405D26]. */
+    float product[9];
+    MultiplyRotationMatrices3x3((float *)&actor->rotation_matrix,
+                                build_mat, product);
+
+    /* MOVSD.REP 12-dword copies [0x00405D2B-4C].
+     *
+     * Original copies 48 bytes (12 dwords) to BOTH destinations:
+     *   - +0x180 collision_spin_matrix <- product (9 floats) + 3 trailing
+     *     dwords from stack (originally the first row of the BuildRotation
+     *     output before the shuffle). The trailing 3 dwords land in
+     *     gap_1A4[12] which the actor struct marks "unused/reserved".
+     *   - +0x150 saved_orientation <- rotation_matrix (9 floats) + 3
+     *     trailing floats which are actor->render_pos at +0x144..+0x14F.
+     *     The trailing 3 dwords land in gap_174[4] + gap_178[8] which
+     *     the actor struct also marks "unused/reserved".
+     *
+     * Per static-port mandate we replicate the 48-byte copy semantics
+     * exactly via memcpy. The trailing 12 bytes are stack/render_pos
+     * residue but the original writes them, so we do too. */
+    memcpy(&actor->collision_spin_matrix, product, 9 * sizeof(float));
+    /* gap_1A4 trailing 12 bytes: original copies stack residue (the first
+     * row of the pre-shuffle BuildRotation output, which the shuffle then
+     * read into local_60). The exact values are stack garbage from the
+     * compiler's perspective, but bit-exact matching means writing the
+     * post-shuffle values that remain at the source addresses. Given the
+     * port doesn't perform the shuffle (it writes Build output directly to
+     * build_mat[0..8]), the equivalent residue is build_mat[0..2]. */
+    memcpy(((uint8_t *)&actor->collision_spin_matrix) + 9 * sizeof(float),
+           build_mat, 3 * sizeof(float));
+
+    memcpy(&actor->saved_orientation, &actor->rotation_matrix, 9 * sizeof(float));
+    /* gap_174/178 trailing 12 bytes: original copies the 12 bytes following
+     * rotation_matrix, which is render_pos (+0x144..+0x14F). */
+    memcpy(((uint8_t *)&actor->saved_orientation) + 9 * sizeof(float),
+           &actor->render_pos, 3 * sizeof(float));
+
+    /* Set recovery state flags [0x00405D4E-5D].
+     *   MOV byte ptr [EBX+0x379], 0x1   -> vehicle_mode = 1
+     *   MOV word ptr [EBX+0x338], 0x0   -> frame_counter = 0 (int16 write) */
+    actor->vehicle_mode = 1;
+    actor->frame_counter = 0;
+
+    /* Pilot precise-port trace — emit row at exit. */
+    td5_pilot_emit_00405B40_leave(actor, branch_taken);
+}
+
+/* Accessor for the pilot trace emitter to read the collisions flag without
+ * exposing the file-static g_collisions_enabled. */
+int td5_physics_get_collisions_flag(void)
+{
+    return g_collisions_enabled;
 }
 
 /* ========================================================================
@@ -5664,168 +7057,230 @@ void td5_physics_clamp_attitude(TD5_Actor *actor)
 
 void td5_physics_reset_actor_state(TD5_Actor *actor)
 {
-    /* Zero all velocities */
-    actor->linear_velocity_x = 0;
-    actor->linear_velocity_y = 0;
-    actor->linear_velocity_z = 0;
-    actor->angular_velocity_roll = 0;
-    actor->angular_velocity_yaw = 0;
-    actor->angular_velocity_pitch = 0;
-
-    /* Zero euler pitch/roll accumulators — yaw was set by
-     * InitializeActorTrackPose (compute_heading) and must be preserved.
-     * Missing these writes caused slot 1+ spawn-pose residuals in
-     * disp_pitch / ang_pitch / disp_roll at sim_tick=1.
-     * [RE basis: ResetVehicleActorState @ 0x00405D70 zeroes the pitch
-     * and roll accumulators while leaving yaw untouched.] */
-    actor->euler_accum.roll = 0;
-    actor->euler_accum.pitch = 0;
-
-    /* Seed display angles from the accumulator so the first render frame
-     * matches the spawn yaw. integrate_pose rewrites these each tick from
-     * (euler_accum >> 8), but the initial values need to be consistent. */
-    actor->display_angles.roll = 0;
-    actor->display_angles.yaw = (int16_t)((actor->euler_accum.yaw >> 8) & 0xFFF);
-    actor->display_angles.pitch = 0;
-
-    /* Reset frame counter — used by mode1 recovery timeout. Carrying
-     * residual counts from a prior race would shorten the recovery window
-     * on respawn. [RE basis: ResetVehicleActorState zeroes the counter.] */
-    actor->frame_counter = 0;
-
-    /* Reset gear to first forward */
-    actor->current_gear = TD5_GEAR_FIRST;
-
-    /* Reset engine RPM to idle */
-    actor->engine_speed_accum = TD5_ENGINE_IDLE_RPM;
-
-    /* Faithful spawn init matching original ResetVehicleActorState @ 0x00405D70:
-     * zero suspension pos + spring_dv (the integrator's velocity state). Do NOT
-     * preload pos with a heuristic — the integrator (0x4057F0) settles to the
-     * correct equilibrium on the first tick from zero, producing the asymmetric
-     * front/rear positions purely from gravity-driven load_accum signs.
-     * The earlier `ss = (href*5+4)/9` heuristic produced +54/+43 FP delta vs
-     * original (frida physics_trace.csv 2026-05-02). [CONFIRMED @ 0x00405D70] */
-    actor->wheel_contact_bitmask = 0;
-    for (int i = 0; i < 4; i++) {
-        actor->wheel_suspension_pos[i] = 0;
-        actor->wheel_spring_dv[i] = 0;
-        /* wheel_load_accum (+0x2FC) NOT zeroed by original — it is populated
-         * by the upcoming td5_physics_integrate_pose -> refresh_wheel_contacts
-         * call below via `force = (wheel_y - ground_y) + g`. */
-    }
-    actor->center_suspension_pos = 0;
-    actor->center_suspension_vel = 0;
-
-    /* Clear slip/tire state */
-    actor->front_axle_slip_excess = 0;
-    actor->rear_axle_slip_excess = 0;
-    actor->accumulated_tire_slip_x = 0;
-    actor->accumulated_tire_slip_z = 0;
-    actor->longitudinal_speed = 0;
-    actor->lateral_speed = 0;
-    actor->current_slip_metric = 0;
-
-    /* Tire-track emitter IDs default to 0xFF (no emitter). The vfx module
-     * uses 0xFF as the "free" sentinel when checking whether to allocate
-     * a new emitter from the 80-slot pool; leaving these zero means the
-     * acquire path never fires and tire marks never appear. */
-    actor->tire_track_emitter_FL = 0xFF;
-    actor->tire_track_emitter_FR = 0xFF;
-    actor->tire_track_emitter_RL = 0xFF;
-    actor->tire_track_emitter_RR = 0xFF;
-
-    /* Clear control state */
-    actor->steering_command = 0;
-    actor->encounter_steering_cmd = 0;  /* zero throttle */
-    actor->brake_flag = 0;
-    actor->handbrake_flag = 0;
-    actor->vehicle_mode = 0;
-    actor->damage_lockout = 0;
-
-    /* Match original ResetVehicleActorState @ 0x00405D70: write the
-     * sentinel world_pos.y = -0x40000000 and let IntegrateVehiclePoseAndContacts
-     * ground-snap via the per-wheel refresh_wheel_contacts -> wheel_contact_pos
-     * averaging path. force = (sentinel - ground_y) + gravity is hugely
-     * negative (< 0x801), so the grounded branch in refresh_wheel_contacts
-     * snaps wheel_contact_pos[i].y = ground_y, and integrate_pose then
-     * averages those 4 per-wheel values into world_pos.y.
+    /* Byte-faithful port of ResetVehicleActorState @ 0x00405D70 (54 instr).
+     * Every write below corresponds to a specific store in the listing.
+     * Field-by-field map: re/analysis/pilot_00405D70_audit.md.
      *
-     * Prior implementation probed at chassis XZ and wrote world_pos.y
-     * before integrate — that sampled ONE terrain point instead of the
-     * 4 rotated wheel XZs, causing per-slot Y deltas that scaled with
-     * grid offset (slot 1 -12416, slot 2 +4736, slot 4 -8000, ...).
-     * [CONFIRMED @ 0x00405D70] */
-    actor->world_pos.y = (int32_t)0xC0000000;
+     * The original touches EXACTLY 25 unique offsets. Earlier port versions
+     * added ~16 extra writes (slip, steering, tire-track-emitter IDs,
+     * center_suspension, damage_lockout, etc.). Those are removed here —
+     * the dependent paths reinitialise those fields elsewhere, or rely on
+     * residual values surviving the reset (notably the traffic recyclers
+     * 0x004353B0 / 0x00435940 / 0x00434DA0 which expect slip/steering
+     * history to persist across the call). */
 
-    /* Convert positions to float for render */
-    actor->render_pos.x = (float)actor->world_pos.x * (1.0f / 256.0f);
-    actor->render_pos.y = (float)actor->world_pos.y * (1.0f / 256.0f);
-    actor->render_pos.z = (float)actor->world_pos.z * (1.0f / 256.0f);
+    /* Capture PRE-state for the pilot probe BEFORE any mutation. */
+    td5_pilot_trace_00405D70_enter(actor);
 
-    /* Run one integrate step to settle suspension against the ground. */
+    /* 0x405D78 / 0x405D7E — clear flag bytes */
+    actor->surface_contact_flags = 0;       /* +0x376 */
+    actor->vehicle_mode = 0;                /* +0x379 */
+
+    /* 0x405D84-DA6 — zero 6 dwords: ang_vel + lin_vel block */
+    actor->angular_velocity_roll = 0;       /* +0x1C0 */
+    actor->angular_velocity_yaw = 0;        /* +0x1C4 */
+    actor->angular_velocity_pitch = 0;      /* +0x1C8 */
+    actor->linear_velocity_x = 0;           /* +0x1CC */
+    actor->linear_velocity_y = 0;           /* +0x1D0 */
+    actor->linear_velocity_z = 0;           /* +0x1D4 */
+
+    /* 0x405DA8 — zero frame_counter (int16) */
+    actor->frame_counter = 0;               /* +0x338 */
+
+    /* 0x405DAF — zero wheel_contact_bitmask (NOT damage_lockout at 0x37D) */
+    actor->wheel_contact_bitmask = 0;       /* +0x37C */
+
+    /* 0x405DB5 — sentinel world_pos.y so the upcoming integrate ground-snaps
+     * via the per-wheel refresh_wheel_contacts -> wheel_contact_pos averaging
+     * path. force = (sentinel - ground_y) + gravity is hugely negative
+     * (< 0x801), so the grounded branch in refresh_wheel_contacts snaps
+     * wheel_contact_pos[i].y = ground_y, and integrate_pose then averages
+     * those 4 per-wheel values into world_pos.y. [CONFIRMED @ 0x00405D70] */
+    actor->world_pos.y = (int32_t)0xC0000000;   /* +0x200 */
+
+    /* 0x405DBF — gear = 2 (first forward) */
+    actor->current_gear = TD5_GEAR_FIRST;       /* +0x36B */
+
+    /* 0x405DC6 — engine_speed_accum = 0x190 (idle RPM) */
+    actor->engine_speed_accum = TD5_ENGINE_IDLE_RPM;  /* +0x310 */
+
+    /* 0x405DD0-E4 — loop: wheel_suspension_pos[0..3] and wheel_spring_dv[0..3]
+     * are zeroed. The integrator (0x4057F0) settles to the correct equilibrium
+     * on the first tick from zero, producing the asymmetric front/rear
+     * positions purely from gravity-driven load_accum signs.
+     * Earlier "preload = (href*5+4)/9" heuristic produced +54/+43 FP delta vs
+     * original (frida physics_trace.csv 2026-05-02). */
+    for (int i = 0; i < 4; i++) {
+        actor->wheel_suspension_pos[i] = 0;     /* +0x2DC + i*4 */
+        actor->wheel_spring_dv[i] = 0;          /* +0x2EC + i*4 */
+    }
+
+    /* 0x405DE6-E41 — render_pos = (float)world_pos * 1/256, interleaved with
+     * display_angles/euler_accum stores. Source-ordering interleave is for
+     * x87/integer pipeline scheduling and has no visible effect since all
+     * fields are disjoint.
+     *
+     * DAT_0045D5E8 = 0x3B800000f = 1.0f/256.0f (verified via memory_read). */
+    actor->display_angles.roll  = 0;        /* +0x208 */
+    actor->euler_accum.roll     = 0;        /* +0x1F0 */
+    actor->display_angles.pitch = 0;        /* +0x20C */
+    actor->euler_accum.pitch    = 0;        /* +0x1F8 */
+    /* SAR EAX, 8 on signed dword → low16 captured by MOV [+0x20A], AX.
+     * Original has no &0xFFF mask; keep the int16 truncate faithful. */
+    actor->display_angles.yaw = (int16_t)(actor->euler_accum.yaw >> 8);  /* +0x20A */
+
+    actor->render_pos.x = (float)actor->world_pos.x * (1.0f / 256.0f);  /* +0x144 */
+    actor->render_pos.y = (float)actor->world_pos.y * (1.0f / 256.0f);  /* +0x148 */
+    actor->render_pos.z = (float)actor->world_pos.z * (1.0f / 256.0f);  /* +0x14C */
+
+    /* 0x405E47 — CALL IntegrateVehiclePoseAndContacts (settles suspension
+     * + ground-snaps world_pos.y from the sentinel). */
     td5_physics_integrate_pose(actor);
 
-    /* Post-integrate: zero all dynamics to prevent bounce (0x405E5E-0x405E7C) */
+    /* 0x405E4C-66 — zero wheel_load_accum[0..3] after the integrate */
     for (int i = 0; i < 4; i++)
-        actor->wheel_load_accum[i] = 0;
-    actor->angular_velocity_roll = 0;
-    actor->angular_velocity_pitch = 0;
-    actor->linear_velocity_y = 0;
+        actor->wheel_load_accum[i] = 0;         /* +0x2FC + i*4 */
 
-    TD5_LOG_I(LOG_TAG, "reset_actor_state: grounded Y=%d", actor->world_pos.y);
+    /* 0x405E69-75 — re-zero a subset of dynamics overwritten by integrate */
+    actor->angular_velocity_roll  = 0;          /* +0x1C0 */
+    actor->angular_velocity_pitch = 0;          /* +0x1C8 */
+    actor->linear_velocity_y      = 0;          /* +0x1D0 */
+
+    /* === pilot trace hook ===
+     * Fires once per reset (rare event — spawn/respawn/recycle); negligible
+     * cost. Schema in tools/diff_func_trace.py reads addr=0x00405D70. */
+    td5_pilot_trace_00405D70_leave(actor);
 }
 
 /* ========================================================================
- * ApplyMissingWheelVelocityCorrection (0x403EB0)
+ * ApplyMissingWheelVelocityCorrection (0x403EB0) -- BYTE-FAITHFUL PORT
  *
- * When wheel contact is asymmetric, applies corrective velocity bias
- * to prevent unrealistic spinning.
+ * Listing-driven port of the original. When the wheel-contact bitmask at
+ * actor+0x37C is in the "asymmetric" set, subtract a velocity bias from
+ * actor+0x1C8 (angular_velocity_pitch in port naming, but the original
+ * targets it as a raw int32 dword) computed from:
+ *
+ *   1. Average of the second int16 (offset +2) of each MISSING wheel's
+ *      contact-normal slot at actor+0x230 (8-byte stride, 4 wheels).
+ *   2. Multiplied by heading_normal.y (int16 @ actor+0x292), then
+ *      round-to-zero >> 12.
+ *   3. Body-frame projection of (linear_velocity_x, linear_velocity_z)
+ *      by display_angles.yaw (int16 @ actor+0x20A): each component
+ *      round-to-zero >>8, multiplied by cos / sin, subtracted, then
+ *      round-to-zero >> 12 and clamped to [-0x200, +0x200].
+ *   4. correction = (proj_clamped * avg_norm * 4), round-to-zero >> 8.
+ *   5. actor+0x1C8 -= correction.
+ *
+ * The "break" set (jump-table 0x404014 + index table 0x40401C, verified
+ * via memory_read 2026-05-14) is {0, 1, 2, 4, 6, 8, 9, 0xF}; everything
+ * else (3, 5, 7, A, B, C, D, E, plus any mask >0xF via the JA fall-through
+ * at 0x403EC1) takes the default body. The original has no divide-by-zero
+ * guard: for the "default" masks in 0..0xF, count is always >= 1.
+ * Bitmasks > 0xF (high bits set) could theoretically zero the count and
+ * crash; the original accepts that hazard and so does this port.
  * ======================================================================== */
+
+/* Round-to-zero arithmetic shift right.
+ * Mirrors original CDQ/AND mask/ADD/SAR idiom: for negative non-divisible
+ * x, yields one unit closer to zero than plain SAR. */
+static inline int32_t mwvc_sar_rz(int32_t x, int n) {
+    int32_t mask = (1 << n) - 1;
+    return (x + ((x >> 31) & mask)) >> n;
+}
 
 void td5_physics_missing_wheel_correction(TD5_Actor *actor)
 {
-    uint8_t mask = actor->wheel_contact_bitmask;
+    uint8_t *ap = (uint8_t *)actor;
+    uint32_t mask = (uint32_t)*(uint8_t *)(ap + 0x37C);   /* zero-extended BL */
 
-    /* Only run for asymmetric patterns (not fully grounded or fully airborne) */
-    switch (mask) {
-    case 0x0: case 0x1: case 0x2: case 0x4: case 0x6: case 0x8: case 0x9: case 0xF:
-        return; /* Symmetric or fully grounded/airborne */
-    default:
-        break;
-    }
-
-    /* Average Y-position of grounded wheels */
-    int32_t avg_y = 0;
-    int32_t count = 0;
-    for (int i = 0; i < 4; i++) {
-        if (!(mask & (1 << i))) {
-            avg_y += actor->wheel_contact_pos[i].y;
-            count++;
+    /* [0x403EBE..EC1] CMP EBX,0xF / JA 0x00403ED2 -- masks > 0xF take the
+     * default body. For mask in 0..0xF, dispatch via the 16-byte index
+     * table at 0x40401C (0=break, 1=default-body). */
+    if (mask <= 0xFu) {
+        /* Index table contents verified at 0x40401C:
+         *   00 00 00 01 00 01 00 01 00 00 01 01 01 01 01 00
+         * i.e. break for mask in {0,1,2,4,6,8,9,0xF}. */
+        switch (mask) {
+        case 0x0: case 0x1: case 0x2:
+        case 0x4: case 0x6:
+        case 0x8: case 0x9:
+        case 0xF:
+            return;
+        default:
+            break;  /* fall through to default body */
         }
     }
-    if (count == 0) return;
-    avg_y /= count;
 
-    /* Compute body-frame longitudinal speed */
-    int32_t heading = (actor->euler_accum.yaw >> 8) & 0xFFF;
-    int32_t cos_h = cos_fixed12(heading);
-    int32_t sin_h = sin_fixed12(heading);
-    int32_t v_long = (actor->linear_velocity_x * sin_h +
-                      actor->linear_velocity_z * cos_h) >> 12;
+    /* --- Default body (0x403ED2..0x404012) --- */
 
-    /* Compute correction from pitch angle * speed */
-    int32_t pitch = (actor->euler_accum.pitch >> 8) & 0xFFF;
-    if (pitch > 0x800) pitch -= 0x1000;
+    /* [0x403ED2..EFE] Initialize the four globals used as scratch by the
+     * loop. The port stores them as locals; the original publishes them
+     * to DAT_004830XX but those are not read by any other function in
+     * the static call graph (verified: only this function writes them). */
+    int16_t *wcn_p = (int16_t *)(ap + 0x230);   /* DAT_00483024: wheel_contact_normals base */
+    uint32_t i_idx = 0;                          /* DAT_00483028: wheel index counter */
+    int32_t  sum   = 0;                          /* DAT_00483020: accumulator (EAX) */
+    int32_t  cnt   = 0;                          /* DAT_00483038: missing-wheel count (EDI) */
+    int16_t *hn_p  = (int16_t *)(ap + 0x290);   /* DAT_00483044: heading_normal base */
 
-    int32_t correction = (pitch * v_long) >> 12;
+    /* [0x403F03..F33] Loop: for each of 4 wheels, if its bit is clear in
+     * the mask, add wcn[i+1] (the second int16 at offset +2) to sum and
+     * increment cnt. wcn_p advances by 4 int16s (8 bytes) per iter. */
+    do {
+        uint32_t bit = 1u << (i_idx & 0x1Fu);
+        if ((mask & bit) == 0) {
+            sum += (int32_t)wcn_p[1];      /* MOVSX EBP, word ptr [EDX+0x2] */
+            cnt += 1;
+        }
+        wcn_p += 4;                         /* ADD EDX, 0x8 */
+        i_idx += 1;
+    } while (i_idx < 4);
 
-    /* Clamp correction */
-    if (correction > 0x200) correction = 0x200;
-    if (correction < -0x200) correction = -0x200;
+    /* [0x403F35..F4E] sum = (sum / cnt) * heading_normal.y, round-to-zero >> 12.
+     * IDIV is signed; cnt is always >= 1 here (asserted by the dispatch
+     * filter above for masks 0..0xF). */
+    sum = (sum / cnt) * (int32_t)hn_p[1];           /* IMUL EAX, [ESI+0x292] */
+    int32_t avg_norm = mwvc_sar_rz(sum, 12);        /* CDQ/AND 0xFFF/ADD/SAR 12 */
+    /* avg_norm == DAT_00483020 at this point */
 
-    /* Apply to pitch angular velocity */
-    actor->angular_velocity_pitch -= correction;
+    /* [0x403F51..F8D] Cos/Sin of display_angles.yaw (int16 @ +0x20A).
+     * Both calls take the same MOVSX-promoted argument. Original then
+     * stores results to DAT_00483034 (cos) and DAT_0048303C/ECX (sin). */
+    int32_t yaw = (int32_t)*(int16_t *)(ap + 0x20A);
+    int32_t cos_v = cos_fixed12(yaw);               /* CALL 0x0040A6E0 */
+    int32_t sin_v = sin_fixed12(yaw);               /* CALL 0x0040A700 */
+
+    /* [0x403F8F..FC6] Body-frame projection of (lin_vel_x @+0x1CC,
+     * lin_vel_z @+0x1D4) by yaw:
+     *
+     *     proj = ((vx + rz_mask_8) >> 8) * cos - ((vz + rz_mask_8) >> 8) * sin
+     *     proj = round_to_zero_12(proj)
+     *
+     * Each load uses round-to-zero >>8 BEFORE the IMUL, matching the
+     * CDQ/AND 0xFF/ADD/SAR 8 idiom in the listing. Note ordering: cos
+     * pairs with linear_velocity_x (the first int32 at [EDI]), sin with
+     * linear_velocity_z (the third int32 at [EDI+8]). */
+    int32_t *vel = (int32_t *)(ap + 0x1CC);         /* DAT_00483040 */
+    int32_t vx_h = mwvc_sar_rz(vel[0], 8);          /* (lin_vel_x rounded) >> 8 */
+    int32_t vz_h = mwvc_sar_rz(vel[2], 8);          /* (lin_vel_z rounded) >> 8 */
+    int32_t proj = vx_h * cos_v - vz_h * sin_v;
+    int32_t proj_clamped = mwvc_sar_rz(proj, 12);   /* CDQ/AND 0xFFF/ADD/SAR 12 */
+
+    /* [0x403FC9..FEA] Clamp proj_clamped to [-0x200, +0x200]. The original
+     * stores back to DAT_00483048 after the clamp. */
+    if (proj_clamped < -0x200) {
+        proj_clamped = -0x200;
+    } else if (proj_clamped > 0x200) {
+        proj_clamped = 0x200;
+    }
+
+    /* [0x403FEF..04005] correction = (proj_clamped * avg_norm * 4) rz>>8. */
+    int32_t prod = proj_clamped * avg_norm;
+    prod <<= 2;                                      /* SHL EAX, 0x2 */
+    int32_t correction = mwvc_sar_rz(prod, 8);       /* CDQ/AND 0xFF/ADD/SAR 8 */
+
+    /* [0x0040400A] *(int32_t *)(actor + 0x1C8) -= correction. */
+    *(int32_t *)(ap + 0x1C8) -= correction;
 }
 
 /* ========================================================================
@@ -5834,224 +7289,539 @@ void td5_physics_missing_wheel_correction(TD5_Actor *actor)
  * "Stunned" state: zero forces, 1/16 velocity decay per frame.
  * ======================================================================== */
 
+/* Round-to-zero arithmetic shift right.
+ * Mirrors original CDQ/AND mask/ADD/SAR idiom: for negative non-divisible x,
+ * yields one unit closer to zero than plain SAR. Listing pattern @ 0x403E00..0E,
+ * 0x403E44..4D, 0x403E60..66, 0x403E77..7F. */
+static inline int32_t state0f_sar_rz(int32_t x, int n) {
+    int32_t mask = (1 << n) - 1;
+    return (x + (((x) >> 31) & mask)) >> n;
+}
+
+#ifdef TD5_PILOT_TRACE_00403D90
+#include "td5_pilot_trace_00403D90.h"
+#endif
+
 void td5_physics_state0f_damping(TD5_Actor *actor)
 {
-    /* Keep engine alive */
+#ifdef TD5_PILOT_TRACE_00403D90
+    td5_pilot_emit_00403D90_enter(actor, (uintptr_t)__builtin_return_address(0));
+#endif
+
+    /* Keep engine alive [@ 0x403D9E CALL 0x0042ED50] */
     update_engine_speed_smoothed(actor);
 
     /* Integrate wheel suspension with zero chassis-motion excitation.
-     * Matches original 0x00403DA9 call: IntegrateWheelSuspensionTravel(
-     *   actor, cardef, 0, 0). The wheel_load_accum term still drives
-     *  the spring; previous port hack of clearing wheel_spring_dv
-     * (the velocity state!) was incorrect — removed. */
+     * [@ 0x403DA5..A9: PUSH 0; PUSH 0; PUSH cardef; PUSH actor; CALL 0x403A20] */
     td5_physics_integrate_suspension(actor, 0, 0);
 
-    /* Zero surface contact flags and slip [CONFIRMED @ 0x403DC4-0x403DD0] */
+    /* Zero surface contact flags and slip [@ 0x403DB8/DBE/DC4 — written
+     * BEFORE the cos/sin calls in the listing, but the sequence is order-
+     * independent because cos/sin use only register state]. */
     actor->surface_contact_flags = 0;
     actor->front_axle_slip_excess = 0;
     actor->rear_axle_slip_excess = 0;
 
-    /* Compute body-frame longitudinal speed */
-    int32_t heading = (actor->euler_accum.yaw >> 8) & 0xFFF;
-    int32_t cos_h = cos_fixed12(heading);
-    int32_t sin_h = sin_fixed12(heading);
-    int32_t v_long = (actor->linear_velocity_x * sin_h +
-                      actor->linear_velocity_z * cos_h) >> 12;
-    int32_t v_lat  = (actor->linear_velocity_x * cos_h -
-                      actor->linear_velocity_z * sin_h) >> 12;
+    /* Body-frame longitudinal projection.
+     *
+     * Original sources display_angle_yaw (+0x20A int16) directly, NEG it,
+     * and passes -yaw to both Cos and Sin. Then truncates vx>>8, vz>>8 to
+     * int16 BEFORE multiplying.
+     * [@ 0x403DAE MOVSX EDI, [ESI+0x20A]; 0x403DB5 NEG EDI;
+     *  0x403DCA CALL CosFixed12bit; 0x403DD2 CALL SinFixed12bit;
+     *  0x403DDD..F7 SAR+MOVSX+IMUL+SUB sequence] */
+    int32_t neg_yaw = -(int32_t)actor->display_angles.yaw;     /* +0x20A int16 */
+    int32_t cos_neg_yaw = cos_fixed12((uint32_t)neg_yaw);
+    int32_t sin_neg_yaw = sin_fixed12(neg_yaw);
 
-    int32_t roll = (actor->euler_accum.roll >> 8) & 0xFFF;
-    if (roll > 0x800) roll -= 0x1000;
+    int32_t vz_hi = (int32_t)(int16_t)((uint32_t)actor->linear_velocity_z >> 8);
+    int32_t vx_hi = (int32_t)(int16_t)((uint32_t)actor->linear_velocity_x >> 8);
 
-    /* Roll correction: if low speed and small roll, apply speed/4 to roll
-     * angular velocity. This naturally steers the car back on-road.
-     * [CONFIRMED @ 0x403DF8-0x403E58] */
-    int32_t abs_v = v_long < 0 ? -v_long : v_long;
-    int32_t abs_r = roll < 0 ? -roll : roll;
-    if (abs_v < 0x21 && abs_r < 0x7F) {
-        actor->angular_velocity_roll += v_long >> 2;
+    /* proj = (int16)(vx>>8) * cos(-yaw) - (int16)(vz>>8) * sin(-yaw)
+     * Equivalently: (vx>>8)*cos(yaw) + (vz>>8)*sin(yaw) (body-frame longitudinal)
+     * [@ 0x403DF1..F7] */
+    int32_t proj = vx_hi * cos_neg_yaw - vz_hi * sin_neg_yaw;
+
+    /* sVar2 = ROUND-TO-ZERO( proj / 4096 ), then truncated to int16
+     * [@ 0x403E02 CDQ; 0x403E03 AND EDX,0xfff; 0x403E09 ADD EAX,EDX;
+     *  0x403E0B SAR EAX,0xc] */
+    int32_t proj_rz = state0f_sar_rz(proj, 12);
+    int16_t sVar2 = (int16_t)proj_rz;
+
+    /* roll12 = (((uint16)display_angle_roll - 0x800) & 0xfff) - 0x800
+     * Folds [0,0xfff] to signed [-0x800, 0x7FF].
+     * [@ 0x403DFB MOV CX,[ESI+0x208]; 0x403E11..1D SUB/AND/SUB sequence] */
+    int32_t roll12 = (int32_t)(((uint32_t)(uint16_t)actor->display_angles.roll - 0x800u) & 0xfffu);
+    roll12 -= 0x800;
+
+    /* Gate (APPLY when |sVar2| > 0x20 AND sign-compatible |roll12| < 0x80):
+     * Listing 0x403E23..3C decision tree:
+     *   CMP AX,0x20; JLE e33        — sVar2 <= 0x20 ?
+     *     [e33] CMP AX,-0x20; JGE SKIP   — if -0x20<=sVar2<=0x20 → skip
+     *           CMP ECX,-0x80; JLE SKIP  — sVar2 < -0x20: skip if roll12 <= -0x80
+     *           else APPLY
+     *   else (sVar2 > 0x20):
+     *           CMP ECX,0x80;  JGE SKIP  — skip if roll12 >= 0x80
+     *           else APPLY
+     * @ 0x403E23..3E.
+     * NOTE: prior port had the gate INVERTED (apply on low speed). The correct
+     * semantic is "recover from sustained body-frame longitudinal drift when
+     * roll is small in the corresponding direction". */
+    int apply = 0;
+    if (sVar2 > 0x20) {
+        if (roll12 < 0x80) apply = 1;
+    } else if (sVar2 < -0x20) {
+        if (roll12 > -0x80) apply = 1;
     }
 
-    /* Decay roll and pitch angular velocities by 1/16 per frame.
-     * [CONFIRMED @ 0x403E58-0x403EA4]
-     * NOTE: yaw and linear velocities are NOT decayed — the car maintains
-     * momentum while airborne. Previous port code incorrectly decayed all
-     * three, causing airborne cars to lose speed. */
-    actor->angular_velocity_roll  -= actor->angular_velocity_roll >> 4;
-    actor->angular_velocity_pitch -= actor->angular_velocity_pitch >> 4;
+    if (apply) {
+        /* angular_velocity_roll += sar_rz(sVar2, 2)
+         * [@ 0x403E3E..52: MOV ECX,[ESI+0x1C0]; MOVSX EAX,AX; CDQ; AND EDX,3;
+         *  ADD EAX,EDX; SAR EAX,2; ADD ECX,EAX; MOV [ESI+0x1C0],ECX] */
+        actor->angular_velocity_roll += state0f_sar_rz((int32_t)sVar2, 2);
+    }
 
-    /* Accumulate slip from body-frame speeds [CONFIRMED @ 0x403E74-0x403E8C] */
-    actor->accumulated_tire_slip_x += (int16_t)(v_lat >> 8);
-    actor->accumulated_tire_slip_z += (int16_t)(v_long >> 8);
+    /* Decay roll and pitch angular velocities by 1/16 per frame with RZ rounding.
+     * [@ 0x403E58..6B: roll  — av -= sar_rz(av,4)]
+     * [@ 0x403E71..A5: pitch — same pattern, +0x1C8] */
+    actor->angular_velocity_roll  -= state0f_sar_rz(actor->angular_velocity_roll,  4);
+    actor->angular_velocity_pitch -= state0f_sar_rz(actor->angular_velocity_pitch, 4);
+
+    /* Accumulate slip from already-stored body-frame speeds.
+     * IMPORTANT: original reads lateral_speed (+0x318) / longitudinal_speed (+0x314)
+     * directly — NOT re-projecting from world velocity. Both are int32 (24.8 fp);
+     * plain SAR 8 + 16-bit truncate (DX/AX register) is used (no RZ rounding here).
+     * [@ 0x403E7F MOV EDX,[ESI+0x318]; 0x403E8A MOV EAX,[ESI+0x314];
+     *  0x403E90 SAR EDX,8; 0x403E93 ADD word[ESI+0x340],DX;
+     *  0x403E9A SAR EAX,8; 0x403E9D ADD word[ESI+0x342],AX] */
+    actor->accumulated_tire_slip_x += (int16_t)(actor->lateral_speed >> 8);
+    actor->accumulated_tire_slip_z += (int16_t)(actor->longitudinal_speed >> 8);
+
+#ifdef TD5_PILOT_TRACE_00403D90
+    td5_pilot_emit_00403D90_leave(actor);
+#endif
 }
 
 /* ========================================================================
  * Engine & Transmission
  * ======================================================================== */
 
-/* --- UpdateVehicleEngineSpeedSmoothed (0x42ED50) ---
+/* --- UpdateVehicleEngineSpeedSmoothed (0x0042ED50) ---
  *
- * Handles neutral/reverse gear RPM:
- * smoothly approaches idle (400) or a throttle-proportional target.
+ * Byte-faithful port of FUN_0042ED50 (RE: TD5_pool11 read-only listing,
+ * audited 2026-05-14). Mirrors the original x86 control flow line-for-line:
+ *
+ *   0x42ED50  PUSH ESI                          ; entry
+ *   0x42ED51  MOV  ESI, [ESP+8]                 ; actor
+ *   0x42ED55  MOV  EAX, [ESI+0x1bc]             ; tuning_data_ptr
+ *   0x42ED5B  MOVSX ECX, WORD [EAX+0x72]        ; ECX = redline (int)
+ *   0x42ED5F  MOV  AL,  BYTE [ESI+0x36d]        ; AL  = brake_flag
+ *   0x42ED65  TEST AL, AL
+ *   0x42ED67  JNZ  0x42ED9A                     ; brake → idle (400)
+ *   0x42ED69  MOV  DX,  WORD [ESI+0x33e]        ; DX  = encounter_steering_cmd
+ *   0x42ED70  TEST DX, DX
+ *   0x42ED73  JL   0x42ED9A                     ; throttle<0 → idle (400)
+ *   0x42ED75  MOVSX EDX, DX                     ; EDX = throttle (int)
+ *   0x42ED78  LEA  EAX, [ECX-0x190]             ; EAX = redline - 400
+ *   0x42ED7E  IMUL EAX, EDX                     ; EAX *= throttle
+ *   0x42ED81  CDQ
+ *   0x42ED82  AND  EDX, 0xff                    ; round-toward-zero bias
+ *   0x42ED88  ADD  EAX, EDX
+ *   0x42ED8A  SAR  EAX, 8                       ; >> 8 (signed, round->0)
+ *   0x42ED8D  CMP  ECX, EAX
+ *   0x42ED8F  JGE  0x42ED93
+ *   0x42ED91  MOV  EAX, ECX                     ; EAX = min(EAX, redline)
+ *   0x42ED93  ADD  EAX, 0x190                   ; target = step + 400
+ *   0x42ED98  JMP  0x42ED9F
+ *   0x42ED9A  MOV  EAX, 0x190                   ; idle target = 400
+ *   0x42ED9F  MOV  ECX, [ESI+0x310]             ; ECX = engine_speed_accum
+ *   0x42EDA5  CMP  EAX, ECX
+ *   0x42EDA7  JLE  0x42EDCA                     ; target <= rpm → down path
+ * UP path (target > rpm):
+ *   0x42EDA9  SUB  EAX, ECX                     ; EAX = target - rpm (>0)
+ *   0x42EDAB  CDQ
+ *   0x42EDAC  AND  EDX, 0xf                     ; round bias (no-op for >0)
+ *   0x42EDAF  ADD  EAX, EDX
+ *   0x42EDB1  SAR  EAX, 4                       ; step = delta >> 4
+ *   0x42EDB4  CMP  EAX, 0x190
+ *   0x42EDB9  JLE  0x42EDE1                     ; step <= 400 → store path
+ *   0x42EDBB  MOV  EAX, 0x190                   ; clamp step to 400
+ *   0x42EDC0  ADD  ECX, EAX                     ; rpm += step
+ *   0x42EDC2  MOV  [ESI+0x310], ECX             ; store
+ *   0x42EDC8  POP ESI; RET
+ * DOWN path (target <= rpm):
+ *   0x42EDCA  SUB  EAX, ECX                     ; EAX = target - rpm (<=0)
+ *   0x42EDCC  CDQ
+ *   0x42EDCD  AND  EDX, 0xf                     ; round bias = 0xf when <0
+ *   0x42EDD0  ADD  EAX, EDX
+ *   0x42EDD2  SAR  EAX, 4                       ; step = delta >> 4 (<=0)
+ *   0x42EDD5  CMP  EAX, 0xc8
+ *   0x42EDDA  JLE  0x42EDE1                     ; always-taken in practice
+ *   0x42EDDC  MOV  EAX, 0xc8                    ; (dead) clamp to 200
+ *   0x42EDE1  ADD  ECX, EAX                     ; rpm += step (negative)
+ *   0x42EDE3  MOV  [ESI+0x310], ECX             ; store
+ *   0x42EDE9  POP ESI; RET
+ *
+ * Notes preserved from prior port audit:
+ *   - No post-store clamp (rpm is not bounded against redline or 400 after
+ *     the slew — original 0x42EDC2/0x42EDE3 stores rpm unconditionally).
+ *   - Down-path clamp to 200 at 0x42EDDC is unreachable: in the down branch
+ *     EAX is the signed (target-rpm)>>4 which is <= 0, so the JLE EAX,0xc8
+ *     at 0x42EDDA is always taken. We preserve the clamp anyway so the C
+ *     mirrors the listing exactly.
+ *
+ * Field offsets verified vs td5_types.h:
+ *   +0x1bc  tuning_data_ptr        +0x310  engine_speed_accum
+ *   +0x33e  encounter_steering_cmd +0x36d  brake_flag
+ *   tuning[+0x72] = redline (int16)
  */
 static void update_engine_speed_smoothed(TD5_Actor *actor)
 {
-    int32_t rpm = actor->engine_speed_accum;
-    int32_t throttle = (int32_t)actor->encounter_steering_cmd;
+    /* MOVSX ECX, WORD [tuning+0x72]  [@ 0x42ED5B] */
     int32_t redline = (int32_t)PHYS_S(actor, 0x72);
+
     int32_t target;
-
-    if (!actor->brake_flag && throttle >= 0) {
-        target = ((redline - 400) * throttle) >> 8;
-        if (target > redline) target = redline;
-        target += 400;
+    /* TEST AL,AL / JNZ + TEST DX,DX / JL  [@ 0x42ED65, 0x42ED70] */
+    if (actor->brake_flag != 0 || (int16_t)actor->encounter_steering_cmd < 0) {
+        /* MOV EAX, 0x190  [@ 0x42ED9A] */
+        target = 0x190;
     } else {
-        target = 400; /* idle */
+        /* MOVSX EDX, DX  [@ 0x42ED75] */
+        int32_t throttle = (int32_t)(int16_t)actor->encounter_steering_cmd;
+        /* LEA EAX,[ECX-0x190]; IMUL EAX,EDX  [@ 0x42ED78,0x42ED7E] */
+        int32_t v = (redline - 0x190) * throttle;
+        /* CDQ; AND EDX,0xff; ADD EAX,EDX; SAR EAX,8  [@ 0x42ED81-0x42ED8A]
+         * Signed round-toward-zero divide by 256. */
+        v = (v + (((int32_t)((uint32_t)v >> 31) ? 0xff : 0))) >> 8;
+        /* CMP ECX,EAX / JGE / MOV EAX,ECX  [@ 0x42ED8D-0x42ED91]
+         * EAX = min(EAX, redline). */
+        if (redline < v) v = redline;
+        /* ADD EAX, 0x190  [@ 0x42ED93] */
+        target = v + 0x190;
     }
 
-    /* Asymmetric slew: approach at delta>>4, clamped to max step.
-     * Original (0x42ED80-0x42EDA0): delta>>4 smooth approach,
-     * fast slew triggers when (delta>>4) > 400 (up) or > 200 (down).
-     * [CONFIRMED @ 0x42ED92: 400 up clamp, 0x42ED88: >>4 shift] */
-    int32_t delta = rpm - target;
-    if (delta > 0) {
-        int32_t step = delta >> 4;
-        if (step > 200) step = 200;
-        rpm -= step;
-    } else if (delta < 0) {
-        int32_t step = (-delta) >> 4;
-        if (step > 400) step = 400;
-        rpm += step;
+    /* MOV ECX,[ESI+0x310]  [@ 0x42ED9F] */
+    int32_t rpm = actor->engine_speed_accum;
+
+    /* CMP EAX,ECX / JLE 0x42EDCA  [@ 0x42EDA5-0x42EDA7] */
+    int32_t step;
+    if (target > rpm) {
+        /* UP path: SUB EAX,ECX  [@ 0x42EDA9] */
+        int32_t delta = target - rpm;
+        /* CDQ; AND EDX,0xf; ADD EAX,EDX; SAR EAX,4  [@ 0x42EDAB-0x42EDB1]
+         * delta is strictly > 0 here, so the round bias is 0; plain >>4. */
+        step = (delta + (((int32_t)((uint32_t)delta >> 31) ? 0xf : 0))) >> 4;
+        /* CMP EAX,0x190 / JLE / MOV EAX,0x190  [@ 0x42EDB4-0x42EDBB] */
+        if (step > 0x190) step = 0x190;
+    } else {
+        /* DOWN path: SUB EAX,ECX  [@ 0x42EDCA] — delta <= 0 */
+        int32_t delta = target - rpm;
+        /* Round-toward-zero divide by 16 for negative delta. */
+        step = (delta + (((int32_t)((uint32_t)delta >> 31) ? 0xf : 0))) >> 4;
+        /* CMP EAX,0xc8 / JLE / MOV EAX,0xc8  [@ 0x42EDD5-0x42EDDC]
+         * Unreachable in practice — step <= 0 here — but kept for fidelity. */
+        if (step > 0xc8) step = 0xc8;
     }
 
-    /* Original @ 0x42EDC2 / 0x42EDE3 stores rpm unconditionally — NO
-     * post-store clamps. Previously the port added `if (rpm > redline)
-     * rpm = redline; if (rpm < 400) rpm = 400;` here, which blocked the
-     * natural overshoot behavior of the asymmetric slew. Removed to
-     * match the original. [CONFIRMED @ 0x42EDC2, 0x42EDE3] */
-    actor->engine_speed_accum = rpm;
+    /* ADD ECX,EAX; MOV [+0x310],ECX  [@ 0x42EDC0/EDC2 or 0x42EDE1/EDE3] */
+    actor->engine_speed_accum = rpm + step;
 }
 
-/* --- UpdateEngineSpeedAccumulator (0x42EDF0) --- */
+/* --- UpdateEngineSpeedAccumulator (0x0042EDF0) ---
+ *
+ * Byte-faithful port of FUN_0042EDF0 (RE: TD5_pool7 read-only listing,
+ * audited 2026-05-14). Mirrors the original x86 control flow line-for-line:
+ *
+ *   0x42EDF0  PUSH ESI                          ; entry
+ *   0x42EDF1  MOV  ESI, [ESP+8]                 ; ESI = actor (param_1)
+ *   0x42EDF5  XOR  EAX, EAX
+ *   0x42EDF7  MOV  AL,  BYTE [ESI+0x36b]        ; AL  = current_gear
+ *   0x42EDFD  PUSH EDI
+ *   0x42EDFE  MOV  EDI, EAX                     ; EDI = gear (zero-extended)
+ *   0x42EE00  CMP  EDI, 0x1
+ *   0x42EE03  JNZ  0x42EE11                     ; gear != 1 → forward path
+ *   0x42EE05  PUSH ESI
+ *   0x42EE06  CALL 0x0042ed50                   ; UpdateVehicleEngineSpeedSmoothed
+ *   0x42EE0B  ADD  ESP, 0x4
+ *   0x42EE0E  POP  EDI; POP ESI; RET            ; gear==1: neutral helper + ret
+ * Forward path (gear != 1):
+ *   0x42EE11  MOV  EAX, [ESI+0x314]             ; EAX = longitudinal_speed (int32)
+ *   0x42EE17  SAR  EAX, 0x8                     ; EAX = speed >> 8 (signed arith)
+ *   0x42EE1A  CDQ                               ; EDX = sign(EAX)
+ *   0x42EE1B  XOR  EAX, EDX
+ *   0x42EE1D  SUB  EAX, EDX                     ; EAX = abs(speed >> 8)
+ *   0x42EE1F  MOV  EDX, [ESP+0x10]              ; EDX = param_2 (tuning_data_ptr)
+ *   0x42EE23  MOVSX EDX, WORD [EDX+EDI*2+0x2e]  ; EDX = gear_ratio (signed int16)
+ *   0x42EE28  MOV  ECX, [ESI+0x310]             ; ECX = engine_speed_accum (rpm)
+ *   0x42EE2E  IMUL EAX, EDX                     ; EAX *= gear_ratio
+ *   0x42EE31  LEA  EAX, [EAX+EAX*4]             ; EAX *= 5
+ *   0x42EE34  LEA  EAX, [EAX+EAX*8]             ; EAX *= 9  (cumulative *45 = 0x2D)
+ *   0x42EE37  CDQ
+ *   0x42EE38  AND  EDX, 0xfff                   ; round-toward-zero bias for SAR 12
+ *   0x42EE3E  ADD  EAX, EDX
+ *   0x42EE40  SAR  EAX, 0xc                     ; EAX = (abs*ratio*45) >> 12 (signed r->0)
+ *   0x42EE43  ADD  EAX, 0x190                   ; target = step + 400
+ *   0x42EE48  MOV  EDX, ECX                     ; EDX = rpm
+ *   0x42EE4A  SUB  EDX, EAX                     ; EDX = delta = rpm - target
+ *   0x42EE4C  CMP  EDX, 0x320
+ *   0x42EE52  JLE  0x42EE5C                     ; delta <= 0x320 → not fast-down
+ *   0x42EE54  SUB  ECX, 0xc8                    ; fast-down: rpm -= 200
+ *   0x42EE5A  JMP  0x42EE79                     ; → clamp/store
+ *   0x42EE5C  CMP  EDX, 0xfffffce0              ; (-800)
+ *   0x42EE62  JGE  0x42EE6C                     ; delta >= -800 → smooth
+ *   0x42EE64  ADD  ECX, 0xc8                    ; fast-up: rpm += 200
+ *   0x42EE6A  JMP  0x42EE79                     ; → clamp/store
+ * Smooth path (-800 <= delta <= 0x320):
+ *   0x42EE6C  SUB  EAX, ECX                     ; EAX = target - rpm (= -delta)
+ *   0x42EE6E  CDQ
+ *   0x42EE6F  AND  EDX, 0x3                     ; round-toward-zero bias for SAR 2
+ *   0x42EE72  ADD  EAX, EDX
+ *   0x42EE74  SAR  EAX, 0x2                     ; step = (target-rpm) >> 2 (signed r->0)
+ *   0x42EE77  ADD  ECX, EAX                     ; rpm += step
+ * Clamp/store:
+ *   0x42EE79  MOV  EAX, [ESI+0x1bc]             ; EAX = tuning_data_ptr (actor field)
+ *   0x42EE7F  MOVSX EAX, WORD [EAX+0x72]        ; EAX = redline (int16)
+ *   0x42EE83  CMP  ECX, EAX
+ *   0x42EE85  JLE  0x42EE89
+ *   0x42EE87  MOV  ECX, EAX                     ; rpm = min(rpm, redline)
+ *   0x42EE89  POP  EDI
+ *   0x42EE8A  MOV  [ESI+0x310], ECX             ; store rpm
+ *   0x42EE90  POP  ESI; RET
+ *
+ * Notes:
+ *   - Original takes a SECOND param (tuning_data_ptr) loaded from [ESP+0x10].
+ *     Both callers (0x00404030 UpdatePlayerVehicleDynamics, 0x00404EC0
+ *     UpdateAIVehicleDynamics) cache EBX = [actor+0x1bc] and push it as the
+ *     second arg, so param_2 == actor->tuning_data_ptr in practice. The port
+ *     uses get_phys(actor) (which reads +0x1bc) and reads the gear ratio at
+ *     phys[+0x2e + gear*2] — equivalent in effect.
+ *   - abs() is computed on the SHIFTED value (`abs(speed >> 8)`), NOT on the
+ *     raw speed. For negative speed this rounds DOWN before abs, which
+ *     differs from `abs(speed) >> 8` by 1 in the absolute-value bin for
+ *     speeds that are not a multiple of 256. The prior port used
+ *     `abs(speed) >> 8`; this version mirrors the listing.
+ *   - Both SAR steps (>>12 and >>2 in the smooth path) include the explicit
+ *     CDQ+AND+ADD round-toward-zero bias used by the original — required for
+ *     bit-exact parity on negative intermediates (the >>12 step's intermediate
+ *     EAX is unsigned in practice because abs() preceded it, so the bias is
+ *     a no-op there, but kept for structural fidelity).
+ *   - Fast-down threshold is `delta > 0x320` (i.e. >= 0x321), from
+ *     `CMP EDX,0x320; JLE smooth`. Prior port used `> 0x321` (off-by-one) —
+ *     fixed here to match the listing exactly.
+ *   - Smooth-path bias `+ (sign? 3 : 0)` before `>> 2` was missing from the
+ *     prior port; added so the divide-by-4 rounds toward zero (matters when
+ *     target < rpm by an amount not divisible by 4).
+ *   - Final clamp is UPPER-only against redline. No 400 floor (original does
+ *     not clamp the lower bound here — see 0x42EE83 single CMP/JLE/MOV).
+ *
+ * Field offsets verified vs td5_types.h:
+ *   +0x1bc  tuning_data_ptr            +0x314  longitudinal_speed
+ *   +0x310  engine_speed_accum         +0x36b  current_gear (byte)
+ *   tuning[+0x2e + gear*2] = gear_ratio (int16)
+ *   tuning[+0x72]          = redline    (int16)
+ */
 void td5_physics_update_engine_speed(TD5_Actor *actor)
 {
     int16_t *phys = get_phys(actor);
     if (!phys) return;
 
-    int32_t gear = (int32_t)actor->current_gear;
+    /* MOVZX EDI, BYTE [ESI+0x36b]  [@ 0x42EDF5-0x42EDFE] — gear is treated as
+     * an unsigned byte index (XOR EAX,EAX / MOV AL,...). */
+    int32_t gear = (int32_t)(uint32_t)(uint8_t)actor->current_gear;
 
-    /* Neutral: use smoothed idle/rev path */
+    /* CMP EDI,1 / JNZ  [@ 0x42EE00-0x42EE03] — gear==1 → neutral helper. */
     if (gear == 1) {
         update_engine_speed_smoothed(actor);
         return;
     }
 
-    /* Target RPM from speed and gear ratio */
-    int32_t abs_speed = actor->longitudinal_speed;
-    if (abs_speed < 0) abs_speed = -abs_speed;
-    int32_t gear_ratio = (int32_t)PHYS_S(actor, 0x2E + gear * 2);
+    /* MOV EAX,[ESI+0x314]  [@ 0x42EE11] */
+    int32_t lspd = actor->longitudinal_speed;
+    /* SAR EAX,8  [@ 0x42EE17] — arithmetic shift, rounds toward -inf for neg. */
+    int32_t lspd_shr8 = (int32_t)(lspd >> 8); /* signed >> in two's complement */
+    /* CDQ; XOR EAX,EDX; SUB EAX,EDX  [@ 0x42EE1A-0x42EE1D] — abs(EAX). */
+    int32_t abs_shr8 = lspd_shr8 < 0 ? -lspd_shr8 : lspd_shr8;
 
-    /* target = abs(speed/256) * gear_ratio * 0x2D / 4096 + 400 */
-    int32_t target = ((abs_speed >> 8) * gear_ratio * 0x2D) >> 12;
-    target += 400;
+    /* MOVSX EDX,WORD [param_2 + gear*2 + 0x2e]  [@ 0x42EE23] — gear ratio.
+     * param_2 is the caller-cached tuning_data_ptr (== actor->tuning_data_ptr). */
+    int32_t gear_ratio = (int32_t)PHYS_S(actor, 0x2e + gear * 2);
 
+    /* MOV ECX,[ESI+0x310]  [@ 0x42EE28] */
     int32_t rpm = actor->engine_speed_accum;
+
+    /* IMUL EAX,EDX; LEA*5; LEA*9  [@ 0x42EE2E-0x42EE34] — EAX = abs*ratio*45. */
+    int32_t prod = abs_shr8 * gear_ratio * 0x2d;
+
+    /* CDQ; AND EDX,0xfff; ADD EAX,EDX; SAR EAX,12  [@ 0x42EE37-0x42EE40]
+     * — signed round-toward-zero divide by 4096. */
+    int32_t step12 = (prod + (((int32_t)((uint32_t)prod >> 31)) ? 0xfff : 0)) >> 12;
+
+    /* ADD EAX,0x190  [@ 0x42EE43] — target = step + 400. */
+    int32_t target = step12 + 0x190;
+
+    /* MOV EDX,ECX; SUB EDX,EAX  [@ 0x42EE48-0x42EE4A] — delta = rpm - target. */
     int32_t delta = rpm - target;
 
-    /* Asymmetric slew toward target */
-    if (delta > 0x321) {
-        rpm -= 200;         /* fast downward slew */
+    /* CMP EDX,0x320 / JLE  [@ 0x42EE4C-0x42EE52] — fast-down on delta > 0x320. */
+    if (delta > 0x320) {
+        /* SUB ECX,0xc8  [@ 0x42EE54] */
+        rpm = rpm - 0xc8;
+        /* JMP clamp/store  [@ 0x42EE5A] */
     } else if (delta < -800) {
-        rpm += 200;         /* fast upward slew */
+        /* CMP EDX,-800 / JGE smooth → fall-through fast-up
+         * ADD ECX,0xc8  [@ 0x42EE64] */
+        rpm = rpm + 0xc8;
+        /* JMP clamp/store  [@ 0x42EE6A] */
     } else {
-        rpm += (target - rpm) >> 2;  /* smooth approach */
+        /* Smooth path  [@ 0x42EE6C-0x42EE77] */
+        /* SUB EAX,ECX  — EAX = target - rpm (= -delta). */
+        int32_t toward = target - rpm;
+        /* CDQ; AND EDX,3; ADD EAX,EDX; SAR EAX,2 — signed r->0 divide by 4. */
+        int32_t s = (toward + (((int32_t)((uint32_t)toward >> 31)) ? 3 : 0)) >> 2;
+        /* ADD ECX,EAX. */
+        rpm = rpm + s;
     }
 
-    /* Cap at redline — original @ 0x42EE6F-0x42EE7A clamps only the UPPER
-     * bound; it does NOT have a 400 floor. Previously the port had
-     * `if (rpm < 400) rpm = 400;` which blocked the valid low-RPM
-     * transient during shifts. [CONFIRMED @ 0x42EE7A] */
+    /* Clamp/store  [@ 0x42EE79-0x42EE90] — upper clamp at redline, no floor. */
     int32_t redline = (int32_t)PHYS_S(actor, 0x72);
     if (rpm > redline) rpm = redline;
 
     actor->engine_speed_accum = rpm;
 }
 
+/* Round-to-zero signed divide by 256 — byte-exact port of the 0x0042EF10
+ * idiom: CDQ ; AND EDX, 0xFF ; ADD EAX, EDX ; SAR EAX, 8.
+ *
+ *   For x >= 0: plain SAR by 8 (low byte truncated).
+ *   For x <  0 with (x & 0xFF) != 0: (x + 0xFF) >> 8 — one unit closer to zero
+ *     than plain SAR (truncated division by 256). */
+static inline int32_t sar8_rz_42EF10(int32_t x) {
+    return ((x < 0) ? (x + 0xFF) : x) >> 8;
+}
+
 /* --- UpdateAutomaticGearSelection (0x0042EF10) ---
  *
- * [CONFIRMED via 2026-04-11 full Ghidra pass.] Key port-vs-original
- * corrections over the prior implementation:
+ * Byte-exact port from listing 0x0042EF10..0x0042F008 (73 instructions).
  *
- *   1. CACHED GEAR for threshold indexing. The original loads current_gear
- *      into EAX once at 0x0042EF21 and never refreshes it before the
- *      upshift/downshift index reads (`MOVSX [ESI+EAX*2+0x3e]` at 0x42EF52
- *      and `MOVSX [ESI+EAX*2+0x4e]` at 0x42EFF1). When the reverse→forward
- *      promotion writes memory (gear=2), the cached EAX stays at 0, so the
- *      upshift reads `phys[0x3E + 0]` (reverse entry), NOT `phys[0x42]`.
- *      The prior port updated its local `gear` variable in the promotion
- *      path and then used it for indexing, causing a one-tick upshift race
- *      on the first post-reverse tick.
+ * Automatic transmission FSM. Promotes reverse→first when throttle goes
+ * positive, force-reverses on negative throttle, applies upshift/downshift
+ * based on per-gear RPM thresholds, and on upshift fires a drivetrain
+ * kick across the four wheel_spring_dv slots.
  *
- *   2. DRIVETRAIN KICK into wheel_spring_dv on upshift. The original
- *      spreads a per-gear torque pulse across the four wheel force-accum
- *      slots (+0x2EC/+0x2F0/+0x2F4/+0x2F8) via the table at 0x00467394
- *      (= {0, 0, 0x100, 0xC0, 0x80, 0x40, 0x20, 0x10, 0}, indexed by the
- *      NEW post-upshift gear). FL/FR get +k, RL/RR get -k. The prior port
- *      omitted this entirely. */
+ *   actor + 0x33E  encounter_steering_cmd   int16 (signed throttle)  → EDX
+ *   actor + 0x36B  current_gear             uint8                     → AL/BL
+ *   actor + 0x310  engine_speed_accum       int32                     → EDI
+ *   actor + 0x314  longitudinal_speed       int32                     → EBX
+ *   actor + 0x2EC..0x2F8  wheel_spring_dv[4] int32 (FL/FR/RL/RR)
+ *   phys + 0x3E + gear*2  upshift threshold int16  (indexed by CACHED gear)
+ *   phys + 0x4E + gear*2  downshift threshold int16 (indexed by CACHED gear)
+ *   phys + 0x68           drive_torque_mult  int16
+ *   DAT_00467394          g_gearTorqueTable  int32[9] = {0,0,0x100,0xC0,
+ *                                            0x80,0x40,0x20,0x10,0}
+ *
+ * KEY semantics from the listing:
+ *
+ *   1. CACHED GEAR INDEXING.  At 0x0042EF1D the function `XOR EAX,EAX` then
+ *      `MOV AL,[ECX+0x36B]` zero-extends current_gear into EAX. This cached
+ *      EAX value is used for BOTH the upshift threshold read at 0x0042EF52
+ *      (`MOVSX EBX,[ESI+EAX*2+0x3E]`) and the downshift threshold read at
+ *      0x0042EFF1 (`MOVSX EDX,[ESI+EAX*2+0x4E]`), AND for the `CMP EAX,0x8`
+ *      gate at 0x0042EF5F and `CMP EAX,0x2` gate at 0x0042EFFA. The cache
+ *      is NEVER refreshed across the function body — even after the
+ *      reverse→2 promotion writes memory at 0x0042EF47, EAX stays at 0.
+ *
+ *   2. DRIVETRAIN KICK.  On upshift the original spreads a per-gear torque
+ *      pulse across wheel_spring_dv via the table at 0x00467394, indexed
+ *      by the NEW post-upshift gear (BL after INC at 0x0042EF78).
+ *      +0x2EC (FL) and +0x2F0 (FR) ADD k; +0x2F4 (RL) and +0x2F8 (RR)
+ *      SUB k. The formula is:
+ *          tmp1 = sar8_rz(phys[0x68] * throttle * 0x1A)
+ *          tmp2 = tmp1 * g_gearTorqueTable[new_gear & 0xFF]
+ *          k    = sar8_rz(tmp2)
+ */
 void td5_physics_auto_gear_select(TD5_Actor *actor)
 {
     int16_t *phys = get_phys(actor);
     if (!phys) return;
 
-    /* Cache up-front — never refresh across the function body. */
-    int32_t throttle    = (int32_t)actor->encounter_steering_cmd;
-    uint8_t gear_cached = actor->current_gear;
-    int32_t rpm         = actor->engine_speed_accum;
+    /* Listing 0x0042EF14: MOVSX EDX, [ECX+0x33E]  (signed throttle). */
+    int32_t throttle = (int32_t)actor->encounter_steering_cmd;
 
-    /* Negative throttle → force reverse and return. */
+    /* Listing 0x0042EF1D-21: XOR EAX,EAX ; MOV AL,[ECX+0x36B].
+     * EAX holds the zero-extended current_gear and is NEVER refreshed. */
+    uint32_t gear_cached = (uint32_t)actor->current_gear;
+
+    /* Listing 0x0042EF28: MOV EDI, [ECX+0x310]  (engine_speed_accum). */
+    int32_t rpm = actor->engine_speed_accum;
+
+    /* Listing 0x0042EF1F-3A: TEST EDX,EDX ; JGE 0x42EF3B.
+     * Negative throttle → write gear=0 (reverse) and RET. */
     if (throttle < 0) {
-        actor->current_gear = TD5_GEAR_REVERSE;
+        actor->current_gear = (uint8_t)0;
         return;
     }
 
-    /* Already in reverse: promote to first forward in MEMORY only when
-     * throttle > 0. Cached value is intentionally NOT updated — matches
-     * the original's non-refreshed EAX cache. */
-    if (gear_cached == TD5_GEAR_REVERSE) {
+    /* Listing 0x0042EF3B-4D: if (EAX == 0) check throttle, promote to 2.
+     *   TEST EAX,EAX ; JNZ 0x42EF4E
+     *   TEST EDX,EDX ; JLE 0x42F005   (cleanup-RET when throttle <= 0)
+     *   MOV BYTE PTR [ECX+0x36B], 0x2  (gear=2 in memory only) */
+    if (gear_cached == 0u) {
         if (throttle <= 0) return;
-        actor->current_gear = TD5_GEAR_FIRST;
-        /* gear_cached stays 0 on purpose */
+        actor->current_gear = (uint8_t)2;
+        /* gear_cached intentionally NOT refreshed — original keeps EAX=0. */
     }
 
-    /* Upshift test — indexed by gear_cached (pre-promotion). */
-    int32_t up_thresh = (int32_t)PHYS_S(actor, 0x3E + gear_cached * 2);
+    /* Listing 0x0042EF4E: MOV ESI, [ESP+0x14]  (param_2 == phys table). */
 
-    if (actor->slot_index == 0 && (actor->frame_counter % 30u) == 0u) {
-        TD5_LOG_I(LOG_TAG,
-                  "AUTO_GEAR: gear=%d rpm=%d up_thresh=%d long_spd=%d throttle=%d f378=%d",
-                  gear_cached, rpm, up_thresh, actor->longitudinal_speed,
-                  throttle, *((const uint8_t *)actor + 0x378));
-    }
+    /* Listing 0x0042EF52: MOVSX EBX, [ESI + EAX*2 + 0x3E]  upshift threshold. */
+    int32_t up_thresh = (int32_t)PHYS_S(actor, 0x3E + (int32_t)gear_cached * 2);
 
+    /* Listing 0x0042EF57-70:
+     *   CMP EDI,EBX     ; JLE 0x42EFF1  (rpm <= up_thresh → downshift branch)
+     *   CMP EAX,0x8     ; JGE 0x42EFF1  (gear_cached >= 8 signed → downshift)
+     *   MOV EBX,[ECX+0x314] ; TEST EBX,EBX ; JLE 0x42EFF1  (long_spd<=0 → ds) */
     if (rpm > up_thresh
-        && gear_cached < 8
+        && (int32_t)gear_cached < 8
         && actor->longitudinal_speed > 0) {
 
-        /* Re-load gear byte from memory (may already be 2 after promotion)
-         * and +1, matching the original's `INC BL` after a second load. */
+        /* Listing 0x0042EF72-7A: MOV BL,[ECX+0x36B] ; INC BL ; MOV
+         * [ECX+0x36B],BL.  BL is re-loaded fresh (will be 2 after promo). */
         uint8_t new_gear = (uint8_t)(actor->current_gear + 1);
         actor->current_gear = new_gear;
 
-        /* Drivetrain kick — per-gear force impulse spread across wheels.
-         * [CONFIRMED @ 0x42EFB0..0x42EFD7 raw disasm + DAT_00467394 table.] */
+        /* Listing 0x0042EF80-8D:
+         *   MOVSX EAX,[ESI+0x68]         ; phys[0x68] (drive_torque_mult)
+         *   IMUL EAX,EDX                 ; * throttle
+         *   LEA EDX,[EAX+EAX*2]          ; EDX = EAX * 3
+         *   LEA EAX,[EAX+EDX*4]          ; EAX = EAX + 12*EAX = 13*EAX
+         *   SHL EAX,1                    ; EAX = 26*EAX = EAX*0x1A
+         *
+         * Listing 0x0042EF8F-A4: CDQ ; AND EDX,0xFF ; ADD EAX,EDX ; SAR EAX,8
+         *   → first sar8_rz (truncated divide by 256). */
+        int32_t k = (int32_t)PHYS_S(actor, 0x68) * throttle * 0x1A;
+        k = sar8_rz_42EF10(k);
+
+        /* Listing 0x0042EFA7-AD: AND EBX,0xFF ; IMUL EAX,[EBX*4 + 0x467394]
+         * EBX still has new_gear in BL from the store at 0x0042EF7A; the
+         * AND masks the high bytes (leftover from the 0x314 long_spd load).
+         * Table at DAT_00467394 = {0, 0, 0x100, 0xC0, 0x80, 0x40, 0x20,
+         * 0x10, 0} (9 dwords). new_gear is bounded by the < 8 gate to
+         * [1..8], so indices 1..8 of the table are all that's reachable. */
         static const int32_t g_gear_torque_table[9] = {
             0, 0, 0x100, 0xC0, 0x80, 0x40, 0x20, 0x10, 0
         };
-        int32_t k = (int32_t)PHYS_S(actor, 0x68) * throttle * 0x1A;
-        k = ((k + ((k >> 31) & 0xFF)) >> 8)
-          * g_gear_torque_table[new_gear & 0x0F];
-        k =  (k + ((k >> 31) & 0xFF)) >> 8;
+        k = k * g_gear_torque_table[new_gear & 0xFFu];
 
+        /* Listing 0x0042EFB5-CA: MOV EBX,[ECX+0x2EC] ; CDQ ; AND EDX,0xFF ;
+         * ADD EAX,EDX ; MOV EDX,[ECX+0x2F8] ; SAR EAX,8
+         *   → second sar8_rz. */
+        k = sar8_rz_42EF10(k);
+
+        /* Listing 0x0042EFCD-E9: spread k across the four spring-dv slots.
+         *   ADD EDI,EAX ; SUB ESI,EAX ; ADD EBX,EAX ; SUB EDX,EAX
+         * with EDI=+0x2F0, ESI=+0x2F4, EBX=+0x2EC, EDX=+0x2F8 ─ so:
+         *   +0x2EC (FL) += k ; +0x2F0 (FR) += k
+         *   +0x2F4 (RL) -= k ; +0x2F8 (RR) -= k */
         actor->wheel_spring_dv[0] += k;   /* +0x2EC FL */
         actor->wheel_spring_dv[1] += k;   /* +0x2F0 FR */
         actor->wheel_spring_dv[2] -= k;   /* +0x2F4 RL */
@@ -6059,9 +7829,15 @@ void td5_physics_auto_gear_select(TD5_Actor *actor)
         return;
     }
 
-    /* Downshift test — also indexed by gear_cached. */
-    int32_t dn_thresh = (int32_t)PHYS_S(actor, 0x4E + gear_cached * 2);
-    if (rpm < dn_thresh && gear_cached > TD5_GEAR_FIRST) {
+    /* Listing 0x0042EFF1: MOVSX EDX,[ESI + EAX*2 + 0x4E]  dn_thresh
+     *                        (still indexed by CACHED gear, not refreshed). */
+    int32_t dn_thresh = (int32_t)PHYS_S(actor, 0x4E + (int32_t)gear_cached * 2);
+
+    /* Listing 0x0042EFF6-FF:
+     *   CMP EDI,EDX  ; JGE 0x42F005   (rpm >= dn_thresh → skip)
+     *   CMP EAX,0x2  ; JLE 0x42F005   (gear_cached <= 2 → skip)
+     *   DEC [ECX+0x36B] */
+    if (rpm < dn_thresh && (int32_t)gear_cached > 2) {
         actor->current_gear = (uint8_t)(actor->current_gear - 1);
     }
 }
@@ -6107,91 +7883,228 @@ void td5_physics_auto_gear_select_no_kick(TD5_Actor *actor)
     }
 }
 
+/* pool13 / 0x0042F030 pilot trace hooks — extern declarations to keep the
+ * function signature unchanged. Implementation in td5_pilot_trace_0042F030.c. */
+extern void td5_pilot_emit_0042F030_enter(const TD5_Actor *actor, uintptr_t caller_ra);
+extern void td5_pilot_emit_0042F030_leave(const TD5_Actor *actor, int32_t return_value,
+                                          int32_t lut_index_used, int32_t lut_frac_used);
+
+/* Round-to-zero signed divide by 256 — byte-exact port of the 0x0042F030
+ * idiom: CDQ ; AND EDX, 0xFF ; ADD EAX, EDX ; SAR EAX, 8.
+ *
+ *   For x >= 0: plain SAR by 8 (low byte truncated).
+ *   For x <  0 with (x & 0xFF) != 0: (x + 0xFF) >> 8 — one unit closer to zero
+ *     than plain SAR (truncated division by 256).
+ *
+ * Equivalent to C99 truncated division: (int32_t)(x / 256). */
+static inline int32_t sar8_rz_42F030(int32_t x) {
+    return ((x < 0) ? (x + 0xFF) : x) >> 8;
+}
+
+/* Round-to-zero signed divide by 512 — original idiom:
+ *   CDQ ; AND EDX, 0x1FF ; ADD EAX, EDX ; SAR EAX, 9.
+ * Equivalent to C99 truncated division: (int32_t)(x / 512). */
+static inline int32_t sar9_rz_42F030(int32_t x) {
+    return ((x < 0) ? (x + 0x1FF) : x) >> 9;
+}
+
 /* --- ComputeDriveTorqueFromGearCurve (0x42F030) ---
  *
+ * Byte-exact port from listing 0x0042F030..0x0042F0FC.
+ *
  * Piecewise-linear torque curve interpolation.
+ *
+ *   actor + 0x310  engine_speed_accum  int32
+ *   actor + 0x33E  encounter_steering  int16 (signed throttle)
+ *   actor + 0x36B  current_gear        uint8 — 0x01 == neutral, early-out
+ *   tuning + 0x00..0x1F  LUT[N] int16 (per-512-rpm torque samples)
+ *   tuning + 0x2E + gear*2  gear_ratio[gear] int16
+ *   tuning + 0x68  torque_mult int16
+ *   tuning + 0x72  redline     int16; cutoff when engine_speed > redline-50
+ *
+ * Audit: re/analysis/pilot_0042F030_audit.md
  */
 int32_t td5_physics_compute_drive_torque(TD5_Actor *actor)
 {
+    /* Entry trace hook (pure-leaf function; no state to snapshot at exit). */
+    td5_pilot_emit_0042F030_enter(actor, (uintptr_t)__builtin_return_address(0));
+
     int16_t *phys = get_phys(actor);
-    if (!phys) return 0;
-
-    int32_t gear = (int32_t)actor->current_gear;
-    if (gear == 1) return 0; /* Neutral = no drive */
-
-    int32_t rpm = actor->engine_speed_accum;
-    int32_t redline = (int32_t)PHYS_S(actor, 0x72);
-
-    /* Redline cutoff */
-    if (rpm > redline - 50) return 0;
-
-    /* Drive torque multiplier */
-    int32_t torque_mult = (int32_t)PHYS_S(actor, 0x68);
-
-    /* Sample torque curve (entries every 512 RPM units, 16 entries at phys+0x00) */
-    int32_t index = rpm >> 9;
-    if (index < 0) index = 0;
-    if (index >= 15) index = 14;
-
-    int32_t t0 = ((int32_t)PHYS_S(actor, index * 2) * torque_mult) >> 8;
-    int32_t t1 = ((int32_t)PHYS_S(actor, (index + 1) * 2) * torque_mult) >> 8;
-
-    /* Linear interpolation within segment */
-    int32_t frac = rpm & 0x1FF;
-    int32_t torque = t0 + (((t1 - t0) * frac) >> 9);
-
-    /* Scale by throttle and gear ratio.
-     * Original preserves throttle sign (actor+0x33E) — negative in reverse
-     * produces negative torque, which is correct for backward motion. */
-    int32_t throttle = (int32_t)actor->encounter_steering_cmd;
-    torque = (torque * throttle) >> 8;
-
-    int32_t gear_ratio = (int32_t)PHYS_S(actor, 0x2E + gear * 2);
-    torque = (torque * gear_ratio) >> 8;
-
-    if (actor->slot_index == 0 && (actor->frame_counter % 30u) == 0u) {
-        TD5_LOG_I(LOG_TAG,
-            "DT slot0: rpm=%d gear=%d thr=%d gr=%d tm=%d t0=%d t1=%d frac=%d torque=%d",
-            rpm, gear, throttle, gear_ratio, torque_mult, t0, t1, frac, torque);
+    if (!phys) {
+        td5_pilot_emit_0042F030_leave(actor, 0, 0, 0);
+        return 0;
     }
 
+    uint8_t  gear_u8 = actor->current_gear;
+    int32_t  gear    = (int32_t)gear_u8;
+
+    /* Neutral (gear == 1) — original CMP BL,0x1 / JZ RET_ZERO at 0x0042F03B-45. */
+    if (gear_u8 == 0x01) {
+        td5_pilot_emit_0042F030_leave(actor, 0, 0, 0);
+        return 0;
+    }
+
+    int32_t rpm = actor->engine_speed_accum;
+
+    /* index = sar9_rz(rpm) — listing 0x0042F04B-58 (CDQ/AND 0x1FF/ADD/SAR 9).
+     * NO bounds clamp (original reads LUT[index] and LUT[index+1] freely). */
+    int32_t index = sar9_rz_42F030(rpm);
+
+    int32_t torque_mult = (int32_t)PHYS_S(actor, 0x68);
+
+    /* t0 = sar8_rz(LUT[index] * mult) — listing 0x0042F060-72.
+     * t1 = sar8_rz(LUT[index+1] * mult) — listing 0x0042F077-8F. */
+    int32_t lut_i  = (int32_t)PHYS_S(actor, index * 2);
+    int32_t lut_i1 = (int32_t)PHYS_S(actor, index * 2 + 2);
+    int32_t t0 = sar8_rz_42F030(lut_i  * torque_mult);
+    int32_t t1 = sar8_rz_42F030(lut_i1 * torque_mult);
+
+    /* Signed low-9-bit fraction (truncated-divide remainder mod 512).
+     * Listing 0x0042F096-A5: AND ECX,0x800001FF; if neg: DEC; OR 0xFFFFFE00; INC.
+     * Algebraically equivalent to C99 truncated remainder rpm % 512.
+     * For rpm >= 0: frac in [0, 511].
+     * For rpm <  0: frac in [-511, 0]. */
+    int32_t frac = rpm % 512;
+
+    /* lerp = sar9_rz((t1 - t0) * frac) + t0 — listing 0x0042F0A6-C0. */
+    int32_t torque = sar9_rz_42F030((t1 - t0) * frac) + t0;
+
+    /* * throttle — original at 0x0042F0C2-D0 uses sar8_rz. Throttle is signed
+     * (encounter_steering_cmd, sign-flipped by 0x42F010 for reverse gear). */
+    int32_t throttle = (int32_t)actor->encounter_steering_cmd;
+    torque = sar8_rz_42F030(torque * throttle);
+
+    /* * gear_ratio[gear] — original at 0x0042F0D2-EF uses sar8_rz on the
+     * EBX-byte-masked gear index. PHYS_S already does 16-bit signed load. */
+    int32_t gear_ratio = (int32_t)PHYS_S(actor, 0x2E + (int32_t)(uint8_t)gear_u8 * 2);
+    torque = sar8_rz_42F030(torque * gear_ratio);
+
+    /* Redline cutoff: original computes the full pipeline then CMPs EBP (raw
+     * engine_speed) against ECX (redline-50). JLE keep result; else XOR=0.
+     * The compare is signed (JLE), so rpm > redline-50 → return 0. */
+    int32_t redline = (int32_t)PHYS_S(actor, 0x72);
+    if (rpm > redline - 50) {
+        td5_pilot_emit_0042F030_leave(actor, 0, index, frac);
+        return 0;
+    }
+
+    td5_pilot_emit_0042F030_leave(actor, torque, index, frac);
     return torque;
 }
 
-/* --- ApplySteeringTorqueToWheels (0x42EEA0) ---
+/* --- ApplySteeringTorqueToWheels (0x42EEA0) ---  [byte-faithful port]
  *
- * Differential torque: FL/FR += force, RL/RR -= force.
+ * Verbatim port of FUN_0042EEA0 (0x0042EEA0..0x0042EF06). Originally the
+ * port stubbed this out to suppress a pitch-divergence symptom, but the
+ * batch precise-port mandate is byte-faithful behaviour first; downstream
+ * suspension fixes belong in their owning functions. Disassembly:
+ *
+ *   MOVSX EDX,[param2+0x68]            ; cardef/tuning short (drive-torque mult)
+ *   MOVSX EAX,[param1+0x33E]           ; actor encounter_steering_cmd (s16)
+ *   IMUL  EAX,EDX                      ; throttle * mult
+ *   LEA   EDX,[EAX+EAX*2]              ; *3
+ *   LEA   EAX,[EAX+EDX*4]              ; *(1+12) = *13
+ *   SHL   EAX,1                        ; *26 (= 0x1A)
+ *   CDQ / AND EDX,0xff / ADD EAX,EDX / SAR EAX,0x8   ; biased >>8
+ *   XOR   EDX,EDX / MOV DL,[param1+0x36B]            ; zero-ext current_gear
+ *   IMUL  EAX,[EDX*4 + 0x467394]       ; g_gearTorqueTable[gear]
+ *   CDQ / AND EDX,0xff / ADD EAX,EDX / SAR EAX,0x8   ; biased >>8
+ *   ADD   [param1+0x2EC],EAX           ; wheel_spring_dv[0] += k (FL)
+ *   ADD   [param1+0x2F0],EAX           ; wheel_spring_dv[1] += k (FR)
+ *   SUB   [param1+0x2F4],EAX           ; wheel_spring_dv[2] -= k (RL)
+ *   SUB   [param1+0x2F8],EAX           ; wheel_spring_dv[3] -= k (RR)
+ *
+ * The (x + ((x>>31)&0xff)) >> 8 idiom is the biased-toward-zero arithmetic
+ * right-shift Microsoft's compiler emits for signed /256. g_gearTorqueTable
+ * at DAT_00467394 mirrors the same LUT used inline by auto_gear_select.
  */
 void td5_physics_apply_steering_torque(TD5_Actor *actor)
 {
     int16_t *phys = get_phys(actor);
     if (!phys) return;
 
-    int32_t throttle = (int32_t)actor->encounter_steering_cmd;
-    int32_t sensitivity = (int32_t)PHYS_S(actor, 0x68);
-    int32_t gear = (int32_t)actor->current_gear;
+    /* DAT_00467394 — g_gearTorqueTable (int32[]). Indexed by current_gear
+     * read as an unsigned byte; only entries 0..8 are meaningful (0,0,
+     * 256,192,128,64,32,16,0).
+     *
+     * BOUNDS AUDIT (2026-05-14, fix-gear-bounds):
+     *   Every writer to actor+0x36B in TD5_d3d.exe is bounded to [0..8]:
+     *     0x40368e  player INC, gated by  gear < gear_count - 1
+     *     0x4036xx  player DEC, gated by  gear != 0
+     *     0x405dbf  ResetVehicleActorState   = 0x02 (constant)
+     *     0x42ef32  UpdateAutomaticGearSelection = 0x00 (constant)
+     *     0x42ef47  UpdateAutomaticGearSelection = 0x02 (constant)
+     *     0x42ef7a  UpdateAutomaticGearSelection INC, gated by gear < 8
+     *     0x42efff  UpdateAutomaticGearSelection DEC, gated by gear > 2
+     *   Port-side writers in td5_physics.c match those bounds line-for-line
+     *   (see td5_physics_auto_gear_select / _no_kick — INC under `< 8` gate,
+     *   DEC under `> 2` gate, plus four constant-only writes of 0 / 2).
+     *
+     *   Reachable indices in normal play: 2..7 (active forward gears) + 0
+     *   (reverse) + 8 (transient one-tick upshift result of the < 8 gate
+     *   when current_gear == 7).  Indices 1 and 9..255 are unreachable.
+     *
+     * The 256-entry zero-filled expansion below is DEFENSIVE belt-and-
+     * suspenders against any future writer that violates the [0..8] range.
+     * It is NOT required for byte-faithful behavior — the original's nine-
+     * entry table is reached at indices 0..8 only, and the port respects
+     * that. The expansion costs 988 bytes of .rodata to make an OOB read
+     * silent (returns 0 → no kick) rather than crashing on a malformed
+     * save or modded actor stream. */
+    static const int32_t g_gear_torque_table[256] = {
+        [2] = 0x100,
+        [3] = 0xC0,
+        [4] = 0x80,
+        [5] = 0x40,
+        [6] = 0x20,
+        [7] = 0x10,
+        /* indices 0,1,8..255 = 0 (default) */
+    };
 
-    /* Original writes force to wheel_spring_dv[0..3] as [+,+,-,-],
-     * creating a pitch differential. However, the original's suspension
-     * reads XZ projections (not this Y-based force_accum), so steering
-     * torque never actually drives the suspension spring-damper. In the
-     * source port, this force goes directly into the suspension and
-     * causes immediate pitch divergence (62400 vs ground contact ~107).
-     * Steering already affects yaw via the separate yaw torque formula
-     * in update_player. Omit the force_accum writes. */
-    (void)throttle;
-    (void)sensitivity;
-    (void)gear;
+    int32_t throttle    = (int32_t)actor->encounter_steering_cmd;  /* +0x33E s16 */
+    int32_t torque_mult = (int32_t)PHYS_S(actor, 0x68);            /* tuning +0x68 s16 */
+
+    int32_t k = throttle * torque_mult * 0x1A;
+    k = (k + ((k >> 31) & 0xff)) >> 8;
+    k = k * g_gear_torque_table[(uint8_t)actor->current_gear];     /* +0x36B u8 */
+    k = (k + ((k >> 31) & 0xff)) >> 8;
+
+    actor->wheel_spring_dv[0] += k;   /* +0x2EC FL */
+    actor->wheel_spring_dv[1] += k;   /* +0x2F0 FR */
+    actor->wheel_spring_dv[2] -= k;   /* +0x2F4 RL */
+    actor->wheel_spring_dv[3] -= k;   /* +0x2F8 RR */
 }
 
-/* --- ApplyReverseGearThrottleSign (0x42F010) --- */
+/* --- ApplyReverseGearThrottleSign (0x42F010) ---
+ *
+ * Byte-exact port from listing 0x0042F010..0x0042F02F (8 instructions).
+ *
+ *   0042f010  MOV  EAX,dword ptr [ESP + 0x4]      ; actor
+ *   0042f014  MOV  CL,byte ptr [EAX + 0x36b]      ; gear_u8 = actor->current_gear
+ *   0042f01a  TEST CL,CL
+ *   0042f01c  JNZ  0x0042f02f                     ; if gear != 0, skip
+ *   0042f01e  MOV  CX,word ptr [EAX + 0x33e]      ; thr = actor->encounter_steering_cmd
+ *   0042f025  NEG  CX                             ; thr = -thr (16-bit two's complement)
+ *   0042f028  MOV  word ptr [EAX + 0x33e],CX
+ *   0042f02f  RET
+ *
+ * Flips the signed throttle term in-place when current_gear == 0 (REVERSE) so
+ * the same forward drive-torque pipeline (0x0042F030) can be reused for
+ * backward motion. Field +0x36B is the 1-byte current_gear (REVERSE=0,
+ * NEUTRAL=1, FIRST=2, ...). Field +0x33E is the int16_t encounter_steering_cmd
+ * (also reachable as the signed-throttle source consumed by
+ * ComputeDriveTorqueFromGearCurve). 16-bit NEG matches C int16_t negation. */
 void td5_physics_reverse_throttle_sign(TD5_Actor *actor)
 {
-    if (actor->current_gear == TD5_GEAR_REVERSE)
-        actor->encounter_steering_cmd = -actor->encounter_steering_cmd;
+    /* TEST CL,CL / JNZ — early-out when gear != REVERSE (0). */
+    if (actor->current_gear != 0)
+        return;
+
+    /* NEG CX on a 16-bit word in memory — int16_t two's-complement negation. */
+    actor->encounter_steering_cmd = (int16_t)-(int32_t)actor->encounter_steering_cmd;
 }
 
-/* --- ComputeReverseGearTorque (0x00403C80) — full encode + engine slew ---
+/* --- ComputeReverseGearTorque (0x00403C80) — byte-faithful port ---
  *
  * Despite the Ghidra name, this function does NOT compute torque. It
  * (a) produces the RPM-encoded pseudo-speed written back as the caller's
@@ -6201,112 +8114,151 @@ void td5_physics_reverse_throttle_sign(TD5_Actor *actor)
  * updater — UpdateEngineSpeedAccumulator (UESA) runs on the airborne path
  * instead; the two are mutually exclusive per tick.
  *
- * [CONFIRMED @ 0x00403C80 via 2026-04-11 full Ghidra pass + raw disasm
- * 0x00403d2f..0x00403d75 for the three +0x310 writeback sites.]
+ * Byte-exact port from listing 0x00403C80..0x00403D82 (98 instructions).
  *
- * Target RPM:
- *   - gear == 1 (neutral): return 0, leave engine alone (early-out).
- *   - throttle >= 1 AND gear == 2 (first forward): hot target =
- *       max((speed*4) >> 8, 0) + redline - 1800, step = 400
- *   - otherwise: target = 0, step = (brake ? 800 : 400) — coast down fast.
+ * Original signature (Ghidra): __cdecl(phys *param_1, actor *param_2, int speed_in)
+ *   param_1 (EAX,[ESP+0xC])  phys/tuning ptr   — reads [+0x2E + gear*2], [+0x72]
+ *   param_2 (EDI,[ESP+0x18]) actor ptr         — reads [+0x310],[+0x33E],[+0x36B],[+0x36D]
+ *                                                writes [+0x310]
+ *   param_3      ([ESP+0x20]) signed speed_in
  *
- * Slew:
- *   cur > target: cur -= step (clamp to target if overshoot) → write A or C
- *   cur <= target - 4*step: cur += step (big-gap linear ramp) → write B
- *   cur <= target, gap <= 4*step: cur += (target - cur) / 4 (exponential) → write C
+ * Port keeps the existing (actor, speed_in) wrapper signature; `get_phys`
+ * recovers param_1.  All math/control-flow inside is line-for-line with
+ * the original.
  *
- * Return value (pseudo-speed) is the closed-form inverse of UESA's decode:
- *   encode(rpm, gear_ratio) = (((rpm - 400) * 0x1000) / 45 / gear_ratio) << 8
+ * Original logic:
+ *   gear == 1  (neutral) → iVar5 (ret_value) = 0, BUT continues to slew
+ *                          engine through the cold branch (target=0).
+ *   gear != 1            → iVar5 = ((((rpm-400)*0x1000) /45 trunc) /gear_ratio
+ *                                  trunc) << 8
  *
- * speed_in is drivetrain-dependent per UpdatePlayerVehicleDynamics @ 0x00404030:
- *   sVar2=1 (RWD): body_vlong (uVar12)
- *   sVar2=2 (FWD): body_vlat  (uVar37)
- *   sVar2=3 (AWD): (uVar12 + uVar37) / 2
- */
+ *   throttle  > 0 AND gear == 2 → hot branch:
+ *      u = sar8_rz(speed_in * 4); if (u<0) u = 0  (SETS/DEC/AND clamp)
+ *      target = u + redline - 0x708 ;  step = 200
+ *   else                          → cold branch:
+ *      target = 0; step = (brake ? 400 : 200) * 2  (i.e. 800 or 400)
+ *
+ *   Slew engine_speed_accum toward target:
+ *     if (target < engine):                              # descending (JLE label)
+ *         engine -= step
+ *         if (engine < target):  write target (clamp)
+ *         else:                  write engine (stepped)
+ *     else:                                              # ascending
+ *         if (engine < target - 4*step):  write engine + step  (big-gap ramp)
+ *         else:  engine += sar2_rz(target - engine); write engine  (exp pull)
+ *
+ *   Return iVar5 (the encoded pseudo-speed).
+ *
+ * sar8_rz / sar2_rz : C99 truncated signed division by 256 / 4. */
+static inline int32_t sar8_rz_403C80(int32_t x) {
+    /* CDQ ; AND EDX,0xFF ; ADD EAX,EDX ; SAR EAX,8.
+     * Equivalent to (int32_t)(x / 256) — truncate toward zero. */
+    return ((x < 0) ? (x + 0xFF) : x) >> 8;
+}
+static inline int32_t sar2_rz_403C80(int32_t x) {
+    /* CDQ ; AND EDX,3 ; ADD EAX,EDX ; SAR EAX,2.
+     * Equivalent to (int32_t)(x / 4). */
+    return ((x < 0) ? (x + 3) : x) >> 2;
+}
+
 static int32_t compute_reverse_gear_torque(TD5_Actor *actor, int32_t speed_in)
 {
     if (!actor) return 0;
     int16_t *phys = get_phys(actor);
     if (!phys) return 0;
+    (void)phys;  /* PHYS_S(actor, off) wraps the same dereference. */
 
-    int32_t engine = actor->engine_speed_accum;
-    int32_t gear   = (int32_t)actor->current_gear;
+    /* Stack-mirroring the listing for clarity:
+     *   ECX = engine          (rpm in/out)
+     *   EBX = gear            (BL, byte-extended)
+     *   EDX = redline (saved at [ESP+0x18])
+     *   EBP = step (200 default, kept at [ESP+0x10])
+     *   ESI = iVar5  (return value)
+     *   EAX = target  (after target-build joins)  */
+    int32_t engine  = actor->engine_speed_accum;
+    int32_t gear    = (int32_t)actor->current_gear;          /* zero-extended byte */
+    int32_t redline = (int32_t)PHYS_S(actor, 0x72);          /* MOVSX from [+0x72] */
+    int32_t step    = 200;                                    /* MOV EBP,0xC8 */
 
-    /* --- Encode pseudo-speed (return value) --- */
-    int32_t ret_value;
+    /* --- Encode pseudo-speed (iVar5 / ESI) --- */
+    int32_t iVar5;
     if (gear == 1) {
-        return 0;  /* neutral — no engine slew, no return value */
-    }
-    {
+        /* 0x00403CAF JNZ skip → XOR ESI,ESI ; JMP 0x00403CE4.
+         * Neutral SKIPS the encode but does NOT early-return; engine slew
+         * still runs through the cold branch below. */
+        iVar5 = 0;
+    } else {
         int32_t gear_ratio = (int32_t)PHYS_S(actor, 0x2E + gear * 2);
-        if (gear_ratio == 0) return 0;
+
+        /* LEA ESI,[ECX-400] ; SHL ESI,12  →  ESI = (engine - 400) * 0x1000.
+         * Then 0xB60B60B7 IMUL idiom = ESI / 45 with truncate-toward-zero
+         * via SAR 5 + sign-bit fixup (SHR 31 / ADD).
+         * Then CDQ / IDIV gear_ratio truncates toward zero. */
         int32_t num = (engine - 400) * 0x1000;
-        ret_value = ((num / 45) / gear_ratio) << 8;
+        int32_t div45 = num / 45;                            /* C99 trunc */
+        int32_t div_gr = div45 / gear_ratio;                 /* C99 trunc */
+        iVar5 = div_gr << 8;
     }
 
-    /* --- Target RPM + slew step --- */
-    int32_t throttle = (int32_t)actor->encounter_steering_cmd;  /* signed short */
-    int32_t target, step;
+    /* --- Target + step selection (0x00403CE4..0x00403D2F) --- */
+    int32_t throttle = (int32_t)actor->encounter_steering_cmd;  /* MOVSX [+0x33E] */
+    int32_t target;
 
-    if (throttle < 1) {
-        /* Cold branch: no throttle → coast target=0. */
-        int base = actor->brake_flag ? 400 : 200;
-        step = base * 2;                     /* 800 or 400 */
-        target = 0;
-    } else if (gear == 2) {
-        /* Hot branch: first-forward under throttle. Step STAYS at 200 here —
-         * the doubling is inside the cold branch only. [CONFIRMED @ 0x00403C80
-         * raw disasm: iVar4=200 default, `iVar4 * 2` only inside the cold
-         * conditional.] */
-        int32_t u = (speed_in * 4) >> 8;
-        if (u < 0) u = 0;                    /* clamp via (AND sign-1) idiom */
-        int32_t redline = (int32_t)PHYS_S(actor, 0x72);
-        target = u + redline - 1800;         /* 0x708 */
-        step = 200;
-    } else if (gear > 2 && throttle >= 1) {
-        /* Higher gears under throttle: maintain RPM proportional to speed
-         * and gear ratio. The original targets RPM=0 here and relies on
-         * airborne UESA ticks to maintain RPM. Since the port rarely goes
-         * airborne and runs auto_gear on-ground, CRGT must maintain RPM
-         * for higher gears or the car oscillates (upshift→RPM dies→downshift). */
-        int32_t gr = (int32_t)PHYS_S(actor, 0x2E + gear * 2);
-        int32_t abs_spd = speed_in < 0 ? -speed_in : speed_in;
-        target = ((abs_spd >> 8) * gr * 0x2D) >> 12;
-        target += 400;
-        step = 200;
+    if (throttle > 0 && gear == 2) {
+        /* Hot branch 0x00403CF3..0x00403D1C:
+         *   EAX = speed_in*4 ; sar8_rz ; clamp <0 → 0 ; + redline - 0x708. */
+        int32_t u = sar8_rz_403C80(speed_in * 4);
+        /* SETS DL ; DEC EDX ; AND EAX,EDX → clamp u<0 to 0. */
+        if (u < 0) u = 0;
+        target = u + redline - 0x708;
+        /* step stays at 200 (EBP unmodified on this path). */
     } else {
-        /* Reverse or neutral under throttle, or higher gears coasting: target=0. */
-        int base = actor->brake_flag ? 400 : 200;
-        step = base * 2;
+        /* Cold branch 0x00403D1E..0x00403D2F:
+         *   if (brake_flag != 0) EBP = 0x190 (400)
+         *   ADD EBP,EBP            → EBP *= 2  → 400 or 800
+         *   XOR EAX,EAX            → target = 0 */
+        if (actor->brake_flag != 0) {
+            step = 0x190;        /* 400 */
+        }
+        step = step + step;      /* 400 or 800 */
         target = 0;
     }
 
-    /* --- Slew engine_speed_accum toward target --- */
-    int32_t new_accum;
-    if (target < engine) {
-        /* Descending: linear step, clamp to target on overshoot */
-        int32_t stepped = engine - step;
-        if (stepped < target) new_accum = target;   /* write A */
-        else                  new_accum = stepped;  /* write C (dec) */
-    } else {
-        if (engine < target - 4 * step) {
-            new_accum = engine + step;                /* write B (big-gap ramp) */
+    /* --- Slew engine_speed_accum (0x00403D31..0x00403D75) --- */
+    /* CMP ECX,EAX ; JLE ascending. Note: JLE in original is SIGNED-LE.
+     * The original CMP is engine (ECX) vs target (EAX). JLE means
+     * engine <= target → take ascending branch. We invert: descending
+     * iff engine > target. */
+    if (engine > target) {
+        /* Descending 0x00403D35..0x00403D48:
+         *   SUB ECX,EBP        (engine -= step)
+         *   CMP ECX,EAX ; JGE write_dec
+         *   else: [+0x310] = EAX (clamp to target)   ; return ESI
+         *   write_dec: [+0x310] = ECX                ; return ESI */
+        engine = engine - step;
+        if (engine >= target) {
+            actor->engine_speed_accum = engine;       /* write_dec / 0x00403D75 */
         } else {
-            /* Exponential pull — C99 signed integer division rounds toward
-             * zero, matching the original's SAR+CDQ+AND 3 idiom. */
+            actor->engine_speed_accum = target;       /* clamp / 0x00403D3B */
+        }
+    } else {
+        /* Ascending 0x00403D49..0x00403D75:
+         *   EDX = step*4 ; EBX = target - step*4
+         *   CMP ECX,EBX ; JGE exp_pull
+         *   else: ECX += EBP ; [+0x310] = ECX        ; return ESI  (big-gap ramp)
+         *   exp_pull: EAX = target - engine ; sar2_rz ; ECX += EAX
+         *            [+0x310] = ECX                  ; return ESI */
+        int32_t threshold = target - step * 4;
+        if (engine < threshold) {
+            actor->engine_speed_accum = engine + step;  /* big-gap / 0x00403D5A */
+        } else {
             int32_t delta = target - engine;
-            new_accum = engine + (delta / 4);        /* write C (exp) */
+            int32_t inc   = sar2_rz_403C80(delta);
+            actor->engine_speed_accum = engine + inc;   /* exp pull / 0x00403D75 */
         }
     }
 
-    if (actor->slot_index == 0 && (actor->frame_counter % 30u) == 0u) {
-        TD5_LOG_I(LOG_TAG,
-            "CRGT: gear=%d rpm=%d->%d target=%d step=%d throttle=%d brake=%d spd_in=%d",
-            gear, engine, new_accum, target, step, throttle,
-            actor->brake_flag, speed_in);
-    }
-    actor->engine_speed_accum = new_accum;
-    return ret_value;
+    return iVar5;
 }
 
 /* ========================================================================
@@ -6315,48 +8267,93 @@ static int32_t compute_reverse_gear_torque(TD5_Actor *actor, int32_t speed_in)
  * Computes effective gravity vector projected onto body axes.
  * ======================================================================== */
 
+/* Byte-faithful port of FUN_0042CCD0 "StoreRoundedVector3Ints" — actually
+ * NormalizeVec3iToConstantMagnitude4096. The original FPU sequence is:
+ *   - FILD each int component → 80-bit (truncated to PC=53 by phase-1 FPU CW)
+ *   - sum = x*x + y*y + z*z   (double, FMUL/FADDP on stack)
+ *   - scale = 4096.0 / sqrt(sum)  (FSQRT + FDIVR on the float constant)
+ *   - foreach component: __ftol(scale * component) writes int (RC=11
+ *     truncate-toward-zero via FLDCW then FISTP qword)
+ *
+ * If sum == 0, the original divides by zero → returns the indefinite integer
+ * sentinel. We guard against that explicitly; in practice the four body probes
+ * are always distinct, but on tick 0 they can all be zero before init.
+ * [CONFIRMED @ 0x0042CCD0 listing 2026-05-14] */
+static void td5_normalize_vec3i_to_4096(int32_t v[3]) {
+    double x = (double)v[0];
+    double y = (double)v[1];
+    double z = (double)v[2];
+    double sum = x * x + y * y + z * z;
+    if (sum <= 0.0) {
+        v[0] = 0; v[1] = 0; v[2] = 0;
+        return;
+    }
+    double scale = 4096.0 / sqrt(sum);
+    /* C99 cast-to-int truncates toward zero — matches __ftol with RC=11. */
+    v[0] = (int32_t)(scale * x);
+    v[1] = (int32_t)(scale * y);
+    v[2] = (int32_t)(scale * z);
+}
+
 void td5_physics_compute_surface_gravity(TD5_Actor *actor)
 {
     /* Original @ 0x42EBF0: uses 4 wheel probe world positions to compute
-     * two surface tangent vectors, then cross product for surface normal.
+     * two diagonal-difference vectors of the body probes, normalizes each
+     * to length 4096, cross-products them into a tilt vector, and projects
+     * gravity onto X and Z body axes.
      *
-     * v1 = (probe_FL - probe_FR - probe_RR + probe_RL) >> 8
-     * v2 = (probe_FL - probe_RR - probe_RL + probe_FR) >> 8
-     * normal = cross(v1, v2)
-     * gravity applied to vel_x and vel_z only.
+     * Listing reference: 0x0042EBF0..0x0042ED47 (audited 2026-05-14 TD5_pool7).
      *
-     * [CONFIRMED @ 0x42EBFA-0x42ECB7: offsets +0x090, +0x09C, +0x0A8, +0x0B4] */
+     * [CONFIRMED @ 0x42EBFA-0x42ECB7: actor offsets +0x090 FL, +0x09C FR,
+     *  +0x0A8 RL, +0x0B4 RR; gravity int @ 0x00467380; mag-4096 @ 0x0046736C] */
     TD5_Vec3_Fixed *fl = &actor->probe_FL;
     TD5_Vec3_Fixed *fr = &actor->probe_FR;
     TD5_Vec3_Fixed *rl = &actor->probe_RL;
     TD5_Vec3_Fixed *rr = &actor->probe_RR;
 
-    /* v1 = FL - FR - RR + RL (lateral-ish diagonal) */
-    int32_t v1x = (fl->x - fr->x - rr->x + rl->x) >> 8;
-    int32_t v1y = (fl->y - fr->y - rr->y + rl->y) >> 8;
-    int32_t v1z = (fl->z - fr->z - rr->z + rl->z) >> 8;
+    /* Phase 1 — Diagonal-difference vectors of the 4 body probes.
+     * v1 = FL - FR - RR + RL   (per axis, then >> 8)  [SAR @ 0x42ec27 et al]
+     * v2 = FL - RR - RL + FR   (per axis, then >> 8)  [SAR @ 0x42ec86 et al]
+     * Plain arithmetic SAR — no round-toward-zero idiom here. */
+    int32_t v1[3];
+    v1[0] = (fl->x - fr->x - rr->x + rl->x) >> 8;
+    v1[1] = (fl->y - fr->y - rr->y + rl->y) >> 8;
+    v1[2] = (fl->z - fr->z - rr->z + rl->z) >> 8;
 
-    /* v2 = FL - RR - RL + FR (longitudinal-ish diagonal) */
-    int32_t v2x = (fl->x - rr->x - rl->x + fr->x) >> 8;
-    int32_t v2y = (fl->y - rr->y - rl->y + fr->y) >> 8;
-    int32_t v2z = (fl->z - rr->z - rl->z + fr->z) >> 8;
+    int32_t v2[3];
+    v2[0] = (fl->x - rr->x - rl->x + fr->x) >> 8;
+    v2[1] = (fl->y - rr->y - rl->y + fr->y) >> 8;
+    v2[2] = (fl->z - rr->z - rl->z + fr->z) >> 8;
 
-    /* Cross product -> surface normal via CrossProduct3i_FixedPoint12 @ 0x42EAC0.
-     * Original shifts by >> 12, not >> 8. The previous >> 8 produced a 16x
-     * magnitude error that injected a ~1.5 world-unit lateral impulse at
-     * spawn — root cause of Cluster A vel_x=-399 / vel_z=+895 observed on
-     * 2026-04-11. [CONFIRMED @ 0x42EAC0 CrossProduct3i_FixedPoint12] */
-    int32_t nx = (v1y * v2z - v1z * v2y) >> 12;
-    int32_t nz = (v1x * v2y - v1y * v2x) >> 12;
+    /* Pilot trace — pre-normalize snapshot (so the diff can localize Phase 1
+     * vs Phase 2 divergence if it ever recurs). Compile-out for release builds. */
+    td5_pilot_emit_0042EBF0_inputs(actor, v1, v2);
 
-    /* Project gravity onto body X and Z axes.
-     * Original @ 0x42EBF0: (gGravityConstant * n) / 2 then
-     * (ax + ((ax >> 31) & 0xfff)) >> 12  (signed round toward zero).
-     * Previous port used (g >> 1) * n which loses 1 LSB on odd n. */
-    int32_t ax = (g_gravity_constant * nx) / 2;
-    int32_t az = (g_gravity_constant * nz) / 2;
+    /* Phase 2 — Normalize both diagonals to length 4096.
+     * [CONFIRMED @ 0x42ecbf + 0x42ecd0 (CALL 0x42ccd0)] */
+    td5_normalize_vec3i_to_4096(v1);
+    td5_normalize_vec3i_to_4096(v2);
+
+    /* Phase 3 — CrossProduct3i_FixedPoint12(v1, v2):
+     *   cross[0] = (v2.z * v1.y - v1.z * v2.y) >> 12   (= v1.y*v2.z - v1.z*v2.y)
+     *   cross[1] = (v1.z * v2.x - v1.x * v2.z) >> 12   (UNUSED — no Y projection)
+     *   cross[2] = (v1.x * v2.y - v2.x * v1.y) >> 12
+     * [CONFIRMED @ 0x0042EAC0 listing 2026-05-14] */
+    int32_t cross_x = (v1[1] * v2[2] - v1[2] * v2[1]) >> 12;
+    int32_t cross_z = (v1[0] * v2[1] - v2[0] * v1[1]) >> 12;
+
+    /* Phase 4 — Project gravity onto X and Z body axes.
+     * IMUL g, cross_n  → /2 round-toward-zero (matches C99 signed `/2`).
+     * Then /4096 with round-toward-zero via `(ax + ((ax>>31)&0xfff)) >> 12`,
+     * matching the original CDQ+AND 0xfff+ADD+SAR sequence.
+     * [CONFIRMED @ 0x42eceb-0x42ed3b listing 2026-05-14] */
+    int32_t ax = (g_gravity_constant * cross_x) / 2;
+    int32_t az = (g_gravity_constant * cross_z) / 2;
     actor->linear_velocity_x += (ax + ((ax >> 31) & 0xfff)) >> 12;
     actor->linear_velocity_z += (az + ((az >> 31) & 0xfff)) >> 12;
+
+    /* Pilot trace — post-update snapshot. */
+    td5_pilot_emit_0042EBF0_outputs(actor, v1, v2, cross_x, cross_z);
 }
 
 /* ========================================================================
@@ -6617,7 +8614,86 @@ void td5_physics_init_vehicle_runtime(void)
         actor->grip_reduction = 0xFF;
         actor->prev_race_position = 0;
         actor->race_position = 0;  /* +0x383 stays 0 until UpdateRaceOrder writes at sim_tick>=1 [CONFIRMED @ 0x0042F5B0] */
-        actor->max_gear_index = 6;
+
+        /* --- Initial heading: actor+0x1F4 (euler_accum.yaw) = 0xE6A00 ---
+         * Faithful port of MOV dword ptr [ESI + 0xfffffe7c], 0xe6a00 @ 0x0042F198.
+         * This is the spawn sentinel yaw that InitializeActorTrackPose
+         * (called from IntegrateVehiclePoseAndContacts) overwrites with the
+         * per-track route heading before the first sim_tick. */
+        actor->euler_accum.yaw = 0xE6A00;
+
+        /* --- Cached suspension travel: actor+0x324 = sext_i32(phys+0x78) ---
+         * Faithful port of MOVSX EDX, word ptr [EBX + 0x78]; MOV [ESI - 0x54], EDX
+         * @ 0x0042F1AC. EBX = local_c = gVehiclePhysicsTable (port's tuning_data_ptr).
+         * Field 0x78 of the physics table is the suspension/brake multiplier.
+         *
+         * Read from s_loaded_tuning (the RAW carparam.dat content) rather
+         * than actor->tuning_data_ptr (which has already had `<<1` Normal
+         * difficulty scaling applied at line 8284). Original's cache at
+         * 0x42F1AC sees the unscaled value (=96 on Viper). Verified via
+         * whole-state diff 2026-05-15: port pre-fix cached 192 = 96<<1. */
+        /* Slot 0 with carparam.dat loaded: read RAW unscaled value (96 on
+         * Viper). Slots 1..5 take the AI-template path in bind_default which
+         * doesn't apply the `<<1` Normal-difficulty scaling to their tuning
+         * buffer, so reading the (already-AI-template) tuning_data_ptr is
+         * correct for them. Slots 6-11 (traffic) fall back to tuning_data_ptr.
+         *
+         * Whole-state diff 2026-05-15: this restriction restores slots 3/5
+         * back to their pre-fix values (which matched original's AI-template
+         * derived cache). */
+        int is_slot0_carparam = (slot == 0 && s_carparam_loaded[0]);
+        if (is_slot0_carparam) {
+            int16_t *raw_tuning = (int16_t *)s_loaded_tuning[0];
+            actor->cached_car_suspension_travel = (int32_t)raw_tuning[0x78 / 2];
+        } else if (actor->tuning_data_ptr) {
+            int16_t *phys_local = (int16_t *)actor->tuning_data_ptr;
+            actor->cached_car_suspension_travel = (int32_t)phys_local[0x78 / 2];
+        }
+
+        /* --- Tire-track emitter IDs: actor+0x371..0x374 = 0xFF ---
+         * Faithful port of the inner copy-loop write at 0x0042F1C8
+         * (MOV byte ptr [EDX], 0xff with EDX=ESI-0x7 then INC EDX each iter).
+         * Initial 0xFF marks emitter slot as unused. */
+        actor->tire_track_emitter_FL = 0xFF;
+        actor->tire_track_emitter_FR = 0xFF;
+        actor->tire_track_emitter_RL = 0xFF;
+        actor->tire_track_emitter_RR = 0xFF;
+
+        /* --- Dynamic gear-count scan: actor+0x36C = scan_count + 1 ---
+         * Faithful port of 0x0042F20C-0x0042F226:
+         *   MOV ECX, 0x2
+         *   ADD EAX, 0x42                  ; EAX = phys+0x42
+         * loop:
+         *   CMP word ptr [EAX], 0x270F     ; signed >= 9999?
+         *   JGE done
+         *   INC ECX                        ; scan_count++
+         *   ADD EAX, 0x2                   ; next entry
+         *   CMP ECX, 0x8
+         *   JL loop
+         * done:
+         *   INC CL                         ; CL = scan_count + 1
+         *   MOV byte ptr [EBP + 0x36c], CL ; actor+0x36C = result
+         *
+         * Result is the highest forward gear index (3..9). Replaces the prior
+         * hardcoded `max_gear_index = 6` which was wrong for 6-gear cars whose
+         * physics table reports CL=8 → write 9. */
+        if (slot < TD5_MAX_RACER_SLOTS && actor->tuning_data_ptr) {
+            int16_t *phys_scan = (int16_t *)actor->tuning_data_ptr;
+            int cl = 2;
+            const int16_t *p = &phys_scan[0x42 / 2];
+            while (cl < 8 && *p < 0x270F) {
+                cl++;
+                p++;
+            }
+            actor->max_gear_index = (uint8_t)(cl + 1);
+        } else {
+            /* Traffic slot: original falls through the JGE @ 0042F1F1 branch and
+             * does NOT run the gear-count scan; field stays 0 from the STOSD
+             * zero-fill. In the port, the actor block is not zeroed at runtime
+             * (re-init across races would leave stale data), so write 0
+             * explicitly to match. */
+            actor->max_gear_index = 0;
+        }
 
         /* --- Load wheel positions from car definition (cardef 0x40-0x5F) ---
          * 4 wheels x {x, y, z, pad} as int16, copied to actor->wheel_display_angles.
@@ -6784,11 +8860,40 @@ static void bind_default_vehicle_tuning(TD5_Actor *actor, int slot)
         memcpy(cardef, s_loaded_cardef[slot], 0x8C);
         actor->tuning_data_ptr = tuning;
         actor->car_definition_ptr = cardef;
-        TD5_LOG_I(LOG_TAG, "bind_tuning slot=%d: using carparam.dat data", slot);
+        TD5_LOG_I(LOG_TAG,
+                  "bind_tuning slot=%d: using carparam.dat data "
+                  "(k_pos_damp=%d k_vel_damp=%d k_spring=%d k_travel_lim=%d k_load_scale=%d)",
+                  slot,
+                  (int)*(int16_t *)(tuning + 0x5E),
+                  (int)*(int16_t *)(tuning + 0x60),
+                  (int)*(int16_t *)(tuning + 0x62),
+                  (int)*(int16_t *)(tuning + 0x64),
+                  (int)*(int16_t *)(tuning + 0x66));
         return;
     }
 
-    /* Fallback: hardcoded defaults */
+    /* Fallback: hardcoded defaults.
+     *
+     * Reaching this branch means:
+     *   (a) td5_asset_load_vehicle() didn't run for this slot, OR
+     *   (b) it ran but couldn't find carparam.dat (missing re/assets/cars/<car>/
+     *       symlink in the worktree, or zip archive missing), OR
+     *   (c) the slot is >= TD5_MAX_TOTAL_ACTORS (impossible — caller guards).
+     *
+     * Precise-port audit sessions (pool5/pool6 etc) hit case (b) because their
+     * worktrees don't have re/assets/cars/ symlinks. The captured "fallback"
+     * cardef constants (k_pos_damp=48, k_vel_damp=96, k_spring=48, k_travel_lim=384)
+     * come from the literals below — they are NOT what the live source-port
+     * uses in production. Live use loads Viper's actual carparam.dat values
+     * (50/40/30/12288 for Viper) via the branch above.
+     *
+     * Audit sessions wishing to reproduce production cardef values MUST link
+     * re/assets/cars from the main tree into their worktree, e.g.:
+     *   cmd //c "mklink /D re\\assets C:\\path\\to\\TD5RE\\re\\assets" */
+    TD5_LOG_W(LOG_TAG,
+              "bind_tuning slot=%d: FALLBACK HARDCODED DEFAULTS (s_carparam_loaded[%d]=0)"
+              " — re/assets/cars/<car>/carparam.dat was not found at runtime",
+              slot, slot);
     static const int16_t k_torque_curve[16] = {
         96, 120, 144, 168, 184, 192, 196, 192,
         184, 176, 168, 156, 144, 132, 120, 104
@@ -6844,15 +8949,35 @@ static void bind_default_vehicle_tuning(TD5_Actor *actor, int slot)
 }
 
 /* ========================================================================
- * ComputeVehicleSuspensionEnvelope (0x42F6D0)
+ * ComputeVehicleSuspensionEnvelope (0x0042F6D0)  -- byte-faithful port
  *
- * Iterates all mesh vertices to compute the AABB, then writes collision
- * geometry into the car definition buffer:
- *   0x00-0x1C: 4 lower corners (Y = suspension height for racers)
+ * Iterates all mesh vertices to compute axis-aligned extents, then writes
+ * collision geometry into the per-slot row of gVehicleTuningTable
+ * (in the port, mapped to actor->car_definition_ptr; carparam.dat seeds
+ *  the same 0x8C-byte cardef rows the original references via ESI =
+ *  &gVehicleTuningTable[slot*0x8c]):
+ *   0x00-0x1C: 4 lower corners (Y = -X where X = y_val for racer / max_y for traffic)
  *   0x20-0x3C: 4 upper corners (Y = max_abs_y from mesh)
  *   0x60-0x7C: simplified traffic footprint (slot >= 6 only)
  *   0x80:      bounding sphere radius
- *   0x86:      Y height value (suspension for racers, min_y for traffic)
+ *   0x86:      Y height value (X = y_val for racer / max_y for traffic)
+ *
+ * Original quirks preserved here:
+ *  - min_y (`local_10`) is computed by the loop but never read after — its
+ *    stack slot `[ESP+0x10]` is overwritten by `BX` (neg_mx) at 0x42F822
+ *    before any consumer. Earlier port versions fed min_y to traffic y_val;
+ *    that was a port-only divergence and is removed below.
+ *  - For traffic slots (param_2 >= 6), the post-loop FSTP ST0 at 0x0042F89A
+ *    is GATED by the param_2<6 branch; the original therefore reuses the
+ *    raw max_y still on x87 ST(0) as the "X" feeding the lower-corner Y,
+ *    the 0x86 store, and the sphere radius. (Racer path replaces ST(0)
+ *    with y_val via FMUL at 0x0042F8AA.)
+ *  - Multiplier constant at 0x0045D6A8 is the literal 32-bit float
+ *    0xBF350000 (-0.7070312500), NOT the C literal -0.707f (0xBF350481).
+ *    Byte-faithful spelling uses the union punning below.
+ *  - No `max_z<0` safety clamp -- the original does FSUB by 20 and uses
+ *    the raw signed value; FTOL truncates toward zero (CW set RC=11
+ *    via OR AH,0xC at 0x0044818B in __ftol).
  * ======================================================================== */
 
 void td5_physics_compute_suspension_envelope(TD5_Actor *actor, int slot)
@@ -6864,7 +8989,11 @@ void td5_physics_compute_suspension_envelope(TD5_Actor *actor, int slot)
 
     int16_t *cd = get_cardef(actor);
 
-    /* --- Iterate mesh vertices to find extents [CONFIRMED @ 0x0042f720-0x0042f7b9] --- */
+    /* --- Iterate mesh vertices to find extents [CONFIRMED @ 0x0042F720-0x0042F7B9].
+     * The original keeps fVar2 (max_y) on x87 ST(0) across iterations (loaded
+     * pre-loop from _DAT_0045D624 = 0.0f at 0x0042F6D7). The decomp shows
+     * per-axis compare/swap pattern; reordering the |y| updates next to each
+     * other here is byte-equivalent for IEEE-754 32-bit float comparisons. --- */
     float max_x = 0.0f, max_y = 0.0f, max_z = 0.0f, min_y = 0.0f;
     int vert_count = mesh->total_vertex_count;
     TD5_MeshVertex *verts = (TD5_MeshVertex *)(uintptr_t)mesh->vertices_offset;
@@ -6874,60 +9003,82 @@ void td5_physics_compute_suspension_envelope(TD5_Actor *actor, int slot)
         float vy = verts[i].pos_y;
         float vz = verts[i].pos_z;
         if ( vx > max_x) max_x =  vx;
-        if (-vx > max_x) max_x = -vx;
         if ( vy > max_y) max_y =  vy;
-        if (-vy > max_y) max_y = -vy;
         if ( vz > max_z) max_z =  vz;
+        if (-vx > max_x) max_x = -vx;
+        if (-vy > max_y) max_y = -vy;
         if (-vz > max_z) max_z = -vz;
-        if (vy < min_y)  min_y = vy;
+        if (vy < min_y)  min_y = vy;  /* dead in original; kept for symmetry */
     }
+    (void)min_y;
 
-    /* --- Racer-only width clamp [CONFIRMED @ 0x0042f7cc-0x0042f7f2] --- */
-    float y_val;  /* used for lower box Y and bounding sphere */
+    /* --- Post-loop "X" = the value the original keeps on x87 ST(0) feeding
+     * the lower-corner Y, the 0x86 store, and the sphere radius:
+     *   racer  (param_2 < 6): y_val = (cd[0x42] - cd[0x82]) * (-1/sqrt(2))
+     *   traffic(param_2 >=6): X stays as max_y (the FSTP ST0 at 0x0042F89A
+     *                         is gated out, leaving max_y still on stack).
+     * --- */
+    float y_val_x;
     if (slot < TD5_MAX_RACER_SLOTS) {
+        /* Racer width clamp [CONFIRMED @ 0x0042F7CC-0x0042F7F2] */
         float delta = (float)((int32_t)cd[0x84 / 2] - (int32_t)cd[0x40 / 2]);
         if (delta > max_x) max_x = delta;
-        /* Suspension-derived Y for lower box [CONFIRMED @ 0x0042f893-0x0042f8aa] */
-        y_val = (float)((int32_t)cd[0x42 / 2] - (int32_t)cd[0x82 / 2]) * -0.707f;
+        /* Suspension-derived Y [CONFIRMED @ 0x0042F893-0x0042F8AA].
+         * Constant at 0x0045D6A8 is exactly 0xBF350000 (-0.7070312500),
+         * NOT the C literal -0.707f (0xBF350481). */
+        const union { uint32_t u; float f; } k_neg_inv_sqrt2 = { 0xBF350000u };
+        y_val_x = (float)((int32_t)cd[0x42 / 2] - (int32_t)cd[0x82 / 2])
+                  * k_neg_inv_sqrt2.f;
     } else {
-        y_val = min_y;
+        /* Traffic: original leaves max_y on FPU stack; we mirror that. */
+        y_val_x = max_y;
     }
 
-    /* --- Add/subtract 20.0f padding [CONFIRMED @ 0x0042f7fa, 0x0042f808] --- */
+    /* --- Add/subtract 20.0f padding [CONFIRMED @ 0x0042F7FA, 0x0042F808].
+     * No safety clamp in the original -- FTOL truncates toward zero. --- */
     max_x += 20.0f;
     max_z -= 20.0f;
-    if (max_z < 0.0f) max_z = 0.0f; /* safety clamp */
 
-    /* Convert to int16 */
+    /* Convert to int16. C `(int)` cast truncates toward zero, matching
+     * the original `__ftol` (CW RC=11 then FISTP m64 at 0x00448195). */
     int16_t neg_mx = (int16_t)(int)(-max_x);
     int16_t pos_mx = (int16_t)(int)( max_x);
     int16_t my_i16 = (int16_t)(int)( max_y);
     int16_t mz_i16 = (int16_t)(int)( max_z);
     int16_t nmz_i16= (int16_t)(int)(-max_z);
-    int16_t ny_i16 = (int16_t)(int)(-y_val);
+    /* ny_i16 = (long)(-y_val_x) -- FCHS at 0x0042F8B7 negates the dup'd
+     * ST(0) before the CALL __ftol that fills uVar4_final. */
+    int16_t ny_i16 = (int16_t)(int)(-y_val_x);
 
-    /* --- Upper AABB box at offsets 0x20-0x3C [CONFIRMED @ 0x0042f827-0x0042f88d] --- */
+    /* --- Upper AABB box at offsets 0x20-0x3C [CONFIRMED @ 0x0042F827-0x0042F88D] --- */
     cd[0x20 / 2] = neg_mx;   cd[0x22 / 2] = my_i16;  cd[0x24 / 2] = mz_i16;
     cd[0x28 / 2] = pos_mx;   cd[0x2a / 2] = my_i16;  cd[0x2c / 2] = mz_i16;
     cd[0x30 / 2] = neg_mx;   cd[0x32 / 2] = my_i16;  cd[0x34 / 2] = nmz_i16;
     cd[0x38 / 2] = pos_mx;   cd[0x3a / 2] = my_i16;  cd[0x3c / 2] = nmz_i16;
 
-    /* --- Lower AABB box at offsets 0x00-0x1C [CONFIRMED @ 0x0042f8b0-0x0042f8f0] --- */
+    /* --- Lower AABB box at offsets 0x00-0x1C [CONFIRMED @ 0x0042F8B0-0x0042F8F0] --- */
     cd[0x00 / 2] = neg_mx;   cd[0x02 / 2] = ny_i16;  cd[0x04 / 2] = mz_i16;
     cd[0x08 / 2] = pos_mx;   cd[0x0a / 2] = ny_i16;  cd[0x0c / 2] = mz_i16;
     cd[0x10 / 2] = neg_mx;   cd[0x12 / 2] = ny_i16;  cd[0x14 / 2] = nmz_i16;
     cd[0x18 / 2] = pos_mx;   cd[0x1a / 2] = ny_i16;  cd[0x1c / 2] = nmz_i16;
 
-    /* --- Bounding sphere radius at 0x80 [CONFIRMED @ 0x0042f918-0x0042f921] --- */
-    float r = sqrtf(max_z * max_z + y_val * y_val + max_x * max_x);
+    /* --- Bounding sphere radius at 0x80 [CONFIRMED @ 0x0042F8F9-0x0042F921].
+     *   FLD [max_z-20]; FMUL [max_z-20]    ; (max_z-20)^2
+     *   FLD ST1; FMUL ST2; FADDP            ; + y_val_x^2
+     *   FLD [max_x+20]; FMUL [max_x+20]; FADDP
+     *   FSQRT; CALL __ftol                  ; sphere radius
+     * --- */
+    float r = sqrtf(max_z * max_z + y_val_x * y_val_x + max_x * max_x);
     cd[0x80 / 2] = (int16_t)(int)r;
 
-    /* --- Y height at 0x86 [CONFIRMED @ 0x0042f8f4-0x0042f901] --- */
-    cd[0x86 / 2] = (int16_t)(int)y_val;
+    /* --- Y height at 0x86 [CONFIRMED @ 0x0042F8F4-0x0042F901] --- */
+    cd[0x86 / 2] = (int16_t)(int)y_val_x;
 
-    /* --- Traffic simplified footprint at 0x60-0x7C [CONFIRMED @ 0x0042f928-0x0042f97e] --- */
+    /* --- Traffic simplified footprint at 0x60-0x7C [CONFIRMED @ 0x0042F928-0x0042F97E].
+     *   shrunk_x = (max_x+20) - (max_x+20) * 0.2  (i.e. (max_x+20) * 0.8)
+     *   FMUL constant at 0x0045D6A4 = 0x3E4CCCCD = 0.2f (exact). --- */
     if (slot >= TD5_MAX_RACER_SLOTS) {
-        float shrunk_x = max_x - max_x * 0.2f;  /* max_x * 0.8 */
+        float shrunk_x = max_x - max_x * 0.2f;
         int16_t neg_sx = (int16_t)(int)(-shrunk_x);
         int16_t pos_sx = (int16_t)(int)( shrunk_x);
 
@@ -6938,9 +9089,9 @@ void td5_physics_compute_suspension_envelope(TD5_Actor *actor, int slot)
     }
 
     TD5_LOG_I(LOG_TAG,
-              "suspension_envelope slot=%d: max_x=%.1f max_y=%.1f max_z=%.1f min_y=%.1f "
-              "y_val=%.1f radius=%d",
-              slot, max_x, max_y, max_z, min_y, y_val, (int)cd[0x80 / 2]);
+              "suspension_envelope slot=%d: max_x=%.1f max_y=%.1f max_z=%.1f "
+              "y_val_x=%.1f radius=%d",
+              slot, max_x, max_y, max_z, y_val_x, (int)cd[0x80 / 2]);
 }
 
 void td5_physics_set_collisions(int enabled)

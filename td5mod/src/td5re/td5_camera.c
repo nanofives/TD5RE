@@ -698,6 +698,151 @@ after_flyin:
 }
 
 /* ========================================================================
+ * Camera wall-clip raycast (port enhancement — NOT in original)
+ *
+ * The original UpdateChaseCamera + SetCameraWorldPosition (0x401590 +
+ * 0x42CE50) does NO ray-vs-wall test — the camera will happily pass through
+ * walls when the player reverses into one. This is a cosmetic-only port
+ * enhancement that pulls the camera forward to stay outside wall geometry.
+ *
+ * Algorithm:
+ *   - Walk a small window of spans around actor->track_span_raw (chassis
+ *     span). For each span of standard type (1, 2, 5), build the LEFT
+ *     and RIGHT rails (NW→SW and NE→SE corners) and perform a 2D segment-
+ *     vs-segment intersection against the ray (car_xz → desired_cam_xz).
+ *   - Return the smallest hit ratio t in (0, 1] across all spans+rails.
+ *   - Caller multiplies the chase-offset by t * SAFETY to clip camera in.
+ *
+ * 2D-only: chase camera always sits "above" the car so vertical walls are
+ * what matter. Rail tops/bottoms are never the failure mode.
+ *
+ * Coordinate space: all rail vertex coords are 24.8 fixed-point world
+ * units (matching actor->world_pos.x/z and probe coords). The ray inputs
+ * to the helper are also 24.8 fixed-point so the comparison is consistent.
+ *
+ * Damping state lives in g_camWallClipRatio[2] — last-frame's hit ratio is
+ * eased toward this frame's value at g_camWallClipDamp per render frame so
+ * transitions are smooth (no abrupt camera snap when entering/exiting wall
+ * proximity).
+ * ======================================================================== */
+
+/* Per-view damping state. 1.0 = no clip. */
+static float g_camWallClipRatio[2] = { 1.0f, 1.0f };
+
+/* Spans to check on each side of the chassis span. The chase camera sits
+ * roughly 1500-2100 world units behind the car; 4 spans @ ~500-1000 units
+ * each covers the worst-case envelope. */
+#define TD5_CAM_WALL_SPAN_RADIUS  4
+
+/* Safety margin: place clipped camera at 90% of the wall distance so it
+ * sits just inside the wall plane, not exactly on it. */
+#define TD5_CAM_WALL_SAFETY       0.9f
+
+/* Damping factor toward the new ratio each render frame.
+ * 0.0 = no damping (snap), 1.0 = ignore new value. */
+#define TD5_CAM_WALL_DAMP         0.35f
+
+/* Minimum normalized hit ratio. Below this the camera would be inside
+ * the car mesh; clamp it. */
+#define TD5_CAM_WALL_MIN_RATIO    0.15f
+
+/* 2D segment-vs-segment intersection in 24.8 FP world coords.
+ * Returns hit parameter t in (0, 1] on ray (P0→P1) if the rail (Q0→Q1)
+ * blocks it; returns 1.0 if no hit. */
+static float wall_clip_segments_2d(int32_t p0x, int32_t p0z,
+                                   int32_t p1x, int32_t p1z,
+                                   int32_t q0x, int32_t q0z,
+                                   int32_t q1x, int32_t q1z)
+{
+    /* Cast to double early to avoid int64 overflow during cross terms.
+     * Coords are 24.8 fixed-point world units so magnitudes are well
+     * within double precision. */
+    double rdx = (double)(p1x - p0x);
+    double rdz = (double)(p1z - p0z);
+    double sdx = (double)(q1x - q0x);
+    double sdz = (double)(q1z - q0z);
+    double denom = rdx * sdz - rdz * sdx;
+    if (denom > -1.0 && denom < 1.0) return 1.0f;  /* parallel */
+    double qpx = (double)(q0x - p0x);
+    double qpz = (double)(q0z - p0z);
+    double t = (qpx * sdz - qpz * sdx) / denom;
+    double u = (qpx * rdz - qpz * rdx) / denom;
+    if (t <= 0.0 || t > 1.0) return 1.0f;
+    if (u < 0.0 || u > 1.0)  return 1.0f;
+    return (float)t;
+}
+
+/* Compute the closest wall-hit ratio on a ray from car_xz to cam_xz.
+ * Returns 1.0 if no hit, else the smallest t in (0, 1]. */
+static float td5_camera_raycast_to_wall(int32_t car_x, int32_t car_z,
+                                        int32_t cam_x, int32_t cam_z,
+                                        int chassis_span)
+{
+    int span_count = td5_track_get_span_count();
+    if (span_count <= 0 || chassis_span < 0 || chassis_span >= span_count)
+        return 1.0f;
+
+    float best_t = 1.0f;
+
+    int lo = chassis_span - TD5_CAM_WALL_SPAN_RADIUS;
+    int hi = chassis_span + TD5_CAM_WALL_SPAN_RADIUS;
+    if (lo < 0) lo = 0;
+    if (hi >= span_count) hi = span_count - 1;
+
+    for (int si = lo; si <= hi; si++) {
+        TD5_StripSpan *sp = td5_track_get_span(si);
+        if (!sp) continue;
+
+        /* Only test standard types — transition/junction/sentinel types
+         * have irregular vertex layouts (see td5_track_resolve_wall_contacts
+         * for the same gate). */
+        int type = sp->span_type;
+        if (type != 1 && type != 2 && type != 5) continue;
+
+        int lane_count = td5_track_get_span_lane_count(si);
+        if (lane_count < 1) lane_count = 1;
+
+        int li = (int)sp->left_vertex_index;
+        int ri = (int)sp->right_vertex_index;
+
+        TD5_StripVertex *vL_near = td5_track_get_vertex(li + 0);
+        TD5_StripVertex *vL_far  = td5_track_get_vertex(ri + 0);
+        TD5_StripVertex *vR_near = td5_track_get_vertex(li + lane_count);
+        TD5_StripVertex *vR_far  = td5_track_get_vertex(ri + lane_count);
+        if (!vL_near || !vL_far || !vR_near || !vR_far) continue;
+
+        /* Strip vertices are 16-bit local coords; lift to 24.8 FP world by
+         * adding the span origin (which is already 24.8 FP). The factor of
+         * 256 (<<8) matches the strip layout — see td5_track.c probe path
+         * (probe.x >> 8 vs vertex coords). */
+        int32_t ox = sp->origin_x;
+        int32_t oz = sp->origin_z;
+
+        int32_t lLnx = ((int32_t)vL_near->x << 8) + ox;
+        int32_t lLnz = ((int32_t)vL_near->z << 8) + oz;
+        int32_t lLfx = ((int32_t)vL_far->x  << 8) + ox;
+        int32_t lLfz = ((int32_t)vL_far->z  << 8) + oz;
+
+        int32_t lRnx = ((int32_t)vR_near->x << 8) + ox;
+        int32_t lRnz = ((int32_t)vR_near->z << 8) + oz;
+        int32_t lRfx = ((int32_t)vR_far->x  << 8) + ox;
+        int32_t lRfz = ((int32_t)vR_far->z  << 8) + oz;
+
+        /* LEFT rail: NW → SW (near-left to far-left) */
+        float tL = wall_clip_segments_2d(car_x, car_z, cam_x, cam_z,
+                                         lLnx, lLnz, lLfx, lLfz);
+        if (tL < best_t) best_t = tL;
+
+        /* RIGHT rail: NE → SE (near-right to far-right) */
+        float tR = wall_clip_segments_2d(car_x, car_z, cam_x, cam_z,
+                                         lRnx, lRnz, lRfx, lRfz);
+        if (tR < best_t) best_t = tR;
+    }
+
+    return best_t;
+}
+
+/* ========================================================================
  * td5_camera_finalize_chase_pos
  *
  * Writes g_camWorldPos[view] and re-orients the camera from the current
@@ -715,6 +860,12 @@ after_flyin:
  * ordering for any tick-level consumers) AND from td5_camera_finalize_all
  * at the top of the render frame so the final g_camWorldPos uses the same
  * g_subTickFraction the car mesh will be drawn with.
+ *
+ * After computing the desired camera position, applies a 2D wall-clip
+ * raycast (port enhancement) so the camera pulls forward when reversing
+ * into a wall. The clip only pulls the camera TOWARD the car, never
+ * pushes it back. Damped per-view to avoid abrupt snaps. See
+ * td5_camera_raycast_to_wall above for details.
  * ======================================================================== */
 void td5_camera_finalize_chase_pos(TD5_Actor *actor_p, int view)
 {
@@ -735,9 +886,48 @@ void td5_camera_finalize_chase_pos(TD5_Actor *actor_p, int view)
     int vel_y_interp = (int)((float)*(int *)(actor + 0x1D0) * g_subTickFraction + 0.5f);
     int vel_z_interp = (int)((float)*(int *)(actor + 0x1D4) * g_subTickFraction + 0.5f);
 
-    g_camWorldPos[v][0] = pos_x + g_camOrbitOffset[v][0] + vel_x_interp;
-    g_camWorldPos[v][1] = pos_y + g_camOrbitOffset[v][1] + vel_y_interp;
-    g_camWorldPos[v][2] = pos_z + g_camOrbitOffset[v][2] + vel_z_interp;
+    /* Desired (unclipped) camera position from existing chase logic. */
+    int cam_x_desired = pos_x + g_camOrbitOffset[v][0] + vel_x_interp;
+    int cam_y_desired = pos_y + g_camOrbitOffset[v][1] + vel_y_interp;
+    int cam_z_desired = pos_z + g_camOrbitOffset[v][2] + vel_z_interp;
+
+    /* Wall-clip raycast (port enhancement, see comment block above).
+     * Ray origin = car center (with vel extrapolation); end = desired
+     * camera. If a wall blocks the line, t < 1 and we pull camera in to
+     * t * SAFETY along the chase offset. Y is left at desired since the
+     * test is 2D and the camera already sits above wall tops in practice. */
+    int chassis_span = (int)(*(short *)(actor + 0x80));
+    int32_t car_x_ray = pos_x + vel_x_interp;
+    int32_t car_z_ray = pos_z + vel_z_interp;
+    float raw_t = td5_camera_raycast_to_wall(car_x_ray, car_z_ray,
+                                             cam_x_desired, cam_z_desired,
+                                             chassis_span);
+    if (raw_t < TD5_CAM_WALL_MIN_RATIO) raw_t = TD5_CAM_WALL_MIN_RATIO;
+    if (raw_t > 1.0f) raw_t = 1.0f;
+
+    /* Damp toward the new ratio. Use a snappier response when pulling IN
+     * (raw_t < current) so the camera doesn't lag a fast wall-poke, but a
+     * slower release when going back out — this matches typical chase-cam
+     * conventions and prevents the camera from oscillating against a wall. */
+    float cur = g_camWallClipRatio[v];
+    float damp = (raw_t < cur) ? (TD5_CAM_WALL_DAMP * 2.0f) : TD5_CAM_WALL_DAMP;
+    if (damp > 1.0f) damp = 1.0f;
+    cur = cur + (raw_t - cur) * damp;
+    if (cur < TD5_CAM_WALL_MIN_RATIO) cur = TD5_CAM_WALL_MIN_RATIO;
+    if (cur > 1.0f) cur = 1.0f;
+    g_camWallClipRatio[v] = cur;
+
+    /* Apply the (damped) clip. Only the X/Z (lateral) offset is shrunk —
+     * Y stays at desired so the camera doesn't dive when it pulls forward. */
+    float clip = cur * TD5_CAM_WALL_SAFETY;
+    if (clip > 1.0f) clip = 1.0f;
+    if (clip < 0.0f) clip = 0.0f;
+
+    g_camWorldPos[v][0] = pos_x + vel_x_interp +
+                          (int)((float)g_camOrbitOffset[v][0] * clip + 0.5f);
+    g_camWorldPos[v][1] = cam_y_desired;
+    g_camWorldPos[v][2] = pos_z + vel_z_interp +
+                          (int)((float)g_camOrbitOffset[v][2] * clip + 0.5f);
 
     target[0] = pos_x + vel_x_interp;
     target[1] = pos_y + smoothed_h + vel_y_interp;

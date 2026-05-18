@@ -26,6 +26,7 @@
 #include <stdlib.h>
 #include <stdarg.h>
 #include <string.h>
+#include <float.h>  /* _controlfp + _RC_DOWN / _MCW_RC for FPU rounding mode */
 
 /* TD5RE headers */
 #include "td5re.h"
@@ -239,6 +240,15 @@ static int td5_apply_cli_overrides(const char *cmdline,
         { "RaceTraceMaxFrames",   &g_td5.ini.race_trace_max_frames },
         { "AutoThrottle",         &g_td5.ini.auto_throttle },
         { "RaceTraceMaxSimTicks", &g_td5.ini.race_trace_max_sim_ticks },
+        { "WholeState",           &g_td5.ini.whole_state_enabled },
+        { "WholeStateMaxTicks",   &g_td5.ini.whole_state_max_ticks },
+        { "ExperimentalBiasClamp", &g_td5.ini.experimental_bias_clamp },
+        /* StateReplayMode is also CLI-overridable but takes the integer
+         * code (0=off, 1=dump, 2=inject, 3=both) rather than the string. */
+        { "StateReplayMode",        &g_td5.ini.state_replay_mode },
+        { "StateReplayStartFrame",  &g_td5.ini.state_replay_start_frame },
+        { "StateReplayEndFrame",    &g_td5.ini.state_replay_end_frame },
+        { "StateReplayMaxFrames",   &g_td5.ini.state_replay_max_frames },
         /* Logging */
         { "LogEnabled",           &g_td5.ini.log_enabled },
         { "LogMinLevel",          &g_td5.ini.log_min_level },
@@ -384,6 +394,16 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     (void)hPrevInstance;
     (void)nCmdShow;
 
+    /* Match the original TD5_d3d.exe FPU control word: round-toward-minus-infinity
+     * (x87 RC=01). Empirically verified by the pool4 precise-port pilot
+     * (re/analysis/pilot_0042EB10_audit.md): 99.82% match against 6228 FISTP
+     * outputs from TransformShortVec3ByRenderMatrixRounded vs 49.05% for the
+     * default round-to-nearest-even. Without this, every `lrintf` / `(int)f` /
+     * FISTP in the simulation core is up to 1 LSB off on negative inputs,
+     * compounding tick-over-tick into the chronic drift we've been chasing.
+     * Set BEFORE anything else so logging/INI parsing don't inherit RTN. */
+    _controlfp(_RC_DOWN, _MCW_RC);
+
     SetUnhandledExceptionFilter(td5_crash_handler);
 
     /* Initialize multi-file logging (creates log/ dir, rotates old sessions) */
@@ -449,6 +469,36 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     g_td5.ini.trace_fast_forward    = td5_ini_float("Trace", "TraceFastForward", 1.0f);
     g_td5.ini.race_trace_max_sim_ticks =
         td5_ini_int("Trace", "RaceTraceMaxSimTicks", 0);
+    /* Feature flag: experimental ClassifyTrackOffsetClamp pre-loop port.
+     * See td5_ai.c:td5_ai_refresh_route_state_slot — closes the lateral_bias
+     * cascade that produces the slot-0 steering 2x divergence at sim_tick=1. */
+    g_td5.ini.experimental_bias_clamp =
+        td5_ini_int("Trace", "ExperimentalBiasClamp", 0);
+
+    /* Whole-state snapshot (see re/analysis/whole_state_diff_design.md).
+     * Independent of RaceTrace -- you can capture whole-state without CSVs. */
+    g_td5.ini.whole_state_enabled =
+        td5_ini_int("Trace", "WholeState", 0);
+    g_td5.ini.whole_state_max_ticks =
+        td5_ini_int("Trace", "WholeStateMaxTicks", 600);
+
+    /* Snapshot-replay harness (see td5_trace_replay.{c,h}).
+     * Mode string is parsed into the int code stored in g_td5.ini.
+     * off=0 dump=1 inject=2 both=3. */
+    {
+        char buf[16];
+        td5_ini_str("Trace", "StateReplayMode", "off", buf, sizeof(buf));
+        if      (!strcmp(buf, "dump"))   g_td5.ini.state_replay_mode = 1;
+        else if (!strcmp(buf, "inject")) g_td5.ini.state_replay_mode = 2;
+        else if (!strcmp(buf, "both"))   g_td5.ini.state_replay_mode = 3;
+        else                             g_td5.ini.state_replay_mode = 0;
+    }
+    g_td5.ini.state_replay_start_frame =
+        td5_ini_int("Trace", "StateReplayStartFrame", 0);
+    g_td5.ini.state_replay_end_frame   =
+        td5_ini_int("Trace", "StateReplayEndFrame",   0);
+    g_td5.ini.state_replay_max_frames  =
+        td5_ini_int("Trace", "StateReplayMaxFrames",  200);
 
     /* Modular trace selection. Defaults to all modules / all stages so an
      * unconfigured trace captures everything (matches the legacy schema's

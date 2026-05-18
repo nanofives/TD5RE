@@ -15,7 +15,7 @@
  *   0x434FE0  UpdateActorTrackBehavior (AI path-following)
  *   0x436A70  UpdateRaceActors
  *   0x435930  InitializeTrafficActorsFromQueue
- *   0x435310  RecycleTrafficActorFromQueue
+ *   0x4353B0  RecycleTrafficActorFromQueue (canonical port in td5_ai.c)
  */
 
 #ifndef TD5_TRACK_H
@@ -131,8 +131,44 @@ const void *td5_track_get_models_display_list_raw(int index, size_t *size_out);
 void td5_track_update_actor_position(TD5_Actor *actor);
 void td5_track_update_probe_position(struct TD5_TrackProbeState *probe,
                                      int32_t world_x, int32_t world_z);
+
+/* Write the per-probe contact_vertex_A/B fields from the probe's current
+ * span_index + sub_lane_index. Mirrors the prefix of
+ * ComputeActorTrackContactNormal[Extended] (0x00445450 / 0x004457E0):
+ *   iVar5 = strip[span].left_vertex_index + sub_lane + LUT_E40[type * 2]
+ *   iVar7 = strip[span].right_vertex_index + sub_lane + LUT_E41[type * 2]
+ * Called after td5_track_update_probe_position so the (possibly walker-
+ * advanced) span_index is the one used. */
+void td5_track_compute_probe_contact_vertices(struct TD5_TrackProbeState *probe);
 int  td5_track_get_surface_type(TD5_Actor *actor, int probe_index);
 void td5_track_compute_heading(TD5_Actor *actor);
+
+/* InterpolateTrackSegmentNormal (byte-faithful port of 0x00445E30).
+ * Inner helper used by ComputeActorHeadingFromTrackSegment (0x00445B90) to
+ * write the int16 surface normal at out_normal[0..2] (caller-side pointer
+ * to actor+0x290). Computes cross-product of (va-vb) x (va-vc), >>12,
+ * FPU-normalises to length 4096.0f, truncates to int16, applies the
+ * post-conversion `if (uny == 0) uny = 1` sentinel so the int16 .y
+ * divisor in ApplyMissingWheelVelocityCorrection (0x00403EB0) is never
+ * exactly zero. va/vb/vc are vertex indices into the strip vertex pool. */
+void td5_track_interpolate_segment_normal(int16_t va_idx, int16_t vb_idx,
+                                           int16_t vc_idx, int16_t *out_normal);
+
+/* Byte-faithful port of ComputeActorHeadingFromTrackSegment @ 0x00445B90.
+ * Per-tick heading-normal writer. Reads actor's track_state at +0x80
+ * (span_idx, sub_lane), looks up the live span record, picks a triangle
+ * via a two-level (sub_lane × span_type) dispatch, and writes the
+ * normalized surface normal back to actor +0x290 (heading_normal int16[3]).
+ *
+ * Called from the per-tick pose integrators:
+ *   - IntegrateVehiclePoseAndContacts   (player/AI per tick)
+ *   - UpdateVehiclePoseFromPhysicsState (player/AI per tick)
+ *   - UpdateTrafficVehiclePose          (traffic per tick)
+ *
+ * This is distinct from td5_track_compute_heading() above, which is the
+ * SPAWN-only initializer port of 0x00434350 and writes a different vector
+ * (with heading_normal.y hard-coded to 0). */
+void td5_track_compute_runtime_heading_normal(TD5_Actor *actor);
 
 /* --- Barycentric contact --- */
 int32_t td5_track_compute_contact_height(int span_index, int sub_lane,
@@ -149,6 +185,17 @@ int  td5_track_get_span_center_world(int span_index,
                                       int *out_x, int *out_y, int *out_z);
 int  td5_track_get_span_lane_world(int span_index, int sub_lane,
                                     int *out_x, int *out_y, int *out_z);
+
+/* Byte-faithful port of InitActorTrackSegmentPlacement @ 0x00445F10.
+ * - actor_at_0x80 must point to actor + 0x80 (span_raw int16); the helper
+ *   reads param_1[0] (span), param_1[6]/byte+12 (sub_lane), and writes back
+ *   param_1[2] (span_accum), param_1[3] (span_high), and clamped sub_lane.
+ * - out_pos receives world position in 24.8 fixed-point at out_pos[0..2]
+ *   (laid out to match actor +0x1FC/+0x200/+0x204).
+ * Used by traffic spawn (UpdateTrafficActorRecycle / InitializeTrafficActorsFromQueue). */
+void td5_track_init_actor_segment_placement(int16_t *actor_at_0x80, int32_t *out_pos);
+
+int  td5_track_span_lane_count_at(int span_index);
 
 /* --- Lighting ---
  * Per-vehicle zone-driven lighting now lives in td5_render.c as
@@ -191,6 +238,9 @@ int  td5_track_load_routes(const void *left_data, size_t left_size,
 
 /* --- Wrap normalization --- */
 int  td5_track_normalize_actor_wrap(TD5_Actor *actor);
+
+/* --- Segment boundary remap (0x443FF0 ResolveActorSegmentBoundary) --- */
+void td5_track_resolve_actor_segment_boundary(TD5_Actor *actor);
 
 /* --- Route heading helpers --- */
 int  td5_track_get_primary_route_heading(int span_index);

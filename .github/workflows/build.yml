@@ -71,7 +71,8 @@ jobs:
           SRCS="td5re.c td5_game.c td5_physics.c td5_track.c td5_ai.c \
                 td5_render.c td5_frontend.c td5_hud.c td5_sound.c td5_input.c \
                 td5_asset.c td5_inflate.c td5_save.c td5_net.c td5_camera.c \
-                td5_vfx.c td5_fmv.c td5_platform_win32.c td5re_stubs.c main.c"
+                td5_vfx.c td5_fmv.c td5_trace_whole_state.c \
+                td5_platform_win32.c td5re_stubs.c main.c"
 
           for src in $SRCS; do
             name="${src%.c}"

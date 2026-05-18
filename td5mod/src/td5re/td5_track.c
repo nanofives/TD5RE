@@ -22,6 +22,8 @@
 #include "td5_platform.h"
 #include "td5_render.h"
 #include "td5_trace.h"
+#include "td5_pilot_trace_004440F0.h"
+#include "td5_pilot_trace_pool15_spline.h"
 #include "../../../re/include/td5_actor_struct.h"
 #include "td5re.h"
 #include <string.h>
@@ -57,7 +59,7 @@ int     g_track_type_mode       = 0;
  * 0x436A70  UpdateRaceActors                    -- DONE (in td5_track_tick)
  * 0x42F5B0  UpdateRaceOrder                     -- DONE
  * 0x435930  InitializeTrafficActorsFromQueue    -- DONE
- * 0x435310  RecycleTrafficActorFromQueue        -- DONE
+ * 0x4353B0  RecycleTrafficActorFromQueue        -- STUB ONLY (real port in td5_ai.c)
  * ======================================================================== */
 
 /* ========================================================================
@@ -585,6 +587,49 @@ void td5_track_resolve_wall_contacts(TD5_Actor *actor)
      * geometry that produces inverted wall normals — the road center tests
      * as "outside" both walls, creating invisible barriers mid-road. */
     if (type != 1 && type != 2 && type != 5) return;
+
+    /* Fork-adjacent guard (Wave 1 Chain A fix, 2026-05-17).
+     *
+     * The current span's type (1/2/5) is "regular quad" but its rail-vertex
+     * pair can STILL diverge into the fork branch when the link_next or
+     * link_prev neighbour is a transition/reversed/junction/sentinel type
+     * (3, 4, 6, 7, 8, 11). On Sydney sp526 and BlueRidge sp257 the rail
+     * vertices diverge enough that the auto-flip's `opp_dot` test reads
+     * the OPPOSITE-rail corner on the WRONG side of the wall edge, flipping
+     * the perp normal AWAY from the road instead of toward it.
+     *
+     * `td5_physics_wall_response` then receives a wrong-sign `wall_angle`
+     * and faithfully reflects the velocity into the lateral direction —
+     * that is exactly the observed "AI shoved sideways by an invisible
+     * wall". The same flipped normal also fails to detect penetration
+     * during AI recovery (the dot test passes with the wrong sign and
+     * `d` stays > -10 dead zone), letting the car clip through walls.
+     *
+     * Suppressing this port-only synthesizer on fork-adjacent geometry is
+     * safe: the original binary has no equivalent mid-strip lateral wall
+     * impulse here, and the topological off-track damping (state 0x0F) is
+     * what's supposed to contain the car near forks anyway. See
+     * `todo_wall_response_clamp_fix_2026-05-16.md` for the full audit.
+     *
+     * Closes: todo_wall_response_clamp_fix, todo_ai_recovery_wall_collision_missing,
+     *         todo_sydney_ai_first_divergence_span526_wall (over-shove half),
+     *         partial: todo_ai_early_turn_into_wall (wall no longer over-fires
+     *         near forks).
+     */
+    {
+        int prev_idx = (int)sp->link_prev;
+        int next_idx = (int)sp->link_next;
+        if (prev_idx >= 0 && prev_idx < s_span_count) {
+            int t = s_span_array[prev_idx].span_type;
+            if (t == 3 || t == 4 || t == 6 || t == 7 || t == 8 || t == 11)
+                return;
+        }
+        if (next_idx >= 0 && next_idx < s_span_count) {
+            int t = s_span_array[next_idx].span_type;
+            if (t == 3 || t == 4 || t == 6 || t == 7 || t == 8 || t == 11)
+                return;
+        }
+    }
 
     /* Branch spans (index >= ring_length) previously skipped this function
      * because the stale (no-gate) logic produced simultaneous LEFT+RIGHT
@@ -1186,6 +1231,151 @@ int td5_track_get_span_lane_world(int span_index, int sub_lane,
     return 1;
 }
 
+/* Byte-faithful port of InitActorTrackSegmentPlacement @ 0x00445F10.
+ *
+ * Disassembly summary (push EBX/EBP/ESI, ESI = param_1 = &actor+0x80,
+ * later EBX = param_2 from [ESP+0x18]):
+ *
+ *   sVar4 = *param_1;                                              [0F BF 0E]
+ *   param_1[2] = sVar4;                                            [66 89 4E 04]
+ *   param_1[3] = sVar4;                                            [66 89 4E 06]
+ *   pbVar1 = g_trackStripRecords + sVar4 * 0x18;                   [LEA EDX+ECX*8]
+ *   iVar7 = (int)(char)param_1[6];                                 [MOVSX EAX, BYTE [ESI+0xC]]
+ *   uVar5 = *(ushort *)(pbVar1 + 4);
+ *   cVar2 = DAT_00474e40[(uint)*pbVar1 * 2];     // = k_quad_vertex_offsets[type][0]
+ *   cVar3 = DAT_00474e41[(uint)*pbVar1 * 2];     // = k_quad_vertex_offsets[type][1]
+ *   uVar6 = *(ushort *)(pbVar1 + 6);
+ *   if ((int)(pbVar1[3] & 0xf) <= iVar7) {       // sub_lane >= lane_count
+ *       iVar7 = (pbVar1[3] & 0xf) - 1;
+ *       *(char *)(param_1 + 6) = (char)iVar7;    // writeback clamp
+ *   }
+ *   iVar9 = (int)cVar3 + (uint)uVar6 + iVar7;    // right_vertex_base
+ *   iVar7 = iVar7 + (int)cVar2 + (uint)uVar5;    // left_vertex_base
+ *   iVar10 = iVar7 * 6;                          // stride 6 (3 shorts)
+ *   iVar8 = iVar9 * 6;
+ *   sum_x = vpool[iVar7+1].x + vpool[iVar9+1].x + vpool[iVar7].x + vpool[iVar9].x
+ *   x = ((sum_x << 8) + ((sum_x<<8)>>31 & 3)) >> 2 + origin_x * 0x100   [SHL/CDQ/AND/ADD/SAR pattern]
+ *   ...same for y/z using +2/+8 and +4/+10 shorts...
+ *
+ * The "+ (x>>31 & 3)" is the compiler-generated sign bias for SAR-by-2 to
+ * implement signed division by 4 that rounds toward zero — equivalent to C
+ * `int /4`. We use plain `/4` here for clarity.
+ *
+ * Side effects on the actor (via param_1 = &actor+0x80):
+ *   - +0x84 (span_accum)  <- span_raw
+ *   - +0x86 (span_high)   <- span_raw
+ *   - +0x8C (sub_lane)    <- clamped to lane_count-1 if >= lane_count
+ *
+ * Writes 24.8 fixed-point world position to out_pos[0..2]
+ * (matches actor +0x1FC/+0x200/+0x204 layout).
+ */
+/* Forward declaration — table itself is defined later in this file. */
+static const int8_t k_quad_vertex_offsets[12][2];
+
+void td5_track_init_actor_segment_placement(int16_t *actor_at_0x80, int32_t *out_pos)
+{
+    int16_t  span_raw;
+    int      span_index;
+    const TD5_StripSpan *sp;
+    int      type;
+    int      lane_nibble;
+    int      sub_lane;
+    int8_t   left_off, right_off;
+    int      left_vert_base, right_vert_base;
+    int      left_idx0, left_idx1, right_idx0, right_idx1;
+    TD5_StripVertex *vL0, *vL1, *vR0, *vR1;
+    int      sum;
+
+    if (!actor_at_0x80 || !out_pos)
+        return;
+
+    span_raw = actor_at_0x80[0];
+
+    /* 0x00445F1A-21: param_1[2] = span; param_1[3] = span (init span_accum + span_high). */
+    actor_at_0x80[2] = span_raw;
+    actor_at_0x80[3] = span_raw;
+
+    span_index = (int)span_raw;
+
+    /* Out-of-range or no track: leave out_pos zero (defensive — original
+     * dereferences strip[span] directly with no range check). */
+    if (out_pos) { out_pos[0] = 0; out_pos[1] = 0; out_pos[2] = 0; }
+
+    if (!s_span_array || !s_vertex_table ||
+        span_index < 0 || span_index >= s_span_count)
+        return;
+
+    sp = &s_span_array[span_index];
+
+    /* sub_lane: SIGN-EXTENDED char read from actor +0x8C
+     * (= (char *)(actor_at_0x80 + 6) = byte +0xC from actor_at_0x80). */
+    sub_lane = (int)*((const int8_t *)(actor_at_0x80) + 12);
+
+    type = (int)sp->span_type;
+    lane_nibble = ((const uint8_t *)sp)[3] & 0x0F;  /* (pbVar1[3] & 0xf) */
+
+    /* DAT_00474E40 / DAT_00474E41 per-type pair (spawn vertex offsets). */
+    if (type >= 0 && type < 12) {
+        left_off  = (int8_t)k_quad_vertex_offsets[type][0];
+        right_off = (int8_t)k_quad_vertex_offsets[type][1];
+    } else {
+        left_off = 0;
+        right_off = 0;
+    }
+
+    /* 0x00445F61-63: CMP EAX,EBP / JL — if lane_nibble <= sub_lane, clamp. */
+    if (lane_nibble <= sub_lane) {
+        sub_lane = lane_nibble - 1;
+        /* 0x00445F68: MOV byte ptr [ESI+0xc], AL — writeback clamped value. */
+        *((int8_t *)(actor_at_0x80) + 12) = (int8_t)sub_lane;
+    }
+
+    /* 0x00445F6B-6D:
+     *   EDX = right_off + uVar6 + sub_lane    (right_vertex_base)
+     *   EAX = sub_lane + left_off + uVar5     (left_vertex_base) */
+    left_vert_base  = sub_lane + (int)left_off  + (int)sp->left_vertex_index;
+    right_vert_base = sub_lane + (int)right_off + (int)sp->right_vertex_index;
+
+    /* Read 4 vertices: vL[base], vL[base+1], vR[base], vR[base+1]. */
+    left_idx0  = left_vert_base;
+    left_idx1  = left_vert_base + 1;
+    right_idx0 = right_vert_base;
+    right_idx1 = right_vert_base + 1;
+
+    /* Defensive bounds — original has none. */
+    if (left_idx0 < 0 || left_idx1 < 0 || right_idx0 < 0 || right_idx1 < 0)
+        return;
+
+    vL0 = vertex_at(left_idx0);
+    vL1 = vertex_at(left_idx1);
+    vR0 = vertex_at(right_idx0);
+    vR1 = vertex_at(right_idx1);
+
+    /* 0x00445F7C-FB5: out_pos[0] = ((sum_x * 0x100) / 4) + origin_x * 0x100
+     * Order matches disasm (vL1, vR1, vL0, vR0). */
+    sum = (int)vL1->x + (int)vR1->x + (int)vL0->x + (int)vR0->x;
+    out_pos[0] = ((sum << 8) / 4) + sp->origin_x * 0x100;
+
+    /* 0x00445FBD-FEB: out_pos[1] uses +0x02/+0x08 shorts (y component). */
+    sum = (int)vL0->y + (int)vL1->y + (int)vR0->y + (int)vR1->y;
+    out_pos[1] = ((sum << 8) / 4) + sp->origin_y * 0x100;
+
+    /* 0x00445FF4-025: out_pos[2] uses +0x04/+0x0a shorts (z component). */
+    sum = (int)vL1->z + (int)vL0->z + (int)vR1->z + (int)vR0->z;
+    out_pos[2] = ((sum << 8) / 4) + sp->origin_z * 0x100;
+}
+
+/* Public accessor for the span's lane-count nibble used by InitializeRaceSession
+ * callers. Mirrors the raw `(byte_3 & 0x0F)` read in
+ * `InitActorTrackSegmentPlacement @ 0x00445F24` for the sub_lane clamp.
+ * Returns 0 if the span index is out of range. */
+int td5_track_span_lane_count_at(int span_index)
+{
+    if (!s_span_array || span_index < 0 || span_index >= s_span_count)
+        return 0;
+    return span_lane_count(&s_span_array[span_index]);
+}
+
 static void rebuild_span_display_list_mapping(void)
 {
     int *mapping;
@@ -1277,36 +1467,47 @@ static inline void vertex_world_pos(const TD5_StripSpan *sp,
 
 /**
  * Per-span-type vertex index offsets — DAT_00473c68 (int32, stride 8).
- * Read by SampleTrackTargetPoint (0x00434836) ONLY: col[0] applied to
- * (left_vertex_index + lane_count) to pick the 2-vertex interpolation
- * "right" vertex. Col[1] is not read by this function.
+ * Stride-8 array: each "type row" has 2 columns of int32.
  *
- * Col 0 verified [CONFIRMED @ 0x00473C68 via independent memory_read on
- * fresh Ghidra session 2026-04-23]:
- *   row: 0  1  2  3  4  5  6  7  8  9 10 11
- *   val: 0  0  0 -1 -1 -2  0 -1 -1 -2  0  0
+ *   Col 0 (base 0x473c68) read by SampleTrackTargetPoint (0x00434836).
+ *   Col 1 (base 0x473c6c) read by ComputeSignedTrackOffset (0x004346A3)
+ *                              and ComputeTrackSpanProgress (0x004345E4).
  *
- * Prior 2026-04-20 comment claimed {-1,-1,-2} at types 2/3/4, missing the
- * second {-1,-1,-2} block at types 7/8/9. That was wrong in both halves:
- *   - First block shifted by -1 (bit 2/3/4 vs actual 3/4/5)
- *   - Second block omitted entirely
- * Effect: SampleTrackTargetPoint picked the wrong right-end vertex on
- * junction-entry spans, so AI cars with high route_byte (RIGHT.TRK slots
- * 0/2/4) chased a corrupted target while LEFT.TRK cars (route_byte=0,
- * interpolation stays at left_vertex) drove fine. See
- * todo_ai_right_route_branches.md.
+ * Both consumers add the value to (vertex_base + lane_count) to pick the
+ * "end" vertex for 2-vertex interpolation.
+ *
+ * [CONFIRMED @ 0x00473C68 via mcp__ghidra__memory_read pool15 2026-05-14]
+ * — Verified independently via 16-byte reads at 0x473c8c..0x473cb0 and
+ * 4-byte single reads at each suspect cell. Earlier prior-port comment
+ * had it shifted by 1 row AND used col 0 values for the col 1 consumer.
+ *
+ *   type:  0  1  2  3  4  5  6  7  8  9 10 11
+ *   col0:  0  0 -1 -1 -2  0  0  0  0  0  0  0     <- SampleTrackTargetPoint
+ *   col1:  0  0  0  0  0 -1 -1 -2  0  0  0  0     <- ComputeSignedTrackOffset
+ *                                                    + ComputeTrackSpanProgress
+ *
+ * Effect of the prior bug:
+ *   - SampleTrackTargetPoint picked the wrong right-end vertex on
+ *     type-3/4/5/7/8/9 spans (now correctly only types 2/3/4 use col0).
+ *   - ComputeSignedTrackOffset / ComputeTrackSpanProgress applied a
+ *     non-zero offset on types 3/4/5/7/8/9 where col 1 is 0 — overshoot
+ *     of 1 or 2 vertices. Now applies a non-zero offset only on
+ *     types 5/6/7.
+ *
+ * See todo_ai_right_route_branches.md for the prior symptom (Moscow
+ * RIGHT.TRK AI chase corrupted target).
  */
 static const int8_t k_target_vertex_offsets[12][2] = {
     /* type  0 */ {  0,  0 },
     /* type  1 */ {  0,  0 },
-    /* type  2 */ {  0,  0 },
+    /* type  2 */ { -1,  0 },
     /* type  3 */ { -1,  0 },
-    /* type  4 */ { -1,  0 },
-    /* type  5 */ { -2,  0 },
-    /* type  6 */ {  0,  0 },
-    /* type  7 */ { -1,  0 },
-    /* type  8 */ { -1,  0 },
-    /* type  9 */ { -2,  0 },
+    /* type  4 */ { -2,  0 },
+    /* type  5 */ {  0, -1 },
+    /* type  6 */ {  0, -1 },
+    /* type  7 */ {  0, -2 },
+    /* type  8 */ {  0,  0 },
+    /* type  9 */ {  0,  0 },
     /* type 10 */ {  0,  0 },
     /* type 11 */ {  0,  0 },
 };
@@ -1696,16 +1897,36 @@ int td5_track_load_strip(const void *data, size_t size)
 }
 
 /**
- * BindTrackStripRuntimePointers (0x444070)
+ * BindTrackStripRuntimePointers (0x444070) — byte-faithful port
  *
- * Patches sentinel records at the first and last MAIN ROAD span:
- *   - First span: type = 9 (SENTINEL_START), backward_link = ring_length - 1
- *   - Last main road span: type = 10 (SENTINEL_END), link at +0x10 cleared
+ * Original listing (29 instructions, 0x00444070-0x004440E0):
+ *   MOV EAX,[0x004aed90]                ; blob base ptr
+ *   MOV [0x004c3da0],EAX                ; DAT_004c3da0 = blob_ptr
+ *   MOV ECX,[EAX]; ADD ECX,EAX          ; ECX = blob + blob[0] = strip records
+ *   MOV [0x004c3d9c],ECX                ; g_trackStripRecords
+ *   MOV EDX,[EAX+8]; ADD EDX,EAX        ; EDX = blob + blob[2] = vertex pool
+ *   MOV [0x004c3d98],EDX                ; g_trackVertexPool
+ *   MOV EDX,[EAX+4]; MOV [0x004c3d90],EDX   ; g_trackTotalSpanCount = blob[1]
+ *   MOV ESI,[EAX+0x10]; MOV [0x004c3d94],ESI ; g_trackStripAttributeBasePtr (raw blob[4])
+ *   MOV EAX,[EAX+0xc]; MOV [0x004c3d8c],EAX  ; _DAT_004c3d8c = blob[3]
+ *   DEC EDX                              ; total - 1
+ *   MOV [ECX+0xa],DX                     ; span[0].link_prev = total - 1
+ *   MOV ECX,[0x004c3d9c]; MOV byte [ECX],0x9 ; span[0].span_type = 9
+ *   MOV EAX,[0x004c3d90]; LEA EDX,[EAX+EAX*2]
+ *   MOV EAX,[0x004c3d9c]
+ *   MOV word [EAX+EDX*8-0x10],0x0        ; *(uint16*)(strip + total*0x18 - 0x10)
+ *                                        ; = last-span +0x08 (link_next) cleared
+ *   MOV EAX,[0x004c3d90]; MOV EDX,[0x004c3d9c]; LEA ECX,[EAX+EAX*2]
+ *   MOV byte [EDX+ECX*8-0x18],0xa        ; *(uint8*)(strip + total*0x18 - 0x18)
+ *                                        ; = last-span +0x00 (span_type) = 10
  *
- * Uses ring_length (main road count) — NOT s_span_count (total incl branches).
- * The original reads DAT_004c3d90 which is the ring length.
- * Branch spans (>= ring_length) keep their original types (junction links
- * back to main road). [CONFIRMED @ 0x444070]
+ * Port maps the original's "g_trackTotalSpanCount" (blob[1], main road ring
+ * length) to g_td5.track_span_ring_length. s_span_count may be larger when
+ * branch spans exist past the main ring, but the sentinel patches are at
+ * (ring-1) just like the original. The blob base / span base / vertex base /
+ * attribute base globals are wired up in td5_track_load_strip above; this
+ * helper performs only the two sentinel patches that the original executes
+ * after the global wiring.
  */
 void td5_track_bind_runtime_pointers(void)
 {
@@ -1718,14 +1939,23 @@ void td5_track_bind_runtime_pointers(void)
     first = &s_span_array[0];
     last  = &s_span_array[ring - 1];
 
-    /* Patch first span: type = SENTINEL_START, backward link = last main road span */
-    first->span_type = 9;  /* TD5_SPAN_SENTINEL_START */
+    /* Patch first span:
+     *   span_type   = 9   (SENTINEL_START)  -- byte at +0x00
+     *   link_prev   = ring - 1              -- int16 at +0x0a */
+    first->span_type = 9;
     first->link_prev = (int16_t)(ring - 1);
 
-    /* Patch last main road span: type = SENTINEL_END, clear forward link area */
-    last->span_type = 10;  /* TD5_SPAN_SENTINEL_END */
-    /* The original clears the int32 at +0x10 (origin_y). */
-    last->origin_y = 0;
+    /* Patch last main road span:
+     *   span_type   = 10  (SENTINEL_END)    -- byte at +0x00
+     *   link_next   = 0                     -- uint16 at +0x08 (NOT origin_y!)
+     *
+     * Original disassembly: `MOV word ptr [EAX + EDX*0x8 + -0x10],0x0`
+     * with EDX = total*3 and EAX = strip base, so the displacement
+     * total*0x18 - 0x10 = (total-1)*0x18 + 0x08, i.e. last-span +0x08
+     * which is link_next, not +0x10 (origin_y) as the previous comment
+     * claimed. */
+    last->span_type = 10;
+    last->link_next = 0;
 
     TD5_LOG_I(LOG_TAG, "bind_runtime: sentinels at span[0]=type9, span[%d]=type10 (ring=%d total=%d)",
               ring - 1, ring, s_span_count);
@@ -2655,7 +2885,13 @@ void td5_track_update_actor_position(TD5_Actor *actor)
      * pass restores faithful behavior; under the original spec the chassis
      * walker incurs at most a 1-tick lag after V2V push / spawn jumps,
      * which the next-tick call resolves. */
-    update_position_recursive(track_state, pos_x, pos_z, 0, /*single_step=*/1);
+    {
+        int32_t world_pos_xz[3] = { pos_x, 0, pos_z };
+        td5_pilot_emit_004440F0_enter(track_state, world_pos_xz,
+                                      (uintptr_t)__builtin_return_address(0));
+        update_position_recursive(track_state, pos_x, pos_z, 0, /*single_step=*/1);
+        td5_pilot_emit_004440F0_leave(track_state, 0);
+    }
 
     if ((uintptr_t)actor == (uintptr_t)0x004AB108u) {
         s_actor_position_log_counter++;
@@ -2694,7 +2930,55 @@ void td5_track_update_probe_position(TD5_TrackProbeState *probe,
      * ground from a span ahead of where the original would. On slope onsets
      * this produces +1792 FP spurious chassis-Y launches. Frida-localized at
      * Moscow span 196 front wheels (2026-05-01). */
-    update_position_recursive((int16_t *)probe, world_x, world_z, 0, /*single_step=*/1);
+    {
+        int32_t world_pos_xz[3] = { world_x, 0, world_z };
+        td5_pilot_emit_004440F0_enter(probe, world_pos_xz,
+                                      (uintptr_t)__builtin_return_address(0));
+        update_position_recursive((int16_t *)probe, world_x, world_z, 0, /*single_step=*/1);
+        td5_pilot_emit_004440F0_leave(probe, 0);
+    }
+}
+
+/* Write per-probe contact_vertex_A/B from probe state. Mirrors the prefix
+ * of ComputeActorTrackContactNormal[Extended] at 0x00445450 / 0x004457E0:
+ *
+ *   iVar9  = probe->span_index * 0x18                       ; strip-record stride
+ *   uVar6  = *(byte *)(iVar9 + g_trackStripRecords)         ; span_type
+ *   iVar5  = strip[span].left_vertex_index
+ *          + (char)param_1[6]                                ; sub_lane_index
+ *          + (char)DAT_00474e40[type * 2]                    ; left_off LUT
+ *   param_1[4] = (short)iVar5
+ *   iVar7  = strip[span].right_vertex_index
+ *          + (char)param_1[6]
+ *          + (char)DAT_00474e41[type * 2]                    ; right_off LUT
+ *   param_1[5] = (short)iVar7
+ *
+ * The walker (UpdateActorTrackPosition) updates span_index + sub_lane;
+ * this helper writes contact_vertex_A/B that the downstream pose code
+ * (and whole-state diff) reads at probe + 0x08 / + 0x0A. The port's
+ * k_quad_vertex_offsets[][0] = DAT_00474e40, [][1] = DAT_00474e41.
+ *
+ * Whole-state diff 2026-05-15: port had contact_vertex_A/B = 0 (memset)
+ * while original had 770/779 on tick 1. */
+void td5_track_compute_probe_contact_vertices(TD5_TrackProbeState *probe)
+{
+    if (!probe || !s_span_array)
+        return;
+
+    int span_idx = (int)probe->span_index;
+    if (span_idx < 0 || span_idx >= s_span_count)
+        return;
+
+    const TD5_StripSpan *sp = &s_span_array[span_idx];
+    int type = sp->span_type;
+    int left_off = 0, right_off = 0;
+    if (type >= 0 && type < 12) {
+        left_off  = (int)k_quad_vertex_offsets[type][0];
+        right_off = (int)k_quad_vertex_offsets[type][1];
+    }
+    int sub_lane = (int)probe->sub_lane_index;
+    probe->contact_vertex_A = (int16_t)((int)sp->left_vertex_index  + sub_lane + left_off);
+    probe->contact_vertex_B = (int16_t)((int)sp->right_vertex_index + sub_lane + right_off);
 }
 
 /* ========================================================================
@@ -2832,6 +3116,193 @@ static int32_t triangle_height(int va_idx, int vb_idx, int vc_idx,
                        (int32_t)(int16_t)vc_idx);
 
     return (origin_y + height) << 8;
+}
+
+/**
+ * InterpolateTrackSegmentNormal — byte-faithful port of 0x00445E30.
+ *
+ * The inner helper called by ComputeActorHeadingFromTrackSegment @ 0x00445B90
+ * after that dispatcher picks 3 vertex indices (va, vb, vc) for the actor's
+ * span/sub_lane/type triple. Computes the unit normal of the triangle and
+ * stores it as int16[3] at the actor's heading_normal slot (caller-side
+ * pointer to actor+0x290), with a post-conversion `if (uny == 0) uny = 1`
+ * sentinel that is the entire reason ApplyMissingWheelVelocityCorrection ever
+ * fires in the original (the port previously wrote uny = 0 unconditionally,
+ * neutering the correction).
+ *
+ * Original disassembly (0x00445E30..0x00445F09, 67 instructions):
+ *
+ *   00445e30  SUB    ESP, 0x24
+ *   00445e33  MOVSX  EAX, word ptr [ESP + 0x28]      ; param_2 = vb_idx
+ *   00445e38  MOV    EDX, [0x004c3d98]               ; g_trackVertexPool
+ *   00445e3e  MOVSX  ECX, word ptr [ESP + 0x2c]      ; param_3 = vc_idx
+ *   00445e43  PUSH   ESI
+ *   00445e44  LEA    ECX, [ECX + ECX*2]              ; ECX = vc_idx * 3
+ *   00445e47  LEA    ECX, [EDX + ECX*2]              ; ECX = pool + vc_idx*6
+ *   00445e4a  PUSH   EDI
+ *   00445e4b  MOVSX  EDI, word ptr [ECX]             ; EDI = vc.x  (note: this is
+ *                                                    ;  later "vb" in source listing,
+ *                                                    ;  Ghidra renames psVar1 differently)
+ *   ...
+ *
+ * Decompiler view (variables renamed for clarity):
+ *
+ *   psVar1 = pool + vb_idx * 6         (= short* to vb's int16-triple)
+ *   psVar2 = pool + va_idx * 6         (= short* to va)
+ *   local_c = va.x - vb.x              (= -e1.x where e1 = vb - va)
+ *   local_8 = va.y - vb.y              (= -e1.y)
+ *   local_4 = va.z - vb.z              (= -e1.z)
+ *   iVar3   = pool + vc_idx * 6        (= short* to vc)
+ *   local_18 = va.x - vc.x             (= -e2.x)
+ *   local_14 = va.y - vc.y             (= -e2.y)
+ *   local_10 = va.z - vc.z             (= -e2.z)
+ *   CrossProduct3i(&local_c, &local_18, &local_24)  ; n = (-e1) x (-e2) = e1 x e2
+ *   local_1c = local_1c >> 0xc                       ; SAR each component
+ *   local_24 = local_24 >> 0xc                       ; (n.x, n.y, n.z) >>= 12
+ *   local_20 = local_20 >> 0xc
+ *   ConvertFloatVec3ToShortAnglesB(&local_24, param_4)
+ *      ; FILD int32 -> float, len_sq = x*x + y*y + z*z,
+ *      ; inv_norm = 4096.0f / sqrt(len_sq),
+ *      ; for each: FMUL inv_norm, __ftol (truncate-to-int32), store low int16.
+ *   if (param_4[1] == 0) param_4[1] = 1
+ *   return
+ *
+ * Key fidelity points:
+ *
+ *   - CrossProduct3i sign: orig uses (va - vb) and (va - vc) (negated edges).
+ *     `(-e1) x (-e2) = e1 x e2`, so the cross-product RESULT is byte-identical
+ *     to `(vb - va) x (vc - va)`. The port may use either pair; for minimum
+ *     surprise vs the listing this port mirrors the orig's negated-edge form.
+ *
+ *   - SAR by 12 on signed int32: arithmetic right-shift preserves sign on x86.
+ *     C's `>>` on signed int is implementation-defined but mingw/gcc lowers it
+ *     to SAR for signed types, matching the listing exactly.
+ *
+ *   - 4096.0f constant: dumped from 0x00467374 = 0x45800000 (IEEE-754 4096.0f).
+ *     The FPU loads single-precision, but x87 widens to extended (80-bit) for
+ *     the FMUL/FDIVR; the final __ftol-truncate to int32 lands the same value
+ *     as `(int32_t)(double)((double)n * 4096.0 / sqrt(len_sq))` on any modern
+ *     x86 with default rounding. The port uses double-precision math, which
+ *     preserves at least as many bits as the original x87 extended path
+ *     before truncation; truncation-toward-zero is identical to `(int16_t)
+ *     (int32_t)` cast in C.
+ *
+ *   - `__ftol` semantics: x86 MSVC runtime helper. Truncates toward zero
+ *     regardless of FPU CW rounding mode (the wrapper sets CW to RC=11 and
+ *     restores it). Matches C's `(int32_t)(double_value)` cast on x86.
+ *
+ *   - Exact-zero guard on out_normal[1] applies ONLY to the int16 unit-y
+ *     AFTER the truncation, NOT the float intermediate. This means slopes
+ *     where the y component truncates to 0 (e.g. very steep) get +1 fp12
+ *     instead of 0 -- crucial for the divide-by-uny in
+ *     ApplyMissingWheelVelocityCorrection's heading_normal[1] divisor.
+ *     [CONFIRMED @ 0x00445EF7-0x00445F02: CMP word ptr [ESI+0x2],0x0 / JNZ /
+ *      MOV word ptr [ESI+0x2],0x1]
+ *
+ *   - The orig writes ONLY through param_4 (the LEA [esi+0x290] passed by
+ *     the outer dispatcher). No actor pointer is dereferenced in this inner.
+ *
+ * This function is intentionally NOT wired up here -- the outer dispatcher
+ * (ComputeActorHeadingFromTrackSegment @ 0x00445B90) lands in a sibling
+ * worktree (precise-00445B90) and is the one that picks (va, vb, vc) and
+ * calls this helper. Until that wires, the helper is unreferenced. We keep
+ * the prototype in td5_track.h so the sibling worktree can pick it up
+ * without a re-port. */
+void td5_track_interpolate_segment_normal(int16_t va_idx, int16_t vb_idx,
+                                           int16_t vc_idx, int16_t *out_normal)
+{
+    TD5_StripVertex *va, *vb, *vc;
+    int32_t e1_neg_x, e1_neg_y, e1_neg_z;   /* local_c/8/4 = va - vb  */
+    int32_t e2_neg_x, e2_neg_y, e2_neg_z;   /* local_18/14/10 = va - vc */
+    int32_t nx, ny, nz;                      /* local_24/1c/20 */
+    double len_sq, inv_norm;
+    int16_t unx, uny, unz;
+
+    if (!out_normal || !s_vertex_table)
+        return;
+
+    /* g_trackVertexPool + idx*6 -- vertex_at clamps neither (orig doesn't
+     * either; vertex indices come from the dispatcher's vertex-base + offset
+     * arithmetic and are pre-validated upstream). */
+    va = vertex_at((int)va_idx);
+    vb = vertex_at((int)vb_idx);
+    vc = vertex_at((int)vc_idx);
+
+    /* MOVSX-then-SUB sequences at 0x00445E51..0x00445EA8.
+     * Orig computes negated edges; the cross-product of two negated vectors
+     * equals the cross-product of the originals, so this is mathematically
+     * identical to (vb-va) x (vc-va). We mirror the listing's signs to keep
+     * intermediate values comparable when stepping a Frida hook. */
+    e1_neg_x = (int32_t)va->x - (int32_t)vb->x;
+    e1_neg_y = (int32_t)va->y - (int32_t)vb->y;
+    e1_neg_z = (int32_t)va->z - (int32_t)vb->z;
+
+    e2_neg_x = (int32_t)va->x - (int32_t)vc->x;
+    e2_neg_y = (int32_t)va->y - (int32_t)vc->y;
+    e2_neg_z = (int32_t)va->z - (int32_t)vc->z;
+
+    /* CALL 0x0042EA70 CrossProduct3i(&e1_neg, &e2_neg, &n)
+     *   n.x = e1_neg.y * e2_neg.z - e1_neg.z * e2_neg.y
+     *   n.y = e1_neg.z * e2_neg.x - e1_neg.x * e2_neg.z
+     *   n.z = e1_neg.x * e2_neg.y - e1_neg.y * e2_neg.x
+     * [CONFIRMED @ 0x0042EA70-0x0042EAB4 listing.] */
+    nx = e1_neg_y * e2_neg_z - e1_neg_z * e2_neg_y;
+    ny = e1_neg_z * e2_neg_x - e1_neg_x * e2_neg_z;
+    nz = e1_neg_x * e2_neg_y - e1_neg_y * e2_neg_x;
+
+    /* SAR EAX/EDX/ECX, 0xc at 0x00445ED2/0x00445EDD/0x00445EE0.
+     * Signed int32 -> int32 arithmetic shift, preserves sign. */
+    nx >>= 12;
+    ny >>= 12;
+    nz >>= 12;
+
+    /* CALL 0x0042CD40 ConvertFloatVec3ToShortAnglesB(&n, out_normal):
+     *   len_sq = n.x^2 + n.y^2 + n.z^2  (all int32 -> float promoted)
+     *   inv_norm = 4096.0f / sqrt(len_sq)
+     *   out[0] = (int16) __ftol(n.x * inv_norm)
+     *   out[1] = (int16) __ftol(n.y * inv_norm)
+     *   out[2] = (int16) __ftol(n.z * inv_norm)
+     * [CONFIRMED @ 0x0042CD40-0x0042CDA8 listing + 0x00467374 = 4096.0f.]
+     *
+     * If len_sq == 0 (degenerate triangle: collinear or all-zero), the orig
+     * computes 1/sqrt(0) which raises FPE_FLTDIV; on the FPU this yields
+     * +Inf for the inv_norm and __ftol of (Inf * 0/n) is implementation-
+     * dependent. In practice the LEFT/RIGHT triangle dispatch never lets
+     * three collinear vertices reach this helper. The port adds a guard
+     * just to keep the divide finite -- the post-zero-guard then bumps uny
+     * to 1 and the caller continues. */
+    len_sq = (double)nx * (double)nx
+           + (double)ny * (double)ny
+           + (double)nz * (double)nz;
+    if (len_sq > 0.0) {
+        inv_norm = 4096.0 / sqrt(len_sq);
+        unx = (int16_t)(int32_t)((double)nx * inv_norm);
+        uny = (int16_t)(int32_t)((double)ny * inv_norm);
+        unz = (int16_t)(int32_t)((double)nz * inv_norm);
+    } else {
+        /* PORT-ONLY GUARD: original 0x0042CD6E FSQRT on zero yields +0 ->
+         * 0x0042CD70 FDIVR 4096.0f / 0.0 -> +Inf -> __ftol(+Inf * 0) which is
+         * UB on x86. The dispatcher upstream never legitimately produces a
+         * collinear triple for a real span/lane, so this is unreachable in
+         * the original; we set zeros and let the uny=1 guard below handle
+         * the divisor case. */
+        unx = 0;
+        uny = 0;
+        unz = 0;
+    }
+
+    /* CMP word ptr [ESI+0x2],0x0 / JNZ +6 / MOV word ptr [ESI+0x2],0x1
+     * Exact-zero sentinel on the int16 unit-Y. This is the root-cause fix
+     * for ApplyMissingWheelVelocityCorrection: the divisor (heading_normal.y)
+     * must be non-zero so the correction can fire. The orig guarantees this
+     * with the +1 fp12 bump; the port previously hard-coded uny=0 elsewhere,
+     * making every divide degenerate. [CONFIRMED @ 0x00445EF7-0x00445F02] */
+    if (uny == 0)
+        uny = 1;
+
+    out_normal[0] = unx;
+    out_normal[1] = uny;
+    out_normal[2] = unz;
 }
 
 /**
@@ -3156,9 +3627,19 @@ void td5_track_compute_heading(TD5_Actor *actor)
         dz = (dz + ((dz >> 31) & 3)) >> 2;
         break;
 
-    default:
-        dx = 0; dz = 1;
+    default: {
+        /* Original LAB_0043448c at 0x0043448C-94 reloads BOTH dx (EBX) and
+         * dz (ECX) from [ESP+0x14] = param_1 = slot. The decompiler shows
+         * `uVar7 = uVar10 = param_1` pre-init persisting into the default
+         * branch. Replicate exactly so that span types outside [1,7] yield
+         * `AngleFromVector12(slot, slot)` instead of the previous
+         * `dx=0, dz=1` port-only fabrication.
+         * [CONFIRMED @ 0x0043448C-94 disassembly in pilot pool14 session.] */
+        int slot_id = (int)((const uint8_t *)actor)[0x375];
+        dx = (int32_t)slot_id;
+        dz = (int32_t)slot_id;
         break;
+    }
     }
 
     /* Original: 4-quadrant dispatch → full-circle angle, then at LAB_00434501:
@@ -3184,79 +3665,525 @@ void td5_track_compute_heading(TD5_Actor *actor)
 }
 
 /* ========================================================================
+ * ComputeActorHeadingFromTrackSegment (0x00445B90) — byte-faithful port.
+ *
+ * Per-tick heading-normal writer called from THREE pose-integrator sites:
+ *   - IntegrateVehiclePoseAndContacts (0x00405E80)  @ 0x00405fb6
+ *   - UpdateVehiclePoseFromPhysicsState (0x004063A0) @ 0x00406439
+ *   - UpdateTrafficVehiclePose (0x00443CF0)          @ 0x00443d3d
+ *
+ * Signature in original:
+ *   void __cdecl(short *track_state,   ; actor + 0x80
+ *                int   *world_pos,     ; actor + 0x1FC
+ *                short *out_normal);   ; actor + 0x290
+ *
+ * The function:
+ *   1. Reads span index = track_state[0]      (= actor +0x80 word)
+ *      Reads sub_lane   = track_state[0xC]    (= actor +0x8C byte; the
+ *      LISTING uses MOVSX EBX, byte [ESI+0xc] — i.e. a sign-extended byte
+ *      at param_1 + 0x0C, which is the lane index field. The Ghidra
+ *      decompile says `(char)param_1[6]` which is the same byte under the
+ *      short* type — verified by listing).
+ *   2. Fetches the span's vertex offsets via k_quad_vertex_offsets[type]
+ *      (= DAT_00474E40[type*2]) and writes the resolved indices back to
+ *      param_1[4] = actor +0x88 (left_index) and param_1[5] = actor +0x8A
+ *      (right_index). This *side effect* is preserved here because the
+ *      same fields are read elsewhere (e.g. by td5_track AI walkers).
+ *   3. Computes local_x = (world_x>>8) - origin_x, local_z analogously.
+ *   4. Two-level dispatch on (sub_lane vs lane_count-1 vs interior) then
+ *      span_type: chooses 3 vertex indices from {li, li+1, ri, ri+1, ri+3}
+ *      and forwards them to InterpolateTrackSegmentNormal.
+ *
+ * Dispatch tables (LUTs at 0x00445DEC, 0x00445DF8, 0x00445E04):
+ *   k_heading_left_edge_class[11]  (= byte LUT 0x00445DF8 for sub_lane==0):
+ *       type 1..0xB → class 0/1/2 (0=diag-class-A, 1=fixed-B, 2=fixed-C)
+ *   left edge final dispatch by class:
+ *       0 → diag test, true: (li, ri+1, li+1) else fall-through (li, ri, ri+1)
+ *       1 → unconditional (li+1, ri, ri+1)           [case 3,4]
+ *       2 → unconditional (li, ri+1, li+1)           [case 6,7]
+ *   right edge final dispatch on type:
+ *       1,3,6,8,9,0xA,0xB → diag test, same as left edge class 0
+ *       2,4   → fall-through (li, ri, ri+1)
+ *       5,7   → unconditional (li, ri, li+1)
+ *   interior:
+ *       always diag test, true: (li, ri+1, li+1) else (li, ri, ri+1)
+ *
+ * Type 0 hits switchD_00445c37_default and the function returns WITHOUT
+ * writing — the original leaves the stale value at +0x290 untouched.
+ * Types >= 0xC are not in the table and also hit default.
+ *
+ * [CONFIRMED via Ghidra pool0 listing 2026-05-14, body 0x00445b90..0x00445de8,
+ *  219 instructions, jump tables at 0x00445DEC/0x00445DF8/0x00445E04]
+ * ======================================================================== */
+
+/* Class indices for left-edge sub_lane==0 dispatch (byte LUT 0x00445DF8).
+ * Indexed by (span_type - 1) where span_type in [1, 0xB]. */
+static const int8_t k_heading_left_edge_class[11] = {
+    0, /* type 1 → class 0 (diag) */
+    0, /* type 2 → class 0 (diag) */
+    1, /* type 3 → class 1 (li+1, ri, ri+1) */
+    1, /* type 4 → class 1 */
+    0, /* type 5 → class 0 */
+    2, /* type 6 → class 2 (li, ri+1, li+1) */
+    2, /* type 7 → class 2 */
+    0, /* type 8 → class 0 */
+    0, /* type 9 → class 0 */
+    0, /* type 10 → class 0 */
+    0, /* type 11 → class 0 */
+};
+
+/* Local diagonal cross-product test used by the dispatch. Matches the
+ * disasm sequence at 0x00445C51..0x00445C85 (and the identical block at
+ * 0x00445CF8..0x00445D2C for the right edge, 0x00445D7C..0x00445DB0 for
+ * the interior). The test points are the vertices:
+ *   va = pool + ri*6 + 6        ; = ri + 1   (LEA EDX, [ECX+ECX*2+3] then *2)
+ *   vb = pool + li*6            ; = li
+ *   sign = (va.x - vb.x) * (local_z - vb.z) - (va.z - vb.z) * (local_x - vb.x)
+ *   if sign > 0 (JLE → skip): triangle = (li, ri+1, li+1)
+ *   else                     : triangle = (li, ri, ri+1)  [LAB_00445DD5 tail]
+ */
+static int64_t heading_diag_cross(int li_idx, int ri_plus1_idx,
+                                  int32_t local_x, int32_t local_z)
+{
+    TD5_StripVertex *vli = vertex_at(li_idx);
+    TD5_StripVertex *vri = vertex_at(ri_plus1_idx);
+    int32_t dx = (int32_t)vri->x - (int32_t)vli->x;
+    int32_t dz = (int32_t)vri->z - (int32_t)vli->z;
+    return (int64_t)dx * (int64_t)(local_z - (int32_t)vli->z)
+         - (int64_t)dz * (int64_t)(local_x - (int32_t)vli->x);
+}
+
+/* Public per-tick heading-normal writer. Pose integrators (player + AI
+ * + traffic) call this immediately after td5_track_update_actor_position
+ * to refresh actor->heading_normal at +0x290 from the live span geometry.
+ *
+ * NOTE: Distinct from td5_track_compute_heading() above, which ports
+ * 0x00434350 (spawn-only InitializeActorTrackPose) and hard-codes
+ * heading_normal[1]=0 — that path is preserved for spawn-pose callers.
+ */
+void td5_track_compute_runtime_heading_normal(TD5_Actor *actor)
+{
+    int16_t *track_state;
+    int16_t *out_normal;
+    int     span_idx;
+    int     sub_lane;
+    int8_t  type;                  /* span_type clamped to int8 (low byte) */
+    int     left_lut, right_lut;   /* lane-bias entries */
+    int     li, ri;                /* resolved left/right base indices */
+    int     lane_count_minus_1;
+    int32_t local_x, local_z;
+    int32_t world_x, world_z;
+    TD5_StripSpan *sp;
+    int     va, vb, vc;            /* selected triangle indices */
+    int     have_triangle;
+
+    if (!actor || !s_span_array || !s_vertex_table)
+        return;
+
+    track_state = (int16_t *)((uint8_t *)actor + 0x80);
+    out_normal  = (int16_t *)((uint8_t *)actor + 0x290);
+
+    /* [00445b94..00445b9b]
+     *   EDX = MOVSX word[ESI]          ; span_idx (signed 16 → 32)
+     *   EBX = MOVSX byte[ESI + 0xc]    ; sub_lane (signed 8 → 32)
+     */
+    span_idx = (int)track_state[0];
+    sub_lane = (int)((int8_t *)actor)[0x8C];
+
+    if (span_idx < 0 || span_idx >= s_span_count)
+        return;
+
+    sp = &s_span_array[span_idx];
+
+    /* [00445bae] MOV AL, byte[EDX + EDI + 3]   ; AL = packed_metadata
+     * [00445bb7] AND EAX, 0xF                  ; low nibble = lane_count
+     * [00445bb4] MOV CL, byte[EDX + EDI]       ; CL = span_type
+     * [00445bbe] MOVSX EBP, byte[0x474E40 + CL*2]  ; left lane-bias
+     */
+    type = (int8_t)sp->span_type;
+    lane_count_minus_1 = span_lane_count(sp) - 1;
+    if (lane_count_minus_1 < 0) lane_count_minus_1 = 0;
+
+    /* k_quad_vertex_offsets matches DAT_00474E40 (12 entries × 2 int8). */
+    if ((unsigned)type < 12) {
+        left_lut  = (int)k_quad_vertex_offsets[(unsigned)type][0];
+        right_lut = (int)k_quad_vertex_offsets[(unsigned)type][1];
+    } else {
+        left_lut = 0;
+        right_lut = 0;
+    }
+
+    /* [00445bcd..00445bd5]
+     *   EDI = EBX + EBP                 ; sub_lane + left_lut
+     *   EAX = (ushort)[EDX + EDI + 4]   ; left_vertex_index
+     *   AX  += EDI
+     *   [ESI + 8] = AX                  ; actor +0x88 ← resolved li
+     * [00445be9..00445bfa]
+     *   EBP = EBX + EDI(=right_lut)
+     *   DI  = (ushort)[EDX + EBP + 6]   ; right_vertex_index
+     *   CX  = DI + EBP
+     *   [ESI + 0xA] = CX                ; actor +0x8A ← resolved ri
+     */
+    li = (int)(uint16_t)sp->left_vertex_index  + sub_lane + left_lut;
+    ri = (int)(uint16_t)sp->right_vertex_index + sub_lane + right_lut;
+    track_state[4] = (int16_t)li;
+    track_state[5] = (int16_t)ri;
+
+    /* [00445bfe..00445c13]
+     *   ESI = world_x; EDI = world_z (24.8 fixed-point)
+     *   ESI = (world_x >> 8) - origin_x   ; local_x
+     *   EDI = (world_z >> 8) - origin_z   ; local_z
+     */
+    world_x = *(int32_t *)((uint8_t *)actor + 0x1FC);
+    world_z = *(int32_t *)((uint8_t *)actor + 0x204);
+    local_x = (world_x >> 8) - sp->origin_x;
+    local_z = (world_z >> 8) - sp->origin_z;
+
+    have_triangle = 0;
+    va = vb = vc = 0;
+
+    /* [00445c17..00445c19] TEST EBX, EBX ; JNZ → not-sub_lane-0 branch */
+    if (sub_lane == 0) {
+        /* [00445c1f..00445c37] LEFT-EDGE DISPATCH
+         *   EBP = type - 1; CMP EBP, 0xa; JA default → return-no-write
+         *   DL = byte[EBP + 0x445DF8]
+         *   JMP [EDX*4 + 0x445DEC]
+         */
+        int ti = (int)(uint8_t)type - 1;
+        if (ti < 0 || ti > 10) {
+            return; /* default: no write, leaves stale heading_normal */
+        }
+        int klass = (int)k_heading_left_edge_class[ti];
+        switch (klass) {
+        case 0: {
+            /* [00445c3e..00445ca8] class A:
+             * diag test (li, ri+1) — JLE → fall-through to LAB_00445dd5
+             *   sign > 0  → (li, ri+1, li+1)
+             *   sign <= 0 → (li, ri, ri+1)   [LAB_00445dd5 tail]
+             */
+            int64_t sign = heading_diag_cross(li, ri + 1, local_x, local_z);
+            if (sign > 0) {
+                va = li; vb = ri + 1; vc = li + 1;
+            } else {
+                va = li; vb = ri;     vc = ri + 1;
+            }
+            have_triangle = 1;
+            break;
+        }
+        case 1:
+            /* [00445ca9..00445cc2] class B (types 3,4):
+             * Unconditional (li+1, ri, ri+1) — pushes (EAX+1, ECX, ECX+1)
+             */
+            va = li + 1; vb = ri; vc = ri + 1;
+            have_triangle = 1;
+            break;
+        case 2:
+            /* [switchD_00445c37_caseD_6 → LAB_00445dd5 via path at 0x00445DD5]
+             * Wait — the decompiler ALSO shows this label calling
+             * (sVar4, sVar6+1, sVar4+1) = (li, ri+1, li+1). The bytes at
+             * 0x00445DEC[idx=2] would be 0x00445DB6, but reading the
+             * dispatch-table dump the third slot is 0x00445DB6 / actually
+             * 0x00445C3E for case A, 0x00445CA9 for case B, 0x00445DD5 (tail)
+             * for the case-6/7 path. From the decompile output, the
+             * "switchD_00445c37_caseD_6" label routes types 6/7 to call
+             * InterpolateTrackSegmentNormal(li, ri+1, li+1) unconditionally.
+             * That matches LEFT-EDGE case 6/7 in probe_span_lane_height.
+             * [CONFIRMED via decompile]
+             */
+            va = li; vb = ri + 1; vc = li + 1;
+            have_triangle = 1;
+            break;
+        default:
+            return;
+        }
+    } else if (sub_lane == lane_count_minus_1) {
+        /* [00445cc3..00445cde] RIGHT-EDGE DISPATCH
+         *   EDX = type - 1; CMP EDX, 0xa; JA → default (no write)
+         *   JMP [EDX*4 + 0x445E04]
+         * The right-edge LUT is dense (no byte indirection) — each type
+         * has its own pointer. The actual dispatch resolves to one of
+         * three labels:
+         *   0x00445CE5  diag test (same as left-edge class 0)
+         *   0x00445DD0  fall-through to LAB_00445dd5 (li, ri, ri+1)
+         *   0x00445D50  unconditional (li, ri, li+1)
+         */
+        switch ((int)(uint8_t)type) {
+        case 1: case 3: case 6:
+        case 8: case 9: case 10: case 11: {
+            /* [00445ce5..00445d4f] diag-class for right edge.
+             * Identical diag test to left-edge class A. */
+            int64_t sign = heading_diag_cross(li, ri + 1, local_x, local_z);
+            if (sign > 0) {
+                va = li; vb = ri + 1; vc = li + 1;
+            } else {
+                va = li; vb = ri;     vc = ri + 1;
+            }
+            have_triangle = 1;
+            break;
+        }
+        case 2: case 4:
+            /* [switchD_00445cde_caseD_2 → LAB_00445dd5] fall-through:
+             * (li, ri, ri+1). Note: original PUSHes (sVar4, sVar6, sVar6+1)
+             * via LEA EDX,[ECX+1] / PUSH EDX / PUSH ECX / PUSH EAX. */
+            va = li; vb = ri; vc = ri + 1;
+            have_triangle = 1;
+            break;
+        case 5: case 7:
+            /* [00445d50..00445d68] unconditional (li, ri, li+1).
+             * Pushes (EAX+1, ECX, EAX) → reordered as (EAX, ECX, EAX+1)
+             * by the C calling convention (right-to-left push order
+             * already matches argument order li, ri, li+1). */
+            va = li; vb = ri; vc = li + 1;
+            have_triangle = 1;
+            break;
+        default:
+            return; /* no write */
+        }
+    } else {
+        /* [00445d69..00445dcf] INTERIOR:
+         * Always runs diag test, no span_type discrimination.
+         *   sign > 0  → (li, ri+1, li+1)  [PUSH branch at 0x00445DB6]
+         *   sign <= 0 → (li, ri, ri+1)    [LAB_00445DD0 → LAB_00445DD5 tail]
+         */
+        int64_t sign = heading_diag_cross(li, ri + 1, local_x, local_z);
+        if (sign > 0) {
+            va = li; vb = ri + 1; vc = li + 1;
+        } else {
+            va = li; vb = ri;     vc = ri + 1;
+        }
+        have_triangle = 1;
+    }
+
+    if (!have_triangle)
+        return;
+
+    /* InterpolateTrackSegmentNormal — byte-faithful extern from precise-00445E30
+     * (defined above in this same file). Cross-products + FPU-normalises +
+     * applies the uny=1 sentinel so heading_normal.y is never exactly zero. */
+    td5_track_interpolate_segment_normal(va, vb, vc, out_normal);
+}
+
+/* ========================================================================
  * Wrap Normalization (0x443FB0 NormalizeActorTrackWrapState)
  *
- * Normalizes the accumulated span counter (actor+0x84) into a wrapped
- * position modulo the total span ring length. Returns the lap count.
+ * Verbatim port of NormalizeActorTrackWrapState @ 0x00443FB0 in TD5_d3d.exe.
+ * Listing (pool0 2026-05-14):
+ *   00443fb0  MOV    ECX, [ESP + 0x4]                ; actor
+ *   00443fb4  MOV    AX,  word ptr [ECX + 0x84]      ; raw accumulated span (int16)
+ *   00443fbb  TEST   AX,  AX                         ; sign test on the 16-bit value
+ *   00443fbe  JL     0x00443fd2                      ; negative branch
+ *   00443fc0  MOVSX  EAX, AX                         ; sign-extend to 32-bit
+ *   00443fc3  CDQ
+ *   00443fc4  IDIV   dword ptr [0x004c3d90]          ; g_trackTotalSpanCount
+ *   00443fca  MOV    word ptr [ECX + 0x82], DX       ; remainder -> normalized
+ *   00443fd1  RET                                    ; EAX = quotient (laps)
+ *   00443fd2  MOVSX  EAX, AX                         ; negative path
+ *   00443fd5  PUSH   ESI
+ *   00443fd6  MOV    ESI, dword ptr [0x004c3d90]
+ *   00443fdc  CDQ
+ *   00443fdd  IDIV   ESI
+ *   00443fdf  ADD    EDX, ESI                        ; remainder + ring_length
+ *   00443fe1  MOV    word ptr [ECX + 0x82], DX       ; store (NO bounds-clamp)
+ *   00443fe8  POP    ESI
+ *   00443fe9  RET                                    ; EAX = quotient (laps, negative or 0)
+ *
+ * Critical fidelity points vs prior port:
+ *   - Divisor is g_trackTotalSpanCount (DAT_004c3d90) = hdr[1] = main-road
+ *     ring length. The port's s_span_count is the INFLATED physical span
+ *     count (includes branch-road spans) and does NOT match the original
+ *     divisor. Use s_strip_header[1] / g_td5.track_span_ring_length
+ *     instead. This mirrors the sibling fix in ResolveActorSegmentBoundary
+ *     (precise-00443FF0).
+ *   - Sign test is on the 16-bit AX value; the post-MOVSX 32-bit raw is
+ *     equivalent in C since int16_t -> int32_t preserves sign.
+ *   - Negative branch ADDs ring_length without any subsequent bounds check;
+ *     if the dividend is an exact negative multiple of ring_length, EDX is
+ *     0 and the stored value is exactly ring_length (matches original
+ *     register-level behavior; the original truncates to 16-bit on store
+ *     via MOV word ptr, DX).
+ *   - Return value is the IDIV quotient (EAX), i.e. the lap count. For
+ *     negative dividends with non-zero remainder, x86 IDIV truncates
+ *     toward zero, so a value of -1 yields quotient 0 (not -1); this
+ *     matches C's `/` operator on signed ints since C99.
+ *   - Only the +0x82 field is touched. The +0x84 raw span is NOT
+ *     modified by this function.
+ *
+ * FIXME(divergence): original has no null/zero guards. If
+ * g_trackTotalSpanCount == 0 (no track loaded), the IDIV traps. We keep
+ * a soft guard for robustness since the port is reachable from the
+ * frontend init path before STRIP.DAT is bound.
  * ======================================================================== */
 
 int td5_track_normalize_actor_wrap(TD5_Actor *actor)
 {
     int16_t *track_state;
-    int32_t raw_span;
-    int32_t ring_length;
-    int32_t wrapped, laps;
+    int32_t raw_span;       /* MOVSX EAX, AX -> int32_t from int16_t */
+    int32_t ring_length;    /* dword ptr [0x004c3d90] = g_trackTotalSpanCount */
+    int32_t quotient;
+    int32_t remainder;
 
-    if (!actor || s_span_count == 0)
+    if (!actor)
         return 0;
+
+    /* Source the divisor from hdr[1] (main-road span count, == original
+     * g_trackTotalSpanCount), NOT the inflated s_span_count. */
+    if (s_strip_header) {
+        ring_length = (int32_t)s_strip_header[1];
+    } else {
+        ring_length = (int32_t)g_td5.track_span_ring_length;
+    }
+    if (ring_length == 0)
+        return 0; /* PORT-ONLY GUARD (KEEP): original 0x00443FC4 issues
+                   * IDIV dword ptr [0x004c3d90] unconditionally and traps
+                   * if g_trackTotalSpanCount==0. Upstream invariant in
+                   * original is "STRIP.DAT was parsed before any actor
+                   * crosses this code path" (set in LoadStripFile @
+                   * 0x004444A0). Port reaches the wrap normalizer from
+                   * the FRONTEND init pass (td5_game.c spawn-actor at
+                   * menu enter) which runs BEFORE the strip file is
+                   * bound, so the guard cannot be dropped without
+                   * regressing reach analysis. */
 
     track_state = (int16_t *)((uint8_t *)actor + 0x80);
-    raw_span = (int32_t)track_state[2]; /* +0x84: accumulated spans (high_water) */
-    ring_length = (int32_t)s_span_count;
 
-    if (ring_length <= 0)
-        return 0;
+    /* MOV AX, word ptr [ECX + 0x84] ; MOVSX EAX, AX */
+    raw_span = (int32_t)track_state[2]; /* +0x84: raw accumulated span */
 
+    /* TEST AX,AX ; JL 0x00443fd2 -- sign-extended raw_span < 0 is
+     * equivalent to the 16-bit AX sign-bit test. */
     if (raw_span >= 0) {
-        laps = raw_span / ring_length;
-        wrapped = raw_span % ring_length;
+        /* Positive branch: IDIV by g_trackTotalSpanCount, store EDX -> +0x82,
+         * return EAX. */
+        quotient  = raw_span / ring_length;
+        remainder = raw_span % ring_length;
+        track_state[1] = (int16_t)remainder; /* MOV word ptr [ECX + 0x82], DX */
+        return (int)quotient;
     } else {
-        /* C truncates toward zero for negative dividends.
-         * Original behavior: remainder adjusted to be non-negative. */
-        laps = raw_span / ring_length;
-        wrapped = raw_span % ring_length;
-        /* When remainder is negative, shift into [0, ring_length) */
-        wrapped += ring_length;
-        if (wrapped >= ring_length)
-            wrapped -= ring_length;
+        /* Negative branch: IDIV by ring_length, then ADD EDX, ring_length,
+         * store DX. NO subsequent bounds clamp -- if remainder is 0 (raw is
+         * an exact negative multiple), DX ends up == ring_length and is
+         * stored truncated to 16-bit. */
+        quotient  = raw_span / ring_length;
+        remainder = raw_span % ring_length;
+        remainder += ring_length;
+        track_state[1] = (int16_t)remainder; /* MOV word ptr [ECX + 0x82], DX */
+        return (int)quotient;
     }
-
-    track_state[1] = (int16_t)wrapped;  /* +0x82: normalized span */
-    return (int)laps;
 }
 
 /* ========================================================================
  * Segment Boundary Remapping (0x443FF0 ResolveActorSegmentBoundary)
  *
- * Handles segment boundary discontinuities using the jump table from
- * the STRIP.DAT header for tracks with non-contiguous span numbering.
+ * Verbatim port of ResolveActorSegmentBoundary @ 0x00443FF0 in TD5_d3d.exe.
+ * Caller in original: RecycleTrafficActorFromQueue @ 0x004353B0 (only xref).
+ *
+ * Listing layout (from 0x00443FF0 disassembly, pool9 2026-05-14):
+ *   - DAT_004c3da0   = pointer to STRIP.DAT blob (== s_strip_blob).
+ *   - [strip + 0x04] = main-road span count (hdr[1], == ring_length).
+ *   - [strip + 0x14] = jump_entry_count.
+ *   - [strip + 0x18] = jump_entry[0] -- 3 shorts per entry, stride 6:
+ *                       short[0] = segment_low  (inclusive)
+ *                       short[1] = segment_high (inclusive)
+ *                       short[2] = segment_anchor (remap basis)
+ *
+ * Behavior:
+ *   1. raw = (int)(int16_t)actor[+0x80].
+ *   2. If raw <= ring_length: write raw to actor[+0x82] and actor[+0x84],
+ *      return. (Sentinel: no remap needed for in-ring spans.)
+ *   3. Else, scan the jump-entry table sequentially. The first entry where
+ *      raw is signed-in-range [low, high] determines the remap. If no
+ *      entry matches, return without writing.
+ *   4. On match for entry i:
+ *        new = raw + (anchor[i] - low[i])
+ *      then store `new` (int16) to actor[+0x82] and actor[+0x84].
+ *
+ * Critical fidelity points vs prior port (resolve_segment_boundary, unused):
+ *   - Source field is the RAW span at +0x80 (track_state[0]), not the
+ *     normalized span at +0x82.
+ *   - Compare against ring_length is on signed int values (JG semantics).
+ *   - Sentinel branch writes raw -> +0x82 AND +0x84 unconditionally for
+ *     the in-ring case (no early-return on missing jump table).
+ *   - Match arithmetic SUBTRACTS the low boundary: it's
+ *     `raw + (anchor - low)`, not `raw + remap_field`.
+ *   - When the loop exits without a match, NEITHER +0x82 nor +0x84 is
+ *     touched (the function simply returns).
  * ======================================================================== */
 
-static void resolve_segment_boundary(int16_t *track_state)
+void td5_track_resolve_actor_segment_boundary(TD5_Actor *actor)
 {
-    int i;
-    int16_t span;
-    uint16_t start, end;
-    int16_t remap;
+    int16_t *track_state;
+    int     raw_span;
+    int     ring_length;
+    int     i;
+    int     entry_count;
+    uint8_t *entry_base;
 
-    if (!s_jump_entries || s_jump_entry_count <= 0)
+    if (!actor) return;
+
+    track_state = (int16_t *)((uint8_t *)actor + 0x80);
+
+    /* Line: MOVSX EDX, word ptr [EBX + 0x80] -> sign-extended raw span. */
+    raw_span = (int)track_state[0];
+
+    /* Original reads [DAT_004c3da0 + 0x04] = hdr[1] = main-road ring length.
+     * In the port, hdr[1] is mirrored at g_td5.track_span_ring_length and
+     * also lives at s_strip_header[1] if the header pointer is bound. We
+     * prefer the runtime ring_length since the original's [+0x04] is
+     * exactly that value (s_span_count is the port's inflated physical
+     * count and does NOT match the original [+0x04]). */
+    if (s_strip_header) {
+        ring_length = (int)s_strip_header[1];
+    } else {
+        ring_length = g_td5.track_span_ring_length;
+    }
+
+    /* JG 0x0044401d == "raw > ring_length -> fall through to scan",
+     * the fallthrough taken when "raw <= ring_length" writes raw to
+     * +0x82/+0x84 and returns. */
+    if (raw_span <= ring_length) {
+        track_state[1] = (int16_t)raw_span; /* +0x82 */
+        track_state[2] = (int16_t)raw_span; /* +0x84 */
+        return;
+    }
+
+    /* Out-of-ring: scan jump table. ESI = [EDI + 0x14] = jump_entry_count.
+     * If count <= 0 the loop is skipped and the function returns without
+     * writing (XOR EAX,EAX; JLE 0x00444069). */
+    entry_count = s_jump_entry_count;
+    entry_base  = s_jump_entries;
+    if (entry_count <= 0 || !entry_base)
         return;
 
-    span = track_state[1]; /* normalized span */
+    /* ECX = EDI + 0x1a initially. puVar3[-1] = entry.low (signed short),
+     * puVar3[ 0] = entry.high (signed short). Compare semantics: JL on
+     * "raw < low" or JG on "high < raw" => keep scanning. Both are signed
+     * (the LEA / MOVZX / MOVSX dance produces zero-extended shorts that
+     * are then signed-compared as 32-bit). */
+    for (i = 0; i < entry_count; i++) {
+        const int16_t *entry = (const int16_t *)(entry_base + i * 6);
+        int low    = (int)(uint16_t)entry[0];
+        int high   = (int)(uint16_t)entry[1];
+        int anchor = (int)(int16_t)entry[2];
 
-    for (i = 0; i < s_jump_entry_count; i++) {
-        uint8_t *entry = s_jump_entries + i * 6;
-        start = *(uint16_t *)(entry + 0);
-        end   = *(uint16_t *)(entry + 2);
-        remap = *(int16_t *)(entry + 4);
+        /* Equivalent to the disassembly's:
+         *   JL (raw < low)  -> next
+         *   JLE (raw > high) inverse -> if (high < raw) next
+         *   else: MATCH (fallthrough to remap block) */
+        if (raw_span < low) continue;
+        if (high < raw_span) continue;
 
-        if ((uint16_t)span >= start && (uint16_t)span <= end) {
-            span = (int16_t)(span + remap);
-            track_state[1] = span; /* normalized */
-            track_state[2] = span; /* accumulated */
-            break;
-        }
+        /* MATCH at index i. Compute the remap:
+         *   AX = [EDI + i*6 + 0x1c]    ; anchor (third short of entry)
+         *   AX-= [EDI + i*6 + 0x18]    ; low    (first short of entry)
+         *   AX+= raw_span
+         * Store AX (16-bit truncation) to +0x82 and +0x84. */
+        int new_span = (anchor - low) + raw_span;
+        track_state[1] = (int16_t)new_span; /* +0x82 */
+        track_state[2] = (int16_t)new_span; /* +0x84 */
+        return;
     }
+    /* Loop exhausted with no match: original returns without touching
+     * +0x82/+0x84 (POP EDI/ESI/EBP/EBX; RET at 0x00444069). */
 }
 
 /* Circuit checkpoint and lap tracking removed from this module.
@@ -3304,7 +4231,10 @@ int64_t td5_track_compute_span_progress(int span_index, const int32_t *actor_pos
 
     /* [CONFIRMED @ 0x004345E0] base vertex = *(uint16*)(span + 0x06) = right_vertex_index */
     start_vi    = (int)(uint16_t)sp->right_vertex_index;
-    type_offset = (int)k_target_vertex_offsets[(int)sp->span_type][0];
+    /* [CONFIRMED @ 0x004345E4: `[EDX*8 + 0x473c6c]` reads COL 1 of the table,
+     * not col 0 that SampleTrackTargetPoint reads.  Col 1 has non-zero
+     * values only at types 5/6/7. */
+    type_offset = (int)k_target_vertex_offsets[(int)sp->span_type][1];
     lane_count  = span_lane_count(sp);
     end_vi      = start_vi + lane_count + type_offset;
 
@@ -3368,7 +4298,9 @@ int32_t td5_track_compute_signed_offset(int span_index, int progress, int route_
 
     /* Same vertex pair as ComputeTrackSpanProgress [CONFIRMED @ 0x00434680-0x004346b8] */
     start_vi    = (int)(uint16_t)sp->right_vertex_index;
-    type_offset = (int)k_target_vertex_offsets[(int)sp->span_type][0];
+    /* [CONFIRMED @ 0x004346A3: `[EDX*8 + 0x473c6c]` reads COL 1 of the table.
+     * Non-zero values only at types 5/6/7. */
+    type_offset = (int)k_target_vertex_offsets[(int)sp->span_type][1];
     lane_count  = span_lane_count(sp);
     end_vi      = start_vi + lane_count + type_offset;
 
@@ -3394,7 +4326,11 @@ int32_t td5_track_compute_signed_offset(int span_index, int progress, int route_
     len = (int)sqrt((double)(dX_sc * dX_sc + dZ_sc * dZ_sc));
 
     /* Sign from comparison [CONFIRMED @ 0x004346f5] */
-    return (progress < route_byte) ? -len : len;
+    {
+        int32_t ret_val = (progress < route_byte) ? -len : len;
+        td5_pilot_trace_pool15_emit_signed_offset(span_index, progress, route_byte, ret_val);
+        return ret_val;
+    }
 }
 
 /* ========================================================================
@@ -3468,34 +4404,40 @@ int td5_track_sample_target_point(int span_index, int route_byte,
     int32_t result_x = (right_x - left_x) * route_byte + left_x * 0x100;
     int32_t result_z = (right_z - left_z) * route_byte + left_z * 0x100;
 
-    /* Perpendicular lateral offset [CONFIRMED @ 0x434883-0x4348F1] */
+    /* Perpendicular lateral offset [CONFIRMED @ 0x434883-0x4348F1].
+     *
+     * Builds an int16 tangent vector then applies the bias along it. The
+     * tangent is computed via ConvertFloatVec4ToShortAngles @ 0x0042CDB0,
+     * which normalises to length 4096 using x87 80-bit precision for
+     * sqrt + divide. The first output (tan_x) is computed at 80-bit
+     * precision; the scale is then truncated to 32-bit float (FST) and
+     * reused for the second output (tan_z) at 32-bit precision.
+     *
+     * Bias is applied along the (left->right) edge tangent itself — the
+     * rail-crossing edge IS the lateral axis of the lane. Original step 6
+     * builds `local_8 = {(short)(Rx-Lx), 0, (short)(Rz-Lz)}` (the edge
+     * vector); step 7 calls ConvertFloatVec4ToShortAngles which scales
+     * by 4096/mag (no rotation); step 8 applies
+     *   `out[0] += (local_8[0]*bias)>>12 << 8` (along +dx).
+     */
     if (lateral_bias != 0) {
         int32_t edge_dx = (int16_t)(right_x - left_x);
         int32_t edge_dz = (int16_t)(right_z - left_z);
 
-        /* Normalize edge direction to unit vector (ConvertFloatVec4ToShortAngles)
-         * [CONFIRMED @ 0x42CDB0] */
-        float fex = (float)edge_dx;
-        float fez = (float)edge_dz;
-        float mag = sqrtf(fex * fex + fez * fez);
-        if (mag > 0.5f) {
-            /* Bias is applied along the (left->right) edge tangent itself —
-             * the rail-crossing edge IS the lateral axis of the lane.
-             * Original `SampleTrackTargetPoint @ 0x00434800` step 6 builds
-             * `local_8 = {(short)(Rx-Lx), 0, (short)(Rz-Lz)}` (the edge
-             * vector itself), step 7 calls `ConvertFloatVec4ToShortAngles`
-             * which scales by 4096/mag (no rotation) [CONFIRMED @
-             * 0x42CDB0-0x42CE39], and step 8 applies `out[0] +=
-             * (local_8[0]*bias)>>12 << 8` (along +dx).
-             * The previous port `(-dz, +dx)` perpendicular shifted the
-             * target along the track length instead of across the lane;
-             * combined with the negation in seed_actor_track_progress_offset,
-             * port produced ~2× lateral velocity vs original on Moscow TT
-             * slot 0. After both fixes (tangent here + negation removed in
-             * td5_ai.c), port vel_x at sim_tick=10 = -2097 vs original
-             * -1913 (within 10% — was 2× before). */
-            int16_t tan_x = (int16_t)(( fex / mag) * 4096.0f);
-            int16_t tan_z = (int16_t)(( fez / mag) * 4096.0f);
+        /* Mirror ConvertFloatVec4ToShortAngles' two-precision scale:
+         *   scale_hi = 4096.0 / sqrt(double(fex² + fez²))  [80-bit equiv]
+         *   scale_lo = (float)scale_hi                     [32-bit FST]
+         * tan_x uses scale_hi (first __ftol from 80-bit ST(0));
+         * tan_z uses scale_lo (FLD of 32-bit FST value, second __ftol).
+         * [CONFIRMED @ 0x0042CE03 FST + 0x0042CE10 FLD reload]. */
+        double  fex_d = (double)edge_dx;
+        double  fez_d = (double)edge_dz;
+        double  mag_sq_d = fex_d * fex_d + fez_d * fez_d;
+        if (mag_sq_d > 0.25) {
+            double scale_hi = 4096.0 / sqrt(mag_sq_d);
+            float  scale_lo = (float)scale_hi;
+            int16_t tan_x = (int16_t)(int32_t)(scale_hi * fex_d);
+            int16_t tan_z = (int16_t)(int32_t)((float)(scale_lo * (float)edge_dz));
 
             /* Apply bias with fixed-point 4.12 multiply and rounding
              * [CONFIRMED @ 0x4348B1-0x4348F1] */
@@ -3512,26 +4454,8 @@ int td5_track_sample_target_point(int span_index, int route_byte,
     if (out_x) *out_x = result_x;
     if (out_z) *out_z = result_z;
 
-    /* Temporary diagnostic: first few calls dump the full field set so we
-     * can cross-check against a Frida capture of the original's 0x00434800.
-     * Remove once the Moscow slot-1 target numbers match. */
-    {
-        static int s_probe_count = 0;
-        if (s_probe_count < 16) {
-            s_probe_count++;
-            TD5_LOG_I(LOG_TAG,
-                "target_point_probe span=%d type=%d lvi=%d lc=%d toff=%d "
-                "ox=%d oz=%d vl=(%d,%d) vr=(%d,%d) rb=%d lb=%d rx=%d rz=%d",
-                span_index, (int)sp->span_type,
-                (int)sp->left_vertex_index, lane_count, type_offset,
-                (int)sp->origin_x, (int)sp->origin_z,
-                (int)v_left->x,  (int)v_left->z,
-                (int)v_right->x, (int)v_right->z,
-                route_byte, lateral_bias,
-                result_x, result_z);
-        }
-    }
-
+    td5_pilot_trace_pool15_emit_target_point(span_index, route_byte, lateral_bias,
+                                              result_x, result_z);
     return 1;
 }
 
@@ -3592,81 +4516,28 @@ int td5_track_apply_target_span_remap(int lin_span, int is_canonical_route)
 }
 
 /* ========================================================================
- * Signed spline distance (0x434670)
- *   route_lane       - route lane offset (subtracted from segment_distance)
+ * Signed spline distance — forwarder to td5_track_compute_signed_offset
  *
- * Returns: signed distance (positive = ahead, negative = behind)
+ * Both `td5_track_compute_spline_position` and `td5_track_compute_signed_offset`
+ * port the same listing function 0x00434670 ComputeSignedTrackOffset. The
+ * older `compute_spline_position` implementation had three divergences:
+ *   1. used `span_height_offset(sp)` (high nibble of byte+3) instead of
+ *      the type_offset table at 0x473c6c (col 1 of k_target_vertex_offsets);
+ *   2. clamped lane_count to >=1 (listing has no clamp);
+ *   3. used td5_isqrt (integer sqrt) instead of sqrt((double)) — listing
+ *      uses FILD/FSQRT/__ftol on the 32-bit mag_sq, giving x87 80-bit
+ *      precision then truncating.
+ *
+ * The newer `compute_signed_offset` is byte-faithful to the listing. Both
+ * call sites in td5_ai.c pass the same listing arguments (param_2 =
+ * "segment_distance"/"progress", param_3 = "route_lane"/"route_byte").
+ * Forwarder eliminates the duplicate while preserving the public ABI.
  * ======================================================================== */
 
 int32_t td5_track_compute_spline_position(int span_index, int segment_distance,
                                            int route_lane)
 {
-    const TD5_StripSpan *sp;
-    int lane_count;
-    int next_vertex_offset;
-    int vertex_idx_a, vertex_idx_b;
-    TD5_StripVertex *vtx_a, *vtx_b;
-    int32_t ax, az, bx, bz;
-    int32_t dx, dz;
-    int32_t t;
-    int32_t interp_x, interp_z;
-    int32_t mag_sq, mag;
-
-    if (!s_span_array || !s_vertex_table ||
-        span_index < 0 || span_index >= s_span_count)
-        return 0;
-
-    sp = &s_span_array[span_index];
-
-    /* Get current vertex index from right_vertex_index (+0x06) */
-    vertex_idx_a = (int)sp->right_vertex_index;
-
-    /* Get lane nibble from byte +0x03 (low nibble = lane count) */
-    lane_count = span_lane_count(sp);
-    if (lane_count < 1)
-        lane_count = 1;
-
-    /* Compute next vertex index:
-     * next = current + lane_count + height_offset
-     * The height_offset from the span type is encoded in the high nibble of +0x03.
-     * This matches the original zone_offset_table lookup. */
-    next_vertex_offset = lane_count + span_height_offset(sp);
-    vertex_idx_b = vertex_idx_a + next_vertex_offset;
-
-    /* Get vertex positions (x, z only -- this is 2D track-plane distance) */
-    vtx_a = vertex_at(vertex_idx_a);
-    vtx_b = vertex_at(vertex_idx_b);
-
-    if (!vtx_a || !vtx_b)
-        return 0;
-
-    ax = (int32_t)vtx_a->x;
-    az = (int32_t)vtx_a->z;
-    bx = (int32_t)vtx_b->x;
-    bz = (int32_t)vtx_b->z;
-
-    /* Direction vector from A to B */
-    dx = bx - ax;
-    dz = bz - az;
-
-    /* Interpolation parameter: how far along the segment */
-    t = segment_distance - route_lane;
-
-    /* Fixed-point interpolation with rounding toward zero:
-     * interp = (delta * t + bias) >> 8
-     * where bias = (delta * t >> 31) & 0xFF  (adds 255 for negative products) */
-    interp_x = dx * t;
-    interp_x = (interp_x + ((interp_x >> 31) & 0xFF)) >> 8;
-
-    interp_z = dz * t;
-    interp_z = (interp_z + ((interp_z >> 31) & 0xFF)) >> 8;
-
-    /* Compute magnitude */
-    mag_sq = interp_x * interp_x + interp_z * interp_z;
-    mag = td5_isqrt(mag_sq);
-
-    /* Sign: negative if behind (segment_distance < route_lane) */
-    return (segment_distance < route_lane) ? -mag : mag;
+    return td5_track_compute_signed_offset(span_index, segment_distance, route_lane);
 }
 
 /* ========================================================================
@@ -4005,9 +4876,22 @@ void td5_track_init_traffic_from_queue(void)
 }
 
 /**
- * RecycleTrafficActorFromQueue (0x435310).
- * Despawns a traffic actor that has fallen too far behind and respawns
- * it at the next queue position ahead of the player.
+ * RecycleTrafficActorFromQueue: vestigial track-side stub.
+ *
+ * NOTE (precise-00435310 audit, 2026-05-14): the scope-file address
+ * 0x00435310 does NOT correspond to a function entry in TD5_d3d.exe.
+ * Ghidra reports 0x00435310 as an instruction inside
+ * UpdateActorTrackBehavior (0x00434FE0-0x004353AC), not a function
+ * start. The actual traffic-recycle entry lives at 0x004353B0
+ * (RecycleTrafficActorFromQueue), and the byte-faithful port of that
+ * function lives in td5_ai.c (td5_ai_recycle_traffic_actor). The
+ * call-site dispatcher (UpdateRaceActors @ 0x00436A70) is in td5_ai.c
+ * too, so the canonical home for this logic is td5_ai.c.
+ *
+ * This stub is retained only to keep external references (route-loader
+ * scaffolding) building until those callers are migrated; it performs
+ * no recycle work itself. Do not call from new code -- use
+ * td5_ai_recycle_traffic_actor() in td5_ai.c.
  */
 void td5_track_recycle_traffic_actor(void)
 {
