@@ -1890,13 +1890,43 @@ void td5_render_actors_for_view(int view_index)
 
             /* Original (0x40C120): compute interpolated render position.
              * render_pos = (world_pos + linear_velocity * g_subTickFraction) / 256.
-             * [CONFIRMED @ 0x40C164-0x40C1D4] */
+             * [CONFIRMED @ 0x40C164-0x40C1D4]
+             *
+             * Original at 0x40C1C5-0x40C1D7 then applies the chassis render-Y
+             * lift:
+             *   ECX = g_trackHeightBaseOffset (signed int @ 0x0048f070)
+             *   SHL ECX, 8                    ; (lift << 8) in fp8 units
+             *   FILD ECX → FSUBR [ESI+0x20]   ; pos_y = pos_y - (lift << 8)
+             *   FSTP  [ESI+0x20]
+             * g_trackHeightBaseOffset is initialized at 0x0040BCE3/0x0040BCFB:
+             *   normal gameplay (g_inputPlaybackActive==0) → -36
+             *   replay playback (g_inputPlaybackActive!=0) → -18
+             * With the default value of -36, the FSUBR adds +9216 fp8 = +36
+             * world units to the render Y. TD5 uses a Y-down world convention
+             * (gravity adds positive Y at td5_physics.c:3849), so +36 world Y
+             * pushes the chassis DOWN by 36 units toward the ground plane.
+             * Without this lift the port renders the car mesh ~36 world units
+             * above where its wheel-contact probes touch the track, giving the
+             * user-reported "floating car" visual (2026-05-17).
+             *
+             * Original gates this on RenderRaceActorForView (racers only); the
+             * traffic block in RenderRaceActorsForView (0x40BD20) skips it, so
+             * we apply the offset only to racer slots [0..TD5_MAX_RACER_SLOTS).
+             * [CONFIRMED @ 0x40C1C5-0x40C1D7 + 0x40BD20 absence] */
             {
                 extern float g_subTickFraction;
+                extern int td5_input_is_playback_active(void);
                 float frac = g_subTickFraction;
                 float interp_x = (float)actor->world_pos.x + (float)actor->linear_velocity_x * frac;
                 float interp_y = (float)actor->world_pos.y + (float)actor->linear_velocity_y * frac;
                 float interp_z = (float)actor->world_pos.z + (float)actor->linear_velocity_z * frac;
+                if (slot < TD5_MAX_RACER_SLOTS) {
+                    /* g_trackHeightBaseOffset = -36 normally, -18 under playback.
+                     * Subtract (offset << 8) in fp8 → equivalent to adding
+                     * (-offset) world units after the /256 conversion below. */
+                    int height_base_offset = td5_input_is_playback_active() ? -18 : -36;
+                    interp_y -= (float)(height_base_offset << 8);
+                }
                 render_pos.x = interp_x * (1.0f / 256.0f);
                 render_pos.y = interp_y * (1.0f / 256.0f);
                 render_pos.z = interp_z * (1.0f / 256.0f);
