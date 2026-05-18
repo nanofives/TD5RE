@@ -839,10 +839,21 @@ void td5_physics_run_paused_engine_step(void)
  * Master dispatcher -- UpdateVehicleActor (0x406650)
  *
  * L4: known divergences — see todo_update_vehicle_actor_dispatcher_2026-05-18.md
- *   1) AccumulateVehicleSpeedBonusScore (orig 0x004066EA) NOT called; port
- *      uses per-hit decrement instead.
+ *   1) AccumulateVehicleSpeedBonusScore (orig 0x004066EA call from inside
+ *      UpdateVehicleActor) — port relocates this call into the td5_game.c
+ *      sub-tick loop (accumulate_speed_bonus @ td5_game.c:3567). Function
+ *      itself IS ported, but the ActorRaceMetric source fields
+ *      (forward_speed/skid_factor/contact_count) are never populated from
+ *      actor state, so the bonus stays at 0 in practice. See
+ *      reference_arch_no_speed_bonus_score_2026-05-18.md (ARCH-DIVERGENCE).
  *   2) AdvancePendingFinishState consolidated into td5_game.c game-tick
- *      loop instead of per-actor here.
+ *      loop instead of per-actor here. Port ported as tick_pending_finish_timer
+ *      @ td5_game.c:3177, mirroring orig 0x0040A2B0 logic with the same
+ *      hi/lo CONCAT11 packing and timeout-promotion path. Minor L4 residuals
+ *      audited 2026-05-18 — see todo_advance_pending_finish_state_residuals_2026-05-18.md.
+ *      [CONFIRMED @ 0x0040A2B0] core hi/lo decrement + underflow promotion
+ *      logic byte-faithful with orig disasm; residuals are gate checks
+ *      (g_replayModeFlag) + timer_ticks<=0 early-return optimization.
  *   3) Step 9 surface_contact_flags update is port-only (player path).
  *   4) Traffic (slot >= 6) sub-path inlined; original dispatches separately
  *      via UpdateRaceActors @ 0x00436A70.
