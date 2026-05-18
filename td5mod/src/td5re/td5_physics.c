@@ -810,6 +810,18 @@ void td5_physics_run_paused_engine_step(void)
 
 /* ========================================================================
  * Master dispatcher -- UpdateVehicleActor (0x406650)
+ *
+ * L4: known divergences — see todo_update_vehicle_actor_dispatcher_2026-05-18.md
+ *   1) AccumulateVehicleSpeedBonusScore (orig 0x004066EA) NOT called; port
+ *      uses per-hit decrement instead.
+ *   2) AdvancePendingFinishState consolidated into td5_game.c game-tick
+ *      loop instead of per-actor here.
+ *   3) Step 9 surface_contact_flags update is port-only (player path).
+ *   4) Traffic (slot >= 6) sub-path inlined; original dispatches separately
+ *      via UpdateRaceActors @ 0x00436A70.
+ *   Steps 1-6 (frame counter, ghost reset, speed tracking, race timer,
+ *   attitude clamp, dynamics dispatch + paused + scripted) are byte-faithful
+ *   per existing [Audit D1..D13] markers.
  * ======================================================================== */
 
 void td5_physics_update_vehicle_actor(TD5_Actor *actor)
