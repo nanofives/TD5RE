@@ -838,17 +838,49 @@ void td5_physics_run_paused_engine_step(void)
 /* ========================================================================
  * Master dispatcher -- UpdateVehicleActor (0x406650)
  *
- * L4: known divergences — see todo_update_vehicle_actor_dispatcher_2026-05-18.md
- *   1) AccumulateVehicleSpeedBonusScore (orig 0x004066EA) NOT called; port
- *      uses per-hit decrement instead.
- *   2) AdvancePendingFinishState consolidated into td5_game.c game-tick
- *      loop instead of per-actor here.
- *   3) Step 9 surface_contact_flags update is port-only (player path).
- *   4) Traffic (slot >= 6) sub-path inlined; original dispatches separately
- *      via UpdateRaceActors @ 0x00436A70.
- *   Steps 1-6 (frame counter, ghost reset, speed tracking, race timer,
- *   attitude clamp, dynamics dispatch + paused + scripted) are byte-faithful
- *   per existing [Audit D1..D13] markers.
+ * [CONFIRMED @ 0x00406650] Steps 1-8 (frame counter, ghost reset, speed
+ * tracking, race timer, attitude clamp, dynamics dispatch + paused + scripted,
+ * pose integration, wall resolvers) are byte-faithful with orig per the
+ * inline [Audit D1..D13] markers. L5 promotion audit 2026-05-18 confirmed
+ * the dispatch ordering, mode==0/mode==1 split, and effective-grip clamp
+ * match orig 0x00406650-0x00406946 line-for-line.
+ *
+ * Audited divergences (L5 promotion audit 2026-05-18):
+ *
+ *   1) [DEFERRED — Phase 2] AccumulateVehicleSpeedBonusScore @ 0x004066EA
+ *      NOT called. Port uses per-hit decrement instead. Phase 2 agent owns
+ *      restoring this call.
+ *
+ *   2) [DEFERRED — Phase 2] AdvancePendingFinishState @ 0x0040... consolidated
+ *      into td5_game.c game-tick loop. Phase 2 agent owns moving it back.
+ *
+ *   3) [ARCH-DIVERGENCE — port-only step 9 surface_contact_flags safety net]
+ *      Port writes scf at the tail of this dispatcher when slot is the human
+ *      player (g_race_slot_state == 1) and !g_game_paused. Original writes
+ *      scf only inside UpdatePlayerVehicleDynamics @ 0x00404030 at a late
+ *      drivetrain-commit conditional that the port doesn't fully mirror.
+ *      The AI gate (`state==1 only`) is the critical guard: Frida
+ *      rotation_probe.csv 2026-05-03 confirmed orig AI slot 0 scf=0 at every
+ *      sim_tick 1..50, and the port matched that AFTER restricting this
+ *      write to the human path. AI cars now inherit scf=0 from spawn memset
+ *      (matching orig). Pure port-only redundancy on the player path; faithful
+ *      on AI/traffic.
+ *
+ *   4) [ARCH-DIVERGENCE — traffic sub-path inlined here vs split in orig]
+ *      Orig's traffic (slot >= 6) NEVER routes through UpdateVehicleActor —
+ *      UpdateRaceActors @ 0x00436A70 dispatches slot>=6 separately through
+ *      UpdateTrafficRoutePlan (0x00435E80) + UpdateTrafficActorMotion
+ *      (0x00443ED0). The port consolidates both paths into this dispatcher,
+ *      using a `slot >= 6` branch at step 7 (integrate_traffic_pose + route
+ *      helpers) and a `slot < 6` guard on the wall resolvers. Mirrors orig
+ *      semantics by gating each step appropriately — no observable behavioral
+ *      divergence given that orig's wall-resolver path is a no-op for traffic
+ *      anyway (resolve_wall_contacts has its own slot>=6 early-out at
+ *      td5_track.c:536). Documented at the dispatch site (lines 1067-1099).
+ *      Consolidation reduces dispatcher fan-out and keeps the per-actor
+ *      tick budget in one function for profiler clarity.
+ *
+ * See todo_update_vehicle_actor_dispatcher_2026-05-18.md for the L5 audit log.
  * ======================================================================== */
 
 void td5_physics_update_vehicle_actor(TD5_Actor *actor)
@@ -5158,22 +5190,69 @@ static int32_t traffic_edge_pen(int32_t v0_x, int32_t v0_z,
  *   *(int16_t*)(car_def + 0x08) = half-length equivalent  [CONFIRMED @ 0x407424]
  *   *(int16_t*)(car_def + 0x0C) = half-width equivalent   [CONFIRMED @ 0x407420]
  *
- * [CONFIRMED @ 0x00407390] Byte-faithful with orig ProcessActorSegmentTransition
- * for: lane_count byte source (+0x03, fixed 2026-05-18), outer_sub mapping
- * (= lane_count, fixed 2026-05-18), inner/outer triggers, dot/angle math.
+ * [L4 — Frida-pending] Multiple algorithmic divergences vs orig
+ * 0x00407390. Documented here per L5 promotion audit 2026-05-18.
+ * Resolution unblocks on Frida-traced traffic-wall contact comparison
+ * (see todo_traffic_route_advance_lane_count_byte_2026-05-18.md for the
+ * unblock criterion). NOT ARCH-DIVERGENCE — these are genuine math gaps:
  *
- * [ARCH-DIVERGENCE: vertex pair ordering vs dot-product reference point]
- *   Orig's inner test reads psVar1 = vertex(right_vertex_index + sub_lane)
- *   and psVar2 = vertex(left_vertex_index + sub_lane), then forms the rotated
- *   outward normal `(psVar2.z - psVar1.z, 0, psVar1.x - psVar2.x)` and uses
- *   `((rel - psVar1) . local_8)` as the signed penetration. Port passes
- *   (vl=left+sub, vr=right+sub) to traffic_edge_pen which atan2s the tangent
- *   then dots `(rel . tangent)` — different reference point (origin vs psVar1)
- *   AND different rotation direction (tangent vs outward normal). These two
- *   asymmetries partially cancel for the typical inside-edge case but the
- *   sign of `pen` may flip in fork-junction sub-spans. See
- *   reference_arch_init_traffic_actors_2026-05-18.md for the full audit
- *   notes; resolving requires Frida-traced traffic-wall contact comparison.
+ *   1) DOT-PRODUCT SEMANTIC MISMATCH (the dominant divergence)
+ *      Orig builds the *rotated outward normal* of edge A→B via
+ *      `local_8 = (B.z - A.z, 0, A.x - B.x)` and normalizes it to length
+ *      4096 via ConvertFloatVec4ToShortAngles @ 0x0042CDB0 (FPU
+ *      x²+y²+z²→FSQRT→4096/len→FMUL→ftol). It then computes
+ *      `pen = ((world - origin - A) . local_8) - car_size_proj` — a
+ *      *signed perpendicular distance* (geometric cross-product component
+ *      of (rel) and the unit edge direction).
+ *
+ *      Port computes `tan = (cos(atan2(tdz,tdx)), sin(atan2(tdz,tdx)))`
+ *      and dots `(rel . tan)` — a *parallel projection along the edge*,
+ *      NOT the perpendicular distance. These give different signs in
+ *      general; only the angle passed to ApplySimpleTrackSurfaceForce
+ *      remains the same.
+ *
+ *   2) REFERENCE-POINT MISMATCH
+ *      Orig dots from psVar1 (the edge endpoint), port dots from the span
+ *      origin. The car-size projection subtraction is identical but the
+ *      pre-subtraction term is offset by `-psVar1`.
+ *
+ *   3) VERTEX-PAIR SWAP (OUTER TEST)
+ *      Orig outer-test uses `psVar1 = vertex(strip[+0x04] + DAT_004631a0
+ *      + nibble) = left_vertex_index+offset+nibble`, port uses
+ *      `right_vertex_index+offset+outer_sub`. The port comment at line 5254
+ *      claims "strip[+0x04] = right_vertex_index" but td5_types.h:383-384
+ *      assigns strip[+0x04] = left_vertex_index. The swap is internally
+ *      inconsistent and likely contributes a sign flip on outer-edge tests.
+ *
+ *   4) (PARTIAL CLOSE) lane_count byte source (+0x03 not +0x01) — fixed
+ *      2026-05-18 commit ef0e862. Outer_sub mapping (= lane_count not
+ *      lane_count-1) — fixed same commit. These two are no longer
+ *      divergent.
+ *
+ * Why this still ships:
+ *
+ *   The traffic-bias-clamp slot gate shipped 2026-05-17 (commit 79023df F1)
+ *   bounds the pre-loop to slots 0..5 (TD5_MAX_RACER_SLOTS), preventing
+ *   traffic from cascading into the racer steering pipeline. The
+ *   remaining edge-test errors fire only at traffic-wall contact ticks
+ *   which are rare enough that no current Wave3 scenario isolates this
+ *   path. San Francisco scenario (slot 6+ traffic, see
+ *   reference_san_francisco_ai_completion_2026-05-16.md) is the closest
+ *   isolated test bed but no traffic-wall contacts have been Frida-traced
+ *   yet.
+ *
+ * Unblock criterion (per todo): Frida hook at orig 0x004073D8 + port
+ * traffic_edge_pen entrypoint capturing (slot, span, sub_lane, type, A.x,
+ * A.z, B.x, B.z, rel.x, rel.z, pen_orig, pen_port) at the first
+ * traffic-wall contact tick. If `sign(pen_orig) == sign(pen_port)`
+ * across all sampled ticks the divergence is benign and these notes
+ * upgrade to ARCH-DIVERGENCE; otherwise file as a fix-required regression.
+ *
+ * NOTE: confirmed byte-faithful for: lane_count byte source (+0x03,
+ * fixed 2026-05-18), outer_sub mapping (= lane_count, fixed 2026-05-18),
+ * inner/outer trigger conditions (sub_lane < 2 / sub_lane >= lane_count-2),
+ * DAT_004631a0 outer-vertex LUT (k_outer_left_offsets matches orig dump),
+ * ApplySimpleTrackSurfaceForce wiring + DecayUltimateVariantTimer wiring.
  */
 static void process_traffic_segment_edge(TD5_Actor *actor, int slot)
 {
