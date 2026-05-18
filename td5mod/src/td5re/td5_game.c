@@ -122,12 +122,67 @@ extern uint8_t *g_track_environment_config; /* td5_asset.c -- LEVELINF.DAT buffe
  *     5) Cache _g_raceVideoConfigCached = *g_appExref.
  *     6) Hard-set g_renderWidthF/g_renderHeightF = 640/480.
  *     7) Call ConfigureProjectionForViewport(640, 480).
+ *         [ARCH-DIVERGENCE @ 0x0043E7E0 ConfigureProjectionForViewport]
+ *         See td5_render.c:2087 td5_render_configure_projection() for the
+ *         port equivalent: orig writes globals (g_projectionDepth,
+ *         g_frustumLeftPlaneNormalX/Z, g_frustumTopPlaneNormalY/Z,
+ *         g_cachedViewportWidth/Height) consumed by the D3D3 fixed-pipeline
+ *         clipper; port writes static module-locals consumed by the D3D11
+ *         software-transform path. Same focal/half-plane math
+ *         (focal = w*0.5625, h_cos = focal/h_len, etc.). Caller also
+ *         resets g_projectionDepthBias = 0x1000 — port mirrors this at
+ *         td5_render.c:2537 [CONFIRMED @ 0x0043E7E0].
  *     8) Center pos: gRenderCenter{X,Y} = render{W,H}F * DAT_0045d5d0 (= 0.5).
  *     9) Call InitializeRaceViewportLayout @ 0x0042C2B0.
  *     10) Call LoadStaticTrackTextureHeader.
+ *         [ARCH-DIVERGENCE @ 0x00442560 LoadStaticTrackTextureHeader]
+ *         Orig: GetArchiveEntrySize/ReadArchiveEntry from "static.hed"
+ *         inside "static.zip" allocated via _malloc, parses gTrackTextureCount
+ *         (-= 4 unless projection mode == 2), gStaticHedEntryCount, and a
+ *         per-page transparency table at Texture_exref+0x24/+0x28 with a
+ *         min/max swap gated on DAT_004c3d04. Port equivalent
+ *         td5_asset_init_static_atlas() (td5_asset.c:528) reads the same
+ *         static.hed directly from "re/assets/static/static.hed" (extracted
+ *         offline, no zip archive at runtime) and stores into s_atlas_table
+ *         + s_page_metadata. Same end-state — per-page (atlas_x, atlas_y,
+ *         w, h, tex_slot) plus per-page metadata. Port skips the orig
+ *         DAT_004c3d04 transparency-swap (port writes width/height directly,
+ *         not min/max-of-pair, because the static.hed shipped in assets/ is
+ *         the already-canonicalised form). [CONFIRMED @ 0x00442560 entry
+ *         table parser + 0x004425D0 page-metadata parser; see also
+ *         reference_smoke_atlas_static_hed_parse_trap.md for the entry-stride
+ *         trap (correct stride = 64 bytes, ints at offset 0x2C).]
  *     11) Set SetRaceTexturePageLoader(LoadRaceTexturePages).
+ *         [ARCH-DIVERGENCE @ 0x0040B580 SetRaceTexturePageLoader]
+ *         Orig is a 13-byte one-liner that writes a function pointer at
+ *         (Set_exref + 0xC), turning LoadRaceTexturePages into the indirect
+ *         callback used by the page-build path. Port has no indirect
+ *         dispatch — td5_asset.c:1516 LoadRaceTexturePages @ 0x00442770 is
+ *         invoked directly by name from the per-race init. Functionally
+ *         equivalent at the call site; the function-pointer indirection is
+ *         a D3D3-era pattern that doesn't survive the D3D11 rewrite.
+ *         [CONFIRMED @ 0x0040B580 single-store body — `MOV [Set_exref+0xC],
+ *         param_1; RET`. No port equivalent needed.]
  *     12) Wire CreateEffects_exref = CreateRaceForceFeedbackEffects (FFB
  *         virtual dispatch slot on the DX::FF singleton).
+ *         [ARCH-DIVERGENCE @ 0x004285B0 CreateRaceForceFeedbackEffects]
+ *         Orig is 719 bytes of DirectInput 5/7 effect creation:
+ *         DXInput::EnumerateEffects(joystick, 3) for constant-force candidates,
+ *         creates 4 effects at js_exref+0x1c/+0x20/+0x24/+0x28 via the
+ *         IDirectInputDevice2/3 vtable (slot 0=steering resistance,
+ *         slot 1=frontal impact, slot 2=side impact, slot 3=spring/condition).
+ *         Joystick-type bit 0x600 (wheel) selects condition-type 0x22; other
+ *         joysticks get 0x12. Port equivalent td5_plat_ff_init() in
+ *         td5_platform_win32.c:1274 + td5_input_ff_init() in td5_input.c:1314
+ *         enumerates effects via DirectInput8 (IDirectInputDevice8_EnumEffects
+ *         filtered by GUID_ConstantForce), then calls
+ *         td5_ff_create_constant_effect for slots 0/1/2 and
+ *         td5_ff_create_periodic_effect for slot 3. Same 4-effect slot
+ *         layout, same per-slot semantics (slot 0/2 X-axis, slot 1 Y-axis,
+ *         slot 3 periodic), different DI version (5/7 -> 8) and different
+ *         struct sizes (DIEFFECT_DX5 vs DIEFFECT/DI8). The orig's virtual
+ *         dispatch through CreateEffects_exref is replaced by a direct
+ *         function call. [CONFIRMED @ 0x004285B0 4-effect creation loop.]
  *
  *   Port handles (1)-(8) implicitly via td5_render_init() / DDraw wrapper.
  *   Steps (10)-(12) are spread across the per-race init in

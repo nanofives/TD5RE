@@ -134,7 +134,11 @@
     "citations": [
       [
         "td5_camera.c",
-        9
+        10
+      ],
+      [
+        "td5_game.c",
+        1
       ],
       [
         "td5_input.c",
@@ -145,16 +149,17 @@
         4
       ]
     ],
-    "total_citations": 16,
+    "total_citations": 18,
     "files_cited": [
       "td5_camera.c",
       "td5_camera.h",
+      "td5_game.c",
       "td5_input.c"
     ],
-    "precision_strong": 0,
+    "precision_strong": 2,
     "precision_weak": 0,
     "sample_context": "[td5_camera.c] ======================================================== |  * 0x401450 -- LoadCameraPresetForView |  * |  * Reads preset data from the camera preset table and populat",
-    "level": 4,
+    "level": 5,
     "is_auto_named": false,
     "is_crt": false
   },
@@ -165,7 +170,7 @@
     "citations": [
       [
         "td5_camera.c",
-        12
+        14
       ],
       [
         "td5_game.c",
@@ -176,16 +181,16 @@
         4
       ]
     ],
-    "total_citations": 17,
+    "total_citations": 19,
     "files_cited": [
       "td5_camera.c",
       "td5_camera.h",
       "td5_game.c"
     ],
-    "precision_strong": 0,
+    "precision_strong": 4,
     "precision_weak": 0,
-    "sample_context": "[td5_camera.c] ======================================================== |  * 0x401590 -- UpdateChaseCamera |  * |  * Main chase camera: orbit around vehicle with terrain-following, |",
-    "level": 4,
+    "sample_context": "[td5_camera.c] t (with documented |  *  ARCH-DIVERGENCEs)] |  *   Decompile of 0x00401590 verified semantically: |  *     - Fly-in counter behaviour (ramp/decrement around g_flyInTh",
+    "level": 5,
     "is_auto_named": false,
     "is_crt": false
   },
@@ -222,7 +227,7 @@
     "citations": [
       [
         "td5_camera.c",
-        7
+        9
       ],
       [
         "td5_game.c",
@@ -233,16 +238,16 @@
         4
       ]
     ],
-    "total_citations": 12,
+    "total_citations": 14,
     "files_cited": [
       "td5_camera.c",
       "td5_camera.h",
       "td5_game.c"
     ],
-    "precision_strong": 0,
+    "precision_strong": 4,
     "precision_weak": 0,
-    "sample_context": "[td5_camera.c] ======================================================== |  * 0x401C20 -- UpdateVehicleRelativeCamera |  * |  * Camera rigidly attached to vehicle with smoothed orien",
-    "level": 4,
+    "sample_context": "[td5_camera.c] sweep audit 2026-05-18 \u2014 byte-equivalent] |  *   Decompile of 0x00401C20 verified line-by-line: |  *     - First angle target  = display_angles.roll  + 0x800   (+0x",
+    "level": 5,
     "is_auto_named": false,
     "is_crt": false
   },
@@ -279,27 +284,27 @@
     "citations": [
       [
         "td5_camera.c",
-        3
+        6
       ],
       [
         "td5_game.c",
-        1
+        7
       ],
       [
         "td5_camera.h",
         4
       ]
     ],
-    "total_citations": 8,
+    "total_citations": 17,
     "files_cited": [
       "td5_camera.c",
       "td5_camera.h",
       "td5_game.c"
     ],
-    "precision_strong": 0,
+    "precision_strong": 8,
     "precision_weak": 0,
-    "sample_context": "[td5_camera.c] ======================================================== |  * 0x402000 -- ResetRaceCameraSelectionState |  * |  * Restores or resets camera preset selection for both",
-    "level": 4,
+    "sample_context": "[td5_camera.c] camera preset selection for both views. |  * |  * [CONFIRMED @ 0x00402000 ResetRaceCameraSelectionState; L5 promotion sweep |  *  audit 2026-05-18] -- Byte-faithful",
+    "level": 5,
     "is_auto_named": false,
     "is_crt": false
   },
@@ -795,7 +800,7 @@
       ],
       [
         "td5_physics.c",
-        50
+        53
       ],
       [
         "td5_pilot_trace_00404030.c",
@@ -814,7 +819,7 @@
         2
       ]
     ],
-    "total_citations": 59,
+    "total_citations": 62,
     "files_cited": [
       "td5_game.c",
       "td5_physics.c",
@@ -823,7 +828,7 @@
       "td5_pilot_trace_00404030.h",
       "td5_pilot_trace_0042EBF0.c"
     ],
-    "precision_strong": 5,
+    "precision_strong": 6,
     "precision_weak": 1,
     "sample_context": "[td5_game.c] 0x00406881) only skips the |              * dynamics dispatch (404030 / 404EC0 / 403D90). The |              * IntegrateVehiclePoseAndContacts chain (LAB_0040690B)",
     "level": 5,
@@ -1131,7 +1136,7 @@
       ],
       [
         "td5_physics.c",
-        11
+        15
       ],
       [
         "td5_pilot_trace_00406650.c",
@@ -1154,7 +1159,7 @@
         3
       ]
     ],
-    "total_citations": 40,
+    "total_citations": 44,
     "files_cited": [
       "td5_ai.c",
       "td5_game.c",
@@ -1165,7 +1170,7 @@
       "td5_pilot_trace_00406650.h",
       "td5_track.c"
     ],
-    "precision_strong": 8,
+    "precision_strong": 10,
     "precision_weak": 1,
     "sample_context": "[td5_ai.c] |  *     - state 0x00 (AI):       UpdateActorTrackBehavior + UpdateVehicleActor |  *     - state 0x01 (player):   skip AI (handled by input/physics) |  *     - state",
     "level": 5,
@@ -1240,17 +1245,17 @@
     "citations": [
       [
         "td5_track.c",
-        4
+        7
       ]
     ],
-    "total_citations": 4,
+    "total_citations": 7,
     "files_cited": [
       "td5_track.c"
     ],
-    "precision_strong": 0,
+    "precision_strong": 5,
     "precision_weak": 0,
     "sample_context": "[td5_track.c] e boundary check (rumble |  * strips at strip start/end), and 0x00406F50/0x004070E0 only test the LEFT |  * rail of a single per-level fence strip. Lateral containm",
-    "level": 4,
+    "level": 5,
     "is_auto_named": false,
     "is_crt": false
   },
@@ -1261,17 +1266,17 @@
     "citations": [
       [
         "td5_track.c",
-        4
+        7
       ]
     ],
-    "total_citations": 4,
+    "total_citations": 7,
     "files_cited": [
       "td5_track.c"
     ],
-    "precision_strong": 0,
+    "precision_strong": 3,
     "precision_weak": 1,
     "sample_context": "[td5_track.c] check (rumble |  * strips at strip start/end), and 0x00406F50/0x004070E0 only test the LEFT |  * rail of a single per-level fence strip. Lateral containment in the",
-    "level": 4,
+    "level": 5,
     "is_auto_named": false,
     "is_crt": false
   },
@@ -1282,14 +1287,14 @@
     "citations": [
       [
         "td5_physics.c",
-        9
+        11
       ]
     ],
-    "total_citations": 9,
+    "total_citations": 11,
     "files_cited": [
       "td5_physics.c"
     ],
-    "precision_strong": 3,
+    "precision_strong": 5,
     "precision_weak": 0,
     "sample_context": "[td5_physics.c] | } |  | /* ApplySimpleTrackSurfaceForce \u2014 byte-faithful port of 0x00407270. |  * |  * Pushes actor out of wall penetration and reflects the outward velocity. |  * |  * Addr",
     "level": 5,
@@ -1303,14 +1308,14 @@
     "citations": [
       [
         "td5_physics.c",
-        16
+        14
       ]
     ],
-    "total_citations": 16,
+    "total_citations": 14,
     "files_cited": [
       "td5_physics.c"
     ],
-    "precision_strong": 4,
+    "precision_strong": 2,
     "precision_weak": 1,
     "sample_context": "[td5_physics.c] t - car_size; | } |  | /* ProcessActorSegmentTransition \u2014 port of 0x00407390. |  * |  * Tests the inner (sub_lane < 2) and outer (sub_lane >= lane_count-2) edges |  * of th",
     "level": 5,
@@ -1636,23 +1641,23 @@
       ],
       [
         "td5_physics.c",
-        1
+        3
       ],
       [
         "td5_game.h",
         3
       ]
     ],
-    "total_citations": 18,
+    "total_citations": 20,
     "files_cited": [
       "td5_game.c",
       "td5_game.h",
       "td5_physics.c"
     ],
-    "precision_strong": 0,
+    "precision_strong": 3,
     "precision_weak": 0,
     "sample_context": "[td5_game.c] on Ultimate |          *   AdvancePendingFinishState        (0x0040A2B0) \u2014 per-tick, decrements +0x344 |          *   DecayUltimateVariantTimer        (0x0040A440)",
-    "level": 4,
+    "level": 5,
     "is_auto_named": false,
     "is_crt": false
   },
@@ -1680,10 +1685,10 @@
       "td5_game.h",
       "td5_physics.c"
     ],
-    "precision_strong": 0,
+    "precision_strong": 1,
     "precision_weak": 0,
     "sample_context": "[td5_game.c] Actor) calls |          *   AccumulateVehicleSpeedBonusScore (0x0040A3D0) \u2014 per-tick, gated on Ultimate |          *   AdvancePendingFinishState        (0x0040A2B0)",
-    "level": 4,
+    "level": 5,
     "is_auto_named": false,
     "is_crt": false
   },
@@ -1698,20 +1703,20 @@
       ],
       [
         "td5_physics.c",
-        6
+        7
       ],
       [
         "td5_game.h",
         2
       ]
     ],
-    "total_citations": 13,
+    "total_citations": 14,
     "files_cited": [
       "td5_game.c",
       "td5_game.h",
       "td5_physics.c"
     ],
-    "precision_strong": 2,
+    "precision_strong": 3,
     "precision_weak": 0,
     "sample_context": "[td5_game.c] ments +0x344 |          *   DecayUltimateVariantTimer        (0x0040A440) \u2014 per-tick from contact paths |          * from inside UpdateRaceActors (which itself runs",
     "level": 5,
@@ -1738,8 +1743,12 @@
     "body_size": 157,
     "citations": [
       [
+        "td5_camera.c",
+        1
+      ],
+      [
         "td5_game.c",
-        16
+        23
       ],
       [
         "td5_render.c",
@@ -1758,18 +1767,19 @@
         2
       ]
     ],
-    "total_citations": 21,
+    "total_citations": 29,
     "files_cited": [
+      "td5_camera.c",
       "td5_game.c",
       "td5_render.c",
       "td5_render.h",
       "td5_trace_whole_state.h",
       "td5re.h"
     ],
-    "precision_strong": 0,
+    "precision_strong": 5,
     "precision_weak": 0,
-    "sample_context": "[td5_game.c] -frame call to |          * UpdateRaceCameraTransitionTimer @ 0x0040A490 which is invoked |          * regardless of paused state. */ |         if (g_cameraTransition",
-    "level": 4,
+    "sample_context": "[td5_camera.c] orView[v] * 0x388 in port). |  *  Note: orig's only caller is UpdateRaceCameraTransitionTimer at the |  *  countdown timer-zero crossing; that call is currently NOT",
+    "level": 5,
     "is_auto_named": false,
     "is_crt": false
   },
@@ -1780,22 +1790,22 @@
     "citations": [
       [
         "td5_game.c",
-        15
+        18
       ],
       [
         "td5_game.h",
         2
       ]
     ],
-    "total_citations": 17,
+    "total_citations": 20,
     "files_cited": [
       "td5_game.c",
       "td5_game.h"
     ],
-    "precision_strong": 0,
+    "precision_strong": 3,
     "precision_weak": 0,
     "sample_context": "[td5_game.c] --- */ |     /* Original AdjustCheckpointTimersByDifficulty @ 0x0040A530 is called |      * per-slot from InitializeRaceVehicleRuntime @ 0x0042F140. The scaling |",
-    "level": 4,
+    "level": 5,
     "is_auto_named": false,
     "is_crt": false
   },
@@ -1835,6 +1845,10 @@
         16
       ],
       [
+        "td5_hud.c",
+        1
+      ],
+      [
         "td5_physics.c",
         11
       ],
@@ -1859,9 +1873,10 @@
         1
       ]
     ],
-    "total_citations": 50,
+    "total_citations": 51,
     "files_cited": [
       "td5_camera.c",
+      "td5_hud.c",
       "td5_physics.c",
       "td5_physics.h",
       "td5_pilot_trace_trig.c",
@@ -1869,7 +1884,7 @@
       "td5_render.c",
       "td5_render.h"
     ],
-    "precision_strong": 7,
+    "precision_strong": 8,
     "precision_weak": 1,
     "sample_context": "[td5_camera.c] ped \u2014 see BuildRotationMatrixFromAngles comment. */ |     s = CosFloat12bit((unsigned int)(unsigned short)yaw); |     c = SinFloat12bit(yaw); |     rot[4] = 1.0f; |",
     "level": 5,
@@ -1884,6 +1899,10 @@
       [
         "td5_camera.c",
         13
+      ],
+      [
+        "td5_hud.c",
+        1
       ],
       [
         "td5_physics.c",
@@ -1910,9 +1929,10 @@
         1
       ]
     ],
-    "total_citations": 46,
+    "total_citations": 47,
     "files_cited": [
       "td5_camera.c",
+      "td5_hud.c",
       "td5_physics.c",
       "td5_physics.h",
       "td5_pilot_trace_trig.c",
@@ -1920,7 +1940,7 @@
       "td5_render.c",
       "td5_render.h"
     ],
-    "precision_strong": 6,
+    "precision_strong": 7,
     "precision_weak": 1,
     "sample_context": "[td5_camera.c] = CosFloat12bit((unsigned int)(unsigned short)yaw); |     c = SinFloat12bit(yaw); |     rot[4] = 1.0f; |     rot[3] = 0.0f; rot[5] = 0.0f; |     rot[1] = 0.0f; rot[7] =",
     "level": 5,
@@ -2011,7 +2031,11 @@
     "citations": [
       [
         "td5_ai.c",
-        5
+        7
+      ],
+      [
+        "td5_camera.c",
+        1
       ],
       [
         "td5_physics.c",
@@ -2027,7 +2051,7 @@
       ],
       [
         "td5_track.c",
-        5
+        10
       ],
       [
         "td5_vfx.c",
@@ -2042,9 +2066,10 @@
         1
       ]
     ],
-    "total_citations": 31,
+    "total_citations": 39,
     "files_cited": [
       "td5_ai.c",
+      "td5_camera.c",
       "td5_physics.c",
       "td5_pilot_trace_0040A720.c",
       "td5_pilot_trace_0040A720.h",
@@ -2053,9 +2078,9 @@
       "td5_track.c",
       "td5_vfx.c"
     ],
-    "precision_strong": 6,
-    "precision_weak": 0,
-    "sample_context": "[td5_ai.c] ==== |  * AngleFromVector12 -- atan2-based angle computation (0x40A720 equivalent) |  * |  * Returns angle in 0..4095 (12-bit), matching original's table-based LUT. |",
+    "precision_strong": 14,
+    "precision_weak": 1,
+    "sample_context": "[td5_ai.c] ARCH-DIVERGENCE @ 0x00433FC0] Orig calls AngleFromVector12 (0x0040A720) |  *   which indexes a 12-bit atan2 LUT at DAT_00463214. Port uses libm |  *   atan2(double)",
     "level": 5,
     "is_auto_named": false,
     "is_crt": false
@@ -2067,17 +2092,17 @@
     "citations": [
       [
         "td5_game.c",
-        1
+        7
       ]
     ],
-    "total_citations": 1,
+    "total_citations": 7,
     "files_cited": [
       "td5_game.c"
     ],
-    "precision_strong": 0,
+    "precision_strong": 5,
     "precision_weak": 0,
-    "sample_context": "[td5_game.c] =================================== |  * Reset results table (0x40A880) |  * ======================================================================== */ |  | static voi",
-    "level": 4,
+    "sample_context": "[td5_game.c] nolithic bootstrap was split. |  * |  * ResetRaceResultsTable @ 0x0040a880 [ARCH-DIVERGENCE] |  *   Orig writes a 6-entry, 20-byte-stride table at 0x0048d988. Per ent",
+    "level": 5,
     "is_auto_named": false,
     "is_crt": false
   },
@@ -2175,23 +2200,23 @@
       ],
       [
         "td5_track.c",
-        4
+        7
       ],
       [
         "td5_track.h",
         2
       ]
     ],
-    "total_citations": 7,
+    "total_citations": 10,
     "files_cited": [
       "td5_render.c",
       "td5_track.c",
       "td5_track.h"
     ],
-    "precision_strong": 0,
+    "precision_strong": 6,
     "precision_weak": 0,
     "sample_context": "[td5_render.c] ==== |  * Deferred Additive Pass |  * |  * The source port has no PrepareMeshResource opcode-rewrite pass, so |  * loaded-texture commands never reach the depth-sorted",
-    "level": 4,
+    "level": 5,
     "is_auto_named": false,
     "is_crt": false
   },
@@ -2253,6 +2278,10 @@
     "body_size": 111,
     "citations": [
       [
+        "td5_game.c",
+        3
+      ],
+      [
         "td5_render.c",
         2
       ],
@@ -2261,15 +2290,16 @@
         2
       ]
     ],
-    "total_citations": 4,
+    "total_citations": 7,
     "files_cited": [
+      "td5_game.c",
       "td5_render.c",
       "td5_render.h"
     ],
-    "precision_strong": 0,
+    "precision_strong": 1,
     "precision_weak": 0,
-    "sample_context": "[td5_render.c] * Original addresses (see td5_render.h for full list): |  *   0x40AE10  InitializeRaceRenderGlobals |  *   0x40AE80  InitializeRaceRenderState |  *   0x40AEC0  Releas",
-    "level": 4,
+    "sample_context": "[td5_game.c] ref[8] - 0x30. |  *     2) Call InitializeRaceRenderGlobals @ 0x0040AE10. |  *     3) Call QueryRaceSharedPointer(4, &g_vehicleProjectionEffectMode, 4). |  *     4) S",
+    "level": 5,
     "is_auto_named": false,
     "is_crt": false
   },
@@ -2510,13 +2540,20 @@
     "address": "0040b580",
     "name": "SetRaceTexturePageLoader",
     "body_size": 13,
-    "citations": [],
-    "total_citations": 0,
-    "files_cited": [],
-    "precision_strong": 0,
+    "citations": [
+      [
+        "td5_game.c",
+        6
+      ]
+    ],
+    "total_citations": 6,
+    "files_cited": [
+      "td5_game.c"
+    ],
+    "precision_strong": 3,
     "precision_weak": 0,
-    "sample_context": "",
-    "level": 3,
+    "sample_context": "[td5_game.c] Loader(LoadRaceTexturePages). |  *         [ARCH-DIVERGENCE @ 0x0040B580 SetRaceTexturePageLoader] |  *         Orig is a 13-byte one-liner that writes a function p",
+    "level": 5,
     "is_auto_named": false,
     "is_crt": false
   },
@@ -2614,18 +2651,23 @@
     "body_size": 31,
     "citations": [
       [
+        "td5_track.c",
+        2
+      ],
+      [
         "td5_render.h",
         2
       ]
     ],
-    "total_citations": 2,
+    "total_citations": 4,
     "files_cited": [
-      "td5_render.h"
+      "td5_render.h",
+      "td5_track.c"
     ],
-    "precision_strong": 0,
+    "precision_strong": 2,
     "precision_weak": 0,
-    "sample_context": "[td5_render.h] rsForView |  *   0x40C7E0  BuildSpecialActorOverlayQuads |  *   0x40B9F0  GetTextureSlotStatus |  *   0x40BA10  AdvanceTexturePageUsageAges |  *   0x40BA60  ResetTextur",
-    "level": 4,
+    "sample_context": "[td5_track.c] dge. UVs are passed through as-is.] |  * |  * 2. Per-mesh-batch GetTextureSlotStatus primitive-type tag |  *    Orig calls GetTextureSlotStatus(mesh->texture_page_id)",
+    "level": 5,
     "is_auto_named": false,
     "is_crt": false
   },
@@ -4026,14 +4068,14 @@
       ],
       [
         "td5_game.c",
-        2
+        3
       ],
       [
         "td5_game.h",
         2
       ]
     ],
-    "total_citations": 15,
+    "total_citations": 16,
     "files_cited": [
       "td5_frontend.c",
       "td5_game.c",
@@ -4074,27 +4116,27 @@
     "citations": [
       [
         "td5_frontend.c",
-        2
+        3
       ],
       [
         "td5_game.c",
-        2
+        3
       ],
       [
         "td5_game.h",
         2
       ]
     ],
-    "total_citations": 6,
+    "total_citations": 8,
     "files_cited": [
       "td5_frontend.c",
       "td5_game.c",
       "td5_game.h"
     ],
-    "precision_strong": 0,
+    "precision_strong": 2,
     "precision_weak": 0,
-    "sample_context": "[td5_frontend.c] ================================ |  * RunFrontendDisplayLoop (0x414B50) |  * |  * Called each frame while game_state == MENU. |  * Returns: 0 = continue, 1 = start race",
-    "level": 4,
+    "sample_context": "[td5_frontend.c] d a handful of cosmetic re-orderings. Orig is 996 bytes |  * (0x00414B50..0x00414F34). |  * |  *   Step-by-step mapping (orig decomp -> port): |  *     - Surface-lost t",
+    "level": 5,
     "is_auto_named": false,
     "is_crt": false
   },
@@ -5315,13 +5357,20 @@
     "address": "00424b80",
     "name": "BlitFrontendCachedRect",
     "body_size": 63,
-    "citations": [],
-    "total_citations": 0,
-    "files_cited": [],
-    "precision_strong": 0,
+    "citations": [
+      [
+        "td5_frontend.c",
+        2
+      ]
+    ],
+    "total_citations": 2,
+    "files_cited": [
+      "td5_frontend.c"
+    ],
+    "precision_strong": 1,
     "precision_weak": 0,
-    "sample_context": "",
-    "level": 3,
+    "sample_context": "[td5_frontend.c] then |  *       blit-restores the 640x480 cached backdrop via BlitFrontendCachedRect. |  *       Port: frontend_recover_surfaces() (td5_frontend.c) -- same |  *",
+    "level": 5,
     "is_auto_named": false,
     "is_crt": false
   },
@@ -5483,13 +5532,20 @@
     "address": "00425360",
     "name": "PresentFrontendBufferSoftware",
     "body_size": 367,
-    "citations": [],
-    "total_citations": 0,
-    "files_cited": [],
-    "precision_strong": 0,
+    "citations": [
+      [
+        "td5_frontend.c",
+        1
+      ]
+    ],
+    "total_citations": 1,
+    "files_cited": [
+      "td5_frontend.c"
+    ],
+    "precision_strong": 1,
     "precision_weak": 0,
-    "sample_context": "",
-    "level": 3,
+    "sample_context": "[td5_frontend.c] ty SNK_ScreenDump primer), OR |  *         (b) software 16bpp PresentFrontendBufferSoftware. |  *       Port collapses both branches to td5_plat_present(1) -- D3D11",
+    "level": 5,
     "is_auto_named": false,
     "is_crt": false
   },
@@ -5525,13 +5581,20 @@
     "address": "00425540",
     "name": "FlushFrontendSpriteBlits",
     "body_size": 277,
-    "citations": [],
-    "total_citations": 0,
-    "files_cited": [],
+    "citations": [
+      [
+        "td5_frontend.c",
+        1
+      ]
+    ],
+    "total_citations": 1,
+    "files_cited": [
+      "td5_frontend.c"
+    ],
     "precision_strong": 0,
     "precision_weak": 0,
-    "sample_context": "",
-    "level": 3,
+    "sample_context": "[td5_frontend.c] h @ 0x00414C5F: orig calls RenderFrontendUiRects + |  *       FlushFrontendSpriteBlits, then either |  *         (a) DXDraw::Flip(1) + an immediate Lock/Unlock of t",
+    "level": 4,
     "is_auto_named": false,
     "is_crt": false
   },
@@ -5542,10 +5605,10 @@
     "citations": [
       [
         "td5_frontend.c",
-        7
+        8
       ]
     ],
-    "total_citations": 7,
+    "total_citations": 8,
     "files_cited": [
       "td5_frontend.c"
     ],
@@ -5679,13 +5742,20 @@
     "address": "00425a30",
     "name": "RenderFrontendUiRects",
     "body_size": 293,
-    "citations": [],
-    "total_citations": 0,
-    "files_cited": [],
+    "citations": [
+      [
+        "td5_frontend.c",
+        2
+      ]
+    ],
+    "total_citations": 2,
+    "files_cited": [
+      "td5_frontend.c"
+    ],
     "precision_strong": 0,
     "precision_weak": 0,
-    "sample_context": "",
-    "level": 3,
+    "sample_context": "[td5_frontend.c] quad at the same texture page. Order matches |  *       orig RenderFrontendUiRects + Flush ordering. |  *     - Submission flush @ 0x00414C5F: orig calls RenderFro",
+    "level": 4,
     "is_auto_named": false,
     "is_crt": false
   },
@@ -5860,10 +5930,10 @@
     "citations": [
       [
         "td5_frontend.c",
-        6
+        7
       ]
     ],
-    "total_citations": 6,
+    "total_citations": 7,
     "files_cited": [
       "td5_frontend.c"
     ],
@@ -6042,22 +6112,22 @@
     "citations": [
       [
         "td5_hud.c",
-        4
+        6
       ],
       [
         "td5_hud.h",
         2
       ]
     ],
-    "total_citations": 6,
+    "total_citations": 8,
     "files_cited": [
       "td5_hud.c",
       "td5_hud.h"
     ],
-    "precision_strong": 0,
+    "precision_strong": 2,
     "precision_weak": 0,
     "sample_context": "[td5_hud.c] yLayout |  *   0x428240  InitializeRaceHudFontGlyphAtlas |  *   0x428320  QueueRaceHudFormattedText |  *   0x428570  FlushQueuedRaceHudText |  */ |  | #include \"td5_hud.h\" |",
-    "level": 4,
+    "level": 5,
     "is_auto_named": false,
     "is_crt": false
   },
@@ -6068,14 +6138,14 @@
     "citations": [
       [
         "td5_hud.c",
-        4
+        5
       ],
       [
         "td5_hud.h",
         2
       ]
     ],
-    "total_citations": 6,
+    "total_citations": 7,
     "files_cited": [
       "td5_hud.c",
       "td5_hud.h"
@@ -6093,6 +6163,10 @@
     "body_size": 719,
     "citations": [
       [
+        "td5_game.c",
+        6
+      ],
+      [
         "td5_input.c",
         2
       ],
@@ -6101,15 +6175,16 @@
         2
       ]
     ],
-    "total_citations": 4,
+    "total_citations": 10,
     "files_cited": [
+      "td5_game.c",
       "td5_input.c",
       "td5_input.h"
     ],
-    "precision_strong": 0,
+    "precision_strong": 3,
     "precision_weak": 0,
-    "sample_context": "[td5_input.c] (primary joystick). |      * CreateRaceForceFeedbackEffects (0x4285B0) creates 4 effect slots: |      *   Slot 0: Constant force -- steering resistance |      *   Sl",
-    "level": 4,
+    "sample_context": "[td5_game.c] lot on the DX::FF singleton). |  *         [ARCH-DIVERGENCE @ 0x004285B0 CreateRaceForceFeedbackEffects] |  *         Orig is 719 bytes of DirectInput 5/7 effect cr",
+    "level": 5,
     "is_auto_named": false,
     "is_crt": false
   },
@@ -6492,22 +6567,22 @@
     "citations": [
       [
         "td5_game.c",
-        1
+        8
       ],
       [
         "td5_game.h",
         1
       ]
     ],
-    "total_citations": 2,
+    "total_citations": 9,
     "files_cited": [
       "td5_game.c",
       "td5_game.h"
     ],
-    "precision_strong": 0,
+    "precision_strong": 3,
     "precision_weak": 0,
-    "sample_context": "[td5_game.c] -- DONE (td5_game_show_legal_screens) |  * 0x442160  InitializeRaceVideoConfiguration   -- DONE (in td5_game_init) |  * 0x414740  InitializeFrontendResourc",
-    "level": 4,
+    "sample_context": "[td5_game.c] alizeRaceVideoConfiguration   -- ARCH-DIVERGENCE (thunk JMP 0x0042a950; |  *                                                 body collapsed into td5_render_init +",
+    "level": 5,
     "is_auto_named": false,
     "is_crt": false
   },
@@ -6534,7 +6609,7 @@
       ],
       [
         "td5_game.c",
-        34
+        35
       ],
       [
         "td5_physics.c",
@@ -6557,7 +6632,7 @@
         3
       ]
     ],
-    "total_citations": 48,
+    "total_citations": 49,
     "files_cited": [
       "main.c",
       "td5_ai.c",
@@ -6570,7 +6645,7 @@
       "td5_track.c",
       "td5re.h"
     ],
-    "precision_strong": 9,
+    "precision_strong": 12,
     "precision_weak": 0,
     "sample_context": "[main.c] patch, |      * matching the original attract-mode autopilot (InitializeRaceSession |      * 0x0042ACCF writes slot[0].state = 1 - g_attractModeDemoActive). */ |",
     "level": 5,
@@ -6588,11 +6663,11 @@
       ],
       [
         "td5_game.c",
-        30
+        31
       ],
       [
         "td5_hud.c",
-        2
+        3
       ],
       [
         "td5_input.c",
@@ -6631,7 +6706,7 @@
         1
       ]
     ],
-    "total_citations": 56,
+    "total_citations": 58,
     "files_cited": [
       "td5_camera.c",
       "td5_camera.h",
@@ -6646,7 +6721,7 @@
       "td5_trace.h",
       "td5_track.c"
     ],
-    "precision_strong": 10,
+    "precision_strong": 11,
     "precision_weak": 0,
     "sample_context": "[td5_camera.c] ,1) |    at the top of the sim-tick loop inside RunRaceFrame (0x0042B580). |    The cached angles become the \"previous-frame\" state that |    UpdateVehicleRelativeCam",
     "level": 5,
@@ -6660,7 +6735,7 @@
     "citations": [
       [
         "td5_game.c",
-        5
+        8
       ],
       [
         "td5_render.c",
@@ -6671,15 +6746,15 @@
         2
       ]
     ],
-    "total_citations": 9,
+    "total_citations": 12,
     "files_cited": [
       "td5_game.c",
       "td5_game.h",
       "td5_render.c"
     ],
-    "precision_strong": 2,
+    "precision_strong": 5,
     "precision_weak": 0,
-    "sample_context": "[td5_game.c] playLoop             -- DONE (delegates to td5_frontend) |  * 0x42C2B0  InitializeRaceViewportLayout       -- DONE (td5_game_init_viewport_layout) |  * 0x430CB0  Re",
+    "sample_context": "[td5_game.c] d5d0 (= 0.5). |  *     9) Call InitializeRaceViewportLayout @ 0x0042C2B0. |  *     10) Call LoadStaticTrackTextureHeader. |  *         [ARCH-DIVERGENCE @ 0x00442560 L",
     "level": 5,
     "is_auto_named": false,
     "is_crt": false
@@ -6738,11 +6813,11 @@
     "citations": [
       [
         "td5_fmv.c",
-        4
+        5
       ],
       [
         "td5_game.c",
-        4
+        5
       ],
       [
         "td5_fmv.h",
@@ -6753,17 +6828,17 @@
         2
       ]
     ],
-    "total_citations": 14,
+    "total_citations": 16,
     "files_cited": [
       "td5_fmv.c",
       "td5_fmv.h",
       "td5_game.c",
       "td5_game.h"
     ],
-    "precision_strong": 0,
+    "precision_strong": 2,
     "precision_weak": 0,
-    "sample_context": "[td5_fmv.c] during playback |  *     - Sleeps 30ms per iteration |  * |  *   0x42C8E0  ShowLegalScreens |  *     - Loads legal1.tga, legal2.tga from LEGALS.ZIP |  *     - Displays e",
-    "level": 4,
+    "sample_context": "[td5_fmv.c] ion sweep audit 2026-05-18 \u2014 ARCH-DIVERGENCE] |  *   Original 0x0042C8E0 decompile compared line-by-line. Two-screen flow |  *   (5000ms display, 400ms grace, then",
+    "level": 5,
     "is_auto_named": false,
     "is_crt": false
   },
@@ -6771,13 +6846,20 @@
     "address": "0042ca00",
     "name": "DisplayLoadingScreenImage",
     "body_size": 466,
-    "citations": [],
-    "total_citations": 0,
-    "files_cited": [],
+    "citations": [
+      [
+        "td5_fmv.c",
+        1
+      ]
+    ],
+    "total_citations": 1,
+    "files_cited": [
+      "td5_fmv.c"
+    ],
     "precision_strong": 0,
     "precision_weak": 0,
-    "sample_context": "",
-    "level": 3,
+    "sample_context": "[td5_fmv.c] D5RE's PNG asset workflow). |  *     2. Decode path: original DisplayLoadingScreenImage decodes 8/16/24 |  *        TGA via DXDraw::dd front/render surface format.",
+    "level": 4,
     "is_auto_named": false,
     "is_crt": false
   },
@@ -6788,22 +6870,22 @@
     "citations": [
       [
         "td5_game.c",
-        4
+        10
       ],
       [
         "td5_game.h",
         2
       ]
     ],
-    "total_citations": 6,
+    "total_citations": 12,
     "files_cited": [
       "td5_game.c",
       "td5_game.h"
     ],
-    "precision_strong": 0,
+    "precision_strong": 4,
     "precision_weak": 0,
-    "sample_context": "[td5_game.c] eOutTransition         -- DONE (td5_game_begin_fade_out) |  * 0x42CBE0  IsLocalRaceParticipantSlot         -- DONE (td5_game_is_local_participant) |  * 0x42CCD0  St",
-    "level": 4,
+    "sample_context": "[td5_game.c] same one-shot destroy). |  * |  * IsLocalRaceParticipantSlot @ 0x0042cbe0 [L5 \u2014 byte-faithful] |  *   Three-branch dispatch matched exactly: network -> dpu[0xBCC+slo",
+    "level": 5,
     "is_auto_named": false,
     "is_crt": false
   },
@@ -6814,22 +6896,22 @@
     "citations": [
       [
         "td5_game.c",
-        5
+        11
       ],
       [
         "td5_game.h",
         2
       ]
     ],
-    "total_citations": 7,
+    "total_citations": 13,
     "files_cited": [
       "td5_game.c",
       "td5_game.h"
     ],
-    "precision_strong": 0,
+    "precision_strong": 4,
     "precision_weak": 0,
-    "sample_context": "[td5_game.c] intTimersByDifficulty -- DONE (adjust_checkpoint_timers) |  * 0x42CC20  BeginRaceFadeOutTransition         -- DONE (td5_game_begin_fade_out) |  * 0x42CBE0  IsLocalR",
-    "level": 4,
+    "sample_context": "[td5_game.c] ented for completeness). |  * |  * BeginRaceFadeOutTransition @ 0x0042cc20 [ARCH-DIVERGENCE] |  *   See detailed audit comment at td5_game_begin_fade_out(). Port |  *",
+    "level": 5,
     "is_auto_named": false,
     "is_crt": false
   },
@@ -6848,21 +6930,21 @@
       ],
       [
         "td5_track.c",
-        2
+        5
       ],
       [
         "td5_game.h",
         2
       ]
     ],
-    "total_citations": 12,
+    "total_citations": 15,
     "files_cited": [
       "td5_game.c",
       "td5_game.h",
       "td5_physics.c",
       "td5_track.c"
     ],
-    "precision_strong": 3,
+    "precision_strong": 7,
     "precision_weak": 0,
     "sample_context": "[td5_game.c] pantSlot         -- DONE (td5_game_is_local_participant) |  * 0x42CCD0  StoreRoundedVector3Ints            -- DONE (td5_game_store_rounded_vec3) |  * ==============",
     "level": 5,
@@ -6897,18 +6979,18 @@
     "citations": [
       [
         "td5_physics.c",
-        1
+        4
       ],
       [
         "td5_render.c",
-        3
+        6
       ],
       [
         "td5_track.c",
         5
       ]
     ],
-    "total_citations": 9,
+    "total_citations": 15,
     "files_cited": [
       "td5_physics.c",
       "td5_render.c",
@@ -6916,7 +6998,7 @@
     ],
     "precision_strong": 4,
     "precision_weak": 0,
-    "sample_context": "[td5_physics.c] s |  * a normalized tangent vector from two span vertices via ConvertFloatVec4ToShortAngles |  * (x87 FPU normalization), then computes: |  *   pen = (world_offset .",
+    "sample_context": "[td5_physics.c] to length |  *      4096 via ConvertFloatVec4ToShortAngles @ 0x0042CDB0 (FPU |  *      x\u00b2+y\u00b2+z\u00b2\u2192FSQRT\u21924096/len\u2192FMUL\u2192ftol). It then computes |  *      `pen = ((world",
     "level": 5,
     "is_auto_named": false,
     "is_crt": false
@@ -6928,22 +7010,22 @@
     "citations": [
       [
         "td5_camera.c",
-        14
+        15
       ],
       [
         "td5_camera.h",
         4
       ]
     ],
-    "total_citations": 18,
+    "total_citations": 19,
     "files_cited": [
       "td5_camera.c",
       "td5_camera.h"
     ],
-    "precision_strong": 0,
+    "precision_strong": 1,
     "precision_weak": 0,
     "sample_context": "[td5_camera.c] ======================================================== |  * 0x42CE50 -- SetCameraWorldPosition |  * |  * Converts integer world-space position to float and stores i",
-    "level": 4,
+    "level": 5,
     "is_auto_named": false,
     "is_crt": false
   },
@@ -6954,27 +7036,27 @@
     "citations": [
       [
         "td5_render.c",
-        4
+        10
       ],
       [
         "td5_track.c",
-        3
+        5
       ],
       [
         "td5_track.h",
         2
       ]
     ],
-    "total_citations": 9,
+    "total_citations": 17,
     "files_cited": [
       "td5_render.c",
       "td5_track.c",
       "td5_track.h"
     ],
-    "precision_strong": 0,
+    "precision_strong": 2,
     "precision_weak": 0,
     "sample_context": "[td5_render.c] = (r + g + b) / 3; | } |  | /* UpdateActiveTrackLightDirections @ 0x0042CE90: |  *   For each slot, transform its world-frame contribution into body frame |  *   via M^T",
-    "level": 4,
+    "level": 5,
     "is_auto_named": false,
     "is_crt": false
   },
@@ -6985,7 +7067,7 @@
     "citations": [
       [
         "td5_camera.c",
-        7
+        8
       ],
       [
         "td5_render.c",
@@ -6996,16 +7078,16 @@
         4
       ]
     ],
-    "total_citations": 12,
+    "total_citations": 13,
     "files_cited": [
       "td5_camera.c",
       "td5_camera.h",
       "td5_render.c"
     ],
-    "precision_strong": 0,
+    "precision_strong": 2,
     "precision_weak": 0,
     "sample_context": "[td5_camera.c] ======================================================== |  * 0x42D0B0 -- BuildCameraBasisFromAngles |  * |  * Builds THREE independent rotation matrices from Euler a",
-    "level": 4,
+    "level": 5,
     "is_auto_named": false,
     "is_crt": false
   },
@@ -7288,22 +7370,22 @@
     "citations": [
       [
         "td5_render.c",
-        4
+        16
       ],
       [
         "td5_track.c",
         2
       ]
     ],
-    "total_citations": 6,
+    "total_citations": 18,
     "files_cited": [
       "td5_render.c",
       "td5_track.c"
     ],
-    "precision_strong": 0,
+    "precision_strong": 5,
     "precision_weak": 0,
     "sample_context": "[td5_render.c] teAverageDepth) */ |  | /* SetTrackLightDirectionContribution @ 0x0042E130: |  *   intensity = avg(R,G,B); contribution_world = dir * intensity * (1/1024). |  *   All-z",
-    "level": 4,
+    "level": 5,
     "is_auto_named": false,
     "is_crt": false
   },
@@ -7509,13 +7591,20 @@
     "address": "0042e9d0",
     "name": "QueryRaceSharedPointer",
     "body_size": 133,
-    "citations": [],
-    "total_citations": 0,
-    "files_cited": [],
-    "precision_strong": 0,
+    "citations": [
+      [
+        "td5_game.c",
+        2
+      ]
+    ],
+    "total_citations": 2,
+    "files_cited": [
+      "td5_game.c"
+    ],
+    "precision_strong": 1,
     "precision_weak": 0,
-    "sample_context": "",
-    "level": 3,
+    "sample_context": "[td5_game.c] ll InitializeRaceRenderGlobals @ 0x0040AE10. |  *     3) Call QueryRaceSharedPointer(4, &g_vehicleProjectionEffectMode, 4). |  *     4) Set _g_raceRenderInitialized",
+    "level": 5,
     "is_auto_named": false,
     "is_crt": false
   },
@@ -7969,24 +8058,24 @@
       ],
       [
         "td5_track.c",
-        4
+        6
       ],
       [
         "td5_track.h",
         2
       ]
     ],
-    "total_citations": 9,
+    "total_citations": 11,
     "files_cited": [
       "td5_asset.c",
       "td5_render.c",
       "td5_track.c",
       "td5_track.h"
     ],
-    "precision_strong": 0,
+    "precision_strong": 3,
     "precision_weak": 0,
     "sample_context": "[td5_asset.c] ), i.e. the same index |      * LoadTrackTextureSet passes to InitializeTrackStripMetadata. |      */ |     int loaded = 0; |     const TD5_EnvironsTrack *t; |  |     if (l",
-    "level": 4,
+    "level": 5,
     "is_auto_named": false,
     "is_crt": false
   },
@@ -7997,22 +8086,22 @@
     "citations": [
       [
         "td5_track.c",
-        3
+        8
       ],
       [
         "td5_track.h",
         2
       ]
     ],
-    "total_citations": 5,
+    "total_citations": 10,
     "files_cited": [
       "td5_track.c",
       "td5_track.h"
     ],
-    "precision_strong": 0,
+    "precision_strong": 6,
     "precision_weak": 0,
-    "sample_context": "[td5_track.c] * 0x42FAD0  InitializeTrackStripMetadata        -- DONE |  * 0x42FB40  ApplyTrackStripAttributeOverrides   -- DONE |  * 0x4440F0  UpdateActorTrackPosition",
-    "level": 4,
+    "sample_context": "[td5_track.c] === |  * Strip Attribute Overrides (0x42FB40) |  * [CONFIRMED @ 0x0042FB40] L5 promotion sweep audit (2026-05-18). Byte-faithful |  *   port of orig fill loop: iterat",
+    "level": 5,
     "is_auto_named": false,
     "is_crt": false
   },
@@ -8050,7 +8139,7 @@
       "td5_track.c",
       "td5_track.h"
     ],
-    "precision_strong": 6,
+    "precision_strong": 9,
     "precision_weak": 0,
     "sample_context": "[td5_asset.c] inter table avoids. Port mirrors that here. |  * [CONFIRMED @ 0x0042FB90 LoadTrackRuntimeData selector] |  */ | static const char *s_strip_fwd[1]   = { \"STRIP.DAT\"",
     "level": 5,
@@ -8132,7 +8221,7 @@
     "citations": [
       [
         "td5_render.c",
-        12
+        15
       ],
       [
         "td5_track.c",
@@ -8147,17 +8236,17 @@
         3
       ]
     ],
-    "total_citations": 23,
+    "total_citations": 26,
     "files_cited": [
       "td5_render.c",
       "td5_render.h",
       "td5_track.c",
       "td5_track.h"
     ],
-    "precision_strong": 0,
+    "precision_strong": 5,
     "precision_weak": 0,
     "sample_context": "[td5_render.c] 7 in the original. |  * ApplyTrackLightingForVehicleSegment @ 0x00430150 walks the per-track zone |  * array forward/backward each frame based on the actor's track_",
-    "level": 4,
+    "level": 5,
     "is_auto_named": false,
     "is_crt": false
   },
@@ -8168,22 +8257,22 @@
     "citations": [
       [
         "td5_game.c",
-        4
+        10
       ],
       [
         "td5_game.h",
         3
       ]
     ],
-    "total_citations": 7,
+    "total_citations": 13,
     "files_cited": [
       "td5_game.c",
       "td5_game.h"
     ],
-    "precision_strong": 0,
+    "precision_strong": 3,
     "precision_weak": 0,
-    "sample_context": "[td5_game.c] -- N/A (CRT, not reimplemented) |  * 0x430A90  GameWinMain                        -- DONE (td5_game_init/tick/shutdown) |  * 0x442170  RunM",
-    "level": 4,
+    "sample_context": "[td5_game.c] weep audit 2026-05-18 \u2014 ARCH-DIVERGENCE] |  *   GameWinMain @ 0x00430A90 (orig WinMain bootstrap) is decomposed in |  *   the source port across three locations: |  *",
+    "level": 5,
     "is_auto_named": false,
     "is_crt": false
   },
@@ -8194,6 +8283,10 @@
     "citations": [
       [
         "td5_game.c",
+        6
+      ],
+      [
+        "td5_platform_win32.c",
         3
       ],
       [
@@ -8201,15 +8294,16 @@
         2
       ]
     ],
-    "total_citations": 5,
+    "total_citations": 11,
     "files_cited": [
       "td5_game.c",
-      "td5_game.h"
+      "td5_game.h",
+      "td5_platform_win32.c"
     ],
-    "precision_strong": 0,
+    "precision_strong": 5,
     "precision_weak": 0,
-    "sample_context": "[td5_game.c] portLayout       -- DONE (td5_game_init_viewport_layout) |  * 0x430CB0  ResetGameHeap                      -- DONE (delegates to td5_plat_heap_reset) |  * 0x40A2B0",
-    "level": 4,
+    "sample_context": "[td5_game.c] atter. Documented divergence; not L4. |  * |  * ResetGameHeap @ 0x00430cb0 [ARCH-DIVERGENCE] |  *   Orig: HeapDestroy gGameHeapHandle (gated on first-call sentinel |  *",
+    "level": 5,
     "is_auto_named": false,
     "is_crt": false
   },
@@ -8281,23 +8375,23 @@
       ],
       [
         "td5_track.c",
-        5
+        7
       ],
       [
         "td5_track.h",
         2
       ]
     ],
-    "total_citations": 8,
+    "total_citations": 10,
     "files_cited": [
       "td5_render.c",
       "td5_track.c",
       "td5_track.h"
     ],
-    "precision_strong": 0,
+    "precision_strong": 4,
     "precision_weak": 0,
     "sample_context": "[td5_render.c] *   [1..N] = pointers to MeshResourceHeader (relocated by ParseModelsDat) |      */ |     static int s_debug_reject_ptr = 0; |     static int s_debug_reject_counts",
-    "level": 4,
+    "level": 5,
     "is_auto_named": false,
     "is_crt": false
   },
@@ -8308,22 +8402,22 @@
     "citations": [
       [
         "td5_track.c",
-        7
+        9
       ],
       [
         "td5_track.h",
         2
       ]
     ],
-    "total_citations": 9,
+    "total_citations": 11,
     "files_cited": [
       "td5_track.c",
       "td5_track.h"
     ],
-    "precision_strong": 0,
+    "precision_strong": 4,
     "precision_weak": 0,
-    "sample_context": "[td5_track.c] * 0x42CE90  UpdateActiveTrackLightDirections    -- DONE |  * 0x431260  GetTrackSpanDisplayListEntry        -- DONE |  * 0x431190  ParseModelsDat",
-    "level": 4,
+    "sample_context": "[td5_track.c] render command buffer) for a span. |  * |  * [ARCH-DIVERGENCE @ 0x00431260] Orig is a 13-byte direct LUT lookup: |  *   return *(uint*)(gModelsDatEntryTable + idx*8).",
+    "level": 5,
     "is_auto_named": false,
     "is_crt": false
   },
@@ -8468,18 +8562,23 @@
     "body_size": 213,
     "citations": [
       [
+        "td5_hud.c",
+        3
+      ],
+      [
         "td5_render.h",
         1
       ]
     ],
-    "total_citations": 1,
+    "total_citations": 4,
     "files_cited": [
+      "td5_hud.c",
       "td5_render.h"
     ],
-    "precision_strong": 0,
+    "precision_strong": 4,
     "precision_weak": 0,
-    "sample_context": "[td5_render.h] arams */ | void td5_render_build_sprite_quad(int *params); | /* 0x4315B0: Submit immediate translucent primitive */ | void td5_render_submit_translucent(uint16_t *qua",
-    "level": 4,
+    "sample_context": "[td5_hud.c] submit_quad replace BuildSpriteQuad |  *           Template / SubmitImmediateTranslucentPrimitive. |  *           [CONFIRMED @ orig 0x00438A40-0x00438C40 vs td5_hud",
+    "level": 5,
     "is_auto_named": false,
     "is_crt": false
   },
@@ -8728,7 +8827,7 @@
       ],
       [
         "td5_hud.c",
-        6
+        7
       ],
       [
         "td5_render.c",
@@ -8743,7 +8842,7 @@
         1
       ]
     ],
-    "total_citations": 14,
+    "total_citations": 15,
     "files_cited": [
       "td5_asset.c",
       "td5_hud.c",
@@ -8751,7 +8850,7 @@
       "td5_render.h",
       "td5_vfx.c"
     ],
-    "precision_strong": 1,
+    "precision_strong": 2,
     "precision_weak": 0,
     "sample_context": "[td5_asset.c] plying by 1/256 for BOTH axes |  * (BuildSpriteQuadTemplate @ 0x432BD0, constant [0x4749D0] = 0.00390625). |  * A 256\u00d7512 page would require V normalization by 1/51",
     "level": 5,
@@ -8909,17 +9008,17 @@
     "citations": [
       [
         "td5_ai.c",
-        3
+        5
       ]
     ],
-    "total_citations": 3,
+    "total_citations": 5,
     "files_cited": [
       "td5_ai.c"
     ],
-    "precision_strong": 0,
+    "precision_strong": 1,
     "precision_weak": 0,
     "sample_context": "[td5_ai.c] } |  |         /* Step 5: RenderTrackSegmentNearActor @ 0x00433CE0 writes RS[0x37] |          * and RS[0x38], neither of which is consumed elsewhere in the po",
-    "level": 4,
+    "level": 5,
     "is_auto_named": false,
     "is_crt": false
   },
@@ -8930,22 +9029,22 @@
     "citations": [
       [
         "td5_ai.c",
-        5
+        9
       ],
       [
         "td5_track.c",
-        2
+        4
       ]
     ],
-    "total_citations": 7,
+    "total_citations": 13,
     "files_cited": [
       "td5_ai.c",
       "td5_track.c"
     ],
-    "precision_strong": 0,
-    "precision_weak": 0,
-    "sample_context": "[td5_ai.c] ng from strip vertex deltas (case 1-7) |  *            * Call AngleFromVector12Full; store (angle+0x800)*0x100 to +0x1f4 |  *            * If polarity flag, add 0x8",
-    "level": 4,
+    "precision_strong": 7,
+    "precision_weak": 1,
+    "sample_context": "[td5_ai.c] ============================= */ |  | /* AngleFromVector12Full (0x00433FC0). L5 promotion sweep audit (2026-05-18). |  * [ARCH-DIVERGENCE @ 0x00433FC0] Orig calls Ang",
+    "level": 5,
     "is_auto_named": false,
     "is_crt": false
   },
@@ -9535,7 +9634,7 @@
     "citations": [
       [
         "td5_ai.c",
-        14
+        17
       ],
       [
         "td5_game.c",
@@ -9543,7 +9642,7 @@
       ],
       [
         "td5_physics.c",
-        3
+        5
       ],
       [
         "td5_track.c",
@@ -9554,7 +9653,7 @@
         2
       ]
     ],
-    "total_citations": 21,
+    "total_citations": 26,
     "files_cited": [
       "td5_ai.c",
       "td5_ai.h",
@@ -9562,9 +9661,9 @@
       "td5_physics.c",
       "td5_track.c"
     ],
-    "precision_strong": 7,
+    "precision_strong": 6,
     "precision_weak": 0,
-    "sample_context": "[td5_ai.c] ng on peer |  * |  * [precise-00435E80] Byte-faithful port from 0x00435E80 disassembly listing. |  * |  * [CONFIRMED @ 0x00435E80] L5 promotion sweep audit (2026-05-18)",
+    "sample_context": "[td5_ai.c] eturns hits only inside |          * UpdateTrafficRoutePlan @ 0x00435E80, where EBX holds an ACTOR base |          * (stride 0x388), NOT the RS-table \u2014 reading acto",
     "level": 5,
     "is_auto_named": false,
     "is_crt": false
@@ -9628,7 +9727,7 @@
     "citations": [
       [
         "td5_ai.c",
-        27
+        31
       ],
       [
         "td5_camera.c",
@@ -9671,7 +9770,7 @@
         5
       ]
     ],
-    "total_citations": 82,
+    "total_citations": 86,
     "files_cited": [
       "td5_ai.c",
       "td5_ai.h",
@@ -9685,7 +9784,7 @@
       "td5_track.h",
       "td5re.h"
     ],
-    "precision_strong": 12,
+    "precision_strong": 13,
     "precision_weak": 2,
     "sample_context": "[td5_ai.c] bias-clamp/boundary chain ported from |  * UpdateRaceActors @ 0x00436A70. Gated behind g_td5.ini.experimental_bias_clamp. */ | static void td5_ai_update_actor_track",
     "level": 5,
@@ -9791,23 +9890,23 @@
       ],
       [
         "td5_hud.c",
-        7
+        8
       ],
       [
         "td5_hud.h",
         2
       ]
     ],
-    "total_citations": 10,
+    "total_citations": 11,
     "files_cited": [
       "td5_game.c",
       "td5_hud.c",
       "td5_hud.h"
     ],
-    "precision_strong": 0,
+    "precision_strong": 3,
     "precision_weak": 0,
     "sample_context": "[td5_game.c] the runtime gate read by both the HUD timer |      * widget (RenderRaceHudOverlays @ 0x004391CC) and the per-actor timer |      * decrement (AdvancePendingFinishSt",
-    "level": 4,
+    "level": 5,
     "is_auto_named": false,
     "is_crt": false
   },
@@ -9818,22 +9917,22 @@
     "citations": [
       [
         "td5_hud.c",
-        9
+        10
       ],
       [
         "td5_hud.h",
         2
       ]
     ],
-    "total_citations": 11,
+    "total_citations": 12,
     "files_cited": [
       "td5_hud.c",
       "td5_hud.h"
     ],
-    "precision_strong": 0,
+    "precision_strong": 1,
     "precision_weak": 0,
     "sample_context": "[td5_hud.c] slot, lap_index); | } |  | /* Original BuildRaceHudMetricDigits @ 0x004397b0 case 0: |  *   gHudMetricValue = (uint)(*(ushort *)(actor + 0x344) >> 8); |  * actor+0x344 is",
-    "level": 4,
+    "level": 5,
     "is_auto_named": false,
     "is_crt": false
   },
@@ -9843,6 +9942,10 @@
     "body_size": 15,
     "citations": [
       [
+        "td5_game.c",
+        6
+      ],
+      [
         "td5_hud.c",
         4
       ],
@@ -9851,15 +9954,16 @@
         2
       ]
     ],
-    "total_citations": 6,
+    "total_citations": 12,
     "files_cited": [
+      "td5_game.c",
       "td5_hud.c",
       "td5_hud.h"
     ],
-    "precision_strong": 0,
+    "precision_strong": 2,
     "precision_weak": 0,
-    "sample_context": "[td5_hud.c] aceHudOverlays |  *   0x4397B0  BuildRaceHudMetricDigits |  *   0x439B60  SetRaceHudIndicatorState |  *   0x439B70  DrawRaceStatusText |  *   0x43A220  RenderTrackMinim",
-    "level": 4,
+    "sample_context": "[td5_game.c] 37 lines decompiled at 0x0040a490): |  *    1) if timer == 0: SetRaceHudIndicatorState(0,0); SetRaceHudIndicatorState(1,0); return |  *    2) elif timer < 0x101: ti",
+    "level": 5,
     "is_auto_named": false,
     "is_crt": false
   },
@@ -9895,17 +9999,22 @@
     "body_size": 928,
     "citations": [
       [
+        "td5_hud.c",
+        1
+      ],
+      [
         "td5_render.h",
         1
       ]
     ],
-    "total_citations": 1,
+    "total_citations": 2,
     "files_cited": [
+      "td5_hud.c",
       "td5_render.h"
     ],
     "precision_strong": 0,
     "precision_weak": 0,
-    "sample_context": "[td5_render.h] _rect(float left, float right, float top, float bottom); | /* 0x439E60: Render radial pulse overlay effect */ | void td5_render_radial_pulse(float dt); |  | /* --- Rend",
+    "sample_context": "[td5_hud.c] er_cy); |  *           FlushQueuedRaceHudText(); |  *           RenderHudRadialPulseOverlay(param_1); |  *           if (split_screen_mode) submit divider at DAT_004B",
     "level": 4,
     "is_auto_named": false,
     "is_crt": false
@@ -9914,13 +10023,20 @@
     "address": "0043a210",
     "name": "ResetHudRadialPulseOverlay",
     "body_size": 10,
-    "citations": [],
-    "total_citations": 0,
-    "files_cited": [],
-    "precision_strong": 0,
+    "citations": [
+      [
+        "td5_game.c",
+        1
+      ]
+    ],
+    "total_citations": 1,
+    "files_cited": [
+      "td5_game.c"
+    ],
+    "precision_strong": 1,
     "precision_weak": 0,
-    "sample_context": "",
-    "level": 3,
+    "sample_context": "[td5_game.c] == 0 && !network && game_type == 0 && !drag): |  *     calls ResetHudRadialPulseOverlay; sets g_raceEndRadialPulseEnabled=1. |  *   - Always sets g_raceEndFadeStat",
+    "level": 5,
     "is_auto_named": false,
     "is_crt": false
   },
@@ -9931,19 +10047,19 @@
     "citations": [
       [
         "td5_hud.c",
-        8
+        9
       ],
       [
         "td5_hud.h",
         2
       ]
     ],
-    "total_citations": 10,
+    "total_citations": 11,
     "files_cited": [
       "td5_hud.c",
       "td5_hud.h"
     ],
-    "precision_strong": 2,
+    "precision_strong": 3,
     "precision_weak": 0,
     "sample_context": "[td5_hud.c] 0x0c, +0x14) are added before rotation. |      * [CONFIRMED @ 0x0043a220 decomp + memory_read @ 0x00473fd8] |      */ |     int local_a4 = start_span; |     int seg_ren",
     "level": 5,
@@ -10032,13 +10148,20 @@
     "address": "0043c3c0",
     "name": "RequestIntroMovieShutdown",
     "body_size": 121,
-    "citations": [],
-    "total_citations": 0,
-    "files_cited": [],
+    "citations": [
+      [
+        "td5_fmv.c",
+        1
+      ]
+    ],
+    "total_citations": 1,
+    "files_cited": [
+      "td5_fmv.c"
+    ],
     "precision_strong": 0,
     "precision_weak": 0,
-    "sample_context": "",
-    "level": 3,
+    "sample_context": "[td5_fmv.c] k, StopStreamPlayback, IsStreamPlaying, |  * SetStreamVolume, RequestIntroMovieShutdown, the IDCT_DAT 8KB / UVA_DATA |  * 20KB PE sections, and the 0x1ED-dword play",
+    "level": 4,
     "is_auto_named": false,
     "is_crt": false
   },
@@ -10049,27 +10172,27 @@
     "citations": [
       [
         "td5_fmv.c",
-        4
+        8
       ],
       [
         "td5_game.c",
-        2
+        3
       ],
       [
         "td5_fmv.h",
         2
       ]
     ],
-    "total_citations": 8,
+    "total_citations": 13,
     "files_cited": [
       "td5_fmv.c",
       "td5_fmv.h",
       "td5_game.c"
     ],
-    "precision_strong": 0,
+    "precision_strong": 2,
     "precision_weak": 0,
-    "sample_context": "[td5_fmv.c] 3D11 render backend |  * |  * Original functions replaced: |  *   0x43C440  PlayIntroMovie |  *     - Opens Movie/intro.tgq via OpenAndStartMediaPlayback |  *     - Neste",
-    "level": 4,
+    "sample_context": "[td5_fmv.c] v_play_with_source_reader replaces orig |  * PlayIntroMovie @ 0x0043C440 (1206 bytes, body 0x0043C440..0x0043C8F6). |  * The replacement is INTENTIONAL and TOTAL: t",
+    "level": 5,
     "is_auto_named": false,
     "is_crt": false
   },
@@ -10246,17 +10369,17 @@
     "citations": [
       [
         "td5_game.c",
-        4
+        10
       ]
     ],
-    "total_citations": 4,
+    "total_citations": 10,
     "files_cited": [
       "td5_game.c"
     ],
-    "precision_strong": 0,
+    "precision_strong": 4,
     "precision_weak": 0,
-    "sample_context": "[td5_game.c] racker marker intensity (DecayTrackedActorMarkerIntensity @ 0x43D7E0). |  * Original global g_wantedTargetTrackerActive. Decays 0x200/sub-tick, clamped to |  * [0,",
-    "level": 4,
+    "sample_context": "[td5_game.c] . Byte-equivalent. |  * |  * DecayTrackedActorMarkerIntensity @ 0x0043d7e0 [L5 \u2014 byte-faithful] |  *   Orig: gate on audio-options-overlay; decrement 0x200/tick; clam",
+    "level": 5,
     "is_auto_named": false,
     "is_crt": false
   },
@@ -10501,22 +10624,22 @@
     "citations": [
       [
         "td5_render.c",
-        5
+        7
       ],
       [
         "td5_render.h",
         2
       ]
     ],
-    "total_citations": 7,
+    "total_citations": 9,
     "files_cited": [
       "td5_render.c",
       "td5_render.h"
     ],
-    "precision_strong": 0,
+    "precision_strong": 1,
     "precision_weak": 0,
     "sample_context": "[td5_render.c] rMatrixFull |  *   0x43DD60  TransformMeshVerticesToView |  *   0x43DDF0  ComputeMeshVertexLighting |  *   0x42DCA0  IsBoundingSphereVisibleInCurrentFrustum |  *   0x42",
-    "level": 4,
+    "level": 5,
     "is_auto_named": false,
     "is_crt": false
   },
@@ -10698,20 +10821,20 @@
       ],
       [
         "td5_hud.c",
-        1
+        2
       ],
       [
         "td5_render.h",
         1
       ]
     ],
-    "total_citations": 4,
+    "total_citations": 5,
     "files_cited": [
       "td5_game.c",
       "td5_hud.c",
       "td5_render.h"
     ],
-    "precision_strong": 2,
+    "precision_strong": 3,
     "precision_weak": 0,
     "sample_context": "[td5_game.c] tate so RSSetScissorRects is always active. |          * [RE: SetProjectedClipRect per view @ InitializeRaceViewportLayout 0x42C2B0] */ |         td5_plat_render_se",
     "level": 5,
@@ -10746,17 +10869,17 @@
     "citations": [
       [
         "td5_render.c",
-        5
+        8
       ]
     ],
-    "total_citations": 5,
+    "total_citations": 8,
     "files_cited": [
       "td5_render.c"
     ],
-    "precision_strong": 0,
+    "precision_strong": 5,
     "precision_weak": 0,
     "sample_context": "[td5_render.c] * intensity * (1.0f / 1024.0f); | } |  | /* ComputeAverageDepth @ 0x0043E7B0: scalar ambient = (R+G+B)/3 byte. */ | static void tl_set_depth(int r, int g, int b) | { |",
-    "level": 4,
+    "level": 5,
     "is_auto_named": false,
     "is_crt": false
   },
@@ -10766,6 +10889,10 @@
     "body_size": 246,
     "citations": [
       [
+        "td5_game.c",
+        6
+      ],
+      [
         "td5_render.c",
         7
       ],
@@ -10774,15 +10901,16 @@
         2
       ]
     ],
-    "total_citations": 9,
+    "total_citations": 15,
     "files_cited": [
+      "td5_game.c",
       "td5_render.c",
       "td5_render.h"
     ],
-    "precision_strong": 0,
+    "precision_strong": 1,
     "precision_weak": 0,
-    "sample_context": "[td5_render.c] integer at 0x00467368. |  * ConfigureProjectionForViewport @ 0x0043E7E0 writes 0x1000 (= 4096) at |  * race init; trackside camera presets 0 and 6 overwrite it wit",
-    "level": 4,
+    "sample_context": "[td5_game.c] jectionForViewport(640, 480). |  *         [ARCH-DIVERGENCE @ 0x0043E7E0 ConfigureProjectionForViewport] |  *         See td5_render.c:2087 td5_render_configure_pro",
+    "level": 5,
     "is_auto_named": false,
     "is_crt": false
   },
@@ -10797,20 +10925,20 @@
       ],
       [
         "td5_hud.c",
-        1
+        2
       ],
       [
         "td5_render.c",
         6
       ]
     ],
-    "total_citations": 8,
+    "total_citations": 9,
     "files_cited": [
       "td5_camera.c",
       "td5_hud.c",
       "td5_render.c"
     ],
-    "precision_strong": 2,
+    "precision_strong": 3,
     "precision_weak": 0,
     "sample_context": "[td5_camera.c] mals using current g_depthFovFactor. |  * Original also calls SetProjectionCenterOffset(0,0) here, but that is |  * a per-frame prep step in the original's RunRaceF",
     "level": 5,
@@ -11189,16 +11317,26 @@
         2
       ],
       [
+        "td5_fmv.c",
+        1
+      ],
+      [
+        "td5_game.c",
+        1
+      ],
+      [
         "td5_asset.h",
         5
       ]
     ],
-    "total_citations": 7,
+    "total_citations": 9,
     "files_cited": [
       "td5_asset.c",
-      "td5_asset.h"
+      "td5_asset.h",
+      "td5_fmv.c",
+      "td5_game.c"
     ],
-    "precision_strong": 4,
+    "precision_strong": 5,
     "precision_weak": 0,
     "sample_context": "[td5_asset.c] the ZIP. |  * This matches original behavior at 0x4409B0 and 0x440790. |  * ======================================================================== */ |  | /** |  * Try",
     "level": 5,
@@ -11236,16 +11374,26 @@
         2
       ],
       [
+        "td5_fmv.c",
+        1
+      ],
+      [
+        "td5_game.c",
+        1
+      ],
+      [
         "td5_asset.h",
         5
       ]
     ],
-    "total_citations": 7,
+    "total_citations": 9,
     "files_cited": [
       "td5_asset.c",
-      "td5_asset.h"
+      "td5_asset.h",
+      "td5_fmv.c",
+      "td5_game.c"
     ],
-    "precision_strong": 4,
+    "precision_strong": 7,
     "precision_weak": 0,
     "sample_context": "[td5_asset.c] ed instead of the ZIP. |  * This matches original behavior at 0x4409B0 and 0x440790. |  * ======================================================================== *",
     "level": 5,
@@ -11539,22 +11687,22 @@
     "citations": [
       [
         "td5_game.c",
-        2
+        7
       ],
       [
         "td5_game.h",
         2
       ]
     ],
-    "total_citations": 4,
+    "total_citations": 9,
     "files_cited": [
       "td5_game.c",
       "td5_game.h"
     ],
-    "precision_strong": 0,
+    "precision_strong": 3,
     "precision_weak": 0,
-    "sample_context": "[td5_game.c] -- DONE (td5_game_show_legal_screens) |  * 0x442160  InitializeRaceVideoConfiguration   -- DONE (in td5_game_init) |  * 0x414740  InitializeFront",
-    "level": 4,
+    "sample_context": "[td5_game.c] l-game-tier) |  * |  * InitializeRaceVideoConfiguration thunk @ 0x00442160 [ARCH-DIVERGENCE] |  *   Orig body: 5 bytes `JMP 0x0042a950` (single tail-call to the impl)",
+    "level": 5,
     "is_auto_named": false,
     "is_crt": false
   },
@@ -11565,22 +11713,22 @@
     "citations": [
       [
         "td5_game.c",
-        5
+        10
       ],
       [
         "td5_game.h",
         3
       ]
     ],
-    "total_citations": 8,
+    "total_citations": 13,
     "files_cited": [
       "td5_game.c",
       "td5_game.h"
     ],
-    "precision_strong": 0,
+    "precision_strong": 2,
     "precision_weak": 0,
-    "sample_context": "[td5_game.c] -- DONE (td5_game_init/tick/shutdown) |  * 0x442170  RunMainGameLoop                    -- DONE (td5_game_tick) |  * 0x42AA10  InitializeRaceSess",
-    "level": 4,
+    "sample_context": "[td5_game.c] frame logic live in |  *   td5_game_tick (= RunMainGameLoop @ 0x00442170). |  */ | int td5_game_init(void) { |     /* Initialize game state machine (0x442170 entry, 0x4",
+    "level": 5,
     "is_auto_named": false,
     "is_crt": false
   },
@@ -11588,13 +11736,20 @@
     "address": "00442560",
     "name": "LoadStaticTrackTextureHeader",
     "body_size": 260,
-    "citations": [],
-    "total_citations": 0,
-    "files_cited": [],
-    "precision_strong": 0,
+    "citations": [
+      [
+        "td5_game.c",
+        6
+      ]
+    ],
+    "total_citations": 6,
+    "files_cited": [
+      "td5_game.c"
+    ],
+    "precision_strong": 3,
     "precision_weak": 0,
-    "sample_context": "",
-    "level": 3,
+    "sample_context": "[td5_game.c] LoadStaticTrackTextureHeader. |  *         [ARCH-DIVERGENCE @ 0x00442560 LoadStaticTrackTextureHeader] |  *         Orig: GetArchiveEntrySize/ReadArchiveEntry from",
+    "level": 5,
     "is_auto_named": false,
     "is_crt": false
   },
@@ -11634,6 +11789,10 @@
         12
       ],
       [
+        "td5_game.c",
+        5
+      ],
+      [
         "td5_render.c",
         3
       ],
@@ -11642,13 +11801,14 @@
         4
       ]
     ],
-    "total_citations": 19,
+    "total_citations": 24,
     "files_cited": [
       "td5_asset.c",
       "td5_asset.h",
+      "td5_game.c",
       "td5_render.c"
     ],
-    "precision_strong": 2,
+    "precision_strong": 5,
     "precision_weak": 1,
     "sample_context": "[td5_asset.c] ; |     } |     return 0; | } |  | /* Original LoadRaceTexturePages @ 0x00442770: silently skips upload when the |  * static.hed pointer for a slot is zero \u2014 no placeholder",
     "level": 5,
@@ -11932,15 +12092,15 @@
       ],
       [
         "td5_physics.c",
-        22
+        24
       ]
     ],
-    "total_citations": 24,
+    "total_citations": 26,
     "files_cited": [
       "td5_ai.c",
       "td5_physics.c"
     ],
-    "precision_strong": 3,
+    "precision_strong": 4,
     "precision_weak": 0,
     "sample_context": "[td5_ai.c] I) |  *     - all others:            UpdateTrafficRoutePlan + UpdateTrafficActorMotion |  * |  *   After traffic loop: UpdateSpecialTrafficEncounter |  * ==============",
     "level": 5,
@@ -11962,19 +12122,19 @@
       ],
       [
         "td5_track.c",
-        5
+        7
       ]
     ],
-    "total_citations": 19,
+    "total_citations": 21,
     "files_cited": [
       "td5_ai.c",
       "td5_game.c",
       "td5_track.c"
     ],
-    "precision_strong": 0,
+    "precision_strong": 5,
     "precision_weak": 1,
     "sample_context": "[td5_ai.c] /* [0x004356cd-ce] NormalizeActorTrackWrapState(actor) at 0x00443fb0 */ |             td5_track_normalize_actor_wrap((TD5_Actor *)a); |  |             /* [0x004356d",
-    "level": 4,
+    "level": 5,
     "is_auto_named": false,
     "is_crt": false
   },
@@ -12074,7 +12234,7 @@
       "td5_track.c",
       "td5_track.h"
     ],
-    "precision_strong": 6,
+    "precision_strong": 8,
     "precision_weak": 1,
     "sample_context": "[td5_camera.c] nt_bz; |         pc[0] = point_cx; pc[1] = point_cz; |  |         UpdateActorTrackPosition(probe_a, pa); |         ComputeActorTrackContactNormal(probe_a, pa, &norm_a_y",
     "level": 5,
@@ -12096,24 +12256,24 @@
       ],
       [
         "td5_track.c",
-        4
+        9
       ],
       [
         "td5_track.h",
         3
       ]
     ],
-    "total_citations": 14,
+    "total_citations": 19,
     "files_cited": [
       "td5_camera.c",
       "td5_physics.c",
       "td5_track.c",
       "td5_track.h"
     ],
-    "precision_strong": 0,
+    "precision_strong": 4,
     "precision_weak": 0,
     "sample_context": "[td5_camera.c] cz; |  |         UpdateActorTrackPosition(probe_a, pa); |         ComputeActorTrackContactNormal(probe_a, pa, &norm_a_y); |  |         UpdateActorTrackPosition(probe_b, p",
-    "level": 4,
+    "level": 5,
     "is_auto_named": false,
     "is_crt": false
   },
@@ -12124,17 +12284,17 @@
     "citations": [
       [
         "td5_track.c",
-        2
+        11
       ]
     ],
-    "total_citations": 2,
+    "total_citations": 11,
     "files_cited": [
       "td5_track.c"
     ],
-    "precision_strong": 0,
+    "precision_strong": 4,
     "precision_weak": 0,
-    "sample_context": "[td5_track.c] ======================== |  * Barycentric Contact Resolution (0x4456D0 / 0x445A70) |  * |  * Given a span, sub-lane, and world XZ position, determines which triangle |",
-    "level": 4,
+    "sample_context": "[td5_track.c] ic Contact Resolution (0x4456D0 / 0x445A70) |  * [CONFIRMED @ 0x004456D0 + 0x00445A70] L5 promotion sweep audit (2026-05-18). |  *   Both orig variants port-collaps",
+    "level": 5,
     "is_auto_named": false,
     "is_crt": false
   },
@@ -12176,17 +12336,17 @@
     "citations": [
       [
         "td5_track.c",
-        5
+        8
       ]
     ],
-    "total_citations": 5,
+    "total_citations": 8,
     "files_cited": [
       "td5_track.c"
     ],
-    "precision_strong": 0,
+    "precision_strong": 4,
     "precision_weak": 0,
-    "sample_context": "[td5_track.c] es. |  * Port of ComputeTrackTriangleBarycentricsWithNormal @ 0x00445A70. |  * |  * Faithful sequence (verified 2026-05-01 against live Ghidra decomp): |  *   1. e1 = v",
-    "level": 4,
+    "sample_context": "[td5_track.c] solution (0x4456D0 / 0x445A70) |  * [CONFIRMED @ 0x004456D0 + 0x00445A70] L5 promotion sweep audit (2026-05-18). |  *   Both orig variants port-collapsed into trian",
+    "level": 5,
     "is_auto_named": false,
     "is_crt": false
   },
@@ -12631,7 +12791,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -12645,7 +12805,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -12659,7 +12819,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -12673,7 +12833,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -12687,7 +12847,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -12708,7 +12868,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "[td5_physics.c] rtFloatVec3ToShortAngles @ 0x0042E2E0 calls __ftol @ |      * 0x0044817C which EXPLICITLY sets the FPU rounding mode to TRUNCATE |      * (`OR AH, 0xC` = RC=11 = ch",
-    "level": 4,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -12722,7 +12882,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -12736,7 +12896,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -12750,7 +12910,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -12764,7 +12924,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -12778,7 +12938,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -12792,7 +12952,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -12806,7 +12966,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -12820,7 +12980,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -12834,7 +12994,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -12876,7 +13036,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -12890,7 +13050,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -12904,7 +13064,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -12918,7 +13078,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -12960,7 +13120,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -12974,7 +13134,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -12988,7 +13148,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -13002,7 +13162,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -13016,7 +13176,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -13030,7 +13190,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -13044,7 +13204,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -13058,7 +13218,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -13072,7 +13232,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -13086,7 +13246,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -13100,7 +13260,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -13114,7 +13274,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -13128,7 +13288,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -13156,7 +13316,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -13184,7 +13344,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -13198,7 +13358,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -13212,7 +13372,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -13226,7 +13386,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -13240,7 +13400,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -13280,7 +13440,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "[td5_game.c] Original function addresses and implementation status |  * |  * 0x4493E0  entry                              -- N/A (CRT, not reimplemented) |  * 0x430A90  GameWinMai",
-    "level": 4,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -13294,7 +13454,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -13322,7 +13482,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -13336,7 +13496,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -13350,7 +13510,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -13364,7 +13524,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -13378,7 +13538,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -13392,7 +13552,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -13406,7 +13566,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -13420,7 +13580,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -13434,7 +13594,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -13448,7 +13608,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -13462,7 +13622,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -13476,7 +13636,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -13504,7 +13664,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -13518,7 +13678,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -13532,7 +13692,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -13546,7 +13706,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -13560,7 +13720,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -13574,7 +13734,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -13602,7 +13762,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -13616,7 +13776,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -13630,7 +13790,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -13644,7 +13804,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -13658,7 +13818,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -13672,7 +13832,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -13686,7 +13846,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -13700,7 +13860,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -13714,7 +13874,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -13728,7 +13888,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -13742,7 +13902,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -13756,7 +13916,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -13770,7 +13930,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -13784,7 +13944,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -13798,7 +13958,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -13812,7 +13972,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -13826,7 +13986,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -13840,7 +14000,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -13854,7 +14014,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -13868,7 +14028,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -13882,7 +14042,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -13896,7 +14056,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -13910,7 +14070,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -13924,7 +14084,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -13938,7 +14098,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -13952,7 +14112,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -13966,7 +14126,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -13980,7 +14140,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -13994,7 +14154,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -14008,7 +14168,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -14022,7 +14182,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -14036,7 +14196,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -14050,7 +14210,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -14064,7 +14224,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -14078,7 +14238,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -14092,7 +14252,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -14106,7 +14266,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -14120,7 +14280,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -14134,7 +14294,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -14148,7 +14308,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -14162,7 +14322,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -14176,7 +14336,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -14190,7 +14350,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -14204,7 +14364,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -14218,7 +14378,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -14232,7 +14392,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -14246,7 +14406,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -14260,7 +14420,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -14274,7 +14434,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -14288,7 +14448,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -14302,7 +14462,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -14316,7 +14476,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -14330,7 +14490,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -14344,7 +14504,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -14358,7 +14518,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -14372,7 +14532,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -14386,7 +14546,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -14400,7 +14560,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -14414,7 +14574,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -14428,7 +14588,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -14442,7 +14602,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -14456,7 +14616,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -14470,7 +14630,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -14484,7 +14644,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -14498,7 +14658,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -14512,7 +14672,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -14526,7 +14686,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -14540,7 +14700,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -14554,7 +14714,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -14568,7 +14728,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -14582,7 +14742,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -14596,7 +14756,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -14610,7 +14770,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -14624,7 +14784,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -14638,7 +14798,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -14652,7 +14812,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -14666,7 +14826,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -14680,7 +14840,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -14694,7 +14854,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -14708,7 +14868,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -14722,7 +14882,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -14736,7 +14896,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -14750,7 +14910,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -14764,7 +14924,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -14778,7 +14938,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -14792,7 +14952,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -14806,7 +14966,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -14820,7 +14980,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -14834,7 +14994,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -14848,7 +15008,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -14862,7 +15022,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -14876,7 +15036,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -14890,7 +15050,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -14904,7 +15064,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -14918,7 +15078,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -14932,7 +15092,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -14946,7 +15106,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -14960,7 +15120,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -14974,7 +15134,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -14988,7 +15148,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -15002,7 +15162,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -15016,7 +15176,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -15030,7 +15190,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -15044,7 +15204,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -15058,7 +15218,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -15072,7 +15232,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -15086,7 +15246,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -15100,7 +15260,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -15114,7 +15274,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -15128,7 +15288,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -15142,7 +15302,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -15156,7 +15316,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -15170,7 +15330,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -15184,7 +15344,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -15198,7 +15358,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -15212,7 +15372,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -15226,7 +15386,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -15240,7 +15400,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -15254,7 +15414,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -15268,7 +15428,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -15282,7 +15442,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -15296,7 +15456,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -15310,7 +15470,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -15324,7 +15484,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -15338,7 +15498,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -15352,7 +15512,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -15366,7 +15526,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -15380,7 +15540,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -15394,7 +15554,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -15408,7 +15568,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -15422,7 +15582,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -15436,7 +15596,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -15450,7 +15610,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -15464,7 +15624,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -15478,7 +15638,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -15492,7 +15652,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -15506,7 +15666,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -15520,7 +15680,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -15534,7 +15694,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -15548,7 +15708,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -15562,7 +15722,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -15576,7 +15736,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -15590,7 +15750,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -15604,7 +15764,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -15618,7 +15778,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -15632,7 +15792,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -15646,7 +15806,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -15660,7 +15820,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -15674,7 +15834,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -15688,7 +15848,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -15702,7 +15862,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -15716,7 +15876,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -15730,7 +15890,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -15744,7 +15904,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -15758,7 +15918,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -15772,7 +15932,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -15786,7 +15946,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -15800,7 +15960,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -15814,7 +15974,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -15828,7 +15988,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -15842,7 +16002,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -15856,7 +16016,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -15870,7 +16030,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -15884,7 +16044,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -15898,7 +16058,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -15912,7 +16072,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -15926,7 +16086,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -15940,7 +16100,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -15954,7 +16114,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -16203,21 +16363,21 @@
     "citations": [
       [
         "td5_fmv.c",
-        1
+        2
       ],
       [
         "td5_fmv.h",
         1
       ]
     ],
-    "total_citations": 2,
+    "total_citations": 3,
     "files_cited": [
       "td5_fmv.c",
       "td5_fmv.h"
     ],
     "precision_strong": 0,
     "precision_weak": 0,
-    "sample_context": "[td5_fmv.c] 0x43C440  PlayIntroMovie |  *     - Opens Movie/intro.tgq via OpenAndStartMediaPlayback |  *     - Nested message pump with PeekMessageA/GetMessageA |  *     - Skippa",
+    "sample_context": "[td5_fmv.c] -graph level because the entire EA TGQ multimedia |  * stack (OpenAndStartMediaPlayback, StopStreamPlayback, IsStreamPlaying, |  * SetStreamVolume, RequestIntroMovi",
     "level": 4,
     "is_auto_named": false,
     "is_crt": false
@@ -16226,13 +16386,20 @@
     "address": "00452e60",
     "name": "SetStreamVolume",
     "body_size": 20,
-    "citations": [],
-    "total_citations": 0,
-    "files_cited": [],
+    "citations": [
+      [
+        "td5_fmv.c",
+        1
+      ]
+    ],
+    "total_citations": 1,
+    "files_cited": [
+      "td5_fmv.c"
+    ],
     "precision_strong": 0,
     "precision_weak": 0,
-    "sample_context": "",
-    "level": 3,
+    "sample_context": "[td5_fmv.c] StartMediaPlayback, StopStreamPlayback, IsStreamPlaying, |  * SetStreamVolume, RequestIntroMovieShutdown, the IDCT_DAT 8KB / UVA_DATA |  * 20KB PE sections, and the",
+    "level": 4,
     "is_auto_named": false,
     "is_crt": false
   },
@@ -16240,13 +16407,20 @@
     "address": "00452e80",
     "name": "IsStreamPlaying",
     "body_size": 61,
-    "citations": [],
-    "total_citations": 0,
-    "files_cited": [],
+    "citations": [
+      [
+        "td5_fmv.c",
+        1
+      ]
+    ],
+    "total_citations": 1,
+    "files_cited": [
+      "td5_fmv.c"
+    ],
     "precision_strong": 0,
     "precision_weak": 0,
-    "sample_context": "",
-    "level": 3,
+    "sample_context": "[td5_fmv.c] ia |  * stack (OpenAndStartMediaPlayback, StopStreamPlayback, IsStreamPlaying, |  * SetStreamVolume, RequestIntroMovieShutdown, the IDCT_DAT 8KB / UVA_DATA |  * 20KB",
+    "level": 4,
     "is_auto_named": false,
     "is_crt": false
   },
@@ -16254,13 +16428,20 @@
     "address": "00452ec0",
     "name": "StopStreamPlayback",
     "body_size": 90,
-    "citations": [],
-    "total_citations": 0,
-    "files_cited": [],
+    "citations": [
+      [
+        "td5_fmv.c",
+        1
+      ]
+    ],
+    "total_citations": 1,
+    "files_cited": [
+      "td5_fmv.c"
+    ],
     "precision_strong": 0,
     "precision_weak": 0,
-    "sample_context": "",
-    "level": 3,
+    "sample_context": "[td5_fmv.c] tire EA TGQ multimedia |  * stack (OpenAndStartMediaPlayback, StopStreamPlayback, IsStreamPlaying, |  * SetStreamVolume, RequestIntroMovieShutdown, the IDCT_DAT 8KB",
+    "level": 4,
     "is_auto_named": false,
     "is_crt": false
   },
@@ -17618,7 +17799,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -17632,7 +17813,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -17646,7 +17827,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -17660,7 +17841,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   },
@@ -17674,7 +17855,7 @@
     "precision_strong": 0,
     "precision_weak": 0,
     "sample_context": "",
-    "level": 3,
+    "level": 0,
     "is_auto_named": false,
     "is_crt": true
   }

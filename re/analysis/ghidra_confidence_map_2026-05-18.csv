@@ -4,12 +4,12 @@ address,name,body_size,level,port_citations,files_cited,callers_count,bookmark_t
 00401330,SpawnRearWheelSmokeEffects,55,4,8,td5_render.c;td5_vfx.c;td5_vfx.h,1,,0,0,0,0,[td5_render.c] actor per frame. |              * SpawnRearWheelSmokeEffects (0x401330) — burnout hardpoint smoke |              * SpawnVehicleSmokeSprite (0x429CF0) — general exha
 00401370,SpawnRandomVehicleSmokePuff,159,3,0,,1,,0,0,0,0,
 00401410,InitializeRaceSmokeSpritePool,56,4,6,td5_vfx.c;td5_vfx.h,1,,0,0,0,0,"[td5_vfx.c] leSystem @ 0x429510, |      * InitializeRaceSmokeSpritePool @ 0x401410, |      * InitializeVehicleTaillightQuadTemplates @ 0x401000. */ |     td5_vfx_init_race_partic"
-00401450,LoadCameraPresetForView,305,4,16,td5_camera.c;td5_camera.h;td5_input.c,3,,0,0,0,0,[td5_camera.c] ======================================================== |  * 0x401450 -- LoadCameraPresetForView |  * |  * Reads preset data from the camera preset table and populat
-00401590,UpdateChaseCamera,957,4,17,td5_camera.c;td5_camera.h;td5_game.c,1,HOOK_POINT,1,0,0,0,"[td5_camera.c] ======================================================== |  * 0x401590 -- UpdateChaseCamera |  * |  * Main chase camera: orbit around vehicle with terrain-following, |"
+00401450,LoadCameraPresetForView,305,5,18,td5_camera.c;td5_camera.h;td5_game.c;td5_input.c,3,,0,0,2,0,[td5_camera.c] ======================================================== |  * 0x401450 -- LoadCameraPresetForView |  * |  * Reads preset data from the camera preset table and populat
+00401590,UpdateChaseCamera,957,5,19,td5_camera.c;td5_camera.h;td5_game.c,1,HOOK_POINT,1,0,4,0,[td5_camera.c] t (with documented |  *  ARCH-DIVERGENCEs)] |  *   Decompile of 0x00401590 verified semantically: |  *     - Fly-in counter behaviour (ramp/decrement around g_flyInTh
 00401950,UpdateTracksideOrbitCamera,708,4,13,td5_camera.c;td5_camera.h,2,,0,0,0,0,"[td5_camera.c] ======================================================== |  * 0x401950 -- UpdateTracksideOrbitCamera |  * |  * Orbiting camera around a vehicle, used for trackside re"
-00401c20,UpdateVehicleRelativeCamera,494,4,12,td5_camera.c;td5_camera.h;td5_game.c,2,,0,0,0,0,[td5_camera.c] ======================================================== |  * 0x401C20 -- UpdateVehicleRelativeCamera |  * |  * Camera rigidly attached to vehicle with smoothed orien
+00401c20,UpdateVehicleRelativeCamera,494,5,14,td5_camera.c;td5_camera.h;td5_game.c,2,,0,0,4,0,[td5_camera.c] sweep audit 2026-05-18 — byte-equivalent] |  *   Decompile of 0x00401C20 verified line-by-line: |  *     - First angle target  = display_angles.roll  + 0x800   (+0x
 00401e10,UpdateRaceCameraTransitionState,482,4,11,td5_camera.c;td5_camera.h,1,,0,0,0,0,"[td5_camera.c] 0, 400,  1600, 310, 0, 0 },  /* preset 10: fly-in level>=3 (0x401E10) */ |     { 0, 2000, 1400, 110, 0, 0 },  /* preset 11: fly-in level 2  (high elevation side s"
-00402000,ResetRaceCameraSelectionState,168,4,8,td5_camera.c;td5_camera.h;td5_game.c,1,,0,0,0,0,[td5_camera.c] ======================================================== |  * 0x402000 -- ResetRaceCameraSelectionState |  * |  * Restores or resets camera preset selection for both
+00402000,ResetRaceCameraSelectionState,168,5,17,td5_camera.c;td5_camera.h;td5_game.c,1,,0,0,8,0,[td5_camera.c] camera preset selection for both views. |  * |  * [CONFIRMED @ 0x00402000 ResetRaceCameraSelectionState; L5 promotion sweep |  *  audit 2026-05-18] -- Byte-faithful
 004020b0,InitializeTracksideCameraProfiles,322,4,7,td5_camera.c;td5_camera.h,1,,0,0,0,0,"[td5_camera.c] ======================================================== |  * 0x4020B0 -- InitializeTracksideCameraProfiles |  * |  * Counts valid profiles, seeds initial camera posi"
 00402200,SelectTracksideCameraProfile,585,4,7,td5_camera.c;td5_camera.h,1,,0,0,0,0,[td5_camera.c] ======================================================== |  * 0x402200 -- SelectTracksideCameraProfile |  * |  * Checks if the followed vehicle's track span falls wit
 00402480,UpdateTracksideCamera,1182,4,9,td5_camera.c;td5_camera.h,1,,0,0,0,0,[td5_camera.c] ======================================================== |  * 0x402480 -- UpdateTracksideCamera |  * |  * Master dispatcher for all 11 trackside camera behavior types
@@ -26,21 +26,21 @@ address,name,body_size,level,port_citations,files_cited,callers_count,bookmark_t
 00403c80,ComputeReverseGearTorque,258,5,7,td5_physics.c;td5_physics.h,1,,0,0,1,0,"[td5_physics.c] encounter_steering_cmd; | } |  | /* --- ComputeReverseGearTorque (0x00403C80) — byte-faithful port --- |  * |  * Despite the Ghidra name, this function does NOT compute t"
 00403d90,UpdateVehicleState0fDamping,285,5,13,td5_game.c;td5_physics.c;td5_physics.h;td5_pilot_trace_00403D90.c;td5_pilot_trace_00403D90.h,1,,0,0,4,0,[td5_game.c] kips the |              * dynamics dispatch (404030 / 404EC0 / 403D90). The |              * IntegrateVehiclePoseAndContacts chain (LAB_0040690B) runs |
 00403eb0,ApplyMissingWheelVelocityCorrection,354,5,13,td5_physics.c;td5_physics.h;td5_track.c;td5_track.h,1,,0,0,9,0,[td5_physics.c] 5D70  ResetVehicleActorState              -- IMPLEMENTED |  * 0x403EB0  ApplyMissingWheelVelocityCorrection -- IMPLEMENTED |  * 0x403D90  UpdateVehicleState0fDampin
-00404030,UpdatePlayerVehicleDynamics,3719,5,59,td5_game.c;td5_physics.c;td5_physics.h;td5_pilot_trace_00404030.c;td5_pilot_trace_00404030.h;td5_pilot_trace_0042EBF0.c,1,,0,0,5,1,[td5_game.c] 0x00406881) only skips the |              * dynamics dispatch (404030 / 404EC0 / 403D90). The |              * IntegrateVehiclePoseAndContacts chain (LAB_0040690B)
+00404030,UpdatePlayerVehicleDynamics,3719,5,62,td5_game.c;td5_physics.c;td5_physics.h;td5_pilot_trace_00404030.c;td5_pilot_trace_00404030.h;td5_pilot_trace_0042EBF0.c,1,,0,0,6,1,[td5_game.c] 0x00406881) only skips the |              * dynamics dispatch (404030 / 404EC0 / 403D90). The |              * IntegrateVehiclePoseAndContacts chain (LAB_0040690B)
 00404ec0,UpdateAIVehicleDynamics,2341,5,30,td5_ai.c;td5_game.c;td5_physics.c;td5_physics.h;td5_pilot_trace_00404EC0.c;td5_pilot_trace_00404EC0.h;td5_pilot_trace_0042EBF0.c,1,,0,0,8,1,"[td5_ai.c] from the bicycle |      * model in UpdateAIVehicleDynamics @ 0x00404EC0, which at v=0 produces |      * ~0 torque and therefore ~0 omega, so the countdown grid-hol"
 004057f0,UpdateVehicleSuspensionResponse,783,5,29,td5_physics.c;td5_physics.h;td5_pilot_trace_004057F0.c;td5_pilot_trace_004057F0.h;td5_pilot_trace_00405E80.h,1,,0,0,8,1,"[td5_physics.c] ; | } |  | #include ""td5_pilot_trace_004057F0.h"" |  | /* [CONFIRMED @ 0x004057F0] L5 promotion sweep audit (2026-05-18). |  * |  * UpdateVehicleSuspensionResponse — 783 bytes"
 00405b40,ClampVehicleAttitudeLimits,549,5,12,td5_physics.c;td5_physics.h;td5_pilot_trace_00405B40.c;td5_pilot_trace_00405B40.h,1,,0,0,1,0,"[td5_physics.c] _pilot_trace_00405B40.h"" /* precise-port pilot CSV emit for 0x00405B40 */ | #include ""td5_pilot_trace_00405D70.h"" /* precise-port pilot CSV emit for 0x00405D70 */"
 00405d70,ResetVehicleActorState,269,5,43,td5_ai.c;td5_game.c;td5_physics.c;td5_physics.h;td5_pilot_trace_00405D70.c;td5_pilot_trace_00405D70.h;td5_track.c,6,,0,0,6,1,[td5_ai.c] /* [0x004356bb-c2] ResetVehicleActorState(actor) at 0x00405d70 — |              * port equivalent zeroes velocities & integrates pose. */ |             td5_
 00405e80,IntegrateVehiclePoseAndContacts,1250,5,58,td5_game.c;td5_physics.c;td5_physics.h;td5_pilot_trace.h;td5_pilot_trace_00405E80.c;td5_pilot_trace_00405E80.h;td5_track.c;td5_track.h,3,,0,0,8,0,[td5_game.c] 00406650 + IntegrateVehiclePoseAndContacts |              * @ 0x00405E80 are CALLED unconditionally during pause in the |              * original — the paused branc
 004063a0,UpdateVehiclePoseFromPhysicsState,631,5,22,td5_physics.c;td5_physics.h;td5_pilot_trace.h;td5_pilot_trace_004063A0.c;td5_pilot_trace_004063A0.h;td5_track.c;td5_track.h,1,,0,0,5,0,"[td5_physics.c] _pilot_trace_004063A0.h"" /* precise-port pilot CSV emit for 0x004063A0 */ | #include ""td5_pilot_trace_00406650.h"" /* precise-port pilot CSV emit for 0x00406650 */"
-00406650,UpdateVehicleActor,758,5,40,td5_ai.c;td5_game.c;td5_physics.c;td5_physics.h;td5_pilot_trace_00403D90.h;td5_pilot_trace_00406650.c;td5_pilot_trace_00406650.h;td5_track.c,1,,0,0,8,1,[td5_ai.c] |  *     - state 0x00 (AI):       UpdateActorTrackBehavior + UpdateVehicleActor |  *     - state 0x01 (player):   skip AI (handled by input/physics) |  *     - state
+00406650,UpdateVehicleActor,758,5,44,td5_ai.c;td5_game.c;td5_physics.c;td5_physics.h;td5_pilot_trace_00403D90.h;td5_pilot_trace_00406650.c;td5_pilot_trace_00406650.h;td5_track.c,1,,0,0,10,1,[td5_ai.c] |  *     - state 0x00 (AI):       UpdateActorTrackBehavior + UpdateVehicleActor |  *     - state 0x01 (player):   skip AI (handled by input/physics) |  *     - state
 00406950,ClearTrackSegmentVisibilityTable,40,3,0,,1,,0,0,0,0,
 00406980,ApplyTrackSurfaceForceToActor,831,5,4,td5_physics.c;td5_track.c,3,,0,0,1,0,[td5_physics.c] /* No ±6000 yaw clamp here — original has none inside 0x406980. |          * [CONFIRMED — no write to actor+0x1C4 after LAB_00406B6B] */ |  |         /* Track c
 00406cc0,UpdateActorTrackSegmentContacts,654,5,16,td5_track.c,2,,0,0,2,0,[td5_track.c] _d3d.exe has NO generic mid-strip lateral wall impulse — |  * 0x00406CC0 is a sub-lane-extremity transverse-edge boundary check (rumble |  * strips at strip start/e
-00406f50,UpdateActorTrackSegmentContactsForward,392,4,4,td5_track.c,2,,0,0,0,0,"[td5_track.c] e boundary check (rumble |  * strips at strip start/end), and 0x00406F50/0x004070E0 only test the LEFT |  * rail of a single per-level fence strip. Lateral containm"
-004070e0,UpdateActorTrackSegmentContactsReverse,392,4,4,td5_track.c,2,,0,0,0,1,"[td5_track.c] check (rumble |  * strips at strip start/end), and 0x00406F50/0x004070E0 only test the LEFT |  * rail of a single per-level fence strip. Lateral containment in the"
-00407270,ApplySimpleTrackSurfaceForce,286,5,9,td5_physics.c,3,,0,0,3,0,[td5_physics.c] | } |  | /* ApplySimpleTrackSurfaceForce — byte-faithful port of 0x00407270. |  * |  * Pushes actor out of wall penetration and reflects the outward velocity. |  * |  * Addr
-00407390,ProcessActorSegmentTransition,812,5,16,td5_physics.c,1,,0,0,4,1,[td5_physics.c] t - car_size; | } |  | /* ProcessActorSegmentTransition — port of 0x00407390. |  * |  * Tests the inner (sub_lane < 2) and outer (sub_lane >= lane_count-2) edges |  * of th
+00406f50,UpdateActorTrackSegmentContactsForward,392,5,7,td5_track.c,2,,0,0,5,0,"[td5_track.c] e boundary check (rumble |  * strips at strip start/end), and 0x00406F50/0x004070E0 only test the LEFT |  * rail of a single per-level fence strip. Lateral containm"
+004070e0,UpdateActorTrackSegmentContactsReverse,392,5,7,td5_track.c,2,,0,0,3,1,"[td5_track.c] check (rumble |  * strips at strip start/end), and 0x00406F50/0x004070E0 only test the LEFT |  * rail of a single per-level fence strip. Lateral containment in the"
+00407270,ApplySimpleTrackSurfaceForce,286,5,11,td5_physics.c,3,,0,0,5,0,[td5_physics.c] | } |  | /* ApplySimpleTrackSurfaceForce — byte-faithful port of 0x00407270. |  * |  * Pushes actor out of wall penetration and reflects the outward velocity. |  * |  * Addr
+00407390,ProcessActorSegmentTransition,812,5,14,td5_physics.c,1,,0,0,2,1,[td5_physics.c] t - car_size; | } |  | /* ProcessActorSegmentTransition — port of 0x00407390. |  * |  * Tests the inner (sub_lane < 2) and outer (sub_lane >= lane_count-2) edges |  * of th
 004076c0,ProcessActorForwardCheckpointPass,372,5,7,td5_physics.c,1,,0,0,2,0,[td5_physics.c] n); |     } | } |  | /* ProcessActorForwardCheckpointPass — port of 0x004076C0. |  * |  * Forward-sentinel counterpart of process_traffic_route_advance. |  * Tests whether tr
 00407840,ProcessActorRouteAdvance,371,5,19,td5_physics.c,1,,0,0,3,1,[td5_physics.c] } |         } |     } | } |  | /* ProcessActorRouteAdvance — port of 0x00407840. |  * |  * Tests the forward end of the current span (the actor is near the end of the |  * spa
 004079c0,ApplyVehicleCollisionImpulse,2982,5,17,td5_physics.c;td5_pilot_trace_v2v.c;td5_pilot_trace_v2v.h,1,HOOK_POINT,1,0,6,0,[td5_physics.c] yDampedSuspensionForce          -- IMPLEMENTED (traffic) |  * 0x4079C0  ApplyVehicleCollisionImpulse        -- IMPLEMENTED |  * 0x409150  ResolveVehicleContacts
@@ -55,26 +55,26 @@ address,name,body_size,level,port_citations,files_cited,callers_count,bookmark_t
 00409d20,IntegrateScriptedVehicleMotion,338,5,7,td5_physics.c,2,,0,0,2,0,[td5_physics.c] confirmed from |          * IntegrateScriptedVehicleMotion @ 0x00409D20-0x00409D66. |          * Angular velocity damping removed — original overwrites them from |
 00409e80,CheckRaceCompletionState,968,5,20,td5_game.c;td5_track.c,1,HOOK_POINT,1,0,2,0,[td5_game.c] ate |          * (verbatim port of CheckRaceCompletionState @ 0x00409E80). This |          * holds the unshifted base — matches original 0x0042b076. */ |         g_td
 0040a260,UpdateCameraTransitionHudIndicator,69,5,8,td5_camera.c,1,,0,0,2,1,[td5_camera.c] for_trackside(); | } |  | /* UpdateCameraTransitionHudIndicator @ 0x0040A260 |  * Single-race: indicator = actor race_position+0x383 + 2; other modes: 0. |  * [CONFIRMED
-0040a2b0,AdvancePendingFinishState,283,4,18,td5_game.c;td5_game.h;td5_physics.c,1,,0,0,0,0,"[td5_game.c] on Ultimate |          *   AdvancePendingFinishState        (0x0040A2B0) — per-tick, decrements +0x344 |          *   DecayUltimateVariantTimer        (0x0040A440)"
-0040a3d0,AccumulateVehicleSpeedBonusScore,109,4,8,td5_game.c;td5_game.h;td5_physics.c,1,,0,0,0,0,"[td5_game.c] Actor) calls |          *   AccumulateVehicleSpeedBonusScore (0x0040A3D0) — per-tick, gated on Ultimate |          *   AdvancePendingFinishState        (0x0040A2B0)"
-0040a440,DecayUltimateVariantTimer,63,5,13,td5_game.c;td5_game.h;td5_physics.c,8,,0,0,2,0,[td5_game.c] ments +0x344 |          *   DecayUltimateVariantTimer        (0x0040A440) — per-tick from contact paths |          * from inside UpdateRaceActors (which itself runs
+0040a2b0,AdvancePendingFinishState,283,5,20,td5_game.c;td5_game.h;td5_physics.c,1,,0,0,3,0,"[td5_game.c] on Ultimate |          *   AdvancePendingFinishState        (0x0040A2B0) — per-tick, decrements +0x344 |          *   DecayUltimateVariantTimer        (0x0040A440)"
+0040a3d0,AccumulateVehicleSpeedBonusScore,109,5,8,td5_game.c;td5_game.h;td5_physics.c,1,,0,0,1,0,"[td5_game.c] Actor) calls |          *   AccumulateVehicleSpeedBonusScore (0x0040A3D0) — per-tick, gated on Ultimate |          *   AdvancePendingFinishState        (0x0040A2B0)"
+0040a440,DecayUltimateVariantTimer,63,5,14,td5_game.c;td5_game.h;td5_physics.c,8,,0,0,3,0,[td5_game.c] ments +0x344 |          *   DecayUltimateVariantTimer        (0x0040A440) — per-tick from contact paths |          * from inside UpdateRaceActors (which itself runs
 0040a480,InitializeRaceCameraTransitionDuration,10,3,0,,1,,0,0,0,0,
-0040a490,UpdateRaceCameraTransitionTimer,157,4,21,td5_game.c;td5_render.c;td5_render.h;td5_trace_whole_state.h;td5re.h,1,,0,0,0,0,[td5_game.c] -frame call to |          * UpdateRaceCameraTransitionTimer @ 0x0040A490 which is invoked |          * regardless of paused state. */ |         if (g_cameraTransition
-0040a530,AdjustCheckpointTimersByDifficulty,274,4,17,td5_game.c;td5_game.h,1,,0,0,0,0,[td5_game.c] --- */ |     /* Original AdjustCheckpointTimersByDifficulty @ 0x0040A530 is called |      * per-slot from InitializeRaceVehicleRuntime @ 0x0042F140. The scaling |
+0040a490,UpdateRaceCameraTransitionTimer,157,5,29,td5_camera.c;td5_game.c;td5_render.c;td5_render.h;td5_trace_whole_state.h;td5re.h,1,,0,0,5,0,[td5_camera.c] orView[v] * 0x388 in port). |  *  Note: orig's only caller is UpdateRaceCameraTransitionTimer at the |  *  countdown timer-zero crossing; that call is currently NOT
+0040a530,AdjustCheckpointTimersByDifficulty,274,5,20,td5_game.c;td5_game.h,1,,0,0,3,0,[td5_game.c] --- */ |     /* Original AdjustCheckpointTimersByDifficulty @ 0x0040A530 is called |      * per-slot from InitializeRaceVehicleRuntime @ 0x0042F140. The scaling |
 0040a650,BuildSinCosLookupTables,76,5,6,td5_ai.c;td5_render.c,1,,0,0,2,1,"[td5_ai.c] , and LUT init |                  * BuildSinCosLookupTables @ 0x0040a650] |                  * Original calls FUN_0040a700(raw_deviation) = SinFixed12bit. |"
-0040a6a0,CosFloat12bit,16,5,50,td5_camera.c;td5_physics.c;td5_physics.h;td5_pilot_trace_trig.c;td5_pilot_trace_trig.h;td5_render.c;td5_render.h,15,,0,0,7,1,[td5_camera.c] ped — see BuildRotationMatrixFromAngles comment. */ |     s = CosFloat12bit((unsigned int)(unsigned short)yaw); |     c = SinFloat12bit(yaw); |     rot[4] = 1.0f; |
-0040a6c0,SinFloat12bit,21,5,46,td5_camera.c;td5_physics.c;td5_physics.h;td5_pilot_trace_trig.c;td5_pilot_trace_trig.h;td5_render.c;td5_render.h,15,,0,0,6,1,[td5_camera.c] = CosFloat12bit((unsigned int)(unsigned short)yaw); |     c = SinFloat12bit(yaw); |     rot[4] = 1.0f; |     rot[3] = 0.0f; rot[5] = 0.0f; |     rot[1] = 0.0f; rot[7] =
+0040a6a0,CosFloat12bit,16,5,51,td5_camera.c;td5_hud.c;td5_physics.c;td5_physics.h;td5_pilot_trace_trig.c;td5_pilot_trace_trig.h;td5_render.c;td5_render.h,15,,0,0,8,1,[td5_camera.c] ped — see BuildRotationMatrixFromAngles comment. */ |     s = CosFloat12bit((unsigned int)(unsigned short)yaw); |     c = SinFloat12bit(yaw); |     rot[4] = 1.0f; |
+0040a6c0,SinFloat12bit,21,5,47,td5_camera.c;td5_hud.c;td5_physics.c;td5_physics.h;td5_pilot_trace_trig.c;td5_pilot_trace_trig.h;td5_render.c;td5_render.h,15,,0,0,7,1,[td5_camera.c] = CosFloat12bit((unsigned int)(unsigned short)yaw); |     c = SinFloat12bit(yaw); |     rot[4] = 1.0f; |     rot[3] = 0.0f; rot[5] = 0.0f; |     rot[1] = 0.0f; rot[7] =
 0040a6e0,CosFixed12bit,16,5,14,td5_camera.c;td5_physics.c;td5_render.c;td5_render.h,21,,0,0,1,0,[td5_camera.c] g_camRotationSlot[v] * 0x800); |  |     cos_val = CosFixed12bit(combined_angle); |     sin_val = SinFixed12bit(combined_angle); |  |     pos_x = *(int *)(ac
 0040a700,SinFixed12bit,21,5,12,td5_ai.c;td5_camera.c;td5_physics.c;td5_render.c;td5_render.h,22,,0,0,3,0,"[td5_ai.c] al correction. |                  * [CONFIRMED @ 0x4340C0 via 0x0040a700, and LUT init |                  * BuildSinCosLookupTables @ 0x0040a650] |                  *"
-0040a720,AngleFromVector12,341,5,31,td5_ai.c;td5_physics.c;td5_pilot_trace_0040A720.c;td5_pilot_trace_0040A720.h;td5_render.c;td5_render.h;td5_track.c;td5_vfx.c,21,,0,0,6,0,"[td5_ai.c] ==== |  * AngleFromVector12 -- atan2-based angle computation (0x40A720 equivalent) |  * |  * Returns angle in 0..4095 (12-bit), matching original's table-based LUT. |"
-0040a880,ResetRaceResultsTable,50,4,1,td5_game.c,2,,0,0,0,0,[td5_game.c] =================================== |  * Reset results table (0x40A880) |  * ======================================================================== */ |  | static voi
+0040a720,AngleFromVector12,341,5,39,td5_ai.c;td5_camera.c;td5_physics.c;td5_pilot_trace_0040A720.c;td5_pilot_trace_0040A720.h;td5_render.c;td5_render.h;td5_track.c;td5_vfx.c,21,,0,0,14,1,[td5_ai.c] ARCH-DIVERGENCE @ 0x00433FC0] Orig calls AngleFromVector12 (0x0040A720) |  *   which indexes a 12-bit atan2 LUT at DAT_00463214. Port uses libm |  *   atan2(double)
+0040a880,ResetRaceResultsTable,50,5,7,td5_game.c,2,,0,0,5,0,"[td5_game.c] nolithic bootstrap was split. |  * |  * ResetRaceResultsTable @ 0x0040a880 [ARCH-DIVERGENCE] |  *   Orig writes a 6-entry, 20-byte-stride table at 0x0048d988. Per ent"
 0040a8c0,BuildRaceResultsTable,527,5,3,td5_game.c,1,,0,0,2,0,"[td5_game.c] ce-runtime rand() consumers |      * (BuildRaceResultsTable @ 0x40A8C0 uses rand() & 0x1F, etc.). */ |     { |         /* StateReplay harness needs the same determini"
 0040aad0,SortRaceResultsByPrimaryMetricAsc,172,5,8,td5_frontend.c;td5_game.c;td5_game.h,1,,0,0,6,0,[td5_frontend.c] rimary metric asc    (SortRaceResultsByPrimaryMetricAsc   @ 0x40AAD0) |          * [CONFIRMED @ 0x00422480 case 0] */ |         td5_game_sort_results(); |  |         /*
 0040ab80,SortRaceResultsBySecondaryMetricDesc,126,5,7,td5_frontend.c;td5_game.c;td5_game.h,1,,0,0,6,0,[td5_frontend.c] condary metric desc (SortRaceResultsBySecondaryMetricDesc @ 0x40AB80) |          * Types 2-5: by primary metric asc    (SortRaceResultsByPrimaryMetricAsc   @ 0x40
-0040ac00,PrepareMeshResource,477,4,7,td5_render.c;td5_track.c;td5_track.h,3,,0,0,0,0,"[td5_render.c] ==== |  * Deferred Additive Pass |  * |  * The source port has no PrepareMeshResource opcode-rewrite pass, so |  * loaded-texture commands never reach the depth-sorted"
+0040ac00,PrepareMeshResource,477,5,10,td5_render.c;td5_track.c;td5_track.h,3,,0,0,6,0,"[td5_render.c] ==== |  * Deferred Additive Pass |  * |  * The source port has no PrepareMeshResource opcode-rewrite pass, so |  * loaded-texture commands never reach the depth-sorted"
 0040ade0,BeginRaceScene,19,4,4,td5_render.c;td5_render.h,1,HOOK_POINT,1,0,0,0,[td5_render.c] eRenderState |  *   0x40AEC0  ReleaseRaceRenderResources |  *   0x40ADE0  BeginRaceScene |  *   0x40AE00  EndRaceScene |  *   0x43DA80  LoadRenderRotationMatrix |  *   0x
 0040ae00,EndRaceScene,10,4,5,td5_render.c;td5_render.h,1,HOOK_POINT,1,0,0,0,[td5_render.c] leaseRaceRenderResources |  *   0x40ADE0  BeginRaceScene |  *   0x40AE00  EndRaceScene |  *   0x43DA80  LoadRenderRotationMatrix |  *   0x43DC20  LoadRenderTranslation |
-0040ae10,InitializeRaceRenderGlobals,111,4,4,td5_render.c;td5_render.h,1,,0,0,0,0,[td5_render.c] * Original addresses (see td5_render.h for full list): |  *   0x40AE10  InitializeRaceRenderGlobals |  *   0x40AE80  InitializeRaceRenderState |  *   0x40AEC0  Releas
+0040ae10,InitializeRaceRenderGlobals,111,5,7,td5_game.c;td5_render.c;td5_render.h,1,,0,0,1,0,"[td5_game.c] ref[8] - 0x30. |  *     2) Call InitializeRaceRenderGlobals @ 0x0040AE10. |  *     3) Call QueryRaceSharedPointer(4, &g_vehicleProjectionEffectMode, 4). |  *     4) S"
 0040ae80,InitializeRaceRenderState,53,4,4,td5_render.c;td5_render.h,1,,0,0,0,0,[td5_render.c] full list): |  *   0x40AE10  InitializeRaceRenderGlobals |  *   0x40AE80  InitializeRaceRenderState |  *   0x40AEC0  ReleaseRaceRenderResources |  *   0x40ADE0  BeginRa
 0040aec0,ReleaseRaceRenderResources,40,4,4,td5_render.c;td5_render.h,1,HOOK_POINT,1,0,0,0,[td5_render.c] RenderGlobals |  *   0x40AE80  InitializeRaceRenderState |  *   0x40AEC0  ReleaseRaceRenderResources |  *   0x40ADE0  BeginRaceScene |  *   0x40AE00  EndRaceScene |  *
 0040aef0,GetEnvironmentTexturePageMode,21,3,0,,1,,0,0,0,0,
@@ -86,11 +86,11 @@ address,name,body_size,level,port_citations,files_cited,callers_count,bookmark_t
 0040b1c0,BuildTrackTextureCache,11,3,0,,1,,0,0,0,0,
 0040b1d0,BuildTrackTextureCacheImpl,839,4,23,td5_asset.c;td5_render.h,1,,0,0,0,0,[td5_asset.c] → alpha 0 rule from BuildTrackTextureCacheImpl |          * @ 0x0040B1D0 case 3. Approximate it by treating pure black |          * (RGB=0) as the background colour
 0040b530,SwapIndexedRuntimeEntries,68,4,7,td5_asset.c;td5_asset.h,1,,0,0,0,0,[td5_asset.c] n @ 0x0042FD70 |  *   SwapIndexedRuntimeEntries             @ 0x0040B530 |  * which exchanges entries in the texture-cache header arrays |  * (DAT_0048dc40+4 page-poi
-0040b580,SetRaceTexturePageLoader,13,3,0,,1,,0,0,0,0,
+0040b580,SetRaceTexturePageLoader,13,5,6,td5_game.c,1,,0,0,3,0,[td5_game.c] Loader(LoadRaceTexturePages). |  *         [ARCH-DIVERGENCE @ 0x0040B580 SetRaceTexturePageLoader] |  *         Orig is a 13-byte one-liner that writes a function p
 0040b590,UploadRaceTexturePage,204,4,10,td5_asset.c;td5_hud.c,2,,0,0,0,0,[td5_asset.c] files are runtime dumps from UploadRaceTexturePage |      * (0x0040B590).  Two layouts are observed depending on the format_mode |      * the original passed to M2
 0040b660,BindRaceTexturePage,438,5,19,td5_asset.c;td5_asset.h;td5_platform_win32.c;td5_render.c;td5_render.h,5,,0,0,2,0,[td5_asset.c] _0048dc40[3]+7+i*8 in the |  * original BindRaceTexturePage @ 0x0040B660. */ | #define TD5_PAGE_TRANSPARENCY_MAX 1024 | static int8_t s_page_transparency[TD5_PAGE_TRA
 0040b830,AdvanceTextureStreamingScheduler,441,4,2,td5_render.h,2,,0,0,0,0,[td5_render.h] RaceTextureCapacity |  *   0x40B660  BindRaceTexturePage |  *   0x40B830  AdvanceTextureStreamingScheduler |  *   0x40B1D0  BuildTrackTextureCacheImpl |  *   0x430D30
-0040b9f0,GetTextureSlotStatus,31,4,2,td5_render.h,1,,0,0,0,0,[td5_render.h] rsForView |  *   0x40C7E0  BuildSpecialActorOverlayQuads |  *   0x40B9F0  GetTextureSlotStatus |  *   0x40BA10  AdvanceTexturePageUsageAges |  *   0x40BA60  ResetTextur
+0040b9f0,GetTextureSlotStatus,31,5,4,td5_render.h;td5_track.c,1,,0,0,2,0,[td5_track.c] dge. UVs are passed through as-is.] |  * |  * 2. Per-mesh-batch GetTextureSlotStatus primitive-type tag |  *    Orig calls GetTextureSlotStatus(mesh->texture_page_id)
 0040ba10,AdvanceTexturePageUsageAges,75,4,4,td5_render.c;td5_render.h,1,,0,0,0,0,[td5_render.c] ure_ages(void) | { |     /* |      * AdvanceTexturePageUsageAges (0x40BA10): |      * Called from EndRaceScene. Per texture page slot: |      * - If used this frame: rese
 0040ba60,ResetTexturePageCacheState,63,4,4,td5_render.c;td5_render.h,1,,0,0,0,0,[td5_render.c] ure_cache(void) | { |     /* |      * ResetTexturePageCacheState (0x40BA60): |      * Full cache reset before loading a new track's textures. |      * Clears active count
 0040baa0,QueryRaceTextureCapacity,62,4,2,td5_render.h,1,,0,0,0,0,[td5_render.h] ageUsageAges |  *   0x40BA60  ResetTexturePageCacheState |  *   0x40BAA0  QueryRaceTextureCapacity |  *   0x40B660  BindRaceTexturePage |  *   0x40B830  AdvanceTextureS
@@ -160,9 +160,9 @@ address,name,body_size,level,port_citations,files_cited,callers_count,bookmark_t
 00413bc0,ScreenPostRaceNameEntry,2587,5,18,td5_frontend.c;td5_frontend.h;td5_game.c;td5_game.h;td5_save.c;td5_save.h,0,,0,0,8,0,[td5_frontend.c] case 0: /* Qualification check */ |         /* [CONFIRMED @ 0x00413BC0 case 0] */ |         frontend_init_return_screen(TD5_SCREEN_NAME_ENTRY); |         TD5_LOG_D(
 00414610,SetFrontendScreen,40,5,16,td5_frontend.c;td5_frontend.h,27,,0,0,2,0,[td5_frontend.c] tend_frame_counter = 0; |  |     /* Original SetFrontendScreen (0x00414610) is silent — per-screen state-0 |      * code emits its own Play(N). Playing here doubled t
 00414640,LoadFrontendSoundEffects,241,4,7,td5_sound.c;td5_sound.h,1,,0,0,0,0,"[td5_sound.c] oundChannels |  *   0x441D90  PlayVehicleSoundAtPosition |  *   0x414640  LoadFrontendSoundEffects |  */ |  | #include ""td5_sound.h"" | #include ""td5_platform.h"" | #include ""t"
-00414740,InitializeFrontendResourcesAndState,847,5,15,td5_frontend.c;td5_game.c;td5_game.h,1,,0,0,2,1,"[td5_frontend.c] frontend): |      *   - InitializeFrontendResourcesAndState @ 0x00414740 calls srand(timeGetTime()) |      *     TWICE, then burns 1+ rand() for the CD-track pick l"
+00414740,InitializeFrontendResourcesAndState,847,5,16,td5_frontend.c;td5_game.c;td5_game.h,1,,0,0,2,1,"[td5_frontend.c] frontend): |      *   - InitializeFrontendResourcesAndState @ 0x00414740 calls srand(timeGetTime()) |      *     TWICE, then burns 1+ rand() for the CD-track pick l"
 00414a90,InitializeFrontendDisplayModeState,190,5,6,td5_frontend.c,15,,0,0,2,0,[td5_frontend.c] onfigureGameTypeFlags -> InitializeRaceSeriesSchedule |  * -> InitializeFrontendDisplayModeState. Any divergence from the original's |  * attract-mode demo path rea
-00414b50,RunFrontendDisplayLoop,996,4,6,td5_frontend.c;td5_game.c;td5_game.h,1,HOOK_POINT,1,0,0,0,"[td5_frontend.c] ================================ |  * RunFrontendDisplayLoop (0x414B50) |  * |  * Called each frame while game_state == MENU. |  * Returns: 0 = continue, 1 = start race"
+00414b50,RunFrontendDisplayLoop,996,5,8,td5_frontend.c;td5_game.c;td5_game.h,1,HOOK_POINT,1,0,2,0,[td5_frontend.c] d a handful of cosmetic re-orderings. Orig is 996 bytes |  * (0x00414B50..0x00414F34). |  * |  *   Step-by-step mapping (orig decomp -> port): |  *     - Surface-lost t
 00414f40,RenderPositionerGlyphStrip,235,3,0,,1,,0,0,0,0,
 00415030,ScreenPositionerDebugTool,795,4,6,td5_frontend.c;td5_frontend.h,0,,0,0,0,0,[td5_frontend.c] | static void Screen_PositionerDebugTool(void);      /* [1]  0x415030 */ | static void Screen_AttractModeDemo(void);           /* [2]  0x4275A0 */ | static void Scre
 00415370,ScreenStartupInit,258,4,5,td5_frontend.c;td5_frontend.h,0,,0,0,0,0,[td5_frontend.c] tatic void Screen_StartupInit(void);                /* [28] 0x415370 */ | static void Screen_SessionLocked(void);              /* [29] 0x41D630 */ |  | /* ===========
@@ -224,7 +224,7 @@ address,name,body_size,level,port_citations,files_cited,callers_count,bookmark_t
 00424a50,MeasureOrCenterFrontendLocalizedString,149,3,0,,19,,0,0,0,0,
 00424af0,PresentPrimaryFrontendBufferViaCopy,57,3,0,,21,,0,0,0,0,
 00424b30,CopyPrimaryFrontendBufferToSecondary,64,4,1,td5_frontend.c,22,,0,0,0,0,"[td5_frontend.c] urface16bpp(""MainMenu.tga"", ""FrontEnd.zip"") then |          * CopyPrimaryFrontendBufferToSecondary so the post-race UI overlays |          * the main-menu artwork."
-00424b80,BlitFrontendCachedRect,63,3,0,,6,,0,0,0,0,
+00424b80,BlitFrontendCachedRect,63,5,2,td5_frontend.c,6,,0,0,1,0,[td5_frontend.c] then |  *       blit-restores the 640x480 cached backdrop via BlitFrontendCachedRect. |  *       Port: frontend_recover_surfaces() (td5_frontend.c) -- same |  *
 00424bc0,CopyPrimaryFrontendRectToSecondary,74,3,0,,1,,0,0,0,0,
 00424c10,PresentSecondaryFrontendRectViaCopy,63,3,0,,15,,0,0,0,0,
 00424c50,BlitSecondaryFrontendRectToPrimary,74,3,0,,18,,0,0,0,0,
@@ -235,11 +235,11 @@ address,name,body_size,level,port_citations,files_cited,callers_count,bookmark_t
 00424e40,InitializeFrontendPresentationState,803,4,2,td5_frontend.c,1,,0,0,0,0,"[td5_frontend.c] neither is per-frame: InitializeFrontendPresentationState (0x00424E40) |      * runs once at app startup, CarSelectionScreenStateMachine (0x0040DFC0) |      * is u"
 00425170,UpdateFrontendClientOrigin,41,3,0,,1,,0,0,0,0,
 004251a0,Copy16BitSurfaceRect,440,5,1,td5_frontend.c,8,,0,0,2,0,[td5_frontend.c] ey. |  * Matches original game's BltFast without SRCCOLORKEY (Copy16BitSurfaceRect flag 0x10). |  * Used for CarSelBar1 (0% black pixels — fully opaque solid bar).
-00425360,PresentFrontendBufferSoftware,367,3,0,,1,,0,0,0,0,
+00425360,PresentFrontendBufferSoftware,367,5,1,td5_frontend.c,1,,0,0,1,0,"[td5_frontend.c] ty SNK_ScreenDump primer), OR |  *         (b) software 16bpp PresentFrontendBufferSoftware. |  *       Port collapses both branches to td5_plat_present(1) -- D3D11"
 004254d0,ResetFrontendOverlayState,35,3,0,,1,,0,0,0,0,
 00425500,ResetFrontendSelectionState,59,3,0,,1,,0,0,0,0,
-00425540,FlushFrontendSpriteBlits,277,3,0,,1,,0,0,0,0,
-00425660,QueueFrontendOverlayRect,205,5,7,td5_frontend.c,33,,0,0,2,0,[td5_frontend.c] ] Original animates the panel |  * surface (DAT_0049628c) via QueueFrontendOverlayRect with a per-state |  * x-coordinate formula. Port has no MoveFrontendSpriteRec
+00425540,FlushFrontendSpriteBlits,277,4,1,td5_frontend.c,1,,0,0,0,0,"[td5_frontend.c] h @ 0x00414C5F: orig calls RenderFrontendUiRects + |  *       FlushFrontendSpriteBlits, then either |  *         (a) DXDraw::Flip(1) + an immediate Lock/Unlock of t"
+00425660,QueueFrontendOverlayRect,205,5,8,td5_frontend.c,33,,0,0,2,0,[td5_frontend.c] ] Original animates the panel |  * surface (DAT_0049628c) via QueueFrontendOverlayRect with a per-state |  * x-coordinate formula. Port has no MoveFrontendSpriteRec
 00425730,QueueFrontendSpriteBlit,368,3,0,,1,,0,0,0,0,
 004258b0,DeferFrontendBackgroundRestore,10,3,0,,1,,0,0,0,0,
 004258c0,ActivateFrontendCursorOverlay,20,4,1,td5_frontend.c,28,,0,0,0,0,[td5_frontend.c] = !visible` to match the original |      * binary's inverted ActivateFrontendCursorOverlay/DeactivateFrontend |      * CursorOverlay convention (state during inter
@@ -247,7 +247,7 @@ address,name,body_size,level,port_citations,files_cited,callers_count,bookmark_t
 004258f0,CreateFrontendMenuRectEntry,190,3,0,,1,,0,0,0,0,
 004259b0,AdvanceFrontendTickAndCheckReady,22,5,2,td5_frontend.c,17,,0,0,2,0,[td5_frontend.c] te = 2; |         } |         break; |  |     case 2: /* Tick until AdvanceFrontendTickAndCheckReady */ |         if (frontend_advance_tick()) { |             s_anim_comple
 004259d0,MoveFrontendSpriteRect,89,5,2,td5_frontend.c,25,,0,0,2,0,[td5_frontend.c] yRect with a per-state |  * x-coordinate formula. Port has no MoveFrontendSpriteRect / sprite-rect |  * array; instead we accumulate a render-side x offset that ove
-00425a30,RenderFrontendUiRects,293,3,0,,1,,0,0,0,0,
+00425a30,RenderFrontendUiRects,293,4,2,td5_frontend.c,1,,0,0,0,0,[td5_frontend.c] quad at the same texture page. Order matches |  *       orig RenderFrontendUiRects + Flush ordering. |  *     - Submission flush @ 0x00414C5F: orig calls RenderFro
 00425b60,DrawFrontendButtonBackground,631,4,1,td5_frontend_button_cache.c,2,,0,0,0,0,"[td5_frontend_button_cache.c] lected,   gold) lives at y = h..2h-1. |  *   - For each half: DrawFrontendButtonBackground (9-slice) then |  *     DrawFrontendLocalizedStringToSurface (label cente"
 00425de0,CreateFrontendDisplayModeButton,764,5,9,td5_frontend.c;td5_frontend_button_cache.c;td5_frontend_button_cache.h,25,,0,0,2,0,"[td5_frontend.c] using the original's coordinate conventions: |  * |  * Original CreateFrontendDisplayModeButton(label, x, y, w, h, flags): |  *   - When x is negative and y == 0: aut"
 004260e0,CreateFrontendDisplayModePreviewButton,58,3,0,,4,,0,0,0,0,
@@ -257,16 +257,16 @@ address,name,body_size,level,port_citations,files_cited,callers_count,bookmark_t
 004263e0,RenderFrontendDisplayModeHighlight,240,4,3,td5_frontend.c,1,,0,0,0,0,"[td5_frontend.c] ine overlay (RenderFrontendDisplay |          * ModeHighlight 0x4263E0), not the gold/blue interior swap. |          * [INFERRED from frontend-rendering-internals.m"
 004264e0,BeginFrontendDisplayModePreviewLayout,89,3,0,,2,,0,0,0,0,
 00426540,RestoreFrontendDisplayModePreviewLayout,63,3,0,,2,,0,0,0,0,
-00426580,UpdateFrontendDisplayModeSelection,1094,4,6,td5_frontend.c,1,,0,0,0,0,"[td5_frontend.c] click. |      * Original UpdateFrontendDisplayModeSelection (0x426580) detects arrow zones: |      * when clicking on the already-selected button, if mouse is with"
+00426580,UpdateFrontendDisplayModeSelection,1094,4,7,td5_frontend.c,1,,0,0,0,0,"[td5_frontend.c] click. |      * Original UpdateFrontendDisplayModeSelection (0x426580) detects arrow zones: |      * when clicking on the already-selected button, if mouse is with"
 004269d0,ScreenLocalizationInit,2224,5,19,td5_frontend.c;td5_frontend.h;td5_save.c,0,,0,0,4,0,[td5_frontend.c] |  | static void Screen_LocalizationInit(void);        /* [0]  0x4269D0 */ | static void Screen_PositionerDebugTool(void);      /* [1]  0x415030 */ | static void Scree
 00427290,ScreenLanguageSelect,495,4,5,td5_frontend.c;td5_frontend.h,0,,0,0,0,0,[td5_frontend.c] static void Screen_LanguageSelect(void);            /* [3]  0x427290 */ | static void Screen_LegalCopyright(void);            /* [4]  0x4274A0 */ | static void Scre
 004274a0,ScreenLegalCopyright,235,5,11,td5_frontend.c;td5_frontend.h,0,,0,0,2,0,"[td5_frontend.c] CanvasH - 0x20) / 0x20 |  * [CONFIRMED @ ScreenLegalCopyright 0x004274A0 case 0] |  * [CONFIRMED: string ""TEST DRIVE 5 COPYRIGHT 1998"" @ 0x00466808 Language.dll] |  *"
 004275a0,RunAttractModeDemoScreen,113,4,5,td5_frontend.c;td5_frontend.h,0,,0,0,0,0,[td5_frontend.c] static void Screen_AttractModeDemo(void);           /* [2]  0x4275A0 */ | static void Screen_LanguageSelect(void);            /* [3]  0x427290 */ | static void Scre
 00427630,TrackSelectionScreenStateMachine,3043,4,6,td5_frontend.c;td5_frontend.h,0,,0,0,0,0,[td5_frontend.c] tatic void Screen_TrackSelection(void);             /* [21] 0x427630 */ | static void Screen_ExtrasGallery(void);              /* [22] 0x417D50 */ | static void Scr
 00428240,InitializeRaceHudFontGlyphAtlas,214,4,6,td5_hud.c;td5_hud.h,1,,0,0,0,0,[td5_hud.c] Layout |  *   0x43B7C0  InitializePauseMenuOverlayLayout |  *   0x428240  InitializeRaceHudFontGlyphAtlas |  *   0x428320  QueueRaceHudFormattedText |  *   0x428570  Fl
-00428320,QueueRaceHudFormattedText,579,4,6,td5_hud.c;td5_hud.h,2,,0,0,0,0,"[td5_hud.c] yLayout |  *   0x428240  InitializeRaceHudFontGlyphAtlas |  *   0x428320  QueueRaceHudFormattedText |  *   0x428570  FlushQueuedRaceHudText |  */ |  | #include ""td5_hud.h"" |"
-00428570,FlushQueuedRaceHudText,50,4,6,td5_hud.c;td5_hud.h,1,,0,0,0,0,"[td5_hud.c] ontGlyphAtlas |  *   0x428320  QueueRaceHudFormattedText |  *   0x428570  FlushQueuedRaceHudText |  */ |  | #include ""td5_hud.h"" | #include ""td5_platform.h"" | #include ""td5_a"
-004285b0,CreateRaceForceFeedbackEffects,719,4,4,td5_input.c;td5_input.h,0,,0,0,0,0,[td5_input.c] (primary joystick). |      * CreateRaceForceFeedbackEffects (0x4285B0) creates 4 effect slots: |      *   Slot 0: Constant force -- steering resistance |      *   Sl
+00428320,QueueRaceHudFormattedText,579,5,8,td5_hud.c;td5_hud.h,2,,0,0,2,0,"[td5_hud.c] yLayout |  *   0x428240  InitializeRaceHudFontGlyphAtlas |  *   0x428320  QueueRaceHudFormattedText |  *   0x428570  FlushQueuedRaceHudText |  */ |  | #include ""td5_hud.h"" |"
+00428570,FlushQueuedRaceHudText,50,4,7,td5_hud.c;td5_hud.h,1,,0,0,0,0,"[td5_hud.c] ontGlyphAtlas |  *   0x428320  QueueRaceHudFormattedText |  *   0x428570  FlushQueuedRaceHudText |  */ |  | #include ""td5_hud.h"" | #include ""td5_platform.h"" | #include ""td5_a"
+004285b0,CreateRaceForceFeedbackEffects,719,5,10,td5_game.c;td5_input.c;td5_input.h,0,,0,0,3,0,[td5_game.c] lot on the DX::FF singleton). |  *         [ARCH-DIVERGENCE @ 0x004285B0 CreateRaceForceFeedbackEffects] |  *         Orig is 719 bytes of DirectInput 5/7 effect cr
 00428880,ConfigureForceFeedbackControllers,85,4,5,td5_input.c;td5_input.h,1,,0,0,0,0,"[td5_input.c] ==================== |  * ConfigureForceFeedbackControllers  (0x428880) |  * |  * Stores per-slot controller assignments for force feedback. |  * In network play, only"
 004288e0,UpdateControllerForceFeedback,296,5,14,td5_input.c;td5_input.h,1,,0,0,2,0,[td5_input.c] ======================== |  * UpdateControllerForceFeedback  (0x4288E0) |  * |  * Called every frame for each active player slot.  Updates: |  *   1. Steering resistanc
 00428a10,PlayAssignedControllerEffect,74,4,5,td5_input.c;td5_input.h,1,,0,0,0,0,[td5_input.c] ========================= |  * PlayAssignedControllerEffect  (0x428A10) |  * |  * A thin helper to fire arbitrary effects on a player's assigned |  * controller.  Valid
@@ -284,22 +284,22 @@ address,name,body_size,level,port_citations,files_cited,callers_count,bookmark_t
 00429fd0,SpawnVehicleSmokePuffAtPoint,688,3,0,,1,,0,0,0,0,
 0042a290,SpawnVehicleSmokePuffFromHardpoint,662,5,11,td5_vfx.c,1,,0,0,2,0,"[td5_vfx.c] Lifetime: (rand() % 4 + 1) * 10 = 10..40 ticks [CONFIRMED @ 0x0042a290] */ |         int16_t life = (int16_t)((rand() % 4 + 1) * 10); |         PSLOT_WR16(slot, PSL"
 0042a6b0,SpawnAmbientParticleStreak,663,4,1,td5_vfx.c,1,,0,0,0,0,[td5_vfx.c] lash_roll <= active_count && active_count > 0) { |         /* SpawnAmbientParticleStreak -- spawns RAINSPL splash in general pool. |          * Allocates from gener
-0042a950,InitializeRaceVideoConfiguration,183,4,2,td5_game.c;td5_game.h,0,,0,0,0,0,[td5_game.c] -- DONE (td5_game_show_legal_screens) |  * 0x442160  InitializeRaceVideoConfiguration   -- DONE (in td5_game_init) |  * 0x414740  InitializeFrontendResourc
-0042aa10,InitializeRaceSession,2915,5,48,main.c;td5_ai.c;td5_asset.c;td5_frontend.c;td5_game.c;td5_game.h;td5_physics.c;td5_sound.c;td5_track.c;td5re.h,1,,0,0,9,0,"[main.c] patch, |      * matching the original attract-mode autopilot (InitializeRaceSession |      * 0x0042ACCF writes slot[0].state = 1 - g_attractModeDemoActive). */ |"
-0042b580,RunRaceFrame,3368,5,56,td5_camera.c;td5_camera.h;td5_game.c;td5_game.h;td5_hud.c;td5_input.c;td5_physics.c;td5_pilot_trace_00436A70.h;td5_render.c;td5_sound.c;td5_trace.h;td5_track.c,1,HOOK_POINT,1,0,10,0,"[td5_camera.c] ,1) |    at the top of the sim-tick loop inside RunRaceFrame (0x0042B580). |    The cached angles become the ""previous-frame"" state that |    UpdateVehicleRelativeCam"
-0042c2b0,InitializeRaceViewportLayout,444,5,9,td5_game.c;td5_game.h;td5_render.c,2,HOOK_POINT,1,0,2,0,[td5_game.c] playLoop             -- DONE (delegates to td5_frontend) |  * 0x42C2B0  InitializeRaceViewportLayout       -- DONE (td5_game_init_viewport_layout) |  * 0x430CB0  Re
+0042a950,InitializeRaceVideoConfiguration,183,5,9,td5_game.c;td5_game.h,0,,0,0,3,0,[td5_game.c] alizeRaceVideoConfiguration   -- ARCH-DIVERGENCE (thunk JMP 0x0042a950; |  *                                                 body collapsed into td5_render_init +
+0042aa10,InitializeRaceSession,2915,5,49,main.c;td5_ai.c;td5_asset.c;td5_frontend.c;td5_game.c;td5_game.h;td5_physics.c;td5_sound.c;td5_track.c;td5re.h,1,,0,0,12,0,"[main.c] patch, |      * matching the original attract-mode autopilot (InitializeRaceSession |      * 0x0042ACCF writes slot[0].state = 1 - g_attractModeDemoActive). */ |"
+0042b580,RunRaceFrame,3368,5,58,td5_camera.c;td5_camera.h;td5_game.c;td5_game.h;td5_hud.c;td5_input.c;td5_physics.c;td5_pilot_trace_00436A70.h;td5_render.c;td5_sound.c;td5_trace.h;td5_track.c,1,HOOK_POINT,1,0,11,0,"[td5_camera.c] ,1) |    at the top of the sim-tick loop inside RunRaceFrame (0x0042B580). |    The cached angles become the ""previous-frame"" state that |    UpdateVehicleRelativeCam"
+0042c2b0,InitializeRaceViewportLayout,444,5,12,td5_game.c;td5_game.h;td5_render.c,2,HOOK_POINT,1,0,5,0,[td5_game.c] d5d0 (= 0.5). |  *     9) Call InitializeRaceViewportLayout @ 0x0042C2B0. |  *     10) Call LoadStaticTrackTextureHeader. |  *         [ARCH-DIVERGENCE @ 0x00442560 L
 0042c470,PollRaceSessionInput,1104,5,19,td5_input.c;td5_input.h,1,HOOK_POINT,1,0,4,0,[td5_input.c] orce feedback update for local players. |      * [CONFIRMED @ 0x0042C470]: UpdateControllerForceFeedback called here |      * inside PollRaceSessionInput in origina
 0042c8d0,GetDamageRulesStub,2,5,1,td5_physics.c,4,PATCH_SITE,1,0,2,0,"[td5_physics.c] y_{roll,pitch,yaw} += RNG % angle - angle/2 |      * (RNG via GetDamageRulesStub modulo angle). Port previously wrote |      * (scatter>>2 - scatter>>3) into euler_"
-0042c8e0,ShowLegalScreens,286,4,14,td5_fmv.c;td5_fmv.h;td5_game.c;td5_game.h,1,,0,0,0,0,"[td5_fmv.c] during playback |  *     - Sleeps 30ms per iteration |  * |  *   0x42C8E0  ShowLegalScreens |  *     - Loads legal1.tga, legal2.tga from LEGALS.ZIP |  *     - Displays e"
-0042ca00,DisplayLoadingScreenImage,466,3,0,,2,,0,0,0,0,
-0042cbe0,IsLocalRaceParticipantSlot,60,4,6,td5_game.c;td5_game.h,1,,0,0,0,0,[td5_game.c] eOutTransition         -- DONE (td5_game_begin_fade_out) |  * 0x42CBE0  IsLocalRaceParticipantSlot         -- DONE (td5_game_is_local_participant) |  * 0x42CCD0  St
-0042cc20,BeginRaceFadeOutTransition,165,4,7,td5_game.c;td5_game.h,1,,0,0,0,0,[td5_game.c] intTimersByDifficulty -- DONE (adjust_checkpoint_timers) |  * 0x42CC20  BeginRaceFadeOutTransition         -- DONE (td5_game_begin_fade_out) |  * 0x42CBE0  IsLocalR
-0042ccd0,StoreRoundedVector3Ints,101,5,12,td5_game.c;td5_game.h;td5_physics.c;td5_track.c,5,,0,0,3,0,[td5_game.c] pantSlot         -- DONE (td5_game_is_local_participant) |  * 0x42CCD0  StoreRoundedVector3Ints            -- DONE (td5_game_store_rounded_vec3) |  * ==============
+0042c8e0,ShowLegalScreens,286,5,16,td5_fmv.c;td5_fmv.h;td5_game.c;td5_game.h,1,,0,0,2,0,"[td5_fmv.c] ion sweep audit 2026-05-18 — ARCH-DIVERGENCE] |  *   Original 0x0042C8E0 decompile compared line-by-line. Two-screen flow |  *   (5000ms display, 400ms grace, then"
+0042ca00,DisplayLoadingScreenImage,466,4,1,td5_fmv.c,2,,0,0,0,0,[td5_fmv.c] D5RE's PNG asset workflow). |  *     2. Decode path: original DisplayLoadingScreenImage decodes 8/16/24 |  *        TGA via DXDraw::dd front/render surface format.
+0042cbe0,IsLocalRaceParticipantSlot,60,5,12,td5_game.c;td5_game.h,1,,0,0,4,0,[td5_game.c] same one-shot destroy). |  * |  * IsLocalRaceParticipantSlot @ 0x0042cbe0 [L5 — byte-faithful] |  *   Three-branch dispatch matched exactly: network -> dpu[0xBCC+slo
+0042cc20,BeginRaceFadeOutTransition,165,5,13,td5_game.c;td5_game.h,1,,0,0,4,0,[td5_game.c] ented for completeness). |  * |  * BeginRaceFadeOutTransition @ 0x0042cc20 [ARCH-DIVERGENCE] |  *   See detailed audit comment at td5_game_begin_fade_out(). Port |  *
+0042ccd0,StoreRoundedVector3Ints,101,5,15,td5_game.c;td5_game.h;td5_physics.c;td5_track.c,5,,0,0,7,0,[td5_game.c] pantSlot         -- DONE (td5_game_is_local_participant) |  * 0x42CCD0  StoreRoundedVector3Ints            -- DONE (td5_game_store_rounded_vec3) |  * ==============
 0042cd40,ConvertFloatVec3ToShortAnglesB,104,5,9,td5_track.c,2,,0,0,2,0,"[td5_track.c] R ECX/EDI/EDX, 0xc] |  *   4. ConvertFloatVec3ToShortAnglesB (0x0042CD40) — renormalize via FPU: |  *        len  = sqrt(nx² + ny² + nz²) |  *        un[i] = (int16)"
-0042cdb0,ConvertFloatVec4ToShortAngles,150,5,9,td5_physics.c;td5_render.c;td5_track.c,8,,0,0,4,0,"[td5_physics.c] s |  * a normalized tangent vector from two span vertices via ConvertFloatVec4ToShortAngles |  * (x87 FPU normalization), then computes: |  *   pen = (world_offset ."
-0042ce50,SetCameraWorldPosition,48,4,18,td5_camera.c;td5_camera.h,5,,0,0,0,0,[td5_camera.c] ======================================================== |  * 0x42CE50 -- SetCameraWorldPosition |  * |  * Converts integer world-space position to float and stores i
-0042ce90,UpdateActiveTrackLightDirections,542,4,9,td5_render.c;td5_track.c;td5_track.h,5,,0,0,0,0,"[td5_render.c] = (r + g + b) / 3; | } |  | /* UpdateActiveTrackLightDirections @ 0x0042CE90: |  *   For each slot, transform its world-frame contribution into body frame |  *   via M^T"
-0042d0b0,BuildCameraBasisFromAngles,857,4,12,td5_camera.c;td5_camera.h;td5_render.c,2,,0,0,0,0,[td5_camera.c] ======================================================== |  * 0x42D0B0 -- BuildCameraBasisFromAngles |  * |  * Builds THREE independent rotation matrices from Euler a
+0042cdb0,ConvertFloatVec4ToShortAngles,150,5,15,td5_physics.c;td5_render.c;td5_track.c,8,,0,0,4,0,[td5_physics.c] to length |  *      4096 via ConvertFloatVec4ToShortAngles @ 0x0042CDB0 (FPU |  *      x²+y²+z²→FSQRT→4096/len→FMUL→ftol). It then computes |  *      `pen = ((world
+0042ce50,SetCameraWorldPosition,48,5,19,td5_camera.c;td5_camera.h,5,,0,0,1,0,[td5_camera.c] ======================================================== |  * 0x42CE50 -- SetCameraWorldPosition |  * |  * Converts integer world-space position to float and stores i
+0042ce90,UpdateActiveTrackLightDirections,542,5,17,td5_render.c;td5_track.c;td5_track.h,5,,0,0,2,0,"[td5_render.c] = (r + g + b) / 3; | } |  | /* UpdateActiveTrackLightDirections @ 0x0042CE90: |  *   For each slot, transform its world-frame contribution into body frame |  *   via M^T"
+0042d0b0,BuildCameraBasisFromAngles,857,5,13,td5_camera.c;td5_camera.h;td5_render.c,2,,0,0,2,0,[td5_camera.c] ======================================================== |  * 0x42D0B0 -- BuildCameraBasisFromAngles |  * |  * Builds THREE independent rotation matrices from Euler a
 0042d410,FinalizeCameraProjectionMatrices,405,4,12,td5_camera.c;td5_camera.h;td5_render.c,2,,0,0,0,0,"[td5_camera.c] ======================================================== |  * 0x42D410 -- FinalizeCameraProjectionMatrices |  * |  * Copies primary basis to working copy, scales all"
 0042d5b0,OrientCameraTowardTarget,708,4,13,td5_camera.c;td5_camera.h,4,,0,0,0,0,[td5_camera.c] ======================================================== |  * 0x42D5B0 -- OrientCameraTowardTarget |  * |  * Constructs a look-at camera basis from the current camera
 0042d880,ApplyMeshRenderBasisFromTransform,200,3,0,,2,,0,0,0,0,
@@ -312,7 +312,7 @@ address,name,body_size,level,port_citations,files_cited,callers_count,bookmark_t
 0042de10,TestMeshAgainstViewFrustum,362,4,7,td5_render.c;td5_render.h;td5_vfx.c,2,,0,0,0,0,[td5_render.c] *   0x42DCA0  IsBoundingSphereVisibleInCurrentFrustum |  *   0x42DE10  TestMeshAgainstViewFrustum |  *   0x43DCB0  TransformAndQueueTranslucentMesh |  *   0x4314B0
 0042df80,ApplyMeshResourceRenderTransform,162,5,2,td5_render.c,1,,0,0,2,0,[td5_render.c] ame sky block (0x0042bdf1-0x0042be45) sequence: |      *   1. ApplyMeshResourceRenderTransform(gSkyMeshResource) — rotation only |      *   2. TransformMeshVertices
 0042e030,ExtractEulerAnglesFromMatrix,246,3,0,,1,,0,0,0,0,
-0042e130,SetTrackLightDirectionContribution,166,4,6,td5_render.c;td5_track.c,3,,0,0,0,0,"[td5_render.c] teAverageDepth) */ |  | /* SetTrackLightDirectionContribution @ 0x0042E130: |  *   intensity = avg(R,G,B); contribution_world = dir * intensity * (1/1024). |  *   All-z"
+0042e130,SetTrackLightDirectionContribution,166,5,18,td5_render.c;td5_track.c,3,,0,0,5,0,"[td5_render.c] teAverageDepth) */ |  | /* SetTrackLightDirectionContribution @ 0x0042E130: |  *   intensity = avg(R,G,B); contribution_world = dir * intensity * (1/1024). |  *   All-z"
 0042e1e0,BuildRotationMatrixFromAngles,249,5,20,td5_camera.c;td5_physics.c;td5_render.c;td5_render.h,8,,0,0,1,0,"[td5_camera.c] cos->[0,2], -cos->[2,0] |      * NOTE: sin/cos swapped — see BuildRotationMatrixFromAngles comment. */ |     s = CosFloat12bit((unsigned int)(unsigned short)yaw); |"
 0042e2e0,ConvertFloatVec3ToShortAngles,140,5,31,td5_camera.c;td5_physics.c;td5_render.c;td5_render.h,5,,0,0,6,0,"[td5_camera.c] _angles[4]; |     short transformed_angles[4]; /* needs 3 for ConvertFloatVec3ToShortAngles */ |     unsigned int look_angle; |     int height_delta; |     short fx, fz"
 0042e370,TransformVector3ByRenderRotation,83,3,0,,1,,0,0,0,0,
@@ -323,7 +323,7 @@ address,name,body_size,level,port_citations,files_cited,callers_count,bookmark_t
 0042e710,TransposeMatrix3x3,60,5,3,td5_physics.c,1,,0,0,2,0,"[td5_physics.c] MED @ 0x004057FA] UpdateVehicleSuspensionResponse calls |  * `TransposeMatrix3x3(&actor->rotation_m00, local_30)` then |  * `LoadRenderRotationMatrix(local_30)`, so"
 0042e750,BuildWorldToViewMatrix,614,3,0,,1,,0,0,0,0,
 0042e9c0,LoadGlobalOrientationToRenderState,11,3,0,,2,,0,0,0,0,
-0042e9d0,QueryRaceSharedPointer,133,3,0,,2,,0,0,0,0,
+0042e9d0,QueryRaceSharedPointer,133,5,2,td5_game.c,2,,0,0,1,0,"[td5_game.c] ll InitializeRaceRenderGlobals @ 0x0040AE10. |  *     3) Call QueryRaceSharedPointer(4, &g_vehicleProjectionEffectMode, 4). |  *     4) Set _g_raceRenderInitialized"
 0042ea70,CrossProduct3i,68,5,9,td5_track.c,3,,0,0,2,0,"[td5_track.c] e1y*e2x) |  *      — int32 multiply (matches CrossProduct3i @ 0x0042EA70) |  *   3. n[i] = cross[i] >> 12 — int32, sign-preserving |  *      [CONFIRMED @ 0x00445B16-0"
 0042eac0,CrossProduct3i_FixedPoint12,77,5,3,td5_physics.c,2,,0,0,2,0,[td5_physics.c] [2] = (v1.x * v2.y - v2.x * v1.y) >> 12 |      * [CONFIRMED @ 0x0042EAC0 listing 2026-05-14] */ |     int32_t cross_x = (v1[1] * v2[2] - v1[2] * v2[1]) >> 12; |     i
 0042eb10,TransformShortVec3ByRenderMatrixRounded,211,5,20,main.c;td5_physics.c;td5_pilot_trace_0042EB10.h,4,,0,0,6,0,[main.c] it.md): 99.82% match against 6228 FISTP |      * outputs from TransformShortVec3ByRenderMatrixRounded vs 49.05% for the |      * default round-to-nearest-even. With
@@ -339,25 +339,25 @@ address,name,body_size,level,port_citations,files_cited,callers_count,bookmark_t
 0042f5b0,UpdateRaceOrder,278,5,24,td5_camera.c;td5_game.c;td5_physics.c;td5_track.c,1,HOOK_POINT,1,0,4,0,"[td5_camera.c] 0042B580, after UpdateRaceActors/ResolveVehicleContacts/ |    UpdateRaceOrder). Reading post-physics actor angles against the |    pre-physics cached angles is what"
 0042f6d0,ComputeVehicleSuspensionEnvelope,697,5,11,td5_game.c;td5_physics.c;td5_physics.h,1,,0,0,1,0,[td5_game.c] /* Compute mesh-derived collision envelopes per slot (0x42F6D0). |          * Must run AFTER init_vehicle_runtime (which binds cardef) and |          * AFTER
 0042f990,LoadEnvironmentTexturePages,318,4,5,td5_asset.c;td5_render.c,1,,0,0,0,0,"[td5_asset.c] ============== |  * Environment / Reflection Texture Loading (0x42F990) |  * ======================================================================== */ |  | #include """
-0042fad0,InitializeTrackStripMetadata,102,4,9,td5_asset.c;td5_render.c;td5_track.c;td5_track.h,1,,0,0,0,0,"[td5_asset.c] ), i.e. the same index |      * LoadTrackTextureSet passes to InitializeTrackStripMetadata. |      */ |     int loaded = 0; |     const TD5_EnvironsTrack *t; |  |     if (l"
-0042fb40,ApplyTrackStripAttributeOverrides,66,4,5,td5_track.c;td5_track.h,1,,0,0,0,0,[td5_track.c] * 0x42FAD0  InitializeTrackStripMetadata        -- DONE |  * 0x42FB40  ApplyTrackStripAttributeOverrides   -- DONE |  * 0x4440F0  UpdateActorTrackPosition
-0042fb90,LoadTrackRuntimeData,467,5,28,td5_asset.c;td5_asset.h;td5_game.c;td5_track.c;td5_track.h,1,,0,0,6,0,"[td5_asset.c] inter table avoids. Port mirrors that here. |  * [CONFIRMED @ 0x0042FB90 LoadTrackRuntimeData selector] |  */ | static const char *s_strip_fwd[1]   = { ""STRIP.DAT"""
+0042fad0,InitializeTrackStripMetadata,102,5,11,td5_asset.c;td5_render.c;td5_track.c;td5_track.h,1,,0,0,3,0,"[td5_asset.c] ), i.e. the same index |      * LoadTrackTextureSet passes to InitializeTrackStripMetadata. |      */ |     int loaded = 0; |     const TD5_EnvironsTrack *t; |  |     if (l"
+0042fb40,ApplyTrackStripAttributeOverrides,66,5,10,td5_track.c;td5_track.h,1,,0,0,6,0,[td5_track.c] === |  * Strip Attribute Overrides (0x42FB40) |  * [CONFIRMED @ 0x0042FB40] L5 promotion sweep audit (2026-05-18). Byte-faithful |  *   port of orig fill loop: iterat
+0042fb90,LoadTrackRuntimeData,467,5,28,td5_asset.c;td5_asset.h;td5_game.c;td5_track.c;td5_track.h,1,,0,0,9,0,"[td5_asset.c] inter table avoids. Port mirrors that here. |  * [CONFIRMED @ 0x0042FB90 LoadTrackRuntimeData selector] |  */ | static const char *s_strip_fwd[1]   = { ""STRIP.DAT"""
 0042fd70,RemapCheckpointOrderForTrackDirection,168,4,10,td5_asset.c;td5_asset.h,1,,0,0,0,0,[td5_asset.c] he original at |  *   RemapCheckpointOrderForTrackDirection @ 0x0042FD70 |  *   SwapIndexedRuntimeEntries             @ 0x0040B530 |  * which exchanges entries in the
 0042fe20,BlendTrackLightEntryFromStart,400,4,3,td5_render.c,1,,0,0,0,0,[td5_render.c] s[track_first + idx]; | } |  | /* BlendTrackLightEntryFromStart @ 0x0042FE20. |  *   Fades the previous zone's directional contribution out as the actor |  *   crosses fr
 0042ffc0,BlendTrackLightEntryFromEnd,399,4,3,td5_render.c,1,,0,0,0,0,"[td5_render.c] rr_dir, 0, 0, 0); |     } | } |  | /* BlendTrackLightEntryFromEnd @ 0x0042FFC0. |  *   Symmetric to BlendStart but uses the strip RIGHT AFTER zone->span_hi |  *   (i.e. the"
-00430150,ApplyTrackLightingForVehicleSegment,2346,4,23,td5_render.c;td5_render.h;td5_track.c;td5_track.h,2,,0,0,0,0,[td5_render.c] 7 in the original. |  * ApplyTrackLightingForVehicleSegment @ 0x00430150 walks the per-track zone |  * array forward/backward each frame based on the actor's track_
-00430a90,GameWinMain,528,4,7,td5_game.c;td5_game.h,1,,0,0,0,0,"[td5_game.c] -- N/A (CRT, not reimplemented) |  * 0x430A90  GameWinMain                        -- DONE (td5_game_init/tick/shutdown) |  * 0x442170  RunM"
-00430cb0,ResetGameHeap,58,4,5,td5_game.c;td5_game.h,1,,0,0,0,0,[td5_game.c] portLayout       -- DONE (td5_game_init_viewport_layout) |  * 0x430CB0  ResetGameHeap                      -- DONE (delegates to td5_plat_heap_reset) |  * 0x40A2B0
+00430150,ApplyTrackLightingForVehicleSegment,2346,5,26,td5_render.c;td5_render.h;td5_track.c;td5_track.h,2,,0,0,5,0,[td5_render.c] 7 in the original. |  * ApplyTrackLightingForVehicleSegment @ 0x00430150 walks the per-track zone |  * array forward/backward each frame based on the actor's track_
+00430a90,GameWinMain,528,5,13,td5_game.c;td5_game.h,1,,0,0,3,0,[td5_game.c] weep audit 2026-05-18 — ARCH-DIVERGENCE] |  *   GameWinMain @ 0x00430A90 (orig WinMain bootstrap) is decomposed in |  *   the source port across three locations: |  *
+00430cb0,ResetGameHeap,58,5,11,td5_game.c;td5_game.h;td5_platform_win32.c,1,,0,0,5,0,[td5_game.c] atter. Documented divergence; not L4. |  * |  * ResetGameHeap @ 0x00430cb0 [ARCH-DIVERGENCE] |  *   Orig: HeapDestroy gGameHeapHandle (gated on first-call sentinel |  *
 00430cf0,HeapAllocTracked,51,4,2,td5_game.h;td5_render.c,15,,0,0,0,0,[td5_render.c] by texture page (sort key at record+0x02). |  * |  * Original: HeapAllocTracked(0x1000) = 4096 bytes = 512 x 8 bytes |  *           DAT_004af270 = active batch count
 00430d30,ParseAndDecodeCompressedTrackData,1113,4,8,td5_asset.c;td5_asset.h;td5_render.h,1,,0,0,0,0,[td5_asset.c] === |  * Mipmap Builder -- ParseAndDecodeCompressedTrackData (0x430D30) |  * |  * Generates a mipmap chain by box-filtering from source dimensions |  * down through eac
-00431190,ParseModelsDat,204,4,8,td5_render.c;td5_track.c;td5_track.h,1,,0,0,0,0,[td5_render.c] *   [1..N] = pointers to MeshResourceHeader (relocated by ParseModelsDat) |      */ |     static int s_debug_reject_ptr = 0; |     static int s_debug_reject_counts
-00431260,GetTrackSpanDisplayListEntry,13,4,9,td5_track.c;td5_track.h,1,,0,0,0,0,[td5_track.c] * 0x42CE90  UpdateActiveTrackLightDirections    -- DONE |  * 0x431260  GetTrackSpanDisplayListEntry        -- DONE |  * 0x431190  ParseModelsDat
+00431190,ParseModelsDat,204,5,10,td5_render.c;td5_track.c;td5_track.h,1,,0,0,4,0,[td5_render.c] *   [1..N] = pointers to MeshResourceHeader (relocated by ParseModelsDat) |      */ |     static int s_debug_reject_ptr = 0; |     static int s_debug_reject_counts
+00431260,GetTrackSpanDisplayListEntry,13,5,11,td5_track.c;td5_track.h,1,,0,0,4,0,[td5_track.c] render command buffer) for a span. |  * |  * [ARCH-DIVERGENCE @ 0x00431260] Orig is a 13-byte direct LUT lookup: |  *   return *(uint*)(gModelsDatEntryTable + idx*8).
 00431270,RenderTrackSpanDisplayList,97,4,7,td5_render.c;td5_render.h,1,,0,0,0,0,[td5_render.c] llboard meshes. |              * RenderTrackSpanDisplayList @ 0x00431270 only calls |              * TransformAndQueueTranslucentMesh which transforms XYZ only. |
 004312e0,InitializeTranslucentPrimitivePipeline,95,4,6,td5_render.c;td5_render.h,1,,0,0,0,0,[td5_render.c] hResource |  *   0x4317F0  ClipAndSubmitProjectedPolygon |  *   0x4312E0  InitializeTranslucentPrimitivePipeline |  *   0x431460  QueueTranslucentPrimitiveBatch |  *
 00431340,FlushQueuedTranslucentPrimitives,283,4,6,td5_render.c;td5_render.h,1,HOOK_POINT,1,0,0,0,[td5_render.c] Pipeline |  *   0x431460  QueueTranslucentPrimitiveBatch |  *   0x431340  FlushQueuedTranslucentPrimitives |  *   0x4329E0  FlushImmediateDrawPrimitiveBatch |  *   0x43
 00431460,QueueTranslucentPrimitiveBatch,69,5,8,td5_render.c;td5_render.h;td5_vfx.c,9,,0,0,1,0,[td5_render.c] |  *   0x4312E0  InitializeTranslucentPrimitivePipeline |  *   0x431460  QueueTranslucentPrimitiveBatch |  *   0x431340  FlushQueuedTranslucentPrimitives |  *   0x4329
 004314b0,RenderPreparedMeshResource,251,5,7,td5_render.c;td5_render.h,3,,0,0,2,0,[td5_render.c] rustum |  *   0x43DCB0  TransformAndQueueTranslucentMesh |  *   0x4314B0  RenderPreparedMeshResource |  *   0x4317F0  ClipAndSubmitProjectedPolygon |  *   0x4312E0  Ini
-004315b0,SubmitImmediateTranslucentPrimitive,213,4,1,td5_render.h,6,,0,0,0,0,[td5_render.h] arams */ | void td5_render_build_sprite_quad(int *params); | /* 0x4315B0: Submit immediate translucent primitive */ | void td5_render_submit_translucent(uint16_t *qua
+004315b0,SubmitImmediateTranslucentPrimitive,213,5,4,td5_hud.c;td5_render.h,6,,0,0,4,0,[td5_hud.c] submit_quad replace BuildSpriteQuad |  *           Template / SubmitImmediateTranslucentPrimitive. |  *           [CONFIRMED @ orig 0x00438A40-0x00438C40 vs td5_hud
 00431690,SubmitProjectedQuadPrimitive,49,4,3,td5_render.c,1,,0,0,0,0,"[td5_render.c] ex_page); | } |  | /** |  * Opcode 3: SubmitProjectedQuadPrimitive (0x431690) |  * |  * Single quad (4 vertices), submitted through clip + project pipeline. |  */ | static void"
 004316d0,EmitTranslucentQuadDirect,20,4,3,td5_render.c,0,,0,0,0,0,[td5_render.c] base_verts); | } |  | /** |  * Opcode 6: EmitTranslucentQuadDirect (0x4316D0) |  * |  * Direct depth-sort insert for quad data. |  */ | static void dispatch_quad_direct(TD5_Pri
 004316f0,SubmitProjectedTrianglePrimitive,49,4,3,td5_render.c,1,,0,0,0,0,"[td5_render.c] } | } |  | /** |  * Opcode 2: SubmitProjectedTrianglePrimitive (0x4316F0) |  * |  * Single triangle, submitted through clip + project pipeline. |  */ | static void dispatch"
@@ -369,13 +369,13 @@ address,name,body_size,level,port_citations,files_cited,callers_count,bookmark_t
 004326d0,RenderTrackSegmentBatchVariant,778,4,2,td5_render.h,1,,0,0,0,0,[td5_render.h] *   0x4323D0  RenderTrackSegmentBatch (X-axis clipper) |  *   0x4326D0  RenderTrackSegmentBatchVariant (Y-axis clipper) |  *   0x432AB0  AppendClippedPolygonTriangl
 004329e0,FlushImmediateDrawPrimitiveBatch,193,4,6,td5_render.c;td5_render.h,2,,0,0,0,0,[td5_render.c] eBatch |  *   0x431340  FlushQueuedTranslucentPrimitives |  *   0x4329E0  FlushImmediateDrawPrimitiveBatch |  *   0x43E3B0  InsertBillboardIntoDepthSortBuckets |  *   0
 00432ab0,AppendClippedPolygonTriangleFan,285,4,2,td5_render.h,1,,0,0,0,0,[td5_render.h] 326D0  RenderTrackSegmentBatchVariant (Y-axis clipper) |  *   0x432AB0  AppendClippedPolygonTriangleFan |  *   0x431270  RenderTrackSpanDisplayList |  *   0x4312E0  I
-00432bd0,BuildSpriteQuadTemplate,397,5,14,td5_asset.c;td5_hud.c;td5_render.c;td5_render.h;td5_vfx.c,28,,0,0,1,0,"[td5_asset.c] plying by 1/256 for BOTH axes |  * (BuildSpriteQuadTemplate @ 0x432BD0, constant [0x4749D0] = 0.00390625). |  * A 256×512 page would require V normalization by 1/51"
+00432bd0,BuildSpriteQuadTemplate,397,5,15,td5_asset.c;td5_hud.c;td5_render.c;td5_render.h;td5_vfx.c,28,,0,0,2,0,"[td5_asset.c] plying by 1/256 for BOTH axes |  * (BuildSpriteQuadTemplate @ 0x432BD0, constant [0x4749D0] = 0.00390625). |  * A 256×512 page would require V normalization by 1/51"
 00432d60,ComputeAIRubberBandThrottle,241,5,17,td5_ai.c;td5_ai.h;td5_game.c;td5_pilot_trace_00432D60.c;td5_pilot_trace_00432D60.h,1,HOOK_POINT,1,0,4,1,[td5_ai.c] ystematic AI |  * under-performance on tier-1/2 races (pool11 0x00432D60 audit blocker #1). |  * The fix routes through g_td5.difficulty_tier instead — keep this st
 00432e60,InitializeRaceActorRuntime,2075,5,25,td5_ai.c;td5_ai.h;td5_game.c;td5_hud.c;td5_physics.c;td5_pilot_trace_00432E60.c;td5_pilot_trace_00432E60.h,1,,0,0,8,0,[td5_ai.c] time(void) { |     /* [CONFIRMED @ InitializeRaceActorRuntime 0x00432E60 reads gRaceDifficultyTier |      * @ 0x00463210 throughout the Layer-2 decision tree.] The
 00433680,FindNearestRoutePeer,337,5,12,td5_ai.c;td5_ai.h,1,,0,0,5,1,[td5_ai.c] precise-00433680): byte-faithful port of the original |  * at 0x00433680. Replaces the prior simplified-by-active-count scan. |  * |  * [CONFIRMED @ disassembly 0x004
 004337e0,FindActorTrackOffsetPeer,1278,5,13,td5_ai.c;td5_ai.h,1,,0,0,3,0,[td5_ai.c] precise-004337E0): byte-faithful port of the |  * original at 0x004337E0. Replaces the prior simplified single-pass scan. |  * |  * TWO-PASS structure [CONFIRMED @ di
-00433ce0,RenderTrackSegmentNearActor,695,4,3,td5_ai.c,1,,0,0,0,0,"[td5_ai.c] } |  |         /* Step 5: RenderTrackSegmentNearActor @ 0x00433CE0 writes RS[0x37] |          * and RS[0x38], neither of which is consumed elsewhere in the po"
-00433fc0,AngleFromVector12Full,119,4,7,td5_ai.c;td5_track.c,2,,0,0,0,0,"[td5_ai.c] ng from strip vertex deltas (case 1-7) |  *            * Call AngleFromVector12Full; store (angle+0x800)*0x100 to +0x1f4 |  *            * If polarity flag, add 0x8"
+00433ce0,RenderTrackSegmentNearActor,695,5,5,td5_ai.c,1,,0,0,1,0,"[td5_ai.c] } |  |         /* Step 5: RenderTrackSegmentNearActor @ 0x00433CE0 writes RS[0x37] |          * and RS[0x38], neither of which is consumed elsewhere in the po"
+00433fc0,AngleFromVector12Full,119,5,13,td5_ai.c;td5_track.c,2,,0,0,7,1,[td5_ai.c] ============================= */ |  | /* AngleFromVector12Full (0x00433FC0). L5 promotion sweep audit (2026-05-18). |  * [ARCH-DIVERGENCE @ 0x00433FC0] Orig calls Ang
 00434040,ComputeActorRouteHeadingDelta,119,5,21,td5_ai.h;td5_camera.c;td5_physics.c,5,,0,0,4,0,[td5_camera.c] td5_compute_heading_delta / ComputeActorRouteHeadingDelta @ 0x00434040 |  * Computes 12-bit heading delta between the actor's current yaw and the |  * route heading
 004340c0,UpdateActorSteeringBias,538,5,28,td5_ai.c;td5_ai.h;td5_game.c;td5_physics.c;td5_pilot_trace_004340C0.c;td5_pilot_trace_004340C0.h,3,,0,0,8,0,"[td5_ai.c] ng), 0x20000 (coasting), 0x4000 (script) |  * |  * [CONFIRMED @ 0x004340C0] Byte-faithful with orig UpdateActorSteeringBias. |  * L5 audit 2026-05-18 (TD5_pool0 read-"
 004342e0,RefreshActorTrackProgressOffset,109,5,14,td5_ai.c;td5_game.c,2,,0,0,4,0,[td5_ai.c] ======================= |  * RefreshActorTrackProgressOffset (0x004342E0) |  * |  * Seeds RS_TRACK_PROGRESS and RS_TRACK_OFFSET_BIAS for a racer slot at spawn. |  * Rea
@@ -392,25 +392,25 @@ address,name,body_size,level,port_citations,files_cited,callers_count,bookmark_t
 004353b0,RecycleTrafficActorFromQueue,1352,5,30,td5_ai.c;td5_ai.h;td5_physics.c;td5_track.c;td5_track.h,1,,0,0,6,1,[td5_ai.c] DIFFERENT init flow |      * (RecycleTrafficActorFromQueue @ 0x004353B0 — see memory |      * reference_arch_recycle_heading_collapse.md) and don't expect these |
 00435940,InitializeTrafficActorsFromQueue,887,5,20,td5_ai.c;td5_ai.h;td5_physics.c;td5_track.c;td5_track.h,2,,0,0,4,0,[td5_ai.c] /* Byte-faithful port of InitializeTrafficActorsFromQueue @ 0x00435940. |  * |  * Original signature: void __stdcall InitializeTrafficActorsFromQueue(void) |  * Spawn
 00435ce0,ComputeActorTrackHeading,380,5,8,td5_ai.c;td5_track.c,1,,0,0,4,0,[td5_ai.c] - Inline switch geometry matches ComputeActorTrackHeading @ 0x00435CE0 |  *     (REMAP path) and an inline AngleFromVector12Full (NORMAL path). |  *   - REMAP path
-00435e80,UpdateTrafficRoutePlan,2142,5,21,td5_ai.c;td5_ai.h;td5_game.c;td5_physics.c;td5_track.c,1,,0,0,7,0,[td5_ai.c] ng on peer |  * |  * [precise-00435E80] Byte-faithful port from 0x00435E80 disassembly listing. |  * |  * [CONFIRMED @ 0x00435E80] L5 promotion sweep audit (2026-05-18)
+00435e80,UpdateTrafficRoutePlan,2142,5,26,td5_ai.c;td5_ai.h;td5_game.c;td5_physics.c;td5_track.c,1,,0,0,6,0,"[td5_ai.c] eturns hits only inside |          * UpdateTrafficRoutePlan @ 0x00435E80, where EBX holds an ACTOR base |          * (stride 0x388), NOT the RS-table — reading acto"
 004366e0,UpdateActorTrackBounds,433,5,10,td5_ai.c,1,,0,0,3,0,"[td5_ai.c] tride 0x0C). |  * Used by UpdateActorTrackBounds [CONFIRMED @ 0x004366E0-0x00436891]. */ | #define ACTOR_PROBE_FL_BASE       0x090   /* int32 x,y,z = probe_FL */ | #d"
 004368a0,ClassifyTrackOffsetClamp,453,5,14,main.c;td5_ai.c;td5re.h,2,,0,0,3,0,"[main.c] aceTraceMaxSimTicks"", 0); |     /* Feature flag: experimental ClassifyTrackOffsetClamp pre-loop port. |      * See td5_ai.c:td5_ai_refresh_route_state_slot — closes"
-00436a70,UpdateRaceActors,1569,5,82,td5_ai.c;td5_ai.h;td5_camera.c;td5_game.c;td5_physics.c;td5_pilot_trace_00432D60.h;td5_pilot_trace_00436A70.c;td5_pilot_trace_00436A70.h;td5_track.c;td5_track.h;td5re.h,1,HOOK_POINT,1,0,12,2,[td5_ai.c] bias-clamp/boundary chain ported from |  * UpdateRaceActors @ 0x00436A70. Gated behind g_td5.ini.experimental_bias_clamp. */ | static void td5_ai_update_actor_track
+00436a70,UpdateRaceActors,1569,5,86,td5_ai.c;td5_ai.h;td5_camera.c;td5_game.c;td5_physics.c;td5_pilot_trace_00432D60.h;td5_pilot_trace_00436A70.c;td5_pilot_trace_00436A70.h;td5_track.c;td5_track.h;td5re.h,1,HOOK_POINT,1,0,13,2,[td5_ai.c] bias-clamp/boundary chain ported from |  * UpdateRaceActors @ 0x00436A70. Gated behind g_td5.ini.experimental_bias_clamp. */ | static void td5_ai_update_actor_track
 004370a0,AdvanceActorTrackScript,1758,5,16,td5_ai.c;td5_ai.h;td5_pilot_trace_004370A0.c;td5_pilot_trace_004370A0.h,1,,0,0,1,0,[td5_ai.c] nt *rs) { |     /* Verbatim port of AdvanceActorTrackScript @ 0x004370A0. |      * Order of operations matches the original byte-for-byte: |      *   1. Countdown dec
 004377b0,InitializeRaceOverlayResources,1004,4,8,td5_hud.c;td5_hud.h,1,,0,0,0,0,[td5_hud.c] (g_game_type == 7) { |             /* Time Trial (preset 3 @ 0x004377B0): no flag-driven timers. |              * The main TIME readout is emitted from td5_hud_dra
 00437ba0,InitializeRaceHudLayout,3327,4,6,td5_hud.c;td5_hud.h,1,,0,0,0,0,[td5_hud.c] dresses: |  *   0x4377B0  InitializeRaceOverlayResources |  *   0x437BA0  InitializeRaceHudLayout |  *   0x4388A0  RenderRaceHudOverlays |  *   0x4397B0  BuildRaceHudMe
-004388a0,RenderRaceHudOverlays,3854,4,10,td5_game.c;td5_hud.c;td5_hud.h,1,HOOK_POINT,1,0,0,0,[td5_game.c] the runtime gate read by both the HUD timer |      * widget (RenderRaceHudOverlays @ 0x004391CC) and the per-actor timer |      * decrement (AdvancePendingFinishSt
-004397b0,BuildRaceHudMetricDigits,914,4,11,td5_hud.c;td5_hud.h,1,,0,0,0,0,"[td5_hud.c] slot, lap_index); | } |  | /* Original BuildRaceHudMetricDigits @ 0x004397b0 case 0: |  *   gHudMetricValue = (uint)(*(ushort *)(actor + 0x344) >> 8); |  * actor+0x344 is"
-00439b60,SetRaceHudIndicatorState,15,4,6,td5_hud.c;td5_hud.h,2,,0,0,0,0,[td5_hud.c] aceHudOverlays |  *   0x4397B0  BuildRaceHudMetricDigits |  *   0x439B60  SetRaceHudIndicatorState |  *   0x439B70  DrawRaceStatusText |  *   0x43A220  RenderTrackMinim
+004388a0,RenderRaceHudOverlays,3854,5,11,td5_game.c;td5_hud.c;td5_hud.h,1,HOOK_POINT,1,0,3,0,[td5_game.c] the runtime gate read by both the HUD timer |      * widget (RenderRaceHudOverlays @ 0x004391CC) and the per-actor timer |      * decrement (AdvancePendingFinishSt
+004397b0,BuildRaceHudMetricDigits,914,5,12,td5_hud.c;td5_hud.h,1,,0,0,1,0,"[td5_hud.c] slot, lap_index); | } |  | /* Original BuildRaceHudMetricDigits @ 0x004397b0 case 0: |  *   gHudMetricValue = (uint)(*(ushort *)(actor + 0x344) >> 8); |  * actor+0x344 is"
+00439b60,SetRaceHudIndicatorState,15,5,12,td5_game.c;td5_hud.c;td5_hud.h,2,,0,0,2,0,"[td5_game.c] 37 lines decompiled at 0x0040a490): |  *    1) if timer == 0: SetRaceHudIndicatorState(0,0); SetRaceHudIndicatorState(1,0); return |  *    2) elif timer < 0x101: ti"
 00439b70,DrawRaceStatusText,747,4,9,td5_hud.c;td5_hud.h,1,HOOK_POINT,1,0,0,0,"[td5_hud.c] 5_hud_draw_status_text |              * (DrawRaceStatusText @ 0x00439B70), not from the overlay bitmask. */ |             TD5_LOG_I(LOG_TAG, ""overlay flags: time-tr"
-00439e60,RenderHudRadialPulseOverlay,928,4,1,td5_render.h,1,,0,0,0,0,"[td5_render.h] _rect(float left, float right, float top, float bottom); | /* 0x439E60: Render radial pulse overlay effect */ | void td5_render_radial_pulse(float dt); |  | /* --- Rend"
-0043a210,ResetHudRadialPulseOverlay,10,3,0,,2,,0,0,0,0,
-0043a220,RenderTrackMinimapOverlay,3707,5,10,td5_hud.c;td5_hud.h,1,,0,0,2,0,"[td5_hud.c] 0x0c, +0x14) are added before rotation. |      * [CONFIRMED @ 0x0043a220 decomp + memory_read @ 0x00473fd8] |      */ |     int local_a4 = start_span; |     int seg_ren"
+00439e60,RenderHudRadialPulseOverlay,928,4,2,td5_hud.c;td5_render.h,1,,0,0,0,0,[td5_hud.c] er_cy); |  *           FlushQueuedRaceHudText(); |  *           RenderHudRadialPulseOverlay(param_1); |  *           if (split_screen_mode) submit divider at DAT_004B
+0043a210,ResetHudRadialPulseOverlay,10,5,1,td5_game.c,2,,0,0,1,0,[td5_game.c] == 0 && !network && game_type == 0 && !drag): |  *     calls ResetHudRadialPulseOverlay; sets g_raceEndRadialPulseEnabled=1. |  *   - Always sets g_raceEndFadeStat
+0043a220,RenderTrackMinimapOverlay,3707,5,11,td5_hud.c;td5_hud.h,1,,0,0,3,0,"[td5_hud.c] 0x0c, +0x14) are added before rotation. |      * [CONFIRMED @ 0x0043a220 decomp + memory_read @ 0x00473fd8] |      */ |     int local_a4 = start_span; |     int seg_ren"
 0043b0a0,InitializeMinimapLayout,1809,5,7,td5_hud.c;td5_hud.h,1,,0,0,2,0,[td5_hud.c] aceStatusText |  *   0x43A220  RenderTrackMinimapOverlay |  *   0x43B0A0  InitializeMinimapLayout |  *   0x43B7C0  InitializePauseMenuOverlayLayout |  *   0x428240  Ini
 0043b7c0,InitializePauseMenuOverlayLayout,1957,4,7,td5_hud.c;td5_hud.h,1,,0,0,0,0,[td5_hud.c] kMinimapOverlay |  *   0x43B0A0  InitializeMinimapLayout |  *   0x43B7C0  InitializePauseMenuOverlayLayout |  *   0x428240  InitializeRaceHudFontGlyphAtlas |  *   0x428
 0043bf70,RunAudioOptionsOverlay,1097,5,5,td5_game.c;td5_hud.c,1,,0,0,4,0,[td5_game.c] Audio3 / Continue / Exit). |                  * [CONFIRMED @ 0x0043BF70] RunAudioOptionsOverlay: 5 rows total. */ |                 if (key_down  && !s_prev_down)
-0043c3c0,RequestIntroMovieShutdown,121,3,0,,0,,0,0,0,0,
-0043c440,PlayIntroMovie,1206,4,8,td5_fmv.c;td5_fmv.h;td5_game.c,1,,0,0,0,0,[td5_fmv.c] 3D11 render backend |  * |  * Original functions replaced: |  *   0x43C440  PlayIntroMovie |  *     - Opens Movie/intro.tgq via OpenAndStartMediaPlayback |  *     - Neste
+0043c3c0,RequestIntroMovieShutdown,121,4,1,td5_fmv.c,0,,0,0,0,0,"[td5_fmv.c] k, StopStreamPlayback, IsStreamPlaying, |  * SetStreamVolume, RequestIntroMovieShutdown, the IDCT_DAT 8KB / UVA_DATA |  * 20KB PE sections, and the 0x1ED-dword play"
+0043c440,PlayIntroMovie,1206,5,13,td5_fmv.c;td5_fmv.h;td5_game.c,1,,0,0,2,0,"[td5_fmv.c] v_play_with_source_reader replaces orig |  * PlayIntroMovie @ 0x0043C440 (1206 bytes, body 0x0043C440..0x0043C8F6). |  * The replacement is INTENTIONAL and TOTAL: t"
 0043c9e0,InitializeTrackedActorMarkerBillboards,985,3,0,,1,,0,0,0,0,
 0043cdc0,AdvanceWorldBillboardAnimations,20,4,10,td5_render.c;td5_render.h;td5_vfx.c;td5_vfx.h,1,,0,0,0,0,[td5_render.c] nims(void) | { |     /* |      * AdvanceWorldBillboardAnimations (0x43CDC0): |      * Advance animation phase by +0x10 per tick for billboard animation pool. |      * Dri
 0043cde0,RenderTrackedActorMarker,1262,3,0,,2,,0,0,0,0,
@@ -418,7 +418,7 @@ address,name,body_size,level,port_citations,files_cited,callers_count,bookmark_t
 0043d4e0,UpdateWantedDamageIndicator,420,3,0,,1,,0,0,0,0,
 0043d690,AwardWantedDamageScore,295,5,8,td5_ai.c;td5_ai.h;td5_physics.c,1,,0,0,2,0,"[td5_ai.c] 0x400 (impact>20000) |  * [CONFIRMED @ AwardWantedDamageScore 0x43D690]. When slot reaches 0, cop is arrested |  * and its AI is frozen [CONFIRMED @ UpdateRaceActor"
 0043d7c0,AdvanceGlobalSkyRotation,19,5,7,td5_game.c;td5_render.c;td5_render.h,1,,0,0,2,0,[td5_game.c] void) { return g_td5.wanted_mode_enabled; } | /* [CONFIRMED @ 0x0043D7C0 AdvanceGlobalSkyRotation]: increments |  * g_wantedTargetTrackerActive (0x004BF500) by 0x40
-0043d7e0,DecayTrackedActorMarkerIntensity,60,4,4,td5_game.c,1,HOOK_POINT,1,0,0,0,"[td5_game.c] racker marker intensity (DecayTrackedActorMarkerIntensity @ 0x43D7E0). |  * Original global g_wantedTargetTrackerActive. Decays 0x200/sub-tick, clamped to |  * [0,"
+0043d7e0,DecayTrackedActorMarkerIntensity,60,5,10,td5_game.c,1,HOOK_POINT,1,0,4,0,[td5_game.c] . Byte-equivalent. |  * |  * DecayTrackedActorMarkerIntensity @ 0x0043d7e0 [L5 — byte-faithful] |  *   Orig: gate on audio-options-overlay; decrement 0x200/tick; clam
 0043d830,ApplyRandomWheelJitterHighSpeed,211,3,0,,0,,0,0,0,0,
 0043d910,ApplyRandomWheelJitterLowSpeed,211,3,0,,0,,0,0,0,0,
 0043d9f0,ApplyRandomWheelJitterSynchronized,135,3,0,,0,,0,0,0,0,
@@ -429,7 +429,7 @@ address,name,body_size,level,port_citations,files_cited,callers_count,bookmark_t
 0043dc50,TransformVec3ByRenderMatrixFull,95,4,4,td5_render.c;td5_render.h,1,,0,0,0,0,[td5_render.c] PushRenderTransform |  *   0x43DB70  PopRenderTransform |  *   0x43DC50  TransformVec3ByRenderMatrixFull |  *   0x43DD60  TransformMeshVerticesToView |  *   0x43DDF0
 0043dcb0,TransformAndQueueTranslucentMesh,173,4,5,td5_render.c;td5_render.h,1,,0,0,0,0,[td5_render.c] rrentFrustum |  *   0x42DE10  TestMeshAgainstViewFrustum |  *   0x43DCB0  TransformAndQueueTranslucentMesh |  *   0x4314B0  RenderPreparedMeshResource |  *   0x4317F0
 0043dd60,TransformMeshVerticesToView,131,5,6,td5_render.c;td5_render.h,3,,0,0,2,0,[td5_render.c] ansform |  *   0x43DC50  TransformVec3ByRenderMatrixFull |  *   0x43DD60  TransformMeshVerticesToView |  *   0x43DDF0  ComputeMeshVertexLighting |  *   0x42DCA0  IsBoun
-0043ddf0,ComputeMeshVertexLighting,195,4,7,td5_render.c;td5_render.h,2,,0,0,0,0,[td5_render.c] rMatrixFull |  *   0x43DD60  TransformMeshVerticesToView |  *   0x43DDF0  ComputeMeshVertexLighting |  *   0x42DCA0  IsBoundingSphereVisibleInCurrentFrustum |  *   0x42
+0043ddf0,ComputeMeshVertexLighting,195,5,9,td5_render.c;td5_render.h,2,,0,0,1,0,[td5_render.c] rMatrixFull |  *   0x43DD60  TransformMeshVerticesToView |  *   0x43DDF0  ComputeMeshVertexLighting |  *   0x42DCA0  IsBoundingSphereVisibleInCurrentFrustum |  *   0x42
 0043dec0,ApplyMeshProjectionEffect,837,4,10,td5_render.c;td5_render.h,1,,0,0,0,0,[td5_render.c] ========= |  * Vehicle Projection Effect / Chrome Reflection (0x43DEC0 / 0x40CBD0) |  * |  * Original renders a second pass on the player car mesh with heading- |  * ro
 0043e210,SetProjectionEffectState,172,4,9,td5_render.c,1,,0,0,0,0,[td5_render.c] t DAT_004bf520 written by |      * SetProjectionEffectState @ 0x0043E210. */ |     float cos_heading;   /* mode 2: cos(-yaw); mode 1: 1.0 */ |     float sin_heading;
 0043e2c0,ResetProjectedPrimitiveWorkBuffer,36,3,0,,1,,0,0,0,0,
@@ -438,11 +438,11 @@ address,name,body_size,level,port_citations,files_cited,callers_count,bookmark_t
 0043e4c0,InsertTriangleIntoDepthSortBuckets,143,3,0,,1,,0,0,0,0,
 0043e550,QueueProjectedPrimitiveBucketEntry,149,4,6,td5_render.c;td5_render.h,1,,0,0,0,0,[td5_render.c] tch |  *   0x43E3B0  InsertBillboardIntoDepthSortBuckets |  *   0x43E550  QueueProjectedPrimitiveBucketEntry |  *   0x43E2F0  FlushProjectedPrimitiveBuckets |  *   0x43
 0043e5f0,InitializeProjectedPrimitiveBuckets,75,3,0,,1,,0,0,0,0,
-0043e640,SetProjectedClipRect,268,5,4,td5_game.c;td5_hud.c;td5_render.h,4,,0,0,2,0,[td5_game.c] tate so RSSetScissorRects is always active. |          * [RE: SetProjectedClipRect per view @ InitializeRaceViewportLayout 0x42C2B0] */ |         td5_plat_render_se
+0043e640,SetProjectedClipRect,268,5,5,td5_game.c;td5_hud.c;td5_render.h,4,,0,0,3,0,[td5_game.c] tate so RSSetScissorRects is always active. |          * [RE: SetProjectedClipRect per view @ InitializeRaceViewportLayout 0x42C2B0] */ |         td5_plat_render_se
 0043e750,SetClipBounds,81,4,2,td5_hud.c,2,,0,0,0,0,[td5_hud.c] =============== |  * Race End Fade — Directional screen wipe (0x43E750 SetClipBounds) |  * |  * Renders black bars that close in from opposite screen edges. |  * progre
-0043e7b0,ComputeAverageDepth,36,4,5,td5_render.c,3,,0,0,0,0,"[td5_render.c] * intensity * (1.0f / 1024.0f); | } |  | /* ComputeAverageDepth @ 0x0043E7B0: scalar ambient = (R+G+B)/3 byte. */ | static void tl_set_depth(int r, int g, int b) | { |"
-0043e7e0,ConfigureProjectionForViewport,246,4,9,td5_render.c;td5_render.h,2,HOOK_POINT,1,0,0,0,[td5_render.c] integer at 0x00467368. |  * ConfigureProjectionForViewport @ 0x0043E7E0 writes 0x1000 (= 4096) at |  * race init; trackside camera presets 0 and 6 overwrite it wit
-0043e8e0,SetProjectionCenterOffset,19,5,8,td5_camera.c;td5_hud.c;td5_render.c,3,,0,0,2,0,"[td5_camera.c] mals using current g_depthFovFactor. |  * Original also calls SetProjectionCenterOffset(0,0) here, but that is |  * a per-frame prep step in the original's RunRaceF"
+0043e7b0,ComputeAverageDepth,36,5,8,td5_render.c,3,,0,0,5,0,"[td5_render.c] * intensity * (1.0f / 1024.0f); | } |  | /* ComputeAverageDepth @ 0x0043E7B0: scalar ambient = (R+G+B)/3 byte. */ | static void tl_set_depth(int r, int g, int b) | { |"
+0043e7e0,ConfigureProjectionForViewport,246,5,15,td5_game.c;td5_render.c;td5_render.h,2,HOOK_POINT,1,0,1,0,"[td5_game.c] jectionForViewport(640, 480). |  *         [ARCH-DIVERGENCE @ 0x0043E7E0 ConfigureProjectionForViewport] |  *         See td5_render.c:2087 td5_render_configure_pro"
+0043e8e0,SetProjectionCenterOffset,19,5,9,td5_camera.c;td5_hud.c;td5_render.c,3,,0,0,3,0,"[td5_camera.c] mals using current g_depthFovFactor. |  * Original also calls SetProjectionCenterOffset(0,0) here, but that is |  * a per-frame prep step in the original's RunRaceF"
 0043e900,RecomputeTracksideProjectionScale,136,5,13,td5_camera.c;td5_render.c,2,,0,0,4,1,[td5_camera.c] e_state[i]; |     } | } |  | /* RecomputeTracksideProjectionScale @ 0x0043E900 |  * Recomputes frustum plane normals using current g_depthFovFactor. |  * Original also call
 0043e990,InitializeTireTrackPool,433,3,0,,1,,0,0,0,0,
 0043eb50,UpdateTireTrackPool,1235,5,6,td5_game.c;td5_vfx.c;td5_vfx.h,1,HOOK_POINT,1,0,2,0,"[td5_game.c] @ 0x0040C120 (LAB_0040c7ba). Sim |          * tick only runs UpdateTireTrackPool() (per-slot intensity decay), |          * NOT the per-actor emit step. Dispatch n"
@@ -458,9 +458,9 @@ address,name,body_size,level,port_citations,files_cited,callers_count,bookmark_t
 0043fbc0,DecompressTrackDataStream,190,3,0,,1,,0,0,0,0,
 0043fc80,ParseZipCentralDirectory,2341,4,5,td5_asset.c;td5_asset.h,3,,0,0,0,0,[td5_asset.c] set pipeline to clean C11. |  * The original ZIP reader is at 0x43FC80..0x440A23 and uses a custom streaming |  * DEFLATE decompressor. This source port uses miniz
 004405b0,DecompressZipEntry,473,4,4,td5_asset.c;td5_asset.h,2,,0,0,0,0,"[td5_asset.c] Entry Decompression |  * |  * Reimplements DecompressZipEntry (0x4405B0). |  * |  * Reads the local file header, then either copies (stored) or inflates |  * (deflate) t"
-00440790,ReadArchiveEntry,207,5,7,td5_asset.c;td5_asset.h,12,,0,0,4,0,[td5_asset.c] the ZIP. |  * This matches original behavior at 0x4409B0 and 0x440790. |  * ======================================================================== */ |  | /** |  * Try
+00440790,ReadArchiveEntry,207,5,9,td5_asset.c;td5_asset.h;td5_fmv.c;td5_game.c,12,,0,0,5,0,[td5_asset.c] the ZIP. |  * This matches original behavior at 0x4409B0 and 0x440790. |  * ======================================================================== */ |  | /** |  * Try
 00440860,OpenArchiveFileForRead,327,5,4,td5_asset.h,5,,0,0,2,0,[td5_asset.h] B0  DecompressZipEntry |  *   0x440790  ReadArchiveEntry |  *   0x440860  OpenArchiveFileForRead |  *   0x4409B0  GetArchiveEntrySize |  *   0x442CF0  FindArchiveEntryB
-004409b0,GetArchiveEntrySize,115,5,7,td5_asset.c;td5_asset.h,9,,0,0,4,0,[td5_asset.c] ed instead of the ZIP. |  * This matches original behavior at 0x4409B0 and 0x440790. |  * ======================================================================== *
+004409b0,GetArchiveEntrySize,115,5,9,td5_asset.c;td5_asset.h;td5_fmv.c;td5_game.c,9,,0,0,7,0,[td5_asset.c] ed instead of the ZIP. |  * This matches original behavior at 0x4409B0 and 0x440790. |  * ======================================================================== *
 00440a30,UpdateVehicleLoopingAudioState,124,4,6,td5_sound.c;td5_sound.h,1,,0,0,0,0,[td5_sound.c] o backend. |  * |  * Key original functions reimplemented: |  *   0x440A30  UpdateVehicleLoopingAudioState |  *   0x440AB0  StartTrackedVehicleAudio |  *   0x440AE0  Stop
 00440ab0,StartTrackedVehicleAudio,34,5,9,td5_ai.c;td5_sound.c;td5_sound.h,1,,0,0,1,0,[td5_ai.c] rt/Stop hooks — wire to ported StartTrackedVehicleAudio |  * (0x00440AB0) / StopTrackedVehicleAudio (0x00440AE0) in td5_sound.c. */ | static inline void td5_enc_sta
 00440ae0,StopTrackedVehicleAudio,19,5,14,td5_ai.c;td5_sound.c;td5_sound.h,2,,0,0,3,0,[td5_ai.c] enabled) { |                     /* StopTrackedVehicleAudio @ 0x00440AE0 */ |                     td5_sound_stop_tracked_vehicle_audio(); |                 } |
@@ -471,11 +471,11 @@ address,name,body_size,level,port_citations,files_cited,callers_count,bookmark_t
 00441d90,PlayVehicleSoundAtPosition,498,5,12,td5_physics.c;td5_sound.c;td5_sound.h,5,,0,0,5,1,"[td5_physics.c] t_grounded; |         bounce   /= cnt_grounded; |     } |  |     /* PlayVehicleSoundAtPosition(0x17, bounce*50, ...) call from the |      * original is omitted — sound si"
 00441f90,BuildCubicSpline3D,250,4,4,td5_camera.c,1,,0,0,0,1,"[td5_camera.c] control_points) { |     /* |      * Catmull-Rom spline builder (0x441F90). |      * Input: 4 control points at control_points, each 3 ints (X,Y,Z in 8.8 fixed). |"
 00442090,EvaluateCubicSpline3D,207,4,4,td5_camera.c,1,,0,0,0,0,"[td5_camera.c] state, int t) { |     /* |      * Catmull-Rom spline evaluator (0x442090). |      * t is 12-bit fixed-point: 0 = start, 0xFFF = end. |      * result[axis] = ((a*t^3 + b"
-00442160,InitializeRaceVideoConfiguration,4,4,4,td5_game.c;td5_game.h,1,,0,0,0,0,[td5_game.c] -- DONE (td5_game_show_legal_screens) |  * 0x442160  InitializeRaceVideoConfiguration   -- DONE (in td5_game_init) |  * 0x414740  InitializeFront
-00442170,RunMainGameLoop,991,4,8,td5_game.c;td5_game.h,1,HOOK_POINT,1,0,0,0,[td5_game.c] -- DONE (td5_game_init/tick/shutdown) |  * 0x442170  RunMainGameLoop                    -- DONE (td5_game_tick) |  * 0x42AA10  InitializeRaceSess
-00442560,LoadStaticTrackTextureHeader,260,3,0,,1,,0,0,0,0,
+00442160,InitializeRaceVideoConfiguration,4,5,9,td5_game.c;td5_game.h,1,,0,0,3,0,[td5_game.c] l-game-tier) |  * |  * InitializeRaceVideoConfiguration thunk @ 0x00442160 [ARCH-DIVERGENCE] |  *   Orig body: 5 bytes `JMP 0x0042a950` (single tail-call to the impl)
+00442170,RunMainGameLoop,991,5,13,td5_game.c;td5_game.h,1,HOOK_POINT,1,0,2,0,"[td5_game.c] frame logic live in |  *   td5_game_tick (= RunMainGameLoop @ 0x00442170). |  */ | int td5_game_init(void) { |     /* Initialize game state machine (0x442170 entry, 0x4"
+00442560,LoadStaticTrackTextureHeader,260,5,6,td5_game.c,1,,0,0,3,0,[td5_game.c] LoadStaticTrackTextureHeader. |  *         [ARCH-DIVERGENCE @ 0x00442560 LoadStaticTrackTextureHeader] |  *         Orig: GetArchiveEntrySize/ReadArchiveEntry from
 00442670,LoadTrackTextureSet,255,4,5,td5_asset.c;td5_asset.h,1,,0,0,0,0,"[td5_asset.c] is the level ZIP number (1..39), i.e. the same index |      * LoadTrackTextureSet passes to InitializeTrackStripMetadata. |      */ |     int loaded = 0; |     const TD"
-00442770,LoadRaceTexturePages,1397,5,19,td5_asset.c;td5_asset.h;td5_render.c,1,,0,0,2,1,[td5_asset.c] ; |     } |     return 0; | } |  | /* Original LoadRaceTexturePages @ 0x00442770: silently skips upload when the |  * static.hed pointer for a slot is zero — no placeholder
+00442770,LoadRaceTexturePages,1397,5,24,td5_asset.c;td5_asset.h;td5_game.c;td5_render.c,1,,0,0,5,1,[td5_asset.c] ; |     } |     return 0; | } |  | /* Original LoadRaceTexturePages @ 0x00442770: silently skips upload when the |  * static.hed pointer for a slot is zero — no placeholder
 00442cf0,FindArchiveEntryByName,56,5,9,td5_asset.c;td5_asset.h;td5_vfx.c,20,,0,0,2,0,[td5_asset.c] ================================ |  * FindArchiveEntryByName (0x442CF0) |  * |  * Case-insensitive search through the static.hed named entry array. |  * The original us
 00442d30,ResampleTexturePageToEntryDimensions,195,3,0,,2,,0,0,0,0,
 00442e00,DecodeArchiveImageToRgb24,925,5,4,td5_asset.c;td5_asset.h,3,,0,0,2,0,"[td5_asset.c] - TGA decoder matches original DecodeArchiveImageToRgb24 (0x442E00) exactly: |  *     supports types 1, 2, 9, 10 with 8/16/24/32-bit source and BGR24 output |  *"
@@ -486,15 +486,15 @@ address,name,body_size,level,port_citations,files_cited,callers_count,bookmark_t
 004437c0,ApplyDampedSuspensionForce,302,5,12,td5_physics.c;td5_physics.h;td5_pilot_trace_traffic.c;td5_pilot_trace_traffic.h,1,,0,0,3,0,"[td5_physics.c] 5_pilot_trace_traffic.h"" /* precise-port pilot CSV emit for 0x004437C0 + 0x004438F0 */ | #include ""td5_pilot_trace_v2v_contact.h"" /* pool15 V2V pilot trace */ | #in"
 004438f0,IntegrateVehicleFrictionForces,1018,5,16,td5_physics.c;td5_physics.h;td5_pilot_trace_traffic.c;td5_pilot_trace_traffic.h,1,,0,0,4,0,"[td5_physics.c] _traffic.h"" /* precise-port pilot CSV emit for 0x004437C0 + 0x004438F0 */ | #include ""td5_pilot_trace_v2v_contact.h"" /* pool15 V2V pilot trace */ | #include ""td5_pi"
 00443cf0,UpdateTrafficVehiclePose,479,5,18,td5_physics.c;td5_track.c;td5_track.h,5,,0,0,4,0,"[td5_physics.c] ngle derivation, matching UpdateTrafficVehiclePose |      * @ 0x00443CF0. */ |  |     /* Update chassis track position from new world XZ. |      * [CONFIRMED @ 0x443D40"
-00443ed0,UpdateTrafficActorMotion,216,5,24,td5_ai.c;td5_physics.c,1,,0,0,3,0,[td5_ai.c] I) |  *     - all others:            UpdateTrafficRoutePlan + UpdateTrafficActorMotion |  * |  *   After traffic loop: UpdateSpecialTrafficEncounter |  * ==============
-00443fb0,NormalizeActorTrackWrapState,57,4,19,td5_ai.c;td5_game.c;td5_track.c,3,HOOK_POINT,1,0,0,1,[td5_ai.c] /* [0x004356cd-ce] NormalizeActorTrackWrapState(actor) at 0x00443fb0 */ |             td5_track_normalize_actor_wrap((TD5_Actor *)a); |  |             /* [0x004356d
+00443ed0,UpdateTrafficActorMotion,216,5,26,td5_ai.c;td5_physics.c,1,,0,0,4,0,[td5_ai.c] I) |  *     - all others:            UpdateTrafficRoutePlan + UpdateTrafficActorMotion |  * |  *   After traffic loop: UpdateSpecialTrafficEncounter |  * ==============
+00443fb0,NormalizeActorTrackWrapState,57,5,21,td5_ai.c;td5_game.c;td5_track.c,3,HOOK_POINT,1,0,5,1,[td5_ai.c] /* [0x004356cd-ce] NormalizeActorTrackWrapState(actor) at 0x00443fb0 */ |             td5_track_normalize_actor_wrap((TD5_Actor *)a); |  |             /* [0x004356d
 00443ff0,ResolveActorSegmentBoundary,125,5,21,td5_ai.c;td5_track.c;td5_track.h,1,,0,0,3,1,[td5_ai.c] t) |  *            * Call ResolveActorSegmentBoundary(actor) (0x00443FF0) |  *   9. Advance DAT_004b08b8 by 4 bytes (past consumed entry). |  *  10. Zero post-call st
 00444070,BindTrackStripRuntimePointers,112,5,9,td5_track.c;td5_track.h,1,,0,0,1,0,"[td5_track.c] byte-faithful port |  * |  * Original listing (29 instructions, 0x00444070-0x004440E0): |  *   MOV EAX,[0x004aed90]                ; blob base ptr |  *   MOV [0x004c3da"
-004440f0,UpdateActorTrackPosition,4908,5,56,td5_camera.c;td5_physics.c;td5_pilot_trace_004440F0.c;td5_pilot_trace_004440F0.h;td5_track.c;td5_track.h,7,,0,0,6,1,"[td5_camera.c] nt_bz; |         pc[0] = point_cx; pc[1] = point_cz; |  |         UpdateActorTrackPosition(probe_a, pa); |         ComputeActorTrackContactNormal(probe_a, pa, &norm_a_y"
-00445450,ComputeActorTrackContactNormal,556,4,14,td5_camera.c;td5_physics.c;td5_track.c;td5_track.h,4,,0,0,0,0,"[td5_camera.c] cz; |  |         UpdateActorTrackPosition(probe_a, pa); |         ComputeActorTrackContactNormal(probe_a, pa, &norm_a_y); |  |         UpdateActorTrackPosition(probe_b, p"
-004456d0,ComputeTrackTriangleBarycentrics,263,4,2,td5_track.c,1,,0,0,0,0,"[td5_track.c] ======================== |  * Barycentric Contact Resolution (0x4456D0 / 0x445A70) |  * |  * Given a span, sub-lane, and world XZ position, determines which triangle |"
+004440f0,UpdateActorTrackPosition,4908,5,56,td5_camera.c;td5_physics.c;td5_pilot_trace_004440F0.c;td5_pilot_trace_004440F0.h;td5_track.c;td5_track.h,7,,0,0,8,1,"[td5_camera.c] nt_bz; |         pc[0] = point_cx; pc[1] = point_cz; |  |         UpdateActorTrackPosition(probe_a, pa); |         ComputeActorTrackContactNormal(probe_a, pa, &norm_a_y"
+00445450,ComputeActorTrackContactNormal,556,5,19,td5_camera.c;td5_physics.c;td5_track.c;td5_track.h,4,,0,0,4,0,"[td5_camera.c] cz; |  |         UpdateActorTrackPosition(probe_a, pa); |         ComputeActorTrackContactNormal(probe_a, pa, &norm_a_y); |  |         UpdateActorTrackPosition(probe_b, p"
+004456d0,ComputeTrackTriangleBarycentrics,263,5,11,td5_track.c,1,,0,0,4,0,[td5_track.c] ic Contact Resolution (0x4456D0 / 0x445A70) |  * [CONFIRMED @ 0x004456D0 + 0x00445A70] L5 promotion sweep audit (2026-05-18). |  *   Both orig variants port-collaps
 004457e0,ComputeActorTrackContactNormalExtended,585,5,15,td5_physics.c;td5_track.c;td5_track.h,3,,0,0,6,0,"[td5_physics.c] for height computation. |          * The original (0x403720 → 0x4457E0) passes the per-wheel probe |          * state directly, which has its own sub_lane from the"
-00445a70,ComputeTrackTriangleBarycentricsWithNormal,287,4,5,td5_track.c,1,,0,0,0,0,[td5_track.c] es. |  * Port of ComputeTrackTriangleBarycentricsWithNormal @ 0x00445A70. |  * |  * Faithful sequence (verified 2026-05-01 against live Ghidra decomp): |  *   1. e1 = v
+00445a70,ComputeTrackTriangleBarycentricsWithNormal,287,5,8,td5_track.c,1,,0,0,4,0,[td5_track.c] solution (0x4456D0 / 0x445A70) |  * [CONFIRMED @ 0x004456D0 + 0x00445A70] L5 promotion sweep audit (2026-05-18). |  *   Both orig variants port-collapsed into trian
 00445b90,ComputeActorHeadingFromTrackSegment,600,5,19,td5_physics.c;td5_track.c;td5_track.h,2,,0,0,8,0,"[td5_physics.c] ginal 0x00406447: CALL ComputeActorHeadingFromTrackSegment (0x00445B90) |      *   args: (&actor->track_span_raw @+0x80, &actor->world_pos @+0x1FC, |      *"
 00445e30,InterpolateTrackSegmentNormal,217,5,8,td5_track.c;td5_track.h,1,,0,0,3,0,[td5_track.c] ** |  * InterpolateTrackSegmentNormal — byte-faithful port of 0x00445E30. |  * |  * The inner helper called by ComputeActorHeadingFromTrackSegment @ 0x00445B90 |  * aft
 00445f10,InitActorTrackSegmentPlacement,281,5,36,td5_ai.c;td5_game.c;td5_track.c;td5_track.h,4,,0,0,5,0,"[td5_ai.c] tor+0x80, actor+0x1FC). |              * Byte-faithful port @ 0x00445F10 — writes world_pos[0..2] in 24.8 FP |              * AND seeds actor +0x84 (span_accum) + +"
@@ -516,243 +516,243 @@ address,name,body_size,level,port_citations,files_cited,callers_count,bookmark_t
 00447bbb,InflateProcessFixedHuffmanBlock,134,3,0,,1,,0,0,0,0,
 00447c42,InflateProcessDynamicHuffmanBlock,927,3,0,,1,,0,0,0,0,
 00447fe2,InflateDecompress,279,3,0,,1,,0,0,0,0,
-004480fa,__fpmath_init,22,3,0,,1,,0,1,0,0,
-00448111,__fpmath_init_ret,0,3,0,,2,,0,1,0,0,
-00448112,__cfltcvt_init,55,3,0,,1,,0,1,0,0,
-0044814a,__set_new_handler,12,3,0,,2,,0,1,0,0,
-00448157,_rand,33,3,0,,22,,0,1,0,0,
-0044817c,__ftol,38,4,1,td5_physics.c,31,,0,1,0,0,"[td5_physics.c] rtFloatVec3ToShortAngles @ 0x0042E2E0 calls __ftol @ |      * 0x0044817C which EXPLICITLY sets the FPU rounding mode to TRUNCATE |      * (`OR AH, 0xC` = RC=11 = ch"
-004481a3,_malloc,17,3,0,,26,,0,1,0,0,
-004481b5,__nh_malloc,43,3,0,,1,,0,1,0,0,
-004481e1,_heap_alloc,251,3,0,,1,,0,1,0,0,
-00448248,__lock_fhandle,8,3,0,,1,,0,1,0,0,
-004482a7,__unlock_fhandle,8,3,0,,1,,0,1,0,0,
-004482dd,_controlfp,52,3,0,,2,,0,1,0,0,
-00448312,__controlfp_internal,21,3,0,,1,,0,1,0,0,
-00448328,__hw_to_abstract_fp,145,3,0,,1,,0,1,0,0,
-004483ba,__abstract_to_hw_cw,136,3,0,,1,,0,1,0,0,
+004480fa,__fpmath_init,22,0,0,,1,,0,1,0,0,
+00448111,__fpmath_init_ret,0,0,0,,2,,0,1,0,0,
+00448112,__cfltcvt_init,55,0,0,,1,,0,1,0,0,
+0044814a,__set_new_handler,12,0,0,,2,,0,1,0,0,
+00448157,_rand,33,0,0,,22,,0,1,0,0,
+0044817c,__ftol,38,0,1,td5_physics.c,31,,0,1,0,0,"[td5_physics.c] rtFloatVec3ToShortAngles @ 0x0042E2E0 calls __ftol @ |      * 0x0044817C which EXPLICITLY sets the FPU rounding mode to TRUNCATE |      * (`OR AH, 0xC` = RC=11 = ch"
+004481a3,_malloc,17,0,0,,26,,0,1,0,0,
+004481b5,__nh_malloc,43,0,0,,1,,0,1,0,0,
+004481e1,_heap_alloc,251,0,0,,1,,0,1,0,0,
+00448248,__lock_fhandle,8,0,0,,1,,0,1,0,0,
+004482a7,__unlock_fhandle,8,0,0,,1,,0,1,0,0,
+004482dd,_controlfp,52,0,0,,2,,0,1,0,0,
+00448312,__controlfp_internal,21,0,0,,1,,0,1,0,0,
+00448328,__hw_to_abstract_fp,145,0,0,,1,,0,1,0,0,
+004483ba,__abstract_to_hw_cw,136,0,0,,1,,0,1,0,0,
 00448443,sprintf_game,81,3,0,,22,,0,0,0,0,
 00448495,fclose_game,48,3,0,,10,,0,0,0,0,
-004484c6,__fclose_lk,75,3,0,,1,,0,1,0,0,
-00448512,_fwrite,46,3,0,,5,,0,1,0,0,
-00448541,_fwrite_nolock,265,3,0,,1,,0,1,0,0,
-0044864b,_fopen,48,3,0,,1,,0,1,0,0,
+004484c6,__fclose_lk,75,0,0,,1,,0,1,0,0,
+00448512,_fwrite,46,0,0,,5,,0,1,0,0,
+00448541,_fwrite_nolock,265,0,0,,1,,0,1,0,0,
+0044864b,_fopen,48,0,0,,1,,0,1,0,0,
 0044867c,fopen_game,18,3,0,,10,,0,0,0,0,
 0044868f,fread_game,46,3,0,,9,,0,0,0,0,
-004486be,_fread_nolock,231,3,0,,1,,0,1,0,0,
-004487b0,__chkstk,46,3,0,,10,,0,1,0,0,
-004487df,_free,232,3,0,,30,,0,1,0,0,
-00448849,__lock_fhandle2,8,3,0,,1,,0,1,0,0,
-004488a1,__unlock_fhandle2,8,3,0,,1,,0,1,0,0,
-00448904,_strlwr,307,3,0,,1,,0,1,0,0,
-00448a38,_toupper,110,3,0,,2,,0,1,0,0,
-00448aa7,_toupper_nolock,203,3,0,,1,,0,1,0,0,
-00448b80,_strncmp,55,3,0,,2,,0,1,0,0,
-00448bb8,_unlink,41,3,0,,1,,0,1,0,0,
-00448bf0,__allmul,51,3,0,,2,,0,1,0,0,
-00448c30,__alldiv,169,3,0,,1,,0,1,0,0,
-00448cda,_sscanf,51,3,0,,1,,0,1,0,0,
+004486be,_fread_nolock,231,0,0,,1,,0,1,0,0,
+004487b0,__chkstk,46,0,0,,10,,0,1,0,0,
+004487df,_free,232,0,0,,30,,0,1,0,0,
+00448849,__lock_fhandle2,8,0,0,,1,,0,1,0,0,
+004488a1,__unlock_fhandle2,8,0,0,,1,,0,1,0,0,
+00448904,_strlwr,307,0,0,,1,,0,1,0,0,
+00448a38,_toupper,110,0,0,,2,,0,1,0,0,
+00448aa7,_toupper_nolock,203,0,0,,1,,0,1,0,0,
+00448b80,_strncmp,55,0,0,,2,,0,1,0,0,
+00448bb8,_unlink,41,0,0,,1,,0,1,0,0,
+00448bf0,__allmul,51,0,0,,2,,0,1,0,0,
+00448c30,__alldiv,169,0,0,,1,,0,1,0,0,
+00448cda,_sscanf,51,0,0,,1,,0,1,0,0,
 00448d0e,ftell_game,33,3,0,,3,,0,0,0,0,
-00448d30,_ftell_nolock,352,3,0,,2,,0,1,0,0,
+00448d30,_ftell_nolock,352,0,0,,2,,0,1,0,0,
 00448e91,fseek_game,43,3,0,,6,,0,0,0,0,
-00448ebd,_fseek,140,3,0,,1,,0,1,0,0,
-00448f4a,_makepath,144,3,0,,1,,0,1,0,0,
-00448fdb,_splitpath,326,3,0,,1,,0,1,0,0,
-00449122,_ceil,206,3,0,,1,,0,1,0,0,
-00449200,_strnicmp,256,3,0,,1,,0,1,0,0,
+00448ebd,_fseek,140,0,0,,1,,0,1,0,0,
+00448f4a,_makepath,144,0,0,,1,,0,1,0,0,
+00448fdb,_splitpath,326,0,0,,1,,0,1,0,0,
+00449122,_ceil,206,0,0,,1,,0,1,0,0,
+00449200,_strnicmp,256,0,0,,1,,0,1,0,0,
 00449310,stricmp_game,207,3,0,,3,,0,0,0,0,
-004493e0,entry,232,4,2,td5_game.c;td5_game.h,0,,0,1,0,0,"[td5_game.c] Original function addresses and implementation status |  * |  * 0x4493E0  entry                              -- N/A (CRT, not reimplemented) |  * 0x430A90  GameWinMai"
-004494e8,__amsg_exit,33,3,0,,8,,0,1,0,0,
+004493e0,entry,232,0,2,td5_game.c;td5_game.h,0,,0,1,0,0,"[td5_game.c] Original function addresses and implementation status |  * |  * 0x4493E0  entry                              -- N/A (CRT, not reimplemented) |  * 0x430A90  GameWinMai"
+004494e8,__amsg_exit,33,0,0,,8,,0,1,0,0,
 0044950d,FatalStartupExit,34,3,0,,1,,0,0,0,0,
-00449531,__init_fp_control,17,3,0,,1,,0,1,0,0,
-00449543,__detect_sse_inner,61,3,0,,1,,0,1,0,0,
-00449581,__IsProcessorFeaturePresent_fp,40,3,0,,1,,0,1,0,0,
-004495aa,__cropzeros,89,3,0,,0,,0,1,0,0,
-0044966a,__fassign,61,3,0,,0,,0,1,0,0,
-004496a8,_ecvt,96,3,0,,1,,0,1,0,0,
-00449709,__cftoe_internal,193,3,0,,2,,0,1,0,0,
-004497cb,_fcvt,84,3,0,,1,,0,1,0,0,
-00449820,__cftof_internal,166,3,0,,2,,0,1,0,0,
-004498c7,_gcvt,146,3,0,,1,,0,1,0,0,
-0044995a,__cfltcvt,80,3,0,,0,,0,1,0,0,
-004499ab,__shift_digits,36,3,0,,2,,0,1,0,0,
+00449531,__init_fp_control,17,0,0,,1,,0,1,0,0,
+00449543,__detect_sse_inner,61,0,0,,1,,0,1,0,0,
+00449581,__IsProcessorFeaturePresent_fp,40,0,0,,1,,0,1,0,0,
+004495aa,__cropzeros,89,0,0,,0,,0,1,0,0,
+0044966a,__fassign,61,0,0,,0,,0,1,0,0,
+004496a8,_ecvt,96,0,0,,1,,0,1,0,0,
+00449709,__cftoe_internal,193,0,0,,2,,0,1,0,0,
+004497cb,_fcvt,84,0,0,,1,,0,1,0,0,
+00449820,__cftof_internal,166,0,0,,2,,0,1,0,0,
+004498c7,_gcvt,146,0,0,,1,,0,1,0,0,
+0044995a,__cfltcvt,80,0,0,,0,,0,1,0,0,
+004499ab,__shift_digits,36,0,0,,2,,0,1,0,0,
 004499d0,InitPrimaryTlsSlot,83,3,0,,1,,0,0,0,0,
-00449a24,__initptd,18,3,0,,3,,0,1,0,0,
-00449a37,_getptd,102,3,0,,6,,0,1,0,0,
-00449a9e,_freeptd,159,3,0,,1,,0,1,0,0,
-00449b3e,__callnewh,26,3,0,,2,,0,1,0,0,
-00449b59,__getLinkerVersion,44,3,0,,1,,0,1,0,0,
-00449b86,__heap_init,327,3,0,,1,,0,1,0,0,
+00449a24,__initptd,18,0,0,,3,,0,1,0,0,
+00449a37,_getptd,102,0,0,,6,,0,1,0,0,
+00449a9e,_freeptd,159,0,0,,1,,0,1,0,0,
+00449b3e,__callnewh,26,0,0,,2,,0,1,0,0,
+00449b59,__getLinkerVersion,44,0,0,,1,,0,1,0,0,
+00449b86,__heap_init,327,0,0,,1,,0,1,0,0,
 00449cce,InitProcessHeap,92,3,0,,1,,0,0,0,0,
-00449d2b,__sbh_heap_init,71,3,0,,1,,0,1,0,0,
-00449d73,__sbh_find_block,42,3,0,,1,,0,1,0,0,
-00449d9e,__sbh_free_block,808,3,0,,1,,0,1,0,0,
-0044a0c7,_heap_alloc_base,776,3,0,,2,,0,1,0,0,
-0044a3d0,__sbh_alloc_new_region,176,3,0,,1,,0,1,0,0,
-0044a481,__sbh_alloc_new_group,250,3,0,,1,,0,1,0,0,
-0044a57c,__sbh_new_region,323,3,0,,2,,0,1,0,0,
-0044a6c0,_heap_free_region,85,3,0,,1,,0,1,0,0,
-0044a716,__sbh_decommit_pages,193,3,0,,1,,0,1,0,0,
-0044a7d8,__sbh_find_block_old,86,3,0,,1,,0,1,0,0,
-0044a82f,__sbh_page_decommit_check,68,3,0,,1,,0,1,0,0,
-0044a874,__sbh_alloc_block,519,3,0,,2,,0,1,0,0,
-0044aa7c,_flsbuf,291,3,0,,1,,0,1,0,0,
-0044aba0,_mtinitlocks,40,3,0,,1,,0,1,0,0,
-0044abc9,_lock,96,3,0,,21,,0,1,0,0,
-0044ac2a,_unlock,20,3,0,,24,,0,1,0,0,
-0044ac40,__global_unwind2,31,3,0,,0,,0,1,0,0,
-0044ac82,__local_unwind2,103,3,0,,1,,0,1,0,0,
-0044ad16,__NLG_Notify,23,3,0,,1,,0,1,0,0,
-0044adf5,__local_unwind2_wrapper,26,3,0,,0,,0,1,0,0,
-0044ae10,_fputc,279,3,0,,3,,0,1,0,0,
-0044af28,_output,1824,3,0,,1,,0,1,0,0,
-0044b669,_write_char,52,3,0,,3,,0,1,0,0,
-0044b69e,_write_multi_char,48,3,0,,1,,0,1,0,0,
-0044b6cf,_write_string,55,3,0,,1,,0,1,0,0,
-0044b707,__va_arg_int,12,3,0,,1,,0,1,0,0,
-0044b714,__va_arg_double,15,3,0,,1,,0,1,0,0,
-0044b724,__va_arg_short,13,3,0,,1,,0,1,0,0,
-0044b7ee,_lock_file,46,3,0,,5,,0,1,0,0,
-0044b81d,_lock_stream,34,3,0,,2,,0,1,0,0,
-0044b840,_unlock_file,46,3,0,,6,,0,1,0,0,
-0044b86f,_unlock_stream,34,3,0,,2,,0,1,0,0,
-0044b892,_close,92,3,0,,2,,0,1,0,0,
-0044b8ef,_close_nolock,130,3,0,,1,,0,1,0,0,
-0044b972,__freebuf,42,3,0,,1,,0,1,0,0,
-0044b99d,_fflush,45,3,0,,1,,0,1,0,0,
-0044b9cb,_flush,91,3,0,,4,,0,1,0,0,
-0044ba30,_flushall,163,3,0,,0,,0,1,0,0,
-0044bad4,_write,100,3,0,,3,,0,1,0,0,
-0044bb39,_write_nolock,394,3,0,,2,,0,1,0,0,
-0044bcd0,_memmove,820,3,0,,3,,0,1,0,0,
-0044c005,_openfile,367,3,0,,1,,0,1,0,0,
-0044c175,_getstream,199,3,0,,1,,0,1,0,0,
-0044c23d,_filbuf,219,3,0,,2,,0,1,0,0,
-0044c319,_read,100,3,0,,2,,0,1,0,0,
-0044c37e,_read_nolock,472,3,0,,2,,0,1,0,0,
-0044c557,_stbuf,140,3,0,,0,,0,1,0,0,
-0044c610,_strcpy,6,3,0,,6,,0,1,0,0,
-0044c620,_strcat,223,3,0,,1,,0,1,0,0,
-0044c700,__crtLCMapStringA,547,3,0,,4,,0,1,0,0,
-0044c924,_strnlen,42,3,0,,1,,0,1,0,0,
-0044c94f,__isctype,116,3,0,,8,,0,1,0,0,
-0044c9c4,_dosmaperr,114,3,0,,7,,0,1,0,0,
-0044ca37,_errno,8,3,0,,22,,0,1,0,0,
-0044ca40,__doserrno,8,3,0,,13,,0,1,0,0,
-0044ca49,_input,2596,3,0,,1,,0,1,0,0,
-0044d46e,_toupper_lk,54,3,0,,1,,0,1,0,0,
-0044d4a5,_fgetc,25,3,0,,2,,0,1,0,0,
-0044d4bf,_ungetc,22,3,0,,1,,0,1,0,0,
-0044d4d6,_fgetc_unlocked,35,3,0,,1,,0,1,0,0,
-0044d500,_strlen,122,3,0,,7,,0,1,0,0,
-0044d57b,_ioinit,443,3,0,,1,,0,1,0,0,
-0044d737,_lseek,100,3,0,,3,,0,1,0,0,
-0044d79c,_lseek_nolock,114,3,0,,5,,0,1,0,0,
-0044d80f,_mbsdec,108,3,0,,1,,0,1,0,0,
-0044d87c,_setmbcp,428,3,0,,1,,0,1,0,0,
-0044da29,___get_codepage,73,3,0,,1,,0,1,0,0,
-0044da73,__codepage_from_lcid,50,3,0,,1,,0,1,0,0,
-0044daa6,___initctype,40,3,0,,1,,0,1,0,0,
-0044dacf,___initctype_impl,388,3,0,,1,,0,1,0,0,
-0044dc54,___initmbctable,27,3,0,,3,,0,1,0,0,
-0044dc70,_mbsncpy,153,3,0,,1,,0,1,0,0,
-0044dd0a,__raise_exc_single,83,3,0,,1,,0,1,0,0,
-0044dd5e,__handle_fp_exc,151,3,0,,1,,0,1,0,0,
-0044ddf6,__build_exc_record,690,3,0,,1,,0,1,0,0,
-0044e0a9,_fpieee_flt,534,3,0,,1,,0,1,0,0,
-0044e2c0,__raise_exc,135,3,0,,2,,0,1,0,0,
-0044e348,__set_errno_from_matherr,39,3,0,,2,,0,1,0,0,
-0044e370,__get_fname,36,3,0,,1,,0,1,0,0,
-0044e395,__abstract_sw,44,3,0,,1,,0,1,0,0,
-0044e3c2,__frnd,17,3,0,,1,,0,1,0,0,
-0044e3d4,_ldexp,40,3,0,,1,,0,1,0,0,
-0044e3fd,_fpclass,89,3,0,,1,,0,1,0,0,
-0044e457,_frexp,192,3,0,,1,,0,1,0,0,
-0044e518,_statusfp,13,3,0,,1,,0,1,0,0,
-0044e526,_clearfp_nw,14,3,0,,1,,0,1,0,0,
-0044e535,__ctrlfp,34,3,0,,4,,0,1,0,0,
-0044e558,_fpreset,85,3,0,,1,,0,1,0,0,
-0044e5ae,_tolower,110,3,0,,1,,0,1,0,0,
-0044e61d,_tolower_nolock,202,3,0,,3,,0,1,0,0,
-0044e6e8,_cinit,44,3,0,,1,,0,1,0,0,
-0044e715,_exit,16,3,0,,1,,0,1,0,0,
-0044e726,__exit,16,3,0,,1,,0,1,0,0,
-0044e737,_doexit,162,3,0,,2,,0,1,0,0,
-0044e7dc,__lock_fh_init,8,3,0,,1,,0,1,0,0,
-0044e7e5,__unlock_fh_init,8,3,0,,1,,0,1,0,0,
-0044e7ee,__initterm_real,25,3,0,,2,,0,1,0,0,
-0044e808,_xcptfilter,317,3,0,,0,,0,1,0,0,
-0044e946,__XcptActTab_lookup,57,3,0,,1,,0,1,0,0,
-0044e980,_pgmptr_init,87,3,0,,1,,0,1,0,0,
-0044e9d8,_setenvp,184,3,0,,1,,0,1,0,0,
-0044ea91,_setargv,152,3,0,,1,,0,1,0,0,
-0044eb2a,_parse_cmdline,435,3,0,,1,,0,1,0,0,
-0044ecde,_crt_setenv,305,3,0,,1,,0,1,0,0,
-0044ee10,_cexit,56,3,0,,2,,0,1,0,0,
-0044ee49,__initterm,338,3,0,,3,,0,1,0,0,
-0044ef9c,__IsZeroMan,72,3,0,,1,,0,1,0,0,
-0044efe5,__IncMan,85,3,0,,1,,0,1,0,0,
-0044f03b,__RoundMan,139,3,0,,1,,0,1,0,0,
-0044f0c7,__CopyMan,26,3,0,,1,,0,1,0,0,
-0044f0e2,__ZeroTail,11,3,0,,1,,0,1,0,0,
-0044f0ee,__IsZeroTail,26,3,0,,1,,0,1,0,0,
-0044f109,__ShrTail,140,3,0,,1,,0,1,0,0,
-0044f196,__ld12cvt,363,3,0,,2,,0,1,0,0,
-0044f302,__ld12tod,21,3,0,,1,,0,1,0,0,
-0044f318,__ld12tof,21,3,0,,1,,0,1,0,0,
-0044f32e,__atodbl,44,3,0,,1,,0,1,0,0,
-0044f35b,__atoflt,44,3,0,,1,,0,1,0,0,
-0044f388,__cftoe,118,3,0,,3,,0,1,0,0,
-0044f3ff,__fltout,91,3,0,,3,,0,1,0,0,
-0044f45b,__dtold12,181,3,0,,1,,0,1,0,0,
-0044f520,_memset,87,3,0,,7,,0,1,0,0,
-0044f580,_memcpy,820,3,0,,3,,0,1,0,0,
-0044f8b5,__amsg_exit_nomem,8,3,0,,2,,0,1,0,0,
-0044f8be,_calloc,316,3,0,,6,,0,1,0,0,
-0044f957,__unlock_fh_9,8,3,0,,1,,0,1,0,0,
-0044f9e0,__unlock_fh_9b,8,3,0,,1,,0,1,0,0,
-0044f9fb,_strtol,22,3,0,,1,,0,1,0,0,
-0044fa12,_strtoxl,516,3,0,,1,,0,1,0,0,
-0044fc30,_strchr,203,3,0,,1,,0,1,0,0,
-0044fcf0,_strstr,127,3,0,,1,,0,1,0,0,
-0044fd70,__getbuf,67,3,0,,3,,0,1,0,0,
-0044fdb4,_isatty,40,3,0,,2,,0,1,0,0,
-0044fddd,_wctomb,88,3,0,,1,,0,1,0,0,
-0044fe36,_wctomb_nolock,104,3,0,,1,,0,1,0,0,
-0044fea0,__aulldiv,103,3,0,,1,,0,1,0,0,
-0044ff10,__aullrem,116,3,0,,1,,0,1,0,0,
-00450006,_alloc_osfhnd,290,3,0,,1,,0,1,0,0,
-00450129,_set_osfhnd,123,3,0,,1,,0,1,0,0,
-004501a5,_free_osfhnd,126,3,0,,1,,0,1,0,0,
-00450224,_get_osfhandle,65,3,0,,4,,0,1,0,0,
-00450266,_lock_fh,94,3,0,,6,,0,1,0,0,
-004502c5,_unlock_fh,33,3,0,,6,,0,1,0,0,
-004502e7,_commit,146,3,0,,1,,0,1,0,0,
-0045037a,_sopen,718,3,0,,1,,0,1,0,0,
-004506e0,_strncpy,253,3,0,,2,,0,1,0,0,
-004507e0,_strcspn,61,3,0,,0,,0,1,0,0,
-00450820,_strpbrk,57,3,0,,0,,0,1,0,0,
-0045085a,__crtGetStringTypeA,328,3,0,,2,,0,1,0,0,
-004509a3,_mbtowc,92,3,0,,1,,0,1,0,0,
-00450a00,_mbtowc_nolock,200,3,0,,1,,0,1,0,0,
-00450ac9,_isspace,39,3,0,,2,,0,1,0,0,
-00450b00,__allshl,30,3,0,,1,,0,1,0,0,
-00450b1f,_ungetc_nolock,109,3,0,,1,,0,1,0,0,
-00450b8d,__retval_zero,2,3,0,,1,,0,1,0,0,
-00450b90,_iscntrl,16,3,0,,1,,0,1,0,0,
-00450ba1,__chval,48,3,0,,1,,0,1,0,0,
-00450bd2,__crtMessageBoxA,136,3,0,,1,,0,1,0,0,
-00450c5b,__addl,32,3,0,,3,,0,1,0,0,
-00450c7c,___add_12,93,3,0,,2,,0,1,0,0,
-00450cda,__shl_12,45,3,0,,3,,0,1,0,0,
-00450d08,__shr_12,44,3,0,,2,,0,1,0,0,
-00450d35,__mtold12,198,3,0,,1,,0,1,0,0,
-00450dfc,__strgtold12,1184,3,0,,2,,0,1,0,0,
-004512cd,$I10_OUTPUT,658,3,0,,1,,0,1,0,0,
-00451560,_chsize,292,3,0,,1,,0,1,0,0,
-00451685,__ld12mul,543,3,0,,2,,0,1,0,0,
-004518a5,__multtenpow12,123,3,0,,2,,0,1,0,0,
-00451921,_setmode,96,3,0,,1,,0,1,0,0,
+00449d2b,__sbh_heap_init,71,0,0,,1,,0,1,0,0,
+00449d73,__sbh_find_block,42,0,0,,1,,0,1,0,0,
+00449d9e,__sbh_free_block,808,0,0,,1,,0,1,0,0,
+0044a0c7,_heap_alloc_base,776,0,0,,2,,0,1,0,0,
+0044a3d0,__sbh_alloc_new_region,176,0,0,,1,,0,1,0,0,
+0044a481,__sbh_alloc_new_group,250,0,0,,1,,0,1,0,0,
+0044a57c,__sbh_new_region,323,0,0,,2,,0,1,0,0,
+0044a6c0,_heap_free_region,85,0,0,,1,,0,1,0,0,
+0044a716,__sbh_decommit_pages,193,0,0,,1,,0,1,0,0,
+0044a7d8,__sbh_find_block_old,86,0,0,,1,,0,1,0,0,
+0044a82f,__sbh_page_decommit_check,68,0,0,,1,,0,1,0,0,
+0044a874,__sbh_alloc_block,519,0,0,,2,,0,1,0,0,
+0044aa7c,_flsbuf,291,0,0,,1,,0,1,0,0,
+0044aba0,_mtinitlocks,40,0,0,,1,,0,1,0,0,
+0044abc9,_lock,96,0,0,,21,,0,1,0,0,
+0044ac2a,_unlock,20,0,0,,24,,0,1,0,0,
+0044ac40,__global_unwind2,31,0,0,,0,,0,1,0,0,
+0044ac82,__local_unwind2,103,0,0,,1,,0,1,0,0,
+0044ad16,__NLG_Notify,23,0,0,,1,,0,1,0,0,
+0044adf5,__local_unwind2_wrapper,26,0,0,,0,,0,1,0,0,
+0044ae10,_fputc,279,0,0,,3,,0,1,0,0,
+0044af28,_output,1824,0,0,,1,,0,1,0,0,
+0044b669,_write_char,52,0,0,,3,,0,1,0,0,
+0044b69e,_write_multi_char,48,0,0,,1,,0,1,0,0,
+0044b6cf,_write_string,55,0,0,,1,,0,1,0,0,
+0044b707,__va_arg_int,12,0,0,,1,,0,1,0,0,
+0044b714,__va_arg_double,15,0,0,,1,,0,1,0,0,
+0044b724,__va_arg_short,13,0,0,,1,,0,1,0,0,
+0044b7ee,_lock_file,46,0,0,,5,,0,1,0,0,
+0044b81d,_lock_stream,34,0,0,,2,,0,1,0,0,
+0044b840,_unlock_file,46,0,0,,6,,0,1,0,0,
+0044b86f,_unlock_stream,34,0,0,,2,,0,1,0,0,
+0044b892,_close,92,0,0,,2,,0,1,0,0,
+0044b8ef,_close_nolock,130,0,0,,1,,0,1,0,0,
+0044b972,__freebuf,42,0,0,,1,,0,1,0,0,
+0044b99d,_fflush,45,0,0,,1,,0,1,0,0,
+0044b9cb,_flush,91,0,0,,4,,0,1,0,0,
+0044ba30,_flushall,163,0,0,,0,,0,1,0,0,
+0044bad4,_write,100,0,0,,3,,0,1,0,0,
+0044bb39,_write_nolock,394,0,0,,2,,0,1,0,0,
+0044bcd0,_memmove,820,0,0,,3,,0,1,0,0,
+0044c005,_openfile,367,0,0,,1,,0,1,0,0,
+0044c175,_getstream,199,0,0,,1,,0,1,0,0,
+0044c23d,_filbuf,219,0,0,,2,,0,1,0,0,
+0044c319,_read,100,0,0,,2,,0,1,0,0,
+0044c37e,_read_nolock,472,0,0,,2,,0,1,0,0,
+0044c557,_stbuf,140,0,0,,0,,0,1,0,0,
+0044c610,_strcpy,6,0,0,,6,,0,1,0,0,
+0044c620,_strcat,223,0,0,,1,,0,1,0,0,
+0044c700,__crtLCMapStringA,547,0,0,,4,,0,1,0,0,
+0044c924,_strnlen,42,0,0,,1,,0,1,0,0,
+0044c94f,__isctype,116,0,0,,8,,0,1,0,0,
+0044c9c4,_dosmaperr,114,0,0,,7,,0,1,0,0,
+0044ca37,_errno,8,0,0,,22,,0,1,0,0,
+0044ca40,__doserrno,8,0,0,,13,,0,1,0,0,
+0044ca49,_input,2596,0,0,,1,,0,1,0,0,
+0044d46e,_toupper_lk,54,0,0,,1,,0,1,0,0,
+0044d4a5,_fgetc,25,0,0,,2,,0,1,0,0,
+0044d4bf,_ungetc,22,0,0,,1,,0,1,0,0,
+0044d4d6,_fgetc_unlocked,35,0,0,,1,,0,1,0,0,
+0044d500,_strlen,122,0,0,,7,,0,1,0,0,
+0044d57b,_ioinit,443,0,0,,1,,0,1,0,0,
+0044d737,_lseek,100,0,0,,3,,0,1,0,0,
+0044d79c,_lseek_nolock,114,0,0,,5,,0,1,0,0,
+0044d80f,_mbsdec,108,0,0,,1,,0,1,0,0,
+0044d87c,_setmbcp,428,0,0,,1,,0,1,0,0,
+0044da29,___get_codepage,73,0,0,,1,,0,1,0,0,
+0044da73,__codepage_from_lcid,50,0,0,,1,,0,1,0,0,
+0044daa6,___initctype,40,0,0,,1,,0,1,0,0,
+0044dacf,___initctype_impl,388,0,0,,1,,0,1,0,0,
+0044dc54,___initmbctable,27,0,0,,3,,0,1,0,0,
+0044dc70,_mbsncpy,153,0,0,,1,,0,1,0,0,
+0044dd0a,__raise_exc_single,83,0,0,,1,,0,1,0,0,
+0044dd5e,__handle_fp_exc,151,0,0,,1,,0,1,0,0,
+0044ddf6,__build_exc_record,690,0,0,,1,,0,1,0,0,
+0044e0a9,_fpieee_flt,534,0,0,,1,,0,1,0,0,
+0044e2c0,__raise_exc,135,0,0,,2,,0,1,0,0,
+0044e348,__set_errno_from_matherr,39,0,0,,2,,0,1,0,0,
+0044e370,__get_fname,36,0,0,,1,,0,1,0,0,
+0044e395,__abstract_sw,44,0,0,,1,,0,1,0,0,
+0044e3c2,__frnd,17,0,0,,1,,0,1,0,0,
+0044e3d4,_ldexp,40,0,0,,1,,0,1,0,0,
+0044e3fd,_fpclass,89,0,0,,1,,0,1,0,0,
+0044e457,_frexp,192,0,0,,1,,0,1,0,0,
+0044e518,_statusfp,13,0,0,,1,,0,1,0,0,
+0044e526,_clearfp_nw,14,0,0,,1,,0,1,0,0,
+0044e535,__ctrlfp,34,0,0,,4,,0,1,0,0,
+0044e558,_fpreset,85,0,0,,1,,0,1,0,0,
+0044e5ae,_tolower,110,0,0,,1,,0,1,0,0,
+0044e61d,_tolower_nolock,202,0,0,,3,,0,1,0,0,
+0044e6e8,_cinit,44,0,0,,1,,0,1,0,0,
+0044e715,_exit,16,0,0,,1,,0,1,0,0,
+0044e726,__exit,16,0,0,,1,,0,1,0,0,
+0044e737,_doexit,162,0,0,,2,,0,1,0,0,
+0044e7dc,__lock_fh_init,8,0,0,,1,,0,1,0,0,
+0044e7e5,__unlock_fh_init,8,0,0,,1,,0,1,0,0,
+0044e7ee,__initterm_real,25,0,0,,2,,0,1,0,0,
+0044e808,_xcptfilter,317,0,0,,0,,0,1,0,0,
+0044e946,__XcptActTab_lookup,57,0,0,,1,,0,1,0,0,
+0044e980,_pgmptr_init,87,0,0,,1,,0,1,0,0,
+0044e9d8,_setenvp,184,0,0,,1,,0,1,0,0,
+0044ea91,_setargv,152,0,0,,1,,0,1,0,0,
+0044eb2a,_parse_cmdline,435,0,0,,1,,0,1,0,0,
+0044ecde,_crt_setenv,305,0,0,,1,,0,1,0,0,
+0044ee10,_cexit,56,0,0,,2,,0,1,0,0,
+0044ee49,__initterm,338,0,0,,3,,0,1,0,0,
+0044ef9c,__IsZeroMan,72,0,0,,1,,0,1,0,0,
+0044efe5,__IncMan,85,0,0,,1,,0,1,0,0,
+0044f03b,__RoundMan,139,0,0,,1,,0,1,0,0,
+0044f0c7,__CopyMan,26,0,0,,1,,0,1,0,0,
+0044f0e2,__ZeroTail,11,0,0,,1,,0,1,0,0,
+0044f0ee,__IsZeroTail,26,0,0,,1,,0,1,0,0,
+0044f109,__ShrTail,140,0,0,,1,,0,1,0,0,
+0044f196,__ld12cvt,363,0,0,,2,,0,1,0,0,
+0044f302,__ld12tod,21,0,0,,1,,0,1,0,0,
+0044f318,__ld12tof,21,0,0,,1,,0,1,0,0,
+0044f32e,__atodbl,44,0,0,,1,,0,1,0,0,
+0044f35b,__atoflt,44,0,0,,1,,0,1,0,0,
+0044f388,__cftoe,118,0,0,,3,,0,1,0,0,
+0044f3ff,__fltout,91,0,0,,3,,0,1,0,0,
+0044f45b,__dtold12,181,0,0,,1,,0,1,0,0,
+0044f520,_memset,87,0,0,,7,,0,1,0,0,
+0044f580,_memcpy,820,0,0,,3,,0,1,0,0,
+0044f8b5,__amsg_exit_nomem,8,0,0,,2,,0,1,0,0,
+0044f8be,_calloc,316,0,0,,6,,0,1,0,0,
+0044f957,__unlock_fh_9,8,0,0,,1,,0,1,0,0,
+0044f9e0,__unlock_fh_9b,8,0,0,,1,,0,1,0,0,
+0044f9fb,_strtol,22,0,0,,1,,0,1,0,0,
+0044fa12,_strtoxl,516,0,0,,1,,0,1,0,0,
+0044fc30,_strchr,203,0,0,,1,,0,1,0,0,
+0044fcf0,_strstr,127,0,0,,1,,0,1,0,0,
+0044fd70,__getbuf,67,0,0,,3,,0,1,0,0,
+0044fdb4,_isatty,40,0,0,,2,,0,1,0,0,
+0044fddd,_wctomb,88,0,0,,1,,0,1,0,0,
+0044fe36,_wctomb_nolock,104,0,0,,1,,0,1,0,0,
+0044fea0,__aulldiv,103,0,0,,1,,0,1,0,0,
+0044ff10,__aullrem,116,0,0,,1,,0,1,0,0,
+00450006,_alloc_osfhnd,290,0,0,,1,,0,1,0,0,
+00450129,_set_osfhnd,123,0,0,,1,,0,1,0,0,
+004501a5,_free_osfhnd,126,0,0,,1,,0,1,0,0,
+00450224,_get_osfhandle,65,0,0,,4,,0,1,0,0,
+00450266,_lock_fh,94,0,0,,6,,0,1,0,0,
+004502c5,_unlock_fh,33,0,0,,6,,0,1,0,0,
+004502e7,_commit,146,0,0,,1,,0,1,0,0,
+0045037a,_sopen,718,0,0,,1,,0,1,0,0,
+004506e0,_strncpy,253,0,0,,2,,0,1,0,0,
+004507e0,_strcspn,61,0,0,,0,,0,1,0,0,
+00450820,_strpbrk,57,0,0,,0,,0,1,0,0,
+0045085a,__crtGetStringTypeA,328,0,0,,2,,0,1,0,0,
+004509a3,_mbtowc,92,0,0,,1,,0,1,0,0,
+00450a00,_mbtowc_nolock,200,0,0,,1,,0,1,0,0,
+00450ac9,_isspace,39,0,0,,2,,0,1,0,0,
+00450b00,__allshl,30,0,0,,1,,0,1,0,0,
+00450b1f,_ungetc_nolock,109,0,0,,1,,0,1,0,0,
+00450b8d,__retval_zero,2,0,0,,1,,0,1,0,0,
+00450b90,_iscntrl,16,0,0,,1,,0,1,0,0,
+00450ba1,__chval,48,0,0,,1,,0,1,0,0,
+00450bd2,__crtMessageBoxA,136,0,0,,1,,0,1,0,0,
+00450c5b,__addl,32,0,0,,3,,0,1,0,0,
+00450c7c,___add_12,93,0,0,,2,,0,1,0,0,
+00450cda,__shl_12,45,0,0,,3,,0,1,0,0,
+00450d08,__shr_12,44,0,0,,2,,0,1,0,0,
+00450d35,__mtold12,198,0,0,,1,,0,1,0,0,
+00450dfc,__strgtold12,1184,0,0,,2,,0,1,0,0,
+004512cd,$I10_OUTPUT,658,0,0,,1,,0,1,0,0,
+00451560,_chsize,292,0,0,,1,,0,1,0,0,
+00451685,__ld12mul,543,0,0,,2,,0,1,0,0,
+004518a5,__multtenpow12,123,0,0,,2,,0,1,0,0,
+00451921,_setmode,96,0,0,,1,,0,1,0,0,
 00451990,OpenMultimediaStream,121,3,0,,1,,0,0,0,0,
 00451a10,OpenWavStream,408,3,0,,1,,0,0,0,0,
 00451bb0,SkipRIFFHeaders,436,3,0,,1,,0,0,0,0,
@@ -770,10 +770,10 @@ address,name,body_size,level,port_citations,files_cited,callers_count,bookmark_t
 00452cc0,ProcessStreamChunk,234,3,0,,1,,0,0,0,0,
 00452dc0,SeekToLoopPoint,71,3,0,,1,,0,0,0,0,
 00452e10,ReturnZero,2,3,0,,1,,0,0,0,0,
-00452e20,OpenAndStartMediaPlayback,62,4,2,td5_fmv.c;td5_fmv.h,1,,0,0,0,0,[td5_fmv.c] 0x43C440  PlayIntroMovie |  *     - Opens Movie/intro.tgq via OpenAndStartMediaPlayback |  *     - Nested message pump with PeekMessageA/GetMessageA |  *     - Skippa
-00452e60,SetStreamVolume,20,3,0,,1,,0,0,0,0,
-00452e80,IsStreamPlaying,61,3,0,,2,,0,0,0,0,
-00452ec0,StopStreamPlayback,90,3,0,,2,,0,0,0,0,
+00452e20,OpenAndStartMediaPlayback,62,4,3,td5_fmv.c;td5_fmv.h,1,,0,0,0,0,"[td5_fmv.c] -graph level because the entire EA TGQ multimedia |  * stack (OpenAndStartMediaPlayback, StopStreamPlayback, IsStreamPlaying, |  * SetStreamVolume, RequestIntroMovi"
+00452e60,SetStreamVolume,20,4,1,td5_fmv.c,1,,0,0,0,0,"[td5_fmv.c] StartMediaPlayback, StopStreamPlayback, IsStreamPlaying, |  * SetStreamVolume, RequestIntroMovieShutdown, the IDCT_DAT 8KB / UVA_DATA |  * 20KB PE sections, and the"
+00452e80,IsStreamPlaying,61,4,1,td5_fmv.c,2,,0,0,0,0,"[td5_fmv.c] ia |  * stack (OpenAndStartMediaPlayback, StopStreamPlayback, IsStreamPlaying, |  * SetStreamVolume, RequestIntroMovieShutdown, the IDCT_DAT 8KB / UVA_DATA |  * 20KB"
+00452ec0,StopStreamPlayback,90,4,1,td5_fmv.c,2,,0,0,0,0,"[td5_fmv.c] tire EA TGQ multimedia |  * stack (OpenAndStartMediaPlayback, StopStreamPlayback, IsStreamPlaying, |  * SetStreamVolume, RequestIntroMovieShutdown, the IDCT_DAT 8KB"
 00452f20,PresentDecodedFrame,1105,3,0,,1,,0,0,0,0,
 00453380,CreateVideoOutputSurface,230,3,0,,2,,0,0,0,0,
 00453470,ResetIDCTState,32,3,0,,3,,0,0,0,0,
@@ -870,8 +870,8 @@ address,name,body_size,level,port_citations,files_cited,callers_count,bookmark_t
 0045bd3c,DecompressLZData,290,3,0,,1,,0,0,0,0,
 0045be5f,UnpackBitplaneToPixels,168,3,0,,1,,0,0,0,0,
 0045bf08,DecodeBitmapRLERun,179,3,0,,1,,0,0,0,0,
-0045bfbc,RtlUnwind,5,3,0,,1,,0,1,0,0,
-0045bfc2,DirectSoundCreate,5,3,0,,1,,0,1,0,0,
-0045bfc8,_beginthread,118,3,0,,2,,0,1,0,0,
-0045c03f,__threadstart,115,3,0,,0,,0,1,0,0,
-0045c0d2,__endthread,60,3,0,,3,,0,1,0,0,
+0045bfbc,RtlUnwind,5,0,0,,1,,0,1,0,0,
+0045bfc2,DirectSoundCreate,5,0,0,,1,,0,1,0,0,
+0045bfc8,_beginthread,118,0,0,,2,,0,1,0,0,
+0045c03f,__threadstart,115,0,0,,0,,0,1,0,0,
+0045c0d2,__endthread,60,0,0,,3,,0,1,0,0,

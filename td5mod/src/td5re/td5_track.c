@@ -53,6 +53,11 @@ int     g_track_type_mode       = 0;
  * 0x4440F0  UpdateActorTrackPosition            -- DONE
  * 0x430150  ApplyTrackLightingForVehicleSegment -- DONE
  * 0x42CE90  UpdateActiveTrackLightDirections    -- DONE
+ *           [ARCH-DIVERGENCE @ 0x0042CE90 — see td5_render.c:2802 for
+ *           full L5 audit. Port handles the M^T body-frame transform
+ *           inside td5_render.c (tl_commit_to_render_globals); track
+ *           layer just forwards the per-zone contrib via
+ *           td5_render_apply_track_lighting().]
  * 0x431260  GetTrackSpanDisplayListEntry        -- DONE
  * 0x431190  ParseModelsDat                      -- DONE
  * 0x40AC00  PrepareMeshResource                 -- DONE
