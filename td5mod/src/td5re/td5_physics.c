@@ -7369,6 +7369,20 @@ void td5_physics_missing_wheel_correction(TD5_Actor *actor)
  * UpdateVehicleState0fDamping (0x403D90)
  *
  * "Stunned" state: zero forces, 1/16 velocity decay per frame.
+ *
+ * [CONFIRMED @ 0x403D90] Byte-faithful with orig UpdateVehicleState0fDamping.
+ * L5 audit 2026-05-18 (TD5_pool0 read-only):
+ *   - Same listing-derived control flow: engine smooth + suspension(0,0) +
+ *     zero contact/slip + body-frame longitudinal projection + gate +
+ *     roll/pitch 1/16 decay + body-frame slip accumulation.
+ *   - RZ shift idiom matches CDQ/AND/ADD/SAR @ 0x403E00..0E, E44..4D, E60..66,
+ *     E77..7F; mask = (1<<n)-1.
+ *   - Cos/Sin called with NEG yaw, vx/vz pre-shifted to int16 before IMUL
+ *     (matches 0x403DAE/DB5/DCA/DD2/DDD..F7).
+ *   - Roll fold + sVar2 gate match 0x403E23..3E decision tree (sign-compatible
+ *     |sVar2|>0x20 with |roll12|<0x80 in matching sign).
+ *   - Slip accumulator reads lateral_speed/longitudinal_speed (+0x318/+0x314)
+ *     and uses plain SAR 8 (no RZ) before 16-bit truncation (0x403E7F..9D).
  * ======================================================================== */
 
 /* Round-to-zero arithmetic shift right.
