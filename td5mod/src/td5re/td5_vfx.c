@@ -234,8 +234,13 @@ static float    s_rainspl_page;
 static float    s_smoke_u0, s_smoke_v0, s_smoke_u1, s_smoke_v1;
 static float    s_smoke_page;
 
-/* Smoke sprite variant UV table (4 entries: 2x2 grid in atlas) */
-static float    s_smoke_variant_uv[4][5]; /* u0, v0, width, height, page */
+/* Smoke sprite variant UV table -- orig DrawCallback @ 0x004297D0 reads
+ * DAT_004aabb8 with stride 0x14 (5 floats) indexed by (phase >> 2) where
+ * phase cycles 0..0x1F mod 32. The orig init loop at 0x00429630 writes 8
+ * entries with col = i & 1, row = (i - sign)/2 (=> i/2 for unsigned), step
+ * 32 texels (DAT_0045d5dc), cell w/h = 30.0 (0x41f00000). The smoke puff
+ * therefore ANIMATES through 8 sub-cells, advancing one cell every 4 ticks. */
+static float    s_smoke_variant_uv[8][5]; /* u0, v0, width, height, page */
 
 /* --- Weather overlay --- */
 static VfxWeatherParticle *s_weather_buf[2];   /* per-view particle buffers */
@@ -566,19 +571,27 @@ void td5_vfx_init_race_particles(void) {
         }
     }
 
-    /* Build 4-variant smoke UV table (2x2 grid in smoke atlas)
-     * variant = (col, row): u = col * half_width + u0, v = row * half_height + v0
-     * Original uses DAT_0045d5dc as the half-size multiplier */
-    float half_w = (s_smoke_u1 - s_smoke_u0) * 0.5f;
-    float half_h = (s_smoke_v1 - s_smoke_v0) * 0.5f;
-    for (int i = 0; i < 4; i++) {
-        int col = i & 1;
-        int row = i / 2;
-        s_smoke_variant_uv[i][0] = (float)col * half_w + s_smoke_u0;
-        s_smoke_variant_uv[i][1] = (float)row * half_h + s_smoke_v0;
-        s_smoke_variant_uv[i][2] = half_w;   /* width */
-        s_smoke_variant_uv[i][3] = half_h;   /* height */
-        s_smoke_variant_uv[i][4] = s_smoke_page;
+    /* Build 8-variant smoke UV table (2 col x 4 row) -- matches orig init at
+     * 0x00429630..0x0042967d:
+     *   for i in 0..7:
+     *     u = (i & 1) * 32.0 + base_u        ; DAT_0045d5dc = 32.0
+     *     v = (i / 2) * 32.0 + base_v
+     *     w = 30.0                            ; DAT_0041f00000 = 30.0
+     *     h = 30.0
+     *     page = SMOKE atlas page id
+     * Cell stride 32, cell size 30 -- 2 texel gap between cells. */
+    {
+        float base_u = s_smoke_u0;
+        float base_v = s_smoke_v0;
+        for (int i = 0; i < 8; i++) {
+            int col = i & 1;
+            int row = i / 2;
+            s_smoke_variant_uv[i][0] = (float)col * 32.0f + base_u;
+            s_smoke_variant_uv[i][1] = (float)row * 32.0f + base_v;
+            s_smoke_variant_uv[i][2] = 30.0f;
+            s_smoke_variant_uv[i][3] = 30.0f;
+            s_smoke_variant_uv[i][4] = s_smoke_page;
+        }
     }
 
     /* Original texture: "SEMICOL" confirmed @ 0x4743F4 (PUSH string ptr at 0x43E997).
@@ -775,6 +788,24 @@ void td5_vfx_draw_particles(int view_index) {
          * spawning car was already too small to see. */
         float half_w = world_half_w * focal * inv_z;
         float half_h = world_half_h * focal * inv_z;
+
+        /* For smoke (type 0): refresh UVs every frame from variant table indexed
+         * by (phase >> 2). Mirrors orig SmokeDrawCallback @ 0x004297D0 which sets
+         * flag=2 in BuildSpriteQuadTemplate and writes the 4 corner UVs from
+         * DAT_004aabb8[phase >> 2]. Phase cycles 0..0x1F via SmokeUpdateCallback
+         * @ 0x00429950 (slot[0] = (slot[0] + 1) & 0x1F) so the puff animates
+         * through 8 sub-cells, one cell every 4 ticks. */
+        if (slot[PSLOT_TYPE] == 0) {
+            int v_idx = (slot[PSLOT_PHASE] >> 2) & 7;
+            float vu0 = s_smoke_variant_uv[v_idx][0];
+            float vv0 = s_smoke_variant_uv[v_idx][1];
+            float vw  = s_smoke_variant_uv[v_idx][2];
+            float vh  = s_smoke_variant_uv[v_idx][3];
+            sq->tex_u0 = vu0;
+            sq->tex_v0 = vv0;
+            sq->tex_u1 = vu0 + vw;
+            sq->tex_v1 = vv0 + vh;
+        }
 
         /* Normalize texel UVs to [0,1] for the D3D11 sampler. Static atlas
          * pages are 256x256; query actual dimensions so hi-res replacement
