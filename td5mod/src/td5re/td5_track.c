@@ -3037,6 +3037,19 @@ void td5_track_compute_probe_contact_vertices(TD5_TrackProbeState *probe)
 
 /* ========================================================================
  * Barycentric Contact Resolution (0x4456D0 / 0x445A70)
+ * [CONFIRMED @ 0x004456D0 + 0x00445A70] L5 promotion sweep audit (2026-05-18).
+ *   Both orig variants port-collapsed into triangle_height (below) with
+ *   the unit-normalized recipe from 0x00445A70 used for both call sites.
+ *   Algebraically identical to orig 0x004456D0 (cross>>4 / ny>>4 ratio
+ *   self-normalizes, equivalent to cross/ny up to LSB rounding).
+ *
+ * [ARCH-DIVERGENCE @ 0x004456D0] Orig variant at 0x004456D0 uses raw
+ *   cross-products with >>4 quantization and no FPU renormalization;
+ *   port uses 0x00445A70's recipe (>>12 + FPU sqrt + trunc to unit
+ *   length 4096) for both call sites. Math is byte-equivalent on the
+ *   plane-equation ratio; rounding differs by at most 1 LSB on the
+ *   final fixed-point height. Audit propagated from physics audit
+ *   Phase 3 (commit d15bcd8 ComputeActorTrackContactNormal).
  *
  * Given a span, sub-lane, and world XZ position, determines which triangle
  * half the point falls in (diagonal split of quad) and computes the ground
