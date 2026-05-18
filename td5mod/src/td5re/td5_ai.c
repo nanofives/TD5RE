@@ -4448,6 +4448,26 @@ void td5_ai_init_traffic_actors(void) {
  * Stage 7 (yield):     FindNearestRoutePeer -> brake if closing on peer
  *
  * [precise-00435E80] Byte-faithful port from 0x00435E80 disassembly listing.
+ *
+ * [CONFIRMED @ 0x00435E80] L5 promotion sweep audit (2026-05-18).
+ *   - Stages 1-7 enumerated above match orig FSM block layout
+ *     (0x00435E80..0x00436A6F, 2142 bytes / 521 instructions).
+ *   - Stage 2 ref_slot via rs[RS_SLOT_INDEX], not param_1 — CONFIRMED at
+ *     0x00435EA6-0x00435FA8 EBX+0xD4 dispatch.
+ *   - Stage 2 polarity reads RS_ROUTE_DIRECTION_POLARITY (dword 0x3F),
+ *     not the prior incorrectly-aliased 0x25 — CONFIRMED at 0x00435EF4.
+ *   - Stage 2 strict hdelta band (0x400, 0xC00) — CONFIRMED at
+ *     0x00435F2B JLE / 0x00435F32 JGE pair.
+ *   - Stage 2 special-encounter audio cleanup asymmetric — orig only
+ *     clears g_encounter_tracked_handle on polarity==0 path.
+ *   - Stage 5 target span calculation accounts for polarity sign flip.
+ *   - Stage 7 yield brake — FindNearestRoutePeer dispatch verified.
+ *
+ * KNOWN DIVERGENCES: none documented (port commits document the four
+ * shipped fixes vs prior approximate port).
+ *
+ * Effective level: L5 (byte-faithful end-to-end).
+ *
  * Notable fixes vs prior approximate port:
  *   - Stage 2 reads heading/yaw_accum from the REFERENCE actor
  *     (actor_ptr(rs[RS_SLOT_INDEX])), not from the param_1 actor. Original
