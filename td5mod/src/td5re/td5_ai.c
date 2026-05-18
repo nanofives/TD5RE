@@ -1703,6 +1703,27 @@ void td5_ai_init_race_actor_runtime(void) {
  *
  * param route_state: pointer to this actor's route state dword array
  * param steer_weight: 0x10000 (braking), 0x20000 (coasting), 0x4000 (script)
+ *
+ * [CONFIRMED @ 0x004340C0] Byte-faithful with orig UpdateActorSteeringBias.
+ * L5 audit 2026-05-18 (TD5_pool0 read-only):
+ *   - Field offsets match: longitudinal_speed +0x314, rear_axle_slip +0x320,
+ *     steering_cmd +0x30C, steering_ramp_accum +0x33A, slot_index +0xD4 (RS[0x35]).
+ *   - RS[0x16]/[0x17] = LEFT/RIGHT_DEVIATION (param_1+0x58/+0x5C).
+ *   - abs(longitudinal_speed >> 8) via XOR-sign idiom matches.
+ *   - rate cap iVar2 = 0xC0000 / ((|v|*0x400)/(slip²+0x400) + 0x40) match.
+ *   - cap iVar3 = 0x1800000 / ((|v|*0x10000)/(slip²+0x10000) + 0x100) match.
+ *   - NESTED cascade structure (LEFT<0x800 → LEFT<0x401 → param_2==0 OR
+ *     LEFT<0x100 OR 0x100<=LEFT<0x401; ELSE 0x401<=LEFT<0x800 +0x4000;
+ *     ELSE RIGHT<0x401 mirror; ELSE -0x4000) all branches walked.
+ *   - Script-ramp branch: ramp += 0x40 if <0x100; bias = curr + sar_rz(iVar2*ramp, 8);
+ *     write bias FIRST, then conditional overwrite to iVar3 (LEFT) or -iVar3 (RIGHT).
+ *     The RIGHT mirror uses `iVar4 <= iVar7` (skip overwrite) vs port
+ *     `param_2 <= bias` — semantically identical.
+ *   - Sin-fine branch uses sar_rz with 0xFFF mask (n=12). Match.
+ *   - Final clamp ±0x18000 match (orig 0xfffe8000 == -0x18000).
+ *   - ai_sin_fixed12 uses libm sin*4096 truncate vs original's int LUT; both
+ *     yield int32 (same integer values within FPU precision). Pre-existing
+ *     known class — see float-LUT trig commit 4e71a88.
  * ======================================================================== */
 
 /* Pilot tracing — per-function entry/exit emitter for pool10 / 0x004340C0. */
@@ -4091,6 +4112,26 @@ void td5_ai_set_traffic_queue(const uint8_t *data, int size) {
  * Original signature: void __stdcall InitializeTrafficActorsFromQueue(void)
  * Spawns ambient traffic actors into slots [6, min(g_racerCount, 12)).
  * Source: Ghidra disassembly listing 0x00435940-0x00435CB7 (271 instructions).
+ *
+ * L4: known divergences (see FIXME + inline DIVERGENCE markers below)
+ * L5 audit 2026-05-18 (TD5_pool0 read-only) — re-verified:
+ *   - Outer gate `if (6 < g_racerCount)` matches 0x0043595D.
+ *   - racer_cap = min(racer_count, 12) matches 0x0043597E.
+ *   - Per-slot initial local_18=6, local_c=0x28 match 0x0043595B-70.
+ *   - Branch condition (lane_count > queue.sub_lane) matches JA at 0x004359C1.
+ *   - NORMAL path span_type switch (cases 1/2/5, 3/4, 6/7) byte-faithful.
+ *   - REMAP path inlined ComputeActorTrackHeading switch byte-faithful.
+ *   - Yaw computation `(angle + 0x800) << 8` matches 0x435C44 / 0x00435A77.
+ *   - Polarity flip +0x80000 matches 0x435C58 / 0x00435A88.
+ *   - Per-slot advance: qp+=4, slot++, local_c+=4 matches 0x00435C8B-CA5.
+ *
+ * Explicit documented divergences (intentional, do NOT promote to L5):
+ *   - REMAP miss returns input span (port helper) vs -1 (orig); fixed by
+ *     re-checking equality and substituting -1.
+ *   - Trailing common ops: ACTOR_SLOT_INDEX mirror + RS_ENCOUNTER_HANDLE = -1
+ *     are port-only port-side bookkeeping.
+ *   - FIXME(direction-polarity-macro): RS_DIRECTION_POLARITY index mismatch
+ *     resolved by removing the dual-write (verified no original references).
  *
  * Per-slot algorithm:
  *   1. Read 4-byte queue record (span, polarity_byte, sub_lane).

@@ -810,6 +810,18 @@ void td5_physics_run_paused_engine_step(void)
 
 /* ========================================================================
  * Master dispatcher -- UpdateVehicleActor (0x406650)
+ *
+ * L4: known divergences — see todo_update_vehicle_actor_dispatcher_2026-05-18.md
+ *   1) AccumulateVehicleSpeedBonusScore (orig 0x004066EA) NOT called; port
+ *      uses per-hit decrement instead.
+ *   2) AdvancePendingFinishState consolidated into td5_game.c game-tick
+ *      loop instead of per-actor here.
+ *   3) Step 9 surface_contact_flags update is port-only (player path).
+ *   4) Traffic (slot >= 6) sub-path inlined; original dispatches separately
+ *      via UpdateRaceActors @ 0x00436A70.
+ *   Steps 1-6 (frame counter, ghost reset, speed tracking, race timer,
+ *   attitude clamp, dynamics dispatch + paused + scripted) are byte-faithful
+ *   per existing [Audit D1..D13] markers.
  * ======================================================================== */
 
 void td5_physics_update_vehicle_actor(TD5_Actor *actor)
@@ -5004,6 +5016,20 @@ static int32_t traffic_edge_pen(int32_t v0_x, int32_t v0_z,
  * The car_definition_ptr carries:
  *   *(int16_t*)(car_def + 0x08) = half-length equivalent  [CONFIRMED @ 0x407424]
  *   *(int16_t*)(car_def + 0x0C) = half-width equivalent   [CONFIRMED @ 0x407420]
+ *
+ * L4: known divergence — see todo_traffic_route_advance_lane_count_byte_2026-05-18.md
+ *   1) `lane_count = sp->surface_attribute & 0xF` reads wrong byte (+0x01);
+ *      original reads byte +0x03 (geometry_metadata low nibble = span_lane_count).
+ *   2) Inner test passes (vl=left+sub, vr=right+sub) to traffic_edge_pen, but
+ *      orig reads psVar1=right_vertex_index (+0x06) and psVar2=left_vertex_index
+ *      (+0x04) — port has v0/v1 swapped relative to orig.
+ *   3) Outer test also has v0/v1 swapped, and uses outer_sub = lane_count-1
+ *      while orig uses uVar10 = lane_count nibble itself.
+ *   4) Tangent vs rotated-normal: orig hand-rotates the edge before atan2;
+ *      port atan2s the tangent then uses cos/sin as tangent components. May
+ *      cancel partially against the swap.
+ *   Traffic-only path; gate at slot >= 6 limits blast radius. Defer to
+ *   dedicated traffic-collision audit.
  */
 static void process_traffic_segment_edge(TD5_Actor *actor, int slot)
 {
@@ -5121,6 +5147,14 @@ outer_test:
  *
  * Only fires when track_span_raw == g_trackTotalSpanCount - 1 (last span).
  * [CONFIRMED @ 0x407879: `if (actor->track_span == DAT_00483550 + -1)`]
+ *
+ * L4: known divergence — see todo_traffic_route_advance_lane_count_byte_2026-05-18.md
+ *   1) Port reads `sp_wrap->surface_attribute & 0xF` (byte +0x01); original reads
+ *      byte +0x03 (geometry_metadata low nibble — same byte `span_lane_count` uses).
+ *   2) Port walks BOTH rails at `+sub_lane` offset (vl=left+sub, vr=right+sub);
+ *      original uses ONE rail across full width (vl=left, vr=left+lane_nibble).
+ *   Numerically close on typical wrap span 0; defer until tail-span divergence
+ *   surfaces in cascade-unwind work.
  */
 static void process_traffic_route_advance(TD5_Actor *actor, int slot)
 {
@@ -7376,6 +7410,20 @@ void td5_physics_missing_wheel_correction(TD5_Actor *actor)
  * UpdateVehicleState0fDamping (0x403D90)
  *
  * "Stunned" state: zero forces, 1/16 velocity decay per frame.
+ *
+ * [CONFIRMED @ 0x403D90] Byte-faithful with orig UpdateVehicleState0fDamping.
+ * L5 audit 2026-05-18 (TD5_pool0 read-only):
+ *   - Same listing-derived control flow: engine smooth + suspension(0,0) +
+ *     zero contact/slip + body-frame longitudinal projection + gate +
+ *     roll/pitch 1/16 decay + body-frame slip accumulation.
+ *   - RZ shift idiom matches CDQ/AND/ADD/SAR @ 0x403E00..0E, E44..4D, E60..66,
+ *     E77..7F; mask = (1<<n)-1.
+ *   - Cos/Sin called with NEG yaw, vx/vz pre-shifted to int16 before IMUL
+ *     (matches 0x403DAE/DB5/DCA/DD2/DDD..F7).
+ *   - Roll fold + sVar2 gate match 0x403E23..3E decision tree (sign-compatible
+ *     |sVar2|>0x20 with |roll12|<0x80 in matching sign).
+ *   - Slip accumulator reads lateral_speed/longitudinal_speed (+0x318/+0x314)
+ *     and uses plain SAR 8 (no RZ) before 16-bit truncation (0x403E7F..9D).
  * ======================================================================== */
 
 /* Round-to-zero arithmetic shift right.

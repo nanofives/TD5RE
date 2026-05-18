@@ -5883,6 +5883,17 @@ void ComputeActorTrackContactNormal(short *probe, int *pos, int *out_y) {
      * Returns the ground Y height (24.8 fixed-point, span-local units)
      * via *out_y. The camera uses this to compute pitch/roll from
      * three sample points around the vehicle.
+     *
+     * L4: known divergence — see todo_compute_actor_track_contact_normal_2026-05-18.md
+     *   Original 0x00445450 does THREE jobs in one function:
+     *     1) write probe[4]/[5] = (li/ri + sub_lane + DAT_00474e40/41[type*2]),
+     *     2) per-type triangle pick (sub_lane edge vs interior),
+     *     3) call ComputeTrackTriangleBarycentrics + write origin_y*256.
+     *   Port splits into td5_track_compute_probe_contact_vertices (job 1) +
+     *   td5_track_compute_contact_height (jobs 2-3). This thin wrapper only
+     *   calls (2-3). The physics body-probe path inlines (1) too; camera
+     *   uses temp stack probes where (1)'s output is dead, so benign in
+     *   practice. Audited-deferred — no current scenario flags this path.
      */
     int span_idx;
     int sub_lane;
