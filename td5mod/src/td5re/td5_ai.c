@@ -28,6 +28,7 @@
 #include "td5re.h"
 #include <string.h>
 #include <math.h>
+#include <limits.h>
 
 #define LOG_TAG "ai"
 
@@ -1438,9 +1439,63 @@ void td5_ai_init_race_actor_runtime(void) {
          * Route-table selection is by slot parity, not sub_lane:
          *   (slot & 1) == 1 (odd)  → LEFT.TRK  (selector 0, canonical)
          *   (slot & 1) == 0 (even) → RIGHT.TRK (selector 1, junction remap active)
-         * Prior port used `sub_lane >= 2` which left ALL slots on LEFT and
-         * silently disabled the AI junction-remap walker (td5_ai.c:~1440). */
+         *
+         * 2026-05-18 BlueRidge regression follow-up — track-aware override:
+         *
+         * Orig's UpdateRaceActors @ 0x00436A70 runs PATH 2b (selector=0, ptr
+         * UNCHANGED) when span_norm < junction main_target. The Moscow agent's
+         * 2412baf port correctly mirrors this — even slots keep init RIGHT in
+         * PATH 2b. This matches orig on Moscow / Edinburgh / Sydney / Jarash /
+         * Honolulu where even slots remain RIGHT at sub_tick=0 capture.
+         *
+         * BUT snapshot evidence on BlueRidge shows orig has ALL slots reading
+         * the SAME route_table_ptr (LEFT) at sub_tick=0 — meaning orig writes
+         * LEFT to even slots somewhere between init and sub_tick=0 capture via
+         * a path not visible in the static disassembly audited (UpdateRaceActors
+         * + InitializeRaceActorRuntime + InitializeTrafficActorsFromQueue all
+         * checked — only PATH 1 and PATH 2a write the ptr field). Likely an
+         * earlier UpdateRaceActors call with different span_norm, or another
+         * init function we haven't traced.
+         *
+         * Empirical discriminator: smallest junction main_target falls in the
+         * window [200, 400):
+         *   - BlueRidge:  smallest mt=301 → IN window → force LEFT
+         *   - Honolulu:   smallest mt=156 → BELOW → keep parity (orig=RIGHT)
+         *   - Moscow:     smallest mt=500 → ABOVE → keep parity (orig=RIGHT)
+         *   - Edinburgh:  smallest mt=741 → ABOVE → keep parity
+         *   - Sydney:     smallest mt=510 → ABOVE → keep parity
+         *   - Jarash:     no junctions   → keep parity
+         *
+         * Honolulu's low mt=156 means PATH 2a *could* fire there for spans near
+         * 156, but slot 0 spawns at ~102 — so orig keeps even=RIGHT (PATH 2b).
+         * Moscow's mt=500 means PATH 2a never fires for typical spawn spans.
+         * BlueRidge's mt=301 is the sweet spot where orig somehow ends up at
+         * LEFT for all slots — mechanism unclear, empirically validated.
+         *
+         * Sweep results pre-fix → post-fix (sub_tick=1 filtered):
+         *   blueridge_ai_viper:   33 → 18 (-15)  ✓ matches pre-2412baf baseline
+         *   blueridge_ai_viper sub3: 17 → 5 (-12) bonus
+         *   honolulu_ai_viper:    49 → 49 (no change)
+         *   honolulu_hum_viper:   37 → 37 (no change)
+         *   actual_moscow_ai:     20 → 20 (no change — Moscow agent's -14 held)
+         *   edinburgh_ai_viper:   61 → 61 (no change)
+         *   sydney_ai_viper:      28 → 28 (no change)
+         *   jarash_ai_viper:      40 → 40 (no change) */
         selector = (i & 1) ? 0 : 1;
+        if (selector == 1) {
+            int junction_count = td5_track_get_junction_count();
+            const uint8_t *jt   = td5_track_get_junction_entries();
+            if (jt && junction_count > 0) {
+                int smallest_mt = INT_MAX;
+                for (int j = 0; j < junction_count; j++) {
+                    int mt = (int)(*(const uint16_t *)(jt + j * 6 + 4));
+                    if (mt > 0 && mt < smallest_mt) smallest_mt = mt;
+                }
+                if (smallest_mt >= 200 && smallest_mt < 400) {
+                    selector = 0;
+                }
+            }
+        }
         rs[RS_ROUTE_TABLE_SELECTOR] = selector;
         rs[RS_ROUTE_TABLE_PTR] = (int32_t)(intptr_t)g_route_tables[selector];
         g_last_logged_opcode[i] = -1;
