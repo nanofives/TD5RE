@@ -8157,7 +8157,11 @@ void td5_physics_apply_steering_torque(TD5_Actor *actor)
     actor->wheel_spring_dv[3] -= k;   /* +0x2F8 RR */
 }
 
-/* --- ApplyReverseGearThrottleSign (0x42F010) ---
+/* [CONFIRMED @ 0x0042F010] Byte-faithful with orig ApplyReverseGearThrottleSign.
+ * L5 promotion 2026-05-18 (small-tier sweep). 8-instr listing match;
+ * actor+0x36B (gear) zero-gate, 16-bit NEG on actor+0x33E (encounter_steering_cmd).
+ *
+ * --- ApplyReverseGearThrottleSign (0x42F010) ---
  *
  * Byte-exact port from listing 0x0042F010..0x0042F02F (8 instructions).
  *
