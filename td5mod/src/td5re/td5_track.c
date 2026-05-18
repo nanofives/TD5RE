@@ -5072,6 +5072,18 @@ int td5_track_load_routes(const void *left_data, size_t left_size,
 
 /* ========================================================================
  * MODELS.DAT Parsing (0x431190 ParseModelsDat)
+ * [ARCH-DIVERGENCE @ 0x00431190] L5 promotion sweep audit (2026-05-18).
+ *   Orig assumes a single fixed layout: DWORD[0]=entry_count,
+ *   DWORD[1..count*2]=relocatable (offset, second_dword) pairs, then
+ *   relocates entry pointers by adding param_1 base and recurses through
+ *   PrepareMeshResource for each sub-mesh. Port detects three layout
+ *   variants (A strict, A relaxed, B no-count-header) via DWORD
+ *   heuristics, then auto-detects (offset, size) vs (size, offset)
+ *   field order per-entry. Auto-detect is required because the
+ *   shipping MODELS.DAT files use multiple layouts across tracks --
+ *   orig binary just trusts the convention; port has to be defensive
+ *   to handle the variation. Forward-direction lookup result is
+ *   byte-equivalent to orig on stock content (Wave 5 audit).
  *
  * MODELS.DAT contains a sequence of mesh resources. Each entry begins
  * with a 4-byte size field followed by mesh data. The parser extracts
