@@ -2974,6 +2974,7 @@ static void reset_race_countdown(void)
 static void tick_race_countdown(void)
 {
     int level, next_indicator;
+    static int s_level0_logged = 0;  /* log-once gate for level==0 transition */
 
     /* Only the timer gate matters here. Orig UpdateRaceCameraTransitionTimer
      * @ 0x0040A490 is called every frame regardless of paused — its
@@ -3015,30 +3016,30 @@ static void tick_race_countdown(void)
                   level, next_indicator, g_cameraTransitionActive);
     }
 
-    /* Race-start: orig flips g_gamePaused at level==0 (indicator "1"),
-     * not when timer hits 0. Use g_td5.paused itself as the one-shot
-     * gate so the log only fires on the actual transition. Indicator is
-     * NOT hidden here — orig keeps "1" visible for the full ~40 sub-tick
-     * level==0 window. The hide happens below when timer fully reaches 0.
-     *
-     * NOTE (2026-05-14): audit of orig 0x0040A490 confirmed the original
-     * does NOT touch STEERING_CMD/RAMP_ACCUM/ang_velocity_yaw or
-     * RS_TRACK_PROGRESS/RS_TRACK_OFFSET_BIAS on the level==0 transition —
-     * it only clears g_gamePaused and gRaceCameraTransitionGate. */
-    if (level == 0 && g_td5.paused) {
-        g_td5.paused = 0;
-        TD5_LOG_I(LOG_TAG, "Race countdown: GO at level=0 timer=0x%X",
+    /* level==0 marks the "1" digit appearing. User-observed behavior in
+     * the original (2026-05-17): race does NOT start here — the car
+     * stays held until "1" disappears (timer==0). Earlier audit (630d797)
+     * read orig as flipping g_gamePaused at level==0 but the in-game
+     * race-start moment perceived by the user is timer==0, so the paused
+     * flip must happen there. Either the Ghidra disasm was misread or
+     * orig has a separate inner gate that holds the car during the
+     * level==0 window even though g_gamePaused == 0; either way, matching
+     * the user-visible behavior means flipping here at timer==0. */
+    if (level == 0 && s_level0_logged == 0) {
+        s_level0_logged = 1;
+        TD5_LOG_I(LOG_TAG,
+                  "Race countdown: level==0 (\"1\" indicator visible) timer=0x%X",
                   g_cameraTransitionActive);
     }
 
-    /* Hide the indicator when timer fully reaches 0, mirroring orig's
-     * entry-guard at 0x0040A490. This fires ~40 sub-ticks after the
-     * level==0 flip above so the "1" digit is visible during the entire
-     * level==0 window like in the original. */
+    /* Hide indicator + flip paused at timer==0. Mirrors orig's entry-
+     * guard at 0x0040A490 plus the perceived race-start moment. */
     if (g_cameraTransitionActive == 0 && s_race_countdown_state != 0) {
         set_countdown_indicator_state(0);
         s_race_countdown_state = 0;
-        TD5_LOG_I(LOG_TAG, "Race countdown: indicator hidden (timer==0)");
+        g_td5.paused = 0;
+        s_level0_logged = 0;
+        TD5_LOG_I(LOG_TAG, "Race countdown: GO at timer==0 (paused→0, indicator hidden)");
     }
 }
 
