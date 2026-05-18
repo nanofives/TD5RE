@@ -1,6 +1,21 @@
 /**
  * td5_fmv.c -- FMV playback module (replaces EA TGQ codec)
  *
+ * L5 promotion sweep audit (2026-05-18, TD5_pool0 read-only) --
+ * td5_fmv_play / fmv_play_with_source_reader replaces orig
+ * PlayIntroMovie @ 0x0043C440 (1206 bytes, body 0x0043C440..0x0043C8F6).
+ * The replacement is INTENTIONAL and TOTAL: there is no functional
+ * mapping at the call-graph level because the entire EA TGQ multimedia
+ * stack (OpenAndStartMediaPlayback, StopStreamPlayback, IsStreamPlaying,
+ * SetStreamVolume, RequestIntroMovieShutdown, the IDCT_DAT 8KB / UVA_DATA
+ * 20KB PE sections, and the 0x1ED-dword playback-control struct at
+ * DAT_004BCB90) was reimplemented from scratch on top of Windows Media
+ * Foundation. See reference_arch_play_intro_movie_2026-05-18.md for the
+ * full rationale.
+ */
+/**
+ * td5_fmv.c (continued) -- FMV playback module (replaces EA TGQ codec)
+ *
  * Replaces the original EA TGQ multimedia engine with:
  *   - Video playback via Windows Media Foundation (IMFSourceReader)
  *   - Legal screen display via TGA loading + D3D11 render backend
