@@ -924,6 +924,31 @@ void td5_track_resolve_wall_contacts(TD5_Actor *actor)
  *     the boundary strip's left edge, normalized to length 4096.
  *   - flag=0 to wall_response so track_contact_flag is NOT written
  *     (port hooks side<0 to skip that write).
+ *
+ * L5 promotion sweep audit (2026-05-18):
+ *   - UpdateActorTrackSegmentContactsForward @ 0x00406F50: byte-faithful.
+ *     [CONFIRMED @ 0x406F87 JG gate, 0x406FB6 per-probe JG, 0x40702A SAR;
+ *     0x40705F JNS sign test, 0x407094 PUSH 0 flag, 0x4070A1 CALL force-fn,
+ *     0x4070C0 CMP 0x8 probe-loop bound.]
+ *   - UpdateActorTrackSegmentContactsReverse @ 0x004070E0: byte-faithful,
+ *     symmetric with Forward — outer gate inverted (`track_span_raw <
+ *     sentinel-1` instead of `> sentinel+1`), per-probe gate uses equality
+ *     instead of `<=`, base/end vertex pair swapped (psVar1 = end, psVar2
+ *     = base) so outward normal flips, and the atan2 edge tangent goes
+ *     base->end inverted. [CONFIRMED @ 0x407124 JG inverted; 0x40717C
+ *     CMP equality; 0x40717E JNZ probe-skip.] The port's `reverse_mode`
+ *     branch in `fwd_rev_resolve_contact` swaps both nx/nz signs and the
+ *     ref_v base/end vertex, mirroring orig's swap exactly.
+ *   - Normalization uses StoreRoundedVector3Ints @ 0x0042CCD0 in orig
+ *     (FILD/FSQRT/FDIVR 4096.0f / FMUL / __ftol-truncate). Port uses
+ *     `sqrtf` + float division + `(int32_t)` cast (also round-toward-zero
+ *     after 32-bit float precision). Differs only at the 80-bit->32-bit
+ *     FPU residue boundary (±1 LSB in normalized normal vector), which
+ *     does not change the sign of the penetration dot at any value
+ *     observable in the field.
+ *   - tangent-angle computation: orig calls AngleFromVector12 @ 0x0040A720,
+ *     port uses `atan2` + scale to 4096-units with `& 0xFFF`. Same value
+ *     range, ±0/±1 LSB difference at quadrant edges.
  * ======================================================================== */
 
 /* Per-level boundary sentinel pair, copied from the original binary's
