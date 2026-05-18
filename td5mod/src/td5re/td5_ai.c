@@ -1647,6 +1647,27 @@ void td5_ai_init_race_actor_runtime(void) {
  *
  * param route_state: pointer to this actor's route state dword array
  * param steer_weight: 0x10000 (braking), 0x20000 (coasting), 0x4000 (script)
+ *
+ * [CONFIRMED @ 0x004340C0] Byte-faithful with orig UpdateActorSteeringBias.
+ * L5 audit 2026-05-18 (TD5_pool0 read-only):
+ *   - Field offsets match: longitudinal_speed +0x314, rear_axle_slip +0x320,
+ *     steering_cmd +0x30C, steering_ramp_accum +0x33A, slot_index +0xD4 (RS[0x35]).
+ *   - RS[0x16]/[0x17] = LEFT/RIGHT_DEVIATION (param_1+0x58/+0x5C).
+ *   - abs(longitudinal_speed >> 8) via XOR-sign idiom matches.
+ *   - rate cap iVar2 = 0xC0000 / ((|v|*0x400)/(slip²+0x400) + 0x40) match.
+ *   - cap iVar3 = 0x1800000 / ((|v|*0x10000)/(slip²+0x10000) + 0x100) match.
+ *   - NESTED cascade structure (LEFT<0x800 → LEFT<0x401 → param_2==0 OR
+ *     LEFT<0x100 OR 0x100<=LEFT<0x401; ELSE 0x401<=LEFT<0x800 +0x4000;
+ *     ELSE RIGHT<0x401 mirror; ELSE -0x4000) all branches walked.
+ *   - Script-ramp branch: ramp += 0x40 if <0x100; bias = curr + sar_rz(iVar2*ramp, 8);
+ *     write bias FIRST, then conditional overwrite to iVar3 (LEFT) or -iVar3 (RIGHT).
+ *     The RIGHT mirror uses `iVar4 <= iVar7` (skip overwrite) vs port
+ *     `param_2 <= bias` — semantically identical.
+ *   - Sin-fine branch uses sar_rz with 0xFFF mask (n=12). Match.
+ *   - Final clamp ±0x18000 match (orig 0xfffe8000 == -0x18000).
+ *   - ai_sin_fixed12 uses libm sin*4096 truncate vs original's int LUT; both
+ *     yield int32 (same integer values within FPU precision). Pre-existing
+ *     known class — see float-LUT trig commit 4e71a88.
  * ======================================================================== */
 
 /* Pilot tracing — per-function entry/exit emitter for pool10 / 0x004340C0. */
