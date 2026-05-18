@@ -4499,6 +4499,42 @@ static inline int32_t arith_round_shift(int32_t x, int32_t mask, int32_t shift)
 
 #include "td5_pilot_trace_004057F0.h"
 
+/* [CONFIRMED @ 0x004057F0] L5 promotion sweep audit (2026-05-18).
+ *
+ * UpdateVehicleSuspensionResponse — 783 bytes / 241 instructions / 120
+ * decompiled lines. Body audited line-for-line vs disassembly:
+ *
+ *   - bVar1=wheel_contact_bitmask / bVar2=damage_lockout polarity:
+ *     CONFIRMED at 0x004058E4 (spring-dot gate) + 0x00405A6A (pattern
+ *     clamp) — port matches AIRBORNE-mask polarity end-to-end.
+ *   - loop 4-wheel structure (psVar11 stride +0x254 / 4 shorts/wheel):
+ *     CONFIRMED at 0x00405884/0x00405888.
+ *   - g_view rotation_world_to_body_y reads row 1 of body^T:
+ *     CONFIRMED at 0x004057FA-0x004058D8 (TransposeMatrix3x3 +
+ *     LoadRenderRotationMatrix + ConvertFloatVec3ToShortAngles).
+ *   - signed div-by-2 with C-style truncation (dot/2 vs dot>>1):
+ *     SHIPPED fix in commit on precise-004057F0 branch.
+ *   - axis assignment to ang_vel_roll/pitch:
+ *     CONFIRMED at 0x00405A3D / 0x00405A43.
+ *   - divisors /0x4B0 (roll) and /0x226 (pitch):
+ *     CONFIRMED via IMUL constants 0x1B4E81B5 SAR 7 + 0x77280773 SAR 8.
+ *   - pattern-clamp switch table on prev_air (bVar2): MATCHES.
+ *
+ * STATUS: Static audit COMPLETE — function is byte-faithful with one
+ * SHIPPED fix (D1 dot>>1 → dot/2). Per the chassis-launch chain
+ * investigation (agent #41) the residual runtime divergence is UPSTREAM
+ * in ComputeActorTrackContactNormalExtended @ 0x00403720 (pool1) — wcv
+ * sign / hires shift / gap_270 chain — and the side-channel cardef-
+ * loading issue for PlayerIsAI=1 slot 0.
+ *
+ * KNOWN TODO CHAIN OWNERS (chassis-launch / suspension cascade):
+ *   - todo_edinburgh_chassis_launch_proximate_cause.md (wcb=0 transient)
+ *   - todo_edinburgh_span_433_residual_launch.md (second crest launch)
+ *   - todo_chassis_snap_fix_2026-05-16.md (floorf vs FISTP-RNE rounding)
+ *
+ * Audit reference: re/analysis/pilot_004057F0_audit.md (pool6, 2026-05-14).
+ * Effective level: L4 (byte-faithful per static audit; upstream-blocked).
+ */
 void td5_physics_update_suspension_response(TD5_Actor *actor)
 {
     td5_pilot_emit_004057F0_enter(actor,
