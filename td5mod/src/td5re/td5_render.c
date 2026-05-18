@@ -4740,6 +4740,19 @@ float td5_sin_12bit(uint32_t angle) {
  * Matrix / Vector Operations (migrated from td5re_stubs.c)
  * ======================================================================== */
 
+/* [CONFIRMED @ 0x0042DA10] Byte-faithful with orig MultiplyRotationMatrices3x3.
+ * L5 audit 2026-05-18 (TD5_pool0 read-only):
+ *   - Formula: C[i][j] = sum_k A[i*3+k] * B[k*3+j], identical to original
+ *     row-major 3x3 multiply (see param_3[2] = A[0]*B[2]+A[1]*B[5]+A[2]*B[8]).
+ *   - Alias safety: original loads ALL 48 source slots into temps before any
+ *     write to param_3 (aliasing-safe). Port uses local tmp[9] buffer + memcpy
+ *     — semantically identical for any aliasing pattern (A==out, B==out, or
+ *     A==B==out as seen in td5_camera.c rotor chains).
+ *   - Original computes float-only with FPU stack-order writes; port computes
+ *     float-only via i,j,k triple loop. Same precision (single-precision IEEE).
+ *   - Write order in original is non-sequential (param_3[2], 3, 4, 0, 5, 1,
+ *     6, 7, 8) because of FPU register pressure; result identical after all
+ *     stores commit. */
 void MultiplyRotationMatrices3x3(float *A, float *B, float *out) {
     int i, j, k;
     float tmp[9];
