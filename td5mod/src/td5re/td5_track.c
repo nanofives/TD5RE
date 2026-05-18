@@ -1963,6 +1963,19 @@ void td5_track_bind_runtime_pointers(void)
 
 /* ========================================================================
  * Strip Attribute Overrides (0x42FB40)
+ * [CONFIRMED @ 0x0042FB40] L5 promotion sweep audit (2026-05-18). Byte-faithful
+ *   port of orig fill loop: iterates s_span_count, consumes (span_idx, val)
+ *   pairs at 8-byte stride from PTR_DAT_0046cb10[param_1], stores current_attr
+ *   at +0x01 of each record (orig stride 0x18 == sizeof(TD5_StripSpan)).
+ *
+ * [ARCH-DIVERGENCE @ 0x0042FB40] Orig signature is
+ *   ApplyTrackStripAttributeOverrides(track_idx, default_attr) and seeds
+ *   uVar3 = default_attr & 0xff before the loop. Port hardcodes initial
+ *   current_attr = 0. Effect-equivalent on TD5 stock content (every
+ *   shipping STRIP.DAT begins with an override at index 0 -- decomp
+ *   shows override fires before any store), but a future modded strip
+ *   that omits an index-0 override would diverge. Caller wiring is also
+ *   absent in current port -- this helper is documented but unused.
  *
  * Applies a compact override table to the surface_attribute byte (+0x01)
  * of each span record. Table format: pairs of (span_index, value) at
