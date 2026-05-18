@@ -856,12 +856,14 @@ void td5_physics_run_paused_engine_step(void)
  *      divergence; scoring-side. Documented in
  *      reference_arch_no_speed_bonus_score_2026-05-18.md.
  *
- *   2) [CONFIRMED @ 0x0040A2B0 + L4 minor residuals] AdvancePendingFinishState
- *      consolidated into td5_game.c game-tick loop (tick_pending_finish_timer
- *      @ td5_game.c:3177). Core hi/lo CONCAT11 decrement + state-2 promotion
- *      logic byte-faithful with orig disasm. 3 minor residuals filed in
- *      todo_advance_pending_finish_state_residuals_2026-05-18.md (replay-mode
- *      gate, transition-gate, timer-ticks early-return optimization).
+ *   2) [CONFIRMED @ 0x0040A2B0] AdvancePendingFinishState consolidated into
+ *      td5_game.c game-tick loop (tick_pending_finish_timer @ td5_game.c).
+ *      Core hi/lo CONCAT11 decrement + state-2 promotion logic byte-faithful
+ *      with orig disasm. All 5 orig gates now mirrored: state==1, transition
+ *      gate (g_cameraTransitionActive==0), replay-mode==0, finish-time==0,
+ *      special_encounter!=0. The 3 minor residuals previously filed in
+ *      todo_advance_pending_finish_state_residuals_2026-05-18.md were closed
+ *      Phase 2 follow-up — see tick_pending_finish_timer header.
  *
  *   3) [ARCH-DIVERGENCE — port-only step 9 surface_contact_flags safety net]
  *      Port writes scf at the tail of this dispatcher when slot is the human
