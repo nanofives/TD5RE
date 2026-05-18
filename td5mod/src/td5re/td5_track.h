@@ -109,6 +109,12 @@ int              td5_track_get_ring_length(void);
 int              td5_track_get_span_lane_count(int span_index);
 int              td5_track_branch_to_junction(int span_idx);
 int              td5_track_get_fwd_sentinel(void);
+/* Junction-table lookup for orig UpdateRaceActors @ 0x00436A70 route_table
+ * selector logic. Returns 1 if span_norm falls inside any junction entry's
+ * main-road range AND the entry's branch_lo - main_target + span_norm != -1
+ * (PATH 2a in orig). Returns 0 for PATH 2b (no match → keep ptr unchanged).
+ * Mirrors orig 0x00436ADB..0x00436C74 byte-faithfully. */
+int              td5_track_route_junction_path2a_match(int span_norm);
 TD5_StripSpan   *td5_track_get_span(int index);
 TD5_StripVertex *td5_track_get_vertex(int index);
 int              td5_track_is_valid_mesh_ptr(const void *ptr);
