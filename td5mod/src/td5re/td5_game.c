@@ -4018,6 +4018,14 @@ static const char *td5_game_state_name(TD5_GameState state)
 
 /* ========================================================================
  * IsLocalRaceParticipantSlot (0x42CBE0)
+ *
+ * [CONFIRMED @ 0x0042cbe0 IsLocalRaceParticipantSlot; L5 promotion sweep
+ *  audit 2026-05-18] -- Byte-faithful port. Three-branch dispatch matches
+ *  orig exactly:
+ *    if dpu[0xc08] != 0      -> dpu[0xbcc + slot*4]   (network participant flag)
+ *    elif viewport_mode != 0 -> slot < 2              (split-screen pair)
+ *    else                    -> slot == 0             (single-player owns slot 0)
+ *  td5_net_is_slot_active() reads the same dpu+0xBCC slot vector as orig.
  * ======================================================================== */
 
 int td5_game_is_local_participant(int slot) {
