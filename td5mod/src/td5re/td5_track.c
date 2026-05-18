@@ -5826,6 +5826,16 @@ int td5_track_get_fwd_sentinel(void)
     return s_boundary_fwd_sentinel;
 }
 
+int td5_track_get_junction_count(void)
+{
+    return s_jump_entry_count;
+}
+
+const uint8_t *td5_track_get_junction_entries(void)
+{
+    return s_jump_entries;
+}
+
 int td5_track_is_ptr_in_blob(const void *ptr, size_t need)
 {
     if (!ptr || !s_models_blob || s_models_blob_size == 0) return 0;

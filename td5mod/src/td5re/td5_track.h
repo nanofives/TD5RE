@@ -115,6 +115,10 @@ int              td5_track_get_fwd_sentinel(void);
  * (PATH 2a in orig). Returns 0 for PATH 2b (no match → keep ptr unchanged).
  * Mirrors orig 0x00436ADB..0x00436C74 byte-faithfully. */
 int              td5_track_route_junction_path2a_match(int span_norm);
+/* Junction-table accessors for slot-init route-selector heuristic
+ * (td5_ai_initialize_runtime, BlueRidge regression follow-up 2026-05-18). */
+int              td5_track_get_junction_count(void);
+const uint8_t   *td5_track_get_junction_entries(void);
 TD5_StripSpan   *td5_track_get_span(int index);
 TD5_StripVertex *td5_track_get_vertex(int index);
 int              td5_track_is_valid_mesh_ptr(const void *ptr);
