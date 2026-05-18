@@ -5121,6 +5121,14 @@ outer_test:
  *
  * Only fires when track_span_raw == g_trackTotalSpanCount - 1 (last span).
  * [CONFIRMED @ 0x407879: `if (actor->track_span == DAT_00483550 + -1)`]
+ *
+ * L4: known divergence — see todo_traffic_route_advance_lane_count_byte_2026-05-18.md
+ *   1) Port reads `sp_wrap->surface_attribute & 0xF` (byte +0x01); original reads
+ *      byte +0x03 (geometry_metadata low nibble — same byte `span_lane_count` uses).
+ *   2) Port walks BOTH rails at `+sub_lane` offset (vl=left+sub, vr=right+sub);
+ *      original uses ONE rail across full width (vl=left, vr=left+lane_nibble).
+ *   Numerically close on typical wrap span 0; defer until tail-span divergence
+ *   surfaces in cascade-unwind work.
  */
 static void process_traffic_route_advance(TD5_Actor *actor, int slot)
 {
