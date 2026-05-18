@@ -5544,6 +5544,55 @@ int td5_track_branch_to_junction(int span_idx)
     return -1;
 }
 
+/* Mirrors orig UpdateRaceActors @ 0x00436ADB..0x00436C74 junction-check.
+ *
+ * Orig disasm summary (verified read-only @ Ghidra session 2026-05-17):
+ *   EDX = strip_base + 0x1c       ; iterates ushort* over junction entries
+ *   ESI = span_norm               ; actor.field_0x82
+ *   For each entry (6-byte stride):
+ *     CX  = ushort[+0x1c]         ; "main_target" (entry_s[2] in port naming)
+ *     If span_norm < CX: skip (JL 0x436b26)
+ *     SI  = ushort[+0x18]         ; "branch_lo" (entry_u[0])
+ *     BP  = ushort[+0x1a]         ; "branch_hi" (entry_u[1])
+ *     EBP -= ESI = (branch_hi - branch_lo)        ; range width
+ *     max = CX + (branch_hi - branch_lo) - 1
+ *     If span_norm <= max: jump to PATH 2a candidate (LAB_b51)
+ *     Else: keep scanning
+ *   PATH 2a candidate (LAB_436c51):
+ *     BP  = ushort[entry.+0x18]   ; branch_lo  (=SI from earlier)
+ *     EBP = ushort[entry.+0x1c]   ; main_target (=CX from earlier)
+ *     If (branch_lo - main_target + span_norm) == -1: PATH 2b (no match)
+ *     Else: PATH 2a match → write selector=0, ptr=LEFT.TRK
+ *
+ * Returns 1 for PATH 2a match (write ptr=LEFT), 0 for PATH 2b (keep ptr).
+ */
+int td5_track_route_junction_path2a_match(int span_norm)
+{
+    if (!s_jump_entries || s_jump_entry_count <= 0) return 0;
+    if (span_norm < 0) return 0;
+
+    for (int j = 0; j < s_jump_entry_count; j++) {
+        uint16_t *entry_u = (uint16_t *)(s_jump_entries + j * 6);
+        int branch_lo   = (int)entry_u[0];        /* +0x18 */
+        int branch_hi   = (int)entry_u[1];        /* +0x1a */
+        int main_target = (int)entry_u[2];        /* +0x1c (signed in port,
+                                                     orig reads as unsigned
+                                                     via MOV CX,word). */
+        /* Range check: main_target <= span_norm <= main_target +
+         * (branch_hi - branch_lo) - 1. Skip until in range. */
+        if (span_norm < main_target) continue;
+        int max_bound = main_target + (branch_hi - branch_lo) - 1;
+        if (span_norm > max_bound) continue;
+
+        /* PATH 2a candidate: confirm with the -1 sentinel check.
+         * (branch_lo - main_target + span_norm) == -1 → PATH 2b (no match);
+         * else PATH 2a. Both orig branches `break` out of the scan loop here. */
+        int probe = branch_lo - main_target + span_norm;
+        return (probe == -1) ? 0 : 1;
+    }
+    return 0;
+}
+
 int td5_track_get_fwd_sentinel(void)
 {
     return s_boundary_fwd_sentinel;

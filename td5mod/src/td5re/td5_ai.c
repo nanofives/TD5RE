@@ -822,20 +822,76 @@ static void td5_ai_refresh_route_state_slot(int slot) {
     rs = route_state(slot);
     actor = actor_ptr(slot);
 
-    /* Per-tick branch-vs-main selector update [CONFIRMED @ 0x00436A9E].
-     * Original UpdateRaceActors sets gActorRouteTableSelector=1 when
-     * span_raw > g_trackTotalSpanCount (actor on branch road), =0 otherwise. */
+    /* Per-tick branch-vs-main selector update [CONFIRMED @ 0x00436AAD..0x00436C9B].
+     *
+     * Orig UpdateRaceActors has THREE paths for the selector/ptr write:
+     *
+     *   PATH 1  (span_raw > total_span_count):
+     *     selector := 1, ptr := RIGHT.TRK
+     *
+     *   PATH 2a (junction match — span_norm in entry main-road range AND
+     *            branch_lo - main_target + span_norm != -1):
+     *     selector := 0, ptr := LEFT.TRK
+     *
+     *   PATH 2b (default — no junction match):
+     *     selector := 0, ptr UNCHANGED   ← KEY DIVERGENCE FROM PRIOR PORT
+     *
+     * Prior port wrote rs[RS_ROUTE_TABLE_PTR] = g_route_tables[selector]
+     * UNCONDITIONALLY. That meant slot 0 (initialized to RIGHT.TRK by
+     * td5_ai_initialize_runtime via `selector = (slot & 1) ? 0 : 1`) had
+     * its ptr force-rewritten to LEFT.TRK on every tick where span_raw <=
+     * total. In orig, slot 0 keeps RIGHT.TRK in PATH 2b → route_byte read
+     * via that table → hdelta computed against RIGHT-relative heading →
+     * recovery-script trigger fires when hdelta in (0x320, 0xCE0).
+     *
+     * On Moscow at sub_tick=1, this is what drove RS[0x3D] (script_flags)
+     * and RS[0x45] (script_countdown) to stay at 0 in port: with LEFT.TRK
+     * substituted, hdelta misses the trigger window, script_base_ptr stays
+     * 0, AdvanceActorTrackScript never runs, and the two RS fields never
+     * pick up their script-driven values (0x10 / 0x96).
+     *
+     * Fix (this commit): only write rs[RS_ROUTE_TABLE_PTR] when the orig
+     * writes it (PATH 1 or PATH 2a). PATH 2b leaves the ptr alone — it
+     * keeps whatever value was set during td5_ai_initialize_runtime (LEFT
+     * for odd slots, RIGHT for even slots). */
     {
         int ring_len = td5_track_get_ring_length();
         int span_raw_val = (int)(int16_t)ACTOR_I16(actor, ACTOR_SPAN_RAW);
-        rs[RS_ROUTE_TABLE_SELECTOR] = (ring_len > 0 && span_raw_val >= ring_len) ? 1 : 0;
+        int span_norm_val = (int)(int16_t)ACTOR_I16(actor, ACTOR_SPAN_NORMALIZED);
+
+        if (ring_len > 0 && span_raw_val > ring_len) {
+            /* PATH 1: span_raw > total → selector=1, ptr=RIGHT
+             * [orig 0x436ab4 CMP EAX,ECX / JLE 0x436adb — fall-through on >]. */
+            rs[RS_ROUTE_TABLE_SELECTOR] = 1;
+            rs[RS_ROUTE_TABLE_PTR] = (int32_t)(intptr_t)g_route_tables[1];
+        } else if (td5_track_route_junction_path2a_match(span_norm_val)) {
+            /* PATH 2a: junction match → selector=0, ptr=LEFT */
+            rs[RS_ROUTE_TABLE_SELECTOR] = 0;
+            rs[RS_ROUTE_TABLE_PTR] = (int32_t)(intptr_t)g_route_tables[0];
+        } else {
+            /* PATH 2b: default → selector=0, ptr UNCHANGED */
+            rs[RS_ROUTE_TABLE_SELECTOR] = 0;
+        }
     }
 
     selector = rs[RS_ROUTE_TABLE_SELECTOR] & 1;
-    route_table = g_route_tables[selector];
-    route_count = g_route_table_sizes[selector] / 3u;
+    /* route_table now derived from rs[RS_ROUTE_TABLE_PTR] which may have been
+     * left UNCHANGED in PATH 2b, OR forcibly set in PATH 1/2a. The selector
+     * variable continues to drive downstream branches; the lookup against
+     * g_route_tables[selector] is only used to derive route_count for the
+     * empty-table fallback and route_byte indexing. To keep downstream code
+     * byte-equivalent we still cache route_table = the resolved ptr, but
+     * we read from rs (not g_route_tables) so PATH 2b's preserved ptr wins. */
+    route_table = (const uint8_t *)(intptr_t)rs[RS_ROUTE_TABLE_PTR];
+    /* For route_count, prefer the size that matches the actual ptr. If the
+     * stored ptr equals g_route_tables[1] use selector=1's size; otherwise
+     * use selector=0's size (covers PATH 2b where ptr keeps initial value). */
+    route_count = (route_table == g_route_tables[1])
+                  ? (g_route_table_sizes[1] / 3u)
+                  : (g_route_table_sizes[0] / 3u);
 
-    rs[RS_ROUTE_TABLE_PTR] = (int32_t)(intptr_t)route_table;
+    /* rs[RS_ROUTE_TABLE_PTR] write is now path-gated above; no fall-through
+     * unconditional write here. */
     if (!route_table || route_count == 0u) {
         rs[RS_FORWARD_TRACK_COMP] = 0;
         g_actor_forward_track_component[slot] = 0;
