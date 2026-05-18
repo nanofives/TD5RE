@@ -3356,6 +3356,19 @@ static void tick_race_countdown(void)
      * delaying the race start by ~40 sub-ticks (one full "level"). */
     if (g_cameraTransitionActive <= TD5_COUNTDOWN_DECR) {
         g_cameraTransitionActive = 0;
+        /* [CONFIRMED @ 0x0040A4B4 UpdateRaceCameraTransitionTimer; Phase 2
+         *  follow-up 2026-05-18] Orig reloads camera preset state at the
+         *  timer < 0x101 crossing, taking the "clear" branch when input
+         *  playback OR replay mode is active, else the "restore" branch.
+         *  Today the camera preset is not re-saved during countdown so
+         *  the restore is a no-op, but the structural call is added for
+         *  parity. Fires once at the timer-zero crossing inside this
+         *  branch (caller's countdown_active>0 guard prevents re-entry). */
+        {
+            int clear_or_restore = (td5_input_is_playback_active() ||
+                                    s_replay_mode) ? 1 : 0;
+            ResetRaceCameraSelectionState(clear_or_restore);
+        }
     } else {
         g_cameraTransitionActive -= TD5_COUNTDOWN_DECR;
     }
@@ -3533,7 +3546,8 @@ static int check_race_completion(uint32_t sim_delta) {
 static void tick_pending_finish_timer(int slot) {
     ActorRaceMetric *m = &s_metrics[slot];
 
-    /* Original AdvancePendingFinishState @ 0x0040A2B0 gate, verbatim:
+    /* [CONFIRMED @ 0x0040A2B0 AdvancePendingFinishState; Phase 2 follow-up
+     *  2026-05-18] All five gates from orig now mirrored verbatim:
      *   gRaceSlotStateTable.slot[uVar1].state == '\x01'   (racing)
      *   && gRaceCameraTransitionGate == 0                 (countdown done)
      *   && g_replayModeFlag == 0                          (not replaying)
@@ -3546,13 +3560,24 @@ static void tick_pending_finish_timer(int slot) {
      * COPS toggle in the frontend (td5_frontend.c:2681) and is therefore
      * the wrong global — when cops were OFF the timer never decremented
      * and the race never finished via the timer path.
+     *
+     * The gRaceCameraTransitionGate gate is mirrored via g_cameraTransitionActive
+     * (collapsed-state convention, see tick_race_countdown delta E). The
+     * sub-tick loop's outer paused=0 already prevents this function from
+     * firing during the countdown window, but the explicit gate matches
+     * orig structure for parity. The timer_ticks <= 0 early return was
+     * removed — orig writes back the CONCAT11 value unconditionally inside
+     * the finish_time==0 branch; the underflow lo=0x39 / hi-stays-0 path
+     * is idempotent on an already-promoted slot (companion_1 gate above
+     * catches it first).
      * [CONFIRMED @ 0x0040A2DC: if (g_specialEncounterType != 0 && ...).] */
     if (g_special_encounter == 0) return;  /* non-P2P -> no decrement */
     if (s_active_checkpoint.checkpoint_count == 0) return;
     if (s_slot_state[slot].state != 1) return;
+    if (g_cameraTransitionActive != 0) return;          /* gRaceCameraTransitionGate */
+    if (g_replay_mode != 0) return;                     /* g_replayModeFlag */
     if (s_slot_state[slot].companion_1 != 0) return;  /* already finished */
     if (m->post_finish_metric_base != 0) return;       /* already scored */
-    if (m->timer_ticks <= 0) return;                   /* already expired */
 
     /* Diagnostic: log slot 0's timer once a second so we can confirm decrement
      * cadence + observe the run-up to underflow. Removeable once timer behavior
