@@ -5299,7 +5299,15 @@ static void process_traffic_segment_edge(TD5_Actor *actor, int slot)
 
     /* Inner edge test: sub_lane < 2  [CONFIRMED @ 0x407394: if (iVar12 < 2)] */
     if (sub_lane < 2) {
-        /* Inner boundary: left vertex[sub_lane] to right vertex[sub_lane] */
+        /* Inner boundary: left vertex[sub_lane] to right vertex[sub_lane]
+         *
+         * [DIVERGENCE NOTE 2026-05-18 audit, session a3a73a6d]
+         * Orig 0x004073A4-0x004073B0 reads `psVar1 = pool[strip[+0x06] * 6]`
+         * and `psVar2 = pool[strip[+0x04] * 6]` — NO sub_lane addition. The
+         * sub_lane is used only as the gate (iVar12 < 2). Port adds sub_lane
+         * to both indices below; this is a bug pending Frida-trace validation
+         * before fix. See Item 3 in
+         * todo_traffic_route_advance_lane_count_byte_2026-05-18.md */
         int li_idx = (int)sp->left_vertex_index  + sub_lane;
         int ri_idx = (int)sp->right_vertex_index + sub_lane;
         TD5_StripVertex *vl = td5_track_get_vertex(li_idx);
@@ -5339,7 +5347,16 @@ outer_test:
          *   psVar1 = vertex_pool[DAT_004631a0[span_type] + strip[+0x04] + uVar10]
          *   psVar2 = vertex_pool[DAT_004631a4[span_type] + strip[+0x06] + uVar10]
          *   where uVar10 = (strip[+0x03] & 0xF) = lane_count itself, NOT lane_count-1.
-         * In port naming: strip[+0x04] = right_vertex_index, strip[+0x06] = left_vertex_index.
+         *
+         * [CORRECTION 2026-05-18 audit, session a3a73a6d] In port naming
+         * (td5_types.h:383-384): strip[+0x04] = left_vertex_index,
+         * strip[+0x06] = right_vertex_index. So orig psVar1 indexes from
+         * LEFT_vertex_index, psVar2 from RIGHT_vertex_index.
+         *
+         * Port code below has these SWAPPED: vl reads from right_vertex_index +
+         * k_outer_offset, vr reads from left_vertex_index. This is a residual
+         * outer-test vertex-pair swap bug (Item 3 [L4 — Frida-pending]).
+         *
          * DAT_004631a4 is 0 for all 12 span types [CONFIRMED @ 0x004631A0].
          * DAT_004631a0 values [CONFIRMED @ 0x004631A0]:
          *   span_type: 0  1  2  3  4  5  6  7  8  9 10 11 */
