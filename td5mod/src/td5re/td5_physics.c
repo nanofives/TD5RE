@@ -7132,6 +7132,13 @@ int td5_physics_get_collisions_flag(void)
 }
 
 /* ========================================================================
+ * [CONFIRMED @ 0x00405D70] Byte-faithful with orig ResetVehicleActorState.
+ * L5 promotion 2026-05-18 (small-tier sweep). 54-instr listing match: clears
+ * 25 unique offsets (surface_contact_flags, vehicle_mode, ang/lin vel block,
+ * frame_counter, wheel_contact_bitmask, suspension_pos/spring_dv loops,
+ * euler_accum, render_pos = world_pos / 256), seeds gear=2 + rpm=400 +
+ * world_pos.y=0xC0000000 sentinel, integrates pose, then re-zeros vel subset.
+ *
  * ResetVehicleActorState (0x405D70)
  *
  * Resets vehicle to initial conditions (respawn/reset).
@@ -7488,7 +7495,12 @@ void td5_physics_state0f_damping(TD5_Actor *actor)
  * Engine & Transmission
  * ======================================================================== */
 
-/* --- UpdateVehicleEngineSpeedSmoothed (0x0042ED50) ---
+/* [CONFIRMED @ 0x0042ED50] Byte-faithful with orig UpdateVehicleEngineSpeedSmoothed.
+ * L5 promotion 2026-05-18 (small-tier sweep). Line-for-line listing port;
+ * brake/neg-throttle → idle 400; else target = (redline-400)*throttle>>8 + 400,
+ * SAR-4 slew (up clamp 400, dead down clamp 200), upper redline clamp omitted.
+ *
+ * --- UpdateVehicleEngineSpeedSmoothed (0x0042ED50) ---
  *
  * Byte-faithful port of FUN_0042ED50 (RE: TD5_pool11 read-only listing,
  * audited 2026-05-14). Mirrors the original x86 control flow line-for-line:
@@ -7609,7 +7621,13 @@ static void update_engine_speed_smoothed(TD5_Actor *actor)
     actor->engine_speed_accum = rpm + step;
 }
 
-/* --- UpdateEngineSpeedAccumulator (0x0042EDF0) ---
+/* [CONFIRMED @ 0x0042EDF0] Byte-faithful with orig UpdateEngineSpeedAccumulator.
+ * L5 promotion 2026-05-18 (small-tier sweep). Line-for-line listing port;
+ * gear==1 → UpdateVehicleEngineSpeedSmoothed; else target = abs(speed>>8) *
+ * gear_ratio[gear] * 45 SAR-12 + 400; delta > 800 fast-down -200, < -800
+ * fast-up +200, smooth (target-rpm) SAR-2; upper redline clamp.
+ *
+ * --- UpdateEngineSpeedAccumulator (0x0042EDF0) ---
  *
  * Byte-faithful port of FUN_0042EDF0 (RE: TD5_pool7 read-only listing,
  * audited 2026-05-14). Mirrors the original x86 control flow line-for-line:
@@ -7990,7 +8008,12 @@ static inline int32_t sar9_rz_42F030(int32_t x) {
     return ((x < 0) ? (x + 0x1FF) : x) >> 9;
 }
 
-/* --- ComputeDriveTorqueFromGearCurve (0x42F030) ---
+/* [CONFIRMED @ 0x0042F030] Byte-faithful with orig ComputeDriveTorqueFromGearCurve.
+ * L5 promotion 2026-05-18 (small-tier sweep). Piecewise-linear LUT lerp at
+ * tuning+rpm_idx*2 (SAR-9 index, mod-512 fraction), * throttle SAR-8 *
+ * gear_ratio SAR-8; redline-50 upper cutoff returns 0; gear==1 early-out.
+ *
+ * --- ComputeDriveTorqueFromGearCurve (0x42F030) ---
  *
  * Byte-exact port from listing 0x0042F030..0x0042F0FC.
  *
@@ -8074,7 +8097,12 @@ int32_t td5_physics_compute_drive_torque(TD5_Actor *actor)
     return torque;
 }
 
-/* --- ApplySteeringTorqueToWheels (0x42EEA0) ---  [byte-faithful port]
+/* [CONFIRMED @ 0x0042EEA0] Byte-faithful with orig ApplySteeringTorqueToWheels.
+ * L5 promotion 2026-05-18 (small-tier sweep). Verbatim port of 24-instr listing;
+ * throttle * tuning[+0x68] * 26, biased SAR 8, * g_gearTorqueTable[gear],
+ * biased SAR 8 → kick written FL/FR (+), RL/RR (-) on wheel_spring_dv[0..3].
+ *
+ * --- ApplySteeringTorqueToWheels (0x42EEA0) ---  [byte-faithful port]
  *
  * Verbatim port of FUN_0042EEA0 (0x0042EEA0..0x0042EF06). Originally the
  * port stubbed this out to suppress a pitch-divergence symptom, but the
@@ -8157,7 +8185,11 @@ void td5_physics_apply_steering_torque(TD5_Actor *actor)
     actor->wheel_spring_dv[3] -= k;   /* +0x2F8 RR */
 }
 
-/* --- ApplyReverseGearThrottleSign (0x42F010) ---
+/* [CONFIRMED @ 0x0042F010] Byte-faithful with orig ApplyReverseGearThrottleSign.
+ * L5 promotion 2026-05-18 (small-tier sweep). 8-instr listing match;
+ * actor+0x36B (gear) zero-gate, 16-bit NEG on actor+0x33E (encounter_steering_cmd).
+ *
+ * --- ApplyReverseGearThrottleSign (0x42F010) ---
  *
  * Byte-exact port from listing 0x0042F010..0x0042F02F (8 instructions).
  *

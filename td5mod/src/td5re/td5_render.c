@@ -4452,6 +4452,11 @@ static inline void td5_trig_ensure_lut(void) {
     if (!s_trig_lut_built) td5_trig_build_lut();
 }
 
+/* [CONFIRMED @ 0x0040A6A0] Byte-faithful with orig CosFloat12bit.
+ * L5 promotion 2026-05-18 (small-tier sweep). 4-instr listing match:
+ * AND angle, 0xfff; FLD float [base + idx*4]. Port reads s_cosFloatTable
+ * (built from FPU cos at td5_trig_build_lut) at the same index. Pilot trig
+ * emit hook is an instrumentation side-effect with no semantic divergence. */
 float CosFloat12bit(unsigned int angle) {
     td5_trig_ensure_lut();
     unsigned int idx = angle & 0xFFFu;
@@ -4462,6 +4467,11 @@ float CosFloat12bit(unsigned int angle) {
     return v;
 }
 
+/* [CONFIRMED @ 0x0040A6C0] Byte-faithful with orig SinFloat12bit.
+ * L5 promotion 2026-05-18 (small-tier sweep). 5-instr listing match:
+ * ADD EAX, 0xfffffc00 (32-bit signed wrap = sin via cos(angle-pi/2));
+ * AND 0xfff; FLD float [s_cosFloatTable + idx*4]. Pilot trig emit hook
+ * is an instrumentation side-effect with no semantic divergence. */
 float SinFloat12bit(int angle) {
     td5_trig_ensure_lut();
     /* Match the original's `ADD EAX, 0xfffffc00` (32-bit signed wrap), then
