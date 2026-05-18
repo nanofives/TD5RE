@@ -1241,6 +1241,23 @@ void UpdateRaceCameraTransitionState(int actor, int view)
  * 0x402000 -- ResetRaceCameraSelectionState
  *
  * Restores or resets camera preset selection for both views.
+ *
+ * [CONFIRMED @ 0x00402000 ResetRaceCameraSelectionState; L5 promotion sweep
+ *  audit 2026-05-18] -- Byte-faithful port (NOT ARCH-DIVERGENCE).
+ *  Two-branch dispatch matches orig exactly:
+ *    param == 0: restore from packed save (DAT_00482f48 / +0x82fd4):
+ *                  preset[0] = packed[0] & 0x7F
+ *                  mode[0]   = (packed[0] & 0xFF) >> 7
+ *                  preset[1] = packed[1] & 0x7F
+ *                  mode[1]   = packed[1] >> 7
+ *    param != 0: zero all four fields.
+ *  Then two LoadCameraPresetForView calls with identical view indices
+ *  (0 and 1) and identical actor base (slot * 0x388 + 0x4ab310 in orig
+ *  / g_actorBaseAddr + g_actorSlotForView[v] * 0x388 in port).
+ *  Note: orig's only caller is UpdateRaceCameraTransitionTimer at the
+ *  countdown timer-zero crossing; that call is currently NOT wired in
+ *  the port -- see todo_countdown_reset_camera_preset_call_2026-05-18.md.
+ *  This function itself is byte-faithful and ready for the wiring.
  * ======================================================================== */
 
 void ResetRaceCameraSelectionState(int clear_or_restore)
