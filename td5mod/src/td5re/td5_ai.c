@@ -354,6 +354,13 @@ static int32_t ai_sin_fixed12(int32_t angle) {
  * Coordinate system: 0=north(+Z), 0x400=east(+X), 0x800=south(-Z), 0xC00=west(-X)
  * ======================================================================== */
 
+/* AngleFromVector12Full (0x00433FC0). L5 promotion sweep audit (2026-05-18).
+ * [ARCH-DIVERGENCE @ 0x00433FC0] Orig calls AngleFromVector12 (0x0040A720)
+ *   which indexes a 12-bit atan2 LUT at DAT_00463214. Port uses libm
+ *   atan2(double) scaled to 12-bit modular units. Cosmetically equivalent:
+ *   same +Z-axis-clockwise-positive convention, same 0..0xFFF output range,
+ *   matches orig within +/-1 LSB.
+ */
 static int32_t ai_angle_from_vector(int32_t dx, int32_t dz) {
     if (dx == 0 && dz == 0) return 0;
     /* atan2(dx, dz) gives angle from +Z axis, clockwise = positive */

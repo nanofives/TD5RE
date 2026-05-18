@@ -2768,7 +2768,14 @@ static int             s_tl_ambient;  /* scalar ambient byte (post-ComputeAverag
 
 /* SetTrackLightDirectionContribution @ 0x0042E130:
  *   intensity = avg(R,G,B); contribution_world = dir * intensity * (1/1024).
- *   All-zero RGB disables the slot. */
+ *   All-zero RGB disables the slot.
+ * [CONFIRMED @ 0x0042E130] L5 promotion sweep audit (2026-05-18). Byte-faithful
+ *   port: same all-zero-disable gate, same (R+G+B)/3 intensity, same
+ *   1/1024 attenuation (DAT_0045d6a0 = 0x3a800000 = 1/1024 IEEE754).
+ *   Minor 1-LSB rounding divergence: orig (int)((R+G+B)/3) truncates
+ *   before float convert; port (float)(R+G+B)/3.0f preserves fraction.
+ *   Result diverges <= 1.0 on intensity for non-multiples-of-3,
+ *   harmless on downstream lighting. */
 static void tl_set_contrib(int slot, const int16_t dir[3], int r, int g, int b)
 {
     if (slot < 0 || slot >= 3) return;

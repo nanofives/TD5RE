@@ -1963,6 +1963,19 @@ void td5_track_bind_runtime_pointers(void)
 
 /* ========================================================================
  * Strip Attribute Overrides (0x42FB40)
+ * [CONFIRMED @ 0x0042FB40] L5 promotion sweep audit (2026-05-18). Byte-faithful
+ *   port of orig fill loop: iterates s_span_count, consumes (span_idx, val)
+ *   pairs at 8-byte stride from PTR_DAT_0046cb10[param_1], stores current_attr
+ *   at +0x01 of each record (orig stride 0x18 == sizeof(TD5_StripSpan)).
+ *
+ * [ARCH-DIVERGENCE @ 0x0042FB40] Orig signature is
+ *   ApplyTrackStripAttributeOverrides(track_idx, default_attr) and seeds
+ *   uVar3 = default_attr & 0xff before the loop. Port hardcodes initial
+ *   current_attr = 0. Effect-equivalent on TD5 stock content (every
+ *   shipping STRIP.DAT begins with an override at index 0 -- decomp
+ *   shows override fires before any store), but a future modded strip
+ *   that omits an index-0 override would diverge. Caller wiring is also
+ *   absent in current port -- this helper is documented but unused.
  *
  * Applies a compact override table to the surface_attribute byte (+0x01)
  * of each span record. Table format: pairs of (span_index, value) at
@@ -3024,6 +3037,19 @@ void td5_track_compute_probe_contact_vertices(TD5_TrackProbeState *probe)
 
 /* ========================================================================
  * Barycentric Contact Resolution (0x4456D0 / 0x445A70)
+ * [CONFIRMED @ 0x004456D0 + 0x00445A70] L5 promotion sweep audit (2026-05-18).
+ *   Both orig variants port-collapsed into triangle_height (below) with
+ *   the unit-normalized recipe from 0x00445A70 used for both call sites.
+ *   Algebraically identical to orig 0x004456D0 (cross>>4 / ny>>4 ratio
+ *   self-normalizes, equivalent to cross/ny up to LSB rounding).
+ *
+ * [ARCH-DIVERGENCE @ 0x004456D0] Orig variant at 0x004456D0 uses raw
+ *   cross-products with >>4 quantization and no FPU renormalization;
+ *   port uses 0x00445A70's recipe (>>12 + FPU sqrt + trunc to unit
+ *   length 4096) for both call sites. Math is byte-equivalent on the
+ *   plane-equation ratio; rounding differs by at most 1 LSB on the
+ *   final fixed-point height. Audit propagated from physics audit
+ *   Phase 3 (commit d15bcd8 ComputeActorTrackContactNormal).
  *
  * Given a span, sub-lane, and world XZ position, determines which triangle
  * half the point falls in (diagonal split of quad) and computes the ground
@@ -3543,9 +3569,16 @@ int td5_track_probe_height(int world_x, int world_z, int current_span,
  * ======================================================================== */
 
 /**
- * AngleFromVector12Full (0x433FC0).
+ * AngleFromVector12Full (0x433FC0). L5 promotion sweep audit (2026-05-18).
  * Full 4-quadrant 12-bit angle from a 2D vector (dx, dz).
  * Returns 0x000-0xFFF = 0-360 degrees.
+ *
+ * [ARCH-DIVERGENCE @ 0x00433FC0] Orig dispatches into AngleFromVector12
+ *   (0x0040A720) which indexes a precomputed 12-bit atan2 LUT at
+ *   DAT_00463214. Port replaces the LUT with a runtime integer atan2
+ *   approximation (linear interpolation per quadrant) - cosmetically
+ *   equivalent: same 4-quadrant dispatch, same 0x400 quadrant scaling,
+ *   same 12-bit modular output, matches orig within +/-1 LSB.
  */
 static int angle_from_vector_full(int32_t dx, int32_t dz)
 {
@@ -4006,6 +4039,10 @@ void td5_track_compute_runtime_heading_normal(TD5_Actor *actor)
 
 /* ========================================================================
  * Wrap Normalization (0x443FB0 NormalizeActorTrackWrapState)
+ * [CONFIRMED @ 0x00443FB0] L5 promotion sweep audit (2026-05-18). Byte-faithful
+ *   verbatim port of orig listing below; positive/negative IDIV branches,
+ *   +0x82 store, EAX-quotient return all preserved. Port-only IDIV-by-zero
+ *   guard documented inline (frontend reachable before STRIP.DAT binding).
  *
  * Verbatim port of NormalizeActorTrackWrapState @ 0x00443FB0 in TD5_d3d.exe.
  * Listing (pool0 2026-05-14):
@@ -5035,6 +5072,18 @@ int td5_track_load_routes(const void *left_data, size_t left_size,
 
 /* ========================================================================
  * MODELS.DAT Parsing (0x431190 ParseModelsDat)
+ * [ARCH-DIVERGENCE @ 0x00431190] L5 promotion sweep audit (2026-05-18).
+ *   Orig assumes a single fixed layout: DWORD[0]=entry_count,
+ *   DWORD[1..count*2]=relocatable (offset, second_dword) pairs, then
+ *   relocates entry pointers by adding param_1 base and recurses through
+ *   PrepareMeshResource for each sub-mesh. Port detects three layout
+ *   variants (A strict, A relaxed, B no-count-header) via DWORD
+ *   heuristics, then auto-detects (offset, size) vs (size, offset)
+ *   field order per-entry. Auto-detect is required because the
+ *   shipping MODELS.DAT files use multiple layouts across tracks --
+ *   orig binary just trusts the convention; port has to be defensive
+ *   to handle the variation. Forward-direction lookup result is
+ *   byte-equivalent to orig on stock content (Wave 5 audit).
  *
  * MODELS.DAT contains a sequence of mesh resources. Each entry begins
  * with a 4-byte size field followed by mesh data. The parser extracts
@@ -5477,8 +5526,18 @@ void td5_track_dim_additive_billboard_meshes(void)
  * ======================================================================== */
 
 /**
- * InitializeTrackStripMetadata (0x42FAD0).
+ * InitializeTrackStripMetadata (0x42FAD0). L5 promotion sweep audit (2026-05-18).
  * Sets up per-strip metadata from the level data.
+ *
+ * [ARCH-DIVERGENCE @ 0x0042FAD0] Orig reads track LEVELINF.DAT blob at
+ *   DAT_004aee10 = (&DAT_0046bb1c)[track_index], then iterates 4 light
+ *   entries (offsets 0x40, 0x60, 0x80, 0xA0) and tests each entry name
+ *   prefix via _strnicmp(entry, sun_string, 3): if match, writes
+ *   light_type=3 at offset 0x14/0x18/0x1C/0x20; else writes 1. Port
+ *   stubs this out -- writes 1 unconditionally to all 4 entries, never
+ *   reads LEVELINF.DAT light-type tags. Effect: any track tagged sun
+ *   gets default ambient lighting instead of sun directional. See
+ *   todo_strip_metadata_sun_tag_stub_2026-05-18.md.
  */
 static void initialize_strip_metadata(int track_index)
 {
@@ -5712,8 +5771,14 @@ const void *td5_track_get_models_display_list_raw(int index, size_t *size_out)
 }
 
 /**
- * GetTrackSpanDisplayListEntry (0x431260).
+ * GetTrackSpanDisplayListEntry (0x431260). L5 promotion sweep audit (2026-05-18).
  * Returns the display list (pre-built render command buffer) for a span.
+ *
+ * [ARCH-DIVERGENCE @ 0x00431260] Orig is a 13-byte direct LUT lookup:
+ *   return *(uint*)(gModelsDatEntryTable + idx*8). Port absorbs caller
+ *   concerns (reverse-direction mirror at 0x0042BB80, MODELS.DAT presence
+ *   gate, STRIP.DAT fallback chain) for cleaner runtime semantics.
+ *   Forward + MODELS.DAT-loaded path is byte-equivalent to orig.
  */
 void *td5_track_get_display_list(int span_index)
 {
