@@ -838,17 +838,49 @@ void td5_physics_run_paused_engine_step(void)
 /* ========================================================================
  * Master dispatcher -- UpdateVehicleActor (0x406650)
  *
- * L4: known divergences — see todo_update_vehicle_actor_dispatcher_2026-05-18.md
- *   1) AccumulateVehicleSpeedBonusScore (orig 0x004066EA) NOT called; port
- *      uses per-hit decrement instead.
- *   2) AdvancePendingFinishState consolidated into td5_game.c game-tick
- *      loop instead of per-actor here.
- *   3) Step 9 surface_contact_flags update is port-only (player path).
- *   4) Traffic (slot >= 6) sub-path inlined; original dispatches separately
- *      via UpdateRaceActors @ 0x00436A70.
- *   Steps 1-6 (frame counter, ghost reset, speed tracking, race timer,
- *   attitude clamp, dynamics dispatch + paused + scripted) are byte-faithful
- *   per existing [Audit D1..D13] markers.
+ * [CONFIRMED @ 0x00406650] Steps 1-8 (frame counter, ghost reset, speed
+ * tracking, race timer, attitude clamp, dynamics dispatch + paused + scripted,
+ * pose integration, wall resolvers) are byte-faithful with orig per the
+ * inline [Audit D1..D13] markers. L5 promotion audit 2026-05-18 confirmed
+ * the dispatch ordering, mode==0/mode==1 split, and effective-grip clamp
+ * match orig 0x00406650-0x00406946 line-for-line.
+ *
+ * Audited divergences (L5 promotion audit 2026-05-18):
+ *
+ *   1) [DEFERRED — Phase 2] AccumulateVehicleSpeedBonusScore @ 0x004066EA
+ *      NOT called. Port uses per-hit decrement instead. Phase 2 agent owns
+ *      restoring this call.
+ *
+ *   2) [DEFERRED — Phase 2] AdvancePendingFinishState @ 0x0040... consolidated
+ *      into td5_game.c game-tick loop. Phase 2 agent owns moving it back.
+ *
+ *   3) [ARCH-DIVERGENCE — port-only step 9 surface_contact_flags safety net]
+ *      Port writes scf at the tail of this dispatcher when slot is the human
+ *      player (g_race_slot_state == 1) and !g_game_paused. Original writes
+ *      scf only inside UpdatePlayerVehicleDynamics @ 0x00404030 at a late
+ *      drivetrain-commit conditional that the port doesn't fully mirror.
+ *      The AI gate (`state==1 only`) is the critical guard: Frida
+ *      rotation_probe.csv 2026-05-03 confirmed orig AI slot 0 scf=0 at every
+ *      sim_tick 1..50, and the port matched that AFTER restricting this
+ *      write to the human path. AI cars now inherit scf=0 from spawn memset
+ *      (matching orig). Pure port-only redundancy on the player path; faithful
+ *      on AI/traffic.
+ *
+ *   4) [ARCH-DIVERGENCE — traffic sub-path inlined here vs split in orig]
+ *      Orig's traffic (slot >= 6) NEVER routes through UpdateVehicleActor —
+ *      UpdateRaceActors @ 0x00436A70 dispatches slot>=6 separately through
+ *      UpdateTrafficRoutePlan (0x00435E80) + UpdateTrafficActorMotion
+ *      (0x00443ED0). The port consolidates both paths into this dispatcher,
+ *      using a `slot >= 6` branch at step 7 (integrate_traffic_pose + route
+ *      helpers) and a `slot < 6` guard on the wall resolvers. Mirrors orig
+ *      semantics by gating each step appropriately — no observable behavioral
+ *      divergence given that orig's wall-resolver path is a no-op for traffic
+ *      anyway (resolve_wall_contacts has its own slot>=6 early-out at
+ *      td5_track.c:536). Documented at the dispatch site (lines 1067-1099).
+ *      Consolidation reduces dispatcher fan-out and keeps the per-actor
+ *      tick budget in one function for profiler clarity.
+ *
+ * See todo_update_vehicle_actor_dispatcher_2026-05-18.md for the L5 audit log.
  * ======================================================================== */
 
 void td5_physics_update_vehicle_actor(TD5_Actor *actor)
