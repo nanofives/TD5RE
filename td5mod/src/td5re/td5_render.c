@@ -3710,6 +3710,10 @@ void td5_render_crossfade_surfaces(uint32_t *dst, const uint32_t *src_a,
  *     original's _g_wheelSuspensionRenderScale @ 0x00463B64 (1.25f) so
  *     the shadow has the same footprint as the original render (a 1.85f
  *     guess used until 2026-05-17 produced shadows ~1.48x linear larger).
+ *   - UV mapping orients texture U-axis along car FRONT-BACK to match the
+ *     original. The previous port mapping (U along left-right) rotated the
+ *     texture 90° and made the shadow appear too narrow across the car —
+ *     the 1.85f scale was partially compensating for that.
  *   - Corners stay at wheel-contact Y; no vertical lift is needed
  *     because the shadow is painted at ground level and then occluded
  *     by the car body via draw order, not depth test.
@@ -3769,12 +3773,32 @@ static void render_vehicle_shadow_quad(const TD5_Actor *actor)
         &actor->probe_RL,
     };
 
-    /* UV corners matching the FL/FR/RR/RL corner order. */
+    /* UV mapping — original draws two trapezoid quads sharing an axle-midline
+     * edge, with texture U-axis running along the car's longitudinal (front-
+     * to-back) axis and V-axis across the car's lateral (left-to-right) axis.
+     * [CONFIRMED @ 0x0040BB70 InitializeVehicleShadowAndWheelSpriteTemplates +
+     *  0x00432BD0 BuildSpriteQuadTemplate]:
+     *   Front quad: FL→(U=130,V=66) FR→(U=130,V=126) RIGHT_mid→(U=192,V=126)
+     *               LEFT_mid→(U=192,V=66)
+     *   Rear  quad: LEFT_mid→(U=192,V=66) RIGHT_mid→(U=192,V=126)
+     *               RR→(U=254,V=126) RL→(U=254,V=66)
+     * I.e. U increases FRONT→BACK along car, V increases LEFT→RIGHT across car.
+     *
+     * The SHADOW atlas entry is 128 wide × 64 tall (atlas_x=128, atlas_y=64
+     * per static.hed), and the actual shadow blob inside the texture is wider
+     * than it is tall (~96×56 pixels). With orig's mapping, the LONG texture
+     * axis (128 wide) runs along the car's length — which matches a typical
+     * car's length:width ratio.
+     *
+     * The port's previous mapping placed U along car's LEFT-RIGHT axis (FL→u0v0,
+     * FR→u1v0, RR→u1v1, RL→u0v1), which rotates the texture 90° and makes the
+     * shadow appear narrower across the car than the original. Fix: map U
+     * along car FRONT-BACK to match orig (FL→u0v0, FR→u0v1, RR→u1v1, RL→u1v0). */
     const float uvs[4][2] = {
-        { s_shadow_u0, s_shadow_v0 },
-        { s_shadow_u1, s_shadow_v0 },
-        { s_shadow_u1, s_shadow_v1 },
-        { s_shadow_u0, s_shadow_v1 },
+        { s_shadow_u0, s_shadow_v0 },   /* FL → texture top-left (U=front, V=left) */
+        { s_shadow_u0, s_shadow_v1 },   /* FR → texture bottom-left (U=front, V=right) */
+        { s_shadow_u1, s_shadow_v1 },   /* RR → texture bottom-right (U=back,  V=right) */
+        { s_shadow_u1, s_shadow_v0 },   /* RL → texture top-right (U=back,  V=left) */
     };
 
     /* Convert the 4 probes to world-float, accumulating the XZ centroid so we
