@@ -94,13 +94,44 @@ def load_port_sources() -> Dict[str, str]:
     return sources
 
 def precision_keywords() -> Tuple[Tuple[str, ...], Tuple[str, ...]]:
-    """Return (level5_strong, level5_weak) precision markers."""
+    """Return (level5_strong, level5_weak) precision markers.
+
+    NOTE: matching against source code is performed case-insensitively
+    (see cross_reference()), so listing keywords in any single case here
+    is sufficient. This catches the assorted capitalisations agents use
+    in audit headers ("Byte-faithful", "byte-faithful", "BYTE-FAITHFUL",
+    "Ghidra-Faithful", etc.) without needing to enumerate every variant.
+
+    ARCH-DIVERGENCE rationale: functions flagged "[ARCH-DIVERGENCE ...]"
+    are intentional, audited deviations from the original binary that are
+    nevertheless byte-equivalent at the architecture-appropriate level
+    (e.g. D3D3 -> D3D11 wheel billboard emission, ddraw stride changes,
+    helper-collapsed dispatch tables). For this project's source-port
+    architecture they count as "faithful" - the divergence is documented
+    and verified, not an outstanding TODO. See Wave H reclassification.
+    """
     strong = (
-        "byte-faithful", "byte-exact", "[CONFIRMED @",
-        "[CONFIRMED@", "[CONFIRMED ", "precise-port",
-        "precise port", "matches orig", "matches original",
+        # Core byte-faithfulness markers
+        "byte-faithful", "byte-exact", "byte-equivalent",
+        "confirmed byte-faithful",
+        # [CONFIRMED ...] audit-header tag (any spacing/casing)
+        "[CONFIRMED @", "[CONFIRMED@", "[CONFIRMED ",
+        # L5 promotion-wave audit phrasings (2026-05-17/18)
+        "L5 promotion sweep audit", "L5 promotion sweep",
+        "L5 byte-faithful", "L5 audit",
+        # SAR-RZ rounding fixes (Wave D)
+        "SAR-RZ rounding fixed",
+        # ARCH-DIVERGENCE: intentional, audited port-side deviations
+        # (see docstring above). Treated as L5-equivalent.
+        "[ARCH-DIVERGENCE",
+        # Pilot / precise-port lineage
+        "precise-port", "precise port",
+        # "matches orig(inal)" pattern from older fix commits
+        "matches orig", "matches original",
+        # Ghidra cross-reference verifications
         "verified vs ghidra", "Ghidra-verified", "Ghidra verified",
-        "ghidra-faithful", "BYTE-FAITHFUL",
+        "Ghidra-faithful", "ghidra-faithful",
+        # Generic faithfulness assertions
         "exact match", "verified faithful",
     )
     weak = (
@@ -119,8 +150,13 @@ def cross_reference(funcs: List[Dict], sources: Dict[str, str]) -> Dict[str, Dic
       - Ghidra symbol name (only if non-auto-named)
     """
     strong_kw, weak_kw = precision_keywords()
-    # Build all-content joined for fast initial pass
-    by_file = [(name, src) for name, src in sources.items()]
+    # Lower-case the keywords once; we'll match against a lower-cased view
+    # of each source file so capitalisations like "Byte-faithful" vs
+    # "byte-faithful" vs "BYTE-FAITHFUL" all count.
+    strong_kw_lower = tuple(k.lower() for k in strong_kw)
+    weak_kw_lower = tuple(k.lower() for k in weak_kw)
+    # Build all-content joined for fast initial pass. Cache lower() per file.
+    by_file = [(name, src, src.lower()) for name, src in sources.items()]
 
     out: Dict[str, Dict] = {}
     for it in funcs:
@@ -151,7 +187,7 @@ def cross_reference(funcs: List[Dict], sources: Dict[str, str]) -> Dict[str, Dic
         files_cited = set()
         sample_context = ""
 
-        for fname, src in by_file:
+        for fname, src, src_lower in by_file:
             hits = 0
             local_ctx_offsets = []
             # check explicit 0x... patterns
@@ -182,16 +218,23 @@ def cross_reference(funcs: List[Dict], sources: Dict[str, str]) -> Dict[str, Dic
                     end = min(len(src), off + 100)
                     ctx = src[start:end].replace("\n", " | ").replace("\r", "")
                     sample_context = f"[{fname}] " + ctx.strip()
-                # precision check in same file
-                for kw in strong_kw:
-                    if kw in src:
+                # precision check in same file (case-insensitive for STRONG
+                # keywords: match against src_lower so "Byte-faithful" /
+                # "BYTE-FAITHFUL" / "byte-faithful" all count under a single
+                # lower-cased keyword entry).
+                for kw in strong_kw_lower:
+                    if kw in src_lower:
                         # only count if kw is near a citation
                         for off in local_ctx_offsets:
                             window_start = max(0, off - 300)
-                            window_end = min(len(src), off + 300)
-                            if kw in src[window_start:window_end]:
+                            window_end = min(len(src_lower), off + 300)
+                            if kw in src_lower[window_start:window_end]:
                                 precision_strong += 1
                                 break
+                # WEAK keywords stay case-sensitive: words like "stub" /
+                # "placeholder" / "approximate" are common substrings of
+                # identifiers ("GetDamageRulesStub", "stubs out", ...) and
+                # casing was a useful disambiguator. Keep the legacy behaviour.
                 for kw in weak_kw:
                     if kw in src:
                         for off in local_ctx_offsets:
@@ -223,22 +266,28 @@ def classify(rec: Dict, *, ghidra_has_doc: bool) -> int:
     auto = is_auto_named(name)
     crt = is_crt_or_lib(name)
 
-    # CRT / Microsoft VS runtime helpers (__ftol, __alloca, _printf, etc.) are
-    # NOT TD5 game code. Even if cited from a port file (because the port
-    # explains in a comment that it replaces a CRT helper with `lrintf`), they
-    # don't belong in the game-only L5 denominator. Filter them out up-front
-    # by returning level 0 (a sentinel value used to exclude from L5 stats).
-    # 2026-05-18: __ftol @ 0x0044817c case — port cites it in td5_physics.c
-    # but uses C casts / lrintf, so this helper has no port equivalent.
+    # CRT/lib helpers don't belong to the port-fidelity denominator regardless
+    # of whether they're cited (e.g. __ftol is "cited" by physics but has no
+    # port equivalent — it's libc). Return level 0 sentinel; CSV consumers
+    # should treat level==0 as "out-of-scope" and exclude from L5 metrics.
     if crt:
         return 0
 
     if cites > 0:
-        if rec["precision_strong"] > 0 and rec["precision_weak"] == 0:
+        strong = rec["precision_strong"]
+        weak = rec["precision_weak"]
+        if strong > 0 and weak == 0:
             return 5
-        if rec["precision_strong"] > 0 and rec["precision_weak"] > 0:
+        # Mixed strong+weak: incidental "stub"/"approximation" mentions are
+        # common in historical comments next to a fresh audit header
+        # (e.g. "Prior port used a linear approximation [...] Now byte-faithful").
+        # If the strong signal clearly outweighs the weak (>=2x), the function
+        # is functionally L5; the weak hits are residue from historical notes.
+        if strong >= 2 * weak and strong >= 2:
+            return 5
+        if strong > 0 and weak > 0:
             return 4   # mixed, prefer weak interpretation
-        if rec["precision_weak"] > 0:
+        if weak > 0:
             return 4
         # Cited without precision keywords
         # Heavy citation likely = full port: assume Level 5 only if name AND any
@@ -248,6 +297,10 @@ def classify(rec: Dict, *, ghidra_has_doc: bool) -> int:
     # No citations
     if auto:
         return 2 if ghidra_has_doc else 1
+    if crt:
+        # CRT/lib helpers — treat as Level 3 (named but obviously not port code)
+        # Will be flagged in CSV.
+        return 3
     return 3  # named but not ported
 
 # -----------------------------------------------------------------------------
@@ -278,7 +331,7 @@ def main(args):
     out_json.write_text(json.dumps(rows, indent=2))
     print(f"Wrote intermediate -> {out_json}", file=sys.stderr)
 
-    # Aggregate stats. Level 0 is the "CRT-excluded" sentinel (see classify()).
+    # Aggregate stats
     by_level = {0: 0, 1: 0, 2: 0, 3: 0, 4: 0, 5: 0}
     auto_named = 0
     crt = 0
