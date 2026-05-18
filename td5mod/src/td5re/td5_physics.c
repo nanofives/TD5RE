@@ -8001,7 +8001,12 @@ static inline int32_t sar9_rz_42F030(int32_t x) {
     return ((x < 0) ? (x + 0x1FF) : x) >> 9;
 }
 
-/* --- ComputeDriveTorqueFromGearCurve (0x42F030) ---
+/* [CONFIRMED @ 0x0042F030] Byte-faithful with orig ComputeDriveTorqueFromGearCurve.
+ * L5 promotion 2026-05-18 (small-tier sweep). Piecewise-linear LUT lerp at
+ * tuning+rpm_idx*2 (SAR-9 index, mod-512 fraction), * throttle SAR-8 *
+ * gear_ratio SAR-8; redline-50 upper cutoff returns 0; gear==1 early-out.
+ *
+ * --- ComputeDriveTorqueFromGearCurve (0x42F030) ---
  *
  * Byte-exact port from listing 0x0042F030..0x0042F0FC.
  *
