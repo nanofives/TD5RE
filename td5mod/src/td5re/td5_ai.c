@@ -5384,6 +5384,51 @@ void td5_pilot_00436A70_collect(PilotSnapshot_00436A70 *snap) {
     }
 }
 
+/* [CONFIRMED @ 0x00436A70] L5 promotion sweep audit (2026-05-18).
+ *
+ * UpdateRaceActors — 1569 bytes / 450 instructions / 270 decompiled lines.
+ * Master per-sub-tick dispatcher with FOUR contiguous regions:
+ *   A: rubber-band call → ComputeAIRubberBandThrottle (0x00432D60).
+ *   B: per-racer track-state loop (branch detection + forward component +
+ *      span progress + offset-clamp + deviation write).
+ *   C/C': non-drag vs drag-mode racer dispatch (state==0/2/3 branches).
+ *   D/D': non-drag vs drag-mode traffic dispatch (slots 6-11 + slot-9
+ *      special-encounter handling + UpdateSpecialTrafficEncounter call).
+ *
+ * SHIPPED FIXES (in master):
+ *   - 3-path route_table_ptr selector (commit 2412baf, 1a95b4c):
+ *     PATH 1 (selector=1, ptr=RIGHT), PATH 2a (selector=0, ptr=LEFT),
+ *     PATH 2b (default — ptr UNCHANGED). Closes Moscow 34→20 (sub_tick=1).
+ *   - F1 traffic bias-clamp slot gate (commit 79023df).
+ *   - Steering pre-AI clear placement (commit 79023df / e6622f2 cluster).
+ *   - State-2 finished encounter_steer = (int16_t)0xFF00 — bit-equivalent
+ *     to orig's WORD 0xFF00 (D5 audited MATCH).
+ *
+ * KNOWN DIVERGENCES (re/analysis/pilot_00436A70_audit.md):
+ *   D1     Branch detection table walker collapsed in port's
+ *          `td5_ai_refresh_route_state_slot` — partial port via 3-path
+ *          selector (2412baf), but underlying DAT_004C3DA0 walker still
+ *          simplified. PARTIAL CLOSE via commit 2412baf.
+ *   D2     Per-actor track-state work (gActorTrackSpanProgress / Render
+ *          TrackSegmentNearActor / UpdateActorTrackBounds /
+ *          ClassifyTrackOffsetClamp / GetTrackSegmentSurfaceType /
+ *          recovery-stage override / branch-aware deviation block) lives
+ *          in `td5_track_recompute_actor_offsets` rather than inline in
+ *          this dispatcher. PER-TICK TIMING may lag by one sub-tick.
+ *   D3     Forward-track-component formula uses (>>12) instead of orig's
+ *          FILD+FSQRT+IDIV by sqrt(sin²+cos²) — sub-LSB magnitude.
+ *   D4     State-2 (finished) 5-byte cluster zero-fill at +0x371..+0x376
+ *          not yet written by port.
+ *   D6-D8  Loop / slot iteration LOW-impact differences (audited).
+ *
+ * KNOWN TODO CHAIN OWNERS:
+ *   - todo_cascade_unwind_2026-05-17.md (RS_TRACK_PROGRESS quotient/
+ *     remainder cluster).
+ *
+ * Audit reference: re/analysis/pilot_00436A70_audit.md (pool13, 2026-05-14).
+ * Effective level: L4 (multiple shipped fixes; D1/D2 are partial-port
+ * residuals tracked as cascade-unwind work).
+ */
 void td5_ai_update_race_actors(void) {
     int i;
 
