@@ -2329,7 +2329,19 @@ int td5_game_run_race_frame(void) {
              * engine RPM (no vehicle movement). */
             td5_physics_set_paused(1);
             for (i = 0; i < TD5_MAX_RACER_SLOTS; i++) {
-                if (s_slot_state[i].state == 1)
+                /* state==1 = player. Also run for slot 0 under PlayerIsAI=1
+                 * to mirror the orig's Frida-hook scoping at
+                 * td5_quickrace_hook.js:381 — slot[0].state=0 is scoped to
+                 * UpdateRaceActors body ONLY; UpdatePlayerVehicleControlState
+                 * fires BEFORE that with state[0]=1. Without this hybrid step,
+                 * slot 0's throttle_state / encounter_steering_cmd are never
+                 * written by the "no input" path (ts=1, enc_steer=0) before
+                 * the AI tick. Then when AI early-returns (script blocking,
+                 * e.g. Blueridge heading-misalignment recovery), the snapshot
+                 * still carries the injected sub_tick=0 values instead of the
+                 * orig's UpdatePlayerVehicleControlState outputs. */
+                if (s_slot_state[i].state == 1 ||
+                    (i == 0 && g_td5.ini.player_is_ai))
                     td5_input_update_player_control(i);
             }
             /* Zero steering_command at the START of each paused sub-tick.
@@ -2544,9 +2556,14 @@ int td5_game_run_race_frame(void) {
 
         /* Input record/playback is handled inside td5_input_poll_race_session(). */
 
-        /* --- Per-slot player control update --- */
+        /* --- Per-slot player control update ---
+         * state==1 = active player. Also run for slot 0 under PlayerIsAI=1
+         * to mirror the orig's Frida-hook scoping at td5_quickrace_hook.js:381
+         * (slot[0].state=0 is scoped to UpdateRaceActors body only).
+         * See paused-branch comment above for full rationale. */
         for (i = 0; i < TD5_MAX_RACER_SLOTS; i++) {
-            if (s_slot_state[i].state == 1) {   /* active player */
+            if (s_slot_state[i].state == 1 ||
+                (i == 0 && g_td5.ini.player_is_ai)) {
                 td5_input_update_player_control(i);
             }
         }
