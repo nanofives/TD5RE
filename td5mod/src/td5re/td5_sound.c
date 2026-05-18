@@ -1117,12 +1117,13 @@ void td5_sound_update_audio_mix(void)
  * optional random variant selection. In split-screen, plays twice
  * (once per viewport, using the duplicate slot range for P2).
  *
- * L4: known divergence — see todo_play_vehicle_sound_clamp_divergence_2026-05-18.md
- *   1) Volume-clamp boundary: port uses `volume >= 0x1000`; original tests
- *      `param_2 == 0x1000` exact-equality (values above 0x1000 pass through).
- *   2) FPU rounding: port uses C99 roundf (half-away-from-zero); original
- *      ROUND macro is FISTP round-half-to-even. ±1-LSB at half-integer inputs.
- *   Audio path — no measurable sweep impact, deferred to audio-precision pass.
+ * [CONFIRMED @ 0x00441D90] Byte-faithful with orig PlayVehicleSoundAtPosition.
+ * SAR-RZ-class LSB fixes shipped 2026-05-18:
+ *   1) Volume-clamp boundary: now `volume == 0x1000` exact-equality to match
+ *      orig (values above 0x1000 pass through unchanged).
+ *   2) FPU rounding: replaced `roundf` (C99 half-away-from-zero) with
+ *      `lrintf` which under the x87 default control word (round-to-nearest-
+ *      even) matches orig's FISTP ROUND macro at half-integer inputs.
  * ======================================================================== */
 
 void td5_sound_play_at_position(int base_slot, int volume, int pitch,
@@ -1137,8 +1138,9 @@ void td5_sound_play_at_position(int base_slot, int volume, int pitch,
     }
     logged_sound_id = base_slot;
 
-    /* Clamp volume */
-    if (volume >= 0x1000) volume = 0xFFF;
+    /* Clamp volume — orig 0x00441D90 tests exact equality with 0x1000
+     * (not >=); values above 0x1000 pass through unchanged. */
+    if (volume == 0x1000) volume = 0xFFF;
     else if (volume < 0)  volume = 0;
 
     /* Determine number of viewport passes */
@@ -1174,8 +1176,11 @@ void td5_sound_play_at_position(int base_slot, int volume, int pitch,
             logged_distance = dist;
         }
 
-        /* Volume attenuation */
-        int vol_atten = ((0x7F - ((int)roundf(dist) >> 7)) * (volume >> 5)) / 0x7F;
+        /* Volume attenuation — orig uses FPU ROUND (FISTP, round-half-to-even
+         * under default x87 control word). C99 `roundf` is half-away-from-zero
+         * and diverges by 1 LSB at half-integer inputs; `lrintf` honors the
+         * current rounding mode, which on x86 defaults to RNE. */
+        int vol_atten = ((0x7F - ((int)lrintf(dist) >> 7)) * (volume >> 5)) / 0x7F;
         if (vol_atten < 0)       vol_atten = 0;
         else if (vol_atten >= 0x80) vol_atten = 0x7F;
 
@@ -1200,7 +1205,9 @@ void td5_sound_play_at_position(int base_slot, int volume, int pitch,
             if (ratio < TD5_SOUND_DOPPLER_ZERO) ratio = TD5_SOUND_DOPPLER_ZERO;
             if (ratio > TD5_SOUND_DOPPLER_MAX)   ratio = TD5_SOUND_DOPPLER_MAX;
 
-            final_pitch = (int)roundf(
+            /* Orig at 0x00441D90 uses FPU ROUND (FISTP RNE). Use lrintf so
+             * x87 default rounding (round-to-nearest-even) is preserved. */
+            final_pitch = (int)lrintf(
                 ((ratio - 1.0f) * TD5_SOUND_DOPPLER_PITCH_SCALE + 1.0f) * (float)pitch);
         }
 
