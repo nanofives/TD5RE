@@ -7614,7 +7614,13 @@ static void update_engine_speed_smoothed(TD5_Actor *actor)
     actor->engine_speed_accum = rpm + step;
 }
 
-/* --- UpdateEngineSpeedAccumulator (0x0042EDF0) ---
+/* [CONFIRMED @ 0x0042EDF0] Byte-faithful with orig UpdateEngineSpeedAccumulator.
+ * L5 promotion 2026-05-18 (small-tier sweep). Line-for-line listing port;
+ * gear==1 → UpdateVehicleEngineSpeedSmoothed; else target = abs(speed>>8) *
+ * gear_ratio[gear] * 45 SAR-12 + 400; delta > 800 fast-down -200, < -800
+ * fast-up +200, smooth (target-rpm) SAR-2; upper redline clamp.
+ *
+ * --- UpdateEngineSpeedAccumulator (0x0042EDF0) ---
  *
  * Byte-faithful port of FUN_0042EDF0 (RE: TD5_pool7 read-only listing,
  * audited 2026-05-14). Mirrors the original x86 control flow line-for-line:
