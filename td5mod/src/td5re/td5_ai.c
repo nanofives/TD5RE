@@ -3599,6 +3599,38 @@ int td5_ai_find_nearest_route_peer(int *route_state_ptr) {
 /**
  * RecycleTrafficActorFromQueue — byte-faithful port of 0x004353B0.
  *
+ * [CONFIRMED @ 0x004353B0] L5 promotion sweep audit (2026-05-18).
+ *
+ * Verbatim 10-step translation per disassembly listing (1352 bytes /
+ * ~340 instructions). Each step in the comment block below is anchored
+ * to its orig listing range:
+ *   1.  Bail g_racerCount <= 6           [0x004353B0-C1].
+ *   2.  Cursor pre-scan over queue       [0x004353C9-FD].
+ *   3.  Linear scan slots 6..min(N,12)   [0x004353FE-465].
+ *   4.  best_dist <= 0x28 early-return.
+ *   5.  *cursor == -1 early-return.
+ *   6.  Slot-9 + special-encounter gate.
+ *   7.  RS direction polarity + table_ptr_index write.
+ *   8.  LEFT/RIGHT branch dispatch (queue_byte vs strip_byte):
+ *       - LEFT: InitActorTrackSegmentPlacement + geometry + angle +
+ *         polarity + ResetVehicleActorState + RefreshActorTrack
+ *         ProgressOffset + NormalizeActorTrackWrapState.
+ *       - RIGHT: inline jump-table scan + remap + Init + geometry +
+ *         RefreshActorTrackProgressOffset + ResolveActorSegmentBoundary.
+ *   9.  Advance DAT_004b08b8 +4.
+ *  10.  LAB_0043588d post-call zero block.
+ *
+ * ARCHITECTURAL DIVERGENCES (documented in code below):
+ *   - RS_DIRECTION_POLARITY macro discrepancy: port writes BOTH 0x3F
+ *     (orig) and 0x25 (port's macro). FIXME flagged in code.
+ *   - Recycle heading dispatch collapsed into td5_track_compute_heading
+ *     (see memory/reference_arch_recycle_heading_collapse.md).
+ *
+ * KNOWN DIVERGENCES: none beyond the two documented architectural ones.
+ *
+ * Effective level: L5 (byte-faithful per static audit; arch-divergences
+ * are equivalence-preserving by design).
+ *
  * Verbatim translation of TD5_d3d.exe @ 0x004353B0 disassembly (pool3
  * 2026-05-14). Replaces the prior semantically-named port (which used
  * wrong route-state offsets, wrote +0x82/+0x84/+0x86 directly instead
