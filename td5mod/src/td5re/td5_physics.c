@@ -1124,7 +1124,35 @@ void td5_physics_update_vehicle_actor(TD5_Actor *actor)
 
 /* ========================================================================
  * Player 4-wheel dynamics -- UpdatePlayerVehicleDynamics (0x404030)
- * ======================================================================== */
+ * ========================================================================
+ *
+ * [CONFIRMED @ 0x00404030] L5 promotion sweep audit (2026-05-18).
+ *
+ * Static port audited byte-for-byte against listing 0x00404030..0x00404eb7
+ * (3719 bytes / 870 instructions). The body has 15+ inline [CONFIRMED]
+ * citations anchoring per-block addresses (see comments below). Overall
+ * structure matches the original block layout: surface probes → drag damp
+ * → body-frame trig → load transfer → drivetrain dispatch → slip-circle.
+ *
+ * KNOWN DIVERGENCES (documented in re/analysis/pilot_00404030_audit.md):
+ *
+ *   D1-D2  Plain SAR vs SAR_RZ at 5+ rounding sites (0/1 LSB per site;
+ *          accumulates over hundreds of ticks but per-tick effect is sub-LSB).
+ *   D4     All 4 wheels read same surface_type_chassis instead of
+ *          per-wheel GetTrackSegmentSurfaceType (structural — only matters
+ *          on mixed-surface track sections).
+ *   D5     `(grip << 8 + 128) >> 8` vs sar8_rz idiom (0/1 LSB).
+ *   D10    front_long / rear_long plain SAR (0/1 LSB).
+ *   D14    yaw damping plain SAR (0/1 LSB).
+ *   D3,D11,D15  audited MATCH — no divergence.
+ *
+ * Most known wheel_load_accum / lateral_bias divergences are UPSTREAM
+ * (carparam binding for PlayerIsAI=1 — see memory/
+ * todo_playerisai_carparam_binding.md, SHIPPED 48d320a).
+ *
+ * Audit reference: re/analysis/pilot_00404030_audit.md (2026-05-14, pool0).
+ * Effective level: L4 (byte-faithful overall; 4-5 LSB sites documented).
+ */
 
 /* Pilot trace hooks (pool0 / 0x00404030) */
 extern void td5_pilot_emit_00404030_enter(const TD5_Actor *actor, uintptr_t caller_ra);
