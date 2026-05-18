@@ -400,6 +400,56 @@ static void set_countdown_indicator_state(int value);
  * Module Init / Shutdown
  * ======================================================================== */
 
+/* [L5 promotion sweep audit 2026-05-18 — ARCH-DIVERGENCE]
+ *   GameWinMain @ 0x00430A90 (orig WinMain bootstrap) is decomposed in
+ *   the source port across three locations:
+ *     - main.c:WinMain      -- Win32 entry; FPU rounding (_RC_DOWN per
+ *                              pool4 pilot), INI load, crash handler,
+ *                              D3D11/wrapper backend bring-up, message
+ *                              pump, td5re_frame loop, shutdown.
+ *     - td5re.c:td5re_init  -- module bring-up dispatcher equivalent to
+ *                              orig DXWin::Initialize + initial state
+ *                              transition prep.
+ *     - td5_game_init       -- THIS function. Mirrors the post-DXWin
+ *                              GameWinMain block that seeds the 4-state
+ *                              FSM into INTRO and clears all per-race
+ *                              slot/metric/result state.
+ *
+ *   Orig 0x00430A90 layout (line-by-line audit):
+ *     1. DXWin::Environment(lpCmdLine)                       → main.c (INI parse + log init).
+ *     2. Width/Height/BPP defaults (0x280/0x1e0/0x10) +
+ *        g_appExref[0x20]=g_titleStr +
+ *        g_appExref[0x188]=1 (run flag).                     → main.c WinMain locals + Backend_Init.
+ *     3. DXWin::Initialize()                                 → Backend_CreateDevice + td5_platform_win32_init.
+ *     4. while (!quit) {
+ *          PeekMessage drain;
+ *          if (DAT_00473b6c == 0)
+ *              RunMainGameLoop();    ← per-frame game tick
+ *          else
+ *              DXDraw::ConfirmDX6 +
+ *              DXWin::DXInitialize +
+ *              InitializeRaceVideoConfiguration;
+ *        }                                                   → main.c:while(running) PeekMessage + td5re_frame.
+ *     5. DXWin::Uninitialize + DestroyWindow                 → td5re_shutdown + Backend_Shutdown.
+ *
+ *   ARCH-DIVERGENCEs:
+ *     a. DDraw → D3D11: original uses DXWin/DXDraw/DXInput COM stack.
+ *        Port uses Backend_* + WrapperDirectDraw shim (ddraw_wrapper/).
+ *     b. DXWin::ConfirmDX6 / DXDraw recreation path (DAT_00473b6c branch)
+ *        has no port equivalent — D3D11 device-lost handling is via the
+ *        wrapper backend instead. Functionally equivalent: rebuild
+ *        graphics resources without quitting.
+ *     c. g_appExref hot-fields (+0x180 quit latch, +0x184/+0x168 gates,
+ *        +0x188 run flag, +0x138 shutdown callback, +0x4 hInstance,
+ *        +0xc8 nCmdShow) collapsed into g_td5 + main.c's `running`.
+ *     d. nCmdShow / hPrevInstance / hInstance ignored (no SDI app shell).
+ *     e. FPU rounding mode is set BEFORE everything else (_RC_DOWN, pool4
+ *        pilot finding) — port-only INI/log init must run under the same
+ *        rounding regime as the sim core.
+ *   Game-loop semantics (PeekMessage drain → game tick → loop until quit)
+ *   are wire-equivalent. The 4-state FSM and per-frame logic live in
+ *   td5_game_tick (= RunMainGameLoop @ 0x00442170).
+ */
 int td5_game_init(void) {
     /* Initialize game state machine (0x442170 entry, 0x430A90 GameWinMain setup) */
     g_td5.game_state = TD5_GAMESTATE_INTRO;
