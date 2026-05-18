@@ -1136,7 +1136,35 @@ void td5_physics_update_vehicle_actor(TD5_Actor *actor)
 
 /* ========================================================================
  * Player 4-wheel dynamics -- UpdatePlayerVehicleDynamics (0x404030)
- * ======================================================================== */
+ * ========================================================================
+ *
+ * [CONFIRMED @ 0x00404030] L5 promotion sweep audit (2026-05-18).
+ *
+ * Static port audited byte-for-byte against listing 0x00404030..0x00404eb7
+ * (3719 bytes / 870 instructions). The body has 15+ inline [CONFIRMED]
+ * citations anchoring per-block addresses (see comments below). Overall
+ * structure matches the original block layout: surface probes → drag damp
+ * → body-frame trig → load transfer → drivetrain dispatch → slip-circle.
+ *
+ * KNOWN DIVERGENCES (documented in re/analysis/pilot_00404030_audit.md):
+ *
+ *   D1-D2  Plain SAR vs SAR_RZ at 5+ rounding sites (0/1 LSB per site;
+ *          accumulates over hundreds of ticks but per-tick effect is sub-LSB).
+ *   D4     All 4 wheels read same surface_type_chassis instead of
+ *          per-wheel GetTrackSegmentSurfaceType (structural — only matters
+ *          on mixed-surface track sections).
+ *   D5     `(grip << 8 + 128) >> 8` vs sar8_rz idiom (0/1 LSB).
+ *   D10    front_long / rear_long plain SAR (0/1 LSB).
+ *   D14    yaw damping plain SAR (0/1 LSB).
+ *   D3,D11,D15  audited MATCH — no divergence.
+ *
+ * Most known wheel_load_accum / lateral_bias divergences are UPSTREAM
+ * (carparam binding for PlayerIsAI=1 — see memory/
+ * todo_playerisai_carparam_binding.md, SHIPPED 48d320a).
+ *
+ * Audit reference: re/analysis/pilot_00404030_audit.md (2026-05-14, pool0).
+ * Effective level: L4 (byte-faithful overall; 4-5 LSB sites documented).
+ */
 
 /* Pilot trace hooks (pool0 / 0x00404030) */
 extern void td5_pilot_emit_00404030_enter(const TD5_Actor *actor, uintptr_t caller_ra);
@@ -2099,7 +2127,34 @@ void td5_physics_update_player(TD5_Actor *actor)
 
 /* ========================================================================
  * AI 2-axle dynamics -- UpdateAIVehicleDynamics (0x404EC0)
- * ======================================================================== */
+ * ========================================================================
+ *
+ * [CONFIRMED @ 0x00404EC0] L5 promotion sweep audit (2026-05-18).
+ *
+ * Static port audited byte-for-byte against listing 0x00404EC0..0x004057E5
+ * (2341 bytes / ~570 instructions / 95 decompiled lines). Body structure
+ * matches original: surface probe → drag → body-frame trig → load
+ * transfer → throttle/brake → bicycle solve → slip-circle.
+ *
+ * SHIPPED FIXES (already in master, audited match):
+ *   - AI brake formula faithful port (commit 63e9624, three-bug fix)
+ *   - AI slot 0 PlayerIsAI=1 carparam exemption (commit 48d320a)
+ *
+ * KNOWN DIVERGENCES (re/analysis/pilot_00404EC0_audit.md):
+ *   D1     Velocity drag uses plain SAR-12, original uses SAR-RZ-12 idiom
+ *          (1 LSB on negative velocity drag; not yet ported, low impact).
+ *   D3     Tire-grip fallback when 0 — safety net only fires under
+ *          carparam-loading regression; benign with proper Viper carparam.
+ *   D4     `current_slip_metric` tail-write — DELIBERATE enhancement to
+ *          drive AI tire/smoke pipeline; not a faithful divergence.
+ *   D5     PlayerIsAI=1 cardef fallback — UPSTREAM (shipped, see above).
+ *
+ * KNOWN TODO chain owners (cascade-investigation):
+ *   - todo_state0f_overfire_skips_player.md (AI dynamics tick overshoot)
+ *
+ * Audit reference: re/analysis/pilot_00404EC0_audit.md (2026-05-14, pool12).
+ * Effective level: L4 (byte-faithful with D1 LSB site documented).
+ */
 
 /* Pilot trace emitters (pool12 / precise-port workflow) */
 extern void td5_pilot_emit_00404EC0_enter(const TD5_Actor *actor, uintptr_t caller_ra);
@@ -4456,6 +4511,42 @@ static inline int32_t arith_round_shift(int32_t x, int32_t mask, int32_t shift)
 
 #include "td5_pilot_trace_004057F0.h"
 
+/* [CONFIRMED @ 0x004057F0] L5 promotion sweep audit (2026-05-18).
+ *
+ * UpdateVehicleSuspensionResponse — 783 bytes / 241 instructions / 120
+ * decompiled lines. Body audited line-for-line vs disassembly:
+ *
+ *   - bVar1=wheel_contact_bitmask / bVar2=damage_lockout polarity:
+ *     CONFIRMED at 0x004058E4 (spring-dot gate) + 0x00405A6A (pattern
+ *     clamp) — port matches AIRBORNE-mask polarity end-to-end.
+ *   - loop 4-wheel structure (psVar11 stride +0x254 / 4 shorts/wheel):
+ *     CONFIRMED at 0x00405884/0x00405888.
+ *   - g_view rotation_world_to_body_y reads row 1 of body^T:
+ *     CONFIRMED at 0x004057FA-0x004058D8 (TransposeMatrix3x3 +
+ *     LoadRenderRotationMatrix + ConvertFloatVec3ToShortAngles).
+ *   - signed div-by-2 with C-style truncation (dot/2 vs dot>>1):
+ *     SHIPPED fix in commit on precise-004057F0 branch.
+ *   - axis assignment to ang_vel_roll/pitch:
+ *     CONFIRMED at 0x00405A3D / 0x00405A43.
+ *   - divisors /0x4B0 (roll) and /0x226 (pitch):
+ *     CONFIRMED via IMUL constants 0x1B4E81B5 SAR 7 + 0x77280773 SAR 8.
+ *   - pattern-clamp switch table on prev_air (bVar2): MATCHES.
+ *
+ * STATUS: Static audit COMPLETE — function is byte-faithful with one
+ * SHIPPED fix (D1 dot>>1 → dot/2). Per the chassis-launch chain
+ * investigation (agent #41) the residual runtime divergence is UPSTREAM
+ * in ComputeActorTrackContactNormalExtended @ 0x00403720 (pool1) — wcv
+ * sign / hires shift / gap_270 chain — and the side-channel cardef-
+ * loading issue for PlayerIsAI=1 slot 0.
+ *
+ * KNOWN TODO CHAIN OWNERS (chassis-launch / suspension cascade):
+ *   - todo_edinburgh_chassis_launch_proximate_cause.md (wcb=0 transient)
+ *   - todo_edinburgh_span_433_residual_launch.md (second crest launch)
+ *   - todo_chassis_snap_fix_2026-05-16.md (floorf vs FISTP-RNE rounding)
+ *
+ * Audit reference: re/analysis/pilot_004057F0_audit.md (pool6, 2026-05-14).
+ * Effective level: L4 (byte-faithful per static audit; upstream-blocked).
+ */
 void td5_physics_update_suspension_response(TD5_Actor *actor)
 {
     td5_pilot_emit_004057F0_enter(actor,

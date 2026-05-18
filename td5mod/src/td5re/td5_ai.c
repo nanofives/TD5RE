@@ -3676,6 +3676,38 @@ int td5_ai_find_nearest_route_peer(int *route_state_ptr) {
 /**
  * RecycleTrafficActorFromQueue — byte-faithful port of 0x004353B0.
  *
+ * [CONFIRMED @ 0x004353B0] L5 promotion sweep audit (2026-05-18).
+ *
+ * Verbatim 10-step translation per disassembly listing (1352 bytes /
+ * ~340 instructions). Each step in the comment block below is anchored
+ * to its orig listing range:
+ *   1.  Bail g_racerCount <= 6           [0x004353B0-C1].
+ *   2.  Cursor pre-scan over queue       [0x004353C9-FD].
+ *   3.  Linear scan slots 6..min(N,12)   [0x004353FE-465].
+ *   4.  best_dist <= 0x28 early-return.
+ *   5.  *cursor == -1 early-return.
+ *   6.  Slot-9 + special-encounter gate.
+ *   7.  RS direction polarity + table_ptr_index write.
+ *   8.  LEFT/RIGHT branch dispatch (queue_byte vs strip_byte):
+ *       - LEFT: InitActorTrackSegmentPlacement + geometry + angle +
+ *         polarity + ResetVehicleActorState + RefreshActorTrack
+ *         ProgressOffset + NormalizeActorTrackWrapState.
+ *       - RIGHT: inline jump-table scan + remap + Init + geometry +
+ *         RefreshActorTrackProgressOffset + ResolveActorSegmentBoundary.
+ *   9.  Advance DAT_004b08b8 +4.
+ *  10.  LAB_0043588d post-call zero block.
+ *
+ * ARCHITECTURAL DIVERGENCES (documented in code below):
+ *   - RS_DIRECTION_POLARITY macro discrepancy: port writes BOTH 0x3F
+ *     (orig) and 0x25 (port's macro). FIXME flagged in code.
+ *   - Recycle heading dispatch collapsed into td5_track_compute_heading
+ *     (see memory/reference_arch_recycle_heading_collapse.md).
+ *
+ * KNOWN DIVERGENCES: none beyond the two documented architectural ones.
+ *
+ * Effective level: L5 (byte-faithful per static audit; arch-divergences
+ * are equivalence-preserving by design).
+ *
  * Verbatim translation of TD5_d3d.exe @ 0x004353B0 disassembly (pool3
  * 2026-05-14). Replaces the prior semantically-named port (which used
  * wrong route-state offsets, wrote +0x82/+0x84/+0x86 directly instead
@@ -4545,6 +4577,26 @@ void td5_ai_init_traffic_actors(void) {
  * Stage 7 (yield):     FindNearestRoutePeer -> brake if closing on peer
  *
  * [precise-00435E80] Byte-faithful port from 0x00435E80 disassembly listing.
+ *
+ * [CONFIRMED @ 0x00435E80] L5 promotion sweep audit (2026-05-18).
+ *   - Stages 1-7 enumerated above match orig FSM block layout
+ *     (0x00435E80..0x00436A6F, 2142 bytes / 521 instructions).
+ *   - Stage 2 ref_slot via rs[RS_SLOT_INDEX], not param_1 — CONFIRMED at
+ *     0x00435EA6-0x00435FA8 EBX+0xD4 dispatch.
+ *   - Stage 2 polarity reads RS_ROUTE_DIRECTION_POLARITY (dword 0x3F),
+ *     not the prior incorrectly-aliased 0x25 — CONFIRMED at 0x00435EF4.
+ *   - Stage 2 strict hdelta band (0x400, 0xC00) — CONFIRMED at
+ *     0x00435F2B JLE / 0x00435F32 JGE pair.
+ *   - Stage 2 special-encounter audio cleanup asymmetric — orig only
+ *     clears g_encounter_tracked_handle on polarity==0 path.
+ *   - Stage 5 target span calculation accounts for polarity sign flip.
+ *   - Stage 7 yield brake — FindNearestRoutePeer dispatch verified.
+ *
+ * KNOWN DIVERGENCES: none documented (port commits document the four
+ * shipped fixes vs prior approximate port).
+ *
+ * Effective level: L5 (byte-faithful end-to-end).
+ *
  * Notable fixes vs prior approximate port:
  *   - Stage 2 reads heading/yaw_accum from the REFERENCE actor
  *     (actor_ptr(rs[RS_SLOT_INDEX])), not from the param_1 actor. Original
@@ -5481,6 +5533,51 @@ void td5_pilot_00436A70_collect(PilotSnapshot_00436A70 *snap) {
     }
 }
 
+/* [CONFIRMED @ 0x00436A70] L5 promotion sweep audit (2026-05-18).
+ *
+ * UpdateRaceActors — 1569 bytes / 450 instructions / 270 decompiled lines.
+ * Master per-sub-tick dispatcher with FOUR contiguous regions:
+ *   A: rubber-band call → ComputeAIRubberBandThrottle (0x00432D60).
+ *   B: per-racer track-state loop (branch detection + forward component +
+ *      span progress + offset-clamp + deviation write).
+ *   C/C': non-drag vs drag-mode racer dispatch (state==0/2/3 branches).
+ *   D/D': non-drag vs drag-mode traffic dispatch (slots 6-11 + slot-9
+ *      special-encounter handling + UpdateSpecialTrafficEncounter call).
+ *
+ * SHIPPED FIXES (in master):
+ *   - 3-path route_table_ptr selector (commit 2412baf, 1a95b4c):
+ *     PATH 1 (selector=1, ptr=RIGHT), PATH 2a (selector=0, ptr=LEFT),
+ *     PATH 2b (default — ptr UNCHANGED). Closes Moscow 34→20 (sub_tick=1).
+ *   - F1 traffic bias-clamp slot gate (commit 79023df).
+ *   - Steering pre-AI clear placement (commit 79023df / e6622f2 cluster).
+ *   - State-2 finished encounter_steer = (int16_t)0xFF00 — bit-equivalent
+ *     to orig's WORD 0xFF00 (D5 audited MATCH).
+ *
+ * KNOWN DIVERGENCES (re/analysis/pilot_00436A70_audit.md):
+ *   D1     Branch detection table walker collapsed in port's
+ *          `td5_ai_refresh_route_state_slot` — partial port via 3-path
+ *          selector (2412baf), but underlying DAT_004C3DA0 walker still
+ *          simplified. PARTIAL CLOSE via commit 2412baf.
+ *   D2     Per-actor track-state work (gActorTrackSpanProgress / Render
+ *          TrackSegmentNearActor / UpdateActorTrackBounds /
+ *          ClassifyTrackOffsetClamp / GetTrackSegmentSurfaceType /
+ *          recovery-stage override / branch-aware deviation block) lives
+ *          in `td5_track_recompute_actor_offsets` rather than inline in
+ *          this dispatcher. PER-TICK TIMING may lag by one sub-tick.
+ *   D3     Forward-track-component formula uses (>>12) instead of orig's
+ *          FILD+FSQRT+IDIV by sqrt(sin²+cos²) — sub-LSB magnitude.
+ *   D4     State-2 (finished) 5-byte cluster zero-fill at +0x371..+0x376
+ *          not yet written by port.
+ *   D6-D8  Loop / slot iteration LOW-impact differences (audited).
+ *
+ * KNOWN TODO CHAIN OWNERS:
+ *   - todo_cascade_unwind_2026-05-17.md (RS_TRACK_PROGRESS quotient/
+ *     remainder cluster).
+ *
+ * Audit reference: re/analysis/pilot_00436A70_audit.md (pool13, 2026-05-14).
+ * Effective level: L4 (multiple shipped fixes; D1/D2 are partial-port
+ * residuals tracked as cascade-unwind work).
+ */
 void td5_ai_update_race_actors(void) {
     int i;
 
