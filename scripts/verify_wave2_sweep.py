@@ -259,16 +259,27 @@ def main():
                     help="Also report unfiltered (EXPECTED_DIVERGENT bypass) counts.")
     ap.add_argument("--scenario", default=None,
                     help="Run only the named scenario (else: all).")
-    ap.add_argument("--parallel", action="store_true",
-                    help="Launch ALL scenarios as concurrent td5re.exe processes "
-                         "(each with its own TD5RE_STATE_REPLAY_DUMP_PATH). "
-                         "Drops wall time from ~11min to ~1.5min. Requires "
-                         "Windowed=1 in td5re.ini (DDraw exclusive mode would "
-                         "collide).")
+    # Parallel is the default — launches all 7 scenarios concurrently, each
+    # with its own TD5RE_STATE_REPLAY_DUMP_PATH. Drops wall time from ~11min
+    # to ~1.5min. Safe because td5re.ini has Windowed=1 (no DDraw exclusive
+    # mode collision). Opt out with --sequential if you need the legacy
+    # single-INI-patch path for debugging.
+    parallel_group = ap.add_mutually_exclusive_group()
+    parallel_group.add_argument("--parallel", action="store_true", default=True,
+                                help="Launch ALL scenarios as concurrent "
+                                     "td5re.exe processes (DEFAULT).")
+    parallel_group.add_argument("--sequential", action="store_true",
+                                help="Run scenarios one-at-a-time using the "
+                                     "legacy shared port_state_snapshot.bin "
+                                     "+ td5re.ini-patch path. Slower (~11min "
+                                     "for 7 scenarios) but useful when "
+                                     "isolating a single scenario's behavior.")
     ap.add_argument("--timeout", type=int, default=120,
-                    help="Per-batch deadline in seconds for --parallel "
-                         "(default 120).")
+                    help="Per-batch deadline in seconds (default 120).")
     args = ap.parse_args()
+    # --sequential wins over the always-true --parallel default
+    if args.sequential:
+        args.parallel = False
 
     scenarios = [s for s in SCENARIOS
                  if args.scenario is None or s[0] == args.scenario]
