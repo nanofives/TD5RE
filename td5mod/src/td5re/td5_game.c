@@ -88,7 +88,9 @@ extern uint8_t *g_track_environment_config; /* td5_asset.c -- LEVELINF.DAT buffe
  * 0x42AA10  InitializeRaceSession              -- DONE (td5_game_init_race_session)
  * 0x42B580  RunRaceFrame                       -- DONE (td5_game_run_race_frame)
  * 0x42C8E0  ShowLegalScreens                   -- DONE (td5_game_show_legal_screens)
- * 0x442160  InitializeRaceVideoConfiguration   -- DONE (in td5_game_init)
+ * 0x442160  InitializeRaceVideoConfiguration   -- ARCH-DIVERGENCE (thunk JMP 0x0042a950;
+ *                                                 body collapsed into td5_render_init +
+ *                                                 platform bootstrap; see audit note below)
  * 0x414740  InitializeFrontendResourcesAndState-- DONE (delegates to td5_frontend)
  * 0x414B50  RunFrontendDisplayLoop             -- DONE (delegates to td5_frontend)
  * 0x42C2B0  InitializeRaceViewportLayout       -- DONE (td5_game_init_viewport_layout)
@@ -100,6 +102,105 @@ extern uint8_t *g_track_environment_config; /* td5_asset.c -- LEVELINF.DAT buffe
  * 0x42CC20  BeginRaceFadeOutTransition         -- DONE (td5_game_begin_fade_out)
  * 0x42CBE0  IsLocalRaceParticipantSlot         -- DONE (td5_game_is_local_participant)
  * 0x42CCD0  StoreRoundedVector3Ints            -- DONE (td5_game_store_rounded_vec3)
+ * ======================================================================== */
+
+/* ========================================================================
+ * L5 promotion sweep audit -- 2026-05-18 (worktree wave3-l5-promo-9-small-game-tier)
+ *
+ * InitializeRaceVideoConfiguration thunk @ 0x00442160 [ARCH-DIVERGENCE]
+ *   Orig body: 5 bytes `JMP 0x0042a950` (single tail-call to the impl). The
+ *   thunk itself contains no logic — it is the public symbol that GameWinMain
+ *   calls. Port-side there is no thunk because the body has been collapsed.
+ *
+ * InitializeRaceVideoConfiguration body @ 0x0042a950 [ARCH-DIVERGENCE]
+ *   Orig responsibilities (183 bytes):
+ *     1) Resolve g_renderDetailLevelPtr = gRenderDetailLevelTable[lang_id]
+ *        clamped to 5, where lang_id = SNK_LangDLL_exref[8] - 0x30.
+ *     2) Call InitializeRaceRenderGlobals @ 0x0040AE10.
+ *     3) Call QueryRaceSharedPointer(4, &g_vehicleProjectionEffectMode, 4).
+ *     4) Set _g_raceRenderInitialized = 1.
+ *     5) Cache _g_raceVideoConfigCached = *g_appExref.
+ *     6) Hard-set g_renderWidthF/g_renderHeightF = 640/480.
+ *     7) Call ConfigureProjectionForViewport(640, 480).
+ *     8) Center pos: gRenderCenter{X,Y} = render{W,H}F * DAT_0045d5d0 (= 0.5).
+ *     9) Call InitializeRaceViewportLayout @ 0x0042C2B0.
+ *     10) Call LoadStaticTrackTextureHeader.
+ *     11) Set SetRaceTexturePageLoader(LoadRaceTexturePages).
+ *     12) Wire CreateEffects_exref = CreateRaceForceFeedbackEffects (FFB
+ *         virtual dispatch slot on the DX::FF singleton).
+ *
+ *   Port handles (1)-(8) implicitly via td5_render_init() / DDraw wrapper.
+ *   Steps (10)-(12) are spread across the per-race init in
+ *   td5_game_init_race_session() and the platform abstraction
+ *   (td5_input_ff_*). Steps (3) (4) (5) (12) carry orig-specific machinery
+ *   (QueryRaceSharedPointer dpu accessor, virtual FFB dispatch, app cached
+ *   handle) that the port replaced with direct calls. Functionally
+ *   equivalent at the user-visible level. The header comment above used to
+ *   claim "DONE (in td5_game_init)" but td5_game_init handles only FSM
+ *   state init — not the video bootstrap. Re-labelled to ARCH-DIVERGENCE
+ *   to reflect that the orig's monolithic bootstrap was split.
+ *
+ * ResetRaceResultsTable @ 0x0040a880 [ARCH-DIVERGENCE]
+ *   Orig writes a 6-entry, 20-byte-stride table at 0x0048d988. Per entry:
+ *     byte[0] = 0, byte[1] = entry_idx (0..5), word[2] = 0, dword[4..14]=0;
+ *     after the loop, entry[0].byte[0] = 1.
+ *   Port helper reset_results_table() (td5_game.c:3729) memsets s_results
+ *   to zero, then sets s_results[0].slot_flags = 1. Behaviour-equivalent
+ *   end-state but port does NOT prime byte[1] = entry_idx. That priming is
+ *   redundant in practice because build_results_table() (td5_game.c:3674)
+ *   always overwrites slot_index with `i` before any sort/read. No port
+ *   reader observes the post-reset/pre-build window where byte[1] would
+ *   matter. Documented divergence; not L4.
+ *
+ * ResetGameHeap @ 0x00430cb0 [ARCH-DIVERGENCE]
+ *   Orig: HeapDestroy gGameHeapHandle (gated on first-call sentinel
+ *   DAT_004aee4c), HeapCreate(0, 24_000_000, 0), zero gGameHeapAllocTotal,
+ *   set sentinel. Port td5_plat_heap_reset() (td5_platform_win32.c:808)
+ *   destroys s_game_heap then HeapCreate(0, 1_048_576, 0). Two divergences:
+ *     - Initial size 1 MB vs 24 MB (both growable on Windows; no
+ *       functional difference at allocation runtime).
+ *     - First-call sentinel replaced with `if (s_game_heap)` null-check
+ *       (semantically equivalent — same one-shot destroy).
+ *
+ * IsLocalRaceParticipantSlot @ 0x0042cbe0 [L5 — byte-faithful]
+ *   Three-branch dispatch matched exactly: network -> dpu[0xBCC+slot*4],
+ *   split-screen -> slot < 2, else -> slot == 0. Port wrapper
+ *   td5_game_is_local_participant() (td5_game.c:3912) calls
+ *   td5_net_is_slot_active(slot) for the network path, which reads the
+ *   same dpu field. Byte-equivalent.
+ *
+ * DecayTrackedActorMarkerIntensity @ 0x0043d7e0 [L5 — byte-faithful]
+ *   Orig: gate on audio-options-overlay; decrement 0x200/tick; clamp
+ *   [0, 0x1000] with early-return at zero. Port tick_wanted_target_tracker()
+ *   (td5_game.c:322) mirrors all three operations using the pause-menu
+ *   gate (orig's audio-options-overlay is the same overlay surface).
+ *   Byte-equivalent decrement + bounds.
+ *
+ * UpdateRaceCameraTransitionTimer @ 0x0040a490 [ARCH-DIVERGENCE]
+ *   See detailed audit comment at tick_race_countdown() — same-shape
+ *   timer/level/indicator state machine; intentional port-side semantic
+ *   choices for paused-flip timing and indicator gating on blank atlas
+ *   cells. ONE TODO opened: orig's ResetRaceCameraSelectionState call at
+ *   the timer-zero crossing is not yet wired in the port (no current
+ *   functional impact because the camera preset is never re-saved during
+ *   the countdown, but the missing call is documented for completeness).
+ *
+ * BeginRaceFadeOutTransition @ 0x0042cc20 [ARCH-DIVERGENCE]
+ *   See detailed audit comment at td5_game_begin_fade_out(). Port
+ *   collapses orig's dual-axis dispatch (param drives radial-pulse gate;
+ *   g_raceViewportLayoutMode drives fade direction) into a single `param`
+ *   axis that already encodes split_screen_mode at all call sites. The
+ *   radial-pulse overlay is a runtime stub (td5_render_radial_pulse is
+ *   empty in td5_render.c:5215) so the missing branch has no
+ *   user-visible effect today. Fade-direction alternator collapses orig's
+ *   complex `& 0x80000001` repair into a single `^= 1` toggle; both
+ *   converge to alternating 0/1, byte-equivalent in observable state.
+ *
+ * ResetRaceCameraSelectionState @ 0x00402000 [L5 — byte-faithful]
+ *   Port td5_camera.c:1246 mirrors orig's two-branch dispatch (param==0
+ *   restore from packed save bytes, param==1 zero everything) and the
+ *   two LoadCameraPresetForView calls with identical view indices.
+ *   Byte-equivalent.
  * ======================================================================== */
 
 /* ========================================================================
