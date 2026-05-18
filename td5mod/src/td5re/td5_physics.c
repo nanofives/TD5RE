@@ -727,6 +727,88 @@ void td5_physics_tick(void)
 }
 
 /* ========================================================================
+ * td5_physics_run_paused_engine_step -- engine-only paused sub-tick
+ * ========================================================================
+ *
+ * Mirrors the engine-RPM portion of UpdateVehicleActor's paused branch
+ * @ 0x00406881-0x00406908 (listing-verified via Ghidra TD5_pool0 2026-05-17):
+ *
+ *   DL = [+0x383]                         ; race_position
+ *   [+0x381] = DL                         ; prev_race_position = race_position
+ *   UpdateVehicleEngineSpeedSmoothed(actor)
+ *   if (g_selectedGameType != 0 && slot[+0x375].state != 1)
+ *       [+0x310] = (cardef[0x72] << 1) / 3
+ *   [+0x376] = 0                          ; surface_contact_flags = 0
+ *   if (slot[slotIndex].state == 1) {
+ *       three_quart_redline = ((int16)cardef[0x72] * 3 + sgn) >> 2
+ *       if (engine_speed_accum > three_quart_redline)
+ *           surface_contact_flags = (uint8)cardef[0x76]
+ *   }
+ *
+ * NOTE: the orig paused branch ALSO calls IntegrateVehiclePoseAndContacts
+ * (UNCONDITIONAL fallthrough). That call is INTENTIONALLY skipped here —
+ * the port's IntegrateVehiclePoseAndContacts doesn't converge to orig's
+ * zero state during stationary countdown (see td5_game.c gate comment),
+ * so we run only the engine-smoothing portion. Combined with the
+ * td5_game.c gate that calls td5_physics_tick() on the first paused tick
+ * + last 3 paused ticks, the integrator still runs at countdown boundaries
+ * but engine smoothing now runs every paused sub-tick — matching orig's
+ * smooth convergence from 400 → ~1200 by sub_tick=1.
+ *
+ * Closes engine_speed_accum cluster: 42 fields across 7 scenarios at
+ * sub_tick=1 (one per slot per scenario). */
+void td5_physics_run_paused_engine_step(void)
+{
+    if (!g_actor_table_base) return;
+
+    int total = td5_game_get_total_actor_count();
+    if (total <= 0) return;
+    if (total > TD5_MAX_TOTAL_ACTORS) total = TD5_MAX_TOTAL_ACTORS;
+
+    /* Only racer slots (0..5) participate in the paused engine branch.
+     * Traffic (6..11) goes through its own integration path in orig
+     * (UpdateTrafficVehiclePose) and never runs UpdateVehicleEngineSpeedSmoothed. */
+    int racers = total < 6 ? total : 6;
+
+    for (int slot = 0; slot < racers; ++slot) {
+        TD5_Actor *actor = (TD5_Actor *)(g_actor_table_base + (size_t)slot * TD5_ACTOR_STRIDE);
+        if (!actor) continue;
+
+        /* D5a — prev_race_position = race_position */
+        actor->prev_race_position = actor->race_position;
+
+        /* D5/0x406897 — UpdateVehicleEngineSpeedSmoothed */
+        update_engine_speed_smoothed(actor);
+
+        /* D5b — AI engine pin: gate on g_selectedGameType != 0 (championship/
+         * cup modes only). [RE basis: 0x004068B3-0x004068CB] */
+        if (g_game_type != 0 &&
+            actor->slot_index < 6 &&
+            g_race_slot_state[actor->slot_index] != 1) {
+            int32_t redline = (int32_t)PHYS_S(actor, 0x72);
+            actor->engine_speed_accum = (redline << 1) / 3;
+        }
+
+        /* D5c — clear surface_contact_flags */
+        actor->surface_contact_flags = 0;
+
+        /* D5d — player path: set scf from cardef[0x76] when engine > 3/4 redline.
+         * Listing 0x004068D8-690B (round-toward-zero divide by 4). */
+        if (actor->slot_index < 6 && g_race_slot_state[actor->slot_index] == 1) {
+            int16_t *phys = get_phys(actor);
+            if (phys) {
+                int32_t redline = (int32_t)PHYS_S(actor, 0x72);
+                int32_t triple = redline * 3;
+                int32_t thresh = (triple + ((triple >> 31) & 3)) >> 2;
+                if (actor->engine_speed_accum > thresh) {
+                    actor->surface_contact_flags = ((uint8_t *)phys)[0x76];
+                }
+            }
+        }
+    }
+}
+
+/* ========================================================================
  * Master dispatcher -- UpdateVehicleActor (0x406650)
  * ======================================================================== */
 

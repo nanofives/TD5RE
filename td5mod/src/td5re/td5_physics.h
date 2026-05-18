@@ -45,6 +45,12 @@ int  td5_physics_init(void);
 void td5_physics_shutdown(void);
 void td5_physics_tick(void);
 
+/* Paused-branch engine-smoothing helper for countdown sub-ticks where
+ * the full td5_physics_tick() is skipped by the td5_game.c gate. Mirrors
+ * UpdateVehicleActor @ 0x00406881-0x00406908 (engine RPM + housekeeping
+ * portion only — IntegrateVehiclePoseAndContacts intentionally omitted). */
+void td5_physics_run_paused_engine_step(void);
+
 /* --- Sub-tick render interpolation ---
  * The 30 Hz sim tick is decoupled from the render loop (typically 60+ Hz under
  * VSync), so between two ticks the renderer needs a smooth pose for everything
