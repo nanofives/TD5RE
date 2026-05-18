@@ -3890,38 +3890,37 @@ static void wheel_lookup_static_hed(void)
               s_inwheel_u0, s_inwheel_v0, s_inwheel_u1, s_inwheel_v1);
 }
 
-/* [CONFIRMED @ 0x00446F00] L5 promotion sweep audit (2026-05-18).
+/* [ARCH-DIVERGENCE — D3D3->D3D11 wheel billboard emission] orig 0x00446f00.
  *
  * RenderVehicleWheelBillboards — 1410 bytes orig (0x00446F00..0x00447482).
  *
- * ARCHITECTURAL DIVERGENCE: The original is a fixed-function 3D pipeline
- * built around per-wheel sprite quads — calls BuildSpriteQuadTemplate /
- * WriteTransformedShortVector / QueueTranslucentPrimitiveBatch with
- * pre-rotated quad templates written to scratch buffers at DAT_004C4300+
- * etc. Vertex submission is via the legacy D3D3 immediate-mode batch
- * queue.
+ * Original used a D3D3-era fixed-function pipeline: BuildSpriteQuadTemplate /
+ * WriteTransformedShortVector / QueueTranslucentPrimitiveBatch write
+ * pre-rotated quad templates to scratch buffers (DAT_004C4300+) and submit
+ * via the legacy D3D3 immediate-mode batch queue (DrawIndexedPrimitiveVB-
+ * style with DDraw surface keys).
  *
  * Port replaces this with a D3D11 ring-vertex pipeline: 9-vertex tire
- * sidewall ring (8 segments × 2 rings for inner/outer) submitted as a
- * vertex stream through TD5_D3DVertex. NOT a byte-faithful port; it
- * cannot be without re-implementing the entire fixed-function batch queue.
+ * sidewall ring (8 segments * 2 rings for inner/outer) emitted as a
+ * TD5_D3DVertex stream through td5_plat_render_draw_tris on D3D11
+ * immediate command lists. The chain matches semantically (CW-from-+Z
+ * yaw, same UV layout, same per-wheel billboard at slot-position) but
+ * the GPU API divergence makes per-byte vertex-buffer comparison
+ * meaningless.
  *
- * RETAINED behaviors (already cited inline below):
+ * Invariants that DO hold (cited inline below):
  *   - Hub-cap spin pre-compute formulas: front_angle_12b = slip_z*-4,
  *     rear_angle_12b = slip_x*-4 [CONFIRMED @ 0x446F15 / 0x446F23].
- *   - Wheel dimensions read from cardef+0x82 / cardef+0x84 [RE: 0x446E30-0x446E3C].
+ *   - Wheel dimensions read from cardef+0x82 / cardef+0x84
+ *     [CONFIRMED @ 0x446E30-0x446E3C].
  *   - Front-wheel visual steering yaw matrix [cos 0 sin; 0 1 0; -sin 0 cos]
  *     derived from (steering_command>>8). Port commit 67f8d18 fixed the
  *     CW-from-+Z yaw convention sign (SHIPPED, merged ad78a32).
  *   - COLOURS palette tire-color lookup [CONFIRMED @ 0x446B44-0x446B6A].
  *
- * Architectural divergence is INTENTIONAL — D3D3 → D3D11 backend cannot
- * preserve byte-faithful submission. Effective level: L4 (high-level
- * algorithmic match; rendering submission is architecturally different
- * by design).
- *
- * No outstanding TODOs. Audit reference: AI wheel display angle sign fix
- * memory note + ad78a32 merge commit.
+ * See reference_arch_render_wheel_billboards_d3d_2026-05-18.md for full
+ * rationale and the documented invariants that DO hold (CW-from-+Z yaw,
+ * billboard position, UV mapping).
  */
 static void render_vehicle_wheel_billboards(TD5_Actor *actor, int slot)
 {
