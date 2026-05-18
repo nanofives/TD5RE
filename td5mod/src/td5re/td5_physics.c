@@ -2115,7 +2115,34 @@ void td5_physics_update_player(TD5_Actor *actor)
 
 /* ========================================================================
  * AI 2-axle dynamics -- UpdateAIVehicleDynamics (0x404EC0)
- * ======================================================================== */
+ * ========================================================================
+ *
+ * [CONFIRMED @ 0x00404EC0] L5 promotion sweep audit (2026-05-18).
+ *
+ * Static port audited byte-for-byte against listing 0x00404EC0..0x004057E5
+ * (2341 bytes / ~570 instructions / 95 decompiled lines). Body structure
+ * matches original: surface probe → drag → body-frame trig → load
+ * transfer → throttle/brake → bicycle solve → slip-circle.
+ *
+ * SHIPPED FIXES (already in master, audited match):
+ *   - AI brake formula faithful port (commit 63e9624, three-bug fix)
+ *   - AI slot 0 PlayerIsAI=1 carparam exemption (commit 48d320a)
+ *
+ * KNOWN DIVERGENCES (re/analysis/pilot_00404EC0_audit.md):
+ *   D1     Velocity drag uses plain SAR-12, original uses SAR-RZ-12 idiom
+ *          (1 LSB on negative velocity drag; not yet ported, low impact).
+ *   D3     Tire-grip fallback when 0 — safety net only fires under
+ *          carparam-loading regression; benign with proper Viper carparam.
+ *   D4     `current_slip_metric` tail-write — DELIBERATE enhancement to
+ *          drive AI tire/smoke pipeline; not a faithful divergence.
+ *   D5     PlayerIsAI=1 cardef fallback — UPSTREAM (shipped, see above).
+ *
+ * KNOWN TODO chain owners (cascade-investigation):
+ *   - todo_state0f_overfire_skips_player.md (AI dynamics tick overshoot)
+ *
+ * Audit reference: re/analysis/pilot_00404EC0_audit.md (2026-05-14, pool12).
+ * Effective level: L4 (byte-faithful with D1 LSB site documented).
+ */
 
 /* Pilot trace emitters (pool12 / precise-port workflow) */
 extern void td5_pilot_emit_00404EC0_enter(const TD5_Actor *actor, uintptr_t caller_ra);
