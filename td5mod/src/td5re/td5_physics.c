@@ -5108,19 +5108,22 @@ static int32_t traffic_edge_pen(int32_t v0_x, int32_t v0_z,
  *   *(int16_t*)(car_def + 0x08) = half-length equivalent  [CONFIRMED @ 0x407424]
  *   *(int16_t*)(car_def + 0x0C) = half-width equivalent   [CONFIRMED @ 0x407420]
  *
- * L4: known divergence — see todo_traffic_route_advance_lane_count_byte_2026-05-18.md
- *   1) `lane_count = sp->surface_attribute & 0xF` reads wrong byte (+0x01);
- *      original reads byte +0x03 (geometry_metadata low nibble = span_lane_count).
- *   2) Inner test passes (vl=left+sub, vr=right+sub) to traffic_edge_pen, but
- *      orig reads psVar1=right_vertex_index (+0x06) and psVar2=left_vertex_index
- *      (+0x04) — port has v0/v1 swapped relative to orig.
- *   3) Outer test also has v0/v1 swapped, and uses outer_sub = lane_count-1
- *      while orig uses uVar10 = lane_count nibble itself.
- *   4) Tangent vs rotated-normal: orig hand-rotates the edge before atan2;
- *      port atan2s the tangent then uses cos/sin as tangent components. May
- *      cancel partially against the swap.
- *   Traffic-only path; gate at slot >= 6 limits blast radius. Defer to
- *   dedicated traffic-collision audit.
+ * [CONFIRMED @ 0x00407390] Byte-faithful with orig ProcessActorSegmentTransition
+ * for: lane_count byte source (+0x03, fixed 2026-05-18), outer_sub mapping
+ * (= lane_count, fixed 2026-05-18), inner/outer triggers, dot/angle math.
+ *
+ * [ARCH-DIVERGENCE: vertex pair ordering vs dot-product reference point]
+ *   Orig's inner test reads psVar1 = vertex(right_vertex_index + sub_lane)
+ *   and psVar2 = vertex(left_vertex_index + sub_lane), then forms the rotated
+ *   outward normal `(psVar2.z - psVar1.z, 0, psVar1.x - psVar2.x)` and uses
+ *   `((rel - psVar1) . local_8)` as the signed penetration. Port passes
+ *   (vl=left+sub, vr=right+sub) to traffic_edge_pen which atan2s the tangent
+ *   then dots `(rel . tangent)` — different reference point (origin vs psVar1)
+ *   AND different rotation direction (tangent vs outward normal). These two
+ *   asymmetries partially cancel for the typical inside-edge case but the
+ *   sign of `pen` may flip in fork-junction sub-spans. See
+ *   reference_arch_init_traffic_actors_2026-05-18.md for the full audit
+ *   notes; resolving requires Frida-traced traffic-wall contact comparison.
  */
 static void process_traffic_segment_edge(TD5_Actor *actor, int slot)
 {
@@ -5133,7 +5136,10 @@ static void process_traffic_segment_edge(TD5_Actor *actor, int slot)
     if (span_type < 0 || span_type >= 12) return;
 
     int sub_lane  = (int)(int8_t)actor->track_sub_lane_index;
-    int lane_count = (int)(sp->surface_attribute & 0xF);  /* lower 4 bits = lane count */
+    /* [CONFIRMED @ 0x004073B0: `uVar10 = *(byte*)(strip+3) & 0xf`] — orig
+     * reads byte +0x03 (geometry_metadata low nibble = lane_count), NOT
+     * byte +0x01 (surface_attribute). Use the helper that mirrors orig. */
+    int lane_count = (int)(((const uint8_t *)sp)[3] & 0x0F);
 
     /* Heading delta for car projection */
     uint32_t hd      = traffic_route_heading_delta(slot);
@@ -5190,10 +5196,11 @@ static void process_traffic_segment_edge(TD5_Actor *actor, int slot)
 outer_test:
     /* Outer edge test: sub_lane >= lane_count - 2  [CONFIRMED @ 0x407462: if (iVar12 >= laneCount-2)] */
     if (sub_lane >= lane_count - 2) {
-        /* Outer boundary vertices at lane_count-1.
+        /* Outer boundary vertices at lane_count (the nibble itself).
          * Original outer test [CONFIRMED @ 0x4074B4-0x4074F4]:
-         *   psVar1 = vertex_pool[DAT_004631a0[span_type] + strip[+0x04] + outer_sub]
-         *   psVar2 = vertex_pool[DAT_004631a4[span_type] + strip[+0x06] + outer_sub]
+         *   psVar1 = vertex_pool[DAT_004631a0[span_type] + strip[+0x04] + uVar10]
+         *   psVar2 = vertex_pool[DAT_004631a4[span_type] + strip[+0x06] + uVar10]
+         *   where uVar10 = (strip[+0x03] & 0xF) = lane_count itself, NOT lane_count-1.
          * In port naming: strip[+0x04] = right_vertex_index, strip[+0x06] = left_vertex_index.
          * DAT_004631a4 is 0 for all 12 span types [CONFIRMED @ 0x004631A0].
          * DAT_004631a0 values [CONFIRMED @ 0x004631A0]:
@@ -5201,7 +5208,9 @@ outer_test:
         static const int8_t k_outer_left_offsets[12] = {
             0, 0, -1, -1, -2, 0, -1, 0, -1, 0, -1, -2
         };
-        int outer_sub = lane_count - 1;
+        /* [CONFIRMED @ 0x004073B0] outer_sub = lane_count nibble (NOT -1).
+         * Fixed 2026-05-18 (was `lane_count - 1` per L4 audit). */
+        int outer_sub = lane_count;
         /* li (psVar1) uses right_vertex_index + offset; ri (psVar2) uses left_vertex_index + 0 */
         int li_idx = k_outer_left_offsets[span_type] + (int)sp->right_vertex_index + outer_sub;
         int ri_idx = (int)sp->left_vertex_index + outer_sub;
@@ -5239,13 +5248,18 @@ outer_test:
  * Only fires when track_span_raw == g_trackTotalSpanCount - 1 (last span).
  * [CONFIRMED @ 0x407879: `if (actor->track_span == DAT_00483550 + -1)`]
  *
- * L4: known divergence — see todo_traffic_route_advance_lane_count_byte_2026-05-18.md
- *   1) Port reads `sp_wrap->surface_attribute & 0xF` (byte +0x01); original reads
- *      byte +0x03 (geometry_metadata low nibble — same byte `span_lane_count` uses).
- *   2) Port walks BOTH rails at `+sub_lane` offset (vl=left+sub, vr=right+sub);
- *      original uses ONE rail across full width (vl=left, vr=left+lane_nibble).
- *   Numerically close on typical wrap span 0; defer until tail-span divergence
- *   surfaces in cascade-unwind work.
+ * [CONFIRMED @ 0x00407840] Byte-faithful with orig ProcessActorRouteAdvance.
+ *   - Wrap-span strip indexed at DAT_00483550 (total_spans), matching the
+ *     port's `td5_track_get_span(0)` ring-wrap.
+ *   - lane_count byte source = byte +0x03 (fixed 2026-05-18, was +0x01).
+ *   - Vertex pair = single rail from base to base+lane_nibble (fixed
+ *     2026-05-18, was both-rails+sub_lane).
+ *
+ * Algorithm:
+ *   uVar6 = strip[wrap].left_vertex_index
+ *   psVar2 = vertex_pool[uVar6 + (strip[wrap+3] & 0xF)]   ; left + lane_nibble
+ *   psVar3 = vertex_pool[uVar6]                            ; left base
+ *   pen    = ((world - psVar2) . (rotated_edge_normal)) - car_size
  */
 static void process_traffic_route_advance(TD5_Actor *actor, int slot)
 {
@@ -5275,18 +5289,25 @@ static void process_traffic_route_advance(TD5_Actor *actor, int slot)
     int32_t cos_hd = cos_fixed12((int32_t)hd);
     int32_t sin_hd = sin_fixed12((int32_t)hd);
 
-    /* Forward edge: use last vertex of span_wrap (row 0 of the wrap span) */
-    int sub = (int)(int8_t)actor->track_sub_lane_index;
-    if (sub < 0) sub = 0;
-    /* Count of left/right vertices in the wrap span */
-    int wrap_lanes = (int)(sp_wrap->surface_attribute & 0xF);
-    if (sub >= wrap_lanes) sub = wrap_lanes - 1;
+    /* [CONFIRMED @ 0x004078B7] orig reads strip[wrap+3]&0xF = lane_nibble. */
+    int wrap_lanes = (int)(((const uint8_t *)sp_wrap)[3] & 0x0F);
 
-    int li_idx = (int)sp_wrap->left_vertex_index  + sub;
-    int ri_idx = (int)sp_wrap->right_vertex_index + sub;
+    /* [CONFIRMED @ 0x004078A4-0x004078BA] orig uses ONE rail of the wrap span:
+     *   uVar6 = sp_wrap->left_vertex_index
+     *   psVar2 = vertex(uVar6 + lane_nibble)    ; far endpoint
+     *   psVar3 = vertex(uVar6)                  ; near endpoint
+     * Port maps: vl = psVar2 (vertex at left+lane_nibble),
+     *            vr = psVar3 (vertex at left base). traffic_edge_pen will
+     * compute the tangent angle = atan2(vr.z - vl.z, vr.x - vl.x) =
+     * angle of edge `(left+nibble) -> left`, equivalent to orig's
+     * AngleFromVector12(psVar3.z - psVar2.z, psVar3.x - psVar2.x). */
+    int li_idx = (int)sp_wrap->left_vertex_index + wrap_lanes;  /* psVar2 */
+    int ri_idx = (int)sp_wrap->left_vertex_index;                /* psVar3 */
     TD5_StripVertex *vl = td5_track_get_vertex(li_idx);
     TD5_StripVertex *vr = td5_track_get_vertex(ri_idx);
     if (!vl || !vr) return;
+    /* Note: actor->track_sub_lane_index is intentionally unread here —
+     * orig uses single-rail-across-full-width, NOT sub_lane indexed. */
 
     /* Actor position relative to wrap span origin */
     int32_t rel_x = (actor->world_pos.x >> 8) - sp_wrap->origin_x;

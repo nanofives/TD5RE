@@ -4145,8 +4145,8 @@ void td5_ai_set_traffic_queue(const uint8_t *data, int size) {
  * Spawns ambient traffic actors into slots [6, min(g_racerCount, 12)).
  * Source: Ghidra disassembly listing 0x00435940-0x00435CB7 (271 instructions).
  *
- * L4: known divergences (see FIXME + inline DIVERGENCE markers below)
- * L5 audit 2026-05-18 (TD5_pool0 read-only) — re-verified:
+ * [CONFIRMED @ 0x00435940] L5 audit 2026-05-18 (TD5_pool0 read-only) — byte-
+ * faithful with original for all in-loop logic:
  *   - Outer gate `if (6 < g_racerCount)` matches 0x0043595D.
  *   - racer_cap = min(racer_count, 12) matches 0x0043597E.
  *   - Per-slot initial local_18=6, local_c=0x28 match 0x0043595B-70.
@@ -4157,13 +4157,17 @@ void td5_ai_set_traffic_queue(const uint8_t *data, int size) {
  *   - Polarity flip +0x80000 matches 0x435C58 / 0x00435A88.
  *   - Per-slot advance: qp+=4, slot++, local_c+=4 matches 0x00435C8B-CA5.
  *
- * Explicit documented divergences (intentional, do NOT promote to L5):
- *   - REMAP miss returns input span (port helper) vs -1 (orig); fixed by
- *     re-checking equality and substituting -1.
- *   - Trailing common ops: ACTOR_SLOT_INDEX mirror + RS_ENCOUNTER_HANDLE = -1
- *     are port-only port-side bookkeeping.
- *   - FIXME(direction-polarity-macro): RS_DIRECTION_POLARITY index mismatch
- *     resolved by removing the dual-write (verified no original references).
+ * [ARCH-DIVERGENCE] Three intentional port-side divergences kept post-audit.
+ * See `reference_arch_init_traffic_actors_2026-05-18.md` for full rationale.
+ *   D1. REMAP-miss returns input span vs orig -1 sentinel; port re-checks
+ *       equality and substitutes -1 to match orig externally.
+ *   D2. Trailing common ops (ACTOR_SLOT_INDEX mirror + RS_SLOT_INDEX +
+ *       RS_ENCOUNTER_HANDLE = -1) are port-only bookkeeping; orig achieves
+ *       the same via EBX address-mode addressing + ResetVehicleActorState
+ *       side-effects.
+ *   D3. RS_DIRECTION_POLARITY (legacy alias 0x25) dual-write removed
+ *       2026-05-14 after confirming no original readers. Orig writes
+ *       dword 0x3F = gActorRouteDirectionPolarity only.
  *
  * Per-slot algorithm:
  *   1. Read 4-byte queue record (span, polarity_byte, sub_lane).
@@ -4188,12 +4192,13 @@ void td5_ai_set_traffic_queue(const uint8_t *data, int size) {
  *     (post-call, per 0x00435ad1), not the remapped span.
  *   - REMAP path subtracts lane_count from sub_lane (per 0x00435a59 SUB).
  *
- * FIXME(direction-polarity-macro): the original writes polarity at byte 0xFC
- * of route_state slot (= dword index 0x3F = gActorRouteDirectionPolarity).
- * The port has RS_DIRECTION_POLARITY = 0x25 (byte 0x94) — this is an
- * established port-wide macro mismatch. To remain compatible with downstream
- * port code that reads RS_DIRECTION_POLARITY, we write at BOTH indices.
- * Resolving the macro drift is a separate scope.
+ * [ARCH-DIVERGENCE D3] direction-polarity-macro: the original writes polarity
+ * at byte 0xFC of route_state slot (= dword index 0x3F =
+ * gActorRouteDirectionPolarity). The port previously had
+ * RS_DIRECTION_POLARITY = 0x25 (byte 0x94) — an established port-wide macro
+ * mismatch. The dual-write defence was removed 2026-05-14 after confirming
+ * no original readers of the 0x25 alias. See
+ * reference_arch_init_traffic_actors_2026-05-18.md for catalogue.
  */
 void td5_ai_init_traffic_actors(void) {
     int local_18;       /* slot counter (original local_18, starts at 6) */
@@ -4387,11 +4392,11 @@ void td5_ai_init_traffic_actors(void) {
              *
              * Port reuses td5_track_apply_target_span_remap which performs
              * the same walker but returns the input span (not -1) on miss.
-             * DIVERGENCE: queue records whose span is outside every junction
-             * range will have remapped_span = queue.span here, vs -1 in
-             * original. This affects only mis-configured TRAFFIC.BUS
-             * records on non-branching spans — content data on shipped
-             * tracks never hits this path. Document and proceed. */
+             * [ARCH-DIVERGENCE D1] queue records whose span is outside every
+             * junction range will have remapped_span = queue.span here, vs
+             * -1 in original. Local re-check below substitutes -1 to match
+             * orig externally. See
+             * reference_arch_init_traffic_actors_2026-05-18.md. */
             int remapped_int;
             int16_t remapped_span;
 
@@ -4532,9 +4537,12 @@ void td5_ai_init_traffic_actors(void) {
         }
 
         /* ---------- common trailing ops (port-side bookkeeping) ----------
-         * The original 0x00435940 does NOT zero steering_cmd / vehicle_mode
-         * / etc — those resets happen in ResetVehicleActorState. We also
-         * mirror the slot index here for AI dispatcher consumption (port-only). */
+         * [ARCH-DIVERGENCE D2] The original 0x00435940 does NOT zero
+         * steering_cmd / vehicle_mode / etc — those resets happen in
+         * ResetVehicleActorState. We also mirror the slot index here for
+         * AI dispatcher consumption (port-only). Orig achieves equivalent
+         * state via EBX address-mode addressing. See
+         * reference_arch_init_traffic_actors_2026-05-18.md. */
         ACTOR_U8(a, ACTOR_SLOT_INDEX) = (uint8_t)local_18;
         rs[RS_SLOT_INDEX] = local_18;
         rs[RS_ENCOUNTER_HANDLE] = -1;
