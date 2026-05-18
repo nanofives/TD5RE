@@ -3009,7 +3009,32 @@ static void tick_race_countdown(void)
      * gate so the log only fires on the actual transition. */
     if (level == 0 && g_td5.paused) {
         g_td5.paused = 0;
-        /* NOTE (2026-05-14): audit of orig 0x0040A490 confirmed the original
+        /* Hide the countdown digit at the SAME transition that flips paused.
+         *
+         * Orig UpdateRaceCameraTransitionTimer @ 0x0040A490 hides the indicator
+         * on the very NEXT call after timer reaches 0, via its entry-guard:
+         *
+         *   if (g_cameraTransitionActive == 0) {
+         *       SetRaceHudIndicatorState(0,0); SetRaceHudIndicatorState(1,0);
+         *       return;
+         *   }
+         *
+         * The port can't rely on a second call: tick_race_countdown is only
+         * invoked while g_td5.paused == 1 (see main race loop ~2486), so once
+         * paused flips here we never come back. Pre-630d797 the port hid the
+         * indicator at the same g_cameraTransitionActive<=0 boundary as
+         * paused→0; commit 630d797 (race-start off-by-one) moved paused→0 to
+         * level==0 (sub_tick=121) but lost the hide-call, leaving the digit
+         * "1" sprite latched on for the rest of the race.
+         *
+         * Hiding here is visually one sub-tick earlier than orig (the orig
+         * shows "1" for one extra frame after paused→0 before the next call's
+         * entry-guard hides it), but that 1-frame transient (~33ms) is
+         * imperceptible — the user-reported regression is the digit staying
+         * on forever. Sister fix to fb60d3d (chase camera spring-reset moved
+         * from g_cameraTransitionActive==0 to !g_td5.paused).
+         *
+         * NOTE (2026-05-14): audit of orig 0x0040A490 confirmed the original
          * does NOT touch STEERING_CMD/RAMP_ACCUM/ang_velocity_yaw or
          * RS_TRACK_PROGRESS/RS_TRACK_OFFSET_BIAS on the level==0 transition —
          * it only clears g_gamePaused and gRaceCameraTransitionGate.
@@ -3017,6 +3042,8 @@ static void tick_race_countdown(void)
          * (now-fixed) spawn-time +0x82 pre-seed bug; with c698403 + 9b7d42a
          * in place the cascade now naturally produces the ±20000 sim_tick=1
          * steering range. */
+        set_countdown_indicator_state(0);
+        s_race_countdown_state = 0;
         TD5_LOG_I(LOG_TAG, "Race countdown: GO at level=0 timer=0x%X",
                   g_cameraTransitionActive);
     }
