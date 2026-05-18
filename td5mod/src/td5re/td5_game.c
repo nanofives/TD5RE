@@ -3080,6 +3080,49 @@ static void reset_race_countdown(void)
     TD5_LOG_I(LOG_TAG, "Race countdown reset: timer=0x%X", g_cameraTransitionActive);
 }
 
+/* [CONFIRMED @ 0x0040a490 UpdateRaceCameraTransitionTimer; L5 promotion
+ *  sweep audit 2026-05-18] -- ARCH-DIVERGENCE, same-shape state machine
+ *  with three intentional port-side deltas.
+ *
+ *  Orig structure (37 lines decompiled at 0x0040a490):
+ *    1) if timer == 0: SetRaceHudIndicatorState(0,0); SetRaceHudIndicatorState(1,0); return
+ *    2) elif timer < 0x101: timer = 0;
+ *                           ResetRaceCameraSelectionState(replay_or_playback ? 1 : 0)
+ *    3) else: timer -= 0x100
+ *    4) level = timer / 0x2800; indicator = level + 1
+ *    5) SetRaceHudIndicatorState(0, indicator); SetRaceHudIndicatorState(1, indicator)
+ *    6) if level == 0: g_gamePaused = 0; gRaceCameraTransitionGate = 0
+ *
+ *  Port deltas (this function):
+ *    A) [TODO] Step (2)'s ResetRaceCameraSelectionState call is NOT wired
+ *       in the port. Orig calls it once at the timer-zero crossing to
+ *       reload camera presets for both views. Today the camera preset is
+ *       never re-saved during the countdown window, so the reload is a
+ *       no-op in practice -- but the call is structurally missing.
+ *       See todo_countdown_reset_camera_preset_call_2026-05-18.md.
+ *    B) Step (6)'s paused-flip happens at timer==0 in the port instead of
+ *       level==0 in orig. User-observed in-game behaviour (2026-05-17)
+ *       confirmed the orig's car-hold extends across the level==0 window
+ *       (~40 sub-ticks) and the actual race-start moment is timer==0.
+ *       Either the Ghidra disasm shows a g_gamePaused write at level==0
+ *       that is gated by an unmodeled inner check, or the visible
+ *       race-start is gated elsewhere. Port chooses to match the
+ *       user-visible timer==0 moment. Recent commit 630d797 had matched
+ *       orig literally at level==0; the v3 fix in this file restored
+ *       timer==0 to match observation.
+ *    C) Port maps level >= 3 (indicator >= 4) to indicator=0. Orig calls
+ *       SetRaceHudIndicatorState with raw indicator value 4 or 5; those
+ *       atlas cells are blank in the original asset and render garbage
+ *       in the port if not suppressed. Port-only workaround for an asset
+ *       difference, not a logic divergence.
+ *    D) Port has indicator-change gate (only update when next != cur);
+ *       orig calls SetRaceHudIndicatorState every tick. Set is
+ *       idempotent so this is a no-op behaviourally; saves redundant
+ *       HUD work.
+ *    E) gRaceCameraTransitionGate at 0x0048306C is collapsed into the
+ *       port's single g_td5.paused / g_game_paused. Both flags are set
+ *       to 0 at the same race-start moment; readers in the port
+ *       reference g_game_paused. Behaviour-equivalent. */
 static void tick_race_countdown(void)
 {
     int level, next_indicator;
