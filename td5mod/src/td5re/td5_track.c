@@ -5723,8 +5723,14 @@ const void *td5_track_get_models_display_list_raw(int index, size_t *size_out)
 }
 
 /**
- * GetTrackSpanDisplayListEntry (0x431260).
+ * GetTrackSpanDisplayListEntry (0x431260). L5 promotion sweep audit (2026-05-18).
  * Returns the display list (pre-built render command buffer) for a span.
+ *
+ * [ARCH-DIVERGENCE @ 0x00431260] Orig is a 13-byte direct LUT lookup:
+ *   return *(uint*)(gModelsDatEntryTable + idx*8). Port absorbs caller
+ *   concerns (reverse-direction mirror at 0x0042BB80, MODELS.DAT presence
+ *   gate, STRIP.DAT fallback chain) for cleaner runtime semantics.
+ *   Forward + MODELS.DAT-loaded path is byte-equivalent to orig.
  */
 void *td5_track_get_display_list(int span_index)
 {
