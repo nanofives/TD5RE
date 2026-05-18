@@ -1133,6 +1133,37 @@ void UpdateTracksideOrbitCamera(int actor, int is_active, int view)
  *
  * Camera rigidly attached to vehicle with smoothed orientation.
  * Interpolates Euler angles via shortest-path wrapping.
+ *
+ * [L5 promotion sweep audit 2026-05-18 — byte-equivalent]
+ *   Decompile of 0x00401C20 verified line-by-line:
+ *     - First angle target  = display_angles.roll  + 0x800   (+0x208)
+ *     - Second angle target = 0x800 - display_angles.yaw     (+0x20A)
+ *     - Third  angle target = -display_angles.pitch          (+0x20C)
+ *     [variable names in port read target_pitch/yaw/roll but the math
+ *      maps roll/yaw/pitch in the actor struct convention — math identity
+ *      preserved]
+ *   Per-axis shortest-path wrap delta (`((target-cached-0x800)&0xFFF) -
+ *   0x800) * g_subTickFraction`) reproduced exactly. cam_angles[1] (yaw)
+ *   gets the g_camYawOffset[v] addition, matching uStack_a addition with
+ *   DAT_00482f70[viewIndex*4] in the original.
+ *   Offset transform through actor rotation matrix + 0x100-scaling +
+ *   world_pos + (linear_velocity * g_subTickFraction) is identical.
+ *   BuildCameraBasisFromAngles called twice (pre- and post-position set)
+ *   matches orig's redundant rebuild pattern.
+ *
+ * [ARCH-DIVERGENCE — rotation matrix indirection]
+ *   Original transforms the offset vector through `g_raceRotationMatrixPtr`
+ *   (pointer-deref to the per-actor render matrix at 0x4aaeec). Port reaches
+ *   the same data via `g_renderBasisMatrix` (direct 12-float buffer kept in
+ *   sync). Value identity preserved; only the addressing differs.
+ *
+ * [ARCH-DIVERGENCE — FPU rounding mode]
+ *   Original uses ROUND() (FISTP / round-to-nearest-even). Port uses
+ *   `(int)(x + 0.5f)` (round-toward-positive-infinity for non-negative,
+ *   away-from-zero). For half-LSB-class values the two differ by 1 unit.
+ *   Tracked under the broader FISTP-RNE vs floorf/+0.5 cleanup
+ *   (todo_chassis_snap_fix_2026-05-16.md). Camera position output is
+ *   visual-only — divergence does not enter the sim cascade.
  * ======================================================================== */
 
 void UpdateVehicleRelativeCamera(int actor, int view)
