@@ -1,0 +1,2 @@
+address,name,body_size,files_cited,phase1_evidence,strong,weak
+0x00402E40,ResetPlayerVehicleControlBuffers,16,td5_input.c;td5_input.h,,0,0

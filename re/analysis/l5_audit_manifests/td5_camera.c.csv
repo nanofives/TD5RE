@@ -1,0 +1,15 @@
+address,name,body_size,files_cited,phase1_evidence,strong,weak
+0x00401950,UpdateTracksideOrbitCamera,708,td5_camera.c;td5_camera.h,,0,0
+0x00401E10,UpdateRaceCameraTransitionState,482,td5_camera.c;td5_camera.h,,0,0
+0x004020B0,InitializeTracksideCameraProfiles,322,td5_camera.c;td5_camera.h,,0,0
+0x00402200,SelectTracksideCameraProfile,585,td5_camera.c;td5_camera.h,,0,0
+0x00402480,UpdateTracksideCamera,1182,td5_camera.c;td5_camera.h,,0,0
+0x00402950,UpdateStaticTracksideCamera,294,td5_camera.c;td5_camera.h,,0,0
+0x00402AD0,UpdateSplineTracksideCamera,813,td5_camera.c;td5_camera.h,,0,0
+0x0040A480,InitializeRaceCameraTransitionDuration,10,td5_camera.c,td5_game.c:density(3/5),0,0
+0x0042D5B0,OrientCameraTowardTarget,708,td5_camera.c;td5_camera.h,,0,0
+0x0042DB40,ConvertFloatVec3ToIntVec3,137,td5_camera.c,td5_camera.c:density(4/4),0,0
+0x0042DBD0,TransformVector3ByBasis,82,td5_camera.c;td5_render.c;td5_render.h,,0,0
+0x0042DC30,ConvertFloatVec3ToIntVec3B,110,td5_camera.c,td5_camera.c:density(3/4),0,0
+0x0042E030,ExtractEulerAnglesFromMatrix,246,td5_camera.c,td5_camera.c:density(4/5),0,0
+0x00441F90,BuildCubicSpline3D,250,td5_camera.c,,0,1

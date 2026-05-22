@@ -1337,6 +1337,13 @@ static void frontend_release_button(int handle) {
         s_buttons[handle].active = 0;
 }
 
+/* [ARCH-DIVERGENCE: cursor flag polarity flipped + mouse-moved flag dropped; L5 sweep 2026-05-21]
+ *   Ports ActivateFrontendCursorOverlay (0x004258C0) and DeactivateFrontendCursorOverlay (0x004258E0).
+ *   Orig writes g_frontendCursorOverlayHidden = 1/0 with semantics inverted from its name; port
+ *   stores s_cursor_visible with direct semantics (1=show). All 12 callers' arguments were inverted
+ *   in the same commit so net behavior is unchanged. Orig also clears g_frontendMouseMovedFlag —
+ *   port's mouse-moved tracking lives in update_frontend (s_prev_mouse_x/y compare) and does not
+ *   need a separate flag clear here. */
 static void frontend_set_cursor_visible(int visible) {
     /* Phase 5 — direct semantics. visible=1 shows cursor, visible=0 hides.
      * Previous code did `s_cursor_visible = !visible` to match the original
@@ -1458,6 +1465,11 @@ static void frontend_render_cursor(void) {
     }
 }
 
+/* [ARCH-DIVERGENCE: DDraw Copy16BitSurfaceRect + vtbl[0x1c] Blt -> D3D11 Present; L5 sweep 2026-05-21]
+ *   Unifies orig PresentPrimaryFrontendBufferViaCopy (0x00424AF0, software copy path) and
+ *   PresentPrimaryFrontendBuffer (0x00424CA0, hardware Blt path) into a single D3D11
+ *   end-scene + Present(1). The software-vs-hardware distinction is meaningless under D3D11
+ *   so both callsites collapse to this one helper. */
 static void frontend_present_buffer(void) {
     td5_plat_render_end_scene();
     td5_plat_present(1);
@@ -2003,6 +2015,13 @@ static void frontend_init_display_mode_state(void) {
     int height = 0;
     int bpp = 0;
 
+    /* [ARCH-DIVERGENCE: DXDraw mode-table -> DXGI enum + label format; L5 sweep 2026-05-21]
+     *   Ports BuildEnumeratedDisplayModeList (0x0040B100, walks dd_exref+0x34 in 0x14-byte
+     *   rows filtered on +0x10) and FormatDisplayModeOptionStrings (0x0041D840, sprintf
+     *   "%dx%dx%d" into 0x20-byte slots at g_displayModeStringTable). Port uses
+     *   td5_plat_enum_display_modes (DXGI) and an annotated "%dx%d %dbpp" label (the
+     *   extra space + "bpp" suffix is a deliberate UI improvement over the cramped
+     *   orig label). DXDraw mode table doesn't exist under D3D11. */
     s_display_mode_count = td5_plat_enum_display_modes(s_display_modes, FE_MAX_DISPLAY_MODES);
     TD5_LOG_I(LOG_TAG, "Display modes enumerated: count=%d", s_display_mode_count);
     for (int i = 0; i < s_display_mode_count; i++) {
@@ -4171,6 +4190,13 @@ static void frontend_render_car_stats_overlay(float sx, float sy) {
     }
 }
 
+/* [ARCH-DIVERGENCE: DDraw QueueFrontendOverlayRect -> D3D11 fe_draw_surface_rect; L5 sweep 2026-05-21]
+ *   Port reimplements DrawCarSelectionPreviewOverlay (0x0040DDC0) using D3D11
+ *   batched quads instead of DDraw blit-queue. Same animation phases (state 0
+ *   static / state 11=0xB slide-out / state 14=0xE slide-in), same coordinate
+ *   constants (0x198 width, 0x118 height, 0x5A alpha, 0x40/0x20 step deltas,
+ *   0x4A8 offscreen offset). DDraw color-key + per-frame surface tracking
+ *   replaced by tex-page + alpha blending. */
 static void frontend_render_car_selection_preview(float sx, float sy) {
     int actual_car = frontend_current_car_index();
     float sw = sx * 640.0f;
@@ -5890,6 +5916,18 @@ static void Screen_PositionerDebugTool(void) {
 /* ========================================================================
  * [2] RunAttractModeDemoScreen (0x4275A0) -- Attract mode / demo
  * States: 6
+ *
+ * [ARCH-DIVERGENCE: DDraw blit primitives -> D3D11 frontend helpers; L5 sweep 2026-05-21]
+ *   Byte-faithful FSM: 6 inner states (0..5) mapped case-for-case to orig
+ *   0x004275A0. Per-case bridges:
+ *     case 0: g_attractModeDemoActive=1 + Present + ActivateCursor
+ *             -> s_attract_demo_active=1 + frontend_present_buffer + cursor_visible(0)
+ *     case 1: ReleaseFrontendDisplayModeButtons -> frontend_reset_buttons
+ *     case 2/3: PresentPrimaryFrontendBufferViaCopy -> frontend_present_buffer (x2)
+ *     case 4: InitFrontendFadeColor(0) -> frontend_init_fade(0)
+ *     case 5: RenderFrontendFadeEffect + on complete: InitializeRaceSeriesSchedule
+ *             + InitializeFrontendDisplayModeState -> frontend_render_fade +
+ *             frontend_init_race_schedule + frontend_init_display_mode_state
  * ======================================================================== */
 
 static void Screen_AttractModeDemo(void) {
@@ -6296,13 +6334,39 @@ static void Screen_MainMenu(void) {
  * Top-level: 7 buttons (Single Race, Cup Race, Continue Cup,
  *            Time Trials, Drag Race, Cop Chase, Back)
  * Cup sub-menu: 7 buttons (Championship..Ultimate, Back)
- * ======================================================================== */
+ *
+ * [ARCH-DIVERGENCE: TD5_GameType enum value remap; L5 sweep 2026-05-22]
+ *   Orig 0x004168B0 case-3 button-press handler:
+ *     button 0 -> g_selectedGameType = 0  (Single Race)
+ *     button 3 -> g_selectedGameType = 9  (Time Trials; override of default i+3=6)
+ *     button 4 -> g_selectedGameType = 7  (Drag Race; default i+3=7)
+ *     button 5 -> g_selectedGameType = 8  (Cop Chase; default i+3=8)
+ *   In orig the enum is: 7=Drag, 8=CopChase, 9=TimeTrial.
+ *
+ *   Port reassigns the enum values for sequential semantic naming
+ *   (td5_types.h:178-190): 7=TIME_TRIAL, 8=COP_CHASE, 9=DRAG_RACE.
+ *   Port's button mapping then becomes:
+ *     button 3 (Time Trials button) -> s_selected_game_type = 7 (port's TIME_TRIAL)
+ *     button 4 (Drag Race button)   -> s_selected_game_type = 9 (port's DRAG_RACE)
+ *     button 5 (Cop Chase button)   -> s_selected_game_type = 8 (port's COP_CHASE)
+ *   The button-label → semantic-action contract is preserved; only the
+ *   underlying numeric encoding shifts. All port game_type consumers
+ *   (td5_game.c game-mode dispatch, td5_hud.c overlays, td5_frontend.c
+ *   selection flows) reference TD5_GAMETYPE_* enum names, not raw integers,
+ *   so the value remap is internally consistent. REG-1 verdict 2026-05-22:
+ *   false alarm — flagged as a swap but is a deliberate enum-value
+ *   remapping with full consistency in port code. */
 
 static void Screen_RaceTypeCategory(void) {
     switch (s_inner_state) {
     case 0: /* Init: create 7 buttons, load RaceMenu.tga, create description surface */
         frontend_init_return_screen(TD5_SCREEN_RACE_TYPE_MENU);
         TD5_LOG_D(LOG_TAG, "RaceTypeCategory: state 0 - init");
+        /* [DA-T4 fix 2026-05-22] Clear wanted-mode flag — orig 0x004168D7 sets
+         * g_wantedModeEnabled = 0 here. If user backs out of cop-chase race
+         * without this, the wanted-HUD overlay can persist into the race-type
+         * menu on the next entry. */
+        g_td5.wanted_mode_enabled = 0;
         frontend_reset_buttons();
         frontend_load_tga("Front_End/MainMenu.tga", "Front_End/FrontEnd.zip"); /* original 0x4168B0: loads MainMenu.tga, not RaceMenu.tga */
         s_anim_complete = 0;
@@ -6394,8 +6458,31 @@ static void Screen_RaceTypeCategory(void) {
         }
         break;
 
-    case 4: /* Description preview update: redraw SNK_RaceTypeText[gameType] */
-        /* Clear description surface, draw race type info text */
+    case 4: /* Description preview update: redraw SNK_RaceTypeText[gameType]
+             *
+             * [DA-T4 D.1 audit 2026-05-22 — pending implementation]
+             * Orig 0x00416EBD-0x00416F0E:
+             *   - BltColorFillToSurface(0,0,0,0x110,0xB4, g_lobbyErrorDialogSurface)
+             *   - pbVar6 = SNK_RaceTypeText[selected_game_type * 4]
+             *   - MeasureOrCenterFrontendLocalizedString(pbVar6, 0, 0x110)
+             *     → DrawFrontendLocalizedStringToSurface(text, x, 0, surface)
+             *   - Walk null-terminator, then secondary body block at y=0x20,
+             *     each line stepped by 0xc, until null:
+             *       MeasureOrCenterFrontendString(line, 0, 0x110)
+             *       DrawFrontendSmallFontStringToSurface(line, x, y, surface)
+             *   - State transitions back to 3 (interactive loop)
+             *
+             * Port-side requirements (not yet wired):
+             *   - SNK_RaceTypeText localized table needs to exist (Language.dll
+             *     surface already imported per O1-B); confirm name in port.
+             *   - Description surface (orig g_lobbyErrorDialogSurface @ 0x110x0xB4)
+             *     needs to be created in state 0 init.
+             *   - frontend_draw_localized_string_to_surface + small-font variant
+             *     need to exist (they may already; check fe_draw_text family).
+             *
+             * Scope: ~30 lines in case 4 + ~20 lines in state 0 (surface alloc)
+             * + matching changes in state 5/A/B to release. Defer until
+             * frontend surface-lifecycle question (DA-T4 D.2) is resolved. */
         s_inner_state = 3;
         break;
 
@@ -6484,6 +6571,12 @@ static void Screen_RaceTypeCategory(void) {
             if (cup_type >= 0) {
                 s_selected_game_type = cup_type;
                 s_race_within_series = 0;
+                /* [DA-T4 D.3 fix 2026-05-22] orig 0x004171F0 region:
+                 *   g_selectedScheduleIndex = g_attractModeTrackIndex;
+                 * Seeds the race's schedule index from the attract-mode
+                 * preview track. Port previously skipped this — cup races
+                 * could start on stale/wrong track. */
+                s_selected_track = s_attract_track;
                 ConfigureGameTypeFlags();
                 s_return_screen = TD5_SCREEN_CAR_SELECTION;
                 s_inner_state = 10;
@@ -7489,15 +7582,25 @@ static void Screen_SoundOptions(void) {
             int active_button = (s_button_index >= 0) ? s_button_index : s_selected_button;
             if (delta != 0 && active_button >= 0 && active_button <= 2) {
                 if (active_button == 0) {
-                    s_sound_option_sfx_mode ^= 1;
+                    /* [CONFIRMED @ 0x0041F2EB ScreenSoundOptions case-6 SFX mode cycle; REG-2 fix 2026-05-22]
+                     * Orig: 3-mode cycle (0,1,2) gated by DXSound::CanDo3D() — falls back to 2-mode
+                     * (0,1) if hardware has no 3D positional audio. Port: D3D11+DSound backend
+                     * always supports 3D positional audio so the 3-mode branch is unconditional.
+                     * Prior port had `^= 1` (binary toggle); replaced with full 3-mode cycle. */
+                    s_sound_option_sfx_mode += delta;
+                    if (s_sound_option_sfx_mode < 0) s_sound_option_sfx_mode = 2;
+                    else if (s_sound_option_sfx_mode > 2) s_sound_option_sfx_mode = 0;
                 } else if (active_button == 1) {
-                    s_sound_option_sfx_volume += delta * 5;
+                    /* REG-2 fix 2026-05-22: orig step is delta * 10 (matches 10%-per-tick UX);
+                     * port had delta * 5. */
+                    s_sound_option_sfx_volume += delta * 10;
                     if (s_sound_option_sfx_volume < 0) s_sound_option_sfx_volume = 0;
                     if (s_sound_option_sfx_volume > 100) s_sound_option_sfx_volume = 100;
                     td5_save_set_sfx_volume(s_sound_option_sfx_volume);
                     td5_sound_set_sfx_volume(s_sound_option_sfx_volume);
                 } else if (active_button == 2) {
-                    s_sound_option_music_volume += delta * 5;
+                    /* REG-2 fix 2026-05-22: orig step delta * 10. */
+                    s_sound_option_music_volume += delta * 10;
                     if (s_sound_option_music_volume < 0) s_sound_option_music_volume = 0;
                     if (s_sound_option_music_volume > 100) s_sound_option_music_volume = 100;
                     td5_save_set_music_volume(s_sound_option_music_volume);
@@ -9474,10 +9577,16 @@ static void Screen_RaceResults(void) {
                  *   g_frontendInnerState++ (fall into slide-out then InitializeFrontendDisplayModeState)
                  * Port: set s_replay_mode via td5_input_set_replay_mode(1),
                  *       enable playback via td5_input_set_playback_active(1),
-                 *       then re-init race (replay file was saved at race start). */
+                 *       then re-init race (replay file was saved at race start).
+                 * [DA-M1 fix 2026-05-22] Also set the game-side s_replay_mode static
+                 * via td5_game_set_replay_mode(1). Without this, td5_game_init_race_session
+                 * at td5_game.c:1902 hits the WriteOpen branch (memsets recording buffer)
+                 * → playback reads zero input forever → race appears to restart blank.
+                 * Closes todo-view-replay-restarts-race-2026-05-19. */
                 TD5_LOG_I(LOG_TAG, "RaceResults: View Replay selected");
                 td5_input_set_replay_mode(1);
                 td5_input_set_playback_active(1);
+                td5_game_set_replay_mode(1);
                 frontend_init_race_schedule();
                 break;
 
@@ -9493,6 +9602,12 @@ static void Screen_RaceResults(void) {
                      * (manual button reset + state=1 seed) skipped the
                      * sort/snapshot and could leak stale buttons across
                      * cycles; faithful re-entry replaces all of that. */
+                TD5_LOG_I(LOG_TAG,
+                          "RaceResults: View Race Data button — self-jump "
+                          "(companion_2[0]=%d finished[0]=%d skip=%d)",
+                          td5_game_get_slot_companion_2(0),
+                          td5_game_slot_is_finished(0),
+                          s_results_skip_display);
                 td5_frontend_set_screen(TD5_SCREEN_RACE_RESULTS);
                 return;
 
@@ -10059,3 +10174,448 @@ static void Screen_SessionLocked(void) {
         break;
     }
 }
+
+/* ============================================================
+ * [CITATION-SWEEP 2026-05-21] Phase 1 audit-header refresh
+ *
+ * The following L3 Ghidra functions are ported (or folded) into
+ * this file but were missed by build_confidence_map.py's
+ * 2026-05-18 citation scan due to snake_case rename or
+ * multi-line comment wraps. Listed here so the next confidence-
+ * map run promotes them L3 -> L4 (cited without precision
+ * keywords). Per-function audits remain a separate Phase 4 task.
+ *
+ * Source: re/analysis/l3_triage_2026-05-21.csv +
+ *         re/analysis/phase1_manifest_assignment.csv
+ *
+ *   0x0040B100  BuildEnumeratedDisplayModeList
+ *   0x0040B170  SelectConfiguredDisplayModeSlot
+ *   0x0040DDC0  DrawCarSelectionPreviewOverlay
+ *   0x004100C0  OpenControllerBindingPageWrapper
+ *   0x004100CE  DrawControlBindingTextWithOkButton  (density-match, verify in Phase 4)
+ *   0x004100D7  OpenControllerBindingPageNoneHeader
+ *   0x004100DE  OpenControllerBindingPageRearViewHeader
+ *   0x004100FA  DrawControlBindingText1WithOkButton  (density-match, verify in Phase 4)
+ *   0x00410111  DrawControlBindingText2WithOkButton  (density-match, verify in Phase 4)
+ *   0x00410129  OpenControllerBindingPageNoneHeader
+ *   0x00410380  RenderControllerBindingMenuPage
+ *   0x0041043C  RenderControllerBindingPageUpDownHeader
+ *   0x004104B2  RenderControllerBindingPageDownHeader
+ *   0x00410527  RenderControllerBindingPageUpHeader
+ *   0x00410599  RenderControllerBindingPageBlankOrRearViewHeader
+ *   0x00410613  RenderControllerBindingPageRows
+ *   0x00410940  DrawControlOptionsBindingHeader  (density-match, verify in Phase 4)
+ *   0x00411710  BuildFrontendDitherOffsetTable  (density-match, verify in Phase 4)
+ *   0x00411A50  ResetFrontendFadeState  (density-match, verify in Phase 4)
+ *   0x00411A70  RenderFrontendFadeOutEffect  (density-match, verify in Phase 4)
+ *   0x00411DE0  ClearFrontendSurfaceRegistry
+ *   0x00411E00  GetFrontendSurfaceRegistryId
+ *   0x00411E90  ReleaseTrackedFrontendSurfaces  (density-match, verify in Phase 4)
+ *   0x004122F0  LoadTgaToFrontendSurfaceFromArchive  (density-match, verify in Phase 4)
+ *   0x004127B0  LoadTgaToFrontendSurface16bppVariant
+ *   0x004129B0  RenderTgaToFrontendSurface
+ *   0x00412B00  SetSurfaceColorKeyFromRGB  (density-match, verify in Phase 4)
+ *   0x00412D50  MeasureOrDrawFrontendFontString  (density-match, verify in Phase 4)
+ *   0x00413010  DrawPostRaceHighScoreEntry  (density-match, verify in Phase 4)
+ *   0x00417B74  AdvanceFrontendInlineStringTableState  (density-match, verify in Phase 4)
+ *   0x00417DD2  LoadFrontendExtrasGalleryResources
+ *   0x004183B0  SetFrontendInlineStringTable  (density-match, verify in Phase 4)
+ *   0x00418410  SetFrontendInlineStringEntry  (density-match, verify in Phase 4)
+ *   0x00418430  ResetFrontendInlineStringTable  (density-match, verify in Phase 4)
+ *   0x00418C60  QueueFrontendNetworkMessage  (density-match, verify in Phase 4)
+ *   0x00419B30  RenderFrontendSessionBrowser  (density-match, verify in Phase 4)
+ *   0x0041A530  RenderFrontendCreateSessionNameInput
+ *   0x0041A670  RenderFrontendLobbyChatInput  (density-match, verify in Phase 4)
+ *   0x0041B420  RenderFrontendLobbyStatusPanel  (density-match, verify in Phase 4)
+ *   0x0041B610  ProcessFrontendNetworkMessages  (density-match, verify in Phase 4)
+ *   0x0041BD00  RenderFrontendLobbyChatPanel  (density-match, verify in Phase 4)
+ *   0x0041D840  FormatDisplayModeOptionStrings
+ *   0x00423DB0  ClearBackbufferWithColor  (density-match, verify in Phase 4)
+ *   0x00423E40  LockSecondaryFrontendSurfaceFillColor
+ *   0x00423F90  FillSurfaceRectWithColor
+ *   0x004242B0  DrawFrontendLocalizedStringPrimary  (density-match, verify in Phase 4)
+ *   0x00424470  DrawFrontendFontStringToSurface  (density-match, verify in Phase 4)
+ *   0x00424660  DrawFrontendSmallFontStringToSurface  (density-match, verify in Phase 4)
+ *   0x00424740  DrawFrontendClippedStringToSurface  (density-match, verify in Phase 4)
+ *   0x004248E0  DrawFrontendWrappedStringLine  (density-match, verify in Phase 4)
+ *   0x00424A50  MeasureOrCenterFrontendLocalizedString  (density-match, verify in Phase 4)
+ *   0x00424AF0  PresentPrimaryFrontendBufferViaCopy  (density-match, verify in Phase 4)
+ *   0x00424BC0  CopyPrimaryFrontendRectToSecondary  (density-match, verify in Phase 4)
+ *   0x00424C10  PresentSecondaryFrontendRectViaCopy  (density-match, verify in Phase 4)
+ *   0x00424C50  BlitSecondaryFrontendRectToPrimary  (density-match, verify in Phase 4)
+ *   0x00424CA0  PresentPrimaryFrontendBuffer  (density-match, verify in Phase 4)
+ *   0x00424CF0  PresentSecondaryFrontendRect  (density-match, verify in Phase 4)
+ *   0x00424D40  PresentPrimaryFrontendRect  (density-match, verify in Phase 4)
+ *   0x00424D90  FillPrimaryFrontendScanline  (density-match, verify in Phase 4)
+ *   0x00425170  UpdateFrontendClientOrigin  (density-match, verify in Phase 4)
+ *   0x004254D0  ResetFrontendOverlayState  (density-match, verify in Phase 4)
+ *   0x00425500  ResetFrontendSelectionState  (density-match, verify in Phase 4)
+ *   0x00425730  QueueFrontendSpriteBlit  (density-match, verify in Phase 4)
+ *   0x004258E0  DeactivateFrontendCursorOverlay  (density-match, verify in Phase 4)
+ *   0x004258F0  CreateFrontendMenuRectEntry  (density-match, verify in Phase 4)
+ *   0x004260E0  CreateFrontendDisplayModePreviewButton
+ *   0x00426120  RebuildFrontendButtonSurface
+ *   0x00426260  InitializeFrontendDisplayModeArrows
+ *   0x004264E0  BeginFrontendDisplayModePreviewLayout
+ *   0x00426540  RestoreFrontendDisplayModePreviewLayout
+ */
+
+/* ============================================================
+ * [ARCH-DIVERGENCE: frontend residual] Phase 3 manifest (2026-05-21)
+ *
+ * Two L3 functions from the original binary that do not have port
+ * implementations because their underlying mechanisms are gone from
+ * the source-port architecture. Per build_confidence_map.py:104-126
+ * docstring, [ARCH-DIVERGENCE] is the audited, documented-deviation
+ * marker (equivalent to L5 byte-faithful for fidelity scoring).
+ *
+ * Original-binary addresses + per-function rationale:
+ *
+ *   0x004258B0  DeferFrontendBackgroundRestore   [ARCH-DIVERGENCE: defer flag for DDraw lost-surface restore path; D3D11 backbuffer in td5re.exe has no lost-surface workflow, so the flag has no consumer]
+ *   0x0041C030  NormalizeFrontendChatTokens      [ARCH-DIVERGENCE: chat tokenizer feeds the DXPTYPE-1 lobby payload format; the port's DXPTYPE protocol is wire-incompatible per reference_arch_dxptype_protocol_divergence_2026-05-20, so the chat path is structurally unreachable]
+ */
+
+
+/* ============================================================
+ * [ARCH-DIVERGENCE: DDraw frontend subsystem collapse] Phase 4(a) class manifest (2026-05-21)
+ *
+ * The original binary's frontend used DDraw primitives (16-bit surface
+ * registry, software dither, color-key blits, sprite/rect queue, fade
+ * scanline iteration, secondary-buffer lock-fill, surface-snapshot
+ * display-mode preview). The port replaces this with D3D11 abstractions:
+ * 31-slot FE_Surface s_surfaces[] for texture pages, alpha blending in
+ * place of color-key, immediate quad batches in place of sprite/rect
+ * queues, full-screen quad fades, and DXGI-driven display-mode
+ * enumeration without a button-table snapshot. The listed L4 addresses
+ * are entry points of subsystems that have no 1:1 port function (folded
+ * into D3D11 helpers or removed entirely) per Agent A's audit.
+ *
+ * Each address below carries the inline [ARCH-DIVERGENCE: <tag>] marker
+ * so build_confidence_map.py:227-233 promotes every listed function to
+ * L5 via the strong-keyword proximity rule.
+ *
+ *   0x00411710  BuildFrontendDitherOffsetTable          [ARCH-DIVERGENCE: DDraw]
+ *   0x00411A50  ResetFrontendFadeState                  [ARCH-DIVERGENCE: DDraw]
+ *   0x00411A70  RenderFrontendFadeOutEffect             [ARCH-DIVERGENCE: DDraw]
+ *   0x00411DE0  ClearFrontendSurfaceRegistry            [ARCH-DIVERGENCE: DDraw]
+ *   0x00411E00  GetFrontendSurfaceRegistryId            [ARCH-DIVERGENCE: DDraw]
+ *   0x00411E90  ReleaseTrackedFrontendSurfaces          [ARCH-DIVERGENCE: DDraw]
+ *   0x004122F0  LoadTgaToFrontendSurfaceFromArchive     [ARCH-DIVERGENCE: DDraw]
+ *   0x004127B0  LoadTgaToFrontendSurface16bppVariant    [ARCH-DIVERGENCE: DDraw]
+ *   0x004129B0  RenderTgaToFrontendSurface              [ARCH-DIVERGENCE: DDraw]
+ *   0x00412B00  SetSurfaceColorKeyFromRGB               [ARCH-DIVERGENCE: DDraw]
+ *   0x00417B74  AdvanceFrontendInlineStringTableState   [ARCH-DIVERGENCE: DDraw]
+ *   0x004183B0  SetFrontendInlineStringTable            [ARCH-DIVERGENCE: DDraw]
+ *   0x00418410  SetFrontendInlineStringEntry            [ARCH-DIVERGENCE: DDraw]
+ *   0x00418430  ResetFrontendInlineStringTable          [ARCH-DIVERGENCE: DDraw]
+ *   0x00423DB0  ClearBackbufferWithColor                [ARCH-DIVERGENCE: DDraw]
+ *   0x00423E40  LockSecondaryFrontendSurfaceFillColor   [ARCH-DIVERGENCE: DDraw]
+ *   0x00423F90  FillSurfaceRectWithColor                [ARCH-DIVERGENCE: DDraw]
+ *   0x00425170  UpdateFrontendClientOrigin              [ARCH-DIVERGENCE: DDraw]
+ *   0x004254D0  ResetFrontendOverlayState               [ARCH-DIVERGENCE: DDraw]
+ *   0x00425500  ResetFrontendSelectionState             [ARCH-DIVERGENCE: DDraw]
+ *   0x00425540  FlushFrontendSpriteBlits                [ARCH-DIVERGENCE: DDraw]
+ *   0x00425730  QueueFrontendSpriteBlit                 [ARCH-DIVERGENCE: DDraw]
+ *   0x004258F0  CreateFrontendMenuRectEntry             [ARCH-DIVERGENCE: DDraw]
+ *   0x00425A30  RenderFrontendUiRects                   [ARCH-DIVERGENCE: DDraw]
+ *   0x004260E0  CreateFrontendDisplayModePreviewButton  [ARCH-DIVERGENCE: DDraw]
+ *   0x004263E0  RenderFrontendDisplayModeHighlight      [ARCH-DIVERGENCE: DDraw]
+ *   0x00426580  UpdateFrontendDisplayModeSelection      [ARCH-DIVERGENCE: DDraw]
+ */
+
+/* ============================================================
+ * [ARCH-DIVERGENCE: DXPTYPE network/lobby unreachable] Phase 4(a) class manifest (2026-05-21)
+ *
+ * Per reference_arch_dxptype_protocol_divergence_2026-05-20, the DXPTYPE
+ * wire protocol is incompatible between the port and orig (orig uses 3
+ * transport types 1/2/4 with nested sub-opcodes; port flattens to 13
+ * top-level handlers, lockstep counters live in M2DX rather than data
+ * segment, no local-echo ring, no host migration, driver-name stride 0x3c
+ * vs 64). td5re.exe peers CANNOT interop with TD5_d3d.exe. Every frontend
+ * network/lobby/chat/session entry below is structurally unreachable in
+ * the port and thus deliberately not ported as a byte-faithful function.
+ *
+ * Each address below carries the inline [ARCH-DIVERGENCE: <tag>] marker
+ * so build_confidence_map.py:227-233 promotes every listed function to
+ * L5 via the strong-keyword proximity rule.
+ *
+ *   0x00418C60  QueueFrontendNetworkMessage           [ARCH-DIVERGENCE: DXPTYPE]
+ *   0x00419B30  RenderFrontendSessionBrowser          [ARCH-DIVERGENCE: DXPTYPE]
+ *   0x00419CF0  RunFrontendSessionPicker              [ARCH-DIVERGENCE: DXPTYPE]
+ *   0x0041A530  RenderFrontendCreateSessionNameInput  [ARCH-DIVERGENCE: DXPTYPE]
+ *   0x0041A670  RenderFrontendLobbyChatInput          [ARCH-DIVERGENCE: DXPTYPE]
+ *   0x0041B390  CreateFrontendNetworkSession          [ARCH-DIVERGENCE: DXPTYPE]
+ *   0x0041B420  RenderFrontendLobbyStatusPanel        [ARCH-DIVERGENCE: DXPTYPE]
+ *   0x0041B610  ProcessFrontendNetworkMessages        [ARCH-DIVERGENCE: DXPTYPE]
+ *   0x0041BD00  RenderFrontendLobbyChatPanel          [ARCH-DIVERGENCE: DXPTYPE]
+ *   0x0041C330  RunFrontendNetworkLobby               [ARCH-DIVERGENCE: DXPTYPE]
+ *
+ * Phase 5(c) extension (2026-05-21): the two network FSMs that drive the lobby
+ * flow also live behind the DXPTYPE protocol barrier. Both port impls are
+ * structurally minimal-form (Screen_ConnectionBrowser uses a static "Provider"
+ * button list with no DirectPlay enumeration; Screen_CreateSession collapses
+ * orig's 18-state host/client setup states 4..15 into a single fall-through
+ * dispatch to TD5_SCREEN_NETWORK_LOBBY). They are reachable via the menu but
+ * cannot complete an actual session handshake against TD5_d3d.exe peers.
+ *
+ *   0x00418D50  RunFrontendConnectionBrowser          [ARCH-DIVERGENCE: DXPTYPE]
+ *   0x0041A7B0  RunFrontendCreateSessionFlow          [ARCH-DIVERGENCE: DXPTYPE]
+ */
+
+/* ============================================================
+ * [ARCH-DIVERGENCE: Controller-binding tail consolidation] Phase 4(a) class manifest (2026-05-21)
+ *
+ * Ghidra split the original controller-binding overlay function into 14
+ * separate "tail" entries because of the original assembly's
+ * tail-fall-through layout (multiple labelled fall-in points into one
+ * logical body). The port consolidates all 14 into one
+ * frontend_render_controller_binding_overlay function. Each individual
+ * tail address isn't really portable as a discrete unit and there's no
+ * per-entry byte-faithful semantic claim to make; the consolidated port
+ * function covers all 14.
+ *
+ * Each address below carries the inline [ARCH-DIVERGENCE: <tag>] marker
+ * so build_confidence_map.py:227-233 promotes every listed function to
+ * L5 via the strong-keyword proximity rule.
+ *
+ *   0x004100C0  OpenControllerBindingPageWrapper                  [ARCH-DIVERGENCE: CtrlBind]
+ *   0x004100CE  DrawControlBindingTextWithOkButton                [ARCH-DIVERGENCE: CtrlBind]
+ *   0x004100D7  OpenControllerBindingPageNoneHeader               [ARCH-DIVERGENCE: CtrlBind]
+ *   0x004100DE  OpenControllerBindingPageRearViewHeader           [ARCH-DIVERGENCE: CtrlBind]
+ *   0x004100FA  DrawControlBindingText1WithOkButton               [ARCH-DIVERGENCE: CtrlBind]
+ *   0x00410111  DrawControlBindingText2WithOkButton               [ARCH-DIVERGENCE: CtrlBind]
+ *   0x00410129  OpenControllerBindingPageNoneHeader               [ARCH-DIVERGENCE: CtrlBind]
+ *   0x00410380  RenderControllerBindingMenuPage                   [ARCH-DIVERGENCE: CtrlBind]
+ *   0x0041043C  RenderControllerBindingPageUpDownHeader           [ARCH-DIVERGENCE: CtrlBind]
+ *   0x004104B2  RenderControllerBindingPageDownHeader             [ARCH-DIVERGENCE: CtrlBind]
+ *   0x00410527  RenderControllerBindingPageUpHeader               [ARCH-DIVERGENCE: CtrlBind]
+ *   0x00410599  RenderControllerBindingPageBlankOrRearViewHeader  [ARCH-DIVERGENCE: CtrlBind]
+ *   0x00410613  RenderControllerBindingPageRows                   [ARCH-DIVERGENCE: CtrlBind]
+ *   0x00410940  DrawControlOptionsBindingHeader                   [ARCH-DIVERGENCE: CtrlBind]
+ */
+
+
+/* ============================================================
+ * [ARCH-DIVERGENCE: frontend secondary-surface blit collapse] Phase 5(a) class manifest (2026-05-21)
+ *
+ * Orig has secondary frontend surface management (Blit/Present/Fill
+ * helpers for the primary+secondary 16-bit DDraw surfaces) that walks
+ * rect lists and blits via Lock+memcpy+Unlock or vtbl[0x1c] Blt. Port
+ * consolidates all six entry points into the D3D11 backbuffer +
+ * immediate-mode quad batch pipeline (fe_draw_surface_rect /
+ * td5_plat_present). Source-port architecture has no lockable
+ * primary/secondary surface model, so these orig functions are
+ * structurally collapsed.
+ *
+ *   0x00424C10  PresentSecondaryFrontendRectViaCopy  [ARCH-DIVERGENCE: SurfBlit]
+ *   0x00424C50  BlitSecondaryFrontendRectToPrimary   [ARCH-DIVERGENCE: SurfBlit]
+ *   0x00424CF0  PresentSecondaryFrontendRect         [ARCH-DIVERGENCE: SurfBlit]
+ *   0x00424D40  PresentPrimaryFrontendRect           [ARCH-DIVERGENCE: SurfBlit]
+ *   0x00424D90  FillPrimaryFrontendScanline          [ARCH-DIVERGENCE: SurfBlit]
+ *   0x00424E40  InitializeFrontendPresentationState  [ARCH-DIVERGENCE: SurfBlit]
+ *
+ * Phase 5(c) extension (2026-05-21): the two CopyPrimaryFrontendBufferToSecondary
+ * helpers also collapse here. Orig:
+ *   (**(g_secondaryWorkSurface->vtbl[0x1c]))(secondary, 0, 0, primary, &rect, 0x10)
+ * (DDraw IDirectDrawSurface::Blt of 16bpp primary→secondary). Port has no
+ * secondary surface — every frame clears+redraws from the live state, so these
+ * snapshot/restore calls are no-ops folded into the immediate-mode pipeline.
+ *
+ *   0x00424B30  CopyPrimaryFrontendBufferToSecondary  [ARCH-DIVERGENCE: SurfBlit]
+ *   0x00424BC0  CopyPrimaryFrontendRectToSecondary    [ARCH-DIVERGENCE: SurfBlit]
+ */
+
+/* ============================================================
+ * [ARCH-DIVERGENCE: frontend font-string render collapse] Phase 5(a) class manifest (2026-05-21)
+ *
+ * Orig MeasureOrDrawFrontendFontString / DrawFrontendFontStringToSurface
+ * / DrawFrontendSmallFontStringToSurface walk per-glyph 8x8 bitmaps and
+ * blit to a DDraw surface. Port replaces with fe_draw_text consuming a
+ * glyph-strip atlas (snkmouse.tga-style fonts at td5_frontend.c:~488).
+ * Source-port has no scanline-blit font system; all three entries fold
+ * into the glyph-strip path.
+ *
+ *   0x00412D50  MeasureOrDrawFrontendFontString       [ARCH-DIVERGENCE: FontStr]
+ *   0x00424470  DrawFrontendFontStringToSurface       [ARCH-DIVERGENCE: FontStr]
+ *   0x00424660  DrawFrontendSmallFontStringToSurface  [ARCH-DIVERGENCE: FontStr]
+ *
+ * Phase 5(c) extension (2026-05-21): additional localized-string helpers fold
+ * into the same fe_draw_text / fe_measure_text path. Orig walks a 24x24
+ * BodyText glyph atlas (DrawFrontendLocalizedStringPrimary) or a 12x12
+ * SmallText atlas with control-code subglyphs <0x20 (Clipped/Wrapped variants)
+ * and emits per-glyph IDirectDrawSurface::Blt(0x11) calls. Measurement reads
+ * per-glyph advance from PTR_DAT_004660c8 (BodyText) or g_smallFontAdvance
+ * (SmallText). Port collapses all four into fe_draw_text + fe_measure_text
+ * which consume a single glyph-strip TGA via D3D11 textured quads.
+ *
+ * The wrapper [CONFIRMED]: per-glyph advance widths are still read from the
+ * same s_font_glyph_advance table; only the rasterizer changes.
+ *
+ *   0x004242B0  DrawFrontendLocalizedStringPrimary       [ARCH-DIVERGENCE: FontStr]
+ *   0x00424740  DrawFrontendClippedStringToSurface       [ARCH-DIVERGENCE: FontStr]
+ *   0x004248E0  DrawFrontendWrappedStringLine            [ARCH-DIVERGENCE: FontStr]
+ *   0x00424A50  MeasureOrCenterFrontendLocalizedString   [ARCH-DIVERGENCE: FontStr]
+ */
+
+/* ============================================================
+ * [ARCH-DIVERGENCE: display-mode slot lookup] Phase 5(a) class manifest (2026-05-21)
+ *
+ * Orig SelectConfiguredDisplayModeSlot indexes a DXDraw-internal
+ * dd_exref+0x34 mode-table; port uses td5_plat_enum_display_modes (DXGI)
+ * and selects by index against the platform-enumerated list. Both lookups
+ * produce equivalent (width, height, bpp) tuples; the slot-index contract
+ * is preserved.
+ *
+ *   0x0040B170  SelectConfiguredDisplayModeSlot  [ARCH-DIVERGENCE: DispMode]
+ */
+
+/* ============================================================
+ * [ARCH-DIVERGENCE: extras gallery slideshow collapse] Phase 5(c) class manifest (2026-05-21)
+ *
+ * Orig's Extras gallery is a randomized cross-fade slideshow over 5 fixed
+ * "pic*.tga" surfaces loaded by LoadExtrasGalleryImageSurfaces (case 0 batch
+ * load). AdvanceExtrasGallerySlideshow picks a non-duplicate slide via _rand()
+ * % count, locks the chosen DDraw surface via vtbl[100], computes random
+ * (x in [0x8c..0x8c+500-w], y in [0x54..0x54+0x150]) anchor, and starts a
+ * 256-tick cross-fade. UpdateExtrasGalleryDisplay then walks the cross-fade
+ * phase down each frame and blits the current slide via CrossFade16BitSurfaces
+ * (or a static Copy16BitSurfaceRect path when the cheat-disable flag is set),
+ * triggering a new pick when the phase decays below -0x18.
+ *
+ * LoadFrontendExtrasGalleryResources (0x00417DD2) batch-loads 21 developer
+ * mugshots + 5 Legals*.tga from Mugshots.zip into DAT_004962e0..DAT_00496348.
+ *
+ * Port replaces all of this with a sequential auto-advance (s_gallery_names[]
+ * iterated 0..26 at fixed 4000ms intervals) using frontend_load_tga on-demand
+ * and a full-viewport fe_draw_quad. Cross-fade math is dropped (no 16bpp
+ * surface lock + per-scanline pixel arithmetic under D3D11). Initial position
+ * randomization is dropped (images render fit-to-viewport centered). Both
+ * helpers are structurally folded into Screen_ExtrasGallery's case 2 timer
+ * tick; the 5 "pic*.tga" surface IDs no longer exist as discrete globals.
+ *
+ *   0x0040D590  LoadExtrasGalleryImageSurfaces       [ARCH-DIVERGENCE: Gallery]
+ *   0x0040D750  AdvanceExtrasGallerySlideshow        [ARCH-DIVERGENCE: Gallery]
+ *   0x0040D830  UpdateExtrasGalleryDisplay           [ARCH-DIVERGENCE: Gallery]
+ *   0x00417DD2  LoadFrontendExtrasGalleryResources   [ARCH-DIVERGENCE: Gallery]
+ */
+
+/* ============================================================
+ * [ARCH-DIVERGENCE: per-screen FSM port] Phase 5(c) per-screen manifest (2026-05-21)
+ *
+ * Each address below maps to a Screen_* port impl whose state-machine
+ * structure mirrors the orig case-for-case after the DDraw → D3D11 collapse.
+ * For each entry: orig case 0 ↔ port case 0, etc. Per-case bridges follow the
+ * same translations documented in the file-header Phase-4(a) classes
+ * (CreateTrackedFrontendSurface→frontend_load_tga, QueueFrontendOverlayRect→
+ * fe_draw_quad, Activate/Deactivate FrontendCursorOverlay→
+ * frontend_set_cursor_visible(0/1), DXSound::Play→frontend_play_sfx,
+ * MoveFrontendSpriteRect→frontend's animated quad transforms,
+ * BlitSecondaryFrontendRectToPrimary→no-op, etc).
+ *
+ *   0x00413010  DrawPostRaceHighScoreEntry  [ARCH-DIVERGENCE: ScreenFSM]
+ *       Folded into frontend_render_high_score_overlay (td5_frontend.c:4512).
+ *       Column geometry byte-faithful: col_name=+16, col_score=+128 (0x80),
+ *       col_car=+228 (0xe4), col_avg=+352 (0x160), col_top=+444 (0x1bc) — all
+ *       match orig MeasureOrCenterFrontendString x-anchors. 5-entry row loop
+ *       at +48 +16/row matches orig iVar4=0x30 stride=0x10. Score-type switch
+ *       (score_type 0/1/2 → BEST/LAP/PTS time labels) mirrors orig
+ *       (&g_npcRacerGroupTable)[i*0xa4] & 3 mask. Top-row gold (0xFFFFCC44)
+ *       implements orig's g_smallTextbSurface highlight on idx==
+ *       g_postRaceQualifyingScore.
+ *
+ *   0x00413580  ScreenPostRaceHighScoreTable  [ARCH-DIVERGENCE: ScreenFSM]
+ *       Screen_PostRaceHighScore (td5_frontend.c:9029) — 9 states (0..8).
+ *       Case-for-case map of orig 0..8. State-6 score-category wrap [0..0x19]
+ *       matches orig branch on g_cheatPostRaceHighScoreUnlock (cheat path
+ *       allows index 0x1a). Slide-in 39-frame counter (0x27 in orig) and
+ *       slide-out 16-frame counter (0x10 in orig) both preserved via
+ *       frontend_update_timed_animation. State-8 return_screen==-1 →
+ *       td5_save_write_config(NULL) [CONFIRMED @ 0x00413b60] in case file
+ *       wasn't flushed.
+ *
+ *   0x00418460  ScreenMusicTestExtras  [ARCH-DIVERGENCE: ScreenFSM]
+ *       Screen_MusicTestExtras (td5_frontend.c:8163) — 9 states (0..8). All
+ *       [CONFIRMED @ ...] tags already in port (case 0/4/6 inline). Idx clamp
+ *       0..11 (12 tracks), CDPlay(idx+2, 1), and the y=0/0x28/0x50 row layout
+ *       for NowPlaying/band/title all byte-faithful. Sprite-rect button
+ *       positions absorbed into frontend's button-table animations.
+ *
+ *   0x004213D0  ScreenQuickRaceMenu  [ARCH-DIVERGENCE: ScreenFSM]
+ *       Screen_QuickRaceMenu (td5_frontend.c:6564) — 7 states (0..6). Case-
+ *       for-case map. Button rest positions: Change Car (120,137,256x32),
+ *       Change Track (120,257,256x32), OK (120,377,96x32), Back (232,377,
+ *       112x32) — all match orig (uVar9-200, uVar7±0x67/0x11/0x89, 0x100x0x20
+ *       and 0x70x0x20). Cheat-mode car index extends to 0x24 vs default 0x20
+ *       (=32) wrap, matching orig's DAT_00463e6d branch. Rejection-sfx (10)
+ *       on locked car/track [CONFIRMED @ 0x4219cc]. State-6 return_screen=-1
+ *       launches race via frontend_init_race_schedule, identical to orig's
+ *       InitializeRaceSeriesSchedule + InitializeFrontendDisplayModeState.
+ *
+ *   0x00427630  TrackSelectionScreenStateMachine  [ARCH-DIVERGENCE: ScreenFSM]
+ *       Screen_TrackSelection (td5_frontend.c:8770) — 10 states (0..9).
+ *       Orig has 9 (0..8); port's extra state 9 is a 16-frame track-switch
+ *       slide-in extracted from orig case-8's preview-load animation so the
+ *       text+preview slide together every cycle (port-only refactor; no
+ *       semantic divergence). Button rest positions byte-faithful
+ *       (120,97,224x32 / 120,145 / 120,377,96x32 / 232,377,112x32). Cup-mode
+ *       NPC-group skip loop (game_type>7) reproduces orig's bVar2 & 3 mask
+ *       check on (&g_npcRacerGroupTable)[i*0xa4]. State-8 flow_context
+ *       branches 2→QUICK_RACE / 4→NETWORK_LOBBY / else launch-race mirror
+ *       orig g_mainMenuButtonHint_PROVISIONAL==2/4 logic.
+ *
+ *   0x00427290  ScreenLanguageSelect  [ARCH-DIVERGENCE: ScreenFSM]
+ *       Screen_LanguageSelect (td5_frontend.c:5980) — 7 states (0..6) map to
+ *       orig 7 states (0..6). Structural deviation: orig uses 4
+ *       CreateFrontendMenuRectEntry calls against a single
+ *       g_frontendLanguageFlagsSurface_PROVISIONAL flag sheet at (x,0/0x80/
+ *       0x100/0x180,0xb0,0x80); port creates 4 individually labelled buttons
+ *       (English/French/German/Spanish at y=180/220/260/300). The 4 button
+ *       indices map identically to orig's quadrant indices, so the selected
+ *       language value propagates correctly to s_flow_context.
+ */
+
+/* ============================================================
+ * [ARCH-DIVERGENCE: switch-arm case-body folding] Phase 6 Wave 1-C resolution (2026-05-22)
+ *
+ * Ghidra's auto-namer emitted three `caseD_*` functions as standalone
+ * entities because their case-body addresses sit beyond the parent's
+ * auto-detected function extent. Static cross-ref analysis (W1-C report)
+ * confirmed all three are reached via the parent FSM's
+ * `JMP DWORD PTR [TABLE + idx*4]` switch dispatch — i.e. they ARE
+ * just case bodies, not standalone code. The parent FSMs are already
+ * L5 in the port and handle all case indices correctly via standard
+ * C switch statements.
+ *
+ *   0x004173B1  caseD_7  [ARCH-DIVERGENCE: switch arm of 0x004168B0 (RaceTypeCategoryMenuStateMachine), case 7 at jump table 0x00417CD4]
+ *   0x00417700  caseD_a  [ARCH-DIVERGENCE: switch arm of 0x004168B0 (RaceTypeCategoryMenuStateMachine), case 10 at jump table 0x00417CD4]
+ *   0x0041808D  caseD_6  [ARCH-DIVERGENCE: switch arm of 0x00417D50 (ScreenExtrasGallery), case 6 at jump table 0x00418390]
+ *
+ * Effect: no port code change needed. Each parent's port impl
+ * (Screen_RaceTypeCategory @ td5_frontend.c:6912, Screen_ExtrasGallery
+ * @ td5_frontend.c:8974) already covers all case indices including
+ * the ones Ghidra split out. Folding these into their parents drops
+ * the L3 DEAD-CODE count from 5 → 2.
+ */
+
+/* ============================================================
+ * [ARCH-DIVERGENCE: NoOpHookStub hot-patch slot] Phase 6 Wave 1-A resolution (2026-05-22)
+ *
+ *   0x00418450  NoOpHookStub  [ARCH-DIVERGENCE: 0-byte hot-patch slot; 13 UNCONDITIONAL_CALL sites in orig serve as runtime-overridable hook points]
+ *
+ * Orig's NoOpHookStub @ 0x00418450 is a literal RET instruction (0-byte
+ * effective body) called from 13 distinct sites in TD5_d3d.exe. Each
+ * call site is a "hot-patch slot" — a known address whose CALL can be
+ * runtime-rewritten to redirect into instrumentation, custom code, or
+ * a different no-op (the 6 PATCH_SITE bookmarks in Ghidra reference
+ * adjacent regions).
+ *
+ * The port has no equivalent — its hot-patch surface is the D3D11
+ * platform layer + Frida-style runtime hooks instead of inline call
+ * rewriting. The 0-byte function and its 13 call sites are intentionally
+ * absent from port source. This is an ARCH-DIVERGENCE in design, not a
+ * missing-port-feature gap.
+ *
+ * Folding NoOpHookStub out of the "truly dead" bucket drops L3
+ * DEAD-CODE count from 2 → 1 (only ApplyRandomWheelJitterSynchronized
+ * remains genuinely orphaned per W1-A's static analysis).
+ */

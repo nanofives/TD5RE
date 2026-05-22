@@ -1,0 +1,28 @@
+/* ============================================================
+ * [CITATION-SWEEP 2026-05-21] Phase 1 audit-header refresh
+ *
+ * The following L3 Ghidra functions are ported (or folded) into
+ * this file but were missed by build_confidence_map.py's
+ * 2026-05-18 citation scan due to snake_case rename or
+ * multi-line comment wraps. Listed here so the next confidence-
+ * map run promotes them L3 -> L4 (cited without precision
+ * keywords). Per-function audits remain a separate Phase 4 task.
+ *
+ * Source: re/analysis/l3_triage_2026-05-21.csv +
+ *         re/analysis/phase1_manifest_assignment.csv
+ *
+ *   0x004092D0  RenderVehicleActorModel  (density-match, verify in Phase 4)
+ *   0x0040CDC0  CrossFade16BitSurfaces
+ *   0x0040D120  AdvanceCrossFadeTransition  (density-match, verify in Phase 4)
+ *   0x0040D190  CrossFade16BitSurfaces
+ *   0x0042D880  ApplyMeshRenderBasisFromTransform  (density-match, verify in Phase 4)
+ *   0x0042E370  TransformVector3ByRenderRotation  (density-match, verify in Phase 4)
+ *   0x0042E3D0  TransformShortVectorToView  (density-match, verify in Phase 4)
+ *   0x0042E4F0  WritePointToCurrentRenderTransform  (density-match, verify in Phase 4)
+ *   0x0042E560  TransformTriangleByRenderMatrix  (density-match, verify in Phase 4)
+ *   0x0042E750  BuildWorldToViewMatrix  (density-match, verify in Phase 4)
+ *   0x0042E9C0  LoadGlobalOrientationToRenderState  (density-match, verify in Phase 4)
+ *   0x004317C0  SubmitProjectedPolygon
+ *   0x0043E2C0  ResetProjectedPrimitiveWorkBuffer  (density-match, verify in Phase 4)
+ *   0x0043E5F0  InitializeProjectedPrimitiveBuckets  (density-match, verify in Phase 4)
+ */

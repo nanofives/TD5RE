@@ -74,6 +74,7 @@ DEST:   ~/.claude-account<dest>/projects/$PROJECT_DIR/
 ```
 - **Append-only**: skip files already present in dest.
 - Avoids re-copying large session logs.
+- **Preserve timestamps**: copies must keep the source file's mtime/atime, because Claude Code's conversation picker uses the file mtime as the "last message date". Without `-p`, every synced conversation collapses to today's date in the destination account.
 
 ## Execution
 
@@ -104,10 +105,11 @@ DEST:   ~/.claude-account<dest>/projects/$PROJECT_DIR/
    - How many session `.jsonl` files would be copied (skipping existing)
    - Ask the user to confirm before proceeding (unless they pre-confirmed).
 
-6. Run the copies:
+6. Run the copies. **Always pass `-p` to preserve timestamps** — otherwise the destination account's conversation picker shows every synced conversation with today's date:
    - `mkdir -p` any missing dest subdirectories.
-   - `cp -f` for memory files (overwrite).
-   - `cp -n` for session files (no-clobber, skip existing).
+   - `cp -fp` for memory files (overwrite, preserve mtime).
+   - `cp -np` for session files (no-clobber, preserve mtime). For recursive session subdirs, use `cp -rnp`.
+   - Verify after copy: a sampled `stat -c '%y' <dst-file>` should equal the source file's mtime. If it doesn't, the user is on a `cp` build without `-p` support — fall back to `rsync -t` or, as a last resort, a Python loop using `shutil.copy2` (which preserves mtime by default).
 
 7. Report:
    - Project: `$PROJECT_DIR`

@@ -2305,8 +2305,30 @@ void td5_plat_render_set_preset(TD5_RenderPreset preset)
          * color-keyed textures the edge taps produce alphas in (0,255).
          * Discarding < 128 prunes the dark/black fringes around transparent
          * pixels (street-light backgrounds, props). Type-2 semi-transparent
-         * pages sit at exactly 0x80 — strict < keeps them. */
+         * pages sit at exactly 0x80 — strict < keeps them.
+         * NOTE: HUD widgets route through TRANSLUCENT_LINEAR_HUD instead —
+         * orig M2DX SetRenderState @ 0x10001770 uses ALPHAREF=0/NOTEQUAL,
+         * so HUD needs alpha_ref=1 for parity. */
         s->alpha_ref         = 0x80;
+        break;
+
+    case TD5_PRESET_TRANSLUCENT_LINEAR_HUD:
+        /* Same blend/filter as TRANSLUCENT_LINEAR, but alpha_ref=1 to mirror
+         * orig M2DX.dll DXD3D::SetRenderState @ 0x10001770 which sets
+         * D3DRS_ALPHAREF=0 + D3DRS_ALPHAFUNC=D3DCMP_NOTEQUAL (discard alpha==0
+         * only). Used by hud_submit_quad so speedometer/lap-timer/digits keep
+         * anti-aliased edge pixels that the 0x80 cutoff would discard. */
+        s->blend_enable = 1;
+        s->src_blend    = D3D6BLEND_SRCALPHA;
+        s->dest_blend   = D3D6BLEND_INVSRCALPHA;
+        s->z_enable     = 0;
+        s->z_write      = 0;
+        s->z_func       = 0;
+        s->mag_filter   = 2;
+        s->min_filter   = 2;
+        s->texblend_mode = D3DTBLEND_MODULATEALPHA;
+        s->alpha_test_enable = 1;
+        s->alpha_ref         = 1;
         break;
 
     case TD5_PRESET_TRANSLUCENT_ANISO:

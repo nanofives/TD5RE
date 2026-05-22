@@ -150,6 +150,11 @@ static TD5_SpriteQuad s_divider_quad_v;  /* 0x4B1068 */
 /* Radial pulse state */
 static float s_radial_pulse_progress;    /* 0x4B0FA0 */
 
+/* [DA-T5 audit 2026-05-22] Accessors for td5_render_radial_pulse so the
+ * renderer can read/update the phase without exposing the static. */
+float td5_hud_radial_pulse_get(void)        { return s_radial_pulse_progress; }
+void  td5_hud_radial_pulse_set(float value) { s_radial_pulse_progress = value; }
+
 /* Screen-center flash counter for HUD */
 static int   s_wrong_way_counter[MAX_HUD_VIEWS]; /* 0x4B0A64 */
 static int   s_prev_span_pos[MAX_HUD_VIEWS];     /* 0x4B1120 */
@@ -330,10 +335,14 @@ static void hud_build_quad(void *dest, int mode, int tex_page,
     td5_render_build_sprite_quad((int *)&p);
 }
 
-/* Helper: submit a pre-built sprite quad */
+/* Helper: submit a pre-built sprite quad.
+ * Routes through td5_render_submit_translucent_hud (alpha_ref=1) to match orig
+ * M2DX DXD3D::SetRenderState @ M2DX.dll 0x10001770 ALPHAREF=0/NOTEQUAL — orig
+ * discards only fully-transparent pixels. The non-HUD TRANSLUCENT_LINEAR path
+ * keeps its 0x80 cutoff for bilinear-fringe pruning on world props. */
 static void hud_submit_quad(void *quad_data)
 {
-    td5_render_submit_translucent((uint16_t *)quad_data);
+    td5_render_submit_translucent_hud((uint16_t *)quad_data);
 }
 
 /* Helper: build a warped 4-corner quad.
@@ -534,6 +543,14 @@ static inline uint8_t actor_route_index(int slot)
  *
  * Allocates the text quad buffer and glyph UV/size table. Loads the
  * "font" atlas entry and builds a 4x16 glyph grid.
+ *
+ * [ARCH-DIVERGENCE: glyph-strip font replaces original bitmap font; L5 sweep 2026-05-21]
+ *   Original loaded the "font" atlas entry and built a 4x16 UV grid with
+ *   constants (base_u+1.5, base_v+2.5, 10×16 stride, 8×12 glyph). Port
+ *   keeps the same grid math, but adds: PNG-first asset path (re/assets),
+ *   GDI-synthesized fallback for missing tpage5.dat, atlas entry lookup
+ *   via td5_asset_find_atlas_entry. Glyph layout and 0x22/0x26 width
+ *   overrides match orig.
  * ======================================================================== */
 
 void td5_hud_init_font_atlas(void)
@@ -1100,6 +1117,12 @@ void td5_hud_queue_text(int font_index, int x, int y, int centered,
  *
  * Iterates all queued glyph quads and submits them to the translucent
  * pipeline, then resets the queue.
+ *
+ * [CONFIRMED @ 0x00428570 FlushQueuedRaceHudText; L5 sweep 2026-05-21]
+ *   Byte-faithful: walk g_hudGlyphQueueBuf with stride 0xB8 (0x5C ushort),
+ *   SubmitImmediateTranslucentPrimitive per quad, reset count to 0. Port's
+ *   while(>0) handles the count==0 case orig guards explicitly — semantic
+ *   identity preserved.
  * ======================================================================== */
 
 void td5_hud_flush_text(void)
@@ -1121,6 +1144,30 @@ void td5_hud_flush_text(void)
  *
  * Allocates HUD primitive storage, sets visibility bitmask based on
  * race mode, and loads the fade/divider sprites.
+ *
+ * [CONFIRMED @ 0x004377B0] — Ghidra-verified: orig allocates 0x1148 bytes
+ * via HeapAllocTracked, splits into two halves with the secondary view
+ * pointer at +0x229*4 (= 0x894 bytes offset, matching port s_hud_prim_storage
+ * +0x894 at line 1158). Bitmask construction mirrors orig: race_mode==0 path
+ * writes 0x80000000 (replay banner) when g_replayModeFlag==0 (port: same
+ * inverted convention); race_mode!=0 path ORs bits 4|0x10|0x40|0x20|8
+ * (port: TD5_HUD_SPEEDOMETER|UTURN|METRIC|RESERVED_5|RESERVED_3 — bits
+ * 4|0x10|0x40|0x20|8) then conditionally adds 1|2 for position/lap timers
+ * driven by g_raceOverlayPresetMode (port: g_game_type with semantic-
+ * equivalent gating). Bit 0x80 (total-timer) under preset 2 with special-
+ * encounter gate matches port lines 1191-1193 (g_game_type==2 with
+ * race_rule_variant 0/4). Bits 0x80|0x100 for preset 4 matches port lines
+ * 1194-1196. Circuit-lap bit 0x200 at lines 1199-1201 matches orig
+ * gTrackIsCircuit gate at LAB_004378c9. FADEWHT atlas lookup + 5-element
+ * fade-quad build + COLOURS split-screen divider builds all match.
+ *
+ * [ARCH-DIVERGENCE: BuildSpriteQuadTemplate D3D3 scratch → hud_build_quad
+ *  D3D11 buffer] — orig writes 4-vertex packed quads into the scratch ring
+ *  at gHudFadeQuadTemplateArray + i*0xB8 via BuildSpriteQuadTemplate (D3D3
+ *  immediate-mode FVF); port writes equivalent geometry into the s_fade_quads
+ *  array via hud_build_quad (D3D11 vertex stream). Same geometry, different
+ *  submission model. Documented class-level in td5_hud_render_overlays
+ *  comment lines 1878-1885. L5 promotion sweep 2026-05-21.
  * ======================================================================== */
 
 void td5_hud_init_overlay_resources(int race_mode, int string_table_offset)
@@ -1247,6 +1294,31 @@ void td5_hud_init_overlay_resources(int race_mode, int string_table_offset)
  *
  * Computes scale factors and per-view viewport bounds. Loads all sprite
  * atlas entries for HUD elements and builds their quad templates.
+ *
+ * [CONFIRMED @ 0x00437BA0] — Ghidra-verified scale math: g_hudPrimaryScaleX =
+ * g_renderWidthF * _DAT_0045d64c (= 1/640); g_hudPrimaryScaleY =
+ * g_renderHeightF * _DAT_0045d6ec (= 1/480) — port lines 1273-1274 emit
+ * the same constants. Viewport-mode dispatch matches:
+ *   mode 0: single full-screen (orig sets vp_left=W*-0.5, vp_right=W*0.5
+ *           with centered coords; port sets [0..W] in pixel-space)
+ *   mode 1: left/right split (scales halved on X)
+ *   mode 2: top/bottom split (scales halved on Y)
+ * Per-view derivation loop at 0x437C70 (puVar7 += 0xE) matches port loop
+ * at lines 1339-1349 (TD5_HudViewLayout stride). Atlas lookups follow the
+ * same order: numbers, SEMICOL, SPEEDO, SPEEDOFONT, GEARNUMBERS, UTURN,
+ * REPLAY. SPEEDO quad offsets (gHudCurrentFlagsPtr + 4 / +0xBC / +0x39C
+ * / +0x67C / +0x7EC) align with port's view_base offsets in the master
+ * dispatcher comment block lines 1799-1854.
+ *
+ * [ARCH-DIVERGENCE: centered-coord BuildSpriteQuadTemplate scratch →
+ *  pixel-space hud_build_quad; per-view layout struct vs DAT_004B1160-
+ *  stride table] — orig stores 14 floats per view at DAT_004B1160 + v*0xE
+ *  (pfVar5 at 0x437D8B); port uses named TD5_HudViewLayout struct with
+ *  scale_x/scale_y/vp_int_X/center_X/half_X. Equivalent storage. Orig also
+ *  emits centered-origin coords consumed by BuildSpriteQuadTemplate which
+ *  internally adds screen_center; port emits pixel-space coords directly to
+ *  D3D11. Documented class-level in render_overlays comment lines 1887-1894.
+ *  L5 promotion sweep 2026-05-21.
  * ======================================================================== */
 
 void td5_hud_init_layout(int viewport_mode)
@@ -1382,14 +1454,17 @@ void td5_hud_init_layout(int viewport_mode)
         float font_x_start = vp_r - sx * 60.0f;
         float font_y = vp_b - sy * 23.0f - sy * 8.0f;
 
-        /* Build 3 digit quads (ones, tens, hundreds -- right to left) */
+        /* Build 3 digit quads (ones, tens, hundreds -- right to left)
+         * [DA-T3 audit 2026-05-22] orig step = font_glyph_w + 2.0f
+         * (NOT +1.0f); orig height = sy * 23.0f (NOT sy * 24.0f) per
+         * 0x00437BA0 layout 0x174/+0x22C/+0x2E4. */
         for (int d = 0; d < 3; d++) {
-            float dx = font_x_start + (float)d * (font_glyph_w + 1.0f);
+            float dx = font_x_start + (float)d * (font_glyph_w + 2.0f);
             hud_build_quad(
                 view_base + SPEEDFONT_BASE_OFF + d * TD5_HUD_GLYPH_QUAD_SIZE,
                 0, s_speedofont_atlas->texture_page,
                 dx, font_y,
-                dx + font_glyph_w, font_y + sy * 24.0f,
+                dx + font_glyph_w, font_y + sy * 23.0f,
                 0.0f, 0.0f, 0.0f, 0.0f, /* UV set at render time per digit */
                 0xFFFFFFFF, HUD_DEPTH
             );
@@ -1413,10 +1488,16 @@ void td5_hud_init_layout(int viewport_mode)
             0xFFFFFFFF, HUD_DEPTH
         );
 
-        /* --- Metric digit quads (numbers atlas, 4 digits) --- */
-        float metric_glyph_w = sx * 16.0f;
+        /* --- Metric digit quads (numbers atlas, 4 digits) ---
+         * [DA-T3 audit 2026-05-22] Per InitializeRaceHudLayout @ 0x00437BA0
+         * layout offsets +0x734/+0x454/+0x50C/+0x5C4:
+         *   - glyph width = sx * 15 (was sx * 16) — anchor shifts left ~2.5px
+         *   - y offset = vp_t + 12.0 raw px, NOT scaled by sy (preserves
+         *     12px top inset across all resolutions)
+         *   - glyph height = sx * 23 (orig quirk: sx not sy — yes really) */
+        float metric_glyph_w = sx * 15.0f;
         float metric_x = s_view_layout[v].center_x - metric_glyph_w * 2.5f;
-        float metric_y = vp_t + sy * 12.0f;
+        float metric_y = vp_t + 12.0f;
 
         for (int d = 0; d < 4; d++) {
             float mdx = metric_x + (float)d * metric_glyph_w;
@@ -1425,7 +1506,7 @@ void td5_hud_init_layout(int viewport_mode)
                 view_base + 0x734 + d * TD5_HUD_GLYPH_QUAD_SIZE,
                 0, s_numbers_atlas->texture_page,
                 mdx, metric_y,
-                mdx + metric_glyph_w, metric_y + sy * 24.0f,
+                mdx + metric_glyph_w, metric_y + sx * 23.0f,
                 0.0f, 0.0f, 0.0f, 0.0f,
                 0xFFFFFFFF, HUD_DEPTH
             );
@@ -1643,6 +1724,33 @@ void td5_hud_set_indicator_state(int view_index, int value)
  *
  * Per-view text overlays: race status messages, wanted messages, time
  * trial timers, lap time comparisons.
+ *
+ * [CONFIRMED @ 0x00439B70] — Ghidra-verified: orig early-exits on
+ * g_inputPlaybackActive!=0 (port: not gated — port handles replay through
+ * the g_replay_mode path lines 1735-1742 below, equivalent semantics).
+ * g_replayModeFlag!=0 path emits "DEMO MODE" centered at (vpL+0x10, vpT+0x10)
+ * — port lines 1735-1742 match (vp_half_w, vp_top+16, alignment=1).
+ * g_wantedModeEnabled && g_hudStatusTextEnabled && timer<300 branch emits
+ * SUSPECT_IS_WANTED/ARMED_ROBBERY two-liner with flash gate at frame 0x10e
+ * (=270) and even-frame mask — port lines 1745-1762 match exactly
+ * (timer 270, & 1 == 0).
+ * g_selectedGameType!=0 path emits "%s %02d:%02d.%03d" total timer at
+ * (curLayout[10]+8, vpT+8, align=0) — port lines 1759-1786 emit at
+ * (vp_int_left+8, vp_top+8) with the same MM:SS.HHH format.
+ * Best-lap + best-race indicator paths at orig actorRuntimeState._808/_1712
+ * with side-effect writes (_780_4_=0, _830_2_=0xfc00, _877_1_=1) — port
+ * lines 1789-1816 implement the lap comparison + race-end check via
+ * g_pending_finish_timer + g_actor_best_lap/best_race globals.
+ *
+ * [ARCH-DIVERGENCE: QueueRaceHudFormattedText (D3D3 deferred queue) →
+ *  td5_hud_queue_text (D3D11 immediate); per-view layout array offset
+ *  vs struct field access] — orig indexes g_hudCurrentLayoutPtr via
+ *  [8]/[0xB]/[10] integer indexes into the 14-float layout table; port uses
+ *  named fields vp_int_left/vp_int_top/half_width. Same memory semantics.
+ *  Orig also writes side-effect actor-state clears (lap-time taken
+ *  indicators); port handles these via td5_input clear paths. Documented
+ *  class-level in render_overlays comment lines 1887-1894. L5 promotion
+ *  sweep 2026-05-21.
  * ======================================================================== */
 
 void td5_hud_draw_status_text(int player_slot, int view_index)
@@ -1668,7 +1776,7 @@ void td5_hud_draw_status_text(int player_slot, int view_index)
     }
 
     /* Wanted mode messages */
-    if (g_wanted_mode_enabled != 0 && s_is_first_player != 0 && g_wanted_msg_timer < 300) {
+    if (g_td5.wanted_mode_enabled != 0 && s_is_first_player != 0 && g_wanted_msg_timer < 300) {
         g_wanted_msg_timer++;
 
         /* Flash after frame 270 (odd frames hidden) */
@@ -3117,6 +3225,45 @@ void td5_hud_init_minimap_layout(void)
  *
  * Builds the pause menu overlay: background panel, selection highlight,
  * slider bars, option row backgrounds, and text glyphs.
+ *
+ * [CONFIRMED @ 0x0043B7C0] — Ghidra-verified: orig clamps param_1<8 (port:
+ * page_index<TD5_HUD_PAUSE_MAX_PAGES). String table at &PTR_s_PAUSED_004744B8
+ * + param_1*0xC (port: g_pause_page_strings[page_index]). Half-width
+ * computation: orig reads (&g_pauseOverlayLanguageWidthTable)[param_1] then
+ * multiplies by 0.5f (port: g_pause_page_sizes[page_index] * 0.5f).
+ *
+ * BLACKBOX panel: orig uses x=[-half_w..+half_w], y=[-56..56] (orig
+ * local_84=-half_w, local_78=+half_w, local_68=-56.0, local_70=56.0). Port
+ * lines 3209-3213 match: PAUSE_ADD(-s_pause_half_width, -56.0f,
+ * s_pause_half_width, 56.0f, ...). UV taps single-texel via blackbox_e
+ * atlas_x/y + 0.5f.
+ *
+ * SELBOX highlight: orig x=[1-half_w..half_w-1], y=[-1..15] initial then
+ * dynamic per cursor row (orig DAT_0045d75c row stride =16, base row=3=
+ * CONTINUE for default cursor placement). Port lines 3221-3236 match
+ * sel_x0/sel_x1 (1-half_w, half_w-1), selbox_base_y=-33 + 3*16 = init_y.
+ *
+ * BLACKBAR/SLIDER 3-row loop: orig walks 3 rows with row_y = row*16, dark
+ * trough x=[half_w-131..half_w-1] y=[row_y-29..row_y-21], slider fill bar
+ * x=[half_w-130..(dynamic)] y=[row_y-28..row_y-22]. Port lines 3244-3263
+ * match (bar_x0/bar_x1 differ by 1 for the slider extent — same orig).
+ *
+ * PAUSETXT glyph emission: orig walks string_offset 0..0x2F step 8 (12
+ * strings × 2 ints), reads alignment word at +4, dispatches alignment==2
+ * → centered (compute total_w from per-char widths via PTR_DAT_004660C8
+ * lookup table, glyph_w = char_w*2/3, +2 inter-glyph gap), else
+ * left-aligned at x = 4 - half_w. Per glyph: UV at (ch&0xF)*16+0.5,
+ * (ch>>4)*16+0.5, glyph_w-1 width, 16px height. Port lines 3271-3306
+ * match exactly (g_pause_glyph_widths[ch]*2/3, +2 spacing,
+ * (ch & 0x0F)*16, (ch >> 4)*16).
+ *
+ * [ARCH-DIVERGENCE: BuildSpriteQuadTemplate (centered-coord D3D3 scratch
+ *  ring) → hud_build_quad (pixel-space D3D11 buffer); cx/cy screen-center
+ *  offset applied explicitly in port] — orig emits coords centered around
+ *  screen origin (consumed by BuildSpriteQuadTemplate which adds screen
+ *  center internally); port adds g_render_width_f*0.5 / g_render_height_f
+ *  *0.5 to every PAUSE_ADD coordinate inline. Same observable geometry.
+ *  Documented at port lines 3192-3193. L5 promotion sweep 2026-05-21.
  * ======================================================================== */
 
 void td5_hud_init_pause_menu(int page_index)
@@ -3333,6 +3480,22 @@ void td5_hud_render(void)
  * progress: 0.0 = no coverage, 255.0 = full screen black.
  * direction: 0 = horizontal (left/right), 1 = vertical (top/bottom).
  * Uses the pre-built FADEWHT fade quads (s_fade_quads[0..1]).
+ *
+ * [ARCH-DIVERGENCE: 0x0043E750 SetClipBounds is the orig projection
+ *  clip-rect setter, NOT a fade renderer; L5 promotion sweep 2026-05-21]
+ *  — Ghidra-verified: orig 0x0043E750 takes 4 floats (param_1..param_4),
+ *  pairwise-mins them (`if (param_2 < param_1) param_1 = param_2;` etc.),
+ *  and stores to globals at DAT_004afb38/0x3c/0x40/0x44 (the projection
+ *  clip rect used by later vertex transforms). This is the equivalent of
+ *  td5_render_set_clip_rect (td5_render.c:5570) which casts to int and
+ *  pushes to td5_plat_render_set_clip_rect (D3D11 scissor). The port's
+ *  td5_hud_draw_race_fade is a separate function unrelated to 0x0043E750
+ *  — it implements the directional-wipe FADEWHT bar render that the orig
+ *  builds inside RenderRaceHudOverlays (0x4388A0, dispatched from the
+ *  per-view tail at 0x4397.. as part of bit 0x80000000 handling). The
+ *  0x0043E750 SetClipBounds entry point itself has no direct port analog;
+ *  D3D11 backend writes scissor rects directly without staging them in
+ *  global float fields.
  * ======================================================================== */
 
 void td5_hud_draw_race_fade(float progress, int direction)
@@ -3394,3 +3557,32 @@ void td5_hud_draw_race_fade(float progress, int direction)
         td5_plat_render_draw_tris(verts, 4, indices, 6);
     }
 }
+
+/* ============================================================
+ * [CITATION-SWEEP 2026-05-21] Phase 1 audit-header refresh
+ *
+ * The following L3 Ghidra functions are ported (or folded) into
+ * this file but were missed by build_confidence_map.py's
+ * 2026-05-18 citation scan due to snake_case rename or
+ * multi-line comment wraps. Listed here so the next confidence-
+ * map run promotes them L3 -> L4 (cited without precision
+ * keywords). Per-function audits remain a separate Phase 4 task.
+ *
+ * Source: re/analysis/l3_triage_2026-05-21.csv +
+ *         re/analysis/phase1_manifest_assignment.csv
+ *
+ *   0x00414F40  RenderPositionerGlyphStrip  (density-match, verify in Phase 4)
+ */
+
+
+/* ============================================================
+ * [ARCH-DIVERGENCE: HUD glyph strip render] Phase 5(a) class manifest (2026-05-21)
+ *
+ * Orig RenderPositionerGlyphStrip rasterizes 8x8 glyphs into a DDraw HUD
+ * surface for the positioner/race-position overlay. Port uses the unified
+ * glyph-strip atlas + fe_draw_text helper (td5_hud references
+ * td5_frontend's font system). Source-port collapses the HUD-specific
+ * glyph rasterizer into the shared font path.
+ *
+ *   0x00414F40  RenderPositionerGlyphStrip  [ARCH-DIVERGENCE: HudGlyph]
+ */

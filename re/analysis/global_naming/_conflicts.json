@@ -1,0 +1,2664 @@
+{
+  "0x0045d5d0": [
+    {
+      "tier": "T2",
+      "batch": "08",
+      "address": "0x0045d5d0",
+      "size": "f32",
+      "name": "g_pixelHalfBias_0p5",
+      "confidence": "high",
+      "evidence": "`= 0.5f`. Universal half-pixel UV/dimension offset for D3D3 texel-center sampling. Pervasive across InitializeRaceHudLayout.",
+      "port_mirror": "(port uses + 0.5f literal)"
+    },
+    {
+      "tier": "T4",
+      "batch": "19",
+      "address": "0x0045d5d0",
+      "size": "float",
+      "name": "g_halfFloatConstant",
+      "confidence": "high",
+      "evidence": "Value=0x3F000000 (=0.5f). **Many xrefs** across the codebase \u2014 Ghidra autonamed it `_g_fixedPointToFloatScale` but that's misleading (true fp24.8 \u2192 float would need `1/256 = 0x3B800000`). Used in `LoadRaceVehicleAssets` for chassis-bounds half-extents, in `InitializeRaceSession` for `gRenderCenterX = g_renderWidthF * 0.5f` viewport-center, and in vehicle-mesh patch loops. **Rename to `g_halfFloatConstant`** to fix misleading T3 inheritance.",
+      "port_mirror": "td5_render.c viewport-center literal"
+    },
+    {
+      "tier": "T4",
+      "batch": "20",
+      "address": "0x0045d5d0",
+      "size": "float",
+      "name": "g_audioReplayDistanceMultiplier",
+      "confidence": "high",
+      "evidence": "Bytes `0000003f` = 0.5f. Used at three loci: (a) `PlayVehicleSoundAtPosition` and mixer multiply final distance by this when `g_inputPlaybackActive != 0` (replay mode \u2192 0.5\u00d7 distance attenuation so audio is louder during replay); (b) the listener-velocity Doppler shift uses this on the `gTrackedVehicleAudioActorIndex` branch (siren in replay); (c) **ALSO reused by `LoadRaceVehicleAssets` UV-patch loop as `(uVar11 & 1) * _DAT_0045d5d0`** \u2014 non-audio overlap. Comment: \"audio replay distance multiplier (0.5\u00d7 attenuation when replay active)\".",
+      "port_mirror": "td5_sound.c replay-distance modifier"
+    }
+  ],
+  "0x0045d5f4": [
+    {
+      "tier": "T2",
+      "batch": "08",
+      "address": "0x0045d5f4",
+      "size": "f32",
+      "name": "g_hudGearGlyphRowOff",
+      "confidence": "medium",
+      "evidence": "`= 1.0f`. Row offset constant for gear glyph (`(gear + 1.0) * 16.0`). Used at HUD 0x00438E00/0x00438E54.",
+      "port_mirror": "td5_hud.c gear row+1"
+    },
+    {
+      "tier": "T3",
+      "batch": "11",
+      "address": "0x0045d5f4",
+      "size": "float",
+      "name": "g_floatOne (= 1.0f)",
+      "confidence": "medium",
+      "evidence": "`00 00 80 3F` = 1.0f. **39 xrefs across binary** \u2014 most-used float constant. Inside RunRaceFrame at 0x0042ba77 (used to seed `g_simTickBudget = 1.0f`). Pure read-only literal.",
+      "port_mirror": "(none \u2014 port uses `1.0f` directly.)"
+    },
+    {
+      "tier": "T4",
+      "batch": "20",
+      "address": "0x0045d5f4",
+      "size": "float",
+      "name": "g_audioMinDistanceEpsilon",
+      "confidence": "high",
+      "evidence": "Bytes `b9a5 5531` \u2248 3.10e-09f (tiny epsilon). Added to denominator in Doppler ratio: `fVar3 + _DAT_0045d5f4`. Prevents div-by-zero when listener and source are coincident.",
+      "port_mirror": "td5_sound.c epsilon constant"
+    }
+  ],
+  "0x0045d650": [
+    {
+      "tier": "T2",
+      "batch": "08",
+      "address": "0x0045d650",
+      "size": "f32",
+      "name": "g_renderHudFixedPointShift_4",
+      "confidence": "low",
+      "evidence": "`= 4.0f`. Probably a glyph-cell-mod constant; appears in InitializeRaceHudLayout speedometer-digit-step. Comment-only.",
+      "port_mirror": "(constant)"
+    },
+    {
+      "tier": "T3",
+      "batch": "11",
+      "address": "0x0045d650",
+      "size": "float",
+      "name": "g_floatFour (= 4.0f)",
+      "confidence": "medium",
+      "evidence": "`00 00 80 40` = 4.0f. **18 xrefs**. Inside RunRaceFrame at 0x0042c1f8 used to clamp `g_simTickBudget` to max 4.0 (= 4 sub-ticks max per frame). The hard cap that prevents the sub-tick loop from going beyond 4 iterations on a slow frame.",
+      "port_mirror": "port: `td5_game.c` MAX_SUBTICKS = 4 constant (verify)."
+    },
+    {
+      "tier": "T4",
+      "batch": "20",
+      "address": "0x0045d650",
+      "size": "float",
+      "name": "g_audioDopplerVelocityScale",
+      "confidence": "high",
+      "evidence": "Bytes `00504348` = 200000.0f. Multiplier on listener-velocity dot product in Doppler ratio. Scales fixed-point velocity into a frequency-shift contribution.",
+      "port_mirror": "td5_sound.c doppler velocity scale"
+    },
+    {
+      "tier": "T5",
+      "batch": "21",
+      "address": "0x0045d650",
+      "size": "float (4.0f)",
+      "name": "g_simTickBudgetCap",
+      "confidence": "high",
+      "evidence": "Read by `RunRaceFrame` end: `if (_DAT_0045D650 < g_simTickBudget) g_simTickBudget = 4.0;`. Sole purpose: cap the per-frame sim tick accumulator to prevent run-away spiral on slow hosts. Byte pattern `40 80 00 00` = float 4.0.",
+      "port_mirror": "`td5_game.c` `TD5_SIM_TICK_BUDGET_CAP = 4.0f`"
+    }
+  ],
+  "0x0045d658": [
+    {
+      "tier": "T3",
+      "batch": "11",
+      "address": "0x0045d658",
+      "size": "double",
+      "name": "g_doubleInvThousand (= 1/1000.0)",
+      "confidence": "low",
+      "evidence": "`FC A9 F1 D2 4D 62 50 3F` \u2248 0.001 = 1/1000.0. 1 reader at 0x0042c16f. ms\u2192s conversion factor companion.",
+      "port_mirror": "(none.)"
+    },
+    {
+      "tier": "T5",
+      "batch": "21",
+      "address": "0x0045d658",
+      "size": "double (1/1000)",
+      "name": "g_msPerSec_double",
+      "confidence": "high",
+      "evidence": "Read in `RunRaceFrame` via FLD/FMUL for the ms\u2192s conversion: `g_normalizedFrameDt = local_8 * _DAT_0045d660 * _DAT_0045d658`. Byte pattern `fc a9 f1 d2 4d 62 50 3f` = double 0.001.",
+      "port_mirror": "`td5_game.c` time scaling const"
+    }
+  ],
+  "0x0045d660": [
+    {
+      "tier": "T3",
+      "batch": "11",
+      "address": "0x0045d660",
+      "size": "double",
+      "name": "g_doubleThirty (= 30.0)",
+      "confidence": "low",
+      "evidence": "`00 00 00 00 00 00 3E 40` = 30.0. 1 reader at 0x0042c169. Used to compute `g_normalizedFrameDt = dt_ms * (1/1000.0) * 30.0` \u2014 = frame time in 30Hz reference units. **30 Hz = the original target framerate**, exposed as a normalization factor.",
+      "port_mirror": "(none \u2014 port uses 60Hz native.)"
+    },
+    {
+      "tier": "T5",
+      "batch": "21",
+      "address": "0x0045d660",
+      "size": "double (30.0)",
+      "name": "g_targetFps_double",
+      "confidence": "high",
+      "evidence": "Read in same FMUL chain as `g_msPerSec_double`. Byte pattern `00 00 00 00 00 00 3e 40` = double 30.0. The product (`dt_ms \u00d7 30 / 1000`) yields normalized \"sim ticks @ 30 FPS\" = port's standard frame quantization.",
+      "port_mirror": "`td5_game.c` `TD5_SIM_TARGET_FPS = 30.0f`"
+    }
+  ],
+  "0x0045d668": [
+    {
+      "tier": "T3",
+      "batch": "11",
+      "address": "0x0045d668",
+      "size": "double",
+      "name": "g_doubleThousand (= 1000.0)",
+      "confidence": "low",
+      "evidence": "`00 00 00 00 00 40 8F 40` = 1000.0. 1 reader at 0x0042c15d. Used to convert reciprocal-ms to FPS via `g_instantFPS = (1000.0/dt_ms) * 1000.0` \u2014 actually 1000/dt scaled.",
+      "port_mirror": "(none.)"
+    },
+    {
+      "tier": "T5",
+      "batch": "21",
+      "address": "0x0045d668",
+      "size": "double (1000.0)",
+      "name": "g_msPerSec_reciprocal",
+      "confidence": "high",
+      "evidence": "Read by `RunRaceFrame`: `g_instantFPS = fVar13 * (float)_DAT_0045d668;`. Byte pattern `00 00 00 00 00 40 8f 40` = double 1000.0. Multiplies `(1/frame_dt_ms)` to get FPS.",
+      "port_mirror": "`td5_game.c` ms\u2192fps converter"
+    }
+  ],
+  "0x0045d670": [
+    {
+      "tier": "T3",
+      "batch": "11",
+      "address": "0x0045d670",
+      "size": "double",
+      "name": "g_doubleOne (= 1.0)",
+      "confidence": "low",
+      "evidence": "`00 00 00 00 00 00 F0 3F` = 1.0 (double precision). 3 readers. Inside RunRaceFrame at 0x0042c148 (`_g_reciprocalFrameDtMs` = 1.0 / frame_dt_ms). Companion to g_doubleThousand for ms\u2192s.",
+      "port_mirror": "(none.)"
+    },
+    {
+      "tier": "T5",
+      "batch": "21",
+      "address": "0x0045d670",
+      "size": "double (1.0)",
+      "name": "g_oneDouble_PROVISIONAL",
+      "confidence": "medium",
+      "evidence": "Used as `((double)_DAT_0045d670 / (float)dt) \u2192 reciprocalFrameDtMs`. Byte pattern `00 00 00 00 00 00 f0 3f` = double 1.0. Generic 1.0 constant; might be shared with other render-frame code.",
+      "port_mirror": "`td5_game.c` reciprocal numerator"
+    }
+  ],
+  "0x0045d68c": [
+    {
+      "tier": "T3",
+      "batch": "11",
+      "address": "0x0045d68c",
+      "size": "float",
+      "name": "g_inv65536F (= 1/65536)",
+      "confidence": "medium",
+      "evidence": "`00 00 80 37` = 1.526e-5 = 1/65536.0f. 2 readers (both inside RunRaceFrame at 0x0042b729 / 0x0042b772) \u2014 converts `g_simTimeAccumulator & 0xFFFF` to a [0..1) fraction stored in `g_subTickFraction`. The sub-tick interpolation fractional-time scale.",
+      "port_mirror": "port: subtick_fraction computation."
+    },
+    {
+      "tier": "T5",
+      "batch": "21",
+      "address": "0x0045d68c",
+      "size": "float (1/65536)",
+      "name": "g_subTickQuantum",
+      "confidence": "high",
+      "evidence": "Read by `g_subTickFraction = (dword)((float)(uint)local_8 * _DAT_0045d68c)`. Byte pattern `00 00 80 37` = float `1.52587890625e-05` = `1/65536`. Converts 24.8 fixed-point sim accumulator to normalized sub-tick fraction.",
+      "port_mirror": "`td5_game.c` `TD5_SUB_TICK_QUANTUM = 1.0f/65536.0f`"
+    }
+  ],
+  "0x0046317c": [
+    {
+      "tier": "T1",
+      "batch": "01",
+      "address": "0x0046317c",
+      "size": "u16[6]",
+      "name": "g_playerSteeringWeightTarget",
+      "confidence": "high",
+      "evidence": "Written by UpdatePlayerSteeringWeightBalance @ 0x004036de/0x00403708. Read at 0x00403335 (signed extend into steering interpolation). Per-slot steering balance for two-player mode. Clearly per-slot baseline, indexed by slotIndex\u00d72.",
+      "port_mirror": "`(none)` \u2014 not yet ported"
+    },
+    {
+      "tier": "T3",
+      "batch": "11",
+      "address": "0x0046317c",
+      "size": "u16[6]",
+      "name": "g_perSlotViewIndicatorInitialAngle",
+      "confidence": "high",
+      "evidence": "6-element u16 table at `[slotIndex * 2 + 0x46317c]`. Bytes `[0001 0001 0001 0001 0001 0001]` \u2014 value `0x0100` per slot. Read at `UpdatePlayerVehicleControlState @ 0x00403335 / 0x00403408` (writes to actor +0x33e indicator field) when the \"view-cycle button\" path fires. Drives the \"view changed\" HUD arrow indicator initial angle per slot. 4 xrefs.",
+      "port_mirror": "port: HUD view-change indicator init constant. Single-value init table; could be inlined."
+    },
+    {
+      "tier": "T5",
+      "batch": "25",
+      "address": "0x0046317c",
+      "size": "i16",
+      "name": "g_player0SteeringBiasShort",
+      "confidence": "high",
+      "evidence": "`_DAT_0046317c = (short)iVar1 + 0x100` written by `UpdatePlayerSteeringWeightBalance @ 0x004036B0`; read by `UpdatePlayerVehicleControlState` via `(short *)(&DAT_0046317C + slotIndex * 2)`. The \"initial steering bias short\" the memo refers to. Bit 0x200 of input mask gates application.",
+      "port_mirror": "td5_input.c per-slot steering-bias base"
+    }
+  ],
+  "0x0046317e": [
+    {
+      "tier": "T1",
+      "batch": "01",
+      "address": "0x0046317e",
+      "size": "u16[6]",
+      "name": "g_playerSteeringWeightOpposite",
+      "confidence": "high",
+      "evidence": "Written by UpdatePlayerSteeringWeightBalance @ 0x004036e4. Complement steering weight (0x100 - target). Used in two-player steering balancing.",
+      "port_mirror": "`(none)` \u2014 not yet ported"
+    },
+    {
+      "tier": "T5",
+      "batch": "25",
+      "address": "0x0046317e",
+      "size": "i16",
+      "name": "g_player1SteeringBiasShort",
+      "confidence": "high",
+      "evidence": "Sister to above. `_DAT_0046317e = 0x100 - (short)iVar1` \u2014 opposite-sign offset for the second player so the bias sums to 0x200. Same write site / same reader.",
+      "port_mirror": "td5_input.c per-slot steering-bias base[1]"
+    }
+  ],
+  "0x00463fc4": [
+    {
+      "tier": "T3",
+      "batch": "14",
+      "address": "0x00463fc4",
+      "size": "u32[4][9]",
+      "name": "g_inputBindingTable",
+      "confidence": "high",
+      "evidence": "Per-context (player+device-pair) action-binding table. 4 banks \u00d7 9 button-slots = 36 dwords = 144 bytes. Initial pattern `{1,4,5,6,7,9,8,4,5}` repeated 4\u00d7. Action codes: 1=accel, 2=brake_up, 3=brake_dn, 4=shift_dn?, 5=shift_up?, 6=horn, 7=handbrake, 8=changeview, 9=rearview. Modified by `ScreenControllerBindingPage @ 0x0040fc8b` (cycle-binding-on-press) and `WritePackedConfigTd5` (load from Config.td5).",
+      "port_mirror": "td5_input.c:13 `gBindingTable[2][9]` (port labels 2\u00d79 but orig is 4\u00d79)"
+    },
+    {
+      "tier": "T4",
+      "batch": "16",
+      "address": "0x00463fc4",
+      "size": "u32[18]",
+      "name": "g_controllerBindings",
+      "confidence": "high",
+      "evidence": "18-dword controller binding map (72 bytes). LoadConfig copies `&DAT_0048F3B6` \u2192 `&DAT_00463FC4` \u00d718 (Config.td5 0x32 onward). On detected-device mismatch, `ScreenLocalizationInit` falls back to copying `&DAT_0046400C` defaults (0x00427081 LAB).",
+      "port_mirror": "td5_save.c:190 `s_controller_bindings`"
+    }
+  ],
+  "0x00464084": [
+    {
+      "tier": "T4",
+      "batch": "16",
+      "address": "0x00464084",
+      "size": "char[32]",
+      "name": "g_cupDataTd5XorKey",
+      "confidence": "high",
+      "evidence": "XOR key for `CupData.td5` payload. Used by WriteCupData/LoadContinueCupData/ValidateCupDataChecksum. Bytes verified: `53 74 65 76 65 20 53 6E 61 6B 65 20 73 61 79 73 20 3A 20 4E 6F 20 43 68 65 61 74 69 6E 67 21 20` = `\"Steve Snake says : No Cheating! \"`. Already labeled `s_Steve_Snake_says___No_Cheating__00464084` (default symbol).",
+      "port_mirror": "td5_save.c line ~5 comment + `td5_save_xor_*`"
+    },
+    {
+      "tier": "T5",
+      "batch": "23",
+      "address": "0x00464084",
+      "size": "char[31]",
+      "name": "g_cupDataXorKey",
+      "confidence": "high",
+      "evidence": "\"Steve Snake says: No Cheating!\" \u2014 XOR key cycled mod-length with extra ^0x80; used by WriteCupData (0x004114f0), LoadContinueCupData (0x00411590), ValidateCupDataChecksum (0x00411630)",
+      "port_mirror": "td5_save.c XOR key constant"
+    }
+  ],
+  "0x004654a4": [
+    {
+      "tier": "T2",
+      "batch": "07",
+      "address": "0x004654a4",
+      "size": "u8[6][40]",
+      "name": "g_cheatCodeKeySequenceTable",
+      "confidence": "high",
+      "evidence": "6 entries x 0x28-byte stride; each row is a VK_* sequence terminated by 0xFF (e.g. row0 = `17 39 23 1E 2F 12 39 14 23 12 39 25 12 15 FF`); indexed `[slot * 0x28 + progress[slot]]` in 0x00414de1; orig comment \"key sequences\"",
+      "port_mirror": "port replaces with `frontend_match_cheat_code(\"OPENALL\")` style char matcher at td5_frontend.c:2443 (semantic, not table-byte)"
+    },
+    {
+      "tier": "T4",
+      "batch": "16",
+      "address": "0x004654a4",
+      "size": "u8[6][40]",
+      "name": "g_cheatCodeKeySequences",
+      "confidence": "high",
+      "evidence": "Six 40-byte DirectInput keycode sequences. Stride 0x28; terminator 0xFF. Read at `RunFrontendDisplayLoop @ 0x00414E18` as `(&DAT_004654A4)[i * 0x28 + (&DAT_004951F0)[i]]`. Match-completion fires the XOR.",
+      "port_mirror": "(none)"
+    }
+  ],
+  "0x00465594": [
+    {
+      "tier": "T2",
+      "batch": "07",
+      "address": "0x00465594",
+      "size": "void*[6]",
+      "name": "g_cheatCodeTargetFlagPtrTable",
+      "confidence": "high",
+      "evidence": "6 pointers to flag dwords. Bytes confirm: `{0x00496298, 0x004962a8, 0x004962ac, 0x004aaf7c, 0x0049629c, 0x004962b4}`. Read at 0x00414e26 as `*(uint*)(table[i])`. Already auto-labeled `PTR_DAT_00465594` -- rename to a real symbol.",
+      "port_mirror": "(none -- port resolves cheat actions directly, no pointer table)"
+    },
+    {
+      "tier": "T4",
+      "batch": "16",
+      "address": "0x00465594",
+      "size": "void*[6]",
+      "name": "g_cheatCodeTargetPointers",
+      "confidence": "high",
+      "evidence": "Pointer table: 6 dwords pointing to the cheat-target dwords. Bytes: `0x00496298, g_cupUnlockLevel(0x004962A8), 0x004962AC, 0x004AAF7C, 0x0049629C, g_cheatCodeActivated(0x004962B4)`. Read in `RunFrontendDisplayLoop @ 0x00414E1C-0x00414E26` as `*(uint *)(&PTR_DAT_00465594)[i] ^= g_cheatCodeXorMaskTable[i]`. Already labeled `PTR_DAT_00465594` (default symbol).",
+      "port_mirror": "(none)"
+    }
+  ],
+  "0x004655ac": [
+    {
+      "tier": "T2",
+      "batch": "07",
+      "address": "0x004655ac",
+      "size": "u32[6]",
+      "name": "g_cheatCodeXorMaskTable",
+      "confidence": "high",
+      "evidence": "6 dwords `{1, 8, 2, 1, 1, 1}`; XOR'd into the targeted cheat flag at 0x00414e26 when sequence completes. The `8` at idx=1 means cheat #1 toggles bit 3 of `DAT_004962a8`.",
+      "port_mirror": "(none)"
+    },
+    {
+      "tier": "T4",
+      "batch": "16",
+      "address": "0x004655ac",
+      "size": "u32[6]",
+      "name": "g_cheatCodeXorMaskTable",
+      "confidence": "high",
+      "evidence": "T2.7 finding confirmed. Bytes: `01 00 00 00 08 00 00 00 02 00 00 00 01 00 00 00 01 00 00 00 01 00 00 00` = `{1, 8, 2, 1, 1, 1}`. Each entry is the XOR mask applied to the target dword when cheat-code `i` completes. Read site: `RunFrontendDisplayLoop @ 0x00414E18`.",
+      "port_mirror": "(none \u2014 port cheat system divergent)"
+    }
+  ],
+  "0x00465660": [
+    {
+      "tier": "T3",
+      "batch": "14",
+      "address": "0x00465660",
+      "size": "u32[8] (stride 16)",
+      "name": "g_inputDeviceTypeTable",
+      "confidence": "high",
+      "evidence": "Per-device descriptor: device-type-id at +0x0, `-1` sentinel at +0xc. `(0x##00) & 0xff00` discriminates wheel/pedal=0x600 from others. Stride 16, 8 entries (4 player \u00d7 2 devices). Read at 0x0040ffd5, 0x004270a0 (DirectInput-init bootstrap).",
+      "port_mirror": "(none \u2014 port uses dxinput enumeration)"
+    },
+    {
+      "tier": "T4",
+      "batch": "16",
+      "address": "0x00465660",
+      "size": "u32[8]",
+      "name": "g_player1DeviceDesc",
+      "confidence": "high",
+      "evidence": "P1 device descriptor block (8 dwords). LoadConfig writes from Config.td5 byte 0x7A (`&DAT_0048F3FE`). Used in mismatch check at `ScreenLocalizationInit` 0x00427060+.",
+      "port_mirror": "td5_save.c:191 `s_p1_device_desc`"
+    }
+  ],
+  "0x00465680": [
+    {
+      "tier": "T3",
+      "batch": "14",
+      "address": "0x00465680",
+      "size": "u32[8] (stride 16)",
+      "name": "g_inputDeviceButtonCountTable",
+      "confidence": "high",
+      "evidence": "Companion to 0x00465660. Per-device button count (4..9 used in `ScreenControllerBindingPage` to clamp `DAT_00490ba4`).",
+      "port_mirror": "(none)"
+    },
+    {
+      "tier": "T4",
+      "batch": "16",
+      "address": "0x00465680",
+      "size": "u32[8]",
+      "name": "g_player2DeviceDesc",
+      "confidence": "high",
+      "evidence": "Symmetric P2 desc. LoadConfig writes from Config.td5 byte 0x9A (`&DAT_0048F41E`).",
+      "port_mirror": "td5_save.c:192 `s_p2_device_desc`"
+    }
+  ],
+  "0x00465e18": [
+    {
+      "tier": "T3",
+      "batch": "13",
+      "address": "0x00465e18",
+      "size": "u32",
+      "name": "g_lastPlayedCdTrackIndex",
+      "confidence": "high",
+      "evidence": "Set inside `ScreenMusicTestExtras @ 0x00418897` after `DXSound::CDPlay(g_selectedCdTrackIndex + 2, 1)`. Tracks \"what was the most recently committed track\" so the now-playing label survives navigation. NOT to be confused with `g_selectedCdTrackIndex @ 0x00465e14` (already named).",
+      "port_mirror": "(none \u2014 port stub)"
+    },
+    {
+      "tier": "T5",
+      "batch": "22",
+      "address": "0x00465e18",
+      "size": "i32",
+      "name": "g_frontendRandomMusicTrackIndex",
+      "confidence": "high",
+      "evidence": "Random number 0..6 chosen in `InitializeFrontendResourcesAndState @ 0x00414A02-0x00414A50` for the menu CD track (excluding tracks 7 and certain pairs). Read by `ScreenExtrasGallery / UpdateExtrasGalleryDisplay / ScreenMusicTestExtras` and `LoadExtrasBandGalleryImages` paths via `(&DAT_0048f2d4)[*(char *)(DAT_00465e18 + 0x465e4c)]` indexed lookup. **Dual role**: index into music-test playlist AND seed for which band image to show. 10 xrefs.",
+      "port_mirror": "port: `td5_sound.c` selects menu CD track via `g_td5.ini.cd_track` \u2014 not random in port."
+    },
+    {
+      "tier": "T5",
+      "batch": "23",
+      "address": "0x00465e18",
+      "size": "u32",
+      "name": "g_attractCdTrackCandidate",
+      "confidence": "high",
+      "evidence": "rand()%7 candidate for next CD track; constrained to avoid current + restricted set (0/7/9/11). Final pick stored into g_selectedCdTrackIndex",
+      "port_mirror": "(none)"
+    }
+  ],
+  "0x00465fe8": [
+    {
+      "tier": "T4",
+      "batch": "16",
+      "address": "0x00465fe8",
+      "size": "u32",
+      "name": "g_audioSoundMode",
+      "confidence": "high",
+      "evidence": "Sound mode (0=stereo, 1=mono). Read by `ScreenSoundOptions @ 0x0041EA90` (multiple sites 0x0041EE9A..0x0041F8A2), written by sound-screen at 0x0041F391. Copied to Config.td5 byte offset 0xBA (write at 0x0040F93F, load at 0x0040FD2E).",
+      "port_mirror": "td5_save.c:195 `s_sound_mode`"
+    },
+    {
+      "tier": "T4",
+      "batch": "20",
+      "address": "0x00465fe8",
+      "size": "int",
+      "name": "g_sfxPlaybackMode",
+      "confidence": "high",
+      "evidence": "0..2 selector: 0 = stereo, 1 = mono?, 2 = 3D (only allowed if `DXSound::CanDo3D() != 0`). Written by `ScreenSoundOptions` cursor-row 0 navigation. Committed via `DXSound::SetPlayback(DAT_00465fe8)`. Read at 12 sites for UI rendering of the mode label and at race-init. Distinct from T3.13's audio-options-modal state. Persisted in Config.td5 (writers at `0x0040fd2e` = save, `0x0040f93f` = load).",
+      "port_mirror": "td5_sound.c sfx playback mode"
+    }
+  ],
+  "0x00465fec": [
+    {
+      "tier": "T4",
+      "batch": "16",
+      "address": "0x00465fec",
+      "size": "u32",
+      "name": "g_audioSfxVolume",
+      "confidence": "high",
+      "evidence": "SFX volume (0..100, stride-10). `ScreenLocalizationInit @ 0x004269D0` final block sets `DAT_00465FEC = DXSound::GetVolume() * scaling` (at 0x004271CC). Read/written by sound options screen. Copied to Config.td5 byte 0xBB.",
+      "port_mirror": "td5_save.c:196 `s_sfx_volume`"
+    },
+    {
+      "tier": "T4",
+      "batch": "20",
+      "address": "0x00465fec",
+      "size": "int",
+      "name": "g_sfxVolumePercent",
+      "confidence": "high",
+      "evidence": "0..100 percent. Written by `ScreenSoundOptions` cursor-row 1 navigation in steps of 10. Committed via `DXSound::SetVolume((DAT_00465fec * 0xfc00) / 100 & 0xfc00)` (converts 0..100 \u2192 0..0xFC00 DSound volume units). Save/load at `0x0040fcd8`/`0x0040f983`. **Pre-race counterpart of T3.13's `g_sfxVolumeFraction @ 0x00474638`** \u2014 but THIS one is the percentage form persisted in Config.td5, and the modal version is a float fraction recalculated from it at runtime.",
+      "port_mirror": "td5_sound.c sfx volume %"
+    },
+    {
+      "tier": "T5",
+      "batch": "23",
+      "address": "0x00465fec",
+      "size": "u32",
+      "name": "g_persistedMasterVolumePercent",
+      "confidence": "high",
+      "evidence": "Loaded/saved in ScreenLocalizationInit attract-mode branch; DXSound::GetVolume scaled to 0..100 stepped by 10; written back via DXSound::SetVolume",
+      "port_mirror": "td5_save.c (Config.td5 volume field)"
+    }
+  ],
+  "0x00465ff0": [
+    {
+      "tier": "T4",
+      "batch": "16",
+      "address": "0x00465ff0",
+      "size": "u32",
+      "name": "g_audioMusicVolume",
+      "confidence": "high",
+      "evidence": "Music (CD) volume (0..100). `ScreenLocalizationInit` sets `DAT_00465FF0 = DXSound::CDGetVolume() * scaling`. Symmetric usage to `g_audioSfxVolume`. Copied to Config.td5 byte 0xBC.",
+      "port_mirror": "td5_save.c:197 `s_music_volume`"
+    },
+    {
+      "tier": "T4",
+      "batch": "20",
+      "address": "0x00465ff0",
+      "size": "int",
+      "name": "g_musicVolumePercent",
+      "confidence": "high",
+      "evidence": "Same as `g_sfxVolumePercent` but for CD music: `DXSound::CDSetVolume((DAT_00465ff0 * 0xfc00) / 100 & 0xfc00)`. Save/load at `0x0040fccc`/`0x0040f94a`. **Pre-race counterpart of T3.13's `g_cdAudioVolumeFraction @ 0x00466ea8`** \u2014 same percent/fraction pairing.",
+      "port_mirror": "td5_sound.c music volume %"
+    },
+    {
+      "tier": "T5",
+      "batch": "23",
+      "address": "0x00465ff0",
+      "size": "u32",
+      "name": "g_persistedCdVolumePercent",
+      "confidence": "high",
+      "evidence": "Same pattern as master volume but for CD audio (DXSound::CDGetVolume / CDSetVolume)",
+      "port_mirror": "td5_save.c (Config.td5 CD-volume field)"
+    }
+  ],
+  "0x00466000": [
+    {
+      "tier": "T4",
+      "batch": "16",
+      "address": "0x00466000",
+      "size": "int[7]",
+      "name": "g_gameOptionsBlock",
+      "confidence": "high",
+      "evidence": "7-dword block read by `ScreenGameOptions @ 0x0041F990` (0x0041FD78 read, 0x0041FFF6/FFE/0042000D/0020 read+write), `ScreenMainMenuAnd1PRaceFlow @ 0x00415490` (0x0041557D read), and copied to Config.td5 at WritePackedConfigTd5 line 1 (`&DAT_00466000` \u2192 `&DAT_0048F388` \u00d77). Default bytes at file load: `03 01 01 01 01 00 01` matches g_td5.ini `{laps=3, checkpoint_timers=1, traffic=1, cops=1, difficulty=1, dynamics=0, collisions_3d=1}`. Field 0 = laps, field 1 = checkpoint_timers, field 2 = traffic, field 3 = cops, field 4 = difficulty, field 5 = dynamics, field 6 = collisions_3d.",
+      "port_mirror": "TD5_GameOptions s_game_options @ td5_save.c:186"
+    },
+    {
+      "tier": "T5",
+      "batch": "21",
+      "address": "0x00466000",
+      "size": "u32 (range 0..3)",
+      "name": "gCircuitLapsConfigShadow",
+      "confidence": "high",
+      "evidence": "Index 0 of Game Options screen (`SNK_CircuitLapsTxt`). Range-clamped 0..3 by `case 0:` arm at `0x0041FFFE`. Live mirror is `gCircuitLapCount = gCircuitLapsConfigShadow + 1` (in `ScreenMainMenuAnd1PRaceFlow`). 10 xrefs across Config save, both Options screens, and OptionsHub.",
+      "port_mirror": "`td5_save.c` lap count shadow"
+    }
+  ],
+  "0x00466004": [
+    {
+      "tier": "T1",
+      "batch": "04",
+      "address": "0x00466004",
+      "size": "u32",
+      "name": "gCheckpointTimersUserToggle",
+      "confidence": "high",
+      "evidence": "Written in `ScreenGameOptions` @ 0x420035 and 0x40FC43; read in game logic to enable/disable checkpoint timer display and time-bonus mechanics. Stored to `Config.td5` in `LoadPackedConfigTd5`",
+      "port_mirror": "`g_td5.ini.checkpoint_timers` (already exists)"
+    },
+    {
+      "tier": "T5",
+      "batch": "21",
+      "address": "0x00466004",
+      "size": "u32 (0/1)",
+      "name": "gCheckpointTimersConfigShadow",
+      "confidence": "high",
+      "evidence": "Index 1 of Game Options (`SNK_CheckpointTimersButTxt`). On/Off toggle. Live mirror is `g_specialEncounterType = gCheckpointTimersConfigShadow` (in main-menu commit). 9 xrefs.",
+      "port_mirror": "`td5_save.c` checkpoint timers shadow"
+    },
+    {
+      "tier": "T5",
+      "batch": "23",
+      "address": "0x00466004",
+      "size": "u32",
+      "name": "g_specialEncounterUnlockA",
+      "confidence": "medium",
+      "evidence": "Gate-block for high-score qualification in special-encounter mode (case 0)",
+      "port_mirror": "(none)"
+    }
+  ],
+  "0x00466008": [
+    {
+      "tier": "T1",
+      "batch": "04",
+      "address": "0x00466008",
+      "size": "u32",
+      "name": "gUnknownCheckpointToggle_B",
+      "confidence": "high",
+      "evidence": "Adjacent to `gCheckpointTimersUserToggle`; written at same locations (0x420047, 0x40FC43); semantics unknown. Possibly lap-counter display, P2P timer display, or sound-effect toggle. Needs deeper analysis before final name",
+      "port_mirror": "(unknown) \u2014 marked high but with `_PROVISIONAL` suffix until semantics confirmed"
+    },
+    {
+      "tier": "T5",
+      "batch": "21",
+      "address": "0x00466008",
+      "size": "u32 (0/1)",
+      "name": "gTrafficConfigShadow",
+      "confidence": "high",
+      "evidence": "Index 2 of Game Options (`SNK_TrafficButTxt`). Live mirror is `gTrafficActorsEnabled` (already named). 7 xrefs.",
+      "port_mirror": "`td5_save.c` traffic config shadow"
+    },
+    {
+      "tier": "T5",
+      "batch": "23",
+      "address": "0x00466008",
+      "size": "u32",
+      "name": "g_specialEncounterUnlockB",
+      "confidence": "medium",
+      "evidence": "Sibling gate to g_specialEncounterUnlockA",
+      "port_mirror": "(none)"
+    }
+  ],
+  "0x00466024": [
+    {
+      "tier": "T4",
+      "batch": "16",
+      "address": "0x00466024",
+      "size": "u32",
+      "name": "g_displayFogEnabled",
+      "confidence": "high",
+      "evidence": "Read by `ScreenDisplayOptions @ 0x00420400` (0x00420794, 0x004207B7, 0x0042094A) and written at 0x00420955. Copied to Config.td5 byte 0xC1 in WriteConfig.",
+      "port_mirror": "td5_save.c:209 `s_fog_enabled`"
+    },
+    {
+      "tier": "T5",
+      "batch": "21",
+      "address": "0x00466024",
+      "size": "u32 (0/1)",
+      "name": "gFoggingConfigShadow",
+      "confidence": "high",
+      "evidence": "Index 1 of Display Options (`SNK_FoggingButTxt`); gated by `DXD3D::CanFog()` capability. Live mirror is `g_fogCapabilityEnabled = gFoggingConfigShadow` (in main-menu commit). 7 xrefs.",
+      "port_mirror": "`td5_save.c` fog shadow"
+    }
+  ],
+  "0x00466028": [
+    {
+      "tier": "T4",
+      "batch": "16",
+      "address": "0x00466028",
+      "size": "u32",
+      "name": "g_displaySpeedUnits",
+      "confidence": "high",
+      "evidence": "Speed-units (0=MPH, 1=KPH). Read by ScreenDisplayOptions (0x004207D3, 0x004207EC), `ScreenPostRaceHighScoreTable @ 0x00413580` (0x00413439), and `ScreenQuickRaceMenu @ 0x004213D0` (0x00421FE9). Copied to Config.td5 byte 0xC5.",
+      "port_mirror": "td5_save.c:210 `s_speed_units`"
+    },
+    {
+      "tier": "T5",
+      "batch": "21",
+      "address": "0x00466028",
+      "size": "u32 (0/1)",
+      "name": "gSpeedReadoutUnitsConfigShadow",
+      "confidence": "high",
+      "evidence": "Index 2 of Display Options (`SNK_SpeedReadoutButTxt`). 0 = mph, 1 = kph (or vice versa \u2014 used in HUD digit formatter via `BuildRaceHudMetricDigits`). Live mirror is `DAT_004B11C4 = gSpeedReadoutUnitsConfigShadow`. 9 xrefs.",
+      "port_mirror": "`td5_save.c` units shadow"
+    }
+  ],
+  "0x004668b0": [
+    {
+      "tier": "T2",
+      "batch": "07",
+      "address": "0x004668b0",
+      "size": "u8[19]",
+      "name": "g_attractModeTrackDisableMask",
+      "confidence": "high",
+      "evidence": "Read as `(&DAT_004668b0)[g_attractModeTrackIndex]` in a `do { idx = rand() % 0x13; } while (mask[idx] != 0);` loop. Initial bytes `{00, 00, 00, 00, 00, 00, 00, 00, 01, 01, 01, ...}` confirm tracks 0-7 = playable (mask=0), tracks 8-18 = disabled (mask=1). Matches the memo's \"Port's 8-track filter is the same set after filtering.\"",
+      "port_mirror": "port shortcut: `rand() % 8` at td5_frontend.c:3130 (mask dropped, set hardcoded)"
+    },
+    {
+      "tier": "T4",
+      "batch": "16",
+      "address": "0x004668b0",
+      "size": "u8[26]",
+      "name": "g_savedTrackLockTable",
+      "confidence": "high",
+      "evidence": "26-byte track-lock table (1=unlocked, 0=locked \u2014 inverted sense per `td5_save.c:163` comment). `RunFrontendDisplayLoop @ 0x00414EED` reads to select random attract-mode track. `TrackSelectionScreenStateMachine @ 0x00427E45` reads. Config.td5 byte 0x148E.",
+      "port_mirror": "td5_save.c TD5_ConfigBuffer.track_locks (offset 0x148E)"
+    }
+  ],
+  "0x00466f88": [
+    {
+      "tier": "T3",
+      "batch": "11",
+      "address": "0x00466f88",
+      "size": "u32[2]",
+      "name": "g_perViewLookBackInputActive",
+      "confidence": "high",
+      "evidence": "2-element per-viewport flag, set to **1** at `PollRaceSessionInput @ 0x0042c5d3` when player held look-back button (control bit `0x2000000`) AND not in replay AND no camera transition. Cleared to **0** in same branch when condition fails. Read at `UpdateRaceCameraTransitionState @ 0x00401d27` to choose look-back camera preset. 2 xrefs (this WRITER + 1 reader).",
+      "port_mirror": "port: `td5_camera.c` look-back handling."
+    },
+    {
+      "tier": "T3",
+      "batch": "12",
+      "address": "0x00466f88",
+      "size": "int[2]",
+      "name": "g_cameraRearViewActive",
+      "confidence": "high",
+      "evidence": "Per-view \"rear view (look-behind) active\" toggle. Read by `UpdateRaceCameraTransitionState` \u2014 when not transitioning, applies `g_cameraYawOffsetView = 0x800` if `(&DAT_00466f88)[view] != 0`, else `0`. Matches the rear-view button mechanic.",
+      "port_mirror": "td5_camera.c:126 `g_lookLeftRight[2]`"
+    },
+    {
+      "tier": "T3",
+      "batch": "14",
+      "address": "0x00466f88",
+      "size": "int[2]",
+      "name": "g_rearViewActiveFlag",
+      "confidence": "high",
+      "evidence": "Per-player rear-view hold flag. WRITE: set to `1` when bit 25 held AND not in replay/transition; cleared to `0` otherwise. Read at 0x00401fce (camera lookup in `LoadCameraPresetForView` or similar).",
+      "port_mirror": "td5_input.c:130 `s_rear_view[]`"
+    },
+    {
+      "tier": "T5",
+      "batch": "24",
+      "address": "0x00466f88",
+      "size": "u32[2]",
+      "name": "g_cameraLookBackHoldTable",
+      "confidence": "high",
+      "evidence": "Twin per-player \"look-back\" latch. At PollRaceSessionInput 0x0042c606: when bit `0x2000000` is set + race-running + camera-not-transitioning, `(&DAT_00466f88)[iVar1] = 1;` else 0. Read by camera presenter (offsets near 0x00466f88 are referenced in td5_camera). Stride 4 = 2 dwords.",
+      "port_mirror": "port may have equivalent via input bit 25 (`TD5_INPUT_LOOK_BACK`); needs check"
+    },
+    {
+      "tier": "T5",
+      "batch": "24",
+      "address": "0x00466f88",
+      "size": "u32",
+      "name": "-- second slot of g_cameraLookBackHoldTable -- already covered",
+      "confidence": "unknown",
+      "evidence": "--",
+      "port_mirror": "--"
+    }
+  ],
+  "0x00469c78": [
+    {
+      "tier": "T2",
+      "batch": "09",
+      "address": "0x00469c78",
+      "size": "array of 24 ptrs",
+      "name": "g_perTrackLightZoneTables",
+      "confidence": "high",
+      "evidence": "24-entry array at .rdata; loaded as `(&DAT_00469c78)[param_1 * 4]` in `LoadTrackRuntimeData` (param_1 = track number 1..24). Each entry points to that track's zone-row block (stride 0x24 per zone)",
+      "port_mirror": "`td5_light_zones_table.inc` (per-track tables; port flattens)"
+    },
+    {
+      "tier": "T4",
+      "batch": "18",
+      "address": "0x00469c78",
+      "size": "void* ptr[24]",
+      "name": "g_perTrackLightZoneTables",
+      "confidence": "high",
+      "evidence": "`LoadTrackRuntimeData @ 0x0042FD07` indexes as `(&DAT_00469c78)[track]` to write `g_trackLightingZoneTablePtr`. Stride-4 array of 24 dwords. Idx 0 = NULL, idx 1..23 = per-track lighting-zone table pointers. **Deferred from batch_09 (T2.9 named in markdown but not applied to binary).**",
+      "port_mirror": "td5_light_zones_table.inc (port flattens this 24\u00d7ptr table)"
+    }
+  ],
+  "0x0046bb1c": [
+    {
+      "tier": "T4",
+      "batch": "17",
+      "address": "0x0046bb1c",
+      "size": "void*[N]",
+      "name": "g_perTrackEnvAssetTableArray",
+      "confidence": "high",
+      "evidence": "Constant table of per-track env-asset-table pointers (indexed by `g_trackPoolIndex`). Only reader: `InitializeTrackStripMetadata @ 0x0042fad4`. 1 xref.",
+      "port_mirror": "td5_asset.c per-track env table"
+    },
+    {
+      "tier": "T4",
+      "batch": "18",
+      "address": "0x0046bb1c",
+      "size": "u32 ptr[24]",
+      "name": "g_perTrackEnvironmentMetadataPtrs",
+      "confidence": "high",
+      "evidence": "Indexed once in `InitializeTrackStripMetadata @ 0x0042FAD4` as `(&DAT_0046bb1c)[param_1 * 4]` (stride 16 = 4 dwords per entry, but only the first dword is read \u2014 apparent 16-byte alignment of a pointer-table). First entry at idx 0 is NULL (idx 0 reserved), idx 1..23 hold metadata pointers per track pool.",
+      "port_mirror": "td5_track.c track-pool\u2192.STR-blob lookup"
+    }
+  ],
+  "0x00473d2c": [
+    {
+      "tier": "T2",
+      "batch": "10",
+      "address": "0x00473d2c",
+      "size": "int[6]",
+      "name": "g_defaultCarIdTable",
+      "confidence": "high",
+      "evidence": "`InitializeRaceActorRuntime` writes `local_4[4] = (&DAT_00473d2c)[local_c]` per-slot \u2014 seeds the per-slot car id from a constant table at slot init time. Value at 0x00473d2c = 0x00000100 (typical default carparam id)",
+      "port_mirror": "td5_save.c default car table"
+    },
+    {
+      "tier": "T4",
+      "batch": "19",
+      "address": "0x00473d2c",
+      "size": "int32[14]",
+      "name": "g_perSlotRubberBandThrottleLive",
+      "confidence": "high",
+      "evidence": "Live runtime table indexed by slot. Read at `InitializeRaceActorRuntime @ 0x0043351f` as `local_4[4] = (&DAT_00473d2c)[local_c]` \u2014 seeds `RS[4]` (= `gActorDefaultRouteSteerBias` per slot) at race init. WRITTEN at `ComputeAIRubberBandThrottle @ 0x00432d7a` (template copy) + `0x00432daa` (network-race forced reset to 0x100). 14 dwords because: 12 actor slots (6 racer + 6 traffic) + 2 padding. Values default to 0x100 (=256, \"neutral 100% throttle\").",
+      "port_mirror": "td5_ai.c per-slot rubber-band throttle table"
+    }
+  ],
+  "0x00475160": [
+    {
+      "tier": "T4",
+      "batch": "16",
+      "address": "0x00475160",
+      "size": "u32[256]",
+      "name": "g_crc32_table_edb88320",
+      "confidence": "high",
+      "evidence": "Standard CRC-32 lookup table for polynomial 0xEDB88320. Verified bytes at offset 0x04 = `0x77073096` (= CRC32(0x01) for EDB88320). 8 xrefs from Write/Load/ValidateConfig + Cup paths + general data hashing. Already labeled `DAT_00475160`.",
+      "port_mirror": "`td5_crc32` table in td5_types.h"
+    },
+    {
+      "tier": "T5",
+      "batch": "23",
+      "address": "0x00475160",
+      "size": "u32[256]",
+      "name": "g_crc32LookupTable",
+      "confidence": "high",
+      "evidence": "Standard CRC32 polynomial table; indexed by `(byte ^ crc&0xff)*4` in serialize loop; reused by restore for validation",
+      "port_mirror": "td5_save.c crc32 table"
+    }
+  ],
+  "0x00482df4": [
+    {
+      "tier": "T3",
+      "batch": "11",
+      "address": "0x00482df4",
+      "size": "u32[2]",
+      "name": "g_perViewPrevCameraPresetId",
+      "confidence": "high",
+      "evidence": "2-element per-viewport array (indexed `[param_2 * 4]` where param_2 is view index 0/1). Read 4\u00d7 / written 5\u00d7 in `UpdateRaceCameraTransitionState` at 0x00401ea5/eaf/eed/ef7/f3b/f45/f81/f8b/fc3. Each branch writes the chosen preset (0xD = full countdown, 0xC, 0xB, 0xA = transition phases) AFTER updating gRaceCameraPresetId; this is the LAG copy for transition gate detection. Per-view.",
+      "port_mirror": "port: implicit in camera preset state \u2014 not byte-mirrored."
+    },
+    {
+      "tier": "T3",
+      "batch": "12",
+      "address": "0x00482df4",
+      "size": "int[2]",
+      "name": "g_cameraFlyInPresetGuard",
+      "confidence": "high",
+      "evidence": "Per-view \"previously loaded preset id during fly-in transition\" gate inside `UpdateRaceCameraTransitionState @ 0x00401E10`. Compared to current preset id (10/11/12/13) to decide skip-vs-`LoadCameraPresetForView(force_reload=0)`. **Naming this directly clarifies the camera-lag TODO's \"one-shot fired\" diagnostic** \u2014 port equivalent is `s_flyin_preset_reloaded[2]` at td5_camera.c:119, but the boolean abstraction loses the preset-id history; the original tracks the actual stage.",
+      "port_mirror": "td5_camera.c:119 (port uses bool one-shot instead)"
+    }
+  ],
+  "0x00482f18": [
+    {
+      "tier": "T3",
+      "batch": "11",
+      "address": "0x00482f18",
+      "size": "u32[2]",
+      "name": "g_perViewCameraOrbitAccum",
+      "confidence": "high",
+      "evidence": "2-element per-viewport array. Accumulated by `+= ftol(orbital_delta)` at `UpdateRaceCameraTransitionState @ 0x00401eb6/efe/f4c` during countdown camera-orbit phases. Drives the \"the camera swings around the car before race start\" visual. **15 xrefs.**",
+      "port_mirror": "port: camera-orbit state during countdown."
+    },
+    {
+      "tier": "T3",
+      "batch": "12",
+      "address": "0x00482f18",
+      "size": "int[2]",
+      "name": "g_cameraSpringYawAccum",
+      "confidence": "high",
+      "evidence": "Per-view smoothed yaw integrator (24.8 fixed). Read everywhere as `*(int*)(&DAT_00482f18 + view*4) >> 8`. Written by chase-camera lag math: `*= ((shifted*5 to 15) * yawDelta >> 8)`. Initial seed from `display_angle_yaw` in `LoadCameraPresetForView`.",
+      "port_mirror": "td5_camera.c (port uses `g_camOrbitAngleFP[2]`)"
+    }
+  ],
+  "0x00482f48": [
+    {
+      "tier": "T3",
+      "batch": "12",
+      "address": "0x00482f48",
+      "size": "u8[2]",
+      "name": "g_cameraPresetPackedSave",
+      "confidence": "high",
+      "evidence": "2-byte packed save of `{preset_id, preset_mode}` for both views (each byte: `id & 0x7F",
+      "port_mirror": "mode << 7`). Written by `LoadCameraPresetForView` when `param_4 != 0`; restored by `ResetRaceCameraSelectionState @ 0x00402000`. Mechanism survives a camera-mode toggle."
+    },
+    {
+      "tier": "T4",
+      "batch": "16",
+      "address": "0x00482f48",
+      "size": "u8",
+      "name": "g_savedPlayer1CameraView",
+      "confidence": "high",
+      "evidence": "Initial-view-mode byte for P1. Written by `LoadCameraPresetForView @ 0x00401450` (0x00401569) and read by `ResetRaceCameraSelectionState @ 0x00402000` (0x0040200B). Copied to Config.td5 at byte 0x3DF (Write 0x0040F9CC).",
+      "port_mirror": "td5_save.c:224 `s_camera_byte_a`"
+    }
+  ],
+  "0x00482f70": [
+    {
+      "tier": "T3",
+      "batch": "11",
+      "address": "0x00482f70",
+      "size": "u32[2]",
+      "name": "g_perViewLookAroundActiveFlag",
+      "confidence": "high",
+      "evidence": "2-element per-viewport array. Written 0 or 0x800 at `UpdateRaceCameraTransitionState @ 0x00401fb6/fd9/fe6` and additionally in 5+ other camera functions. 0x800 = \"look-around input was active this tick\"; 0 otherwise. **20 xrefs** \u2014 heavily-used.",
+      "port_mirror": "port: maps to `td5_camera.c` look-around handling."
+    },
+    {
+      "tier": "T3",
+      "batch": "12",
+      "address": "0x00482f70",
+      "size": "int[2]",
+      "name": "g_cameraYawOffsetView",
+      "confidence": "high",
+      "evidence": "Per-view yaw offset (rear-view / mirror toggle). 0=front camera, 0x800=180\u00b0 (rear view). Written in case 7/8/10 of trackside dispatch and as default `0x800` for rear-view. The \"rear-view button\" path lives here.",
+      "port_mirror": "td5_camera.c:87 `g_camYawOffset[2]`"
+    }
+  ],
+  "0x00483000": [
+    {
+      "tier": "T3",
+      "batch": "14",
+      "address": "0x00483000",
+      "size": "u32",
+      "name": "g_playerControlBits_player2_alias",
+      "confidence": "low",
+      "evidence": "Stride-4 alias of `&g_playerControlBits[1]`. The pattern `(&DAT_00482ffc)[1]` is rewritten by Ghidra as a separate `DAT_00483000` symbol. **No new symbol needed** \u2014 comment only flag-up so future readers don't think this is a distinct global.",
+      "port_mirror": "(port uses array indexing \u2014 no alias needed)"
+    },
+    {
+      "tier": "T5",
+      "batch": "24",
+      "address": "0x00483000",
+      "size": "u32",
+      "name": "g_player2ControlBits",
+      "confidence": "high",
+      "evidence": "Aliased read at `g_playerControlBits + 4` in PollRaceSessionInput when the second slot processes the auto-pause bit. Direct write at 0x0042c5b7: `DAT_00483000 = DAT_00483000 \\",
+      "port_mirror": "0x10000000;`. The two-player local-mux uses `(&g_playerControlBits)[iVar1]` (0/+4); 0x00483000 IS the +4 alias used when the second-iter index is written-back through a non-aliased path."
+    }
+  ],
+  "0x00483014": [
+    {
+      "tier": "T1",
+      "batch": "01",
+      "address": "0x00483014",
+      "size": "u8[6]",
+      "name": "g_cheatRemoteBrakingApplied",
+      "confidence": "high",
+      "evidence": "Reset to 0 @ 0x00402e32 when input bit 0x200000 NOT set; set to 1 @ 0x0042b96b after velocity-doubling cheat applied. Per-slot flag. Checked at 0x0042b96d.",
+      "port_mirror": "`(none)` \u2014 cheat state, not ported"
+    },
+    {
+      "tier": "T3",
+      "batch": "11",
+      "address": "0x00483014",
+      "size": "u8[6]",
+      "name": "g_remoteBrakeCheatPerSlotLatch",
+      "confidence": "high",
+      "evidence": "6-byte per-slot latch (one per racer). Read+write at `UpdatePlayerVehicleControlState @ 0x00403422-0x0040346e` inside the `if (_g_networkControlBufferReset != 0)` block. Set to `0xF` when remote-brake cheat fires (along with velocity-double effect at +0x1cc/+0x1d4); cleared to 0 when not active. Acts as the \"remote brake just fired this tick, suppress until cleared\" latch. 5 xrefs.",
+      "port_mirror": "port: cheat-remote-brake handling \u2014 likely missing from port (no `g_td5.cheat_remote_brake_active`)."
+    },
+    {
+      "tier": "T5",
+      "batch": "25",
+      "address": "0x00483014",
+      "size": "u32",
+      "name": "g_playerControlAccum0",
+      "confidence": "high",
+      "evidence": "Cleared by `ResetPlayerVehicleControlAccumulators @ 0x00402E30` to zero. Reader is `UpdatePlayerVehicleControlState`; written/incremented per-frame as a control-state accumulator. 5 refs across `0x00402E32`, `0x0040343D`, `0x004034CD`, `0x004034D6`, `0x0042c275` (RunRaceFrame tail read).",
+      "port_mirror": "td5_input.c control accum slot 0"
+    }
+  ],
+  "0x00483018": [
+    {
+      "tier": "T1",
+      "batch": "01",
+      "address": "0x00483018",
+      "size": "u16",
+      "name": "g_controlAccumulatorResetMarker",
+      "confidence": "medium",
+      "evidence": "Written @ 0x00402e37 in ResetPlayerVehicleControlAccumulators (alongside DAT_00483014). No visible read refs; likely a sentinel or alignment.",
+      "port_mirror": "`(none)` \u2014 initialization only"
+    },
+    {
+      "tier": "T5",
+      "batch": "25",
+      "address": "0x00483018",
+      "size": "u32",
+      "name": "g_playerControlAccum1",
+      "confidence": "high",
+      "evidence": "Sister field cleared alongside above by `ResetPlayerVehicleControlAccumulators`. Single 2-int pair memset to 0.",
+      "port_mirror": "td5_input.c control accum slot 1"
+    }
+  ],
+  "0x0048301c": [
+    {
+      "tier": "T1",
+      "batch": "01",
+      "address": "0x0048301c",
+      "size": "u32",
+      "name": "g_maxSteeringWeightBalance",
+      "confidence": "high",
+      "evidence": "Read at 0x004036c4 and 0x004036ee in UpdatePlayerSteeringWeightBalance. Written at 0x004155ea in ScreenMainMenuAnd1PRaceFlow (race init). Caps the steering balance delta.",
+      "port_mirror": "`(none)` \u2014 likely INI-driven config"
+    },
+    {
+      "tier": "T5",
+      "batch": "25",
+      "address": "0x0048301c",
+      "size": "u32",
+      "name": "g_steeringBiasMaxSwing",
+      "confidence": "high",
+      "evidence": "Read at `UpdatePlayerSteeringWeightBalance` 0x004036C4 / 0x004036EE as the clamp ceiling on the computed bias delta: `if (DAT_0048301c < iVar1) iVar1 = DAT_0048301c;`. Single writer at `ScreenMainMenuAnd1PRaceFlow @ 0x004155EA` (likely sets per-difficulty). 3 refs.",
+      "port_mirror": "td5_input.c steering-bias cap"
+    }
+  ],
+  "0x00483550": [
+    {
+      "tier": "T2",
+      "batch": "10",
+      "address": "0x00483550",
+      "size": "u32",
+      "name": "g_trackCameraConfigSecondary",
+      "confidence": "low",
+      "evidence": "`LoadTrackRuntimeData` writes from `&DAT_00473824 + (param_1-1) * 8` per-track lookup. Used outside scope; comment-flag only.",
+      "port_mirror": "(none)"
+    },
+    {
+      "tier": "T4",
+      "batch": "18",
+      "address": "0x00483550",
+      "size": "u32",
+      "name": "g_currentTrackCameraConfigA",
+      "confidence": "low",
+      "evidence": "Twin sink with 0x00483954; written by `LoadTrackRuntimeData` from `&DAT_00473824 + (track-1)*8`. Out-of-scope consumer; comment-flag only.",
+      "port_mirror": "(none)"
+    }
+  ],
+  "0x00483954": [
+    {
+      "tier": "T1",
+      "batch": "04",
+      "address": "0x00483954",
+      "size": "u32",
+      "name": "g_currentCheckpointStripIndex",
+      "confidence": "high",
+      "evidence": "Written @ 0x42FD51 in RemapCheckpointOrderForTrackDirection; read @ 0x406F77, 0x4070AE, 0x4076DD; indexes into `g_trackStripRecords` for checkpoint geometry",
+      "port_mirror": "(consider adding)"
+    },
+    {
+      "tier": "T2",
+      "batch": "10",
+      "address": "0x00483954",
+      "size": "u32",
+      "name": "g_trackCameraConfigPrimary",
+      "confidence": "low",
+      "evidence": "Twin of 0x00483550, writes from `&DAT_00473820 + (param_1-1) * 8`; same per-track lookup pair. Comment-flag only.",
+      "port_mirror": "(none)"
+    },
+    {
+      "tier": "T4",
+      "batch": "18",
+      "address": "0x00483954",
+      "size": "u32",
+      "name": "g_currentTrackCameraConfigB",
+      "confidence": "low",
+      "evidence": "Twin sink with 0x00483550; written by `LoadTrackRuntimeData` from `&DAT_00473820 + (track-1)*8`. Out-of-scope consumer; comment-flag only.",
+      "port_mirror": "(none)"
+    }
+  ],
+  "0x0048d988": [
+    {
+      "tier": "T1",
+      "batch": "05",
+      "address": "0x0048d988",
+      "size": "u32",
+      "name": "g_raceActorRuntimeValid",
+      "confidence": "high",
+      "evidence": "Checked at state-3 early-exit gate; if invalid, bounces user",
+      "port_mirror": "td5_frontend.c:9188"
+    },
+    {
+      "tier": "T4",
+      "batch": "16",
+      "address": "0x0048d988",
+      "size": "u32[30]",
+      "name": "g_raceResults",
+      "confidence": "high",
+      "evidence": "120-byte race-results array. Twin of `g_raceSchedule`; copied to cup buffer at `&DAT_00490C34`.",
+      "port_mirror": "td5_save.c TD5_CupDataBuffer.race_results (offset 0x88)"
+    },
+    {
+      "tier": "T5",
+      "batch": "23",
+      "address": "0x0048d988",
+      "size": "struct[6]\u00d720B (120B total)",
+      "name": "g_raceFinalResultsSlotTable_PROVISIONAL",
+      "confidence": "high",
+      "evidence": "ResetRaceResultsTable @ 0x0040a880 iterates 6 entries stride 20 with index-stamp at +1; SortRaceResultsByPrimaryMetricAsc @ 0x0040aad0 reads field +0 metric and writes short rank at +2",
+      "port_mirror": "(none \u2014 needs struct-promotion follow-up; see \"Out-of-scope\")"
+    }
+  ],
+  "0x0048dc50": [
+    {
+      "tier": "T2",
+      "batch": "06",
+      "address": "0x0048dc50",
+      "size": "struct~0xB8 + body",
+      "name": "g_vehicleShadowSpriteTemplates",
+      "confidence": "medium",
+      "evidence": "Base of an array iterated by InitializeVehicleShadowAndWheelSpriteTemplates 0x0040bc6a/0x0040bc71. Stride 0x170, 14 entries; each entry includes a shadow quad-template region around offset +0xb8 (where the loop seeds `puVar5 = &DAT_0048dd08` = base + 0xb8 and walks 14 iterations of `BuildSpriteQuadTemplate`). Address adjacent to `g_shadowVerticalOffset @ 0x0048dc48`. End: 0x0048f128 (= 0x48dc50 + 14*0x170 = 0x48f070 \u2014 hmm but loop uses 0x48f128 as limit and seeds from 0x48dd08; the off-by-0xb8 is the wheel-template offset inside each entry).",
+      "port_mirror": "td5_render.c \u2014 sprite/shadow render path. Port has BuildSpriteQuadTemplate at 0x432BD0 and unified flag dispatch (recent commit bb9cae9); base buffer likely allocated dynamically."
+    },
+    {
+      "tier": "T3",
+      "batch": "15",
+      "address": "0x0048dc50",
+      "size": "byte[6][0x170]",
+      "name": "g_vehicleShadowAndWheelSpriteTemplates",
+      "confidence": "high",
+      "evidence": "6 records \u00d7 0x170 bytes. Cleared by `InitializeVehicleShadowAndWheelSpriteTemplates @ 0x0040BB70` (end at 0x0048F128). Holds the shadow quad + wheel-billboard pair per racer slot. Per-record local_28..local_24 constants `0x42840000`/`0x42FC0000` = (66.0f, 126.0f) define the shadow UV bounding box (referenced in audit). The shadow template is the first of 2 `BuildSpriteQuadTemplate` calls in the loop.",
+      "port_mirror": "`td5_render.c` shadow+wheel templates"
+    }
+  ],
+  "0x0048f368": [
+    {
+      "tier": "T3",
+      "batch": "14",
+      "address": "0x0048f368",
+      "size": "u32",
+      "name": "g_player1SelectedPaintScheme",
+      "confidence": "high",
+      "evidence": "Persisted player-1 car paint variant. Written at 0x004114b8 (race restore), 0x00421a98 (QuickRace OK), 0x0040f5a6 (CarSelect commit), 0x0041c3b2 (NetLobby). Read at 0x0041b75e (frontend display), 0x0040dadc (CarSelect open), 0x0042251f (RaceResults). Paired with `DAT_0048f308` (transient car-select state).",
+      "port_mirror": "(none \u2014 paint scheme not ported)"
+    },
+    {
+      "tier": "T4",
+      "batch": "16",
+      "address": "0x0048f368",
+      "size": "u32",
+      "name": "g_savedCarIndexCup",
+      "confidence": "low",
+      "evidence": "Read by RestoreRaceStatusSnapshot `DAT_0048F368 = DAT_00490BEC;` at 0x004112C0 final block. Mirror of cup-snapshot field; semantic = cached selected-car-id within an active cup snapshot.",
+      "port_mirror": "(none \u2014 implicit through `td5_save_sync_cup_to_game`)"
+    }
+  ],
+  "0x0048f378": [
+    {
+      "tier": "T3",
+      "batch": "11",
+      "address": "0x0048f378",
+      "size": "u32",
+      "name": "g_player1AutoThrottleEnabled",
+      "confidence": "high",
+      "evidence": "Read at `PollRaceSessionInput @ 0x0042c516` (`if (_DAT_0048f378 != 0) g_playerControlBits \\",
+      "port_mirror": "= 0x10000000`). Written at 5 frontend menu functions (`ScreenQuickRaceMenu @ 0x00421426`, `InitializeRaceSeriesSchedule @ 0x0040db05`, `RestoreRaceStatusSnapshot @ 0x004114ca`, plus 2 others). Bit `0x10000000` OR'd into player 1's control word every tick \u2014 same bit-position the port's `g_td5.ini.player_is_ai`/auto-throttle path uses. 12 xrefs."
+    },
+    {
+      "tier": "T3",
+      "batch": "14",
+      "address": "0x0048f378",
+      "size": "u8",
+      "name": "g_player1ManualTransmission",
+      "confidence": "high",
+      "evidence": "**THIS IS THE BIT-28 WRITER.** Read at `PollRaceSessionInput @ 0x0042c516`: `if (_DAT_0048f378 != 0) g_playerControlBits",
+      "port_mirror": "= 0x10000000`. Written by `CarSelectionScreenStateMachine`'s Auto/Manual toggle button (`_DAT_0048f378 = DAT_0048f338` at 0x0040f5b1 + 0x0040f622). `DAT_0048f338` is initialized to `(uint)!(g_selectedGameType != 7)` \u2014 drag race defaults to manual=1, all others default to manual=0 (auto). Toggled in-place by `button==3` at 0x0040ea51. Persisted across races via `RestoreRaceStatusSnapshot @ 0x004114ca`. Zeroed by QuickRace init at 0x00421426."
+    }
+  ],
+  "0x0048f37c": [
+    {
+      "tier": "T3",
+      "batch": "11",
+      "address": "0x0048f37c",
+      "size": "u32",
+      "name": "g_player2AutoThrottleEnabled",
+      "confidence": "high",
+      "evidence": "Twin of 0x0048f378 for player 2. Read at `PollRaceSessionInput @ 0x0042c52f`. Same 5 frontend writers as P1 (with adjacent addresses 0x00421420 / 0x0040e1a6 / 0x004114c8 / etc). 7 xrefs.",
+      "port_mirror": "(same \u2014 split-screen P2 auto-throttle.)"
+    },
+    {
+      "tier": "T3",
+      "batch": "14",
+      "address": "0x0048f37c",
+      "size": "u32",
+      "name": "g_player2ManualTransmission",
+      "confidence": "high",
+      "evidence": "Symmetric to 0x0048f378 for player 2. Read at `PollRaceSessionInput @ 0x0042c52f`: `if (DAT_0048f37c != 0) DAT_00483000",
+      "port_mirror": "= 0x10000000` (where `DAT_00483000 = g_playerControlBits[1]`). Written by `CarSelectionScreenStateMachine`'s player-2 branch at 0x0040e1a6 and final commit at 0x0040f5f0."
+    },
+    {
+      "tier": "T5",
+      "batch": "24",
+      "address": "0x0048f37c",
+      "size": "u8",
+      "name": "g_player2AutoPauseLatch",
+      "confidence": "high",
+      "evidence": "Read at PollRaceSessionInput 0x0042c596: `else if ((iVar1 == 1) && (DAT_0048f37c != 0))`. Companion to `_DAT_0048f378` (player1). When non-zero, player2's auto-pause bit (0x10000000) is set into `g_player2ControlBits`. Twin of `g_player1AutoPauseLatch` at 0x0048f378 (already labeled, see Out-of-scope).",
+      "port_mirror": "(none -- pause-latch behaviour TBD in port)"
+    },
+    {
+      "tier": "T5",
+      "batch": "24",
+      "address": "0x0048f37c",
+      "size": "(covered in PollRaceSessionInput section)",
+      "name": "--",
+      "confidence": "unknown",
+      "evidence": "--",
+      "port_mirror": "--"
+    }
+  ],
+  "0x00490bac": [
+    {
+      "tier": "T4",
+      "batch": "16",
+      "address": "0x00490bac",
+      "size": "u8[12966]",
+      "name": "g_cupDataTd5IoBuffer",
+      "confidence": "high",
+      "evidence": "0x32A6-byte CupData.td5 read/write buffer. Cup snapshot starts at byte 0; first 12 bytes are header (game_type, race_index, npc_group, ...). The CRC32 is at offset +0x0C (`DAT_00490BB8`). Size lives in `DAT_00494BBC`.",
+      "port_mirror": "td5_save.c:171 `s_cup_buf`"
+    },
+    {
+      "tier": "T5",
+      "batch": "23",
+      "address": "0x00490bac",
+      "size": "u8",
+      "name": "g_snapshotGameType",
+      "confidence": "high",
+      "evidence": "Written at start of SerializeRaceStatusSnapshot @ 0x00411120 from g_selectedGameType; first byte of snapshot header (used as CRC base)",
+      "port_mirror": "(none)"
+    }
+  ],
+  "0x00490bb8": [
+    {
+      "tier": "T4",
+      "batch": "16",
+      "address": "0x00490bb8",
+      "size": "u32",
+      "name": "g_cupDataTd5Crc32",
+      "confidence": "high",
+      "evidence": "Embedded CRC32 in cup buffer at offset +0x0C. Computed in SerializeRaceStatusSnapshot's final CRC32 loop (line `DAT_00490BB8 = ~uVar1;`). Verified by `RestoreRaceStatusSnapshot` `if (DAT_00490BB8 == ~uVar2)` and by `ValidateCupDataChecksum`.",
+      "port_mirror": "(none \u2014 `cup_buffer.crc32` field per TD5_CupDataBuffer)"
+    },
+    {
+      "tier": "T5",
+      "batch": "23",
+      "address": "0x00490bb8",
+      "size": "u32",
+      "name": "g_snapshotCrc32",
+      "confidence": "high",
+      "evidence": "Final ~uVar1 (~CRC32) written at end of SerializeRaceStatusSnapshot; computed via DAT_00475160 lookup over 0x32a6 bytes starting at DAT_00490bac",
+      "port_mirror": "td5_save.c CRC32 verification slot"
+    }
+  ],
+  "0x00494bbc": [
+    {
+      "tier": "T4",
+      "batch": "16",
+      "address": "0x00494bbc",
+      "size": "u32",
+      "name": "g_cupDataTd5ByteCount",
+      "confidence": "high",
+      "evidence": "Always 0x32A6 (original) or larger w/ port overlay. Set by LoadContinueCupData at 0x004115FA after fread, written hardcoded to 0x32A6 by SerializeRaceStatusSnapshot at 0x004112B2, read by WriteCupData / ValidateCupDataChecksum for the encryption loop bound.",
+      "port_mirror": "td5_save.c:176 `s_cup_buf_size`"
+    },
+    {
+      "tier": "T5",
+      "batch": "23",
+      "address": "0x00494bbc",
+      "size": "u32",
+      "name": "g_snapshotPayloadSize",
+      "confidence": "high",
+      "evidence": "Set to 0x32a6 (literal) at end of serialize; defines CRC region length",
+      "port_mirror": "td5_save.c snapshot-length constant"
+    }
+  ],
+  "0x004951f0": [
+    {
+      "tier": "T2",
+      "batch": "07",
+      "address": "0x004951f0",
+      "size": "u8[6]",
+      "name": "g_cheatCodeKeyProgressTable",
+      "confidence": "high",
+      "evidence": "6 per-slot byte counters, incremented on key-match in 0x00414e07; reset to 0 on either consume-success path or non-options-screen path; orig comment \"6-byte progress array\"",
+      "port_mirror": "port uses `s_cheat_key_history[32]` ring at td5_frontend.c:471 (rebuilt, not byte-mirror)"
+    },
+    {
+      "tier": "T4",
+      "batch": "16",
+      "address": "0x004951f0",
+      "size": "u8[6]",
+      "name": "g_cheatCodeKeyProgress",
+      "confidence": "high",
+      "evidence": "6 progress indices (current key-in-sequence per cheat). Incremented on match, reset on non-match or activation. Decompile shows reset to zero via `_DAT_004951F0 = 0; _DAT_004951F4 = 0;` (8 bytes covers 6 bytes + 2 pad).",
+      "port_mirror": "(none)"
+    }
+  ],
+  "0x00495234": [
+    {
+      "tier": "T5",
+      "batch": "21",
+      "address": "0x00495234",
+      "size": "u32",
+      "name": "g_cpuHasMmx",
+      "confidence": "high",
+      "evidence": "Derived from `g_cpuFeatureFlags >> 23 & 1` (MMX feature bit). Read by `LoadExtrasGalleryImageSurfaces`, `UpdateExtrasGalleryDisplay`, and `InitializeFrontendDisplayModeState` to GATE the use of MMX-accelerated extras gallery image surfaces. 6 readers.",
+      "port_mirror": "`td5_render.c` always-MMX assumption (port targets x86 baseline)"
+    },
+    {
+      "tier": "T5",
+      "batch": "22",
+      "address": "0x00495234",
+      "size": "u32",
+      "name": "g_extrasGalleryEnabledFlag_PROVISIONAL",
+      "confidence": "medium",
+      "evidence": "Set to 0 in `InitializeFrontendResourcesAndState @ 0x004147C3` and at `0x0042507C` (race-end transition). Read in `LoadExtrasGalleryImageSurfaces @ 0x0040D595` and `UpdateExtrasGalleryDisplay @ 0x0040D84C / 0x0040DA3A / 0x0040DA65` as the gate for whether to load/use extras-gallery surfaces. The dual-use as \"cross-fade enabled\" vs \"feature enabled\" is ambiguous; provisional name pending confirmation. 7 xrefs.",
+      "port_mirror": "(none)"
+    }
+  ],
+  "0x0049628c": [
+    {
+      "tier": "T5",
+      "batch": "22",
+      "address": "0x0049628c",
+      "size": "LPDIRECTDRAWSURFACE7",
+      "name": "g_frontendDialogPanelSurface_PROVISIONAL",
+      "confidence": "medium",
+      "evidence": "Tracked frontend surface allocated in `ScreenStartupInit @ 0x00415377` (408\u00d7112) and used by `ScreenMainMenuAnd1PRaceFlow` later. Released at `0x004153D0`. Dual-use across multiple screens \u2014 semantic name pending wider audit. 4 xrefs in ScreenStartupInit alone.",
+      "port_mirror": "(none \u2014 port renders dialogs directly.)"
+    },
+    {
+      "tier": "T5",
+      "batch": "24",
+      "address": "0x0049628c",
+      "size": "int*",
+      "name": "g_lobbyErrorDialogSurface",
+      "confidence": "high",
+      "evidence": "Created at `RunFrontendNetworkLobby` case 6 entry as `DAT_0049628c = CreateTrackedFrontendSurface(0x1e2, 0x40);` -- the \"Connection lost / No remote players / Host left\" error dialog. Filled by 4 case-6 branches selecting `SNK_NetErrString{1,2,3,4}_exref` pairs. Released on dismiss.",
+      "port_mirror": "(none -- port logs via TD5_LOG_E and returns to main menu)"
+    }
+  ],
+  "0x00496298": [
+    {
+      "tier": "T2",
+      "batch": "07",
+      "address": "0x00496298",
+      "size": "u32",
+      "name": "g_cheatFlagUnlockAll",
+      "confidence": "high",
+      "evidence": "Cheat #0 target. Read by `CarSelectionScreenStateMachine` (0x0042142e), `WritePackedConfigTd5` (0x0040fa1c) -- persisted in Config.td5. Port mirrors as `s_cheat_unlock_all` at td5_frontend.c:261 (commented \"DAT_00496298\").",
+      "port_mirror": "td5_frontend.c:261 `s_cheat_unlock_all`"
+    },
+    {
+      "tier": "T4",
+      "batch": "16",
+      "address": "0x00496298",
+      "size": "u32",
+      "name": "g_cheatPostRaceHighScoreUnlock",
+      "confidence": "high",
+      "evidence": "Cheat target 0 (XOR mask 1). Read in `RunFrontendDisplayLoop @ 0x00414E26` and gated on the post-race screen flow in `ScreenPostRaceHighScoreTable @ 0x004138C7`. Acts as a boolean toggle gating the high-score range branch (controls min-music-track display direction).",
+      "port_mirror": "(none \u2014 port doesn't implement post-race-score cheat)"
+    }
+  ],
+  "0x0049629c": [
+    {
+      "tier": "T2",
+      "batch": "07",
+      "address": "0x0049629c",
+      "size": "u32",
+      "name": "g_cheatFlagBitfieldNetwork",
+      "confidence": "medium",
+      "evidence": "Cheat #4 target, XOR mask = 1 (bit 0). Read by `UpdatePlayerVehicleControlState` (0x004034dd), `ProcessFrontendNetworkMessages` (0x0041b77d), `RunFrontendNetworkLobby` (0x0041d2d0). The network readers suggest a \"network features unlock\" cheat.",
+      "port_mirror": "(none)"
+    },
+    {
+      "tier": "T4",
+      "batch": "16",
+      "address": "0x0049629c",
+      "size": "u32",
+      "name": "g_cheatRemoteBraking",
+      "confidence": "high",
+      "evidence": "Cheat target 4 (XOR mask 1). Read as `_g_cheatRemoteBraking` in `UpdatePlayerVehicleControlState @ 0x004034DD`: zeroes velocities on all other slots when handbrake held \u2014 the \"freeze rivals\" cheat. Decompiler already renamed inline.",
+      "port_mirror": "(none)"
+    }
+  ],
+  "0x004962a8": [
+    {
+      "tier": "T2",
+      "batch": "07",
+      "address": "0x004962a8",
+      "size": "u32",
+      "name": "g_cheatFlagBitfieldGameModes",
+      "confidence": "high",
+      "evidence": "Cheat #1 target, XOR mask = 8 (toggles bit 3). Read/written by `LoadPackedConfigTd5` (0x0040fda9 W, 0x0040fa1c R) -- persisted. Also read by `CarSelectionScreenStateMachine` (0x00410f89..) -- gates car-selection branches.",
+      "port_mirror": "(none -- not modeled)"
+    },
+    {
+      "tier": "T4",
+      "batch": "16",
+      "address": "0x004962a8",
+      "size": "u32",
+      "name": "g_cupUnlockLevel (already named)",
+      "confidence": "unknown",
+      "evidence": "Already labeled (T1). 3-bit cup-tier completion bitfield. LoadConfig at 0x0040FD9C reads `(uint)DAT_0049080F`; Write masks to 7 bits. Config.td5 byte 0x148B.",
+      "port_mirror": "td5_save.c TD5_ConfigBuffer.cup_tier_state"
+    }
+  ],
+  "0x004962ac": [
+    {
+      "tier": "T2",
+      "batch": "07",
+      "address": "0x004962ac",
+      "size": "u32",
+      "name": "g_cheatFlagBitfieldExtras",
+      "confidence": "high",
+      "evidence": "Cheat #2 target, XOR mask = 2 (bit 1). Read by `CarSelectionScreenStateMachine` (0x0042140b) and `RunRaceResultsScreen` (0x00421990) and adjacent extras-gallery code at 0x0040e07b, 0x0040e8f8.",
+      "port_mirror": "(none)"
+    },
+    {
+      "tier": "T4",
+      "batch": "16",
+      "address": "0x004962ac",
+      "size": "u32",
+      "name": "g_cheatAttractModeOverride",
+      "confidence": "medium",
+      "evidence": "Cheat target 2 (XOR mask 2). Read by `ScreenQuickRaceMenu @ 0x0042140B`, attract-mode loaders `0x0040E07B/0x0040E8F8`. Gates an attract-mode-bypass branch.",
+      "port_mirror": "(none)"
+    }
+  ],
+  "0x004962d0": [
+    {
+      "tier": "T1",
+      "batch": "05",
+      "address": "0x004962d0",
+      "size": "u32",
+      "name": "g_raceSinglePlayerCompanionBitfield",
+      "confidence": "medium",
+      "evidence": "Gates display mode for companion slot races",
+      "port_mirror": "td5_frontend.c implicit"
+    },
+    {
+      "tier": "T5",
+      "batch": "21",
+      "address": "0x004962d0",
+      "size": "u32",
+      "name": "(comment-only: career restart gate)",
+      "confidence": "low",
+      "evidence": "Written 2\u00d7 during frontend bootstrap; read once by `RunRaceResultsScreen` to gate the \"go directly to results\" fast path. Unclear single-purpose \u2014 likely a career-stage restart cookie. 3 xrefs.",
+      "port_mirror": "(none)"
+    },
+    {
+      "tier": "T5",
+      "batch": "25",
+      "address": "0x004962d0",
+      "size": "u32",
+      "name": "g_postRaceSkipResultsBanner",
+      "confidence": "medium",
+      "evidence": "Single read in `RunRaceResultsScreen` at 0x00422620: gates the \"if (DAT_004962d0 != 1)\" path that skips to `SetFrontendScreen(0x1a)` early when in attract mode or DNF. Written 0/1 by `InitializeFrontendResourcesAndState @ 0x0041476F` and `0x00414777`. 3 refs total.",
+      "port_mirror": "td5_frontend.c attract-mode skip-results flag"
+    }
+  ],
+  "0x0049636c": [
+    {
+      "tier": "T1",
+      "batch": "05",
+      "address": "0x0049636c",
+      "size": "u32",
+      "name": "g_raceResultsLoadedFlag",
+      "confidence": "medium",
+      "evidence": "Checked as early-entry gate for load/restore logic",
+      "port_mirror": "(none)"
+    },
+    {
+      "tier": "T5",
+      "batch": "21",
+      "address": "0x0049636c",
+      "size": "u32 (0/1)",
+      "name": "g_benchmarkRequestPending",
+      "confidence": "high",
+      "evidence": "Set to 1 by `ScreenMainMenuAnd1PRaceFlow case 4 button 2` (when TimeDemo button pressed in retail-debug build). Read by `RunRaceResultsScreen case 0` to fast-forward back to the menu/benchmark-image-display loop. Also set to 0 by `ScreenStartupInit`. 3 xrefs \u2014 clear semantic.",
+      "port_mirror": "`td5_game.c` benchmark request gate"
+    }
+  ],
+  "0x004970ac": [
+    {
+      "tier": "T5",
+      "batch": "23",
+      "address": "0x004970ac",
+      "size": "char[16]",
+      "name": "g_postRacePlayerNameEntryDefault",
+      "confidence": "high",
+      "evidence": "Fallback default name copied into entry buffer when user submits empty",
+      "port_mirror": "(none)"
+    },
+    {
+      "tier": "T5",
+      "batch": "24",
+      "address": "0x004970ac",
+      "size": "char[60]",
+      "name": "g_localComputerName",
+      "confidence": "high",
+      "evidence": "Filled at browser entry: `GetComputerNameA(&DAT_004970ac, &local_8);` (local_8 = 16). Falls back to literal `\"Clint Eastwood\"` (s_Clint_Eastwood_00465f84) if `GetComputerNameA` fails or returns empty. Used as default session name. Capacity ~60 chars (next named global at 0x004970bc). `DAT_004970e7 = 0` truncation at offset 0x3b == 59 in failure path.",
+      "port_mirror": "port `s_session.name` default"
+    }
+  ],
+  "0x004970bc": [
+    {
+      "tier": "T5",
+      "batch": "24",
+      "address": "0x004970bc",
+      "size": "u8[6][0x3d]",
+      "name": "g_lobbyDriverDisplayNameTable",
+      "confidence": "high",
+      "evidence": "6 rows \u00d7 0x3d (61) bytes stride. Walked by the \"broadcast SeshLeave\" loop in `ProcessFrontendNetworkMessages` at 0x0041b9b2 (`pcVar16 = (char *)&DAT_004970bc; ... pcVar16 = pcVar16 + 0x3d`) and the host-of-session twin loop at 0x0041bb17. Stride confirmed by `iVar5 + 4 < 0xbe4 && pcVar16 += 0x3d` (6 iterations: 0xbcc -> 0xbe4 in dpu_exref). Each row holds the printable driver display name for the corresponding slot's last-known-state.",
+      "port_mirror": "(none -- port reads from `s_roster[i].name`)"
+    },
+    {
+      "tier": "T5",
+      "batch": "24",
+      "address": "0x004970bc",
+      "size": "(covered above)",
+      "name": "--",
+      "confidence": "unknown",
+      "evidence": "--",
+      "port_mirror": "--"
+    }
+  ],
+  "0x00497250": [
+    {
+      "tier": "T4",
+      "batch": "16",
+      "address": "0x00497250",
+      "size": "u32[30]",
+      "name": "g_raceSchedule",
+      "confidence": "high",
+      "evidence": "120-byte race-schedule array. SerializeRaceStatusSnapshot copies 30 dwords from `&DAT_00497250` into cup buffer (`&DAT_00490BBC`). Restore reads it back. Source-port confirms this is the cup race-order table.",
+      "port_mirror": "td5_save.c TD5_CupDataBuffer.race_schedule (offset 0x10)"
+    },
+    {
+      "tier": "T5",
+      "batch": "24",
+      "address": "0x00497250",
+      "size": "u32",
+      "name": "g_dxpdataRaceSettingsGameType",
+      "confidence": "high",
+      "evidence": "First dword of a 0x1e \u00d7 4 = 0x78-byte block. At lobby case 0xc: `DAT_00497250 = g_selectedGameType;`. Block sent as `DXPlay::SendMessageA(1, &DAT_004968ac, 0x80)` (opcode 0x15 broadcast in case 0xf at 0x0041d4ac). Receiver (opcode 0x15 handler) copies 0x1e dwords into this address.",
+      "port_mirror": "(none -- port re-derives)"
+    }
+  ],
+  "0x00497314": [
+    {
+      "tier": "T5",
+      "batch": "23",
+      "address": "0x00497314",
+      "size": "int*",
+      "name": "g_postRaceNameButtonSurfacePtr",
+      "confidence": "medium",
+      "evidence": "Tracked frontend surface for \"Enter Player Name\" button; created/released within ScreenPostRaceNameEntry",
+      "port_mirror": "(none)"
+    },
+    {
+      "tier": "T5",
+      "batch": "24",
+      "address": "0x00497314",
+      "size": "int*",
+      "name": "g_lobbyChatPanelSurface_OR_genericButton",
+      "confidence": "low",
+      "evidence": "**Confusing**: WRITTEN in lobby entry as the chat panel surface (`CreateFrontendDisplayModeButton(... 0x200, 0x80, 0)`) but also written in 5+ other frontend screens (connection browser, create session, main menu) as \"generic display-mode button surface\". Same address reused as a transient surface slot. Marked low-confidence: this is the **frontend's shared chat/options-panel surface** rather than a network-specific global. **DO NOT rename** -- file a comment that says \"transient surface, owner is whichever frontend screen is active\" and let the consolidation session decide.",
+      "port_mirror": "(none)"
+    }
+  ],
+  "0x00497a60": [
+    {
+      "tier": "T1",
+      "batch": "05",
+      "address": "0x00497a60",
+      "size": "u32",
+      "name": "g_raceResultsSeriesAdvanceFlag",
+      "confidence": "high",
+      "evidence": "Gates series progression; set after first Race Again in cup mode",
+      "port_mirror": "(none)"
+    },
+    {
+      "tier": "T5",
+      "batch": "25",
+      "address": "0x00497a60",
+      "size": "u32",
+      "name": "g_postRaceProgressionAdvanced",
+      "confidence": "high",
+      "evidence": "`RunRaceResultsScreen` writes `0` at race-start (state 0), `1` after `g_raceWithinSeriesIndex += 1` (state 0xd next-cup-race path). Guards against double-increment when re-entering the screen. 4 refs (3 writes, 1 read at 0x00422f43).",
+      "port_mirror": "td5_frontend.c post-race progression gate"
+    }
+  ],
+  "0x00497a64": [
+    {
+      "tier": "T1",
+      "batch": "05",
+      "address": "0x00497a64",
+      "size": "u32",
+      "name": "g_lastSelectedResultButton",
+      "confidence": "high",
+      "evidence": "Stores button index (0-4) from state 0xf dispatch",
+      "port_mirror": "td5_frontend.c:9484-9497"
+    },
+    {
+      "tier": "T5",
+      "batch": "25",
+      "address": "0x00497a64",
+      "size": "u32",
+      "name": "g_postRaceMenuButtonChoice",
+      "confidence": "high",
+      "evidence": "Written at state 0xf (`DAT_00497a64 = g_frontendButtonIndex`) when user clicks one of the 5 post-race menu buttons (Race Again / View Replay / View Race Data / Select New Car / Quit). Read by state 0x10 to dispatch the chosen branch. 6 refs.",
+      "port_mirror": "td5_frontend.c menu-choice latch"
+    }
+  ],
+  "0x00497a68": [
+    {
+      "tier": "T1",
+      "batch": "05",
+      "address": "0x00497a68",
+      "size": "u32",
+      "name": "g_selectedRaceResultIndex",
+      "confidence": "high",
+      "evidence": "Tracks viewed result slot (0-5)",
+      "port_mirror": "td5_frontend.c implicit"
+    },
+    {
+      "tier": "T5",
+      "batch": "23",
+      "address": "0x00497a68",
+      "size": "u32",
+      "name": "g_postRaceHighScoreEntrySubState",
+      "confidence": "medium",
+      "evidence": "Reset at case 5/6 of ScreenPostRaceNameEntry; flagged in T1.5 as `g_selectedRaceResultIndex` \u2014 semantic clarification: this is the post-race results carousel sub-state, NOT just selection index. Document overlap, do not rename",
+      "port_mirror": "(none)"
+    },
+    {
+      "tier": "T5",
+      "batch": "25",
+      "address": "0x00497a68",
+      "size": "u32",
+      "name": "g_postRaceRacerCardIndex",
+      "confidence": "high",
+      "evidence": "The current racer slot whose card is being displayed on the results screen. Initialised to `0` (or to `*(int*)(dpu_exref + 0xbe8)` in network mode). Incremented/decremented by `+= DAT_0049b690` (nav direction) in state 6 with wraparound 0..5 and skip-if-state-3 logic. 17 refs. Passed to `DrawRaceDataSummaryPanel(...)`.",
+      "port_mirror": "td5_frontend.c results racer iterator"
+    }
+  ],
+  "0x00497a6c": [
+    {
+      "tier": "T5",
+      "batch": "22",
+      "address": "0x00497a6c",
+      "size": "u32",
+      "name": "(g_languageSelectPostBootFlag \u2014 low confidence, comment-only)",
+      "confidence": "low",
+      "evidence": "Set to 1 only at `ScreenLocalizationInit @ 0x00427192` when `g_frontendBootDispatchMode == 2` (= the post-race re-init path). Read at `RunRaceResultsScreen @ 0x00422F8A / 0x0042304E / 0x0042310C` to influence end-of-race screen flow. Likely \"indicate we just came through language-select on a re-init\" but the readers are deep into RaceResults \u2014 out of attract scope. Comment-only.",
+      "port_mirror": "(none)"
+    },
+    {
+      "tier": "T5",
+      "batch": "23",
+      "address": "0x00497a6c",
+      "size": "u32",
+      "name": "g_replayFileAvailable",
+      "confidence": "medium",
+      "evidence": "reset to 0 at 0x00416d64 in RaceTypeCategoryMenuStateMachine case 2 (Continue Cup); set to 1 at 0x00427192 in ScreenLocalizationInit attract-mode==2 branch (post-View-Replay); read by RunRaceResultsScreen",
+      "port_mirror": "td5_input.c (replay-write-success flag)"
+    },
+    {
+      "tier": "T5",
+      "batch": "25",
+      "address": "0x00497a6c",
+      "size": "u32",
+      "name": "g_replayFileAvailable",
+      "confidence": "high",
+      "evidence": "Single writer at 0x00416d64 (`RaceTypeCategoryMenuStateMachine`) sets it when a replay file IS present on disk; 4 reads in `RunRaceResultsScreen` state 0xd choose between `CreateFrontendDisplayModeButton(SNK_ViewReplay_exref, ...)` (button enabled, replay available) vs `CreateFrontendDisplayModePreviewButton(...)` (button disabled / grayed-out). 5 refs. **Directly relevant to `todo_view_replay_restarts_race_2026-05-19`** \u2014 port may set this incorrectly.",
+      "port_mirror": "td5_frontend.c view-replay button gate"
+    }
+  ],
+  "0x00497a70": [
+    {
+      "tier": "T1",
+      "batch": "05",
+      "address": "0x00497a70",
+      "size": "u32",
+      "name": "g_cupModeNextRaceAvailable",
+      "confidence": "medium",
+      "evidence": "Set by ConfigureGameTypeFlags(); gates Next Cup Race button",
+      "port_mirror": "td5_frontend.c implicit"
+    },
+    {
+      "tier": "T5",
+      "batch": "25",
+      "address": "0x00497a70",
+      "size": "u32",
+      "name": "g_postRaceNextCupRaceAvailable",
+      "confidence": "high",
+      "evidence": "Written `1` at state 0xd when `ConfigureGameTypeFlags()` returns 0 (cup mode has more races queued); also written `0` after race-results screen restart. Read at 0x00423507 to choose between \"Next Cup Race\" preview/active button styling. 3 refs.",
+      "port_mirror": "td5_frontend.c cup-progress flag"
+    }
+  ],
+  "0x00497a74": [
+    {
+      "tier": "T1",
+      "batch": "05",
+      "address": "0x00497a74",
+      "size": "u32",
+      "name": "g_raceResultsStateGateFlag",
+      "confidence": "medium",
+      "evidence": "Checked to gate state 3 exit; reset on state entry",
+      "port_mirror": "td5_frontend.c:9188"
+    },
+    {
+      "tier": "T5",
+      "batch": "25",
+      "address": "0x00497a74",
+      "size": "u32",
+      "name": "g_postRaceRestartSelectedRace",
+      "confidence": "high",
+      "evidence": "Reentry sentinel. Written `1` at state 0x15 (Race Again path) and at `InitializeFrontendResourcesAndState @ 0x00414789`. Read at 0x00422940 to gate \"skip results, restart race\" early-exit. 11 refs.",
+      "port_mirror": "td5_frontend.c restart-race flag"
+    }
+  ],
+  "0x00497a78": [
+    {
+      "tier": "T1",
+      "batch": "05",
+      "address": "0x00497a78",
+      "size": "u32",
+      "name": "g_raceReplayStateFlag",
+      "confidence": "high",
+      "evidence": "Written as 1, 2, 0 in state 0; controls backup lifecycle",
+      "port_mirror": "td5_input.c:157 s_replay_mode_flag"
+    },
+    {
+      "tier": "T5",
+      "batch": "21",
+      "address": "0x00497a78",
+      "size": "int",
+      "name": "(comment-only: race-results saved-state stage)",
+      "confidence": "low",
+      "evidence": "3-state stage marker (0/1/2) for whether the snapshot of `g_selectedCarIndex` / race options has been saved into `0x00497A7C..0x00497A98` for restoring after race-results. Adjacent to results-screen state, not debug.",
+      "port_mirror": "(none)"
+    },
+    {
+      "tier": "T5",
+      "batch": "25",
+      "address": "0x00497a78",
+      "size": "u32",
+      "name": "g_postRaceCarSelectionBackupValid",
+      "confidence": "high",
+      "evidence": "Backup-state-valid flag for the car-selection scratch block at 0x00497A7C..0x00497A98. Written `1` at start of `RaceTypeCategoryMenuStateMachine @ 0x00415500`; written `2` (consumed) in state 0 after the 8-field car-selection snapshot is taken; written `0` in state 0xf option-0 path after restore. Tri-state. 7 refs.",
+      "port_mirror": "td5_frontend.c car-selection backup gate"
+    }
+  ],
+  "0x00497a7c": [
+    {
+      "tier": "T1",
+      "batch": "05",
+      "address": "0x00497a7c",
+      "size": "u32",
+      "name": "g_savedCarIndex",
+      "confidence": "high",
+      "evidence": "Stores g_selectedCarIndex on backup; restored on Race Again",
+      "port_mirror": "td5_frontend.c:9475"
+    },
+    {
+      "tier": "T5",
+      "batch": "25",
+      "address": "0x00497a7c",
+      "size": "u32[8]",
+      "name": "g_postRaceCarSelectionBackup",
+      "confidence": "high",
+      "evidence": "8-dword backup of car-selection state taken when the user starts a race, restored on \"Race Again\" via state 0xf option-0. Saved fields are `g_selectedCarIndex`, `DAT_0048f368` (= `gFrontendSlotCarIdTable`), `DAT_0048f370`, `_DAT_0048f378`, `DAT_00463e08`, `DAT_0048f36c`, `DAT_0048f374`, `DAT_0048f37c`. Block runs 0x00497a7c..0x00497a98 (8 \u00d7 4 = 32 bytes). 2 refs each.",
+      "port_mirror": "td5_frontend.c car-selection backup struct"
+    }
+  ],
+  "0x004a2cdc": [
+    {
+      "tier": "T3",
+      "batch": "13",
+      "address": "0x004a2cdc",
+      "size": "u32[6]",
+      "name": "g_vehicleAudioPlayingIntensityByActor",
+      "confidence": "medium",
+      "evidence": "Per-actor (6) u32. Written by mixer @ 0x00440d46 with value 0 (siren-stop) or value 1 (siren-active+nonzero-vol). Read by another subsystem (`0x004289d4 / 0x004289e6` \u2014 not in sound module, possibly HUD overlay flicker or particle gating). Effectively \"is actor N's siren audible right now?\"",
+      "port_mirror": "(none \u2014 port doesn't propagate to HUD)"
+    },
+    {
+      "tier": "T3",
+      "batch": "14",
+      "address": "0x004a2cdc",
+      "size": "u32[6]",
+      "name": "g_ffCollisionEffectActive",
+      "confidence": "high",
+      "evidence": "Per-player collision FF \"currently playing\" gate. Cleared in `UpdateControllerForceFeedback` after first PlayEffect call; checked to choose between PlayEffect (initial) vs SetEffect (continuing). Set elsewhere by collision dispatch (`PlayVehicleCollisionForceFeedback @ 0x00428a60`).",
+      "port_mirror": "td5_input.c (s_ff struct)"
+    }
+  ],
+  "0x004aaf93": [
+    {
+      "tier": "T3",
+      "batch": "11",
+      "address": "0x004aaf93",
+      "size": "u8",
+      "name": "g_globalDebugPanelKeySticky",
+      "confidence": "medium",
+      "evidence": "Boolean. Set to 1 at `PollRaceSessionInput @ 0x0042c71f` when key 0x3D (F3 \u2014 diagnostics overlay) is pressed. Cleared to 0 at 0x0042c731 (only when key is NOT down). The transition-to-zero side-effect writes `g_inputPollDeferFlag = 1`. 3 xrefs. Likely a debug/diagnostics toggle key.",
+      "port_mirror": "(none \u2014 port has no equivalent; possibly stripped from shipped build but the code path remains active.)"
+    },
+    {
+      "tier": "T3",
+      "batch": "14",
+      "address": "0x004aaf93",
+      "size": "u8",
+      "name": "g_f3PauseInputHeldFlag",
+      "confidence": "high",
+      "evidence": "F3-key edge-detect latch. Set to 1 when `DXInput::CheckKey(0x3d /*F3*/)` returns nonzero; on F3 release the rising-edge path writes `g_inputPollDeferFlag = 1` at 0x0042c728. Source confirms F3 = \"pause input poll\" toggle. Port mirror already labels this.",
+      "port_mirror": "td5_input.c:186 `s_f3_held`"
+    },
+    {
+      "tier": "T5",
+      "batch": "24",
+      "address": "0x004aaf93",
+      "size": "u8",
+      "name": "g_autoExitKeyHeldState",
+      "confidence": "high",
+      "evidence": "At PollRaceSessionInput 0x0042c708-0x0042c724: `DXInput::CheckKey(0x3d)` (= VK_F2). If pressed, `DAT_004aaf93 = 1`. If released and prior was 1, clear and set `g_inputPollDeferFlag = 1`. Edge-detect for the per-frame \"F2 toggles input-poll mode\" behaviour. **Note**: read only inside this function -- if this flag belongs to a wider F2 system the writer/reader will be in another batch's area.",
+      "port_mirror": "(none -- F2-as-poll-defer not mirrored)"
+    }
+  ],
+  "0x004aaf98": [
+    {
+      "tier": "T3",
+      "batch": "11",
+      "address": "0x004aaf98",
+      "size": "u32[2]",
+      "name": "g_perViewCameraCyclePresetDebounce",
+      "confidence": "high",
+      "evidence": "2-element per-viewport counter `[ESI*4 + 0x4aaf98]` at `PollRaceSessionInput @ 0x0042c541` (READ) / 0x0042c54d (DECREMENT). Set to **10** at 0x0042c5ab and 0x0042c8a9 after a camera-cycle event. Decremented per-tick. Gates rapid re-cycling. 6 xrefs.",
+      "port_mirror": "port: input-debounce in `td5_input.c` camera cycle handler \u2014 semantic match, not byte-faithful."
+    },
+    {
+      "tier": "T3",
+      "batch": "14",
+      "address": "0x004aaf98",
+      "size": "int[2]",
+      "name": "g_cameraCyclePerPlayerCooldown",
+      "confidence": "high",
+      "evidence": "Decremented every frame at `PollRaceSessionInput @ 0x0042c541` when nonzero. Reset to 10 when bit 24 (CHANGE_VIEW) fires AND `g_replayModeFlag==0` AND `g_cameraTransitionActive==0`. Also reset to 10 by F4/F5 keyboard fallback at 0x0042c8a9. Per-player (indexed by `iVar1=0..1`).",
+      "port_mirror": "td5_input.c:127 `s_camera_cooldown[]`"
+    },
+    {
+      "tier": "T5",
+      "batch": "24",
+      "address": "0x004aaf98",
+      "size": "u32[2]",
+      "name": "g_cameraCycleDebounceTable",
+      "confidence": "high",
+      "evidence": "Twin per-player cooldown counter. Written `(&DAT_004aaf98)[iVar1] = 10;` after CycleRaceCameraPreset (PollRaceSessionInput 0x0042c5e2). Decremented per tick at 0x0042c5b1 if non-zero. Used by both the `0x1000000` (cycle camera) and the function-key (VK_F4/F5) per-player camera-cycle paths. **Stride 4 = 2 dwords.**",
+      "port_mirror": "port has no equivalent; cycle has no debounce."
+    },
+    {
+      "tier": "T5",
+      "batch": "24",
+      "address": "0x004aaf98",
+      "size": "u32",
+      "name": "-- second slot of g_cameraCycleDebounceTable -- already covered",
+      "confidence": "unknown",
+      "evidence": "--",
+      "port_mirror": "--"
+    }
+  ],
+  "0x004ad288": [
+    {
+      "tier": "T2",
+      "batch": "10",
+      "address": "0x004ad288",
+      "size": "void*",
+      "name": "g_dragRaceLaneStripPtr",
+      "confidence": "medium",
+      "evidence": "`InitializeRaceActorRuntime` writes 15 short writes at `*(DAT_004ad288 + 0x40..0x84)` \u2014 drag race lane geometry init (gates only run in `g_selectedGameType != 0` paths visible elsewhere). 15 xrefs.",
+      "port_mirror": "td5_physics.c drag-strip block"
+    },
+    {
+      "tier": "T4",
+      "batch": "19",
+      "address": "0x004ad288",
+      "size": "void*",
+      "name": "g_dragRaceLaneStripPtr",
+      "confidence": "high",
+      "evidence": "15 reads inside `InitializeRaceActorRuntime @ 0x00433558..0x0043360e` of the form `*(short *)(DAT_004ad288 + 0xNN) = literal`. The literals (0xff10, 0xff79, 0x208, 0xf0, ...) are 16-bit signed fixed-point coordinates that match a **12-vertex quad-strip** at offsets 0x40..0x5c plus 0x80..0x84 trailer (count + pad). Companion literal block at `_DAT_004ad2e0..0x004ad2fc` writes the SAME values directly \u2014 indicating `DAT_004ad288 == 0x004ad2a0` at runtime (pointer + 0x40 == 0x4ad2e0 = lane-2 mirror). Writer site **not found** in static disasm (likely written by an indirect strip-walker or runtime-bound via track-strip data; references-database has 15 reads but no `MOV [0x4ad288], reg` byte pattern). Block fires only when execution reaches the post-loop sequence in `InitializeRaceActorRuntime` (which is unconditional, but the data is only consumed by drag start-grid geometry submission).",
+      "port_mirror": "td5_physics.c drag-strip pre-init block (port likely doesn't need this \u2014 drag uses hardcoded pose)"
+    }
+  ],
+  "0x004aed8c": [
+    {
+      "tier": "T2",
+      "batch": "10",
+      "address": "0x004aed8c",
+      "size": "void*",
+      "name": "g_trafficBusTableBlob",
+      "confidence": "high",
+      "evidence": "`LoadTrackRuntimeData` reads TRAFFIC.BUS (`&PTR_s_TRAFFIC_BUS_004673c0`); seeds `g_activeTrafficBusCursor` (0x004b08b8)",
+      "port_mirror": "td5_ai.c TRAFFIC.BUS table"
+    },
+    {
+      "tier": "T4",
+      "batch": "18",
+      "address": "0x004aed8c",
+      "size": "void*",
+      "name": "g_trafficBusTableBlob",
+      "confidence": "high",
+      "evidence": "`LoadTrackRuntimeData @ 0x0042FC79` allocates TRAFFIC.BUS (`&PTR_s_TRAFFIC_BUS_004673c0`); seeds `g_activeTrafficBusCursor` (0x004b08b8). **Deferred from batch_10**.",
+      "port_mirror": "td5_ai.c TRAFFIC.BUS table"
+    }
+  ],
+  "0x004aed90": [
+    {
+      "tier": "T2",
+      "batch": "10",
+      "address": "0x004aed90",
+      "size": "void*",
+      "name": "g_trackStripDataBlob",
+      "confidence": "high",
+      "evidence": "`LoadTrackRuntimeData` allocates and reads STRIP.DAT here; bound to runtime pointers by `BindTrackStripRuntimePointers @ 0x00444070` (which writes `g_trackStripRecords`, `g_trackVertexPool`, `g_trackStripAttributeBasePtr`)",
+      "port_mirror": "td5_track.c STRIP.DAT loader"
+    },
+    {
+      "tier": "T4",
+      "batch": "18",
+      "address": "0x004aed90",
+      "size": "void*",
+      "name": "g_trackStripDataBlob",
+      "confidence": "high",
+      "evidence": "`LoadTrackRuntimeData @ 0x0042FBD0` allocates STRIP.DAT here via `HeapAllocTracked`; consumed by `BindTrackStripRuntimePointers @ 0x00444070` which extracts [0]=strip_records, [1]=total_span_count, [2]=vertex_pool, [3]=(written to DAT_004c3d8c), [4]=strip_attr_span_count. **Deferred from batch_10**.",
+      "port_mirror": "td5_track.c STRIP.DAT loader"
+    }
+  ],
+  "0x004aed94": [
+    {
+      "tier": "T2",
+      "batch": "10",
+      "address": "0x004aed94",
+      "size": "void*",
+      "name": "g_leftRouteTableBlob",
+      "confidence": "high",
+      "evidence": "`LoadTrackRuntimeData` reads LEFT.TRK into this allocation (`&PTR_s_LEFT_TRK_004673b8`); seeds `g_activeRouteTablePtrA_left` (0x004afb58)",
+      "port_mirror": "td5_ai.c LEFT.TRK buffer"
+    },
+    {
+      "tier": "T4",
+      "batch": "18",
+      "address": "0x004aed94",
+      "size": "void*",
+      "name": "g_leftRouteTableBlob",
+      "confidence": "high",
+      "evidence": "`LoadTrackRuntimeData @ 0x0042FC0B` allocates LEFT.TRK here (`&PTR_s_LEFT_TRK_004673b8`); seeds `g_activeRouteTablePtrA_left` (0x004afb58) via `InitializeRaceActorRuntime`. **Deferred from batch_10**.",
+      "port_mirror": "td5_ai.c LEFT.TRK buffer"
+    }
+  ],
+  "0x004aed98": [
+    {
+      "tier": "T2",
+      "batch": "10",
+      "address": "0x004aed98",
+      "size": "int[6]",
+      "name": "g_raceCheckpointTableLive",
+      "confidence": "high",
+      "evidence": "`LoadTrackRuntimeData` copies 6 dwords from `&DAT_0046cf6c + param_1*4`-pointed array into `&DAT_004aed98`. Address is then assigned to the already-named `g_raceCheckpointTablePtr`. This is the back-store for the checkpoint table.",
+      "port_mirror": "(none)"
+    },
+    {
+      "tier": "T4",
+      "batch": "18",
+      "address": "0x004aed98",
+      "size": "int[6]",
+      "name": "g_raceCheckpointTableLive",
+      "confidence": "high",
+      "evidence": "`LoadTrackRuntimeData @ 0x0042FD3E` copies 6 dwords from `&DAT_0046cf6c + track*4`-pointed array into this address; then assigned to `g_raceCheckpointTablePtr`. Back-store for checkpoint table. **Deferred from batch_10**.",
+      "port_mirror": "(none)"
+    }
+  ],
+  "0x004aedb0": [
+    {
+      "tier": "T1",
+      "batch": "04",
+      "address": "0x004aedb0",
+      "size": "u32[16]",
+      "name": "gCheckpointOrderRemapTable",
+      "confidence": "high",
+      "evidence": "Array of checkpoint order indices used when track direction changes (forward vs reverse). Read in RemapCheckpointOrderForTrackDirection @ 0x42FD70. Paired with `gTrackDirectionSwitchFlag` to switch orderings",
+      "port_mirror": "`td5_track.c` (none yet)"
+    },
+    {
+      "tier": "T2",
+      "batch": "10",
+      "address": "0x004aedb0",
+      "size": "byte[0x60]",
+      "name": "g_checkpointNumTable",
+      "confidence": "medium",
+      "evidence": "`LoadTrackRuntimeData` reads CHECKPT.NUM (0x60 bytes) directly into this address. Referenced by checkpoint logic (out of scope). Memo `todo_drag_checkpt_num_sentinel` already mentions this archive \u2014 confirm name candidate.",
+      "port_mirror": "td5_track.c CHECKPT.NUM"
+    },
+    {
+      "tier": "T4",
+      "batch": "18",
+      "address": "0x004aedb0",
+      "size": "byte[0x60]",
+      "name": "g_checkpointNumTable",
+      "confidence": "medium",
+      "evidence": "`LoadTrackRuntimeData @ 0x0042FBFA` reads CHECKPT.NUM (0x60 bytes) directly into this address. Referenced in `todo_drag_checkpt_num_sentinel`. **Deferred from batch_10**.",
+      "port_mirror": "td5_track.c CHECKPT.NUM"
+    }
+  ],
+  "0x004aee10": [
+    {
+      "tier": "T4",
+      "batch": "17",
+      "address": "0x004aee10",
+      "size": "byte*",
+      "name": "g_perTrackEnvAssetTable",
+      "confidence": "high",
+      "evidence": "Per-track environment-asset descriptor table base. Written by `InitializeTrackStripMetadata @ 0x0042fad0` from `&DAT_0046bb1c + track_idx*4` (table of pointers). Header at +0 = count (DAT_004aee10[0]); entries stride 0x20 starting at +0x40 hold archive name strings used by `LoadEnvironmentTexturePages` to fetch each `ENV%d` page. 11 xrefs.",
+      "port_mirror": "td5_asset.c env-list parser"
+    },
+    {
+      "tier": "T4",
+      "batch": "18",
+      "address": "0x004aee10",
+      "size": "void*",
+      "name": "g_trackEnvironmentMetadataBlob",
+      "confidence": "high",
+      "evidence": "`InitializeTrackStripMetadata @ 0x0042FADD` writes `DAT_004aee10 = (&DAT_0046bb1c)[track_pool * 4]` (per-track environment-metadata pointer). Read by `LoadEnvironmentTexturePages @ 0x0042F990` (texture page count at +0, names at +0x40 stride 0x20), `ConfigureActorProjectionEffect @ 0x0040CBE2` (mode codes at +0x4 and +0x14). Distinct from `g_trackEnvironmentConfig` (LEVELINF.DAT) at 0x4aee20. 11 xrefs.",
+      "port_mirror": "td5_track.c per-track .STR metadata"
+    }
+  ],
+  "0x004aee14": [
+    {
+      "tier": "T2",
+      "batch": "09",
+      "address": "0x004aee14",
+      "size": "u32 ptr",
+      "name": "g_trackLightingZoneTablePtr",
+      "confidence": "high",
+      "evidence": "Seeded by `LoadTrackRuntimeData` @ 0x0042FD19 from `(&DAT_00469c78)[track_index]`; read by `ApplyTrackLightingForVehicleSegment` @ 0x00430150 (indexed by `actor->field_0x377` \u00d7 0x24) and `UpdateActorTrackLightState` @ 0x0040CDAA (reads field +0x1c of same row). Per memo: stride 0x24, ~285 zones \u00d7 42 tracks total across the per-track tables",
+      "port_mirror": "`td5mod/src/td5re/td5_light_zones_table.inc` (zone table is statically extracted port-side; runtime pointer is per-track, mirrored in port helpers)"
+    },
+    {
+      "tier": "T2",
+      "batch": "10",
+      "address": "0x004aee14",
+      "size": "u32",
+      "name": "g_trackCircuitFlagOrLapCount",
+      "confidence": "medium",
+      "evidence": "`LoadTrackRuntimeData` writes `*(DAT_00469c78 + param_1 * 4)` here (per-track lookup). Read by 0x0040cdaa and 0x00430150. Likely lap/checkpoint config. Comment-flag for verification.",
+      "port_mirror": "(none)"
+    }
+  ],
+  "0x004aee1c": [
+    {
+      "tier": "T2",
+      "batch": "10",
+      "address": "0x004aee1c",
+      "size": "void*",
+      "name": "g_rightRouteTableBlob",
+      "confidence": "high",
+      "evidence": "`LoadTrackRuntimeData` reads RIGHT.TRK (`&PTR_s_RIGHT_TRK_004673bc`); seeds `g_activeRouteTablePtrB_right` (0x004b08b4)",
+      "port_mirror": "td5_ai.c RIGHT.TRK buffer"
+    },
+    {
+      "tier": "T4",
+      "batch": "18",
+      "address": "0x004aee1c",
+      "size": "void*",
+      "name": "g_rightRouteTableBlob",
+      "confidence": "high",
+      "evidence": "`LoadTrackRuntimeData @ 0x0042FC44` allocates RIGHT.TRK (`&PTR_s_RIGHT_TRK_004673bc`); seeds `g_activeRouteTablePtrB_right` (0x004b08b4). **Deferred from batch_10**.",
+      "port_mirror": "td5_ai.c RIGHT.TRK buffer"
+    }
+  ],
+  "0x004aee54": [
+    {
+      "tier": "T4",
+      "batch": "17",
+      "address": "0x004aee54",
+      "size": "uint*",
+      "name": "g_modelsDatPostEntryTableEnd",
+      "confidence": "medium",
+      "evidence": "Set in `ParseModelsDat @ 0x0043119e` as `gModelsDatEntryTable + gModelsDatEntryCount * 2` \u2014 i.e. the address just past the end of the 8-byte-pair entry table. Allows downstream code (currently unidentified callers) to find the start of the raw mesh blob region. 1 xref (writer only \u2014 no reader yet observed, which matches the audit memo's note that the 2nd dword of each pair has no observed runtime consumer).",
+      "port_mirror": "td5_asset.c MODELS.DAT end-of-table"
+    },
+    {
+      "tier": "T4",
+      "batch": "18",
+      "address": "0x004aee54",
+      "size": "void*",
+      "name": "g_modelsDatPostEntryTableBlob",
+      "confidence": "medium",
+      "evidence": "`ParseModelsDat @ 0x0043119E` writes `_DAT_004aee54 = gModelsDatEntryTable + gModelsDatEntryCount * 2` (offset to whatever follows the 8-byte entry-pair table in MODELS.DAT). **Write-only globally \u2014 no known reader.** Likely an unused header trailer pointer or reserved future hook.",
+      "port_mirror": "td5_render.c MODELS.DAT trailer (currently unused)"
+    }
+  ],
+  "0x004b08b4": [
+    {
+      "tier": "T1",
+      "batch": "03",
+      "address": "0x004b08b4",
+      "size": "u32",
+      "name": "g_traffic_queue_span_base",
+      "confidence": "high",
+      "evidence": "READ @ 0x00436B43 (immediate); written from unknown init location. Used to initialize route state base when traffic queue entry has span < g_actorRuntimeState.field_0x130.",
+      "port_mirror": "(port inline, see td5_ai.c:2626 comment)"
+    },
+    {
+      "tier": "T2",
+      "batch": "10",
+      "address": "0x004b08b4",
+      "size": "void*",
+      "name": "g_activeRouteTablePtrB_right",
+      "confidence": "high",
+      "evidence": "Symmetric to `g_activeRouteTablePtrA_left`. Writes `DAT_004b08b4 = DAT_004aee1c` (RIGHT.TRK buffer); used for odd slots and as the \"other route\" pointer that RS[0] gets swapped to on route changes. 11 xrefs.",
+      "port_mirror": "td5_ai.c right-route-pointer global"
+    }
+  ],
+  "0x004b08b8": [
+    {
+      "tier": "T1",
+      "batch": "03",
+      "address": "0x004b08b8",
+      "size": "u32",
+      "name": "g_traffic_queue_cursor_ptr",
+      "confidence": "high",
+      "evidence": "READ @ 0x004353C9, 0x004356D3, 0x0043587D (loops & condition); WRITE @ 0x00432E86, 0x004353F3, 0x00435C98, 0x00435888; called `DAT_004b08b8` in decompiler. Tracks position in traffic spawn queue.",
+      "port_mirror": "td5_ai.c:302 (g_traffic_queue_ptr)"
+    },
+    {
+      "tier": "T2",
+      "batch": "10",
+      "address": "0x004b08b8",
+      "size": "void*",
+      "name": "g_activeTrafficBusCursor",
+      "confidence": "high",
+      "evidence": "`InitializeRaceActorRuntime` initializes `DAT_004b08b8 = DAT_004aed8c` (TRAFFIC.BUS blob ptr). Then advanced/rewound by `RecycleTrafficActorFromQueue @ 0x004353B0` reads + writes. Functions as the active \"next traffic entry\" cursor. 11 xrefs.",
+      "port_mirror": "td5_ai.c traffic-recycle cursor"
+    }
+  ],
+  "0x004b1120": [
+    {
+      "tier": "T2",
+      "batch": "08",
+      "address": "0x004b1120",
+      "size": "i32[2]",
+      "name": "g_hudPrevSpanPosition",
+      "confidence": "high",
+      "evidence": "Per-view 2-element table (`piVar1 = &DAT_004b1120 + view`); HUD 0x004394D9 updates it from actor field +0x80. Drives U-turn warning latch via `0x004b1140`-adjacent counter. Port mirror: `s_prev_span_pos`.",
+      "port_mirror": "td5_hud.c:155 s_prev_span_pos"
+    },
+    {
+      "tier": "T5",
+      "batch": "21",
+      "address": "0x004b1120",
+      "size": "int[2]",
+      "name": "g_hudPrevSpeedCache",
+      "confidence": "medium",
+      "evidence": "`&DAT_004b1120 + view` \u2014 set to `iVar10 = (int16)actor.field_0x80` (= player speed) by `RenderRaceHudOverlays` after the route-heading-divergence check; read next frame to detect deceleration spike (which counts up the wrong-way-warning fade). 2 xrefs.",
+      "port_mirror": "(port currently always-on)"
+    }
+  ],
+  "0x004b1140": [
+    {
+      "tier": "T2",
+      "batch": "08",
+      "address": "0x004b1140",
+      "size": "i32[2]",
+      "name": "g_hudWrongWayCounter_v0",
+      "confidence": "high",
+      "evidence": "First slot of the wrong-way/U-turn dwell counter; HUD 0x00439527 increments via `(&g_hudFadeOverlayAlpha)[view]`. Writer is HUD itself (`(&g_hudFadeOverlayAlpha)[view] = ... + 1`). g_hudFadeOverlayAlpha resolves to 0x004b1140 already in Ghidra as overlapping label? \u2014 confirmed mislabel: this slot is *not* the same as the named symbol; the port treats this as `s_wrong_way_counter` slot 0.",
+      "port_mirror": "td5_hud.c:154 s_wrong_way_counter"
+    },
+    {
+      "tier": "T2",
+      "batch": "08",
+      "address": "0x004b1140",
+      "size": "f32",
+      "name": "g_hudView0CenterX",
+      "confidence": "high",
+      "evidence": "+0x08 \u2014 center_x = (vp_left + vp_right) * 0.5 from 0x00437DAB FSTP. Shared address with wrong-way counter only because **the wrong-way counter sits inside the 14-float stride at offset +0x08; the port unpacked it into a separate array**. Confirms: 0x4b1140 is dual-purpose-overloaded between init (center_x writeback) and HUD-loop (wrong-way counter scratch). See key discoveries.",
+      "port_mirror": "td5_hud.c center_x / s_wrong_way_counter"
+    }
+  ],
+  "0x004b1178": [
+    {
+      "tier": "T2",
+      "batch": "08",
+      "address": "0x004b1178",
+      "size": "i32",
+      "name": "g_hudWrongWayCounter_v1",
+      "confidence": "high",
+      "evidence": "Second slot of same 2-entry per-view counter (slot 0 at 0x004b1140, slot 1 at 0x004b1178). Writer InitializeRaceHudLayout @ 0x00437DDB.",
+      "port_mirror": "td5_hud.c:154 s_wrong_way_counter[1]"
+    },
+    {
+      "tier": "T2",
+      "batch": "08",
+      "address": "0x004b1178",
+      "size": "f32",
+      "name": "g_hudView1CenterX",
+      "confidence": "medium",
+      "evidence": "+0x40 \u2014 view-1 center_x. Same dual-use as 0x4b1140 (init writes float center_x; HUD loop reads view-1 wrong-way counter from same byte range).",
+      "port_mirror": "(struct field)"
+    }
+  ],
+  "0x004b11a8": [
+    {
+      "tier": "T2",
+      "batch": "08",
+      "address": "0x004b11a8",
+      "size": "i32[2]",
+      "name": "g_hudIndicatorDigit",
+      "confidence": "high",
+      "evidence": "Per-view 2-element table read at HUD 0x00439518 (`(&DAT_004b11a8)[view]`); writer is `SetRaceHudIndicatorState @ 0x00439B60`: `dword ptr [ECX*4 + 0x4b11a8] = EAX`. Port mirror: `s_indicator_state[MAX_HUD_VIEWS]`.",
+      "port_mirror": "td5_hud.c:156 s_indicator_state"
+    },
+    {
+      "tier": "T5",
+      "batch": "21",
+      "address": "0x004b11a8",
+      "size": "int[2]",
+      "name": "g_hudIndicatorState",
+      "confidence": "medium",
+      "evidence": "Per-view HUD indicator state value. Written ONLY by `SetRaceHudIndicatorState @ 0x00439B60` (a single-line setter); read by `RenderRaceHudOverlays` to gate the \"checkpoint-passed flash\" / \"milestone reached\" sprite emission. **Named because of the dedicated setter \u2014 clear single-purpose value.**",
+      "port_mirror": "`td5_hud.c` indicator state"
+    }
+  ],
+  "0x004b11b0": [
+    {
+      "tier": "T2",
+      "batch": "08",
+      "address": "0x004b11b0",
+      "size": "u32",
+      "name": "g_hudCurrentViewIndex",
+      "confidence": "high",
+      "evidence": "Loop induction at HUD body 0x004388B3 (`DAT_004b11b0 = 0`), increments at 0x004396FC; gates per-view code via `< g_hudViewCount`. 13 refs (3 writes). Port mirror: `s_cur_view`.",
+      "port_mirror": "td5_hud.c:134 s_cur_view"
+    },
+    {
+      "tier": "T5",
+      "batch": "21",
+      "address": "0x004b11b0",
+      "size": "int",
+      "name": "g_hudCurrentViewIndex",
+      "confidence": "high",
+      "evidence": "The view-iteration index used by `RenderRaceHudOverlays` to walk through the active viewports. Re-read by every HUD branch; set/incremented by the outer loop. 10 xrefs all in HUD render. **This is the HUD-specific twin of `g_activeRenderViewIndex` (T3 batch 15).**",
+      "port_mirror": "`td5_hud.c` current view"
+    }
+  ],
+  "0x004b11c4": [
+    {
+      "tier": "T2",
+      "batch": "08",
+      "address": "0x004b11c4",
+      "size": "u32",
+      "name": "g_hudUseMetricUnits",
+      "confidence": "high",
+      "evidence": "Read at HUD 0x00438EAA (gates `(speed*256+625)/1252` vs `(speed*256+389)/778`). Writer is `ScreenMainMenuAnd1PRaceFlow @ 0x00415490` body @ 0x00415597 -- main-menu UNITS option. 0 = MPH, 1 = KPH.",
+      "port_mirror": "td5_hud.c speed_display switch"
+    },
+    {
+      "tier": "T5",
+      "batch": "21",
+      "address": "0x004b11c4",
+      "size": "u32 (0/1)",
+      "name": "(comment-only: speed-readout-units live cache)",
+      "confidence": "low",
+      "evidence": "Already-known via cross-reference (`DAT_004B11C4 = DAT_00466028` in main-menu commit). Adds nothing new beyond the shadow\u2192live mapping documented under `gSpeedReadoutUnitsConfigShadow`.",
+      "port_mirror": "(port reads from save struct)"
+    }
+  ],
+  "0x004bedc0": [
+    {
+      "tier": "T3",
+      "batch": "15",
+      "address": "0x004bedc0",
+      "size": "byte[N][0x458]",
+      "name": "g_trackedActorMarkerBillboardPool",
+      "confidence": "medium",
+      "evidence": "0x458-byte records, count derived from loop end at 0x004BF674 \u2192 4 records. Cleared by `InitializeTrackedActorMarkerBillboards @ 0x0043C9E0` to seed 6 sub-templates per record (red/blue light + 2 marker variants \u00d7 2). `AdvanceWorldBillboardAnimations` walks this stride 0x22C (so 2 sub-records per primary).",
+      "port_mirror": "(none \u2014 port stubs police markers)"
+    },
+    {
+      "tier": "T3",
+      "batch": "15",
+      "address": "0x004bedc0",
+      "size": "u32",
+      "name": "g_trackedActorMarkerAnimPhase_PROVISIONAL",
+      "confidence": "low",
+      "evidence": "Final 4 dword writes at 0x004BEDC0=0, 0x004BEFEC=0x80, 0x004BF218=0x40, 0x004BF444=0xC0 \u2014 these set the initial animation phase for the 4 record bases at 0x90-degree offsets. Confirms record stride of 0x22C \u00d7 2 = 0x458.",
+      "port_mirror": "(none)"
+    }
+  ],
+  "0x004c38a0": [
+    {
+      "tier": "T2",
+      "batch": "09",
+      "address": "0x004c38a0",
+      "size": "u32[6]",
+      "name": "g_actorTrackZoneAudioStateCode",
+      "confidence": "high",
+      "evidence": "6 dwords (per-slot); written by `ApplyTrackLightingForVehicleSegment` @ 0x004301E2 as `*(undefined4 *)(&DAT_004c38a0 + slot*4) = *(undefined4 *)(psVar9 + 0x10)` \u2014 i.e. copies the zone row's u32 at offset +0x10 (zone-row field `slot_color` per the RE memo). Read **only by audio** (`UpdateVehicleAudioMix` @ 0x00441035 / 0x00441195) as a switch value (cases 1-5) selecting per-engine SFX volume. **Lighting writes it, audio reads it \u2014 a cross-subsystem mailbox.**",
+      "port_mirror": "(none \u2014 port appears to not propagate this; flag for audio TODO)"
+    },
+    {
+      "tier": "T4",
+      "batch": "18",
+      "address": "0x004c38a0",
+      "size": "int[16]",
+      "name": "g_perSlotActiveLightZoneTexturePage",
+      "confidence": "high",
+      "evidence": "`ApplyTrackLightingForVehicleSegment @ 0x004301E2` writes `*(undefined4 *)(&DAT_004c38a0 + slot * 4) = psVar9[0x10]` (texture-page id from current light-zone row, indexed by `slot_index`). Per-slot cached texture page id used by the render-time lighting blend. 1 xref but per-slot stride 4.",
+      "port_mirror": "td5_render.c per-slot light texture page"
+    }
+  ],
+  "0x004c3d04": [
+    {
+      "tier": "T4",
+      "batch": "17",
+      "address": "0x004c3d04",
+      "size": "u32 (bool)",
+      "name": "g_textureUploadSkipResample",
+      "confidence": "high",
+      "evidence": "\"Skip nearest-neighbour resample on upload\" flag. Read at 7 sites (all `ResampleTexturePageToEntryDimensions` gates in `LoadRaceTexturePages` / `LoadEnvironmentTexturePages` / `BuildTrackTextureCacheImpl`'s upload loop, and inside `LoadTrafficVehicleSkinTexture @ 0x004431c0`). When non-zero, the 256\u00d7256 source page is uploaded as-is; when zero (default), it's resampled to the static.hed entry's stored dimensions. Tied to the texture-config mode set somewhere in track loading.",
+      "port_mirror": "td5_render.c upload-time resample gate"
+    },
+    {
+      "tier": "T4",
+      "batch": "18",
+      "address": "0x004c3d04",
+      "size": "int",
+      "name": "g_textureUsesTallPageFormat",
+      "confidence": "medium",
+      "evidence": "Read at 7 sites in `LoadStaticTrackTextureHeader`, `BuildTrackTextureCache`, `LoadTrackTextureSet`, and other texture upload paths. Controls whether (width, height) are read directly from static.hed (when nonzero) or swapped (when zero \u2014 `if uVar1 <= uVar6 then uVar6 = uVar1`). **Never written via instruction \u2014 always 0 in this binary.** Likely an artifact of a removed alternate page layout mode.",
+      "port_mirror": "(none)"
+    }
+  ],
+  "0x004c3d28": [
+    {
+      "tier": "T4",
+      "batch": "17",
+      "address": "0x004c3d28",
+      "size": "u32[6]",
+      "name": "g_trafficMeshSlotOffset",
+      "confidence": "high",
+      "evidence": "Per-traffic-slot offset into the traffic-mesh heap allocation. Written at `LoadRaceVehicleAssets @ 0x0044347b` (iVar19 accumulator) and patched-relative to the heap base in the 0x4c3d28-loop just below. Reads at 0x004c3d40 (loop bound) \u2014 gives 6 slots \u00d7 4 bytes.",
+      "port_mirror": "td5_asset.c traffic-mesh per-slot offset table"
+    },
+    {
+      "tier": "T4",
+      "batch": "19",
+      "address": "0x004c3d28",
+      "size": "void*[6]",
+      "name": "g_trafficVehicleMeshResourcePtrTable",
+      "confidence": "high",
+      "evidence": "Written by `LoadRaceVehicleAssets @ 0x004435c7` (6-element loop), read by traffic spawn code (`InitializeTrafficActorsFromQueue @ 0x0040bdb7`, `RecycleTrafficActorFromQueue` mesh-resolution path). Per-traffic-slot mesh resource pointer. Per LoadRaceVehicleAssets: `(&DAT_004c3d28)[iVar10] = iVar19;` accumulates offsets, then a finalize loop adds the heap base. Sibling of `gSlotMeshResourcePtrTable` (0x004c3d10) for racer slots.",
+      "port_mirror": "td5_physics.c traffic-slot mesh table"
+    },
+    {
+      "tier": "T4",
+      "batch": "20",
+      "address": "0x004c3d28",
+      "size": "void*[6]",
+      "name": "gTrafficMeshResourcePtrTable",
+      "confidence": "high",
+      "evidence": "Sister array of already-named `gSlotMeshResourcePtrTable`. `LoadRaceVehicleAssets` walks 6 traffic-mesh slots and writes `(&DAT_004c3d28)[iVar10] = iVar19` (per-mesh byte offsets into a single big heap alloc). Read by `0x0040bdb7` (traffic-actor mesh resolver, out of scope).",
+      "port_mirror": "td5_track.c / td5_render.c traffic-mesh resolver"
+    }
+  ],
+  "0x004c3d48": [
+    {
+      "tier": "T4",
+      "batch": "17",
+      "address": "0x004c3d48",
+      "size": "u32[6+1]",
+      "name": "g_slotMeshResourceSize",
+      "confidence": "high",
+      "evidence": "Per-slot allocation size for the himodel.dat blob (one dword per slot, 6 slots + 1 trailing entry for player reflection size). Written at `LoadRaceVehicleAssets @ 0x004432d7` (= `GetArchiveEntrySize(s_himodel_dat, ...) rounded up`); read at 0x4432ec / 0x4433e2 / 0x44351b. 4 xrefs.",
+      "port_mirror": "td5_asset.c himodel blob size table"
+    },
+    {
+      "tier": "T4",
+      "batch": "19",
+      "address": "0x004c3d48",
+      "size": "uint32[6]",
+      "name": "g_slotVehicleMeshResourceSizeTable",
+      "confidence": "high",
+      "evidence": "Written by `LoadRaceVehicleAssets @ 0x004432d7` (`(&DAT_004c3d48)[iVar15] = uVar4` \u2014 aligned-up archive entry size). Read at 0x004432ec/0x0044351b for the `ReadArchiveEntry` size argument. Per-slot mesh resource byte sizes (6 entries).",
+      "port_mirror": "td5_physics.c per-slot mesh size table"
+    },
+    {
+      "tier": "T4",
+      "batch": "20",
+      "address": "0x004c3d48",
+      "size": "int[6]",
+      "name": "gSlotMeshResourceByteSize",
+      "confidence": "high",
+      "evidence": "Per-slot mesh byte size cache. `LoadRaceVehicleAssets` writes `(&DAT_004c3d48)[iVar15] = uVar4` for slot iVar15 = 0..5 (or 0..1 in drag mode). Used to compute the second `ReadArchiveEntry` size argument when the same function re-reads `himodel.dat` for `g_playerReflectionMeshResource`.",
+      "port_mirror": "(none \u2014 port consolidates)"
+    }
+  ],
+  "0x004c3d60": [
+    {
+      "tier": "T4",
+      "batch": "17",
+      "address": "0x004c3d60",
+      "size": "u32[6]",
+      "name": "g_trafficMeshSlotSize",
+      "confidence": "high",
+      "evidence": "Sister table to `g_trafficMeshSlotOffset` \u2014 per-slot allocation size for the `MODEL%d.PRR` traffic mesh blob. Written at `LoadRaceVehicleAssets @ 0x0044349a`; read at 0x004433f0.",
+      "port_mirror": "td5_asset.c traffic-mesh per-slot size table"
+    },
+    {
+      "tier": "T4",
+      "batch": "19",
+      "address": "0x004c3d60",
+      "size": "uint32[6]",
+      "name": "g_trafficVehicleMeshResourceSizeTable",
+      "confidence": "high",
+      "evidence": "Written by `LoadRaceVehicleAssets @ 0x00443620` (`(&DAT_004c3d60)[iVar10] = uVar11`). Sibling of `g_slotVehicleMeshResourceSizeTable` for traffic mesh entries.",
+      "port_mirror": "td5_physics.c traffic-slot mesh size table"
+    },
+    {
+      "tier": "T4",
+      "batch": "20",
+      "address": "0x004c3d60",
+      "size": "int[6]",
+      "name": "gTrafficMeshResourceByteSize",
+      "confidence": "high",
+      "evidence": "Twin of `gSlotMeshResourceByteSize` but for traffic slots. Written in the traffic-mesh allocation loop alongside `gTrafficMeshResourcePtrTable`.",
+      "port_mirror": "(none)"
+    }
+  ],
+  "0x004c3d78": [
+    {
+      "tier": "T4",
+      "batch": "17",
+      "address": "0x004c3d78",
+      "size": "byte*",
+      "name": "g_chassisStaticHedEntryPtr",
+      "confidence": "high",
+      "evidence": "Pointer to the \"chassis\" static.hed entry, fetched once in `LoadRaceVehicleAssets @ 0x00443337` (`= FindArchiveEntryByName(..., s_chassis_00474e14)`). Read at 0x00443741 to seed the per-track lighting UV patch. 2 xrefs.",
+      "port_mirror": "(none \u2014 chassis-entry lookup is inline in port)"
+    },
+    {
+      "tier": "T4",
+      "batch": "19",
+      "address": "0x004c3d78",
+      "size": "void*",
+      "name": "g_chassisMeshArchiveEntry",
+      "confidence": "high",
+      "evidence": "Single writer at `LoadRaceVehicleAssets @ 0x00443337` (`FindArchiveEntryByName(piVar9, s_chassis_00474e14)`). Read by `GenerateActorChassisShadowGeometry @ 0x00443741`. Holds the \"chassis\" sub-mesh ptr inside the himodel.dat archive \u2014 used by car-shadow generator.",
+      "port_mirror": "td5_physics.c / td5_render.c chassis sub-mesh resource"
+    },
+    {
+      "tier": "T4",
+      "batch": "20",
+      "address": "0x004c3d78",
+      "size": "void*",
+      "name": "g_chassisMeshArchiveEntry",
+      "confidence": "high",
+      "evidence": "`LoadRaceVehicleAssets` writes `DAT_004c3d78 = FindArchiveEntryByName(piVar9, s_chassis_00474e14)` \u2014 caches the chassis-mesh entry header. Read at race-end cleanup `0x00443741`. The 4 floats at `+0x2c..+0x38` (read into `_DAT_004c3d7c..0x004c3d88`) are the chassis bounding-box for shadow + reflection.",
+      "port_mirror": "td5_render.c chassis bbox"
+    }
+  ],
+  "0x004c3d7c": [
+    {
+      "tier": "T4",
+      "batch": "17",
+      "address": "0x004c3d7c",
+      "size": "f32[4]",
+      "name": "g_chassisFixedPointBounds",
+      "confidence": "medium",
+      "evidence": "4 float globals seeded immediately after `g_chassisStaticHedEntryPtr` from `(uint *)(DAT_004c3d78 + 0x2c..0x38) * _g_fixedPointToFloatScale`. These are the chassis bounding-box extents in float space (used by mesh-prepare / sky-clip downstream). Comment-only group naming; individual semantic of each component (min_x/min_y/max_x/max_y?) needs follow-up.",
+      "port_mirror": "(none)"
+    },
+    {
+      "tier": "T4",
+      "batch": "19",
+      "address": "0x004c3d7c",
+      "size": "float",
+      "name": "g_chassisBoundsXMin",
+      "confidence": "high",
+      "evidence": "Written at `LoadRaceVehicleAssets @ 0x00443360..0x0044339e` as `_DAT_004c3d7c = (float)*(uint *)(DAT_004c3d78 + 0x2c) * <0.5_constant>`. Chassis bounds X (from chassis mesh header offsets 0x2c..0x38).",
+      "port_mirror": "td5_physics.c chassis bounds floats"
+    },
+    {
+      "tier": "T4",
+      "batch": "20",
+      "address": "0x004c3d7c",
+      "size": "float",
+      "name": "g_chassisBoundsMinX",
+      "confidence": "medium",
+      "evidence": "First of 4 floats at `+0x2c..+0x38` of `g_chassisMeshArchiveEntry` (post-multiplied by `g_fixedPointToFloatScale`). Naming reflects probable role as a bounding-box edge but exact semantic unconfirmed (could be center vs edge). Used by shadow/reflection clip.",
+      "port_mirror": "td5_render.c shadow extent"
+    }
+  ],
+  "0x004c3d80": [
+    {
+      "tier": "T4",
+      "batch": "19",
+      "address": "0x004c3d80",
+      "size": "float",
+      "name": "g_chassisBoundsXMax",
+      "confidence": "high",
+      "evidence": "Symmetric writer at same site (offset 0x30 in mesh header * 0.5).",
+      "port_mirror": "(same)"
+    },
+    {
+      "tier": "T4",
+      "batch": "20",
+      "address": "0x004c3d80",
+      "size": "float",
+      "name": "g_chassisBoundsMaxX",
+      "confidence": "medium",
+      "evidence": "Second of the 4 chassis bounds floats. Speculative \u2014 could be max or width.",
+      "port_mirror": "td5_render.c shadow extent"
+    }
+  ],
+  "0x004c3d84": [
+    {
+      "tier": "T4",
+      "batch": "19",
+      "address": "0x004c3d84",
+      "size": "float",
+      "name": "g_chassisBoundsZ",
+      "confidence": "medium",
+      "evidence": "Written from chassis mesh +0x34 * 0.5. Likely Z-axis bound or center.",
+      "port_mirror": "(same)"
+    },
+    {
+      "tier": "T4",
+      "batch": "20",
+      "address": "0x004c3d84",
+      "size": "float",
+      "name": "g_chassisBoundsMinZ",
+      "confidence": "medium",
+      "evidence": "Third \u2014 same caveat.",
+      "port_mirror": "td5_render.c shadow extent"
+    }
+  ],
+  "0x004c3d88": [
+    {
+      "tier": "T4",
+      "batch": "19",
+      "address": "0x004c3d88",
+      "size": "float",
+      "name": "g_chassisBoundsY",
+      "confidence": "medium",
+      "evidence": "Written from chassis mesh +0x38 * 0.5. Likely Y-axis bound or center.",
+      "port_mirror": "(same)"
+    },
+    {
+      "tier": "T4",
+      "batch": "20",
+      "address": "0x004c3d88",
+      "size": "float",
+      "name": "g_chassisBoundsMaxZ",
+      "confidence": "medium",
+      "evidence": "Fourth \u2014 same caveat.",
+      "port_mirror": "td5_render.c shadow extent"
+    }
+  ],
+  "0x004c3da0": [
+    {
+      "tier": "T1",
+      "batch": "03",
+      "address": "0x004c3da0",
+      "size": "struct (~96 bytes)",
+      "name": "g_track_route_metadata",
+      "confidence": "high",
+      "evidence": "Addressed directly; READ @ 0x00435FE6 (DATA reference). Contains route table metadata: 0x14=span count, 0x1c=span offset array. Used by RecycleTrafficActorFromQueue to index junctions.",
+      "port_mirror": "(track metadata, no direct port ref; see td5_track.c)"
+    },
+    {
+      "tier": "T2",
+      "batch": "10",
+      "address": "0x004c3da0",
+      "size": "void*",
+      "name": "g_trackStripBlobAlias",
+      "confidence": "medium",
+      "evidence": "`BindTrackStripRuntimePointers` writes `DAT_004c3da0 = DAT_004aed90` (alias of strip-blob ptr). Read by junction-table walkers (`+0x14` = count, `+0x1c` = first entry stride 6 \u2014 junction/branch table). Wrap of STRIP header. 16 xrefs.",
+      "port_mirror": "td5_track.c strip-blob alias"
+    },
+    {
+      "tier": "T4",
+      "batch": "18",
+      "address": "0x004c3da0",
+      "size": "void*",
+      "name": "g_trackStripBlobAlias",
+      "confidence": "high",
+      "evidence": "`BindTrackStripRuntimePointers @ 0x00444075` writes `DAT_004c3da0 = DAT_004aed90` (alias of strip-blob ptr). Read by `InitializeTrafficActorsFromQueue @ 0x004359D8` as the **junction-table header**: `*(int *)(iVar10 + 0x14)` = junction count; `(ushort *)(iVar10 + 0x1c)` = junction entries (stride 6 bytes = 3 ushorts per entry). Multiple traffic-recycle/route-walker reads at 0x00435ade, 0x00436adb, 0x00436c51, 0x004351b3, 0x004351fa, 0x00436020, 0x00436083, 0x004361bc, 0x00436215, 0x004354b5, 0x004355e2, 0x0043691b, 0x00436966, 0x00443fff. 16 xrefs. **Deferred from batch_10.**",
+      "port_mirror": "td5_track.c strip-blob alias (junction-table holder)"
+    },
+    {
+      "tier": "T4",
+      "batch": "19",
+      "address": "0x004c3da0",
+      "size": "void*",
+      "name": "g_trackStripBlobAliasJunction",
+      "confidence": "high",
+      "evidence": "Single writer: `BindTrackStripRuntimePointers @ 0x00444075` writes `DAT_004c3da0 = DAT_004aed90` (the loaded STRIP.DAT blob). **16 reads** across track/AI/junction-walker functions (`UpdateActorTrackBehavior @ 0x004351b3`, `UpdateActorTrackBounds @ 0x004366e0`, `RecycleTrafficActorFromQueue @ 0x004353B0`, etc.). The reads dereference `+0x14` (= span count?) and `+0x1c` (= start of junction/branch table \u2014 stride 6 words). T2.10 already proposed `g_trackStripBlobAlias` as medium-confidence; **upgrading to high** because the dereferences uniformly walk junction-table records.",
+      "port_mirror": "td5_track.c strip-blob-with-junction-table cursor"
+    }
+  ],
+  "0x004c3ddc": [
+    {
+      "tier": "T3",
+      "batch": "15",
+      "address": "0x004c3ddc",
+      "size": "u32",
+      "name": "g_weatherSegmentTargetView0_PROVISIONAL",
+      "confidence": "low",
+      "evidence": "Sibling of 0x004C3DD8; this offset (+0x4) is set to 0 by `InitializeWeatherOverlayParticles` but never written elsewhere. Likely view-1 mirror of `g_weatherSegmentTargetDensity` (`&DAT_004C3DD8 + view*4` pattern). Comment-flag for verification.",
+      "port_mirror": "(none)"
+    },
+    {
+      "tier": "T6",
+      "batch": "26",
+      "address": "0x004c3ddc",
+      "size": "i32",
+      "name": "g_weatherSegmentTargetDensityView1",
+      "confidence": "medium",
+      "evidence": "View1 of `g_weatherSegmentTargetDensity @ 0x004c3dd8`. Read/written as `*(int *)(&g_weatherSegmentTargetDensity + view*4)` in `UpdateAmbientParticleDensityForSegment`.",
+      "port_mirror": "(none)"
+    }
+  ],
+  "0x004c3de4": [
+    {
+      "tier": "T3",
+      "batch": "15",
+      "address": "0x004c3de4",
+      "size": "u32",
+      "name": "g_weatherActiveCountView1_PROVISIONAL",
+      "confidence": "low",
+      "evidence": "Mirror of `g_weatherActiveCountView0 @ 0x004C3DE0` for view 1 (consistent with the `(&g_weatherActiveCountView0)[param_3]` indexing seen in `RenderAmbientParticleStreaks`). Cleared by `InitializeWeatherOverlayParticles`.",
+      "port_mirror": "(none)"
+    },
+    {
+      "tier": "T6",
+      "batch": "26",
+      "address": "0x004c3de4",
+      "size": "dword",
+      "name": "g_weatherActiveCountView1",
+      "confidence": "medium",
+      "evidence": "View1 of `g_weatherActiveCountView0 @ 0x004c3de0`. Read/written as `(&g_weatherActiveCountView0)[view]` in `UpdateAmbientParticleDensityForSegment`, `UpdateVehicleAudioMix`, and `RenderAmbientParticleStreaks`.",
+      "port_mirror": "(none)"
+    }
+  ]
+}

@@ -29,6 +29,9 @@
 extern int    g_actorSlotForView[2];
 extern uint8_t *g_actor_table_base;
 
+/* Defined in td5_render.c (AngleFromVector12 LUT at 0x0040A720) */
+extern int AngleFromVector12(int x, int z);
+
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -540,9 +543,54 @@ void td5_input_update_player_control(int slot)
     int neg_limit = -steer_limit;
     if (neg_limit < -TD5_INPUT_STEER_MAX) neg_limit = -TD5_INPUT_STEER_MAX;
 
-    /* Path correction bias (simplified -- full version reads track heading).
-     * In the stub this is 0; the physics module will supply the real value.
-     * int path_bias = 0;  -- reserved for physics integration */
+    /* Path correction bias [CONFIRMED @ 0x00402F12-0x00402FB1].
+     * Orig computes:
+     *   motion_angle = AngleFromVector12(lin_vel_x>>8, lin_vel_z>>8)
+     *   angle_diff   = ((motion_angle - (yaw_accum>>8)) - 0x800) & 0xFFF) - 0x800
+     *                  (wrap to signed 12-bit, range -0x800..+0x7FF)
+     *   if (rear_axle_slip < 0x800):
+     *       path_bias_fp0 = (speed_long * angle_diff) >> 11  (signed div by 0x800)
+     *   else:
+     *       path_bias_fp0 = 0
+     *   path_bias_fp8 = path_bias_fp0 << 8
+     *   pos_limit_effective = clamp(max(path_bias_fp8,  steer_limit), ..., +STEER_MAX)
+     *   neg_limit_effective = clamp(min(path_bias_fp8, -steer_limit), -STEER_MAX, ...)
+     * Then digital/analog steering uses pos/neg_limit_effective.
+     * Without this, port had only speed-dependent ±steer_limit and the player
+     * lost the drift-driven steering-range expansion (= "stiff handling"). */
+    {
+        int32_t path_bias_fp8 = 0;
+        TD5_Actor *actor = td5_game_get_actor(slot);
+        if (actor) {
+            uint8_t *abytes = (uint8_t *)actor;
+            int32_t vx = (*(int32_t *)(abytes + 0x1cc)) >> 8;
+            int32_t vz = (*(int32_t *)(abytes + 0x1d4)) >> 8;
+            int32_t motion_angle = AngleFromVector12((int)vx, (int)vz);
+            int32_t yaw_h = (*(int32_t *)(abytes + 0x1f4)) >> 8;
+            int32_t angle_diff = ((motion_angle - yaw_h) - 0x800) & 0xFFF;
+            angle_diff -= 0x800;  /* signed 12-bit, -0x800..+0x7FF */
+            int32_t rear_slip = (*(int32_t *)(abytes + 0x31c)) >> 8;
+            (void)rear_slip;  /* gate is on +0x320 in orig, not +0x31C */
+            int32_t rear_slip_x = (*(int32_t *)(abytes + 0x320));
+            int32_t speed_long  = (*(int32_t *)(abytes + 0x314));
+            int32_t abs_long = speed_long < 0 ? -speed_long : speed_long;
+            if (rear_slip_x < 0x800) {
+                int64_t prod = (int64_t)abs_long * (int64_t)angle_diff;
+                int32_t path_bias_fp0 = (int32_t)(prod >> 11);
+                path_bias_fp8 = path_bias_fp0 << 8;
+            }
+        }
+        /* Expand pos_limit if path_bias is more positive than speed-cap */
+        if (path_bias_fp8 > pos_limit) {
+            pos_limit = path_bias_fp8;
+            if (pos_limit > TD5_INPUT_STEER_MAX) pos_limit = TD5_INPUT_STEER_MAX;
+        }
+        /* Expand neg_limit if path_bias is more negative than -speed-cap */
+        if (path_bias_fp8 < neg_limit) {
+            neg_limit = path_bias_fp8;
+            if (neg_limit < -TD5_INPUT_STEER_MAX) neg_limit = -TD5_INPUT_STEER_MAX;
+        }
+    }
 
     if ((bits & TD5_INPUT_ANALOG_X_FLAG) == 0) {
         /* ---- Path A: Digital steering ---- */
@@ -874,8 +922,24 @@ void td5_input_update_player_control(int slot)
                 }
             }
 
-            /* 0x30C: steering_command (int32) */
-            *(int32_t *)(a + 0x30C) = s_steering_cmd[slot];
+            /* 0x30C: steering_command (int32).
+             *
+             * Skip for slot 0 under PlayerIsAI=1. The AI cascade in
+             * td5_ai_update_steering_bias (0x004340C0 port) is ADDITIVE:
+             * `param_2 = ACTOR_STEERING_CMD + delta`. Writing back the
+             * keyboard-derived s_steering_cmd[0] (= 0 with no human input)
+             * here resets the cascade's accumulator every tick, pinning the
+             * field at exactly the per-tick delta (e.g. -0x4000 from the
+             * emergency-snap branch) instead of allowing it to saturate to
+             * ±0x18000. Visible symptom (Edinburgh PlayerIsAI=1 2000-tick):
+             * slot 0 locked at span 137 from sim_tick 440+, steering pinned
+             * at -16384 = -0x4000. Letting the AI value survive ends the
+             * lock-up. Other input fields (throttle, brake, gearbox) are
+             * unaffected because AI writes them as absolute values after
+             * input runs, so the input pre-write is overwritten. */
+            if (!(slot == 0 && g_td5.ini.player_is_ai)) {
+                *(int32_t *)(a + 0x30C) = s_steering_cmd[slot];
+            }
             /* 0x33E: encounter_steering_cmd (int16) — used as throttle by physics */
             *(int16_t *)(a + 0x33E) = s_throttle[slot];
             /* 0x36D: brake_flag (byte) */
@@ -910,13 +974,18 @@ void td5_input_update_player_control(int slot)
     }
 }
 
-/* ========================================================================
- * ResetPlayerVehicleControlAccumulators  (0x402E30)
+/* [ARCH-DIVERGENCE: 2-dword globals collapsed into per-slot array; L5 sweep 2026-05-21]
+ *   Orig 0x00402E30 zeroes two specific dwords:
+ *     _g_remoteBrakeCheatPerSlotLatch = 0;     (DAT_00483014)
+ *     _g_playerControlAccum1 = 0;              (DAT_00483018)
+ *   Port stores NOS-latch state per-slot in s_nos_latch[TD5_MAX_RACER_SLOTS]
+ *   rather than the orig's 2-dword pair. The port zeroes the whole array here
+ *   to match the conceptual "reset all NOS accumulators" semantics. Orig's
+ *   globals don't exist in port code (only as DAT_* aliases in
+ *   td5_orig_globals.h:153-154 for cross-reference). Per-slot storage is the
+ *   port's design choice driven by TD5_MAX_RACER_SLOTS=6 racer abstraction.
  *
- * Zeroes the NOS latch accumulators for all players.
- * Original: _DAT_00483014 = 0; _DAT_00483018 = 0;
- * ======================================================================== */
-
+ *   ResetPlayerVehicleControlAccumulators  (0x402E30) */
 void td5_input_reset_accumulators(void)
 {
     for (int i = 0; i < TD5_MAX_RACER_SLOTS; i++) {
@@ -929,6 +998,11 @@ void td5_input_reset_accumulators(void)
  *
  * Zeroes the gear-change debounce counters for all 6 slots.
  * Original: memset(DAT_00482FE4, 0, 6 * 4)
+ *
+ * [CONFIRMED @ 0x00402E40] — Ghidra-verified: orig walks &gPlayerControlBuffer
+ * with a 6-iteration loop writing 0 per int (6 × 4 bytes). Port loop matches
+ * iteration count and per-element zero write; TD5_MAX_RACER_SLOTS == 6.
+ * L5 promotion sweep 2026-05-21.
  * ======================================================================== */
 
 void td5_input_reset_buffers(void)
@@ -1387,7 +1461,16 @@ void td5_input_ff_stop(void)
  * params:
  *   assignments -- array of joystick indices (1-based, 0=none)
  *   count       -- number of entries to copy (up to 6)
- * ======================================================================== */
+ *
+ * [ARCH-DIVERGENCE: network-mode branch moved to caller; L5 sweep 2026-05-21]
+ *   Ghidra-verified 0x00428880: orig clears g_ffControllerAssignment[0..5]
+ *   then either copies the param_1[0..count-1] into [0..count-1] when in
+ *   non-network mode (dpu_exref+0xc08 == 0), or splices only one entry
+ *   (param_1[0] -> g_ffControllerAssignment[dpu_exref+0xbe8]) in network
+ *   mode. Port preserves the bulk-clear + bulk-copy half of the original
+ *   (same 6-slot stride, same count clamp) but moves the network-mode
+ *   single-slot splice to caller code; the port comment explicitly notes
+ *   "we handle that at a higher level". Bulk-copy path itself byte-faithful. */
 
 void td5_input_ff_configure(const int *assignments, int count)
 {
@@ -1499,7 +1582,19 @@ void td5_input_ff_update_player(int slot)
  *
  * A thin helper to fire arbitrary effects on a player's assigned
  * controller.  Validates slot and FF capability before dispatching.
- * ======================================================================== */
+ *
+ * [ARCH-DIVERGENCE: DXInput::PlayEffect -> td5_plat_ff_constant; L5 sweep 2026-05-21]
+ *   Ghidra-verified 0x00428A10: orig validates slot < 6 and
+ *   g_ffControllerAssignment[slot] != 0, then calls
+ *   DXInput::PlayEffect(jsidx, effect_slot, magnitude, repeat_count) if
+ *   the per-joystick FF-capable flag at js_exref[jsidx*0x70+0x44] is set.
+ *   Port replaces DXInput with td5_plat_ff_constant (a 2-param API:
+ *   effect_slot, magnitude), so repeat_count is discarded (already a noop
+ *   for the port's effect cache) and the FF-capable flag check is folded
+ *   into the platform layer's no-op behaviour on unsupported joysticks.
+ *   Port adds an upper-bound `js_idx > 1` clamp the orig lacks, but
+ *   port targets at most 2 force-feedback wheels so the clamp is a noop
+ *   in practice. */
 
 void td5_input_ff_play_effect(int slot, int effect_slot, int magnitude,
                               int repeat_count)
@@ -1527,7 +1622,22 @@ void td5_input_ff_play_effect(int slot, int effect_slot, int magnitude,
  *   0x01-0x08 (front/rear):  A gets slot 1 (frontal), B gets slot 2 (side)
  *   0x10-0x80 (left/right):  B gets slot 1 (frontal), A gets slot 2 (side)
  *   default (other):         Both get slot 2 (side)
- * ======================================================================== */
+ *
+ * [ARCH-DIVERGENCE: actor+0x375 -> explicit slot params; L5 sweep 2026-05-21]
+ *   Ghidra-verified 0x00428A60: orig magnitude = param_4 / 10 clamped to
+ *   10000 (TD5_INPUT_FF_COLLISION_DIV / TD5_INPUT_FF_COLLISION_MAX in port
+ *   match byte-exact), same switch on contact_side with the same
+ *   frontal/side assignments (effect slots 1 and 2 = TD5_FF_SLOT_FRONTAL/
+ *   TD5_FF_SLOT_SIDE in port match orig DXInput::PlayEffect constants),
+ *   reading the actor's per-actor controller-assignment byte at +0x375.
+ *   Port takes (actor_a_slot, actor_b_slot) as explicit int parameters
+ *   rather than reading actor+0x375 directly, and replaces DXInput::
+ *   PlayEffect with td5_input_ff_play_effect (port wrapper, see
+ *   ARCH-DIVERGENCE block on PlayAssignedControllerEffect above). Port
+ *   also sets s_ff.collision_active[slot] = 1 per-actor (port-only state
+ *   used to dampen terrain vibration during collision recovery; the
+ *   orig has no equivalent damping). Switch logic, clamps, and slot
+ *   assignment byte-faithful. */
 
 void td5_input_ff_collision(int contact_side, int actor_a_slot,
                             int actor_b_slot, int raw_magnitude)

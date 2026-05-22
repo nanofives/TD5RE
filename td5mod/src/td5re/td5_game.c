@@ -1211,14 +1211,18 @@ int td5_game_init_race_session(void) {
      * slots 1..5 to state=3 (INACTIVE) so the player runs alone without
      * AI rear-ends. Mirrors the Frida hook's onLeave InitializeRaceSession
      * suppressor on the original side. The runtime AI/physics paths see
-     * single race (game_type=0) so both sides take the same code path. */
+     * single race (game_type=0) so both sides take the same code path.
+     *
+     * SoloAISlot debug knob: slot 0 stays active (camera tracks slot 0),
+     * but its initial route-selector parity is overridden to simulate
+     * slot N's behavior (see td5_ai.c InitializeRaceActorRuntime). */
     if (g_td5.solo_mode_synth && g_td5.split_screen_mode == 0) {
         for (int i = 1; i < TD5_MAX_RACER_SLOTS; i++) {
             s_slot_state[i].state = 3;  /* inactive */
         }
         TD5_LOG_I(LOG_TAG,
-                  "Solo synth: slots 1..5 forced INACTIVE "
-                  "(mirrors Frida TT-synth on original)");
+                  "Solo synth: slots 1..5 INACTIVE, slot 0 simulates SoloAISlot=%d",
+                  g_td5.ini.solo_ai_slot);
     }
     /* Mark unused racer slots as disabled based on the current mode */
     {
@@ -1424,6 +1428,13 @@ int td5_game_init_race_session(void) {
                 continue;
             }
             if (td5_asset_load_traffic_model(traffic_model, traffic_slot)) {
+                /* Mirror orig LoadRaceVehicleAssets @ 0x00443280 traffic loop:
+                 * copy slot-0 cardef into the traffic slot's cardef row. Without
+                 * this, bind_default_vehicle_tuning falls through to the all-zero
+                 * fallback for traffic, leaving CDEF_S(actor, 0x86) = 0 (no ground
+                 * lift → traffic clips through the road) and cardef[0x0C] = 0
+                 * (car_half_w wrong in process_traffic_route_advance). */
+                td5_physics_seed_traffic_cardef_from_player(traffic_slot);
                 traffic_loaded++;
             } else {
                 TD5_LOG_W(LOG_TAG,
@@ -1639,7 +1650,19 @@ int td5_game_init_race_session(void) {
             int world_x = 0;
             int world_y = 0;
             int world_z = 0;
-            int sub_lane = active_lanes[slot];
+
+            /* SoloAISlot data-swap: when set, make slot 0 spawn at slot N's
+             * grid position + lane so we can test each slot's initial
+             * conditions while keeping slot 0 as the camera target. Other
+             * slots are state=3 so they don't drive anyway. */
+            int effective_slot = slot;
+            if (g_td5.solo_mode_synth && slot == 0 &&
+                g_td5.split_screen_mode == 0)
+            {
+                int N = g_td5.ini.solo_ai_slot;
+                if (N >= 0 && N < TD5_MAX_RACER_SLOTS) effective_slot = N;
+            }
+            int sub_lane = active_lanes[effective_slot];
             TD5_StripSpan *sp;
 
             if (track_span_count > 0) {
@@ -1652,7 +1675,7 @@ int td5_game_init_race_session(void) {
                  * NO remap: original FUN_00434350 stores CX directly at
                  * 0x00434377 with no bounds check; actor fields get the raw
                  * int16 value even if negative. */
-                int raw = start_span + span_offsets[slot] + g_td5.ini.start_span_offset;
+                int raw = start_span + span_offsets[effective_slot] + g_td5.ini.start_span_offset;
                 span_index = (int)(int16_t)(raw & 0xFFFF);
             } else {
                 span_index = 1;
@@ -2078,7 +2101,8 @@ int td5_game_init_race_session(void) {
      * which stays at the raw value. */
     for (int i = 0; i < TD5_MAX_RACER_SLOTS; i++) {
         if (s_slot_state[i].state == 3) continue;   /* disabled slot */
-        if (g_td5.checkpoint_timers_enabled) {
+        if (g_td5.checkpoint_timers_enabled &&
+            g_td5.track_type != TD5_TRACK_CIRCUIT) {
             adjust_checkpoint_timers(i);
         } else {
             s_metrics[i].timer_ticks = 0x7FFF;  /* disable: max timer */
@@ -2176,6 +2200,27 @@ static void td5_game_trace_stage_impl(const char *stage, unsigned int stage_bit,
         td5_trace_shutdown();
         g_td5.quit_requested = 1;
         return;
+    }
+
+    /* MaxSpan cap: exit when slot 0's span_normalized reaches the threshold.
+     * Used for per-slot AI benchmarking — see --SoloAISlot=N + --MaxSpan=N. */
+    if (g_td5.ini.max_span > 0) {
+        TD5_Actor *a0 = td5_game_get_actor(0);
+        if (a0) {
+            int16_t span_norm = *(int16_t *)((uint8_t *)a0 + 0x82);
+            if (span_norm >= g_td5.ini.max_span) {
+                static int s_max_span_logged = 0;
+                if (!s_max_span_logged) {
+                    TD5_LOG_I(LOG_TAG,
+                              "MaxSpan cap reached (span_norm=%d >= %d), requesting quit",
+                              (int)span_norm, g_td5.ini.max_span);
+                    s_max_span_logged = 1;
+                }
+                td5_trace_shutdown();
+                g_td5.quit_requested = 1;
+                return;
+            }
+        }
     }
 
     /* Whole-state snapshot -- INDEPENDENT of the per-module CSV trace.
@@ -3882,12 +3927,29 @@ static void advance_pending_finish_state(int slot, uint32_t sim_delta) {
          *   2. Explicit early-out here as a belt-and-braces guard against any
          *      path that leaves checkpoint_count stale while +0x08 is 0. */
         if (s_levelinf_checkpoint_config == 0) {
+            if (slot == 0) {
+                static int s_log_div = 0;
+                if ((++s_log_div % 120) == 0) {
+                    TD5_LOG_I(LOG_TAG,
+                              "P2P checkpoint skipped: LEVELINF +0x08 == 0 (no checkpoints on track)");
+                }
+            }
             return;
         }
         if (m->checkpoint_index < s_active_checkpoint.checkpoint_count) {
             int cp = m->checkpoint_index;
             int threshold = (int)(unsigned int)s_active_checkpoint.checkpoints[cp].span_threshold;
             int span_val  = (int)actor_span;
+            if (slot == 0) {
+                static int s_log_div = 0;
+                if ((++s_log_div % 60) == 0) {
+                    TD5_LOG_I(LOG_TAG,
+                              "P2P checkpoint watch: slot=0 cp=%d span=%d threshold=%d bonus=%d remaining_cps=%d",
+                              cp, span_val, threshold,
+                              (int)(int16_t)s_active_checkpoint.checkpoints[cp].time_bonus,
+                              (int)s_active_checkpoint.checkpoint_count - cp);
+                }
+            }
             if (span_val >= threshold) {
                 /* Crossed checkpoint: add time bonus */
                 m->timer_ticks +=
@@ -4628,6 +4690,17 @@ int td5_game_get_slot_state(int slot) {
 int td5_game_is_replay_active(void) {
     return td5_input_is_playback_active() || s_replay_mode;
 }
+
+/* DA-M1 audit 2026-05-22: frontend View-Replay button only flipped
+ * td5_input_set_replay_mode + td5_input_set_playback_active (both inside
+ * td5_input.c's state). The game-side s_replay_mode static was never set,
+ * so td5_game_init_race_session @ line 1902 hit the WriteOpen branch and
+ * memset the recording buffer to zero — playback then returned 0 input
+ * forever, making the race appear to restart blank. Closes
+ * todo-view-replay-restarts-race-2026-05-19. */
+void td5_game_set_replay_mode(int v) {
+    s_replay_mode = v ? 1 : 0;
+}
 /* [CONFIRMED @ 0x00443240 GetTrafficVehicleVariantType]: two-table lookup;
  * returns 2 if model==0xe(14), 1 otherwise, 0 if gate fails or index==4. */
 int td5_game_get_traffic_variant(int traffic_index) {
@@ -4639,7 +4712,12 @@ int td5_game_get_traffic_variant(int traffic_index) {
 }
 /* Slot 1 is the active pursuing cop in wanted mode (slots 2-5 are inactive).
  * [INFERRED from slot-state init @ 0x42ABF8 + spawn layout @ 0x42B1C6] */
-int td5_game_get_cop_actor_index(void) { return g_td5.wanted_mode_enabled ? 1 : -1; }
+/* Mirrors orig g_wantedTargetSlotIndex @ 0x004bf51c — .data-init = 0,
+ * zero writers across the binary (6 readers verified Ghidra 2026-05-20).
+ * Orig's tracked-vehicle audio fires when slot_iter == 0, so the siren
+ * source is the player's actor (slot 0). The port previously returned 1,
+ * routing the siren onto an opponent AI. */
+int td5_game_get_cop_actor_index(void) { return g_td5.wanted_mode_enabled ? 0 : -1; }
 /* [CONFIRMED]: g_wantedModeEnabled @ 0x4AAF68 set at InitializeRaceSession */
 int td5_game_is_wanted_mode(void) { return g_td5.wanted_mode_enabled; }
 /* [CONFIRMED @ 0x0043D7C0 AdvanceGlobalSkyRotation]: increments
@@ -4705,3 +4783,42 @@ void td5_game_update_split_screen_balance(void)
         g_steer_scale_p2 = 0x100 + delta;
     }
 }
+
+/* ============================================================
+ * [CITATION-SWEEP 2026-05-21] Phase 1 audit-header refresh
+ *
+ * The following L3 Ghidra functions are ported (or folded) into
+ * this file but were missed by build_confidence_map.py's
+ * 2026-05-18 citation scan due to snake_case rename or
+ * multi-line comment wraps. Listed here so the next confidence-
+ * map run promotes them L3 -> L4 (cited without precision
+ * keywords). Per-function audits remain a separate Phase 4 task.
+ *
+ * Source: re/analysis/l3_triage_2026-05-21.csv +
+ *         re/analysis/phase1_manifest_assignment.csv
+ *
+ *   0x00428D20  InitializeBenchmarkFrameRateCapture  [ARCH-DIVERGENCE: benchmark sample-buffer pipeline removed; L5 sweep 2026-05-21]
+ *     Orig (Ghidra-verified 0x00428D20): one-shot HeapAllocTracked(1000000) into
+ *     g_benchmarkSampleBuffer + zeroes g_benchmarkSampleCount. The port has no
+ *     equivalent because benchmark mode samples via td5_plat_query_perf_counter
+ *     directly; see the sibling ARCH-DIVERGENCE block below for the consuming
+ *     functions 0x00428D40 / 0x00428D80. With those gone, this allocator is
+ *     also gone -- no gameplay or fidelity impact.
+ *   0x00428D60  FormatBenchmarkReportText  (density-match, verify in Phase 4)
+ *   0x0042D950  ApplyMeshRenderBasisFromWorldPosition  (density-match, verify in Phase 4)
+ */
+
+/* ============================================================
+ * [ARCH-DIVERGENCE: benchmark output collapse] Phase 3 manifest (2026-05-21)
+ *
+ * Two L3 functions from the original binary that the port does not
+ * implement because the benchmark output format and sampling pipeline
+ * are deliberately changed. Per build_confidence_map.py:104-126
+ * docstring, [ARCH-DIVERGENCE] is the audited, documented-deviation
+ * marker (equivalent to L5 byte-faithful for fidelity scoring).
+ *
+ * Original-binary addresses + per-function rationale:
+ *
+ *   0x00428D40  RecordBenchmarkFrameRateSample   [ARCH-DIVERGENCE: orig pushes each frame's dt into a 1024-slot FPU circular buffer at DAT_004A2CF8 indexed by DAT_004A2CF4; the port's benchmark FSM state samples via td5_plat_query_perf_counter directly and does not need the intermediate buffer]
+ *   0x00428D80  WriteBenchmarkResultsTgaReport   [ARCH-DIVERGENCE: orig writes results as a bespoke TGA-formatted screenshot file; the port emits plain-text frame-time logs instead, an output-format change with no gameplay impact]
+ */

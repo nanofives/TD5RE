@@ -152,6 +152,14 @@ void td5_physics_set_slot_series_position(int slot, int position);
  * Must be called before td5_physics_init_vehicle_runtime(). */
 void td5_physics_load_carparam(int slot, const uint8_t *data_268);
 
+/* Mirror orig LoadRaceVehicleAssets @ 0x00443280 traffic loop: copy slot 0's
+ * loaded cardef into the given traffic slot's s_loaded_cardef row, and mark
+ * s_carparam_loaded[slot]=1 so bind_default_vehicle_tuning uses it instead of
+ * the all-zero fallback. Required for traffic Y ground-lift (CDEF_S 0x86) and
+ * bounding-box reads in process_traffic_route_advance. Call AFTER slot 0's
+ * carparam has been loaded and BEFORE td5_physics_init_vehicle_runtime. */
+void td5_physics_seed_traffic_cardef_from_player(int traffic_slot);
+
 /* --- 12-bit angle trig utilities --- */
 /* 0x40A6A0: Cos from 12-bit angle (4096 = 360 degrees), returns float */
 float td5_cos_12bit(uint32_t angle);

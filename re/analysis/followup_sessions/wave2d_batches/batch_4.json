@@ -1,0 +1,272 @@
+[
+  {
+    "addr": "0x00423acd",
+    "port_name": "frontend_delete_cup_data",
+    "port_sig": "static void frontend_delete_cup_data(void)",
+    "quality": "good",
+    "action": "apply",
+    "translated_template": "void __PLACEHOLDER__(void)",
+    "reason": ""
+  },
+  {
+    "addr": "0x00423bdd",
+    "port_name": "frontend_render_cup_won_overlay",
+    "port_sig": "static void frontend_render_cup_won_overlay(float sx, float sy)",
+    "quality": "weak",
+    "action": "apply",
+    "translated_template": "void __PLACEHOLDER__(float sx, float sy)",
+    "reason": ""
+  },
+  {
+    "addr": "0x00424110",
+    "port_name": "frontend_draw_string",
+    "port_sig": "static void frontend_draw_string(int surface, const char *str_id, int x, int y)",
+    "quality": "weak",
+    "action": "apply",
+    "translated_template": "void __PLACEHOLDER__(int surface, const char *str_id, int x, int y)",
+    "reason": ""
+  },
+  {
+    "addr": "0x00424390",
+    "port_name": "frontend_render_legal_copyright_overlay",
+    "port_sig": "static void frontend_render_legal_copyright_overlay(float sx, float sy)",
+    "quality": "weak",
+    "action": "apply",
+    "translated_template": "void __PLACEHOLDER__(float sx, float sy)",
+    "reason": ""
+  },
+  {
+    "addr": "0x00424560",
+    "port_name": "td5_fe_btncache_reset",
+    "port_sig": "void td5_fe_btncache_reset(void)",
+    "quality": "good",
+    "action": "apply",
+    "translated_template": "void __PLACEHOLDER__(void)",
+    "reason": ""
+  },
+  {
+    "addr": "0x00424af0",
+    "port_name": "frontend_present_buffer",
+    "port_sig": "static void frontend_present_buffer(void)",
+    "quality": "good",
+    "action": "apply",
+    "translated_template": "void __PLACEHOLDER__(void)",
+    "reason": ""
+  },
+  {
+    "addr": "0x00425b60",
+    "port_name": "fe_draw_button_9slice",
+    "port_sig": "static void fe_draw_button_9slice(float bx, float by, float bw, float bh,                  int state, float sx, float sy)",
+    "quality": "weak",
+    "action": "apply",
+    "translated_template": "void __PLACEHOLDER__(float bx, float by, float bw, float bh,                  int state, float sx, float sy)",
+    "reason": ""
+  },
+  {
+    "addr": "0x004269d0",
+    "port_name": "Screen_LocalizationInit",
+    "port_sig": "static void Screen_LocalizationInit(void)",
+    "quality": "good",
+    "action": "apply",
+    "translated_template": "void __PLACEHOLDER__(void)",
+    "reason": ""
+  },
+  {
+    "addr": "0x00427156",
+    "port_name": "td5_save_get_display_mode",
+    "port_sig": "int td5_save_get_display_mode(void)",
+    "quality": "good",
+    "action": "apply",
+    "translated_template": "int __PLACEHOLDER__(void)",
+    "reason": ""
+  },
+  {
+    "addr": "0x00427290",
+    "port_name": "Screen_LanguageSelect",
+    "port_sig": "static void Screen_LanguageSelect(void)",
+    "quality": "good",
+    "action": "apply",
+    "translated_template": "void __PLACEHOLDER__(void)",
+    "reason": ""
+  },
+  {
+    "addr": "0x004274a0",
+    "port_name": "Screen_LegalCopyright",
+    "port_sig": "static void Screen_LegalCopyright(void)",
+    "quality": "good",
+    "action": "apply",
+    "translated_template": "void __PLACEHOLDER__(void)",
+    "reason": ""
+  },
+  {
+    "addr": "0x004275a0",
+    "port_name": "Screen_AttractModeDemo",
+    "port_sig": "static void Screen_AttractModeDemo(void)",
+    "quality": "good",
+    "action": "apply",
+    "translated_template": "void __PLACEHOLDER__(void)",
+    "reason": ""
+  },
+  {
+    "addr": "0x00427630",
+    "port_name": "Screen_TrackSelection",
+    "port_sig": "static void Screen_TrackSelection(void)",
+    "quality": "good",
+    "action": "apply",
+    "translated_template": "void __PLACEHOLDER__(void)",
+    "reason": ""
+  },
+  {
+    "addr": "0x00428240",
+    "port_name": "td5_hud_init_font_atlas",
+    "port_sig": "void td5_hud_init_font_atlas(void)",
+    "quality": "good",
+    "action": "apply",
+    "translated_template": "void __PLACEHOLDER__(void)",
+    "reason": ""
+  },
+  {
+    "addr": "0x00428320",
+    "port_name": "td5_hud_queue_text",
+    "port_sig": "void td5_hud_queue_text(int font_index, int x, int y, int centered,             const char *fmt, ...)",
+    "quality": "weak",
+    "action": "apply",
+    "translated_template": "void __PLACEHOLDER__(int font_index, int x, int y, int centered,             const char *fmt, ...)",
+    "reason": ""
+  },
+  {
+    "addr": "0x00428570",
+    "port_name": "td5_hud_flush_text",
+    "port_sig": "void td5_hud_flush_text(void)",
+    "quality": "good",
+    "action": "apply",
+    "translated_template": "void __PLACEHOLDER__(void)",
+    "reason": ""
+  },
+  {
+    "addr": "0x00429510",
+    "port_name": "td5_vfx_init_race_particles",
+    "port_sig": "void td5_vfx_init_race_particles(void)",
+    "quality": "good",
+    "action": "apply",
+    "translated_template": "void __PLACEHOLDER__(void)",
+    "reason": ""
+  },
+  {
+    "addr": "0x00429cf0",
+    "port_name": "td5_vfx_spawn_smoke",
+    "port_sig": "void td5_vfx_spawn_smoke(TD5_Actor *actor)",
+    "quality": "good",
+    "action": "apply",
+    "translated_template": "void __PLACEHOLDER__(RuntimeSlotActor *actor)",
+    "reason": ""
+  },
+  {
+    "addr": "0x0042aa10",
+    "port_name": "td5_game_init_race_session",
+    "port_sig": "int td5_game_init_race_session(void)",
+    "quality": "good",
+    "action": "apply",
+    "translated_template": "int __PLACEHOLDER__(void)",
+    "reason": ""
+  },
+  {
+    "addr": "0x0042abf8",
+    "port_name": "td5_game_get_cop_actor_index",
+    "port_sig": "int td5_game_get_cop_actor_index(void)",
+    "quality": "good",
+    "action": "apply",
+    "translated_template": "int __PLACEHOLDER__(void)",
+    "reason": ""
+  },
+  {
+    "addr": "0x0042b580",
+    "port_name": "td5_game_run_race_frame",
+    "port_sig": "int td5_game_run_race_frame(void)",
+    "quality": "good",
+    "action": "apply",
+    "translated_template": "int __PLACEHOLDER__(void)",
+    "reason": ""
+  },
+  {
+    "addr": "0x0042b67f",
+    "port_name": "td5_hud_render_overlays",
+    "port_sig": "void td5_hud_render_overlays(float dt)",
+    "quality": "weak",
+    "action": "apply",
+    "translated_template": "void __PLACEHOLDER__(float dt)",
+    "reason": ""
+  },
+  {
+    "addr": "0x0042c2b0",
+    "port_name": "td5_game_init_viewport_layout",
+    "port_sig": "void td5_game_init_viewport_layout(void)",
+    "quality": "good",
+    "action": "apply",
+    "translated_template": "void __PLACEHOLDER__(void)",
+    "reason": ""
+  },
+  {
+    "addr": "0x0042c470",
+    "port_name": "td5_input_poll_race_session",
+    "port_sig": "void td5_input_poll_race_session(void)",
+    "quality": "good",
+    "action": "apply",
+    "translated_template": "void __PLACEHOLDER__(void)",
+    "reason": ""
+  },
+  {
+    "addr": "0x0042ccd0",
+    "port_name": "td5_normalize_vec3i_to_4096",
+    "port_sig": "static void td5_normalize_vec3i_to_4096(int32_t v[3])",
+    "quality": "weak",
+    "action": "apply",
+    "translated_template": "void __PLACEHOLDER__(int v[3])",
+    "reason": ""
+  },
+  {
+    "addr": "0x0042cdb0",
+    "port_name": "process_traffic_segment_edge",
+    "port_sig": "static void process_traffic_segment_edge(TD5_Actor *actor, int slot)",
+    "quality": "partial",
+    "action": "apply",
+    "translated_template": "void __PLACEHOLDER__(RuntimeSlotActor *actor, int slot)",
+    "reason": ""
+  },
+  {
+    "addr": "0x0042ce90",
+    "port_name": "tl_commit_to_render_globals",
+    "port_sig": "static void tl_commit_to_render_globals(const TD5_Actor *actor)",
+    "quality": "good",
+    "action": "apply",
+    "translated_template": "void __PLACEHOLDER__(const RuntimeSlotActor *actor)",
+    "reason": ""
+  },
+  {
+    "addr": "0x0042cea9",
+    "port_name": "tl_apply_fallback",
+    "port_sig": "static void tl_apply_fallback(void)",
+    "quality": "good",
+    "action": "apply",
+    "translated_template": "void __PLACEHOLDER__(void)",
+    "reason": ""
+  },
+  {
+    "addr": "0x0042d410",
+    "port_name": "FinalizeCameraProjectionMatrices",
+    "port_sig": "void FinalizeCameraProjectionMatrices(void)",
+    "quality": "good",
+    "action": "apply",
+    "translated_template": "void __PLACEHOLDER__(void)",
+    "reason": ""
+  },
+  {
+    "addr": "0x0042da10",
+    "port_name": "MultiplyRotationMatrices3x3",
+    "port_sig": "void MultiplyRotationMatrices3x3(float *A, float *B, float *out)",
+    "quality": "weak",
+    "action": "apply",
+    "translated_template": "void __PLACEHOLDER__(float *A, float *B, float *out)",
+    "reason": ""
+  }
+]

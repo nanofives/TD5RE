@@ -67,7 +67,7 @@ WRAPPER_OBJS := $(addprefix $(WRAPPER_BUILD)/,$(WRAPPER_SRCS:.c=.o))
 # Flags (mirrors the .bat scripts exactly)
 # ---------------------------------------------------------------------------
 
-TD5RE_CFLAGS   := -c -O2 -Wall -Wextra -Wpedantic -DWIN32 -m32 \
+TD5RE_CFLAGS   := -c -O2 -fwrapv -Wall -Wextra -Wpedantic -DWIN32 -m32 \
                   -I$(TD5RE_SRC) -I$(WRAPPER_SRC) -I$(ZLIB_INC) \
                   -DTD5_INFLATE_USE_ZLIB
 

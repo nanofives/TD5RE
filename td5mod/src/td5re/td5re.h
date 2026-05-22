@@ -291,6 +291,15 @@ typedef struct TD5_GlobalState {
          * When set, slot 0 is driven by td5_ai_update_race_actors and the
          * human input-to-actor path is skipped, exactly like demo mode. */
         int  player_is_ai;
+        /* SoloAISlot (port-only debug, 2026-05-22): which slot drives in
+         * solo mode. Default 0. Affects td5_ai_update_track_offset_bias
+         * peer-emulation gate and slot-state init. Used to A/B test the
+         * solo cascade behavior across all AI personalities. */
+        int  solo_ai_slot;
+        /* MaxSpan (port-only debug, 2026-05-22): if > 0, race auto-exits
+         * when slot 0's span_normalized reaches this value. Used to
+         * benchmark per-slot AI behavior over the same track distance. */
+        int  max_span;
         /* FrontendDraw: when 1, log every fe_draw_quad call to
          * log/frontend_draw_port.csv (screen, page, x, y, w, h, color, uvs).
          * Disabled by default — enable with FrontendDraw=1 in [Logging]. */

@@ -1,0 +1,198 @@
+{
+  "05": {
+    "renamed": 17,
+    "commented": 17,
+    "skipped": 0,
+    "errors": [],
+    "total": 17
+  },
+  "06": {
+    "renamed": 8,
+    "commented": 9,
+    "skipped": 0,
+    "errors": [],
+    "total": 9
+  },
+  "07": {
+    "renamed": 40,
+    "commented": 42,
+    "skipped": 0,
+    "errors": [],
+    "total": 42
+  },
+  "08": {
+    "renamed": 69,
+    "commented": 71,
+    "skipped": 20,
+    "errors": [],
+    "total": 91
+  },
+  "09": {
+    "renamed": 16,
+    "commented": 16,
+    "skipped": 7,
+    "errors": [
+      "0x00467338: bad name chars: 'g_trackLightContribDirX[3] (3\u00d74 bytes from 0x467338, stride 0xC)'",
+      "0x0046733c: bad name chars: 'g_trackLightContribDirY[3] (component, stride 0xC)'",
+      "0x00467340: bad name chars: 'g_trackLightContribDirZ[3] (component, stride 0xC)'",
+      "0x004ab0d0: bad name chars: 'g_activeLightBasisDirX[3] (stride 0xC, slot 0/1/2 at d0/dc/e8)'",
+      "0x004ab0d4: bad name chars: 'g_activeLightBasisDirY[3] (stride 0xC)'",
+      "0x004ab0d8: bad name chars: 'g_activeLightBasisDirZ[3] (stride 0xC)'",
+      "0x004ab0dc: bad name chars: 'g_activeLightBasisDirX[1] (slot 1 alias of 0x4ab0d0+12)_PROVISIONAL'"
+    ],
+    "total": 23
+  },
+  "10": {
+    "renamed": 14,
+    "commented": 16,
+    "skipped": 17,
+    "errors": [
+      "0x004afb74: bad name chars: 'g_rs_probe_span_progress_min_slot0 (RS idx 5)'",
+      "0x004afb78: bad name chars: 'g_rs_probe_span_progress_max_slot0 (RS idx 6)'",
+      "0x004afb7c: bad name chars: 'g_rs_probe_span_progress_rear_slot0 (RS idx 7)'",
+      "0x004afb80: bad name chars: 'g_rs_probe_span_progress_front_slot0 (RS idx 8)'",
+      "0x004afb84: bad name chars: 'g_rs_track_offset_bias_slot0 (RS idx 9)'",
+      "0x004afb88: bad name chars: 'g_rs_probe_progress_slot0_p0 (RS idx 10)'",
+      "0x004afb8c: bad name chars: 'g_rs_probe_progress_slot0_p1 (RS idx 11)'",
+      "0x004afb90: bad name chars: 'g_rs_probe_progress_slot0_p2 (RS idx 12)'",
+      "0x004afb94: bad name chars: 'g_rs_probe_progress_slot0_p3 (RS idx 13)'",
+      "0x004afb98: bad name chars: 'g_rs_track_offset_for_left_route_slot0 (RS idx 14)'",
+      "0x004afb9c: bad name chars: 'g_rs_track_offset_for_right_route_slot0 (RS idx 15)'",
+      "0x004afba0: bad name chars: 'g_rs_left_bound_upper_slot0 (RS idx 16)'",
+      "0x004afba4: bad name chars: 'g_rs_left_bound_lower_slot0 (RS idx 17)'",
+      "0x004afba8: bad name chars: 'g_rs_right_bound_upper_slot0 (RS idx 18)'",
+      "0x004afbac: bad name chars: 'g_rs_right_bound_lower_slot0 (RS idx 19)'",
+      "0x004afbb0: bad name chars: 'g_rs_active_upper_bound_slot0 (RS idx 20)'",
+      "0x004afbb4: bad name chars: 'g_rs_active_lower_bound_slot0 (RS idx 21)'"
+    ],
+    "total": 33
+  },
+  "11": {
+    "renamed": 10,
+    "commented": 10,
+    "skipped": 12,
+    "errors": [
+      "0x004aaef0: bad name chars: '**g_raceCountdownTimer** (existing name g_cameraTransitionActive is MISLEADING \u2014 propose **rename**)'",
+      "0x0045d5f4: bad name chars: 'g_floatOne (= 1.0f)_PROVISIONAL'",
+      "0x0045d650: bad name chars: 'g_floatFour (= 4.0f)_PROVISIONAL'",
+      "0x0045d68c: bad name chars: 'g_inv65536F (= 1/65536)_PROVISIONAL'",
+      "0x0045d684: bad name chars: 'g_floatMaxByte (= 255.0f)'",
+      "0x0045d680: bad name chars: 'g_floatOneDiv255 (= 1/255)'",
+      "0x0045d670: bad name chars: 'g_doubleOne (= 1.0)'",
+      "0x0045d668: bad name chars: 'g_doubleThousand (= 1000.0)'",
+      "0x0045d660: bad name chars: 'g_doubleThirty (= 30.0)'",
+      "0x0045d658: bad name chars: 'g_doubleInvThousand (= 1/1000.0)'"
+    ],
+    "total": 22
+  },
+  "12": {
+    "renamed": 37,
+    "commented": 38,
+    "skipped": 0,
+    "errors": [],
+    "total": 38
+  },
+  "13": {
+    "renamed": 28,
+    "commented": 28,
+    "skipped": 0,
+    "errors": [],
+    "total": 28
+  },
+  "14": {
+    "renamed": 27,
+    "commented": 28,
+    "skipped": 3,
+    "errors": [],
+    "total": 31
+  },
+  "15": {
+    "renamed": 30,
+    "commented": 33,
+    "skipped": 0,
+    "errors": [],
+    "total": 33
+  },
+  "16": {
+    "renamed": 48,
+    "commented": 50,
+    "skipped": 8,
+    "errors": [],
+    "total": 58
+  },
+  "17": {
+    "renamed": 31,
+    "commented": 31,
+    "skipped": 0,
+    "errors": [],
+    "total": 31
+  },
+  "18": {
+    "renamed": 11,
+    "commented": 21,
+    "skipped": 1,
+    "errors": [
+      "0x004c3d94: bad name chars: 'g_trackStripValidSpanCount (RENAME from g_trackStripAttributeBasePtr)'"
+    ],
+    "total": 22
+  },
+  "19": {
+    "renamed": 20,
+    "commented": 20,
+    "skipped": 0,
+    "errors": [],
+    "total": 20
+  },
+  "20": {
+    "renamed": 22,
+    "commented": 23,
+    "skipped": 6,
+    "errors": [],
+    "total": 29
+  },
+  "21": {
+    "renamed": 32,
+    "commented": 33,
+    "skipped": 5,
+    "errors": [
+      "0x00497ab8: bad name chars: '(comment-only: frontend client origin X)'",
+      "0x00497abc: bad name chars: '(comment-only: frontend client origin Y)'",
+      "0x00497a78: bad name chars: '(comment-only: race-results saved-state stage)'",
+      "0x004b11c4: bad name chars: '(comment-only: speed-readout-units live cache)'",
+      "0x004962d0: bad name chars: '(comment-only: career restart gate)'"
+    ],
+    "total": 38
+  },
+  "22": {
+    "renamed": 17,
+    "commented": 17,
+    "skipped": 3,
+    "errors": [
+      "0x0048f2fc: bad name chars: '**g_extrasGalleryCrossFadePhase** (existing g_attractModeIdleCounter is MISLEADING \u2014 propose **rename**)'",
+      "0x004a2c8c: bad name chars: '**g_frontendBootDispatchMode** (existing g_attractModeControlEnabled is MISLEADING \u2014 propose **rename**)'",
+      "0x00497a6c: bad name chars: '(g_languageSelectPostBootFlag \u2014 low confidence, comment-only)'"
+    ],
+    "total": 20
+  },
+  "23": {
+    "renamed": 47,
+    "commented": 47,
+    "skipped": 0,
+    "errors": [],
+    "total": 47
+  },
+  "24": {
+    "renamed": 44,
+    "commented": 46,
+    "skipped": 5,
+    "errors": [],
+    "total": 51
+  },
+  "25": {
+    "renamed": 30,
+    "commented": 30,
+    "skipped": 0,
+    "errors": [],
+    "total": 30
+  }
+}

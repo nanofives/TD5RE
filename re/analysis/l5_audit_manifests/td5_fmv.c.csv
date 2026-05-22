@@ -1,0 +1,7 @@
+address,name,body_size,files_cited,phase1_evidence,strong,weak
+0x0042CA00,DisplayLoadingScreenImage,466,td5_fmv.c,,0,0
+0x0043C3C0,RequestIntroMovieShutdown,121,td5_fmv.c,,0,0
+0x00452E20,OpenAndStartMediaPlayback,62,td5_fmv.c;td5_fmv.h,,0,0
+0x00452E60,SetStreamVolume,20,td5_fmv.c,,0,0
+0x00452E80,IsStreamPlaying,61,td5_fmv.c,,0,0
+0x00452EC0,StopStreamPlayback,90,td5_fmv.c,,0,0

@@ -1,0 +1,272 @@
+[
+  {
+    "addr": "0x004114f0",
+    "port_name": "td5_save_write_cup_data",
+    "port_sig": "int td5_save_write_cup_data(const char *path)",
+    "quality": "weak",
+    "action": "apply",
+    "translated_template": "int __PLACEHOLDER__(const char *path)",
+    "reason": ""
+  },
+  {
+    "addr": "0x00411590",
+    "port_name": "td5_save_load_cup_data",
+    "port_sig": "int td5_save_load_cup_data(const char *path)",
+    "quality": "weak",
+    "action": "apply",
+    "translated_template": "int __PLACEHOLDER__(const char *path)",
+    "reason": ""
+  },
+  {
+    "addr": "0x00411630",
+    "port_name": "td5_save_validate_cup_checksum",
+    "port_sig": "int td5_save_validate_cup_checksum(const char *path, uint32_t expected_crc)",
+    "quality": "weak",
+    "action": "apply",
+    "translated_template": "int __PLACEHOLDER__(const char *path, uint expected_crc)",
+    "reason": ""
+  },
+  {
+    "addr": "0x00413580",
+    "port_name": "Screen_PostRaceHighScore",
+    "port_sig": "static void Screen_PostRaceHighScore(void)",
+    "quality": "good",
+    "action": "apply",
+    "translated_template": "void __PLACEHOLDER__(void)",
+    "reason": ""
+  },
+  {
+    "addr": "0x00413bc0",
+    "port_name": "Screen_PostRaceNameEntry",
+    "port_sig": "static void Screen_PostRaceNameEntry(void)",
+    "quality": "good",
+    "action": "apply",
+    "translated_template": "void __PLACEHOLDER__(void)",
+    "reason": ""
+  },
+  {
+    "addr": "0x00414640",
+    "port_name": "td5_sound_load_frontend_sfx",
+    "port_sig": "int td5_sound_load_frontend_sfx(void)",
+    "quality": "good",
+    "action": "apply",
+    "translated_template": "int __PLACEHOLDER__(void)",
+    "reason": ""
+  },
+  {
+    "addr": "0x00414740",
+    "port_name": "td5_frontend_init_resources",
+    "port_sig": "int td5_frontend_init_resources(void)",
+    "quality": "good",
+    "action": "apply",
+    "translated_template": "int __PLACEHOLDER__(void)",
+    "reason": ""
+  },
+  {
+    "addr": "0x00414cdc",
+    "port_name": "td5_frontend_display_loop",
+    "port_sig": "int td5_frontend_display_loop(void)",
+    "quality": "good",
+    "action": "apply",
+    "translated_template": "int __PLACEHOLDER__(void)",
+    "reason": ""
+  },
+  {
+    "addr": "0x00415030",
+    "port_name": "Screen_PositionerDebugTool",
+    "port_sig": "static void Screen_PositionerDebugTool(void)",
+    "quality": "good",
+    "action": "apply",
+    "translated_template": "void __PLACEHOLDER__(void)",
+    "reason": ""
+  },
+  {
+    "addr": "0x00415370",
+    "port_name": "Screen_StartupInit",
+    "port_sig": "static void Screen_StartupInit(void)",
+    "quality": "good",
+    "action": "apply",
+    "translated_template": "void __PLACEHOLDER__(void)",
+    "reason": ""
+  },
+  {
+    "addr": "0x00415490",
+    "port_name": "Screen_MainMenu",
+    "port_sig": "static void Screen_MainMenu(void)",
+    "quality": "good",
+    "action": "apply",
+    "translated_template": "void __PLACEHOLDER__(void)",
+    "reason": ""
+  },
+  {
+    "addr": "0x004168b0",
+    "port_name": "Screen_RaceTypeCategory",
+    "port_sig": "static void Screen_RaceTypeCategory(void)",
+    "quality": "good",
+    "action": "apply",
+    "translated_template": "void __PLACEHOLDER__(void)",
+    "reason": ""
+  },
+  {
+    "addr": "0x00418460",
+    "port_name": "Screen_MusicTestExtras",
+    "port_sig": "static void Screen_MusicTestExtras(void)",
+    "quality": "good",
+    "action": "apply",
+    "translated_template": "void __PLACEHOLDER__(void)",
+    "reason": ""
+  },
+  {
+    "addr": "0x00418527",
+    "port_name": "frontend_render_music_test_overlay",
+    "port_sig": "static void frontend_render_music_test_overlay(float sx, float sy)",
+    "quality": "weak",
+    "action": "apply",
+    "translated_template": "void __PLACEHOLDER__(float sx, float sy)",
+    "reason": ""
+  },
+  {
+    "addr": "0x00418d50",
+    "port_name": "Screen_ConnectionBrowser",
+    "port_sig": "static void Screen_ConnectionBrowser(void)",
+    "quality": "good",
+    "action": "apply",
+    "translated_template": "void __PLACEHOLDER__(void)",
+    "reason": ""
+  },
+  {
+    "addr": "0x00419cf0",
+    "port_name": "Screen_SessionPicker",
+    "port_sig": "static void Screen_SessionPicker(void)",
+    "quality": "good",
+    "action": "apply",
+    "translated_template": "void __PLACEHOLDER__(void)",
+    "reason": ""
+  },
+  {
+    "addr": "0x0041a7b0",
+    "port_name": "Screen_CreateSession",
+    "port_sig": "static void Screen_CreateSession(void)",
+    "quality": "good",
+    "action": "apply",
+    "translated_template": "void __PLACEHOLDER__(void)",
+    "reason": ""
+  },
+  {
+    "addr": "0x0041c330",
+    "port_name": "Screen_NetworkLobby",
+    "port_sig": "static void Screen_NetworkLobby(void)",
+    "quality": "good",
+    "action": "apply",
+    "translated_template": "void __PLACEHOLDER__(void)",
+    "reason": ""
+  },
+  {
+    "addr": "0x0041d630",
+    "port_name": "Screen_SessionLocked",
+    "port_sig": "static void Screen_SessionLocked(void)",
+    "quality": "good",
+    "action": "apply",
+    "translated_template": "void __PLACEHOLDER__(void)",
+    "reason": ""
+  },
+  {
+    "addr": "0x0041d890",
+    "port_name": "Screen_OptionsHub",
+    "port_sig": "static void Screen_OptionsHub(void)",
+    "quality": "good",
+    "action": "apply",
+    "translated_template": "void __PLACEHOLDER__(void)",
+    "reason": ""
+  },
+  {
+    "addr": "0x0041df20",
+    "port_name": "Screen_ControlOptions",
+    "port_sig": "static void Screen_ControlOptions(void)",
+    "quality": "good",
+    "action": "apply",
+    "translated_template": "void __PLACEHOLDER__(void)",
+    "reason": ""
+  },
+  {
+    "addr": "0x0041ea90",
+    "port_name": "Screen_SoundOptions",
+    "port_sig": "static void Screen_SoundOptions(void)",
+    "quality": "good",
+    "action": "apply",
+    "translated_template": "void __PLACEHOLDER__(void)",
+    "reason": ""
+  },
+  {
+    "addr": "0x0041f990",
+    "port_name": "Screen_GameOptions",
+    "port_sig": "static void Screen_GameOptions(void)",
+    "quality": "good",
+    "action": "apply",
+    "translated_template": "void __PLACEHOLDER__(void)",
+    "reason": ""
+  },
+  {
+    "addr": "0x0041ff5b",
+    "port_name": "frontend_draw_value_centered",
+    "port_sig": "static void frontend_draw_value_centered(float sx, float sy, int y,                     const char *text, uint32_t color)",
+    "quality": "weak",
+    "action": "apply",
+    "translated_template": "void __PLACEHOLDER__(float sx, float sy, int y,                     const char *text, uint color)",
+    "reason": ""
+  },
+  {
+    "addr": "0x00420400",
+    "port_name": "Screen_DisplayOptions",
+    "port_sig": "static void Screen_DisplayOptions(void)",
+    "quality": "good",
+    "action": "apply",
+    "translated_template": "void __PLACEHOLDER__(void)",
+    "reason": ""
+  },
+  {
+    "addr": "0x00420c70",
+    "port_name": "Screen_TwoPlayerOptions",
+    "port_sig": "static void Screen_TwoPlayerOptions(void)",
+    "quality": "good",
+    "action": "apply",
+    "translated_template": "void __PLACEHOLDER__(void)",
+    "reason": ""
+  },
+  {
+    "addr": "0x004213d0",
+    "port_name": "Screen_QuickRaceMenu",
+    "port_sig": "static void Screen_QuickRaceMenu(void)",
+    "quality": "good",
+    "action": "apply",
+    "translated_template": "void __PLACEHOLDER__(void)",
+    "reason": ""
+  },
+  {
+    "addr": "0x00422480",
+    "port_name": "Screen_RaceResults",
+    "port_sig": "static void Screen_RaceResults(void)",
+    "quality": "good",
+    "action": "apply",
+    "translated_template": "void __PLACEHOLDER__(void)",
+    "reason": ""
+  },
+  {
+    "addr": "0x004237f0",
+    "port_name": "Screen_CupFailed",
+    "port_sig": "static void Screen_CupFailed(void)",
+    "quality": "good",
+    "action": "apply",
+    "translated_template": "void __PLACEHOLDER__(void)",
+    "reason": ""
+  },
+  {
+    "addr": "0x00423a80",
+    "port_name": "Screen_CupWon",
+    "port_sig": "static void Screen_CupWon(void)",
+    "quality": "good",
+    "action": "apply",
+    "translated_template": "void __PLACEHOLDER__(void)",
+    "reason": ""
+  }
+]

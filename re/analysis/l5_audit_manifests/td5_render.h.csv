@@ -1,0 +1,5 @@
+address,name,body_size,files_cited,phase1_evidence,strong,weak
+0x0040BAA0,QueryRaceTextureCapacity,62,td5_render.h,,0,0
+0x004323D0,RenderTrackSegmentBatch,766,td5_render.h,,0,0
+0x004326D0,RenderTrackSegmentBatchVariant,778,td5_render.h,,0,0
+0x00432AB0,AppendClippedPolygonTriangleFan,285,td5_render.h,,0,0

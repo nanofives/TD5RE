@@ -134,7 +134,18 @@ static void fill_rect(uint32_t *dst, int dw, int dh, int dx, int dy,
  * Sub-rect tile coordinates are 1:1 source-pixel coords from the
  * 56x100 ButtonBits page; the cached texture is also at source pixel
  * scale (224x64) so no per-half scaling is needed. The per-frame quad
- * draw scales the entire cache to the on-screen button rect. */
+ * draw scales the entire cache to the on-screen button rect.
+ *
+ * [ARCH-DIVERGENCE: DDraw BltFast -> CPU BGRA32 composite; L5 sweep 2026-05-21]
+ *   Orig DrawFrontendButtonBackground (Ghidra-verified 0x00425B60) calls a
+ *   DDraw surface BltFast vtable (**(*param_1 + 0x1c))(...) for every
+ *   sub-rect, walking the same 9-slice tile geometry (edge loops at x+=4 /
+ *   y+=4 with corner overdraw last) into a SYSMEM DDraw surface. The port
+ *   bakes once into a malloc'd BGRA32 buffer that is later uploaded through
+ *   the texture-page path, so we substitute blit_rect for the vtable call
+ *   and add a state==0 transparency-fill prepass (orig's SYSMEM surface
+ *   was pre-cleared by DDraw; the port's malloc isn't). Same constants
+ *   (tl=13, tr=9, bl=9, br=13, BB_TILE=4), same iteration order. */
 static void composite_half(uint32_t *dst, int dw, int dh, int yo,
                            int bw, int bh, int state,
                            const uint32_t *bb, int bbw, int bbh) {

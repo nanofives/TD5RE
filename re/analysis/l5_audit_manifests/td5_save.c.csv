@@ -1,0 +1,4 @@
+address,name,body_size,files_cited,phase1_evidence,strong,weak
+0x00411120,SerializeRaceStatusSnapshot,411,td5_save.c;td5_save.h,,0,1
+0x004112C0,RestoreRaceStatusSnapshot,552,td5_save.c;td5_save.h,,0,1
+0x00411630,ValidateCupDataChecksum,212,td5_save.c;td5_save.h,,0,0

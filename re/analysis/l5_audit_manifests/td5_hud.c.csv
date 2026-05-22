@@ -1,0 +1,7 @@
+address,name,body_size,files_cited,phase1_evidence,strong,weak
+0x004377B0,InitializeRaceOverlayResources,1004,td5_hud.c;td5_hud.h,,0,0
+0x00437BA0,InitializeRaceHudLayout,3327,td5_hud.c;td5_hud.h,,0,0
+0x00439B70,DrawRaceStatusText,747,td5_hud.c;td5_hud.h,,0,0
+0x00439E60,RenderHudRadialPulseOverlay,928,td5_hud.c;td5_render.h,,0,0
+0x0043B7C0,InitializePauseMenuOverlayLayout,1957,td5_hud.c;td5_hud.h,,0,0
+0x0043E750,SetClipBounds,81,td5_hud.c,,0,0

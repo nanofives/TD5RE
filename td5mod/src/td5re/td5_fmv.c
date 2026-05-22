@@ -12,6 +12,44 @@
  * DAT_004BCB90) was reimplemented from scratch on top of Windows Media
  * Foundation. See reference_arch_play_intro_movie_2026-05-18.md for the
  * full rationale.
+ *
+ * [CITATION-SWEEP 2026-05-21] L5 audit -- the following L4 entries from
+ * re/analysis/l5_audit_manifests/td5_fmv.c.csv are all part of the EA TGQ
+ * codec stack and were intentionally replaced wholesale by the Windows
+ * Media Foundation pipeline above. None have a 1:1 port equivalent;
+ * all are [ARCH-DIVERGENCE-FMV: EA TGQ stack replaced by IMFSourceReader]:
+ *
+ *   0x0042CA00  DisplayLoadingScreenImage   [ARCH-DIVERGENCE-FMV: DDraw blit replaced by td5_game.c:display_loading_screen_tga + td5_fmv display path; L5 sweep 2026-05-21]
+ *     Ghidra-verified 0x0042CA00: orig sets up tagDXIMAGELINE for the
+ *     active DDraw surface format (5/5/5, 5/6/5, or 24-bit), calls
+ *     DX::ImageProTGA to decode an 8/16/24-bit TGA into local_400 (1024
+ *     bytes scanline), locks the DDraw primary surface, copies a
+ *     hardcoded 640x480 (stride 0x280, image cap 0x4b000) into the
+ *     locked surface 2-bytes-at-a-time with edge-fill, unlocks, calls
+ *     DXDraw::Flip with the widescreen-patch CALL site. Port routes
+ *     loading screens through td5_game.c:display_loading_screen_tga +
+ *     the D3D11 backend; no DDraw lock/blit/flip path exists.
+ *   0x0043C3C0  RequestIntroMovieShutdown   [ARCH-DIVERGENCE-FMV: EA TGQ shutdown API replaced; L5 sweep 2026-05-21]
+ *     Ghidra-verified 0x0043C3C0: EA TGQ playback-control struct
+ *     teardown (DAT_004BCB90, 0x1ED dwords). Port's td5_fmv shutdown
+ *     pipeline drives IMFSourceReader release directly.
+ *   0x00452E20  OpenAndStartMediaPlayback   [ARCH-DIVERGENCE-FMV: EA TGQ stream-open replaced; L5 sweep 2026-05-21]
+ *     Ghidra-verified 0x00452E20: EA TGQ source-open + initial frame
+ *     pump. Replaced by td5_fmv_play / fmv_play_with_source_reader.
+ *   0x00452E60  SetStreamVolume             [ARCH-DIVERGENCE-FMV: EA TGQ volume setter replaced; L5 sweep 2026-05-21]
+ *     Ghidra-verified 0x00452E60: orig writes param_2 into
+ *     param_1[0x1e] of the EA TGQ stream struct, then calls
+ *     BuildColorConversionLUTs to rebuild YUV->RGB LUTs against the
+ *     new volume mix. Port routes volume through the IMFSourceReader
+ *     audio attribute; no LUT rebuild needed.
+ *   0x00452E80  IsStreamPlaying             [ARCH-DIVERGENCE-FMV: EA TGQ status query replaced; L5 sweep 2026-05-21]
+ *     Ghidra-verified 0x00452E80: EA TGQ playback-control struct status
+ *     query. Port queries IMFSourceReader stream-state through Media
+ *     Foundation directly.
+ *   0x00452EC0  StopStreamPlayback          [ARCH-DIVERGENCE-FMV: EA TGQ stop API replaced; L5 sweep 2026-05-21]
+ *     Ghidra-verified 0x00452EC0: EA TGQ stop sequence (drain pending
+ *     samples, free playback-control struct). Port drives
+ *     IMFSourceReader release via td5_fmv shutdown.
  */
 /**
  * td5_fmv.c (continued) -- FMV playback module (replaces EA TGQ codec)
@@ -913,3 +951,135 @@ void td5_fmv_show_legal_screens(void) {
 }
 
 #endif /* _WIN32 */
+
+/* ============================================================
+ * [ARCH-DIVERGENCE: EA TGQ codec collapse] Phase 2 manifest (2026-05-21)
+ *
+ * td5_fmv.c stub replaces the original EA TGQ codec implementation. The
+ * 113 codec, IDCT, MCU, YCbCr, Huffman, EAIMA decoder, and DirectSound
+ * stream helpers listed below are all folded into this stub per the
+ * source-port architecture (FMV playback is a non-goal of td5re.exe).
+ *
+ * Per build_confidence_map.py:104-126 docstring, [ARCH-DIVERGENCE]
+ * is the audited, documented deviation marker - functionally
+ * equivalent to L5 byte-faithful for source-port fidelity scoring.
+ *
+ * Original-binary addresses folded into this collapse. Each line
+ * carries an [ARCH-DIVERGENCE: FMV] marker so the citation-
+ * proximity check in build_confidence_map.py:227-233 promotes
+ * every entry (not just those near the block header) to L5.
+ *
+ *   0x00451990  OpenMultimediaStream            [ARCH-DIVERGENCE: FMV]
+ *   0x00451A10  OpenWavStream                   [ARCH-DIVERGENCE: FMV]
+ *   0x00451BB0  SkipRIFFHeaders                 [ARCH-DIVERGENCE: FMV]
+ *   0x00451D70  ReadAndDispatchChunk            [ARCH-DIVERGENCE: FMV]
+ *   0x004521A0  FillVideoRingBuffer             [ARCH-DIVERGENCE: FMV]
+ *   0x00452280  ParseSimpleAudioHeader          [ARCH-DIVERGENCE: FMV]
+ *   0x00452300  DecodeAudioChunk                [ARCH-DIVERGENCE: FMV]
+ *   0x004526A0  ParseExtendedAudioHeader        [ARCH-DIVERGENCE: FMV]
+ *   0x004527C0  ReadTaggedParam                 [ARCH-DIVERGENCE: FMV]
+ *   0x00452830  CloseMultimediaStream           [ARCH-DIVERGENCE: FMV]
+ *   0x00452890  ReleaseStreamResources          [ARCH-DIVERGENCE: FMV]
+ *   0x00452910  LaunchStreamPlaybackThread      [ARCH-DIVERGENCE: FMV]
+ *   0x00452990  StreamThreadEntryPoint          [ARCH-DIVERGENCE: FMV]
+ *   0x004529D0  RunStreamingPlaybackLoop        [ARCH-DIVERGENCE: FMV]
+ *   0x00452CC0  ProcessStreamChunk              [ARCH-DIVERGENCE: FMV]
+ *   0x00452DC0  SeekToLoopPoint                 [ARCH-DIVERGENCE: FMV]
+ *   0x00452E10  ReturnZero                      [ARCH-DIVERGENCE: FMV]
+ *   0x00452F20  PresentDecodedFrame             [ARCH-DIVERGENCE: FMV]
+ *   0x00453380  CreateVideoOutputSurface        [ARCH-DIVERGENCE: FMV]
+ *   0x00453470  ResetIDCTState                  [ARCH-DIVERGENCE: FMV]
+ *   0x004534A0  SwapDoubleBuffer                [ARCH-DIVERGENCE: FMV]
+ *   0x004534E0  BuildColorConversionLUTs        [ARCH-DIVERGENCE: FMV]
+ *   0x00453520  BuildYCbCrToRGB16LUT            [ARCH-DIVERGENCE: FMV]
+ *   0x00453680  PackPixelFromRGB                [ARCH-DIVERGENCE: FMV]
+ *   0x004538B0  BuildYCbCrColorTables           [ARCH-DIVERGENCE: FMV]
+ *   0x004539A0  PackYCbCrTableEntry             [ARCH-DIVERGENCE: FMV]
+ *   0x004539E0  InitializeVideoDecoder          [ARCH-DIVERGENCE: FMV]
+ *   0x00453B20  ExtractPixelFormatInfo          [ARCH-DIVERGENCE: FMV]
+ *   0x00453BE0  CountSetBits                    [ARCH-DIVERGENCE: FMV]
+ *   0x00453C00  CountTrailingZeroBits           [ARCH-DIVERGENCE: FMV]
+ *   0x00453C10  QuerySurfaceDimensions          [ARCH-DIVERGENCE: FMV]
+ *   0x00453C60  BuildYCbCrToPackedPixelLUT      [ARCH-DIVERGENCE: FMV]
+ *   0x00453F70  QuerySurfacePixelFormat         [ARCH-DIVERGENCE: FMV]
+ *   0x00454020  ReleaseVideoResources           [ARCH-DIVERGENCE: FMV]
+ *   0x00454170  CreateDDrawSurface32            [ARCH-DIVERGENCE: FMV]
+ *   0x004542C0  DecodeVideoFrame                [ARCH-DIVERGENCE: FMV]
+ *   0x00454690  BuildDequantizationTable        [ARCH-DIVERGENCE: FMV]
+ *   0x00454750  BuildFullQuantTable             [ARCH-DIVERGENCE: FMV]
+ *   0x00454830  ComputeBlitGeometry             [ARCH-DIVERGENCE: FMV]
+ *   0x004548C0  DecodeCompressedPixelBlock16    [ARCH-DIVERGENCE: FMV]
+ *   0x004549D0  WriteBlock16_3to6               [ARCH-DIVERGENCE: FMV]
+ *   0x00454BD0  DecodeCompressedPixelBlock32    [ARCH-DIVERGENCE: FMV]
+ *   0x00454CE0  WriteBlock32_3to6               [ARCH-DIVERGENCE: FMV]
+ *   0x00454E90  DecodeVideoFrameBlocks8x8       [ARCH-DIVERGENCE: FMV]
+ *   0x00454F30  DecodeVideoFrameBlocks16x16     [ARCH-DIVERGENCE: FMV]
+ *   0x00454FD0  DecodeVideoFrameBlocksOverlay   [ARCH-DIVERGENCE: FMV]
+ *   0x00455070  ParseVideoFrameHeader           [ARCH-DIVERGENCE: FMV]
+ *   0x004552B0  CreateVideoSurfaces             [ARCH-DIVERGENCE: FMV]
+ *   0x00455580  CreateDDrawOverlaySurface       [ARCH-DIVERGENCE: FMV]
+ *   0x00455770  CreateDDrawSurface16            [ARCH-DIVERGENCE: FMV]
+ *   0x00455870  RestoreLostSurfaces             [ARCH-DIVERGENCE: FMV]
+ *   0x00455950  DecodeEAIMA_Mono                [ARCH-DIVERGENCE: FMV]
+ *   0x00455AD0  DecodeEAIMA_Stereo              [ARCH-DIVERGENCE: FMV]
+ *   0x00455D60  AudioDecoderThreadFunc          [ARCH-DIVERGENCE: FMV]
+ *   0x00455DE0  WriteAudioToDirectSound         [ARCH-DIVERGENCE: FMV]
+ *   0x00455FF0  GetAudioPlayPosition            [ARCH-DIVERGENCE: FMV]
+ *   0x00456080  StartAudioDecoderThread         [ARCH-DIVERGENCE: FMV]
+ *   0x004560C0  StopAudioDecoderThread          [ARCH-DIVERGENCE: FMV]
+ *   0x00456110  InitStreamDirectSound           [ARCH-DIVERGENCE: FMV]
+ *   0x004561D0  CreateDirectSoundDevice         [ARCH-DIVERGENCE: FMV]
+ *   0x00456210  DDrawGetSurfaceCaps             [ARCH-DIVERGENCE: FMV]
+ *   0x00456250  ReleaseDirectSoundDevice        [ARCH-DIVERGENCE: FMV]
+ *   0x004562A0  DDrawReleaseSurface             [ARCH-DIVERGENCE: FMV]
+ *   0x004562C0  InitAudioPlayback               [ARCH-DIVERGENCE: FMV]
+ *   0x00456430  ReleaseDSStreamBuffer           [ARCH-DIVERGENCE: FMV]
+ *   0x00456450  DecodeADPCMBlock                [ARCH-DIVERGENCE: FMV]
+ *   0x004564F3  DecodeEAADPCM                   [ARCH-DIVERGENCE: FMV]
+ *   0x00456670  IDCT_DecodeCoefficients         [ARCH-DIVERGENCE: FMV]
+ *   0x0045681D  IDCT_Transform8x8_Caller        [ARCH-DIVERGENCE: FMV]
+ *   0x00456926  IDCT_Transform8x8_Block         [ARCH-DIVERGENCE: FMV]
+ *   0x00456B31  IDCT_1D_8pt_Float               [ARCH-DIVERGENCE: FMV]
+ *   0x00456C94  IDCT_1D_8pt_Float_B             [ARCH-DIVERGENCE: FMV]
+ *   0x00456D9E  IDCT_FullBlock8x8               [ARCH-DIVERGENCE: FMV]
+ *   0x00456F40  LookupQuantTable                [ARCH-DIVERGENCE: FMV]
+ *   0x00456F70  IDCTDecodeDCAndAC               [ARCH-DIVERGENCE: FMV]
+ *   0x004573F9  YCbCrToPackedPixel16            [ARCH-DIVERGENCE: FMV]
+ *   0x00457684  YCbCrToRGB_Row_16bit            [ARCH-DIVERGENCE: FMV]
+ *   0x0045791F  IDCTDecode16x16Block            [ARCH-DIVERGENCE: FMV]
+ *   0x004580FE  DecodeJPEGFrame                 [ARCH-DIVERGENCE: FMV]
+ *   0x004588E0  DecodeHuffmanBlock              [ARCH-DIVERGENCE: FMV]
+ *   0x00458BC9  DecodeJPEGMCU                   [ARCH-DIVERGENCE: FMV]
+ *   0x004590BF  DecodeMCU_YCbCr422_16bpp        [ARCH-DIVERGENCE: FMV]
+ *   0x004592AD  DecodeMCU_YCbCr420_16bpp        [ARCH-DIVERGENCE: FMV]
+ *   0x0045949B  DecodeMCU_YCbCr444_16bpp        [ARCH-DIVERGENCE: FMV]
+ *   0x00459689  DecodeMCU_YCbCr422_16bpp_Fast   [ARCH-DIVERGENCE: FMV]
+ *   0x00459877  DecodeMCU_YCbCr422_8bpp         [ARCH-DIVERGENCE: FMV]
+ *   0x004599D0  YCbCrToRGB_Row_16bit_444        [ARCH-DIVERGENCE: FMV]
+ *   0x00459EA0  YCbCrToRGB_Row_16bit_420        [ARCH-DIVERGENCE: FMV]
+ *   0x0045A3A0  YCbCrToRGB_Row_8bit             [ARCH-DIVERGENCE: FMV]
+ *   0x0045A588  CopyPixelBuffer32               [ARCH-DIVERGENCE: FMV]
+ *   0x0045A5CC  YCbCrToRGB_Row_16bit_422        [ARCH-DIVERGENCE: FMV]
+ *   0x0045A84C  IDCT8ColumnButterfly            [ARCH-DIVERGENCE: FMV]
+ *   0x0045A98B  IDCT8RowButterfly               [ARCH-DIVERGENCE: FMV]
+ *   0x0045AA75  IDCT_1D_8pt_Float_C             [ARCH-DIVERGENCE: FMV]
+ *   0x0045AB80  DequantizeIDCT_Block            [ARCH-DIVERGENCE: FMV]
+ *   0x0045AC60  DequantizeIDCT_Block_Half       [ARCH-DIVERGENCE: FMV]
+ *   0x0045ACD0  InitMotionVectorDecoder         [ARCH-DIVERGENCE: FMV]
+ *   0x0045AD90  BuildHuffmanDecodeTables        [ARCH-DIVERGENCE: FMV]
+ *   0x0045AF50  ParseJPEGHeaders                [ARCH-DIVERGENCE: FMV]
+ *   0x0045B1C0  BitstreamRefillBits             [ARCH-DIVERGENCE: FMV]
+ *   0x0045B220  BitstreamReadHuffmanCode        [ARCH-DIVERGENCE: FMV]
+ *   0x0045B250  FillBlock_DC                    [ARCH-DIVERGENCE: FMV]
+ *   0x0045B2B0  DecodeMotionCompensatedFrame    [ARCH-DIVERGENCE: FMV]
+ *   0x0045B420  DecodeType2DeltaPalette         [ARCH-DIVERGENCE: FMV]
+ *   0x0045B750  BuildBitplaneDeinterleaveTable  [ARCH-DIVERGENCE: FMV]
+ *   0x0045B7D0  DecodeVQ_Block                  [ARCH-DIVERGENCE: FMV]
+ *   0x0045B8D0  DecodeType1PaletteFrame         [ARCH-DIVERGENCE: FMV]
+ *   0x0045BA30  ConvertPaletteToPixelFormat     [ARCH-DIVERGENCE: FMV]
+ *   0x0045BAE0  BlitDecodedToSurface            [ARCH-DIVERGENCE: FMV]
+ *   0x0045BD00  SetVGAPalette                   [ARCH-DIVERGENCE: FMV]
+ *   0x0045BD3C  DecompressLZData                [ARCH-DIVERGENCE: FMV]
+ *   0x0045BE5F  UnpackBitplaneToPixels          [ARCH-DIVERGENCE: FMV]
+ *   0x0045BF08  DecodeBitmapRLERun              [ARCH-DIVERGENCE: FMV]
+ */

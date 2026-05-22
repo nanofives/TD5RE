@@ -1,0 +1,353 @@
+ADDRESS      #   BATCH  CONF    NAME                                                   
+----------------------------------------------------------------------------------------------------
+0x0045d5d0    WIN b08   high    g_pixelHalfBias_0p5
+0x0045d5d0    alt b19   high    g_halfFloatConstant
+0x0045d5d0    alt b20   high    g_audioReplayDistanceMultiplier
+
+0x0045d5f4    WIN b08   medium  g_hudGearGlyphRowOff
+0x0045d5f4    alt b11   medium  g_floatOne (= 1.0f)
+0x0045d5f4    alt b20   high    g_audioMinDistanceEpsilon
+
+0x0045d650    WIN b08   low     g_renderHudFixedPointShift_4
+0x0045d650    alt b11   medium  g_floatFour (= 4.0f)
+0x0045d650    alt b20   high    g_audioDopplerVelocityScale
+0x0045d650    alt b21   high    g_simTickBudgetCap
+
+0x0045d658    WIN b11   low     g_doubleInvThousand (= 1/1000.0)
+0x0045d658    alt b21   high    g_msPerSec_double
+
+0x0045d660    WIN b11   low     g_doubleThirty (= 30.0)
+0x0045d660    alt b21   high    g_targetFps_double
+
+0x0045d668    WIN b11   low     g_doubleThousand (= 1000.0)
+0x0045d668    alt b21   high    g_msPerSec_reciprocal
+
+0x0045d670    WIN b11   low     g_doubleOne (= 1.0)
+0x0045d670    alt b21   medium  g_oneDouble_PROVISIONAL
+
+0x0045d68c    WIN b11   medium  g_inv65536F (= 1/65536)
+0x0045d68c    alt b21   high    g_subTickQuantum
+
+0x0046317c    WIN b01   high    g_playerSteeringWeightTarget
+0x0046317c    alt b11   high    g_perSlotViewIndicatorInitialAngle
+0x0046317c    alt b25   high    g_player0SteeringBiasShort
+
+0x0046317e    WIN b01   high    g_playerSteeringWeightOpposite
+0x0046317e    alt b25   high    g_player1SteeringBiasShort
+
+0x00463fc4    WIN b14   high    g_inputBindingTable
+0x00463fc4    alt b16   high    g_controllerBindings
+
+0x00464084    WIN b16   high    g_cupDataTd5XorKey
+0x00464084    alt b23   high    g_cupDataXorKey
+
+0x004654a4    WIN b07   high    g_cheatCodeKeySequenceTable
+0x004654a4    alt b16   high    g_cheatCodeKeySequences
+
+0x00465594    WIN b07   high    g_cheatCodeTargetFlagPtrTable
+0x00465594    alt b16   high    g_cheatCodeTargetPointers
+
+0x004655ac    WIN b07   high    g_cheatCodeXorMaskTable
+0x004655ac    alt b16   high    g_cheatCodeXorMaskTable
+
+0x00465660    WIN b14   high    g_inputDeviceTypeTable
+0x00465660    alt b16   high    g_player1DeviceDesc
+
+0x00465680    WIN b14   high    g_inputDeviceButtonCountTable
+0x00465680    alt b16   high    g_player2DeviceDesc
+
+0x00465e18    WIN b13   high    g_lastPlayedCdTrackIndex
+0x00465e18    alt b22   high    g_frontendRandomMusicTrackIndex
+0x00465e18    alt b23   high    g_attractCdTrackCandidate
+
+0x00465fe8    WIN b16   high    g_audioSoundMode
+0x00465fe8    alt b20   high    g_sfxPlaybackMode
+
+0x00465fec    WIN b16   high    g_audioSfxVolume
+0x00465fec    alt b20   high    g_sfxVolumePercent
+0x00465fec    alt b23   high    g_persistedMasterVolumePercent
+
+0x00465ff0    WIN b16   high    g_audioMusicVolume
+0x00465ff0    alt b20   high    g_musicVolumePercent
+0x00465ff0    alt b23   high    g_persistedCdVolumePercent
+
+0x00466000    WIN b16   high    g_gameOptionsBlock
+0x00466000    alt b21   high    gCircuitLapsConfigShadow
+
+0x00466004    WIN b04   high    gCheckpointTimersUserToggle
+0x00466004    alt b21   high    gCheckpointTimersConfigShadow
+0x00466004    alt b23   medium  g_specialEncounterUnlockA
+
+0x00466008    WIN b04   high    gUnknownCheckpointToggle_B
+0x00466008    alt b21   high    gTrafficConfigShadow
+0x00466008    alt b23   medium  g_specialEncounterUnlockB
+
+0x00466024    WIN b16   high    g_displayFogEnabled
+0x00466024    alt b21   high    gFoggingConfigShadow
+
+0x00466028    WIN b16   high    g_displaySpeedUnits
+0x00466028    alt b21   high    gSpeedReadoutUnitsConfigShadow
+
+0x004668b0    WIN b07   high    g_attractModeTrackDisableMask
+0x004668b0    alt b16   high    g_savedTrackLockTable
+
+0x00466f88    WIN b11   high    g_perViewLookBackInputActive
+0x00466f88    alt b12   high    g_cameraRearViewActive
+0x00466f88    alt b14   high    g_rearViewActiveFlag
+0x00466f88    alt b24   high    g_cameraLookBackHoldTable
+0x00466f88    alt b24   unknown -- second slot of g_cameraLookBackHoldTable -- already 
+
+0x00469c78    WIN b09   high    g_perTrackLightZoneTables
+0x00469c78    alt b18   high    g_perTrackLightZoneTables
+
+0x0046bb1c    WIN b17   high    g_perTrackEnvAssetTableArray
+0x0046bb1c    alt b18   high    g_perTrackEnvironmentMetadataPtrs
+
+0x00473d2c    WIN b10   high    g_defaultCarIdTable
+0x00473d2c    alt b19   high    g_perSlotRubberBandThrottleLive
+
+0x00475160    WIN b16   high    g_crc32_table_edb88320
+0x00475160    alt b23   high    g_crc32LookupTable
+
+0x00482df4    WIN b11   high    g_perViewPrevCameraPresetId
+0x00482df4    alt b12   high    g_cameraFlyInPresetGuard
+
+0x00482f18    WIN b11   high    g_perViewCameraOrbitAccum
+0x00482f18    alt b12   high    g_cameraSpringYawAccum
+
+0x00482f48    WIN b12   high    g_cameraPresetPackedSave
+0x00482f48    alt b16   high    g_savedPlayer1CameraView
+
+0x00482f70    WIN b11   high    g_perViewLookAroundActiveFlag
+0x00482f70    alt b12   high    g_cameraYawOffsetView
+
+0x00483000    WIN b14   low     g_playerControlBits_player2_alias
+0x00483000    alt b24   high    g_player2ControlBits
+
+0x00483014    WIN b01   high    g_cheatRemoteBrakingApplied
+0x00483014    alt b11   high    g_remoteBrakeCheatPerSlotLatch
+0x00483014    alt b25   high    g_playerControlAccum0
+
+0x00483018    WIN b01   medium  g_controlAccumulatorResetMarker
+0x00483018    alt b25   high    g_playerControlAccum1
+
+0x0048301c    WIN b01   high    g_maxSteeringWeightBalance
+0x0048301c    alt b25   high    g_steeringBiasMaxSwing
+
+0x00483550    WIN b10   low     g_trackCameraConfigSecondary
+0x00483550    alt b18   low     g_currentTrackCameraConfigA
+
+0x00483954    WIN b04   high    g_currentCheckpointStripIndex
+0x00483954    alt b10   low     g_trackCameraConfigPrimary
+0x00483954    alt b18   low     g_currentTrackCameraConfigB
+
+0x0048d988    WIN b05   high    g_raceActorRuntimeValid
+0x0048d988    alt b16   high    g_raceResults
+0x0048d988    alt b23   high    g_raceFinalResultsSlotTable_PROVISIONAL
+
+0x0048dc50    WIN b06   medium  g_vehicleShadowSpriteTemplates
+0x0048dc50    alt b15   high    g_vehicleShadowAndWheelSpriteTemplates
+
+0x0048f368    WIN b14   high    g_player1SelectedPaintScheme
+0x0048f368    alt b16   low     g_savedCarIndexCup
+
+0x0048f378    WIN b11   high    g_player1AutoThrottleEnabled
+0x0048f378    alt b14   high    g_player1ManualTransmission
+
+0x0048f37c    WIN b11   high    g_player2AutoThrottleEnabled
+0x0048f37c    alt b14   high    g_player2ManualTransmission
+0x0048f37c    alt b24   high    g_player2AutoPauseLatch
+0x0048f37c    alt b24   unknown --
+
+0x00490bac    WIN b16   high    g_cupDataTd5IoBuffer
+0x00490bac    alt b23   high    g_snapshotGameType
+
+0x00490bb8    WIN b16   high    g_cupDataTd5Crc32
+0x00490bb8    alt b23   high    g_snapshotCrc32
+
+0x00494bbc    WIN b16   high    g_cupDataTd5ByteCount
+0x00494bbc    alt b23   high    g_snapshotPayloadSize
+
+0x004951f0    WIN b07   high    g_cheatCodeKeyProgressTable
+0x004951f0    alt b16   high    g_cheatCodeKeyProgress
+
+0x00495234    WIN b21   high    g_cpuHasMmx
+0x00495234    alt b22   medium  g_extrasGalleryEnabledFlag_PROVISIONAL
+
+0x0049628c    WIN b22   medium  g_frontendDialogPanelSurface_PROVISIONAL
+0x0049628c    alt b24   high    g_lobbyErrorDialogSurface
+
+0x00496298    WIN b07   high    g_cheatFlagUnlockAll
+0x00496298    alt b16   high    g_cheatPostRaceHighScoreUnlock
+
+0x0049629c    WIN b07   medium  g_cheatFlagBitfieldNetwork
+0x0049629c    alt b16   high    g_cheatRemoteBraking
+
+0x004962a8    WIN b07   high    g_cheatFlagBitfieldGameModes
+0x004962a8    alt b16   unknown g_cupUnlockLevel (already named)
+
+0x004962ac    WIN b07   high    g_cheatFlagBitfieldExtras
+0x004962ac    alt b16   medium  g_cheatAttractModeOverride
+
+0x004962d0    WIN b05   medium  g_raceSinglePlayerCompanionBitfield
+0x004962d0    alt b21   low     (comment-only: career restart gate)
+0x004962d0    alt b25   medium  g_postRaceSkipResultsBanner
+
+0x0049636c    WIN b05   medium  g_raceResultsLoadedFlag
+0x0049636c    alt b21   high    g_benchmarkRequestPending
+
+0x004970ac    WIN b23   high    g_postRacePlayerNameEntryDefault
+0x004970ac    alt b24   high    g_localComputerName
+
+0x004970bc    WIN b24   high    g_lobbyDriverDisplayNameTable
+0x004970bc    alt b24   unknown --
+
+0x00497250    WIN b16   high    g_raceSchedule
+0x00497250    alt b24   high    g_dxpdataRaceSettingsGameType
+
+0x00497314    WIN b23   medium  g_postRaceNameButtonSurfacePtr
+0x00497314    alt b24   low     g_lobbyChatPanelSurface_OR_genericButton
+
+0x00497a60    WIN b05   high    g_raceResultsSeriesAdvanceFlag
+0x00497a60    alt b25   high    g_postRaceProgressionAdvanced
+
+0x00497a64    WIN b05   high    g_lastSelectedResultButton
+0x00497a64    alt b25   high    g_postRaceMenuButtonChoice
+
+0x00497a68    WIN b05   high    g_selectedRaceResultIndex
+0x00497a68    alt b23   medium  g_postRaceHighScoreEntrySubState
+0x00497a68    alt b25   high    g_postRaceRacerCardIndex
+
+0x00497a6c    WIN b22   low     (g_languageSelectPostBootFlag — low confidence, comment
+0x00497a6c    alt b23   medium  g_replayFileAvailable
+0x00497a6c    alt b25   high    g_replayFileAvailable
+
+0x00497a70    WIN b05   medium  g_cupModeNextRaceAvailable
+0x00497a70    alt b25   high    g_postRaceNextCupRaceAvailable
+
+0x00497a74    WIN b05   medium  g_raceResultsStateGateFlag
+0x00497a74    alt b25   high    g_postRaceRestartSelectedRace
+
+0x00497a78    WIN b05   high    g_raceReplayStateFlag
+0x00497a78    alt b21   low     (comment-only: race-results saved-state stage)
+0x00497a78    alt b25   high    g_postRaceCarSelectionBackupValid
+
+0x00497a7c    WIN b05   high    g_savedCarIndex
+0x00497a7c    alt b25   high    g_postRaceCarSelectionBackup
+
+0x004a2cdc    WIN b13   medium  g_vehicleAudioPlayingIntensityByActor
+0x004a2cdc    alt b14   high    g_ffCollisionEffectActive
+
+0x004aaf93    WIN b11   medium  g_globalDebugPanelKeySticky
+0x004aaf93    alt b14   high    g_f3PauseInputHeldFlag
+0x004aaf93    alt b24   high    g_autoExitKeyHeldState
+
+0x004aaf98    WIN b11   high    g_perViewCameraCyclePresetDebounce
+0x004aaf98    alt b14   high    g_cameraCyclePerPlayerCooldown
+0x004aaf98    alt b24   high    g_cameraCycleDebounceTable
+0x004aaf98    alt b24   unknown -- second slot of g_cameraCycleDebounceTable -- already
+
+0x004ad288    WIN b10   medium  g_dragRaceLaneStripPtr
+0x004ad288    alt b19   high    g_dragRaceLaneStripPtr
+
+0x004aed8c    WIN b10   high    g_trafficBusTableBlob
+0x004aed8c    alt b18   high    g_trafficBusTableBlob
+
+0x004aed90    WIN b10   high    g_trackStripDataBlob
+0x004aed90    alt b18   high    g_trackStripDataBlob
+
+0x004aed94    WIN b10   high    g_leftRouteTableBlob
+0x004aed94    alt b18   high    g_leftRouteTableBlob
+
+0x004aed98    WIN b10   high    g_raceCheckpointTableLive
+0x004aed98    alt b18   high    g_raceCheckpointTableLive
+
+0x004aedb0    WIN b04   high    gCheckpointOrderRemapTable
+0x004aedb0    alt b10   medium  g_checkpointNumTable
+0x004aedb0    alt b18   medium  g_checkpointNumTable
+
+0x004aee10    WIN b17   high    g_perTrackEnvAssetTable
+0x004aee10    alt b18   high    g_trackEnvironmentMetadataBlob
+
+0x004aee14    WIN b09   high    g_trackLightingZoneTablePtr
+0x004aee14    alt b10   medium  g_trackCircuitFlagOrLapCount
+
+0x004aee1c    WIN b10   high    g_rightRouteTableBlob
+0x004aee1c    alt b18   high    g_rightRouteTableBlob
+
+0x004aee54    WIN b17   medium  g_modelsDatPostEntryTableEnd
+0x004aee54    alt b18   medium  g_modelsDatPostEntryTableBlob
+
+0x004b08b4    WIN b03   high    g_traffic_queue_span_base
+0x004b08b4    alt b10   high    g_activeRouteTablePtrB_right
+
+0x004b08b8    WIN b03   high    g_traffic_queue_cursor_ptr
+0x004b08b8    alt b10   high    g_activeTrafficBusCursor
+
+0x004b1120    WIN b08   high    g_hudPrevSpanPosition
+0x004b1120    alt b21   medium  g_hudPrevSpeedCache
+
+0x004b1140    WIN b08   high    g_hudWrongWayCounter_v0
+0x004b1140    alt b08   high    g_hudView0CenterX
+
+0x004b1178    WIN b08   high    g_hudWrongWayCounter_v1
+0x004b1178    alt b08   medium  g_hudView1CenterX
+
+0x004b11a8    WIN b08   high    g_hudIndicatorDigit
+0x004b11a8    alt b21   medium  g_hudIndicatorState
+
+0x004b11b0    WIN b08   high    g_hudCurrentViewIndex
+0x004b11b0    alt b21   high    g_hudCurrentViewIndex
+
+0x004b11c4    WIN b08   high    g_hudUseMetricUnits
+0x004b11c4    alt b21   low     (comment-only: speed-readout-units live cache)
+
+0x004bedc0    WIN b15   medium  g_trackedActorMarkerBillboardPool
+0x004bedc0    alt b15   low     g_trackedActorMarkerAnimPhase_PROVISIONAL
+
+0x004c38a0    WIN b09   high    g_actorTrackZoneAudioStateCode
+0x004c38a0    alt b18   high    g_perSlotActiveLightZoneTexturePage
+
+0x004c3d04    WIN b17   high    g_textureUploadSkipResample
+0x004c3d04    alt b18   medium  g_textureUsesTallPageFormat
+
+0x004c3d28    WIN b17   high    g_trafficMeshSlotOffset
+0x004c3d28    alt b19   high    g_trafficVehicleMeshResourcePtrTable
+0x004c3d28    alt b20   high    gTrafficMeshResourcePtrTable
+
+0x004c3d48    WIN b17   high    g_slotMeshResourceSize
+0x004c3d48    alt b19   high    g_slotVehicleMeshResourceSizeTable
+0x004c3d48    alt b20   high    gSlotMeshResourceByteSize
+
+0x004c3d60    WIN b17   high    g_trafficMeshSlotSize
+0x004c3d60    alt b19   high    g_trafficVehicleMeshResourceSizeTable
+0x004c3d60    alt b20   high    gTrafficMeshResourceByteSize
+
+0x004c3d78    WIN b17   high    g_chassisStaticHedEntryPtr
+0x004c3d78    alt b19   high    g_chassisMeshArchiveEntry
+0x004c3d78    alt b20   high    g_chassisMeshArchiveEntry
+
+0x004c3d7c    WIN b17   medium  g_chassisFixedPointBounds
+0x004c3d7c    alt b19   high    g_chassisBoundsXMin
+0x004c3d7c    alt b20   medium  g_chassisBoundsMinX
+
+0x004c3d80    WIN b19   high    g_chassisBoundsXMax
+0x004c3d80    alt b20   medium  g_chassisBoundsMaxX
+
+0x004c3d84    WIN b19   medium  g_chassisBoundsZ
+0x004c3d84    alt b20   medium  g_chassisBoundsMinZ
+
+0x004c3d88    WIN b19   medium  g_chassisBoundsY
+0x004c3d88    alt b20   medium  g_chassisBoundsMaxZ
+
+0x004c3da0    WIN b03   high    g_track_route_metadata
+0x004c3da0    alt b10   medium  g_trackStripBlobAlias
+0x004c3da0    alt b18   high    g_trackStripBlobAlias
+0x004c3da0    alt b19   high    g_trackStripBlobAliasJunction
+
+0x004c3ddc    WIN b15   low     g_weatherSegmentTargetView0_PROVISIONAL
+0x004c3ddc    alt b26   medium  g_weatherSegmentTargetDensityView1
+
+0x004c3de4    WIN b15   low     g_weatherActiveCountView1_PROVISIONAL
+0x004c3de4    alt b26   medium  g_weatherActiveCountView1
+

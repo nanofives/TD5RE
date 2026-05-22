@@ -1,0 +1,7 @@
+address,name,body_size,files_cited,phase1_evidence,strong,weak
+0x0040B530,SwapIndexedRuntimeEntries,68,td5_asset.c;td5_asset.h,,0,0
+0x0040B590,UploadRaceTexturePage,204,td5_asset.c;td5_hud.c,,0,0
+0x0042F990,LoadEnvironmentTexturePages,318,td5_asset.c;td5_render.c,,0,0
+0x0042FD70,RemapCheckpointOrderForTrackDirection,168,td5_asset.c;td5_asset.h,,0,0
+0x00430D30,ParseAndDecodeCompressedTrackData,1113,td5_asset.c;td5_asset.h;td5_render.h,,0,0
+0x00442670,LoadTrackTextureSet,255,td5_asset.c;td5_asset.h,,0,0

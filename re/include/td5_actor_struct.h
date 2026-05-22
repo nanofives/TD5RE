@@ -150,6 +150,28 @@ typedef struct TD5_WheelSuspensionState {
 } TD5_WheelSuspensionState;
 
 /**
+ * WheelContactDelta -- per-wheel frame-to-frame contact-position delta (8 bytes)
+ *
+ * 4 instances stored as `wheel_contact_delta[4]` at actor +0x270.
+ *
+ * Writer: RefreshVehicleWheelContactFrames @ 0x00403720
+ *         (port td5_physics.c:7053). Computed as
+ *         (new_wheel_contact_pos - prev_wheel_contact_pos) >> 8 BEFORE Y-snap.
+ * Reader: UpdateVehicleSuspensionResponse @ 0x004057F0
+ *         (port td5_physics.c:3709). Used in landing-impulse spring_dot:
+ *         spring_dot = delta.x*wcv.x + delta.y*wcv.y + delta.z*wcv.z,
+ *         gated on prev_air & current_air.
+ *
+ * Identified by Agent I 2026-05-16; tools/td5_actor_offsets.py:144-159.
+ */
+typedef struct TD5_WheelContactDelta {
+    int16_t  x;                         /* +0x00: contact-pos delta X (fp8, >>8 of fp16 diff) */
+    int16_t  y;                         /* +0x02: contact-pos delta Y (pre-Y-snap) */
+    int16_t  z;                         /* +0x04: contact-pos delta Z */
+    int16_t  pad;                       /* +0x06: padding (unused) */
+} TD5_WheelContactDelta;
+
+/**
  * TrackProbeState -- per-probe track segment position state (16 bytes)
  *
  * Each probe (wheel or body corner) maintains its own copy of the
@@ -226,10 +248,15 @@ typedef struct TD5_Actor {
     int16_t  track_span_accumulated;    /* +0x084: monotonic forward span counter [CONFIRMED] */
     int16_t  track_span_high_water;     /* +0x086: high-water mark for race ordering [CONFIRMED]
                                          *         UpdateRaceOrder reads this for position sort */
-    uint8_t  gap_088[4];               /* +0x088: unknown auxiliary track state */
+    int16_t  track_contact_vertex_A;    /* +0x088: left-edge track vertex index [CONFIRMED 2026-05-20]
+                                         *         written by ComputeActorHeadingFromTrackSegment @ 0x00445B90;
+                                         *         block 0x080-0x08F mirrors TrackProbeState layout */
+    int16_t  track_contact_vertex_B;    /* +0x08A: right-edge track vertex index [CONFIRMED 2026-05-20]
+                                         *         written by ComputeActorHeadingFromTrackSegment @ 0x00445B90 */
     uint8_t  track_sub_lane_index;      /* +0x08C: sub-lane within current span [CONFIRMED]
                                          *         used by FindNearestRoutePeer for same-lane match */
-    uint8_t  gap_08D[3];               /* +0x08D: unknown */
+    uint8_t  _pad_main_probe_0D;        /* +0x08D: TrackProbeState trailing pad */
+    int16_t  _pad_main_probe_0E;        /* +0x08E: TrackProbeState trailing pad */
 
     /* === CONTACT PROBE POSITIONS (0x090-0x0BF) =======================
      *
@@ -293,9 +320,17 @@ typedef struct TD5_Actor {
      */
     TD5_Mat3x3 saved_orientation;       /* +0x150: saved orientation for recovery [CONFIRMED] */
 
-    /* === ORIENTATION PADDING (0x174-0x17F) ============================ */
-    uint8_t  gap_174[4];               /* +0x174: unused/reserved */
-    uint8_t  gap_178[8];               /* +0x178: unused/reserved */
+    /* === SAVED RENDER POSITION (0x174-0x17F) ==========================
+     *
+     * Translation tail of the 48-byte saved orientation transform.
+     * ClampVehicleAttitudeLimits @ 0x00405B40 does a single 48-byte copy
+     * (Mat3x3 + Vec3_Float) from rotation_matrix + render_pos to
+     * saved_orientation + saved_render_pos. Used by scripted-mode
+     * interpolation to restore both orientation and position.
+     */
+    TD5_Vec3_Float saved_render_pos;    /* +0x174: saved render position [CONFIRMED 2026-05-20]
+                                         *         written by ClampVehicleAttitudeLimits @ 0x00405B40
+                                         *         (memcpy +0x144 → +0x174, 12 bytes) */
 
     /* === COLLISION SPIN MATRIX (0x180-0x1A3) =========================
      *
@@ -310,8 +345,16 @@ typedef struct TD5_Actor {
      */
     TD5_Mat3x3 collision_spin_matrix;   /* +0x180: recovery rotation [CONFIRMED wave3] */
 
-    /* === MATRIX BLOCK PADDING (0x1A4-0x1AF) ========================== */
-    uint8_t  gap_1A4[12];              /* +0x1A4: unused/reserved */
+    /* === COLLISION SPIN TRANSLATION (0x1A4-0x1AF) ====================
+     *
+     * Translation tail of the 48-byte collision spin transform.
+     * ClampVehicleAttitudeLimits writes 12 dwords starting at +0x180
+     * (9 floats spin matrix + 3 floats translation). In the original,
+     * the trailing 3 dwords are stack residue (first row of the
+     * pre-shuffle BuildRotation output); the port mirrors via build_mat.
+     */
+    TD5_Vec3_Float collision_spin_translation; /* +0x1A4: collision spin translation [CONFIRMED 2026-05-20]
+                                                *         written by ClampVehicleAttitudeLimits @ 0x00405B40 */
 
     /* === CAR DEFINITION & TUNING POINTERS (0x1B0-0x1BF) ==============
      *
@@ -319,7 +362,10 @@ typedef struct TD5_Actor {
      * parameter blocks. Set during actor initialization.
      */
     void*    car_config_ptr;            /* +0x1B0: car visual config (bounding box, hardpoints) [INFERRED] */
-    uint8_t  gap_1B4[4];               /* +0x1B4: unknown (zeroed on init, possibly car_visual_config_ptr) */
+    void*    actor_aux_ptr_1B4;         /* +0x1B4: 4th pointer slot in the 16-byte ptr block [INFERRED 2026-05-20]
+                                         *         InitializeRaceActor @ 0x0042F140 zeroes it on init;
+                                         *         td5_trace_replay preserves all 16 bytes at +0x1B0..+0x1BF.
+                                         *         Writer not yet identified — possible LOD/hi-detail-model alt. */
     void*    car_definition_ptr;        /* +0x1B8: car definition struct [CONFIRMED]
                                          *         half-width(+0x04), half-length(+0x08),
                                          *         bounding_radius(+0x80), mass(+0x88) */
@@ -352,7 +398,7 @@ typedef struct TD5_Actor {
      * identified dynamics function. Unused padding between velocity
      * and angle accumulator blocks.
      */
-    uint8_t  gap_1D8[24];              /* +0x1D8: unused padding [CONFIRMED wave3] */
+    uint8_t  _pad_1D8[24];              /* +0x1D8: unused padding [CONFIRMED wave3 + 2026-05-20 re-audit] */
 
     /* === EULER ANGLE ACCUMULATORS (0x1F0-0x1FB) ======================
      *
@@ -393,11 +439,31 @@ typedef struct TD5_Actor {
      * vectors, and wheel world positions. Written by
      * RefreshVehicleWheelContactFrames. Sub-field layout partially resolved.
      */
-    uint8_t  gap_20E[2];               /* +0x20E: padding after display angles */
+    uint8_t  _pad_20E[2];               /* +0x20E: alignment pad before wheel_display_angles [CONFIRMED 2026-05-20] */
     int16_t  wheel_display_angles[4][4]; /* +0x210: per-wheel angle data (4 wheels x 4 shorts) [INFERRED] */
     int16_t  wheel_contact_normals[4][4]; /* +0x230: per-wheel track contact normals [INFERRED] */
     int16_t  wheel_contact_velocities[4][4]; /* +0x250: per-wheel contact velocity vectors [INFERRED] */
-    uint8_t  gap_270[32];              /* +0x270: wheel contact velocity hires / mixed data [INFERRED] */
+    /* +0x270: wheel_contact_delta[4] — per-wheel frame-to-frame contact-position
+     * delta (i16 xyz + pad). 4 wheels x 8 bytes = 32 bytes.
+     *
+     *   Writer: RefreshVehicleWheelContactFrames @ 0x00403720
+     *           (port td5_physics.c:7053). Computed as
+     *           (new_wheel_contact_pos - prev_wheel_contact_pos) >> 8
+     *           BEFORE the Y-snap. Y uses transform Y, not ground-snapped Y.
+     *   Reader: UpdateVehicleSuspensionResponse @ 0x004057F0
+     *           (port td5_physics.c:3709). Used as spring_dot in
+     *           landing-impulse compute, gated on prev_air & current_air.
+     *
+     * Storage stays uint8_t[32] (NOT promoted to typed struct) because
+     * promoting it triggers a +7-field convergence regression — likely
+     * GCC strict-aliasing rules generating different code once the type is
+     * non-char (char arrays alias everything; struct arrays do not). The
+     * diff harness labels these via tools/td5_actor_offsets.py:144-159
+     * regardless of the C type. Identified by Agent I 2026-05-16.
+     */
+    uint8_t  wheel_contact_delta[32];  /* +0x270: per-wheel pre-snap delta storage [CONFIRMED 2026-05-20]
+                                         *         Logical layout: int16_t[4][4] (4 wheels × {dx,dy,dz,pad}).
+                                         *         Storage stays uint8_t[32] — see caveat above. */
 
     /* === HEADING NORMAL (0x290-0x295) ================================
      *
@@ -407,7 +473,7 @@ typedef struct TD5_Actor {
      */
     TD5_Vec3_Int16 heading_normal;      /* +0x290: heading direction normal [CONFIRMED wave3] */
 
-    uint8_t  gap_296[2];               /* +0x296: padding */
+    uint8_t  _pad_296[2];               /* +0x296: alignment pad before wheel_world_positions_hires [CONFIRMED 2026-05-20] */
 
     /* === HIGH-RES WHEEL WORLD POSITIONS (0x298-0x2C7) ================
      *
@@ -426,7 +492,7 @@ typedef struct TD5_Actor {
     /* === CENTER SUSPENSION (0x2CC-0x2DB) ============================= */
     int32_t  center_suspension_pos;     /* +0x2CC: chassis roll/pitch suspension position [CONFIRMED] */
     int32_t  center_suspension_vel;     /* +0x2D0: chassis suspension velocity [CONFIRMED] */
-    uint8_t  gap_2D4[4];               /* +0x2D4: unknown */
+    uint8_t  _pad_2D4[4];               /* +0x2D4: pad between center_suspension_vel and prev_frame_y_position [CONFIRMED 2026-05-20] */
     int32_t  prev_frame_y_position;     /* +0x2D8: previous frame world_pos.y [CONFIRMED]
                                          *         saved before integration for suspension delta */
 
@@ -494,8 +560,8 @@ typedef struct TD5_Actor {
                                          *         decremented per tick; 0 = DNF */
 
     /* === CHECKPOINT & RACE STATE (0x346-0x36A) ======================= */
-    int16_t  gap_346;                   /* +0x346: unknown */
-    uint8_t  gap_348[4];               /* +0x348: unknown */
+    int16_t  _pad_346;                   /* +0x346: pad between pending_finish_timer and timing_frame_counter [CONFIRMED 2026-05-20] */
+    uint8_t  _pad_348[4];               /* +0x348: pad before timing_frame_counter [CONFIRMED 2026-05-20] */
     int16_t  timing_frame_counter;      /* +0x34C: timing frame counter [CONFIRMED]
                                          *         init -1, incremented per tick while racing;
                                          *         used for average speed calculation */
@@ -508,7 +574,8 @@ typedef struct TD5_Actor {
                                          *         >= 3 frames + wheel_contact_bitmask==0x0F
                                          *         (i.e. all wheels airborne THIS tick at +0x37C)
                                          *         triggers damping recovery (FUN_00403d90) */
-    uint8_t  gap_362[9];               /* +0x362: unknown input/state block */
+    uint8_t  _pad_362[9];               /* +0x362: unused/reserved (subsystem docs speculated +0x366/+0x367
+                                         *         but no writer/reader corroborated 2026-05-20) */
 
     /* === GEAR & CONTROL FLAGS (0x36B-0x374) ========================== */
     uint8_t  current_gear;              /* +0x36B: gear index [CONFIRMED]
@@ -539,14 +606,17 @@ typedef struct TD5_Actor {
                                          *         0-5=racer, 6-11=traffic */
     uint8_t  surface_contact_flags;     /* +0x376: surface contact bitmask [CONFIRMED]
                                          *         bit0=rear contact, bit1=front contact */
-    uint8_t  gap_377;                   /* +0x377: unknown */
+    uint8_t  light_zone_index;          /* +0x377: cached per-track lighting-zone index [CONFIRMED 2026-05-20]
+                                         *         written by ApplyTrackLightingForVehicleSegment @ 0x00430150
+                                         *         (zone walk based on track_span_raw vs zone [span_lo, span_hi]);
+                                         *         port mirrors via file-static s_actor_light_zone[slot]. */
     uint8_t  throttle_input_active;     /* +0x378: player throttle input [CONFIRMED wave3]
                                          *         = ~(input_flags >> 0x1C) & 1;
                                          *         1 = accelerator pressed */
     uint8_t  vehicle_mode;              /* +0x379: physics mode [CONFIRMED]
                                          *         0=normal, 1=scripted/recovery.
                                          *         controls dispatch in UpdateVehicleActor */
-    uint8_t  gap_37A;                   /* +0x37A: unknown */
+    uint8_t  _pad_37A;                   /* +0x37A: pad between vehicle_mode and track_contact_flag [CONFIRMED 2026-05-20] */
     uint8_t  track_contact_flag;        /* +0x37B: V2W contact flag [CONFIRMED]
                                          *         cleared each frame, set on wall collision.
                                          *         0=none, 1=left/right, 2=inner edge */
@@ -568,13 +638,13 @@ typedef struct TD5_Actor {
                                          *         NOTE: overloaded as checkpoint_count in
                                          *         point-to-point mode -- indexes into
                                          *         checkpoint_split_times[9] at 0x34E */
-    uint8_t  gap_37F;                   /* +0x37F: unknown */
+    uint8_t  _pad_37F;                   /* +0x37F: pad between ghost_flag and grip_reduction [CONFIRMED 2026-05-20] */
     uint8_t  grip_reduction;            /* +0x380: grip reduction override [CONFIRMED]
                                          *         effective grip = min(this, race_position) */
     uint8_t  prev_race_position;        /* +0x381: previous frame's race position [CONFIRMED wave3]
                                          *         copied from race_position each frame;
                                          *         used for grip_reduction clamping */
-    uint8_t  gap_382;                   /* +0x382: unknown */
+    uint8_t  _pad_382;                   /* +0x382: pad between prev_race_position and race_position [CONFIRMED 2026-05-20] */
     uint8_t  race_position;             /* +0x383: display race position [CONFIRMED]
                                          *         0=1st, 1=2nd, ..., 5=6th.
                                          *         written by UpdateRaceOrder */
@@ -594,13 +664,21 @@ _Static_assert(sizeof(TD5_DisplayAngles) == 0x06, "TD5_DisplayAngles must stay 6
 _Static_assert(sizeof(TD5_EulerAccum) == 0x0C, "TD5_EulerAccum must stay 12 bytes");
 _Static_assert(sizeof(TD5_TrackProbeState) == 0x10, "TD5_TrackProbeState must stay 16 bytes");
 _Static_assert(sizeof(TD5_Actor) == TD5_ACTOR_STRIDE, "TD5_Actor size drifted from 0x388");
+/* +0x270 wheel_contact_delta: stored as uint8_t[32] (logical int16_t[4][4]) to
+ * avoid a strict-aliasing-induced codegen change (see comment at field). */
+_Static_assert(offsetof(TD5_Actor, wheel_contact_delta) == 0x270, "TD5_Actor.wheel_contact_delta offset drifted");
 _Static_assert(offsetof(TD5_Actor, body_probes) == 0x000, "TD5_Actor.body_probes offset drifted");
 _Static_assert(offsetof(TD5_Actor, wheel_probes) == 0x040, "TD5_Actor.wheel_probes offset drifted");
 _Static_assert(offsetof(TD5_Actor, track_span_raw) == 0x080, "TD5_Actor.track_span_raw offset drifted");
+_Static_assert(offsetof(TD5_Actor, track_contact_vertex_A) == 0x088, "TD5_Actor.track_contact_vertex_A offset drifted");
 _Static_assert(offsetof(TD5_Actor, track_sub_lane_index) == 0x08C, "TD5_Actor.track_sub_lane_index offset drifted");
 _Static_assert(offsetof(TD5_Actor, probe_FL) == 0x090, "TD5_Actor.probe_FL offset drifted");
 _Static_assert(offsetof(TD5_Actor, rotation_matrix) == 0x120, "TD5_Actor.rotation_matrix offset drifted");
+_Static_assert(offsetof(TD5_Actor, saved_render_pos) == 0x174, "TD5_Actor.saved_render_pos offset drifted");
 _Static_assert(offsetof(TD5_Actor, collision_spin_matrix) == 0x180, "TD5_Actor.collision_spin_matrix offset drifted");
+_Static_assert(offsetof(TD5_Actor, collision_spin_translation) == 0x1A4, "TD5_Actor.collision_spin_translation offset drifted");
+_Static_assert(offsetof(TD5_Actor, actor_aux_ptr_1B4) == 0x1B4, "TD5_Actor.actor_aux_ptr_1B4 offset drifted");
+_Static_assert(offsetof(TD5_Actor, light_zone_index) == 0x377, "TD5_Actor.light_zone_index offset drifted");
 _Static_assert(offsetof(TD5_Actor, world_pos) == 0x1FC, "TD5_Actor.world_pos offset drifted");
 _Static_assert(offsetof(TD5_Actor, display_angles) == 0x208, "TD5_Actor.display_angles offset drifted");
 _Static_assert(offsetof(TD5_Actor, steering_command) == 0x30C, "TD5_Actor.steering_command offset drifted");

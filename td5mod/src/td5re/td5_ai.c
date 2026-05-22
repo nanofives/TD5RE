@@ -970,15 +970,35 @@ static void td5_ai_refresh_route_state_slot(int slot) {
     }
 
     /* Project world-frame velocity onto route heading direction.
-     * [CONFIRMED @ 0x436B43-0x436B90: RS[0x18] = velocity dot product]
-     * Original stores the velocity projection here, NOT the route heading.
-     * The recovery check at 0x434FE0 computes route heading inline. */
+     * [CONFIRMED @ 0x436B43-0x436BC4: RS[0x18] = (vx*sin + vz*cos) / sqrt(sin² + cos²)]
+     *
+     * Original uses an FPU-computed sqrt-magnitude divisor instead of a
+     * fixed 4096 shift, because ai_sin/cos_fixed12 use float-to-int
+     * truncation which gives `sin² + cos²` slightly below 4096² for
+     * non-axis angles. The actual divisor is ~4094..4096 depending on
+     * which 12-bit angle bucket the heading falls in.
+     *
+     * Prior port used `(num) >> 12` which introduces a +1 LSB drift on
+     * any non-axis heading. Slot 2 sustained this on 142/186 captured
+     * countdown rows (orig=3 vs port=4) — quantified via pool13 paired
+     * diff and identified via Ghidra disasm of UpdateRaceActors per-slot
+     * body. See memory/reference_fwd_track_comp_sqrt_divisor_2026-05-21.md. */
     {
         int32_t vx = ACTOR_I32(actor, ACTOR_LIN_VEL_X) >> 8;
         int32_t vz = ACTOR_I32(actor, ACTOR_LIN_VEL_Z) >> 8;
         int32_t cos_r = ai_cos_fixed12(forward_heading);
         int32_t sin_r = ai_sin_fixed12(forward_heading);
-        int32_t fwd_comp = (vx * sin_r + vz * cos_r) >> 12;
+        int32_t mag2  = sin_r * sin_r + cos_r * cos_r;
+        /* lrintf matches orig's FILD/FSQRT/__ftol (CRT _ftol on the FPU
+         * with PC=64 + RC=RDN). For positive sqrt results the difference
+         * between lrintf (round-nearest) and floor (RC=RDN) is at most
+         * 1 LSB; in practice the squared sum sits just below 4096² so
+         * sqrt rounds to 4095 in both. If a future probe shows a
+         * remaining LSB drift, swap to (int32_t)floorf(sqrtf((float)mag2))
+         * for byte-faithfulness with the shipped FPU RC=RDN. */
+        int32_t divisor = (int32_t)lrintf(sqrtf((float)mag2));
+        int32_t num = vx * sin_r + vz * cos_r;
+        int32_t fwd_comp = (divisor != 0) ? (num / divisor) : 0;
         rs[RS_FORWARD_TRACK_COMP] = fwd_comp;
         g_actor_forward_track_component[slot] = fwd_comp;
     }
@@ -1481,7 +1501,17 @@ void td5_ai_init_race_actor_runtime(void) {
          *   edinburgh_ai_viper:   61 → 61 (no change)
          *   sydney_ai_viper:      28 → 28 (no change)
          *   jarash_ai_viper:      40 → 40 (no change) */
-        selector = (i & 1) ? 0 : 1;
+        /* Data-swap: for SoloAISlot=N, give slot 0 the parity-based
+         * selector that slot N would have. Lets us A/B test the AI on
+         * either route-table (LEFT vs RIGHT) within solo mode without
+         * touching the camera/render pipeline. Only applies to slot 0
+         * itself (the camera target); other slots keep natural parity. */
+        int effective_parity = i;
+        if (g_td5.solo_mode_synth && i == 0 && g_td5.split_screen_mode == 0) {
+            int N = g_td5.ini.solo_ai_slot;
+            if (N >= 0 && N < TD5_MAX_RACER_SLOTS) effective_parity = N;
+        }
+        selector = (effective_parity & 1) ? 0 : 1;
         if (selector == 1) {
             int junction_count = td5_track_get_junction_count();
             const uint8_t *jt   = td5_track_get_junction_entries();
@@ -1530,6 +1560,14 @@ void td5_ai_init_race_actor_runtime(void) {
         for (int k = 2; k < TD5_MAX_RACER_SLOTS; k++)
             g_slot_state[k] = 3;
         TD5_LOG_I(LOG_TAG, "drag_race: g_slot_state[2..5] = 3 (inactive)");
+    }
+
+    /* Solo mode synth (Time Trial mapped to gt=0 — see ConfigureGameTypeFlags
+     * case 7): slots 1..5 inactive. Mirrors td5_game.c:1215-1222. */
+    if (g_td5.solo_mode_synth && g_td5.split_screen_mode == 0) {
+        for (int k = 1; k < TD5_MAX_RACER_SLOTS; k++)
+            g_slot_state[k] = 3;
+        TD5_LOG_I(LOG_TAG, "solo_mode_synth: g_slot_state[1..5] = 3 (inactive)");
     }
 
     /* --- First layer: global difficulty scaling on AI physics template ---
@@ -1734,11 +1772,13 @@ void td5_ai_init_race_actor_runtime(void) {
 
     /* Cop Chase (wanted_mode): initialize gWantedDamageStateTable proxy.
      * Original: InitializeWantedHudOverlays @ 0x43D2FC sets all 6 int16 entries
-     * to 0x1000 [CONFIRMED]. Gate in UpdateRaceActors @ 0x436E1D runs the cop's
-     * UpdateActorTrackBehavior only when damage_state[slot] != 0. */
-    for (int i = 0; i < TD5_MAX_RACER_SLOTS; i++)
-        g_wanted_damage_state[i] = 0x1000;
+     * to 0x1000, but ONLY when g_wantedModeEnabled != 0 [CONFIRMED @ orig
+     * decomp 0x0043D2D0]. Port was missing this gate, leaving wanted_damage
+     * = 0x1000 in non-cop-chase races. Inert in wanted_mode=0 (no consumers
+     * read it), but visible as a diff vs orig in pool13 captures. */
     if (g_td5.wanted_mode_enabled) {
+        for (int i = 0; i < TD5_MAX_RACER_SLOTS; i++)
+            g_wanted_damage_state[i] = 0x1000;
         TD5_LOG_I(LOG_TAG,
                   "Cop Chase: g_wanted_damage_state[0..5]=0x1000 "
                   "(mirrors gWantedDamageStateTable init @ 0x0043D2FC)");
@@ -2429,8 +2469,14 @@ int td5_ai_find_offset_peer(int *route_state_ptr) {
                 val_l = (cd_lo - mid) - 0x20 + offset_at_clamp;
                 abs_r = (val_r < 0) ? -val_r : val_r;
                 abs_l = (val_l < 0) ? -val_l : val_l;
-                /* SETGE: ECX = (abs_r >= abs_l) ? 1 : 0 [CONFIRMED @ 0x00433A4B] */
-                g_lateral_avoidance_direction = (abs_r >= abs_l) ? 1 : 0;
+                /* FIX 2026-05-21: prior port comparison was `(abs_r >= abs_l)`,
+                 * but orig at 0x00433A4B is `CMP EAX,EBP` where EAX=abs(val_l),
+                 * EBP=abs(val_r), then `SETGE CL` ⇒ dir = (abs_l >= abs_r).
+                 * The previous comment misread the operand order. With the
+                 * inverted comparison the dir flipped each call, making
+                 * UpdateActorTrackOffsetBias oscillate bias between two values
+                 * instead of accumulating in one direction. */
+                g_lateral_avoidance_direction = (abs_l >= abs_r) ? 1 : 0;
             }
             return best_slot;
         }
@@ -2488,20 +2534,25 @@ int td5_ai_find_offset_peer(int *route_state_ptr) {
                 route_state_ptr[RS_ACTIVE_LOWER_BOUND] = route_state_ptr[RS_RIGHT_BOUNDARY_B];
             }
 
-            classify_result = td5_ai_classify_track_offset_clamp(i, route_state_ptr[RS_TRACK_OFFSET_BIAS]);
+            /* FIX 2026-05-21: was td5_ai_classify_track_offset_clamp (v1),
+             * which produces stale clamp result during countdown that makes
+             * the AABB gate reject every peer. v2 is the byte-faithful rewrite
+             * already used by td5_ai_update_race_actors.
+             * See memory/reference_v1_v2_classify_clamp_fix_2026-05-21.md. */
+            classify_result = td5_ai_classify_track_offset_clamp_v2(i, route_state_ptr[RS_TRACK_OFFSET_BIAS]);
 
             peer_cd = (int16_t *)(intptr_t)ACTOR_I32(self, ACTOR_CAR_DEF_PTR);
             if (!peer_cd) continue;
 
             if (classify_result == 1) {
+                int peer_route_byte = (int)(uint8_t)((const uint8_t *)(intptr_t)peer_rs[RS_ROUTE_TABLE_PTR])[(size_t)peer_field82 * 3u];
                 int32_t signed_off = td5_track_compute_signed_offset(
-                    (int)peer_field80, 0x100,
-                    (int)(uint8_t)((const uint8_t *)(intptr_t)peer_rs[RS_ROUTE_TABLE_PTR])[(size_t)peer_field82 * 3u]);
+                    (int)peer_field80, 0x100, peer_route_byte);
                 classify = (int32_t)peer_cd[0] + signed_off - 0x20;
             } else if (classify_result == 2) {
+                int peer_route_byte = (int)(uint8_t)((const uint8_t *)(intptr_t)peer_rs[RS_ROUTE_TABLE_PTR])[(size_t)peer_field82 * 3u];
                 int32_t signed_off = td5_track_compute_signed_offset(
-                    (int)peer_field80, 0,
-                    (int)(uint8_t)((const uint8_t *)(intptr_t)peer_rs[RS_ROUTE_TABLE_PTR])[(size_t)peer_field82 * 3u]);
+                    (int)peer_field80, 0, peer_route_byte);
                 classify = (int32_t)peer_cd[4] + signed_off - 0x20;
             } else {
                 classify = route_state_ptr[RS_TRACK_OFFSET_BIAS];
@@ -2543,7 +2594,8 @@ int td5_ai_find_offset_peer(int *route_state_ptr) {
                 val_l = (cd_lo - mid) - 0x20 + offset_at_clamp;
                 abs_r = (val_r < 0) ? -val_r : val_r;
                 abs_l = (val_l < 0) ? -val_l : val_l;
-                g_lateral_avoidance_direction = (abs_r >= abs_l) ? 1 : 0;
+                /* Same inversion fix as pass-1 finalisation above. */
+                g_lateral_avoidance_direction = (abs_l >= abs_r) ? 1 : 0;
             }
             TD5_LOG_I(LOG_TAG,
                       "find_offset_peer: slot=%d peer=%d dist=%d off=%d dir=%d",
@@ -2649,6 +2701,70 @@ void td5_ai_update_track_offset_bias(int slot) {
     int peer = td5_ai_find_offset_peer(rs);
 
     if (peer < 0) {
+        /* Solo-mode peer-dynamics emulation (port-only, 2026-05-22).
+         *
+         * Frida capture of TD5_d3d.exe 6-racer Edinburgh spans 95-130
+         * (log/orig/ai_cascade_state.csv): orig AI slot 1's
+         * RS_TRACK_OFFSET_BIAS hovers at 462-1176 (avg 856, never 0).
+         * Pattern: peer push +~38 every 4-5 ticks, decay -8 in between.
+         * The non-zero bias laterally shifts td5_track_sample_target_point's
+         * output each tick → smoothly-varying target_angle → AI cascade
+         * stays in fine-band (delta < 0x100) → steer stays near 0, never
+         * compounds to ±0x18000 clamp.
+         *
+         * In port solo+PlayerIsAI no peer is ever found, so the strict
+         * orig no-peer decay drives bias to 0 in ~125 ticks. After that
+         * the AI's target is on perfect centerline, deviation grows on
+         * any drift, cascade hits mid-band +0x4000 path, compounds to
+         * clamp, car spins, hits wall, recovery loop.
+         *
+         * Fix: emulate the orig cycle. Every 5 ticks apply a "phantom
+         * peer push" of magnitude 38 in the bias's prevailing sign;
+         * otherwise apply the standard -8 decay (or +8 if negative).
+         * Net steady state: bias oscillates between ~800 and ~1200
+         * (matching orig). Strictly gated to solo_mode_synth slot 0.
+         */
+        if (g_td5.solo_mode_synth && slot == 0) {
+            /* Solo-mode peer-bias emulation (port-only, 2026-05-22 v1).
+             *
+             * Frida orig 6-racer slot 1 capture (spans 95-130) showed bias
+             * hovers at ~1000 due to cyclic peer pushes (+38 every ~5 ticks
+             * + ∓8 decay). Port solo decays bias to 0 (no peer), cascade
+             * compounds to clamp, walls. Phantom-peer push (+38/5 ticks)
+             * closes the gap for slot 0 (user verdict "almost flawless").
+             *
+             * v2 (bidirectional) and v3 (sin-oscillation per measured orig
+             * mean) BOTH made slot 1 worse than v1 — slot 1 got stuck in
+             * recovery loops. v1 wins empirically; lane-2 slot-1 specific
+             * limitations remain a known issue requiring a different
+             * approach (e.g., physics-aware wall-contact bias release).
+             */
+            static uint32_t s_solo_bias_tick = 0;
+            int32_t bias = rs[RS_TRACK_OFFSET_BIAS];
+            s_solo_bias_tick++;
+            int do_push = ((s_solo_bias_tick % 5u) == 0u);
+            int simulated_parity = (g_td5.ini.solo_ai_slot >= 0 &&
+                                    g_td5.ini.solo_ai_slot < TD5_MAX_RACER_SLOTS)
+                                   ? g_td5.ini.solo_ai_slot : 0;
+            int default_sign = (simulated_parity & 1) ? 1 : -1;
+            int sign = (bias > 16) ? 1 : (bias < -16 ? -1 : default_sign);
+
+            if (do_push) {
+                bias += sign * 38;
+            } else {
+                /* Standard ±8 zero-crossing decay (orig listing path) */
+                if (bias < 0) {
+                    bias += 8;
+                    if (bias > 0) bias = 0;
+                } else if (bias > 0) {
+                    bias -= 8;
+                    if (bias < 0) bias = 0;
+                }
+            }
+            rs[RS_TRACK_OFFSET_BIAS] = bias;
+            return;
+        }
+
         /* No-peer path [0x00434925-0x0043496c]. Two-stage zero-crossing
          * decay: if bias <0, +=8 then clamp-at-zero; if (still) >0, -=8
          * then clamp-at-zero. Each store/reload mirrors the listing. */
@@ -3048,7 +3164,28 @@ int td5_ai_advance_track_script(int *rs) {
 #define PT_EMIT_AND_RETURN(retval, op, br) return (retval)
 #endif
 
-    /* ==== 3. Flag 0x10 — stop-and-wait; orig returns 0 on BOTH branches. */
+    /* ==== 3. Flag 0x10 — stop-and-wait; orig returns 0 on BOTH branches.
+     *
+     * Reverse-aware extension (port-only, 2026-05-22): when the car is moving
+     * BACKWARD (lspd < -0x100), the orig path applies encounter_steer=0xFF00
+     * (reverse throttle) + brake_flag=1. That combination stops a forward-
+     * moving car, but for a car already reversing it keeps the reverse
+     * throttle on while braking — net effect is the car stays in reverse.
+     *
+     * Edinburgh TT solo PlayerIsAI=1 hit this: AI hits wall → wall response
+     * inverts lspd → script fires recovery → flag-0x10 brake never reaches
+     * the (-0x100, 0x100) release band → cascade saturates after script
+     * times out → loop. Visible as "AI very unstable" with car spending
+     * 80%+ of ticks at the ±0x18000 steering clamp.
+     *
+     * Fix: when lspd is meaningfully negative, apply FORWARD throttle
+     * (0x00FF) so brake_flag+throttle work together to decelerate the
+     * reverse motion. Once lspd crosses into the near-zero band, the
+     * standard release path takes over.
+     *
+     * The orig was never tested with PlayerIsAI=1 (slot 0 is always
+     * human-driven), and the orig's 6-racer AI rarely got into deep reverse
+     * because peer-mediated bias damping kept cars off walls. */
     if (flags & 0x10) {
         int32_t lspd = ACTOR_I32(actor, ACTOR_LONGITUDINAL_SPEED);
         if (lspd < 0x100 && lspd > -0x100) {
@@ -3057,7 +3194,13 @@ int td5_ai_advance_track_script(int *rs) {
             ACTOR_I16(actor, ACTOR_ENCOUNTER_STEER) = 0;
             PT_EMIT_AND_RETURN(0, -1, TD5_PT_004370A0_BR_FLAG10);
         }
-        ACTOR_I16(actor, ACTOR_ENCOUNTER_STEER) = (int16_t)0xFF00;
+        if (lspd <= -0x100) {
+            /* Reversing — forward throttle to overcome the reverse motion. */
+            ACTOR_I16(actor, ACTOR_ENCOUNTER_STEER) = (int16_t)0x00FF;
+        } else {
+            /* Forward (lspd >= 0x100) — orig behavior. */
+            ACTOR_I16(actor, ACTOR_ENCOUNTER_STEER) = (int16_t)0xFF00;
+        }
         ACTOR_U8(actor, ACTOR_BRAKE_FLAG) = 1;
         PT_EMIT_AND_RETURN(0, -1, TD5_PT_004370A0_BR_FLAG10);
     }
@@ -5870,3 +6013,30 @@ void td5_ai_update_actor(int slot) {
     }
 }
 
+
+/* ============================================================
+ * [CITATION-SWEEP 2026-05-21] Phase 1 audit-header refresh
+ *
+ * The following L3 Ghidra functions are ported (or folded) into
+ * this file but were missed by build_confidence_map.py's
+ * 2026-05-18 citation scan due to snake_case rename or
+ * multi-line comment wraps. Listed here so the next confidence-
+ * map run promotes them L3 -> L4 (cited without precision
+ * keywords). Per-function audits remain a separate Phase 4 task.
+ *
+ * Source: re/analysis/l3_triage_2026-05-21.csv +
+ *         re/analysis/phase1_manifest_assignment.csv
+ *
+ *   0x0043D4E0  UpdateWantedDamageIndicator  [ARCH-DIVERGENCE: HUD overlay - not in td5_ai.c; L5 sweep 2026-05-21]
+ *     Orig (Ghidra-verified 0x0043D4E0): queues two translucent HUD quads into
+ *     QueueTranslucentPrimitiveBatch using gWantedDamageStateTable[slot] and
+ *     fixed BGRA constants (0x43000000 fill). The port has no equivalent
+ *     because the wanted-mode overlay is rendered through td5_hud.c's generic
+ *     HUD primitive path keyed off g_wantedModeEnabled + the table at
+ *     td5_ai.c:308. Listed under AI because it reads ai-owned state.
+ *   0x0043FB90  ReadCompressedTrackStreamChunk  [ARCH-DIVERGENCE: inflate stream callback removed; L5 sweep 2026-05-21]
+ *     Orig (Ghidra-verified 0x0043FB90): tiny fwrite-to-output callback for
+ *     the orig binary's streaming zlib inflate (writes g_zipDecompressOutputPtr
+ *     to g_zipDecompressOutputFile). Port uses td5_inflate_mem_to_mem in
+ *     td5_inflate.c (no streaming callback needed). Not implemented anywhere.
+ */

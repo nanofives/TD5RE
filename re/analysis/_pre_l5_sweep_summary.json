@@ -1,0 +1,29 @@
+{
+  "total_functions": 876,
+  "by_level": {
+    "5": 249,
+    "4": 137,
+    "3": 258,
+    "0": 232
+  },
+  "auto_named": 0,
+  "crt_or_lib": 232,
+  "cited_in_port": 388,
+  "ghidra_documented": 36,
+  "bookmark_categories": {
+    "PE Header": 3,
+    "CODE_CAVE": 2,
+    "PATCH_SITE": 6,
+    "HOOK_POINT": 65,
+    "KEY_GLOBAL": 8
+  },
+  "game_only": {
+    "total": 644,
+    "by_level": {
+      "5": 249,
+      "4": 137,
+      "3": 258
+    },
+    "cited_in_port": 386
+  }
+}

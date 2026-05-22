@@ -1,0 +1,25 @@
+orig_address,port_function_name,port_signature,signature_quality_hint,missing_type
+0x00408570,obb_corner_test,"static int obb_corner_test(TD5_Actor *a, TD5_Actor *b,              int32_t pos_a_x_fp, int32_t pos_a_z_fp,              int32_t pos_b_x_fp, int32_t pos_b_z_fp,              int32_t yaw_a_acc, int32_t yaw_b_acc,              OBB_CornerData corners[8])",partial,OBB_CornerData
+0x0040ac0f,td5_track_prepare_mesh_resource,void td5_track_prepare_mesh_resource(TD5_MeshHeader *mesh),good,TD5_MeshHeader
+0x0040af10,td5_render_load_rotation,void td5_render_load_rotation(const TD5_Mat3x3 *rot),good,TD5_Mat3x3
+0x0040b070,td5_render_set_race_pass,void td5_render_set_race_pass(TD5_RaceRenderPass pass),good,TD5_RaceRenderPass
+0x0040c120,render_vehicle_reflection_overlay,"static void render_vehicle_reflection_overlay(TD5_MeshHeader *mesh, int slot)",partial,TD5_MeshHeader
+0x00414610,td5_frontend_set_screen,void td5_frontend_set_screen(TD5_ScreenIndex index),good,TD5_ScreenIndex
+0x0042fe20,tl_blend_from_start,"static void tl_blend_from_start(const TD5_Actor *actor,                 const TD5_LightZone *prev,                 const TD5_LightZone *curr,                 int max_dist)",partial,TD5_LightZone
+0x0042ffc0,tl_blend_from_end,"static void tl_blend_from_end(const TD5_Actor *actor,                const TD5_LightZone *curr,                const TD5_LightZone *next,                int max_dist)",partial,TD5_LightZone
+0x00431690,dispatch_projected_quad,"static void dispatch_projected_quad(TD5_PrimitiveCmd *cmd, TD5_MeshVertex *base_verts)",good,TD5_PrimitiveCmd
+0x004316d0,dispatch_quad_direct,"static void dispatch_quad_direct(TD5_PrimitiveCmd *cmd, TD5_MeshVertex *base_verts)",good,TD5_PrimitiveCmd
+0x004316f0,dispatch_projected_tri,"static void dispatch_projected_tri(TD5_PrimitiveCmd *cmd, TD5_MeshVertex *base_verts)",good,TD5_PrimitiveCmd
+0x00431730,dispatch_tristrip_direct,"static void dispatch_tristrip_direct(TD5_PrimitiveCmd *cmd, TD5_MeshVertex *base_verts)",good,TD5_PrimitiveCmd
+0x00431750,dispatch_tristrip,"static void dispatch_tristrip(TD5_PrimitiveCmd *cmd, TD5_MeshVertex *base_verts)",good,TD5_PrimitiveCmd
+0x004323d0,clip_and_submit_polygon,"static void clip_and_submit_polygon(TD5_MeshVertex *vert_data, int vert_count,                   int tex_page)",partial,TD5_MeshVertex
+0x0043db70,td5_render_transform_mesh_vertices,void td5_render_transform_mesh_vertices(TD5_MeshHeader *mesh),good,TD5_MeshHeader
+0x0043dc20,td5_render_load_translation,void td5_render_load_translation(const TD5_Vec3f *pos),good,TD5_Vec3f
+0x0043dcb0,td5_render_prepared_mesh,void td5_render_prepared_mesh(TD5_MeshHeader *mesh),good,TD5_MeshHeader
+0x0043e3b0,dispatch_billboard,"static void dispatch_billboard(TD5_PrimitiveCmd *cmd, TD5_MeshVertex *base_verts)",good,TD5_PrimitiveCmd
+0x004405b0,decompress_entry,"static int decompress_entry(TD5_File *f, TD5_ZipEntry *entry,               void *out_buf, int out_buf_size)",partial,TD5_File
+0x00444920,compound_cross,"static int64_t compound_cross(const TD5_StripSpan *sp,                int v_a_idx, int v_b_idx,                int32_t pos_x, int32_t pos_z)",partial,TD5_StripSpan
+0x00445450,td5_track_compute_probe_contact_vertices,void td5_track_compute_probe_contact_vertices(TD5_TrackProbeState *probe),good,TD5_TrackProbeState
+0x004457e0,probe_span_lane_height,"static int32_t probe_span_lane_height(const TD5_StripSpan *sp, int sub_lane,                    int32_t world_x, int32_t world_z,                    int16_t *out_normal)",partial,TD5_StripSpan
+0x00449310,td5_asset_find_entry_by_name,"TD5_StaticHedEntry * td5_asset_find_entry_by_name(TD5_StaticHedEntry *entries, int entry_count, const char *name)",partial,TD5_StaticHedEntry
+0x00463030,vfx_atlas_entry_valid,static int vfx_atlas_entry_valid(const TD5_AtlasEntry *entry),good,TD5_AtlasEntry

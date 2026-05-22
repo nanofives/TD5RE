@@ -333,7 +333,16 @@ int td5_sound_init_race_resources(void)
  *
  * Race shutdown: stop all duplicate-range channels (44-87),
  * then remove all base-range buffers (0-43).
- */
+ *
+ * [ARCH-DIVERGENCE: DXSound::Stop/Remove -> td5_plat_audio; L5 sweep 2026-05-21]
+ *   Ghidra-verified 0x00441D50: orig stops slots 0x2c..0x57 (DXSound::Stop)
+ *   then removes slots 0x00..0x2b (DXSound::Remove); returns 1. Port walks
+ *   the same two ranges using slot_stop and td5_plat_audio_free
+ *   (TD5_SOUND_DUP_OFFSET == 0x2c, TD5_SOUND_TOTAL_SLOTS == 0x58,
+ *   TD5_SOUND_MAX_BASE_SLOTS == 0x2c -- match by definition), with the
+ *   port also scrubbing s_slot_to_buffer / its duplicate mirror to track
+ *   per-slot buffer ownership (no orig-side equivalent because DXSound
+ *   tracked it internally). */
 void td5_sound_release_race_channels(void)
 {
     /* Stop duplicate slots 44-87 */
@@ -371,7 +380,18 @@ void td5_sound_release_race_channels(void)
  * @param is_reverb_vehicle Non-zero to load Reverb.wav instead of Rev.wav
  *                          (set for the local player's own vehicle).
  * @return 1 on success.
- */
+ *
+ * [ARCH-DIVERGENCE: 4 "99" markers collapsed to per-state array writes; L5 sweep 2026-05-21]
+ *   Orig sets four 99-value markers on entry (one per array):
+ *     (&DAT_004c3774)[param_2 * 2] = 99;
+ *     (&g_engineRevLoopStateByActorView)[param_2 * 2] = 99;
+ *     (&g_engineLoopStateByActorView)[param_2 * 2] = 99;
+ *     (&g_sirenChannelPlayStateByActorView + param_2 * 8) = 99;
+ *   Port consolidates audio per-slot state into s_engine_state / s_tracked_audio_state
+ *   arrays and uses the ENGINE_STATE_STOPPED enum (=99) to mark uninitialized.
+ *   The siren-channel marker is intentionally folded into s_siren_refreshed /
+ *   s_siren_active_flag flag resets at the end of the function instead of an
+ *   array-indexed marker write. */
 int td5_sound_load_vehicle_bank(const char *car_dir, int vehicle_index,
                                 int is_reverb_vehicle)
 {
@@ -543,6 +563,34 @@ void td5_sound_update_ambient(void)
  * Called per-actor when the horn button is pressed. If wanted mode is active
  * and this actor is the cop, activates the siren audio layer. Otherwise,
  * triggers the horn sound for this vehicle.
+ *
+ * [CONFIRMED @ 0x00440A30 wanted-mode branch] — Ghidra-verified: orig
+ * checks g_wantedModeEnabled && slotIndex == g_wantedTargetSlotIndex, and
+ * when g_sirenRefreshedThisFrame==0 writes
+ *   _g_trackedVehicleAudioActiveView0Mirror_PROVISIONAL = 1
+ *   gTrackedVehicleAudioActive = 1
+ *   gTrackedVehicleAudioActorIndex = slotIndex
+ *   gTrackedVehicleAudioFadeTarget = 0x1000
+ * then unconditionally calls AdvanceGlobalSkyRotation and sets
+ * g_sirenActiveFlag=1, g_sirenRefreshedThisFrame=1. Port lines 575-588
+ * match exactly: s_tracked_veh_active_p2/active/actor/fade_target writes
+ * gated on s_siren_active_flag==0, td5_game_advance_sky_rotation, then
+ * s_siren_refreshed=1 + s_siren_active_flag=1.
+ *
+ * [ARCH-DIVERGENCE: non-cop branch — DXSound::Status query → slot_is_playing
+ *  poll; skid-loop state writes → engine-state writes] — orig fall-through
+ *  queries DXSound::Status(slotIndex*3+3) (the buffer for actor+1's drive
+ *  slot, or the duplicate ring) and, when idle (status==0), sets
+ *  (&g_skidLoopFlagAlternativeByActorView_PROVISIONAL)[slotIndex*2]=1 and
+ *  (&g_skidLoopStateByActorView)[slotIndex*2]=1 (i.e., requests a skid loop
+ *  refresh). Port lines 589-594 instead poll slot_is_playing on the local
+ *  engine slot (base_slot, base_slot+1) and resets s_engine_state to
+ *  ENGINE_STATE_STOPPED when neither plays. Different semantics: orig
+ *  reactivates skid loop when a different DX slot is idle, port resets
+ *  engine looping marker. The DX-side queue model and the per-slot semantic
+ *  of "playing" differ enough that a 1:1 port would also require porting
+ *  the orig skid-loop state machine (currently consolidated into
+ *  s_skid_playing). L5 promotion sweep 2026-05-21.
  */
 void td5_sound_update_vehicle_looping_state(int actor_index)
 {
@@ -1236,7 +1284,18 @@ void td5_sound_play_at_position(int base_slot, int volume, int pitch,
  *
  * Loads 10 frontend WAVs from "Front End\Sounds\Sounds.zip" into
  * DXSound slots 1-10. All are one-shot (no looping).
- */
+ *
+ * [ARCH-DIVERGENCE: DXSound -> td5_plat_audio + loose-file fallback; L5 sweep 2026-05-21]
+ *   Ghidra-verified 0x00414640: orig walks two parallel arrays (10 WAV
+ *   paths, slots 1..10), opens each via OpenArchiveFileForRead("Front End\
+ *   Sounds\Sounds.zip") and feeds DXSound::LoadBuffer(buf, slot, 0). Port
+ *   mirrors the same 10-entry path/slot tables (s_frontend_sfx_paths /
+ *   s_frontend_sfx_slots, byte-faithful order including the repeated
+ *   Whoosh.wav/Crash1.wav entries) and the one-shot flag, but routes
+ *   through td5_asset_open_and_read (which tries loose-file at
+ *   re/assets/sounds/<name> before the ZIP) and td5_plat_audio_load_wav
+ *   in place of the DDraw-era DXSound interface. Same slot mapping,
+ *   same loop=0 flag. */
 int td5_sound_load_frontend_sfx(void)
 {
     const char *zip_path = "Front End\\Sounds\\Sounds.zip";
@@ -1469,6 +1528,33 @@ static int sound_load_wav_from_zip(const char *wav_name, const char *zip_path,
                   wav_name, slot, read_size, loop, duplicates);
     } else {
         s_slot_to_buffer[slot] = buffer_id;
+        /* [DA-M3 audit 2026-05-22 — pending application]
+         * This stores the SAME buffer_id at slot+44 (the "duplicate" slot)
+         * which is the root cause of engine/skid SFX choppiness:
+         *
+         *   - Orig's nDup=2 sounds get a TRUE second DirectSound buffer
+         *     (via DuplicateSoundBuffer at load time, per W1-D analysis of
+         *     DXSound::Create @ 0x1000ce30 + g_soundDuplicateCountTable).
+         *   - Orig's DXSound::Play @ 0x1000d380 walks the linked-list chain
+         *     looking for an idle voice ("tail-steal" semantics) — never
+         *     Stop+SetCurrentPosition(0) on a busy head.
+         *   - Port currently stores the same buffer_id at both slots, so
+         *     slot_play(slot+44) is functionally identical to slot_play(slot).
+         *     When the gear FSM (td5_sound.c:893-913) flips DRIVE↔REV at
+         *     high cycle rate, slot_stop releases the running buffer → click.
+         *
+         * Fix outline (DA-M3 Section E.1):
+         *   1. Allocate a real second buffer_id when duplicates >= 2 (new
+         *      td5_plat_audio_duplicate(buffer_id) wrapping
+         *      IDirectSound8_DuplicateSoundBuffer at load-time).
+         *   2. Add per-slot "next voice idx" rotating counter (2 entries).
+         *   3. In slot_play(): if head is_playing AND dup is idle, route to
+         *      dup channel; if both busy, replace older voice (tail-steal).
+         *
+         * Affected: Drive/Rev/Horn (veh*3+{0,1,2} slots 0..17), SkidBit
+         * (slot 19), Siren3/5 (slot 20/21), traffic engine variants (37..43).
+         * Scope: ~30 lines td5_sound.c + ~20 lines td5_platform_win32.c.
+         * Not applied yet — needs A/B audio testing per affected SFX class. */
         if (duplicates > 0 && slot + TD5_SOUND_DUP_OFFSET < TD5_SOUND_TOTAL_SLOTS)
             s_slot_to_buffer[slot + TD5_SOUND_DUP_OFFSET] = buffer_id;
         TD5_LOG_I(LOG_TAG,

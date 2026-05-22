@@ -1,0 +1,1192 @@
+### 0x0045d5d0  (3-way)
+  [WIN] b08 high    | g_pixelHalfBias_0p5
+       size=f32
+       evidence: `= 0.5f`. Universal half-pixel UV/dimension offset for D3D3 texel-center sampling. Pervasive across InitializeRaceHudLayout.
+       port: (port uses + 0.5f literal)
+  [alt] b19 high    | g_halfFloatConstant
+       size=float
+       evidence: Value=0x3F000000 (=0.5f). **Many xrefs** across the codebase — Ghidra autonamed it `_g_fixedPointToFloatScale` but that's misleading (true fp24.8 → float would need `1/256 = 0x3B800000`). Used in `LoadRaceVehicleAssets` for chassis-bounds half-extents, in `InitializeRaceSession` for `gRenderCenterX = g_renderWidthF * 0.5f` viewport-center, and in vehicle-mesh patch loops. **Rename to `g_halfFloatConstant`** to fix misleading T3 inheritance.
+       port: td5_render.c viewport-center literal
+  [alt] b20 high    | g_audioReplayDistanceMultiplier
+       size=float
+       evidence: Bytes `0000003f` = 0.5f. Used at three loci: (a) `PlayVehicleSoundAtPosition` and mixer multiply final distance by this when `g_inputPlaybackActive != 0` (replay mode → 0.5× distance attenuation so audio is louder during replay); (b) the listener-velocity Doppler shift uses this on the `gTrackedVehicleAudioActorIndex` branch (siren in replay); (c) **ALSO reused by `LoadRaceVehicleAssets` UV-patch loop as `(uVar11 & 1) * _DAT_0045d5d0`** — non-audio overlap. Comment: "audio replay distance multip
+       port: td5_sound.c replay-distance modifier
+
+### 0x0045d5f4  (3-way)
+  [WIN] b08 medium  | g_hudGearGlyphRowOff
+       size=f32
+       evidence: `= 1.0f`. Row offset constant for gear glyph (`(gear + 1.0) * 16.0`). Used at HUD 0x00438E00/0x00438E54.
+       port: td5_hud.c gear row+1
+  [alt] b11 medium  | g_floatOne (= 1.0f)
+       size=float
+       evidence: `00 00 80 3F` = 1.0f. **39 xrefs across binary** — most-used float constant. Inside RunRaceFrame at 0x0042ba77 (used to seed `g_simTickBudget = 1.0f`). Pure read-only literal.
+       port: (none — port uses `1.0f` directly.)
+  [alt] b20 high    | g_audioMinDistanceEpsilon
+       size=float
+       evidence: Bytes `b9a5 5531` ≈ 3.10e-09f (tiny epsilon). Added to denominator in Doppler ratio: `fVar3 + _DAT_0045d5f4`. Prevents div-by-zero when listener and source are coincident.
+       port: td5_sound.c epsilon constant
+
+### 0x0045d650  (4-way)
+  [WIN] b08 low     | g_renderHudFixedPointShift_4
+       size=f32
+       evidence: `= 4.0f`. Probably a glyph-cell-mod constant; appears in InitializeRaceHudLayout speedometer-digit-step. Comment-only.
+       port: (constant)
+  [alt] b11 medium  | g_floatFour (= 4.0f)
+       size=float
+       evidence: `00 00 80 40` = 4.0f. **18 xrefs**. Inside RunRaceFrame at 0x0042c1f8 used to clamp `g_simTickBudget` to max 4.0 (= 4 sub-ticks max per frame). The hard cap that prevents the sub-tick loop from going beyond 4 iterations on a slow frame.
+       port: port: `td5_game.c` MAX_SUBTICKS = 4 constant (verify).
+  [alt] b20 high    | g_audioDopplerVelocityScale
+       size=float
+       evidence: Bytes `00504348` = 200000.0f. Multiplier on listener-velocity dot product in Doppler ratio. Scales fixed-point velocity into a frequency-shift contribution.
+       port: td5_sound.c doppler velocity scale
+  [alt] b21 high    | g_simTickBudgetCap
+       size=float (4.0f)
+       evidence: Read by `RunRaceFrame` end: `if (_DAT_0045D650 < g_simTickBudget) g_simTickBudget = 4.0;`. Sole purpose: cap the per-frame sim tick accumulator to prevent run-away spiral on slow hosts. Byte pattern `40 80 00 00` = float 4.0.
+       port: `td5_game.c` `TD5_SIM_TICK_BUDGET_CAP = 4.0f`
+
+### 0x0045d658  (2-way)
+  [WIN] b11 low     | g_doubleInvThousand (= 1/1000.0)
+       size=double
+       evidence: `FC A9 F1 D2 4D 62 50 3F` ≈ 0.001 = 1/1000.0. 1 reader at 0x0042c16f. ms→s conversion factor companion.
+       port: (none.)
+  [alt] b21 high    | g_msPerSec_double
+       size=double (1/1000)
+       evidence: Read in `RunRaceFrame` via FLD/FMUL for the ms→s conversion: `g_normalizedFrameDt = local_8 * _DAT_0045d660 * _DAT_0045d658`. Byte pattern `fc a9 f1 d2 4d 62 50 3f` = double 0.001.
+       port: `td5_game.c` time scaling const
+
+### 0x0045d660  (2-way)
+  [WIN] b11 low     | g_doubleThirty (= 30.0)
+       size=double
+       evidence: `00 00 00 00 00 00 3E 40` = 30.0. 1 reader at 0x0042c169. Used to compute `g_normalizedFrameDt = dt_ms * (1/1000.0) * 30.0` — = frame time in 30Hz reference units. **30 Hz = the original target framerate**, exposed as a normalization factor.
+       port: (none — port uses 60Hz native.)
+  [alt] b21 high    | g_targetFps_double
+       size=double (30.0)
+       evidence: Read in same FMUL chain as `g_msPerSec_double`. Byte pattern `00 00 00 00 00 00 3e 40` = double 30.0. The product (`dt_ms × 30 / 1000`) yields normalized "sim ticks @ 30 FPS" = port's standard frame quantization.
+       port: `td5_game.c` `TD5_SIM_TARGET_FPS = 30.0f`
+
+### 0x0045d668  (2-way)
+  [WIN] b11 low     | g_doubleThousand (= 1000.0)
+       size=double
+       evidence: `00 00 00 00 00 40 8F 40` = 1000.0. 1 reader at 0x0042c15d. Used to convert reciprocal-ms to FPS via `g_instantFPS = (1000.0/dt_ms) * 1000.0` — actually 1000/dt scaled.
+       port: (none.)
+  [alt] b21 high    | g_msPerSec_reciprocal
+       size=double (1000.0)
+       evidence: Read by `RunRaceFrame`: `g_instantFPS = fVar13 * (float)_DAT_0045d668;`. Byte pattern `00 00 00 00 00 40 8f 40` = double 1000.0. Multiplies `(1/frame_dt_ms)` to get FPS.
+       port: `td5_game.c` ms→fps converter
+
+### 0x0045d670  (2-way)
+  [WIN] b11 low     | g_doubleOne (= 1.0)
+       size=double
+       evidence: `00 00 00 00 00 00 F0 3F` = 1.0 (double precision). 3 readers. Inside RunRaceFrame at 0x0042c148 (`_g_reciprocalFrameDtMs` = 1.0 / frame_dt_ms). Companion to g_doubleThousand for ms→s.
+       port: (none.)
+  [alt] b21 medium  | g_oneDouble_PROVISIONAL
+       size=double (1.0)
+       evidence: Used as `((double)_DAT_0045d670 / (float)dt) → reciprocalFrameDtMs`. Byte pattern `00 00 00 00 00 00 f0 3f` = double 1.0. Generic 1.0 constant; might be shared with other render-frame code.
+       port: `td5_game.c` reciprocal numerator
+
+### 0x0045d68c  (2-way)
+  [WIN] b11 medium  | g_inv65536F (= 1/65536)
+       size=float
+       evidence: `00 00 80 37` = 1.526e-5 = 1/65536.0f. 2 readers (both inside RunRaceFrame at 0x0042b729 / 0x0042b772) — converts `g_simTimeAccumulator & 0xFFFF` to a [0..1) fraction stored in `g_subTickFraction`. The sub-tick interpolation fractional-time scale.
+       port: port: subtick_fraction computation.
+  [alt] b21 high    | g_subTickQuantum
+       size=float (1/65536)
+       evidence: Read by `g_subTickFraction = (dword)((float)(uint)local_8 * _DAT_0045d68c)`. Byte pattern `00 00 80 37` = float `1.52587890625e-05` = `1/65536`. Converts 24.8 fixed-point sim accumulator to normalized sub-tick fraction.
+       port: `td5_game.c` `TD5_SUB_TICK_QUANTUM = 1.0f/65536.0f`
+
+### 0x0046317c  (3-way)
+  [WIN] b01 high    | g_playerSteeringWeightTarget
+       size=u16[6]
+       evidence: Written by UpdatePlayerSteeringWeightBalance @ 0x004036de/0x00403708. Read at 0x00403335 (signed extend into steering interpolation). Per-slot steering balance for two-player mode. Clearly per-slot baseline, indexed by slotIndex×2.
+       port: `(none)` — not yet ported
+  [alt] b11 high    | g_perSlotViewIndicatorInitialAngle
+       size=u16[6]
+       evidence: 6-element u16 table at `[slotIndex * 2 + 0x46317c]`. Bytes `[0001 0001 0001 0001 0001 0001]` — value `0x0100` per slot. Read at `UpdatePlayerVehicleControlState @ 0x00403335 / 0x00403408` (writes to actor +0x33e indicator field) when the "view-cycle button" path fires. Drives the "view changed" HUD arrow indicator initial angle per slot. 4 xrefs.
+       port: port: HUD view-change indicator init constant. Single-value init table; could be inlined.
+  [alt] b25 high    | g_player0SteeringBiasShort
+       size=i16
+       evidence: `_DAT_0046317c = (short)iVar1 + 0x100` written by `UpdatePlayerSteeringWeightBalance @ 0x004036B0`; read by `UpdatePlayerVehicleControlState` via `(short *)(&DAT_0046317C + slotIndex * 2)`. The "initial steering bias short" the memo refers to. Bit 0x200 of input mask gates application.
+       port: td5_input.c per-slot steering-bias base
+
+### 0x0046317e  (2-way)
+  [WIN] b01 high    | g_playerSteeringWeightOpposite
+       size=u16[6]
+       evidence: Written by UpdatePlayerSteeringWeightBalance @ 0x004036e4. Complement steering weight (0x100 - target). Used in two-player steering balancing.
+       port: `(none)` — not yet ported
+  [alt] b25 high    | g_player1SteeringBiasShort
+       size=i16
+       evidence: Sister to above. `_DAT_0046317e = 0x100 - (short)iVar1` — opposite-sign offset for the second player so the bias sums to 0x200. Same write site / same reader.
+       port: td5_input.c per-slot steering-bias base[1]
+
+### 0x00463fc4  (2-way)
+  [WIN] b14 high    | g_inputBindingTable
+       size=u32[4][9]
+       evidence: Per-context (player+device-pair) action-binding table. 4 banks × 9 button-slots = 36 dwords = 144 bytes. Initial pattern `{1,4,5,6,7,9,8,4,5}` repeated 4×. Action codes: 1=accel, 2=brake_up, 3=brake_dn, 4=shift_dn?, 5=shift_up?, 6=horn, 7=handbrake, 8=changeview, 9=rearview. Modified by `ScreenControllerBindingPage @ 0x0040fc8b` (cycle-binding-on-press) and `WritePackedConfigTd5` (load from Config.td5).
+       port: td5_input.c:13 `gBindingTable[2][9]` (port labels 2×9 but orig is 4×9)
+  [alt] b16 high    | g_controllerBindings
+       size=u32[18]
+       evidence: 18-dword controller binding map (72 bytes). LoadConfig copies `&DAT_0048F3B6` → `&DAT_00463FC4` ×18 (Config.td5 0x32 onward). On detected-device mismatch, `ScreenLocalizationInit` falls back to copying `&DAT_0046400C` defaults (0x00427081 LAB).
+       port: td5_save.c:190 `s_controller_bindings`
+
+### 0x00464084  (2-way)
+  [WIN] b16 high    | g_cupDataTd5XorKey
+       size=char[32]
+       evidence: XOR key for `CupData.td5` payload. Used by WriteCupData/LoadContinueCupData/ValidateCupDataChecksum. Bytes verified: `53 74 65 76 65 20 53 6E 61 6B 65 20 73 61 79 73 20 3A 20 4E 6F 20 43 68 65 61 74 69 6E 67 21 20` = `"Steve Snake says : No Cheating! "`. Already labeled `s_Steve_Snake_says___No_Cheating__00464084` (default symbol).
+       port: td5_save.c line ~5 comment + `td5_save_xor_*`
+  [alt] b23 high    | g_cupDataXorKey
+       size=char[31]
+       evidence: "Steve Snake says: No Cheating!" — XOR key cycled mod-length with extra ^0x80; used by WriteCupData (0x004114f0), LoadContinueCupData (0x00411590), ValidateCupDataChecksum (0x00411630)
+       port: td5_save.c XOR key constant
+
+### 0x004654a4  (2-way)
+  [WIN] b07 high    | g_cheatCodeKeySequenceTable
+       size=u8[6][40]
+       evidence: 6 entries x 0x28-byte stride; each row is a VK_* sequence terminated by 0xFF (e.g. row0 = `17 39 23 1E 2F 12 39 14 23 12 39 25 12 15 FF`); indexed `[slot * 0x28 + progress[slot]]` in 0x00414de1; orig comment "key sequences"
+       port: port replaces with `frontend_match_cheat_code("OPENALL")` style char matcher at td5_frontend.c:2443 (semantic, not table-byte)
+  [alt] b16 high    | g_cheatCodeKeySequences
+       size=u8[6][40]
+       evidence: Six 40-byte DirectInput keycode sequences. Stride 0x28; terminator 0xFF. Read at `RunFrontendDisplayLoop @ 0x00414E18` as `(&DAT_004654A4)[i * 0x28 + (&DAT_004951F0)[i]]`. Match-completion fires the XOR.
+       port: (none)
+
+### 0x00465594  (2-way)
+  [WIN] b07 high    | g_cheatCodeTargetFlagPtrTable
+       size=void*[6]
+       evidence: 6 pointers to flag dwords. Bytes confirm: `{0x00496298, 0x004962a8, 0x004962ac, 0x004aaf7c, 0x0049629c, 0x004962b4}`. Read at 0x00414e26 as `*(uint*)(table[i])`. Already auto-labeled `PTR_DAT_00465594` -- rename to a real symbol.
+       port: (none -- port resolves cheat actions directly, no pointer table)
+  [alt] b16 high    | g_cheatCodeTargetPointers
+       size=void*[6]
+       evidence: Pointer table: 6 dwords pointing to the cheat-target dwords. Bytes: `0x00496298, g_cupUnlockLevel(0x004962A8), 0x004962AC, 0x004AAF7C, 0x0049629C, g_cheatCodeActivated(0x004962B4)`. Read in `RunFrontendDisplayLoop @ 0x00414E1C-0x00414E26` as `*(uint *)(&PTR_DAT_00465594)[i] ^= g_cheatCodeXorMaskTable[i]`. Already labeled `PTR_DAT_00465594` (default symbol).
+       port: (none)
+
+### 0x004655ac  (2-way)
+  [WIN] b07 high    | g_cheatCodeXorMaskTable
+       size=u32[6]
+       evidence: 6 dwords `{1, 8, 2, 1, 1, 1}`; XOR'd into the targeted cheat flag at 0x00414e26 when sequence completes. The `8` at idx=1 means cheat #1 toggles bit 3 of `DAT_004962a8`.
+       port: (none)
+  [alt] b16 high    | g_cheatCodeXorMaskTable
+       size=u32[6]
+       evidence: T2.7 finding confirmed. Bytes: `01 00 00 00 08 00 00 00 02 00 00 00 01 00 00 00 01 00 00 00 01 00 00 00` = `{1, 8, 2, 1, 1, 1}`. Each entry is the XOR mask applied to the target dword when cheat-code `i` completes. Read site: `RunFrontendDisplayLoop @ 0x00414E18`.
+       port: (none — port cheat system divergent)
+
+### 0x00465660  (2-way)
+  [WIN] b14 high    | g_inputDeviceTypeTable
+       size=u32[8] (stride 16)
+       evidence: Per-device descriptor: device-type-id at +0x0, `-1` sentinel at +0xc. `(0x##00) & 0xff00` discriminates wheel/pedal=0x600 from others. Stride 16, 8 entries (4 player × 2 devices). Read at 0x0040ffd5, 0x004270a0 (DirectInput-init bootstrap).
+       port: (none — port uses dxinput enumeration)
+  [alt] b16 high    | g_player1DeviceDesc
+       size=u32[8]
+       evidence: P1 device descriptor block (8 dwords). LoadConfig writes from Config.td5 byte 0x7A (`&DAT_0048F3FE`). Used in mismatch check at `ScreenLocalizationInit` 0x00427060+.
+       port: td5_save.c:191 `s_p1_device_desc`
+
+### 0x00465680  (2-way)
+  [WIN] b14 high    | g_inputDeviceButtonCountTable
+       size=u32[8] (stride 16)
+       evidence: Companion to 0x00465660. Per-device button count (4..9 used in `ScreenControllerBindingPage` to clamp `DAT_00490ba4`).
+       port: (none)
+  [alt] b16 high    | g_player2DeviceDesc
+       size=u32[8]
+       evidence: Symmetric P2 desc. LoadConfig writes from Config.td5 byte 0x9A (`&DAT_0048F41E`).
+       port: td5_save.c:192 `s_p2_device_desc`
+
+### 0x00465e18  (3-way)
+  [WIN] b13 high    | g_lastPlayedCdTrackIndex
+       size=u32
+       evidence: Set inside `ScreenMusicTestExtras @ 0x00418897` after `DXSound::CDPlay(g_selectedCdTrackIndex + 2, 1)`. Tracks "what was the most recently committed track" so the now-playing label survives navigation. NOT to be confused with `g_selectedCdTrackIndex @ 0x00465e14` (already named).
+       port: (none — port stub)
+  [alt] b22 high    | g_frontendRandomMusicTrackIndex
+       size=i32
+       evidence: Random number 0..6 chosen in `InitializeFrontendResourcesAndState @ 0x00414A02-0x00414A50` for the menu CD track (excluding tracks 7 and certain pairs). Read by `ScreenExtrasGallery / UpdateExtrasGalleryDisplay / ScreenMusicTestExtras` and `LoadExtrasBandGalleryImages` paths via `(&DAT_0048f2d4)[*(char *)(DAT_00465e18 + 0x465e4c)]` indexed lookup. **Dual role**: index into music-test playlist AND seed for which band image to show. 10 xrefs.
+       port: port: `td5_sound.c` selects menu CD track via `g_td5.ini.cd_track` — not random in port.
+  [alt] b23 high    | g_attractCdTrackCandidate
+       size=u32
+       evidence: rand()%7 candidate for next CD track; constrained to avoid current + restricted set (0/7/9/11). Final pick stored into g_selectedCdTrackIndex
+       port: (none)
+
+### 0x00465fe8  (2-way)
+  [WIN] b16 high    | g_audioSoundMode
+       size=u32
+       evidence: Sound mode (0=stereo, 1=mono). Read by `ScreenSoundOptions @ 0x0041EA90` (multiple sites 0x0041EE9A..0x0041F8A2), written by sound-screen at 0x0041F391. Copied to Config.td5 byte offset 0xBA (write at 0x0040F93F, load at 0x0040FD2E).
+       port: td5_save.c:195 `s_sound_mode`
+  [alt] b20 high    | g_sfxPlaybackMode
+       size=int
+       evidence: 0..2 selector: 0 = stereo, 1 = mono?, 2 = 3D (only allowed if `DXSound::CanDo3D() != 0`). Written by `ScreenSoundOptions` cursor-row 0 navigation. Committed via `DXSound::SetPlayback(DAT_00465fe8)`. Read at 12 sites for UI rendering of the mode label and at race-init. Distinct from T3.13's audio-options-modal state. Persisted in Config.td5 (writers at `0x0040fd2e` = save, `0x0040f93f` = load).
+       port: td5_sound.c sfx playback mode
+
+### 0x00465fec  (3-way)
+  [WIN] b16 high    | g_audioSfxVolume
+       size=u32
+       evidence: SFX volume (0..100, stride-10). `ScreenLocalizationInit @ 0x004269D0` final block sets `DAT_00465FEC = DXSound::GetVolume() * scaling` (at 0x004271CC). Read/written by sound options screen. Copied to Config.td5 byte 0xBB.
+       port: td5_save.c:196 `s_sfx_volume`
+  [alt] b20 high    | g_sfxVolumePercent
+       size=int
+       evidence: 0..100 percent. Written by `ScreenSoundOptions` cursor-row 1 navigation in steps of 10. Committed via `DXSound::SetVolume((DAT_00465fec * 0xfc00) / 100 & 0xfc00)` (converts 0..100 → 0..0xFC00 DSound volume units). Save/load at `0x0040fcd8`/`0x0040f983`. **Pre-race counterpart of T3.13's `g_sfxVolumeFraction @ 0x00474638`** — but THIS one is the percentage form persisted in Config.td5, and the modal version is a float fraction recalculated from it at runtime.
+       port: td5_sound.c sfx volume %
+  [alt] b23 high    | g_persistedMasterVolumePercent
+       size=u32
+       evidence: Loaded/saved in ScreenLocalizationInit attract-mode branch; DXSound::GetVolume scaled to 0..100 stepped by 10; written back via DXSound::SetVolume
+       port: td5_save.c (Config.td5 volume field)
+
+### 0x00465ff0  (3-way)
+  [WIN] b16 high    | g_audioMusicVolume
+       size=u32
+       evidence: Music (CD) volume (0..100). `ScreenLocalizationInit` sets `DAT_00465FF0 = DXSound::CDGetVolume() * scaling`. Symmetric usage to `g_audioSfxVolume`. Copied to Config.td5 byte 0xBC.
+       port: td5_save.c:197 `s_music_volume`
+  [alt] b20 high    | g_musicVolumePercent
+       size=int
+       evidence: Same as `g_sfxVolumePercent` but for CD music: `DXSound::CDSetVolume((DAT_00465ff0 * 0xfc00) / 100 & 0xfc00)`. Save/load at `0x0040fccc`/`0x0040f94a`. **Pre-race counterpart of T3.13's `g_cdAudioVolumeFraction @ 0x00466ea8`** — same percent/fraction pairing.
+       port: td5_sound.c music volume %
+  [alt] b23 high    | g_persistedCdVolumePercent
+       size=u32
+       evidence: Same pattern as master volume but for CD audio (DXSound::CDGetVolume / CDSetVolume)
+       port: td5_save.c (Config.td5 CD-volume field)
+
+### 0x00466000  (2-way)
+  [WIN] b16 high    | g_gameOptionsBlock
+       size=int[7]
+       evidence: 7-dword block read by `ScreenGameOptions @ 0x0041F990` (0x0041FD78 read, 0x0041FFF6/FFE/0042000D/0020 read+write), `ScreenMainMenuAnd1PRaceFlow @ 0x00415490` (0x0041557D read), and copied to Config.td5 at WritePackedConfigTd5 line 1 (`&DAT_00466000` → `&DAT_0048F388` ×7). Default bytes at file load: `03 01 01 01 01 00 01` matches g_td5.ini `{laps=3, checkpoint_timers=1, traffic=1, cops=1, difficulty=1, dynamics=0, collisions_3d=1}`. Field 0 = laps, field 1 = checkpoint_timers, field 2 = traffic,
+       port: TD5_GameOptions s_game_options @ td5_save.c:186
+  [alt] b21 high    | gCircuitLapsConfigShadow
+       size=u32 (range 0..3)
+       evidence: Index 0 of Game Options screen (`SNK_CircuitLapsTxt`). Range-clamped 0..3 by `case 0:` arm at `0x0041FFFE`. Live mirror is `gCircuitLapCount = gCircuitLapsConfigShadow + 1` (in `ScreenMainMenuAnd1PRaceFlow`). 10 xrefs across Config save, both Options screens, and OptionsHub.
+       port: `td5_save.c` lap count shadow
+
+### 0x00466004  (3-way)
+  [WIN] b04 high    | gCheckpointTimersUserToggle
+       size=u32
+       evidence: Written in `ScreenGameOptions` @ 0x420035 and 0x40FC43; read in game logic to enable/disable checkpoint timer display and time-bonus mechanics. Stored to `Config.td5` in `LoadPackedConfigTd5`
+       port: `g_td5.ini.checkpoint_timers` (already exists)
+  [alt] b21 high    | gCheckpointTimersConfigShadow
+       size=u32 (0/1)
+       evidence: Index 1 of Game Options (`SNK_CheckpointTimersButTxt`). On/Off toggle. Live mirror is `g_specialEncounterType = gCheckpointTimersConfigShadow` (in main-menu commit). 9 xrefs.
+       port: `td5_save.c` checkpoint timers shadow
+  [alt] b23 medium  | g_specialEncounterUnlockA
+       size=u32
+       evidence: Gate-block for high-score qualification in special-encounter mode (case 0)
+       port: (none)
+
+### 0x00466008  (3-way)
+  [WIN] b04 high    | gUnknownCheckpointToggle_B
+       size=u32
+       evidence: Adjacent to `gCheckpointTimersUserToggle`; written at same locations (0x420047, 0x40FC43); semantics unknown. Possibly lap-counter display, P2P timer display, or sound-effect toggle. Needs deeper analysis before final name
+       port: (unknown) — marked high but with `_PROVISIONAL` suffix until semantics confirmed
+  [alt] b21 high    | gTrafficConfigShadow
+       size=u32 (0/1)
+       evidence: Index 2 of Game Options (`SNK_TrafficButTxt`). Live mirror is `gTrafficActorsEnabled` (already named). 7 xrefs.
+       port: `td5_save.c` traffic config shadow
+  [alt] b23 medium  | g_specialEncounterUnlockB
+       size=u32
+       evidence: Sibling gate to g_specialEncounterUnlockA
+       port: (none)
+
+### 0x00466024  (2-way)
+  [WIN] b16 high    | g_displayFogEnabled
+       size=u32
+       evidence: Read by `ScreenDisplayOptions @ 0x00420400` (0x00420794, 0x004207B7, 0x0042094A) and written at 0x00420955. Copied to Config.td5 byte 0xC1 in WriteConfig.
+       port: td5_save.c:209 `s_fog_enabled`
+  [alt] b21 high    | gFoggingConfigShadow
+       size=u32 (0/1)
+       evidence: Index 1 of Display Options (`SNK_FoggingButTxt`); gated by `DXD3D::CanFog()` capability. Live mirror is `g_fogCapabilityEnabled = gFoggingConfigShadow` (in main-menu commit). 7 xrefs.
+       port: `td5_save.c` fog shadow
+
+### 0x00466028  (2-way)
+  [WIN] b16 high    | g_displaySpeedUnits
+       size=u32
+       evidence: Speed-units (0=MPH, 1=KPH). Read by ScreenDisplayOptions (0x004207D3, 0x004207EC), `ScreenPostRaceHighScoreTable @ 0x00413580` (0x00413439), and `ScreenQuickRaceMenu @ 0x004213D0` (0x00421FE9). Copied to Config.td5 byte 0xC5.
+       port: td5_save.c:210 `s_speed_units`
+  [alt] b21 high    | gSpeedReadoutUnitsConfigShadow
+       size=u32 (0/1)
+       evidence: Index 2 of Display Options (`SNK_SpeedReadoutButTxt`). 0 = mph, 1 = kph (or vice versa — used in HUD digit formatter via `BuildRaceHudMetricDigits`). Live mirror is `DAT_004B11C4 = gSpeedReadoutUnitsConfigShadow`. 9 xrefs.
+       port: `td5_save.c` units shadow
+
+### 0x004668b0  (2-way)
+  [WIN] b07 high    | g_attractModeTrackDisableMask
+       size=u8[19]
+       evidence: Read as `(&DAT_004668b0)[g_attractModeTrackIndex]` in a `do { idx = rand() % 0x13; } while (mask[idx] != 0);` loop. Initial bytes `{00, 00, 00, 00, 00, 00, 00, 00, 01, 01, 01, ...}` confirm tracks 0-7 = playable (mask=0), tracks 8-18 = disabled (mask=1). Matches the memo's "Port's 8-track filter is the same set after filtering."
+       port: port shortcut: `rand() % 8` at td5_frontend.c:3130 (mask dropped, set hardcoded)
+  [alt] b16 high    | g_savedTrackLockTable
+       size=u8[26]
+       evidence: 26-byte track-lock table (1=unlocked, 0=locked — inverted sense per `td5_save.c:163` comment). `RunFrontendDisplayLoop @ 0x00414EED` reads to select random attract-mode track. `TrackSelectionScreenStateMachine @ 0x00427E45` reads. Config.td5 byte 0x148E.
+       port: td5_save.c TD5_ConfigBuffer.track_locks (offset 0x148E)
+
+### 0x00466f88  (5-way)
+  [WIN] b11 high    | g_perViewLookBackInputActive
+       size=u32[2]
+       evidence: 2-element per-viewport flag, set to **1** at `PollRaceSessionInput @ 0x0042c5d3` when player held look-back button (control bit `0x2000000`) AND not in replay AND no camera transition. Cleared to **0** in same branch when condition fails. Read at `UpdateRaceCameraTransitionState @ 0x00401d27` to choose look-back camera preset. 2 xrefs (this WRITER + 1 reader).
+       port: port: `td5_camera.c` look-back handling.
+  [alt] b12 high    | g_cameraRearViewActive
+       size=int[2]
+       evidence: Per-view "rear view (look-behind) active" toggle. Read by `UpdateRaceCameraTransitionState` — when not transitioning, applies `g_cameraYawOffsetView = 0x800` if `(&DAT_00466f88)[view] != 0`, else `0`. Matches the rear-view button mechanic.
+       port: td5_camera.c:126 `g_lookLeftRight[2]`
+  [alt] b14 high    | g_rearViewActiveFlag
+       size=int[2]
+       evidence: Per-player rear-view hold flag. WRITE: set to `1` when bit 25 held AND not in replay/transition; cleared to `0` otherwise. Read at 0x00401fce (camera lookup in `LoadCameraPresetForView` or similar).
+       port: td5_input.c:130 `s_rear_view[]`
+  [alt] b24 high    | g_cameraLookBackHoldTable
+       size=u32[2]
+       evidence: Twin per-player "look-back" latch. At PollRaceSessionInput 0x0042c606: when bit `0x2000000` is set + race-running + camera-not-transitioning, `(&DAT_00466f88)[iVar1] = 1;` else 0. Read by camera presenter (offsets near 0x00466f88 are referenced in td5_camera). Stride 4 = 2 dwords.
+       port: port may have equivalent via input bit 25 (`TD5_INPUT_LOOK_BACK`); needs check
+  [alt] b24 unknown | -- second slot of g_cameraLookBackHoldTable -- already covered
+       size=u32
+       evidence: --
+       port: --
+
+### 0x00469c78  (2-way)
+  [WIN] b09 high    | g_perTrackLightZoneTables
+       size=array of 24 ptrs
+       evidence: 24-entry array at .rdata; loaded as `(&DAT_00469c78)[param_1 * 4]` in `LoadTrackRuntimeData` (param_1 = track number 1..24). Each entry points to that track's zone-row block (stride 0x24 per zone)
+       port: `td5_light_zones_table.inc` (per-track tables; port flattens)
+  [alt] b18 high    | g_perTrackLightZoneTables
+       size=void* ptr[24]
+       evidence: `LoadTrackRuntimeData @ 0x0042FD07` indexes as `(&DAT_00469c78)[track]` to write `g_trackLightingZoneTablePtr`. Stride-4 array of 24 dwords. Idx 0 = NULL, idx 1..23 = per-track lighting-zone table pointers. **Deferred from batch_09 (T2.9 named in markdown but not applied to binary).**
+       port: td5_light_zones_table.inc (port flattens this 24×ptr table)
+
+### 0x0046bb1c  (2-way)
+  [WIN] b17 high    | g_perTrackEnvAssetTableArray
+       size=void*[N]
+       evidence: Constant table of per-track env-asset-table pointers (indexed by `g_trackPoolIndex`). Only reader: `InitializeTrackStripMetadata @ 0x0042fad4`. 1 xref.
+       port: td5_asset.c per-track env table
+  [alt] b18 high    | g_perTrackEnvironmentMetadataPtrs
+       size=u32 ptr[24]
+       evidence: Indexed once in `InitializeTrackStripMetadata @ 0x0042FAD4` as `(&DAT_0046bb1c)[param_1 * 4]` (stride 16 = 4 dwords per entry, but only the first dword is read — apparent 16-byte alignment of a pointer-table). First entry at idx 0 is NULL (idx 0 reserved), idx 1..23 hold metadata pointers per track pool.
+       port: td5_track.c track-pool→.STR-blob lookup
+
+### 0x00473d2c  (2-way)
+  [WIN] b10 high    | g_defaultCarIdTable
+       size=int[6]
+       evidence: `InitializeRaceActorRuntime` writes `local_4[4] = (&DAT_00473d2c)[local_c]` per-slot — seeds the per-slot car id from a constant table at slot init time. Value at 0x00473d2c = 0x00000100 (typical default carparam id)
+       port: td5_save.c default car table
+  [alt] b19 high    | g_perSlotRubberBandThrottleLive
+       size=int32[14]
+       evidence: Live runtime table indexed by slot. Read at `InitializeRaceActorRuntime @ 0x0043351f` as `local_4[4] = (&DAT_00473d2c)[local_c]` — seeds `RS[4]` (= `gActorDefaultRouteSteerBias` per slot) at race init. WRITTEN at `ComputeAIRubberBandThrottle @ 0x00432d7a` (template copy) + `0x00432daa` (network-race forced reset to 0x100). 14 dwords because: 12 actor slots (6 racer + 6 traffic) + 2 padding. Values default to 0x100 (=256, "neutral 100% throttle").
+       port: td5_ai.c per-slot rubber-band throttle table
+
+### 0x00475160  (2-way)
+  [WIN] b16 high    | g_crc32_table_edb88320
+       size=u32[256]
+       evidence: Standard CRC-32 lookup table for polynomial 0xEDB88320. Verified bytes at offset 0x04 = `0x77073096` (= CRC32(0x01) for EDB88320). 8 xrefs from Write/Load/ValidateConfig + Cup paths + general data hashing. Already labeled `DAT_00475160`.
+       port: `td5_crc32` table in td5_types.h
+  [alt] b23 high    | g_crc32LookupTable
+       size=u32[256]
+       evidence: Standard CRC32 polynomial table; indexed by `(byte ^ crc&0xff)*4` in serialize loop; reused by restore for validation
+       port: td5_save.c crc32 table
+
+### 0x00482df4  (2-way)
+  [WIN] b11 high    | g_perViewPrevCameraPresetId
+       size=u32[2]
+       evidence: 2-element per-viewport array (indexed `[param_2 * 4]` where param_2 is view index 0/1). Read 4× / written 5× in `UpdateRaceCameraTransitionState` at 0x00401ea5/eaf/eed/ef7/f3b/f45/f81/f8b/fc3. Each branch writes the chosen preset (0xD = full countdown, 0xC, 0xB, 0xA = transition phases) AFTER updating gRaceCameraPresetId; this is the LAG copy for transition gate detection. Per-view.
+       port: port: implicit in camera preset state — not byte-mirrored.
+  [alt] b12 high    | g_cameraFlyInPresetGuard
+       size=int[2]
+       evidence: Per-view "previously loaded preset id during fly-in transition" gate inside `UpdateRaceCameraTransitionState @ 0x00401E10`. Compared to current preset id (10/11/12/13) to decide skip-vs-`LoadCameraPresetForView(force_reload=0)`. **Naming this directly clarifies the camera-lag TODO's "one-shot fired" diagnostic** — port equivalent is `s_flyin_preset_reloaded[2]` at td5_camera.c:119, but the boolean abstraction loses the preset-id history; the original tracks the actual stage.
+       port: td5_camera.c:119 (port uses bool one-shot instead)
+
+### 0x00482f18  (2-way)
+  [WIN] b11 high    | g_perViewCameraOrbitAccum
+       size=u32[2]
+       evidence: 2-element per-viewport array. Accumulated by `+= ftol(orbital_delta)` at `UpdateRaceCameraTransitionState @ 0x00401eb6/efe/f4c` during countdown camera-orbit phases. Drives the "the camera swings around the car before race start" visual. **15 xrefs.**
+       port: port: camera-orbit state during countdown.
+  [alt] b12 high    | g_cameraSpringYawAccum
+       size=int[2]
+       evidence: Per-view smoothed yaw integrator (24.8 fixed). Read everywhere as `*(int*)(&DAT_00482f18 + view*4) >> 8`. Written by chase-camera lag math: `*= ((shifted*5 to 15) * yawDelta >> 8)`. Initial seed from `display_angle_yaw` in `LoadCameraPresetForView`.
+       port: td5_camera.c (port uses `g_camOrbitAngleFP[2]`)
+
+### 0x00482f48  (2-way)
+  [WIN] b12 high    | g_cameraPresetPackedSave
+       size=u8[2]
+       evidence: 2-byte packed save of `{preset_id, preset_mode}` for both views (each byte: `id & 0x7F
+       port: mode << 7`). Written by `LoadCameraPresetForView` when `param_4 != 0`; restored by `ResetRaceCameraSelectionState @ 0x00402000`. Mechanism survives a 
+  [alt] b16 high    | g_savedPlayer1CameraView
+       size=u8
+       evidence: Initial-view-mode byte for P1. Written by `LoadCameraPresetForView @ 0x00401450` (0x00401569) and read by `ResetRaceCameraSelectionState @ 0x00402000` (0x0040200B). Copied to Config.td5 at byte 0x3DF (Write 0x0040F9CC).
+       port: td5_save.c:224 `s_camera_byte_a`
+
+### 0x00482f70  (2-way)
+  [WIN] b11 high    | g_perViewLookAroundActiveFlag
+       size=u32[2]
+       evidence: 2-element per-viewport array. Written 0 or 0x800 at `UpdateRaceCameraTransitionState @ 0x00401fb6/fd9/fe6` and additionally in 5+ other camera functions. 0x800 = "look-around input was active this tick"; 0 otherwise. **20 xrefs** — heavily-used.
+       port: port: maps to `td5_camera.c` look-around handling.
+  [alt] b12 high    | g_cameraYawOffsetView
+       size=int[2]
+       evidence: Per-view yaw offset (rear-view / mirror toggle). 0=front camera, 0x800=180° (rear view). Written in case 7/8/10 of trackside dispatch and as default `0x800` for rear-view. The "rear-view button" path lives here.
+       port: td5_camera.c:87 `g_camYawOffset[2]`
+
+### 0x00483000  (2-way)
+  [WIN] b14 low     | g_playerControlBits_player2_alias
+       size=u32
+       evidence: Stride-4 alias of `&g_playerControlBits[1]`. The pattern `(&DAT_00482ffc)[1]` is rewritten by Ghidra as a separate `DAT_00483000` symbol. **No new symbol needed** — comment only flag-up so future readers don't think this is a distinct global.
+       port: (port uses array indexing — no alias needed)
+  [alt] b24 high    | g_player2ControlBits
+       size=u32
+       evidence: Aliased read at `g_playerControlBits + 4` in PollRaceSessionInput when the second slot processes the auto-pause bit. Direct write at 0x0042c5b7: `DAT_00483000 = DAT_00483000 \
+       port: 0x10000000;`. The two-player local-mux uses `(&g_playerControlBits)[iVar1]` (0/+4); 0x00483000 IS the +4 alias used when the second-iter index is writ
+
+### 0x00483014  (3-way)
+  [WIN] b01 high    | g_cheatRemoteBrakingApplied
+       size=u8[6]
+       evidence: Reset to 0 @ 0x00402e32 when input bit 0x200000 NOT set; set to 1 @ 0x0042b96b after velocity-doubling cheat applied. Per-slot flag. Checked at 0x0042b96d.
+       port: `(none)` — cheat state, not ported
+  [alt] b11 high    | g_remoteBrakeCheatPerSlotLatch
+       size=u8[6]
+       evidence: 6-byte per-slot latch (one per racer). Read+write at `UpdatePlayerVehicleControlState @ 0x00403422-0x0040346e` inside the `if (_g_networkControlBufferReset != 0)` block. Set to `0xF` when remote-brake cheat fires (along with velocity-double effect at +0x1cc/+0x1d4); cleared to 0 when not active. Acts as the "remote brake just fired this tick, suppress until cleared" latch. 5 xrefs.
+       port: port: cheat-remote-brake handling — likely missing from port (no `g_td5.cheat_remote_brake_active`).
+  [alt] b25 high    | g_playerControlAccum0
+       size=u32
+       evidence: Cleared by `ResetPlayerVehicleControlAccumulators @ 0x00402E30` to zero. Reader is `UpdatePlayerVehicleControlState`; written/incremented per-frame as a control-state accumulator. 5 refs across `0x00402E32`, `0x0040343D`, `0x004034CD`, `0x004034D6`, `0x0042c275` (RunRaceFrame tail read).
+       port: td5_input.c control accum slot 0
+
+### 0x00483018  (2-way)
+  [WIN] b01 medium  | g_controlAccumulatorResetMarker
+       size=u16
+       evidence: Written @ 0x00402e37 in ResetPlayerVehicleControlAccumulators (alongside DAT_00483014). No visible read refs; likely a sentinel or alignment.
+       port: `(none)` — initialization only
+  [alt] b25 high    | g_playerControlAccum1
+       size=u32
+       evidence: Sister field cleared alongside above by `ResetPlayerVehicleControlAccumulators`. Single 2-int pair memset to 0.
+       port: td5_input.c control accum slot 1
+
+### 0x0048301c  (2-way)
+  [WIN] b01 high    | g_maxSteeringWeightBalance
+       size=u32
+       evidence: Read at 0x004036c4 and 0x004036ee in UpdatePlayerSteeringWeightBalance. Written at 0x004155ea in ScreenMainMenuAnd1PRaceFlow (race init). Caps the steering balance delta.
+       port: `(none)` — likely INI-driven config
+  [alt] b25 high    | g_steeringBiasMaxSwing
+       size=u32
+       evidence: Read at `UpdatePlayerSteeringWeightBalance` 0x004036C4 / 0x004036EE as the clamp ceiling on the computed bias delta: `if (DAT_0048301c < iVar1) iVar1 = DAT_0048301c;`. Single writer at `ScreenMainMenuAnd1PRaceFlow @ 0x004155EA` (likely sets per-difficulty). 3 refs.
+       port: td5_input.c steering-bias cap
+
+### 0x00483550  (2-way)
+  [WIN] b10 low     | g_trackCameraConfigSecondary
+       size=u32
+       evidence: `LoadTrackRuntimeData` writes from `&DAT_00473824 + (param_1-1) * 8` per-track lookup. Used outside scope; comment-flag only.
+       port: (none)
+  [alt] b18 low     | g_currentTrackCameraConfigA
+       size=u32
+       evidence: Twin sink with 0x00483954; written by `LoadTrackRuntimeData` from `&DAT_00473824 + (track-1)*8`. Out-of-scope consumer; comment-flag only.
+       port: (none)
+
+### 0x00483954  (3-way)
+  [WIN] b04 high    | g_currentCheckpointStripIndex
+       size=u32
+       evidence: Written @ 0x42FD51 in RemapCheckpointOrderForTrackDirection; read @ 0x406F77, 0x4070AE, 0x4076DD; indexes into `g_trackStripRecords` for checkpoint geometry
+       port: (consider adding)
+  [alt] b10 low     | g_trackCameraConfigPrimary
+       size=u32
+       evidence: Twin of 0x00483550, writes from `&DAT_00473820 + (param_1-1) * 8`; same per-track lookup pair. Comment-flag only.
+       port: (none)
+  [alt] b18 low     | g_currentTrackCameraConfigB
+       size=u32
+       evidence: Twin sink with 0x00483550; written by `LoadTrackRuntimeData` from `&DAT_00473820 + (track-1)*8`. Out-of-scope consumer; comment-flag only.
+       port: (none)
+
+### 0x0048d988  (3-way)
+  [WIN] b05 high    | g_raceActorRuntimeValid
+       size=u32
+       evidence: Checked at state-3 early-exit gate; if invalid, bounces user
+       port: td5_frontend.c:9188
+  [alt] b16 high    | g_raceResults
+       size=u32[30]
+       evidence: 120-byte race-results array. Twin of `g_raceSchedule`; copied to cup buffer at `&DAT_00490C34`.
+       port: td5_save.c TD5_CupDataBuffer.race_results (offset 0x88)
+  [alt] b23 high    | g_raceFinalResultsSlotTable_PROVISIONAL
+       size=struct[6]×20B (120B total)
+       evidence: ResetRaceResultsTable @ 0x0040a880 iterates 6 entries stride 20 with index-stamp at +1; SortRaceResultsByPrimaryMetricAsc @ 0x0040aad0 reads field +0 metric and writes short rank at +2
+       port: (none — needs struct-promotion follow-up; see "Out-of-scope")
+
+### 0x0048dc50  (2-way)
+  [WIN] b06 medium  | g_vehicleShadowSpriteTemplates
+       size=struct~0xB8 + body
+       evidence: Base of an array iterated by InitializeVehicleShadowAndWheelSpriteTemplates 0x0040bc6a/0x0040bc71. Stride 0x170, 14 entries; each entry includes a shadow quad-template region around offset +0xb8 (where the loop seeds `puVar5 = &DAT_0048dd08` = base + 0xb8 and walks 14 iterations of `BuildSpriteQuadTemplate`). Address adjacent to `g_shadowVerticalOffset @ 0x0048dc48`. End: 0x0048f128 (= 0x48dc50 + 14*0x170 = 0x48f070 — hmm but loop uses 0x48f128 as limit and seeds from 0x48dd08; the off-by-0xb8 i
+       port: td5_render.c — sprite/shadow render path. Port has BuildSpriteQuadTemplate at 0x432BD0 and unified flag dispatch (recent commit bb9cae9); base buffer 
+  [alt] b15 high    | g_vehicleShadowAndWheelSpriteTemplates
+       size=byte[6][0x170]
+       evidence: 6 records × 0x170 bytes. Cleared by `InitializeVehicleShadowAndWheelSpriteTemplates @ 0x0040BB70` (end at 0x0048F128). Holds the shadow quad + wheel-billboard pair per racer slot. Per-record local_28..local_24 constants `0x42840000`/`0x42FC0000` = (66.0f, 126.0f) define the shadow UV bounding box (referenced in audit). The shadow template is the first of 2 `BuildSpriteQuadTemplate` calls in the loop.
+       port: `td5_render.c` shadow+wheel templates
+
+### 0x0048f368  (2-way)
+  [WIN] b14 high    | g_player1SelectedPaintScheme
+       size=u32
+       evidence: Persisted player-1 car paint variant. Written at 0x004114b8 (race restore), 0x00421a98 (QuickRace OK), 0x0040f5a6 (CarSelect commit), 0x0041c3b2 (NetLobby). Read at 0x0041b75e (frontend display), 0x0040dadc (CarSelect open), 0x0042251f (RaceResults). Paired with `DAT_0048f308` (transient car-select state).
+       port: (none — paint scheme not ported)
+  [alt] b16 low     | g_savedCarIndexCup
+       size=u32
+       evidence: Read by RestoreRaceStatusSnapshot `DAT_0048F368 = DAT_00490BEC;` at 0x004112C0 final block. Mirror of cup-snapshot field; semantic = cached selected-car-id within an active cup snapshot.
+       port: (none — implicit through `td5_save_sync_cup_to_game`)
+
+### 0x0048f378  (2-way)
+  [WIN] b11 high    | g_player1AutoThrottleEnabled
+       size=u32
+       evidence: Read at `PollRaceSessionInput @ 0x0042c516` (`if (_DAT_0048f378 != 0) g_playerControlBits \
+       port: = 0x10000000`). Written at 5 frontend menu functions (`ScreenQuickRaceMenu @ 0x00421426`, `InitializeRaceSeriesSchedule @ 0x0040db05`, `RestoreRaceSta
+  [alt] b14 high    | g_player1ManualTransmission
+       size=u8
+       evidence: **THIS IS THE BIT-28 WRITER.** Read at `PollRaceSessionInput @ 0x0042c516`: `if (_DAT_0048f378 != 0) g_playerControlBits
+       port: = 0x10000000`. Written by `CarSelectionScreenStateMachine`'s Auto/Manual toggle button (`_DAT_0048f378 = DAT_0048f338` at 0x0040f5b1 + 0x0040f622). `D
+
+### 0x0048f37c  (4-way)
+  [WIN] b11 high    | g_player2AutoThrottleEnabled
+       size=u32
+       evidence: Twin of 0x0048f378 for player 2. Read at `PollRaceSessionInput @ 0x0042c52f`. Same 5 frontend writers as P1 (with adjacent addresses 0x00421420 / 0x0040e1a6 / 0x004114c8 / etc). 7 xrefs.
+       port: (same — split-screen P2 auto-throttle.)
+  [alt] b14 high    | g_player2ManualTransmission
+       size=u32
+       evidence: Symmetric to 0x0048f378 for player 2. Read at `PollRaceSessionInput @ 0x0042c52f`: `if (DAT_0048f37c != 0) DAT_00483000
+       port: = 0x10000000` (where `DAT_00483000 = g_playerControlBits[1]`). Written by `CarSelectionScreenStateMachine`'s player-2 branch at 0x0040e1a6 and final c
+  [alt] b24 high    | g_player2AutoPauseLatch
+       size=u8
+       evidence: Read at PollRaceSessionInput 0x0042c596: `else if ((iVar1 == 1) && (DAT_0048f37c != 0))`. Companion to `_DAT_0048f378` (player1). When non-zero, player2's auto-pause bit (0x10000000) is set into `g_player2ControlBits`. Twin of `g_player1AutoPauseLatch` at 0x0048f378 (already labeled, see Out-of-scope).
+       port: (none -- pause-latch behaviour TBD in port)
+  [alt] b24 unknown | --
+       size=(covered in PollRaceSessionInput section)
+       evidence: --
+       port: --
+
+### 0x00490bac  (2-way)
+  [WIN] b16 high    | g_cupDataTd5IoBuffer
+       size=u8[12966]
+       evidence: 0x32A6-byte CupData.td5 read/write buffer. Cup snapshot starts at byte 0; first 12 bytes are header (game_type, race_index, npc_group, ...). The CRC32 is at offset +0x0C (`DAT_00490BB8`). Size lives in `DAT_00494BBC`.
+       port: td5_save.c:171 `s_cup_buf`
+  [alt] b23 high    | g_snapshotGameType
+       size=u8
+       evidence: Written at start of SerializeRaceStatusSnapshot @ 0x00411120 from g_selectedGameType; first byte of snapshot header (used as CRC base)
+       port: (none)
+
+### 0x00490bb8  (2-way)
+  [WIN] b16 high    | g_cupDataTd5Crc32
+       size=u32
+       evidence: Embedded CRC32 in cup buffer at offset +0x0C. Computed in SerializeRaceStatusSnapshot's final CRC32 loop (line `DAT_00490BB8 = ~uVar1;`). Verified by `RestoreRaceStatusSnapshot` `if (DAT_00490BB8 == ~uVar2)` and by `ValidateCupDataChecksum`.
+       port: (none — `cup_buffer.crc32` field per TD5_CupDataBuffer)
+  [alt] b23 high    | g_snapshotCrc32
+       size=u32
+       evidence: Final ~uVar1 (~CRC32) written at end of SerializeRaceStatusSnapshot; computed via DAT_00475160 lookup over 0x32a6 bytes starting at DAT_00490bac
+       port: td5_save.c CRC32 verification slot
+
+### 0x00494bbc  (2-way)
+  [WIN] b16 high    | g_cupDataTd5ByteCount
+       size=u32
+       evidence: Always 0x32A6 (original) or larger w/ port overlay. Set by LoadContinueCupData at 0x004115FA after fread, written hardcoded to 0x32A6 by SerializeRaceStatusSnapshot at 0x004112B2, read by WriteCupData / ValidateCupDataChecksum for the encryption loop bound.
+       port: td5_save.c:176 `s_cup_buf_size`
+  [alt] b23 high    | g_snapshotPayloadSize
+       size=u32
+       evidence: Set to 0x32a6 (literal) at end of serialize; defines CRC region length
+       port: td5_save.c snapshot-length constant
+
+### 0x004951f0  (2-way)
+  [WIN] b07 high    | g_cheatCodeKeyProgressTable
+       size=u8[6]
+       evidence: 6 per-slot byte counters, incremented on key-match in 0x00414e07; reset to 0 on either consume-success path or non-options-screen path; orig comment "6-byte progress array"
+       port: port uses `s_cheat_key_history[32]` ring at td5_frontend.c:471 (rebuilt, not byte-mirror)
+  [alt] b16 high    | g_cheatCodeKeyProgress
+       size=u8[6]
+       evidence: 6 progress indices (current key-in-sequence per cheat). Incremented on match, reset on non-match or activation. Decompile shows reset to zero via `_DAT_004951F0 = 0; _DAT_004951F4 = 0;` (8 bytes covers 6 bytes + 2 pad).
+       port: (none)
+
+### 0x00495234  (2-way)
+  [WIN] b21 high    | g_cpuHasMmx
+       size=u32
+       evidence: Derived from `g_cpuFeatureFlags >> 23 & 1` (MMX feature bit). Read by `LoadExtrasGalleryImageSurfaces`, `UpdateExtrasGalleryDisplay`, and `InitializeFrontendDisplayModeState` to GATE the use of MMX-accelerated extras gallery image surfaces. 6 readers.
+       port: `td5_render.c` always-MMX assumption (port targets x86 baseline)
+  [alt] b22 medium  | g_extrasGalleryEnabledFlag_PROVISIONAL
+       size=u32
+       evidence: Set to 0 in `InitializeFrontendResourcesAndState @ 0x004147C3` and at `0x0042507C` (race-end transition). Read in `LoadExtrasGalleryImageSurfaces @ 0x0040D595` and `UpdateExtrasGalleryDisplay @ 0x0040D84C / 0x0040DA3A / 0x0040DA65` as the gate for whether to load/use extras-gallery surfaces. The dual-use as "cross-fade enabled" vs "feature enabled" is ambiguous; provisional name pending confirmation. 7 xrefs.
+       port: (none)
+
+### 0x0049628c  (2-way)
+  [WIN] b22 medium  | g_frontendDialogPanelSurface_PROVISIONAL
+       size=LPDIRECTDRAWSURFACE7
+       evidence: Tracked frontend surface allocated in `ScreenStartupInit @ 0x00415377` (408×112) and used by `ScreenMainMenuAnd1PRaceFlow` later. Released at `0x004153D0`. Dual-use across multiple screens — semantic name pending wider audit. 4 xrefs in ScreenStartupInit alone.
+       port: (none — port renders dialogs directly.)
+  [alt] b24 high    | g_lobbyErrorDialogSurface
+       size=int*
+       evidence: Created at `RunFrontendNetworkLobby` case 6 entry as `DAT_0049628c = CreateTrackedFrontendSurface(0x1e2, 0x40);` -- the "Connection lost / No remote players / Host left" error dialog. Filled by 4 case-6 branches selecting `SNK_NetErrString{1,2,3,4}_exref` pairs. Released on dismiss.
+       port: (none -- port logs via TD5_LOG_E and returns to main menu)
+
+### 0x00496298  (2-way)
+  [WIN] b07 high    | g_cheatFlagUnlockAll
+       size=u32
+       evidence: Cheat #0 target. Read by `CarSelectionScreenStateMachine` (0x0042142e), `WritePackedConfigTd5` (0x0040fa1c) -- persisted in Config.td5. Port mirrors as `s_cheat_unlock_all` at td5_frontend.c:261 (commented "DAT_00496298").
+       port: td5_frontend.c:261 `s_cheat_unlock_all`
+  [alt] b16 high    | g_cheatPostRaceHighScoreUnlock
+       size=u32
+       evidence: Cheat target 0 (XOR mask 1). Read in `RunFrontendDisplayLoop @ 0x00414E26` and gated on the post-race screen flow in `ScreenPostRaceHighScoreTable @ 0x004138C7`. Acts as a boolean toggle gating the high-score range branch (controls min-music-track display direction).
+       port: (none — port doesn't implement post-race-score cheat)
+
+### 0x0049629c  (2-way)
+  [WIN] b07 medium  | g_cheatFlagBitfieldNetwork
+       size=u32
+       evidence: Cheat #4 target, XOR mask = 1 (bit 0). Read by `UpdatePlayerVehicleControlState` (0x004034dd), `ProcessFrontendNetworkMessages` (0x0041b77d), `RunFrontendNetworkLobby` (0x0041d2d0). The network readers suggest a "network features unlock" cheat.
+       port: (none)
+  [alt] b16 high    | g_cheatRemoteBraking
+       size=u32
+       evidence: Cheat target 4 (XOR mask 1). Read as `_g_cheatRemoteBraking` in `UpdatePlayerVehicleControlState @ 0x004034DD`: zeroes velocities on all other slots when handbrake held — the "freeze rivals" cheat. Decompiler already renamed inline.
+       port: (none)
+
+### 0x004962a8  (2-way)
+  [WIN] b07 high    | g_cheatFlagBitfieldGameModes
+       size=u32
+       evidence: Cheat #1 target, XOR mask = 8 (toggles bit 3). Read/written by `LoadPackedConfigTd5` (0x0040fda9 W, 0x0040fa1c R) -- persisted. Also read by `CarSelectionScreenStateMachine` (0x00410f89..) -- gates car-selection branches.
+       port: (none -- not modeled)
+  [alt] b16 unknown | g_cupUnlockLevel (already named)
+       size=u32
+       evidence: Already labeled (T1). 3-bit cup-tier completion bitfield. LoadConfig at 0x0040FD9C reads `(uint)DAT_0049080F`; Write masks to 7 bits. Config.td5 byte 0x148B.
+       port: td5_save.c TD5_ConfigBuffer.cup_tier_state
+
+### 0x004962ac  (2-way)
+  [WIN] b07 high    | g_cheatFlagBitfieldExtras
+       size=u32
+       evidence: Cheat #2 target, XOR mask = 2 (bit 1). Read by `CarSelectionScreenStateMachine` (0x0042140b) and `RunRaceResultsScreen` (0x00421990) and adjacent extras-gallery code at 0x0040e07b, 0x0040e8f8.
+       port: (none)
+  [alt] b16 medium  | g_cheatAttractModeOverride
+       size=u32
+       evidence: Cheat target 2 (XOR mask 2). Read by `ScreenQuickRaceMenu @ 0x0042140B`, attract-mode loaders `0x0040E07B/0x0040E8F8`. Gates an attract-mode-bypass branch.
+       port: (none)
+
+### 0x004962d0  (3-way)
+  [WIN] b05 medium  | g_raceSinglePlayerCompanionBitfield
+       size=u32
+       evidence: Gates display mode for companion slot races
+       port: td5_frontend.c implicit
+  [alt] b21 low     | (comment-only: career restart gate)
+       size=u32
+       evidence: Written 2× during frontend bootstrap; read once by `RunRaceResultsScreen` to gate the "go directly to results" fast path. Unclear single-purpose — likely a career-stage restart cookie. 3 xrefs.
+       port: (none)
+  [alt] b25 medium  | g_postRaceSkipResultsBanner
+       size=u32
+       evidence: Single read in `RunRaceResultsScreen` at 0x00422620: gates the "if (DAT_004962d0 != 1)" path that skips to `SetFrontendScreen(0x1a)` early when in attract mode or DNF. Written 0/1 by `InitializeFrontendResourcesAndState @ 0x0041476F` and `0x00414777`. 3 refs total.
+       port: td5_frontend.c attract-mode skip-results flag
+
+### 0x0049636c  (2-way)
+  [WIN] b05 medium  | g_raceResultsLoadedFlag
+       size=u32
+       evidence: Checked as early-entry gate for load/restore logic
+       port: (none)
+  [alt] b21 high    | g_benchmarkRequestPending
+       size=u32 (0/1)
+       evidence: Set to 1 by `ScreenMainMenuAnd1PRaceFlow case 4 button 2` (when TimeDemo button pressed in retail-debug build). Read by `RunRaceResultsScreen case 0` to fast-forward back to the menu/benchmark-image-display loop. Also set to 0 by `ScreenStartupInit`. 3 xrefs — clear semantic.
+       port: `td5_game.c` benchmark request gate
+
+### 0x004970ac  (2-way)
+  [WIN] b23 high    | g_postRacePlayerNameEntryDefault
+       size=char[16]
+       evidence: Fallback default name copied into entry buffer when user submits empty
+       port: (none)
+  [alt] b24 high    | g_localComputerName
+       size=char[60]
+       evidence: Filled at browser entry: `GetComputerNameA(&DAT_004970ac, &local_8);` (local_8 = 16). Falls back to literal `"Clint Eastwood"` (s_Clint_Eastwood_00465f84) if `GetComputerNameA` fails or returns empty. Used as default session name. Capacity ~60 chars (next named global at 0x004970bc). `DAT_004970e7 = 0` truncation at offset 0x3b == 59 in failure path.
+       port: port `s_session.name` default
+
+### 0x004970bc  (2-way)
+  [WIN] b24 high    | g_lobbyDriverDisplayNameTable
+       size=u8[6][0x3d]
+       evidence: 6 rows × 0x3d (61) bytes stride. Walked by the "broadcast SeshLeave" loop in `ProcessFrontendNetworkMessages` at 0x0041b9b2 (`pcVar16 = (char *)&DAT_004970bc; ... pcVar16 = pcVar16 + 0x3d`) and the host-of-session twin loop at 0x0041bb17. Stride confirmed by `iVar5 + 4 < 0xbe4 && pcVar16 += 0x3d` (6 iterations: 0xbcc -> 0xbe4 in dpu_exref). Each row holds the printable driver display name for the corresponding slot's last-known-state.
+       port: (none -- port reads from `s_roster[i].name`)
+  [alt] b24 unknown | --
+       size=(covered above)
+       evidence: --
+       port: --
+
+### 0x00497250  (2-way)
+  [WIN] b16 high    | g_raceSchedule
+       size=u32[30]
+       evidence: 120-byte race-schedule array. SerializeRaceStatusSnapshot copies 30 dwords from `&DAT_00497250` into cup buffer (`&DAT_00490BBC`). Restore reads it back. Source-port confirms this is the cup race-order table.
+       port: td5_save.c TD5_CupDataBuffer.race_schedule (offset 0x10)
+  [alt] b24 high    | g_dxpdataRaceSettingsGameType
+       size=u32
+       evidence: First dword of a 0x1e × 4 = 0x78-byte block. At lobby case 0xc: `DAT_00497250 = g_selectedGameType;`. Block sent as `DXPlay::SendMessageA(1, &DAT_004968ac, 0x80)` (opcode 0x15 broadcast in case 0xf at 0x0041d4ac). Receiver (opcode 0x15 handler) copies 0x1e dwords into this address.
+       port: (none -- port re-derives)
+
+### 0x00497314  (2-way)
+  [WIN] b23 medium  | g_postRaceNameButtonSurfacePtr
+       size=int*
+       evidence: Tracked frontend surface for "Enter Player Name" button; created/released within ScreenPostRaceNameEntry
+       port: (none)
+  [alt] b24 low     | g_lobbyChatPanelSurface_OR_genericButton
+       size=int*
+       evidence: **Confusing**: WRITTEN in lobby entry as the chat panel surface (`CreateFrontendDisplayModeButton(... 0x200, 0x80, 0)`) but also written in 5+ other frontend screens (connection browser, create session, main menu) as "generic display-mode button surface". Same address reused as a transient surface slot. Marked low-confidence: this is the **frontend's shared chat/options-panel surface** rather than a network-specific global. **DO NOT rename** -- file a comment that says "transient surface, owner 
+       port: (none)
+
+### 0x00497a60  (2-way)
+  [WIN] b05 high    | g_raceResultsSeriesAdvanceFlag
+       size=u32
+       evidence: Gates series progression; set after first Race Again in cup mode
+       port: (none)
+  [alt] b25 high    | g_postRaceProgressionAdvanced
+       size=u32
+       evidence: `RunRaceResultsScreen` writes `0` at race-start (state 0), `1` after `g_raceWithinSeriesIndex += 1` (state 0xd next-cup-race path). Guards against double-increment when re-entering the screen. 4 refs (3 writes, 1 read at 0x00422f43).
+       port: td5_frontend.c post-race progression gate
+
+### 0x00497a64  (2-way)
+  [WIN] b05 high    | g_lastSelectedResultButton
+       size=u32
+       evidence: Stores button index (0-4) from state 0xf dispatch
+       port: td5_frontend.c:9484-9497
+  [alt] b25 high    | g_postRaceMenuButtonChoice
+       size=u32
+       evidence: Written at state 0xf (`DAT_00497a64 = g_frontendButtonIndex`) when user clicks one of the 5 post-race menu buttons (Race Again / View Replay / View Race Data / Select New Car / Quit). Read by state 0x10 to dispatch the chosen branch. 6 refs.
+       port: td5_frontend.c menu-choice latch
+
+### 0x00497a68  (3-way)
+  [WIN] b05 high    | g_selectedRaceResultIndex
+       size=u32
+       evidence: Tracks viewed result slot (0-5)
+       port: td5_frontend.c implicit
+  [alt] b23 medium  | g_postRaceHighScoreEntrySubState
+       size=u32
+       evidence: Reset at case 5/6 of ScreenPostRaceNameEntry; flagged in T1.5 as `g_selectedRaceResultIndex` — semantic clarification: this is the post-race results carousel sub-state, NOT just selection index. Document overlap, do not rename
+       port: (none)
+  [alt] b25 high    | g_postRaceRacerCardIndex
+       size=u32
+       evidence: The current racer slot whose card is being displayed on the results screen. Initialised to `0` (or to `*(int*)(dpu_exref + 0xbe8)` in network mode). Incremented/decremented by `+= DAT_0049b690` (nav direction) in state 6 with wraparound 0..5 and skip-if-state-3 logic. 17 refs. Passed to `DrawRaceDataSummaryPanel(...)`.
+       port: td5_frontend.c results racer iterator
+
+### 0x00497a6c  (3-way)
+  [WIN] b22 low     | (g_languageSelectPostBootFlag — low confidence, comment-only)
+       size=u32
+       evidence: Set to 1 only at `ScreenLocalizationInit @ 0x00427192` when `g_frontendBootDispatchMode == 2` (= the post-race re-init path). Read at `RunRaceResultsScreen @ 0x00422F8A / 0x0042304E / 0x0042310C` to influence end-of-race screen flow. Likely "indicate we just came through language-select on a re-init" but the readers are deep into RaceResults — out of attract scope. Comment-only.
+       port: (none)
+  [alt] b23 medium  | g_replayFileAvailable
+       size=u32
+       evidence: reset to 0 at 0x00416d64 in RaceTypeCategoryMenuStateMachine case 2 (Continue Cup); set to 1 at 0x00427192 in ScreenLocalizationInit attract-mode==2 branch (post-View-Replay); read by RunRaceResultsScreen
+       port: td5_input.c (replay-write-success flag)
+  [alt] b25 high    | g_replayFileAvailable
+       size=u32
+       evidence: Single writer at 0x00416d64 (`RaceTypeCategoryMenuStateMachine`) sets it when a replay file IS present on disk; 4 reads in `RunRaceResultsScreen` state 0xd choose between `CreateFrontendDisplayModeButton(SNK_ViewReplay_exref, ...)` (button enabled, replay available) vs `CreateFrontendDisplayModePreviewButton(...)` (button disabled / grayed-out). 5 refs. **Directly relevant to `todo_view_replay_restarts_race_2026-05-19`** — port may set this incorrectly.
+       port: td5_frontend.c view-replay button gate
+
+### 0x00497a70  (2-way)
+  [WIN] b05 medium  | g_cupModeNextRaceAvailable
+       size=u32
+       evidence: Set by ConfigureGameTypeFlags(); gates Next Cup Race button
+       port: td5_frontend.c implicit
+  [alt] b25 high    | g_postRaceNextCupRaceAvailable
+       size=u32
+       evidence: Written `1` at state 0xd when `ConfigureGameTypeFlags()` returns 0 (cup mode has more races queued); also written `0` after race-results screen restart. Read at 0x00423507 to choose between "Next Cup Race" preview/active button styling. 3 refs.
+       port: td5_frontend.c cup-progress flag
+
+### 0x00497a74  (2-way)
+  [WIN] b05 medium  | g_raceResultsStateGateFlag
+       size=u32
+       evidence: Checked to gate state 3 exit; reset on state entry
+       port: td5_frontend.c:9188
+  [alt] b25 high    | g_postRaceRestartSelectedRace
+       size=u32
+       evidence: Reentry sentinel. Written `1` at state 0x15 (Race Again path) and at `InitializeFrontendResourcesAndState @ 0x00414789`. Read at 0x00422940 to gate "skip results, restart race" early-exit. 11 refs.
+       port: td5_frontend.c restart-race flag
+
+### 0x00497a78  (3-way)
+  [WIN] b05 high    | g_raceReplayStateFlag
+       size=u32
+       evidence: Written as 1, 2, 0 in state 0; controls backup lifecycle
+       port: td5_input.c:157 s_replay_mode_flag
+  [alt] b21 low     | (comment-only: race-results saved-state stage)
+       size=int
+       evidence: 3-state stage marker (0/1/2) for whether the snapshot of `g_selectedCarIndex` / race options has been saved into `0x00497A7C..0x00497A98` for restoring after race-results. Adjacent to results-screen state, not debug.
+       port: (none)
+  [alt] b25 high    | g_postRaceCarSelectionBackupValid
+       size=u32
+       evidence: Backup-state-valid flag for the car-selection scratch block at 0x00497A7C..0x00497A98. Written `1` at start of `RaceTypeCategoryMenuStateMachine @ 0x00415500`; written `2` (consumed) in state 0 after the 8-field car-selection snapshot is taken; written `0` in state 0xf option-0 path after restore. Tri-state. 7 refs.
+       port: td5_frontend.c car-selection backup gate
+
+### 0x00497a7c  (2-way)
+  [WIN] b05 high    | g_savedCarIndex
+       size=u32
+       evidence: Stores g_selectedCarIndex on backup; restored on Race Again
+       port: td5_frontend.c:9475
+  [alt] b25 high    | g_postRaceCarSelectionBackup
+       size=u32[8]
+       evidence: 8-dword backup of car-selection state taken when the user starts a race, restored on "Race Again" via state 0xf option-0. Saved fields are `g_selectedCarIndex`, `DAT_0048f368` (= `gFrontendSlotCarIdTable`), `DAT_0048f370`, `_DAT_0048f378`, `DAT_00463e08`, `DAT_0048f36c`, `DAT_0048f374`, `DAT_0048f37c`. Block runs 0x00497a7c..0x00497a98 (8 × 4 = 32 bytes). 2 refs each.
+       port: td5_frontend.c car-selection backup struct
+
+### 0x004a2cdc  (2-way)
+  [WIN] b13 medium  | g_vehicleAudioPlayingIntensityByActor
+       size=u32[6]
+       evidence: Per-actor (6) u32. Written by mixer @ 0x00440d46 with value 0 (siren-stop) or value 1 (siren-active+nonzero-vol). Read by another subsystem (`0x004289d4 / 0x004289e6` — not in sound module, possibly HUD overlay flicker or particle gating). Effectively "is actor N's siren audible right now?"
+       port: (none — port doesn't propagate to HUD)
+  [alt] b14 high    | g_ffCollisionEffectActive
+       size=u32[6]
+       evidence: Per-player collision FF "currently playing" gate. Cleared in `UpdateControllerForceFeedback` after first PlayEffect call; checked to choose between PlayEffect (initial) vs SetEffect (continuing). Set elsewhere by collision dispatch (`PlayVehicleCollisionForceFeedback @ 0x00428a60`).
+       port: td5_input.c (s_ff struct)
+
+### 0x004aaf93  (3-way)
+  [WIN] b11 medium  | g_globalDebugPanelKeySticky
+       size=u8
+       evidence: Boolean. Set to 1 at `PollRaceSessionInput @ 0x0042c71f` when key 0x3D (F3 — diagnostics overlay) is pressed. Cleared to 0 at 0x0042c731 (only when key is NOT down). The transition-to-zero side-effect writes `g_inputPollDeferFlag = 1`. 3 xrefs. Likely a debug/diagnostics toggle key.
+       port: (none — port has no equivalent; possibly stripped from shipped build but the code path remains active.)
+  [alt] b14 high    | g_f3PauseInputHeldFlag
+       size=u8
+       evidence: F3-key edge-detect latch. Set to 1 when `DXInput::CheckKey(0x3d /*F3*/)` returns nonzero; on F3 release the rising-edge path writes `g_inputPollDeferFlag = 1` at 0x0042c728. Source confirms F3 = "pause input poll" toggle. Port mirror already labels this.
+       port: td5_input.c:186 `s_f3_held`
+  [alt] b24 high    | g_autoExitKeyHeldState
+       size=u8
+       evidence: At PollRaceSessionInput 0x0042c708-0x0042c724: `DXInput::CheckKey(0x3d)` (= VK_F2). If pressed, `DAT_004aaf93 = 1`. If released and prior was 1, clear and set `g_inputPollDeferFlag = 1`. Edge-detect for the per-frame "F2 toggles input-poll mode" behaviour. **Note**: read only inside this function -- if this flag belongs to a wider F2 system the writer/reader will be in another batch's area.
+       port: (none -- F2-as-poll-defer not mirrored)
+
+### 0x004aaf98  (4-way)
+  [WIN] b11 high    | g_perViewCameraCyclePresetDebounce
+       size=u32[2]
+       evidence: 2-element per-viewport counter `[ESI*4 + 0x4aaf98]` at `PollRaceSessionInput @ 0x0042c541` (READ) / 0x0042c54d (DECREMENT). Set to **10** at 0x0042c5ab and 0x0042c8a9 after a camera-cycle event. Decremented per-tick. Gates rapid re-cycling. 6 xrefs.
+       port: port: input-debounce in `td5_input.c` camera cycle handler — semantic match, not byte-faithful.
+  [alt] b14 high    | g_cameraCyclePerPlayerCooldown
+       size=int[2]
+       evidence: Decremented every frame at `PollRaceSessionInput @ 0x0042c541` when nonzero. Reset to 10 when bit 24 (CHANGE_VIEW) fires AND `g_replayModeFlag==0` AND `g_cameraTransitionActive==0`. Also reset to 10 by F4/F5 keyboard fallback at 0x0042c8a9. Per-player (indexed by `iVar1=0..1`).
+       port: td5_input.c:127 `s_camera_cooldown[]`
+  [alt] b24 high    | g_cameraCycleDebounceTable
+       size=u32[2]
+       evidence: Twin per-player cooldown counter. Written `(&DAT_004aaf98)[iVar1] = 10;` after CycleRaceCameraPreset (PollRaceSessionInput 0x0042c5e2). Decremented per tick at 0x0042c5b1 if non-zero. Used by both the `0x1000000` (cycle camera) and the function-key (VK_F4/F5) per-player camera-cycle paths. **Stride 4 = 2 dwords.**
+       port: port has no equivalent; cycle has no debounce.
+  [alt] b24 unknown | -- second slot of g_cameraCycleDebounceTable -- already covered
+       size=u32
+       evidence: --
+       port: --
+
+### 0x004ad288  (2-way)
+  [WIN] b10 medium  | g_dragRaceLaneStripPtr
+       size=void*
+       evidence: `InitializeRaceActorRuntime` writes 15 short writes at `*(DAT_004ad288 + 0x40..0x84)` — drag race lane geometry init (gates only run in `g_selectedGameType != 0` paths visible elsewhere). 15 xrefs.
+       port: td5_physics.c drag-strip block
+  [alt] b19 high    | g_dragRaceLaneStripPtr
+       size=void*
+       evidence: 15 reads inside `InitializeRaceActorRuntime @ 0x00433558..0x0043360e` of the form `*(short *)(DAT_004ad288 + 0xNN) = literal`. The literals (0xff10, 0xff79, 0x208, 0xf0, ...) are 16-bit signed fixed-point coordinates that match a **12-vertex quad-strip** at offsets 0x40..0x5c plus 0x80..0x84 trailer (count + pad). Companion literal block at `_DAT_004ad2e0..0x004ad2fc` writes the SAME values directly — indicating `DAT_004ad288 == 0x004ad2a0` at runtime (pointer + 0x40 == 0x4ad2e0 = lane-2 mirror)
+       port: td5_physics.c drag-strip pre-init block (port likely doesn't need this — drag uses hardcoded pose)
+
+### 0x004aed8c  (2-way)
+  [WIN] b10 high    | g_trafficBusTableBlob
+       size=void*
+       evidence: `LoadTrackRuntimeData` reads TRAFFIC.BUS (`&PTR_s_TRAFFIC_BUS_004673c0`); seeds `g_activeTrafficBusCursor` (0x004b08b8)
+       port: td5_ai.c TRAFFIC.BUS table
+  [alt] b18 high    | g_trafficBusTableBlob
+       size=void*
+       evidence: `LoadTrackRuntimeData @ 0x0042FC79` allocates TRAFFIC.BUS (`&PTR_s_TRAFFIC_BUS_004673c0`); seeds `g_activeTrafficBusCursor` (0x004b08b8). **Deferred from batch_10**.
+       port: td5_ai.c TRAFFIC.BUS table
+
+### 0x004aed90  (2-way)
+  [WIN] b10 high    | g_trackStripDataBlob
+       size=void*
+       evidence: `LoadTrackRuntimeData` allocates and reads STRIP.DAT here; bound to runtime pointers by `BindTrackStripRuntimePointers @ 0x00444070` (which writes `g_trackStripRecords`, `g_trackVertexPool`, `g_trackStripAttributeBasePtr`)
+       port: td5_track.c STRIP.DAT loader
+  [alt] b18 high    | g_trackStripDataBlob
+       size=void*
+       evidence: `LoadTrackRuntimeData @ 0x0042FBD0` allocates STRIP.DAT here via `HeapAllocTracked`; consumed by `BindTrackStripRuntimePointers @ 0x00444070` which extracts [0]=strip_records, [1]=total_span_count, [2]=vertex_pool, [3]=(written to DAT_004c3d8c), [4]=strip_attr_span_count. **Deferred from batch_10**.
+       port: td5_track.c STRIP.DAT loader
+
+### 0x004aed94  (2-way)
+  [WIN] b10 high    | g_leftRouteTableBlob
+       size=void*
+       evidence: `LoadTrackRuntimeData` reads LEFT.TRK into this allocation (`&PTR_s_LEFT_TRK_004673b8`); seeds `g_activeRouteTablePtrA_left` (0x004afb58)
+       port: td5_ai.c LEFT.TRK buffer
+  [alt] b18 high    | g_leftRouteTableBlob
+       size=void*
+       evidence: `LoadTrackRuntimeData @ 0x0042FC0B` allocates LEFT.TRK here (`&PTR_s_LEFT_TRK_004673b8`); seeds `g_activeRouteTablePtrA_left` (0x004afb58) via `InitializeRaceActorRuntime`. **Deferred from batch_10**.
+       port: td5_ai.c LEFT.TRK buffer
+
+### 0x004aed98  (2-way)
+  [WIN] b10 high    | g_raceCheckpointTableLive
+       size=int[6]
+       evidence: `LoadTrackRuntimeData` copies 6 dwords from `&DAT_0046cf6c + param_1*4`-pointed array into `&DAT_004aed98`. Address is then assigned to the already-named `g_raceCheckpointTablePtr`. This is the back-store for the checkpoint table.
+       port: (none)
+  [alt] b18 high    | g_raceCheckpointTableLive
+       size=int[6]
+       evidence: `LoadTrackRuntimeData @ 0x0042FD3E` copies 6 dwords from `&DAT_0046cf6c + track*4`-pointed array into this address; then assigned to `g_raceCheckpointTablePtr`. Back-store for checkpoint table. **Deferred from batch_10**.
+       port: (none)
+
+### 0x004aedb0  (3-way)
+  [WIN] b04 high    | gCheckpointOrderRemapTable
+       size=u32[16]
+       evidence: Array of checkpoint order indices used when track direction changes (forward vs reverse). Read in RemapCheckpointOrderForTrackDirection @ 0x42FD70. Paired with `gTrackDirectionSwitchFlag` to switch orderings
+       port: `td5_track.c` (none yet)
+  [alt] b10 medium  | g_checkpointNumTable
+       size=byte[0x60]
+       evidence: `LoadTrackRuntimeData` reads CHECKPT.NUM (0x60 bytes) directly into this address. Referenced by checkpoint logic (out of scope). Memo `todo_drag_checkpt_num_sentinel` already mentions this archive — confirm name candidate.
+       port: td5_track.c CHECKPT.NUM
+  [alt] b18 medium  | g_checkpointNumTable
+       size=byte[0x60]
+       evidence: `LoadTrackRuntimeData @ 0x0042FBFA` reads CHECKPT.NUM (0x60 bytes) directly into this address. Referenced in `todo_drag_checkpt_num_sentinel`. **Deferred from batch_10**.
+       port: td5_track.c CHECKPT.NUM
+
+### 0x004aee10  (2-way)
+  [WIN] b17 high    | g_perTrackEnvAssetTable
+       size=byte*
+       evidence: Per-track environment-asset descriptor table base. Written by `InitializeTrackStripMetadata @ 0x0042fad0` from `&DAT_0046bb1c + track_idx*4` (table of pointers). Header at +0 = count (DAT_004aee10[0]); entries stride 0x20 starting at +0x40 hold archive name strings used by `LoadEnvironmentTexturePages` to fetch each `ENV%d` page. 11 xrefs.
+       port: td5_asset.c env-list parser
+  [alt] b18 high    | g_trackEnvironmentMetadataBlob
+       size=void*
+       evidence: `InitializeTrackStripMetadata @ 0x0042FADD` writes `DAT_004aee10 = (&DAT_0046bb1c)[track_pool * 4]` (per-track environment-metadata pointer). Read by `LoadEnvironmentTexturePages @ 0x0042F990` (texture page count at +0, names at +0x40 stride 0x20), `ConfigureActorProjectionEffect @ 0x0040CBE2` (mode codes at +0x4 and +0x14). Distinct from `g_trackEnvironmentConfig` (LEVELINF.DAT) at 0x4aee20. 11 xrefs.
+       port: td5_track.c per-track .STR metadata
+
+### 0x004aee14  (2-way)
+  [WIN] b09 high    | g_trackLightingZoneTablePtr
+       size=u32 ptr
+       evidence: Seeded by `LoadTrackRuntimeData` @ 0x0042FD19 from `(&DAT_00469c78)[track_index]`; read by `ApplyTrackLightingForVehicleSegment` @ 0x00430150 (indexed by `actor->field_0x377` × 0x24) and `UpdateActorTrackLightState` @ 0x0040CDAA (reads field +0x1c of same row). Per memo: stride 0x24, ~285 zones × 42 tracks total across the per-track tables
+       port: `td5mod/src/td5re/td5_light_zones_table.inc` (zone table is statically extracted port-side; runtime pointer is per-track, mirrored in port helpers)
+  [alt] b10 medium  | g_trackCircuitFlagOrLapCount
+       size=u32
+       evidence: `LoadTrackRuntimeData` writes `*(DAT_00469c78 + param_1 * 4)` here (per-track lookup). Read by 0x0040cdaa and 0x00430150. Likely lap/checkpoint config. Comment-flag for verification.
+       port: (none)
+
+### 0x004aee1c  (2-way)
+  [WIN] b10 high    | g_rightRouteTableBlob
+       size=void*
+       evidence: `LoadTrackRuntimeData` reads RIGHT.TRK (`&PTR_s_RIGHT_TRK_004673bc`); seeds `g_activeRouteTablePtrB_right` (0x004b08b4)
+       port: td5_ai.c RIGHT.TRK buffer
+  [alt] b18 high    | g_rightRouteTableBlob
+       size=void*
+       evidence: `LoadTrackRuntimeData @ 0x0042FC44` allocates RIGHT.TRK (`&PTR_s_RIGHT_TRK_004673bc`); seeds `g_activeRouteTablePtrB_right` (0x004b08b4). **Deferred from batch_10**.
+       port: td5_ai.c RIGHT.TRK buffer
+
+### 0x004aee54  (2-way)
+  [WIN] b17 medium  | g_modelsDatPostEntryTableEnd
+       size=uint*
+       evidence: Set in `ParseModelsDat @ 0x0043119e` as `gModelsDatEntryTable + gModelsDatEntryCount * 2` — i.e. the address just past the end of the 8-byte-pair entry table. Allows downstream code (currently unidentified callers) to find the start of the raw mesh blob region. 1 xref (writer only — no reader yet observed, which matches the audit memo's note that the 2nd dword of each pair has no observed runtime consumer).
+       port: td5_asset.c MODELS.DAT end-of-table
+  [alt] b18 medium  | g_modelsDatPostEntryTableBlob
+       size=void*
+       evidence: `ParseModelsDat @ 0x0043119E` writes `_DAT_004aee54 = gModelsDatEntryTable + gModelsDatEntryCount * 2` (offset to whatever follows the 8-byte entry-pair table in MODELS.DAT). **Write-only globally — no known reader.** Likely an unused header trailer pointer or reserved future hook.
+       port: td5_render.c MODELS.DAT trailer (currently unused)
+
+### 0x004b08b4  (2-way)
+  [WIN] b03 high    | g_traffic_queue_span_base
+       size=u32
+       evidence: READ @ 0x00436B43 (immediate); written from unknown init location. Used to initialize route state base when traffic queue entry has span < g_actorRuntimeState.field_0x130.
+       port: (port inline, see td5_ai.c:2626 comment)
+  [alt] b10 high    | g_activeRouteTablePtrB_right
+       size=void*
+       evidence: Symmetric to `g_activeRouteTablePtrA_left`. Writes `DAT_004b08b4 = DAT_004aee1c` (RIGHT.TRK buffer); used for odd slots and as the "other route" pointer that RS[0] gets swapped to on route changes. 11 xrefs.
+       port: td5_ai.c right-route-pointer global
+
+### 0x004b08b8  (2-way)
+  [WIN] b03 high    | g_traffic_queue_cursor_ptr
+       size=u32
+       evidence: READ @ 0x004353C9, 0x004356D3, 0x0043587D (loops & condition); WRITE @ 0x00432E86, 0x004353F3, 0x00435C98, 0x00435888; called `DAT_004b08b8` in decompiler. Tracks position in traffic spawn queue.
+       port: td5_ai.c:302 (g_traffic_queue_ptr)
+  [alt] b10 high    | g_activeTrafficBusCursor
+       size=void*
+       evidence: `InitializeRaceActorRuntime` initializes `DAT_004b08b8 = DAT_004aed8c` (TRAFFIC.BUS blob ptr). Then advanced/rewound by `RecycleTrafficActorFromQueue @ 0x004353B0` reads + writes. Functions as the active "next traffic entry" cursor. 11 xrefs.
+       port: td5_ai.c traffic-recycle cursor
+
+### 0x004b1120  (2-way)
+  [WIN] b08 high    | g_hudPrevSpanPosition
+       size=i32[2]
+       evidence: Per-view 2-element table (`piVar1 = &DAT_004b1120 + view`); HUD 0x004394D9 updates it from actor field +0x80. Drives U-turn warning latch via `0x004b1140`-adjacent counter. Port mirror: `s_prev_span_pos`.
+       port: td5_hud.c:155 s_prev_span_pos
+  [alt] b21 medium  | g_hudPrevSpeedCache
+       size=int[2]
+       evidence: `&DAT_004b1120 + view` — set to `iVar10 = (int16)actor.field_0x80` (= player speed) by `RenderRaceHudOverlays` after the route-heading-divergence check; read next frame to detect deceleration spike (which counts up the wrong-way-warning fade). 2 xrefs.
+       port: (port currently always-on)
+
+### 0x004b1140  (2-way)
+  [WIN] b08 high    | g_hudWrongWayCounter_v0
+       size=i32[2]
+       evidence: First slot of the wrong-way/U-turn dwell counter; HUD 0x00439527 increments via `(&g_hudFadeOverlayAlpha)[view]`. Writer is HUD itself (`(&g_hudFadeOverlayAlpha)[view] = ... + 1`). g_hudFadeOverlayAlpha resolves to 0x004b1140 already in Ghidra as overlapping label? — confirmed mislabel: this slot is *not* the same as the named symbol; the port treats this as `s_wrong_way_counter` slot 0.
+       port: td5_hud.c:154 s_wrong_way_counter
+  [alt] b08 high    | g_hudView0CenterX
+       size=f32
+       evidence: +0x08 — center_x = (vp_left + vp_right) * 0.5 from 0x00437DAB FSTP. Shared address with wrong-way counter only because **the wrong-way counter sits inside the 14-float stride at offset +0x08; the port unpacked it into a separate array**. Confirms: 0x4b1140 is dual-purpose-overloaded between init (center_x writeback) and HUD-loop (wrong-way counter scratch). See key discoveries.
+       port: td5_hud.c center_x / s_wrong_way_counter
+
+### 0x004b1178  (2-way)
+  [WIN] b08 high    | g_hudWrongWayCounter_v1
+       size=i32
+       evidence: Second slot of same 2-entry per-view counter (slot 0 at 0x004b1140, slot 1 at 0x004b1178). Writer InitializeRaceHudLayout @ 0x00437DDB.
+       port: td5_hud.c:154 s_wrong_way_counter[1]
+  [alt] b08 medium  | g_hudView1CenterX
+       size=f32
+       evidence: +0x40 — view-1 center_x. Same dual-use as 0x4b1140 (init writes float center_x; HUD loop reads view-1 wrong-way counter from same byte range).
+       port: (struct field)
+
+### 0x004b11a8  (2-way)
+  [WIN] b08 high    | g_hudIndicatorDigit
+       size=i32[2]
+       evidence: Per-view 2-element table read at HUD 0x00439518 (`(&DAT_004b11a8)[view]`); writer is `SetRaceHudIndicatorState @ 0x00439B60`: `dword ptr [ECX*4 + 0x4b11a8] = EAX`. Port mirror: `s_indicator_state[MAX_HUD_VIEWS]`.
+       port: td5_hud.c:156 s_indicator_state
+  [alt] b21 medium  | g_hudIndicatorState
+       size=int[2]
+       evidence: Per-view HUD indicator state value. Written ONLY by `SetRaceHudIndicatorState @ 0x00439B60` (a single-line setter); read by `RenderRaceHudOverlays` to gate the "checkpoint-passed flash" / "milestone reached" sprite emission. **Named because of the dedicated setter — clear single-purpose value.**
+       port: `td5_hud.c` indicator state
+
+### 0x004b11b0  (2-way)
+  [WIN] b08 high    | g_hudCurrentViewIndex
+       size=u32
+       evidence: Loop induction at HUD body 0x004388B3 (`DAT_004b11b0 = 0`), increments at 0x004396FC; gates per-view code via `< g_hudViewCount`. 13 refs (3 writes). Port mirror: `s_cur_view`.
+       port: td5_hud.c:134 s_cur_view
+  [alt] b21 high    | g_hudCurrentViewIndex
+       size=int
+       evidence: The view-iteration index used by `RenderRaceHudOverlays` to walk through the active viewports. Re-read by every HUD branch; set/incremented by the outer loop. 10 xrefs all in HUD render. **This is the HUD-specific twin of `g_activeRenderViewIndex` (T3 batch 15).**
+       port: `td5_hud.c` current view
+
+### 0x004b11c4  (2-way)
+  [WIN] b08 high    | g_hudUseMetricUnits
+       size=u32
+       evidence: Read at HUD 0x00438EAA (gates `(speed*256+625)/1252` vs `(speed*256+389)/778`). Writer is `ScreenMainMenuAnd1PRaceFlow @ 0x00415490` body @ 0x00415597 -- main-menu UNITS option. 0 = MPH, 1 = KPH.
+       port: td5_hud.c speed_display switch
+  [alt] b21 low     | (comment-only: speed-readout-units live cache)
+       size=u32 (0/1)
+       evidence: Already-known via cross-reference (`DAT_004B11C4 = DAT_00466028` in main-menu commit). Adds nothing new beyond the shadow→live mapping documented under `gSpeedReadoutUnitsConfigShadow`.
+       port: (port reads from save struct)
+
+### 0x004bedc0  (2-way)
+  [WIN] b15 medium  | g_trackedActorMarkerBillboardPool
+       size=byte[N][0x458]
+       evidence: 0x458-byte records, count derived from loop end at 0x004BF674 → 4 records. Cleared by `InitializeTrackedActorMarkerBillboards @ 0x0043C9E0` to seed 6 sub-templates per record (red/blue light + 2 marker variants × 2). `AdvanceWorldBillboardAnimations` walks this stride 0x22C (so 2 sub-records per primary).
+       port: (none — port stubs police markers)
+  [alt] b15 low     | g_trackedActorMarkerAnimPhase_PROVISIONAL
+       size=u32
+       evidence: Final 4 dword writes at 0x004BEDC0=0, 0x004BEFEC=0x80, 0x004BF218=0x40, 0x004BF444=0xC0 — these set the initial animation phase for the 4 record bases at 0x90-degree offsets. Confirms record stride of 0x22C × 2 = 0x458.
+       port: (none)
+
+### 0x004c38a0  (2-way)
+  [WIN] b09 high    | g_actorTrackZoneAudioStateCode
+       size=u32[6]
+       evidence: 6 dwords (per-slot); written by `ApplyTrackLightingForVehicleSegment` @ 0x004301E2 as `*(undefined4 *)(&DAT_004c38a0 + slot*4) = *(undefined4 *)(psVar9 + 0x10)` — i.e. copies the zone row's u32 at offset +0x10 (zone-row field `slot_color` per the RE memo). Read **only by audio** (`UpdateVehicleAudioMix` @ 0x00441035 / 0x00441195) as a switch value (cases 1-5) selecting per-engine SFX volume. **Lighting writes it, audio reads it — a cross-subsystem mailbox.**
+       port: (none — port appears to not propagate this; flag for audio TODO)
+  [alt] b18 high    | g_perSlotActiveLightZoneTexturePage
+       size=int[16]
+       evidence: `ApplyTrackLightingForVehicleSegment @ 0x004301E2` writes `*(undefined4 *)(&DAT_004c38a0 + slot * 4) = psVar9[0x10]` (texture-page id from current light-zone row, indexed by `slot_index`). Per-slot cached texture page id used by the render-time lighting blend. 1 xref but per-slot stride 4.
+       port: td5_render.c per-slot light texture page
+
+### 0x004c3d04  (2-way)
+  [WIN] b17 high    | g_textureUploadSkipResample
+       size=u32 (bool)
+       evidence: "Skip nearest-neighbour resample on upload" flag. Read at 7 sites (all `ResampleTexturePageToEntryDimensions` gates in `LoadRaceTexturePages` / `LoadEnvironmentTexturePages` / `BuildTrackTextureCacheImpl`'s upload loop, and inside `LoadTrafficVehicleSkinTexture @ 0x004431c0`). When non-zero, the 256×256 source page is uploaded as-is; when zero (default), it's resampled to the static.hed entry's stored dimensions. Tied to the texture-config mode set somewhere in track loading.
+       port: td5_render.c upload-time resample gate
+  [alt] b18 medium  | g_textureUsesTallPageFormat
+       size=int
+       evidence: Read at 7 sites in `LoadStaticTrackTextureHeader`, `BuildTrackTextureCache`, `LoadTrackTextureSet`, and other texture upload paths. Controls whether (width, height) are read directly from static.hed (when nonzero) or swapped (when zero — `if uVar1 <= uVar6 then uVar6 = uVar1`). **Never written via instruction — always 0 in this binary.** Likely an artifact of a removed alternate page layout mode.
+       port: (none)
+
+### 0x004c3d28  (3-way)
+  [WIN] b17 high    | g_trafficMeshSlotOffset
+       size=u32[6]
+       evidence: Per-traffic-slot offset into the traffic-mesh heap allocation. Written at `LoadRaceVehicleAssets @ 0x0044347b` (iVar19 accumulator) and patched-relative to the heap base in the 0x4c3d28-loop just below. Reads at 0x004c3d40 (loop bound) — gives 6 slots × 4 bytes.
+       port: td5_asset.c traffic-mesh per-slot offset table
+  [alt] b19 high    | g_trafficVehicleMeshResourcePtrTable
+       size=void*[6]
+       evidence: Written by `LoadRaceVehicleAssets @ 0x004435c7` (6-element loop), read by traffic spawn code (`InitializeTrafficActorsFromQueue @ 0x0040bdb7`, `RecycleTrafficActorFromQueue` mesh-resolution path). Per-traffic-slot mesh resource pointer. Per LoadRaceVehicleAssets: `(&DAT_004c3d28)[iVar10] = iVar19;` accumulates offsets, then a finalize loop adds the heap base. Sibling of `gSlotMeshResourcePtrTable` (0x004c3d10) for racer slots.
+       port: td5_physics.c traffic-slot mesh table
+  [alt] b20 high    | gTrafficMeshResourcePtrTable
+       size=void*[6]
+       evidence: Sister array of already-named `gSlotMeshResourcePtrTable`. `LoadRaceVehicleAssets` walks 6 traffic-mesh slots and writes `(&DAT_004c3d28)[iVar10] = iVar19` (per-mesh byte offsets into a single big heap alloc). Read by `0x0040bdb7` (traffic-actor mesh resolver, out of scope).
+       port: td5_track.c / td5_render.c traffic-mesh resolver
+
+### 0x004c3d48  (3-way)
+  [WIN] b17 high    | g_slotMeshResourceSize
+       size=u32[6+1]
+       evidence: Per-slot allocation size for the himodel.dat blob (one dword per slot, 6 slots + 1 trailing entry for player reflection size). Written at `LoadRaceVehicleAssets @ 0x004432d7` (= `GetArchiveEntrySize(s_himodel_dat, ...) rounded up`); read at 0x4432ec / 0x4433e2 / 0x44351b. 4 xrefs.
+       port: td5_asset.c himodel blob size table
+  [alt] b19 high    | g_slotVehicleMeshResourceSizeTable
+       size=uint32[6]
+       evidence: Written by `LoadRaceVehicleAssets @ 0x004432d7` (`(&DAT_004c3d48)[iVar15] = uVar4` — aligned-up archive entry size). Read at 0x004432ec/0x0044351b for the `ReadArchiveEntry` size argument. Per-slot mesh resource byte sizes (6 entries).
+       port: td5_physics.c per-slot mesh size table
+  [alt] b20 high    | gSlotMeshResourceByteSize
+       size=int[6]
+       evidence: Per-slot mesh byte size cache. `LoadRaceVehicleAssets` writes `(&DAT_004c3d48)[iVar15] = uVar4` for slot iVar15 = 0..5 (or 0..1 in drag mode). Used to compute the second `ReadArchiveEntry` size argument when the same function re-reads `himodel.dat` for `g_playerReflectionMeshResource`.
+       port: (none — port consolidates)
+
+### 0x004c3d60  (3-way)
+  [WIN] b17 high    | g_trafficMeshSlotSize
+       size=u32[6]
+       evidence: Sister table to `g_trafficMeshSlotOffset` — per-slot allocation size for the `MODEL%d.PRR` traffic mesh blob. Written at `LoadRaceVehicleAssets @ 0x0044349a`; read at 0x004433f0.
+       port: td5_asset.c traffic-mesh per-slot size table
+  [alt] b19 high    | g_trafficVehicleMeshResourceSizeTable
+       size=uint32[6]
+       evidence: Written by `LoadRaceVehicleAssets @ 0x00443620` (`(&DAT_004c3d60)[iVar10] = uVar11`). Sibling of `g_slotVehicleMeshResourceSizeTable` for traffic mesh entries.
+       port: td5_physics.c traffic-slot mesh size table
+  [alt] b20 high    | gTrafficMeshResourceByteSize
+       size=int[6]
+       evidence: Twin of `gSlotMeshResourceByteSize` but for traffic slots. Written in the traffic-mesh allocation loop alongside `gTrafficMeshResourcePtrTable`.
+       port: (none)
+
+### 0x004c3d78  (3-way)
+  [WIN] b17 high    | g_chassisStaticHedEntryPtr
+       size=byte*
+       evidence: Pointer to the "chassis" static.hed entry, fetched once in `LoadRaceVehicleAssets @ 0x00443337` (`= FindArchiveEntryByName(..., s_chassis_00474e14)`). Read at 0x00443741 to seed the per-track lighting UV patch. 2 xrefs.
+       port: (none — chassis-entry lookup is inline in port)
+  [alt] b19 high    | g_chassisMeshArchiveEntry
+       size=void*
+       evidence: Single writer at `LoadRaceVehicleAssets @ 0x00443337` (`FindArchiveEntryByName(piVar9, s_chassis_00474e14)`). Read by `GenerateActorChassisShadowGeometry @ 0x00443741`. Holds the "chassis" sub-mesh ptr inside the himodel.dat archive — used by car-shadow generator.
+       port: td5_physics.c / td5_render.c chassis sub-mesh resource
+  [alt] b20 high    | g_chassisMeshArchiveEntry
+       size=void*
+       evidence: `LoadRaceVehicleAssets` writes `DAT_004c3d78 = FindArchiveEntryByName(piVar9, s_chassis_00474e14)` — caches the chassis-mesh entry header. Read at race-end cleanup `0x00443741`. The 4 floats at `+0x2c..+0x38` (read into `_DAT_004c3d7c..0x004c3d88`) are the chassis bounding-box for shadow + reflection.
+       port: td5_render.c chassis bbox
+
+### 0x004c3d7c  (3-way)
+  [WIN] b17 medium  | g_chassisFixedPointBounds
+       size=f32[4]
+       evidence: 4 float globals seeded immediately after `g_chassisStaticHedEntryPtr` from `(uint *)(DAT_004c3d78 + 0x2c..0x38) * _g_fixedPointToFloatScale`. These are the chassis bounding-box extents in float space (used by mesh-prepare / sky-clip downstream). Comment-only group naming; individual semantic of each component (min_x/min_y/max_x/max_y?) needs follow-up.
+       port: (none)
+  [alt] b19 high    | g_chassisBoundsXMin
+       size=float
+       evidence: Written at `LoadRaceVehicleAssets @ 0x00443360..0x0044339e` as `_DAT_004c3d7c = (float)*(uint *)(DAT_004c3d78 + 0x2c) * <0.5_constant>`. Chassis bounds X (from chassis mesh header offsets 0x2c..0x38).
+       port: td5_physics.c chassis bounds floats
+  [alt] b20 medium  | g_chassisBoundsMinX
+       size=float
+       evidence: First of 4 floats at `+0x2c..+0x38` of `g_chassisMeshArchiveEntry` (post-multiplied by `g_fixedPointToFloatScale`). Naming reflects probable role as a bounding-box edge but exact semantic unconfirmed (could be center vs edge). Used by shadow/reflection clip.
+       port: td5_render.c shadow extent
+
+### 0x004c3d80  (2-way)
+  [WIN] b19 high    | g_chassisBoundsXMax
+       size=float
+       evidence: Symmetric writer at same site (offset 0x30 in mesh header * 0.5).
+       port: (same)
+  [alt] b20 medium  | g_chassisBoundsMaxX
+       size=float
+       evidence: Second of the 4 chassis bounds floats. Speculative — could be max or width.
+       port: td5_render.c shadow extent
+
+### 0x004c3d84  (2-way)
+  [WIN] b19 medium  | g_chassisBoundsZ
+       size=float
+       evidence: Written from chassis mesh +0x34 * 0.5. Likely Z-axis bound or center.
+       port: (same)
+  [alt] b20 medium  | g_chassisBoundsMinZ
+       size=float
+       evidence: Third — same caveat.
+       port: td5_render.c shadow extent
+
+### 0x004c3d88  (2-way)
+  [WIN] b19 medium  | g_chassisBoundsY
+       size=float
+       evidence: Written from chassis mesh +0x38 * 0.5. Likely Y-axis bound or center.
+       port: (same)
+  [alt] b20 medium  | g_chassisBoundsMaxZ
+       size=float
+       evidence: Fourth — same caveat.
+       port: td5_render.c shadow extent
+
+### 0x004c3da0  (4-way)
+  [WIN] b03 high    | g_track_route_metadata
+       size=struct (~96 bytes)
+       evidence: Addressed directly; READ @ 0x00435FE6 (DATA reference). Contains route table metadata: 0x14=span count, 0x1c=span offset array. Used by RecycleTrafficActorFromQueue to index junctions.
+       port: (track metadata, no direct port ref; see td5_track.c)
+  [alt] b10 medium  | g_trackStripBlobAlias
+       size=void*
+       evidence: `BindTrackStripRuntimePointers` writes `DAT_004c3da0 = DAT_004aed90` (alias of strip-blob ptr). Read by junction-table walkers (`+0x14` = count, `+0x1c` = first entry stride 6 — junction/branch table). Wrap of STRIP header. 16 xrefs.
+       port: td5_track.c strip-blob alias
+  [alt] b18 high    | g_trackStripBlobAlias
+       size=void*
+       evidence: `BindTrackStripRuntimePointers @ 0x00444075` writes `DAT_004c3da0 = DAT_004aed90` (alias of strip-blob ptr). Read by `InitializeTrafficActorsFromQueue @ 0x004359D8` as the **junction-table header**: `*(int *)(iVar10 + 0x14)` = junction count; `(ushort *)(iVar10 + 0x1c)` = junction entries (stride 6 bytes = 3 ushorts per entry). Multiple traffic-recycle/route-walker reads at 0x00435ade, 0x00436adb, 0x00436c51, 0x004351b3, 0x004351fa, 0x00436020, 0x00436083, 0x004361bc, 0x00436215, 0x004354b5, 0x0
+       port: td5_track.c strip-blob alias (junction-table holder)
+  [alt] b19 high    | g_trackStripBlobAliasJunction
+       size=void*
+       evidence: Single writer: `BindTrackStripRuntimePointers @ 0x00444075` writes `DAT_004c3da0 = DAT_004aed90` (the loaded STRIP.DAT blob). **16 reads** across track/AI/junction-walker functions (`UpdateActorTrackBehavior @ 0x004351b3`, `UpdateActorTrackBounds @ 0x004366e0`, `RecycleTrafficActorFromQueue @ 0x004353B0`, etc.). The reads dereference `+0x14` (= span count?) and `+0x1c` (= start of junction/branch table — stride 6 words). T2.10 already proposed `g_trackStripBlobAlias` as medium-confidence; **upgr
+       port: td5_track.c strip-blob-with-junction-table cursor
+
+### 0x004c3ddc  (2-way)
+  [WIN] b15 low     | g_weatherSegmentTargetView0_PROVISIONAL
+       size=u32
+       evidence: Sibling of 0x004C3DD8; this offset (+0x4) is set to 0 by `InitializeWeatherOverlayParticles` but never written elsewhere. Likely view-1 mirror of `g_weatherSegmentTargetDensity` (`&DAT_004C3DD8 + view*4` pattern). Comment-flag for verification.
+       port: (none)
+  [alt] b26 medium  | g_weatherSegmentTargetDensityView1
+       size=i32
+       evidence: View1 of `g_weatherSegmentTargetDensity @ 0x004c3dd8`. Read/written as `*(int *)(&g_weatherSegmentTargetDensity + view*4)` in `UpdateAmbientParticleDensityForSegment`.
+       port: (none)
+
+### 0x004c3de4  (2-way)
+  [WIN] b15 low     | g_weatherActiveCountView1_PROVISIONAL
+       size=u32
+       evidence: Mirror of `g_weatherActiveCountView0 @ 0x004C3DE0` for view 1 (consistent with the `(&g_weatherActiveCountView0)[param_3]` indexing seen in `RenderAmbientParticleStreaks`). Cleared by `InitializeWeatherOverlayParticles`.
+       port: (none)
+  [alt] b26 medium  | g_weatherActiveCountView1
+       size=dword
+       evidence: View1 of `g_weatherActiveCountView0 @ 0x004c3de0`. Read/written as `(&g_weatherActiveCountView0)[view]` in `UpdateAmbientParticleDensityForSegment`, `UpdateVehicleAudioMix`, and `RenderAmbientParticleStreaks`.
+       port: (none)
+

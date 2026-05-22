@@ -1,0 +1,245 @@
+[
+  {
+    "addr": "0x00441a80",
+    "port_name": "td5_sound_load_vehicle_bank",
+    "port_sig": "int td5_sound_load_vehicle_bank(const char *car_dir, int vehicle_index,                 int is_reverb_vehicle)",
+    "quality": "weak",
+    "action": "apply",
+    "translated_template": "int __PLACEHOLDER__(const char *car_dir, int vehicle_index,                 int is_reverb_vehicle)",
+    "reason": ""
+  },
+  {
+    "addr": "0x00441c60",
+    "port_name": "td5_sound_load_ambient",
+    "port_sig": "int td5_sound_load_ambient(void)",
+    "quality": "good",
+    "action": "apply",
+    "translated_template": "int __PLACEHOLDER__(void)",
+    "reason": ""
+  },
+  {
+    "addr": "0x00441d50",
+    "port_name": "td5_sound_release_race_channels",
+    "port_sig": "void td5_sound_release_race_channels(void)",
+    "quality": "good",
+    "action": "apply",
+    "translated_template": "void __PLACEHOLDER__(void)",
+    "reason": ""
+  },
+  {
+    "addr": "0x00441d90",
+    "port_name": "td5_sound_play_at_position",
+    "port_sig": "void td5_sound_play_at_position(int base_slot, int volume, int pitch,                 const int32_t *pos, int num_variants)",
+    "quality": "weak",
+    "action": "apply",
+    "translated_template": "void __PLACEHOLDER__(int base_slot, int volume, int pitch,                 const int *pos, int num_variants)",
+    "reason": ""
+  },
+  {
+    "addr": "0x004437c0",
+    "port_name": "sar8_rz",
+    "port_sig": "static inline int32_t sar8_rz(int32_t x)",
+    "quality": "weak",
+    "action": "apply",
+    "translated_template": "int __PLACEHOLDER__(int x)",
+    "reason": ""
+  },
+  {
+    "addr": "0x004438f0",
+    "port_name": "td5_physics_update_traffic",
+    "port_sig": "void td5_physics_update_traffic(TD5_Actor *actor)",
+    "quality": "good",
+    "action": "apply",
+    "translated_template": "void __PLACEHOLDER__(RuntimeSlotActor *actor)",
+    "reason": ""
+  },
+  {
+    "addr": "0x00443ed0",
+    "port_name": "integrate_traffic_pose",
+    "port_sig": "static void integrate_traffic_pose(TD5_Actor *actor)",
+    "quality": "good",
+    "action": "apply",
+    "translated_template": "void __PLACEHOLDER__(RuntimeSlotActor *actor)",
+    "reason": ""
+  },
+  {
+    "addr": "0x00443fb0",
+    "port_name": "td5_track_normalize_actor_wrap",
+    "port_sig": "int td5_track_normalize_actor_wrap(TD5_Actor *actor)",
+    "quality": "good",
+    "action": "apply",
+    "translated_template": "int __PLACEHOLDER__(RuntimeSlotActor *actor)",
+    "reason": ""
+  },
+  {
+    "addr": "0x00443ff0",
+    "port_name": "td5_track_resolve_actor_segment_boundary",
+    "port_sig": "void td5_track_resolve_actor_segment_boundary(TD5_Actor *actor)",
+    "quality": "good",
+    "action": "apply",
+    "translated_template": "void __PLACEHOLDER__(RuntimeSlotActor *actor)",
+    "reason": ""
+  },
+  {
+    "addr": "0x00444070",
+    "port_name": "td5_track_bind_runtime_pointers",
+    "port_sig": "void td5_track_bind_runtime_pointers(void)",
+    "quality": "good",
+    "action": "apply",
+    "translated_template": "void __PLACEHOLDER__(void)",
+    "reason": ""
+  },
+  {
+    "addr": "0x004440f0",
+    "port_name": "update_position_recursive",
+    "port_sig": "static void update_position_recursive(int16_t *track_state, int32_t pos_x, int32_t pos_z,                    int depth, int single_step)",
+    "quality": "weak",
+    "action": "apply",
+    "translated_template": "void __PLACEHOLDER__(short *track_state, int pos_x, int pos_z,                    int depth, int single_step)",
+    "reason": ""
+  },
+  {
+    "addr": "0x004456d0",
+    "port_name": "diagonal_cross",
+    "port_sig": "static int64_t diagonal_cross(int vl0_idx, int vr1_idx,                int32_t local_x, int32_t local_z)",
+    "quality": "weak",
+    "action": "apply",
+    "translated_template": "longlong __PLACEHOLDER__(int vl0_idx, int vr1_idx,                int local_x, int local_z)",
+    "reason": ""
+  },
+  {
+    "addr": "0x00445a70",
+    "port_name": "triangle_height",
+    "port_sig": "static int32_t triangle_height(int va_idx, int vb_idx, int vc_idx,                 int32_t origin_x, int32_t origin_y, int32_t origin_z,                 int32_t pos_x, int32_t pos_z,                 int16_t *out_normal)",
+    "quality": "weak",
+    "action": "apply",
+    "translated_template": "int __PLACEHOLDER__(int va_idx, int vb_idx, int vc_idx,                 int origin_x, int origin_y, int origin_z,                 int pos_x, int pos_z,                 short *out_normal)",
+    "reason": ""
+  },
+  {
+    "addr": "0x00445c51",
+    "port_name": "heading_diag_cross",
+    "port_sig": "static int64_t heading_diag_cross(int li_idx, int ri_plus1_idx,                  int32_t local_x, int32_t local_z)",
+    "quality": "weak",
+    "action": "apply",
+    "translated_template": "longlong __PLACEHOLDER__(int li_idx, int ri_plus1_idx,                  int local_x, int local_z)",
+    "reason": ""
+  },
+  {
+    "addr": "0x00445ef7",
+    "port_name": "td5_track_interpolate_segment_normal",
+    "port_sig": "void td5_track_interpolate_segment_normal(int16_t va_idx, int16_t vb_idx,                      int16_t vc_idx, int16_t *out_normal)",
+    "quality": "weak",
+    "action": "apply",
+    "translated_template": "void __PLACEHOLDER__(short va_idx, short vb_idx,                      short vc_idx, short *out_normal)",
+    "reason": ""
+  },
+  {
+    "addr": "0x00446030",
+    "port_name": "td5_physics_attitude_from_wheels",
+    "port_sig": "static void td5_physics_attitude_from_wheels(const TD5_Actor *actor,                       int16_t *out_roll,                       int16_t *out_pitch)",
+    "quality": "partial",
+    "action": "apply",
+    "translated_template": "void __PLACEHOLDER__(const RuntimeSlotActor *actor,                       short *out_roll,                       short *out_pitch)",
+    "reason": ""
+  },
+  {
+    "addr": "0x00446240",
+    "port_name": "td5_vfx_init_weather",
+    "port_sig": "void td5_vfx_init_weather(TD5_WeatherType type)",
+    "quality": "good",
+    "action": "apply",
+    "translated_template": "void __PLACEHOLDER__(TD5_WeatherType type)",
+    "reason": ""
+  },
+  {
+    "addr": "0x004464b0",
+    "port_name": "td5_vfx_update_ambient_density",
+    "port_sig": "void td5_vfx_update_ambient_density(TD5_Actor *actor, int view_index)",
+    "quality": "partial",
+    "action": "apply",
+    "translated_template": "void __PLACEHOLDER__(RuntimeSlotActor *actor, int view_index)",
+    "reason": ""
+  },
+  {
+    "addr": "0x00446560",
+    "port_name": "td5_vfx_render_ambient_streaks",
+    "port_sig": "void td5_vfx_render_ambient_streaks(TD5_Actor *actor, float sim_budget,                   int view_index)",
+    "quality": "partial",
+    "action": "apply",
+    "translated_template": "void __PLACEHOLDER__(RuntimeSlotActor *actor, float sim_budget,                   int view_index)",
+    "reason": ""
+  },
+  {
+    "addr": "0x00446a70",
+    "port_name": "wheel_lookup_static_hed",
+    "port_sig": "static void wheel_lookup_static_hed(void)",
+    "quality": "good",
+    "action": "apply",
+    "translated_template": "void __PLACEHOLDER__(void)",
+    "reason": ""
+  },
+  {
+    "addr": "0x00446f15",
+    "port_name": "render_vehicle_wheel_billboards",
+    "port_sig": "static void render_vehicle_wheel_billboards(TD5_Actor *actor, int slot)",
+    "quality": "partial",
+    "action": "apply",
+    "translated_template": "void __PLACEHOLDER__(RuntimeSlotActor *actor, int slot)",
+    "reason": ""
+  },
+  {
+    "addr": "0x004643b8",
+    "port_name": "td5_save_init",
+    "port_sig": "int td5_save_init(void)",
+    "quality": "good",
+    "action": "apply",
+    "translated_template": "int __PLACEHOLDER__(void)",
+    "reason": ""
+  },
+  {
+    "addr": "0x00466000",
+    "port_name": "td5_save_get_sfx_volume",
+    "port_sig": "int td5_save_get_sfx_volume(void)",
+    "quality": "good",
+    "action": "apply",
+    "translated_template": "int __PLACEHOLDER__(void)",
+    "reason": ""
+  },
+  {
+    "addr": "0x00467380",
+    "port_name": "rd_i16",
+    "port_sig": "static inline int16_t rd_i16(const uint8_t *p)",
+    "quality": "weak",
+    "action": "apply",
+    "translated_template": "short __PLACEHOLDER__(const byte *p)",
+    "reason": ""
+  },
+  {
+    "addr": "0x00475160",
+    "port_name": "td5_save_crc32",
+    "port_sig": "uint32_t td5_save_crc32(const uint8_t *data, size_t size)",
+    "quality": "weak",
+    "action": "apply",
+    "translated_template": "uint __PLACEHOLDER__(const byte *data, size_t size)",
+    "reason": ""
+  },
+  {
+    "addr": "0x00488984",
+    "port_name": "td5_trig_build_lut",
+    "port_sig": "static void td5_trig_build_lut(void)",
+    "quality": "good",
+    "action": "apply",
+    "translated_template": "void __PLACEHOLDER__(void)",
+    "reason": ""
+  },
+  {
+    "addr": "0x004aafa0",
+    "port_name": "BuildCameraBasisFromAngles",
+    "port_sig": "void BuildCameraBasisFromAngles(short *angles)",
+    "quality": "weak",
+    "action": "apply",
+    "translated_template": "void __PLACEHOLDER__(short *angles)",
+    "reason": ""
+  }
+]

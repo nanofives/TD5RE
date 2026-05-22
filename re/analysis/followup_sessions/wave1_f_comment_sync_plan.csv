@@ -1,0 +1,704 @@
+orig_address,comment_kind,port_file,port_line,comment_text_short
+,ARCH-DIVERGENCE,main.c,895,[ARCH-DIVERGENCE: CRT bridge collapse] Phase 2 manifest (2026-05-21)
+,ARCH-DIVERGENCE,main.c,905,"Per build_confidence_map.py:104-126 docstring, [ARCH-DIVERGENCE] is the audited, documented deviation marker - functionally"
+,ARCH-DIVERGENCE,main.c,910,carries an [ARCH-DIVERGENCE: LIBC] marker so the citation- proximity check in build_confidence_map.py:227-233 promotes
+0x00448443,ARCH-DIVERGENCE,main.c,914,0x00448443  sprintf_game        [ARCH-DIVERGENCE: LIBC] 0x00448495  fclose_game         [ARCH-DIVERGENCE: LIBC]
+0x00448495,ARCH-DIVERGENCE,main.c,915,0x00448495  fclose_game         [ARCH-DIVERGENCE: LIBC] 0x0044867C  fopen_game          [ARCH-DIVERGENCE: LIBC]
+0x0044867c,ARCH-DIVERGENCE,main.c,916,0x0044867C  fopen_game          [ARCH-DIVERGENCE: LIBC] 0x0044868F  fread_game          [ARCH-DIVERGENCE: LIBC]
+0x0044868f,ARCH-DIVERGENCE,main.c,917,0x0044868F  fread_game          [ARCH-DIVERGENCE: LIBC] 0x00448D0E  ftell_game          [ARCH-DIVERGENCE: LIBC]
+0x00448d0e,ARCH-DIVERGENCE,main.c,918,0x00448D0E  ftell_game          [ARCH-DIVERGENCE: LIBC] 0x00448E91  fseek_game          [ARCH-DIVERGENCE: LIBC]
+0x00448e91,ARCH-DIVERGENCE,main.c,919,0x00448E91  fseek_game          [ARCH-DIVERGENCE: LIBC] 0x00449310  stricmp_game        [ARCH-DIVERGENCE: LIBC]
+0x00449310,ARCH-DIVERGENCE,main.c,920,0x00449310  stricmp_game        [ARCH-DIVERGENCE: LIBC] 0x0044950D  FatalStartupExit    [ARCH-DIVERGENCE: LIBC]
+0x0044950d,ARCH-DIVERGENCE,main.c,921,0x0044950D  FatalStartupExit    [ARCH-DIVERGENCE: LIBC] 0x004499D0  InitPrimaryTlsSlot  [ARCH-DIVERGENCE: LIBC]
+0x004499d0,ARCH-DIVERGENCE,main.c,922,0x004499D0  InitPrimaryTlsSlot  [ARCH-DIVERGENCE: LIBC] 0x00449CCE  InitProcessHeap     [ARCH-DIVERGENCE: LIBC]
+0x00449cce,ARCH-DIVERGENCE,main.c,923,0x00449CCE  InitProcessHeap     [ARCH-DIVERGENCE: LIBC]
+0x00433fc0,ARCH-DIVERGENCE,td5_ai.c,359,[ARCH-DIVERGENCE @ 0x00433FC0] Orig calls AngleFromVector12 (0x0040A720) which indexes a 12-bit atan2 LUT at DAT_00463214. Port uses libm
+0x0040a720,ARCH-DIVERGENCE,td5_ai.c,359,[ARCH-DIVERGENCE @ 0x00433FC0] Orig calls AngleFromVector12 (0x0040A720) which indexes a 12-bit atan2 LUT at DAT_00463214. Port uses libm
+0x00403180,CONFIRMED,td5_ai.c,430,Per-slot encounter latch accessor [CONFIRMED @ 0x00403180]. Original UpdatePlayerVehicleControlState gates the encounter-control branch
+0x00436a0c,CONFIRMED,td5_ai.c,780,(int)lVar7 < 0xff → return 1 [CONFIRMED @ 0x00436A0C] */ if (sample_progress < 0xFF) {
+0x00436a4d,CONFIRMED,td5_ai.c,808,[CONFIRMED @ 0x00436A4D] */ if (sample_progress > 0) {
+0x00434ffb,CONFIRMED,td5_ai.c,960,Route-byte → 12-bit angle: (byte * 0x102C) >> 8 [CONFIRMED @ 0x434FFB] */ route_heading = (((int32_t)route_table[(size_t)span * 3u + 1u] * 0x102C) >> 
+0x004340c0,CONFIRMED,td5_ai.c,1839,[CONFIRMED @ 0x004340C0] Byte-faithful with orig UpdateActorSteeringBias. L5 audit 2026-05-18 (TD5_pool0 read-only):
+0x00433c92,CONFIRMED,td5_ai.c,2207,"Bounds source [CONFIRMED @ 0x00433C92]: cardef pointer comes from g_actorRuntimeState.slot[self_slot].field_0x1b8 (SELF's cardef), NOT"
+0x00433832,CONFIRMED,td5_ai.c,2363,Route-id match: rs[3] [CONFIRMED @ 0x00433832] */ if (route_state_ptr[3] != peer_rs[3]) continue;
+0x00433851,CONFIRMED,td5_ai.c,2365,self.field_0x82 <= peer.field_0x82 [CONFIRMED @ 0x00433851] */ if (self_field82 > peer_field82) continue;
+0x00433aa5,CONFIRMED,td5_ai.c,2504,rs[3] route-id match [CONFIRMED @ 0x00433AA5] */ if (route_state_ptr[3] != peer_rs[3]) continue;
+0x00433ac7,CONFIRMED,td5_ai.c,2508,self.field_0x82 <= peer.field_0x82 [CONFIRMED @ 0x00433AC7] */ if (self_field82 > peer_field82) continue;
+0x004342e0,CONFIRMED,td5_ai.c,2821,[CONFIRMED @ 0x004342E0] ======================================================================== */
+0x00434327,CONFIRMED,td5_ai.c,2842,Route byte from route table at span_norm * 3 [CONFIRMED @ 0x00434327].
+0x00434fe0,CONFIRMED,td5_ai.c,3422,"[CONFIRMED @ 0x00434FE0] decomp: if ((800 < uVar3) && (uVar3 < 0xce0)) — 800 is DECIMAL (= 0x320), upper is strict <."
+0x00435352,CONFIRMED,td5_ai.c,3594,[CONFIRMED @ 0x435352] */ int32_t delta = actor_heading - target_angle;
+0x00435392,CONFIRMED,td5_ai.c,3638,threshold != 0 → weight = 0x10000  [CONFIRMED @ 0x00435392] threshold == 0 → weight = 0x20000  [CONFIRMED @ 0x0043539F]
+0x0043539f,CONFIRMED,td5_ai.c,3639,threshold == 0 → weight = 0x20000  [CONFIRMED @ 0x0043539F]
+0x004353b0,CONFIRMED,td5_ai.c,3850,[CONFIRMED @ 0x004353B0] L5 promotion sweep audit (2026-05-18).
+0x00435940,CONFIRMED,td5_ai.c,4319,[CONFIRMED @ 0x00435940] L5 audit 2026-05-18 (TD5_pool0 read-only) — byte- faithful with original for all in-loop logic:
+,ARCH-DIVERGENCE,td5_ai.c,4331,[ARCH-DIVERGENCE] Three intentional port-side divergences kept post-audit. See `reference_arch_init_traffic_actors_2026-05-18.md` for full rationale.
+,ARCH-DIVERGENCE,td5_ai.c,4366,[ARCH-DIVERGENCE D3] direction-polarity-macro: the original writes polarity at byte 0xFC of route_state slot (= dword index 0x3F =
+,ARCH-DIVERGENCE,td5_ai.c,4566,"[ARCH-DIVERGENCE D1] queue records whose span is outside every junction range will have remapped_span = queue.span here, vs"
+0x00435940,ARCH-DIVERGENCE,td5_ai.c,4711,[ARCH-DIVERGENCE D2] The original 0x00435940 does NOT zero steering_cmd / vehicle_mode / etc — those resets happen in
+0x00435e80,CONFIRMED,td5_ai.c,4760,[CONFIRMED @ 0x00435E80] L5 promotion sweep audit (2026-05-18). - Stages 1-7 enumerated above match orig FSM block layout
+0x00435f6a,CONFIRMED,td5_ai.c,4974,[CONFIRMED @ 0x00435F6A] iVar14=field_0x82; iVar8 = iVar14 + 1 */ lin_span = ((int)span_norm + 1) % span_count;
+0x0043646a,CONFIRMED,td5_ai.c,5080,"Proximity gate [CONFIRMED @ 0x43646A]: if peer within 4 spans and moving, brake now */"
+0x004364ee,CONFIRMED,td5_ai.c,5091,TTC formula [CONFIRMED @ 0x4364EE]: iVar7 = ((iVar14 * peer_speed * 0x5DC) / speed_delta + iVar14 * 0x5DC) / self_speed
+0x00436561,CONFIRMED,td5_ai.c,5103,self_speed arithmetic right-shift by 10 [CONFIRMED @ 0x436561] */ speed_shifted = (self_speed + (self_speed >> 31 & 0x3FF)) >> 10;
+0x00436a70,CONFIRMED,td5_ai.c,5715,[CONFIRMED @ 0x00436A70] L5 promotion sweep audit (2026-05-18).
+0x00436e1d,CONFIRMED,td5_ai.c,5933,racer slots: ai_update_single_racer(slot) [CONFIRMED @ 0x436E1D] traffic slots: ai_update_single_traffic(slot)
+0x0043d4e0,ARCH-DIVERGENCE,td5_ai.c,5961,0x0043D4E0  UpdateWantedDamageIndicator  [ARCH-DIVERGENCE: HUD overlay - not in td5_ai.c; L5 sweep 2026-05-21]
+0x0043fb90,ARCH-DIVERGENCE,td5_ai.c,5968,0x0043FB90  ReadCompressedTrackStreamChunk  [ARCH-DIVERGENCE: inflate stream callback removed; L5 sweep 2026-05-21]
+0x0043fbc0,ARCH-DIVERGENCE,td5_asset.c,733,[ARCH-DIVERGENCE: streaming -> bulk-read; L5 sweep 2026-05-21] Ghidra-verified 0x0043FC80: orig walks central-directory entries
+,ARCH-DIVERGENCE,td5_asset.c,973,[ARCH-DIVERGENCE: streaming inflate -> td5_inflate_mem_to_mem; L5 sweep 2026-05-21]
+0x0040aef0,ARCH-DIVERGENCE,td5_asset.c,3038,0x0040AEF0  GetEnvironmentTexturePageMode  [ARCH-DIVERGENCE: D3D3 device-state query removed; L5 sweep 2026-05-21]
+0x0040bae0,ARCH-DIVERGENCE,td5_asset.c,3043,0x0040BAE0  PreloadLevelTexturePages  [ARCH-DIVERGENCE: on-demand texture streaming removed; L5 sweep 2026-05-21]
+0x00412030,ARCH-DIVERGENCE,td5_asset.c,3051,0x00412030  LoadFrontendTgaSurfaceFromArchive  [ARCH-DIVERGENCE: TGA/DDraw -> PNG/D3D11; L5 sweep 2026-05-21]
+0x00442d30,ARCH-DIVERGENCE,td5_asset.c,3062,0x00442D30  ResampleTexturePageToEntryDimensions  [ARCH-DIVERGENCE: page-resize removed; L5 sweep 2026-05-21]
+,ARCH-DIVERGENCE,td5_camera.c,336,[ARCH-DIVERGENCE: D3D11 billboard snapshot + FPU rounding; L5 sweep 2026-05-21] Math sequence is byte-equivalent to orig (12-float memcpy → 18 multipl
+,ARCH-DIVERGENCE,td5_camera.c,577,[ARCH-DIVERGENCE — DAT_*-bank globals → named C-arrays] Orig writes to fixed DAT addresses (DAT_00482ed8/edc/ee0/f18/f50/f54/
+,ARCH-DIVERGENCE,td5_camera.c,585,[ARCH-DIVERGENCE — terrain-derived pitch/roll temporarily forced to 0] Orig computes pitch/roll via AngleFromVector12 over the three terrain
+,ARCH-DIVERGENCE,td5_camera.c,593,[ARCH-DIVERGENCE — FPU rounding mode (ROUND vs +0.5f)] Same FISTP-RNE vs nearest-up rounding gap as
+,ARCH-DIVERGENCE,td5_camera.c,597,[ARCH-DIVERGENCE — split into UpdateChaseCamera + finalize_chase_pos] Port factors the final SetCameraWorldPosition call out into
+,ARCH-DIVERGENCE,td5_camera.c,1074,[ARCH-DIVERGENCE — FPU rounding mode] Orig uses ROUND() (FISTP / RNE). Port uses (int)(x + 0.5f). Per-call
+0x00401950,CONFIRMED,td5_camera.c,1126,[CONFIRMED @ 0x401950]: original calls LoadRenderRotationMatrix with actor+0x120 then ConvertFloatVec3ToShortAngles. */
+,ARCH-DIVERGENCE,td5_camera.c,1214,[ARCH-DIVERGENCE — rotation matrix indirection] Original transforms the offset vector through `g_raceRotationMatrixPtr`
+,ARCH-DIVERGENCE,td5_camera.c,1220,[ARCH-DIVERGENCE — FPU rounding mode] Original uses ROUND() (FISTP / round-to-nearest-even). Port uses
+,ARCH-DIVERGENCE,td5_camera.c,2502,[ARCH-DIVERGENCE — basis-matrix indirection] Orig reads DAT_00474bc0 (16 int constants in .rdata). Port inlines.
+0x0040a260,CONFIRMED,td5_camera.c,2589,"[CONFIRMED @ 0x0040A260] */ static void UpdateCameraTransitionHudIndicator(int view, int actor_index) {"
+0x00434040,CONFIRMED,td5_camera.c,2606,[CONFIRMED @ 0x00434040] */ uint32_t td5_compute_heading_delta(void *route_entry) {
+0x00434040,CONFIRMED,td5_camera.c,2618,slot = rs[0x35];   /* RS_SLOT_INDEX [CONFIRMED @ 0x00434040] */ actor = (char *)(uintptr_t)(uint32_t)g_actorBaseAddr +
+0x00434040,CONFIRMED,td5_camera.c,2621,actor_yaw  = *(int32_t *)(actor + 0x1F4); /* yaw accumulator [CONFIRMED @ 0x00434040] */
+0x00434040,CONFIRMED,td5_camera.c,2622,span_norm  = *(int16_t *)(actor + 0x82);  /* span_normalized [CONFIRMED @ 0x00434040] */
+0x00434040,CONFIRMED,td5_camera.c,2623,route_table = (const uint8_t *)(intptr_t)rs[0x00]; /* RS_ROUTE_TABLE_PTR [CONFIRMED @ 0x00434040] */
+0x00434040,CONFIRMED,td5_camera.c,2625,rb   = route_table[(uint16_t)span_norm * 3u + 1u]; /* byte lookup [CONFIRMED @ 0x00434040] */
+0x00434040,CONFIRMED,td5_camera.c,2629,return (uint32_t)(0u - t);  /* 12-bit negation; formula: -(...) [CONFIRMED @ 0x00434040] */
+0x0042dbd0,ARCH-DIVERGENCE,td5_camera.c,2654,[ARCH-DIVERGENCE: matrix*vec converter with short clamp; L5 sweep 2026-05-21] Orig: 3x3 matrix * vec3 -> three __ftol -> (int)(short)... -> int[3].
+,ARCH-DIVERGENCE,td5_camera.c,2664,"[ARCH-DIVERGENCE: shared helper, no port surface; L5 sweep 2026-05-21] Same shape as 0x0042DB40 (matrix * vec -> __ftol -> short-clamp to"
+0x00409bf0,ARCH-DIVERGENCE,td5_camera.c,2671,"[ARCH-DIVERGENCE: recovery-mode Euler decomp not ported; L5 sweep 2026-05-21] Orig extracts (yaw, pitch, roll) from rotation matrix via"
+,ARCH-DIVERGENCE,td5_fmv.c,20,all are [ARCH-DIVERGENCE-FMV: EA TGQ stack replaced by IMFSourceReader]:
+0x0042ca00,ARCH-DIVERGENCE,td5_fmv.c,22,0x0042CA00  DisplayLoadingScreenImage   [ARCH-DIVERGENCE-FMV: DDraw blit replaced by td5_game.c:display_loading_screen_tga + td5_fmv display path; L5 
+0x0043c3c0,ARCH-DIVERGENCE,td5_fmv.c,32,0x0043C3C0  RequestIntroMovieShutdown   [ARCH-DIVERGENCE-FMV: EA TGQ shutdown API replaced; L5 sweep 2026-05-21]
+0x00452e20,ARCH-DIVERGENCE,td5_fmv.c,36,0x00452E20  OpenAndStartMediaPlayback   [ARCH-DIVERGENCE-FMV: EA TGQ stream-open replaced; L5 sweep 2026-05-21]
+0x00452e60,ARCH-DIVERGENCE,td5_fmv.c,39,0x00452E60  SetStreamVolume             [ARCH-DIVERGENCE-FMV: EA TGQ volume setter replaced; L5 sweep 2026-05-21]
+0x00452e80,ARCH-DIVERGENCE,td5_fmv.c,45,0x00452E80  IsStreamPlaying             [ARCH-DIVERGENCE-FMV: EA TGQ status query replaced; L5 sweep 2026-05-21]
+0x00452ec0,ARCH-DIVERGENCE,td5_fmv.c,49,0x00452EC0  StopStreamPlayback          [ARCH-DIVERGENCE-FMV: EA TGQ stop API replaced; L5 sweep 2026-05-21]
+,ARCH-DIVERGENCE,td5_fmv.c,956,[ARCH-DIVERGENCE: EA TGQ codec collapse] Phase 2 manifest (2026-05-21)
+,ARCH-DIVERGENCE,td5_fmv.c,963,"Per build_confidence_map.py:104-126 docstring, [ARCH-DIVERGENCE] is the audited, documented deviation marker - functionally"
+,ARCH-DIVERGENCE,td5_fmv.c,968,carries an [ARCH-DIVERGENCE: FMV] marker so the citation- proximity check in build_confidence_map.py:227-233 promotes
+0x00451990,ARCH-DIVERGENCE,td5_fmv.c,972,0x00451990  OpenMultimediaStream            [ARCH-DIVERGENCE: FMV] 0x00451A10  OpenWavStream                   [ARCH-DIVERGENCE: FMV]
+0x00451a10,ARCH-DIVERGENCE,td5_fmv.c,973,0x00451A10  OpenWavStream                   [ARCH-DIVERGENCE: FMV] 0x00451BB0  SkipRIFFHeaders                 [ARCH-DIVERGENCE: FMV]
+0x00451bb0,ARCH-DIVERGENCE,td5_fmv.c,974,0x00451BB0  SkipRIFFHeaders                 [ARCH-DIVERGENCE: FMV] 0x00451D70  ReadAndDispatchChunk            [ARCH-DIVERGENCE: FMV]
+0x00451d70,ARCH-DIVERGENCE,td5_fmv.c,975,0x00451D70  ReadAndDispatchChunk            [ARCH-DIVERGENCE: FMV] 0x004521A0  FillVideoRingBuffer             [ARCH-DIVERGENCE: FMV]
+0x004521a0,ARCH-DIVERGENCE,td5_fmv.c,976,0x004521A0  FillVideoRingBuffer             [ARCH-DIVERGENCE: FMV] 0x00452280  ParseSimpleAudioHeader          [ARCH-DIVERGENCE: FMV]
+0x00452280,ARCH-DIVERGENCE,td5_fmv.c,977,0x00452280  ParseSimpleAudioHeader          [ARCH-DIVERGENCE: FMV] 0x00452300  DecodeAudioChunk                [ARCH-DIVERGENCE: FMV]
+0x00452300,ARCH-DIVERGENCE,td5_fmv.c,978,0x00452300  DecodeAudioChunk                [ARCH-DIVERGENCE: FMV] 0x004526A0  ParseExtendedAudioHeader        [ARCH-DIVERGENCE: FMV]
+0x004526a0,ARCH-DIVERGENCE,td5_fmv.c,979,0x004526A0  ParseExtendedAudioHeader        [ARCH-DIVERGENCE: FMV] 0x004527C0  ReadTaggedParam                 [ARCH-DIVERGENCE: FMV]
+0x004527c0,ARCH-DIVERGENCE,td5_fmv.c,980,0x004527C0  ReadTaggedParam                 [ARCH-DIVERGENCE: FMV] 0x00452830  CloseMultimediaStream           [ARCH-DIVERGENCE: FMV]
+0x00452830,ARCH-DIVERGENCE,td5_fmv.c,981,0x00452830  CloseMultimediaStream           [ARCH-DIVERGENCE: FMV] 0x00452890  ReleaseStreamResources          [ARCH-DIVERGENCE: FMV]
+0x00452890,ARCH-DIVERGENCE,td5_fmv.c,982,0x00452890  ReleaseStreamResources          [ARCH-DIVERGENCE: FMV] 0x00452910  LaunchStreamPlaybackThread      [ARCH-DIVERGENCE: FMV]
+0x00452910,ARCH-DIVERGENCE,td5_fmv.c,983,0x00452910  LaunchStreamPlaybackThread      [ARCH-DIVERGENCE: FMV] 0x00452990  StreamThreadEntryPoint          [ARCH-DIVERGENCE: FMV]
+0x00452990,ARCH-DIVERGENCE,td5_fmv.c,984,0x00452990  StreamThreadEntryPoint          [ARCH-DIVERGENCE: FMV] 0x004529D0  RunStreamingPlaybackLoop        [ARCH-DIVERGENCE: FMV]
+0x004529d0,ARCH-DIVERGENCE,td5_fmv.c,985,0x004529D0  RunStreamingPlaybackLoop        [ARCH-DIVERGENCE: FMV] 0x00452CC0  ProcessStreamChunk              [ARCH-DIVERGENCE: FMV]
+0x00452cc0,ARCH-DIVERGENCE,td5_fmv.c,986,0x00452CC0  ProcessStreamChunk              [ARCH-DIVERGENCE: FMV] 0x00452DC0  SeekToLoopPoint                 [ARCH-DIVERGENCE: FMV]
+0x00452dc0,ARCH-DIVERGENCE,td5_fmv.c,987,0x00452DC0  SeekToLoopPoint                 [ARCH-DIVERGENCE: FMV] 0x00452E10  ReturnZero                      [ARCH-DIVERGENCE: FMV]
+0x00452e10,ARCH-DIVERGENCE,td5_fmv.c,988,0x00452E10  ReturnZero                      [ARCH-DIVERGENCE: FMV] 0x00452F20  PresentDecodedFrame             [ARCH-DIVERGENCE: FMV]
+0x00452f20,ARCH-DIVERGENCE,td5_fmv.c,989,0x00452F20  PresentDecodedFrame             [ARCH-DIVERGENCE: FMV] 0x00453380  CreateVideoOutputSurface        [ARCH-DIVERGENCE: FMV]
+0x00453380,ARCH-DIVERGENCE,td5_fmv.c,990,0x00453380  CreateVideoOutputSurface        [ARCH-DIVERGENCE: FMV] 0x00453470  ResetIDCTState                  [ARCH-DIVERGENCE: FMV]
+0x00453470,ARCH-DIVERGENCE,td5_fmv.c,991,0x00453470  ResetIDCTState                  [ARCH-DIVERGENCE: FMV] 0x004534A0  SwapDoubleBuffer                [ARCH-DIVERGENCE: FMV]
+0x004534a0,ARCH-DIVERGENCE,td5_fmv.c,992,0x004534A0  SwapDoubleBuffer                [ARCH-DIVERGENCE: FMV] 0x004534E0  BuildColorConversionLUTs        [ARCH-DIVERGENCE: FMV]
+0x004534e0,ARCH-DIVERGENCE,td5_fmv.c,993,0x004534E0  BuildColorConversionLUTs        [ARCH-DIVERGENCE: FMV] 0x00453520  BuildYCbCrToRGB16LUT            [ARCH-DIVERGENCE: FMV]
+0x00453520,ARCH-DIVERGENCE,td5_fmv.c,994,0x00453520  BuildYCbCrToRGB16LUT            [ARCH-DIVERGENCE: FMV] 0x00453680  PackPixelFromRGB                [ARCH-DIVERGENCE: FMV]
+0x00453680,ARCH-DIVERGENCE,td5_fmv.c,995,0x00453680  PackPixelFromRGB                [ARCH-DIVERGENCE: FMV] 0x004538B0  BuildYCbCrColorTables           [ARCH-DIVERGENCE: FMV]
+0x004538b0,ARCH-DIVERGENCE,td5_fmv.c,996,0x004538B0  BuildYCbCrColorTables           [ARCH-DIVERGENCE: FMV] 0x004539A0  PackYCbCrTableEntry             [ARCH-DIVERGENCE: FMV]
+0x004539a0,ARCH-DIVERGENCE,td5_fmv.c,997,0x004539A0  PackYCbCrTableEntry             [ARCH-DIVERGENCE: FMV] 0x004539E0  InitializeVideoDecoder          [ARCH-DIVERGENCE: FMV]
+0x004539e0,ARCH-DIVERGENCE,td5_fmv.c,998,0x004539E0  InitializeVideoDecoder          [ARCH-DIVERGENCE: FMV] 0x00453B20  ExtractPixelFormatInfo          [ARCH-DIVERGENCE: FMV]
+0x00453b20,ARCH-DIVERGENCE,td5_fmv.c,999,0x00453B20  ExtractPixelFormatInfo          [ARCH-DIVERGENCE: FMV] 0x00453BE0  CountSetBits                    [ARCH-DIVERGENCE: FMV]
+0x00453be0,ARCH-DIVERGENCE,td5_fmv.c,1000,0x00453BE0  CountSetBits                    [ARCH-DIVERGENCE: FMV] 0x00453C00  CountTrailingZeroBits           [ARCH-DIVERGENCE: FMV]
+0x00453c00,ARCH-DIVERGENCE,td5_fmv.c,1001,0x00453C00  CountTrailingZeroBits           [ARCH-DIVERGENCE: FMV] 0x00453C10  QuerySurfaceDimensions          [ARCH-DIVERGENCE: FMV]
+0x00453c10,ARCH-DIVERGENCE,td5_fmv.c,1002,0x00453C10  QuerySurfaceDimensions          [ARCH-DIVERGENCE: FMV] 0x00453C60  BuildYCbCrToPackedPixelLUT      [ARCH-DIVERGENCE: FMV]
+0x00453c60,ARCH-DIVERGENCE,td5_fmv.c,1003,0x00453C60  BuildYCbCrToPackedPixelLUT      [ARCH-DIVERGENCE: FMV] 0x00453F70  QuerySurfacePixelFormat         [ARCH-DIVERGENCE: FMV]
+0x00453f70,ARCH-DIVERGENCE,td5_fmv.c,1004,0x00453F70  QuerySurfacePixelFormat         [ARCH-DIVERGENCE: FMV] 0x00454020  ReleaseVideoResources           [ARCH-DIVERGENCE: FMV]
+0x00454020,ARCH-DIVERGENCE,td5_fmv.c,1005,0x00454020  ReleaseVideoResources           [ARCH-DIVERGENCE: FMV] 0x00454170  CreateDDrawSurface32            [ARCH-DIVERGENCE: FMV]
+0x00454170,ARCH-DIVERGENCE,td5_fmv.c,1006,0x00454170  CreateDDrawSurface32            [ARCH-DIVERGENCE: FMV] 0x004542C0  DecodeVideoFrame                [ARCH-DIVERGENCE: FMV]
+0x004542c0,ARCH-DIVERGENCE,td5_fmv.c,1007,0x004542C0  DecodeVideoFrame                [ARCH-DIVERGENCE: FMV] 0x00454690  BuildDequantizationTable        [ARCH-DIVERGENCE: FMV]
+0x00454690,ARCH-DIVERGENCE,td5_fmv.c,1008,0x00454690  BuildDequantizationTable        [ARCH-DIVERGENCE: FMV] 0x00454750  BuildFullQuantTable             [ARCH-DIVERGENCE: FMV]
+0x00454750,ARCH-DIVERGENCE,td5_fmv.c,1009,0x00454750  BuildFullQuantTable             [ARCH-DIVERGENCE: FMV] 0x00454830  ComputeBlitGeometry             [ARCH-DIVERGENCE: FMV]
+0x00454830,ARCH-DIVERGENCE,td5_fmv.c,1010,0x00454830  ComputeBlitGeometry             [ARCH-DIVERGENCE: FMV] 0x004548C0  DecodeCompressedPixelBlock16    [ARCH-DIVERGENCE: FMV]
+0x004548c0,ARCH-DIVERGENCE,td5_fmv.c,1011,0x004548C0  DecodeCompressedPixelBlock16    [ARCH-DIVERGENCE: FMV] 0x004549D0  WriteBlock16_3to6               [ARCH-DIVERGENCE: FMV]
+0x004549d0,ARCH-DIVERGENCE,td5_fmv.c,1012,0x004549D0  WriteBlock16_3to6               [ARCH-DIVERGENCE: FMV] 0x00454BD0  DecodeCompressedPixelBlock32    [ARCH-DIVERGENCE: FMV]
+0x00454bd0,ARCH-DIVERGENCE,td5_fmv.c,1013,0x00454BD0  DecodeCompressedPixelBlock32    [ARCH-DIVERGENCE: FMV] 0x00454CE0  WriteBlock32_3to6               [ARCH-DIVERGENCE: FMV]
+0x00454ce0,ARCH-DIVERGENCE,td5_fmv.c,1014,0x00454CE0  WriteBlock32_3to6               [ARCH-DIVERGENCE: FMV] 0x00454E90  DecodeVideoFrameBlocks8x8       [ARCH-DIVERGENCE: FMV]
+0x00454e90,ARCH-DIVERGENCE,td5_fmv.c,1015,0x00454E90  DecodeVideoFrameBlocks8x8       [ARCH-DIVERGENCE: FMV] 0x00454F30  DecodeVideoFrameBlocks16x16     [ARCH-DIVERGENCE: FMV]
+0x00454f30,ARCH-DIVERGENCE,td5_fmv.c,1016,0x00454F30  DecodeVideoFrameBlocks16x16     [ARCH-DIVERGENCE: FMV] 0x00454FD0  DecodeVideoFrameBlocksOverlay   [ARCH-DIVERGENCE: FMV]
+0x00454fd0,ARCH-DIVERGENCE,td5_fmv.c,1017,0x00454FD0  DecodeVideoFrameBlocksOverlay   [ARCH-DIVERGENCE: FMV] 0x00455070  ParseVideoFrameHeader           [ARCH-DIVERGENCE: FMV]
+0x00455070,ARCH-DIVERGENCE,td5_fmv.c,1018,0x00455070  ParseVideoFrameHeader           [ARCH-DIVERGENCE: FMV] 0x004552B0  CreateVideoSurfaces             [ARCH-DIVERGENCE: FMV]
+0x004552b0,ARCH-DIVERGENCE,td5_fmv.c,1019,0x004552B0  CreateVideoSurfaces             [ARCH-DIVERGENCE: FMV] 0x00455580  CreateDDrawOverlaySurface       [ARCH-DIVERGENCE: FMV]
+0x00455580,ARCH-DIVERGENCE,td5_fmv.c,1020,0x00455580  CreateDDrawOverlaySurface       [ARCH-DIVERGENCE: FMV] 0x00455770  CreateDDrawSurface16            [ARCH-DIVERGENCE: FMV]
+0x00455770,ARCH-DIVERGENCE,td5_fmv.c,1021,0x00455770  CreateDDrawSurface16            [ARCH-DIVERGENCE: FMV] 0x00455870  RestoreLostSurfaces             [ARCH-DIVERGENCE: FMV]
+0x00455870,ARCH-DIVERGENCE,td5_fmv.c,1022,0x00455870  RestoreLostSurfaces             [ARCH-DIVERGENCE: FMV] 0x00455950  DecodeEAIMA_Mono                [ARCH-DIVERGENCE: FMV]
+0x00455950,ARCH-DIVERGENCE,td5_fmv.c,1023,0x00455950  DecodeEAIMA_Mono                [ARCH-DIVERGENCE: FMV] 0x00455AD0  DecodeEAIMA_Stereo              [ARCH-DIVERGENCE: FMV]
+0x00455ad0,ARCH-DIVERGENCE,td5_fmv.c,1024,0x00455AD0  DecodeEAIMA_Stereo              [ARCH-DIVERGENCE: FMV] 0x00455D60  AudioDecoderThreadFunc          [ARCH-DIVERGENCE: FMV]
+0x00455d60,ARCH-DIVERGENCE,td5_fmv.c,1025,0x00455D60  AudioDecoderThreadFunc          [ARCH-DIVERGENCE: FMV] 0x00455DE0  WriteAudioToDirectSound         [ARCH-DIVERGENCE: FMV]
+0x00455de0,ARCH-DIVERGENCE,td5_fmv.c,1026,0x00455DE0  WriteAudioToDirectSound         [ARCH-DIVERGENCE: FMV] 0x00455FF0  GetAudioPlayPosition            [ARCH-DIVERGENCE: FMV]
+0x00455ff0,ARCH-DIVERGENCE,td5_fmv.c,1027,0x00455FF0  GetAudioPlayPosition            [ARCH-DIVERGENCE: FMV] 0x00456080  StartAudioDecoderThread         [ARCH-DIVERGENCE: FMV]
+0x00456080,ARCH-DIVERGENCE,td5_fmv.c,1028,0x00456080  StartAudioDecoderThread         [ARCH-DIVERGENCE: FMV] 0x004560C0  StopAudioDecoderThread          [ARCH-DIVERGENCE: FMV]
+0x004560c0,ARCH-DIVERGENCE,td5_fmv.c,1029,0x004560C0  StopAudioDecoderThread          [ARCH-DIVERGENCE: FMV] 0x00456110  InitStreamDirectSound           [ARCH-DIVERGENCE: FMV]
+0x00456110,ARCH-DIVERGENCE,td5_fmv.c,1030,0x00456110  InitStreamDirectSound           [ARCH-DIVERGENCE: FMV] 0x004561D0  CreateDirectSoundDevice         [ARCH-DIVERGENCE: FMV]
+0x004561d0,ARCH-DIVERGENCE,td5_fmv.c,1031,0x004561D0  CreateDirectSoundDevice         [ARCH-DIVERGENCE: FMV] 0x00456210  DDrawGetSurfaceCaps             [ARCH-DIVERGENCE: FMV]
+0x00456210,ARCH-DIVERGENCE,td5_fmv.c,1032,0x00456210  DDrawGetSurfaceCaps             [ARCH-DIVERGENCE: FMV] 0x00456250  ReleaseDirectSoundDevice        [ARCH-DIVERGENCE: FMV]
+0x00456250,ARCH-DIVERGENCE,td5_fmv.c,1033,0x00456250  ReleaseDirectSoundDevice        [ARCH-DIVERGENCE: FMV] 0x004562A0  DDrawReleaseSurface             [ARCH-DIVERGENCE: FMV]
+0x004562a0,ARCH-DIVERGENCE,td5_fmv.c,1034,0x004562A0  DDrawReleaseSurface             [ARCH-DIVERGENCE: FMV] 0x004562C0  InitAudioPlayback               [ARCH-DIVERGENCE: FMV]
+0x004562c0,ARCH-DIVERGENCE,td5_fmv.c,1035,0x004562C0  InitAudioPlayback               [ARCH-DIVERGENCE: FMV] 0x00456430  ReleaseDSStreamBuffer           [ARCH-DIVERGENCE: FMV]
+0x00456430,ARCH-DIVERGENCE,td5_fmv.c,1036,0x00456430  ReleaseDSStreamBuffer           [ARCH-DIVERGENCE: FMV] 0x00456450  DecodeADPCMBlock                [ARCH-DIVERGENCE: FMV]
+0x00456450,ARCH-DIVERGENCE,td5_fmv.c,1037,0x00456450  DecodeADPCMBlock                [ARCH-DIVERGENCE: FMV] 0x004564F3  DecodeEAADPCM                   [ARCH-DIVERGENCE: FMV]
+0x004564f3,ARCH-DIVERGENCE,td5_fmv.c,1038,0x004564F3  DecodeEAADPCM                   [ARCH-DIVERGENCE: FMV] 0x00456670  IDCT_DecodeCoefficients         [ARCH-DIVERGENCE: FMV]
+0x00456670,ARCH-DIVERGENCE,td5_fmv.c,1039,0x00456670  IDCT_DecodeCoefficients         [ARCH-DIVERGENCE: FMV] 0x0045681D  IDCT_Transform8x8_Caller        [ARCH-DIVERGENCE: FMV]
+0x0045681d,ARCH-DIVERGENCE,td5_fmv.c,1040,0x0045681D  IDCT_Transform8x8_Caller        [ARCH-DIVERGENCE: FMV] 0x00456926  IDCT_Transform8x8_Block         [ARCH-DIVERGENCE: FMV]
+0x00456926,ARCH-DIVERGENCE,td5_fmv.c,1041,0x00456926  IDCT_Transform8x8_Block         [ARCH-DIVERGENCE: FMV] 0x00456B31  IDCT_1D_8pt_Float               [ARCH-DIVERGENCE: FMV]
+0x00456b31,ARCH-DIVERGENCE,td5_fmv.c,1042,0x00456B31  IDCT_1D_8pt_Float               [ARCH-DIVERGENCE: FMV] 0x00456C94  IDCT_1D_8pt_Float_B             [ARCH-DIVERGENCE: FMV]
+0x00456c94,ARCH-DIVERGENCE,td5_fmv.c,1043,0x00456C94  IDCT_1D_8pt_Float_B             [ARCH-DIVERGENCE: FMV] 0x00456D9E  IDCT_FullBlock8x8               [ARCH-DIVERGENCE: FMV]
+0x00456d9e,ARCH-DIVERGENCE,td5_fmv.c,1044,0x00456D9E  IDCT_FullBlock8x8               [ARCH-DIVERGENCE: FMV] 0x00456F40  LookupQuantTable                [ARCH-DIVERGENCE: FMV]
+0x00456f40,ARCH-DIVERGENCE,td5_fmv.c,1045,0x00456F40  LookupQuantTable                [ARCH-DIVERGENCE: FMV] 0x00456F70  IDCTDecodeDCAndAC               [ARCH-DIVERGENCE: FMV]
+0x00456f70,ARCH-DIVERGENCE,td5_fmv.c,1046,0x00456F70  IDCTDecodeDCAndAC               [ARCH-DIVERGENCE: FMV] 0x004573F9  YCbCrToPackedPixel16            [ARCH-DIVERGENCE: FMV]
+0x004573f9,ARCH-DIVERGENCE,td5_fmv.c,1047,0x004573F9  YCbCrToPackedPixel16            [ARCH-DIVERGENCE: FMV] 0x00457684  YCbCrToRGB_Row_16bit            [ARCH-DIVERGENCE: FMV]
+0x00457684,ARCH-DIVERGENCE,td5_fmv.c,1048,0x00457684  YCbCrToRGB_Row_16bit            [ARCH-DIVERGENCE: FMV] 0x0045791F  IDCTDecode16x16Block            [ARCH-DIVERGENCE: FMV]
+0x0045791f,ARCH-DIVERGENCE,td5_fmv.c,1049,0x0045791F  IDCTDecode16x16Block            [ARCH-DIVERGENCE: FMV] 0x004580FE  DecodeJPEGFrame                 [ARCH-DIVERGENCE: FMV]
+0x004580fe,ARCH-DIVERGENCE,td5_fmv.c,1050,0x004580FE  DecodeJPEGFrame                 [ARCH-DIVERGENCE: FMV] 0x004588E0  DecodeHuffmanBlock              [ARCH-DIVERGENCE: FMV]
+0x004588e0,ARCH-DIVERGENCE,td5_fmv.c,1051,0x004588E0  DecodeHuffmanBlock              [ARCH-DIVERGENCE: FMV] 0x00458BC9  DecodeJPEGMCU                   [ARCH-DIVERGENCE: FMV]
+0x00458bc9,ARCH-DIVERGENCE,td5_fmv.c,1052,0x00458BC9  DecodeJPEGMCU                   [ARCH-DIVERGENCE: FMV] 0x004590BF  DecodeMCU_YCbCr422_16bpp        [ARCH-DIVERGENCE: FMV]
+0x004590bf,ARCH-DIVERGENCE,td5_fmv.c,1053,0x004590BF  DecodeMCU_YCbCr422_16bpp        [ARCH-DIVERGENCE: FMV] 0x004592AD  DecodeMCU_YCbCr420_16bpp        [ARCH-DIVERGENCE: FMV]
+0x004592ad,ARCH-DIVERGENCE,td5_fmv.c,1054,0x004592AD  DecodeMCU_YCbCr420_16bpp        [ARCH-DIVERGENCE: FMV] 0x0045949B  DecodeMCU_YCbCr444_16bpp        [ARCH-DIVERGENCE: FMV]
+0x0045949b,ARCH-DIVERGENCE,td5_fmv.c,1055,0x0045949B  DecodeMCU_YCbCr444_16bpp        [ARCH-DIVERGENCE: FMV] 0x00459689  DecodeMCU_YCbCr422_16bpp_Fast   [ARCH-DIVERGENCE: FMV]
+0x00459689,ARCH-DIVERGENCE,td5_fmv.c,1056,0x00459689  DecodeMCU_YCbCr422_16bpp_Fast   [ARCH-DIVERGENCE: FMV] 0x00459877  DecodeMCU_YCbCr422_8bpp         [ARCH-DIVERGENCE: FMV]
+0x00459877,ARCH-DIVERGENCE,td5_fmv.c,1057,0x00459877  DecodeMCU_YCbCr422_8bpp         [ARCH-DIVERGENCE: FMV] 0x004599D0  YCbCrToRGB_Row_16bit_444        [ARCH-DIVERGENCE: FMV]
+0x004599d0,ARCH-DIVERGENCE,td5_fmv.c,1058,0x004599D0  YCbCrToRGB_Row_16bit_444        [ARCH-DIVERGENCE: FMV] 0x00459EA0  YCbCrToRGB_Row_16bit_420        [ARCH-DIVERGENCE: FMV]
+0x00459ea0,ARCH-DIVERGENCE,td5_fmv.c,1059,0x00459EA0  YCbCrToRGB_Row_16bit_420        [ARCH-DIVERGENCE: FMV] 0x0045A3A0  YCbCrToRGB_Row_8bit             [ARCH-DIVERGENCE: FMV]
+0x0045a3a0,ARCH-DIVERGENCE,td5_fmv.c,1060,0x0045A3A0  YCbCrToRGB_Row_8bit             [ARCH-DIVERGENCE: FMV] 0x0045A588  CopyPixelBuffer32               [ARCH-DIVERGENCE: FMV]
+0x0045a588,ARCH-DIVERGENCE,td5_fmv.c,1061,0x0045A588  CopyPixelBuffer32               [ARCH-DIVERGENCE: FMV] 0x0045A5CC  YCbCrToRGB_Row_16bit_422        [ARCH-DIVERGENCE: FMV]
+0x0045a5cc,ARCH-DIVERGENCE,td5_fmv.c,1062,0x0045A5CC  YCbCrToRGB_Row_16bit_422        [ARCH-DIVERGENCE: FMV] 0x0045A84C  IDCT8ColumnButterfly            [ARCH-DIVERGENCE: FMV]
+0x0045a84c,ARCH-DIVERGENCE,td5_fmv.c,1063,0x0045A84C  IDCT8ColumnButterfly            [ARCH-DIVERGENCE: FMV] 0x0045A98B  IDCT8RowButterfly               [ARCH-DIVERGENCE: FMV]
+0x0045a98b,ARCH-DIVERGENCE,td5_fmv.c,1064,0x0045A98B  IDCT8RowButterfly               [ARCH-DIVERGENCE: FMV] 0x0045AA75  IDCT_1D_8pt_Float_C             [ARCH-DIVERGENCE: FMV]
+0x0045aa75,ARCH-DIVERGENCE,td5_fmv.c,1065,0x0045AA75  IDCT_1D_8pt_Float_C             [ARCH-DIVERGENCE: FMV] 0x0045AB80  DequantizeIDCT_Block            [ARCH-DIVERGENCE: FMV]
+0x0045ab80,ARCH-DIVERGENCE,td5_fmv.c,1066,0x0045AB80  DequantizeIDCT_Block            [ARCH-DIVERGENCE: FMV] 0x0045AC60  DequantizeIDCT_Block_Half       [ARCH-DIVERGENCE: FMV]
+0x0045ac60,ARCH-DIVERGENCE,td5_fmv.c,1067,0x0045AC60  DequantizeIDCT_Block_Half       [ARCH-DIVERGENCE: FMV] 0x0045ACD0  InitMotionVectorDecoder         [ARCH-DIVERGENCE: FMV]
+0x0045acd0,ARCH-DIVERGENCE,td5_fmv.c,1068,0x0045ACD0  InitMotionVectorDecoder         [ARCH-DIVERGENCE: FMV] 0x0045AD90  BuildHuffmanDecodeTables        [ARCH-DIVERGENCE: FMV]
+0x0045ad90,ARCH-DIVERGENCE,td5_fmv.c,1069,0x0045AD90  BuildHuffmanDecodeTables        [ARCH-DIVERGENCE: FMV] 0x0045AF50  ParseJPEGHeaders                [ARCH-DIVERGENCE: FMV]
+0x0045af50,ARCH-DIVERGENCE,td5_fmv.c,1070,0x0045AF50  ParseJPEGHeaders                [ARCH-DIVERGENCE: FMV] 0x0045B1C0  BitstreamRefillBits             [ARCH-DIVERGENCE: FMV]
+0x0045b1c0,ARCH-DIVERGENCE,td5_fmv.c,1071,0x0045B1C0  BitstreamRefillBits             [ARCH-DIVERGENCE: FMV] 0x0045B220  BitstreamReadHuffmanCode        [ARCH-DIVERGENCE: FMV]
+0x0045b220,ARCH-DIVERGENCE,td5_fmv.c,1072,0x0045B220  BitstreamReadHuffmanCode        [ARCH-DIVERGENCE: FMV] 0x0045B250  FillBlock_DC                    [ARCH-DIVERGENCE: FMV]
+0x0045b250,ARCH-DIVERGENCE,td5_fmv.c,1073,0x0045B250  FillBlock_DC                    [ARCH-DIVERGENCE: FMV] 0x0045B2B0  DecodeMotionCompensatedFrame    [ARCH-DIVERGENCE: FMV]
+0x0045b2b0,ARCH-DIVERGENCE,td5_fmv.c,1074,0x0045B2B0  DecodeMotionCompensatedFrame    [ARCH-DIVERGENCE: FMV] 0x0045B420  DecodeType2DeltaPalette         [ARCH-DIVERGENCE: FMV]
+0x0045b420,ARCH-DIVERGENCE,td5_fmv.c,1075,0x0045B420  DecodeType2DeltaPalette         [ARCH-DIVERGENCE: FMV] 0x0045B750  BuildBitplaneDeinterleaveTable  [ARCH-DIVERGENCE: FMV]
+0x0045b750,ARCH-DIVERGENCE,td5_fmv.c,1076,0x0045B750  BuildBitplaneDeinterleaveTable  [ARCH-DIVERGENCE: FMV] 0x0045B7D0  DecodeVQ_Block                  [ARCH-DIVERGENCE: FMV]
+0x0045b7d0,ARCH-DIVERGENCE,td5_fmv.c,1077,0x0045B7D0  DecodeVQ_Block                  [ARCH-DIVERGENCE: FMV] 0x0045B8D0  DecodeType1PaletteFrame         [ARCH-DIVERGENCE: FMV]
+0x0045b8d0,ARCH-DIVERGENCE,td5_fmv.c,1078,0x0045B8D0  DecodeType1PaletteFrame         [ARCH-DIVERGENCE: FMV] 0x0045BA30  ConvertPaletteToPixelFormat     [ARCH-DIVERGENCE: FMV]
+0x0045ba30,ARCH-DIVERGENCE,td5_fmv.c,1079,0x0045BA30  ConvertPaletteToPixelFormat     [ARCH-DIVERGENCE: FMV] 0x0045BAE0  BlitDecodedToSurface            [ARCH-DIVERGENCE: FMV]
+0x0045bae0,ARCH-DIVERGENCE,td5_fmv.c,1080,0x0045BAE0  BlitDecodedToSurface            [ARCH-DIVERGENCE: FMV] 0x0045BD00  SetVGAPalette                   [ARCH-DIVERGENCE: FMV]
+0x0045bd00,ARCH-DIVERGENCE,td5_fmv.c,1081,0x0045BD00  SetVGAPalette                   [ARCH-DIVERGENCE: FMV] 0x0045BD3C  DecompressLZData                [ARCH-DIVERGENCE: FMV]
+0x0045bd3c,ARCH-DIVERGENCE,td5_fmv.c,1082,0x0045BD3C  DecompressLZData                [ARCH-DIVERGENCE: FMV] 0x0045BE5F  UnpackBitplaneToPixels          [ARCH-DIVERGENCE: FMV]
+0x0045be5f,ARCH-DIVERGENCE,td5_fmv.c,1083,0x0045BE5F  UnpackBitplaneToPixels          [ARCH-DIVERGENCE: FMV] 0x0045BF08  DecodeBitmapRLERun              [ARCH-DIVERGENCE: FMV]
+0x0045bf08,ARCH-DIVERGENCE,td5_fmv.c,1084,0x0045BF08  DecodeBitmapRLERun              [ARCH-DIVERGENCE: FMV]
+0x00423a80,CONFIRMED,td5_frontend.c,140,"[CONFIRMED @ 0x423A80]: original DAT_00494bb0 = car count, DAT_00494bb4 = track count."
+0x00465f74,CONFIRMED,td5_frontend.c,173,"Format: track-label  = ""%d. %s"" (track# 1-based + band name)   [CONFIRMED @ 0x465f74]"
+0x00418571,CONFIRMED,td5_frontend.c,174,now-playing panel rows at y=0/0x28/0x50                 [CONFIRMED @ 0x418571]
+0x004667a8,CONFIRMED,td5_frontend.c,1063,"[CONFIRMED @ 0x4667A8] English archive entry = ""config.eng""; token 0 = display name."
+,ARCH-DIVERGENCE,td5_frontend.c,1340,[ARCH-DIVERGENCE: cursor flag polarity flipped + mouse-moved flag dropped; L5 sweep 2026-05-21]
+0x00424110,CONFIRMED,td5_frontend.c,1372,"[CONFIRMED @ 0x00424110] DrawFrontendFontStringPrimary: 12×12 glyph atlas, 21 columns. col = (c-0x20) % 21 * 12, row = (c-0x20) / 21 * 12. Advance"
+0x004241e0,CONFIRMED,td5_frontend.c,1375,"[CONFIRMED @ 0x004241E0] Secondary variant: same atlas, renders to g_secondaryWorkSurface at y+8. Callers include ScreenGameOptions (0x41F990),"
+,ARCH-DIVERGENCE,td5_frontend.c,1468,[ARCH-DIVERGENCE: DDraw Copy16BitSurfaceRect + vtbl[0x1c] Blt -> D3D11 Present; L5 sweep 2026-05-21]
+0x0040daf0,CONFIRMED,td5_frontend.c,1648,Two-player setup [CONFIRMED @ 0x0040daf0]: Original gate: g_twoPlayerModeEnabled != 0 || g_selectedGameType == 7.
+0x0040dac0,CONFIRMED,td5_frontend.c,1714,"=== Path 1: Quick Race (gameType == 2, Era) [CONFIRMED @ 0x0040dac0] === Original loop body consumes THREE rand() calls per iteration:"
+0x0040dac0,CONFIRMED,td5_frontend.c,1742,"=== Path 2: Cup/Masters (gameType == 5) [CONFIRMED @ 0x0040dac0] === Scans s_masters_roster_flags[] for state==1 entries, claims them (sets to 2),"
+0x0040dac0,CONFIRMED,td5_frontend.c,1764,"=== Path 3: Default (single race, all other types) [CONFIRMED @ 0x0040dac0] === Faithful port of the original's loop structure. Each iteration of"
+,ARCH-DIVERGENCE,td5_frontend.c,2018,[ARCH-DIVERGENCE: DXDraw mode-table -> DXGI enum + label format; L5 sweep 2026-05-21]
+0x00423acd,CONFIRMED,td5_frontend.c,2580,[CONFIRMED @ 0x423ACD]: original calls _unlink(CupData.td5) directly in ScreenCupWonDialog case 0. Port delegates to td5_plat_file_delete which
+,ARCH-DIVERGENCE,td5_frontend.c,3082,level after audit: L5 + [ARCH-DIVERGENCE] for the DDraw flip / surface-lost handshake.
+0x00417d50,CONFIRMED,td5_frontend.c,3126,"Original: ESC in credits always exits the game [CONFIRMED @ 0x417D50] */ TD5_LOG_I(LOG_TAG, ""ExtrasGallery: ESC pressed, quitting game"");"
+0x0041ff5b,CONFIRMED,td5_frontend.c,3904,float bar_x  = 394.0f * sx; /* panel x = canvasW/2+0x4A [CONFIRMED @ 0x41FF5B] */
+0x004210a4,CONFIRMED,td5_frontend.c,3999,[CONFIRMED @ 0x4210A4]: QueueFrontendOverlayRect with src_y = g_twoPlayerSplitMode << 5 (=*32)
+,ARCH-DIVERGENCE,td5_frontend.c,4193,[ARCH-DIVERGENCE: DDraw QueueFrontendOverlayRect -> D3D11 fe_draw_surface_rect; L5 sweep 2026-05-21]
+0x0040df4a,CONFIRMED,td5_frontend.c,4281,"float x = 1832.0f - 1600.0f * t;  /* 1832 → 232 [CONFIRMED @ 0x0040DF4A] */ TD5_LOG_I(LOG_TAG, ""car_sel: slide-in x=%.0f t=%.2f"", x, t);"
+0x0040fe00,CONFIRMED,td5_frontend.c,4389,Controller type icon [CONFIRMED @ 0x40FE00]: per-type TGA centered at y=120 */ int controller_type = td5_input_get_device_type(0);
+0x00466808,CONFIRMED,td5_frontend.c,5133,"Copyright string [CONFIRMED @ 0x00466808] */ static const char k_copyright[] = ""TEST DRIVE 5 COPYRIGHT 1998"";"
+0x004237f0,CONFIRMED,td5_frontend.c,5156,"QueueFrontendOverlayRect(uVar2-0xa8, uVar3-0x8f, ...) [CONFIRMED @ 0x4237F0] = (320 - 168, 240 - 143) = (152, 97) on 640x480."
+0x004237f0,CONFIRMED,td5_frontend.c,5180,Only draw during states 4-5 (dialog visible) [CONFIRMED @ 0x4237F0] */ if (s_inner_state < 4) return;
+0x00423bdd,CONFIRMED,td5_frontend.c,5227,SNK_CarsUnlocked    y = 0x8C (140) — if s_cup_won_car_count != 0  [CONFIRMED @ 0x00423BDD]
+0x00423c2d,CONFIRMED,td5_frontend.c,5228,SNK_TracksUnlocked  y = 0xA8 (168) — if s_cup_won_track_count != 0 [CONFIRMED @ 0x00423C2D]
+0x00423a80,CONFIRMED,td5_frontend.c,5237,Only draw during states 4-5 (dialog visible) [CONFIRMED @ 0x00423A80] */ if (s_inner_state < 4) return;
+0x00423d4d,CONFIRMED,td5_frontend.c,5240,Dialog box screen position (same offsets as CupFailed) [CONFIRMED @ 0x00423D4D] */
+0x00423aeb,CONFIRMED,td5_frontend.c,5244,float dlg_h = 196.0f * sy;  /* 0xC4 [CONFIRMED @ 0x00423AEB] */ float dlg_cx = dlg_x + dlg_w * 0.5f;
+0x00423b10,CONFIRMED,td5_frontend.c,5247,Dialog background — BltColorFillToSurface fills to black [CONFIRMED @ 0x00423B10] */
+0x00423b2e,CONFIRMED,td5_frontend.c,5251,"""CONGRATULATIONS"" at y=0x00 [CONFIRMED @ 0x00423B2E] */ fe_draw_text_centered(dlg_cx, dlg_y + 0.0f  * sy, ""CONGRATULATIONS"", 0xFFFFFFFF, sx, sy);"
+0x00423b52,CONFIRMED,td5_frontend.c,5253,"""YOU HAVE WON"" at y=0x38=56 [CONFIRMED @ 0x00423B52] */ fe_draw_text_centered(dlg_cx, dlg_y + 56.0f * sy, ""YOU HAVE WON"",    0xFFFFFFFF, sx, sy);"
+0x00423b89,CONFIRMED,td5_frontend.c,5255,Cup type name at y=0x54=84 [CONFIRMED @ 0x00423B89] */ if (s_selected_game_type >= 1 && s_selected_game_type <= 6) {
+0x00423bdd,CONFIRMED,td5_frontend.c,5260,Car unlock line at y=0x8C=140 [CONFIRMED @ 0x00423BDD] */ if (s_cup_won_car_count != 0) {
+0x00423c2d,CONFIRMED,td5_frontend.c,5265,Track unlock line at y=0xA8=168 [CONFIRMED @ 0x00423C2D] */ if (s_cup_won_track_count != 0) {
+0x0041d630,CONFIRMED,td5_frontend.c,5282,Only draw during states 4-5 (dialog visible) [CONFIRMED @ 0x41D630] */ if (s_inner_state < 4) return;
+0x004274a0,CONFIRMED,td5_frontend.c,5405,"""TEST DRIVE 5 COPYRIGHT 1998"" tiled [CONFIRMED @ 0x004274A0] */ frontend_render_legal_copyright_overlay(sx, sy);"
+0x004237f0,CONFIRMED,td5_frontend.c,5409,"""Sorry / You Failed / To Win / [cup]"" dialog [CONFIRMED @ 0x004237F0] */ frontend_render_cup_failed_overlay(sx, sy);"
+0x00423a80,CONFIRMED,td5_frontend.c,5413,"""Congrats / You Have Won / [cup] / [unlocks]"" dialog [CONFIRMED @ 0x00423A80] */"
+0x0041d630,CONFIRMED,td5_frontend.c,5417,"""Sorry / Session Locked"" dialog [CONFIRMED @ 0x0041D630] */ frontend_render_session_locked_overlay(sx, sy);"
+0x004269d0,CONFIRMED,td5_frontend.c,5800,"[CONFIRMED @ 0x4269D0] g_attractModeControlEnabled three-state gate: 0 = first entry: run full init, set ctrl=1, route to MAIN_MENU (screen 5)"
+0x004667a8,CONFIRMED,td5_frontend.c,5829,"English entry name = ""config.eng"" [CONFIRMED @ 0x4667A8]. The original reads ""config.eng"" per car ZIP, sscanf's 17 tokens into"
+0x004269d0,CONFIRMED,td5_frontend.c,5836,[CONFIRMED @ 0x4269D0] Car ZIP path table: handled in td5_asset.c */ [CONFIRMED @ 0x426F80]: LoadPackedConfigTd5() reads config.td5 settings */
+0x00426f80,CONFIRMED,td5_frontend.c,5837,[CONFIRMED @ 0x426F80]: LoadPackedConfigTd5() reads config.td5 settings */ [INFERRED] Enumerate display modes (handled in td5_render.c) */
+0x00427081,CONFIRMED,td5_frontend.c,5839,[CONFIRMED @ 0x427081]: Seed controller/input state from DXInput joystick exports
+0x00427060,CONFIRMED,td5_frontend.c,5845,Mark init done so re-entry skips straight to menu [CONFIRMED @ 0x427060] */ s_attract_mode_ctrl = 1;
+0x00427182,CONFIRMED,td5_frontend.c,5848,[CONFIRMED @ 0x427182]: SetFrontendScreen(5) = TD5_SCREEN_MAIN_MENU */ td5_frontend_set_screen(TD5_SCREEN_MAIN_MENU);
+,ARCH-DIVERGENCE,td5_frontend.c,5920,[ARCH-DIVERGENCE: DDraw blit primitives -> D3D11 frontend helpers; L5 sweep 2026-05-21]
+0x004275b1,CONFIRMED,td5_frontend.c,5937,[CONFIRMED @ 0x4275B1] g_attractModeDemoActive = 1 */ s_attract_demo_active = 1;
+0x004275b7,CONFIRMED,td5_frontend.c,5945,[CONFIRMED @ 0x4275B7] ReleaseFrontendDisplayModeButtons() */ frontend_reset_buttons();
+0x00466808,CONFIRMED,td5_frontend.c,6041,"Original renders ""TEST DRIVE 5 COPYRIGHT 1998"" [CONFIRMED @ 0x00466808] at x=canvasW/10, y=0x20 (32px) and repeats each row down the screen."
+,ARCH-DIVERGENCE,td5_frontend.c,6338,[ARCH-DIVERGENCE: TD5_GameType enum value remap; L5 sweep 2026-05-22] Orig 0x004168B0 case-3 button-press handler:
+0x00420d22,CONFIRMED,td5_frontend.c,7709,"[CONFIRMED @ 0x420d22]: SNK_SplitScreenButTxt at x=-0x100, width=0x100 */ frontend_create_button(""Split Screen"", -0x100, 0, 0x100, 0x20);"
+0x00420d33,CONFIRMED,td5_frontend.c,7711,"[CONFIRMED @ 0x420d33]: SNK_CatchupTxt at x=-0x100, width=0x100 */ frontend_create_button(""Catch-Up"",    -0x100, 0, 0x100, 0x20);"
+0x00420d43,CONFIRMED,td5_frontend.c,7713,"[CONFIRMED @ 0x420d43]: SNK_OkButTxt at x=-0x100, width=0x60 */ frontend_create_button(""OK"",          -0x100, 0, 0x60,  0x20);"
+0x0042106b,CONFIRMED,td5_frontend.c,7740,[CONFIRMED @ 0x42106B]: g_twoPlayerSplitMode = (delta + g_twoPlayerSplitMode) & 1 */
+0x004210b3,CONFIRMED,td5_frontend.c,7750,[CONFIRMED @ 0x4210B3]: DAT_00465ff8 += delta; clamped 0..9 */ s_catchup_level += delta;
+0x004210f7,CONFIRMED,td5_frontend.c,7757,"[CONFIRMED @ 0x4210F7]: OK pressed: blit secondary, advance to slide-out */ s_inner_state = 7;"
+0x0040fe00,CONFIRMED,td5_frontend.c,7777,RE basis: ScreenControllerBindingPage decompiled [CONFIRMED @ 0x40FE00]
+0x0040fe00,CONFIRMED,td5_frontend.c,7793,"Data layout [CONFIRMED @ 0x40FE00]: s_ctrl_player        — which player is being configured (0=P1, 1=P2)"
+0x0040fe00,CONFIRMED,td5_frontend.c,7821,"[CONFIRMED @ 0x40FE00] Determines device type, routes to joystick path (state 9) or keyboard path (state 19). If device==3 (none),"
+0x0041e6c3,CONFIRMED,td5_frontend.c,7838,[CONFIRMED @ 0x0041e6c3]: button 1 → DAT_004974b8 = 0 [CONFIRMED @ 0x0041e71d]: button 3 → DAT_004974b8 = 1 */
+0x0041e71d,CONFIRMED,td5_frontend.c,7839,"[CONFIRMED @ 0x0041e71d]: button 3 → DAT_004974b8 = 1 */ TD5_LOG_I(LOG_TAG, ""ControllerBinding: player=%d"", s_ctrl_player);"
+0x0040fe00,CONFIRMED,td5_frontend.c,7846,[CONFIRMED @ 0x40FE00] uses g_player1InputSource or g_player2InputSource depending on DAT_004974b8; port uses td5_input_get_device_type(). */
+0x0040fe00,CONFIRMED,td5_frontend.c,7853,[CONFIRMED @ 0x40FE00] if device_desc[source] type byte == 3 → g_frontendAnimFrameCounter=0; g_frontendInnerState=0x13; return. */
+0x0040fe00,CONFIRMED,td5_frontend.c,7863,[CONFIRMED @ 0x40FE00] if device_desc type byte == 3 → no-ctrl; otherwise joystick path uses DAT_00490ba4 = button count clamped.
+0x0040fe00,CONFIRMED,td5_frontend.c,7886,[CONFIRMED @ 0x40FE00] DAT_00490ba4 set from device descriptor: if button_count < 4 → clamp to 2; if >= 9 → use 8; else use count.
+0x0040fe00,CONFIRMED,td5_frontend.c,7889,controller_bindings[player*9] = 1 (active flag) [CONFIRMED @ 0x40FE00] */ {
+0x0040fe00,CONFIRMED,td5_frontend.c,7898,Set controller active flag [CONFIRMED @ 0x40FE00]: (&DAT_00463fc4)[player*9] = 1  →  s_ctrl_binding_table row */
+0x0040fe00,CONFIRMED,td5_frontend.c,7902,Validate axis assignments: slots [CONFIRMED @ 0x40FE00] (&DAT_00463fc8)[player*9] = steer axis (must be 4 or 5)
+0x00410165,CONFIRMED,td5_frontend.c,7915,"Create OK button [CONFIRMED @ 0x00410165]: CreateFrontendDisplayModeButton(SNK_OkButTxt, -0x128, 0, 0x60, 0x20, 0) */"
+0x0040fe00,CONFIRMED,td5_frontend.c,7929,"[CONFIRMED @ 0x40FE00] Counts g_frontendAnimFrameCounter to 0x1C, then advances to state 10 and deactivates cursor overlay."
+0x0040fe00,CONFIRMED,td5_frontend.c,7945,[CONFIRMED @ 0x40FE00] Each frame: js_prev = js_held (prev & curr)
+0x0040fe00,CONFIRMED,td5_frontend.c,7987,Shift register [CONFIRMED @ 0x40FE00]: DAT_00490b90 = DAT_00490b88        (prev = old held)
+0x0040fe00,CONFIRMED,td5_frontend.c,7999,[CONFIRMED @ 0x40FE00] if num_buttons==2: swap [1] and [2] */ if (s_ctrl_num_buttons == 2) {
+0x0040fe00,CONFIRMED,td5_frontend.c,8009,[CONFIRMED @ 0x40FE00] */ for (int i = 0; i < s_ctrl_num_buttons; i++) {
+0x0040fe00,CONFIRMED,td5_frontend.c,8023,OK button [CONFIRMED @ 0x40FE00]: if (g_frontendButtonPressedFlag && g_frontendButtonIndex==0) → state 11 */
+0x0040fe00,CONFIRMED,td5_frontend.c,8042,"[CONFIRMED @ 0x40FE00] After animation, releases surfaces and calls SetFrontendScreen(0xe) = TD5_SCREEN_CONTROL_OPTIONS."
+0x0040fe00,CONFIRMED,td5_frontend.c,8056,[CONFIRMED @ 0x40FE00] Same anim counter mechanism as state 9. After 0x1C frames → state 20 (0x14).
+0x0040fe00,CONFIRMED,td5_frontend.c,8070,"[CONFIRMED @ 0x40FE00] Draws ""Press Key"" header, clears the 4 scan-code DWORDs (DAT_00464054/58/5c/60), resets slot counter to 0,"
+0x0040fe00,CONFIRMED,td5_frontend.c,8083,"[CONFIRMED @ 0x40FE00] Draws label for slot DAT_00490b84 at y=0x18, then immediately advances to state 26 (0x1A)."
+0x0040fe00,CONFIRMED,td5_frontend.c,8096,[CONFIRMED @ 0x40FE00] Scans scancodes 0..255 each frame: - skip scancodes already in the 16-byte scan buffer
+0x0040fe00,CONFIRMED,td5_frontend.c,8113,Skip if already captured [CONFIRMED @ 0x40FE00] */ int already = 0;
+0x0040fe00,CONFIRMED,td5_frontend.c,8124,[CONFIRMED @ 0x40FE00] DXInput::CheckKey(sc) != 0 */ if (kb[sc]) {
+0x0040fe00,CONFIRMED,td5_frontend.c,8135,Record the scancode [CONFIRMED @ 0x40FE00]: (char *)((int)&DAT_00464054 + DAT_00490b84) = (char)uVar13;  */
+0x0040fe00,CONFIRMED,td5_frontend.c,8142,frontend_play_sfx(3);  /* [CONFIRMED @ 0x40FE00] DXSound::Play(3) */
+0x0040fe00,CONFIRMED,td5_frontend.c,8146,All 10 actions captured? [CONFIRMED @ 0x40FE00] if slot==10 → done */ if (s_ctrl_kb_slot >= 10) {
+0x0040fe00,CONFIRMED,td5_frontend.c,8171,"[CONFIRMED @ 0x40FE00] After animation, releases surfaces and calls SetFrontendScreen(0xe) = TD5_SCREEN_CONTROL_OPTIONS."
+0x00418460,CONFIRMED,td5_frontend.c,8208,"[CONFIRMED @ 0x418460] CreateFrontendDisplayModeButton(SNK_SelectTrackButTxt, -0x120, 0, 0xA0, 0x20, 0)"
+0x004186a8,CONFIRMED,td5_frontend.c,8244,"[CONFIRMED @ 0x4186A8]: g_selectedCdTrackIndex += DAT_0049b690 (arrow dir), clamped 0..11; then BltColorFillToSurface + sprintf ""%d. %s"" redrawn"
+0x004186a8,CONFIRMED,td5_frontend.c,8248,"[CONFIRMED @ 0x4186A8] original clamps 0..0xB, does NOT wrap */ if (s_music_test_track_idx < 0)  s_music_test_track_idx = 0;"
+0x0041864e,CONFIRMED,td5_frontend.c,8256,"[CONFIRMED @ 0x41864E]: DXSound::CDPlay(g_selectedCdTrackIndex+2, 1) then redraw DAT_00496400 (now-playing surface):"
+0x0040f184,CONFIRMED,td5_frontend.c,8624,centered via MeasureOrCenterFrontendString [CONFIRMED @ 0x0040F184]). Language.dll is unavailable in the port; fall through to return. */
+0x0040f744,CONFIRMED,td5_frontend.c,8754,Drag-race 2-pass CarSelect [CONFIRMED @ 0x0040f744]. Original: game_type==7 (=drag race there) && pass_marker==0 → re-enter
+0x00427984,CONFIRMED,td5_frontend.c,8922,Both text and preview animate together via s_track_switch_tick [CONFIRMED @ 0x427984]. */
+0x00427e96,CONFIRMED,td5_frontend.c,8966,frontend_play_sfx(4); /* completion chime [CONFIRMED @ 0x427e96] */ s_inner_state = 4;
+0x004229da,CONFIRMED,td5_frontend.c,9283,"[CONFIRMED @ 0x004229DA] DAT_00497a68 cycles by DAT_0049b690 (arrow delta), skips slots with state == 3 (disabled). Drag: masked & 1 for 2-slot only."
+0x004229da,CONFIRMED,td5_frontend.c,9302,[CONFIRMED @ 0x004229DA] Original wraps the button-press exit in `if (DAT_0049b690 == 0)` — i.e. only honor the confirm when
+0x00422a22,CONFIRMED,td5_frontend.c,9327,[CONFIRMED @ 0x00422A22] Wrap: [0..5] with 6 -> 0 and -1 -> 5. */ s_score_category_index += s_results_panel_slide_dir;
+0x00422cee,CONFIRMED,td5_frontend.c,9424,P9 — [CONFIRMED @ 0x00422CEE] original body: DAT_0049628c = ReleaseTrackedFrontendSurface(DAT_0049628c);
+0x0042332e,CONFIRMED,td5_frontend.c,9625,[CONFIRMED @ 0x0042332E]: WriteCupData() result picks SNK_BlockSavedOK or SNK_FailedToSave string; creates 2 buttons (message + OK).
+0x00413c0b,CONFIRMED,td5_frontend.c,9717,[CONFIRMED @ 0x00413C0B]: DAT_0048d990 for cup types */ s_post_race_score = td5_game_get_result_secondary(0);
+0x004237f0,CONFIRMED,td5_frontend.c,9949,SNK_RaceTypeText y=0x54 ([cup type name])    [CONFIRMED @ 0x4237F0] [CONFIRMED @ ScreenCupFailedDialog 0x004237F0] */
+0x004237f0,CONFIRMED,td5_frontend.c,9951,"[CONFIRMED @ 0x4237F0]: SNK_OkButTxt at x=-0x120 */ frontend_create_button(""OK"", -0x120, 0, 0x60, 0x20);"
+0x00421da0,CONFIRMED,td5_frontend.c,9999,"finished, not DNF) before proceeding. [CONFIRMED @ 0x00421da0] Store car/track counts separately for the overlay renderer."
+0x00423a80,CONFIRMED,td5_frontend.c,10001,"[CONFIRMED @ 0x00423A80]: DAT_00494bb0 = car count, DAT_00494bb4 = track count. */"
+0x00423c61,CONFIRMED,td5_frontend.c,10040,"[CONFIRMED @ 0x00423C61]: SNK_OkButTxt at x=-0x120 (was -100, wrong) */ frontend_create_button(""OK"", -0x120, 0, 0x60, 0x20);"
+0x0041d630,CONFIRMED,td5_frontend.c,10112,"[CONFIRMED @ 0x41D630]: SNK_OkButTxt at x=-0x120 */ frontend_create_button(""OK"", -0x120, 0, 0x60, 0x20);"
+,ARCH-DIVERGENCE,td5_frontend.c,10224,[ARCH-DIVERGENCE: frontend residual] Phase 3 manifest (2026-05-21)
+,ARCH-DIVERGENCE,td5_frontend.c,10229,"docstring, [ARCH-DIVERGENCE] is the audited, documented-deviation marker (equivalent to L5 byte-faithful for fidelity scoring)."
+0x004258b0,ARCH-DIVERGENCE,td5_frontend.c,10234,0x004258B0  DeferFrontendBackgroundRestore   [ARCH-DIVERGENCE: defer flag for DDraw lost-surface restore path; D3D11 backbuffer in td5re.exe has no lo
+0x0041c030,ARCH-DIVERGENCE,td5_frontend.c,10235,0x0041C030  NormalizeFrontendChatTokens      [ARCH-DIVERGENCE: chat tokenizer feeds the DXPTYPE-1 lobby payload format; the port's DXPTYPE protocol is
+,ARCH-DIVERGENCE,td5_frontend.c,10240,[ARCH-DIVERGENCE: DDraw frontend subsystem collapse] Phase 4(a) class manifest (2026-05-21)
+,ARCH-DIVERGENCE,td5_frontend.c,10253,Each address below carries the inline [ARCH-DIVERGENCE: <tag>] marker so build_confidence_map.py:227-233 promotes every listed function to
+0x00411710,ARCH-DIVERGENCE,td5_frontend.c,10257,0x00411710  BuildFrontendDitherOffsetTable          [ARCH-DIVERGENCE: DDraw] 0x00411A50  ResetFrontendFadeState                  [ARCH-DIVERGENCE: DDr
+0x00411a50,ARCH-DIVERGENCE,td5_frontend.c,10258,0x00411A50  ResetFrontendFadeState                  [ARCH-DIVERGENCE: DDraw] 0x00411A70  RenderFrontendFadeOutEffect             [ARCH-DIVERGENCE: DDr
+0x00411a70,ARCH-DIVERGENCE,td5_frontend.c,10259,0x00411A70  RenderFrontendFadeOutEffect             [ARCH-DIVERGENCE: DDraw] 0x00411DE0  ClearFrontendSurfaceRegistry            [ARCH-DIVERGENCE: DDr
+0x00411de0,ARCH-DIVERGENCE,td5_frontend.c,10260,0x00411DE0  ClearFrontendSurfaceRegistry            [ARCH-DIVERGENCE: DDraw] 0x00411E00  GetFrontendSurfaceRegistryId            [ARCH-DIVERGENCE: DDr
+0x00411e00,ARCH-DIVERGENCE,td5_frontend.c,10261,0x00411E00  GetFrontendSurfaceRegistryId            [ARCH-DIVERGENCE: DDraw] 0x00411E90  ReleaseTrackedFrontendSurfaces          [ARCH-DIVERGENCE: DDr
+0x00411e90,ARCH-DIVERGENCE,td5_frontend.c,10262,0x00411E90  ReleaseTrackedFrontendSurfaces          [ARCH-DIVERGENCE: DDraw] 0x004122F0  LoadTgaToFrontendSurfaceFromArchive     [ARCH-DIVERGENCE: DDr
+0x004122f0,ARCH-DIVERGENCE,td5_frontend.c,10263,0x004122F0  LoadTgaToFrontendSurfaceFromArchive     [ARCH-DIVERGENCE: DDraw] 0x004127B0  LoadTgaToFrontendSurface16bppVariant    [ARCH-DIVERGENCE: DDr
+0x004127b0,ARCH-DIVERGENCE,td5_frontend.c,10264,0x004127B0  LoadTgaToFrontendSurface16bppVariant    [ARCH-DIVERGENCE: DDraw] 0x004129B0  RenderTgaToFrontendSurface              [ARCH-DIVERGENCE: DDr
+0x004129b0,ARCH-DIVERGENCE,td5_frontend.c,10265,0x004129B0  RenderTgaToFrontendSurface              [ARCH-DIVERGENCE: DDraw] 0x00412B00  SetSurfaceColorKeyFromRGB               [ARCH-DIVERGENCE: DDr
+0x00412b00,ARCH-DIVERGENCE,td5_frontend.c,10266,0x00412B00  SetSurfaceColorKeyFromRGB               [ARCH-DIVERGENCE: DDraw] 0x00417B74  AdvanceFrontendInlineStringTableState   [ARCH-DIVERGENCE: DDr
+0x00417b74,ARCH-DIVERGENCE,td5_frontend.c,10267,0x00417B74  AdvanceFrontendInlineStringTableState   [ARCH-DIVERGENCE: DDraw] 0x004183B0  SetFrontendInlineStringTable            [ARCH-DIVERGENCE: DDr
+0x004183b0,ARCH-DIVERGENCE,td5_frontend.c,10268,0x004183B0  SetFrontendInlineStringTable            [ARCH-DIVERGENCE: DDraw] 0x00418410  SetFrontendInlineStringEntry            [ARCH-DIVERGENCE: DDr
+0x00418410,ARCH-DIVERGENCE,td5_frontend.c,10269,0x00418410  SetFrontendInlineStringEntry            [ARCH-DIVERGENCE: DDraw] 0x00418430  ResetFrontendInlineStringTable          [ARCH-DIVERGENCE: DDr
+0x00418430,ARCH-DIVERGENCE,td5_frontend.c,10270,0x00418430  ResetFrontendInlineStringTable          [ARCH-DIVERGENCE: DDraw] 0x00423DB0  ClearBackbufferWithColor                [ARCH-DIVERGENCE: DDr
+0x00423db0,ARCH-DIVERGENCE,td5_frontend.c,10271,0x00423DB0  ClearBackbufferWithColor                [ARCH-DIVERGENCE: DDraw] 0x00423E40  LockSecondaryFrontendSurfaceFillColor   [ARCH-DIVERGENCE: DDr
+0x00423e40,ARCH-DIVERGENCE,td5_frontend.c,10272,0x00423E40  LockSecondaryFrontendSurfaceFillColor   [ARCH-DIVERGENCE: DDraw] 0x00423F90  FillSurfaceRectWithColor                [ARCH-DIVERGENCE: DDr
+0x00423f90,ARCH-DIVERGENCE,td5_frontend.c,10273,0x00423F90  FillSurfaceRectWithColor                [ARCH-DIVERGENCE: DDraw] 0x00425170  UpdateFrontendClientOrigin              [ARCH-DIVERGENCE: DDr
+0x00425170,ARCH-DIVERGENCE,td5_frontend.c,10274,0x00425170  UpdateFrontendClientOrigin              [ARCH-DIVERGENCE: DDraw] 0x004254D0  ResetFrontendOverlayState               [ARCH-DIVERGENCE: DDr
+0x004254d0,ARCH-DIVERGENCE,td5_frontend.c,10275,0x004254D0  ResetFrontendOverlayState               [ARCH-DIVERGENCE: DDraw] 0x00425500  ResetFrontendSelectionState             [ARCH-DIVERGENCE: DDr
+0x00425500,ARCH-DIVERGENCE,td5_frontend.c,10276,0x00425500  ResetFrontendSelectionState             [ARCH-DIVERGENCE: DDraw] 0x00425540  FlushFrontendSpriteBlits                [ARCH-DIVERGENCE: DDr
+0x00425540,ARCH-DIVERGENCE,td5_frontend.c,10277,0x00425540  FlushFrontendSpriteBlits                [ARCH-DIVERGENCE: DDraw] 0x00425730  QueueFrontendSpriteBlit                 [ARCH-DIVERGENCE: DDr
+0x00425730,ARCH-DIVERGENCE,td5_frontend.c,10278,0x00425730  QueueFrontendSpriteBlit                 [ARCH-DIVERGENCE: DDraw] 0x004258F0  CreateFrontendMenuRectEntry             [ARCH-DIVERGENCE: DDr
+0x004258f0,ARCH-DIVERGENCE,td5_frontend.c,10279,0x004258F0  CreateFrontendMenuRectEntry             [ARCH-DIVERGENCE: DDraw] 0x00425A30  RenderFrontendUiRects                   [ARCH-DIVERGENCE: DDr
+0x00425a30,ARCH-DIVERGENCE,td5_frontend.c,10280,0x00425A30  RenderFrontendUiRects                   [ARCH-DIVERGENCE: DDraw] 0x004260E0  CreateFrontendDisplayModePreviewButton  [ARCH-DIVERGENCE: DDr
+0x004260e0,ARCH-DIVERGENCE,td5_frontend.c,10281,0x004260E0  CreateFrontendDisplayModePreviewButton  [ARCH-DIVERGENCE: DDraw] 0x004263E0  RenderFrontendDisplayModeHighlight      [ARCH-DIVERGENCE: DDr
+0x004263e0,ARCH-DIVERGENCE,td5_frontend.c,10282,0x004263E0  RenderFrontendDisplayModeHighlight      [ARCH-DIVERGENCE: DDraw] 0x00426580  UpdateFrontendDisplayModeSelection      [ARCH-DIVERGENCE: DDr
+0x00426580,ARCH-DIVERGENCE,td5_frontend.c,10283,0x00426580  UpdateFrontendDisplayModeSelection      [ARCH-DIVERGENCE: DDraw]
+,ARCH-DIVERGENCE,td5_frontend.c,10287,[ARCH-DIVERGENCE: DXPTYPE network/lobby unreachable] Phase 4(a) class manifest (2026-05-21)
+,ARCH-DIVERGENCE,td5_frontend.c,10298,Each address below carries the inline [ARCH-DIVERGENCE: <tag>] marker so build_confidence_map.py:227-233 promotes every listed function to
+0x00418c60,ARCH-DIVERGENCE,td5_frontend.c,10302,0x00418C60  QueueFrontendNetworkMessage           [ARCH-DIVERGENCE: DXPTYPE] 0x00419B30  RenderFrontendSessionBrowser          [ARCH-DIVERGENCE: DXPTY
+0x00419b30,ARCH-DIVERGENCE,td5_frontend.c,10303,0x00419B30  RenderFrontendSessionBrowser          [ARCH-DIVERGENCE: DXPTYPE] 0x00419CF0  RunFrontendSessionPicker              [ARCH-DIVERGENCE: DXPTY
+0x00419cf0,ARCH-DIVERGENCE,td5_frontend.c,10304,0x00419CF0  RunFrontendSessionPicker              [ARCH-DIVERGENCE: DXPTYPE] 0x0041A530  RenderFrontendCreateSessionNameInput  [ARCH-DIVERGENCE: DXPTY
+0x0041a530,ARCH-DIVERGENCE,td5_frontend.c,10305,0x0041A530  RenderFrontendCreateSessionNameInput  [ARCH-DIVERGENCE: DXPTYPE] 0x0041A670  RenderFrontendLobbyChatInput          [ARCH-DIVERGENCE: DXPTY
+0x0041a670,ARCH-DIVERGENCE,td5_frontend.c,10306,0x0041A670  RenderFrontendLobbyChatInput          [ARCH-DIVERGENCE: DXPTYPE] 0x0041B390  CreateFrontendNetworkSession          [ARCH-DIVERGENCE: DXPTY
+0x0041b390,ARCH-DIVERGENCE,td5_frontend.c,10307,0x0041B390  CreateFrontendNetworkSession          [ARCH-DIVERGENCE: DXPTYPE] 0x0041B420  RenderFrontendLobbyStatusPanel        [ARCH-DIVERGENCE: DXPTY
+0x0041b420,ARCH-DIVERGENCE,td5_frontend.c,10308,0x0041B420  RenderFrontendLobbyStatusPanel        [ARCH-DIVERGENCE: DXPTYPE] 0x0041B610  ProcessFrontendNetworkMessages        [ARCH-DIVERGENCE: DXPTY
+0x0041b610,ARCH-DIVERGENCE,td5_frontend.c,10309,0x0041B610  ProcessFrontendNetworkMessages        [ARCH-DIVERGENCE: DXPTYPE] 0x0041BD00  RenderFrontendLobbyChatPanel          [ARCH-DIVERGENCE: DXPTY
+0x0041bd00,ARCH-DIVERGENCE,td5_frontend.c,10310,0x0041BD00  RenderFrontendLobbyChatPanel          [ARCH-DIVERGENCE: DXPTYPE] 0x0041C330  RunFrontendNetworkLobby               [ARCH-DIVERGENCE: DXPTY
+0x0041c330,ARCH-DIVERGENCE,td5_frontend.c,10311,0x0041C330  RunFrontendNetworkLobby               [ARCH-DIVERGENCE: DXPTYPE]
+0x00418d50,ARCH-DIVERGENCE,td5_frontend.c,10321,0x00418D50  RunFrontendConnectionBrowser          [ARCH-DIVERGENCE: DXPTYPE] 0x0041A7B0  RunFrontendCreateSessionFlow          [ARCH-DIVERGENCE: DXPTY
+0x0041a7b0,ARCH-DIVERGENCE,td5_frontend.c,10322,0x0041A7B0  RunFrontendCreateSessionFlow          [ARCH-DIVERGENCE: DXPTYPE]
+,ARCH-DIVERGENCE,td5_frontend.c,10326,[ARCH-DIVERGENCE: Controller-binding tail consolidation] Phase 4(a) class manifest (2026-05-21)
+,ARCH-DIVERGENCE,td5_frontend.c,10337,Each address below carries the inline [ARCH-DIVERGENCE: <tag>] marker so build_confidence_map.py:227-233 promotes every listed function to
+0x004100c0,ARCH-DIVERGENCE,td5_frontend.c,10341,0x004100C0  OpenControllerBindingPageWrapper                  [ARCH-DIVERGENCE: CtrlBind]
+0x004100ce,ARCH-DIVERGENCE,td5_frontend.c,10342,0x004100CE  DrawControlBindingTextWithOkButton                [ARCH-DIVERGENCE: CtrlBind]
+0x004100d7,ARCH-DIVERGENCE,td5_frontend.c,10343,0x004100D7  OpenControllerBindingPageNoneHeader               [ARCH-DIVERGENCE: CtrlBind]
+0x004100de,ARCH-DIVERGENCE,td5_frontend.c,10344,0x004100DE  OpenControllerBindingPageRearViewHeader           [ARCH-DIVERGENCE: CtrlBind]
+0x004100fa,ARCH-DIVERGENCE,td5_frontend.c,10345,0x004100FA  DrawControlBindingText1WithOkButton               [ARCH-DIVERGENCE: CtrlBind]
+0x00410111,ARCH-DIVERGENCE,td5_frontend.c,10346,0x00410111  DrawControlBindingText2WithOkButton               [ARCH-DIVERGENCE: CtrlBind]
+0x00410129,ARCH-DIVERGENCE,td5_frontend.c,10347,0x00410129  OpenControllerBindingPageNoneHeader               [ARCH-DIVERGENCE: CtrlBind]
+0x00410380,ARCH-DIVERGENCE,td5_frontend.c,10348,0x00410380  RenderControllerBindingMenuPage                   [ARCH-DIVERGENCE: CtrlBind]
+0x0041043c,ARCH-DIVERGENCE,td5_frontend.c,10349,0x0041043C  RenderControllerBindingPageUpDownHeader           [ARCH-DIVERGENCE: CtrlBind]
+0x004104b2,ARCH-DIVERGENCE,td5_frontend.c,10350,0x004104B2  RenderControllerBindingPageDownHeader             [ARCH-DIVERGENCE: CtrlBind]
+0x00410527,ARCH-DIVERGENCE,td5_frontend.c,10351,0x00410527  RenderControllerBindingPageUpHeader               [ARCH-DIVERGENCE: CtrlBind]
+0x00410599,ARCH-DIVERGENCE,td5_frontend.c,10352,0x00410599  RenderControllerBindingPageBlankOrRearViewHeader  [ARCH-DIVERGENCE: CtrlBind]
+0x00410613,ARCH-DIVERGENCE,td5_frontend.c,10353,0x00410613  RenderControllerBindingPageRows                   [ARCH-DIVERGENCE: CtrlBind]
+0x00410940,ARCH-DIVERGENCE,td5_frontend.c,10354,0x00410940  DrawControlOptionsBindingHeader                   [ARCH-DIVERGENCE: CtrlBind]
+,ARCH-DIVERGENCE,td5_frontend.c,10359,[ARCH-DIVERGENCE: frontend secondary-surface blit collapse] Phase 5(a) class manifest (2026-05-21)
+0x00424c10,ARCH-DIVERGENCE,td5_frontend.c,10370,0x00424C10  PresentSecondaryFrontendRectViaCopy  [ARCH-DIVERGENCE: SurfBlit] 0x00424C50  BlitSecondaryFrontendRectToPrimary   [ARCH-DIVERGENCE: SurfBl
+0x00424c50,ARCH-DIVERGENCE,td5_frontend.c,10371,0x00424C50  BlitSecondaryFrontendRectToPrimary   [ARCH-DIVERGENCE: SurfBlit] 0x00424CF0  PresentSecondaryFrontendRect         [ARCH-DIVERGENCE: SurfBl
+0x00424cf0,ARCH-DIVERGENCE,td5_frontend.c,10372,0x00424CF0  PresentSecondaryFrontendRect         [ARCH-DIVERGENCE: SurfBlit] 0x00424D40  PresentPrimaryFrontendRect           [ARCH-DIVERGENCE: SurfBl
+0x00424d40,ARCH-DIVERGENCE,td5_frontend.c,10373,0x00424D40  PresentPrimaryFrontendRect           [ARCH-DIVERGENCE: SurfBlit] 0x00424D90  FillPrimaryFrontendScanline          [ARCH-DIVERGENCE: SurfBl
+0x00424d90,ARCH-DIVERGENCE,td5_frontend.c,10374,0x00424D90  FillPrimaryFrontendScanline          [ARCH-DIVERGENCE: SurfBlit] 0x00424E40  InitializeFrontendPresentationState  [ARCH-DIVERGENCE: SurfBl
+0x00424e40,ARCH-DIVERGENCE,td5_frontend.c,10375,0x00424E40  InitializeFrontendPresentationState  [ARCH-DIVERGENCE: SurfBlit]
+0x00424b30,ARCH-DIVERGENCE,td5_frontend.c,10384,0x00424B30  CopyPrimaryFrontendBufferToSecondary  [ARCH-DIVERGENCE: SurfBlit] 0x00424BC0  CopyPrimaryFrontendRectToSecondary    [ARCH-DIVERGENCE: Surf
+0x00424bc0,ARCH-DIVERGENCE,td5_frontend.c,10385,0x00424BC0  CopyPrimaryFrontendRectToSecondary    [ARCH-DIVERGENCE: SurfBlit]
+,ARCH-DIVERGENCE,td5_frontend.c,10389,[ARCH-DIVERGENCE: frontend font-string render collapse] Phase 5(a) class manifest (2026-05-21)
+0x00412d50,ARCH-DIVERGENCE,td5_frontend.c,10398,0x00412D50  MeasureOrDrawFrontendFontString       [ARCH-DIVERGENCE: FontStr] 0x00424470  DrawFrontendFontStringToSurface       [ARCH-DIVERGENCE: FontS
+0x00424470,ARCH-DIVERGENCE,td5_frontend.c,10399,0x00424470  DrawFrontendFontStringToSurface       [ARCH-DIVERGENCE: FontStr] 0x00424660  DrawFrontendSmallFontStringToSurface  [ARCH-DIVERGENCE: FontS
+0x00424660,ARCH-DIVERGENCE,td5_frontend.c,10400,0x00424660  DrawFrontendSmallFontStringToSurface  [ARCH-DIVERGENCE: FontStr]
+0x004242b0,ARCH-DIVERGENCE,td5_frontend.c,10414,0x004242B0  DrawFrontendLocalizedStringPrimary       [ARCH-DIVERGENCE: FontStr] 0x00424740  DrawFrontendClippedStringToSurface       [ARCH-DIVERGENCE:
+0x00424740,ARCH-DIVERGENCE,td5_frontend.c,10415,0x00424740  DrawFrontendClippedStringToSurface       [ARCH-DIVERGENCE: FontStr] 0x004248E0  DrawFrontendWrappedStringLine            [ARCH-DIVERGENCE:
+0x004248e0,ARCH-DIVERGENCE,td5_frontend.c,10416,0x004248E0  DrawFrontendWrappedStringLine            [ARCH-DIVERGENCE: FontStr] 0x00424A50  MeasureOrCenterFrontendLocalizedString   [ARCH-DIVERGENCE:
+0x00424a50,ARCH-DIVERGENCE,td5_frontend.c,10417,0x00424A50  MeasureOrCenterFrontendLocalizedString   [ARCH-DIVERGENCE: FontStr]
+,ARCH-DIVERGENCE,td5_frontend.c,10421,[ARCH-DIVERGENCE: display-mode slot lookup] Phase 5(a) class manifest (2026-05-21)
+0x0040b170,ARCH-DIVERGENCE,td5_frontend.c,10429,0x0040B170  SelectConfiguredDisplayModeSlot  [ARCH-DIVERGENCE: DispMode]
+,ARCH-DIVERGENCE,td5_frontend.c,10433,[ARCH-DIVERGENCE: extras gallery slideshow collapse] Phase 5(c) class manifest (2026-05-21)
+0x0040d590,ARCH-DIVERGENCE,td5_frontend.c,10456,0x0040D590  LoadExtrasGalleryImageSurfaces       [ARCH-DIVERGENCE: Gallery] 0x0040D750  AdvanceExtrasGallerySlideshow        [ARCH-DIVERGENCE: Gallery
+0x0040d750,ARCH-DIVERGENCE,td5_frontend.c,10457,0x0040D750  AdvanceExtrasGallerySlideshow        [ARCH-DIVERGENCE: Gallery] 0x0040D830  UpdateExtrasGalleryDisplay           [ARCH-DIVERGENCE: Gallery
+0x0040d830,ARCH-DIVERGENCE,td5_frontend.c,10458,0x0040D830  UpdateExtrasGalleryDisplay           [ARCH-DIVERGENCE: Gallery] 0x00417DD2  LoadFrontendExtrasGalleryResources   [ARCH-DIVERGENCE: Gallery
+0x00417dd2,ARCH-DIVERGENCE,td5_frontend.c,10459,0x00417DD2  LoadFrontendExtrasGalleryResources   [ARCH-DIVERGENCE: Gallery]
+,ARCH-DIVERGENCE,td5_frontend.c,10463,[ARCH-DIVERGENCE: per-screen FSM port] Phase 5(c) per-screen manifest (2026-05-21)
+0x00413010,ARCH-DIVERGENCE,td5_frontend.c,10475,0x00413010  DrawPostRaceHighScoreEntry  [ARCH-DIVERGENCE: ScreenFSM] Folded into frontend_render_high_score_overlay (td5_frontend.c:4512).
+0x00413580,ARCH-DIVERGENCE,td5_frontend.c,10486,0x00413580  ScreenPostRaceHighScoreTable  [ARCH-DIVERGENCE: ScreenFSM] Screen_PostRaceHighScore (td5_frontend.c:9029) — 9 states (0..8).
+0x00413b60,CONFIRMED,td5_frontend.c,10493,td5_save_write_config(NULL) [CONFIRMED @ 0x00413b60] in case file wasn't flushed.
+0x00418460,ARCH-DIVERGENCE,td5_frontend.c,10496,0x00418460  ScreenMusicTestExtras  [ARCH-DIVERGENCE: ScreenFSM] Screen_MusicTestExtras (td5_frontend.c:8163) — 9 states (0..8). All
+0x004213d0,ARCH-DIVERGENCE,td5_frontend.c,10503,0x004213D0  ScreenQuickRaceMenu  [ARCH-DIVERGENCE: ScreenFSM] Screen_QuickRaceMenu (td5_frontend.c:6564) — 7 states (0..6). Case-
+0x004219cc,CONFIRMED,td5_frontend.c,10510,"on locked car/track [CONFIRMED @ 0x4219cc]. State-6 return_screen=-1 launches race via frontend_init_race_schedule, identical to orig's"
+0x00427630,ARCH-DIVERGENCE,td5_frontend.c,10514,0x00427630  TrackSelectionScreenStateMachine  [ARCH-DIVERGENCE: ScreenFSM] Screen_TrackSelection (td5_frontend.c:8770) — 10 states (0..9).
+0x00427290,ARCH-DIVERGENCE,td5_frontend.c,10526,0x00427290  ScreenLanguageSelect  [ARCH-DIVERGENCE: ScreenFSM] Screen_LanguageSelect (td5_frontend.c:5980) — 7 states (0..6) map to
+,ARCH-DIVERGENCE,td5_frontend_button_cache.c,139,[ARCH-DIVERGENCE: DDraw BltFast -> CPU BGRA32 composite; L5 sweep 2026-05-21] Orig DrawFrontendButtonBackground (Ghidra-verified 0x00425B60) calls a
+0x00442160,ARCH-DIVERGENCE,td5_game.c,110,InitializeRaceVideoConfiguration thunk @ 0x00442160 [ARCH-DIVERGENCE] Orig body: 5 bytes `JMP 0x0042a950` (single tail-call to the impl). The
+0x0042a950,ARCH-DIVERGENCE,td5_game.c,115,InitializeRaceVideoConfiguration body @ 0x0042a950 [ARCH-DIVERGENCE] Orig responsibilities (183 bytes):
+0x0043e7e0,ARCH-DIVERGENCE,td5_game.c,125,[ARCH-DIVERGENCE @ 0x0043E7E0 ConfigureProjectionForViewport] See td5_render.c:2087 td5_render_configure_projection() for the
+0x0043e7e0,CONFIRMED,td5_game.c,134,"td5_render.c:2537 [CONFIRMED @ 0x0043E7E0]. 8) Center pos: gRenderCenter{X,Y} = render{W,H}F * DAT_0045d5d0 (= 0.5)."
+0x00442560,ARCH-DIVERGENCE,td5_game.c,138,"[ARCH-DIVERGENCE @ 0x00442560 LoadStaticTrackTextureHeader] Orig: GetArchiveEntrySize/ReadArchiveEntry from ""static.hed"""
+0x0040b580,ARCH-DIVERGENCE,td5_game.c,156,[ARCH-DIVERGENCE @ 0x0040B580 SetRaceTexturePageLoader] Orig is a 13-byte one-liner that writes a function pointer at
+0x004285b0,ARCH-DIVERGENCE,td5_game.c,168,[ARCH-DIVERGENCE @ 0x004285B0 CreateRaceForceFeedbackEffects] Orig is 719 bytes of DirectInput 5/7 effect creation:
+0x0040a880,ARCH-DIVERGENCE,td5_game.c,198,"ResetRaceResultsTable @ 0x0040a880 [ARCH-DIVERGENCE] Orig writes a 6-entry, 20-byte-stride table at 0x0048d988. Per entry:"
+0x00430cb0,ARCH-DIVERGENCE,td5_game.c,210,ResetGameHeap @ 0x00430cb0 [ARCH-DIVERGENCE] Orig: HeapDestroy gGameHeapHandle (gated on first-call sentinel
+0x0040a490,ARCH-DIVERGENCE,td5_game.c,234,UpdateRaceCameraTransitionTimer @ 0x0040a490 [ARCH-DIVERGENCE] See detailed audit comment at tick_race_countdown() — same-shape
+0x0042cc20,ARCH-DIVERGENCE,td5_game.c,243,BeginRaceFadeOutTransition @ 0x0042cc20 [ARCH-DIVERGENCE] See detailed audit comment at td5_game_begin_fade_out(). Port
+,ARCH-DIVERGENCE,td5_game.c,757,[ARCH-DIVERGENCE] (3 items above) for the DX::app+exref mirrors and the DDraw Lock/blit/Flip benchmark presentation path.
+0x0048d988,CONFIRMED,td5_game.c,966,[CONFIRMED @ 0x0048d988] s_results mirrors original ResultsTable at that addr [CONFIRMED @ 0x40AAD0 / 0x40AB80] sort functions populate final_position
+0x00436e1d,CONFIRMED,td5_game.c,1267,per slot [CONFIRMED @ 0x00436E1D]: blocks track-behavior only when mode=ON AND damage_table[slot]==0. Original initialises the table to
+0x0043bf70,CONFIRMED,td5_game.c,2555,[CONFIRMED @ 0x0043BF70] RunAudioOptionsOverlay: 5 rows total. */ if (key_down  && !s_prev_down)  s_pause_menu_cursor = (s_pause_menu_cursor + 1) % 5;
+0x0043c211,CONFIRMED,td5_game.c,2560,"[CONFIRMED @ 0x0043C211] CONTINUOUS while held — (&DAT_004B135C)[cursor] ± 0.02f, clamp [0,1]."
+0x0043c0e5,CONFIRMED,td5_game.c,2621,"[CONFIRMED @ 0x0043C0E5] Row 0=VIEW (DAT_004B135C → 0x00466EA8), Row 1=MUSIC (DAT_004B1360), Row 2=SOUND (DAT_004B1364). */"
+0x00440b00,CONFIRMED,td5_game.c,3253,"[CONFIRMED @ 0x00440B00]: ambient weather (rain) sound runs each frame after the vehicle audio mix, gated by weather particle density. */"
+0x00409f76,CONFIRMED,td5_game.c,3782,[CONFIRMED @ 0x00409F76] formula: actor+0x336 = (sub_prog * 0x5DC) / denom
+0x00409fcc,CONFIRMED,td5_game.c,3826,"[CONFIRMED @ 0x00409FCC] Original: param_1[1]='\x01' (companion_2=1), NOT 2. P2P branch at 0x0040A180 also writes '\x01'. Circuit was"
+0x00409e98,CONFIRMED,td5_game.c,3928,Store split time — raw timing_frame_counter at crossing [CONFIRMED @ 0x00409E98] */
+,ARCH-DIVERGENCE,td5_game.c,4021,[ARCH-DIVERGENCE — per-slot ActorRaceMetric vs in-place table mutation] Original mutates g_raceCheckpointTablePtr[+2] AND the per-checkpoint
+0x00428d20,ARCH-DIVERGENCE,td5_game.c,4752,0x00428D20  InitializeBenchmarkFrameRateCapture  [ARCH-DIVERGENCE: benchmark sample-buffer pipeline removed; L5 sweep 2026-05-21]
+,ARCH-DIVERGENCE,td5_game.c,4764,[ARCH-DIVERGENCE: benchmark output collapse] Phase 3 manifest (2026-05-21)
+,ARCH-DIVERGENCE,td5_game.c,4769,"docstring, [ARCH-DIVERGENCE] is the audited, documented-deviation marker (equivalent to L5 byte-faithful for fidelity scoring)."
+0x00428d40,ARCH-DIVERGENCE,td5_game.c,4774,0x00428D40  RecordBenchmarkFrameRateSample   [ARCH-DIVERGENCE: orig pushes each frame's dt into a 1024-slot FPU circular buffer at DAT_004A2CF8 indexe
+0x00428d80,ARCH-DIVERGENCE,td5_game.c,4775,0x00428D80  WriteBenchmarkResultsTgaReport   [ARCH-DIVERGENCE: orig writes results as a bespoke TGA-formatted screenshot file; the port emits plain-te
+,ARCH-DIVERGENCE,td5_hud.c,538,[ARCH-DIVERGENCE: glyph-strip font replaces original bitmap font; L5 sweep 2026-05-21]
+0x0043bf70,CONFIRMED,td5_hud.c,981,"[CONFIRMED @ 0x0043BF70] slider 0=DAT_004B135C → 0x00466EA8 view distance, slider 1=DAT_004B1360 → DXSound::CDSetVolume (music),"
+0x004377b0,CONFIRMED,td5_hud.c,1139,"[CONFIRMED @ 0x004377B0] — Ghidra-verified: orig allocates 0x1148 bytes via HeapAllocTracked, splits into two halves with the secondary view"
+0x00437ba0,CONFIRMED,td5_hud.c,1289,[CONFIRMED @ 0x00437BA0] — Ghidra-verified scale math: g_hudPrimaryScaleX = g_renderWidthF * _DAT_0045d64c (= 1/640); g_hudPrimaryScaleY =
+0x00439b70,CONFIRMED,td5_hud.c,1710,[CONFIRMED @ 0x00439B70] — Ghidra-verified: orig early-exits on g_inputPlaybackActive!=0 (port: not gated — port handles replay through
+,ARCH-DIVERGENCE,td5_hud.c,1981,[ARCH-DIVERGENCE] (2 items above) for D3D3 queue -> D3D11 immediate- mode and for the per-view layout table representation.
+0x004388a0,CONFIRMED,td5_hud.c,2177,"Original clamps negative speed to 0 [CONFIRMED @ 0x4388A0]. Previous code took abs(), showing speed while reversing. */"
+0x0045d6d8,CONFIRMED,td5_hud.c,2193,Inter-digit gap is 2.0 [CONFIRMED @ 0x45d6d8]. */ float sf_gw = sx * 15.0f;
+0x0043a380,CONFIRMED,td5_hud.c,2565,"start_span = ((player_span / 24) - 6) * 24 [CONFIRMED @ 0x43A380]: round down to 24-span group, go back 6 groups (144 spans behind player). */"
+0x0043a426,CONFIRMED,td5_hud.c,2674,Pre-iter segment advance [CONFIRMED @ 0x43A426]: while (seg_end[cur_seg] < local_a4) cur_seg++ */
+0x0043b7c0,CONFIRMED,td5_hud.c,3211,[CONFIRMED @ 0x0043B7C0] — Ghidra-verified: orig clamps param_1<8 (port: page_index<TD5_HUD_PAUSE_MAX_PAGES). String table at &PTR_s_PAUSED_004744B8
+,ARCH-DIVERGENCE,td5_hud.c,3561,[ARCH-DIVERGENCE: HUD glyph strip render] Phase 5(a) class manifest (2026-05-21)
+0x00414f40,ARCH-DIVERGENCE,td5_hud.c,3569,0x00414F40  RenderPositionerGlyphStrip  [ARCH-DIVERGENCE: HudGlyph]
+,ARCH-DIVERGENCE,td5_inflate.c,429,[ARCH-DIVERGENCE: zlib inflate collapse] Phase 2 manifest (2026-05-21)
+,ARCH-DIVERGENCE,td5_inflate.c,437,"Per build_confidence_map.py:104-126 docstring, [ARCH-DIVERGENCE] is the audited, documented deviation marker - functionally"
+,ARCH-DIVERGENCE,td5_inflate.c,442,carries an [ARCH-DIVERGENCE: ZLIB] marker so the citation- proximity check in build_confidence_map.py:227-233 promotes
+0x00447490,ARCH-DIVERGENCE,td5_inflate.c,446,0x00447490  InflateFlushOutputAndUpdateCrc32   [ARCH-DIVERGENCE: ZLIB] 0x004474F6  InflateRefillInputBuffer           [ARCH-DIVERGENCE: ZLIB]
+0x004474f6,ARCH-DIVERGENCE,td5_inflate.c,447,0x004474F6  InflateRefillInputBuffer           [ARCH-DIVERGENCE: ZLIB] 0x00447502  InflateWriteOutputChunk            [ARCH-DIVERGENCE: ZLIB]
+0x00447502,ARCH-DIVERGENCE,td5_inflate.c,448,0x00447502  InflateWriteOutputChunk            [ARCH-DIVERGENCE: ZLIB] 0x0044751B  InflateBuildDecodeTable            [ARCH-DIVERGENCE: ZLIB]
+0x0044751b,ARCH-DIVERGENCE,td5_inflate.c,449,0x0044751B  InflateBuildDecodeTable            [ARCH-DIVERGENCE: ZLIB] 0x00447715  InflateDecodeHuffmanCodes          [ARCH-DIVERGENCE: ZLIB]
+0x00447715,ARCH-DIVERGENCE,td5_inflate.c,450,0x00447715  InflateDecodeHuffmanCodes          [ARCH-DIVERGENCE: ZLIB] 0x00447AA6  InflateProcessStoredBlock          [ARCH-DIVERGENCE: ZLIB]
+0x00447aa6,ARCH-DIVERGENCE,td5_inflate.c,451,0x00447AA6  InflateProcessStoredBlock          [ARCH-DIVERGENCE: ZLIB] 0x00447BBB  InflateProcessFixedHuffmanBlock    [ARCH-DIVERGENCE: ZLIB]
+0x00447bbb,ARCH-DIVERGENCE,td5_inflate.c,452,0x00447BBB  InflateProcessFixedHuffmanBlock    [ARCH-DIVERGENCE: ZLIB] 0x00447C42  InflateProcessDynamicHuffmanBlock  [ARCH-DIVERGENCE: ZLIB]
+0x00447c42,ARCH-DIVERGENCE,td5_inflate.c,453,0x00447C42  InflateProcessDynamicHuffmanBlock  [ARCH-DIVERGENCE: ZLIB] 0x00447FE2  InflateDecompress                  [ARCH-DIVERGENCE: ZLIB]
+0x00447fe2,ARCH-DIVERGENCE,td5_inflate.c,454,0x00447FE2  InflateDecompress                  [ARCH-DIVERGENCE: ZLIB]
+0x0042c470,CONFIRMED,td5_input.c,377,[CONFIRMED @ 0x0042C470]: UpdateControllerForceFeedback called here inside PollRaceSessionInput in original RunRaceFrame. */
+0x00403180,CONFIRMED,td5_input.c,511,Per-slot encounter latch [CONFIRMED @ 0x00403180]. Original gate: gActorSpecialEncounterActive[slot * 0x11c] != 0.
+0x004032e8,CONFIRMED,td5_input.c,740,brake_flag mirrors throttle_state [CONFIRMED @ 0x4032E8] */ s_brake[slot] = throttle_st;
+0x00434ba0,CONFIRMED,td5_input.c,751,"FUN_00434BA0 [CONFIRMED @ 0x434BA0] UpdateSpecialEncounterControl. In the original, this modifies the cop (encounter) actor's heading/"
+0x00403180,CONFIRMED,td5_input.c,758,No brake: reset throttle_state to forward [CONFIRMED @ 0x403180] */ s_brake[slot] = 0;
+0x00403182,CONFIRMED,td5_input.c,769,s_throttle[slot] = 0x100;  /* original DAT_0046317C = 0x0100 [CONFIRMED @ 0x403182] */
+0x00402e60,CONFIRMED,td5_input.c,816,Sync current gear from live actor [CONFIRMED @ 0x402E60] */ if (a_gear) s_gear[slot] = ((uint8_t *)a_gear)[0x36B];
+,ARCH-DIVERGENCE,td5_input.c,977,[ARCH-DIVERGENCE: 2-dword globals collapsed into per-slot array; L5 sweep 2026-05-21]
+0x00402e40,CONFIRMED,td5_input.c,1002,[CONFIRMED @ 0x00402E40] — Ghidra-verified: orig walks &gPlayerControlBuffer with a 6-iteration loop writing 0 per int (6 × 4 bytes). Port loop matche
+0x0042c470,CONFIRMED,td5_input.c,1423,[CONFIRMED @ 0x0042C470]: UpdateControllerForceFeedback(0) is called from within PollRaceSessionInput for single-player; in net play the
+0x0042c470,CONFIRMED,td5_input.c,1433,[CONFIRMED @ 0x0042C470]: UpdateControllerForceFeedback dispatched inside PollRaceSessionInput for slot 0 (single-player) or the
+,ARCH-DIVERGENCE,td5_input.c,1465,[ARCH-DIVERGENCE: network-mode branch moved to caller; L5 sweep 2026-05-21] Ghidra-verified 0x00428880: orig clears g_ffControllerAssignment[0..5]
+0x004288e0,CONFIRMED,td5_input.c,1501,[CONFIRMED @ 0x4288E0]: g_actorRuntimeState.slot.field_0x318 actor+0x370 = surface type byte (index into g_terrain_ff_coefficients[13])
+0x004288e0,CONFIRMED,td5_input.c,1503,[CONFIRMED @ 0x4288E0]: cast to uint then used as LUT index ======================================================================== */
+0x004288e0,CONFIRMED,td5_input.c,1517,"[CONFIRMED @ 0x4288E0]: iVar2 = *(int*)(actor + slot*0x388 + 0x318) This is lat_speed — body-frame lateral velocity (int32, 24.8 FP)."
+0x004288e0,CONFIRMED,td5_input.c,1530,lateral_force = lateral_force * -2;  /* asymmetric feel [CONFIRMED @ 0x4288E0] */
+0x004288e0,CONFIRMED,td5_input.c,1550,[CONFIRMED @ 0x4288E0]: (uint)(byte)(actor + slot*0x388 + 0x370) Surface type byte — indexes into DAT_00466afc = g_terrain_ff_coefficients[13].
+0x004288e0,CONFIRMED,td5_input.c,1558,surface_type = (int)(uint8_t)(actor[0x370]); /* surface type [CONFIRMED @ 0x4288E0] */
+,ARCH-DIVERGENCE,td5_input.c,1586,[ARCH-DIVERGENCE: DXInput::PlayEffect -> td5_plat_ff_constant; L5 sweep 2026-05-21]
+,ARCH-DIVERGENCE,td5_input.c,1626,[ARCH-DIVERGENCE: actor+0x375 -> explicit slot params; L5 sweep 2026-05-21] Ghidra-verified 0x00428A60: orig magnitude = param_4 / 10 clamped to
+0x00406a66,CONFIRMED,td5_physics.c,349,Angular divisor shared with V2V = 0x28C (652) [CONFIRMED @ 0x406a66] */ #define ANGULAR_DIVISOR_W   0x28C
+0x00406aae,CONFIRMED,td5_physics.c,351,Impulse numerator scale factor [CONFIRMED @ 0x406aae] */ #define V2W_NUM_SCALE       0x1100
+0x004069cc,CONFIRMED,td5_physics.c,413,"wall-normal (v_perp, iVar10) components [CONFIRMED @ 0x4069cc]. Same round-toward-zero correction on the >>12 (D2/D3/D4/D6 family). */"
+0x00406a10,CONFIRMED,td5_physics.c,530,"[CONFIRMED @ 0x406a10]. D6 audit: round-toward-zero on the >>12, matching original (val + (val>>31 & 0xFFF)) >> 12 pattern. */"
+0x00406650,CONFIRMED,td5_physics.c,859,"[CONFIRMED @ 0x00406650] Steps 1-8 (frame counter, ghost reset, speed tracking, race timer, attitude clamp, dynamics dispatch + paused + scripted,"
+0x0040a2b0,CONFIRMED,td5_physics.c,877,2) [CONFIRMED @ 0x0040A2B0] AdvancePendingFinishState consolidated into td5_game.c game-tick loop (tick_pending_finish_timer @ td5_game.c).
+0x00404030,ARCH-DIVERGENCE,td5_physics.c,886,3) [ARCH-DIVERGENCE — port-only step 9 surface_contact_flags safety net] Port writes scf at the tail of this dispatcher when slot is the human
+0x00436a70,ARCH-DIVERGENCE,td5_physics.c,898,4) [ARCH-DIVERGENCE — traffic sub-path inlined here vs split in orig] Orig's traffic (slot >= 6) NEVER routes through UpdateVehicleActor —
+0x00409dd0,CONFIRMED,td5_physics.c,1061,"if (actor->frame_counter > 0x3B) {  /* 59 frames [CONFIRMED @ 0x00409DD0] */ TD5_LOG_I(LOG_TAG, ""mode1 recovery: slot=%d resetting after %d frames"","
+0x00443ed0,CONFIRMED,td5_physics.c,1132,"for traffic [CONFIRMED @ 0x443ED0]. Instead, UpdateTrafficVehiclePose sets Y absolutely from barycentric track height each tick."
+0x00443ed0,CONFIRMED,td5_physics.c,1153,"process_traffic_forward_checkpoint_pass(actor, _ts);  /* [CONFIRMED @ 0x443ED0] */"
+0x00404030,CONFIRMED,td5_physics.c,1229,[CONFIRMED @ 0x00404030] Byte-faithful with orig UpdatePlayerVehicleDynamics. SAR-RZ rounding fixed 2026-05-18 (L5 promotion follow-up).
+0x00404030,CONFIRMED,td5_physics.c,1398,[CONFIRMED @ 0x00404030]
+0x00404030,CONFIRMED,td5_physics.c,1413,Original structure [CONFIRMED @ 0x404030]: - Manual gearbox (field_0x378==0): reverse_throttle_sign only
+0x004044f9,CONFIRMED,td5_physics.c,1423,"before calling auto_gear [CONFIRMED @ 0x4044F9]. During braking, throttle=-256 which would make auto_gear set gear=REVERSE,"
+0x00404030,CONFIRMED,td5_physics.c,1453,Per-wheel distribution [CONFIRMED @ 0x00404030]: RWD: D/2 per rear wheel (front = 0)
+0x00404030,CONFIRMED,td5_physics.c,1462,case 1: /* RWD — D/2 per rear wheel [CONFIRMED @ 0x00404030] */ wheel_drive[2] = drive_torque >> 1;
+0x00404030,CONFIRMED,td5_physics.c,1466,case 2: /* FWD — D/2 per front wheel [CONFIRMED @ 0x00404030] */ wheel_drive[0] = drive_torque >> 1;
+0x00404521,CONFIRMED,td5_physics.c,1585,"Gearbox dispatch [CONFIRMED @ 0x404521]: field_0x378 == 0 → manual, != 0 → automatic */"
+0x004046dc,CONFIRMED,td5_physics.c,1679,[CONFIRMED @ 0x004046DC]: original re-reads gSurfaceGripCoefficientTable (DAT_004748C0) directly — it does NOT use the load-weighted/clamped grip[].
+0x00404b27,CONFIRMED,td5_physics.c,1760,rear_lat_force = local_14_num / denom;  /* no negation [CONFIRMED @ 0x00404B27] */
+0x00404b93,CONFIRMED,td5_physics.c,1774,front_lat_force = local_c_num / denom;  /* no negation [CONFIRMED @ 0x00404B93] */
+0x00404030,CONFIRMED,td5_physics.c,2058,projections (no CRGT dispatch). [CONFIRMED @ 0x00404030] */ {
+0x00404ec0,CONFIRMED,td5_physics.c,2240,[CONFIRMED @ 0x00404EC0] Byte-faithful with orig UpdateAIVehicleDynamics. SAR-RZ rounding fixed 2026-05-18 (L5 promotion follow-up).
+0x0040506b,CONFIRMED,td5_physics.c,2316,Cross-weight load transfer [CONFIRMED @ 0x40506B]: front_load = (rear_weight << 8) / total_weight * (half_wb - susp_defl) / half_wb
+0x004050b8,CONFIRMED,td5_physics.c,2322,Grip from surface friction * load [CONFIRMED @ 0x4050B8] */ int32_t sf = (int32_t)s_surface_friction[surface & 0x1F];
+0x00404ec0,CONFIRMED,td5_physics.c,2332,--- 4. Velocity drag in WORLD frame [CONFIRMED @ 0x404EC0] --- */ {
+0x004050ef,CONFIRMED,td5_physics.c,2357,"Steer delta trig (cos_d, sin_d) [CONFIRMED @ 0x4050EF] */ int32_t cos_d = cos_fixed12(steer_angle & 0xFFF);"
+0x004051a0,CONFIRMED,td5_physics.c,2395,--- 6. Engine pipeline [CONFIRMED @ 0x4051A0] --- */ int32_t throttle = (int32_t)actor->encounter_steering_cmd;
+0x00405285,CONFIRMED,td5_physics.c,2541,before the bicycle solve [CONFIRMED @ 0x00405285]. The drive path already stored torque/4; brake path stored clamp/2.
+0x004089eb,CONFIRMED,td5_physics.c,3177,[CONFIRMED @ 0x004089EB] — original applies the same subtraction with sVar1/sVar2 = A_center in B's frame. */
+0x00408570,CONFIRMED,td5_physics.c,3248,"Contact data from OBB corner test [CONFIRMED @ 0x00408570]: cx_A, cz_A = corner->proj_x, proj_z   (corner in TARGET's frame, WITH translation)"
+0x00407adb,CONFIRMED,td5_physics.c,3357,"[CONFIRMED @ 0x407ADB]: cardef+0x04 = front-Z extent (positive), cardef+0x08 = half-width,"
+0x004079c0,CONFIRMED,td5_physics.c,3399,"NUM_CONST = (500000 >> 8) * 0x1100 = 8,499,456 [CONFIRMED @ 0x4079C0]. The `>> 8` on INERTIA_K is NOT a compiler overflow workaround — it is"
+0x0042e2e0,CONFIRMED,td5_physics.c,4520,[CONFIRMED @ 0x0042E2E0] ConvertFloatVec3ToShortAngles Y output: Y = v[0]*M[+0xC] + v[1]*M[+0x10] + v[2]*M[+0x14]
+0x004057fa,CONFIRMED,td5_physics.c,4584,"[CONFIRMED @ 0x004057FA] UpdateVehicleSuspensionResponse calls `TransposeMatrix3x3(&actor->rotation_m00, local_30)` then"
+0x004057f0,CONFIRMED,td5_physics.c,4625,[CONFIRMED @ 0x004057F0] L5 promotion sweep audit (2026-05-18).
+0x00407424,CONFIRMED,td5_physics.c,5219,(int16_t*)(car_def + 0x08) = half-length equivalent  [CONFIRMED @ 0x407424] (int16_t*)(car_def + 0x0C) = half-width equivalent   [CONFIRMED @ 0x407420
+0x00407420,CONFIRMED,td5_physics.c,5220,(int16_t*)(car_def + 0x0C) = half-width equivalent   [CONFIRMED @ 0x407420]
+0x0040a440,CONFIRMED,td5_physics.c,5348,DecayUltimateVariantTimer [CONFIRMED @ 0x0040A440]: encounter mode 4 erodes the actor's clean_driving_score by 1
+0x004631a0,CONFIRMED,td5_physics.c,5380,DAT_004631a4 is 0 for all 12 span types [CONFIRMED @ 0x004631A0]. DAT_004631a0 values [CONFIRMED @ 0x004631A0]:
+0x004631a0,CONFIRMED,td5_physics.c,5381,DAT_004631a0 values [CONFIRMED @ 0x004631A0]: span_type: 0  1  2  3  4  5  6  7  8  9 10 11 */
+0x004073b0,CONFIRMED,td5_physics.c,5386,[CONFIRMED @ 0x004073B0] outer_sub = lane_count nibble (NOT -1). Fixed 2026-05-18 (was `lane_count - 1` per L4 audit). */
+0x0040a440,CONFIRMED,td5_physics.c,5408,DecayUltimateVariantTimer [CONFIRMED @ 0x0040A440] — same as inner-edge */ if (g_td5.special_encounter_enabled == 4 && actor->finish_time == 0) {
+0x00407840,CONFIRMED,td5_physics.c,5426,"[CONFIRMED @ 0x00407840] Byte-faithful with orig ProcessActorRouteAdvance. - Wrap-span strip indexed at DAT_00483550 (total_spans), matching the"
+0x00407879,CONFIRMED,td5_physics.c,5444,Only fires at the last span [CONFIRMED @ 0x407879] */ int span_idx = (int)actor->track_span_raw;
+0x004078b7,CONFIRMED,td5_physics.c,5467,[CONFIRMED @ 0x004078B7] orig reads strip[wrap+3]&0xF = lane_nibble. */ int wrap_lanes = (int)(((const uint8_t *)sp_wrap)[3] & 0x0F);
+0x004076c0,CONFIRMED,td5_physics.c,5517,"[CONFIRMED @ 0x4076C0] if (*(short*)(actor+0x80) == DAT_00483954 + 1) [CONFIRMED @ 0x443ED0] called after ProcessActorRouteAdvance, before"
+0x00443ed0,CONFIRMED,td5_physics.c,5518,"[CONFIRMED @ 0x443ED0] called after ProcessActorRouteAdvance, before ProcessActorSegmentTransition."
+0x0040634b,CONFIRMED,td5_physics.c,6014,"[CONFIRMED @ 0x0040634B]: original does INC word ptr [ESI+0x360] inside the per-wheel averaging loop of IntegrateVehiclePoseAndContacts,"
+0x00405ff9,CONFIRMED,td5_physics.c,6115,[CONFIRMED @ 0x00405FF9] gate angular_velocity on mask stability. */ if (mask_stable) {
+0x00403720,CONFIRMED,td5_physics.c,7011,Per-probe track position update [CONFIRMED @ 0x403720]. Original calls FUN_004440F0 per probe with probe's own world pos.
+0x00403720,CONFIRMED,td5_physics.c,7129,[CONFIRMED @ 0x00403720] */ int32_t force = (wheel_y - ground_y) + g_gravity_constant;
+0x00405d70,CONFIRMED,td5_physics.c,7545,[CONFIRMED @ 0x00405D70] Byte-faithful with orig ResetVehicleActorState. L5 promotion 2026-05-18 (small-tier sweep). 54-instr listing match: clears
+0x00405d70,CONFIRMED,td5_physics.c,7597,those 4 per-wheel values into world_pos.y. [CONFIRMED @ 0x00405D70] */ actor->world_pos.y = (int32_t)0xC0000000;   /* +0x200 */
+0x00403d90,CONFIRMED,td5_physics.c,7790,[CONFIRMED @ 0x403D90] Byte-faithful with orig UpdateVehicleState0fDamping. L5 audit 2026-05-18 (TD5_pool0 read-only):
+0x0042ed50,CONFIRMED,td5_physics.c,7922,[CONFIRMED @ 0x0042ED50] Byte-faithful with orig UpdateVehicleEngineSpeedSmoothed.
+0x0042edf0,CONFIRMED,td5_physics.c,8048,[CONFIRMED @ 0x0042EDF0] Byte-faithful with orig UpdateEngineSpeedAccumulator. L5 promotion 2026-05-18 (small-tier sweep). Line-for-line listing port;
+0x0042f030,CONFIRMED,td5_physics.c,8435,[CONFIRMED @ 0x0042F030] Byte-faithful with orig ComputeDriveTorqueFromGearCurve.
+0x0042eea0,CONFIRMED,td5_physics.c,8524,[CONFIRMED @ 0x0042EEA0] Byte-faithful with orig ApplySteeringTorqueToWheels. L5 promotion 2026-05-18 (small-tier sweep). Verbatim port of 24-instr li
+0x0042f010,CONFIRMED,td5_physics.c,8612,[CONFIRMED @ 0x0042F010] Byte-faithful with orig ApplyReverseGearThrottleSign. L5 promotion 2026-05-18 (small-tier sweep). 8-instr listing match;
+0x004032a0,CONFIRMED,td5_physics.c,9139,actor->throttle_state = 1;  /* forward mode [CONFIRMED @ 0x4032A0] */ actor->vehicle_mode = 0;
+0x0042f140,CONFIRMED,td5_physics.c,9148,actor->throttle_input_active = 1;  /* auto gearbox [CONFIRMED @ 0x42F140] */ actor->frame_counter = 0;
+0x0042f5b0,CONFIRMED,td5_physics.c,9154,actor->race_position = 0;  /* +0x383 stays 0 until UpdateRaceOrder writes at sim_tick>=1 [CONFIRMED @ 0x0042F5B0] */
+0x0043d830,ARCH-DIVERGENCE,td5_physics.c,9760,0x0043D830  ApplyRandomWheelJitterHighSpeed  [ARCH-DIVERGENCE: dead in orig (0 callers verified 2026-05-21 via mcp__ghidra__function_callers); no port
+0x0043d910,ARCH-DIVERGENCE,td5_physics.c,9761,0x0043D910  ApplyRandomWheelJitterLowSpeed   [ARCH-DIVERGENCE: dead in orig (0 callers verified 2026-05-21 via mcp__ghidra__function_callers); no port
+0x0040b0d8,CONFIRMED,td5_platform_win32.c,2397,D3DRS_ZFUNC        (0x17) = 8 (D3DCMP_ALWAYS)  [CONFIRMED @ 0x0040b0d8] D3DRS_ZWRITEENABLE (0x0E) = 0                  [CONFIRMED @ 0x0040b0e1]
+0x0040b0e1,CONFIRMED,td5_platform_win32.c,2398,D3DRS_ZWRITEENABLE (0x0E) = 0                  [CONFIRMED @ 0x0040b0e1]
+,ARCH-DIVERGENCE,td5_render.c,865,[ARCH-DIVERGENCE: globals -> parameter list; L5 sweep 2026-05-21] Mirror of the quad path with vert count 3 instead of 4. Orig writes the
+,ARCH-DIVERGENCE,td5_render.c,886,"[ARCH-DIVERGENCE: globals -> parameter list; L5 sweep 2026-05-21] Orig writes DAT_004af268 (vertex ptr = cmd+8), DAT_004af278=1, sets"
+0x0040aec0,ARCH-DIVERGENCE,td5_render.c,1112,[ARCH-DIVERGENCE: D3D3 ReleaseRaceRenderResources -> D3D11 abstracted shutdown; L5 sweep 2026-05-21]
+0x0040ade0,ARCH-DIVERGENCE,td5_render.c,1145,[ARCH-DIVERGENCE: D3D3 BeginScene -> D3D11 platform-abstracted begin-frame; L5 sweep 2026-05-21]
+0x0040ae00,ARCH-DIVERGENCE,td5_render.c,1187,[ARCH-DIVERGENCE: D3D3 EndScene -> D3D11 platform-abstracted end-frame; L5 sweep 2026-05-21]
+0x0040af50,ARCH-DIVERGENCE,td5_render.c,1222,[ARCH-DIVERGENCE: D3D3 SetRenderState calls -> D3D11 platform call; L5 sweep 2026-05-21]
+0x0040af10,ARCH-DIVERGENCE,td5_render.c,1243,[ARCH-DIVERGENCE: D3D3 DXD3D::CanFog() probe removed; L5 sweep 2026-05-21] Mirrors ConfigureRaceFogColorAndMode @ 0x0040AF10. Orig stores
+0x0043dc20,ARCH-DIVERGENCE,td5_render.c,1274,[ARCH-DIVERGENCE: absorbed caller's view-space translation bake; L5 sweep 2026-05-21]
+0x0043daf0,ARCH-DIVERGENCE,td5_render.c,1312,[ARCH-DIVERGENCE: depth-1 backup slot -> N-deep stack; L5 sweep 2026-05-21] Mirrors PushRenderTransform @ 0x0043DAF0. Orig copies the 12-float (3x4)
+0x0043db70,ARCH-DIVERGENCE,td5_render.c,1329,[ARCH-DIVERGENCE: depth-1 backup slot -> N-deep stack; L5 sweep 2026-05-21] Mirrors PopRenderTransform @ 0x0043DB70. Symmetric counterpart to
+0x0042dcad,CONFIRMED,td5_render.c,1638,no origin offset added) [CONFIRMED @ 0x42dcad] */ float cx = mesh->bounding_center_x;
+0x004312e0,ARCH-DIVERGENCE,td5_render.c,2441,[ARCH-DIVERGENCE: struct-pool vs raw-byte linked-list; L5 sweep 2026-05-21] Mirrors InitializeTranslucentPrimitivePipeline @ 0x004312E0. Orig builds t
+0x0040ba60,ARCH-DIVERGENCE,td5_render.c,2661,[ARCH-DIVERGENCE: struct vs raw-byte texture-page pool; L5 sweep 2026-05-21] Mirrors ResetTexturePageCacheState @ 0x0040BA60. Orig walks raw byte arra
+0x0040b6b0,CONFIRMED,td5_render.c,2723,"type 0 → ALPHABLENDENABLE=0 (opaque)                  [CONFIRMED @ 0x0040B6B0] type 1 → ALPHABLENDENABLE=1, SRCALPHA/INVSRCALPHA     [CONFIRMED @ 0x00"
+0x0040b6cc,CONFIRMED,td5_render.c,2724,"type 1 → ALPHABLENDENABLE=1, SRCALPHA/INVSRCALPHA     [CONFIRMED @ 0x0040B6CC] type 2 → same D3D state as type 1, no ZWRITE write    [CONFIRMED @ 0x00"
+0x0040b6e8,CONFIRMED,td5_render.c,2726,"type 3 → ALPHABLENDENABLE=1, ONE/ONE (additive)       [CONFIRMED @ 0x0040B6E8]"
+0x0042e130,CONFIRMED,td5_render.c,3078,"[CONFIRMED @ 0x0042E130] L5 promotion sweep audit (2026-05-18). Byte-faithful port: same all-zero-disable gate, same (R+G+B)/3 intensity, same"
+0x00430150,CONFIRMED,td5_render.c,3483,[CONFIRMED @ 0x00430150] ApplyTrackLightingForVehicleSegment. L5 audit 2026-05-18 (TD5_pool0 read-only).
+0x0040c5cc,CONFIRMED,td5_render.c,3994,#define SHADOW_VIEW_Y_OFFSET    (-22.0f)   /* [CONFIRMED @ 0x40C5CC] push shadow below car in view-space */
+0x0040c5cc,CONFIRMED,td5_render.c,4136,"the car, not at wheel-probe height. [CONFIRMED @ 0x40C5CC] */ vy += SHADOW_VIEW_Y_OFFSET;"
+0x00401204,CONFIRMED,td5_render.c,4228,"td5_vfx.c [CONFIRMED @ 0x401204] / @ 0x4011F5]. */ static void render_vehicle_brake_lights(const TD5_Actor *actor, int slot)"
+0x00446f00,ARCH-DIVERGENCE,td5_render.c,4416,[ARCH-DIVERGENCE — D3D3->D3D11 wheel billboard emission] orig 0x00446f00.
+0x00446f15,CONFIRMED,td5_render.c,4477,front_angle_12b = accumulated_tire_slip_z * -4  [CONFIRMED @ 0x446F15] rear_angle_12b  = accumulated_tire_slip_x * -4  [CONFIRMED @ 0x446F23]
+0x00446f23,CONFIRMED,td5_render.c,4478,rear_angle_12b  = accumulated_tire_slip_x * -4  [CONFIRMED @ 0x446F23] The slip fields accumulate forward speed every physics tick
+0x00446f00,CONFIRMED,td5_render.c,4621,"Spin frame [CONFIRMED @ 0x446F00]: frame = min(abs(long_speed) >> 14, 3)"
+0x004470c0,CONFIRMED,td5_render.c,4652,"[CONFIRMED @ 0x004470C0]. UV samples a 30/64-half-width window (1-texel margin) centered on the chosen sub-tile, so the"
+,ARCH-DIVERGENCE,td5_render.c,4914,[ARCH-DIVERGENCE: per-billboard pool collapsed to global counter; L5 sweep 2026-05-21]
+0x0040a6a0,CONFIRMED,td5_render.c,5014,[CONFIRMED @ 0x0040A6A0] Byte-faithful with orig CosFloat12bit. L5 promotion 2026-05-18 (small-tier sweep). 4-instr listing match:
+0x0040a6c0,CONFIRMED,td5_render.c,5029,[CONFIRMED @ 0x0040A6C0] Byte-faithful with orig SinFloat12bit. L5 promotion 2026-05-18 (small-tier sweep). 5-instr listing match:
+0x0042da10,CONFIRMED,td5_render.c,5312,[CONFIRMED @ 0x0042DA10] Byte-faithful with orig MultiplyRotationMatrices3x3. L5 audit 2026-05-18 (TD5_pool0 read-only):
+,ARCH-DIVERGENCE,td5_render.c,5341,[ARCH-DIVERGENCE: signature & output type; L5 sweep 2026-05-21] Orig 0x0042DBD0 disassembly (FLD/FMUL/FADDP/FSTP) writes 3 floats
+0x0043e8e0,CONFIRMED,td5_render.c,5735,"[CONFIRMED @ 0x0043E8E0] */ void td5_render_set_projection_center(float cx, float cy) {"
+0x0043e900,CONFIRMED,td5_render.c,5744,[CONFIRMED @ 0x0043E900] */ void td5_render_recompute_frustum_for_trackside(void) {
+,ARCH-DIVERGENCE,td5_render.c,5970,[ARCH-DIVERGENCE: cross-fade / fade-overlay collapse] Phase 5(a) class manifest (2026-05-21)
+0x0040cdc0,ARCH-DIVERGENCE,td5_render.c,5981,0x0040CDC0  CrossFade16BitSurfaces (variant 1)  [ARCH-DIVERGENCE: CrossFade] 0x0040D120  AdvanceCrossFadeTransition          [ARCH-DIVERGENCE: CrossFa
+0x0040d120,ARCH-DIVERGENCE,td5_render.c,5982,0x0040D120  AdvanceCrossFadeTransition          [ARCH-DIVERGENCE: CrossFade] 0x0040D190  CrossFade16BitSurfaces (variant 2)  [ARCH-DIVERGENCE: CrossFa
+0x0040d190,ARCH-DIVERGENCE,td5_render.c,5983,0x0040D190  CrossFade16BitSurfaces (variant 2)  [ARCH-DIVERGENCE: CrossFade]
+,ARCH-DIVERGENCE,td5_render.c,5987,[ARCH-DIVERGENCE: mesh transform / projection helpers] Phase 5(a) class manifest (2026-05-21)
+0x0042d880,ARCH-DIVERGENCE,td5_render.c,5998,0x0042D880  ApplyMeshRenderBasisFromTransform  [ARCH-DIVERGENCE: MeshXform] 0x0042E3D0  TransformShortVectorToView         [ARCH-DIVERGENCE: MeshXform
+0x0042e3d0,ARCH-DIVERGENCE,td5_render.c,5999,0x0042E3D0  TransformShortVectorToView         [ARCH-DIVERGENCE: MeshXform] 0x0042E560  TransformTriangleByRenderMatrix    [ARCH-DIVERGENCE: MeshXform
+0x0042e560,ARCH-DIVERGENCE,td5_render.c,6000,0x0042E560  TransformTriangleByRenderMatrix    [ARCH-DIVERGENCE: MeshXform] 0x0043DEC0  ApplyMeshProjectionEffect          [ARCH-DIVERGENCE: MeshXform
+0x0043dec0,ARCH-DIVERGENCE,td5_render.c,6001,0x0043DEC0  ApplyMeshProjectionEffect          [ARCH-DIVERGENCE: MeshXform]
+,ARCH-DIVERGENCE,td5_render.c,6005,[ARCH-DIVERGENCE: depth-sort bucket management] Phase 5(a) class manifest (2026-05-21)
+0x0043e2c0,ARCH-DIVERGENCE,td5_render.c,6016,0x0043E2C0  ResetProjectedPrimitiveWorkBuffer    [ARCH-DIVERGENCE: DepthSort] 0x0043E2F0  FlushProjectedPrimitiveBuckets       [ARCH-DIVERGENCE: Depth
+0x0043e2f0,ARCH-DIVERGENCE,td5_render.c,6017,0x0043E2F0  FlushProjectedPrimitiveBuckets       [ARCH-DIVERGENCE: DepthSort] 0x0043E3B0  InsertBillboardIntoDepthSortBuckets  [ARCH-DIVERGENCE: Depth
+0x0043e3b0,ARCH-DIVERGENCE,td5_render.c,6018,0x0043E3B0  InsertBillboardIntoDepthSortBuckets  [ARCH-DIVERGENCE: DepthSort] 0x0043E5F0  InitializeProjectedPrimitiveBuckets  [ARCH-DIVERGENCE: Depth
+0x0043e5f0,ARCH-DIVERGENCE,td5_render.c,6019,0x0043E5F0  InitializeProjectedPrimitiveBuckets  [ARCH-DIVERGENCE: DepthSort]
+,ARCH-DIVERGENCE,td5_render.c,6023,[ARCH-DIVERGENCE: per-segment track lighting] Phase 5(a) class manifest (2026-05-21)
+0x0040cd10,ARCH-DIVERGENCE,td5_render.c,6034,0x0040CD10  UpdateActorTrackLightState     [ARCH-DIVERGENCE: TrackLight] 0x0042FE20  BlendTrackLightEntryFromStart  [ARCH-DIVERGENCE: TrackLight]
+0x0042fe20,ARCH-DIVERGENCE,td5_render.c,6035,0x0042FE20  BlendTrackLightEntryFromStart  [ARCH-DIVERGENCE: TrackLight] 0x0042FFC0  BlendTrackLightEntryFromEnd    [ARCH-DIVERGENCE: TrackLight]
+0x0042ffc0,ARCH-DIVERGENCE,td5_render.c,6036,0x0042FFC0  BlendTrackLightEntryFromEnd    [ARCH-DIVERGENCE: TrackLight]
+,ARCH-DIVERGENCE,td5_render.c,6040,[ARCH-DIVERGENCE: rasterizer pipeline (D3D3 -> D3D11)] Phase 5(d) class manifest (2026-05-21)
+0x004317f0,ARCH-DIVERGENCE,td5_render.c,6066,0x004317F0  ClipAndSubmitProjectedPolygon    [ARCH-DIVERGENCE: D3D Pipeline] 0x004323D0  RenderTrackSegmentBatch          [ARCH-DIVERGENCE: D3D Pipeli
+0x004323d0,ARCH-DIVERGENCE,td5_render.c,6067,0x004323D0  RenderTrackSegmentBatch          [ARCH-DIVERGENCE: D3D Pipeline] 0x004326D0  RenderTrackSegmentBatchVariant   [ARCH-DIVERGENCE: D3D Pipeli
+0x004326d0,ARCH-DIVERGENCE,td5_render.c,6068,0x004326D0  RenderTrackSegmentBatchVariant   [ARCH-DIVERGENCE: D3D Pipeline] 0x00432AB0  AppendClippedPolygonTriangleFan  [ARCH-DIVERGENCE: D3D Pipeli
+0x00432ab0,ARCH-DIVERGENCE,td5_render.c,6069,0x00432AB0  AppendClippedPolygonTriangleFan  [ARCH-DIVERGENCE: D3D Pipeline] 0x004329E0  FlushImmediateDrawPrimitiveBatch [ARCH-DIVERGENCE: D3D Pipeli
+0x004329e0,ARCH-DIVERGENCE,td5_render.c,6070,0x004329E0  FlushImmediateDrawPrimitiveBatch [ARCH-DIVERGENCE: D3D Pipeline] 0x00431340  FlushQueuedTranslucentPrimitives [ARCH-DIVERGENCE: D3D Pipeli
+0x00431340,ARCH-DIVERGENCE,td5_render.c,6071,0x00431340  FlushQueuedTranslucentPrimitives [ARCH-DIVERGENCE: D3D Pipeline] 0x00431750  EmitTranslucentTriangleStrip     [ARCH-DIVERGENCE: D3D Pipeli
+0x00431750,ARCH-DIVERGENCE,td5_render.c,6072,0x00431750  EmitTranslucentTriangleStrip     [ARCH-DIVERGENCE: D3D Pipeline] 0x0043DCB0  TransformAndQueueTranslucentMesh [ARCH-DIVERGENCE: D3D Pipeli
+0x0043dcb0,ARCH-DIVERGENCE,td5_render.c,6073,0x0043DCB0  TransformAndQueueTranslucentMesh [ARCH-DIVERGENCE: D3D Pipeline]
+,ARCH-DIVERGENCE,td5_render.c,6077,[ARCH-DIVERGENCE: D3D3 sprite-template scratch -> D3D11 vertex stream] Phase 5(d) class manifest (2026-05-21)
+0x00446a70,ARCH-DIVERGENCE,td5_render.c,6100,0x00446A70  InitializeVehicleWheelSpriteTemplates [ARCH-DIVERGENCE: D3D3 Templates]
+0x0040c7e0,ARCH-DIVERGENCE,td5_render.c,6101,0x0040C7E0  BuildSpecialActorOverlayQuads         [ARCH-DIVERGENCE: D3D3 Templates]
+0x004011c0,ARCH-DIVERGENCE,td5_render.c,6102,0x004011C0  RenderVehicleTaillightQuads           [ARCH-DIVERGENCE: D3D3 Templates]
+,ARCH-DIVERGENCE,td5_save.c,892,[ARCH-DIVERGENCE: port-only TD5_CUPDATA_OVERLAY trailer; L5 sweep 2026-05-21] Ghidra-verified 0x00411120: orig writes exactly 0x32A6 bytes (header
+,ARCH-DIVERGENCE,td5_save.c,1072,"[ARCH-DIVERGENCE: port-only TD5_CUPDATA_OVERLAY trailer; L5 sweep 2026-05-21] Ghidra-verified 0x004112C0: orig reads at fixed 0x32A6 size, validates"
+0x00440b00,CONFIRMED,td5_sound.c,223,"[CONFIRMED @ 0x00440B00]: DAT_004c3768 tracks whether rain has been started per viewport (""if DAT_004c3768 != 0 → already playing""). */"
+,ARCH-DIVERGENCE,td5_sound.c,337,[ARCH-DIVERGENCE: DXSound::Stop/Remove -> td5_plat_audio; L5 sweep 2026-05-21] Ghidra-verified 0x00441D50: orig stops slots 0x2c..0x57 (DXSound::Stop)
+,ARCH-DIVERGENCE,td5_sound.c,384,"[ARCH-DIVERGENCE: 4 ""99"" markers collapsed to per-state array writes; L5 sweep 2026-05-21]"
+0x00440b00,CONFIRMED,td5_sound.c,499,UpdateVehicleAudioMix ambient weather section [CONFIRMED @ 0x00440B00]
+0x00441c60,CONFIRMED,td5_sound.c,506,Sound slots (from LoadRaceAmbientSoundBuffers [CONFIRMED @ 0x00441C60]): slot 18 (0x12): Rain.wav  — looped rain loop start channel
+0x00440b00,CONFIRMED,td5_sound.c,510,[CONFIRMED @ 0x00440B00]: g_weatherActiveCountView0/1 → td5_vfx_get_weather_active_count(vp)
+0x00440b00,CONFIRMED,td5_sound.c,524,[CONFIRMED @ 0x00440B00]: Start rain if count>=1 AND not yet playing AND weather==RAIN (0).  Play at volume=0 (silent start). */
+0x00440b00,CONFIRMED,td5_sound.c,532,[CONFIRMED @ 0x00440B00]: Stop rain when count drops to zero. */ slot_stop(slot_offset + 0x12);
+0x00440b00,CONFIRMED,td5_sound.c,538,"[CONFIRMED @ 0x00440B00]: Modulate rain volume by particle count. Volume = clamp(weather_count, 0, 0x7f)."
+0x004413d1,CONFIRMED,td5_sound.c,947,Start SkidBit.wav loop — slot 0x13 [CONFIRMED @ 0x4413D1] */ if (!slot_is_playing(slot_offset + 0x13)) {
+0x00441d90,CONFIRMED,td5_sound.c,1168,[CONFIRMED @ 0x00441D90] Byte-faithful with orig PlayVehicleSoundAtPosition. SAR-RZ-class LSB fixes shipped 2026-05-18:
+,ARCH-DIVERGENCE,td5_sound.c,1288,[ARCH-DIVERGENCE: DXSound -> td5_plat_audio + loose-file fallback; L5 sweep 2026-05-21]
+0x00406cc0,CONFIRMED,td5_track.c,808,dispatch [CONFIRMED @ 0x00406CC0].
+0x0042fb40,CONFIRMED,td5_track.c,2008,"[CONFIRMED @ 0x0042FB40] L5 promotion sweep audit (2026-05-18). Byte-faithful port of orig fill loop: iterates s_span_count, consumes (span_idx, val)"
+0x0042fb40,ARCH-DIVERGENCE,td5_track.c,2013,"[ARCH-DIVERGENCE @ 0x0042FB40] Orig signature is ApplyTrackStripAttributeOverrides(track_idx, default_attr) and seeds"
+0x004440f0,CONFIRMED,td5_track.c,2224,Junction branch decision [CONFIRMED @ 0x004440F0]: The original uses running sub_lane_index (cVar15) directly for the
+0x004440f0,CONFIRMED,td5_track.c,2237,case 8: { /* JUNCTION_FWD [CONFIRMED @ 0x004440F0]: original uses running cVar15 (sub_lane_index) directly:
+0x00444414,CONFIRMED,td5_track.c,2279,Normal: adjust sub_lane by height_offset difference [CONFIRMED @ 0x444414] */ if (new_span >= 0 && new_span < s_span_count) {
+0x004440f0,CONFIRMED,td5_track.c,2290,case 8: { /* JUNCTION_FWD: same branch decision as 0x01 [CONFIRMED @ 0x004440F0] */
+0x004440f0,CONFIRMED,td5_track.c,2328,case 11: { /* JUNCTION_BWD [CONFIRMED @ 0x004440F0]: threshold = pbVar1[-0x15] & 0xf
+0x004440f0,CONFIRMED,td5_track.c,2375,case 11: { /* JUNCTION_BWD: same branch decision as 0x04 [CONFIRMED @ 0x004440F0] */
+0x004440f0,CONFIRMED,td5_track.c,2919,[CONFIRMED @ 0x004440F0] L5 promotion sweep audit (2026-05-18).
+0x004456d0,ARCH-DIVERGENCE,td5_track.c,3088,[ARCH-DIVERGENCE @ 0x004456D0] Orig variant at 0x004456D0 uses raw cross-products with >>4 quantization and no FPU renormalization;
+0x004457e0,CONFIRMED,td5_track.c,3433,[CONFIRMED @ 0x004457E0]
+0x004458f7,CONFIRMED,td5_track.c,3471,"Unconditional (li+1, ri, ri+1). [CONFIRMED @ 0x004458f7] */ va = vl1; vb = vr0; vc = vr1;"
+0x004459e8,CONFIRMED,td5_track.c,3476,"Unconditional (li, ri+1, li+1). [CONFIRMED @ 0x004459e8] */ va = vl0; vb = vr1; vc = vl1;"
+0x004459f9,CONFIRMED,td5_track.c,3497,"Unconditional (li, ri, ri+1). [CONFIRMED @ 0x004459f9] */ va = vl0; vb = vr0; vc = vr1;"
+0x0044598c,CONFIRMED,td5_track.c,3502,"Unconditional (li, ri, li+1). [CONFIRMED @ 0x0044598c] */ va = vl0; vb = vr0; vc = vl1;"
+0x00433fc0,ARCH-DIVERGENCE,td5_track.c,3618,[ARCH-DIVERGENCE @ 0x00433FC0] Orig dispatches into AngleFromVector12 (0x0040A720) which indexes a precomputed 12-bit atan2 LUT at
+0x00434390,CONFIRMED,td5_track.c,3668,1. Sub-lane NOT added to vertex indices [CONFIRMED @ 0x434390] 2. Case 3/4: uses right+2 vertex [CONFIRMED @ 0x434410]
+0x00434410,CONFIRMED,td5_track.c,3669,2. Case 3/4: uses right+2 vertex [CONFIRMED @ 0x434410] 3. Case 6/7: uses left+2 vertex [CONFIRMED @ 0x434450]
+0x00434450,CONFIRMED,td5_track.c,3670,3. Case 6/7: uses left+2 vertex [CONFIRMED @ 0x434450] 4. Signed divide rounds toward zero [CONFIRMED @ 0x434408]
+0x00434408,CONFIRMED,td5_track.c,3671,4. Signed divide rounds toward zero [CONFIRMED @ 0x434408] 5. 180° (0x800) offset added to heading [CONFIRMED @ 0x434501]
+0x00434501,CONFIRMED,td5_track.c,3672,5. 180° (0x800) offset added to heading [CONFIRMED @ 0x434501]
+0x00434408,CONFIRMED,td5_track.c,3719,Signed divide-by-4 rounding toward zero [CONFIRMED @ 0x434408] */ dx = (dx + ((dx >> 31) & 3)) >> 2;
+0x00434410,CONFIRMED,td5_track.c,3725,Shifted diagonal: uses right+2 vertex [CONFIRMED @ 0x434410] */ {
+0x00434450,CONFIRMED,td5_track.c,3736,Reversed winding: uses left+2 vertex [CONFIRMED @ 0x434450] */ {
+0x00434501,CONFIRMED,td5_track.c,3762,stored = (full_angle + 0x800) * 0x100  [CONFIRMED @ 0x00434501] Port's atan2-based AngleFromVector12 also returns the full-circle angle
+0x00434501,CONFIRMED,td5_track.c,3779,Store yaw to euler accumulator at +0x1F4. [CONFIRMED @ 0x00434501] */ (int32_t *)((uint8_t *)actor + 0x1F4) = (angle + 0x800) << 8;
+0x00443fb0,CONFIRMED,td5_track.c,4084,"[CONFIRMED @ 0x00443FB0] L5 promotion sweep audit (2026-05-18). Byte-faithful verbatim port of orig listing below; positive/negative IDIV branches,"
+0x004345b0,CONFIRMED,td5_track.c,4336,[CONFIRMED @ 0x004345B0] ======================================================================== */
+0x004345e0,CONFIRMED,td5_track.c,4352,[CONFIRMED @ 0x004345E0] base vertex = *(uint16*)(span + 0x06) = right_vertex_index */
+0x00434631,CONFIRMED,td5_track.c,4383,ax = actor_pos[0] >> 8;  /* strip 24.8 FP to integer world [CONFIRMED @ 0x00434631] */
+0x0043465d,CONFIRMED,td5_track.c,4392,Two-stage normalisation: (dot/len)<<8 then /len [CONFIRMED @ 0x0043465d] */ scaled = (dot / span_len) << 8;
+0x00434670,CONFIRMED,td5_track.c,4403,[CONFIRMED @ 0x00434670] ======================================================================== */
+0x004346f5,CONFIRMED,td5_track.c,4448,Sign from comparison [CONFIRMED @ 0x004346f5] */ {
+0x0043483d,CONFIRMED,td5_track.c,4516,World-space base coordinates [CONFIRMED @ 0x43483D] */ int32_t left_x  = (int32_t)v_left->x  + sp->origin_x;
+0x00435218,CONFIRMED,td5_track.c,4608,"[CONFIRMED @ 0x00435218] walker field layout (stride 6, per entry): u16 remap_dst           at +0"
+0x00431190,ARCH-DIVERGENCE,td5_track.c,5117,"[ARCH-DIVERGENCE @ 0x00431190] L5 promotion sweep audit (2026-05-18). Orig assumes a single fixed layout: DWORD[0]=entry_count,"
+0x0042fad0,CONFIRMED,td5_track.c,5637,[CONFIRMED @ 0x0042FAD0] Byte-faithful with orig InitializeTrackStripMetadata.
+0x00431260,ARCH-DIVERGENCE,td5_track.c,5960,[ARCH-DIVERGENCE @ 0x00431260] Orig is a 13-byte direct LUT lookup: return *(uint*)(gModelsDatEntryTable + idx*8). Port absorbs caller
+0x00445450,CONFIRMED,td5_track.c,6181,[CONFIRMED @ 0x00445450] Byte-faithful with orig ComputeActorTrackContactNormal.
+0x00445450,ARCH-DIVERGENCE,td5_track.c,6199,[ARCH-DIVERGENCE — port splits orig 0x00445450 into wrapper + 2 helpers]
+0x00434390,CONFIRMED,td5_track.c,6268,"ushort[3] = right_vertex_index (+6). [CONFIRMED @ 0x00434390] 3. Vertex pool: entry i = short[3]{x,y,z} at +i*6 bytes."
+0x00434390,CONFIRMED,td5_track.c,6295,Base vertices — sub_lane NOT added [CONFIRMED @ 0x00434390] */ vl0 = vertex_at(sp->left_vertex_index);
+0x00434408,CONFIRMED,td5_track.c,6304,[CONFIRMED @ 0x00434408] standard quad */ dx = ((int32_t)vl1->x - (int32_t)vr1->x) - (int32_t)vr0->x + (int32_t)vl0->x;
+0x00434410,CONFIRMED,td5_track.c,6311,[CONFIRMED @ 0x00434410] diagonal — right+2 vertex */ {
+0x00434450,CONFIRMED,td5_track.c,6321,[CONFIRMED @ 0x00434450] reversed winding — left+2 vertex */ {
+0x00406950,ARCH-DIVERGENCE,td5_track.c,6444,0x00406950  ClearTrackSegmentVisibilityTable  [ARCH-DIVERGENCE: broadphase grid array-width compaction + chain fold; L5 sweep 2026-05-21]
+0x00434740,ARCH-DIVERGENCE,td5_track.c,6462,"0x00434740  ComputeRouteForwardOvershootScalar  [ARCH-DIVERGENCE: dead code, sole caller discards return; L5 sweep 2026-05-21]"
+0x0043fb70,ARCH-DIVERGENCE,td5_track.c,6468,0x0043FB70  ReadTrackStaticDataChunk  [ARCH-DIVERGENCE: streaming inflate callback removed; L5 sweep 2026-05-21]
+0x0043fbc0,ARCH-DIVERGENCE,td5_track.c,6475,0x0043FBC0  DecompressTrackDataStream  [ARCH-DIVERGENCE: streaming inflate bit-reader removed; L5 sweep 2026-05-21]
+,ARCH-DIVERGENCE,td5_vfx.c,666,[ARCH-DIVERGENCE: D3D11 camera basis indirection; L5 sweep 2026-05-21] Math sequence (world→camera→basis multiply→write view-space + flag 0x40)
+,ARCH-DIVERGENCE,td5_vfx.c,722,[ARCH-DIVERGENCE: D3D11 quad path replaces DDraw sprite batch; L5 sweep 2026-05-21]
+0x0043ed7e,CONFIRMED,td5_vfx.c,1517,Realloc trigger [CONFIRMED @ 0x0043ED7E]: ((slot->direction_hash ^ angle12) & 0xFFFFFF80) != 0
+0x0043eba8,CONFIRMED,td5_vfx.c,1520,"where speedClass = clamp(abs(actor[+0x314]) >> 0xF, 1, 3) [CONFIRMED @ 0x0043EBA8]."
+0x0043f210,CONFIRMED,td5_vfx.c,1663,"[CONFIRMED @ 0x43F210] RenderTireTrackPool: iterates 80 slots, ages lifetime, fades after 300 ticks, expires at 600 ticks, reconstructs 4 world-space "
+0x0043f210,CONFIRMED,td5_vfx.c,1668,- [CONFIRMED @ 0x43F210] Per-frame anchor_y decrement removed (was gravity sink).
+0x004743f4,CONFIRMED,td5_vfx.c,1669,"- [CONFIRMED @ 0x4743F4] Texture ""SEMICOL"" (not ""SKIDMARK"" which doesn't exist)."
+0x0043f210,CONFIRMED,td5_vfx.c,1705,Age the lifetime counter [CONFIRMED @ 0x43F210] */ slot->lifetime++;
+0x0043f210,CONFIRMED,td5_vfx.c,1708,Expire after 600 ticks [CONFIRMED @ 0x43F210] */ if (slot->lifetime > TD5_VFX_TIRE_TRACK_LIFETIME) {
+0x0043f210,CONFIRMED,td5_vfx.c,1715,[CONFIRMED @ 0x43F210] bit 3 (0x08 in uVar4 >> 3) = no-fade flag. */ if (slot->lifetime > TD5_VFX_TIRE_TRACK_FADE_START) {
+0x0042a290,CONFIRMED,td5_vfx.c,2113,Lifetime: (rand() % 4 + 1) * 10 = 10..40 ticks [CONFIRMED @ 0x0042a290] */ int16_t life = (int16_t)((rand() % 4 + 1) * 10);
+0x0042a290,CONFIRMED,td5_vfx.c,2143,Phase: random start [CONFIRMED @ 0x0042a290] */ slot[PSLOT_PHASE] = (uint8_t)(rand() % 0x1F);
+0x0042a290,CONFIRMED,td5_vfx.c,2146,Velocity [CONFIRMED @ 0x0042a290]: Y = 0x600 (upward drift)
+,ARCH-DIVERGENCE,td5_vfx.c,2210,2. [ARCH-DIVERGENCE: port-introduced tire-mark spawn] Port adds vfx_tire_mark_spawn calls (lines 2225-2242) using a
+0x0042a35a,CONFIRMED,td5_vfx.c,2643,"hp=2 → +0xA8, hp=3 → +0xB4  [CONFIRMED @ 0x42A35A] */ for (int hp = 2; hp <= 3; hp++) {"
+0x00429dee,CONFIRMED,td5_vfx.c,2717,Exhaust smoke uses higher upward velocity: 0x2000 [CONFIRMED @ 0x429DEE] */ s_smoke_vel_y = 0x2000;
+0x00401204,CONFIRMED,td5_vfx.c,2831,if (brightness < 0x80) {  /* cap at 128 [CONFIRMED @ 0x401204] */ brightness += 8;
+0x00440b00,CONFIRMED,td5_vfx.c,2894,[CONFIRMED @ 0x00440B00] UpdateVehicleAudioMix reads g_weatherActiveCountView0 (per-viewport particle density) and g_weatherType to gate rain sound.
+,ARCH-DIVERGENCE,td5_vfx.c,2949,[ARCH-DIVERGENCE: particle system pipeline collapse] Phase 5(a) class manifest (2026-05-21)
+0x00429510,ARCH-DIVERGENCE,td5_vfx.c,2961,0x00429510  InitializeRaceParticleSystem            [ARCH-DIVERGENCE: Particle] 0x00429690  ProjectRaceParticlesToView              [ARCH-DIVERGENCE: 
+0x00429690,ARCH-DIVERGENCE,td5_vfx.c,2962,0x00429690  ProjectRaceParticlesToView              [ARCH-DIVERGENCE: Particle] 0x00429720  DrawRaceParticleEffects                 [ARCH-DIVERGENCE: 
+0x00429720,ARCH-DIVERGENCE,td5_vfx.c,2963,0x00429720  DrawRaceParticleEffects                 [ARCH-DIVERGENCE: Particle] 0x00429790  UpdateRaceParticleEffects               [ARCH-DIVERGENCE: 
+0x00429790,ARCH-DIVERGENCE,td5_vfx.c,2964,0x00429790  UpdateRaceParticleEffects               [ARCH-DIVERGENCE: Particle] 0x0042A6B0  SpawnAmbientParticleStreak              [ARCH-DIVERGENCE: 
+0x0042a6b0,ARCH-DIVERGENCE,td5_vfx.c,2965,0x0042A6B0  SpawnAmbientParticleStreak              [ARCH-DIVERGENCE: Particle] 0x00446240  InitializeWeatherOverlayParticles       [ARCH-DIVERGENCE: 
+0x00446240,ARCH-DIVERGENCE,td5_vfx.c,2966,0x00446240  InitializeWeatherOverlayParticles       [ARCH-DIVERGENCE: Particle] 0x004464B0  UpdateAmbientParticleDensityForSegment  [ARCH-DIVERGENCE: 
+0x004464b0,ARCH-DIVERGENCE,td5_vfx.c,2967,0x004464B0  UpdateAmbientParticleDensityForSegment  [ARCH-DIVERGENCE: Particle] 0x00446560  RenderAmbientParticleStreaks            [ARCH-DIVERGENCE: 
+0x00446560,ARCH-DIVERGENCE,td5_vfx.c,2968,0x00446560  RenderAmbientParticleStreaks            [ARCH-DIVERGENCE: Particle]
+0x00403180,CONFIRMED,td5_ai.h,93,Per-slot encounter latch (g_encounter_active[slot] != 0) [CONFIRMED @ 0x00403180].
+0x00413bc0,CONFIRMED,td5_game.h,105,[CONFIRMED @ 0x00413BC0] ScreenPostRaceNameEntry reads these fields */ int32_t td5_game_get_result_primary(int slot);   /* finish time ticks */
+0x0042c470,CONFIRMED,td5_input.h,262,void td5_input_ff_update(void);  /* top-level dispatcher: calls ff_update_player for each active slot [CONFIRMED @ 0x0042C470] */
+0x00423a80,CONFIRMED,td5_save.h,174,[CONFIRMED @ 0x423A80]: original tracks DAT_00494bb0 (cars) / DAT_00494bb4 (tracks) separately. */
+0x00435218,CONFIRMED,td5_track.h,295,Record layout per [CONFIRMED @ 0x00435218] walker disasm: +0 u16 remap_dst
+0x004140a8,CONFIRMED,td5_types.h,530,char     name[16];              /* player name up to 15 chars (null at +0x0F) [CONFIRMED @ 0x4140A8] */
+0x00440b00,CONFIRMED,td5_vfx.h,116,[CONFIRMED @ 0x00440B00]: UpdateVehicleAudioMix reads per-view weather particle active count (g_weatherActiveCountView0) and g_weatherType

@@ -1,0 +1,151 @@
+0045d630,g_hudSpeedoDigitMicroOff
+0045d670,g_oneDouble_PROVISIONAL
+0045d680,g_floatOneDiv255 (= 1/255)
+0045d684,g_floatMaxByte (= 255.0f)
+0045d6c4,g_hudViewportInsetSign
+0045d6c8,g_hudReplayBannerInsetX
+0045d6d0,g_hudIndicatorCenterOffY
+0045d6e4,g_hudIndicatorCenterOffX
+0045d790,g_audioSirenFrequencyScale
+0045d794,g_audioEngineFrequencyScale
+00463080,g_cameraOrientAngleFovScale
+00463088,g_cameraProfileProjScaleRand
+00463c8c,g_extrasGalleryPreviousSlideIndex
+00463fbc,g_fopenModeWrite
+00463fc0,g_fopenModeRead
+004643b8,g_npcRacerGroupTable (already named)
+004656f4,s_FrontendSoundsZipPath (already named)
+00465ff4,g_player2InputSource (already named)
+00466004,g_specialEncounterUnlockA
+00466008,g_specialEncounterUnlockB
+00466020,gConfiguredDisplayModeOrdinal (already named)
+0046602c,g_cameraSpeedSetting (already named)
+00466e8c,(already named gCircuitLapCount)
+00466e94,(already named gTrackIsCircuit)
+00466ea0,(already named gPrimarySelectedSlot)
+00466ea4,(already named gSecondarySelectedSlot)
+00467384,g_actorWheelOrderTableActive
+0046738c,g_actorWheelOrderTableScripted
+00473820,g_perTrackCameraConfigPair
+0047463c,g_engineSpeakerVolumeFraction
+00474b60,s_HornWavFilename (already named)
+00474b6c,s_RevWavFilename (already named)
+00474b74,s_ReverbWavFilename (already named)
+00474b94,s_DriveWavFilename (already named)
+00474bb0,s_SoundZipPath (already named)
+00482ec4,g_cameraProfileStripOffsetPrev
+00482ecc,g_cameraProfileBehaviorTypePrev
+00482ef8,g_cameraRotationSlot
+00482f78,g_cameraReservedF78
+00482fe4,gPlayerControlBuffer *(already named)*
+00482ffc,g_playerControlBits *(already named)*
+00483550,g_currentTrackCameraConfigA
+0048dd08,g_vehicleShadowSpriteTemplates_wheelAnchor
+0048f318,g_p1CupCompletionBitmask
+0048f324,g_mastersEncounterFlags
+0048f380,g_carSelectChampionshipReturnFlag
+0048f388,g_configTd5GameOptionsCopy_start
+00490bec,g_snapshotMiscFrontend0
+00490c04,g_snapshotMiscFrontend1
+00490c1c,g_snapshotMiscFrontend2
+00493e34,g_snapshotMiscState0
+00493e38,g_snapshotMiscState1
+00493e3c,g_snapshotMiscState2
+00493e40,g_snapshotMiscState3
+00493e42,g_snapshotMiscState4
+00493e43,g_snapshotMiscState5
+00493e47,g_snapshotMiscState6
+00493e4b,g_snapshotMiscState7
+00493e4f,g_snapshotMiscState8
+00493e51,g_snapshotMiscState9
+004951ec,g_frontendHardwareFlipEnabled_Alt_PROVISIONAL
+00495234,g_extrasGalleryEnabledFlag_PROVISIONAL
+00496284,g_browserSelectionBarSprite
+00496288,g_browserScrollIndicatorSprite
+00496290,g_languageSelectButtonHoverIndex_PROVISIONAL
+004962ac,g_cheatAttractModeOverride
+004962d0,g_postRaceSkipResultsBanner
+004962d4,g_mainMenuButtonHint
+004962d8,g_frontendMustSelectMessage_PROVISIONAL
+004968ad,(inside g_dxpOutboundPacketBuf at +1)
+00497314,g_lobbyChatPanelSurface_OR_genericButton
+00497a58,g_player1InputSource (already named)
+00497a5c,g_twoPlayerSplitMode (already named)
+00497ab8,(comment-only: frontend client origin X)
+00497abc,(comment-only: frontend client origin Y)
+00499c78,g_connBrowserListOriginX
+00499c7c,g_connBrowserListOriginY
+00499ca8,g_connBrowserListRowStride
+0049b698,g_frontendLanguageFlagsSurface_PROVISIONAL
+004a2c9c,gNpcRacerCheatFlags (already named)
+004aad60,g_gamePaused (ALREADY NAMED — confirmed)
+004aadb0,(already named g_raceViewTransformPtr)
+004aadf0,g_inputPollDeferFlag *(already named)*
+004aae0c,gRaceCameraTransitionGate (ALREADY NAMED — confirmed)
+004aaef0,**g_raceCountdownTimer** (existing name g_cameraTransitionActive is MISLEADING — propose **rename**)
+004ab0dc,g_activeLightBasisDirX[1] (slot 1 alias of 0x4ab0d0+12)
+004ab0e0,g_activeLightBasisDirY[1]
+004ab0e4,g_activeLightBasisDirZ[1]
+004ab0e8,g_activeLightBasisDirX[2]
+004ab0ec,g_activeLightBasisDirY[2]
+004ab0f0,g_activeLightBasisDirZ[2]
+004ab473,g_playerGearIndex
+004aed88,(already named g_raceCheckpointTablePtr)
+004aedb0,g_checkpointNumTable
+004aee14,g_trackCircuitFlagOrLapCount
+004aee54,g_modelsDatPostEntryTableBlob
+004afb60,(already named gActorRouteStateTable)
+004afbc8,g_actor_throttle_bias_stage
+004afbdc,g_actor_encounter_tracked_handle
+004b0a64,(already named g_hudFadeOverlayAlpha)
+004b0a6c,(already named g_minimapQuadBuffer)
+004b0a70,(already named g_minimapTrackSegmentTable)
+004b0a76,g_minimapSegmentBranchOffset
+004b0a78,g_minimapSegmentNextStart
+004b0a7a,g_minimapSegmentTableSentinel
+004b0bf8,(already named g_hudFontGlyphAtlasPtr)
+004b0c00,(already named g_hudOverlayFlagsPtr)
+004b0c04,(already named g_hudOverlayFlagsSecondaryPtr)
+004b1120,g_hudPrevSpeedCache
+004b1130,(already named g_minimapWidth)
+004b1134,(already named g_hudViewCount)
+004b1178,g_hudView1CenterX
+004b11a8,g_hudIndicatorState
+004b11ac,g_hudView1VpIntRight
+004b11b8,(already named g_minimapHeight)
+004b135c,g_audioOptionsSliderStaging
+004b1370,g_pauseOverlayBlackboxScratch
+004b1428,g_pauseOverlaySelboxScratch
+004b14e0,g_pauseOverlaySliderScratchPool
+004bcb70,g_pauseOverlaySelboxScratchPtr
+004bcb78,g_audioOptionsRepeatLatch
+004bcb80,g_fmvUseRgbOverlayFlag
+004bd344,g_fmvHasLineParamA
+004bd34c,g_fmvForceFullscreenFlag
+004bd350,g_fmvRgbOverlayParam
+004bea80,g_fmvTgqControlBlockPtr
+004bea8c,g_fmvTgqStreamConfigSelectFlag
+004bea90,g_fmvHasFloatingParamA
+004bea94,g_fmvHasFloatingParamB
+004bea9c,g_fmvFloatingParamA
+004beaa0,g_fmvFeatureFlagA
+004beaa8,g_fmvUnusedStateD
+004beab4,g_fmvFloatingParamB
+004bead0,(already named g_wantedArrestCounter)
+004bedc0,g_trackedActorMarkerAnimPhase_PROVISIONAL
+004c3720,g_tireTrackEmitterRecords
+004c37d4,g_trackedVehicleAudioActiveView0Mirror
+004c384c,g_skidLoopFlagAlternativeByActorView
+004c3cf4,g_dualTextureSetSecondHalfBase
+004c3d04,g_textureUsesTallPageFormat
+004c3d80,g_chassisBoundsMaxX
+004c3d84,g_chassisBoundsMinZ
+004c3d88,g_chassisBoundsMaxZ
+004c3d8c,g_trackStripHeaderField3
+004c3d90,(already named g_trackTotalSpanCount)
+004c3d98,(already named g_trackVertexPool)
+004c3d9c,(already named g_trackStripRecords)
+004c3db8,g_weatherStreakPrevCameraPos
+004c3dd0,g_weatherStreakParam2CachePerView
+004c3ddc,g_weatherSegmentTargetView0_PROVISIONAL
+004c3de4,g_weatherActiveCountView1_PROVISIONAL

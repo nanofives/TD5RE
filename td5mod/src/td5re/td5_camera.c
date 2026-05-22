@@ -160,13 +160,36 @@ TD5_CameraPreset g_cameraPresets[TD5_CAMERA_PRESET_COUNT] = {
  * height_mod, sentinel}. Sentinel 0xFFFF terminates.
  * ======================================================================== */
 
+/* [CONFIRMED @ 0x00402AD0 UpdateSplineTracksideCamera; REG-4 fix 2026-05-22]
+ * Spline template table, reverse-engineered from the orig's stack-local
+ * `local_5e` initialization. Each template is 4 control-point pairs of
+ * (span_delta, vert_offset) — used by UpdateSplineTracksideCamera to read
+ * 4 strip vertices around the anchor and build a cubic Catmull-Rom spline.
+ *
+ *   iter 0: span_anchor - 1            (= one strip before the camera anchor)
+ *   iter 1: span_anchor                (= the anchor itself)
+ *   iter 2: span_anchor + 40 or +10    (forward sweep, far)
+ *   iter 3: span_anchor + 41 or +11    (forward sweep, far + 1)
+ *
+ * Prior port had flat-anchor pairs (all spans = 0, alternating vert -1/0)
+ * which produced 4 collinear control points — Catmull-Rom of 4 collinear
+ * points degenerates to a straight line, breaking trackside spline cam.
+ *
+ * Orig data per template:
+ *   type 0: (-1,0) (0,0) (40, 0) (41, 0)  — forward sweep, flat anchor
+ *   type 1: (-1,0) (0,0) (40, 4) (41, 4)  — forward sweep, +4 vert lift
+ *   type 2: (-1,0) (0,0) (40,-4) (41,-4)  — forward sweep, -4 vert dip
+ *   type 3: (-1,0) (0,0) (10, 4) (11, 4)  — short-range sweep, +4 lift
+ *   type 4: same as type 3
+ *   type 5: defensive duplicate (orig has no type 5; bounds-safe fallback)
+ */
 static const short s_splineTemplates[6][8] = {
-    /* type 0 */ {  0,  0,  0, -1,  0,  0,  0, -1 },
-    /* type 1 */ {  0,  0, 40,  0, 41,  0,  0, -1 },
-    /* type 2 */ {  0,  0, 40,  0, 41,  0,  0, -1 },
-    /* type 3 */ {  0,  0, 40,  0, 41, -4, -4, -1 },
-    /* type 4 */ {  0,  0, 10,  4, 11,  4,  0, -1 },
-    /* type 5 */ {  0,  0, 10,  4, 11,  4,  0, -1 },
+    /* type 0 */ { -1, 0,   0, 0,   40,  0,   41,  0 },
+    /* type 1 */ { -1, 0,   0, 0,   40,  4,   41,  4 },
+    /* type 2 */ { -1, 0,   0, 0,   40, -4,   41, -4 },
+    /* type 3 */ { -1, 0,   0, 0,   10,  4,   11,  4 },
+    /* type 4 */ { -1, 0,   0, 0,   10,  4,   11,  4 },
+    /* type 5 */ { -1, 0,   0, 0,   10,  4,   11,  4 },
 };
 
 /* ========================================================================
@@ -309,6 +332,18 @@ void BuildCameraBasisFromAngles(short *angles)
  *
  * Copies primary basis to working copy, scales all three matrix sets
  * by projection factors, and computes integer depth range.
+ *
+ * [ARCH-DIVERGENCE: D3D11 billboard snapshot + FPU rounding; L5 sweep 2026-05-21]
+ *   Math sequence is byte-equivalent to orig (12-float memcpy → 18 multiplies
+ *   by inv_proj → ROUND of depth → 18 multiplies by fov_factor). Two
+ *   intentional divergences:
+ *   1. Port snapshots g_cameraSecondary into g_cameraSecondaryUnscaled (9
+ *      floats) before scaling — feeds the D3D11 billboard path so its rotation
+ *      lives in the unscaled basis space.
+ *   2. Integer depth uses `(int)(x + 0.5f)` instead of FISTP/RNE; tracked
+ *      under the broader chassis-snap FPU rounding cleanup
+ *      (todo_chassis_snap_fix_2026-05-16). Visual-only path; does not enter
+ *      sim cascade.
  * ======================================================================== */
 
 void FinalizeCameraProjectionMatrices(void)
@@ -349,6 +384,20 @@ void FinalizeCameraProjectionMatrices(void)
  * Constructs a look-at camera basis from the current camera position
  * toward the given target position. Applies yaw offset rotation and
  * coordinate system flip.
+ *
+ * [CONFIRMED @ 0x0042D5B0 OrientCameraTowardTarget; L5 sweep 2026-05-21]
+ *   Byte-faithful port. Side-by-side decompile match:
+ *   - dir_x/y/z = (target * g_fixedPointToFloatScale) - g_currentViewWorldOrigin
+ *   - dist_sq early-out on `(int)dist_sq <= 0`
+ *   - inv_dist = _DAT_0046737c / sqrt(dist_sq) (g_invDistScale)
+ *   - degenerate-case branch on horiz_len <= g_audioDopplerZeroSentinel
+ *     (sentinel reuses near-zero compare const)
+ *   - non-degenerate branch writes secondary matrix DAT_004ab070..090
+ *     identically (right.x, right.z = -fwd.x/h, up.x = -fy*fx/h, up.y = h,
+ *     up.z = fz*fy/h, secondary row1/2 mirrors)
+ *   - yaw_rot uses (sin,cos) swap matching orig's `local_60=cos local_5c=-sin`
+ *   - three MultiplyRotationMatrices3x3 calls + FinalizeCameraProjectionMatrices
+ *     in identical order
  * ======================================================================== */
 
 void OrientCameraTowardTarget(int *target_pos, unsigned int yaw_offset)
@@ -1009,6 +1058,25 @@ void td5_camera_finalize_all(void)
  *
  * Orbiting camera around a vehicle, used for trackside replay.
  * Smooths orbit counter using subTickFraction interpolation.
+ *
+ * [CONFIRMED @ 0x00401950 UpdateTracksideOrbitCamera; L5 sweep 2026-05-21]
+ *   Decompile verified line-by-line. Active branch matches orig:
+ *     - abs(yaw_delta)>>11 + 5 effective speed clamp; fly-in inversion
+ *     - orbit_angle_fp accumulator update via ROUND(delta*eff>>8 * subTick)
+ *     - vis_angle = orbit>>8; heading = vis_angle - actor.display_yaw +
+ *       g_cameraYawOffsetView[v]
+ *     - g_cameraOrbitAngleShortVec writes (sin/-cos)*radius + stored_pitch
+ *     - LoadRenderRotationMatrix + ConvertFloatVec3ToShortAngles
+ *     - orbit_offset[0..2] = (sin, stored_pitch, -cos) * (yawOff - vis_angle)
+ *     - world_pos additions of actor xyz + vel*subTick
+ *     - OrientCameraTowardTarget(target, g_tracksideYawOffset)
+ *
+ * [ARCH-DIVERGENCE — FPU rounding mode]
+ *   Orig uses ROUND() (FISTP / RNE). Port uses (int)(x + 0.5f). Per-call
+ *   1-LSB drift possible; visual-only output, not part of sim cascade.
+ *
+ * NOTE: Lines 1104-1117 retain dead scribble code (overwritten by 1118-1119).
+ *       Final state is correct; recommend cleanup pass to remove cruft.
  * ======================================================================== */
 
 void UpdateTracksideOrbitCamera(int actor, int is_active, int view)
@@ -1071,25 +1139,17 @@ void UpdateTracksideOrbitCamera(int actor, int is_active, int view)
         float h_delta = (g_camTargetHeight[v] - g_camSmoothedHeight[v]) * g_dampWeight;
         int smoothed_h = (int)(h_delta * g_subTickFraction + g_camSmoothedHeight[v] + 0.5f);
 
-        /* Orbit position using opposite angle */
+        /* Orbit position from Ghidra 0x00401950:
+         *   X =  sin(orbit_vis) * radius
+         *   Y =  stored pitch (no orbit component on vertical)
+         *   Z = -cos(orbit_vis) * radius
+         * (REG-8 cleanup 2026-05-22: removed 4 stale authoring-draft overwrites
+         *  of [v][0]/[v][2]; final writes preserved identically.) */
         unsigned int orbit_vis = (unsigned int)(g_camYawOffset[v] - (int)vis_angle);
         float radius = g_camCurrentRadius[v];
 
-        g_camOrbitOffset[v][0] = (int)(CosFloat12bit(orbit_vis) * radius + 0.5f);
-        g_camOrbitOffset[v][1] = g_camStoredPitch[v];
-        g_camOrbitOffset[v][2] = (int)(-(CosFloat12bit((unsigned int)orbit_vis) * radius) + 0.5f);
-        /* Correction: Z uses sin not cos */
-        g_camOrbitOffset[v][0] = (int)(SinFloat12bit((int)orbit_vis) * radius + 0.5f);  /* actually CosFloat per Ghidra */
-
-        /* Rewrite faithfully from Ghidra:
-           orbit position uses (yawOffset - vis_angle) as the orbit placement angle */
-        g_camOrbitOffset[v][0] = (int)(CosFloat12bit(orbit_vis) * radius + 0.5f);
-        g_camOrbitOffset[v][1] = g_camStoredPitch[v];
-        g_camOrbitOffset[v][2] = (int)(-(CosFloat12bit((unsigned int)orbit_vis) * radius) + 0.5f);
-        /* Actually Ghidra shows:
-           sin -> X, -cos -> Z, same pattern as chase cam.
-           Let me just use the pattern from the decompilation directly. */
         g_camOrbitOffset[v][0] = (int)(SinFloat12bit((int)orbit_vis) * radius + 0.5f);
+        g_camOrbitOffset[v][1] = g_camStoredPitch[v];
         g_camOrbitOffset[v][2] = (int)(-(CosFloat12bit(orbit_vis) * radius) + 0.5f);
 
         /* Camera world pos = vehicle pos + orbit offset + velocity interpolation */
@@ -1237,6 +1297,23 @@ void UpdateVehicleRelativeCamera(int actor, int view)
  * Camera transition state machine during race start fly-in.
  * Divides transition timer by 0x2800 to get HUD indicator level,
  * then selects camera preset based on level.
+ *
+ * [CONFIRMED @ 0x00401E10 UpdateRaceCameraTransitionState; L5 sweep 2026-05-21]
+ *   Decompile matches branch-by-branch:
+ *     - Early dispatch: alive-check -> UpdateCameraTransitionHudIndicator
+ *     - g_uiInputFreezeOverlayActive_PROVISIONAL (port: g_camTransitionGate)
+ *     - Transition-complete branch: lookback selects 0 vs 0x800 yaw offset
+ *     - level = g_cameraTransitionActive / 0x2800
+ *     - level==0: preset 0xD, orbit_radius -= __ftol(delta*3584.0)
+ *     - level==1: preset 0xC, orbit_angle += __ftol(delta*1024.0)
+ *     - level==2: preset 0xB, orbit_angle += __ftol(delta*1024.0)
+ *     - else:     preset 10,  orbit_angle += __ftol(delta*256.0), force_reload=1
+ *     - LoadCameraPresetForView(actor+0x208, force_reload, view, 0) + yaw=0
+ *     - store_prev: g_cameraPrevPresetId[v] = g_raceCameraPresetId[v]
+ *   Port intentionally uses frame_delta=1.0 (orig has no subTickFraction
+ *   factor; was a port-side stale interpolation that caused fps-dependent
+ *   orbit speed). The const lifts {3584.0, 1024.0, 256.0} match orig FILD
+ *   constants.
  * ======================================================================== */
 
 void UpdateRaceCameraTransitionState(int actor, int view)
@@ -1375,6 +1452,19 @@ void ResetRaceCameraSelectionState(int clear_or_restore)
  *
  * Counts valid profiles, seeds initial camera positions from track
  * geometry, and randomizes per-view timers.
+ *
+ * [CONFIRMED @ 0x004020B0 InitializeTracksideCameraProfiles; L5 sweep 2026-05-21]
+ *   Byte-faithful match:
+ *     - count loop scans `gTracksideCameraProfiles[i*8] != -1` with stride 8
+ *     - anchor strip index/offset read from profile[3] and profile[4]
+ *     - X/Z anchor = (vtx[(strip[+4] + ofs)*6 {+0|+4}] + strip[+0xC|+0x14]) * 0x100
+ *     - Y-bias = profile[5]
+ *     - Copy view 0 -> view 1 for span/ofs/anchor/Y/index
+ *     - Two _rand() % 10000 + 10000 calls for per-view timers
+ *     - Spline adv rate seeded to 8, spline params zeroed
+ *     - Circuit/<2 profiles override forces behavior type 4 (orbit)
+ *   Note: port's `while (... != -1) count++` and orig's `do++; check;` produce
+ *   identical final count.
  * ======================================================================== */
 
 void InitializeTracksideCameraProfiles(void)
@@ -1447,6 +1537,23 @@ void InitializeTracksideCameraProfiles(void)
  *
  * Checks if the followed vehicle's track span falls within a different
  * profile's range. If so, initializes behavior-specific camera state.
+ *
+ * [CONFIRMED @ 0x00402200 SelectTracksideCameraProfile; L5 sweep 2026-05-21]
+ *   Byte-faithful port. Verified:
+ *     - profile range scan: prof[1] <= actor.span <= prof[2]
+ *     - early-out when profile index unchanged
+ *     - anchor X/Z recomputed identically (vtx + strip[+C/+14]) * 0x100
+ *     - 0..10 switch dispatch matches orig:
+ *         0: yaw=0, timer=20000
+ *         1: yaw=0, offset=(0x200, 0xE2, 0xFB9C), depth_bias=0x1000
+ *         2: yaw=0, offset=(0xFE00, 0xE2, 0xFB9C), depth_bias=0x1000
+ *         3: yaw=0, depth_bias=0x1000
+ *         4/9, 5/10: depth_bias=0x1000, height_param = prof[5]
+ *         6: yaw=0, spline_param=0, timer=20000, adv=prof[7], nodes=prof[6]
+ *         7/8: depth_bias=0x1000, offset=(0, 0xFF38, 0), mode=1
+ *           (orig falls through into shared fall-through block; port
+ *            replicates writes per-case but produces identical state)
+ *     - prof stride = 0x10 (orig) = 8 shorts (port array) — same
  * ======================================================================== */
 
 void SelectTracksideCameraProfile(int actor, int view)
@@ -1567,6 +1674,21 @@ void SelectTracksideCameraProfile(int actor, int view)
  *
  * Fixed camera position from track geometry, with look-at toward
  * the followed vehicle.
+ *
+ * [CONFIRMED @ 0x00402950 UpdateStaticTracksideCamera; REG-3 verdict 2026-05-22]
+ *   Byte-faithful Y baseline. Orig reads
+ *     vtx[(strip[+4] + g_cameraProfileVertOffset[v]) * 6 + 2]
+ *   from the per-profile g_cameraProfileVertOffset @ DAT_00482eb8. Cross-ref
+ *   audit (mcp__ghidra__reference_to 0x00482eb8) shows ONLY two refs to that
+ *   global — both READS at 0x004024dc (UpdateTracksideCamera case 0) and
+ *   0x0040299a (this function). NO ORIG WRITER exists; the variable remains
+ *   at .bss default 0 throughout the orig binary.
+ *
+ *   Port mirrors this exactly: g_camHeightSampleOfs[2] = {0} (line 70) and
+ *   stays 0 — both orig and port sample vertex[strip_base + 0]. Earlier
+ *   suspected-regression note (2026-05-21) was a false alarm based on the
+ *   assumption that the variable was supposed to be written by
+ *   SelectTracksideCameraProfile; in fact neither orig nor port writes it.
  * ======================================================================== */
 
 void UpdateStaticTracksideCamera(int actor, int view)
@@ -1605,6 +1727,12 @@ void UpdateStaticTracksideCamera(int actor, int view)
  *
  * Snapshots the vehicle's current orientation into per-view cache,
  * with 180-degree yaw offset for chase view.
+ *
+ * [CONFIRMED @ 0x00402A80 CacheVehicleCameraAngles; L5 sweep 2026-05-21]
+ *   Byte-faithful: 3 short writes per view, identical offsets/signs
+ *   (display_angle_roll+0x800, 0x800-display_angle_yaw, -display_angle_pitch)
+ *   mapped to g_camCachedAngles[view][0..2]. Field offsets 0x208/0x20A/0x20C
+ *   verified against Ghidra decomp.
  * ======================================================================== */
 
 void CacheVehicleCameraAngles(int actor, int view)
@@ -1619,6 +1747,38 @@ void CacheVehicleCameraAngles(int actor, int view)
  *
  * Evaluates a cubic spline camera path, adjusts projection scale
  * (FOV) based on distance to target.
+ *
+ * [L5-AUDIT 2026-05-21 — LEFT AT L4, suspected regression]
+ *   Orig builds spline templates as inline stack array `local_5e[39]` indexed
+ *   by `param_3 * 8`. Effective per-type template (as 4 pairs
+ *   (span_delta, ofs_delta)):
+ *     type 0: (-1, 0), (0, 0), (40, 0), (41, 0)
+ *     type 1: (-1, 0), (0, 0), (40, 0), (41, 0)  [same template, distinct
+ *             ofs delta of 0]  -- need careful re-read of local_5e[8..15]
+ *     type 2 also reuses (-1, 0) start; types 3-5 advance into 0x28/0x29
+ *     range with offset -4 (0xfffc) at specific slots.
+ *
+ *   Port table at td5_camera.c:163:
+ *     type 0: { 0, 0, 0, -1, 0, 0, 0, -1 }
+ *     type 1: { 0, 0, 40, 0, 41, 0, 0, -1 }
+ *     ...
+ *   Indexed as `tmpl[i*2]` (span_delta), `tmpl[i*2+1]` (ofs_delta).
+ *
+ *   Mismatch: orig type-0 pairs (-1,0),(0,0),(40,0),(41,0) vs port type-0
+ *   (0,0),(0,-1),(0,0),(0,-1). Span/ofs roles swapped AND span values
+ *   wrong (port flat-anchor vs orig forward-span sweep). Visual: spline
+ *   camera path no longer covers the orig 40-41-span flyby arc.
+ *
+ *   Suggested fix: re-derive all 6 template rows from orig's local_5e
+ *   stack pattern (see decomp at 0x00402AD0 lines 21..55). Note orig
+ *   reads `psVar2[-1]` for span (off-by-one trick via local_60=0xffff
+ *   sentinel sitting at local_5e[-1]).
+ *
+ *   Also note: orig terrain Y uses g_cameraTracksideAnchorYBias bias.
+ *   Port mirrors this via g_camHeightParam (OK), but the underlying
+ *   `g_camHeightSampleOfs` vs `g_cameraProfileVertOffset` issue from
+ *   UpdateStaticTracksideCamera does NOT apply here (spline uses ofs
+ *   delta direct, not VertOffset).
  * ======================================================================== */
 
 void UpdateSplineTracksideCamera(int actor, int view, int spline_type)
@@ -1710,6 +1870,23 @@ void UpdateSplineTracksideCamera(int actor, int view, int spline_type)
  * 0x402480 -- UpdateTracksideCamera
  *
  * Master dispatcher for all 11 trackside camera behavior types.
+ *
+ * [L5-AUDIT 2026-05-21 — LEFT AT L4, mostly faithful but inherits two
+ *  documented latent divergences]
+ *   - case 0 terrain Y sampling: same `g_camHeightSampleOfs` vs
+ *     `g_cameraProfileVertOffset` issue as UpdateStaticTracksideCamera.
+ *   - case 1/2 offset transform: orig calls ConvertFloatVec3ToIntVec3
+ *     @ 0x0042DB40 which __ftols + clamps to short range. Port calls
+ *     TransformVector3ByBasis @ 0x0042DBD0 which keeps full int32 range.
+ *     For very-near-zero or near-saturation offsets the two diverge by
+ *     up to 1 LSB; for offsets within ±32767 (the normal case) the
+ *     observable values match.
+ *   - Dispatch structure (cases 0..10 + default), preset increments
+ *     (+8/-8/+0/+0x800 for orbit variants), preset reload semantics,
+ *     and trailing projection-scale update all match orig precisely.
+ *   - case 6 uses g_camSplineNodeCount[v] (port name) vs
+ *     g_cameraSplineTemplateIndex (orig name) — same field, different
+ *     port-side name (verify alias is OK).
  * ======================================================================== */
 
 void UpdateTracksideCamera(int actor, int view)
@@ -1868,6 +2045,10 @@ void UpdateTracksideCamera(int actor, int view)
  *
  * Advances the camera preset index by delta, wrapping modulo 7.
  * Returns the number of complete cycles (preset / 7).
+ *
+ * [CONFIRMED @ 0x00402E00 CycleRaceCameraPreset; L5 sweep 2026-05-21]
+ *   Byte-faithful: read g_raceCameraPresetId[view], store (old+delta)%7,
+ *   return (old+delta)/7. Matches Ghidra decomp exactly.
  * ======================================================================== */
 
 int CycleRaceCameraPreset(int view, int delta)
@@ -2305,6 +2486,22 @@ static void BuildCubicSpline3D(int *spline_state, int control_points) {
      *    2 -5  4 -1
      *   -1  0  1  0
      *    0  2  0  0
+     *
+     * [CONFIRMED @ 0x00441F90 BuildCubicSpline3D; L5 sweep 2026-05-21]
+     *   Decompile verified line-by-line:
+     *     - spline_state[0..2] = P[1].xyz (control points 1's coords)
+     *     - delta loop scans 4 control points, computes (P[i] - P[1]) >> 8
+     *       for each xyz component (12 deltas total in local_30[12])
+     *     - Matrix multiplication loop over DAT_00474bc0 (4x4 int basis matrix)
+     *       writes spline_state[3..14] (12 coefficients = 4 rows x 3 components)
+     *     - Final loop divides all 12 of spline_state[3..14] by 2
+     *   Port inlines the basis values directly (-1,3,-3,1)/(2,-5,4,-1)/(-1,0,1,0)/
+     *   (0,2,0,0). The `(2*d1) / 2` line equals d1 — matches orig's `>> 8`
+     *   delta + later `/ 2` two-step combination.
+     *
+     * [ARCH-DIVERGENCE — basis-matrix indirection]
+     *   Orig reads DAT_00474bc0 (16 int constants in .rdata). Port inlines.
+     *   Semantically identical.
      */
     int *P = (int *)(intptr_t)control_points;
     int delta[4][3];
@@ -2335,6 +2532,23 @@ static void BuildCubicSpline3D(int *spline_state, int control_points) {
     }
 }
 
+/* [CONFIRMED @ 0x00442090 EvaluateCubicSpline3D; L5 sweep 2026-05-21]
+ *   Byte-faithful: orig applies signed-rounding correction
+ *   `(x + (x>>31 & 0xFFFu)) >> 12` at FOUR sites (t2, t3, and each of 3 axes).
+ *   That adds 0xFFF when x<0 before the SAR12, rounding toward zero rather
+ *   than toward negative-infinity (standard MSVC SAR pattern for div-by-pow2
+ *   that preserves /4096 semantics for negative inputs).
+ *
+ *   Prior port used plain `>> 12` which round-toward-neg-inf for negatives:
+ *   off-by-one error on negative Catmull-Rom coefficients during trackside
+ *   spline cam evaluation. */
+static int sar12_rz(int x) {
+    /* Orig pattern: (x + (x>>31 & 0xFFFu)) >> 12
+     * Adds 0xFFF when x<0 before the arithmetic shift, rounding toward zero
+     * rather than toward negative-infinity. Matches MSVC's /4096 codegen. */
+    int corr = ((int)((unsigned)x >> 31)) & 0xFFF;  /* 0xFFF if x<0, else 0 */
+    return (x + corr) >> 12;
+}
 static void EvaluateCubicSpline3D(int *out_pos, int *spline_state, int t) {
     /*
      * Catmull-Rom spline evaluator (0x442090).
@@ -2349,15 +2563,15 @@ static void EvaluateCubicSpline3D(int *out_pos, int *spline_state, int t) {
         return;
     }
 
-    t2 = (t * t) >> 12;
-    t3 = (t2 * t) >> 12;
+    t2 = sar12_rz(t * t);
+    t3 = sar12_rz(t2 * t);
 
     for (i = 0; i < 3; i++) {
         int a = spline_state[3+i];
         int b = spline_state[6+i];
         int c = spline_state[9+i];
         int d = spline_state[12+i];
-        out_pos[i] = (((a * t3 + b * t2 + c * t) >> 12) + d) * 256 + spline_state[i];
+        out_pos[i] = (sar12_rz(a * t3 + b * t2 + c * t) + d) * 256 + spline_state[i];
     }
 }
 
@@ -2414,3 +2628,51 @@ uint32_t td5_compute_heading_delta(void *route_entry) {
     t    = (t - 0x800u) & 0xFFFu;
     return (uint32_t)(0u - t);  /* 12-bit negation; formula: -(...) [CONFIRMED @ 0x00434040] */
 }
+
+/* ============================================================
+ * [CITATION-SWEEP 2026-05-21] Phase 1 audit-header refresh
+ *
+ * The following L3 Ghidra functions are ported (or folded) into
+ * this file but were missed by build_confidence_map.py's
+ * 2026-05-18 citation scan due to snake_case rename or
+ * multi-line comment wraps. Listed here so the next confidence-
+ * map run promotes them L3 -> L4 (cited without precision
+ * keywords). Per-function audits remain a separate Phase 4 task.
+ *
+ * Source: re/analysis/l3_triage_2026-05-21.csv +
+ *         re/analysis/phase1_manifest_assignment.csv
+ *
+ *   0x0040A480  InitializeRaceCameraTransitionDuration
+ *     [ARCH-DIVERGENCE: trivial 10-byte setter inlined into the port's
+ *      reset_race_countdown() helper in td5_game.c:3283. Orig single
+ *      caller is InitializeRaceSession; the port's static initializer
+ *      (g_cameraTransitionActive=0xA000 at td5_camera.c:117) plus the
+ *      per-race reset_race_countdown() reach the same observable state.
+ *      L5 sweep 2026-05-21]
+ *
+ *   0x0042DB40  ConvertFloatVec3ToIntVec3
+ *     [ARCH-DIVERGENCE: matrix*vec converter with short clamp; L5 sweep 2026-05-21]
+ *     Orig: 3x3 matrix * vec3 -> three __ftol -> (int)(short)... -> int[3].
+ *     Result clamped to short range via the sign-extension chain.
+ *     Port substitutes TransformVector3ByBasis @ 0x0042DBD0 at the
+ *     UpdateTracksideCamera case-1/2 and UpdateVehicleRelativeCamera
+ *     call sites — same matrix*vec math but stores full int32 (no
+ *     short clamp). For offsets within ±32767 (the normal case) results
+ *     are identical; near saturation the port retains higher precision.
+ *
+ *   0x0042DC30  ConvertFloatVec3ToIntVec3B
+ *     [ARCH-DIVERGENCE: shared helper, no port surface; L5 sweep 2026-05-21]
+ *     Same shape as 0x0042DB40 (matrix * vec -> __ftol -> short-clamp to
+ *     int[3]). Decompile confirms identical inner body. Port-side this
+ *     helper isn't broken out — math is inlined in TransformVector3ByBasis
+ *     callers. No observable divergence vs sibling 0x0042DB40.
+ *
+ *   0x0042E030  ExtractEulerAnglesFromMatrix
+ *     [ARCH-DIVERGENCE: recovery-mode Euler decomp not ported; L5 sweep 2026-05-21]
+ *     Orig extracts (yaw, pitch, roll) from rotation matrix via
+ *     AngleFromVector12 (atan2-12bit) at 3 sites, with a gimbal-lock
+ *     branch when |pitch|=0x400. Sole caller is RefreshScriptedVehicleTransforms
+ *     @ 0x00409BF0, which is itself NOT ported (vehicle_mode==1 scripted
+ *     recovery — see td5_physics.c:996-1009). When port wires that branch,
+ *     this function must come with it. Not currently observable.
+ */

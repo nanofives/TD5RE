@@ -1,0 +1,38 @@
+address,size,proposed_name,confidence,batch,area,evidence,port_mirror
+0x0046317c,u16[6],g_playerSteeringWeightTarget,high,01,transmission,"Written by UpdatePlayerSteeringWeightBalance @ 0x004036de/0x00403708; read at 0x00403335 (signed extend into steering interp). Per-slot baseline, indexed by slotIndex*2.",(none)
+0x0046317e,u16[6],g_playerSteeringWeightOpposite,high,01,transmission,"Written by UpdatePlayerSteeringWeightBalance @ 0x004036e4. Complement steering weight (0x100 - target). Used in two-player steering balancing.",(none)
+0x0048301c,u32,g_maxSteeringWeightBalance,high,01,transmission,"Read at 0x004036c4 and 0x004036ee in UpdatePlayerSteeringWeightBalance. Written at 0x004155ea in ScreenMainMenuAnd1PRaceFlow (race init). Caps steering balance delta.",(none — likely INI-driven config)
+0x00483014,u8[6],g_cheatRemoteBrakingApplied,high,01,transmission,"Reset to 0 @ 0x00402e32 when input bit 0x200000 NOT set; set to 1 @ 0x0042b96b after velocity-doubling cheat applied. Per-slot flag.",(none — cheat state)
+0x00483018,u16,g_controlAccumulatorResetMarker,medium,01,transmission,"Written @ 0x00402e37 in ResetPlayerVehicleControlAccumulators. No visible read refs; likely sentinel or alignment.",(none)
+0x004ab473,u8,g_playerGearIndex,medium,01,transmission,"Per-actor gear byte at +0x36b. Already symbolically accessed in port but no global label in orig binary.",td5_physics.c — already field-named
+0x004b08b8,u32,g_traffic_queue_cursor_ptr,high,03,traffic_init,"Traffic spawn queue read cursor. READ @ 0x004353C9, 0x004356D3, 0x0043587D; WRITE @ 0x00432E86, 0x004353F3, 0x00435C98. CRITICAL seed point — if not initialized at level load, RecycleTrafficActorFromQueue returns early and traffic cardef pointers stay NULL.",td5_ai.c:302 (g_traffic_queue_ptr)
+0x004b08b4,u32,g_traffic_queue_span_base,high,03,traffic_init,"READ @ 0x00436B43. Used to init route state base when traffic queue entry has span < g_actorRuntimeState.field_0x130.",inline reference in td5_ai.c:2626
+0x004afc50,u32[12],g_actor_traffic_recovery_stage,high,03,traffic_init,"Per-actor recovery state (0=normal, 1-7=recovering). Indexed by param_1*0x11c (route stride). Written in UpdateTrafficRoutePlan @ 0x00435F81 on span boundary cross.",td5_ai.c:202
+0x004afbb8,u32[12],g_actor_steering_bias_latch,high,03,traffic_init,"Indexed by param_1*0x11c. WRITE @ 0x0043642B, 0x0043536F. Caches steering bias for traffic actors between route-plan updates.",td5_ai.c:190 alias
+0x004afbbc,u32[12],g_actor_steering_input_offset,high,03,traffic_init,"Indexed by param_1*0x11c. WRITE @ 0x0043536F (offset variant). Per-traffic-actor steering input offset for lane-change.",(intermediate; no port direct ref)
+0x004afbc8,u32[12],g_actor_throttle_bias_stage,medium,03,traffic_init,"Indexed by local_4*4+0x10 (non-stride). Written @ 0x004353FA. Per-actor throttle recovery bias during queue recycle.",td5_ai.c:202 adjacent
+0x004afc5c,u32[12],g_actor_route_direction_polarity,high,03,traffic_init,"Indexed by local_4*0x11c. READ/WRITE @ 0x004353FA (set from queue flags & 1). Direction control (0=fwd, 1=reverse/oncoming).",td5_ai.c:82 (RS_ROUTE_DIRECTION_POLARITY)
+0x004afbdc,u32[12],g_actor_encounter_tracked_handle,medium,03,traffic_init,"Indexed by local_4*0x47 (route state stride). WRITE @ 0x00435B9D (set -1). Cop-chase encounter handle per actor.",td5_ai.c:246 (related per-actor variant)
+0x004c3da0,struct ~96B,g_track_route_metadata,high,03,traffic_init,"READ @ 0x00435FE6. Contains route table metadata: +0x14=span count, +0x1c=span offset array. Used by RecycleTrafficActorFromQueue to index junctions.",(none — see td5_track.c)
+0x00483954,u32,g_currentCheckpointStripIndex,high,04,checkpoint_config,"Written @ 0x42FD51 in RemapCheckpointOrderForTrackDirection; read @ 0x406F77, 0x4070AE, 0x4076DD. Indexes into g_trackStripRecords for checkpoint geometry.",(consider adding)
+0x004aedb0,u32[16],gCheckpointOrderRemapTable,high,04,checkpoint_config,"Array of checkpoint order indices used when track direction changes (forward vs reverse). Read in RemapCheckpointOrderForTrackDirection @ 0x42FD70.",td5_track.c
+0x004aee00,u32,gTrackDirectionSwitchFlag,high,04,checkpoint_config,"Discriminates between two sets of checkpoint order swaps. When == -1, uses one pair; otherwise alternate pair. Determines track reversal layout.",td5_track.c
+0x00466004,u32,gCheckpointTimersUserToggle,high,04,checkpoint_config,"Written in ScreenGameOptions @ 0x420035 and 0x40FC43; read in game logic to enable/disable checkpoint timer display and time-bonus mechanics. Stored to Config.td5 in LoadPackedConfigTd5.",g_td5.ini.checkpoint_timers
+0x00466008,u32,gUnknownCheckpointToggle_B_PROVISIONAL,high,04,checkpoint_config,"Adjacent to gCheckpointTimersUserToggle. Written at same UI callsite (0x420047, 0x40FC43). Semantics unknown — possibly lap-counter display or P2P timer display.",(unknown)
+0x00497a78,u32,g_raceReplayStateFlag,high,05,replay_results,"Written as 1, 2, 0 in state 0 of RunRaceResultsScreen; controls backup lifecycle.",td5_input.c:157 (s_replay_mode_flag)
+0x00497a7c,u32,g_savedCarIndex,high,05,replay_results,"Stores g_selectedCarIndex on backup; restored on Race Again.",td5_frontend.c:9475
+0x00497a80,u32,g_savedSlotCarIdTable,high,05,replay_results,"Saves car ID table snapshot during backup.",td5_frontend.c:9475
+0x00497a84,u32,g_savedSlotPositionTable,high,05,replay_results,"Saves position table for determinism.",td5_frontend.c:9475
+0x00497a88,u32,g_savedTrackModeFlags,high,05,replay_results,"Saves race mode/type flags.",td5_frontend.c:9475
+0x00497a8c,u32,g_savedDragRaceState,high,05,replay_results,"Saves drag race mode state (game type 7).",td5_frontend.c:9475
+0x00497a90,u32,g_savedDragRaceParam1,high,05,replay_results,"Drag race parameter 1.",td5_frontend.c:9475
+0x00497a94,u32,g_savedDragRaceParam2,high,05,replay_results,"Drag race parameter 2.",td5_frontend.c:9475
+0x00497a98,u32,g_savedDragRaceParam3,high,05,replay_results,"Drag race parameter 3.",td5_frontend.c:9475
+0x00497a60,u32,g_raceResultsSeriesAdvanceFlag,high,05,replay_results,"Gates series progression; set after first Race Again in cup mode.",(none)
+0x00497a68,u32,g_selectedRaceResultIndex,high,05,replay_results,"Tracks viewed result slot (0-5).",td5_frontend.c implicit
+0x00497a70,u32,g_cupModeNextRaceAvailable,medium,05,replay_results,"Set by ConfigureGameTypeFlags(); gates Next Cup Race button.",td5_frontend.c implicit
+0x00497a74,u32,g_raceResultsStateGateFlag,medium,05,replay_results,"Checked to gate state 3 exit; reset on state entry.",td5_frontend.c:9188
+0x00497a64,u32,g_lastSelectedResultButton,high,05,replay_results,"Stores button index (0-4) from state 0xf dispatch.",td5_frontend.c:9484-9497
+0x0049636c,u32,g_raceResultsLoadedFlag,medium,05,replay_results,"Checked as early-entry gate for load/restore logic.",(none)
+0x004962d0,u32,g_raceSinglePlayerCompanionBitfield,medium,05,replay_results,"Gates display mode for companion slot races.",td5_frontend.c implicit
+0x0048d988,u32,g_raceActorRuntimeValid,high,05,replay_results,"Checked at state-3 early-exit gate; if invalid, bounces user. CRITICAL for View Race Data flow.",td5_frontend.c:9188

@@ -1,0 +1,2 @@
+address,name,body_size,files_cited,phase1_evidence,strong,weak
+0x00428D20,InitializeBenchmarkFrameRateCapture,28,td5_game.c,td5_render.c:density(3/5),0,0

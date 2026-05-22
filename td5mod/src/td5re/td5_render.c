@@ -78,12 +78,34 @@ float CosFloat12bit(unsigned int angle);
 float SinFloat12bit(int angle);
 void BuildRotationMatrixFromAngles(float *out, short *angles);
 
-/** Near/far clip defaults — restored to Ghidra-confirmed originals.
- * Depth normalization (0x00473bcc): depth = (vz - 64) / 65472, far = 65536.
- * Frustum far-cull (0x0042D48E): round(3.0 * 65000) = 195000. */
-#define DEFAULT_NEAR_CLIP   1.0f
-#define DEFAULT_FAR_CLIP    65536.0f
-#define DEFAULT_FAR_CULL    195000.0f
+/** Near/far clip defaults.
+ * Depth normalization (0x00473bcc): depth = (vz - 64) / 65479, far = 65536.
+ * Frustum far-cull (0x0042D48E): round(3.0 * 65000) = 195000.
+ *
+ * [DA-T1 audit 2026-05-22]
+ *   - NEAR_DEPTH_OFFSET = 64.0f: orig subtracts 64 from vz before normalizing
+ *     (g_hudSpeedoDialNearOff @ 0x0045d6c0 = 64.0f). Port previously skipped
+ *     this; depth was vz/65536. Effect: ~64 z-units of depth-fight bias near
+ *     camera, esp. at low z. Fix applies to clipped[i].depth_z at line ~755.
+ *   - DEPTH_NORMALIZE: orig uses 1/65479 (DAT_00473bcc ≈ 1.5278e-5); port
+ *     uses 1/s_far_clip (= 1/65536). Close but different — using orig value. */
+/* [DA-T1 fix #1 2026-05-22] DEFAULT_NEAR_CLIP changed 1.0f → 32.0f to match
+ * orig DAT_00473bbc = 0x42000000 = 32.0f. Prior port comment claimed "1.0f
+ * Ghidra-confirmed" — that was an earlier audit's misreading (likely confused
+ * 1.0f rhw constant at DAT_00473bc4 with the near-clip threshold).
+ *
+ * Impact: orig clips polygons in z ∈ [0, 32] entirely; port previously
+ * projected them with 1/z up to 1.0 → screen-coord blow-up on near-camera
+ * geometry. Should eliminate near-camera popping/tearing class.
+ *
+ * REVERT IF: visible regressions on geometry that was previously fine,
+ * particularly first-person cockpit views or close-up overlays. To revert,
+ * change 32.0f back to 1.0f. The fix is isolated to this constant. */
+#define DEFAULT_NEAR_CLIP    32.0f     /* orig DAT_00473bbc, was 1.0f */
+#define DEFAULT_FAR_CLIP     65536.0f
+#define DEFAULT_FAR_CULL     195000.0f
+#define NEAR_DEPTH_OFFSET    64.0f                /* orig 0x0045d6c0 */
+#define DEPTH_NORMALIZE_INV  (1.0f / 65479.0f)    /* orig DAT_00473bcc */
 
 /** Billboard depth sort stride sizes (bytes) */
 #define BILLBOARD_TRI_STRIDE  0x84
@@ -416,6 +438,13 @@ static void mat3x4_transform_point(const float *m, const float *in, float *out)
 /**
  * Apply 3x3 rotation only (no translation) -- for direction vectors/normals.
  */
+/* [CONFIRMED @ 0x0043DC50 TransformVec3ByRenderMatrixFull
+ *  + 0x0042E370 TransformVector3ByRenderRotation; L5 sweep 2026-05-21]
+ *   Byte-faithful: row-major 3x3 multiply matching both orig helpers (orig
+ *   has duplicated 3x3-only direction-vector multipliers using m[0..8];
+ *   port consolidates into one shared inline helper. Same FPU ordering
+ *   (in[k]*m[row*3+k] sum), same memory layout (m[0..8] = row-major rotation
+ *   sub-block of the 3x4 render transform). No translation component.) */
 static void mat3x3_transform_dir(const float *m, const float *in, float *out)
 {
     out[0] = in[0] * m[0] + in[1] * m[1] + in[2] * m[2];
@@ -538,7 +567,19 @@ void td5_render_flush_deferred_additive(void)
 /**
  * Flush immediate vertex/index buffers to GPU via platform DrawPrimitive.
  * Corresponds to FlushImmediateDrawPrimitiveBatch (0x4329e0).
- */
+ *
+ * [ARCH-DIVERGENCE: D3D3 vtable trampoline -> D3D11 wrapper; Phase 5(d) L5
+ *  audit 2026-05-21]
+ *   Orig invokes `(*(*(*(d3d_exref + 0x38))) + 0x74)(D3D3_device, type=4,
+ *   FVF=0x1C4, vertex_buffer, vertex_count, index_buffer, index_count, 0xC)`
+ *   — IDirect3DDevice3::DrawIndexedPrimitive on a DDraw-bound device.
+ *   Port routes through td5_plat_render_draw_tris which fans through the
+ *   ddraw_wrapper D3D11 backend. Same vertex layout (TD5_D3DVertex mirrors
+ *   FVF 0x1C4: XYZRHW + diffuse + UV); the color LUT fixup loop on diffuse
+ *   bytes is preserved verbatim. Port adds opt-in deferred additive batching
+ *   for type-3 (additive) pages, which orig lacks — invariant: type-3 page
+ *   geometry still draws in the same draw order, just queued and replayed
+ *   after the opaque pass. */
 static void flush_immediate_internal(void)
 {
     if (s_imm_vert_count <= 0 || s_imm_index_count <= 0) return;
@@ -650,10 +691,21 @@ static void append_projected_triangle(const TD5_D3DVertex *v0,
  *
  * Corresponds to ClipAndSubmitProjectedPolygon (0x4317f0).
  *
- * vert_data: pointer to vertex array (MeshVertex, already view-transformed)
- * vert_count: 3 (triangle) or 4 (quad)
- * tex_page: texture page to bind
- */
+ * [ARCH-DIVERGENCE: D3D3 rasterizer pipeline -> D3D11 immediate stream;
+ *  Phase 5(d) L5 audit 2026-05-21]
+ *   Orig is a 3030-byte function that orchestrates near-plane Sutherland-
+ *   Hodgman + projection + chained calls into the X-axis screen clipper
+ *   (RenderTrackSegmentBatch @ 0x004323D0), Y-axis screen clipper
+ *   (RenderTrackSegmentBatchVariant @ 0x004326D0), and triangle-fan emitter
+ *   (AppendClippedPolygonTriangleFan @ 0x00432AB0). All four orig functions
+ *   collapse into this single helper: near-plane clip preserved, screen-
+ *   axis Sutherland-Hodgman stages removed (D3D11 viewport clipping handles
+ *   them GPU-side with CullMode=NONE), triangle-fan emission inlined into
+ *   the tail of this function. Per-byte vertex-stream comparison is
+ *   meaningless across the API boundary; geometry semantics (near-clip
+ *   plane, perspective projection formula, UV/color interp on cut edges)
+ *   are preserved. See the Phase 5(d) D3D Pipeline manifest at file footer
+ *   for the full address list. */
 static void clip_and_submit_polygon(TD5_MeshVertex *vert_data, int vert_count,
                                     int tex_page)
 {
@@ -705,7 +757,22 @@ static void clip_and_submit_polygon(TD5_MeshVertex *vert_data, int vert_count,
             out_vz[out_count]    = near_z;
             out_u[out_count]     = in_u[i]  + t * (in_u[j]  - in_u[i]);
             out_v[out_count]     = in_v[i]  + t * (in_v[j]  - in_v[i]);
-            out_color[out_count] = in_color[i]; /* snap to nearer vertex */
+            /* [DA-T1 fix #3 2026-05-22] orig interpolates color via
+             * FILD/FISUB/FMUL/FIADD + ROUND across the clip edge (per-channel
+             * integer-as-float lerp); port previously snapped to in_color[i].
+             * Now per-channel BGRA lerp. */
+            {
+                uint32_t ci = in_color[i], cj = in_color[j];
+                int b = (int)(ci & 0xFF)        + (int)(t * (int)((int)(cj & 0xFF)        - (int)(ci & 0xFF))        + 0.5f);
+                int g = (int)((ci >>  8) & 0xFF) + (int)(t * (int)((int)((cj >>  8) & 0xFF) - (int)((ci >>  8) & 0xFF)) + 0.5f);
+                int r = (int)((ci >> 16) & 0xFF) + (int)(t * (int)((int)((cj >> 16) & 0xFF) - (int)((ci >> 16) & 0xFF)) + 0.5f);
+                int a = (int)((ci >> 24) & 0xFF) + (int)(t * (int)((int)((cj >> 24) & 0xFF) - (int)((ci >> 24) & 0xFF)) + 0.5f);
+                if (b < 0) b = 0; else if (b > 255) b = 255;
+                if (g < 0) g = 0; else if (g > 255) g = 255;
+                if (r < 0) r = 0; else if (r > 255) r = 255;
+                if (a < 0) a = 0; else if (a > 255) a = 255;
+                out_color[out_count] = ((uint32_t)a << 24) | ((uint32_t)r << 16) | ((uint32_t)g << 8) | (uint32_t)b;
+            }
             out_count++;
         }
 
@@ -722,7 +789,12 @@ static void clip_and_submit_polygon(TD5_MeshVertex *vert_data, int vert_count,
         float inv_z = 1.0f / out_vz[i];
         clipped[i].screen_x = -out_vx[i] * s_focal_length * inv_z + s_center_x;
         clipped[i].screen_y = -out_vy[i] * s_focal_length * inv_z + s_center_y;
-        clipped[i].depth_z  = out_vz[i] * (1.0f / s_far_clip);
+        /* [DA-T1 fix #4 2026-05-22] orig 0x00432362 region:
+         *   v[2] -= 64.0f;
+         *   v[2] *= 1.5278e-5f;  (= 1/65479)
+         * Port previously did vz/65536 with no near offset → ~64 z-unit depth
+         * bias near camera. Now matches orig. */
+        clipped[i].depth_z  = (out_vz[i] - NEAR_DEPTH_OFFSET) * DEPTH_NORMALIZE_INV;
         clipped[i].rhw      = inv_z;
         clipped[i].diffuse  = out_color[i];
         clipped[i].specular = 0;
@@ -793,6 +865,17 @@ static void clip_and_submit_polygon(TD5_MeshVertex *vert_data, int vert_count,
  *
  * Processes variable-count triangle strips. Sets vertex count = 3 per triangle,
  * iterates tri_count triangles, calling clip_and_submit_polygon for each.
+ *
+ * [ARCH-DIVERGENCE: globals + ClipAndSubmit -> direct param list;
+ *  Phase 5(d) L5 audit 2026-05-21]
+ *   Orig EmitTranslucentTriangleStrip @ 0x00431750: per-tri loop writes
+ *   DAT_004af268 (vertex ptr = cmd+0xC), DAT_004af278 (vert count), the
+ *   material handle (cmd+0x02), DAT_004af27c (count=3 or 4), then calls
+ *   ClipAndSubmitProjectedPolygon which reads those globals. The orig also
+ *   has a second loop for quads (count=4) appended at vertex_ptr + tri_count
+ *   *0x84. Port passes (verts, 3/4, tex_page) directly to
+ *   clip_and_submit_polygon; the four globals are eliminated. Same per-tri
+ *   strip-of-triangles + per-quad-strip semantics.
  */
 static void dispatch_tristrip(TD5_PrimitiveCmd *cmd, TD5_MeshVertex *base_verts)
 {
@@ -820,6 +903,13 @@ static void dispatch_tristrip(TD5_PrimitiveCmd *cmd, TD5_MeshVertex *base_verts)
  * Opcode 2: SubmitProjectedTrianglePrimitive (0x4316F0)
  *
  * Single triangle, submitted through clip + project pipeline.
+ *
+ * [ARCH-DIVERGENCE: globals -> parameter list; L5 sweep 2026-05-21]
+ *   Mirror of the quad path with vert count 3 instead of 4. Orig writes the
+ *   same four globals (DAT_004af268=cmd+8, DAT_004af278=1, material handle
+ *   from cmd+2, DAT_004af27c=3) then calls ClipAndSubmitProjectedPolygon;
+ *   port passes (verts, 3, tex_page) explicitly into clip_and_submit_polygon.
+ *   Same vertex source and texture-page semantics.
  */
 static void dispatch_projected_tri(TD5_PrimitiveCmd *cmd, TD5_MeshVertex *base_verts)
 {
@@ -834,6 +924,14 @@ static void dispatch_projected_tri(TD5_PrimitiveCmd *cmd, TD5_MeshVertex *base_v
  * Opcode 3: SubmitProjectedQuadPrimitive (0x431690)
  *
  * Single quad (4 vertices), submitted through clip + project pipeline.
+ *
+ * [ARCH-DIVERGENCE: globals -> parameter list; L5 sweep 2026-05-21]
+ *   Orig writes DAT_004af268 (vertex ptr = cmd+8), DAT_004af278=1, sets
+ *   g_renderCurrentMaterialHandle from cmd+2, DAT_004af27c=4 (vert count),
+ *   then calls ClipAndSubmitProjectedPolygon (which reads the four globals).
+ *   Port passes (verts, 4, tex_page) explicitly into clip_and_submit_polygon,
+ *   eliminating the global-write step. Same vertex source, same vert count,
+ *   same texture-page semantics.
  */
 static void dispatch_projected_quad(TD5_PrimitiveCmd *cmd, TD5_MeshVertex *base_verts)
 {
@@ -891,18 +989,55 @@ static void dispatch_billboard(TD5_PrimitiveCmd *cmd, TD5_MeshVertex *base_verts
 /**
  * Opcode 5: EmitTranslucentTriangleStripDirect (0x431730)
  *
- * Small wrapper: direct depth-sort insert for tri-strip data.
+ * [CONFIRMED @ 0x00431730 EmitTranslucentTriangleStripDirect; L5 sweep 2026-05-21]
+ *   Orig: DAT_004af268 = param_1+8; InsertTriangleIntoDepthSortBuckets(param_1);
+ *   Routes through depth-sort bucket queue (translucent primitives need
+ *   back-to-front ordering for correct alpha blending). Prior port routed
+ *   through clip_and_submit_polygon (immediate raster), bypassing depth-sort
+ *   — caused z-order glitches in HUD overlays / lens flares.
  */
 static void dispatch_tristrip_direct(TD5_PrimitiveCmd *cmd, TD5_MeshVertex *base_verts)
 {
-    /* Direct submission -- same as tristrip but bypasses translucent queue */
-    dispatch_tristrip(cmd, base_verts);
+    int tex_page = cmd->texture_page_id;
+    int tri_count = cmd->triangle_count;
+    int quad_count = cmd->quad_count;
+    TD5_MeshVertex *verts = (TD5_MeshVertex *)(uintptr_t)cmd->vertex_data_ptr;
+    if (!verts) verts = base_verts;
+
+    /* Iterate strip primitives, route each through depth-sort bucket queue */
+    for (int i = 0; i < tri_count; i++) {
+        TD5_MeshVertex *v = &verts[i * 3];
+        float avg_z = (v[0].view_z + v[1].view_z + v[2].view_z) * (1.0f / 3.0f);
+        if (avg_z > s_near_clip) {
+            int bucket = (int)(avg_z * (float)(DEPTH_BUCKET_COUNT - 1) / s_far_clip);
+            bucket = clampi(bucket, 0, DEPTH_BUCKET_COUNT - 1);
+            bucket ^= (DEPTH_BUCKET_COUNT - 1);
+            td5_render_queue_projected_entry(v, bucket, 0x3u, tex_page);
+        }
+    }
+    {
+        TD5_MeshVertex *quad_start = verts + tri_count * 3;
+        for (int i = 0; i < quad_count; i++) {
+            TD5_MeshVertex *v = &quad_start[i * 4];
+            float avg_z = (v[0].view_z + v[1].view_z + v[2].view_z + v[3].view_z) * 0.25f;
+            if (avg_z > s_near_clip) {
+                int bucket = (int)(avg_z * (float)(DEPTH_BUCKET_COUNT - 1) / s_far_clip);
+                bucket = clampi(bucket, 0, DEPTH_BUCKET_COUNT - 1);
+                bucket ^= (DEPTH_BUCKET_COUNT - 1);
+                td5_render_queue_projected_entry(v, bucket, 0x4u, tex_page);
+            }
+        }
+    }
 }
 
 /**
  * Opcode 6: EmitTranslucentQuadDirect (0x4316D0)
  *
- * Direct depth-sort insert for quad data.
+ * [CONFIRMED @ 0x004316D0 EmitTranslucentQuadDirect; L5 sweep 2026-05-21]
+ *   Orig: DAT_004af268 = param_1+8; QueueProjectedPrimitiveBucketEntry(param_1);
+ *   Routes through depth-sort bucket queue (translucent primitives need
+ *   back-to-front ordering for correct alpha blending). Prior port routed
+ *   through clip_and_submit_polygon (immediate raster).
  */
 static void dispatch_quad_direct(TD5_PrimitiveCmd *cmd, TD5_MeshVertex *base_verts)
 {
@@ -910,7 +1045,13 @@ static void dispatch_quad_direct(TD5_PrimitiveCmd *cmd, TD5_MeshVertex *base_ver
     TD5_MeshVertex *verts = (TD5_MeshVertex *)(uintptr_t)cmd->vertex_data_ptr;
     if (!verts) verts = base_verts;
 
-    clip_and_submit_polygon(verts, 4, tex_page);
+    float avg_z = (verts[0].view_z + verts[1].view_z + verts[2].view_z + verts[3].view_z) * 0.25f;
+    if (avg_z > s_near_clip) {
+        int bucket = (int)(avg_z * (float)(DEPTH_BUCKET_COUNT - 1) / s_far_clip);
+        bucket = clampi(bucket, 0, DEPTH_BUCKET_COUNT - 1);
+        bucket ^= (DEPTH_BUCKET_COUNT - 1);
+        td5_render_queue_projected_entry(verts, bucket, 0x4u, tex_page);
+    }
 }
 
 /* ========================================================================
@@ -919,6 +1060,13 @@ static void dispatch_quad_direct(TD5_PrimitiveCmd *cmd, TD5_MeshVertex *base_ver
 
 /* --- Module Lifecycle --- */
 
+/* [CONFIRMED @ 0x0040AE80 InitializeRaceRenderState; Phase 5(d) L5 audit 2026-05-21]
+ *   Orig is a one-shot gate (`if (DAT_0048dba0 == 1) return 0;`) that calls
+ *   InitializeTranslucentPrimitivePipeline + InitializeProjectedPrimitiveBuckets
+ *   + ResetProjectedPrimitiveWorkBuffer, sets the sentinel, and arms the
+ *   clear-screen flag. Port collapses the three sub-routines (folded under
+ *   the Phase 5(a) DepthSort manifest) into inline reset passes here; the
+ *   sentinel collapses to s_globals_initialized. Behaviour-equivalent. */
 int td5_render_init(void)
 {
     if (s_globals_initialized) return 0;
@@ -1003,6 +1151,12 @@ int td5_render_init(void)
     return 1;
 }
 
+/* [ARCH-DIVERGENCE: D3D3 ReleaseRaceRenderResources -> D3D11 abstracted shutdown; L5 sweep 2026-05-21]
+ *   Mirrors ReleaseRaceRenderResources @ 0x0040AEC0 (orig: DXD3DTexture::ClearAll
+ *   + write 0 to d3d_exref+0xa34 if DAT_0048dba0 != 0). Port routes texture
+ *   teardown through td5_render_reset_texture_cache and clears fog + active
+ *   sentinel (s_state_active / s_globals_initialized), absorbing the orig's
+ *   DAT_0048dba0 gate. */
 void td5_render_shutdown(void)
 {
     TD5_LOG_I(RENDER_LOG_TAG, "Releasing render resources");
@@ -1030,6 +1184,13 @@ void td5_render_frame(void)
 
 /* --- Scene Brackets --- */
 
+/* [ARCH-DIVERGENCE: D3D3 BeginScene -> D3D11 platform-abstracted begin-frame; L5 sweep 2026-05-21]
+ *   Mirrors BeginRaceScene @ 0x0040ADE0 (orig: DXD3D::BeginScene() +
+ *   g_renderCurrentMaterialHandle = g_renderCurrentTextureHandle = 0xffffffff).
+ *   Port routes through td5_plat_render_begin_scene and forces texture-page
+ *   invalidation via -1 sentinels (semantic equivalent of orig's 0xffffffff
+ *   handle invalidation). Adds substantial per-frame debug counter resets that
+ *   have no orig counterpart (D3D11 path needs them for clip/draw tracking). */
 void td5_render_begin_scene(void)
 {
     td5_plat_render_begin_scene();
@@ -1065,6 +1226,12 @@ void td5_render_begin_scene(void)
               s_debug_scene_draw_calls);
 }
 
+/* [ARCH-DIVERGENCE: D3D3 EndScene -> D3D11 platform-abstracted end-frame; L5 sweep 2026-05-21]
+ *   Mirrors EndRaceScene @ 0x0040AE00 (orig: DXD3D::EndScene() +
+ *   AdvanceTexturePageUsageAges()). Port routes through td5_plat_render_end_scene
+ *   (D3D11 device-context) and calls td5_render_advance_texture_ages (the same
+ *   LRU sweep), plus adds per-frame debug counters and tick advance. Same
+ *   pre+post-scene cleanup ordering. */
 void td5_render_end_scene(void)
 {
     if (g_td5.total_actor_count <= 0 && s_debug_clip_log_count < 5) {
@@ -1094,6 +1261,14 @@ void td5_render_set_preset(TD5_RenderPreset preset)
     td5_plat_render_set_preset(preset);
 }
 
+/* [ARCH-DIVERGENCE: D3D3 SetRenderState calls -> D3D11 platform call; L5 sweep 2026-05-21]
+ *   Mirrors ApplyRaceFogRenderState @ 0x0040AF50. Orig issues 6 IDirect3DDevice
+ *   SetRenderState calls for the param=1 path (states 0x1c FOGENABLE, 0x22-0x26
+ *   color/start/end/density and final 0x1c=1 commit) routing failures through
+ *   DXErrorToString/Msg, and just FOGENABLE=0 for param=0. Port routes the
+ *   entire 6-state config into a single td5_plat_render_set_fog(enable, color,
+ *   start, end, density) call -- the D3D11 backend builds the equivalent
+ *   constant-buffer state. Same enable/disable polarity. */
 void td5_render_set_fog(int enable)
 {
     if (enable && g_td5.ini.fog_enabled) {
@@ -1107,6 +1282,12 @@ void td5_render_set_fog(int enable)
     }
 }
 
+/* [ARCH-DIVERGENCE: D3D3 DXD3D::CanFog() probe removed; L5 sweep 2026-05-21]
+ *   Mirrors ConfigureRaceFogColorAndMode @ 0x0040AF10. Orig stores
+ *   (color & 0xFFFFFF) at d3d_exref+0x18, then probes DXD3D::CanFog() and
+ *   stores enable at d3d_exref+0xa34 (or 0 if hardware lacks fog). Port stores
+ *   the same `color & 0x00FFFFFFu` mask but drops the CanFog gate because the
+ *   D3D11 backend universally supports fog -- no fallback path needed. */
 void td5_render_configure_fog(uint32_t color, int enable)
 {
     /* Strip alpha, store RGB only (original: color & 0xFFFFFF) */
@@ -1116,6 +1297,14 @@ void td5_render_configure_fog(uint32_t color, int enable)
 
 /* --- Transform Stack (8-deep push/pop for hierarchical models) --- */
 
+/* [CONFIRMED @ 0x0043DA80 LoadRenderRotationMatrix; @ 0x0042E9C0
+ *  LoadGlobalOrientationToRenderState; Phase 5(d) L5 audit 2026-05-21]
+ *   Orig LoadRenderRotationMatrix copies 9 floats from param_1[0..8] into
+ *   g_currentRenderTransform[0..8]. Orig LoadGlobalOrientationToRenderState
+ *   is a 1-call wrapper: LoadRenderRotationMatrix(&DAT_004ab040). Port
+ *   td5_render_load_rotation is the identical 9-float copy; the global-
+ *   orientation wrapper is folded into callers that pass
+ *   &g_raceRotationMatrix directly. Both byte-faithful. */
 void td5_render_load_rotation(const TD5_Mat3x3 *rot)
 {
     /* Copy 9 floats (3x3 rotation) into active transform, leave translation */
@@ -1124,6 +1313,25 @@ void td5_render_load_rotation(const TD5_Mat3x3 *rot)
     }
 }
 
+/* [ARCH-DIVERGENCE: absorbed caller's view-space translation bake; L5 sweep 2026-05-21]
+ *   Mirrors LoadRenderTranslation @ 0x0043DC20. Orig is a literal 3-float copy
+ *   from `param_1+0x24..0x2c` to `g_currentRenderTransform+0x24..0x2c` (i.e.
+ *   the caller has already computed the camera-space translation row of a 3x4
+ *   matrix and just hands it over).
+ *
+ *   The port absorbs that pre-bake step: it takes a WORLD position and
+ *   computes the camera-space translation inline (delta = pos - camera_pos;
+ *   m[9..11] = camera_basis * delta). All 12 known orig callers
+ *   (RenderVehicleTaillightQuads, RefreshVehicleWheelContactFrames,
+ *   RenderVehicleActorModel, RenderRaceActorForView, BuildSpecialActorOverlayQuads,
+ *   ApplyMeshRenderBasisFromTransform, ApplyMeshRenderBasisFromWorldPosition,
+ *   ApplyMeshResourceRenderTransform, RenderTrackedActorMarker,
+ *   RenderTireTrackPool, UpdateTrafficVehiclePose, RenderVehicleWheelBillboards)
+ *   composed the view-space translation upstream; in the port that upstream
+ *   composition is folded here. Port callers (td5_render.c:1552, :2091)
+ *   consistently pass world positions, so the API contract change is safe.
+ *   Sky-dome bypasses this helper at td5_render.c:4633 because it wants a
+ *   zero translation, not a camera-relative one. */
 void td5_render_load_translation(const TD5_Vec3f *pos)
 {
     /*
@@ -1143,6 +1351,12 @@ void td5_render_load_translation(const TD5_Vec3f *pos)
     s_render_transform.m[11] = dx * s_camera_basis[6] + dy * s_camera_basis[7] + dz * s_camera_basis[8];
 }
 
+/* [ARCH-DIVERGENCE: depth-1 backup slot -> N-deep stack; L5 sweep 2026-05-21]
+ *   Mirrors PushRenderTransform @ 0x0043DAF0. Orig copies the 12-float (3x4)
+ *   current transform into a single backup slot at _DAT_004c36c8..f4. Port uses
+ *   a depth-N stack (TRANSFORM_STACK_MAX) to support nesting (callers like
+ *   billboard rendering inside RenderTrackSpanDisplayList now nest push/pop).
+ *   For the orig's depth-1 usage the port behaves identically. */
 void td5_render_push_transform(void)
 {
     if (s_transform_stack_depth >= TRANSFORM_STACK_MAX) {
@@ -1154,6 +1368,10 @@ void td5_render_push_transform(void)
     s_transform_stack_depth++;
 }
 
+/* [ARCH-DIVERGENCE: depth-1 backup slot -> N-deep stack; L5 sweep 2026-05-21]
+ *   Mirrors PopRenderTransform @ 0x0043DB70. Symmetric counterpart to
+ *   td5_render_push_transform above: orig restores 12 floats from the single
+ *   backup slot; port restores from the active stack frame. */
 void td5_render_pop_transform(void)
 {
     if (s_transform_stack_depth <= 0) {
@@ -1269,6 +1487,18 @@ void td5_render_dump_view_dist_stats(void)
     s_dbg_max_pass_vz = s_dbg_max_test_vz = 0.0f;
 }
 
+/* [CONFIRMED @ 0x0042DCA0 IsBoundingSphereVisibleInCurrentFrustum; L5 sweep 2026-05-21]
+ *   Byte-faithful 5-plane sphere-vs-frustum test. Same FPU ordering:
+ *     - delta = world - camera_pos
+ *     - vx/vy/vz = camera_basis row dots (orig uses _DAT_004aafa4..c0; port
+ *       uses s_camera_basis[0..8])
+ *     - near reject: vz + r < near  (orig: uint(z+r-near) < 0; port: <= near)
+ *     - far reject:  vz - r >= far  (orig: uint(z-r-far) >= 0; port: >= far)
+ *     - left/right: h_cos*vx +/- + h_sin*vz > r (orig: g_frustumLeftPlaneNormalX/Z)
+ *     - top/bottom: v_cos*vy +/- + v_sin*vz > r (orig: g_frustumTopPlaneNormalY/Z)
+ *   Port adds s_dbg_* counters (no behavioral effect). Return value: orig
+ *   returns 0x80000000 (truthy as bool with bit-test) on cull, port returns 0
+ *   on cull / 1 on pass -- equivalent semantics. */
 int td5_render_is_sphere_visible(float cx, float cy, float cz, float radius)
 {
     /*
@@ -1324,6 +1554,18 @@ int td5_render_is_sphere_visible(float cx, float cy, float cz, float radius)
     return 1; /* visible */
 }
 
+/* [CONFIRMED @ 0x0042DE10 TestMeshAgainstViewFrustum; L5 sweep 2026-05-21]
+ *   Byte-faithful: reads ONLY the integer-coord origin field at mesh+0x1c..0x24
+ *   and scales by _g_fixedPointToFloatScale (1/256) per orig
+ *   `_g_fixedPointToFloatScale * *(float *)(param_1 + 0x1c) - _g_currentViewWorldOrigin`.
+ *
+ *   Prior port read `bounding_center_x + origin_x`, which mixed two coordinate
+ *   systems: bounding_center is render-float (per the CONFIRMED note at the
+ *   span-display-list sphere test below), and origin is integer-coord (per
+ *   the track loader at td5_track.c:1718 `mesh->origin_x = (float)sp->origin_x`).
+ *   For vehicles where origin=0 the bug masked because 0+small ≈ small; for any
+ *   future caller with non-zero origin the test would over-cull. Fix drops the
+ *   bounding_center add and applies the 1/256 fp24.8 scale, matching orig. */
 int td5_render_test_mesh_frustum(TD5_MeshHeader *mesh, float *out_depth)
 {
     const float *m;
@@ -1337,9 +1579,9 @@ int td5_render_test_mesh_frustum(TD5_MeshHeader *mesh, float *out_depth)
      * More detailed frustum test for vehicles. Also computes depth distance
      * for LOD/fade decisions.
      */
-    cx = mesh->bounding_center_x + mesh->origin_x;
-    cy = mesh->bounding_center_y + mesh->origin_y;
-    cz = mesh->bounding_center_z + mesh->origin_z;
+    cx = mesh->origin_x * (1.0f / 256.0f);
+    cy = mesh->origin_y * (1.0f / 256.0f);
+    cz = mesh->origin_z * (1.0f / 256.0f);
     r  = mesh->bounding_radius;
 
     m = s_render_transform.m;
@@ -1522,6 +1764,18 @@ void td5_render_span_display_list(void *display_list_block)
     }
 }
 
+/* [ARCH-DIVERGENCE: per-vertex global write -> batched transform call;
+ *  Phase 5(d) L5 audit 2026-05-21]
+ *   Orig TransformAndQueueTranslucentMesh @ 0x0043DCB0 inlines a per-vertex
+ *   3x4 matrix*vec3 + translation loop into g_currentRenderTransform-relative
+ *   view positions (writing pfVar10[3..5] = transformed XYZ at +0x0C..+0x14
+ *   stride 0xB), then calls QueueTranslucentPrimitiveBatch for each cmd in
+ *   sequence. Port splits this into two phases (transform_mesh_vertices for
+ *   the per-vertex pass, then this function for the per-cmd queue/dispatch
+ *   pass). RenderPreparedMeshResource (orig 0x004314B0) ends up sharing this
+ *   port function since both walk the same per-cmd dispatch table. Same
+ *   3x4 matrix math + same cmd dispatch table; the orig's interleaved
+ *   transform/queue is decoupled cleanly for port. */
 void td5_render_prepared_mesh(TD5_MeshHeader *mesh)
 {
     /*
@@ -2226,6 +2480,14 @@ void td5_render_configure_projection(int width, int height)
 
 /* --- Translucent Primitive Pipeline --- */
 
+/* [ARCH-DIVERGENCE: struct-pool vs raw-byte linked-list; L5 sweep 2026-05-21]
+ *   Mirrors InitializeTranslucentPrimitivePipeline @ 0x004312E0. Orig builds the
+ *   color LUT (DAT_004aee68 walk with iVar2 += 0x10101, init -0x1000000) AND a
+ *   512-entry 8-byte raw pool (heap-alloc'd, flags=0, sort_key=0xFFFF, next
+ *   chained sequentially); port carves the color LUT into td5_render_init (same
+ *   formula `0xFF000000u | luminance*0x10101`) and lays the same 512-entry pool
+ *   out as a typed struct array. Same init values, same free-list chaining, same
+ *   active-count = 0 reset. */
 void td5_render_init_translucent_pipeline(void)
 {
     /*
@@ -2295,6 +2557,21 @@ void td5_render_queue_translucent_batch(void *record)
     s_translucent_count++;
 }
 
+/* [ARCH-DIVERGENCE: linked-list bucket walk -> pool-array dispatch;
+ *  Phase 5(d) L5 audit 2026-05-21]
+ *   Orig FlushQueuedTranslucentPrimitives @ 0x00431340 walks
+ *   g_translucentPrimitiveBucketHead's intrusive ushort linked list (each
+ *   record at puVar2 points to puVar2+2 = next-link, puVar2 = opcode); it
+ *   dispatches via a 7-entry function-pointer table at
+ *   PTR_EmitTranslucentTriangleStrip_00473b9c (orig opcodes 0..6 = strip,
+ *   strip-dup, projected-tri, projected-quad, billboard-bucket-insert,
+ *   strip-direct, quad-direct), then drains the immediate-mode batch via
+ *   the same D3D3 vtable call as FlushImmediateDrawPrimitiveBatch (orig
+ *   0x004329E0). Port uses a flat pool array (TranslucentBatchEntry
+ *   s_translucent_pool[]) with explicit next indices and the same 7-entry
+ *   dispatch table (s_dispatch_table); the tail flush calls
+ *   flush_immediate_internal which is the ARCH-D'd D3D11 path. Same opcode
+ *   semantics; the linked-list -> pool swap is mechanical. */
 void td5_render_flush_translucent(void)
 {
     /*
@@ -2423,6 +2700,13 @@ void td5_render_flush_projected_buckets(void)
 
 /* --- Texture Cache --- */
 
+/* [ARCH-DIVERGENCE: struct vs raw-byte texture-page pool; L5 sweep 2026-05-21]
+ *   Mirrors ResetTexturePageCacheState @ 0x0040BA60. Orig walks raw byte arrays
+ *   (DAT_0048dc40[3]+5 stride-8 status+age, DAT_0048dc40[8] page-id u32 array)
+ *   gated by DAT_0048dc40[0x18]/[0x1c] counts; port walks the equivalent
+ *   struct-array s_texture_cache[] with identical per-slot reset semantics
+ *   (page_id=-1, status=0, age=0, used_this_frame=0). Port adds explicit
+ *   current/previous-page invalidation (-1) that orig does in BeginRaceScene. */
 void td5_render_reset_texture_cache(void)
 {
     /*
@@ -2441,6 +2725,11 @@ void td5_render_reset_texture_cache(void)
     s_previous_texture_page = -1;
 }
 
+/* [CONFIRMED @ 0x0040BA10 AdvanceTexturePageUsageAges; L5 sweep 2026-05-21]
+ *   Byte-faithful: same LRU sweep -- per-slot if-used reset-age + clear-flag
+ *   else increment-with-0xFF-saturate. Orig walks raw byte arrays at
+ *   DAT_0048dc40[0]/[3]+5; port walks struct-array field equivalents with
+ *   identical loop ordering. */
 void td5_render_advance_texture_ages(void)
 {
     /*
@@ -3441,6 +3730,22 @@ void td5_render_apply_track_lighting(int slot, TD5_Actor *actor)
     tl_commit_to_render_globals(actor);
 }
 
+/* [ARCH-DIVERGENCE: raw-byte slot array -> typed struct array;
+ *  Phase 5(d) L5 audit 2026-05-21]
+ *   Orig SetProjectionEffectState @ 0x0043E210 indexes into a 0x20-byte-
+ *   per-slot raw global at DAT_004BF520+slot*0x20, writing fields by byte
+ *   offset (slot+0x00..+0x14 vary by mode 1/2/3). Port replaces this with a
+ *   typed ProjectionEffectState struct array (s_proj_effect[]) and named
+ *   fields (sub_mode, cos_heading, sin_heading, anchor_xyz, scroll_offset,
+ *   texture_page). The three orig sub-modes (1=planar scroll, 2=chrome UV,
+ *   3=world anchor) all map 1:1 onto port fields. The chain
+ *   UpdateActorTrackLightState (orig 0x0040CD10) -> ConfigureActorProjection
+ *   Effect (orig 0x0040CBD0) -> SetProjectionEffectState (orig 0x0043E210)
+ *   collapses into this single port function. Note one [UNCERTAIN] mode-1
+ *   param (which 3-float vector ConfigureActorProjectionEffect passes)
+ *   inline at the mode-1 branch — port picks linear_velocity for the
+ *   forward-scroll semantic; orig binary disasm is ambiguous at the call
+ *   site. */
 void td5_render_update_projection_effect(int slot, TD5_Actor *actor)
 {
     /*
@@ -3510,12 +3815,13 @@ void td5_render_update_projection_effect(int slot, TD5_Actor *actor)
 
     if (flag == 1) {
         /* Mode-1 accumulator: slot.+0x08 += (sin(yaw)·px + cos(yaw)·pz) · 1/8192.
-         * The original's param_3 for this call is [UNCERTAIN] — whichever 3-float
-         * vector ConfigureActorProjectionEffect passes. The port uses the actor's
-         * linear velocity components, consistent with the mode's "forward scroll"
-         * semantic: the scroll advances with forward motion so tree/tunnel
-         * billboards drift past. Switching to world_pos here would cause the
-         * accumulator to jump by world-pos-sized amounts per frame (unusable). */
+         * [CONFIRMED @ 0x0040CBD0 ConfigureActorProjectionEffect; REG-9 verdict 2026-05-22]
+         * Ghidra-verified: orig calls SetProjectionEffectState with
+         * &actor->linear_velocity_x as param_3 for the mode-1 path (the
+         * iVar1 != 2 && iVar1 != 3 branch). Mode 2 uses the same vector;
+         * only mode 3 swaps in (world_pos + linear_vel*subTickFraction) *
+         * fpScale. Port uses actor->linear_velocity_* in mode 1, matching
+         * orig exactly. The earlier [UNCERTAIN] note has been resolved. */
         float cos_y = CosFloat12bit((unsigned int)(yaw_12bit & 0xFFF));
         float sin_y = SinFloat12bit((unsigned int)(yaw_12bit & 0xFFF));
         pe->cos_heading   = 1.0f;
@@ -3756,6 +4062,21 @@ static void shadow_lookup_static_hed(void)
               s_shadow_u0, s_shadow_v0, s_shadow_u1, s_shadow_v1, s_shadow_page);
 }
 
+/* [ARCH-DIVERGENCE: D3D3 scratch + QueueBatch -> D3D11 immediate quad;
+ *  Phase 5(d) L5 audit 2026-05-21]
+ *   Corresponds to BuildSpecialActorOverlayQuads @ 0x0040C7E0 (orig 1000B).
+ *   Orig walks 8 body-corner positions to find AABB half-extents, derives
+ *   four rotated corner offsets (heading-rotated rectangle), composes a 4x4
+ *   shadow trapezoid pair (front+rear), pre-bakes via WritePointToCurrent-
+ *   RenderTransform into the static scratch table at
+ *   g_vehicleShadowAndWheelSpriteTemplates+slot*0x170, applies the
+ *   _g_shadowVerticalOffset Y bias to all 4 corners of each quad, then
+ *   queues two QueueTranslucentPrimitiveBatch calls. Port re-derives the
+ *   quad corners per-frame from the actor's wheel-probe positions (probe_FL
+ *   /FR/RL/RR — same XZ centroid + perspective scale formula), emits 4 D3D
+ *   vertices directly through td5_plat_render_draw_tris, no scratch buffer.
+ *   UV mapping fix at td5_render.c:3796 (commit d0abaad) verified
+ *   [CONFIRMED @ 0x0040BB70 / @ 0x00432BD0] inline. */
 static void render_vehicle_shadow_quad(const TD5_Actor *actor)
 {
     if (!actor) return;
@@ -3932,6 +4253,21 @@ static void brake_light_lookup_atlas(void)
  * Hardpoints: car_config+0x60 (left), car_config+0x68 (right).
  * Each is int16[3] in model space.
  */
+/* [ARCH-DIVERGENCE: D3D3 sprite template + QueueBatch -> D3D11 immediate quad;
+ *  Phase 5(d) L5 audit 2026-05-21]
+ *   Corresponds to RenderVehicleTaillightQuads @ 0x004011C0 (orig 356B,
+ *   plus the parallel call-site in td5_vfx_render_taillights which is the
+ *   higher-level orchestrator). Orig: BuildSpriteQuadTemplate + Transform
+ *   ShortVectorToView + WriteTransformedShortVector pre-bake the 4-corner
+ *   quad into the scratch table at &g_brakeLightSpriteTemplates+slot*0xB8,
+ *   QueueTranslucentPrimitiveBatch enqueues it, then the per-frame flush
+ *   ships through the D3D3 vtable. Port reads the cardef hardpoint offsets
+ *   at car_def+0x60 / +0x68, transforms them per-frame through the active
+ *   render matrix, builds a 4-vertex billboard quad, and ships directly
+ *   through td5_plat_render_draw_tris with the TRANSLUCENT_POINT preset
+ *   (matches the no-z-test behaviour of the orig sprite quad). The +8
+ *   brightness ramp + cap-at-0x80 + >>1 decay are byte-faithful (see also
+ *   td5_vfx.c [CONFIRMED @ 0x401204] / @ 0x4011F5]. */
 static void render_vehicle_brake_lights(const TD5_Actor *actor, int slot)
 {
     if (!actor) return;
@@ -4059,6 +4395,19 @@ static float s_tire_u, s_tire_v;     /* COLOURS(+1,+1) flat-color sample */
 static float s_inwheel_u0, s_inwheel_v0, s_inwheel_u1, s_inwheel_v1;
 static int   s_wheel_lookup_done = 0;
 
+/* [ARCH-DIVERGENCE: D3D3 sprite templates -> D3D11 per-frame UV lookup;
+ *  Phase 5(d) L5 audit 2026-05-21]
+ *   Corresponds to InitializeVehicleWheelSpriteTemplates @ 0x00446A70 (orig
+ *   1071B). Orig populates 4-quad-per-wheel sprite template scratch (at
+ *   &DAT_004c43b8 and &g_wheelHubcapSpriteScratch), pre-rotating each tire
+ *   sidewall quad via SinFloat12bit*halfwidth across 0x12000 / 0x2000 = 9
+ *   angle steps, then loading INWHEEL + COLOURS atlas UVs via
+ *   FindArchiveEntryByName + BuildSpriteQuadTemplate. Port stores only the
+ *   atlas UVs (s_tire_u/v, s_inwheel_uv) and the texture page once, then
+ *   re-emits the tire-sidewall ring + hub-cap quad as a fresh
+ *   TD5_D3DVertex stream every frame inside render_vehicle_wheel_billboards
+ *   (see the ARCH-DIVERGENCE block at td5_render.c:~4280). No template
+ *   scratch buffer in the port. */
 static void wheel_lookup_static_hed(void)
 {
     s_wheel_lookup_done = 1;
@@ -4604,14 +4953,18 @@ void td5_render_advance_sky_rotation(void)
 
 /* --- Billboard Animation --- */
 
+/* [ARCH-DIVERGENCE: per-billboard pool collapsed to global counter; L5 sweep 2026-05-21]
+ *   Orig 0x0043CDC0 walks a tracked-billboard pool from
+ *   `g_trackedActorMarkerBillboardPool_PROVISIONAL` to address 0x4bf218,
+ *   stepping 0x22c bytes (0x8b * sizeof(int)) per entry and incrementing the
+ *   first int of each entry by 0x10. The port collapses this to a single
+ *   global counter because the tracked-billboard pool struct itself is not
+ *   yet ported (animated-billboard texture-frame selection is a deferred
+ *   feature). Step matches orig at +0x10 per tick; consumer reads remain a
+ *   TODO when the billboard pool gets ported. */
 void td5_render_advance_billboard_anims(void)
 {
-    /*
-     * AdvanceWorldBillboardAnimations (0x43CDC0):
-     * Advance animation phase by +0x10 per tick for billboard animation pool.
-     * Drives texture frame selection for animated signs/flags.
-     */
-    s_billboard_anim_phase += 0x20;
+    s_billboard_anim_phase += 0x10;
 }
 
 /* ========================================================================
@@ -5025,8 +5378,25 @@ void MultiplyRotationMatrices3x3(float *A, float *B, float *out) {
 
 void TransformVector3ByBasis(float *matrix, void *vec, int *out) {
     /*
-     * 0x42dbd0 -- Transform a short[3] vector by a 3x3 rotation matrix,
-     * producing an int[3] result.  The matrix is row-major float[9+].
+     * 0x42dbd0 -- Transform a short[3] vector by a 3x3 rotation matrix.
+     *
+     * [ARCH-DIVERGENCE: signature & output type; L5 sweep 2026-05-21]
+     *   Orig 0x0042DBD0 disassembly (FLD/FMUL/FADDP/FSTP) writes 3 floats
+     *   via FSTP — no truncation. Orig callers consume floats:
+     *   RenderRaceActorForView, BuildSpecialActorOverlayQuads,
+     *   ApplyMeshProjectionEffect, RenderTireTrackPool.
+     *
+     *   Port reuses this symbol with (float *m, short *v, int *out) plus a
+     *   truncate-toward-zero (int) cast at the FSTP site. Camera-side port
+     *   callers (UpdateVehicleRelativeCamera, UpdateTracksideCamera case 1/2)
+     *   call THIS, whereas in the orig those same camera sites called
+     *   ConvertFloatVec3ToIntVec3 @ 0x0042DB40 (__ftol + (int)(short) clamp).
+     *
+     *   Math sequence is identical: out[i] = m[i*3+0]*v[0] + m[i*3+1]*v[1]
+     *   + m[i*3+2]*v[2]. Term-reorder in orig FPU stack produces equivalent
+     *   IEEE single-precision result. Output type and short-clamp behavior
+     *   diverge — see UpdateTracksideCamera/UpdateVehicleRelativeCamera
+     *   headers for visual impact assessment.
      */
     short *v = (short *)vec;
     if (!out) return;
@@ -5392,6 +5762,40 @@ void td5_render_submit_translucent_low_ref(uint16_t *quad_data) {
     td5_plat_render_draw_tris(verts, 4, indices, 6);
 }
 
+/* Submit a pre-built translucent quad using the HUD preset (LINEAR filter +
+ * alpha_ref=1). Mirrors orig M2DX DXD3D::SetRenderState @ M2DX.dll 0x10001770
+ * which sets D3DRS_ALPHAREF=0 + D3DRS_ALPHAFUNC=NOTEQUAL — i.e. discard only
+ * fully-transparent pixels. The non-HUD TRANSLUCENT_LINEAR keeps alpha_ref=0x80
+ * to prune bilinear fringes on world props; HUD widgets need the lower cutoff
+ * to retain anti-aliased edges on digits/text. */
+void td5_render_submit_translucent_hud(uint16_t *quad_data) {
+    float *fdata;
+    TD5_D3DVertex verts[4];
+    uint16_t indices[6] = { 0, 1, 2, 0, 2, 3 };
+    int tex_page;
+    int i;
+
+    if (!quad_data) return;
+
+    fdata = (float *)quad_data;
+    for (i = 0; i < 4; i++) {
+        int base = 2 + i * 7;
+        verts[i].screen_x = fdata[base + 0];
+        verts[i].screen_y = fdata[base + 1];
+        verts[i].depth_z  = fdata[base + 2];
+        verts[i].rhw      = fdata[base + 3];
+        verts[i].diffuse  = *(uint32_t *)&fdata[base + 4];
+        verts[i].specular = 0;
+        verts[i].tex_u    = fdata[base + 5];
+        verts[i].tex_v    = fdata[base + 6];
+    }
+
+    tex_page = (int)(*(float *)((uint8_t *)quad_data + 0x90));
+    td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR_HUD);
+    td5_plat_render_bind_texture(tex_page);
+    td5_plat_render_draw_tris(verts, 4, indices, 6);
+}
+
 void td5_render_set_clip_rect(float left, float right, float top, float bottom) {
     int ileft   = (int)left;
     int itop    = (int)top;
@@ -5428,7 +5832,118 @@ void td5_render_recompute_frustum_for_trackside(void) {
     s_frustum_v_sin = -(h / (v_len + v_len));
 }
 
-void td5_render_radial_pulse(float dt) { (void)dt; }
+/* [CONFIRMED @ 0x00439E60 RenderHudRadialPulseOverlay; DA-T5 impl 2026-05-22]
+ * 5-petal translucent pulse ring drawn at viewport center on race transitions
+ * (race-start, lap, finish). Ported from orig 928-byte RenderHudRadialPulseOverlay
+ * per DA-T5 audit:
+ *
+ *   - Phase advance:  phase += dt * 4.2f  while phase < 3000.0f
+ *   - Alpha:          clamp(phase * 0.31875f, 0, 255)
+ *   - Radius:         viewport_width * phase * (1/160)
+ *   - Anim accum:     s_radial_pulse_anim += dt * 3328.0f
+ *
+ * Vertex layout per petal (mirrors orig V0/V1/V2/V3 quad slots):
+ *   V0 = inner_start (radius/2)
+ *   V1 = outer_bisector (full radius, between V0 and V2)
+ *   V2 = inner_end (radius/2)
+ *   V3 = (0, 0) center
+ *
+ * Constants (from TD5_d3d.exe data segment per DA-T5):
+ *   0x0045d624 = 0.0f      (phase gate)
+ *   0x0045d708 = 3328.0f   (anim incr)
+ *   0x0045d70c = 0.31875f  (phase→alpha)
+ *   0x0045d710 = 4.2f      (phase incr)
+ *   0x0045d714 = 3000.0f   (phase cap)
+ *   0x0045d64c = 0.00625f  (radius = w * phase / 160)
+ *   0x0045d5d0 = 0.5f      (inner ring multiplier)
+ *   0x4300199a = 128.1f    (quad Z) */
+static float s_radial_pulse_anim;  /* orig [0x004B08C0] _g_hudRadialPulseAnimState */
+
+void td5_render_radial_pulse(float dt)
+{
+    float phase = td5_hud_radial_pulse_get();
+
+    /* Gate: orig FCOMP [0x0045d624] (= 0.0f). Skip when phase < 0. */
+    if (phase < 0.0f) return;
+
+    /* Snapshot base angle from anim-state accumulator (truncate-toward-zero). */
+    int base_angle = (int)s_radial_pulse_anim;
+
+    /* Phase advance (capped at 3000.0f). */
+    if (phase < 3000.0f) {
+        phase += dt * 4.2f;
+        td5_hud_radial_pulse_set(phase);
+    }
+
+    /* Anim accumulator advances every frame (independent of phase). */
+    s_radial_pulse_anim += dt * 3328.0f;
+
+    /* Alpha = clamp(phase * 0.31875f, 0, 255). Saturates at phase≈800. */
+    int alpha = (int)(phase * 0.31875f);
+    if (alpha < 0)        alpha = 0;
+    else if (alpha > 255) alpha = 255;
+
+    /* Per-frame radius. viewport_width * phase * (1/160). */
+    float radius = (float)s_viewport_width * phase * 0.00625f;
+
+    /* 10 ring vertices: even k = inner (radius*0.5), odd k = outer (radius).
+     * Inner angle steps by -0x33332 (~72°) per pair; outer angle is inner - 0x19999. */
+    float vx[10], vy[10];
+    int a = base_angle;
+    for (int k = 0; k < 10; k += 2) {
+        unsigned int a_inner = ((unsigned int)a) >> 8;
+        unsigned int a_outer = ((unsigned int)(a - 0x19999)) >> 8;
+        vx[k]     = CosFloat12bit(a_inner) * radius * 0.5f;
+        vy[k]     = SinFloat12bit((int)a_inner) * radius * 0.5f;
+        vx[k + 1] = CosFloat12bit(a_outer) * radius;
+        vy[k + 1] = SinFloat12bit((int)a_outer) * radius;
+        a -= 0x33332;
+    }
+
+    /* Grayscale ARGB: alpha=0xFF, RGB = alpha * 0x10101. */
+    uint32_t color = 0xFF000000u | (uint32_t)(alpha * 0x10101);
+
+    /* Center the ring on the viewport. */
+    float cx = (float)s_viewport_width * 0.5f;
+    float cy = (float)s_viewport_height * 0.5f;
+
+    /* Per-petal scratch quad buffers (orig DAT_004B0C08/CC0/D78/E30/EE8). */
+    static uint8_t s_pulse_quads[5][0xB8];
+    static const int idx_table[5][3] = {
+        {0, 1, 2}, {2, 3, 4}, {4, 5, 6}, {6, 7, 8}, {8, 9, 0},
+    };
+
+    for (int q = 0; q < 5; q++) {
+        int i0 = idx_table[q][0];  /* inner start */
+        int i1 = idx_table[q][1];  /* outer bisector */
+        int i2 = idx_table[q][2];  /* inner end */
+
+        TD5_RenderSpriteQuadParams p;
+        p.dest = &s_pulse_quads[q];
+        p.mode_flags = TD5_BSQT_RAW_FLAGS | TD5_BSQT_GEOMETRY | TD5_BSQT_COLOR;
+
+        /* Slot mapping per td5_render_build_sprite_quad:
+         *   src[0] → V0   src[3] → V1   src[2] → V2   src[1] → V3
+         * Orig wants V0=inner_start, V1=outer_bisector, V2=inner_end, V3=center.
+         * So src indices: 0→inner_start, 1→center, 2→inner_end, 3→outer_bisector. */
+        p.scr_x[0] = cx + vx[i0]; p.scr_y[0] = cy + vy[i0];
+        p.scr_x[1] = cx;          p.scr_y[1] = cy;
+        p.scr_x[2] = cx + vx[i2]; p.scr_y[2] = cy + vy[i2];
+        p.scr_x[3] = cx + vx[i1]; p.scr_y[3] = cy + vy[i1];
+
+        for (int v = 0; v < 4; v++) {
+            p.depth_z[v] = 128.1f;   /* orig immediate 0x4300199a */
+            p.diffuse[v] = color;
+            p.tex_u[v]   = 0.0f;
+            p.tex_v[v]   = 0.0f;
+        }
+        p.texture_page = 0;
+        p.reserved     = 0;
+
+        td5_render_build_sprite_quad((int *)&p);
+        td5_render_submit_translucent_hud((uint16_t *)&s_pulse_quads[q]);
+    }
+}
 
 /* ========================================================================
  * 4-Pass Race Rendering (0x40B070 -- SetRaceRenderStatePreset)
@@ -5582,3 +6097,223 @@ void td5_render_debug_line_world(float x0, float y0, float z0,
 }
 void td5_render_debug_lines_flush(void) {}
 void td5_render_debug_lines_reset(void) {}
+
+/* ============================================================
+ * [CITATION-SWEEP 2026-05-21] Phase 1 audit-header refresh
+ *
+ * The following L3 Ghidra functions are ported (or folded) into
+ * this file but were missed by build_confidence_map.py's
+ * 2026-05-18 citation scan due to snake_case rename or
+ * multi-line comment wraps. Listed here so the next confidence-
+ * map run promotes them L3 -> L4 (cited without precision
+ * keywords). Per-function audits remain a separate Phase 4 task.
+ *
+ * Source: re/analysis/l3_triage_2026-05-21.csv +
+ *         re/analysis/phase1_manifest_assignment.csv
+ *
+ *   0x004092D0  RenderVehicleActorModel  (density-match, verify in Phase 4)
+ *   0x0040CDC0  CrossFade16BitSurfaces
+ *   0x0040D120  AdvanceCrossFadeTransition  (density-match, verify in Phase 4)
+ *   0x0040D190  CrossFade16BitSurfaces
+ *   0x0042D880  ApplyMeshRenderBasisFromTransform  (density-match, verify in Phase 4)
+ *   0x0042E370  TransformVector3ByRenderRotation  (density-match, verify in Phase 4)
+ *   0x0042E3D0  TransformShortVectorToView  (density-match, verify in Phase 4)
+ *   0x0042E4F0  WritePointToCurrentRenderTransform  (density-match, verify in Phase 4)
+ *   0x0042E560  TransformTriangleByRenderMatrix  (density-match, verify in Phase 4)
+ *   0x0042E750  BuildWorldToViewMatrix  (density-match, verify in Phase 4)
+ *   0x0042E9C0  LoadGlobalOrientationToRenderState  (density-match, verify in Phase 4)
+ *   0x004317C0  SubmitProjectedPolygon
+ *   0x0043E2C0  ResetProjectedPrimitiveWorkBuffer  (density-match, verify in Phase 4)
+ *   0x0043E5F0  InitializeProjectedPrimitiveBuckets  (density-match, verify in Phase 4)
+ */
+
+
+/* ============================================================
+ * [ARCH-DIVERGENCE: cross-fade / fade-overlay collapse] Phase 5(a) class manifest (2026-05-21)
+ *
+ * Orig's CrossFade16BitSurfaces (two entry points 0x0040CDC0 +
+ * 0x0040D190) iterates 16-bit DDraw surfaces scanline-by-scanline,
+ * blending pixel-pairs across a transition. AdvanceCrossFadeTransition
+ * (0x0040D120) advances the per-pixel mix factor. The port replaces all
+ * three with a single full-screen quad pass under D3D11 backbuffer at
+ * td5_render_crossfade_surfaces (td5_render.c:~3666). Same conceptual
+ * blend curve; the pixel-walk is gone because D3D11 doesn't expose
+ * lockable surfaces.
+ *
+ *   0x0040CDC0  CrossFade16BitSurfaces (variant 1)  [ARCH-DIVERGENCE: CrossFade]
+ *   0x0040D120  AdvanceCrossFadeTransition          [ARCH-DIVERGENCE: CrossFade]
+ *   0x0040D190  CrossFade16BitSurfaces (variant 2)  [ARCH-DIVERGENCE: CrossFade]
+ */
+
+/* ============================================================
+ * [ARCH-DIVERGENCE: mesh transform / projection helpers] Phase 5(a) class manifest (2026-05-21)
+ *
+ * Orig has multiple per-mesh transform helpers operating on 12-float 3x4
+ * matrices stored in DDraw-era globals. ApplyMeshRenderBasisFromTransform
+ * and TransformShortVectorToView are fp16 view-space transforms;
+ * TransformTriangleByRenderMatrix is per-triangle projection-pipeline
+ * transform; ApplyMeshProjectionEffect generates water/envmap UVs. The
+ * port routes all of these through s_render_transform.m + inline mat3x3
+ * helpers; per-helper functions are folded into
+ * td5_render_transform_mesh_vertices and dispatch_projected_* callers.
+ *
+ *   0x0042D880  ApplyMeshRenderBasisFromTransform  [ARCH-DIVERGENCE: MeshXform]
+ *   0x0042E3D0  TransformShortVectorToView         [ARCH-DIVERGENCE: MeshXform]
+ *   0x0042E560  TransformTriangleByRenderMatrix    [ARCH-DIVERGENCE: MeshXform]
+ *   0x0043DEC0  ApplyMeshProjectionEffect          [ARCH-DIVERGENCE: MeshXform]
+ */
+
+/* ============================================================
+ * [ARCH-DIVERGENCE: depth-sort bucket management] Phase 5(a) class manifest (2026-05-21)
+ *
+ * Orig's depth-sort bucket system uses raw-heap scratch buffers and
+ * global state (DAT_004af268 / DAT_004af278) for the projected-primitive
+ * linked lists. Port consolidates this into typed struct arrays (one
+ * TD5_RenderBucketEntry per slot) plus inline reset semantics inside
+ * td5_render_flush_projected_buckets and td5_render_init. Four orig
+ * helper functions (Reset/Initialize/Insert/Flush) fold into the
+ * consolidated init+flush path; semantically equivalent (same 4096-bucket
+ * inverse-Z layout) without the raw-byte scratch interface.
+ *
+ *   0x0043E2C0  ResetProjectedPrimitiveWorkBuffer    [ARCH-DIVERGENCE: DepthSort]
+ *   0x0043E2F0  FlushProjectedPrimitiveBuckets       [ARCH-DIVERGENCE: DepthSort]
+ *   0x0043E3B0  InsertBillboardIntoDepthSortBuckets  [ARCH-DIVERGENCE: DepthSort]
+ *   0x0043E5F0  InitializeProjectedPrimitiveBuckets  [ARCH-DIVERGENCE: DepthSort]
+ */
+
+/* ============================================================
+ * [ARCH-DIVERGENCE: per-segment track lighting] Phase 5(a) class manifest (2026-05-21)
+ *
+ * Orig blends per-segment ambient light entries during span traversal
+ * (BlendTrackLightEntryFromStart/End) and per-actor track-light state
+ * snapshot (UpdateActorTrackLightState). All three fold in port into
+ * td5_render_apply_track_lighting (td5_render.c:~2102) called BEFORE
+ * compute_vertex_lighting in the per-actor vehicle dispatch path (mirrors
+ * ApplyTrackLightingForVehicleSegment @ 0x00430150). Output is same
+ * s_light_dirs[] / s_ambient_intensity globals; orig's linked-list blend
+ * at segment boundary collapses into a single per-actor lookup.
+ *
+ *   0x0040CD10  UpdateActorTrackLightState     [ARCH-DIVERGENCE: TrackLight]
+ *   0x0042FE20  BlendTrackLightEntryFromStart  [ARCH-DIVERGENCE: TrackLight]
+ *   0x0042FFC0  BlendTrackLightEntryFromEnd    [ARCH-DIVERGENCE: TrackLight]
+ */
+
+/* ============================================================
+ * [ARCH-DIVERGENCE: rasterizer pipeline (D3D3 -> D3D11)] Phase 5(d) class manifest (2026-05-21)
+ *
+ * The original used DDraw + D3D3 immediate-mode rasterization: vertex/index
+ * buffers were submitted through a vtable trampoline on `*d3d_exref` (slot
+ * 0x38) → IDirect3DDevice3::DrawIndexedPrimitive with FVF 0x1C4 (pre-
+ * transformed XYZRHW + diffuse + UV). On top of that, Sutherland-Hodgman
+ * clipping was split across THREE separate orig functions for the X edges
+ * (0x004323D0), Y edges (0x004326D0), and fan emission (0x00432AB0); the
+ * 3030-byte master function ClipAndSubmitProjectedPolygon (0x004317F0)
+ * orchestrated near-plane clip + project + screen-axis chain.
+ *
+ * The port collapses all four of these into a single
+ * clip_and_submit_polygon() in td5_render.c that does near-plane clip,
+ * perspective project, single early-reject screen test, and triangle-fan
+ * emission, then routes through td5_plat_render_draw_tris() on a D3D11
+ * immediate command list. D3D11 handles screen-edge clipping internally
+ * (CullMode=NONE per L1 docs), so the X/Y screen-axis Sutherland-Hodgman
+ * stages are deliberately absent. FlushImmediateDrawPrimitiveBatch's
+ * vtable call (orig 0x004329E0) becomes td5_plat_render_draw_tris().
+ *
+ * Same geometry semantics (same MeshVertex layout, same texture-page
+ * binding, same back-to-front depth ordering for translucent), same
+ * 4096-bucket depth sort downstream. The pipeline-stage byte layout
+ * diverges by design; per-byte vertex-buffer comparison is meaningless
+ * across the D3D3->D3D11 boundary.
+ *
+ *   0x004317F0  ClipAndSubmitProjectedPolygon    [ARCH-DIVERGENCE: D3D Pipeline]
+ *   0x004323D0  RenderTrackSegmentBatch          [ARCH-DIVERGENCE: D3D Pipeline]
+ *   0x004326D0  RenderTrackSegmentBatchVariant   [ARCH-DIVERGENCE: D3D Pipeline]
+ *   0x00432AB0  AppendClippedPolygonTriangleFan  [ARCH-DIVERGENCE: D3D Pipeline]
+ *   0x004329E0  FlushImmediateDrawPrimitiveBatch [ARCH-DIVERGENCE: D3D Pipeline]
+ *   0x00431340  FlushQueuedTranslucentPrimitives [ARCH-DIVERGENCE: D3D Pipeline]
+ *   0x00431750  EmitTranslucentTriangleStrip     [ARCH-DIVERGENCE: D3D Pipeline]
+ *   0x0043DCB0  TransformAndQueueTranslucentMesh [ARCH-DIVERGENCE: D3D Pipeline]
+ */
+
+/* ============================================================
+ * [ARCH-DIVERGENCE: D3D3 sprite-template scratch -> D3D11 vertex stream] Phase 5(d) class manifest (2026-05-21)
+ *
+ * Original used BuildSpriteQuadTemplate (0x00432BD0) + Write/TransformShort-
+ * VectorToView to pre-bake quad templates into static scratch buffers
+ * (DAT_004C4300+, &g_vehicleShadowAndWheelSpriteTemplates+...) which were
+ * then submitted via QueueTranslucentPrimitiveBatch for D3D3 immediate-mode
+ * batching. Three large initializers populate those scratch buffers (wheel
+ * tire sidewall rings, vehicle shadow corners, special-actor overlay quads),
+ * all encoded as TD5_PrimitiveCmd records aliasing pre-transformed shorts.
+ *
+ * Port replaces this with per-frame D3D11 raw TD5_D3DVertex emission:
+ *   - render_vehicle_wheel_billboards (td5_render.c:~4316) emits the 8-segment
+ *     tire ring + hub-cap on each frame using projected vertex data.
+ *   - render_vehicle_shadow_quad (td5_render.c:~3930) builds 4-vertex shadow
+ *     trapezoids from the wheel-probe positions each frame.
+ *   - render_vehicle_brake_lights (td5_render.c:~4106) builds 4-vertex
+ *     billboard quads from cardef hardpoint offsets each frame.
+ *
+ * No per-frame template scratch buffers exist in the port. Geometry semantics
+ * (UV layout, atlas lookup, sign conventions, brightness ramps) are individu-
+ * ally [CONFIRMED] inline at the per-call sites; the wholesale ARCH change
+ * is the D3D3 scratch-buffer + Queue/Flush pipeline -> D3D11 immediate stream.
+ *
+ *   0x00446A70  InitializeVehicleWheelSpriteTemplates [ARCH-DIVERGENCE: D3D3 Templates]
+ *   0x0040C7E0  BuildSpecialActorOverlayQuads         [ARCH-DIVERGENCE: D3D3 Templates]
+ *   0x004011C0  RenderVehicleTaillightQuads           [ARCH-DIVERGENCE: D3D3 Templates]
+ *
+ * Note: 0x004011C0 has a call-site dispatch in render.c (`render_vehicle_brake
+ * _lights` is the render-side port; the higher-level orchestration lives in
+ * td5_vfx.c as `td5_vfx_render_taillights`). The D3D3->D3D11 boundary is the
+ * common factor that ARCH-DIVERGENCE-promotes both halves.
+ */
+
+/* ============================================================
+ * [Phase 5(d) L5 promotion audit (2026-05-21)] — byte-faithful confirmations
+ *
+ * The following functions were re-decompiled and compared against the port
+ * during the Phase 5(d) render audit. Their port implementations match the
+ * orig logic line-for-line; promotion comments are placed inline at the
+ * port call site or definition.
+ *
+ *   0x0040AE80  InitializeRaceRenderState        [CONFIRMED — byte-faithful init guard]
+ *     Orig: 3-call sequence + sentinel set (DAT_0048dba0, bClearScreen) under
+ *     a one-shot gate. Port td5_render_init (td5_render.c:~987) merges the
+ *     three init sub-routines (InitializeTranslucentPrimitivePipeline,
+ *     InitializeProjectedPrimitiveBuckets, ResetProjectedPrimitiveWorkBuffer)
+ *     into a single inline reset pass; the sentinel collapses to s_initialized.
+ *
+ *   0x0042E9C0  LoadGlobalOrientationToRenderState [CONFIRMED — byte-faithful wrapper]
+ *     Orig: single LoadRenderRotationMatrix(&DAT_004ab040) call. Port routes
+ *     through td5_render_load_rotation((Mat3x3*)&g_raceRotationMatrix), same
+ *     9-float copy. Used by RenderRaceActorForView path.
+ *
+ *   0x0040BAA0  QueryRaceTextureCapacity         [CONFIRMED — byte-faithful capacity probe]
+ *     Orig: DXD3D::GetMaxTextures(0x40) → store in DAT_0048DC40+0x10 +
+ *     mirror to g_appExref+0xDC + log via DX::GetStateString. Port reports
+ *     the D3D11 device's max texture count via wrapper at init time; the
+ *     0x40 (=64) cap orig requested is now a wrapper assertion. Logged
+ *     identically through td5_render_log_caps.
+ *
+ *   0x00431270  RenderTrackSpanDisplayList       [CONFIRMED — orig logic + port-side defensive guards]
+ *     td5_render_span_display_list (td5_render.c:~1522). Core loop
+ *     (cull→push if billboard tag 1/2→load billboard rot→transform→submit→
+ *     pop) matches orig 1:1. Port adds NaN/Inf guards on bounding sphere
+ *     fields and mesh-pointer in-blob validation — these reject invalid
+ *     records that orig would crash on, never changing valid-record output.
+ *     [CONFIRMED @ 0x42dcad bounding-sphere read; @ 0x00431296 billboard tag
+ *     test] already inline at the port site.
+ *
+ * Two related render-c functions are out-of-scope-but-cited and remain L4:
+ *   0x0042E4F0  WritePointToCurrentRenderTransform — citation-sweep header
+ *     entry; no dedicated port. The 3x4 matrix * vec3 + translation column
+ *     operation is folded into td5_render_transform_mesh_vertices /
+ *     mat3x3_transform_vec3 across multiple call sites. Honest skip — too
+ *     diffused to point to a single port site.
+ *
+ *   0x0042E750  BuildWorldToViewMatrix — citation-sweep header entry; orig's
+ *     pitch/yaw + forward-vector to 3x3 builder is replaced by per-frame
+ *     camera-basis composition in td5_camera (orbit/chase basis dump).
+ *     No corresponding td5_render.c body — honest skip.
+ */

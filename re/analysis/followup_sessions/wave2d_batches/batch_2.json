@@ -1,0 +1,272 @@
+[
+  {
+    "addr": "0x00408f70",
+    "port_name": "collision_detect_simple",
+    "port_sig": "static void collision_detect_simple(TD5_Actor *a, TD5_Actor *b)",
+    "quality": "good",
+    "action": "apply",
+    "translated_template": "void __PLACEHOLDER__(RuntimeSlotActor *a, RuntimeSlotActor *b)",
+    "reason": ""
+  },
+  {
+    "addr": "0x00409150",
+    "port_name": "td5_physics_resolve_vehicle_contacts",
+    "port_sig": "void td5_physics_resolve_vehicle_contacts(void)",
+    "quality": "good",
+    "action": "apply",
+    "translated_template": "void __PLACEHOLDER__(void)",
+    "reason": ""
+  },
+  {
+    "addr": "0x00409e80",
+    "port_name": "check_race_completion",
+    "port_sig": "static int check_race_completion(uint32_t sim_delta)",
+    "quality": "weak",
+    "action": "apply",
+    "translated_template": "int __PLACEHOLDER__(uint sim_delta)",
+    "reason": ""
+  },
+  {
+    "addr": "0x0040a2b0",
+    "port_name": "advance_pending_finish_state",
+    "port_sig": "static void advance_pending_finish_state(int slot, uint32_t sim_delta)",
+    "quality": "weak",
+    "action": "apply",
+    "translated_template": "void __PLACEHOLDER__(int slot, uint sim_delta)",
+    "reason": ""
+  },
+  {
+    "addr": "0x0040a490",
+    "port_name": "tick_race_countdown",
+    "port_sig": "static void tick_race_countdown(void)",
+    "quality": "good",
+    "action": "apply",
+    "translated_template": "void __PLACEHOLDER__(void)",
+    "reason": ""
+  },
+  {
+    "addr": "0x0040a4c9",
+    "port_name": "td5_game_is_replay_active",
+    "port_sig": "int td5_game_is_replay_active(void)",
+    "quality": "good",
+    "action": "apply",
+    "translated_template": "int __PLACEHOLDER__(void)",
+    "reason": ""
+  },
+  {
+    "addr": "0x0040a720",
+    "port_name": "atan2_fixed12",
+    "port_sig": "static int32_t atan2_fixed12(int32_t dx, int32_t dz)",
+    "quality": "weak",
+    "action": "apply",
+    "translated_template": "int __PLACEHOLDER__(int dx, int dz)",
+    "reason": ""
+  },
+  {
+    "addr": "0x0040a880",
+    "port_name": "reset_results_table",
+    "port_sig": "static void reset_results_table(void)",
+    "quality": "good",
+    "action": "apply",
+    "translated_template": "void __PLACEHOLDER__(void)",
+    "reason": ""
+  },
+  {
+    "addr": "0x0040a8c0",
+    "port_name": "build_results_table",
+    "port_sig": "static void build_results_table(void)",
+    "quality": "good",
+    "action": "apply",
+    "translated_template": "void __PLACEHOLDER__(void)",
+    "reason": ""
+  },
+  {
+    "addr": "0x0040aad0",
+    "port_name": "sort_results_by_time_asc",
+    "port_sig": "static void sort_results_by_time_asc(void)",
+    "quality": "good",
+    "action": "apply",
+    "translated_template": "void __PLACEHOLDER__(void)",
+    "reason": ""
+  },
+  {
+    "addr": "0x0040ab80",
+    "port_name": "sort_results_by_score_desc",
+    "port_sig": "static void sort_results_by_score_desc(void)",
+    "quality": "good",
+    "action": "apply",
+    "translated_template": "void __PLACEHOLDER__(void)",
+    "reason": ""
+  },
+  {
+    "addr": "0x0040ade0",
+    "port_name": "td5_render_begin_scene",
+    "port_sig": "void td5_render_begin_scene(void)",
+    "quality": "good",
+    "action": "apply",
+    "translated_template": "void __PLACEHOLDER__(void)",
+    "reason": ""
+  },
+  {
+    "addr": "0x0040ae00",
+    "port_name": "td5_render_end_scene",
+    "port_sig": "void td5_render_end_scene(void)",
+    "quality": "good",
+    "action": "apply",
+    "translated_template": "void __PLACEHOLDER__(void)",
+    "reason": ""
+  },
+  {
+    "addr": "0x0040ae80",
+    "port_name": "td5_render_init",
+    "port_sig": "int td5_render_init(void)",
+    "quality": "good",
+    "action": "apply",
+    "translated_template": "int __PLACEHOLDER__(void)",
+    "reason": ""
+  },
+  {
+    "addr": "0x0040aec0",
+    "port_name": "td5_render_shutdown",
+    "port_sig": "void td5_render_shutdown(void)",
+    "quality": "good",
+    "action": "apply",
+    "translated_template": "void __PLACEHOLDER__(void)",
+    "reason": ""
+  },
+  {
+    "addr": "0x0040b530",
+    "port_name": "td5_asset_reset_texture_page_remap",
+    "port_sig": "static void td5_asset_reset_texture_page_remap(void)",
+    "quality": "good",
+    "action": "apply",
+    "translated_template": "void __PLACEHOLDER__(void)",
+    "reason": ""
+  },
+  {
+    "addr": "0x0040b590",
+    "port_name": "alpha_bleed_rgb",
+    "port_sig": "static void alpha_bleed_rgb(uint8_t *pixels, int w, int h)",
+    "quality": "weak",
+    "action": "apply",
+    "translated_template": "void __PLACEHOLDER__(byte *pixels, int w, int h)",
+    "reason": ""
+  },
+  {
+    "addr": "0x0040ba10",
+    "port_name": "td5_render_advance_texture_ages",
+    "port_sig": "void td5_render_advance_texture_ages(void)",
+    "quality": "good",
+    "action": "apply",
+    "translated_template": "void __PLACEHOLDER__(void)",
+    "reason": ""
+  },
+  {
+    "addr": "0x0040ba60",
+    "port_name": "td5_render_reset_texture_cache",
+    "port_sig": "void td5_render_reset_texture_cache(void)",
+    "quality": "good",
+    "action": "apply",
+    "translated_template": "void __PLACEHOLDER__(void)",
+    "reason": ""
+  },
+  {
+    "addr": "0x0040c5cc",
+    "port_name": "brake_light_lookup_atlas",
+    "port_sig": "static void brake_light_lookup_atlas(void)",
+    "quality": "good",
+    "action": "apply",
+    "translated_template": "void __PLACEHOLDER__(void)",
+    "reason": ""
+  },
+  {
+    "addr": "0x0040c7e0",
+    "port_name": "render_vehicle_shadow_quad",
+    "port_sig": "static void render_vehicle_shadow_quad(const TD5_Actor *actor)",
+    "quality": "good",
+    "action": "apply",
+    "translated_template": "void __PLACEHOLDER__(const RuntimeSlotActor *actor)",
+    "reason": ""
+  },
+  {
+    "addr": "0x0040d590",
+    "port_name": "frontend_advance_bg_gallery",
+    "port_sig": "static void frontend_advance_bg_gallery(void)",
+    "quality": "good",
+    "action": "apply",
+    "translated_template": "void __PLACEHOLDER__(void)",
+    "reason": ""
+  },
+  {
+    "addr": "0x0040ddc0",
+    "port_name": "frontend_render_car_selection_preview",
+    "port_sig": "static void frontend_render_car_selection_preview(float sx, float sy)",
+    "quality": "weak",
+    "action": "apply",
+    "translated_template": "void __PLACEHOLDER__(float sx, float sy)",
+    "reason": ""
+  },
+  {
+    "addr": "0x0040dfc0",
+    "port_name": "Screen_CarSelection",
+    "port_sig": "static void Screen_CarSelection(void)",
+    "quality": "good",
+    "action": "apply",
+    "translated_template": "void __PLACEHOLDER__(void)",
+    "reason": ""
+  },
+  {
+    "addr": "0x0040f8d0",
+    "port_name": "config_serialize_to_buffer",
+    "port_sig": "static void config_serialize_to_buffer(void)",
+    "quality": "good",
+    "action": "apply",
+    "translated_template": "void __PLACEHOLDER__(void)",
+    "reason": ""
+  },
+  {
+    "addr": "0x0040fb60",
+    "port_name": "config_deserialize_from_buffer",
+    "port_sig": "static void config_deserialize_from_buffer(void)",
+    "quality": "good",
+    "action": "apply",
+    "translated_template": "void __PLACEHOLDER__(void)",
+    "reason": ""
+  },
+  {
+    "addr": "0x0040fe00",
+    "port_name": "Screen_ControllerBinding",
+    "port_sig": "static void Screen_ControllerBinding(void)",
+    "quality": "good",
+    "action": "apply",
+    "translated_template": "void __PLACEHOLDER__(void)",
+    "reason": ""
+  },
+  {
+    "addr": "0x00410ca0",
+    "port_name": "ConfigureGameTypeFlags",
+    "port_sig": "static int ConfigureGameTypeFlags(void)",
+    "quality": "good",
+    "action": "apply",
+    "translated_template": "int __PLACEHOLDER__(void)",
+    "reason": ""
+  },
+  {
+    "addr": "0x00411120",
+    "port_name": "cup_serialize_to_buffer",
+    "port_sig": "static void cup_serialize_to_buffer(void)",
+    "quality": "good",
+    "action": "apply",
+    "translated_template": "void __PLACEHOLDER__(void)",
+    "reason": ""
+  },
+  {
+    "addr": "0x004112c0",
+    "port_name": "cup_deserialize_from_buffer",
+    "port_sig": "static int cup_deserialize_from_buffer(void)",
+    "quality": "good",
+    "action": "apply",
+    "translated_template": "int __PLACEHOLDER__(void)",
+    "reason": ""
+  }
+]

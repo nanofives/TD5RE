@@ -39,6 +39,62 @@ static FILE *s_fp = NULL;
 static int   s_active_call = 0;
 static uint32_t s_tick = 0;
 
+/* DIAG-2026-05-21: extended physics dump for orig comparison.
+ * Mirrors tools/_probes/extended_physics_probe.js columns exactly. */
+#define EXT_OUT_PATH "log/port/extended_physics.csv"
+static FILE *s_ext_fp = NULL;
+static int   s_ext_rows = 0;
+
+static void emit_extended_physics(void) {
+    if (s_ext_rows >= 2000) return;
+    if (!s_ext_fp) {
+        s_ext_fp = fopen(EXT_OUT_PATH, "w");
+        if (!s_ext_fp) return;
+        fputs("sim_tick,world_x,world_y,world_z,lvx,lvy,lvz,"
+              "euler_roll,euler_yaw,euler_pitch,ang_vel_yaw,"
+              "susp0,susp1,wheel_load_0,wheel_load_1,wheel_load_2,wheel_load_3,"
+              "wheel_contact,surface_contact,brake,handbrake,"
+              "span_raw,span_norm,long_speed,steer_cmd\n", s_ext_fp);
+    }
+    char *base = td5_pilot_00436A70_actor_base_ptr();
+    if (!base) return;
+    /* slot 0 */
+    char *a = base;
+    int32_t wx = *(int32_t *)(a + 0x1FC);
+    int32_t wy = *(int32_t *)(a + 0x200);
+    int32_t wz = *(int32_t *)(a + 0x204);
+    int32_t lvx = *(int32_t *)(a + 0x1CC);
+    int32_t lvy = *(int32_t *)(a + 0x1D0);
+    int32_t lvz = *(int32_t *)(a + 0x1D4);
+    int32_t er  = *(int32_t *)(a + 0x1F0);
+    int32_t ey  = *(int32_t *)(a + 0x1F4);
+    int32_t ep  = *(int32_t *)(a + 0x1F8);
+    int32_t avy = *(int32_t *)(a + 0x21C);
+    int32_t s0  = *(int32_t *)(a + 0x2DC);
+    int32_t s1  = *(int32_t *)(a + 0x2E0);
+    int16_t wl0 = *(int16_t *)(a + 0x270);
+    int16_t wl1 = *(int16_t *)(a + 0x272);
+    int16_t wl2 = *(int16_t *)(a + 0x274);
+    int16_t wl3 = *(int16_t *)(a + 0x276);
+    uint8_t wc  = *(uint8_t *)(a + 0x37C);
+    uint8_t sc  = *(uint8_t *)(a + 0x37D);
+    uint8_t bk  = *(uint8_t *)(a + 0x36D);
+    uint8_t hb  = *(uint8_t *)(a + 0x36E);
+    int16_t sr  = *(int16_t *)(a + 0x80);
+    int16_t sn  = *(int16_t *)(a + 0x82);
+    int32_t ls  = *(int32_t *)(a + 0x314);
+    int32_t st  = *(int32_t *)(a + 0x30C);
+    fprintf(s_ext_fp,
+        "%u,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%u,%u,%u,%u,%d,%d,%d,%d\n",
+        (unsigned)s_tick,
+        wx, wy, wz, lvx, lvy, lvz, er, ey, ep, avy,
+        s0, s1, (int)wl0, (int)wl1, (int)wl2, (int)wl3,
+        (unsigned)wc, (unsigned)sc, (unsigned)bk, (unsigned)hb,
+        (int)sr, (int)sn, ls, st);
+    s_ext_rows++;
+    if ((s_ext_rows & 0x3F) == 0) fflush(s_ext_fp);
+}
+
 static PilotSnapshot_00436A70 s_in_snap;
 
 /* Per-slot pre-call output snapshot — many output fields are
@@ -168,6 +224,8 @@ void td5_pilot_emit_00436A70_leave(void) {
     }
 
     fflush(s_fp);
+    /* DIAG: also dump extended physics for orig comparison. */
+    emit_extended_physics();
     s_active_call = 0;
     /* Silence unused warnings if pre-snapshot is not consumed in this build. */
     (void)s_pre_route_selector;

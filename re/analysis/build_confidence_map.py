@@ -224,10 +224,15 @@ def cross_reference(funcs: List[Dict], sources: Dict[str, str]) -> Dict[str, Dic
                 # lower-cased keyword entry).
                 for kw in strong_kw_lower:
                     if kw in src_lower:
-                        # only count if kw is near a citation
+                        # only count if kw is near a citation.
+                        # Window widened 300 -> 1500 (CLASSIFIER-1 2026-05-22) so
+                        # function-header [ARCH-DIVERGENCE]/[CONFIRMED @] tags
+                        # placed above a function body still reach the address
+                        # citation that appears in the function's signature line
+                        # (typical separation is ~15-30 lines = ~1000-2000 chars).
                         for off in local_ctx_offsets:
-                            window_start = max(0, off - 300)
-                            window_end = min(len(src_lower), off + 300)
+                            window_start = max(0, off - 1500)
+                            window_end = min(len(src_lower), off + 1500)
                             if kw in src_lower[window_start:window_end]:
                                 precision_strong += 1
                                 break

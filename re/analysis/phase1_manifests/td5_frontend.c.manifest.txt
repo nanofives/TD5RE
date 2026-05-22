@@ -1,0 +1,84 @@
+/* ============================================================
+ * [CITATION-SWEEP 2026-05-21] Phase 1 audit-header refresh
+ *
+ * The following L3 Ghidra functions are ported (or folded) into
+ * this file but were missed by build_confidence_map.py's
+ * 2026-05-18 citation scan due to snake_case rename or
+ * multi-line comment wraps. Listed here so the next confidence-
+ * map run promotes them L3 -> L4 (cited without precision
+ * keywords). Per-function audits remain a separate Phase 4 task.
+ *
+ * Source: re/analysis/l3_triage_2026-05-21.csv +
+ *         re/analysis/phase1_manifest_assignment.csv
+ *
+ *   0x0040B100  BuildEnumeratedDisplayModeList
+ *   0x0040B170  SelectConfiguredDisplayModeSlot
+ *   0x0040DDC0  DrawCarSelectionPreviewOverlay
+ *   0x004100C0  OpenControllerBindingPageWrapper
+ *   0x004100CE  DrawControlBindingTextWithOkButton  (density-match, verify in Phase 4)
+ *   0x004100D7  OpenControllerBindingPageNoneHeader
+ *   0x004100DE  OpenControllerBindingPageRearViewHeader
+ *   0x004100FA  DrawControlBindingText1WithOkButton  (density-match, verify in Phase 4)
+ *   0x00410111  DrawControlBindingText2WithOkButton  (density-match, verify in Phase 4)
+ *   0x00410129  OpenControllerBindingPageNoneHeader
+ *   0x00410380  RenderControllerBindingMenuPage
+ *   0x0041043C  RenderControllerBindingPageUpDownHeader
+ *   0x004104B2  RenderControllerBindingPageDownHeader
+ *   0x00410527  RenderControllerBindingPageUpHeader
+ *   0x00410599  RenderControllerBindingPageBlankOrRearViewHeader
+ *   0x00410613  RenderControllerBindingPageRows
+ *   0x00410940  DrawControlOptionsBindingHeader  (density-match, verify in Phase 4)
+ *   0x00411710  BuildFrontendDitherOffsetTable  (density-match, verify in Phase 4)
+ *   0x00411A50  ResetFrontendFadeState  (density-match, verify in Phase 4)
+ *   0x00411A70  RenderFrontendFadeOutEffect  (density-match, verify in Phase 4)
+ *   0x00411DE0  ClearFrontendSurfaceRegistry
+ *   0x00411E00  GetFrontendSurfaceRegistryId
+ *   0x00411E90  ReleaseTrackedFrontendSurfaces  (density-match, verify in Phase 4)
+ *   0x004122F0  LoadTgaToFrontendSurfaceFromArchive  (density-match, verify in Phase 4)
+ *   0x004127B0  LoadTgaToFrontendSurface16bppVariant
+ *   0x004129B0  RenderTgaToFrontendSurface
+ *   0x00412B00  SetSurfaceColorKeyFromRGB  (density-match, verify in Phase 4)
+ *   0x00412D50  MeasureOrDrawFrontendFontString  (density-match, verify in Phase 4)
+ *   0x00413010  DrawPostRaceHighScoreEntry  (density-match, verify in Phase 4)
+ *   0x00417B74  AdvanceFrontendInlineStringTableState  (density-match, verify in Phase 4)
+ *   0x00417DD2  LoadFrontendExtrasGalleryResources
+ *   0x004183B0  SetFrontendInlineStringTable  (density-match, verify in Phase 4)
+ *   0x00418410  SetFrontendInlineStringEntry  (density-match, verify in Phase 4)
+ *   0x00418430  ResetFrontendInlineStringTable  (density-match, verify in Phase 4)
+ *   0x00418C60  QueueFrontendNetworkMessage  (density-match, verify in Phase 4)
+ *   0x00419B30  RenderFrontendSessionBrowser  (density-match, verify in Phase 4)
+ *   0x0041A530  RenderFrontendCreateSessionNameInput
+ *   0x0041A670  RenderFrontendLobbyChatInput  (density-match, verify in Phase 4)
+ *   0x0041B420  RenderFrontendLobbyStatusPanel  (density-match, verify in Phase 4)
+ *   0x0041B610  ProcessFrontendNetworkMessages  (density-match, verify in Phase 4)
+ *   0x0041BD00  RenderFrontendLobbyChatPanel  (density-match, verify in Phase 4)
+ *   0x0041D840  FormatDisplayModeOptionStrings
+ *   0x00423DB0  ClearBackbufferWithColor  (density-match, verify in Phase 4)
+ *   0x00423E40  LockSecondaryFrontendSurfaceFillColor
+ *   0x00423F90  FillSurfaceRectWithColor
+ *   0x004242B0  DrawFrontendLocalizedStringPrimary  (density-match, verify in Phase 4)
+ *   0x00424470  DrawFrontendFontStringToSurface  (density-match, verify in Phase 4)
+ *   0x00424660  DrawFrontendSmallFontStringToSurface  (density-match, verify in Phase 4)
+ *   0x00424740  DrawFrontendClippedStringToSurface  (density-match, verify in Phase 4)
+ *   0x004248E0  DrawFrontendWrappedStringLine  (density-match, verify in Phase 4)
+ *   0x00424A50  MeasureOrCenterFrontendLocalizedString  (density-match, verify in Phase 4)
+ *   0x00424AF0  PresentPrimaryFrontendBufferViaCopy  (density-match, verify in Phase 4)
+ *   0x00424BC0  CopyPrimaryFrontendRectToSecondary  (density-match, verify in Phase 4)
+ *   0x00424C10  PresentSecondaryFrontendRectViaCopy  (density-match, verify in Phase 4)
+ *   0x00424C50  BlitSecondaryFrontendRectToPrimary  (density-match, verify in Phase 4)
+ *   0x00424CA0  PresentPrimaryFrontendBuffer  (density-match, verify in Phase 4)
+ *   0x00424CF0  PresentSecondaryFrontendRect  (density-match, verify in Phase 4)
+ *   0x00424D40  PresentPrimaryFrontendRect  (density-match, verify in Phase 4)
+ *   0x00424D90  FillPrimaryFrontendScanline  (density-match, verify in Phase 4)
+ *   0x00425170  UpdateFrontendClientOrigin  (density-match, verify in Phase 4)
+ *   0x004254D0  ResetFrontendOverlayState  (density-match, verify in Phase 4)
+ *   0x00425500  ResetFrontendSelectionState  (density-match, verify in Phase 4)
+ *   0x00425730  QueueFrontendSpriteBlit  (density-match, verify in Phase 4)
+ *   0x004258E0  DeactivateFrontendCursorOverlay  (density-match, verify in Phase 4)
+ *   0x004258F0  CreateFrontendMenuRectEntry  (density-match, verify in Phase 4)
+ *   0x004260E0  CreateFrontendDisplayModePreviewButton
+ *   0x00426120  RebuildFrontendButtonSurface
+ *   0x00426260  InitializeFrontendDisplayModeArrows
+ *   0x004264E0  BeginFrontendDisplayModePreviewLayout
+ *   0x00426540  RestoreFrontendDisplayModePreviewLayout
+ */

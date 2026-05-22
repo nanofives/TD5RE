@@ -888,7 +888,21 @@ int td5_save_load_config(const char *path)
  *
  * Captures the entire cup state into the contiguous 12966-byte snapshot
  * buffer. Computes CRC-32 and stores it at offset +0x0C.
- * ======================================================================== */
+ *
+ * [ARCH-DIVERGENCE: port-only TD5_CUPDATA_OVERLAY trailer; L5 sweep 2026-05-21]
+ *   Ghidra-verified 0x00411120: orig writes exactly 0x32A6 bytes (header
+ *   bytes 0x00..0x0B, race-schedule at 0x10, race-results at 0x88, actor
+ *   block at 0x100 (0xC5C dwords), slot-state at 0x3270 (6 dwords), tail
+ *   misc-state at 0x3288..0x32A5), CRC32 over all 0x32A6 bytes, stores
+ *   at +0x0C, sets g_snapshotPayloadSize = 0x32A6. The port mirrors every
+ *   offset byte-for-byte within the first 0x32A6 bytes (including the
+ *   asymmetric 0x328C/0x3290/0x3294/0x3296/0x3297/0x329B/0x329F/0x32A3/
+ *   0x32A5 packing) then appends a 32-byte port-only "TD5RECUP" overlay
+ *   carrying 6 stable car_index entries, extending the file to
+ *   TD5_CUPDATA_EXT_FILE_SIZE (12998 B). CRC32 covers the extended range
+ *   (CRC field set to TD5_CRC_PLACEHOLDER first to mirror orig's
+ *   placeholder dance). Legacy files (size == 0x32A6) still load via
+ *   the symmetric reader path. */
 
 static void cup_serialize_to_buffer(void)
 {
@@ -1054,7 +1068,21 @@ static void cup_serialize_to_buffer(void)
  *
  * Validates CRC-32 embedded at offset +0x0C, then restores all cup globals
  * from the snapshot buffer. Returns 1 on success, 0 on failure.
- * ======================================================================== */
+ *
+ * [ARCH-DIVERGENCE: port-only TD5_CUPDATA_OVERLAY trailer; L5 sweep 2026-05-21]
+ *   Ghidra-verified 0x004112C0: orig reads at fixed 0x32A6 size, validates
+ *   CRC32 stored at +0x0C against recomputation, then unpacks the same
+ *   byte offsets the serializer writes. The port mirrors every offset
+ *   byte-for-byte (including the special game_type==0xFF -> -1 remap
+ *   and the asymmetric 0x328C/0x3290/0x3294/0x3296/0x3297/0x329B/0x329F/
+ *   0x32A3/0x32A5 unpacking) plus a port-only path that recognizes the
+ *   "TD5RECUP" magic at offset 0x32A6 and decodes 6 car_index entries
+ *   into s_overlay_car_indices for the source-port's actor pointer
+ *   re-resolution pass. Defensive: any restored racer actor (slots 0..5)
+ *   has its pointer-shaped fields at +0x1B0/+0x1B8/+0x1BC scrubbed so
+ *   stale dangling pointers cannot be dereferenced before
+ *   LoadRaceVehicleAssets/InitializeRaceActor re-fill them. Legacy
+ *   (non-overlay) files validate identically to orig. */
 
 static int cup_deserialize_from_buffer(void)
 {
@@ -1276,7 +1304,15 @@ int td5_save_load_cup_data(const char *path)
  *
  * Original signature: bool __cdecl(unused, unused, uint32_t expected_crc)
  * The first two parameters are unused in the original binary.
- * ======================================================================== */
+ *
+ * [CONFIRMED @ 0x00411630 ValidateCupDataChecksum; L5 sweep 2026-05-21]
+ *   Byte-faithful: open via filename -> fread up to 0x4000 bytes ->
+ *   XOR-decrypt with TD5_CUPDATA_XOR_KEY (orig's `g_cupDataXorKey[iVar6] ^
+ *   buf[uVar7] ^ 0x80` with key-index wraparound on NUL is the same as
+ *   td5_save_xor_decrypt) -> CRC32 over the full bytes_read window ->
+ *   compare to expected. Port reads expected_crc from an explicit
+ *   parameter; orig reads it from an above-buffer stack slot (cdecl
+ *   caller pushes it). Same algorithm, same buffer cap, same key. */
 
 int td5_save_validate_cup_checksum(const char *path, uint32_t expected_crc)
 {

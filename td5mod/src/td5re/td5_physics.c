@@ -275,6 +275,24 @@ static inline void write_i32(uint8_t *base, size_t offset, int32_t value)
     memcpy(base + offset, &value, sizeof(value));
 }
 
+/* Force a float expression to round to float32 precision via an x87 FSTP-to-
+ * memory + reload. Mirrors orig 0x0042E1E0's intermediate-product spill
+ * pattern: each `FMUL ...; FSTP [esp+N]; FLD [esp+N]; FMUL ...` truncates
+ * the 80-bit FPU register to a 32-bit memory slot before the next operand
+ * arrives. Plain `volatile float` is NOT enough on i686 + MinGW x87 (GCC
+ * PR323) — GCC keeps the intermediate at 80 bit on the FPU stack. The
+ * explicit inline asm forces the spill exactly where orig does. */
+#define TD5_F32_SPILL(expr) ({                          \
+    float _td5_spill_v = (expr);                         \
+    float _td5_spill_t;                                  \
+    __asm__ volatile (                                   \
+        "fstps %0"                                       \
+        : "=m" (_td5_spill_t)                            \
+        : "t"  (_td5_spill_v)                            \
+        : "st");                                         \
+    _td5_spill_t;                                        \
+})
+
 /* ========================================================================
  * Fixed-point trig (12-bit angle, returns 12-bit result)
  *
@@ -5772,6 +5790,24 @@ static void td5_physics_attitude_from_wheels(const TD5_Actor *actor,
 
     *out_pitch = (int16_t)(AngleFromVector12(-dx, hyp_p) & 0xFFF);
     *out_roll  = (int16_t)(AngleFromVector12(-dz, hyp_r) & 0xFFF);
+
+    /* Diagnostic for [[todo-car-tilted-right-flat-surface-2026-05-19]]:
+     * on flat ground all 4 wheel Y values are equal and sp[0..3]==0 →
+     * dx=dz=0 → roll=pitch=0. If user reports persistent tilt, this log
+     * surfaces which input is biased. Slot-0 only, rate-limited. */
+    if (actor->slot_index == 0) {
+        static int s_attitude_log_div = 0;
+        if ((++s_attitude_log_div % 120) == 0) {
+            TD5_LOG_I(LOG_TAG,
+                "attitude_from_wheels slot0: roll=%d pitch=%d "
+                "dz_pre=%d dx_pre=%d sp=[%d,%d,%d,%d] "
+                "wcp_y=[%d,%d,%d,%d]",
+                (int)*out_roll, (int)*out_pitch,
+                (int)dz, (int)dx,
+                (int)sp[0], (int)sp[1], (int)sp[2], (int)sp[3],
+                (int)wcp[1], (int)wcp[4], (int)wcp[7], (int)wcp[10]);
+        }
+    }
 }
 
 /* Helper: signed-wrap a 12-bit delta into [-2048, +2047], matching the
@@ -5893,7 +5929,20 @@ void td5_physics_integrate_pose(TD5_Actor *actor)
      * float32 precision (~1e-3 .. 1e-6) while the port collapsed it to 0,
      * producing rotation_matrix.m[3] = port=0 vs orig=−7e−11 and cascading
      * into wheel_world_positions_hires.y off-by-1 LSB and probe_FR_x ±1
-     * world unit. [whole_state_diff slot-0 tick-1 labelled cluster, 2026-05-15] */
+     * world unit. [whole_state_diff slot-0 tick-1 labelled cluster, 2026-05-15]
+     *
+     * 2026-05-22 FPU SPILL FIX (session_02): orig FSTPs four intermediate
+     * products to float32 memory slots BEFORE the final FMUL/FADD chain:
+     *   slot F = (float)(sp*sy)   slot G = (float)(cp*cy)
+     *   slot H = (float)(cp*sy)   slot I = (float)(sp*cy)
+     * Then m[0]/m[1]/m[6]/m[7] consume these float32 spills, so each entry
+     * is `round_f32( round_f32(a*b) * c ± round_f32(d*e) )`, NOT the all-
+     * 80-bit chain GCC produces by default. Use `volatile float` to force
+     * MinGW (-m32, x87, no SSE) to emit FSTP-to-memory then FLD-from-memory
+     * at exactly the orig spill points. This is the literal port of
+     * 0x0042e244, 0x0042e250, 0x0042e26a, 0x0042e274. m[2]/m[3]/m[4]/m[5]/m[8]
+     * have only one trig product each (no intermediate spill needed) and
+     * already match orig at ULP level. */
     {
         int32_t roll_a  = actor->display_angles.roll  & 0xFFF;
         int32_t yaw_a   = actor->display_angles.yaw   & 0xFFF;
@@ -5906,15 +5955,40 @@ void td5_physics_integrate_pose(TD5_Actor *actor)
         float cp = CosFloat12bit((unsigned int)pitch_a);
         float sp = SinFloat12bit(pitch_a);
 
-        actor->rotation_matrix.m[0] = sp * sy * sr + cp * cy;
-        actor->rotation_matrix.m[1] = cp * sy * sr - sp * cy;
+        /* Float32 spills (slots F/G/H/I from orig 0x42E1E0). See
+         * TD5_F32_SPILL at file top for rationale. */
+        float sp_sy_f32 = TD5_F32_SPILL(sp * sy); /* slot F @ orig 0x42E244 */
+        float cp_cy_f32 = TD5_F32_SPILL(cp * cy); /* slot G @ orig 0x42E250 */
+        float cp_sy_f32 = TD5_F32_SPILL(cp * sy); /* slot H @ orig 0x42E26A */
+        float sp_cy_f32 = TD5_F32_SPILL(sp * cy); /* slot I @ orig 0x42E274 */
+
+        actor->rotation_matrix.m[0] = sp_sy_f32 * sr + cp_cy_f32;
+        actor->rotation_matrix.m[1] = cp_sy_f32 * sr - sp_cy_f32;
         actor->rotation_matrix.m[2] = sy * cr;
         actor->rotation_matrix.m[3] = sp * cr;
         actor->rotation_matrix.m[4] = cp * cr;
         actor->rotation_matrix.m[5] = -sr;
-        actor->rotation_matrix.m[6] = sp * cy * sr - cp * sy;
-        actor->rotation_matrix.m[7] = cp * cy * sr + sp * sy;
+        actor->rotation_matrix.m[6] = sp_cy_f32 * sr - cp_sy_f32;
+        actor->rotation_matrix.m[7] = cp_cy_f32 * sr + sp_sy_f32;
         actor->rotation_matrix.m[8] = cy * cr;
+
+        /* Per-frame rotation_matrix dump for cross-binary diff against orig
+         * Frida probe of 0x0042E1E0 (tools/_probes/rotation_matrix_probe.js).
+         * Gated on RaceTrace + slot 0 so it does not flood normal runs.
+         * [session_02 follow-up, 2026-05-22] */
+        if (actor->slot_index == 0 && g_td5.ini.race_trace_enabled) {
+            const float *m = actor->rotation_matrix.m;
+            TD5_LOG_I(LOG_TAG,
+                "ROTMAT slot0 fc=%u roll=%d yaw=%d pitch=%d "
+                "m=[%.6f %.6f %.6f %.6f %.6f %.6f %.6f %.6f %.6f] "
+                "wp=(%d,%d,%d)",
+                actor->frame_counter,
+                (int)actor->display_angles.roll,
+                (int)actor->display_angles.yaw,
+                (int)actor->display_angles.pitch,
+                m[0], m[1], m[2], m[3], m[4], m[5], m[6], m[7], m[8],
+                actor->world_pos.x, actor->world_pos.y, actor->world_pos.z);
+        }
     }
 
     /* 6. Compute render position (world_pos / 256 as float) */
@@ -6075,14 +6149,21 @@ void td5_physics_integrate_pose(TD5_Actor *actor)
         float cp = CosFloat12bit((unsigned int)pitch_a);
         float sp = SinFloat12bit(pitch_a);
 
-        actor->rotation_matrix.m[0] = sp * sy * sr + cp * cy;
-        actor->rotation_matrix.m[1] = cp * sy * sr - sp * cy;
+        /* Float32 spills (slots F/G/H/I from orig 0x42E1E0). See
+         * TD5_F32_SPILL at file top for rationale. */
+        float sp_sy_f32 = TD5_F32_SPILL(sp * sy);
+        float cp_cy_f32 = TD5_F32_SPILL(cp * cy);
+        float cp_sy_f32 = TD5_F32_SPILL(cp * sy);
+        float sp_cy_f32 = TD5_F32_SPILL(sp * cy);
+
+        actor->rotation_matrix.m[0] = sp_sy_f32 * sr + cp_cy_f32;
+        actor->rotation_matrix.m[1] = cp_sy_f32 * sr - sp_cy_f32;
         actor->rotation_matrix.m[2] = sy * cr;
         actor->rotation_matrix.m[3] = sp * cr;
         actor->rotation_matrix.m[4] = cp * cr;
         actor->rotation_matrix.m[5] = -sr;
-        actor->rotation_matrix.m[6] = sp * cy * sr - cp * sy;
-        actor->rotation_matrix.m[7] = cp * cy * sr + sp * sy;
+        actor->rotation_matrix.m[6] = sp_cy_f32 * sr - cp_sy_f32;
+        actor->rotation_matrix.m[7] = cp_cy_f32 * sr + sp_sy_f32;
         actor->rotation_matrix.m[8] = cy * cr;
 
         /* One-line per-tick diagnostic for the player car only */
@@ -6497,14 +6578,21 @@ static void update_vehicle_pose_from_physics(TD5_Actor *actor)
         float cp = CosFloat12bit((unsigned int)pitch_a);
         float sp = SinFloat12bit(pitch_a);
 
-        actor->rotation_matrix.m[0] = sp * sy * sr + cp * cy;
-        actor->rotation_matrix.m[1] = cp * sy * sr - sp * cy;
+        /* Float32 spills (slots F/G/H/I from orig 0x42E1E0). See
+         * TD5_F32_SPILL at file top for rationale. */
+        float sp_sy_f32 = TD5_F32_SPILL(sp * sy);
+        float cp_cy_f32 = TD5_F32_SPILL(cp * cy);
+        float cp_sy_f32 = TD5_F32_SPILL(cp * sy);
+        float sp_cy_f32 = TD5_F32_SPILL(sp * cy);
+
+        actor->rotation_matrix.m[0] = sp_sy_f32 * sr + cp_cy_f32;
+        actor->rotation_matrix.m[1] = cp_sy_f32 * sr - sp_cy_f32;
         actor->rotation_matrix.m[2] = sy * cr;
         actor->rotation_matrix.m[3] = sp * cr;
         actor->rotation_matrix.m[4] = cp * cr;
         actor->rotation_matrix.m[5] = -sr;
-        actor->rotation_matrix.m[6] = sp * cy * sr - cp * sy;
-        actor->rotation_matrix.m[7] = cp * cy * sr + sp * sy;
+        actor->rotation_matrix.m[6] = sp_cy_f32 * sr - cp_sy_f32;
+        actor->rotation_matrix.m[7] = cp_cy_f32 * sr + sp_sy_f32;
         actor->rotation_matrix.m[8] = cy * cr;
     }
 
@@ -6574,28 +6662,39 @@ static void update_vehicle_pose_from_physics(TD5_Actor *actor)
      * Since the port currently SKIPS the switch (D3), this 2nd rebuild
      * regenerates the SAME matrix already built above. It is included anyway
      * so the byte-faithful sequence is preserved for the day D3 lands.
-     * [D4 — precise-port pilot 004063A0, 2026-05-14] */
+     * [D4 — precise-port pilot 004063A0, 2026-05-14]
+     *
+     * 2026-05-22: switched from cos_fixed12*(1/4096) to CosFloat12bit + the
+     * TD5_F32_SPILL float32 intermediate spill so both BuildRotationMatrix-
+     * FromAngles call sites in 0x4063A0 produce identical byte-faithful
+     * matrices. Previously this 2nd rebuild OVERWROTE the first with the
+     * older Q12-truncating trig path, partially undoing the precision fix
+     * in the first rebuild. [session_02 follow-up, 2026-05-22] */
     {
         int32_t roll_a  = actor->display_angles.roll  & 0xFFF;
         int32_t yaw_a   = actor->display_angles.yaw   & 0xFFF;
         int32_t pitch_a = actor->display_angles.pitch  & 0xFFF;
 
-        const float k = 1.0f / 4096.0f;
-        float cr = (float)cos_fixed12(roll_a)  * k;
-        float sr = (float)sin_fixed12(roll_a)  * k;
-        float cy = (float)cos_fixed12(yaw_a)   * k;
-        float sy = (float)sin_fixed12(yaw_a)   * k;
-        float cp = (float)cos_fixed12(pitch_a) * k;
-        float sp = (float)sin_fixed12(pitch_a) * k;
+        float cr = CosFloat12bit((unsigned int)roll_a);
+        float sr = SinFloat12bit(roll_a);
+        float cy = CosFloat12bit((unsigned int)yaw_a);
+        float sy = SinFloat12bit(yaw_a);
+        float cp = CosFloat12bit((unsigned int)pitch_a);
+        float sp = SinFloat12bit(pitch_a);
 
-        actor->rotation_matrix.m[0] = sp * sy * sr + cp * cy;
-        actor->rotation_matrix.m[1] = cp * sy * sr - sp * cy;
+        float sp_sy_f32 = TD5_F32_SPILL(sp * sy);
+        float cp_cy_f32 = TD5_F32_SPILL(cp * cy);
+        float cp_sy_f32 = TD5_F32_SPILL(cp * sy);
+        float sp_cy_f32 = TD5_F32_SPILL(sp * cy);
+
+        actor->rotation_matrix.m[0] = sp_sy_f32 * sr + cp_cy_f32;
+        actor->rotation_matrix.m[1] = cp_sy_f32 * sr - sp_cy_f32;
         actor->rotation_matrix.m[2] = sy * cr;
         actor->rotation_matrix.m[3] = sp * cr;
         actor->rotation_matrix.m[4] = cp * cr;
         actor->rotation_matrix.m[5] = -sr;
-        actor->rotation_matrix.m[6] = sp * cy * sr - cp * sy;
-        actor->rotation_matrix.m[7] = cp * cy * sr + sp * sy;
+        actor->rotation_matrix.m[6] = sp_cy_f32 * sr - cp_sy_f32;
+        actor->rotation_matrix.m[7] = cp_cy_f32 * sr + sp_sy_f32;
         actor->rotation_matrix.m[8] = cy * cr;
     }
 
@@ -6898,13 +6997,15 @@ void td5_physics_refresh_wheel_contacts(TD5_Actor *actor)
          *
          * Recompute body-only Y (no render_pos add) in the same FADD order as
          * 0x0042EB10 output 1: p1*M4 + p0*M3 + p2*M5. No translation add.
-         * Rounds toward -inf to match the original FPU control word. */
+         * Uses RNE (round-to-nearest-even) to match orig FISTP — see
+         * td5_round_toward_neg_inf_to_int32 helper at line ~6740 and
+         * memory/todo_chassis_snap_fix_2026-05-16.md. */
         {
             float by_tmp = (float)(int16_t)wy * rot[4]
                          + (float)(int16_t)wx * rot[3]
                          + (float)(int16_t)wz * rot[5];
             s_wheel_offset_y_world[slot & 0x0F][i] =
-                (int32_t)(int16_t)floorf(by_tmp) * 256;
+                (int32_t)(int16_t)lrintf(by_tmp) * 256;
         }
 
         /* Per-probe track position update [CONFIRMED @ 0x403720].
@@ -7030,7 +7131,13 @@ void td5_physics_refresh_wheel_contacts(TD5_Actor *actor)
 
         /* gap_270[i] = frame-to-frame wheel contact position delta >> 8.
          * MUST compare pre-snap transform results from two consecutive frames.
-         * Using post-snap (ground_y) as old causes huge Y deltas (~90k). */
+         * Using post-snap (ground_y) as old causes huge Y deltas (~90k).
+         *
+         * 2026-05-22: the pragmatic `g_td5.paused -> zero gap_270` gate that
+         * used to live here was removed once the rotation_matrix FPU spill
+         * fix landed (orig 0x42E1E0 byte-faithful). If pause-frame gap_270
+         * starts producing phantom impulses again, the gate's history is in
+         * git (search for "countdown guard" in `td5_physics.c`). */
         {
             int16_t *g270 = (int16_t *)((uint8_t *)actor + 0x270 + i * 8);
             if (s_prev_wheel_valid[slot]) {
@@ -9581,6 +9688,35 @@ void td5_physics_set_slot_series_position(int slot, int position)
     g_slot_series_position[slot] = position;
 }
 
+void td5_physics_seed_traffic_cardef_from_player(int traffic_slot)
+{
+    if (traffic_slot < TD5_MAX_RACER_SLOTS || traffic_slot >= TD5_MAX_TOTAL_ACTORS)
+        return;
+    if (!s_carparam_loaded[0]) {
+        TD5_LOG_W(LOG_TAG,
+                  "seed_traffic_cardef slot=%d: player slot 0 carparam not loaded — skipping",
+                  traffic_slot);
+        return;
+    }
+
+    /* Mirrors orig LoadRaceVehicleAssets @ 0x00443280 traffic copy loop
+     * (`for iVar17 = 0x23; *puVar16 = *puVar6` at 0x004436C6-0x004436D7).
+     * Orig copies 0x23 dwords = 0x8C bytes = full cardef from slot 0 into each
+     * traffic slot's cardef row. Tuning is NOT copied — orig's traffic motion
+     * path (UpdateTrafficActorMotion @ 0x00443ED0) uses hardcoded constants
+     * for friction/throttle and does not read per-slot tuning. */
+    memcpy(s_loaded_cardef[traffic_slot], s_loaded_cardef[0], 0x8C);
+    s_carparam_loaded[traffic_slot] = 1;
+    TD5_LOG_I(LOG_TAG,
+              "seed_traffic_cardef slot=%d: copied slot-0 cardef "
+              "(height_offset=%d half_w=%d half_l=%d sphere_r=%d)",
+              traffic_slot,
+              (int)*(int16_t *)(s_loaded_cardef[traffic_slot] + 0x86),
+              (int)*(int16_t *)(s_loaded_cardef[traffic_slot] + 0x0C),
+              (int)*(int16_t *)(s_loaded_cardef[traffic_slot] + 0x08),
+              (int)*(int16_t *)(s_loaded_cardef[traffic_slot] + 0x80));
+}
+
 void td5_physics_load_carparam(int slot, const uint8_t *data_268)
 {
     if (slot < 0 || slot >= TD5_MAX_TOTAL_ACTORS || !data_268) return;
@@ -9603,3 +9739,26 @@ void td5_physics_load_carparam(int slot, const uint8_t *data_268)
               *(int16_t *)(s_loaded_tuning[slot] + 0x6E),
               *(int16_t *)(s_loaded_tuning[slot] + 0x70));
 }
+
+/* ============================================================
+ * [CITATION-SWEEP 2026-05-21] Phase 1 audit-header refresh
+ *
+ * The following L3 Ghidra functions are ported (or folded) into
+ * this file but were missed by build_confidence_map.py's
+ * 2026-05-18 citation scan due to snake_case rename or
+ * multi-line comment wraps. Listed here so the next confidence-
+ * map run promotes them L3 -> L4 (cited without precision
+ * keywords). Per-function audits remain a separate Phase 4 task.
+ *
+ * Source: re/analysis/l3_triage_2026-05-21.csv +
+ *         re/analysis/phase1_manifest_assignment.csv
+ *
+ *   0x00409520  CheckAndUpdateActorCollisionAlignment
+ *   0x004096B0  ComputeActorWorldBoundingVolume
+ *   0x0043C9E0  InitializeTrackedActorMarkerBillboards
+ *   0x0043CDE0  RenderTrackedActorMarker
+ *   0x0043D830  ApplyRandomWheelJitterHighSpeed  [ARCH-DIVERGENCE: dead in orig (0 callers verified 2026-05-21 via mcp__ghidra__function_callers); no port impl needed]
+ *   0x0043D910  ApplyRandomWheelJitterLowSpeed   [ARCH-DIVERGENCE: dead in orig (0 callers verified 2026-05-21 via mcp__ghidra__function_callers); no port impl needed]
+ *   0x0043E4C0  InsertTriangleIntoDepthSortBuckets  (density-match, verify in Phase 4)
+ *   0x004431C0  LoadTrafficVehicleSkinTexture
+ */

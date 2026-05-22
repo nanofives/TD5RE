@@ -122,6 +122,12 @@ void td5_game_update_split_screen_balance(void);
 
 /* --- Wanted-mode / replay / traffic accessors (0x40A2B0 region) --- */
 int  td5_game_is_replay_active(void);
+/* Set replay mode (1=playback path / 0=recording path).
+ * Gates the WriteOpen-vs-ReadOpen branch in td5_game_init_race_session
+ * at td5_game.c:1902. Frontend View-Replay must call this; otherwise the
+ * race re-entry path runs WriteOpen which memsets the recording buffer
+ * (closes todo-view-replay-restarts-race-2026-05-19 per DA-M1 audit). */
+void td5_game_set_replay_mode(int v);
 int  td5_game_get_traffic_variant(int traffic_index);
 int  td5_game_get_cop_actor_index(void);
 int  td5_game_is_wanted_mode(void);

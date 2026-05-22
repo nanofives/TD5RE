@@ -2534,6 +2534,30 @@ static void update_position_recursive(int16_t *track_state, int32_t pos_x, int32
     int16_t saved_state[8];
     memcpy(saved_state, track_state, 16);
 
+    /* [DA-T2 audit 2026-05-22 — pending application]
+     * Deep audit of orig 0x004440F0 vs port found 5 cascade-relevant divergences
+     * (re/analysis/wave4_deep_audits/da_t2_update_actor_track_pos.md). Each is
+     * a candidate fix for the residual ~210u slot 0 bias and the Edinburgh
+     * 6-racer cascade pattern documented in pool13. NOT YET APPLIED — fixes
+     * are HIGH-risk cascade changes that need runtime pool13 dynamic-diff
+     * measurement to validate. Apply order per audit Section E:
+     *
+     *   Fix 1 (D2, case 1=FWD ~line 2544): orig has 3-outcome FWD with two
+     *     secondary cross tests on the new span. Port advances unconditionally.
+     *     Orig at 0x0044436d-0x004445ad. Est. lift: 10-30 fields @ sub_tick=1.
+     *   Fix 2 (D3, case 4=BACK ~line 2626): symmetric to D2 for backward step.
+     *     Orig 0x004449c1-0x00444c4b. Unblocks `todo-reverse-not-triggered`.
+     *   Fix 3 (D8, case 2=RIGHT ~line 2567): missing FWD/BACK post-step retests.
+     *     Orig 0x004445ae-0x004449c0. Edinburgh right-hand bends.
+     *   Fix 4 (D9, case 8=LEFT, search below): symmetric to D8. Sydney/BlueRidge
+     *     left-hand wall hug. Orig 0x00444e10-0x00445031.
+     *   Fix 5 (D10, default ~line 2848-2872): bits 5/7/10/11 should be RET no-op
+     *     per orig switch table 0x00445420 → 0x00445411. Port's cascade-resolve
+     *     warps span ±1/tick on degenerate quads. Needs Frida bits histogram
+     *     to confirm patterns occur before applying.
+     *
+     * Sequencing: apply Fix 1+3 first → measure pool13 lift → Fix 2+4 → Fix 5
+     * after Frida histogram. */
     for (iter = 0; iter < TRACK_MAX_RECURSION; iter++) {
         uint8_t bits = compute_boundary_bits(span_idx, sub_lane, pos_x, pos_z);
 
@@ -6427,3 +6451,55 @@ void td5_track_debug_emit_collision_lines(int center_span, int span_radius)
     if (center_span >= 0 && center_span < s_span_count)
         emit_span_wireframe(center_span, PLAYER_RAIL, PLAYER_CROSS);
 }
+
+/* ============================================================
+ * [CITATION-SWEEP 2026-05-21] Phase 1 audit-header refresh
+ *
+ * The following L3 Ghidra functions are ported (or folded) into
+ * this file but were missed by build_confidence_map.py's
+ * 2026-05-18 citation scan due to snake_case rename or
+ * multi-line comment wraps. Listed here so the next confidence-
+ * map run promotes them L3 -> L4 (cited without precision
+ * keywords). Per-function audits remain a separate Phase 4 task.
+ *
+ * Source: re/analysis/l3_triage_2026-05-21.csv +
+ *         re/analysis/phase1_manifest_assignment.csv
+ *
+ *   0x00406950  ClearTrackSegmentVisibilityTable  [ARCH-DIVERGENCE: broadphase grid array-width compaction + chain fold; L5 sweep 2026-05-21]
+ *     Ghidra-verified 0x00406950: orig writes 0x100 uint32_t entries of
+ *     0xFFFFFFFF into gBroadphaseSpatialGrid, then walks a separate
+ *     chain-link table at gBroadphaseActorChainLinks (stride 0x14, end
+ *     0x483178) zeroing/initializing each per-actor record. The port
+ *     folds both passes into td5_physics.c:4041 ResolveVehicleContacts:
+ *     the spatial grid is compressed from uint32_t[256] to uint8_t[256]
+ *     (s_collision_grid, since chain-head fits a byte sentinel
+ *     0xFF == COLLISION_CHAIN_END) and the per-actor chain link lives
+ *     inside g_actor_aabb[i][4] which is unconditionally written before
+ *     read each frame. Functionally equivalent; no orig-side standalone
+ *     equivalent in td5_track.c.
+ *   0x0040B1C0  BuildTrackTextureCache  [CONFIRMED @ 0x0040B1C0 BuildTrackTextureCache; L5 sweep 2026-05-21]
+ *     Byte-faithful: 11-byte thunk that drops param_1/param_2 and tail-
+ *     calls BuildTrackTextureCacheImpl(param_3). Port's
+ *     td5_asset_build_track_texture_cache callers invoke the impl
+ *     directly with the third argument, same effect, same drop. No port
+ *     wrapper needed.
+ *   0x00434740  ComputeRouteForwardOvershootScalar  [ARCH-DIVERGENCE: dead code, sole caller discards return; L5 sweep 2026-05-21]
+ *     Ghidra-verified 0x00434740: orig's own header comment notes
+ *     "the only caller recomputes the target vector and discards the
+ *     return value", and the function has no observable side effects
+ *     (pure compute returning an int). Port omits it entirely; no
+ *     consumer exists. Confirmed dead from re/analysis perspective.
+ *   0x0043FB70  ReadTrackStaticDataChunk  [ARCH-DIVERGENCE: streaming inflate callback removed; L5 sweep 2026-05-21]
+ *     Ghidra-verified 0x0043FB70: one-line callback that fread()s 0x10000
+ *     bytes into g_zipIoBuffer64K from g_zipArchiveFileHandle. Used by the
+ *     original binary's chunked streaming inflate. Port uses
+ *     td5_inflate.c's mem-to-mem decompressor which loads the whole
+ *     compressed stream into memory before inflating, removing the
+ *     streaming callback entirely.
+ *   0x0043FBC0  DecompressTrackDataStream  [ARCH-DIVERGENCE: streaming inflate bit-reader removed; L5 sweep 2026-05-21]
+ *     Ghidra-verified 0x0043FBC0: streaming-chunk bit-reader that
+ *     consumes N bytes from a 0x10000-byte buffer, refilling via fread
+ *     when g_zipCdReadCursor exhausts. Replaced wholesale by mem-to-mem
+ *     inflate in td5_inflate.c -- the port reads the entire compressed
+ *     blob once, so there is no chunk-refill state machine.
+ */

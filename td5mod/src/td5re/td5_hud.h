@@ -57,9 +57,15 @@
 #define TD5_HUD_MAX_VIEWS        2
 #define TD5_HUD_VIEW_STRIDE      0x1148  /* bytes per view HUD primitive storage */
 
-#define TD5_HUD_MAX_TEXT_GLYPHS  256
+/* Increased 256→512 (2026-05-21): debug overlay flickers when speedometer
+ * text + race UI text + debug lines together exceed 256 glyphs in one frame,
+ * causing the late-queued WHEELS/SURF/SLIP/SPAN debug lines to be dropped
+ * by td5_hud_queue_text's overflow guard at td5_hud.c:1051. 512 gives the
+ * debug overlay room to coexist with full HUD without re-budgeting per-line
+ * widths. Trace runs with DebugOverlay=0 are unaffected (and unchanged). */
+#define TD5_HUD_MAX_TEXT_GLYPHS  512
 #define TD5_HUD_GLYPH_QUAD_SIZE  0xB8    /* bytes per glyph quad */
-#define TD5_HUD_TEXT_BUF_SIZE    0xB800  /* 256 * 0xB8 */
+#define TD5_HUD_TEXT_BUF_SIZE    0x17000 /* 512 * 0xB8 */
 #define TD5_HUD_GLYPH_TABLE_SIZE 0x404   /* 64 glyphs * 16 bytes + 4 bytes tex ptr */
 
 #define TD5_HUD_FONT_GRID_COLS   16
@@ -157,6 +163,12 @@ void td5_hud_init_layout(int viewport_mode);
 void td5_hud_init_minimap_layout(void);
 void td5_hud_init_pause_menu(int page_index);
 void td5_hud_init_font_atlas(void);
+
+/* --- Radial pulse state accessors (orig [0x004B0FA0] g_hudRadialPulsePhase) ---
+ * [DA-T5 audit 2026-05-22] td5_render_radial_pulse uses these to read/update
+ * the HUD-side phase counter without exposing the static. */
+float td5_hud_radial_pulse_get(void);
+void  td5_hud_radial_pulse_set(float value);
 
 /* --- Per-frame rendering --- */
 void td5_hud_render_overlays(float dt);

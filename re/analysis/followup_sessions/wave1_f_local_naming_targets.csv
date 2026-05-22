@@ -1,0 +1,200 @@
+orig_address,port_file,port_line,suggested_name,suggested_type,context_snippet
+0x00436a70,td5_ai.c,5783,racer_count,int,int racer_count = TD5_MAX_RACER_SLOTS;
+0x00436a70,td5_ai.c,5794,traffic_max,int,int traffic_max = g_active_actor_count;
+0x00404030,td5_physics.c,1275,surface_center,uint8_t,uint8_t surface_center = actor->surface_type_chassis;
+0x00404030,td5_physics.c,1276,surface_wheel,uint8_t,uint8_t surface_wheel[4];
+0x00404030,td5_physics.c,1286,grip,int32_t,int32_t grip[4];
+0x00404030,td5_physics.c,1287,front_weight,int32_t,"int32_t front_weight = (int32_t)PHYS_S(actor, 0x28);"
+0x00404030,td5_physics.c,1288,rear_weight,int32_t,"int32_t rear_weight  = (int32_t)PHYS_S(actor, 0x2A);"
+0x00404030,td5_physics.c,1289,total_weight,int32_t,int32_t total_weight = front_weight + rear_weight;
+0x00405e80,td5_physics.c,5838,t2_old_disp_roll,int16_t,int16_t t2_old_disp_roll  = actor->display_angles.roll;
+0x00405e80,td5_physics.c,5839,t2_old_disp_pitch,int16_t,int16_t t2_old_disp_pitch = actor->display_angles.pitch;
+0x00405e80,td5_physics.c,5879,max_span,int,int max_span = td5_track_get_span_count();  /* includes branch spans */
+0x00405e80,td5_physics.c,5889,wdelta,int,int wdelta = (int)actor->wheel_probes[wi].span_index - (int)actor->track_span_raw;
+0x00405e80,td5_physics.c,5947,roll_a,int32_t,int32_t roll_a  = actor->display_angles.roll  & 0xFFF;
+0x00405e80,td5_physics.c,5948,yaw_a,int32_t,int32_t yaw_a   = actor->display_angles.yaw   & 0xFFF;
+0x0042b580,td5_game.c,2429,frame_accum,uint32_t,uint32_t frame_accum = td5_game_normalized_dt_to_accum(g_td5.normalized_frame_dt);
+0x0042b580,td5_game.c,2435,completion,int,int completion = check_race_completion(frame_accum);
+0x0042b580,td5_game.c,2448,elapsed,uint32_t,uint32_t elapsed = td5_plat_time_ms() - s_race_end_timer_start;
+0x0042b580,td5_game.c,2457,fade_dt_seconds,float,float fade_dt_seconds = td5_game_normalized_dt_to_seconds(g_td5.normalized_frame_dt);
+0x0042b580,td5_game.c,2482,ticks_this_frame,int,int ticks_this_frame = 0;
+0x0042b580,td5_game.c,2485,max_ticks_per_frame,int,const int max_ticks_per_frame =
+0x004440f0,td5_track.c,6148,span_count,int,int span_count;
+0x004440f0,td5_track.c,6149,span_idx,int,int span_idx;
+0x004440f0,td5_track.c,6150,sub_lane,int,int sub_lane;
+0x0042aa10,td5_game.c,1164,session_seed,uint32_t,uint32_t session_seed =
+0x0042aa10,td5_game.c,1225,racer_slot_count,int,int racer_slot_count = g_td5.time_trial_enabled ? 2 : TD5_MAX_RACER_SLOTS;
+0x0042aa10,td5_game.c,1248,decoration_start,int,int decoration_start = 2;
+0x0040fe00,td5_frontend.c,7842,dev_type,int,int dev_type;
+0x0040fe00,td5_frontend.c,7843,source,int,int source;
+0x0040fe00,td5_frontend.c,7891,num_buttons,int,int num_buttons;
+0x0040fe00,td5_frontend.c,7967,js_new,uint32_t,uint32_t js_new = 0;
+0x00403720,td5_physics.c,6874,resolved_surface,int,int resolved_surface = actor->surface_type_chassis;
+0x00403720,td5_physics.c,6875,resolved_surface_valid,int,int resolved_surface_valid = 0;
+0x00403720,td5_physics.c,6916,slot,int,int slot = actor->slot_index;
+0x00403720,td5_physics.c,6944,sp_div,int32_t,int32_t sp_div = (sp + (int32_t)((uint32_t)(sp >> 31) & 0xFFu)) >> 8;
+0x00403720,td5_physics.c,6945,href,int32_t,"int32_t href = (int32_t)CDEF_S(actor, 0x82);"
+0x00403720,td5_physics.c,6946,href_x181,int32_t,int32_t href_x181 = href * 0xB5;
+0x00406650,td5_physics.c,952,spd_sar8,int32_t,int32_t spd_sar8 = spd >> 8;   /* sar8_rz collapses to >>8 for spd >= 0 */
+0x00406650,td5_physics.c,992,eff_grip,uint8_t,uint8_t eff_grip = actor->grip_reduction;
+0x00406650,td5_physics.c,1099,redline,int32_t,"int32_t redline = (int32_t)PHYS_S(actor, 0x72);"
+0x00406650,td5_physics.c,1119,triple,int32_t,int32_t triple = redline * 3;
+0x00406650,td5_physics.c,1120,thresh,int32_t,int32_t thresh = (triple + ((triple >> 31) & 3)) >> 2;  /* /4 round-rz */
+0x00405d70,td5_ai.c,5222,handle,int32_t,int32_t handle;
+0x00405d70,td5_ai.c,5225,cop_span_norm,int32_t,int32_t cop_span_norm;     /* DAT_004ad152 — actor[9] +0x82 */
+0x00405d70,td5_ai.c,5226,player_span_norm,int16_t,int16_t player_span_norm;  /* DAT_004ab18a — actor[0] +0x82 */
+0x00405d70,td5_ai.c,5227,player_speed,int32_t,int32_t player_speed;      /* DAT_004ab41c — actor[0] +0x314 */
+0x00405d70,td5_ai.c,5228,player_fwd,int32_t,int32_t player_fwd;        /* DAT_004afbc0 — RS[0].forward_track_component */
+0x00405d70,td5_ai.c,5229,player_selector,int32_t,int32_t player_selector;   /* DAT_004afb6c — RS[0].route_table_selector */
+0x00422480,td5_frontend.c,4646,canvas_w,float,"const float canvas_w = 640.0f, canvas_h = 480.0f;"
+0x00422480,td5_frontend.c,4647,panel_w,float,"const float panel_w = 408.0f, panel_h = 392.0f;"
+0x00422480,td5_frontend.c,4651,panel_x,float,float panel_x = ((canvas_w - panel_w) * 0.5f + (float)s_results_panel_slide_x) * sx;
+0x00422480,td5_frontend.c,4652,panel_y,float,float panel_y = (canvas_h - panel_h) * 0.5f * sy;
+0x00422480,td5_frontend.c,4698,focus_slot,int,int focus_slot = s_score_category_index;
+0x00422480,td5_frontend.c,4741,k_rows_single,int,"static const int k_rows_single[]   = { LBL_AVG_SPEED, LBL_TOP_SPEED, LBL_FINISH_POSITION,"
+0x00434fe0,td5_ai.c,3315,threshold_result,int,int threshold_result;
+0x00434fe0,td5_ai.c,3316,steer_weight,int32_t,int32_t steer_weight;
+0x00434fe0,td5_ai.c,3382,result,int,int result = td5_ai_advance_track_script(rs);
+0x00434fe0,td5_ai.c,3388,span_raw,int,"int span_raw  = (int)(int16_t)ACTOR_I16(actor, ACTOR_SPAN_RAW);"
+0x00434fe0,td5_ai.c,3389,span_norm,int,"int span_norm = (int)(int16_t)ACTOR_I16(actor, ACTOR_SPAN_NORMALIZED);"
+0x00434fe0,td5_ai.c,3390,pos_vec,int32_t,int32_t pos_vec[3];
+0x0040a720,td5_render.c,5153,param_1,int,const int param_1 = x;
+0x0040a720,td5_render.c,5154,param_2,int,const int param_2 = z;
+0x0040a720,td5_render.c,5179,neg_p2,int,int neg_p2 = -param_2;
+0x0040a720,td5_render.c,5226,neg_p1,int,int neg_p1 = -param_1;
+0x00410ca0,td5_frontend.c,2751,count,int,int count = 0;
+0x00410ca0,td5_frontend.c,2827,sched_idx,int,int sched_idx = s_selected_game_type - 1;
+0x00434350,td5_track.c,3884,span_idx,int,int     span_idx;
+0x00434350,td5_track.c,3885,sub_lane,int,int     sub_lane;
+0x00434350,td5_track.c,3886,type,int8_t,int8_t  type;                  /* span_type clamped to int8 (low byte) */
+0x00434350,td5_track.c,3889,lane_count_minus_1,int,int     lane_count_minus_1;
+0x00434350,td5_track.c,3894,have_triangle,int,int     have_triangle;
+0x00434350,td5_track.c,3972,klass,int,int klass = (int)k_heading_left_edge_class[ti];
+0x0042e2e0,td5_physics.c,4285,k_pos_damp,int32_t,"const int32_t k_pos_damp   = (int32_t)PHYS_S(actor, 0x5E);  /* position-proportional damping (restoring) */"
+0x0042e2e0,td5_physics.c,4286,k_vel_damp,int32_t,"const int32_t k_vel_damp   = (int32_t)PHYS_S(actor, 0x60);  /* velocity-proportional damping */"
+0x0042e2e0,td5_physics.c,4287,k_spring,int32_t,"const int32_t k_spring     = (int32_t)PHYS_S(actor, 0x62);  /* spring coefficient (multiplies lever proj) */"
+0x0042e2e0,td5_physics.c,4288,k_travel_lim,int32_t,"const int32_t k_travel_lim = (int32_t)PHYS_S(actor, 0x64);  /* per-wheel +/- travel clamp */"
+0x0042e2e0,td5_physics.c,4289,k_load_scale,int32_t,"const int32_t k_load_scale = (int32_t)PHYS_S(actor, 0x66);  /* multiplier on wheel_load_accum */"
+0x0042e2e0,td5_physics.c,4294,wpx_scaled,int32_t,const int32_t wpx_scaled = sar8_rz(actor->world_pos.x);
+0x00434670,td5_track.c,4450,ret_val,int32_t,int32_t ret_val = (progress < route_byte) ? -len : len;
+0x00404ec0,td5_physics.c,2298,surface,uint8_t,uint8_t surface = actor->surface_type_chassis;
+0x00404ec0,td5_physics.c,2306,front_weight,int32_t,"int32_t front_weight = (int32_t)PHYS_S(actor, 0x28);"
+0x00404ec0,td5_physics.c,2307,rear_weight,int32_t,"int32_t rear_weight  = (int32_t)PHYS_S(actor, 0x2A);"
+0x00404ec0,td5_physics.c,2308,total_weight,int32_t,int32_t total_weight = front_weight + rear_weight;
+0x00404ec0,td5_physics.c,2311,half_wb,int32_t,"int32_t half_wb = PHYS_I(actor, 0x24);"
+0x00404ec0,td5_physics.c,2314,susp_defl,int32_t,int32_t susp_defl = actor->center_suspension_pos;
+0x004353b0,td5_ai.c,3974,racer_count,int,int       racer_count;
+0x004353b0,td5_ai.c,3975,best_slot,int,int       best_slot = 0;
+0x004353b0,td5_ai.c,3976,best_dist,int32_t,int32_t   best_dist = 0;
+0x004353b0,td5_ai.c,3978,loop_max,int,int       loop_max;
+0x004353b0,td5_ai.c,3980,player_span_norm,int16_t,int16_t   player_span_norm;
+0x004353b0,td5_ai.c,3982,q_span,int16_t,int16_t   q_span;
+0x004057f0,td5_physics.c,4704,lock,uint8_t,const uint8_t lock = actor->wheel_contact_bitmask;
+0x004057f0,td5_physics.c,4722,prev_air,uint8_t,const uint8_t prev_air = (uint8_t)((~s_prev_grounded_mask[actor->slot_index & 0x0F]) & 0x0F);
+0x004057f0,td5_physics.c,4748,loni_grav,int32_t,int32_t loni_grav = 0;      /* local_50 — Σ g_scaled * arm2 */
+0x004057f0,td5_physics.c,4749,lat_grav,int32_t,int32_t lat_grav  = 0;      /* local_5c — Σ -(g_scaled * arm0) */
+0x004057f0,td5_physics.c,4750,loni_spr,int32_t,int32_t loni_spr  = 0;      /* local_64 — Σ (dot * arm2) * -0x100 */
+0x004057f0,td5_physics.c,4751,lat_spr,int32_t,int32_t lat_spr   = 0;      /* local_60 — Σ (dot * arm0) * +0x100 */
+0x0040a490,td5_game.c,3341,s_level0_logged,int,static int s_level0_logged = 0;  /* log-once gate for level==0 transition */
+0x0040a490,td5_game.c,3376,clear_or_restore,int,int clear_or_restore = (td5_input_is_playback_active() ||
+0x00434800,td5_track.c,4471,lane_count,int,int lane_count;
+0x00434800,td5_track.c,4472,type_offset,int,int type_offset;
+0x00434800,td5_track.c,4517,left_x,int32_t,int32_t left_x  = (int32_t)v_left->x  + sp->origin_x;
+0x00434800,td5_track.c,4518,left_z,int32_t,int32_t left_z  = (int32_t)v_left->z  + sp->origin_z;
+0x00434800,td5_track.c,4519,right_x,int32_t,int32_t right_x = (int32_t)v_right->x + sp->origin_x;
+0x00434800,td5_track.c,4520,right_z,int32_t,int32_t right_z = (int32_t)v_right->z + sp->origin_z;
+0x00440b00,td5_sound.c,677,active_engine_channels,int,int active_engine_channels = 0;
+0x00440b00,td5_sound.c,697,desired_viewport_state,int,int desired_viewport_state = (g_td5.split_screen_mode != 0) ? 1 : 0;
+0x00440b00,td5_sound.c,742,num_passes,int,int num_passes;
+0x00440b00,td5_sound.c,743,viewer_vehicle,int,"int viewer_vehicle;  /* which vehicle index is the ""viewer"" for this pass */"
+0x00440b00,td5_sound.c,759,slot_offset,int,"int slot_offset = 0; /* 0 for P1 base slots, 44 for P2 duplicate slots */"
+0x00440b00,td5_sound.c,779,state_idx,int,int state_idx = pass + veh * 2;
+0x004340c0,td5_ai.c,1399,tier,int,int tier = g_td5.difficulty_tier;
+0x004340c0,td5_ai.c,1400,is_circuit,int,int is_circuit = (g_td5.track_type == TD5_TRACK_CIRCUIT);
+0x004340c0,td5_ai.c,1401,has_traffic,int,int has_traffic = g_td5.traffic_enabled;
+0x004340c0,td5_ai.c,1408,is_cop_chase,int,int is_cop_chase = g_td5.wanted_mode_enabled;
+0x004340c0,td5_ai.c,1409,is_time_trial,int,int is_time_trial = g_td5.time_trial_enabled;
+0x004340c0,td5_ai.c,1410,racer_count,int,int racer_count;
+0x0040c120,td5_render.c,3856,saved_pages,int,int saved_pages[256];
+0x0040c120,td5_render.c,3866,save_count,int,int save_count = (vert_count < REFLECTION_MAX_VERTS) ? vert_count : REFLECTION_MAX_VERTS;
+0x0040c120,td5_render.c,3886,saved_lighting,uint32_t,uint32_t saved_lighting[REFLECTION_MAX_VERTS];
+0x0040c120,td5_render.c,3902,s_refl_log_count,int,static int s_refl_log_count = 0;
+0x00430150,td5_track.c,4714,current_span,int16_t,int16_t current_span;
+0x00430150,td5_track.c,4715,actor_idx,int,int actor_idx;
+0x00430150,td5_track.c,4766,zone_width,int,int zone_width = zone->span_end - zone->span_start;
+0x00430150,td5_track.c,4775,blend_range,float,float blend_range = (float)zone->blend_distance / (float)zone_width;
+0x00435e80,td5_ai.c,4797,ref_slot,int,int  ref_slot;
+0x00435e80,td5_ai.c,4818,ref_span_norm,int16_t,"int16_t ref_span_norm = ACTOR_I16(ref_actor, ACTOR_SPAN_NORMALIZED);"
+0x00435e80,td5_ai.c,4868,seed_src,int32_t,int32_t seed_src = 0;
+0x00435e80,td5_ai.c,4902,span_raw,int16_t,"int16_t span_raw = ACTOR_I16(actor, ACTOR_SPAN_RAW);"
+0x00435e80,td5_ai.c,4903,ring_length,int,int ring_length = td5_track_get_ring_length();
+0x00435e80,td5_ai.c,4904,near_edge,int,int near_edge = (span_raw < 3 || (ring_length > 0 && span_raw >= ring_length - 8));
+0x00443ed0,td5_physics.c,5611,max_span,int,int max_span = td5_track_get_span_count();
+0x00443ed0,td5_physics.c,5628,span,int,int span  = (int)actor->track_span_raw;
+0x00443ed0,td5_physics.c,5629,lane,int,int lane  = (int)actor->track_sub_lane_index;
+0x00443ed0,td5_physics.c,5630,surface_normal,int16_t,"int16_t surface_normal[3] = {0, 1, 0};  /* default: flat up */"
+0x00443ed0,td5_physics.c,5631,ground_y,int32_t,int32_t ground_y = td5_track_compute_contact_height_with_normal(
+0x00443ed0,td5_physics.c,5642,height_offset,int32_t,"int32_t height_offset = (int32_t)CDEF_S(actor, 0x86) << 8;"
+0x0042f5b0,td5_game.c,4233,swapped,int,int swapped;
+0x0042f5b0,td5_game.c,4246,span_a,int32_t,int32_t span_a = actor_a ? (int32_t)actor_a->track_span_high_water : 0;
+0x0042f5b0,td5_game.c,4247,span_b,int32_t,int32_t span_b = actor_b ? (int32_t)actor_b->track_span_high_water : 0;
+0x00442770,td5_asset.c,2176,zip_path,char,char zip_path[256];
+0x00442770,td5_asset.c,2179,tex_sz,int,int tex_sz = 0;
+0x00442770,td5_asset.c,2180,page_count,int,int page_count = 0;
+0x00442770,td5_asset.c,2206,additive_count,int,int additive_count = 0;
+0x00442770,td5_asset.c,2212,page_type,uint8_t,uint8_t page_type = ((const uint8_t *)tex_data)[off + 3];
+0x00442770,td5_asset.c,2240,parsed,int,int parsed = (tex_data != NULL);
+0x004063a0,td5_physics.c,6567,roll_a,int32_t,int32_t roll_a  = actor->display_angles.roll  & 0xFFF;
+0x004063a0,td5_physics.c,6568,yaw_a,int32_t,int32_t yaw_a   = actor->display_angles.yaw   & 0xFFF;
+0x004063a0,td5_physics.c,6569,pitch_a,int32_t,int32_t pitch_a = actor->display_angles.pitch  & 0xFFF;
+0x004063a0,td5_physics.c,6583,sp_sy_f32,float,float sp_sy_f32 = TD5_F32_SPILL(sp * sy);
+0x004063a0,td5_physics.c,6584,cp_cy_f32,float,float cp_cy_f32 = TD5_F32_SPILL(cp * cy);
+0x004063a0,td5_physics.c,6585,cp_sy_f32,float,float cp_sy_f32 = TD5_F32_SPILL(cp * sy);
+0x00434040,td5_camera.c,2609,slot,int,int slot;
+0x00434040,td5_camera.c,2611,actor_yaw,int32_t,int32_t actor_yaw;
+0x00434040,td5_camera.c,2612,span_norm,int16_t,int16_t span_norm;
+0x00434040,td5_camera.c,2615,diff,int,int diff;
+0x004345b0,td5_track.c,4235,raw_span,int,int     raw_span;
+0x004345b0,td5_track.c,4236,ring_length,int,int     ring_length;
+0x004345b0,td5_track.c,4238,entry_count,int,int     entry_count;
+0x004345b0,td5_track.c,4285,high,int,int high   = (int)(uint16_t)entry[1];
+0x004345b0,td5_track.c,4286,anchor,int,int anchor = (int)(int16_t)entry[2];
+0x004345b0,td5_track.c,4300,new_span,int,int new_span = (anchor - low) + raw_span;
+0x00443fb0,td5_track.c,4140,raw_span,int32_t,"int32_t raw_span;       /* MOVSX EAX, AX -> int32_t from int16_t */"
+0x00443fb0,td5_track.c,4141,ring_length,int32_t,int32_t ring_length;    /* dword ptr [0x004c3d90] = g_trackTotalSpanCount */
+0x00443fb0,td5_track.c,4142,quotient,int32_t,int32_t quotient;
+0x00443fb0,td5_track.c,4143,remainder,int32_t,int32_t remainder;
+0x00403a20,td5_physics.c,4272,bias,int32_t,int32_t bias = (x < 0) ? -1 : 0;
+0x00409e80,td5_game.c,3485,all_finished,int,int all_finished = 1;
+0x0040a2b0,td5_game.c,3666,actor_span,int16_t,int16_t actor_span = actor ? actor->track_span_normalized : 0;
+0x0040a2b0,td5_game.c,3699,track_start,int32_t,int32_t track_start = g_td5.track_start_span_index;
+0x0040a2b0,td5_game.c,3700,total_spans,int32_t,int32_t total_spans = g_td5.track_span_ring_length;
+0x0040a2b0,td5_game.c,3777,denom,int32_t,int32_t denom = ls >> 8;
+0x0040a2b0,td5_game.c,3790,sub_prog,int32_t,int32_t sub_prog = 0;
+0x0040a2b0,td5_game.c,3792,span_i,int,int span_i = (int)actor->track_span_raw;
+0x0040a530,td5_game.c,4033,numerator,int,"int numerator = 10, denominator = 10;"
+0x0040a530,td5_game.c,4044,is_slot_zero,int,int is_slot_zero = (slot == 0);
+0x0040dfc0,td5_frontend.c,8326,slot,int,int slot = -1;
+0x0040dfc0,td5_frontend.c,8331,page,int,int page = FE_SURFACE_PAGE_BASE + slot;
+0x0040dfc0,td5_frontend.c,8333,blue_pixel,uint32_t,uint32_t blue_pixel = 0xFF00005C;
+0x0040dfc0,td5_frontend.c,8376,upper,int,int upper = s_total_unlocked_cars - 1;
+0x0040dfc0,td5_frontend.c,8458,delta,int,int delta = frontend_option_delta();
+0x0040dfc0,td5_frontend.c,8459,active_button,int,int active_button = s_button_index;
+0x00435940,td5_ai.c,4375,local_18,int,"int local_18;       /* slot counter (original local_18, starts at 6) */"
+0x00435940,td5_ai.c,4376,local_c,int,"int local_c;        /* per-slot small constant (slot*4 + 0x10), starts at 0x28 */"
+0x00435940,td5_ai.c,4378,racer_count,int,int racer_count;
+0x00435940,td5_ai.c,4379,racer_cap,int,int racer_cap;
+0x00435940,td5_ai.c,4402,queue_span,int16_t,int16_t queue_span;
+0x00435940,td5_ai.c,4403,queue_byte2,uint8_t,uint8_t queue_byte2;          /* polarity in bit 0 */
+0x00401590,td5_camera.c,607,fly_in_threshold,int,int fly_in_threshold = g_flyInThreshold;
+0x00401590,td5_camera.c,609,fly_in,int,int fly_in;
+0x00401590,td5_camera.c,610,current_radius,float,float current_radius;
+0x00401590,td5_camera.c,611,orbit_visual_angle,int,int orbit_visual_angle;
+0x00401590,td5_camera.c,618,terrain_matrix,float,float terrain_matrix[12];
+0x00401590,td5_camera.c,619,cam_angles,short,short cam_angles[4];
+0x00407840,td5_physics.c,5441,total_spans,int,int total_spans = td5_track_get_span_count();
+0x00407840,td5_physics.c,5445,span_idx,int,int span_idx = (int)actor->track_span_raw;
+0x00407840,td5_physics.c,5458,car_half_w,int16_t,int16_t car_half_w = (int16_t)((*(uint32_t *)((uint8_t *)car_def + 0x0C)) & 0xFFFF);
+0x00407840,td5_physics.c,5459,car_half_l,int16_t,int16_t car_half_l = (int16_t)((*(uint32_t *)((uint8_t *)car_def + 0x08)) & 0xFFFF);
+0x00407840,td5_physics.c,5464,cos_hd,int32_t,int32_t cos_hd = cos_fixed12((int32_t)hd);
+0x00407840,td5_physics.c,5465,sin_hd,int32_t,int32_t sin_hd = sin_fixed12((int32_t)hd);

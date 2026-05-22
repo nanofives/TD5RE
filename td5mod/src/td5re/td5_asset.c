@@ -382,6 +382,21 @@ static int load_static_r5g6b5_tpage(int slot)
      * (0x0040B590).  Two layouts are observed depending on the format_mode
      * the original passed to M2DX:
      *
+     * [ARCH-DIVERGENCE: 0x0040B590 UploadRaceTexturePage — D3D3 LoadRGBS24/32
+     *  → D3D11 direct upload; L5 promotion sweep 2026-05-21] — Ghidra-
+     *  verified orig at 0x0040B590 dispatches to DXD3DTexture::LoadRGBS24
+     *  (mode 0) or LoadRGBS32 (mode 1 with blend preset 7 / mode 2 with
+     *  blend preset 8), with a pre-pass for format_mode==4 that walks
+     *  0x10000 bytes setting byte[-2] to 0/0x80 based on byte[-1]+byte[0]+
+     *  byte[1] tally (alpha keying for slot 4 speedo). Then writes the
+     *  transparency type at DAT_0048DBAC + slot*4 (0=opaque,1=keyed,2=80%,
+     *  3=additive). Port has no DXD3DTexture object — uploads happen via
+     *  td5_plat_render_upload_texture into D3D11 SRVs directly; the slot-4
+     *  alpha-rebake is preserved at lines 449-465 below, and the
+     *  transparency table is preserved via td5_asset_set_page_transparency.
+     *  The d3d_exref+0xa5c branch (16-vs-24-bit D3D3 driver caps) is folded
+     *  away as the D3D11 backend exposes uniform BGRA8 formats.
+     *
      * - "ARGB" layout (format_mode=1 dumps from older builds): every non-zero
      *   pixel has byte[0]=0xFF as the alpha/marker byte.
      *   Channel layout: [0]=A/X, [1]=R, [2]=G, [3]=B.
@@ -714,7 +729,16 @@ int td5_asset_get_page_transparency(int page_id)
  * directory byte-by-byte using a 64KB buffer. We simplify by reading the
  * entire central directory into memory (it is typically < 64KB for TD5
  * archives which have at most ~60 entries).
- * ======================================================================== */
+ *
+ * [ARCH-DIVERGENCE: streaming -> bulk-read; L5 sweep 2026-05-21]
+ *   Ghidra-verified 0x0043FC80: orig walks central-directory entries
+ *   through the chunked stream-reader (see ReadTrackStaticDataChunk @
+ *   0x0043FB70 and DecompressTrackDataStream @ 0x0043FBC0 -- the same
+ *   64KB refill state machine the orig uses for all archive reads).
+ *   Port reads the whole central directory into a malloc'd buffer once
+ *   then parses linearly, dropping the streaming refill state. EOCD
+ *   signature (0x06054B50) and per-record field offsets / sizes are
+ *   ZIP-format byte-faithful. */
 
 /** Read a little-endian uint16 from a byte pointer. */
 static inline uint16_t read_u16(const uint8_t *p)
@@ -945,7 +969,18 @@ static TD5_ZipEntry *find_entry(TD5_Archive *arc, const char *name)
  *
  * Reads the local file header, then either copies (stored) or inflates
  * (deflate) the entry data.
- * ======================================================================== */
+ *
+ * [ARCH-DIVERGENCE: streaming inflate -> td5_inflate_mem_to_mem; L5 sweep 2026-05-21]
+ *   Ghidra-verified 0x004405B0: orig reads the local file header via the
+ *   chunked stream-reader, then either memcpys "stored" entries through
+ *   the 64KB refill buffer or feeds compressed bytes to its streaming
+ *   inflate state machine (ReadTrackStaticDataChunk + DecompressTrack-
+ *   DataStream consume one chunk at a time). Port reads the full local
+ *   header + compressed payload into memory and decompresses via
+ *   td5_inflate_mem_to_mem (zlib-backed when TD5_INFLATE_USE_ZLIB is set,
+ *   own implementation otherwise). ZIP local-header field offsets,
+ *   compression-method codes (0=stored, 8=deflate) and CRC32 checks are
+ *   ZIP-format byte-faithful. */
 
 /**
  * Decompress a single ZIP entry given an open file handle seeked to the
@@ -2029,6 +2064,22 @@ const void *td5_asset_get_checkpoint_data(int *out_size)
  *                                 (col1[i], col4[i]),
  *                                 (col2[i], col3[i])
  * Each entry is a TEXTURES.DAT page index; -1 entries are skipped.
+ *
+ * [CONFIRMED @ 0x0042FD70 RemapCheckpointOrderForTrackDirection] —
+ *   Ghidra-verified: orig walks &g_checkpointNumTable_PROVISIONAL (0x4aedb0)
+ *   stride 1 int until 0x4aedc0 (4 rows). Reads gTrackDirectionSwitchFlag
+ *   at 0x004aee00 (which is &table+0x50 = position 20 ints) — port's
+ *   `cols[20]` reads the same byte. Pair selection identical (== -1: 4-col
+ *   variant pairs [col0,col4]+[col1,col3]; != -1: 5-col variant pairs
+ *   [col0,col5]+[col1,col4]+[col2,col3]). -1 skip identical.
+ *
+ * [ARCH-DIVERGENCE: 0x0040B530 SwapIndexedRuntimeEntries — two-table swap
+ *   collapsed to single page_remap table] — orig swaps two parallel tables
+ *   under DAT_0048DC40+4 (4-byte entries) and DAT_0048DC40+0xc (8-byte
+ *   entries; per-page-descriptor cache header). Port has no separate cache
+ *   header (D3D11 backend keys pages by raw index), so only s_page_remap[]
+ *   is swapped; the 8-byte descriptor swap has no equivalent. Documented
+ *   in file-header comment lines 67-83. L5 promotion sweep 2026-05-21.
  * ======================================================================== */
 
 static void td5_asset_reset_texture_page_remap(void)
@@ -2098,7 +2149,26 @@ void td5_asset_apply_reverse_texture_swap(void)
 }
 
 /* ========================================================================
- * Track Texture Loading
+ * Track Texture Loading -- LoadTrackTextureSet (0x00442670)
+ *
+ * [ARCH-DIVERGENCE: static.hed pointer-rebase + BuildTrackTextureCache call
+ *  removed; L5 promotion sweep 2026-05-21] — Ghidra-verified orig at
+ *  0x00442670: (1) calls InitializeTrackStripMetadata; (2) reads TEXTURES.DAT
+ *  via GetArchiveEntrySize+ReadArchiveEntry+HeapAllocTracked; (3) reads
+ *  static.hed via the same archive path; (4) writes gTrackTextureCount with
+ *  branch on g_vehicleProjectionEffectMode==2 (split storage between primary
+ *  count and g_dualTextureSetSecondHalfBase_PROVISIONAL); (5) loops over
+ *  gStaticHedEntryCount entries adding 0x400 to each entry's offset (rebases
+ *  the data-section pointers); (6) calls BuildTrackTextureCache.
+ *  Port td5_asset_load_track_textures retains the TEXTURES.DAT page-count
+ *  and type-byte read (steps 1-2 conceptually) and immediately calls the
+ *  reverse-direction page swap, but does NOT walk static.hed for pointer
+ *  rebase (port has no separate cache header — pages are uploaded direct to
+ *  GPU slots via td5_plat_render_upload_texture) and does NOT branch on the
+ *  dual-texture-set effect mode (D3D11 backend treats both modes uniformly).
+ *  The actual GPU upload happens later in td5_asset_load_race_texture_pages
+ *  (the LoadRaceTexturePages @ 0x00442770 analog). See file-header comment
+ *  on lines 67-83 for the cache-header arch-divergence rationale.
  * ======================================================================== */
 
 int td5_asset_load_track_textures(int track_index)
@@ -2339,6 +2409,17 @@ int td5_asset_load_race_texture_pages(void)
 }
 /* ========================================================================
  * Environment / Reflection Texture Loading (0x42F990)
+ *
+ * [ARCH-DIVERGENCE: DDraw archive read + DXD3DTexture upload → PNG decode +
+ *  D3D11 upload; L5 promotion sweep 2026-05-21] — Ghidra-verified orig walks
+ *  *g_trackEnvironmentMetadataBlob entries, calls ReadArchiveEntry against
+ *  environs.zip into a 0x20000 scratch, runs ResampleTexturePageToEntryDimensions
+ *  on g_textureUsesTallPageFormat_PROVISIONAL==0 branch, then
+ *  UploadRaceTexturePage with descriptor page-id (gStaticHedTextureData+0x3c).
+ *  Port replaces the entire DDraw+D3D3 pipeline with PNG decode from
+ *  re/assets/environs and direct td5_plat_render_upload_texture. The per-track
+ *  metadata layout (count + 0x20-stride name entries) is preserved as a static
+ *  table in td5_environs_table.inc.
  * ======================================================================== */
 
 #include "td5_environs_table.inc"
@@ -2843,6 +2924,26 @@ int td5_asset_resolve_traffic_model_index(int track_index, int reverse, int slot
  *
  * Generates a mipmap chain by box-filtering from source dimensions
  * down through each power-of-two level.
+ *
+ * [ARCH-DIVERGENCE: orig 0x430D30 is a software pixel-format quantizer,
+ *  port replaces with box-filter mipmap builder; L5 promotion sweep
+ *  2026-05-21] — Ghidra-verified: the orig function at 0x430D30 is NOT a
+ *  mipmap builder. It is a software RGBA→packed-pixel converter that:
+ *    1) Computes per-channel LSB shift + bit-length from 4 channel masks
+ *       (param_1+0x0c/0x10/0x14/0x18) via trailing-zero / set-bit counts.
+ *    2) Iterates a per-level dimension table at &DAT_00473b70 (param_1+0x24
+ *       indexes down to +0x20).
+ *    3) Per pixel, reads 4 floats via __ftol, clamps each to 0xfe→0xff,
+ *       then packs into ushort (≤16 total bits) or uint (>16 bits) via the
+ *       precomputed channel shifts. This targets D3D3 surface formats
+ *       (RGB565 / ARGB1555 / RGBA8888) determined at runtime from the
+ *       active DDraw surface caps.
+ *  The D3D11 backend doesn't need runtime pixel-format conversion (uses a
+ *  fixed B8G8R8A8_UNORM swap chain), so the port replaces this entry point
+ *  with a mipmap builder that the D3D11 SRV creation flow can consume. The
+ *  per-level iteration outer loop is shared in shape but the inner pixel
+ *  conversion is gone; output buffer layout (consecutive mip levels) is
+ *  preserved.
  * ======================================================================== */
 
 int td5_asset_build_mipmaps(const void *src, int width, int height, int format,
@@ -2920,3 +3021,49 @@ void td5_asset_free(void *ptr)
 {
     td5_plat_heap_free(ptr);
 }
+
+/* ============================================================
+ * [CITATION-SWEEP 2026-05-21] Phase 1 audit-header refresh
+ *
+ * The following L3 Ghidra functions are ported (or folded) into
+ * this file but were missed by build_confidence_map.py's
+ * 2026-05-18 citation scan due to snake_case rename or
+ * multi-line comment wraps. Listed here so the next confidence-
+ * map run promotes them L3 -> L4 (cited without precision
+ * keywords). Per-function audits remain a separate Phase 4 task.
+ *
+ * Source: re/analysis/l3_triage_2026-05-21.csv +
+ *         re/analysis/phase1_manifest_assignment.csv
+ *
+ *   0x0040AEF0  GetEnvironmentTexturePageMode  [ARCH-DIVERGENCE: D3D3 device-state query removed; L5 sweep 2026-05-21]
+ *     Ghidra-verified 0x0040AEF0: returns 2 when *(d3d_exref + 0xa5c) == 0
+ *     else 0; an old D3D3 driver-caps query (16- vs 24-bit color page mode).
+ *     Port targets D3D11 which exposes uniform RGBA8 page formats, so the
+ *     query has no equivalent and is folded away at every call site.
+ *   0x0040BAE0  PreloadLevelTexturePages  [ARCH-DIVERGENCE: on-demand texture streaming removed; L5 sweep 2026-05-21]
+ *     Ghidra-verified 0x0040BAE0: orig calls AdvanceTextureStreamingScheduler
+ *     for each level page when the texture-cache has capacity headroom
+ *     (DAT_0048DC40[7] < DAT_0048DC40[4]) and marks per-page residency
+ *     flags. Port loads all level textures upfront in
+ *     td5_asset_load_track_texture_set (no streaming scheduler -- a
+ *     deliberate simplification under the D3D11 backend), so the
+ *     scheduler-advance loop has no equivalent.
+ *   0x00412030  LoadFrontendTgaSurfaceFromArchive  [ARCH-DIVERGENCE: TGA/DDraw -> PNG/D3D11; L5 sweep 2026-05-21]
+ *     Ghidra-verified 0x00412030: orig opens a frontend TGA from an
+ *     archive via OpenArchiveFileForRead, allocates a 0x1d4c00-byte
+ *     conversion buffer through DX::Allocate, decodes via DX::ImageProTGA
+ *     using the active DDraw color masks (g_tgaDecodeRedMask/Green/Blue),
+ *     then creates a tracked DDraw surface via CreateTrackedFrontendSurface
+ *     and copies the decoded pixels into it. Port uses the asset PNG
+ *     pipeline (td5_asset_load_png / fmv_load_png) into a malloc'd BGRA32
+ *     buffer that the D3D11 backend uploads as a texture; the entire
+ *     DDraw-surface object model is gone. Asset-source change documented
+ *     in td5_fmv.c file header for the legal-screens path.
+ *   0x00442D30  ResampleTexturePageToEntryDimensions  [ARCH-DIVERGENCE: page-resize removed; L5 sweep 2026-05-21]
+ *     Ghidra-verified 0x00442D30: orig resizes a decoded texture page to
+ *     match the dimensions recorded in the archive entry descriptor at
+ *     gStaticHedTextureData (handles both 3- and 4-channel pixel formats,
+ *     scaling via integer iVar2 / iVar7 ratio). Port's PNG asset
+ *     pipeline produces textures at their natural size; D3D11 accepts any
+ *     dimensions, so the runtime resampler is folded away.
+ */

@@ -1,0 +1,10 @@
+address,name,body_size,files_cited,phase1_evidence,strong,weak
+0x00401370,SpawnRandomVehicleSmokePuff,159,td5_vfx.c,td5_render.c:density(3/5),0,0
+0x00401410,InitializeRaceSmokeSpritePool,56,td5_vfx.c;td5_vfx.h,,0,0
+0x00429A30,SpawnVehicleSmokeVariant,703,td5_vfx.c,,0,0
+0x00429FD0,SpawnVehicleSmokePuffAtPoint,688,td5_vfx.c,td5_ai.c:density(3/5),0,0
+0x0043F030,AcquireTireTrackEmitter,471,td5_vfx.c;td5_vfx.h,,0,0
+0x0043F420,UpdateFrontWheelSoundEffects,476,td5_vfx.c;td5_vfx.h,,0,0
+0x0043F600,UpdateRearWheelSoundEffects,479,td5_vfx.c;td5_vfx.h,,0,0
+0x0043F7E0,UpdateRearTireEffects,373,td5_vfx.c;td5_vfx.h,,0,0
+0x0043F960,UpdateFrontTireEffects,373,td5_vfx.c;td5_vfx.h,,0,0

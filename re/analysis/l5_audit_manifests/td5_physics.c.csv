@@ -1,0 +1,9 @@
+address,name,body_size,files_cited,phase1_evidence,strong,weak
+0x00409520,CheckAndUpdateActorCollisionAlignment,392,td5_physics.c,td5_ai.c:update_actor,0,0
+0x004096B0,ComputeActorWorldBoundingVolume,1339,td5_physics.c,td5_ai.c:compute_actor,0,0
+0x0043C9E0,InitializeTrackedActorMarkerBillboards,985,td5_physics.c,td5_ai.c:tracked_actor,0,0
+0x0043CDE0,RenderTrackedActorMarker,1262,td5_physics.c,td5_ai.c:tracked_actor,0,0
+0x0043D830,ApplyRandomWheelJitterHighSpeed,211,td5_physics.c,td5_physics.h:density(3/6),0,0
+0x0043D910,ApplyRandomWheelJitterLowSpeed,211,td5_physics.c,td5_physics.c:density(3/5),0,0
+0x0043E4C0,InsertTriangleIntoDepthSortBuckets,143,td5_physics.c,td5_physics.c:density(3/6),0,0
+0x004431C0,LoadTrafficVehicleSkinTexture,119,td5_physics.c,td5_asset.c:load_traffic,0,0

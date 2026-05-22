@@ -1,0 +1,6 @@
+address,name,body_size,files_cited,phase1_evidence,strong,weak
+0x00406950,ClearTrackSegmentVisibilityTable,40,td5_track.c,td5_frontend.c:density(3/5),0,0
+0x0040B1C0,BuildTrackTextureCache,11,td5_track.c,td5_asset.c:name,0,0
+0x00434740,ComputeRouteForwardOvershootScalar,189,td5_track.c,td5_track.c:density(3/5),0,0
+0x0043FB70,ReadTrackStaticDataChunk,28,td5_track.c,td5_ai.c:density(3/5),0,0
+0x0043FBC0,DecompressTrackDataStream,190,td5_track.c,td5_track.c:density(3/4),0,0

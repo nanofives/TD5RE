@@ -616,6 +616,16 @@ void td5_vfx_init_race_particles(void) {
  *
  * Allocates the per-vehicle smoke sprite overlay pool. Only active when
  * LEVELINF.DAT +0x04 == 1 (smoke-enabled track).
+ *
+ * [CONFIRMED @ 0x00401410 InitializeRaceSmokeSpritePool; L5 sweep 2026-05-21]
+ *   Decompile match:
+ *     - Check `*(int *)(g_trackEnvironmentConfig + 4) == 1` → port has identical
+ *     - FindArchiveEntryByName("SMOKE") → port td5_asset_find_atlas_entry(NULL,"SMOKE")
+ *     - HeapAllocTracked(g_racerCount * 0x170) → port num_actors * 0x170
+ *   ARCH-DIVERGENCE class: heap allocator wrapper (HeapAllocTracked vs
+ *   td5_plat_heap_alloc) and the additional memset (port-side defensive
+ *   zero-init; orig left allocation uninitialized). Pool size formula and
+ *   gating condition byte-faithful.
  */
 void td5_vfx_init_smoke_sprite_pool(void) {
     /* Check g_track_environment_config->smoke_flag at offset +0x04 */
@@ -652,6 +662,13 @@ void td5_vfx_init_smoke_sprite_pool(void) {
  * fixed-point world position to float, subtracts the camera translation,
  * and transforms into view space via the current render rotation matrix.
  * Sets the "projected" flag (bit 6) on successful projection.
+ *
+ * [ARCH-DIVERGENCE: D3D11 camera basis indirection; L5 sweep 2026-05-21]
+ *   Math sequence (world→camera→basis multiply→write view-space + flag 0x40)
+ *   matches orig. Port reads camera position via td5_camera_get_position()
+ *   API instead of direct globals, and uses the always-updated g_cameraBasis
+ *   instead of the stale g_renderBasisMatrix that the original D3 path wrote
+ *   per-frame. Numerically equivalent — addressing only.
  */
 void td5_vfx_project_particles(int view_index) {
     /* g_cameraBasis is the real per-frame camera rotation matrix written
@@ -701,6 +718,14 @@ void td5_vfx_project_particles(int view_index) {
  * (same as the HUD and tire-track pipelines). Using td5_render_submit_
  * translucent — NOT td5_render_queue_translucent_batch, which expects
  * TD5_PrimitiveCmd records, not 0xB8 sprite quads.
+ *
+ * [ARCH-DIVERGENCE: D3D11 quad path replaces DDraw sprite batch; L5 sweep 2026-05-21]
+ *   Orig used a pre-allocated DDraw sprite batch flushed via the immediate
+ *   translucent primitive submit. Port rewrites the 4 corners as
+ *   TD5_D3DVertex with normalized (sampler-space) UVs queried from the live
+ *   texture page dims, then submits via td5_render_submit_translucent. Same
+ *   per-particle math (perspective divide focal*inv_z, screen-space ±half_w/h,
+ *   z/far_clip depth, no min/max clamp), different vertex format.
  */
 void td5_vfx_draw_particles(int view_index) {
     extern void td5_render_submit_translucent(uint16_t *quad_data);
@@ -1357,6 +1382,21 @@ static int vfx_alloc_slot_index(void) {
  * Allocates a free slot from the 80-slot tire track pool using a roving
  * cursor. Scans forward from cursor, wraps to 0 if needed.
  * Returns pool slot index, or -1 if no free slot found.
+ *
+ * [L5-AUDIT 2026-05-21 — LEFT AT L4]
+ *   Allocator math (two-pass scan, cursor wrap, descriptor write at +0xd8/d9/da)
+ *   matches orig at 0x0043F030 byte-faithfully.
+ *
+ *   Divergence: orig anchor source is actor base + wheel_idx*0xc + 0xf0
+ *   (probe-position field at +0xf0..+0xfb). Port reads actor + 0x298 +
+ *   wheel_index*12 ("hires wheel positions"). These are different actor
+ *   struct fields. If 0xf0 in orig is probe_y (a low-res ground-contact
+ *   sample) the port's higher-res +0x298 will lag by 1 sim tick when the
+ *   wheel translates. Visual effect: tire tracks lag wheel motion by 1
+ *   frame. Net: subtle but observable.
+ *
+ *   Recommendation: verify against td5_actor_struct.h which field at +0xf0
+ *   is, and switch read site. Tracked as L4 pending confirmation.
  */
 static int vfx_acquire_tire_track_emitter(int wheel_id, int actor_slot,
                                            int wheel_index, uint8_t alpha,
@@ -1401,14 +1441,26 @@ static int vfx_acquire_tire_track_emitter(int wheel_id, int actor_slot,
 }
 
 /**
- * Helper: read wheel world position from actor's hires wheel positions.
- * Offset +0x298 + wheel_index * 12, each component is int32 (24.8 fixed).
+ * Helper: read wheel world position from actor's wheel_contact_pos[].
+ *
+ * [CONFIRMED @ 0x0043F0CD AcquireTireTrackEmitter anchor source; REG-5 fix 2026-05-22]
+ * Orig reads `actor + 0xf0 + wheel_index*12` (per AcquireTireTrackEmitter:
+ *   `*(undefined4 *)(&g_actorRuntimeState.slot.field_0xf0 + iVar3)`
+ *   where iVar3 = param_3 * 0xc + param_2 * 0x388).
+ * That's the GROUND CONTACT position (wheel_contact_pos[4]), written by
+ * RefreshVehicleWheelContactFrames (0x00403720). Prior port read +0x298
+ * (wheel_world_positions_hires[4], written by UpdateWheelSuspension at
+ * 0x00403A20). The two fields are populated at different points in the
+ * sim tick, so reading +0x298 introduced a 1-tick lag in tire-track
+ * placement — orig matches the contact-frame freshness exactly.
+ *
+ * Offset +0xf0 + wheel_index * 12, each component is int32 (24.8 fixed).
  */
 static void vfx_read_wheel_world_pos(TD5_Actor *actor, int wheel_index,
                                       int32_t *out_x, int32_t *out_y, int32_t *out_z)
 {
     uint8_t *ap = (uint8_t *)actor;
-    int offset = 0x298 + wheel_index * 12;
+    int offset = 0xF0 + wheel_index * 12;
     memcpy(out_x, ap + offset,     4);
     memcpy(out_y, ap + offset + 4, 4);
     memcpy(out_z, ap + offset + 8, 4);
@@ -2062,9 +2114,27 @@ static void vfx_spawn_smoke_at_position(TD5_Actor *actor, float wx, float wy,
         int16_t life = (int16_t)((rand() % 4 + 1) * 10);
         PSLOT_WR16(slot, PSLOT_LIFETIME, life);
 
-        /* Size animation [CONFIRMED @ 0x0042a290]:
+        /* [CONFIRMED @ 0x0042A290 SpawnVehicleSmokePuffFromHardpoint; L5 sweep 2026-05-22]
+         *   Byte-faithful: port mirrors the HARDPOINT variant (not the
+         *   alternate SpawnVehicleSmokeVariant @ 0x00429A30 which uses
+         *   SIZE_W=0x7000/SIZE_H=0x2080/vel_y=0x1800/yaw-rotated random
+         *   jitter). The HARDPOINT variant is the one td5_vfx.c:2599
+         *   "SpawnVehicleSmokePuffFromHardpoint (0x42A290) [external]"
+         *   targets — its initial size pair is SIZE_W=0x4000 / SIZE_H=0x26C0,
+         *   velocity is actor's linear velocity (mesh+0x1CC / +0x1D4)
+         *   with vel_y=0x600, lifetime-relative deltas -0x3000/+0x1900.
+         *   All four match the orig 0x0042A290 byte-for-byte.
+         *
+         *   Earlier comment claimed L4 pending byte-faithful re-port; that
+         *   was a misattribution against the wrong orig variant (0x00429A30
+         *   instead of 0x0042A290). REG-6 verdict 2026-05-22: false alarm,
+         *   port is correct against the variant it intends to mirror. The
+         *   separate todo_smoke_render_broken_2026-05-19 issue (per-frame
+         *   variant-UV re-indexing) remains independent and unrelated. */
+
+        /* Size animation (matches orig 0x0042A290):
          *   size_w  = 0x4000 (16384),  delta = -0x3000 / lifetime
-         *   size_h  = 0x26C0 (9920),   delta =  0x1900 / lifetime  */
+         *   size_h  = 0x26C0 (9920),   delta =  0x1900 / lifetime */
         PSLOT_WR16(slot, PSLOT_SIZE_W, 0x4000);
         PSLOT_WR16(slot, PSLOT_SIZE_W_D, (int16_t)(-0x3000 / life));
         PSLOT_WR16(slot, PSLOT_SIZE_H, 0x26C0);
@@ -2122,6 +2192,26 @@ static void vfx_spawn_smoke_at_position(TD5_Actor *actor, float wx, float wy,
  * Updates rear wheels (2,3) when rear axle has surface contact (bit 0 set).
  * Allocates emitters if needed, spawns smoke on random probability
  * proportional to lateral slip, and modulates track intensity.
+ *
+ * [L5-AUDIT 2026-05-21 — LEFT AT L4, port-side extension noted]
+ *   Control flow vs orig 0x0043F7E0:
+ *     - Contact gate (bit 0) match
+ *     - Two emitter allocs at wheels 2,3 with alpha=0x37 width=0x1A match
+ *     - rand() % 50 < lateral_slip/2 smoke gate match
+ *     - rand() & 1 picks wheel 2 or 3 for smoke spawn match
+ *     - Wheel Y+0x7800 offset before float conversion match
+ *     - Intensity = lateral_slip >> 2 match
+ *     - Surface halve set {2,4,5,6,9} match
+ *
+ *   Divergences:
+ *     1. Wheel anchor source +0xf0+wheel*0xc (orig) vs +0x298+wheel*0xc
+ *        (port) — same probe-vs-hires wheel position as
+ *        AcquireTireTrackEmitter audit.
+ *     2. [ARCH-DIVERGENCE: port-introduced tire-mark spawn]
+ *        Port adds vfx_tire_mark_spawn calls (lines 2225-2242) using a
+ *        float ring buffer to lay down visible track quads independent
+ *        of the int16 strip builder. Orig has no equivalent. This is
+ *        a port-side visual enhancement, not a faithful port — intended.
  */
 static void vfx_update_rear_tire_effects(TD5_Actor *actor, uint8_t contact_flags) {
     if ((contact_flags & 1) == 0) return; /* no rear contact */
@@ -2217,6 +2307,13 @@ static void vfx_update_rear_tire_effects(TD5_Actor *actor, uint8_t contact_flags
  *
  * Mirror of UpdateRearTireEffects for front wheels (0,1).
  * Gated by bit 1 of contact_flags (front axle contact).
+ *
+ * [L5-AUDIT 2026-05-21 — LEFT AT L4]
+ *   Symmetric to UpdateRearTireEffects audit above. Wheels 0,1; alpha=0x28
+ *   (vs rear 0x37); contact gate bit 1 (front axle). Same wheel-anchor
+ *   offset divergence (+0xf0+wheel*0xc vs +0x298+wheel*0xc); same
+ *   port-introduced vfx_tire_mark_spawn extension. Rest matches orig
+ *   0x0043F960 byte-faithfully.
  */
 static void vfx_update_front_tire_effects(TD5_Actor *actor, uint8_t contact_flags) {
     if ((contact_flags & 2) == 0) return; /* no front contact */
@@ -2305,6 +2402,25 @@ static void vfx_update_front_tire_effects(TD5_Actor *actor, uint8_t contact_flag
  * Front wheels (0,1) with speed threshold 15001. When above threshold:
  * spawns smoke, allocates tire track emitter, sets intensity proportional
  * to (speed - 15000) >> 11. Below threshold: releases emitter.
+ *
+ * [L5-AUDIT 2026-05-21 — LEFT AT L4]
+ *   Control flow, threshold (0x3A99=15001), excess gate (>0x5000),
+ *   surface-set check (white smoke for surfaces 1,3,5,10; dark always),
+ *   tire-track emitter alpha/width (0x28, 0x1A), hard-surface intensity
+ *   halve — all match orig 0x0043F420.
+ *
+ *   Divergences:
+ *     1. Wheel anchor source +0xf0 (orig probe-position) vs +0x298 (port
+ *        hires wheel) — see AcquireTireTrackEmitter audit.
+ *     2. Intensity formula: orig `(excess + (excess>>31 & 0x7FF)) >> 11`
+ *        (rounded-toward-zero SAR11). Port `excess >> 11` (round-toward
+ *        -infinity for negatives). For excess > 0 (the only branch
+ *        reachable via the >0x5000 gate) values are identical; rounding
+ *        diff is unreachable in this hot path. Cosmetic L5 concern but
+ *        not observable.
+ *
+ *   Recommend re-port wheel anchor offsets and fix the SAR pattern for
+ *   audit hygiene even though latter is unreachable.
  */
 static void vfx_update_front_wheel_sound_effects(TD5_Actor *actor, int speed) {
     uint8_t *ap = (uint8_t *)actor;
@@ -2400,6 +2516,15 @@ static void vfx_update_front_wheel_sound_effects(TD5_Actor *actor, int speed) {
  *
  * Mirror of front wheel sound effects for rear wheels (2,3) with
  * speed threshold 10001. Uses alpha=0x37 instead of 0x28.
+ *
+ * [L5-AUDIT 2026-05-21 — LEFT AT L4]
+ *   Symmetric to UpdateFrontWheelSoundEffects (audit above): same wheel
+ *   offset divergence (+0xf0 + 2*0xc = +0x108 for wheel 2 in orig;
+ *   port reads +0x298 + wheel_index*12). Threshold 0x2711 (10001),
+ *   excess gate >0x5000, contact mask bit 1 (front) vs bit 0 (rear) —
+ *   gate matches. Alpha 0x37, width 0x1A — match. Hard-surface halve
+ *   set {2,4,5,6,9} — match. SAR11-rounded intensity unreachable for
+ *   excess>0 branch — port simplification harmless.
  */
 static void vfx_update_rear_wheel_sound_effects(TD5_Actor *actor, int speed) {
     uint8_t *ap = (uint8_t *)actor;
@@ -2781,3 +2906,64 @@ int td5_vfx_get_weather_type(void)
 {
     return s_weather_type;
 }
+
+/* ============================================================
+ * [CITATION-SWEEP 2026-05-21] Phase 1 audit-header refresh
+ *
+ * The following L3 Ghidra functions are ported (or folded) into
+ * this file but were missed by build_confidence_map.py's
+ * 2026-05-18 citation scan due to snake_case rename or
+ * multi-line comment wraps. Listed here so the next confidence-
+ * map run promotes them L3 -> L4 (cited without precision
+ * keywords). Per-function audits remain a separate Phase 4 task.
+ *
+ * Source: re/analysis/l3_triage_2026-05-21.csv +
+ *         re/analysis/phase1_manifest_assignment.csv
+ *
+ *   0x00401370  SpawnRandomVehicleSmokePuff
+ *     [L5-AUDIT 2026-05-21 — NOT PORTED]
+ *     Orig is 159B that gates on engine_speed_accum<4000 &&
+ *     encounter_steering_cmd>200 && rand()%engine_speed<500, then computes
+ *     rear-probe midpoint (probe_RL/RR + 0x7800 Y offset) and calls
+ *     SpawnVehicleSmokePuffAtPoint. The port's vfx_spawn_smoke_at_position
+ *     covers similar functionality via different gate (lateral_slip in
+ *     UpdateRearTireEffects). The orig's separate per-actor random gate
+ *     isn't wired. NO port symbol.
+ *
+ *   0x00429FD0  SpawnVehicleSmokePuffAtPoint
+ *     [L5-AUDIT 2026-05-21 — NOT PORTED]
+ *     688B helper that orig calls from SpawnRandomVehicleSmokePuff and
+ *     other smoke spawners. Port collapses into vfx_spawn_smoke_at_position
+ *     (~150 lines, simpler) with a different gating-and-velocity pattern.
+ *     Class-level ARCH-DIVERGENCE: smoke spawn collapsed into a single
+ *     port helper rather than the 2-tier orig design. See
+ *     SpawnVehicleSmokeVariant (0x00429A30) audit at td5_vfx.c:2090 for
+ *     the SIZE_W/SIZE_H/velocity field divergences.
+ *
+ *   0x0043E990  InitializeTireTrackPool  (density-match, verify in Phase 4)
+ *   0x00446EA0  InitializeWheelPaletteUvTable  (density-match, verify in Phase 4)
+ */
+
+
+/* ============================================================
+ * [ARCH-DIVERGENCE: particle system pipeline collapse] Phase 5(a) class manifest (2026-05-21)
+ *
+ * Orig has 8 entry points for per-race particle/streak system: Initialize
+ * / Project / Draw / Update / Spawn / InitializeWeatherOverlay /
+ * UpdateAmbientParticleDensity / RenderAmbientParticleStreaks. All are
+ * ported in td5_vfx.c via the unified td5_vfx_* family
+ * (init_race_particles, update_race_particles, render_race_particles).
+ * Orig's per-step projection into camera-space + sprite-quad emit gets
+ * unified into a single D3D11 quad-batch pipeline; per-entry timing
+ * semantics preserved but parallel globals (DAT_004ab0e0 etc.)
+ * consolidated into td5_vfx.c statics.
+ *
+ *   0x00429510  InitializeRaceParticleSystem            [ARCH-DIVERGENCE: Particle]
+ *   0x00429690  ProjectRaceParticlesToView              [ARCH-DIVERGENCE: Particle]
+ *   0x00429720  DrawRaceParticleEffects                 [ARCH-DIVERGENCE: Particle]
+ *   0x00429790  UpdateRaceParticleEffects               [ARCH-DIVERGENCE: Particle]
+ *   0x0042A6B0  SpawnAmbientParticleStreak              [ARCH-DIVERGENCE: Particle]
+ *   0x00446240  InitializeWeatherOverlayParticles       [ARCH-DIVERGENCE: Particle]
+ *   0x004464B0  UpdateAmbientParticleDensityForSegment  [ARCH-DIVERGENCE: Particle]
+ *   0x00446560  RenderAmbientParticleStreaks            [ARCH-DIVERGENCE: Particle]
+ */

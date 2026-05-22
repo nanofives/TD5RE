@@ -1,0 +1,259 @@
+label,address,name,body_size,callers_count,evidence
+TODO-PORT,00428d80,WriteBenchmarkResultsTgaReport,1921,1,
+TODO-PORT,0041c030,NormalizeFrontendChatTokens,752,1,
+TODO-PORT,00428d40,RecordBenchmarkFrameRateSample,29,1,
+TODO-PORT,004258b0,DeferFrontendBackgroundRestore,10,1,
+CITED-BUT-UNTAGGED,004258e0,DeactivateFrontendCursorOverlay,12,24,td5_frontend.c:density(4/4)
+CITED-BUT-UNTAGGED,00424af0,PresentPrimaryFrontendBufferViaCopy,57,21,td5_frontend.c:density(3/5)
+CITED-BUT-UNTAGGED,004129b0,RenderTgaToFrontendSurface,333,20,td5_frontend.c:frontend_surface
+CITED-BUT-UNTAGGED,00412b00,SetSurfaceColorKeyFromRGB,134,20,td5_frontend.c:density(3/3)
+CITED-BUT-UNTAGGED,00424a50,MeasureOrCenterFrontendLocalizedString,149,19,td5_frontend.c:density(3/5)
+CITED-BUT-UNTAGGED,00424c50,BlitSecondaryFrontendRectToPrimary,74,18,td5_frontend.c:density(3/5)
+CITED-BUT-UNTAGGED,004183b0,SetFrontendInlineStringTable,81,16,td5_frontend.c:density(4/4)
+CITED-BUT-UNTAGGED,00418430,ResetFrontendInlineStringTable,20,16,td5_frontend.c:density(4/5)
+CITED-BUT-UNTAGGED,00424c10,PresentSecondaryFrontendRectViaCopy,63,15,td5_frontend.c:density(3/5)
+CITED-BUT-UNTAGGED,00412030,LoadFrontendTgaSurfaceFromArchive,688,12,td5_fmv.c:density(3/5)
+CITED-BUT-UNTAGGED,00426260,InitializeFrontendDisplayModeArrows,294,11,main.c:display_mode
+CITED-BUT-UNTAGGED,00424740,DrawFrontendClippedStringToSurface,334,8,td5_frontend_button_cache.c:density(4/5)
+CITED-BUT-UNTAGGED,00426120,RebuildFrontendButtonSurface,313,5,td5_frontend.c:frontend_button
+CITED-BUT-UNTAGGED,00418c60,QueueFrontendNetworkMessage,224,5,td5_frontend.c:density(3/4)
+CITED-BUT-UNTAGGED,0042e4f0,WritePointToCurrentRenderTransform,106,5,td5_ai.c:density(3/5)
+CITED-BUT-UNTAGGED,00424660,DrawFrontendSmallFontStringToSurface,217,4,td5_frontend.c:density(5/6)
+CITED-BUT-UNTAGGED,004260e0,CreateFrontendDisplayModePreviewButton,58,4,main.c:display_mode
+CITED-BUT-UNTAGGED,00418410,SetFrontendInlineStringEntry,25,4,td5_frontend.c:density(3/4)
+CITED-BUT-UNTAGGED,00424ca0,PresentPrimaryFrontendBuffer,64,3,td5_frontend.c:density(3/4)
+CITED-BUT-UNTAGGED,00411e00,GetFrontendSurfaceRegistryId,40,3,td5_frontend.c:frontend_surface
+CITED-BUT-UNTAGGED,0041b610,ProcessFrontendNetworkMessages,1731,2,td5_frontend.c:density(3/4)
+CITED-BUT-UNTAGGED,00413010,DrawPostRaceHighScoreEntry,1368,2,td5_frontend.c:density(5/6)
+CITED-BUT-UNTAGGED,0043cde0,RenderTrackedActorMarker,1262,2,td5_ai.c:tracked_actor
+CITED-BUT-UNTAGGED,004122f0,LoadTgaToFrontendSurfaceFromArchive,693,2,td5_fmv.c:density(3/5)
+CITED-BUT-UNTAGGED,004127b0,LoadTgaToFrontendSurface16bppVariant,502,2,td5_frontend.c:load_frontend
+CITED-BUT-UNTAGGED,0041a530,RenderFrontendCreateSessionNameInput,311,2,td5_frontend.c:frontend_create
+CITED-BUT-UNTAGGED,004242b0,DrawFrontendLocalizedStringPrimary,221,2,td5_frontend.c:density(4/5)
+CITED-BUT-UNTAGGED,0042d880,ApplyMeshRenderBasisFromTransform,200,2,td5_camera.c:density(3/6)
+CITED-BUT-UNTAGGED,00442d30,ResampleTexturePageToEntryDimensions,195,2,td5_asset.c:texture_page
+CITED-BUT-UNTAGGED,0042db40,ConvertFloatVec3ToIntVec3,137,2,td5_camera.c:density(4/4)
+CITED-BUT-UNTAGGED,00423db0,ClearBackbufferWithColor,136,2,main.c:density(3/4)
+CITED-BUT-UNTAGGED,0040b100,BuildEnumeratedDisplayModeList,108,2,main.c:display_mode
+CITED-BUT-UNTAGGED,004264e0,BeginFrontendDisplayModePreviewLayout,89,2,main.c:display_mode
+CITED-BUT-UNTAGGED,00426540,RestoreFrontendDisplayModePreviewLayout,63,2,main.c:display_mode
+CITED-BUT-UNTAGGED,0042e9c0,LoadGlobalOrientationToRenderState,11,2,main.c:density(3/5)
+CITED-BUT-UNTAGGED,004100d7,OpenControllerBindingPageNoneHeader,6,2,td5_frontend.c:controller_binding
+CITED-BUT-UNTAGGED,004096b0,ComputeActorWorldBoundingVolume,1339,1,td5_ai.c:compute_actor
+CITED-BUT-UNTAGGED,0040d190,CrossFade16BitSurfaces,1015,1,td5_render.c:3666 td5_render_crossfade_surfaces (manual)
+CITED-BUT-UNTAGGED,0043c9e0,InitializeTrackedActorMarkerBillboards,985,1,td5_ai.c:tracked_actor
+CITED-BUT-UNTAGGED,00411a70,RenderFrontendFadeOutEffect,878,1,td5_game.c:density(3/4)
+CITED-BUT-UNTAGGED,0040cdc0,CrossFade16BitSurfaces,858,1,td5_render.c:3666 td5_render_crossfade_surfaces (manual)
+CITED-BUT-UNTAGGED,0041bd00,RenderFrontendLobbyChatPanel,812,1,td5_frontend.c:density(3/5)
+CITED-BUT-UNTAGGED,00429fd0,SpawnVehicleSmokePuffAtPoint,688,1,td5_ai.c:density(3/5)
+CITED-BUT-UNTAGGED,0042e750,BuildWorldToViewMatrix,614,1,td5_camera.c:density(3/4)
+CITED-BUT-UNTAGGED,004092d0,RenderVehicleActorModel,587,1,td5_ai.c:density(3/4)
+CITED-BUT-UNTAGGED,0041b420,RenderFrontendLobbyStatusPanel,494,1,td5_frontend.c:density(3/5)
+CITED-BUT-UNTAGGED,00412b90,RenderTgaWithColorKeyToSurface,447,1,main.c:density(3/4)
+CITED-BUT-UNTAGGED,0040ddc0,DrawCarSelectionPreviewOverlay,446,1,td5_frontend.c:selection_preview
+CITED-BUT-UNTAGGED,00419b30,RenderFrontendSessionBrowser,443,1,td5_frontend.c:density(3/4)
+CITED-BUT-UNTAGGED,0043e990,InitializeTireTrackPool,433,1,td5_game.c:density(3/4)
+CITED-BUT-UNTAGGED,0043d4e0,UpdateWantedDamageIndicator,420,1,td5_ai.c:wanted_damage
+CITED-BUT-UNTAGGED,00409520,CheckAndUpdateActorCollisionAlignment,392,1,td5_ai.c:update_actor
+CITED-BUT-UNTAGGED,00425730,QueueFrontendSpriteBlit,368,1,td5_frontend.c:density(3/4)
+CITED-BUT-UNTAGGED,004248e0,DrawFrontendWrappedStringLine,356,1,td5_frontend.c:density(3/5)
+CITED-BUT-UNTAGGED,0041a670,RenderFrontendLobbyChatInput,306,1,main.c:density(3/5)
+CITED-BUT-UNTAGGED,0042e030,ExtractEulerAnglesFromMatrix,246,1,td5_camera.c:density(4/5)
+CITED-BUT-UNTAGGED,00414f40,RenderPositionerGlyphStrip,235,1,td5_hud.c:density(3/4)
+CITED-BUT-UNTAGGED,00424470,DrawFrontendFontStringToSurface,228,1,td5_frontend.c:density(3/5)
+CITED-BUT-UNTAGGED,00412d50,MeasureOrDrawFrontendFontString,213,1,td5_frontend.c:density(3/5)
+CITED-BUT-UNTAGGED,004258f0,CreateFrontendMenuRectEntry,190,1,td5_frontend.c:density(3/5)
+CITED-BUT-UNTAGGED,0043fbc0,DecompressTrackDataStream,190,1,td5_track.c:density(3/4)
+CITED-BUT-UNTAGGED,00434740,ComputeRouteForwardOvershootScalar,189,1,td5_track.c:density(3/5)
+CITED-BUT-UNTAGGED,00423f90,FillSurfaceRectWithColor,188,1,td5_frontend.c:fill_surface
+CITED-BUT-UNTAGGED,0042d950,ApplyMeshRenderBasisFromWorldPosition,180,1,td5_game.c:density(4/7)
+CITED-BUT-UNTAGGED,00424d90,FillPrimaryFrontendScanline,170,1,td5_frontend.c:density(3/4)
+CITED-BUT-UNTAGGED,00401370,SpawnRandomVehicleSmokePuff,159,1,td5_render.c:density(3/5)
+CITED-BUT-UNTAGGED,0043e4c0,InsertTriangleIntoDepthSortBuckets,143,1,td5_physics.c:density(3/6)
+CITED-BUT-UNTAGGED,00423e40,LockSecondaryFrontendSurfaceFillColor,140,1,td5_frontend.c:frontend_surface
+CITED-BUT-UNTAGGED,0040bae0,PreloadLevelTexturePages,138,1,td5_asset.c:texture_pages
+CITED-BUT-UNTAGGED,0042e3d0,TransformShortVectorToView,129,1,td5_camera.c:density(3/4)
+CITED-BUT-UNTAGGED,004431c0,LoadTrafficVehicleSkinTexture,119,1,td5_asset.c:load_traffic
+CITED-BUT-UNTAGGED,0042dc30,ConvertFloatVec3ToIntVec3B,110,1,td5_camera.c:density(3/4)
+CITED-BUT-UNTAGGED,0040d120,AdvanceCrossFadeTransition,105,1,td5_game.h:density(3/4)
+CITED-BUT-UNTAGGED,00411e90,ReleaseTrackedFrontendSurfaces,96,1,td5_frontend.c:density(3/4)
+CITED-BUT-UNTAGGED,00446ea0,InitializeWheelPaletteUvTable,85,1,td5_vfx.c:density(3/4)
+CITED-BUT-UNTAGGED,0042e370,TransformVector3ByRenderRotation,83,1,td5_camera.c:density(4/4)
+CITED-BUT-UNTAGGED,0041d840,FormatDisplayModeOptionStrings,78,1,main.c:display_mode
+CITED-BUT-UNTAGGED,0043e5f0,InitializeProjectedPrimitiveBuckets,75,1,td5_render.c:density(3/4)
+CITED-BUT-UNTAGGED,00424bc0,CopyPrimaryFrontendRectToSecondary,74,1,td5_frontend.c:density(3/5)
+CITED-BUT-UNTAGGED,00424cf0,PresentSecondaryFrontendRect,74,1,td5_frontend.c:density(3/4)
+CITED-BUT-UNTAGGED,00424d40,PresentPrimaryFrontendRect,74,1,td5_frontend.c:density(3/4)
+CITED-BUT-UNTAGGED,0040b170,SelectConfiguredDisplayModeSlot,72,1,main.c:display_mode
+CITED-BUT-UNTAGGED,00411710,BuildFrontendDitherOffsetTable,60,1,td5_frontend.c:density(3/5)
+CITED-BUT-UNTAGGED,00425500,ResetFrontendSelectionState,59,1,td5_frontend.c:density(3/4)
+CITED-BUT-UNTAGGED,0040df80,MarkMastersRaceSlotCompleted,51,1,main.c:density(3/5)
+CITED-BUT-UNTAGGED,00425170,UpdateFrontendClientOrigin,41,1,td5re.h:density(3/4)
+CITED-BUT-UNTAGGED,00406950,ClearTrackSegmentVisibilityTable,40,1,td5_frontend.c:density(3/5)
+CITED-BUT-UNTAGGED,00417b74,AdvanceFrontendInlineStringTableState,37,1,td5_frontend.c:density(5/6)
+CITED-BUT-UNTAGGED,0043e2c0,ResetProjectedPrimitiveWorkBuffer,36,1,td5_frontend.c:density(3/5)
+CITED-BUT-UNTAGGED,004254d0,ResetFrontendOverlayState,35,1,td5_frontend.c:density(3/4)
+CITED-BUT-UNTAGGED,0043fb90,ReadCompressedTrackStreamChunk,35,1,td5_ai.c:density(3/5)
+CITED-BUT-UNTAGGED,004317c0,SubmitProjectedPolygon,33,1,td5_render.c:name
+CITED-BUT-UNTAGGED,00428d20,InitializeBenchmarkFrameRateCapture,28,1,td5_render.c:density(3/5)
+CITED-BUT-UNTAGGED,0043fb70,ReadTrackStaticDataChunk,28,1,td5_ai.c:density(3/5)
+CITED-BUT-UNTAGGED,00428d60,FormatBenchmarkReportText,26,1,td5_orig_globals.h:density(3/4)
+CITED-BUT-UNTAGGED,00411a50,ResetFrontendFadeState,22,1,td5_frontend.c:density(3/4)
+CITED-BUT-UNTAGGED,00411de0,ClearFrontendSurfaceRegistry,22,1,td5_frontend.c:frontend_surface
+CITED-BUT-UNTAGGED,0040aef0,GetEnvironmentTexturePageMode,21,1,td5_asset.c:texture_page
+CITED-BUT-UNTAGGED,0040b1c0,BuildTrackTextureCache,11,1,td5_asset.c:name
+CITED-BUT-UNTAGGED,0040a480,InitializeRaceCameraTransitionDuration,10,1,td5_game.c:density(3/5)
+CITED-BUT-UNTAGGED,004100ce,DrawControlBindingTextWithOkButton,8,1,td5_frontend.c:density(3/6)
+CITED-BUT-UNTAGGED,00410613,RenderControllerBindingPageRows,1565,0,td5_frontend.c:render_controller
+CITED-BUT-UNTAGGED,00417dd2,LoadFrontendExtrasGalleryResources,684,0,td5_frontend.c:load_frontend
+CITED-BUT-UNTAGGED,0042e560,TransformTriangleByRenderMatrix,418,0,td5_camera.c:density(3/4)
+CITED-BUT-UNTAGGED,0043d830,ApplyRandomWheelJitterHighSpeed,211,0,td5_physics.h:density(3/6)
+CITED-BUT-UNTAGGED,0043d910,ApplyRandomWheelJitterLowSpeed,211,0,td5_physics.c:density(3/5)
+CITED-BUT-UNTAGGED,00410380,RenderControllerBindingMenuPage,187,0,td5_frontend.c:render_controller
+CITED-BUT-UNTAGGED,00410599,RenderControllerBindingPageBlankOrRearViewHeader,121,0,td5_frontend.c:render_controller
+CITED-BUT-UNTAGGED,0041043c,RenderControllerBindingPageUpDownHeader,117,0,td5_frontend.c:render_controller
+CITED-BUT-UNTAGGED,004104b2,RenderControllerBindingPageDownHeader,116,0,td5_frontend.c:render_controller
+CITED-BUT-UNTAGGED,00410940,DrawControlOptionsBindingHeader,114,0,main.c:density(3/5)
+CITED-BUT-UNTAGGED,00410527,RenderControllerBindingPageUpHeader,113,0,td5_frontend.c:render_controller
+CITED-BUT-UNTAGGED,00410129,OpenControllerBindingPageNoneHeader,109,0,td5_frontend.c:controller_binding
+CITED-BUT-UNTAGGED,004100de,OpenControllerBindingPageRearViewHeader,27,0,td5_frontend.c:controller_binding
+CITED-BUT-UNTAGGED,00410111,DrawControlBindingText2WithOkButton,23,0,td5_frontend.c:density(3/5)
+CITED-BUT-UNTAGGED,004100fa,DrawControlBindingText1WithOkButton,22,0,td5_frontend.c:density(3/5)
+CITED-BUT-UNTAGGED,004100c0,OpenControllerBindingPageWrapper,13,0,td5_frontend.c:controller_binding
+ARCH-COLLAPSED-LIBC,00448443,sprintf_game,81,22,addr in CRT range
+ARCH-COLLAPSED-LIBC,00448495,fclose_game,48,10,addr in CRT range
+ARCH-COLLAPSED-LIBC,0044867c,fopen_game,18,10,addr in CRT range
+ARCH-COLLAPSED-LIBC,0044868f,fread_game,46,9,addr in CRT range
+ARCH-COLLAPSED-LIBC,00448e91,fseek_game,43,6,addr in CRT range
+ARCH-COLLAPSED-LIBC,00449310,stricmp_game,207,3,addr in CRT range
+ARCH-COLLAPSED-LIBC,00448d0e,ftell_game,33,3,addr in CRT range
+ARCH-COLLAPSED-LIBC,00449cce,InitProcessHeap,92,1,addr in CRT range
+ARCH-COLLAPSED-LIBC,004499d0,InitPrimaryTlsSlot,83,1,addr in CRT range
+ARCH-COLLAPSED-LIBC,0044950d,FatalStartupExit,34,1,addr in CRT range
+ARCH-COLLAPSED-ZLIB,004474f6,InflateRefillInputBuffer,11,4,addr in zlib range
+ARCH-COLLAPSED-ZLIB,00447490,InflateFlushOutputAndUpdateCrc32,101,3,addr in zlib range
+ARCH-COLLAPSED-ZLIB,00447715,InflateDecodeHuffmanCodes,912,2,addr in zlib range
+ARCH-COLLAPSED-ZLIB,0044751b,InflateBuildDecodeTable,505,2,addr in zlib range
+ARCH-COLLAPSED-ZLIB,00447c42,InflateProcessDynamicHuffmanBlock,927,1,addr in zlib range
+ARCH-COLLAPSED-ZLIB,00447fe2,InflateDecompress,279,1,addr in zlib range
+ARCH-COLLAPSED-ZLIB,00447aa6,InflateProcessStoredBlock,276,1,addr in zlib range
+ARCH-COLLAPSED-ZLIB,00447bbb,InflateProcessFixedHuffmanBlock,134,1,addr in zlib range
+ARCH-COLLAPSED-ZLIB,00447502,InflateWriteOutputChunk,24,1,addr in zlib range
+ARCH-COLLAPSED-FMV,004588e0,DecodeHuffmanBlock,744,5,addr in FMV codec range
+ARCH-COLLAPSED-FMV,00451d70,ReadAndDispatchChunk,1063,3,addr in FMV codec range
+ARCH-COLLAPSED-FMV,0045a84c,IDCT8ColumnButterfly,318,3,addr in FMV codec range
+ARCH-COLLAPSED-FMV,00453470,ResetIDCTState,32,3,addr in FMV codec range
+ARCH-COLLAPSED-FMV,00457684,YCbCrToRGB_Row_16bit,666,2,addr in FMV codec range
+ARCH-COLLAPSED-FMV,004573f9,YCbCrToPackedPixel16,650,2,addr in FMV codec range
+ARCH-COLLAPSED-FMV,00456f70,IDCTDecodeDCAndAC,415,2,addr in FMV codec range
+ARCH-COLLAPSED-FMV,0045a98b,IDCT8RowButterfly,233,2,addr in FMV codec range
+ARCH-COLLAPSED-FMV,00453380,CreateVideoOutputSurface,230,2,addr in FMV codec range
+ARCH-COLLAPSED-FMV,0045b1c0,BitstreamRefillBits,84,2,addr in FMV codec range
+ARCH-COLLAPSED-FMV,004534e0,BuildColorConversionLUTs,58,2,addr in FMV codec range
+ARCH-COLLAPSED-FMV,0045791f,IDCTDecode16x16Block,2014,1,addr in FMV codec range
+ARCH-COLLAPSED-FMV,004580fe,DecodeJPEGFrame,2014,1,addr in FMV codec range
+ARCH-COLLAPSED-FMV,00459ea0,YCbCrToRGB_Row_16bit_420,1278,1,addr in FMV codec range
+ARCH-COLLAPSED-FMV,00458bc9,DecodeJPEGMCU,1269,1,addr in FMV codec range
+ARCH-COLLAPSED-FMV,004599d0,YCbCrToRGB_Row_16bit_444,1229,1,addr in FMV codec range
+ARCH-COLLAPSED-FMV,00452f20,PresentDecodedFrame,1105,1,addr in FMV codec range
+ARCH-COLLAPSED-FMV,004542c0,DecodeVideoFrame,944,1,addr in FMV codec range
+ARCH-COLLAPSED-FMV,00452300,DecodeAudioChunk,926,1,addr in FMV codec range
+ARCH-COLLAPSED-FMV,0045b420,DecodeType2DeltaPalette,811,1,addr in FMV codec range
+ARCH-COLLAPSED-FMV,00453c60,BuildYCbCrToPackedPixelLUT,776,1,addr in FMV codec range
+ARCH-COLLAPSED-FMV,004529d0,RunStreamingPlaybackLoop,738,1,addr in FMV codec range
+ARCH-COLLAPSED-FMV,004552b0,CreateVideoSurfaces,719,1,addr in FMV codec range
+ARCH-COLLAPSED-FMV,00455ad0,DecodeEAIMA_Stereo,652,1,addr in FMV codec range
+ARCH-COLLAPSED-FMV,0045af50,ParseJPEGHeaders,618,1,addr in FMV codec range
+ARCH-COLLAPSED-FMV,00455070,ParseVideoFrameHeader,564,1,addr in FMV codec range
+ARCH-COLLAPSED-FMV,00453680,PackPixelFromRGB,545,1,addr in FMV codec range
+ARCH-COLLAPSED-FMV,0045bae0,BlitDecodedToSurface,528,1,addr in FMV codec range
+ARCH-COLLAPSED-FMV,00455de0,WriteAudioToDirectSound,522,1,addr in FMV codec range
+ARCH-COLLAPSED-FMV,00456926,IDCT_Transform8x8_Block,522,1,addr in FMV codec range
+ARCH-COLLAPSED-FMV,004549d0,WriteBlock16_3to6,497,1,addr in FMV codec range
+ARCH-COLLAPSED-FMV,00455580,CreateDDrawOverlaySurface,493,1,addr in FMV codec range
+ARCH-COLLAPSED-FMV,004590bf,DecodeMCU_YCbCr422_16bpp,493,1,addr in FMV codec range
+ARCH-COLLAPSED-FMV,004592ad,DecodeMCU_YCbCr420_16bpp,493,1,addr in FMV codec range
+ARCH-COLLAPSED-FMV,0045949b,DecodeMCU_YCbCr444_16bpp,493,1,addr in FMV codec range
+ARCH-COLLAPSED-FMV,00459689,DecodeMCU_YCbCr422_16bpp_Fast,493,1,addr in FMV codec range
+ARCH-COLLAPSED-FMV,0045a3a0,YCbCrToRGB_Row_8bit,487,1,addr in FMV codec range
+ARCH-COLLAPSED-FMV,0045ad90,BuildHuffmanDecodeTables,441,1,addr in FMV codec range
+ARCH-COLLAPSED-FMV,00451bb0,SkipRIFFHeaders,436,1,addr in FMV codec range
+ARCH-COLLAPSED-FMV,00456670,IDCT_DecodeCoefficients,428,1,addr in FMV codec range
+ARCH-COLLAPSED-FMV,00454ce0,WriteBlock32_3to6,427,1,addr in FMV codec range
+ARCH-COLLAPSED-FMV,00451a10,OpenWavStream,408,1,addr in FMV codec range
+ARCH-COLLAPSED-FMV,00456d9e,IDCT_FullBlock8x8,402,1,addr in FMV codec range
+ARCH-COLLAPSED-FMV,004564f3,DecodeEAADPCM,374,1,addr in FMV codec range
+ARCH-COLLAPSED-FMV,00455950,DecodeEAIMA_Mono,371,1,addr in FMV codec range
+ARCH-COLLAPSED-FMV,004562c0,InitAudioPlayback,361,1,addr in FMV codec range
+ARCH-COLLAPSED-FMV,0045b2b0,DecodeMotionCompensatedFrame,358,1,addr in FMV codec range
+ARCH-COLLAPSED-FMV,00456b31,IDCT_1D_8pt_Float,354,1,addr in FMV codec range
+ARCH-COLLAPSED-FMV,0045b8d0,DecodeType1PaletteFrame,345,1,addr in FMV codec range
+ARCH-COLLAPSED-FMV,00453520,BuildYCbCrToRGB16LUT,344,1,addr in FMV codec range
+ARCH-COLLAPSED-FMV,00459877,DecodeMCU_YCbCr422_8bpp,343,1,addr in FMV codec range
+ARCH-COLLAPSED-FMV,00454020,ReleaseVideoResources,333,1,addr in FMV codec range
+ARCH-COLLAPSED-FMV,00454170,CreateDDrawSurface32,324,1,addr in FMV codec range
+ARCH-COLLAPSED-FMV,004539e0,InitializeVideoDecoder,307,1,addr in FMV codec range
+ARCH-COLLAPSED-FMV,0045bd3c,DecompressLZData,290,1,addr in FMV codec range
+ARCH-COLLAPSED-FMV,00456c94,IDCT_1D_8pt_Float_B,265,1,addr in FMV codec range
+ARCH-COLLAPSED-FMV,0045681d,IDCT_Transform8x8_Caller,264,1,addr in FMV codec range
+ARCH-COLLAPSED-FMV,0045aa75,IDCT_1D_8pt_Float_C,264,1,addr in FMV codec range
+ARCH-COLLAPSED-FMV,00454bd0,DecodeCompressedPixelBlock32,263,1,addr in FMV codec range
+ARCH-COLLAPSED-FMV,004548c0,DecodeCompressedPixelBlock16,262,1,addr in FMV codec range
+ARCH-COLLAPSED-FMV,004526a0,ParseExtendedAudioHeader,257,1,addr in FMV codec range
+ARCH-COLLAPSED-FMV,00455770,CreateDDrawSurface16,254,1,addr in FMV codec range
+ARCH-COLLAPSED-FMV,0045b7d0,DecodeVQ_Block,254,1,addr in FMV codec range
+ARCH-COLLAPSED-FMV,004538b0,BuildYCbCrColorTables,239,1,addr in FMV codec range
+ARCH-COLLAPSED-FMV,00452cc0,ProcessStreamChunk,234,1,addr in FMV codec range
+ARCH-COLLAPSED-FMV,004521a0,FillVideoRingBuffer,221,1,addr in FMV codec range
+ARCH-COLLAPSED-FMV,0045ab80,DequantizeIDCT_Block,216,1,addr in FMV codec range
+ARCH-COLLAPSED-FMV,00455870,RestoreLostSurfaces,214,1,addr in FMV codec range
+ARCH-COLLAPSED-FMV,0045a5cc,YCbCrToRGB_Row_16bit_422,210,1,addr in FMV codec range
+ARCH-COLLAPSED-FMV,00454750,BuildFullQuantTable,209,1,addr in FMV codec range
+ARCH-COLLAPSED-FMV,00453b20,ExtractPixelFormatInfo,184,1,addr in FMV codec range
+ARCH-COLLAPSED-FMV,00454690,BuildDequantizationTable,184,1,addr in FMV codec range
+ARCH-COLLAPSED-FMV,00456110,InitStreamDirectSound,184,1,addr in FMV codec range
+ARCH-COLLAPSED-FMV,0045acd0,InitMotionVectorDecoder,182,1,addr in FMV codec range
+ARCH-COLLAPSED-FMV,0045bf08,DecodeBitmapRLERun,179,1,addr in FMV codec range
+ARCH-COLLAPSED-FMV,0045ba30,ConvertPaletteToPixelFormat,171,1,addr in FMV codec range
+ARCH-COLLAPSED-FMV,0045be5f,UnpackBitplaneToPixels,168,1,addr in FMV codec range
+ARCH-COLLAPSED-FMV,00453f70,QuerySurfacePixelFormat,165,1,addr in FMV codec range
+ARCH-COLLAPSED-FMV,00454f30,DecodeVideoFrameBlocks16x16,154,1,addr in FMV codec range
+ARCH-COLLAPSED-FMV,00454e90,DecodeVideoFrameBlocks8x8,153,1,addr in FMV codec range
+ARCH-COLLAPSED-FMV,00454fd0,DecodeVideoFrameBlocksOverlay,148,1,addr in FMV codec range
+ARCH-COLLAPSED-FMV,00454830,ComputeBlitGeometry,142,1,addr in FMV codec range
+ARCH-COLLAPSED-FMV,00455ff0,GetAudioPlayPosition,141,1,addr in FMV codec range
+ARCH-COLLAPSED-FMV,00452890,ReleaseStreamResources,123,1,addr in FMV codec range
+ARCH-COLLAPSED-FMV,00451990,OpenMultimediaStream,121,1,addr in FMV codec range
+ARCH-COLLAPSED-FMV,0045b750,BuildBitplaneDeinterleaveTable,121,1,addr in FMV codec range
+ARCH-COLLAPSED-FMV,00452910,LaunchStreamPlaybackThread,118,1,addr in FMV codec range
+ARCH-COLLAPSED-FMV,00452280,ParseSimpleAudioHeader,114,1,addr in FMV codec range
+ARCH-COLLAPSED-FMV,0045ac60,DequantizeIDCT_Block_Half,109,1,addr in FMV codec range
+ARCH-COLLAPSED-FMV,004527c0,ReadTaggedParam,104,1,addr in FMV codec range
+ARCH-COLLAPSED-FMV,00452830,CloseMultimediaStream,89,1,addr in FMV codec range
+ARCH-COLLAPSED-FMV,0045b250,FillBlock_DC,86,1,addr in FMV codec range
+ARCH-COLLAPSED-FMV,00452dc0,SeekToLoopPoint,71,1,addr in FMV codec range
+ARCH-COLLAPSED-FMV,004560c0,StopAudioDecoderThread,69,1,addr in FMV codec range
+ARCH-COLLAPSED-FMV,00456250,ReleaseDirectSoundDevice,69,1,addr in FMV codec range
+ARCH-COLLAPSED-FMV,00453c10,QuerySurfaceDimensions,67,1,addr in FMV codec range
+ARCH-COLLAPSED-FMV,0045a588,CopyPixelBuffer32,67,1,addr in FMV codec range
+ARCH-COLLAPSED-FMV,004539a0,PackYCbCrTableEntry,63,1,addr in FMV codec range
+ARCH-COLLAPSED-FMV,00456080,StartAudioDecoderThread,63,1,addr in FMV codec range
+ARCH-COLLAPSED-FMV,004561d0,CreateDirectSoundDevice,59,1,addr in FMV codec range
+ARCH-COLLAPSED-FMV,00452990,StreamThreadEntryPoint,58,1,addr in FMV codec range
+ARCH-COLLAPSED-FMV,004534a0,SwapDoubleBuffer,52,1,addr in FMV codec range
+ARCH-COLLAPSED-FMV,00456210,DDrawGetSurfaceCaps,51,1,addr in FMV codec range
+ARCH-COLLAPSED-FMV,00456f40,LookupQuantTable,35,1,addr in FMV codec range
+ARCH-COLLAPSED-FMV,0045b220,BitstreamReadHuffmanCode,35,1,addr in FMV codec range
+ARCH-COLLAPSED-FMV,00456430,ReleaseDSStreamBuffer,30,1,addr in FMV codec range
+ARCH-COLLAPSED-FMV,00453be0,CountSetBits,26,1,addr in FMV codec range
+ARCH-COLLAPSED-FMV,004562a0,DDrawReleaseSurface,24,1,addr in FMV codec range
+ARCH-COLLAPSED-FMV,00453c00,CountTrailingZeroBits,15,1,addr in FMV codec range
+ARCH-COLLAPSED-FMV,00452e10,ReturnZero,2,1,addr in FMV codec range
+ARCH-COLLAPSED-FMV,00456450,DecodeADPCMBlock,162,0,addr in FMV codec range
+ARCH-COLLAPSED-FMV,00455d60,AudioDecoderThreadFunc,127,0,addr in FMV codec range
+ARCH-COLLAPSED-FMV,0045bd00,SetVGAPalette,59,0,addr in FMV codec range
+DEAD-CODE,00418450,NoOpHookStub,0,9,0-byte no-op function in orig
+DEAD-CODE,00417700,caseD_a,1490,0,Ghidra caseD_* orphan
+DEAD-CODE,004173b1,caseD_7,284,0,Ghidra caseD_* orphan
+DEAD-CODE,0043d9f0,ApplyRandomWheelJitterSynchronized,135,0,"0 callers, no port reference"
+DEAD-CODE,0041808d,caseD_6,37,0,Ghidra caseD_* orphan
