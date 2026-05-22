@@ -2696,49 +2696,131 @@ int td5_ai_find_offset_peer(int *route_state_ptr) {
  *      {0,1} (no flip), matching the JNZ at 0x004349E6 falling through to
  *      common_neg without touching DAT_004b08b0.
  */
+/* Phantom-peer setup (port-only, 2026-05-22 v2).
+ *
+ * In TD5_d3d.exe 6-racer mode, find_offset_peer reliably returns a real
+ * peer every tick, and the peer-found branch oscillates RS_TRACK_OFFSET_BIAS
+ * in a narrow band (orig slot 1 Edinburgh spans 95-130: 462-1176, avg 856).
+ * The non-zero bias laterally shifts td5_track_sample_target_point's output,
+ * keeping target_angle smooth tick-to-tick, keeping the AI cascade in the
+ * fine band, and preventing the ±0x18000 saturation spiral that walks the
+ * car into walls.
+ *
+ * In the port's TT+PlayerIsAI solo mode, slots 1..5 are state==3 and their
+ * RS_ACTIVE_LOWER/UPPER are never updated (they stay at init = 0). The AABB
+ * gate at line ~2567 always rejects them → find_offset_peer returns -1 → the
+ * no-peer decay drives bias to 0 → cascade compounds → walls.
+ *
+ * This helper sets up an inactive slot (slot 1, or slot 2 if SoloAISlot=1)
+ * as a phantom peer just before find_offset_peer is called, with all the
+ * RS/actor fields the gates+classify+peer-found branch read. The phantom
+ * is configured to mirror self's lane, route_table_ptr, and bounds, and
+ * sits a small fixed distance ahead. Then the unmodified orig logic
+ * produces emergent per-slot bias dynamics — different self route tables
+ * (LEFT vs RIGHT) and boundaries yield different val_r/val_l/abs comparisons
+ * in find_offset_peer's finalization, which drive the peer-found branch
+ * via g_lateral_avoidance_direction.
+ *
+ * Gated behind --PhantomPeer (default 1). When disabled, the no-peer path
+ * falls back to the v1 solo-emulation push cycle (still slot-0 only).
+ *
+ * Returns the phantom slot index, or -1 if disabled / unable to set up. */
+static int td5_ai_setup_phantom_peer_for_solo0(int32_t *self_rs) {
+    if (!g_td5.solo_mode_synth) return -1;
+    if (!g_td5.ini.phantom_peer) return -1;
+    if (self_rs[RS_SLOT_INDEX] != 0) return -1;
+
+    char *self_actor = actor_ptr(0);
+    int32_t self_cd = ACTOR_I32(self_actor, ACTOR_CAR_DEF_PTR);
+    if (!self_cd) return -1;  /* not yet initialized; no peer */
+
+    /* Phantom slot: prefer slot 1; if SoloAISlot=1, use slot 2 so the user's
+     * --SoloAISlot=1 data-swap doesn't end up making the phantom equal self
+     * in any other observable. (slot 0 IS self; we can't use it.) */
+    int phantom_slot = (g_td5.ini.solo_ai_slot == 1) ? 2 : 1;
+    int32_t *phantom_rs = route_state(phantom_slot);
+    char *phantom_actor = actor_ptr(phantom_slot);
+
+    /* Disable the other inactive slots as candidates by setting their
+     * RS_ROUTE_TABLE_SELECTOR to an impossible value. find_offset_peer
+     * rejects on rs[3] mismatch before any other read. We do this each
+     * tick because nothing else touches these slots in solo mode. */
+    for (int k = 1; k < TD5_MAX_RACER_SLOTS; k++) {
+        if (k == phantom_slot) continue;
+        route_state(k)[RS_ROUTE_TABLE_SELECTOR] = -1;
+    }
+
+    /* Phantom span = self.span + 4 (so dist clamps to 4 → push magnitude
+     * 0x29-4 = 37 / 4-0x29 = -37, close to orig's measured ±38). Wrap to
+     * span_count. */
+    int span_count = g_strip_span_count > 0 ? g_strip_span_count : 1;
+    int self_span_norm = (int)(int16_t)ACTOR_I16(self_actor, ACTOR_SPAN_NORMALIZED);
+    int self_span_raw  = (int)(int16_t)ACTOR_I16(self_actor, ACTOR_SPAN_RAW);
+    int phantom_span_norm = (self_span_norm + 4) % span_count;
+    int phantom_span_raw  = (self_span_raw  + 4) % span_count;
+
+    /* RS state — mirror self's lane / route / bounds. find_offset_peer +
+     * classify_v2 + peer-found branch read these (route_table_ptr, selector,
+     * forward_track_comp, active bounds, route_table boundaries). */
+    phantom_rs[RS_ROUTE_TABLE_PTR]      = self_rs[RS_ROUTE_TABLE_PTR];
+    phantom_rs[RS_ROUTE_TABLE_SELECTOR] = self_rs[RS_ROUTE_TABLE_SELECTOR];
+    phantom_rs[RS_FORWARD_TRACK_COMP]   = self_rs[RS_FORWARD_TRACK_COMP];
+    phantom_rs[RS_ACTIVE_LOWER_BOUND]   = self_rs[RS_ACTIVE_LOWER_BOUND];
+    phantom_rs[RS_ACTIVE_UPPER_BOUND]   = self_rs[RS_ACTIVE_UPPER_BOUND];
+    phantom_rs[RS_LEFT_BOUNDARY_A]      = self_rs[RS_LEFT_BOUNDARY_A];
+    phantom_rs[RS_LEFT_BOUNDARY_B]      = self_rs[RS_LEFT_BOUNDARY_B];
+    phantom_rs[RS_RIGHT_BOUNDARY_A]     = self_rs[RS_RIGHT_BOUNDARY_A];
+    phantom_rs[RS_RIGHT_BOUNDARY_B]     = self_rs[RS_RIGHT_BOUNDARY_B];
+    phantom_rs[RS_RIGHT_EXTENT_A]       = self_rs[RS_RIGHT_EXTENT_A];
+    phantom_rs[RS_RIGHT_EXTENT_B]       = self_rs[RS_RIGHT_EXTENT_B];
+    phantom_rs[RS_TRACK_PROGRESS]       = self_rs[RS_TRACK_PROGRESS];
+    phantom_rs[RS_TRACK_OFFSET_BIAS]    = 0;  /* not read in peer-found path */
+    phantom_rs[RS_SLOT_INDEX]           = phantom_slot;
+
+    /* Actor state — span fields, sub_lane, cardef. The peer-found branch
+     * reads SPAN_NORMALIZED (dist), SPAN_RAW (strip nibble lookup when
+     * direction==0), and SUB_LANE_INDEX (direction-flip / push-sign tests).
+     * classify_v2 reads peer's CAR_DEF_PTR — use self's. */
+    ACTOR_I16(phantom_actor, ACTOR_SPAN_NORMALIZED) = (int16_t)phantom_span_norm;
+    ACTOR_I16(phantom_actor, ACTOR_SPAN_RAW)        = (int16_t)phantom_span_raw;
+    ACTOR_I32(phantom_actor, ACTOR_CAR_DEF_PTR)     = self_cd;
+
+    /* SUB_LANE_INDEX — set to self's sub_lane so the phantom appears
+     * "co-lane" with self. The peer-found branch's direction logic:
+     *   - direction==1 && peer.sub_lane==0 → flip dir=0 + positive push
+     *   - direction==1 && peer.sub_lane!=0 → negative push (no flip)
+     *   - direction==0 && peer.sub_lane!=strip_nibble → positive push
+     *   - direction==0 && peer.sub_lane==strip_nibble → flip dir=1 + neg push
+     * direction is overwritten each tick by find_offset_peer's geometry-
+     * derived finalization (abs_l vs abs_r). So the bias dynamics emerge
+     * from self's route/bounds geometry through the unmodified orig path. */
+    uint8_t self_sub_lane = ACTOR_U8(self_actor, ACTOR_SUB_LANE_INDEX);
+    ACTOR_U8(phantom_actor, ACTOR_SUB_LANE_INDEX) = self_sub_lane;
+
+    return phantom_slot;
+}
+
 void td5_ai_update_track_offset_bias(int slot) {
     int32_t *rs = route_state(slot);
+
+    /* Solo-mode phantom-peer setup (port-only, 2026-05-22 v2). Runs ONCE
+     * before find_offset_peer so the unmodified orig peer-found logic
+     * produces emergent per-slot bias dynamics. See helper comment. */
+    (void)td5_ai_setup_phantom_peer_for_solo0(rs);
+
     int peer = td5_ai_find_offset_peer(rs);
 
     if (peer < 0) {
-        /* Solo-mode peer-dynamics emulation (port-only, 2026-05-22).
-         *
-         * Frida capture of TD5_d3d.exe 6-racer Edinburgh spans 95-130
-         * (log/orig/ai_cascade_state.csv): orig AI slot 1's
-         * RS_TRACK_OFFSET_BIAS hovers at 462-1176 (avg 856, never 0).
-         * Pattern: peer push +~38 every 4-5 ticks, decay -8 in between.
-         * The non-zero bias laterally shifts td5_track_sample_target_point's
-         * output each tick → smoothly-varying target_angle → AI cascade
-         * stays in fine-band (delta < 0x100) → steer stays near 0, never
-         * compounds to ±0x18000 clamp.
-         *
-         * In port solo+PlayerIsAI no peer is ever found, so the strict
-         * orig no-peer decay drives bias to 0 in ~125 ticks. After that
-         * the AI's target is on perfect centerline, deviation grows on
-         * any drift, cascade hits mid-band +0x4000 path, compounds to
-         * clamp, car spins, hits wall, recovery loop.
-         *
-         * Fix: emulate the orig cycle. Every 5 ticks apply a "phantom
-         * peer push" of magnitude 38 in the bias's prevailing sign;
-         * otherwise apply the standard -8 decay (or +8 if negative).
-         * Net steady state: bias oscillates between ~800 and ~1200
-         * (matching orig). Strictly gated to solo_mode_synth slot 0.
-         */
+        /* Phantom-peer fallback: when --PhantomPeer=0 (or setup couldn't
+         * find a valid self car_def_ptr), use the v1 push cycle so solo
+         * mode still escapes the no-peer decay-to-zero trap. Slot-0-only,
+         * solo_mode_synth-only — does NOT affect 6-racer mode. */
         if (g_td5.solo_mode_synth && slot == 0) {
-            /* Solo-mode peer-bias emulation (port-only, 2026-05-22 v1).
-             *
-             * Frida orig 6-racer slot 1 capture (spans 95-130) showed bias
-             * hovers at ~1000 due to cyclic peer pushes (+38 every ~5 ticks
-             * + ∓8 decay). Port solo decays bias to 0 (no peer), cascade
-             * compounds to clamp, walls. Phantom-peer push (+38/5 ticks)
-             * closes the gap for slot 0 (user verdict "almost flawless").
-             *
-             * v2 (bidirectional) and v3 (sin-oscillation per measured orig
-             * mean) BOTH made slot 1 worse than v1 — slot 1 got stuck in
-             * recovery loops. v1 wins empirically; lane-2 slot-1 specific
-             * limitations remain a known issue requiring a different
-             * approach (e.g., physics-aware wall-contact bias release).
-             */
+            /* Solo-mode peer-bias emulation v1 (kept as fallback when
+             * phantom_peer is disabled or fails). Frida orig 6-racer slot 1
+             * spans 95-130 measured bias hovering at ~1000 via cyclic peer
+             * pushes (+38 every ~5 ticks + ∓8 decay). v1 emulates that cycle
+             * in the bias's prevailing sign. */
             static uint32_t s_solo_bias_tick = 0;
             int32_t bias = rs[RS_TRACK_OFFSET_BIAS];
             s_solo_bias_tick++;
@@ -3585,6 +3667,63 @@ void td5_ai_update_track_behavior(int slot) {
             int lin_span = ((int)span + 4) % span_count;
             int target_span = td5_track_apply_target_span_remap(lin_span, is_canonical);
 
+            /* Adaptive lookahead (solo_mode_synth slot 0 only, 2026-05-22 v2).
+             *
+             * Root cause from [[target-angle-wobble-finding-2026-05-22]]: in
+             * dense-span curve sections (Edinburgh spans 95-99) the +4
+             * lookahead lands so close to the actor that atan2 wobbles 150°+
+             * tick-to-tick. Cascade hits mid-band, slams ±0x18000, car spins.
+             *
+             * Two-threshold design — KEY DIFFERENCE from earlier reverted
+             * "Solo-mode short-span guard" which extended until dist >= 1500
+             * (overshot curves, slot 0 regressed to stuck-at-span-98):
+             *   - TRIGGER 200: only extend when first sample is *very* close
+             *   - RELEASE 600: stop extending as soon as distance is workable
+             * Narrow extension window prevents overshooting the curve.
+             *
+             * Probe uses lateral_bias=0 so the trigger is independent of the
+             * peer-bias emulation cycle; sample for steering downstream still
+             * applies the real bias. */
+            if (g_td5.solo_mode_synth && slot == 0) {
+                enum { TD5_ADAPTIVE_LOOKAHEAD_TRIGGER = 200,
+                       TD5_ADAPTIVE_LOOKAHEAD_RELEASE = 600,
+                       TD5_ADAPTIVE_LOOKAHEAD_MAX_EXTEND = 6 };
+                const uint8_t *rt_probe = (const uint8_t *)(intptr_t)rs[RS_ROUTE_TABLE_PTR];
+                int probe_rb = 128;
+                if (rt_probe) probe_rb = (int)rt_probe[(size_t)(unsigned)lin_span * 3u];
+                int32_t actor_x_chk = ACTOR_I32(actor, ACTOR_WORLD_POS_X);
+                int32_t actor_z_chk = ACTOR_I32(actor, ACTOR_WORLD_POS_Z);
+                int target_x_probe = 0, target_z_probe = 0;
+                int triggered = 0;
+                if (td5_track_sample_target_point(target_span, probe_rb,
+                                                   &target_x_probe, &target_z_probe, 0)) {
+                    int32_t ddx = (target_x_probe - actor_x_chk) >> 8;
+                    int32_t ddz = (target_z_probe - actor_z_chk) >> 8;
+                    int32_t adx = ddx < 0 ? -ddx : ddx;
+                    int32_t adz = ddz < 0 ? -ddz : ddz;
+                    if (adx + adz < TD5_ADAPTIVE_LOOKAHEAD_TRIGGER) triggered = 1;
+                }
+                if (triggered) {
+                    int extended = 0;
+                    for (int e = 0; e < TD5_ADAPTIVE_LOOKAHEAD_MAX_EXTEND; e++) {
+                        lin_span = (lin_span + 1) % span_count;
+                        target_span = td5_track_apply_target_span_remap(lin_span, is_canonical);
+                        if (rt_probe) probe_rb = (int)rt_probe[(size_t)(unsigned)lin_span * 3u];
+                        extended = e + 1;
+                        if (!td5_track_sample_target_point(target_span, probe_rb,
+                                                            &target_x_probe, &target_z_probe, 0))
+                            break;
+                        int32_t ddx = (target_x_probe - actor_x_chk) >> 8;
+                        int32_t ddz = (target_z_probe - actor_z_chk) >> 8;
+                        int32_t adx = ddx < 0 ? -ddx : ddx;
+                        int32_t adz = ddz < 0 ? -ddz : ddz;
+                        if (adx + adz >= TD5_ADAPTIVE_LOOKAHEAD_RELEASE) break;
+                    }
+                    TD5_LOG_I(LOG_TAG, "adaptive_lookahead: slot=%d span=%d lin=%d tspan=%d ext=%d",
+                              slot, (int)span, lin_span, target_span, extended);
+                }
+            }
+
             /* [PRECISE-PORT D4 removed 2026-05-14, pool9_00434FE0]: original
              * 0x00434FE0 does NOT write rs[RS_TRACK_PROGRESS] in the normal-AI
              * branch — that field is only written in the script-completed
@@ -3652,6 +3791,53 @@ void td5_ai_update_track_behavior(int slot) {
                      * the moderate-left band which turns the car slowly, matching
                      * the original's behavior. */
                     int32_t target_angle = ai_angle_from_vector(dx, dz) & 0xFFF;
+
+                    /* Solo-mode target_angle smoothing (port-only, 2026-05-22).
+                     *
+                     * On dense-span curves the actor frequently sits within one
+                     * tick's motion of the +4 lookahead target. atan2(dx,dz) is
+                     * hyper-sensitive to small position changes when dx²+dz² is
+                     * small → target_angle wobbles 150°+ between consecutive
+                     * ticks at the same tspan (Frida-traced Edinburgh slot 1
+                     * spans 95-97: ta 0x966→0x28F→0x98E→0x2B0). The cascade
+                     * can't track those swings and saturates at ±clamp.
+                     *
+                     * In orig 6-racer mode peer interactions shift the lateral
+                     * target each tick, masking the wobble. Solo PlayerIsAI has
+                     * no peers (even with the phantom-peer bias emulation
+                     * above the geometry-side wobble remains), so we IIR-filter
+                     * target_angle here. Wrap-aware diff handles the 0xFFF↔0
+                     * crossing; alpha=1/4 is heavily smoothed (response
+                     * timescale ~4 ticks @ 30Hz = ~130 ms).
+                     *
+                     * Strictly gated to solo_mode_synth slot 0 — 6-racer mode
+                     * keeps byte-fidelity with orig 0x4352CB-0x435336.
+                     */
+                    if (g_td5.solo_mode_synth && slot == 0) {
+                        static int32_t s_smoothed_ta = -1;
+                        /* Conditional near-target smoothing. Only smooth when
+                         * |dx|+|dz| < 600 in post->>8 fixed-point units. Far-
+                         * target atan2 is already stable; smoothing there
+                         * adds lag at sharp turns. Near-target is where the
+                         * wobble cascade fires (Edinburgh slot 1 spans 95-97
+                         * Frida trace). Re-entering the near band: reset
+                         * smoother to current raw so we don't snap-back. */
+                        int32_t abs_dx = (dx < 0) ? -dx : dx;
+                        int32_t abs_dz = (dz < 0) ? -dz : dz;
+                        int near_target = (abs_dx + abs_dz) < 600;
+
+                        if (s_smoothed_ta < 0 || !near_target) {
+                            s_smoothed_ta = target_angle;
+                        } else {
+                            int32_t diff = target_angle - s_smoothed_ta;
+                            if (diff >  0x800) diff -= 0x1000;
+                            if (diff < -0x800) diff += 0x1000;
+                            s_smoothed_ta = (s_smoothed_ta + (diff >> 2)) & 0xFFF;
+                            TD5_LOG_D(LOG_TAG, "ta_smooth: slot=%d raw=0x%X smooth=0x%X dxz=%d",
+                                      slot, target_angle, s_smoothed_ta, abs_dx + abs_dz);
+                            target_angle = s_smoothed_ta;
+                        }
+                    }
 
                     /* (e) Actor heading: (yaw_accum + steering_cmd) >> 8
                      * [CONFIRMED @ 0x435338-0x43534C] */

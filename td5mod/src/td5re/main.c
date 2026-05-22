@@ -225,6 +225,7 @@ static int td5_apply_cli_overrides(const char *cmdline,
         { "PlayerIsAI",           &g_td5.ini.player_is_ai },
         { "SoloAISlot",           &g_td5.ini.solo_ai_slot },
         { "MaxSpan",              &g_td5.ini.max_span },
+        { "PhantomPeer",          &g_td5.ini.phantom_peer },
         /* Game */
         { "DefaultCar",           &g_td5.ini.default_car },
         { "DefaultTrack",         &g_td5.ini.default_track },
@@ -456,6 +457,10 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     g_td5.ini.player_is_ai      = td5_ini_int("GameOptions", "PlayerIsAI", 0);
     g_td5.ini.solo_ai_slot      = td5_ini_int("GameOptions", "SoloAISlot", 0);
     g_td5.ini.max_span          = td5_ini_int("GameOptions", "MaxSpan", 0);
+    /* PhantomPeer default OFF: initial A/B (2026-05-22) regressed slot 0
+     * Edinburgh from 11 → 1418 wall_hits when ON; v1 emulation is the
+     * shipping path. Enable with --PhantomPeer=1 for A/B testing. */
+    g_td5.ini.phantom_peer      = td5_ini_int("GameOptions", "PhantomPeer", 0);
 
     /* Auto-race: skip frontend entirely, launch race with INI settings */
     g_td5.ini.auto_race             = td5_ini_int("Game", "AutoRace", 0);
