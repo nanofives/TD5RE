@@ -21,6 +21,7 @@
 #include "td5_ai.h"
 #include "td5_platform.h"
 #include "td5_render.h"
+#include "td5_camera.h"
 #include "td5_trace.h"
 #include "td5_pilot_trace_004440F0.h"
 #include "td5_pilot_trace_pool15_spline.h"
@@ -1829,6 +1830,7 @@ int td5_track_load_strip(const void *data, size_t size)
     s_strip_header = NULL;
     s_jump_entry_count = 0;
     s_jump_entries = NULL;
+    td5_camera_bind_track_geometry(NULL, NULL);
     free_display_lists();
     if (s_span_display_list_indices) {
         free(s_span_display_list_indices);
@@ -1900,6 +1902,12 @@ int td5_track_load_strip(const void *data, size_t size)
     g_strip_total_segments = s_span_count;
     g_strip_span_base = s_span_array;
     g_strip_vertex_base = s_vertex_table;
+    /* Publish to the trackside-camera dispatch (case 0 static-FOV, case 3
+     * static, case 6 spline, plus UpdateStaticTracksideCamera and
+     * SelectTracksideCameraProfile). Crash trace 0x002D1C6D / fault at
+     * address 0x4 = movzwl 0x4(%edx),%eax with edx=g_spanTable+anchor*0x18
+     * resolving to NULL+0 because nothing wired these globals before. */
+    td5_camera_bind_track_geometry(s_span_array, s_vertex_table);
 
     if (s_models_display_list_count > 0)
         rebuild_span_display_list_mapping();
@@ -2588,10 +2596,23 @@ static void update_position_recursive(int16_t *track_state, int32_t pos_x, int32
             break;
         }
 
-        case 2: /* Right */
+        case 2: /* Right (forward + lateral) — advances to span+1 */
             new_span = resolve_neighbor(span_idx, &sub_lane, 0x02, pos_x, pos_z);
             span_idx = new_span;
             track_state[0] = (int16_t)new_span;
+            /* Increment span_accumulated to match orig 0x004440F0 case 2:
+             * `psVar6[2] = psVar6[2] + 1; ... high_water = max(...)`.
+             * The port previously omitted this, so on Moscow's multi-lane
+             * road a player drifting forward-right (which fires case 2 each
+             * boundary cross) advanced track_state[0] (current span) but
+             * NOT track_state[2] (accumulator). track_state[2] feeds the
+             * wrap normalizer that produces track_span_normalized, which
+             * the P2P checkpoint trigger compares against the threshold.
+             * Result: timer extension fired ~50 spans past the visual
+             * checkpoint banner. 2026-05-23 audit + user report. */
+            track_state[2]++;
+            if (track_state[2] > track_state[3])
+                track_state[3] = track_state[2];
             break;
 
         case 3: { /* Forward + Right — single FWD step + post-step retest
@@ -2726,10 +2747,14 @@ static void update_position_recursive(int16_t *track_state, int32_t pos_x, int32
             break;
         }
 
-        case 8: /* Left */
+        case 8: /* Left (backward + lateral) — advances to span-1 */
             new_span = resolve_neighbor(span_idx, &sub_lane, 0x08, pos_x, pos_z);
             span_idx = new_span;
             track_state[0] = (int16_t)new_span;
+            /* Decrement span_accumulated to match orig 0x004440F0 case 8:
+             * `psVar6[2] = psVar6[2] + -1`. Symmetric to the case 2 fix
+             * above. No high_water update (orig matches). */
+            track_state[2]--;
             break;
 
         case 9: { /* Forward + Left — FWD primary + post-step retest

@@ -222,9 +222,11 @@ static int td5_apply_cli_overrides(const char *cmdline,
         { "Difficulty",           &g_td5.ini.difficulty },
         { "Dynamics",             &g_td5.ini.dynamics },
         { "Collisions",           &g_td5.ini.collisions },
+        { "AutoGearbox",          &g_td5.ini.auto_gearbox },
         { "PlayerIsAI",           &g_td5.ini.player_is_ai },
         { "SoloAISlot",           &g_td5.ini.solo_ai_slot },
         { "MaxSpan",              &g_td5.ini.max_span },
+        { "PhantomPeer",          &g_td5.ini.phantom_peer },
         /* Game */
         { "DefaultCar",           &g_td5.ini.default_car },
         { "DefaultTrack",         &g_td5.ini.default_track },
@@ -436,6 +438,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     g_td5.ini.difficulty         = td5_ini_int("GameOptions", "Difficulty", 1);
     g_td5.ini.dynamics           = td5_ini_int("GameOptions", "Dynamics", 0);
     g_td5.ini.collisions         = td5_ini_int("GameOptions", "Collisions", 1);
+    g_td5.ini.auto_gearbox       = td5_ini_int("GameOptions", "AutoGearbox", 1);
 
     /* Game defaults */
     g_td5.ini.default_car       = td5_ini_int("Game", "DefaultCar", 0);
@@ -456,6 +459,10 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     g_td5.ini.player_is_ai      = td5_ini_int("GameOptions", "PlayerIsAI", 0);
     g_td5.ini.solo_ai_slot      = td5_ini_int("GameOptions", "SoloAISlot", 0);
     g_td5.ini.max_span          = td5_ini_int("GameOptions", "MaxSpan", 0);
+    /* PhantomPeer default OFF: initial A/B (2026-05-22) regressed slot 0
+     * Edinburgh from 11 → 1418 wall_hits when ON; v1 emulation is the
+     * shipping path. Enable with --PhantomPeer=1 for A/B testing. */
+    g_td5.ini.phantom_peer      = td5_ini_int("GameOptions", "PhantomPeer", 0);
 
     /* Auto-race: skip frontend entirely, launch race with INI settings */
     g_td5.ini.auto_race             = td5_ini_int("Game", "AutoRace", 0);
@@ -576,10 +583,10 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
            g_td5.ini.fog_enabled, g_td5.ini.speed_units, g_td5.ini.camera_damping);
     dbglog("  [Audio]   SFXVolume=%d MusicVolume=%d SFXMode=%d",
            g_td5.ini.sfx_volume, g_td5.ini.music_volume, g_td5.ini.sfx_mode);
-    dbglog("  [GameOpt] Laps=%d Timers=%d Traffic=%d Cops=%d Diff=%d Dyn=%d Coll=%d PlayerIsAI=%d",
+    dbglog("  [GameOpt] Laps=%d Timers=%d Traffic=%d Cops=%d Diff=%d Dyn=%d Coll=%d AutoGB=%d PlayerIsAI=%d",
            g_td5.ini.laps, g_td5.ini.checkpoint_timers, g_td5.ini.traffic,
            g_td5.ini.cops, g_td5.ini.difficulty, g_td5.ini.dynamics, g_td5.ini.collisions,
-           g_td5.ini.player_is_ai);
+           g_td5.ini.auto_gearbox, g_td5.ini.player_is_ai);
     dbglog("  [Game]    Car=%d Track=%d GameType=%d SkipIntro=%d DebugOverlay=%d AutoRace=%d StartScreen=%d StartSpanOffset=%d",
            g_td5.ini.default_car, g_td5.ini.default_track, g_td5.ini.default_game_type,
            g_td5.ini.skip_intro, g_td5.ini.debug_overlay, g_td5.ini.auto_race,

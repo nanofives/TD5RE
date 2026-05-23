@@ -967,12 +967,23 @@ int32_t td5_game_get_race_timer(int slot, int lap_index)
  * [CONFIRMED @ 0x40AAD0 / 0x40AB80] sort functions populate final_position
  * ======================================================================== */
 
+/* Race-results accessors.
+ *
+ * Normally s_results is populated by build_results_table() when the race
+ * completes naturally (all racers finished). If the player quits / DNFs,
+ * build_results_table never runs and s_results stays zero — but the
+ * underlying s_metrics has been ticked the whole race. Fall back to the
+ * raw metric so Screen_RaceResults' View Race Data path shows the
+ * actual run instead of all "-" / 0. */
+
 /* Returns the primary_metric (finish time ticks) for a given slot.
  * 0 = not finished or out-of-range. [CONFIRMED: DAT_0048d990 = primary base] */
 int32_t td5_game_get_result_primary(int slot)
 {
     if (slot < 0 || slot >= TD5_MAX_RACER_SLOTS) return 0;
-    return s_results[slot].primary_metric;
+    int32_t v = s_results[slot].primary_metric;
+    if (v == 0) v = s_metrics[slot].post_finish_metric_base;
+    return v;
 }
 
 /* Returns the secondary_metric (accumulated score/points) for a given slot.
@@ -980,7 +991,9 @@ int32_t td5_game_get_result_primary(int slot)
 int32_t td5_game_get_result_secondary(int slot)
 {
     if (slot < 0 || slot >= TD5_MAX_RACER_SLOTS) return 0;
-    return s_results[slot].secondary_metric;
+    int32_t v = s_results[slot].secondary_metric;
+    if (v == 0) v = s_metrics[slot].accumulated_score;
+    return v;
 }
 
 /* Returns the top_speed for a given slot (in internal units).
@@ -988,7 +1001,9 @@ int32_t td5_game_get_result_secondary(int slot)
 int32_t td5_game_get_result_top_speed(int slot)
 {
     if (slot < 0 || slot >= TD5_MAX_RACER_SLOTS) return 0;
-    return (int32_t)s_results[slot].top_speed;
+    int32_t v = (int32_t)s_results[slot].top_speed;
+    if (v == 0) v = (int32_t)s_metrics[slot].top_speed;
+    return v;
 }
 
 /* Returns the average speed accumulator (raw) for a given slot.

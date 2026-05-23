@@ -210,6 +210,12 @@ typedef struct TD5_GlobalState {
         int  difficulty;
         int  dynamics;
         int  collisions;
+        /* AutoGearbox: 1 = automatic transmission (default; gear up/down keys
+         * ignored), 0 = manual. Drives input bit 28 → actor+0x378 which orig
+         * UpdatePlayerVehicleControlState @ 0x00402E60 gates the gear-shift
+         * block on. The orig defaults to auto; in port the menu toggle is
+         * not wired, so this INI key is the only way to switch to manual. */
+        int  auto_gearbox;
         /* Defaults */
         int  default_car;
         int  default_track;
@@ -300,6 +306,12 @@ typedef struct TD5_GlobalState {
          * when slot 0's span_normalized reaches this value. Used to
          * benchmark per-slot AI behavior over the same track distance. */
         int  max_span;
+        /* PhantomPeer (port-only debug, 2026-05-22): when 1, solo mode
+         * synthesizes a fake peer actor in slot 1 so orig's unmodified
+         * find_offset_peer + update_track_offset_bias produce emergent
+         * per-slot bias dynamics naturally. When 0, falls back to the v1
+         * solo-emulation push cycle. Default 1. */
+        int  phantom_peer;
         /* FrontendDraw: when 1, log every fe_draw_quad call to
          * log/frontend_draw_port.csv (screen, page, x, y, w, h, color, uvs).
          * Disabled by default — enable with FrontendDraw=1 in [Logging]. */

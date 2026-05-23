@@ -182,4 +182,13 @@ void td5_camera_cache_vehicle_angles(TD5_Actor *actor, int view_index);
 void td5_camera_get_position(float *x, float *y, float *z);
 void td5_camera_get_basis(float *right, float *up, float *forward);
 
+/* Bind the strip-span / vertex tables for trackside-camera dispatch.
+ * Mirrors the original BindTrackStripRuntimePointers (0x444070), which wires
+ * g_trackStripRecords (0x4c3d9c) + g_trackVertexPool (0x4c3d98) consumed by
+ * UpdateTracksideCamera/UpdateSplineTracksideCamera. Called by
+ * td5_track_load_strip after the strip blob is parsed. Pass NULL to clear
+ * (used when the strip is unloaded between races). */
+void td5_camera_bind_track_geometry(const void *span_base,
+                                    const void *vertex_base);
+
 #endif /* TD5_CAMERA_H */
