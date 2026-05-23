@@ -318,9 +318,21 @@ void td5_input_poll_race_session(void)
         s_analog_x[i] = state.analog_x;
         s_analog_y[i] = state.analog_y;
 
-        /* OR in nitro pending flag from game logic */
-        if (s_nitro_pending[i]) {
-            s_control_bits[i] |= 0x10000000u;
+        /* Bit 28 = auto/manual gearbox toggle.
+         * Orig 0x00402E60 derives actor+0x378 = ~(bits >> 28) & 1, then gates
+         * the entire gear-up/gear-down block on `field_0x378 == 0` (i.e.
+         * bit 28 must be SET for gear keys to do anything). The original game
+         * defaults to auto and exposes a menu toggle; the port doesn't wire
+         * that toggle, so the [GameOptions] AutoGearbox INI key is the only
+         * way to switch. AutoGearbox=1 (default) → bit 28 clear → auto mode.
+         * AutoGearbox=0 → bit 28 set → manual (player gear keys honored).
+         *
+         * (The previous mapping of bit 28 to `s_nitro_pending` was dead code —
+         * the setter was never called — and misnamed a real gearbox flag.) */
+        if (g_td5.ini.auto_gearbox) {
+            s_control_bits[i] &= ~0x10000000u;
+        } else {
+            s_control_bits[i] |=  0x10000000u;
         }
 
         /* Camera change with cooldown */
@@ -799,9 +811,15 @@ void td5_input_update_player_control(int slot)
     /* Cop mode: horn zeroes other actors' velocities.
      * Deferred to physics module integration. */
 
-    /* ---- Gear Changes (5-frame debounce) ---- */
-    if (((~(bits >> 28)) & 1) == 0) {
-        /* NOS flag set means stunned, skip gear changes */
+    /* ---- Gear Changes (5-frame debounce) ----
+     * Manual-mode gate [CONFIRMED @ 0x00402E60: orig wraps the entire gear
+     * up/down block in `if (field_0x378 == 0)`. field_0x378 = ~(bits>>28)&1,
+     * so field_0x378 == 0 ⟺ bit 28 set ⟺ MANUAL mode.
+     * Port previously gated the OPPOSITE way — gear keys worked in auto
+     * (default) mode and were ignored in manual. Fixed 2026-05-22 alongside
+     * the [GameOptions] AutoGearbox INI key. */
+    if ((bits & 0x10000000u) == 0) {
+        /* Auto mode (default) — orig ignores gear up/down keys here. */
     } else if (s_gear_debounce[slot] == 0) {
         /* Gear up (bit 0x400000) */
         if (bits & 0x400000u) {

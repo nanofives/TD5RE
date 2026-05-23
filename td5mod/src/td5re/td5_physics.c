@@ -1179,35 +1179,34 @@ void td5_physics_update_vehicle_actor(TD5_Actor *actor)
         td5_track_resolve_wall_contacts(actor);
     }
 
-    /* 9. Update surface_contact_flags for the NEXT tick's dynamics dispatch
-     * — HUMAN-PLAYER PATH ONLY.
+    /* 9. surface_contact_flags update — REMOVED 2026-05-23.
      *
-     * [RE basis: the original's surface_contact_flags is only written inside
-     * UpdatePlayerVehicleDynamics @ 0x00404030, at a late drivetrain-commit
-     * condition. AI cars in the original never have scf written — it stays
-     * at 0 from the spawn memset for the entire race.]
+     * The original NEVER derives scf from wheel-ground contact. scf is a
+     * WHEELSPIN LATCH set/cleared inside UpdatePlayerVehicleDynamics
+     * (0x00404030) by two late conditionals:
      *
-     * Frida rotation_probe.csv 2026-05-03 confirmed: orig slot 0 (AI)
-     * scf=0 at every sim_tick from 1..50. Port had scf=3 from sim_tick=2
-     * onwards because this update fired for AI cars too — a port-specific
-     * deviation that flipped the AI dynamics path from airborne (scf=0)
-     * to grounded (scf=3), changing drive-torque application on tick 2+.
+     *   CLEAR (every tick): if abs(long_spd - body_v_long) >> 8 < 0x41 → 0
+     *                       (engine-derived speed matches body speed → grip)
+     *   SET   (FIRST gear only): when engine spins much faster than body
+     *                            AND throttle > 0x7f → scf = cardef[0x76]
+     *                            (1=RWD, 2=FWD, 3=AWD wheelspin)
      *
-     * Gated on slot_state==1 (human player) so AI slots match the
-     * original's scf=0 behavior. The player path still gets the eager
-     * update because the original's late conditional inside
-     * UpdatePlayerVehicleDynamics isn't fully ported. */
-    if (!g_game_paused &&
-        actor->slot_index < 6 &&
-        g_race_slot_state[actor->slot_index] == 1) {
-        uint8_t bm = actor->wheel_contact_bitmask;
-        uint8_t flags = 0;
-        if (!(bm & 0x04) || !(bm & 0x08))  /* RL or RR grounded */
-            flags |= 1;
-        if (!(bm & 0x01) || !(bm & 0x02))  /* FL or FR grounded */
-            flags |= 2;
-        actor->surface_contact_flags = flags;
-    }
+     * scf != 0 routes the next tick to CRGT (engine governs ground speed —
+     * the launch/burnout model). scf == 0 routes to UESA (gear-ratio RPM
+     * tracking) which is what 99% of normal driving uses.
+     *
+     * The prior wheel-contact-bitmask write here clobbered scf to 3 every
+     * tick on flat ground, forcing every tick into the CRGT branch where
+     * (a) UpdateAutomaticGearSelection never runs (orig doesn't call it on
+     * that branch) and (b) CRGT slews engine_speed_accum to 0 in any gear
+     * other than FIRST. Net effect: gear shifts stalled, RPM collapsed to
+     * minimum after upshift, front grip math desynced, drift sound fired
+     * on tiny inputs. Per the deep-dive Ghidra audit 2026-05-23.
+     *
+     * Phase 1 of the fix: leave scf at whatever set/clear sites it was
+     * legitimately written by (initially 0 from ResetVehicleActorState
+     * at 0x00405DC6). Phase 2 will port the orig's SET/CLEAR conditionals
+     * into td5_physics_update_player. */
 
     if (actor->slot_index == 0 && (actor->frame_counter % 60u) == 0u) {
         TD5_LOG_D(LOG_TAG,
@@ -1379,6 +1378,7 @@ void td5_physics_update_player(TD5_Actor *actor)
     /* Lateral = dot(velocity, heading_right) */
     int32_t v_lat  = (vx * cos_h - vz * sin_h) >> 12;
 
+
     /* NOTE: `actor->longitudinal_speed` / `lateral_speed` are NOT written
      * here. The original UpdatePlayerVehicleDynamics @ 0x00404030 writes
      * both fields at its TAIL, using (a) the POST-drag PRE-force velocity
@@ -1426,9 +1426,14 @@ void td5_physics_update_player(TD5_Actor *actor)
         if (!actor->brake_flag) {
             if (*((const uint8_t *)actor + 0x378) == 0) {
                 td5_physics_reverse_throttle_sign(actor);
-            } else {
-                td5_physics_auto_gear_select_no_kick(actor);
             }
+            /* No auto_gear_select call here — orig's on-ground branch
+             * (scf != 0) does NOT call UpdateAutomaticGearSelection at all
+             * [CONFIRMED @ 0x00404030 Ghidra decomp 2026-05-23]. Gears and
+             * RPM only update on the airborne branch (scf == 0 → UESA path).
+             * Previous on-ground compensatory call + its 30-tick debounce
+             * wrapper were a port-only patch over the scf miscomputation
+             * that is being removed in the same change. */
         }
 
         if (actor->slot_index == 0 && (actor->frame_counter % 30u) == 0u) {
@@ -1599,11 +1604,30 @@ void td5_physics_update_player(TD5_Actor *actor)
             if (abs_speed <= speed_limit) {
                 switch (dt_type) {
                 case 1: /* RWD */
-                    /* Original airborne RWD (0x404576-0x404592): SAR ECX,1 then MOV [EBP-0x18] only.
-                     * Only ONE rear wheel slot receives torque/2; wheel_drive[3] stays 0
-                     * (zero-initialised at line 829). Writing both gives 2× vz vs original.
-                     * [CONFIRMED by Ghidra agent: single MOV in RWD airborne path] */
+                    /* Original airborne RWD writes BOTH rear wheel slots to
+                     * drive_torque/2 — same as the on-ground RWD branch above.
+                     *
+                     * RE'd direct from orig UpdatePlayerVehicleDynamics
+                     * @ 0x00404030 decomp 2026-05-23: in the !brake, throttle!=0,
+                     * sVar2==1 block, the orig writes
+                     *   local_8  = drive_torque / 2;  // → wheel_drive[2] (RL)
+                     *   pRVar24  = local_8;           // → wheel_drive[3] (RR)
+                     * The prior port (and the inline comment that claimed a
+                     * "single MOV in RWD airborne path") missed the second
+                     * assignment, so wheel_drive[3] stayed 0. Symptoms after
+                     * Phase 1 of the scf rewrite (which made the airborne
+                     * branch the dominant path):
+                     *   - rear_long was HALVED (one rear contributed zero)
+                     *     → accel from 0 felt sluggish.
+                     *   - yaw term2 = (RR - RL - FL + FR)*500 = (0 - X - 0 + 0)*500
+                     *     ran at -120k to -240k every tick → constant
+                     *     self-steer to one side.
+                     *   - asymmetric drive desynced the slip-circle math
+                     *     → drift sound on tiny steering input.
+                     * Writing both rear slots brings the airborne RWD path
+                     * into line with the on-ground RWD branch and the orig. */
                     wheel_drive[2] = drive_torque >> 1;
+                    wheel_drive[3] = drive_torque >> 1;
                     break;
                 case 2: /* FWD */
                     /* Original airborne FWD (0x404594-0x4045AE): writes [EBP-0x4] and [EBP+0x8]
@@ -1811,25 +1835,46 @@ void td5_physics_update_player(TD5_Actor *actor)
         if (tire_grip_coeff != 0)
             grip_limit_f = (grip_limit_f * tire_grip_coeff) >> 8;
 
-        /* Pass A — only when slip already meaningful (avoids zero-drive edge) */
+        /* Pass A — runs whenever scf & 1.
+         *
+         * Mirrors orig 0x00404030 pass A which:
+         *   (a) computes slip = |actor->long_speed - max(0, body_vlong)|
+         *   (b) clears scf when slip>>8 < 0x41 (wheelspin recovered)
+         *   (c) UNCONDITIONALLY applies the slip-coupling math: reduces
+         *       grip_limit_f and modulates front_long by `coupled =
+         *       slip*coupling/256` divided by hyp = sqrt(lat²/256² + coupled²).
+         *
+         * Earlier port wrapped (c) in `slip_shift >= 0x41` as a "defensive
+         * guard against zero-drive at rest / grid / countdown" — but that
+         * guard is no longer needed: after the scf source rewrite (Phase 1)
+         * and the wheelspin SET fix (Phase 2), scf is only ever non-zero
+         * during legitimate wheelspin where slip is large by definition.
+         * The `if (slip_shift < 0x41) scf=0` CLEAR below fires before any
+         * subsequent tick can enter pass-A with vanishing slip, so the math
+         * always runs on meaningful values. Restoring orig's unconditional
+         * form makes the slip-circle behavior match in the brief wheelspin
+         * transition ticks. 2026-05-23 follow-up to scf rewrite. */
         if ((actor->surface_contact_flags & 1) && slip_coupling != 0) {
             int32_t body_vlong = (vx * sin_h + vz * cos_h) >> 12;
             int32_t pos_vlong  = (body_vlong < 0) ? 0 : body_vlong;
             int32_t delta      = actor->longitudinal_speed - pos_vlong;
             int32_t delta_abs  = (delta < 0) ? -delta : delta;
             int32_t slip_shift = delta_abs >> 8;
-            if (slip_shift >= 0x41) {
-                int32_t coupled = (slip_shift * slip_coupling) >> 8;
-                int32_t lat     = front_lat_force;
-                int32_t latSh   = lat >> 8;
-                int32_t latMix  = (latSh * lat) >> 8;
-                int32_t hyp_sq  = latMix + coupled * coupled;
-                if (hyp_sq < 0) hyp_sq = 0;
-                int32_t hyp     = td5_isqrt(hyp_sq) + 1;
-                int32_t latSh_a = (latSh < 0) ? -latSh : latSh;
-                grip_limit_f    = (latSh_a * grip_limit_f) / hyp;
-                front_long      = ((front_long / 2) * coupled) / hyp;
+            /* Wheelspin CLEAR [CONFIRMED @ 0x00404030] — engine and ground
+             * speed have re-synced; drop scf so next tick uses UESA. */
+            if (slip_shift < 0x41) {
+                actor->surface_contact_flags = 0;
             }
+            int32_t coupled = (slip_shift * slip_coupling) >> 8;
+            int32_t lat     = front_lat_force;
+            int32_t latSh   = lat >> 8;
+            int32_t latMix  = (latSh * lat) >> 8;
+            int32_t hyp_sq  = latMix + coupled * coupled;
+            if (hyp_sq < 0) hyp_sq = 0;
+            int32_t hyp     = td5_isqrt(hyp_sq) + 1;
+            int32_t latSh_a = (latSh < 0) ? -latSh : latSh;
+            grip_limit_f    = (latSh_a * grip_limit_f) / hyp;
+            front_long      = ((front_long / 2) * coupled) / hyp;
         }
 
         /* Pass B — classical slip-circle clamp */
@@ -1850,6 +1895,9 @@ void td5_physics_update_player(TD5_Actor *actor)
         if (tire_grip_coeff != 0)
             grip_limit_r = (grip_limit_r * tire_grip_coeff) >> 8;
 
+        /* Pass A (rear) — mirrors orig 0x00404030 rear pass A.
+         * Same shape as front pass A above; see that block for the rationale
+         * on running unconditionally once `(scf & 2)` is true. */
         if ((actor->surface_contact_flags & 2) && slip_coupling != 0) {
             int32_t raw_front = (int32_t)(((int64_t)sin_s * vx + (int64_t)cos_s * vz) >> 12);
             int64_t yaw_q12   = (int64_t)sin_sr * front_weight * actor->angular_velocity_yaw;
@@ -1859,18 +1907,19 @@ void td5_physics_update_player(TD5_Actor *actor)
             int32_t delta     = actor->lateral_speed - pos_vlat;
             int32_t delta_abs = (delta < 0) ? -delta : delta;
             int32_t slip_shift = delta_abs >> 8;
-            if (slip_shift >= 0x41) {
-                int32_t coupled = (slip_shift * slip_coupling) >> 8;
-                int32_t lat     = rear_lat_force;
-                int32_t latSh   = lat >> 8;
-                int32_t latMix  = (latSh * lat) >> 8;
-                int32_t hyp_sq  = latMix + coupled * coupled;
-                if (hyp_sq < 0) hyp_sq = 0;
-                int32_t hyp     = td5_isqrt(hyp_sq) + 1;
-                int32_t latSh_a = (latSh < 0) ? -latSh : latSh;
-                grip_limit_r    = (latSh_a * grip_limit_r) / hyp;
-                rear_long       = ((rear_long / 2) * coupled) / hyp;
+            if (slip_shift < 0x41) {
+                actor->surface_contact_flags = 0;
             }
+            int32_t coupled = (slip_shift * slip_coupling) >> 8;
+            int32_t lat     = rear_lat_force;
+            int32_t latSh   = lat >> 8;
+            int32_t latMix  = (latSh * lat) >> 8;
+            int32_t hyp_sq  = latMix + coupled * coupled;
+            if (hyp_sq < 0) hyp_sq = 0;
+            int32_t hyp     = td5_isqrt(hyp_sq) + 1;
+            int32_t latSh_a = (latSh < 0) ? -latSh : latSh;
+            grip_limit_r    = (latSh_a * grip_limit_r) / hyp;
+            rear_long       = ((rear_long / 2) * coupled) / hyp;
         }
 
         int32_t rl16 = rear_lat_force >> 4;
@@ -2184,25 +2233,57 @@ void td5_physics_update_player(TD5_Actor *actor)
     td5_physics_missing_wheel_correction(actor);
 
     /* --- 17a. Wheelspin override [CONFIRMED @ 0x00404E00-0x00404E1C].
-     * Three-condition gate: gear==2, RPM-derived wheelspin exceeds threshold,
-     * and throttle > 0x7F. When all true: surface_contact_flags = tuning[0x76]
-     * (drivetrain type byte) — marks only the driven axle in contact.
-     * uVar12 = (steering_command + sign_round) >> 8 [CONFIRMED @ FUN_00404030
-     * decompilation: *(int*)(short_ptr + 0x186) = byte offset 0x30C =
-     * steering_command; the arithmetic right-shift rounding idiom matches
-     * Ghidra's (x + (x>>31 & 0xFF)) >> 8 pattern]. */
+     *
+     * Three-condition gate: gear==FIRST(2), engine-implied wheel speed
+     * exceeds body forward speed by > 0x12C00, throttle > 0x7F. When all
+     * true: surface_contact_flags = tuning[0x76] (drivetrain layout byte,
+     * 1=RWD/2=FWD/3=AWD). The SET routes the next tick to CRGT (the
+     * "engine governs ground speed" branch) — the orig's launch/burnout
+     * model. Without it, 1st-gear accel from a stop is limited to what the
+     * bicycle/slip-circle force model can deliver, which is sluggish.
+     *
+     * Two bugs in the previous port — both audited from a fresh Ghidra
+     * decomp of 0x00404030 on 2026-05-23:
+     *
+     *   1. The throttle gate read `(int32_t)(uint8_t)encounter_steering_cmd
+     *      > 0x7F`. encounter_steering_cmd is int16_t and normal forward
+     *      throttle is 0x0100 (= 256); the uint8_t cast truncates that to
+     *      the low byte 0x00, which is never > 0x7F. Gate never fired in
+     *      practice — wheelspin SET was unreachable. Orig directly compares
+     *      the signed int16 (`0x7f < (short)cmd`), so 256 > 127 ⇒ true.
+     *
+     *   2. `uVar12` was sourced as `steering_command >> 8`. Ghidra's
+     *      decomp reuses the local name `uVar12` twice in this function:
+     *      first as `steering_command >> 8` near the top, then reassigned
+     *      to `(vx*sin + vz*cos) >> 12` (body-frame forward velocity) just
+     *      before the dispatch around `if (scf != 0)`. The wheelspin SET
+     *      conditional at the bottom uses the LATE one — body_v_long, not
+     *      steering. Confusing the two made wheelspin = engine_implied -
+     *      steering ≈ huge always (steering ~0 at center), so the SET
+     *      fired indiscriminately whenever the throttle gate happened to
+     *      pass. The orig wheelspin = engine_implied - body_v_long, which
+     *      is huge only at launch (engine spinning, body not moving yet)
+     *      and shrinks as the car catches up.
+     *
+     * After the scf-source removal in step 9 of update_player, scf is
+     * permanently 0 going INTO this block (until this SET fires), so
+     * actor->longitudinal_speed equals body_v_long from the scf==0 dispatch
+     * branch — we use it directly as the orig's uVar12 stand-in. */
     {
         int32_t gear_ratio = (int32_t)PHYS_S(actor, 0x32);
         if (gear_ratio != 0) {
             int32_t rpm_norm = (((actor->engine_speed_accum - 400) * 0x1000) / 0x2d) / gear_ratio;
-            int32_t steer    = actor->steering_command;
-            int32_t uVar12   = (steer + (steer >> 31 & 0xff)) >> 8;
-            int32_t wheelspin = rpm_norm * 0x100 - uVar12;
+            int32_t body_vlong_q8 = actor->longitudinal_speed;
+            int32_t wheelspin = rpm_norm * 0x100 - body_vlong_q8;
             if (actor->current_gear == 2 &&
                 wheelspin > 0x12C00 &&
-                (int32_t)(uint8_t)actor->encounter_steering_cmd > 0x7F) {
-                TD5_LOG_I(LOG_TAG, "wheelspin: slot=%d rpm_norm=%d wsp=%d scf=%d->tuning[0x76]",
-                          actor->slot_index, rpm_norm, wheelspin, actor->surface_contact_flags);
+                (int32_t)actor->encounter_steering_cmd > 0x7F) {
+                TD5_LOG_I(LOG_TAG,
+                    "wheelspin SET: slot=%d rpm_norm=%d wsp=%d vlong=%d thr=%d scf=%d->%d",
+                    actor->slot_index, rpm_norm, wheelspin, body_vlong_q8,
+                    (int)actor->encounter_steering_cmd,
+                    actor->surface_contact_flags,
+                    (int)(uint8_t)PHYS_S(actor, 0x76));
                 actor->surface_contact_flags = (uint8_t)PHYS_S(actor, 0x76);
             }
         }

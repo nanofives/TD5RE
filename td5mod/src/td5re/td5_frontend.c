@@ -289,6 +289,16 @@ static int  s_results_panel_slide_x;
 static int  s_results_panel_slide_dir;   /* +1 = right (next), -1 = left (prev) */
 static int  s_results_skip_display;     /* DAT_00497a74 */
 
+/* View Race Data sentinel: when the user clicks "View Race Data" in state
+ * 0x0F, we re-enter screen 24 via td5_frontend_set_screen — but state 0's
+ * cup-fail early-route and state 3's table-skip gate both check
+ * td5_game_slot_is_finished(0) / companion_2, which can be false if the
+ * player DNF'd or quit early. Orig relied on actor.slot._808_4_ to detect
+ * "race data exists", a field the port doesn't materialize. This flag is
+ * set in the View Race Data dispatch and cleared after the state-3 gate
+ * passes, forcing the table to display even on a partial race. */
+static int  s_results_view_data_request;
+
 /* Race snapshot for re-race */
 static int  s_snap_car, s_snap_paint, s_snap_trans, s_snap_config;
 
@@ -4642,28 +4652,39 @@ static void frontend_render_race_results_overlay(float sx, float sy) {
      * (slide-in) and persists through states 4-0xB plus 0xD-0x14. */
     if (s_inner_state < 3 || s_inner_state == 0xC) return;
 
-    /* Panel 408x392 centered in 640x480 canvas space */
-    const float canvas_w = 640.0f, canvas_h = 480.0f;
+    /* Panel geometry — byte-faithful to orig.
+     * [CONFIRMED @ DrawRaceDataSummaryPanel 0x00421e90 + RunRaceResultsScreen
+     *  case 0 @ 0x00422480]
+     *   CreateTrackedFrontendSurface(0x198, 0x188)  → 408 × 392
+     *   QueueFrontendOverlayRect(uVar3 - 0xa8, iVar6, ..., 0x198, 0x188, ...)
+     *   uVar3 = g_frontendCanvasW >> 1 = 320 (640-wide canvas)
+     *   iVar6 = (g_frontendCanvasH >> 1) - 0x9f = 240 - 159 = 81
+     * → panel anchored at (152, 81), NOT centered. Orig leaves ~80px right
+     * margin and ~152px left margin (the difference accommodates the
+     * "RACE RESULTS" header banner at x=120 which sits left-of-center).
+     *
+     * P7 PANEL fix: apply per-state slide offset accumulated by states
+     * 7/8/9/10 (L/R browse) and 0xB (exit). Zero during interactive
+     * (state 6) and resting display (states 4/5). */
     const float panel_w = 408.0f, panel_h = 392.0f;
-    /* P7 PANEL fix: apply per-state slide offset accumulated by states
-     * 7/8/9/10 (L/R browse) and 0xB (exit). Zero during interactive (state 6)
-     * and resting display (states 4/5). */
-    float panel_x = ((canvas_w - panel_w) * 0.5f + (float)s_results_panel_slide_x) * sx;
-    float panel_y = (canvas_h - panel_h) * 0.5f * sy;
+    float panel_x = (152.0f + (float)s_results_panel_slide_x) * sx;
+    float panel_y = 81.0f * sy;
     float pw = panel_w * sx;
     float ph = panel_h * sy;
-
-    /* Original screen 24 has no panel body / border / inner title — the
-     * frontend's standard banner already labels the screen. The previous
-     * port-only decorations (gold-bordered translucent box + duplicated
-     * "RACE RESULTS" header) were a visual stand-in and didn't match the
-     * original capture. Keep only the results table below. */
-    (void)pw; (void)ph; (void)panel_x; (void)panel_y;
 
     /* During state 0xD+ the panel is reused as the main-menu backdrop,
      * so hide the results table (buttons are drawn on top by the
      * generic button loop in td5_frontend_render_ui_rects). */
     if (s_inner_state >= 0x0D) return;
+
+    /* No panel body draw — orig blits g_lobbyErrorDialogSurface with DDraw
+     * color-key transparency on color 0 (black), so the cleared surface
+     * itself is INVISIBLE in the composite; only the text drawn into it
+     * is shown. Drawing an opaque black quad here would cover the
+     * MainMenu.tga backdrop, which is not what orig does.
+     * [CONFIRMED @ 0x00422480 case 4-6 QueueFrontendOverlayRect(...,0,...)
+     *  — the trailing 0 flag selects color-key blit mode]. */
+    (void)pw; (void)ph;
 
     /* --- P4 LANG fix — Single-slot stat sheet (faithful) ---
      * [CONFIRMED @ 0x00421e90 DrawRaceDataSummaryPanel + 0x00422480 case 0]
@@ -4761,38 +4782,34 @@ static void frontend_render_race_results_overlay(float sx, float sy) {
     else if (gt >= 2 && gt <= 5) rows = k_rows_cup_2_5;
     else                       rows = k_rows_single;
 
-    /* Geometry: panel-local x=12 (left col label) + x=280 (right col value).
-     * Base Y depends on game_type — preserved from original ladder. */
-    float text_scale = 0.75f;
-    float pad_x      = 24.0f;
-    float left_col   = panel_x + pad_x * sx;
+    /* Column anchors — byte-faithful to orig.
+     * [CONFIRMED @ DrawRaceDataSummaryPanel 0x00421e90]:
+     *   BltColorFillToSurface(0, 0x118, 0, 0x80, 0x188, surface)
+     *     clears the value column at panel-relative x=0x118 (280), w=0x80 (128)
+     *   Labels are drawn at panel-relative x=0 (flush left).
+     * Row stride 0x18 = 24 px matches one font cell. Orig's BodyText atlas
+     * has padding baked into each 24×24 cell so adjacent rows don't visually
+     * touch — port reads from the same atlas at scale 1.0 to match. */
+    float text_scale = 1.0f;
+    float left_col   = panel_x;
     float right_col  = panel_x + 280.0f * sx;
 
     int kph = td5_save_get_speed_units();
     int unit_kph = (kph != 0);
 
-    /* Driver / car header band (port-only addition, x-stretch full width). */
-    {
-        char hdr_buf[80];
-        const char *driver_name = (focus_slot == 0) ? "PLAYER" : "OPPONENT";
-        if (focus_slot != 0) {
-            /* Use slot index for opponent label when more than 1 AI exists. */
-            static char opp_buf[16];
-            snprintf(opp_buf, sizeof(opp_buf), "CPU %d", focus_slot);
-            driver_name = opp_buf;
-        }
-        int car_idx = (focus_slot == 0) ? s_selected_car : g_td5.ai_car_indices[focus_slot];
-        if (car_idx < 0 || car_idx > 36) car_idx = 0;
-        const char *cname = frontend_get_car_display_name(car_idx);
-        snprintf(hdr_buf, sizeof(hdr_buf), "%s  -  %s", driver_name,
-                 cname ? cname : "");
-        uint32_t hdr_color = (focus_slot == 0) ? 0xFFFFCC44 : 0xFFFFFFFF;
-        fe_draw_text(left_col, panel_y + 32.0f * sy, hdr_buf, hdr_color,
-                     sx * text_scale, sy * text_scale);
-    }
-
-    /* Stat list */
-    float row_block_y = panel_y + 84.0f * sy;
+    /* Stat list — per-game-type starting Y.
+     * [CONFIRMED @ RunRaceResultsScreen case 0 @ 0x00422480]:
+     *   Cup races (gt 1..6): label loop starts at uVar3 = 0x30
+     *   Cop chase  (gt 8)  : label loop starts at uVar3 = 0x48
+     *   Single/TT/Drag     : label loop starts at uVar3 = 0x60
+     * Step is always 0x18 (24 px) and upper bound varies (0xa8 / 0xf0)
+     * per game type — the port's k_rows_* tables already encode the
+     * row count, so only the start Y needs to vary. */
+    float row_start_y_px;
+    if (gt >= 1 && gt <= 6)       row_start_y_px = (float)0x30;  /* 48 */
+    else if (gt == 8)             row_start_y_px = (float)0x48;  /* 72 */
+    else                          row_start_y_px = (float)0x60;  /* 96 */
+    float row_block_y = panel_y + row_start_y_px * sy;
     float row_step    = 24.0f * sy;
     uint32_t lbl_color = 0xFFCCCCCC;
     uint32_t val_color = 0xFFFFFFFF;
@@ -4887,16 +4904,6 @@ static void frontend_render_race_results_overlay(float sx, float sy) {
         fe_draw_text(right_col, y, val_buf, val_color,
                      sx * text_scale, sy * text_scale);
         row_idx++;
-    }
-
-    /* Footer hint during interactive state 6 */
-    if (s_inner_state == 6) {
-        const char *hint = (gt == 7 || gt == 9)
-                             ? "Press OK to continue"
-                             : "L/R to browse  -  OK to continue";
-        float hw = fe_measure_text(hint, sx * 0.7f);
-        fe_draw_text(panel_x + (pw - hw) * 0.5f, panel_y + ph - 28.0f * sy,
-                     hint, 0xFFAAAAAA, sx * 0.7f, sy * 0.7f);
     }
 }
 
@@ -6283,13 +6290,17 @@ static void Screen_MainMenu(void) {
         s_inner_state = 9;
         break;
 
-    case 9: /* Slide-out animation: buttons scatter, ~500ms */
+    case 9: /* Slide-out animation: buttons scatter, ~500ms.
+             *
+             * [ARCH-DIVERGENCE] Orig 0x004155DE checks the per-player input
+             * source (joystick index 7 = none) before navigating, and routes
+             * to states 0x14-0x17 (controller-required dialog → ControlOptions)
+             * when a joystick is configured but missing. The port is
+             * keyboard-first — `td5_plat_input_get_keyboard()` is always
+             * available — so a missing joystick can never block navigation.
+             * The validation gate and its dialog states are intentionally
+             * dropped; replace with a direct screen transition. */
         if (frontend_update_timed_animation(16, 267) >= 1.0f) {
-            /* Controller validation: check joystick assignment */
-            /* 1P modes (context 1,2,4): check P1 input source */
-            /* 2P mode (context 3): also check P2 input source */
-            /* If joystick index == 7 (none), go to state 0x14 */
-            /* Otherwise, navigate to target screen */
             td5_frontend_set_screen((TD5_ScreenIndex)s_return_screen);
         }
         break;
@@ -6304,26 +6315,6 @@ static void Screen_MainMenu(void) {
         if (frontend_update_timed_animation(16, 267) >= 1.0f) {
             frontend_post_quit();
         }
-        break;
-
-    /* States 13-19: reserved/unused in normal flow */
-    case 13: case 14: case 15: case 16: case 17: case 18: case 19:
-        break;
-
-    case 0x14: /* "Must select controller" error */
-        TD5_LOG_W(LOG_TAG, "MainMenu: controller not assigned");
-        /* Create error message surface */
-        s_inner_state = 0x15;
-        break;
-
-    case 0x15: /* Controller-required message display */
-    case 0x16:
-        frontend_present_buffer();
-        s_inner_state++;
-        break;
-
-    case 0x17: /* Cleanup, redirect to controller options (screen 0xE) */
-        td5_frontend_set_screen(TD5_SCREEN_CONTROL_OPTIONS);
         break;
     }
 }
@@ -6359,7 +6350,7 @@ static void Screen_MainMenu(void) {
 
 static void Screen_RaceTypeCategory(void) {
     switch (s_inner_state) {
-    case 0: /* Init: create 7 buttons, load RaceMenu.tga, create description surface */
+    case 0: /* Init: load MainMenu.tga, create 7 race-type buttons */
         frontend_init_return_screen(TD5_SCREEN_RACE_TYPE_MENU);
         TD5_LOG_D(LOG_TAG, "RaceTypeCategory: state 0 - init");
         /* [DA-T4 fix 2026-05-22] Clear wanted-mode flag — orig 0x004168D7 sets
@@ -6371,7 +6362,12 @@ static void Screen_RaceTypeCategory(void) {
         frontend_load_tga("Front_End/MainMenu.tga", "Front_End/FrontEnd.zip"); /* original 0x4168B0: loads MainMenu.tga, not RaceMenu.tga */
         s_anim_complete = 0;
 
-        /* Create 0x110 x 0xB4 description preview surface */
+        /* [ARCH-DIVERGENCE] Orig allocated a 0x110x0xB4 DDraw surface here for
+         * the description preview (`g_lobbyErrorDialogSurface` @ 0x004168D7) and
+         * blitted text into it from state 4 on hover. Port renders the preview
+         * directly per-frame via `frontend_render_race_type_description`
+         * (td5_frontend.c:4021, dispatched at :5362), so no intermediate
+         * surface is needed and the old state-4 update step is unreachable. */
         /* Create 7 buttons for race types */
         frontend_create_button("Single Race", -0xE0, 0, 0xE0, 0x20);
         frontend_create_button("Cup Race",    -0xE0, 0, 0xE0, 0x20);
@@ -6404,7 +6400,9 @@ static void Screen_RaceTypeCategory(void) {
         break;
 
     case 3: /* Main interaction loop */
-        /* Render buttons + description preview */
+        /* Buttons render via the standard frontend pass; description preview
+         * is driven by s_selected_button (hover index) per-frame — no explicit
+         * "preview update" state needed (see ARCH-DIVERGENCE note in state 0). */
         if (s_input_ready && s_button_index >= 0) {
             switch (s_button_index) {
             case 0: /* Single Race */
@@ -6456,34 +6454,6 @@ static void Screen_RaceTypeCategory(void) {
                 break;
             }
         }
-        break;
-
-    case 4: /* Description preview update: redraw SNK_RaceTypeText[gameType]
-             *
-             * [DA-T4 D.1 audit 2026-05-22 — pending implementation]
-             * Orig 0x00416EBD-0x00416F0E:
-             *   - BltColorFillToSurface(0,0,0,0x110,0xB4, g_lobbyErrorDialogSurface)
-             *   - pbVar6 = SNK_RaceTypeText[selected_game_type * 4]
-             *   - MeasureOrCenterFrontendLocalizedString(pbVar6, 0, 0x110)
-             *     → DrawFrontendLocalizedStringToSurface(text, x, 0, surface)
-             *   - Walk null-terminator, then secondary body block at y=0x20,
-             *     each line stepped by 0xc, until null:
-             *       MeasureOrCenterFrontendString(line, 0, 0x110)
-             *       DrawFrontendSmallFontStringToSurface(line, x, y, surface)
-             *   - State transitions back to 3 (interactive loop)
-             *
-             * Port-side requirements (not yet wired):
-             *   - SNK_RaceTypeText localized table needs to exist (Language.dll
-             *     surface already imported per O1-B); confirm name in port.
-             *   - Description surface (orig g_lobbyErrorDialogSurface @ 0x110x0xB4)
-             *     needs to be created in state 0 init.
-             *   - frontend_draw_localized_string_to_surface + small-font variant
-             *     need to exist (they may already; check fe_draw_text family).
-             *
-             * Scope: ~30 lines in case 4 + ~20 lines in state 0 (surface alloc)
-             * + matching changes in state 5/A/B to release. Defer until
-             * frontend surface-lifecycle question (DA-T4 D.2) is resolved. */
-        s_inner_state = 3;
         break;
 
     case 5: /* Slide-out prep: buttons scatter */
@@ -6592,10 +6562,6 @@ static void Screen_RaceTypeCategory(void) {
     case 11: /* Back to top-level: rebuild top buttons */
         frontend_reset_buttons();
         s_inner_state = 0; /* re-init top menu */
-        break;
-
-    case 12: /* Cup description preview update */
-        s_inner_state = 9;
         break;
 
     /* --- Return transition --- */
@@ -6792,11 +6758,14 @@ static void Screen_ConnectionBrowser(void) {
         }
         break;
 
-    case 6: /* Highlight browse */
-        frontend_present_buffer();
-        s_inner_state = 5;
-        break;
-    case 7: /* Scroll */
+    /* [ARCH-DIVERGENCE: DXPTYPE] Cases 6/7 were the highlight-browse and
+     * scroll sub-states of the orig DirectPlay session-browser list. The
+     * port's connection browser is a static 2-button list (OK/Back) with no
+     * enumerable peers, so neither sub-state is reachable; they exist as
+     * no-op fall-throughs to state 5 so any stale orig-derived state value
+     * still returns to interaction safely. */
+    case 6:
+    case 7:
         s_inner_state = 5;
         break;
 
@@ -6925,8 +6894,14 @@ static void Screen_CreateSession(void) {
         s_inner_state = 4;
         break;
 
-    case 4: /* Session setup -- further states for host/client paths */
-    case 5: case 6: case 7: case 8: case 9:
+    /* [ARCH-DIVERGENCE: DXPTYPE] Orig states 4-15 ran the full DirectPlay
+     * host/client handshake (provider negotiation, session create/join,
+     * player-slot assignment). Port's DXPTYPE wire format is incompatible
+     * with TD5_d3d.exe peers (see file-footer manifest @ ~:10301), so the
+     * handshake is unreachable end-to-end. All 12 states collapse to a
+     * single transition into the lobby; s_network_active gates the lobby's
+     * own behavior. */
+    case 4: case 5: case 6: case 7: case 8: case 9:
     case 10: case 11: case 12: case 13: case 14: case 15:
         s_network_active = (s_return_screen == TD5_SCREEN_NETWORK_LOBBY);
         td5_frontend_set_screen((TD5_ScreenIndex)s_return_screen);
@@ -6941,6 +6916,13 @@ static void Screen_CreateSession(void) {
 /* ========================================================================
  * [11] RunFrontendNetworkLobby (0x41C330) -- 18-state multiplayer lobby
  * States: 18 (0x00 - 0x11)
+ *
+ * [ARCH-DIVERGENCE: DXPTYPE] The lobby's network paths (DXPCHAT submit,
+ * LOBBY_KICK/REQUEST_CONFIG/SETTINGS broadcast, DXPSTART rendezvous) all
+ * use the DXPTYPE wire format that's incompatible with TD5_d3d.exe peers
+ * per the file-footer manifest. The full 18-state FSM is ported for code
+ * structural fidelity but cannot complete an actual session against orig
+ * binaries. Reachable from the menu; not field-tested end-to-end.
  * ======================================================================== */
 
 static void Screen_NetworkLobby(void) {
@@ -8592,10 +8574,6 @@ static void Screen_CarSelection(void) {
         }
         break;
 
-    case 9: /* Unused */
-        s_inner_state = 7;
-        break;
-
     case 10: /* Clear car preview area, prep for new image load */
         s_car_spec_car = -1; /* invalidate spec cache on car/paint change */
         s_anim_complete = 1;
@@ -8627,10 +8605,6 @@ static void Screen_CarSelection(void) {
         s_inner_state = 14;
         break;
 
-    case 13:
-        s_inner_state = 14;
-        break;
-
     case 14: /* Car preview slide-in from right, 25 frames (~833ms @30fps) — 0x40DFC0 state 14 */
         if (frontend_update_timed_animation(0x19, 833) >= 1.0f) {
             /* Original 0x40DFC0 case 0xE @ 0x0040EE3F plays Play(4) once when
@@ -8648,11 +8622,6 @@ static void Screen_CarSelection(void) {
         }
         break;
 
-    case 16: /* Unused (was "return from config") — fall through to 7 */
-        s_car_preview_overlay = 2;
-        s_inner_state = 7;
-        break;
-
     case 17: /* Info sub-screen [0x40DFC0 state 0x11]: draws 10 strings from
               * SNK_Info_Values_exref (Language.dll export, 10 × char* pointers,
               * centered via MeasureOrCenterFrontendString [CONFIRMED @ 0x0040F184]).
@@ -8662,10 +8631,6 @@ static void Screen_CarSelection(void) {
 
     case 18: /* Return from info */
         s_car_preview_overlay = 2;
-        s_inner_state = 7;
-        break;
-
-    case 19: /* Unused */
         s_inner_state = 7;
         break;
 
@@ -9214,7 +9179,8 @@ static void Screen_RaceResults(void) {
          * main menu. The port reaches TD5_SCREEN_CUP_FAILED only via the
          * explicit Quit button at case 0x10 — which doesn't fire when the
          * cup-failed condition is detected automatically. */
-        if (!s_network_active &&
+        if (!s_results_view_data_request &&
+            !s_network_active &&
             !s_results_skip_display &&
             s_selected_game_type >= 1 && s_selected_game_type < 7 &&
             (td5_game_get_slot_companion_2(0) == 2 ||
@@ -9284,9 +9250,10 @@ static void Screen_RaceResults(void) {
              * no actor data has been written, so the table sub-flow is
              * skipped. After a real race the finish flag is set and the
              * gate falls through, so the table animates in normally. */
-        if (s_results_skip_display ||
-            td5_game_get_slot_companion_2(0) == 2 ||
-            !td5_game_slot_is_finished(0)) {
+        if (!s_results_view_data_request &&
+            (s_results_skip_display ||
+             td5_game_get_slot_companion_2(0) == 2 ||
+             !td5_game_slot_is_finished(0))) {
             TD5_LOG_I(LOG_TAG,
                       "RaceResults: state 3 early-exit gate fired "
                       "(skip=%d companion_2=%d finished=%d) -> 0xC",
@@ -9304,6 +9271,12 @@ static void Screen_RaceResults(void) {
              * the AdvanceFrontendTickAndCheckReady ready-branch immediately
              * before g_frontendInnerState++. */
             frontend_play_sfx(4);
+            /* Sentinel served its purpose — clear now that state 3's full
+             * 9-tick animation has run. Clearing earlier (e.g. immediately
+             * after the gate check) would let the gate fire on tick 2 since
+             * !finished is still true; the flag must survive across the
+             * entire state-3 anim window. */
+            s_results_view_data_request = 0;
             s_inner_state = 4;
         }
         break;
@@ -9498,38 +9471,38 @@ static void Screen_RaceResults(void) {
             const int RR_Y3 = FE_CENTER_Y + 0x01;     /* 241 */
             const int RR_Y4 = FE_CENTER_Y + 0x31;     /* 289 */
 
-            if (s_selected_game_type < 1 || s_selected_game_type == 7 || s_selected_game_type == 9) {
-                /* Quick Race / Time Trial / Drag */
-                frontend_create_button("Race Again",      RR_BX, RR_Y0, RR_BW, RR_BH);
-                frontend_create_button("View Replay",     RR_BX, RR_Y1, RR_BW, RR_BH);
-                frontend_create_button("View Race Data",  RR_BX, RR_Y2, RR_BW, RR_BH);
-                frontend_create_button("Select New Car",  RR_BX, RR_Y3, RR_BW, RR_BH);
-                frontend_create_button("Quit",            RR_BX, RR_Y4, RR_BW, RR_BH);
-            } else {
-                /* Cup Race (types 1-6) */
-                int next_valid = ConfigureGameTypeFlags();
-                frontend_create_button("Next Cup Race",    RR_BX, RR_Y0, RR_BW, RR_BH);
-                frontend_create_button("View Replay",      RR_BX, RR_Y1, RR_BW, RR_BH);
-                frontend_create_button("View Race Data",   RR_BX, RR_Y2, RR_BW, RR_BH);
-                frontend_create_button("Save Race Status", RR_BX, RR_Y3, RR_BW, RR_BH);
+            /* Cup races are game_type 1..6; types 0, 7, 9 are single-race
+             * variants (Quick Race / Time Trial / Drag). Slot 1 (View Replay)
+             * and slot 2 (View Race Data) are identical across both branches;
+             * only slots 0/3/4 differ. ConfigureGameTypeFlags has runtime
+             * side effects (mode globals) so it stays gated to cup races. */
+            const int is_cup = (s_selected_game_type >= 1 &&
+                                s_selected_game_type != 7 &&
+                                s_selected_game_type != 9);
+            const int next_valid = is_cup ? ConfigureGameTypeFlags() : 1;
+            const char *btn0 = is_cup ? "Next Cup Race"    : "Race Again";
+            const char *btn3 = is_cup ? "Save Race Status" : "Select New Car";
+            /* Cup-complete path @ 0x00422FD8: slot 4 swaps Quit→OK and the
+             * Quit dispatch in state 0x10 routes to CUP_WON/CUP_FAILED. */
+            const char *btn4 = (is_cup && !next_valid) ? "OK" : "Quit";
 
-                if (!next_valid) {
-                    /* Cup-complete path @ 0x00422FD8: last button is "OK",
-                     * g_frontendButtonIndex=1, s_results_cup_complete=1. */
-                    frontend_create_button("OK", RR_BX, RR_Y4, RR_BW, RR_BH);
-                    s_results_cup_complete = 1;
-                } else {
-                    frontend_create_button("Quit", RR_BX, RR_Y4, RR_BW, RR_BH);
-                }
+            frontend_create_button(btn0,              RR_BX, RR_Y0, RR_BW, RR_BH);
+            frontend_create_button("View Replay",     RR_BX, RR_Y1, RR_BW, RR_BH);
+            frontend_create_button("View Race Data",  RR_BX, RR_Y2, RR_BW, RR_BH);
+            frontend_create_button(btn3,              RR_BX, RR_Y3, RR_BW, RR_BH);
+            frontend_create_button(btn4,              RR_BX, RR_Y4, RR_BW, RR_BH);
 
-                /* Masters (type 5): special progression (PRE-EXISTING branch
-                 * reused verbatim; flag inversion from original is
-                 * tracked in prior memory and not touched by this fix) */
-                if (s_selected_game_type == 5 && !s_results_rerace_flag &&
-                    s_race_within_series != 9) {
-                    s_inner_state = 0x15;
-                    return;
-                }
+            if (is_cup && !next_valid) {
+                s_results_cup_complete = 1;
+            }
+
+            /* Masters (type 5): special progression (PRE-EXISTING branch
+             * reused verbatim; flag inversion from original is tracked in
+             * prior memory and not touched by this fix) */
+            if (is_cup && s_selected_game_type == 5 && !s_results_rerace_flag &&
+                s_race_within_series != 9) {
+                s_inner_state = 0x15;
+                return;
             }
         }
 
@@ -9608,6 +9581,10 @@ static void Screen_RaceResults(void) {
                           td5_game_get_slot_companion_2(0),
                           td5_game_slot_is_finished(0),
                           s_results_skip_display);
+                /* Bypass state 0 cup-fail and state 3 table-skip gates so the
+                 * table always shows when the user explicitly asks for it
+                 * (even after a DNF / early quit where slot_is_finished == 0). */
+                s_results_view_data_request = 1;
                 td5_frontend_set_screen(TD5_SCREEN_RACE_RESULTS);
                 return;
 
@@ -10037,7 +10014,13 @@ static void Screen_CupWon(void) {
         /* Apply cup unlock progression and save to Config.td5.
          * Original AwardCupCompletionUnlocks checks companion_state_2 == 1 (player
          * finished, not DNF) before proceeding. [CONFIRMED @ 0x00421da0]
-         * Store car/track counts separately for the overlay renderer.
+         *
+         * Lifetime contract: s_cup_won_car_count / s_cup_won_track_count are
+         * latched HERE in state 0 (or left at zero on DNF) and read by
+         * frontend_render_cup_won_overlay during states 4-5 (slide-in + wait).
+         * They persist via static-zero-init until the next Screen_CupWon
+         * entry; td5_frontend_set_screen(MAIN_MENU) in state 5 leaves them
+         * stale, but no other screen reads them so the staleness is inert.
          * [CONFIRMED @ 0x00423A80]: DAT_00494bb0 = car count, DAT_00494bb4 = track count. */
         s_cup_won_car_count   = 0;
         s_cup_won_track_count = 0;
@@ -10134,6 +10117,13 @@ static void Screen_StartupInit(void) {
  * [29] ScreenSessionLockedDialog (0x41D630)
  * States: 6. "Sorry, Session Locked" network error.
  * Identical structure to CupFailed.
+ *
+ * [ARCH-DIVERGENCE: DXPTYPE] Entered only via the kicked-from-lobby path
+ * which itself is gated on the DXPTYPE protocol being live. In the port,
+ * s_kicked_flag is never set by a remote peer (no compatible peer exists);
+ * the dialog is reachable only by manually setting the flag for testing.
+ * Kept faithful to orig FSM so the path lights up if the network ever
+ * works against another td5re.exe build that adopts the same protocol.
  * ======================================================================== */
 
 static void Screen_SessionLocked(void) {

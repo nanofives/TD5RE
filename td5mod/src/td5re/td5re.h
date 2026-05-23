@@ -210,6 +210,12 @@ typedef struct TD5_GlobalState {
         int  difficulty;
         int  dynamics;
         int  collisions;
+        /* AutoGearbox: 1 = automatic transmission (default; gear up/down keys
+         * ignored), 0 = manual. Drives input bit 28 → actor+0x378 which orig
+         * UpdatePlayerVehicleControlState @ 0x00402E60 gates the gear-shift
+         * block on. The orig defaults to auto; in port the menu toggle is
+         * not wired, so this INI key is the only way to switch to manual. */
+        int  auto_gearbox;
         /* Defaults */
         int  default_car;
         int  default_track;

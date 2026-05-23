@@ -192,6 +192,20 @@ static const short s_splineTemplates[6][8] = {
     /* type 5 */ { -1, 0,   0, 0,   10,  4,   11,  4 },
 };
 
+/* Mirrors BindTrackStripRuntimePointers (0x444070): publishes the strip-span
+ * and vertex-pool base addresses so trackside-camera modes (case 0 static FOV,
+ * case 3 static, case 6 spline; UpdateStaticTracksideCamera / SelectTrackside-
+ * CameraProfile) can index them. Without this the case-0 path NULL-derefs
+ * (movzwl 0x4(%edx),%eax with edx=0) the first time the post-race or replay
+ * cinematic switches to trackside view. Stored as integer so the existing
+ * `base + idx*0x18` arithmetic in the call sites is unchanged. */
+void td5_camera_bind_track_geometry(const void *span_base,
+                                    const void *vertex_base)
+{
+    g_spanTable   = (int)(intptr_t)span_base;
+    g_vertexTable = (int)(intptr_t)vertex_base;
+}
+
 /* ========================================================================
  * 0x42CE50 -- SetCameraWorldPosition
  *
