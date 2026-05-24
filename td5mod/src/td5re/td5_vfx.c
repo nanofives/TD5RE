@@ -808,10 +808,28 @@ void td5_vfx_draw_particles(int view_index) {
         td5_plat_render_get_texture_dims((int)sq->texture_page, &tw, &th);
         float inv_tw = 1.0f / (float)tw;
         float inv_th = 1.0f / (float)th;
-        float nu0 = sq->tex_u0 * inv_tw;
-        float nv0 = sq->tex_v0 * inv_th;
-        float nu1 = sq->tex_u1 * inv_tw;
-        float nv1 = sq->tex_v1 * inv_th;
+
+        /* Smoke (type 0): re-index UVs per-frame from s_smoke_variant_uv,
+         * mirroring orig render callback LAB_004297D0 which reads the variant
+         * table at 0x004AABB8 every frame indexed by (phase >> 2). Spawn-time
+         * UV bake at vfx_spawn_smoke_at_position is now unused for smoke.
+         * Port has 4 variants vs orig's 8 — animates over 16 ticks instead of
+         * orig's 32-tick cycle; table expansion is a separate follow-up. */
+        float tu0 = sq->tex_u0, tv0 = sq->tex_v0;
+        float tu1 = sq->tex_u1, tv1 = sq->tex_v1;
+        if (slot[PSLOT_TYPE] == 0) {
+            int v_idx = (slot[PSLOT_PHASE] >> 2) & 3;
+            float su0 = s_smoke_variant_uv[v_idx][0];
+            float sv0 = s_smoke_variant_uv[v_idx][1];
+            float sw  = s_smoke_variant_uv[v_idx][2];
+            float sh  = s_smoke_variant_uv[v_idx][3];
+            tu0 = su0;       tv0 = sv0;
+            tu1 = su0 + sw;  tv1 = sv0 + sh;
+        }
+        float nu0 = tu0 * inv_tw;
+        float nv0 = tv0 * inv_th;
+        float nu1 = tu1 * inv_tw;
+        float nv1 = tv1 * inv_th;
 
         /* Rewrite the 4 corners: v0=TL, v1=TR, v2=BR, v3=BL */
         sq->geometry_ptr = 0;
