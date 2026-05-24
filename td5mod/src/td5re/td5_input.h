@@ -213,6 +213,29 @@ void td5_input_reset_accumulators(void);
 void td5_input_reset_buffers(void);
 
 /* ========================================================================
+ * Public API -- 2P Split-Screen Steering Weight Balance
+ *
+ * Mirrors orig UpdatePlayerSteeringWeightBalance @ 0x004036b0
+ * (Tier 4 port 2026-05-24). INERT in port until 2P-split input is wired:
+ * the input scratch words feeding _set_player_steering_bias_input are not
+ * currently driven from any source, and bit 0x200 of the player control
+ * bits (the orig consumer) is not currently emitted by the port's
+ * td5_input_update_player_control.
+ * ======================================================================== */
+
+/** Recompute per-player steering bias weights from the 2P input scratch. */
+void    td5_input_update_player_steering_weight_balance(void);
+
+/** Read current 16-bit steering bias weight (default 0x100 = neutral). */
+int16_t td5_input_get_player_steering_bias(int player);
+
+/** Set the 16-bit per-player input source word that feeds the weight calc. */
+void    td5_input_set_player_steering_bias_input(int player, int16_t value);
+
+/** Steering bias maximum swing (orig DAT_0048301c g_steeringBiasMaxSwing). */
+extern int32_t g_td5_steering_bias_max_swing;
+
+/* ========================================================================
  * Public API -- Control State Queries
  * ======================================================================== */
 

@@ -3042,12 +3042,17 @@ void td5_asset_free(void *ptr)
  *     query has no equivalent and is folded away at every call site.
  *   0x0040BAE0  PreloadLevelTexturePages  [ARCH-DIVERGENCE: on-demand texture streaming removed; L5 sweep 2026-05-21]
  *     Ghidra-verified 0x0040BAE0: orig calls AdvanceTextureStreamingScheduler
- *     for each level page when the texture-cache has capacity headroom
- *     (DAT_0048DC40[7] < DAT_0048DC40[4]) and marks per-page residency
- *     flags. Port loads all level textures upfront in
+ *     (0x0040B830) for each level page when the texture-cache has capacity
+ *     headroom (DAT_0048DC40[7] < DAT_0048DC40[4]) and marks per-page
+ *     residency flags. Port loads all level textures upfront in
  *     td5_asset_load_track_texture_set (no streaming scheduler -- a
  *     deliberate simplification under the D3D11 backend), so the
  *     scheduler-advance loop has no equivalent.
+ *     [2026-05-24 re-audit] The bind-side LRU equivalent lives in
+ *     td5_render_bind_texture_page (td5_render.c:2808) -- 600 cache slots
+ *     vs orig's 64, so eviction rarely fires and pop-in risk is lower than
+ *     orig. Verdict: CONFIRMED_D3D11_BACKEND, no port needed. See
+ *     re/analysis/advance_texture_streaming_scheduler_reaudit_2026-05-24.md.
  *   0x00412030  LoadFrontendTgaSurfaceFromArchive  [ARCH-DIVERGENCE: TGA/DDraw -> PNG/D3D11; L5 sweep 2026-05-21]
  *     Ghidra-verified 0x00412030: orig opens a frontend TGA from an
  *     archive via OpenArchiveFileForRead, allocates a 0x1d4c00-byte

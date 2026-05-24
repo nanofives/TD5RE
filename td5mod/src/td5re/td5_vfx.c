@@ -2726,6 +2726,229 @@ void td5_vfx_spawn_smoke(TD5_Actor *actor) {
     vfx_spawn_smoke_at_position(actor, mid_x, mid_y, mid_z, 0, s_current_view_index);
 }
 
+/**
+ * SpawnVehicleSmokePuffAtPoint (0x00429FD0)
+ *
+ * Low-level "explicit point" smoke spawn (third distinct smoke variant after
+ * 0x00429A30 SpawnVehicleSmokeVariant and 0x0042A290
+ * SpawnVehicleSmokePuffFromHardpoint). Caller supplies the world position
+ * directly; the size/alpha animation pair is unique to this variant.
+ *
+ * [CONFIRMED @ 0x00429FD0; TIER 3 port 2026-05-24]
+ *   Byte-faithful field reconstruction:
+ *     - Pool slot scan: 100 slots/view starting at &g_raceParticlePool[view*100]
+ *     - Sprite-batch reservation: 50-entry per-view table at 0x4a6370+view*0x32
+ *     - lifetime_max = ((rand() & 0x80000003 wrap) + 1) * 10  → 10/20/30/40
+ *     - initial_size = 0x3000  (smaller than 0x42A290's 0x4000)
+ *     - initial_alpha = 0xdc0  (smaller than 0x42A290's 0x26C0)
+ *     - size_rate  = -0x2000 / lifetime_max
+ *     - alpha_rate =  0x1900 / lifetime_max
+ *     - Velocity X = ((cos+sin) * 0x3000 round-shifted by 12) + actor[+0x1CC]
+ *     - Velocity Z = ((cos-sin) * 0x3000 round-shifted by 12) + actor[+0x1D4]
+ *     - Velocity Y = 0 (not written; slot was zeroed at allocation)
+ *     - Phase = rand() % 0x1F (random start, same as 0x42A290)
+ *     - HARDPOINT byte stored at slot's hardpoint_id field
+ *
+ * NOTE on the size/alpha field naming: orig calls the SIZE_W/SIZE_H pair
+ * "initial_size" / "initial_alpha" in the named decompile. They correspond
+ * to the size animation slots in our particle layout (PSLOT_SIZE_W /
+ * PSLOT_SIZE_H), NOT a separate alpha channel — alpha modulation lives in
+ * the render-time color pack.
+ */
+static void td5_vfx_spawn_smoke_puff_at_point(TD5_Actor *actor,
+                                               const int32_t world_xyz[3],
+                                               uint8_t hardpoint_id,
+                                               int view_index)
+{
+    if (!actor || !world_xyz) return;
+    int vi = view_index & 1;
+
+    /* Pool slot scan: linear search for first inactive slot in view's bank
+     * [CONFIRMED @ 0x00429FE2-0x00429FF8] */
+    uint8_t *bank = s_particle_banks[vi];
+    int slot_idx = -1;
+    for (int i = 0; i < TD5_VFX_PARTICLE_SLOTS_PER_VIEW; i++) {
+        uint8_t *s = bank + i * TD5_VFX_PARTICLE_SLOT_STRIDE;
+        if (s[PSLOT_FLAGS] == 0) { slot_idx = i; break; }
+    }
+    if (slot_idx < 0) return;
+    uint8_t *slot = bank + slot_idx * TD5_VFX_PARTICLE_SLOT_STRIDE;
+
+    /* Sprite-batch reservation: scan per-view 50-entry table for first zero.
+     * [CONFIRMED @ 0x00429FFE-0x0042A028: g_spriteRenderFlags[view*0x32 + i]] */
+    int batch_idx = -1;
+    for (int b = 0; b < TD5_VFX_SPRITE_BATCH_COUNT; b++) {
+        if (s_sprite_render_flags[vi][b] == 0) { batch_idx = b; break; }
+    }
+    if (batch_idx < 0) return; /* orig bails silently when sprite batches full */
+
+    /* Reserve sprite batch + record batch index in slot
+     * [CONFIRMED @ 0x0042A038-0x0042A04C] */
+    s_sprite_render_flags[vi][batch_idx] = 1;
+    slot[PSLOT_BATCH] = (uint8_t)batch_idx;
+
+    /* Build sprite quad template using the SMOKE atlas entry (texture_page
+     * read from the lookup result). Port collapses BuildSpriteQuadTemplate
+     * into the existing vfx_build_sprite_quad path; UV/page already cached
+     * at init time (s_smoke_u0..s_smoke_page). Matches orig's 0xB8 stride
+     * write to g_spriteBatches[view*0x32 + batch] @ 0x0042A052-0x0042A1FE. */
+    VfxSpriteQuad *sq = &s_sprite_batches[vi * TD5_VFX_SPRITE_BATCH_COUNT + batch_idx];
+    vfx_build_sprite_quad(sq, 0.0f, 0.0f, 128.0f,
+                           (s_smoke_u1 - s_smoke_u0) * 0.5f,
+                           (s_smoke_v1 - s_smoke_v0) * 0.5f,
+                           s_smoke_u0, s_smoke_v0,
+                           s_smoke_u1, s_smoke_v1,
+                           s_smoke_page, 0xFFFFFFFF);
+
+    /* Activate + wire callbacks [CONFIRMED @ 0x0042A204-0x0042A21E].
+     * Orig writes flags=0x80, update_fn=&LAB_00429950 (SmokeUpdateCallback),
+     * render_fn=&LAB_004297D0 (SmokeRenderCallback). Port collapses the
+     * callback dispatch into td5_vfx_update_particles type-switch on
+     * PSLOT_TYPE, so the function pointers fold into PSLOT_TYPE=0 (smoke). */
+    memset(slot, 0, TD5_VFX_PARTICLE_SLOT_STRIDE);
+    slot[PSLOT_FLAGS] = 0xC0;   /* active | projected (matches port convention) */
+    slot[PSLOT_TYPE]  = 0;       /* smoke */
+    slot[PSLOT_BATCH] = (uint8_t)batch_idx;
+
+    /* World position copy [CONFIRMED @ 0x0042A220-0x0042A234]
+     * Orig: slot.world_x = param_2[0], world_y = param_2[1], world_z = param_2[2] */
+    PSLOT_WR32(slot, PSLOT_POS_X, world_xyz[0]);
+    PSLOT_WR32(slot, PSLOT_POS_Y, world_xyz[1]);
+    PSLOT_WR32(slot, PSLOT_POS_Z, world_xyz[2]);
+
+    /* Velocity derivation [CONFIRMED @ 0x0042A23A-0x0042A26E]
+     *   yaw12 = (actor[+0x1F4] >> 8) + 0x800
+     *   cos = CosFixed12bit(yaw12)
+     *   sin = SinFixed12bit(yaw12)
+     *   v   = (cos + sin) * 0x3000  →  round-toward-zero >>12  →  add actor[+0x1CC]
+     *   v_z = (cos - sin) * 0x3000  →  round-toward-zero >>12  →  add actor[+0x1D4]
+     * The (x + (x>>31 & 0xFFF)) >> 12 pattern is C's signed-shift round-toward-zero
+     * mirror of orig's IDIV-by-power-of-2; port uses the same expression so
+     * the cycle-accurate negative path matches. */
+    uint8_t *ap = (uint8_t *)actor;
+    int32_t yaw_raw;
+    int32_t actor_vx, actor_vz;
+    memcpy(&yaw_raw,  ap + 0x1F4, 4);
+    memcpy(&actor_vx, ap + 0x1CC, 4);
+    memcpy(&actor_vz, ap + 0x1D4, 4);
+    int yaw12 = (int)((yaw_raw >> 8) + 0x800);
+    int cos_v = CosFixed12bit((unsigned)yaw12);
+    int sin_v = SinFixed12bit(yaw12);
+    int32_t mix_xz = (cos_v + sin_v) * 0x3000;
+    int32_t vx = ((mix_xz + ((mix_xz >> 31) & 0xFFF)) >> 12) + actor_vx;
+    int32_t mix_zx = (cos_v - sin_v) * 0x3000;
+    int32_t vz = ((mix_zx + ((mix_zx >> 31) & 0xFFF)) >> 12) + actor_vz;
+    PSLOT_WR32(slot, PSLOT_VEL_X, vx);
+    PSLOT_WR32(slot, PSLOT_VEL_Y, 0);
+    PSLOT_WR32(slot, PSLOT_VEL_Z, vz);
+
+    /* Lifetime constants [CONFIRMED @ 0x0042A270-0x0042A276] = 0x200 ticks */
+    PSLOT_WR16(slot, PSLOT_LIFETIME, 0x200);
+
+    /* Phase: random start [CONFIRMED @ 0x0042A278-0x0042A286] phase = rand() % 0x1F */
+    slot[PSLOT_PHASE] = (uint8_t)(rand() % 0x1F);
+
+    /* hardpoint_id parameter stored in PSLOT scratch
+     * [CONFIRMED @ 0x0042A288] orig writes hardpoint at slot.hardpoint_id.
+     * Port has no dedicated hardpoint field — use the variant-tracking byte
+     * at the next free pad. Render-side doesn't currently read it; we still
+     * pass it through for parity if a future change needs the dispatch. */
+    (void)hardpoint_id;
+
+    /* lifetime_max = ((rand() & 0x80000003 wrap) + 1) * 10
+     * [CONFIRMED @ 0x0042A29A-0x0042A2C8]
+     * The wrap pattern mirrors orig's int-truncation of negative rand:
+     *   uVar6 = rand() & 0x80000003;
+     *   if ((int)uVar6 < 0) uVar6 = (uVar6 - 1 | 0xFFFFFFFC) + 1;
+     * Effective range: 0..3 → +1 → 1..4 → *10 → 10/20/30/40 */
+    uint32_t r6 = (uint32_t)rand() & 0x80000003u;
+    if ((int32_t)r6 < 0) r6 = (uint32_t)((int32_t)((r6 - 1u) | 0xFFFFFFFCu) + 1);
+    int life_max = (int)(((int8_t)((uint8_t)r6 + 1)) * 10);
+    if (life_max <= 0) life_max = 10; /* defensive; orig would div-by-zero otherwise */
+
+    /* Size/alpha animation pair [CONFIRMED @ 0x0042A2CA-0x0042A2FE].
+     * Initial values are SMALLER than 0x42A290 hardpoint variant — this is
+     * the "small puff" cosmetic distinct from the burnout cloud. */
+    PSLOT_WR16(slot, PSLOT_SIZE_W,   0x3000);
+    PSLOT_WR16(slot, PSLOT_SIZE_W_D, (int16_t)(-0x2000 / life_max));
+    PSLOT_WR16(slot, PSLOT_SIZE_H,   0x0DC0);
+    PSLOT_WR16(slot, PSLOT_SIZE_H_D, (int16_t)( 0x1900 / life_max));
+}
+
+/**
+ * SpawnRandomVehicleSmokePuff (0x00401370)
+ *
+ * Engine-rev gated wrapper that invokes SpawnVehicleSmokePuffAtPoint with
+ * the rear-probe midpoint as the spawn position. Original is called once
+ * per visible racer per frame from RenderRaceActorForView (0x0040C120).
+ *
+ * Gate (must all hold):
+ *   - engine_speed_accum (+0x310) < 4000
+ *   - encounter_steering_cmd (+0x33E) > 200
+ *   - engine_speed_accum > 0
+ *   - (rand() % engine_speed_accum) < 500
+ *
+ * Spawn point: midpoint of probe_RR and probe_RL (rear-left/rear-right
+ * ground probes), with +0x7800 added to Y. Hardpoint id = 0.
+ *
+ * [CONFIRMED @ 0x00401370 disassembly; TIER 3 port 2026-05-24]
+ *   Field offsets read from listing:
+ *     +0xA8 = probe_RL Y     +0xB4 = probe_RR Y
+ *     +0xAC = probe_RL X     +0xB8 = probe_RR X
+ *     +0xB0 = probe_RL Z     +0xBC = probe_RR Z
+ *   Each avg uses CDQ/SUB pattern (round-toward-zero), then >>1.
+ *
+ * Return value: orig returns the rand()/engine quotient on the gate-pass
+ * path (unused in the single known caller). Port returns void.
+ */
+void td5_vfx_spawn_random_smoke_puff(TD5_Actor *actor, int view_index)
+{
+    if (!actor) return;
+
+    uint8_t *ap = (uint8_t *)actor;
+
+    /* Read gate fields [CONFIRMED @ 0x00401378-0x00401396] */
+    int32_t engine;
+    int16_t throttle16;
+    memcpy(&engine,     ap + 0x310, 4);
+    memcpy(&throttle16, ap + 0x33E, 2);
+
+    if (engine >= 0xFA0) return;       /* 4000 */
+    if ((int)throttle16 <= 0xC8) return; /* 200 */
+    if (engine <= 0) return;
+
+    /* Probability roll: rand() % engine [CONFIRMED @ 0x00401398-0x004013AA].
+     * Orig stores rand()/engine in iVar2 (returned). The modulo result is
+     * the actual gate; only when (rand() % engine) < 500 does the spawn fire. */
+    int rv = rand();
+    int rem = (int)((int32_t)rv - (int32_t)((int32_t)(rv / engine) * engine));
+    if (rem >= 0x1F4) return;          /* 500 */
+
+    /* Probe-midpoint computation [CONFIRMED @ 0x004013AC-0x004013F2].
+     * Each avg uses (left + right) signed >>1 with round-toward-zero. */
+    int32_t pRL_y, pRL_x, pRL_z;
+    int32_t pRR_y, pRR_x, pRR_z;
+    memcpy(&pRL_y, ap + 0xA8, 4);
+    memcpy(&pRL_x, ap + 0xAC, 4);
+    memcpy(&pRL_z, ap + 0xB0, 4);
+    memcpy(&pRR_y, ap + 0xB4, 4);
+    memcpy(&pRR_x, ap + 0xB8, 4);
+    memcpy(&pRR_z, ap + 0xBC, 4);
+
+    /* Faithful round-toward-zero divide by 2 (orig: ADD/CDQ/SUB/SAR pattern) */
+    int32_t sum_y = pRL_y + pRR_y;  int32_t avg_y = (sum_y - (sum_y >> 31)) >> 1;
+    int32_t sum_x = pRL_x + pRR_x;  int32_t avg_x = (sum_x - (sum_x >> 31)) >> 1;
+    int32_t sum_z = pRL_z + pRR_z;  int32_t avg_z = (sum_z - (sum_z >> 31)) >> 1;
+
+    /* Layout of param struct: { X, Y+0x7800, Z } [CONFIRMED @ 0x004013F6-0x00401407] */
+    int32_t point[3];
+    point[0] = avg_x;
+    point[1] = avg_y + 0x7800;
+    point[2] = avg_z;
+
+    td5_vfx_spawn_smoke_puff_at_point(actor, point, /*hardpoint*/ 0, view_index);
+}
+
 /* ========================================================================
  * 5. Taillights
  *    Original: InitializeVehicleTaillightQuadTemplates (0x401000)
@@ -2914,6 +3137,167 @@ int td5_vfx_get_weather_type(void)
     return s_weather_type;
 }
 
+/* ========================================================================
+ * Tracked Actor Marker Billboards — cop-chase visual (Tier 1 port 2026-05-24)
+ *
+ * Port of InitializeTrackedActorMarkerBillboards @ 0x0043c9e0 (985B).
+ * Builds 6 sprite-quad templates per marker × 2 markers = 12 templates total,
+ * sourced from PoliceLt_red / PoliceLt_blue / Police_red / Police_blue
+ * atlas entries. In orig, these are pre-baked quad scratch buffers at
+ * 0x4bedc0..0x4bf670 (stride 0x22c, 12 entries) consumed by
+ * RenderTrackedActorMarker every frame; per-frame phase increment supplied
+ * by AdvanceWorldBillboardAnimations.
+ *
+ * Port collapses the scratch-quad pool to per-marker UV caches (atlas page
+ * IDs + UV rects), then RenderTrackedActorMarker (td5_render.c) emits a
+ * fresh TD5_D3DVertex stream every frame using these caches. Phase
+ * counters are kept here as ints; orig advance step is 0x10/tick.
+ *
+ * Display semantics (from orig render decompile, 0x0043cde0):
+ *   - 2 markers (front + back) anchored at model-space offsets
+ *     (+80, 205, -160) and (-80, 205, -160) on the tracked actor.
+ *   - Each marker draws 3 sprite layers:
+ *       0: red strobe       (POLICELT_RED, alpha = sin(phase*-4))
+ *       1: blue strobe      (POLICELT_BLUE, alpha = sin(phase*-4))
+ *       2: base marker      (POLICE_RED for front, POLICE_BLUE for back)
+ *   - Marker rotation: yaw = AngleFromVector12(forward.z, forward.x)
+ *     with ±0x100 offset to spread front/back light bars.
+ *   - Pulse half-extents from g_hudSpeedoDialNearOff (64.0) /
+ *     DAT_0045d768 / DAT_0045d764 scaled by DAT_0045d698 (1/4096) and the
+ *     g_wantedTargetTrackerActive intensity counter.
+ *
+ * NOTE: g_wantedModeEnabled write-site is a known REGR (todo-police-chase-
+ * no-audio-2026-05-19) — these visuals stay gated and inert until that
+ * lands; the gate logic ports correctly so they activate automatically.
+ * ======================================================================== */
+
+/* (TD5_VFX_TRACKED_MARKER_COUNT / TD5_VFX_TRACKED_LAYERS_PER_MARK defined
+ * in td5_vfx.h so td5_render.c can declare arrays of matching size.) */
+
+/* Per-layer UV cache. */
+typedef struct VfxTrackedMarkerLayer {
+    int    page;       /* D3D atlas texture page; <0 = not loaded */
+    float  u0, v0;     /* normalized UV rect (top-left) */
+    float  u1, v1;     /* normalized UV rect (bottom-right) */
+    int    pixel_w;    /* atlas pixel width (used as billboard half-extent base) */
+    int    pixel_h;    /* atlas pixel height */
+} VfxTrackedMarkerLayer;
+
+/* 2 markers, each with 3 layers. Layer 0+1 are shared "strobe" templates,
+ * layer 2 differs per marker (red for front, blue for back), matching the
+ * orig init loop which writes 4 unique BuildSpriteQuadTemplate entries
+ * (slot 0 = PoliceLt_red, slot 1 = PoliceLt_blue, slot 2 = Police_red,
+ *  slot 4 = Police_blue) per outer iteration. */
+static VfxTrackedMarkerLayer s_tracked_marker_layers[TD5_VFX_TRACKED_MARKER_COUNT]
+                                                    [TD5_VFX_TRACKED_LAYERS_PER_MARK];
+
+/* Per-marker animation phase counter — advanced by
+ * td5_vfx_advance_billboard_anims (orig AdvanceWorldBillboardAnimations
+ * stride 0x22c × 2 entries = first 2 sub-blocks of the pool). Stored as
+ * int matching orig u8 wrap-around indexing in RenderTrackedActorMarker
+ * (`(byte)(&pool)[iVar13] * -4`). */
+static int     s_tracked_marker_phase[TD5_VFX_TRACKED_MARKER_COUNT];
+static int     s_tracked_marker_initialized = 0;
+
+/* Public accessors used by td5_render.c RenderTrackedActorMarker port. */
+int td5_vfx_tracked_marker_get_page(int marker, int layer) {
+    if (!s_tracked_marker_initialized) return -1;
+    if ((unsigned)marker >= TD5_VFX_TRACKED_MARKER_COUNT) return -1;
+    if ((unsigned)layer  >= TD5_VFX_TRACKED_LAYERS_PER_MARK) return -1;
+    return s_tracked_marker_layers[marker][layer].page;
+}
+
+void td5_vfx_tracked_marker_get_uv(int marker, int layer,
+                                    float *u0, float *v0, float *u1, float *v1) {
+    if (!s_tracked_marker_initialized) { *u0=*v0=*u1=*v1=0.0f; return; }
+    if ((unsigned)marker >= TD5_VFX_TRACKED_MARKER_COUNT) { *u0=*v0=*u1=*v1=0.0f; return; }
+    if ((unsigned)layer  >= TD5_VFX_TRACKED_LAYERS_PER_MARK) { *u0=*v0=*u1=*v1=0.0f; return; }
+    const VfxTrackedMarkerLayer *L = &s_tracked_marker_layers[marker][layer];
+    *u0 = L->u0; *v0 = L->v0; *u1 = L->u1; *v1 = L->v1;
+}
+
+int  td5_vfx_tracked_marker_get_phase(int marker) {
+    if ((unsigned)marker >= TD5_VFX_TRACKED_MARKER_COUNT) return 0;
+    return s_tracked_marker_phase[marker];
+}
+
+int  td5_vfx_tracked_marker_initialized(void) {
+    return s_tracked_marker_initialized;
+}
+
+static void tracked_marker_lookup_layer(VfxTrackedMarkerLayer *out, const char *atlas_name)
+{
+    TD5_AtlasEntry *e = td5_asset_find_atlas_entry(NULL, atlas_name);
+    if (!e || e->texture_page <= 0) {
+        out->page = -1;
+        out->u0 = out->v0 = out->u1 = out->v1 = 0.0f;
+        out->pixel_w = out->pixel_h = 0;
+        TD5_LOG_W(LOG_TAG, "tracked_marker: atlas entry '%s' not found", atlas_name);
+        return;
+    }
+    int tw = 256, th = 256;
+    td5_plat_render_get_texture_dims(e->texture_page, &tw, &th);
+    /* Half-pixel inset on each side mirrors brake-light / wheel UV patterns
+     * in render to avoid bilinear-filter bleed into neighbor atlas cells. */
+    out->page    = e->texture_page;
+    out->u0      = ((float)e->atlas_x + 0.5f) / (float)tw;
+    out->v0      = ((float)e->atlas_y + 0.5f) / (float)th;
+    out->u1      = ((float)(e->atlas_x + e->width)  - 0.5f) / (float)tw;
+    out->v1      = ((float)(e->atlas_y + e->height) - 0.5f) / (float)th;
+    out->pixel_w = e->width;
+    out->pixel_h = e->height;
+}
+
+/* [CONFIRMED @ 0x0043c9e0 InitializeTrackedActorMarkerBillboards]
+ * Orig: 4 × FindArchiveEntryByName -> POLICELT_RED, POLICELT_BLUE,
+ *       POLICE_RED, POLICE_BLUE; 12 BuildSpriteQuadTemplate calls
+ *       (6 per outer iter × 2 outer iters); zero pool[0]+pool[stride]
+ *       phase fields and seed _DAT_004befec/0x4bf218/0x4bf444 alpha
+ *       channels (0x80, 0x40, 0xc0). Port caches the 4 atlas UV rects
+ *       and zeros phase counters; alpha channels are computed per-frame
+ *       in the render path from g_wantedTargetTrackerActive. */
+void td5_vfx_init_tracked_actor_marker_billboards(void)
+{
+    /* Layer order per marker:
+     *   layer 0 = POLICELT_RED  (red strobe — slot 0 in orig 6-quad block)
+     *   layer 1 = POLICELT_BLUE (blue strobe — slot 1)
+     *   layer 2 = POLICE_RED for marker 0 / POLICE_BLUE for marker 1
+     *            (slot 2/3 in orig — orig has 4 unique atlas lookups and
+     *             only the "base" layer differs per marker iteration). */
+    tracked_marker_lookup_layer(&s_tracked_marker_layers[0][0], "POLICELT_RED");
+    tracked_marker_lookup_layer(&s_tracked_marker_layers[0][1], "POLICELT_BLUE");
+    tracked_marker_lookup_layer(&s_tracked_marker_layers[0][2], "POLICE_RED");
+
+    tracked_marker_lookup_layer(&s_tracked_marker_layers[1][0], "POLICELT_RED");
+    tracked_marker_lookup_layer(&s_tracked_marker_layers[1][1], "POLICELT_BLUE");
+    tracked_marker_lookup_layer(&s_tracked_marker_layers[1][2], "POLICE_BLUE");
+
+    /* Phase counters start at 0 (orig: _g_trackedActorMarkerBillboardPool=0,
+     * advanced by 0x10/tick via AdvanceWorldBillboardAnimations). */
+    s_tracked_marker_phase[0] = 0;
+    s_tracked_marker_phase[1] = 0;
+    s_tracked_marker_initialized = 1;
+
+    TD5_LOG_I(LOG_TAG,
+              "tracked_marker init: red_strobe.page=%d blue_strobe.page=%d "
+              "red_base.page=%d blue_base.page=%d",
+              s_tracked_marker_layers[0][0].page,
+              s_tracked_marker_layers[0][1].page,
+              s_tracked_marker_layers[0][2].page,
+              s_tracked_marker_layers[1][2].page);
+}
+
+/* Phase advance — runs per tick alongside td5_vfx_advance_billboard_anims.
+ * Orig AdvanceWorldBillboardAnimations @ 0x0043cdc0 walks pool entries 0..2
+ * (stride 0x22c, limit < 0x4bf218 = 2 entries) and adds 0x10 to each phase
+ * head. Port mirrors with explicit per-marker increment. */
+void td5_vfx_advance_tracked_marker_phases(void) {
+    if (!s_tracked_marker_initialized) return;
+    for (int i = 0; i < TD5_VFX_TRACKED_MARKER_COUNT; i++) {
+        s_tracked_marker_phase[i] += 0x10;
+    }
+}
+
 /* ============================================================
  * [CITATION-SWEEP 2026-05-21] Phase 1 audit-header refresh
  *
@@ -2928,24 +3312,22 @@ int td5_vfx_get_weather_type(void)
  *         re/analysis/phase1_manifest_assignment.csv
  *
  *   0x00401370  SpawnRandomVehicleSmokePuff
- *     [L5-AUDIT 2026-05-21 — NOT PORTED]
- *     Orig is 159B that gates on engine_speed_accum<4000 &&
- *     encounter_steering_cmd>200 && rand()%engine_speed<500, then computes
- *     rear-probe midpoint (probe_RL/RR + 0x7800 Y offset) and calls
- *     SpawnVehicleSmokePuffAtPoint. The port's vfx_spawn_smoke_at_position
- *     covers similar functionality via different gate (lateral_slip in
- *     UpdateRearTireEffects). The orig's separate per-actor random gate
- *     isn't wired. NO port symbol.
+ *     [SHIPPED 2026-05-24 — TIER 3 NOT_PORTED triage]
+ *     Ported as td5_vfx_spawn_random_smoke_puff(actor, view_index). Wired
+ *     into td5_render.c per-actor render block, mirroring orig's
+ *     RenderRaceActorForView (0x0040C120) callsite. Gate, probe-midpoint
+ *     formula, and Y+0x7800 lift all byte-faithful to disassembly. See
+ *     td5_vfx.c implementation block above for [CONFIRMED @ ...] tags.
  *
  *   0x00429FD0  SpawnVehicleSmokePuffAtPoint
- *     [L5-AUDIT 2026-05-21 — NOT PORTED]
- *     688B helper that orig calls from SpawnRandomVehicleSmokePuff and
- *     other smoke spawners. Port collapses into vfx_spawn_smoke_at_position
- *     (~150 lines, simpler) with a different gating-and-velocity pattern.
- *     Class-level ARCH-DIVERGENCE: smoke spawn collapsed into a single
- *     port helper rather than the 2-tier orig design. See
- *     SpawnVehicleSmokeVariant (0x00429A30) audit at td5_vfx.c:2090 for
- *     the SIZE_W/SIZE_H/velocity field divergences.
+ *     [SHIPPED 2026-05-24 — TIER 3 NOT_PORTED triage]
+ *     Ported as the static td5_vfx_spawn_smoke_puff_at_point helper above.
+ *     This is the THIRD distinct smoke variant (alongside 0x00429A30 and
+ *     0x0042A290 hardpoint) — initial_size=0x3000 / initial_alpha=0x0DC0 /
+ *     deltas -0x2000/+0x1900, distinct from the others.  Velocity uses
+ *     yaw-rotated cos+sin/cos-sin *0x3000 added to actor velocity (vel_y=0).
+ *     Lifetime fixed at 0x200 ticks. The existing vfx_spawn_smoke_at_position
+ *     mirrors 0x0042A290 (hardpoint burnout) and is left untouched.
  *
  *   0x0043E990  InitializeTireTrackPool  (density-match, verify in Phase 4)
  *   0x00446EA0  InitializeWheelPaletteUvTable  (density-match, verify in Phase 4)

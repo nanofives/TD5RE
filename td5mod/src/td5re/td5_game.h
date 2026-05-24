@@ -132,5 +132,12 @@ int  td5_game_get_traffic_variant(int traffic_index);
 int  td5_game_get_cop_actor_index(void);
 int  td5_game_is_wanted_mode(void);
 void td5_game_advance_sky_rotation(void);
+/* Cop-chase tracked-marker intensity (orig g_wantedTargetTrackerActive
+ * @ 0x004BF500; decays 0x200/sub-tick, clamped to [0, 0x1000]). Consumed
+ * by render-side RenderTrackedActorMarker port for pulse scaling. */
+int32_t td5_game_get_wanted_target_tracker(void);
+/* Slot index of the wanted-mode tracked actor (orig g_wantedTargetSlotIndex
+ * @ 0x004bf51c; .data-init=0, no binary writers). */
+int     td5_game_get_wanted_target_slot(void);
 
 #endif /* TD5_GAME_H */

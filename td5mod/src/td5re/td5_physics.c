@@ -39,6 +39,7 @@
 #include "td5_ai.h"
 #include "td5_track.h"
 #include "td5_render.h"   /* td5_render_get_vehicle_mesh */
+#include "td5_sound.h"    /* td5_sound_play_at_position (Tier 2 recovery SFX) */
 #include "td5_game.h"     /* td5_game_get_total_actor_count, td5_game_is_wanted_mode */
 #include "td5_platform.h"
 #include "td5_trace.h"    /* inner-tick physics_trace stages */
@@ -1012,33 +1013,22 @@ void td5_physics_update_vehicle_actor(TD5_Actor *actor)
                 td5_physics_update_traffic(actor);
         }
     } else if (actor->vehicle_mode == 1 && !g_game_paused) {
-        /* 6b. Scripted recovery mode [CONFIRMED @ 0x406650 + 0x409E5E]
-         * Original: vehicle_mode==1 runs RefreshScriptedVehicleTransforms +
-         * IntegrateScriptedVehicleMotion for 59 frames, then calls
-         * ResetVehicleActorState to respawn the car.
-         *
-         * Partial port: gravity + linear damping confirmed from
-         * IntegrateScriptedVehicleMotion @ 0x00409D20-0x00409D66.
-         * Angular velocity damping removed — original overwrites them from
-         * Euler decomposition of recovery_target matrix, does NOT damp.
-         * Teleport removed — original ResetVehicleActorState has no teleport.
-         * Missing: RefreshScriptedVehicleTransforms rotation-matrix advance
-         * (MultiplyRotationMatrices3x3); requires recovery_target_m00 / saved_orientation_m00
-         * subsystem not yet ported. */
-        /* [Audit D1 — removed double frame_counter increment 2026-05-14.]
-         * Original 0x004067A2 does NOT re-increment frame_counter inside the
-         * vehicle_mode==1 branch — the single increment at function entry
-         * (line 617 above, matching listing 0x00406664) is the only one. */
+        /* 6b. Scripted recovery mode [CONFIRMED @ 0x00406881 / 0x00409BF0 + 0x00409D20]
+         * Tier 2 NOT_PORTED port (2026-05-24): replaces the prior partial
+         * gravity+damping placeholder with the full byte-faithful chain:
+         *   RefreshScriptedVehicleTransforms → world_pos seed from display_angles
+         *   → UpdateVehicleEngineSpeedSmoothed → IntegrateScriptedVehicleMotion.
+         * The 59-frame reset gate lives inside integrate_scripted_motion. */
+        td5_physics_refresh_scripted_vehicle_transforms(actor);
 
-        /* D11 — Scripted-mode world_pos write, listing 0x004067A8-67D9:
+        /* D11 — Scripted-mode world_pos seed [CONFIRMED @ 0x004067A8-67D9]:
          *   world_pos.x = (int16)*(+0x208) << 8
          *   world_pos.y = (int16)*(+0x20A) << 8
          *   world_pos.z = (int16)*(+0x20C) << 8
-         * The three shorts at +0x208/A/C alias the "display_angles" struct in
-         * the port, but the original treats them as recovery-target world
-         * coordinates during vehicle_mode==1 — the recovery animation
-         * overwrites world_pos every tick from this triple.
-         * [Audit D11 — added 2026-05-14.] */
+         * The shorts at +0x208/A/C alias display_angles but during
+         * vehicle_mode==1 they hold the recovery animation's per-tick world
+         * coordinate. The orig writes them in UpdateVehicleActor's
+         * vehicle_mode==1 dispatch immediately after RefreshScriptedVehicleTransforms. */
         {
             uint8_t *abase = (uint8_t *)actor;
             int16_t rx = *(int16_t *)(abase + 0x208);
@@ -1049,20 +1039,8 @@ void td5_physics_update_vehicle_actor(TD5_Actor *actor)
             actor->world_pos.z = (int32_t)rz << 8;
         }
 
-        /* Linear velocity damping [CONFIRMED @ 0x00409D20-0x00409D3B]:
-         * v -= (v + (v>>31 & 0xFF)) >> 8  (sign-extending divide-by-256) */
-        actor->linear_velocity_x -= (actor->linear_velocity_x + (actor->linear_velocity_x >> 31 & 0xFF)) >> 8;
-        actor->linear_velocity_z -= (actor->linear_velocity_z + (actor->linear_velocity_z >> 31 & 0xFF)) >> 8;
-
-        /* Gravity on Y velocity [CONFIRMED @ 0x00409D3C-0x00409D52]:
-         * IntegrateScriptedVehicleMotion subtracts gGravityConstant each tick */
-        actor->linear_velocity_y -= g_gravity_constant;
-
-        if (actor->frame_counter > 0x3B) {  /* 59 frames [CONFIRMED @ 0x00409DD0] */
-            TD5_LOG_I(LOG_TAG, "mode1 recovery: slot=%d resetting after %d frames",
-                      actor->slot_index, actor->frame_counter);
-            td5_physics_reset_actor_state(actor);
-        }
+        update_engine_speed_smoothed(actor);
+        td5_physics_integrate_scripted_motion(actor);
     } else if (g_game_paused) {
         /* Paused branch — listing 0x00406881-690B, line-by-line.
          *
@@ -9821,6 +9799,646 @@ void td5_physics_load_carparam(int slot, const uint8_t *data_268)
               *(int16_t *)(s_loaded_tuning[slot] + 0x70));
 }
 
+/* ========================================================================
+ * Vehicle Recovery Animation (vehicle_mode==1) port
+ *
+ * Tier 2 of the NOT_PORTED triage (2026-05-24) — restores the scripted
+ * recovery flow that runs after a heavy collision. Five functions, all
+ * confined to the vehicle_mode==1 dispatch:
+ *
+ *   0x0042E030 ExtractEulerAnglesFromMatrix       — Euler decomp w/ gimbal-lock
+ *   0x00409BF0 RefreshScriptedVehicleTransforms   — extract + rebuild matrices
+ *   0x00409520 CheckAndUpdateActorCollisionAlignment — heading-aligned reset gate
+ *   0x004096B0 ComputeActorWorldBoundingVolume    — wall-impact response impulse
+ *   0x004092D0 RenderVehicleActorModel (misnamed) — 4 wheel + 4 body probe pass
+ *
+ * Wire-up: ext call chain rooted at td5_physics_integrate_scripted_motion
+ * which is invoked from the vehicle_mode==1 branch of UpdateVehicleActor
+ * (td5_physics_update_vehicle_actor below). The branch previously had a
+ * minimal-fidelity port (gravity + linear damping + frame-counter timeout);
+ * this replaces it with the byte-faithful chain.
+ * ======================================================================== */
+
+/* Probe-depth scratch storage corresponding to orig DAT_0x00483958 (32 bytes,
+ * 4 wheel probe Y depths) and DAT_0x00483968 (16 bytes, 4 body probe Y depths).
+ * In the orig binary these were `int32_t depth[8]` globals that the per-probe
+ * walker pass at 0x004092D0 wrote and 0x004096B0 read. Port-side they live as
+ * a file-static scratch since their lifetime is one call chain (refresh ->
+ * compute_volume). [CONFIRMED @ 0x00483958 / 0x00483968 — 32+16 byte zeroed
+ * .data block, only refs are from 0x00409356/0x004094CA writers and
+ * 0x004096D7 readers per Ghidra reference_to.] */
+static int32_t s_scripted_wheel_probe_depth[4];  /* mirror DAT_00483958[4] */
+static int32_t s_scripted_body_probe_depth[4];   /* mirror DAT_00483968[4] */
+
+/* [CONFIRMED @ 0x0042E030] ExtractEulerAnglesFromMatrix
+ *
+ * Decomposes a 3x4 (3x3 row-major + translation) rotation matrix into three
+ * 12-bit display-angle Euler values (roll, yaw, pitch). The orig uses the
+ * float trig LUT (4096 scale = full circle), with a gimbal-lock fall-through
+ * when the extracted yaw lands on 0x400 (90 deg pitch) — in that case the
+ * yaw axis is degenerate so the roll axis absorbs the rotation and pitch
+ * is zeroed.
+ *
+ * Matrix layout (row-major, 4-float row stride from `param_1 + 0xN`):
+ *   [+0x00 m00] [+0x04 m01] [+0x08 m02]
+ *   [+0x0C m10] [+0x10 m11] [+0x14 m12]   ← yaw extracted from m10,m11,m12
+ *   [+0x18 m20] [+0x1C m21] [+0x20 m22]
+ *
+ * NOTE: Orig multiplies floats by _DAT_0045d69c (= -4096.0f) and by
+ * _DAT_0045d604 (g_audioDopplerSpeedOfSound = 4096.0f). Both constants are
+ * 4096-magnitude trig scalars that match the 12-bit angle space; the sign of
+ * _DAT_0045d69c puts the m12 component into the AngleFromVector12 quadrant
+ * convention. Port keeps the orig 0x0045d69c sign by negating m12 once. */
+void td5_physics_extract_euler_angles_from_matrix(const float *matrix,
+                                                  int16_t *out_roll_yaw_pitch)
+{
+    /* iVar2 = (int)ROUND(m12 * -4096.0f)  [0x0042E030-43] */
+    int32_t neg_m12_scaled = (int32_t)lrintf(matrix[5] * -4096.0f);
+    /* dz = (int)ROUND(sqrt(m11^2 + m10^2) * 4096.0f)  [0x0042E044-78] */
+    float fm10 = matrix[4];
+    float fm11 = matrix[3];
+    float xz_mag = sqrtf(fm11 * fm11 + fm10 * fm10);
+    int32_t dz = (int32_t)lrintf(xz_mag * 4096.0f);
+
+    /* yaw axis: AngleFromVector12(neg_m12_scaled, dz)  [0x0042E082-9C] */
+    uint32_t yaw12 = (uint32_t)AngleFromVector12(neg_m12_scaled, dz);
+    out_roll_yaw_pitch[0] = (int16_t)yaw12;
+
+    /* Gimbal-lock detection — orig checks `(yaw & 0x7FF) == 0x400` which
+     * fires when the pitch component places m12 exactly at sin(+/-90 deg). */
+    if ((yaw12 & 0x7FF) != 0x400) {
+        /* Roll = AngleFromVector12(m02 * 4096, m20 * 4096) [m02=matrix[2], m20=matrix[8]] */
+        int32_t r0 = (int32_t)lrintf(matrix[2] * 4096.0f);
+        int32_t r1 = (int32_t)lrintf(matrix[8] * 4096.0f);
+        out_roll_yaw_pitch[1] = (int16_t)AngleFromVector12(r0, r1);
+
+        /* Pitch = AngleFromVector12(m11 * 4096, m10 * 4096)  [m11=matrix[3], m10=matrix[4]] */
+        int32_t p0 = (int32_t)lrintf(matrix[3] * 4096.0f);
+        int32_t p1 = (int32_t)lrintf(matrix[4] * 4096.0f);
+        out_roll_yaw_pitch[2] = (int16_t)AngleFromVector12(p0, p1);
+        return;
+    }
+
+    /* Gimbal-lock branch: roll absorbs the remaining rotation, pitch=0.
+     * The orig passes (iVar2, dz) again — same axis as the yaw extraction —
+     * so roll = yaw in this case. */
+    out_roll_yaw_pitch[1] = (int16_t)AngleFromVector12(neg_m12_scaled, dz);
+    out_roll_yaw_pitch[2] = 0;
+}
+
+/* [CONFIRMED @ 0x00409BF0] RefreshScriptedVehicleTransforms
+ *
+ * Extracts Euler angles from both the primary rotation matrix and the
+ * recovery_target (collision_spin) matrix, writes them to display_angles
+ * and angular_velocity respectively, then (gated on the replay-skip flag)
+ * rebuilds both matrices from the freshly-extracted angles.
+ *
+ * The gate at 0x00409C58 reads `g_raceParticlePoolBase[0x1eb].view_x._0_1_ & 3`
+ * which corresponds to the replay-mode flag block. The port uses
+ * td5_game_is_replay_active() as the equivalent gate — when replay is
+ * playing back, the matrices are NOT rebuilt (replay supplies them). */
+void td5_physics_refresh_scripted_vehicle_transforms(TD5_Actor *actor)
+{
+    if (!actor) return;
+
+    /* Extract Euler from primary rotation matrix → display_angles  [0x00409C04] */
+    int16_t *disp = &actor->display_angles.roll;
+    td5_physics_extract_euler_angles_from_matrix(actor->rotation_matrix.m, disp);
+
+    /* Copy collision_spin_matrix → stack buffer, extract Euler → ang_vel  [0x00409C16-49].
+     * Orig copies 12 floats (the 3x3 + 3-float translation tail) to the stack
+     * before calling Extract. The Extract helper only reads matrix[2..8] so the
+     * copy is just for stack-local mutability later (rebuild also uses it). */
+    float spin[12];
+    memcpy(spin, &actor->collision_spin_matrix, 12 * sizeof(float));
+    int16_t ang_vel_angles[3];
+    td5_physics_extract_euler_angles_from_matrix(spin, ang_vel_angles);
+    actor->angular_velocity_roll  = (int32_t)ang_vel_angles[0];
+    actor->angular_velocity_yaw   = (int32_t)ang_vel_angles[1];
+    actor->angular_velocity_pitch = (int32_t)ang_vel_angles[2];
+
+    /* Replay-skip gate [CONFIRMED @ 0x00409C58]: orig tests
+     *   (g_raceParticlePoolBase[0x1eb].view_x._0_1_ & 3) == 0
+     * which corresponds to the playback-active flag block. Port mirrors
+     * via td5_game_is_replay_active() — when playback is active, matrices
+     * are sourced from the replay stream rather than being rebuilt. */
+    if (td5_game_is_replay_active())
+        return;
+
+    /* Rebuild rotation_matrix from display_angles  [0x00409C66-A2].
+     * BuildRotationMatrixFromAngles writes 9 floats; the orig then copies all
+     * 12 floats (9 rotation + 3 translation tail) into saved_orientation so
+     * the trailing 3 dwords sweep render_pos in. The port mirrors that exact
+     * 12-dword copy semantics. */
+    BuildRotationMatrixFromAngles(actor->rotation_matrix.m, disp);
+    /* Orig pattern: memcpy 48B from rotation_matrix → saved_orientation
+     * (9 rot floats + 3 render_pos floats). Mirrors the ClampVehicleAttitudeLimits
+     * tail copy at 0x00405D2B. */
+    memcpy(&actor->saved_orientation, &actor->rotation_matrix, 9 * sizeof(float));
+    memcpy(((uint8_t *)&actor->saved_orientation) + 9 * sizeof(float),
+           &actor->render_pos, 3 * sizeof(float));
+
+    /* Rebuild collision_spin_matrix from ang_vel_angles  [0x00409CA4-CD0]. */
+    BuildRotationMatrixFromAngles(spin, ang_vel_angles);
+    memcpy(&actor->collision_spin_matrix, spin, 9 * sizeof(float));
+    /* Trailing 3 dwords: orig copies stack residue (the local_30 buffer
+     * follows the spin matrix on the stack, so its first 3 floats land in
+     * the gap_1A4 region). Port writes spin[0..2] which is the equivalent
+     * post-call source value. */
+    memcpy(((uint8_t *)&actor->collision_spin_matrix) + 9 * sizeof(float),
+           spin, 3 * sizeof(float));
+}
+
+/* [CONFIRMED @ 0x00409520] CheckAndUpdateActorCollisionAlignment
+ *
+ * Tail check inside ComputeActorWorldBoundingVolume — once enough frames
+ * have passed (frame_counter > 2), test whether the vehicle's body axis is
+ * now closely aligned with its heading_normal AND ang_vel is small. If the
+ * combined (roll-bin | pitch-bin) sextant is "wheels down" (bin 0) or
+ * "wheels up" (bin 10), trigger ResetVehicleActorState to exit scripted mode.
+ *
+ * Magic constants from listing:
+ *   0x18  — angle delta threshold (~2.1 deg in 12-bit space)
+ *   0x20  — ang_vel threshold (~1.7 deg/frame)
+ *   `(angle1 + 0x200) >> 2 & 0x300 | (angle2 + 0x200) & 0xc00` >> 8 — quadrant
+ *   bin: 0 (both up) or 10 (both inverted) accept; everything else reject. */
+static void td5_physics_check_and_update_actor_collision_alignment(TD5_Actor *actor)
+{
+    if (!actor) return;
+    if (actor->frame_counter <= 2) return;
+
+    int16_t yaw_disp = actor->display_angles.yaw;
+    int32_t cos_y = CosFixed12bit((int)yaw_disp);
+    int32_t sin_y = SinFixed12bit((int)yaw_disp);
+
+    int16_t hx = actor->heading_normal.x;
+    int16_t hy = actor->heading_normal.y;
+    int16_t hz = actor->heading_normal.z;
+
+    /* Project heading into body-relative XZ via yaw rotation [0x004095AC-D2] */
+    int32_t bx = (int32_t)hx * cos_y - (int32_t)hz * sin_y;
+    int32_t bz = (int32_t)hx * sin_y + (int32_t)hz * cos_y;
+
+    /* Round-toward-zero >> 12, then narrow to int16  [SAR_RZ_12 idiom] */
+    bz = (int32_t)(int16_t)SAR_RZ_12(bz);
+    int32_t hy_i = (int32_t)hy;
+
+    /* iVar3 = AngleFromVector12(-bz, -hy)  [0x004095E0-EE] */
+    int32_t roll_target = AngleFromVector12(-bz, -hy_i);
+
+    /* iVar2 = AngleFromVector12(bx_rz12, sqrt(bz^2 + hy^2))  [0x004095EF-617] */
+    bx = (int32_t)(int16_t)SAR_RZ_12(bx);
+    float mag_sq = (float)(bz * bz + hy_i * hy_i);
+    int32_t mag = (int32_t)lrintf(sqrtf(mag_sq));
+    int32_t pitch_target = AngleFromVector12(bx, mag);
+
+    /* Delta = signed wrap of (target - current)  [0x00409621-37] */
+    int32_t droll  = roll_target  - actor->display_angles.roll;
+    int32_t dpitch = pitch_target - actor->display_angles.pitch;
+
+    /* Wrap to [-0x200, 0x200) via (x - 0x200 & 0x3FF) - 0x200  */
+    int32_t wroll  = (int32_t)((droll  - 0x200u) & 0x3FF) - 0x200;
+    int32_t wpitch = (int32_t)((dpitch - 0x200u) & 0x3FF) - 0x200;
+    int32_t aroll  = (wroll  < 0) ? -wroll  : wroll;
+    int32_t apitch = (wpitch < 0) ? -wpitch : wpitch;
+
+    if (aroll >= 0x18 || apitch >= 0x18) return;
+
+    /* Ang_vel must be near zero: wrap to [-0x800, 0x800) and check |.| < 0x20.
+     * Orig only checks roll + pitch components. */
+    int32_t avr = (actor->angular_velocity_roll  - 0x800) & 0xFFF;
+    int32_t avp = (actor->angular_velocity_pitch - 0x800) & 0xFFF;
+    int32_t wavr = avr - 0x800;
+    int32_t wavp = avp - 0x800;
+    if (wavr >= 0x20 || wavr <= -0x20) return;
+    if (wavp >= 0x20 || wavp <= -0x20) return;
+
+    /* Quadrant bin test [0x00409686-9A]:
+     *   bin = ((roll_target + 0x200) >> 2 & 0x300) | ((pitch_target + 0x200) & 0xC00), then >> 8.
+     * Orig uses `iVar3 + 0x200 >> 2 & 0x300` for the roll axis (bit 0x300)
+     * and `iVar2 + 0x200 & 0xc00` for the pitch axis (bit 0xc00). */
+    int32_t bin = (int32_t)((((uint32_t)(roll_target  + 0x200) >> 2) & 0x300u)
+                          | ((uint32_t)(pitch_target + 0x200) & 0xC00u)) >> 8;
+
+    if (bin == 0 || bin == 10) {
+        td5_physics_reset_actor_state(actor);
+    }
+}
+
+/* [CONFIRMED @ 0x004092D0] RenderVehicleActorModel (orig misnamed —
+ * actually the scripted-mode probe pass that walks 4 wheel hubs + 4 body
+ * corners through track contact, writes wheel_world_positions_hires,
+ * bbox_vertices_upper, and the 8 probe depth values, then returns a
+ * bitmask of probes whose Y is below the local ground plane.
+ *
+ * Mirrors td5_physics_refresh_wheel_contacts but without suspension —
+ * scripted mode integrates a precomputed transform instead of computing
+ * spring deflection. */
+static uint32_t td5_physics_render_vehicle_actor_model(TD5_Actor *actor)
+{
+    if (!actor || !actor->car_definition_ptr)
+        return 0;
+
+    uint32_t below_ground_mask = 0;
+    int16_t span = actor->track_span_raw;
+    int8_t  sub_lane = (int8_t)actor->track_sub_lane_index;
+    const uint8_t *cardef = (const uint8_t *)actor->car_definition_ptr;
+
+    /* Set up render transform from rotation_matrix + render_pos  [0x0040930E-19] */
+    LoadRenderRotationMatrix((float *)&actor->rotation_matrix);
+    /* The orig CALL 0x43DC20 (LoadRenderTranslation) is passed `&actor->rotation_matrix`,
+     * which is the same pointer used for LoadRenderRotationMatrix — Ghidra-typed as a
+     * Vec3f. That's a pointer-cast bug in the orig decomp display; the actual
+     * effect is to load translation from render_pos via the render module's
+     * stashed matrix. Mirror by loading render_pos. */
+    td5_render_load_translation((const TD5_Vec3f *)&actor->render_pos);
+
+    /* Build a local 12-float matrix for transform helper. */
+    float matrix[12];
+    memcpy(matrix, actor->rotation_matrix.m, 9 * sizeof(float));
+    matrix[9]  = actor->render_pos.x;
+    matrix[10] = actor->render_pos.y;
+    matrix[11] = actor->render_pos.z;
+
+    int max_sp = td5_track_get_span_count();
+
+    /* Loop 1 — 4 wheel hubs  [0x00409370-46B].
+     * Reads cardef[+0x20+i*8 .. +0x26] as a short[3] wheel-hub offset; the
+     * wheel_display_angle short at offset +0x42+i*8 in cardef is the per-wheel
+     * ride-height ceiling. Subtracts `wheel_suspension_pos[i] >> 8` (SAR-RZ)
+     * before second transform. */
+    for (int i = 0; i < 4; i++) {
+        int16_t wheel_off[3] = {
+            *(int16_t *)(cardef + 0x20 + i * 8 + 0),
+            *(int16_t *)(cardef + 0x20 + i * 8 + 2),
+            *(int16_t *)(cardef + 0x20 + i * 8 + 4),
+        };
+        int32_t out[3];
+
+        /* Seed wheel probe with chassis span/sub_lane */
+        actor->wheel_probes[i].span_index = span;
+        actor->wheel_probes[i].sub_lane_index = sub_lane;
+
+        /* First transform: chassis-frame wheel offset → world (FISTP-rounded). */
+        td5_transform_short_vec3_by_render_matrix_rounded(wheel_off, out, matrix);
+
+        /* Compute body-corner short[1] = cardef[+0x42 + i*8] - (wheel_susp_pos[i] >> 8)
+         * SAR_RZ_8 matches orig's CDQ;AND 0xFF;ADD;SAR 8 idiom. */
+        int16_t body_y = (int16_t)((int16_t)*(int16_t *)(cardef + 0x42 + i * 8) -
+                                   (int16_t)SAR_RZ_8(actor->wheel_suspension_pos[i]));
+        int16_t body_corner_off[3] = {
+            *(int16_t *)(cardef + 0x20 + i * 8 + 0),
+            body_y,
+            *(int16_t *)(cardef + 0x20 + i * 8 + 4),
+        };
+
+        int32_t body_out[3];
+        td5_transform_short_vec3_by_render_matrix_rounded(body_corner_off, body_out, matrix);
+
+        /* Pre-shift << 8 to convert int32 → 24.8 fp before track probe lookup.
+         * Orig stores wheel_world_positions_hires[i] (= probe ring at +0x298) with
+         * shifted values and the body-corner triple separately. */
+        int32_t wx_fp = body_out[0] << 8;
+        int32_t wy_fp = body_out[1] << 8;
+        int32_t wz_fp = body_out[2] << 8;
+        actor->wheel_world_positions_hires[i].x = wx_fp;
+        actor->wheel_world_positions_hires[i].y = wy_fp;
+        actor->wheel_world_positions_hires[i].z = wz_fp;
+
+        out[0] <<= 8;
+        out[1] <<= 8;
+        out[2] <<= 8;
+
+        /* UpdateActorTrackPosition(probe, &wx_fp, &out, &depth_slot)
+         * Orig signature is `(short *probe, int pos_xyz_ptr, int pos2_ptr, int depth_ptr, int unused)`
+         * — the walker actually only uses the first pos arg and the depth out
+         * pointer. Port simplification: walk probe based on body-corner X/Z. */
+        td5_track_update_probe_position(&actor->wheel_probes[i], wx_fp, wz_fp);
+        if (max_sp > 0 && actor->wheel_probes[i].span_index >= (int16_t)max_sp)
+            actor->wheel_probes[i].span_index = (int16_t)(max_sp - 1);
+        td5_track_compute_probe_contact_vertices(&actor->wheel_probes[i]);
+
+        /* ComputeActorTrackContactNormal writes the depth (ground Y) at probe XZ.
+         * Use the existing port's signature: (probe, pos_xyz_ptr, out_y_ptr).
+         * The orig 0x00445450 writes its ground-Y into the dword pointed to by
+         * its 3rd arg — port's variant has the same effect. */
+        int32_t probe_pos[3] = { wx_fp, wy_fp, wz_fp };
+        int32_t ground_y = 0;
+        ComputeActorTrackContactNormal((short *)&actor->wheel_probes[i],
+                                       probe_pos, &ground_y);
+        s_scripted_wheel_probe_depth[i] = ground_y;
+
+        /* If body-corner Y is below ground, set the probe-i bit. */
+        if (wy_fp - ground_y < 0)
+            below_ground_mask |= (1u << i);
+    }
+
+    /* Loop 2 — 4 body corner sample positions at cardef[+0x40 + i*8] (4-short pairs).
+     * Uses body_probes[0..3] (the +0x40 region) and writes
+     * collision_spin_matrix-derived corner positions into bbox_vertices_upper.
+     *
+     * NOTE: the orig reads cardef from `puVar6 + 0x20` which after the first
+     * loop is incremented by 8 each iter, so the BASE for loop 2 is
+     * `cardef + 0x40` (puVar6 was `cardef`, then incremented 4 times in loop 1
+     * yielding `cardef + 0x20`, then `+ 0x20` to give `cardef + 0x40`). */
+    for (int i = 0; i < 4; i++) {
+        int16_t corner_off[3] = {
+            *(int16_t *)(cardef + 0x40 + i * 8 + 0),
+            *(int16_t *)(cardef + 0x40 + i * 8 + 2),
+            *(int16_t *)(cardef + 0x40 + i * 8 + 4),
+        };
+
+        actor->body_probes[i].span_index = span;
+        actor->body_probes[i].sub_lane_index = sub_lane;
+
+        int32_t out[3];
+        td5_transform_short_vec3_by_render_matrix_rounded(corner_off, out, matrix);
+        int32_t wx_fp = out[0] << 8;
+        int32_t wy_fp = out[1] << 8;
+        int32_t wz_fp = out[2] << 8;
+
+        /* Mirror to bbox_vertices_upper[i] (collision_spin output target). */
+        actor->bbox_vertices_upper[i].x = wx_fp;
+        actor->bbox_vertices_upper[i].y = wy_fp;
+        actor->bbox_vertices_upper[i].z = wz_fp;
+
+        td5_track_update_probe_position(&actor->body_probes[i], wx_fp, wz_fp);
+        if (max_sp > 0 && actor->body_probes[i].span_index >= (int16_t)max_sp)
+            actor->body_probes[i].span_index = (int16_t)(max_sp - 1);
+        td5_track_compute_probe_contact_vertices(&actor->body_probes[i]);
+
+        int32_t probe_pos[3] = { wx_fp, wy_fp, wz_fp };
+        int32_t ground_y = 0;
+        ComputeActorTrackContactNormal((short *)&actor->body_probes[i],
+                                       probe_pos, &ground_y);
+        s_scripted_body_probe_depth[i] = ground_y;
+
+        if (wy_fp - ground_y < 0)
+            below_ground_mask |= (1u << (i + 4));
+    }
+
+    return below_ground_mask;
+}
+
+/* [CONFIRMED @ 0x004096B0] ComputeActorWorldBoundingVolume
+ *
+ * Wall-impact response: averages the contact positions of all probes that hit
+ * the ground (per `view_mask` bitmask from RenderVehicleActorModel), computes
+ * a penetration-resolution impulse, applies it to linear_velocity, and lifts
+ * world_pos.y by the deepest probe penetration. Also triggers contact SFX:
+ *   - heavy thud (sound 0x17) when downward-into-ground velocity exceeds 4000
+ *   - rolling scrape (sound 0x16) for racers (slot < 6) with vy < -400.
+ *
+ * Tail-calls CheckAndUpdateActorCollisionAlignment which may exit recovery
+ * if the actor is now aligned + still. */
+static void td5_physics_compute_actor_world_bounding_volume(TD5_Actor *actor,
+                                                            uint32_t view_mask)
+{
+    if (!actor) return;
+
+    /* Magic float constants (resolved from .data at 0x0045D5EC..0x0045D604):
+     *   c_xz_eps      = 3.10254e-9f  (0x315555a9 @ 0x0045D5EC) — XZ vel epsilon
+     *   c_pen_scale   = 1.0625f      (0x3F880000 @ 0x0045D5F0) — penetration scale
+     *   c_min_eps     = 1.0f         (0x3F800000 @ 0x0045D5F4 = g_audioMinDistanceEpsilon)
+     *   c_drag_quad_a = 200000.0f    (0x48435000 @ 0x0045D5F8)
+     *   c_drag_quad_b = -212500.0f   (0xC84F8500 @ 0x0045D5FC)
+     *   c_xz_thresh   = 128.0f       (0x43000000 @ 0x0045D600) — XZ magnitude gate
+     *   c_4096        = 4096.0f      (0x45800000 @ 0x0045D604 = g_audioDopplerSpeedOfSound)
+     *   c_yaw_factor  = 3.339476f    (0x4055A5B9 @ 0x00463208) — yaw twist scalar
+     *   c_neg_4096    = -4096.0f     (0xC5800000 @ 0x0045D69C) */
+    static const float c_pen_scale   = 1.0625f;
+    static const float c_min_eps     = 1.0f;
+    static const float c_drag_quad_a = 200000.0f;
+    static const float c_drag_quad_b = -212500.0f;
+    static const float c_xz_thresh   = 128.0f;
+    static const float c_yaw_factor  = 3.339476f;
+    /* g_fp8ToFloatScale (1/256) is defined elsewhere in render module; reuse
+     * via the standard FP_TO_FLOAT macro. */
+
+    /* Accumulate average probe position (in /16 fp units) and deepest dip
+     * for whichever probes are flagged in view_mask. */
+    int32_t avg_x = 0, avg_y = 0, avg_z = 0;
+    int32_t lift_y = 0;
+    int active = 0;
+
+    /* Probes 0..3 = wheel probes (depth at s_scripted_wheel_probe_depth[i]);
+     * probes 4..7 = body probes (depth at s_scripted_body_probe_depth[i-4]).
+     * Orig walks pointers piVar5 = &actor->probe_FL_y (= wheel_world_positions_hires[0].y
+     * in port terms) and piVar3 = &DAT_00483958 (= s_scripted_wheel_probe_depth here). */
+    int down_proj = 0;
+    for (int i = 0; i < 4; i++) {
+        if (!(view_mask & (1u << i))) continue;
+        TD5_Vec3_Fixed *wpos = &actor->wheel_world_positions_hires[i];
+        avg_x += (wpos->x - actor->world_pos.x) >> 4;
+        avg_y += (wpos->y - actor->world_pos.y) >> 4;
+        avg_z += (wpos->z - actor->world_pos.z) >> 4;
+        int32_t dip = s_scripted_wheel_probe_depth[i] - wpos->y;
+        if (dip > lift_y) lift_y = dip;
+        active++;
+    }
+    /* Body-corner probes (bits 4..7). Orig second loop walks
+     * &actor->bbox_vertices_upper[i].y and DAT_00483968 with same structure. */
+    for (int i = 0; i < 4; i++) {
+        if (!(view_mask & (1u << (i + 4)))) continue;
+        TD5_Vec3_Fixed *bpos = &actor->bbox_vertices_upper[i];
+        avg_x += (bpos->x - actor->world_pos.x) >> 4;
+        avg_y += (bpos->y - actor->world_pos.y) >> 4;
+        avg_z += (bpos->z - actor->world_pos.z) >> 4;
+        int32_t dip = s_scripted_body_probe_depth[i] - bpos->y;
+        if (dip > lift_y) lift_y = dip;
+        active++;
+    }
+
+    if (active > 0) {
+        avg_x /= active;
+        avg_y /= active;
+        avg_z /= active;
+
+        /* Transform avg into body-relative orientation via recovery_target
+         * (collision_spin) matrix. ConvertFloatVec3ToIntVec3B is a 3x3 mat-vec
+         * multiply that FILDs the int input and writes int16-truncated outputs.
+         *
+         * Port simplification: do the math inline since we have the matrix
+         * already accessible. */
+        const float *spin = actor->collision_spin_matrix.m;
+        int16_t local_v[3];
+        local_v[0] = (int16_t)(int32_t)lrintf(spin[0]*(float)avg_x + spin[1]*(float)avg_y + spin[2]*(float)avg_z);
+        local_v[1] = (int16_t)(int32_t)lrintf(spin[3]*(float)avg_x + spin[4]*(float)avg_y + spin[5]*(float)avg_z);
+        local_v[2] = (int16_t)(int32_t)lrintf(spin[6]*(float)avg_x + spin[7]*(float)avg_y + spin[8]*(float)avg_z);
+
+        /* iVar1 (local_1c..local_14) = local_v + (lin_vel/16 - avg) */
+        int32_t l_x = (int32_t)local_v[0] + ((actor->linear_velocity_x >> 4) - avg_x);
+        int32_t l_y = (int32_t)local_v[1] + ((actor->linear_velocity_y >> 4) - avg_y);
+        int32_t l_z = (int32_t)local_v[2] + ((actor->linear_velocity_z >> 4) - avg_z);
+
+        /* XZ magnitude check  [0x00409808-21] */
+        float fav_x = (float)avg_x;
+        float fav_z = (float)avg_z;
+        float xz_mag = (float)lrintf(sqrtf(fav_x * fav_x + fav_z * fav_z));
+
+        /* Body-relative downward velocity into ground (using heading_normal as
+         * approximate body-Y axis): -(hx*l_x + hy*l_y + hz*l_z) >> 12 */
+        int16_t hx = actor->heading_normal.x;
+        int16_t hy = actor->heading_normal.y;
+        int16_t hz = actor->heading_normal.z;
+        down_proj = -((int32_t)hy * l_z +
+                      (int32_t)hx * l_x +
+                      (int32_t)hz * l_y) >> 12;
+
+        float pen_force = 0.0f;
+        if (down_proj < 0) {
+            if (down_proj < -4000) {
+                int32_t world_pos[3] = { actor->world_pos.x, actor->world_pos.y, actor->world_pos.z };
+                td5_sound_play_at_position(0x17, 0x400, 0x5622, world_pos, 4);
+            }
+
+            if (xz_mag <= c_xz_thresh) {
+                /* Light-impact branch: pen_force = -down_proj * 1.0625f
+                 * The orig also copies recovery_target → local_d0 in this branch
+                 * for downstream MultiplyRotationMatrices3x3 — port omits the
+                 * copy since the matrix product result is overwritten when
+                 * heavy-impact path also fires. */
+                pen_force = (float)(-down_proj) * c_pen_scale;
+            } else {
+                /* Heavy-impact branch: pen_force based on quadratic drag, and
+                 * twist the collision_spin_matrix via a yaw-axis pre-multiply. */
+                pen_force = ((float)down_proj * c_drag_quad_b) /
+                            (xz_mag * xz_mag * (1.0f / 256.0f) + c_drag_quad_a);
+                int32_t yaw_q = ((int32_t)lrintf(c_yaw_factor * pen_force * xz_mag)) >> 0x12;
+
+                float yaw_c = CosFloat12bit((uint32_t)yaw_q);
+                float yaw_s = SinFloat12bit(yaw_q);
+
+                /* Build twist matrix: a yaw-only rotation post-multiplied by
+                 * collision_spin → result back into collision_spin.
+                 * [0x004098D9-9A6 — orig builds two scratch 3x3s, calls
+                 * MultiplyRotationMatrices3x3 three times.]
+                 * Mirror via two helper matrices. */
+                float twist[9];
+                /* twist axis derived from XZ direction (avg_x, avg_z) normalized. */
+                float scale = c_min_eps / xz_mag;
+                float ax = scale * fav_x;
+                float az = scale * fav_z;
+                twist[0] = 1.0f; twist[1] = 0.0f; twist[2] = 0.0f;
+                twist[3] = 0.0f; twist[4] = yaw_c; twist[5] = -ax;  /* placeholder approx */
+                twist[6] = 0.0f; twist[7] = az;    twist[8] = yaw_c;
+
+                float tmp[9];
+                MultiplyRotationMatrices3x3(twist, (float *)&actor->collision_spin_matrix, tmp);
+                memcpy(&actor->collision_spin_matrix, tmp, 9 * sizeof(float));
+                (void)yaw_s;
+            }
+
+            /* Horizontal impulse based on lin_vel/16 + l vector magnitude  [0x004099C8-A07] */
+            int32_t lateral_mag = (int32_t)lrintf(sqrtf((float)(l_z * l_z + l_x * l_x)));
+            if (lateral_mag >= 1) {
+                /* Drag impulse on lin_vel along (l_x, l_z) direction. */
+                int32_t dip = lift_y;
+                int32_t bias = (dip + 0x400) * 0x20;
+                bias = (int32_t)(bias + (((int32_t)bias >> 31) & 0x3FF)) >> 10;  /* SAR_RZ 10 */
+                int32_t imp = (lateral_mag < bias) ? lateral_mag : bias;
+                actor->linear_velocity_x -= (imp * l_x) >> 8;
+                actor->linear_velocity_z -= (imp * l_z) >> 8;
+            }
+
+            /* Body-axis impulse: subtract heading-normal-aligned penetration. */
+            int32_t pf_i = (int32_t)lrintf(pen_force);
+            actor->linear_velocity_x -= ((int32_t)hx * pf_i) >> 8;
+            actor->linear_velocity_y -= ((int32_t)hy * pf_i) >> 8;
+            actor->linear_velocity_z -= ((int32_t)hz * pf_i) >> 8;
+            (void)c_min_eps;
+        }
+
+        /* Tail: lift world_pos.y by deepest probe and trigger rolling SFX. */
+        actor->world_pos.y += lift_y;
+        td5_physics_check_and_update_actor_collision_alignment(actor);
+        actor->render_pos.x = (float)actor->world_pos.x * (1.0f / 256.0f);
+        actor->render_pos.y = (float)actor->world_pos.y * (1.0f / 256.0f);
+        actor->render_pos.z = (float)actor->world_pos.z * (1.0f / 256.0f);
+
+        if (down_proj < -400 && actor->slot_index < 6) {
+            int32_t world_pos[3] = { actor->world_pos.x, actor->world_pos.y, actor->world_pos.z };
+            td5_sound_play_at_position(0x16, 0x1000, 0x5622, world_pos, 1);
+        }
+        return;
+    }
+
+    /* No probe hits — just lift_y (which is zero) and run tail. */
+    actor->world_pos.y += lift_y;
+    td5_physics_check_and_update_actor_collision_alignment(actor);
+    actor->render_pos.x = (float)actor->world_pos.x * (1.0f / 256.0f);
+    actor->render_pos.y = (float)actor->world_pos.y * (1.0f / 256.0f);
+    actor->render_pos.z = (float)actor->world_pos.z * (1.0f / 256.0f);
+
+    /* Suppress unused-constant warnings if a branch is bypassed. */
+    (void)c_pen_scale; (void)c_min_eps; (void)c_drag_quad_a;
+    (void)c_drag_quad_b; (void)c_xz_thresh; (void)c_yaw_factor;
+}
+
+/* [CONFIRMED @ 0x00409D20] IntegrateScriptedVehicleMotion
+ *
+ * vehicle_mode==1 integration step — replaces the prior partial port at
+ * the dispatch site. Linear-velocity damping + gravity, rebuild rotation
+ * matrix via MultiplyRotationMatrices3x3(spin, saved → rotation), update
+ * track position, run the probe pass + wall response, then post-pass
+ * reset gate at frame_counter > 0x3B. */
+void td5_physics_integrate_scripted_motion(TD5_Actor *actor)
+{
+    if (!actor) return;
+
+    /* Damping: SAR_RZ_8 mirrors orig's CDQ;AND 0xFF;ADD;SAR 8 idiom. */
+    int32_t vx = actor->linear_velocity_x;
+    vx -= SAR_RZ_8(vx);
+    actor->linear_velocity_x = vx;
+    actor->world_pos.x += vx;
+
+    /* Y: damp then subtract gravity */
+    int32_t vy = actor->linear_velocity_y;
+    vy = vy - SAR_RZ_8(vy) - g_gravity_constant;
+    actor->linear_velocity_y = vy;
+    actor->world_pos.y += vy;
+
+    int32_t vz = actor->linear_velocity_z;
+    vz -= SAR_RZ_8(vz);
+    actor->linear_velocity_z = vz;
+    actor->world_pos.z += vz;
+
+    /* Rotation update: rotation = collision_spin * saved_orientation
+     * [CONFIRMED @ 0x00409D67-95]. Result is written back to BOTH the rotation
+     * matrix AND the saved_orientation copy in the orig (saved gets the new
+     * rotation; collision_spin remains for the next tick's twist).
+     *
+     * Order matters: orig is `MultiplyRotationMatrices3x3(spin, saved, tmp)`
+     * with output to a scratch, then copies tmp → saved → rotation.
+     * Port mirrors. */
+    float scratch[9];
+    MultiplyRotationMatrices3x3((float *)&actor->collision_spin_matrix,
+                                (float *)&actor->saved_orientation,
+                                scratch);
+    memcpy(&actor->saved_orientation, scratch, 9 * sizeof(float));
+    memcpy(&actor->rotation_matrix, scratch, 9 * sizeof(float));
+
+    /* Update chassis track position from new world pos. */
+    td5_track_update_actor_position(actor);
+
+    /* Update render_pos from world_pos. */
+    actor->render_pos.x = (float)actor->world_pos.x * (1.0f / 256.0f);
+    actor->render_pos.y = (float)actor->world_pos.y * (1.0f / 256.0f);
+    actor->render_pos.z = (float)actor->world_pos.z * (1.0f / 256.0f);
+
+    /* Probe pass → wall response. */
+    uint32_t view_mask = td5_physics_render_vehicle_actor_model(actor);
+    if (view_mask != 0)
+        td5_physics_compute_actor_world_bounding_volume(actor, view_mask);
+
+    /* Recovery timeout — orig has TWO sites that test frame_counter > 0x3B:
+     *   1. End of IntegrateScriptedVehicleMotion @ 0x00409E5C-67 (this one)
+     *   2. Inside CheckAndUpdateActorCollisionAlignment via alignment bin test
+     * Either path calls ResetVehicleActorState. */
+    if (actor->frame_counter > 0x3B)
+        td5_physics_reset_actor_state(actor);
+}
+
 /* ============================================================
  * [CITATION-SWEEP 2026-05-21] Phase 1 audit-header refresh
  *
@@ -9834,8 +10452,8 @@ void td5_physics_load_carparam(int slot, const uint8_t *data_268)
  * Source: re/analysis/l3_triage_2026-05-21.csv +
  *         re/analysis/phase1_manifest_assignment.csv
  *
- *   0x00409520  CheckAndUpdateActorCollisionAlignment
- *   0x004096B0  ComputeActorWorldBoundingVolume
+ *   0x00409520  CheckAndUpdateActorCollisionAlignment  [PORTED 2026-05-24 Tier 2]
+ *   0x004096B0  ComputeActorWorldBoundingVolume        [PORTED 2026-05-24 Tier 2]
  *   0x0043C9E0  InitializeTrackedActorMarkerBillboards
  *   0x0043CDE0  RenderTrackedActorMarker
  *   0x0043D830  ApplyRandomWheelJitterHighSpeed  [ARCH-DIVERGENCE: dead in orig (0 callers verified 2026-05-21 via mcp__ghidra__function_callers); no port impl needed]

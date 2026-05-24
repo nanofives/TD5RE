@@ -33,6 +33,7 @@
 #include "td5_trace.h"
 #include "td5_trace_whole_state.h"
 #include "td5_trace_replay.h"
+#include "td5_benchmark.h"
 
 int td5_trace_current_sim_tick(void) {
     return g_td5.simulation_tick_counter;
@@ -244,12 +245,14 @@ extern uint8_t *g_track_environment_config; /* td5_asset.c -- LEVELINF.DAT buffe
  *   See detailed audit comment at td5_game_begin_fade_out(). Port
  *   collapses orig's dual-axis dispatch (param drives radial-pulse gate;
  *   g_raceViewportLayoutMode drives fade direction) into a single `param`
- *   axis that already encodes split_screen_mode at all call sites. The
- *   radial-pulse overlay is a runtime stub (td5_render_radial_pulse is
- *   empty in td5_render.c:5215) so the missing branch has no
- *   user-visible effect today. Fade-direction alternator collapses orig's
- *   complex `& 0x80000001` repair into a single `^= 1` toggle; both
- *   converge to alternating 0/1, byte-equivalent in observable state.
+ *   axis that already encodes split_screen_mode at all call sites.
+ *   Radial-pulse RESET now wired (Tier 4 port 2026-05-24): port calls
+ *   td5_hud_reset_radial_pulse() when the orig gate triggers, mirroring
+ *   ResetHudRadialPulseOverlay @ 0x0043a210. The pulse render itself
+ *   already lives in td5_render_radial_pulse + td5_hud.c:2514 gate.
+ *   Fade-direction alternator collapses orig's complex `& 0x80000001`
+ *   repair into a single `^= 1` toggle; both converge to alternating
+ *   0/1, byte-equivalent in observable state.
  *
  * ResetRaceCameraSelectionState @ 0x00402000 [L5 — byte-faithful]
  *   Port td5_camera.c:1246 mirrors orig's two-branch dispatch (param==0
@@ -649,6 +652,10 @@ void td5_game_shutdown(void) {
         td5_plat_heap_free(s_benchmark_image_data);
         s_benchmark_image_data = NULL;
     }
+    /* Release the benchmark sample buffer (mirrors orig's process-exit
+     * cleanup of g_benchmarkSampleBuffer; safe to call without prior
+     * init). */
+    td5_benchmark_shutdown();
     TD5_LOG_I(LOG_TAG, "Game module shut down");
 }
 
@@ -854,6 +861,11 @@ int td5_game_tick(void) {
              * result=1: normal race completion (fade finished) -> results screen
              * result=2: ESC/pause menu exit -> main menu */
             if (g_td5.benchmark_active) {
+                /* [CONFIRMED @ 0x00428D80 WriteBenchmarkResultsTgaReport]:
+                 * orig RunRaceFrame calls this on race-end when benchmark
+                 * mode is active.  Port emits a portable plain-text
+                 * report (ARCH-DIVERGENCE: no DDraw TGA glyph blit). */
+                td5_benchmark_write_report(NULL);
                 TD5_LOG_I(LOG_TAG, "State transition: %s -> %s",
                           td5_game_state_name(TD5_GAMESTATE_RACE),
                           td5_game_state_name(TD5_GAMESTATE_BENCHMARK));
@@ -1932,6 +1944,12 @@ int td5_game_init_race_session(void) {
 
     /* ---- Step 14: Initialize particles, smoke, tire tracks, weather ---- */
     td5_vfx_init();
+    /* Tier 1 port — cache PoliceLt_red/blue + Police_red/blue atlas UVs
+     * and reset marker phase counters. Mirrors orig
+     * InitializeTrackedActorMarkerBillboards @ 0x0043c9e0 callsite inside
+     * InitializeRaceSession (between LoadRaceAmbientSoundBuffers and
+     * InitializeRaceParticleSystem). */
+    td5_vfx_init_tracked_actor_marker_billboards();
     TD5_LOG_I(LOG_TAG, "InitRace step 14/19: VFX systems initialized");
 
     /* ---- Step 15: Configure force feedback + input mapping ---- */
@@ -2176,6 +2194,15 @@ int td5_game_init_race_session(void) {
     /* Seed prev_world_pos so the first sub-tick render interpolation pass
      * (before any sim tick has fired) lerps current->current = no jump. */
     td5_physics_seed_prev_world_pos();
+
+    /* [CONFIRMED @ 0x00428D20 InitializeBenchmarkFrameRateCapture]:
+     * orig InitializeRaceSession calls this once at race start to
+     * reset the per-frame sample buffer.  Port mirrors the cadence;
+     * the capture is a no-op when benchmark_active is 0 so non-
+     * benchmark races pay zero cost. */
+    if (g_td5.benchmark_active) {
+        td5_benchmark_init_capture();
+    }
 
     TD5_LOG_I(LOG_TAG, "InitializeRaceSession: complete (%d actors)",
               g_td5.total_actor_count);
@@ -3190,6 +3217,10 @@ int td5_game_run_race_frame(void) {
         td5_render_set_fog(0);  /* fog off for sky */
         td5_render_advance_sky_rotation();
         td5_render_advance_billboard_anims();
+        /* Tier 1 port — advance tracked-actor marker strobe phases
+         * (orig AdvanceWorldBillboardAnimations @ 0x0043cdc0 stride
+         * 0x22c × 2 entries = first 2 sub-blocks of marker pool). */
+        td5_vfx_advance_tracked_marker_phases();
 
         /* ---- Pass 1: OPAQUE (world + track + actors) ---- */
         td5_render_set_race_pass(TD5_RACE_PASS_OPAQUE);
@@ -4368,11 +4399,11 @@ int td5_game_check_race_completion(void) {
  *       2 (vert):     direction = 1
  *
  * Port collapses the dual-axis dispatch into a single `param` axis. All
- * call sites in td5_game.c (lines 2119, 2285) pass either
- * g_td5.split_screen_mode or 0, which are the same values orig reads
- * from g_raceViewportLayoutMode. The radial-pulse gate is omitted
- * because td5_render_radial_pulse is a stub (td5_render.c:5215). The
- * alternator complex bit-twiddle is replaced with `^= 1` -- both
+ * call sites in td5_game.c pass g_td5.split_screen_mode. The radial-pulse
+ * gate is now WIRED (Tier 4 port 2026-05-24): td5_hud_reset_radial_pulse()
+ * is invoked when single-player non-network non-drag matches orig's gate.
+ * The render path was already live (td5_render.c:6202 + td5_hud.c:2514).
+ * The alternator complex bit-twiddle is replaced with `^= 1` -- both
  * converge to alternating 0/1 across calls, byte-equivalent in
  * observable state. Port additionally zeroes s_fade_accumulator which
  * the orig does not -- orig relies on the accumulator already being at
@@ -4383,6 +4414,21 @@ int td5_game_check_race_completion(void) {
 void td5_game_begin_fade_out(int param) {
     g_td5.race_end_fade_state = 1;
     s_fade_accumulator = 0.0f;
+
+    /* [CONFIRMED @ 0x0042cc30..0x0042cc73 BeginRaceFadeOutTransition; Tier 4
+     * port 2026-05-24] Radial-pulse gate. Orig checks:
+     *   param_1 == 1 && g_humanPlayerCount == 1 && actor+0x383 == 0 &&
+     *   !network && selectedGameType == 0 && !drag
+     * Port port-time gate uses split_screen_mode == 0 as the equivalent of
+     * (param_1==1 && human_count==1) since both call sites supply
+     * split_screen_mode. The actor+0x383 (per-slot dead/disabled) check is
+     * inferred from slot 0 active status. */
+    if (param == 0 &&
+        !g_td5.network_active &&
+        g_td5.game_type == TD5_GAMETYPE_SINGLE_RACE &&
+        !g_td5.drag_race_enabled) {
+        td5_hud_reset_radial_pulse();
+    }
 
     switch (param) {
     case 0:  /* single player */
@@ -4507,6 +4553,15 @@ void td5_game_update_frame_timing(void) {
 
     g_td5.frame_end_timestamp = now;
     g_td5.frame_prev_timestamp = now;
+
+    /* [CONFIRMED @ 0x00428D40 RecordBenchmarkFrameRateSample]: orig
+     * pushes one delta sample per frame into g_benchmarkSampleBuffer
+     * while benchmark mode is active.  Port records the microsecond
+     * delta into td5_benchmark.c's ring; td5_benchmark_write_report
+     * consumes it when the FSM transitions to GAMESTATE_BENCHMARK. */
+    if (g_td5.benchmark_active) {
+        td5_benchmark_record_sample(delta_ms * 1000u);
+    }
 }
 
 float td5_game_get_fps(void) {
@@ -4743,6 +4798,21 @@ void td5_game_advance_sky_rotation(void) {
     }
 }
 
+/* [CONFIRMED @ 0x004BF500 g_wantedTargetTrackerActive read site in
+ * RenderTrackedActorMarker 0x0043cde0] — exposes the marker intensity to
+ * the render path. Decays at 0x200/sub-tick and clamps to [0, 0x1000]
+ * inside tick_wanted_target_tracker (see td5_game.c:484). */
+int32_t td5_game_get_wanted_target_tracker(void) {
+    return s_wanted_target_tracker;
+}
+
+/* [CONFIRMED @ 0x004bf51c g_wantedTargetSlotIndex] — slot index of the
+ * tracked actor used by the cop-chase marker render gate. Orig .data-
+ * init = 0 (player slot); no binary writers. */
+int td5_game_get_wanted_target_slot(void) {
+    return 0;
+}
+
 void *td5_game_heap_alloc(size_t size) {
     return calloc(1, size);
 }
@@ -4812,28 +4882,30 @@ void td5_game_update_split_screen_balance(void)
  * Source: re/analysis/l3_triage_2026-05-21.csv +
  *         re/analysis/phase1_manifest_assignment.csv
  *
- *   0x00428D20  InitializeBenchmarkFrameRateCapture  [ARCH-DIVERGENCE: benchmark sample-buffer pipeline removed; L5 sweep 2026-05-21]
+ *   0x00428D20  InitializeBenchmarkFrameRateCapture  [PORTED 2026-05-24 Tier 5]
  *     Orig (Ghidra-verified 0x00428D20): one-shot HeapAllocTracked(1000000) into
- *     g_benchmarkSampleBuffer + zeroes g_benchmarkSampleCount. The port has no
- *     equivalent because benchmark mode samples via td5_plat_query_perf_counter
- *     directly; see the sibling ARCH-DIVERGENCE block below for the consuming
- *     functions 0x00428D40 / 0x00428D80. With those gone, this allocator is
- *     also gone -- no gameplay or fidelity impact.
+ *     g_benchmarkSampleBuffer + zeroes g_benchmarkSampleCount. Port mirror:
+ *     td5_benchmark_init_capture() in td5_benchmark.c; wired from
+ *     td5_game_init_race_session under the benchmark_active gate.
  *   0x00428D60  FormatBenchmarkReportText  (density-match, verify in Phase 4)
  *   0x0042D950  ApplyMeshRenderBasisFromWorldPosition  (density-match, verify in Phase 4)
  */
 
 /* ============================================================
- * [ARCH-DIVERGENCE: benchmark output collapse] Phase 3 manifest (2026-05-21)
+ * [PORTED 2026-05-24 Tier 5 — benchmark report parity] (was [ARCH-DIVERGENCE])
  *
- * Two L3 functions from the original binary that the port does not
- * implement because the benchmark output format and sampling pipeline
- * are deliberately changed. Per build_confidence_map.py:104-126
- * docstring, [ARCH-DIVERGENCE] is the audited, documented-deviation
- * marker (equivalent to L5 byte-faithful for fidelity scoring).
+ * Three orig functions newly ported into td5_benchmark.c.  Sample
+ * capture is now byte-faithful (u32 ring of frame deltas).  Report
+ * output remains ARCH-DIVERGENT in *format* (plain text instead of
+ * 640x480 24bpp TGA composed by DDraw glyph blits + DXDraw::PrintTGA
+ * + DXDecimal -- the source-port surface stack has no equivalent),
+ * but the report content (sample count, min/max/avg FPS, per-sample
+ * dt) carries the same data orig wrote into the TGA.
  *
- * Original-binary addresses + per-function rationale:
- *
- *   0x00428D40  RecordBenchmarkFrameRateSample   [ARCH-DIVERGENCE: orig pushes each frame's dt into a 1024-slot FPU circular buffer at DAT_004A2CF8 indexed by DAT_004A2CF4; the port's benchmark FSM state samples via td5_plat_query_perf_counter directly and does not need the intermediate buffer]
- *   0x00428D80  WriteBenchmarkResultsTgaReport   [ARCH-DIVERGENCE: orig writes results as a bespoke TGA-formatted screenshot file; the port emits plain-text frame-time logs instead, an output-format change with no gameplay impact]
+ *   0x00428D40  RecordBenchmarkFrameRateSample   -> td5_benchmark_record_sample
+ *                                                   (wired from td5_game_update_frame_timing)
+ *   0x00428D60  FormatBenchmarkReportText        -> folded into td5_benchmark_write_report
+ *                                                   (orig's only caller was the TGA writer)
+ *   0x00428D80  WriteBenchmarkResultsTgaReport   -> td5_benchmark_write_report
+ *                                                   (wired from RACE->BENCHMARK transition)
  */

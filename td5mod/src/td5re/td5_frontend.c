@@ -8219,7 +8219,10 @@ static void Screen_MusicTestExtras(void) {
          *   CreateTrackedFrontendSurface(0x170,0x78) → DAT_00496400 (now-playing)
          *   Initial draw: sprintf "%d. %s" + NowPlayingTxt + band + title into surfaces
          * Port: no offscreen surfaces — strings are rendered live every frame via
-         * frontend_render_music_test_overlay. Initialise them here. */
+         * frontend_render_music_test_overlay. Initialise them here.
+         * Tier 4 port 2026-05-24 added the [ARCH-DIVERGENCE] footer entries
+         * for ReleaseExtrasGalleryImageSurfaces / LoadExtrasBandGalleryImages /
+         * CreateMenuStringLabelSurface — see end of file. */
         frontend_load_tga("Front_End/MainMenu.tga", "Front_End/FrontEnd.zip");
         /* [CONFIRMED @ 0x418460] CreateFrontendDisplayModeButton(SNK_SelectTrackButTxt, -0x120, 0, 0xA0, 0x20, 0)
          *                          CreateFrontendDisplayModeButton(SNK_OkButTxt, -0x120, 0, 0x60, 0x20, 0) */
@@ -8294,7 +8297,12 @@ static void Screen_MusicTestExtras(void) {
 
     case 8: /* Slide-out (~500ms). Restore gallery images. */
         if (frontend_update_timed_animation(16, 267) >= 1.0f) {
-            /* Release band surfaces, reload gallery surfaces */
+            /* [CONFIRMED @ 0x00418bd2..0x00418bdc]:
+             *   ReleaseExtrasGalleryImageSurfaces(); LoadExtrasGalleryImageSurfaces();
+             * Port has no band-photo surface pool (case 0 documents the fold), so
+             * release/reload is a no-op. The mugshot gallery (Screen_ExtrasGallery
+             * at TD5_SCREEN_EXTRAS_GALLERY) maintains its own s_gallery_pic_surface
+             * independently and is not coupled to this screen's transition. */
             td5_frontend_set_screen(TD5_SCREEN_SOUND_OPTIONS);
         }
         break;
@@ -10529,6 +10537,50 @@ static void Screen_SessionLocked(void) {
  *       0..11 (12 tracks), CDPlay(idx+2, 1), and the y=0/0x28/0x50 row layout
  *       for NowPlaying/band/title all byte-faithful. Sprite-rect button
  *       positions absorbed into frontend's button-table animations.
+ *
+ *   0x0040d640  ReleaseExtrasGalleryImageSurfaces  [ARCH-DIVERGENCE: surface-pool fold; Tier 4 2026-05-24]
+ *       Orig walks g_extrasGallerySlideSurfaces[g_extrasGallerySlideCount]
+ *       calling ReleaseTrackedFrontendSurface on each non-NULL entry, then
+ *       zeroes the count and sets g_frontendScreenTransitionFlag=1. Used by
+ *       Screen_MusicTestExtras case 0 (clear mugshots before loading band
+ *       photos) and case 8 (clear band photos before reloading mugshots).
+ *       Port: Screen_MusicTestExtras renders text live (no offscreen surface
+ *       pool) and Screen_ExtrasGallery owns its own per-image surface; the
+ *       coupling between the two screens does not exist in the port, so this
+ *       helper has no purpose. Documented at td5_frontend.c:8295.
+ *
+ *   0x0040d6a0  LoadExtrasBandGalleryImages  [ARCH-DIVERGENCE: surface-pool fold; Tier 4 2026-05-24]
+ *       Orig loads 5 band photos via LoadTgaToFrontendSurfaceFromArchive into
+ *       g_extrasGallerySlideSurfaces[0..4] (Fear Factory, Gravity Kills, Junkie
+ *       XL, KMFDM, Pitch Shifter) from Front_End/Extras/Extras.zip and resets
+ *       the crossfade phase / slide cursor. The orig MusicTestExtras screen
+ *       then crossfaded these photos behind the track-info text. Port skips
+ *       the photos entirely; track info is rendered live by
+ *       frontend_render_music_test_overlay (td5_frontend.c:3974). Equivalent
+ *       feature parity would require a port-side band-photo surface pool, a
+ *       crossfade state machine, and overlay-blit infrastructure — none of
+ *       which exist today. Documented at td5_frontend.c:8217.
+ *
+ *   0x00412e30  CreateMenuStringLabelSurface  [ARCH-DIVERGENCE: string-baker fold; Tier 4 2026-05-24]
+ *       Orig 472-byte helper. Two dispatch branches:
+ *         (a) Lang DLL byte[8] != '0': measure SNK_MenuStrings[param]
+ *             via MeasureOrDrawFrontendFontString, allocate a tracked
+ *             0x24-tall surface, blit black, render the localized string
+ *             into the surface, and set g_menuHeaderLabel{Width,Height,
+ *             YOffset} = (W, 0x24, 0x10).
+ *         (b) Lang DLL byte[8] == '0' (English baked path): sprintf the
+ *             template "Front_End/%s.tga", load that TGA from FrontEnd.zip
+ *             via LoadFrontendTgaSurfaceFromArchive, vtbl-lock the surface
+ *             to read width via DDSURFACEDESC (the 0x7c-byte size hint),
+ *             set g_menuHeaderLabel{Width,Height,YOffset} = (0x150, 0x14, 0).
+ *       Called by all 19 screen state-machines to bake a per-screen header
+ *       label. Port: fe_draw_text + frontend overlay helpers render headers
+ *       live every frame using the font atlas (td5_frontend.c:4957); no
+ *       offscreen surface caching, no DDraw Lock path, no per-language TGA
+ *       fallback (English-only string table at present). The dual-axis
+ *       (live-font vs baked-TGA) branch is therefore folded entirely.
+ *       g_menuHeaderLabel* state is computed implicitly by the live-render
+ *       path (text width measured via fe_measure_text_width at each draw).
  *
  *   0x004213D0  ScreenQuickRaceMenu  [ARCH-DIVERGENCE: ScreenFSM]
  *       Screen_QuickRaceMenu (td5_frontend.c:6564) — 7 states (0..6). Case-

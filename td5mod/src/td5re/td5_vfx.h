@@ -97,6 +97,12 @@ void td5_vfx_update_tire_track_emitters(TD5_Actor *actor, int view_index);
 void td5_vfx_spawn_smoke(TD5_Actor *actor);
 void td5_vfx_spawn_rear_wheel_smoke(TD5_Actor *actor, int view_index);
 
+/* Engine-rev gated random smoke puff (orig 0x00401370 SpawnRandomVehicleSmokePuff).
+ * Called per-frame per visible racer from the actor render path. Gates on
+ * engine_speed_accum<4000 && encounter_steering_cmd>200 && rand()%engine<500;
+ * spawns from probe_RR/RL midpoint via td5_vfx_spawn_smoke_puff_at_point. */
+void td5_vfx_spawn_random_smoke_puff(TD5_Actor *actor, int view_index);
+
 /* ========================================================================
  * Taillights
  * ======================================================================== */
@@ -109,6 +115,31 @@ void td5_vfx_render_taillights(int actor_index);
  * ======================================================================== */
 
 void td5_vfx_advance_billboard_anims(void);
+
+/* ========================================================================
+ * Tracked-actor marker billboards (cop chase visuals)
+ *
+ * Port of orig 0x0043c9e0 InitializeTrackedActorMarkerBillboards. Caches
+ * UVs + texture pages for POLICELT_RED / POLICELT_BLUE / POLICE_RED /
+ * POLICE_BLUE atlas entries, owns per-marker animation phase counters
+ * advanced by td5_vfx_advance_tracked_marker_phases. Consumed by the
+ * render-side RenderTrackedActorMarker port in td5_render.c, which
+ * gates its draw on g_wantedModeEnabled + tracked-target slot index.
+ * ======================================================================== */
+
+#define TD5_VFX_TRACKED_MARKER_COUNT      2  /* front + back marker per actor */
+#define TD5_VFX_TRACKED_LAYERS_PER_MARK   3  /* red strobe + blue strobe + base */
+
+void td5_vfx_init_tracked_actor_marker_billboards(void);
+void td5_vfx_advance_tracked_marker_phases(void);
+
+/* Per-layer UV / page accessor — used by render to draw the 3-layer
+ * billboard stack (red strobe + blue strobe + base marker) per marker. */
+int  td5_vfx_tracked_marker_get_page(int marker, int layer);
+void td5_vfx_tracked_marker_get_uv(int marker, int layer,
+                                    float *u0, float *v0, float *u1, float *v1);
+int  td5_vfx_tracked_marker_get_phase(int marker);
+int  td5_vfx_tracked_marker_initialized(void);
 
 /* ========================================================================
  * Weather state accessors (used by td5_sound_update_ambient)

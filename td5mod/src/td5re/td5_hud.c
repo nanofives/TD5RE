@@ -155,6 +155,16 @@ static float s_radial_pulse_progress;    /* 0x4B0FA0 */
 float td5_hud_radial_pulse_get(void)        { return s_radial_pulse_progress; }
 void  td5_hud_radial_pulse_set(float value) { s_radial_pulse_progress = value; }
 
+/* [CONFIRMED @ 0x0043a210 ResetHudRadialPulseOverlay; Tier 4 port 2026-05-24]
+ * Resets the radial pulse overlay so the effect starts from the beginning
+ * on the next trigger. Orig is a 10-byte stub: MOV [_g_hudRadialPulsePhase], 0.
+ * Note: orig writes 0 (which starts the pulse animation from radius=0,
+ * alpha=0 ramping up); port's td5_hud_init uses -1.0f to mean "inactive /
+ * suppressed". After this reset is called the pulse becomes visible. Called
+ * by orig RunRaceFrame @ 0x0042b687 and BeginRaceFadeOutTransition @
+ * 0x0042cc6f -- both wired in the port at td5_game.c. */
+void td5_hud_reset_radial_pulse(void) { s_radial_pulse_progress = 0.0f; }
+
 /* Screen-center flash counter for HUD */
 static int   s_wrong_way_counter[MAX_HUD_VIEWS]; /* 0x4B0A64 */
 static int   s_prev_span_pos[MAX_HUD_VIEWS];     /* 0x4B1120 */
@@ -3586,3 +3596,173 @@ void td5_hud_draw_race_fade(float progress, int direction)
  *
  *   0x00414F40  RenderPositionerGlyphStrip  [ARCH-DIVERGENCE: HudGlyph]
  */
+
+/* ========================================================================
+ * UpdateWantedDamageIndicator — cop-chase damage HUD (Tier 1 port 2026-05-24)
+ *
+ * Port of UpdateWantedDamageIndicator @ 0x0043d4e0 (420B).
+ *
+ * Orig behavior: per-actor render-time call that emits 2 translucent quads
+ * for the active cop's damage state.
+ *   - Outer frame quad: fixed white outline above the cop's roof.
+ *   - Inner fill quad : height scales with remaining damage
+ *     ((0x1000 - gWantedDamageStateTable[slot]) → emptier as cop takes hits).
+ * Anchored at model-space (0, 120, 0) projected through the current render
+ * transform (which the per-actor render path has just loaded).
+ *
+ * Port replaces the orig BuildSpriteQuadTemplate-into-scratch +
+ * QueueTranslucentPrimitiveBatch sequence with direct screen-space billboard
+ * emission via the existing td5_plat_render_draw_tris pipeline
+ * (TRANSLUCENT_POINT preset — same pattern as brake/tracked-marker billboards).
+ *
+ * Gate (orig @ 0x0043d4f5):
+ *   wanted_mode_enabled != 0 && slot == g_wantedDamageHudOverlayCount
+ * Port mirrors via td5_game_is_wanted_mode() + matching slot index.
+ *
+ * [CONFIRMED @ 0x0043d4e0 + orig disassembly]:
+ *   - Anchor (0, 120, 0)        — DAT_00474868
+ *   - Frame fill 128.0 / 128.0  — DAT_0045d600 / shared with depth_z=128
+ *   - Half-extent constant 0.5  — _g_halfFloatConstant @ 0x0045d5d0
+ *   - Vertical stride 2.0       — _g_simTickBudgetCap @ 0x0045d650
+ *   - Damage scale * 1/4096     — DAT_0045d698
+ * ======================================================================== */
+
+extern int      g_wanted_mode_enabled;
+extern int16_t  g_wanted_damage_state[TD5_MAX_RACER_SLOTS];
+
+/* Mirrors orig g_wantedDamageHudOverlayCount @ 0x004bf504 — selects the
+ * single slot whose damage bar is displayed each frame. Orig .data init
+ * = 0; no writers in the binary apart from the wanted-overlay init reset
+ * at 0x0043d2fc. Port: route through 0 (the cop slot in single-cop mode
+ * — see td5_game_get_cop_actor_index). */
+static int hud_wanted_active_slot(void) {
+    return 0;
+}
+
+void td5_hud_update_wanted_damage_indicator(int actor_slot)
+{
+    /* Gate matches orig 0x0043d4f5:
+     *   if (wanted_mode_enabled != 0 && slot == g_wantedDamageHudOverlayCount) */
+    if (!g_wanted_mode_enabled) return;
+    if (actor_slot != hud_wanted_active_slot()) return;
+    if ((unsigned)actor_slot >= (unsigned)TD5_MAX_RACER_SLOTS) return;
+
+    /* Project model anchor (0, 120, 0) through the current render
+     * transform — same hook the orig uses (WritePointToCurrent
+     * RenderTransform @ 0x0042e4f0 from DAT_00474868). Then perspective-
+     * project to screen space exactly like the brake/tracked-marker
+     * billboards. */
+    float sx, sy, sz, rhw;
+    if (!td5_render_transform_and_project(0.0f, 120.0f, 0.0f,
+                                          &sx, &sy, &sz, &rhw)) {
+        /* Anchor behind near plane — nothing to draw this frame. */
+        return;
+    }
+
+    /* Pulse-w base = (0x1000 - damage) * (1/4096) — orig at 0x0043d637:
+     *   fVar3 = (0x1000 - gWantedDamageStateTable[slot]) * fVar2 * fVar1
+     *           * _DAT_0045d698
+     * where fVar1 = view_height * 1/4096 and fVar2 = fVar1 * digit_step.
+     * Port uses fixed pixel constants for the bar size (screen-space
+     * billboard floats above the car). The remaining-damage scalar is the
+     * fraction we use to scale the inner fill height. */
+    int16_t  dmg     = g_wanted_damage_state[actor_slot];
+    if (dmg < 0)    dmg = 0;
+    if (dmg > 0x1000) dmg = 0x1000;
+    float    health  = (float)dmg * (1.0f / 4096.0f);             /* 1.0 = full */
+    float    damage_frac = 1.0f - health;                          /* 0.0 = full */
+    if (damage_frac < 0.0f) damage_frac = 0.0f;
+    if (damage_frac > 1.0f) damage_frac = 1.0f;
+
+    /* Screen-space billboard footprint — same scale at any distance,
+     * matching the orig's _g_halfFloatConstant + _g_simTickBudgetCap
+     * derived sizes (which work out to a tiny model-space rect). */
+    const float bar_half_w   = 16.0f;   /* outer frame half-width  (px) */
+    const float bar_half_h   = 4.0f;    /* outer frame half-height (px) */
+    const float bar_y_offset = -36.0f;  /* float above projected anchor */
+    const float inner_inset  = 1.0f;    /* frame outline thickness    */
+
+    float cx = sx;
+    float cy = sy + bar_y_offset;
+    /* Use the projected sz/rhw directly so the bar shares depth bucket
+     * with the car body and gets occluded correctly when the car ducks
+     * behind track geometry. */
+
+    /* Pre-fetch a usable atlas page — reuse the BRAKED sprite as a flat
+     * white-keyed quad source. TODO: switch to a dedicated POLICEBAR atlas
+     * entry once the orig damage-bar texture is identified. */
+    TD5_AtlasEntry *bar_atlas = td5_asset_find_atlas_entry(NULL, "BRAKED");
+    int bar_page = bar_atlas ? bar_atlas->texture_page : -1;
+    if (bar_page <= 0) return; /* no atlas — silently skip until BRAKED loads */
+
+    int tw = 256, th = 256;
+    td5_plat_render_get_texture_dims(bar_page, &tw, &th);
+    /* Sample a single white-ish pixel at the atlas entry's top-left+0.5
+     * — gives a solid colored quad without bleed from neighbors. */
+    float u = ((float)bar_atlas->atlas_x + 1.5f) / (float)tw;
+    float v = ((float)bar_atlas->atlas_y + 1.5f) / (float)th;
+
+    /* --- Quad 1: outer frame (white) --- */
+    {
+        TD5_D3DVertex q[4];
+        q[0].screen_x = cx - bar_half_w; q[0].screen_y = cy - bar_half_h;
+        q[1].screen_x = cx - bar_half_w; q[1].screen_y = cy + bar_half_h;
+        q[2].screen_x = cx + bar_half_w; q[2].screen_y = cy - bar_half_h;
+        q[3].screen_x = cx + bar_half_w; q[3].screen_y = cy + bar_half_h;
+        for (int i = 0; i < 4; i++) {
+            q[i].depth_z  = sz;
+            q[i].rhw      = rhw;
+            q[i].diffuse  = 0xFFFFFFFFu;   /* white frame */
+            q[i].specular = 0;
+            q[i].tex_u    = u;
+            q[i].tex_v    = v;
+        }
+        uint16_t idx[6] = { 0, 1, 2, 1, 3, 2 };
+        td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_POINT);
+        td5_plat_render_bind_texture(bar_page);
+        td5_plat_render_draw_tris(q, 4, idx, 6);
+    }
+
+    /* --- Quad 2: inner fill (red→green by damage) --- */
+    {
+        float fill_half_w = bar_half_w - inner_inset;
+        float fill_half_h = bar_half_h - inner_inset;
+        /* Shrink fill horizontally as damage accumulates (right side empties)
+         * — orig at 0x0043d63c writes _DAT_004bf45c = bar_left + (bar_w *
+         * fill_factor), which produces the same shrinking effect. */
+        float fill_right = (cx - fill_half_w) + (2.0f * fill_half_w) * health;
+        float fill_left  = cx - fill_half_w;
+
+        /* Color interpolation: green (0x00FF00) at full health → red (0xFF0000)
+         * at zero. Alpha = 0xFF. */
+        int   r = (int)(255.0f * damage_frac);
+        int   g = (int)(255.0f * health);
+        if (r > 255) r = 255;
+        if (r < 0)   r = 0;
+        if (g > 255) g = 255;
+        if (g < 0)   g = 0;
+        uint32_t fill_color = 0xFF000000u | ((uint32_t)r << 16) | ((uint32_t)g << 8);
+
+        TD5_D3DVertex q[4];
+        q[0].screen_x = fill_left;  q[0].screen_y = cy - fill_half_h;
+        q[1].screen_x = fill_left;  q[1].screen_y = cy + fill_half_h;
+        q[2].screen_x = fill_right; q[2].screen_y = cy - fill_half_h;
+        q[3].screen_x = fill_right; q[3].screen_y = cy + fill_half_h;
+        for (int i = 0; i < 4; i++) {
+            q[i].depth_z  = sz;
+            q[i].rhw      = rhw;
+            q[i].diffuse  = fill_color;
+            q[i].specular = 0;
+            q[i].tex_u    = u;
+            q[i].tex_v    = v;
+        }
+        uint16_t idx[6] = { 0, 1, 2, 1, 3, 2 };
+        td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_POINT);
+        td5_plat_render_bind_texture(bar_page);
+        td5_plat_render_draw_tris(q, 4, idx, 6);
+    }
+
+    /* Restore opaque preset so it doesn't leak into the next per-actor
+     * pass (mirrors brake_lights / tracked-marker tails). */
+    td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
+}

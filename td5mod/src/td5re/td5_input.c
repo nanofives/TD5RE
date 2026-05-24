@@ -1031,6 +1031,74 @@ void td5_input_reset_buffers(void)
 }
 
 /* ========================================================================
+ * UpdatePlayerSteeringWeightBalance  (0x004036b0, 101 bytes)
+ *
+ * [CONFIRMED @ 0x004036b0; Tier 4 port 2026-05-24]
+ *
+ * Two-player split-screen steering-weight balance. Each frame the orig
+ * compares an "input source signed value" between player 0 and player 1
+ * (the orig reads two 16-bit scratch words inside the particle pool at
+ * 0x4ab18c and 0x4ab514 — see g_raceParticlePoolBase). The deltas drive a
+ * pair of 16-bit weights at g_player0SteeringBiasShort/g_player1SteeringBiasShort
+ * (0x0046317c / 0x0046317e); UpdatePlayerVehicleControlState uses bit
+ * 0x200 of the control bits to optionally apply those weights to the
+ * encounter/lane control output at DAT_004ab446.
+ *
+ * Orig logic:
+ *   delta = abs(p0_input - p1_input) * 2
+ *   delta = min(delta, g_steeringBiasMaxSwing)
+ *   if (p0 < p1)  // p1 stronger -> bias toward p0
+ *     player0_weight = 0x100 + delta
+ *     player1_weight = 0x100 - delta
+ *   else
+ *     player0_weight = 0x100 - delta
+ *     player1_weight = 0x100 + delta
+ *
+ * Port: 2P split-screen input scratch words are not currently mirrored in
+ * the port (no analog of g_raceParticlePoolBase[0x200/0x20e]). The
+ * function is provided for completeness so a future 2P-split implementation
+ * can call it once the two source words exist as port-side statics. It
+ * operates on a port-local pair of weights td5_input_get_player_steering_bias()
+ * which falls back to neutral (0x100) when never invoked.
+ *
+ * Caller: RunRaceFrame @ 0x42b96b — INERT in port until 2P-split is wired.
+ * ======================================================================== */
+
+static int16_t s_player_steering_bias_short[2] = { 0x100, 0x100 };   /* orig 0x0046317c/7e */
+static int16_t s_player_steering_bias_input[2] = { 0, 0 };           /* orig 0x004ab18c/0x004ab514 */
+int32_t        g_td5_steering_bias_max_swing  = 0x400;                /* orig 0x0048301c, default plausible cap */
+
+void td5_input_update_player_steering_weight_balance(void)
+{
+    int i0 = (int)s_player_steering_bias_input[0];
+    int i1 = (int)s_player_steering_bias_input[1];
+    int delta;
+    if (i0 < i1) {
+        delta = (i1 - i0) * 2;
+        if (delta > g_td5_steering_bias_max_swing) delta = g_td5_steering_bias_max_swing;
+        s_player_steering_bias_short[0] = (int16_t)(delta + 0x100);
+        s_player_steering_bias_short[1] = (int16_t)(0x100 - delta);
+    } else {
+        delta = (i0 - i1) * 2;
+        if (delta > g_td5_steering_bias_max_swing) delta = g_td5_steering_bias_max_swing;
+        s_player_steering_bias_short[0] = (int16_t)(0x100 - delta);
+        s_player_steering_bias_short[1] = (int16_t)(delta + 0x100);
+    }
+}
+
+int16_t td5_input_get_player_steering_bias(int player)
+{
+    if (player < 0 || player > 1) return 0x100;
+    return s_player_steering_bias_short[player];
+}
+
+void td5_input_set_player_steering_bias_input(int player, int16_t value)
+{
+    if (player < 0 || player > 1) return;
+    s_player_steering_bias_input[player] = value;
+}
+
+/* ========================================================================
  * Control State Queries
  * ======================================================================== */
 

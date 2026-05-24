@@ -170,6 +170,10 @@ void td5_hud_init_font_atlas(void);
 float td5_hud_radial_pulse_get(void);
 void  td5_hud_radial_pulse_set(float value);
 
+/* Resets phase to 0 so the next render triggers a fresh pulse animation.
+ * Mirrors orig ResetHudRadialPulseOverlay @ 0x0043a210 (Tier 4 port). */
+void  td5_hud_reset_radial_pulse(void);
+
 /* --- Per-frame rendering --- */
 void td5_hud_render_overlays(float dt);
 int  td5_hud_build_metric_digits(void);
@@ -181,6 +185,20 @@ void td5_hud_draw_race_fade(float progress, int direction);
 
 /* --- State control --- */
 void td5_hud_set_indicator_state(int view_index, int value);
+
+/* --- Wanted-mode damage indicator overlay (cop chase) ---
+ *
+ * Port of UpdateWantedDamageIndicator @ 0x0043d4e0 (420B). Called once per
+ * actor slot in the render path (mirrors orig RenderRaceActorForView site
+ * @ 0x0040c7a4). Emits two translucent quads:
+ *   1. outer frame (fixed size, fully opaque white)
+ *   2. inner damage bar (height scales with remaining
+ *      gWantedDamageStateTable[slot] in [0, 0x1000]).
+ *
+ * Anchored at model-space (0,120,0) projected through the current render
+ * transform — billboard floats above the cop's roof. No-op outside wanted
+ * mode and when the slot does not match the active HUD-overlay index. */
+void td5_hud_update_wanted_damage_indicator(int actor_slot);
 
 /* --- Text pipeline --- */
 void td5_hud_queue_text(int font_index, int x, int y, int centered,

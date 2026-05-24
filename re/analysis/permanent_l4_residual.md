@@ -1,5 +1,14 @@
 # Permanent L4 Residual — Post Phase 5 (2026-05-21)
 
+> **Status update — 2026-05-24:** A full orig-vs-port verdict sweep (876
+> functions, results at `re/analysis/orig_vs_port_verdict_2026-05-24.csv`)
+> + a NOT_PORTED triage (`re/analysis/not_ported_triage_2026-05-24.md`) +
+> Tier 2 port (recovery animation) shipped today. Affected entries below
+> are inline-annotated with `[STATUS 2026-05-24: ...]` tags. The
+> sweep also surfaced 13 new OVERSIGHT bugs separate from the 6
+> documented regressions here — see
+> `re/analysis/oversight_triage_2026-05-24.md` (in progress).
+
 After the Phase 5 L4→L5 sweep, **17 functions remain at L4** by the
 `build_confidence_map.py` classifier. Every one of them is documented below
 with the reason it could not be honestly promoted to L5. The project's honest
@@ -26,10 +35,10 @@ The blockers fall into five categories:
 | Address | Function | Module owner | Category | Reason |
 |---|---|---|---|---|
 | 0x00401330 | `SpawnRearWheelSmokeEffects` | td5_vfx.c | OUT-OF-SCOPE | Body in `td5_vfx_spawn_rear_wheel_smoke`; only dispatch in td5_render.c. VFX audit must promote. |
-| 0x00401370 | `SpawnRandomVehicleSmokePuff` | (unowned) | NOT-PORTED | 159B engine-rev-based rand puff at rear-probe midpoint. Port gate not wired. |
+| 0x00401370 | `SpawnRandomVehicleSmokePuff` | (unowned) | NOT-PORTED | 159B engine-rev-based rand puff at rear-probe midpoint. Port gate not wired. **[STATUS 2026-05-24: SCHEDULED Tier 3 (smoke completion) per `not_ported_triage_2026-05-24.md`]** |
 | 0x00402950 | `UpdateStaticTracksideCamera` | td5_camera.c | REGR | `g_camHeightSampleOfs[2]` never written; should be `g_cameraProfileVertOffset[2]`. Trackside-cam Y baseline off (regression #4). |
 | 0x00402AD0 | `UpdateSplineTracksideCamera` | td5_camera.c | REGR | `s_splineTemplates[6][8]` table values do not match orig stack pattern; spline flyby broken for all 6 types (regression #5). |
-| 0x004092D0 | `RenderVehicleActorModel` | td5_physics.c | OUT-OF-SCOPE | Wheel-probe transform chain (`TransformShortVec3ByRenderMatrixRounded`) — physics audit must promote. |
+| 0x004092D0 | `RenderVehicleActorModel` | td5_physics.c | OUT-OF-SCOPE | Wheel-probe transform chain (`TransformShortVec3ByRenderMatrixRounded`) — physics audit must promote. **[STATUS 2026-05-24: PORTED in Tier 2 (recovery animation), `td5_physics.c` +618 lines; build 1,854,126 bytes. Awaiting L5 classifier re-tip.]** |
 | 0x0040CBD0 | `ConfigureActorProjectionEffect` | td5_render.c | UNCERTAIN | Mode-1 SetProjectionEffectState param_3 vector choice binary-ambiguous; port picks linear_velocity for forward-scroll semantic (regression #3 / pre-existing UNCERTAINty). |
 | 0x00415030 | `ScreenPositionerDebugTool` | td5_frontend.c | PARTIAL-PORT | Port case-5 file write is `TD5_LOG_I`-only; orig writes positioner.txt with two 0x25-iteration glyph-rect tables. |
 | 0x00415370 | `ScreenStartupInit` | td5_frontend.c | UNCERTAIN | Port case-4 redirects to `TD5_SCREEN_LOCALIZATION_INIT`; orig redirects via `g_frontendScreenFnTable`. Cases 0-3 also diverge (port skips BltColorFillToSurface dialog + cursor-overlay activate). Bootstrap divergence vs regression — needs runtime trace. |
@@ -37,7 +46,7 @@ The blockers fall into five categories:
 | 0x0041C330 | `RunFrontendNetworkLobby` | td5_frontend.c | CLASSIFIER-LAG | Has `[ARCH-DIVERGENCE: DXPTYPE]` tag at td5_frontend.c:10280; classifier shows strong=1 weak=2 → L4. Promotion is authored; classifier re-tip needs a strong-precision keyword pass. |
 | 0x0041EA90 | `ScreenSoundOptions` | td5_frontend.c | REGR | SFX mode `^=1` (2-mode toggle) vs orig 3-mode cycle gated by `DXSound::CanDo3D()`; volume step `*5` vs orig `*10` (regression #2). |
 | 0x00429CF0 | `SpawnVehicleSmokeSprite` | td5_vfx.c | OUT-OF-SCOPE | Body in `td5_vfx_spawn_smoke`; call-site only in td5_render.c. |
-| 0x00429FD0 | `SpawnVehicleSmokePuffAtPoint` | td5_vfx.c | NOT-PORTED | 688B smoke-spawn helper; port collapses pipeline into simpler `vfx_spawn_smoke_at_position`. |
+| 0x00429FD0 | `SpawnVehicleSmokePuffAtPoint` | td5_vfx.c | NOT-PORTED | 688B smoke-spawn helper; port collapses pipeline into simpler `vfx_spawn_smoke_at_position`. **[STATUS 2026-05-24: SCHEDULED Tier 3 (smoke completion) per `not_ported_triage_2026-05-24.md`]** |
 | 0x0042E750 | `BuildWorldToViewMatrix` | td5_camera.c | NO-PORT-SITE | Citation-sweep header entry; orig's pitch/yaw + forward-vector to 3x3 builder replaced by per-frame camera-basis composition with no single anchor site. |
 | 0x0043F420 | `UpdateFrontWheelSoundEffects` | td5_vfx.c | REGR | Wheel-anchor source `+0x298` (hires wheel) vs orig `+0xf0` (probe) — 1-tick lag in tire-track anchor (regression #6). |
 | 0x0043F600 | `UpdateRearWheelSoundEffects` | td5_vfx.c | REGR | Symmetric to 0x0043F420 — same `+0x298` vs orig `+0xf0` wheel-anchor offset divergence. |

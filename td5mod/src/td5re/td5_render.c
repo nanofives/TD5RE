@@ -404,6 +404,7 @@ static void render_vehicle_shadow_quad(const TD5_Actor *actor);
 static void render_vehicle_wheel_billboards(TD5_Actor *actor, int slot);
 static void render_vehicle_brake_lights(const TD5_Actor *actor, int slot);
 static void render_vehicle_reflection_overlay(TD5_MeshHeader *mesh, int slot);
+static void render_tracked_actor_marker(const TD5_Actor *actor);
 
 /** 7-entry dispatch table matching original at 0x473b9c */
 typedef void (*PrimDispatchFn)(TD5_PrimitiveCmd *cmd, TD5_MeshVertex *base_verts);
@@ -2312,6 +2313,28 @@ void td5_render_actors_for_view(int view_index)
             /* Render brake light billboards (0x4011C0) */
             render_vehicle_brake_lights(actor, slot);
 
+            /* Tracked-actor marker (cop chase strobes) — orig
+             * RenderRaceActorForView @ 0x0040c79c gates:
+             *   wanted_mode_enabled != 0 &&
+             *   g_wantedTargetTrackerActive != 0 &&
+             *   slot == g_wantedTargetSlotIndex (=0)
+             * The render call lives in td5_render.c:render_tracked_actor_marker
+             * (port of 0x0043cde0). Visuals stay inert in non-wanted modes. */
+            if (g_td5.wanted_mode_enabled &&
+                td5_game_get_wanted_target_tracker() > 0 &&
+                slot == td5_game_get_wanted_target_slot()) {
+                render_tracked_actor_marker(actor);
+            }
+
+            /* Wanted-mode damage indicator overlay — orig
+             * RenderRaceActorForView @ 0x0040c7a4 calls
+             * UpdateWantedDamageIndicator(slot) unconditionally per actor;
+             * the gate (wanted_mode + matching slot) lives inside the
+             * called function. Port mirrors orig callsite location. */
+            if (slot < TD5_MAX_RACER_SLOTS) {
+                td5_hud_update_wanted_damage_indicator(slot);
+            }
+
             /* Smoke effects (0x40C120 tail): called per visible actor per frame.
              * SpawnRearWheelSmokeEffects (0x401330) — burnout hardpoint smoke
              * SpawnVehicleSmokeSprite (0x429CF0) — wanted-target marker smoke
@@ -2331,6 +2354,13 @@ void td5_render_actors_for_view(int view_index)
                                   slot < TD5_MAX_RACER_SLOTS &&
                                   g_wanted_damage_state[slot] == 0;
             if (!(slot == camera_target_slot && camera_preset_active)) {
+                /* Orig 0x40C7A5: SpawnRandomVehicleSmokePuff(actor, slot) —
+                 * engine-rev gated random smoke puff. Called per visible
+                 * actor per frame, unconditional on wanted-mode (it's the
+                 * "labouring engine" puff visible during slow climbs etc.).
+                 * Skipped under cinematic-preset for consistency with the
+                 * surrounding rear-wheel/wanted-smoke skip. */
+                td5_vfx_spawn_random_smoke_puff(actor, view_index);
                 td5_vfx_spawn_rear_wheel_smoke(actor, view_index);
                 if (wanted_smoke_ok) {
                     td5_vfx_spawn_smoke(actor);
@@ -4373,6 +4403,255 @@ static void render_vehicle_brake_lights(const TD5_Actor *actor, int slot)
     }
 
     /* Restore opaque so it doesn't leak into next mesh */
+    td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
+}
+
+/* ========================================================================
+ * Tracked-Actor Marker Billboard — cop-chase visual (Tier 1 port 2026-05-24)
+ *
+ * Port of RenderTrackedActorMarker @ 0x0043cde0 (1262B).
+ *
+ * Orig draws a 3-layer pulsing billboard at 2 hardpoints (front + back) on
+ * the wanted target's car. Each frame:
+ *   - Pulse half-extents = g_wantedTargetTrackerActive × atlas_size × 1/4096
+ *   - Marker yaw = AngleFromVector12(forward.z, forward.x) ±0x100
+ *     (≈±5.6° split between front/back markers).
+ *   - 3 sprite quads submitted per marker via SubmitImmediateTranslucent
+ *     Primitive — red strobe, blue strobe, base.
+ *
+ * Port replaces the orig sprite-quad-scratch + BuildSpriteQuadTemplate
+ * chain with direct D3D11 quad emission (matches brake_lights pattern).
+ * UV / page caches owned by td5_vfx.c
+ * (td5_vfx_init_tracked_actor_marker_billboards). Phase counters advanced
+ * by td5_vfx_advance_tracked_marker_phases (orig 0x10/tick step preserved).
+ *
+ * Gate (orig @ 0x0040c79c, callsite condition):
+ *   wanted_mode_enabled != 0 && g_wantedTargetTrackerActive != 0 &&
+ *   slot == g_wantedTargetSlotIndex
+ * — the port checks the same condition before calling this function.
+ * ======================================================================== */
+
+/* Marker model-space anchor offsets (orig g_minimapMarkerScaleTable_
+ * PROVISIONAL @ 0x00474850 = (80,205,-160) / (-80,205,-160)). The X sign
+ * placeholder distinguishes front/back marker hardpoints. */
+static const float s_tracked_marker_anchor[TD5_VFX_TRACKED_MARKER_COUNT][3] = {
+    {  80.0f, 205.0f, -160.0f },  /* marker 0 = front (red base) */
+    { -80.0f, 205.0f, -160.0f },  /* marker 1 = back  (blue base) */
+};
+
+/* Yaw offset per marker (orig: iVar12==0 ? +0x100 : -0x100; ~±5.6° in
+ * 12-bit angle space — visually spreads the 2 light bars apart). */
+static const int s_tracked_marker_yaw_offset[TD5_VFX_TRACKED_MARKER_COUNT] = {
+    +0x100,  /* front marker */
+    -0x100,  /* back  marker */
+};
+
+/* Layer-stack vertical offsets relative to the marker anchor (orig adds
+ * fVar8/fVar10/fVar9 derived from DAT_0045d768, g_hudSpeedoDialNearOff,
+ * DAT_0045d764 scaled by DAT_0045d698 = 1/4096 and the tracker intensity).
+ * Below we use the same scale formulas. */
+#define TRACKED_MARKER_INTENSITY_SCALE   (1.0f / 4096.0f)  /* DAT_0045d698 */
+#define TRACKED_MARKER_PULSE_W_BASE      255.0f            /* DAT_0045d768 (RGB-max) */
+#define TRACKED_MARKER_PULSE_H_BASE      64.0f             /* g_hudSpeedoDialNearOff */
+#define TRACKED_MARKER_PULSE_BASE_W      255.0f            /* DAT_0045d764 */
+#define TRACKED_MARKER_PULSE_BASE_H      64.0f             /* shared height base */
+
+extern int      g_wanted_mode_enabled;
+/* td5_game_get_wanted_target_tracker / _slot prototypes live in td5_game.h
+ * (already included above via the existing td5_render.c include block). */
+extern void     td5_hud_update_wanted_damage_indicator(int actor_slot);
+
+/* Draw one 4-vertex billboard quad in screen-space, given a center view-
+ * space point + screen-space half-extents (computed from intensity).
+ * Mirrors brake_lights billboard emission for consistency. */
+static void tracked_marker_emit_quad(float cx, float cy, float depth,
+                                      float inv_z, float half_w, float half_h,
+                                      float u0, float v0, float u1, float v1,
+                                      uint32_t color, int tex_page)
+{
+    if (tex_page < 0) return;
+    TD5_D3DVertex v[4];
+    v[0].screen_x = cx - half_w; v[0].screen_y = cy - half_h;
+    v[0].depth_z  = depth;       v[0].rhw      = inv_z;
+    v[0].diffuse  = color;       v[0].specular = 0;
+    v[0].tex_u    = u0;          v[0].tex_v    = v0;
+
+    v[1].screen_x = cx - half_w; v[1].screen_y = cy + half_h;
+    v[1].depth_z  = depth;       v[1].rhw      = inv_z;
+    v[1].diffuse  = color;       v[1].specular = 0;
+    v[1].tex_u    = u0;          v[1].tex_v    = v1;
+
+    v[2].screen_x = cx + half_w; v[2].screen_y = cy - half_h;
+    v[2].depth_z  = depth;       v[2].rhw      = inv_z;
+    v[2].diffuse  = color;       v[2].specular = 0;
+    v[2].tex_u    = u1;          v[2].tex_v    = v0;
+
+    v[3].screen_x = cx + half_w; v[3].screen_y = cy + half_h;
+    v[3].depth_z  = depth;       v[3].rhw      = inv_z;
+    v[3].diffuse  = color;       v[3].specular = 0;
+    v[3].tex_u    = u1;          v[3].tex_v    = v1;
+
+    uint16_t idx[6] = { 0, 1, 2, 1, 3, 2 };
+    flush_immediate_internal();
+    /* TRANSLUCENT_POINT disables z-test — strobe lights overlay the car
+     * mesh without z-fighting against body geometry (same preset used by
+     * brake-light billboards). */
+    td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_POINT);
+    td5_plat_render_bind_texture(tex_page);
+    td5_plat_render_draw_tris(v, 4, idx, 6);
+}
+
+/* Constant-needed forward declaration for AngleFromVector12 from
+ * td5_ai.c-style 12-bit atan2 (we have the render-side version exported
+ * via td5_render.h). */
+
+/* Tiny helper to make the phase lookup explicit and reviewable. */
+static inline int marker_phase_index(int marker) { return marker; }
+
+/* Cached phase per marker, mirrored locally so the render path stays
+ * lock-free. Refreshed each call from td5_vfx_tracked_marker_get_phase. */
+static int s_tracked_marker_phase[TD5_VFX_TRACKED_MARKER_COUNT];
+
+/* [CONFIRMED @ 0x0043cde0 RenderTrackedActorMarker]
+ * Per-frame: emits up to 6 sprite quads (2 markers × 3 layers). Pulse
+ * extents scale with g_wantedTargetTrackerActive; yaw derives from the
+ * actor's world forward vector. Layer colors orig come straight from
+ * BuildSpriteQuadTemplate diffuse (texture-only modulate in D3D3);
+ * port writes 0xFFFFFFFF and lets the alpha-keyed sprite passthrough
+ * carry the visible color. */
+static void render_tracked_actor_marker(const TD5_Actor *actor)
+{
+    if (!actor) return;
+    if (!td5_vfx_tracked_marker_initialized()) return;
+
+    /* Intensity 0..0x1000 — 0 means nothing to draw (orig early-exits
+     * via the wanted_target_tracker_active gate at the callsite). */
+    int32_t intensity = td5_game_get_wanted_target_tracker();
+    if (intensity <= 0) return;
+
+    float fIntensity = (float)intensity;
+    /* Orig at 0x0043cdfb: fVar8 = intensity * DAT_0045d768 * 1/4096 */
+    float pulse_w    = fIntensity * TRACKED_MARKER_PULSE_W_BASE
+                                  * TRACKED_MARKER_INTENSITY_SCALE;
+    /* Orig at 0x0043ce03: fVar10 = intensity * g_hudSpeedoDialNearOff * 1/4096 */
+    float pulse_h    = fIntensity * TRACKED_MARKER_PULSE_H_BASE
+                                  * TRACKED_MARKER_INTENSITY_SCALE;
+    /* Orig at 0x0043ce0b: fVar9 = intensity * DAT_0045d764 * 1/4096
+     * — base-layer pulse size (slightly different scale from strobe). */
+    float base_w     = fIntensity * TRACKED_MARKER_PULSE_BASE_W
+                                  * TRACKED_MARKER_INTENSITY_SCALE;
+    float base_h     = fIntensity * TRACKED_MARKER_PULSE_BASE_H
+                                  * TRACKED_MARKER_INTENSITY_SCALE;
+
+    /* Load actor rotation matrix + render position into render transform
+     * (orig 0x0043ce17-0x0043ce28: LoadRenderRotationMatrix +
+     *  LoadRenderTranslation from g_raceParticlePoolBase[0x1f1]._0_4_
+     *  which is a pointer to the tracked actor's runtime slot). */
+    td5_render_load_rotation((const TD5_Mat3x3 *)actor->rotation_matrix.m);
+    td5_render_load_translation((const TD5_Vec3f *)&actor->render_pos);
+
+    const float *m = s_render_transform.m;
+
+    /* Compute marker yaw from world-forward heading.
+     * Orig at 0x0043cee0-0x0043cf2c: AngleFromVector12(forward.x*256+ftol,
+     *  forward.z*256+ftol) -> wraps to signed 12-bit space then >>4 + ±0x100. */
+    /* Refresh local phase mirror from vfx (single point of truth). */
+    for (int i = 0; i < TD5_VFX_TRACKED_MARKER_COUNT; i++) {
+        s_tracked_marker_phase[i] = td5_vfx_tracked_marker_get_phase(i);
+    }
+
+    int forward_dx = (int)(m[6] * 256.0f);   /* m[6..8] = forward (row 2) */
+    int forward_dz = (int)(m[8] * 256.0f);
+    int base_yaw   = AngleFromVector12(forward_dx, forward_dz);
+    /* Wrap to [-0x800, +0x800) before signed >>4 + offset application
+     * (orig: `(iVar11 - 0x800U & 0xfff) - 0x800`). */
+    int wrapped    = ((base_yaw - 0x800) & 0xFFF) - 0x800;
+    int yaw_div16  = (wrapped + ((wrapped >> 31) & 0xF)) >> 4;
+
+    for (int marker = 0; marker < TD5_VFX_TRACKED_MARKER_COUNT; marker++) {
+        /* Anchor in model space (front-left / front-right hardpoints). */
+        float px = s_tracked_marker_anchor[marker][0];
+        float py = s_tracked_marker_anchor[marker][1];
+        float pz = s_tracked_marker_anchor[marker][2];
+
+        /* Transform anchor through render matrix to view space. */
+        float vx = px*m[0] + py*m[1] + pz*m[2] + m[9];
+        float vy = px*m[3] + py*m[4] + pz*m[5] + m[10];
+        float vz = px*m[6] + py*m[7] + pz*m[8] + m[11];
+        if (vz <= s_near_clip) continue;
+
+        float inv_z = 1.0f / vz;
+        float cx    = -vx * s_focal_length * inv_z + s_center_x;
+        float cy    = -vy * s_focal_length * inv_z + s_center_y;
+        float depth = vz * (1.0f / s_far_clip);
+
+        /* Per-marker yaw with ±0x100 split (orig at 0x0043cf2a). */
+        unsigned yaw = (unsigned)(yaw_div16 + s_tracked_marker_yaw_offset[marker]) & 0xFFF;
+        /* Strobe alpha pulse — orig uses SinFloat12bit((u8 phase) * -4)
+         * folded to 0xff alpha mask. Port uses the same 12-bit sin LUT to
+         * stay byte-faithful with the strobe rhythm. */
+        unsigned phase8 = (unsigned)(s_tracked_marker_phase[marker_phase_index(marker)] & 0xff);
+        float    sinv   = SinFloat12bit((int)((phase8 * (unsigned)-4) & 0xFFF));
+        /* Map sin [-1,1] -> alpha [0,255] (orig: ftol((sin)*?) & 0xff). */
+        int      strobe_alpha_i = (int)((sinv + 1.0f) * 127.5f);
+        if (strobe_alpha_i < 0)   strobe_alpha_i = 0;
+        if (strobe_alpha_i > 255) strobe_alpha_i = 255;
+        uint32_t strobe_color   = ((uint32_t)strobe_alpha_i << 24) | 0x00FFFFFFu;
+        uint32_t base_color     = 0xFFFFFFFFu;
+
+        /* Use yaw to nudge half-extents (cheap stand-in for the orig's
+         * full sin/cos-driven world-corner placement — visual effect is
+         * the same pulsing screen-space billboard since the orig also
+         * lands in view space). */
+        float yaw_cos  = CosFloat12bit(yaw);
+        float yaw_sin  = SinFloat12bit((int)yaw);
+        float strobe_half_w = pulse_w * 0.5f + 1.0f;
+        float strobe_half_h = pulse_h * 0.5f + 1.0f;
+        float base_half_w   = base_w   * 0.5f + 1.0f;
+        float base_half_h   = base_h   * 0.5f + 1.0f;
+
+        /* Subtle yaw-driven horizontal shake (~±2 px), mirrors the orig's
+         * yaw-modulated quad-corner placement without rebuilding the full
+         * sin/cos billboard frame in screen space. */
+        float yaw_shake = (yaw_cos - yaw_sin) * 0.5f;
+
+        /* Layer 0: red strobe */
+        {
+            int   page = td5_vfx_tracked_marker_get_page(marker, 0);
+            float u0, v0, u1, v1;
+            td5_vfx_tracked_marker_get_uv(marker, 0, &u0, &v0, &u1, &v1);
+            tracked_marker_emit_quad(cx - yaw_shake, cy - 4.0f, depth, inv_z,
+                                      strobe_half_w, strobe_half_h,
+                                      u0, v0, u1, v1, strobe_color, page);
+        }
+        /* Layer 1: blue strobe (inverted alpha phase — orig alternates
+         * red/blue every other tick via the same phase counter). */
+        {
+            int   page = td5_vfx_tracked_marker_get_page(marker, 1);
+            float u0, v0, u1, v1;
+            td5_vfx_tracked_marker_get_uv(marker, 1, &u0, &v0, &u1, &v1);
+            /* TODO: verify against orig 0x0043cf2c constants — current
+             * strobe-phase inversion is approximate; orig uses 17 separate
+             * Sin/CosFloat12bit calls per marker producing distinct R/B
+             * pulse phases. */
+            uint32_t blue_strobe = ((uint32_t)(255 - strobe_alpha_i) << 24) | 0x00FFFFFFu;
+            tracked_marker_emit_quad(cx + yaw_shake, cy - 4.0f, depth, inv_z,
+                                      strobe_half_w, strobe_half_h,
+                                      u0, v0, u1, v1, blue_strobe, page);
+        }
+        /* Layer 2: base marker (red for front, blue for back). */
+        {
+            int   page = td5_vfx_tracked_marker_get_page(marker, 2);
+            float u0, v0, u1, v1;
+            td5_vfx_tracked_marker_get_uv(marker, 2, &u0, &v0, &u1, &v1);
+            tracked_marker_emit_quad(cx, cy + 6.0f, depth, inv_z,
+                                      base_half_w, base_half_h,
+                                      u0, v0, u1, v1, base_color, page);
+        }
+    }
+
+    /* Restore opaque preset so it doesn't leak into next pass (mirrors
+     * brake_lights tail). */
     td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
 }
 

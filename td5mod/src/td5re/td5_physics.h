@@ -101,6 +101,15 @@ void td5_physics_reset_actor_state(TD5_Actor *actor);
 void td5_physics_missing_wheel_correction(TD5_Actor *actor);
 void td5_physics_state0f_damping(TD5_Actor *actor);
 
+/* --- Scripted-mode recovery animation (vehicle_mode==1) ---
+ * Tier 2 port (2026-05-24) — driven from UpdateVehicleActor's vehicle_mode==1
+ * branch in td5_physics_update_vehicle_actor. Mirrors orig
+ * 0x0042E030 / 0x00409BF0 / 0x00409D20 chain. */
+void td5_physics_extract_euler_angles_from_matrix(const float *matrix,
+                                                  int16_t *out_roll_yaw_pitch);
+void td5_physics_refresh_scripted_vehicle_transforms(TD5_Actor *actor);
+void td5_physics_integrate_scripted_motion(TD5_Actor *actor);
+
 /* --- Engine / Transmission --- */
 void td5_physics_update_engine_speed(TD5_Actor *actor);
 void td5_physics_auto_gear_select(TD5_Actor *actor);
