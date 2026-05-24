@@ -1,0 +1,5 @@
+0043da80,LoadRenderRotationMatrix,110,5
+0043daf0,PushRenderTransform,112,4
+0043db70,PopRenderTransform,175,4
+0043dc20,LoadRenderTranslation,40,4
+0043dc50,TransformVec3ByRenderMatrixFull,95,4

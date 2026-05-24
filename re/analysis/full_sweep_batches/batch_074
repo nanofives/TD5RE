@@ -1,0 +1,5 @@
+004340c0,UpdateActorSteeringBias,538,5
+004342e0,RefreshActorTrackProgressOffset,109,5
+00434350,InitializeActorTrackPose,567,5
+004345b0,ComputeTrackSpanProgress,186,5
+00434670,ComputeSignedTrackOffset,200,5

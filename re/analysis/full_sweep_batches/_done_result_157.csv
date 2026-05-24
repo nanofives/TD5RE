@@ -1,0 +1,5 @@
+00454750,BuildFullQuantTable,209,3,NOT_PORTED,FMV_STUB,,"EA TGQ codec quant-table builder; td5_fmv.c:1009 lists as ARCH-DIVERGENCE-FMV. Port replaces entire TGQ stack with Windows Media Foundation IMFSourceReader",AGENT,2026-05-24
+00454830,ComputeBlitGeometry,142,3,NOT_PORTED,FMV_STUB,,"EA TGQ DDraw blit-geometry helper (reads flags at struct+4, computes dst rect); td5_fmv.c:1010 ARCH-DIVERGENCE-FMV. Port uses D3D11 fullscreen quad, no DDraw blit",AGENT,2026-05-24
+004548c0,DecodeCompressedPixelBlock16,262,3,NOT_PORTED,FMV_STUB,,"EA TGQ 16bpp pixel-block decoder dispatching to WriteBlock16_3to6 or DecodeJPEGFrame; td5_fmv.c:1011 ARCH-DIVERGENCE-FMV. WMF replaces TGQ entirely",AGENT,2026-05-24
+004549d0,WriteBlock16_3to6,497,3,NOT_PORTED,FMV_STUB,,"EA TGQ YUV->RGB565 16x16 block writer using DAT_004d3820 scale + 4 LUTs (DAT_004d3930/3b30/3d30); td5_fmv.c:1012 ARCH-DIVERGENCE-FMV. Replaced by WMF",AGENT,2026-05-24
+00454bd0,DecodeCompressedPixelBlock32,263,3,NOT_PORTED,FMV_STUB,,"EA TGQ 32bpp pixel-block decoder (sibling of 0x004548C0, dispatches to WriteBlock32_3to6 / IDCTDecode16x16Block); td5_fmv.c:1013 ARCH-DIVERGENCE-FMV",AGENT,2026-05-24

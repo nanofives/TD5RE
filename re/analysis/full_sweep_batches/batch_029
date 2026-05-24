@@ -1,0 +1,5 @@
+004127b0,LoadTgaToFrontendSurface16bppVariant,502,3
+004129b0,RenderTgaToFrontendSurface,333,3
+00412b00,SetSurfaceColorKeyFromRGB,134,3
+00412b90,RenderTgaWithColorKeyToSurface,447,3
+00412d50,MeasureOrDrawFrontendFontString,213,3

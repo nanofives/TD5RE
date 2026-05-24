@@ -1,0 +1,5 @@
+0044e9d8,_setenvp,184,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT internal at 0x0044e9d8 builds _environ[] from env strings via _malloc/_strlen/_strcpy + __amsg_exit; port links MinGW CRT which provides equivalent setup",AGENT,2026-05-24
+0044ea91,_setargv,152,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT internal at 0x0044ea91 calls GetModuleFileNameA + _parse_cmdline to build __argv/__argc; port links MinGW CRT which provides equivalent argv setup",AGENT,2026-05-24
+0044eb2a,_parse_cmdline,435,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT internal at 0x0044eb2a; quoted-arg tokenizer with backslash-escape semantics used by _setargv; port relies on MinGW CRT _setargv equivalent",AGENT,2026-05-24
+0044ecde,_crt_setenv,305,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT internal at 0x0044ecde; GetEnvironmentStringsW/A + WideCharToMultiByte to build env block; port uses MinGW CRT env initialization",AGENT,2026-05-24
+0044ee10,_cexit,56,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT internal at 0x0044ee10; __initterm(0xfc/0xff) atexit dispatch + DAT_004cf200 hook; port uses MinGW CRT _cexit equivalent",AGENT,2026-05-24

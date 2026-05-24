@@ -1,0 +1,5 @@
+00449200,_strnicmp,256,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT _strnicmp embedded in orig (uses _tolower_nolock/_lock 0x13); port uses MinGW _strnicmp directly (main.c:290+, td5_asset.c:205+)",AGENT,2026-05-24
+00449310,stricmp_game,207,3,NOT_PORTED,MINGW_CRT,"main.c:931","MSVC CRT stricmp wrapper (Ghidra-tagged ARCH-DIVERGENCE LIBC); port uses _stricmp/strcasecmp via td5_stricmp macro (td5_asset.c:128-132)",AGENT,2026-05-24
+004493e0,entry,232,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT startup (_ioinit/_cinit/_setargv/_setenvp + GameWinMain); port uses MinGW startup with own main() (cited td5_game.c:85 N/A CRT)",AGENT,2026-05-24
+004494e8,__amsg_exit,33,0,NOT_PORTED,MINGW_CRT,,"Ghidra identifies as Visual Studio 2003 library __amsg_exit (_cexit/__initterm/PTR___exit); MinGW CRT provides equivalent at link time",AGENT,2026-05-24
+0044950d,FatalStartupExit,34,3,NOT_PORTED,MINGW_CRT,"main.c:932","MSVC CRT startup-fail exit (__initterm + ExitProcess 0xff); Ghidra-tagged ARCH-DIVERGENCE LIBC; MinGW CRT handles equivalent path",AGENT,2026-05-24

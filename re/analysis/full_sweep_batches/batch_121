@@ -1,0 +1,5 @@
+0044b840,_unlock_file,46,0
+0044b86f,_unlock_stream,34,0
+0044b892,_close,92,0
+0044b8ef,_close_nolock,130,0
+0044b972,__freebuf,42,0

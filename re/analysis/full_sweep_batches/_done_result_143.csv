@@ -1,0 +1,5 @@
+00450224,_get_osfhandle,65,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT _get_osfhandle stub at 0x00450224; reads file-handle table DAT_004cfbe0/DAT_004cfce0. Port links MinGW CRT — no port equivalent.",AGENT,2026-05-24
+00450266,_lock_fh,94,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT _lock_fh stub at 0x00450266; per-fh critical-section init via _lock(0x11)/InitializeCriticalSection. Port links MinGW CRT.",AGENT,2026-05-24
+004502c5,_unlock_fh,33,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT _unlock_fh stub at 0x004502c5; LeaveCriticalSection on per-fh table entry +0xc. Port links MinGW CRT.",AGENT,2026-05-24
+004502e7,_commit,146,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT _commit stub at 0x004502e7; FlushFileBuffers wrapper with _lock_fh/_unlock_fh + _errno/__doserrno error path. Port links MinGW CRT.",AGENT,2026-05-24
+0045037a,_sopen,718,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT _sopen stub at 0x0045037a; CreateFileA wrapper with O_*/SH_* flag translation + _alloc_osfhnd/_set_osfhnd table mgmt. Port links MinGW CRT.",AGENT,2026-05-24

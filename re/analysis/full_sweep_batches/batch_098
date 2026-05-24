@@ -1,0 +1,5 @@
+00445f10,InitActorTrackSegmentPlacement,281,5
+00446030,TransformTrackVertexByMatrix,261,5
+00446140,TransformTrackVertexByMatrixB,123,5
+004461c0,TransformTrackVertexByMatrixC,124,5
+00446240,InitializeWeatherOverlayParticles,608,4

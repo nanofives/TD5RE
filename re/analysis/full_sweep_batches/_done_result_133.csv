@@ -1,0 +1,5 @@
+0044e6e8,_cinit,44,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT entry at orig 0x0044e6e8 calling __fpmath_init ptr + __initterm_real on .CRT$XI*/.CRT$XC* arrays; port links MinGW CRT (no port equivalent)",AGENT,2026-05-24
+0044e715,_exit,16,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT _exit at orig 0x0044e715 thunks to _doexit(code,0,0); port uses MinGW exit",AGENT,2026-05-24
+0044e726,__exit,16,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT __exit at orig 0x0044e726 (Ghidra-tagged Visual Studio 2003 Release) thunks to _doexit(code,1,0); port uses MinGW _Exit",AGENT,2026-05-24
+0044e737,_doexit,162,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT _doexit at orig 0x0044e737 walks .CRT$XP*/.CRT$XT* atexit arrays + TerminateProcess/ExitProcess; port uses MinGW CRT exit chain",AGENT,2026-05-24
+0044e7dc,__lock_fh_init,8,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT __lock_fh_init at orig 0x0044e7dc calls _lock(0xd) for file-handle init lock; port uses MinGW CRT locking",AGENT,2026-05-24

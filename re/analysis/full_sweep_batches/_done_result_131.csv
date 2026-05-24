@@ -1,0 +1,5 @@
+0044e3c2,__frnd,17,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT FP-round helper in orig 0x0044e000+ range; no port references; MinGW CRT provides equivalent",AGENT,2026-05-24
+0044e3d4,_ldexp,40,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT ldexp impl in orig 0x0044e000+ range; no port references; MinGW CRT provides ldexp",AGENT,2026-05-24
+0044e3fd,_fpclass,89,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT _fpclass impl in orig 0x0044e000+ range; no port references; MinGW CRT provides equivalent",AGENT,2026-05-24
+0044e457,_frexp,192,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT frexp impl in orig 0x0044e000+ range; no port references; MinGW CRT provides frexp",AGENT,2026-05-24
+0044e518,_statusfp,13,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT _statusfp impl in orig 0x0044e000+ range; no port references; MinGW CRT provides equivalent",AGENT,2026-05-24

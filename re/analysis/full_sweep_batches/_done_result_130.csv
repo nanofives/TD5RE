@@ -1,0 +1,5 @@
+0044e0a9,_fpieee_flt,534,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT IEEE 754 floating-point exception filter (_fpieee_flt) embedded in orig at 0x0044e0a9; undefined in Ghidra DB; no port reference; port links MinGW CRT",AGENT,2026-05-24
+0044e2c0,__raise_exc,135,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT IEEE exception raise helper for _fpieee_flt at 0x0044e2c0; undefined in Ghidra DB; no port reference",AGENT,2026-05-24
+0044e348,__set_errno_from_matherr,39,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT helper mapping matherr return to errno at 0x0044e348; undefined in Ghidra DB; no port reference",AGENT,2026-05-24
+0044e370,__get_fname,36,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT helper returning math function name string at 0x0044e370; undefined in Ghidra DB; no port reference",AGENT,2026-05-24
+0044e395,__abstract_sw,44,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT helper abstracting FPU status word for IEEE exception filter at 0x0044e395; undefined in Ghidra DB; no port reference",AGENT,2026-05-24

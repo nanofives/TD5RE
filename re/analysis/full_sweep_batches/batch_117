@@ -1,0 +1,5 @@
+0044a82f,__sbh_page_decommit_check,68,0
+0044a874,__sbh_alloc_block,519,0
+0044aa7c,_flsbuf,291,0
+0044aba0,_mtinitlocks,40,0
+0044abc9,_lock,96,0

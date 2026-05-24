@@ -1,0 +1,5 @@
+0042ce50,SetCameraWorldPosition,48,5
+0042ce90,UpdateActiveTrackLightDirections,542,5
+0042d0b0,BuildCameraBasisFromAngles,857,5
+0042d410,FinalizeCameraProjectionMatrices,405,4
+0042d5b0,OrientCameraTowardTarget,708,4

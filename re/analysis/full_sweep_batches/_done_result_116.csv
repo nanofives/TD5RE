@@ -1,0 +1,5 @@
+0044a481,__sbh_alloc_new_group,250,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT small-block-heap allocator (VirtualAlloc 0x8000 + group init at +0x44/+0xc4); port links MinGW CRT, no equivalent in td5mod/",AGENT,2026-05-24
+0044a57c,__sbh_new_region,323,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT SBH region creator (VirtualAlloc 0x400000 reserve + 0x10000 commit, links via PTR_LOOP_0047b248); MinGW CRT in port",AGENT,2026-05-24
+0044a6c0,_heap_free_region,85,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT SBH region releaser (VirtualFree + HeapFree on DAT_004d0d20); MinGW CRT in port has no equivalent",AGENT,2026-05-24
+0044a716,__sbh_decommit_pages,193,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT SBH page decommitter (VirtualFree MEM_DECOMMIT 0x4000, calls _heap_free_region when region empty); MinGW CRT in port",AGENT,2026-05-24
+0044a7d8,__sbh_find_block_old,86,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT SBH block locator (walks PTR_LOOP_0047b248 region list, checks 0xfff/0x100 alignment); MinGW CRT in port",AGENT,2026-05-24

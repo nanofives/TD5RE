@@ -1,0 +1,5 @@
+00448904,_strlwr,307,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT _strlwr stub in orig 0x00448000+ range; port links MinGW CRT — no port equivalent. No port refs to address or name.",AGENT,2026-05-24
+00448a38,_toupper,110,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT _toupper stub in orig 0x00448000+ range; port uses MinGW CRT toupper. No port refs.",AGENT,2026-05-24
+00448aa7,_toupper_nolock,203,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT _toupper_nolock (CRT-internal locale helper) in orig 0x00448000+ range; port uses MinGW CRT. No port refs.",AGENT,2026-05-24
+00448b80,_strncmp,55,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT _strncmp stub in orig 0x00448000+ range; port uses MinGW CRT strncmp. No port refs.",AGENT,2026-05-24
+00448bb8,_unlink,41,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT _unlink (file-delete) stub in orig 0x00448000+ range; port uses MinGW CRT unlink. No port refs.",AGENT,2026-05-24

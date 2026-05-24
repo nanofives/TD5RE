@@ -1,0 +1,5 @@
+00453b20,ExtractPixelFormatInfo,184,3,INTENTIONAL,FMV_STUB,td5_fmv.c:999,"EA TGQ codec DDraw pixel-format extractor (calls vtable+0x54 + CountSetBits/CountTrailingZeroBits); port replaces entire EA TGQ stack with IMFSourceReader pipeline",AGENT,2026-05-24
+00453be0,CountSetBits,26,3,INTENTIONAL,FMV_STUB,td5_fmv.c:1000,"EA TGQ helper (population-count over bits 0..0x1e) used by ExtractPixelFormatInfo; no port equivalent under Media Foundation pipeline",AGENT,2026-05-24
+00453c00,CountTrailingZeroBits,15,3,INTENTIONAL,FMV_STUB,td5_fmv.c:1001,"EA TGQ helper (CTZ via right-shift loop) used by ExtractPixelFormatInfo; no port equivalent",AGENT,2026-05-24
+00453c10,QuerySurfaceDimensions,67,3,INTENTIONAL,FMV_STUB,td5_fmv.c:1002,"EA TGQ DDraw GetSurfaceDesc wrapper (vtable+0x14 then +0x58 with 0x6c-byte DDSURFACEDESC2); port has no DDraw surface stack",AGENT,2026-05-24
+00453c60,BuildYCbCrToPackedPixelLUT,776,3,INTENTIONAL,FMV_STUB,td5_fmv.c:1003,"EA TGQ YCbCr->packed-pixel LUT builder writing DAT_004d4f30/5730/5f30 + DAT_004d6730/6bf8/7010; replaced by Media Foundation native YUV->RGB",AGENT,2026-05-24

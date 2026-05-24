@@ -1,0 +1,5 @@
+00418410,SetFrontendInlineStringEntry,25,3
+00418430,ResetFrontendInlineStringTable,20,3
+00418450,NoOpHookStub,0,3
+00418460,ScreenMusicTestExtras,2002,4
+00418c60,QueueFrontendNetworkMessage,224,3

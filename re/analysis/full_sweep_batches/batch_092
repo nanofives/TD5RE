@@ -1,0 +1,5 @@
+00441d50,ReleaseRaceSoundChannels,52,4
+00441d90,PlayVehicleSoundAtPosition,498,5
+00441f90,BuildCubicSpline3D,250,4
+00442090,EvaluateCubicSpline3D,207,4
+00442160,InitializeRaceVideoConfiguration,4,5

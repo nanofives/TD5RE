@@ -1,0 +1,5 @@
+0044a82f,__sbh_page_decommit_check,68,0,NOT_PORTED,MINGW_CRT,,"MSVC small-block-heap page-decommit helper embedded in orig CRT (calls __sbh_decommit_pages); port links MinGW CRT instead",AGENT,2026-05-24
+0044a874,__sbh_alloc_block,519,0,NOT_PORTED,MINGW_CRT,,"MSVC small-block-heap allocator (uses PTR_LOOP_0047d268 region list + VirtualAlloc + __sbh_new_region); port links MinGW CRT instead",AGENT,2026-05-24
+0044aa7c,_flsbuf,291,0,NOT_PORTED,MINGW_CRT,,"MSVC stdio buffer-flush CRT routine (FILE _ptr/_cnt manipulation); port links MinGW CRT instead",AGENT,2026-05-24
+0044aba0,_mtinitlocks,40,0,NOT_PORTED,MINGW_CRT,,"MSVC multithread CRT lock-table init (4x InitializeCriticalSection on PTR_DAT_0047d2{74,94,a4,b4}); port links MinGW CRT instead",AGENT,2026-05-24
+0044abc9,_lock,96,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT _lock helper (lazy-init CRITICAL_SECTION via _malloc + EnterCriticalSection); port links MinGW CRT instead",AGENT,2026-05-24

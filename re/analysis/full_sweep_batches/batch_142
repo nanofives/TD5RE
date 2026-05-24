@@ -1,0 +1,5 @@
+0044fea0,__aulldiv,103,0
+0044ff10,__aullrem,116,0
+00450006,_alloc_osfhnd,290,0
+00450129,_set_osfhnd,123,0
+004501a5,_free_osfhnd,126,0

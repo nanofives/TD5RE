@@ -1,0 +1,5 @@
+0042c2b0,InitializeRaceViewportLayout,444,5
+0042c470,PollRaceSessionInput,1104,5
+0042c8d0,GetDamageRulesStub,2,5
+0042c8e0,ShowLegalScreens,286,5
+0042ca00,DisplayLoadingScreenImage,466,4

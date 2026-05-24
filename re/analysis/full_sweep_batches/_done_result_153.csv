@@ -1,0 +1,5 @@
+00452f20,PresentDecodedFrame,1105,3,NOT_PORTED,FMV_STUB,td5_fmv.c:989,"orig EA TGQ frame presenter (DDraw blit via vtable calls 0x14/0x60/0x6c at +0x1c surface ptr); port FMV is silent stub, only doc comment",AGENT,2026-05-24
+00453380,CreateVideoOutputSurface,230,3,NOT_PORTED,FMV_STUB,td5_fmv.c:990,"orig creates DDraw output surface via vtable +0x84 (CreateSurface) with caps 0x200 or 0x84000; port FMV stub has no surface creation",AGENT,2026-05-24
+00453470,ResetIDCTState,32,3,NOT_PORTED,FMV_STUB,td5_fmv.c:991,"orig zeros TGQ IDCT state at +0x500/0x504/0x508/0x600/0x604; port FMV stub has no decoder state",AGENT,2026-05-24
+004534a0,SwapDoubleBuffer,52,3,NOT_PORTED,FMV_STUB,td5_fmv.c:992,"orig swaps +0x1c/+0x20 surface ptrs (gated on flag 0x800 also swaps +0x4c/+0x50); port FMV stub has no double-buffer",AGENT,2026-05-24
+004534e0,BuildColorConversionLUTs,58,3,NOT_PORTED,FMV_STUB,td5_fmv.c:993,"orig dispatches BuildYCbCrToRGB16LUT (bpp 15/16) or BuildYCbCrColorTables; port FMV stub has no YCbCr LUTs",AGENT,2026-05-24

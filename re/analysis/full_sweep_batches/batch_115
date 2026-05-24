@@ -1,0 +1,5 @@
+00449d2b,__sbh_heap_init,71,0
+00449d73,__sbh_find_block,42,0
+00449d9e,__sbh_free_block,808,0
+0044a0c7,_heap_alloc_base,776,0
+0044a3d0,__sbh_alloc_new_region,176,0

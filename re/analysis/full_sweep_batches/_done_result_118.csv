@@ -1,0 +1,5 @@
+0044ac2a,_unlock,20,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT _unlock(_File) calls LeaveCriticalSection on lock table at DAT_0047d270; port links MinGW CRT which provides its own internal locks",AGENT,2026-05-24
+0044ac40,__global_unwind2,31,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT wrapper around RtlUnwind for SEH global unwind; library-function single-match (Visual Studio); MinGW CRT provides equivalent via its own SEH runtime",AGENT,2026-05-24
+0044ac82,__local_unwind2,103,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT SEH local-unwind helper walking try-block scope table with __NLG_Notify(0x101); library-function single-match (VS 1998/2003); MinGW CRT-provided",AGENT,2026-05-24
+0044ad16,__NLG_Notify,23,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT non-local-goto debugger notify hook writing EAX/EBP/[EBP+8] to DAT_0047d334/338/33c; MinGW CRT has no NLG hooks",AGENT,2026-05-24
+0044adf5,__local_unwind2_wrapper,26,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT thunk calling __local_unwind2 with args at [param+0x18]/[param+0x1c]; MinGW CRT-provided unwind machinery",AGENT,2026-05-24

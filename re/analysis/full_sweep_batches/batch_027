@@ -1,0 +1,5 @@
+00411a50,ResetFrontendFadeState,22,3
+00411a70,RenderFrontendFadeOutEffect,878,3
+00411de0,ClearFrontendSurfaceRegistry,22,3
+00411e00,GetFrontendSurfaceRegistryId,40,3
+00411e30,ReleaseTrackedFrontendSurface,90,5

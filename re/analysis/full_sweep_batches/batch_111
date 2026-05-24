@@ -1,0 +1,5 @@
+00449531,__init_fp_control,17,0
+00449543,__detect_sse_inner,61,0
+00449581,__IsProcessorFeaturePresent_fp,40,0
+004495aa,__cropzeros,89,0
+0044966a,__fassign,61,0

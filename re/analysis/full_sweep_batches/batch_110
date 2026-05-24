@@ -1,0 +1,5 @@
+00449200,_strnicmp,256,0
+00449310,stricmp_game,207,3
+004493e0,entry,232,0
+004494e8,__amsg_exit,33,0
+0044950d,FatalStartupExit,34,3

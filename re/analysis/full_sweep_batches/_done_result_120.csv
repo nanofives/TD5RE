@@ -1,0 +1,5 @@
+0044b707,__va_arg_int,12,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT stdarg helper embedded in orig at 0x0044b707; not disassembled as function in Ghidra; no port reference; port uses MinGW CRT stdarg.h",AGENT,2026-05-24
+0044b714,__va_arg_double,15,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT stdarg helper at 0x0044b714; not disassembled as function in Ghidra; no port reference; port uses MinGW CRT stdarg.h",AGENT,2026-05-24
+0044b724,__va_arg_short,13,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT stdarg helper at 0x0044b724; not disassembled as function in Ghidra; no port reference; port uses MinGW CRT stdarg.h",AGENT,2026-05-24
+0044b7ee,_lock_file,46,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT FILE* thread-lock helper at 0x0044b7ee; not disassembled as function in Ghidra; no port reference; port relies on MinGW CRT internal locking",AGENT,2026-05-24
+0044b81d,_lock_stream,34,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT stream lock helper at 0x0044b81d; not disassembled as function in Ghidra; no port reference; port relies on MinGW CRT internal locking",AGENT,2026-05-24

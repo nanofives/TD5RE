@@ -1,0 +1,5 @@
+0044e9d8,_setenvp,184,0
+0044ea91,_setargv,152,0
+0044eb2a,_parse_cmdline,435,0
+0044ecde,_crt_setenv,305,0
+0044ee10,_cexit,56,0

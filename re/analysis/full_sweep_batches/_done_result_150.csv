@@ -1,0 +1,5 @@
+00452300,DecodeAudioChunk,926,3,INTENTIONAL,FMV_STUB,td5_fmv.c:978,"orig EA TGQ audio chunk decoder (mmioRead + DecodeEAIMA_Mono/Stereo + DecodeEAADPCM dispatch); port collapses entire codec to FMV stub per ARCH-DIVERGENCE manifest",AGENT,2026-05-24
+004526a0,ParseExtendedAudioHeader,257,3,INTENTIONAL,FMV_STUB,td5_fmv.c:979,"orig tagged-param audio header parser (mmioRead + ReadTaggedParam dispatch on 0x81-0x84); port collapses entire EA TGQ codec to FMV stub",AGENT,2026-05-24
+004527c0,ReadTaggedParam,104,3,INTENTIONAL,FMV_STUB,td5_fmv.c:980,"orig tagged-param big-endian decoder (1/2/3-byte signed extend); part of EA TGQ codec collapsed into FMV stub per manifest",AGENT,2026-05-24
+00452830,CloseMultimediaStream,89,3,INTENTIONAL,FMV_STUB,td5_fmv.c:981,"orig FMV stream teardown (ReleaseStreamResources + ReleaseDirectSoundDevice + ReleaseVideoResources + free); port FMV stub has no equivalent",AGENT,2026-05-24
+00452890,ReleaseStreamResources,123,3,INTENTIONAL,FMV_STUB,td5_fmv.c:982,"orig stream resource cleanup (mmioClose + free of buffers 7/8 + zero ring slots); port FMV stub has no equivalent",AGENT,2026-05-24

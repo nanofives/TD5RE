@@ -1,0 +1,5 @@
+0044bcd0,_memmove,820,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT memmove (forward/backward word-copy + tail-switch) embedded in orig binary; port links MinGW CRT — no port equivalent",AGENT,2026-05-24
+0044c005,_openfile,367,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT fopen-mode parser (calls _sopen with flags 0x109/0x301, FILE _flag init) embedded in orig; port uses MinGW CRT",AGENT,2026-05-24
+0044c175,_getstream,199,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT FILE-table allocator (lock(2), iotab scan, malloc(0x38), InitializeCriticalSection) embedded in orig; port uses MinGW CRT",AGENT,2026-05-24
+0044c23d,_filbuf,219,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT buffered-input refill (FILE _flag/_cnt/_ptr mgmt, 0x200→0x1000 bufsiz promote, calls _read/_getbuf) embedded in orig; port uses MinGW CRT",AGENT,2026-05-24
+0044c319,_read,100,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT _read wrapper (fh bounds check, _lock_fh/_read_nolock/_unlock_fh, errno=EBADF on fail) embedded in orig; port uses MinGW CRT",AGENT,2026-05-24

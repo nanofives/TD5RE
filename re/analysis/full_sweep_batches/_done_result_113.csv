@@ -1,0 +1,5 @@
+0044995a,__cfltcvt,80,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT _cfltcvt (Visual Studio 2003 lib match) dispatching to _ecvt/_fcvt/_gcvt; port links MinGW CRT printf chain instead",AGENT,2026-05-24
+004499ab,__shift_digits,36,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT helper used by floating-point printf formatting (memcpy shift by N); port uses MinGW printf",AGENT,2026-05-24
+004499d0,InitPrimaryTlsSlot,83,3,NOT_PORTED,MINGW_CRT,"main.c:933","explicitly documented as ARCH-DIVERGENCE LIBC at main.c:933; orig MSVC CRT _mtinit body (TlsAlloc + calloc 0x74 + __initptd); MinGW CRT handles TLS init in port",AGENT,2026-05-24
+00449a24,__initptd,18,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT per-thread data init (sets _holdrand=1 + _con_ch_buf pointer); MinGW CRT thread data layout differs entirely",AGENT,2026-05-24
+00449a37,_getptd,102,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT TlsGetValue-or-create per-thread data; calls __initptd and __amsg_exit on failure; MinGW CRT equivalent used by port",AGENT,2026-05-24

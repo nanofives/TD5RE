@@ -1,0 +1,5 @@
+004329e0,FlushImmediateDrawPrimitiveBatch,193,4
+00432ab0,AppendClippedPolygonTriangleFan,285,4
+00432bd0,BuildSpriteQuadTemplate,397,5
+00432d60,ComputeAIRubberBandThrottle,241,5
+00432e60,InitializeRaceActorRuntime,2075,5

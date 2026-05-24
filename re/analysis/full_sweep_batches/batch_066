@@ -1,0 +1,5 @@
+0042f6d0,ComputeVehicleSuspensionEnvelope,697,5
+0042f990,LoadEnvironmentTexturePages,318,4
+0042fad0,InitializeTrackStripMetadata,102,5
+0042fb40,ApplyTrackStripAttributeOverrides,66,5
+0042fb90,LoadTrackRuntimeData,467,5

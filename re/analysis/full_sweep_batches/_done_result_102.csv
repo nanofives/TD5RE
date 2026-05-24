@@ -1,0 +1,5 @@
+00448111,__fpmath_init_ret,0,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT helper embedded in orig (0x00448000+ range); port links MinGW CRT — toolchain-provided, not source-port surface",AGENT,2026-05-24
+00448112,__cfltcvt_init,55,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT float conversion init in orig 0x448112; port uses MinGW CRT — explicit example in MINGW_CRT class tag",AGENT,2026-05-24
+0044814a,__set_new_handler,12,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT new-handler stub in orig 0x44814a; port uses MinGW CRT — explicit example in MINGW_CRT class tag",AGENT,2026-05-24
+0044817c,__ftol,38,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT float-to-long convert in orig 0x44817c; port uses MinGW CRT __ftol equivalent — explicit example in MINGW_CRT class tag",AGENT,2026-05-24
+004481b5,__nh_malloc,43,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT no-handler malloc in orig 0x4481b5; port uses MinGW CRT malloc — toolchain-provided, no port equivalent needed",AGENT,2026-05-24

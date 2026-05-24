@@ -1,0 +1,5 @@
+00411e90,ReleaseTrackedFrontendSurfaces,96,3
+00411f00,CreateTrackedFrontendSurface,301,5
+00412030,LoadFrontendTgaSurfaceFromArchive,688,3
+004122f0,LoadTgaToFrontendSurfaceFromArchive,693,3
+004125b0,LoadTgaToFrontendSurface16bpp,502,5

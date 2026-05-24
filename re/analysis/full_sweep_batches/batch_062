@@ -1,0 +1,5 @@
+0042e460,WriteTransformedShortVector,130,5
+0042e4f0,WritePointToCurrentRenderTransform,106,3
+0042e560,TransformTriangleByRenderMatrix,418,3
+0042e710,TransposeMatrix3x3,60,5
+0042e750,BuildWorldToViewMatrix,614,3

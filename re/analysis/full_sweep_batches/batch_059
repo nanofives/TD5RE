@@ -1,0 +1,5 @@
+0042d880,ApplyMeshRenderBasisFromTransform,200,3
+0042d950,ApplyMeshRenderBasisFromWorldPosition,180,3
+0042da10,MultiplyRotationMatrices3x3,292,5
+0042db40,ConvertFloatVec3ToIntVec3,137,3
+0042dbd0,TransformVector3ByBasis,82,4

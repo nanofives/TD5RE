@@ -1,0 +1,5 @@
+00442170,RunMainGameLoop,991,5
+00442560,LoadStaticTrackTextureHeader,260,5
+00442670,LoadTrackTextureSet,255,4
+00442770,LoadRaceTexturePages,1397,5
+00442cf0,FindArchiveEntryByName,56,5

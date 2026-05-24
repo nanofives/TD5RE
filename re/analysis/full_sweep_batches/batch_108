@@ -1,0 +1,5 @@
+00448bf0,__allmul,51,0
+00448c30,__alldiv,169,0
+00448cda,_sscanf,51,0
+00448d0e,ftell_game,33,3
+00448d30,_ftell_nolock,352,0

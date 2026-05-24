@@ -1,0 +1,5 @@
+00451a10,OpenWavStream,408,3,NOT_PORTED,FMV_STUB,td5_fmv.c:973,"orig 0x451a10 mmioOpenA + RIFF parse + WAVEFORMATEX setup; port td5_fmv.c is FMV stub (EA TGQ codec collapse) - no playback",AGENT,2026-05-24
+00451bb0,SkipRIFFHeaders,436,3,NOT_PORTED,FMV_STUB,td5_fmv.c:974,"orig 0x451bb0 mmioRead/mmioSeek loop skipping SEAD/SCHl/S1Nh FourCC headers; folded into td5_fmv.c FMV stub",AGENT,2026-05-24
+00451d70,ReadAndDispatchChunk,1063,3,NOT_PORTED,FMV_STUB,td5_fmv.c:975,"orig 0x451d70 FourCC dispatch (MADe/MADk/MADm/VGTf/VGTk/VQIp etc.) to FillVideoRingBuffer + audio decoders; folded into FMV stub",AGENT,2026-05-24
+004521a0,FillVideoRingBuffer,221,3,NOT_PORTED,FMV_STUB,td5_fmv.c:976,"orig 0x4521a0 mmioRead + ring-buffer slot write + InterlockedIncrement counters; folded into FMV stub",AGENT,2026-05-24
+00452280,ParseSimpleAudioHeader,114,3,NOT_PORTED,FMV_STUB,td5_fmv.c:977,"orig 0x452280 mmioRead + sets bits=16/channels=2/sample_rate=22050/codec=10; folded into FMV stub",AGENT,2026-05-24

@@ -1,0 +1,5 @@
+00433680,FindNearestRoutePeer,337,5
+004337e0,FindActorTrackOffsetPeer,1278,5
+00433ce0,RenderTrackSegmentNearActor,695,5
+00433fc0,AngleFromVector12Full,119,5
+00434040,ComputeActorRouteHeadingDelta,119,5

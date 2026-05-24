@@ -1,0 +1,5 @@
+0044fcf0,_strstr,127,0
+0044fd70,__getbuf,67,0
+0044fdb4,_isatty,40,0
+0044fddd,_wctomb,88,0
+0044fe36,_wctomb_nolock,104,0

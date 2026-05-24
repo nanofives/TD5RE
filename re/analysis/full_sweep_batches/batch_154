@@ -1,0 +1,5 @@
+00453520,BuildYCbCrToRGB16LUT,344,3
+00453680,PackPixelFromRGB,545,3
+004538b0,BuildYCbCrColorTables,239,3
+004539a0,PackYCbCrTableEntry,63,3
+004539e0,InitializeVideoDecoder,307,3

@@ -1,0 +1,5 @@
+0044f0e2,__ZeroTail,11,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT _LDBL12 helper at 0x0044f0e2; zeroes 3 dwords. Port links MinGW CRT; no equivalent needed",AGENT,2026-05-24
+0044f0ee,__IsZeroTail,26,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT _LDBL12 helper at 0x0044f0ee; checks 3 dwords zero. Port links MinGW CRT; no equivalent needed",AGENT,2026-05-24
+0044f109,__ShrTail,140,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT _LDBL12 shift-right helper at 0x0044f109; multi-word shift used by __ld12cvt. Port links MinGW CRT",AGENT,2026-05-24
+0044f196,__ld12cvt,363,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT internal long-double to float/double convert at 0x0044f196 (uses _LDBL12/_CRT_DOUBLE). Port links MinGW CRT",AGENT,2026-05-24
+0044f302,__ld12tod,21,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT _LDBL12 to _CRT_DOUBLE wrapper at 0x0044f302 calling __ld12cvt. Port links MinGW CRT",AGENT,2026-05-24

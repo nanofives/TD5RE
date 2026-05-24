@@ -1,0 +1,5 @@
+00448512,_fwrite,46,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT _fwrite stub (calls _lock_file/_fwrite_nolock/_unlock_file); port links MinGW CRT and uses libc fwrite directly",AGENT,2026-05-24
+00448541,_fwrite_nolock,265,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT _fwrite_nolock buffer-management body (_flag 0x10c/0x108/0x20 + _write/_fputc/_flush); port uses MinGW libc",AGENT,2026-05-24
+0044864b,_fopen,48,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT _fopen stub (calls _getstream/_openfile/_unlock_file); port links MinGW CRT and uses libc fopen directly",AGENT,2026-05-24
+0044867c,fopen_game,18,3,NOT_PORTED,STDLIB_INLINE,"main.c:927","CRT-bridge wrapper (calls _fopen); audited in batch_56 and listed in main.c:905-935 ARCH-DIVERGENCE CRT collapse manifest",AGENT,2026-05-24
+0044868f,fread_game,46,3,NOT_PORTED,STDLIB_INLINE,"main.c:928","CRT-bridge wrapper (calls _lock_file/_fread_nolock/_unlock_file); audited in batch_56 and listed in main.c CRT collapse manifest",AGENT,2026-05-24

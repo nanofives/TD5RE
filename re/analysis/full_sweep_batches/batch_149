@@ -1,0 +1,5 @@
+00451a10,OpenWavStream,408,3
+00451bb0,SkipRIFFHeaders,436,3
+00451d70,ReadAndDispatchChunk,1063,3
+004521a0,FillVideoRingBuffer,221,3
+00452280,ParseSimpleAudioHeader,114,3

@@ -1,0 +1,5 @@
+0045791f,IDCTDecode16x16Block,2014,3,NOT_PORTED,FMV_STUB,td5_fmv.c:1049,"EA TGQ JPEG IDCT 16x16 block decode (DCT+YCbCrToPackedPixel16); port FMV is silent stub, no equivalent; documented ARCH-DIVERGENCE FMV manifest",AGENT,2026-05-24
+004580fe,DecodeJPEGFrame,2014,3,NOT_PORTED,FMV_STUB,td5_fmv.c:1050,"EA TGQ JPEG frame decode (DCT+YCbCrToRGB_Row_16bit); port FMV stub skips movies silently, no equivalent",AGENT,2026-05-24
+004588e0,DecodeHuffmanBlock,744,3,NOT_PORTED,FMV_STUB,td5_fmv.c:1051,"EA TGQ Huffman block decoder using DAT_004d792c/004d75b0 tables and DecodeJPEGMCU; port FMV stub, no equivalent",AGENT,2026-05-24
+00458bc9,DecodeJPEGMCU,1269,3,NOT_PORTED,FMV_STUB,td5_fmv.c:1052,"EA TGQ JPEG MCU AC-coef decoder (zigzag dequant via DAT_004d75b0/IDCT8ColumnButterfly); port FMV stub, no equivalent",AGENT,2026-05-24
+004590bf,DecodeMCU_YCbCr422_16bpp,493,3,NOT_PORTED,FMV_STUB,td5_fmv.c:1053,"EA TGQ 422 MCU 16bpp wrapper (DecodeHuffmanBlock + 16x YCbCrToRGB_Row_8bit); port FMV stub, no equivalent",AGENT,2026-05-24

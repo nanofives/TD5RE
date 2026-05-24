@@ -1,0 +1,5 @@
+00402000,ResetRaceCameraSelectionState,168,5
+004020b0,InitializeTracksideCameraProfiles,322,4
+00402200,SelectTracksideCameraProfile,585,4
+00402480,UpdateTracksideCamera,1182,4
+00402a80,CacheVehicleCameraAngles,65,4

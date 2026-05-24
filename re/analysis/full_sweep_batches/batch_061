@@ -1,0 +1,5 @@
+0042e130,SetTrackLightDirectionContribution,166,5
+0042e1e0,BuildRotationMatrixFromAngles,249,5
+0042e2e0,ConvertFloatVec3ToShortAngles,140,5
+0042e370,TransformVector3ByRenderRotation,83,3
+0042e3d0,TransformShortVectorToView,129,3

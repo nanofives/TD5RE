@@ -1,0 +1,5 @@
+00449a9e,_freeptd,159,0
+00449b3e,__callnewh,26,0
+00449b59,__getLinkerVersion,44,0
+00449b86,__heap_init,327,0
+00449cce,InitProcessHeap,92,3

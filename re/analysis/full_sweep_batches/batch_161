@@ -1,0 +1,5 @@
+004560c0,StopAudioDecoderThread,69,3
+00456110,InitStreamDirectSound,184,3
+004561d0,CreateDirectSoundDevice,59,3
+00456210,DDrawGetSurfaceCaps,51,3
+00456250,ReleaseDirectSoundDevice,69,3

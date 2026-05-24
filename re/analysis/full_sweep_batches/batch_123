@@ -1,0 +1,5 @@
+0044bcd0,_memmove,820,0
+0044c005,_openfile,367,0
+0044c175,_getstream,199,0
+0044c23d,_filbuf,219,0
+0044c319,_read,100,0

@@ -1,0 +1,5 @@
+004092d0,RenderVehicleActorModel,587,3
+00409520,CheckAndUpdateActorCollisionAlignment,392,3
+004096b0,ComputeActorWorldBoundingVolume,1339,3
+00409bf0,RefreshScriptedVehicleTransforms,179,5
+00409d20,IntegrateScriptedVehicleMotion,338,5

@@ -1,0 +1,5 @@
+0043dcb0,TransformAndQueueTranslucentMesh,173,4
+0043dd60,TransformMeshVerticesToView,131,5
+0043ddf0,ComputeMeshVertexLighting,195,5
+0043dec0,ApplyMeshProjectionEffect,837,4
+0043e210,SetProjectionEffectState,172,4

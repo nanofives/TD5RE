@@ -1,0 +1,5 @@
+00439b70,DrawRaceStatusText,747,4
+00439e60,RenderHudRadialPulseOverlay,928,4
+0043a210,ResetHudRadialPulseOverlay,10,5
+0043a220,RenderTrackMinimapOverlay,3707,5
+0043b0a0,InitializeMinimapLayout,1809,5

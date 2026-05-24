@@ -1,0 +1,5 @@
+0042dc30,ConvertFloatVec3ToIntVec3B,110,3
+0042dca0,IsBoundingSphereVisibleInCurrentFrustum,358,4
+0042de10,TestMeshAgainstViewFrustum,362,4
+0042df80,ApplyMeshResourceRenderTransform,162,5
+0042e030,ExtractEulerAnglesFromMatrix,246,3

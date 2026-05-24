@@ -1,0 +1,5 @@
+00452e10,ReturnZero,2,3
+00452e20,OpenAndStartMediaPlayback,62,4
+00452e60,SetStreamVolume,20,4
+00452e80,IsStreamPlaying,61,4
+00452ec0,StopStreamPlayback,90,4

@@ -1,0 +1,5 @@
+00401000,InitializeVehicleTaillightQuadTemplates,436,5
+004011c0,RenderVehicleTaillightQuads,356,4
+00401330,SpawnRearWheelSmokeEffects,55,4
+00401370,SpawnRandomVehicleSmokePuff,159,3
+00401410,InitializeRaceSmokeSpritePool,56,4

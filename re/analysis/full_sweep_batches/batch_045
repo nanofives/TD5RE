@@ -1,0 +1,5 @@
+00424e40,InitializeFrontendPresentationState,803,4
+00425170,UpdateFrontendClientOrigin,41,3
+004251a0,Copy16BitSurfaceRect,440,5
+00425360,PresentFrontendBufferSoftware,367,5
+004254d0,ResetFrontendOverlayState,35,3

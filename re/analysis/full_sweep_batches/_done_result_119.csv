@@ -1,0 +1,5 @@
+0044ae10,_fputc,279,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT fputc embedded in orig (FILE _flag/_cnt/_ptr/_base bitfield logic + __getbuf/_write/_lseek/_isatty); port links MinGW CRT, no source-port equivalent",AGENT,2026-05-24
+0044af28,_output,1824,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT printf core (_output): %d/%s/%x/%c/%n/%S/%Z/%I64 format machine with __va_arg_int/__aullrem/__aulldiv/_wctomb; port links MinGW CRT, no port equivalent",AGENT,2026-05-24
+0044b669,_write_char,52,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT _output helper: decrements FILE _cnt and calls _fputc on underflow; port links MinGW CRT, no port equivalent",AGENT,2026-05-24
+0044b69e,_write_multi_char,48,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT _output helper: loops _write_char N times until error; port links MinGW CRT, no port equivalent",AGENT,2026-05-24
+0044b6cf,_write_string,55,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT _output helper: loops _write_char over string for N bytes; port links MinGW CRT, no port equivalent",AGENT,2026-05-24

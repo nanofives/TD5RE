@@ -1,0 +1,5 @@
+004315b0,SubmitImmediateTranslucentPrimitive,213,5
+00431690,SubmitProjectedQuadPrimitive,49,4
+004316d0,EmitTranslucentQuadDirect,20,4
+004316f0,SubmitProjectedTrianglePrimitive,49,4
+00431730,EmitTranslucentTriangleStripDirect,20,4

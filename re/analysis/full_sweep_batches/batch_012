@@ -1,0 +1,5 @@
+0040a6c0,SinFloat12bit,21,5
+0040a6e0,CosFixed12bit,16,5
+0040a700,SinFixed12bit,21,5
+0040a720,AngleFromVector12,341,5
+0040a880,ResetRaceResultsTable,50,5

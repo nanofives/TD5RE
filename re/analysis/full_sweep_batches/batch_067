@@ -1,0 +1,5 @@
+0042fd70,RemapCheckpointOrderForTrackDirection,168,4
+0042fe20,BlendTrackLightEntryFromStart,400,4
+0042ffc0,BlendTrackLightEntryFromEnd,399,4
+00430150,ApplyTrackLightingForVehicleSegment,2346,5
+00430a90,GameWinMain,528,5

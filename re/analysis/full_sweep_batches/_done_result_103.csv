@@ -1,0 +1,5 @@
+004481e1,_heap_alloc,251,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT heap allocator embedded in orig binary; port links MinGW CRT and uses td5_plat_heap_alloc/HeapAlloc wrappers instead",AGENT,2026-05-24
+00448248,__lock_fhandle,8,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT internal stdio file-handle lock stub in orig; port uses MinGW CRT equivalent, no port-side port",AGENT,2026-05-24
+004482a7,__unlock_fhandle,8,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT internal stdio file-handle unlock stub in orig; port uses MinGW CRT equivalent, no port-side port",AGENT,2026-05-24
+004482dd,_controlfp,52,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT _controlfp entry embedded in orig; port calls MinGW CRT _controlfp at main.c:410 (PC=64/RC=DOWN) rather than porting the impl",AGENT,2026-05-24
+00448312,__controlfp_internal,21,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT internal helper for _controlfp in orig; toolchain-provided MinGW equivalent used by port, no source-port equivalent",AGENT,2026-05-24

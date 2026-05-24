@@ -1,0 +1,5 @@
+004486be,_fread_nolock,231,0
+004487b0,__chkstk,46,0
+004487df,_free,232,0
+00448849,__lock_fhandle2,8,0
+004488a1,__unlock_fhandle2,8,0

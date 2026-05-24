@@ -1,0 +1,5 @@
+00425500,ResetFrontendSelectionState,59,3
+00425540,FlushFrontendSpriteBlits,277,4
+00425660,QueueFrontendOverlayRect,205,5
+00425730,QueueFrontendSpriteBlit,368,3
+004258b0,DeferFrontendBackgroundRestore,10,3

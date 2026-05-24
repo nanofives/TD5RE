@@ -1,0 +1,5 @@
+00452f20,PresentDecodedFrame,1105,3
+00453380,CreateVideoOutputSurface,230,3
+00453470,ResetIDCTState,32,3
+004534a0,SwapDoubleBuffer,52,3
+004534e0,BuildColorConversionLUTs,58,3

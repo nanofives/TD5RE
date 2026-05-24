@@ -1,0 +1,5 @@
+0044c37e,_read_nolock,472,0
+0044c557,_stbuf,140,0
+0044c610,_strcpy,6,0
+0044c620,_strcat,223,0
+0044c700,__crtLCMapStringA,547,0

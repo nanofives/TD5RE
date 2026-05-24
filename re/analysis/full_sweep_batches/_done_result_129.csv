@@ -1,0 +1,5 @@
+0044dc54,___initmbctable,27,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT multibyte char-class table initializer in orig 0x0044d*** CRT region; port links MinGW CRT, no source port equivalent",AGENT,2026-05-24
+0044dc70,_mbsncpy,153,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT multibyte strncpy helper used by _splitpath et al; port uses MinGW CRT, no source port equivalent",AGENT,2026-05-24
+0044dd0a,__raise_exc_single,83,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT FPU exception raise helper; port uses MinGW CRT, no source port equivalent",AGENT,2026-05-24
+0044dd5e,__handle_fp_exc,151,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT FPU exception dispatcher (used by _ceil/IEEE754 helpers per batch_109); port uses MinGW CRT, no source port equivalent",AGENT,2026-05-24
+0044ddf6,__build_exc_record,690,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT exception-record constructor for FPU exception machinery; port uses MinGW CRT, no source port equivalent",AGENT,2026-05-24

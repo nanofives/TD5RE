@@ -1,0 +1,5 @@
+0044f45b,__dtold12,181,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT long-double-to-12-byte conversion helper in orig 0x0044f000+ range; not disassembled as function in Ghidra; no port references found; provided by MinGW CRT",AGENT,2026-05-24
+0044f520,_memset,87,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT memset in orig 0x0044f000+ range; not disassembled as function in Ghidra; port uses MinGW CRT memset",AGENT,2026-05-24
+0044f580,_memcpy,820,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT memcpy in orig 0x0044f000+ range; not disassembled as function in Ghidra; port uses MinGW CRT memcpy",AGENT,2026-05-24
+0044f8b5,__amsg_exit_nomem,8,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT out-of-memory exit helper in orig 0x0044f000+ range; not disassembled as function in Ghidra; port uses MinGW CRT",AGENT,2026-05-24
+0044f8be,_calloc,316,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT calloc in orig 0x0044f000+ range; not disassembled as function in Ghidra; port uses MinGW CRT calloc",AGENT,2026-05-24

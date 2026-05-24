@@ -1,0 +1,5 @@
+00448e91,fseek_game,43,3,NOT_PORTED,MINGW_CRT,main.c:930,"orig MSVCRT _lock_file/_fseek/_unlock_file wrapper; documented [ARCH-DIVERGENCE: LIBC] at main.c:910-935; port uses MinGW CRT fseek directly",AGENT,2026-05-24
+00448ebd,_fseek,140,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT internal _fseek (handles _flag bits/_flush/_lseek); port links MinGW CRT, no equivalent in source port surface",AGENT,2026-05-24
+00448f4a,_makepath,144,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT _makepath embedded in orig binary; port uses MinGW CRT, no source port equivalent",AGENT,2026-05-24
+00448fdb,_splitpath,326,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT _splitpath (uses _mbsncpy + DAT_004cfac0 char-class table); port uses MinGW CRT, no source port equivalent",AGENT,2026-05-24
+00449122,_ceil,206,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT _ceil (uses __ctrlfp/__frnd/__handle_fp_exc/_fpclass for IEEE754 inf/nan handling); port uses MinGW CRT ceil",AGENT,2026-05-24

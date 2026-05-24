@@ -1,0 +1,5 @@
+00448512,_fwrite,46,0
+00448541,_fwrite_nolock,265,0
+0044864b,_fopen,48,0
+0044867c,fopen_game,18,3
+0044868f,fread_game,46,3

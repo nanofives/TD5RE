@@ -1,0 +1,5 @@
+0040b1d0,BuildTrackTextureCacheImpl,839,4
+0040b530,SwapIndexedRuntimeEntries,68,4
+0040b580,SetRaceTexturePageLoader,13,5
+0040b590,UploadRaceTexturePage,204,4
+0040b660,BindRaceTexturePage,438,5

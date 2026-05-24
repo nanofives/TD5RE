@@ -1,0 +1,5 @@
+00448bf0,__allmul,51,0,NOT_PORTED,MINGW_CRT,,"MSVC compiler intrinsic for 64-bit signed multiply embedded in orig CRT; port links MinGW libgcc equivalent (__muldi3)",AGENT,2026-05-24
+00448c30,__alldiv,169,0,NOT_PORTED,MINGW_CRT,,"MSVC compiler intrinsic for 64-bit signed divide embedded in orig CRT; port links MinGW libgcc equivalent (__divdi3)",AGENT,2026-05-24
+00448cda,_sscanf,51,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT sscanf entry embedded in orig binary; port uses MinGW msvcrt sscanf via stdio.h",AGENT,2026-05-24
+00448d0e,ftell_game,33,3,NOT_PORTED,MINGW_CRT,td5mod/src/td5re/main.c:929,"Explicitly documented LIBC arch-divergence in main.c:929 block; orig wraps _lock_file + _ftell_nolock + _unlock_file; port uses MinGW ftell directly",AGENT,2026-05-24
+00448d30,_ftell_nolock,352,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT _ftell_nolock internal; touches FILE struct + _osfile table at DAT_004cfbe0; port uses MinGW CRT ftell which has different FILE layout",AGENT,2026-05-24

@@ -1,0 +1,5 @@
+00443730,PatchModelUVCoordsForTrackLighting,142,5
+004437c0,ApplyDampedSuspensionForce,302,5
+004438f0,IntegrateVehicleFrictionForces,1018,5
+00443cf0,UpdateTrafficVehiclePose,479,5
+00443ed0,UpdateTrafficActorMotion,216,5

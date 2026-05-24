@@ -1,0 +1,5 @@
+00434740,ComputeRouteForwardOvershootScalar,189,3
+00434800,SampleTrackTargetPoint,251,5
+00434900,UpdateActorTrackOffsetBias,407,5
+00434aa0,UpdateActorRouteThresholdState,245,5
+00434ba0,UpdateSpecialEncounterControl,499,5

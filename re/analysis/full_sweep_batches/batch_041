@@ -1,0 +1,5 @@
+00424050,BltColorFillToSurface,190,5
+00424110,DrawFrontendFontStringPrimary,204,5
+004241e0,DrawFrontendFontStringSecondary,204,5
+00424390,DrawFrontendLocalizedStringSecondary,221,5
+00424470,DrawFrontendFontStringToSurface,228,3

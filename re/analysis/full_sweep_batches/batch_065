@@ -1,0 +1,5 @@
+0042f010,ApplyReverseGearThrottleSign,31,5
+0042f030,ComputeDriveTorqueFromGearCurve,204,5
+0042f100,GetTrackSegmentSurfaceType,58,5
+0042f140,InitializeRaceVehicleRuntime,1130,5
+0042f5b0,UpdateRaceOrder,278,5

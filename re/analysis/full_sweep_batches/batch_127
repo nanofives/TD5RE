@@ -1,0 +1,5 @@
+0044d500,_strlen,122,0
+0044d57b,_ioinit,443,0
+0044d737,_lseek,100,0
+0044d79c,_lseek_nolock,114,0
+0044d80f,_mbsdec,108,0

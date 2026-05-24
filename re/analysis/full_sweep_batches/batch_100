@@ -1,0 +1,5 @@
+00447490,InflateFlushOutputAndUpdateCrc32,101,3
+004474f6,InflateRefillInputBuffer,11,3
+00447502,InflateWriteOutputChunk,24,3
+0044751b,InflateBuildDecodeTable,505,3
+00447715,InflateDecodeHuffmanCodes,912,3

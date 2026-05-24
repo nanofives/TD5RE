@@ -1,0 +1,5 @@
+00426260,InitializeFrontendDisplayModeArrows,294,3
+00426390,ReleaseFrontendDisplayModeButtons,79,5
+004263e0,RenderFrontendDisplayModeHighlight,240,4
+004264e0,BeginFrontendDisplayModePreviewLayout,89,3
+00426540,RestoreFrontendDisplayModePreviewLayout,63,3

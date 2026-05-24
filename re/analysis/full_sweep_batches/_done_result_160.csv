@@ -1,0 +1,5 @@
+00455ad0,DecodeEAIMA_Stereo,652,3,NOT_PORTED,FMV_STUB,td5_fmv.c:1024,"EA IMA ADPCM stereo decoder for TGQ FMV; orig uses g_eaImaStepTableLow/High; port td5_fmv.c is stub (FMVs skipped silently)",AGENT,2026-05-24
+00455d60,AudioDecoderThreadFunc,127,3,NOT_PORTED,FMV_STUB,td5_fmv.c:1025,"FMV audio decoder worker thread (Sleep+InterlockedExchange loop calling WriteAudioToDirectSound); port td5_fmv.c stub does not start any thread",AGENT,2026-05-24
+00455de0,WriteAudioToDirectSound,522,3,NOT_PORTED,FMV_STUB,td5_fmv.c:1026,"FMV DirectSound stream-buffer writer (IDirectSoundBuffer::Lock/Unlock via vtable +0x2c/+0x4c); port stub has no DSound streaming for FMV",AGENT,2026-05-24
+00455ff0,GetAudioPlayPosition,141,3,NOT_PORTED,FMV_STUB,td5_fmv.c:1027,"FMV DSound play-cursor query (vtable +0x10 GetCurrentPosition) with software counter fallback (+0x372); port stub absent",AGENT,2026-05-24
+00456080,StartAudioDecoderThread,63,3,NOT_PORTED,FMV_STUB,td5_fmv.c:1028,"FMV _beginthread(AudioDecoderThreadFunc) + SetThreadPriority(0xf); port td5_fmv.c is FMV_STUB, no decoder thread spawn",AGENT,2026-05-24

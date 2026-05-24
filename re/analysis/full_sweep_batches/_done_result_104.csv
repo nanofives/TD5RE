@@ -1,0 +1,5 @@
+00448328,__hw_to_abstract_fp,145,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT FPU abstraction helper (hw status flags + RC + PC bits to portable form); port links MinGW CRT which provides equivalents internally",AGENT,2026-05-24
+004483ba,__abstract_to_hw_cw,136,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT inverse of __hw_to_abstract_fp (abstract CW back to x87 hw bits); port uses MinGW CRT + main.c:405 _controlfp PC=64 directly",AGENT,2026-05-24
+00448443,sprintf_game,81,3,NOT_PORTED,MINGW_CRT,,"MSVC CRT sprintf wrapper using stack FILE local_24; documented in main.c:925 CRT bridge collapse manifest as [ARCH-DIVERGENCE: LIBC] - port calls snprintf directly",AGENT,2026-05-24
+00448495,fclose_game,48,3,NOT_PORTED,MINGW_CRT,,"MSVC CRT fclose wrapper (_lock_file/__fclose_lk/_unlock_file); documented in main.c:926 CRT bridge collapse manifest as [ARCH-DIVERGENCE: LIBC] - port uses libc fclose",AGENT,2026-05-24
+004484c6,__fclose_lk,75,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT internal __fclose_lk helper (Ghidra-matched VS2003 Release library); only called by fclose_game; port uses MinGW CRT fclose path",AGENT,2026-05-24

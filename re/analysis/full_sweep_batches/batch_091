@@ -1,0 +1,5 @@
+00440ab0,StartTrackedVehicleAudio,34,5
+00440ae0,StopTrackedVehicleAudio,19,5
+00440b00,UpdateVehicleAudioMix,3934,5
+00441a80,LoadVehicleSoundBank,471,4
+00441c60,LoadRaceAmbientSoundBuffers,239,5

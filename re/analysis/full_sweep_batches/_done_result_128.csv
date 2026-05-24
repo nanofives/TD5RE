@@ -1,0 +1,5 @@
+0044d87c,_setmbcp,428,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT _setmbcp (codepage/MBCS setup, GetCPInfo + __codepage_from_lcid); port links MinGW CRT — no port equivalent",AGENT,2026-05-24
+0044da29,___get_codepage,73,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT internal: maps -2/-3/-4 sentinels to GetOEMCP/GetACP/DAT_004cf0a8; port uses MinGW CRT",AGENT,2026-05-24
+0044da73,__codepage_from_lcid,50,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT internal LCID→codepage table (0x3a4→0x411 etc); port uses MinGW CRT",AGENT,2026-05-24
+0044daa6,___initctype,40,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT internal ctype table zero-init (DAT_004cfac0 0x101 bytes + state globals); port uses MinGW CRT",AGENT,2026-05-24
+0044dacf,___initctype_impl,388,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT internal ctype-table populator via __crtGetStringTypeA/__crtLCMapStringA; port uses MinGW CRT",AGENT,2026-05-24

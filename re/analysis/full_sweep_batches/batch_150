@@ -1,0 +1,5 @@
+00452300,DecodeAudioChunk,926,3
+004526a0,ParseExtendedAudioHeader,257,3
+004527c0,ReadTaggedParam,104,3
+00452830,CloseMultimediaStream,89,3
+00452890,ReleaseStreamResources,123,3

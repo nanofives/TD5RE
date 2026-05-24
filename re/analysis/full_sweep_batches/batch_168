@@ -1,0 +1,5 @@
+0045a98b,IDCT8RowButterfly,233,3
+0045aa75,IDCT_1D_8pt_Float_C,264,3
+0045ab80,DequantizeIDCT_Block,216,3
+0045ac60,DequantizeIDCT_Block_Half,109,3
+0045acd0,InitMotionVectorDecoder,182,3

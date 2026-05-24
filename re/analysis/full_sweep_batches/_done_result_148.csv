@@ -1,0 +1,5 @@
+00451560,_chsize,292,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT _chsize at 0x00451560 calls _lseek_nolock/_write_nolock/_setmode/_errno; port links MinGW CRT, no port wrapper grep hit for _chsize",AGENT,2026-05-24
+00451685,__ld12mul,543,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT 12-byte long-double multiply at 0x00451685 (uses __addl/__shr_12/__shl_12 helpers); MinGW CRT replaces; no port reference",AGENT,2026-05-24
+004518a5,__multtenpow12,123,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT 12-byte long-double pow-of-10 helper at 0x004518a5; calls __ld12mul with table at 0x47df38/0x47e098; MinGW CRT replaces",AGENT,2026-05-24
+00451921,_setmode,96,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT _setmode at 0x00451921 toggles bit 0x80 in iob entry (DAT_004cfbe0[fd>>5]+(fd&0x1f)*0x24+4); MinGW CRT replaces",AGENT,2026-05-24
+00451990,OpenMultimediaStream,121,3,INTENTIONAL,FMV_STUB,td5_fmv.c:972,"EA TGQ FMV stream opener (calloc 0x668, OpenWavStream + InitStreamDirectSound + InitializeVideoDecoder); folded into td5_fmv.c stub per ARCH-DIVERGENCE: FMV",AGENT,2026-05-24

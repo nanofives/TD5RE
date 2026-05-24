@@ -1,0 +1,5 @@
+00424c50,BlitSecondaryFrontendRectToPrimary,74,3
+00424ca0,PresentPrimaryFrontendBuffer,64,3
+00424cf0,PresentSecondaryFrontendRect,74,3
+00424d40,PresentPrimaryFrontendRect,74,3
+00424d90,FillPrimaryFrontendScanline,170,3

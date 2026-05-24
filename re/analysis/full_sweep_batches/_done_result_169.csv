@@ -1,0 +1,5 @@
+0045ad90,BuildHuffmanDecodeTables,441,3,NOT_PORTED,FMV_STUB,td5_fmv.c:1069,"EA TGQ JPEG Huffman LUT init (writes 0xf/0x1f/0x2f/0x3f fills to DAT_004d144c..); port FMV is silent stub, no decoder",AGENT,2026-05-24
+0045af50,ParseJPEGHeaders,618,3,NOT_PORTED,FMV_STUB,td5_fmv.c:1070,"EA TGQ macroblock parser: BitstreamReadHuffmanCode + IDCT_DecodeCoefficients dispatch over 6 chroma/luma blocks; port FMV stub has no decoder",AGENT,2026-05-24
+0045b1c0,BitstreamRefillBits,84,3,NOT_PORTED,FMV_STUB,td5_fmv.c:1071,"EA TGQ bitstream window refill: shifts DAT_004d2650, decrements DAT_004d2654, reads from DAT_004d264c; no port equivalent (FMV stub)",AGENT,2026-05-24
+0045b220,BitstreamReadHuffmanCode,35,3,NOT_PORTED,FMV_STUB,td5_fmv.c:1072,"EA TGQ Huffman lookup via DAT_004d244c[DAT_004d2650>>0x1a] then BitstreamRefillBits; no port equivalent (FMV stub)",AGENT,2026-05-24
+0045b250,FillBlock_DC,86,3,NOT_PORTED,FMV_STUB,td5_fmv.c:1073,"EA TGQ 8x8 block DC fill from DAT_004d114c via stride param_2; no port equivalent (FMV stub)",AGENT,2026-05-24

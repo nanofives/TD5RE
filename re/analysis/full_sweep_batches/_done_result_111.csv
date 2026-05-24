@@ -1,0 +1,5 @@
+00449531,__init_fp_control,17,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT FP init stub in orig 0x00449xxx range; port links MinGW CRT; no port equivalent; no symbol/function defined in Ghidra (unanalyzed bytes)",AGENT,2026-05-24
+00449543,__detect_sse_inner,61,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT SSE-detect helper in orig 0x00449xxx range; port links MinGW CRT; no port grep hits; unanalyzed bytes at addr",AGENT,2026-05-24
+00449581,__IsProcessorFeaturePresent_fp,40,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT IsProcessorFeaturePresent wrapper in orig 0x00449xxx range; port uses MinGW CRT; no port equivalent; unanalyzed bytes",AGENT,2026-05-24
+004495aa,__cropzeros,89,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT FP-formatting helper (_cropzeros from cfltcvt) in orig 0x00449xxx range; port uses MinGW CRT; no port equivalent",AGENT,2026-05-24
+0044966a,__fassign,61,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT FP-assign helper (_fassign from cfltcvt) in orig 0x00449xxx range; port uses MinGW CRT; no port equivalent",AGENT,2026-05-24

@@ -1,0 +1,5 @@
+0044c924,_strnlen,42,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT _strnlen stub in orig binary; port links MinGW CRT which provides its own strnlen — no port-side source equivalent",AGENT,2026-05-24
+0044c94f,__isctype,116,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT __isctype stub (calls __crtGetStringTypeA) in orig binary; port uses MinGW CRT equivalent",AGENT,2026-05-24
+0044c9c4,_dosmaperr,114,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT _dosmaperr stub mapping DOS error codes to errno via DAT_0047d8f8 table; port uses MinGW CRT",AGENT,2026-05-24
+0044ca37,_errno,8,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT _errno stub — returns &_getptd()->_terrno; port uses MinGW CRT errno",AGENT,2026-05-24
+0044ca40,__doserrno,8,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT __doserrno stub — returns &_getptd()->_tdoserrno; port uses MinGW CRT",AGENT,2026-05-24

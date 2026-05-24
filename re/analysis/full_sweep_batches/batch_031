@@ -1,0 +1,5 @@
+00414640,LoadFrontendSoundEffects,241,4
+00414740,InitializeFrontendResourcesAndState,847,5
+00414a90,InitializeFrontendDisplayModeState,190,5
+00414b50,RunFrontendDisplayLoop,996,5
+00414f40,RenderPositionerGlyphStrip,235,3

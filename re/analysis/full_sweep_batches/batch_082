@@ -1,0 +1,5 @@
+0043d7c0,AdvanceGlobalSkyRotation,19,5
+0043d7e0,DecayTrackedActorMarkerIntensity,60,5
+0043d830,ApplyRandomWheelJitterHighSpeed,211,3
+0043d910,ApplyRandomWheelJitterLowSpeed,211,3
+0043d9f0,ApplyRandomWheelJitterSynchronized,135,3

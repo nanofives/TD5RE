@@ -1,0 +1,5 @@
+0045ba30,ConvertPaletteToPixelFormat,171,3,NOT_PORTED,FMV_STUB,td5_fmv.c:1,"EA TGQ codec function in FMV range (0x0045B*); entire codec stack replaced by IMFSourceReader per td5_fmv.c header; function no longer defined in Ghidra",AGENT,2026-05-24
+0045bae0,BlitDecodedToSurface,528,3,NOT_PORTED,FMV_STUB,td5_fmv.c:1,"EA TGQ decoded-frame blit; replaced wholesale by D3D11 fullscreen-quad upload path in port td5_fmv.c; no Ghidra function entry remains",AGENT,2026-05-24
+0045bd00,SetVGAPalette,59,3,NOT_PORTED,FMV_STUB,td5_fmv.c:1,"EA TGQ VGA palette setter in FMV codec range; port has no palette pipeline (Media Foundation outputs RGB32); no Ghidra function entry",AGENT,2026-05-24
+0045bd3c,DecompressLZData,290,3,NOT_PORTED,FMV_STUB,td5_fmv.c:1,"EA TGQ LZ decompression helper inside FMV codec range; not used by IMFSourceReader-based port; no Ghidra function entry",AGENT,2026-05-24
+0045be5f,UnpackBitplaneToPixels,168,3,NOT_PORTED,FMV_STUB,td5_fmv.c:1,"EA TGQ bitplane→pixel unpack in FMV codec range; replaced by Media Foundation decode path; no Ghidra function entry",AGENT,2026-05-24

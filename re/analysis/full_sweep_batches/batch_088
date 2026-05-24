@@ -1,0 +1,5 @@
+0043f210,RenderTireTrackPool,522,5
+0043f420,UpdateFrontWheelSoundEffects,476,4
+0043f600,UpdateRearWheelSoundEffects,479,4
+0043f7e0,UpdateRearTireEffects,373,4
+0043f960,UpdateFrontTireEffects,373,4

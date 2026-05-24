@@ -1,0 +1,5 @@
+00430cb0,ResetGameHeap,58,5
+00430cf0,HeapAllocTracked,51,4
+00430d30,ParseAndDecodeCompressedTrackData,1113,4
+00431190,ParseModelsDat,204,5
+00431260,GetTrackSpanDisplayListEntry,13,5

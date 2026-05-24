@@ -1,0 +1,5 @@
+004560c0,StopAudioDecoderThread,69,3,NOT_PORTED,FMV_STUB,td5_fmv.c:1029,"orig 0x004560C0 EA TGQ audio-decoder thread stop (InterlockedExchange spin); port replaces entire EA TGQ stack with Windows Media Foundation (IMFSourceReader); no 1:1 mirror",AGENT,2026-05-24
+00456110,InitStreamDirectSound,184,3,NOT_PORTED,FMV_STUB,td5_fmv.c:1030,"orig 0x00456110 EA TGQ DirectSound stream init (creates device + queries DDraw surface caps); port uses WMF pipeline; no port equivalent",AGENT,2026-05-24
+004561d0,CreateDirectSoundDevice,59,3,NOT_PORTED,FMV_STUB,td5_fmv.c:1031,"orig 0x004561D0 DirectSoundCreate + SetCooperativeLevel(2) for FMV audio out; port uses WMF audio attribute path; no equivalent",AGENT,2026-05-24
+00456210,DDrawGetSurfaceCaps,51,3,NOT_PORTED,FMV_STUB,td5_fmv.c:1032,"orig 0x00456210 DDSCAPS query via vtbl+0xC (5-dword caps struct); port has no DDraw surface caps query; FMV stack replaced wholesale",AGENT,2026-05-24
+00456250,ReleaseDirectSoundDevice,69,3,NOT_PORTED,FMV_STUB,td5_fmv.c:1033,"orig 0x00456250 releases DirectSound device + DDraw surface via vtbl+8; port WMF pipeline shutdown handles teardown; no equivalent",AGENT,2026-05-24

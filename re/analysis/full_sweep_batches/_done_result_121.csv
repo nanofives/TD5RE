@@ -1,0 +1,5 @@
+0044b840,_unlock_file,46,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT file-lock stub (LeaveCriticalSection on FILE+1); orig 0x44b840 in CRT range; port links MinGW CRT, no source-port equivalent",AGENT,2026-05-24
+0044b86f,_unlock_stream,34,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT stream-unlock stub (_unlock(param+0x1c) or LeaveCriticalSection on param2+0x20); orig 0x44b86f in CRT range; port uses MinGW CRT",AGENT,2026-05-24
+0044b892,_close,92,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT _close wrapper (lock_fh + _close_nolock + unlock_fh, errno=EBADF on bad handle); orig 0x44b892 CRT range; port uses MinGW CRT",AGENT,2026-05-24
+0044b8ef,_close_nolock,130,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT _close_nolock (Win32 CloseHandle + _free_osfhnd + _dosmaperr); orig 0x44b8ef in CRT range; port uses MinGW CRT equivalent",AGENT,2026-05-24
+0044b972,__freebuf,42,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT __freebuf (Ghidra-tagged 'Visual Studio 2003 Release' library function); orig 0x44b972 CRT range; port uses MinGW CRT",AGENT,2026-05-24

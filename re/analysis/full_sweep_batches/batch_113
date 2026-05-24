@@ -1,0 +1,5 @@
+0044995a,__cfltcvt,80,0
+004499ab,__shift_digits,36,0
+004499d0,InitPrimaryTlsSlot,83,3
+00449a24,__initptd,18,0
+00449a37,_getptd,102,0

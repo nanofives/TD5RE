@@ -1,0 +1,5 @@
+00449a9e,_freeptd,159,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT _ptiddata cleanup (TlsGetValue/free) embedded in orig binary; port links MinGW CRT — no source-port equivalent",AGENT,2026-05-24
+00449b3e,__callnewh,26,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT new-handler invocation via DAT_004ceff8 fn ptr; toolchain-provided in orig, MinGW CRT in port",AGENT,2026-05-24
+00449b59,__getLinkerVersion,44,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT helper reading PE optional-header MajorLinkerVersion via GetModuleHandleA(NULL); toolchain init, not part of port surface",AGENT,2026-05-24
+00449b86,__heap_init,327,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT heap-selector parsing __MSVCRT_HEAP_SELECT env var and GetVersionExA; selects small-block heap mode — port uses MinGW CRT",AGENT,2026-05-24
+00449cce,InitProcessHeap,92,3,NOT_PORTED,MINGW_CRT,,"MSVC CRT process heap init (HeapCreate + __sbh_heap_init/__sbh_new_region); orig Ghidra comment + main.c:934 explicitly tag ARCH-DIVERGENCE: LIBC",AGENT,2026-05-24

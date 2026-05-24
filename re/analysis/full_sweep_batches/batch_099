@@ -1,0 +1,5 @@
+004464b0,UpdateAmbientParticleDensityForSegment,162,4
+00446560,RenderAmbientParticleStreaks,1291,4
+00446a70,InitializeVehicleWheelSpriteTemplates,1071,4
+00446ea0,InitializeWheelPaletteUvTable,85,3
+00446f00,RenderVehicleWheelBillboards,1410,5

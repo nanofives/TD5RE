@@ -1,0 +1,5 @@
+0044dc54,___initmbctable,27,0
+0044dc70,_mbsncpy,153,0
+0044dd0a,__raise_exc_single,83,0
+0044dd5e,__handle_fp_exc,151,0
+0044ddf6,__build_exc_record,690,0

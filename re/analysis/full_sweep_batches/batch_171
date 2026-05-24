@@ -1,0 +1,5 @@
+0045ba30,ConvertPaletteToPixelFormat,171,3
+0045bae0,BlitDecodedToSurface,528,3
+0045bd00,SetVGAPalette,59,3
+0045bd3c,DecompressLZData,290,3
+0045be5f,UnpackBitplaneToPixels,168,3

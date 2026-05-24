@@ -1,0 +1,5 @@
+00424560,DrawFrontendLocalizedStringToSurface,245,5
+00424660,DrawFrontendSmallFontStringToSurface,217,3
+00424740,DrawFrontendClippedStringToSurface,334,3
+00424890,MeasureOrCenterFrontendString,75,5
+004248e0,DrawFrontendWrappedStringLine,356,3

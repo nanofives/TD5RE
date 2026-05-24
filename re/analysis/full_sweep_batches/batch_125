@@ -1,0 +1,5 @@
+0044c924,_strnlen,42,0
+0044c94f,__isctype,116,0
+0044c9c4,_dosmaperr,114,0
+0044ca37,_errno,8,0
+0044ca40,__doserrno,8,0

@@ -1,0 +1,1 @@
+0045c0d2,__endthread,60,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT _endthread stub in orig (_getptd/_freeptd/__amsg_exit/CloseHandle/ExitThread); port links MinGW CRT — toolchain-provided, not part of source-port surface",AGENT,2026-05-24

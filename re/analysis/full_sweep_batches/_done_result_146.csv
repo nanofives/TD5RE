@@ -1,0 +1,5 @@
+00450b90,_iscntrl,16,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT _iscntrl in orig 0x00450b90 calls __chval(c,0,4); port links MinGW CRT, no source-port equivalent",AGENT,2026-05-24
+00450ba1,__chval,48,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT ctype helper at orig 0x00450ba1 (reads DAT_004cfac0+DAT_0047d6e6 ctype tables); port uses MinGW CRT",AGENT,2026-05-24
+00450bd2,__crtMessageBoxA,136,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT user32.dll dynamic loader+MessageBoxA wrapper at orig 0x00450bd2; port links MinGW CRT (uses MessageBoxA directly)",AGENT,2026-05-24
+00450c5b,__addl,32,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT 32-bit add-with-carry helper at orig 0x00450c5b; port uses MinGW CRT __builtin equivalents",AGENT,2026-05-24
+00450c7c,___add_12,93,0,NOT_PORTED,MINGW_CRT,,"Ghidra-tagged VS2003 lib function ___add_12 (96-bit add via __addl) at orig 0x00450c7c; MinGW CRT replacement, no port",AGENT,2026-05-24

@@ -1,0 +1,5 @@
+004552b0,CreateVideoSurfaces,719,3
+00455580,CreateDDrawOverlaySurface,493,3
+00455770,CreateDDrawSurface16,254,3
+00455870,RestoreLostSurfaces,214,3
+00455950,DecodeEAIMA_Mono,371,3

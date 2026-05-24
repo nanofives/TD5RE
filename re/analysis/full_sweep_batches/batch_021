@@ -1,0 +1,5 @@
+0040dac0,InitializeRaceSeriesSchedule,766,5
+0040ddc0,DrawCarSelectionPreviewOverlay,446,3
+0040df80,MarkMastersRaceSlotCompleted,51,3
+0040dfc0,CarSelectionScreenStateMachine,6298,5
+0040f8d0,WritePackedConfigTd5,643,5

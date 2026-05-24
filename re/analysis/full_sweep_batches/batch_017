@@ -1,0 +1,5 @@
+0040b830,AdvanceTextureStreamingScheduler,441,4
+0040b9f0,GetTextureSlotStatus,31,5
+0040ba10,AdvanceTexturePageUsageAges,75,4
+0040ba60,ResetTexturePageCacheState,63,4
+0040baa0,QueryRaceTextureCapacity,62,4

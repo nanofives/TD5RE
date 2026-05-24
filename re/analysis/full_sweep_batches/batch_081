@@ -1,0 +1,5 @@
+0043cdc0,AdvanceWorldBillboardAnimations,20,4
+0043cde0,RenderTrackedActorMarker,1262,3
+0043d2d0,InitializeWantedHudOverlays,518,5
+0043d4e0,UpdateWantedDamageIndicator,420,3
+0043d690,AwardWantedDamageScore,295,5

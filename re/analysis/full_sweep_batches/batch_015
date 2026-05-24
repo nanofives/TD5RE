@@ -1,0 +1,5 @@
+0040af10,ConfigureRaceFogColorAndMode,60,4
+0040af50,ApplyRaceFogRenderState,287,4
+0040b070,SetRaceRenderStatePreset,122,5
+0040b100,BuildEnumeratedDisplayModeList,108,3
+0040b170,SelectConfiguredDisplayModeSlot,72,3

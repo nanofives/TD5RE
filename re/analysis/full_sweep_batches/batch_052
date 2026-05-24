@@ -1,0 +1,5 @@
+00428880,ConfigureForceFeedbackControllers,85,4
+004288e0,UpdateControllerForceFeedback,296,5
+00428a10,PlayAssignedControllerEffect,74,4
+00428a60,PlayVehicleCollisionForceFeedback,553,4
+00428d20,InitializeBenchmarkFrameRateCapture,28,3

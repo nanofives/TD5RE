@@ -1,0 +1,5 @@
+0040ae00,EndRaceScene,10,4
+0040ae10,InitializeRaceRenderGlobals,111,5
+0040ae80,InitializeRaceRenderState,53,4
+0040aec0,ReleaseRaceRenderResources,40,4
+0040aef0,GetEnvironmentTexturePageMode,21,3

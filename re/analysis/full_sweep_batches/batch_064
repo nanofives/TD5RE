@@ -1,0 +1,5 @@
+0042ebf0,ComputeVehicleSurfaceNormalAndGravity,343,5
+0042ed50,UpdateVehicleEngineSpeedSmoothed,154,5
+0042edf0,UpdateEngineSpeedAccumulator,161,5
+0042eea0,ApplySteeringTorqueToWheels,102,5
+0042ef10,UpdateAutomaticGearSelection,248,5

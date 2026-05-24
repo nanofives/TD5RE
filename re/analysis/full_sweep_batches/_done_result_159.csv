@@ -1,0 +1,5 @@
+004552b0,CreateVideoSurfaces,719,3,NOT_PORTED,FMV_STUB,td5_fmv.c:1019,"DirectDraw FMV surface creation (IID_IDirectDrawSurface7, YUV2 fourcc 0x32595559); port stubs FMV per FMV_STUB class — no EA TGQ codec",AGENT,2026-05-24
+00455580,CreateDDrawOverlaySurface,493,3,NOT_PORTED,FMV_STUB,td5_fmv.c:1020,"DDraw overlay surface for FMV playback (IID_IDirectDrawSurface7, overlay caps 0x1027); port has no FMV decoder per FMV_STUB",AGENT,2026-05-24
+00455770,CreateDDrawSurface16,254,3,NOT_PORTED,FMV_STUB,td5_fmv.c:1021,"DDraw 16bpp offscreen surface (caps 0x1007) used by FMV decoder; port omits per FMV_STUB",AGENT,2026-05-24
+00455870,RestoreLostSurfaces,214,3,NOT_PORTED,FMV_STUB,td5_fmv.c:1022,"DDRAW_SURFACELOST (0x88760000-style) restore for primary/secondary/overlay FMV surfaces; no analog in D3D11 backend per FMV_STUB",AGENT,2026-05-24
+00455950,DecodeEAIMA_Mono,371,3,NOT_PORTED,FMV_STUB,td5_fmv.c:1023,"EA IMA ADPCM mono decoder (g_eaImaStepTableLow/High, 0x1c-sample blocks, sat -0x8000/0x7fff) for FMV audio; port omits per FMV_STUB",AGENT,2026-05-24

@@ -1,0 +1,5 @@
+00450a00,_mbtowc_nolock,200,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT _mbtowc_nolock @ 0x00450a00 calls MultiByteToWideChar; port links MinGW CRT - no source-port equivalent in td5mod",AGENT,2026-05-24
+00450ac9,_isspace,39,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT _isspace @ 0x00450ac9 uses _pctype/__isctype; port links MinGW CRT - no source-port equivalent",AGENT,2026-05-24
+00450b00,__allshl,30,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT __allshl @ 0x00450b00 (64-bit shift-left helper); port links MinGW CRT which provides its own __ashldi3/_allshl",AGENT,2026-05-24
+00450b1f,_ungetc_nolock,109,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT _ungetc_nolock @ 0x00450b1f operates on MSVC FILE struct (_flag/_base/_ptr/_cnt); port links MinGW CRT with different FILE layout",AGENT,2026-05-24
+00450b8d,__retval_zero,2,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT __retval_zero @ 0x00450b8d trivial stub returning 0 (xor eax,eax; ret); no port equivalent needed",AGENT,2026-05-24

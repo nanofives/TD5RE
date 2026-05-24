@@ -1,0 +1,5 @@
+00409e80,CheckRaceCompletionState,968,5
+0040a260,UpdateCameraTransitionHudIndicator,69,5
+0040a2b0,AdvancePendingFinishState,283,5
+0040a3d0,AccumulateVehicleSpeedBonusScore,109,5
+0040a440,DecayUltimateVariantTimer,63,5

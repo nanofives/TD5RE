@@ -1,0 +1,5 @@
+0040cbd0,ConfigureActorProjectionEffect,310,4
+0040cd10,UpdateActorTrackLightState,174,4
+0040cdc0,CrossFade16BitSurfaces,858,3
+0040d120,AdvanceCrossFadeTransition,105,3
+0040d190,CrossFade16BitSurfaces,1015,3

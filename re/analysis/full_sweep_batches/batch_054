@@ -1,0 +1,5 @@
+00429720,DrawRaceParticleEffects,103,4
+00429790,UpdateRaceParticleEffects,51,4
+00429a30,SpawnVehicleSmokeVariant,703,4
+00429cf0,SpawnVehicleSmokeSprite,726,4
+00429fd0,SpawnVehicleSmokePuffAtPoint,688,3

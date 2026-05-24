@@ -1,0 +1,5 @@
+0044d500,_strlen,122,0,NOT_PORTED,MINGW_CRT,,"orig 0x0044d500 Ghidra-tagged 'Library Function - Single Match _strlen Visual Studio 1998'; MSVC CRT entry, port uses MinGW CRT; zero port refs",AGENT,2026-05-24
+0044d57b,_ioinit,443,0,NOT_PORTED,MINGW_CRT,,"orig 0x0044d57b MSVC CRT _ioinit (FD table @ DAT_004cfbe0, GetStartupInfoA inherited handles, SetHandleCount); port uses MinGW CRT; zero port refs",AGENT,2026-05-24
+0044d737,_lseek,100,0,NOT_PORTED,MINGW_CRT,,"orig 0x0044d737 MSVC CRT _lseek wrapper (_lock_fh/_unlock_fh/_errno/__doserrno); port uses MinGW CRT; zero port refs",AGENT,2026-05-24
+0044d79c,_lseek_nolock,114,0,NOT_PORTED,MINGW_CRT,,"orig 0x0044d79c MSVC CRT _lseek_nolock (_get_osfhandle/SetFilePointer/_dosmaperr); port uses MinGW CRT; zero port refs",AGENT,2026-05-24
+0044d80f,_mbsdec,108,0,NOT_PORTED,MINGW_CRT,,"orig 0x0044d80f MSVC CRT _mbsdec (MBCS lead-byte table @ DAT_004cfac0, _lock(0x19)); port uses MinGW CRT; zero port refs",AGENT,2026-05-24

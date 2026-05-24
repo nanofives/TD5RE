@@ -1,0 +1,5 @@
+00453b20,ExtractPixelFormatInfo,184,3
+00453be0,CountSetBits,26,3
+00453c00,CountTrailingZeroBits,15,3
+00453c10,QuerySurfaceDimensions,67,3
+00453c60,BuildYCbCrToPackedPixelLUT,776,3

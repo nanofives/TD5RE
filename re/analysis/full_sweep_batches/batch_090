@@ -1,0 +1,5 @@
+004405b0,DecompressZipEntry,473,4
+00440790,ReadArchiveEntry,207,5
+00440860,OpenArchiveFileForRead,327,5
+004409b0,GetArchiveEntrySize,115,5
+00440a30,UpdateVehicleLoopingAudioState,124,4

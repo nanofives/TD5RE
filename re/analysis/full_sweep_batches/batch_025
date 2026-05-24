@@ -1,0 +1,5 @@
+00410940,DrawControlOptionsBindingHeader,114,3
+00410ca0,ConfigureGameTypeFlags,655,5
+00411120,SerializeRaceStatusSnapshot,411,4
+004112c0,RestoreRaceStatusSnapshot,552,4
+004114f0,WriteCupData,149,5

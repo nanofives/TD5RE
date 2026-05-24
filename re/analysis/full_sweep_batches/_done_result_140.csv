@@ -1,0 +1,5 @@
+0044f957,__unlock_fh_9,8,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT internal __unlock_fh helper in orig 0x0044f000+ region; no Ghidra function defined (raw data bytes); port links MinGW CRT instead",AGENT,2026-05-24
+0044f9e0,__unlock_fh_9b,8,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT internal __unlock_fh helper variant in orig 0x0044f000+ region; not analyzed by Ghidra; port uses MinGW CRT equivalents",AGENT,2026-05-24
+0044f9fb,_strtol,22,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT strtol wrapper at orig 0x0044f9fb (calls _strtoxl); port uses MinGW CRT strtol; no port equivalent and no xrefs in td5mod/",AGENT,2026-05-24
+0044fa12,_strtoxl,516,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT _strtoxl numeric-parse core at orig 0x0044fa12; toolchain-provided in orig; port links MinGW CRT; no port code references",AGENT,2026-05-24
+0044fc30,_strchr,203,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT strchr implementation at orig 0x0044fc30; toolchain-provided in orig; port uses MinGW CRT strchr; no port references found",AGENT,2026-05-24

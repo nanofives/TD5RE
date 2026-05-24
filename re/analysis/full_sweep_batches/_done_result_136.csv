@@ -1,0 +1,5 @@
+0044ee49,__initterm,338,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT init list walker w/ __crtMessageBoxA Runtime Error path (range 0x0044e000+); port uses MinGW CRT startup, no port site",AGENT,2026-05-24
+0044ef9c,__IsZeroMan,72,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT 96-bit mantissa helper (used by printf %f/%g formatting); MinGW CRT supplies equivalent, no port site",AGENT,2026-05-24
+0044efe5,__IncMan,85,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT 96-bit mantissa increment helper (uses __addl); MinGW CRT supplies equivalent, no port site",AGENT,2026-05-24
+0044f03b,__RoundMan,139,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT 96-bit mantissa rounding helper (calls __IsZeroMan/__IncMan); MinGW CRT supplies equivalent, no port site",AGENT,2026-05-24
+0044f0c7,__CopyMan,26,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT 3-dword mantissa copy helper; MinGW CRT supplies equivalent, no port site",AGENT,2026-05-24

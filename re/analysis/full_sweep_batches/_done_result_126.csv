@@ -1,0 +1,5 @@
+0044ca49,_input,2596,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT _input (scanf input parser) embedded in orig at 0x0044ca49 in 0x00448000+ CRT range; port links against MinGW CRT (no port equivalent)",AGENT,2026-05-24
+0044d46e,_toupper_lk,54,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT _toupper_lk (locale-aware uppercase) embedded in orig at 0x0044d46e in 0x00448000+ CRT range; port links against MinGW CRT (no port equivalent)",AGENT,2026-05-24
+0044d4a5,_fgetc,25,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT _fgetc stdio wrapper embedded in orig at 0x0044d4a5 in 0x00448000+ CRT range; port links against MinGW CRT (no port equivalent)",AGENT,2026-05-24
+0044d4bf,_ungetc,22,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT _ungetc stdio wrapper embedded in orig at 0x0044d4bf in 0x00448000+ CRT range; port links against MinGW CRT (no port equivalent)",AGENT,2026-05-24
+0044d4d6,_fgetc_unlocked,35,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT _fgetc_unlocked (lock-free stdio) embedded in orig at 0x0044d4d6 in 0x00448000+ CRT range; port links against MinGW CRT (no port equivalent)",AGENT,2026-05-24

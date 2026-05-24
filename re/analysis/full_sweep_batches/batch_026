@@ -1,0 +1,5 @@
+00411590,LoadContinueCupData,148,5
+00411630,ValidateCupDataChecksum,212,4
+00411710,BuildFrontendDitherOffsetTable,60,3
+00411750,InitFrontendFadeColor,37,5
+00411780,RenderFrontendFadeEffect,705,5

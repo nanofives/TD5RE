@@ -1,0 +1,5 @@
+004506e0,_strncpy,253,0
+004507e0,_strcspn,61,0
+00450820,_strpbrk,57,0
+0045085a,__crtGetStringTypeA,328,0
+004509a3,_mbtowc,92,0

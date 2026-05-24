@@ -1,0 +1,5 @@
+00450cda,__shl_12,45,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT 96-bit left-shift helper (long double internal); port links MinGW CRT; no port equivalent",AGENT,2026-05-24
+00450d08,__shr_12,44,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT 96-bit right-shift helper (long double internal); port links MinGW CRT; no port equivalent",AGENT,2026-05-24
+00450d35,__mtold12,198,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT decimal-digits-to-80bit-long-double helper; calls __shl_12/__add_12; port links MinGW CRT; no port equivalent",AGENT,2026-05-24
+00450dfc,__strgtold12,1184,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT string-to-long-double parser (used by strtod/scanf); calls __mtold12/__multtenpow12; port links MinGW CRT",AGENT,2026-05-24
+004512cd,$I10_OUTPUT,658,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT printf %g/%e long-double formatter; emits 1#INF/1#QNAN/1#IND/1#SNAN strings; port links MinGW CRT",AGENT,2026-05-24

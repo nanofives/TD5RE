@@ -1,0 +1,5 @@
+00412e30,CreateMenuStringLabelSurface,472,5
+00413010,DrawPostRaceHighScoreEntry,1368,3
+00413580,ScreenPostRaceHighScoreTable,1549,4
+00413bc0,ScreenPostRaceNameEntry,2587,5
+00414610,SetFrontendScreen,40,5

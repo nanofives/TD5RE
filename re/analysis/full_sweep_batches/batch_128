@@ -1,0 +1,5 @@
+0044d87c,_setmbcp,428,0
+0044da29,___get_codepage,73,0
+0044da73,__codepage_from_lcid,50,0
+0044daa6,___initctype,40,0
+0044dacf,___initctype_impl,388,0

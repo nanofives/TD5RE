@@ -1,0 +1,5 @@
+0044fea0,__aulldiv,103,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT 64-bit unsigned divide helper at 0x44fea0; Ghidra has no function defined (raw 0x53 push ebx prologue). Port links MinGW CRT which supplies its own __aulldiv equivalent",AGENT,2026-05-24
+0044ff10,__aullrem,116,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT 64-bit unsigned modulo helper at 0x44ff10; Ghidra has no function defined. Port links MinGW CRT which supplies its own __aullrem equivalent",AGENT,2026-05-24
+00450006,_alloc_osfhnd,290,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT internal file-handle table helper at 0x450006 (raw 0x51 push ecx prologue); not analyzed as function in Ghidra. Port uses MinGW CRT stdio; no port surface",AGENT,2026-05-24
+00450129,_set_osfhnd,123,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT internal file-handle setter at 0x450129; not analyzed as function in Ghidra. Port uses MinGW CRT stdio; no port surface",AGENT,2026-05-24
+004501a5,_free_osfhnd,126,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT internal file-handle freer at 0x4501a5; not analyzed as function in Ghidra. Port uses MinGW CRT stdio; no port surface",AGENT,2026-05-24

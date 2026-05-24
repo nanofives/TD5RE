@@ -1,0 +1,5 @@
+0043b7c0,InitializePauseMenuOverlayLayout,1957,4
+0043bf70,RunAudioOptionsOverlay,1097,5
+0043c3c0,RequestIntroMovieShutdown,121,4
+0043c440,PlayIntroMovie,1206,5
+0043c9e0,InitializeTrackedActorMarkerBillboards,985,3

@@ -1,0 +1,5 @@
+00442d30,ResampleTexturePageToEntryDimensions,195,3
+00442e00,DecodeArchiveImageToRgb24,925,5
+004431c0,LoadTrafficVehicleSkinTexture,119,3
+00443240,GetTrafficVehicleVariantType,61,5
+00443280,LoadRaceVehicleAssets,1194,5

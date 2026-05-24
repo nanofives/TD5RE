@@ -1,0 +1,5 @@
+00434da0,UpdateSpecialTrafficEncounter,563,5
+00434fe0,UpdateActorTrackBehavior,972,5
+004353b0,RecycleTrafficActorFromQueue,1352,5
+00435940,InitializeTrafficActorsFromQueue,887,5
+00435ce0,ComputeActorTrackHeading,380,5

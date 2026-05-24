@@ -1,0 +1,5 @@
+0042e9c0,LoadGlobalOrientationToRenderState,11,3
+0042e9d0,QueryRaceSharedPointer,133,5
+0042ea70,CrossProduct3i,68,5
+0042eac0,CrossProduct3i_FixedPoint12,77,5
+0042eb10,TransformShortVec3ByRenderMatrixRounded,211,5

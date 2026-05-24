@@ -1,0 +1,5 @@
+0043e5f0,InitializeProjectedPrimitiveBuckets,75,3
+0043e640,SetProjectedClipRect,268,5
+0043e750,SetClipBounds,81,4
+0043e7b0,ComputeAverageDepth,36,5
+0043e7e0,ConfigureProjectionForViewport,246,5

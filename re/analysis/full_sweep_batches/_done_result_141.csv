@@ -1,0 +1,5 @@
+0044fcf0,_strstr,127,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT strstr embedded in orig binary at .text 0x0044fcf0; port links against MinGW CRT providing strstr — no port-side source",AGENT,2026-05-24
+0044fd70,__getbuf,67,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT internal stdio buffer helper at .text 0x0044fd70; port uses MinGW CRT stdio; no port-side equivalent",AGENT,2026-05-24
+0044fdb4,_isatty,40,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT isatty at .text 0x0044fdb4; port uses MinGW CRT isatty; no port-side source",AGENT,2026-05-24
+0044fddd,_wctomb,88,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT wctomb wrapper at .text 0x0044fddd; port uses MinGW CRT wctomb; no port-side equivalent",AGENT,2026-05-24
+0044fe36,_wctomb_nolock,104,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT _wctomb_nolock internal at .text 0x0044fe36; port uses MinGW CRT; no port-side equivalent",AGENT,2026-05-24

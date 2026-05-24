@@ -1,0 +1,5 @@
+0044e526,_clearfp_nw,14,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT FPU helper at 0x0044e526 (reads FPU status word); port links MinGW CRT, no per-function port equivalent",AGENT,2026-05-24
+0044e535,__ctrlfp,34,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT FPU helper at 0x0044e535 (reads FPU control word); port uses MinGW CRT + _controlfp in main.c for FPU PC=64",AGENT,2026-05-24
+0044e558,_fpreset,85,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT _fpreset stub at 0x0044e558 (empty body in orig); port links MinGW CRT _fpreset",AGENT,2026-05-24
+0044e5ae,_tolower,110,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT _tolower at 0x0044e5ae (locale-aware with _lock/_unlock branches); port uses MinGW libc tolower (td5_trace.c:131-132)",AGENT,2026-05-24
+0044e61d,_tolower_nolock,202,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT _tolower_nolock at 0x0044e61d (LCMapStringA-based); MinGW CRT supplies equivalent, no port surface",AGENT,2026-05-24

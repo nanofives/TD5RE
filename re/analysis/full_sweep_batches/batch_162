@@ -1,0 +1,5 @@
+004562a0,DDrawReleaseSurface,24,3
+004562c0,InitAudioPlayback,361,3
+00456430,ReleaseDSStreamBuffer,30,3
+00456450,DecodeADPCMBlock,162,3
+004564f3,DecodeEAADPCM,374,3

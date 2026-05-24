@@ -1,0 +1,5 @@
+00456670,IDCT_DecodeCoefficients,428,3,NOT_PORTED,FMV_STUB,td5_fmv.c:1039,"orig TGQ/JPEG IDCT coefficient decoder called from ParseJPEGHeaders; port FMV is a stub (td5_fmv.c) and explicitly lists this addr as ARCH-DIVERGENCE: FMV",AGENT,2026-05-24
+0045681d,IDCT_Transform8x8_Caller,264,3,NOT_PORTED,FMV_STUB,td5_fmv.c:1040,"orig 8x8 IDCT caller wrapping IDCT_Transform8x8_Block; called from ParseJPEGHeaders; port FMV stub lists addr as ARCH-DIVERGENCE: FMV",AGENT,2026-05-24
+00456926,IDCT_Transform8x8_Block,522,3,NOT_PORTED,FMV_STUB,td5_fmv.c:1041,"orig 8x8 IDCT block transform invoked by IDCT_Transform8x8_Caller; FMV codec path with no port equivalent (FMVs skipped silently)",AGENT,2026-05-24
+00456b31,IDCT_1D_8pt_Float,354,3,NOT_PORTED,FMV_STUB,td5_fmv.c:1042,"orig float 1D 8-point IDCT inner kernel called from IDCT_FullBlock8x8; FMV codec path absent from port (FMV_STUB)",AGENT,2026-05-24
+00456c94,IDCT_1D_8pt_Float_B,265,3,NOT_PORTED,FMV_STUB,td5_fmv.c:1043,"orig float 1D 8-point IDCT alternate (column or row) kernel called from IDCT_FullBlock8x8; FMV stub path with no port impl",AGENT,2026-05-24

@@ -1,0 +1,5 @@
+0042a290,SpawnVehicleSmokePuffFromHardpoint,662,5
+0042a6b0,SpawnAmbientParticleStreak,663,4
+0042a950,InitializeRaceVideoConfiguration,183,5
+0042aa10,InitializeRaceSession,2915,5
+0042b580,RunRaceFrame,3368,5

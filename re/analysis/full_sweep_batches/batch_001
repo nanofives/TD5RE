@@ -1,0 +1,5 @@
+00401450,LoadCameraPresetForView,305,5
+00401590,UpdateChaseCamera,957,5
+00401950,UpdateTracksideOrbitCamera,708,4
+00401c20,UpdateVehicleRelativeCamera,494,5
+00401e10,UpdateRaceCameraTransitionState,482,4

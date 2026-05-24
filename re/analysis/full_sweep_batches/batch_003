@@ -1,0 +1,5 @@
+00402ad0,UpdateSplineTracksideCamera,813,4
+00402e00,CycleRaceCameraPreset,32,4
+00402e30,ResetPlayerVehicleControlAccumulators,13,4
+00402e40,ResetPlayerVehicleControlBuffers,16,4
+00402e60,UpdatePlayerVehicleControlState,2126,5

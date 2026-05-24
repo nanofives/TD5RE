@@ -1,0 +1,5 @@
+004562a0,DDrawReleaseSurface,24,3,NOT_PORTED,FMV_STUB,td5_fmv.c:1034,"COM Release helper for DDraw FMV surfaces; listed in FMV stub manifest as ARCH-DIVERGENCE-FMV. Port replaces EA TGQ/DDraw stack with IMFSourceReader; no 1:1 mapping.",AGENT,2026-05-24
+004562c0,InitAudioPlayback,361,3,NOT_PORTED,FMV_STUB,td5_fmv.c:1035,"DirectSound stream-buffer init for FMV audio (CreateSoundBuffer/SetFormat/Play). Port routes FMV audio through WMF pipeline; entire EA TGQ stack stubbed.",AGENT,2026-05-24
+00456430,ReleaseDSStreamBuffer,30,3,NOT_PORTED,FMV_STUB,td5_fmv.c:1036,"COM Release of DSStreamBuffer at param_1[0x5c]; FMV audio teardown. Replaced wholesale by IMFSourceReader release pipeline.",AGENT,2026-05-24
+00456450,DecodeADPCMBlock,162,3,NOT_PORTED,FMV_STUB,td5_fmv.c:1037,"EA IMA-ADPCM nibble decode loop with g_eaAdpcmCoefTable/g_eaAdpcmShiftTable (clamps -0x8000..0x7fff, step 0..0x1600). EA TGQ codec - stubbed.",AGENT,2026-05-24
+004564f3,DecodeEAADPCM,374,3,NOT_PORTED,FMV_STUB,td5_fmv.c:1038,"Dual-channel EA-ADPCM decoder using g_eaAdpcmDecoderState globals (predA/predB/predC/stepIndex). EA TGQ codec; replaced by WMF pipeline.",AGENT,2026-05-24

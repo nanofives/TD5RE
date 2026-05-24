@@ -1,0 +1,5 @@
+0045bf08,DecodeBitmapRLERun,179,3
+0045bfbc,RtlUnwind,5,0
+0045bfc2,DirectSoundCreate,5,0
+0045bfc8,_beginthread,118,0
+0045c03f,__threadstart,115,0

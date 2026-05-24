@@ -1,0 +1,5 @@
+004456d0,ComputeTrackTriangleBarycentrics,263,5
+004457e0,ComputeActorTrackContactNormalExtended,585,5
+00445a70,ComputeTrackTriangleBarycentricsWithNormal,287,5
+00445b90,ComputeActorHeadingFromTrackSegment,600,5
+00445e30,InterpolateTrackSegmentNormal,217,5

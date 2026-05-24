@@ -1,0 +1,5 @@
+004481e1,_heap_alloc,251,0
+00448248,__lock_fhandle,8,0
+004482a7,__unlock_fhandle,8,0
+004482dd,_controlfp,52,0
+00448312,__controlfp_internal,21,0

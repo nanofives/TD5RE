@@ -1,0 +1,5 @@
+0044e7e5,__unlock_fh_init,8,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT stub in orig calling _unlock(0xd) file-handle mutex; port links MinGW CRT, no port equivalent",AGENT,2026-05-24
+0044e7ee,__initterm_real,25,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT init-table walker (calls fn pointers between param_1 and param_2); port uses MinGW CRT startup",AGENT,2026-05-24
+0044e808,_xcptfilter,317,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT structured-exception filter using _getptd + UnhandledExceptionFilter + FP exception code translation table; port uses MinGW CRT",AGENT,2026-05-24
+0044e946,__XcptActTab_lookup,57,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT exception-action-table linear search helper used by _xcptfilter; port uses MinGW CRT equivalent",AGENT,2026-05-24
+0044e980,_pgmptr_init,87,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT command-line/pgmptr parser (quoted+ctrl-char handling) calling ___initmbctable/_iscntrl; port uses MinGW CRT",AGENT,2026-05-24

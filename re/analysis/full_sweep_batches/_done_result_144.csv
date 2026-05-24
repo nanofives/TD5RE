@@ -1,0 +1,5 @@
+004506e0,_strncpy,253,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT strncpy (VS1998 Library Function); port links MinGW libc strncpy via STDLIB_INLINE/MINGW_CRT — no port file references 0x004506e0",AGENT,2026-05-24
+004507e0,_strcspn,61,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT strcspn bitmap variant; port links MinGW libc strcspn — no port equivalent at 0x004507e0",AGENT,2026-05-24
+00450820,_strpbrk,57,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT strpbrk bitmap variant; port links MinGW libc strpbrk — no port equivalent at 0x00450820",AGENT,2026-05-24
+0045085a,__crtGetStringTypeA,328,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT locale helper wrapping GetStringTypeW/A + MultiByteToWideChar with SEH; port uses MinGW CRT locale layer — no port equivalent",AGENT,2026-05-24
+004509a3,_mbtowc,92,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT mbtowc wrapper around _mbtowc_nolock with _lock(0x13)/InterlockedIncrement gate; port uses MinGW CRT mbtowc — no port equivalent",AGENT,2026-05-24

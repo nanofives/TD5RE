@@ -1,0 +1,5 @@
+004100de,OpenControllerBindingPageRearViewHeader,27,3
+004100fa,DrawControlBindingText1WithOkButton,22,3
+00410111,DrawControlBindingText2WithOkButton,23,3
+00410129,OpenControllerBindingPageNoneHeader,109,3
+00410380,RenderControllerBindingMenuPage,187,3

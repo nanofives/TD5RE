@@ -1,0 +1,5 @@
+00449d2b,__sbh_heap_init,71,0,NOT_PORTED,MINGW_CRT,,"MSVC small-block heap init (CRT internal) at 0x449d2b in 0x00448000+ MSVC CRT range; port links MinGW CRT instead",AGENT,2026-05-24
+00449d73,__sbh_find_block,42,0,NOT_PORTED,MINGW_CRT,,"MSVC small-block heap find_block (CRT internal) at 0x449d73 in 0x00448000+ MSVC CRT range; port links MinGW CRT instead",AGENT,2026-05-24
+00449d9e,__sbh_free_block,808,0,NOT_PORTED,MINGW_CRT,,"MSVC small-block heap free_block (CRT internal) at 0x449d9e in 0x00448000+ MSVC CRT range; port links MinGW CRT instead",AGENT,2026-05-24
+0044a0c7,_heap_alloc_base,776,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT heap allocator base at 0x44a0c7 in 0x00448000+ MSVC CRT range; port links MinGW CRT (malloc/free) instead",AGENT,2026-05-24
+0044a3d0,__sbh_alloc_new_region,176,0,NOT_PORTED,MINGW_CRT,,"MSVC small-block heap alloc_new_region (CRT internal) at 0x44a3d0 in 0x00448000+ MSVC CRT range; port links MinGW CRT instead",AGENT,2026-05-24

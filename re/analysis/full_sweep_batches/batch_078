@@ -1,0 +1,5 @@
+004377b0,InitializeRaceOverlayResources,1004,4
+00437ba0,InitializeRaceHudLayout,3327,4
+004388a0,RenderRaceHudOverlays,3854,5
+004397b0,BuildRaceHudMetricDigits,914,5
+00439b60,SetRaceHudIndicatorState,15,5

@@ -1,0 +1,5 @@
+00452e10,ReturnZero,2,3,NOT_PORTED,FMV_STUB,td5_fmv.c:1,"orig bytes 33 C0 C3 = XOR EAX,EAX/RET (EA TGQ stub returning 0); entire EA TGQ codec stack replaced by Windows Media Foundation IMFSourceReader pipeline in port",AGENT,2026-05-24
+00452e20,OpenAndStartMediaPlayback,62,4,NOT_PORTED,FMV_STUB,td5_fmv.c:36,"EA TGQ source-open + initial frame pump; port replaces with td5_fmv_play / fmv_play_with_source_reader via Windows Media Foundation",AGENT,2026-05-24
+00452e60,SetStreamVolume,20,4,NOT_PORTED,FMV_STUB,td5_fmv.c:39,"EA TGQ volume setter writing param_1[0x1e] + BuildColorConversionLUTs LUT rebuild; port routes volume through IMFSourceReader audio attribute",AGENT,2026-05-24
+00452e80,IsStreamPlaying,61,4,NOT_PORTED,FMV_STUB,td5_fmv.c:45,"EA TGQ playback-control struct status query (DAT_004BCB90 0x1ED-dword); port queries IMFSourceReader stream-state via Media Foundation",AGENT,2026-05-24
+00452ec0,StopStreamPlayback,90,4,NOT_PORTED,FMV_STUB,td5_fmv.c:49,"EA TGQ stop sequence (drain samples + free playback-control struct); port drives IMFSourceReader release via td5_fmv shutdown",AGENT,2026-05-24

@@ -1,0 +1,5 @@
+00453f70,QuerySurfacePixelFormat,165,3
+00454020,ReleaseVideoResources,333,3
+00454170,CreateDDrawSurface32,324,3
+004542c0,DecodeVideoFrame,944,3
+00454690,BuildDequantizationTable,184,3

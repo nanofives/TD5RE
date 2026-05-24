@@ -1,0 +1,5 @@
+004486be,_fread_nolock,231,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT _fread_nolock in 0x00448xxx CRT range; port links MinGW CRT (uses fread); no port citation of 0x004486be",AGENT,2026-05-24
+004487b0,__chkstk,46,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT __chkstk stack-probe helper in 0x00448xxx CRT range; port uses MinGW CRT _chkstk_ms; no port citation of 0x004487b0",AGENT,2026-05-24
+004487df,_free,232,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT _free in 0x00448xxx CRT range; port links MinGW CRT (uses free); no port citation of 0x004487df",AGENT,2026-05-24
+00448849,__lock_fhandle2,8,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT __lock_fhandle2 file-handle lock helper in 0x00448xxx CRT range; port uses MinGW CRT; no port citation of 0x00448849",AGENT,2026-05-24
+004488a1,__unlock_fhandle2,8,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT __unlock_fhandle2 file-handle unlock helper in 0x00448xxx CRT range; port uses MinGW CRT; no port citation of 0x004488a1",AGENT,2026-05-24

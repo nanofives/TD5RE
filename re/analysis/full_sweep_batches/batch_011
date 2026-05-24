@@ -1,0 +1,5 @@
+0040a480,InitializeRaceCameraTransitionDuration,10,3
+0040a490,UpdateRaceCameraTransitionTimer,157,5
+0040a530,AdjustCheckpointTimersByDifficulty,274,5
+0040a650,BuildSinCosLookupTables,76,5
+0040a6a0,CosFloat12bit,16,5

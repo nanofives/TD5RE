@@ -1,0 +1,5 @@
+0043e2c0,ResetProjectedPrimitiveWorkBuffer,36,3
+0043e2f0,FlushProjectedPrimitiveBuckets,188,4
+0043e3b0,InsertBillboardIntoDepthSortBuckets,270,4
+0043e4c0,InsertTriangleIntoDepthSortBuckets,143,3
+0043e550,QueueProjectedPrimitiveBucketEntry,149,4

@@ -1,0 +1,5 @@
+00427630,TrackSelectionScreenStateMachine,3043,4
+00428240,InitializeRaceHudFontGlyphAtlas,214,4
+00428320,QueueRaceHudFormattedText,579,5
+00428570,FlushQueuedRaceHudText,50,4
+004285b0,CreateRaceForceFeedbackEffects,719,5

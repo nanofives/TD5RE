@@ -1,0 +1,5 @@
+0044ae10,_fputc,279,0
+0044af28,_output,1824,0
+0044b669,_write_char,52,0
+0044b69e,_write_multi_char,48,0
+0044b6cf,_write_string,55,0

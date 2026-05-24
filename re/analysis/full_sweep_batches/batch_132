@@ -1,0 +1,5 @@
+0044e526,_clearfp_nw,14,0
+0044e535,__ctrlfp,34,0
+0044e558,_fpreset,85,0
+0044e5ae,_tolower,110,0
+0044e61d,_tolower_nolock,202,0

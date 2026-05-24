@@ -1,0 +1,5 @@
+0040d590,LoadExtrasGalleryImageSurfaces,168,4
+0040d640,ReleaseExtrasGalleryImageSurfaces,90,5
+0040d6a0,LoadExtrasBandGalleryImages,163,5
+0040d750,AdvanceExtrasGallerySlideshow,222,4
+0040d830,UpdateExtrasGalleryDisplay,652,4

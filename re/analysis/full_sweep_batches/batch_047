@@ -1,0 +1,5 @@
+004258c0,ActivateFrontendCursorOverlay,20,4
+004258e0,DeactivateFrontendCursorOverlay,12,3
+004258f0,CreateFrontendMenuRectEntry,190,3
+004259b0,AdvanceFrontendTickAndCheckReady,22,5
+004259d0,MoveFrontendSpriteRect,89,5

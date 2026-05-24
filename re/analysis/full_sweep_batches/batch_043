@@ -1,0 +1,5 @@
+00424a50,MeasureOrCenterFrontendLocalizedString,149,3
+00424af0,PresentPrimaryFrontendBufferViaCopy,57,3
+00424b80,BlitFrontendCachedRect,63,5
+00424bc0,CopyPrimaryFrontendRectToSecondary,74,3
+00424c10,PresentSecondaryFrontendRectViaCopy,63,3

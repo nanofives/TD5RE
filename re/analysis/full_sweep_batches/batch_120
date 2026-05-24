@@ -1,0 +1,5 @@
+0044b707,__va_arg_int,12,0
+0044b714,__va_arg_double,15,0
+0044b724,__va_arg_short,13,0
+0044b7ee,_lock_file,46,0
+0044b81d,_lock_stream,34,0

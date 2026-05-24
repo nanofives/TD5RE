@@ -1,0 +1,5 @@
+00423a80,ScreenCupWonDialog,783,5
+00423db0,ClearBackbufferWithColor,136,3
+00423e40,LockSecondaryFrontendSurfaceFillColor,140,3
+00423ed0,FillPrimaryFrontendRect,188,5
+00423f90,FillSurfaceRectWithColor,188,3

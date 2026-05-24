@@ -1,0 +1,5 @@
+00450a00,_mbtowc_nolock,200,0
+00450ac9,_isspace,39,0
+00450b00,__allshl,30,0
+00450b1f,_ungetc_nolock,109,0
+00450b8d,__retval_zero,2,0

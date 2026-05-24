@@ -1,0 +1,5 @@
+0045bf08,DecodeBitmapRLERun,179,3,NOT_PORTED,FMV_STUB,td5_fmv.c:1084,"orig 0x0045bf08 EA TGQ codec RLE-run decoder; port FMV layer is stub-only — documented in td5_fmv.c ARCH-DIVERGENCE FMV list",AGENT,2026-05-24
+0045bfbc,RtlUnwind,5,0,NOT_PORTED,MINGW_CRT,,"orig is IAT thunk to ntdll.RtlUnwind for MSVC SEH unwind; port links MinGW CRT which provides its own SEH unwind paths",AGENT,2026-05-24
+0045bfc2,DirectSoundCreate,5,0,NOT_PORTED,M2DX_AUDIO,td5_platform_win32.c:1577,"orig is IAT thunk to dsound.DirectSoundCreate (legacy DSound1); port uses DirectSoundCreate8 directly in td5_platform_win32.c",AGENT,2026-05-24
+0045bfc8,_beginthread,118,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT _beginthread embedded in orig (uses _calloc/_initptd/CreateThread/ResumeThread/_dosmaperr); port links MinGW CRT which provides own _beginthread",AGENT,2026-05-24
+0045c03f,__threadstart,115,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT __threadstart helper for _beginthread (TlsSetValue/__fpmath_init/SEH frame); port links MinGW CRT which provides own thread-start trampoline",AGENT,2026-05-24

@@ -1,0 +1,5 @@
+0044c37e,_read_nolock,472,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT _read_nolock at 0x0044c37e; port links MinGW CRT which supplies stdio read primitives — no source-port equivalent expected",AGENT,2026-05-24
+0044c557,_stbuf,140,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT _stbuf (stdio buffer setup) at 0x0044c557; port links MinGW CRT — no source-port equivalent expected",AGENT,2026-05-24
+0044c610,_strcpy,6,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT _strcpy thunk (6 bytes) at 0x0044c610; port uses MinGW CRT strcpy — no source-port equivalent expected",AGENT,2026-05-24
+0044c620,_strcat,223,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT _strcat at 0x0044c620; port uses MinGW CRT strcat — no source-port equivalent expected",AGENT,2026-05-24
+0044c700,__crtLCMapStringA,547,0,NOT_PORTED,MINGW_CRT,,"MSVC CRT __crtLCMapStringA (locale string mapping) at 0x0044c700; port uses MinGW CRT — no source-port equivalent expected",AGENT,2026-05-24

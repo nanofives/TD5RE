@@ -1,0 +1,5 @@
+0043e8e0,SetProjectionCenterOffset,19,5
+0043e900,RecomputeTracksideProjectionScale,136,5
+0043e990,InitializeTireTrackPool,433,3
+0043eb50,UpdateTireTrackPool,1235,5
+0043f030,AcquireTireTrackEmitter,471,4

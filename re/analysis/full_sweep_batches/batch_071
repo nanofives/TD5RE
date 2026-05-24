@@ -1,0 +1,5 @@
+00431750,EmitTranslucentTriangleStrip,110,4
+004317c0,SubmitProjectedPolygon,33,3
+004317f0,ClipAndSubmitProjectedPolygon,3030,4
+004323d0,RenderTrackSegmentBatch,766,4
+004326d0,RenderTrackSegmentBatchVariant,778,4

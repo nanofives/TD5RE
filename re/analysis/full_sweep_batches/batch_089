@@ -1,0 +1,5 @@
+0043fae0,UpdateTireTrackEmitters,136,5
+0043fb70,ReadTrackStaticDataChunk,28,3
+0043fb90,ReadCompressedTrackStreamChunk,35,3
+0043fbc0,DecompressTrackDataStream,190,3
+0043fc80,ParseZipCentralDirectory,2341,4
