@@ -235,7 +235,7 @@ static float    s_smoke_u0, s_smoke_v0, s_smoke_u1, s_smoke_v1;
 static float    s_smoke_page;
 
 /* Smoke sprite variant UV table (4 entries: 2x2 grid in atlas) */
-static float    s_smoke_variant_uv[4][5]; /* u0, v0, width, height, page */
+static float    s_smoke_variant_uv[8][5]; /* u0, v0, width, height, page */
 
 /* --- Weather overlay --- */
 static VfxWeatherParticle *s_weather_buf[2];   /* per-view particle buffers */
@@ -566,18 +566,19 @@ void td5_vfx_init_race_particles(void) {
         }
     }
 
-    /* Build 4-variant smoke UV table (2x2 grid in smoke atlas)
-     * variant = (col, row): u = col * half_width + u0, v = row * half_height + v0
-     * Original uses DAT_0045d5dc as the half-size multiplier */
-    float half_w = (s_smoke_u1 - s_smoke_u0) * 0.5f;
-    float half_h = (s_smoke_v1 - s_smoke_v0) * 0.5f;
-    for (int i = 0; i < 4; i++) {
+    /* Build 8-variant smoke UV table (2 cols × 4 rows) matching orig
+     * FUN_00429510 @ 0x00429620 — cell stride 32px (DAT_0045d5dc = 32.0f),
+     * sampled box 30×30. Render callback indexes the table as
+     * (phase >> 2), which spans 0..7 since phase ∈ [0, 0x1F]. */
+    const float CELL_STRIDE = 32.0f;
+    const float CELL_SIZE   = 30.0f;
+    for (int i = 0; i < 8; i++) {
         int col = i & 1;
-        int row = i / 2;
-        s_smoke_variant_uv[i][0] = (float)col * half_w + s_smoke_u0;
-        s_smoke_variant_uv[i][1] = (float)row * half_h + s_smoke_v0;
-        s_smoke_variant_uv[i][2] = half_w;   /* width */
-        s_smoke_variant_uv[i][3] = half_h;   /* height */
+        int row = i >> 1;
+        s_smoke_variant_uv[i][0] = (float)col * CELL_STRIDE + s_smoke_u0;
+        s_smoke_variant_uv[i][1] = (float)row * CELL_STRIDE + s_smoke_v0;
+        s_smoke_variant_uv[i][2] = CELL_SIZE;
+        s_smoke_variant_uv[i][3] = CELL_SIZE;
         s_smoke_variant_uv[i][4] = s_smoke_page;
     }
 
@@ -728,7 +729,7 @@ void td5_vfx_project_particles(int view_index) {
  *   z/far_clip depth, no min/max clamp), different vertex format.
  */
 void td5_vfx_draw_particles(int view_index) {
-    extern void td5_render_submit_translucent(uint16_t *quad_data);
+    extern void td5_render_submit_translucent_world(uint16_t *quad_data);
     extern float g_render_width_f;
     extern float g_render_height_f;
 
@@ -812,13 +813,11 @@ void td5_vfx_draw_particles(int view_index) {
         /* Smoke (type 0): re-index UVs per-frame from s_smoke_variant_uv,
          * mirroring orig render callback LAB_004297D0 which reads the variant
          * table at 0x004AABB8 every frame indexed by (phase >> 2). Spawn-time
-         * UV bake at vfx_spawn_smoke_at_position is now unused for smoke.
-         * Port has 4 variants vs orig's 8 — animates over 16 ticks instead of
-         * orig's 32-tick cycle; table expansion is a separate follow-up. */
+         * UV bake at vfx_spawn_smoke_at_position is now unused for smoke. */
         float tu0 = sq->tex_u0, tv0 = sq->tex_v0;
         float tu1 = sq->tex_u1, tv1 = sq->tex_v1;
         if (slot[PSLOT_TYPE] == 0) {
-            int v_idx = (slot[PSLOT_PHASE] >> 2) & 3;
+            int v_idx = (slot[PSLOT_PHASE] >> 2) & 7;
             float su0 = s_smoke_variant_uv[v_idx][0];
             float sv0 = s_smoke_variant_uv[v_idx][1];
             float sw  = s_smoke_variant_uv[v_idx][2];
@@ -855,7 +854,7 @@ void td5_vfx_draw_particles(int view_index) {
         sq->v3_color = 0xFFFFFFFF;
         sq->v3_u = nu0;         sq->v3_v = nv1;
 
-        td5_render_submit_translucent((uint16_t *)sq);
+        td5_render_submit_translucent_world((uint16_t *)sq);
         drawn++;
     }
 
@@ -2700,40 +2699,30 @@ void td5_vfx_spawn_smoke(TD5_Actor *actor) {
     int abs_speed = (speed < 0) ? -speed : speed;
     if (abs_speed < 4000) return;
 
-    /* Read heading normal at +0x290 (3 x int16) */
-    int16_t heading[3];
-    memcpy(heading, ap + 0x290, sizeof(heading));
-
-    /* Read world position */
+    /* Read world position — orig 0x00429CF0 receives `actor+0x1FC` as param_2
+     * and reads x/y/z directly into the particle pos with no offset or rotation.
+     * Port previously used the rear-wheel ground-probe midpoint + 0x7800 lift,
+     * which placed smoke at track surface behind the chassis — visually hidden
+     * by the body mesh from chase cameras. [CONFIRMED via Ghidra decomp of
+     * 0x00429CF0 + callers 0x0040BD20 and 0x0040C120]. */
     int32_t pos_x, pos_y, pos_z;
     memcpy(&pos_x, ap + 0x1FC, 4);
     memcpy(&pos_y, ap + 0x200, 4);
     memcpy(&pos_z, ap + 0x204, 4);
 
-    /* Read rotation matrix for local-to-world transform */
-    float rot[9];
-    memcpy(rot, ap + 0x120, sizeof(float) * 9);
-
-    /* Compute midpoint of two rear body corners (actor+0xA8..0xBC)
-     * with upward Y offset of 0x7800 */
-    int32_t corner_rl_x, corner_rl_y, corner_rl_z;
-    int32_t corner_rr_x, corner_rr_y, corner_rr_z;
-    memcpy(&corner_rl_x, ap + 0xA8, 4);
-    memcpy(&corner_rl_y, ap + 0xAC, 4);
-    memcpy(&corner_rl_z, ap + 0xB0, 4);
-    memcpy(&corner_rr_x, ap + 0xB4, 4);
-    memcpy(&corner_rr_y, ap + 0xB8, 4);
-    memcpy(&corner_rr_z, ap + 0xBC, 4);
-
-    float mid_x = (float)(corner_rl_x + corner_rr_x) * 0.5f * FP_TO_FLOAT;
-    float mid_y = (float)((corner_rl_y + corner_rr_y) / 2 + 0x7800) * FP_TO_FLOAT;
-    float mid_z = (float)(corner_rl_z + corner_rr_z) * 0.5f * FP_TO_FLOAT;
+    float mid_x = (float)pos_x * FP_TO_FLOAT;
+    float mid_y = (float)pos_y * FP_TO_FLOAT;
+    float mid_z = (float)pos_z * FP_TO_FLOAT;
 
     TD5_LOG_I(LOG_TAG, "exhaust_smoke: pos=(%.1f,%.1f,%.1f) speed=%d",
               mid_x, mid_y, mid_z, abs_speed);
 
-    /* Exhaust smoke uses higher upward velocity: 0x2000 [CONFIRMED @ 0x429DEE] */
-    s_smoke_vel_y = 0x2000;
+    /* Orig 0x00429cf0 leaves velocity_y at 0 (only X/Z are set from sin/cos
+     * of yaw scaled by rand). The previous `s_smoke_vel_y = 0x2000` write was
+     * port-only and made smoke shoot straight up from chassis center over
+     * the particle lifetime — visually a vertical streak rather than the
+     * orig's lazy drift that looks like exhaust. */
+    s_smoke_vel_y = 0;
     vfx_spawn_smoke_at_position(actor, mid_x, mid_y, mid_z, 0, s_current_view_index);
 }
 

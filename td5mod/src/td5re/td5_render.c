@@ -43,6 +43,7 @@
 #include "td5_asset.h"
 #include "td5_save.h"
 #include "td5_vfx.h"
+#include "td5_ai.h"
 #include "td5re.h"
 
 #include "../../../re/include/td5_actor_struct.h"
@@ -2169,7 +2170,11 @@ void td5_render_actors_for_view(int view_index)
              * the faithful ~90 would leave a ~10× gap between visible track
              * geometry and visible AI cars. [CONFIRMED @ 0x40C2FD; writer @
              * 0x42BB72; actor span at +0x82] */
-            if (slot != camera_target_slot && slot < TD5_MAX_RACER_SLOTS) {
+            /* Cull racers AND traffic by span-window; orig
+             * RenderRaceActorsForView @ 0x0040BD20 applies the same gate to
+             * the second loop (slots 6-11). The racer-only restriction was a
+             * port mistake that let traffic render at any distance. */
+            if (slot != camera_target_slot) {
                 TD5_Actor *owner = td5_game_get_actor(camera_target_slot);
                 if (owner) {
                     int actor_span = (int)actor->track_span_normalized;
@@ -2309,13 +2314,27 @@ void td5_render_actors_for_view(int view_index)
 
             /* Smoke effects (0x40C120 tail): called per visible actor per frame.
              * SpawnRearWheelSmokeEffects (0x401330) — burnout hardpoint smoke
-             * SpawnVehicleSmokeSprite (0x429CF0) — general exhaust smoke
-             * Skip for the camera-target actor when this view is in cinematic
-             * preset mode (g_raceCameraPresetMode[view] != 0) — matches the
-             * original gate at 0x40C120. */
+             * SpawnVehicleSmokeSprite (0x429CF0) — wanted-target marker smoke
+             *
+             * Orig at 0x40C793-0x40C7A5 gates SpawnVehicleSmokeSprite on:
+             *   g_wantedModeEnabled != 0 AND gWantedDamageState[slot] == 0
+             * This isn't general exhaust smoke — it's the cop-chase "wanted
+             * target" smoke trail that marks the chased car. In Single Race
+             * (game_type != 8) orig never emits it. Port previously called
+             * it unconditionally for every visible actor every frame, which
+             * is the "smoke never stops emitting" symptom.
+             *
+             * Also skip for the camera-target actor when this view is in
+             * cinematic preset mode (g_raceCameraPresetMode[view] != 0)
+             * — matches the original gate at 0x40C120. */
+            int wanted_smoke_ok = g_td5.wanted_mode_enabled != 0 &&
+                                  slot < TD5_MAX_RACER_SLOTS &&
+                                  g_wanted_damage_state[slot] == 0;
             if (!(slot == camera_target_slot && camera_preset_active)) {
                 td5_vfx_spawn_rear_wheel_smoke(actor, view_index);
-                td5_vfx_spawn_smoke(actor);
+                if (wanted_smoke_ok) {
+                    td5_vfx_spawn_smoke(actor);
+                }
             }
 
             actor_render_count++;
@@ -5792,6 +5811,48 @@ void td5_render_submit_translucent_hud(uint16_t *quad_data) {
 
     tex_page = (int)(*(float *)((uint8_t *)quad_data + 0x90));
     td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR_HUD);
+    td5_plat_render_bind_texture(tex_page);
+    td5_plat_render_draw_tris(verts, 4, indices, 6);
+}
+
+/* Submit a pre-built translucent quad with WORLD-space depth test enabled
+ * (z_enable=1, z_write=0, alpha_ref=1). Mirrors orig
+ * SetRaceRenderStatePreset(TD5_RACE_PASS_ALPHA) @ 0x0040b070: ZENABLE on,
+ * ZWRITEENABLE off, ZFUNC LESSEQUAL — so world-space particles (smoke,
+ * weather streaks) get occluded by opaque geometry but don't write to the
+ * depth buffer.
+ *
+ * KNOWN ISSUE 2026-05-24: smoke's `sz = vz / far_clip` (linear depth) does
+ * NOT match the opaque mesh path's depth-buffer values (perspective NDC z),
+ * so depth-test ON makes smoke fail every compare against car bodies → fully
+ * invisible. Until smoke depth is reprojected into the opaque-pass z space,
+ * we fall through to TRANSLUCENT_LINEAR_HUD (z_enable=0 + alpha_ref=1) which
+ * matches HUD parity: smoke draws on top with soft edges but loses world
+ * occlusion. Reinstating TRANSLUCENT_ANISO is one-line revert. */
+void td5_render_submit_translucent_world(uint16_t *quad_data) {
+    float *fdata;
+    TD5_D3DVertex verts[4];
+    uint16_t indices[6] = { 0, 1, 2, 0, 2, 3 };
+    int tex_page;
+    int i;
+
+    if (!quad_data) return;
+
+    fdata = (float *)quad_data;
+    for (i = 0; i < 4; i++) {
+        int base = 2 + i * 7;
+        verts[i].screen_x = fdata[base + 0];
+        verts[i].screen_y = fdata[base + 1];
+        verts[i].depth_z  = fdata[base + 2];
+        verts[i].rhw      = fdata[base + 3];
+        verts[i].diffuse  = *(uint32_t *)&fdata[base + 4];
+        verts[i].specular = 0;
+        verts[i].tex_u    = fdata[base + 5];
+        verts[i].tex_v    = fdata[base + 6];
+    }
+
+    tex_page = (int)(*(float *)((uint8_t *)quad_data + 0x90));
+    td5_plat_render_set_preset(TD5_PRESET_ADDITIVE_OVERLAY);
     td5_plat_render_bind_texture(tex_page);
     td5_plat_render_draw_tris(verts, 4, indices, 6);
 }

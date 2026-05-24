@@ -212,6 +212,7 @@ void td5_render_build_sprite_quad(int *params);
 void td5_render_submit_translucent(uint16_t *quad_data);
 void td5_render_submit_translucent_low_ref(uint16_t *quad_data);
 void td5_render_submit_translucent_hud(uint16_t *quad_data);
+void td5_render_submit_translucent_world(uint16_t *quad_data);
 /* 0x43E640: Set viewport clip rect */
 void td5_render_set_clip_rect(float left, float right, float top, float bottom);
 /* 0x439E60: Render radial pulse overlay effect */

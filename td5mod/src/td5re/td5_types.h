@@ -293,7 +293,8 @@ typedef enum TD5_RenderPreset {
     TD5_PRESET_ADDITIVE           = 5,  /* Additive (ONE/ONE) — type-3 tpages: lights, glows */
     TD5_PRESET_SHADOW             = 6,  /* Shadow: translucent, z_test=1, z_write=0, point filter */
     TD5_PRESET_SKY                = 7,  /* Sky dome: opaque, z_test=0, z_write=0, linear filter */
-    TD5_PRESET_TRANSLUCENT_LINEAR_HUD = 8 /* HUD: LINEAR filter, alpha_ref=1 to match orig M2DX ALPHAREF=0 */
+    TD5_PRESET_TRANSLUCENT_LINEAR_HUD = 8, /* HUD: LINEAR filter, alpha_ref=1 to match orig M2DX ALPHAREF=0 */
+    TD5_PRESET_ADDITIVE_OVERLAY   = 9   /* Additive (ONE/ONE), z_test off — particle smoke (orig 0x0040B660 case 3 minus z_test) */
 } TD5_RenderPreset;
 
 /** Mesh primitive dispatch opcodes */

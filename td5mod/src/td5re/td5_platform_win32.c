@@ -2413,6 +2413,30 @@ void td5_plat_render_set_preset(TD5_RenderPreset preset)
         s->alpha_ref         = 1;
         break;
 
+    case TD5_PRESET_ADDITIVE_OVERLAY:
+        /* Same blend/filter as TD5_PRESET_ADDITIVE (orig 0x0040B660 case 3:
+         * ONE/ONE additive), but with z_test OFF. Particle smoke writes its
+         * depth as linear `sz = vz/far_clip` (td5_vfx.c:777) which does NOT
+         * share the opaque pass's perspective-NDC z space — depth-test ON
+         * would reject every smoke pixel against car-body depth values.
+         * Until smoke depth is reprojected, fall back to z_test=off and
+         * trade world-occlusion for visibility. The additive blend is the
+         * critical part for color parity — orig smoke is white/glowy
+         * because of ONE/ONE, NOT because of vertex color (which is white
+         * in both paths). */
+        s->blend_enable      = 1;
+        s->src_blend         = D3D6BLEND_ONE;
+        s->dest_blend        = D3D6BLEND_ONE;
+        s->z_enable          = 0;
+        s->z_write           = 0;
+        s->z_func            = 0;
+        s->mag_filter        = 2;
+        s->min_filter        = 2;
+        s->texblend_mode     = D3DTBLEND_MODULATE;
+        s->alpha_test_enable = 1;
+        s->alpha_ref         = 1;
+        break;
+
     case TD5_PRESET_SKY:
         /* Sky dome — faithful match to original SetRaceRenderStatePreset(0)
          * @ 0x0040b070 case 0 (final fallthrough block 0x40b0d8-0x40b0e9):

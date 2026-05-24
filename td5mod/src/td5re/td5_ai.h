@@ -36,6 +36,11 @@ int  td5_ai_init(void);
 void td5_ai_shutdown(void);
 void td5_ai_tick(void);
 
+/* Per-slot wanted/cop-chase damage state (orig gWantedDamageStateTable
+ * @ 0x004bead4). Used by the smoke-spawn gate at td5_render.c that
+ * mirrors orig 0x0040C79C: smoke emits only when this is 0. */
+extern int16_t g_wanted_damage_state[TD5_MAX_RACER_SLOTS];
+
 /* Returns a pointer to the 128-byte AI physics tuning template (DAT_00473DB0
  * in TD5_d3d.exe). Shared across all AI slots in the original. Used by the
  * physics init to point AI actors' tuning_data_ptr at this instead of each

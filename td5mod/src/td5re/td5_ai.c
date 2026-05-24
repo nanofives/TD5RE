@@ -310,7 +310,7 @@ static uint32_t g_ai_frame_counter;
  * Decremented on player<->cop collision by 0x200 (impact<=20000) or 0x400 (impact>20000)
  * [CONFIRMED @ AwardWantedDamageScore 0x43D690]. When slot reaches 0, cop is arrested
  * and its AI is frozen [CONFIRMED @ UpdateRaceActors 0x436E1D gate]. */
-static int16_t g_wanted_damage_state[TD5_MAX_RACER_SLOTS];
+int16_t g_wanted_damage_state[TD5_MAX_RACER_SLOTS];
 
 /* ========================================================================
  * Forward declarations (internal helpers)
