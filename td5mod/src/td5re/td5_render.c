@@ -2067,6 +2067,29 @@ void td5_render_actors_for_view(int view_index)
         int ring_entries = (ring > 0) ? ((ring + 3) >> 2) : 0;
         int is_circuit   = (g_td5.track_type == TD5_TRACK_CIRCUIT) ? 1 : 0;
 
+        /* [FIX 2026-05-25 munich-gantry-double-submit] Per-frame display-list
+         * dedup set. The branch-fallback loop below uses
+         * td5_track_get_display_list(span_index) which *also* hits MODELS.DAT
+         * first (see td5_track.c:6040-6057) — for branch spans whose
+         * (span_index >> 2) falls inside s_models_display_list_count, that
+         * path returns the SAME pointer the main-road entry walk above already
+         * submitted. Result on Munich: gantry mesh submitted twice (once via
+         * main wrap, once via branch fallback) and the branch-side submission
+         * uses a mirrored span position near the junction → visible
+         * duplicated+mirrored arch.
+         *
+         * Dedup by pointer is sufficient: identical MODELS.DAT block ⇒
+         * identical pointer (s_models_blob + s_models_entry_offsets[i]).
+         * Pointer-based also defends future STRIP-fallback overlap cases.
+         *
+         * Cap: 2 × MODELS_DAT_MAX_ENTRIES (2048) covers main + branch worst
+         * case; typical frame uses ~25-30 entries each. Overflow falls back
+         * to "submit anyway" so we never lose geometry — only the cap-spill
+         * tail can re-duplicate, and that's strictly safer than the bug. */
+        #define TD5_RENDER_SUBMITTED_CAP 4096
+        static const void *s_submitted[TD5_RENDER_SUBMITTED_CAP];
+        int submitted_count = 0;
+
         for (int i = 0; i < n_entries; i++) {
             int entry_idx = start_entry + i;
 
@@ -2089,6 +2112,18 @@ void td5_render_actors_for_view(int view_index)
             if (!display_list)
                 continue;
 
+            /* [FIX 2026-05-25 munich-gantry-double-submit] Also dedup against
+             * the circuit-wrap case where two distinct entry_idx values can
+             * collapse to the same MODELS.DAT entry. Cheap linear scan —
+             * submitted_count stays small in practice (~25-30). */
+            int dup = 0;
+            for (int s = 0; s < submitted_count; s++) {
+                if (s_submitted[s] == display_list) { dup = 1; break; }
+            }
+            if (dup) continue;
+            if (submitted_count < TD5_RENDER_SUBMITTED_CAP)
+                s_submitted[submitted_count++] = display_list;
+
             td5_render_span_display_list(display_list);
             rendered_spans++;
         }
@@ -2098,9 +2133,13 @@ void td5_render_actors_for_view(int view_index)
          * span-indexed getter so the STRIP fallback synthesizer keeps
          * producing per-span road quads for branch visibility.
          *
-         * Dedup is not required here: branch spans are >= ring_length and
-         * the main-road loop above only queries entries < ring_entries,
-         * so there's no overlap with the MODELS.DAT entry walk. */
+         * [FIX 2026-05-25 munich-gantry-double-submit] Dedup against the
+         * main-road submissions above. Prior comment claimed "no overlap"
+         * because branch spans are >= ring_length, but
+         * td5_track_get_display_list() probes MODELS.DAT FIRST regardless of
+         * whether the span is in the main ring (td5_track.c:6040-6057). When
+         * the branch span's >>2 falls inside the MODELS.DAT range, the same
+         * block is re-submitted → Munich gantry double + mirror. */
         if (player_branch_span >= 0 && total_spans > ring) {
             int blo = player_branch_span - back_window;
             int bhi = player_branch_span + fwd_window;
@@ -2110,10 +2149,18 @@ void td5_render_actors_for_view(int view_index)
                 void *display_list = td5_track_get_display_list(span_index);
                 if (!display_list)
                     continue;
+                int dup = 0;
+                for (int s = 0; s < submitted_count; s++) {
+                    if (s_submitted[s] == display_list) { dup = 1; break; }
+                }
+                if (dup) continue;
+                if (submitted_count < TD5_RENDER_SUBMITTED_CAP)
+                    s_submitted[submitted_count++] = display_list;
                 td5_render_span_display_list(display_list);
                 rendered_spans++;
             }
         }
+        #undef TD5_RENDER_SUBMITTED_CAP
     }
 
     {
