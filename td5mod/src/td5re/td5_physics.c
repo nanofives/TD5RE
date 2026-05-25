@@ -582,11 +582,21 @@ void td5_physics_wall_response(TD5_Actor *actor, int32_t wall_angle,
             int32_t ff_mag = (v_perp + ((v_perp >> 31) & 3)) >> 2;
             if (ff_mag > 99999) ff_mag = 100000;
 
-            extern void *g_route_data;
+            /* [FIX 2026-05-25 crash-compute-heading-delta-stride]: the route-state
+             * stride is RS_STRIDE_DWORDS = 0x47 DWORDS (= 0x11C bytes), not 0x47
+             * BYTES.  Previous "(uint8_t *)g_route_data + slot*0x47" landed in
+             * garbage for any slot > 0; td5_compute_heading_delta then read
+             * rs[0x35] (RS_SLOT_INDEX) from that garbage, multiplied by 0x388
+             * (actor stride) and crashed at "actor + 0x1F4".  Reproduced as
+             * "CRASH at EIP=0071CB97" on Scotland span 191/203 and Moscow
+             * span 224 (high-velocity wall impacts triggering this tail block).
+             * Use td5_ai_get_route_state() which already applies the correct
+             * stride. */
+            extern int32_t *td5_ai_get_route_state(int slot);
             uint32_t hd = 0;
-            if (g_route_data) {
-                hd = td5_compute_heading_delta(
-                    (uint8_t *)g_route_data + (size_t)actor->slot_index * 0x47);
+            {
+                int32_t *rs = td5_ai_get_route_state((int)actor->slot_index);
+                if (rs) hd = td5_compute_heading_delta(rs);
             }
             uint32_t local_flags = (side < 0) ? 0u : (uint32_t)(side + 1);
             if ((int32_t)hd > 0x3FF && (int32_t)hd < 0xC00) local_flags ^= 3;

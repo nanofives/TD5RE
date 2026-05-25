@@ -2339,10 +2339,15 @@ void td5_hud_render_overlays(float dt)
             }
 
             /* Check heading delta for > 90 degree wrong way */
-            uint8_t route_idx = actor_route_index(actor_slot);
-            extern void *g_route_data;
-            uint32_t heading_delta = td5_compute_heading_delta(
-                (uint8_t *)g_route_data + route_idx * 0x47);
+            /* [FIX 2026-05-25 crash-compute-heading-delta-stride]: see matching
+             * fix in td5_physics.c.  route_state stride is 0x47 DWORDS not BYTES;
+             * use the helper that applies the correct stride.  route_idx is
+             * captured but no longer multiplied in (helper re-derives slot from
+             * the route_state's own RS_SLOT_INDEX). */
+            (void)actor_route_index(actor_slot); /* side-effect: ensure index resolves */
+            extern int32_t *td5_ai_get_route_state(int slot);
+            int32_t *rs_hud = td5_ai_get_route_state(actor_slot);
+            uint32_t heading_delta = rs_hud ? td5_compute_heading_delta(rs_hud) : 0;
 
             if (heading_delta > 0x3FF && heading_delta < 0xC00 &&
                 s_wrong_way_counter[v] > 2) {
