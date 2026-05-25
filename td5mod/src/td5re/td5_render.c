@@ -4446,15 +4446,22 @@ static const int s_tracked_marker_yaw_offset[TD5_VFX_TRACKED_MARKER_COUNT] = {
     -0x100,  /* back  marker */
 };
 
-/* Layer-stack vertical offsets relative to the marker anchor (orig adds
- * fVar8/fVar10/fVar9 derived from DAT_0045d768, g_hudSpeedoDialNearOff,
- * DAT_0045d764 scaled by DAT_0045d698 = 1/4096 and the tracker intensity).
- * Below we use the same scale formulas. */
+/* Per-marker scalar bases (orig 0x0043cdf6-0x0043ce26). All three are scaled
+ * by intensity * DAT_0045d698 (1/4096) every frame:
+ *   fVar8  = intensity * 512.0f / 4096   — long-radius rotated cone (DAT_0045d768)
+ *   fVar10 = intensity *  64.0f / 4096   — cross-radius            (DAT_0045d6c0)
+ *   fVar9  = intensity *   6.0f / 4096   — narrow bottom-tip       (DAT_0045d764)
+ * [FIX 2026-05-24 strobe-17call; orig 0x0043cde0]
+ *   Previous constants (255/64/255/64) were placeholders during the Tier-1
+ *   port. Reconciled to the actual orig FMUL operands read from memory at
+ *   0x0045d768 (=512.0), 0x0045d6c0 (=64.0), 0x0045d764 (=6.0). */
 #define TRACKED_MARKER_INTENSITY_SCALE   (1.0f / 4096.0f)  /* DAT_0045d698 */
-#define TRACKED_MARKER_PULSE_W_BASE      255.0f            /* DAT_0045d768 (RGB-max) */
-#define TRACKED_MARKER_PULSE_H_BASE      64.0f             /* g_hudSpeedoDialNearOff */
-#define TRACKED_MARKER_PULSE_BASE_W      255.0f            /* DAT_0045d764 */
-#define TRACKED_MARKER_PULSE_BASE_H      64.0f             /* shared height base */
+#define TRACKED_MARKER_BASE_FVAR8        512.0f            /* DAT_0045d768 */
+#define TRACKED_MARKER_BASE_FVAR10       64.0f             /* DAT_0045d6c0 */
+#define TRACKED_MARKER_BASE_FVAR9        6.0f              /* DAT_0045d764 */
+#define TRACKED_MARKER_BASE_HALF_XY      32.0f             /* DAT_0045d5dc — layer-2 half-extent */
+#define TRACKED_MARKER_BASE_Z_OFFSET     4.0f              /* _g_simTickBudgetCap — layer-2 Z lift */
+#define TRACKED_MARKER_ALPHA_SCALE       255.0f            /* DAT_0045d684 — sin alpha scale */
 
 /* [FIX 2026-05-24 OVERSIGHT: wanted-mode-init; orig 0x004aaf68]
  * Removed dead extern of g_wanted_mode_enabled (stale parallel global from
@@ -4465,41 +4472,60 @@ static const int s_tracked_marker_yaw_offset[TD5_VFX_TRACKED_MARKER_COUNT] = {
  * (already included above via the existing td5_render.c include block). */
 extern void     td5_hud_update_wanted_damage_indicator(int actor_slot);
 
-/* Draw one 4-vertex billboard quad in screen-space, given a center view-
- * space point + screen-space half-extents (computed from intensity).
- * Mirrors brake_lights billboard emission for consistency. */
-static void tracked_marker_emit_quad(float cx, float cy, float depth,
-                                      float inv_z, float half_w, float half_h,
-                                      float u0, float v0, float u1, float v1,
-                                      uint32_t color, int tex_page)
+/* [FIX 2026-05-24 strobe-17call; orig 0x0043cde0]
+ * Emit a sprite quad given 4 distinct view-space corner positions
+ * (corner order: TL, BL, TR, BR — matches the BuildSpriteQuadTemplate
+ * vertex slot order at orig offsets +0x36/+0x4c/+0x0a/+0x20).
+ *
+ * Each corner shares the same view-space Z (the orig writes fVar7 to all 4
+ * Z slots), so we project once for depth/inv_z and per-corner for X/Y. */
+static void tracked_marker_emit_quad_world(const float corners_world_xy[4][2],
+                                            float shared_world_z,
+                                            float u0, float v0, float u1, float v1,
+                                            uint32_t color, int tex_page)
 {
     if (tex_page < 0) return;
+    if (shared_world_z <= s_near_clip) return;
+
+    float inv_z = 1.0f / shared_world_z;
+    float depth = shared_world_z * (1.0f / s_far_clip);
+
+    /* Project each corner using the same focal/center convention as the
+     * single-center path above (mirrors td5_render_project). */
+    float sx[4], sy[4];
+    for (int i = 0; i < 4; ++i) {
+        sx[i] = -corners_world_xy[i][0] * s_focal_length * inv_z + s_center_x;
+        sy[i] = -corners_world_xy[i][1] * s_focal_length * inv_z + s_center_y;
+    }
+
     TD5_D3DVertex v[4];
-    v[0].screen_x = cx - half_w; v[0].screen_y = cy - half_h;
-    v[0].depth_z  = depth;       v[0].rhw      = inv_z;
-    v[0].diffuse  = color;       v[0].specular = 0;
-    v[0].tex_u    = u0;          v[0].tex_v    = v0;
+    /* Corner mapping (orig BuildSpriteQuadTemplate scratch +0x36/+0x4c/+0x0a/+0x20):
+     *   index 0 -> top-left  (UV u0,v0)
+     *   index 1 -> bottom-left (UV u0,v1)
+     *   index 2 -> top-right (UV u1,v0)
+     *   index 3 -> bottom-right (UV u1,v1) */
+    v[0].screen_x = sx[0]; v[0].screen_y = sy[0];
+    v[0].depth_z  = depth; v[0].rhw      = inv_z;
+    v[0].diffuse  = color; v[0].specular = 0;
+    v[0].tex_u    = u0;    v[0].tex_v    = v0;
 
-    v[1].screen_x = cx - half_w; v[1].screen_y = cy + half_h;
-    v[1].depth_z  = depth;       v[1].rhw      = inv_z;
-    v[1].diffuse  = color;       v[1].specular = 0;
-    v[1].tex_u    = u0;          v[1].tex_v    = v1;
+    v[1].screen_x = sx[1]; v[1].screen_y = sy[1];
+    v[1].depth_z  = depth; v[1].rhw      = inv_z;
+    v[1].diffuse  = color; v[1].specular = 0;
+    v[1].tex_u    = u0;    v[1].tex_v    = v1;
 
-    v[2].screen_x = cx + half_w; v[2].screen_y = cy - half_h;
-    v[2].depth_z  = depth;       v[2].rhw      = inv_z;
-    v[2].diffuse  = color;       v[2].specular = 0;
-    v[2].tex_u    = u1;          v[2].tex_v    = v0;
+    v[2].screen_x = sx[2]; v[2].screen_y = sy[2];
+    v[2].depth_z  = depth; v[2].rhw      = inv_z;
+    v[2].diffuse  = color; v[2].specular = 0;
+    v[2].tex_u    = u1;    v[2].tex_v    = v0;
 
-    v[3].screen_x = cx + half_w; v[3].screen_y = cy + half_h;
-    v[3].depth_z  = depth;       v[3].rhw      = inv_z;
-    v[3].diffuse  = color;       v[3].specular = 0;
-    v[3].tex_u    = u1;          v[3].tex_v    = v1;
+    v[3].screen_x = sx[3]; v[3].screen_y = sy[3];
+    v[3].depth_z  = depth; v[3].rhw      = inv_z;
+    v[3].diffuse  = color; v[3].specular = 0;
+    v[3].tex_u    = u1;    v[3].tex_v    = v1;
 
     uint16_t idx[6] = { 0, 1, 2, 1, 3, 2 };
     flush_immediate_internal();
-    /* TRANSLUCENT_POINT disables z-test — strobe lights overlay the car
-     * mesh without z-fighting against body geometry (same preset used by
-     * brake-light billboards). */
     td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_POINT);
     td5_plat_render_bind_texture(tex_page);
     td5_plat_render_draw_tris(v, 4, idx, 6);
@@ -4534,18 +4560,19 @@ static void render_tracked_actor_marker(const TD5_Actor *actor)
     if (intensity <= 0) return;
 
     float fIntensity = (float)intensity;
-    /* Orig at 0x0043cdfb: fVar8 = intensity * DAT_0045d768 * 1/4096 */
-    float pulse_w    = fIntensity * TRACKED_MARKER_PULSE_W_BASE
-                                  * TRACKED_MARKER_INTENSITY_SCALE;
-    /* Orig at 0x0043ce03: fVar10 = intensity * g_hudSpeedoDialNearOff * 1/4096 */
-    float pulse_h    = fIntensity * TRACKED_MARKER_PULSE_H_BASE
-                                  * TRACKED_MARKER_INTENSITY_SCALE;
-    /* Orig at 0x0043ce0b: fVar9 = intensity * DAT_0045d764 * 1/4096
-     * — base-layer pulse size (slightly different scale from strobe). */
-    float base_w     = fIntensity * TRACKED_MARKER_PULSE_BASE_W
-                                  * TRACKED_MARKER_INTENSITY_SCALE;
-    float base_h     = fIntensity * TRACKED_MARKER_PULSE_BASE_H
-                                  * TRACKED_MARKER_INTENSITY_SCALE;
+    /* [FIX 2026-05-24 strobe-17call; orig 0x0043cde0]
+     * Three independent per-marker radii drive the rotated trapezoid cones
+     * (layers 0/1) and their narrow bottom-tip (shared). Orig sequence at
+     * 0x0043cdf6-0x0043ce26 builds fVar8/fVar10/fVar9 once per frame. */
+    /* Orig at 0x0043cdf6: fVar8 = intensity * 512.0 * (1/4096) */
+    float fVar8  = fIntensity * TRACKED_MARKER_BASE_FVAR8
+                              * TRACKED_MARKER_INTENSITY_SCALE;
+    /* Orig at 0x0043ce0a: fVar10 = intensity * 64.0 * (1/4096) */
+    float fVar10 = fIntensity * TRACKED_MARKER_BASE_FVAR10
+                              * TRACKED_MARKER_INTENSITY_SCALE;
+    /* Orig at 0x0043ce1a: fVar9 (narrow tip)= intensity * 6.0 * (1/4096) */
+    float fVar9  = fIntensity * TRACKED_MARKER_BASE_FVAR9
+                              * TRACKED_MARKER_INTENSITY_SCALE;
 
     /* Load actor rotation matrix + render position into render transform
      * (orig 0x0043ce17-0x0043ce28: LoadRenderRotationMatrix +
@@ -4578,79 +4605,118 @@ static void render_tracked_actor_marker(const TD5_Actor *actor)
         float py = s_tracked_marker_anchor[marker][1];
         float pz = s_tracked_marker_anchor[marker][2];
 
-        /* Transform anchor through render matrix to view space. */
-        float vx = px*m[0] + py*m[1] + pz*m[2] + m[9];
-        float vy = px*m[3] + py*m[4] + pz*m[5] + m[10];
-        float vz = px*m[6] + py*m[7] + pz*m[8] + m[11];
-        if (vz <= s_near_clip) continue;
+        /* Transform anchor through render matrix to view space.
+         * Orig at 0x0043cf02-0x0043cf64 — three FLD/FMUL/FADD chains that
+         * land in fVar5 (X), fVar6 (Y), fVar7 (Z). */
+        float fVar5 = px*m[0] + py*m[1] + pz*m[2] + m[9];
+        float fVar6 = px*m[3] + py*m[4] + pz*m[5] + m[10];
+        float fVar7 = px*m[6] + py*m[7] + pz*m[8] + m[11];
+        if (fVar7 <= s_near_clip) continue;
 
-        float inv_z = 1.0f / vz;
-        float cx    = -vx * s_focal_length * inv_z + s_center_x;
-        float cy    = -vy * s_focal_length * inv_z + s_center_y;
-        float depth = vz * (1.0f / s_far_clip);
+        /* [FIX 2026-05-24 strobe-17call; orig 0x0043cde0]
+         * The orig at 0x0043cf68-0x0043cf7c also derives a yaw from the
+         * transformed anchor (ftol fVar5, ftol fVar6, AngleFromVector12)
+         * BEFORE the ±0x100 split. We mirror that pre-transform AngleFromVector
+         * computation using forward_dx/forward_dz set above; the anchor-yaw
+         * is equivalent up to its sign-conventions for the chase-camera
+         * orientation used by the wanted-target render path. */
+        /* Per-marker yaw with ±0x100 split (orig at 0x0043cfa2/0x0043cfb4). */
+        unsigned uVar14 = (unsigned)(yaw_div16 + s_tracked_marker_yaw_offset[marker]) & 0xFFF;
 
-        /* Per-marker yaw with ±0x100 split (orig at 0x0043cf2a). */
-        unsigned yaw = (unsigned)(yaw_div16 + s_tracked_marker_yaw_offset[marker]) & 0xFFF;
-        /* Strobe alpha pulse — orig uses SinFloat12bit((u8 phase) * -4)
-         * folded to 0xff alpha mask. Port uses the same 12-bit sin LUT to
-         * stay byte-faithful with the strobe rhythm. */
+        /* [FIX 2026-05-24 strobe-17call; orig 0x0043ce5f]
+         * Alpha pulse — orig:
+         *   SinFloat12bit(phase * -4) * 255.0  -> __ftol -> & 0xff
+         * The signed-truncate-then-byte-mask creates a sharp asymmetric
+         * pulse (positive sin half rises 0->255, negative half wraps 255->1).
+         * Output replicated to RGB with full A=0xff -> gray modulator. */
         unsigned phase8 = (unsigned)(s_tracked_marker_phase[marker_phase_index(marker)] & 0xff);
         float    sinv   = SinFloat12bit((int)((phase8 * (unsigned)-4) & 0xFFF));
-        /* Map sin [-1,1] -> alpha [0,255] (orig: ftol((sin)*?) & 0xff). */
-        int      strobe_alpha_i = (int)((sinv + 1.0f) * 127.5f);
-        if (strobe_alpha_i < 0)   strobe_alpha_i = 0;
-        if (strobe_alpha_i > 255) strobe_alpha_i = 255;
-        uint32_t strobe_color   = ((uint32_t)strobe_alpha_i << 24) | 0x00FFFFFFu;
-        uint32_t base_color     = 0xFFFFFFFFu;
+        int32_t  a_ftol = (int32_t)(sinv * TRACKED_MARKER_ALPHA_SCALE); /* truncate toward zero */
+        uint32_t a      = (uint32_t)a_ftol & 0xFFu;
+        uint32_t pulse_color = 0xFF000000u | (a << 16) | (a << 8) | a;
 
-        /* Use yaw to nudge half-extents (cheap stand-in for the orig's
-         * full sin/cos-driven world-corner placement — visual effect is
-         * the same pulsing screen-space billboard since the orig also
-         * lands in view space). */
-        float yaw_cos  = CosFloat12bit(yaw);
-        float yaw_sin  = SinFloat12bit((int)yaw);
-        float strobe_half_w = pulse_w * 0.5f + 1.0f;
-        float strobe_half_h = pulse_h * 0.5f + 1.0f;
-        float base_half_w   = base_w   * 0.5f + 1.0f;
-        float base_half_h   = base_h   * 0.5f + 1.0f;
+        /* [FIX 2026-05-24 strobe-17call; orig 0x0043cfbb-0x0043d0d7]
+         * Orig issues 20 Sin/CosFloat12bit calls per marker, all with the
+         * same arg uVar14 (the compiler does not CSE float10 returns from
+         * cdecl x87 calls). The values are mathematically:
+         *   c = cos(uVar14)   s = sin(uVar14)
+         * Computing them ONCE here is a no-op on the visible result (LUT
+         * lookups are deterministic) and trims 18 redundant calls. The
+         * 1-call alpha sin above is a SEPARATE waveform (different arg). */
+        float c = CosFloat12bit(uVar14);   /* mirrors 10 cos calls 0x0043cfbb..0x0043d120 */
+        float s = SinFloat12bit((int)uVar14); /* mirrors 10 sin calls in same range */
 
-        /* Subtle yaw-driven horizontal shake (~±2 px), mirrors the orig's
-         * yaw-modulated quad-corner placement without rebuilding the full
-         * sin/cos billboard frame in screen space. */
-        float yaw_shake = (yaw_cos - yaw_sin) * 0.5f;
+        /* Per-corner view-space offsets — orig formulas at 0x0043d12d..
+         * 0x0043d291. fVar7 is shared across all 12 corners; X/Y vary per
+         * corner. Each layer is a trapezoid (top edge wide, bottom narrow). */
 
-        /* Layer 0: red strobe */
+        /* Pre-baked corner offsets shared with both rotated layers. */
+        const float bot_x_left  = fVar5 - s * fVar9;   /* fVar2 @ orig 0x0043cff7 reused */
+        const float bot_y_left  = fVar6 + c * fVar9;   /* fVar3 */
+        const float bot_x_right = fVar5 + s * fVar9;   /* fVar4 @ orig 0x0043d016 */
+        const float bot_y_right = fVar6 - c * fVar9;   /* (float)fVar15 final */
+
+        /* Layer 0 = "g_trackedActorMarkerEntryScratch" trapezoid (orig
+         * 4bec90/4becbc/4bece8/4bec64). */
+        const float l0_corners[4][2] = {
+            /* TL @ 4bec90: (c*fVar8 + fVar5) - s*fVar10,  s*fVar8 + c*fVar10 + fVar6 */
+            { (c * fVar8 + fVar5) - s * fVar10,  s * fVar8 + c * fVar10 + fVar6 },
+            /* BL @ 4bec64: fVar2/fVar3 (narrow bottom-left) */
+            { bot_x_left,  bot_y_left },
+            /* TR @ 4becbc: c*fVar8 + s*fVar10 + fVar5,  (s*fVar8 + fVar6) - c*fVar10 */
+            { c * fVar8 + s * fVar10 + fVar5,    (s * fVar8 + fVar6) - c * fVar10 },
+            /* BR @ 4bece8: fVar4/(float)fVar15 (narrow bottom-right) */
+            { bot_x_right, bot_y_right },
+        };
+
+        /* Layer 1 = "g_trackedActorMarkerCount" mirrored trapezoid (orig
+         * 4bed48/4bed74/4beda0/4bed1c). The top corners flip cos sign. */
+        const float l1_corners[4][2] = {
+            /* TL @ 4bed48: (fVar5 - c*fVar8) + s*fVar10, (fVar6 - s*fVar8) - c*fVar10 */
+            { (fVar5 - c * fVar8) + s * fVar10,  (fVar6 - s * fVar8) - c * fVar10 },
+            /* BL @ 4beda0: fVar2/fVar3 (shared with layer 0 BL) */
+            { bot_x_left,  bot_y_left },
+            /* TR @ 4bed74: (fVar5 - c*fVar8) - s*fVar10,  c*fVar10 + (fVar6 - s*fVar8) */
+            { (fVar5 - c * fVar8) - s * fVar10,  c * fVar10 + (fVar6 - s * fVar8) },
+            /* BR @ 4bed1c: fVar4/(float)fVar15 (shared with layer 0 BR) */
+            { bot_x_right, bot_y_right },
+        };
+
+        /* Layer 2 = "g_trackedActorMarkerSurface" axis-aligned ±32 square at
+         * Z - 4.0 (orig 4bebac/4bebd8/4bec04/4bec30). */
+        const float half_xy = TRACKED_MARKER_BASE_HALF_XY;
+        const float l2_z    = fVar7 - TRACKED_MARKER_BASE_Z_OFFSET;
+        const float l2_corners[4][2] = {
+            { fVar5 - half_xy, fVar6 - half_xy },   /* TL @ 4bebac */
+            { fVar5 - half_xy, fVar6 + half_xy },   /* BL @ 4bebd8 */
+            { fVar5 + half_xy, fVar6 - half_xy },   /* TR @ 4bec30 */
+            { fVar5 + half_xy, fVar6 + half_xy },   /* BR @ 4bec04 */
+        };
+
+        /* Submit in orig order (0x0043d29e/0x0043d2a8/0x0043d2b2: 3x
+         * SubmitImmediateTranslucentPrimitive). Each shares the same gray
+         * pulse_color (all 4 corners get the same diffuse via the orig's
+         * local_18/14/10/c broadcast at 0x0043cea5..0x0043ceba). */
         {
             int   page = td5_vfx_tracked_marker_get_page(marker, 0);
             float u0, v0, u1, v1;
             td5_vfx_tracked_marker_get_uv(marker, 0, &u0, &v0, &u1, &v1);
-            tracked_marker_emit_quad(cx - yaw_shake, cy - 4.0f, depth, inv_z,
-                                      strobe_half_w, strobe_half_h,
-                                      u0, v0, u1, v1, strobe_color, page);
+            tracked_marker_emit_quad_world(l0_corners, fVar7,
+                                            u0, v0, u1, v1, pulse_color, page);
         }
-        /* Layer 1: blue strobe (inverted alpha phase — orig alternates
-         * red/blue every other tick via the same phase counter). */
         {
             int   page = td5_vfx_tracked_marker_get_page(marker, 1);
             float u0, v0, u1, v1;
             td5_vfx_tracked_marker_get_uv(marker, 1, &u0, &v0, &u1, &v1);
-            /* TODO: verify against orig 0x0043cf2c constants — current
-             * strobe-phase inversion is approximate; orig uses 17 separate
-             * Sin/CosFloat12bit calls per marker producing distinct R/B
-             * pulse phases. */
-            uint32_t blue_strobe = ((uint32_t)(255 - strobe_alpha_i) << 24) | 0x00FFFFFFu;
-            tracked_marker_emit_quad(cx + yaw_shake, cy - 4.0f, depth, inv_z,
-                                      strobe_half_w, strobe_half_h,
-                                      u0, v0, u1, v1, blue_strobe, page);
+            tracked_marker_emit_quad_world(l1_corners, fVar7,
+                                            u0, v0, u1, v1, pulse_color, page);
         }
-        /* Layer 2: base marker (red for front, blue for back). */
         {
             int   page = td5_vfx_tracked_marker_get_page(marker, 2);
             float u0, v0, u1, v1;
             td5_vfx_tracked_marker_get_uv(marker, 2, &u0, &v0, &u1, &v1);
-            tracked_marker_emit_quad(cx, cy + 6.0f, depth, inv_z,
-                                      base_half_w, base_half_h,
-                                      u0, v0, u1, v1, base_color, page);
+            tracked_marker_emit_quad_world(l2_corners, l2_z,
+                                            u0, v0, u1, v1, pulse_color, page);
         }
     }
 
