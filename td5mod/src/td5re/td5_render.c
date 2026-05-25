@@ -2332,11 +2332,6 @@ void td5_render_actors_for_view(int view_index)
             td5_render_apply_track_lighting(slot, actor);
             td5_render_compute_vertex_lighting(mesh);
 
-            /* Shadow before car mesh — car body + wheels paint over it via
-             * z_write=1 (draw-order occlusion). z_test=0 on the shadow so
-             * it doesn't z-fight with the track surface. */
-            render_vehicle_shadow_quad(actor);
-
             td5_render_prepared_mesh(mesh);
 
             /* Chrome/envmap reflection overlay (0x40C120 second pass).
@@ -2359,6 +2354,18 @@ void td5_render_actors_for_view(int view_index)
 
             /* Render brake light billboards (0x4011C0) */
             render_vehicle_brake_lights(actor, slot);
+
+            /* Vehicle shadow AFTER car mesh + wheels + brake lights, matching
+             * orig deferred translucent pass [CONFIRMED @ 0x40C120: shadow
+             * is queued into the translucent sort list AFTER the opaque body
+             * mesh draw at 0x40C2E4]. Uses TD5_PRESET_SHADOW (z_test=LEQUAL,
+             * z_write=0) plus a small view-space depth bias inside the helper
+             * so the shadow PASSES depth test against the track surface (no
+             * z-fight) but is OCCLUDED by closer opaque geometry (other cars,
+             * walls). Drawing before the car with z_test=0 made shadows render
+             * on top of opponents and walls when viewed from the player's
+             * camera angle — this restores correct occlusion behaviour. */
+            render_vehicle_shadow_quad(actor);
 
             /* Tracked-actor marker (cop chase strobes) — orig
              * RenderRaceActorForView @ 0x0040c79c gates:
@@ -4095,19 +4102,26 @@ void td5_render_crossfade_surfaces(uint32_t *dst, const uint32_t *src_a,
  * (128,64)), vertex color 0xFFFFFFFF, darkness from the texture alpha.
  * Corners derived from the 4 wheel probe positions at actor+0x90..+0xbc.
  *
- * The original draws shadows via a translucent sort list with z-test
- * disabled entirely — the -22.0f offset is a pure screen-space nudge, never
- * depth-tested against the car or the track.
+ * The original draws shadows via a deferred translucent sort list rendered
+ * AFTER all opaque geometry (car bodies, wheels, brake lights). Depth-test
+ * is enabled (LESSEQUAL) so closer opaque pixels — other cars, walls,
+ * environment props — correctly occlude the shadow. The -22.0f offset is a
+ * pure screen-space (view-Y) nudge that places the shadow below the wheel
+ * contact point; an additional view-space depth bias is applied here to
+ * prevent z-fighting with the track surface (which sits at the same world
+ * Y as the shadow corners).
  *
  * Source port approach:
- *   - TRANSLUCENT_POINT (z_test=0, z_write=0, alpha_ref=1, SRCALPHA/
- *     INVSRCALPHA). No depth test means no terrain-slope flicker and no
- *     alpha-cutoff cropping of the feathered shadow edges.
- *   - The call site draws the shadow BEFORE the car mesh (and the
- *     wheels). The opaque car body and wheels draw afterwards with
- *     z_write=1 and paint over the shadow where they exist in screen
- *     space, so the car correctly "occludes" the shadow without a
- *     depth test on the shadow itself.
+ *   - TD5_PRESET_SHADOW (z_test=LEQUAL, z_write=0, alpha_ref=1, SRCALPHA/
+ *     INVSRCALPHA). Depth test on so opponent cars and walls correctly
+ *     occlude the shadow; depth write off so the shadow doesn't write to
+ *     the depth buffer and break subsequent translucent passes.
+ *   - The call site draws the shadow AFTER the car mesh, wheels, and
+ *     brake lights, matching the orig deferred translucent sort list
+ *     order. The depth bias (SHADOW_VIEW_DEPTH_BIAS) is subtracted from
+ *     view-Z to bias the shadow toward the camera so it always passes the
+ *     depth test against the track surface beneath, while still being
+ *     occluded by closer opaque geometry (other cars, walls).
  *   - Scale corners outward from the XZ centroid by 1.25 to match the
  *     original's _g_wheelSuspensionRenderScale @ 0x00463B64 (1.25f) so
  *     the shadow has the same footprint as the original render (a 1.85f
@@ -4130,6 +4144,14 @@ void td5_render_crossfade_surfaces(uint32_t *dst, const uint32_t *src_a,
  * shadows ~1.48x linear (~2.2x area) larger than the original. */
 #define SHADOW_CORNER_SCALE     (1.25f)
 #define SHADOW_VIEW_Y_OFFSET    (-22.0f)   /* [CONFIRMED @ 0x40C5CC] push shadow below car in view-space */
+/* Pull shadow corners ~2 world units closer to the camera in view-Z so the
+ * LESSEQUAL depth test always passes against the track surface (which sits
+ * at the same world Y as the wheel-contact corners and would otherwise
+ * z-fight). 2.0 is small enough that opaque geometry between the camera and
+ * the shadow (other cars, walls, props) still occludes correctly — vehicles
+ * are several units thick in view space, so a 2u bias never lifts the
+ * shadow in front of them. */
+#define SHADOW_VIEW_DEPTH_BIAS  (2.0f)
 
 static int   s_shadow_lookup_done = 0;
 static int   s_shadow_page        = -1;
@@ -4274,6 +4296,13 @@ static void render_vehicle_shadow_quad(const TD5_Actor *actor)
          * the car, not at wheel-probe height. [CONFIRMED @ 0x40C5CC] */
         vy += SHADOW_VIEW_Y_OFFSET;
 
+        /* Bias shadow toward camera in view-Z so it passes the LESSEQUAL
+         * depth test against the track surface at identical world-Y (prevents
+         * z-fighting that motivated the previous z_test=0 workaround). The
+         * bias is small enough (~2 view units) that opaque geometry between
+         * the camera and the shadow still occludes correctly. */
+        vz -= SHADOW_VIEW_DEPTH_BIAS;
+
         if (vz <= s_near_clip) return;
 
         float inv_z = 1.0f / vz;
@@ -4302,11 +4331,15 @@ static void render_vehicle_shadow_quad(const TD5_Actor *actor)
 
     uint16_t indices[6] = { 0, 1, 2, 0, 2, 3 };
     flush_immediate_internal();
-    td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_POINT);
+    /* TD5_PRESET_SHADOW: z_test=LEQUAL, z_write=0, SRCALPHA/INVSRCALPHA,
+     * point filter. Depth test is ON so opponent cars, walls, and any other
+     * opaque pixels closer to the camera correctly occlude this shadow. */
+    td5_plat_render_set_preset(TD5_PRESET_SHADOW);
     td5_plat_render_bind_texture(s_shadow_page);
     td5_plat_render_draw_tris(verts, 4, indices, 6);
 
-    /* Restore opaque preset so it doesn't leak into the car mesh draw. */
+    /* Restore opaque preset so the next per-actor draw starts from a known
+     * z_test=1/z_write=1 state. */
     td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
 }
 
