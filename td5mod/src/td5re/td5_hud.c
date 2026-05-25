@@ -3627,7 +3627,14 @@ void td5_hud_draw_race_fade(float progress, int direction)
  *   - Damage scale * 1/4096     — DAT_0045d698
  * ======================================================================== */
 
-extern int      g_wanted_mode_enabled;
+/* [FIX 2026-05-24 OVERSIGHT: wanted-mode-init; orig 0x004aaf68]
+ * The previously-extern'd g_wanted_mode_enabled was a stale parallel
+ * global from a 2026 stub-migration commit (cf0777f) that was never
+ * written anywhere — it shadowed the real flag g_td5.wanted_mode_enabled
+ * (set by ConfigureGameTypeFlags case 8 @ td5_frontend.c:2820, mirroring
+ * orig 0x00410ED2). Today's Tier 1 UpdateWantedDamageIndicator port
+ * (commit fa1e910) hooked into the dead global, leaving the damage HUD
+ * permanently inert in cop chase. Route through the real flag here. */
 extern int16_t  g_wanted_damage_state[TD5_MAX_RACER_SLOTS];
 
 /* Mirrors orig g_wantedDamageHudOverlayCount @ 0x004bf504 — selects the
@@ -3643,7 +3650,7 @@ void td5_hud_update_wanted_damage_indicator(int actor_slot)
 {
     /* Gate matches orig 0x0043d4f5:
      *   if (wanted_mode_enabled != 0 && slot == g_wantedDamageHudOverlayCount) */
-    if (!g_wanted_mode_enabled) return;
+    if (!g_td5.wanted_mode_enabled) return;
     if (actor_slot != hud_wanted_active_slot()) return;
     if ((unsigned)actor_slot >= (unsigned)TD5_MAX_RACER_SLOTS) return;
 

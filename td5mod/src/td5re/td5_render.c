@@ -4456,7 +4456,11 @@ static const int s_tracked_marker_yaw_offset[TD5_VFX_TRACKED_MARKER_COUNT] = {
 #define TRACKED_MARKER_PULSE_BASE_W      255.0f            /* DAT_0045d764 */
 #define TRACKED_MARKER_PULSE_BASE_H      64.0f             /* shared height base */
 
-extern int      g_wanted_mode_enabled;
+/* [FIX 2026-05-24 OVERSIGHT: wanted-mode-init; orig 0x004aaf68]
+ * Removed dead extern of g_wanted_mode_enabled (stale parallel global from
+ * stub migration cf0777f, never written). The actual wanted-mode flag lives
+ * at g_td5.wanted_mode_enabled and the gate is enforced at the callsite
+ * in render_tracked_actor_marker's caller (td5_render.c:2323). */
 /* td5_game_get_wanted_target_tracker / _slot prototypes live in td5_game.h
  * (already included above via the existing td5_render.c include block). */
 extern void     td5_hud_update_wanted_damage_indicator(int actor_slot);

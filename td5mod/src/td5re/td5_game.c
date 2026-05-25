@@ -57,7 +57,10 @@ int     g_racer_count           = 0;
 int     g_game_type             = 0;
 int     g_split_screen_mode     = 0;
 int     g_replay_mode           = 0;
-int     g_wanted_mode_enabled   = 0;
+/* [FIX 2026-05-24 OVERSIGHT: wanted-mode-init; orig 0x004aaf68]
+ * Removed orphan g_wanted_mode_enabled (was never written; shadowed
+ * the live flag g_td5.wanted_mode_enabled). Consumers re-routed to the
+ * real flag. Header extern in td5_game.h also dropped. */
 int     g_special_encounter     = 0;
 int     g_race_rule_variant     = 0;
 uint32_t g_tick_counter         = 0;

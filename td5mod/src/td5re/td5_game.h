@@ -86,7 +86,9 @@ void *td5_game_heap_alloc(size_t size);
 
 /* --- Game state globals (defined in td5_game.c) --- */
 extern int      g_replay_mode;
-extern int      g_wanted_mode_enabled;
+/* [FIX 2026-05-24 OVERSIGHT] g_wanted_mode_enabled removed — was orphan
+ * shadow of g_td5.wanted_mode_enabled. Use td5_game_is_wanted_mode() or
+ * g_td5.wanted_mode_enabled directly. */
 extern int      g_special_encounter;
 extern int      g_race_rule_variant;
 extern int      g_game_type;
