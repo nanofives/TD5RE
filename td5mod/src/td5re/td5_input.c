@@ -1066,7 +1066,14 @@ void td5_input_reset_buffers(void)
 
 static int16_t s_player_steering_bias_short[2] = { 0x100, 0x100 };   /* orig 0x0046317c/7e */
 static int16_t s_player_steering_bias_input[2] = { 0, 0 };           /* orig 0x004ab18c/0x004ab514 */
-int32_t        g_td5_steering_bias_max_swing  = 0x400;                /* orig 0x0048301c, default plausible cap */
+int32_t        g_td5_steering_bias_max_swing  = 0;                    /* orig 0x0048301c [CONFIRMED via Ghidra read]:
+                                                                          BSS-resident, ROM default = 0 (inactive).
+                                                                          Live value propagated from g_twoPlayerCatchupAssist
+                                                                          (orig 0x00465ff8, range 0..9, ROM default = 4) at the
+                                                                          MainMenu→1PRace transition (orig writer near 0x004155EA
+                                                                          inside ScreenMainMenuAnd1PRaceFlow:
+                                                                          `DAT_0048301c = DAT_00465ff8;`). Port has no 2P-split,
+                                                                          so the value is effectively unused; keep BSS default. */
 
 void td5_input_update_player_steering_weight_balance(void)
 {
