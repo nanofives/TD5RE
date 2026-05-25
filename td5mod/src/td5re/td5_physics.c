@@ -1111,7 +1111,17 @@ void td5_physics_update_vehicle_actor(TD5_Actor *actor)
          * The shorts at +0x208/A/C alias display_angles but during
          * vehicle_mode==1 they hold the recovery animation's per-tick world
          * coordinate. The orig writes them in UpdateVehicleActor's
-         * vehicle_mode==1 dispatch immediately after RefreshScriptedVehicleTransforms. */
+         * vehicle_mode==1 dispatch immediately after RefreshScriptedVehicleTransforms.
+         *
+         * [LOAD-BEARING — keep] Verified 2026-05-25 oversight-y-damping
+         * triage row reclassified to FAITHFUL. The follow-up
+         * td5_physics_integrate_scripted_motion ALSO writes world_pos (via
+         * += velocity), so the seed-then-accumulate pattern is intentional
+         * and byte-faithful to orig: each tick the recovery animation's
+         * authoritative position (+0x208/A/C, in int16 world units) is
+         * re-loaded into world_pos before damped velocity is added on top.
+         * Removing this block would let velocity drift accumulate instead
+         * of tracking the scripted recovery animation. */
         {
             uint8_t *abase = (uint8_t *)actor;
             int16_t rx = *(int16_t *)(abase + 0x208);
