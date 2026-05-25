@@ -1356,6 +1356,25 @@ int td5_game_init_race_session(void) {
     TD5_LOG_I(LOG_TAG, "InitRace step 4/19: level runtime loaded track=%d is_circuit=%d", g_td5.track_index, g_track_is_circuit);
     CK("ck4_after_load_level");
 
+    /* [FIX 2026-05-25 circuit-checkpoint-timer-decrement]: the circuit clear
+     * at line 1157 reads g_track_is_circuit BEFORE td5_asset_load_level (just
+     * above) sets it from LEVELINF.DAT. On the first race of a session
+     * g_track_is_circuit is 0 (default); on subsequent races it carries the
+     * previous race's value. Either way it can leak g_special_encounter=1 into
+     * a circuit race, which makes (a) tick_pending_finish_timer decrement
+     * s_metrics[].timer_ticks every sub-tick (it early-returns on
+     * g_special_encounter==0) and (b) the bit-0x40 metric-digit HUD widget
+     * draw the P2P countdown (gated on g_special_encounter!=0 at
+     * td5_hud.c:2314). Result: a 3-digit countdown that "runs out of time"
+     * on circuit races, despite the step-21 init seeding timer_ticks=0x7FFF.
+     * Re-apply the circuit clear now that g_track_is_circuit reflects the
+     * loaded track. */
+    if (g_track_is_circuit && g_special_encounter != 0) {
+        g_special_encounter = 0;
+        TD5_LOG_I(LOG_TAG,
+                  "InitRace: g_special_encounter cleared post-load (circuit track)");
+    }
+
     /* ---- Step 4a: Per-level traffic gate from LEVELINF+0x30 ----
      * Faithful port of InitializeRaceSession @ 0x0042AE7A-0x0042AE80:
      *     if (g_trackEnvironmentConfig[0xc] == 0)   // int32 index 0xc = byte +0x30
