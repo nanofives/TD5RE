@@ -441,11 +441,19 @@ int td5_ai_is_encounter_active(int slot) {
 
 /* [FIX 2026-05-24 OVERSIGHT: missing-gates-and-arrest-counter; orig 0x0043D690
  * AwardWantedDamageScore]
+ * [FIX 2026-05-24 wanted-scoring-writer; orig 0x0043D329 / 0x0043D6A0]
  *
- * Mirror port of DAT_004bf518 — orig "wanted-damage scoring enabled" gate that
- * is set elsewhere (cop spawn) and cleared on race end. No writer ported yet,
- * so default 1 keeps the behaviour active. Once the writer site is found this
- * can be wired in. [TODO: port DAT_004bf518 writer site] */
+ * Mirror port of DAT_004bf518 — orig "wanted-damage scoring suppressed" flag.
+ * Ghidra writer audit (TD5_d3d.exe, pool1, 2026-05-24): the variable has
+ * exactly ONE writer (InitializeWantedHudOverlays @ 0x0043D329 writing 0)
+ * and ONE reader (this gate @ 0x0043D6A0 testing `== 0`). No code path in
+ * the orig binary ever sets it to 1, so the gate is permanently open and
+ * the variable is effectively a vestigial debug/cheat-disable hook.
+ *
+ * Port semantic: 1 = scoring ENABLED (gate open, default), 0 = suppressed.
+ * Default 1 mirrors orig's "always-on" runtime behaviour byte-for-byte.
+ * Kept as a named static so future debug toggles can flip it; no writer to
+ * wire from orig because none exists. */
 static int s_wanted_scoring_enabled = 1;
 
 /* Mirror port of g_wantedArrestCounter — accumulates arrests over the race
