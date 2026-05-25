@@ -635,6 +635,49 @@ void td5_track_resolve_wall_contacts(TD5_Actor *actor)
             if (t == 3 || t == 4 || t == 6 || t == 7 || t == 8 || t == 11)
                 return;
         }
+
+        /* Physical-neighbor extension (2026-05-25 invisible-wall fix at
+         * widening/branch entries — user-reported Scotland sp412, Jarash
+         * sp579 pattern: "wider road / branch, AI eventually goes through").
+         *
+         * The link_prev / link_next checks above only catch spans that
+         * THEMSELVES have a branch link. But the dominant junction layout
+         * is: junction span (type 8 or 11) sits at the entry/exit of a
+         * widened/branched section, while the spans IMMEDIATELY before and
+         * after (type 1/2/5) are regular quads with `link_prev = link_next
+         * = -1`. The chassis walker (single-step per call) lags by 1 tick
+         * across the junction, so for one frame the actor's
+         * `track_span_raw` lands on the regular span next to a junction
+         * while the actor's physical position is still on the opposite
+         * side. The wall test then fires the FAR-transverse "r_wall" edge
+         * (the actor is past the far end of the lagged span) and
+         * `wall_response` reflects velocity along-road — creating the
+         * invisible barrier the user reports.
+         *
+         * L15 (Scotland) span 412 reproduces this exactly: span 411 is
+         * type 11 (JUNCTION_BWD), span 418 is type 8 (JUNCTION_FWD),
+         * spans 412-417 form the widened (lane_count=6) section between
+         * them. Span 412's own link_prev/next are both -1, so the old
+         * guard misses it. Adding a physical-neighbor (span_idx ± 1)
+         * check on the same junction/transition-type list catches this.
+         *
+         * Safe because: (1) the wall fn is port-specific (orig has no
+         * mid-strip lateral wall); (2) the AI's topological routing
+         * doesn't need this synthesizer; (3) inside the widened section
+         * (span_idx ± 1 both regular), walls still fire normally;
+         * (4) the unguarded `td5_track_resolve_forward_contacts` /
+         * `_reverse_contacts` still provide end-of-level boundary
+         * containment via the per-level sentinel pair. */
+        if (span_idx - 1 >= 0 && span_idx - 1 < s_span_count) {
+            int t = s_span_array[span_idx - 1].span_type;
+            if (t == 3 || t == 4 || t == 6 || t == 7 || t == 8 || t == 11)
+                return;
+        }
+        if (span_idx + 1 >= 0 && span_idx + 1 < s_span_count) {
+            int t = s_span_array[span_idx + 1].span_type;
+            if (t == 3 || t == 4 || t == 6 || t == 7 || t == 8 || t == 11)
+                return;
+        }
     }
 
     /* Branch spans (index >= ring_length) previously skipped this function
