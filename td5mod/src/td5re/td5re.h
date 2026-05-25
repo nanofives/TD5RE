@@ -233,6 +233,14 @@ typedef struct TD5_GlobalState {
          * tools/frida_csv/traffic_edge_pen_port.csv. Inert when 0.
          * [TRACE 2026-05-24 traffic-edge-pen-cluster] */
         int  trace_traffic_edge_pen;
+        /* [Trace] TerrainCamProbe=1 enables the per-call CSV mirror in
+         * td5_camera.c::UpdateChaseCamera for the three terrain probes
+         * (forward-right, forward-left, backward) + the AngleFromVector12
+         * pitch/roll inputs. Pairs with the Frida orig probe at
+         * tools/_probes/terrain_probe_capture.js. CSV lands at
+         * tools/frida_csv/terrain_probe_port.csv. Inert when 0.
+         * [TRACE 2026-05-25 terrain-pitch-roll-zeroed OVERSIGHT row] */
+        int  trace_terrain_cam_probe;
         int  auto_throttle;         /* 1 = force full throttle for slot 0 */
         float trace_fast_forward;   /* Speed multiplier during trace capture.
                                      * 1.0 = real-time (default), 2.0 = 2x,

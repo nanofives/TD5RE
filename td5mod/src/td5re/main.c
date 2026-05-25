@@ -490,6 +490,10 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
      * Frida probe at tools/_probes/traffic_edge_pen_probe.js. */
     g_td5.ini.trace_traffic_edge_pen =
         td5_ini_int("Trace", "TrafficEdgePen", 0);
+    /* [TRACE 2026-05-25 terrain-pitch-roll-zeroed] CSV mirror of orig
+     * Frida probe at tools/_probes/terrain_probe_capture.js. */
+    g_td5.ini.trace_terrain_cam_probe =
+        td5_ini_int("Trace", "TerrainCamProbe", 0);
 
     /* Whole-state snapshot (see re/analysis/whole_state_diff_design.md).
      * Independent of RaceTrace -- you can capture whole-state without CSVs. */

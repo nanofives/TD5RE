@@ -17,6 +17,9 @@
 
 #include <math.h>
 #include <stdlib.h>
+#include <stdio.h>   /* FILE/fopen/fprintf — used by the [Trace] TerrainCamProbe
+                       CSV mirror in UpdateChaseCamera (gated by
+                       g_td5.ini.trace_terrain_cam_probe). Inert when 0. */
 #include <string.h>
 
 #define LOG_TAG "camera"
@@ -616,6 +619,75 @@ void LoadCameraPresetForView(int actor, int force_reload, int view, int save_sta
  *   when sub-tick fraction is 1.0 (per-sim-tick callsite).
  * ======================================================================== */
 
+/* [TRACE 2026-05-25 terrain-pitch-roll-zeroed] CSV mirror of the orig
+ * 3-point terrain probe in UpdateChaseCamera @ 0x00401590. Pairs with
+ * tools/_probes/terrain_probe_capture.js (orig). Confirms whether the
+ * port's ComputeActorTrackContactNormal output (norm_a/b/c_y, all 24.8
+ * FP) matches the orig stack-locals local_38/local_2c/local_20 at the
+ * AngleFromVector12 call sites (0x004017EC pitch / 0x0040180C roll).
+ *
+ * If the values agree the OVERSIGHT row upgrades to FIX_APPLIED and we
+ * restore the AngleFromVector12 derivation at td5_camera.c:752-754.
+ * Otherwise the rows pinpoint the unit / coord-system mismatch.
+ *
+ * Gated by g_td5.ini.trace_terrain_cam_probe ([Trace] TerrainCamProbe=1).
+ * When disabled the trace is a single compare-and-bail at the top of
+ * terrain_probe_trace_emit. */
+static FILE *s_terrain_probe_trace_fp = NULL;
+
+static void terrain_probe_trace_ensure_open(void)
+{
+    if (s_terrain_probe_trace_fp) return;
+    s_terrain_probe_trace_fp = fopen("tools/frida_csv/terrain_probe_port.csv", "w");
+    if (s_terrain_probe_trace_fp) {
+        fprintf(s_terrain_probe_trace_fp,
+            "sim_tick,view,actor_slot,actor_span,actor_sub_lane,"
+            "pos_x,pos_z,combined_angle,"
+            "point_ax,point_az,point_bx,point_bz,point_cx,point_cz,"
+            "norm_a_y,norm_b_y,norm_c_y,"
+            "pitch_input,roll_input\n");
+        fflush(s_terrain_probe_trace_fp);
+    }
+}
+
+/* Emit one row per chase-camera tick. All coordinate values are in 24.8
+ * fixed-point (matches orig stack-local layout). pitch_input/roll_input
+ * are the post-shift, post-negate raw operands to AngleFromVector12.
+ *
+ * Matches columns from tools/_probes/terrain_probe_capture.js. */
+static void terrain_probe_trace_emit(int view, int actor_addr,
+                                     int pos_x, int pos_z,
+                                     unsigned int combined_angle,
+                                     int point_ax, int point_az,
+                                     int point_bx, int point_bz,
+                                     int point_cx, int point_cz,
+                                     int norm_a_y, int norm_b_y, int norm_c_y,
+                                     int pitch_input, int roll_input)
+{
+    if (!g_td5.ini.trace_terrain_cam_probe) return;
+    terrain_probe_trace_ensure_open();
+    if (!s_terrain_probe_trace_fp) return;
+
+    /* Derive slot from actor's per-tick slot_index field at +0x375
+     * (uint8_t — see td5_vfx.c:2240 for the same idiom against the orig
+     * actor base, and td5_pilot_trace_004370A0.h:47 for the typed field).
+     * Frida side derives slot from g_raceActors base; we mirror via the
+     * actor's own +0x375 since the port uses heap-allocated actors. */
+    int actor_slot = actor_addr ? (int)*(unsigned char *)(actor_addr + 0x375) : -1;
+    int actor_span = actor_addr ? (int)*(short *)(actor_addr + 0x80) : -1;
+    int actor_sub  = actor_addr ? (int)*(signed char *)(actor_addr + 0x8C) : -1;
+
+    fprintf(s_terrain_probe_trace_fp,
+        "%u,%d,%d,%d,%d,%d,%d,%u,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d\n",
+        (unsigned)g_td5.simulation_tick_counter,
+        view, actor_slot, actor_span, actor_sub,
+        pos_x, pos_z, combined_angle,
+        point_ax, point_az, point_bx, point_bz, point_cx, point_cz,
+        norm_a_y, norm_b_y, norm_c_y,
+        pitch_input, roll_input);
+    fflush(s_terrain_probe_trace_fp);
+}
+
 void UpdateChaseCamera(int actor, int do_track_heading, int view)
 {
     int fly_in_threshold = g_flyInThreshold;
@@ -747,8 +819,41 @@ after_flyin:
     /* Compute pitch and roll from terrain normals.
      * NOTE: Terrain probes currently return garbage because actor positions
      * are in integer coords but probes expect 24.8 FP. Force pitch/roll to
-     * zero until the coordinate system is unified. */
+     * zero until the coordinate system is unified.
+     *
+     * [TRACE 2026-05-25 terrain-pitch-roll-zeroed OVERSIGHT row] The L5
+     * audit (td5_track.c:6230+ ComputeActorTrackContactNormal) marks the
+     * probe pipeline byte-faithful with orig — output is 24.8 FP just
+     * like orig stack-locals local_38/local_2c/local_20. Before flipping
+     * the AngleFromVector12 derivation back on, mirror the orig probe via
+     * tools/_probes/terrain_probe_capture.js and outer-join the CSVs.
+     * If norm_a/b/c_y agree by sim_tick → outcome (a) at next session.
+     * Gate is INI [Trace] TerrainCamProbe (default 0, inert). */
     {
+        /* Match orig pitch_input formula at 0x004017CA..0x004017E4:
+         *   EAX = local_38;  EAX -= ((local_28 + local_1c) + ((local_28+local_1c)>>31 & 1)) >> 1
+         *   EAX = -(EAX >> 8)
+         * which is equivalent to:
+         *   pitch_input = -((norm_a_y - (norm_b_y + norm_c_y)/2) >> 8)
+         * Computed here for the trace CSV only — fed to AngleFromVector12
+         * only after the orig-vs-port unit match is confirmed. */
+        int avg_bc = norm_b_y + norm_c_y;
+        avg_bc = (avg_bc + ((avg_bc >> 31) & 1)) >> 1;  /* signed /2 round-toward-zero */
+        int pitch_input = -((norm_a_y - avg_bc) >> 8);
+
+        /* Match orig roll_input formula at 0x004017F8..0x00401800:
+         *   EAX = local_28; EAX -= local_1c; EAX = -(EAX >> 8)
+         *   = -((norm_b_y - norm_c_y) >> 8) */
+        int roll_input = -((norm_b_y - norm_c_y) >> 8);
+
+        terrain_probe_trace_emit(view, actor,
+                                  pos_x, pos_z, combined_angle,
+                                  point_ax, point_az,
+                                  point_bx, point_bz,
+                                  point_cx, point_cz,
+                                  norm_a_y, norm_b_y, norm_c_y,
+                                  pitch_input, roll_input);
+
         cam_angles[0] = 0;  /* pitch = 0 (flat terrain) */
         cam_angles[1] = (short)combined_angle;
         cam_angles[2] = 0;  /* roll = 0 */
