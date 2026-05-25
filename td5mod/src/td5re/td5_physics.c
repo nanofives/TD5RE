@@ -6931,9 +6931,9 @@ static void update_vehicle_pose_from_physics(TD5_Actor *actor)
      * and the OLD-bitmask snapshot at +0x37D all happen inside this call. */
     td5_physics_refresh_wheel_contacts(actor);
 
-    /* TODO (D3+D4 — damage_lockout switch + 2nd matrix rebuild):
+    /* TODO (D3+D4 — wheel-attitude switch + 2nd matrix rebuild):
      * Original 0x00406459-0x004064E1:
-     *   switch (actor->damage_lockout @ +0x37D) {
+     *   switch (actor->wheel_contact_bitmask @ +0x37C) {   // NEW mask, NOT +0x37D
      *     case 0,1,2,4,6,8,9: TransformTrackVertexByMatrix  (0x00446030); writes back roll + pitch
      *     case 5,10:          TransformTrackVertexByMatrixB (0x00446140); writes back roll only
      *     case 3,12:          TransformTrackVertexByMatrixC (0x004461C0); writes back pitch only
@@ -6943,11 +6943,31 @@ static void update_vehicle_pose_from_physics(TD5_Actor *actor)
      *   euler_accum_pitch = display_angle_pitch << 8   (if A or C branch)
      *   BuildRotationMatrixFromAngles(rotation_matrix, display_angles)   // 2nd build
      *
+     * NOTE 2026-05-25 audit: original switches on +0x37C (wheel_contact_bitmask,
+     * the NEW airborne mask just written by refresh_wheel_contacts), NOT on
+     * +0x37D (damage_lockout/OLD mask). Verified via Ghidra listing at
+     * 0x0040645B: `MOV AL, byte ptr [ESI + 0x37c]`. The "damage_lockout"
+     * name in earlier TODOs was a misread. Case values map to the airborne
+     * bitmask: case 5 = FL+RL airborne (LEFT-side off) → roll-only solver;
+     * case 3 = FL+FR airborne (FRONT axle off) → pitch-only solver; etc.
+     *
      * The Transform* helpers derive wheel-implied roll/pitch from the post-
      * impulse wheel_contact_pos + wheel_suspension_pos, allowing the next
      * physics tick to start integration at the wheel-attitude. Without this,
      * after a collision the chassis pose remains at the impulse-applied
      * attitude even when the wheels disagree with it.
+     *
+     * IMPORTANT: orig 0x004063A0 (this function) is ONLY called from
+     * FUN_004079c0 (V2V vehicle-to-vehicle collision response, callers
+     * verified 2026-05-25 via ghidra function_callers). It is NOT per-tick.
+     * The per-tick attitude rebuild lives in IntegrateVehiclePoseAndContacts
+     * (orig 0x00405E80 → port td5_physics_integrate_pose at td5_physics.c
+     * line ~6128) and that path's switch dispatch IS already implemented at
+     * port lines 6402-6469 with the SAME case-set + helpers. So this missing
+     * dispatch only affects POST-V2V-COLLISION attitude rebuild — without it,
+     * after two cars touch, both chassis snap to the impulse-applied yaw
+     * but retain their pre-impulse roll/pitch until the next 0x00405E80 tick
+     * rebuilds them.
      *
      * Helper status (2026-05-25): A (full solver, 0x00446030) is shipped as
      * td5_physics_attitude_from_wheels (td5_physics.c near line 6054). B
@@ -6958,11 +6978,15 @@ static void update_vehicle_pose_from_physics(TD5_Actor *actor)
      * rounding mirrors orig FILD/FSQRT/__ftol via (int32_t)sqrtf((float)...).
      *
      * The switch dispatch + 2nd-rebuild wire-up remains DEFERRED pending
-     * pool13 dynamic-diff validation. HIGH-risk per-tick attitude change
-     * (see re/analysis/oversight_triage_2026-05-24.md row
-     * "damage_lockout_switch_skipped"). To be applied in a follow-up
-     * precise-port worktree (precise-00446030). When that lands, the
-     * dispatch can call the three helpers above with no further decompile. */
+     * pool13 dynamic-diff validation. RULED OUT 2026-05-25 as candidate
+     * for Jarash bouncing / not-touching-ground / yaw-rotation symptoms on
+     * curved terrain — those occur during normal driving (no V2V impulse),
+     * so this V2V-only dispatch is inert in that scenario. See companion
+     * Frida probe tools/frida_jarash_pose_probe.js for paired-diff capture
+     * to localize the actual culprit (candidate: DA-T2 case 1 always-advance
+     * walker bug at td5_track.c:2619, or wheel-walker single_step on slope
+     * onsets). HIGH-risk per-tick attitude change still applies — to be
+     * applied in a follow-up precise-port worktree (precise-00446030). */
     /* The helpers themselves are defined at the bottom of this file with
      * __attribute__((unused)) to suppress the unused-function warning until
      * the switch dispatch lands. [PORT 2026-05-25 damage-lockout-helpers] */
