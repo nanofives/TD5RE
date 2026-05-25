@@ -1402,14 +1402,131 @@ void td5_physics_update_player(TD5_Actor *actor)
     /* Lateral = dot(velocity, heading_right) */
     int32_t v_lat  = (vx * cos_h - vz * sin_h) >> 12;
 
+    /* --- 6a. Steering-angle cos/sin (HOISTED 2026-05-25 for scf-wheelspin
+     * ordering fix). These were previously computed at the top of section 12
+     * (per-axle forces) but are needed earlier by section 14a (long/lat speed
+     * writeback) which is itself being moved UP to before the section 7-11
+     * dispatch so that auto_gear / slip-circle / current_slip_metric all see
+     * this-tick's freshly-written long_speed/lat_speed instead of stale
+     * previous-tick values. See moved-block comment below for rationale. */
+    int32_t steer_angle = -(actor->steering_command >> 8);
+    /* Original input maps LEFT=positive, RIGHT=negative (bit 0x02=LEFT feeds
+     * the add-to-cmd path). Port input maps LEFT=negative, RIGHT=positive.
+     * Negate here to match the original convention the physics was built
+     * around. [CONFIRMED: original bit layout documented in td5_input.c:484]
+     *
+     * Original (0x40415B): steer_angle = steering_command >> 8, no scaling.
+     * Constant 294 does NOT exist in the binary. [CONFIRMED @ 0x404142-0x40415E] */
+    int32_t steer_heading = (heading + steer_angle) & 0xFFF;
+    int32_t cos_s = cos_fixed12(steer_heading);   /* cos(h+s) — iVar16 */
+    int32_t sin_s = sin_fixed12(steer_heading);   /* sin(h+s) — iVar17 */
 
-    /* NOTE: `actor->longitudinal_speed` / `lateral_speed` are NOT written
-     * here. The original UpdatePlayerVehicleDynamics @ 0x00404030 writes
-     * both fields at its TAIL, using (a) the POST-drag PRE-force velocity
-     * (captured above in `vx`/`vz`) and (b) for the lateral field, the
-     * front-axle-frame forward projection minus a yaw-rate-induced term,
-     * NOT the chassis-right projection. See the dispatch block near the
-     * force-writeback for the faithful compute. */
+    /* Steer-angle-only cos/sin for the lateral force solve.
+     * Decomp uses iVar18 = cos(steer), iVar19 = sin(steer) — NOT (h+s). */
+    int32_t steer_only = steer_angle & 0xFFF;
+    int32_t cos_sr = cos_fixed12(steer_only);     /* iVar18 = cos(s) */
+    int32_t sin_sr = sin_fixed12(steer_only);     /* iVar19 = sin(s) */
+
+    /* --- 14a. [HOISTED 2026-05-25 from former tail location ~line 2122-2187 —
+     * scf-wheelspin-ordering fix per todo_scf_wheelspin_ordering.md.]
+     *
+     * Orig UpdatePlayerVehicleDynamics @ 0x00404030 writes
+     * actor->longitudinal_speed and actor->lateral_speed in the dispatch
+     * block BEFORE the auto-gear / drive-torque / slip-circle stages, so the
+     * downstream consumers (UpdateAutomaticGearSelection @ 0x0042EF10 uses
+     * `0 < actor->longitudinal_speed` as its upshift gate; slip-circle pass-A
+     * reads long_speed/lat_speed to compute slip delta; current_slip_metric
+     * @ 0x004049BA/0x00404A80 reads the same) all see THIS tick's values.
+     *
+     * Prior port placed this block at the function tail (after force writeback
+     * and yaw-torque). Result: at full-throttle launch, auto_gear read the
+     * PREVIOUS tick's long_speed (could be >0 from countdown / prior gear),
+     * so the upshift gate fired at rpm 5400 (Viper gear-2 threshold from
+     * tuning+0x42), gear shifted to 3 before engine reached rpm ≈ 7295 that
+     * the wheelspin SET gate at 0x00404E51 needs → actor->surface_contact_flags
+     * (+0x376) stayed 0 → CRGT branch + UpdateTireTrackEmitters + wheel-sound
+     * smoke all early-returned. User-visible symptoms (2026-05-24 Newcastle):
+     * no initial-drift wheelspin at launch, no tire marks at spawn, smoke
+     * particle count diverged from orig.
+     *
+     * Orig verification (Ghidra UpdatePlayerVehicleDynamics @ 0x00404030):
+     *   if (scf != 0) {
+     *     if (sVar2==1) { lateral_speed=uVar31; longitudinal_speed=CRGT(uVar12); }
+     *     elif (sVar2==2) { lateral_speed=CRGT(uVar31); longitudinal_speed=uVar12; }
+     *     elif (sVar2==3) { both=CRGT(...); }
+     *     // then drive/brake dispatch — NO auto_gear on this branch
+     *   } else {
+     *     lateral_speed=uVar31; longitudinal_speed=uVar12;
+     *     // then if (!brake && throttle) { auto_gear(); UESA(); drive... }
+     *   }
+     *
+     * The slip-circle pass A reads (lines below in section 13) use these
+     * freshly-written values. The current_slip_metric write (section 13a)
+     * likewise. All three are the orig-faithful pattern; the prior port's
+     * tail placement was the divergence.
+     *
+     * NOTE: CRGT here uses last-tick's engine_speed_accum (UESA runs AFTER
+     * the dispatch on airborne). This matches orig: orig's on-ground branch
+     * also runs CRGT with last-tick engine_speed_accum (no UESA on on-ground).
+     *
+     * See sections 13 (slip-circle pass A) and 13a (current_slip_metric)
+     * below for the readers of these writes. */
+    {
+        /* Pre-force velocity (vx/vz captured at line ~1397, post-drag). */
+        int64_t pre_vx = vx;
+        int64_t pre_vz = vz;
+
+        /* uVar12 — chassis forward projection. */
+        int32_t body_vlong = (int32_t)((pre_vx * sin_h + pre_vz * cos_h) >> 12);
+
+        /* uVar37 — front-axle-frame forward minus yaw-rate correction. */
+        int32_t raw_front = (int32_t)(((int64_t)sin_s * pre_vx + (int64_t)cos_s * pre_vz) >> 12);
+        int64_t yaw_term_q12 = (int64_t)sin_sr * front_weight * actor->angular_velocity_yaw;
+        int32_t yaw_term = (int32_t)((yaw_term_q12 >> 12) / 0x28c);
+        int32_t body_vlat = raw_front - yaw_term;
+
+        if (actor->surface_contact_flags != 0) {
+            /* Drivetrain dispatch per UpdatePlayerVehicleDynamics @ 0x00404030:
+             * sVar2=1 (RWD): CRGT(body_vlong) → long; lat=body_vlat (front-axle form)
+             * sVar2=2 (FWD): CRGT(body_vlat)  → lat;  long=body_vlong
+             * sVar2=3 (AWD): CRGT((long+lat)/2) → BOTH */
+            int32_t dt_layout = (int32_t)PHYS_S(actor, 0x76);
+            switch (dt_layout) {
+            case 1: {
+                int32_t crgt = compute_reverse_gear_torque(actor, body_vlong);
+                actor->longitudinal_speed = crgt;
+                actor->lateral_speed      = body_vlat;
+                break;
+            }
+            case 2: {
+                int32_t crgt = compute_reverse_gear_torque(actor, body_vlat);
+                actor->lateral_speed      = crgt;
+                actor->longitudinal_speed = body_vlong;
+                break;
+            }
+            case 3: {
+                int32_t crgt = compute_reverse_gear_torque(actor, (body_vlong + body_vlat) / 2);
+                actor->longitudinal_speed = crgt;
+                actor->lateral_speed      = crgt;
+                break;
+            }
+            default:
+                actor->longitudinal_speed = body_vlong;
+                actor->lateral_speed      = body_vlat;
+                break;
+            }
+        } else {
+            actor->longitudinal_speed = body_vlong;
+            actor->lateral_speed      = body_vlat;
+        }
+
+        if (actor->slot_index == 0 && (actor->frame_counter % 60u) == 0u) {
+            TD5_LOG_I(LOG_TAG,
+                      "body_speeds: long=%d lat=%d (vlong=%d vlat=%d yaw_term=%d)",
+                      actor->longitudinal_speed, actor->lateral_speed,
+                      body_vlong, body_vlat, yaw_term);
+        }
+    }
 
     /* --- 7/8/9/10/11. On-ground vs airborne gate — matches original 0x404030:
      *   if (surface_contact_flags != 0) → ON-GROUND:
@@ -1704,24 +1821,12 @@ void td5_physics_update_player(TD5_Actor *actor)
                   actor->surface_contact_flags);
     }
 
-    /* --- 12. Per-axle lateral/longitudinal forces --- */
-    int32_t steer_angle = -(actor->steering_command >> 8);
-    /* Original input maps LEFT=positive, RIGHT=negative (bit 0x02=LEFT feeds
-     * the add-to-cmd path). Port input maps LEFT=negative, RIGHT=positive.
-     * Negate here to match the original convention the physics was built
-     * around. [CONFIRMED: original bit layout documented in td5_input.c:484]
-     *
-     * Original (0x40415B): steer_angle = steering_command >> 8, no scaling.
-     * Constant 294 does NOT exist in the binary. [CONFIRMED @ 0x404142-0x40415E] */
-    int32_t steer_heading = (heading + steer_angle) & 0xFFF;
-    int32_t cos_s = cos_fixed12(steer_heading);   /* cos(h+s) — iVar16 */
-    int32_t sin_s = sin_fixed12(steer_heading);   /* sin(h+s) — iVar17 */
-
-    /* Steer-angle-only cos/sin for the lateral force solve.
-     * Decomp uses iVar18 = cos(steer), iVar19 = sin(steer) — NOT (h+s). */
-    int32_t steer_only = steer_angle & 0xFFF;
-    int32_t cos_sr = cos_fixed12(steer_only);     /* iVar18 = cos(s) */
-    int32_t sin_sr = sin_fixed12(steer_only);     /* iVar19 = sin(s) */
+    /* --- 12. Per-axle lateral/longitudinal forces ---
+     * NOTE 2026-05-25: `steer_angle`, `steer_heading`, `cos_s`, `sin_s`,
+     * `steer_only`, `cos_sr`, `sin_sr` were HOISTED to section 6a (above the
+     * section 7-11 dispatch) so that the section 14a speed writeback — also
+     * moved up — can compute body_vlat using sin_s/cos_s/sin_sr. See section
+     * 6a header for the scf-wheelspin-ordering rationale. */
 
     /* Front/rear longitudinal forces scaled by RAW surface friction coefficient.
      * [CONFIRMED @ 0x004046DC]: original re-reads gSurfaceGripCoefficientTable
@@ -2097,94 +2202,17 @@ void td5_physics_update_player(TD5_Actor *actor)
     actor->linear_velocity_x += player_fx;
     actor->linear_velocity_z += player_fz;
 
-    /* --- 14a. Write longitudinal/lateral speeds at UpdatePlayerVehicleDynamics
-     * tail. Two bugs fixed here (T7):
+    /* [moved 2026-05-25 — scf-wheelspin-ordering fix]: the section 14a
+     * `actor->longitudinal_speed` / `lateral_speed` writeback block formerly
+     * lived here. It is now executed UP at section 6a (just below v_long/v_lat
+     * computation, before the section 7-11 dispatch) so that auto_gear,
+     * slip-circle pass A, and current_slip_metric all see this tick's
+     * freshly-written values instead of stale previous-tick values. See the
+     * hoisted block's header comment for full rationale and orig-Ghidra
+     * verification (UpdatePlayerVehicleDynamics @ 0x00404030 dispatch block).
      *
-     * BUG B — velocity input was POST-force. Original at 0x00404030 computes
-     *   uVar12 (chassis forward) and uVar37 (front-axle-frame forward minus
-     *   yaw-rate term) from the POST-DRAG PRE-FORCE velocity — i.e. the
-     *   `linear_velocity_x/_z` state BEFORE the per-wheel force add-back at
-     *   0x00404D66 / 0x00404D7E. The port was reading post-force velocity
-     *   (after `actor->linear_velocity_x += player_fx` above), which doubled
-     *   the long_speed magnitude at throttle-forward ticks (orig=59904 vs
-     *   port=122880 at sim_tick=4). Switched to the function-scoped `vx`/`vz`
-     *   locals captured at the top of this function (post-drag, pre-force).
-     *
-     * BUG A — lateral_speed (+0x318) was chassis-right projection; original
-     *   writes the FRONT-AXLE-FRAME FORWARD projection minus a yaw-rate-
-     *   induced term. For a near-straight car this yields a small positive
-     *   value (orig=912 at sim_tick=4), whereas chassis-right yields ~0
-     *   (port=-1). Exact formula [CONFIRMED @ 0x00404030 decomp]:
-     *     uVar37 = (sin(h+s)*vx + cos(h+s)*vz) >> 12
-     *            - (sin(s) * front_weight * angular_velocity_yaw >> 12) / 0x28c
-     *   where sin/cos ports: sin_s/cos_s = sin/cos(yaw+steer), sin_sr = sin(steer),
-     *   front_weight = PHYS_S(0x28), and 0x28c (652) is a physics-units
-     *   scaling divisor kept verbatim from the original.
-     *
-     *   sVar2 | longitudinal_speed (+0x314) | lateral_speed (+0x318)
-     *   ------+-----------------------------+------------------------
-     *     1   | CRGT(engine, gear_ratio)    | front-axle Vlat'
-     *     2   | body-frame Vlong            | CRGT(engine, gear_ratio)
-     *     3   | CRGT(engine, gear_ratio)    | CRGT(engine, gear_ratio)
-     *
-     * Airborne cars (surface_contact_flags == 0) get both fields as plain
-     * projections (no CRGT dispatch). [CONFIRMED @ 0x00404030] */
-    {
-        /* Pre-force velocity (vx/vz captured at line 677-678, post-drag). */
-        int64_t pre_vx = vx;
-        int64_t pre_vz = vz;
-
-        /* uVar12 — chassis forward projection. */
-        int32_t body_vlong = (int32_t)((pre_vx * sin_h + pre_vz * cos_h) >> 12);
-
-        /* uVar37 — front-axle-frame forward minus yaw-rate correction. */
-        int32_t raw_front = (int32_t)(((int64_t)sin_s * pre_vx + (int64_t)cos_s * pre_vz) >> 12);
-        int64_t yaw_term_q12 = (int64_t)sin_sr * front_weight * actor->angular_velocity_yaw;
-        int32_t yaw_term = (int32_t)((yaw_term_q12 >> 12) / 0x28c);
-        int32_t body_vlat = raw_front - yaw_term;
-
-        if (actor->surface_contact_flags != 0) {
-            /* Drivetrain dispatch per UpdatePlayerVehicleDynamics @ 0x00404030:
-             * sVar2=1 (RWD): CRGT(body_vlong) → long; lat=body_vlat (front-axle form)
-             * sVar2=2 (FWD): CRGT(body_vlat)  → lat;  long=body_vlong
-             * sVar2=3 (AWD): CRGT((long+lat)/2) → BOTH */
-            int32_t dt_layout = (int32_t)PHYS_S(actor, 0x76);
-            switch (dt_layout) {
-            case 1: {
-                int32_t crgt = compute_reverse_gear_torque(actor, body_vlong);
-                actor->longitudinal_speed = crgt;
-                actor->lateral_speed      = body_vlat;
-                break;
-            }
-            case 2: {
-                int32_t crgt = compute_reverse_gear_torque(actor, body_vlat);
-                actor->lateral_speed      = crgt;
-                actor->longitudinal_speed = body_vlong;
-                break;
-            }
-            case 3: {
-                int32_t crgt = compute_reverse_gear_torque(actor, (body_vlong + body_vlat) / 2);
-                actor->longitudinal_speed = crgt;
-                actor->lateral_speed      = crgt;
-                break;
-            }
-            default:
-                actor->longitudinal_speed = body_vlong;
-                actor->lateral_speed      = body_vlat;
-                break;
-            }
-        } else {
-            actor->longitudinal_speed = body_vlong;
-            actor->lateral_speed      = body_vlat;
-        }
-
-        if (actor->slot_index == 0 && (actor->frame_counter % 60u) == 0u) {
-            TD5_LOG_I(LOG_TAG,
-                      "body_speeds: long=%d lat=%d (vlong=%d vlat=%d yaw_term=%d)",
-                      actor->longitudinal_speed, actor->lateral_speed,
-                      body_vlong, body_vlat, yaw_term);
-        }
-    }
+     * This placeholder is preserved for code-archaeology traceability.
+     * todo: todo_scf_wheelspin_ordering.md */
 
     /* --- 14b. Velocity magnitude safety clamp ---
      * Without working wall collisions, cars leave the road immediately.
