@@ -6939,10 +6939,23 @@ static void update_vehicle_pose_from_physics(TD5_Actor *actor)
      * after a collision the chassis pose remains at the impulse-applied
      * attitude even when the wheels disagree with it.
      *
-     * Faithful port of the three Transform* helpers requires ports of
-     * AngleFromVector12 (0x0040A720, already done in precise-trig worktree)
-     * + FUN_0044817C + an inline FSQRT-rounding path. Deferred to a
-     * follow-up precise-port worktree (precise-00446030). */
+     * Helper status (2026-05-25): A (full solver, 0x00446030) is shipped as
+     * td5_physics_attitude_from_wheels (td5_physics.c near line 6054). B
+     * (0x00446140) and C (0x004461C0) are ported as pure infrastructure at
+     * the bottom of this file — see td5_physics_transform_track_vertex_by_matrix_b
+     * and td5_physics_transform_track_vertex_by_matrix_c. AngleFromVector12
+     * (0x0040A720) was already ported in the precise-trig worktree; FSQRT-
+     * rounding mirrors orig FILD/FSQRT/__ftol via (int32_t)sqrtf((float)...).
+     *
+     * The switch dispatch + 2nd-rebuild wire-up remains DEFERRED pending
+     * pool13 dynamic-diff validation. HIGH-risk per-tick attitude change
+     * (see re/analysis/oversight_triage_2026-05-24.md row
+     * "damage_lockout_switch_skipped"). To be applied in a follow-up
+     * precise-port worktree (precise-00446030). When that lands, the
+     * dispatch can call the three helpers above with no further decompile. */
+    /* The helpers themselves are defined at the bottom of this file with
+     * __attribute__((unused)) to suppress the unused-function warning until
+     * the switch dispatch lands. [PORT 2026-05-25 damage-lockout-helpers] */
 
     /* Second BuildRotationMatrixFromAngles call (0x004064E1).
      * Even without the switch writeback, the original UNCONDITIONALLY rebuilds
@@ -10680,6 +10693,154 @@ void td5_physics_integrate_scripted_motion(TD5_Actor *actor)
      * Either path calls ResetVehicleActorState. */
     if (actor->frame_counter > 0x3B)
         td5_physics_reset_actor_state(actor);
+}
+
+/* ========================================================================
+ * [PORT 2026-05-25 damage-lockout-helpers; orig 0x00446140 / 0x004461C0]
+ *
+ * Infrastructure for the future damage_lockout switch fix described in
+ *   re/analysis/oversight_triage_2026-05-24.md  (row "damage_lockout_switch_skipped")
+ * and the long TODO block in update_vehicle_pose_from_physics @ td5_physics.c
+ * (search "TODO (D3+D4 — damage_lockout switch").
+ *
+ * The switch dispatch in orig 0x004063A0 routes per damage_lockout value:
+ *   cases 0,1,2,4,6,8,9 -> TransformTrackVertexByMatrix   @ 0x00446030 (A — both axes)
+ *   cases 3, 12         -> TransformTrackVertexByMatrixC  @ 0x004461C0 (C — pitch only)
+ *   cases 5, 10         -> TransformTrackVertexByMatrixB  @ 0x00446140 (B — roll only)
+ *
+ * The A variant (full solver) is ALREADY ported as
+ * td5_physics_attitude_from_wheels (see td5_physics.c near line 6054). The
+ * B and C variants below are byte-faithful per-axis ports — IDENTICAL math
+ * to the corresponding half of the A solver. Confirmed by Ghidra
+ * disassembly diff at 0x00446140/0x004461C0 (B/C use the SAME numerator,
+ * span and AngleFromVector12 sequence as A's roll/pitch passes; the only
+ * difference is that they SKIP writing the inactive axis).
+ *
+ * These helpers are PURE (no actor mutation beyond *out) and UNUSED by the
+ * port until a future precise-port worktree (precise-00446030 per the
+ * OVERSIGHT triage row's recommended-fix) wires them into the switch at
+ * update_vehicle_pose_from_physics. They are exposed with TD5_UNUSED_FN so
+ * GCC does not warn on the dead reference. Do not call them from the
+ * per-tick attitude code without a runtime A/B test (HIGH risk; the author
+ * of the triage explicitly defers to a precise-port worktree).
+ *
+ * Algorithm shared with A (attitude_from_wheels):
+ *   wcp[12] = (int32_t*)&actor->wheel_contact_pos[0]      (4 vec3, stride 3)
+ *   sp[4]   = actor->wheel_suspension_pos
+ *   dz   = wcp[1] + wcp[4] - wcp[7] - wcp[10]
+ *        + sp[0] + sp[1] - sp[2] - sp[3]                  (roll numerator)
+ *   dx   = wcp[1] - wcp[4] - wcp[10] + wcp[7]
+ *        + sp[0] - sp[1] + sp[2] - sp[3]                  (pitch numerator)
+ *   crAr = wcp[0] + wcp[3] - wcp[6] - wcp[9]              (roll X span)
+ *   crBr = wcp[2] + wcp[5] - wcp[8] - wcp[11]             (roll Z span)
+ *   crAp = wcp[0] - wcp[3] + wcp[6] - wcp[9]              (pitch X span)
+ *   crBp = wcp[2] - wcp[5] + wcp[8] - wcp[11]             (pitch Z span)
+ *
+ * Then each numerator/span pair is SAR>>8, squared and summed, FILD+FSQRT
+ * (replicated via (int32_t)sqrtf((float)int_val) — RC=11 __ftol semantics),
+ * fed into AngleFromVector12 with the numerator NEGated. No gimbal-lock
+ * branch (variants B and C have NONE — straight-line code; the A variant
+ * also has none — gimbal handling is a property of the EULER decomp at
+ * 0x0042E030, not these per-axis solvers).
+ * ======================================================================== */
+
+/* `used` keeps the symbol in the object file even when no caller exists
+ * yet (the dispatch wire-up is deferred to a precise-port worktree, see
+ * the TODO at update_vehicle_pose_from_physics). `unused` suppresses the
+ * accompanying "defined but not used" warning. */
+#if defined(__GNUC__) || defined(__clang__)
+#  define TD5_UNUSED_FN __attribute__((used, unused))
+#else
+#  define TD5_UNUSED_FN
+#endif
+
+/* [CONFIRMED @ 0x00446140] TransformTrackVertexByMatrixB — roll-only solver.
+ *
+ * Signature mirrors orig: param_1 = out (write *out = roll int16),
+ * param_2 = wheel_contact_pos[] (int32_t* aliasing 4 vec3, stride 12B),
+ * param_3 = wheel_suspension_pos[0..3] (int32_t*).
+ *
+ * Disassembly diff vs A's roll pass (0x00446030 first half):
+ *   - ECX  = p[3] - p[9] - p[6] + p[0]                   (crAr — X span)
+ *   - EDX  = p[5] - p[11] - p[8] + p[2]                  (crBr — Z span)
+ *   - ESI  = p[4] - p[10] - p[7] - sp[3] - sp[2]
+ *          + p[1] + sp[1] + sp[0]                        (dz   — roll numerator)
+ *   - SAR>>8, IMUL, FILD/FSQRT, __ftol, NEG ESI, AngleFromVector12, MOV [param_1], AX
+ * Byte-identical to attitude_from_wheels's roll arm. */
+TD5_UNUSED_FN
+static void td5_physics_transform_track_vertex_by_matrix_b(
+    int16_t *out_roll,
+    const int32_t *wheel_contact_pos,   /* aliased int32_t[12] over 4 vec3 */
+    const int32_t *wheel_suspension_pos /* [4] */
+)
+{
+    const int32_t *wcp = wheel_contact_pos;
+    const int32_t *sp  = wheel_suspension_pos;
+
+    int32_t dz   = wcp[1] + wcp[4] - wcp[7] - wcp[10]
+                 + sp[0]  + sp[1]  - sp[2]  - sp[3];     /* roll numerator (ESI) */
+    int32_t crAr = wcp[0] + wcp[3] - wcp[6] - wcp[9];    /* X span      (ECX)   */
+    int32_t crBr = wcp[2] + wcp[5] - wcp[8] - wcp[11];   /* Z span      (EDX)   */
+
+    /* SAR>>8 each before squaring (matches 0x00446182/0x00446187/0x00446198). */
+    dz   >>= 8;
+    crAr >>= 8;
+    crBr >>= 8;
+
+    /* IMUL EAX,EDX + IMUL EDX,ECX + ADD → squared sum (0x0044618A-0x00446194). */
+    int32_t mag_sq = crBr * crBr + crAr * crAr;
+    /* FILD+FSQRT+__ftol at 0x0044619B-0x004461A6. (int32_t)sqrtf matches the
+     * RC=11 truncate-toward-zero semantics of orig __ftol. */
+    int32_t mag = (int32_t)sqrtf((float)mag_sq);
+
+    /* NEG ESI; PUSH ESI/EAX; CALL AngleFromVector12 (0x004461A7-0x004461AA). */
+    int32_t roll12 = AngleFromVector12(-dz, mag);
+    *out_roll = (int16_t)roll12;
+}
+
+/* [CONFIRMED @ 0x004461C0] TransformTrackVertexByMatrixC — pitch-only solver.
+ *
+ * Signature mirrors orig: param_1 = pointer such that *(short*)(param_1 + 4)
+ * is the pitch output. To keep the port helper PURE and unambiguous, the
+ * port exposes the pitch out-pointer DIRECTLY (caller does &display_angles.pitch).
+ *
+ * Disassembly diff vs A's pitch pass (0x00446030 second half):
+ *   - ECX  = p[6] - p[9] - p[3] + p[0]                   (crAp — X span)
+ *   - EDX  = p[8] - p[11] - p[5] + p[2]                  (crBp — Z span)
+ *   - ESI  = p[4] - p[10] - p[7] - sp[3] - sp[1]
+ *          + p[1] + sp[2] + sp[0]                        (dx   — pitch numerator,
+ *                                                         sign-equivalent to
+ *                                                         attitude_from_wheels)
+ *   - SAR>>8, IMUL, FILD/FSQRT, __ftol, NEG ESI, AngleFromVector12, MOV [param_1+4], AX
+ * Byte-identical to attitude_from_wheels's pitch arm. */
+TD5_UNUSED_FN
+static void td5_physics_transform_track_vertex_by_matrix_c(
+    int16_t *out_pitch,
+    const int32_t *wheel_contact_pos,   /* aliased int32_t[12] over 4 vec3 */
+    const int32_t *wheel_suspension_pos /* [4] */
+)
+{
+    const int32_t *wcp = wheel_contact_pos;
+    const int32_t *sp  = wheel_suspension_pos;
+
+    int32_t dx   = wcp[1] - wcp[4] + wcp[7] - wcp[10]
+                 + sp[0]  - sp[1]  + sp[2]  - sp[3];     /* pitch numerator (ESI) */
+    int32_t crAp = wcp[0] - wcp[3] + wcp[6] - wcp[9];    /* X span      (ECX)    */
+    int32_t crBp = wcp[2] - wcp[5] + wcp[8] - wcp[11];   /* Z span      (EDX)    */
+
+    /* SAR>>8 each before squaring (matches 0x00446202/0x00446207/0x00446218). */
+    dx   >>= 8;
+    crAp >>= 8;
+    crBp >>= 8;
+
+    /* IMUL+ADD → squared sum (0x0044620A-0x00446212). */
+    int32_t mag_sq = crBp * crBp + crAp * crAp;
+    /* FILD+FSQRT+__ftol at 0x0044621B-0x00446226. */
+    int32_t mag = (int32_t)sqrtf((float)mag_sq);
+
+    /* NEG ESI; PUSH ESI/EAX; CALL AngleFromVector12 (0x00446227-0x0044622A). */
+    int32_t pitch12 = AngleFromVector12(-dx, mag);
+    *out_pitch = (int16_t)pitch12;
 }
 
 /* ============================================================
