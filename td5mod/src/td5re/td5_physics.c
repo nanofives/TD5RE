@@ -1064,7 +1064,41 @@ void td5_physics_update_vehicle_actor(TD5_Actor *actor)
          * gravity+damping placeholder with the full byte-faithful chain:
          *   RefreshScriptedVehicleTransforms → world_pos seed from display_angles
          *   → UpdateVehicleEngineSpeedSmoothed → IntegrateScriptedVehicleMotion.
-         * The 59-frame reset gate lives inside integrate_scripted_motion. */
+         * The 59-frame reset gate lives inside integrate_scripted_motion.
+         *
+         * [DEFERRED 2026-05-25 traffic-scripted-recovery-latch; orig 0x00443ED0
+         *  + 0x00408082-840A heavy-impact branch in ApplyVehicleCollisionImpulse]
+         *  This dispatch is slot-agnostic and would handle traffic (slot>=6)
+         *  too IF the writer side were ported. It currently is NOT:
+         *    - Orig 0x4079C0 heavy-impact branch (impact_mag > 90000) writes a
+         *      random rotation matrix to +0xC0 (collision_spin_matrix), sets
+         *      actor->vehicle_mode = 1, and zeros the +0x338 frame_counter for
+         *      traffic slots (slot>=6). Port-side at td5_physics.c:3753-3777
+         *      ONLY processes slot_index<6 (racers receive angular scatter +
+         *      vertical bounce); traffic slots are skipped entirely.
+         *    - Orig 0x00409150 ResolveVehicleContacts gates the simple-vs-full
+         *      collision response on (gap_0376[3]==0 && gap_0376[6]<0xF) — i.e.
+         *      scripted-mode traffic uses ResolveSimpleActorSeparation. Port
+         *      lacks the scripted-mode branch entirely so this gate is moot.
+         *
+         *  Net effect: traffic actors in the port NEVER enter vehicle_mode==1.
+         *  They continue physics integration through td5_physics_update_traffic
+         *  even after a heavy hit. Behavioral cost: traffic doesn't visibly
+         *  spin/tumble on heavy impact, doesn't snap-respawn after 59 frames,
+         *  and doesn't escalate g_actor_traffic_recovery_stage from collisions
+         *  (only from heading-misalignment in route-plan). Recovery still
+         *  happens implicitly via queue recycle.
+         *
+         *  Future work (separate session — too risky to land alongside Tier 2):
+         *  port the 0x4079C0 traffic heavy-impact branch (random spin matrix
+         *  init via GetDamageRulesStub + vehicle_mode=1 + frame_counter=0),
+         *  then audit integrate_scripted_motion for traffic-safety (no wheel
+         *  ground-snap, no per-axle suspension calls — uses
+         *  ComputeActorWorldBoundingVolume for body-probe contacts only).
+         *  Reference re/analysis/subsystems/traffic-ai-system.md L213-240 and
+         *  re/analysis/global_naming/batch_03_traffic_init.md for the 12-slot
+         *  g_actor_traffic_recovery_stage state machine that gates route-plan
+         *  during recovery. */
         td5_physics_refresh_scripted_vehicle_transforms(actor);
 
         /* D11 — Scripted-mode world_pos seed [CONFIRMED @ 0x004067A8-67D9]:
@@ -9891,6 +9925,16 @@ void td5_physics_load_carparam(int slot, const uint8_t *data_268)
  * (td5_physics_update_vehicle_actor below). The branch previously had a
  * minimal-fidelity port (gravity + linear damping + frame-counter timeout);
  * this replaces it with the byte-faithful chain.
+ *
+ * Traffic-path note: orig 0x00443ED0 UpdateTrafficActorMotion has a SECOND
+ * caller of RefreshScriptedVehicleTransforms in its cVar3==1 branch (traffic
+ * scripted recovery). The port's dispatch at td5_physics_update_vehicle_actor
+ * is slot-agnostic on vehicle_mode==1 and WOULD service traffic too, but the
+ * upstream WRITER that sets vehicle_mode=1 + collision_spin_matrix on heavy
+ * traffic impact (orig 0x4079C0 heavy-impact branch for slot>=6) is NOT
+ * ported. As a result traffic slots never enter scripted recovery in the
+ * port — see DEFERRED block at the vehicle_mode==1 dispatch site for the
+ * full deferral rationale and future-work checklist. [2026-05-25]
  * ======================================================================== */
 
 /* Probe-depth scratch storage corresponding to orig DAT_0x00483958 (32 bytes,
