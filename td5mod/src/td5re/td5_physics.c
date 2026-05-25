@@ -70,6 +70,9 @@
 #include <string.h>  /* memset, memcpy */
 #include <math.h>    /* cos, sin */
 #include <stdlib.h>  /* abs */
+#include <stdio.h>   /* FILE/fopen/fprintf — used by the [Trace] TrafficEdgePen
+                      * CSV mirror at traffic_edge_pen (no-op when flag is 0).
+                      * [TRACE 2026-05-24 traffic-edge-pen-cluster] */
 
 #define LOG_TAG "physics"
 
@@ -5347,6 +5350,79 @@ static void apply_simple_track_surface_force(TD5_Actor *actor,
     actor->track_contact_flag = 0;
 }
 
+/* [TRACE 2026-05-24 traffic-edge-pen-cluster] Per-call context so the
+ * caller can tell traffic_edge_pen which call-site it is + which slot is
+ * being tested. Gated by g_td5.ini.trace_traffic_edge_pen (INI key
+ * [Trace] TrafficEdgePen=1). When disabled the trace path is a single
+ * compare-and-bail at the top of traffic_edge_pen — no measurable cost.
+ * Mirrors tools/_probes/traffic_edge_pen_probe.js capture for orig. */
+static struct {
+    const char *call_id;   /* "1a" inner / "1b" outer / "2" fwd-cp / "3" route-adv */
+    int slot;
+    int span_idx;
+    int sub_lane;
+    int span_type;
+    int lane_count;
+    int32_t rel_x;
+    int32_t rel_z;
+    int armed;             /* 1 = pen log is active for the next call */
+} s_tep_trace;
+
+static FILE *s_tep_trace_fp = NULL;
+
+static void tep_trace_ensure_open(void)
+{
+    if (s_tep_trace_fp) return;
+    s_tep_trace_fp = fopen("tools/frida_csv/traffic_edge_pen_port.csv", "w");
+    if (s_tep_trace_fp) {
+        fprintf(s_tep_trace_fp,
+            "sim_tick,call_id,slot,span_idx,sub_lane,span_type,lane_count,"
+            "A_x,A_z,B_x,B_z,rel_x,rel_z,pen_orig\n");
+        fflush(s_tep_trace_fp);
+    }
+}
+
+static void tep_trace_arm(const char *call_id, int slot,
+                          int span_idx, int sub_lane,
+                          int span_type, int lane_count,
+                          int32_t rel_x, int32_t rel_z)
+{
+    if (!g_td5.ini.trace_traffic_edge_pen) { s_tep_trace.armed = 0; return; }
+    s_tep_trace.call_id    = call_id;
+    s_tep_trace.slot       = slot;
+    s_tep_trace.span_idx   = span_idx;
+    s_tep_trace.sub_lane   = sub_lane;
+    s_tep_trace.span_type  = span_type;
+    s_tep_trace.lane_count = lane_count;
+    s_tep_trace.rel_x      = rel_x;
+    s_tep_trace.rel_z      = rel_z;
+    s_tep_trace.armed      = 1;
+}
+
+static void tep_trace_emit(int32_t v0_x, int32_t v0_z,
+                           int32_t v1_x, int32_t v1_z, int32_t pen)
+{
+    if (!s_tep_trace.armed) return;
+    s_tep_trace.armed = 0;
+    tep_trace_ensure_open();
+    if (!s_tep_trace_fp) return;
+    /* "sim_tick" here is the port's simulation_tick_counter (mirrors
+     * g_simTick @ 0x004AADA0 captured by the Frida orig probe). */
+    fprintf(s_tep_trace_fp,
+        "%u,%s,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d\n",
+        (unsigned)g_td5.simulation_tick_counter,
+        s_tep_trace.call_id,
+        s_tep_trace.slot,
+        s_tep_trace.span_idx,
+        s_tep_trace.sub_lane,
+        s_tep_trace.span_type,
+        s_tep_trace.lane_count,
+        (int)v0_x, (int)v0_z, (int)v1_x, (int)v1_z,
+        (int)s_tep_trace.rel_x, (int)s_tep_trace.rel_z,
+        (int)pen);
+    fflush(s_tep_trace_fp);
+}
+
 /* Compute signed perpendicular distance from span edge for traffic containment.
  *
  * The original (ProcessActorSegmentTransition, ProcessActorRouteAdvance) builds
@@ -5390,7 +5466,12 @@ static int32_t traffic_edge_pen(int32_t v0_x, int32_t v0_z,
     int32_t dot = (int32_t)(((int64_t)car_z * tan_z + (int64_t)car_x * tan_x) >> 12);
     int32_t car_size = (int32_t)(((int64_t)sin_hd * car_half_w +
                                    (int64_t)cos_hd * car_half_l) >> 12);
-    return dot - car_size;
+    int32_t pen = dot - car_size;
+
+    /* [TRACE 2026-05-24 traffic-edge-pen-cluster] mirror Frida orig probe */
+    tep_trace_emit(v0_x, v0_z, v1_x, v1_z, pen);
+
+    return pen;
 }
 
 /* ProcessActorSegmentTransition — port of 0x00407390.
@@ -5518,6 +5599,10 @@ static void process_traffic_segment_edge(TD5_Actor *actor, int slot)
         TD5_StripVertex *vr = td5_track_get_vertex(ri_idx);
         if (!vl || !vr) goto outer_test;
 
+        /* [TRACE 2026-05-24 traffic-edge-pen-cluster] arm call_id=1a (inner) */
+        tep_trace_arm("1a", slot, (int)actor->track_span_raw, sub_lane,
+                       span_type, lane_count, rel_x, rel_z);
+
         uint32_t edge_angle;
         int32_t pen = traffic_edge_pen(
             (int32_t)vl->x, (int32_t)vl->z,
@@ -5576,6 +5661,10 @@ outer_test:
         TD5_StripVertex *vl = td5_track_get_vertex(li_idx);
         TD5_StripVertex *vr = td5_track_get_vertex(ri_idx);
         if (!vl || !vr) return;
+
+        /* [TRACE 2026-05-24 traffic-edge-pen-cluster] arm call_id=1b (outer) */
+        tep_trace_arm("1b", slot, (int)actor->track_span_raw, sub_lane,
+                       span_type, lane_count, rel_x, rel_z);
 
         uint32_t edge_angle;
         int32_t pen = traffic_edge_pen(
@@ -5672,6 +5761,11 @@ static void process_traffic_route_advance(TD5_Actor *actor, int slot)
     int32_t rel_x = (actor->world_pos.x >> 8) - sp_wrap->origin_x;
     int32_t rel_z = (actor->world_pos.z >> 8) - sp_wrap->origin_z;
 
+    /* [TRACE 2026-05-24 traffic-edge-pen-cluster] arm call_id=3 (route-adv) */
+    tep_trace_arm("3", slot, (int)actor->track_span_raw,
+                   (int)(int8_t)actor->track_sub_lane_index,
+                   (int)sp_wrap->span_type, wrap_lanes, rel_x, rel_z);
+
     uint32_t edge_angle;
     int32_t pen = traffic_edge_pen(
         (int32_t)vl->x, (int32_t)vl->z,
@@ -5749,6 +5843,10 @@ static void process_traffic_forward_checkpoint_pass(TD5_Actor *actor, int slot)
     /* Actor position relative to sentinel span origin */
     int32_t rel_x = (actor->world_pos.x >> 8) - sp->origin_x;
     int32_t rel_z = (actor->world_pos.z >> 8) - sp->origin_z;
+
+    /* [TRACE 2026-05-24 traffic-edge-pen-cluster] arm call_id=2 (fwd-cp) */
+    tep_trace_arm("2", slot, (int)actor->track_span_raw, sub,
+                   (int)sp->span_type, lane_count, rel_x, rel_z);
 
     uint32_t edge_angle;
     int32_t pen = traffic_edge_pen(

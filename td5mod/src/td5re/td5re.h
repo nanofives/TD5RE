@@ -227,6 +227,12 @@ typedef struct TD5_GlobalState {
         int  race_trace_enabled;
         int  race_trace_slot;
         int  race_trace_max_frames;
+        /* [Trace] TrafficEdgePen=1 enables the per-call CSV mirror in
+         * td5_physics.c::traffic_edge_pen, paired with the Frida orig
+         * probe at tools/_probes/traffic_edge_pen_probe.js. CSV lands at
+         * tools/frida_csv/traffic_edge_pen_port.csv. Inert when 0.
+         * [TRACE 2026-05-24 traffic-edge-pen-cluster] */
+        int  trace_traffic_edge_pen;
         int  auto_throttle;         /* 1 = force full throttle for slot 0 */
         float trace_fast_forward;   /* Speed multiplier during trace capture.
                                      * 1.0 = real-time (default), 2.0 = 2x,

@@ -486,6 +486,10 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
      * cascade that produces the slot-0 steering 2x divergence at sim_tick=1. */
     g_td5.ini.experimental_bias_clamp =
         td5_ini_int("Trace", "ExperimentalBiasClamp", 0);
+    /* [TRACE 2026-05-24 traffic-edge-pen-cluster] CSV mirror of orig
+     * Frida probe at tools/_probes/traffic_edge_pen_probe.js. */
+    g_td5.ini.trace_traffic_edge_pen =
+        td5_ini_int("Trace", "TrafficEdgePen", 0);
 
     /* Whole-state snapshot (see re/analysis/whole_state_diff_design.md).
      * Independent of RaceTrace -- you can capture whole-state without CSVs. */
