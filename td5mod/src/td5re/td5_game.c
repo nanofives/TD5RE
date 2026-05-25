@@ -1012,22 +1012,92 @@ int32_t td5_game_get_result_secondary(int slot)
 }
 
 /* Returns the top_speed for a given slot (in internal units).
- * [CONFIRMED: results entry +0x18 = top_speed] */
+ * [CONFIRMED: results entry +0x18 = top_speed]
+ *
+ * [FIX 2026-05-25 hud-metrics; orig 0x004066E2 / 0x00422061]
+ *   ActorRaceMetric.top_speed has ZERO writers in the port (dead field).
+ *   Orig BuildResultsTable @ 0x0040A8C0 reads peak from actor +0x330
+ *   (psVar7[0x155]) and orig results-screen @ 0x00422061 reads from
+ *   accumulated_distance / timing_frame_counter table separately.
+ *   The actual peak-speed accumulator IS populated on actor->peak_speed
+ *   (+0x330) by td5_physics_update_vehicle_actor:1015. Fall back to the
+ *   live actor field so the HUD shows the correct value even when the
+ *   stale s_metrics/s_results pair is zero. */
 int32_t td5_game_get_result_top_speed(int slot)
 {
     if (slot < 0 || slot >= TD5_MAX_RACER_SLOTS) return 0;
     int32_t v = (int32_t)s_results[slot].top_speed;
     if (v == 0) v = (int32_t)s_metrics[slot].top_speed;
+    if (v == 0) {
+        TD5_Actor *actor = td5_game_get_actor(slot);
+        if (actor) v = (int32_t)actor->peak_speed;
+    }
     return v;
 }
 
 /* Returns the average speed accumulator (raw) for a given slot.
  * Port uses s_metrics.average_speed_raw for the actor avg speed.
- * [CONFIRMED: DAT_0048d994 in ScreenPostRaceNameEntry case 4] */
+ * [CONFIRMED: DAT_0048d994 in ScreenPostRaceNameEntry case 4]
+ *
+ * [FIX 2026-05-25 hud-metrics; orig 0x0040672B/0x00422001]
+ *   ActorRaceMetric.average_speed_raw has ZERO writers in the port (dead
+ *   field). Orig actor +0x332 (average_speed_metric) IS populated by
+ *   td5_physics_update_vehicle_actor:1032 as
+ *     accumulated_distance / timing_frame_counter.
+ *   Fall back to the live actor field so the HUD avg-speed reading is
+ *   non-zero even when build_results_table never ran (DNF/quit). */
 int32_t td5_game_get_result_avg_speed(int slot)
 {
     if (slot < 0 || slot >= TD5_MAX_RACER_SLOTS) return 0;
-    return s_metrics[slot].average_speed_raw;
+    int32_t v = s_metrics[slot].average_speed_raw;
+    if (v == 0) {
+        TD5_Actor *actor = td5_game_get_actor(slot);
+        if (actor) v = (int32_t)actor->average_speed_metric;
+    }
+    return v;
+}
+
+/* Returns the highest (best) position achieved during the race for slot.
+ * [CONFIRMED @ 0x00422216 DrawRaceDataSummaryPanel reads actor+0x380 grip_reduction]
+ *
+ * The orig overloads actor +0x380 as the running MIN of race_position
+ * observed during the race; UpdateVehicleActor @ 0x00406823 clamps
+ *   grip_reduction = min(grip_reduction, race_position)
+ * so the field naturally tracks "best position ever seen".
+ *
+ * [FIX 2026-05-25 hud-metrics; orig 0x00422216]
+ *   Port's frontend previously printed "-" placeholder for HIGHEST_POSITION;
+ *   wire it to actor->grip_reduction. Returns 0-based (0 = 1st place);
+ *   caller adds +1 for display. */
+int td5_game_get_highest_position(int slot)
+{
+    if (slot < 0 || slot >= TD5_MAX_RACER_SLOTS) return -1;
+    TD5_Actor *actor = td5_game_get_actor(slot);
+    if (!actor) return -1;
+    return (int)actor->grip_reduction;
+}
+
+/* Returns wanted_kills (cop-chase arrests) for slot.
+ * [CONFIRMED @ 0x0040AA0F BuildResultsTable: psVar7[0x17f] = actor+0x384]
+ *
+ * Orig stores arrest count in actor->special_encounter_state (+0x384),
+ * incremented by td5_ai_wanted_cop_hit on first-hit branch (port
+ * td5_ai.c:447 after 2026-05-24 OVERSIGHT fix).
+ *
+ * [FIX 2026-05-25 hud-metrics; orig 0x0040AA0F]
+ *   Port's frontend previously printed "0" placeholder for ARRESTS; wire
+ *   it to the actor field directly (matches orig BuildResultsTable read).
+ *   ActorRaceMetric.wanted_kills has ZERO writers (dead field). */
+int td5_game_get_wanted_kills(int slot)
+{
+    if (slot < 0 || slot >= TD5_MAX_RACER_SLOTS) return 0;
+    int32_t v = (int32_t)s_results[slot].wanted_kills;
+    if (v == 0) v = (int32_t)s_metrics[slot].wanted_kills;
+    if (v == 0) {
+        TD5_Actor *actor = td5_game_get_actor(slot);
+        if (actor) v = actor->special_encounter_state & 0xFF;
+    }
+    return v;
 }
 
 /* Returns the race order slot index at position 'pos' (0=1st, ...).
@@ -4234,6 +4304,7 @@ static void build_results_table(void) {
     for (i = 0; i < TD5_MAX_RACER_SLOTS; i++) {
         ActorRaceMetric *m = &s_metrics[i];
         RaceResultEntry *r = &s_results[i];
+        TD5_Actor *actor_i = td5_game_get_actor(i);
 
         r->slot_flags = (s_slot_state[i].state != 3) ? 1 : 0;
         r->slot_index = (uint8_t)i;
@@ -4246,10 +4317,21 @@ static void build_results_table(void) {
 
         r->primary_metric   += m->post_finish_metric_base;
         r->secondary_metric += m->accumulated_score;
-        r->wanted_kills      = (uint8_t)m->wanted_kills;
-        r->speed_bonus       += m->speed_bonus;
-        if (m->top_speed > r->top_speed) {
-            r->top_speed = (int16_t)m->top_speed;
+        /* [FIX 2026-05-25 hud-metrics; orig 0x0040AA0F BuildResultsTable]
+         *   Orig reads peak_speed/avg_speed/wanted_kills from the ACTOR
+         *   (psVar7[0x155]=actor+0x330, psVar7[0x156]=actor+0x332,
+         *   psVar7[0x17f]=actor+0x384). Port's s_metrics mirrors are dead
+         *   fields (zero writers). Read directly from actor to match. */
+        if (actor_i) {
+            r->wanted_kills = (uint8_t)(actor_i->special_encounter_state & 0xFF);
+            r->speed_bonus  += actor_i->average_speed_metric;
+            if (actor_i->peak_speed > r->top_speed)
+                r->top_speed = actor_i->peak_speed;
+        } else {
+            r->wanted_kills = (uint8_t)m->wanted_kills;
+            r->speed_bonus += m->speed_bonus;
+            if (m->top_speed > r->top_speed)
+                r->top_speed = (int16_t)m->top_speed;
         }
 
         /* Award position points based on game type */

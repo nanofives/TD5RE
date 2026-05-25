@@ -2359,6 +2359,19 @@ static void frontend_begin_text_input(char *buffer, int capacity) {
     s_text_input_ctx.blink_tick = td5_plat_time_ms();
     s_text_input_ctx.confirm_state = 0;
     s_text_input_state = 1;
+    /* [FIX 2026-05-25 frontend-name-input] Drain any stale GetAsyncKeyState
+     * latched bits for navigation keys so the Enter that selected the OK
+     * button on the prior screen (Race Results) does not immediately confirm
+     * the freshly-opened name input. GetAsyncKeyState(VK,&1) reports the
+     * "depressed since last call" bit; without this drain, the very first
+     * state-2 frame sees Enter still latched and calls
+     * frontend_commit_text_input() before the user can type a character.
+     * The 'PLAYER' default then becomes the auto-submitted name and the
+     * screen flashes off so fast it reads as 'empty and auto-submits'. */
+    (void)GetAsyncKeyState(VK_RETURN);
+    (void)GetAsyncKeyState(VK_SPACE);
+    (void)GetAsyncKeyState(VK_BACK);
+    for (int vk = 0x30; vk <= 0x5A; vk++) (void)GetAsyncKeyState(vk);
     TD5_LOG_I(LOG_TAG, "Text input started: capacity=%d initial=\"%s\"", capacity, buffer);
 }
 
@@ -3151,12 +3164,26 @@ int td5_frontend_display_loop(void) {
     /* 8. Cheat code detection */
     frontend_update_cheat_codes();
 
-    /* 9. Attract mode timeout: 60 seconds of idle on main menu -> demo screen */
-    if (s_current_screen == TD5_SCREEN_MAIN_MENU) {
+    /* 9. Attract mode timeout: 60 seconds of idle on main menu -> demo screen.
+     * [FIX 2026-05-25 frontend-attract-mode] Gate on s_anim_complete AND
+     * s_inner_state == 4 (the interactive state) so the timer cannot fire
+     * while the menu is still sliding in. Without this gate, a fresh boot's
+     * idle-since-init window combined with the LOCALIZATION_INIT -> MAIN_MENU
+     * jump's frontend_note_activity() reset is fine on first entry, but
+     * RETURNING to MAIN_MENU from another screen could land mid-slide with a
+     * stale-large delta if the user was idle on a sub-screen for >60s.
+     * Also emit a clear log when the attract fires so we can see whether the
+     * trigger actually happens (issue #4: 'demo not auto-launching'). */
+    if (s_current_screen == TD5_SCREEN_MAIN_MENU &&
+        s_anim_complete && s_inner_state == 4) {
         uint32_t now = td5_plat_time_ms();
-        if ((now - s_attract_idle_timestamp) >= 60000) {
+        uint32_t idle_ms = now - s_attract_idle_timestamp;
+        if (idle_ms >= 60000u) {
             /* Pick a random track for the demo without corrupting the player's selection */
             s_attract_track = rand() % 8;
+            TD5_LOG_I(LOG_TAG,
+                      "Attract timer fired: idle_ms=%u -> ATTRACT_MODE (demo track=%d)",
+                      idle_ms, s_attract_track);
             td5_frontend_set_screen(TD5_SCREEN_ATTRACT_MODE);
         }
     }
@@ -4868,10 +4895,19 @@ static void frontend_render_race_results_overlay(float sx, float sy) {
                 snprintf(val_buf, sizeof(val_buf), "DNF");
             break;
         }
-        case LBL_HIGHEST_POSITION:
-            /* Original reads from cup-progression state not surfaced in port. */
-            snprintf(val_buf, sizeof(val_buf), "-");
+        case LBL_HIGHEST_POSITION: {
+            /* [FIX 2026-05-25 hud-metrics; orig 0x00422216]
+             *   Orig DrawRaceDataSummaryPanel reads (byte)actor+0x380
+             *   (grip_reduction overloaded as "best position seen") into
+             *   the position-name table at 0x4660b4. Wire the port to
+             *   the same actor field via td5_game_get_highest_position. */
+            int hp = td5_game_get_highest_position(focus_slot);
+            if (hp >= 0 && hp < TD5_MAX_RACER_SLOTS)
+                snprintf(val_buf, sizeof(val_buf), "%d", hp + 1);
+            else
+                snprintf(val_buf, sizeof(val_buf), "-");
             break;
+        }
         case LBL_TOTAL_TIME: {
             int32_t t = td5_game_get_race_timer(focus_slot, 0);
             if (t > 0) frontend_format_score_time(val_buf, sizeof(val_buf), t, 0);
@@ -4890,8 +4926,13 @@ static void frontend_render_race_results_overlay(float sx, float sy) {
             break;
         }
         case LBL_ARRESTS:
-            /* DAT_004660cc / wanted_kills not surfaced via accessor. */
-            snprintf(val_buf, sizeof(val_buf), "0");
+            /* [FIX 2026-05-25 hud-metrics; orig 0x0040AA0F]
+             *   Orig BuildResultsTable copies actor +0x384 (low byte) into
+             *   s_results +0x10 (wanted_kills); results-screen reads it
+             *   via byte ptr [0x0048d998]. Wire to td5_game_get_wanted_kills
+             *   which falls back to actor->special_encounter_state. */
+            snprintf(val_buf, sizeof(val_buf), "%d",
+                     td5_game_get_wanted_kills(focus_slot));
             break;
         case LBL_POINTS:
             snprintf(val_buf, sizeof(val_buf), "%d",

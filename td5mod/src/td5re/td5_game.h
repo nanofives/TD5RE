@@ -113,6 +113,8 @@ int     td5_game_get_race_order(int pos);         /* slot index at finish positi
 int     td5_game_slot_is_finished(int slot);      /* 1 if post_finish_metric_base != 0 */
 int     td5_game_get_finish_position(int slot);   /* 0-based finish position (0 = 1st), -1 if not set */
 int32_t td5_game_get_best_lap_time(int slot);     /* best lap ticks, lap-type tracks */
+int     td5_game_get_highest_position(int slot);  /* best (lowest) race_position seen this race; 0=1st, -1 if invalid */
+int     td5_game_get_wanted_kills(int slot);       /* cop-chase arrest count (actor->special_encounter_state low byte) */
 
 /* Re-sort s_results in place using the current game_type's metric.
  * Called from Screen [24] case 0 to mirror RunRaceResultsScreen behaviour.
