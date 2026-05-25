@@ -3667,7 +3667,17 @@ static void tick_pending_finish_timer(int slot) {
      * [CONFIRMED @ 0x0040A2DC: if (g_specialEncounterType != 0 && ...).] */
     if (g_special_encounter == 0) return;  /* non-P2P -> no decrement */
     if (s_active_checkpoint.checkpoint_count == 0) return;
-    if (s_slot_state[slot].state != 1) return;
+    /* state==1 gate per orig 0x0040A2DC. Port debug knob PlayerIsAI=1 forces
+     * slot 0 to state==0 (mirrors orig attract-mode AI write at 0x0042ACCF)
+     * but we still want the P2P checkpoint timer to tick down — otherwise
+     * the HUD shows a frozen value forever and the race never finishes via
+     * the timer-expiry path. Accept state==0 only for slot 0 under PlayerIsAI;
+     * all other slots must be state==1 (racing). */
+    if (s_slot_state[slot].state != 1) {
+        if (!(slot == 0 && g_td5.ini.player_is_ai && s_slot_state[slot].state == 0)) {
+            return;
+        }
+    }
     if (g_cameraTransitionActive != 0) return;          /* gRaceCameraTransitionGate */
     if (g_replay_mode != 0) return;                     /* g_replayModeFlag */
     if (s_slot_state[slot].companion_1 != 0) return;  /* already finished */
@@ -4439,18 +4449,31 @@ void td5_game_begin_fade_out(int param) {
     s_fade_accumulator = 0.0f;
 
     /* [CONFIRMED @ 0x0042cc30..0x0042cc73 BeginRaceFadeOutTransition; Tier 4
-     * port 2026-05-24] Radial-pulse gate. Orig checks:
+     * port 2026-05-24, REGR-FIX 2026-05-25] Radial-pulse gate. Orig checks:
      *   param_1 == 1 && g_humanPlayerCount == 1 && actor+0x383 == 0 &&
      *   !network && selectedGameType == 0 && !drag
-     * Port port-time gate uses split_screen_mode == 0 as the equivalent of
-     * (param_1==1 && human_count==1) since both call sites supply
-     * split_screen_mode. The actor+0x383 (per-slot dead/disabled) check is
-     * inferred from slot 0 active status. */
+     *
+     * actor+0x383 is race_position (0 = 1st place). The orig pulse is the
+     * VICTORY burst, fired only when the player finishes 1st in a normal
+     * single-player single-race (no split-screen, no network, no drag, no
+     * cop chase). Without this check the pulse fired on every single-player
+     * race exit (including losing and pause-menu Exit), producing a
+     * "star fade" that played simultaneously with the normal black wipe.
+     *
+     * Port mapping: split_screen_mode==0 covers the (param_1==1 &&
+     * g_humanPlayerCount==1) orig gate -- both call sites in
+     * td5_game_run_race_frame pass either 0 (pause-exit) or
+     * g_td5.split_screen_mode. We additionally require slot-0 race_position
+     * == 0 so the pulse only triggers on a 1st-place finish, matching
+     * orig's actor+0x383 check. */
     if (param == 0 &&
         !g_td5.network_active &&
         g_td5.game_type == TD5_GAMETYPE_SINGLE_RACE &&
         !g_td5.drag_race_enabled) {
-        td5_hud_reset_radial_pulse();
+        TD5_Actor *player = td5_game_get_actor(0);
+        if (player && player->race_position == 0 && !s_pause_exit_pending) {
+            td5_hud_reset_radial_pulse();
+        }
     }
 
     switch (param) {
