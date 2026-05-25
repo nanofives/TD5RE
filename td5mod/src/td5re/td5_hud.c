@@ -3695,19 +3695,33 @@ void td5_hud_update_wanted_damage_indicator(int actor_slot)
      * with the car body and gets occluded correctly when the car ducks
      * behind track geometry. */
 
-    /* Pre-fetch a usable atlas page — reuse the BRAKED sprite as a flat
-     * white-keyed quad source. TODO: switch to a dedicated POLICEBAR atlas
-     * entry once the orig damage-bar texture is identified. */
-    TD5_AtlasEntry *bar_atlas = td5_asset_find_atlas_entry(NULL, "BRAKED");
-    int bar_page = bar_atlas ? bar_atlas->texture_page : -1;
-    if (bar_page <= 0) return; /* no atlas — silently skip until BRAKED loads */
+    /* [FIX 2026-05-24 damage-bar-atlas; orig 0x0043d4e0]
+     * Orig InitializeWantedHudOverlays @ 0x0043d2d0 calls
+     *   FindArchiveEntryByName(..., "DAMAGE")   -> 0x004beae0 frame quad
+     *   FindArchiveEntryByName(..., "DAMAGEB1") -> 0x004bf448 fill  quad
+     * (confirmed via Ghidra string refs s_DAMAGE_004748b8 + s_DAMAGEB1_004748ac;
+     *  both keys present in re/assets/static/static.hed alongside DAMAGEB2).
+     * The port samples a 1-pixel UV from each entry so the bound page just
+     * needs to be the page that actually contains the sprite; using the
+     * correct entries also makes the bar pick up the right tpage transparency
+     * preset at bind time. */
+    TD5_AtlasEntry *frame_atlas = td5_asset_find_atlas_entry(NULL, "DAMAGE");
+    TD5_AtlasEntry *fill_atlas  = td5_asset_find_atlas_entry(NULL, "DAMAGEB1");
+    int frame_page = frame_atlas ? frame_atlas->texture_page : -1;
+    int fill_page  = fill_atlas  ? fill_atlas->texture_page  : -1;
+    if (frame_page <= 0 || fill_page <= 0)
+        return; /* atlas missing DAMAGE/DAMAGEB1 — silently skip */
 
-    int tw = 256, th = 256;
-    td5_plat_render_get_texture_dims(bar_page, &tw, &th);
-    /* Sample a single white-ish pixel at the atlas entry's top-left+0.5
-     * — gives a solid colored quad without bleed from neighbors. */
-    float u = ((float)bar_atlas->atlas_x + 1.5f) / (float)tw;
-    float v = ((float)bar_atlas->atlas_y + 1.5f) / (float)th;
+    int frame_tw = 256, frame_th = 256;
+    int fill_tw  = 256, fill_th  = 256;
+    td5_plat_render_get_texture_dims(frame_page, &frame_tw, &frame_th);
+    td5_plat_render_get_texture_dims(fill_page,  &fill_tw,  &fill_th);
+    /* Sample a single pixel at each atlas entry's top-left+0.5 — gives a
+     * solid colored quad without bleed from neighbours. */
+    float frame_u = ((float)frame_atlas->atlas_x + 1.5f) / (float)frame_tw;
+    float frame_v = ((float)frame_atlas->atlas_y + 1.5f) / (float)frame_th;
+    float fill_u  = ((float)fill_atlas->atlas_x  + 1.5f) / (float)fill_tw;
+    float fill_v  = ((float)fill_atlas->atlas_y  + 1.5f) / (float)fill_th;
 
     /* --- Quad 1: outer frame (white) --- */
     {
@@ -3721,12 +3735,12 @@ void td5_hud_update_wanted_damage_indicator(int actor_slot)
             q[i].rhw      = rhw;
             q[i].diffuse  = 0xFFFFFFFFu;   /* white frame */
             q[i].specular = 0;
-            q[i].tex_u    = u;
-            q[i].tex_v    = v;
+            q[i].tex_u    = frame_u;
+            q[i].tex_v    = frame_v;
         }
         uint16_t idx[6] = { 0, 1, 2, 1, 3, 2 };
         td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_POINT);
-        td5_plat_render_bind_texture(bar_page);
+        td5_plat_render_bind_texture(frame_page);
         td5_plat_render_draw_tris(q, 4, idx, 6);
     }
 
@@ -3760,12 +3774,12 @@ void td5_hud_update_wanted_damage_indicator(int actor_slot)
             q[i].rhw      = rhw;
             q[i].diffuse  = fill_color;
             q[i].specular = 0;
-            q[i].tex_u    = u;
-            q[i].tex_v    = v;
+            q[i].tex_u    = fill_u;
+            q[i].tex_v    = fill_v;
         }
         uint16_t idx[6] = { 0, 1, 2, 1, 3, 2 };
         td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_POINT);
-        td5_plat_render_bind_texture(bar_page);
+        td5_plat_render_bind_texture(fill_page);
         td5_plat_render_draw_tris(q, 4, idx, 6);
     }
 
