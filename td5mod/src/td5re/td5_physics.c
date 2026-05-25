@@ -1303,9 +1303,11 @@ void td5_physics_update_vehicle_actor(TD5_Actor *actor)
  *         (SAR-RZ-6 then SAR-RZ-15).
  *
  * RESIDUAL KNOWN DIVERGENCES (documented in re/analysis/pilot_00404030_audit.md):
- *   D4   All 4 wheels read same surface_type_chassis instead of per-wheel
- *        GetTrackSegmentSurfaceType (structural — mixed-surface segments
- *        only; upstream-blocked on RefreshVehicleWheelContactFrames audit).
+ *   D4   CLOSED 2026-05-24 — per-wheel GetTrackSegmentSurfaceType restored
+ *        via td5_track_get_surface_type(actor, 0..3) reading body_probes
+ *        (orig 0x00404030 byte-faithful for the 4 wheel calls). Chassis
+ *        cache write remains via refresh_wheel_contact_frames (port-side
+ *        deviation from orig's +0x80 chassis probe; out of scope here).
  *   D3,D11,D15  audited MATCH — no divergence.
  *
  * Most known wheel_load_accum / lateral_bias divergences are UPSTREAM
@@ -1328,13 +1330,28 @@ void td5_physics_update_player(TD5_Actor *actor)
 
     int32_t i;
 
-    /* --- 1. Surface type probes (5: chassis + 4 wheels) --- */
+    /* --- 1. Surface type probes (5: chassis + 4 wheels) ---
+     *
+     * [FIX 2026-05-24 D4-audit-residual: per-wheel surface probe restored;
+     *  orig 0x00404030] Original calls GetTrackSegmentSurfaceType @ 0x0042F100
+     *  five times: chassis (from +0x80 track_span block) + body_probes[0..3]
+     *  at +0x00/+0x10/+0x20/+0x30 (FL/FR/RL/RR corners). Mixed-surface
+     *  segments (tarmac/grass transitions, half-on/half-off) now give each
+     *  wheel its own surface friction / grip coefficient.
+     *
+     *  Port helper `td5_track_get_surface_type(actor, probe_index)` maps
+     *  probe_index 0..3 -> body_probes (orig's per-wheel corner probes),
+     *  4..7 -> wheel_probes. Orig uses body probes, so we pass 0..3.
+     *
+     *  Chassis surface (`surface_center`) remains the cached value written
+     *  upstream by refresh_wheel_contact_frames (orig 0x00403720). That
+     *  cache currently picks the first valid wheel_probes[i] (port-side
+     *  divergence from orig's chassis-block probe at +0x80) — left as-is
+     *  since the body_probes-based per-wheel pass is the in-scope D4 fix. */
     uint8_t surface_center = actor->surface_type_chassis;
     uint8_t surface_wheel[4];
-    /* In the full build, each wheel calls GetTrackSegmentSurfaceType.
-     * Here we use the chassis surface type as a fallback for all wheels. */
     for (i = 0; i < 4; i++)
-        surface_wheel[i] = surface_center;
+        surface_wheel[i] = (uint8_t)td5_track_get_surface_type(actor, i);
 
     /* --- 2. Surface normal and gravity --- */
     td5_physics_compute_surface_gravity(actor);
