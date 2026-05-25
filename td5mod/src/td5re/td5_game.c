@@ -4054,21 +4054,41 @@ static void sync_actor_race_metrics(int slot)
  * ======================================================================== */
 
 static void accumulate_speed_bonus(int slot) {
+    /* [FIX 2026-05-24 OVERSIGHT: dead-fields; orig 0x0040A3D0 AccumulateVehicleSpeedBonusScore]
+     *
+     * Previous implementation read m->forward_speed / m->skid_factor /
+     * m->contact_count which are NEVER WRITTEN anywhere in the codebase
+     * (grep-confirmed: only declared in struct + read here). Effective no-op.
+     *
+     * Rewrite per orig 0x0040A3D0 to read directly from actor fields:
+     *   gate: finish_time==0, surface_contact_flags==0, lateral_speed>0,
+     *         (sim_tick_counter & 3) == 0
+     *   bonus = (lateral_speed >> 15) - (race_position >> 1)
+     *   clamp 0 if surface_type_chassis > 15 OR bonus < 0
+     *   slot-0 only: bonus = 0 if track_span_normalized < track_span_high_water
+     *   accumulate into actor->clean_driving_score (+0x2C8).
+     */
+    TD5_Actor *actor = td5_game_get_actor(slot);
     ActorRaceMetric *m = &s_metrics[slot];
 
-    /* Only accumulate for unfinished actors, every 4th tick */
-    if (s_slot_state[slot].companion_1 != 0) return;
-    if (m->forward_speed <= 0) return;
+    if (!actor) return;
+    if (s_slot_state[slot].companion_1 != 0) return;       /* finished */
+    if (actor->finish_time != 0) return;                    /* finished (mirrors orig actor+0x328 gate) */
+    if (actor->surface_contact_flags != 0) return;          /* in contact / airborne flag set */
+    if (actor->lateral_speed <= 0) return;
     if ((g_td5.simulation_tick_counter & 3) != 0) return;
 
-    int bonus = (m->forward_speed >> 15) - (m->skid_factor >> 1);
-    if (m->contact_count > 15 || bonus < 0) bonus = 0;
+    int bonus = (actor->lateral_speed >> 15) - ((int)actor->race_position >> 1);
+    if (actor->surface_type_chassis > 15 || bonus < 0) bonus = 0;
 
-    /* Human player: no bonus if behind checkpoint */
-    if (s_slot_state[slot].state == 1 && m->normalized_span < m->checkpoint_index) {
+    /* Slot-0 only: no bonus if behind high-water mark (orig per-slot gate). */
+    if (slot == 0 && actor->track_span_normalized < actor->track_span_high_water) {
         bonus = 0;
     }
 
+    actor->clean_driving_score += bonus;
+    /* Keep per-slot mirror so HUD/serialization paths that already read
+     * m->accumulated_score continue to function. */
     m->accumulated_score += bonus;
 }
 

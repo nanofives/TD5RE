@@ -234,6 +234,10 @@ int   SinFixed12bit(int angle);
 int   AngleFromVector12(int x, int z);
 void  MultiplyRotationMatrices3x3(float *A, float *B, float *out);
 void  TransformVector3ByBasis(float *matrix, void *vec, int *out);
+/* [FIX 2026-05-24 OVERSIGHT: case_1_2_basis_transform; orig 0x0042DB40]
+ * Same math as TransformVector3ByBasis but clamps each output coordinate
+ * to int16 range via (int)(short) cast (matches orig __ftol + (int)(short)). */
+void  ConvertFloatVec3ToIntVec3(float *matrix, void *vec, int *out);
 void  BuildRotationMatrixFromAngles(float *out, short *angles);
 void  ConvertFloatVec3ToShortAngles(short *in, short *out);
 void  LoadRenderRotationMatrix(float *matrix);

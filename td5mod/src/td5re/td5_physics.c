@@ -40,6 +40,7 @@
 #include "td5_track.h"
 #include "td5_render.h"   /* td5_render_get_vehicle_mesh */
 #include "td5_sound.h"    /* td5_sound_play_at_position (Tier 2 recovery SFX) */
+#include "td5_input.h"    /* td5_input_ff_play_effect (wall impact FF) */
 #include "td5_game.h"     /* td5_game_get_total_actor_count, td5_game_is_wanted_mode */
 #include "td5_platform.h"
 #include "td5_trace.h"    /* inner-tick physics_trace stages */
@@ -547,6 +548,51 @@ void td5_physics_wall_response(TD5_Actor *actor, int32_t wall_angle,
          * [CONFIRMED @ 0x406d7e/0x406e4e on the side-encoding mapping] */
         if (side >= 0)
             actor->track_contact_flag = (uint8_t)(side + 1);
+
+        /* [FIX 2026-05-24 OVERSIGHT: wall_impact_sfx_ff_missing; orig 0x00406B70..0x00406CB7]
+         * After computing the wall impulse, the orig plays a sound + FF rumble
+         * if v_perp (= iVar10) > 0x3200. Two SFX tiers based on impulse
+         * magnitude; FF rumble channel selected by route heading delta.
+         * Visual / audio only — no sim feedback. */
+        if (v_perp > 0x3200) {
+            int32_t pitch_arg = v_perp - 0x2000;
+            if (pitch_arg < 0x400) pitch_arg = 0x400;
+            else if (pitch_arg > 0x800) pitch_arg = 0x800;
+            int variant = (v_perp < 0x19001) ? 0x16 : 0x1b;
+            int mag     = (v_perp < 0x19001) ? 0x5622 : 0x2198;
+            int volume  = (v_perp < 0x19001) ? 1 : 4;
+            int32_t wpos[3] = { actor->world_pos.x, actor->world_pos.y, actor->world_pos.z };
+            /* Port td5_sound_play_at_position param order matches orig:
+             * (variant, pitch, mag, &pos, volume_or_variant_count). */
+            td5_sound_play_at_position(variant, pitch_arg, mag, wpos, volume);
+
+            /* DecayUltimateVariantTimer(actor, 1) [orig 0x0040A440]: inlined to
+             * match existing call sites at td5_physics.c:5410/5468. */
+            if (g_td5.special_encounter_enabled == 4 && actor->finish_time == 0) {
+                if (actor->clean_driving_score > 0) actor->clean_driving_score -= 1;
+                if (actor->clean_driving_score < 0) actor->clean_driving_score  = 0;
+            }
+
+            /* Force-feedback rumble: magnitude = (v_perp + sign-bit&3) >> 2,
+             * capped at 100000. Channel chosen by route heading delta XOR'd
+             * with the contact side when |heading_delta - 0x800| < 0x400. */
+            int32_t ff_mag = (v_perp + ((v_perp >> 31) & 3)) >> 2;
+            if (ff_mag > 99999) ff_mag = 100000;
+
+            extern void *g_route_data;
+            uint32_t hd = 0;
+            if (g_route_data) {
+                hd = td5_compute_heading_delta(
+                    (uint8_t *)g_route_data + (size_t)actor->slot_index * 0x47);
+            }
+            uint32_t local_flags = (side < 0) ? 0u : (uint32_t)(side + 1);
+            if ((int32_t)hd > 0x3FF && (int32_t)hd < 0xC00) local_flags ^= 3;
+            if (local_flags == 1) {
+                td5_input_ff_play_effect((int)actor->slot_index, 2, ff_mag, ff_mag * 10);
+            } else if (local_flags == 2) {
+                td5_input_ff_play_effect((int)actor->slot_index, 1, ff_mag, ff_mag * 10);
+            }
+        }
     }
 
     TD5_LOG_I(LOG_TAG,

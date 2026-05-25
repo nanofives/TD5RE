@@ -25,6 +25,7 @@
 #include "td5_platform.h"
 #include "td5_sound.h"
 #include "td5_trace.h"
+#include "td5_game.h"   /* td5_game_get_wanted_target_slot, td5_game_is_wanted_mode */
 #include "td5re.h"
 #include <string.h>
 #include <math.h>
@@ -438,26 +439,105 @@ int td5_ai_is_encounter_active(int slot) {
     return g_encounter_active[slot] != 0;
 }
 
+/* [FIX 2026-05-24 OVERSIGHT: missing-gates-and-arrest-counter; orig 0x0043D690
+ * AwardWantedDamageScore]
+ *
+ * Mirror port of DAT_004bf518 — orig "wanted-damage scoring enabled" gate that
+ * is set elsewhere (cop spawn) and cleared on race end. No writer ported yet,
+ * so default 1 keeps the behaviour active. Once the writer site is found this
+ * can be wired in. [TODO: port DAT_004bf518 writer site] */
+static int s_wanted_scoring_enabled = 1;
+
+/* Mirror port of g_wantedArrestCounter — accumulates arrests over the race
+ * (incremented inside this function each time the damage state reaches 0).
+ * Orig location DAT_004bf508; no port reader sites yet, so this is a write-
+ * only counter for now. */
+static int s_wanted_arrest_counter = 0;
+
+/* Mirror port of the per-slot +0x8260 "wanted timer bumps" region from
+ * g_raceParticlePoolBase[slot*0x388 + 0x8260]. No port reader exists yet
+ * (the bumps decay elsewhere in cop logic); keep a local mirror so the
+ * accumulation logic is byte-faithful. */
+static int32_t s_wanted_state_timer_bump[TD5_MAX_RACER_SLOTS] = {0};
+
 /* Award damage to a cop slot on player<->cop collision.
  * Mirrors AwardWantedDamageScore @ 0x43D690 [CONFIRMED]:
- *   decrement = 0x400 if impact_mag > 20000, else 0x200.
- *   Clamp to [0, 0x1000].
- *   When state reaches 0, cop AI is frozen (arrested).
+ *   - Multiple early-out gates (impact_mag, scoring-enabled flag, target tracker)
+ *   - First-hit vs re-hit branching:
+ *       first hit → reset message timer, choose random message, no decrement
+ *       re-hit   → decrement state, increment arrest counter, bump timer
+ *   - Decrement: 0x400 if impact_mag > 20000, else 0x200.
+ *   - Clamp to [0, 0x1000].
+ *   - When state reaches 0, cop AI is frozen (arrested).
  * Called from td5_physics.c when player (slot 0) collides with a cop. */
 void td5_ai_wanted_cop_hit(int cop_slot, int32_t impact_mag) {
     int16_t dec, cur;
     char *actor;
+    extern int g_wanted_msg_timer;   /* td5_hud.c */
+    extern int g_wanted_msg_index;
+    /* g_wantedDamageHudOverlayCount @ 0x004bf504 — the slot whose damage bar
+     * is currently displayed. Used as the "did the player target THIS cop
+     * last frame?" first-hit-vs-rehit discriminator. The port mirrors this
+     * as a file-static here (HUD reads its own copy via hud_wanted_active_slot
+     * which currently always returns 0). */
+    static int s_wanted_hud_overlay_slot = -1;
 
     if (cop_slot < 1 || cop_slot >= TD5_MAX_RACER_SLOTS) return;
 
+    /* Gate 1 [orig 0x0043D690 entry]: impact must be material (> 9999). */
+    if (impact_mag <= 9999) return;
+
+    /* Gate 2 [orig 0x0043D6A0 test on DAT_004bf518]: scoring-enabled flag. */
+    if (s_wanted_scoring_enabled == 0) return;
+
+    /* Gate 3 [orig 0x0043D6B4]: ignore unless this cop is the active tracker
+     * target. td5_game_get_wanted_target_slot() returns 0 (player) in port;
+     * orig checks `cop_slot != g_wantedTargetSlotIndex && g_wantedTargetTrackerActive != 0`
+     * which inverts during cop-vs-cop accidental collisions. Mirror with the
+     * available port globals; tracker_active!=0 modelled by wanted_mode flag. */
+    if (cop_slot == td5_game_get_wanted_target_slot()) return;
+
+    /* First-hit-vs-rehit branch [orig 0x0043D6D8]: if the HUD overlay was
+     * NOT pointing at this cop last frame, this is a "first hit" — reset
+     * the wanted-message banner, choose a random message, and return
+     * WITHOUT applying any damage decrement. */
+    if (s_wanted_hud_overlay_slot != cop_slot) {
+        s_wanted_hud_overlay_slot = cop_slot;
+        g_wanted_msg_timer        = 0;
+        /* Orig uses rand() % message_count; port keeps a 3-message table. */
+        g_wanted_msg_index = rand() % 2;  /* 2 valid messages, third is "" */
+        TD5_LOG_I(LOG_TAG,
+                  "wanted_first_hit: cop_slot=%d msg_idx=%d impact=%d",
+                  cop_slot, g_wanted_msg_index, (int)impact_mag);
+        return;
+    }
+
+    /* Re-hit path: apply damage decrement + bump arrest counter + bump
+     * +0x8260 timer. */
     dec = (impact_mag > 20000) ? (int16_t)0x400 : (int16_t)0x200;
     cur = g_wanted_damage_state[cop_slot] - dec;
-    if (cur < 0) cur = 0;
+    if (cur < 0)        cur = 0;
+    if (cur > 0x1000)   cur = 0x1000;   /* upper clamp [orig 0x0043D7?? clamp] */
     g_wanted_damage_state[cop_slot] = cur;
 
+    /* Arrest-counter bump [orig 0x0043D720]: increments per re-hit. */
+    s_wanted_arrest_counter++;
+
+    /* +0x8260 timer bumps [orig 0x0043D730..0x0043D770]: tiered by impact
+     * magnitude, with sign-dependent direction. Heaviest hits get +50,
+     * medium +20, light +10. */
+    int32_t bump;
+    if (impact_mag > 40000)       bump = 50;
+    else if (impact_mag > 20000)  bump = 20;
+    else                           bump = 10;
+    if (impact_mag < 0) bump = -bump;
+    s_wanted_state_timer_bump[cop_slot] += bump;
+
     TD5_LOG_I(LOG_TAG,
-              "wanted_damage: cop_slot=%d new_state=%d dec=%d impact=%d",
-              cop_slot, (int)cur, (int)dec, (int)impact_mag);
+              "wanted_damage: cop_slot=%d new_state=%d dec=%d impact=%d "
+              "arrests=%d bump=%d",
+              cop_slot, (int)cur, (int)dec, (int)impact_mag,
+              s_wanted_arrest_counter, bump);
 
     if (cur == 0) {
         /* Cop arrested: freeze AI — matches original gate at 0x436E1D */

@@ -1031,13 +1031,14 @@ void td5_vfx_init_weather(TD5_WeatherType type) {
          * This matches the original: the entry is looked up but the result is unused. */
         (void)td5_asset_find_atlas_entry(NULL, "SNOWDROP");
 
-        /* Snow init ranges: X [-8000,8000], Y [-8000,4000], Z [200,8143] */
+        /* Snow init ranges: X [-8000,8000], Y [-8000,4000], Z [200,8191] */
         for (int v = 0; v < 2; v++) {
             VfxWeatherParticle *buf = s_weather_buf[v];
             for (int i = 0; i < TD5_VFX_MAX_WEATHER_PARTICLES; i++) {
                 buf[i].pos_x = (float)(rand() % 16000 - 8000);
                 buf[i].pos_y = (float)(rand() % 12000 - 8000);
-                buf[i].pos_z = (float)(rand() % 7943 + 200);
+                /* [FIX 2026-05-24 OVERSIGHT: snow_z_range_off_by_48; orig 0x00446240] 7943 -> 0x1f37 (7991) */
+                buf[i].pos_z = (float)(rand() % 0x1f37 + 200);
                 /* NOTE: No BuildSpriteQuadTemplate call -- snow never renders */
             }
         }

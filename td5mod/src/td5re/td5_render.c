@@ -5709,6 +5709,26 @@ void TransformVector3ByBasis(float *matrix, void *vec, int *out) {
     out[2] = (int)(matrix[6] * fx + matrix[7] * fy + matrix[8] * fz);
 }
 
+/* [FIX 2026-05-24 OVERSIGHT: case_1_2_basis_transform; orig 0x0042DB40
+ * ConvertFloatVec3ToIntVec3] Same math as TransformVector3ByBasis but each
+ * output is __ftol-rounded then truncated to int16 via (int)(short) cast.
+ * Orig camera sites (UpdateTracksideCamera case 1/2, UpdateVehicleRelativeCamera)
+ * call THIS helper, not TransformVector3ByBasis. For |result| <= 32767 the
+ * two match; the short-clamp is a safety net for overflow cases. */
+void ConvertFloatVec3ToIntVec3(float *matrix, void *vec, int *out) {
+    short *v = (short *)vec;
+    if (!out) return;
+    if (!matrix || !v) { out[0] = 0; out[1] = 0; out[2] = 0; return; }
+
+    float fx = (float)v[0];
+    float fy = (float)v[1];
+    float fz = (float)v[2];
+
+    out[0] = (int)(short)(int)(matrix[0] * fx + matrix[1] * fy + matrix[2] * fz);
+    out[1] = (int)(short)(int)(matrix[3] * fx + matrix[4] * fy + matrix[5] * fz);
+    out[2] = (int)(short)(int)(matrix[6] * fx + matrix[7] * fy + matrix[8] * fz);
+}
+
 void BuildRotationMatrixFromAngles(float *out, short *angles) {
     /*
      * 0x42e1e0 -- Build a 3x3 rotation matrix from 12-bit Euler angles

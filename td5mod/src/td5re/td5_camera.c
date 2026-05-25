@@ -1288,7 +1288,10 @@ void UpdateVehicleRelativeCamera(int actor, int view)
         /* DAT_004aaeec is a pointer to some global matrix; in the original this is
            passed as a float* from a fixed address. We use the actor's rotation matrix. */
         extern float g_renderBasisMatrix[12]; /* 0x4AAEEC points to this */
-        TransformVector3ByBasis(g_renderBasisMatrix, &g_camOffsetVec[v][0], cam_pos);
+        /* [FIX 2026-05-24 OVERSIGHT: case_1_2_basis_transform; orig 0x00401C20]
+         * Orig UpdateVehicleRelativeCamera calls ConvertFloatVec3ToIntVec3
+         * @ 0x0042DB40 (short-clamped), not TransformVector3ByBasis. */
+        ConvertFloatVec3ToIntVec3(g_renderBasisMatrix, &g_camOffsetVec[v][0], cam_pos);
     }
 
     /* Scale offset and add vehicle position + velocity interpolation */
@@ -1989,7 +1992,11 @@ void UpdateTracksideCamera(int actor, int view)
         BuildCameraBasisFromAngles(cam_angles);
 
         cam_world = g_camWorldPos[v];
-        TransformVector3ByBasis((float *)(actor + 0x120), &g_camOffsetVec[v][0], cam_world);
+        /* [FIX 2026-05-24 OVERSIGHT: case_1_2_basis_transform; orig 0x00402480]
+         * Orig case 1/2 calls ConvertFloatVec3ToIntVec3 @ 0x0042DB40 (__ftol
+         * + (int)(short) clamp). Port previously called the unclamped
+         * TransformVector3ByBasis variant. */
+        ConvertFloatVec3ToIntVec3((float *)(actor + 0x120), &g_camOffsetVec[v][0], cam_world);
 
         cam_world[0] = cam_world[0] * 0x100 + *(int *)(actor + 0x1FC);
         cam_world[1] = *(int *)(actor + 0x200) + cam_world[1] * 0x100;
