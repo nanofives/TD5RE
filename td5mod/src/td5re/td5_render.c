@@ -1964,6 +1964,20 @@ void td5_render_actors_for_view(int view_index)
     if (fwd_window  < 1) fwd_window  = 1;
     if (back_window < 1) back_window = 1;
 
+    /* Actor visibility cull window — orig gRaceTrackSpanCullWindow @ 0x004AAEF4,
+     * written each frame in RunRaceFrame @ 0x42BB72 as
+     *   min(ftol(frac_scaled * max), max) * 2,  max = 64 (full) / 32 (split).
+     * This is SEPARATE from the track-render fwd_window: the original renders
+     * track geometry far ahead but only pops AI cars + traffic into view within
+     * ~88 spans. The port previously reused fwd_window (~720) for the actor
+     * cull, so traffic appeared ~8x too early ("traffic came in much earlier
+     * than the original"). [FIX 2026-05-26 traffic-appears-too-early] */
+    int cull_max = (g_td5.split_screen_mode > 0) ? 32 : 64;
+    int actor_cull_window = (int)(frac_scaled * (float)cull_max);
+    if (actor_cull_window > cull_max) actor_cull_window = cull_max;
+    actor_cull_window *= 2;
+    if (actor_cull_window < 1) actor_cull_window = 1;
+
     /* far_cull is now slider-driven inside td5_render_configure_projection
      * so it applies to track render too, not just actor cull. */
     {
@@ -2212,12 +2226,12 @@ void td5_render_actors_for_view(int view_index)
              * with max=64 fullscreen / 32 split-screen and v from 0x466ea8
              * (default 0.65 → cullWindow=90; v=1.0 → 128 fullscreen / 64 split).
              *
-             * Port reuses fwd_window — view-distance scaled, defaulting to
-             * 1024 — as a symmetric abs window so the actor cull stays
-             * coupled to the port's enlarged track-span horizon. Pinning to
-             * the faithful ~90 would leave a ~10× gap between visible track
-             * geometry and visible AI cars. [CONFIRMED @ 0x40C2FD; writer @
-             * 0x42BB72; actor span at +0x82] */
+             * [FIX 2026-05-26] Use actor_cull_window (orig ~88-128) NOT
+             * fwd_window (~720). Reusing the track-render window made traffic +
+             * AI cars pop in ~8x too far ahead vs the original. The visible
+             * empty track beyond ~88 spans is faithful — the original renders
+             * track far but only shows cars near. [CONFIRMED @ 0x40C2FD; writer
+             * @ 0x42BB72; actor span at +0x82] */
             /* Cull racers AND traffic by span-window; orig
              * RenderRaceActorsForView @ 0x0040BD20 applies the same gate to
              * the second loop (slots 6-11). The racer-only restriction was a
@@ -2235,12 +2249,12 @@ void td5_render_actors_for_view(int view_index)
                         if (delta < -half) delta += ring;
                     }
                     int delta_abs = delta < 0 ? -delta : delta;
-                    if (delta_abs >= fwd_window) {
+                    if (delta_abs >= actor_cull_window) {
                         static uint32_t s_cull_log = 0;
                         if ((s_cull_log++ % 600u) == 0u) {
                             TD5_LOG_I(LOG_TAG,
                                       "actor span-cull: view=%d slot=%d delta=%d window=%d",
-                                      view_index, slot, delta_abs, fwd_window);
+                                      view_index, slot, delta_abs, actor_cull_window);
                         }
                         continue;
                     }
