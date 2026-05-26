@@ -43,6 +43,8 @@ pyghidra_projects/
 !/tools/run_state_replay.py
 !/tools/frida_chassis_probe.js
 !/tools/frida_cascade_probe.js
+!/tools/frida_traffic_compare.js
+!/tools/diff_traffic_compare.py
 
 # MinGW toolchain (753 MB — install via MSYS2 or deps/mingw-i686.7z)
 td5mod/deps/mingw/

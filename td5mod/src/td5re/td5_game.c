@@ -3033,13 +3033,29 @@ int td5_game_run_race_frame(void) {
              * (vs original full -23904..+40672 range).
              * [Confirmed via diff_race Edinburgh PlayerIsAI=1: port
              *  emitted span_norm=0 for all 6 slots at sim_tick=1; original
-             *  emits 62, 65, 68, 59, 56, 53.] */
-            for (i = 0; i < TD5_MAX_RACER_SLOTS; i++) {
-                TD5_Actor *lap_actor;
-                if (s_slot_state[i].state == 3) continue; /* disabled */
-                lap_actor = td5_game_get_actor(i);
-                if (lap_actor) {
-                    td5_track_normalize_actor_wrap(lap_actor);
+             *  emits 62, 65, 68, 59, 56, 53.]
+             *
+             * [BUGFIX 2026-05-26 traffic-stale-span-norm] Loop bound was
+             * TD5_MAX_RACER_SLOTS (6) — only racers got their +0x82
+             * (span_normalized) synced per sub-tick. Orig RunRaceFrame
+             * @ 0x0042B580 bounds the loop at g_racerCount (= 12 with
+             * traffic) so traffic slots 6-11 also normalize. Without it,
+             * traffic span_normalized stayed frozen at its spawn value
+             * while span_raw advanced → render span-cull (td5_render.c
+             * uses +0x82) dropped the car bodies (only shadows rendered)
+             * and minimap plotted stale/off-road positions. */
+            {
+                int norm_count = td5_game_get_total_actor_count();
+                for (i = 0; i < norm_count; i++) {
+                    TD5_Actor *lap_actor;
+                    /* s_slot_state only covers racer slots 0..5; traffic
+                     * slots 6-11 are never state==3 during normal play. */
+                    if (i < TD5_MAX_RACER_SLOTS && s_slot_state[i].state == 3)
+                        continue; /* disabled */
+                    lap_actor = td5_game_get_actor(i);
+                    if (lap_actor) {
+                        td5_track_normalize_actor_wrap(lap_actor);
+                    }
                 }
             }
             continue;
@@ -3136,14 +3152,25 @@ int td5_game_run_race_frame(void) {
         td5_camera_update_chase_all();
         td5_game_trace_stage("post_camera", ticks_this_frame);
 
-        /* --- Per-actor wrap normalization --- */
-        for (i = 0; i < TD5_MAX_RACER_SLOTS; i++) {
-            TD5_Actor *lap_actor;
-            if (s_slot_state[i].state == 3) continue; /* disabled */
-            lap_actor = td5_game_get_actor(i);
-            if (lap_actor) {
-                /* Track owns span normalization only. Race progression stays here. */
-                td5_track_normalize_actor_wrap(lap_actor);
+        /* --- Per-actor wrap normalization ---
+         * [BUGFIX 2026-05-26 traffic-stale-span-norm] Bound at active actor
+         * count (12 with traffic), not TD5_MAX_RACER_SLOTS (6). Orig
+         * RunRaceFrame @ 0x0042B580 normalizes slots 0..g_racerCount-1 every
+         * sub-tick. Capping at 6 left traffic span_normalized frozen → render
+         * span-cull dropped car bodies (shadow-only) + off-road minimap dots. */
+        {
+            int norm_count = td5_game_get_total_actor_count();
+            for (i = 0; i < norm_count; i++) {
+                TD5_Actor *lap_actor;
+                /* s_slot_state only covers racer slots 0..5; traffic
+                 * slots 6-11 are never state==3 during normal play. */
+                if (i < TD5_MAX_RACER_SLOTS && s_slot_state[i].state == 3)
+                    continue; /* disabled */
+                lap_actor = td5_game_get_actor(i);
+                if (lap_actor) {
+                    /* Track owns span normalization only. Race progression stays here. */
+                    td5_track_normalize_actor_wrap(lap_actor);
+                }
             }
         }
 

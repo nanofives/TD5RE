@@ -83,6 +83,7 @@ LOG_DIR      = PROJECT_ROOT / "log"
 # Hook scripts live in tools/ (gitignore exceptions added).
 CHASSIS_JS = PROJECT_ROOT / "tools" / "frida_chassis_probe.js"
 CASCADE_JS = PROJECT_ROOT / "tools" / "frida_cascade_probe.js"
+TRAFFIC_JS = PROJECT_ROOT / "tools" / "frida_traffic_compare.js"
 
 # Quickrace dispatcher used for orig (it spawns + injects + hooks).
 QUICKRACE_PY  = PROJECT_ROOT / "re" / "tools" / "quickrace" / "td5_quickrace.py"
@@ -136,6 +137,21 @@ TARGETS = {
                    "fwd_track,active_lo,active_hi,right_a,right_b,lat_dir,"
                    "peer_returned",
     ),
+    "traffic": Target(
+        name="traffic",
+        description=(
+            "Traffic spawn + per-tick state. Hooks InitializeTrafficActorsFromQueue "
+            "(0x00435940 / port td5_ai_init_traffic_actors), RecycleTrafficActorFromQueue "
+            "(0x004353B0 / port td5_ai_recycle_traffic_actor) and IntegrateVehicleFrictionForces "
+            "(0x004438F0 / port td5_physics_update_traffic). Snapshots traffic slots 6..11 "
+            "(span, sub_lane, world_pos, lin_vel, euler_yaw, longitudinal_speed)."
+        ),
+        track=1, car=0, player_is_ai=True, game_type=0,
+        hook_script=TRAFFIC_JS,
+        csv_header="binary,event,sim_tick,paused,slot,span_raw,span_norm,span_acc,"
+                   "sub_lane,pos_x,pos_y,pos_z,lin_x,lin_y,lin_z,euler_yaw,ang_yaw,"
+                   "long_spd,steer,enc_steer",
+    ),
 }
 
 
@@ -184,10 +200,56 @@ def restore_port_ini(original_text: str):
     PORT_INI.write_text(original_text, encoding="utf-8")
 
 
+# Port symbol → JS RVA-override var. nm prints absolute PE addresses (ImageBase
+# 0x00400000); the probe subtracts that to get the module-relative offset.
+PORT_RVA_SYMBOLS = {
+    "PORT_RVA_INIT_TRAFFIC": "_td5_ai_init_traffic_actors",
+    "PORT_RVA_RECYCLE":      "_td5_ai_recycle_traffic_actor",
+    "PORT_RVA_FRICTION":     "_td5_physics_update_traffic",
+    "PORT_RVA_ACTOR_BASE":   "_s_actor_memory",   # nm emits "_s_actor_memory.NN"
+    "PORT_RVA_SIM_TICK":     "_g_tick_counter",
+    "PORT_RVA_PAUSED":       "_g_game_paused",
+}
+NM_EXE = PROJECT_ROOT / "td5mod" / "deps" / "mingw" / "mingw32" / "bin" / "nm.exe"
+IMAGE_BASE = 0x00400000
+
+
+def resolve_port_rvas() -> dict:
+    """Run nm on td5re.exe and map each PORT_RVA_* var to its module RVA.
+    Returns {var_name: rva_int}. Missing symbols are omitted (probe falls
+    back to its hardcoded default for those)."""
+    if not NM_EXE.exists() or not PORT_EXE.exists():
+        return {}
+    try:
+        out = subprocess.run([str(NM_EXE), str(PORT_EXE)],
+                             capture_output=True, text=True, timeout=60).stdout
+    except Exception:
+        return {}
+    # Build name → absolute-address map (strip the ".NN" static suffix nm adds).
+    addr_by_name: dict = {}
+    for line in out.splitlines():
+        parts = line.split()
+        if len(parts) < 3:
+            continue
+        try:
+            addr = int(parts[0], 16)
+        except ValueError:
+            continue
+        name = parts[2].split(".")[0]  # "_s_actor_memory.24" → "_s_actor_memory"
+        addr_by_name.setdefault(name, addr)
+    rvas: dict = {}
+    for var, sym in PORT_RVA_SYMBOLS.items():
+        if sym in addr_by_name:
+            rvas[var] = addr_by_name[sym] - IMAGE_BASE
+    return rvas
+
+
 def read_hook_with_overrides(hook_path: Path, binary_label: str,
                              out_csv: Path) -> str:
     """Inline-edit the JS so OUTPUT_PATH and BINARY_LABEL are correct for
-    this run.  The hooks expose those as top-of-file `var` declarations."""
+    this run.  The hooks expose those as top-of-file `var` declarations.
+    For port captures, also resolve PORT_RVA_* via nm so the probe targets
+    the freshly-built binary's addresses (they shift every rebuild)."""
     src = hook_path.read_text(encoding="utf-8")
     posix_out = str(out_csv).replace("\\", "/")
     src = re.sub(
@@ -200,6 +262,13 @@ def read_hook_with_overrides(hook_path: Path, binary_label: str,
         f'var BINARY_LABEL = "{binary_label}";',
         src, count=1
     )
+    if binary_label == "port":
+        for var, rva in resolve_port_rvas().items():
+            src = re.sub(
+                rf'var {var}\s*=\s*(?:-?\d+|0x[0-9A-Fa-f]+)\s*;',
+                f'var {var} = 0x{rva:X};',
+                src, count=1
+            )
     return src
 
 
@@ -429,11 +498,17 @@ def merge_csvs(orig_csv: Path, port_csv: Path, merged: Path,
     rows.extend(orig_rows)
     rows.extend(port_rows)
 
-    # Index of the slot/self_slot column varies per target schema but is
-    # column index 1 in both (binary, slot/self_slot, sub_tick, ...).
+    # Schema-aware merge: read slot/tick column indices from header.
+    # Default = chassis/cascade schema (binary,slot,sub_tick,...).
+    slot_col = 1; tick_col = 2
+    if hdr:
+        if "slot" in hdr:     slot_col = hdr.index("slot")
+        if "sub_tick" in hdr: tick_col = hdr.index("sub_tick")
+        elif "sim_tick" in hdr: tick_col = hdr.index("sim_tick")
     def keyfn(r):
         try:
-            return (int(r[1]), int(r[2]), 0 if r[0] == "orig" else 1)
+            return (int(r[slot_col]), int(r[tick_col]),
+                    0 if r[0] == "orig" else 1)
         except (ValueError, IndexError):
             return (-1, -1, 0)
     rows.sort(key=keyfn)

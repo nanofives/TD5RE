@@ -5327,18 +5327,40 @@ void td5_ai_update_traffic_route_plan(int slot) {
         int span_count = td5_track_get_span_count();
         int ring_length = td5_track_get_ring_length();
         if (span_count > 0 && span_norm >= 0) {
-            int lin_span;
+            int lookup_span;    /* junction lookup span (norm-based, matches orig 0x00435F6A) */
+            int fallback_span;  /* no-junction-match target (raw-based, matches orig 0x0043614c /
+                                 * 0x004362C6 — `iVar8 = iVar10 + 1` / `iVar8 = iVar7 - 1` where
+                                 * iVar10/iVar7 = span_raw). */
             if (polarity == 0) {
                 /* [CONFIRMED @ 0x00435F6A] iVar14=field_0x82; iVar8 = iVar14 + 1 */
-                lin_span = ((int)span_norm + 1) % span_count;
+                lookup_span = ((int)span_norm + 1) % span_count;
+                /* [CONFIRMED @ 0x0043614c] iVar10 = field_0x80 (span_raw); iVar8 = iVar10 + 1 */
+                fallback_span = ((int)span_raw + 1) % span_count;
+                if (fallback_span < 0) fallback_span += span_count;
             } else {
-                lin_span = (int)span_norm - 1;
-                if (lin_span < 0) lin_span += span_count;
+                lookup_span = (int)span_norm - 1;
+                if (lookup_span < 0) lookup_span += span_count;
+                /* [CONFIRMED @ 0x004362C6] iVar7 = field_0x80; iVar8 = iVar7 - 1 */
+                fallback_span = (int)span_raw - 1;
+                if (fallback_span < 0) fallback_span += span_count;
+                if (fallback_span >= span_count) fallback_span -= span_count;
             }
 
             int is_canonical = (rs[RS_ROUTE_TABLE_SELECTOR] == 0);
-            int target_span = td5_track_apply_target_span_remap(lin_span,
-                                                                 is_canonical);
+            int remapped = td5_track_apply_target_span_remap(lookup_span,
+                                                              is_canonical);
+            /* [BUGFIX 2026-05-26 traffic-steer-saturation] When junction remap
+             * does NOT fire (remapped == lookup_span), orig uses span_raw±1 as
+             * target, NOT span_norm±1. Previously port used norm-based target
+             * unconditionally; when actor's span_norm lagged span_raw (e.g. after
+             * lap wrap or because normalize_wrap isn't called per-tick for traffic),
+             * the target stayed anchored behind the actor's actual position →
+             * deviation grew → steering cascade hit ±0x18000 emergency-snap and
+             * saturated at -0x18000 within ~13s. Verified via Frida
+             * tools/frida_traffic_compare.js: pre-fix slot 6 had 89.5% of ticks
+             * at |steer|>50000 vs orig ~131 avg. */
+            int remap_fired = (remapped != lookup_span);
+            int target_span = remap_fired ? remapped : fallback_span;
 
             /* Target sub_lane: start with current sub_lane (default path). */
             int target_sub_lane = (int)ACTOR_U8(actor, ACTOR_SUB_LANE_INDEX);
@@ -5352,7 +5374,7 @@ void td5_ai_update_traffic_route_plan(int slot) {
              * Condition "iVar7 <= g_trackTotalSpanCount" in Ghidra uses <=, meaning
              * the branch target must be <= ring_length (inclusive, since ring_length
              * is the first branch index). */
-            if (target_span != lin_span &&          /* remap actually fired */
+            if (remap_fired &&                      /* junction remap fired */
                 (int)span_raw < ring_length &&       /* actor on main road */
                 target_span <= ring_length) {        /* target on/at branch edge */
                 int cur_lane_count = td5_track_get_span_lane_count((int)span_norm);
