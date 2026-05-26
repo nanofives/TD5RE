@@ -2398,9 +2398,21 @@ static int resolve_neighbor(int span_idx, int *sub_lane, uint8_t crossing_bit,
             break;
         default:
             new_span = span_idx + 1;
+            /* [BUGFIX 2026-05-26] Apply src_h - dest_h on the DEFAULT path only,
+             * matching orig 0x00444613-0x0044461B (SHR EDI,4; SHR EAX,4; SUB EDI,EAX;
+             * ADD ECX,EDI). Previously the port added h_offset (src only) AFTER the
+             * switch unconditionally, which (a) fired on type-8/10 paths that orig
+             * skips and (b) used src_h instead of (src_h - dest_h). On Edinburgh
+             * L16 spans 263-265 (h=5) → 266 (h=6) this produced sub_lane jumps of
+             * +5..+7 per tick instead of ±1, sending the RL wheel to sub_lane 0
+             * (left edge) where probe_span_lane_height picks a different triangle
+             * → +147K fp ground spike → chassis snap → launch (span 260-272). */
+            if (new_span >= 0 && new_span < s_span_count) {
+                int dest_h = span_height_offset(&s_span_array[new_span]);
+                *sub_lane += h_offset - dest_h;
+            }
             break;
         }
-        *sub_lane += h_offset;
         break;
 
     case 0x04: /* Backward */
@@ -2483,9 +2495,18 @@ static int resolve_neighbor(int span_idx, int *sub_lane, uint8_t crossing_bit,
             break;
         default:
             new_span = span_idx - 1;
+            /* [BUGFIX 2026-05-26] Apply src_h - dest_h on the DEFAULT path only,
+             * matching orig 0x00444E97-0x00444E9F (SHR EDI,4; SHR EDX,4; SUB EDI,EDX;
+             * ADD ECX,EDI). Same formula as case 0x02 — orig adds (src_h - dest_h)
+             * for BOTH lateral directions despite case 0x08 moving backward. See
+             * case 0x02 default branch above for the launch-chain root-cause
+             * explanation. */
+            if (new_span >= 0 && new_span < s_span_count) {
+                int dest_h = span_height_offset(&s_span_array[new_span]);
+                *sub_lane += h_offset - dest_h;
+            }
             break;
         }
-        *sub_lane -= h_offset;
         break;
     }
 
