@@ -680,81 +680,6 @@ void td5_track_resolve_wall_contacts(TD5_Actor *actor)
         }
     }
 
-    /* [FIX 2026-05-25 jarash-579-widening-wall]
-     * Physical-width widening-transition guard. Jordan / Jarash has NO
-     * junction (type 3/4/6/7/8/11) spans binary-wide, but the physical
-     * road width still varies — e.g. lateral width widens 1500 -> 1635
-     * units across spans 583-594 (user-reported "invisible wall at sp579"
-     * range). On the approach to such a widening, the rail vertices on the
-     * narrower upstream spans (sp579..sp582) sit at the OLD narrower edge,
-     * so the rightmost-sub_lane extremity gate (sub_lane >= lane_count - 1)
-     * lets the geometric d<0 test fire the wall at the narrower position
-     * even though the visible road is about to open up a few spans ahead.
-     *
-     * The junction-neighbour guard above doesn't catch this because Jordan
-     * has no irregular-type spans to detect.
-     *
-     * Detection: compare current span's near-transverse rail-to-rail
-     * distance squared with the same metric at span_idx +/- 3. If the
-     * squared ratio differs by >= 6% (linear ~3%) in either direction,
-     * treat as a width-transition zone and skip wall synth for this frame.
-     *
-     * Threshold rationale: 1635/1500 = 1.090 (squared ~1.188) over 11
-     * spans is a per-3-span cumulative change of ~3% linear (squared
-     * ~1.06). Using cross-multiplication to avoid floats:
-     *     n_sq * 100 > cur_sq * 106  ==> neighbour wider by >~3% linear
-     *     cur_sq * 100 > n_sq * 106  ==> neighbour narrower by >~3% linear
-     *
-     * Lookahead window of +/- 3 spans (not +/- 1) is required because the
-     * per-span step on Jordan is too small for a +/- 1 comparison to
-     * register a 3% change. A wider window also covers smoothly-tapering
-     * widenings without making the threshold so loose it trips on
-     * road-bend lateral curvature.
-     *
-     * Safe because: (1) port-specific fn (orig has no mid-strip lateral
-     * wall); (2) only regular quad types (1/2/5) considered for the
-     * width measurement (irregular layouts give garbage widths); (3)
-     * topological off-track damping (state 0x0F) still keeps the car on
-     * the road during the skip window; (4) once past the widening the
-     * actor lands on regular spans with consistent neighbours and walls
-     * resume normally. */
-    {
-        int lc_cur = span_lane_count(sp);
-        if (lc_cur < 1) lc_cur = 1;
-        int li_c = (int)sp->left_vertex_index;
-        TD5_StripVertex *nw_c = vertex_at(li_c + 0);
-        TD5_StripVertex *ne_c = vertex_at(li_c + lc_cur);
-        if (nw_c && ne_c) {
-            int32_t cdx = (int32_t)ne_c->x - (int32_t)nw_c->x;
-            int32_t cdz = (int32_t)ne_c->z - (int32_t)nw_c->z;
-            int64_t cur_sq = (int64_t)cdx * cdx + (int64_t)cdz * cdz;
-            if (cur_sq >= 100) {
-                /* +/- 3 span lookahead, regular-quad neighbours only. */
-                static const int k_widening_offsets[6] = {-3, -2, -1, 1, 2, 3};
-                for (int oi = 0; oi < 6; oi++) {
-                    int n_idx = span_idx + k_widening_offsets[oi];
-                    if (n_idx < 0 || n_idx >= s_span_count) continue;
-                    const TD5_StripSpan *nsp = &s_span_array[n_idx];
-                    int nt = nsp->span_type;
-                    if (nt != 1 && nt != 2 && nt != 5) continue;
-                    int lc_n = span_lane_count(nsp);
-                    if (lc_n < 1) lc_n = 1;
-                    int li_n = (int)nsp->left_vertex_index;
-                    TD5_StripVertex *nw_n = vertex_at(li_n + 0);
-                    TD5_StripVertex *ne_n = vertex_at(li_n + lc_n);
-                    if (!nw_n || !ne_n) continue;
-                    int32_t ndx = (int32_t)ne_n->x - (int32_t)nw_n->x;
-                    int32_t ndz = (int32_t)ne_n->z - (int32_t)nw_n->z;
-                    int64_t n_sq = (int64_t)ndx * ndx + (int64_t)ndz * ndz;
-                    if (n_sq < 100) continue;
-                    /* >~3% linear width change in either direction. */
-                    if (n_sq * 100 > cur_sq * 106) return;
-                    if (cur_sq * 100 > n_sq * 106) return;
-                }
-            }
-        }
-    }
-
     /* Branch spans (index >= ring_length) previously skipped this function
      * because the stale (no-gate) logic produced simultaneous LEFT+RIGHT
      * false-positives on the narrow 2-lane branches. With the sub_lane
@@ -2691,83 +2616,27 @@ static void update_position_recursive(int16_t *track_state, int32_t pos_x, int32
             break; /* Actor is within the current quad */
 
         switch (bits) {
-        case 1: { /* [FIX 2026-05-25 da-t2-case1-fwd; orig 0x004440f0]
-                   * Forward — 3-outcome secondary-cross [CONFIRMED @ 0x0044434c-0x004445ad]
-                   *
-                   * Re-seed edge mask, then test two secondary crosses on the
-                   * CURRENT span's column-pair vertices at (sub-1, sub):
-                   *   Test #1 (mask & 2): cross(e41[sub-1] -> e41[sub])  > 0 -> ADVANCE + sub--
-                   *   Test #2 (mask & 8): cross(e40[sub-1] -> e40[sub])  > 0 -> STEP-BACK + sub--
-                   *                       else                                 -> STAY  + sub--
-                   * Test #1 uses resolve_neighbor(0x01) for ADVANCE dispatch (matches
-                   * orig type 10/8/default branches at 0x00444399-0x004443DC).
-                   * Test #2 uses resolve_neighbor(0x04) for STEP-BACK dispatch (matches
-                   * orig type 9/11/default branches at 0x0044454F-0x004445A6). */
-            TD5_StripSpan *sp = &s_span_array[span_idx];
-            int type = sp->span_type;
-            if (type < 0 || type > 11) type = 0;  /* safe-table */
-            int e40_base = (int)sp->left_vertex_index  + k_quad_vertex_offsets[type][0];
-            int e41_base = (int)sp->right_vertex_index + k_quad_vertex_offsets[type][1];
-            /* Orig 0x00444356: bVar10 = 0xf; if (sub == 1 || sub - 1 < 0) use first_mask.
-             * Both arms (==1 and <1) take the masked path -> `sub_lane <= 1`. */
-            uint8_t mask = (sub_lane <= 1) ? s_edge_mask_first[type] : 0x0f;
-
-            int64_t cross_adv = 0;
-            if (mask & 0x02) {
-                /* orig: ((psVar2[-3] - psVar2) x (pos - psVar2)) > 0 ;
-                 * compound_cross(sp, a, b) = (b - a) x (pos - a).
-                 * Map a=cur=e41[sub], b=prev=e41[sub-1] -> equivalent sign. */
-                cross_adv = compound_cross(sp,
-                                           e41_base + sub_lane,
-                                           e41_base + sub_lane - 1,
-                                           pos_x, pos_z);
-            }
-            if ((mask & 0x02) && cross_adv > 0) {
-                /* ADVANCE - same dispatch as the prior always-advance path. */
-                int prev_type = sp->span_type;
-                new_span = resolve_neighbor(span_idx, &sub_lane, 0x01, pos_x, pos_z);
-                span_idx = new_span;
-                track_state[0] = (int16_t)new_span;
-                track_state[2]++;
-                if (track_state[2] > track_state[3])
-                    track_state[3] = track_state[2];
-                sub_lane -= 1;
-                ((int8_t *)track_state)[12] = (int8_t)sub_lane;
-                /* Orig RETs unconditionally on ADVANCE - keep the early-exit for
-                 * type 8 to preserve the prior junction-route semantics, then
-                 * also early-exit for non-junction (orig case 1 is single-pass). */
-                if (prev_type == 8) return;
-                return;
-            }
-
-            int64_t cross_back = 0;
-            if (mask & 0x08) {
-                /* orig: ((psVar5 - psVar5[-3]) x (pos - psVar5[-3])) > 0 ;
-                 * compound_cross(sp, a, b) = (b - a) x (pos - a).
-                 * Map a=prev=e40[sub-1], b=cur=e40[sub] -> equivalent sign. */
-                cross_back = compound_cross(sp,
-                                            e40_base + sub_lane - 1,
-                                            e40_base + sub_lane,
-                                            pos_x, pos_z);
-            }
-            if ((mask & 0x08) == 0 || cross_back <= 0) {
-                /* STAY - no span change, just decrement sub_lane.
-                 * Orig: `*(char*)(track_state + 6) = cVar15 + -1; return;` */
-                sub_lane -= 1;
-                ((int8_t *)track_state)[12] = (int8_t)sub_lane;
-                return;
-            }
-
-            /* STEP BACK - span -= 1 (or type 9/11 link), t[2]--, sub_lane--.
-             * resolve_neighbor(0x04) encodes the type 9/11/default dispatch and
-             * applies the appropriate sub_lane delta. */
-            new_span = resolve_neighbor(span_idx, &sub_lane, 0x04, pos_x, pos_z);
+        case 1: { /* Forward */
+            int prev_type = s_span_array[span_idx].span_type;
+            new_span = resolve_neighbor(span_idx, &sub_lane, 0x01, pos_x, pos_z);
             span_idx = new_span;
             track_state[0] = (int16_t)new_span;
-            track_state[2]--;
+            track_state[2]++;
+            if (track_state[2] > track_state[3])
+                track_state[3] = track_state[2];
+            /* Original appends -1 to sub_lane post-step unconditionally,
+             * including for junction (type 8) transitions.
+             * [CONFIRMED @ 0x004440F0 case 0x01: `cVar15 + ... + (-1)`]
+             * resolve_neighbor now uses the running sub_lane (not geometric
+             * projection) so the -1 applies cleanly.  The early return keeps
+             * single-step semantics matching the original — negative stored
+             * values are clamped to 0 at the next call's walker entry. */
             sub_lane -= 1;
-            ((int8_t *)track_state)[12] = (int8_t)sub_lane;
-            return;
+            if (prev_type == 8) {
+                ((int8_t *)track_state)[12] = (int8_t)sub_lane;
+                return;
+            }
+            break;
         }
 
         case 2: /* Right (forward + lateral) — advances to span+1 */
