@@ -4143,14 +4143,33 @@ void td5_render_crossfade_surfaces(uint32_t *dst, const uint32_t *src_a,
  * reference to "the unread _g_wheelSuspensionRenderScale") and produced
  * shadows ~1.48x linear (~2.2x area) larger than the original. */
 #define SHADOW_CORNER_SCALE     (1.25f)
-/* [CORRECTED 2026-05-26] Orig 0x40C7E0 / 0x40C120 applies ZERO view-Y nudge
- * and ZERO view-Z bias. _DAT_0048F070 (Y lift) and _DAT_0048DC48 (Z bias)
- * are both 0.0f. The earlier -22.0f / +2.0f guess was a misread of an
- * unrelated subtraction inside FUN_0040C120 and caused shadows to render
- * below terrain on inclines ("clipping through ground"). Keeping these as
- * 0.0f matches orig exactly. */
+/* [CORRECTED 2026-05-26 r3] _DAT_0048DC48 (g_shadowVerticalOffset) IS 0.0f
+ * in the orig binary AND _DAT_0048F070 (Y lift) is also unused, so the orig
+ * relies on byte-identical projection between shadow and track polygons:
+ * both go through WritePointToCurrentRenderTransform @ 0x42E4F0 followed by
+ * ClipAndSubmitProjectedPolygon @ 0x4317F0. Their view-Z values literally
+ * tie at the same XZ, and LEQUAL ties pass.
+ *
+ * The PORT can't get byte-identical depth this way because render_vehicle_
+ * shadow_quad does its own hand-rolled projection (camera_basis · (world -
+ * cam_pos)) rather than routing through clip_and_submit_polygon. Even with
+ * the correct (vz - 64) / 65479 formula, floating-point ordering between
+ * the two code paths can produce sub-LSB depth differences and the wheel
+ * probe Y from td5_track_compute_contact_height_with_normal can land a
+ * sliver below the rendered polygon's interpolated Y at a given XZ.
+ *
+ * The bias compensates by pushing the shadow slightly toward the camera in
+ * view-Z so LEQUAL always passes against the track surface. 2 view-units
+ * ≈ 3.05e-5 in depth space — well below the gap created by opponent cars
+ * (50-100 view-units deep) or walls, so opaque geometry still occludes the
+ * shadow correctly. Without this bias the user observes "shadow tail
+ * visible depending on angle" because perspective only bends some corners
+ * forward of the track depth — others lose the LEQUAL tie and disappear.
+ *
+ * Reinstates the value first shipped in 055d9b3 (zeroed in a6e5072 on the
+ * mistaken assumption that the depth-formula fix alone was sufficient). */
 #define SHADOW_VIEW_Y_OFFSET    (0.0f)
-#define SHADOW_VIEW_DEPTH_BIAS  (0.0f)
+#define SHADOW_VIEW_DEPTH_BIAS  (2.0f)
 
 static int   s_shadow_lookup_done = 0;
 static int   s_shadow_page        = -1;
