@@ -4307,7 +4307,15 @@ static void render_vehicle_shadow_quad(const TD5_Actor *actor)
         float inv_z = 1.0f / vz;
         verts[i].screen_x = -vx * s_focal_length * inv_z + s_center_x;
         verts[i].screen_y = -vy * s_focal_length * inv_z + s_center_y;
-        verts[i].depth_z  = vz * (1.0f / s_far_clip);
+        /* [FIX 2026-05-26 shadow-depth-formula] Match the track/mesh depth
+         * formula (vz - NEAR_DEPTH_OFFSET) * DEPTH_NORMALIZE_INV instead of
+         * vz / s_far_clip. Track polygons use the orig formula (line ~750);
+         * shadow used the simplified vz/65536 which always produced ~0.001
+         * MORE depth than the track at the same world point, so LEQUAL
+         * rejected the shadow against the track every frame except where
+         * perspective bent shadow corners forward of the track (the "tail
+         * end visible at angle" symptom the user reported). */
+        verts[i].depth_z  = (vz - NEAR_DEPTH_OFFSET) * DEPTH_NORMALIZE_INV;
         verts[i].rhw      = inv_z;
         verts[i].diffuse  = 0xFFFFFFFFu;   /* white — alpha comes from texture */
         verts[i].specular = 0;
@@ -5049,7 +5057,7 @@ static void render_vehicle_wheel_billboards(TD5_Actor *actor, int slot)
                 float inv_z = 1.0f / vz;
                 verts[i].screen_x = -vx * s_focal_length * inv_z + s_center_x;
                 verts[i].screen_y = -vy * s_focal_length * inv_z + s_center_y;
-                verts[i].depth_z  = vz * (1.0f / s_far_clip);
+                verts[i].depth_z  = (vz - NEAR_DEPTH_OFFSET) * DEPTH_NORMALIZE_INV;
                 verts[i].rhw      = inv_z;
                 verts[i].diffuse  = 0xFFFFFFFFu;
                 verts[i].specular = 0;
@@ -5071,7 +5079,7 @@ static void render_vehicle_wheel_billboards(TD5_Actor *actor, int slot)
                 float inv_z = 1.0f / vz;
                 verts[9+i].screen_x = -vx * s_focal_length * inv_z + s_center_x;
                 verts[9+i].screen_y = -vy * s_focal_length * inv_z + s_center_y;
-                verts[9+i].depth_z  = vz * (1.0f / s_far_clip);
+                verts[9+i].depth_z  = (vz - NEAR_DEPTH_OFFSET) * DEPTH_NORMALIZE_INV;
                 verts[9+i].rhw      = inv_z;
                 verts[9+i].diffuse  = 0xFFFFFFFFu;
                 verts[9+i].specular = 0;
@@ -5172,7 +5180,7 @@ static void render_vehicle_wheel_billboards(TD5_Actor *actor, int slot)
                     float inv_z = 1.0f / vz;
                     hub[0].screen_x = -vx * s_focal_length * inv_z + s_center_x;
                     hub[0].screen_y = -vy * s_focal_length * inv_z + s_center_y;
-                    hub[0].depth_z  = vz * (1.0f / s_far_clip);
+                    hub[0].depth_z  = (vz - NEAR_DEPTH_OFFSET) * DEPTH_NORMALIZE_INV;
                     hub[0].rhw      = inv_z;
                     hub[0].diffuse  = 0xFFFFFFFFu;
                     hub[0].specular = 0;
@@ -5203,7 +5211,7 @@ static void render_vehicle_wheel_billboards(TD5_Actor *actor, int slot)
                 float inv_z = 1.0f / vz;
                 hub[1+c].screen_x = -vx * s_focal_length * inv_z + s_center_x;
                 hub[1+c].screen_y = -vy * s_focal_length * inv_z + s_center_y;
-                hub[1+c].depth_z  = vz * (1.0f / s_far_clip);
+                hub[1+c].depth_z  = (vz - NEAR_DEPTH_OFFSET) * DEPTH_NORMALIZE_INV;
                 hub[1+c].rhw      = inv_z;
                 hub[1+c].diffuse  = 0xFFFFFFFFu;
                 hub[1+c].specular = 0;

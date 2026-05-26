@@ -678,6 +678,35 @@ void td5_track_resolve_wall_contacts(TD5_Actor *actor)
             if (t == 3 || t == 4 || t == 6 || t == 7 || t == 8 || t == 11)
                 return;
         }
+
+        /* Lane-count-change extension (2026-05-26 invisible-wall fix on
+         * widening sections without explicit junction spans — user-reported
+         * Edinburgh sp361 7→8 lanes, Newcastle sp288 3→4 lanes).
+         *
+         * Some tracks widen lane count without a JUNCTION_FWD/BWD span
+         * sentinel (just type-1/2/5 spans with growing lane_count nibble).
+         * The rail-vertex pair for current span's transverse edge is
+         * indexed using `lane_count` of THIS span, but the wall edge is
+         * formed by mixing vertices across two spans with different
+         * lane_counts; the perpendicular calculation picks the wrong
+         * edge → fires `wall_response` against an invisible wall sitting
+         * in the middle of the road.
+         *
+         * Skip the synthesizer at any span whose lane_count differs from
+         * either neighbour. The topological off-track damping (state
+         * 0x0F) continues to contain the car laterally, and forward/reverse
+         * sentinel contacts still bound the level. */
+        {
+            int cur_lc = span_lane_count(sp);
+            if (span_idx - 1 >= 0 && span_idx - 1 < s_span_count) {
+                int prev_lc = span_lane_count(&s_span_array[span_idx - 1]);
+                if (prev_lc != cur_lc) return;
+            }
+            if (span_idx + 1 >= 0 && span_idx + 1 < s_span_count) {
+                int next_lc = span_lane_count(&s_span_array[span_idx + 1]);
+                if (next_lc != cur_lc) return;
+            }
+        }
     }
 
     /* Branch spans (index >= ring_length) previously skipped this function

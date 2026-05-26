@@ -5143,6 +5143,20 @@ void td5_ai_update_traffic_route_plan(int slot) {
     int32_t hdelta, hdelta_neg;
     int polarity, peer;
 
+    /* [FIX 2026-05-26 traffic-recovery-decrement] g_traffic_recovery_stage
+     * is set 1..7 by Stage 2 when hdelta is wide, but the port has no
+     * per-tick decrement (only init/recycle clears it). Stage 3 then
+     * brake-bails forever (encounter_steer = 0, brake = 1), and traffic
+     * sits motionless after any heading misalignment — the user-reported
+     * "traffic not moving". The orig has a per-tick countdown somewhere
+     * (the 1..7 seed value is meaningless without one); without Ghidra
+     * pinpointing it, apply the simplest correct decrement here so the
+     * recovery wears off naturally. */
+    if (slot >= 0 && slot < TD5_MAX_TOTAL_ACTORS &&
+        g_traffic_recovery_stage[slot] > 0) {
+        g_traffic_recovery_stage[slot]--;
+    }
+
     /* --- Stage 1: Recycle --- */
     td5_ai_recycle_traffic_actor();
 
@@ -5204,7 +5218,8 @@ void td5_ai_update_traffic_route_plan(int slot) {
 
     /* Original 0x435F2B JLE 0x400 + 0x435F32 JGE 0xC00 implement strict bounds:
      * body fires for hdelta in (0x400, 0xC00) exclusive. */
-    if (hdelta > 0x400 && hdelta < 0xC00) {
+    if (hdelta > 0x400 && hdelta < 0xC00
+        && g_traffic_recovery_stage[slot] == 0 /* only arm fresh; see decrement at top */ ) {
         /* Original at 0x435F34/0x435F81: reads DAT_004ab30c = actor[0].world_pos_z
          * (g_actor_base + 0x204). Used as a pseudo-random source for the
          * recovery stage. */

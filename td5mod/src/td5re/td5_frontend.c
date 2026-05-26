@@ -2007,7 +2007,16 @@ static TD5_ScreenIndex frontend_get_parent_screen(TD5_ScreenIndex screen) {
         return TD5_SCREEN_CAR_SELECTION;
 
     case TD5_SCREEN_HIGH_SCORE:
-        if (s_previous_screen == TD5_SCREEN_RACE_RESULTS) {
+        /* [FIX 2026-05-26 high-score-esc-route] s_previous_screen lingers
+         * as RACE_RESULTS for the entire session after any race; using it
+         * as the parent-screen indicator made Escape jump back to the
+         * race-results frontend instead of returning to the Main Menu
+         * (user-reported). Only treat the post-race flow as a child of
+         * RACE_RESULTS when explicitly reached via the post-race transition
+         * (NAME_ENTRY → HIGH_SCORE). For Main-Menu → Records entry,
+         * always parent to MAIN_MENU. */
+        if (s_flow_context == 6) {
+            /* Post-race flow signaled by Screen_PostRaceNameEntry. */
             return TD5_SCREEN_RACE_RESULTS;
         }
         return TD5_SCREEN_MAIN_MENU;
@@ -4606,6 +4615,18 @@ static void frontend_render_high_score_overlay(float sx, float sy) {
     /* Panel geometry: 0x208 x 0x90 surface blitted at (115, 177) in 640x480 */
     float panel_x = 115.0f * sx;
     float panel_y = 177.0f * sy;
+    float panel_w = 520.0f * sx;
+    float panel_h = 144.0f * sy;
+
+    /* [FIX 2026-05-26 high-score-panel-backdrop] Orig allocates a 0x208×0x90
+     * DDraw surface, black-fills it via FUN_00424050(0,0,0,0x208,0x90,...),
+     * paints columns onto it, then blits the whole surface. Port draws live
+     * text but had no backdrop — table looked unframed, floating on MainMenu
+     * background. Add an opaque dark fill + 1px border for visual parity. */
+    fe_draw_quad(panel_x - sx, panel_y - sy, panel_w + 2.0f * sx,
+                 panel_h + 2.0f * sy, 0xFFFFFFFF, -1, 0.0f, 0.0f, 1.0f, 1.0f);
+    fe_draw_quad(panel_x, panel_y, panel_w, panel_h, 0xF0101018,
+                 -1, 0.0f, 0.0f, 1.0f, 1.0f);
 
     /* Column X positions (in 520px panel space, scaled to screen) */
     float col_name  = panel_x + 16.0f  * sx;

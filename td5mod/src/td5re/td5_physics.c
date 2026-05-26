@@ -4214,24 +4214,19 @@ void td5_physics_resolve_vehicle_contacts(void)
         return;
     }
 
-    /* [precise-00409150 D10 2026-05-14]
-     * Listing 0x00409150-0x00409168 + 0x004091C9-CB + 0x004091F0:
-     *   MOV EDX, [0x004aaf00]   ; g_racerCount (NOT total_actor_count)
-     *   TEST EDX, EDX / JLE end
-     *
-     * Original iterates `g_racerCount` (count of racing vehicles only,
-     * excludes traffic). Port previously iterated total actor count
-     * (racers + traffic), causing traffic actors to be broadphase-included
-     * in this function. Traffic V2V is handled separately in
-     * UpdateTrafficActorMotion in the original — NOT here.
-     *
-     * Faithful behavior: iterate only g_racer_count slots. */
-    total = g_racer_count;
+    /* [CORRECTED 2026-05-26 v2v-include-traffic; orig 0x00409150]
+     * Earlier port comment claimed DAT_004aaf00 was g_racerCount and
+     * excluded traffic. Ghidra re-audit confirms DAT_004aaf00 is the
+     * FULL active-actor count written by 0x00432e60 as ((traffic_on)?12:6)
+     * — so orig DOES include traffic slots 6..11 in V2V broadphase.
+     * The dispatch at line ~4350 already gates per-slot on vehicle_mode
+     * and wheel_contact_bitmask, so re-including traffic here surfaces
+     * the user-reported missing traffic-vs-player collisions without
+     * affecting racer-on-racer behavior. */
+    total = (int)td5_game_get_total_actor_count();
+    if (total > TD5_MAX_TOTAL_ACTORS) total = TD5_MAX_TOTAL_ACTORS;
     if (total < 2) {
         return;
-    }
-    if (total > TD5_MAX_TOTAL_ACTORS) {
-        total = TD5_MAX_TOTAL_ACTORS;
     }
 
 #ifdef TD5_PILOT_TRACE_00409150
