@@ -4258,10 +4258,14 @@ static void render_vehicle_shadow_quad(const TD5_Actor *actor)
         { s_shadow_u1, s_shadow_v0 },   /* RL → texture top-right (U=back,  V=left) */
     };
 
-    /* Convert the 4 probes to world-float, accumulating the XZ centroid so we
-     * can scale corners outward from it (the original uses
-     * _g_wheelSuspensionRenderScale for the same effect). Y is kept at each
-     * wheel's contact height so the shadow follows uneven terrain.
+    /* Convert the 4 probes to world-float, accumulating the centroid so we
+     * can scale corners outward from it. Orig 0x40C120 scales offsets in
+     * ALL THREE components by _g_wheelSuspensionRenderScale (= 1.25f at
+     * 0x00463B64):
+     *
+     *   local_90 = (FL.x - centroid_x) * scale   <- X scaled
+     *   local_8c = (FL.y - centroid_y) * scale   <- Y scaled
+     *   local_88 = (FL.z - centroid_z) * scale   <- Z scaled
      *
      * Subtick interpolation: probes are only refreshed once per sim tick, but
      * the car mesh is rendered with (world_pos + linear_velocity *
@@ -4289,13 +4293,26 @@ static void render_vehicle_shadow_quad(const TD5_Actor *actor)
     cx *= 0.25f;
     cy *= 0.25f;
     cz *= 0.25f;
-    /* [CORRECTED 2026-05-26] Orig 0x40C7E0 keeps each corner at its own
-     * wheel-probe Y; the centroid-Y flatten was a workaround for "diagonal
-     * streaks" that turned out to come from the bogus -22 view-Y nudge.
-     * With that removed, per-corner probe Y is what makes the shadow follow
-     * uneven ground without clipping into terrain on slopes. */
+    /* [CORRECTED 2026-05-26 r4] Scale Y outward from centroid like the orig.
+     *
+     * Prior port version only scaled X and Z, keeping each corner at its
+     * own wheel-probe Y. On inclined terrain (Edinburgh bowl, Newcastle
+     * slopes, mountain passes) the wheels sit at different Ys, so the
+     * scaled corners' XZ positions land at outer points where the ground
+     * polygon has continued its slope, but the corner Y stays at the
+     * INNER wheel value. The shadow plane is then SHALLOWER than the
+     * ground polygon — front corners end up buried below the ground
+     * mesh, rear corners hover above it. User symptom: "shadow clipping
+     * through the ground, tail end visible depending on angle".
+     *
+     * Scaling Y outward by the same SHADOW_CORNER_SCALE makes the shadow
+     * plane stay parallel to the wheel plane, which on a smooth slope
+     * lies along the ground polygon. Verified against orig 0x40C120
+     * (local_8c, local_80, local_68, local_5c all multiply by
+     * _g_wheelSuspensionRenderScale). */
     for (int i = 0; i < 4; i++) {
         corners[i][0] = cx + (corners[i][0] - cx) * SHADOW_CORNER_SCALE;
+        corners[i][1] = cy + (corners[i][1] - cy) * SHADOW_CORNER_SCALE;
         corners[i][2] = cz + (corners[i][2] - cz) * SHADOW_CORNER_SCALE;
     }
 
