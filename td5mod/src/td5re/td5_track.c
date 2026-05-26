@@ -5397,9 +5397,19 @@ int td5_track_parse_models_dat(const void *data, size_t size)
             } else if (f1_is_offset && !f0_is_offset) {
                 entry_offset = f1; entry_size = f0;  /* [size, offset] */
             } else if (f0_is_offset && f1_is_offset) {
-                /* Both valid — pick the one closer to table_end for first entry */
-                entry_offset = (f0 <= f1) ? f0 : f1;
-                entry_size = (f0 <= f1) ? f1 : f0;
+                /* [BUGFIX 2026-05-26 invisible-road] Both fields parse as
+                 * valid offsets — rare collision where the size field's
+                 * value happens to point to a dword in [1,256] (e.g. a
+                 * float bit-pattern or a vertex-count from some other
+                 * block). Prior code picked min(f0,f1) which selected the
+                 * false positive and pointed the renderer at junk geometry
+                 * → invisible road segments. Real-world hits: L016 entry
+                 * 314 (Edinburgh spans 1256-59), L017 entries 41/485/620
+                 * (Blue Ridge), L002 entries 134/162/393/436 (Sydney),
+                 * L014 entry 679. Always prefer f0: scan of all shipped
+                 * Pitbull MODELS.DAT (L001-L039) shows f0 is 100% monotonic
+                 * and 100% valid; zero entries actually use [size,offset]. */
+                entry_offset = f0; entry_size = f1;
             } else {
                 entry_offset = f0; entry_size = f1;  /* fallback */
             }
