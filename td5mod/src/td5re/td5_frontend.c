@@ -305,6 +305,12 @@ static int  s_snap_car, s_snap_paint, s_snap_trans, s_snap_config;
 /* Post-race name entry state (Screen [25]) */
 static int32_t s_post_race_score;       /* DAT_004951d0: player's score for qualification */
 static int     s_score_insert_pos;      /* 0-4: position in 5-entry table where insert goes */
+/* Snapshotted at NAME_ENTRY case 0 (race-end transition) so case 4 can
+ * insert non-zero values even if the actor pool has been torn down by
+ * the time we reach the insert step. Without these the inserted entry's
+ * AVG/TOP kph columns show 0 (user-reported 2026-05-26). */
+static int32_t s_post_race_top_speed;
+static int32_t s_post_race_avg_speed;
 static int  s_snap_opp_car, s_snap_opp_paint, s_snap_opp_trans, s_snap_opp_config;
 
 /* Masters roster (type 5): 15 random car slots, 6 marked AI */
@@ -2443,23 +2449,67 @@ static void frontend_handle_text_input_key(void) {
 }
 
 static void frontend_render_text_input(void) {
-    float text_x, caret_x;
     if (!s_text_input_ctx.buffer) return;
     frontend_handle_text_input_key();
 
-    /* Draw input box background */
-    frontend_fill_rect(0, 118, 290, 404, 40, 0xFF8C8C8C);
-    frontend_fill_rect(0, 120, 292, 400, 36, 0xE0101010);
+    /* All previous coords were raw 640x480 pixels; at higher resolutions
+     * everything mispositioned because frontend_fill_rect/fe_draw_text
+     * here did NOT receive the sx/sy scale that the rest of the frontend
+     * gets in td5_frontend_render_ui_rects. Compute scale locally so the
+     * input panel sits in the same canvas-relative location regardless of
+     * window size. [orig blits a baked 0x1C0×0x40 surface at (20, 104) via
+     * FUN_0041a530; port renders live with scaled rects + text.] */
+    int screen_w = 0, screen_h = 0;
+    td5_plat_get_window_size(&screen_w, &screen_h);
+    if (screen_w <= 0 || screen_h <= 0) return;
+    float sx = (float)screen_w / 640.0f;
+    float sy = (float)screen_h / 480.0f;
 
-    /* Draw text */
-    text_x = 128.0f;
-    fe_draw_text(text_x, 297.0f, s_text_input_ctx.buffer, 0xFFFFFFFF, 0.8f, 0.8f);
+    /* Canvas-relative panel (448×64 at 20,104) — matches orig surface dims. */
+    int panel_x = (int)(96.0f * sx);
+    int panel_y = (int)(280.0f * sy);
+    int panel_w = (int)(448.0f * sx);
+    int panel_h = (int)(80.0f * sy);
 
-    /* Blinking caret */
+    /* Panel background — solid opaque (orig surface had baked title + box). */
+    frontend_fill_rect(0, panel_x, panel_y, panel_w, panel_h, 0xFF202028);
+    frontend_fill_rect(0, panel_x + (int)(2.0f * sx), panel_y + (int)(2.0f * sy),
+                       panel_w - (int)(4.0f * sx), panel_h - (int)(4.0f * sy),
+                       0xFF8C8C8C);
+
+    /* Title "ENTER PLAYER NAME" centered above the input box.
+     * Orig SNK_EnterPlayerNameButTxt was baked into the surface; port
+     * renders live via the standard font. */
+    float ts_title = 0.7f;
+    fe_draw_text_centered((float)panel_x + (float)panel_w * 0.5f,
+                          (float)panel_y + 6.0f * sy,
+                          "ENTER PLAYER NAME",
+                          0xFFFFFFFF, sx * ts_title, sy * ts_title);
+
+    /* Input field — slightly inset, dark fill so light text reads cleanly. */
+    int field_x = panel_x + (int)(24.0f * sx);
+    int field_y = panel_y + (int)(36.0f * sy);
+    int field_w = panel_w - (int)(48.0f * sx);
+    int field_h = (int)(36.0f * sy);
+    frontend_fill_rect(0, field_x - (int)(1.0f * sx), field_y - (int)(1.0f * sy),
+                       field_w + (int)(2.0f * sx), field_h + (int)(2.0f * sy),
+                       0xFFFFFFFF);
+    frontend_fill_rect(0, field_x, field_y, field_w, field_h, 0xFF101018);
+
+    /* Typed text. Scale 0.8 matches prior port look but now relative to sx/sy. */
+    float text_x = (float)field_x + 8.0f * sx;
+    float text_y = (float)field_y + 5.0f * sy;
+    float ts_text = 0.85f;
+    fe_draw_text(text_x, text_y, s_text_input_ctx.buffer,
+                 0xFFFFFFFF, sx * ts_text, sy * ts_text);
+
+    /* Blinking caret — visible only while accepting input (state==1). */
     if (s_text_input_state == 1 &&
         (((td5_plat_time_ms() - s_text_input_ctx.blink_tick) / 350U) & 1U) == 0U) {
-        caret_x = text_x + (float)s_text_input_ctx.caret * 11.2f;
-        frontend_fill_rect(0, (int)caret_x, 297, 2, 22, 0xFFFFFFFF);
+        float caret_x = text_x + (float)s_text_input_ctx.caret * 11.2f * sx * ts_text;
+        frontend_fill_rect(0, (int)caret_x, field_y + (int)(4.0f * sy),
+                           (int)(2.0f * sx), field_h - (int)(8.0f * sy),
+                           0xFFFFFFFF);
     }
 }
 
@@ -5440,6 +5490,14 @@ void td5_frontend_render_ui_rects(void) {
         frontend_render_controller_binding_overlay(sx, sy);
         break;
     case TD5_SCREEN_HIGH_SCORE:
+        frontend_render_high_score_overlay(sx, sy);
+        break;
+    case TD5_SCREEN_NAME_ENTRY:
+        /* During NAME_ENTRY cases 6-12 we render the same score table the
+         * Records screen uses, pointed at the just-inserted group via
+         * s_score_category_index set in Screen_PostRaceNameEntry case 4.
+         * Without this dispatch the post-submit screen would stay blank
+         * between insert and slide-out (orig blits a baked surface here). */
         frontend_render_high_score_overlay(sx, sy);
         break;
     case TD5_SCREEN_EXTRAS_GALLERY:
@@ -9752,6 +9810,14 @@ static void Screen_PostRaceNameEntry(void) {
         TD5_LOG_D(LOG_TAG, "PostRaceNameEntry: qualification check, game_type=%d",
                   s_selected_game_type);
 
+        /* Snapshot speeds NOW while the actor pool is still alive — by the
+         * time case 4 fires (after name entry slide-in/typing/slide-out OR
+         * the direct !qualifies jump) the race teardown may have invalidated
+         * td5_game_get_actor(0), which would zero the avg/top columns in
+         * the inserted entry (user-reported 2026-05-26). */
+        s_post_race_top_speed = td5_game_get_result_top_speed(0);
+        s_post_race_avg_speed = td5_game_get_result_avg_speed(0);
+
         /* Compute group index for the high-score table.
          * Cup types 1-6: group = game_type + 0x13 (mirroring original case 0 at 0x413BCF).
          * Drag (type 7):  group = 0x13.
@@ -9919,15 +9985,25 @@ static void Screen_PostRaceNameEntry(void) {
                      * Non-cup: direct from slot 0 metrics.
                      * Cup: avg_speed = total / race count [CONFIRMED @ 0x00413D55-0x00413D70] */
                     if (s_selected_game_type < 1 || s_selected_game_type == 7) {
-                        e->avg_speed = td5_game_get_result_avg_speed(0);
-                        e->top_speed = td5_game_get_result_top_speed(0);
+                        e->avg_speed = s_post_race_avg_speed;
+                        e->top_speed = s_post_race_top_speed;
                     } else {
                         int race_count = (s_race_within_series > 0) ? s_race_within_series : 1;
-                        int32_t raw_avg = td5_game_get_result_avg_speed(0);
-                        e->avg_speed = raw_avg / race_count;
-                        e->top_speed = td5_game_get_result_top_speed(0);
+                        e->avg_speed = s_post_race_avg_speed / race_count;
+                        e->top_speed = s_post_race_top_speed;
                     }
                     s_score_insert_pos = ins_pos;
+                    /* Point the shared score-overlay at the just-inserted
+                     * group so the post-submit display (cases 5-12) renders
+                     * the user's new entry. Without this the overlay would
+                     * show whatever group was last viewed in the Records
+                     * screen (initialized to 0 at HIGH_SCORE entry). */
+                    s_score_category_index = ins_group;
+                    /* Unblock the overlay's `!s_anim_complete` early-return so
+                     * NAME_ENTRY cases 6+ can render the high-score table.
+                     * Without this the screen stays blank between insert and
+                     * slide-out (user-reported 2026-05-26). */
+                    s_anim_complete = 1;
 
                     TD5_LOG_I(LOG_TAG,
                               "PostRaceNameEntry: inserted '%s' score=%d at pos=%d in group=%d",

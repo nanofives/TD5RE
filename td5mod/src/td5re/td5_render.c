@@ -4143,15 +4143,14 @@ void td5_render_crossfade_surfaces(uint32_t *dst, const uint32_t *src_a,
  * reference to "the unread _g_wheelSuspensionRenderScale") and produced
  * shadows ~1.48x linear (~2.2x area) larger than the original. */
 #define SHADOW_CORNER_SCALE     (1.25f)
-#define SHADOW_VIEW_Y_OFFSET    (-22.0f)   /* [CONFIRMED @ 0x40C5CC] push shadow below car in view-space */
-/* Pull shadow corners ~2 world units closer to the camera in view-Z so the
- * LESSEQUAL depth test always passes against the track surface (which sits
- * at the same world Y as the wheel-contact corners and would otherwise
- * z-fight). 2.0 is small enough that opaque geometry between the camera and
- * the shadow (other cars, walls, props) still occludes correctly — vehicles
- * are several units thick in view space, so a 2u bias never lifts the
- * shadow in front of them. */
-#define SHADOW_VIEW_DEPTH_BIAS  (2.0f)
+/* [CORRECTED 2026-05-26] Orig 0x40C7E0 / 0x40C120 applies ZERO view-Y nudge
+ * and ZERO view-Z bias. _DAT_0048F070 (Y lift) and _DAT_0048DC48 (Z bias)
+ * are both 0.0f. The earlier -22.0f / +2.0f guess was a misread of an
+ * unrelated subtraction inside FUN_0040C120 and caused shadows to render
+ * below terrain on inclines ("clipping through ground"). Keeping these as
+ * 0.0f matches orig exactly. */
+#define SHADOW_VIEW_Y_OFFSET    (0.0f)
+#define SHADOW_VIEW_DEPTH_BIAS  (0.0f)
 
 static int   s_shadow_lookup_done = 0;
 static int   s_shadow_page        = -1;
@@ -4271,13 +4270,13 @@ static void render_vehicle_shadow_quad(const TD5_Actor *actor)
     cx *= 0.25f;
     cy *= 0.25f;
     cz *= 0.25f;
-    /* Flatten all corners to the centroid Y so the shadow lies flat on the
-     * ground regardless of slope. Without this, front/rear probe Y differences
-     * (e.g. 24-88 world units on AI cars) create a tilted quad that renders
-     * as tall diagonal streaks instead of a ground-hugging shadow. */
+    /* [CORRECTED 2026-05-26] Orig 0x40C7E0 keeps each corner at its own
+     * wheel-probe Y; the centroid-Y flatten was a workaround for "diagonal
+     * streaks" that turned out to come from the bogus -22 view-Y nudge.
+     * With that removed, per-corner probe Y is what makes the shadow follow
+     * uneven ground without clipping into terrain on slopes. */
     for (int i = 0; i < 4; i++) {
         corners[i][0] = cx + (corners[i][0] - cx) * SHADOW_CORNER_SCALE;
-        corners[i][1] = cy;
         corners[i][2] = cz + (corners[i][2] - cz) * SHADOW_CORNER_SCALE;
     }
 

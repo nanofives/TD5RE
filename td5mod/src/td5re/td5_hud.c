@@ -2850,7 +2850,22 @@ void td5_hud_render_minimap(int actor_slot)
             int b_near = near_idx + delta;
             int b_far  = far_idx  + delta;
 
-            if (b_near >= 0 && b_far >= 0 &&
+            /* Branch quad must stay strictly inside the branch's own range
+             * [seg_branch[K] .. seg_branch[K] + plen - 1]. The appended
+             * branch row's seg_end is br + plen — that index IS the join
+             * span (where branch reconverges with the post-segment mainline)
+             * and its vertex slot +0x06 encodes the join geometry, not a
+             * normal road span. Reading it produced stretched/skewed quads
+             * at branch start AND missing quads at branch end on the
+             * minimap (user-reported 2026-05-26). [orig parity: TBD via
+             * Frida on Parkway/Sydney; static-safe lower bound applied]. */
+            int plen     = (int)s_minimap_seg_end[cur_seg]
+                         - (int)s_minimap_seg_start[cur_seg];
+            int b_far_max = (int)s_minimap_seg_branch[cur_seg] + plen - 1;
+            if (b_far > b_far_max) b_far = b_far_max;
+
+            if (b_near <= b_far &&
+                b_near >= 0 && b_far >= 0 &&
                 b_near < g_strip_span_count &&
                 b_far  < g_strip_span_count) {
                 uint8_t *bsn = span_base + b_near * 24;
@@ -3020,6 +3035,58 @@ void td5_hud_render_minimap(int actor_slot)
             } else {
                 dot_u0 = s_minimap_dot_atlas_u + 16.5f; /* col 2: other (teal) [@ 0x45D720] */
             }
+            hud_build_quad(
+                &map_quad,
+                0, dot_tex,
+                dot_x - half_dot, dot_y - half_dot,
+                dot_x + half_dot, dot_y + half_dot,
+                dot_u0, s_minimap_dot_atlas_v,
+                dot_u0 + 7.0f,
+                s_minimap_dot_atlas_v + 7.0f,
+                0xFFFFFFFF,
+                HUD_DEPTH
+            );
+            hud_submit_quad(&map_quad);
+            dot_count++;
+        }
+    }
+
+    /* Traffic actor dots [orig RenderTrackMinimapOverlay @ 0x0043A220 second
+     * loop]. Orig walks the traffic pool (DAT_004ab304, stride 0x388) for
+     * count DAT_004aaf00, drawing teal dots (col 2 = atlas_u + 16.5) using
+     * the same world-to-minimap transform and ±144-span window as racers.
+     * Port previously omitted this loop entirely, so traffic vehicles were
+     * absent from the minimap. Traffic actors share the unified actor pool
+     * at slots TD5_MAX_RACER_SLOTS..total-1; mesh==NULL is the "slot
+     * inactive" indicator (matches the render path at td5_render.c:2185). */
+    int total_actors = td5_game_get_total_actor_count();
+    for (int t = TD5_MAX_RACER_SLOTS; t < total_actors && t < TD5_MAX_TOTAL_ACTORS; t++) {
+        if (!td5_render_get_vehicle_mesh(t))
+            continue;
+        int16_t traffic_span = actor_span_index(t);
+        int span_delta;
+        if (g_track_is_circuit) {
+            span_delta = ((g_strip_span_count / 2 - (int)traffic_span) + (int)player_span)
+                         % g_strip_span_count - g_strip_span_count / 2;
+        } else {
+            span_delta = (int)player_span - (int)traffic_span;
+        }
+        if (span_delta > -0x91 && span_delta < 0x91) {
+            float twx = (float)actor_world_x(t) * kFP + offset_x;
+            float twz = (float)actor_world_z(t) * kFP + offset_z;
+            float dmx = (twx * cos_h + twz * sin_h) * s_minimap_world_scale_x;
+            float dmy = (twz * cos_h - twx * sin_h) * s_minimap_world_scale_y;
+            float half_dot = s_minimap_dot_size * 0.5f;
+            float dot_x = mm_cx + dmx;
+            float dot_y = mm_cy + dmy;
+            if (dot_x + half_dot < s_minimap_x ||
+                dot_x - half_dot > s_minimap_x + s_minimap_width ||
+                dot_y + half_dot < s_minimap_y ||
+                dot_y - half_dot > s_minimap_y + s_minimap_height) {
+                continue;
+            }
+            int dot_tex = s_minimap_scandots_tex_page ? s_minimap_scandots_tex_page : HUD_WHITE_TEX_PAGE;
+            float dot_u0 = s_minimap_dot_atlas_u + 16.5f;  /* col 2: teal — orig "other" colour */
             hud_build_quad(
                 &map_quad,
                 0, dot_tex,

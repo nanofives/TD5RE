@@ -5934,14 +5934,21 @@ static void integrate_traffic_pose(TD5_Actor *actor)
             span, lane, actor->world_pos.x, actor->world_pos.z, surface_normal);
 
         /* Car height offset: signed int16 at car_definition + 0x86, shifted left 8.
-         * Original (Y-DOWN): `ADD [world_pos_y], ECX` with ECX = MOVSX cdef[0x86] << 8
-         * (negative → moves Y more negative → above ground in Y-DOWN).
+         * Original (Y-DOWN): `ADD [world_pos_y], ECX` with ECX = MOVSX cdef[0x86] << 8.
+         * Port runs Y-UP so the equivalent lift is a subtract.
          *
-         * Port renders with Y-UP convention (as shown by track normal Y-sign
-         * inversion required at line 3143 to get roll=0 on flat ground), so
-         * we SUBTRACT the raw offset to lift the car above ground. */
+         * compute_suspension_envelope @ 0x0042F8F4 writes cdef[0x86]:
+         *   - Racer  (slot<6): negative ((cd[0x42]-cd[0x82]) * -0.7070...)
+         *   - Traffic(slot>=6): positive (mesh max_y from vertex extents)
+         *
+         * This function is traffic-only, so cdef[0x86] is normally positive.
+         * Subtracting a positive value would SINK the traffic vehicle into
+         * the ground (user-reported "traffic clipping through ground"
+         * 2026-05-26). Use the magnitude so the lift direction matches
+         * racers regardless of the sign that compute_envelope chose. */
         if (actor->car_definition_ptr) {
             int32_t height_offset = (int32_t)CDEF_S(actor, 0x86) << 8;
+            if (height_offset > 0) height_offset = -height_offset;
             ground_y -= height_offset;
         }
 
