@@ -220,6 +220,10 @@ void Backend_Shutdown(void)
         ID3D11RasterizerState_Release(g_backend.rs_state);
         g_backend.rs_state = NULL;
     }
+    if (g_backend.rs_state_shadow_decal) {
+        ID3D11RasterizerState_Release(g_backend.rs_state_shadow_decal);
+        g_backend.rs_state_shadow_decal = NULL;
+    }
     for (i = 0; i < SAMP_STATE_COUNT; i++) {
         if (g_backend.sampler_states[i]) {
             ID3D11SamplerState_Release(g_backend.sampler_states[i]);

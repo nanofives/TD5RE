@@ -136,6 +136,12 @@ typedef struct {
     DWORD   alpha_ref;
     int     z_func;         /* 0=default(LESSEQUAL), 1=ALWAYS */
 
+    /* Polygon-offset selector — 0 = default rasterizer, 1 = shadow decal
+     * rasterizer (DepthBias + SlopeScaledDepthBias toward camera). Used to
+     * resolve z-fighting on co-planar shadow quads without forcing a
+     * constant depth bias that overshoots nearby occluders. */
+    int     polygon_offset;
+
     /* Fog state */
     int     fog_enable;
     DWORD   fog_color;      /* D3DCOLOR */
@@ -155,6 +161,7 @@ typedef struct {
     int     current_ds_idx;
     int     current_samp_idx;
     int     current_ps_idx;
+    int     current_rs_idx;     /* 0=default, 1=shadow decal */
 
     /* Dirty flag — set when any state changes, cleared after binding */
     int     dirty;
@@ -239,6 +246,7 @@ typedef struct {
     ID3D11BlendState        *blend_states[BLEND_STATE_COUNT];
     ID3D11DepthStencilState *ds_states[DS_STATE_COUNT];
     ID3D11RasterizerState   *rs_state;               /* CullNone, solid fill */
+    ID3D11RasterizerState   *rs_state_shadow_decal;  /* same + DepthBias + SlopeScaledDepthBias */
     ID3D11SamplerState      *sampler_states[SAMP_STATE_COUNT];
 
     /* Dynamic buffers for immediate-mode rendering */

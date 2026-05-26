@@ -4169,7 +4169,15 @@ void td5_render_crossfade_surfaces(uint32_t *dst, const uint32_t *src_a,
  * Reinstates the value first shipped in 055d9b3 (zeroed in a6e5072 on the
  * mistaken assumption that the depth-formula fix alone was sufficient). */
 #define SHADOW_VIEW_Y_OFFSET    (0.0f)
-#define SHADOW_VIEW_DEPTH_BIAS  (2.0f)
+/* Polygon offset now handled by the shadow-decal rasterizer state in the
+ * D3D11 wrapper (DepthBias + SlopeScaledDepthBias). Vertex-side biasing is
+ * left at zero: the projection is byte-identical to a track polygon at the
+ * same world position, and the GPU adapts the depth offset per pixel based
+ * on surface slope. Constant biases here couldn't satisfy both "win
+ * against co-planar ground" AND "lose against the car body 50 units up"
+ * simultaneously — the slope-scaled bias resolves that automatically. */
+#define SHADOW_VIEW_DEPTH_BIAS  (0.0f)
+#define SHADOW_DEPTH_Z_BIAS     (0.0f)
 
 static int   s_shadow_lookup_done = 0;
 static int   s_shadow_page        = -1;
@@ -4327,31 +4335,23 @@ static void render_vehicle_shadow_quad(const TD5_Actor *actor)
         float vy = dx * s_camera_basis[3] + dy * s_camera_basis[4] + dz * s_camera_basis[5];
         float vz = dx * s_camera_basis[6] + dy * s_camera_basis[7] + dz * s_camera_basis[8];
 
-        /* Push shadow down in view-space so it renders on the ground below
-         * the car, not at wheel-probe height. [CONFIRMED @ 0x40C5CC] */
         vy += SHADOW_VIEW_Y_OFFSET;
 
-        /* Bias shadow toward camera in view-Z so it passes the LESSEQUAL
-         * depth test against the track surface at identical world-Y (prevents
-         * z-fighting that motivated the previous z_test=0 workaround). The
-         * bias is small enough (~2 view units) that opaque geometry between
-         * the camera and the shadow still occludes correctly. */
-        vz -= SHADOW_VIEW_DEPTH_BIAS;
-
+        /* Near-clip check BEFORE any bias — bias must not push vz below
+         * near_clip and erroneously reject the shadow (the r3-r5 bug). */
         if (vz <= s_near_clip) return;
 
+        /* Projection uses RAW vz (no bias) so screen position is correct
+         * and matches the car/track projection exactly. */
         float inv_z = 1.0f / vz;
         verts[i].screen_x = -vx * s_focal_length * inv_z + s_center_x;
         verts[i].screen_y = -vy * s_focal_length * inv_z + s_center_y;
-        /* [FIX 2026-05-26 shadow-depth-formula] Match the track/mesh depth
-         * formula (vz - NEAR_DEPTH_OFFSET) * DEPTH_NORMALIZE_INV instead of
-         * vz / s_far_clip. Track polygons use the orig formula (line ~750);
-         * shadow used the simplified vz/65536 which always produced ~0.001
-         * MORE depth than the track at the same world point, so LEQUAL
-         * rejected the shadow against the track every frame except where
-         * perspective bent shadow corners forward of the track (the "tail
-         * end visible at angle" symptom the user reported). */
-        verts[i].depth_z  = (vz - NEAR_DEPTH_OFFSET) * DEPTH_NORMALIZE_INV;
+        /* Depth_z uses orig formula (matches track polys at line ~799),
+         * then a direct depth-space bias is subtracted to push the shadow
+         * toward the camera. Bias is applied here so it ONLY affects depth
+         * compare, not projection. */
+        verts[i].depth_z  = (vz - NEAR_DEPTH_OFFSET) * DEPTH_NORMALIZE_INV
+                            - SHADOW_DEPTH_Z_BIAS;
         verts[i].rhw      = inv_z;
         verts[i].diffuse  = 0xFFFFFFFFu;   /* white — alpha comes from texture */
         verts[i].specular = 0;

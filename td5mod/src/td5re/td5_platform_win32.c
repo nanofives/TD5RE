@@ -2277,6 +2277,9 @@ void td5_plat_render_set_preset(TD5_RenderPreset preset)
 {
     RenderStateCache *s = &g_backend.state;
 
+    /* Default to no polygon offset; the SHADOW preset opts in explicitly. */
+    s->polygon_offset = 0;
+
     switch (preset) {
     case TD5_PRESET_OPAQUE_ANISO:
         s->blend_enable = 0;
@@ -2372,17 +2375,22 @@ void td5_plat_render_set_preset(TD5_RenderPreset preset)
         break;
 
     case TD5_PRESET_SHADOW:
-        /* Shadow quads: same blend as TRANSLUCENT_POINT but with z_test ON
-         * and z_write OFF. Drawn AFTER car mesh so the car's depth occludes
-         * the shadow where they overlap. [CONFIRMED @ 0x40C120: original
-         * queues shadows into a deferred translucent sort list that renders
-         * after all opaque geometry with depth testing enabled.] */
+        /* Shadow quads — z_test LEQUAL, z_write OFF, plus the shadow-decal
+         * rasterizer state (DepthBias + SlopeScaledDepthBias toward camera).
+         * The polygon offset wins against co-planar ground polys (no flicker
+         * regardless of car speed) while staying small enough at separated
+         * geometry that opaque opponents / walls still occlude correctly.
+         * [r7 diagnostic with z_func=ALWAYS confirmed shadow rendered fine
+         *  on the road but drew over the car — proved depth-test was the
+         *  flicker cause and a constant bias couldn't satisfy both
+         *  "win-vs-ground" and "lose-vs-car" constraints simultaneously.] */
         s->blend_enable = 1;
         s->src_blend    = D3D6BLEND_SRCALPHA;
         s->dest_blend   = D3D6BLEND_INVSRCALPHA;
         s->z_enable     = 1;
         s->z_write      = 0;
-        s->z_func       = 0;
+        s->z_func       = 0;  /* LEQUAL */
+        s->polygon_offset    = 1;  /* shadow-decal rasterizer */
         s->mag_filter   = 0;
         s->min_filter   = 0;
         s->texblend_mode = D3DTBLEND_MODULATEALPHA;

@@ -507,6 +507,21 @@ static int Backend_CreateStateObjects(void)
         rd.AntialiasedLineEnable = FALSE;
         hr = ID3D11Device_CreateRasterizerState(dev, &rd, &g_backend.rs_state);
         if (FAILED(hr)) return 0;
+
+        /* Shadow-decal rasterizer: same params + polygon offset toward the
+         * camera. DepthBias is multiplied by the depth format's smallest
+         * representable unit (D24S8 → 1/2^24 ≈ 5.96e-8); SlopeScaledDepthBias
+         * is multiplied by max |∂z/∂x|, |∂z/∂y| per pixel.
+         *
+         * Values tuned 2026-05-26:
+         *   r9 -1000/-2.0 → too aggressive (shadow over car underbody)
+         *   r10 -100/-1.0 → too weak (flicker returns)
+         *   r11 -500/-1.5 → midpoint search */
+        rd.DepthBias            = -500;
+        rd.SlopeScaledDepthBias = -1.5f;
+        rd.DepthBiasClamp       = 0.0f;
+        hr = ID3D11Device_CreateRasterizerState(dev, &rd, &g_backend.rs_state_shadow_decal);
+        if (FAILED(hr)) return 0;
     }
 
     /* --- Sampler states --- */
@@ -1108,6 +1123,18 @@ void Backend_ApplyStateCache(void)
         if (di != s->current_ds_idx) {
             s->current_ds_idx = di;
             ID3D11DeviceContext_OMSetDepthStencilState(ctx, g_backend.ds_states[di], 0);
+        }
+    }
+
+    /* Rasterizer state — default vs shadow-decal (polygon offset for shadows). */
+    {
+        int ri = s->polygon_offset ? 1 : 0;
+        if (ri != s->current_rs_idx) {
+            s->current_rs_idx = ri;
+            ID3D11RasterizerState *target = ri ?
+                g_backend.rs_state_shadow_decal :
+                g_backend.rs_state;
+            ID3D11DeviceContext_RSSetState(ctx, target);
         }
     }
 
