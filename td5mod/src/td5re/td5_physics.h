@@ -51,6 +51,12 @@ void td5_physics_tick(void);
  * portion only — IntegrateVehiclePoseAndContacts intentionally omitted). */
 void td5_physics_run_paused_engine_step(void);
 
+/* Traffic-only physics for the skipped middle countdown sub-ticks. Orig runs
+ * traffic motion every sub-tick incl. countdown; the port's countdown gate runs
+ * the full physics tick only on the first + last 3 paused sub-ticks, so this
+ * integrates traffic (slots 6..11) on the middle ones. [FIX 2026-05-26] */
+void td5_physics_run_paused_traffic_step(void);
+
 /* --- Sub-tick render interpolation ---
  * The 30 Hz sim tick is decoupled from the render loop (typically 60+ Hz under
  * VSync), so between two ticks the renderer needs a smooth pose for everything

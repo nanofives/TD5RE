@@ -914,6 +914,37 @@ void td5_physics_run_paused_engine_step(void)
 }
 
 /* ========================================================================
+ * td5_physics_run_paused_traffic_step -- traffic-only physics on skipped
+ * middle countdown sub-ticks.
+ * ========================================================================
+ *
+ * [FIX 2026-05-26 traffic-countdown-stall] Orig runs traffic motion
+ * (UpdateTrafficActorMotion) EVERY sub-tick incl. the countdown, so orig
+ * traffic accelerates to speed before the race starts. The port's td5_game.c
+ * countdown gate calls the full td5_physics_tick() only on the first + last 3
+ * paused sub-ticks (to avoid over-integrating RACER pose on the middle ~117);
+ * on those skipped middle sub-ticks only the racer engine-RPM step ran, so
+ * traffic never integrated. This runs the traffic (slots 6..11) per-actor
+ * physics on those skipped sub-ticks so traffic integrates every countdown
+ * tick like orig. Racers are untouched here (engine step handles them). */
+void td5_physics_run_paused_traffic_step(void)
+{
+    if (!g_actor_table_base) return;
+
+    int total = td5_game_get_total_actor_count();
+    if (total <= 6) return;                 /* no traffic active */
+    if (total > TD5_MAX_TOTAL_ACTORS) total = TD5_MAX_TOTAL_ACTORS;
+
+    for (int slot = 6; slot < total; ++slot) {
+        TD5_Actor *actor = (TD5_Actor *)(g_actor_table_base + (size_t)slot * TD5_ACTOR_STRIDE);
+        if (!actor) continue;
+        /* td5_physics_update_vehicle_actor runs traffic friction + pose
+         * regardless of g_game_paused (slot>=6 branch at step 6). */
+        td5_physics_update_vehicle_actor(actor);
+    }
+}
+
+/* ========================================================================
  * Master dispatcher -- UpdateVehicleActor (0x406650)
  *
  * [CONFIRMED @ 0x00406650] Steps 1-8 (frame counter, ghost reset, speed
@@ -1043,7 +1074,25 @@ void td5_physics_update_vehicle_actor(TD5_Actor *actor)
         td5_physics_clamp_attitude(actor);
 
     /* 6. Dynamics dispatch */
-    if (actor->vehicle_mode == 0 && !g_game_paused) {
+    if (actor->vehicle_mode == 0 && actor->slot_index >= 6) {
+        /* Traffic friction (XZ + yaw + speed integration) runs EVERY sub-tick,
+         * INCLUDING the countdown (g_game_paused==1). [FIX 2026-05-26 traffic-
+         * countdown-stall] Orig dispatches traffic via UpdateRaceActors ->
+         * UpdateTrafficActorMotion (0x00443ED0 -> IntegrateVehicleFrictionForces
+         * 0x004438F0) with NO paused gate — Frida (pool8 + Moscow) shows orig
+         * traffic accelerating during the countdown (lspd 0->239->478... while
+         * paused=1). The port consolidated traffic into this dispatcher and
+         * gated it on !g_game_paused, so port traffic stayed at REST through the
+         * whole countdown, then started the race from 0 speed. With the close
+         * (1-span) route target, a stationary actor's target angle is unstable,
+         * so the steering controller wound up to the +/-0x18000 clamp before the
+         * actor could build speed -> stuck/spinning. Running friction during the
+         * countdown (like orig) lets speed + steering grow together, so traffic
+         * enters the race already moving and tracks the road. NOTE the td5_game.c
+         * countdown gate also runs td5_physics_run_paused_traffic_step() on the
+         * skipped middle sub-ticks so traffic integrates every countdown tick. */
+        td5_physics_update_traffic(actor);
+    } else if (actor->vehicle_mode == 0 && !g_game_paused) {
         /* Select effective grip: min of grip_reduction and race_position.
          * Listing 0x00406823-683D: AL=[+0x380]; CL=[+0x383]; if (CL < AL) AL=CL;
          * MOV [+0x380], AL.  Original WRITES the clamped result back to
@@ -1065,11 +1114,8 @@ void td5_physics_update_vehicle_actor(TD5_Actor *actor)
              * not `state != 0`. [Audit D13 — tightened 2026-05-14.] */
             td5_physics_update_player(actor);
         } else {
-            /* AI racer or traffic */
-            if (actor->slot_index < 6)
-                td5_physics_update_ai(actor);
-            else
-                td5_physics_update_traffic(actor);
+            /* AI racer (slot < 6). Traffic handled by the slot>=6 branch above. */
+            td5_physics_update_ai(actor);
         }
     } else if (actor->vehicle_mode == 1 && !g_game_paused) {
         /* 6b. Scripted recovery mode [CONFIRMED @ 0x00406881 / 0x00409BF0 + 0x00409D20]
@@ -5457,34 +5503,51 @@ static void tep_trace_emit(int32_t v0_x, int32_t v0_z,
  *
  * Returns (pen, edge_angle).  pen < 0 means outside the edge.
  */
-static int32_t traffic_edge_pen(int32_t v0_x, int32_t v0_z,
-                                 int32_t v1_x, int32_t v1_z,
-                                 int32_t car_x, int32_t car_z,
+/* Signed edge penetration for traffic containment — REWRITTEN 2026-05-26 to
+ * match orig ProcessActorSegmentTransition @ 0x00407390 (was a divergent
+ * parallel-projection re-impl that fired spuriously every tick → traffic
+ * locked, see reference_traffic_steer_saturation_2026-05-26).
+ *
+ * Edge runs A→B. Orig builds the rotated OUTWARD NORMAL
+ *   normal = (B.z - A.z, A.x - B.x)   [edge tangent rotated -90°]
+ * and normalizes it to length 4096 (ConvertFloatVec4ToShortAngles @ 0x0042CDB0
+ * = FPU x²+z²→FSQRT→4096/len→FMUL→ftol). Penetration is the signed
+ * perpendicular distance of the actor from the edge, minus the heading-folded
+ * car half-extent:
+ *   rel  = (actor_world>>8 - origin - A)
+ *   pen  = rel·normal - (sin_hd*half_w + cos_hd*half_l)
+ * pen < 0 ⇒ the car has crossed the edge → containment push.
+ * out_edge_angle = AngleFromVector12(B.z-A.z, B.x-A.x) for the push direction.
+ *
+ * Scale: rel is world units, normal is ×4096, so rel·normal is the perp
+ * distance ×4096; car_extent is (sin/cos ×4096)·half so also ×4096. No shift —
+ * matches orig (which leaves both at ×4096 and tests sign only). */
+static int32_t traffic_edge_pen(int32_t a_x, int32_t a_z,
+                                 int32_t b_x, int32_t b_z,
+                                 int32_t rel_x, int32_t rel_z,
                                  int32_t car_half_w, int32_t car_half_l,
                                  int32_t cos_hd, int32_t sin_hd,
                                  uint32_t *out_edge_angle)
 {
-    /* Edge direction: tangent from v0 to v1 */
-    int32_t tdx = v1_x - v0_x;
-    int32_t tdz = v1_z - v0_z;
+    if (out_edge_angle)
+        *out_edge_angle = (uint32_t)(atan2_fixed12(b_z - a_z, b_x - a_x) & 0xFFF);
 
-    /* Edge angle for ApplySimpleTrackSurfaceForce */
-    uint32_t angle = (uint32_t)(atan2_fixed12(tdz, tdx) & 0xFFF);
-    if (out_edge_angle) *out_edge_angle = angle;
+    /* Outward edge normal, normalized to length 4096. */
+    double dnx = (double)(b_z - a_z);
+    double dnz = (double)(a_x - b_x);
+    double len = sqrt(dnx * dnx + dnz * dnz);
+    int32_t nx = 0, nz = 0;
+    if (len >= 1.0) {
+        nx = (int32_t)(dnx * 4096.0 / len);
+        nz = (int32_t)(dnz * 4096.0 / len);
+    }
 
-    /* Normalized tangent components (4096-scale) */
-    int32_t tan_x = cos_fixed12((int32_t)angle);
-    int32_t tan_z = sin_fixed12((int32_t)angle);
-
-    /* Signed penetration [CONFIRMED @ 0x4073D8 / 0x407920]:
-     *   pen = (car_offset . tangent) - car_size  */
-    int32_t dot = (int32_t)(((int64_t)car_z * tan_z + (int64_t)car_x * tan_x) >> 12);
-    int32_t car_size = (int32_t)(((int64_t)sin_hd * car_half_w +
-                                   (int64_t)cos_hd * car_half_l) >> 12);
-    int32_t pen = dot - car_size;
+    int32_t proj       = rel_z * nz + rel_x * nx;
+    int32_t car_extent = sin_hd * car_half_w + cos_hd * car_half_l;
+    int32_t pen        = proj - car_extent;
 
     /* [TRACE 2026-05-24 traffic-edge-pen-cluster] mirror Frida orig probe */
-    tep_trace_emit(v0_x, v0_z, v1_x, v1_z, pen);
+    tep_trace_emit(a_x, a_z, b_x, b_z, pen);
 
     return pen;
 }
@@ -5597,32 +5660,27 @@ static void process_traffic_segment_edge(TD5_Actor *actor, int slot)
     int32_t rel_x = (actor->world_pos.x >> 8) - orig_x;
     int32_t rel_z = (actor->world_pos.z >> 8) - orig_z;
 
-    /* Inner edge test: sub_lane < 2  [CONFIRMED @ 0x407394: if (iVar12 < 2)] */
+    /* Inner edge test: sub_lane < 2  [CONFIRMED @ 0x407394: if (iVar12 < 2)]
+     * [FIX 2026-05-26] Orig 0x004073A4-0x004073B0: A=psVar1=right_vertex(+6),
+     * B=psVar2=left_vertex(+4), NO sub_lane offset (sub_lane is only the gate).
+     * Prior port added sub_lane to both indices (wrong). */
     if (sub_lane < 2) {
-        /* Inner boundary: left vertex[sub_lane] to right vertex[sub_lane]
-         *
-         * [DIVERGENCE NOTE 2026-05-18 audit, session a3a73a6d]
-         * Orig 0x004073A4-0x004073B0 reads `psVar1 = pool[strip[+0x06] * 6]`
-         * and `psVar2 = pool[strip[+0x04] * 6]` — NO sub_lane addition. The
-         * sub_lane is used only as the gate (iVar12 < 2). Port adds sub_lane
-         * to both indices below; this is a bug pending Frida-trace validation
-         * before fix. See Item 3 in
-         * todo_traffic_route_advance_lane_count_byte_2026-05-18.md */
-        int li_idx = (int)sp->left_vertex_index  + sub_lane;
-        int ri_idx = (int)sp->right_vertex_index + sub_lane;
-        TD5_StripVertex *vl = td5_track_get_vertex(li_idx);
-        TD5_StripVertex *vr = td5_track_get_vertex(ri_idx);
-        if (!vl || !vr) goto outer_test;
+        TD5_StripVertex *A = td5_track_get_vertex((int)sp->right_vertex_index);
+        TD5_StripVertex *B = td5_track_get_vertex((int)sp->left_vertex_index);
+        if (!A || !B) goto outer_test;
 
         /* [TRACE 2026-05-24 traffic-edge-pen-cluster] arm call_id=1a (inner) */
         tep_trace_arm("1a", slot, (int)actor->track_span_raw, sub_lane,
                        span_type, lane_count, rel_x, rel_z);
 
+        /* rel measured from edge endpoint A (orig dots from psVar1). */
+        int32_t arel_x = rel_x - (int32_t)A->x;
+        int32_t arel_z = rel_z - (int32_t)A->z;
         uint32_t edge_angle;
         int32_t pen = traffic_edge_pen(
-            (int32_t)vl->x, (int32_t)vl->z,
-            (int32_t)vr->x, (int32_t)vr->z,
-            rel_x, rel_z,
+            (int32_t)A->x, (int32_t)A->z,
+            (int32_t)B->x, (int32_t)B->z,
+            arel_x, arel_z,
             (int32_t)car_half_w, (int32_t)car_half_l,
             cos_hd, sin_hd,
             &edge_angle);
@@ -5636,62 +5694,42 @@ static void process_traffic_segment_edge(TD5_Actor *actor, int slot)
                 if (actor->clean_driving_score > 0) actor->clean_driving_score -= 1;
                 if (actor->clean_driving_score < 0) actor->clean_driving_score  = 0;
             }
-            /* Original calls UpdateTrafficVehiclePose again after push;
-             * the port's integrate_traffic_pose rebuilds the pose at the end
-             * of the tick anyway, so skip the redundant rebuild here. */
             return;
         }
     }
 
 outer_test:
-    /* Outer edge test: sub_lane >= lane_count - 2  [CONFIRMED @ 0x407462: if (iVar12 >= laneCount-2)] */
+    /* Outer edge test: sub_lane >= lane_count - 2  [CONFIRMED @ 0x407462]
+     * [FIX 2026-05-26] Orig outer 0x4074B4-0x4074F4:
+     *   A = psVar1 = vtx[DAT_004631a0[type] + left_vertex_index(+4) + lane_count]
+     *   B = psVar2 = vtx[DAT_004631a4[type](=0) + right_vertex_index(+6) + lane_count]
+     * Prior port had LEFT/RIGHT swapped. DAT_004631a0 = k_outer_left_offsets. */
     if (sub_lane >= lane_count - 2) {
-        /* Outer boundary vertices at lane_count (the nibble itself).
-         * Original outer test [CONFIRMED @ 0x4074B4-0x4074F4]:
-         *   psVar1 = vertex_pool[DAT_004631a0[span_type] + strip[+0x04] + uVar10]
-         *   psVar2 = vertex_pool[DAT_004631a4[span_type] + strip[+0x06] + uVar10]
-         *   where uVar10 = (strip[+0x03] & 0xF) = lane_count itself, NOT lane_count-1.
-         *
-         * [CORRECTION 2026-05-18 audit, session a3a73a6d] In port naming
-         * (td5_types.h:383-384): strip[+0x04] = left_vertex_index,
-         * strip[+0x06] = right_vertex_index. So orig psVar1 indexes from
-         * LEFT_vertex_index, psVar2 from RIGHT_vertex_index.
-         *
-         * Port code below has these SWAPPED: vl reads from right_vertex_index +
-         * k_outer_offset, vr reads from left_vertex_index. This is a residual
-         * outer-test vertex-pair swap bug (Item 3 [L4 — Frida-pending]).
-         *
-         * DAT_004631a4 is 0 for all 12 span types [CONFIRMED @ 0x004631A0].
-         * DAT_004631a0 values [CONFIRMED @ 0x004631A0]:
-         *   span_type: 0  1  2  3  4  5  6  7  8  9 10 11 */
         static const int8_t k_outer_left_offsets[12] = {
             0, 0, -1, -1, -2, 0, -1, 0, -1, 0, -1, -2
         };
-        /* [CONFIRMED @ 0x004073B0] outer_sub = lane_count nibble (NOT -1).
-         * Fixed 2026-05-18 (was `lane_count - 1` per L4 audit). */
-        int outer_sub = lane_count;
-        /* li (psVar1) uses right_vertex_index + offset; ri (psVar2) uses left_vertex_index + 0 */
-        int li_idx = k_outer_left_offsets[span_type] + (int)sp->right_vertex_index + outer_sub;
-        int ri_idx = (int)sp->left_vertex_index + outer_sub;
-        TD5_StripVertex *vl = td5_track_get_vertex(li_idx);
-        TD5_StripVertex *vr = td5_track_get_vertex(ri_idx);
-        if (!vl || !vr) return;
+        int a_idx = k_outer_left_offsets[span_type] + (int)sp->left_vertex_index  + lane_count;
+        int b_idx = (int)sp->right_vertex_index + lane_count;   /* DAT_004631a4 = 0 */
+        TD5_StripVertex *A = td5_track_get_vertex(a_idx);
+        TD5_StripVertex *B = td5_track_get_vertex(b_idx);
+        if (!A || !B) return;
 
         /* [TRACE 2026-05-24 traffic-edge-pen-cluster] arm call_id=1b (outer) */
         tep_trace_arm("1b", slot, (int)actor->track_span_raw, sub_lane,
                        span_type, lane_count, rel_x, rel_z);
 
+        int32_t arel_x = rel_x - (int32_t)A->x;
+        int32_t arel_z = rel_z - (int32_t)A->z;
         uint32_t edge_angle;
         int32_t pen = traffic_edge_pen(
-            (int32_t)vl->x, (int32_t)vl->z,
-            (int32_t)vr->x, (int32_t)vr->z,
-            rel_x, rel_z,
+            (int32_t)A->x, (int32_t)A->z,
+            (int32_t)B->x, (int32_t)B->z,
+            arel_x, arel_z,
             (int32_t)car_half_w, (int32_t)car_half_l,
             cos_hd, sin_hd,
             &edge_angle);
 
         if (pen < 0) {
-            TD5_LOG_I("physics", "seg_edge outer push slot=%d span=%d type=%d pen=%d", slot, (int)actor->track_span_raw, span_type, (int)pen);
             apply_simple_track_surface_force(actor, edge_angle, pen);
             /* DecayUltimateVariantTimer [CONFIRMED @ 0x0040A440] — same as inner-edge */
             if (g_td5.special_encounter_enabled == 4 && actor->finish_time == 0) {

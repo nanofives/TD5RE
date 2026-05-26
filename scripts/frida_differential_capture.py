@@ -69,6 +69,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import dataclasses
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional, Tuple
@@ -146,7 +147,7 @@ TARGETS = {
             "(0x004438F0 / port td5_physics_update_traffic). Snapshots traffic slots 6..11 "
             "(span, sub_lane, world_pos, lin_vel, euler_yaw, longitudinal_speed)."
         ),
-        track=1, car=0, player_is_ai=True, game_type=0,
+        track=0, car=0, player_is_ai=True, game_type=0,
         hook_script=TRAFFIC_JS,
         csv_header="binary,event,sim_tick,paused,slot,span_raw,span_norm,span_acc,"
                    "sub_lane,pos_x,pos_y,pos_z,lin_x,lin_y,lin_z,euler_yaw,ang_yaw,"
@@ -438,6 +439,37 @@ def capture_orig(target: Target, duration_s: float, out_csv: Path,
         proc = subprocess.Popen(cmd, cwd=str(PROJECT_ROOT),
                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                 text=True)
+
+        # Keep TD5_d3d.exe foregrounded for the whole run. The original PAUSES
+        # its entire frame loop (including the race countdown timer) when it is
+        # not the foreground window, so an unfocused quickrace-spawned window
+        # stays stuck at sim_tick=0 and never runs the race physics — traffic
+        # friction never fires. A background thread repeatedly raises the orig
+        # window so the countdown clears and the race actually runs.
+        import threading
+        _stop_focus = threading.Event()
+        def _focus_loop():
+            import time as _t
+            try:
+                import frida as _frida
+                dev = _frida.get_local_device()
+            except Exception:
+                dev = None
+            while not _stop_focus.is_set():
+                pid = None
+                if dev is not None:
+                    try:
+                        for p in dev.enumerate_processes():
+                            if p.name.lower() == "td5_d3d.exe":
+                                pid = p.pid; break
+                    except Exception:
+                        pid = None
+                if pid:
+                    focus_pid_window(pid, timeout_s=0.5)
+                _t.sleep(1.0)
+        _focus_thread = threading.Thread(target=_focus_loop, daemon=True)
+        _focus_thread.start()
+
         # Wait for capture to finish (capped by duration + boot grace).
         try:
             stdout, _ = proc.communicate(timeout=duration_s + 60)
@@ -452,6 +484,8 @@ def capture_orig(target: Target, duration_s: float, out_csv: Path,
             for line in stdout.splitlines():
                 print(f"[orig:qr] {line}")
     finally:
+        try: _stop_focus.set()
+        except Exception: pass
         try: os.unlink(tmp_path)
         except: pass
         # Belt-and-braces: kill any straggling original processes.
@@ -541,9 +575,14 @@ def main():
                     help="Capture port only (orig CSV must already exist).")
     ap.add_argument("--skip-port", action="store_true",
                     help="Capture orig only (port CSV must already exist).")
+    ap.add_argument("--track", type=int, default=None,
+                    help="Override the target's track index (e.g. 0=Moscow, "
+                         "1=Edinburgh, 2=Sydney). Default uses the target's own.")
     args = ap.parse_args()
 
     target = TARGETS[args.target]
+    if args.track is not None:
+        target = dataclasses.replace(target, track=args.track)
     print(f"=== Frida Differential Capture ===")
     print(f"Target:    {target.name}")
     print(f"  {target.description}")

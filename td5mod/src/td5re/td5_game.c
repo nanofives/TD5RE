@@ -2957,6 +2957,15 @@ int td5_game_run_race_frame(void) {
                      * orig's zero state during stationary countdown, which
                      * is the reason this gate exists. */
                     td5_physics_run_paused_engine_step();
+                    /* [FIX 2026-05-26 traffic-countdown-stall] Traffic (6..11)
+                     * MUST integrate every countdown sub-tick — orig runs
+                     * UpdateTrafficActorMotion unconditionally so traffic
+                     * accelerates during the countdown and enters the race at
+                     * speed. The engine step above is racer-only; this runs the
+                     * traffic friction+pose on the skipped middle sub-ticks.
+                     * Without it traffic starts the race from rest and the
+                     * steering controller deadlocks (Moscow stuck/spin). */
+                    td5_physics_run_paused_traffic_step();
                 }
             }
 

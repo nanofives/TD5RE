@@ -72,6 +72,45 @@ if (origMod) {
         fn_recycle       : ptr(0x004353B0),
         fn_friction      : ptr(0x004438F0),
     };
+    /* Force traffic ON in the original. InitializeRaceActorRuntime @ 0x00432E60
+     * computes g_racerCount (@0x004AAF00) from gTrafficActorsEnabled (@0x004AAD8C,
+     * read at 0x00432E8B as `MOV EAX,[0x004aad8c]`): racerCount = flag ? 12 : 6.
+     * The quickrace harness launches with traffic OFF (flag=0 → racerCount=6, no
+     * traffic spawn). Writing 1 at the function's ENTRY (before 0x00432E8B reads it)
+     * makes the original spawn 6 racers + 6 traffic, so we can capture orig traffic
+     * for the Moscow/Edinburgh/Sydney comparison. */
+    var FORCE_ORIG_TRAFFIC = true;  /* set false for no-force diagnostic */
+    if (FORCE_ORIG_TRAFFIC) {
+        /* Set traffic flag EARLY — at ConfigureGameTypeFlags (0x00410CA0)
+         * entry, before InitializeRaceSeriesSchedule builds the race series.
+         * For Single Race (game_type 0) ConfigureGameTypeFlags returns early
+         * without touching gTrafficActorsEnabled (0x004AAD8C = g_raceParticle
+         * PoolBase[0x1f0]._pad_1c[0]), so this survives. Setting it here makes
+         * the WHOLE session build for traffic (consistent). Forcing it LATE
+         * (at InitializeRaceActorRuntime) hung the race because the session was
+         * already built no-traffic. Re-assert at InitializeRaceSession's tail
+         * too in case the conditional disables at 0x0042ae4a/80 cleared it. */
+        Interceptor.attach(ptr(0x00410CA0), {
+            onEnter: function () { ptr(0x004AAD8C).writeS32(1); },
+            onLeave: function () { ptr(0x004AAD8C).writeS32(1); }
+        });
+    }
+    /* Heartbeat on UpdateRaceActors (0x00436A70) — confirms the gameplay loop
+     * runs (sim_tick advances, racerCount, paused). No per-frame forcing here:
+     * if the early flag-set works, racerCount becomes 12 naturally. */
+    var _ura_count = 0;
+    Interceptor.attach(ptr(0x00436A70), {
+        onEnter: function () {
+            _ura_count++;
+            if ((_ura_count % 30) === 1) {
+                send("[orig HB] UpdateRaceActors call#" + _ura_count +
+                     " sim_tick=" + ptr(0x004AADA0).readS32() +
+                     " racerCount=" + ptr(0x004AAF00).readS32() +
+                     " paused=" + ptr(0x004AAD60).readS32());
+            }
+        }
+    });
+    send("[orig: FORCE_ORIG_TRAFFIC=" + FORCE_ORIG_TRAFFIC + " (early flag-set @ ConfigureGameTypeFlags)]");
 } else if (portMod) {
     MODE = "port";
     MOD  = portMod;
