@@ -6063,6 +6063,42 @@ static void integrate_traffic_pose(TD5_Actor *actor)
     actor->render_pos.y = (float)actor->world_pos.y * (1.0f / 256.0f);
     actor->render_pos.z = (float)actor->world_pos.z * (1.0f / 256.0f);
 
+    /* 8. Refresh the 4 wheel-contact probes (+0x90..0xbc) from the car
+     * footprint + heading. [FIX 2026-05-26 traffic-shadow-misaligned]
+     * render_vehicle_shadow_quad (td5_render.c) reads probe_FL/FR/RL/RR to
+     * place the vehicle shadow. The orig refreshes these every tick inside
+     * UpdateTrafficVehiclePose @ 0x00443CF0 (transforms the car-def corner
+     * offsets through the render matrix into the probes), but the port's
+     * racer-only refresh_wheel_contacts never runs for traffic, so traffic
+     * shadows rendered from STALE probe positions (offset into another lane /
+     * invisible). Derive them here: 4 ground corners at (±half_w, ±half_l)
+     * rotated by heading, translated to world_pos, at ground Y. half_w =
+     * car_def+0x0C, half_l = car_def+0x08 (same fields the edge-containment
+     * uses). Yaw-only (flat-ground shadow) is sufficient; the orig's full-
+     * matrix transform only adds negligible pitch/roll tilt to a ground decal. */
+    if (actor->car_definition_ptr) {
+        int32_t half_w = (int32_t)CDEF_S(actor, 0x0C);
+        int32_t half_l = (int32_t)CDEF_S(actor, 0x08);
+        int32_t yaw12  = (actor->euler_accum.yaw >> 8) & 0xFFF;
+        int32_t ch = cos_fixed12(yaw12);
+        int32_t sh = sin_fixed12(yaw12);
+        /* model corners (lateral mx = ±half_w, longitudinal mz = ±half_l):
+         * FL=(-w,+l) FR=(+w,+l) RL=(-w,-l) RR=(+w,-l). Heading from +Z axis,
+         * CW positive: forward(+mz)→(mz·sin, mz·cos); right(+mx)→(mx·cos, -mx·sin). */
+        const int32_t mx[4] = { -half_w, +half_w, -half_w, +half_w }; /* FL,FR,RL,RR */
+        const int32_t mz[4] = { +half_l, +half_l, -half_l, -half_l };
+        TD5_Vec3_Fixed *pr[4] = {
+            &actor->probe_FL, &actor->probe_FR, &actor->probe_RL, &actor->probe_RR
+        };
+        for (int i = 0; i < 4; i++) {
+            int32_t wox = (mx[i] * ch + mz[i] * sh) >> 12;   /* world units */
+            int32_t woz = (-mx[i] * sh + mz[i] * ch) >> 12;
+            pr[i]->x = actor->world_pos.x + (wox << 8);       /* 24.8 FP */
+            pr[i]->y = actor->world_pos.y;
+            pr[i]->z = actor->world_pos.z + (woz << 8);
+        }
+    }
+
     /* Log once per 60 frames per slot for diagnostics */
     if ((actor->frame_counter % 60u) == 0u) {
         TD5_LOG_I(LOG_TAG, "traffic_pose: slot=%d span=%d y=%d roll=%d pitch=%d",
