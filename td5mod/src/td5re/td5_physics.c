@@ -676,27 +676,36 @@ int td5_physics_init(void)
      * NOTE: s_surface_friction is used for grip calc at line ~361,
      * despite the misleading variable name. Values from original binary. */
     {
-        static const int16_t k_grip_004748C0[16] = {
+        /* Full 32-entry table read from the binary at DAT_004748C0 (2026-05-26).
+         * Entries 16-31 are the ALTERNATE (off-strip/grass) surfaces returned by
+         * GetTrackSegmentSurfaceType's high-nibble path `(attr>>4)|0x10`. The
+         * port previously filled 16-31 with 0x0100 (full grip), so alternate
+         * surfaces wrongly had tarmac grip. Binary has them at 0xC0 (192). */
+        static const int16_t k_grip_004748C0[32] = {
             0x0100, 0x0100, 0x00DC, 0x00F0, 0x00FC, 0x00C0, 0x00B4, 0x0100,
-            0x0100, 0x0100, 0x00C8, 0x0100, 0x0100, 0x0100, 0x0100, 0x0100
+            0x0100, 0x0100, 0x00C8, 0x0100, 0x0100, 0x0100, 0x0100, 0x0100,
+            0x00C0, 0x00C0, 0x00C0, 0x00DC, 0x00C0, 0x0100, 0x00C0, 0x00C0,
+            0x00C0, 0x00C0, 0x00C0, 0x00C0, 0x00C0, 0x00C0, 0x00C0, 0x00C0
         };
-        for (int i = 0; i < 16; i++)
+        for (int i = 0; i < 32; i++)
             s_surface_friction[i] = k_grip_004748C0[i];
-        for (int i = 16; i < 32; i++)
-            s_surface_friction[i] = 0x0100;
     }
 
     /* Surface drag coefficients from DAT_00474900 (short[32]).
      * NOTE: s_surface_grip is used for drag/damping at line ~393. */
     {
-        static const int16_t k_drag_00474900[16] = {
+        /* Full 32-entry table read from the binary at DAT_00474900 (2026-05-26).
+         * Entries 16-31 (alternate/grass surfaces) carry drag 0x20 (32) in the
+         * binary; the port previously zeroed them, so alternate surfaces added
+         * no slowdown. */
+        static const int16_t k_drag_00474900[32] = {
             0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0002, 0x0000, 0x0000,
-            0x0000, 0x0000, 0x0008, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000
+            0x0000, 0x0000, 0x0008, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+            0x0020, 0x0020, 0x0020, 0x0020, 0x0020, 0x0010, 0x0020, 0x0020,
+            0x0020, 0x0020, 0x0020, 0x0020, 0x0020, 0x0020, 0x0020, 0x0020
         };
-        for (int i = 0; i < 16; i++)
+        for (int i = 0; i < 32; i++)
             s_surface_grip[i] = k_drag_00474900[i];
-        for (int i = 16; i < 32; i++)
-            s_surface_grip[i] = 0;
     }
 
     /* Gear torque multipliers from DAT_00467394 (dword[8] -> int16_t[16]).
@@ -1445,10 +1454,20 @@ void td5_physics_update_player(TD5_Actor *actor)
      * deflection. Original @ 0x004041AE uses center_suspension_pos directly
      * (no shift). Prior port divided by 16, which near-zeroed load transfer
      * and made grip front/rear symmetric under weight shift, killing the
-     * asymmetry that drives oversteer/understeer during cornering. [CONFIRMED] */
-    int32_t front_load = ((front_weight << 8) / total_weight);
+     * asymmetry that drives oversteer/understeer during cornering. [CONFIRMED]
+     *
+     * [FIX 2026-05-26] Weight terms were SWAPPED vs orig 0x00404030. The
+     * original feeds tuning[0x2a] (rear_weight) into the FRONT-axle grip load
+     * and tuning[0x28] (front_weight) into the REAR-axle grip load — bicycle-
+     * model static axle load is proportional to the OPPOSITE-axle CG term.
+     * The port previously fed front_weight into front_load, so on front-heavy
+     * cars (Wf>Wr, true for nearly every player car — e.g. 414/397, gto 490/410)
+     * the REAR axle got too little grip and slid at low provocation → premature
+     * oversteer/drift. AI cars were immune because their template has
+     * Wf==Wr==400, which is why AI regression sweeps never caught it. */
+    int32_t front_load = ((rear_weight << 8) / total_weight);
     front_load = front_load * (half_wb - susp_defl) / full_wb;
-    int32_t rear_load = ((rear_weight << 8) / total_weight);
+    int32_t rear_load = ((front_weight << 8) / total_weight);
     rear_load = rear_load * (half_wb + susp_defl) / full_wb;
 
     for (i = 0; i < 4; i++) {
