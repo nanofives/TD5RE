@@ -196,7 +196,8 @@ var COLS = [
     "pos_x", "pos_y", "pos_z",
     "lin_x", "lin_y", "lin_z",
     "euler_yaw", "ang_yaw",
-    "long_spd", "steer", "enc_steer"
+    "long_spd", "steer", "enc_steer",
+    "player_span"
 ];
 
 var fp = new File(OUTPUT_PATH, "w");
@@ -206,13 +207,17 @@ fp.flush();
 function emit(event, slot, s) {
     var tick   = ADDR.sim_tick.readS32();
     var paused = ADDR.paused.readS32();
+    /* Player (slot 0) span_normalized (+0x82) so we can measure player→traffic
+     * span gap over time (diagnose "traffic comes in earlier than orig"). */
+    var player_span = actorOf(0).add(O_SPAN_NORM).readS16();
     fp.write([
         BINARY_LABEL, event, tick, paused, slot,
         s.span_raw, s.span_norm, s.span_acc, s.sub_lane,
         s.pos_x, s.pos_y, s.pos_z,
         s.lin_x, s.lin_y, s.lin_z,
         s.euler_yaw, s.ang_yaw,
-        s.long_spd, s.steer, s.enc_steer
+        s.long_spd, s.steer, s.enc_steer,
+        player_span
     ].join(",") + "\n");
 }
 
