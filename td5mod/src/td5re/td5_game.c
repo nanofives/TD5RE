@@ -2044,6 +2044,24 @@ int td5_game_init_race_session(void) {
     td5_vfx_init_tracked_actor_marker_billboards();
     TD5_LOG_I(LOG_TAG, "InitRace step 14/19: VFX systems initialized");
 
+    /* ---- Step 14b: SECOND traffic fill ----
+     * The orig calls InitializeTrafficActorsFromQueue @ 0x00435940 TWICE
+     * during race setup [CONFIRMED @ 0x0042aa10 InitializeRaceSession +
+     * 0x00432e60 InitializeRaceActorRuntime — Ghidra function_callers]:
+     *   1st: inside InitializeRaceActorRuntime (port: td5_ai_init_race_actor_
+     *        runtime @ line 1637) — fills slots 6-11 from queue records 0-5
+     *        and advances the queue cursor 6 records.
+     *   2nd: directly in InitializeRaceSession, right after
+     *        InitializeWeatherOverlayParticles and before
+     *        ConfigureForceFeedbackControllers (this position) — re-fills the
+     *        SAME slots from queue records 6-11, so the in-race starting
+     *        traffic sits ~125 spans further down-track.
+     * The port previously only did the 1st fill, leaving traffic at records
+     * 0-5 (~125 spans too close to the player → "traffic spawns/encounters
+     * happen earlier than the original"). The function self-gates on
+     * g_racerCount <= 6, so a bare call is inert when traffic is disabled. */
+    td5_ai_init_traffic_actors();
+
     /* ---- Step 15: Configure force feedback + input mapping ---- */
     td5_input_set_active_players(g_td5.split_screen_mode > 0 ? 2 : 1);
     td5_input_ff_init();
