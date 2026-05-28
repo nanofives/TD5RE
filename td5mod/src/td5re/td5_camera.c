@@ -14,6 +14,7 @@
 #include "td5_hud.h"
 #include "td5_ai.h"     /* td5_compute_heading_delta */
 #include "td5re.h"
+#include "../../../re/include/td5_actor_struct.h"  /* TD5_TrackProbeState — camera terrain probes walk via td5_track_update_probe_position */
 
 #include <math.h>
 #include <stdlib.h>
@@ -641,10 +642,10 @@ static void terrain_probe_trace_ensure_open(void)
     if (s_terrain_probe_trace_fp) {
         fprintf(s_terrain_probe_trace_fp,
             "sim_tick,view,actor_slot,actor_span,actor_sub_lane,"
-            "pos_x,pos_z,combined_angle,"
+            "pos_x,pos_y,pos_z,combined_angle,"
             "point_ax,point_az,point_bx,point_bz,point_cx,point_cz,"
             "norm_a_y,norm_b_y,norm_c_y,"
-            "pitch_input,roll_input\n");
+            "pitch_input,roll_input,orient1_y,stored_pitch,cam_y_offset\n");
         fflush(s_terrain_probe_trace_fp);
     }
 }
@@ -675,12 +676,13 @@ static void terrain_probe_trace_emit(int view, int actor_addr,
     int actor_slot = actor_addr ? (int)*(unsigned char *)(actor_addr + 0x375) : -1;
     int actor_span = actor_addr ? (int)*(short *)(actor_addr + 0x80) : -1;
     int actor_sub  = actor_addr ? (int)*(signed char *)(actor_addr + 0x8C) : -1;
+    int actor_pos_y = actor_addr ? *(int *)(actor_addr + 0x200) : 0;
 
     fprintf(s_terrain_probe_trace_fp,
-        "%u,%d,%d,%d,%d,%d,%d,%u,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d\n",
+        "%u,%d,%d,%d,%d,%d,%d,%d,%u,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d\n",
         (unsigned)g_td5.simulation_tick_counter,
         view, actor_slot, actor_span, actor_sub,
-        pos_x, pos_z, combined_angle,
+        pos_x, actor_pos_y, pos_z, combined_angle,
         point_ax, point_az, point_bx, point_bz, point_cx, point_cz,
         norm_a_y, norm_b_y, norm_c_y,
         pitch_input, roll_input,
@@ -701,7 +703,7 @@ void UpdateChaseCamera(int actor, int do_track_heading, int view)
     unsigned int combined_angle;
     int cos_val, sin_val;
     int point_ax, point_az, point_bx, point_bz, point_cx, point_cz;
-    short probe_a[6], probe_b[6], probe_c[6];
+    TD5_TrackProbeState probe_a, probe_b, probe_c;
     int norm_a_y, norm_b_y, norm_c_y;
     int pos_x, pos_z;
     float terrain_matrix[12];
@@ -795,13 +797,20 @@ after_flyin:
     point_cx = pos_x + cos_val * 0x20;
     point_cz = pos_z + sin_val * -0x20;
 
-    /* Copy track probe state from actor */
-    probe_a[0] = *(short *)(actor + 0x80);
-    *(unsigned char *)&probe_a[5] = *(unsigned char *)(actor + 0x8C);
-    probe_b[0] = probe_a[0];
-    *(unsigned char *)&probe_b[5] = *(unsigned char *)&probe_a[5];
-    probe_c[0] = probe_a[0];
-    *(unsigned char *)&probe_c[5] = *(unsigned char *)&probe_a[5];
+    /* Seed all three camera terrain probes from the actor's current span +
+     * sub-lane, then let each walk to the span its own XZ lands in (below).
+     * The previous port used short[6] arrays and wrote sub_lane at byte 10 but
+     * ComputeActorTrackContactNormal reads it at byte 12 (OOB into the next
+     * probe). TD5_TrackProbeState puts span_index at +0x00 and sub_lane_index
+     * at +0x0C, so the walker and the contact-normal resolver agree on the
+     * layout and the sub-lane is read from the byte it was written to. The
+     * walker reads only span_index + sub_lane_index, so zero-init + these two
+     * fields matches the orig camera's span+sub_lane-only seed. (2026-05-28) */
+    memset(&probe_a, 0, sizeof(probe_a));
+    probe_a.span_index     = *(short *)(actor + 0x80);
+    probe_a.sub_lane_index = *(signed char *)(actor + 0x8C);
+    probe_b = probe_a;
+    probe_c = probe_a;
 
     {
         int pa[2], pb[2], pc[2];
@@ -809,14 +818,24 @@ after_flyin:
         pb[0] = point_bx; pb[1] = point_bz;
         pc[0] = point_cx; pc[1] = point_cz;
 
-        UpdateActorTrackPosition(probe_a, pa);
-        ComputeActorTrackContactNormal(probe_a, pa, &norm_a_y);
+        /* Walk each probe to the span that actually contains its XZ — orig
+         * UpdateActorTrackPosition (0x4440F0), one step per call (single_step),
+         * the same walker physics uses for laterally-offset body corners. The
+         * prior port stub (td5_track.c UpdateActorTrackPosition) only CLAMPED
+         * the actor's span, so points outside the actor's triangle (forward-
+         * left B / backward C on a slope) resolved to a sea-level default
+         * (~256 FP) while A read real altitude → a phantom ~44° downhill →
+         * the (byte-faithful) camera-Y arithmetic drove the chase camera below
+         * the ground. Walking lands all three on real geometry so pitch/roll
+         * reflect the true slope. (2026-05-28) */
+        td5_track_update_probe_position(&probe_a, point_ax, point_az);
+        ComputeActorTrackContactNormal((short *)&probe_a, pa, &norm_a_y);
 
-        UpdateActorTrackPosition(probe_b, pb);
-        ComputeActorTrackContactNormal(probe_b, pb, &norm_b_y);
+        td5_track_update_probe_position(&probe_b, point_bx, point_bz);
+        ComputeActorTrackContactNormal((short *)&probe_b, pb, &norm_b_y);
 
-        UpdateActorTrackPosition(probe_c, pc);
-        ComputeActorTrackContactNormal(probe_c, pc, &norm_c_y);
+        td5_track_update_probe_position(&probe_c, point_cx, point_cz);
+        ComputeActorTrackContactNormal((short *)&probe_c, pc, &norm_c_y);
     }
 
     /* Compute pitch and roll from the three terrain-contact normals and feed
