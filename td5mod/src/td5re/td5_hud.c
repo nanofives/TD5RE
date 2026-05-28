@@ -2455,6 +2455,69 @@ void td5_hud_render_overlays(float dt)
                            yaw_deg, pitch_deg, roll_deg);
         dbg_y += dbg_dy;
 
+        /* [ATTITUDE DIAG 2026-05-27] Ground-truth for "car not following the
+         * slope". display_angles.roll FIELD (+0x208) = front-rear-derived =
+         * the car's VISUAL PITCH; .pitch FIELD (+0x20C) = left-right = visual
+         * ROLL. Shown SIGNED in degrees (the YAW/PITCH/ROLL line above wraps
+         * negatives to ~348). The dz breakdown answers WHY: dzWheel = the pure
+         * wheel-plane front-rear slope (what the road demands); suspFR = the
+         * suspension squat/dive that gets ADDED in the solver; dzFull =
+         * dzWheel+suspFR = the numerator that becomes the displayed pitch.
+         * If on a downhill dzWheel is big but dzFull≈0 (suspFR cancels it),
+         * the squat is eating the slope. If pitch matches the road but the car
+         * still looks flat, it's render/camera, not the solver. */
+        {
+            int16_t disp_fr = *(int16_t *)(dbg_a + 0x208);   /* front-rear → visual pitch */
+            int16_t disp_lr = *(int16_t *)(dbg_a + 0x20C);   /* left-right → visual roll  */
+            int sfr = (((int)disp_fr + 2048) & 0xFFF) - 2048;
+            int slr = (((int)disp_lr + 2048) & 0xFFF) - 2048;
+            int fl = *(int32_t *)(dbg_a + 0xF0 + 0*12 + 4);
+            int fr = *(int32_t *)(dbg_a + 0xF0 + 1*12 + 4);
+            int rl = *(int32_t *)(dbg_a + 0xF0 + 2*12 + 4);
+            int rr = *(int32_t *)(dbg_a + 0xF0 + 3*12 + 4);
+            int s0 = *(int32_t *)(dbg_a + 0x2DC + 0);
+            int s1 = *(int32_t *)(dbg_a + 0x2DC + 4);
+            int s2 = *(int32_t *)(dbg_a + 0x2DC + 8);
+            int s3 = *(int32_t *)(dbg_a + 0x2DC + 12);
+            int dz_wheel = (fl + fr) - (rl + rr);
+            int susp_fr  = (s0 + s1) - (s2 + s3);
+            td5_hud_queue_text(0, 8, dbg_y, 0,
+                "ATT: pitch=%+ddeg roll=%+ddeg | dzWheel=%d suspFR=%d dzFull=%d",
+                sfr * 360 / 4096, slr * 360 / 4096,
+                dz_wheel, susp_fr, dz_wheel + susp_fr);
+            dbg_y += dbg_dy;
+        }
+
+        /* [WHEELGAP DIAG 2026-05-27] Per-wheel RENDERED world-Y minus GROUND
+         * contact-Y, in world units (÷256). Wheels render rigidly at
+         * render_pos + body_matrix*wheel_display_angles[w] (td5_render.c ~5054),
+         * so gap = render_wheel_y - ground_y; positive => that wheel floats
+         * above the road. Pins which wheels lift on slopes per orientation. */
+        {
+            float wpy = (float)(*(int32_t *)(dbg_a + 0x200)) / 256.0f;
+            /* body->world Y = ROW 1 of rotation matrix: m[3],m[4],m[5]
+             * (+0x12C/+0x130/+0x134). Matches the actual wheel render
+             * (mat3x4 out[1]) and orig 0x0042E2E0. Was reading COL 1
+             * (m[1],m[4],m[7]) → transposed, wrong gaps. [FIX 2026-05-27 PM-7] */
+            float m3 = *(float *)(dbg_a + 0x12C);
+            float m4 = *(float *)(dbg_a + 0x130);
+            float m5 = *(float *)(dbg_a + 0x134);
+            int gap[4];
+            for (int w = 0; w < 4; w++) {
+                int16_t wx = *(int16_t *)(dbg_a + 0x210 + w*8 + 0);
+                int16_t wy = *(int16_t *)(dbg_a + 0x210 + w*8 + 2);
+                int16_t wz = *(int16_t *)(dbg_a + 0x210 + w*8 + 4);
+                float rot_y    = m3*(float)wx + m4*(float)wy + m5*(float)wz;
+                float render_y = wpy + rot_y;
+                float ground_y = (float)(*(int32_t *)(dbg_a + 0xF0 + w*12 + 4)) / 256.0f;
+                gap[w] = (int)(render_y - ground_y);
+            }
+            td5_hud_queue_text(0, 8, dbg_y, 0,
+                "WHEELGAP(float+): FL=%d FR=%d RL=%d RR=%d",
+                gap[0], gap[1], gap[2], gap[3]);
+            dbg_y += dbg_dy;
+        }
+
         /* Speed: longitudinal + lateral (body-frame, 8.8 fp) */
         int32_t long_spd = *(int32_t *)(dbg_a + 0x314);
         int32_t lat_spd  = *(int32_t *)(dbg_a + 0x318);

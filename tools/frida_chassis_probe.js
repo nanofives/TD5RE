@@ -161,11 +161,13 @@ function resolveAddresses() {
         }
     }
     if (exp === null) {
-        // Last-resort: hardcoded RVA from nm (0x40bdd0 - 0x400000 = 0xbdd0).
+        // Last-resort: hardcoded RVA from nm (0x40be90 - 0x400000 = 0xbe90).
+        // NOTE: this RVA shifts every rebuild — re-fetch with
+        // `nm td5re.exe | grep _td5_physics_refresh_wheel_contacts` and update.
         // ASLR may shift module.base; compute as base + RVA.
         try {
-            exp = portMod.base.add(0xbdd0);
-            console.log("[chassis_probe] resolved via hardcoded RVA: 0xbdd0 -> " + exp);
+            exp = portMod.base.add(0xbe90);
+            console.log("[chassis_probe] resolved via hardcoded RVA: 0xbe90 -> " + exp);
         } catch (e) {
             console.log("[chassis_probe] hardcoded RVA fallback failed: " + e.message);
         }
@@ -180,8 +182,8 @@ function resolveAddresses() {
     // td5re.exe does not export these via the PE table; resolve from the
     // statically-known RVAs from nm.exe (s_actor_memory.24 @ 0x4f2800).
     try {
-        actorBase = portMod.base.add(0xf2800);
-        console.log("[chassis_probe] actor_base via hardcoded RVA: 0xf2800 -> " + actorBase);
+        actorBase = portMod.base.add(0xf3800);
+        console.log("[chassis_probe] actor_base via hardcoded RVA: 0xf3800 -> " + actorBase);
     } catch (e) {
         console.log("[chassis_probe] actor_base RVA fallback failed: " + e.message);
     }

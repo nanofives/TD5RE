@@ -928,9 +928,21 @@ void td5_input_update_player_control(int slot)
                               s_steering_cmd[slot], bits,
                               (bits & TD5_INPUT_ANALOG_X_FLAG) ? 1 : 0);
                 }
-                s_throttle[slot] = 0x100;
                 s_steering_cmd[slot] = 0;
-                s_brake[slot] = 0;
+                /* AutoThrottleStopSpan: once slot 0 reaches the target span,
+                 * brake to a full stop so the car settles STATIONARY on the
+                 * slope — for a clean at-rest WHEELGAP capture (the moving
+                 * capture is contaminated by accel-bounce). 0 = drive forever. */
+                int stop_span = g_td5.ini.auto_throttle_stop_span;
+                int cur_span  = (int)*(int16_t *)(a + 0x80);
+                if (stop_span > 0 && cur_span >= stop_span) {
+                    s_throttle[slot] = 0;
+                    s_brake[slot]    = 0x100;
+                } else {
+                    s_throttle[slot] = g_td5.ini.auto_throttle_value
+                                           ? (int16_t)g_td5.ini.auto_throttle_value : 0x100;
+                    s_brake[slot]    = 0;
+                }
             } else if (slot == 0) {
                 static uint32_t s_at_log2 = 0;
                 if ((s_at_log2++ % 60u) == 0u) {

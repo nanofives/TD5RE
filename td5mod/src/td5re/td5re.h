@@ -242,6 +242,8 @@ typedef struct TD5_GlobalState {
          * [TRACE 2026-05-25 terrain-pitch-roll-zeroed OVERSIGHT row] */
         int  trace_terrain_cam_probe;
         int  auto_throttle;         /* 1 = force full throttle for slot 0 */
+        int  auto_throttle_value;   /* throttle magnitude under AutoThrottle (0=full 0x100) */
+        int  auto_throttle_stop_span; /* AutoThrottle brakes to a stop at this span (0=off) */
         float trace_fast_forward;   /* Speed multiplier during trace capture.
                                      * 1.0 = real-time (default), 2.0 = 2x,
                                      * 0.5 = half-speed, N = Nx. Implemented by

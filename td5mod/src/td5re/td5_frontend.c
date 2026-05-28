@@ -3930,7 +3930,7 @@ static void fe_draw_option_arrows(int btn_idx, float sx, float sy) {
 
 static void frontend_render_game_options_overlay(float sx, float sy) {
     const char *on_off[] = { "OFF", "ON" };
-    const char *difficulty[] = { "EASY", "MEDIUM", "HARD" };
+    const char *difficulty[] = { "EASY", "NORMAL", "HARD" };  /* orig middle label: NORMAL */
     const char *dynamics[] = { "SIMULATION", "ARCADE" };
     char laps[16];
     if (!s_buttons[0].active) return;
@@ -5676,7 +5676,6 @@ void td5_frontend_render_ui_rects(void) {
         case TD5_SCREEN_QUICK_RACE:
             fe_draw_option_arrows(0, sx, sy);
             fe_draw_option_arrows(1, sx, sy);
-            TD5_LOG_I("frontend", "fe_draw_option_arrows: quick_race pass");
             break;
         case TD5_SCREEN_GAME_OPTIONS:
             for (int i = 0; i <= 6; i++) fe_draw_option_arrows(i, sx, sy);
@@ -5689,6 +5688,23 @@ void td5_frontend_render_ui_rects(void) {
             break;
         case TD5_SCREEN_TWO_PLAYER_OPTIONS:
             for (int i = 0; i <= 1; i++) fe_draw_option_arrows(i, sx, sy);
+            break;
+        case TD5_SCREEN_CAR_SELECTION:
+            /* orig 0x40DFC0: arrows on Car(0) and Paint(1) only */
+            fe_draw_option_arrows(0, sx, sy);
+            fe_draw_option_arrows(1, sx, sy);
+            break;
+        case TD5_SCREEN_TRACK_SELECTION:
+            /* The track overlay draws arrows BEFORE the button fill, so the
+             * highlighted selector's arrows get painted over. Re-draw button 0
+             * (Track) here, post-fill, so the highlighted Track keeps its arrows
+             * (Forwards/button 1 is non-highlighted, so its overlay arrows show). */
+            fe_draw_option_arrows(0, sx, sy);
+            break;
+        case TD5_SCREEN_CONTROL_OPTIONS:
+            /* orig 0x41DF20: arrows on Player1(0) and Player2(2) device selectors */
+            fe_draw_option_arrows(0, sx, sy);
+            fe_draw_option_arrows(2, sx, sy);
             break;
         default:
             break;
@@ -7486,7 +7502,7 @@ static void Screen_GameOptions(void) {
         frontend_create_button("Circuit Laps",      -0x128, 0, 0x128, 0x20); /* 0x41fa1d: width=0x128 */
         frontend_create_button("Checkpoint Timers", -0x128, 0, 0x128, 0x20);
         frontend_create_button("Traffic",           -0x128, 0, 0x128, 0x20);
-        frontend_create_button("Cops",              -0x128, 0, 0x128, 0x20);
+        frontend_create_button("Police",            -0x128, 0, 0x128, 0x20); /* orig label: POLICE */
         frontend_create_button("Difficulty",        -0x128, 0, 0x128, 0x20);
         frontend_create_button("Dynamics",          -0x128, 0, 0x128, 0x20);
         frontend_create_button("3D Collisions",     -0x128, 0, 0x128, 0x20);
@@ -7845,7 +7861,7 @@ static void Screen_TwoPlayerOptions(void) {
         /* [CONFIRMED @ 0x420d22]: SNK_SplitScreenButTxt at x=-0x100, width=0x100 */
         frontend_create_button("Split Screen", -0x100, 0, 0x100, 0x20);
         /* [CONFIRMED @ 0x420d33]: SNK_CatchupTxt at x=-0x100, width=0x100 */
-        frontend_create_button("Catch-Up",    -0x100, 0, 0x100, 0x20);
+        frontend_create_button("Catchup",     -0x100, 0, 0x100, 0x20); /* orig label: CATCHUP (no hyphen) */
         /* [CONFIRMED @ 0x420d43]: SNK_OkButTxt at x=-0x100, width=0x60 */
         frontend_create_button("OK",          -0x100, 0, 0x60,  0x20);
         s_anim_tick = 0;

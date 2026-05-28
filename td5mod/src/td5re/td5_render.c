@@ -2319,6 +2319,14 @@ void td5_render_actors_for_view(int view_index)
              * Order: [roll+0x208, yaw+0x20A, pitch+0x20C] → BuildRotationMatrixFromAngles.
              * [CONFIRMED: scale=1/256 @ DAT_004749D0; field order @ 0x40C1E2] */
             if (actor->vehicle_mode != 0) {
+                if (slot == 0) {
+                    static int s_ratt2 = 0;
+                    if ((s_ratt2++ % 30) == 0)
+                        TD5_LOG_I("physics",
+                            "RENDERATT slot0 vmode=%d (PHYSICS matrix direct): disp[roll=%d pitch=%d]",
+                            (int)actor->vehicle_mode,
+                            (int)actor->display_angles.roll, (int)actor->display_angles.pitch);
+                }
                 mat3x3_mul(s_camera_basis, actor->rotation_matrix.m, view_rot.m);
             } else {
                 extern float g_subTickFraction;
@@ -2328,6 +2336,23 @@ void td5_render_actors_for_view(int view_index)
                 interp[0] = actor->display_angles.roll  + (short)(int)(actor->angular_velocity_roll  * ifrac + 0.5f);
                 interp[1] = actor->display_angles.yaw   + (short)(int)(actor->angular_velocity_yaw   * ifrac + 0.5f);
                 interp[2] = actor->display_angles.pitch + (short)(int)(actor->angular_velocity_pitch * ifrac + 0.5f);
+                /* [RENDERATT DIAG 2026-05-27] Does the RENDER attitude (interp,
+                 * after sub-tick extrapolation) match the PHYSICS attitude
+                 * (display_angles)? If interp diverges (esp. interp[0]=front-rear
+                 * vs disp_roll), the sub-tick interpolation is flattening the car
+                 * vs the slope. Slot 0 only, rate-limited. */
+                if (slot == 0) {
+                    static int s_ratt = 0;
+                    if ((s_ratt++ % 30) == 0) {
+                        TD5_LOG_I("physics",
+                            "RENDERATT slot0: interp[roll=%d pitch=%d] disp[roll=%d pitch=%d] "
+                            "angvel[roll=%d pitch=%d] subfrac=%.4f ifrac=%.5f",
+                            (int)interp[0], (int)interp[2],
+                            (int)actor->display_angles.roll, (int)actor->display_angles.pitch,
+                            (int)actor->angular_velocity_roll, (int)actor->angular_velocity_pitch,
+                            (double)g_subTickFraction, (double)ifrac);
+                    }
+                }
                 BuildRotationMatrixFromAngles(interp_mat, interp);
                 mat3x3_mul(s_camera_basis, interp_mat, view_rot.m);
             }
@@ -5964,14 +5989,37 @@ void BuildRotationMatrixFromAngles(float *out, short *angles) {
     out[3] = 0.0f; out[4] = 1.0f; out[5] = 0.0f;
     out[6] = 0.0f; out[7] = 0.0f; out[8] = 1.0f;
 
-    /* Yaw (angles[1]): rotate around Y axis */
-    s = CosFloat12bit((unsigned int)(unsigned short)angles[1]);
-    c = SinFloat12bit(angles[1]);
-    rot[4] = 1.0f;
-    rot[3] = 0.0f; rot[5] = 0.0f;
-    rot[1] = 0.0f; rot[7] = 0.0f;
-    rot[0] = s;  rot[8] = s;
-    rot[2] = c;  rot[6] = -c;
+    /* [FIX 2026-05-27 PM-12 — matrix rotation ORDER reversed]
+     * Decomp of orig BuildRotationMatrixFromAngles @ 0x0042E1E0 (closed-form)
+     * produces Ry(a1)·Rx(a0)·Rz(a2) (yaw·pitch·roll). Working out the elements:
+     *   M[5]=-sin(a0)   M[8]=cos(a1)*cos(a0)   M[2]=sin(a1)*cos(a0)
+     *   M[3]=sin(a2)*cos(a0)   M[4]=cos(a2)*cos(a0)
+     * all match Ry·Rx·Rz exactly.
+     *
+     * The previous port applied Yaw then Pitch then Roll (each as out = rot·out),
+     * which builds Rz·Rx·Ry — the REVERSE order. Same display_angles, same trig
+     * helpers, but a different final matrix. Physics solvers (attitude_from_wheels)
+     * use raw contacts so the numeric attitude matched the orig; but every render
+     * of the car body and the wheel billboards uses this matrix, so the orig saw
+     * Ry·Rx·Rz and the port saw Rz·Rx·Ry → the rendered orientation differed even
+     * though every diagnostic that re-multiplied through the same wrong matrix
+     * agreed with itself (the data-matches-but-visual-differs paradox).
+     *
+     * To match the orig, apply Roll FIRST, then Pitch, then Yaw:
+     *   out = I
+     *   out = Rz · out          (after roll block)
+     *   out = Rx · out  = Rx·Rz (after pitch block)
+     *   out = Ry · out  = Ry·Rx·Rz   ✓ matches orig
+     */
+
+    /* Roll (angles[2]): rotate around Z axis */
+    s = CosFloat12bit((unsigned int)(unsigned short)angles[2]);
+    c = SinFloat12bit(angles[2]);
+    rot[8] = 1.0f;
+    rot[2] = 0.0f; rot[5] = 0.0f;
+    rot[6] = 0.0f; rot[7] = 0.0f;
+    rot[0] = s;  rot[4] = s;
+    rot[3] = c;  rot[1] = -c;
     MultiplyRotationMatrices3x3(rot, out, out);
 
     /* Pitch (angles[0]): rotate around X axis */
@@ -5984,14 +6032,14 @@ void BuildRotationMatrixFromAngles(float *out, short *angles) {
     rot[7] = c;  rot[5] = -c;
     MultiplyRotationMatrices3x3(rot, out, out);
 
-    /* Roll (angles[2]): rotate around Z axis */
-    s = CosFloat12bit((unsigned int)(unsigned short)angles[2]);
-    c = SinFloat12bit(angles[2]);
-    rot[8] = 1.0f;
-    rot[2] = 0.0f; rot[5] = 0.0f;
-    rot[6] = 0.0f; rot[7] = 0.0f;
-    rot[0] = s;  rot[4] = s;
-    rot[3] = c;  rot[1] = -c;
+    /* Yaw (angles[1]): rotate around Y axis */
+    s = CosFloat12bit((unsigned int)(unsigned short)angles[1]);
+    c = SinFloat12bit(angles[1]);
+    rot[4] = 1.0f;
+    rot[3] = 0.0f; rot[5] = 0.0f;
+    rot[1] = 0.0f; rot[7] = 0.0f;
+    rot[0] = s;  rot[8] = s;
+    rot[2] = c;  rot[6] = -c;
     MultiplyRotationMatrices3x3(rot, out, out);
 }
 

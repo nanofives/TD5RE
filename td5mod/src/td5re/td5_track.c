@@ -2598,6 +2598,52 @@ static int64_t compound_cross(const TD5_StripSpan *sp,
 }
 
 /**
+ * Secondary forward/back edge retest shared by the single-bit lateral cases
+ * 2 (RIGHT) and 8 (LEFT). After the primary lateral step lands the probe on
+ * `new_span` at `*sub_lane`, the orig (0x004445f4-0x004449c0 case 2 /
+ * 0x00444e10-0x00445031 case 8) re-tests the new span's forward and backward
+ * quad edges and nudges the sub-lane by ±1 if the position is past one of
+ * them. Both cases use the IDENTICAL test (verified against the orig decomp);
+ * only the primary span step (+1 vs -1) differs, so it lives here once.
+ *
+ * Skipping this retest left laterally-offset wheels one sub-lane short, so on
+ * graded road the left and right wheels sampled different ground heights →
+ * false roll → camera/chassis wobble (Honolulu 2026-05-27).
+ */
+static void walker_lateral_secondary_retest(int new_span, int *sub_lane,
+                                            int32_t pos_x, int32_t pos_z)
+{
+    int span_count = td5_track_get_span_count();
+    if (new_span < 0 || new_span >= span_count) return;
+    TD5_StripSpan *nsp = &s_span_array[new_span];
+    int nt = (nsp->span_type >= 0 && nsp->span_type < 12) ? nsp->span_type : 0;
+    int lc_new = span_lane_count(nsp);
+    int sub = *sub_lane;
+    int e40_base = (int)nsp->left_vertex_index  + k_quad_vertex_offsets[nt][0];
+    int e41_base = (int)nsp->right_vertex_index + k_quad_vertex_offsets[nt][1];
+
+    /* Edge mask: orig starts 0xF, replaces with first-lane mask when at lane 0,
+     * ANDs last-lane mask when at the final lane (0x004445d0-0x004445f3). */
+    uint8_t mask = 0x0F;
+    if (sub < 1) mask = s_edge_mask_first[nt];
+    if (lc_new - 1 <= sub) mask &= s_edge_mask_last[nt];
+
+    /* FWD edge (bit 1): cross of (e41[sub] → e40[sub]) vs pos > 0 → sub -= 1. */
+    if ((mask & 0x01) &&
+        compound_cross(nsp, e41_base + sub, e40_base + sub, pos_x, pos_z) > 0) {
+        *sub_lane = sub - 1;
+        return;
+    }
+    /* BACK edge (bit 4): cross of (e40[sub+1] → e41[sub+1]) vs pos > 0 → sub += 1. */
+    if ((mask & 0x04) &&
+        compound_cross(nsp, e40_base + 1 + sub, e41_base + 1 + sub, pos_x, pos_z) > 0) {
+        *sub_lane = sub + 1;
+        return;
+    }
+    /* else: leave sub_lane unchanged (orig LAB_0044501a). */
+}
+
+/**
  * Iterative boundary traversal matching original FUN_004440f0 switch logic.
  * Handles compound crossings (diagonal movement) in a single step.
  * Bitmask: bit0=forward(1), bit1=right(2), bit2=backward(4), bit3=left(8).
@@ -2666,30 +2712,57 @@ static void update_position_recursive(int16_t *track_state, int32_t pos_x, int32
             break; /* Actor is within the current quad */
 
         switch (bits) {
-        case 1: { /* Forward */
+        case 1: { /* Forward — orig 0x004440F0 is a 3-WAY decision, not an
+                   * unconditional advance (DA-T2 Fix 1, applied 2026-05-27).
+                   * After the forward-edge crossing the orig retests the
+                   * CURRENT span's right/left diagonals (0x0044436d-0x004445ad):
+                   *   RIGHT secondary passes → forward step (current behavior)
+                   *   else no LEFT cross      → STAY (sub-1, no span change)
+                   *   else                    → backward step (left diagonal)
+                   * The port previously always advanced forward, so a wheel
+                   * grazing the forward edge over-advanced a full span; the
+                   * left/right wheels then sampled different ground heights →
+                   * false roll wobble (Honolulu, worse under human steering). */
             int prev_type = s_span_array[span_idx].span_type;
-            new_span = resolve_neighbor(span_idx, &sub_lane, 0x01, pos_x, pos_z);
+            TD5_StripSpan *csp = &s_span_array[span_idx];
+            int cur_type = (prev_type >= 0 && prev_type < 12) ? prev_type : 0;
+            int ce40 = (int)csp->left_vertex_index  + k_quad_vertex_offsets[cur_type][0];
+            int ce41 = (int)csp->right_vertex_index + k_quad_vertex_offsets[cur_type][1];
+            uint8_t m = 0x0F;
+            if (sub_lane <= 1) m = s_edge_mask_first[cur_type];
+
+            if ((m & 0x02) &&
+                compound_cross(csp, ce41 + sub_lane, ce41 + sub_lane - 1, pos_x, pos_z) > 0) {
+                /* FORWARD step (orig forward path). */
+                new_span = resolve_neighbor(span_idx, &sub_lane, 0x01, pos_x, pos_z);
+                span_idx = new_span;
+                track_state[0] = (int16_t)new_span;
+                track_state[2]++;
+                if (track_state[2] > track_state[3]) track_state[3] = track_state[2];
+                sub_lane -= 1;
+                if (prev_type == 8) { ((int8_t *)track_state)[12] = (int8_t)sub_lane; return; }
+                compound_done = 1;
+                break;
+            }
+            if ((m & 0x08) == 0 ||
+                compound_cross(csp, ce40 + sub_lane - 1, ce40 + sub_lane, pos_x, pos_z) <= 0) {
+                /* STAY — no span change (orig sub_lane = cVar15 - 1). */
+                sub_lane -= 1;
+                compound_done = 1;
+                break;
+            }
+            /* BACKWARD step (left diagonal); forward-convention post-adjust (-1). */
+            new_span = resolve_neighbor(span_idx, &sub_lane, 0x04, pos_x, pos_z);
             span_idx = new_span;
             track_state[0] = (int16_t)new_span;
-            track_state[2]++;
-            if (track_state[2] > track_state[3])
-                track_state[3] = track_state[2];
-            /* Original appends -1 to sub_lane post-step unconditionally,
-             * including for junction (type 8) transitions.
-             * [CONFIRMED @ 0x004440F0 case 0x01: `cVar15 + ... + (-1)`]
-             * resolve_neighbor now uses the running sub_lane (not geometric
-             * projection) so the -1 applies cleanly.  The early return keeps
-             * single-step semantics matching the original — negative stored
-             * values are clamped to 0 at the next call's walker entry. */
+            track_state[2]--;
             sub_lane -= 1;
-            if (prev_type == 8) {
-                ((int8_t *)track_state)[12] = (int8_t)sub_lane;
-                return;
-            }
+            if (prev_type == 11) { ((int8_t *)track_state)[12] = (int8_t)sub_lane; return; }
+            compound_done = 1;
             break;
         }
 
-        case 2: /* Right (forward + lateral) — advances to span+1 */
+        case 2: { /* Right (forward + lateral) — advances to span+1 */
             new_span = resolve_neighbor(span_idx, &sub_lane, 0x02, pos_x, pos_z);
             span_idx = new_span;
             track_state[0] = (int16_t)new_span;
@@ -2706,7 +2779,18 @@ static void update_position_recursive(int16_t *track_state, int32_t pos_x, int32
             track_state[2]++;
             if (track_state[2] > track_state[3])
                 track_state[3] = track_state[2];
+            /* [DA-T2 Fix 3 — applied 2026-05-27] Secondary FWD/BACK retest on
+             * the NEW span, matching orig 0x004445f4-0x004449c0. The port
+             * previously skipped this, leaving a laterally-stepped wheel one
+             * sub-lane off; on graded sections the left/right wheels then
+             * sampled different ground heights, producing a false ~30deg roll
+             * that the camera fix exposed as a "wobble" (Honolulu, AI Viper:
+             * port roll 4x orig). The retest nudges sub_lane ±1 so the wheel
+             * lands in the same sub-lane the orig walks to. */
+            walker_lateral_secondary_retest(span_idx, &sub_lane, pos_x, pos_z);
+            compound_done = 1;
             break;
+        }
 
         case 3: { /* Forward + Right — single FWD step + post-step retest
                    * [CONFIRMED @ 0x00444920-0x004449BD, pass-4 Ghidra]:
@@ -2761,20 +2845,50 @@ static void update_position_recursive(int16_t *track_state, int32_t pos_x, int32
             break;
         }
 
-        case 4: { /* Backward */
+        case 4: { /* Backward — orig 3-WAY decision (DA-T2 Fix 2, applied
+                   * 2026-05-27; orig 0x004449c1-0x00444c4b). Symmetric to
+                   * case 1 but tests the sub+1/sub+2 diagonals and uses the
+                   * backward-convention post-adjust (+1):
+                   *   RIGHT secondary passes → forward step, sub+1
+                   *   else no LEFT cross      → STAY (sub+1, no span change)
+                   *   else                    → backward step (current behavior) */
             int prev_type = s_span_array[span_idx].span_type;
+            TD5_StripSpan *csp = &s_span_array[span_idx];
+            int cur_type = (prev_type >= 0 && prev_type < 12) ? prev_type : 0;
+            int lc = span_lane_count(csp);
+            int ce40 = (int)csp->left_vertex_index  + k_quad_vertex_offsets[cur_type][0];
+            int ce41 = (int)csp->right_vertex_index + k_quad_vertex_offsets[cur_type][1];
+            uint8_t m = 0x0F;
+            if (lc - 1 <= sub_lane + 1) m = s_edge_mask_last[cur_type];
+
+            if ((m & 0x02) &&
+                compound_cross(csp, ce41 + sub_lane + 2, ce41 + sub_lane + 1, pos_x, pos_z) > 0) {
+                /* FORWARD step (right diagonal); backward-convention post-adjust (+1). */
+                new_span = resolve_neighbor(span_idx, &sub_lane, 0x01, pos_x, pos_z);
+                span_idx = new_span;
+                track_state[0] = (int16_t)new_span;
+                track_state[2]++;
+                if (track_state[2] > track_state[3]) track_state[3] = track_state[2];
+                sub_lane += 1;
+                if (prev_type == 8) { ((int8_t *)track_state)[12] = (int8_t)sub_lane; return; }
+                compound_done = 1;
+                break;
+            }
+            if ((m & 0x08) == 0 ||
+                compound_cross(csp, ce40 + sub_lane + 1, ce40 + sub_lane + 2, pos_x, pos_z) <= 0) {
+                /* STAY — no span change (orig sub_lane = cVar15 + 1). */
+                sub_lane += 1;
+                compound_done = 1;
+                break;
+            }
+            /* BACKWARD step (orig backward path). */
             new_span = resolve_neighbor(span_idx, &sub_lane, 0x04, pos_x, pos_z);
             span_idx = new_span;
             track_state[0] = (int16_t)new_span;
             track_state[2]--;
-            /* Original appends +1 to sub_lane post-step unconditionally,
-             * including for junction (type 11) transitions.
-             * [CONFIRMED @ 0x004440F0 case 0x04: `cVar15 + ... + '\x01'`] */
             sub_lane += 1;
-            if (prev_type == 11) {
-                ((int8_t *)track_state)[12] = (int8_t)sub_lane;
-                return;
-            }
+            if (prev_type == 11) { ((int8_t *)track_state)[12] = (int8_t)sub_lane; return; }
+            compound_done = 1;
             break;
         }
 
@@ -2840,7 +2954,7 @@ static void update_position_recursive(int16_t *track_state, int32_t pos_x, int32
             break;
         }
 
-        case 8: /* Left (backward + lateral) — advances to span-1 */
+        case 8: { /* Left (backward + lateral) — advances to span-1 */
             new_span = resolve_neighbor(span_idx, &sub_lane, 0x08, pos_x, pos_z);
             span_idx = new_span;
             track_state[0] = (int16_t)new_span;
@@ -2848,7 +2962,14 @@ static void update_position_recursive(int16_t *track_state, int32_t pos_x, int32
              * `psVar6[2] = psVar6[2] + -1`. Symmetric to the case 2 fix
              * above. No high_water update (orig matches). */
             track_state[2]--;
+            /* [DA-T2 Fix 4 — applied 2026-05-27] Same secondary FWD/BACK
+             * retest as case 2 (orig 0x00444e10-0x00445031). Symmetric LEFT
+             * counterpart; closes the left-side half of the Honolulu roll
+             * wobble. */
+            walker_lateral_secondary_retest(span_idx, &sub_lane, pos_x, pos_z);
+            compound_done = 1;
             break;
+        }
 
         case 9: { /* Forward + Left — FWD primary + post-step retest
                    * [CONFIRMED @ 0x00445134-0x004451FB, pass-4 Ghidra]:
@@ -3742,6 +3863,42 @@ int td5_track_probe_height(int world_x, int world_z, int current_span,
                   *out_y, *out_surface_type, current_span);
     }
     return 1;
+}
+
+/**
+ * Ground contact height + surface normal using the BEST-FIT lane within
+ * `span_index` — the lane whose boundary bits are minimised for (world_x,
+ * world_z), i.e. the lane that geometrically CONTAINS the point.
+ *
+ * Used by the per-wheel contact refresh instead of the walker's stored
+ * sub_lane: that sub_lane lands on the wrong lane on slopes (right wheels
+ * systematically), leaking the longitudinal slope into a sideways roll
+ * (right-side-lift bug, 2026-05-27). The original walker resolves the
+ * containing lane, so this best-fit selection matches its result.
+ */
+int32_t td5_track_compute_contact_height_bestlane(int span_index,
+                                                  int32_t world_x, int32_t world_z,
+                                                  int16_t *out_normal)
+{
+    TD5_StripSpan *sp;
+    int lane_count, best_lane = 0, best_score = 0x7FFFFFFF;
+
+    if (span_index < 0 || span_index >= s_span_count)
+        return 0;
+
+    sp = &s_span_array[span_index];
+    lane_count = span_lane_count(sp);
+    if (lane_count < 1) lane_count = 1;
+
+    for (int lane = 0; lane < lane_count; lane++) {
+        uint8_t bits = compute_boundary_bits(span_index, lane, world_x, world_z);
+        int score = 0;
+        if (bits == 0) { best_lane = lane; best_score = 0; break; }
+        for (uint8_t m = bits; m != 0; m >>= 1) score += (m & 1u);
+        if (score < best_score) { best_score = score; best_lane = lane; }
+    }
+
+    return probe_span_lane_height(sp, best_lane, world_x, world_z, out_normal);
 }
 
 /* ========================================================================

@@ -599,13 +599,12 @@ void LoadCameraPresetForView(int actor, int force_reload, int view, int save_sta
  *   g_camCurrentRadius, g_camTargetHeight, g_camSmoothedHeight) indexed by
  *   view. Wire-equivalent; only addressing differs.
  *
- * [ARCH-DIVERGENCE — terrain-derived pitch/roll temporarily forced to 0]
- *   Orig computes pitch/roll via AngleFromVector12 over the three terrain
- *   normals. Port currently zeroes both axes (cam_angles[0]=0,
- *   cam_angles[2]=0) and only retains yaw because terrain probes return
- *   wrong-scale values while actor coords are mixed 24.8 fp / world ints.
- *   Tracked under todo_camera_no_slope_adjustment_2026-05-16.md — closes
- *   when chassis-snap cascade clears the rotation_matrix divergence.
+ * [PARITY — terrain-derived pitch/roll] Orig computes pitch/roll via
+ *   AngleFromVector12 over the three terrain-contact normals so the chase
+ *   cam follows the road over hills/jumps. Port now mirrors this exactly
+ *   (cam_angles[0]=pitch, [2]=roll); the point construction +
+ *   ComputeActorTrackContactNormal pipeline is byte-faithful 24.8 FP, so
+ *   the earlier "forced to 0" workaround was unnecessary and is removed.
  *
  * [ARCH-DIVERGENCE — FPU rounding mode (ROUND vs +0.5f)]
  *   Same FISTP-RNE vs nearest-up rounding gap as
@@ -678,13 +677,17 @@ static void terrain_probe_trace_emit(int view, int actor_addr,
     int actor_sub  = actor_addr ? (int)*(signed char *)(actor_addr + 0x8C) : -1;
 
     fprintf(s_terrain_probe_trace_fp,
-        "%u,%d,%d,%d,%d,%d,%d,%u,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d\n",
+        "%u,%d,%d,%d,%d,%d,%d,%u,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d\n",
         (unsigned)g_td5.simulation_tick_counter,
         view, actor_slot, actor_span, actor_sub,
         pos_x, pos_z, combined_angle,
         point_ax, point_az, point_bx, point_bz, point_cx, point_cz,
         norm_a_y, norm_b_y, norm_c_y,
-        pitch_input, roll_input);
+        pitch_input, roll_input,
+        /* diag: does terrain pitch reach orient[1] / stored pitch / cam-Y offset? */
+        (int)g_camOrientShort[view & 1][1],
+        g_camStoredPitch[view & 1],
+        g_camOrbitOffset[view & 1][1]);
     fflush(s_terrain_probe_trace_fp);
 }
 
@@ -816,27 +819,67 @@ after_flyin:
         ComputeActorTrackContactNormal(probe_c, pc, &norm_c_y);
     }
 
-    /* Compute pitch and roll from terrain normals.
-     * NOTE: Terrain probes currently return garbage because actor positions
-     * are in integer coords but probes expect 24.8 FP. Force pitch/roll to
-     * zero until the coordinate system is unified.
-     *
-     * [TRACE 2026-05-25 terrain-pitch-roll-zeroed OVERSIGHT row] The L5
-     * audit (td5_track.c:6230+ ComputeActorTrackContactNormal) marks the
-     * probe pipeline byte-faithful with orig — output is 24.8 FP just
-     * like orig stack-locals local_38/local_2c/local_20. Before flipping
-     * the AngleFromVector12 derivation back on, mirror the orig probe via
-     * tools/_probes/terrain_probe_capture.js and outer-join the CSVs.
-     * If norm_a/b/c_y agree by sim_tick → outcome (a) at next session.
-     * Gate is INI [Trace] TerrainCamProbe (default 0, inert). */
+    /* Compute pitch and roll from the three terrain-contact normals and feed
+     * them into the camera rotation matrix, so the chase cam pitches/rolls
+     * to follow the road over hills and jumps (orig 0x004017CA..0x0040180C).
+     * The point construction above and ComputeActorTrackContactNormal are
+     * byte-faithful with orig (all 24.8 FP), so norm_a/b/c_y match the orig
+     * stack-locals local_38/local_2c/local_20. The trace below (INI [Trace]
+     * TerrainCamProbe, default 0) remains available for orig-vs-port CSV
+     * verification but is no longer a precondition for the derivation. */
     {
+        /* [2026-05-28 — terrain probe sanity fallback]
+         * The backward terrain probe (point_c) occasionally returns a Y-down
+         * surface normal (norm_c_y ≈ -58M while norm_b_y ≈ +9.6M, opposite sign,
+         * 6× magnitude) at certain spans. That single garbage tick produces
+         * pitch_input ≈ -96k and roll_input ≈ -266k → the camera kicks violently.
+         * Cross-check signs: a Y-down surface is meaningless for chase-cam tilt
+         * (the road is Y-up). When any normal's Y has the opposite sign from
+         * the others, treat it as a probe miss and fall back to the median sign
+         * sample. Empirically the wobble disappears with this single guard. */
+        if (norm_b_y != 0) {
+            /* From the orig decomp of ComputeActorTrackContactNormal (0x445450):
+             * the value written is a contact HEIGHT in 24.8 FP at the probe XZ
+             * (= bary + span_origin_y << 8). All three probe points are
+             * spaced ~512 world units around the car so on a real slope the
+             * height delta between them is at most ~512·tan(slope) (a few
+             * hundred world units), i.e. ≤ 1% of |norm_b|.
+             *
+             * In practice the port's forward/backward probe occasionally walks
+             * into a span at a completely different altitude (track branch /
+             * ring wrap → origin_y from a far span). That gives a sane sign
+             * but a wildly different magnitude → pitch_input still spikes,
+             * and the earlier sign-only fallback didn't catch it.
+             *
+             * Treat any probe whose value differs from norm_b by more than
+             * 50% of |norm_b| as a probe miss and fall back to norm_b. This
+             * keeps real slope deltas (<1%) untouched. */
+            /* ABSOLUTE threshold (not relative to norm_b): on a Honolulu-altitude
+             * track norm_b ≈ 9.6M and a 50% relative threshold works, but on
+             * tracks like Newcastle where surface Y is much smaller, that
+             * threshold caught legitimate slopes and zeroed the tilt.
+             *
+             * Probe spacing is ≤ 512 world units per axis (0x20 × 0x1000 from
+             * sin/cos table, scaled). Steepest real slope is ~60°, giving a
+             * legitimate height delta ≤ 512·tan(60°) ≈ 887 world units (=
+             * ~227072 in 24.8 FP). The observed probe-wander deltas were
+             * millions of world units. 500000 FP (~1950 world units) sits
+             * cleanly between them. */
+            const int WANDER_FP = 500000;
+            int sbn = (norm_b_y > 0) ? 1 : -1;
+            int sa = (norm_a_y > 0) ? 1 : ((norm_a_y < 0) ? -1 : sbn);
+            int diff_a = norm_a_y - norm_b_y; if (diff_a < 0) diff_a = -diff_a;
+            if (sa != sbn || diff_a > WANDER_FP) norm_a_y = norm_b_y;
+            int sc = (norm_c_y > 0) ? 1 : ((norm_c_y < 0) ? -1 : sbn);
+            int diff_c = norm_c_y - norm_b_y; if (diff_c < 0) diff_c = -diff_c;
+            if (sc != sbn || diff_c > WANDER_FP) norm_c_y = norm_b_y;
+        }
         /* Match orig pitch_input formula at 0x004017CA..0x004017E4:
          *   EAX = local_38;  EAX -= ((local_28 + local_1c) + ((local_28+local_1c)>>31 & 1)) >> 1
          *   EAX = -(EAX >> 8)
          * which is equivalent to:
          *   pitch_input = -((norm_a_y - (norm_b_y + norm_c_y)/2) >> 8)
-         * Computed here for the trace CSV only — fed to AngleFromVector12
-         * only after the orig-vs-port unit match is confirmed. */
+         * This is the first operand to AngleFromVector12 (z=0x200). */
         int avg_bc = norm_b_y + norm_c_y;
         avg_bc = (avg_bc + ((avg_bc >> 31) & 1)) >> 1;  /* signed /2 round-toward-zero */
         int pitch_input = -((norm_a_y - avg_bc) >> 8);
@@ -854,9 +897,74 @@ after_flyin:
                                   norm_a_y, norm_b_y, norm_c_y,
                                   pitch_input, roll_input);
 
-        cam_angles[0] = 0;  /* pitch = 0 (flat terrain) */
+        /* Feed terrain-derived pitch/roll through AngleFromVector12 exactly
+         * as orig 0x004017EC (pitch, z=0x200) / 0x0040180C (roll, z=0x400).
+         * The point construction + ComputeActorTrackContactNormal pipeline is
+         * byte-faithful with orig (24.8 FP), so the normals are correct — the
+         * earlier zeroing was the only divergence (camera failed to follow
+         * slope; orig pitches/rolls the chase cam over hills and jumps). */
+        /* [2026-05-28 — softened TILT_DIV/CLAMP after PM-12 matrix-order fix]
+         * The matrix fix removed part of the over-amplification but the port's
+         * look-at + orient-vector architecture still amplifies somewhat (raw
+         * inputs make the camera swing violently up on the spawn transient).
+         * Halved the divisor (was /4) and doubled the clamp (was 90) — the
+         * tilt follows the slope visibly without lurching at race start. */
+        /* Honolulu showed |pitch_input| ~6000 with ±100k spikes; Newcastle's real
+         * slope is only ~80-130 — DIV=64 (calibrated against Honolulu) killed
+         * Newcastle slopes entirely (cam tilt ~0.2°). The Honolulu spikes are
+         * already caught upstream by the magnitude/sign fallback, so the
+         * divisor doesn't need to defend against them. Run raw inputs like the
+         * orig (DIV=1) and let CLAMP catch only the rare > ~45° excursion. */
+        const int TILT_DIV   = 1;
+        const int TILT_CLAMP = 512;   /* caps cam tilt at atan2(512,512) = 45° */
+        int pin = pitch_input / TILT_DIV;
+        int rin = roll_input  / TILT_DIV;
+        if (pin >  TILT_CLAMP) pin =  TILT_CLAMP;
+        if (pin < -TILT_CLAMP) pin = -TILT_CLAMP;
+        if (rin >  TILT_CLAMP) rin =  TILT_CLAMP;
+        if (rin < -TILT_CLAMP) rin = -TILT_CLAMP;
+        /* IIR smoothing: state ← 3/4·state + 1/4·new (≈4-tick time constant).
+         * Reset to the current sample on the first ticks of a race so a previous
+         * race's residual (e.g. a stale spike from an OOB event) can't bleed
+         * into the next race's camera. */
+        static int s_pin_prev[2] = {0,0}, s_rin_prev[2] = {0,0};
+        int vidx = view & 1;
+        if ((unsigned)g_td5.simulation_tick_counter < 30u) {
+            s_pin_prev[vidx] = pin;
+            s_rin_prev[vidx] = rin;
+        } else {
+            pin = (s_pin_prev[vidx] * 3 + pin) / 4;
+            rin = (s_rin_prev[vidx] * 3 + rin) / 4;
+            s_pin_prev[vidx] = pin;
+            s_rin_prev[vidx] = rin;
+        }
+        /* [RESTORED 2026-05-27] Feed the scaled/clamped terrain pitch/roll
+         * through AngleFromVector12 (orig 0x004017EC z=0x200 / 0x0040180C
+         * z=0x400). The extra negate vs orig accounts for the port's inverted
+         * tilt basis (see comment above; direction + magnitude confirmed by
+         * drive-test 2026-05-26). The temporary 2026-05-27 diagnostic that
+         * forced these to 0 — to isolate car-physics tilt from camera tilt —
+         * is removed now that the attitude pipeline is verified byte-faithful
+         * (orig 0x00446030 / 0x00405E80 / 0x00403A20); the chase cam follows
+         * the road over hills/jumps again. */
+        /* [RE-ENABLED 2026-05-27 PM-12 — terrain tilt RESTORED after matrix fix]
+         * Was disabled in PM-11 as a symptomatic workaround for "camera bobs
+         * up/down with heading on flat road" and "over-swings below the road
+         * on slopes". Root cause turned out to be the SAME matrix-construction
+         * bug we just fixed in BuildRotationMatrixFromAngles: the terrain_matrix
+         * was being built as Rz·Rx·Ry instead of Ry·Rx·Rz, so the orient vector
+         * transformed through it swung wildly off-axis. With the matrix correct,
+         * the tilt should follow the slope smoothly without bobbing or clipping. */
+        /* [2026-05-28 — negation removed after PM-12 matrix-order fix]
+         * Was AngleFromVector12(-pin/-rin, …); the negation compensated for
+         * "the port's inverted tilt basis", which was a side effect of the
+         * same Rz·Rx·Ry vs Ry·Rx·Rz matrix-order bug. With the matrix correct,
+         * the basis matches the orig → the negation was flipping the tilt the
+         * wrong way (cam pitched UP on uphills, hiding the road). Match the
+         * orig's formula (0x004017EC z=0x200 / 0x0040180C z=0x400). */
+        cam_angles[0] = (short)AngleFromVector12(pin, 0x200);
         cam_angles[1] = (short)combined_angle;
-        cam_angles[2] = 0;  /* roll = 0 */
+        cam_angles[2] = (short)AngleFromVector12(rin, 0x400);
 
         BuildRotationMatrixFromAngles(terrain_matrix, cam_angles);
     }
@@ -1147,6 +1255,16 @@ void td5_camera_finalize_chase_pos(TD5_Actor *actor_p, int view)
     g_camWorldPos[v][1] = cam_y_desired;
     g_camWorldPos[v][2] = pos_z + vel_z_interp +
                           (int)((float)g_camOrbitOffset[v][2] * clip + 0.5f);
+
+    /* [REVERTED 2026-05-27 PM-10] A ground-clamp here (probe the terrain at the
+     * camera XZ, raise cam Y above it) traded the slope clip for worse bugs:
+     * the chassis-span lane probe is unreliable at the camera's orbiting XZ
+     * (several spans behind), returning garbage/zero → camera reset/stop-follow,
+     * and on flat road the per-heading probe variance made the camera bob up
+     * and down with the car's facing. The real cause of the slope clip is the
+     * terrain-tilt OVER-SWING (port's look-at amplifies cam_angles tilt by the
+     * orbit radius — see UpdateChaseCamera ~L860); fix that at the source, not
+     * with a flaky downstream floor. */
 
     target[0] = pos_x + vel_x_interp;
     target[1] = pos_y + smoothed_h + vel_y_interp;

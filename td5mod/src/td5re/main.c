@@ -243,6 +243,7 @@ static int td5_apply_cli_overrides(const char *cmdline,
         { "RaceTraceSlot",        &g_td5.ini.race_trace_slot },
         { "RaceTraceMaxFrames",   &g_td5.ini.race_trace_max_frames },
         { "AutoThrottle",         &g_td5.ini.auto_throttle },
+        { "AutoThrottleValue",    &g_td5.ini.auto_throttle_value },
         { "RaceTraceMaxSimTicks", &g_td5.ini.race_trace_max_sim_ticks },
         { "WholeState",           &g_td5.ini.whole_state_enabled },
         { "WholeStateMaxTicks",   &g_td5.ini.whole_state_max_ticks },
@@ -478,6 +479,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     g_td5.ini.race_trace_slot       = td5_ini_int("Trace", "RaceTraceSlot", -1);
     g_td5.ini.race_trace_max_frames = td5_ini_int("Trace", "RaceTraceMaxFrames", 600);
     g_td5.ini.auto_throttle         = td5_ini_int("Trace", "AutoThrottle", 0);
+    g_td5.ini.auto_throttle_value   = td5_ini_int("Trace", "AutoThrottleValue", 0);
+    g_td5.ini.auto_throttle_stop_span = td5_ini_int("Trace", "AutoThrottleStopSpan", 0);
     g_td5.ini.trace_fast_forward    = td5_ini_float("Trace", "TraceFastForward", 1.0f);
     g_td5.ini.race_trace_max_sim_ticks =
         td5_ini_int("Trace", "RaceTraceMaxSimTicks", 0);

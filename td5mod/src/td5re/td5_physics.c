@@ -2340,6 +2340,22 @@ void td5_physics_update_player(TD5_Actor *actor)
             player_fx, player_fz, front_long, rear_long, front_lat_force, rear_lat_force,
             (int)actor->linear_velocity_x, (int)actor->linear_velocity_z);
     }
+    /* [FORCEDIAG 2026-05-27] Force-cascade root-cause: the suspension squat
+     * over-excites because player_fx/fz (the per-tick world accel) feeds the
+     * spring. Capture the whole longitudinal chain — engine torque → axle
+     * long forces → player_fx/fz → suspension pos — so it can be diffed
+     * against the orig under a deterministic AutoThrottle launch. Slot 0,
+     * every 12 ticks. */
+    if (actor->slot_index == 0 && (actor->frame_counter % 12u) == 0u) {
+        TD5_LOG_I(LOG_TAG,
+            "FORCEDIAG vlong=%d rpm=%d gear=%d torque=%d fLong=%d rLong=%d "
+            "fLat=%d rLat=%d fx=%d fz=%d susp=[%d,%d,%d,%d]",
+            v_long, actor->engine_speed_accum, (int)actor->current_gear, drive_torque,
+            front_long, rear_long, front_lat_force, rear_lat_force,
+            player_fx, player_fz,
+            actor->wheel_suspension_pos[0], actor->wheel_suspension_pos[1],
+            actor->wheel_suspension_pos[2], actor->wheel_suspension_pos[3]);
+    }
     actor->linear_velocity_x += player_fx;
     actor->linear_velocity_z += player_fz;
 
@@ -2413,8 +2429,27 @@ void td5_physics_update_player(TD5_Actor *actor)
         }
     }
 
-    /* --- 15. ApplySteeringTorqueToWheels --- */
-    td5_physics_apply_steering_torque(actor);
+    /* --- 15. ApplySteeringTorqueToWheels — REMOVED from the per-tick physics
+     * path (2026-05-27 root-cause fix for the slope-attitude / over-squat bug).
+     *
+     * The original calls ApplySteeringTorqueToWheels (0x0042EEA0) from EXACTLY
+     * ONE place — UpdatePlayerVehicleControlState @ 0x00402E60 — and only on a
+     * manual GEAR-UP shift event (`if (controlBits & 0x400000) { gear++;
+     * ApplySteeringTorqueToWheels(); }`). It is a ONE-SHOT ±k pitch kick added
+     * to wheel_spring_dv[0..3] (FL/FR +, RL/RR -) per upshift. The original's
+     * UpdatePlayerVehicleDynamics @ 0x00404030 does NOT call it at all.
+     *
+     * The port already applies that upshift kick faithfully + gated in the
+     * input handler (td5_input.c gear-up block, ~line 847). This per-tick call
+     * was a spurious DUPLICATE: it re-injected ~+780/tick (throttle*mult*26 *
+     * gearTorque) into wheel_spring_dv EVERY frame, so the suspension spring
+     * never settled — it rang and sat pinned ~14x its equilibrium (the original
+     * settles to a fixed point). That sustained over-squat dominated the
+     * wheel-derived attitude (TransformTrackVertexByMatrix reads
+     * wheel_suspension_pos), which is why the car would not follow slopes.
+     * Verified via matched part-throttle A/B: orig suspension dv 39→0 (settles
+     * pos~106); port dv 780→ring (pos~3500) at identical force. Removing this
+     * call makes the port suspension converge like the original. */
 
     /* --- 16. IntegrateWheelSuspensionTravel ---
      * Pass the net world-frame velocity delta applied this frame as the
@@ -4563,6 +4598,33 @@ void td5_physics_integrate_suspension(TD5_Actor *actor, int32_t accel_x, int32_t
     const int32_t wpx_scaled = sar8_rz(actor->world_pos.x);
     const int32_t wpz_scaled = sar8_rz(actor->world_pos.z);
 
+    /* [SUSPCONST 2026-05-27] Force-cascade root-cause: capture the spring
+     * constants, lever arm, and accel so the suspension equilibrium can be
+     * compared to the orig (0x00403A20). The port suspension saturates while
+     * the orig stays ~500; fx is only 2x, so the extra factor is in the
+     * spring response (constants or arm). Slot 0, every 60 ticks. */
+    if (actor->slot_index == 0 && (actor->frame_counter % 60u) == 0u) {
+        int32_t arm0x = actor->wheel_world_positions_hires[0].x - wpx_scaled;
+        int32_t arm0z = actor->wheel_world_positions_hires[0].z - wpz_scaled;
+        TD5_LOG_I(LOG_TAG,
+            "SUSPCONST k_spring=%d k_pos_damp=%d k_vel_damp=%d k_travel=%d "
+            "k_load=%d | arm0=(%d,%d) accel=(%d,%d) hires0=(%d,%d) wp8=(%d,%d)",
+            k_spring, k_pos_damp, k_vel_damp, k_travel_lim, k_load_scale,
+            arm0x, arm0z, accel_x, accel_z,
+            actor->wheel_world_positions_hires[0].x,
+            actor->wheel_world_positions_hires[0].z,
+            wpx_scaled, wpz_scaled);
+        TD5_LOG_I(LOG_TAG,
+            "TUNING LUT[8..11]=%d,%d,%d,%d torque_mult=%d gear_ratio[2]=%d "
+            "redline=%d | throttle(+0x33E)=%d rpm=%d gear=%d",
+            (int)PHYS_S(actor, 16), (int)PHYS_S(actor, 18),
+            (int)PHYS_S(actor, 20), (int)PHYS_S(actor, 22),
+            (int)PHYS_S(actor, 0x68), (int)PHYS_S(actor, 0x32),
+            (int)PHYS_S(actor, 0x72),
+            (int)actor->encounter_steering_cmd,
+            actor->engine_speed_accum, (int)actor->current_gear);
+    }
+
     /* ---- Per-wheel pass (4 wheels) ---- */
     for (int i = 0; i < 4; i++) {
         /* Lever arm from chassis centre to this wheel's contact position.
@@ -4651,6 +4713,27 @@ void td5_physics_integrate_suspension(TD5_Actor *actor, int32_t accel_x, int32_t
          * (i.e. stays non-zero), CMP 0x10 + JGE jumps when new_vel >= 0x10. */
         if (new_vel > -0x10 && new_vel < 0x10)
             new_vel = 0;
+
+        /* [SPRINGTRACE 2026-05-27] Per-tick spring dynamics for slot 0, wheels
+         * 0(FL)/2(RL), every 30 ticks. Shows WHY pos runs to ±12288 when the
+         * measured-accel equilibrium is only ~1044: logs proj, spring/load/damp
+         * terms, old pos+dv, and new_vel. pos_in/dv_in are still pre-write. */
+        if (actor->slot_index == 0 && i == 0 && actor->frame_counter < 80u) {
+            TD5_LOG_I(LOG_TAG,
+                "SPRINGTRACE w%d: proj=%d spT=%d(s%d) loadAcc=%d loadT=%d(s%d) "
+                "dvIn=%d posIn=%d posdampT=%d(s%d) veldampT=%d(s%d) new_vel=%d",
+                i, proj, spring_term_x256, sar8_rz(spring_term_x256),
+                actor->wheel_load_accum[i], load_term_x256, sar8_rz(load_term_x256),
+                actor->wheel_spring_dv[i], actor->wheel_suspension_pos[i],
+                pos_damp_x256, sar8_rz(pos_damp_x256),
+                vel_damp_x256, sar8_rz(vel_damp_x256), new_vel);
+            TD5_LOG_I(LOG_TAG,
+                "SPRINGARM w%d: arm=(%d,%d) accel=(%d,%d) hires=(%d,%d) wp8=(%d,%d)",
+                i, arm_x, arm_z, accel_x, accel_z,
+                actor->wheel_world_positions_hires[i].x,
+                actor->wheel_world_positions_hires[i].z,
+                wpx_scaled, wpz_scaled);
+        }
 
         /* Write velocity then position; clamp at +k_travel_lim then -k_travel_lim.
          * [0x00403B24-54] */
@@ -6721,6 +6804,23 @@ void td5_physics_integrate_pose(TD5_Actor *actor)
                 wcn[2] = rot_v3[2];
             }
 
+            /* [FIX 2026-05-27 — wheels-lift-on-slopes root] Per-tick update of
+             * the RENDER wheel-offset Y to the suspension-adjusted value
+             * (cwy - sp_div), matching the orig integrate_pose loop @ 0x00405E80
+             * (`*psVar10 = body_wy; ConvertFloatVec3ToShortAngles(...); *psVar10
+             * += susp_offset` → wheel_display_angles[i][1] = cwy - sp_div).
+             *
+             * The port set wheel_display_angles ONCE at init (raw cardef Y, no
+             * suspension — td5_physics.c ~9881), so the rendered wheel billboards
+             * were RIGID and did NOT follow per-tick suspension travel. On slopes
+             * the springs load differentially (and orientation-dependently), so
+             * the static wheels floated/sank off the road — the "rear wheels lift
+             * a lot uphill / side wheels lift sideways" symptom — even though the
+             * 4-wheel attitude SOLVER (0x00446030) is correct. X,Z stay static
+             * (cardef); only Y tracks the spring, grounded wheels only (the loop's
+             * airborne `continue` mirrors the orig's damage_lockout gate). */
+            actor->wheel_display_angles[i][1] = (int16_t)((int32_t)body_wy + susp_offset);
+
             int32_t wheel_y = actor->wheel_contact_pos[i].y;
             contact_y_sum += (int64_t)(wheel_y + (int32_t)rot_y * -0x100);
             contact_count++;
@@ -6755,6 +6855,44 @@ void td5_physics_integrate_pose(TD5_Actor *actor)
              * post-snap render_pos.y write closes the 7.4u (g/256) gap
              * between port=226.5 and orig=219.078 on Honolulu sim_tick=1. */
             actor->world_pos.y = new_y;
+
+            /* [WHEELGAP LOG 2026-05-27] Per-wheel RENDERED world-Y minus GROUND
+             * contact-Y (world units, ÷256). Wheels render at world_pos +
+             * body_matrix*wheel_display_angles[w] (+0x210); positive gap = that
+             * wheel floats above the road. Self-contained capture: run with
+             * AutoThrottle to drive up the hill, grep WHEELGAP at span ~160. */
+            if (actor->slot_index == 0) {
+                static int s_wg_div = 0;
+                if ((s_wg_div++ % 15) == 0) {
+                    uint8_t *ab = (uint8_t *)actor;
+                    float wpy = (float)(*(int32_t *)(ab + 0x200)) / 256.0f;
+                    /* body->world Y uses ROW 1 of the rotation matrix
+                     * (m[3],m[4],m[5] @ +0x12C/+0x130/+0x134) — matching the
+                     * actual wheel render (mat3x4 out[1]) and orig
+                     * ConvertFloatVec3ToShortAngles (0x0042E2E0: Y = v·M[+0xC,+0x10,+0x14]).
+                     * Previously read COL 1 (m[1],m[4],m[7]) → transposed,
+                     * wrong gap magnitudes. [FIX 2026-05-27 PM-7] */
+                    float m3f = *(float *)(ab + 0x12C);
+                    float m4f = *(float *)(ab + 0x130);
+                    float m5f = *(float *)(ab + 0x134);
+                    int g[4];
+                    for (int wq = 0; wq < 4; wq++) {
+                        int16_t wxx = *(int16_t *)(ab + 0x210 + wq*8 + 0);
+                        int16_t wyy = *(int16_t *)(ab + 0x210 + wq*8 + 2);
+                        int16_t wzz = *(int16_t *)(ab + 0x210 + wq*8 + 4);
+                        float roty = m3f*(float)wxx + m4f*(float)wyy + m5f*(float)wzz;
+                        float ry   = wpy + roty;
+                        float gy   = (float)(*(int32_t *)(ab + 0xF0 + wq*12 + 4)) / 256.0f;
+                        g[wq] = (int)(ry - gy);
+                    }
+                    TD5_LOG_I(LOG_TAG,
+                        "WHEELGAP span=%d wda=[%d,%d,%d,%d] gap(float+) FL=%d FR=%d RL=%d RR=%d",
+                        (int)actor->track_span_raw,
+                        (int)*(int16_t *)(ab+0x210+2), (int)*(int16_t *)(ab+0x210+8+2),
+                        (int)*(int16_t *)(ab+0x210+16+2), (int)*(int16_t *)(ab+0x210+24+2),
+                        g[0], g[1], g[2], g[3]);
+                }
+            }
 
           if (contact_count > 0) {
             /* Velocity-from-snap gate — literal port of original
@@ -7328,6 +7466,43 @@ void td5_physics_refresh_wheel_contacts(TD5_Actor *actor)
     int resolved_surface = actor->surface_type_chassis;
     int resolved_surface_valid = 0;
 
+    /* [DIAGNOSTIC 2026-05-27 — lateral-leak unit test, slot 0] On a purely
+     * LONGITUDINAL slope, two ground samples displaced purely LATERALLY
+     * (perpendicular to heading) must have EQUAL height. If the right sample
+     * reads higher, the per-lane height interpolation is leaking the slope
+     * into a sideways roll (the confirmed right-side-lift bug). We also sample
+     * fore/aft so the lateral gradient (R-L) can be compared to the real
+     * slope (A-B). Driven by the AI harness; read LATLEAK lines in race.log. */
+    if (actor->slot_index == 0) {
+        static int s_latleak_div = 0;
+        if ((s_latleak_div++ % 30) == 0) {
+            int yaw = (int)actor->display_angles.yaw & 0xFFF;
+            float fwx = SinFloat12bit(yaw), fwz = CosFloat12bit(yaw); /* forward XZ */
+            float ltx = fwz, ltz = -fwx;                              /* lateral XZ */
+            int cx = actor->world_pos.x, cz = actor->world_pos.z;
+            int sp = actor->track_span_raw;
+            int d  = 50000;
+            int yC = 0, yL = 0, yR = 0, yA = 0, yB = 0, st = 0;
+            td5_track_probe_height(cx, cz, sp, &yC, &st);
+            td5_track_probe_height(cx + (int)(d * ltx), cz + (int)(d * ltz), sp, &yR, &st);
+            td5_track_probe_height(cx - (int)(d * ltx), cz - (int)(d * ltz), sp, &yL, &st);
+            td5_track_probe_height(cx + (int)(d * fwx), cz + (int)(d * fwz), sp, &yA, &st);
+            td5_track_probe_height(cx - (int)(d * fwx), cz - (int)(d * fwz), sp, &yB, &st);
+            /* dRoll = display_angles.roll FIELD = front-rear-derived = the
+             * car's PITCH (should track the surface slope A-B). dPitch =
+             * display_angles.pitch FIELD = left-right-derived = the car's
+             * ROLL (should track the lateral R-L). up.x/up.z = world up-axis
+             * tilt. If slope is big but dRoll≈0 → car not following slope. */
+            TD5_LOG_I(LOG_TAG,
+                "LATLEAK span=%d yaw=%d slope=%d latRL=%d | car pitch(dRoll)=%d roll(dPitch)=%d | up.x=%.3f up.y=%.3f up.z=%.3f | FRwy=%d %d %d %d",
+                sp, yaw, yA - yB, yR - yL,
+                (int)actor->display_angles.roll, (int)actor->display_angles.pitch,
+                actor->rotation_matrix.m[1], actor->rotation_matrix.m[4], actor->rotation_matrix.m[7],
+                actor->wheel_contact_pos[0].y, actor->wheel_contact_pos[1].y,
+                actor->wheel_contact_pos[2].y, actor->wheel_contact_pos[3].y);
+        }
+    }
+
     /* Entry snapshot: copy prior-tick airborne mask (+0x37C) into the OLD
      * slot (+0x37D). Matches original 0x00403793/0x004037D5:
      *   MOV CL, byte ptr [ESI+0x37C]
@@ -7372,9 +7547,17 @@ void td5_physics_refresh_wheel_contacts(TD5_Actor *actor)
 
     /* Per-wheel contact frame computation */
     for (int i = 0; i < 4; i++) {
-        /* Get wheel display angle data */
+        /* Get wheel display angle data.
+         * [2026-05-27] body-Y is read from the CARDEF directly, NOT from
+         * wheel_display_angles[i][1]. That field is now rewritten every tick to
+         * the suspension-adjusted RENDER value (cwy - sp_div) in
+         * integrate_pose's chassis loop (matching orig 0x00405E80's psVar10
+         * write), so reading it back here and subtracting sp_div again would
+         * DOUBLE-count the spring and run away. The orig refresh (0x00403720)
+         * reads the raw cardef wheel Y. X,Z stay static cardef (= the init
+         * wheel_display_angles[0]/[2], unchanged). */
         int32_t wx = actor->wheel_display_angles[i][0];
-        int32_t wy = actor->wheel_display_angles[i][1];
+        int32_t wy = (int32_t)CDEF_S(actor, 0x42 + i * 8);
         int32_t wz = actor->wheel_display_angles[i][2];
 
         /* Body-space Y of the wheel = cwy − (susp_pos>>8) − (href*0xB5>>8).
@@ -7477,6 +7660,31 @@ void td5_physics_refresh_wheel_contacts(TD5_Actor *actor)
                 actor->wheel_probes[i].span_index = (int16_t)(max_sp - 1);
         }
 
+        /* [FIX 2026-05-27 — slope-induced false ROLL] On slopes the RIGHT
+         * wheels (FR=probe1, RR=probe3) consistently over-walk one span
+         * FORWARD of their LEFT partners (FL=probe0, RL=probe2). Because the
+         * right wheels then sample the ground a span further along the slope,
+         * an UPHILL reads right-side-high (car lifts on the right) and a
+         * DOWNHILL reads right-side-low (car lifts on the left). At a dead
+         * stop on a slope this is a static ~9° roll (player overlay: SPD 0,
+         * ROLL 9.1). The original keeps each axle's left/right wheels on the
+         * SAME span, so the slope only ever produces PITCH, never a fake roll
+         * (orig L-R wheel delta is balanced; port is right-biased by ~2400fp).
+         *
+         * Snap each axle's right wheel onto its left partner's span. The
+         * wheel keeps its own lateral sub_lane, so genuine road camber is
+         * still sampled; the front-vs-rear span gap (true pitch) is untouched.
+         * Guard ±2 leaves real junction/branch transitions alone. Replaces an
+         * earlier chassis-clamp that only halved the split and risked
+         * flattening pitch. Processed in wheel order 0,1,2,3 so the left
+         * partner (i-1) is already walked. */
+        if (i == 1 || i == 3) {
+            int left_span = (int)actor->wheel_probes[i - 1].span_index;
+            int diff = (int)actor->wheel_probes[i].span_index - left_span;
+            if (diff != 0 && diff >= -2 && diff <= 2)
+                actor->wheel_probes[i].span_index = (int16_t)left_span;
+        }
+
         /* Mirror the original's ComputeActorTrackContactNormalExtended
          * prefix: write contact_vertex_A/B to the probe based on its
          * (post-walker) span_index + sub_lane_index. */
@@ -7505,21 +7713,28 @@ void td5_physics_refresh_wheel_contacts(TD5_Actor *actor)
                 probe_span = 0;  /* absolute fallback */
         }
 
-        /* Use the wheel probe's own sub_lane for height computation.
-         * The original (0x403720 → 0x4457E0) passes the per-wheel probe
-         * state directly, which has its own sub_lane from the track
-         * position update. Our td5_track_probe_height re-computes the
-         * lane via boundary testing which may pick a different lane.
+        /* Ground height + surface normal at the wheel, using the BEST-FIT
+         * (geometrically containing) lane within the wheel's span — NOT the
+         * walker's stored sub_lane.
          *
-         * Also retrieve the span surface normal, which the original writes to
-         * actor+0x250+i*8 (wheel_contact_velocities[i]) via FUN_00445A70.
-         * This normal is the "wcv" consumed by UpdateVehicleSuspensionResponse
-         * (0x4057F0) as the contact surface direction vector. */
+         * [FIX 2026-05-27 — right-side-lift root cause] The per-wheel walker's
+         * stored sub_lane lands on the WRONG lane on slopes (the right wheels
+         * systematically), so the wheel reads a height a lane over — leaking
+         * the longitudinal slope into a sideways roll (uphill→right lifts,
+         * downhill→left lifts, ~9° even at a dead stop). Proven by a lateral-
+         * leak unit test: sampling the surface at the containing lane is
+         * balanced (R-L≈0 vs slope up to 21000), but the walked sub_lane is
+         * right-biased ~6000fp (96% of rows). The original's walker resolves
+         * the containing lane, so best-fit matches its result. The wheel keeps
+         * its own world XZ, so genuine road camber is still sampled; only the
+         * lane SELECTION is corrected.
+         *
+         * Also retrieves the span surface normal (orig FUN_00445A70 → actor+
+         * 0x250+i*8, the "wcv" consumed by UpdateVehicleSuspensionResponse). */
         int16_t span_normal[3] = {0, 4096, 0};  /* default: flat upward normal (magnitude 4096) */
         {
-            int probe_lane = actor->wheel_probes[i].sub_lane_index;
-            ground_y = td5_track_compute_contact_height_with_normal(
-                probe_span, probe_lane,
+            ground_y = td5_track_compute_contact_height_bestlane(
+                probe_span,
                 actor->wheel_contact_pos[i].x,
                 actor->wheel_contact_pos[i].z,
                 span_normal);

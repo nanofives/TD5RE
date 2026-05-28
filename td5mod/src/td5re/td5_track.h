@@ -190,6 +190,11 @@ int32_t td5_track_compute_contact_height(int span_index, int sub_lane,
 int32_t td5_track_compute_contact_height_with_normal(int span_index, int sub_lane,
                                                       int32_t world_x, int32_t world_z,
                                                       int16_t *out_normal);
+/* Height + normal using the best-fit (geometrically containing) lane within
+ * span_index, rather than a caller-supplied sub_lane. */
+int32_t td5_track_compute_contact_height_bestlane(int span_index,
+                                                  int32_t world_x, int32_t world_z,
+                                                  int16_t *out_normal);
 int  td5_track_probe_height(int world_x, int world_z, int current_span,
                              int *out_y, int *out_surface_type);
 void td5_track_get_span_edges(int span_index,
