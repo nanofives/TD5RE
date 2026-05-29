@@ -148,10 +148,13 @@ typedef struct VfxTireTrackSlot {
     int32_t  trail_z;               /* +0x08 */
     /* +0x0C: perpendicular half-width vector in 24.8 FP.
      * Computed from (dx,dz) × width / len in UpdateTireTrackEmitters. */
-    int32_t  perp_x;                /* +0x0C */
+    int32_t  perp_x;                /* +0x0C: LEAD-edge half-width vector */
     int32_t  perp_z;                /* +0x10 */
-    int32_t  _pad0;                 /* +0x14 */
-    int32_t  _reserved[6];         /* +0x18: was prev_verts; keep for size compat */
+    int32_t  perp0_x;               /* +0x14: TRAIL-edge half-width = prior segment's
+                                     *        lead perp, so joins share an edge → smooth
+                                     *        curve instead of dented kinks. */
+    int32_t  perp0_z;               /* +0x18 */
+    int32_t  _reserved[5];         /* +0x1C: was prev_verts; keep for size compat */
     /* --- Sprite quad blob (was at +0x30; size corrected from 0x98 → 0xA8) --- */
     uint8_t  quad_data[0xA8];       /* +0x30 */
     /* --- Control block at +0xD8 --- */
@@ -730,9 +733,6 @@ void td5_vfx_project_particles(int view_index) {
  */
 void td5_vfx_draw_particles(int view_index) {
     extern void td5_render_submit_translucent_world(uint16_t *quad_data);
-    extern float g_render_width_f;
-    extern float g_render_height_f;
-
     s_current_view_index = view_index;
     int vi = view_index & 1;
     int drawn = 0;
@@ -745,15 +745,23 @@ void td5_vfx_draw_particles(int view_index) {
         }
     }
 
-    /* Project all active particles to view space */
+    /* Project all active particles (sets active/projected/cull flags). */
     td5_vfx_project_particles(view_index);
 
-    /* Perspective projection parameters (match tire track pipeline) */
-    const float focal    = g_render_width_f * 0.5f / 0.41421356f;
-    const float center_x = g_render_width_f  * 0.5f;
-    const float center_y = g_render_height_f * 0.5f;
-    const float far_clip = 10000.0f;
-    const float near_z   = 1.0f;
+    /* [FIX 2026-05-28 smoke-invisible] Project smoke through the renderer's OWN
+     * transform pipeline (same as tire tracks / world geometry) instead of a
+     * custom focal. The old path used focal = width*1.207 (~2.15x the
+     * renderer's width*0.5625) AND the opposite X sign (sx = +vx vs the
+     * renderer's -vx), so off-center smoke was mirrored and pushed off-screen
+     * → "no smoke on rear wheels". Now each particle's WORLD position is
+     * projected via td5_render_transform_and_project, identical to the marks. */
+    TD5_Mat3x3 cam_rot;
+    td5_camera_get_basis(&cam_rot.m[0], &cam_rot.m[3], &cam_rot.m[6]);
+    TD5_Vec3f zero_pos = { 0.0f, 0.0f, 0.0f };
+    td5_render_push_transform();
+    td5_render_load_rotation(&cam_rot);
+    td5_render_load_translation(&zero_pos);
+    const float focal = td5_render_get_focal_length();
 
     uint8_t *bank = s_particle_banks[vi];
     for (int i = 0; i < TD5_VFX_PARTICLE_SLOTS_PER_VIEW; i++) {
@@ -766,17 +774,18 @@ void td5_vfx_draw_particles(int view_index) {
         if (batch_index < 0 || batch_index >= TD5_VFX_SPRITE_BATCH_COUNT) continue;
         VfxSpriteQuad *sq = &s_sprite_batches[vi * TD5_VFX_SPRITE_BATCH_COUNT + batch_index];
 
-        float vx = PSLOT_RDF(slot, PSLOT_VIEW_X);
-        float vy = PSLOT_RDF(slot, PSLOT_VIEW_Y);
-        float vz = PSLOT_RDF(slot, PSLOT_VIEW_Z);
-
-        if (vz <= near_z) continue;
-
-        float inv_z = 1.0f / vz;
-        float sx = vx * focal * inv_z + center_x;
-        float sy = -vy * focal * inv_z + center_y;
-        float sz = vz * (1.0f / far_clip);
-        if (sz > 1.0f) sz = 1.0f;
+        /* Project the particle's CURRENT world position (POS is advanced by
+         * velocity each tick) through the renderer pipeline — same focal,
+         * center, X/Y sign, and depth space as the world geometry and marks. */
+        int32_t pwx = PSLOT_RD32(slot, PSLOT_POS_X);
+        int32_t pwy = PSLOT_RD32(slot, PSLOT_POS_Y);
+        int32_t pwz = PSLOT_RD32(slot, PSLOT_POS_Z);
+        float sx, sy, sz, inv_z;
+        if (!td5_render_transform_and_project((float)pwx * FP_TO_FLOAT,
+                                              (float)pwy * FP_TO_FLOAT,
+                                              (float)pwz * FP_TO_FLOAT,
+                                              &sx, &sy, &sz, &inv_z))
+            continue;  /* behind near plane */
 
         /* Perspective-scale using animated size from slot (original +0x04/+0x08).
          * Size values are 24.8 fixed-point world units (same as positions).
@@ -857,6 +866,9 @@ void td5_vfx_draw_particles(int view_index) {
         td5_render_submit_translucent_world((uint16_t *)sq);
         drawn++;
     }
+
+    /* Restore the prior render transform (matches the tire-track render). */
+    td5_render_pop_transform();
 
     if ((s_vfx_debug_frame % 60u) == 0u) {
         TD5_LOG_D(LOG_TAG, "particle draw view %d: drawn=%d", view_index, drawn);
@@ -1434,8 +1446,21 @@ static int vfx_acquire_tire_track_emitter(int wheel_id, int actor_slot,
         s_emitter_descs[desc_idx].width = width;
     }
 
+    /* DIAG 2026-05-28: confirm acquire set the descriptor active. */
+    TD5_LOG_I(LOG_TAG, "ACQUIRE: wheel_id=%d actor_slot=%d desc_idx=%d found=%d "
+              "-> descs[%d].active=%d pool_slot=%d",
+              wheel_id, actor_slot, desc_idx, found, desc_idx,
+              (desc_idx < (int)(sizeof(s_emitter_descs)/sizeof(s_emitter_descs[0])))
+                  ? (int)s_emitter_descs[desc_idx].active : -1,
+              found);
+
     /* Initialize pool slot */
     VfxTireTrackSlot *slot = &s_tire_track_pool[found];
+
+    /* Clear perp vectors — a reused slot must not carry stale lead/trail
+     * half-widths (the first-motion seed below sets them fresh). */
+    slot->perp_x = slot->perp_z = 0;
+    slot->perp0_x = slot->perp0_z = 0;
 
     /* Seed anchor from actor's live wheel position via global actor table. */
     if (g_actor_table_base) {
@@ -1608,6 +1633,20 @@ void td5_vfx_update_tire_tracks(void) {
         }
 
         if (realloc_now) {
+            /* [FIX 2026-05-28 marks-not-continuous] Capture the OLD segment's
+             * lead (far edge) so the NEW segment's trail (near edge) stitches
+             * to it — orig 0x0043EE10 chains segments edge-to-edge. Previously
+             * the new trail started at the CURRENT wheel pos while the old lead
+             * was one tick behind, leaving a one-tick GAP between every segment
+             * → a dotted/broken trail. */
+            int32_t stitch_x = slot->anchor_x;
+            int32_t stitch_y = slot->anchor_y;
+            int32_t stitch_z = slot->anchor_z;
+            /* Prior segment's LEAD perp — the new segment's TRAIL edge adopts
+             * it so the shared join edge matches exactly (smooth strip). */
+            int32_t join_perp_x = slot->perp_x;
+            int32_t join_perp_z = slot->perp_z;
+
             /* Freeze old slot: clear bit0 (released), keep bit1 (render still
              * ages it). [CONFIRMED @ 0x0043EE26: control &= 2] */
             slot->control &= 2u;
@@ -1616,15 +1655,14 @@ void td5_vfx_update_tire_tracks(void) {
             if (new_idx >= 0) {
                 VfxTireTrackSlot *ns = &s_tire_track_pool[new_idx];
                 memset(ns, 0, sizeof(*ns));
-                /* Anchor (lead) and trail collapse at spawn. Per orig
-                 * 0x0043EE10 (Ghidra audit), the new slot inherits the
-                 * pre-realloc motion vector and is immediately marked
-                 * geometry-active (control=3). The first-motion seed
-                 * below will fire on this slot using the accumulated
-                 * dx/dz, setting perp + advancing direction_hash. */
+                /* New lead = current wheel; trail STITCHES to the prior
+                 * segment's lead so the strip is continuous (no gap). The
+                 * nonzero trail→anchor delta makes the first-motion seed below
+                 * fire immediately (perp + geometry this tick). */
                 ns->anchor_x = wx; ns->anchor_y = wy; ns->anchor_z = wz;
-                ns->trail_x  = wx; ns->trail_y  = wy; ns->trail_z  = wz;
+                ns->trail_x  = stitch_x; ns->trail_y = stitch_y; ns->trail_z = stitch_z;
                 ns->perp_x = 0; ns->perp_z = 0;
+                ns->perp0_x = join_perp_x; ns->perp0_z = join_perp_z;
                 ns->direction_hash = angle12;
                 ns->intensity      = desc->initial_alpha;
                 ns->control        = 1u; /* bit0 set; bit1 set below */
@@ -1663,6 +1701,14 @@ void td5_vfx_update_tire_tracks(void) {
             if (len > 0 && w > 0) {
                 slot->perp_x = (-dz * w) / len;
                 slot->perp_z = ( dx * w) / len;
+                /* A fresh (non-stitched) segment has no prior lead perp — make
+                 * its trail edge match its lead edge (a plain rectangle). A
+                 * realloc'd segment already carries the prior lead perp in
+                 * perp0 (set above), so leave that intact for a smooth join. */
+                if (slot->perp0_x == 0 && slot->perp0_z == 0) {
+                    slot->perp0_x = slot->perp_x;
+                    slot->perp0_z = slot->perp_z;
+                }
                 slot->direction_hash = angle12;
                 slot->control |= 2u;
             }
@@ -1676,8 +1722,15 @@ void td5_vfx_update_tire_tracks(void) {
     }
 
     if ((s_vfx_debug_frame % 60u) == 0u) {
-        TD5_LOG_I(LOG_TAG, "tire tracks update: active_emitters=%d reallocs=%d",
-                  active_emitters, reallocs_this_tick);
+        TD5_LOG_I(LOG_TAG, "tire tracks update: active_emitters=%d reallocs=%d "
+                  "| descs[0..5].active=%d,%d,%d,%d,%d,%d pool=%d,%d,%d,%d,%d,%d",
+                  active_emitters, reallocs_this_tick,
+                  s_emitter_descs[0].active, s_emitter_descs[1].active,
+                  s_emitter_descs[2].active, s_emitter_descs[3].active,
+                  s_emitter_descs[4].active, s_emitter_descs[5].active,
+                  s_emitter_descs[0].pool_slot, s_emitter_descs[1].pool_slot,
+                  s_emitter_descs[2].pool_slot, s_emitter_descs[3].pool_slot,
+                  s_emitter_descs[4].pool_slot, s_emitter_descs[5].pool_slot);
     }
 }
 
@@ -1701,11 +1754,13 @@ void td5_vfx_render_tire_tracks(void) {
      * - Struct redesigned: trail_x/y/z + perp_x/z replace int16 vertex arrays (overflow fix). */
 
 
-    /* alpha_ref=1 submit (HUD preset) — orig M2DX SetRenderState uses
-     * ALPHAREF=0/NOTEQUAL (discard only fully-transparent pixels). The
-     * default LINEAR submit clamps at 0x80 which prunes faint marks and
-     * bilinear edges; tire tracks need the lower cutoff to stay visible. */
-    extern void td5_render_submit_translucent_hud(uint16_t *quad_data);
+    /* [FIX 2026-05-28 through-walls] Submit tire marks as ground DECALS via
+     * TD5_PRESET_SHADOW (z_test=LEQUAL, z_write=0, alpha_ref=1). The marks lie
+     * on the road and were drawing OVER walls because the prior HUD submit had
+     * z_test off. Marks now share the opaque pass's linear depth (both go
+     * through project_vertex), so the depth compare is valid and walls/props
+     * occlude them. z_write=0 keeps overlapping trail quads from z-fighting. */
+    extern void td5_render_submit_tire_mark(uint16_t *quad_data);
 
     static uint32_t s_tt_render_frame = 0;
     int tt_log = ((s_tt_render_frame++ % 60u) == 0u);
@@ -1756,10 +1811,15 @@ void td5_vfx_render_tire_tracks(void) {
             continue;
         }
 
-        /* Fade after 300 ticks: decrement intensity by 1 per tick.
-         * [CONFIRMED @ 0x43F210] bit 3 (0x08 in uVar4 >> 3) = no-fade flag. */
+        /* Fade after 300 ticks. [FIX 2026-05-28] Orig @0x43F265 decrements
+         * intensity ONLY when (lifetime & 8) == 0 — i.e. ~half the ticks
+         * (TEST CL,0x8 on the lifetime counter), so the fade from 300→600
+         * is gentle. The port keyed the no-fade test off `control & 0x08`,
+         * but control is only ever 1/2/3, so the test was always true and
+         * the mark faded EVERY tick → ~2× too fast ("marks last very
+         * little"). Match orig: gate on bit 3 of the lifetime counter. */
         if (slot->lifetime > TD5_VFX_TIRE_TRACK_FADE_START) {
-            if (!(slot->control & 0x08)) {
+            if ((slot->lifetime & 8) == 0) {
                 if (slot->intensity > 0) {
                     slot->intensity--;
                 }
@@ -1806,14 +1866,31 @@ void td5_vfx_render_tire_tracks(void) {
          * v0=trail-left  v1=trail-right  v2=lead-right  v3=lead-left
          * (lead_ws_* / trail_ws_* already computed above for the frustum
          * midpoint — reuse them.) */
-        float px      = (float)slot->perp_x   * FP_TO_FLOAT;
+        float px      = (float)slot->perp_x   * FP_TO_FLOAT;  /* lead edge  */
         float pz      = (float)slot->perp_z   * FP_TO_FLOAT;
+        float px0     = (float)slot->perp0_x  * FP_TO_FLOAT;  /* trail edge */
+        float pz0     = (float)slot->perp0_z  * FP_TO_FLOAT;
 
+        /* [FIX 2026-05-28 marks-dented] Lift the mark slightly above the road.
+         * The marks now render under TD5_PRESET_SHADOW (z-test LEQUAL); when
+         * the through-walls fix switched to that depth-tested preset the old
+         * +Y lift had already been removed (it was using a z-OFF preset), so
+         * the marks became COPLANAR with the road under a depth test → per-
+         * pixel z-fight that reads as a speckled / "dented" line. The orig
+         * lifts marks above the ground for exactly this reason (DAT_0045d6ac).
+         * +Y is up (same axis the smoke lifts on). */
+        const float TM_LIFT = 24.0f;
+        float tly = trail_ws_y + TM_LIFT;
+        float lly = lead_ws_y  + TM_LIFT;
+
+        /* Trail edge uses perp0 (= prior segment's lead perp) so the join edge
+         * is shared exactly; lead edge uses this segment's perp. Result is a
+         * smooth trapezoid strip instead of dented parallelograms. */
         float wpos[4][3] = {
-            { trail_ws_x - px, trail_ws_y, trail_ws_z - pz }, /* v0: trail-L */
-            { trail_ws_x + px, trail_ws_y, trail_ws_z + pz }, /* v1: trail-R */
-            { lead_ws_x  + px, lead_ws_y,  lead_ws_z  + pz }, /* v2: lead-R  */
-            { lead_ws_x  - px, lead_ws_y,  lead_ws_z  - pz }, /* v3: lead-L  */
+            { trail_ws_x - px0, tly, trail_ws_z - pz0 }, /* v0: trail-L */
+            { trail_ws_x + px0, tly, trail_ws_z + pz0 }, /* v1: trail-R */
+            { lead_ws_x  + px,  lly, lead_ws_z  + pz  }, /* v2: lead-R  */
+            { lead_ws_x  - px,  lly, lead_ws_z  - pz  }, /* v3: lead-L  */
         };
 
         /* Project 4 world corners through the renderer's own pipeline.
@@ -1856,9 +1933,16 @@ void td5_vfx_render_tire_tracks(void) {
          * No floor in orig — intensity can fade fully to 0 (transparent gray).
          * Port previously floored at 0x30 (~19% gray) which left a residue at
          * end-of-life that orig clears. Removed to match orig pack-as-is. */
+        /* [FIX 2026-05-28 marks-too-faint] Render marks as a DARK decal —
+         * black RGB with alpha derived from intensity — so the SHADOW preset's
+         * SRCALPHA blend DARKENS the road like a real skid (the original
+         * multiplies the road down), instead of the old opaque medium-gray
+         * (0x37) patch that read as a faint LIGHT smudge on dark asphalt.
+         * Alpha is boosted (×3) so a fresh mark is clearly dark, and fades out
+         * naturally as the intensity counter decays toward 0. */
         uint8_t val = slot->intensity;
-        uint32_t color = 0xFF000000u | ((uint32_t)val << 16) |
-                         ((uint32_t)val << 8) | (uint32_t)val;
+        uint32_t a = (uint32_t)val * 3u; if (a > 255u) a = 255u;
+        uint32_t color = (a << 24); /* RGB=0 (black), A=boosted intensity */
 
         /* Normalize texel UVs to [0,1] for the D3D11 sampler (same as HUD). */
         int tt_tw = 256, tt_th = 256;
@@ -1897,9 +1981,9 @@ void td5_vfx_render_tire_tracks(void) {
         tquad.quad_height = 0.0f;
         tquad.texture_page = s_tiremark_page;
 
-        /* Submit through the alpha_ref=1 HUD preset so faint marks and
-         * bilinear edge fringes don't get pruned by the 0x80 cutoff. */
-        td5_render_submit_translucent_hud((uint16_t *)&tquad);
+        /* Submit as a depth-tested ground decal (TD5_PRESET_SHADOW) so walls
+         * occlude the marks instead of them drawing through. */
+        td5_render_submit_tire_mark((uint16_t *)&tquad);
         if (tt_log && tt_submitted == 0) {
             TD5_LOG_I(LOG_TAG, "tire diag: sx=(%.1f,%.1f,%.1f,%.1f) "
                       "sy=(%.1f,%.1f,%.1f,%.1f) sz=(%.3f,%.3f,%.3f,%.3f) "
@@ -1964,6 +2048,32 @@ void td5_vfx_update_tire_track_emitters(TD5_Actor *actor, int view_index) {
     int32_t rear_speed, front_speed;
     memcpy(&rear_speed,  ap + 0x31C, 4); /* front_axle_slip_excess */
     memcpy(&front_speed, ap + 0x320, 4); /* rear_axle_slip_excess */
+
+    /* DIAG 2026-05-28 (tire-mark root-cause hunt): one-line dispatcher-entry
+     * trace. Answers in a single run: does the dispatcher run? is tuning_ptr
+     * NULL (early-return suspect)? drivetrain value? scf/+0x376? the
+     * +0x371..+0x374 emitter-id sentinels (0xFF=ready, 00=zero-filled by AI
+     * state path, else=already acquired)? Throttled to every 30 calls. */
+    {
+        static uint32_t s_disp_log = 0;
+        if ((s_disp_log++ % 30u) == 0u) {
+            void *tp_dbg = NULL; memcpy(&tp_dbg, ap + 0x1BC, sizeof(void *));
+            int16_t dt_dbg = -1;
+            if (tp_dbg) memcpy(&dt_dbg, (uint8_t *)tp_dbg + 0x76, 2);
+            uint8_t slot_dbg = *(ap + 0x375);
+            int descidx_w2 = 2 + (int)slot_dbg * 4;
+            TD5_LOG_I(LOG_TAG,
+                "dispatch ENTER: view=%d tuning=%p drivetrain=%d cf=0x%X "
+                "wid=%02X,%02X,%02X,%02X rear_sp=%d front_sp=%d "
+                "slot_index=%u desc_idx(w2)=%d descN=%d vmode=%u dmg=0x%X",
+                view_index, tp_dbg, (int)dt_dbg, *(ap + 0x376),
+                *(ap + 0x371), *(ap + 0x372), *(ap + 0x373), *(ap + 0x374),
+                rear_speed, front_speed,
+                (unsigned)slot_dbg, descidx_w2,
+                (int)(sizeof(s_emitter_descs)/sizeof(s_emitter_descs[0])),
+                (unsigned)*(ap + 0x379), (unsigned)*(ap + 0x37C));
+        }
+    }
 
     /* Always update wheel sound effects */
     vfx_update_rear_wheel_sound_effects(actor, rear_speed);

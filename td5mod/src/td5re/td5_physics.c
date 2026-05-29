@@ -2100,8 +2100,15 @@ void td5_physics_update_player(TD5_Actor *actor)
     int32_t tire_grip_coeff = (int32_t)PHYS_S(actor, 0x2C);
     int32_t slip_coupling   = (int32_t)PHYS_S(actor, 0x7C);
     {
-        /* ---- FRONT axle ---- */
-        int32_t grip_limit_f = (grip[0] + grip[1]);
+        /* ---- Longitudinal slip-circle -> REAR axle ----
+         * [FIX 2026-05-28 tire-marks] Orig +0x31C store @0x404aed: scf&1 +
+         * LONGITUDINAL slip clamps the REAR (driven) axle force pair against
+         * the REAR wheel-grip pair; the slip-excess remainder is stored at
+         * +0x31C (consumed by the rear wheel-sound skid-mark path). The port
+         * previously fed FRONT operands here, so a RWD launch (rear wheelspin)
+         * never saturated -> +0x31C stayed 0 -> no skid marks. Confirmed vs
+         * Frida orig: +0x31C ~480 at launch. Local name kept _f (now rear). */
+        int32_t grip_limit_f = (grip[2] + grip[3]);
         if (tire_grip_coeff != 0)
             grip_limit_f = (grip_limit_f * tire_grip_coeff) >> 8;
 
@@ -2136,7 +2143,7 @@ void td5_physics_update_player(TD5_Actor *actor)
                 actor->surface_contact_flags = 0;
             }
             int32_t coupled = (slip_shift * slip_coupling) >> 8;
-            int32_t lat     = front_lat_force;
+            int32_t lat     = rear_lat_force;       /* REAR lateral (orig +0x31C) */
             int32_t latSh   = lat >> 8;
             int32_t latMix  = (latSh * lat) >> 8;
             int32_t hyp_sq  = latMix + coupled * coupled;
@@ -2144,24 +2151,33 @@ void td5_physics_update_player(TD5_Actor *actor)
             int32_t hyp     = td5_isqrt(hyp_sq) + 1;
             int32_t latSh_a = (latSh < 0) ? -latSh : latSh;
             grip_limit_f    = (latSh_a * grip_limit_f) / hyp;
-            front_long      = ((front_long / 2) * coupled) / hyp;
+            rear_long       = ((rear_long / 2) * coupled) / hyp;   /* REAR long */
         }
 
-        /* Pass B — classical slip-circle clamp */
-        int32_t fl16 = front_lat_force >> 4;
-        int32_t flo16 = front_long >> 4;
+        /* Pass B — classical slip-circle clamp (REAR axle force pair) */
+        int32_t fl16 = rear_lat_force >> 4;
+        int32_t flo16 = rear_long >> 4;
         int32_t combined_sq = fl16 * fl16 + flo16 * flo16;
         int32_t combined = td5_isqrt(combined_sq) << 4;
         if (combined > grip_limit_f && combined > 0) {
-            actor->front_axle_slip_excess = combined - grip_limit_f;
-            front_long = ((grip_limit_f << 8) / combined * front_long) >> 8;
-            front_lat_force = ((grip_limit_f << 8) / combined * front_lat_force) >> 8;
+            actor->front_axle_slip_excess = combined - grip_limit_f;  /* +0x31C */
+            /* [FIX 2026-05-28] Orig Pass-B (@0x00404ad1-0x00404ae4) rescales
+             * ONLY the lateral force; the longitudinal/drive force is left
+             * untouched. The port previously also clamped *_long, which —
+             * once this block clamps the DRIVEN (rear) axle — collapsed the
+             * drive force to ~0 during straight launch wheelspin (limit→0
+             * when lateral≈0) and froze the car. Drop the _long rescale. */
+            rear_lat_force = ((grip_limit_f << 8) / combined * rear_lat_force) >> 8;
         } else {
             actor->front_axle_slip_excess = 0;
         }
 
-        /* ---- REAR axle ---- */
-        int32_t grip_limit_r = (grip[2] + grip[3]);
+        /* ---- Lateral slip-circle -> FRONT axle ----
+         * [FIX 2026-05-28 tire-marks] Orig +0x320 store @0x404c3d: scf&2 +
+         * LATERAL slip clamps the FRONT axle force pair against the FRONT
+         * wheel-grip pair; slip-excess stored at +0x320 (front skid path).
+         * Operands corrected REAR->FRONT to match orig. Local kept _r. */
+        int32_t grip_limit_r = (grip[0] + grip[1]);
         if (tire_grip_coeff != 0)
             grip_limit_r = (grip_limit_r * tire_grip_coeff) >> 8;
 
@@ -2181,7 +2197,7 @@ void td5_physics_update_player(TD5_Actor *actor)
                 actor->surface_contact_flags = 0;
             }
             int32_t coupled = (slip_shift * slip_coupling) >> 8;
-            int32_t lat     = rear_lat_force;
+            int32_t lat     = front_lat_force;      /* FRONT lateral (orig +0x320) */
             int32_t latSh   = lat >> 8;
             int32_t latMix  = (latSh * lat) >> 8;
             int32_t hyp_sq  = latMix + coupled * coupled;
@@ -2189,17 +2205,19 @@ void td5_physics_update_player(TD5_Actor *actor)
             int32_t hyp     = td5_isqrt(hyp_sq) + 1;
             int32_t latSh_a = (latSh < 0) ? -latSh : latSh;
             grip_limit_r    = (latSh_a * grip_limit_r) / hyp;
-            rear_long       = ((rear_long / 2) * coupled) / hyp;
+            front_long      = ((front_long / 2) * coupled) / hyp;  /* FRONT long */
         }
 
-        int32_t rl16 = rear_lat_force >> 4;
-        int32_t rlo16 = rear_long >> 4;
+        int32_t rl16 = front_lat_force >> 4;
+        int32_t rlo16 = front_long >> 4;
         combined_sq = rl16 * rl16 + rlo16 * rlo16;
         combined = td5_isqrt(combined_sq) << 4;
         if (combined > grip_limit_r && combined > 0) {
-            actor->rear_axle_slip_excess = combined - grip_limit_r;
-            rear_long = ((grip_limit_r << 8) / combined * rear_long) >> 8;
-            rear_lat_force = ((grip_limit_r << 8) / combined * rear_lat_force) >> 8;
+            actor->rear_axle_slip_excess = combined - grip_limit_r;   /* +0x320 */
+            /* [FIX 2026-05-28] Orig clamps ONLY the lateral force in Pass-B
+             * (symmetric to the +0x31C block above) — leave the drive force
+             * (front_long) untouched. */
+            front_lat_force = ((grip_limit_r << 8) / combined * front_lat_force) >> 8;
         } else {
             actor->rear_axle_slip_excess = 0;
         }
