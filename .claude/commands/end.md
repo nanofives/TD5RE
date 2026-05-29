@@ -511,6 +511,96 @@ rm -f "${REPORT}" "${SAFE}" 2>/dev/null || true
 
 ---
 
+## Step 7.6: Final commit & publish gate (guaranteed origin sync)
+
+`/end` must leave the repo fully committed and pushed — you should never have to
+manually `git add` / `commit` / `push` after a clean `/end`. Step 5 already merges
+and pushes the *worktree branch*, but two things still slip through:
+
+- **Main-tree-only work** done outside any worktree (skill edits in
+  `.claude/commands/`, `.gitignore`, RE docs under `re/analysis/`, tooling under
+  `scripts/`) — never part of a `/fix` branch, so Steps 4–5 don't touch it.
+- **A guaranteed final push** after all cleanup, so every commit that exists —
+  the merge, plus any main-tree commit below — lands on `origin/master`.
+
+This step runs on the merge-confirmed (second) `/end` invocation **and** on a
+main-tree-only `/end` (no worktree). It commits remaining **safe** main-tree
+changes, then pushes as the last git action.
+
+### 7.6a — Stage safe main-tree changes (explicit allowlist ONLY)
+
+```bash
+cd C:/Users/maria/Desktop/Proyectos/TD5RE
+
+# Stage by explicit path. NEVER `git add -A` / `git add .` here — that is exactly
+# how a runtime save (_cleanup_*/Config.td5) got committed on 2026-05-29.
+git add td5mod/src/td5re/*.c td5mod/src/td5re/*.h 2>/dev/null || true
+git add td5mod/src/*.c td5mod/src/*.h 2>/dev/null || true
+git add td5mod/ddraw_wrapper/src/*.c td5mod/ddraw_wrapper/src/*.h 2>/dev/null || true
+git add .claude/commands/*.md 2>/dev/null || true        # skill edits
+git add re/analysis/ re/sessions/ 2>/dev/null || true     # RE notes
+git add scripts/ 2>/dev/null || true                      # tooling
+git add .gitignore CLAUDE.md AGENTS.md 2>/dev/null || true
+
+# Forbidden-path guard (same as Step 5): never original/ or re/ outside the
+# tracked-notes whitelist.
+BAD="$(git diff --cached --name-only | grep -E '^(original/|re/)' \
+        | grep -vE '^re/(analysis|sessions|assets/static/.*\.dat)$' || true)"
+if [ -n "${BAD}" ]; then
+    echo "REFUSING TO COMMIT — forbidden paths staged:"; echo "${BAD}"
+    echo "Unstage with: git reset HEAD -- <path>"; exit 1
+fi
+```
+
+### 7.6b — Surface what was NOT staged (never blind-commit unknowns)
+
+```bash
+# Anything still unstaged or untracked after the allowlist is left for the user
+# on purpose: td5re.ini (test scaffolding), *.td5 saves, loose scratch, or any
+# file type the allowlist doesn't recognize. Do NOT `git add` these.
+LEFT="$(git status --short | grep -vE '^[MARD]  ' || true)"
+if [ -n "${LEFT}" ]; then
+    echo "Left in working tree (NOT auto-committed — review/commit manually if wanted):"
+    echo "${LEFT}" | sed 's/^/  /'
+fi
+```
+
+### 7.6c — Commit (if anything staged) + guaranteed push
+
+```bash
+cd C:/Users/maria/Desktop/Proyectos/TD5RE
+
+if git diff --cached --quiet; then
+    echo "No main-tree changes to commit."
+else
+    git commit -m "chore(session): commit remaining main-tree work — ${SESSION_TAG}
+
+<one-line summary: skill edits / RE docs / tooling committed this session>
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
+fi
+
+# Guaranteed final push — the LAST git action of /end. Captures the Step 5 merge,
+# the Step 6/7.5 cleanup, and any main-tree commit above.
+git push origin master
+git fetch origin master --quiet
+AHEAD="$(git rev-list --count origin/master..master)"
+if [ "${AHEAD}" -gt 0 ]; then
+    echo "POST-CONDITION FAILED: master is ${AHEAD} ahead of origin after push."
+    echo "Retry 'git push origin master' or surface the auth/network error —"
+    echo "do NOT report the session as shipped while commits are unpushed."
+    exit 1
+fi
+echo "origin/master in sync — session fully published."
+```
+
+**Rules for this step:**
+- **Never `git add -A` / `git add .`** — stage only the explicit allowlist. `td5re.ini`, `*.td5` saves, scratch, and unrecognized files are *listed* for the user, never auto-committed. (Direct lesson of the 2026-05-29 `Config.td5` mis-commit.)
+- **The push is the final action.** `/end` is not done until `git rev-list --count origin/master..master` returns `0`. If the push fails, surface it — do not end as if shipped.
+- **Idempotent** — if nothing is staged and master is already in sync, this step prints two status lines and changes nothing.
+
+---
+
 ## Step 8: Session close report
 
 Print a final summary to close the session cleanly:
@@ -552,5 +642,6 @@ Next recommended action:
 - **Never commit `td5re.ini`, `log/`, or build artifacts**.
 - **Never use `git branch -D`** during teardown — only `-d`. A worktree that wasn't merged should not be torn down by this skill; ask the user first.
 - **If recheck surfaces uncertainties and the user chooses to work on them**: stop here, let the user work, and wait for `/end` to be re-invoked. Do NOT keep running the merge steps.
-- **If `git worktree list` shows no active `fix-*` worktrees and we're in the main tree**: Steps 5–7 reduce to just a push + memory update. Skip teardown entirely. **Step 7.5 still runs** — it sweeps stray branch refs (`worktree-agent-*`, orphaned `fix-*`) even when there are no worktrees left.
+- **If `git worktree list` shows no active `fix-*` worktrees and we're in the main tree**: Steps 5–7 reduce to just a push + memory update. Skip teardown entirely. **Steps 7.5 and 7.6 still run** — 7.5 sweeps stray branch refs (`worktree-agent-*`, orphaned `fix-*`) and 7.6 commits any safe main-tree work + pushes, even when there are no worktrees left.
 - **Step 7.5 never force-merges and never uses `git branch -D`.** It deletes only branches/worktrees fully contained in master; everything with unmerged work is reported for the user, never destroyed. This is the rule that prevents `/end` from silently swallowing an unfinished candidate fix.
+- **`/end` always ends with `origin/master` in sync (Step 7.6).** It commits remaining *safe* main-tree work (explicit allowlist — never `git add -A`, never `td5re.ini`/saves/unknowns) and pushes as its final action. The session is not "done" until `origin/master..master` is empty. This is why you should never have to manually commit/push after a clean `/end`.
