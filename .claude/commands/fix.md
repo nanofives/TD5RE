@@ -284,7 +284,7 @@ git commit -m "fix: <one-line description from $ARGUMENTS>
 RE basis: <function name(s) and Ghidra address(es) from Step 1>
 CSV bundle: tools/frida_csv/${SESSION_TAG}/  (Moscow + Newcastle + <random track name>)
 
-Co-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>"
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 ```
 
 Rules for this step:

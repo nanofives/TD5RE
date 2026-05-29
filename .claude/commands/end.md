@@ -243,7 +243,7 @@ else
 Session: ${SESSION_TAG}
 Deferred TODOs: <list from Step 3a, or 'none'>
 
-Co-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>"
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 fi
 ```
 
