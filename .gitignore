@@ -20,6 +20,11 @@ TD5_tmp.rep/
 data/
 tmp_ar_check*/
 
+# Game runtime saves (Config.td5 / CupData.td5 — XOR-encrypted, regenerated at
+# runtime by td5_save.c; never source). Accidentally committed once from a
+# recovery-scratch dir on 2026-05-29.
+*.td5
+
 # Original game files (copyrighted — do not distribute)
 original/
 
