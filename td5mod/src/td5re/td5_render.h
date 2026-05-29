@@ -213,6 +213,12 @@ void td5_render_submit_translucent(uint16_t *quad_data);
 void td5_render_submit_translucent_low_ref(uint16_t *quad_data);
 void td5_render_submit_translucent_hud(uint16_t *quad_data);
 void td5_render_submit_translucent_world(uint16_t *quad_data);
+void td5_render_submit_tire_mark(uint16_t *quad_data);
+/* Active projection parameters (so VFX billboards size/place quads with the
+ * SAME focal/center the world geometry uses). */
+float td5_render_get_focal_length(void);
+float td5_render_get_center_x(void);
+float td5_render_get_center_y(void);
 /* 0x43E640: Set viewport clip rect */
 void td5_render_set_clip_rect(float left, float right, float top, float bottom);
 /* 0x439E60: Render radial pulse overlay effect */

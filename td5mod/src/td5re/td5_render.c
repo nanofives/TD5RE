@@ -494,6 +494,15 @@ int td5_render_transform_and_project(float mx, float my, float mz,
     return project_vertex(-vx, -vy, vz, sx, sy, sz, rhw);
 }
 
+/* Expose the active projection parameters so VFX billboards (smoke,
+ * particles) can size and place screen-space quads with the SAME focal
+ * length and screen center the world geometry uses. Without this the VFX
+ * code rolled its own focal (width * 1.207) which is ~2.15x the renderer's
+ * width * 0.5625, so smoke sat at the wrong screen position and size. */
+float td5_render_get_focal_length(void) { return s_focal_length; }
+float td5_render_get_center_x(void)     { return s_center_x; }
+float td5_render_get_center_y(void)     { return s_center_y; }
+
 /**
  * Clamp an integer to [lo, hi].
  */
@@ -6407,6 +6416,41 @@ void td5_render_submit_translucent_world(uint16_t *quad_data) {
 
     tex_page = (int)(*(float *)((uint8_t *)quad_data + 0x90));
     td5_plat_render_set_preset(TD5_PRESET_ADDITIVE_OVERLAY);
+    td5_plat_render_bind_texture(tex_page);
+    td5_plat_render_draw_tris(verts, 4, indices, 6);
+}
+
+/* Submit a pre-built translucent quad as a ground DECAL: TD5_PRESET_SHADOW
+ * (z_test=LEQUAL, z_write=0, alpha_ref=1, SRCALPHA). Used for tire/skid marks
+ * — they lie on the road and MUST be depth-tested against world geometry so
+ * walls/props occlude them. The marks' `sz` comes from the same project_vertex
+ * (linear vz/far_clip) the opaque pass uses, so the LEQUAL compare is valid
+ * (unlike the smoke NDC-vs-linear issue). z_write=0 so overlapping marks in
+ * the trail don't z-fight each other. [FIX 2026-05-28 tire-marks-through-walls] */
+void td5_render_submit_tire_mark(uint16_t *quad_data) {
+    float *fdata;
+    TD5_D3DVertex verts[4];
+    uint16_t indices[6] = { 0, 1, 2, 0, 2, 3 };
+    int tex_page;
+    int i;
+
+    if (!quad_data) return;
+
+    fdata = (float *)quad_data;
+    for (i = 0; i < 4; i++) {
+        int base = 2 + i * 7;
+        verts[i].screen_x = fdata[base + 0];
+        verts[i].screen_y = fdata[base + 1];
+        verts[i].depth_z  = fdata[base + 2];
+        verts[i].rhw      = fdata[base + 3];
+        verts[i].diffuse  = *(uint32_t *)&fdata[base + 4];
+        verts[i].specular = 0;
+        verts[i].tex_u    = fdata[base + 5];
+        verts[i].tex_v    = fdata[base + 6];
+    }
+
+    tex_page = (int)(*(float *)((uint8_t *)quad_data + 0x90));
+    td5_plat_render_set_preset(TD5_PRESET_SHADOW);
     td5_plat_render_bind_texture(tex_page);
     td5_plat_render_draw_tris(verts, 4, indices, 6);
 }
