@@ -494,6 +494,15 @@ int td5_render_transform_and_project(float mx, float my, float mz,
     return project_vertex(-vx, -vy, vz, sx, sy, sz, rhw);
 }
 
+/* Expose the active projection parameters so VFX billboards (smoke,
+ * particles) can size and place screen-space quads with the SAME focal
+ * length and screen center the world geometry uses. Without this the VFX
+ * code rolled its own focal (width * 1.207) which is ~2.15x the renderer's
+ * width * 0.5625, so smoke sat at the wrong screen position and size. */
+float td5_render_get_focal_length(void) { return s_focal_length; }
+float td5_render_get_center_x(void)     { return s_center_x; }
+float td5_render_get_center_y(void)     { return s_center_y; }
+
 /**
  * Clamp an integer to [lo, hi].
  */
@@ -1919,11 +1928,15 @@ void td5_render_actors_for_view(int view_index)
      * Source port uses max_spans=128 (200% of original) so slider at 1.0 shows 2× the original max.
      * Cull window = player_span ± half_window with ring-wrap for circuit tracks.
      *
-     * Original also pulls the cull-start back by −0x19 (≈100 spans) at 0x42BBDF when
-     * g_selectedGameType != 0 (cup/wanted/drag). The port's doubled max_spans already
-     * exceeds the original's (64 + 25 quarter-span = ~89 effective) trailing reach,
-     * so no explicit offset is needed. [RE basis: research agent confirmed the
-     * architectural coverage — task #9 resolved by doubled window.] */
+     * Original also pulls the cull-start back by −0x19 (25 entries = 100 spans)
+     * at 0x42BBDF when its game-type flag (g_selectedGameType @ 0x4aaf6c) != 0.
+     * The drag branch sets that flag = 1 [CONFIRMED @ 0x42AD79], so drag pulls the
+     * window back 25 entries. Applied below, gated on g_td5.drag_race_enabled
+     * (the only game type whose 0x4aaf6c write is confirmed). The earlier claim
+     * that a "doubled max_spans" compensated for this was WRONG — VIEW_DIST_*_SPANS
+     * are 64 (un-doubled), so nothing compensated: drag spawned with the near/start
+     * geometry culled because the window was shifted forward and was only half as
+     * deep as the original's. */
 /* Asymmetric span window. The original used a symmetric ±MaxSpans window
  * (max 64 each side, single-screen), but on long Moscow-style point-to-point
  * tracks the player's perception of "view distance" is dominated by FORWARD
@@ -2069,14 +2082,52 @@ void td5_render_actors_for_view(int view_index)
         if (g_td5.reverse_direction && ring > 0 && player_span < ring)
             eff_player = ring - 1 - player_span;
 
-        /* Signed >> 2 with round-toward-zero bias (matches orig 0x0042BBBC:
-         *   `(x + (x >> 31 & 3U)) >> 2` — the standard signed-divide-by-4
-         *   idiom). C's `>>` on signed negatives is implementation-defined
-         *   but is arithmetic on all targets we ship (gcc/i686, MSVC/x86). */
-        int back_spans  = back_window;
-        int fwd_spans   = fwd_window;
-        int start_entry = (eff_player - back_spans) >> 2;
-        int n_entries   = ((back_spans + fwd_spans) >> 2) + 1;
+        /* effectiveSpans = min(ftol((v*0.85+0.15)*maxSpans), maxSpans),
+         * maxSpans = 0x40 (64) single-screen [CONFIRMED @ RunRaceFrame
+         * 0x42BB2E-0x42BB5D]. frac_scaled already holds (v*0.85+0.15). */
+        int eff_spans = (int)(frac_scaled * (float)VIEW_DIST_FWD_SPANS);
+        if (eff_spans > VIEW_DIST_FWD_SPANS) eff_spans = VIEW_DIST_FWD_SPANS;
+        if (eff_spans < 1)                   eff_spans = 1;
+
+        /* gRaceTrackSpanCullWindow = effectiveSpans * 2  [CONFIRMED @ 0x42BB5F
+         * `LEA EDX,[EAX+EAX]`, stored 0x42BB72]. This is the BACK reach in spans;
+         * the forward reach comes from the entry loop below, giving a window of
+         * ±~128 spans (256 spans total) around the center — not the 128-span
+         * (64 fwd / 64 back) window the port had, which was half as deep. NB:
+         * the separate actor_cull_window above already uses this *2 form for the
+         * AI/traffic pop-in cull (FIX 2026-05-26); this restores the same depth
+         * for the TRACK display-list walk, which that fix did not touch. */
+        int cull_window = eff_spans * 2;
+
+        /* start_entry = (center - cullWindow) >> 2  [CONFIRMED @ 0x42BBC9-0x42BBD8:
+         * SUB EAX,EDX; CDQ; AND EDX,3; ADD; SAR EDI,2 — the standard signed
+         * divide-by-4 idiom `(x + (x>>31 & 3)) >> 2`]. C's `>>` on signed
+         * negatives is arithmetic on all targets we ship (gcc/i686, MSVC/x86). */
+        int start_entry = (eff_player - cull_window) >> 2;
+
+        /* Drag pulls the cull-start back 0x19 entries (= 100 spans) so the
+         * start/staging geometry behind the line stays visible at spawn
+         * [CONFIRMED @ 0x42BBDF; drag flag write @ 0x42AD79]. */
+        if (g_td5.drag_race_enabled)
+            start_entry -= 0x19;
+
+        /* Loop count = effectiveSpans ENTRIES, NOT (window)>>2+1. The port's
+         * `((back+fwd)>>2)+1` ≈ 33 entries rendered only ~half the original's
+         * depth [CONFIRMED count = effectiveSpans @ 0x42BBE9 `MOV EBP,[0x4aae44]`,
+         * loop 0x42BC11-0x42BC3C]. */
+        int n_entries   = eff_spans;
+        /* Change-gated (not per-frame) so the render dispatch isn't spammed. */
+        {
+            static int s_log_start = 0x7fffffff, s_log_n = -1;
+            if (start_entry != s_log_start || n_entries != s_log_n) {
+                TD5_LOG_I(LOG_TAG,
+                          "span-window: center=%d eff_spans=%d cull_win=%d start_entry=%d n_entries=%d drag=%d",
+                          eff_player, eff_spans, cull_window, start_entry, n_entries,
+                          (int)g_td5.drag_race_enabled);
+                s_log_start = start_entry;
+                s_log_n = n_entries;
+            }
+        }
 
         int ring_entries = (ring > 0) ? ((ring + 3) >> 2) : 0;
         int is_circuit   = (g_td5.track_type == TD5_TRACK_CIRCUIT) ? 1 : 0;
