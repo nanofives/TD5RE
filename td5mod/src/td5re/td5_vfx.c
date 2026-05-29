@@ -237,7 +237,12 @@ static float    s_rainspl_page;
 static float    s_smoke_u0, s_smoke_v0, s_smoke_u1, s_smoke_v1;
 static float    s_smoke_page;
 
-/* Smoke sprite variant UV table (4 entries: 2x2 grid in atlas) */
+/* Smoke sprite variant UV table -- orig DrawCallback @ 0x004297D0 reads
+ * DAT_004aabb8 with stride 0x14 (5 floats) indexed by (phase >> 2) where
+ * phase cycles 0..0x1F mod 32. The orig init loop at 0x00429630 writes 8
+ * entries with col = i & 1, row = (i - sign)/2 (=> i/2 for unsigned), step
+ * 32 texels (DAT_0045d5dc), cell w/h = 30.0 (0x41f00000). The smoke puff
+ * therefore ANIMATES through 8 sub-cells, advancing one cell every 4 ticks. */
 static float    s_smoke_variant_uv[8][5]; /* u0, v0, width, height, page */
 
 /* --- Weather overlay --- */
@@ -810,6 +815,24 @@ void td5_vfx_draw_particles(int view_index) {
          * spawning car was already too small to see. */
         float half_w = world_half_w * focal * inv_z;
         float half_h = world_half_h * focal * inv_z;
+
+        /* For smoke (type 0): refresh UVs every frame from variant table indexed
+         * by (phase >> 2). Mirrors orig SmokeDrawCallback @ 0x004297D0 which sets
+         * flag=2 in BuildSpriteQuadTemplate and writes the 4 corner UVs from
+         * DAT_004aabb8[phase >> 2]. Phase cycles 0..0x1F via SmokeUpdateCallback
+         * @ 0x00429950 (slot[0] = (slot[0] + 1) & 0x1F) so the puff animates
+         * through 8 sub-cells, one cell every 4 ticks. */
+        if (slot[PSLOT_TYPE] == 0) {
+            int v_idx = (slot[PSLOT_PHASE] >> 2) & 7;
+            float vu0 = s_smoke_variant_uv[v_idx][0];
+            float vv0 = s_smoke_variant_uv[v_idx][1];
+            float vw  = s_smoke_variant_uv[v_idx][2];
+            float vh  = s_smoke_variant_uv[v_idx][3];
+            sq->tex_u0 = vu0;
+            sq->tex_v0 = vv0;
+            sq->tex_u1 = vu0 + vw;
+            sq->tex_v1 = vv0 + vh;
+        }
 
         /* Normalize texel UVs to [0,1] for the D3D11 sampler. Static atlas
          * pages are 256x256; query actual dimensions so hi-res replacement
