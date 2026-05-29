@@ -1171,32 +1171,40 @@ void td5_physics_update_vehicle_actor(TD5_Actor *actor)
          *  during recovery. */
         td5_physics_refresh_scripted_vehicle_transforms(actor);
 
-        /* D11 — Scripted-mode world_pos seed [CONFIRMED @ 0x004067A8-67D9]:
-         *   world_pos.x = (int16)*(+0x208) << 8
-         *   world_pos.y = (int16)*(+0x20A) << 8
-         *   world_pos.z = (int16)*(+0x20C) << 8
-         * The shorts at +0x208/A/C alias display_angles but during
-         * vehicle_mode==1 they hold the recovery animation's per-tick world
-         * coordinate. The orig writes them in UpdateVehicleActor's
-         * vehicle_mode==1 dispatch immediately after RefreshScriptedVehicleTransforms.
+        /* D11 — Scripted-mode euler-accumulator RESYNC [CONFIRMED @ 0x004067A8-0x004067D8]:
+         *   euler_accum.roll  (+0x1F0) = (int16)display_angles.roll  (+0x208) << 8
+         *   euler_accum.yaw   (+0x1F4) = (int16)display_angles.yaw   (+0x20A) << 8
+         *   euler_accum.pitch (+0x1F8) = (int16)display_angles.pitch (+0x20C) << 8
+         * Raw listing: MOVSX from +0x208/0x20A/0x20C, SHL 8, MOV to +0x1F0/0x1F4/0x1F8.
          *
-         * [LOAD-BEARING — keep] Verified 2026-05-25 oversight-y-damping
-         * triage row reclassified to FAITHFUL. The follow-up
-         * td5_physics_integrate_scripted_motion ALSO writes world_pos (via
-         * += velocity), so the seed-then-accumulate pattern is intentional
-         * and byte-faithful to orig: each tick the recovery animation's
-         * authoritative position (+0x208/A/C, in int16 world units) is
-         * re-loaded into world_pos before damped velocity is added on top.
-         * Removing this block would let velocity drift accumulate instead
-         * of tracking the scripted recovery animation. */
-        {
-            uint8_t *abase = (uint8_t *)actor;
-            int16_t rx = *(int16_t *)(abase + 0x208);
-            int16_t ry = *(int16_t *)(abase + 0x20A);
-            int16_t rz = *(int16_t *)(abase + 0x20C);
-            actor->world_pos.x = (int32_t)rx << 8;
-            actor->world_pos.y = (int32_t)ry << 8;
-            actor->world_pos.z = (int32_t)rz << 8;
+         * The destination is the 24.8 euler ACCUMULATOR block (+0x1F0), NOT
+         * world_pos (+0x1FC). RefreshScriptedVehicleTransforms (above) just ran
+         * ExtractEulerAnglesFromMatrix which recomputes the 12-bit display
+         * angles (+0x208/A/C) from the rotation matrix; this block re-seeds the
+         * matching 24.8 accumulators so the two angle representations stay in
+         * sync for the next integration step. It does NOT touch world_pos.
+         *
+         * [OOB-TELEPORT FIX 2026-05-29] The prior port wrote these (display
+         * angles, range ±0x7FF) into world_pos.x/y/z << 8 — teleporting the
+         * recovering car to ≈world-origin (±0x7FF00 ≈ ±2096 fp) every tick =
+         * "sideways car flies out of bounds". The original NEVER reads
+         * +0x208/A/C as world coordinates; world_pos is integrated purely from
+         * velocity in td5_physics_integrate_scripted_motion, and the 59-frame
+         * gate hands off to ResetVehicleActorState (0x00405D70) which re-drops
+         * the car IN PLACE (preserves world_pos.x/z, only resets .y sentinel).
+         * Verified against re/include/td5_actor_struct.h _Static_asserts:
+         * euler_accum=+0x1F0, world_pos=+0x1FC, display_angles=+0x208 — distinct
+         * fields, no union. */
+        actor->euler_accum.roll  = (int32_t)actor->display_angles.roll  << 8;
+        actor->euler_accum.yaw   = (int32_t)actor->display_angles.yaw   << 8;
+        actor->euler_accum.pitch = (int32_t)actor->display_angles.pitch << 8;
+        if (actor->slot_index == 0 && actor->frame_counter == 0) {
+            TD5_LOG_I(LOG_TAG,
+                "scripted_recovery_enter: slot=0 disp{r=%d y=%d p=%d} "
+                "world_pos=(%d,%d,%d) — euler resync (no world teleport)",
+                (int)actor->display_angles.roll, (int)actor->display_angles.yaw,
+                (int)actor->display_angles.pitch,
+                actor->world_pos.x, actor->world_pos.y, actor->world_pos.z);
         }
 
         update_engine_speed_smoothed(actor);
