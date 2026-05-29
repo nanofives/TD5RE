@@ -2610,6 +2610,110 @@ void td5_hud_render_overlays(float dt)
  * heading.
  * ======================================================================== */
 
+/* Branch-collapse a raw strip-span index into the main-road linear range,
+ * replicating the value the original stores at actor+0x82
+ * (track_span_normalized) via ResolveActorSegmentBoundary @ 0x00443FF0
+ * (store @ 0x0044400d). Main-road spans (raw < ring_length) pass through
+ * unchanged; branch spans (raw >= ring_length) map back using the appended
+ * branch-mirror rows of the minimap segment table — the same collapse the
+ * player's remapped_span uses for centering. Used by the actor/traffic dot
+ * filters so vehicles on a DIFFERENT branch than the player aren't culled by
+ * the +/-144 span gate (the port can't read +0x82 directly: it isn't kept
+ * current per-frame for racers, only on traffic recycle). */
+static int minimap_normalize_span(int raw_span)
+{
+    int ring_length = g_td5.track_span_ring_length;
+    if (ring_length <= 0) ring_length = g_strip_span_count;
+    int norm = raw_span;
+    if (norm >= ring_length &&
+        s_minimap_seg_branch_start < s_minimap_seg_primary_end) {
+        for (int si = s_minimap_seg_branch_start;
+             si < s_minimap_seg_primary_end; si++) {
+            if (norm <= (int)s_minimap_seg_end[si]) {
+                norm += (int)s_minimap_seg_branch[si]
+                      - (int)s_minimap_seg_start[si];
+                break;
+            }
+        }
+    }
+    return norm;
+}
+
+/* Emit one minimap "checkpoint-connector" road quad spanning [span_a .. span_a+2].
+ * BOTH edges use the span record's +0x06 back-vertex (orig Quad3 @ 0x43a9b1/0x43aa45,
+ * Quad4 @ 0x43ac51/0x43ad40 — unlike the primary quad which uses +0x04 for the near
+ * edge). The right-edge col1 delta is indexed by span_a's type byte for BOTH edges
+ * (the orig carries cp's type in EDI across both right-edge computations). Shading
+ * matches the port's primary road quad (HUD_WHITE_TEX_PAGE, 0xFF9A9A9A). Returns 1
+ * if a quad was submitted, 0 if skipped (bad index / fully offscreen).
+ * [CONFIRMED @ 0x43a9a9-0x43aeb4]. */
+static int minimap_emit_connector(uint8_t *span_base, uint8_t *vert_base, int span_a,
+                                  float offset_x, float offset_z,
+                                  float cos_h, float sin_h,
+                                  float mm_cx, float mm_cy)
+{
+    int span_b = span_a + 2;
+    if (!span_base || !vert_base) return 0;
+    if (span_a < 0 || span_b < 0 ||
+        span_a >= g_strip_span_count || span_b >= g_strip_span_count) return 0;
+
+    uint8_t *sa = span_base + span_a * 24;
+    uint8_t *sb = span_base + span_b * 24;
+    int32_t ox_a = *(int32_t *)(sa + 0x0C), oz_a = *(int32_t *)(sa + 0x14);
+    int32_t ox_b = *(int32_t *)(sb + 0x0C), oz_b = *(int32_t *)(sb + 0x14);
+
+    int32_t col1 = s_minimap_vtx_delta_col1[span_base[span_a * 24] & 0x07];
+
+    uint16_t vi_a_l = *(uint16_t *)(sa + 0x06);
+    int32_t  vi_a_r = (int32_t)vi_a_l + (int32_t)(sa[3] & 0x0F) + col1;
+    uint16_t vi_b_l = *(uint16_t *)(sb + 0x06);
+    int32_t  vi_b_r = (int32_t)vi_b_l + (int32_t)(sb[3] & 0x0F) + col1;
+    if (vi_a_r < 0 || vi_b_r < 0) return 0;
+
+    int16_t *va_l = (int16_t *)(vert_base + (uint32_t)vi_a_l * 6);
+    int16_t *va_r = (int16_t *)(vert_base + (uint32_t)vi_a_r * 6);
+    int16_t *vb_l = (int16_t *)(vert_base + (uint32_t)vi_b_l * 6);
+    int16_t *vb_r = (int16_t *)(vert_base + (uint32_t)vi_b_r * 6);
+
+    /* TL=front-left (span_a left), BL=back-left (span_b left),
+     * BR=back-right (span_b right), TR=front-right (span_a right). */
+    float wx_tl = (float)((int)va_l[0] + ox_a) + offset_x;
+    float wz_tl = (float)((int)va_l[2] + oz_a) + offset_z;
+    float wx_tr = (float)((int)va_r[0] + ox_a) + offset_x;
+    float wz_tr = (float)((int)va_r[2] + oz_a) + offset_z;
+    float wx_bl = (float)((int)vb_l[0] + ox_b) + offset_x;
+    float wz_bl = (float)((int)vb_l[2] + oz_b) + offset_z;
+    float wx_br = (float)((int)vb_r[0] + ox_b) + offset_x;
+    float wz_br = (float)((int)vb_r[2] + oz_b) + offset_z;
+
+    float tl_x = mm_cx + (wx_tl * cos_h + wz_tl * sin_h) * s_minimap_world_scale_x;
+    float tl_y = mm_cy + (wz_tl * cos_h - wx_tl * sin_h) * s_minimap_world_scale_y;
+    float tr_x = mm_cx + (wx_tr * cos_h + wz_tr * sin_h) * s_minimap_world_scale_x;
+    float tr_y = mm_cy + (wz_tr * cos_h - wx_tr * sin_h) * s_minimap_world_scale_y;
+    float bl_x = mm_cx + (wx_bl * cos_h + wz_bl * sin_h) * s_minimap_world_scale_x;
+    float bl_y = mm_cy + (wz_bl * cos_h - wx_bl * sin_h) * s_minimap_world_scale_y;
+    float br_x = mm_cx + (wx_br * cos_h + wz_br * sin_h) * s_minimap_world_scale_x;
+    float br_y = mm_cy + (wz_br * cos_h - wx_br * sin_h) * s_minimap_world_scale_y;
+
+    float mm_l = s_minimap_x, mm_t = s_minimap_y;
+    float mm_r = s_minimap_x + s_minimap_width, mm_b = s_minimap_y + s_minimap_height;
+    float min_x = tl_x, max_x = tl_x, min_y = tl_y, max_y = tl_y;
+    if (tr_x < min_x) min_x = tr_x; if (tr_x > max_x) max_x = tr_x;
+    if (bl_x < min_x) min_x = bl_x; if (bl_x > max_x) max_x = bl_x;
+    if (br_x < min_x) min_x = br_x; if (br_x > max_x) max_x = br_x;
+    if (tr_y < min_y) min_y = tr_y; if (tr_y > max_y) max_y = tr_y;
+    if (bl_y < min_y) min_y = bl_y; if (bl_y > max_y) max_y = bl_y;
+    if (br_y < min_y) min_y = br_y; if (br_y > max_y) max_y = br_y;
+    if (max_x < mm_l || min_x > mm_r || max_y < mm_t || min_y > mm_b) return 0;
+
+    TD5_SpriteQuad q;
+    hud_build_quad_warped(&q, HUD_WHITE_TEX_PAGE,
+        tl_x, tl_y, bl_x, bl_y, br_x, br_y, tr_x, tr_y,
+        0.0f, 0.0f, 0.0f, 0.0f, 0xFF9A9A9A, HUD_DEPTH);
+    hud_submit_quad(&q);
+    return 1;
+}
+
 void td5_hud_render_minimap(int actor_slot)
 {
     /* Only for point-to-point tracks */
@@ -2913,20 +3017,18 @@ void td5_hud_render_minimap(int actor_slot)
             int b_near = near_idx + delta;
             int b_far  = far_idx  + delta;
 
-            /* Branch quad must stay strictly inside the branch's own range
-             * [seg_branch[K] .. seg_branch[K] + plen - 1]. The appended
-             * branch row's seg_end is br + plen — that index IS the join
-             * span (where branch reconverges with the post-segment mainline)
-             * and its vertex slot +0x06 encodes the join geometry, not a
-             * normal road span. Reading it produced stretched/skewed quads
-             * at branch start AND missing quads at branch end on the
-             * minimap (user-reported 2026-05-26). [orig parity: TBD via
-             * Frida on Parkway/Sydney; static-safe lower bound applied]. */
-            int plen     = (int)s_minimap_seg_end[cur_seg]
-                         - (int)s_minimap_seg_start[cur_seg];
-            int b_far_max = (int)s_minimap_seg_branch[cur_seg] + plen - 1;
-            if (b_far > b_far_max) b_far = b_far_max;
-
+            /* No b_far clamp — byte-faithful to orig @ 0x43a711 (b_far =
+             * far + delta, raw). The branch's last quad INTENTIONALLY reaches
+             * the JOIN span (seg_branch[K] + plen): its +0x06 vertex encodes
+             * the reconvergence geometry where the branch rejoins the mainline,
+             * so drawing it CLOSES the branch line at the rejoin. A prior port
+             * guard clamped b_far to br+plen-1 to "stay inside the branch
+             * range", which dropped that join quad and produced the taper/
+             * cutoff at the branch end (user-reported). The earlier init
+             * off-by-one fix corrected the segment boundaries the old guard was
+             * compensating for. The b_near<=b_far and <g_strip_span_count
+             * guards below keep the raw far in-bounds.
+             * [CONFIRMED: orig has no clamp @ 0x43a711]. */
             if (b_near <= b_far &&
                 b_near >= 0 && b_far >= 0 &&
                 b_near < g_strip_span_count &&
@@ -3019,6 +3121,41 @@ void td5_hud_render_minimap(int actor_slot)
                 }
             }
         }
+
+        /* Quad3/Quad4: checkpoint-connector road quads [CONFIRMED @ 0x43a9a9-0x43aeb4].
+         * The original draws an extra 2-span connector quad at the checkpoint span
+         * `cp` that falls within this quad's [near, far] range, plus its branch-
+         * collapsed counterpart when the current segment has a branch link. These
+         * bridge the route line through checkpoint seams. Checkpoint spans come
+         * from s_active_checkpoint (mirror of g_raceCheckpointTablePtr @ 0x4aed88).
+         * Use near_idx (the pre-advance value) for the range test — local_a4 has
+         * already been advanced to far_idx+1 above. */
+        {
+            int cp = 9999; /* orig default 0x270f @ 0x43a3c4 */
+            int cp_count = td5_game_get_minimap_checkpoint_count();
+            for (int ci = 0; ci < cp_count; ci++) {
+                int cs = td5_game_get_minimap_checkpoint_span(ci);
+                if (cs >= near_idx && cs < near_idx + 0x120) { cp = cs; break; }
+            }
+            if (cp <= far_idx) { /* Quad3 gate @ 0x43a9a9 */
+                if (minimap_emit_connector(span_base, vert_base, cp,
+                                           offset_x, offset_z, cos_h, sin_h,
+                                           mm_cx, mm_cy))
+                    seg_rendered++;
+                /* Quad4: branch-collapsed connector, gated on LINK != -1
+                 * (g_minimapSegmentSpanEnd[seg], @ 0x43ac23). cpB = cp + delta
+                 * where delta = LINK - segStart (same delta as the branch quad). */
+                if (cur_seg < s_minimap_seg_branch_start &&
+                    s_minimap_seg_branch[cur_seg] != (int16_t)-1) {
+                    int cpB = cp + ((int)s_minimap_seg_branch[cur_seg]
+                                  - (int)s_minimap_seg_start[cur_seg]);
+                    if (minimap_emit_connector(span_base, vert_base, cpB,
+                                               offset_x, offset_z, cos_h, sin_h,
+                                               mm_cx, mm_cy))
+                        branch_rendered++;
+                }
+            }
+        }
     }
     {
         static int s_mm_log_counter = 0;
@@ -3060,7 +3197,28 @@ void td5_hud_render_minimap(int actor_slot)
             span_delta = ((g_strip_span_count / 2 - (int)racer_span) + (int)player_span)
                          % g_strip_span_count - g_strip_span_count / 2;
         } else {
-            span_delta = (int)player_span - (int)racer_span;
+            /* Branch-aware gate: compare branch-collapsed (normalized) spans,
+             * matching the original which reads actor+0x82 for both player and
+             * racer [CONFIRMED @ 0x43aefa/0x43af2c]. remapped_span is the
+             * player's normalized span (already computed for centering);
+             * minimap_normalize_span() collapses the racer's raw span the same
+             * way. Without this, an opponent on a different branch has a
+             * raw-span delta far beyond +/-144 and is culled (the reported
+             * "can't see opponents on the other branch"). */
+            int racer_norm = minimap_normalize_span((int)racer_span);
+            span_delta = remapped_span - racer_norm;
+
+            /* One-shot-per-second diagnostic when a racer is on a different
+             * branch than the player (raw span differs from normalized). */
+            if (r != actor_slot && (int)racer_span != racer_norm) {
+                static int s_xbranch_log_ctr = 0;
+                if ((s_xbranch_log_ctr++ % 60) == 0) {
+                    TD5_LOG_I(LOG_TAG,
+                        "minimap xbranch: r=%d raw=%d norm=%d player_norm=%d span_delta=%d shown=%d",
+                        r, (int)racer_span, racer_norm, remapped_span, span_delta,
+                        (span_delta > -0x91 && span_delta < 0x91));
+                }
+            }
         }
 
         /* Only show racers within +/-144 spans */
@@ -3132,7 +3290,12 @@ void td5_hud_render_minimap(int actor_slot)
             span_delta = ((g_strip_span_count / 2 - (int)traffic_span) + (int)player_span)
                          % g_strip_span_count - g_strip_span_count / 2;
         } else {
-            span_delta = (int)player_span - (int)traffic_span;
+            /* Same branch-collapsed gate as the racer loop above so traffic on
+             * a different branch than the player isn't culled by the raw-span
+             * delta. [INFERRED — the original's traffic loop shares the racer
+             * loop's +/-144 window; the +0x82 normalize matches the racer path
+             * at 0x43af2c.] Main-road traffic (raw==norm) is unaffected. */
+            span_delta = remapped_span - minimap_normalize_span((int)traffic_span);
         }
         if (span_delta > -0x91 && span_delta < 0x91) {
             float twx = (float)actor_world_x(t) * kFP + offset_x;
@@ -3309,7 +3472,12 @@ void td5_hud_init_minimap_layout(void)
         uint8_t *span_base = (uint8_t *)g_strip_span_base;
 
         for (int s = 0; s < g_strip_total_segments; s++) {
-            uint8_t span_type = span_base[(s + 1) * 24]; /* type of next span */
+            /* Test the CURRENT span's type. Original tests span N at counter N:
+             * g_trackStripRecords[N*0x18] [CONFIRMED @ 0x43b6c1]. The prior
+             * (s+1)*24 indexing made every segment END land one span short
+             * (and read one span PAST the array on the final iteration),
+             * truncating the minimap road/branch line at each segment end. */
+            uint8_t span_type = span_base[s * 24];
 
             if (span_type == 0x08) {
                 /* Segment end */
@@ -3322,8 +3490,15 @@ void td5_hud_init_minimap_layout(void)
                 /* Branch connector */
                 s_minimap_seg_start[seg_count] = (int16_t)seg_start_val;
                 s_minimap_seg_end[seg_count]   = (int16_t)(s - 1);
-                /* Read branch link from span data */
-                int16_t link = *(int16_t *)(span_base + seg_start_val * 24 + 8);
+                /* Branch LINK = field +8 of the segment's OPENING span (span
+                 * at the prior 0x08), i.e. seg_start_val-1. Original reads
+                 * *(short*)(records + local_80 - 0x10) with local_80 =
+                 * seg_start_val*0x18  =>  span (seg_start_val-1) record +8
+                 * [CONFIRMED @ 0x43b6f4]. Guard the first-segment underflow
+                 * (no 0x08 precedes the first 0x0B on shipped tracks). */
+                int16_t link = (seg_start_val > 0)
+                    ? *(int16_t *)(span_base + (seg_start_val - 1) * 24 + 8)
+                    : (int16_t)-1;
                 s_minimap_seg_branch[seg_count] = link;
                 seg_start_val = s;
                 seg_count++;
