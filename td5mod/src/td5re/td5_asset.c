@@ -1912,7 +1912,60 @@ int td5_asset_load_level(int track_index)
      * [CONFIRMED @ 0x0042FB90 LoadTrackRuntimeData + 0x0042AA10 InitializeRaceSession]
      * writers of gReverseTrackDirection land here through the frontend's
      * "Direction" toggle (stored into g_td5.reverse_direction). */
-    const int is_reverse = g_td5.reverse_direction ? 1 : 0;
+    int is_reverse = g_td5.reverse_direction ? 1 : 0;
+
+    /* Forward-only track guard.
+     * Not every TD5 track ships reverse-direction data. Reverse-capable
+     * tracks include a STRIPB.DAT/LEFTB.TRK/RIGHTB.TRK/TRAFFICB.BUS set
+     * alongside the forward files (e.g. Moscow/level023). Forward-only tracks
+     * have NO STRIPB.DAT — confirmed by inspecting the original shipped
+     * archives: level027 (Courmayeur) and level029 (Newcastle) contain only
+     * strip.dat/left.trk/right.trk/traffic.bus, whereas level023 (Moscow)
+     * additionally contains stripb.dat/leftb.trk/rightb.trk/trafficb.bus.
+     *
+     * Requesting reverse on a forward-only track made the STRIPB.DAT lookup
+     * below return NULL, so the strip load fell through to
+     * td5_track_load_strip(NULL,0) -> placeholder track with span_count=0.
+     * Every per-slot spawn-span lookup in the grid loop then returned NULL
+     * (td5_track_get_span -> NULL -> `continue`), so all six racers were left
+     * at their memset-zero origin: the reported "all cars stacked on top of
+     * each other out of bounds" on Courmayeur. (Runtime-confirmed: race.log
+     * "Grid start ... span_count=0" with zero per-slot spawn lines.)
+     *
+     * Probe the reverse strip first; if it is absent, fall back to forward and
+     * clear g_td5.reverse_direction so the ENTIRE race pipeline stays
+     * forward-consistent — the reverse texture swap (td5_asset.c), the reverse
+     * minimap/render span math (td5_render.c) and the reverse span-progress
+     * logic (td5_track.c) all gate on g_td5.reverse_direction and would
+     * otherwise operate on forward data. The frontend re-applies the user's
+     * Direction choice on the next race entry (td5_frontend.c), so this clear
+     * does not stick for reverse-capable tracks. */
+    if (is_reverse) {
+        /* Authoritative, offset-free capability check: does THIS track's own
+         * level directory contain the reverse strip? We deliberately do NOT
+         * route this through load_first_available_level_entry /
+         * td5_asset_open_and_read: their try_extracted_level_file_* helpers
+         * probe level_num AND level_num+1 (build_extracted_level_path's
+         * level_offset 0..1 loop), so a forward-only track would falsely
+         * "find" the NEXT level's STRIPB.DAT. Concretely, Newcastle
+         * (level029) otherwise resolves STRIPB.DAT to level030 (the Drag
+         * Strip), loading the wrong reverse geometry instead of being
+         * recognised as forward-only. Checking the exact per-level loose path
+         * avoids that off-by-one (td5_plat_file_exists is case-insensitive on
+         * Win32, so "STRIPB.DAT" matches the extracted lowercase stripb.dat). */
+        char rev_strip_path[256];
+        td5_asset_build_level_loose_path(track_index, s_strip_rev[0],
+                                         rev_strip_path, sizeof(rev_strip_path));
+        if (!td5_plat_file_exists(rev_strip_path)) {
+            TD5_LOG_W(LOG_TAG,
+                      "load_level: track_index=%d has no reverse strip (%s); "
+                      "forcing forward direction (track is forward-only)",
+                      track_index, rev_strip_path);
+            is_reverse = 0;
+            g_td5.reverse_direction = 0;
+        }
+    }
+
     const char **strip_names   = is_reverse ? s_strip_rev   : s_strip_fwd;
     const char **left_names    = is_reverse ? s_left_rev    : s_left_fwd;
     const char **right_names   = is_reverse ? s_right_rev   : s_right_fwd;
