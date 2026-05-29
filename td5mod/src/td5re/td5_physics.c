@@ -750,35 +750,11 @@ void td5_physics_snapshot_prev_world_pos(void)
     }
 }
 
-/* Per-slot out-of-bounds recovery state (fast-tilt launch fix, 2026-05-28).
- * Tracks the last solidly-grounded on-track pose so a car flung off-track by
- * the OOB cascade can be reset there. See td5_physics_oob_recovery(). Reset
- * at race init by td5_physics_seed_prev_world_pos(). */
-typedef struct {
-    int      valid;          /* a good pose has been captured this race */
-    int      bad_ticks;      /* consecutive un-grounded ticks since last good */
-    int      prev_valid;     /* prev_{x,y,z} hold last tick's position */
-    int32_t  prev_x, prev_y, prev_z;
-    int32_t  good_x, good_y, good_z;             /* last solidly-grounded world_pos */
-    int32_t  good_eroll, good_eyaw, good_epitch; /* last solidly-grounded euler_accum */
-} TD5_OobState;
-static TD5_OobState s_oob_state[16];
-
-/* Out-of-bounds detector + faithful recovery. Tracks the last solidly-grounded
- * on-track pose; when the car is flung off-track it restores XZ to that pose and
- * invokes the original's ResetVehicleActorState (0-speed, re-drop on track).
- * Called once per actor per tick from the END of td5_physics_update_vehicle_actor
- * (NOT from integrate_pose — reset_actor_state re-enters integrate_pose). */
-static void td5_physics_oob_recovery(TD5_Actor *actor);
-
 void td5_physics_seed_prev_world_pos(void)
 {
     /* Race-init seed: zero the table, then snapshot current world_pos so the
      * first interpolation pass before any tick fires lerps current->current. */
     memset(s_prev_world_pos, 0, sizeof(s_prev_world_pos));
-    /* Reset OOB recovery tracking so a race restart can't reset a car to the
-     * previous race's last-good pose. */
-    memset(s_oob_state, 0, sizeof(s_oob_state));
     td5_physics_snapshot_prev_world_pos();
 }
 
@@ -1384,14 +1360,6 @@ void td5_physics_update_vehicle_actor(TD5_Actor *actor)
                   actor->current_gear,
                   actor->surface_type_chassis);
     }
-
-    /* [FIX 2026-05-28 — fast-tilt out-of-bounds launch] After the full per-tick
-     * vehicle update (integrate + wall resolve), if the car has been flung far
-     * off-track by the OOB cascade, restore it to its last solidly-grounded pose
-     * via the original's ResetVehicleActorState. No-op during normal driving and
-     * legitimate jumps. Placed here (not in integrate_pose) so the reset's
-     * internal integrate is not a re-entrant nested call. */
-    td5_physics_oob_recovery(actor);
 
     /* precise-port pilot 0x00406650: capture leave snapshot. */
     td5_pilot_emit_00406650_leave(actor);
@@ -6414,117 +6382,6 @@ static void td5_physics_attitude_from_wheels(const TD5_Actor *actor,
  * `(((new - old - 0x800) & 0xFFF) - 0x800)` pattern at 0x00405ED8-0x00405F10. */
 static inline int32_t td5_physics_wrap_angle_delta(int32_t new_angle, int32_t old_angle) {
     return (int32_t)(((new_angle - old_angle - 0x800) & 0xFFF) - 0x800);
-}
-
-/* ========================================================================
- * Out-of-bounds detection + recovery (fast-tilt launch fix, 2026-05-28)
- *
- * The original game resets a car that leaves the playable area; the port had
- * this disabled (see the "OOB recovery disabled" note further down in
- * integrate_pose) after an earlier attempt false-positived on suspension
- * instability. This contiguity-based detector cannot fire during normal driving
- * or a legitimate jump:
- *
- *   - Each tick, when the car is SOLIDLY grounded (>=3 wheels in contact) and it
- *     moved a sane amount since the previous tick, snapshot a "last good"
- *     on-track pose (world_pos + euler_accum). Normal driving updates this every
- *     tick, so the snapshot follows the car continuously.
- *   - When a fast, tilted car leaves the track the per-wheel probe walker
- *     extrapolates garbage ground (see td5_track.c triangle_height cap) and the
- *     dynamics fling the car thousands-to-millions of units away in a spin
- *     cascade. A legitimate jump stays within a few hundred units of its launch
- *     point; the cascade does not. When the excursion from the last good pose
- *     exceeds OOB_DIST on any axis (or the car has been un-grounded for a very
- *     long time), reset to the last good pose with zeroed linear+angular
- *     velocity and a re-synced track position.
- *
- * Thresholds (24.8 fixed point) are set well above any real driving speed and
- * well below observed fling magnitudes (repro reached X=238M fp ~= 930k units;
- * legitimate travel is tens of units/tick). Applies to racers (slots 0-5);
- * traffic uses a separate, simpler integrator. */
-static void td5_physics_oob_recovery(TD5_Actor *actor)
-{
-    if (!actor) return;
-    if (g_game_paused) return;                  /* car is parked during countdown */
-    if ((int)actor->slot_index >= 6) return;    /* racers only */
-
-    const int32_t SANE_STEP = 0x28000;  /* 163840 fp (~640 u/tick): max contiguous move
-                                         * (generous headroom over the dev car's top speed
-                                         * so high-speed driving still updates last-good) */
-    const int32_t OOB_DIST  = 0x80000;  /* 524288 fp (~2048 u): excursion meaning OOB */
-    const int     MAX_BAD   = 120;       /* ~4s un-grounded fallback */
-
-    int slot = actor->slot_index & 0x0F;
-    TD5_OobState *s = &s_oob_state[slot];
-
-    int32_t px = actor->world_pos.x, py = actor->world_pos.y, pz = actor->world_pos.z;
-
-    /* Per-tick displacement (for the contiguity test). */
-    int32_t dxx = 0, dyy = 0, dzz = 0;
-    if (s->prev_valid) {
-        dxx = px - s->prev_x; if (dxx < 0) dxx = -dxx;
-        dyy = py - s->prev_y; if (dyy < 0) dyy = -dyy;
-        dzz = pz - s->prev_z; if (dzz < 0) dzz = -dzz;
-    }
-
-    int grounded = 4;
-    for (int i = 0; i < 4; i++)
-        if (actor->wheel_contact_bitmask & (1 << i)) grounded--;
-
-    int contiguous = (dxx < SANE_STEP && dyy < SANE_STEP && dzz < SANE_STEP);
-    int healthy = (grounded >= 3) && (!s->prev_valid || contiguous);
-
-    if (healthy) {
-        s->good_x = px; s->good_y = py; s->good_z = pz;
-        s->good_eroll  = actor->euler_accum.roll;
-        s->good_eyaw   = actor->euler_accum.yaw;
-        s->good_epitch = actor->euler_accum.pitch;
-        s->valid = 1;
-        s->bad_ticks = 0;
-    } else if (s->valid) {
-        s->bad_ticks++;
-    }
-
-    if (s->valid) {
-        int32_t ex = px - s->good_x; if (ex < 0) ex = -ex;
-        int32_t ey = py - s->good_y; if (ey < 0) ey = -ey;
-        int32_t ez = pz - s->good_z; if (ez < 0) ez = -ez;
-        if (ex > OOB_DIST || ey > OOB_DIST || ez > OOB_DIST || s->bad_ticks > MAX_BAD) {
-            TD5_LOG_W(LOG_TAG,
-                "OOB_RECOVER slot=%d from=(%d,%d,%d) to=(%d,%d,%d) "
-                "excursion=(%d,%d,%d) bad=%d -> reset_actor_state",
-                slot, px, py, pz, s->good_x, s->good_y, s->good_z,
-                ex, ey, ez, s->bad_ticks);
-
-            /* Restore the horizontal position + heading to the last solidly-
-             * grounded on-track pose, then hand off to the ORIGINAL's recovery
-             * reset (ResetVehicleActorState @ 0x00405D70). That zeros linear +
-             * angular velocity, re-drops the car onto the track (world_pos.y
-             * sentinel -> ground-snap via its internal integrate), levels
-             * roll/pitch (keeps yaw), and restores gear=2 / idle RPM — the
-             * faithful "recover with 0 speed".
-             *
-             * The original keeps XZ across reset (its cars never fly far); the
-             * port restores XZ here because the OOB cascade physically flings
-             * the car thousands of units away, so a re-drop at the flung XZ
-             * would land in the void. With XZ + yaw restored, reset_actor_state
-             * re-drops the car exactly where it last had solid contact.
-             *
-             * Safe to call here: this runs at the END of
-             * td5_physics_update_vehicle_actor, AFTER integrate_pose has already
-             * returned, so reset_actor_state's internal integrate_pose is not a
-             * re-entrant nested call. */
-            actor->world_pos.x = s->good_x;
-            actor->world_pos.z = s->good_z;
-            actor->euler_accum.yaw = s->good_eyaw;
-            td5_physics_reset_actor_state(actor);
-
-            s->bad_ticks = 0;
-            px = actor->world_pos.x; py = actor->world_pos.y; pz = actor->world_pos.z;
-        }
-    }
-
-    s->prev_x = px; s->prev_y = py; s->prev_z = pz; s->prev_valid = 1;
 }
 
 /* ========================================================================

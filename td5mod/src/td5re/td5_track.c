@@ -3420,10 +3420,6 @@ static int64_t diagonal_cross(int vl0_idx, int vr1_idx,
  *
  * Returns height in 24.8 fixed-point.
  */
-/* Diagnostic counter: number of times the OOB upward-extrapolation cap fired
- * (see the height-cap block inside triangle_height, fast-tilt launch fix). */
-static unsigned int s_height_cap_hits = 0;
-
 /* Set when the most recent probe_span_lane_height() call capped an upward
  * out-of-quad extrapolation (fast-tilt launch fix). The per-wheel contact
  * refresh reads it via td5_track_last_contact_was_capped() right after its
@@ -3523,13 +3519,6 @@ static int32_t triangle_height(int va_idx, int vb_idx, int vc_idx,
         if (height > hi) {
             height = hi;
             s_last_contact_capped = 1;   /* signal consumer: force this wheel airborne */
-            /* Rate-limited confirmation that the cap engaged (off-quad OOB). */
-            s_height_cap_hits++;
-            if ((s_height_cap_hits % 64u) == 1u) {
-                TD5_LOG_W(LOG_TAG,
-                    "height_cap: capped to %d (vmax=%d vmin=%d) hits=%u",
-                    height, vmax, vmin, s_height_cap_hits);
-            }
         }
     }
 
