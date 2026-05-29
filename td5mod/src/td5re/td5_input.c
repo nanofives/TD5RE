@@ -708,8 +708,6 @@ void td5_input_update_player_control(int slot)
         }
     } else {
         /* Digital throttle/brake */
-        s_handbrake[slot] = 0;
-
         if (bits & TD5_INPUT_BRAKE) {
             /* Brake / reverse latch — matches original at 0x4032A0-0x403300.
              *
@@ -784,14 +782,39 @@ void td5_input_update_player_control(int slot)
             }
         }
 
-        /* Handbrake (bit 0x100000) — level-triggered via K_DOWN, so the flag
-         * stays set for as long as Space is held. No throttle / reverse
-         * override: a drift handbrake cuts rear grip via tuning+0x7A, it does
-         * NOT brake the car or shift to reverse. The physics path already
-         * halves grip[2]/grip[3] while actor->handbrake_flag is set. */
-        if (bits & 0x100000u) {
-            s_handbrake[slot] = 1;
-        }
+    }
+
+    /* ---- Handbrake (bit 0x100000) ----
+     * Faithful to UpdatePlayerVehicleControlState's shared tail block
+     * [CONFIRMED @ 0x004033fb-0x00403422]: when the handbrake bit is set —
+     * on BOTH the analog and digital throttle paths, which is why this is
+     * unified here AFTER the if/else rather than nested in the digital arm —
+     * the original writes three actor fields and OVERRIDES whatever
+     * throttle/brake the decode above produced:
+     *   actor+0x33E (encounter_steering_cmd / throttle) = 0xFF00 (-256)
+     *   actor+0x36D (brake_flag)                        = 1
+     *   actor+0x36E (handbrake_flag)                    = 1
+     * Setting brake_flag turns the brake lights on (the taillight gate at
+     * RenderVehicleTaillightQuads 0x004011C0 reads +0x36D) and routes the
+     * physics through the on-ground brake-deceleration path; the -256 throttle
+     * gives that path a non-zero retarding force (bf = tuning[0x6E] * throttle
+     * >> 8 @ 0x004043f0). The rear-grip cut (tuning+0x7A) and slip-z gate in
+     * td5_physics still key off handbrake_flag. When NOT pressed,
+     * handbrake_flag is cleared to 0 [CONFIRMED @ the (bits&0x100000)==0
+     * branch].
+     *
+     * Earlier port comment claimed handbrake "does NOT brake the car or shift
+     * to reverse" and set only handbrake_flag — that diverged from the
+     * original (no deceleration, no brake lights). This restores the faithful
+     * behavior. */
+    if (bits & 0x100000u) {
+        s_throttle[slot]  = (int16_t)0xFF00;  /* -256: full brake throttle */
+        s_brake[slot]     = 1;                 /* lights brake lights + brake path */
+        s_handbrake[slot] = 1;                 /* rear-grip cut + slip-z gate */
+        TD5_LOG_I(LOG_TAG,
+                  "handbrake ON slot=%d: throttle=-256 brake=1 hb=1", slot);
+    } else {
+        s_handbrake[slot] = 0;
     }
 
     /* ---- NOS / Horn ---- */
