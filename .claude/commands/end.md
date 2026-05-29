@@ -334,23 +334,37 @@ echo "origin/master in sync."
 
 ## Step 6: Tear down the worktree (junction-safe)
 
-Same protocol as `/fix` Step 4 — no exceptions.
+Same protocol as `/fix` Step 4 — no exceptions. See the **TEARDOWN SAFEGUARDS**
+block in `fix.md` ("Abandoning a worktree") for the full rationale: main's
+`original/` + `td5mod/deps/mingw/` now carry a deny-delete ACL, and there is an
+off-disk backup at `C:\Users\maria\Desktop\TD5RE_backup_2026-05-28\`.
 
 ```bash
-# Pre-unlink the mingw junction with a hardcoded backslash path.
-# Do NOT use $(cygpath -w ...) — it silently fails on this host.
-cmd //c "rmdir \"C:\\Users\\maria\\Desktop\\Proyectos\\TD5RE\\.claude\\worktrees\\${SESSION_TAG}\\td5mod\\deps\\mingw\""
+cd C:/Users/maria/Desktop/Proyectos/TD5RE
+
+# CANARY (pre): irreplaceable main-tree markers must exist before we start.
+test -f original/TD5_d3d.exe && test -f td5mod/deps/mingw/mingw32/bin/gcc.exe \
+  || { echo "PRECONDITION: main-tree markers already missing — investigate first"; exit 1; }
+
+# Pre-unlink the mingw junction. THIS HOST: cmd //c "rmdir" fails with a
+# volume-label syntax error (confirmed 2026-05-28), leaving the junction live
+# for --force to follow. Use PowerShell's reparse-aware delete (link only, never
+# the target), guarded on ReparsePoint.
+powershell.exe -NoProfile -Command "\$p='${WORKTREE_DIR}/td5mod/deps/mingw' -replace '/','\\'; if (Test-Path \$p){ \$i=Get-Item \$p -Force; if (\$i.Attributes -band [IO.FileAttributes]::ReparsePoint){ \$i.Delete() } else { Write-Error 'NOT a reparse point — refusing'; exit 1 } }"
 
 # MANDATORY: verify junction is gone before running --force.
 if [ -d "${WORKTREE_DIR}/td5mod/deps/mingw" ]; then
     echo "ERROR: pre-unlink failed — junction still live. Do NOT proceed."
-    echo "Inspect: cmd //c 'dir /AL' inside ${WORKTREE_DIR}/td5mod/deps/"
     exit 1
 fi
 
-cd C:/Users/maria/Desktop/Proyectos/TD5RE
 git worktree remove --force "${WORKTREE_DIR}"
 git branch -d "${SESSION_TAG}"
+
+# CANARY (post): the ACL should block any junction-follow, but verify the
+# markers survived. If gone, restore from the backup IMMEDIATELY.
+test -f original/TD5_d3d.exe && test -f td5mod/deps/mingw/mingw32/bin/gcc.exe \
+  || { echo "FATAL: main-tree data vanished during teardown — restore from C:\\Users\\maria\\Desktop\\TD5RE_backup_2026-05-28\\ NOW"; exit 1; }
 
 # Stale-build janitor (2026-04-29). Sweep any orphan build_<pid>/ dirs
 # from main's td5mod/src/td5re/. Numeric suffix only — named variants
@@ -398,6 +412,105 @@ done
 
 ---
 
+## Step 7.5: Global house-cleaning — sweep stray branches + fully-merged worktrees
+
+Steps 5–6 close *this* session's worktree, but `/fix` runs and subagent
+worktree-isolation runs leave two kinds of debris that nothing else collects:
+
+- **Stray branch refs** — `worktree-agent-*` branches (subagent worktrees whose
+  directory the harness auto-removed but whose branch ref survived) and `fix-*`
+  branches whose worktree is already gone. These are invisible to the `/fix`
+  worktree janitor because it only walks `git worktree list`.
+- **Fully-merged sibling worktrees** — old `/fix` worktrees whose branch is now
+  entirely contained in master.
+
+This step deletes only what is **provably disposable** (merged into master) and
+**reports** anything with unmerged commits or uncommitted changes for your
+decision — it NEVER force-merges. This is what makes `/end` actually "clean
+house" instead of letting agent branches and old fix worktrees pile up.
+
+### 7.5a — Sweep stray branch refs (no live worktree)
+
+```bash
+cd C:/Users/maria/Desktop/Proyectos/TD5RE
+git fetch origin master --quiet 2>/dev/null || true
+
+REPORT="$(mktemp)"   # accumulates unmerged leftovers for 7.5c
+
+# Branches still checked out in a worktree are handled in 7.5b — exclude them.
+CHECKED_OUT="$(git worktree list --porcelain | awk '/^branch /{sub(/^refs\/heads\//,"",$2);print $2}')"
+
+for B in $(git for-each-ref --format='%(refname:short)' \
+            'refs/heads/worktree-agent-*' 'refs/heads/fix-*'); do
+    [ "${B}" = "master" ] && continue
+    printf '%s\n' "${CHECKED_OUT}" | grep -qx "${B}" && continue   # has a worktree → 7.5b
+    if git merge-base --is-ancestor "${B}" master 2>/dev/null; then
+        # Fully in master — only the label remains. -d is safe (and refuses if
+        # we somehow misjudged: that refusal is the backstop).
+        git branch -d "${B}" >/dev/null 2>&1 && echo "deleted merged branch: ${B}"
+    else
+        AHEAD="$(git rev-list --count "master..${B}" 2>/dev/null || echo '?')"
+        echo "BRANCH   ${B} — ${AHEAD} commit(s) not in master" >> "${REPORT}"
+    fi
+done
+```
+
+### 7.5b — Close fully-merged sibling worktrees
+
+```bash
+cd C:/Users/maria/Desktop/Proyectos/TD5RE
+
+SAFE="$(mktemp)"   # worktrees safe to auto-close (merged + clean)
+git worktree list --porcelain | awk '
+    /^worktree /{wt=$2}
+    /^branch /  {sub(/^refs\/heads\//,"",$2); br=$2}
+    /^$/        {if(wt)printf "%s\t%s\n",wt,br; wt="";br=""}
+    END         {if(wt)printf "%s\t%s\n",wt,br}
+' | while IFS=$'\t' read -r WT BR; do
+    case "${WT}" in */.claude/worktrees/fix-*) ;; *) continue ;; esac   # never the main tree
+    DIRTY="$(git -C "${WT}" status --porcelain 2>/dev/null | wc -l)"
+    if [ -n "${BR}" ] && git merge-base --is-ancestor "${BR}" master 2>/dev/null && [ "${DIRTY}" -eq 0 ]; then
+        printf '%s\t%s\n' "${WT}" "${BR}" >> "${SAFE}"
+    else
+        WHY=""; [ "${DIRTY}" -gt 0 ] && WHY="dirty=${DIRTY} "
+        git merge-base --is-ancestor "${BR}" master 2>/dev/null || WHY="${WHY}unmerged"
+        echo "WORKTREE ${WT} (${BR}) — ${WHY}" >> "${REPORT}"
+    fi
+done
+```
+
+Then tear down each entry in `${SAFE}` using the **Step 6 junction-safe teardown
+block, verbatim** — plug `WORKTREE_DIR=<WT>` and `SESSION_TAG=<BR>` and run the
+full block (pre/post canary, PowerShell reparse-delete of the `mingw` junction,
+verify the junction is gone, then `git worktree remove --force`, then
+`git branch -d`). Do NOT improvise a shorter teardown and never `rm -rf` a
+worktree path. After the loop:
+
+```bash
+git worktree prune --verbose
+```
+
+### 7.5c — Report leftovers (these are your decision, never auto-touched)
+
+```bash
+if [ -s "${REPORT}" ]; then
+    echo ""
+    echo "UNMERGED LEFTOVERS — left untouched, need your decision:"
+    sed 's/^/  /' "${REPORT}"
+    echo "  → resume with /fix, or once you're sure it's disposable delete manually"
+    echo "    (git branch -D <name> for a ref; Step 6 junction-safe teardown for a worktree)."
+fi
+rm -f "${REPORT}" "${SAFE}" 2>/dev/null || true
+```
+
+**Rules for this step:**
+- **Only `git branch -d`, never `-D`.** `-d` refuses any branch not fully in master — that refusal IS the safety net. Unmerged branches are reported, never deleted.
+- **Auto-close only MERGED + CLEAN worktrees.** Any uncommitted change or unmerged commit → report and leave alone, even if the name matches `fix-*` (it may be a candidate fix you're iterating on, e.g. an unfinished OOB rework).
+- **Reuse the Step 6 teardown verbatim** for every removal — same junction pre-unlink + canary. Never `rm -rf`.
+- **Idempotent** — re-running on a clean repo reports nothing and removes nothing.
+
+---
+
 ## Step 8: Session close report
 
 Print a final summary to close the session cleanly:
@@ -414,12 +527,18 @@ Resolved this session:
 Deferred to memory:
   <list of new TODO memory entries from Step 3a, or 'none'>
 
+Cleaned up this session (Step 7.5):
+  <count of stray branches deleted + fully-merged worktrees auto-closed, or 'none'>
+
+Unmerged leftovers (left for your decision):
+  <the Step 7.5c REPORT list, or 'none'>
+
 Open worktrees remaining:
   <git worktree list output, filtered to fix-* only>
 
 Next recommended action:
   <if deferred TODOs exist: "Run /fix <item> to address deferred stubs">
-  <if sibling worktrees exist: "Review and merge or discard remaining fix-* worktrees">
+  <if unmerged leftovers exist: "Resume them with /fix, or delete once confirmed disposable">
   <if everything clean: "Nothing pending — session complete.">
 ```
 
@@ -433,4 +552,5 @@ Next recommended action:
 - **Never commit `td5re.ini`, `log/`, or build artifacts**.
 - **Never use `git branch -D`** during teardown — only `-d`. A worktree that wasn't merged should not be torn down by this skill; ask the user first.
 - **If recheck surfaces uncertainties and the user chooses to work on them**: stop here, let the user work, and wait for `/end` to be re-invoked. Do NOT keep running the merge steps.
-- **If `git worktree list` shows no active `fix-*` worktrees and we're in the main tree**: Steps 5–7 reduce to just a push + memory update. Skip teardown entirely.
+- **If `git worktree list` shows no active `fix-*` worktrees and we're in the main tree**: Steps 5–7 reduce to just a push + memory update. Skip teardown entirely. **Step 7.5 still runs** — it sweeps stray branch refs (`worktree-agent-*`, orphaned `fix-*`) even when there are no worktrees left.
+- **Step 7.5 never force-merges and never uses `git branch -D`.** It deletes only branches/worktrees fully contained in master; everything with unmerged work is reported for the user, never destroyed. This is the rule that prevents `/end` from silently swallowing an unfinished candidate fix.

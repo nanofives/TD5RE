@@ -10,21 +10,42 @@ Fix a bug or implement a feature in the TD5RE source port. Delegates Ghidra RE r
 
 Every `/fix` run gets its own git worktree under `.claude/worktrees/` so builds, logs, and INI tweaks stay isolated from the main tree and from other concurrent sessions.
 
-Pick a short unique session tag and create the worktree from `master`. Run these from the main tree (`C:/Users/maria/Desktop/Proyectos/TD5RE`):
+Pick a short unique session tag and create the worktree. By default branch from `master`, but allow opt-in to branch from the current HEAD when the user is mid-investigation on a topic branch with uncommitted work that the fix should build on. Run these from the main tree (`C:/Users/maria/Desktop/Proyectos/TD5RE`):
 
 ```bash
 cd C:/Users/maria/Desktop/Proyectos/TD5RE
 
-# Unique tag (epoch + PID). Keep it short — also becomes the branch name.
-SESSION_TAG="fix-$(date +%s)-$$"
+# Unique tag (epoch + PID + $RANDOM). Keep it short — also becomes the branch name.
+# $RANDOM avoids collisions when two parallel bash shells fire in the same second
+# with PID reuse (rare on Windows but seen empirically).
+SESSION_TAG="fix-$(date +%s)-$$-${RANDOM}"
 WORKTREE_DIR="C:/Users/maria/Desktop/Proyectos/TD5RE/.claude/worktrees/${SESSION_TAG}"
 
-# Create a new branch from master in its own worktree.
-git worktree add -b "${SESSION_TAG}" "${WORKTREE_DIR}" master
+# --- Pick the source branch (QOL: don't silently lose in-progress work) ---
+# Default is master. If the user is on a topic branch with uncommitted work,
+# STOP and ask before branching from master — they may want to continue the
+# investigation on top of their current HEAD instead of forking off master.
+BASE_BRANCH="${BASE_BRANCH:-master}"
+CURRENT_BRANCH="$(git rev-parse --abbrev-ref HEAD)"
+DIRTY_FILES="$(git status --porcelain | wc -l)"
+
+if [ "${BASE_BRANCH}" = "master" ] && [ "${CURRENT_BRANCH}" != "master" ] && [ "${DIRTY_FILES}" -gt 0 ]; then
+    echo "WARN: current branch is ${CURRENT_BRANCH} with ${DIRTY_FILES} uncommitted file(s)."
+    echo "      Default /fix behavior branches from master and IGNORES your in-progress work."
+    echo "      Ask the user which base they want before proceeding:"
+    echo "        (a) master              — clean fork (default, recommended for unrelated fixes)"
+    echo "        (b) ${CURRENT_BRANCH}   — continue investigation; uncommitted files mirrored at Step 0"
+    echo "      Set BASE_BRANCH=${CURRENT_BRANCH} and re-run if they pick (b)."
+    # If running inside an autonomous /fix where you cannot prompt, default to (a)
+    # and call this out explicitly in the final report.
+fi
+
+# Create a new branch from BASE_BRANCH in its own worktree.
+git worktree add -b "${SESSION_TAG}" "${WORKTREE_DIR}" "${BASE_BRANCH}"
 
 # All subsequent edits / builds / runs happen inside $WORKTREE_DIR.
 echo "Worktree ready at: ${WORKTREE_DIR}"
-echo "Branch: ${SESSION_TAG}"
+echo "Branch: ${SESSION_TAG} (forked from ${BASE_BRANCH})"
 ```
 
 **Record the `WORKTREE_DIR` and `SESSION_TAG`** — you will use them for every Read/Edit/Bash call for the rest of the workflow. From here on:
@@ -338,9 +359,9 @@ Rules for this step:
 - Only delete the branch with `-d` (safe, rejects unmerged branches). Never use `-D`.
 - **Push is mandatory.** Whether the fix landed via `git merge --no-ff` or via fallback `git cherry-pick`, the workflow is not done until `git push origin master` succeeds and `git rev-list --count origin/master..master` returns `0`. Verify both before declaring the fix shipped.
 
-### Step 4.5: Propagate new master into sibling /fix worktrees
+### Step 4.5: Propagate new master into sibling /fix worktrees (merge + re-populate)
 
-After Step 4 merges the approved branch into master, every OTHER active `/fix` worktree is now one commit behind. Auto-fast-forward new master into each sibling worktree so they're all testing against the same base.
+After Step 4 merges the approved branch into master, every OTHER active `/fix` worktree is now one commit behind AND missing any new uncommitted-but-mirrored files / fresh assets that main has accumulated since the sibling was created. This step does **two** things per sibling: (a) merge new master, (b) re-populate uncommitted source mirrors + asset deltas so each sibling is byte-identical to "freshly created from current master" for its build inputs.
 
 ```bash
 cd C:/Users/maria/Desktop/Proyectos/TD5RE
@@ -357,8 +378,9 @@ for WT in .claude/worktrees/fix-*; do
 
     echo "=== Propagating master into ${WT} ==="
 
-    # Run the merge. --no-edit uses the default merge message; --no-ff preserves
-    # the incoming history cleanly. Capture stderr so we can pattern-match locks.
+    # --- (a) Run the merge. --no-edit uses the default merge message; --no-ff
+    # preserves the incoming history cleanly. Capture stderr so we can
+    # pattern-match locks. ---
     if ! MERGE_ERR="$(git -C "${WT}" merge --no-ff --no-edit master 2>&1)"; then
         echo "${MERGE_ERR}"
 
@@ -388,6 +410,37 @@ for WT in .claude/worktrees/fix-*; do
         echo "STOPPED: unexpected merge failure in ${WT}. See error above."
         break
     fi
+
+    # --- (b) Re-populate the sibling's working state from main so it's not
+    # missing uncommitted .c/.h, new assets, or deps the user added in main
+    # after this sibling was forked. This is the SAME logic as Step 0's
+    # "Runtime asset + toolchain setup" but trimmed: junctions and pre-built
+    # ddraw_wrapper objects don't need re-doing (they're already in place),
+    # only the deltas matter. ---
+    echo "    Re-populating uncommitted mirrors + asset delta into ${WT}..."
+
+    # Mirror uncommitted .c/.h from main into the sibling so they don't build
+    # against a stale source set. Modified, untracked, AND deleted (so stale
+    # copies in the worktree don't sneak into the build).
+    (
+        cd C:/Users/maria/Desktop/Proyectos/TD5RE
+        git status --short td5mod/src/td5re/ td5mod/ddraw_wrapper/src/ 2>/dev/null \
+            | awk '/^ M|^\?\?/ {print $2}' | while read f; do
+                mkdir -p "$(dirname "${WT}/${f}")"
+                cp "${f}" "${WT}/${f}" 2>/dev/null || true
+            done
+        git status --short td5mod/src/td5re/ 2>/dev/null \
+            | awk '/^ D/ {print $2}' | while read f; do
+                rm -f "${WT}/${f}" 2>/dev/null || true
+            done
+    )
+
+    # Asset delta — idempotent robocopy. /XC /XN /XO means "skip if file
+    # already exists regardless of timestamp" so this only copies NEW files
+    # added to main since the sibling was created. Cheap when nothing changed.
+    cmd //c "robocopy C:\\Users\\maria\\Desktop\\Proyectos\\TD5RE\\re\\assets \"$(cygpath -w "${WT}")\\re\\assets\" /E /XC /XN /XO /NFL /NDL /NJH /NJS /NC /NS /NP /MT:8" >/dev/null 2>&1 || true
+
+    echo "    ${WT}: merged + re-populated"
 done
 ```
 
@@ -396,11 +449,31 @@ Rules for this step:
 - **Any conflict → stop and leave the conflict in place** for manual resolution. Do not `--abort` in the conflict case; the user wants to see the diff.
 - Never pass `--force` or `-X theirs/ours`. If a merge needs strategy help, that's a user decision.
 - Don't touch worktrees outside `.claude/worktrees/fix-*` (the main tree is already updated, other unrelated worktrees are not our business).
-- If the loop breaks early due to a lock/conflict, later worktrees stay unmerged — that's fine. Running this step again after the blocker clears will pick them up (git skips worktrees that are already up to date).
+- The re-population step (b) ONLY runs after the merge succeeds for that sibling. If the merge failed (lock/conflict), the loop has already `break`'d and we never reach re-population — that's intentional so we don't paper over a broken merge state.
+- If the loop breaks early due to a lock/conflict, later worktrees stay unmerged — that's fine. Running this step again after the blocker clears will pick them up (git skips worktrees that are already up to date, and the asset robocopy is idempotent).
+
+### Step 4.6: Final Ghidra pool sync (republish master's RE annotations)
+
+Step 1 (research agent) runs `ghidra_pool.sh cleanup` + `sync` at the end of its own work, but only inside the research subagent's scope. Steps 2–4 never touch the pool. If the shipped fix included any Ghidra annotations (function renames, struct edits, comments, retypes) the master `TD5.rep` now contains them — but pool slots still hold the pre-merge snapshot. Republish so the next `/fix` (or `/re`, or any concurrent session) sees up-to-date RE state.
+
+```bash
+cd C:/Users/maria/Desktop/Proyectos/TD5RE
+
+# Clean any stale lock files first so locked slots that died ungracefully
+# don't get skipped forever. The pool script already protects active slots
+# (it skips ones with a live .lock file from another running session).
+bash "C:/Users/maria/Desktop/Proyectos/TD5RE/scripts/ghidra_pool.sh" cleanup
+bash "C:/Users/maria/Desktop/Proyectos/TD5RE/scripts/ghidra_pool.sh" sync
+```
+
+Rules for this step:
+- This is **always** safe to re-run. Locked slots get logged-as-skipped, not failed. Idempotent.
+- Failure here is not fatal — the fix is already merged and pushed. Log the error and continue to Step 5. (Locked pool slots will catch up on the next `/fix` or manual `ghidra_pool.sh sync`.)
+- Do NOT run `ghidra_pool.sh init` here — that recreates ALL slots from scratch and wipes any in-progress edits in pool slots that another session is using.
 
 ### Step 5: Post-condition — verify origin is in sync (HARD STOP)
 
-After Step 4.5, run a final check that local master is fully published. This catches any case where the push was skipped — e.g. fallback cherry-pick path (Step 4 rules), partial flow due to manual recovery, or auth failure that wasn't surfaced.
+After Step 4.5 (sibling worktree propagation) and Step 4.6 (final pool sync), run a final check that local master is fully published. This catches any case where the push was skipped — e.g. fallback cherry-pick path (Step 4 rules), partial flow due to manual recovery, or auth failure that wasn't surfaced.
 
 ```bash
 cd C:/Users/maria/Desktop/Proyectos/TD5RE
@@ -423,15 +496,52 @@ Only declare the /fix done after this step prints the success line. If the push 
 
 ### Abandoning a worktree
 
+> ### 🛡️ TEARDOWN SAFEGUARDS (added 2026-05-28 after a data-loss incident)
+>
+> A worktree teardown that followed junctions into the main tree wiped main's
+> `re/`, `original/`, `td5mod/deps/mingw/`, AND `ddraw_wrapper/build/`. Three
+> protections are now in place — respect ALL three:
+>
+> 1. **OS-level deny-delete ACL** on `original/` and `td5mod/deps/mingw/`
+>    (icacls DENY `(DE,DC)` for `MARIANO-PC\maria` + `MARIANO-PC\CodexSandboxUsers`,
+>    `(OI)(CI)` inherited). A teardown/delete that reaches these now fails with
+>    **Access Denied — that is the safeguard WORKING.** NEVER strip the ACL to
+>    "make teardown succeed." If `git worktree remove` errors Access-Denied on a
+>    main-tree path, a junction was still live → unlink it (step 3) and retry.
+>    To *legitimately* replace original/mingw, drop the deny first then re-apply:
+>    `powershell.exe -NoProfile -Command "icacls '<dir>' /remove:d 'MARIANO-PC\maria' /remove:d 'MARIANO-PC\CodexSandboxUsers'"`
+>    (the READ-ONLY `attrib +R` mentioned later in this doc did NOT hold — the ACL supersedes it.)
+>
+> 2. **Off-disk backup** at `C:\Users\maria\Desktop\TD5RE_backup_2026-05-28\`
+>    (`original/` + `mingw-i686.7z`). Recovery if main data vanishes:
+>    `re/` tracked files → `git checkout HEAD -- re/`; `original/` + `re/assets`
+>    → robocopy from the backup or a sibling worktree; `mingw` → re-extract
+>    `td5mod/deps/mingw-i686.7z` (build zlib from source — winlibs omits it);
+>    `ddraw_wrapper/build` → recompile `src/*.c` + `ar rcs libddraw_wrapper.a`.
+>
+> 3. **Correct junction unlink for THIS host:** `cmd //c "rmdir ..."` FAILS here
+>    with a volume-label syntax error (confirmed 2026-05-28), silently leaving the
+>    junction live for `--force` to follow. Use PowerShell's reparse-aware delete
+>    (removes ONLY the link, never the target), with a ReparsePoint guard.
+>
+> **Pre/post canary — run around EVERY teardown:** before, confirm
+> `original/TD5_d3d.exe` and `td5mod/deps/mingw/mingw32/bin/gcc.exe` exist; after,
+> confirm they STILL exist. If either vanished, the teardown followed a junction —
+> STOP and restore from the backup immediately.
+
 If the fix doesn't pan out and the user wants to throw it away instead of merging:
 
 ```bash
 cd C:/Users/maria/Desktop/Proyectos/TD5RE
 
+# CANARY (pre): record that the irreplaceable main-tree markers exist.
+test -f original/TD5_d3d.exe && test -f td5mod/deps/mingw/mingw32/bin/gcc.exe \
+  || { echo "PRECONDITION: main-tree markers already missing — investigate before teardown"; exit 1; }
+
 # Always pre-unlink the mingw junction before teardown — plain `git worktree
 # remove` will refuse (dirty files), and --force follows the junction into main.
-# Use a hardcoded backslash path; $(cygpath -w ...) silently fails on this host.
-cmd //c "rmdir \"C:\\Users\\maria\\Desktop\\Proyectos\\TD5RE\\.claude\\worktrees\\${SESSION_TAG}\\td5mod\\deps\\mingw\""
+# THIS HOST: cmd //c "rmdir" fails (volume-label error) — use PowerShell reparse delete.
+powershell.exe -NoProfile -Command "\$p='${WORKTREE_DIR}/td5mod/deps/mingw' -replace '/','\\'; if (Test-Path \$p){ \$i=Get-Item \$p -Force; if (\$i.Attributes -band [IO.FileAttributes]::ReparsePoint){ \$i.Delete(); 'unlinked' } else { Write-Error 'NOT a reparse point — refusing'; exit 1 } }"
 
 # MANDATORY: abort if the junction is still present — do NOT proceed to --force.
 if [ -d "${WORKTREE_DIR}/td5mod/deps/mingw" ]; then
@@ -450,22 +560,26 @@ Ask the user to confirm before running the `-D` variant.
 **`git worktree remove --force` is NOT safe with this junction.** Empirically confirmed on 2026-04-16, 2026-04-20, and 2026-04-22: when a worktree has uncommitted files (td5re.ini tweaks, log/, build artifacts) plain `git worktree remove` refuses, and the agent reaches for `--force` — which traverses the mingw junction and wipes main's toolchain. Before EVERY `git worktree remove --force`, pre-unlink the junction:
 
 ```bash
-# CRITICAL: use a hardcoded backslash path — do NOT use $(cygpath -w ...) here.
-# cygpath silently produces a "volume label syntax error" on this host, making
-# the rmdir a no-op, leaving the junction live for --force to follow. Incident
-# on 2026-04-22 confirmed this failure mode.
-cmd //c "rmdir \"C:\\Users\\maria\\Desktop\\Proyectos\\TD5RE\\.claude\\worktrees\\${SESSION_TAG}\\td5mod\\deps\\mingw\""
+# THIS HOST: cmd //c "rmdir" fails with a volume-label syntax error (confirmed
+# 2026-05-28), silently leaving the junction live for --force to follow. Use the
+# PowerShell reparse-aware delete (removes ONLY the link, never the target) —
+# see the TEARDOWN SAFEGUARDS block above.
+powershell.exe -NoProfile -Command "\$p='${WORKTREE_DIR}/td5mod/deps/mingw' -replace '/','\\'; if (Test-Path \$p){ \$i=Get-Item \$p -Force; if (\$i.Attributes -band [IO.FileAttributes]::ReparsePoint){ \$i.Delete() } else { Write-Error 'NOT a reparse point — refusing'; exit 1 } }"
 
 # MANDATORY: verify the junction is gone before proceeding. If it still exists,
-# the rmdir silently failed — do NOT run --force.
+# the unlink failed — do NOT run --force.
 if [ -d "${WORKTREE_DIR}/td5mod/deps/mingw" ]; then
     echo "ERROR: pre-unlink failed — ${WORKTREE_DIR}/td5mod/deps/mingw still exists."
-    echo "STOP: do NOT run git worktree remove --force. Investigate the rmdir failure."
-    echo "Try: cmd //c 'rmdir /AL' in the worktree dir to confirm the junction path."
+    echo "STOP: do NOT run git worktree remove --force. Investigate the unlink failure."
     exit 1
 fi
 
 git worktree remove --force "${WORKTREE_DIR}"   # safe now — junction is gone
+
+# CANARY (post): the deny-delete ACL on original//mingw should block any
+# junction-follow, but verify the irreplaceable markers survived regardless.
+test -f original/TD5_d3d.exe && test -f td5mod/deps/mingw/mingw32/bin/gcc.exe \
+  || { echo "FATAL: main-tree data vanished during teardown — restore from C:\\Users\\maria\\Desktop\\TD5RE_backup_2026-05-28\\ NOW"; exit 1; }
 ```
 
 **Stale-build janitor (2026-04-29).** After the worktree is gone, sweep
@@ -496,9 +610,213 @@ work and the upside is bounded recovery (single /fix run created
 ~5 MB of orphans before this guard; the historical accumulation was
 ~6 GB by 2026-04-29).
 
-As of 2026-04-20 main's `td5mod/deps/mingw/` has the READ-ONLY attribute set via `attrib +R /S /D` so a forgotten pre-unlink step fails with EACCES instead of silently wiping the toolchain. Do not clear that attribute.
+**As of 2026-05-28, main's `td5mod/deps/mingw/` AND `original/` are protected by a deny-delete ACL** (icacls DENY `(DE,DC)` for `MARIANO-PC\maria` + `MARIANO-PC\CodexSandboxUsers`, `(OI)(CI)` inherited) — a junction-follow delete now fails with Access Denied instead of wiping the data. This SUPERSEDES the older `attrib +R /S /D` READ-ONLY approach, which did NOT hold (the toolchain was wiped anyway on 2026-05-28). Do not clear the deny ACL; to legitimately replace these dirs, drop the deny with `icacls '<dir>' /remove:d 'MARIANO-PC\maria' /remove:d 'MARIANO-PC\CodexSandboxUsers'` and re-apply afterward.
 
 **ALSO CRITICAL — never `rm` a junction inside the worktree, even ad-hoc.** This trap fires outside teardown too: if you see `${WORKTREE_DIR}/td5mod/deps/mingw` listed by MSYS as a `symlink` (because git-bash renders Windows junctions that way), DO NOT `rm -f` it to "clean it up before recreating". Bash's `rm` follows junctions into their target and empties the destination. The 2026-04-15 incident: agent ran `rm -f "${WORKTREE_DIR}/td5mod/deps/mingw"` to recreate a junction → emptied main's `td5mod/deps/mingw/` → had to re-extract `td5mod/deps/mingw-i686.7z` to restore. The `~/bin/rm` wrapper now refuses paths under main's `td5mod/deps/mingw`, but the wrapper resolves through junctions, so the worktree path is also blocked. To unlink a junction safely, use `cmd //c "rmdir <path>"` (no `/s`) — Windows `rmdir` removes the junction without recursing into it. Recovery if the toolchain is wiped: `cd td5mod/deps && rm -rf mingw && 7z x mingw-i686.7z -y && mv mingw32 mingw/`.
+
+### Worktree janitor (bulk cleanup of abandoned worktrees)
+
+`/fix` creates a fresh worktree on every invocation. Over time `.claude/worktrees/` accumulates dozens-to-hundreds of leftovers: candidate fixes that weren't merged, agent subagent runs, half-finished sessions. By late 2026 this directory routinely reaches 15–30 GB. This recipe categorizes every worktree by what it actually contains and tears down the safely-disposable ones. It **also sweeps stray branch refs** — `worktree-agent-*` (subagent worktree-isolation leftovers) and orphaned `fix-*` branches whose worktree is already gone — which never show up in `git worktree list` and otherwise accumulate invisibly as dangling refs.
+
+**This is destructive. NEVER run automatically — always behind an explicit user request like "clean up worktrees" or "run the worktree janitor".** Even then, run the dry-run pass first, show the user the categorized output, and wait for confirmation before deleting anything that holds unique commits. (`/end` runs a merged-only subset of this automatically at session close — see end.md Step 7.5.)
+
+The janitor categorizes each worktree into one of four buckets:
+
+| Bucket | Definition | Default action |
+|---|---|---|
+| `LOCKED` | `git worktree list` shows `locked` — usually means an active session holds it OR a `worktree.lock` file exists from a crashed session | Skip; report count |
+| `MERGED` | Every commit on the worktree's branch is reachable from master | Safe to remove (no work loss) |
+| `STALE` | Branch has zero commits beyond its fork point AND working tree has no uncommitted changes | Safe to remove (nothing was ever done in it) |
+| `UNIQUE` | Branch carries commits NOT in master OR working tree has uncommitted changes | Needs user decision per worktree |
+
+Algorithm:
+
+```bash
+cd C:/Users/maria/Desktop/Proyectos/TD5RE
+
+# Make sure master is up to date locally so "reachable from master" is accurate.
+git fetch origin master --quiet 2>/dev/null || true
+
+# Storage for the report. Use temp files so the bash loop's subshell scoping
+# doesn't lose counts.
+REPORT_DIR="$(mktemp -d)"
+: > "${REPORT_DIR}/locked.txt"
+: > "${REPORT_DIR}/merged.txt"
+: > "${REPORT_DIR}/stale.txt"
+: > "${REPORT_DIR}/unique.txt"
+
+# Iterate the canonical list (machine-readable) instead of shelling out to ls.
+# Format: each worktree is a blank-line-separated record with key/value lines.
+git worktree list --porcelain | awk '
+    /^worktree / { wt=$2 }
+    /^branch /   { br=$2; sub(/^refs\/heads\//, "", br) }
+    /^locked/    { locked=1 }
+    /^detached/  { detached=1 }
+    /^$/         {
+        if (wt) printf "%s\t%s\t%d\t%d\n", wt, br, locked+0, detached+0
+        wt=""; br=""; locked=0; detached=0
+    }
+    END {
+        if (wt) printf "%s\t%s\t%d\t%d\n", wt, br, locked+0, detached+0
+    }
+' | while IFS=$'\t' read -r WT BR LOCKED DETACHED; do
+    # The main tree itself shows up in the list — skip it.
+    case "${WT}" in
+        */C--Users-maria-Desktop-Proyectos-TD5RE) continue ;;
+        C:/Users/maria/Desktop/Proyectos/TD5RE)  continue ;;
+    esac
+    # Only act on .claude/worktrees/ paths — never touch unrelated worktrees.
+    case "${WT}" in
+        */.claude/worktrees/*) ;;
+        *) continue ;;
+    esac
+
+    # Locked worktrees are off-limits — they're either in active use or a
+    # crashed session left a marker we can't safely override.
+    if [ "${LOCKED}" -eq 1 ]; then
+        echo "${WT}|${BR}" >> "${REPORT_DIR}/locked.txt"
+        continue
+    fi
+
+    # Detached HEAD with no branch — treat as STALE only if the working tree
+    # is clean. Otherwise UNIQUE (there's uncommitted state).
+    if [ "${DETACHED}" -eq 1 ]; then
+        DIRTY="$(git -C "${WT}" status --porcelain 2>/dev/null | wc -l)"
+        if [ "${DIRTY}" -eq 0 ]; then
+            echo "${WT}|<detached>" >> "${REPORT_DIR}/stale.txt"
+        else
+            echo "${WT}|<detached>|dirty=${DIRTY}" >> "${REPORT_DIR}/unique.txt"
+        fi
+        continue
+    fi
+
+    # Count commits on this branch NOT reachable from master.
+    UNIQUE_COMMITS="$(git rev-list --count master.."${BR}" 2>/dev/null || echo "?")"
+    DIRTY="$(git -C "${WT}" status --porcelain 2>/dev/null | wc -l)"
+
+    if [ "${UNIQUE_COMMITS}" = "?" ]; then
+        # Branch disappeared or refs broken — treat as UNIQUE so the user inspects.
+        echo "${WT}|${BR}|refs-broken" >> "${REPORT_DIR}/unique.txt"
+    elif [ "${UNIQUE_COMMITS}" -eq 0 ] && [ "${DIRTY}" -eq 0 ]; then
+        # Branch is at-or-behind master with a clean tree. Distinguish:
+        #   - If branch == master exactly → STALE (never did anything)
+        #   - If branch has commits BEHIND master but none ahead → MERGED
+        BEHIND="$(git rev-list --count "${BR}"..master 2>/dev/null || echo 0)"
+        if [ "${BEHIND}" -eq 0 ]; then
+            echo "${WT}|${BR}" >> "${REPORT_DIR}/stale.txt"
+        else
+            echo "${WT}|${BR}|behind=${BEHIND}" >> "${REPORT_DIR}/merged.txt"
+        fi
+    else
+        echo "${WT}|${BR}|ahead=${UNIQUE_COMMITS}|dirty=${DIRTY}" >> "${REPORT_DIR}/unique.txt"
+    fi
+done
+
+# --- Stray branch refs (no live worktree) ---------------------------------
+# worktree-agent-* branches (subagent worktree-isolation leftovers) and any
+# fix-* branch whose worktree is already gone never appear in `git worktree
+# list`, so the loop above misses them entirely. Categorize them separately:
+# merged into master = safe to delete (label-only); unmerged = needs a decision.
+: > "${REPORT_DIR}/branches_merged.txt"
+: > "${REPORT_DIR}/branches_unmerged.txt"
+CHECKED_OUT="$(git worktree list --porcelain | awk '/^branch /{sub(/^refs\/heads\//,"",$2);print $2}')"
+for B in $(git for-each-ref --format='%(refname:short)' \
+            'refs/heads/worktree-agent-*' 'refs/heads/fix-*'); do
+    [ "${B}" = "master" ] && continue
+    printf '%s\n' "${CHECKED_OUT}" | grep -qx "${B}" && continue   # still has a worktree → categorized above
+    if git merge-base --is-ancestor "${B}" master 2>/dev/null; then
+        echo "${B}" >> "${REPORT_DIR}/branches_merged.txt"
+    else
+        AHEAD="$(git rev-list --count "master..${B}" 2>/dev/null || echo '?')"
+        echo "${B}|ahead=${AHEAD}" >> "${REPORT_DIR}/branches_unmerged.txt"
+    fi
+done
+
+# Print the categorized report.
+echo "=== Worktree janitor report ==="
+echo "LOCKED  (skip — in-use or crashed):  $(wc -l < "${REPORT_DIR}/locked.txt")"
+echo "MERGED  (safe to remove):            $(wc -l < "${REPORT_DIR}/merged.txt")"
+echo "STALE   (safe to remove):            $(wc -l < "${REPORT_DIR}/stale.txt")"
+echo "UNIQUE  (needs user decision):       $(wc -l < "${REPORT_DIR}/unique.txt")"
+echo "BRANCHES merged   (no worktree, safe to delete):  $(wc -l < "${REPORT_DIR}/branches_merged.txt")"
+echo "BRANCHES unmerged (no worktree, needs decision):  $(wc -l < "${REPORT_DIR}/branches_unmerged.txt")"
+echo ""
+echo "Report files at ${REPORT_DIR}/{locked,merged,stale,unique,branches_merged,branches_unmerged}.txt"
+```
+
+**Report the counts to the user and STOP.** Show the contents of `unique.txt` (worktree, branch, ahead-count, dirty-count) and ask:
+
+```
+Janitor found:
+  - <N> MERGED worktrees          (branch fully in master, safe to remove)
+  - <N> STALE worktrees           (branch is at-or-behind master, clean tree, safe to remove)
+  - <N> UNIQUE worktrees          (each has commits not in master OR uncommitted changes)
+  - <N> LOCKED worktrees          (skipped — in-use or crashed)
+  - <N> merged stray branches     (no worktree, fully in master — label-only, safe to delete)
+  - <N> unmerged stray branches   (no worktree, carry commits not in master)
+
+Approve:
+  (a) Remove MERGED + STALE worktrees + merged stray branches (default — never touches unique work)
+  (b) Also remove selected UNIQUE worktrees (you pick which UNIQUE)
+  (c) Show me each UNIQUE worktree's / unmerged branch's log before deciding
+  (d) Abort — don't remove anything
+```
+
+Show the contents of `unique.txt` AND `branches_unmerged.txt` (with each branch's
+ahead-count) so the user can see exactly what carries unmerged work before choosing.
+
+Apply the user's choice. Removal uses the junction-safe teardown documented in **Abandoning a worktree** above — copy that block, plug in the worktree path as `WORKTREE_DIR` and the branch name as `SESSION_TAG`, and run it for each one. The hard rules carry over: pre-unlink the mingw junction with `cmd //c "rmdir ..."`, verify it's gone, only then `git worktree remove --force`. Never `rm -rf` a worktree path directly.
+
+For removal-loop sanity:
+
+```bash
+# After user approval, iterate the chosen bucket(s). Example for MERGED + STALE.
+for entry in $(cat "${REPORT_DIR}/merged.txt" "${REPORT_DIR}/stale.txt"); do
+    WT="${entry%%|*}"
+    BR="$(echo "${entry}" | cut -d'|' -f2)"
+
+    # Pre-unlink junction via PowerShell reparse delete (cmd //c "rmdir" fails on
+    # this host — see TEARDOWN SAFEGUARDS). Removes only the link, never the target.
+    powershell.exe -NoProfile -Command "\$p='${WT}/td5mod/deps/mingw' -replace '/','\\'; if (Test-Path \$p){ \$i=Get-Item \$p -Force; if (\$i.Attributes -band [IO.FileAttributes]::ReparsePoint){ \$i.Delete() } }" 2>/dev/null
+
+    # Verify junction is gone before --force; if it's still there, SKIP this
+    # worktree and continue to the next, do NOT --force through a live junction.
+    if [ -d "${WT}/td5mod/deps/mingw" ]; then
+        echo "SKIP ${WT}: junction pre-unlink failed; inspect manually"
+        continue
+    fi
+
+    git worktree remove --force "${WT}" 2>&1 || echo "SKIP ${WT}: worktree remove failed"
+
+    # Branch deletion — -d for MERGED (refuses if branch is unmerged into master,
+    # which is the safety net we want), -D ONLY for STALE because a STALE branch
+    # by definition has no commits past the fork point so -d would already accept it.
+    if [ "${BR}" != "<detached>" ]; then
+        git branch -d "${BR}" 2>/dev/null || git branch -D "${BR}" 2>/dev/null || true
+    fi
+done
+
+# Merged stray branches (no worktree) — always part of option (a) and above.
+# -d refuses anything not fully in master, so it's a backstop even though we
+# already filtered to merged ones. Unmerged stray branches are NEVER deleted
+# here — they're surfaced in branches_unmerged.txt for the user to decide.
+while read -r B; do
+    [ -n "${B}" ] || continue
+    git branch -d "${B}" 2>/dev/null && echo "deleted merged stray branch: ${B}"
+done < "${REPORT_DIR}/branches_merged.txt"
+
+# Final cleanup: prune any leftover .git/worktrees/ admin entries for paths
+# that no longer exist on disk (happens when a worktree was rm'd ad-hoc by
+# someone bypassing this recipe). Safe — only touches the git-internal registry.
+git worktree prune --verbose
+```
+
+**Constraints on the janitor:**
+- NEVER auto-run as part of a normal `/fix`. Only on explicit user request.
+- ALWAYS show the categorized counts and wait for approval before any removal.
+- The default action (a) NEVER touches UNIQUE worktrees — those might hold candidate fixes the user is iterating on across days/weeks.
+- Honor LOCKED entries; never try to break a lock. If the user is sure a lock is from a crashed session, they should delete the `.git/worktrees/<name>/locked` marker manually and re-run.
+- The recipe is idempotent: re-running on a clean tree reports zero in every bucket and removes nothing.
 
 ## Testing the build (INI + log loop)
 
