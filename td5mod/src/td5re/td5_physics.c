@@ -1277,7 +1277,13 @@ void td5_physics_update_vehicle_actor(TD5_Actor *actor)
      * function, which achieves equivalent semantics as long as the sub-path
      * mirrors UpdateTrafficActorMotion's tick order (route-plan → friction →
      * traffic pose, no wall resolvers). */
-    if (actor->slot_index >= 6) {
+    if (actor->slot_index >= 6 && actor->vehicle_mode != 1) {
+        /* [FIX 2026-05-28] vehicle_mode != 1 guard: a traffic vehicle in scripted
+         * crash-spin recovery (vehicle_mode==1) has its motion owned by
+         * td5_physics_integrate_scripted_motion in the dispatch above. Skipping
+         * the normal traffic pose/route here avoids double-integrating (which
+         * would overwrite the spin animation's world_pos). No-op for normal
+         * traffic, which is always vehicle_mode==0. */
         integrate_traffic_pose(actor);
         /* Traffic edge containment: call AFTER pose update so world_pos is
          * current. Mirrors UpdateTrafficActorMotion @ 0x443ED0 which calls:
@@ -1290,7 +1296,7 @@ void td5_physics_update_vehicle_actor(TD5_Actor *actor)
         process_traffic_route_advance(actor, _ts);
         process_traffic_forward_checkpoint_pass(actor, _ts);  /* [CONFIRMED @ 0x443ED0] */
         process_traffic_segment_edge(actor, _ts);
-    } else {
+    } else if (actor->slot_index < 6) {
         /* Racer path: full gravity + per-wheel ground snap.
          * Run even during countdown (paused) so ground-snap keeps the car
          * at the correct height above the road surface. */
@@ -3607,6 +3613,62 @@ static inline int32_t v2v_sar12_rz_64(int64_t x) {
     return (int32_t)(((x < 0) ? (x + 0xFFF) : x) >> 12);
 }
 
+/* [FIX 2026-05-28 — traffic crash-spin animation] Port of the heavy-impact
+ * TRAFFIC branch of ApplyVehicleCollisionImpulse (orig 0x00408289+). When a
+ * traffic vehicle (slot >= 6) takes a heavy hit it enters scripted recovery
+ * (vehicle_mode=1): a per-tick spin matrix is latched into collision_spin_matrix,
+ * the current orientation is snapshotted to saved_orientation, the car is popped
+ * up (linear_velocity_y = impact/6), and the recovery animation plays for ~0x3B
+ * frames before ResetVehicleActorState rights it (handled by the existing
+ * vehicle_mode==1 dispatch + td5_physics_integrate_scripted_motion).
+ *
+ * The original derives the spin angles from GetDamageRulesStub's RNG, whose range
+ * was NOT recovered in RE. Rather than (a) guess a sequence that can't match the
+ * original anyway or (b) consume from the global rand() stream that AI/spawn RNG
+ * parity depends on, the angles are seeded deterministically from actor state via
+ * a local LCG. This is cosmetic only — the STRUCTURE (vehicle_mode=1, spin-matrix
+ * latch, impact pop-up, 0x3B-frame auto-reset) is faithful; the exact tumble
+ * angles are an [INFERRED] approximation. */
+static void td5_physics_apply_traffic_crash_spin(TD5_Actor *t, int32_t impact_mag)
+{
+    if (!t) return;
+
+    /* Local LCG seeded from state — does NOT touch the global rand() sequence. */
+    uint32_t r = (uint32_t)t->world_pos.x
+               ^ ((uint32_t)t->world_pos.z << 1)
+               ^ ((uint32_t)impact_mag << 3)
+               ^ ((uint32_t)t->slot_index * 2654435761u);
+    int16_t ang[3];
+    for (int k = 0; k < 3; k++) {
+        r = r * 1103515245u + 12345u;
+        /* per-tick spin delta, 12-bit angle units, ~±11deg (0x80/0x1000*360) */
+        ang[k] = (int16_t)((int)((r >> 16) & 0xFF) - 0x80);
+    }
+
+    float spin[9];
+    BuildRotationMatrixFromAngles(spin, ang);
+
+    /* Latch per-tick spin + snapshot current orientation. Mirror the orig's
+     * 12-float (48-byte) copies to +0x180 / +0x150 (trailing 3 floats are
+     * residue but the orig writes them, so we match). */
+    memcpy(&t->collision_spin_matrix, spin, 9 * sizeof(float));
+    memcpy(((uint8_t *)&t->collision_spin_matrix) + 9 * sizeof(float),
+           spin, 3 * sizeof(float));
+    memcpy(&t->saved_orientation, &t->rotation_matrix, 9 * sizeof(float));
+    memcpy(((uint8_t *)&t->saved_orientation) + 9 * sizeof(float),
+           &t->render_pos, 3 * sizeof(float));
+
+    int32_t lift = impact_mag / 6;
+    if (lift > 200000) lift = 200000;
+    t->linear_velocity_y = lift;
+
+    t->vehicle_mode = 1;     /* route to scripted-recovery dispatch next tick */
+    t->frame_counter = 0;    /* start the ~0x3B-frame recovery animation */
+
+    TD5_LOG_I(LOG_TAG, "traffic_crash_spin: slot=%d mag=%d lift=%d ang=[%d,%d,%d]",
+              t->slot_index, impact_mag, lift, ang[0], ang[1], ang[2]);
+}
+
 static void apply_collision_response(TD5_Actor *penetrator, TD5_Actor *target,
                                      int corner_idx, OBB_CornerData *corner,
                                      int32_t heading_target, int32_t impactForce)
@@ -3957,6 +4019,9 @@ static void apply_collision_response(TD5_Actor *penetrator, TD5_Actor *target,
             int32_t lift_a = impact_mag / 6;
             if (lift_a > 200000) lift_a = 200000;
             A->linear_velocity_y  = lift_a;
+        } else {
+            /* Traffic (slot >= 6): scripted crash-spin recovery, orig 0x00408289+. */
+            td5_physics_apply_traffic_crash_spin(A, impact_mag);
         }
         if (B->slot_index < 6) {
             B->angular_velocity_roll  -= kick_r;
@@ -3965,6 +4030,9 @@ static void apply_collision_response(TD5_Actor *penetrator, TD5_Actor *target,
             int32_t lift_b = impact_mag / 6;
             if (lift_b > 200000) lift_b = 200000;
             B->linear_velocity_y  = lift_b;
+        } else {
+            /* Traffic (slot >= 6): scripted crash-spin recovery, orig 0x00408289+. */
+            td5_physics_apply_traffic_crash_spin(B, impact_mag);
         }
         TD5_LOG_I(LOG_TAG, "v2v_heavy_scatter: A=%d B=%d mag=%d kick_r=%d kick_p=%d kick_y=%d",
                   A->slot_index, B->slot_index, impact_mag, kick_r, kick_p, kick_y);
@@ -7768,6 +7836,14 @@ void td5_physics_refresh_wheel_contacts(TD5_Actor *actor)
             }
         }
 
+        /* [FIX 2026-05-28 — fast-tilt out-of-bounds launch] Did the height probe
+         * just cap an upward out-of-quad extrapolation? If so this wheel is over
+         * a fictional plane extrapolated above its (mis-assigned) span — it must
+         * NOT be allowed to read "grounded", or the chassis Y-snap ratchets the
+         * car upward off-track. Force it airborne in the contact test below so
+         * the car falls under gravity instead, matching the original. */
+        int wheel_capped = td5_track_last_contact_was_capped();
+
         /* Write surface normal to wheel_contact_velocities[i][0..2] (actor+0x250+i*8).
          * Original: FUN_00445A70 computes cross-product of span edge vectors >> 12,
          * then FUN_0042CD40 normalizes to magnitude 4096. For flat ground: (0, 4096, 0).
@@ -7868,8 +7944,13 @@ void td5_physics_refresh_wheel_contacts(TD5_Actor *actor)
          * overwrites wheel_contact_pos[i].y = ground_y. Without this,
          * wheel_y stays at the rotation-computed value (often 0) and the
          * ground snap in integrate_pose has no valid baseline.
-         * [CONFIRMED @ 0x403720 — piVar8 = local_30] */
-        if (force > 0x800) {
+         * [CONFIRMED @ 0x403720 — piVar8 = local_30]
+         *
+         * `wheel_capped` (fast-tilt OOB fix) forces airborne regardless of force:
+         * the probed ground was a capped upward extrapolation (fictional), so the
+         * wheel is genuinely off-track even if its capped height happens to sit
+         * near the chassis. */
+        if (force > 0x800 || wheel_capped) {
             actor->wheel_contact_bitmask |= (1 << i);
             force = 12000;
         } else {

@@ -3420,6 +3420,14 @@ static int64_t diagonal_cross(int vl0_idx, int vr1_idx,
  *
  * Returns height in 24.8 fixed-point.
  */
+/* Set when the most recent probe_span_lane_height() call capped an upward
+ * out-of-quad extrapolation (fast-tilt launch fix). The per-wheel contact
+ * refresh reads it via td5_track_last_contact_was_capped() right after its
+ * compute_contact_height_bestlane() call to force that wheel airborne — a wheel
+ * cannot be "grounded" on a fictional plane extrapolated above its span. */
+static int s_last_contact_capped = 0;
+
+int td5_track_last_contact_was_capped(void) { return s_last_contact_capped; }
 static int32_t triangle_height(int va_idx, int vb_idx, int vc_idx,
                                 int32_t origin_x, int32_t origin_y, int32_t origin_z,
                                 int32_t pos_x, int32_t pos_z,
@@ -3474,6 +3482,45 @@ static int32_t triangle_height(int va_idx, int vb_idx, int vc_idx,
 
     height = (int32_t)va->y
            - ((dx * (int32_t)unx + dz * (int32_t)unz) / (int32_t)uny);
+
+    /* [FIX 2026-05-28 — fast-tilt out-of-bounds UPWARD launch ROOT] Clamp the
+     * plane height to NO MORE than this triangle's own top vertex (+ margin).
+     *
+     * This is a plane equation: height = va.y - (dx*unx + dz*unz)/uny. For a
+     * point INSIDE the triangle it is a convex blend of the 3 vertex Ys, so it
+     * is already <= vmax and this is a NO-OP (in-quad contact + slope attitude
+     * stay byte-identical). But when a fast, tilted car leaves the track its
+     * wheel XZ lands far OUTSIDE its (mis-assigned) span quad and the plane is
+     * EXTRAPOLATED. An extrapolation far ABOVE the triangle (runtime capture:
+     * ground_y ~4.7M on a span whose terrain top is ~3000) reads downstream as
+     * "ground just above the wheel" -> force stays small -> all wheels report
+     * grounded -> the chassis Y-snap ratchets the car upward a few thousand fp
+     * per tick (no single jump big enough for a per-tick guard to catch) ->
+     * unbounded UPWARD runaway (world_pos.y -> millions; user-reported "Y keeps
+     * going up out of bounds"). Capping the height at the local triangle top
+     * makes a high-flying off-quad wheel read its true (far-below) ground ->
+     * force huge -> airborne (mask 0x0F) -> no snap -> the car falls under
+     * gravity, matching the original off-track behavior.
+     *
+     * Only the UPPER bound is clamped. The lower bound is intentionally left
+     * open: spawn relies on a legitimate DOWNWARD extrapolation (Edinburgh
+     * start ground ~99840fp sits ~2384 units BELOW its steep span's vertices),
+     * and a downward off-track read correctly makes wheels airborne anyway.
+     * Margin = triangle Y-span + 1024 units so genuine near-edge walker lag
+     * (a wheel a lane past the uphill edge) is untouched. */
+    {
+        int32_t vy_a = (int32_t)va->y, vy_b = (int32_t)vb->y, vy_c = (int32_t)vc->y;
+        int32_t vmax = vy_a, vmin = vy_a;
+        if (vy_b > vmax) vmax = vy_b;
+        if (vy_c > vmax) vmax = vy_c;
+        if (vy_b < vmin) vmin = vy_b;
+        if (vy_c < vmin) vmin = vy_c;
+        int32_t hi = vmax + (vmax - vmin) + 1024;
+        if (height > hi) {
+            height = hi;
+            s_last_contact_capped = 1;   /* signal consumer: force this wheel airborne */
+        }
+    }
 
     /* Same int16 unit normal as the divisor — original re-reads from param_5. */
     if (out_normal) {
@@ -3705,6 +3752,8 @@ static int32_t probe_span_lane_height(const TD5_StripSpan *sp, int sub_lane,
     int max_lane;
     int type;
     int64_t cross;
+
+    s_last_contact_capped = 0;   /* reset per call; triangle_height sets it on upward OOB cap */
 
     if (!sp)
         return 0;
