@@ -195,6 +195,11 @@ int32_t td5_track_compute_contact_height_with_normal(int span_index, int sub_lan
 int32_t td5_track_compute_contact_height_bestlane(int span_index,
                                                   int32_t world_x, int32_t world_z,
                                                   int16_t *out_normal);
+/* Returns nonzero if the most recent contact-height probe capped an upward
+ * out-of-quad extrapolation (fast-tilt OOB launch fix). The per-wheel contact
+ * refresh reads this immediately after its bestlane call to force the wheel
+ * airborne instead of letting it "ground" on a fictional extrapolated plane. */
+int td5_track_last_contact_was_capped(void);
 int  td5_track_probe_height(int world_x, int world_z, int current_span,
                              int *out_y, int *out_surface_type);
 void td5_track_get_span_edges(int span_index,
