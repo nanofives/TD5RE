@@ -3207,6 +3207,14 @@ int td5_render_load_environs_textures(int level_number)
     TD5_LOG_I(LOG_TAG, "environs: loaded %d textures, effect_mode=%d",
               s_envmap_page_count, s_proj_effect_mode);
 
+    /* Reverse-direction light-zone span mirror is gated on g_td5.reverse_direction
+     * in tl_reverse_mirror_span(); log it once per level load so the reverse
+     * "interior shader" fix is visible in engine.log without per-frame spam. */
+    if (g_td5.reverse_direction)
+        TD5_LOG_I(LOG_TAG,
+                  "reverse light-zone span mirror ACTIVE for level %d (forward-frame remap of STRIPB spans)",
+                  level_number);
+
     return s_envmap_page_count;
 }
 
@@ -3245,6 +3253,40 @@ static int update_actor_light_zone(int slot, int track_span)
 
     s_actor_light_zone[slot] = (uint8_t)idx;
     return idx;
+}
+
+/* [BUGFIX 2026-05-29] Reverse-direction light-zone span mirror.
+ *
+ * Restores parity with the original on reverse tracks. The per-track light-zone
+ * table (td5_light_zones) and the environs page table are FORWARD-numbered. The
+ * port keeps the strip walker's REVERSE-numbered STRIPB.DAT span in
+ * track_span_raw and un-mirrors it (ring-1-span) at each forward-frame consumer
+ * -- e.g. MODELS.DAT geometry does this at td5_track.c:6358-6360. The vehicle
+ * lighting / environs-projection consumers were MISSING that mirror, so in
+ * reverse they indexed the forward zone table with a reverse span and applied
+ * the tunnel "interior" darkening at the WRONG physical location -- on the open
+ * road instead of in the tunnel.
+ *
+ * Ground truth (user-observed, 2026-05-29): the ORIGINAL shows the tunnel
+ * darkening ONLY inside the Keswick tunnel in reverse -- it is correct, so this
+ * is a genuine port bug, NOT a faithful reproduction. (The earlier static-RE
+ * claim that the original reads the raw span at +0x80 mispredicted the outcome;
+ * the original's exact internal span handling in reverse was not traced, but its
+ * observed behavior is tunnel-only darkening.)
+ *
+ * Fix: mirror the span into the forward frame before the zone walk, exactly like
+ * the MODELS.DAT consumer, so the darkening tracks the physical tunnel in both
+ * directions. Verified on Keswick reverse (port screenshots): span 2408 = inside
+ * the tunnel -> dark; span 617 = open road -> normally lit. Mirror uses the
+ * main-road ring length only (branch spans >= ring keep their raw index; they
+ * have no light zone anyway). Forward direction is byte-for-byte untouched
+ * (g_td5.reverse_direction gate). */
+static inline int tl_reverse_mirror_span(int span)
+{
+    int ring = g_td5.track_span_ring_length;
+    if (g_td5.reverse_direction && ring > 0 && span >= 0 && span < ring)
+        return ring - 1 - span;
+    return span;
 }
 
 /* ========================================================================
@@ -3823,6 +3865,11 @@ void td5_render_apply_track_lighting(int slot, TD5_Actor *actor)
         return;
     }
 
+    /* Reverse-direction fix: map the STRIPB span into the forward-numbered
+     * light-zone frame so the darkening follows the physical tunnel, not the
+     * reverse span number. No-op in forward. See tl_reverse_mirror_span(). */
+    span = tl_reverse_mirror_span(span);
+
     int zone_idx = update_actor_light_zone(slot, span);
     if (zone_idx < 0) {
         tl_apply_fallback();
@@ -3969,7 +4016,11 @@ void td5_render_update_projection_effect(int slot, TD5_Actor *actor)
     pe = &s_proj_effect[slot];
     yaw_12bit = actor->display_angles.yaw & 0xFFF;
 
-    zone_idx = update_actor_light_zone(slot, (int)(int16_t)actor->track_span_raw);
+    /* Same reverse-direction span mirror as td5_render_apply_track_lighting:
+     * the environs page table is forward-numbered, so the projection-effect
+     * zone walk must index it in the forward frame in reverse. No-op forward. */
+    zone_idx = update_actor_light_zone(
+        slot, tl_reverse_mirror_span((int)(int16_t)actor->track_span_raw));
     if (zone_idx < 0 || s_environs_level < 0 ||
         s_environs_level >= TD5_ENVIRONS_TRACK_COUNT) {
         /* No zone: fall back to mode 2 on the first environs page. */
