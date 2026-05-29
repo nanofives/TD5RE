@@ -2777,7 +2777,23 @@ static int ConfigureGameTypeFlags(void) {
         case 1: case 2:             g_td5.difficulty_tier = 0; break;
         case 3: case 4: case 5:     g_td5.difficulty_tier = 1; break;
         case 6: case 7:             g_td5.difficulty_tier = 2; break;
-        default: /* 0, 8, 9: keep prior */ break;
+        default:
+            /* Game-types 0 (Single Race), 8 (Cop Chase), 9 (Drag): the original
+             * ConfigureGameTypeFlags @ 0x00410CA0 does NOT write gRaceDifficultyTier
+             * @ 0x00463210 for these cases (only 1-7 clobber it), so the committed
+             * user-selected difficulty survives. Mirror that by routing the user's
+             * Difficulty toggle into the tier here. This is the value read by:
+             *   - InitializeRaceActorRuntime @ 0x00432E60 (AI rubber-band tier),
+             *   - AdjustCheckpointTimersByDifficulty @ 0x0040A530 (checkpoint timers),
+             *   - AI car selection (s_difficulty_tier_cars[tier]).
+             * Previously this case left difficulty_tier at the boot default (2=Hard),
+             * which is why the Difficulty toggle had no observable effect on gameplay.
+             * [CONFIRMED @ 0x00410CA0: cases 0/8/9 leave 0x00463210 untouched.] */
+            g_td5.difficulty_tier = s_game_option_difficulty;
+            TD5_LOG_I(LOG_TAG,
+                      "ConfigureGameTypeFlags: gt=%d uses user Difficulty toggle -> tier=%d",
+                      s_selected_game_type, g_td5.difficulty_tier);
+            break;
     }
     TD5_LOG_I(LOG_TAG, "ConfigureGameTypeFlags: game_type=%d tier=%d",
               s_selected_game_type, g_td5.difficulty_tier);
@@ -2785,7 +2801,18 @@ static int ConfigureGameTypeFlags(void) {
     switch (s_selected_game_type) {
     case 0: /* Single Race -- user preferences apply */
         g_td5.circuit_lap_count = (s_game_option_laps + 1) * 2;
-        g_td5.difficulty = (TD5_Difficulty)s_game_option_difficulty;
+        /* g_td5.difficulty feeds ONLY the AI first-layer template scaling in
+         * td5_ai_init_race_actor_runtime (td5_ai.c:1677). In the original that
+         * first layer (InitializeRaceActorRuntime @ 0x00432F2F / 0x00432FB4) is
+         * gated on the game-phase globals [0x004AAF80] / [0x004AAF84], NOT on the
+         * user difficulty toggle — gRaceDifficultyTier @ 0x00463210 is only read
+         * AFTER that block (@ 0x00432FFD). [CONFIRMED @ 0x00432F2F / 0x00432FB4 /
+         * 0x00432FFD.] So the user toggle must NOT drive layer-1; previously it did
+         * (= s_game_option_difficulty), which both mis-keyed layer-1 and was the only
+         * thing the toggle touched. Hold layer-1 at the established single-race
+         * baseline (NORMAL) and route the toggle into difficulty_tier instead (above),
+         * which is the path the original actually ties to user difficulty. */
+        g_td5.difficulty = TD5_DIFFICULTY_NORMAL;
         g_td5.traffic_enabled = s_game_option_traffic;
         g_td5.special_encounter_enabled = s_game_option_cops;
         td5_physics_set_collisions(s_game_option_collisions);
