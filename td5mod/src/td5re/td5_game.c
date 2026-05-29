@@ -564,6 +564,27 @@ int td5_game_get_total_actor_count(void)
 
     return total;
 }
+
+/* Minimap checkpoint-connector accessors. RenderTrackMinimapOverlay @ 0x0043A220
+ * reads checkpoint spans from g_raceCheckpointTablePtr (0x4aed88) to draw the
+ * connector road quads (Quad3/Quad4). s_active_checkpoint is the byte-faithful
+ * mirror of that table: count at +0, then 4-byte entries with the span at +0
+ * (CheckpointRecord layout). Expose the spans so td5_hud.c can replicate the
+ * connector draws. The original reads the count as a single byte. */
+int td5_game_get_minimap_checkpoint_count(void)
+{
+    int c = (int)(uint8_t)s_active_checkpoint.checkpoint_count;
+    if (c > 5) c = 5; /* checkpoints[] is sized 5 */
+    return c;
+}
+
+int td5_game_get_minimap_checkpoint_span(int idx)
+{
+    if (idx < 0 || idx >= td5_game_get_minimap_checkpoint_count())
+        return -1;
+    return (int)s_active_checkpoint.checkpoints[idx].span_threshold;
+}
+
 static void set_countdown_indicator_state(int value);
 
 /* ========================================================================
