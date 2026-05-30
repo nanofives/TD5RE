@@ -6722,8 +6722,30 @@ static inline void emit_strip_line(const TD5_StripSpan *sp,
     td5_render_debug_line_world(ax, ay, az, bx, by, bz, argb);
 }
 
+/* Extrude a rail edge (a→b) upward by wall_h into a vertical wall face: the
+ * raised top edge plus the two vertical posts at each end. +Y is world-up
+ * (confirmed: OOB falls drive world_pos.y → -1e9; (origin_y+height)<<8 raises
+ * a point). The flat base edge is drawn separately as the rail line. This is
+ * what makes the collision WALLS visible as walls instead of road-edge lines. */
+static inline void emit_span_wall(const TD5_StripSpan *sp,
+                                  const TD5_StripVertex *a,
+                                  const TD5_StripVertex *b,
+                                  float wall_h, uint32_t argb)
+{
+    if (!a || !b) return;
+    float ax = (float)((int32_t)sp->origin_x + (int32_t)a->x);
+    float ay = (float)((int32_t)sp->origin_y + (int32_t)a->y);
+    float az = (float)((int32_t)sp->origin_z + (int32_t)a->z);
+    float bx = (float)((int32_t)sp->origin_x + (int32_t)b->x);
+    float by = (float)((int32_t)sp->origin_y + (int32_t)b->y);
+    float bz = (float)((int32_t)sp->origin_z + (int32_t)b->z);
+    td5_render_debug_line_world(ax, ay + wall_h, az, bx, by + wall_h, bz, argb); /* top edge */
+    td5_render_debug_line_world(ax, ay, az, ax, ay + wall_h, az, argb);          /* post @ a  */
+    td5_render_debug_line_world(bx, by, bz, bx, by + wall_h, bz, argb);          /* post @ b  */
+}
+
 static void emit_span_wireframe(int span_index, uint32_t rail_color,
-                                uint32_t cross_color)
+                                uint32_t cross_color, uint32_t wall_color)
 {
     if (span_index < 0 || span_index >= s_span_count) return;
     const TD5_StripSpan *sp = &s_span_array[span_index];
@@ -6745,9 +6767,21 @@ static void emit_span_wireframe(int span_index, uint32_t rail_color,
     TD5_StripVertex *sw = vertex_at(ri + 0);
     TD5_StripVertex *se = vertex_at(ri + lane_count);
 
-    /* Left rail (NW→SW) and right rail (NE→SE) — the actual wall edges. */
+    /* Left rail (NW→SW) and right rail (NE→SE) — the wall base edges. */
     emit_strip_line(sp, nw, sw, rail_color);
     emit_strip_line(sp, ne, se, rail_color);
+
+    /* Vertical wall faces: extrude the left/right rails upward so the
+     * collision walls show AS walls, not just road-edge lines. Height scales
+     * to ~25% of the span's lateral road width so it looks right on any track. */
+    if (nw && ne) {
+        float wx = (float)((int32_t)ne->x - (int32_t)nw->x);
+        float wz = (float)((int32_t)ne->z - (int32_t)nw->z);
+        float wall_h = sqrtf(wx * wx + wz * wz) * 0.25f;
+        if (wall_h < 1.0f) wall_h = 256.0f;   /* degenerate-width fallback */
+        emit_span_wall(sp, nw, sw, wall_h, wall_color);   /* left wall  */
+        emit_span_wall(sp, ne, se, wall_h, wall_color);   /* right wall */
+    }
 
     /* Transverse edges (NW→NE, SW→SE) — span boundaries. */
     emit_strip_line(sp, nw, ne, cross_color);
@@ -6767,10 +6801,12 @@ void td5_track_debug_emit_collision_lines(int center_span, int span_radius)
     if (span_radius < 0) span_radius = 0;
     if (span_radius > s_span_count) span_radius = s_span_count;
 
-    const uint32_t RAIL_COLOR  = 0xFFFFFFFFu; /* white */
-    const uint32_t CROSS_COLOR = 0xFF00FFFFu; /* cyan */
+    const uint32_t RAIL_COLOR  = 0xFFFFFFFFu; /* white  — wall base edge */
+    const uint32_t CROSS_COLOR = 0xFF00FFFFu; /* cyan   — span boundaries */
+    const uint32_t WALL_COLOR  = 0xFFFF2020u; /* red    — vertical collision wall */
     const uint32_t PLAYER_RAIL = 0xFFFFFF00u; /* yellow */
-    const uint32_t PLAYER_CROSS = 0xFFFFA000u;/* amber */
+    const uint32_t PLAYER_CROSS = 0xFFFFA000u;/* amber  */
+    const uint32_t PLAYER_WALL  = 0xFFFF8000u;/* orange — player-span wall */
 
     int lo = center_span - span_radius;
     int hi = center_span + span_radius;
@@ -6779,11 +6815,11 @@ void td5_track_debug_emit_collision_lines(int center_span, int span_radius)
 
     for (int s = lo; s <= hi; s++) {
         if (s == center_span) continue;
-        emit_span_wireframe(s, RAIL_COLOR, CROSS_COLOR);
+        emit_span_wireframe(s, RAIL_COLOR, CROSS_COLOR, WALL_COLOR);
     }
     /* Player span last so it draws on top of any overlapping neighbors. */
     if (center_span >= 0 && center_span < s_span_count)
-        emit_span_wireframe(center_span, PLAYER_RAIL, PLAYER_CROSS);
+        emit_span_wireframe(center_span, PLAYER_RAIL, PLAYER_CROSS, PLAYER_WALL);
 }
 
 /* ============================================================
