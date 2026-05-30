@@ -297,6 +297,11 @@ void  td5_asset_free(void *ptr);
  * ======================================================================== */
 
 int  td5_asset_level_number(int track_index);
+/** 1 if the track ships reverse-direction data (level dir has STRIPB.DAT),
+ *  else 0. Only point-to-point tracks have it; circuit tracks are forward-only.
+ *  Used to hide the frontend Direction toggle and to force forward in the
+ *  INI/AutoRace path. */
+int  td5_asset_track_has_reverse(int track_index);
 /** Load PNG and return BGRA32 pixels (R↔B swapped for D3D11 B8G8R8A8_UNORM).
  *  Despite the legacy name, output is BGRA, not RGBA. */
 int  td5_asset_decode_png_rgba32(const char *path,
