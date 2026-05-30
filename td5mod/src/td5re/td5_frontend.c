@@ -1175,6 +1175,10 @@ typedef struct {
     int active;
     int x, y, w, h;
     int disabled;
+    int hidden;             /* 1 = not drawn at all (mirrors original moving the
+                             * sprite off-screen, e.g. the Direction toggle on
+                             * forward-only/circuit tracks). Pair with disabled
+                             * so nav/mouse also skip it. */
     int highlight_ramp;     /* 0-6: smooth highlight fade (original uses 6-step ramp) */
     int is_selector;        /* 1 = left/right selector widget; always uses blue 9-slice */
     char label[64];
@@ -1313,6 +1317,7 @@ static int frontend_create_button(const char *label, int x, int y, int w, int h)
         if (!s_buttons[i].active) {
             s_buttons[i].active = 1;
             s_buttons[i].disabled = 0;
+            s_buttons[i].hidden = 0;
             s_buttons[i].highlight_ramp = 0;
             s_buttons[i].is_selector = 0;
 
@@ -3951,7 +3956,11 @@ static void fe_draw_option_arrows(int btn_idx, float sx, float sy) {
      * Original FUN_00426260 always passes param_2=1 (confirmed @ 0x00422430). */
     float bx, by, bw, bh;
     float aw = 12.0f * sx, ah = 9.0f * sy;
-    if (!s_buttons[btn_idx].active || s_arrowbuttonz_tex_page < 0) return;
+    /* Skip hidden buttons (e.g. the Direction toggle on forward-only/circuit
+     * tracks) — the selector arrows must vanish with the button frame+label,
+     * not leave an empty ◄ ► row floating where the button used to be. */
+    if (!s_buttons[btn_idx].active || s_buttons[btn_idx].hidden ||
+        s_arrowbuttonz_tex_page < 0) return;
     frontend_get_button_render_rect(btn_idx, sx, sy, &bx, &by, &bw, &bh);
     td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_POINT);
     fe_draw_quad(bx + 4.0f * sx,          by + (bh - ah) * 0.5f, aw, ah, 0xFFFFFFFF,
@@ -5582,7 +5591,7 @@ void td5_frontend_render_ui_rects(void) {
 
     /* Draw buttons */
     for (int i = 0; i < FE_MAX_BUTTONS; i++) {
-        if (!s_buttons[i].active) continue;
+        if (!s_buttons[i].active || s_buttons[i].hidden) continue;
 
         float bx, by, bw, bh;
         frontend_get_button_render_rect(i, sx, sy, &bx, &by, &bw, &bh);
@@ -8971,6 +8980,36 @@ static void Screen_CarSelection(void) {
     }
 }
 
+/* Hide/show the Direction toggle (button index 1) for the currently selected
+ * track. Only point-to-point tracks ship reverse data; circuit tracks are
+ * forward-only, so the original removes the Direction option for them (the
+ * original gates on a per-track "reverse unlocked" byte gNpcRacerCheatFlags
+ * @0x004A2C98 which is only ever set for point-to-point tracks; the port has
+ * no unlock-progression model, so we gate directly on reverse-data presence —
+ * equivalent for the "circuit tracks never offer reverse" requirement).
+ *
+ * Mirrors the original's mechanism: when not available the sprite is moved
+ * off-screen (here: hidden=skip render) AND the toggle is inert (here:
+ * disabled, so the vertical nav and mouse hover both skip button 1). When the
+ * track has no reverse we also force s_track_direction=0 and reset the label so
+ * a stale "Backwards" choice can't carry onto a forward-only track. Random
+ * (s_selected_track < 0, 2P "?") keeps the toggle shown. */
+static void frontend_update_direction_button_visibility(void) {
+    if (s_button_count <= 1) return;
+    int has_reverse = (s_selected_track < 0)
+                      ? 1
+                      : td5_asset_track_has_reverse(s_selected_track);
+    s_buttons[1].hidden   = !has_reverse;
+    s_buttons[1].disabled = !has_reverse;
+    if (!has_reverse) {
+        s_track_direction = 0;
+        strncpy(s_buttons[1].label, "Forwards", sizeof(s_buttons[1].label) - 1);
+        s_buttons[1].label[sizeof(s_buttons[1].label) - 1] = '\0';
+        /* Don't leave the highlight focus parked on the now-hidden button. */
+        if (s_selected_button == 1) s_selected_button = 0;
+    }
+}
+
 /* ========================================================================
  * [21] TrackSelectionScreenStateMachine (0x427630)
  * States: 9 (0x00 - 0x08)
@@ -9012,6 +9051,9 @@ static void Screen_TrackSelection(void) {
         s_track_direction = 0;
         s_track_switch_tick = 16; /* holds preview settled during button slide-in (state 3); reset to 0 in state 5 */
         frontend_load_selected_track_preview();
+        /* Hide the Direction toggle for forward-only/circuit tracks from the
+         * very first frame (cases 1-3 render before case 5 reloads). */
+        frontend_update_direction_button_visibility();
         frontend_begin_timed_animation();
         s_inner_state = 1;
         break;
@@ -9022,7 +9064,8 @@ static void Screen_TrackSelection(void) {
         break;
 
     case 3: /* Slide-in: 39 frames */
-        /* Hide direction button if track has no reverse */
+        /* (Direction-button visibility is set in case 0 and refreshed on each
+         * track cycle in case 4 — see frontend_update_direction_button_visibility.) */
         if (frontend_update_timed_animation(0x27, 650) >= 1.0f) {
             s_anim_complete = 1;
             /* Original goes to state 5 (load preview) then state 8 (slide-in) on initial entry.
@@ -9061,12 +9104,20 @@ static void Screen_TrackSelection(void) {
                  * (old preview still loaded, new s_selected_track already set).
                  * Case 5 loads new preview next frame; case 9 runs the 16-frame slide-in. */
                 s_track_switch_tick = 0;
+                /* Re-evaluate the Direction toggle for the newly selected track
+                 * (hide on forward-only/circuit tracks, restore on reverse-capable). */
+                frontend_update_direction_button_visibility();
                 s_inner_state = 5;
             }
 
-            if (selected_button == 1 && (delta != 0 || s_button_index == 1)) {
-                /* Direction toggle: 0=Forwards, 1=Backwards */
-                /* Only if track supports reverse */
+            /* Direction toggle: 0=Forwards, 1=Backwards. Gated on the track
+             * actually having reverse data — forward-only/circuit tracks hide
+             * this button (see frontend_update_direction_button_visibility), and
+             * the guard here keeps the toggle inert even if reached by another
+             * path. Mirrors original 0x00427630 which only flips when the track's
+             * reverse flag is set. */
+            if (selected_button == 1 && !s_buttons[1].hidden &&
+                (delta != 0 || s_button_index == 1)) {
                 s_track_direction = !s_track_direction;
                 strncpy(s_buttons[1].label,
                         s_track_direction ? "Backwards" : "Forwards",
