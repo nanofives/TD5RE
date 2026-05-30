@@ -221,6 +221,16 @@ static int  s_p2_paint;
 static int  s_p2_config;
 static int  s_p2_transmission;
 
+/* Dedicated PLAYER (pass-1) car storage for the drag-race 2-pass CarSelect.
+ * The original keeps the player car in g_selectedCarIndex @0x0048f364 and never
+ * overwrites it during the opponent pass (the user cycles a SEPARATE scratch
+ * register). The port collapsed scratch + player slot into s_selected_car, so
+ * the pass-2 navigation clobbered the player car -> both racers ended up with
+ * the later (opponent) car. s_p1_car preserves the player's pass-1 choice across
+ * the opponent pass. [CONFIRMED root cause @ 0x40dfc0 case-0/case-0x18, 0x40dac0] */
+static int  s_p1_car;
+static int  s_p1_paint;
+
 /* Drag-race CarSelect 2-pass counter [CONFIRMED @ DAT_0048f380].
  * Original binary gates this on g_selectedGameType == 7 which is DRAG RACE in the
  * original; the port's game_type convention has Drag Race = 9. 0 = picking car 1,
@@ -8628,6 +8638,13 @@ static void Screen_CarSelection(void) {
         /* 5 buttons per original (0x40DFC0 state 4): exact final positions from Ghidra
          * Tab buttons: x=46, y=169/209/249/289, w=168, h=32
          * OK: x=46, y=329, w=64  |  BACK: x=118, y=329, w=96 */
+        /* Drag race FORCES Manual transmission and renders the toggle
+         * non-interactive [CONFIRMED @ 0x0040e119 cmp gameType!=7(orig drag) /
+         * 0x0040e167 write g_carSelectManualTransmissionToggle = (gameType==7)].
+         * Port game_type 9 == drag. Force the value here so the button shows
+         * "Manual"; case 3 below refuses to toggle it back. */
+        if (g_td5.drag_race_enabled)
+            s_selected_transmission = 1;
         frontend_create_button("Car",   46, 169, 168, 32);
         frontend_create_button("Paint", 46, 209, 168, 32);
         frontend_create_button("Stats", 46, 249, 168, 32);
@@ -8707,7 +8724,13 @@ static void Screen_CarSelection(void) {
                 break;
 
             case 3: /* Auto/Manual toggle */
-                if (s_selected_game_type != 7 && (s_button_index >= 0 || delta != 0)) { /* not Time Trials */
+                /* Drag race locks the transmission to Manual [CONFIRMED @
+                 * 0x0040e167 — orig makes the button a non-interactive Preview
+                 * for game_type 7 (=drag there); port drag == game_type 9].
+                 * The pre-existing `!= 7` guard keeps the port's Time-Trial
+                 * behavior unchanged; the added drag guard is the faithful fix. */
+                if (!g_td5.drag_race_enabled &&
+                    s_selected_game_type != 7 && (s_button_index >= 0 || delta != 0)) {
                     s_selected_transmission = !s_selected_transmission;
                     strncpy(s_buttons[3].label,
                             s_selected_transmission ? "Manual" : "Automatic",
@@ -8949,20 +8972,40 @@ static void Screen_CarSelection(void) {
         if (g_td5.drag_race_enabled &&
             s_return_screen == TD5_SCREEN_TRACK_SELECTION) {
             if (s_drag_carselect_pass == 0) {
-                s_selected_car = actual_car;
+                /* Pass 1 = PLAYER car. Stash it in dedicated storage so the
+                 * pass-2 navigation cursor (s_selected_car) cannot clobber it.
+                 * [Mirrors orig g_selectedCarIndex @0x0048f364 being preserved
+                 *  across the opponent pass — the port's root-cause fix.] */
+                s_p1_car   = actual_car;
+                s_p1_paint = s_selected_paint;
                 s_drag_carselect_pass = 1;
-                TD5_LOG_I(LOG_TAG, "CarSelect: drag-race pass1 car=%d → re-enter for car 2",
-                          actual_car);
+                /* Seed the pass-2 cursor from the opponent slot (orig loads its
+                 * scratch from DAT_00463e08 on the opponent pass) so pass 2 does
+                 * not start showing the player's just-picked car. Screen case 0
+                 * clamps to the valid roster range. */
+                s_selected_car   = s_p2_car;
+                s_selected_paint = s_p2_paint;
+                TD5_LOG_I(LOG_TAG,
+                          "CarSelect: drag-race pass1 PLAYER car=%d saved → re-enter for opponent (cursor seed=%d)",
+                          s_p1_car, s_selected_car);
                 td5_frontend_set_screen(TD5_SCREEN_CAR_SELECTION);
                 return;
             } else {
+                /* Pass 2 = OPPONENT car. */
                 s_p2_car = actual_car;
                 s_p2_paint = s_selected_paint;
                 s_p2_config = s_selected_config;
                 s_p2_transmission = s_selected_transmission;
                 s_drag_carselect_pass = 0;
-                TD5_LOG_I(LOG_TAG, "CarSelect: drag-race pass2 car=%d → skip track select, start race",
-                          actual_car);
+                /* Restore the PLAYER car/paint into the live selector BEFORE the
+                 * schedule reads slot 0 from s_selected_car. Without this, slot 0
+                 * (player) inherits the opponent car the user just cycled to ->
+                 * both racers get the same car (the reported bug). */
+                s_selected_car   = s_p1_car;
+                s_selected_paint = s_p1_paint;
+                TD5_LOG_I(LOG_TAG,
+                          "CarSelect: drag-race pass2 OPPONENT car=%d, restored PLAYER car=%d → start race",
+                          s_p2_car, s_selected_car);
                 frontend_init_race_schedule();
                 frontend_init_display_mode_state();
                 return;
