@@ -476,6 +476,15 @@ static ViewportRect s_viewports[2];
 
 /* Replay / benchmark timing */
 static uint32_t s_race_end_timer_start;
+
+/* Victory-overlay window. When the 1st-place star fires, hold the race (and
+ * thus the fade-to-results exit) for this long so the white star animation and
+ * the centered finishing number are readable instead of a ~0.5s flash.
+ * [user 2026-05-30: "animation too fast" / "number sometimes not present".] */
+#define TD5_VICTORY_HOLD_MS 2500u
+static uint32_t s_victory_hold_start;   /* ms timestamp the star armed (0 = none) */
+static int      s_finish_position_display; /* 1-based place captured at finish (0 = none) */
+
 static int      s_replay_mode;
 static int      s_race_countdown_ticks;
 static int      s_race_countdown_state;
@@ -2331,6 +2340,8 @@ int td5_game_init_race_session(void) {
     s_fade_accumulator = 0.0f;
     s_post_finish_cooldown = 0;
     s_race_end_timer_start = 0;
+    s_victory_hold_start = 0;
+    s_finish_position_display = 0;
 
     /* Reset results table */
     reset_results_table();
@@ -2673,6 +2684,15 @@ int td5_game_run_race_frame(void) {
         if (completion) {
             g_td5.race_end_fade_state = 1;
 
+            /* Capture the finishing place ONCE for the centered victory digit.
+             * Reading actor->race_position every frame in the draw path was racy
+             * (update_race_order can re-sort mid-window), which blanked/changed
+             * the number — [user 2026-05-30: "number sometimes is not present"]. */
+            {
+                TD5_Actor *pl = td5_game_get_actor(0);
+                s_finish_position_display = pl ? (int)pl->race_position + 1 : 1;
+            }
+
             /* Select fade direction based on viewport layout */
             td5_game_begin_fade_out(g_td5.split_screen_mode);
         }
@@ -2688,32 +2708,46 @@ int td5_game_run_race_frame(void) {
             }
         }
 
-        /* Accumulate fade — ~1s wipe at 60fps.
-         * Clamp dt to 1/30 to prevent instant fade after pause frames
-         * (pause menu exit produces a huge dt spike on the next frame). */
-        float fade_dt_seconds = td5_game_normalized_dt_to_seconds(g_td5.normalized_frame_dt);
-        /* Per-frame cap guards against the huge dt spike on pause-menu exit. Scale
-         * the cap with the game-speed (fast-forward) multiplier so the black wipe
-         * stays in sync with the sim at higher speeds instead of crawling at
-         * real-time while everything else races (user 2026-05-30: black transition
-         * didn't scale with game speed). At 1x the cap is unchanged (~1s wipe). */
-        float fade_cap = 0.034f;
-        if (g_td5.ini.trace_fast_forward > 1.0f) fade_cap *= g_td5.ini.trace_fast_forward;
-        if (fade_dt_seconds > fade_cap) fade_dt_seconds = fade_cap;
-        s_fade_accumulator += fade_dt_seconds * 255.0f;
-        if (s_fade_accumulator >= 255.0f) {
-            s_fade_accumulator = 255.0f;
+        /* Victory hold: while the 1st-place star is playing, freeze the fade so
+         * the race view (with the white star + centered finishing number) stays
+         * up for TD5_VICTORY_HOLD_MS, THEN fade to results. Without this the
+         * race exited in ~0.5s and the (now faithfully-slow 1/640) star never
+         * got room to expand — it read as a fast dark flash and the number
+         * blinked by. The directional wipe is already suppressed for the star
+         * case (mutual-exclusion gate below), so the hold just delays the cut to
+         * results. [user 2026-05-30: animation too fast / number missing.] */
+        int victory_holding =
+            (s_race_end_radial_pulse_enabled && s_victory_hold_start != 0 &&
+             (td5_plat_time_ms() - s_victory_hold_start) < TD5_VICTORY_HOLD_MS);
 
-            /* Fade complete: release all race resources and exit */
-            td5_game_release_race_resources();
+        if (!victory_holding) {
+            /* Accumulate fade — ~1s wipe at 60fps.
+             * Clamp dt to 1/30 to prevent instant fade after pause frames
+             * (pause menu exit produces a huge dt spike on the next frame). */
+            float fade_dt_seconds = td5_game_normalized_dt_to_seconds(g_td5.normalized_frame_dt);
+            /* Per-frame cap guards against the huge dt spike on pause-menu exit. Scale
+             * the cap with the game-speed (fast-forward) multiplier so the black wipe
+             * stays in sync with the sim at higher speeds instead of crawling at
+             * real-time while everything else races (user 2026-05-30: black transition
+             * didn't scale with game speed). At 1x the cap is unchanged (~1s wipe). */
+            float fade_cap = 0.034f;
+            if (g_td5.ini.trace_fast_forward > 1.0f) fade_cap *= g_td5.ini.trace_fast_forward;
+            if (fade_dt_seconds > fade_cap) fade_dt_seconds = fade_cap;
+            s_fade_accumulator += fade_dt_seconds * 255.0f;
+            if (s_fade_accumulator >= 255.0f) {
+                s_fade_accumulator = 255.0f;
 
-            if (s_pause_exit_pending) {
-                TD5_LOG_I(LOG_TAG, "Fade complete (ESC exit) -> main menu");
-                s_pause_exit_pending = 0;
-                return 2;  /* 2 = ESC quit (-> main menu) */
+                /* Fade complete: release all race resources and exit */
+                td5_game_release_race_resources();
+
+                if (s_pause_exit_pending) {
+                    TD5_LOG_I(LOG_TAG, "Fade complete (ESC exit) -> main menu");
+                    s_pause_exit_pending = 0;
+                    return 2;  /* 2 = ESC quit (-> main menu) */
+                }
+                TD5_LOG_I(LOG_TAG, "Fade complete (race finish) -> results");
+                return 1;  /* 1 = normal race finish (-> results screen) */
             }
-            TD5_LOG_I(LOG_TAG, "Fade complete (race finish) -> results");
-            return 1;  /* 1 = normal race finish (-> results screen) */
         }
     }
 
@@ -3510,16 +3544,10 @@ int td5_game_run_race_frame(void) {
         td5_hud_draw_race_fade(s_fade_accumulator, g_td5.fade_direction);
     }
 
-    /* Finishing position: big centered digit during the race-end victory
-     * window (port enhancement, user 2026-05-30). Drawn last so it stays
-     * readable over the star glow / directional fade. race_position is 0-based
-     * (0 = 1st); display 1-based. */
-    if (g_td5.race_end_fade_state > 0) {
-        TD5_Actor *fp_player = td5_game_get_actor(0);
-        if (fp_player) {
-            td5_hud_draw_finish_position((int)fp_player->race_position + 1);
-        }
-    }
+    /* Finishing-position digit is now drawn INSIDE td5_hud_render_overlays (in the
+     * centered render state, alongside the star pulse). Drawing it here picked up
+     * a leftover viewport/clip offset and landed it off-centre. The captured place
+     * is exposed via td5_game_get_finish_position() below. */
 
     td5_hud_flush_text();
 
@@ -4741,6 +4769,11 @@ void td5_game_begin_fade_out(int param) {
              * right after ResetHudRadialPulseOverlay -> suppresses the
              * directional fade for this race (star wipe ONLY). */
             s_race_end_radial_pulse_enabled = 1;
+            /* Arm the victory hold so the star animation + finishing number get
+             * TD5_VICTORY_HOLD_MS of screen time before the cut to results. */
+            s_victory_hold_start = td5_plat_time_ms();
+            TD5_LOG_I(LOG_TAG, "Victory hold armed: pos=%d hold=%ums",
+                      s_finish_position_display, TD5_VICTORY_HOLD_MS);
         }
     } else {
         TD5_LOG_I(LOG_TAG,
@@ -4889,6 +4922,14 @@ float td5_game_get_fps(void) {
 
 float td5_game_get_frame_dt(void) {
     return g_td5.normalized_frame_dt;
+}
+
+/* 1-based finishing place captured at the finish line, for the centered victory
+ * digit drawn by td5_hud_render_overlays. 0 = no finish this race yet.
+ * (Distinct from td5_game_get_finish_position(slot), which reads the results
+ * table's 0-based final_position and is only valid after results are built.) */
+int td5_game_get_victory_position(void) {
+    return s_finish_position_display;
 }
 
 /* ========================================================================

@@ -6688,6 +6688,11 @@ void td5_render_recompute_frustum_for_trackside(void) {
  *   0x4300199a = 128.1f    (quad Z) */
 static float s_radial_pulse_anim;  /* orig [0x004B08C0] _g_hudRadialPulseAnimState */
 
+/* Mirror of td5_hud.c HUD_WHITE_TEX_PAGE — the 1x1 white texture page uploaded
+ * during HUD init, used to render flat-color (untextured-equivalent) HUD quads
+ * through the texture-modulating translucent path. */
+#define TD5_HUD_WHITE_TEX_PAGE 899
+
 void td5_render_radial_pulse(float dt)
 {
     float phase = td5_hud_radial_pulse_get();
@@ -6707,13 +6712,24 @@ void td5_render_radial_pulse(float dt)
     /* Anim accumulator advances every frame (independent of phase). */
     s_radial_pulse_anim += dt * 3328.0f;
 
-    /* Alpha = clamp(phase * 0.31875f, 0, 255). Saturates at phase≈800. */
-    int alpha = (int)(phase * 0.31875f);
+    /* Star opacity ramp. Orig used phase*0.31875 (alpha for its gray-RGB petals),
+     * which only reaches full at phase~800 = radius ~800px (far off-screen), so on
+     * the visible window (phase ~0..330 over the victory hold) it stays a faint
+     * ~12-40% wash. For a clearly-WHITE victory star [user 2026-05-30] we ramp the
+     * alpha faster (0.62) so it builds to ~75% white by the end of the hold while
+     * still fading in from invisible at phase 0. Tunable: 0.31875 = faithful
+     * (faint), ~0.62 = near white-out by hold end. 0.55 builds to ~72% white at
+     * the end of the 2.5s victory hold — clearly white, scene still dimly visible. */
+    int alpha = (int)(phase * 0.55f);
     if (alpha < 0)        alpha = 0;
     else if (alpha > 255) alpha = 255;
 
-    /* Per-frame radius. viewport_width * phase * (1/160). */
-    float radius = (float)s_viewport_width * phase * 0.00625f;
+    /* Per-frame radius. viewport_width * phase * (1/640).
+     * [CONFIRMED @ 0x439e60 RenderHudRadialPulseOverlay: _DAT_0045d64c =
+     *  0.0015625f = 1/640]. The port previously used 0.00625f (1/160) — 4x
+     *  too large, which ballooned the star across the screen ~4x too fast
+     *  (user 2026-05-30 "animation too fast"). Restored to the faithful 1/640. */
+    float radius = (float)s_viewport_width * phase * 0.0015625f;
 
     /* 10 ring vertices: even k = inner (radius*0.5), odd k = outer (radius).
      * Inner angle steps by -0x33332 (~72°) per pair; outer angle is inner - 0x19999. */
@@ -6729,8 +6745,19 @@ void td5_render_radial_pulse(float dt)
         a -= 0x33332;
     }
 
-    /* Grayscale ARGB: alpha=0xFF, RGB = alpha * 0x10101. */
-    uint32_t color = 0xFF000000u | (uint32_t)(alpha * 0x10101);
+    /* White victory star with alpha fade-in: RGB pinned WHITE (0xFFFFFF),
+     * alpha = the phase ramp. Drawn via the translucent (SRCALPHA) HUD path
+     * below, so alpha 0 = invisible -> alpha 255 = bright opaque white.
+     *
+     * [user 2026-05-30: "star is black, should be white".] Two port bugs made
+     * it read black: (1) the previous pass put the ramp in the RGB bytes (so
+     * the star was near-black gray at low phase) and (2) submitted ADDITIVE,
+     * where dark RGB adds ~nothing to the scene -> a faint/black flash.
+     * Deliberate deviation from orig's gray-RGB-ramp/opaque-alpha at 0x439e60:
+     * orig's gray ramp only reaches white at phase ~800 (off-screen radius),
+     * so on-screen it always looks dark — constant-white + alpha-ramp delivers
+     * the white glow the user expects while keeping the faithful translucent blend. */
+    uint32_t color = ((uint32_t)alpha << 24) | 0x00FFFFFFu;
 
     /* Center the ring on the viewport. */
     float cx = (float)s_viewport_width * 0.5f;
@@ -6766,13 +6793,20 @@ void td5_render_radial_pulse(float dt)
             p.tex_u[v]   = 0.0f;
             p.tex_v[v]   = 0.0f;
         }
-        p.texture_page = 0;
+        /* Orig petals are UNTEXTURED flat color (tex_u=tex_v=0). The port's
+         * translucent-HUD path always modulates by a bound texture, so bind the
+         * 1x1 WHITE page (== td5_hud.c HUD_WHITE_TEX_PAGE 899, uploaded at HUD
+         * init) — page 0 is an arbitrary atlas whose texel darkened the flat
+         * white, contributing to the "black star". white*white = white. */
+        p.texture_page = TD5_HUD_WHITE_TEX_PAGE;
         p.reserved     = 0;
 
         td5_render_build_sprite_quad((int *)&p);
-        /* Additive so the petals are a semi-transparent white glow that brightens
-         * with phase (not opaque gray quads). [user feedback 2026-05-30] */
-        td5_render_submit_additive_hud((uint16_t *)&s_pulse_quads[q]);
+        /* Translucent (SRCALPHA/INVSRCALPHA) so the white petals fade in by
+         * vertex alpha — faithful to orig SubmitImmediateTranslucentPrimitive
+         * @ 0x4315b0 (NOT additive). The previous additive path made the dark
+         * low-phase color invisible/black. [user feedback 2026-05-30] */
+        td5_render_submit_translucent_hud((uint16_t *)&s_pulse_quads[q]);
     }
 }
 
