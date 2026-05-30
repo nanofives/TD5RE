@@ -1548,6 +1548,32 @@ void UpdateVehicleRelativeCamera(int actor, int view)
 
     /* Rebuild basis a second time (the original does this) */
     BuildCameraBasisFromAngles(cam_angles);
+
+    /* Port D3D11 handedness compensation for the in-car (bumper) camera.
+     *
+     * The original's in-car Euler basis (BuildCameraBasisFromAngles @ 0x42d0b0,
+     * which applies NO coordinate flip) renders upright in the original's
+     * software projector. The port's D3D11 transform consumes g_cameraBasis
+     * directly as s_camera_basis (td5_render.c:1534-1536, rows = right/up/fwd)
+     * with the opposite up/right handedness, so the un-flipped Euler basis
+     * comes out rolled 180° about forward — i.e. upside down. The CHASE camera
+     * never hits this because it finalizes through OrientCameraTowardTarget
+     * (0x42d5b0), which applies its OWN coordinate flip ([5]-negate +
+     * {-1,0,0,0,1,0,0,0,-1}); BuildCameraBasisFromAngles has no such flip.
+     *
+     * Measured at runtime: in-car Up came out (0,-1,0) for a level car. Apply the
+     * matching correction — a 180° roll about forward: negate right (row 0) and
+     * up (row 1), keep forward (row 2). That makes Up = (0,+1,0) without
+     * touching the look direction (no left/right mirror, determinant preserved).
+     * g_cameraBasisWork (FinalizeCameraProjectionMatrices output) is unused by
+     * the port renderer, so negating g_cameraBasis here is sufficient.
+     * [Port-specific render-compat divergence; not in orig 0x401c20.] */
+    g_cameraBasis[0] = -g_cameraBasis[0];   /* right.x */
+    g_cameraBasis[1] = -g_cameraBasis[1];   /* right.y */
+    g_cameraBasis[2] = -g_cameraBasis[2];   /* right.z */
+    g_cameraBasis[3] = -g_cameraBasis[3];   /* up.x */
+    g_cameraBasis[4] = -g_cameraBasis[4];   /* up.y */
+    g_cameraBasis[5] = -g_cameraBasis[5];   /* up.z */
 }
 
 /* ========================================================================
@@ -2540,6 +2566,20 @@ void td5_camera_update_chase_all(void)
     for (int v = 0; v < view_count; v++) {
         TD5_Actor *actor = camera_actor_for_view(v);
         if (!actor) continue;
+        /* Orig RunRaceFrame sim-tick loop (0x0042b9c9) gates the chase cam on
+         * gRaceCameraPresetMode[v] == 0. In bumper/in-car mode (mode != 0) the
+         * chase orbit math must NOT run, or it overwrites the heading-locked
+         * basis that UpdateVehicleRelativeCamera builds in the per-frame
+         * dispatch — which is why the in-car view didn't rotate with the car.
+         *
+         * Gate also on !paused: during the pre-race fly-in/countdown the saved
+         * camera mode (g_camPackedSave, loaded at race init) may be the bumper
+         * preset (mode 1), but the original forces the orbit/fly-in camera then
+         * (RunRaceFrame's "mode==0 OR flyInFlag>0" clause). So while paused,
+         * always run the chase/orbit path regardless of mode; only suppress it
+         * for the in-car cam once the race is actually running. */
+        if (!g_td5.paused && g_raceCameraPresetMode[v] != 0)
+            continue;
         UpdateChaseCamera((int)actor, 1, v);
     }
 }
@@ -2688,14 +2728,36 @@ void td5_camera_update_transition_state(int p, int vi)
         TD5_LOG_I(LOG_TAG, "transition view %d: path=trackside actor_slot=%d", vi, g_actorSlotForView[vi]);
         UpdateTracksideCamera((int)actor, vi);
     } else {
-        int preset = g_raceCameraPresetMode[vi];
-        if (preset == 6 || preset == 5) {
-            /* Bumper / in-car camera */
-            TD5_LOG_I(LOG_TAG, "transition view %d: path=bumper actor_slot=%d preset=%d",
-                      vi, g_actorSlotForView[vi], preset);
+        /* Orig RunRaceFrame per-view dispatch (0x0042bca0): runs the orbit/chase
+         * cam when gRaceCameraPresetMode[view] == 0 (or the race-start fly-in
+         * flag is set, which the port already handles via the
+         * g_cameraTransitionActive early-return above), and the in-car/bumper
+         * cam otherwise (mode != 0).
+         *
+         * g_raceCameraPresetMode holds the preset MODE (0 = chase, 1 = bumper),
+         * NOT the preset ID. The old `preset == 6 || preset == 5` test compared
+         * the mode against preset IDs, so it never fired —
+         * UpdateVehicleRelativeCamera never ran and the bumper view kept the
+         * (per-sim-tick) chase orientation instead of rotating with the car. */
+        int mode = g_raceCameraPresetMode[v];
+        if (mode != 0 && !g_td5.paused) {
+            /* Bumper / in-car camera (orig UpdateVehicleRelativeCamera
+             * @ 0x00401c20): orientation is taken straight from the car's
+             * display angles (roll +0x208, yaw +0x20A, pitch +0x20C), so the
+             * view rotates with the vehicle's heading.
+             *
+             * !paused: during the pre-race fly-in/countdown the loaded camera
+             * mode may be bumper (saved in g_camPackedSave), but the original
+             * forces the orbit cam then; only run the in-car cam once the race
+             * is actually running. After GO the spring-reset one-shot above
+             * sets mode 0 (chase), so the in-car cam only appears when the
+             * player cycles to it with the view button during the race. */
+            TD5_LOG_I(LOG_TAG, "transition view %d: path=bumper actor_slot=%d mode=%d",
+                      vi, g_actorSlotForView[vi], mode);
             UpdateVehicleRelativeCamera((int)actor, vi);
         }
-        /* Chase camera: updated per-sim-tick in td5_camera_tick() via UpdateChaseCamera */
+        /* Chase camera (mode 0): updated per-sim-tick in
+         * td5_camera_update_chase_all() via UpdateChaseCamera. */
     }
 
     TD5_LOG_D(LOG_TAG,
