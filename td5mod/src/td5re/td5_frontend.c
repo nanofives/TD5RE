@@ -401,8 +401,7 @@ static int   s_bg_gal_blend;
 static float s_bg_gal_x, s_bg_gal_y;
 
 static int  s_control_options_surface;
-static int  s_sound_icon_surface = 0;       /* Stereo.tga (stereo icon, Sound Options) */
-static int  s_sound_icon_mono_surface = 0;  /* Mono.tga   (mono icon,   Sound Options) */
+static int  s_sound_icon_surface = 0;       /* Controllers.tga: SFX-mode icon strip (64x224, 7x 64x32 rows; SFX mode N -> row N+4) */
 static int  s_sound_volumebox_surface = 0;  /* VolumeBox.tga   (volume bar background) */
 static int  s_sound_volumefill_surface = 0; /* VolumeFill.tga  (volume bar fill)       */
 static int  s_split_screen_surface = 0;     /* SplitScreen.tga (Two Player layout preview)    */
@@ -2820,7 +2819,12 @@ static int ConfigureGameTypeFlags(void) {
 
     switch (s_selected_game_type) {
     case 0: /* Single Race -- user preferences apply */
-        g_td5.circuit_lap_count = (s_game_option_laps + 1) * 2;
+        /* [CONFIRMED @ 0x004155DE] orig live circuit lap count = gCircuitLapsConfigShadow + 1
+         * (NOT doubled). The previous *2 made a Single Race run twice the lap count shown
+         * on the Game Options screen ("2" displayed but 4 laps run). Now consistent with
+         * the GameOptions display (frontend_render_game_options_overlay) and the MainMenu
+         * seed (g_td5.circuit_lap_count = s_game_option_laps + 1). */
+        g_td5.circuit_lap_count = s_game_option_laps + 1;
         /* g_td5.difficulty feeds ONLY the AI first-layer template scaling in
          * td5_ai_init_race_actor_runtime (td5_ai.c:1677). In the original that
          * first layer (InitializeRaceActorRuntime @ 0x00432F2F / 0x00432FB4) is
@@ -3986,7 +3990,11 @@ static void frontend_render_game_options_overlay(float sx, float sy) {
     char laps[16];
     if (!s_buttons[0].active) return;
     if (!s_anim_complete) return;
-    snprintf(laps, sizeof(laps), "%d", (s_game_option_laps + 1) * 2);
+    /* [CONFIRMED @ 0x0041FD78] orig renders gCircuitLapsConfigShadow + 1 with "%d"
+     * (shadow 0..3 -> "1".."4"); there is NO *2 multiply. Must match the live lap
+     * count (g_td5.circuit_lap_count = laps+1) so the displayed number equals the
+     * laps actually raced. */
+    snprintf(laps, sizeof(laps), "%d", s_game_option_laps + 1);
     frontend_draw_value_centered(sx, sy, s_buttons[0].y + 6, laps, 0xFFFFFFFF);
     frontend_draw_value_centered(sx, sy, s_buttons[1].y + 6, on_off[s_game_option_checkpoint_timers & 1], 0xFFFFFFFF);
     frontend_draw_value_centered(sx, sy, s_buttons[2].y + 6, on_off[s_game_option_traffic & 1], 0xFFFFFFFF);
@@ -4028,14 +4036,23 @@ static void frontend_render_sound_options_overlay(float sx, float sy) {
      * VolumeFill Mus: x=395, y=226, w=0-222, h=10 */
     td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
 
-    /* Stereo or Mono icon based on current mode */
+    /* SFX-mode icon: Controllers.tga row (sfx_mode+4) of 7. [CONFIRMED @ 0x0041EA90:
+     * src_y = (g_sfxPlaybackMode + 4) * 0x20, full 64px width.] Modes 0/1/2 map to
+     * rows 4/5/6 -> three distinct icons. The prior 2-state Stereo/Mono swap keyed on
+     * (mode & 1), so mode 0 and mode 2 drew the SAME icon (mode 2 indistinguishable). */
     {
-        int icon_surface = (s_sound_option_sfx_mode & 1) ? s_sound_icon_mono_surface : s_sound_icon_surface;
+        int icon_surface = s_sound_icon_surface;
+        int mode = s_sound_option_sfx_mode;
+        if (mode < 0) mode = 0;
+        if (mode > 2) mode = 2;
         if (icon_surface > 0) {
             int slot = icon_surface - 1;
-            if (slot >= 0 && slot < FE_MAX_SURFACES && s_surfaces[slot].in_use)
+            if (slot >= 0 && slot < FE_MAX_SURFACES && s_surfaces[slot].in_use) {
+                float v0 = (float)(mode + 4) / 7.0f;
+                float v1 = (float)(mode + 5) / 7.0f;
                 fe_draw_quad(394.0f * sx, 97.0f * sy, 64.0f * sx, 32.0f * sy,
-                             0xFFFFFFFF, s_surfaces[slot].tex_page, 0.0f, 0.0f, 1.0f, 1.0f);
+                             0xFFFFFFFF, s_surfaces[slot].tex_page, 0.0f, v0, 1.0f, v1);
+            }
         }
     }
 
@@ -7508,7 +7525,18 @@ static void Screen_OptionsHub(void) {
             case 2: s_return_screen = TD5_SCREEN_SOUND_OPTIONS;      s_inner_state = 7; break;
             case 3: s_return_screen = TD5_SCREEN_DISPLAY_OPTIONS;    s_inner_state = 7; break;
             case 4: s_return_screen = TD5_SCREEN_TWO_PLAYER_OPTIONS; s_inner_state = 7; break;
-            case 5: /* OK -> apply settings, return to main menu */
+            case 5: /* OK -> return to main menu.
+                     * PARITY NOTE (audit 2026-05-30): the original 0x0041D890 OK case
+                     * commits the option shadows to live globals here (camera =
+                     * collisions^1 @0x41dc8e, dynamics @0x41dc82, traffic/cops, and
+                     * gRaceDifficultyTier @0x41dc9f). The port uses an equivalent but
+                     * DEFERRED model: the option screens edit s_game_option_* directly
+                     * and ConfigureGameTypeFlags applies them at race launch (see
+                     * td5_frontend.c case 0 of the game-type switch: difficulty->tier,
+                     * traffic, cops, collisions, dynamics, checkpoint timers). Race
+                     * launch is the sole consumer path, so the user's choices still take
+                     * effect without an explicit shadow->live commit here. Adding one
+                     * would risk double-application. Left as-is intentionally. */
                 s_return_screen = TD5_SCREEN_MAIN_MENU;
                 s_inner_state = 7;
                 break;
@@ -7589,8 +7617,13 @@ static void Screen_GameOptions(void) {
             if (delta != 0) {
                 if (active_button == 0) {
                     s_game_option_laps += delta;
-                    if (s_game_option_laps < 0) s_game_option_laps = 3;
-                    if (s_game_option_laps > 3) s_game_option_laps = 0;
+                    /* [CONFIRMED @ 0x0041F990 case6/idx0] orig CLAMPS laps to [0,3] and
+                     * does NOT wrap. (The Difficulty row at idx4 DOES wrap 0<->2 — the
+                     * clamp-vs-wrap distinction is deliberate.) Port previously wrapped. */
+                    if (s_game_option_laps < 0) s_game_option_laps = 0;
+                    if (s_game_option_laps > 3) s_game_option_laps = 3;
+                    TD5_LOG_D(LOG_TAG, "GameOptions: laps idx=%d (displayed %d)",
+                              s_game_option_laps, s_game_option_laps + 1);
                     s_inner_state = 4;
                 } else if (active_button == 1) {
                     s_game_option_checkpoint_timers ^= 1;
@@ -7719,8 +7752,11 @@ static void Screen_SoundOptions(void) {
         frontend_init_return_screen(TD5_SCREEN_SOUND_OPTIONS);
         TD5_LOG_D(LOG_TAG, "SoundOptions: init");
         frontend_load_tga("Front_End/MainMenu.tga", "Front_End/FrontEnd.zip");
-        s_sound_icon_surface       = frontend_load_tga("Stereo.tga",    "Front End/frontend.zip");
-        s_sound_icon_mono_surface  = frontend_load_tga("Mono.tga",      "Front End/frontend.zip");
+        /* [CONFIRMED @ 0x0041EA90] SFX-mode icon source is Controllers.tga (64x224 =
+         * 7 rows of 64x32), blitted at row (sfx_mode+4): modes 0/1/2 -> rows 4/5/6.
+         * Replaces the prior 2-state Stereo.tga/Mono.tga pair, which could not render
+         * a distinct icon for the 3rd (surround) mode. */
+        s_sound_icon_surface       = frontend_load_tga("Controllers.TGA", "Front End/frontend.zip");
         s_sound_volumebox_surface  = frontend_load_tga("VolumeBox.tga", "Front End/frontend.zip");
         s_sound_volumefill_surface = frontend_load_tga("VolumeFill.tga","Front End/frontend.zip");
         frontend_create_button("SFX Mode",     -0x100, 0, 0x100, 0x20); /* 0x41eb5e: width=0x100 */
@@ -7819,6 +7855,12 @@ static void Screen_DisplayOptions(void) {
          * current window dimensions every entry would clobber the user's
          * last selection (which is restored from config.td5 at boot). */
         frontend_create_button("Resolution",    -0x120, 0, 0x120, 0x20); /* 0x420484: width=0x120 */
+        /* PARITY NOTE (audit 2026-05-30): orig 0x00420484 makes Fogging a DISABLED
+         * preview button when DXD3D::CanFog() != 1 (M2DX ordinal 0x6f), else a live
+         * cycler with arrows. The port's D3D11 backend always supports fog (same as the
+         * SFX 3-mode reasoning in Screen_SoundOptions), so CanFog()==1 holds and the
+         * faithful result is an always-live Fogging row — which is what this is. No
+         * gating needed unless a future backend can lack fog. */
         frontend_create_button("Fogging",       -0x120, 0, 0x120, 0x20);
         frontend_create_button("Speed Readout", -0x120, 0, 0x120, 0x20);
         frontend_create_button("Camera Damping",-0x120, 0, 0x120, 0x20);
@@ -8455,9 +8497,13 @@ static void Screen_MusicTestExtras(void) {
                  *   clamped 0..11; then BltColorFillToSurface + sprintf "%d. %s" redrawn
                  *   into DAT_0049628c (track-name surface). Port: update label string. */
                 s_music_test_track_idx += delta;
-                /* [CONFIRMED @ 0x4186A8] original clamps 0..0xB, does NOT wrap */
-                if (s_music_test_track_idx < 0)  s_music_test_track_idx = 0;
-                if (s_music_test_track_idx > 11) s_music_test_track_idx = 11;
+                /* [CONFIRMED @ 0x00418460 case6/idx0, re-decompiled 2026-05-30 by two
+                 * independent agents] original WRAPS 0<->0xB: LEFT underflow -> 0xB,
+                 * RIGHT overflow -> 0. It does NOT clamp. The prior comment here (citing
+                 * a 0x4186A8 clamp) was incorrect. Table length 12 (PTR_s_GRAVITY_KILLS /
+                 * PTR_s_FALLING) matches the 0..11 wrap range. */
+                if (s_music_test_track_idx < 0)  s_music_test_track_idx = 11;
+                if (s_music_test_track_idx > 11) s_music_test_track_idx = 0;
                 frontend_music_test_update_track_label();
                 TD5_LOG_D(LOG_TAG, "MusicTestExtras: cycle -> '%s'", s_music_test_track_label);
             }
