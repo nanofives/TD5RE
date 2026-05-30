@@ -6471,6 +6471,42 @@ void td5_render_submit_translucent_hud(uint16_t *quad_data) {
     td5_plat_render_draw_tris(verts, 4, indices, 6);
 }
 
+/* Additive variant of submit_translucent_hud for the victory star pulse.
+ * Uses TD5_PRESET_ADDITIVE_OVERLAY (ONE/ONE, z-test off) so the grayscale-ramp
+ * petals (diffuse RGB = phase*0.319, alpha pinned 0xFF) read as a SEMI-TRANSPARENT
+ * WHITE GLOW that brightens as phase grows: gray 0 adds nothing (invisible at
+ * start) -> gray 255 adds full white (bright). The plain translucent HUD path
+ * (SRCALPHA with alpha=0xFF) drew them as OPAQUE gray quads instead.
+ * [user feedback 2026-05-30: star should be white, semi-transparent, brighter
+ *  as the animation progresses. Matches orig's additive (type-3) petal path.] */
+void td5_render_submit_additive_hud(uint16_t *quad_data) {
+    float *fdata;
+    TD5_D3DVertex verts[4];
+    uint16_t indices[6] = { 0, 1, 2, 0, 2, 3 };
+    int tex_page;
+    int i;
+
+    if (!quad_data) return;
+
+    fdata = (float *)quad_data;
+    for (i = 0; i < 4; i++) {
+        int base = 2 + i * 7;
+        verts[i].screen_x = fdata[base + 0];
+        verts[i].screen_y = fdata[base + 1];
+        verts[i].depth_z  = fdata[base + 2];
+        verts[i].rhw      = fdata[base + 3];
+        verts[i].diffuse  = *(uint32_t *)&fdata[base + 4];
+        verts[i].specular = 0;
+        verts[i].tex_u    = fdata[base + 5];
+        verts[i].tex_v    = fdata[base + 6];
+    }
+
+    tex_page = (int)(*(float *)((uint8_t *)quad_data + 0x90));
+    td5_plat_render_set_preset(TD5_PRESET_ADDITIVE_OVERLAY);
+    td5_plat_render_bind_texture(tex_page);
+    td5_plat_render_draw_tris(verts, 4, indices, 6);
+}
+
 /* Submit a pre-built translucent quad with WORLD-space depth test enabled
  * (z_enable=1, z_write=0, alpha_ref=1). Mirrors orig
  * SetRaceRenderStatePreset(TD5_RACE_PASS_ALPHA) @ 0x0040b070: ZENABLE on,
@@ -6693,7 +6729,9 @@ void td5_render_radial_pulse(float dt)
         p.reserved     = 0;
 
         td5_render_build_sprite_quad((int *)&p);
-        td5_render_submit_translucent_hud((uint16_t *)&s_pulse_quads[q]);
+        /* Additive so the petals are a semi-transparent white glow that brightens
+         * with phase (not opaque gray quads). [user feedback 2026-05-30] */
+        td5_render_submit_additive_hud((uint16_t *)&s_pulse_quads[q]);
     }
 }
 

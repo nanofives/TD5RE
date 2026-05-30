@@ -225,6 +225,7 @@ static int td5_apply_cli_overrides(const char *cmdline,
         { "AutoGearbox",          &g_td5.ini.auto_gearbox },
         { "PlayerIsAI",           &g_td5.ini.player_is_ai },
         { "SoloAISlot",           &g_td5.ini.solo_ai_slot },
+        { "SoloRace",             &g_td5.ini.solo_race },
         { "MaxSpan",              &g_td5.ini.max_span },
         { "PhantomPeer",          &g_td5.ini.phantom_peer },
         /* Game */
@@ -459,6 +460,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
      * 0x0042ACCF writes slot[0].state = 1 - g_attractModeDemoActive). */
     g_td5.ini.player_is_ai      = td5_ini_int("GameOptions", "PlayerIsAI", 0);
     g_td5.ini.solo_ai_slot      = td5_ini_int("GameOptions", "SoloAISlot", 0);
+    g_td5.ini.solo_race         = td5_ini_int("GameOptions", "SoloRace", 0);
     g_td5.ini.max_span          = td5_ini_int("GameOptions", "MaxSpan", 0);
     /* PhantomPeer default OFF: initial A/B (2026-05-22) regressed slot 0
      * Edinburgh from 11 → 1418 wall_hits when ON; v1 emulation is the

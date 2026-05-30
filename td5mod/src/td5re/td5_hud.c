@@ -1730,6 +1730,45 @@ void td5_hud_set_indicator_state(int view_index, int value)
 }
 
 /* ========================================================================
+ * Finishing-position center-screen digit (port enhancement, user 2026-05-30)
+ *
+ * Draws the player's finishing place as one BIG digit centered on the screen
+ * during the race-end victory window. position is 1-based (1 = 1st). The
+ * ORIGINAL shows the finishing position only on the post-race results screen
+ * (BuildRaceResultsTable @ 0x0040a8c0) — this overlays it on the race view per
+ * user request. Reuses the NUMBERS atlas (digit d -> cell (d%5,d/5), 16x24)
+ * scaled up, drawn opaque white via the normal translucent-HUD path.
+ * ======================================================================== */
+void td5_hud_draw_finish_position(int position)
+{
+    if (!s_numbers_atlas) return;
+    if (position < 1) position = 1;
+    if (position > 9) position = 9;   /* single digit (max 6 racers) */
+
+    int digit = position;             /* NUMBERS cell index == digit glyph */
+    int col = digit % 5;
+    int row = digit / 5;
+    float u0 = (float)(col * 16 + s_numbers_atlas->atlas_x) + 0.5f;
+    float v0 = (float)(row * 24 + s_numbers_atlas->atlas_y) + 0.5f;
+
+    /* Centered digit: base 16x24 cell scaled ~1.5x (24x36). */
+    const float scale = 1.5f;
+    float w = 16.0f * scale;
+    float h = 24.0f * scale;
+    float cx = (float)g_td5.render_width  * 0.5f;
+    float cy = (float)g_td5.render_height * 0.5f;
+    float x0 = cx - w * 0.5f;
+    float y0 = cy - h * 0.5f;
+
+    static uint8_t s_finish_pos_quad[0xB8];
+    hud_build_quad(s_finish_pos_quad, 0, s_numbers_atlas->texture_page,
+                   x0, y0, x0 + w, y0 + h,
+                   u0, v0, u0 + 15.0f, v0 + 23.0f,
+                   0xFFFFFFFF, HUD_DEPTH);
+    hud_submit_quad(s_finish_pos_quad);
+}
+
+/* ========================================================================
  * DrawRaceStatusText (0x439B70)
  *
  * Per-view text overlays: race status messages, wanted messages, time
