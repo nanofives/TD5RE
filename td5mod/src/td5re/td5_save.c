@@ -815,6 +815,13 @@ static void config_deserialize_from_buffer(void)
     memcpy(s_p1_custom_bindings, buf->p1_custom_bindings, sizeof(s_p1_custom_bindings));
     memcpy(s_p2_custom_bindings, buf->p2_custom_bindings, sizeof(s_p2_custom_bindings));
 
+    /* Push the loaded keyboard scancodes (first 10 bytes of each custom-binding
+     * buffer, canonical action order) down to the input layer so saved rebinds
+     * take effect in-race. A 0 byte is ignored by the setter, so an old save
+     * with empty bindings keeps the built-in defaults. */
+    td5_plat_input_set_keyboard_bindings(0, (const uint8_t *)s_p1_custom_bindings, 10);
+    td5_plat_input_set_keyboard_bindings(1, (const uint8_t *)s_p2_custom_bindings, 10);
+
     /* Misc single-byte settings. */
     s_split_screen_mode = buf->split_screen_mode;
     s_catchup_assist    = buf->catchup_assist;
