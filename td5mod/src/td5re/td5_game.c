@@ -3433,6 +3433,20 @@ int td5_game_run_race_frame(void) {
         /* Render race actors for this view */
         td5_render_actors_for_view(vp);
 
+        /* Debug: collision-wireframe overlay (F12 / [Debug] Collisions /
+         * --DebugCollisions). Drawn after opaque terrain + actors so the depth
+         * buffer occludes hidden rails, and before translucent VFX. Centered on
+         * the raw current span (+0x80) of the actor this viewport follows. */
+        if (g_td5.ini.debug_collisions) {
+            TD5_Actor *wire_actor = td5_game_get_actor(g_actorSlotForView[vp]);
+            if (wire_actor) {
+                int wire_span = *(int16_t *)((uint8_t *)wire_actor + 0x80);
+                td5_render_debug_lines_reset();
+                td5_track_debug_emit_collision_lines(wire_span, 40);
+                td5_render_debug_lines_flush();
+            }
+        }
+
         /* VFX: tire tracks, particles */
         td5_vfx_render_tire_tracks();
         td5_vfx_render_tire_marks();

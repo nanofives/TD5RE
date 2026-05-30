@@ -6722,8 +6722,31 @@ static inline void emit_strip_line(const TD5_StripSpan *sp,
     td5_render_debug_line_world(ax, ay, az, bx, by, bz, argb);
 }
 
+/* Extrude a rail edge (a→b) upward by wall_h into a vertical wall face: the
+ * raised top edge plus the two vertical posts at each end. +Y is world-up
+ * (confirmed: OOB falls drive world_pos.y → -1e9; (origin_y+height)<<8 raises
+ * a point). The flat base edge is drawn separately as the rail line. This is
+ * what makes the collision WALLS visible as walls instead of road-edge lines. */
+static inline void emit_span_wall(const TD5_StripSpan *sp,
+                                  const TD5_StripVertex *a,
+                                  const TD5_StripVertex *b,
+                                  float wall_h, uint32_t argb)
+{
+    if (!a || !b) return;
+    float ax = (float)((int32_t)sp->origin_x + (int32_t)a->x);
+    float ay = (float)((int32_t)sp->origin_y + (int32_t)a->y);
+    float az = (float)((int32_t)sp->origin_z + (int32_t)a->z);
+    float bx = (float)((int32_t)sp->origin_x + (int32_t)b->x);
+    float by = (float)((int32_t)sp->origin_y + (int32_t)b->y);
+    float bz = (float)((int32_t)sp->origin_z + (int32_t)b->z);
+    td5_render_debug_line_world(ax, ay + wall_h, az, bx, by + wall_h, bz, argb); /* top edge */
+    td5_render_debug_line_world(ax, ay, az, ax, ay + wall_h, az, argb);          /* post @ a  */
+    td5_render_debug_line_world(bx, by, bz, bx, by + wall_h, bz, argb);          /* post @ b  */
+}
+
 static void emit_span_wireframe(int span_index, uint32_t rail_color,
-                                uint32_t cross_color)
+                                uint32_t cross_color, uint32_t wall_color,
+                                uint32_t lane_color)
 {
     if (span_index < 0 || span_index >= s_span_count) return;
     const TD5_StripSpan *sp = &s_span_array[span_index];
@@ -6745,45 +6768,123 @@ static void emit_span_wireframe(int span_index, uint32_t rail_color,
     TD5_StripVertex *sw = vertex_at(ri + 0);
     TD5_StripVertex *se = vertex_at(ri + lane_count);
 
-    /* Left rail (NW→SW) and right rail (NE→SE) — the actual wall edges. */
+    /* Left rail (NW→SW) and right rail (NE→SE) — the wall base edges. */
     emit_strip_line(sp, nw, sw, rail_color);
     emit_strip_line(sp, ne, se, rail_color);
+
+    /* Vertical wall faces: extrude the left/right rails upward so the
+     * collision walls show AS walls, not just road-edge lines. Height scales
+     * to ~25% of the span's lateral road width so it looks right on any track. */
+    if (nw && ne) {
+        float wx = (float)((int32_t)ne->x - (int32_t)nw->x);
+        float wz = (float)((int32_t)ne->z - (int32_t)nw->z);
+        float wall_h = sqrtf(wx * wx + wz * wz) * 0.25f;
+        if (wall_h < 1.0f) wall_h = 256.0f;   /* degenerate-width fallback */
+        emit_span_wall(sp, nw, sw, wall_h, wall_color);   /* left wall  */
+        emit_span_wall(sp, ne, se, wall_h, wall_color);   /* right wall */
+    }
 
     /* Transverse edges (NW→NE, SW→SE) — span boundaries. */
     emit_strip_line(sp, nw, ne, cross_color);
     emit_strip_line(sp, sw, se, cross_color);
 
-    /* Inner sub-lane separators (cosmetic, helps visualize lane count). */
+    /* Inner lane / sub-lane separators: longitudinal dividers (near→far)
+     * between the span's sub-lanes. lane_count comes from the strip data, so
+     * this draws lane_count-1 dividers and shows the full lane grid. */
     for (int i = 1; i < lane_count; i++) {
         TD5_StripVertex *n = vertex_at(li + i);
         TD5_StripVertex *s = vertex_at(ri + i);
-        emit_strip_line(sp, n, s, 0xFF404040u);
+        emit_strip_line(sp, n, s, lane_color);
     }
 }
+
+#define TD5_DBG_MAX_SPANS 8192
 
 void td5_track_debug_emit_collision_lines(int center_span, int span_radius)
 {
     if (!s_span_array || !s_vertex_table || s_span_count <= 0) return;
+    if (center_span < 0 || center_span >= s_span_count) return;
     if (span_radius < 0) span_radius = 0;
-    if (span_radius > s_span_count) span_radius = s_span_count;
 
-    const uint32_t RAIL_COLOR  = 0xFFFFFFFFu; /* white */
-    const uint32_t CROSS_COLOR = 0xFF00FFFFu; /* cyan */
-    const uint32_t PLAYER_RAIL = 0xFFFFFF00u; /* yellow */
-    const uint32_t PLAYER_CROSS = 0xFFFFA000u;/* amber */
+    const uint32_t RAIL_COLOR   = 0xFFFFFFFFu; /* white  — wall base edge */
+    const uint32_t CROSS_COLOR  = 0xFF00FFFFu; /* cyan   — span boundaries */
+    const uint32_t WALL_COLOR   = 0xFFFF2020u; /* red    — vertical collision wall */
+    const uint32_t LANE_COLOR   = 0xFF30E030u; /* green  — lane / sub-lane dividers */
+    const uint32_t PLAYER_RAIL  = 0xFFFFFF00u; /* yellow */
+    const uint32_t PLAYER_CROSS = 0xFFFFA000u; /* amber  */
+    const uint32_t PLAYER_WALL  = 0xFFFF8000u; /* orange   — player-span wall */
+    const uint32_t PLAYER_LANE  = 0xFF90FF90u; /* lt green — player-span lanes */
 
-    int lo = center_span - span_radius;
-    int hi = center_span + span_radius;
-    if (lo < 0) lo = 0;
-    if (hi >= s_span_count) hi = s_span_count - 1;
+    const int total = s_span_count;
+    int ring_length = g_td5.track_span_ring_length;
+    if (ring_length <= 0 || ring_length > total) ring_length = total;
 
-    for (int s = lo; s <= hi; s++) {
-        if (s == center_span) continue;
-        emit_span_wireframe(s, RAIL_COLOR, CROSS_COLOR);
+    /* Topological BFS from the player's span so BOTH arms of a fork are drawn.
+     * Neighbours = contiguous ±1 (kept within the same main/branch array
+     * region) PLUS junction branch links: type 8 → link_next, type 11 →
+     * link_prev, sentinels 9/10 wrap the ring [CONFIRMED @ 0x004440F0
+     * resolve_neighbor]. A flat index window only follows the arm whose spans
+     * are contiguous; branch spans live past ring_length and are reachable only
+     * through the junction link, so the other branch was never shown. */
+    if (total > TD5_DBG_MAX_SPANS) {
+        /* Track exceeds the BFS scratch tables — fall back to a contiguous
+         * window so we never index out of bounds. */
+        int lo = center_span - span_radius, hi = center_span + span_radius;
+        if (lo < 0) lo = 0;
+        if (hi >= total) hi = total - 1;
+        for (int s = lo; s <= hi; s++)
+            if (s != center_span)
+                emit_span_wireframe(s, RAIL_COLOR, CROSS_COLOR, WALL_COLOR, LANE_COLOR);
+        emit_span_wireframe(center_span, PLAYER_RAIL, PLAYER_CROSS, PLAYER_WALL, PLAYER_LANE);
+        return;
     }
-    /* Player span last so it draws on top of any overlapping neighbors. */
-    if (center_span >= 0 && center_span < s_span_count)
-        emit_span_wireframe(center_span, PLAYER_RAIL, PLAYER_CROSS);
+
+    /* Generation-stamped visited set avoids a per-call memset of the tables. */
+    static int32_t s_visit_stamp[TD5_DBG_MAX_SPANS];
+    static int32_t s_visit_depth[TD5_DBG_MAX_SPANS];
+    static int32_t s_visit_queue[TD5_DBG_MAX_SPANS];
+    static int32_t s_visit_gen = 0;
+    s_visit_gen++;
+
+    int qh = 0, qt = 0;
+    s_visit_stamp[center_span] = s_visit_gen;
+    s_visit_depth[center_span] = 0;
+    s_visit_queue[qt++] = center_span;
+
+    while (qh < qt) {
+        int s = s_visit_queue[qh++];
+        int d = s_visit_depth[s];
+        const TD5_StripSpan *sp = &s_span_array[s];
+
+        emit_span_wireframe(s,
+            (s == center_span) ? PLAYER_RAIL  : RAIL_COLOR,
+            (s == center_span) ? PLAYER_CROSS : CROSS_COLOR,
+            (s == center_span) ? PLAYER_WALL  : WALL_COLOR,
+            (s == center_span) ? PLAYER_LANE  : LANE_COLOR);
+
+        if (d >= span_radius) continue;
+
+        int nbr[4], nc = 0;
+        int t = (int)sp->span_type;
+        /* contiguous neighbours, but never bridge the main<->branch array split */
+        if (s + 1 < total && ((s < ring_length) == (s + 1 < ring_length))) nbr[nc++] = s + 1;
+        if (s - 1 >= 0    && ((s < ring_length) == (s - 1 < ring_length))) nbr[nc++] = s - 1;
+        /* junction / sentinel branch links (the OTHER fork arm) */
+        if ((t == 8 || t == 10) && sp->link_next >= 0 && sp->link_next < total) nbr[nc++] = (int)sp->link_next;
+        if ((t == 11 || t == 9) && sp->link_prev >= 0 && sp->link_prev < total) nbr[nc++] = (int)sp->link_prev;
+
+        for (int k = 0; k < nc; k++) {
+            int n = nbr[k];
+            if (s_visit_stamp[n] != s_visit_gen) {
+                s_visit_stamp[n] = s_visit_gen;
+                s_visit_depth[n] = d + 1;
+                if (qt < TD5_DBG_MAX_SPANS) s_visit_queue[qt++] = n;
+            }
+        }
+    }
+
+    /* Re-emit the player span last so its highlight wins at shared edges. */
+    emit_span_wireframe(center_span, PLAYER_RAIL, PLAYER_CROSS, PLAYER_WALL, PLAYER_LANE);
 }
 
 /* ============================================================
