@@ -1324,11 +1324,37 @@ void td5_physics_update_vehicle_actor(TD5_Actor *actor)
      * (resolve_wall_contacts has its own slot>=6 early-out at td5_track.c:536,
      * and fwd_rev_resolve_contact uses stale probe positions for traffic
      * which pass the pen>=0 test and return without contact) — but the
-     * guard here keeps the port faithful to the original's dispatch. */
-    if (actor->vehicle_mode == 0 && actor->slot_index < 6) {
+     * guard here keeps the port faithful to the original's dispatch.
+     *
+     * [OOB-SLIDE FIX 2026-05-30] The gate was previously
+     * `vehicle_mode == 0 && slot < 6`, which STRIPPED wall containment during
+     * scripted recovery (vehicle_mode==1) — a car that rolled past sideways
+     * then slid through the rail and fell out of bounds (world_pos.y -> -1e9).
+     * The original UpdateVehicleActor (0x00406650) calls these three resolvers
+     * in BOTH dispatch branches: the normal branch (cVar3==0) with probe table
+     * 0x467384 = {0,1,2,3} (4 wheels) + callback 0x4063A0, and the recovery
+     * branch (cVar3==1, ~0x004068F0-0x00406946) with probe table 0x46738c =
+     * {0..7} (4 wheels + 4 body corners) + callback 0x00409CB0, then RETURNs.
+     * The resolvers feed ApplyTrackSurfaceForceToActor (0x00406980) which pushes
+     * world_pos.x/z back inside the rail and damps lateral velocity. So the gate
+     * must be slot<6 only — recovery is contained, not exempt. [CONFIRMED @ 0x00406650]
+     *
+     * Fidelity note: the original recovery branch additionally tests the 4 body
+     * corners (probe table 0x46738c); the port's td5_track_resolve_* iterate the
+     * wheel probes, so recovery here gets wheel-probe lateral containment (stops
+     * the slide) but not full body-corner containment — a deeper follow-up if
+     * body-first clip-through is observed. */
+    if (actor->slot_index < 6) {
         td5_track_resolve_reverse_contacts(actor);
         td5_track_resolve_forward_contacts(actor);
         td5_track_resolve_wall_contacts(actor);
+        if (actor->slot_index == 0 && actor->vehicle_mode == 1 &&
+            actor->frame_counter == 0) {
+            TD5_LOG_I(LOG_TAG,
+                "recovery_wall_contain: slot=0 vmode=1 resolvers now run "
+                "world_pos=(%d,%d,%d)",
+                actor->world_pos.x, actor->world_pos.y, actor->world_pos.z);
+        }
     }
 
     /* 9. surface_contact_flags update — REMOVED 2026-05-23.
