@@ -8251,6 +8251,15 @@ static void Screen_ControllerBinding(void) {
              * port uses separate module statics that must be bridged at exit. */
             memcpy(td5_save_get_controller_bindings_mutable(),
                    s_ctrl_binding_table, sizeof(s_ctrl_binding_table));
+            /* Push the configured row to the live poll so the rebind takes
+             * effect immediately (otherwise it would only apply after the next
+             * td5_input_apply_device_selection at race start). */
+            {
+                int32_t row[9];
+                for (int i = 0; i < 9; i++)
+                    row[i] = (int32_t)s_ctrl_binding_table[s_ctrl_player][i];
+                td5_input_set_joystick_bindings(s_ctrl_player, row, 9);
+            }
             TD5_LOG_I(LOG_TAG, "CtrlBind: joystick OK — saved bindings for player %d",
                       s_ctrl_player);
             td5_save_write_config("Config.td5");

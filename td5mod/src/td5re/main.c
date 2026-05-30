@@ -223,6 +223,8 @@ static int td5_apply_cli_overrides(const char *cmdline,
         { "Dynamics",             &g_td5.ini.dynamics },
         { "Collisions",           &g_td5.ini.collisions },
         { "AutoGearbox",          &g_td5.ini.auto_gearbox },
+        { "Player1Joystick",      &g_td5.ini.player1_joystick },
+        { "Player2Joystick",      &g_td5.ini.player2_joystick },
         { "PlayerIsAI",           &g_td5.ini.player_is_ai },
         { "SoloAISlot",           &g_td5.ini.solo_ai_slot },
         { "SoloRace",             &g_td5.ini.solo_race },
@@ -441,6 +443,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     g_td5.ini.dynamics           = td5_ini_int("GameOptions", "Dynamics", 0);
     g_td5.ini.collisions         = td5_ini_int("GameOptions", "Collisions", 1);
     g_td5.ini.auto_gearbox       = td5_ini_int("GameOptions", "AutoGearbox", 1);
+    g_td5.ini.player1_joystick   = td5_ini_int("GameOptions", "Player1Joystick", 0);
+    g_td5.ini.player2_joystick   = td5_ini_int("GameOptions", "Player2Joystick", 0);
 
     /* Game defaults */
     g_td5.ini.default_car       = td5_ini_int("Game", "DefaultCar", 0);

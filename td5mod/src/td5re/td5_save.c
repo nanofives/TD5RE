@@ -219,6 +219,11 @@ uint32_t *td5_save_get_controller_bindings_mutable(void) { return s_controller_b
 uint32_t *td5_save_get_p1_custom_bindings_mutable(void)  { return s_p1_custom_bindings; }
 uint32_t *td5_save_get_p2_custom_bindings_mutable(void)  { return s_p2_custom_bindings; }
 
+/* Persisted per-player input device index (Config.td5 +0x20/+0x21):
+ * 0 = keyboard, >=1 = 1-based joystick index. */
+uint32_t td5_save_get_p1_device_index(void)  { return s_p1_device_index; }
+uint32_t td5_save_get_p2_device_index(void)  { return s_p2_device_index; }
+
 static uint32_t s_split_screen_mode;                          /* 0x497A5C */
 static uint32_t s_catchup_assist;                             /* 0x465FF8 */
 static uint8_t  s_camera_byte_a;                              /* 0x482F48 */

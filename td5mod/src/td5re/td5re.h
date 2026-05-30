@@ -216,6 +216,11 @@ typedef struct TD5_GlobalState {
          * block on. The orig defaults to auto; in port the menu toggle is
          * not wired, so this INI key is the only way to switch to manual. */
         int  auto_gearbox;
+        /* Per-player joystick selection (0 = keyboard, >=1 = 1-based enumerated
+         * joystick index). Overrides the device index persisted in Config.td5.
+         * The original supports up to 2 simultaneous joystick devices. */
+        int  player1_joystick;
+        int  player2_joystick;
         /* Defaults */
         int  default_car;
         int  default_track;

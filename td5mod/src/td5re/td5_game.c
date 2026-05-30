@@ -2107,6 +2107,10 @@ int td5_game_init_race_session(void) {
 
     /* ---- Step 15: Configure force feedback + input mapping ---- */
     td5_input_set_active_players(g_td5.split_screen_mode > 0 ? 2 : 1);
+    /* Resolve each player's input device (keyboard / joystick 1 / joystick 2)
+     * from the INI override or Config.td5 and create the DirectInput devices +
+     * push joystick bindings, BEFORE FF init (which binds slot 0's device). */
+    td5_input_apply_device_selection();
     td5_input_ff_init();
     td5_input_reset_accumulators();
     td5_input_reset_buffers();
