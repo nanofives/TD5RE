@@ -81,9 +81,26 @@ static uint32_t s_mouse_buttons;
 static LPDIRECTINPUT8A       s_dinput        = NULL;
 static LPDIRECTINPUTDEVICE8A s_di_keyboard   = NULL;
 static LPDIRECTINPUTDEVICE8A s_di_mouse      = NULL;
-static LPDIRECTINPUTDEVICE8A s_di_joystick   = NULL;
+/* Per-player (slot) joystick devices. slot 0 = player 1, slot 1 = player 2.
+ * The original supports up to 2 joystick devices simultaneously (M2DX
+ * JoystickC cap = 2); each race player can be bound to the keyboard or one of
+ * the joysticks. */
+#define TD5_PLAT_MAX_JS_SLOTS 2
+static LPDIRECTINPUTDEVICE8A s_di_joystick[TD5_PLAT_MAX_JS_SLOTS] = { NULL, NULL };
+/* 9-slot binding table per player, mirroring the original DAT_00463FC4 row:
+ *   [0]=active flag, [1]/[2]=axis assignment (4=X-like, 5=Y-like, swappable),
+ *   [3..8]=6 button actions (value 2..10 selects physical button = value-2).
+ * s_joystick_bound[slot]==0 → unconfigured → GetJS-default button mapping. */
+static int32_t s_joystick_bindings[TD5_PLAT_MAX_JS_SLOTS][9];
+static int     s_joystick_bound[TD5_PLAT_MAX_JS_SLOTS] = { 0, 0 };
+/* GetJS axis center (0xFA=250) and max tracked buttons (10); kept local so the
+ * platform layer doesn't depend on td5_input.h (mirrors TD5_INPUT_JS_AXIS_CENTER
+ * / TD5_INPUT_MAX_JS_BUTTONS). */
+#define TD5_PLAT_JS_AXIS_CENTER 0xFA
+#define TD5_PLAT_JS_MAX_BUTTONS 10
 static char s_device_names[16][256];
 static int  s_device_types[16];  /* 0=keyboard, 1=gamepad, 2=wheel/joystick */
+static GUID s_device_guids[16];  /* DirectInput instance GUID per enumerated device (index 0 = keyboard, unused) */
 static int  s_device_count = 0;
 
 /* Multi-file logging — messages routed by module tag to separate log files.
@@ -903,10 +920,12 @@ int td5_plat_input_init(void)
 
 void td5_plat_input_shutdown(void)
 {
-    if (s_di_joystick) {
-        IDirectInputDevice8_Unacquire(s_di_joystick);
-        IDirectInputDevice8_Release(s_di_joystick);
-        s_di_joystick = NULL;
+    for (int js = 0; js < TD5_PLAT_MAX_JS_SLOTS; js++) {
+        if (s_di_joystick[js]) {
+            IDirectInputDevice8_Unacquire(s_di_joystick[js]);
+            IDirectInputDevice8_Release(s_di_joystick[js]);
+            s_di_joystick[js] = NULL;
+        }
     }
     if (s_di_mouse) {
         IDirectInputDevice8_Unacquire(s_di_mouse);
@@ -1096,22 +1115,71 @@ void td5_plat_input_poll(int slot, TD5_InputState *out)
         out->buttons = bits;
     }
 
-    /* Joystick: slot 0 uses first joystick, slot 1 uses second (if available) */
-    if (slot == 0 && s_di_joystick) {
+    /* Joystick: if a device is bound to this slot, REPLACE the control word
+     * with the original M2DX GetJS packed format (analog axes + action buttons
+     * + keyboard pause/escape). Faithful to PollRaceSessionInput 0x0042c470,
+     * which uses DXInput::GetJS for a joystick player and the keyboard stick
+     * otherwise. The device axis range is set to [0, 0x1F4] (=500) so the raw
+     * value is the 9-bit packed axis centred at 0xFA (=250), matching
+     * GetJS @ M2DX 0x1000a1e0 and the consumer at td5_input.c (Path B). */
+    if (slot >= 0 && slot < TD5_PLAT_MAX_JS_SLOTS && s_di_joystick[slot]) {
         DIJOYSTATE2 js;
         HRESULT hr;
         memset(&js, 0, sizeof(js));
-        hr = IDirectInputDevice8_Poll(s_di_joystick);
+        hr = IDirectInputDevice8_Poll(s_di_joystick[slot]);
         if (hr == DIERR_INPUTLOST || hr == DIERR_NOTACQUIRED) {
-            IDirectInputDevice8_Acquire(s_di_joystick);
-            IDirectInputDevice8_Poll(s_di_joystick);
+            IDirectInputDevice8_Acquire(s_di_joystick[slot]);
+            IDirectInputDevice8_Poll(s_di_joystick[slot]);
         }
-        hr = IDirectInputDevice8_GetDeviceState(s_di_joystick, sizeof(js), &js);
+        hr = IDirectInputDevice8_GetDeviceState(s_di_joystick[slot], sizeof(js), &js);
         if (SUCCEEDED(hr)) {
-            out->analog_x = (int16_t)((js.lX - 32768) >> 0);
-            out->analog_y = (int16_t)((js.lY - 32768) >> 0);
-            if (out->analog_x != 0) out->buttons |= TD5_INPUT_ANALOG_X_FLAG;
-            if (out->analog_y != 0) out->buttons |= TD5_INPUT_ANALOG_Y_FLAG;
+            const int32_t *bind = s_joystick_bindings[slot];
+            int configured = s_joystick_bound[slot];
+            uint32_t jbits = 0;
+
+            /* Axes: X = steering, Y = throttle/brake (fixed assignment, matching
+             * M2DX Configure[p][0..3] = {1,2,0x200,0x400}). Honour the [1]/[2]
+             * axis-swap if the binding requests it (orig 2-button swap path). */
+            long ax_x = js.lX, ax_y = js.lY;
+            if (configured && bind[1] == 5 && bind[2] == 4) {
+                long t = ax_x; ax_x = ax_y; ax_y = t;
+            }
+            if (ax_x < 0)     ax_x = 0;
+            if (ax_x > 0x1FF) ax_x = 0x1FF;
+            if (ax_y < 0)     ax_y = 0;
+            if (ax_y > 0x1FF) ax_y = 0x1FF;
+            jbits |= ((uint32_t)ax_x & 0x1FF) | TD5_INPUT_ANALOG_X_FLAG;
+            jbits |= (((uint32_t)ax_y & 0x1FF) << 9) | TD5_INPUT_ANALOG_Y_FLAG;
+
+            /* Buttons -> action bits. Default (GetJS non-custom) maps physical
+             * btn 2..7 to handbrake/horn/gear-up/gear-down/camera/rear; a
+             * configured binding slot [3+k] selects physical button (value-2). */
+            {
+                static const uint32_t k_action_bits[6] = {
+                    TD5_INPUT_HANDBRAKE, TD5_INPUT_HORN, TD5_INPUT_GEAR_UP,
+                    TD5_INPUT_GEAR_DOWN, TD5_INPUT_CAMERA_CHANGE, TD5_INPUT_REAR_VIEW
+                };
+                static const int k_default_btn[6] = { 2, 3, 4, 5, 6, 7 };
+                for (int k = 0; k < 6; k++) {
+                    int phys = k_default_btn[k];
+                    if (configured) {
+                        int v = bind[3 + k];
+                        if (v >= 2 && v <= 10) phys = v - 2;
+                    }
+                    if (phys >= 0 && phys < TD5_PLAT_JS_MAX_BUTTONS &&
+                        (js.rgbButtons[phys] & 0x80))
+                        jbits |= k_action_bits[k];
+                }
+            }
+
+            /* Pause / Escape always read from the keyboard (GetJS tail). */
+            if (s_keyboard[0x19] & 0x80) jbits |= TD5_INPUT_PAUSE;   /* DIK_P   */
+            if (s_keyboard[0x01] & 0x80) jbits |= TD5_INPUT_ESCAPE;  /* DIK_ESC */
+
+            out->buttons  = jbits;
+            /* Keep the decoded analog accessors in sync (FF / camera consumers). */
+            out->analog_x = (int16_t)((int)ax_x - TD5_PLAT_JS_AXIS_CENTER);
+            out->analog_y = (int16_t)((int)ax_y - TD5_PLAT_JS_AXIS_CENTER);
         }
     }
 }
@@ -1137,6 +1205,10 @@ static BOOL CALLBACK EnumJoysticksCallback(
                 inst->tszInstanceName,
                 sizeof(s_device_names[0]) - 1);
         s_device_names[s_device_count][255] = '\0';
+        /* Store the instance GUID so td5_plat_input_set_device can (re)create
+         * this exact device later — without it, switching to any joystick is
+         * impossible (s_di_joystick was never created). */
+        s_device_guids[s_device_count] = inst->guidInstance;
         /* Classify device type: wheel/driving=2, gamepad=1 */
         {
             BYTE dev_type = GET_DIDEVICE_TYPE(inst->dwDevType);
@@ -1188,25 +1260,109 @@ int td5_plat_input_device_type(int index)
 
 void td5_plat_input_set_device(int slot, int device_index)
 {
-    (void)slot;
-    /* Device 0 is keyboard, no joystick device to create */
+    if (slot < 0 || slot >= TD5_PLAT_MAX_JS_SLOTS) {
+        TD5_LOG_W(LOG_TAG, "Input device select: slot %d out of range", slot);
+        return;
+    }
+
+    /* Device 0 = keyboard: release this slot's joystick (if any) and return. */
     if (device_index <= 0) {
-        if (s_di_joystick) {
-            IDirectInputDevice8_Unacquire(s_di_joystick);
-            IDirectInputDevice8_Release(s_di_joystick);
-            s_di_joystick = NULL;
+        if (s_di_joystick[slot]) {
+            IDirectInputDevice8_Unacquire(s_di_joystick[slot]);
+            IDirectInputDevice8_Release(s_di_joystick[slot]);
+            s_di_joystick[slot] = NULL;
         }
         TD5_LOG_I(LOG_TAG, "Input device selected: slot=%d device=%d name=%s",
                   slot, device_index, "Keyboard");
         return;
     }
 
-    /* For joystick devices, re-enumerate and create the requested one */
-    /* This is simplified -- a full implementation would store GUIDs */
-    (void)device_index;
-    TD5_LOG_I(LOG_TAG, "Input device selected: slot=%d device=%d name=%s",
-              slot, device_index,
-              (device_index >= 0 && device_index < s_device_count) ? s_device_names[device_index] : "<unknown>");
+    /* (Re)create the requested joystick for this player slot from its stored
+     * instance GUID. Port-side reimplementation on DirectInput8 (the original
+     * delegated this to M2DX's DXInput). The original supports up to 2 joystick
+     * devices at once, so each slot owns its own device. */
+    if (device_index >= s_device_count) {
+        TD5_LOG_W(LOG_TAG, "Input device select: index %d out of range (count=%d)",
+                  device_index, s_device_count);
+        return;
+    }
+    if (!s_dinput) {
+        TD5_LOG_W(LOG_TAG, "Input device select: DirectInput not initialized");
+        return;
+    }
+
+    /* Drop this slot's previous joystick before creating the new one. */
+    if (s_di_joystick[slot]) {
+        IDirectInputDevice8_Unacquire(s_di_joystick[slot]);
+        IDirectInputDevice8_Release(s_di_joystick[slot]);
+        s_di_joystick[slot] = NULL;
+    }
+
+    {
+        HRESULT hr = IDirectInput8_CreateDevice(s_dinput,
+                                                &s_device_guids[device_index],
+                                                &s_di_joystick[slot], NULL);
+        if (FAILED(hr) || !s_di_joystick[slot]) {
+            TD5_LOG_W(LOG_TAG, "Input device select: CreateDevice failed hr=0x%08lX slot=%d device=%d (%s)",
+                      (unsigned long)hr, slot, device_index, s_device_names[device_index]);
+            s_di_joystick[slot] = NULL;
+            return;
+        }
+
+        /* DIJOYSTATE2 format — matches the struct the poll reads. */
+        IDirectInputDevice8_SetDataFormat(s_di_joystick[slot], &c_dfDIJoystick2);
+
+        /* Exclusive foreground: required for force feedback (td5_plat_ff_init
+         * reuses slot 0's device); input reads still work in this mode. */
+        if (s_hwnd)
+            IDirectInputDevice8_SetCooperativeLevel(s_di_joystick[slot], s_hwnd,
+                DISCL_EXCLUSIVE | DISCL_FOREGROUND);
+
+        /* Absolute axis range [0, 0x1F4]=500 with a 10% deadzone, so the raw
+         * axis value is the original's 9-bit packed axis centred at 0xFA=250
+         * (deadzone 25/250 ~ 10%, per M2DX EnumerateJoystickDeviceCallback). */
+        {
+            DIPROPRANGE range;
+            range.diph.dwSize       = sizeof(DIPROPRANGE);
+            range.diph.dwHeaderSize = sizeof(DIPROPHEADER);
+            range.diph.dwHow        = DIPH_DEVICE;
+            range.diph.dwObj        = 0;
+            range.lMin              = 0;
+            range.lMax              = 0x1F4;
+            IDirectInputDevice8_SetProperty(s_di_joystick[slot], DIPROP_RANGE, &range.diph);
+
+            DIPROPDWORD dz;
+            dz.diph.dwSize       = sizeof(DIPROPDWORD);
+            dz.diph.dwHeaderSize = sizeof(DIPROPHEADER);
+            dz.diph.dwHow        = DIPH_DEVICE;
+            dz.diph.dwObj        = 0;
+            dz.dwData            = 1000;  /* 10% of [0,10000] */
+            IDirectInputDevice8_SetProperty(s_di_joystick[slot], DIPROP_DEADZONE, &dz.diph);
+        }
+
+        IDirectInputDevice8_Acquire(s_di_joystick[slot]);
+    }
+
+    TD5_LOG_I(LOG_TAG, "Input device selected: slot=%d device=%d name=%s (joystick created)",
+              slot, device_index, s_device_names[device_index]);
+}
+
+/* Push the per-player 9-slot joystick binding table into the platform poll.
+ * Mirrors td5_plat_input_set_keyboard_bindings; without this the control-config
+ * screen's joystick bindings would be a write-only dead end. count<=9. */
+void td5_plat_input_set_joystick_bindings(int slot, const int32_t *bindings, int count)
+{
+    if (slot < 0 || slot >= TD5_PLAT_MAX_JS_SLOTS || !bindings) return;
+    int n = (count < 9) ? count : 9;
+    for (int i = 0; i < n; i++) s_joystick_bindings[slot][i] = bindings[i];
+    s_joystick_bound[slot] = 1;
+    TD5_LOG_I(LOG_TAG,
+              "Joystick bindings set: slot=%d [%d %d %d %d %d %d %d %d %d]",
+              slot, s_joystick_bindings[slot][0], s_joystick_bindings[slot][1],
+              s_joystick_bindings[slot][2], s_joystick_bindings[slot][3],
+              s_joystick_bindings[slot][4], s_joystick_bindings[slot][5],
+              s_joystick_bindings[slot][6], s_joystick_bindings[slot][7],
+              s_joystick_bindings[slot][8]);
 }
 
 /* ========================================================================
@@ -1303,12 +1459,13 @@ int td5_plat_ff_init(int device_index)
 
     (void)device_index;
 
-    if (!s_di_joystick) {
+    /* Force feedback runs on player 1's joystick (slot 0) — the wheel. */
+    if (!s_di_joystick[0]) {
         return 0;
     }
 
     ZeroMemory(&s_ff, sizeof(s_ff));
-    s_ff.device = (IDirectInputDevice8 *)s_di_joystick;
+    s_ff.device = (IDirectInputDevice8 *)s_di_joystick[0];
     s_ff.axes[0] = DIJOFS_X;
     s_ff.axes[1] = DIJOFS_Y;
     s_ff.directions[0] = 0;

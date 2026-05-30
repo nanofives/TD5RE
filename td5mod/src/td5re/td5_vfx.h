@@ -49,9 +49,6 @@
 #define TD5_VFX_TIRE_TRACK_FADE_START   300     /* ticks before fade begins */
 #define TD5_VFX_TIRE_TRACK_Y_OFFSET     -20.0f  /* flush with road surface */
 
-#define TD5_VFX_BILLBOARD_STRIDE        0x22C   /* 556 bytes per billboard entry */
-#define TD5_VFX_BILLBOARD_PHASE_INC     0x20    /* phase counter increment per tick */
-
 #define TD5_VFX_MAX_DENSITY_PAIRS       6       /* max weather density pairs per track */
 
 /* ========================================================================
@@ -111,13 +108,11 @@ void td5_vfx_init_taillight_templates(void);
 void td5_vfx_render_taillights(int actor_index);
 
 /* ========================================================================
- * Billboard animations
- * ======================================================================== */
-
-void td5_vfx_advance_billboard_anims(void);
-
-/* ========================================================================
  * Tracked-actor marker billboards (cop chase visuals)
+ *
+ * Also the home of the AdvanceWorldBillboardAnimations 0x43CDC0 port:
+ * td5_vfx_advance_tracked_marker_phases() advances the cop-marker strobe
+ * phases (the only thing that orig function animates).
  *
  * Port of orig 0x0043c9e0 InitializeTrackedActorMarkerBillboards. Caches
  * UVs + texture pages for POLICELT_RED / POLICELT_BLUE / POLICE_RED /

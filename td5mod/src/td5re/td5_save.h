@@ -216,4 +216,9 @@ uint32_t *td5_save_get_controller_bindings_mutable(void);
 uint32_t *td5_save_get_p1_custom_bindings_mutable(void);
 uint32_t *td5_save_get_p2_custom_bindings_mutable(void);
 
+/* Persisted per-player input device index (Config.td5 +0x20/+0x21):
+ * 0 = keyboard, >=1 = 1-based joystick index. */
+uint32_t td5_save_get_p1_device_index(void);
+uint32_t td5_save_get_p2_device_index(void);
+
 #endif /* TD5_SAVE_H */

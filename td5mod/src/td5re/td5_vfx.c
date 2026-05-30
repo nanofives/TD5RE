@@ -312,10 +312,6 @@ static const int16_t s_taillight_offsets[4][3] = {
     { -80,  80, 0 },   /* 0x463048: bottom-right */
 };
 
-/* --- Billboard animation --- */
-static int32_t *s_billboard_phase_table;
-static int      s_billboard_count;
-
 static const char *vfx_weather_type_name(TD5_WeatherType type)
 {
     switch (type) {
@@ -446,10 +442,6 @@ int td5_vfx_init(void) {
     /* Clear smoke pool */
     s_smoke_pool = NULL;
 
-    /* Billboard init */
-    s_billboard_phase_table = NULL;
-    s_billboard_count = 0;
-
     s_current_view_index = 0;
     s_vfx_debug_frame = 0;
 
@@ -494,7 +486,9 @@ void td5_vfx_shutdown(void) {
 void td5_vfx_tick(void) {
     s_vfx_debug_frame++;
     td5_vfx_update_tire_tracks();
-    td5_vfx_advance_billboard_anims();
+    /* Billboard (cop-marker) phase advance is driven once per rendered
+     * viewport by td5_vfx_advance_tracked_marker_phases() — the single live
+     * port of AdvanceWorldBillboardAnimations 0x43CDC0. */
 
     /* UpdateRaceParticleEffects @ 0x429790 runs once per view per sim tick;
      * decrements slot lifetimes and drives update callbacks. Without this
@@ -3124,31 +3118,18 @@ void td5_vfx_render_taillights(int actor_index) {
 /* ========================================================================
  * 6. Billboard Animations
  *    Original: AdvanceWorldBillboardAnimations (0x43CDC0)
+ *
+ * 0x43CDC0 walks the tracked-actor marker pool at 0x4BEDC0 (stride 0x22C,
+ * limit < 0x4BF218 = exactly 2 entries) and adds 0x10 to each entry's phase
+ * head at +0x00 — i.e. it animates the 2 cop-chase strobe markers. That pool
+ * is the SAME one initialised by 0x43C9E0 and drawn by 0x43CDE0 (confirmed by
+ * shared base/stride). The faithful port is td5_vfx_advance_tracked_marker_phases()
+ * below, which advances the 2 s_tracked_marker_phase[] counters by 0x10.
+ *
+ * The former td5_vfx_advance_billboard_anims() stub was a no-op duplicate: it
+ * iterated a never-allocated s_billboard_phase_table with a wrong +0x20 step.
+ * It has been removed in favour of the single live implementation.
  * ======================================================================== */
-
-/**
- * AdvanceWorldBillboardAnimations (0x43CDC0)
- *
- * Simple phase counter advance for world billboard animations.
- * Iterates the billboard table at DAT_004BEDC0 with stride 0x22C (556 bytes),
- * incrementing the phase counter at offset +0x00 by 0x10 per tick.
- *
- * The table runs from 0x4BEDC0 to 0x4BF218 (range of ~0x458 = 1112 bytes).
- * At stride 0x22C, this is 2 entries (1112 / 556 = 2).
- */
-void td5_vfx_advance_billboard_anims(void) {
-    /* Original iterates int* from DAT_004bedc0 stepping by 0x8B dwords
-     * (0x8B * 4 = 0x22C bytes) until address reaches 0x4BF218.
-     * Each iteration: *phase_ptr += 0x10 */
-
-    /* In the source port, this would iterate the billboard table
-     * if we had it loaded. For now, iterate the count we know. */
-    if (!s_billboard_phase_table) return;
-
-    for (int i = 0; i < s_billboard_count; i++) {
-        s_billboard_phase_table[i] += TD5_VFX_BILLBOARD_PHASE_INC;
-    }
-}
 
 /* --- Wheel Billboards (0x446F00) --- */
 
@@ -3234,8 +3215,8 @@ static VfxTrackedMarkerLayer s_tracked_marker_layers[TD5_VFX_TRACKED_MARKER_COUN
                                                     [TD5_VFX_TRACKED_LAYERS_PER_MARK];
 
 /* Per-marker animation phase counter — advanced by
- * td5_vfx_advance_billboard_anims (orig AdvanceWorldBillboardAnimations
- * stride 0x22c × 2 entries = first 2 sub-blocks of the pool). Stored as
+ * td5_vfx_advance_tracked_marker_phases (orig AdvanceWorldBillboardAnimations
+ * 0x43CDC0, stride 0x22c × 2 entries = the 2 sub-blocks of the pool). Stored as
  * int matching orig u8 wrap-around indexing in RenderTrackedActorMarker
  * (`(byte)(&pool)[iVar13] * -4`). */
 static int     s_tracked_marker_phase[TD5_VFX_TRACKED_MARKER_COUNT];
@@ -3329,10 +3310,10 @@ void td5_vfx_init_tracked_actor_marker_billboards(void)
               s_tracked_marker_layers[1][2].page);
 }
 
-/* Phase advance — runs per tick alongside td5_vfx_advance_billboard_anims.
- * Orig AdvanceWorldBillboardAnimations @ 0x0043cdc0 walks pool entries 0..2
- * (stride 0x22c, limit < 0x4bf218 = 2 entries) and adds 0x10 to each phase
- * head. Port mirrors with explicit per-marker increment. */
+/* Phase advance — the single live port of AdvanceWorldBillboardAnimations
+ * @ 0x0043cdc0, which walks pool entries 0..2 (stride 0x22c, limit < 0x4bf218
+ * = 2 entries) and adds 0x10 to each phase head. Port mirrors with explicit
+ * per-marker increment. */
 void td5_vfx_advance_tracked_marker_phases(void) {
     if (!s_tracked_marker_initialized) return;
     for (int i = 0; i < TD5_VFX_TRACKED_MARKER_COUNT; i++) {
