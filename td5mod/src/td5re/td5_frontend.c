@@ -8337,6 +8337,10 @@ static void Screen_ControllerBinding(void) {
                     ? td5_save_get_p1_custom_bindings_mutable()
                     : td5_save_get_p2_custom_bindings_mutable());
                 memcpy(dst, s_ctrl_kb_scancodes, 16);
+                /* Apply immediately to the live input layer so the rebind takes
+                 * effect this session without waiting for a Config.td5 reload. */
+                td5_plat_input_set_keyboard_bindings(s_ctrl_player == 0 ? 0 : 1,
+                                                     s_ctrl_kb_scancodes, 10);
             }
             TD5_LOG_I(LOG_TAG, "CtrlBind: all 10 actions bound for player %d — saved",
                       s_ctrl_player);
