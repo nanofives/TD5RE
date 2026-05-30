@@ -1850,7 +1850,16 @@ void td5_physics_update_player(TD5_Actor *actor)
              * which with throttle<0 + gear=REVERSE produces reverse motion. */
             {
                 int32_t abs_vlong = v_long < 0 ? -v_long : v_long;
-                if (abs_vlong < 0x100) {
+                /* Suppress this port-only reverse hand-off while the handbrake
+                 * is held. The original on-ground brake path NEVER writes
+                 * current_gear=REVERSE [CONFIRMED @ 0x004043f0-0x00404452]; on
+                 * flat ground a held handbrake decelerates to ~0 and the
+                 * near-zero-velocity clamp holds the car at rest — it does not
+                 * start reversing. This hand-off exists only to emulate the
+                 * brake BUTTON's reverse transition (orig achieves it via
+                 * airborne-microbump auto-gear, too sticky to reproduce on
+                 * ground), so it must not fire for the handbrake. */
+                if (abs_vlong < 0x100 && !actor->handbrake_flag) {
                     actor->current_gear = TD5_GEAR_REVERSE;
                     actor->brake_flag = 0;
                 }
