@@ -1282,7 +1282,26 @@ void td5_render_set_preset(TD5_RenderPreset preset)
  *   constant-buffer state. Same enable/disable polarity. */
 void td5_render_set_fog(int enable)
 {
-    if (enable && g_td5.ini.fog_enabled) {
+    /* Gate on the per-track fog-capability flag (s_fog_enabled), mirroring the
+     * original's per-frame fog apply. Orig ApplyRaceFogRenderState (0x0040AF50)
+     * is only invoked when g_fogCapabilityEnabled (0x00466E98) is set, and that
+     * global is cleared to 0 whenever LEVELINF.DAT+0x5C == 0 for the current
+     * track (0x0042AE5B-65; per-frame gate at 0x0042BE11/0x0042BE32). The port's
+     * s_fog_enabled is that flag (written by td5_render_configure_fog from the
+     * LEVELINF gate in td5_game InitRace step 4b).
+     *
+     * Without this term, fog-DISABLED tracks (e.g. Edinburgh/Scotland L016,
+     * Maui L028 — both LEVELINF+0x5C == 0) still had fog forced on during the
+     * world pass using the leftover default s_fog_color (0x808080, mid-gray).
+     * That gray is LIGHTER than the scene, so distant geometry blended toward
+     * light gray => "fog gets lighter far away" + "Scotland has fog it
+     * shouldn't". Fog-enabled tracks use near-black LEVELINF colors, so they
+     * correctly darken with distance and are unaffected by this gate.
+     *
+     * g_td5.ini.fog_enabled is kept as a live user-preference override (a port
+     * addition; the original has no such pref). s_fog_enabled already folds the
+     * pref in at race init, so this term only adds live-toggle responsiveness. */
+    if (enable && s_fog_enabled && g_td5.ini.fog_enabled) {
         /* Apply full fog pipeline: linear table fog */
         td5_plat_render_set_fog(1, s_fog_color,
                                 FOG_START_DEFAULT, FOG_END_DEFAULT,
@@ -1304,6 +1323,9 @@ void td5_render_configure_fog(uint32_t color, int enable)
     /* Strip alpha, store RGB only (original: color & 0xFFFFFF) */
     s_fog_color   = color & 0x00FFFFFFu;
     s_fog_enabled = enable;
+    TD5_LOG_I(LOG_TAG, "td5_render_configure_fog: per-track fog %s color=0x%06X",
+              enable ? "ENABLED" : "disabled",
+              (unsigned int)(s_fog_color & 0x00FFFFFFu));
 }
 
 /* --- Transform Stack (8-deep push/pop for hierarchical models) --- */

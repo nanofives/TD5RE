@@ -329,10 +329,15 @@ void td5_input_poll_race_session(void)
          *
          * (The previous mapping of bit 28 to `s_nitro_pending` was dead code —
          * the setter was never called — and misnamed a real gearbox flag.) */
-        if (g_td5.ini.auto_gearbox) {
-            s_control_bits[i] &= ~0x10000000u;
+        /* Drag race FORCES MANUAL for the human player [CONFIRMED chain
+         * 0x0042c51e OR bit28 -> 0x00402e97 actor+0x378=0 -> 0x00404529 auto-gear
+         * call skipped]. This loop only iterates active human players
+         * (i < s_active_players), so the AI opponent in drag is unaffected.
+         * Otherwise honor the [GameOptions] AutoGearbox INI key. */
+        if (g_td5.ini.auto_gearbox && !g_td5.drag_race_enabled) {
+            s_control_bits[i] &= ~0x10000000u;   /* auto */
         } else {
-            s_control_bits[i] |=  0x10000000u;
+            s_control_bits[i] |=  0x10000000u;   /* manual (AutoGearbox=0 or drag race) */
         }
 
         /* Camera change with cooldown */
