@@ -6915,19 +6915,84 @@ int     g_render_height         = 480;
 float   g_renderBasisMatrix[12] = { 1,0,0, 0,1,0, 0,0,1, 0,0,0 };
 
 /* ========================================================================
- * Debug line overlay — placeholder stubs.
- * Wired up by td5_track collision-wireframe overlay (F12). Real renderer
- * not yet ported; calls are no-ops so the build links cleanly.
+ * Debug line overlay — world-space colored line batch (F12 collision wireframe).
+ *
+ * Accumulates the world-space segments emitted by
+ * td5_track_debug_emit_collision_lines() and flushes them as a single D3D11
+ * LINELIST via td5_plat_render_draw_lines(). Each endpoint is projected through
+ * the SAME camera-relative transform + depth formula the opaque track polygons
+ * use (see the track pass at ~line 800: depth = (vz-NEAR_DEPTH_OFFSET)*
+ * DEPTH_NORMALIZE_INV), so the wireframe registers exactly on the rails.
+ * draw_lines hard-codes z-test LESS_EQUAL / z-write OFF / opaque, so lines are
+ * occluded by nearer terrain but coincident rail edges still draw on top, and
+ * the overlay never poisons depth for later passes.
+ *
+ * Coordinate space: x/y/z arrive in raw 24.8 world fixed-point (origin+vertex
+ * sums from emit_strip_line) — the SAME space as s_camera_pos, so a plain
+ * camera-relative subtract + basis rotate matches the world geometry.
+ * [Implements the former no-op stub; renderer pipeline confirmed against
+ * project_vertex / the shadow path 2026-05-30.]
  * ======================================================================== */
+#define TD5_DEBUG_LINE_MAX_VERTS 2048   /* 1024 segments/flush; VB holds ~4096 */
+
+static TD5_D3DVertex s_debug_line_verts[TD5_DEBUG_LINE_MAX_VERTS];
+static int           s_debug_line_count = 0;
+
+void td5_render_debug_lines_reset(void) {
+    s_debug_line_count = 0;
+}
+
+void td5_render_debug_lines_flush(void) {
+    if (s_debug_line_count >= 2) {
+        static int s_logged = 0;
+        if (!s_logged) {
+            TD5_LOG_I(LOG_TAG, "debug wireframe: first flush %d verts (%d segments)",
+                      s_debug_line_count, s_debug_line_count / 2);
+            s_logged = 1;
+        }
+        td5_plat_render_draw_lines(s_debug_line_verts, s_debug_line_count);
+    }
+    s_debug_line_count = 0;
+}
+
+/* Project one world point (raw 24.8 fixed-point, same space as s_camera_pos)
+ * into a pretransformed screen-space vertex. Returns 0 if behind near clip. */
+static int debug_line_project(float wx, float wy, float wz, uint32_t argb,
+                              TD5_D3DVertex *out) {
+    float dx = wx - s_camera_pos[0];
+    float dy = wy - s_camera_pos[1];
+    float dz = wz - s_camera_pos[2];
+    /* camera_basis is row-major { right, up, forward } (same as track/shadow). */
+    float vx = dx * s_camera_basis[0] + dy * s_camera_basis[1] + dz * s_camera_basis[2];
+    float vy = dx * s_camera_basis[3] + dy * s_camera_basis[4] + dz * s_camera_basis[5];
+    float vz = dx * s_camera_basis[6] + dy * s_camera_basis[7] + dz * s_camera_basis[8];
+    if (vz <= s_near_clip) return 0;
+    float inv_z = 1.0f / vz;
+    out->screen_x = -vx * s_focal_length * inv_z + s_center_x;
+    out->screen_y = -vy * s_focal_length * inv_z + s_center_y;
+    out->depth_z  = (vz - NEAR_DEPTH_OFFSET) * DEPTH_NORMALIZE_INV; /* matches track polys */
+    out->rhw      = inv_z;
+    out->diffuse  = argb;   /* 0xAARRGGBB → B8G8R8A8_UNORM diffuse (white SRV modulate) */
+    out->specular = 0;
+    out->tex_u    = 0.0f;
+    out->tex_v    = 0.0f;
+    return 1;
+}
+
 void td5_render_debug_line_world(float x0, float y0, float z0,
                                  float x1, float y1, float z1,
                                  uint32_t argb) {
-    (void)x0; (void)y0; (void)z0;
-    (void)x1; (void)y1; (void)z1;
-    (void)argb;
+    TD5_D3DVertex a, b;
+    /* The line path has no near-plane clipper, so drop the whole segment if
+     * either endpoint is behind the camera. Acceptable for a debug overlay. */
+    if (!debug_line_project(x0, y0, z0, argb, &a)) return;
+    if (!debug_line_project(x1, y1, z1, argb, &b)) return;
+    if (s_debug_line_count + 2 > TD5_DEBUG_LINE_MAX_VERTS) {
+        td5_render_debug_lines_flush();   /* emit full batch, keep accumulating */
+    }
+    s_debug_line_verts[s_debug_line_count++] = a;
+    s_debug_line_verts[s_debug_line_count++] = b;
 }
-void td5_render_debug_lines_flush(void) {}
-void td5_render_debug_lines_reset(void) {}
 
 /* ============================================================
  * [CITATION-SWEEP 2026-05-21] Phase 1 audit-header refresh
