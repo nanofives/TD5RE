@@ -2232,10 +2232,14 @@ void td5_render_actors_for_view(int view_index)
         int total_actors = td5_game_get_total_actor_count();
         int drag_mode = g_td5.drag_race_enabled;
 
-        /* Cinematic-camera smoke bypass (parity follow-up): original at 0x40C120
-         * skips the smoke spawn chain for the actor under cinematic camera when
-         * g_raceCameraPresetMode[view] != 0. Without this gate the camera-target
-         * car keeps emitting exhaust/tire smoke through cutscene-style views. */
+        /* Bumper/interior-camera own-car suppression. The original
+         * RenderRaceActorForView @ 0x0040c120 (gate @ 0x0040c2a0-0x0040c2af)
+         * skips the ENTIRE render of the view's OWN car — mesh, reflection,
+         * wheels, brake lights, shadow AND smoke — when this view's active
+         * preset mode != 0 (the bumper/interior cam, preset 6). camera_target_slot
+         * is the viewed slot (orig gPrimarySelectedSlot[view]); camera_preset_active
+         * is g_raceCameraPresetMode[view] != 0. Consumed by the per-actor skip at
+         * the top of the loop below (and the smoke sub-gate further down). */
         extern int g_raceCameraPresetMode[2];
         int camera_target_slot   = td5_game_get_player_slot(view_index);
         int camera_preset_active = (g_raceCameraPresetMode[view_index & 1] != 0);
@@ -2248,6 +2252,21 @@ void td5_render_actors_for_view(int view_index)
             float depth;
 
             if (!actor || !mesh)
+                continue;
+
+            /* Bumper / interior camera own-car skip (orig RenderRaceActorForView
+             * @ 0x0040c120, gate @ 0x0040c2a0-0x0040c2af): when this actor IS the
+             * view's own slot AND the view's preset mode != 0, the original does
+             * CMP viewed-slot / TEST mode / JMP 0x0040c7ba (function tail) — i.e.
+             * it renders NOTHING for the player's own car: no mesh, reflection,
+             * wheels, brake lights, shadow or smoke. In the bumper/interior cam
+             * the camera sits inside the player's chassis, so without this skip
+             * the player just sees the inside of their own car model. The
+             * owner-only tire-track emitter runs in the post-loop pass below,
+             * which is past the original's skip target (LAB_0040c7ba), so it is
+             * intentionally NOT skipped here. Only fires for mode != 0, so chase
+             * cams (mode 0) still render the owner normally. */
+            if (slot == camera_target_slot && camera_preset_active)
                 continue;
 
             /* Drag race: skip decoration slots (state==3). Originally this

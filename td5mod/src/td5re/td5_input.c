@@ -347,8 +347,26 @@ void td5_input_poll_race_session(void)
             (!s_replay_mode_flag) &&
             (!s_escape_fade_active))
         {
-            /* Original calls CycleRaceCameraPreset(i, 1) then
-             * LoadCameraPresetForView(actor+0x208, 1, i, 1). (0x42C470) */
+            /* Original (0x0042C470, per-player do..while over iVar2):
+             *   CycleRaceCameraPreset(iVar2, 1);
+             *   LoadCameraPresetForView(slot*0x388+0x4ab310, 0, 0, 1);
+             *
+             * The 2nd arg (force_reload) is literally 0 — this is the
+             * view-switch TRANSITION. LoadCameraPresetForView only SNAPS the
+             * chase-spring accumulators (radius/height/orbit-angle/pitch) when
+             * force_reload != 0 OR the preset MODE changes (0x00401450:543).
+             * Chase presets 0-5 all share mode 0, so with force_reload=0 the
+             * accumulators are left intact and UpdateChaseCamera's per-frame
+             * spring (0x00401590) GLIDES from the old camera pose to the new
+             * one. That smooth convergence IS the original's camera-change
+             * animation — there is no separate blend timer. Passing 1 (as the
+             * port previously did, from a mis-transcribed comment) hard-snaps
+             * every switch and destroys the glide.
+             *
+             * view-index: original hard-codes 0; port keeps `i` so the per-view
+             * preset arrays stay paired with CycleRaceCameraPreset(i). Identical
+             * to the original in single-player (loop var is always 0 there);
+             * only relevant to split-screen, which is out of scope here. */
             CycleRaceCameraPreset(i, 1);
             {
                 int slot = g_actorSlotForView[i];
@@ -360,7 +378,7 @@ void td5_input_poll_race_session(void)
                 }
                 if (actor) {
                     LoadCameraPresetForView(
-                        (int)((uint8_t *)actor + 0x208), 1, i, 1);
+                        (int)((uint8_t *)actor + 0x208), 0, i, 1);
                 }
             }
             s_camera_cooldown[i] = TD5_INPUT_CAMERA_COOLDOWN;
@@ -453,8 +471,12 @@ post_poll:
                                           (size_t)slot * TD5_ACTOR_STRIDE);
                 }
                 if (actor) {
+                    /* force_reload = 0 → smooth spring glide, matching orig
+                     * F4/F5 path: LoadCameraPresetForView(...,0,0,1) @0x0042C470.
+                     * (Same transition rationale as the camera-button branch
+                     * above.) */
                     LoadCameraPresetForView(
-                        (int)((uint8_t *)actor + 0x208), 1, i, 1);
+                        (int)((uint8_t *)actor + 0x208), 0, i, 1);
                 }
             }
             s_camera_cooldown[i] = TD5_INPUT_CAMERA_COOLDOWN;
