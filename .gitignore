@@ -35,6 +35,9 @@ re/td5_dump/
 re/td5_png/
 re/td5_png_clean/
 
+# Throwaway /fix + /end visual-verification captures (swept by /end Step 6)
+re/screenshots/
+
 # Large RE tools / cloned repos (not project source)
 pyghidra_projects/
 /tools/*
