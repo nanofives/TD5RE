@@ -11024,9 +11024,11 @@ static void td5_physics_compute_actor_world_bounding_volume(TD5_Actor *actor,
          * already accessible. */
         const float *spin = actor->collision_spin_matrix.m;
         int16_t local_v[3];
-        local_v[0] = (int16_t)(int32_t)lrintf(spin[0]*(float)avg_x + spin[1]*(float)avg_y + spin[2]*(float)avg_z);
-        local_v[1] = (int16_t)(int32_t)lrintf(spin[3]*(float)avg_x + spin[4]*(float)avg_y + spin[5]*(float)avg_z);
-        local_v[2] = (int16_t)(int32_t)lrintf(spin[6]*(float)avg_x + spin[7]*(float)avg_y + spin[8]*(float)avg_z);
+        /* ConvertFloatVec3ToIntVec3B (0x0042DC30): row-major mat·vec, __ftol
+         * TRUNCATES toward zero — prior port used lrintf (round). [CONFIRMED] */
+        local_v[0] = (int16_t)(int32_t)(spin[0]*(float)avg_x + spin[1]*(float)avg_y + spin[2]*(float)avg_z);
+        local_v[1] = (int16_t)(int32_t)(spin[3]*(float)avg_x + spin[4]*(float)avg_y + spin[5]*(float)avg_z);
+        local_v[2] = (int16_t)(int32_t)(spin[6]*(float)avg_x + spin[7]*(float)avg_y + spin[8]*(float)avg_z);
 
         /* iVar1 (local_1c..local_14) = local_v + (lin_vel/16 - avg) */
         int32_t l_x = (int32_t)local_v[0] + ((actor->linear_velocity_x >> 4) - avg_x);
@@ -11043,9 +11045,11 @@ static void td5_physics_compute_actor_world_bounding_volume(TD5_Actor *actor,
         int16_t hx = actor->heading_normal.x;
         int16_t hy = actor->heading_normal.y;
         int16_t hz = actor->heading_normal.z;
-        down_proj = -((int32_t)hy * l_z +
-                      (int32_t)hx * l_x +
-                      (int32_t)hz * l_y) >> 12;
+        /* [FIX] orig 0x004096B0 pairs hn.x*l_x + hn.y*l_y + hn.z*l_z; prior port
+         * had hy*l_z + hz*l_y swapped. */
+        down_proj = -((int32_t)hx * l_x +
+                      (int32_t)hy * l_y +
+                      (int32_t)hz * l_z) >> 12;
 
         float pen_force = 0.0f;
         if (down_proj < 0) {
@@ -11054,61 +11058,84 @@ static void td5_physics_compute_actor_world_bounding_volume(TD5_Actor *actor,
                 td5_sound_play_at_position(0x17, 0x400, 0x5622, world_pos, 4);
             }
 
+            /* Staged spin matrix; committed to collision_spin (+0x180) below.
+             * [ROLL-ANIM FIX 2026-05-30] Branch gating was SWAPPED in the prior
+             * port. Orig 0x004096B0: xz_mag<=128 -> quadratic pen + cos/sin twist;
+             * xz_mag>128 -> pen = -down*1.0625, no twist. */
+            float d0[9];
             if (xz_mag <= c_xz_thresh) {
-                /* Light-impact branch: pen_force = -down_proj * 1.0625f
-                 * The orig also copies recovery_target → local_d0 in this branch
-                 * for downstream MultiplyRotationMatrices3x3 — port omits the
-                 * copy since the matrix product result is overwritten when
-                 * heavy-impact path also fires. */
-                pen_force = (float)(-down_proj) * c_pen_scale;
-            } else {
-                /* Heavy-impact branch: pen_force based on quadratic drag, and
-                 * twist the collision_spin_matrix via a yaw-axis pre-multiply. */
+                /* === cos/sin twist branch — the continuous-roll driver.
+                 * [CONFIRMED instruction-level @ 0x004098A5-0x004099B6]
+                 *   spin_new = (A1 · B1 · A1^T) · spin_old
+                 *   A1  = [[nz,0, nx],[0,1,0],[-nx,0,nz]]  (yaw from norm. avg dir)
+                 *   B1  = [[1,0,0],[0,c,s],[0,-s,c]]        (X-axis impact twist)
+                 *   A1T = A1 transpose
+                 *   nz = avg_z/xz_mag, nx = avg_x/xz_mag, c=cos(yaw_q), s=sin(yaw_q)
+                 *   pen = (down * c_drag_quad_b) / (xz_mag^2/256 + 200000) */
                 pen_force = ((float)down_proj * c_drag_quad_b) /
                             (xz_mag * xz_mag * (1.0f / 256.0f) + c_drag_quad_a);
                 int32_t yaw_q = ((int32_t)lrintf(c_yaw_factor * pen_force * xz_mag)) >> 0x12;
+                float c = CosFloat12bit((uint32_t)yaw_q);
+                float s = SinFloat12bit(yaw_q);
+                float n  = c_min_eps / xz_mag;   /* 1.0 / xz_mag */
+                float nx = n * fav_x;
+                float nz = n * fav_z;
 
-                float yaw_c = CosFloat12bit((uint32_t)yaw_q);
-                float yaw_s = SinFloat12bit(yaw_q);
-
-                /* Build twist matrix: a yaw-only rotation post-multiplied by
-                 * collision_spin → result back into collision_spin.
-                 * [0x004098D9-9A6 — orig builds two scratch 3x3s, calls
-                 * MultiplyRotationMatrices3x3 three times.]
-                 * Mirror via two helper matrices. */
-                float twist[9];
-                /* twist axis derived from XZ direction (avg_x, avg_z) normalized. */
-                float scale = c_min_eps / xz_mag;
-                float ax = scale * fav_x;
-                float az = scale * fav_z;
-                twist[0] = 1.0f; twist[1] = 0.0f; twist[2] = 0.0f;
-                twist[3] = 0.0f; twist[4] = yaw_c; twist[5] = -ax;  /* placeholder approx */
-                twist[6] = 0.0f; twist[7] = az;    twist[8] = yaw_c;
-
-                float tmp[9];
-                MultiplyRotationMatrices3x3(twist, (float *)&actor->collision_spin_matrix, tmp);
-                memcpy(&actor->collision_spin_matrix, tmp, 9 * sizeof(float));
-                (void)yaw_s;
+                float A1[9]  = { nz, 0.0f,  nx,   0.0f, 1.0f, 0.0f,  -nx, 0.0f, nz };
+                float B1[9]  = { 1.0f, 0.0f, 0.0f, 0.0f, c,   s,      0.0f, -s,  c  };
+                float A1T[9] = { nz, 0.0f, -nx,   0.0f, 1.0f, 0.0f,   nx, 0.0f, nz };
+                float m1[9], m2[9];
+                MultiplyRotationMatrices3x3(A1, B1, m1);    /* m1 = A1·B1 */
+                MultiplyRotationMatrices3x3(m1, A1T, m2);   /* m2 = A1·B1·A1^T */
+                MultiplyRotationMatrices3x3(m2, (float *)&actor->collision_spin_matrix, d0); /* d0 = twist·spin */
+            } else {
+                /* xz_mag>128: pen = -down*1.0625 [0x004099D3]; no twist.
+                 * Stage d0 = spin so the lateral<1 commit is identity. */
+                pen_force = (float)(-down_proj) * c_pen_scale;
+                memcpy(d0, actor->collision_spin_matrix.m, 9 * sizeof(float));
             }
 
-            /* Horizontal impulse based on lin_vel/16 + l vector magnitude  [0x004099C8-A07] */
-            int32_t lateral_mag = (int32_t)lrintf(sqrtf((float)(l_z * l_z + l_x * l_x)));
-            if (lateral_mag >= 1) {
-                /* Drag impulse on lin_vel along (l_x, l_z) direction. */
-                int32_t dip = lift_y;
-                int32_t bias = (dip + 0x400) * 0x20;
+            /* lateral_mag = round(sqrt(l_x^2 + l_z^2)) [CONFIRMED FISTP round]. */
+            int32_t lateral_mag = (int32_t)lrintf(sqrtf((float)(l_x * l_x + l_z * l_z)));
+            if (lateral_mag < 1) {
+                /* Commit staged twist to collision_spin. [CONFIRMED copy loop] */
+                memcpy(&actor->collision_spin_matrix, d0, 9 * sizeof(float));
+            } else {
+                /* lateral>=1: ground-friction drag. bias from down_proj (NOT
+                 * lift_y — prior port bug). k = min(lateral_mag, bias). */
+                int32_t bias = (down_proj + 0x400) * 0x20;
                 bias = (int32_t)(bias + (((int32_t)bias >> 31) & 0x3FF)) >> 10;  /* SAR_RZ 10 */
-                int32_t imp = (lateral_mag < bias) ? lateral_mag : bias;
-                actor->linear_velocity_x -= (imp * l_x) >> 8;
-                actor->linear_velocity_z -= (imp * l_z) >> 8;
+                int32_t k = (lateral_mag < bias) ? lateral_mag : bias;
+                /* Velocity drag CROSSED per orig raw bytes @0x00409AD2:
+                 * vx(+0x1cc) -= (k*l_z)>>8, vz(+0x1d4) -= (k*l_x)>>8.
+                 * [CONFIRMED-from-bytes; decompiler labels x/z — flagged.] */
+                actor->linear_velocity_x -= (k * l_z) >> 8;
+                actor->linear_velocity_z -= (k * l_x) >> 8;
+                /* [APPROX — FOLLOW-UP] Orig re-derives collision_spin here via
+                 * BuildWorldToViewMatrix (0x0042E750) general branch (axis =
+                 * normalized l×avg, angle = (k*avg_y)*3.10862e-10). That general
+                 * branch's 9-element layout is not yet byte-confirmed, so commit
+                 * the staged cos/sin twist instead of guessing the matrix — keeps
+                 * the roll continuing. Refine once 0x0042E750 is decompiled. */
+                memcpy(&actor->collision_spin_matrix, d0, 9 * sizeof(float));
             }
 
-            /* Body-axis impulse: subtract heading-normal-aligned penetration. */
+            /* Body-axis impulse: subtract heading-normal-aligned penetration.
+             * [CONFIRMED shared tail @ 0x00409B0D] */
             int32_t pf_i = (int32_t)lrintf(pen_force);
             actor->linear_velocity_x -= ((int32_t)hx * pf_i) >> 8;
             actor->linear_velocity_y -= ((int32_t)hy * pf_i) >> 8;
             actor->linear_velocity_z -= ((int32_t)hz * pf_i) >> 8;
             (void)c_min_eps;
+
+            if (actor->slot_index == 0 && (actor->frame_counter & 7u) == 0u) {
+                TD5_LOG_I(LOG_TAG,
+                    "recov_anim: t=%u xz=%d lat=%d down=%d branch=%s spin=[%.3f %.3f %.3f]",
+                    (unsigned)actor->frame_counter, (int)xz_mag, lateral_mag, down_proj,
+                    (xz_mag <= c_xz_thresh) ? "twist" : "drag",
+                    actor->collision_spin_matrix.m[0], actor->collision_spin_matrix.m[4],
+                    actor->collision_spin_matrix.m[8]);
+            }
         }
 
         /* Tail: lift world_pos.y by deepest probe and trigger rolling SFX. */
