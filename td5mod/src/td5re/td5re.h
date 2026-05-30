@@ -318,6 +318,12 @@ typedef struct TD5_GlobalState {
          * peer-emulation gate and slot-state init. Used to A/B test the
          * solo cascade behavior across all AI personalities. */
         int  solo_ai_slot;
+        /* SoloRace (port-only debug, 2026-05-30): when 1, force a 1-racer race
+         * (g_racer_count=1) in any game type so the player always finishes 1st.
+         * Used to reliably test the victory star/position overlay without having
+         * to out-drive the AI. Opponent slots are not spawned, so the position
+         * sort ranks slot 0 first (race_position 0). */
+        int  solo_race;
         /* MaxSpan (port-only debug, 2026-05-22): if > 0, race auto-exits
          * when slot 0's span_normalized reaches this value. Used to
          * benchmark per-slot AI behavior over the same track distance. */

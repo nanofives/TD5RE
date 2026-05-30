@@ -186,6 +186,10 @@ void td5_hud_draw_race_fade(float progress, int direction);
 /* --- State control --- */
 void td5_hud_set_indicator_state(int view_index, int value);
 
+/* Finishing-position center-screen digit (race-end victory overlay).
+ * position is 1-based (1 = 1st). See td5_hud.c. */
+void td5_hud_draw_finish_position(int position);
+
 /* --- Wanted-mode damage indicator overlay (cop chase) ---
  *
  * Port of UpdateWantedDamageIndicator @ 0x0043d4e0 (420B). Called once per

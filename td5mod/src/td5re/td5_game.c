@@ -293,6 +293,12 @@ extern uint8_t *g_track_environment_config; /* td5_asset.c -- LEVELINF.DAT buffe
 /* Fade system */
 static float s_fade_accumulator;            /* 0.0 -> 255.0 */
 static int   s_fade_direction_alternator;   /* toggles 0/1 per race */
+/* g_raceEndRadialPulseEnabled (orig dword @ 0x004aaefc). Latched to 1 in
+ * td5_game_begin_fade_out when the 1st-place victory star pulse fires. When
+ * set, the directional race-end fade is SUPPRESSED so the win shows the star
+ * wipe ONLY (mutually exclusive in orig RunRaceFrame @ 0x0042b791/0x0042b797).
+ * Reset to 0 per race. */
+static int   s_race_end_radial_pulse_enabled;
 
 /* Race completion */
 static uint32_t s_post_finish_cooldown;     /* 0x483980: 0 = phase1, >0 = phase2 accumulator */
@@ -1345,6 +1351,17 @@ int td5_game_init_race_session(void) {
                   "Solo synth: slots 1..5 INACTIVE, slot 0 simulates SoloAISlot=%d",
                   g_td5.ini.solo_ai_slot);
     }
+    /* SoloRace debug (2026-05-30): force slots 1..5 inactive so the player
+     * races alone and always finishes 1st — lets the victory star/position
+     * overlay be tested without out-driving the AI. Unlike solo_mode_synth this
+     * applies NO AI emulation to slot 0 (the human still drives normally). */
+    if (g_td5.ini.solo_race && g_td5.split_screen_mode == 0) {
+        for (int i = 1; i < TD5_MAX_RACER_SLOTS; i++) {
+            s_slot_state[i].state = 3;  /* inactive */
+        }
+        TD5_LOG_I(LOG_TAG, "SoloRace: slots 1..5 INACTIVE (player races alone)");
+    }
+
     /* Mark unused racer slots as disabled based on the current mode */
     {
         int racer_slot_count = g_td5.time_trial_enabled ? 2 : TD5_MAX_RACER_SLOTS;
@@ -1436,6 +1453,11 @@ int td5_game_init_race_session(void) {
         g_racer_count = 2;  /* slot 0 = player, slot 1 = cop AI */
     } else {
         g_racer_count = TD5_MAX_RACER_SLOTS;
+    }
+    /* SoloRace debug override: 1-racer race (player always 1st). */
+    if (g_td5.ini.solo_race && g_td5.split_screen_mode == 0) {
+        g_racer_count = 1;
+        TD5_LOG_I(LOG_TAG, "SoloRace: g_racer_count=1 (opponents disabled)");
     }
 
     /* ---- Step 4: Load track runtime data ---- */
@@ -2287,6 +2309,7 @@ int td5_game_init_race_session(void) {
 
     /* ---- Reset race state ---- */
     g_td5.race_end_fade_state = 0;
+    s_race_end_radial_pulse_enabled = 0;  /* orig writes [0x4aaefc] @ 0x0042aaff */
     s_pause_exit_pending = 0;
     g_td5.paused = 1;              /* start paused for countdown */
     /* DAT_00483030 (xz_freeze) has 1 read / 0 writes in the original binary.
@@ -2665,7 +2688,14 @@ int td5_game_run_race_frame(void) {
          * Clamp dt to 1/30 to prevent instant fade after pause frames
          * (pause menu exit produces a huge dt spike on the next frame). */
         float fade_dt_seconds = td5_game_normalized_dt_to_seconds(g_td5.normalized_frame_dt);
-        if (fade_dt_seconds > 0.034f) fade_dt_seconds = 0.034f;
+        /* Per-frame cap guards against the huge dt spike on pause-menu exit. Scale
+         * the cap with the game-speed (fast-forward) multiplier so the black wipe
+         * stays in sync with the sim at higher speeds instead of crawling at
+         * real-time while everything else races (user 2026-05-30: black transition
+         * didn't scale with game speed). At 1x the cap is unchanged (~1s wipe). */
+        float fade_cap = 0.034f;
+        if (g_td5.ini.trace_fast_forward > 1.0f) fade_cap *= g_td5.ini.trace_fast_forward;
+        if (fade_dt_seconds > fade_cap) fade_dt_seconds = fade_cap;
         s_fade_accumulator += fade_dt_seconds * 255.0f;
         if (s_fade_accumulator >= 255.0f) {
             s_fade_accumulator = 255.0f;
@@ -3450,9 +3480,27 @@ int td5_game_run_race_frame(void) {
         td5_hud_draw_pause_overlay();
     }
 
-    /* Race end fade: directional wipe overlay (black bars closing in) */
-    if (g_td5.race_end_fade_state > 0) {
+    /* Race end fade: directional wipe overlay (black bars closing in).
+     * [CONFIRMED @ 0x0042b791/0x0042b797 RunRaceFrame] The directional fade and
+     * the 1st-place victory star pulse are MUTUALLY EXCLUSIVE: orig CMPs
+     * g_raceEndRadialPulseEnabled (0x4aaefc) and the JNZ jumps over the entire
+     * directional-fade (SetClipBounds) block when the pulse is enabled. So a
+     * 1st-place finish shows the star wipe ONLY; any other finish shows the
+     * directional fade ONLY. The port previously drew BOTH -> "star + fade at
+     * the same time" on a win. */
+    if (g_td5.race_end_fade_state > 0 && !s_race_end_radial_pulse_enabled) {
         td5_hud_draw_race_fade(s_fade_accumulator, g_td5.fade_direction);
+    }
+
+    /* Finishing position: big centered digit during the race-end victory
+     * window (port enhancement, user 2026-05-30). Drawn last so it stays
+     * readable over the star glow / directional fade. race_position is 0-based
+     * (0 = 1st); display 1-based. */
+    if (g_td5.race_end_fade_state > 0) {
+        TD5_Actor *fp_player = td5_game_get_actor(0);
+        if (fp_player) {
+            td5_hud_draw_finish_position((int)fp_player->race_position + 1);
+        }
     }
 
     td5_hud_flush_text();
@@ -3707,23 +3755,33 @@ void td5_game_release_race_resources(void) {
     }
 }
 
+/* Post-finish dwell before the victory star/fade/results fire.
+ * The ORIGINAL uses 0x3FFFFF: g_raceEndControl accrues a fixed 30 ticks/sec
+ * (16.16 fp, verified @ 0x0040a230 + frame increment @ 0x0042b5d1) and the
+ * gate is `0x3FFFFF < g_raceEndControl` = 64 ticks / 30 Hz = 2.13s.
+ * Per user request (2026-05-30) the port triggers the victory animation AT the
+ * finish line instead of 2s later — a deliberate snappier-than-original choice.
+ * 0 = expire on the first post-latch frame (~1 frame, effectively instant).
+ * Raise toward 0x3FFFFF (4194303) to restore the original 2.13s dwell. */
+#define TD5_RACE_END_DWELL  0u
+
 /* ========================================================================
  * Race Completion Detection
  *
  * Two-phase architecture matching CheckRaceCompletionState (0x409e80):
  *   Phase 1: Per-actor finish detection (when s_post_finish_cooldown == 0)
- *   Phase 2: Cooldown accumulator; when > 0x3FFFFF, build results table
+ *   Phase 2: Cooldown accumulator; when > TD5_RACE_END_DWELL, build results
  * ======================================================================== */
 
 static int check_race_completion(uint32_t sim_delta) {
     int i;
 
-    /* Phase 2: Post-finish cooldown */
+    /* Phase 2: Post-finish cooldown (near-instant per TD5_RACE_END_DWELL) */
     if (s_post_finish_cooldown != 0) {
         s_post_finish_cooldown += sim_delta;
-        if (s_post_finish_cooldown > 0x3FFFFF) {
-            /* Cooldown expired: build results and signal completion */
-            TD5_LOG_I(LOG_TAG, "Race completion cooldown expired: building results");
+        if (s_post_finish_cooldown > TD5_RACE_END_DWELL) {
+            /* Dwell expired: build results and signal completion */
+            TD5_LOG_I(LOG_TAG, "Race completion: building results (dwell=%u)", TD5_RACE_END_DWELL);
             s_post_finish_cooldown = 0;
             build_results_table();
             return 1;
@@ -4535,8 +4593,12 @@ static void update_race_order(void) {
 
             TD5_Actor *actor_a = td5_game_get_actor(a);
             TD5_Actor *actor_b = td5_game_get_actor(b);
-            int32_t span_a = actor_a ? (int32_t)actor_a->track_span_high_water : 0;
-            int32_t span_b = actor_b ? (int32_t)actor_b->track_span_high_water : 0;
+            /* Disabled slots (state 3 — SoloRace / solo-synth opponents) sort to
+             * the BACK so they never outrank an active racer in the standings. */
+            int32_t span_a = (s_slot_state[a].state == 3) ? INT32_MIN
+                             : (actor_a ? (int32_t)actor_a->track_span_high_water : 0);
+            int32_t span_b = (s_slot_state[b].state == 3) ? INT32_MIN
+                             : (actor_b ? (int32_t)actor_b->track_span_high_water : 0);
 
             /* Higher span_high = further ahead = better position (lower index) */
             if (span_a < span_b) {
@@ -4647,9 +4709,26 @@ void td5_game_begin_fade_out(int param) {
         g_td5.game_type == TD5_GAMETYPE_SINGLE_RACE &&
         !g_td5.drag_race_enabled) {
         TD5_Actor *player = td5_game_get_actor(0);
-        if (player && player->race_position == 0 && !s_pause_exit_pending) {
+        int rp = player ? (int)player->race_position : -1;
+        int star_fired = (player && player->race_position == 0 && !s_pause_exit_pending);
+        /* DIAG (race-finish-transition /fix): make the star-gate decision observable. */
+        TD5_LOG_I(LOG_TAG,
+                  "STAR-GATE: param=%d net=%d gt=%d drag=%d race_position=%d pause_exit=%d -> star=%s",
+                  param, (int)g_td5.network_active, (int)g_td5.game_type,
+                  (int)g_td5.drag_race_enabled, rp, (int)s_pause_exit_pending,
+                  star_fired ? "FIRED" : "skipped");
+        if (star_fired) {
             td5_hud_reset_radial_pulse();
+            /* [CONFIRMED @ 0x0042cc74] orig sets g_raceEndRadialPulseEnabled=1
+             * right after ResetHudRadialPulseOverlay -> suppresses the
+             * directional fade for this race (star wipe ONLY). */
+            s_race_end_radial_pulse_enabled = 1;
         }
+    } else {
+        TD5_LOG_I(LOG_TAG,
+                  "STAR-GATE: outer gate failed (param=%d net=%d gt=%d drag=%d) -> star skipped",
+                  param, (int)g_td5.network_active, (int)g_td5.game_type,
+                  (int)g_td5.drag_race_enabled);
     }
 
     switch (param) {
