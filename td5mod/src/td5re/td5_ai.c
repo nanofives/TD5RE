@@ -1658,42 +1658,34 @@ void td5_ai_init_race_actor_runtime(void) {
         TD5_LOG_I(LOG_TAG, "solo_mode_synth: g_slot_state[1..5] = 3 (inactive)");
     }
 
-    /* --- First layer: global difficulty scaling on AI physics template ---
-     * Mirrors [@ 0x00432F2F..0x00432FEC] verbatim.
+    /* --- First layer: DYNAMICS (arcade/sim) scaling on AI physics template ---
+     * Mirrors InitializeRaceActorRuntime [@ 0x00432F2F..0x00432FEC]. The original
+     * gates this block on the dynamics globals gDifficultyHard @0x004AAF80 /
+     * gDifficultyEasy @0x004AAF84 — NOT on the user difficulty selector
+     * (gRaceDifficultyTier @0x00463210 is only read AFTER it, @0x00432FFD).
+     * gDifficultyEasy = gDynamicsConfigShadow (the ARCADE/SIMULATION toggle);
+     * gDifficultyHard has NO writers, so its HARD 4-field branch never executes
+     * and is omitted here (matching runtime). Live three-way collapses to:
+     *   ARCADE     (Easy==0): steer *= 0x168/256, grip *= 0x12C/256  [@0x432FBC..0x432FEC]
+     *   SIMULATION (Easy!=0): no scaling                             [@0x432FBA skip]
      *
-     * Template field offsets:
-     *   +0x2C: grip / base lateral coefficient (short)
-     *   +0x68: steering factor (short)
-     *   +0x6E: brake force (short)
-     *   +0x70: low-speed brake coefficient (short)
-     *   +0x74: top speed / rev limiter (short)
+     * Previously keyed on g_td5.difficulty — a documented deviation (see the
+     * note at ConfigureGameTypeFlags, td5_frontend.c). Now keyed on the dynamics
+     * flag via td5_physics_get_dynamics() (0=ARCADE, 1=SIMULATION == gDifficultyEasy),
+     * matching the player path (td5_physics_init_vehicle_runtime, 0x42F140).
+     *
+     * Template field offsets:  +0x2C grip (short), +0x68 steer (short).
      */
     {
-        int16_t *steer  = (int16_t *)(g_ai_physics_template + 0x68);
-        int16_t *grip   = (int16_t *)(g_ai_physics_template + 0x2C);
-        int16_t *brake  = (int16_t *)(g_ai_physics_template + 0x6E);
-        int16_t *lspd_brake = (int16_t *)(g_ai_physics_template + 0x70);
+        int16_t *steer = (int16_t *)(g_ai_physics_template + 0x68);
+        int16_t *grip  = (int16_t *)(g_ai_physics_template + 0x2C);
 
-        switch (g_td5.difficulty) {
-        case TD5_DIFFICULTY_EASY:
-            /* [@ 0x00432FB4 if (gDifficultyEasy != 0)] No change (Easy). */
-            break;
-
-        case TD5_DIFFICULTY_NORMAL:
-            /* [@ 0x00432FBC..0x00432FEC] NORMAL: steer*0x168/256, grip*300/256 only.
-             * No brake / lspd_brake / top_spd writes here. */
+        if (td5_physics_get_dynamics() == 0) {
+            /* ARCADE [@ 0x00432FBC..0x00432FEC]: steer*0x168/256, grip*300/256. */
             *steer = (int16_t)(((int32_t)*steer * 0x168) >> 8);
             *grip  = (int16_t)(((int32_t)*grip  * 0x12C) >> 8); /* 0x12C = 300 */
-            break;
-
-        case TD5_DIFFICULTY_HARD:
-            /* [@ 0x00432F37..0x00432FB2] HARD: 4 scaled fields. */
-            *steer      = (int16_t)(((int32_t)*steer      * 0x28A) >> 8); /* [@ 0x00432F37-57]  */
-            *grip       = (int16_t)(((int32_t)*grip       * 0x17C) >> 8); /* [@ 0x00432F5B-72]  */
-            *brake      = (int16_t)(((int32_t)*brake      * 0x1C2) >> 8); /* [@ 0x00432F76-91]  */
-            *lspd_brake = (int16_t)(((int32_t)*lspd_brake * 0x190) >> 8); /* [@ 0x00432F95-AE] 0x190=400 */
-            break;
         }
+        /* SIMULATION [@ 0x00432FBA JNZ skip]: no template scaling. */
     }
 
     /* --- Second layer: mode/circuit/traffic/tier decision tree ---

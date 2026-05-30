@@ -1900,6 +1900,13 @@ void td5_frontend_auto_race_setup(void) {
     s_game_option_dynamics          = g_td5.ini.dynamics;
     s_game_option_collisions        = g_td5.ini.collisions;
 
+    /* Commit the dynamics (arcade/sim) selection into the physics race-init
+     * flag deterministically for the AutoRace path, mirroring the options-screen
+     * commit at ConfigureGameTypeFlags (td5_physics_set_dynamics @ case 0). The
+     * boot path also commits the INI value, but committing here makes the
+     * AutoRace harness independent of boot-block ordering. */
+    td5_physics_set_dynamics(s_game_option_dynamics);
+
     /* Match the Frida hook's pre-call writes.
      *   g_twoPlayerModeEnabled=0, g_returnToScreenIndex=-1
      *   s_current_screen pinned to MAIN_MENU so frontend_init_race_schedule
@@ -2821,17 +2828,15 @@ static int ConfigureGameTypeFlags(void) {
     switch (s_selected_game_type) {
     case 0: /* Single Race -- user preferences apply */
         g_td5.circuit_lap_count = (s_game_option_laps + 1) * 2;
-        /* g_td5.difficulty feeds ONLY the AI first-layer template scaling in
-         * td5_ai_init_race_actor_runtime (td5_ai.c:1677). In the original that
-         * first layer (InitializeRaceActorRuntime @ 0x00432F2F / 0x00432FB4) is
-         * gated on the game-phase globals [0x004AAF80] / [0x004AAF84], NOT on the
-         * user difficulty toggle — gRaceDifficultyTier @ 0x00463210 is only read
-         * AFTER that block (@ 0x00432FFD). [CONFIRMED @ 0x00432F2F / 0x00432FB4 /
-         * 0x00432FFD.] So the user toggle must NOT drive layer-1; previously it did
-         * (= s_game_option_difficulty), which both mis-keyed layer-1 and was the only
-         * thing the toggle touched. Hold layer-1 at the established single-race
-         * baseline (NORMAL) and route the toggle into difficulty_tier instead (above),
-         * which is the path the original actually ties to user difficulty. */
+        /* The AI first-layer template scaling in td5_ai_init_race_actor_runtime
+         * (InitializeRaceActorRuntime @ 0x00432F2F / 0x00432FB4) is now keyed on
+         * the DYNAMICS flag (gDifficultyEasy @0x004AAF84 = the arcade/sim toggle),
+         * matching the original — it no longer reads g_td5.difficulty. The user
+         * difficulty toggle routes into difficulty_tier (above), which is the path
+         * the original actually ties to user difficulty (gRaceDifficultyTier
+         * @0x00463210, read only AFTER the dynamics block @ 0x00432FFD). The
+         * g_td5.difficulty field below is retained only for save/log round-trip
+         * (td5_save.c) and no longer affects AI scaling. */
         g_td5.difficulty = TD5_DIFFICULTY_NORMAL;
         g_td5.traffic_enabled = s_game_option_traffic;
         g_td5.special_encounter_enabled = s_game_option_cops;
@@ -3982,7 +3987,12 @@ static void fe_draw_option_arrows(int btn_idx, float sx, float sy) {
 static void frontend_render_game_options_overlay(float sx, float sy) {
     const char *on_off[] = { "OFF", "ON" };
     const char *difficulty[] = { "EASY", "NORMAL", "HARD" };  /* orig middle label: NORMAL */
-    const char *dynamics[] = { "SIMULATION", "ARCADE" };
+    /* [CONFIRMED @ Language.dll SNK_DynamicsTxt, indexed directly by
+     * gDynamicsConfigShadow @0x00466014 at ScreenGameOptions 0x0041FECF]:
+     * value 0 -> "ARCADE", value 1 -> "SIMULATION". The previous order was
+     * inverted. Physics: 0=ARCADE (gravity 1900 + car-stat boosts),
+     * 1=SIMULATION (gravity 1500 + stock stats). */
+    const char *dynamics[] = { "ARCADE", "SIMULATION" };
     char laps[16];
     if (!s_buttons[0].active) return;
     if (!s_anim_complete) return;
