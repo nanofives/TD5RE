@@ -531,7 +531,21 @@ void td5_track_get_span_edges(int span_index,
  *     (transition/reversed/junction/sentinel) where the rail edge produces
  *     inverted normals.
  */
-#if 1
+/* ====================================================================== *
+ * OLD heuristic synthetic lateral wall (DISABLED 2026-05-30).
+ *
+ * Preserved under #if 0 for diff/revert. It constructed the correct
+ * left/right rails and per-probe sub_lane gate, but: (a) BAILED at every
+ * lane-width transition (type filter + junction-neighbour + lane-count
+ * guards) -> no containment at wide<->narrow transitions -> car drove
+ * through the wall (Tokyo L15 fwd 310-319 / rev 310,312,440,488, plus the
+ * recurrent narrow<->wide plazas on most tracks); (b) auto-flipped the perp
+ * toward an inside-ref vertex, which inverted v_perp in REVERSE and broke
+ * reverse-into-wall; (c) added a non-faithful -30 clamp / 2-vote / -10
+ * dead-zone. Replaced by a faithful port of UpdateActorTrackSegmentContacts
+ * @ 0x00406CC0 below. See git history for the rationale of each guard.
+ * ====================================================================== */
+#if 0
 void td5_track_resolve_wall_contacts(TD5_Actor *actor)
 {
     static uint32_t s_wall_tick = 0;
@@ -970,6 +984,175 @@ void td5_track_resolve_wall_contacts(TD5_Actor *actor)
     }
 }
 #endif /* legacy wall_contacts disabled */
+
+/* ------------------------------------------------------------------------
+ * td5_track_resolve_wall_contacts — FAITHFUL port of
+ * UpdateActorTrackSegmentContacts @ 0x00406CC0 (lateral rail containment).
+ *
+ * RE basis (2026-05-30, three-pass Ghidra investigation):
+ *   - 0x00406CC0 is a per-probe LATERAL rail test, processed CONTINUOUSLY on
+ *     all span types (it does NOT bail at lane-width transitions). For each of
+ *     the 4 wheel probes it reads the probe's lateral sub_lane index (signed
+ *     byte at probe record +0x0C [CONFIRMED @ 0x406d08]):
+ *       sub_lane <= 0            -> test LEFT  rail (orig flags=1)
+ *       sub_lane >= lane_count-1 -> test RIGHT rail (orig flags=2)
+ *   - LEFT rail edge  [CONFIRMED @ 0x406d28]: NW=vtx[li_base+0], SW=vtx[ri_base+0];
+ *       inward normal n = (NW.z-SW.z, SW.x-NW.x). No LUT.
+ *   - RIGHT rail edge [CONFIRMED @ 0x406e3d/0x406e5e]:
+ *       NE=vtx[li_base+lane_count+LUT_L[type]], SE=vtx[ri_base+lane_count+LUT_R[type]];
+ *       opposite-handed inward normal n = (SE.z-NE.z, NE.x-SE.x).
+ *       LUT = DAT_004631a0 (L) / DAT_004631a4 (R), 8-byte stride [CONFIRMED raw read].
+ *   - Fires whenever penetration d < 0 (probe outside the rail). No dead-zone,
+ *     no clamp, no multi-probe vote. The -4 push bias and the gentle mass-
+ *     weighted impulse live in ApplyTrackSurfaceForceToActor @ 0x00406980,
+ *     already faithfully ported (td5_physics_wall_response). This reproduces
+ *     the measured "continuous gentle correction" (mean pen ~ -6, ~13% velocity
+ *     reduction) that contains the car laterally on the road in BOTH directions.
+ *   - The inward normal is FIXED by winding + LUT (NO auto-flip). v_perp inside
+ *     0x406980 becomes -(velocity . inward_normal), which is positive for any
+ *     approaching motion regardless of forward/reverse -> matches 0x406980's
+ *     iVar11>=0 gate, fixing reverse-into-wall (the old auto-flip inverted it).
+ *
+ * Faithfulness deviations (port-specific, intentional):
+ *   - Uses the CHASSIS span (actor->track_span_raw) for all 4 probes rather
+ *     than each probe's own span: the port's single-step walker leaves per-probe
+ *     span_index stale across transitions. Wheels are ~800u apart (< one span).
+ *   - A degenerate-span guard skips a probe that flags BOTH rails at once
+ *     (impossible on convex road geometry; can occur on a 1-tick walker-lag
+ *     glitch). The original has no such guard but never sees degenerate data.
+ *   - Traffic actors (slot >= 6) are skipped (fixed AI paths, possibly
+ *     uninitialised probes).
+ * ------------------------------------------------------------------------ */
+void td5_track_resolve_wall_contacts(TD5_Actor *actor)
+{
+    static uint32_t s_wall_tick = 0;
+    int diag_slot0 = 0;
+
+    if (!actor || !s_span_array || !s_vertex_table) return;
+
+    /* Traffic actors (slots 6+) follow fixed AI paths; their probe positions
+     * can be uninitialised -> skip (port-specific guard, retained). */
+    if (actor->slot_index >= 6) return;
+
+    /* Pre-spawn guard: skip while the actor is still at the origin. */
+    if (actor->world_pos.x == 0 && actor->world_pos.z == 0) return;
+
+    if (actor->slot_index == 0) {
+        s_wall_tick++;
+        if ((s_wall_tick % 60u) == 0u) diag_slot0 = 1;
+    }
+
+    /* Per-span-type RIGHT-rail (flags=2) vertex base-offset LUT.
+     * [CONFIRMED raw read DAT_004631a0 (L) / DAT_004631a4 (R), 8-byte stride].
+     * flags=1 (left rail) uses no LUT (offsets implicitly 0). */
+    static const int8_t k_rail_lut_l[12] = { 0, 0, -1, -1, -2,  0,  0,  0, 0, 0, 0, 0 };
+    static const int8_t k_rail_lut_r[12] = { 0, 0,  0,  0,  0, -1, -1, -2, 0, 0, 0, 0 };
+
+    TD5_Vec3_Fixed *probe_block = &actor->probe_FL;
+
+    int span_idx = (int)actor->track_span_raw;
+    if (span_idx < 0 || span_idx >= s_span_count) return;
+
+    const TD5_StripSpan *sp = &s_span_array[span_idx];
+    int type = sp->span_type;
+    if (type < 0 || type >= 12) type = 0;
+    int lane_count = span_lane_count(sp);
+    if (lane_count < 1) lane_count = 1;
+
+    int li_base = (int)sp->left_vertex_index;
+    int ri_base = (int)sp->right_vertex_index;
+
+    /* LEFT rail (flags=1): edge NW=vtx[li_base+0] -> SW=vtx[ri_base+0]. */
+    TD5_StripVertex *l_nw = vertex_at(li_base + 0);
+    TD5_StripVertex *l_sw = vertex_at(ri_base + 0);
+    /* RIGHT rail (flags=2): edge NE -> SE with per-type LUT offset. */
+    TD5_StripVertex *r_ne = vertex_at(li_base + lane_count + (int)k_rail_lut_l[type]);
+    TD5_StripVertex *r_se = vertex_at(ri_base + lane_count + (int)k_rail_lut_r[type]);
+
+    struct rail {
+        int32_t nnx, nnz;      /* inward normal, |n| ~ 4096 */
+        int32_t ref_x, ref_z;  /* reference vertex on the rail (NW / NE) */
+        int     ok;
+    } left = {0}, right = {0};
+
+    if (l_nw && l_sw) {
+        /* n = (NW.z - SW.z, SW.x - NW.x)  [CONFIRMED @ 0x406d28] */
+        float fnx = (float)((int32_t)l_nw->z - (int32_t)l_sw->z);
+        float fnz = (float)((int32_t)l_sw->x - (int32_t)l_nw->x);
+        float fmag = sqrtf(fnx * fnx + fnz * fnz);
+        if (fmag >= 0.5f) {
+            left.nnx = (int32_t)(fnx / fmag * 4096.0f);
+            left.nnz = (int32_t)(fnz / fmag * 4096.0f);
+            left.ref_x = (int32_t)l_nw->x;
+            left.ref_z = (int32_t)l_nw->z;
+            left.ok = 1;
+        }
+    }
+    if (r_ne && r_se) {
+        /* n = (SE.z - NE.z, NE.x - SE.x)  [CONFIRMED @ 0x406e3d] */
+        float fnx = (float)((int32_t)r_se->z - (int32_t)r_ne->z);
+        float fnz = (float)((int32_t)r_ne->x - (int32_t)r_se->x);
+        float fmag = sqrtf(fnx * fnx + fnz * fnz);
+        if (fmag >= 0.5f) {
+            right.nnx = (int32_t)(fnx / fmag * 4096.0f);
+            right.nnz = (int32_t)(fnz / fmag * 4096.0f);
+            right.ref_x = (int32_t)r_ne->x;
+            right.ref_z = (int32_t)r_ne->z;
+            right.ok = 1;
+        }
+    }
+
+    for (int pi = 0; pi < 4; pi++) {
+        int32_t px = probe_block[pi].x >> 8;
+        int32_t pz = probe_block[pi].z >> 8;
+        int sub_lane = (int)actor->wheel_probes[pi].sub_lane_index;
+
+        int test_left  = (left.ok  && sub_lane < 1);
+        int test_right = (right.ok && sub_lane >= lane_count - 1);
+
+        int32_t pen_l = 0, pen_r = 0;
+        int hit_l = 0, hit_r = 0;
+
+        if (test_left) {
+            int64_t p = (int64_t)((pz - sp->origin_z) - left.ref_z) * left.nnz
+                      + (int64_t)((px - left.ref_x) - sp->origin_x) * left.nnx;
+            pen_l = (int32_t)((p + ((p >> 63) & 0xFFF)) >> 12);
+            hit_l = (pen_l < 0);
+        }
+        if (test_right) {
+            int64_t p = (int64_t)((pz - sp->origin_z) - right.ref_z) * right.nnz
+                      + (int64_t)((px - right.ref_x) - sp->origin_x) * right.nnx;
+            pen_r = (int32_t)((p + ((p >> 63) & 0xFFF)) >> 12);
+            hit_r = (pen_r < 0);
+        }
+
+        /* Degenerate-span guard: a probe cannot be outside BOTH rails of a
+         * convex road. If both flag, the geometry is momentarily inverted
+         * (walker-lag glitch) -> skip rather than fight it. */
+        if (hit_l && hit_r) continue;
+
+        if (hit_l) {
+            double rad = atan2((double)left.nnx, (double)(-left.nnz));
+            int32_t wall_angle = (int32_t)(rad * (4096.0 / (2.0 * 3.14159265358979323846))) & 0xFFF;
+            td5_physics_wall_response(actor, wall_angle, pen_l, 1,
+                                      probe_block[pi].x, probe_block[pi].z);
+            td5_physics_rebuild_pose(actor);
+            if (diag_slot0 || pen_l < -100)
+                TD5_LOG_I(LOG_TAG, "wall_contact: slot=%d probe=%d LEFT span=%d type=%d sub=%d pen=%d angle=%d",
+                          actor->slot_index, pi, span_idx, type, sub_lane, pen_l, wall_angle);
+        }
+        if (hit_r) {
+            double rad = atan2((double)right.nnx, (double)(-right.nnz));
+            int32_t wall_angle = (int32_t)(rad * (4096.0 / (2.0 * 3.14159265358979323846))) & 0xFFF;
+            td5_physics_wall_response(actor, wall_angle, pen_r, 2,
+                                      probe_block[pi].x, probe_block[pi].z);
+            td5_physics_rebuild_pose(actor);
+            if (diag_slot0 || pen_r < -100)
+                TD5_LOG_I(LOG_TAG, "wall_contact: slot=%d probe=%d RIGHT span=%d type=%d sub=%d pen=%d angle=%d",
+                          actor->slot_index, pi, span_idx, type, sub_lane, pen_r, wall_angle);
+        }
+    }
+}
 
 /* ========================================================================
  * Forward / Reverse track-segment contact handlers
