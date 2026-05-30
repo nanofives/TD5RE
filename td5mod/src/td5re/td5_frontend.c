@@ -422,20 +422,25 @@ static uint8_t  s_ctrl_kb_scancodes[16];
 static uint32_t s_ctrl_binding_table[2][9];
 
 /* Action label strings for keyboard capture prompt (SNK_ControlText slots 0-9)
- * [CONFIRMED @ 0x40FE00 case 0x19]: index = s_ctrl_kb_slot (0..9)
- * Strings from LANGUAGE.DLL SNK_ControlText at offsets 0..9 * 0x10.
- * Content [UNCERTAIN]: LANGUAGE.DLL not in binary; names estimated from slot order. */
+ * [CONFIRMED @ 0x40FE00 case 0x19]: index = s_ctrl_kb_slot (0..9), iterated
+ *   via SNK_ControlText[i*0x10], loop stops at slot==10.
+ * [CONFIRMED]: strings read from LANGUAGE.DLL SNK_ControlText @ 0x100075E0
+ *   (stride 0x10, idx 0..9); default scancodes baked at g_keyboardScanCodeTable
+ *   0x00464054 = {cb cd c8 d0 10 9d 1e 2c 14 2d}. Index 10 @ 0x10007680 = "NONE"
+ *   is a sentinel, not iterated.
+ * Faithful port of the original action list (was previously guessed/shifted —
+ * had no "Steer"/"Gas"/"NOS"/"Camera", missed HANDBRAKE, and merged steer L/R). */
 static const char * const k_ctrl_action_labels[10] = {
-    "Steer",        /* slot 0 */
-    "Gas",          /* slot 1 */
-    "Brake",        /* slot 2 */
-    "Handbrake",    /* slot 3 */
-    "Gear Up",      /* slot 4 */
-    "Gear Down",    /* slot 5 */
-    "Look Back",    /* slot 6 */
-    "Horn",         /* slot 7 */
-    "NOS",          /* slot 8 */
-    "Camera",       /* slot 9 */
+    "LEFT",         /* slot 0 — DIK_LEFT  0xCB */
+    "RIGHT",        /* slot 1 — DIK_RIGHT 0xCD */
+    "ACCELERATE",   /* slot 2 — DIK_UP    0xC8 */
+    "BRAKE",        /* slot 3 — DIK_DOWN  0xD0 */
+    "HANDBRAKE",    /* slot 4 — DIK_Q     0x10 */
+    "HORN/SIREN",   /* slot 5 — DIK_RCTRL 0x9D */
+    "GEAR UP",      /* slot 6 — DIK_A     0x1E */
+    "GEAR DOWN",    /* slot 7 — DIK_Z     0x2C */
+    "CHANGE VIEW",  /* slot 8 — DIK_T     0x14 */
+    "REAR VIEW",    /* slot 9 — DIK_X     0x2D */
 };
 
 /* Display labels for joystick binding values 2-10
@@ -7996,9 +8001,9 @@ static void Screen_TwoPlayerOptions(void) {
  *   s_ctrl_kb_scancodes  — 10-byte captured scancode buffer
  *                          mirrors DAT_00464054 (gKbScanCodes[16])
  *
- * Action label strings (from SNK_ControlText_exref + slot*0x10):
- *   0=Steer  1=Gas  2=Brake  3=Handbrake  4=Gear Up  5=Gear Down
- *   6=Look Back  7=Horn  8=NOS  9=Camera
+ * Action label strings (from SNK_ControlText @ 0x100075E0 + slot*0x10):
+ *   0=LEFT  1=RIGHT  2=ACCELERATE  3=BRAKE  4=HANDBRAKE  5=HORN/SIREN
+ *   6=GEAR UP  7=GEAR DOWN  8=CHANGE VIEW  9=REAR VIEW  (10=NONE sentinel)
  * ======================================================================== */
 
 static void Screen_ControllerBinding(void) {
@@ -8341,6 +8346,10 @@ static void Screen_ControllerBinding(void) {
                     ? td5_save_get_p1_custom_bindings_mutable()
                     : td5_save_get_p2_custom_bindings_mutable());
                 memcpy(dst, s_ctrl_kb_scancodes, 16);
+                /* Apply immediately to the live input layer so the rebind takes
+                 * effect this session without waiting for a Config.td5 reload. */
+                td5_plat_input_set_keyboard_bindings(s_ctrl_player == 0 ? 0 : 1,
+                                                     s_ctrl_kb_scancodes, 10);
             }
             TD5_LOG_I(LOG_TAG, "CtrlBind: all 10 actions bound for player %d — saved",
                       s_ctrl_player);

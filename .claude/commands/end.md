@@ -10,20 +10,10 @@ End a `/fix` session: rebase against master, recheck the changes, surface any st
 
 Determine the **current session's** worktree and recover `SESSION_TAG` + `WORKTREE_DIR`. This skill always operates on the worktree belonging to *this conversation* — other active worktrees from parallel sessions are not this skill's concern.
 
-**Check for second-invocation sentinel first:**
+**Recover `SESSION_TAG` + `WORKTREE_DIR` FIRST** — the second-invocation sentinel is keyed on `SESSION_TAG`, so you must know the tag before you can find this session's own sentinel:
 
-```bash
-# If this file exists we are on the second /end call — treat as merge confirmation.
-# (Created by Step 5 on the first /end call.)
-ls C:/Users/maria/Desktop/Proyectos/TD5RE/.claude/worktrees/.end_pending 2>/dev/null && echo "SECOND_INVOCATION=1" || echo "SECOND_INVOCATION=0"
-```
-
-If `SECOND_INVOCATION=1`: read `SESSION_TAG` + `WORKTREE_DIR` from `.end_pending`, delete the file, then **jump directly to Step 5 merge execution** (skip Steps 1–4).
-
-**Otherwise (first invocation):** recover the current session's worktree:
-
-1. If `SESSION_TAG` / `WORKTREE_DIR` are already in scope from a `/fix` session in this conversation, use those directly.
-2. Otherwise infer from current branch:
+1. If `SESSION_TAG` / `WORKTREE_DIR` are already in scope from a `/fix` session in this conversation, use those directly. **This is the authoritative source** — prefer it over anything on disk.
+2. Otherwise infer from the current branch (valid only when `/end` is run from inside the worktree):
 
 ```bash
 SESSION_TAG="$(git rev-parse --abbrev-ref HEAD)"
@@ -32,7 +22,25 @@ echo "Session: ${SESSION_TAG}"
 echo "Worktree: ${WORKTREE_DIR}"
 ```
 
-If there are **no active worktrees** and we're in the main tree with a clean branch, this skill still runs — it just skips the worktree teardown and treats the main tree as the unit of review.
+If `SESSION_TAG` resolves to `master` (run from the main tree with nothing in scope) and there are **no active worktrees**, this skill still runs — it just skips the worktree teardown and treats the main tree as the unit of review.
+
+**Then check for THIS session's second-invocation sentinel:**
+
+```bash
+# Per-session sentinel — keyed on SESSION_TAG so concurrent /end runs in parallel
+# sessions never clobber each other. The OLD design used a single shared
+# `.end_pending` file: with multiple live worktrees it raced — one session's first
+# /end overwrote another's, and a parallel second /end could delete it or even read
+# the wrong SESSION_TAG and merge the wrong branch. Created by Step 5 on first /end.
+SENTINEL="C:/Users/maria/Desktop/Proyectos/TD5RE/.claude/worktrees/.end_pending.${SESSION_TAG}"
+ls "${SENTINEL}" 2>/dev/null && echo "SECOND_INVOCATION=1" || echo "SECOND_INVOCATION=0"
+```
+
+**If `SECOND_INVOCATION=1`:** read `SESSION_TAG` + `WORKTREE_DIR` from `${SENTINEL}` and **sanity-check they match what you recovered above**. If the file's tag differs from the conversation-scope tag, trust the conversation scope and STOP to investigate — never merge a tag you did not recover yourself. Then delete the sentinel and **jump directly to Step 5 merge execution** (skip Steps 1–4).
+
+**If `SECOND_INVOCATION=0` but the user explicitly re-invoked `/end`** to confirm a merge you already summarized in this conversation (the sentinel can go missing if a concurrent session's cleanup swept the worktrees dir, or an older shared `.end_pending` was removed): treat the explicit re-invocation as the approval — but **ONLY ever merge/teardown the `SESSION_TAG` you recovered from THIS conversation's `/fix` state.** Never merge a branch you cannot tie to this conversation.
+
+**Otherwise (genuine first invocation):** proceed to Step 1 with the recovered `SESSION_TAG` / `WORKTREE_DIR`.
 
 ---
 
@@ -253,11 +261,11 @@ fi
 
 **First invocation — present summary and pause:**
 
-Print the merge summary, write the sentinel file with `SESSION_TAG` + `WORKTREE_DIR` recorded inside it, then **stop and wait for the user to re-invoke `/end`** to confirm:
+Print the merge summary, write the **per-session** sentinel file (named `.end_pending.${SESSION_TAG}` so parallel sessions never collide) with `SESSION_TAG` + `WORKTREE_DIR` recorded inside it, then **stop and wait for the user to re-invoke `/end`** to confirm:
 
 ```bash
 printf "SESSION_TAG=%s\nWORKTREE_DIR=%s\n" "${SESSION_TAG}" "${WORKTREE_DIR}" \
-    > C:/Users/maria/Desktop/Proyectos/TD5RE/.claude/worktrees/.end_pending
+    > "C:/Users/maria/Desktop/Proyectos/TD5RE/.claude/worktrees/.end_pending.${SESSION_TAG}"
 ```
 
 ```
@@ -282,10 +290,10 @@ Do NOT proceed further on the first invocation. Wait for the user.
 
 **Second invocation (sentinel was present — merge confirmed):**
 
-Delete the sentinel (already done in Step 0), then execute the merge:
+Delete this session's sentinel, then execute the merge:
 
 ```bash
-rm -f C:/Users/maria/Desktop/Proyectos/TD5RE/.claude/worktrees/.end_pending || true
+rm -f "C:/Users/maria/Desktop/Proyectos/TD5RE/.claude/worktrees/.end_pending.${SESSION_TAG}" || true
 ```
 
 ```bash
@@ -377,6 +385,16 @@ for d in C:/Users/maria/Desktop/Proyectos/TD5RE/td5mod/src/td5re/build_[0-9]*/; 
     fi
 done
 shopt -u nullglob
+
+# Screenshot / scratch sweep (2026-05-30). /fix and /end visual-verification
+# captures land in main's re/screenshots/ (untracked, gitignored scratch). They
+# are throwaway evidence and the user does not want them kept — sweep so they
+# don't accumulate. ONLY re/screenshots/ — never re/assets, re/analysis,
+# re/sessions, or any tracked/important path.
+if [ -d C:/Users/maria/Desktop/Proyectos/TD5RE/re/screenshots ]; then
+    rm -rf C:/Users/maria/Desktop/Proyectos/TD5RE/re/screenshots
+    echo "swept re/screenshots/ (throwaway verification captures)"
+fi
 ```
 
 If `git branch -d` rejects (branch not fully merged): this should not happen since we just merged — report the error and do not use `-D`.
@@ -451,6 +469,23 @@ for B in $(git for-each-ref --format='%(refname:short)' \
     else
         AHEAD="$(git rev-list --count "master..${B}" 2>/dev/null || echo '?')"
         echo "BRANCH   ${B} — ${AHEAD} commit(s) not in master" >> "${REPORT}"
+    fi
+done
+
+# Orphaned per-session sentinels — `.end_pending.<tag>` left by a session that ran
+# its first /end but never confirmed (no second /end), plus any legacy bare
+# `.end_pending` from the old shared-file design. Safe to remove once the matching
+# worktree is gone; NEVER touch a sentinel whose worktree still exists (that
+# session may still be about to confirm its merge).
+for S in .claude/worktrees/.end_pending .claude/worktrees/.end_pending.*; do
+    [ -e "${S}" ] || continue
+    if [ "${S}" = ".claude/worktrees/.end_pending" ]; then
+        rm -f "${S}" && echo "removed legacy shared sentinel: ${S}"
+        continue
+    fi
+    TAG="${S#.claude/worktrees/.end_pending.}"
+    if [ ! -d ".claude/worktrees/${TAG}" ]; then
+        rm -f "${S}" && echo "removed orphaned sentinel: ${S} (worktree gone)"
     fi
 done
 ```
@@ -636,7 +671,9 @@ Next recommended action:
 
 ## Key Rules
 
-- **Never merge to master on the first `/end` invocation** — always pause at Step 5 and write the sentinel. The second `/end` invocation is the approval.
+- **Never merge to master on the first `/end` invocation** — always pause at Step 5 and write the **per-session** sentinel (`.end_pending.${SESSION_TAG}`). The second `/end` invocation is the approval.
+- **The sentinel is per-session, keyed on `SESSION_TAG`.** Never use a single shared `.end_pending` — with parallel sessions it races and can merge the wrong branch (the 2026-05-30 incident). Always recover `SESSION_TAG` from THIS conversation's scope first, and only ever merge/teardown that tag — even if an explicit `/end` re-invocation arrives with the sentinel missing.
+- **With other active `fix-*` worktrees present, SKIP Step 7 (merge master into siblings) and Step 7.5b (auto-close "merged+clean" worktrees).** A freshly-forked sibling worktree (branch == master, clean tree) is classified "merged+clean" and would be wrongly torn down, destroying a parallel session's in-progress work. Siblings self-update via their own `/end` rebase (Step 1). Only the janitor + Step 7.5a (orphaned MERGED branches with no live worktree) are safe to run while siblings are active.
 - **Never teardown the worktree without pre-unlinking the mingw junction** using the hardcoded backslash path — not `cygpath`.
 - **Never auto-resolve rebase conflicts** — always stop and surface them.
 - **Never commit `td5re.ini`, `log/`, or build artifacts**.

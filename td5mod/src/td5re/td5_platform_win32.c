@@ -57,6 +57,25 @@ static LRESULT CALLBACK TD5_WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
 
 /* Input */
 static uint8_t  s_keyboard[256];
+
+/* Rebindable keyboard scancode table, per player, in the canonical action
+ * order used by the control-config screen / original g_keyboardScanCodeTable:
+ *   0=LEFT 1=RIGHT 2=ACCELERATE 3=BRAKE 4=HANDBRAKE 5=HORN/SIREN
+ *   6=GEAR UP 7=GEAR DOWN 8=CHANGE VIEW 9=REAR VIEW
+ * P1 defaults are the original's [CONFIRMED @ g_keyboardScanCodeTable 0x00464054
+ *   = {cb cd c8 d0 10 9d 1e 2c 14 2d}].
+ * P2 defaults preserve the port's split-screen WASD layout (the original's P2
+ * keyboard defaults were not RE'd, so this is the non-regression choice).
+ * The config screen pushes rebound codes here via td5_plat_input_set_keyboard_bindings
+ * so a rebind actually takes effect in-race instead of being a write-only dead end. */
+enum { TD5_KB_BIND_COUNT = 10 };
+static uint8_t s_kb_bindings[2][TD5_KB_BIND_COUNT] = {
+    /* P1: LEFT  RIGHT ACCEL BRAKE HBRK  HORN  GUP   GDN   VIEW  REAR */
+    {     0xCB, 0xCD, 0xC8, 0xD0, 0x10, 0x9D, 0x1E, 0x2C, 0x14, 0x2D },
+    /* P2:   A     D     W     S    CAPS  TAB    E     Q     R     F  */
+    {     0x1E, 0x20, 0x11, 0x1F, 0x3A, 0x0F, 0x12, 0x10, 0x13, 0x21 },
+};
+
 static int      s_mouse_dx, s_mouse_dy;
 static uint32_t s_mouse_buttons;
 static LPDIRECTINPUT8A       s_dinput        = NULL;
@@ -905,6 +924,23 @@ void td5_plat_input_shutdown(void)
     }
 }
 
+/* Apply rebound keyboard scancodes (from the control-config screen / Config.td5)
+ * to the live binding table the in-race poll reads. `scancodes` is the canonical
+ * 10-action array; a 0 byte (DIK_NONE) is ignored so unset slots keep their
+ * default. Mirrors the original copying g_keyboardScanCodeTable into the live
+ * M2DX binding table on the menu->race transition (0x00415546). */
+void td5_plat_input_set_keyboard_bindings(int player, const uint8_t *scancodes, int count)
+{
+    if (player < 0 || player > 1 || !scancodes) return;
+    if (count > TD5_KB_BIND_COUNT) count = TD5_KB_BIND_COUNT;
+    for (int i = 0; i < count; i++) {
+        if (scancodes[i] != 0) s_kb_bindings[player][i] = scancodes[i];
+    }
+    TD5_LOG_I(LOG_TAG, "input: applied %d kb bindings P%d (view=0x%02X rear=0x%02X handbrake=0x%02X)",
+              count, player + 1, s_kb_bindings[player][8], s_kb_bindings[player][9],
+              s_kb_bindings[player][4]);
+}
+
 void td5_plat_input_poll(int slot, TD5_InputState *out)
 {
     static POINT s_last_cursor_pos;
@@ -1014,46 +1050,36 @@ void td5_plat_input_poll(int slot, TD5_InputState *out)
     out->mouse_buttons = s_mouse_buttons | s_mouse_click_latch;
     s_mouse_click_latch = 0;
 
-    /* Map keyboard to game buttons.
-     * Split-screen layout:
-     *   P1 (slot 0): Arrow keys + LShift/RShift + Space
-     *   P2 (slot 1): WASD + Q/E + Tab
-     * Single-player: all keys mapped to slot 0 (backwards compatible). */
+    /* Map keyboard to game buttons via the rebindable per-player binding table.
+     * Defaults: P1 (slot 0) = original arrow-key layout; P2 (slot 1) = WASD.
+     * Both are rebindable from the control-config screen. */
     {
         uint32_t bits = 0;
 
         #define K_DOWN(sc) (s_keyboard[(sc)] & 0x80)
 
-        if (slot == 0) {
-            /* Player 1: arrow keys + modern defaults
-             * Space=handbrake (held), Q kept as alternate, RCtrl=horn,
-             * A=gear up, Z=gear down, T=camera, X=rear view */
-            if (K_DOWN(DIK_LEFT))                     bits |= TD5_INPUT_STEER_LEFT;
-            if (K_DOWN(DIK_RIGHT))                    bits |= TD5_INPUT_STEER_RIGHT;
-            if (K_DOWN(DIK_UP))                       bits |= TD5_INPUT_THROTTLE;
-            if (K_DOWN(DIK_DOWN))                     bits |= TD5_INPUT_BRAKE;
-            if (K_DOWN(DIK_A))                        bits |= TD5_INPUT_GEAR_UP;
-            if (K_DOWN(DIK_Z))                        bits |= TD5_INPUT_GEAR_DOWN;
-            if (K_DOWN(DIK_RCONTROL))                 bits |= TD5_INPUT_HORN;
-            if (K_DOWN(DIK_SPACE))                    bits |= TD5_INPUT_HANDBRAKE;
-            if (K_DOWN(DIK_Q))                        bits |= TD5_INPUT_HANDBRAKE;
-            if (K_DOWN(DIK_T))                        bits |= TD5_INPUT_CAMERA_CHANGE;
-            if (K_DOWN(DIK_X))                        bits |= TD5_INPUT_REAR_VIEW;
-            /* Modern alternates for convenience */
-            if (K_DOWN(DIK_LSHIFT))                   bits |= TD5_INPUT_GEAR_DOWN;
-            if (K_DOWN(DIK_RSHIFT))                   bits |= TD5_INPUT_GEAR_UP;
-        } else {
-            /* Player 2: WASD + Q/E */
-            if (K_DOWN(DIK_A))                        bits |= TD5_INPUT_STEER_LEFT;
-            if (K_DOWN(DIK_D))                        bits |= TD5_INPUT_STEER_RIGHT;
-            if (K_DOWN(DIK_W))                        bits |= TD5_INPUT_THROTTLE;
-            if (K_DOWN(DIK_S))                        bits |= TD5_INPUT_BRAKE;
-            if (K_DOWN(DIK_Q))                        bits |= TD5_INPUT_GEAR_DOWN;
-            if (K_DOWN(DIK_E))                        bits |= TD5_INPUT_GEAR_UP;
-            if (K_DOWN(DIK_TAB))                      bits |= TD5_INPUT_HORN;
-            if (K_DOWN(DIK_CAPSLOCK))                 bits |= TD5_INPUT_HANDBRAKE;
-            if (K_DOWN(DIK_R))                        bits |= TD5_INPUT_CAMERA_CHANGE;
-            if (K_DOWN(DIK_F))                        bits |= TD5_INPUT_REAR_VIEW;
+        /* Table-driven: read each action's scancode from the rebindable
+         * per-player binding table (s_kb_bindings), so a key rebound on the
+         * control-config screen actually changes in-race input. The binding
+         * table is the single source of truth (faithful to the original, which
+         * reads its live M2DX binding table — itself a copy of the rebindable
+         * g_keyboardScanCodeTable). A binding of 0 (DIK_NONE) reads s_keyboard[0]
+         * which is never set, so an unbound slot is simply inert.
+         * NOTE: the previous "modern alternates" (Space=handbrake, LShift/RShift
+         * =gear) are intentionally dropped — keeping a second hardcoded key alive
+         * after a rebind is exactly the bug being fixed. */
+        {
+            const uint8_t *kb = s_kb_bindings[(slot == 0) ? 0 : 1];
+            if (K_DOWN(kb[0])) bits |= TD5_INPUT_STEER_LEFT;
+            if (K_DOWN(kb[1])) bits |= TD5_INPUT_STEER_RIGHT;
+            if (K_DOWN(kb[2])) bits |= TD5_INPUT_THROTTLE;
+            if (K_DOWN(kb[3])) bits |= TD5_INPUT_BRAKE;
+            if (K_DOWN(kb[4])) bits |= TD5_INPUT_HANDBRAKE;
+            if (K_DOWN(kb[5])) bits |= TD5_INPUT_HORN;
+            if (K_DOWN(kb[6])) bits |= TD5_INPUT_GEAR_UP;
+            if (K_DOWN(kb[7])) bits |= TD5_INPUT_GEAR_DOWN;
+            if (K_DOWN(kb[8])) bits |= TD5_INPUT_CAMERA_CHANGE;
+            if (K_DOWN(kb[9])) bits |= TD5_INPUT_REAR_VIEW;
         }
 
         #undef K_DOWN

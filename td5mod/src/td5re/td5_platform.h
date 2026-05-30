@@ -142,6 +142,12 @@ void td5_plat_input_shutdown(void);
 /** Poll input for a player slot. */
 void td5_plat_input_poll(int slot, TD5_InputState *out);
 
+/** Apply rebound keyboard scancodes (control-config screen / Config.td5) to the
+ *  live binding table the in-race poll reads. `scancodes` is the canonical
+ *  10-action array (0=LEFT,1=RIGHT,2=ACCELERATE,3=BRAKE,4=HANDBRAKE,5=HORN,
+ *  6=GEAR UP,7=GEAR DOWN,8=CHANGE VIEW,9=REAR VIEW). A 0 byte keeps the default. */
+void td5_plat_input_set_keyboard_bindings(int player, const uint8_t *scancodes, int count);
+
 /** Get raw keyboard state (256-byte scancode array). */
 const uint8_t *td5_plat_input_get_keyboard(void);
 
