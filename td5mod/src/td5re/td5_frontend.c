@@ -453,19 +453,29 @@ static const char * const k_ctrl_action_labels[10] = {
     "REAR VIEW",    /* slot 9 — DIK_X     0x2D */
 };
 
-/* Display labels for joystick binding values 2-10
- * [CONFIRMED @ 0x40FE00 case 10]: values cycle 2..10 via SNK_ControlText[value*16].
- * Content [UNCERTAIN]: fetched from LANGUAGE.DLL at runtime; port uses placeholder names. */
+/* Descriptive labels for joystick binding values 2-10.
+ *
+ * [CONFIRMED @ 0x40FE00 (ScreenControllerBindingPage)]: the binding "value"
+ * cycles 2..10 (wraps back to 2 when incremented past 10). It is NOT an index
+ * into a LANGUAGE.DLL string table — the original joystick screen renders each
+ * row from SNK_ButtonTxt ("BUTTON", LANGUAGE.DLL @ 0x100076BC) plus a 1-based
+ * digit, and the stored value is an internal STATE CODE consumed by the
+ * axis/button mask logic: value 2 -> axis-direction mask bit 1, value 3 ->
+ * axis-direction mask bit 2, values 4..10 -> button codes. (The earlier
+ * "SNK_ControlText[value*16]" / placeholder note was wrong; verified there is
+ * no per-value label asset.) The port draws a value column as a UI aid, so
+ * these strings are grounded in the confirmed state-code semantics, using the
+ * real "BUTTON" wording for the button codes. */
 static const char * const k_js_value_labels[9] = {
-    "Axis+",  /* value 2 */
-    "Axis-",  /* value 3 */
-    "Btn1",   /* value 4 */
-    "Btn2",   /* value 5 */
-    "Btn3",   /* value 6 */
-    "Btn4",   /* value 7 */
-    "Btn5",   /* value 8 */
-    "Btn6",   /* value 9 */
-    "Btn7",   /* value 10 */
+    "AXIS +",    /* value 2  — axis direction, mask bit 1 */
+    "AXIS -",    /* value 3  — axis direction, mask bit 2 */
+    "BUTTON 1",  /* value 4 */
+    "BUTTON 2",  /* value 5 */
+    "BUTTON 3",  /* value 6 */
+    "BUTTON 4",  /* value 7 */
+    "BUTTON 5",  /* value 8 */
+    "BUTTON 6",  /* value 9 */
+    "BUTTON 7",  /* value 10 */
 };
 
 /* ========================================================================

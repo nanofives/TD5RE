@@ -84,6 +84,7 @@ static LPDIRECTINPUTDEVICE8A s_di_mouse      = NULL;
 static LPDIRECTINPUTDEVICE8A s_di_joystick   = NULL;
 static char s_device_names[16][256];
 static int  s_device_types[16];  /* 0=keyboard, 1=gamepad, 2=wheel/joystick */
+static GUID s_device_guids[16];  /* DirectInput instance GUID per enumerated device (index 0 = keyboard, unused) */
 static int  s_device_count = 0;
 
 /* Multi-file logging — messages routed by module tag to separate log files.
@@ -1137,6 +1138,10 @@ static BOOL CALLBACK EnumJoysticksCallback(
                 inst->tszInstanceName,
                 sizeof(s_device_names[0]) - 1);
         s_device_names[s_device_count][255] = '\0';
+        /* Store the instance GUID so td5_plat_input_set_device can (re)create
+         * this exact device later — without it, switching to any joystick is
+         * impossible (s_di_joystick was never created). */
+        s_device_guids[s_device_count] = inst->guidInstance;
         /* Classify device type: wheel/driving=2, gamepad=1 */
         {
             BYTE dev_type = GET_DIDEVICE_TYPE(inst->dwDevType);
@@ -1201,12 +1206,66 @@ void td5_plat_input_set_device(int slot, int device_index)
         return;
     }
 
-    /* For joystick devices, re-enumerate and create the requested one */
-    /* This is simplified -- a full implementation would store GUIDs */
-    (void)device_index;
-    TD5_LOG_I(LOG_TAG, "Input device selected: slot=%d device=%d name=%s",
-              slot, device_index,
-              (device_index >= 0 && device_index < s_device_count) ? s_device_names[device_index] : "<unknown>");
+    /* For joystick devices, (re)create the requested one from its stored
+     * instance GUID. This is a port-side reimplementation on DirectInput8
+     * (the original's device-selection path is not byte-faithfully ported);
+     * the goal is simply that selecting a joystick actually produces a live
+     * s_di_joystick that the slot-0 poll path can read. */
+    if (device_index >= s_device_count) {
+        TD5_LOG_W(LOG_TAG, "Input device select: index %d out of range (count=%d)",
+                  device_index, s_device_count);
+        return;
+    }
+    if (!s_dinput) {
+        TD5_LOG_W(LOG_TAG, "Input device select: DirectInput not initialized");
+        return;
+    }
+
+    /* Drop any previously selected joystick before creating the new one. */
+    if (s_di_joystick) {
+        IDirectInputDevice8_Unacquire(s_di_joystick);
+        IDirectInputDevice8_Release(s_di_joystick);
+        s_di_joystick = NULL;
+    }
+
+    {
+        HRESULT hr = IDirectInput8_CreateDevice(s_dinput,
+                                                &s_device_guids[device_index],
+                                                &s_di_joystick, NULL);
+        if (FAILED(hr) || !s_di_joystick) {
+            TD5_LOG_W(LOG_TAG, "Input device select: CreateDevice failed hr=0x%08lX device=%d (%s)",
+                      (unsigned long)hr, device_index, s_device_names[device_index]);
+            s_di_joystick = NULL;
+            return;
+        }
+
+        /* DIJOYSTATE2 format — matches the struct the slot-0 poll reads. */
+        IDirectInputDevice8_SetDataFormat(s_di_joystick, &c_dfDIJoystick2);
+
+        /* Exclusive foreground: required for force feedback (td5_plat_ff_init
+         * reuses s_di_joystick), and reading input still works in this mode. */
+        if (s_hwnd)
+            IDirectInputDevice8_SetCooperativeLevel(s_di_joystick, s_hwnd,
+                DISCL_EXCLUSIVE | DISCL_FOREGROUND);
+
+        /* Map every absolute axis to [0, 0xFFFF] so the poll's
+         * (js.lX - 32768) centering yields a signed value about zero. */
+        {
+            DIPROPRANGE range;
+            range.diph.dwSize       = sizeof(DIPROPRANGE);
+            range.diph.dwHeaderSize = sizeof(DIPROPHEADER);
+            range.diph.dwHow        = DIPH_DEVICE;
+            range.diph.dwObj        = 0;
+            range.lMin              = 0;
+            range.lMax              = 0xFFFF;
+            IDirectInputDevice8_SetProperty(s_di_joystick, DIPROP_RANGE, &range.diph);
+        }
+
+        IDirectInputDevice8_Acquire(s_di_joystick);
+    }
+
+    TD5_LOG_I(LOG_TAG, "Input device selected: slot=%d device=%d name=%s (joystick created)",
+              slot, device_index, s_device_names[device_index]);
 }
 
 /* ========================================================================

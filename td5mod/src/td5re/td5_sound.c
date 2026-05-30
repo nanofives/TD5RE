@@ -782,8 +782,9 @@ void td5_sound_update_audio_mix(void)
              * Viewer vehicle horn/siren tracked audio (per-vehicle)
              * ---------------------------------------------------------- */
             if ((int)veh == td5_game_get_player_slot(pass)) {
-                /* Check if this is a "dead" vehicle (all -1 bytes at identity check) */
-                /* Simplified: check if vehicle is active */
+                /* Horn/siren tracked-audio mix for the viewer vehicle. The
+                 * "dead vehicle" identity check is applied at the play/modify
+                 * decision below (see comment there). */
 
                 /* Get lateral slip for skid/horn volume */
                 int slip_front = actor->front_axle_slip_excess;
@@ -841,8 +842,23 @@ void td5_sound_update_audio_mix(void)
                     final_pitch = sound_apply_doppler_pitch(tracked_pitch, doppler);
                 }
 
-                /* Play or modify tracked audio */
-                if (s_tracked_audio_state[state_idx] == ENGINE_STATE_STOPPED) {
+                /* Dead-vehicle identity check [CONFIRMED @ 0x00440cf3..0x00440d0e
+                 * in UpdateVehicleAudioMix 0x00440B00]: an empty/dead actor slot
+                 * has a contiguous 4-byte identity tag at +0x371..+0x374 set to
+                 * all 0xFF (-1) by UpdateRaceActors 0x00436a70 /
+                 * InitializeRaceVehicleRuntime 0x0042f140. When dead, the original
+                 * stops the tracked siren channel (DXSound::Stop on the +0x14 slot)
+                 * if it is playing and skips the play/modify. Active slots run the
+                 * normal play-or-modify path. */
+                const uint8_t *id_tag = (const uint8_t *)actor + 0x371;
+                int veh_dead = (id_tag[0] == 0xFF && id_tag[1] == 0xFF &&
+                                id_tag[2] == 0xFF && id_tag[3] == 0xFF);
+                if (veh_dead) {
+                    if (s_tracked_audio_state[state_idx] != ENGINE_STATE_STOPPED) {
+                        slot_stop(slot_offset + 0x14);
+                        s_tracked_audio_state[state_idx] = ENGINE_STATE_STOPPED;
+                    }
+                } else if (s_tracked_audio_state[state_idx] == ENGINE_STATE_STOPPED) {
                     slot_play(slot_offset + 0x13, 1, vol_atten, pan, final_pitch);
                     s_tracked_audio_state[state_idx] = 1;
                 } else {
