@@ -1751,14 +1751,36 @@ void td5_hud_draw_finish_position(int position)
     float u0 = (float)(col * 16 + s_numbers_atlas->atlas_x) + 0.5f;
     float v0 = (float)(row * 24 + s_numbers_atlas->atlas_y) + 0.5f;
 
-    /* Centered digit: base 16x24 cell scaled ~1.5x (24x36). */
-    const float scale = 1.5f;
-    float w = 16.0f * scale;
-    float h = 24.0f * scale;
-    float cx = (float)g_td5.render_width  * 0.5f;
-    float cy = (float)g_td5.render_height * 0.5f;
+    /* Same size as the in-race checkpoint indicator digit: a 16x24 NUMBERS cell
+     * scaled by the view's HUD scale (sx,sy), centered on the screen.
+     * [user 2026-05-30: number "has to be the same size as the checkpoint
+     *  indicator number" and "in the middle of the screen".] The indicator
+     *  (see td5_hud_render_overlays) draws sx*16 x sy*24 — match it exactly and
+     *  drop the prior 1.5x blow-up that read "bigger than the indicator". */
+    float sx = s_view_layout[0].scale_x;
+    float sy = s_view_layout[0].scale_y;
+    float w = 16.0f * sx;
+    float h = 24.0f * sy;
+    /* Center in HUD/view space (the indicator's basis), NOT g_td5.render_width —
+     * HUD quads live in the per-view layout space (vp_left..vp_right), which is
+     * what the checkpoint indicator centers on. Using g_td5.render_width put the
+     * digit off-center because the backbuffer != HUD virtual width. */
+    float cx = s_view_layout[0].center_x;
+    float cy = s_view_layout[0].center_y;
     float x0 = cx - w * 0.5f;
     float y0 = cy - h * 0.5f;
+
+    /* Drop-shadow pass: the same glyph in opaque black, offset down-right, so the
+     * white digit stays readable over the white victory star (white-on-white) and
+     * over bright scenery. [guards against the number "not being present" visually
+     * once the star itself became white.] */
+    static uint8_t s_finish_pos_shadow[0xB8];
+    float off = (sx > 1.0f ? sx : 1.0f) * 2.0f;
+    hud_build_quad(s_finish_pos_shadow, 0, s_numbers_atlas->texture_page,
+                   x0 + off, y0 + off, x0 + w + off, y0 + h + off,
+                   u0, v0, u0 + 15.0f, v0 + 23.0f,
+                   0xFF000000, HUD_DEPTH);
+    hud_submit_quad(s_finish_pos_shadow);
 
     static uint8_t s_finish_pos_quad[0xB8];
     hud_build_quad(s_finish_pos_quad, 0, s_numbers_atlas->texture_page,
@@ -2428,6 +2450,16 @@ void td5_hud_render_overlays(float dt)
                 0xFFFFFFFF, HUD_DEPTH
             );
             hud_submit_quad(&indicator_quad);
+        }
+
+        /* Finishing-position victory digit — drawn HERE inside the per-view loop
+         * (the same render context as the speedo/indicator, which land correctly).
+         * The post-per-view-loop HUD pass applied an ~(80,66) viewport-relative
+         * offset that pushed the digit off-centre. Main view only. */
+        if (v == 0 && g_td5.race_end_fade_state > 0) {
+            extern int td5_game_get_victory_position(void);
+            int fpos = td5_game_get_victory_position();
+            if (fpos > 0) td5_hud_draw_finish_position(fpos);
         }
 
         s_cur_view++;
