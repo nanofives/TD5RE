@@ -10457,8 +10457,19 @@ void td5_physics_rebuild_pose(TD5_Actor *actor)
 void td5_physics_set_dynamics(int mode)
 {
     s_dynamics_mode = (mode != 0) ? 1 : 0;
-    TD5_LOG_I(LOG_TAG, "Dynamics mode set to %s (%d)",
-              s_dynamics_mode ? "simulation" : "arcade", s_dynamics_mode);
+    /* Commit to the race-init flag consumed by td5_physics_init_vehicle_runtime
+     * (0x42F140) for gravity + per-car stat scaling. This is the faithful analog
+     * of the original's `gDifficultyEasy = gDynamicsConfigShadow` at the frontend
+     * transitions (0x004155F2 / 0x0041DC82). The dynamics shadow @0x00466014 is
+     * copied verbatim into gDifficultyEasy @0x004AAF84. Mapping (CONFIRMED):
+     *   mode 0 = ARCADE     -> Easy=0 -> gravity 1900 (0x76C) + car-stat boosts
+     *   mode 1 = SIMULATION -> Easy=1 -> gravity 1500 (0x5DC) + stock stats
+     * gDifficultyHard @0x004AAF80 has NO writers in the original, so the port's
+     * g_difficulty_hard stays 0 (its HARD branch is dead, matching the orig). */
+    g_difficulty_easy = s_dynamics_mode;
+    TD5_LOG_I(LOG_TAG, "Dynamics mode set to %s (%d) -> g_difficulty_easy=%d",
+              s_dynamics_mode ? "simulation" : "arcade", s_dynamics_mode,
+              g_difficulty_easy);
 }
 
 int td5_physics_get_dynamics(void)
