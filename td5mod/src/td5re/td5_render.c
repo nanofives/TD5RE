@@ -6934,6 +6934,10 @@ float   g_renderBasisMatrix[12] = { 1,0,0, 0,1,0, 0,0,1, 0,0,0 };
  * project_vertex / the shadow path 2026-05-30.]
  * ======================================================================== */
 #define TD5_DEBUG_LINE_MAX_VERTS 2048   /* 1024 segments/flush; VB holds ~4096 */
+#define TD5_DEBUG_LINE_HALF_PX   1      /* line half-thickness in px → (2*HP+1) px wide.
+                                         * D3D11 LINELIST is always 1px, so thicken by
+                                         * emitting parallel copies offset perpendicular
+                                         * in screen space. */
 
 static TD5_D3DVertex s_debug_line_verts[TD5_DEBUG_LINE_MAX_VERTS];
 static int           s_debug_line_count = 0;
@@ -6987,11 +6991,26 @@ void td5_render_debug_line_world(float x0, float y0, float z0,
      * either endpoint is behind the camera. Acceptable for a debug overlay. */
     if (!debug_line_project(x0, y0, z0, argb, &a)) return;
     if (!debug_line_project(x1, y1, z1, argb, &b)) return;
-    if (s_debug_line_count + 2 > TD5_DEBUG_LINE_MAX_VERTS) {
-        td5_render_debug_lines_flush();   /* emit full batch, keep accumulating */
+
+    /* Thicken: D3D11 lines are 1px, so emit (2*HALF_PX+1) parallel copies
+     * offset perpendicular to the segment in SCREEN space (pixels). Depth/rhw
+     * are preserved so occlusion is unchanged. */
+    float sdx = b.screen_x - a.screen_x;
+    float sdy = b.screen_y - a.screen_y;
+    float slen = sqrtf(sdx * sdx + sdy * sdy);
+    float px = 0.0f, py = 0.0f;
+    if (slen > 0.001f) { px = -sdy / slen; py = sdx / slen; }
+
+    for (int o = -TD5_DEBUG_LINE_HALF_PX; o <= TD5_DEBUG_LINE_HALF_PX; o++) {
+        TD5_D3DVertex va = a, vb = b;
+        va.screen_x += px * (float)o; va.screen_y += py * (float)o;
+        vb.screen_x += px * (float)o; vb.screen_y += py * (float)o;
+        if (s_debug_line_count + 2 > TD5_DEBUG_LINE_MAX_VERTS) {
+            td5_render_debug_lines_flush();   /* emit full batch, keep accumulating */
+        }
+        s_debug_line_verts[s_debug_line_count++] = va;
+        s_debug_line_verts[s_debug_line_count++] = vb;
     }
-    s_debug_line_verts[s_debug_line_count++] = a;
-    s_debug_line_verts[s_debug_line_count++] = b;
 }
 
 /* ============================================================
