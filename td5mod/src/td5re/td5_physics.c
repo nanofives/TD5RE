@@ -7824,12 +7824,13 @@ void td5_physics_refresh_wheel_contacts(TD5_Actor *actor)
          * earlier chassis-clamp that only halved the split and risked
          * flattening pitch. Processed in wheel order 0,1,2,3 so the left
          * partner (i-1) is already walked. */
-        if (i == 1 || i == 3) {
-            int left_span = (int)actor->wheel_probes[i - 1].span_index;
-            int diff = (int)actor->wheel_probes[i].span_index - left_span;
-            if (diff != 0 && diff >= -2 && diff <= 2)
-                actor->wheel_probes[i].span_index = (int16_t)left_span;
-        }
+        /* [FIX 2026-05-31 sub-lane-shift bounce] Axle right-wheel span-snap
+         * DISABLED. It papered over the slope-roll by forcing FR/RR onto the
+         * left partner's span, but at sub-lane-count transitions it toggles the
+         * right wheel's reference span on/off, producing the user-reported
+         * vertical bounce. The faithful 0x00403720 path walks each wheel
+         * independently and reads height from the walker's carried
+         * span+sub_lane (see the contact-height call below). */
 
         /* Mirror the original's ComputeActorTrackContactNormalExtended
          * prefix: write contact_vertex_A/B to the probe based on its
@@ -7877,10 +7878,18 @@ void td5_physics_refresh_wheel_contacts(TD5_Actor *actor)
          *
          * Also retrieves the span surface normal (orig FUN_00445A70 → actor+
          * 0x250+i*8, the "wcv" consumed by UpdateVehicleSuspensionResponse). */
+        /* [FIX 2026-05-31] The BEST-FIT-lane rationale in the comment above is
+         * SUPERSEDED. Per-tick lane re-selection (bestlane) made best_lane jump
+         * discontinuously across sub-lane-count transitions, popping ground_y
+         * (the user-reported bounce). We now use the walker's carried sub_lane,
+         * faithful to 0x00403720 -> 0x00445450. If the slope-roll (2026-05-27)
+         * returns, the real bug is the walker's sub_lane carry in
+         * resolve_neighbor / update_position_recursive, not the height call. */
         int16_t span_normal[3] = {0, 4096, 0};  /* default: flat upward normal (magnitude 4096) */
         {
-            ground_y = td5_track_compute_contact_height_bestlane(
+            ground_y = td5_track_compute_contact_height_with_normal(
                 probe_span,
+                (int)actor->wheel_probes[i].sub_lane_index,
                 actor->wheel_contact_pos[i].x,
                 actor->wheel_contact_pos[i].z,
                 span_normal);
