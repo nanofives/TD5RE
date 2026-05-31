@@ -5314,8 +5314,25 @@ void td5_physics_update_suspension_response(TD5_Actor *actor)
         bounce   /= cnt_grounded;
     }
 
-    /* PlayVehicleSoundAtPosition(0x17, bounce*50, ...) call from the
-     * original is omitted — sound side is stubbed elsewhere. */
+    /* [FIX 2026-05-31 falling-car-ground-impact-sound] Faithful port of the
+     * normal-mode wheel-LANDING thud from UpdateVehicleSuspensionResponse
+     * @0x004057F0. Orig: after averaging the per-just-landed-wheel impact into
+     * `bounce` (iVar8), if bounce > 0x14 it plays sound 0x17 (Bottom*.wav,
+     * 4 variants) at volume bounce*0x32, freq 0x5622, positioned at the actor
+     * world_pos (+0x1FC). This is the "car falls off a slope and hits the
+     * ground" thud the user reported missing — a SEPARATE emitter from the
+     * collision/scripted-recovery thud at 0x004096B0 (which only runs in
+     * vehicle_mode==1). RE basis: Ghidra agent (ab81bbcf) confirmed
+     * iVar8>0x14 → PlayVehicleSoundAtPosition(0x17, iVar8*0x32, 0x5622,
+     * actor+0x1FC, 4); the *0x32 multiplier is also corroborated by this
+     * function's own line-by-line audit (the prior `bounce*50` stub comment).
+     * Previously omitted ("sound side stubbed") → no landing thud on falls. */
+    if (bounce > 0x14) {
+        int32_t world_pos[3] = { actor->world_pos.x,
+                                 actor->world_pos.y,
+                                 actor->world_pos.z };
+        td5_sound_play_at_position(0x17, bounce * 0x32, 0x5622, world_pos, 4);
+    }
 
     /* Apply roll/pitch corrective torque + Y velocity restore.
      *
