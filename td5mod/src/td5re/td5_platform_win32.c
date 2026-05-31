@@ -1984,12 +1984,25 @@ static LONG vol_to_ds(int volume)
     return (LONG)(-50 * (100 - volume));
 }
 
-/** Convert -100..+100 pan to DS pan range (-10000..+10000). */
+/** Pass through a native DirectSound-scale pan (-10000..+10000).
+ *
+ * The TD5 sound module (td5_sound.c) emits pans already in DirectSound's
+ * native units, mirroring the original game's DXSound::Modify calls:
+ *   0           = centered (most sounds; all non-split-screen AI/traffic)
+ *   +/-~491 max = single-player steering pan (UpdateVehicleAudioMix 0x441160:
+ *                 steering_command * -0x51EB851F >> 38, range +/-0x18000)
+ *   +/-10000    = split-screen viewport sides (literal in the original)
+ *
+ * The previous implementation clamped the input to +/-100 then multiplied by
+ * 100, which turned the subtle +/-491 steering pan into a full hard +/-10000
+ * pan -- the "very aggressive stereo when steering" bug. (Split-screen +/-10000
+ * survived only by coincidence: clamp to +/-100 then x100 = +/-10000.)
+ * Clamp to the native DirectSound range and pass through unchanged. */
 static LONG pan_to_ds(int pan)
 {
-    if (pan < -100) pan = -100;
-    if (pan > 100)  pan = 100;
-    return (LONG)(pan * 100);
+    if (pan < -10000) pan = -10000;
+    if (pan >  10000) pan =  10000;
+    return (LONG)pan;
 }
 
 static DWORD td5_audio_translate_frequency(int buffer_index, int frequency)

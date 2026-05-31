@@ -86,11 +86,24 @@ static const char *s_ambient_wav_names[TD5_SOUND_AMBIENT_COUNT] = {
     "Gear1.wav"     /* slot 36 */
 };
 
-/** Traffic engine variant WAV filenames (matches table at 0x474A4C). */
+/** Traffic engine variant WAV filenames.
+ *
+ * The original table @0x474A4C maps variant 0/1/2 -> {Engine0.wav, car.wav,
+ * diesel.wav}, indexed by GetTrafficVehicleVariantType @0x443240. BUT car.wav
+ * and diesel.wav exist in NO original archive -- SOUND.ZIP ships only
+ * engine0.wav..engine5.wav (and only engine0 is referenced by the table). So
+ * the ORIGINAL game itself loads no engine sound for traffic variants 1/2
+ * (which covers most traffic), leaving them silent -- evidently a dev filename
+ * bug (6 engine variants shipped, 5 unused).
+ *
+ * DEVIATION (user-approved 2026-05-31): point the two missing names at the
+ * shipped engine1.wav / engine2.wav so traffic cars are actually audible,
+ * restoring the apparent dev intent. To restore byte-faithful (silent)
+ * behavior, change these back to "car.wav" / "diesel.wav". */
 static const char *s_traffic_engine_wavs[3] = {
-    "Engine0.wav",  /* variant 0: generic */
-    "car.wav",      /* variant 1: car */
-    "diesel.wav"    /* variant 2: diesel/truck */
+    "Engine0.wav",  /* variant 0: generic (faithful; exists) */
+    "engine1.wav",  /* variant 1: was "car.wav"    (missing in all archives) */
+    "engine2.wav"   /* variant 2: was "diesel.wav" (missing in all archives) */
 };
 
 /** Frontend SFX WAV paths (10 entries, slots 1-10). Original at 0x414640. */
@@ -931,8 +944,19 @@ void td5_sound_update_audio_mix(void)
             int engine_vol;
             int engine_pitch;
 
-            if (raw_speed < 1000 && s_reverb_flag[veh]) {
-                /* Diesel/reverb mode: fixed low-frequency idle */
+            /* Stationary idle branch. [CONFIRMED @ 0x00440fe4:
+             *   MOV ECX,[ESI*4 + 0x4c382c]; TEST ECX,ECX; JNZ <moving>]
+             * The original takes the fixed-pitch idle (REV state, 22050Hz) only
+             * when the per-actor reverb-mode flag == 0, i.e. for NON-reverb cars.
+             * The player (slot 0) is loaded with the reverb flag SET
+             * (td5_game.c: is_reverb = (i == 0)), so the player takes the moving
+             * DRIVE branch even when stationary (low engine rumble + small rand
+             * jitter), while AI cars get the fixed idle. The port had this
+             * inverted -- testing s_reverb_flag[veh] (true) instead of
+             * !s_reverb_flag[veh] -- so the player's stationary "rev sound" was
+             * a wrong fixed 22050Hz whine instead of the idle rumble. */
+            if (raw_speed < 1000 && !s_reverb_flag[veh]) {
+                /* Non-reverb (AI) car idle: fixed low-frequency rev loop */
                 engine_target_state = ENGINE_STATE_REV;
                 engine_vol   = 0x50; /* ~63% of max */
                 engine_pitch = TD5_SOUND_FREQ_22050;
@@ -1031,8 +1055,26 @@ void td5_sound_update_audio_mix(void)
                     slot_modify(slot_offset + 0x13, skid_vol, pan,
                                           TD5_SOUND_FREQ_22050);
                 }
-                if (skid_val == 0 && s_skid_playing[pass] != 0) {
+                /* Stop the skid loop when the slip returns to zero OR the race
+                 * has ended. The original re-triggers SkidBit and stops it via
+                 * DXSound::Status==0 (0x0044148d), so a frozen slip value at the
+                 * race-end physics freeze never leaves a screech hanging. The
+                 * port's intensity-driven loop must be stopped explicitly on
+                 * race-end, otherwise a finish-while-sliding leaves the skid
+                 * screech stuck for the remainder of the race/results screen. */
+                if (s_skid_playing[pass] != 0 &&
+                    (skid_val == 0 || s_race_end_flag != 0)) {
                     slot_stop(slot_offset + 0x13);
+                    s_skid_playing[pass] = 0;
+                    TD5_LOG_I(LOG_TAG,
+                              "Skid stop: pass=%d skid_val=%d race_end=%d",
+                              pass, skid_val, s_race_end_flag);
+                }
+                /* Defensive: if the loop channel is no longer playing (stolen by
+                 * channel recycling), clear the latch so it can re-arm cleanly
+                 * instead of being stuck "playing" forever. */
+                else if (s_skid_playing[pass] != 0 &&
+                         !slot_is_playing(slot_offset + 0x13)) {
                     s_skid_playing[pass] = 0;
                 }
             } else {
@@ -1666,4 +1708,15 @@ void td5_sound_set_gear_state(int vehicle, int gear)
 void td5_sound_set_race_end(int ended)
 {
     s_race_end_flag = ended;
+    if (ended) {
+        /* Guarantee no skid screech survives the finish, even if the audio mix
+         * loop happens not to re-enter the viewer block this frame (e.g. replay
+         * takeover). Skid loop slot is 0x13 for P1, +DUP_OFFSET for P2. */
+        for (int p = 0; p < 2; p++) {
+            if (s_skid_playing[p]) {
+                slot_stop((p ? TD5_SOUND_DUP_OFFSET : 0) + 0x13);
+                s_skid_playing[p] = 0;
+            }
+        }
+    }
 }
