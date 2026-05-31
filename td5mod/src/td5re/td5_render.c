@@ -2655,22 +2655,44 @@ void td5_render_configure_projection(int width, int height)
     s_focal_length = (float)width * 0.5625f;
     s_inv_focal    = 1.0f / s_focal_length;
 
-    /* Near/far clip. far_cull is driven by the pause-menu VIEW slider so
-     * the player can dial back render distance for performance. The slider
-     * MUST be applied here (inside configure_projection) — track + scenery
-     * render before td5_render_actors_for_view in the per-viewport flow,
-     * so applying the slider only inside actors_for_view (as an earlier
-     * iteration did) leaves the track horizon stuck at DEFAULT_FAR_CULL
-     * regardless of slider position. far_clip stays at the constant max
-     * to keep z-buffer depth distribution stable across slider moves. */
+    /* Near/far clip.
+     *
+     * [FIX 2026-05-31 distant-building-popin] far_cull is a FIXED constant in
+     * the original — round(3.0f * 65000.0f) = 195000, stored at 0x00467360,
+     * computed @ 0x0042D47C-0x0042D48E [CONFIRMED]. It is NOT scaled by the
+     * pause-menu VIEW slider. The slider instead reduces render distance by
+     * lowering the number of MODELS.DAT span ENTRIES walked per frame
+     * (effectiveSpans / frac_scaled path @ :1996 and :2110, matching orig
+     * RunRaceFrame 0x42BB2E-0x42BC3C [CONFIRMED]).
+     *
+     * The prior port made far_cull itself slider-driven (5000..65536) — ~3x to
+     * ~39x nearer than the original 195000. A span's MODELS.DAT building could
+     * be IN the entry window (submitted) yet frustum-REJECTED by the per-mesh
+     * bounding-sphere test (td5_render_is_sphere_visible @ :1567 /
+     * td5_render_test_mesh_frustum @ :1627) until the camera advanced close
+     * enough — so distant buildings "popped" into view and could draw in front
+     * of nearer geometry that crossed the threshold on a different frame.
+     * Pinning far_cull to the fixed 195000 lets the whole visible scene resolve
+     * in a single pass, as the original does ("everything at once").
+     *
+     * Safe with DepthClipEnable=FALSE (d3d11_backend.c:504): geometry past
+     * view_z=65479 gets depth_z>1.0 CLAMPED (not clipped) to the far plane,
+     * mirroring the original's D3D3 XYZRHW depth-clamp. far_clip (depth
+     * normalization 1/65479) is left unchanged — it is a separate, CONFIRMED
+     * value and must not track far_cull (doing so would distort near-camera
+     * z-buffer precision). */
     s_near_clip = DEFAULT_NEAR_CLIP;
     s_far_clip  = DEFAULT_FAR_CLIP;
+    s_far_cull  = DEFAULT_FAR_CULL;   /* orig 0x0042D48E = 195000, slider-independent */
     {
-        const float MIN_FAR_CULL = 5000.0f;
-        const float MAX_FAR_CULL = (float)DEFAULT_FAR_CULL;
-        float frac = td5_save_get_view_distance();
-        if (frac < 0.0f) frac = 0.0f; else if (frac > 1.0f) frac = 1.0f;
-        s_far_cull = MIN_FAR_CULL + (MAX_FAR_CULL - MIN_FAR_CULL) * frac;
+        static int s_farcull_logged = 0;
+        if (!s_farcull_logged) {
+            TD5_LOG_I(LOG_TAG,
+                "far_cull pinned to fixed %.0f (orig 0x42D48E); VIEW slider drives "
+                "MODELS.DAT span entry count only, not the frustum far plane",
+                s_far_cull);
+            s_farcull_logged = 1;
+        }
     }
 
     /* Horizontal frustum half-plane normals */
