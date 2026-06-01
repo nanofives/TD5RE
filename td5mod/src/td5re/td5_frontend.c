@@ -4777,30 +4777,32 @@ static void frontend_render_controller_binding_overlay(float sx, float sy) {
     /* ---------------------------------------------------------------
      * Keyboard capture prompt — shown during states 20/25/26/27.
      *
-     * [CONFIRMED @ 0x40FE00 case 0x19]: action label drawn at y=0x18 (24)
-     * on 448×64 header surface; one label at a time per slot.
-     * [UNCERTAIN] Surface blit origin estimated at canvas y=130.
-     * Shows: "PRESS KEY FOR: [ACTION]" + progress counter.
-     * --------------------------------------------------------------- */
+     * [CONFIRMED @ 0x40FE00 case 0x19] action label at y=0x18 (24) on a 448×64 header
+     * surface blitted at dest (cx-0xc8, cy-0x9f) = (120, 81). So the action label sits at
+     * canvas y = 81 + 24 = 105; the prompt line above it. Prompt text = SNK_PressKeyTxt =
+     * "PRESS THE KEY TO USE FOR". [origin RE-confirmed 2026-06-01, replaces y=130 estimate.] */
     if (s_ctrl_input_source == 0 &&
         (s_inner_state == 20 || s_inner_state == 25 ||
          s_inner_state == 26 || s_inner_state == 27)) {
         float cx = 320.0f * sx;
+        float hdr_y = 81.0f * sy;            /* 448x64 header surface dest top */
 
-        static const char k_prompt[] = "PRESS KEY FOR:";
+        static const char k_prompt[] = "PRESS THE KEY TO USE FOR";  /* SNK_PressKeyTxt */
         float pw = fe_measure_text(k_prompt, sx);
-        fe_draw_text(cx - pw * 0.5f, 150.0f * sy, k_prompt, 0xFFCCCCCC, sx, sy);
+        fe_draw_text(cx - pw * 0.5f, hdr_y + 4.0f * sy, k_prompt, 0xFFCCCCCC, sx, sy);
 
         int slot_idx = s_ctrl_kb_slot;
         if (slot_idx >= 10) slot_idx = 9;
         const char *aname = k_ctrl_action_labels[slot_idx];
         float aw = fe_measure_text(aname, sx * 1.3f);
-        fe_draw_text(cx - aw * 0.5f, 178.0f * sy, aname, 0xFFFFFFFF, sx * 1.3f, sy * 1.3f);
+        fe_draw_text(cx - aw * 0.5f, hdr_y + 24.0f * sy, aname, 0xFFFFFFFF, sx * 1.3f, sy * 1.3f);
 
+        /* Progress counter is a PORT-ONLY UX addition (original has no "%d / 10" line);
+         * anchored below the header surface. [register: EXTRA, harmless] */
         char prog[16];
         snprintf(prog, sizeof(prog), "%d / 10", s_ctrl_kb_slot);
         float pgw = fe_measure_text(prog, sx * 0.8f);
-        fe_draw_text(cx - pgw * 0.5f, 210.0f * sy, prog, 0xFF999999, sx * 0.8f, sy * 0.8f);
+        fe_draw_text(cx - pgw * 0.5f, hdr_y + 56.0f * sy, prog, 0xFF999999, sx * 0.8f, sy * 0.8f);
 
         TD5_LOG_D(LOG_TAG, "CtrlBind overlay: keyboard path, slot=%d action=%s",
                   s_ctrl_kb_slot, aname);
