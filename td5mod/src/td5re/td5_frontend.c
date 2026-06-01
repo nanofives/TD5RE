@@ -4245,35 +4245,66 @@ static void frontend_render_two_player_options_overlay(float sx, float sy) {
 }
 
 static void frontend_render_race_type_description(float sx, float sy) {
-    /* [FIXED 2026-06-01] Orig (0x4168B0 state 4) shows the single localized race-type
-     * NAME from SNK_RaceTypeText, indexed by the hovered button's race-type id — NOT
-     * the multi-line English blurbs the port invented (which exist nowhere in the
-     * original). SNK_RaceTypeText[12] = SINGLE RACE / CHAMPIONSHIP CUP / ERA CUP /
-     * CHALLENGE CUP / PITBULL CUP / MASTERS CUP / ULTIMATE CUP / DRAG RACING / COP CHASE
-     * / TIME TRIALS / CUP RACE / CONTINUE CUP. Map the screen-6 button index to that. */
-    static const char *k_snk_race_type_text[12] = {
-        "SINGLE RACE", "CHAMPIONSHIP CUP", "ERA CUP", "CHALLENGE CUP", "PITBULL CUP",
-        "MASTERS CUP", "ULTIMATE CUP", "DRAG RACING", "COP CHASE", "TIME TRIALS",
-        "CUP RACE", "CONTINUE CUP"
+    /* [FIXED 2026-06-01, corrected] Orig (0x4168B0 case 4/9) draws a MULTI-LINE localized
+     * description into a 0x110x0xB4 (272x180) panel: line 0 = race-type NAME (big font,
+     * centered, Y=0); lines 1.. = description (12px small font, centered, Y=32 step +12,
+     * stop at Y>=176). The text is SNK_RaceTypeText[gt] — each entry is a NUL-separated
+     * line LIST (double-NUL terminated), re-extracted byte-faithfully from Language.dll.
+     * (My prior "name-only" version was wrong: the SNK dump had truncated each entry to
+     * its first segment, so I deleted the real descriptions. These ARE the original text.) */
+    static const char *k_race_desc[12][13] = {
+        /* 0 SINGLE RACE */
+        {"SINGLE RACE"," ","DEFEAT A COURSE OR","CIRCUIT AT NORMAL","DIFFICULTY BY COMING","IN FIRST TO UNLOCK A","REVERSE TRACK OR SECRET","CAR",0,0,0,0,0},
+        /* 1 CHAMPIONSHIP CUP */
+        {"CHAMPIONSHIP CUP"," ","TOTAL POINTS OVER 4 COURSES:","POINTS BASED ON YOUR FINISHING","POSITION IN EACH RACE."," ","MOSCOW, RUSSIA","EDINBURGH, SCOTLAND","SYDNEY, AUSTRALIA","BLUE RIDGE PARKWAY, NC",0,0,0},
+        /* 2 ERA CUP */
+        {"ERA CUP","TOTAL TIME OVER ALL 6 CIRCUITS.","JARASH, JORDAN","CHEDDAR CHEESE, ENGLAND","MAUI, HAWAII, USA","COURMAYEUR, ITALY","NEWCASTLE, ENGLAND","MONTEGO BAY, JAMAICA"," ","YOUR OPPONENTS AND YOUR","CAR WILL BE FROM EITHER THE","BEAUTY (NEW CARS) OR BEAST","(OLD CARS) DIVISIONS."},
+        /* 3 CHALLENGE CUP */
+        {"CHALLENGE CUP"," ","TOTAL TIME OVER 6 COURSES."," ","MOSCOW, RUSSIA","EDINBURGH, SCOTLAND","SYDNEY, AUSTRALIA","BLUE RIDGE PARKWAY, NC","MUNICH, GERMANY","HONOLULU, HAWAII",0,0,0},
+        /* 4 PITBULL CUP */
+        {"PITBULL CUP","YOU MUST PLACE FIRST ON","EACH OF 8 COURSES ON","NORMAL DIFFICULTY TO MOVE","ON TO THE NEXT CUP RACE.","MOSCOW, RUSSIA","EDINBURGH, SCOTLAND","SYDNEY, AUSTRALIA","BLUE RIDGE PARKWAY, NC","MUNICH, GERMANY","HONOLULU, HAWAII","SAN FRANCISCO, CA, USA","KYOTO, JAPAN"},
+        /* 5 MASTERS CUP */
+        {"MASTERS CUP"," ","TOTAL TIME OVER 10 COURSES."," ","10 RANDOMLY CHOSEN CARS","WILL BE AT YOUR DISPOSAL."," ","AFTER YOU USE A VEHICLE IN","YOUR MOTOR POOL, YOU MAY","NOT USE IT AGAIN FOR THE","DURATION OF THE CUP.",0,0},
+        /* 6 ULTIMATE CUP */
+        {"ULTIMATE CUP"," ","TOTAL POINTS OVER 12 COURSES."," ","POINTS ARE TABULATED FOR","AVERAGE SPEED OVER THE","LENGTH OF THE COURSE."," ","POINTS STOP ACCUMULATING","FOR BEING STOPPED BY THE COPS,","FOR CRASHES, HITTING WALLS AND","RUNNING OFF THE ROAD.",0},
+        /* 7 DRAG RACING */
+        {"DRAG RACING"," ","CHOOSE YOUR CAR.....","THEN THROW DOWN THE HAMMER","AND WATCH THE SMOKE FLY!",0,0,0,0,0,0,0,0},
+        /* 8 COP CHASE */
+        {"COP CHASE"," ","CHOOSE ONE OF THE COP CARS","AND PULL OVER THOSE LAWLESS","HOOLIGANS WHO ARE SPEEDING","THROUGH YOUR TOWN. HIT THE SIREN","AND SPIN THE CARS OUT TO GIVE OUT","THE TICKETS AND INSURANCE POINTS.",0,0,0,0,0},
+        /* 9 TIME TRIALS */
+        {"TIME TRIALS"," ","TAKE ON THE CLOCK WITH","TRAFFIC TO SEE HOW YOU FARE","IN A RACE AGAINST YOUR OWN","SKILL."," ","TIME IS KEPT FOR ALL","CHECKPOINTS AND TABULATED","AT THE END OF THE RACE.",0,0,0},
+        /* 10 CUP RACE */
+        {"CUP RACE"," ","GO UP AGAINST THE WORLDS BEST","RACERS IN A NON-SANCTIONED","TOURNAMENT.",0,0,0,0,0,0,0,0},
+        /* 11 CONTINUE CUP */
+        {"CONTINUE CUP"," ","YOU MAY SAVE A CUP RACE AND","CONTINUE IT LATER."," ","CHOOSE CONTINUE CUP TO","LOAD THE SAVED CUP RACE.",0,0,0,0,0,0},
     };
-    /* Top menu button order: 0 Single Race,1 Cup Race,2 Continue Cup,3 Time Trials,
-     * 4 Drag Race,5 Cop Chase,6 Back. Cup sub-menu: 0..5 Championship..Ultimate,6 Back. */
-    static const int k_top_to_snk[7]  = { 0, 10, 11, 9, 7, 8, -1 };
-    static const int k_cup_to_snk[7]  = { 1, 2, 3, 4, 5, 6, -1 };
+    /* Top menu buttons (0 Single Race,1 Cup Race,2 Continue Cup,3 Time Trials,4 Drag Race,
+     * 5 Cop Chase,6 Back) → SNK_RaceTypeText index. Cup sub-menu (0..5 Championship..
+     * Ultimate,6 Back) → index 1..6. [CONFIRMED @ 0x416e45 / 0x4171xx button→gameType map.] */
+    static const int k_top_to_idx[7] = { 0, 10, 11, 9, 7, 8, -1 };
+    static const int k_cup_to_idx[7] = { 1, 2, 3, 4, 5, 6, -1 };
     int btn = s_selected_button;
-    float panel_x = 358.0f * sx;
-    float panel_y = 145.0f * sy;
-    float panel_w = 272.0f * sx;
-    int snk_idx;
+    float panel_x = 358.0f * sx;   /* cx + 0x26 = 320 + 38 = 358 */
+    float panel_y = 145.0f * sy;   /* cy - 0x5f = 240 - 95 = 145 */
+    float panel_w = 272.0f * sx;   /* 0x110 */
+    int idx, line;
 
     if (!s_anim_complete) return;
     if (btn < 0 || btn > 6) btn = 0;
-    snk_idx = (s_inner_state >= 6 && s_inner_state <= 12) ? k_cup_to_snk[btn] : k_top_to_snk[btn];
-    if (snk_idx < 0) return;  /* "Back" has no race-type description */
+    idx = (s_inner_state >= 6 && s_inner_state <= 12) ? k_cup_to_idx[btn] : k_top_to_idx[btn];
+    if (idx < 0) return;  /* "Back" has no description */
 
-    /* Single centered localized name (24px), matching the original's one-line draw. */
-    fe_draw_text(panel_x + (panel_w - fe_measure_text(k_snk_race_type_text[snk_idx], sx)) * 0.5f,
-                 panel_y + 2.0f * sy, k_snk_race_type_text[snk_idx], 0xFFFFFFFF, sx, sy);
+    /* Line 0: race-type NAME, big font, centered at Y=0. */
+    fe_draw_text(panel_x + (panel_w - fe_measure_text(k_race_desc[idx][0], sx)) * 0.5f,
+                 panel_y + 2.0f * sy, k_race_desc[idx][0], 0xFFFFFFFF, sx, sy);
+    /* Lines 1..: 12px small font (0.5 scale), centered, Y=32 step +12, stop at Y>=176. */
+    for (line = 1; line < 13 && k_race_desc[idx][line]; line++) {
+        float ly = 32.0f + (float)(line - 1) * 12.0f;
+        if (ly >= 176.0f) break;
+        const char *s = k_race_desc[idx][line];
+        fe_draw_text(panel_x + (panel_w - fe_measure_text(s, sx * 0.5f)) * 0.5f,
+                     panel_y + ly * sy, s, 0xFFFFFFFF, sx * 0.5f, sy * 0.5f);
+    }
 }
 
 /* --- Car stats sub-screen (0x40DFC0 state 0xF) ------------------------------------ */
