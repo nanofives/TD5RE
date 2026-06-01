@@ -6184,16 +6184,25 @@ static void process_traffic_forward_checkpoint_pass(TD5_Actor *actor, int slot)
     /* Vertex ordering: NOT reversed (psVar2=left_base, psVar3=left_base+lane_count)
      * [CONFIRMED @ 0x407708-0x40771C in 0x4076C0]:
      *   uVar6 = left_vertex_index
-     *   psVar2 = vertex[uVar6]                 (left base)
+     *   psVar2 = vertex[uVar6]                 (left base, NO sub_lane offset)
      *   psVar3 = vertex[uVar6 + lane_count]    (right end)
-     * Compare ProcessActorRouteAdvance which swaps: psVar2=right, psVar3=left. */
+     * Compare ProcessActorRouteAdvance which swaps: psVar2=right, psVar3=left.
+     *
+     * [FIX 2026-06-01] li_idx previously added `+ sub` (the actor's sub_lane) to
+     * the NEAR vertex — a divergence the original lacks. Independently re-confirmed
+     * via Ghidra (0x407776-0x40777B): the near vertex is vertex[left_vertex_index],
+     * and the actor sub_lane is NEVER read in 0x4076C0 (the only addend anywhere is
+     * the lane-count nibble on the FAR vertex). The inner/outer
+     * ProcessActorSegmentTransition path was already corrected 2026-05-26 (sub_lane
+     * is only the edge-gate there); this forward-checkpoint path was the last site
+     * still adding sub. Dropped — `sub` is retained only for the trace arg below. */
     int sub = (int)(int8_t)actor->track_sub_lane_index;
     if (sub < 0) sub = 0;
     int lane_count = (int)(sp->surface_attribute & 0xF);
     if (sub >= lane_count) sub = lane_count - 1;
 
-    int li_idx = (int)sp->left_vertex_index + sub;
-    int ri_idx = (int)sp->left_vertex_index + lane_count;  /* end vertex (NOT right_vertex_index) */
+    int li_idx = (int)sp->left_vertex_index;               /* psVar2 = left base (orig: NO sub) */
+    int ri_idx = (int)sp->left_vertex_index + lane_count;  /* psVar3 = end vertex (NOT right_vertex_index) */
 
     TD5_StripVertex *vl = td5_track_get_vertex(li_idx);
     TD5_StripVertex *vr = td5_track_get_vertex(ri_idx);
