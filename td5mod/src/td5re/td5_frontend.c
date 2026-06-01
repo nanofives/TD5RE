@@ -6195,6 +6195,11 @@ static void Screen_PositionerDebugTool(void) {
     case 0: /* Load Positioner.tga */
         frontend_init_return_screen(TD5_SCREEN_POSITIONER_DEBUG);
         frontend_load_tga("Front_End/Positioner.tga", "Front_End/FrontEnd.zip");
+        /* [NOTE 2026-06-01] The ORIGINAL ScreenPositionerDebugTool @0x00415030 creates
+         * NO on-screen buttons — it saves to positioner.txt purely via a keyboard edge
+         * bit (g_frontendInputEdgeBits & 0x40000). These "Save"/"Back" buttons are a
+         * PORT-ONLY dev affordance on an unreachable debug screen; kept (not faithful,
+         * but dev-only, never shown to users). [register: EXTRA, dev-screen] */
         frontend_create_button("Save", 120, 400, 96, 32);
         frontend_create_button(SNK_BackButTxt, 232, 400, 112, 32);
         s_anim_tick = 0;
@@ -7040,7 +7045,7 @@ static void Screen_ConnectionBrowser(void) {
         frontend_net_enumerate();
         frontend_load_tga("Front_End/MainMenu.tga", "Front_End/FrontEnd.zip");
         /* Create buttons: connection list, OK, Back */
-        frontend_create_button("Provider", 120, 160, 256, 32);
+        frontend_create_button(SNK_ChooseConnectionButTxt, 120, 160, 256, 32);
         frontend_create_button(SNK_OkButTxt,   -100, 0, 100, 0x20);
         frontend_create_button(SNK_BackButTxt, -100, 0, 100, 0x20);
         s_anim_tick = 0;
@@ -7123,7 +7128,7 @@ static void Screen_SessionPicker(void) {
          * Create button shifted OK/Back indices and ESC. Removed; OK is now slot 1, Back
          * slot 2. (DXPTYPE session enumeration/join is stubbed ARCH-DIV, but the button
          * set + dispatch are now faithful.) */
-        frontend_create_button("Session", 120, 160, 256, 32);  /* slot 0: session-list selector */
+        frontend_create_button(SNK_ChooseSessionButTxt, 120, 160, 256, 32);  /* slot 0: session-list selector */
         frontend_create_button(SNK_OkButTxt,     -100, 0, 100, 0x20);   /* slot 1 */
         frontend_create_button(SNK_BackButTxt,   -100, 0, 100, 0x20);   /* slot 2 */
         s_anim_tick = 0;
@@ -7284,7 +7289,7 @@ static void Screen_NetworkLobby(void) {
         /* Create UI elements: text input bar, message window, status panel,
          * "Change Car", "Start", "Exit" buttons */
         frontend_create_button("",           -0x1D0, 0, 0x1D0, 0x18);  /* text input bar */
-        frontend_create_button("Messages",   -0x200, 0, 0x200, 0x80);  /* message window */
+        frontend_create_button(SNK_MessageWindowButTxt,   -0x200, 0, 0x200, 0x80);  /* message window */
         frontend_create_button(SNK_StatusButTxt,     -0xE0,  0, 0xE0,  0x86);  /* status panel */
         frontend_create_button(SNK_ChangeCarButTxt, -200,   0, 200,   0x20);
         frontend_create_button(SNK_StartButTxt,      -0x78,  0, 0x78,  0x20);
@@ -8615,7 +8620,7 @@ static void Screen_MusicTestExtras(void) {
          * positions (the orig auto-creates then MoveFrontendSpriteRects them; slide-in
          * settles at counter 0x27): [CONFIRMED @0x418460] TRACK (120,97) 160x32 top-left;
          * OK (216,377) 96x32 at the BOTTOM (below the 160x160 cover), NOT auto-stacked. */
-        frontend_create_button("TRACK", 120, 97,  0xA0, 0x20);
+        frontend_create_button(SNK_SelectTrackButTxt, 120, 97,  0xA0, 0x20);
         frontend_create_button(SNK_OkButTxt,    216, 377, 0x60, 0x20);
         /* Load the 5 band cover-art images (Extras.zip -> re/assets/extras).
          * Idempotent (frontend_load_tga returns the existing handle if reloaded). */
@@ -10000,11 +10005,13 @@ static void Screen_RaceResults(void) {
                                 s_selected_game_type != 7 &&
                                 s_selected_game_type != 9);
             const int next_valid = is_cup ? ConfigureGameTypeFlags() : 1;
-            const char *btn0 = is_cup ? "Next Cup Race"    : "Race Again";
-            const char *btn3 = is_cup ? "Save Race Status" : "Select New Car";
+            /* [FIXED 2026-06-01] byte-exact SNK_ labels (results action menu, state 0xD):
+             * SNK_NextCupRace/RaceAgain/SaveRaceStatus/SelectNewCar/Quit, OK = SNK_OkButTxt. */
+            const char *btn0 = is_cup ? SNK_NextCupRace    : SNK_RaceAgain;
+            const char *btn3 = is_cup ? SNK_SaveRaceStatus : SNK_SelectNewCar;
             /* Cup-complete path @ 0x00422FD8: slot 4 swaps Quit→OK and the
              * Quit dispatch in state 0x10 routes to CUP_WON/CUP_FAILED. */
-            const char *btn4 = (is_cup && !next_valid) ? "OK" : "Quit";
+            const char *btn4 = (is_cup && !next_valid) ? SNK_OkButTxt : SNK_Quit;
 
             frontend_create_button(btn0,              RR_BX, RR_Y0, RR_BW, RR_BH);
             /* NOTE (2026-06-01): orig greys View Replay / View Race Data as disabled
@@ -10013,8 +10020,8 @@ static void Screen_RaceResults(void) {
              * them live (they no-op) rather than greying them ALWAYS (which would be the
              * literal result of "no replay ever available" and is arguably worse UX).
              * Revisit if/when a replay system is added. [fix_20.md S24] */
-            frontend_create_button("View Replay",     RR_BX, RR_Y1, RR_BW, RR_BH);
-            frontend_create_button("View Race Data",  RR_BX, RR_Y2, RR_BW, RR_BH);
+            frontend_create_button(SNK_ViewReplay,     RR_BX, RR_Y1, RR_BW, RR_BH);
+            frontend_create_button(SNK_ViewRaceData,  RR_BX, RR_Y2, RR_BW, RR_BH);
             frontend_create_button(btn3,              RR_BX, RR_Y3, RR_BW, RR_BH);
             frontend_create_button(btn4,              RR_BX, RR_Y4, RR_BW, RR_BH);
 
