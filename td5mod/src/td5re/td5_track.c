@@ -4133,6 +4133,63 @@ int32_t td5_track_compute_contact_height_bestlane(int span_index,
     return probe_span_lane_height(sp, best_lane, world_x, world_z, out_normal);
 }
 
+/**
+ * Ground contact height + normal using a BOUNDED (+/-1) containing-lane search
+ * around the walker's CARRIED sub_lane.
+ *
+ * [FIX 2026-06-01 residual sub-lane-shift bounce] Using the walker's carried
+ * sub_lane directly (the faithful 0x00445450 input) removed the big bounce, but
+ * the port walker's sub_lane carry across a lane-COUNT change is not byte-exact:
+ * the case-8 LEFT and case-4 BACK lateral re-tests are still unapplied (DA-T2
+ * D9/D3, see update_position_recursive). So on a left/back lateral crossing the
+ * carried lane can land ONE lane off the geometrically-containing lane, and the
+ * wheel then samples an adjacent lane's plane (slightly extrapolated) -> a small
+ * residual height step (the user-reported "smaller jumps when lanes shift").
+ *
+ * This searches only {carried, carried-1, carried+1}, prefers the carried lane,
+ * and lands on the lane that geometrically CONTAINS the wheel (boundary bits==0).
+ * The output equals the original's containing-lane height. The +/-1 bound keeps
+ * the lane selection CONTINUOUS (<= 1 lane change per tick from the carried
+ * value), so unlike the unbounded `_bestlane` it canNOT re-introduce the
+ * 2026-05-27 slope-roll (which was bestlane re-selecting a FAR lane across a
+ * transition). When the walker's carry is already correct this is a no-op.
+ */
+int32_t td5_track_compute_contact_height_bounded(int span_index, int carried_sub_lane,
+                                                 int32_t world_x, int32_t world_z,
+                                                 int16_t *out_normal)
+{
+    TD5_StripSpan *sp;
+    int lane_count, best_lane, best_score = 0x7FFFFFFF;
+    int cand[3], nc = 0;
+
+    if (span_index < 0 || span_index >= s_span_count)
+        return 0;
+
+    sp = &s_span_array[span_index];
+    lane_count = span_lane_count(sp);
+    if (lane_count < 1) lane_count = 1;
+
+    if (carried_sub_lane < 0) carried_sub_lane = 0;
+    if (carried_sub_lane > lane_count - 1) carried_sub_lane = lane_count - 1;
+    best_lane = carried_sub_lane;
+
+    /* Carried lane checked first so it wins on ties; neighbours only consulted
+     * when the carried lane does not contain the wheel. */
+    cand[nc++] = carried_sub_lane;
+    if (carried_sub_lane - 1 >= 0)              cand[nc++] = carried_sub_lane - 1;
+    if (carried_sub_lane + 1 <= lane_count - 1) cand[nc++] = carried_sub_lane + 1;
+
+    for (int k = 0; k < nc; k++) {
+        uint8_t bits = compute_boundary_bits(span_index, cand[k], world_x, world_z);
+        if (bits == 0) { best_lane = cand[k]; break; }   /* lane contains the wheel */
+        int score = 0;
+        for (uint8_t m = bits; m != 0; m >>= 1) score += (m & 1u);
+        if (score < best_score) { best_score = score; best_lane = cand[k]; }
+    }
+
+    return probe_span_lane_height(sp, best_lane, world_x, world_z, out_normal);
+}
+
 /* ========================================================================
  * Heading Computation (0x435CE0 / 0x445B90)
  *

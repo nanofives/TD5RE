@@ -195,6 +195,12 @@ int32_t td5_track_compute_contact_height_with_normal(int span_index, int sub_lan
 int32_t td5_track_compute_contact_height_bestlane(int span_index,
                                                   int32_t world_x, int32_t world_z,
                                                   int16_t *out_normal);
+/* Height + normal using a BOUNDED (+/-1) containing-lane search around the
+ * walker's carried sub_lane. Reproduces the original's containing-lane height
+ * while staying continuous across lane-count transitions (no slope-roll). */
+int32_t td5_track_compute_contact_height_bounded(int span_index, int carried_sub_lane,
+                                                 int32_t world_x, int32_t world_z,
+                                                 int16_t *out_normal);
 /* Returns nonzero if the most recent contact-height probe capped an upward
  * out-of-quad extrapolation (fast-tilt OOB launch fix). The per-wheel contact
  * refresh reads this immediately after its bestlane call to force the wheel
