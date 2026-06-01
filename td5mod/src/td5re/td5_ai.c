@@ -176,10 +176,17 @@ int32_t g_rb_ahead_scale;        /* 0x473DA0 */
 int32_t g_rb_behind_range;       /* 0x473DA4 */
 int32_t g_rb_ahead_range;        /* 0x473DA8 */
 
-/* Default throttle table (0x473D64, 6+padding entries) */
+/* Default throttle table (0x473D64, 14 int32 entries).
+ * [CONFIRMED @ memory_read 0x473D64]: raw bytes are
+ *   { 0x100, 0x100, 0x140, 0x118, 0x122, 0x140, 0, 0, 0, 0x2bc, 0, 0, 0, 0 }
+ * Index 9 = 0x2bc (700) is NON-ZERO: it is the special-encounter cop slot
+ * (slot 9). The cop is hijacked from traffic to racer-AI, and its forward
+ * throttle comes ONLY from this seed (the rubber-band recompute @0x00432D60
+ * covers slots 0-5 only). The prior port table zeroed index 9, so the cop
+ * steered toward the player but never accelerated. [FIX 2026-06-01 cops-traffic] */
 int32_t g_default_throttle[14] = {
     0x0100, 0x0100, 0x0140, 0x0118, 0x0122, 0x0140,
-    0, 0, 0, 0, 0, 0, 0, 0
+    0, 0, 0, 0x2bc, 0, 0, 0, 0
 };
 
 /* Live throttle table (0x473D2C) -- copied from default each tick,
@@ -1548,6 +1555,24 @@ void td5_ai_init_race_actor_runtime(void) {
         rs[RS_SLOT_INDEX] = i;
         rs[RS_ENCOUNTER_HANDLE] = -1;
         rs[RS_DEFAULT_THROTTLE] = g_default_throttle[i];
+        /* [CONFIRMED @ InitializeRaceActorRuntime 0x00433526]: the original
+         * seeds gActorDefaultRouteSteerBias[i] = live_throttle[i] for ALL 12
+         * actors (MOV [EAX+0x10], live[i]; loop covers the full actor pool),
+         * NOT just racers 0-5. UpdateActorRouteThresholdState reads this bias
+         * (port mirror g_actor_route_steer_bias[]) and writes it to the actor's
+         * throttle word (+0x33E) in its fallback branch. The per-tick rubber-band
+         * recompute (@0x00432D60) overwrites only slots 0-5, so the seed for the
+         * encounter-cop slot 9 (= g_default_throttle[9] = 0x2bc) must be planted
+         * here or the hijacked cop has zero throttle. The port previously left
+         * g_actor_route_steer_bias[] memset to 0 and only the rubber-band (0-5)
+         * populated it, starving slot 9. [FIX 2026-06-01 cops-traffic] */
+        g_actor_route_steer_bias[i] = g_default_throttle[i];
+        if (g_default_throttle[i] != 0 && i >= TD5_MAX_RACER_SLOTS) {
+            TD5_LOG_I(LOG_TAG,
+                      "init_actor_runtime: encounter-cop slot=%d seeded "
+                      "route_steer_bias=live_throttle=%d (0x%X)",
+                      i, g_default_throttle[i], g_default_throttle[i]);
+        }
         rs[RS_RECOVERY_STAGE] = 0;
         rs[RS_ROUTE_DIRECTION_POLARITY] = 0;
 
