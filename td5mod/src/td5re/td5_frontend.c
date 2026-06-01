@@ -833,7 +833,12 @@ static void fe_draw_surface_rect(int handle, float x, float y, float w, float h,
     td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
 }
 
-static int frontend_load_tga(const char *name, const char *archive) {
+/* Auto-slot TGA/PNG loader with explicit colorkey. frontend_load_tga() wraps this with
+ * TD5_COLORKEY_NONE (the default for full-frame backgrounds). Sprite-sheet ICONS that
+ * sit on a black background (Controllers.tga, SplitScreen.tga) must pass TD5_COLORKEY_BLACK
+ * so the black is keyed transparent — the original sets DDCKEY_SRCBLT on these surfaces
+ * (LoadFrontendTgaSurfaceFromArchive @0x412030). */
+static int frontend_load_tga_ck(const char *name, const char *archive, TD5_ColorKeyMode colorkey) {
     int existing_handle;
 
     /* Strip path prefix from entry name — the ZIP stores bare filenames */
@@ -865,7 +870,7 @@ static int frontend_load_tga(const char *name, const char *archive) {
     char png_path[256];
 
     if (td5_asset_resolve_png_path(bare_name, real_archive, png_path, sizeof(png_path))) {
-        if (!td5_asset_load_png_to_buffer(png_path, TD5_COLORKEY_NONE, &pixels, &w, &h))
+        if (!td5_asset_load_png_to_buffer(png_path, colorkey, &pixels, &w, &h))
             pixels = NULL;
     }
 
@@ -913,6 +918,11 @@ static int frontend_load_tga(const char *name, const char *archive) {
 
     free(pixels);
     return 0;
+}
+
+/* Default loader: no colorkey (full-frame backgrounds). */
+static int frontend_load_tga(const char *name, const char *archive) {
+    return frontend_load_tga_ck(name, archive, TD5_COLORKEY_NONE);
 }
 
 /**
@@ -4669,11 +4679,11 @@ static void frontend_render_control_options_overlay(float sx, float sy) {
     int slot = s_control_options_surface - 1;
     if (slot < 0 || slot >= FE_MAX_SURFACES || !s_surfaces[slot].in_use) return;
 
-    /* Controllers.tga: sprite sheet, 64x32 per controller-type icon, rows stacked vertically.
-     * Positions are absolute canvas coords from FUN_0041DF20 case4/5 steady-state:
-     *   P1 icon: x = uVar2+0x4a = 320+74 = 394,  y = uVar4-0x8f = 240-143 = 97
-     *   P2 icon: x = 394,                          y = uVar4-0x17 = 240-23  = 217
-     * Row = controller_type * 32; type 0 = keyboard, 1 = joypad, 2 = joystick. */
+    /* Controllers.tga: 64x32 device-type icon, color-keyed (black transparent).
+     * [CONFIRMED @0x0041df20 case 6]: P1 icon dest (uVar3+0x4a, uVar5-0x8f)=(394,145);
+     * P2 icon (394, uVar5-0x17)=(394,217). src (0, class*32). The icon sits at the LEFT
+     * of a 224-wide name panel anchored at the same (x,y); the device name is drawn
+     * centered within that panel (base x 0x4a), i.e. to the RIGHT of the icon. */
     int sh = s_surfaces[slot].height;
     if (sh <= 0) return;
 
@@ -4684,37 +4694,39 @@ static void frontend_render_control_options_overlay(float sx, float sy) {
     int p2_type = td5_input_get_device_type(1);
     float p1_v0 = (float)p1_type * v_row, p1_v1 = p1_v0 + v_row;
     float p2_v0 = (float)p2_type * v_row, p2_v1 = p2_v0 + v_row;
+    float p1_y = 145.0f, p2_y = 217.0f;  /* [FIXED] was 97/217 — P1 is 145, not 97 */
 
     td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
-    fe_draw_quad(394.0f * sx,  97.0f * sy, icon_w, icon_h,
+    fe_draw_quad(394.0f * sx, p1_y * sy, icon_w, icon_h,
                  0xFFFFFFFF, s_surfaces[slot].tex_page, 0.0f, p1_v0, 1.0f, p1_v1);
-    fe_draw_quad(394.0f * sx, 217.0f * sy, icon_w, icon_h,
+    fe_draw_quad(394.0f * sx, p2_y * sy, icon_w, icon_h,
                  0xFFFFFFFF, s_surfaces[slot].tex_page, 0.0f, p2_v0, 1.0f, p2_v1);
     td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
 
-    /* [FIXED 2026-06-01] Device-NAME panel. [CONFIRMED @0x0041df20]: orig draws
-     * SNK_Ctrl_Modes[class] centered below each player icon — keyboard => "%s" (name
-     * only), others => "%s %d" (name + 1-based device index). class: 0=KEYBOARD,
-     * 1=JOYSTICK, 2=JOYPAD, 3=WHEEL, 4=<NONE>. The port's td5_input_get_device_type
-     * returns 0=kbd/1=joypad/2=joystick; remap to the original SNK_Ctrl_Modes order
-     * (joystick=1, joypad=2) so the displayed name matches the original. */
+    /* [FIXED 2026-06-01] Device-NAME text TO THE RIGHT of the icon, vertically aligned
+     * with it. [CONFIRMED @0x0041df20]: SNK_Ctrl_Modes[class] — keyboard => "%s", others
+     * => "%s %d" (name + 1-based device index). class: 0=KEYBOARD/1=JOYSTICK/2=JOYPAD/
+     * 3=WHEEL/4=<NONE>. The original draws the name centered in the 224-wide (0xe0) panel
+     * starting at panel base x=0x4a; with the 64px icon at the panel's left edge the name
+     * reads to the right of the icon. Port: left-align the name just right of the icon
+     * (icon ends at 394+64=458) at the icon's vertical center. td5_input_get_device_type
+     * returns 0=kbd/1=joypad/2=joystick; remap to SNK_Ctrl_Modes order. */
     {
         static const char *ctrl_modes[5] = { "KEYBOARD", "JOYSTICK", "JOYPAD", "WHEEL", "<NONE>" };
         int p_types[2] = { p1_type, p2_type };
-        float name_y[2] = { 135.0f, 255.0f };  /* just below each 32px icon at y=97/217 */
+        float icon_y[2] = { p1_y, p2_y };
         int pi;
         for (pi = 0; pi < 2; pi++) {
             int t = p_types[pi];
-            /* td5_input device type -> SNK_Ctrl_Modes class index */
             int cls = (t == 0) ? 0 : (t == 2) ? 1 : (t == 1) ? 2 : 4;
             char buf[40];
-            if (cls == 0) {  /* keyboard: name only */
+            if (cls == 0)
                 snprintf(buf, sizeof(buf), "%s", ctrl_modes[cls]);
-            } else {         /* joystick/joypad/wheel: name + 1-based device index */
+            else
                 snprintf(buf, sizeof(buf), "%s %d", ctrl_modes[cls],
                          td5_input_get_input_source(pi) + 1);
-            }
-            fe_draw_text_centered(426.0f * sx, name_y[pi] * sy, buf, 0xFFFFFFFF, sx, sy);
+            /* Right of the 64px icon (x=394..458), vertically centered on the 32px icon. */
+            fe_draw_text(466.0f * sx, (icon_y[pi] + 8.0f) * sy, buf, 0xFFFFFFFF, sx, sy);
         }
     }
 }
@@ -7925,7 +7937,9 @@ static void Screen_ControlOptions(void) {
         frontend_init_return_screen(TD5_SCREEN_CONTROL_OPTIONS);
         TD5_LOG_D(LOG_TAG, "ControlOptions: init");
         frontend_load_tga("Front_End/MainMenu.tga", "Front_End/FrontEnd.zip");
-        s_control_options_surface = frontend_load_tga("Controllers.TGA", "Front End/frontend.zip");
+        /* [FIXED 2026-06-01] Controllers.tga icon must be BLACK-color-keyed (the original
+         * sets DDCKEY_SRCBLT @0x412030); loading without it left an opaque black box. */
+        s_control_options_surface = frontend_load_tga_ck("Controllers.TGA", "Front End/frontend.zip", TD5_COLORKEY_BLACK);
         /* Original layout: Player 1 label, Configure P1, Player 2 label, Configure P2, OK */
         frontend_create_preview_button(SNK_Player1ButTxt,  -0x100, 0, 0x100, 0x20); /* 0x41e07d: width=0x100 */
         frontend_create_button(SNK_ConfigureButTxt,         -0x100, 0, 0x100, 0x20);
