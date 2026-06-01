@@ -6617,20 +6617,25 @@ void td5_render_submit_additive_hud(uint16_t *quad_data) {
     td5_plat_render_draw_tris(verts, 4, indices, 6);
 }
 
-/* Submit a pre-built translucent quad with WORLD-space depth test enabled
- * (z_enable=1, z_write=0, alpha_ref=1). Mirrors orig
- * SetRaceRenderStatePreset(TD5_RACE_PASS_ALPHA) @ 0x0040b070: ZENABLE on,
- * ZWRITEENABLE off, ZFUNC LESSEQUAL — so world-space particles (smoke,
- * weather streaks) get occluded by opaque geometry but don't write to the
- * depth buffer.
+/* Submit a pre-built translucent quad for world-space VFX (smoke, weather
+ * streaks) so it is OCCLUDED by opaque geometry (walls, cars), matching the
+ * original. Uses TD5_PRESET_ADDITIVE_WORLD: ONE/ONE additive blend with the
+ * depth test ON (LEQUAL) and z-write off.
  *
- * KNOWN ISSUE 2026-05-24: smoke's `sz = vz / far_clip` (linear depth) does
- * NOT match the opaque mesh path's depth-buffer values (perspective NDC z),
- * so depth-test ON makes smoke fail every compare against car bodies → fully
- * invisible. Until smoke depth is reprojected into the opaque-pass z space,
- * we fall through to TRANSLUCENT_LINEAR_HUD (z_enable=0 + alpha_ref=1) which
- * matches HUD parity: smoke draws on top with soft edges but loses world
- * occlusion. Reinstating TRANSLUCENT_ANISO is one-line revert. */
+ * Why depth-tested: RE of the original (Ghidra, 2026-06-01) shows queued
+ * translucent primitives — including wheel smoke — are drawn by
+ * FlushQueuedTranslucentPrimitives @0x00431340, which RunRaceFrame @0x0042b580
+ * calls while the OPAQUE pass preset is still active (ZFUNC=LESSEQUAL, z-buffer
+ * enabled). SetRaceRenderStatePreset @0x0040b070 never touches ZENABLE, which
+ * stays TRUE scene-wide (proven by the SKY pass dodging occlusion via
+ * ZFUNC=ALWAYS rather than disabling ZENABLE), so orig smoke is depth-tested.
+ *
+ * DEPTH SPACE: the renderer is uniformly LINEAR depth (no NDC stage). Smoke's
+ * `sz` from project_vertex (line 498) is vz*(1/195000); opaque geometry writes
+ * (vz-64)*(1/195000) (clip_and_submit_polygon, line 824). They differ ONLY by
+ * the constant 64 NEAR_DEPTH_OFFSET, folded in below so the LEQUAL compare
+ * against coplanar geometry is exact. td5_render_submit_tire_mark (below) is
+ * the analogous depth-tested decal path (via TD5_PRESET_SHADOW). */
 void td5_render_submit_translucent_world(uint16_t *quad_data) {
     float *fdata;
     TD5_D3DVertex verts[4];
@@ -6645,7 +6650,10 @@ void td5_render_submit_translucent_world(uint16_t *quad_data) {
         int base = 2 + i * 7;
         verts[i].screen_x = fdata[base + 0];
         verts[i].screen_y = fdata[base + 1];
-        verts[i].depth_z  = fdata[base + 2];
+        /* Fold in the -64 NEAR_DEPTH_OFFSET that the opaque pass applies
+         * (line 824) but the shared project_vertex (line 498) omits, so smoke
+         * ties exactly with coplanar opaque geometry under the LEQUAL test. */
+        verts[i].depth_z  = fdata[base + 2] - NEAR_DEPTH_OFFSET * DEPTH_NORMALIZE_INV;
         verts[i].rhw      = fdata[base + 3];
         verts[i].diffuse  = *(uint32_t *)&fdata[base + 4];
         verts[i].specular = 0;
@@ -6654,7 +6662,7 @@ void td5_render_submit_translucent_world(uint16_t *quad_data) {
     }
 
     tex_page = (int)(*(float *)((uint8_t *)quad_data + 0x90));
-    td5_plat_render_set_preset(TD5_PRESET_ADDITIVE_OVERLAY);
+    td5_plat_render_set_preset(TD5_PRESET_ADDITIVE_WORLD);
     td5_plat_render_bind_texture(tex_page);
     td5_plat_render_draw_tris(verts, 4, indices, 6);
 }

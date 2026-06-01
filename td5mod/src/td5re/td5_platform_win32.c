@@ -2661,21 +2661,55 @@ void td5_plat_render_set_preset(TD5_RenderPreset preset)
 
     case TD5_PRESET_ADDITIVE_OVERLAY:
         /* Same blend/filter as TD5_PRESET_ADDITIVE (orig 0x0040B660 case 3:
-         * ONE/ONE additive), but with z_test OFF. Particle smoke writes its
-         * depth as linear `sz = vz/far_clip` (td5_vfx.c:777) which does NOT
-         * share the opaque pass's perspective-NDC z space — depth-test ON
-         * would reject every smoke pixel against car-body depth values.
-         * Until smoke depth is reprojected, fall back to z_test=off and
-         * trade world-occlusion for visibility. The additive blend is the
-         * critical part for color parity — orig smoke is white/glowy
-         * because of ONE/ONE, NOT because of vertex color (which is white
-         * in both paths). */
+         * ONE/ONE additive), but with z_test OFF — a 2D screen-space additive
+         * glow that draws on top of everything. Used by the victory-star pulse
+         * HUD (td5_render_submit_additive_hud). World-space smoke used to share
+         * this preset; it now uses TD5_PRESET_ADDITIVE_WORLD (z-tested) below,
+         * because the original draws smoke depth-tested (see that case). The
+         * additive blend is the critical part for color parity — the glow is
+         * white because of ONE/ONE, NOT because of vertex color. */
         s->blend_enable      = 1;
         s->src_blend         = D3D6BLEND_ONE;
         s->dest_blend        = D3D6BLEND_ONE;
         s->z_enable          = 0;
         s->z_write           = 0;
         s->z_func            = 0;
+        s->mag_filter        = 2;
+        s->min_filter        = 2;
+        s->texblend_mode     = D3DTBLEND_MODULATE;
+        s->alpha_test_enable = 1;
+        s->alpha_ref         = 1;
+        break;
+
+    case TD5_PRESET_ADDITIVE_WORLD:
+        /* Depth-tested additive smoke. Same ONE/ONE additive blend as
+         * TD5_PRESET_ADDITIVE_OVERLAY, but z_test ON (LEQUAL) so world-space
+         * particle smoke is OCCLUDED by walls/cars — matching the original.
+         *
+         * RE (Ghidra, 2026-06-01): the orig renders queued translucent
+         * primitives (incl. wheel smoke) in FlushQueuedTranslucentPrimitives
+         * @0x00431340, which is called by RunRaceFrame @0x0042b580 while the
+         * TD5_RACE_PASS_OPAQUE preset is still active — i.e. ZFUNC=LESSEQUAL
+         * with the z-buffer enabled. SetRaceRenderStatePreset @0x0040b070 only
+         * ever sets ZFUNC(0x17)+ZWRITEENABLE(0xe), never ZENABLE(7); ZENABLE
+         * stays TRUE for the whole scene (proven by the SKY pass avoiding
+         * occlusion via ZFUNC=ALWAYS rather than disabling ZENABLE).
+         * BindRaceTexturePage @0x0040b660 only sets blend+clamp, never z-state.
+         *
+         * z_write=0 (vs the orig flush's inherited ZWRITE=1): deliberate, and
+         * consistent with TD5_PRESET_ADDITIVE — additive particles shouldn't
+         * write depth (avoids near puffs suppressing farther overlapping puffs'
+         * additive contribution / self-z-fighting). polygon_offset stays 0:
+         * smoke is volumetric, not a coplanar ground decal like SHADOW, and the
+         * depth already ties exactly thanks to the -64 NEAR_DEPTH_OFFSET folded
+         * in at the submit site, so the car body correctly occludes smoke just
+         * behind it. */
+        s->blend_enable      = 1;
+        s->src_blend         = D3D6BLEND_ONE;
+        s->dest_blend        = D3D6BLEND_ONE;
+        s->z_enable          = 1;
+        s->z_write           = 0;
+        s->z_func            = 0;  /* LEQUAL */
         s->mag_filter        = 2;
         s->min_filter        = 2;
         s->texblend_mode     = D3DTBLEND_MODULATE;
