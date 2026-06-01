@@ -2479,6 +2479,22 @@ void td5_render_actors_for_view(int view_index)
             td5_render_apply_track_lighting(slot, actor);
             td5_render_compute_vertex_lighting(mesh);
 
+            /* Vehicle shadow drawn BEFORE the opaque car body. [FIX 2026-06-01
+             * shadow-over-car] The shadow is a ground decal (TD5_PRESET_SHADOW:
+             * z_test=LEQUAL, z_write=0); drawing it first lets the opaque body —
+             * rendered next with z_write=1 — paint over any shadow pixels that
+             * fall on the car. In effect this reproduces the original's deferred
+             * translucent pass result: every car body occludes the shadows.
+             *
+             * This fixes the player-ONLY over-car symptom that no depth bias
+             * could: through the port's separate shadow projection, the close
+             * player car's 1.25-scaled shadow corners project NEARER to the
+             * camera than its own lower body, so an after-body z-test let the
+             * shadow win. Drawing before the body makes the opaque body cover it
+             * regardless of depth. Shadows still show on open ground and are
+             * still occluded by walls / earlier-drawn cars via the z-test. */
+            render_vehicle_shadow_quad(actor);
+
             td5_render_prepared_mesh(mesh);
 
             /* Chrome/envmap reflection overlay (0x40C120 second pass).
@@ -2502,17 +2518,8 @@ void td5_render_actors_for_view(int view_index)
             /* Render brake light billboards (0x4011C0) */
             render_vehicle_brake_lights(actor, slot);
 
-            /* Vehicle shadow AFTER car mesh + wheels + brake lights, matching
-             * orig deferred translucent pass [CONFIRMED @ 0x40C120: shadow
-             * is queued into the translucent sort list AFTER the opaque body
-             * mesh draw at 0x40C2E4]. Uses TD5_PRESET_SHADOW (z_test=LEQUAL,
-             * z_write=0) plus a small view-space depth bias inside the helper
-             * so the shadow PASSES depth test against the track surface (no
-             * z-fight) but is OCCLUDED by closer opaque geometry (other cars,
-             * walls). Drawing before the car with z_test=0 made shadows render
-             * on top of opponents and walls when viewed from the player's
-             * camera angle — this restores correct occlusion behaviour. */
-            render_vehicle_shadow_quad(actor);
+            /* (Vehicle shadow now drawn BEFORE the car body mesh above so the
+             * body occludes it — see that call site for rationale.) */
 
             /* Tracked-actor marker (cop chase strobes) — orig
              * RenderRaceActorForView @ 0x0040c79c gates:
@@ -4326,23 +4333,31 @@ void td5_render_crossfade_surfaces(uint32_t *dst, const uint32_t *src_a,
  * The original draws shadows via a deferred translucent sort list rendered
  * AFTER all opaque geometry (car bodies, wheels, brake lights). Depth-test
  * is enabled (LESSEQUAL) so closer opaque pixels — other cars, walls,
- * environment props — correctly occlude the shadow. The -22.0f offset is a
- * pure screen-space (view-Y) nudge that places the shadow below the wheel
- * contact point; an additional view-space depth bias is applied here to
- * prevent z-fighting with the track surface (which sits at the same world
- * Y as the shadow corners).
+ * environment props — correctly occlude the shadow. The original separates the
+ * shadow from the road via the shared track projection (coplanar depths tie) and
+ * applies NO depth bias [CONFIRMED @ 0x0040C120: no D3DRENDERSTATE_ZBIAS, no sz
+ * offset]; the port can't share that projection, so it uses a tiny 2 view-z
+ * toward-camera nudge instead (see SHADOW_DEPTH_Z_BIAS).
  *
  * Source port approach:
  *   - TD5_PRESET_SHADOW (z_test=LEQUAL, z_write=0, alpha_ref=1, SRCALPHA/
  *     INVSRCALPHA). Depth test on so opponent cars and walls correctly
  *     occlude the shadow; depth write off so the shadow doesn't write to
- *     the depth buffer and break subsequent translucent passes.
- *   - The call site draws the shadow AFTER the car mesh, wheels, and
- *     brake lights, matching the orig deferred translucent sort list
- *     order. The depth bias (SHADOW_VIEW_DEPTH_BIAS) is subtracted from
- *     view-Z to bias the shadow toward the camera so it always passes the
- *     depth test against the track surface beneath, while still being
- *     occluded by closer opaque geometry (other cars, walls).
+ *     the depth buffer and break subsequent translucent passes. (Orig flushes
+ *     shadows with z_write ON; kept OFF here because the preset is shared with
+ *     tire tracks — known faithful-divergence, does not affect occlusion.)
+ *   - [FIX 2026-06-01] The call site draws the shadow BEFORE the car body mesh
+ *     (then wheels/brake lights/reflection follow the body). The opaque body,
+ *     drawn next with z_write=1, paints over any shadow pixels that fall on the
+ *     car — reproducing the original deferred pass's net result (every body
+ *     occludes the shadows) and curing the player-only over-car symptom that an
+ *     after-body z-test could not (the close player's 1.25-scaled shadow corners
+ *     project nearer than its own lower body through the separate projection).
+ *   - SHADOW_VERTICAL_OFFSET = 0: the shadow sits at the wheel-contact (ground)
+ *     plane. The orig's -22 world-Y lift causes the shadow to out-depth the
+ *     close player car in the port's separate projection (see that macro), so
+ *     the port keeps it flat on the ground and separates via the tiny depth
+ *     nudge below.
  *   - Scale corners outward from the XZ centroid by 1.25 to match the
  *     original's _g_wheelSuspensionRenderScale @ 0x00463B64 (1.25f) so
  *     the shadow has the same footprint as the original render (a 1.85f
@@ -4351,67 +4366,59 @@ void td5_render_crossfade_surfaces(uint32_t *dst, const uint32_t *src_a,
  *     original. The previous port mapping (U along left-right) rotated the
  *     texture 90° and made the shadow appear too narrow across the car —
  *     the 1.85f scale was partially compensating for that.
- *   - Corners stay at wheel-contact Y; no vertical lift is needed
- *     because the shadow is painted at ground level and then occluded
- *     by the car body via draw order, not depth test.
  *   - Subtick-interpolate corners with linear_velocity * g_subTickFraction
  *     so the shadow doesn't sawtooth-lag behind the car at speed (the
  *     car mesh is interpolated the same way at line ~1547).
  */
+/* [FIX 2026-06-01 shadow-over-car] World-space Y nudge added to all 4 shadow
+ * corners. Kept at 0 in the port — the shadow sits exactly at the wheel-contact
+ * (ground) plane, which is where a car shadow visually belongs.
+ *
+ * The ORIGINAL applies _g_shadowVerticalOffset = 0xC1B00000 = -22.0f here
+ * [CONFIRMED @ 0x0040BB70] (Y-down world, so -22 lifts the shadow 22 units UP,
+ * toward the camera). In the original that is harmless: the shadow shares the
+ * track's SINGLE projection (WritePointToCurrentRenderTransform @ 0x42E4F0 ->
+ * ClipAndSubmitProjectedPolygon @ 0x4317F0), so the lift never makes the shadow
+ * out-depth the car body.
+ *
+ * The PORT projects the shadow through a SEPARATE hand-rolled transform, so a
+ * world-Y lift turns into a real toward-camera depth offset. At the chase
+ * camera's close range that offset beats the small gap between the PLAYER car's
+ * lower-rear bumper and the ground -> shadow drew OVER the player car (opponents,
+ * far away, were unaffected -> the player-only symptom). So the port leaves this
+ * at 0 and instead uses the tiny SHADOW_DEPTH_Z_BIAS below for road separation —
+ * the same approach that shipped correctly before the D16->D32 depth change. */
 #define SHADOW_VERTICAL_OFFSET  (0.0f)
 /* [CONFIRMED 2026-05-17] g_wheelSuspensionRenderScale @ 0x00463B64 = 1.25f.
  * Previous port value 1.85f was an unverified guess (see commented-out
  * reference to "the unread _g_wheelSuspensionRenderScale") and produced
  * shadows ~1.48x linear (~2.2x area) larger than the original. */
 #define SHADOW_CORNER_SCALE     (1.25f)
-/* [CORRECTED 2026-05-26 r3] _DAT_0048DC48 (g_shadowVerticalOffset) IS 0.0f
- * in the orig binary AND _DAT_0048F070 (Y lift) is also unused, so the orig
- * relies on byte-identical projection between shadow and track polygons:
- * both go through WritePointToCurrentRenderTransform @ 0x42E4F0 followed by
- * ClipAndSubmitProjectedPolygon @ 0x4317F0. Their view-Z values literally
- * tie at the same XZ, and LEQUAL ties pass.
+/* [FIX 2026-06-01 shadow-over-car] Road-separation for the port: a TINY
+ * toward-camera depth nudge (NOT the broken 500 view-z pull, NOT a world-Y lift).
  *
- * The PORT can't get byte-identical depth this way because render_vehicle_
- * shadow_quad does its own hand-rolled projection (camera_basis · (world -
- * cam_pos)) rather than routing through clip_and_submit_polygon. Even with
- * the correct (vz - 64) / 65479 formula, floating-point ordering between
- * the two code paths can produce sub-LSB depth differences and the wheel
- * probe Y from td5_track_compute_contact_height_with_normal can land a
- * sliver below the rendered polygon's interpolated Y at a given XZ.
+ * Because the port's shadow uses a separate projection from the track, at the
+ * exact ground plane the shadow and road depths tie only to within sub-LSB
+ * jitter — some pixels lose the LEQUAL tie and the shadow drops out ("tail
+ * visible depending on angle"). A 2 view-z pull toward the camera clears that
+ * jitter so the shadow reliably wins against the coplanar road, while staying
+ * FAR below the car-body gap (tens of view-z) so it can never reach the car —
+ * including the close player car's lower-rear bumper. This is the value the port
+ * shipped successfully before the D16->D32 depth upgrade (commit 49ae1e4); the
+ * D32 regression came from ballooning it to 500 view-z, which over-shot onto the
+ * car. Expressed via DEPTH_NORMALIZE_INV so it tracks the depth normalization.
  *
- * The bias compensates by pushing the shadow slightly toward the camera in
- * view-Z so LEQUAL always passes against the track surface. 2 view-units
- * ≈ 3.05e-5 in depth space — well below the gap created by opponent cars
- * (50-100 view-units deep) or walls, so opaque geometry still occludes the
- * shadow correctly. Without this bias the user observes "shadow tail
- * visible depending on angle" because perspective only bends some corners
- * forward of the track depth — others lose the LEQUAL tie and disappear.
- *
- * Reinstates the value first shipped in 055d9b3 (zeroed in a6e5072 on the
- * mistaken assumption that the depth-formula fix alone was sufficient). */
+ * The original needs no such bias (its shadow shares the track transform, so
+ * coplanar depths tie deterministically) and has NO D3DRENDERSTATE_ZBIAS / sz
+ * offset [CONFIRMED @ 0x0040C120]. The shared TD5_PRESET_SHADOW also selects the
+ * wrapper's shadow-decal rasterizer (DepthBias=-500), which on D32_FLOAT near
+ * geometry is ~1e-7 (negligible) — left in place, harmless. Byte-faithful state
+ * would be z_write=ON (orig flushes shadows under the OPAQUE pass, ZWRITEENABLE=1
+ * @ 0x0040B070); the port keeps z_write=OFF because TD5_PRESET_SHADOW is shared
+ * with tire tracks and z-write does not affect occlusion here — known divergence. */
 #define SHADOW_VIEW_Y_OFFSET    (0.0f)
-/* [FIX 2026-06-01 shadow-flicker] Shadow depth separation moved back to a
- * VERTEX-SIDE depth bias.
- *
- * Previously this was left at 0 and ALL separation came from the shadow-decal
- * rasterizer state's constant DepthBias (-500) in the D3D11 wrapper. That works
- * for a UNORM depth buffer (bias = DepthBias * 1/2^bits, a fixed NDC step) but
- * the depth buffer was upgraded to D32_FLOAT (distant-depth fix). For a FLOAT
- * depth format, constant DepthBias is scaled by 2^(exponent(maxZ)-23), so for
- * near-camera geometry (small depth_z) it collapses to ~0 — the shadow lost its
- * offset and z-fought the road (flicker). SlopeScaledDepthBias (-1.5) still
- * works but is ~0 for a flat shadow on flat road.
- *
- * Fix: carry the offset as a fixed VIEW-Z pull toward the camera (format- and
- * precision-independent; D32 resolves it cleanly). 500 view-z units replicates
- * the proven 2026-05-26 tuning (the old -500 DepthBias was ~0.0076 NDC ≈ 500
- * view-z on the then-65479 range; -100/flicker and -1000/over-car bracketed it).
- * Expressed via DEPTH_NORMALIZE_INV so it auto-tracks the depth range:
- * depth_z = (vz - 64 - 500) * DEPTH_NORMALIZE_INV. ~500 view-z clears the road
- * (incl. bumpy/sloped terrain the flat shadow quad approximates) without
- * reaching the car body well above it. */
 #define SHADOW_VIEW_DEPTH_BIAS  (0.0f)
-#define SHADOW_PULL_VIEWZ       (500.0f)   /* world view-z units shadow is pulled toward camera */
+#define SHADOW_PULL_VIEWZ       (2.0f)   /* small toward-camera pull: clears road z-fight, far below the car gap */
 #define SHADOW_DEPTH_Z_BIAS     (SHADOW_PULL_VIEWZ * DEPTH_NORMALIZE_INV)
 
 static int   s_shadow_lookup_done = 0;
@@ -4581,10 +4588,11 @@ static void render_vehicle_shadow_quad(const TD5_Actor *actor)
         float inv_z = 1.0f / vz;
         verts[i].screen_x = -vx * s_focal_length * inv_z + s_center_x;
         verts[i].screen_y = -vy * s_focal_length * inv_z + s_center_y;
-        /* Depth_z uses orig formula (matches track polys at line ~799),
-         * then a direct depth-space bias is subtracted to push the shadow
-         * toward the camera. Bias is applied here so it ONLY affects depth
-         * compare, not projection. */
+        /* Depth_z uses the orig track-poly formula (line ~824), minus a TINY
+         * 2 view-z toward-camera nudge (SHADOW_DEPTH_Z_BIAS) so the coplanar
+         * road can't z-fight the shadow. The nudge is far below the car-body
+         * gap, so it never reaches the car (no over-car). Bias affects depth
+         * compare only, NOT screen projection (computed from raw vz above). */
         verts[i].depth_z  = (vz - NEAR_DEPTH_OFFSET) * DEPTH_NORMALIZE_INV
                             - SHADOW_DEPTH_Z_BIAS;
         verts[i].rhw      = inv_z;
