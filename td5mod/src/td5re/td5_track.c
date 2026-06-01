@@ -5462,13 +5462,21 @@ void td5_track_apply_segment_lighting(TD5_Actor *actor, int view_index)
 #endif /* legacy track-lighting skeleton */
 
 /* ========================================================================
- * Race Order (0x42F5B0 UpdateRaceOrder)
+ * Race Order — REAL owner is update_race_order() in td5_game.c
  *
- * Bubble sort on track_span_high_water (+0x86) to determine race positions.
- * Unfinished actors are sorted by forward progress; finished actors retain
- * their finish-time-based positions.
+ * The authoritative race-order pass is update_race_order() in td5_game.c (the
+ * faithful UpdateRaceOrder @0x0042F5B0 port: reads live actors via
+ * td5_game_get_actor(), bubble-sorts by track_span_high_water (+0x86)
+ * descending, writes display_position + race_position).
+ *
+ * The function below was a DEAD placeholder: it hardcoded its actor_base
+ * pointers to 0 and forced hw_a=hw_b=0, so its swap test (hw_a < hw_b) was
+ * always false — it NEVER swapped s_race_order and NEVER wrote back to actors.
+ * It was called every tick from td5_track_tick() with zero observable effect.
+ * Quarantined 2026-06-01 (the call was removed in td5_track_tick); kept under
+ * #if 0 for code-archaeology only. Do NOT re-enable — use update_race_order().
  * ======================================================================== */
-
+#if 0  /* DEAD placeholder — superseded by update_race_order() in td5_game.c */
 void td5_track_update_race_order(void)
 {
     int i, swapped;
@@ -5528,6 +5536,7 @@ void td5_track_update_race_order(void)
     /* Write back race positions to each actor's race_position field (+0x383).
      * In full integration, this would iterate actors and set the byte. */
 }
+#endif /* DEAD td5_track_update_race_order placeholder */
 
 /* ========================================================================
  * Traffic Bus FIFO (0x435930 / 0x435310)
@@ -6715,18 +6724,17 @@ void td5_track_shutdown(void)
 }
 
 /**
- * Per-tick update: runs race actor updates and traffic recycling.
+ * Per-tick traffic recycling.
  * Called from the main game loop each simulation tick.
  *
- * Corresponds to UpdateRaceActors (0x436A70) which iterates all active
- * actors, updates their track positions, checks checkpoints, normalizes
- * wrap state, and recycles traffic.
+ * Race ORDER is owned by update_race_order() in td5_game.c (the faithful
+ * UpdateRaceOrder @0x0042F5B0 port). This function previously also called a
+ * dead placeholder race-order pass (td5_track_update_race_order) that never
+ * swapped or wrote back — that no-op call was removed 2026-06-01, leaving only
+ * traffic recycling here. (This is NOT a port of UpdateRaceActors @0x436A70.)
  */
 void td5_track_tick(void)
 {
-    /* Update race order (bubble sort on high-water mark) */
-    td5_track_update_race_order();
-
     /* Recycle traffic actors that have fallen behind */
     if (g_td5.traffic_enabled) {
         td5_track_recycle_traffic_actor();
