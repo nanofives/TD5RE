@@ -468,19 +468,26 @@ static const char * const k_ctrl_action_labels[10] = {
     "REAR VIEW",    /* slot 9 — DIK_X     0x2D */
 };
 
-/* Display labels for joystick binding values 2-10
- * [CONFIRMED @ 0x40FE00 case 10]: values cycle 2..10 via SNK_ControlText[value*16].
- * Content [UNCERTAIN]: fetched from LANGUAGE.DLL at runtime; port uses placeholder names. */
+/* Display labels for joystick binding values 2-10.
+ * [CONFIRMED @ 0x40FE00 case 10]: the binding value cycles 2..10 and is labelled via
+ * SNK_ControlText[value] (the decomp's [value*16] is the byte offset into the char[12][16]
+ * array → element `value`). [RESOLVED 2026-06-01, byte-exact from Language.dll]:
+ * SNK_ControlText = {LEFT,RIGHT,ACCELERATE,BRAKE,HANDBRAKE,HORN/SIREN,GEAR UP,GEAR DOWN,
+ * CHANGE VIEW,REAR VIEW,NONE,ACCEL/BRAKE}, so values 2..10 = ACCELERATE..NONE. The prior
+ * "Axis+/Btn1.." placeholders were invented; these are the original action-name labels.
+ * (NOTE: live joystick INPUT on this screen is still a keyboard surrogate — the
+ * joystick-poll infra is on the unmerged branch fix-1780168877 — but the DISPLAYED labels
+ * are now faithful.) */
 static const char * const k_js_value_labels[9] = {
-    "Axis+",  /* value 2 */
-    "Axis-",  /* value 3 */
-    "Btn1",   /* value 4 */
-    "Btn2",   /* value 5 */
-    "Btn3",   /* value 6 */
-    "Btn4",   /* value 7 */
-    "Btn5",   /* value 8 */
-    "Btn6",   /* value 9 */
-    "Btn7",   /* value 10 */
+    "ACCELERATE",  /* value 2  = SNK_ControlText[2] */
+    "BRAKE",       /* value 3  = SNK_ControlText[3] */
+    "HANDBRAKE",   /* value 4  = SNK_ControlText[4] */
+    "HORN/SIREN",  /* value 5  = SNK_ControlText[5] */
+    "GEAR UP",     /* value 6  = SNK_ControlText[6] */
+    "GEAR DOWN",   /* value 7  = SNK_ControlText[7] */
+    "CHANGE VIEW", /* value 8  = SNK_ControlText[8] */
+    "REAR VIEW",   /* value 9  = SNK_ControlText[9] */
+    "NONE",        /* value 10 = SNK_ControlText[10] */
 };
 
 /* ========================================================================
