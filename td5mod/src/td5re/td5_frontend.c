@@ -4222,28 +4222,27 @@ static void frontend_render_music_test_overlay(float sx, float sy) {
 }
 
 static void frontend_render_two_player_options_overlay(float sx, float sy) {
-    /* [FIXED 2026-06-01] orig (0x420C70 case 4) shows the split-mode NAME and the
-     * numeric catchup LEVEL, not ON/OFF. SNK_Split_Modes={"LEFT/RIGHT","UP/DOWN"};
-     * catchup value is sprintf "%d" of the 0..9 level. The prior ON/OFF collapse hid
-     * which split layout and which catchup level were selected. */
+    /* [FIXED 2026-06-01, layout corrected] Orig (0x420c70 cases 4/5/6) composites a 224x120
+     * value panel at screen (394,97)=(cx+0x4a, cy-0x8f): the SplitScreen.tga icon at panel-top
+     * (src_y=mode*32, 64x32) with the split-mode NAME text over it at panel-local y=0, and the
+     * catchup NUMBER at panel-local y=0x50 (80). The prior port drew the value text via
+     * frontend_draw_value_centered at button[i].y+6, which collided with the icon at y=97.
+     * Also: catchup displays level+1 (1..10), not raw 0..9. [CONFIRMED @0x420f40/0x420f90/
+     * 0x420fbf: SNK_Split_Modes[mode], "%d" of g_twoPlayerCatchupAssist+1, centered in the
+     * panel.] Value column X = 394 (cx+0x4a). */
     const char *split_modes[] = { "LEFT/RIGHT", "UP/DOWN" };
     char catchup_buf[8];
+    float panel_cx = (394.0f + 112.0f) * sx;   /* panel x=394, centered text at +0xe0/2=112 */
 
     if (!s_buttons[0].active) return;
     if (!s_anim_complete) return;
-    snprintf(catchup_buf, sizeof(catchup_buf), "%d", s_catchup_level);
-    frontend_draw_value_centered(sx, sy, s_buttons[0].y + 6, split_modes[s_split_screen_mode & 1], 0xFFFFFFFF);
-    frontend_draw_value_centered(sx, sy, s_buttons[1].y + 6, catchup_buf, 0xFFFFFFFF);
 
-    /* [CONFIRMED @ 0x4210A4]: QueueFrontendOverlayRect with src_y = g_twoPlayerSplitMode << 5 (=*32)
-     * SplitScreen.tga: 64x32 icon rows; row 0=off icon, row 1=on icon.
-     * Blit position: x = canvasW/2+0x4a = 394, y = canvasH/2-0x8f = 97. */
+    /* SplitScreen.tga icon at panel-top (394,97), 64x32, row = mode. */
     if (s_split_screen_surface > 0) {
         int slot = s_split_screen_surface - 1;
         if (slot >= 0 && slot < FE_MAX_SURFACES && s_surfaces[slot].in_use) {
             int sh = s_surfaces[slot].height;
             if (sh > 0) {
-                /* s_split_screen_mode is 0 or 1 — use directly, not via bit-mask */
                 int   mode = s_split_screen_mode;  /* [CONFIRMED @ 0x420C70 g_twoPlayerSplitMode] */
                 float v_row = 32.0f / (float)sh;
                 float v0    = (float)mode * v_row;
@@ -4255,6 +4254,12 @@ static void frontend_render_two_player_options_overlay(float sx, float sy) {
             }
         }
     }
+
+    /* Split-mode NAME text at panel-local y=0 (screen y=97), centered; catchup NUMBER
+     * (level+1) at panel-local y=0x50 (screen y=177), centered. */
+    snprintf(catchup_buf, sizeof(catchup_buf), "%d", s_catchup_level + 1);
+    fe_draw_text_centered(panel_cx, 97.0f * sy,  split_modes[s_split_screen_mode & 1], 0xFFFFFFFF, sx, sy);
+    fe_draw_text_centered(panel_cx, 177.0f * sy, catchup_buf, 0xFFFFFFFF, sx, sy);
 }
 
 /* ScreenLanguageSelect overlay: full-screen LanguageScreen.tga bg + 4 flag IMAGE tiles
