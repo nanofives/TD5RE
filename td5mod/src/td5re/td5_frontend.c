@@ -4822,15 +4822,19 @@ static void frontend_render_controller_binding_overlay(float sx, float sy) {
         int slot_idx = s_ctrl_kb_slot;
         if (slot_idx >= 10) slot_idx = 9;
         const char *aname = k_ctrl_action_labels[slot_idx];
-        float aw = fe_measure_text(aname, sx * 1.3f);
-        fe_draw_text(cx - aw * 0.5f, hdr_y + 24.0f * sy, aname, 0xFFFFFFFF, sx * 1.3f, sy * 1.3f);
+        /* [FIXED 2026-06-01] action label at the header's y=0x18 (24) in NORMAL font size.
+         * The prior 1.3x scale stretched the BodyText glyph cells (exposing their black
+         * inter-glyph background = the "black box" look) AND its taller line collided with
+         * the counter below. Original draws this at the standard font size. */
+        float aw = fe_measure_text(aname, sx);
+        fe_draw_text(cx - aw * 0.5f, hdr_y + 24.0f * sy, aname, 0xFFFFFFFF, sx, sy);
 
         /* Progress counter is a PORT-ONLY UX addition (original has no "%d / 10" line);
-         * anchored below the header surface. [register: EXTRA, harmless] */
+         * anchored further below so it never collides with the action label. */
         char prog[16];
         snprintf(prog, sizeof(prog), "%d / 10", s_ctrl_kb_slot);
         float pgw = fe_measure_text(prog, sx * 0.8f);
-        fe_draw_text(cx - pgw * 0.5f, hdr_y + 56.0f * sy, prog, 0xFF999999, sx * 0.8f, sy * 0.8f);
+        fe_draw_text(cx - pgw * 0.5f, hdr_y + 60.0f * sy, prog, 0xFF999999, sx * 0.8f, sy * 0.8f);
 
         TD5_LOG_D(LOG_TAG, "CtrlBind overlay: keyboard path, slot=%d action=%s",
                   s_ctrl_kb_slot, aname);
