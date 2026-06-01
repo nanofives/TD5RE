@@ -4386,15 +4386,29 @@ void td5_render_crossfade_surfaces(uint32_t *dst, const uint32_t *src_a,
  * Reinstates the value first shipped in 055d9b3 (zeroed in a6e5072 on the
  * mistaken assumption that the depth-formula fix alone was sufficient). */
 #define SHADOW_VIEW_Y_OFFSET    (0.0f)
-/* Polygon offset now handled by the shadow-decal rasterizer state in the
- * D3D11 wrapper (DepthBias + SlopeScaledDepthBias). Vertex-side biasing is
- * left at zero: the projection is byte-identical to a track polygon at the
- * same world position, and the GPU adapts the depth offset per pixel based
- * on surface slope. Constant biases here couldn't satisfy both "win
- * against co-planar ground" AND "lose against the car body 50 units up"
- * simultaneously — the slope-scaled bias resolves that automatically. */
+/* [FIX 2026-06-01 shadow-flicker] Shadow depth separation moved back to a
+ * VERTEX-SIDE depth bias.
+ *
+ * Previously this was left at 0 and ALL separation came from the shadow-decal
+ * rasterizer state's constant DepthBias (-500) in the D3D11 wrapper. That works
+ * for a UNORM depth buffer (bias = DepthBias * 1/2^bits, a fixed NDC step) but
+ * the depth buffer was upgraded to D32_FLOAT (distant-depth fix). For a FLOAT
+ * depth format, constant DepthBias is scaled by 2^(exponent(maxZ)-23), so for
+ * near-camera geometry (small depth_z) it collapses to ~0 — the shadow lost its
+ * offset and z-fought the road (flicker). SlopeScaledDepthBias (-1.5) still
+ * works but is ~0 for a flat shadow on flat road.
+ *
+ * Fix: carry the offset as a fixed VIEW-Z pull toward the camera (format- and
+ * precision-independent; D32 resolves it cleanly). 500 view-z units replicates
+ * the proven 2026-05-26 tuning (the old -500 DepthBias was ~0.0076 NDC ≈ 500
+ * view-z on the then-65479 range; -100/flicker and -1000/over-car bracketed it).
+ * Expressed via DEPTH_NORMALIZE_INV so it auto-tracks the depth range:
+ * depth_z = (vz - 64 - 500) * DEPTH_NORMALIZE_INV. ~500 view-z clears the road
+ * (incl. bumpy/sloped terrain the flat shadow quad approximates) without
+ * reaching the car body well above it. */
 #define SHADOW_VIEW_DEPTH_BIAS  (0.0f)
-#define SHADOW_DEPTH_Z_BIAS     (0.0f)
+#define SHADOW_PULL_VIEWZ       (500.0f)   /* world view-z units shadow is pulled toward camera */
+#define SHADOW_DEPTH_Z_BIAS     (SHADOW_PULL_VIEWZ * DEPTH_NORMALIZE_INV)
 
 static int   s_shadow_lookup_done = 0;
 static int   s_shadow_page        = -1;
