@@ -242,6 +242,10 @@ int td5_plat_audio_is_playing(TD5_AudioChannel ch);
 /** Set master volume (0-100). */
 void td5_plat_audio_set_master_volume(int volume);
 
+/** Force all SFX play/modify to silence (1) or restore (0). Used to mute race
+ *  audio while the in-race pause menu is up. Does not affect CD/music. */
+void td5_plat_audio_set_muted(int muted);
+
 /** Start streaming a WAV file through a double-buffered DirectSound buffer. */
 int td5_plat_audio_stream_play(const char *wav_path, int loop);
 
