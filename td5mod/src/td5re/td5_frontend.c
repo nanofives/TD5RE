@@ -4739,13 +4739,20 @@ static void frontend_render_control_options_overlay(float sx, float sy) {
 static void frontend_render_controller_binding_overlay(float sx, float sy) {
     if (!s_anim_complete) return;
 
-    /* Controller type icon [CONFIRMED @ 0x40FE00]: per-type TGA centered at y=120 */
+    /* Controller type icon (per-type TGA centered at y=120). [FIXED 2026-06-01] Do NOT draw
+     * it during the keyboard-capture states (20/25/26/27): those show the "PRESS THE KEY TO
+     * USE FOR <action>" prompt at y=85-145, and the y=120 icon collided with the action label
+     * (read as a black/keyboard box behind "LEFT"). The device icon belongs to the idle /
+     * joystick-binding view, not the per-key capture prompt. */
+    int kb_capture = (s_ctrl_input_source == 0 &&
+                      (s_inner_state == 20 || s_inner_state == 25 ||
+                       s_inner_state == 26 || s_inner_state == 27));
     int controller_type = td5_input_get_device_type(0);
     int icon_surface = s_keyboard_icon_surface;
     if (controller_type == 1) icon_surface = s_joypad_icon_surface;
     if (controller_type == 2) icon_surface = s_joystick_icon_surface;
 
-    if (icon_surface > 0) {
+    if (!kb_capture && icon_surface > 0) {
         int slot = icon_surface - 1;
         if (slot >= 0 && slot < FE_MAX_SURFACES && s_surfaces[slot].in_use) {
             float icon_w = (float)s_surfaces[slot].width  * sx;
