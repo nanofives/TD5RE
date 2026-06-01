@@ -4739,14 +4739,18 @@ static void frontend_render_controller_binding_overlay(float sx, float sy) {
      *   Action label at x=0xa0 (160) on 448×216 surface.
      *   Row y = uStack_14 + 0x20 + i * 0x18, where
      *   uStack_14 = iVar13 + num_buttons * (-12) + 0x9a.
-     * [UNCERTAIN] iVar13=0 assumed; surface blit origin = canvas (96,130).
+     * [CONFIRMED 2026-06-01 @0x0040fe00 state 10] The 448x216 binding-list panel blits
+     * at dest (cx-0xb0, cy-5-0xc*count) = (144, cy-5-0xc*count); at 640x480 with 8 buttons
+     * that's (144,139). Action label x = panel_x + 0xa0 (160). Replaces the (96,130) estimate.
      * --------------------------------------------------------------- */
     if (s_ctrl_input_source != 0 && s_inner_state == 10) {
-        float origin_x  = 96.0f * sx;
-        float col_act_x = (96.0f + 160.0f) * sx;
         int   num = s_ctrl_num_buttons;
-        float surf_y0   = (float)(num * (-12) + 154 + 32);  /* within 448×216 surface */
-        float y_first   = (surf_y0 + 130.0f) * sy;
+        float panel_x  = 144.0f * sx;                /* cx - 0xb0 = 320-176 */
+        float origin_x = panel_x;
+        float col_act_x = panel_x + 160.0f * sx;     /* action column at panel_x + 0xa0 */
+        /* Panel top dest Y = cy - 5 - 0xc*count; rows within start at +0x20, step 0x18. */
+        float panel_y  = (240.0f - 5.0f - 12.0f * (float)num) * sy;
+        float y_first  = panel_y + 32.0f * sy;
         float ts = 0.75f;
 
         fe_draw_text(origin_x,          y_first - 20.0f * sy, "BUTTON", 0xFF888888, sx*ts, sy*ts);
@@ -4978,10 +4982,16 @@ static void frontend_render_high_score_overlay(float sx, float sy) {
  *     The port collapses this into this overlay dispatched from
  *     td5_frontend_render_ui_rects.
  *
- * [UNCERTAIN] Panel alpha: original uses opaque BltColorFillToSurface(0,0,0);
- * port uses 0xE0 so the gallery background stays dimly visible.
- * [UNCERTAIN] Column layout: simplified POS/DRIVER/CAR/TIME columns —
- * SNK_* string-surface pipeline not wired up in the port.
+ * [RESOLVED 2026-06-01] Panel: the original CLEARS its offscreen surface to black
+ * (BltColorFillToSurface 0 @0x00422685) then composites it to screen with COLOR-KEY
+ * transparency on black (QueueFrontendOverlayRect(...,0,...) trailing-0 flag) — so the
+ * black is keyed out and only the TEXT shows over the MainMenu backdrop. The port
+ * correctly draws NO panel body (an opaque quad would wrongly cover the backdrop). The
+ * old "[UNCERTAIN] 0xE0 alpha" note was stale — no such fill exists in the port now.
+ * [RESOLVED] Column layout: the port DOES wire the per-game-type SNK_ResultsTxt /
+ * SNK_DRResultsTxt / SNK_CCResultsTxt label ladder (LBL_* enum below), header X=0,
+ * value X=0x118, row step 0x18 — matching the original. The old "POS/DRIVER/CAR/TIME"
+ * note described a long-replaced high-score-style layout.
  * ========================================================================== */
 static void frontend_render_race_results_overlay(float sx, float sy) {
     /* State gate: panel is created at state 0, first drawn at state 3
@@ -9640,8 +9650,12 @@ static void Screen_ExtrasGallery(void) {
     case 2: /* Auto-advance through all images; ESC handled by global handler -> quit */
         {
             uint32_t now = td5_plat_time_ms();
-            /* Advance image every 4000ms [UNCERTAIN: original uses per-frame scroll counter
-             * starting at 0x27F; exact per-image duration not confirmed] */
+            /* [RESOLVED 2026-06-01 @0x00417d50] The original is a VERTICAL SCROLL REEL, not a
+             * paged slideshow: counter inits 0x27F (639), +1/frame, wraps -0x280 → 640-frame
+             * cycle; a new 32px-tall content row appears every (counter & 0x1f)==0 = 32 frames
+             * (~1.07s @30fps), quitting after 11 sections ('*' terminators). The port's paged
+             * 4000ms slideshow is an accepted ARCH-DIV reskin (no scroll-surface pool); 4000ms
+             * ≈ several scroll rows. Kept as ARCH-DIV; real cadence recorded for the record. */
             if (now - s_anim_start_ms >= 4000) {
                 s_gallery_pic_index++;
                 if (s_gallery_pic_index >= GALLERY_PIC_COUNT) {
