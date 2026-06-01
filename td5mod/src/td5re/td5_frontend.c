@@ -349,9 +349,11 @@ static const int s_cup_schedules[][13] = {
     /* [2] Challenge    (GT=3) @ 0x4640C8 */ {  1,  2,  3, 15,  8, 11, 13, 99, -1,-1,-1,-1,-1 },
     /* [3] Pitbull      (GT=4) @ 0x4640D8 */ {  1,  2,  3, 15,  8, 11, 13, 10, 12, 99, -1,-1,-1 },
     /* [4] Masters      (GT=5) @ 0x4640E8 */ {  1,  2,  3, 15,  8, 11, 13, 10, 12,  9, 14, 99, -1 },
-    /* [5] Ultimate     (GT=6) — RE found no schedule row; handled by jump table
-     *                  callback @ 0x4110A0 (task #2). Placeholder = Masters order. */
-    {  1,  2,  3, 15,  8, 11, 13, 10, 12,  9, 14, 99, -1 },
+    /* [5] Ultimate     (GT=6) @ 0x004640F8 [CONFIRMED 2026-06-01: real static row in
+     *     g_cupDataXorKey @0x00464084, fetched by ConfigureGameTypeFlags @0x00410CA0 —
+     *     NOT a callback. The prior "Masters placeholder" was MISSING track ids 9 and 14.
+     *     Real row bytes: 00 01 02 03 0F 08 0B 0D 0A 0C 09 0E 63 = 12 tracks + 99 term. */
+    {  0,  1,  2,  3, 15,  8, 11, 13, 10, 12,  9, 14, 99 },
 };
 
 /* Bar-fade transition lookup table (slot -> {r,g,b} bar color + type) */
@@ -3976,8 +3978,10 @@ static void frontend_render_quick_race_overlay(float sx, float sy) {
                     s_track_lock_table[s_selected_track] != 0);
     frontend_draw_value_text(sx, sy, 140, 106, car_name, 0xFFFFFFFF);
     frontend_draw_value_text(sx, sy, 140, 226, track_name, 0xFFFFFFFF);
-    if (car_locked) frontend_draw_value_text(sx, sy, 398, 126, "LOCKED", 0xFFFF4444);
-    if (track_locked) frontend_draw_value_text(sx, sy, 398, 246, "LOCKED", 0xFFFF4444);
+    /* [FIXED 2026-06-01] SNK_LockedTxt renders WHITE in the original (consistent with the
+     * CarSelect/TrackSelect LOCKED fixes); was red 0xFFFF4444 only here. */
+    if (car_locked)   frontend_draw_value_text(sx, sy, 398, 126, "LOCKED", 0xFFFFFFFF);
+    if (track_locked) frontend_draw_value_text(sx, sy, 398, 246, "LOCKED", 0xFFFFFFFF);
 }
 
 static void fe_draw_option_arrows(int btn_idx, float sx, float sy) {
@@ -5865,12 +5869,16 @@ void td5_frontend_render_ui_rects(void) {
             }
         }
 
-        /* Green highlight border (RenderFrontendDisplayModeHighlight 0x4263e0).
+        /* Selection highlight border (RenderFrontendDisplayModeHighlight 0x4263e0).
          * 2px outline, mouse-hover only. Driven by the separate hover index
-         * (DAT_00498700), NOT the selection index — hover does not select. */
+         * (DAT_00498700), NOT the selection index — hover does not select.
+         * [FIXED 2026-06-01] Color = 16-bit 0xC000 (565) = DARK RED, not green.
+         * The original BltColorFillToSurface(0xC000,...) is R~0x18/0x1F,G=0,B=0;
+         * the port's prior 0xFF008000 green was WRONG. RGBA equivalent ~0xFFC50000.
+         * Insets inL=20/inR=22/inT=4/inB=6 + 2px bars match the original exactly. */
         if (i == s_mouse_hover_button &&
             !s_buttons[i].disabled) {
-            uint32_t gc = 0xFF008000;
+            uint32_t gc = 0xFFC50000;
             float inL = 20.0f * sx, inR = 22.0f * sx;
             float inT = 4.0f * sy,  inB = 6.0f * sy;
             float barV = 2.0f * sy, barH = 2.0f * sx;
