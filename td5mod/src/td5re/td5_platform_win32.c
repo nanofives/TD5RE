@@ -2604,6 +2604,28 @@ void td5_plat_render_set_preset(TD5_RenderPreset preset)
         s->alpha_ref         = 1;
         break;
 
+    case TD5_PRESET_ADDITIVE_GLOW:
+        /* Cop-light strobe marker (RenderTrackedActorMarker @ 0x0043cde0).
+         * Additive ONE/ONE like TD5_PRESET_ADDITIVE and z_test ON (lights are
+         * occluded by walls), but with ALPHA TEST OFF — the original marker
+         * submit path sets no alpha test. With LINEAR filtering, the near-binary
+         * police-light texels then blend into a SOFT, DIFFUSED glow instead of
+         * being hard-clipped at the alpha=1 contour into clear rectangles.
+         * (Additive means the zero-RGB background still contributes nothing, so
+         * dropping the alpha test does NOT reintroduce a gray/colored box.) */
+        s->blend_enable      = 1;
+        s->src_blend         = D3D6BLEND_ONE;
+        s->dest_blend        = D3D6BLEND_ONE;
+        s->z_enable          = 1;
+        s->z_write           = 0;
+        s->z_func            = 0;
+        s->mag_filter        = 2; /* LINEAR */
+        s->min_filter        = 2;
+        s->texblend_mode     = D3DTBLEND_MODULATE;
+        s->alpha_test_enable = 0;  /* <-- key: no hard alpha clip → diffused edges */
+        s->alpha_ref         = 0;
+        break;
+
     case TD5_PRESET_ADDITIVE_OVERLAY:
         /* Same blend/filter as TD5_PRESET_ADDITIVE (orig 0x0040B660 case 3:
          * ONE/ONE additive), but with z_test OFF. Particle smoke writes its

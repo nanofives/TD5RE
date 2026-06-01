@@ -60,10 +60,28 @@ static const char *s_default_position_strings[] = {
 };
 const char **g_position_strings = s_default_position_strings;
 
-static const char *s_default_wanted_line1[] = { "YOU ARE", "PULL OVER", "" };
-static const char *s_default_wanted_line2[] = { "WANTED!", "NOW!", "" };
-const char **g_wanted_msg_line1 = s_default_wanted_line1;
-const char **g_wanted_msg_line2 = s_default_wanted_line2;
+/* Cop-chase "wanted" dispatch two-liners. [FIX 2026-05-30 cop-chase]
+ * The original has 8 message PAIRS in an interleaved pointer table at
+ * 0x474038 (line1 base) / 0x47403C (line2 base = +4, i.e. one pointer into
+ * the same array), each read with stride index*2. DrawRaceStatusText @
+ * 0x00439BC8 selects index = rand() & 7 on first contact with a new suspect.
+ * The previous port had invented placeholders ("YOU ARE / WANTED!") and only
+ * 2 valid entries (rand()%2). Real strings transcribed from the binary table
+ * (cross-checked re/sessions/2026-03-20-cop-chase-mode-analysis.md). */
+static const char *s_wanted_msg_table[16] = {
+    /* idx0 */ "SUSPECT IS WANTED FOR", "ARMED ROBBERY.",
+    /* idx1 */ "SUSPECT IS WANTED FOR", "SPEEDING.",
+    /* idx2 */ "SUSPECT IS ARMED",      "AND DANGEROUS.",
+    /* idx3 */ "SUSPECT IS WANTED",     "FOR 1ST DEGREE MURDER.",
+    /* idx4 */ "SUSPECT IS WANTED",     "FOR ILLEGAL LICENSE PLATES.",
+    /* idx5 */ "SUSPECT IS WANTED",     "FOR GRAND THEFT AUTO.",
+    /* idx6 */ "SUSPECT IS WANTED",     "FOR CHICKEN PLUCKING.",
+    /* idx7 */ "SUSPECT IS WANTED",     "FOR SOFTWARE PIRACY.",
+};
+/* line1 = table[index*2], line2 = table[index*2 + 1] — mirrors the orig's
+ * two base pointers 4 bytes apart, both indexed by index*2. */
+const char **g_wanted_msg_line1 = &s_wanted_msg_table[0];
+const char **g_wanted_msg_line2 = &s_wanted_msg_table[1];
 
 int     g_wanted_msg_timer      = 0;
 int     g_wanted_msg_index      = 0;
@@ -1224,6 +1242,15 @@ void td5_hud_init_overlay_resources(int race_mode, int string_table_offset)
             if (g_special_encounter == 0) {
                 flags |= TD5_HUD_POSITION_LABEL | TD5_HUD_LAP_TIMERS;
             }
+        } else if (g_game_type == 8) {
+            /* Cop Chase (preset 4 / DAT_004aaf74==4): the orig overlay bitmask
+             * is 0x04|0x08|0x10|0x20|0x40|0x80|0x100 — it OMITS the race
+             * POSITION label (0x01) and the per-racer LAP TIMERS (0x02), and
+             * adds the total timer (0x80) + the bust/arrest counter (0x100).
+             * [FIX 2026-05-31, orig InitializeRaceOverlayResources @ 0x004378a9
+             *  preset-4 path]. The previous port fell into the generic else and
+             *  wrongly showed "1ST/2ND" position in cop chase. */
+            flags |= TD5_HUD_TOTAL_TIMER | TD5_HUD_LAP_COUNTER;
         } else {
             flags |= TD5_HUD_POSITION_LABEL | TD5_HUD_LAP_TIMERS;
         }
@@ -2104,13 +2131,26 @@ void td5_hud_render_overlays(float dt)
                 "%s", s_hud_string_table[pos]);
         }
 
-        /* --- Bit 7: Total timer "%s %d" --- */
+        /* --- Bit 7: Total timer "%s %d" / cop-chase POINTS --- */
         if (flags & TD5_HUD_TOTAL_TIMER) {
-            td5_hud_queue_text(0,
-                (int)(vl->vp_int_left + 8.0f),
-                (int)(vl->vp_int_top + 24.0f),
-                0,
-                "%s %d", s_hud_string_table[11], 0 /* timer value */);
+            if (g_td5.wanted_mode_enabled) {
+                /* Cop chase: bit 0x80 is the "POINTS" line (the ram score —
+                 * +10 light hit / +20 heavy / +50 bust), NOT a timer. Confirmed
+                 * against the original's on-screen HUD ("POINTS N" under
+                 * "ARRESTS N"). [FIX 2026-05-31] The score accrues to the
+                 * player/cop at accumulated_score (+0x2C8). */
+                td5_hud_queue_text(0,
+                    (int)(vl->vp_int_left + 8.0f),
+                    (int)(vl->vp_int_top + 24.0f),
+                    0,
+                    "POINTS %d", (int)td5_game_get_result_secondary(0));
+            } else {
+                td5_hud_queue_text(0,
+                    (int)(vl->vp_int_left + 8.0f),
+                    (int)(vl->vp_int_top + 24.0f),
+                    0,
+                    "%s %d", s_hud_string_table[11], 0 /* timer value */);
+            }
         }
 
         /* --- Bit 9: Circuit lap count --- */
@@ -2126,11 +2166,24 @@ void td5_hud_render_overlays(float dt)
 
         /* --- Bit 8: Lap/checkpoint counter --- */
         if (flags & TD5_HUD_LAP_COUNTER) {
-            td5_hud_queue_text(0,
-                (int)(vl->vp_int_left + 8.0f),
-                (int)(vl->vp_int_top + 8.0f),
-                0,
-                "%s %d", s_hud_string_table[11], 0);
+            if (g_td5.wanted_mode_enabled) {
+                /* Cop chase: bit 0x100 is the "ARRESTS" line (the bust count =
+                 * g_wantedArrestCounter @ 0x004bead0, incremented each time a
+                 * suspect's damage bar is fully depleted). Label confirmed
+                 * against the original's on-screen HUD ("ARRESTS N", top line).
+                 * [FIX 2026-05-31 — was the guessed "BUSTS".] */
+                td5_hud_queue_text(0,
+                    (int)(vl->vp_int_left + 8.0f),
+                    (int)(vl->vp_int_top + 8.0f),
+                    0,
+                    "ARRESTS %d", td5_game_get_wanted_kills(0));
+            } else {
+                td5_hud_queue_text(0,
+                    (int)(vl->vp_int_left + 8.0f),
+                    (int)(vl->vp_int_top + 8.0f),
+                    0,
+                    "%s %d", s_hud_string_table[11], 0);
+            }
         }
 
         /* --- Bit 1: Lap timers --- */
@@ -4019,12 +4072,16 @@ void td5_hud_draw_race_fade(float progress, int direction)
 extern int16_t  g_wanted_damage_state[TD5_MAX_RACER_SLOTS];
 
 /* Mirrors orig g_wantedDamageHudOverlayCount @ 0x004bf504 — selects the
- * single slot whose damage bar is displayed each frame. Orig .data init
- * = 0; no writers in the binary apart from the wanted-overlay init reset
- * at 0x0043d2fc. Port: route through 0 (the cop slot in single-cop mode
- * — see td5_game_get_cop_actor_index). */
+ * single slot whose damage bar is displayed each frame.
+ *
+ * [FIX 2026-05-30 cop-chase] Previously hardcoded 0 (the player/cop slot),
+ * but the player never takes ram damage, so the bar never appeared. The
+ * orig sets this to the LAST-RAMMED SUSPECT (1..5) on first contact in
+ * AwardWantedDamageScore @ 0x0043D690; the port tracks that slot in td5_ai.c
+ * and exposes it here. Returns -1 when no suspect has been hit yet (gate
+ * below rejects it, so no bar shows until the first ram). */
 static int hud_wanted_active_slot(void) {
-    return 0;
+    return td5_ai_get_wanted_overlay_slot();
 }
 
 void td5_hud_update_wanted_damage_indicator(int actor_slot)
@@ -4062,19 +4119,35 @@ void td5_hud_update_wanted_damage_indicator(int actor_slot)
     if (damage_frac < 0.0f) damage_frac = 0.0f;
     if (damage_frac > 1.0f) damage_frac = 1.0f;
 
-    /* Screen-space billboard footprint — same scale at any distance,
-     * matching the orig's _g_halfFloatConstant + _g_simTickBudgetCap
-     * derived sizes (which work out to a tiny model-space rect). */
-    const float bar_half_w   = 16.0f;   /* outer frame half-width  (px) */
-    const float bar_half_h   = 4.0f;    /* outer frame half-height (px) */
-    const float bar_y_offset = -36.0f;  /* float above projected anchor */
-    const float inner_inset  = 1.0f;    /* frame outline thickness    */
+    /* [FIX 2026-05-30 cop-chase, orig UpdateWantedDamageIndicator 0x0043D4E0]
+     * Faithful sprite geometry. The orig draws a TEXTURED square frame (DAMAGE
+     * sprite, side fVar2) with a narrow VERTICAL fill strip (DAMAGEB1 sprite)
+     * that drains top-down as the suspect takes damage — NOT the previous port's
+     * wide horizontal green->red solid rect. Both quads use a white (texture-
+     * passthrough) diffuse; the sprite art carries the color. The orig uses a
+     * FIXED screen size (it does not perspective-scale the quad), positioned at
+     * the projected (0,120,0) anchor.
+     *
+     * Size: orig fVar1 = S*0.0015625 (= S/640), fVar2 = fVar1*16, where S
+     * (0x004aaf08) is the ACTIVE DISPLAY WIDTH in px — written by
+     * InitializeRaceSession @ 0x0042B4AD from the selected display mode
+     * (CONFIRMED 2026-05-31). So the bar scales linearly with resolution: at
+     * 640px fVar2=16, at 1280px fVar2=32, etc. The previous port hardcoded 16
+     * (640 only), so the bar read too small at higher resolutions. */
+    extern float g_render_width_f;
+    const float FV1 = g_render_width_f * (1.0f / 640.0f);  /* orig fVar1 = S/640  */
+    /* Original sizes: fVar2 = fVar1*16 (frame side); DAMAGEB1 needle = fVar1*4.
+     * [USER DIVERGENCE 2026-06-01: 3x upscale per user — bigger damage indicator
+     * over the suspect cars. fVar2 -> fVar1*48, needle -> fVar1*12 (keeps 4:1).] */
+    const float FV2 = FV1 * 48.0f;                          /* frame side (px) — 3x orig */
+    const float fill_w = FV1 * 12.0f;                       /* DAMAGEB1 needle width — 3x orig */
 
-    float cx = sx;
-    float cy = sy + bar_y_offset;
-    /* Use the projected sz/rhw directly so the bar shares depth bucket
-     * with the car body and gets occluded correctly when the car ducks
-     * behind track geometry. */
+    /* Frame square: orig cx = anchorX - fVar2*0.5, cy = anchorY - (fVar2*0.5 +
+     * fVar2) — centered on the projected anchor and lifted ~1.5*fVar2 above. */
+    float frame_left   = sx - FV2 * 0.5f;
+    float frame_top    = sy - (FV2 * 0.5f + FV2);
+    float frame_right  = frame_left + FV2;
+    float frame_bottom = frame_top  + FV2;
 
     /* [FIX 2026-05-24 damage-bar-atlas; orig 0x0043d4e0]
      * Orig InitializeWantedHudOverlays @ 0x0043d2d0 calls
@@ -4097,27 +4170,33 @@ void td5_hud_update_wanted_damage_indicator(int actor_slot)
     int fill_tw  = 256, fill_th  = 256;
     td5_plat_render_get_texture_dims(frame_page, &frame_tw, &frame_th);
     td5_plat_render_get_texture_dims(fill_page,  &fill_tw,  &fill_th);
-    /* Sample a single pixel at each atlas entry's top-left+0.5 — gives a
-     * solid colored quad without bleed from neighbours. */
-    float frame_u = ((float)frame_atlas->atlas_x + 1.5f) / (float)frame_tw;
-    float frame_v = ((float)frame_atlas->atlas_y + 1.5f) / (float)frame_th;
-    float fill_u  = ((float)fill_atlas->atlas_x  + 1.5f) / (float)fill_tw;
-    float fill_v  = ((float)fill_atlas->atlas_y  + 1.5f) / (float)fill_th;
+    /* Full-sprite UVs (half-texel inset) — the orig draws the WHOLE DAMAGE /
+     * DAMAGEB1 sprite, not a 1-pixel solid-color sample. */
+    float frame_u0 = ((float)frame_atlas->atlas_x + 0.5f) / (float)frame_tw;
+    float frame_v0 = ((float)frame_atlas->atlas_y + 0.5f) / (float)frame_th;
+    float frame_u1 = ((float)(frame_atlas->atlas_x + frame_atlas->width)  - 0.5f) / (float)frame_tw;
+    float frame_v1 = ((float)(frame_atlas->atlas_y + frame_atlas->height) - 0.5f) / (float)frame_th;
+    float fill_u0  = ((float)fill_atlas->atlas_x  + 0.5f) / (float)fill_tw;
+    float fill_v0  = ((float)fill_atlas->atlas_y  + 0.5f) / (float)fill_th;
+    float fill_u1  = ((float)(fill_atlas->atlas_x + fill_atlas->width)  - 0.5f) / (float)fill_tw;
+    float fill_v1  = ((float)(fill_atlas->atlas_y + fill_atlas->height) - 0.5f) / (float)fill_th;
 
-    /* --- Quad 1: outer frame (white) --- */
+    /* --- Quad 1: DAMAGE frame sprite (square, white = texture passthrough) --- */
     {
         TD5_D3DVertex q[4];
-        q[0].screen_x = cx - bar_half_w; q[0].screen_y = cy - bar_half_h;
-        q[1].screen_x = cx - bar_half_w; q[1].screen_y = cy + bar_half_h;
-        q[2].screen_x = cx + bar_half_w; q[2].screen_y = cy - bar_half_h;
-        q[3].screen_x = cx + bar_half_w; q[3].screen_y = cy + bar_half_h;
+        q[0].screen_x = frame_left;  q[0].screen_y = frame_top;
+        q[1].screen_x = frame_left;  q[1].screen_y = frame_bottom;
+        q[2].screen_x = frame_right; q[2].screen_y = frame_top;
+        q[3].screen_x = frame_right; q[3].screen_y = frame_bottom;
+        q[0].tex_u = frame_u0; q[0].tex_v = frame_v0;
+        q[1].tex_u = frame_u0; q[1].tex_v = frame_v1;
+        q[2].tex_u = frame_u1; q[2].tex_v = frame_v0;
+        q[3].tex_u = frame_u1; q[3].tex_v = frame_v1;
         for (int i = 0; i < 4; i++) {
             q[i].depth_z  = sz;
             q[i].rhw      = rhw;
-            q[i].diffuse  = 0xFFFFFFFFu;   /* white frame */
+            q[i].diffuse  = 0xFFFFFFFFu;   /* texture passthrough */
             q[i].specular = 0;
-            q[i].tex_u    = frame_u;
-            q[i].tex_v    = frame_v;
         }
         uint16_t idx[6] = { 0, 1, 2, 1, 3, 2 };
         td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_POINT);
@@ -4125,43 +4204,44 @@ void td5_hud_update_wanted_damage_indicator(int actor_slot)
         td5_plat_render_draw_tris(q, 4, idx, 6);
     }
 
-    /* --- Quad 2: inner fill (red→green by damage) --- */
+    /* --- Quad 2: DAMAGEB1 fill needle (orig 0x4bf448) ---
+     * [FIX 2026-06-01, re-decoded UpdateWantedDamageIndicator @ 0x0043D4E0]
+     * The needle is a THIN vertical bar sitting at the frame's RIGHT EDGE
+     * (x0 = frame_right, width = fVar1*4), draining from the TOP as health
+     * drops — NOT centered inside the frame. So the frame + needle read as the
+     * "damage indicator and arrow one near the other" the user expects.
+     *   fVar3 (top inset) = fVar2 * (0x1000 - dmg)/0x1000  (= FV2 * damage_frac;
+     *     orig literal fVar2*fVar1*(0x1000-dmg)/4096, identical at the 640 base)
+     *   top = frame_top + fVar3 ; bottom = frame_bottom ; height = FV2 - fVar3 */
     {
-        float fill_half_w = bar_half_w - inner_inset;
-        float fill_half_h = bar_half_h - inner_inset;
-        /* Shrink fill horizontally as damage accumulates (right side empties)
-         * — orig at 0x0043d63c writes _DAT_004bf45c = bar_left + (bar_w *
-         * fill_factor), which produces the same shrinking effect. */
-        float fill_right = (cx - fill_half_w) + (2.0f * fill_half_w) * health;
-        float fill_left  = cx - fill_half_w;
+        float fVar3 = FV2 * damage_frac;           /* top inset grows with damage */
+        float fill_height = FV2 - fVar3;           /* = FV2 * health */
+        if (fill_height > 0.5f) {
+            float fl = frame_right;                /* immediately right of the frame */
+            float fr = fl + fill_w;
+            float ft = frame_top + fVar3;
+            float fb = frame_bottom;
 
-        /* Color interpolation: green (0x00FF00) at full health → red (0xFF0000)
-         * at zero. Alpha = 0xFF. */
-        int   r = (int)(255.0f * damage_frac);
-        int   g = (int)(255.0f * health);
-        if (r > 255) r = 255;
-        if (r < 0)   r = 0;
-        if (g > 255) g = 255;
-        if (g < 0)   g = 0;
-        uint32_t fill_color = 0xFF000000u | ((uint32_t)r << 16) | ((uint32_t)g << 8);
-
-        TD5_D3DVertex q[4];
-        q[0].screen_x = fill_left;  q[0].screen_y = cy - fill_half_h;
-        q[1].screen_x = fill_left;  q[1].screen_y = cy + fill_half_h;
-        q[2].screen_x = fill_right; q[2].screen_y = cy - fill_half_h;
-        q[3].screen_x = fill_right; q[3].screen_y = cy + fill_half_h;
-        for (int i = 0; i < 4; i++) {
-            q[i].depth_z  = sz;
-            q[i].rhw      = rhw;
-            q[i].diffuse  = fill_color;
-            q[i].specular = 0;
-            q[i].tex_u    = fill_u;
-            q[i].tex_v    = fill_v;
+            TD5_D3DVertex q[4];
+            q[0].screen_x = fl; q[0].screen_y = ft;
+            q[1].screen_x = fl; q[1].screen_y = fb;
+            q[2].screen_x = fr; q[2].screen_y = ft;
+            q[3].screen_x = fr; q[3].screen_y = fb;
+            q[0].tex_u = fill_u0; q[0].tex_v = fill_v0;
+            q[1].tex_u = fill_u0; q[1].tex_v = fill_v1;
+            q[2].tex_u = fill_u1; q[2].tex_v = fill_v0;
+            q[3].tex_u = fill_u1; q[3].tex_v = fill_v1;
+            for (int i = 0; i < 4; i++) {
+                q[i].depth_z  = sz;
+                q[i].rhw      = rhw;
+                q[i].diffuse  = 0xFFFFFFFFu;   /* texture passthrough */
+                q[i].specular = 0;
+            }
+            uint16_t idx[6] = { 0, 1, 2, 1, 3, 2 };
+            td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_POINT);
+            td5_plat_render_bind_texture(fill_page);
+            td5_plat_render_draw_tris(q, 4, idx, 6);
         }
-        uint16_t idx[6] = { 0, 1, 2, 1, 3, 2 };
-        td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_POINT);
-        td5_plat_render_bind_texture(fill_page);
-        td5_plat_render_draw_tris(q, 4, idx, 6);
     }
 
     /* Restore opaque preset so it doesn't leak into the next per-actor

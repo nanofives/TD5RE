@@ -25,6 +25,7 @@
 #include "td5_camera.h"
 #include "td5_ai.h"
 #include "td5_save.h"
+#include "td5_sound.h"   /* td5_sound_toggle_siren — cop-chase siren toggle */
 
 /* Defined in td5_game.c */
 extern int    g_actorSlotForView[2];
@@ -123,6 +124,11 @@ static int32_t s_gear_debounce[TD5_MAX_RACER_SLOTS];
 
 /** NOS latch accumulator per-player (mirrors 0x483014). */
 static uint8_t s_nos_latch[TD5_MAX_RACER_SLOTS];
+
+/** Cop-chase siren-toggle horn-edge latch per-player (PORT ENHANCEMENT).
+ * Tracks the horn bit so we fire the siren on/off toggle once per press
+ * rather than every frame the horn is held. */
+static uint8_t s_siren_horn_latch[TD5_MAX_RACER_SLOTS];
 
 /** NOS cooldown per actor (actor+0x37C). */
 static uint8_t s_nos_cooldown[TD5_MAX_RACER_SLOTS];
@@ -223,6 +229,7 @@ int td5_input_init(void)
     memset(s_gear, 0, sizeof(s_gear));
     memset(s_gear_debounce, 0, sizeof(s_gear_debounce));
     memset(s_nos_latch, 0, sizeof(s_nos_latch));
+    memset(s_siren_horn_latch, 0, sizeof(s_siren_horn_latch));
     memset(s_nos_cooldown, 0, sizeof(s_nos_cooldown));
     memset(s_camera_cooldown, 0, sizeof(s_camera_cooldown));
     memset(s_rear_view, 0, sizeof(s_rear_view));
@@ -903,6 +910,24 @@ void td5_input_update_player_control(int slot)
             s_nos_cooldown[slot] = TD5_INPUT_NOS_COOLDOWN;
             s_nos_latch[slot] = 1;
         }
+    }
+
+    /* ---- Cop-chase siren toggle (PORT ENHANCEMENT, user-requested 2026-05-30) ----
+     * In wanted mode the player drives the cop car (slot == cop actor index, =0).
+     * The original keeps the siren on while the horn key (0x200000) is held; the
+     * user prefers a press-to-toggle. Edge-detect the horn key here and flip the
+     * siren on/off via td5_sound_toggle_siren(). The toggle couples siren audio
+     * + the flashing-light marker (both live in the same horn-gated branch in
+     * the original). Only the cop slot toggles; AI suspects never press horn. */
+    if (td5_game_is_wanted_mode() && slot == td5_game_get_cop_actor_index()) {
+        if ((bits & 0x200000u) == 0) {
+            s_siren_horn_latch[slot] = 0;
+        } else if (s_siren_horn_latch[slot] == 0) {
+            s_siren_horn_latch[slot] = 1;
+            td5_sound_toggle_siren();
+        }
+    } else {
+        s_siren_horn_latch[slot] = 0;
     }
 
     /* Cop mode: horn zeroes other actors' velocities.

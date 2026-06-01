@@ -1136,6 +1136,35 @@ int td5_game_get_wanted_kills(int slot)
     return v;
 }
 
+/* Cop-chase scoring (port wiring for fields the HUD/results read).
+ *
+ * [FIX 2026-05-30 cop-chase] td5_ai_wanted_cop_hit previously accumulated
+ * private write-only counters that nothing displayed, so the cop-chase score
+ * and bust count never appeared. The original AwardWantedDamageScore @
+ * 0x0043D690 awards ram points to the player/cop at gap_01f8+0xD0 (=actor
+ * +0x2C8, the same field the speed bonus uses, mirrored here by
+ * accumulated_score) and counts busts in the field BuildResultsTable reads
+ * back (actor+0x384, special_encounter_state). Wire both. Awarded to the
+ * player/cop (slot 0 = the wanted-scoring actor). */
+void td5_game_add_wanted_score(int slot, int points)
+{
+    if (slot < 0 || slot >= TD5_MAX_RACER_SLOTS) return;
+    s_metrics[slot].accumulated_score += points;
+    TD5_Actor *a = td5_game_get_actor(slot);
+    if (a) a->clean_driving_score += points;   /* mirror orig +0x2C8 */
+}
+
+void td5_game_add_wanted_kill(int slot)
+{
+    if (slot < 0 || slot >= TD5_MAX_RACER_SLOTS) return;
+    s_metrics[slot].wanted_kills++;
+    /* Mirror into actor+0x384 (the low byte is the bust count read by
+     * BuildResultsTable @ 0x0040AA0F). Safe in cop chase: the special-
+     * encounter system is disabled (gSpecialEncounterEnabled=0). */
+    TD5_Actor *a = td5_game_get_actor(slot);
+    if (a) a->special_encounter_state++;
+}
+
 /* Returns the race order slot index at position 'pos' (0=1st, ...).
  * [CONFIRMED: g_raceOrderTable = s_race_order at 0x004ae279] */
 int td5_game_get_race_order(int pos)
@@ -1544,6 +1573,31 @@ int td5_game_init_race_session(void) {
 
     /* ---- Step 4b: Initialize race sound resources ---- */
     td5_sound_init_race_resources();
+
+    /* ---- Cop Chase: force the player into a POLICE car ----
+     * [FIX 2026-05-30 cop-chase] Faithful to the original car-select clamp for
+     * game_type 8: CarSelectionScreenStateMachine @ 0x0040E0B3 restricts the
+     * player's EXT car id to 0x21..0x24 = the 4 police cars (cop/sp5/sp6/sp7.zip
+     * = port s_car_zip_paths indices 33..36 = Police Cerbera/Mustang/Charger/
+     * Camaro). The port's frontend never clamped, so the player kept their menu
+     * car (a non-police model — the user saw a regular Cerbera). Clamp here, the
+     * single point before the model/cardef/sound load below picks up
+     * g_td5.car_index. Respect an already-police choice (33..36); otherwise
+     * default to the Police Cerbera (33 = cars/cop.zip). Suspects (slots 1..5)
+     * stay varied via the normal opponent roster — only the player is police
+     * (CONFIRMED: orig opponent loop @ 0x0040DD5B uses the difficulty roster,
+     * not the police set). */
+    if (g_td5.wanted_mode_enabled) {
+        if (g_td5.car_index < 33 || g_td5.car_index > 36) {
+            TD5_LOG_I(LOG_TAG,
+                      "Cop Chase: forcing player car %d -> 33 (Police Cerbera, cop.zip)",
+                      g_td5.car_index);
+            g_td5.car_index = 33;
+        } else {
+            TD5_LOG_I(LOG_TAG, "Cop Chase: player car %d already a police car",
+                      g_td5.car_index);
+        }
+    }
 
     /* ---- Step 5: Load vehicle assets and sound banks for all active slots ---- */
     for (int i = 0; i < TD5_MAX_RACER_SLOTS; i++) {
@@ -4353,6 +4407,15 @@ static void accumulate_speed_bonus(int slot) {
     ActorRaceMetric *m = &s_metrics[slot];
 
     if (!actor) return;
+    /* [FIX 2026-05-31 cop-chase] No passive speed/clean-driving bonus in cop
+     * chase. In the original the clean-driving score is gated on the actor-9
+     * special encounter, which is DISABLED in wanted mode (gSpecialEncounter
+     * Enabled=0), so cop-chase POINTS = the RAM/BUST score ONLY — you do NOT
+     * earn points just for driving. User-confirmed against the original; the
+     * port previously accumulated this every tick into accumulated_score (the
+     * field the cop-chase POINTS HUD reads), making POINTS tick up while
+     * merely driving. Ram points (td5_game_add_wanted_score) still accrue. */
+    if (g_td5.wanted_mode_enabled) return;
     if (s_slot_state[slot].companion_1 != 0) return;       /* finished */
     if (actor->finish_time != 0) return;                    /* finished (mirrors orig actor+0x328 gate) */
     if (actor->surface_contact_flags != 0) return;          /* in contact / airborne flag set */

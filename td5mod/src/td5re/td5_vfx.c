@@ -2729,11 +2729,17 @@ void td5_vfx_spawn_smoke(TD5_Actor *actor) {
 
     uint8_t *ap = (uint8_t *)actor;
 
-    /* Read actor speed -- only spawn if moving */
+    /* [FIX 2026-05-31 cop-chase] The original SpawnVehicleSmokeSprite @ 0x429CF0
+     * has NO speed gate — only the rand()%10 probability above (CONFIRMED). The
+     * port's `if (abs_speed < 4000) return;` was a port-only addition that
+     * suppressed this effect at low speed. The sole caller is the cop-chase
+     * "wanted" smoke (td5_render.c, gated on g_wanted_damage_state[slot]==0 =
+     * a BUSTED suspect), and busted cars coast to a STOP — so the speed gate
+     * killed the smoke exactly when it should appear (over a disabled suspect),
+     * making the effect "completely missing" vs the original. Gate removed. */
     int32_t speed;
     memcpy(&speed, ap + 0x314, 4);
     int abs_speed = (speed < 0) ? -speed : speed;
-    if (abs_speed < 4000) return;
 
     /* Read world position — orig 0x00429CF0 receives `actor+0x1FC` as param_2
      * and reads x/y/z directly into the particle pos with no offset or rotation.
@@ -3281,19 +3287,36 @@ static void tracked_marker_lookup_layer(VfxTrackedMarkerLayer *out, const char *
  *       in the render path from g_wantedTargetTrackerActive. */
 void td5_vfx_init_tracked_actor_marker_billboards(void)
 {
-    /* Layer order per marker:
-     *   layer 0 = POLICELT_RED  (red strobe — slot 0 in orig 6-quad block)
-     *   layer 1 = POLICELT_BLUE (blue strobe — slot 1)
-     *   layer 2 = POLICE_RED for marker 0 / POLICE_BLUE for marker 1
-     *            (slot 2/3 in orig — orig has 4 unique atlas lookups and
-     *             only the "base" layer differs per marker iteration). */
-    tracked_marker_lookup_layer(&s_tracked_marker_layers[0][0], "POLICELT_RED");
-    tracked_marker_lookup_layer(&s_tracked_marker_layers[0][1], "POLICELT_BLUE");
-    tracked_marker_lookup_layer(&s_tracked_marker_layers[0][2], "POLICE_RED");
+    /* [FIX 2026-06-01 cop-chase] Per-marker color separation — the original
+     * draws TWO distinct lights: marker 0 = a fully-RED light, marker 1 = a
+     * fully-BLUE light. Each marker's three layers are all the SAME color:
+     *   marker 0: PoliceLt_red (strobe beam) + Police_red + Police_red
+     *   marker 1: PoliceLt_blue (strobe beam) + Police_blue + Police_blue
+     * [CONFIRMED by full RE of InitializeTrackedActorMarkerBillboards @ 0x0043c9e0
+     *  — every BuildSpriteQuadTemplate destination traced.]
+     *
+     * The previous port wrongly put POLICELT_RED + POLICELT_BLUE on BOTH markers
+     * (a red AND a blue strobe beam on each), only swapping the base — so the
+     * two distinct red/blue lights were never formed and POLICELT_BLUE was never
+     * rendered as marker 1's own beam. That muddled the colors and is the "light
+     * effect that isn't loaded right" the original shows cleanly. */
+    /* [FIX 2026-06-01 cop-chase] TEXTURE SHAPES (verified from the atlas):
+     *   POLICELT_RED/BLUE = SOFT radial glow blobs (diffused).
+     *   POLICE_RED/BLUE   = HARD solid rectangles (alpha 128 everywhere).
+     * The over-car "base" layer (L2, the small ±32 square) must use the SOFT
+     * glow (POLICELT) so it reads as a diffused light, NOT the hard POLICE
+     * rectangle (which rendered as the clear squares the user reported). The
+     * two sweeping beam layers (L0/L1) keep the glow + bar. Per-marker color is
+     * still separated (marker 0 red, marker 1 blue). */
+    /* marker 0 = RED light */
+    tracked_marker_lookup_layer(&s_tracked_marker_layers[0][0], "POLICELT_RED"); /* glow beam */
+    tracked_marker_lookup_layer(&s_tracked_marker_layers[0][1], "POLICE_RED");   /* bar beam  */
+    tracked_marker_lookup_layer(&s_tracked_marker_layers[0][2], "POLICELT_RED"); /* soft over-car glow (was POLICE_RED hard rect) */
 
-    tracked_marker_lookup_layer(&s_tracked_marker_layers[1][0], "POLICELT_RED");
-    tracked_marker_lookup_layer(&s_tracked_marker_layers[1][1], "POLICELT_BLUE");
-    tracked_marker_lookup_layer(&s_tracked_marker_layers[1][2], "POLICE_BLUE");
+    /* marker 1 = BLUE light */
+    tracked_marker_lookup_layer(&s_tracked_marker_layers[1][0], "POLICELT_BLUE");
+    tracked_marker_lookup_layer(&s_tracked_marker_layers[1][1], "POLICE_BLUE");
+    tracked_marker_lookup_layer(&s_tracked_marker_layers[1][2], "POLICELT_BLUE");
 
     /* Phase counters start at 0 (orig: _g_trackedActorMarkerBillboardPool=0,
      * advanced by 0x10/tick via AdvanceWorldBillboardAnimations). */

@@ -456,17 +456,25 @@ int td5_ai_is_encounter_active(int slot) {
  * wire from orig because none exists. */
 static int s_wanted_scoring_enabled = 1;
 
-/* Mirror port of g_wantedArrestCounter — accumulates arrests over the race
- * (incremented inside this function each time the damage state reaches 0).
- * Orig location DAT_004bf508; no port reader sites yet, so this is a write-
- * only counter for now. */
-static int s_wanted_arrest_counter = 0;
+/* Slot whose damage bar the HUD currently shows — mirrors
+ * g_wantedDamageHudOverlayCount @ 0x004bf504 (orig .data init -1, reset to -1
+ * by InitializeWantedHudOverlays). Set to the last-rammed suspect on first
+ * contact and used as the first-hit-vs-rehit discriminator. The HUD reads it
+ * via td5_ai_get_wanted_overlay_slot() to float the DAMAGE bar over that car.
+ *
+ * [FIX 2026-05-30 cop-chase] Previously a function-local static here that the
+ * HUD never saw (hud_wanted_active_slot() hardcoded 0), so the damage bar only
+ * tried to render over slot 0 (the player/cop) — which never takes ram damage
+ * — and therefore never appeared. Promoted to file scope + exposed. */
+static int s_wanted_hud_overlay_slot = -1;
 
-/* Mirror port of the per-slot +0x8260 "wanted timer bumps" region from
- * g_raceParticlePoolBase[slot*0x388 + 0x8260]. No port reader exists yet
- * (the bumps decay elsewhere in cop logic); keep a local mirror so the
- * accumulation logic is byte-faithful. */
-static int32_t s_wanted_state_timer_bump[TD5_MAX_RACER_SLOTS] = {0};
+/* Accessor for the HUD damage-bar gate. Returns the last-rammed suspect slot
+ * (1..5) or -1 when none has been hit yet. */
+int td5_ai_get_wanted_overlay_slot(void) { return s_wanted_hud_overlay_slot; }
+
+/* Reset per-race cop-chase transient state (mirrors the -1 reset in
+ * InitializeWantedHudOverlays @ 0x0043D2D0). */
+void td5_ai_reset_wanted_state(void) { s_wanted_hud_overlay_slot = -1; }
 
 /* Award damage to a cop slot on player<->cop collision.
  * Mirrors AwardWantedDamageScore @ 0x43D690 [CONFIRMED]:
@@ -483,12 +491,6 @@ void td5_ai_wanted_cop_hit(int cop_slot, int32_t impact_mag) {
     char *actor;
     extern int g_wanted_msg_timer;   /* td5_hud.c */
     extern int g_wanted_msg_index;
-    /* g_wantedDamageHudOverlayCount @ 0x004bf504 — the slot whose damage bar
-     * is currently displayed. Used as the "did the player target THIS cop
-     * last frame?" first-hit-vs-rehit discriminator. The port mirrors this
-     * as a file-static here (HUD reads its own copy via hud_wanted_active_slot
-     * which currently always returns 0). */
-    static int s_wanted_hud_overlay_slot = -1;
 
     if (cop_slot < 1 || cop_slot >= TD5_MAX_RACER_SLOTS) return;
 
@@ -512,43 +514,49 @@ void td5_ai_wanted_cop_hit(int cop_slot, int32_t impact_mag) {
     if (s_wanted_hud_overlay_slot != cop_slot) {
         s_wanted_hud_overlay_slot = cop_slot;
         g_wanted_msg_timer        = 0;
-        /* Orig uses rand() % message_count; port keeps a 3-message table. */
-        g_wanted_msg_index = rand() % 2;  /* 2 valid messages, third is "" */
+        /* Orig picks rand() & 7 over the 8 wanted-message pairs (table
+         * @ 0x474038) [CONFIRMED @ 0x0043D6F? — DAT_004bf508 = rand() & 7]. */
+        g_wanted_msg_index = rand() & 7;
         TD5_LOG_I(LOG_TAG,
                   "wanted_first_hit: cop_slot=%d msg_idx=%d impact=%d",
                   cop_slot, g_wanted_msg_index, (int)impact_mag);
         return;
     }
 
-    /* Re-hit path: apply damage decrement + bump arrest counter + bump
-     * +0x8260 timer. */
+    /* Re-hit path [orig 0x0043D6F8 onward]: only a suspect with health left
+     * can take damage. Light hit (force 10k..20k) = -0x200 + 10 pts; heavy
+     * hit (>20k) = -0x400 + 20 pts; the hit that depletes health adds the
+     * +50 kill bonus and bumps the bust counter. Score accrues to the
+     * player/cop (slot 0 = the wanted-scoring actor, orig gap_01f8+0xD0). */
+    if (g_wanted_damage_state[cop_slot] <= 0) {
+        /* Already busted — no further damage/score (orig gate `health > 0`). */
+        return;
+    }
     dec = (impact_mag > 20000) ? (int16_t)0x400 : (int16_t)0x200;
+    int points = (dec == (int16_t)0x200) ? 10 : 20;
     cur = g_wanted_damage_state[cop_slot] - dec;
-    if (cur < 0)        cur = 0;
-    if (cur > 0x1000)   cur = 0x1000;   /* upper clamp [orig 0x0043D7?? clamp] */
+    int killed = 0;
+    if (cur <= 0) {
+        cur = 0;
+        points += 50;          /* kill bonus [orig 0x0043D720] */
+        killed = 1;
+    }
+    if (cur > 0x1000) cur = 0x1000;   /* upper clamp [orig] */
     g_wanted_damage_state[cop_slot] = cur;
 
-    /* Arrest-counter bump [orig 0x0043D720]: increments per re-hit. */
-    s_wanted_arrest_counter++;
-
-    /* +0x8260 timer bumps [orig 0x0043D730..0x0043D770]: tiered by impact
-     * magnitude, with sign-dependent direction. Heaviest hits get +50,
-     * medium +20, light +10. */
-    int32_t bump;
-    if (impact_mag > 40000)       bump = 50;
-    else if (impact_mag > 20000)  bump = 20;
-    else                           bump = 10;
-    if (impact_mag < 0) bump = -bump;
-    s_wanted_state_timer_bump[cop_slot] += bump;
+    /* Award ram points + (on bust) the kill to the player/cop so the HUD
+     * score and the results "PUNKTE"/arrests column populate. The player is
+     * the wanted-scoring actor (slot 0). */
+    td5_game_add_wanted_score(td5_game_get_wanted_target_slot(), points);
+    if (killed) td5_game_add_wanted_kill(td5_game_get_wanted_target_slot());
 
     TD5_LOG_I(LOG_TAG,
               "wanted_damage: cop_slot=%d new_state=%d dec=%d impact=%d "
-              "arrests=%d bump=%d",
-              cop_slot, (int)cur, (int)dec, (int)impact_mag,
-              s_wanted_arrest_counter, bump);
+              "pts=%d killed=%d",
+              cop_slot, (int)cur, (int)dec, (int)impact_mag, points, killed);
 
-    if (cur == 0) {
-        /* Cop arrested: freeze AI — matches original gate at 0x436E1D */
+    if (killed) {
+        /* Cop busted: freeze AI — matches original gate at 0x436E1D */
         actor = actor_ptr(cop_slot);
         if (actor) {
             ACTOR_U8(actor, ACTOR_BRAKE_FLAG) = 1;
@@ -1859,6 +1867,7 @@ void td5_ai_init_race_actor_runtime(void) {
     if (g_td5.wanted_mode_enabled) {
         for (int i = 0; i < TD5_MAX_RACER_SLOTS; i++)
             g_wanted_damage_state[i] = 0x1000;
+        td5_ai_reset_wanted_state();   /* overlay slot -> -1 (orig @ 0x0043D2FC) */
         TD5_LOG_I(LOG_TAG,
                   "Cop Chase: g_wanted_damage_state[0..5]=0x1000 "
                   "(mirrors gWantedDamageStateTable init @ 0x0043D2FC)");
