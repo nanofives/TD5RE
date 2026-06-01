@@ -216,6 +216,23 @@ static int s_tracked_veh_actor;        /* Original: DAT_004c380c */
 static int s_siren_active_flag;        /* Original: DAT_004c3880 */
 static int s_siren_refreshed;          /* Original: DAT_004c3844 */
 
+/* Cop-chase siren on/off toggle (PORT ENHANCEMENT, user-requested 2026-05-30).
+ *
+ * In the original, the siren is gated on the horn control bit (0x200000):
+ * UpdateVehicleLoopingAudioState @ 0x00440A30 is only *called* while the horn
+ * is HELD (gate @ 0x0042C260), so releasing the horn lets the mixer timeout
+ * fade the siren out. The port instead calls the looping-state update for
+ * every slot every frame (td5_game.c), so the cop's siren was re-activated
+ * unconditionally and could never be silenced ("can't deactivate sirens").
+ *
+ * The user prefers a press-to-toggle instead of hold-to-keep-on. This flag is
+ * flipped by a horn-key edge in td5_input.c (td5_sound_toggle_siren); the
+ * wanted-mode siren activation below is gated on it. Default 0 (off) — the
+ * siren and its coupled flashing-light marker (AdvanceGlobalSkyRotation, in
+ * the same branch) start silent and the player presses the horn to turn the
+ * cop lights+siren on, matching the original's "press horn → siren on". */
+static int s_siren_user_enabled;
+
 /** Per-viewport skid playing state. Original: DAT_004c3768. */
 static int s_skid_playing[2];
 
@@ -309,6 +326,7 @@ int td5_sound_init_race_resources(void)
     s_tracked_veh_actor     = 0;
     s_siren_active_flag     = 0;
     s_siren_refreshed       = 0;
+    s_siren_user_enabled    = 0;   /* siren starts off; press horn to enable */
     s_skid_playing[0]       = 0;
     s_skid_playing[1]       = 0;
     s_rain_playing[0]       = 0;
@@ -443,6 +461,7 @@ int td5_sound_load_vehicle_bank(const char *car_dir, int vehicle_index,
     s_rain_playing[1]   = 0;
     s_siren_refreshed   = 0;
     s_siren_active_flag = 0;
+    s_siren_user_enabled = 0;   /* siren off until the player presses the horn */
 
     return 1;
 }
@@ -598,16 +617,27 @@ void td5_sound_update_vehicle_looping_state(int actor_index)
 
     /* Check if wanted mode is active and this is the cop */
     if (td5_game_is_wanted_mode() && actor_index == td5_game_get_cop_actor_index()) {
-        if (s_siren_active_flag == 0) {
-            /* Activate tracked vehicle audio (siren) */
-            s_tracked_veh_active_p2 = 1;
-            s_tracked_veh_active    = 1;
-            s_tracked_veh_actor     = actor_index;
-            s_tracked_veh_fade_target = TD5_SOUND_SIREN_FADE_FULL;
+        /* PORT ENHANCEMENT: gate on the press-to-toggle flag (s_siren_user_enabled,
+         * flipped by the horn key in td5_input.c) instead of the original's
+         * hold-the-horn gating. When the toggle is OFF we simply DON'T refresh
+         * the siren this frame; the mixer's post-loop timeout (s_siren_active_flag
+         * set but s_siren_refreshed clear) then fades it out and clears the flag.
+         * AdvanceGlobalSkyRotation (the flashing-light marker intensity boost)
+         * lives in this same branch in the original, so toggling off also lets
+         * the cop-light pulse decay — siren and lights stay coupled, as in the
+         * original where both are driven by this horn-gated call. */
+        if (s_siren_user_enabled) {
+            if (s_siren_active_flag == 0) {
+                /* Activate tracked vehicle audio (siren) */
+                s_tracked_veh_active_p2 = 1;
+                s_tracked_veh_active    = 1;
+                s_tracked_veh_actor     = actor_index;
+                s_tracked_veh_fade_target = TD5_SOUND_SIREN_FADE_FULL;
+            }
+            td5_game_advance_sky_rotation();
+            s_siren_refreshed   = 1;
+            s_siren_active_flag = 1;
         }
-        td5_game_advance_sky_rotation();
-        s_siren_refreshed   = 1;
-        s_siren_active_flag = 1;
         return;
     }
 
@@ -644,6 +674,33 @@ void td5_sound_stop_tracked_vehicle_audio(void)
     if (s_tracked_veh_active != 0) {
         s_tracked_veh_fade_target = 0;
     }
+}
+
+/**
+ * td5_sound_toggle_siren (PORT ENHANCEMENT, user-requested 2026-05-30).
+ *
+ * Flip the cop-chase siren on/off. Called on a horn-key press edge from
+ * td5_input.c. The actual fade-in/out is handled by the looping-state update
+ * (which refreshes the siren only while s_siren_user_enabled is set) and the
+ * mixer timeout (which fades it out when not refreshed). Returns the new
+ * state so the caller can log it.
+ */
+int td5_sound_toggle_siren(void)
+{
+    s_siren_user_enabled = !s_siren_user_enabled;
+    if (!s_siren_user_enabled) {
+        /* Begin fade-out immediately so the toggle feels responsive rather
+         * than waiting a frame for the looping-state/mixer timeout. */
+        td5_sound_stop_tracked_vehicle_audio();
+    }
+    TD5_LOG_I(LOG_TAG, "siren toggle -> %s", s_siren_user_enabled ? "ON" : "OFF");
+    return s_siren_user_enabled;
+}
+
+/** Query the current cop-chase siren toggle state (1 = on). */
+int td5_sound_siren_is_enabled(void)
+{
+    return s_siren_user_enabled;
 }
 
 /* ========================================================================

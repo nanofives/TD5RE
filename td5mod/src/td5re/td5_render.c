@@ -418,7 +418,9 @@ static void render_vehicle_shadow_quad(const TD5_Actor *actor);
 static void render_vehicle_wheel_billboards(TD5_Actor *actor, int slot);
 static void render_vehicle_brake_lights(const TD5_Actor *actor, int slot);
 static void render_vehicle_reflection_overlay(TD5_MeshHeader *mesh, int slot);
-static void render_tracked_actor_marker(const TD5_Actor *actor);
+static void render_tracked_actor_marker(const TD5_Actor *actor,
+                                        const TD5_Mat3x3 *body_rot,
+                                        const TD5_Vec3f *body_pos);
 
 /** 7-entry dispatch table matching original at 0x473b9c */
 typedef void (*PrimDispatchFn)(TD5_PrimitiveCmd *cmd, TD5_MeshVertex *base_verts);
@@ -2522,7 +2524,9 @@ void td5_render_actors_for_view(int view_index)
             if (g_td5.wanted_mode_enabled &&
                 td5_game_get_wanted_target_tracker() > 0 &&
                 slot == td5_game_get_wanted_target_slot()) {
-                render_tracked_actor_marker(actor);
+                /* Pass the SAME body transform the mesh used (view_rot +
+                 * render_pos) so the strobe is welded to the car body. */
+                render_tracked_actor_marker(actor, &view_rot, &render_pos);
             }
 
             /* Wanted-mode damage indicator overlay — orig
@@ -4813,7 +4817,7 @@ static const int s_tracked_marker_yaw_offset[TD5_VFX_TRACKED_MARKER_COUNT] = {
 #define TRACKED_MARKER_BASE_FVAR8        512.0f            /* DAT_0045d768 */
 #define TRACKED_MARKER_BASE_FVAR10       64.0f             /* DAT_0045d6c0 */
 #define TRACKED_MARKER_BASE_FVAR9        6.0f              /* DAT_0045d764 */
-#define TRACKED_MARKER_BASE_HALF_XY      32.0f             /* DAT_0045d5dc — layer-2 half-extent */
+#define TRACKED_MARKER_BASE_HALF_XY      96.0f             /* [USER DIVERGENCE 2026-06-01: 3x the orig DAT_0045d5dc=32.0 — bigger over-car glow per user] */
 #define TRACKED_MARKER_BASE_Z_OFFSET     4.0f              /* _g_simTickBudgetCap — layer-2 Z lift */
 #define TRACKED_MARKER_ALPHA_SCALE       255.0f            /* DAT_0045d684 — sin alpha scale */
 
@@ -4880,7 +4884,25 @@ static void tracked_marker_emit_quad_world(const float corners_world_xy[4][2],
 
     uint16_t idx[6] = { 0, 1, 2, 1, 3, 2 };
     flush_immediate_internal();
-    td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_POINT);
+    /* [FIX 2026-05-30 cop-chase] The tracked-actor marker (the pulsing red/blue
+     * cop-light strobe) is an ADDITIVE sprite in the original — BindRaceTexturePage
+     * @ 0x0040B660 selects ONE/ONE for the police-light page (transparency-type 3),
+     * and the per-vertex diffuse is a GRAY modulator (a,a,a | 0xFF000000) whose
+     * pulse scales the texture brightness. Rendering it ALPHA-blended (the old
+     * TRANSLUCENT_POINT) drew the large semi-transparent quads' DARK texels (e.g.
+     * (24,0,0,128)) at 50% over the scene, stacking 6 quads into a grey haze that
+     * also appeared to "move" as the quads rotate — the user's reported gray
+     * background. Additive makes dark texels add ~0 (invisible) so only the bright
+     * light centers glow; faithful AND removes the haze.
+     *
+     * [FIX 2026-06-01] Use TD5_PRESET_ADDITIVE_GLOW (additive, but NO alpha test)
+     * rather than TD5_PRESET_ADDITIVE (which alpha-tests at ref=1). The original
+     * marker submit path sets no alpha test; with LINEAR filtering the near-binary
+     * police-light texels then blend into a SOFT, DIFFUSED glow instead of being
+     * hard-clipped into clear rectangles (the user's "squared lights should be
+     * diffused" report). Additive keeps the zero-RGB background invisible, so
+     * dropping the alpha test does not bring back any box. */
+    td5_plat_render_set_preset(TD5_PRESET_ADDITIVE_GLOW);
     td5_plat_render_bind_texture(tex_page);
     td5_plat_render_draw_tris(v, 4, idx, 6);
 }
@@ -4903,7 +4925,9 @@ static int s_tracked_marker_phase[TD5_VFX_TRACKED_MARKER_COUNT];
  * BuildSpriteQuadTemplate diffuse (texture-only modulate in D3D3);
  * port writes 0xFFFFFFFF and lets the alpha-keyed sprite passthrough
  * carry the visible color. */
-static void render_tracked_actor_marker(const TD5_Actor *actor)
+static void render_tracked_actor_marker(const TD5_Actor *actor,
+                                        const TD5_Mat3x3 *body_rot,
+                                        const TD5_Vec3f *body_pos)
 {
     if (!actor) return;
     if (!td5_vfx_tracked_marker_initialized()) return;
@@ -4928,18 +4952,15 @@ static void render_tracked_actor_marker(const TD5_Actor *actor)
     float fVar9  = fIntensity * TRACKED_MARKER_BASE_FVAR9
                               * TRACKED_MARKER_INTENSITY_SCALE;
 
-    /* Load actor rotation matrix + render position into render transform
-     * (orig 0x0043ce17-0x0043ce28: LoadRenderRotationMatrix +
-     *  LoadRenderTranslation from g_raceParticlePoolBase[0x1f1]._0_4_
-     *  which is a pointer to the tracked actor's runtime slot). */
-    td5_render_load_rotation((const TD5_Mat3x3 *)actor->rotation_matrix.m);
-    td5_render_load_translation((const TD5_Vec3f *)&actor->render_pos);
+    /* Lock the marker to the car BODY transform: use the SAME view_rot +
+     * render_pos the car mesh used this frame (passed in as body_rot/body_pos),
+     * so the strobe is welded to the body at all speeds. [v8 — user confirmed
+     * this position is correct; the v9 camera-basis experiment was reverted.] */
+    td5_render_load_rotation(body_rot);
+    td5_render_load_translation(body_pos);
 
     const float *m = s_render_transform.m;
 
-    /* Compute marker yaw from world-forward heading.
-     * Orig at 0x0043cee0-0x0043cf2c: AngleFromVector12(forward.x*256+ftol,
-     *  forward.z*256+ftol) -> wraps to signed 12-bit space then >>4 + ±0x100. */
     /* Refresh local phase mirror from vfx (single point of truth). */
     for (int i = 0; i < TD5_VFX_TRACKED_MARKER_COUNT; i++) {
         s_tracked_marker_phase[i] = td5_vfx_tracked_marker_get_phase(i);
@@ -4948,8 +4969,6 @@ static void render_tracked_actor_marker(const TD5_Actor *actor)
     int forward_dx = (int)(m[6] * 256.0f);   /* m[6..8] = forward (row 2) */
     int forward_dz = (int)(m[8] * 256.0f);
     int base_yaw   = AngleFromVector12(forward_dx, forward_dz);
-    /* Wrap to [-0x800, +0x800) before signed >>4 + offset application
-     * (orig: `(iVar11 - 0x800U & 0xfff) - 0x800`). */
     int wrapped    = ((base_yaw - 0x800) & 0xFFF) - 0x800;
     int yaw_div16  = (wrapped + ((wrapped >> 31) & 0xF)) >> 4;
 
@@ -4967,14 +4986,7 @@ static void render_tracked_actor_marker(const TD5_Actor *actor)
         float fVar7 = px*m[6] + py*m[7] + pz*m[8] + m[11];
         if (fVar7 <= s_near_clip) continue;
 
-        /* [FIX 2026-05-24 strobe-17call; orig 0x0043cde0]
-         * The orig at 0x0043cf68-0x0043cf7c also derives a yaw from the
-         * transformed anchor (ftol fVar5, ftol fVar6, AngleFromVector12)
-         * BEFORE the ±0x100 split. We mirror that pre-transform AngleFromVector
-         * computation using forward_dx/forward_dz set above; the anchor-yaw
-         * is equivalent up to its sign-conventions for the chase-camera
-         * orientation used by the wanted-target render path. */
-        /* Per-marker yaw with ±0x100 split (orig at 0x0043cfa2/0x0043cfb4). */
+        /* Per-marker yaw with ±0x100 split (orig 0x0043cfa2/0x0043cfb4). */
         unsigned uVar14 = (unsigned)(yaw_div16 + s_tracked_marker_yaw_offset[marker]) & 0xFFF;
 
         /* [FIX 2026-05-24 strobe-17call; orig 0x0043ce5f]

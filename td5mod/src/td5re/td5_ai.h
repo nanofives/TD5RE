@@ -92,6 +92,12 @@ void td5_ai_set_traffic_queue(const uint8_t *data, int size);
  * the cop is arrested and its AI frozen. Called from td5_physics.c. */
 void td5_ai_wanted_cop_hit(int cop_slot, int32_t impact_mag);
 
+/* Slot whose DAMAGE bar the HUD shows (last-rammed suspect 1..5, or -1).
+ * Mirrors g_wantedDamageHudOverlayCount @ 0x004bf504. Read by td5_hud.c. */
+int  td5_ai_get_wanted_overlay_slot(void);
+/* Reset per-race cop-chase transient state (overlay slot -> -1). */
+void td5_ai_reset_wanted_state(void);
+
 /* --- Special encounter (cop chase) --- */
 void td5_ai_update_special_encounter(void);
 void td5_ai_update_encounter_control(int slot);
