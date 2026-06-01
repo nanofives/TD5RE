@@ -402,6 +402,8 @@ static uint32_t s_fade_color;        /* packed 0x00RRGGBB from caller */
 static int  s_gallery_pic_index;
 static int  s_gallery_pic_surface;
 static int  s_gallery_visited_mask;
+static int  s_language_bg_surface = 0;   /* LanguageScreen.tga 640x480 bg (ScreenLanguageSelect) */
+static int  s_language_flag_surface = 0; /* Language.tga 176x512 = 4 stacked 176x128 flag tiles */
 
 /* Background gallery slideshow (LoadExtrasGalleryImageSurfaces / UpdateExtrasGalleryDisplay)
  * pic1-5.tga from Extras.zip cycle as a semi-transparent overlay during frontend navigation. */
@@ -4245,6 +4247,40 @@ static void frontend_render_two_player_options_overlay(float sx, float sy) {
     }
 }
 
+/* ScreenLanguageSelect overlay: full-screen LanguageScreen.tga bg + 4 flag IMAGE tiles
+ * from Language.tga (176x512 = four 176x128 tiles, src V 0/128/256/384) at the 4 corners
+ * + "LANGUAGE SELECT" header. [CONFIRMED @0x00427290; header literal @0x004667c0;
+ * flag dest rects TL(40,128) TR(424,128) BL(40,320) BR(424,320), 176x128.] */
+static void frontend_render_language_select_overlay(float sx, float sy) {
+    /* Background (drawn opaque, full screen) */
+    if (s_language_bg_surface > 0) {
+        int slot = s_language_bg_surface - 1;
+        if (slot >= 0 && slot < FE_MAX_SURFACES && s_surfaces[slot].in_use) {
+            td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
+            fe_draw_quad(0.0f, 0.0f, 640.0f * sx, 480.0f * sy, 0xFFFFFFFF,
+                         s_surfaces[slot].tex_page, 0.0f, 0.0f, 1.0f, 1.0f);
+        }
+    }
+    /* 4 flag tiles (each 176x128 from the 176x512 sheet; src V = row/4) */
+    if (s_language_flag_surface > 0) {
+        int slot = s_language_flag_surface - 1;
+        if (slot >= 0 && slot < FE_MAX_SURFACES && s_surfaces[slot].in_use) {
+            static const int dx[4] = { 40, 424, 40, 424 };
+            static const int dy[4] = { 128, 128, 320, 320 };
+            int fi;
+            td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
+            for (fi = 0; fi < 4; fi++) {
+                float v0 = (float)fi / 4.0f, v1 = (float)(fi + 1) / 4.0f;
+                fe_draw_quad((float)dx[fi] * sx, (float)dy[fi] * sy,
+                             176.0f * sx, 128.0f * sy, 0xFFFFFFFF,
+                             s_surfaces[slot].tex_page, 0.0f, v0, 1.0f, v1);
+            }
+        }
+    }
+    /* Header "LANGUAGE SELECT" (in-EXE literal @0x4667c0), 24px font, at (xpad, ~34). */
+    fe_draw_text(40.0f * sx, 34.0f * sy, "LANGUAGE SELECT", 0xFFFFFFFF, sx, sy);
+}
+
 static void frontend_render_race_type_description(float sx, float sy) {
     /* [FIXED 2026-06-01, corrected] Orig (0x4168B0 case 4/9) draws a MULTI-LINE localized
      * description into a 0x110x0xB4 (272x180) panel: line 0 = race-type NAME (big font,
@@ -5650,6 +5686,9 @@ void td5_frontend_render_ui_rects(void) {
         frontend_render_bg_gallery(sx, sy);
 
     switch (s_current_screen) {
+    case TD5_SCREEN_LANGUAGE_SELECT:
+        frontend_render_language_select_overlay(sx, sy);
+        break;
     case TD5_SCREEN_RACE_TYPE_MENU:
         frontend_render_race_type_description(sx, sy);
         break;
@@ -6316,12 +6355,27 @@ static void Screen_LanguageSelect(void) {
     switch (s_inner_state) {
     case 0: /* Load Language.tga and LanguageScreen.tga */
         frontend_init_return_screen(TD5_SCREEN_LANGUAGE_SELECT);
-        frontend_load_tga("Front_End/Language.tga", "Front_End/FrontEnd.zip");
-        frontend_load_tga("Front_End/LanguageScreen.tga", "Front_End/FrontEnd.zip");
-        frontend_create_button("English", 120, 180, 180, 32);
-        frontend_create_button("French",  120, 220, 180, 32);
-        frontend_create_button("German",  120, 260, 180, 32);
-        frontend_create_button("Spanish", 120, 300, 180, 32);
+        /* [FIXED 2026-06-01] Faithful to ScreenLanguageSelect @0x00427290: the original
+         * draws LanguageScreen.tga (bg) + 4 FLAG IMAGE tiles from Language.tga (176x512,
+         * four stacked 176x128 tiles, src V 0/128/256/384) as clickable hit-rects at the
+         * four corners + a "LANGUAGE SELECT" header (in-EXE literal @0x4667c0). It has NO
+         * text buttons. Port previously showed 4 text buttons — replaced: the 4 buttons
+         * are now HIDDEN hit-rects at the confirmed flag dest rects (input still works via
+         * s_button_index<4), and frontend_render_language_select_overlay draws the flags +
+         * header + bg. Clicking any flag advances to LEGAL (no language global written —
+         * CONFIRMED). Dest rects @640x480: TL(40,128) TR(424,128) BL(40,320) BR(424,320),
+         * each 176x128. */
+        s_language_bg_surface   = frontend_load_tga("Front_End/LanguageScreen.tga", "Front_End/FrontEnd.zip");
+        s_language_flag_surface = frontend_load_tga("Front_End/Language.tga", "Front_End/FrontEnd.zip");
+        {
+            int fi;
+            for (fi = 0; fi < 4; fi++) {
+                int fx = (fi & 1) ? 424 : 40;     /* TL/BL left=40, TR/BR right=424 */
+                int fy = (fi < 2) ? 128 : 320;    /* top row 128, bottom row 320 */
+                int b = frontend_create_button("", fx, fy, 176, 128);
+                if (b >= 0) s_buttons[b].hidden = 1;  /* invisible hit-rect; flag drawn in overlay */
+            }
+        }
         s_anim_tick = 0;
         s_inner_state = 1;
         break;
