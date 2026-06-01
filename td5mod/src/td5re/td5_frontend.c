@@ -8241,11 +8241,11 @@ static void Screen_TwoPlayerOptions(void) {
         /* [CONFIRMED @ 0x420C70 case 0]: init state */
         frontend_init_return_screen(TD5_SCREEN_TWO_PLAYER_OPTIONS);
         TD5_LOG_D(LOG_TAG, "TwoPlayerOptions: init split_mode=%d", s_split_screen_mode);
-        /* [NOTE 2026-06-01] SplitScreen.tga corner is (255,239,255) near-white, NOT black,
-         * and the PNG is fully opaque — so a black colorkey would do nothing and its real
-         * transparency key is UNCONFIRMED. Left without colorkey pending RE of the original's
-         * SplitScreen.tga key color (the icon may legitimately be a near-white-bg sprite, or
-         * need a white/magenta key). Flagged, not guessed. */
+        /* [RESOLVED 2026-06-01] SplitScreen.tga is drawn OPAQUE — no colorkey. Its
+         * near-white (255,239,255) background is intentional (palette index 5, the
+         * dominant color). The original loader sets a black SRCBLT key but the icon is
+         * blitted via the OPAQUE path (Copy16BitSurfaceRect @0x4251a0 flag 0x10, no key
+         * test), so the key is inert. Port's plain load (no colorkey) is correct. */
         s_split_screen_surface = frontend_load_tga("SplitScreen.tga", "Front End/frontend.zip");
         /* [CONFIRMED @ 0x420d22]: SNK_SplitScreenButTxt at x=-0x100, width=0x100 */
         frontend_create_button(SNK_SplitScreenButTxt, -0x100, 0, 0x100, 0x20);
