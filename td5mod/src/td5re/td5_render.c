@@ -103,10 +103,24 @@ void BuildRotationMatrixFromAngles(float *out, short *angles);
  * particularly first-person cockpit views or close-up overlays. To revert,
  * change 32.0f back to 1.0f. The fix is isolated to this constant. */
 #define DEFAULT_NEAR_CLIP    32.0f     /* orig DAT_00473bbc, was 1.0f */
-#define DEFAULT_FAR_CLIP     65536.0f
+/* [FIX 2026-06-01 distant-depth / pop-in] DEFAULT_FAR_CLIP + DEPTH_NORMALIZE_INV
+ * extended from the original's 65536 / (1/65479) to 195000 / (1/195000) so the
+ * depth range MATCHES the 195000 frustum far-cull. The original co-designed its
+ * +/-128-span draw window with a 65479 depth range so geometry never exceeded it;
+ * the port draws geometry out to view_z ~176000-199000 (far_cull=195000), which
+ * with the old 65479 normalization clamped everything past 65479 to the far
+ * plane -> distant buildings/trees all at depth 1.0, z-fighting by draw order
+ * (the user's "rendered in front of the previous one at a later stage" /
+ * "distance looks weird"). Extending the range gives every drawn mesh a real
+ * depth value across the whole visible distance. Paired with the D16->D32_FLOAT
+ * depth buffer (ddraw_wrapper/src/d3d11_backend.c) so near-camera precision is
+ * not sacrificed by the wider linear range. DELIBERATE DIVERGENCE from the
+ * CONFIRMED orig 1/65479; justified because the port's draw distance is no
+ * longer window-limited to ~65479 view_z. */
+#define DEFAULT_FAR_CLIP     195000.0f            /* was 65536; matches far-cull */
 #define DEFAULT_FAR_CULL     195000.0f
 #define NEAR_DEPTH_OFFSET    64.0f                /* orig 0x0045d6c0 */
-#define DEPTH_NORMALIZE_INV  (1.0f / 65479.0f)    /* orig DAT_00473bcc */
+#define DEPTH_NORMALIZE_INV  (1.0f / 195000.0f)   /* was orig 1/65479; extended to far-cull */
 
 /** Billboard depth sort stride sizes (bytes) */
 #define BILLBOARD_TRI_STRIDE  0x84
@@ -2675,12 +2689,11 @@ void td5_render_configure_projection(int width, int height)
      * Pinning far_cull to the fixed 195000 lets the whole visible scene resolve
      * in a single pass, as the original does ("everything at once").
      *
-     * Safe with DepthClipEnable=FALSE (d3d11_backend.c:504): geometry past
-     * view_z=65479 gets depth_z>1.0 CLAMPED (not clipped) to the far plane,
-     * mirroring the original's D3D3 XYZRHW depth-clamp. far_clip (depth
-     * normalization 1/65479) is left unchanged — it is a separate, CONFIRMED
-     * value and must not track far_cull (doing so would distort near-camera
-     * z-buffer precision). */
+     * [UPDATED 2026-06-01] far_clip (depth normalization) is now ALSO extended
+     * to 195000 (see DEFAULT_FAR_CLIP / DEPTH_NORMALIZE_INV) and the depth
+     * buffer upgraded D16->D32_FLOAT, so geometry drawn out to the 195000
+     * far-cull gets a real depth value instead of clamping to the far plane and
+     * z-fighting. Range and far-cull now intentionally match. */
     s_near_clip = DEFAULT_NEAR_CLIP;
     s_far_clip  = DEFAULT_FAR_CLIP;
     s_far_cull  = DEFAULT_FAR_CULL;   /* orig 0x0042D48E = 195000, slider-independent */

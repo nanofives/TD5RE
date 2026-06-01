@@ -668,7 +668,15 @@ static int Backend_CreateRenderTargets(int width, int height)
         dtd.Height = (UINT)height;
         dtd.MipLevels = 1;
         dtd.ArraySize = 1;
-        dtd.Format = DXGI_FORMAT_D16_UNORM;
+        /* [FIX 2026-06-01 distant-depth] D16_UNORM -> D32_FLOAT. The 16-bit
+         * buffer only resolved ~65k linear depth units; with the scene depth
+         * range extended to the 195000 far-cull (td5_render.c), 16 bits gave
+         * ~3 units/level and distant geometry z-fought / clamped. 32-bit float
+         * has ample precision across the full extended range (near and far),
+         * eliminating the distant z-fighting that read as buildings "rendered
+         * in front of one another at a later stage". Depth-only (no stencil);
+         * the DSV infers format from the texture, DS states use DepthFunc only. */
+        dtd.Format = DXGI_FORMAT_D32_FLOAT;
         dtd.SampleDesc.Count = 1;
         dtd.Usage = D3D11_USAGE_DEFAULT;
         dtd.BindFlags = D3D11_BIND_DEPTH_STENCIL;
