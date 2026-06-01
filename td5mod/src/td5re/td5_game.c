@@ -3617,27 +3617,17 @@ int td5_game_run_race_frame(void) {
             g_camWorldPos[vp][2]);
     }
 
-    /* Feed per-vehicle skid intensity and gear state into the sound system */
+    /* Feed per-vehicle gear state into the sound system (engine/horn vol LUT).
+     * The tyre screech is NOT plumbed from here: the original 0x440B00 D1 block
+     * reads the slip-excess (+0x31C/+0x320) directly off the actor, so the port's
+     * mixer reads it directly too -- no skid-intensity feed. */
     for (i = 0; i < TD5_MAX_RACER_SLOTS; i++) {
         if (s_slot_state[i].state == 3) continue;
         TD5_Actor *actor_snd = td5_game_get_actor(i);
         if (!actor_snd) continue;
         uint8_t *a = (uint8_t *)actor_snd;
 
-        /* Skid intensity: max of front/rear axle slip excess (offset 0x31C, 0x320) */
-        int slip_front = *(int32_t *)(a + 0x31C);
-        int slip_rear  = *(int32_t *)(a + 0x320);
-        int slip_max   = (slip_front > slip_rear) ? slip_front : slip_rear;
-        if (slip_max < 0) slip_max = 0;
-
-        /* Feed skid intensity for the viewport that is watching this vehicle */
-        for (int vp = 0; vp < (g_td5.split_screen_mode ? 2 : 1); vp++) {
-            if (g_actorSlotForView[vp] == i) {
-                td5_sound_set_skid_intensity(vp, slip_max);
-            }
-        }
-
-        /* Gear state (offset 0x224) -- used for horn volume table lookup */
+        /* Gear state (offset 0x224) -- used for engine/horn volume table lookup */
         int gear = *(int32_t *)(a + 0x224);
         td5_sound_set_gear_state(i, gear);
     }

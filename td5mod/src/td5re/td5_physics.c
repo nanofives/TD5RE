@@ -4010,6 +4010,23 @@ static void apply_collision_response(TD5_Actor *penetrator, TD5_Actor *target,
               is_side_branch, A->slot_index, B->slot_index, mass_A, mass_B,
               cx_A, cz_A, cx_B, cz_B, impulse, impact_mag, impactForce);
 
+    /* [orig ApplyVehicleCollisionImpulse 0x004079c0, pre-LAB_00408289]: car/
+     * traffic collision SFX. A racer-involved impact (at least one slot < 6)
+     * above 0x3201 plays a positional one-shot: LHit1-5 (light) below 0xc801,
+     * HHit1-4 (hard) at/above it. Volume 0x1000; pitch per tier (0xd02 / 0x2198).
+     * Reached only on an APPROACHING impact (the separating early-out above
+     * returns before this), so it fires once per real hit, not while resting. */
+    if ((A->slot_index < 6 || B->slot_index < 6) && impact_mag >= 0x3201) {
+        int hit_slot, hit_pitch, hit_variants;
+        if (impact_mag < 0xc801) {
+            hit_slot = 0x1F; hit_pitch = 0xd02;  hit_variants = 5; /* LHit1-5 */
+        } else {
+            hit_slot = 0x1B; hit_pitch = 0x2198; hit_variants = 4; /* HHit1-4 */
+        }
+        int32_t hit_pos[3] = { A->world_pos.x, A->world_pos.y, A->world_pos.z };
+        td5_sound_play_at_position(hit_slot, 0x1000, hit_pitch, hit_pos, hit_variants);
+    }
+
     /* Wanted mode (cop chase): player<->cop collision awards damage score.
      * Mirrors ApplyVehicleCollisionImpulse @ 0x40817A/0x4081BE → AwardWantedDamageScore.
      * [CONFIRMED]: both A-is-player and B-is-player paths call AwardWantedDamageScore

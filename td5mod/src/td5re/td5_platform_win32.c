@@ -23,6 +23,7 @@
 #include <string.h>
 #include <stdarg.h>
 #include <malloc.h>
+#include <math.h>
 
 #include "td5_platform.h"
 
@@ -147,6 +148,11 @@ static int                     s_ds_channel_buf[MAX_AUDIO_CHANNELS]; /* buffer i
 static DWORD                   s_ds_buffer_rates[MAX_AUDIO_BUFFERS];
 static int                     s_audio_buf_count = 0;
 static int                     s_master_volume   = 40;
+/* When set, all SFX play/modify is forced to silence (e.g. while the in-race
+ * pause menu is up). Looping buffers keep running so resume is click-free; the
+ * per-frame audio mix simply re-applies volume 0 until unmuted. Music (CD) uses
+ * a separate path and is unaffected. */
+static int                     s_audio_muted     = 0;
 
 #define TD5_STREAM_BUFFER_BYTES 0x81600u
 
@@ -1978,10 +1984,19 @@ static int find_free_channel(void)
  *  DS range: DSBVOLUME_MIN (-10000) to DSBVOLUME_MAX (0). */
 static LONG vol_to_ds(int volume)
 {
-    if (volume <= 0) return DSBVOLUME_MIN;
+    if (volume <= 0)   return DSBVOLUME_MIN;
     if (volume >= 100) return DSBVOLUME_MAX;
-    /* Approximate log scale: -100 * (100 - volume) */
-    return (LONG)(-50 * (100 - volume));
+    /* Perceptual amplitude-dB attenuation: 20*log10(v/100), in DirectSound's
+     * hundredths-of-a-dB. The old -50*(100-v) was linear-IN-dB and far too steep
+     * (v=50 -> -25 dB), which buried every mid-volume sound: a wall scrape at
+     * ~v48 mapped to -26 dB and was masked under the engine, so it was inaudible
+     * even at full SFX volume. Log maps v=50 -> -6 dB, v=25 -> -12 dB, v=10 ->
+     * -20 dB, keeping quieter one-shots (scrape, distant hits) audible while the
+     * loud sounds (engine/collisions near v100) stay at full level. */
+    LONG ds = (LONG)(2000.0 * log10((double)volume / 100.0));
+    if (ds < DSBVOLUME_MIN) ds = DSBVOLUME_MIN;
+    if (ds > DSBVOLUME_MAX) ds = DSBVOLUME_MAX;
+    return ds;
 }
 
 /** Pass through a native DirectSound-scale pan (-10000..+10000).
@@ -2049,7 +2064,7 @@ TD5_AudioChannel td5_plat_audio_play(int buffer_index, int loop,
 
     /* Apply parameters */
     {
-        int effective_vol = (volume * s_master_volume) / 100;
+        int effective_vol = s_audio_muted ? 0 : (volume * s_master_volume) / 100;
         IDirectSoundBuffer_SetVolume(dup_buf, vol_to_ds(effective_vol));
     }
     IDirectSoundBuffer_SetPan(dup_buf, pan_to_ds(pan));
@@ -2085,7 +2100,7 @@ void td5_plat_audio_modify(TD5_AudioChannel ch, int volume, int pan, int frequen
     if (!buf) return;
 
     {
-        int effective_vol = (volume * s_master_volume) / 100;
+        int effective_vol = s_audio_muted ? 0 : (volume * s_master_volume) / 100;
         IDirectSoundBuffer_SetVolume(buf, vol_to_ds(effective_vol));
     }
     IDirectSoundBuffer_SetPan(buf, pan_to_ds(pan));
@@ -2107,6 +2122,11 @@ void td5_plat_audio_set_master_volume(int volume)
     if (volume < 0)   volume = 0;
     if (volume > 100) volume = 100;
     s_master_volume = volume;
+}
+
+void td5_plat_audio_set_muted(int muted)
+{
+    s_audio_muted = muted ? 1 : 0;
 }
 
 int td5_plat_audio_stream_play(const char *wav_path, int loop)

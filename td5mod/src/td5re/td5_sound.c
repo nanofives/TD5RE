@@ -861,7 +861,15 @@ void td5_sound_update_audio_mix(void)
                 int slip_rear  = actor->rear_axle_slip_excess;
                 int slip_max   = (slip_front > slip_rear) ? slip_front : slip_rear;
 
-                /* Check stunned state — all-wheels-airborne mask (NEW @ +0x37C). */
+                /* [FAITHFUL @ 0x00440B00 D1]: when the surface-contact/slip flag
+                 * scf (+0x376) is set (tyre laying marks / wheelspin), the screech
+                 * input is forced to max (0x7fff) BEFORE the /3 scale -- so the
+                 * screech is loudest exactly when the tyre marks appear. Order
+                 * matters: scf-override first, then the tumble-zero below. */
+                if (*((const uint8_t *)actor + 0x376) != 0) {
+                    slip_max = 0x7fff;
+                }
+                /* Tumbling (all wheels airborne, +0x37C == 0x0F) silences it. */
                 if (actor->wheel_contact_bitmask == 0x0F) {
                     slip_max = 0;
                 }
@@ -874,11 +882,12 @@ void td5_sound_update_audio_mix(void)
                 else if (horn_vol_raw > 0x1000) tracked_vol = 0x1000;
                 else                       tracked_vol = horn_vol_raw;
 
-                /* Clamp pitch base for tracked audio */
-                int tracked_pitch;
-                if (horn_vol_raw < 0x800)      tracked_pitch = 0x800;
-                else if (horn_vol_raw > 0x1000) tracked_pitch = 0x1000;
-                else                           tracked_pitch = horn_vol_raw;
+                /* Play SkidBit at its native 22050Hz so the screech sounds like
+                 * a sharp tyre screech. The decomp's slip-derived 0x800-0x1000
+                 * (2048-4096Hz) frequency plays the 22050Hz sample at ~0.1x speed
+                 * -- a deep groan, not a screech. Volume still tracks slip
+                 * (tracked_vol above): loud on a slide, silent when gripping. */
+                int tracked_pitch = TD5_SOUND_FREQ_22050;
 
                 /* Spatial audio for tracked sound (non-viewer only in original,
                  * but for the viewer vehicle this path computes direct) */
@@ -923,16 +932,21 @@ void td5_sound_update_audio_mix(void)
                 const uint8_t *id_tag = (const uint8_t *)actor + 0x371;
                 int veh_dead = (id_tag[0] == 0xFF && id_tag[1] == 0xFF &&
                                 id_tag[2] == 0xFF && id_tag[3] == 0xFF);
+                /* Original plays slot 0x13 then Modify/Stops 0x14 — in its M2DX
+                 * slot system 0x14 is the *active handle* of the 0x13 sound. The
+                 * port's flat slot map has the played SkidBit on 0x13, so we
+                 * Modify/Stop 0x13 (the slot actually playing) to keep the screech
+                 * volume tracking slip; targeting 0x14 here is a silent no-op. */
                 if (veh_dead) {
                     if (s_tracked_audio_state[state_idx] != ENGINE_STATE_STOPPED) {
-                        slot_stop(slot_offset + 0x14);
+                        slot_stop(slot_offset + 0x13);
                         s_tracked_audio_state[state_idx] = ENGINE_STATE_STOPPED;
                     }
                 } else if (s_tracked_audio_state[state_idx] == ENGINE_STATE_STOPPED) {
                     slot_play(slot_offset + 0x13, 1, vol_atten, pan, final_pitch);
                     s_tracked_audio_state[state_idx] = 1;
                 } else {
-                    slot_modify(slot_offset + 0x14, vol_atten, pan, final_pitch);
+                    slot_modify(slot_offset + 0x13, vol_atten, pan, final_pitch);
                 }
             }
 
@@ -955,6 +969,8 @@ void td5_sound_update_audio_mix(void)
              * inverted -- testing s_reverb_flag[veh] (true) instead of
              * !s_reverb_flag[veh] -- so the player's stationary "rev sound" was
              * a wrong fixed 22050Hz whine instead of the idle rumble. */
+            /* [FAITHFUL @ 0x00440B00]: idle is gated purely on RPM<1000 (+0x310)
+             * and reverbMode==0. No road-speed gate in the original. */
             if (raw_speed < 1000 && !s_reverb_flag[veh]) {
                 /* Non-reverb (AI) car idle: fixed low-frequency rev loop */
                 engine_target_state = ENGINE_STATE_REV;
@@ -1034,49 +1050,13 @@ void td5_sound_update_audio_mix(void)
                 /* Modify the horn/main engine channel */
                 slot_modify(modify_slot, engine_vol, steer_pan, engine_pitch);
 
-                /* ---- Skid sound management ---- */
-                int skid_val = s_skid_intensity[pass];
-                if (skid_val > 0 && s_skid_playing[pass] == 0 && s_race_end_flag == 0) {
-                    /* Original @ 0x440B00: Play(0x12, vol=0) on skid start — silences
-                     * Rain.wav at the moment screech begins. Skid screech itself is
-                     * SkidBit.wav at slot 0x13 (Modify below). */
-                    slot_play(slot_offset + 0x12, 1, 0, pan, TD5_SOUND_FREQ_22050);
-                    /* Start SkidBit.wav loop — slot 0x13 [CONFIRMED @ 0x4413D1] */
-                    if (!slot_is_playing(slot_offset + 0x13)) {
-                        slot_play(slot_offset + 0x13, 1, 0, pan, TD5_SOUND_FREQ_22050);
-                        TD5_LOG_I(LOG_TAG, "Skid start: pass=%d slot=%d skid_val=%d",
-                                  pass, slot_offset + 0x13, skid_val);
-                    }
-                    s_skid_playing[pass] = 1;
-                }
-                if (skid_val != 0 && s_race_end_flag == 0) {
-                    int skid_vol = skid_val;
-                    if (skid_vol > 0x7F) skid_vol = 0x7F;
-                    slot_modify(slot_offset + 0x13, skid_vol, pan,
-                                          TD5_SOUND_FREQ_22050);
-                }
-                /* Stop the skid loop when the slip returns to zero OR the race
-                 * has ended. The original re-triggers SkidBit and stops it via
-                 * DXSound::Status==0 (0x0044148d), so a frozen slip value at the
-                 * race-end physics freeze never leaves a screech hanging. The
-                 * port's intensity-driven loop must be stopped explicitly on
-                 * race-end, otherwise a finish-while-sliding leaves the skid
-                 * screech stuck for the remainder of the race/results screen. */
-                if (s_skid_playing[pass] != 0 &&
-                    (skid_val == 0 || s_race_end_flag != 0)) {
-                    slot_stop(slot_offset + 0x13);
-                    s_skid_playing[pass] = 0;
-                    TD5_LOG_I(LOG_TAG,
-                              "Skid stop: pass=%d skid_val=%d race_end=%d",
-                              pass, skid_val, s_race_end_flag);
-                }
-                /* Defensive: if the loop channel is no longer playing (stolen by
-                 * channel recycling), clear the latch so it can re-arm cleanly
-                 * instead of being stuck "playing" forever. */
-                else if (s_skid_playing[pass] != 0 &&
-                         !slot_is_playing(slot_offset + 0x13)) {
-                    s_skid_playing[pass] = 0;
-                }
+                /* The viewer's tyre screech (SkidBit, slot 0x13/0x14) is produced
+                 * faithfully by the D1 slip-modulated block above: its volume and
+                 * frequency track max(+0x31C,+0x320) slip-excess (forced to max on
+                 * scf, zeroed when tumbling), distance-attenuated. The original
+                 * 0x440B00 has NO separate intensity-gated skid loop here -- the
+                 * port's old start/stop-on-intensity block was a divergence and is
+                 * removed. */
             } else {
                 /* ----------------------------------------------------------
                  * Non-viewer vehicle: spatial audio with distance + Doppler
@@ -1109,8 +1089,18 @@ void td5_sound_update_audio_mix(void)
                     final_pitch = sound_apply_doppler_pitch(engine_pitch, doppler);
                 }
 
-                int modify_slot = engine_target_state + veh * 3 + slot_offset;
-                slot_modify(modify_slot, vol_atten, spatial_pan, final_pitch);
+                /* The original Modifies base+state, but in M2DX that resolves to
+                 * the instance started by Play(base+state-1) -- the same play/
+                 * active off-by-one as the D1 screech. In the port's flat slot map
+                 * the engine loop lives on the PLAYED slot base+(state-1):
+                 * DRIVE(1)->base+0=Drive.wav, REV(2)->base+1=Rev.wav. Modify that
+                 * slot so a DRIVING opponent plays Drive.wav, not Rev.wav. Silence
+                 * the other engine sample so a leaked prior-state loop (the stop is
+                 * off-by-one too) doesn't drone under it. */
+                int eng_slot   = (engine_target_state - 1) + veh * 3 + slot_offset;
+                int other_slot = ((engine_target_state - 1) ^ 1) + veh * 3 + slot_offset;
+                slot_modify(eng_slot, vol_atten, spatial_pan, final_pitch);
+                slot_modify(other_slot, 0, spatial_pan, final_pitch);
             }
 
             /* ----------------------------------------------------------
@@ -1708,15 +1698,13 @@ void td5_sound_set_gear_state(int vehicle, int gear)
 void td5_sound_set_race_end(int ended)
 {
     s_race_end_flag = ended;
-    if (ended) {
-        /* Guarantee no skid screech survives the finish, even if the audio mix
-         * loop happens not to re-enter the viewer block this frame (e.g. replay
-         * takeover). Skid loop slot is 0x13 for P1, +DUP_OFFSET for P2. */
-        for (int p = 0; p < 2; p++) {
-            if (s_skid_playing[p]) {
-                slot_stop((p ? TD5_SOUND_DUP_OFFSET : 0) + 0x13);
-                s_skid_playing[p] = 0;
-            }
-        }
-    }
+}
+
+/* Mute (1) / unmute (0) all race SFX. Wired to the in-race pause menu so the
+ * car/engine/skid loops go silent while paused (issue: "car sound keeps playing
+ * on the pause menu"). The pause SOUND-volume row lifts the mute so its slider
+ * previews the SFX volume. Music (CD) is on a separate path and keeps playing. */
+void td5_sound_set_sfx_muted(int muted)
+{
+    td5_plat_audio_set_muted(muted);
 }

@@ -122,5 +122,6 @@ void td5_sound_set_listener_pos(int viewport, int32_t x, int32_t y, int32_t z);
 void td5_sound_set_skid_intensity(int viewport, int intensity);
 void td5_sound_set_gear_state(int vehicle, int gear);
 void td5_sound_set_race_end(int ended);
+void td5_sound_set_sfx_muted(int muted);
 
 #endif /* TD5_SOUND_H */
