@@ -7887,7 +7887,7 @@ void td5_physics_refresh_wheel_contacts(TD5_Actor *actor)
          * resolve_neighbor / update_position_recursive, not the height call. */
         int16_t span_normal[3] = {0, 4096, 0};  /* default: flat upward normal (magnitude 4096) */
         {
-            ground_y = td5_track_compute_contact_height_with_normal(
+            ground_y = td5_track_compute_contact_height_bounded(
                 probe_span,
                 (int)actor->wheel_probes[i].sub_lane_index,
                 actor->wheel_contact_pos[i].x,
