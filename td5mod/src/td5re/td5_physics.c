@@ -2453,15 +2453,29 @@ void td5_physics_update_player(TD5_Actor *actor)
      * This placeholder is preserved for code-archaeology traceability.
      * todo: todo_scf_wheelspin_ordering.md */
 
-    /* --- 14b. Velocity magnitude safety clamp ---
-     * Without working wall collisions, cars leave the road immediately.
-     * Clamp total velocity magnitude to the car's speed_limit (1x, not 2x)
-     * so the car stays at a controllable speed. The original game relies on
-     * track walls to contain speed through corners; until walls are
-     * implemented, this hard cap prevents runaway velocity. */
+    /* --- 14b. Velocity magnitude safety backstop (2x speed_limit) ---
+     * NON-ORIGINAL. The original UpdatePlayerVehicleDynamics @ 0x00404030 has
+     * NO total-velocity-magnitude clamp here: it limits speed via the drive-
+     * torque cutoff at the `abs_speed <= speed_limit` guards (preserved above,
+     * CONFIRMED @ 0x00404030) plus track-wall containment through corners. This
+     * block sits between the confirmed-orig force writeback (14a) and the yaw
+     * damping 14c (CONFIRMED @ 0x404DB6) — there is no original instruction
+     * here.
+     *
+     * It was added as a 1x hard cap "until track walls are implemented". Lateral
+     * rail containment is now ported (0x00406CC0, the Tokyo wall work), so the
+     * 1x cap is obsolete: it clipped corner-exit speed and could mask upstream
+     * force divergence by clamping the symptom. Raised to 2x speed_limit — the
+     * walls now do the real containment; this remains only as a runaway-velocity
+     * backstop and lets the car carry momentum (gravity / corner exit) above
+     * speed_limit the way the original does.
+     *
+     * Drive-test gate: car must stay contained on Tokyo + Moscow AND reach
+     * higher corner-exit speed than the 1x cap allowed. If a tested track lets
+     * the car leave the road, KEEP the 2x cap (do not remove it). */
     {
         int32_t speed_lim = (int32_t)PHYS_S(actor, 0x74) << 8;
-        int32_t vel_cap = speed_lim;  /* 1x speed limit until walls exist */
+        int32_t vel_cap = speed_lim * 2;  /* 2x backstop (was 1x); walls do real containment */
         int32_t vxh = actor->linear_velocity_x >> 8;
         int32_t vzh = actor->linear_velocity_z >> 8;
         int32_t mag_sq = vxh * vxh + vzh * vzh;
@@ -2471,6 +2485,12 @@ void td5_physics_update_player(TD5_Actor *actor)
             int32_t cap_h = vel_cap >> 8;
             actor->linear_velocity_x = (int32_t)((int64_t)actor->linear_velocity_x * cap_h / mag);
             actor->linear_velocity_z = (int32_t)((int64_t)actor->linear_velocity_z * cap_h / mag);
+            /* Throttled diagnostic (slot 0, every 120 frames) so a drive-test
+             * can tell whether the 2x backstop is engaging — same pattern as 14c. */
+            if (actor->slot_index == 0 && (actor->frame_counter % 120u) == 0u) {
+                TD5_LOG_I(LOG_TAG, "vel_backstop_2x: fired mag=%d cap_h=%d speed_lim_h=%d",
+                          mag, cap_h, speed_lim >> 8);
+            }
         }
     }
 
