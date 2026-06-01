@@ -2056,18 +2056,17 @@ static TD5_ScreenIndex frontend_get_parent_screen(TD5_ScreenIndex screen) {
         return TD5_SCREEN_CAR_SELECTION;
 
     case TD5_SCREEN_HIGH_SCORE:
-        /* [FIX 2026-05-26 high-score-esc-route] s_previous_screen lingers
-         * as RACE_RESULTS for the entire session after any race; using it
-         * as the parent-screen indicator made Escape jump back to the
-         * race-results frontend instead of returning to the Main Menu
-         * (user-reported). Only treat the post-race flow as a child of
-         * RACE_RESULTS when explicitly reached via the post-race transition
-         * (NAME_ENTRY → HIGH_SCORE). For Main-Menu → Records entry,
-         * always parent to MAIN_MENU. */
-        if (s_flow_context == 6) {
-            /* Post-race flow signaled by Screen_PostRaceNameEntry. */
-            return TD5_SCREEN_RACE_RESULTS;
-        }
+        /* [FIXED 2026-06-01] High Scores ALWAYS returns to MAIN MENU. The original
+         * ScreenPostRaceHighScoreTable @0x00413580 has NO parent discriminator — case 6
+         * unconditionally sets g_returnToScreenIndex=TD5_SCREEN_MAIN_MENU on OK/ESC, and
+         * this screen is only ever reached from the main-menu Hi-Score button. The prior
+         * `s_flow_context == 6 -> RACE_RESULTS` test was wrong: 6 is the main-menu
+         * Hi-Score button's OWN context value (set at Screen_MainMenu :6676), so it
+         * fired on EXACTLY the main-menu entry it must not, sending ESC/Back to RACE
+         * RESULTS (OK was hardcoded to MAIN_MENU, hence the OK-vs-ESC asymmetry the user
+         * saw). The port's post-race table is Screen_PostRaceNameEntry (NAME_ENTRY), which
+         * never enters HIGH_SCORE and exits to MAIN_MENU on its own — so this case never
+         * needs a RACE_RESULTS parent. [verified end-to-end vs 0x00413580.] */
         return TD5_SCREEN_MAIN_MENU;
 
     case TD5_SCREEN_NAME_ENTRY:
@@ -4855,31 +4854,19 @@ static void frontend_render_high_score_overlay(float sx, float sy) {
                                                   * the column header is "SPEED" (SNK_SpdTxt),
                                                   * not the unit, per DrawPostRaceHighScoreEntry */
 
-    /* Panel geometry: 0x208 x 0x90 surface blitted at (115, 177) in 640x480 */
+    /* Panel: 0x208 x 0x90 = 520x144 surface at (115,177). [FIXED 2026-06-01] The original
+     * (DrawPostRaceHighScoreEntry @0x00413010) clears this surface to black then composites
+     * it COLOR-KEYED on black (QueueFrontendOverlayRect trailing-0), so ONLY THE TEXT shows
+     * over the MainMenu backdrop — there is NO visible framed box. The prior opaque
+     * white-border + dark-fill quads were a port invention; removed. */
     float panel_x = 115.0f * sx;
     float panel_y = 177.0f * sy;
-    float panel_w = 520.0f * sx;
-    float panel_h = 144.0f * sy;
 
-    /* [FIX 2026-05-26 high-score-panel-backdrop] Orig allocates a 0x208×0x90
-     * DDraw surface, black-fills it via FUN_00424050(0,0,0,0x208,0x90,...),
-     * paints columns onto it, then blits the whole surface. Port draws live
-     * text but had no backdrop — table looked unframed, floating on MainMenu
-     * background. Add an opaque dark fill + 1px border for visual parity. */
-    fe_draw_quad(panel_x - sx, panel_y - sy, panel_w + 2.0f * sx,
-                 panel_h + 2.0f * sy, 0xFFFFFFFF, -1, 0.0f, 0.0f, 1.0f, 1.0f);
-    fe_draw_quad(panel_x, panel_y, panel_w, panel_h, 0xF0101018,
-                 -1, 0.0f, 0.0f, 1.0f, 1.0f);
-
-    /* Column X positions (in 520px panel space, scaled to screen) */
-    float col_name  = panel_x + 16.0f  * sx;
-    float col_score = panel_x + 128.0f * sx; /* 0x80: original left edge */
-    float col_car   = panel_x + 228.0f * sx;
-    float col_avg   = panel_x + 352.0f * sx;
-    float col_top   = panel_x + 444.0f * sx;
-
-    /* Scale for small text within the panel */
+    /* Columns are CENTERED within surface-local [left,right] bounds via MeasureOrCenter in
+     * the original [CONFIRMED @0x00413010]: NAME[16,112] SCORE[128,212] CAR[228,336]
+     * AVERAGE[352,428] TOP[444,520]. Helper centers a string in [l,r] (panel-local px). */
     float ts = 0.55f;  /* text scale relative to screen scale */
+    #define HS_CTR(L,R,S) (panel_x + ((float)(L) + (((float)((R)-(L)) - fe_measure_text((S), sx*ts)/sx) * 0.5f)) * sx)
 
     if (!grp) {
         float tw = fe_measure_text("NO SCORES YET", sx * ts);
@@ -4889,26 +4876,27 @@ static void frontend_render_high_score_overlay(float sx, float sy) {
     }
 
     int score_type = grp->header & 0xFF;
-
-    /* Column headers — same white font as data rows (SmallText.tga, no color change) */
-    float hdr_y = panel_y + 7.0f * sy;
     uint32_t hdr_color = 0xFFFFFFFF;
-    /* [FIXED 2026-06-01] Headers from SNK_ strings (DrawPostRaceHighScoreEntry 0x413010):
-     * NAME / BEST / TIME|LAP|POINTS / CAR / AVERAGE / TOP, with second line "SPEED"
-     * (SNK_SpdTxt) under AVERAGE & TOP — NOT the MPH/KPH unit (the unit only affects the
-     * row VALUE conversion). Prior labels "AVG"/"PTS"/<unit> were abbreviations/guesses. */
-    fe_draw_text(col_name,  hdr_y, "NAME", hdr_color, sx * ts, sy * ts);
+    /* [FIXED 2026-06-01] Header layout byte-faithful to DrawPostRaceHighScoreEntry @0x413010:
+     * NAME/CAR and the TIME|LAP|POINTS type label sit at surface-local y=7; AVERAGE/TOP first
+     * line at y=0; the second "SPEED" line and BEST at y=14. (Prior port had BEST at y=0 and
+     * the type label at y=14 — INVERTED.) All centered in their column bounds. */
+    float y7  = panel_y + 7.0f  * sy;
+    float y0  = panel_y + 0.0f  * sy;
+    float y14 = panel_y + 14.0f * sy;
+    fe_draw_text(HS_CTR(0x10,0x70,"NAME"), y7, "NAME", hdr_color, sx * ts, sy * ts);
     if (score_type == 2) {
-        fe_draw_text(col_score, hdr_y, "POINTS",  hdr_color, sx * ts, sy * ts);
+        fe_draw_text(HS_CTR(0x80,0xd4,"POINTS"), y7, "POINTS", hdr_color, sx * ts, sy * ts);
     } else {
-        fe_draw_text(col_score, panel_y + 0.0f,       "BEST",                          hdr_color, sx * ts, sy * ts);
-        fe_draw_text(col_score, panel_y + 14.0f * sy, (score_type == 1) ? "LAP" : "TIME", hdr_color, sx * ts, sy * ts);
+        const char *tlabel = (score_type == 1) ? "LAP" : "TIME";
+        fe_draw_text(HS_CTR(0x80,0xd4,tlabel), y7,  tlabel, hdr_color, sx * ts, sy * ts);
+        fe_draw_text(HS_CTR(0x80,0xd4,"BEST"),  y14, "BEST", hdr_color, sx * ts, sy * ts);
     }
-    fe_draw_text(col_car, hdr_y, "CAR", hdr_color, sx * ts, sy * ts);
-    fe_draw_text(col_avg, panel_y + 0.0f,        "AVERAGE", hdr_color, sx * ts, sy * ts);
-    fe_draw_text(col_avg, panel_y + 14.0f * sy,  "SPEED",   hdr_color, sx * ts, sy * ts);
-    fe_draw_text(col_top, panel_y + 0.0f,        "TOP",     hdr_color, sx * ts, sy * ts);
-    fe_draw_text(col_top, panel_y + 14.0f * sy,  "SPEED",   hdr_color, sx * ts, sy * ts);
+    fe_draw_text(HS_CTR(0xe4,0x150,"CAR"),     y7,  "CAR",     hdr_color, sx * ts, sy * ts);
+    fe_draw_text(HS_CTR(0x160,0x1ac,"AVERAGE"),y0,  "AVERAGE", hdr_color, sx * ts, sy * ts);
+    fe_draw_text(HS_CTR(0x160,0x1ac,"SPEED"),  y14, "SPEED",   hdr_color, sx * ts, sy * ts);
+    fe_draw_text(HS_CTR(0x1bc,0x208,"TOP"),    y0,  "TOP",     hdr_color, sx * ts, sy * ts);
+    fe_draw_text(HS_CTR(0x1bc,0x208,"SPEED"),  y14, "SPEED",   hdr_color, sx * ts, sy * ts);
 
     /* 5 entry rows */
     float row_y = panel_y + 48.0f * sy;
@@ -4926,33 +4914,32 @@ static void frontend_render_high_score_overlay(float sx, float sy) {
         uint32_t row_color = (i == s_score_insert_pos) ? 0xFFFFCC44 : 0xFFE0E0E0;
         char buf[64];
 
-        /* Check if entry is empty (no name) */
+        /* Check if entry is empty (no name) — rank flush at x=0, "---" in name column. */
         if (e->name[0] == '\0') {
-            fe_draw_text(col_name, y, "---", 0xFF888888, sx * ts, sy * ts);
+            fe_draw_text(panel_x, y, "---", 0xFF888888, sx * ts, sy * ts);
             continue;
         }
 
-        /* Rank */
+        /* Rank: flush at panel x=0 [CONFIRMED @0x413010 DrawFrontendSmallFontStringToSurface(buf,0,...)] */
         snprintf(buf, sizeof(buf), "%d", i + 1);
-        fe_draw_text(panel_x + 2.0f * sx, y, buf, row_color, sx * ts, sy * ts);
+        fe_draw_text(panel_x, y, buf, row_color, sx * ts, sy * ts);
 
-        /* Name (clipped to 13 chars max from struct) */
+        /* Name: clipped to width 0x60 starting at x=0x10 [CONFIRMED @0x413010]. */
         {
             char name_buf[14];
             memcpy(name_buf, e->name, 13);
             name_buf[13] = '\0';
-            fe_draw_text(col_name, y, name_buf, row_color, sx * ts, sy * ts);
+            fe_draw_text(panel_x + 16.0f * sx, y, name_buf, row_color, sx * ts, sy * ts);
         }
 
-        /* Score / Time */
+        /* Score / Time: centered in [0x80,0xd4] */
         frontend_format_score_time(buf, sizeof(buf), e->score, score_type);
-        fe_draw_text(col_score, y, buf, row_color, sx * ts, sy * ts);
+        fe_draw_text(HS_CTR(0x80,0xd4,buf), y, buf, row_color, sx * ts, sy * ts);
 
-        /* Car name */
+        /* Car name: clipped to 108px column [0xe4,0x150], centered */
         {
             int cid = e->car_id & 0xFF;
             const char *cname = frontend_get_car_display_name(cid);
-            /* Clip car name to 108px column width [0xe4..0x150] */
             char cname_buf[20];
             strncpy(cname_buf, cname, sizeof(cname_buf) - 1);
             cname_buf[sizeof(cname_buf) - 1] = '\0';
@@ -4962,17 +4949,18 @@ static void frontend_render_high_score_overlay(float sx, float sy) {
                     cname_buf[--clen] = '\0';
                 }
             }
-            fe_draw_text(col_car, y, cname_buf, row_color, sx * ts, sy * ts);
+            fe_draw_text(HS_CTR(0xe4,0x150,cname_buf), y, cname_buf, row_color, sx * ts, sy * ts);
         }
 
-        /* Average speed */
+        /* Average speed: centered in [0x160,0x1ac] */
         snprintf(buf, sizeof(buf), "%d", frontend_convert_speed(e->avg_speed, speed_kph));
-        fe_draw_text(col_avg, y, buf, row_color, sx * ts, sy * ts);
+        fe_draw_text(HS_CTR(0x160,0x1ac,buf), y, buf, row_color, sx * ts, sy * ts);
 
-        /* Top speed */
+        /* Top speed: centered in [0x1bc,0x208] */
         snprintf(buf, sizeof(buf), "%d", frontend_convert_speed(e->top_speed, speed_kph));
-        fe_draw_text(col_top, y, buf, row_color, sx * ts, sy * ts);
+        fe_draw_text(HS_CTR(0x1bc,0x208,buf), y, buf, row_color, sx * ts, sy * ts);
     }
+    #undef HS_CTR
 }
 
 /* ============================================================================
@@ -5918,13 +5906,16 @@ void td5_frontend_render_ui_rects(void) {
         /* Selection highlight border (RenderFrontendDisplayModeHighlight 0x4263e0).
          * 2px outline, mouse-hover only. Driven by the separate hover index
          * (DAT_00498700), NOT the selection index — hover does not select.
-         * [FIXED 2026-06-01] Color = 16-bit 0xC000 (565) = DARK RED, not green.
-         * The original BltColorFillToSurface(0xC000,...) is R~0x18/0x1F,G=0,B=0;
-         * the port's prior 0xFF008000 green was WRONG. RGBA equivalent ~0xFFC50000.
-         * Insets inL=20/inR=22/inT=4/inB=6 + 2px bars match the original exactly. */
+         * [FIXED 2026-06-01, byte-verified] Color = GREEN 0xFF00C500. The original fills
+         * with constant 0xC000 via BltColorFillToSurface @0x00424050, which does NOT
+         * treat it as a raw RGB565 pixel — it re-packs a BYTE-PER-CHANNEL input, and the
+         * 0xC0 byte (input bits 11-15) is routed into the GREEN output channel, packing
+         * to pixel 0x0600 = pure green (R=0, G~24/31, B=0). My earlier "0xC000 = dark red"
+         * was the raw-565 misread; the user (correctly) sees GREEN. RGBA = 0xFF00C500.
+         * Insets inL=20/inR=22/inT=4/inB=6 + 2px bars match the original. */
         if (i == s_mouse_hover_button &&
             !s_buttons[i].disabled) {
-            uint32_t gc = 0xFFC50000;
+            uint32_t gc = 0xFF00C500;
             float inL = 20.0f * sx, inR = 22.0f * sx;
             float inT = 4.0f * sy,  inB = 6.0f * sy;
             float barV = 2.0f * sy, barH = 2.0f * sx;
