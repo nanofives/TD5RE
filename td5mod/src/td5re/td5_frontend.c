@@ -5585,8 +5585,9 @@ static void frontend_render_cup_failed_overlay(float sx, float sy) {
  *   SNK_TracksUnlocked  y = 0xA8 (168) — if s_cup_won_track_count != 0 [CONFIRMED @ 0x00423C2D]
  *
  * Dialog height: 0xC4 = 196 (vs CupFailed's 0x70 = 112) [CONFIRMED @ 0x00423AEB/AF0]
- * Unlock string text [UNCERTAIN — Language.dll not decompiled]:
- *   using "NEW CARS UNLOCKED" / "NEW TRACKS UNLOCKED" as reasonable defaults.
+ * Unlock string text [RESOLVED 2026-06-01 from Language.dll]: SNK_CongratsTxt="CONGRATULATIONS!",
+ *   SNK_YouHaveWonTxt="YOU HAVE WON THE", SNK_CarsUnlocked="CARS UNLOCKED",
+ *   SNK_TracksUnlocked="TRACKS UNLOCKED"; unlock lines render "%d CARS/TRACKS UNLOCKED".
  * ======================================================================== */
 static void frontend_render_cup_won_overlay(float sx, float sy) {
     char unlock_buf[64];
@@ -5605,11 +5606,11 @@ static void frontend_render_cup_won_overlay(float sx, float sy) {
     td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
     fe_draw_quad(dlg_x, dlg_y, dlg_w, dlg_h, 0xCC000000u, -1, 0,0,1,1);
 
-    /* [FIXED 2026-06-01] exact SNK_ strings: SNK_CongratsTxt="CONGRATULATIONS!" (with !),
-     * SNK_YouHaveWonTxt="YOU HAVE WON"; unlock lines are "%d %s" with
-     * SNK_CarsUnlocked="CARS UNLOCKED" / SNK_TracksUnlocked="TRACKS UNLOCKED" (no "NEW"). */
-    fe_draw_text_centered(dlg_cx, dlg_y + 0.0f  * sy, "CONGRATULATIONS!", 0xFFFFFFFF, sx, sy);
-    fe_draw_text_centered(dlg_cx, dlg_y + 56.0f * sy, "YOU HAVE WON",     0xFFFFFFFF, sx, sy);
+    /* [FIXED 2026-06-01] byte-exact SNK_ strings: SNK_CongratsTxt="CONGRATULATIONS!",
+     * SNK_YouHaveWonTxt="YOU HAVE WON THE" (the cup-type name follows on the next line,
+     * e.g. "YOU HAVE WON THE" / "CHAMPIONSHIP"); unlock lines "%d CARS/TRACKS UNLOCKED". */
+    fe_draw_text_centered(dlg_cx, dlg_y + 0.0f  * sy, "CONGRATULATIONS!",  0xFFFFFFFF, sx, sy);
+    fe_draw_text_centered(dlg_cx, dlg_y + 56.0f * sy, "YOU HAVE WON THE",  0xFFFFFFFF, sx, sy);
     /* Cup type name at y=0x54=84 [CONFIRMED @ 0x00423B89] */
     if (s_selected_game_type >= 1 && s_selected_game_type <= 6) {
         fe_draw_text_centered(dlg_cx, dlg_y + 84.0f * sy,
