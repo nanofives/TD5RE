@@ -4098,14 +4098,14 @@ static void frontend_render_sound_options_overlay(float sx, float sy) {
                              0xFFFFFFFF, s_surfaces[slot].tex_page, 0.0f, v0, 1.0f, v1);
             }
         }
-        /* [FIXED 2026-06-01] SFX-mode NAME text. Orig (0x41EA90) bakes SNK_SFX_Modes[mode]
-         * into the dialog beside the icon; the port drew the icon only, so the mode wasn't
-         * named. Centered under the 64px icon (icon center x=394+32=426). */
+        /* [FIXED 2026-06-01] SFX-mode NAME text. Orig (0x41EA90) draws SNK_SFX_Modes[mode]
+         * beside the icon. Placed TO THE RIGHT of the 64px icon (ends at 394+64=458) at the
+         * icon's vertical center (y=97+8) — NOT below it, where it collided with the SFX
+         * VOLUME bar at y~133. */
         {
             static const char *sfx_mode_names[] = { "MONAURAL", "STEREO", "3D SOUND" };
-            td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
-            fe_draw_text_centered(426.0f * sx, 131.0f * sy, sfx_mode_names[mode],
-                                  0xFFFFFFFF, sx, sy);
+            fe_draw_text(466.0f * sx, (97.0f + 8.0f) * sy, sfx_mode_names[mode],
+                         0xFFFFFFFF, sx, sy);
         }
     }
 
@@ -8045,7 +8045,9 @@ static void Screen_SoundOptions(void) {
          * 7 rows of 64x32), blitted at row (sfx_mode+4): modes 0/1/2 -> rows 4/5/6.
          * Replaces the prior 2-state Stereo.tga/Mono.tga pair, which could not render
          * a distinct icon for the 3rd (surround) mode. */
-        s_sound_icon_surface       = frontend_load_tga("Controllers.TGA", "Front End/frontend.zip");
+        /* [FIXED 2026-06-01] black-color-keyed like the Control Options icon (was opaque
+         * black box). Controllers.tga background is black; key it transparent. */
+        s_sound_icon_surface       = frontend_load_tga_ck("Controllers.TGA", "Front End/frontend.zip", TD5_COLORKEY_BLACK);
         s_sound_volumebox_surface  = frontend_load_tga("VolumeBox.tga", "Front End/frontend.zip");
         s_sound_volumefill_surface = frontend_load_tga("VolumeFill.tga","Front End/frontend.zip");
         frontend_create_button(SNK_SfxModeButTxt,     -0x100, 0, 0x100, 0x20); /* 0x41eb5e: width=0x100 */
