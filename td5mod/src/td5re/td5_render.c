@@ -103,10 +103,24 @@ void BuildRotationMatrixFromAngles(float *out, short *angles);
  * particularly first-person cockpit views or close-up overlays. To revert,
  * change 32.0f back to 1.0f. The fix is isolated to this constant. */
 #define DEFAULT_NEAR_CLIP    32.0f     /* orig DAT_00473bbc, was 1.0f */
-#define DEFAULT_FAR_CLIP     65536.0f
+/* [FIX 2026-06-01 distant-depth / pop-in] DEFAULT_FAR_CLIP + DEPTH_NORMALIZE_INV
+ * extended from the original's 65536 / (1/65479) to 195000 / (1/195000) so the
+ * depth range MATCHES the 195000 frustum far-cull. The original co-designed its
+ * +/-128-span draw window with a 65479 depth range so geometry never exceeded it;
+ * the port draws geometry out to view_z ~176000-199000 (far_cull=195000), which
+ * with the old 65479 normalization clamped everything past 65479 to the far
+ * plane -> distant buildings/trees all at depth 1.0, z-fighting by draw order
+ * (the user's "rendered in front of the previous one at a later stage" /
+ * "distance looks weird"). Extending the range gives every drawn mesh a real
+ * depth value across the whole visible distance. Paired with the D16->D32_FLOAT
+ * depth buffer (ddraw_wrapper/src/d3d11_backend.c) so near-camera precision is
+ * not sacrificed by the wider linear range. DELIBERATE DIVERGENCE from the
+ * CONFIRMED orig 1/65479; justified because the port's draw distance is no
+ * longer window-limited to ~65479 view_z. */
+#define DEFAULT_FAR_CLIP     195000.0f            /* was 65536; matches far-cull */
 #define DEFAULT_FAR_CULL     195000.0f
 #define NEAR_DEPTH_OFFSET    64.0f                /* orig 0x0045d6c0 */
-#define DEPTH_NORMALIZE_INV  (1.0f / 65479.0f)    /* orig DAT_00473bcc */
+#define DEPTH_NORMALIZE_INV  (1.0f / 195000.0f)   /* was orig 1/65479; extended to far-cull */
 
 /** Billboard depth sort stride sizes (bytes) */
 #define BILLBOARD_TRI_STRIDE  0x84
@@ -2655,22 +2669,43 @@ void td5_render_configure_projection(int width, int height)
     s_focal_length = (float)width * 0.5625f;
     s_inv_focal    = 1.0f / s_focal_length;
 
-    /* Near/far clip. far_cull is driven by the pause-menu VIEW slider so
-     * the player can dial back render distance for performance. The slider
-     * MUST be applied here (inside configure_projection) — track + scenery
-     * render before td5_render_actors_for_view in the per-viewport flow,
-     * so applying the slider only inside actors_for_view (as an earlier
-     * iteration did) leaves the track horizon stuck at DEFAULT_FAR_CULL
-     * regardless of slider position. far_clip stays at the constant max
-     * to keep z-buffer depth distribution stable across slider moves. */
+    /* Near/far clip.
+     *
+     * [FIX 2026-05-31 distant-building-popin] far_cull is a FIXED constant in
+     * the original — round(3.0f * 65000.0f) = 195000, stored at 0x00467360,
+     * computed @ 0x0042D47C-0x0042D48E [CONFIRMED]. It is NOT scaled by the
+     * pause-menu VIEW slider. The slider instead reduces render distance by
+     * lowering the number of MODELS.DAT span ENTRIES walked per frame
+     * (effectiveSpans / frac_scaled path @ :1996 and :2110, matching orig
+     * RunRaceFrame 0x42BB2E-0x42BC3C [CONFIRMED]).
+     *
+     * The prior port made far_cull itself slider-driven (5000..65536) — ~3x to
+     * ~39x nearer than the original 195000. A span's MODELS.DAT building could
+     * be IN the entry window (submitted) yet frustum-REJECTED by the per-mesh
+     * bounding-sphere test (td5_render_is_sphere_visible @ :1567 /
+     * td5_render_test_mesh_frustum @ :1627) until the camera advanced close
+     * enough — so distant buildings "popped" into view and could draw in front
+     * of nearer geometry that crossed the threshold on a different frame.
+     * Pinning far_cull to the fixed 195000 lets the whole visible scene resolve
+     * in a single pass, as the original does ("everything at once").
+     *
+     * [UPDATED 2026-06-01] far_clip (depth normalization) is now ALSO extended
+     * to 195000 (see DEFAULT_FAR_CLIP / DEPTH_NORMALIZE_INV) and the depth
+     * buffer upgraded D16->D32_FLOAT, so geometry drawn out to the 195000
+     * far-cull gets a real depth value instead of clamping to the far plane and
+     * z-fighting. Range and far-cull now intentionally match. */
     s_near_clip = DEFAULT_NEAR_CLIP;
     s_far_clip  = DEFAULT_FAR_CLIP;
+    s_far_cull  = DEFAULT_FAR_CULL;   /* orig 0x0042D48E = 195000, slider-independent */
     {
-        const float MIN_FAR_CULL = 5000.0f;
-        const float MAX_FAR_CULL = (float)DEFAULT_FAR_CULL;
-        float frac = td5_save_get_view_distance();
-        if (frac < 0.0f) frac = 0.0f; else if (frac > 1.0f) frac = 1.0f;
-        s_far_cull = MIN_FAR_CULL + (MAX_FAR_CULL - MIN_FAR_CULL) * frac;
+        static int s_farcull_logged = 0;
+        if (!s_farcull_logged) {
+            TD5_LOG_I(LOG_TAG,
+                "far_cull pinned to fixed %.0f (orig 0x42D48E); VIEW slider drives "
+                "MODELS.DAT span entry count only, not the frustum far plane",
+                s_far_cull);
+            s_farcull_logged = 1;
+        }
     }
 
     /* Horizontal frustum half-plane normals */
@@ -4351,15 +4386,29 @@ void td5_render_crossfade_surfaces(uint32_t *dst, const uint32_t *src_a,
  * Reinstates the value first shipped in 055d9b3 (zeroed in a6e5072 on the
  * mistaken assumption that the depth-formula fix alone was sufficient). */
 #define SHADOW_VIEW_Y_OFFSET    (0.0f)
-/* Polygon offset now handled by the shadow-decal rasterizer state in the
- * D3D11 wrapper (DepthBias + SlopeScaledDepthBias). Vertex-side biasing is
- * left at zero: the projection is byte-identical to a track polygon at the
- * same world position, and the GPU adapts the depth offset per pixel based
- * on surface slope. Constant biases here couldn't satisfy both "win
- * against co-planar ground" AND "lose against the car body 50 units up"
- * simultaneously — the slope-scaled bias resolves that automatically. */
+/* [FIX 2026-06-01 shadow-flicker] Shadow depth separation moved back to a
+ * VERTEX-SIDE depth bias.
+ *
+ * Previously this was left at 0 and ALL separation came from the shadow-decal
+ * rasterizer state's constant DepthBias (-500) in the D3D11 wrapper. That works
+ * for a UNORM depth buffer (bias = DepthBias * 1/2^bits, a fixed NDC step) but
+ * the depth buffer was upgraded to D32_FLOAT (distant-depth fix). For a FLOAT
+ * depth format, constant DepthBias is scaled by 2^(exponent(maxZ)-23), so for
+ * near-camera geometry (small depth_z) it collapses to ~0 — the shadow lost its
+ * offset and z-fought the road (flicker). SlopeScaledDepthBias (-1.5) still
+ * works but is ~0 for a flat shadow on flat road.
+ *
+ * Fix: carry the offset as a fixed VIEW-Z pull toward the camera (format- and
+ * precision-independent; D32 resolves it cleanly). 500 view-z units replicates
+ * the proven 2026-05-26 tuning (the old -500 DepthBias was ~0.0076 NDC ≈ 500
+ * view-z on the then-65479 range; -100/flicker and -1000/over-car bracketed it).
+ * Expressed via DEPTH_NORMALIZE_INV so it auto-tracks the depth range:
+ * depth_z = (vz - 64 - 500) * DEPTH_NORMALIZE_INV. ~500 view-z clears the road
+ * (incl. bumpy/sloped terrain the flat shadow quad approximates) without
+ * reaching the car body well above it. */
 #define SHADOW_VIEW_DEPTH_BIAS  (0.0f)
-#define SHADOW_DEPTH_Z_BIAS     (0.0f)
+#define SHADOW_PULL_VIEWZ       (500.0f)   /* world view-z units shadow is pulled toward camera */
+#define SHADOW_DEPTH_Z_BIAS     (SHADOW_PULL_VIEWZ * DEPTH_NORMALIZE_INV)
 
 static int   s_shadow_lookup_done = 0;
 static int   s_shadow_page        = -1;
