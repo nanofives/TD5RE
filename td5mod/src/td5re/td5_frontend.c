@@ -4553,11 +4553,16 @@ static void frontend_render_car_selection_preview(float sx, float sy) {
     }
 
     if (s_inner_state == 15) {
-        /* Stats sub-screen: car image at 35% opacity over the blue panel background,
-         * then spec text. Matches original: car blitted at alpha 0x5A onto the blue
-         * primary surface (FillPrimaryFrontendRect 0x5c), no additional overlay quad. */
+        /* Stats sub-screen [CONFIRMED @0x0040dfc0 state 0xF]: background is OPAQUE dark
+         * blue (the layer-1 0xFF00005C fill above) — the scene does NOT show through. The
+         * car is drawn DIMMED in place by a per-channel HALVING (>>1), NOT the preview
+         * screen's 0x5A alpha: the original calls RenderTgaWithColorKeyToSurface(...,0xff)
+         * which halves each RGB channel of the car twice. Approximate that here with a
+         * multiplicative tint of ~0x40 (≈ one halving toward black) at full opacity, so the
+         * car reads faintly under the spec text over the opaque blue (matching the original's
+         * "dimmed car on opaque blue", not a semi-transparent see-through panel). */
         if (s_car_preview_surface > 0)
-            fe_draw_surface_rect(s_car_preview_surface, 232.0f * sx, 124.0f * sy, 408.0f * sx, 280.0f * sy, 0x5AFFFFFF);
+            fe_draw_surface_rect(s_car_preview_surface, 232.0f * sx, 124.0f * sy, 408.0f * sx, 280.0f * sy, 0xFF404040);
         frontend_render_car_stats_overlay(sx, sy);
     } else {
         if (s_inner_state == 11 && s_car_preview_prev_surface > 0) {
