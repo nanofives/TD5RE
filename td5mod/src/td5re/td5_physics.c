@@ -303,39 +303,54 @@ static inline void write_i32(uint8_t *base, size_t offset, int32_t value)
 /* ========================================================================
  * Fixed-point trig (12-bit angle, returns 12-bit result)
  *
- * Compact lookup-free integer cos/sin using a quadratic approximation.
- * Input: 12-bit angle (0-4095 = 0-360 degrees).
- * Output: signed 12-bit result (-4096 .. +4096).
+ * Thin wrappers over the byte-faithful integer LUT shared with the rest of
+ * the port. The original physics path NEVER calls libm: it indexes the
+ * fixed-point sin/cos LUT g_sinCosLut_fixed12 @ 0x00483984 via CosFixed12bit
+ * @ 0x0040A6E0 / SinFixed12bit @ 0x0040A700, and the angle LUT DAT_00463214
+ * via AngleFromVector12 @ 0x0040A720.
+ *
+ * [CONFIRMED @ 0x0040A6E0/0x0040A700] CosFixed12bit/SinFixed12bit are the
+ *   INTEGER LUT cos/sin (not the float family 0x0040A6A0/0x0040A6C0). The
+ *   player/AI/wall/collision physics functions (0x00404030, 0x00404EC0,
+ *   0x00406980, 0x004079C0, 0x00409520, 0x00443CF0) all call this integer
+ *   family; no physics path uses the float LUT.
+ * [CONFIRMED @ 0x0040A720] AngleFromVector12(dx, dz): first arg = param_1 =
+ *   dx (horizontal), second = param_2 = dz; angle 0 ⇄ +dz, increasing toward
+ *   +dx. The three atan2_fixed12 call sites map 1:1 to the original's
+ *   AngleFromVector12 args (0x00406CC0 wall-edge B.z-A.z/B.x-A.x; 0x00443CF0
+ *   roll -rotated_z/-normal_y; 0x00443CF0 pitch rotated_x/mag_xz).
+ *
+ * Input: 12-bit angle (0-4095 = 0-360 degrees), masked internally by the LUT.
+ * Output: signed 12-bit result (-4096 .. +4096) for cos/sin; 0-4095 for atan2.
+ *
+ * Routing these to the LUT (was libm cos/sin/atan2 *4096) removes the
+ * per-angle truncation drift the host-trig path leaked into wall response,
+ * steering, heading, and collision normals.
  * ======================================================================== */
 
 static int32_t cos_fixed12(int32_t angle)
 {
-    /* Use standard math for exact results matching the original game's
-     * lookup table.  The previous quadratic approximation was catastrophically
-     * wrong at quadrant boundaries (e.g., sin(0) returned -4096 instead of 0). */
-    double rad = (double)(angle & 0xFFF) * (2.0 * 3.14159265358979323846 / 4096.0);
-    return (int32_t)(cos(rad) * 4096.0);
+    return (int32_t)CosFixed12bit((unsigned int)angle);
 }
 
 static int32_t sin_fixed12(int32_t angle)
 {
-    double rad = (double)(angle & 0xFFF) * (2.0 * 3.14159265358979323846 / 4096.0);
-    return (int32_t)(sin(rad) * 4096.0);
+    return (int32_t)SinFixed12bit(angle);
 }
 
 /* ========================================================================
  * Fixed-point atan2 (12-bit result: 0-4095 = 0-360°)
  *
- * Used for wall collision angle computation. Matches FUN_0040a720 in
- * the original binary (angle LUT). Input: (dx, dz) in world coords.
- * Returns: 12-bit angle where 0 = +Z direction, CW positive.
+ * Byte-faithful port of AngleFromVector12 @ 0x0040A720 (atan LUT
+ * DAT_00463214). Input: (dx, dz) in world coords (dx=param_1, dz=param_2).
+ * Returns: 12-bit angle where 0 = +Z direction, CW positive. The & 0xFFF
+ * folds the degenerate octant-7 (0x1000) result back into range, preserving
+ * the prior call-site masking.
  * ======================================================================== */
 
 static int32_t atan2_fixed12(int32_t dx, int32_t dz)
 {
-    double rad = atan2((double)dx, (double)dz);
-    int32_t angle = (int32_t)(rad * (4096.0 / (2.0 * 3.14159265358979323846)));
-    return angle & 0xFFF;
+    return AngleFromVector12(dx, dz) & 0xFFF;
 }
 
 /* ========================================================================
