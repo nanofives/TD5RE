@@ -20,6 +20,7 @@
 #include "td5_save.h"
 #include "td5_sound.h"
 #include "td5re.h"
+#include "td5_snk_strings.h"   /* byte-exact SNK_ labels baked from Language.dll */
 #include "../../ddraw_wrapper/src/wrapper.h"
 
 #define WIN32_LEAN_AND_MEAN
@@ -6147,9 +6148,14 @@ static void Screen_LocalizationInit(void) {
         frontend_init_return_screen(TD5_SCREEN_LOCALIZATION_INIT);
         TD5_LOG_I(LOG_TAG, "ScreenLocalizationInit: first entry, loading resources");
 
-        /* [CONFIRMED @ 0x4269D0 / 0x4267A8] LANGUAGE.DLL is a static PE import;
-         * SNK_LangDLL_exref[8] is a language-selection byte: 0x31=English, 0x32=French,
-         * 0x33=German, 0x34=Italian, 0x35=Spanish (MOVs at 0x4269DF–0x426A07).
+        /* [CONFIRMED @ 0x4269D0 / 0x4267A8] LANGUAGE.DLL is a static PE import.
+         * [CORRECTED 2026-06-01 — byte-verified from the English Language.dll export
+         * SNK_LangDLL = "LANGDLL 0 : ENGLISH/US"]: byte[8] is the digit '0' = 0x30 for
+         * English (the prior comment's "0x31" was WRONG). The font/text gate compares
+         * byte[8] against 0x30 (CMP byte[reg+8],0x30 @0x00424568 / @0x004242b8 /
+         * CreateMenuStringLabelSurface 0x00412e30); the ==0x30 (JZ-taken) branch is the
+         * English/localized-blit path. (Other locales use different digits, but the
+         * shipped English DLL is '0'.)
          * English entry name = "config.eng" [CONFIRMED @ 0x4667A8].
          * The original reads "config.eng" per car ZIP, sscanf's 17 tokens into
          * DAT_0049b90c (stride 0x330, 17 rows × 0x30 bytes each).
@@ -6190,7 +6196,7 @@ static void Screen_PositionerDebugTool(void) {
         frontend_init_return_screen(TD5_SCREEN_POSITIONER_DEBUG);
         frontend_load_tga("Front_End/Positioner.tga", "Front_End/FrontEnd.zip");
         frontend_create_button("Save", 120, 400, 96, 32);
-        frontend_create_button("Back", 232, 400, 112, 32);
+        frontend_create_button(SNK_BackButTxt, 232, 400, 112, 32);
         s_anim_tick = 0;
         s_inner_state = 1;
         break;
@@ -6435,13 +6441,13 @@ static void Screen_MainMenu(void) {
          * 5: SNK_HiScoreButTxt
          * 6: SNK_ExitButTxt
          */
-        frontend_create_button("Race Menu",   -0xE0, 0, 0xE0, 0x20);
-        frontend_create_button("Quick Race",  -0xE0, 0, 0xE0, 0x20);
-        frontend_create_button("Two Player",  -0xE0, 0, 0xE0, 0x20);
-        frontend_create_button("Net Play",    -0xE0, 0, 0xE0, 0x20);
-        frontend_create_button("Options",     -0xE0, 0, 0xE0, 0x20);
-        frontend_create_button("High Scores", -0xE0, 0, 0xE0, 0x20);
-        frontend_create_button("Exit",        -0xE0, 0, 0xE0, 0x20);
+        frontend_create_button(SNK_RaceMenuButTxt,   -0xE0, 0, 0xE0, 0x20);
+        frontend_create_button(SNK_QuickRaceButTxt,  -0xE0, 0, 0xE0, 0x20);
+        frontend_create_button(SNK_TwoPlayerButTxt,  -0xE0, 0, 0xE0, 0x20);
+        frontend_create_button(SNK_NetPlayButTxt,    -0xE0, 0, 0xE0, 0x20);
+        frontend_create_button(SNK_OptionsButTxt,     -0xE0, 0, 0xE0, 0x20);
+        frontend_create_button(SNK_HiScoreButTxt, -0xE0, 0, 0xE0, 0x20);
+        frontend_create_button(SNK_ExitButTxt,        -0xE0, 0, 0xE0, 0x20);
 
         /* Phase 6: per-button surface cache is populated lazily by the
          * render path on first draw of each button -- no per-screen bake
@@ -6569,8 +6575,8 @@ static void Screen_MainMenu(void) {
         int exit_x = s_buttons[6].x;
         int exit_y = s_buttons[6].y;
         int exit_h = s_buttons[6].h;
-        int yes_idx = frontend_create_button("Yes", exit_x, exit_y + exit_h + 8, 96, 32);
-        int no_idx  = frontend_create_button("No",  exit_x + 100, exit_y + exit_h + 8, 96, 32);
+        int yes_idx = frontend_create_button(SNK_YesButTxt, exit_x, exit_y + exit_h + 8, 96, 32);
+        int no_idx  = frontend_create_button(SNK_NoxButTxt,  exit_x + 100, exit_y + exit_h + 8, 96, 32);
         if (yes_idx >= 0) s_selected_button = yes_idx;
         TD5_LOG_I(LOG_TAG, "MainMenu: exit confirm dialog created yes=%d no=%d", yes_idx, no_idx);
         (void)no_idx;
@@ -6687,17 +6693,17 @@ static void Screen_RaceTypeCategory(void) {
          * (td5_frontend.c:4021, dispatched at :5362), so no intermediate
          * surface is needed and the old state-4 update step is unreachable. */
         /* Create 7 buttons for race types */
-        frontend_create_button("Single Race", -0xE0, 0, 0xE0, 0x20);
-        frontend_create_button("Cup Race",    -0xE0, 0, 0xE0, 0x20);
+        frontend_create_button(SNK_SingleRaceButTxt, -0xE0, 0, 0xE0, 0x20);
+        frontend_create_button(SNK_CupRaceButTxt,    -0xE0, 0, 0xE0, 0x20);
         /* Continue Cup: greyed if no valid CupData.td5 */
         if (frontend_validate_cup_checksum())
-            frontend_create_button("Continue Cup", -0xE0, 0, 0xE0, 0x20);
+            frontend_create_button(SNK_ContCupButTxt, -0xE0, 0, 0xE0, 0x20);
         else
-            frontend_create_preview_button("Continue Cup", -0xE0, 0, 0xE0, 0x20);
-        frontend_create_button("Time Trials", -0xE0, 0, 0xE0, 0x20);
-        frontend_create_button("Drag Race",   -0xE0, 0, 0xE0, 0x20);
-        frontend_create_button("Cop Chase",   -0xE0, 0, 0xE0, 0x20);
-        frontend_create_button("Back",        -0xE0, 0, 0xE0, 0x20);
+            frontend_create_preview_button(SNK_ContCupButTxt, -0xE0, 0, 0xE0, 0x20);
+        frontend_create_button(SNK_TimeTrialsButTxt, -0xE0, 0, 0xE0, 0x20);
+        frontend_create_button(SNK_DragRaceButTxt,   -0xE0, 0, 0xE0, 0x20);
+        frontend_create_button(SNK_CopChaseButTxt,   -0xE0, 0, 0xE0, 0x20);
+        frontend_create_button(SNK_BackButTxt,        -0xE0, 0, 0xE0, 0x20);
 
         s_selected_game_type = -1;
         frontend_begin_timed_animation();
@@ -6785,34 +6791,34 @@ static void Screen_RaceTypeCategory(void) {
         TD5_LOG_D(LOG_TAG, "RaceTypeCategory: entering cup sub-menu");
         frontend_reset_buttons();
         /* Create 7 cup tier buttons */
-        frontend_create_button("Championship", -0xE0, 0, 0xE0, 0x20); /* always available */
-        frontend_create_button("Era",          -0xE0, 0, 0xE0, 0x20); /* always available */
+        frontend_create_button(SNK_ChampionshipButTxt, -0xE0, 0, 0xE0, 0x20); /* always available */
+        frontend_create_button(SNK_EraButTxt,          -0xE0, 0, 0xE0, 0x20); /* always available */
 
         /* Challenge: locked if s_cup_unlock_tier == 0 */
         if (s_cup_unlock_tier >= 1)
-            frontend_create_button("Challenge", -0xE0, 0, 0xE0, 0x20);
+            frontend_create_button(SNK_ChallengeButTxt, -0xE0, 0, 0xE0, 0x20);
         else
-            frontend_create_preview_button("Challenge", -0xE0, 0, 0xE0, 0x20);
+            frontend_create_preview_button(SNK_ChallengeButTxt, -0xE0, 0, 0xE0, 0x20);
 
         /* Pitbull: locked if s_cup_unlock_tier < 1 */
         if (s_cup_unlock_tier >= 1)
-            frontend_create_button("Pitbull", -0xE0, 0, 0xE0, 0x20);
+            frontend_create_button(SNK_PitbullButTxt, -0xE0, 0, 0xE0, 0x20);
         else
-            frontend_create_preview_button("Pitbull", -0xE0, 0, 0xE0, 0x20);
+            frontend_create_preview_button(SNK_PitbullButTxt, -0xE0, 0, 0xE0, 0x20);
 
         /* Masters: locked if s_cup_unlock_tier < 2 */
         if (s_cup_unlock_tier >= 2)
-            frontend_create_button("Masters", -0xE0, 0, 0xE0, 0x20);
+            frontend_create_button(SNK_MastersButTxt, -0xE0, 0, 0xE0, 0x20);
         else
-            frontend_create_preview_button("Masters", -0xE0, 0, 0xE0, 0x20);
+            frontend_create_preview_button(SNK_MastersButTxt, -0xE0, 0, 0xE0, 0x20);
 
         /* Ultimate: locked if s_cup_unlock_tier < 2 */
         if (s_cup_unlock_tier >= 2)
-            frontend_create_button("Ultimate", -0xE0, 0, 0xE0, 0x20);
+            frontend_create_button(SNK_UltimateButTxt, -0xE0, 0, 0xE0, 0x20);
         else
-            frontend_create_preview_button("Ultimate", -0xE0, 0, 0xE0, 0x20);
+            frontend_create_preview_button(SNK_UltimateButTxt, -0xE0, 0, 0xE0, 0x20);
 
-        frontend_create_button("Back", -0xE0, 0, 0xE0, 0x20);
+        frontend_create_button(SNK_BackButTxt, -0xE0, 0, 0xE0, 0x20);
 
         frontend_begin_timed_animation();
         s_inner_state = 7;
@@ -6924,12 +6930,12 @@ static void Screen_QuickRaceMenu(void) {
          * OK:          (120, halfH+0x89)        = (120, 377), size 0x60x0x20 (96x32)
          * Back:        (halfW-0x58, halfH+0x89) = (232, 377), size 0x70x0x20 (112x32) */
         { int bi;
-          bi = frontend_create_button("Change Car",   120, 137, 256, 32);
+          bi = frontend_create_button(SNK_ChangeCarButTxt,   120, 137, 256, 32);
           if (bi >= 0) s_buttons[bi].is_selector = 1;
-          bi = frontend_create_button("Change Track", 120, 257, 256, 32);
+          bi = frontend_create_button(SNK_ChangeTrackButTxt, 120, 257, 256, 32);
           if (bi >= 0) s_buttons[bi].is_selector = 1; }
-        frontend_create_button("OK",           120, 377,  96, 32);
-        frontend_create_button("Back",         232, 377, 112, 32);
+        frontend_create_button(SNK_OkButTxt,           120, 377,  96, 32);
+        frontend_create_button(SNK_BackButTxt,         232, 377, 112, 32);
 
         /* Init left/right arrows on buttons 0 and 1 */
         s_anim_tick = 0;
@@ -7035,8 +7041,8 @@ static void Screen_ConnectionBrowser(void) {
         frontend_load_tga("Front_End/MainMenu.tga", "Front_End/FrontEnd.zip");
         /* Create buttons: connection list, OK, Back */
         frontend_create_button("Provider", 120, 160, 256, 32);
-        frontend_create_button("OK",   -100, 0, 100, 0x20);
-        frontend_create_button("Back", -100, 0, 100, 0x20);
+        frontend_create_button(SNK_OkButTxt,   -100, 0, 100, 0x20);
+        frontend_create_button(SNK_BackButTxt, -100, 0, 100, 0x20);
         s_anim_tick = 0;
         s_inner_state = 1;
         break;
@@ -7118,8 +7124,8 @@ static void Screen_SessionPicker(void) {
          * slot 2. (DXPTYPE session enumeration/join is stubbed ARCH-DIV, but the button
          * set + dispatch are now faithful.) */
         frontend_create_button("Session", 120, 160, 256, 32);  /* slot 0: session-list selector */
-        frontend_create_button("OK",     -100, 0, 100, 0x20);   /* slot 1 */
-        frontend_create_button("Back",   -100, 0, 100, 0x20);   /* slot 2 */
+        frontend_create_button(SNK_OkButTxt,     -100, 0, 100, 0x20);   /* slot 1 */
+        frontend_create_button(SNK_BackButTxt,   -100, 0, 100, 0x20);   /* slot 2 */
         s_anim_tick = 0;
         s_inner_state = 1;
         break;
@@ -7187,8 +7193,8 @@ static void Screen_CreateSession(void) {
         frontend_init_return_screen(TD5_SCREEN_CREATE_SESSION);
         TD5_LOG_D(LOG_TAG, "CreateSession: init");
         frontend_load_tga("Front_End/MainMenu.tga", "Front_End/FrontEnd.zip");
-        frontend_create_button("Enter Name", -300, 0, 300, 0x20);
-        frontend_create_button("Back",       -100, 0, 100, 0x20);
+        frontend_create_button(SNK_EnterNewSessionNameButTxt, -300, 0, 300, 0x20);
+        frontend_create_button(SNK_BackButTxt,       -100, 0, 100, 0x20);
         memset(s_create_session_name, 0, sizeof(s_create_session_name));
         strcpy(s_create_session_name, "New Session");
         frontend_begin_text_input(s_create_session_name, (int)sizeof(s_create_session_name));
@@ -7279,10 +7285,10 @@ static void Screen_NetworkLobby(void) {
          * "Change Car", "Start", "Exit" buttons */
         frontend_create_button("",           -0x1D0, 0, 0x1D0, 0x18);  /* text input bar */
         frontend_create_button("Messages",   -0x200, 0, 0x200, 0x80);  /* message window */
-        frontend_create_button("Status",     -0xE0,  0, 0xE0,  0x86);  /* status panel */
-        frontend_create_button("Change Car", -200,   0, 200,   0x20);
-        frontend_create_button("Start",      -0x78,  0, 0x78,  0x20);
-        frontend_create_button("Exit",       -0x78,  0, 0x78,  0x20);
+        frontend_create_button(SNK_StatusButTxt,     -0xE0,  0, 0xE0,  0x86);  /* status panel */
+        frontend_create_button(SNK_ChangeCarButTxt, -200,   0, 200,   0x20);
+        frontend_create_button(SNK_StartButTxt,      -0x78,  0, 0x78,  0x20);
+        frontend_create_button(SNK_ExitButTxt,       -0x78,  0, 0x78,  0x20);
 
         /* Allocate chat input surface */
         memset(s_chat_input_buffer, 0, sizeof(s_chat_input_buffer));
@@ -7420,10 +7426,10 @@ static void Screen_NetworkLobby(void) {
     case 7: /* SHOW DIALOG BUTTONS */
         /* Create Yes/No or OK button based on dialog_mode */
         if (s_dialog_mode == 0 || s_dialog_mode == 2) {
-            frontend_create_button("Yes", -80, 0, 80, 0x20);
-            frontend_create_button("No",  -80, 0, 80, 0x20);
+            frontend_create_button(SNK_YesButTxt, -80, 0, 80, 0x20);
+            frontend_create_button(SNK_NoxButTxt,  -80, 0, 80, 0x20);
         } else {
-            frontend_create_button("Ok", -80, 0, 80, 0x20);
+            frontend_create_button(SNK_OkButTxt, -80, 0, 80, 0x20);
         }
         s_inner_state = 8;
         break;
@@ -7611,12 +7617,12 @@ static void Screen_OptionsHub(void) {
         frontend_load_tga("Front_End/MainMenu.tga", "Front_End/FrontEnd.zip");
         s_anim_complete = 0;
 
-        frontend_create_button("Game Options",      -0x130, 0, 0x130, 0x20);
-        frontend_create_button("Control Options",   -0x130, 0, 0x130, 0x20);
-        frontend_create_button("Sound Options",     -0x130, 0, 0x130, 0x20);
-        frontend_create_button("Graphics Options",  -0x130, 0, 0x130, 0x20);
-        frontend_create_button("Two Player Options",-0x130, 0, 0x130, 0x20);
-        frontend_create_button("OK",                -0x130, 0, 0x130, 0x20);
+        frontend_create_button(SNK_GameOptionsButTxt,      -0x130, 0, 0x130, 0x20);
+        frontend_create_button(SNK_ControlOptionsButTxt,   -0x130, 0, 0x130, 0x20);
+        frontend_create_button(SNK_SoundOptionsButTxt,     -0x130, 0, 0x130, 0x20);
+        frontend_create_button(SNK_GraphicsOptionsButTxt,  -0x130, 0, 0x130, 0x20);
+        frontend_create_button(SNK_TwoPlayerOptionsButTxt,-0x130, 0, 0x130, 0x20);
+        frontend_create_button(SNK_OkButTxt,                -0x130, 0, 0x130, 0x20);
 
         frontend_begin_timed_animation();
         s_inner_state = 1;
@@ -7701,14 +7707,14 @@ static void Screen_GameOptions(void) {
         /* 7 option rows with left/right arrows:
          * Circuit Laps, Checkpoint Timers, Traffic, Cops,
          * Difficulty, Dynamics, 3D Collisions */
-        frontend_create_button("Circuit Laps",      -0x128, 0, 0x128, 0x20); /* 0x41fa1d: width=0x128 */
-        frontend_create_button("Checkpoint Timers", -0x128, 0, 0x128, 0x20);
-        frontend_create_button("Traffic",           -0x128, 0, 0x128, 0x20);
-        frontend_create_button("Police",            -0x128, 0, 0x128, 0x20); /* orig label: POLICE */
-        frontend_create_button("Difficulty",        -0x128, 0, 0x128, 0x20);
-        frontend_create_button("Dynamics",          -0x128, 0, 0x128, 0x20);
-        frontend_create_button("3D Collisions",     -0x128, 0, 0x128, 0x20);
-        frontend_create_button("OK",                -0x60,  0, 0x60,  0x20); /* 0x41fae3: width=0x60 */
+        frontend_create_button(SNK_CircuitLapsTxt,      -0x128, 0, 0x128, 0x20); /* 0x41fa1d: width=0x128 */
+        frontend_create_button(SNK_CheckpointTimersButTxt, -0x128, 0, 0x128, 0x20);
+        frontend_create_button(SNK_TrafficButTxt,           -0x128, 0, 0x128, 0x20);
+        frontend_create_button(SNK_CopsButTxt,            -0x128, 0, 0x128, 0x20); /* orig label: POLICE */
+        frontend_create_button(SNK_DifficultyButTxt,        -0x128, 0, 0x128, 0x20);
+        frontend_create_button(SNK_DynamicsButTxt,          -0x128, 0, 0x128, 0x20);
+        frontend_create_button(SNK_3dCollisionsButTxt,     -0x128, 0, 0x128, 0x20);
+        frontend_create_button(SNK_OkButTxt,                -0x60,  0, 0x60,  0x20); /* 0x41fae3: width=0x60 */
         s_anim_tick = 0;
         s_inner_state = 1;
         break;
@@ -7807,11 +7813,11 @@ static void Screen_ControlOptions(void) {
         frontend_load_tga("Front_End/MainMenu.tga", "Front_End/FrontEnd.zip");
         s_control_options_surface = frontend_load_tga("Controllers.TGA", "Front End/frontend.zip");
         /* Original layout: Player 1 label, Configure P1, Player 2 label, Configure P2, OK */
-        frontend_create_preview_button("Player 1",  -0x100, 0, 0x100, 0x20); /* 0x41e07d: width=0x100 */
-        frontend_create_button("Configure",         -0x100, 0, 0x100, 0x20);
-        frontend_create_preview_button("Player 2",  -0x100, 0, 0x100, 0x20);
-        frontend_create_button("Configure",         -0x100, 0, 0x100, 0x20);
-        frontend_create_button("OK",                -0x60,  0, 0x60,  0x20); /* 0x41e0f1: width=0x60 */
+        frontend_create_preview_button(SNK_Player1ButTxt,  -0x100, 0, 0x100, 0x20); /* 0x41e07d: width=0x100 */
+        frontend_create_button(SNK_ConfigureButTxt,         -0x100, 0, 0x100, 0x20);
+        frontend_create_preview_button(SNK_Player2ButTxt,  -0x100, 0, 0x100, 0x20);
+        frontend_create_button(SNK_ConfigureButTxt,         -0x100, 0, 0x100, 0x20);
+        frontend_create_button(SNK_OkButTxt,                -0x60,  0, 0x60,  0x20); /* 0x41e0f1: width=0x60 */
         s_anim_complete = 0;
         frontend_begin_timed_animation();
         s_inner_state = 1;
@@ -7904,11 +7910,11 @@ static void Screen_SoundOptions(void) {
         s_sound_icon_surface       = frontend_load_tga("Controllers.TGA", "Front End/frontend.zip");
         s_sound_volumebox_surface  = frontend_load_tga("VolumeBox.tga", "Front End/frontend.zip");
         s_sound_volumefill_surface = frontend_load_tga("VolumeFill.tga","Front End/frontend.zip");
-        frontend_create_button("SFX Mode",     -0x100, 0, 0x100, 0x20); /* 0x41eb5e: width=0x100 */
-        frontend_create_button("SFX Volume",   -0x100, 0, 0x100, 0x20);
-        frontend_create_button("Music Volume", -0x100, 0, 0x100, 0x20);
-        frontend_create_button("Music Test",   -0x100, 0, 0x100, 0x20);
-        frontend_create_button("OK",           -0x60,  0, 0x60,  0x20); /* 0x41ebd0: width=0x60 */
+        frontend_create_button(SNK_SfxModeButTxt,     -0x100, 0, 0x100, 0x20); /* 0x41eb5e: width=0x100 */
+        frontend_create_button(SNK_SfxVolumeButTxt,   -0x100, 0, 0x100, 0x20);
+        frontend_create_button(SNK_MusicVolumeButTxt, -0x100, 0, 0x100, 0x20);
+        frontend_create_button(SNK_MusicTestButTxt,   -0x100, 0, 0x100, 0x20);
+        frontend_create_button(SNK_OkButTxt,           -0x60,  0, 0x60,  0x20); /* 0x41ebd0: width=0x60 */
         s_anim_tick = 0;
         s_inner_state = 1;
         break;
@@ -7999,17 +8005,17 @@ static void Screen_DisplayOptions(void) {
          * boot by ScreenLocalizationInit. Re-deriving the index from the
          * current window dimensions every entry would clobber the user's
          * last selection (which is restored from config.td5 at boot). */
-        frontend_create_button("Resolution",    -0x120, 0, 0x120, 0x20); /* 0x420484: width=0x120 */
+        frontend_create_button(SNK_ResolutionButTxt,    -0x120, 0, 0x120, 0x20); /* 0x420484: width=0x120 */
         /* PARITY NOTE (audit 2026-05-30): orig 0x00420484 makes Fogging a DISABLED
          * preview button when DXD3D::CanFog() != 1 (M2DX ordinal 0x6f), else a live
          * cycler with arrows. The port's D3D11 backend always supports fog (same as the
          * SFX 3-mode reasoning in Screen_SoundOptions), so CanFog()==1 holds and the
          * faithful result is an always-live Fogging row — which is what this is. No
          * gating needed unless a future backend can lack fog. */
-        frontend_create_button("Fogging",       -0x120, 0, 0x120, 0x20);
-        frontend_create_button("Speed Readout", -0x120, 0, 0x120, 0x20);
-        frontend_create_button("Camera Damping",-0x120, 0, 0x120, 0x20);
-        frontend_create_button("OK",            -0x60,  0, 0x60,  0x20); /* 0x420522: width=0x60 */
+        frontend_create_button(SNK_FoggingButTxt,       -0x120, 0, 0x120, 0x20);
+        frontend_create_button(SNK_SpeedReadoutButTxt, -0x120, 0, 0x120, 0x20);
+        frontend_create_button(SNK_CameraDampingButTxt,-0x120, 0, 0x120, 0x20);
+        frontend_create_button(SNK_OkButTxt,            -0x60,  0, 0x60,  0x20); /* 0x420522: width=0x60 */
         frontend_refresh_display_option_labels();
         s_anim_tick = 0;
         s_inner_state = 1;
@@ -8097,11 +8103,11 @@ static void Screen_TwoPlayerOptions(void) {
         TD5_LOG_D(LOG_TAG, "TwoPlayerOptions: init split_mode=%d", s_split_screen_mode);
         s_split_screen_surface = frontend_load_tga("SplitScreen.tga", "Front End/frontend.zip");
         /* [CONFIRMED @ 0x420d22]: SNK_SplitScreenButTxt at x=-0x100, width=0x100 */
-        frontend_create_button("Split Screen", -0x100, 0, 0x100, 0x20);
+        frontend_create_button(SNK_SplitScreenButTxt, -0x100, 0, 0x100, 0x20);
         /* [CONFIRMED @ 0x420d33]: SNK_CatchupTxt at x=-0x100, width=0x100 */
-        frontend_create_button("Catchup",     -0x100, 0, 0x100, 0x20); /* orig label: CATCHUP (no hyphen) */
+        frontend_create_button(SNK_CatchupTxt,     -0x100, 0, 0x100, 0x20); /* orig label: CATCHUP (no hyphen) */
         /* [CONFIRMED @ 0x420d43]: SNK_OkButTxt at x=-0x100, width=0x60 */
-        frontend_create_button("OK",          -0x100, 0, 0x60,  0x20);
+        frontend_create_button(SNK_OkButTxt,          -0x100, 0, 0x60,  0x20);
         s_anim_tick = 0;
         s_inner_state = 1;
         break;
@@ -8304,7 +8310,7 @@ static void Screen_ControllerBinding(void) {
 
             /* Create OK button [CONFIRMED @ 0x00410165]:
              * CreateFrontendDisplayModeButton(SNK_OkButTxt, -0x128, 0, 0x60, 0x20, 0) */
-            frontend_create_button("OK", -0x128, 0, 0x60, 0x20);
+            frontend_create_button(SNK_OkButTxt, -0x128, 0, 0x60, 0x20);
 
             s_ctrl_js_prev = 0;
             s_ctrl_js_curr = 0;
@@ -8610,7 +8616,7 @@ static void Screen_MusicTestExtras(void) {
          * settles at counter 0x27): [CONFIRMED @0x418460] TRACK (120,97) 160x32 top-left;
          * OK (216,377) 96x32 at the BOTTOM (below the 160x160 cover), NOT auto-stacked. */
         frontend_create_button("TRACK", 120, 97,  0xA0, 0x20);
-        frontend_create_button("OK",    216, 377, 0x60, 0x20);
+        frontend_create_button(SNK_OkButTxt,    216, 377, 0x60, 0x20);
         /* Load the 5 band cover-art images (Extras.zip -> re/assets/extras).
          * Idempotent (frontend_load_tga returns the existing handle if reloaded). */
         {
@@ -8865,14 +8871,14 @@ static void Screen_CarSelection(void) {
          * "Manual"; case 3 below refuses to toggle it back. */
         if (g_td5.drag_race_enabled)
             s_selected_transmission = 1;
-        frontend_create_button("Car",   46, 169, 168, 32);
-        frontend_create_button("Paint", 46, 209, 168, 32);
-        frontend_create_button("Stats", 46, 249, 168, 32);
+        frontend_create_button(SNK_CarButTxt,   46, 169, 168, 32);
+        frontend_create_button(SNK_PaintButTxt, 46, 209, 168, 32);
+        frontend_create_button(SNK_ConfigButTxt, 46, 249, 168, 32);
         frontend_create_button(s_selected_transmission ? "Manual" : "Automatic",
                                46, 289, 168, 32);
-        frontend_create_button("OK",   46, 329,  64, 32);
+        frontend_create_button(SNK_OkButTxt,   46, 329,  64, 32);
         if (!s_network_active)
-            frontend_create_button("Back", 118, 329, 96, 32);
+            frontend_create_button(SNK_BackButTxt, 118, 329, 96, 32);
 
         /* Time Trials: grey out Manual button */
         /* Load inline string table SNK_CarSelect_MT1 */
@@ -9316,12 +9322,12 @@ static void Screen_TrackSelection(void) {
 
         /* Create buttons. Ghidra settles these at x=120 for Track/Forwards/OK
          * and x=232 for Back, with OK/Back sharing the bottom row. */
-        frontend_create_button("Track",     120,  97, 224, 32); /* with L/R arrows */
-        frontend_create_button("Forwards",  120, 145, 224, 32); /* direction toggle */
-        frontend_create_button("OK",        120, 377,  96, 32);
+        frontend_create_button(SNK_TrackButTxt,     120,  97, 224, 32); /* with L/R arrows */
+        frontend_create_button(SNK_ForwardsButTxt,  120, 145, 224, 32); /* direction toggle */
+        frontend_create_button(SNK_OkButTxt,        120, 377,  96, 32);
         /* Quick Race mode: no Back button */
         if (s_flow_context != 2) {
-            frontend_create_button("Back", 232, 377, 112, 32);
+            frontend_create_button(SNK_BackButTxt, 232, 377, 112, 32);
         }
 
         /* Create 0x128 x 0xB8 info surface */
@@ -9576,7 +9582,7 @@ static void Screen_PostRaceHighScore(void) {
         /* Create 0x208 x 0x90 score panel surface (black fill) */
         /* Create nav button + OK button */
         frontend_create_button(NULL, 115,  93, 520, 32);  /* nav bar: x=115, y=93 */
-        frontend_create_button("OK", 120, 416,  96, 32);  /* OK button at bottom */
+        frontend_create_button(SNK_OkButTxt, 120, 416,  96, 32);  /* OK button at bottom */
         frontend_set_cursor_visible(0);
         frontend_play_sfx(5);
         s_score_category_index = 0;
@@ -9741,7 +9747,7 @@ static void Screen_RaceResults(void) {
         s_results_skip_display = 0;
         s_anim_tick = 0;
         frontend_create_button(NULL, FE_CENTER_X - 0x104, 400, 0x208, 0x20);
-        frontend_create_button("OK", FE_CENTER_X -   0x30, 400, 0x60,  0x20);
+        frontend_create_button(SNK_OkButTxt, FE_CENTER_X -   0x30, 400, 0x60,  0x20);
         s_inner_state = 1;
         break;
 
@@ -10174,7 +10180,7 @@ static void Screen_RaceResults(void) {
             /* Button 0: message label (288x32); Button 1: OK (96x32).
              * [CONFIRMED @ 0x00423342/0x0042335C]: offset -0x120 from canvas, width 0x120/0x60 */
             frontend_create_button(save_msg, FE_CENTER_X - 0x90, FE_CENTER_Y - 0x5F, 0x120, 0x20);
-            frontend_create_button("OK",     FE_CENTER_X - 0x30, FE_CENTER_Y + 0x31, 0x60,  0x20);
+            frontend_create_button(SNK_OkButTxt,     FE_CENTER_X - 0x30, FE_CENTER_Y + 0x31, 0x60,  0x20);
         }
         s_anim_tick = 0;
         s_inner_state = 0x12;
@@ -10504,7 +10510,7 @@ static void Screen_CupFailed(void) {
          *   SNK_RaceTypeText y=0x54 ([cup type name])    [CONFIRMED @ 0x4237F0]
          * [CONFIRMED @ ScreenCupFailedDialog 0x004237F0] */
         /* [CONFIRMED @ 0x4237F0]: SNK_OkButTxt at x=-0x120 */
-        frontend_create_button("OK", -0x120, 0, 0x60, 0x20);
+        frontend_create_button(SNK_OkButTxt, -0x120, 0, 0x60, 0x20);
         s_anim_tick = 0;
         s_inner_state = 1;
         break;
@@ -10599,7 +10605,7 @@ static void Screen_CupWon(void) {
         /* Dialog 0x198×0xC4 (408×196) rendered live in frontend_render_cup_won_overlay.
          * [CONFIRMED @ 0x00423AEB/AF0]: CreateTrackedFrontendSurface(0x198, 0xC4) */
         /* [CONFIRMED @ 0x00423C61]: SNK_OkButTxt at x=-0x120 (was -100, wrong) */
-        frontend_create_button("OK", -0x120, 0, 0x60, 0x20);
+        frontend_create_button(SNK_OkButTxt, -0x120, 0, 0x60, 0x20);
         s_anim_tick = 0;
         s_inner_state = 1;
         break;
@@ -10635,7 +10641,7 @@ static void Screen_StartupInit(void) {
         frontend_init_return_screen(TD5_SCREEN_STARTUP_INIT);
         TD5_LOG_D(LOG_TAG, "StartupInit: state 0");
         frontend_load_tga("Front_End/MainMenu.tga", "Front_End/FrontEnd.zip");
-        frontend_create_button("OK", -100, 0, 100, 0x20);
+        frontend_create_button(SNK_OkButTxt, -100, 0, 100, 0x20);
         s_inner_state = 1;
         break;
 
@@ -10678,7 +10684,7 @@ static void Screen_SessionLocked(void) {
          *   SNK_SeshLockedTxt y=0x38 ("SESSION LOCKED") [CONFIRMED Language.dll]
          * [CONFIRMED @ ScreenSessionLockedDialog 0x0041D630] */
         /* [CONFIRMED @ 0x41D630]: SNK_OkButTxt at x=-0x120 */
-        frontend_create_button("OK", -0x120, 0, 0x60, 0x20);
+        frontend_create_button(SNK_OkButTxt, -0x120, 0, 0x60, 0x20);
         s_anim_tick = 0;
         s_inner_state = 1;
         break;
