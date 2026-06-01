@@ -177,6 +177,17 @@ static char s_music_test_track_label[64];   /* e.g. "1. GRAVITY KILLS" */
 static char s_music_test_now_band[64];      /* band name of currently playing track */
 static char s_music_test_now_title[64];     /* song title of currently playing track */
 static int  s_music_test_playing_set;       /* 1 once CDPlay has been called */
+/* Music Test album cover art: 5 band covers + the 12-track->5-band LUT.
+ * [CONFIRMED @ 0x40d6a0 LoadExtrasBandGalleryImages load order:
+ *  0=Fear Factory,1=Gravity Kills,2=Junkie XL,3=KMFDM,4=PitchShifter;
+ *  LUT @0x465e4c; drawn at (0x76,0x8c)=(118,140) by UpdateExtrasGalleryDisplay@0x40d830.] */
+static int  s_band_cover_surface[5];
+static const int k_music_track_to_band[12] = { 1,3,4,4,2,0,0,1,3,4,4,4 };
+/* The band whose cover is shown. [CONFIRMED @0x418460] orig keys the cover on
+ * g_attractCdTrackCandidate, which is set ONLY when SELECT is pressed — so the album
+ * art (and now-playing panel) reflect the PLAYED track, not the one being previewed
+ * with ◄►. Track 0 plays at entry, so this starts at 0. */
+static int  s_music_attract_track = 0;
 static int  s_input_ready;              /* DAT_004951e8            */
 static int  s_button_index;             /* currently pressed button */
 static int  s_arrow_input;              /* DAT_0049b690 arrow direction */
@@ -1330,12 +1341,19 @@ static int frontend_create_button(const char *label, int x, int y, int w, int h)
             s_buttons[i].highlight_ramp = 0;
             s_buttons[i].is_selector = 0;
 
-            /* Determine width: if negative x, the absolute value is the width
-             * (original convention). Otherwise use explicit w, defaulting to 224. */
-            if (x < 0) {
-                s_buttons[i].w = (-x > 0) ? -x : 224;
+            /* Width = the explicit w (the original's CreateFrontendDisplayModeButton
+             * takes x and w independently; negative x is ONLY the auto-layout flag).
+             * Most screens pass w==|x| so this is unchanged, but Music Test "TRACK"
+             * (-0x120,w=0xA0) and the narrow OK buttons (-0x1xx,w=0x60) need their real
+             * w. Previously |x| was used as the width, over-widening those buttons.
+             * [CONFIRMED @ 0x418460: Select Track w=0xA0, OK w=0x60.] Fall back to |x|
+             * only if w is unusable. */
+            if (w > 0 && w != 200) {
+                s_buttons[i].w = w;
+            } else if (x < 0 && -x > 0) {
+                s_buttons[i].w = -x;
             } else {
-                s_buttons[i].w = (w > 0 && w != 200) ? w : 224;
+                s_buttons[i].w = 224;
             }
             s_buttons[i].h = (h > 0 && h != 32) ? h : 32;   /* 0x20 = 32 */
 
@@ -3986,7 +4004,10 @@ static void fe_draw_option_arrows(int btn_idx, float sx, float sy) {
 static void frontend_render_game_options_overlay(float sx, float sy) {
     const char *on_off[] = { "OFF", "ON" };
     const char *difficulty[] = { "EASY", "NORMAL", "HARD" };  /* orig middle label: NORMAL */
-    const char *dynamics[] = { "SIMULATION", "ARCADE" };
+    /* [FIXED 2026-06-01] SNK_DynamicsTxt = {"ARCADE","SIMULATION"} — index 0 = ARCADE
+     * (matches td5_physics dynamics flag 0=arcade). The array was INVERTED, so the
+     * screen showed "SIMULATION" when the setting was arcade and vice-versa. */
+    const char *dynamics[] = { "ARCADE", "SIMULATION" };
     char laps[16];
     if (!s_buttons[0].active) return;
     if (!s_anim_complete) return;
@@ -4053,6 +4074,15 @@ static void frontend_render_sound_options_overlay(float sx, float sy) {
                 fe_draw_quad(394.0f * sx, 97.0f * sy, 64.0f * sx, 32.0f * sy,
                              0xFFFFFFFF, s_surfaces[slot].tex_page, 0.0f, v0, 1.0f, v1);
             }
+        }
+        /* [FIXED 2026-06-01] SFX-mode NAME text. Orig (0x41EA90) bakes SNK_SFX_Modes[mode]
+         * into the dialog beside the icon; the port drew the icon only, so the mode wasn't
+         * named. Centered under the 64px icon (icon center x=394+32=426). */
+        {
+            static const char *sfx_mode_names[] = { "MONAURAL", "STEREO", "3D SOUND" };
+            td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
+            fe_draw_text_centered(426.0f * sx, 131.0f * sy, sfx_mode_names[mode],
+                                  0xFFFFFFFF, sx, sy);
         }
     }
 
@@ -4131,34 +4161,66 @@ static void frontend_render_music_test_overlay(float sx, float sy) {
 
     if (!s_anim_complete) return;
 
-    /* Track-name label: drawn at track-name surface top-left */
-    if (s_music_test_track_label[0]) {
-        float x = (cx - 0x32 * sx);
-        float y = (cy - 0x8f * sy);
-        fe_draw_text(x, y, s_music_test_track_label, 0xFFFFFFFF, sx, sy);
+    /* Album cover art for the current track: band = LUT[track], drawn at (118,140).
+     * The headline previously-missing element. [CONFIRMED @ 0x40d830
+     * UpdateExtrasGalleryDisplay reads g_extrasGallerySlideSurfaces[LUT[track]] and
+     * blits at (0x76,0x8c); LUT @0x465e4c.] */
+    if (s_music_attract_track >= 0 && s_music_attract_track < 12) {
+        int band = k_music_track_to_band[s_music_attract_track];
+        if (band >= 0 && band < 5) {
+            int cs = s_band_cover_surface[band];
+            if (cs > 0) {
+                int slot = cs - 1;
+                if (slot >= 0 && slot < FE_MAX_SURFACES && s_surfaces[slot].in_use) {
+                    td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
+                    /* [CONFIRMED @0x40d190 CrossFade16BitSurfaces blits the slide at
+                     * desc.lWidth x desc.lHeight = its NATIVE size] dest origin
+                     * (0x76,0x8c)=(118,140); band-cover surfaces are the TGAs' own size
+                     * (extracted PNGs = 224x224). No fixed/stretched size. */
+                    fe_draw_quad(118.0f * sx, 140.0f * sy,
+                                 (float)s_surfaces[slot].width  * sx,
+                                 (float)s_surfaces[slot].height * sy,
+                                 0xFFFFFFFF, s_surfaces[slot].tex_page, 0.0f, 0.0f, 1.0f, 1.0f);
+                }
+            }
+        }
     }
 
-    /* Now-playing panel: shown after user confirms a track */
+    /* Track-name label, centered in its 0x170(368)-wide box at x=cx-0x32 (center 454).
+     * [orig draws it via MeasureOrCenter into the track-# box.] */
+    if (s_music_test_track_label[0]) {
+        /* [CONFIRMED @0x418527] centered in the 0x170-wide track-# box at x=cx-0x32
+         * (screen center 454); text baseline = box_top + 8. */
+        fe_draw_text_centered((cx - 0x32 * sx) + 184.0f * sx, (cy - 0x8f * sy) + 8.0f * sy,
+                              s_music_test_track_label, 0xFFFFFFFF, sx, sy);
+    }
+
+    /* Now-playing panel (after a track is played), centered in its box at x=cx-0xc
+     * (center 492). Header = SNK_NowPlayingTxt = "NOW PLAYING:". */
     if (s_music_test_playing_set) {
-        float x  = cx - 0x0c * sx;
+        float ncx = (cx - 0x0c * sx) + 184.0f * sx;
         float y0 = cy - 0x3f * sy;
         float y1 = y0 + 0x28 * sy;
         float y2 = y0 + 0x50 * sy;
-        fe_draw_text(x, y0, "NOW PLAYING", 0xFFCCCCCC, sx * 0.8f, sy * 0.8f);
-        fe_draw_text(x, y1, s_music_test_now_band,  0xFFFFFFFF, sx, sy);
-        fe_draw_text(x, y2, s_music_test_now_title, 0xFFFFFFFF, sx, sy);
+        fe_draw_text_centered(ncx, y0, "NOW PLAYING:", 0xFFCCCCCC, sx, sy);
+        fe_draw_text_centered(ncx, y1, s_music_test_now_band,  0xFFFFFFFF, sx, sy);
+        fe_draw_text_centered(ncx, y2, s_music_test_now_title, 0xFFFFFFFF, sx, sy);
     }
 }
 
 static void frontend_render_two_player_options_overlay(float sx, float sy) {
-    const char *on_off[] = { "OFF", "ON" };
+    /* [FIXED 2026-06-01] orig (0x420C70 case 4) shows the split-mode NAME and the
+     * numeric catchup LEVEL, not ON/OFF. SNK_Split_Modes={"LEFT/RIGHT","UP/DOWN"};
+     * catchup value is sprintf "%d" of the 0..9 level. The prior ON/OFF collapse hid
+     * which split layout and which catchup level were selected. */
+    const char *split_modes[] = { "LEFT/RIGHT", "UP/DOWN" };
+    char catchup_buf[8];
 
     if (!s_buttons[0].active) return;
     if (!s_anim_complete) return;
-    /* [CONFIRMED @ 0x420C70 case 4]: row 0 = split-screen ON/OFF; row 1 = catch-up ON/OFF
-     * g_twoPlayerSplitMode is 0 or 1; DAT_00465ff8 is catch-up level (0..9, nonzero = ON) */
-    frontend_draw_value_centered(sx, sy, s_buttons[0].y + 6, on_off[s_split_screen_mode ? 1 : 0], 0xFFFFFFFF);
-    frontend_draw_value_centered(sx, sy, s_buttons[1].y + 6, on_off[s_catchup_level ? 1 : 0], 0xFFFFFFFF);
+    snprintf(catchup_buf, sizeof(catchup_buf), "%d", s_catchup_level);
+    frontend_draw_value_centered(sx, sy, s_buttons[0].y + 6, split_modes[s_split_screen_mode & 1], 0xFFFFFFFF);
+    frontend_draw_value_centered(sx, sy, s_buttons[1].y + 6, catchup_buf, 0xFFFFFFFF);
 
     /* [CONFIRMED @ 0x4210A4]: QueueFrontendOverlayRect with src_y = g_twoPlayerSplitMode << 5 (=*32)
      * SplitScreen.tga: 64x32 icon rows; row 0=off icon, row 1=on icon.
@@ -4183,46 +4245,35 @@ static void frontend_render_two_player_options_overlay(float sx, float sy) {
 }
 
 static void frontend_render_race_type_description(float sx, float sy) {
-    static const char *k_race_type_lines[][4] = {
-        { "Single Race",    "Race a single event", "with your current",   "garage and rules." },
-        { "Cup Race",       "Enter a full cup and", "unlock harder tiers", "by finishing strong." },
-        { "Continue Cup",   "Resume the last cup",  "saved to your profile", "if it is still valid." },
-        { "Time Trials",    "Set the fastest lap",  "with traffic disabled", "and no rivals." },
-        { "Drag Race",      "Line up for a short",  "head-to-head sprint", "down the strip." },
-        { "Cop Chase",      "Outrun the cops in",   "a wanted-style chase", "with heavy pressure." },
-        { "Back",           "Return to the main",   "menu without changing", "the current flow." }
+    /* [FIXED 2026-06-01] Orig (0x4168B0 state 4) shows the single localized race-type
+     * NAME from SNK_RaceTypeText, indexed by the hovered button's race-type id — NOT
+     * the multi-line English blurbs the port invented (which exist nowhere in the
+     * original). SNK_RaceTypeText[12] = SINGLE RACE / CHAMPIONSHIP CUP / ERA CUP /
+     * CHALLENGE CUP / PITBULL CUP / MASTERS CUP / ULTIMATE CUP / DRAG RACING / COP CHASE
+     * / TIME TRIALS / CUP RACE / CONTINUE CUP. Map the screen-6 button index to that. */
+    static const char *k_snk_race_type_text[12] = {
+        "SINGLE RACE", "CHAMPIONSHIP CUP", "ERA CUP", "CHALLENGE CUP", "PITBULL CUP",
+        "MASTERS CUP", "ULTIMATE CUP", "DRAG RACING", "COP CHASE", "TIME TRIALS",
+        "CUP RACE", "CONTINUE CUP"
     };
-    static const char *k_cup_lines[][4] = {
-        { "Championship",   "Starter cup with a",   "short schedule and",  "easier opponents." },
-        { "Era",            "Classic-era roster",   "with a longer route", "across older tracks." },
-        { "Challenge",      "A tougher series with", "denser traffic and",  "harder rivals." },
-        { "Pitbull",        "Longer cup set with",  "more demanding races", "and AI pressure." },
-        { "Masters",        "Advanced cup rules",   "with deep series",    "progression." },
-        { "Ultimate",       "The final cup with",   "the hardest field and","full schedule." },
-        { "Back",           "Go back to the race",  "type menu and pick",  "another event." }
-    };
-    const char *(*lines)[4];
-    int desc_index = s_selected_button;
+    /* Top menu button order: 0 Single Race,1 Cup Race,2 Continue Cup,3 Time Trials,
+     * 4 Drag Race,5 Cop Chase,6 Back. Cup sub-menu: 0..5 Championship..Ultimate,6 Back. */
+    static const int k_top_to_snk[7]  = { 0, 10, 11, 9, 7, 8, -1 };
+    static const int k_cup_to_snk[7]  = { 1, 2, 3, 4, 5, 6, -1 };
+    int btn = s_selected_button;
     float panel_x = 358.0f * sx;
     float panel_y = 145.0f * sy;
     float panel_w = 272.0f * sx;
-    float panel_h = 180.0f * sy;
+    int snk_idx;
 
     if (!s_anim_complete) return;
-    if (desc_index < 0 || desc_index > 6) desc_index = 0;
-    if (s_inner_state >= 6 && s_inner_state <= 12) {
-        lines = k_cup_lines;
-    } else {
-        lines = k_race_type_lines;
-    }
+    if (btn < 0 || btn > 6) btn = 0;
+    snk_idx = (s_inner_state >= 6 && s_inner_state <= 12) ? k_cup_to_snk[btn] : k_top_to_snk[btn];
+    if (snk_idx < 0) return;  /* "Back" has no race-type description */
 
-    /* No background: original cleared surface to black with color-key transparency.
-     * Title: large font (24px, sx/sy), white, centered. Y=0 in original surface.
-     * Body:  small font (12px, 0.5 scale), white, centered. Y=32/44/56 in original surface. */
-    fe_draw_text(panel_x + (panel_w - fe_measure_text(lines[desc_index][0], sx))        * 0.5f, panel_y +  2.0f * sy, lines[desc_index][0], 0xFFFFFFFF, sx,        sy);
-    fe_draw_text(panel_x + (panel_w - fe_measure_text(lines[desc_index][1], sx * 0.5f)) * 0.5f, panel_y + 32.0f * sy, lines[desc_index][1], 0xFFFFFFFF, sx * 0.5f, sy * 0.5f);
-    fe_draw_text(panel_x + (panel_w - fe_measure_text(lines[desc_index][2], sx * 0.5f)) * 0.5f, panel_y + 44.0f * sy, lines[desc_index][2], 0xFFFFFFFF, sx * 0.5f, sy * 0.5f);
-    fe_draw_text(panel_x + (panel_w - fe_measure_text(lines[desc_index][3], sx * 0.5f)) * 0.5f, panel_y + 56.0f * sy, lines[desc_index][3], 0xFFFFFFFF, sx * 0.5f, sy * 0.5f);
+    /* Single centered localized name (24px), matching the original's one-line draw. */
+    fe_draw_text(panel_x + (panel_w - fe_measure_text(k_snk_race_type_text[snk_idx], sx)) * 0.5f,
+                 panel_y + 2.0f * sy, k_snk_race_type_text[snk_idx], 0xFFFFFFFF, sx, sy);
 }
 
 /* --- Car stats sub-screen (0x40DFC0 state 0xF) ------------------------------------ */
@@ -4455,10 +4506,19 @@ static void frontend_render_car_selection_preview(float sx, float sy) {
     if (s_anim_complete) {
         /* Car name: y = canvasH/2 - 0x97 = 480/2 - 151 = 89 (gap between topbar bottom y=81 and car preview y=124) */
         frontend_draw_value_text(sx, sy, 232, 89, frontend_get_car_display_name(actual_car), 0xFFFFFFFF);
-        if (!s_cheat_unlock_all && !s_network_active &&
-            actual_car >= 0 && actual_car < 37 &&
-            s_car_lock_table[actual_car] != 0) {
-            frontend_draw_value_text(sx, sy, 86, 121, "LOCKED", 0xFFFF4444);
+        int is_locked = (!s_cheat_unlock_all && !s_network_active &&
+                         actual_car >= 0 && actual_car < 37 &&
+                         s_car_lock_table[actual_car] != 0);
+        if (is_locked) {
+            /* [FIXED 2026-06-01] SNK_LockedTxt white (orig), at (86,163)=(cx-0xea, cy-0x77),
+             * not red at y=121. */
+            frontend_draw_value_text(sx, sy, 86, 163, "LOCKED", 0xFFFFFFFF);
+        } else if (s_selected_game_type == 2) {
+            /* [FIXED 2026-06-01] Beast/Beauty tag for the Era cup (gametype 2), same
+             * (86,163) slot as Locked (mutually exclusive). [CONFIRMED @ 0x40DFC0 case0xc:
+             * car<8 → Beauty (SNK_BeautyTxt), else Beast (SNK_BeastTxt).] */
+            frontend_draw_value_text(sx, sy, 86, 163,
+                                     (actual_car < 8) ? "BEAUTY" : "BEAST", 0xFFFFFFFF);
         }
     }
 }
@@ -4501,15 +4561,18 @@ static void frontend_render_track_selection_preview(float sx, float sy) {
                              412.0f * sx + img_x_off, 135.0f * sy,
                              152.0f * sx, 224.0f * sy, 0xFFFFFFFF);
     }
-    /* Draw L/R arrow indicators on Track and Direction buttons */
+    /* [FIXED 2026-06-01] Arrows only on the Track selector (slot 0). Orig
+     * (0x427630) arms InitializeFrontendDisplayModeArrows(0,1) for the Track
+     * cycler; the Forwards/Backwards row (slot 1) is a PRESS toggle, not a ◄►
+     * cycler, so it must NOT show selector arrows. */
     fe_draw_option_arrows(0, sx, sy);
-    fe_draw_option_arrows(1, sx, sy);
     if (!s_cheat_unlock_all &&
         s_selected_track >= 0 &&
         s_selected_track < 26 &&
         s_track_lock_table[s_selected_track] != 0 &&
         !s_network_active) {
-        frontend_draw_value_text(sx, sy, 412, 375, "LOCKED", 0xFFFF4444);
+        /* [FIXED 2026-06-01] SNK_LockedTxt renders white (orig), not red. */
+        frontend_draw_value_text(sx, sy, 412, 375, "LOCKED", 0xFFFFFFFF);
     }
 }
 
@@ -4677,8 +4740,9 @@ static void frontend_render_high_score_overlay(float sx, float sy) {
     if (!s_anim_complete || s_inner_state < 6) return;
 
     const TD5_NpcGroup *grp = td5_save_get_npc_group(s_score_category_index);
-    int speed_kph = td5_save_get_speed_units();
-    const char *speed_suffix = speed_kph ? "KPH" : "MPH";
+    int speed_kph = td5_save_get_speed_units();  /* drives the AVERAGE/TOP value conversion;
+                                                  * the column header is "SPEED" (SNK_SpdTxt),
+                                                  * not the unit, per DrawPostRaceHighScoreEntry */
 
     /* Panel geometry: 0x208 x 0x90 surface blitted at (115, 177) in 640x480 */
     float panel_x = 115.0f * sx;
@@ -4718,21 +4782,22 @@ static void frontend_render_high_score_overlay(float sx, float sy) {
     /* Column headers — same white font as data rows (SmallText.tga, no color change) */
     float hdr_y = panel_y + 7.0f * sy;
     uint32_t hdr_color = 0xFFFFFFFF;
+    /* [FIXED 2026-06-01] Headers from SNK_ strings (DrawPostRaceHighScoreEntry 0x413010):
+     * NAME / BEST / TIME|LAP|POINTS / CAR / AVERAGE / TOP, with second line "SPEED"
+     * (SNK_SpdTxt) under AVERAGE & TOP — NOT the MPH/KPH unit (the unit only affects the
+     * row VALUE conversion). Prior labels "AVG"/"PTS"/<unit> were abbreviations/guesses. */
     fe_draw_text(col_name,  hdr_y, "NAME", hdr_color, sx * ts, sy * ts);
-    /* Score column: two-line header. "BEST"/"LAP"/"PTS" on y=0, type label on y=14.
-     * For PTS only one line. (SNK_BestTxt at y=0, SNK_TimeTxt/LapTxt at y=14) */
     if (score_type == 2) {
-        fe_draw_text(col_score, hdr_y, "PTS",  hdr_color, sx * ts, sy * ts);
+        fe_draw_text(col_score, hdr_y, "POINTS",  hdr_color, sx * ts, sy * ts);
     } else {
         fe_draw_text(col_score, panel_y + 0.0f,       "BEST",                          hdr_color, sx * ts, sy * ts);
         fe_draw_text(col_score, panel_y + 14.0f * sy, (score_type == 1) ? "LAP" : "TIME", hdr_color, sx * ts, sy * ts);
     }
     fe_draw_text(col_car, hdr_y, "CAR", hdr_color, sx * ts, sy * ts);
-    /* AVG/TOP: two lines — label at y=0, speed unit at y=14 within the 144px surface */
-    fe_draw_text(col_avg, panel_y + 0.0f,        "AVG",        hdr_color, sx * ts, sy * ts);
-    fe_draw_text(col_avg, panel_y + 14.0f * sy,  speed_suffix, hdr_color, sx * ts, sy * ts);
-    fe_draw_text(col_top, panel_y + 0.0f,        "TOP",        hdr_color, sx * ts, sy * ts);
-    fe_draw_text(col_top, panel_y + 14.0f * sy,  speed_suffix, hdr_color, sx * ts, sy * ts);
+    fe_draw_text(col_avg, panel_y + 0.0f,        "AVERAGE", hdr_color, sx * ts, sy * ts);
+    fe_draw_text(col_avg, panel_y + 14.0f * sy,  "SPEED",   hdr_color, sx * ts, sy * ts);
+    fe_draw_text(col_top, panel_y + 0.0f,        "TOP",     hdr_color, sx * ts, sy * ts);
+    fe_draw_text(col_top, panel_y + 14.0f * sy,  "SPEED",   hdr_color, sx * ts, sy * ts);
 
     /* 5 entry rows */
     float row_y = panel_y + 48.0f * sy;
@@ -4740,7 +4805,14 @@ static void frontend_render_high_score_overlay(float sx, float sy) {
     for (int i = 0; i < 5; i++) {
         const TD5_NpcEntry *e = &grp->entries[i];
         float y = row_y + (float)i * row_h;
-        uint32_t row_color = (i == 0) ? 0xFFFFCC44 : 0xFFE0E0E0;
+        /* [FIXED 2026-06-01] Highlight the INSERTED rank, not always row 0.
+         * Orig (DrawPostRaceHighScoreEntry 0x413010) bolds the row where
+         * row_index == g_postRaceQualifyingScore (the just-inserted rank) via the
+         * SmallTextb bold atlas. Port has no bold atlas, so use the gold highlight
+         * color on the correct row. s_score_insert_pos holds that rank (set at
+         * NAME_ENTRY insert :10208); it is reset to -1 on pure Records browsing so
+         * no row is highlighted there. Previously hardcoded (i==0) → always row 0. */
+        uint32_t row_color = (i == s_score_insert_pos) ? 0xFFFFCC44 : 0xFFE0E0E0;
         char buf[64];
 
         /* Check if entry is empty (no name) */
@@ -5435,10 +5507,11 @@ static void frontend_render_cup_won_overlay(float sx, float sy) {
     td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
     fe_draw_quad(dlg_x, dlg_y, dlg_w, dlg_h, 0xCC000000u, -1, 0,0,1,1);
 
-    /* "CONGRATULATIONS" at y=0x00 [CONFIRMED @ 0x00423B2E] */
-    fe_draw_text_centered(dlg_cx, dlg_y + 0.0f  * sy, "CONGRATULATIONS", 0xFFFFFFFF, sx, sy);
-    /* "YOU HAVE WON" at y=0x38=56 [CONFIRMED @ 0x00423B52] */
-    fe_draw_text_centered(dlg_cx, dlg_y + 56.0f * sy, "YOU HAVE WON",    0xFFFFFFFF, sx, sy);
+    /* [FIXED 2026-06-01] exact SNK_ strings: SNK_CongratsTxt="CONGRATULATIONS!" (with !),
+     * SNK_YouHaveWonTxt="YOU HAVE WON"; unlock lines are "%d %s" with
+     * SNK_CarsUnlocked="CARS UNLOCKED" / SNK_TracksUnlocked="TRACKS UNLOCKED" (no "NEW"). */
+    fe_draw_text_centered(dlg_cx, dlg_y + 0.0f  * sy, "CONGRATULATIONS!", 0xFFFFFFFF, sx, sy);
+    fe_draw_text_centered(dlg_cx, dlg_y + 56.0f * sy, "YOU HAVE WON",     0xFFFFFFFF, sx, sy);
     /* Cup type name at y=0x54=84 [CONFIRMED @ 0x00423B89] */
     if (s_selected_game_type >= 1 && s_selected_game_type <= 6) {
         fe_draw_text_centered(dlg_cx, dlg_y + 84.0f * sy,
@@ -5446,12 +5519,12 @@ static void frontend_render_cup_won_overlay(float sx, float sy) {
     }
     /* Car unlock line at y=0x8C=140 [CONFIRMED @ 0x00423BDD] */
     if (s_cup_won_car_count != 0) {
-        snprintf(unlock_buf, sizeof(unlock_buf), "%d NEW CARS UNLOCKED", s_cup_won_car_count);
+        snprintf(unlock_buf, sizeof(unlock_buf), "%d CARS UNLOCKED", s_cup_won_car_count);
         fe_draw_text_centered(dlg_cx, dlg_y + 140.0f * sy, unlock_buf, 0xFFFFFFFF, sx, sy);
     }
     /* Track unlock line at y=0xA8=168 [CONFIRMED @ 0x00423C2D] */
     if (s_cup_won_track_count != 0) {
-        snprintf(unlock_buf, sizeof(unlock_buf), "%d NEW TRACKS UNLOCKED", s_cup_won_track_count);
+        snprintf(unlock_buf, sizeof(unlock_buf), "%d TRACKS UNLOCKED", s_cup_won_track_count);
         fe_draw_text_centered(dlg_cx, dlg_y + 168.0f * sy, unlock_buf, 0xFFFFFFFF, sx, sy);
     }
 
@@ -5758,9 +5831,11 @@ void td5_frontend_render_ui_rects(void) {
             for (int i = 0; i <= 1; i++) fe_draw_option_arrows(i, sx, sy);
             break;
         case TD5_SCREEN_CAR_SELECTION:
-            /* orig 0x40DFC0: arrows on Car(0) and Paint(1) only */
+            /* orig 0x40DFC0: arrows on Car(0), Paint(1), AND Stats(2) — Stats is a
+             * wheel/config-scheme ◄► cycler too. [FIXED 2026-06-01: added slot 2.] */
             fe_draw_option_arrows(0, sx, sy);
             fe_draw_option_arrows(1, sx, sy);
+            fe_draw_option_arrows(2, sx, sy);
             break;
         case TD5_SCREEN_TRACK_SELECTION:
             /* The track overlay draws arrows BEFORE the button fill, so the
@@ -5773,6 +5848,13 @@ void td5_frontend_render_ui_rects(void) {
             /* orig 0x41DF20: arrows on Player1(0) and Player2(2) device selectors */
             fe_draw_option_arrows(0, sx, sy);
             fe_draw_option_arrows(2, sx, sy);
+            break;
+        case TD5_SCREEN_MUSIC_TEST:
+            /* orig 0x418460: InitializeFrontendDisplayModeArrows(0,1) — the TRACK
+             * selector (button 0) is ◄►-cyclable. This screen was missing from the
+             * arrow-render dispatch (creation≠rendering gap; see
+             * re/analysis/frontend_diff_blindspot_postmortem.md). */
+            fe_draw_option_arrows(0, sx, sy);
             break;
         default:
             break;
@@ -6256,9 +6338,10 @@ static void Screen_LegalCopyright(void) {
         s_inner_state = 1;
         break;
 
-    case 1: /* Fade in */
-        s_anim_tick += 2;
-        if (s_anim_tick >= 16) {
+    case 1: /* Fade in [FIXED 2026-06-01: actually run the fade — was a no-op counter,
+             * so the legal splash popped in. Orig case1 = RenderFrontendFadeEffect.] */
+        if (s_anim_tick == 0) { frontend_init_fade(0x000000); s_anim_tick = 1; }
+        if (frontend_render_fade()) {
             /* Store wall-clock start for 3-second guard [CONFIRMED @ 0x4274A0 case 1→2] */
             s_anim_tick = (int)timeGetTime();
             s_inner_state = 2;
@@ -6272,9 +6355,9 @@ static void Screen_LegalCopyright(void) {
         }
         break;
 
-    case 3: /* Fade out + exit to main menu */
-        s_anim_tick += 2;
-        if (s_anim_tick >= 16) {
+    case 3: /* Fade out + exit [FIXED 2026-06-01: run the fade, was a no-op counter.] */
+        if (s_anim_tick == 0) { frontend_init_fade(0x000000); s_anim_tick = 1; }
+        if (frontend_render_fade()) {
             td5_frontend_set_screen(TD5_SCREEN_MAIN_MENU);
         }
         break;
@@ -6997,10 +7080,15 @@ static void Screen_SessionPicker(void) {
         frontend_init_return_screen(TD5_SCREEN_SESSION_PICKER);
         TD5_LOG_D(LOG_TAG, "SessionPicker: init");
         frontend_load_tga("Front_End/MainMenu.tga", "Front_End/FrontEnd.zip");
-        frontend_create_button("Session", 120, 160, 256, 32);
-        frontend_create_button("Create", -100, 0, 100, 0x20);
-        frontend_create_button("OK",     -100, 0, 100, 0x20);
-        frontend_create_button("Back",   -100, 0, 100, 0x20);
+        /* [FIXED 2026-06-01] Orig RunFrontendSessionPicker (0x419CF0) has only the
+         * session-list selector + OK (join) + Back — NO "Create" button (creating a
+         * session is the separate ConnectionBrowser->CreateSession path). The spurious
+         * Create button shifted OK/Back indices and ESC. Removed; OK is now slot 1, Back
+         * slot 2. (DXPTYPE session enumeration/join is stubbed ARCH-DIV, but the button
+         * set + dispatch are now faithful.) */
+        frontend_create_button("Session", 120, 160, 256, 32);  /* slot 0: session-list selector */
+        frontend_create_button("OK",     -100, 0, 100, 0x20);   /* slot 1 */
+        frontend_create_button("Back",   -100, 0, 100, 0x20);   /* slot 2 */
         s_anim_tick = 0;
         s_inner_state = 1;
         break;
@@ -7018,23 +7106,27 @@ static void Screen_SessionPicker(void) {
 
     case 3: /* Interaction */
         if (s_input_ready) {
-            if (s_button_index == 0 && s_arrow_input != 0) {
+            /* [FIXED 2026-06-01] active_button fallback (keyboard ◄► leaves
+             * s_button_index == -1). Slot 0 = session-list selector (cycle through
+             * enumerated sessions), slot 1 = OK (join selected), slot 2 = Back. */
+            int active_button = (s_button_index >= 0) ? s_button_index : s_selected_button;
+            int delta = frontend_option_delta();
+            if (active_button == 0 && delta != 0) {
+                /* Cycle the session-list selection. (DXPTYPE enumeration is stubbed,
+                 * so the list is currently empty; the selector input is wired faithfully
+                 * for when sessions exist.) */
                 frontend_play_sfx(2);
-            } else if (s_button_index == 1) { /* Create */
-                s_inner_state = 4; /* create sub-flow */
-            } else if (s_button_index == 2) { /* OK / Join */
-                s_return_screen = TD5_SCREEN_CREATE_SESSION;
+            } else if (s_button_index == 1) { /* OK -> join the selected session */
+                /* Orig joins the highlighted enumerated session and proceeds to the
+                 * lobby. With the peer layer stubbed there is no session to join, so
+                 * route to the lobby (the faithful post-join destination). */
+                s_return_screen = TD5_SCREEN_NETWORK_LOBBY;
                 s_inner_state = 5;
-            } else if (s_button_index == 3) { /* Back */
+            } else if (s_button_index == 2) { /* Back */
                 s_return_screen = TD5_SCREEN_CONNECTION_BROWSER;
                 s_inner_state = 5;
             }
         }
-        break;
-
-    case 4: /* Create sub-flow -> redirect to create session screen */
-        s_return_screen = TD5_SCREEN_CREATE_SESSION;
-        s_inner_state = 5;
         break;
 
     case 5: /* Slide-out prep */
@@ -7711,9 +7803,31 @@ static void Screen_ControlOptions(void) {
         break;
     case 6:
         if (s_input_ready) {
-            /* btn 0 = "Player 1" (disabled label), btn 1 = Configure P1
-             * btn 2 = "Player 2" (disabled label), btn 3 = Configure P2
+            /* btn 0 = "Player 1" device selector, btn 1 = Configure P1
+             * btn 2 = "Player 2" device selector, btn 3 = Configure P2
              * btn 4 = OK */
+            /* [FIXED 2026-06-01, L3] Orig (0x41DF20) makes the Player rows ◄►
+             * device-source SELECTORS that cycle g_player1/2InputSource. Wire that:
+             * keyboard ◄► over row 0 / row 2 cycles the player's input device.
+             * (active_button fallback because keyboard arrows leave s_button_index=-1.)
+             * NOTE: the full original screen STRUCTURE — rows 0/2 ARE the cyclers and
+             * the device NAME is drawn beside them — is only partially mirrored here;
+             * the device-name panel + skip-empty/skip-equal device walk are deferred to
+             * a dedicated pass (intersects the user-verified keyboard-rebind flow).
+             * See re/analysis/frontend_fixlist/fix_10.md S14. */
+            int active_button = (s_button_index >= 0) ? s_button_index : s_selected_button;
+            int delta = frontend_option_delta();
+            int dev_count = td5_input_enumerate_devices();
+            if (dev_count < 1) dev_count = 1;
+            if ((active_button == 0 || active_button == 2) && delta != 0) {
+                int player = (active_button == 2) ? 1 : 0;
+                int src = td5_input_get_input_source(player) + delta;
+                if (src < 0) src = dev_count - 1;
+                if (src >= dev_count) src = 0;
+                td5_input_set_input_source(player, src);
+                frontend_play_sfx(2);
+                s_inner_state = 4; /* redraw */
+            }
             if (s_button_index == 1 || s_button_index == 3) {
                 /* Set which player to configure [CONFIRMED @ 0x40FE00 / DAT_004974b8] */
                 s_ctrl_player = (s_button_index == 3) ? 1 : 0;
@@ -8459,9 +8573,27 @@ static void Screen_MusicTestExtras(void) {
         frontend_load_tga("Front_End/MainMenu.tga", "Front_End/FrontEnd.zip");
         /* [CONFIRMED @ 0x418460] CreateFrontendDisplayModeButton(SNK_SelectTrackButTxt, -0x120, 0, 0xA0, 0x20, 0)
          *                          CreateFrontendDisplayModeButton(SNK_OkButTxt, -0x120, 0, 0x60, 0x20, 0) */
-        frontend_create_button("Select Track", -0x120, 0, 0xA0, 0x20);
-        frontend_create_button("OK",           -0x120, 0, 0x60, 0x20);
+        /* SNK_SelectTrackButTxt = "TRACK" (Language.dll, byte-faithful — port's prior
+         * "Select Track" was a wrong guess). Buttons placed at their EXACT settled rest
+         * positions (the orig auto-creates then MoveFrontendSpriteRects them; slide-in
+         * settles at counter 0x27): [CONFIRMED @0x418460] TRACK (120,97) 160x32 top-left;
+         * OK (216,377) 96x32 at the BOTTOM (below the 160x160 cover), NOT auto-stacked. */
+        frontend_create_button("TRACK", 120, 97,  0xA0, 0x20);
+        frontend_create_button("OK",    216, 377, 0x60, 0x20);
+        /* Load the 5 band cover-art images (Extras.zip -> re/assets/extras).
+         * Idempotent (frontend_load_tga returns the existing handle if reloaded). */
+        {
+            static const char *covers[5] = {
+                "Fear Factory.tga", "Gravity Kills.tga", "Junkie XL.tga",
+                "KMFDM.tga", "PitchShifter.tga"
+            };
+            int ci;
+            for (ci = 0; ci < 5; ci++)
+                s_band_cover_surface[ci] =
+                    frontend_load_tga(covers[ci], "Front End/Extras/Extras.zip");
+        }
         s_music_test_track_idx = 0;
+        s_music_attract_track = 0;   /* cover/now-playing reflect the PLAYED track */
         s_music_test_playing_set = 0;
         s_music_test_now_band[0]  = '\0';
         s_music_test_now_title[0] = '\0';
@@ -8491,7 +8623,14 @@ static void Screen_MusicTestExtras(void) {
     case 6: /* Interactive: cycle tracks, play, OK */
         if (s_input_ready) {
             int delta = frontend_option_delta();
-            if (s_button_index == 0 && delta != 0) {
+            /* Use the same selected-button fallback as every other option screen
+             * (e.g. Game Options :7662). s_button_index is the CLICKED button and is
+             * -1 when the user only presses LEFT/RIGHT arrow keys — so gating the
+             * cycle on `s_button_index == 0` meant keyboard arrows never changed the
+             * track (the reported bug). active_button resolves to the highlighted
+             * selector (button 0) for keyboard arrow input. */
+            int active_button = (s_button_index >= 0) ? s_button_index : s_selected_button;
+            if (active_button == 0 && delta != 0) {
                 /* Cycle track index 0..11.
                  * [CONFIRMED @ 0x4186A8]: g_selectedCdTrackIndex += DAT_0049b690 (arrow dir),
                  *   clamped 0..11; then BltColorFillToSurface + sprintf "%d. %s" redrawn
@@ -8517,6 +8656,10 @@ static void Screen_MusicTestExtras(void) {
                  * Port: record now-playing strings; render overlay draws them live. */
                 frontend_cd_play(s_music_test_track_idx);
                 frontend_music_test_update_now_playing(s_music_test_track_idx);
+                /* [FIXED 2026-06-01] orig sets g_attractCdTrackCandidate here on SELECT;
+                 * the cover art + now-playing panel follow the PLAYED track, not the
+                 * one being previewed with ◄►. */
+                s_music_attract_track = s_music_test_track_idx;
                 TD5_LOG_D(LOG_TAG, "MusicTestExtras: now playing '%s' / '%s'",
                           s_music_test_now_band, s_music_test_now_title);
             }
@@ -8725,8 +8868,11 @@ static void Screen_CarSelection(void) {
         if (s_input_ready) {
             int delta = frontend_option_delta();
             int active_button = s_button_index;
+            /* [FIXED 2026-06-01] include button 2 (Stats) — orig slot2 is also a ◄►
+             * cycler (wheel/config scheme), so keyboard arrows over it must resolve. */
             if (active_button < 0 && delta != 0 &&
-                (s_selected_button == 0 || s_selected_button == 1 || s_selected_button == 3)) {
+                (s_selected_button == 0 || s_selected_button == 1 ||
+                 s_selected_button == 2 || s_selected_button == 3)) {
                 active_button = s_selected_button;
             }
             if (active_button >= 0) switch (active_button) {
@@ -8746,6 +8892,10 @@ static void Screen_CarSelection(void) {
                         if (s_selected_car < s_car_roster_min) s_selected_car = s_car_roster_max;
                         if (s_selected_car > s_car_roster_max) s_selected_car = s_car_roster_min;
                     }
+                    /* [FIXED 2026-06-01] orig (0x40E8xx) resets paint + wheel/config
+                     * scheme to 0 on EVERY car change. */
+                    s_selected_paint = 0;
+                    s_selected_config = 0;
                     s_inner_state = 10; /* trigger new car image load */
                 }
                 break;
@@ -8764,9 +8914,18 @@ static void Screen_CarSelection(void) {
                 }
                 break;
 
-            case 2: /* Config -> spec sheet sub-screen */
-                s_car_preview_overlay = 1;
-                s_inner_state = 15;
+            case 2: /* Stats: ◄► cycles wheel/config scheme 0..3; press opens spec sheet.
+                     * [CONFIRMED @ 0x40DFC0 case 7 g_frontendButtonIndex==2: arrow cycles
+                     * g_carSelectWheelSchemeTransient 0..3 wrap; press enters state 0xf.] */
+                if (delta != 0) {
+                    s_selected_config += delta;
+                    if (s_selected_config < 0) s_selected_config = 3;
+                    if (s_selected_config > 3) s_selected_config = 0;
+                    s_inner_state = 10; /* re-render preview with new scheme */
+                } else if (s_button_index == 2) {
+                    s_car_preview_overlay = 1;
+                    s_inner_state = 15;
+                }
                 break;
 
             case 3: /* Auto/Manual toggle */
@@ -9390,6 +9549,10 @@ static void Screen_PostRaceHighScore(void) {
         frontend_set_cursor_visible(0);
         frontend_play_sfx(5);
         s_score_category_index = 0;
+        /* [FIXED 2026-06-01] Records browsing has no "just-inserted" row, so no row
+         * is highlighted here. -1 keeps the shared high-score overlay from golding a
+         * stale rank (NAME_ENTRY sets s_score_insert_pos to the real inserted rank). */
+        s_score_insert_pos = -1;
         s_anim_tick = 0;
         s_inner_state = 1;
         break;
@@ -9807,6 +9970,12 @@ static void Screen_RaceResults(void) {
             const char *btn4 = (is_cup && !next_valid) ? "OK" : "Quit";
 
             frontend_create_button(btn0,              RR_BX, RR_Y0, RR_BW, RR_BH);
+            /* NOTE (2026-06-01): orig greys View Replay / View Race Data as disabled
+             * preview buttons when g_replayFileAvailable==0 / no race-data. The port has
+             * no replay subsystem, so there is no availability flag to gate on; leaving
+             * them live (they no-op) rather than greying them ALWAYS (which would be the
+             * literal result of "no replay ever available" and is arguably worse UX).
+             * Revisit if/when a replay system is added. [fix_20.md S24] */
             frontend_create_button("View Replay",     RR_BX, RR_Y1, RR_BW, RR_BH);
             frontend_create_button("View Race Data",  RR_BX, RR_Y2, RR_BW, RR_BH);
             frontend_create_button(btn3,              RR_BX, RR_Y3, RR_BW, RR_BH);

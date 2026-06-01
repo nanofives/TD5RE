@@ -257,6 +257,7 @@ int      td5_input_get_rear_view(int slot);
 
 void td5_input_set_active_players(int n);
 void td5_input_set_input_source(int player, int source);
+int  td5_input_get_input_source(int player);
 void td5_input_set_playback_active(int v);
 int  td5_input_is_playback_active(void);
 void td5_input_set_replay_mode(int v);

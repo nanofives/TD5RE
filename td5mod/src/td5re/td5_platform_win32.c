@@ -23,6 +23,7 @@
 #include <string.h>
 #include <stdarg.h>
 #include <malloc.h>
+#include <zlib.h>   /* frame-dump PNG encoder (dev tool, see td5_plat_dump_frame_png) */
 
 #include "td5_platform.h"
 
@@ -378,6 +379,108 @@ int td5_plat_pump_messages(void)
     return 1;
 }
 
+/* ----------------------------------------------------------------------------
+ * Frame dump (dev tool): copy the swap-chain backbuffer to a PNG so the rendered
+ * frame can be inspected. OS-level capture of the D3D11 window does not work here
+ * (PrintWindow returns black; CopyFromScreen is occlusion-prone), so this gives a
+ * reliable visual ground-truth loop for frontend faithfulness work. Enabled by
+ * setting env var TD5RE_FRAMEDUMP=<path>; the path is (re)written every 30 frames.
+ * -------------------------------------------------------------------------- */
+static ID3D11Texture2D *s_fd_staging = NULL;
+static int s_fd_w = 0, s_fd_h = 0;
+
+static void td5_png_chunk(FILE *f, const char *type, const unsigned char *data, unsigned len) {
+    unsigned char be[4];
+    uLong crc;
+    be[0]=(unsigned char)(len>>24); be[1]=(unsigned char)(len>>16);
+    be[2]=(unsigned char)(len>>8);  be[3]=(unsigned char)len;
+    fwrite(be,1,4,f); fwrite(type,1,4,f);
+    if (len && data) fwrite(data,1,len,f);
+    crc = crc32(0,(const Bytef*)type,4);
+    if (len && data) crc = crc32(crc,(const Bytef*)data,len);
+    be[0]=(unsigned char)(crc>>24); be[1]=(unsigned char)(crc>>16);
+    be[2]=(unsigned char)(crc>>8);  be[3]=(unsigned char)crc;
+    fwrite(be,1,4,f);
+}
+
+static int td5_write_png_rgba(const char *path, const unsigned char *rgba, int w, int h) {
+    FILE *f;
+    unsigned char ihdr[13];
+    unsigned char *raw, *comp;
+    uLongf comp_len;
+    unsigned long raw_len;
+    int y, ok = 0;
+    static const unsigned char sig[8] = {137,80,78,71,13,10,26,10};
+    f = fopen(path,"wb"); if (!f) return 0;
+    fwrite(sig,1,8,f);
+    ihdr[0]=(unsigned char)(w>>24);ihdr[1]=(unsigned char)(w>>16);ihdr[2]=(unsigned char)(w>>8);ihdr[3]=(unsigned char)w;
+    ihdr[4]=(unsigned char)(h>>24);ihdr[5]=(unsigned char)(h>>16);ihdr[6]=(unsigned char)(h>>8);ihdr[7]=(unsigned char)h;
+    ihdr[8]=8; ihdr[9]=6; ihdr[10]=0; ihdr[11]=0; ihdr[12]=0;  /* 8-bit RGBA */
+    td5_png_chunk(f,"IHDR",ihdr,13);
+    raw_len = (unsigned long)h * (1u + (unsigned long)w*4u);
+    raw = (unsigned char*)malloc(raw_len);
+    if (raw) {
+        for (y=0;y<h;y++){
+            raw[(size_t)y*(1+w*4)] = 0;  /* filter type 0 (none) */
+            memcpy(raw+(size_t)y*(1+w*4)+1, rgba+(size_t)y*w*4, (size_t)w*4);
+        }
+        comp_len = compressBound(raw_len);
+        comp = (unsigned char*)malloc(comp_len);
+        if (comp && compress2(comp,&comp_len,raw,raw_len,6)==Z_OK) {
+            td5_png_chunk(f,"IDAT",comp,(unsigned)comp_len);
+            td5_png_chunk(f,"IEND",NULL,0);
+            ok = 1;
+        }
+        free(comp); free(raw);
+    }
+    fclose(f);
+    return ok;
+}
+
+static void td5_plat_dump_frame_png(const char *path) {
+    ID3D11Texture2D *bb = NULL;
+    D3D11_TEXTURE2D_DESC d;
+    D3D11_MAPPED_SUBRESOURCE m;
+    if (!g_backend.swap_chain || !g_backend.device || !g_backend.context || !path) return;
+    if (FAILED(IDXGISwapChain_GetBuffer(g_backend.swap_chain, 0, &IID_ID3D11Texture2D, (void**)&bb)) || !bb) return;
+    ID3D11Texture2D_GetDesc(bb, &d);
+    if (!s_fd_staging || s_fd_w != (int)d.Width || s_fd_h != (int)d.Height) {
+        D3D11_TEXTURE2D_DESC sd = d;
+        if (s_fd_staging) { ID3D11Texture2D_Release(s_fd_staging); s_fd_staging = NULL; }
+        sd.Usage = D3D11_USAGE_STAGING; sd.BindFlags = 0;
+        sd.CPUAccessFlags = D3D11_CPU_ACCESS_READ; sd.MiscFlags = 0;
+        if (FAILED(ID3D11Device_CreateTexture2D(g_backend.device,&sd,NULL,&s_fd_staging))) {
+            ID3D11Texture2D_Release(bb); return;
+        }
+        s_fd_w = (int)d.Width; s_fd_h = (int)d.Height;
+    }
+    ID3D11DeviceContext_CopyResource(g_backend.context,
+        (ID3D11Resource*)s_fd_staging, (ID3D11Resource*)bb);
+    if (SUCCEEDED(ID3D11DeviceContext_Map(g_backend.context,
+            (ID3D11Resource*)s_fd_staging, 0, D3D11_MAP_READ, 0, &m))) {
+        int w=(int)d.Width, h=(int)d.Height, x, yy;
+        int bgra = (d.Format==DXGI_FORMAT_B8G8R8A8_UNORM ||
+                    d.Format==DXGI_FORMAT_B8G8R8A8_UNORM_SRGB);
+        unsigned char *rgba = (unsigned char*)malloc((size_t)w*h*4);
+        if (rgba) {
+            for (yy=0;yy<h;yy++){
+                const unsigned char *src=(const unsigned char*)m.pData + (size_t)yy*m.RowPitch;
+                unsigned char *dst=rgba+(size_t)yy*w*4;
+                for (x=0;x<w;x++){
+                    unsigned char c0=src[x*4+0],c1=src[x*4+1],c2=src[x*4+2];
+                    if (bgra){ dst[x*4+0]=c2; dst[x*4+1]=c1; dst[x*4+2]=c0; } /* BGRA->RGBA */
+                    else     { dst[x*4+0]=c0; dst[x*4+1]=c1; dst[x*4+2]=c2; }
+                    dst[x*4+3]=255;
+                }
+            }
+            td5_write_png_rgba(path,rgba,w,h);
+            free(rgba);
+        }
+        ID3D11DeviceContext_Unmap(g_backend.context,(ID3D11Resource*)s_fd_staging,0);
+    }
+    ID3D11Texture2D_Release(bb);
+}
+
 void td5_plat_present(int vsync)
 {
     static int s_present_log_count = 0;
@@ -385,6 +488,22 @@ void td5_plat_present(int vsync)
     int empty_scene_fallback = 0;
 
     (void)vsync;
+
+    /* Dev frame-dump: when TD5RE_FRAMEDUMP=<path> is set, write the swap-chain
+     * backbuffer to that PNG every 30 frames (overwrite). Captures buffer 0 at
+     * the top of present = the last presented frame; for a static frontend
+     * screen this equals the current frame. Cheap no-op when unset. */
+    {
+        static int s_fd_init = 0, s_fd_on = 0, s_fd_count = 0;
+        static char s_fd_path[300];
+        if (!s_fd_init) {
+            const char *e = getenv("TD5RE_FRAMEDUMP");
+            s_fd_init = 1;
+            if (e && e[0]) { s_fd_on = 1; strncpy(s_fd_path, e, sizeof(s_fd_path)-1); s_fd_path[sizeof(s_fd_path)-1]='\0'; }
+        }
+        if (s_fd_on && (s_fd_count++ % 30) == 0) td5_plat_dump_frame_png(s_fd_path);
+    }
+
     if (s_present_log_count < 120 && g_backend.scene_rendered) {
         TD5_LOG_I("plat",
                   "present: scene=%d draws=%d verts=%d indices=%d tex=%d backbuffer_rtv=%p backbuffer_srv=%p swap_rtv=%p",
