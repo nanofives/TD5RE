@@ -4675,6 +4675,32 @@ static void frontend_render_control_options_overlay(float sx, float sy) {
     fe_draw_quad(394.0f * sx, 217.0f * sy, icon_w, icon_h,
                  0xFFFFFFFF, s_surfaces[slot].tex_page, 0.0f, p2_v0, 1.0f, p2_v1);
     td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
+
+    /* [FIXED 2026-06-01] Device-NAME panel. [CONFIRMED @0x0041df20]: orig draws
+     * SNK_Ctrl_Modes[class] centered below each player icon — keyboard => "%s" (name
+     * only), others => "%s %d" (name + 1-based device index). class: 0=KEYBOARD,
+     * 1=JOYSTICK, 2=JOYPAD, 3=WHEEL, 4=<NONE>. The port's td5_input_get_device_type
+     * returns 0=kbd/1=joypad/2=joystick; remap to the original SNK_Ctrl_Modes order
+     * (joystick=1, joypad=2) so the displayed name matches the original. */
+    {
+        static const char *ctrl_modes[5] = { "KEYBOARD", "JOYSTICK", "JOYPAD", "WHEEL", "<NONE>" };
+        int p_types[2] = { p1_type, p2_type };
+        float name_y[2] = { 135.0f, 255.0f };  /* just below each 32px icon at y=97/217 */
+        int pi;
+        for (pi = 0; pi < 2; pi++) {
+            int t = p_types[pi];
+            /* td5_input device type -> SNK_Ctrl_Modes class index */
+            int cls = (t == 0) ? 0 : (t == 2) ? 1 : (t == 1) ? 2 : 4;
+            char buf[40];
+            if (cls == 0) {  /* keyboard: name only */
+                snprintf(buf, sizeof(buf), "%s", ctrl_modes[cls]);
+            } else {         /* joystick/joypad/wheel: name + 1-based device index */
+                snprintf(buf, sizeof(buf), "%s %d", ctrl_modes[cls],
+                         td5_input_get_input_source(pi) + 1);
+            }
+            fe_draw_text_centered(426.0f * sx, name_y[pi] * sy, buf, 0xFFFFFFFF, sx, sy);
+        }
+    }
 }
 
 /* Controller binding overlay: show the active controller-type icon (64x32)
@@ -7915,19 +7941,29 @@ static void Screen_ControlOptions(void) {
              * keyboard ◄► over row 0 / row 2 cycles the player's input device.
              * (active_button fallback because keyboard arrows leave s_button_index=-1.)
              * NOTE: the full original screen STRUCTURE — rows 0/2 ARE the cyclers and
-             * the device NAME is drawn beside them — is only partially mirrored here;
-             * the device-name panel + skip-empty/skip-equal device walk are deferred to
-             * a dedicated pass (intersects the user-verified keyboard-rebind flow).
-             * See re/analysis/frontend_fixlist/fix_10.md S14. */
+             * the device NAME panel is now drawn (frontend_render_control_options_overlay)
+             * and the cycle does the original's skip-other-player walk. The original's
+             * skip-EMPTY-descriptor step (slots whose g_playerNDeviceDesc==0) is bounded
+             * here by the enumerated device count instead (the port packs present devices
+             * contiguously, so 0..count-1 are all valid). [CONFIRMED @0x0041df20:
+             * src=(src+dir)&7; skip empty; skip == other player's source.] */
             int active_button = (s_button_index >= 0) ? s_button_index : s_selected_button;
             int delta = frontend_option_delta();
             int dev_count = td5_input_enumerate_devices();
             if (dev_count < 1) dev_count = 1;
             if ((active_button == 0 || active_button == 2) && delta != 0) {
                 int player = (active_button == 2) ? 1 : 0;
-                int src = td5_input_get_input_source(player) + delta;
-                if (src < 0) src = dev_count - 1;
-                if (src >= dev_count) src = 0;
+                int other  = player ^ 1;
+                int other_src = td5_input_get_input_source(other);
+                int src = td5_input_get_input_source(player);
+                int guard = 0;
+                /* Advance to the next device, skipping the slot assigned to the other
+                 * player (original's outer do/while). Guard bounds the walk. */
+                do {
+                    src += delta;
+                    if (src < 0) src = dev_count - 1;
+                    if (src >= dev_count) src = 0;
+                } while (src == other_src && dev_count > 1 && ++guard < dev_count);
                 td5_input_set_input_source(player, src);
                 frontend_play_sfx(2);
                 s_inner_state = 4; /* redraw */
