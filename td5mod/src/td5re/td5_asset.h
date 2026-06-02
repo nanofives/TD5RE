@@ -245,7 +245,9 @@ const void *td5_asset_get_checkpoint_data(int *out_size);
  * Phase 3: Patch UV coords for 2-car-per-page tiling.
  * Phase 4: Load traffic vehicle models from traffic.zip.
  */
-int td5_asset_load_vehicle(int car_index, int slot);
+/* paint = colour/paint scheme 0..3 (carskin%d.tga / carhub%d.tga); clamped
+ * to 0 if out of range. Mirrors the original CARSKIN%d.TGA build at 0x00442949. */
+int td5_asset_load_vehicle(int car_index, int slot, int paint);
 
 /** Get the ZIP archive path for a car by index (0-36). Returns NULL if out of range. */
 const char *td5_asset_get_car_zip_path(int car_index);

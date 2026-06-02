@@ -1998,6 +1998,14 @@ static void frontend_init_race_schedule(void) {
         }
     }
 
+    /* Commit the PLAYER's selected paint (slot 0). The AI loop above starts at
+     * slot 1, so without this the player's chosen colour is dropped and the car
+     * always loads carskin0 (the default). The per-slot variant table mirrors
+     * the original's gSlotCarIdSelectionTable[0] = g_player1SelectedPaintScheme
+     * [CONFIRMED @ 0x0040DADC → built into "CARSKIN%d.TGA" @ 0x00442949]. */
+    g_td5.ai_car_variants[0] = (slot_variant[0] >= 0 && slot_variant[0] <= 3)
+                               ? slot_variant[0] : 0;
+
     TD5_LOG_I(LOG_TAG, "InitializeRaceSeriesSchedule: car=%d (resolved=%d) track=%d level=%d screen=%d type=%d ai=[%d,%d,%d,%d,%d]",
               s_selected_car, g_td5.car_index, g_td5.track_index,
               td5_asset_level_number(g_td5.track_index),
@@ -2384,15 +2392,16 @@ static void frontend_poll_input(void) {
     if (up_edge) {
         if (frontend_cycle_selected_button_vertical(-1)) {
             frontend_play_sfx(2); s_selection_from_mouse = 0;
-        } else {
-            frontend_play_sfx(10);
         }
+        /* No sound on a no-target edge move. Faithful to the original shared nav
+         * handler UpdateFrontendDisplayModeSelection @0x00426580, which is SILENT
+         * when no neighbour button exists. The port previously played Uh-Oh (10)
+         * here, producing an error blip every time you hit the top/bottom of a
+         * list. (Horizontal L/R moves already had no failed-move sound.) */
     }
     if (down_edge) {
         if (frontend_cycle_selected_button_vertical(1)) {
             frontend_play_sfx(2); s_selection_from_mouse = 0;
-        } else {
-            frontend_play_sfx(10);
         }
     }
     if (enter_edge) {
@@ -2590,6 +2599,9 @@ static void frontend_handle_text_input_key(void) {
         s_text_input_ctx.caret--;
         s_text_input_ctx.blink_tick = td5_plat_time_ms();
         frontend_note_activity();
+        frontend_play_sfx(3); /* keystroke tick — the original name-entry input
+                               * plays Ping1 on each edit [CONFIRMED @ 0x41A63D];
+                               * the port's text widget was silent while typing. */
     }
 
     /* Printable characters */
@@ -2611,6 +2623,7 @@ static void frontend_handle_text_input_key(void) {
             s_text_input_ctx.caret++;
             s_text_input_ctx.blink_tick = td5_plat_time_ms();
             frontend_note_activity();
+            frontend_play_sfx(3); /* keystroke tick [CONFIRMED @ 0x41A63D] */
             TD5_LOG_I(LOG_TAG, "Text input char: '%c' -> \"%s\"",
                       (char)ch, s_text_input_ctx.buffer);
         }
@@ -2627,6 +2640,7 @@ static void frontend_handle_text_input_key(void) {
             s_text_input_ctx.caret++;
             s_text_input_ctx.blink_tick = td5_plat_time_ms();
             frontend_note_activity();
+            frontend_play_sfx(3); /* keystroke tick [CONFIRMED @ 0x41A63D] */
             TD5_LOG_I(LOG_TAG, "Text input char: ' ' -> \"%s\"", s_text_input_ctx.buffer);
         }
     }
@@ -6261,11 +6275,16 @@ void td5_frontend_render_ui_rects(void) {
             for (int i = 0; i <= 1; i++) fe_draw_option_arrows(i, sx, sy);
             break;
         case TD5_SCREEN_CAR_SELECTION:
-            /* orig 0x40DFC0: arrows on Car(0), Paint(1), AND Stats(2) — Stats is a
-             * wheel/config-scheme ◄► cycler too. [FIXED 2026-06-01: added slot 2.] */
+            /* orig CarSelectionScreenStateMachine @0x0040DFC0 case 4 calls
+             * InitializeFrontendDisplayModeArrows only for Car(0) and Paint(1)
+             * — those two get button.flags|=2 (the ◄► sprites). The Stats/Config
+             * button (slot 2) gets NO arrow call, so it must NOT draw ◄►.
+             * [CONFIRMED @ 0x00426260 + 0x0040DFC0 case-4 call sites — 2026-06-02
+             * RE corrected the 2026-06-01 assumption that slot 2 also carried
+             * arrows; the original cycles slot 2's wheel/config scheme on key
+             * press but never paints arrow glyphs over the stat panel.] */
             fe_draw_option_arrows(0, sx, sy);
             fe_draw_option_arrows(1, sx, sy);
-            fe_draw_option_arrows(2, sx, sy);
             break;
         case TD5_SCREEN_TRACK_SELECTION:
             /* The track overlay draws arrows BEFORE the button fill, so the
@@ -7177,6 +7196,12 @@ static void Screen_RaceTypeCategory(void) {
     case 2: /* Tick until AdvanceFrontendTickAndCheckReady */
         if (frontend_advance_tick()) {
             s_anim_complete = 1;
+            frontend_play_sfx(4); /* slide-in settle chime — the original
+                                   * RaceTypeCategory plays Play(4) when the
+                                   * slide-in completes [CONFIRMED @ 0x4168B0];
+                                   * the port was missing it, so the race menu
+                                   * appeared without the settle chime that every
+                                   * other screen has. */
             s_inner_state = 3;
         }
         break;
@@ -7239,6 +7264,11 @@ static void Screen_RaceTypeCategory(void) {
         break;
 
     case 5: /* Slide-out prep: buttons scatter */
+        frontend_play_sfx(5); /* slide-out whoosh — was missing here, so leaving
+                               * the race menu to another screen was silent. Every
+                               * other slide-out prep plays it (cf. Screen_MainMenu
+                               * case 8). Placed at prep (not the 0x14 animation),
+                               * matching the one-whoosh-per-transition pattern. */
         frontend_begin_timed_animation();
         s_inner_state = 0x14;
         break;
@@ -9430,6 +9460,12 @@ static void Screen_CarSelection(void) {
     case 6: /* Tick until ready */
         if (frontend_advance_tick()) {
             s_anim_complete = 1;
+            frontend_play_sfx(4); /* screen-entry slide-in settle chime — the
+                                   * original CarSelection plays Play(4) on its
+                                   * slide-in settle [CONFIRMED @ 0x40DFC0]. The
+                                   * port only chimed on the per-CAR preview
+                                   * slide-in (case 14), so ENTERING the car-select
+                                   * screen had no chime. */
             s_inner_state = 7;
         }
         break;
@@ -9579,6 +9615,13 @@ static void Screen_CarSelection(void) {
     case 10: /* Clear car preview area, prep for new image load */
         s_car_spec_car = -1; /* invalidate spec cache on car/paint change */
         s_anim_complete = 1;
+        frontend_play_sfx(5); /* car-change animation START whoosh — fires once when
+                               * a car/paint/scheme change begins (case 10 is reached
+                               * ONLY from the cycle cases, never the initial load).
+                               * The original plays Play(5) on the change
+                               * [CONFIRMED @ 0x40DFC0]; it pairs with the Play(4)
+                               * settle chime at case 14 when the new preview finishes
+                               * sliding in. The port had only the finish chime. */
         s_inner_state = 11;
         break;
 

@@ -1646,7 +1646,11 @@ int td5_game_init_race_session(void) {
     for (int i = 0; i < TD5_MAX_RACER_SLOTS; i++) {
         if (s_slot_state[i].state != 3) {
             int car_for_slot = (i == 0) ? g_td5.car_index : g_td5.ai_car_indices[i];
-            td5_asset_load_vehicle(car_for_slot, i);
+            /* Per-slot paint scheme: slot 0 = player's chosen colour, slots 1-5 =
+             * AI variants. Committed in InitializeRaceSeriesSchedule. Without this
+             * the loader always used carskin0 (the default colour). */
+            int paint_for_slot = g_td5.ai_car_variants[i];
+            td5_asset_load_vehicle(car_for_slot, i, paint_for_slot);
 
             /* Load per-vehicle sound bank (Drive.wav, Rev.wav/Reverb.wav, Horn.wav).
              * Slot 0 is the local player and uses Reverb.wav (is_reverb=1). */
@@ -2981,15 +2985,17 @@ int td5_game_run_race_frame(void) {
         }
         if (esc_edge && !s_pause_menu_active && !td5_game_is_cinematic_race()) {
             s_pause_menu_active = 1;
-            s_pause_menu_cursor = 0;  /* default to VIEW so LEFT/RIGHT
-                                       * immediately moves the view-distance
-                                       * slider without forcing the user to
-                                       * UP-arrow first. The original defaulted
-                                       * to CONTINUE (row 3); that made
-                                       * dismiss-with-ENTER one keypress, but
-                                       * hid the slider behind 3 UP presses.
-                                       * Slider responsiveness wins. */
-            TD5_LOG_I(LOG_TAG, "Pause menu opened (cursor=VIEW row 0)");
+            s_pause_menu_cursor = 3;  /* default to CONTINUE (row 3), matching the
+                                       * original: g_audioOptionsCursorRow @0x00474640
+                                       * is statically initialised to 3 and is never
+                                       * reset on pause-open, so the menu always opens
+                                       * on CONTINUE. [CONFIRMED memory_read
+                                       * @0x00474640 = 0x00000003; rows
+                                       * 0=VIEW 1=MUSIC 2=SOUND 3=CONTINUE 4=EXIT]
+                                       * ENTER then dismisses in one keypress. */
+            td5_sound_set_sfx_muted(1);  /* silence engine/skid SFX on pause
+                                          * (mirrors DXSound::MuteAll @0x0042C470). */
+            TD5_LOG_I(LOG_TAG, "Pause menu opened (cursor=CONTINUE row 3, SFX muted)");
         }
         if (s_pause_menu_active) {
             /* Process pause menu input ONCE per frame (not per tick) to avoid
@@ -3104,6 +3110,19 @@ int td5_game_run_race_frame(void) {
             float music_frac = (float)td5_save_get_music_volume() / 100.0f;
             float sfx_frac   = (float)td5_save_get_sfx_volume()   / 100.0f;
             td5_hud_update_pause_overlay(s_pause_menu_cursor, view_frac, music_frac, sfx_frac);
+
+            /* SFX audio gating while paused (mirrors the original's MuteAll on
+             * entry + per-row preview + UnMuteAll on exit):
+             *   - menu open  → engine/skid SFX stay muted EXCEPT on the SOUND row
+             *     (cursor 2), where un-muting lets the volume slider preview
+             *     audibly. [CONFIRMED @ 0x0043BF70: ModifyOveride(1, cursor==2?100:0,...)]
+             *   - menu just closed (Continue/ESC/Exit this frame) → restore all
+             *     SFX. [CONFIRMED @ 0x0043BF70: DXSound::UnMuteAll on rows 3/4] */
+            if (s_pause_menu_active) {
+                td5_sound_set_sfx_muted(s_pause_menu_cursor == 2 ? 0 : 1);
+            } else if (pause_menu_was_active) {
+                td5_sound_set_sfx_muted(0);
+            }
 
             /* If the pause menu just closed (Continue / ESC) and a volume slider
              * changed, flush it to td5re.ini. The Exit path persists inline
