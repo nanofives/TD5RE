@@ -1955,10 +1955,22 @@ void td5_vfx_render_tire_tracks(void) {
          * SRCALPHA blend DARKENS the road like a real skid (the original
          * multiplies the road down), instead of the old opaque medium-gray
          * (0x37) patch that read as a faint LIGHT smudge on dark asphalt.
-         * Alpha is boosted (×3) so a fresh mark is clearly dark, and fades out
-         * naturally as the intensity counter decays toward 0. */
+         * Alpha is boosted so a fresh mark is clearly dark, and fades out
+         * naturally as the intensity counter decays toward 0.
+         *
+         * [FIX 2026-06-02 marks-more-visible — user request] Boost raised ×3 -> ×6.
+         * RE basis: the original (RenderTireTrackPool @0x0043F210, pack @0x43F23B)
+         * draws marks as a GRAYSCALE strip (intensity,intensity,intensity) at
+         * alpha 0xFF — effectively an OPAQUE dark-gray strip on the road (initial
+         * intensity 0x1A-0x37). The port's black SRCALPHA darkening at ×3 only
+         * reached ~30% on a fresh moderate-slip mark, far fainter than the
+         * original's opaque strip. ×6 lifts a fresh mark's darkening to a
+         * comparable perceived contrast (hard-slip marks still clamp at 255, so
+         * this only strengthens the faint moderate-slip marks the user couldn't
+         * see). Not "arbitrarily darker" — it targets the original's actual
+         * on-road visibility. Tunable via this single multiplier. */
         uint8_t val = slot->intensity;
-        uint32_t a = (uint32_t)val * 3u; if (a > 255u) a = 255u;
+        uint32_t a = (uint32_t)val * 6u; if (a > 255u) a = 255u;
         uint32_t color = (a << 24); /* RGB=0 (black), A=boosted intensity */
 
         /* Normalize texel UVs to [0,1] for the D3D11 sampler (same as HUD). */

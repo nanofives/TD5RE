@@ -6909,24 +6909,21 @@ void td5_render_radial_pulse(float dt)
     /* Anim accumulator advances every frame (independent of phase). */
     s_radial_pulse_anim += dt * 3328.0f;
 
-    /* Star opacity ramp. [user 2026-06-02: star looked "a little pinkish".]
-     * ROOT CAUSE: the petals are white-RGB drawn translucent (SRCALPHA), and the
-     * previous coefficient 0.55 only reached ~72% opacity at the end of the 2.5s
-     * victory hold (phase ~0..330 -> alpha max ~181). The remaining ~28% let the
-     * WARM finish-line scene bleed THROUGH the white star, tinting it toward the
-     * scene colour -> the perceived "pinkish" wash. Both the star's diffuse
-     * (0x00FFFFFF) and its modulate texture (page 899 = 0xFFFFFFFF) are provably
-     * pure white through PS_MODULATE_ALPHA (tex*diffuse), and every other white
-     * HUD element renders neutral in a frame-dump — so the tint is ONLY
-     * scene-bleed, not a colour/channel bug. [RE: RenderHudRadialPulseOverlay
-     * @0x00439E60 — orig petals ramp grayscale RGB at alpha 0xFF, i.e. OPAQUE, so
-     * the original never bleeds the scene through.] FIX: ramp the alpha faster
-     * (1.6) so the star reaches full opacity (255) by phase ~160 — roughly the
-     * mid-point of the hold. The prominent second half (largest radius, most
-     * visible) is then fully OPAQUE neutral white with NO scene-bleed, while the
-     * first half still fades in from invisible. This also moves the port closer
-     * to the original's opaque petals. Tunable: 0.31875 = orig-faint, 0.55 = old
-     * (pink-prone), 1.6 = opaque-by-mid-hold (neutral white). */
+    /* Star opacity ramp. [user 2026-06-02: victory star looked "a little
+     * pinkish"; should be white/neutral.] The DOMINANT cause was the missing
+     * TD5_BSQT_TEXPAGE flag above (the petals modulated PAGE 0, a brown scene
+     * atlas) — fixed there; with page 899 bound the petals are now pure white
+     * (frame-dump verified 255,255,255). This ramp is a SECONDARY measure: the
+     * petals are still drawn translucent (SRCALPHA), so at the old coefficient
+     * 0.55 they only reached ~72% opacity (phase ~0..330 -> alpha max ~181),
+     * letting the WARM finish-line scene bleed ~28% through the white star and
+     * leaving a faint residual warm tint. [RE: RenderHudRadialPulseOverlay
+     * @0x00439E60 — orig petals are OPAQUE (alpha 0xFF), so the original never
+     * bleeds the scene.] Ramp the alpha faster (1.6) so the star reaches full
+     * opacity (255) by phase ~160 (mid-hold): the prominent second half is then
+     * fully OPAQUE neutral white, the first half still fades in, and the result
+     * is closer to the original opaque petals. Tunable: 0.31875 = orig-faint,
+     * 0.55 = old (translucent fade-in), 1.6 = opaque-by-mid-hold (neutral). */
     int alpha = (int)(phase * 1.6f);
     if (alpha < 0)        alpha = 0;
     else if (alpha > 255) alpha = 255;
@@ -6983,7 +6980,14 @@ void td5_render_radial_pulse(float dt)
 
         TD5_RenderSpriteQuadParams p;
         p.dest = &s_pulse_quads[q];
-        p.mode_flags = TD5_BSQT_RAW_FLAGS | TD5_BSQT_GEOMETRY | TD5_BSQT_COLOR;
+        /* [FIX 2026-06-02 star-pinkish] TD5_BSQT_TEXPAGE was MISSING here, so
+         * build_sprite_quad silently dropped p.texture_page (899=white) and the
+         * quad kept texture_page=0 -> the petals modulated PAGE 0 (an arbitrary
+         * brown scene atlas), rendering the victory star muddy brown/pink instead
+         * of white. A prior pass set p.texture_page=899 but forgot the flag that
+         * makes build_sprite_quad honour it. Adding TD5_BSQT_TEXPAGE binds the
+         * real 1x1 white page 899 -> white star (matches orig untextured petals). */
+        p.mode_flags = TD5_BSQT_RAW_FLAGS | TD5_BSQT_GEOMETRY | TD5_BSQT_COLOR | TD5_BSQT_TEXPAGE;
 
         /* Slot mapping per td5_render_build_sprite_quad:
          *   src[0] → V0   src[3] → V1   src[2] → V2   src[1] → V3
