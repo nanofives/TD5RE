@@ -120,6 +120,7 @@ void BuildRotationMatrixFromAngles(float *out, short *angles);
 #define DEFAULT_FAR_CLIP     195000.0f            /* was 65536; matches far-cull */
 #define DEFAULT_FAR_CULL     195000.0f
 #define NEAR_DEPTH_OFFSET    64.0f                /* orig 0x0045d6c0 */
+#define TIRE_DECAL_BIAS      40.0f                /* tire-mark decal pull toward camera (view units); 40 clears z-fight speckle on bumpy cobblestone while the car (far closer) still occludes */
 #define DEPTH_NORMALIZE_INV  (1.0f / 195000.0f)   /* was orig 1/65479; extended to far-cull */
 
 /** Billboard depth sort stride sizes (bytes) */
@@ -4781,9 +4782,13 @@ static void render_vehicle_brake_lights(const TD5_Actor *actor, int slot)
     if (s_braked_page < 0) return;
     if (slot < 0 || slot >= 12) return;
 
-    /* Read brake_flag at actor+0x36D */
+    /* Read brake_flag at actor+0x36D; also light on the HANDBRAKE (+0x36E). */
     const uint8_t *ap = (const uint8_t *)actor;
-    int braking = (*(ap + 0x36D) != 0);
+    /* [FIX 2026-06-02] Brake lights illuminate for the handbrake too, not just the
+     * foot brake. The throttle+handbrake power-slide deviation clears brake_flag so
+     * the drive path runs for the donut, which left the lights dark; the original
+     * handbrake sets brake_flag=1 (lights on), so include handbrake_flag here. */
+    int braking = (*(ap + 0x36D) != 0 || *(ap + 0x36E) != 0);
 
     /* Brightness ramp / decay */
     uint8_t bright = s_brake_brightness[slot];
@@ -6791,7 +6796,15 @@ void td5_render_submit_tire_mark(uint16_t *quad_data) {
         int base = 2 + i * 7;
         verts[i].screen_x = fdata[base + 0];
         verts[i].screen_y = fdata[base + 1];
-        verts[i].depth_z  = fdata[base + 2];
+        /* [FIX 2026-06-02 tire-through-car] Put the decal in the SAME depth space
+         * as the opaque road/car (which write (vz-NEAR_DEPTH_OFFSET)*INV) and add a
+         * small extra bias toward the camera so the mark wins the coplanar road
+         * without z-fighting, while the car body (genuinely much closer) still
+         * occludes it. The raw projected sz (fdata[base+2]) omitted the -64 the
+         * opaque pass applies, so marks were depth-inconsistent and showed through
+         * the car. */
+        verts[i].depth_z  = fdata[base + 2]
+                            - (NEAR_DEPTH_OFFSET + TIRE_DECAL_BIAS) * DEPTH_NORMALIZE_INV;
         verts[i].rhw      = fdata[base + 3];
         verts[i].diffuse  = *(uint32_t *)&fdata[base + 4];
         verts[i].specular = 0;
@@ -6800,7 +6813,14 @@ void td5_render_submit_tire_mark(uint16_t *quad_data) {
     }
 
     tex_page = (int)(*(float *)((uint8_t *)quad_data + 0x90));
-    td5_plat_render_set_preset(TD5_PRESET_SHADOW);
+    /* [FIX 2026-06-02 tire-through-car] Use a depth-tested translucent preset WITHOUT
+     * the SHADOW preset's polygon_offset. That rasterizer DepthBias pulls decals
+     * toward the camera (needed for the car's OWN shadow, coplanar under the car) and
+     * was shoving the tire marks IN FRONT of the car body -> see-through. The marks
+     * trail behind the car, so they only need to (a) win the coplanar road, handled by
+     * the small vertex bias above, and (b) lose to the car, handled by the normal
+     * LEQUAL test now that no rasterizer pull over-biases them. */
+    td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_ANISO);
     td5_plat_render_bind_texture(tex_page);
     td5_plat_render_draw_tris(verts, 4, indices, 6);
 }

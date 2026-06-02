@@ -43,7 +43,14 @@
 #define TD5_VFX_SPRITE_BATCH_COUNT      50      /* render slots per view */
 #define TD5_VFX_SPRITE_BATCH_STRIDE     184     /* 0xB8 bytes per sprite quad */
 
-#define TD5_VFX_TIRE_TRACK_POOL_SIZE    80      /* 0x50 slots */
+#define TD5_VFX_TIRE_TRACK_POOL_SIZE    240     /* [2026-06-02] was 80 (orig 0x50): a
+                                                 * sustained drift/donut saturated all 80 slots
+                                                 * so the trail came out sparse/dotted. Enlarged
+                                                 * to 240 for a continuous trail. HARD CAP <255:
+                                                 * the slot index is stored in a uint8_t (emitter
+                                                 * desc pool_slot AND the actor +0x371 byte, where
+                                                 * 0xFF = "no emitter"), so >256 wraps and corrupts
+                                                 * earlier slots -> marks vanished. Port-only. */
 #define TD5_VFX_TIRE_TRACK_SLOT_STRIDE  236     /* 0xEC bytes per emitter record */
 #define TD5_VFX_TIRE_TRACK_LIFETIME     600     /* ticks before expiry */
 #define TD5_VFX_TIRE_TRACK_FADE_START   300     /* ticks before fade begins */

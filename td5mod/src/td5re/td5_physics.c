@@ -1563,6 +1563,16 @@ void td5_physics_update_player(TD5_Actor *actor)
      * never engage handbrake_flag, so this branch is player-only. */
     if (actor->handbrake_flag) {
         int32_t hb_mod = (int32_t)PHYS_S(actor, 0x7A);
+        /* [FIX 2026-06-02 power-donut] On a RWD car the faithful ~25% rear-grip
+         * cut leaves too much LATERAL grip to oversteer UNDER power, so
+         * throttle+handbrake just drove forward (handbrake "negated"). When the
+         * player is ALSO on throttle (encounter_steering_cmd > 0 thanks to the
+         * power-slide input deviation), cut the rear grip ~2x harder so the rear
+         * breaks loose and the car donuts. Handbrake-only (throttle=-256, i.e.
+         * <=0 here) keeps the faithful cut. Tunable: >>1 = strong, >>2 = looser. */
+        if (actor->encounter_steering_cmd > 0) {
+            hb_mod >>= 1;
+        }
         int32_t g2_pre = grip[2], g3_pre = grip[3];
         /* D1 — SAR-RZ-8 [CONFIRMED @ 0x0040434C-0x0040436F].
          * Original idiom: IMUL grip,hb_mod; CDQ; AND EDX,0xFF; ADD; SAR 8. */
@@ -2013,8 +2023,18 @@ void td5_physics_update_player(TD5_Actor *actor)
                 int32_t abs_br = br < 0 ? -br : br;
                 int32_t cf = abs_bf < abs_vl ? abs_bf : abs_vl;
                 int32_t cr = abs_br < abs_vl ? abs_br : abs_vl;
-                bf = (bf < 0) ? -(int32_t)cf : (int32_t)cf;
-                br = (br < 0) ? -(int32_t)cr : (int32_t)cr;
+                /* [FIX 2026-06-02 handbrake-reverses-on-cobbles] The brake/coast
+                 * force must OPPOSE travel (decelerate), not keep bf's throttle-
+                 * derived sign. With the handbrake held throttle=-256 makes bf
+                 * negative; on Moscow's cobblestone the car is intermittently
+                 * AIRBORNE so THIS path runs, and the old sign-preserving clamp kept
+                 * pushing BACKWARD even once the car was already moving backward ->
+                 * runaway reverse. The on-ground brake path already opposes velocity
+                 * (~0x404441); the comment above claimed "same fix as on-ground" but
+                 * the code only clamped magnitude, not sign. Oppose v_long. Forward
+                 * driving is unaffected (the sign only flips when v_long < 0). */
+                bf = (v_long > 0) ? -(int32_t)cf : (int32_t)cf;
+                br = (v_long > 0) ? -(int32_t)cr : (int32_t)cr;
             }
             wheel_drive[0] = bf >> 1;
             wheel_drive[1] = bf >> 1;
