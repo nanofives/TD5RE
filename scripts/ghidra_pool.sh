@@ -120,12 +120,12 @@ cmd_sync() {
 
         if is_locked "$slot"; then
             echo "  Slot $slot: LOCKED (skipping)"
-            ((skipped++))
+            skipped=$((skipped + 1))   # avoid ((x++)) returning 1 under set -e when x==0
         else
             echo "  Slot $slot: syncing..."
             rm -rf "$rep"
             cp -r "$MASTER_REP" "$rep"
-            ((synced++))
+            synced=$((synced + 1))   # avoid ((x++)) returning 1 under set -e when x==0
         fi
     done
 

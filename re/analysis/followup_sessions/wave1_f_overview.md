@@ -107,3 +107,23 @@ All Ghidra calls go through the pool: `bash scripts/ghidra_pool.sh acquire`
 → `project_program_open_existing(read_only=true)` for any sub-agent doing
 exploratory reads. Wave 2 WRITERS must serialize through the master
 `TD5.gpr` (one writer at a time); the ghidra-apply skill enforces this.
+
+---
+
+## Session P6 reconciliation (2026-06-01)
+
+RE-doc hygiene pass; no port code change, no build.
+
+- **The 126 `weak` signatures (Task 1) are RE-doc cosmetic, NOT a fidelity risk.** They are
+  port functions still typed with generic `int` / `void *` params. The port compiles and
+  links against its own correct C types in `td5_types.h` / `td5_actor_struct.h`; the "weak"
+  label only means Ghidra's *decomp annotation* hasn't been refined, which has zero runtime
+  impact. Downgraded from fidelity-risk to cosmetic backlog. Refine opportunistically; do not
+  block any fix on them.
+
+- **The 6 game-type init handlers @0x00410F60–0x004110A0 are now NAMED (Wave 2F) and mirrored
+  in the port.** Confirmed read-only against master `TD5`: 0x410F60 `ConfigureCupChampionshipSchedule`,
+  0x410FA0 `ConfigureCupEraSchedule`, 0x410FF0 `ConfigureCupChallengeSchedule`, 0x411030
+  `ConfigureCupPitbullSchedule`, 0x411070 `ConfigureCupMastersSchedule`, 0x4110A0
+  `ConfigureCupUltimateSchedule`. The end-of-series unlock-bit / clamp logic is mirrored at
+  `td5_frontend.c:2980-3011`. No longer an unmapped/weak gap.
