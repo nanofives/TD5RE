@@ -3712,28 +3712,38 @@ static inline int32_t v2v_sar12_rz_64(int64_t x) {
  * frames before ResetVehicleActorState rights it (handled by the existing
  * vehicle_mode==1 dispatch + td5_physics_integrate_scripted_motion).
  *
- * The original derives the spin angles from GetDamageRulesStub's RNG, whose range
- * was NOT recovered in RE. Rather than (a) guess a sequence that can't match the
- * original anyway or (b) consume from the global rand() stream that AI/spawn RNG
- * parity depends on, the angles are seeded deterministically from actor state via
- * a local LCG. This is cosmetic only — the STRUCTURE (vehicle_mode=1, spin-matrix
- * latch, impact pop-up, 0x3B-frame auto-reset) is faithful; the exact tumble
- * angles are an [INFERRED] approximation. */
+ * The spin-angle MAGNITUDE is byte-faithful to the original (GetDamageRulesStub
+ * @0x0042C8D0 returns 0, so the original's spin is deterministic, not random) and
+ * is NOT cosmetic: it is precisely what keeps the recovery's per-frame angular
+ * velocity above the early-exit threshold so the tumble stays visible for the full
+ * ~0x3B-frame window. The per-tick angle formula is documented inline below. */
 static void td5_physics_apply_traffic_crash_spin(TD5_Actor *t, int32_t impact_mag)
 {
     if (!t) return;
 
-    /* Local LCG seeded from state — does NOT touch the global rand() sequence. */
-    uint32_t r = (uint32_t)t->world_pos.x
-               ^ ((uint32_t)t->world_pos.z << 1)
-               ^ ((uint32_t)impact_mag << 3)
-               ^ ((uint32_t)t->slot_index * 2654435761u);
-    int16_t ang[3];
-    for (int k = 0; k < 3; k++) {
-        r = r * 1103515245u + 12345u;
-        /* per-tick spin delta, 12-bit angle units, ~±11deg (0x80/0x1000*360) */
-        ang[k] = (int16_t)((int)((r >> 16) & 0xFF) - 0x80);
-    }
+    /* [FIX 2026-06-02 traffic-tumble-visible] Per-tick spin angles derived from the
+     * impact magnitude exactly like the original traffic branch (orig 0x408289+),
+     * NOT a state LCG. orig: scatter = max(impact_mag/4, 0x7FFF) [floor, same as the
+     * racer scatter]; iVar = scatter >> 8; each of the 3 spin-matrix angles =
+     * GetDamageRulesStub() % iVar - iVar/2. GetDamageRulesStub @0x0042C8D0 returns 0,
+     * so the byte-faithful deterministic value is -(iVar/2).
+     *
+     * Why this fixes the INVISIBLE tumble: RefreshScriptedVehicleTransforms re-derives
+     * angular_velocity_{roll,yaw,pitch} from this spin matrix every tick, and the
+     * recovery exit (td5_physics_check_and_update_actor_collision_alignment, orig
+     * CheckAndUpdateActorCollisionAlignment @0x00409520) calls ResetVehicleActorState
+     * at frame_counter==3 if the car is still upright (bin 0) AND |ang_vel_roll| < 0x20
+     * AND |ang_vel_pitch| < 0x20. The OLD state-LCG produced angles in [-128,127]
+     * INDEPENDENT of impact and frequently < 0x20, so a fresh hit reset out of scripted
+     * mode in ~3 frames -> no visible tumble. The original's -(iVar/2) is always >= 63
+     * (scatter >= 0x7FFF -> iVar >= 127), so |ang_vel| > 0x20 on every axis, the
+     * early-exit can never fire, and the car tumbles the full ~0x3B frames (until the
+     * unconditional frame_counter > 0x3B reset at the tail of integrate_scripted_motion).
+     * Magnitude scales with impact, so harder hits spin faster. */
+    int32_t scatter = impact_mag / 4;
+    if (scatter < 0x7FFF) scatter = 0x7FFF;            /* floor (orig 0x4082A2-C9) */
+    int16_t spin_ang = (int16_t)(-((scatter >> 8) / 2));  /* -(iVar/2), <= -63 */
+    int16_t ang[3] = { spin_ang, spin_ang, spin_ang };
 
     float spin[9];
     BuildRotationMatrixFromAngles(spin, ang);
@@ -11070,6 +11080,68 @@ static uint32_t td5_physics_render_vehicle_actor_model(TD5_Actor *actor)
     return below_ground_mask;
 }
 
+/* [CONFIRMED @ 0x0042E750] BuildWorldToViewMatrix — row-major rotation matrix of
+ * `angle` about `axis` (int[3]; normalized INTERNALLY, do NOT pre-normalize). The
+ * angle is a fixed-point value whose top 12-bit field (angle>>0x12) indexes the
+ * float trig table (0x1000 = 2pi). Realized as B . Z . B^T (align axis, twist,
+ * un-align). Every element + sign transcribed verbatim from the listing
+ * (FCHS/FSTP sites @0x0042E7CF-0x0042E92E), x=axis[0] y=axis[1] z=axis[2],
+ * r=sqrt(y^2+z^2), R=sqrt(x^2+y^2+z^2), c=cos, s=sin:
+ *   B  = { r/R, 0, x/R,  -(y*x)/(R*r), z/r, y/R,  -(z*x)/(R*r), -(y/r), z/R }
+ *   Z  = { c, s, 0,  -s, c, 0,  0, 0, 1 }
+ *   B^T= transpose(B);  out = (B . Z) . B^T
+ * r==0 (axis pure-X): yaw matrix { 1,0,0, 0,c,-s, 0,s,c }, s negated when x<0
+ * [@0x0042E968/0x0042E977]. R<=0 (degenerate): identity [@0x0042E937]. */
+static void td5_build_world_to_view_matrix(float *out, const int32_t axis[3], int32_t angle)
+{
+    int32_t a12 = angle >> 0x12;                  /* SAR angle,0x12 [@0x0042E75E] */
+    float c = CosFloat12bit((unsigned int)a12);
+    float s = SinFloat12bit(a12);
+
+    float x = (float)axis[0];
+    float y = (float)axis[1];
+    float z = (float)axis[2];
+
+    float r = sqrtf(y * y + z * z);
+    if (r == 0.0f) {
+        float ss = (axis[0] < 0) ? -s : s;        /* x<0 sign flip [@0x0042E977] */
+        out[0] = 1.0f; out[1] = 0.0f; out[2] = 0.0f;
+        out[3] = 0.0f; out[4] = c;    out[5] = -ss;
+        out[6] = 0.0f; out[7] = ss;   out[8] = c;
+        return;
+    }
+
+    float R = sqrtf(x * x + y * y + z * z);
+    if (R <= 0.0f) {
+        out[0] = 1.0f; out[1] = 0.0f; out[2] = 0.0f;
+        out[3] = 0.0f; out[4] = 1.0f; out[5] = 0.0f;
+        out[6] = 0.0f; out[7] = 0.0f; out[8] = 1.0f;
+        return;
+    }
+
+    float r_R  = r / R;
+    float x_R  = x / R;
+    float y_R  = y / R;
+    float z_R  = z / R;
+    float z_r  = z / r;
+    float ny_r = -(y / r);
+    float nyx  = -(y * x) / (R * r);
+    float nzx  = -(z * x) / (R * r);
+
+    float B[9]  = { r_R,  0.0f, x_R,
+                    nyx,  z_r,  y_R,
+                    nzx,  ny_r, z_R };
+    float Z[9]  = {  c,    s,   0.0f,
+                    -s,    c,   0.0f,
+                    0.0f, 0.0f, 1.0f };
+    float BT[9] = { r_R,  nyx,  nzx,
+                    0.0f, z_r,  ny_r,
+                    x_R,  y_R,  z_R };
+    float tmp[9];
+    MultiplyRotationMatrices3x3(B, Z, tmp);       /* B . Z      [@0x0042E8C6] */
+    MultiplyRotationMatrices3x3(tmp, BT, out);    /* (B.Z) . BT [@0x0042E928] */
+}
+
 /* [CONFIRMED @ 0x004096B0] ComputeActorWorldBoundingVolume
  *
  * Wall-impact response: averages the contact positions of all probes that hit
@@ -11239,13 +11311,26 @@ static void td5_physics_compute_actor_world_bounding_volume(TD5_Actor *actor,
                  * [CONFIRMED-from-bytes; decompiler labels x/z — flagged.] */
                 actor->linear_velocity_x -= (k * l_z) >> 8;
                 actor->linear_velocity_z -= (k * l_x) >> 8;
-                /* [APPROX — FOLLOW-UP] Orig re-derives collision_spin here via
-                 * BuildWorldToViewMatrix (0x0042E750) general branch (axis =
-                 * normalized l×avg, angle = (k*avg_y)*3.10862e-10). That general
-                 * branch's 9-element layout is not yet byte-confirmed, so commit
-                 * the staged cos/sin twist instead of guessing the matrix — keeps
-                 * the roll continuing. Refine once 0x0042E750 is decompiled. */
-                memcpy(&actor->collision_spin_matrix, d0, 9 * sizeof(float));
+                /* [FIX 2026-06-02 flat-spin] Faithful re-derivation of collision_spin
+                 * via BuildWorldToViewMatrix (orig 0x0042E750), replacing the prior
+                 * staged-twist approximation that produced a tumble instead of the
+                 * original's flat yaw spinout. The rotation axis = (l_x,0,l_z) x
+                 * (avg_x,avg_y,avg_z) -- l.y is FORCED TO 0 [orig mov [l.y],0
+                 * @0x00409A58], so the axis is ~vertical and the per-tick rotation
+                 * is a FLAT YAW spin. Cross (>>12, l.y dropped) [@0x0042EAC0];
+                 * angle = round((k * avg_y) * 3.108978186e-09) [const 0x3155A5B9
+                 * @0x0045D5EC]; result = old_spin(d0) . new [old.new, @0x00409AAA]. */
+                int32_t bwv_axis[3];
+                bwv_axis[0] = (int32_t)(-(l_z * avg_y)) >> 12;
+                bwv_axis[1] = (int32_t)(l_z * avg_x - l_x * avg_z) >> 12;
+                bwv_axis[2] = (int32_t)(l_x * avg_y) >> 12;
+                int32_t bwv_angle = (int32_t)lrintf((float)(k * avg_y) * 3.108978186e-09f);
+                float bwv_mat[9];
+                td5_build_world_to_view_matrix(bwv_mat, bwv_axis, bwv_angle);
+                MultiplyRotationMatrices3x3(d0, bwv_mat, (float *)&actor->collision_spin_matrix);
+                TD5_LOG_I(LOG_TAG, "recov_flatspin: slot=%d k=%d avg_y=%d angle=%d a12=%d axis=[%d,%d,%d]",
+                          actor->slot_index, k, avg_y, bwv_angle, bwv_angle >> 0x12,
+                          bwv_axis[0], bwv_axis[1], bwv_axis[2]);
             }
 
             /* Body-axis impulse: subtract heading-normal-aligned penetration.
