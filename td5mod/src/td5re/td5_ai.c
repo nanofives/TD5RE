@@ -4759,6 +4759,21 @@ void td5_ai_init_traffic_actors(void) {
         return;
     }
 
+    /* [DIAG fix-1780404735 upstream-remap] track how often this race-start fill
+     * runs and how far the queue cursor has advanced. The original calls
+     * InitializeTrafficActorsFromQueue ONCE per race; if the port calls it
+     * repeatedly the cursor walks deep into the queue into branch-entries that
+     * miss the junction remap (-> span=-1 -> origin placement -> stuck). */
+    {
+        static int s_init_traffic_calls = 0;
+        s_init_traffic_calls++;
+        TD5_LOG_I(LOG_TAG,
+                  "init_traffic_ENTER: call#=%d cursor_off=%ld span_count=%d",
+                  s_init_traffic_calls,
+                  (long)(g_traffic_queue_base ? (qp - g_traffic_queue_base) : -1),
+                  td5_track_get_span_count());
+    }
+
     /* 0x00435975-7e: cap iteration at min(racer_count, 0xc) */
     racer_cap = (racer_count > 12) ? 12 : racer_count;
 
@@ -4948,6 +4963,15 @@ void td5_ai_init_traffic_actors(void) {
             if (remapped_int == (int)queue_span) {
                 /* No remap occurred — treat as miss per original (sentinel). */
                 remapped_span = (int16_t)-1;
+                /* [DIAG fix-1780404735 upstream-remap] capture WHY this branch
+                 * entry missed the junction remap so we can compare vs the
+                 * original: the resulting span=-1 placement strands the car at
+                 * the world origin (stuck-traffic root cause). */
+                TD5_LOG_I(LOG_TAG,
+                          "init_remap_MISS: slot=%d queue_span=%d sub_lane=%d "
+                          "lane_count=%d (sub_lane>=lane_count -> REMAP path) span_count=%d",
+                          local_18, (int)queue_span, (int)queue_byte3,
+                          lane_count, td5_track_get_span_count());
             } else {
                 remapped_span = (int16_t)remapped_int;
             }
@@ -5170,19 +5194,20 @@ void td5_ai_update_traffic_route_plan(int slot) {
     int32_t hdelta, hdelta_neg;
     int polarity, peer;
 
-    /* [FIX 2026-05-26 traffic-recovery-decrement] g_traffic_recovery_stage
-     * is set 1..7 by Stage 2 when hdelta is wide, but the port has no
-     * per-tick decrement (only init/recycle clears it). Stage 3 then
-     * brake-bails forever (encounter_steer = 0, brake = 1), and traffic
-     * sits motionless after any heading misalignment — the user-reported
-     * "traffic not moving". The orig has a per-tick countdown somewhere
-     * (the 1..7 seed value is meaningless without one); without Ghidra
-     * pinpointing it, apply the simplest correct decrement here so the
-     * recovery wears off naturally. */
-    if (slot >= 0 && slot < TD5_MAX_TOTAL_ACTORS &&
-        g_traffic_recovery_stage[slot] > 0) {
-        g_traffic_recovery_stage[slot]--;
-    }
+    /* [FIX 2026-06-02 traffic-recovery-faithful — fix-1780404735]
+     * REMOVED a non-original per-tick decrement of g_traffic_recovery_stage
+     * that used to sit here. Exhaustive Ghidra search of TD5_d3d.exe confirms
+     * the original (gActorTrafficRecoveryStage @ 0x4AFBE8) is NEVER decremented
+     * anywhere — it is set 1..7 by Stage 2 (heading-misalignment, unconditional),
+     * escalated on heavy collision (0x408215, saturating at 7), and cleared in
+     * EXACTLY ONE place: RecycleTrafficActorFromQueue (0x4353B0) when the actor
+     * falls >0x28 spans behind the player and is respawned ahead. The prior port
+     * author's premise ("the orig has a per-tick countdown somewhere") was wrong
+     * — the original relies on queue-recycle, not a countdown, to retire a
+     * misaligned/stuck traffic actor. The invented decrement (plus the `== 0`
+     * arming guard removed below) produced a non-faithful brake↔recover
+     * oscillation at lane-change/junction headings instead of the original's
+     * clean brake-until-recycle. Restoring the faithful behavior here. */
 
     /* --- Stage 1: Recycle --- */
     td5_ai_recycle_traffic_actor();
@@ -5245,8 +5270,11 @@ void td5_ai_update_traffic_route_plan(int slot) {
 
     /* Original 0x435F2B JLE 0x400 + 0x435F32 JGE 0xC00 implement strict bounds:
      * body fires for hdelta in (0x400, 0xC00) exclusive. */
-    if (hdelta > 0x400 && hdelta < 0xC00
-        && g_traffic_recovery_stage[slot] == 0 /* only arm fresh; see decrement at top */ ) {
+    if (hdelta > 0x400 && hdelta < 0xC00) {
+        /* [FAITHFUL 0x435F2B] The original arms UNCONDITIONALLY here — no
+         * `recovery_stage == 0` guard (the port-only guard was removed with the
+         * decrement above). Re-arming each tick to a fresh (world_z & 7)|1 value
+         * matches the original; the latch stays non-zero until queue-recycle. */
         /* Original at 0x435F34/0x435F81: reads DAT_004ab30c = actor[0].world_pos_z
          * (g_actor_base + 0x204). Used as a pseudo-random source for the
          * recovery stage. */
@@ -5257,6 +5285,18 @@ void td5_ai_update_traffic_route_plan(int slot) {
         g_traffic_recovery_stage[slot] = (int)(seed_src & 7);
         if (g_traffic_recovery_stage[slot] == 0)
             g_traffic_recovery_stage[slot] = 1;
+        /* Observability (fix-1780404735): rate-limited. The original re-arms
+         * UNCONDITIONALLY every tick a car is in the (0x400,0xC00) heading band,
+         * so a stuck (e.g. remap-miss / origin-placed) actor arms every frame —
+         * log at most every 30 frames per the bail log to avoid flooding while
+         * keeping the arm→brake→recycle cycle visible for diagnosis. */
+        if ((g_ai_frame_counter % 30u) == 0u) {
+            TD5_LOG_I(LOG_TAG,
+                      "traffic_recovery_arm: slot=%d hdelta=0x%X polarity=%d stage=%d "
+                      "span_raw=%d (brakes until recycle >0x28 spans behind player)",
+                      slot, hdelta, polarity, g_traffic_recovery_stage[slot],
+                      (int)ACTOR_I16(actor, ACTOR_SPAN_RAW));
+        }
         /* Slot 9 special-encounter audio cleanup. */
         if (slot == 9) {
             if (polarity == 0) {
@@ -5295,6 +5335,16 @@ void td5_ai_update_traffic_route_plan(int slot) {
             /* LAB_004366c7: brake = 1, encounter_steer = 0, return */
             ACTOR_U8(actor, ACTOR_BRAKE_FLAG) = 1;
             ACTOR_I16(actor, ACTOR_ENCOUNTER_STEER) = 0;
+            /* Observability (fix-1780404735): rate-limited so a latched actor
+             * braking-until-recycle is visible without per-tick spam. Only logs
+             * the recovery-latch cause (not the faithful near-edge/script bails). */
+            if (g_traffic_recovery_stage[slot] != 0 &&
+                (g_ai_frame_counter % 30u) == 0u) {
+                TD5_LOG_I(LOG_TAG,
+                          "traffic_recovery_bail: slot=%d stage=%d span_raw=%d "
+                          "(braking, awaiting recycle)",
+                          slot, g_traffic_recovery_stage[slot], (int)span_raw);
+            }
             return;
         }
     }
@@ -5702,6 +5752,40 @@ void td5_ai_update_special_encounter(void) {
         /* ---- Spawn attempt (0x00434e2c–0x00434f11) ------------------ */
         int32_t span_delta_2span;
         int32_t player_diff_abs;
+
+        /* [DIAG fix-1780404735] BUG-1 cop-spawn diagnosis. The spawn gate is
+         * byte-faithful (no divergence found) but the spawn requires a precise
+         * runtime condition only reachable by MANUAL driving (PlayerIsAI forces
+         * route_table_selector=1, which fails the selector gate). This logs which
+         * of the 5 gate conditions blocks the spawn + the live inputs, so a
+         * manual drive (Traffic ON + Cops ON, e.g. Moscow/Tokyo) pinpoints the
+         * failing condition. Rate-limited, plus an always-on "near-miss" log when
+         * the cop (slot 9) is within 1..3 spans of the player (the window in
+         * which span_delta crosses the required ==2). Zero behavioral effect. */
+        {
+            int32_t sd = (int32_t)(int16_t)player_span_norm - cop_span_norm;
+            int near_miss = (sd >= 1 && sd <= 3);
+            if (near_miss || (g_ai_frame_counter % 90u) == 0u) {
+                const char *blocker =
+                    (g_encounter_cooldown != 0)                            ? "cooldown!=0" :
+                    (sd != 2)                                              ? "span_delta!=2" :
+                    (player_speed <= 0x15638)                              ? "speed<=0x15638" :
+                    (player_fwd <= 0)                                      ? "fwd<=0" :
+                    (player_selector != g_encounter_route_table_selector)  ? "selector!=0" :
+                                                                             "PASSES(will spawn)";
+                TD5_LOG_I(LOG_TAG,
+                          "cop_spawn_gate: BLOCK=%s | cooldown=%d span_delta=%d "
+                          "(player_norm=%d cop9_norm=%d) speed=%d(>0x15638?%d) "
+                          "fwd=%d(>0?%d) selector=%d(==%d?%d)%s",
+                          blocker, g_encounter_cooldown, sd,
+                          (int)(int16_t)player_span_norm, cop_span_norm,
+                          player_speed, player_speed > 0x15638,
+                          player_fwd, player_fwd > 0,
+                          player_selector, g_encounter_route_table_selector,
+                          player_selector == g_encounter_route_table_selector,
+                          near_miss ? " [NEAR-MISS: cop within 1-3 spans]" : "");
+            }
+        }
 
         if (g_encounter_cooldown != 0) return;
 
