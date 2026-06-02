@@ -280,6 +280,7 @@ void td5_input_set_input_source(int p, int s)
      * device index). Without this the chosen source was a dead flag. */
     td5_plat_input_set_device(p, s);
 }
+int  td5_input_get_input_source(int p)          { return (p >= 0 && p < 2) ? s_input_source[p] : 0; }
 void td5_input_set_joystick_bindings(int player, const int32_t *bindings, int count)
 {
     if (player < 0 || player >= 2) return;

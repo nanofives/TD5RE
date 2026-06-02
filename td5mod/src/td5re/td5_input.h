@@ -259,6 +259,7 @@ void td5_input_set_active_players(int n);
 /** Set a player's input source (0=keyboard, >=1 = 1-based joystick index) AND
  *  create/release the underlying device so the in-race poll reads it. */
 void td5_input_set_input_source(int player, int source);
+int  td5_input_get_input_source(int player);
 /** Push a player's 9-slot joystick binding table to the live poll. */
 void td5_input_set_joystick_bindings(int player, const int32_t *bindings, int count);
 /** Resolve+apply both players' input devices (INI override or Config.td5) and
