@@ -58,9 +58,13 @@
 #include "td5_pilot_trace_0042EBF0.h" /* precise-port pilot CSV emit for 0x0042EBF0 */
 #ifdef TD5_PILOT_TRACE_TRAFFIC
 #include "td5_pilot_trace_traffic.h" /* precise-port pilot CSV emit for 0x004437C0 + 0x004438F0 */
+#endif
+/* V2V trace headers are included unconditionally: their obb_corner_test /
+ * collision_detect_full call sites below are ungated, so the snapshot types
+ * must always be declared. The emitters self-stub to no-ops under
+ * TD5RE_RELEASE (release build does not link the v2v trace modules). */
 #include "td5_pilot_trace_v2v_contact.h" /* pool15 V2V pilot trace */
 #include "td5_pilot_trace_v2v.h"  /* pool14_v2v precise-port pilot */
-#endif
 #include "td5re.h"
 
 /* Include the full actor struct for field-level access.
@@ -8458,7 +8462,9 @@ void td5_physics_reset_actor_state(TD5_Actor *actor)
      * history to persist across the call). */
 
     /* Capture PRE-state for the pilot probe BEFORE any mutation. */
+#ifndef TD5RE_RELEASE
     td5_pilot_trace_00405D70_enter(actor);
+#endif
 
     /* 0x405D78 / 0x405D7E — clear flag bytes */
     actor->surface_contact_flags = 0;       /* +0x376 */
@@ -8537,7 +8543,9 @@ void td5_physics_reset_actor_state(TD5_Actor *actor)
     /* === pilot trace hook ===
      * Fires once per reset (rare event — spawn/respawn/recycle); negligible
      * cost. Schema in tools/diff_func_trace.py reads addr=0x00405D70. */
+#ifndef TD5RE_RELEASE
     td5_pilot_trace_00405D70_leave(actor);
+#endif
 }
 
 /* ========================================================================

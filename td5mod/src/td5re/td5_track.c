@@ -5036,7 +5036,9 @@ int32_t td5_track_compute_signed_offset(int span_index, int progress, int route_
     /* Sign from comparison [CONFIRMED @ 0x004346f5] */
     {
         int32_t ret_val = (progress < route_byte) ? -len : len;
+#ifndef TD5RE_RELEASE
         td5_pilot_trace_pool15_emit_signed_offset(span_index, progress, route_byte, ret_val);
+#endif
         return ret_val;
     }
 }
@@ -5162,8 +5164,10 @@ int td5_track_sample_target_point(int span_index, int route_byte,
     if (out_x) *out_x = result_x;
     if (out_z) *out_z = result_z;
 
+#ifndef TD5RE_RELEASE
     td5_pilot_trace_pool15_emit_target_point(span_index, route_byte, lateral_bias,
                                               result_x, result_z);
+#endif
     return 1;
 }
 

@@ -490,7 +490,9 @@ post_poll:
 
     /* F12 — toggle the collision-wireframe overlay (DIK_F12 = 0x58). Rising
      * edge only so a held key doesn't strobe the flag. Mirrors the
-     * --DebugCollisions CLI / [Debug] Collisions INI setting. */
+     * --DebugCollisions CLI / [Debug] Collisions INI setting.
+     * Dev-only affordance — compiled out of the release build. */
+#ifndef TD5RE_RELEASE
     {
         static int s_prev_f12 = 0;
         int f12_now = td5_plat_input_key_pressed(0x58);
@@ -501,6 +503,7 @@ post_poll:
         }
         s_prev_f12 = f12_now;
     }
+#endif
 
     /* Escape handling: trigger race exit fade */
     if ((s_control_bits[0] & 0x40000000u) != 0 &&
