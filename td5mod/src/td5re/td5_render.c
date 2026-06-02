@@ -2282,6 +2282,76 @@ void td5_render_actors_for_view(int view_index)
         int camera_target_slot   = td5_game_get_player_slot(view_index);
         int camera_preset_active = (g_raceCameraPresetMode[view_index & 1] != 0);
 
+        /* === Vehicle shadow PRE-PASS (FIX 2026-06-02 inter-actor overlay) ===
+         * Draw EVERY visible actor's ground shadow BEFORE any car body is drawn
+         * in the main loop below. The opaque car bodies (z_write=1) then paint
+         * over any shadow pixel a body covers, so EVERY body occludes EVERY
+         * shadow — reproducing the net result of the original's deferred
+         * translucent flush (RunRaceFrame @ 0x0042b580 flushes all queued car
+         * shadows AFTER all opaque bodies via FlushQueuedTranslucentPrimitives
+         * @ 0x00431340; no depth sort).
+         *
+         * Why a pre-pass and not the prior per-actor "shadow before its OWN
+         * body" (2026-06-01 fix): that only made each body occlude its OWN
+         * shadow. A nearer traffic/AI car processed in a LATER loop iteration
+         * drew its shadow (z_test=LEQUAL, z_write=0) AFTER the player body was
+         * already down; the port's SEPARATE shadow projection let the
+         * 1.25-scaled shadow corners win the depth test against the player's
+         * lower body -> "other cars' shadows render over my car". Drawing ALL
+         * shadows first, then ALL bodies, makes the player body unconditionally
+         * overwrite those shadows, fixing the inter-actor case while KEEPING the
+         * player-self fix (own body is still drawn after its own shadow).
+         *
+         * A literal port of the original (defer shadows AFTER bodies + z-test)
+         * would reintroduce the player-self over-body case precisely because the
+         * port can't share the track projection (see SHADOW_DEPTH_Z_BIAS notes);
+         * the pre-pass sidesteps that with the opaque-overwrite guarantee.
+         *
+         * Gates mirror the body loop's pre-frustum gates below (null actor/mesh,
+         * bumper/interior own-car suppression, drag decoration slots, span
+         * distance cull). The mesh frustum test is intentionally NOT replicated:
+         * the shadow has its own near-clip and the rasterizer clips off-screen
+         * pixels, so a ground shadow for a car just past the body-frustum edge
+         * is harmless (and slightly more correct). */
+        {
+            int shadow_drawn = 0;
+            for (int slot = 0; slot < total_actors; slot++) {
+                TD5_Actor *sa = td5_game_get_actor(slot);
+                if (!sa || !td5_render_get_vehicle_mesh(slot))
+                    continue;
+                if (slot == camera_target_slot && camera_preset_active)
+                    continue;   /* bumper/interior cam: own car (incl. shadow) suppressed */
+                if (drag_mode && slot < TD5_MAX_RACER_SLOTS &&
+                    td5_game_get_slot_state(slot) == 3)
+                    continue;   /* drag decoration slot */
+                if (slot != camera_target_slot) {
+                    TD5_Actor *owner = td5_game_get_actor(camera_target_slot);
+                    if (owner) {
+                        int delta = (int)sa->track_span_normalized -
+                                    (int)owner->track_span_normalized;
+                        int ring = td5_track_get_ring_length();
+                        if (ring > 0) {
+                            int half = ring / 2;
+                            if (delta >  half) delta -= ring;
+                            if (delta < -half) delta += ring;
+                        }
+                        int delta_abs = delta < 0 ? -delta : delta;
+                        if (delta_abs >= actor_cull_window)
+                            continue;   /* span-distance cull (mirrors body loop) */
+                    }
+                }
+                render_vehicle_shadow_quad(sa);
+                shadow_drawn++;
+            }
+            {
+                static uint32_t s_shadow_prepass_log = 0;
+                if ((s_shadow_prepass_log++ % 600u) == 0u)
+                    TD5_LOG_I(LOG_TAG,
+                              "shadow pre-pass: view=%d drew %d shadow(s) before bodies",
+                              view_index, shadow_drawn);
+            }
+        }
+
         for (int slot = 0; slot < total_actors; slot++) {
             TD5_Actor *actor = td5_game_get_actor(slot);
             TD5_MeshHeader *mesh = td5_render_get_vehicle_mesh(slot);
@@ -2479,21 +2549,13 @@ void td5_render_actors_for_view(int view_index)
             td5_render_apply_track_lighting(slot, actor);
             td5_render_compute_vertex_lighting(mesh);
 
-            /* Vehicle shadow drawn BEFORE the opaque car body. [FIX 2026-06-01
-             * shadow-over-car] The shadow is a ground decal (TD5_PRESET_SHADOW:
-             * z_test=LEQUAL, z_write=0); drawing it first lets the opaque body —
-             * rendered next with z_write=1 — paint over any shadow pixels that
-             * fall on the car. In effect this reproduces the original's deferred
-             * translucent pass result: every car body occludes the shadows.
-             *
-             * This fixes the player-ONLY over-car symptom that no depth bias
-             * could: through the port's separate shadow projection, the close
-             * player car's 1.25-scaled shadow corners project NEARER to the
-             * camera than its own lower body, so an after-body z-test let the
-             * shadow win. Drawing before the body makes the opaque body cover it
-             * regardless of depth. Shadows still show on open ground and are
-             * still occluded by walls / earlier-drawn cars via the z-test. */
-            render_vehicle_shadow_quad(actor);
+            /* Vehicle shadow is now drawn in the shadow PRE-PASS above (before
+             * ANY car body in this view), not inline here. [FIX 2026-06-02
+             * inter-actor overlay] Drawing all shadows first and then all bodies
+             * makes EVERY opaque body (z_write=1) overwrite EVERY shadow it
+             * covers — extending the 2026-06-01 per-actor "shadow before its own
+             * body" fix to cover the inter-actor case ("other cars' shadows
+             * render over my car") while keeping the player-self fix intact. */
 
             td5_render_prepared_mesh(mesh);
 
@@ -2515,11 +2577,13 @@ void td5_render_actors_for_view(int view_index)
             /* Render wheel ring billboards (0x446F00) */
             render_vehicle_wheel_billboards(actor, slot);
 
-            /* Render brake light billboards (0x4011C0) */
+            /* Render brake light billboards (0x4011C0). Depth-tested (LEQUAL)
+             * against the bodies drawn so far, so a nearer car body occludes a
+             * farther car's brake light ("traffic brake lights render over my
+             * car" fix 2026-06-02). See render_vehicle_brake_lights. */
             render_vehicle_brake_lights(actor, slot);
 
-            /* (Vehicle shadow now drawn BEFORE the car body mesh above so the
-             * body occludes it — see that call site for rationale.) */
+            /* (Vehicle shadow drawn in the per-view shadow pre-pass above.) */
 
             /* Tracked-actor marker (cop chase strobes) — orig
              * RenderRaceActorForView @ 0x0040c79c gates:
@@ -4637,6 +4701,18 @@ static float s_braked_u0, s_braked_v0, s_braked_u1, s_braked_v1;
 static int   s_braked_lookup_done = 0;
 static uint8_t s_brake_brightness[12]; /* per-slot brightness ramp */
 
+/* [FIX 2026-06-02 inter-actor overlay] Small toward-camera depth pull for the
+ * brake billboard, in view-z units (expressed via DEPTH_NORMALIZE_INV so it
+ * tracks the depth normalization). With the brake now depth-tested (LEQUAL,
+ * TD5_PRESET_TRANSLUCENT_POINT_ZTEST) the FLAT billboard (constant depth =
+ * taillight-hardpoint center vz) would otherwise z-fight / partially clip
+ * against its OWN angled rear-body surface; a small pull wins that tie cleanly.
+ * It stays far below a clearly-in-front car's depth gap (a whole car length),
+ * so a nearer car body still correctly occludes a farther car's brake light —
+ * which is the reported fix ("traffic brake lights render over my car"). */
+#define BRAKE_PULL_VIEWZ   (16.0f)
+#define BRAKE_DEPTH_BIAS   (BRAKE_PULL_VIEWZ * DEPTH_NORMALIZE_INV)
+
 static void brake_light_lookup_atlas(void)
 {
     s_braked_lookup_done = 1;
@@ -4732,7 +4808,12 @@ static void render_vehicle_brake_lights(const TD5_Actor *actor, int slot)
         float inv_z = 1.0f / vz;
         float cx = -vx * s_focal_length * inv_z + s_center_x;
         float cy = -vy * s_focal_length * inv_z + s_center_y;
-        float depth = vz * (1.0f / s_far_clip);
+        /* [FIX 2026-06-02] Use the SAME depth formula as the car body / track
+         * ((vz-64)/195000, see line ~824) instead of the old vz/far_clip, so the
+         * brake's depth is directly comparable to the body depth buffer now that
+         * the brake is z-tested (LEQUAL). Minus a small toward-camera pull so the
+         * flat billboard reliably wins against its own angled rear surface. */
+        float depth = (vz - NEAR_DEPTH_OFFSET) * DEPTH_NORMALIZE_INV - BRAKE_DEPTH_BIAS;
 
         /* Screen-space half-size: perspective-scale the billboard */
         float h = half_size * s_focal_length * inv_z;
@@ -4761,9 +4842,16 @@ static void render_vehicle_brake_lights(const TD5_Actor *actor, int slot)
 
         uint16_t idx[6] = { 0, 1, 2, 1, 3, 2 };
         flush_immediate_internal();
-        /* TRANSLUCENT_POINT disables z-test (like the shadow quad) so the
-         * brake light billboard doesn't z-fight with the car body mesh. */
-        td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_POINT);
+        /* [FIX 2026-06-02 inter-actor overlay] Depth-tested (LEQUAL, z_write=0)
+         * translucent billboard. The old TD5_PRESET_TRANSLUCENT_POINT disabled
+         * the depth test entirely, so a traffic/AI car's brake light painted
+         * over the player car (and showed THROUGH the car from the front). With
+         * the test on, a nearer car body occludes a farther car's brake light,
+         * matching the original's deferred z-tested tail-light flush
+         * (RenderVehicleTaillightQuads @0x4011C0 -> FlushQueuedTranslucent-
+         * Primitives @0x431340, ZENABLE on / ZFUNC=LESSEQUAL @0x40B070). The
+         * small BRAKE_DEPTH_BIAS above keeps the brake visible on its own car. */
+        td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_POINT_ZTEST);
         td5_plat_render_bind_texture(s_braked_page);
         td5_plat_render_draw_tris(v, 4, idx, 6);
     }
@@ -6774,6 +6862,23 @@ void td5_render_radial_pulse(float dt)
 {
     float phase = td5_hud_radial_pulse_get();
 
+    /* [TEMP DIAG — remove before commit] Force the victory star visible during
+     * a normal race so its color can be frame-dumped over the (neutral) road,
+     * isolating an inherent tint (texture/channel) from scene-bleed. Set
+     * TD5RE_DIAG_STAR=<phase> in the environment. */
+    {
+        const char *ds = getenv("TD5RE_DIAG_STAR");
+        if (ds) { phase = (float)atof(ds); td5_hud_radial_pulse_set(phase); }
+    }
+
+    {
+        static uint32_t s_diag_n = 0;
+        if ((s_diag_n++ % 60u) == 0u) {
+            TD5_LOG_I("render", "radial_pulse: phase=%.1f vp=%dx%d", phase,
+                      (int)s_viewport_width, (int)s_viewport_height);
+        }
+    }
+
     /* Gate: orig FCOMP [0x0045d624] (= 0.0f). Skip when phase < 0. */
     if (phase < 0.0f) return;
 
@@ -6789,15 +6894,25 @@ void td5_render_radial_pulse(float dt)
     /* Anim accumulator advances every frame (independent of phase). */
     s_radial_pulse_anim += dt * 3328.0f;
 
-    /* Star opacity ramp. Orig used phase*0.31875 (alpha for its gray-RGB petals),
-     * which only reaches full at phase~800 = radius ~800px (far off-screen), so on
-     * the visible window (phase ~0..330 over the victory hold) it stays a faint
-     * ~12-40% wash. For a clearly-WHITE victory star [user 2026-05-30] we ramp the
-     * alpha faster (0.62) so it builds to ~75% white by the end of the hold while
-     * still fading in from invisible at phase 0. Tunable: 0.31875 = faithful
-     * (faint), ~0.62 = near white-out by hold end. 0.55 builds to ~72% white at
-     * the end of the 2.5s victory hold — clearly white, scene still dimly visible. */
-    int alpha = (int)(phase * 0.55f);
+    /* Star opacity ramp. [user 2026-06-02: star looked "a little pinkish".]
+     * ROOT CAUSE: the petals are white-RGB drawn translucent (SRCALPHA), and the
+     * previous coefficient 0.55 only reached ~72% opacity at the end of the 2.5s
+     * victory hold (phase ~0..330 -> alpha max ~181). The remaining ~28% let the
+     * WARM finish-line scene bleed THROUGH the white star, tinting it toward the
+     * scene colour -> the perceived "pinkish" wash. Both the star's diffuse
+     * (0x00FFFFFF) and its modulate texture (page 899 = 0xFFFFFFFF) are provably
+     * pure white through PS_MODULATE_ALPHA (tex*diffuse), and every other white
+     * HUD element renders neutral in a frame-dump — so the tint is ONLY
+     * scene-bleed, not a colour/channel bug. [RE: RenderHudRadialPulseOverlay
+     * @0x00439E60 — orig petals ramp grayscale RGB at alpha 0xFF, i.e. OPAQUE, so
+     * the original never bleeds the scene through.] FIX: ramp the alpha faster
+     * (1.6) so the star reaches full opacity (255) by phase ~160 — roughly the
+     * mid-point of the hold. The prominent second half (largest radius, most
+     * visible) is then fully OPAQUE neutral white with NO scene-bleed, while the
+     * first half still fades in from invisible. This also moves the port closer
+     * to the original's opaque petals. Tunable: 0.31875 = orig-faint, 0.55 = old
+     * (pink-prone), 1.6 = opaque-by-mid-hold (neutral white). */
+    int alpha = (int)(phase * 1.6f);
     if (alpha < 0)        alpha = 0;
     else if (alpha > 255) alpha = 255;
 

@@ -2849,6 +2849,34 @@ void td5_plat_render_set_preset(TD5_RenderPreset preset)
         s->alpha_ref         = 1;
         break;
 
+    case TD5_PRESET_TRANSLUCENT_POINT_ZTEST:
+        /* Identical to TD5_PRESET_TRANSLUCENT_POINT (SRCALPHA/INVSRCALPHA,
+         * point filter, MODULATEALPHA, alpha_ref=1) but with the depth test
+         * ENABLED (LEQUAL), z_write OFF. Used by vehicle brake-light billboards
+         * so a nearer car body occludes a farther car's brake light, matching
+         * the original's deferred z-tested tail-light flush (RenderVehicle-
+         * TaillightQuads @0x004011c0 queues into FlushQueuedTranslucent-
+         * Primitives @0x00431340, which runs with ZENABLE on / ZFUNC=LESSEQUAL;
+         * SetRaceRenderStatePreset @0x0040b070 never disables ZENABLE).
+         * z_write OFF because the port draws brakes inline during the actor
+         * loop — writing depth would let an earlier brake occlude a later car
+         * body. No polygon_offset — a brake light is not a coplanar ground decal
+         * (unlike TD5_PRESET_SHADOW). The (z_enable=1, z_write=0, z_func=LEQUAL)
+         * combination is already exercised by TD5_PRESET_SHADOW / ADDITIVE_WORLD,
+         * so the d3d11 backend DSV mapping needs no change. */
+        s->blend_enable      = 1;
+        s->src_blend         = D3D6BLEND_SRCALPHA;
+        s->dest_blend        = D3D6BLEND_INVSRCALPHA;
+        s->z_enable          = 1;
+        s->z_write           = 0;
+        s->z_func            = 0;  /* LEQUAL */
+        s->mag_filter        = 0;  /* POINT — no bilinear bleed into transparent border pixels */
+        s->min_filter        = 0;
+        s->texblend_mode     = D3DTBLEND_MODULATEALPHA;
+        s->alpha_test_enable = 1;
+        s->alpha_ref         = 1;
+        break;
+
     case TD5_PRESET_SKY:
         /* Sky dome — faithful match to original SetRaceRenderStatePreset(0)
          * @ 0x0040b070 case 0 (final fallthrough block 0x40b0d8-0x40b0e9):
