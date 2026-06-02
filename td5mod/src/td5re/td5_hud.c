@@ -1214,8 +1214,14 @@ void td5_hud_init_overlay_resources(int race_mode, int string_table_offset)
 
     /* Set visibility bitmask based on race mode */
     if (race_mode == 0) {
-        /* Attract/demo mode or replay-only */
-        if (g_replay_mode == 0) {
+        /* race_mode==0 is passed only for View Replay or benchmark (orig
+         * InitializeRaceOverlayResources param_1==0). The replay sub-path lights
+         * the flashing "REPLAY" banner (bit 0x80000000); benchmark shows nothing.
+         * [CONFIRMED orig @0x437805: param_1==0 && view_z==0.0 (NOT benchmark)
+         *  → flags=0x80000000; else flags=0.] The previous port keyed this on
+         * g_replay_mode==0, which (combined with the caller hardcoding race_mode=1)
+         * left the banner permanently dead and showed "DEMO MODE" during replay. */
+        if (!g_td5.benchmark_active) {
             *s_hud_flags[0] = TD5_HUD_REPLAY_BANNER;
             *s_hud_flags[1] = TD5_HUD_REPLAY_BANNER;
         } else {
@@ -1863,8 +1869,17 @@ void td5_hud_draw_status_text(int player_slot, int view_index)
     float vp_top    = s_view_layout[view_index].vp_int_top;
     float vp_bottom = s_view_layout[view_index].vp_int_bottom;
 
-    /* Demo mode: show "DEMO MODE" text */
+    /* [CONFIRMED orig DrawRaceStatusText @0x439B70] During View Replay (input
+     * playback) the original EARLY-EXITS here: NO status text — the flashing
+     * "REPLAY" banner is supplied by the overlay bitmask, not this path. The
+     * previous port instead drew "DEMO MODE" whenever g_replay_mode!=0, which is
+     * exactly why a real replay showed the DEMO-MODE banner. */
     if (g_replay_mode != 0) {
+        return;
+    }
+
+    /* Attract demo: show "DEMO MODE" text (orig g_replayModeFlag!=0 path). */
+    if (g_demo_mode != 0) {
         td5_hud_queue_text(0,
             (int)vp_half_w,
             (int)(vp_top + 16.0f),

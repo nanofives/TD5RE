@@ -88,6 +88,13 @@ void *td5_game_heap_alloc(size_t size);
 
 /* --- Game state globals (defined in td5_game.c) --- */
 extern int      g_replay_mode;
+/* Attract-mode demo flag (port analog of g_replayModeFlag @ 0x4AAF64). Set
+ * ONLY by the attract-demo launch path — distinct from g_replay_mode which is
+ * the input-playback "View Replay" flag (orig g_inputPlaybackActive @ 0x466E9C).
+ * The original keeps these as two separate globals: demo shows the "DEMO MODE"
+ * status text and is AI-driven; View Replay shows the flashing "REPLAY" banner
+ * and plays back recorded input. Both run cinematic trackside cameras. */
+extern int      g_demo_mode;
 /* [FIX 2026-05-24 OVERSIGHT] g_wanted_mode_enabled removed — was orphan
  * shadow of g_td5.wanted_mode_enabled. Use td5_game_is_wanted_mode() or
  * g_td5.wanted_mode_enabled directly. */
@@ -136,6 +143,12 @@ int  td5_game_is_replay_active(void);
  * race re-entry path runs WriteOpen which memsets the recording buffer
  * (closes todo-view-replay-restarts-race-2026-05-19 per DA-M1 audit). */
 void td5_game_set_replay_mode(int v);
+/* Set attract-demo mode (1=attract demo / 0=clear). Drives the "DEMO MODE"
+ * status text + cinematic camera. Independent of replay (View Replay). */
+void td5_game_set_demo_mode(int v);
+/* 1 when EITHER View Replay OR attract demo is active — used to select the
+ * cinematic trackside camera + replay/demo HUD bitmask + ESC-to-exit. */
+int  td5_game_is_cinematic_race(void);
 int  td5_game_get_traffic_variant(int traffic_index);
 int  td5_game_get_cop_actor_index(void);
 int  td5_game_is_wanted_mode(void);

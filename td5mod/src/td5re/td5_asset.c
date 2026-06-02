@@ -2983,6 +2983,43 @@ int td5_asset_resolve_traffic_model_index(int track_index, int reverse, int slot
     return s_traffic_model_table[row][slot_in_pool];
 }
 
+/* Returns the 1-based track-pool record number ("world_x" =
+ * gTrackPoolSpanCountTable[gScheduleToPoolIndex[track]] forward, or the reverse
+ * table when reverse) — the same value InitializeRaceSession feeds to
+ * LoadTrackRuntimeData @0x42fb90 to select the trackside-camera profile table
+ * (profile index = return - 1, via td5_camera_bind_trackside_profiles). Returns
+ * 0 when the track/direction is invalid or reverse is unavailable (-1 sentinel),
+ * so the caller binds no profiles and the replay camera falls back to chase. */
+int td5_asset_track_pool_index(int track_index, int reverse)
+{
+    if (track_index < 0 ||
+        track_index >= (int)(sizeof(s_schedule_to_pool_index) /
+                             sizeof(s_schedule_to_pool_index[0]))) {
+        return 0;
+    }
+    int pool_row = (int)s_schedule_to_pool_index[track_index];
+    int world_x;
+    if (reverse) {
+        if (pool_row < 0 ||
+            pool_row >= (int)(sizeof(s_track_pool_reverse_span_count_table) /
+                              sizeof(int32_t))) {
+            return 0;
+        }
+        world_x = s_track_pool_reverse_span_count_table[pool_row];
+        if (world_x < 0) {
+            return 0;   /* reverse unavailable for this track */
+        }
+    } else {
+        if (pool_row < 0 ||
+            pool_row >= (int)(sizeof(s_track_pool_span_count_table) /
+                              sizeof(int32_t))) {
+            return 0;
+        }
+        world_x = s_track_pool_span_count_table[pool_row];
+    }
+    return world_x;
+}
+
 /* ========================================================================
  * Mipmap Builder -- ParseAndDecodeCompressedTrackData (0x430D30)
  *

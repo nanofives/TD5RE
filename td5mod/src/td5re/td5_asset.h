@@ -273,6 +273,11 @@ int td5_asset_load_traffic_model(int model_index, int slot);
  */
 int td5_asset_resolve_traffic_model_index(int track_index, int reverse, int slot_in_pool);
 
+/* Returns the 1-based track-pool record ("world_x") used to select the
+ * trackside replay-camera profile table (profile index = return - 1). 0 means
+ * no profiles for this track/direction (reverse may be unavailable). */
+int td5_asset_track_pool_index(int track_index, int reverse);
+
 /* ========================================================================
  * Mipmap Generation
  * ======================================================================== */

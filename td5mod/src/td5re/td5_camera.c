@@ -14,6 +14,11 @@
 #include "td5_hud.h"
 #include "td5_ai.h"     /* td5_compute_heading_delta */
 #include "td5re.h"
+/* Per-track trackside (replay) camera profile data, extracted from
+ * TD5_d3d.exe @0x473780 (re/tools/extract_trackside_cam_profiles.py).
+ * Defines s_per_track_camera_profiles[] + TD5_PER_TRACK_CAMERA_PROFILE_COUNT.
+ * Include in exactly this one TU (the arrays are static). */
+#include "td5_camera_profiles.h"
 #include "../../../re/include/td5_actor_struct.h"  /* TD5_TrackProbeState — camera terrain probes walk via td5_track_update_probe_position */
 
 #include <math.h>
@@ -1763,6 +1768,14 @@ void InitializeTracksideCameraProfiles(void)
     g_cameraLastProjScale[0] = -1;
     g_cameraLastProjScale[1] = -1;
 
+    /* Defensive: no profile table bound for this track/direction (e.g. a track
+     * without authored trackside cameras). Leave count 0 so the replay camera
+     * dispatch falls back to chase instead of dereferencing NULL. */
+    if (g_tracksideCameraProfiles == NULL) {
+        g_tracksideCameraProfileCount = 0;
+        return;
+    }
+
     /* Count valid profiles (scan until -1 sentinel) */
     while (g_tracksideCameraProfiles[count * 8] != -1) {
         count++;
@@ -1815,6 +1828,35 @@ void InitializeTracksideCameraProfiles(void)
         g_camBehaviorType[0] = 4;
         g_camBehaviorType[1] = 4;
     }
+}
+
+/* Bind the active per-track trackside-camera profile table. Mirrors the orig
+ * LoadTrackRuntimeData @0x42fd4b: gTracksideCameraProfiles =
+ * g_perTrackTracksideCameraProfilePtrs[track_pool_index - 1]. pool_index_1based
+ * is the 1-based selector (orig world_x = gTrackPoolSpanCountTable[...]); an
+ * out-of-range / unavailable index (0, or a reverse track marked -1, or an
+ * unused 64 sentinel) clears the pointer so the replay camera falls back to
+ * chase. */
+void td5_camera_bind_trackside_profiles(int pool_index_1based)
+{
+    if (pool_index_1based >= 1 &&
+        pool_index_1based <= TD5_PER_TRACK_CAMERA_PROFILE_COUNT) {
+        /* cast away const: SelectTracksideCameraProfile / Initialize only READ. */
+        g_tracksideCameraProfiles =
+            (short *)s_per_track_camera_profiles[pool_index_1based - 1];
+    } else {
+        g_tracksideCameraProfiles = NULL;
+    }
+    g_tracksideCameraProfileCount = 0;  /* (re)counted by InitializeTracksideCameraProfiles */
+}
+
+/* True when the cinematic trackside replay camera has usable per-track profile
+ * data (bound by td5_camera_bind_trackside_profiles + counted by
+ * InitializeTracksideCameraProfiles). When false the replay path falls back to
+ * the chase camera so the played-back car always stays on screen. */
+int td5_camera_replay_trackside_ready(void)
+{
+    return (g_tracksideCameraProfiles != NULL) && (g_tracksideCameraProfileCount > 0);
 }
 
 /* ========================================================================
@@ -2723,10 +2765,31 @@ void td5_camera_update_transition_state(int p, int vi)
         return;
     }
 
-    /* Route to appropriate camera based on mode */
-    if (g_replay_mode) {
-        TD5_LOG_I(LOG_TAG, "transition view %d: path=trackside actor_slot=%d", vi, g_actorSlotForView[vi]);
+    /* Route to appropriate camera based on mode.
+     *
+     * Replay uses the cinematic trackside cameras (orig RunRaceFrame @0x42BA70:
+     * when g_inputPlaybackActive!=0 it runs SelectTracksideCameraProfile +
+     * UpdateTracksideCamera instead of chase). This requires the per-track
+     * profile table to have been loaded (td5_camera_bind_trackside_profiles) and
+     * InitializeTracksideCameraProfiles to have set a non-zero profile count at
+     * race init. If neither holds (no profile data for this track/direction —
+     * including reverse tracks, whose forward-authored span ranges never match
+     * the car, the original's own "shows nothing" case), fall back to the chase
+     * camera so the replay is always VISIBLE. [Documented deviation: the original
+     * shows nothing on reverse-track replay; the port shows chase instead.] */
+    if (g_replay_mode && td5_camera_replay_trackside_ready()) {
+        TD5_LOG_D(LOG_TAG, "transition view %d: path=trackside(replay) actor_slot=%d",
+                  vi, g_actorSlotForView[vi]);
+        SelectTracksideCameraProfile((int)actor, vi);
         UpdateTracksideCamera((int)actor, vi);
+    } else if (g_replay_mode) {
+        /* Replay fallback (no trackside profiles): behave like the chase/bumper
+         * path below so the played-back car stays on screen. */
+        int mode = g_raceCameraPresetMode[v];
+        if (mode != 0 && !g_td5.paused) {
+            UpdateVehicleRelativeCamera((int)actor, vi);
+        }
+        /* Chase (mode 0) updated per-sim-tick in td5_camera_update_chase_all(). */
     } else {
         /* Orig RunRaceFrame per-view dispatch (0x0042bca0): runs the orbit/chase
          * cam when gRaceCameraPresetMode[view] == 0 (or the race-start fly-in
