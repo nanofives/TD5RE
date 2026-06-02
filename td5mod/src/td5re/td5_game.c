@@ -2325,6 +2325,32 @@ int td5_game_init_race_session(void) {
         } else if (tidx >= 0 && tidx < (int)(sizeof(k_schedule_to_checkpoint_index) /
                                       sizeof(k_schedule_to_checkpoint_index[0]))) {
             record_idx = k_schedule_to_checkpoint_index[tidx];
+
+            /* Reverse-direction races use a DIFFERENT checkpoint record. The
+             * original derives the record via the reverse pool-count table
+             * (gTrackPoolReverseSpanCountTable @0x466E3C) so reverse gets its
+             * own span thresholds / initial_time / time bonuses — without this,
+             * reverse compared the player's reverse-walker span against FORWARD
+             * checkpoint spans, firing each checkpoint ~10-25 spans before the
+             * painted banner and applying the wrong (too-short) timer.
+             * [CONFIRMED via runtime dump of the original: reverse Sydney =
+             *  record 18 {665,1081,1679,2250,2635} init=15419, vs forward
+             *  record 13 {486,1057,1655,2071,2658} init=10299. 1081 == the
+             *  stage-2 banner span.] Falls back to the forward record when the
+             * track ships no reverse data (resolver returns -1). */
+            if (g_td5.reverse_direction) {
+                int rev_rec = td5_asset_resolve_checkpoint_record_index(tidx, 1);
+                if (rev_rec >= 0) {
+                    TD5_LOG_I(LOG_TAG,
+                              "Reverse checkpoint record: track=%d fwd_record=%d -> rev_record=%d",
+                              tidx, record_idx, rev_rec);
+                    record_idx = rev_rec;
+                } else {
+                    TD5_LOG_W(LOG_TAG,
+                              "Reverse requested but no reverse checkpoint record for track=%d; using forward record=%d",
+                              tidx, record_idx);
+                }
+            }
         }
         if (record_idx >= 0 && record_idx < 40) {
             memcpy(&s_active_checkpoint, k_checkpoint_table[record_idx], 24);

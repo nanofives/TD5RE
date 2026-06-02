@@ -278,6 +278,12 @@ int td5_asset_resolve_traffic_model_index(int track_index, int reverse, int slot
  * no profiles for this track/direction (reverse may be unavailable). */
 int td5_asset_track_pool_index(int track_index, int reverse);
 
+/* Direction-aware checkpoint-timing record index for a track. Reverse uses the
+ * reverse pool-count table so reverse races get their own checkpoint record
+ * (span thresholds, initial_time, time bonuses). Returns -1 if the track is
+ * out of range or reverse data is unavailable (caller falls back to forward). */
+int td5_asset_resolve_checkpoint_record_index(int track_index, int reverse);
+
 /* ========================================================================
  * Mipmap Generation
  * ======================================================================== */
