@@ -6134,6 +6134,26 @@ teardown:
     g_encounter_control_active_latch = 0;
     g_encounter_tracked_handle = -1;
     g_encounter_cooldown = 300;
+    /* [DELIBERATE DIVERGENCE fix-1780404735 — close stuck-siren gap]
+     * The original UpdateSpecialEncounterControl teardown (0x434BA0) does NOT
+     * stop the tracked-vehicle (siren) audio — RE-confirmed. The siren is
+     * normally killed earlier by the ACTIVATE transition in
+     * UpdateSpecialTrafficEncounter (0x434DA0). But if an encounter ends via
+     * THIS teardown (player slowed -> fwd_comp<=8, or the heading-misalignment
+     * band) WITHOUT having activated first, the siren is never stopped and keeps
+     * playing while the cop drives away — matching the user report "siren stuck
+     * despite the cop being far away". The gap exists in the original too;
+     * stopping here closes it. SAFE: td5_sound_stop_tracked_vehicle_audio is a
+     * no-op when the siren is already stopped (s_tracked_veh_active==0), so the
+     * common already-activated path is unaffected (just begins a fade that's
+     * already at zero). Gated to the special encounter (ENC_WANTED_MODE==0); the
+     * Cop-Chase-mode siren is the separate user horn-toggle path. */
+    if (ENC_WANTED_MODE == 0) {
+        td5_enc_stop_tracked_audio();
+        TD5_LOG_I(LOG_TAG,
+                  "encounter_control teardown: siren stop (close stuck-siren gap, slot=%d)",
+                  slot);
+    }
     /* Byte-wide increment (orig uses CL via INC). Field at +0x384 is the encounter
      * completion counter on the slot's own actor (NOT on the player). */
     ACTOR_U8(actor_self, ACTOR_ENCOUNTER_STATE) =
