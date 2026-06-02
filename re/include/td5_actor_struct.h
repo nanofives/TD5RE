@@ -362,10 +362,13 @@ typedef struct TD5_Actor {
      * parameter blocks. Set during actor initialization.
      */
     void*    car_config_ptr;            /* +0x1B0: car visual config (bounding box, hardpoints) [INFERRED] */
-    void*    actor_aux_ptr_1B4;         /* +0x1B4: 4th pointer slot in the 16-byte ptr block [INFERRED 2026-05-20]
-                                         *         InitializeRaceActor @ 0x0042F140 zeroes it on init;
-                                         *         td5_trace_replay preserves all 16 bytes at +0x1B0..+0x1BF.
-                                         *         Writer not yet identified — possible LOD/hi-detail-model alt. */
+    void*    actor_aux_ptr_1B4;         /* +0x1B4: 4th pointer slot in the 16-byte ptr block [DEAD-VESTIGIAL 2026-06-01]
+                                         *         Confirmed unwritten/unread, kept as zeroed pad. A binary-wide
+                                         *         scan for [reg+0x1b4] yields ONLY [ESP+0x1b4] stack hits (plus an
+                                         *         unrelated immediate 0x1b4e81b5 @ 0x004059FB) — no actor-relative
+                                         *         reader or writer exists. Only touched by InitializeRaceActor
+                                         *         @ 0x0042F140's block-zero on init; td5_trace_replay preserves all
+                                         *         16 bytes at +0x1B0..+0x1BF. Do NOT invent a writer (see P6 audit). */
     void*    car_definition_ptr;        /* +0x1B8: car definition struct [CONFIRMED]
                                          *         half-width(+0x04), half-length(+0x08),
                                          *         bounding_radius(+0x80), mass(+0x88) */
@@ -441,7 +444,13 @@ typedef struct TD5_Actor {
      */
     uint8_t  _pad_20E[2];               /* +0x20E: alignment pad before wheel_display_angles [CONFIRMED 2026-05-20] */
     int16_t  wheel_display_angles[4][4]; /* +0x210: per-wheel angle data (4 wheels x 4 shorts) [INFERRED] */
-    int16_t  wheel_contact_normals[4][4]; /* +0x230: per-wheel track contact normals [INFERRED] */
+    int16_t  wheel_contact_normals[4][4]; /* +0x230: per-wheel track contact normals [CONFIRMED 2026-06-01]
+                                         *         Original writer: ConvertFloatVec3ToShortAngles @ 0x0042E2E0,
+                                         *         called in the 4-wheel loop of IntegrateVehiclePoseAndContacts
+                                         *         @ 0x00405E80 (LEA [ESI+0x230] @ 0x0040621D feeds its vec arg;
+                                         *         writes all 3 shorts via __ftol, ptr advances +8/iter).
+                                         *         Port mirrors all 3 components at td5_physics.c:6964-6967;
+                                         *         consumed by suspension response (4th short is pad). */
     int16_t  wheel_contact_velocities[4][4]; /* +0x250: per-wheel contact velocity vectors [INFERRED] */
     /* +0x270: wheel_contact_delta[4] — per-wheel frame-to-frame contact-position
      * delta (i16 xyz + pad). 4 wheels x 8 bytes = 32 bytes.
@@ -574,8 +583,10 @@ typedef struct TD5_Actor {
                                          *         >= 3 frames + wheel_contact_bitmask==0x0F
                                          *         (i.e. all wheels airborne THIS tick at +0x37C)
                                          *         triggers damping recovery (FUN_00403d90) */
-    uint8_t  _pad_362[9];               /* +0x362: unused/reserved (subsystem docs speculated +0x366/+0x367
-                                         *         but no writer/reader corroborated 2026-05-20) */
+    uint8_t  _pad_362[9];               /* +0x362: unused/reserved [DEAD-VESTIGIAL 2026-06-01]
+                                         *         confirmed unwritten/unread, kept as zeroed pad — a binary-wide
+                                         *         scan finds ZERO +0x362 displacement accesses. (Subsystem docs
+                                         *         speculated +0x366/+0x367 but no writer/reader corroborated.) */
 
     /* === GEAR & CONTROL FLAGS (0x36B-0x374) ========================== */
     uint8_t  current_gear;              /* +0x36B: gear index [CONFIRMED]

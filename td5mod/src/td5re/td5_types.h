@@ -294,7 +294,9 @@ typedef enum TD5_RenderPreset {
     TD5_PRESET_SHADOW             = 6,  /* Shadow: translucent, z_test=1, z_write=0, point filter */
     TD5_PRESET_SKY                = 7,  /* Sky dome: opaque, z_test=0, z_write=0, linear filter */
     TD5_PRESET_TRANSLUCENT_LINEAR_HUD = 8, /* HUD: LINEAR filter, alpha_ref=1 to match orig M2DX ALPHAREF=0 */
-    TD5_PRESET_ADDITIVE_OVERLAY   = 9   /* Additive (ONE/ONE), z_test off — particle smoke (orig 0x0040B660 case 3 minus z_test) */
+    TD5_PRESET_ADDITIVE_OVERLAY   = 9,  /* Additive (ONE/ONE), z_test OFF — 2D screen-space additive glow (victory-star pulse HUD). For depth-tested WORLD smoke use TD5_PRESET_ADDITIVE_WORLD. */
+    TD5_PRESET_ADDITIVE_GLOW      = 10, /* Additive (ONE/ONE), z_test on, NO alpha test — cop-light strobe marker: lets LINEAR-filtered edges blend into a soft/diffused glow instead of hard alpha-clipped rectangles (orig RenderTrackedActorMarker submit path sets no alpha test) */
+    TD5_PRESET_ADDITIVE_WORLD     = 11  /* Additive (ONE/ONE), z_test=LEQUAL z_write=0 — world-space particle smoke that IS occluded by opaque geometry. Orig draws smoke in FlushQueuedTranslucentPrimitives @0x431340 with the OPAQUE preset's z-state still active (ZENABLE on, ZFUNC=LESSEQUAL). Depth gets the -64 NEAR_DEPTH_OFFSET folded in by td5_render_submit_translucent_world so it ties with coplanar opaque geometry. */
 } TD5_RenderPreset;
 
 /** Mesh primitive dispatch opcodes */

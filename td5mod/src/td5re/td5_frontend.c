@@ -471,26 +471,29 @@ static const char * const k_ctrl_action_labels[10] = {
     "REAR VIEW",    /* slot 9 — DIK_X     0x2D */
 };
 
-/* Display labels for joystick binding values 2-10.
- * [CONFIRMED @ 0x40FE00 case 10]: the binding value cycles 2..10 and is labelled via
- * SNK_ControlText[value] (the decomp's [value*16] is the byte offset into the char[12][16]
- * array → element `value`). [RESOLVED 2026-06-01, byte-exact from Language.dll]:
- * SNK_ControlText = {LEFT,RIGHT,ACCELERATE,BRAKE,HANDBRAKE,HORN/SIREN,GEAR UP,GEAR DOWN,
- * CHANGE VIEW,REAR VIEW,NONE,ACCEL/BRAKE}, so values 2..10 = ACCELERATE..NONE. The prior
- * "Axis+/Btn1.." placeholders were invented; these are the original action-name labels.
- * (NOTE: live joystick INPUT on this screen is still a keyboard surrogate — the
- * joystick-poll infra is on the unmerged branch fix-1780168877 — but the DISPLAYED labels
- * are now faithful.) */
+/* Descriptive labels for joystick binding values 2-10.
+ *
+ * [CONFIRMED @ 0x40FE00 (ScreenControllerBindingPage)]: the binding "value"
+ * cycles 2..10 (wraps back to 2 when incremented past 10). It is NOT an index
+ * into a LANGUAGE.DLL string table — the original joystick screen renders each
+ * row from SNK_ButtonTxt ("BUTTON", LANGUAGE.DLL @ 0x100076BC) plus a 1-based
+ * digit, and the stored value is an internal STATE CODE consumed by the
+ * axis/button mask logic: value 2 -> axis-direction mask bit 1, value 3 ->
+ * axis-direction mask bit 2, values 4..10 -> button codes. (The earlier
+ * "SNK_ControlText[value*16]" / placeholder note was wrong; verified there is
+ * no per-value label asset.) The port draws a value column as a UI aid, so
+ * these strings are grounded in the confirmed state-code semantics, using the
+ * real "BUTTON" wording for the button codes. */
 static const char * const k_js_value_labels[9] = {
-    "ACCELERATE",  /* value 2  = SNK_ControlText[2] */
-    "BRAKE",       /* value 3  = SNK_ControlText[3] */
-    "HANDBRAKE",   /* value 4  = SNK_ControlText[4] */
-    "HORN/SIREN",  /* value 5  = SNK_ControlText[5] */
-    "GEAR UP",     /* value 6  = SNK_ControlText[6] */
-    "GEAR DOWN",   /* value 7  = SNK_ControlText[7] */
-    "CHANGE VIEW", /* value 8  = SNK_ControlText[8] */
-    "REAR VIEW",   /* value 9  = SNK_ControlText[9] */
-    "NONE",        /* value 10 = SNK_ControlText[10] */
+    "AXIS +",    /* value 2  — axis direction, mask bit 1 */
+    "AXIS -",    /* value 3  — axis direction, mask bit 2 */
+    "BUTTON 1",  /* value 4 */
+    "BUTTON 2",  /* value 5 */
+    "BUTTON 3",  /* value 6 */
+    "BUTTON 4",  /* value 7 */
+    "BUTTON 5",  /* value 8 */
+    "BUTTON 6",  /* value 9 */
+    "BUTTON 7",  /* value 10 */
 };
 
 /* ========================================================================
@@ -2032,6 +2035,13 @@ void td5_frontend_auto_race_setup(void) {
     s_game_option_dynamics          = g_td5.ini.dynamics;
     s_game_option_collisions        = g_td5.ini.collisions;
 
+    /* Commit the dynamics (arcade/sim) selection into the physics race-init
+     * flag deterministically for the AutoRace path, mirroring the options-screen
+     * commit at ConfigureGameTypeFlags (td5_physics_set_dynamics @ case 0). The
+     * boot path also commits the INI value, but committing here makes the
+     * AutoRace harness independent of boot-block ordering. */
+    td5_physics_set_dynamics(s_game_option_dynamics);
+
     /* Match the Frida hook's pre-call writes.
      *   g_twoPlayerModeEnabled=0, g_returnToScreenIndex=-1
      *   s_current_screen pinned to MAIN_MENU so frontend_init_race_schedule
@@ -2958,23 +2968,21 @@ static int ConfigureGameTypeFlags(void) {
 
     switch (s_selected_game_type) {
     case 0: /* Single Race -- user preferences apply */
-        /* [CONFIRMED @ 0x004155DE] orig live circuit lap count = gCircuitLapsConfigShadow + 1
-         * (NOT doubled). The previous *2 made a Single Race run twice the lap count shown
-         * on the Game Options screen ("2" displayed but 4 laps run). Now consistent with
-         * the GameOptions display (frontend_render_game_options_overlay) and the MainMenu
-         * seed (g_td5.circuit_lap_count = s_game_option_laps + 1). */
+        /* [CONFIRMED @ 0x004155DE] live circuit lap count = gCircuitLapsConfigShadow + 1,
+         * NOT doubled — kept from this branch's frontend pass. The prior *2 made a Single
+         * Race run twice the count shown on Game Options, and contradicts this file's own
+         * display comment below (frontend_render_game_options_overlay @ ~0x0041FD78: "NO *2
+         * multiply ... g_td5.circuit_lap_count = laps+1"). [merge-resolved 2026-06-02] */
         g_td5.circuit_lap_count = s_game_option_laps + 1;
-        /* g_td5.difficulty feeds ONLY the AI first-layer template scaling in
-         * td5_ai_init_race_actor_runtime (td5_ai.c:1677). In the original that
-         * first layer (InitializeRaceActorRuntime @ 0x00432F2F / 0x00432FB4) is
-         * gated on the game-phase globals [0x004AAF80] / [0x004AAF84], NOT on the
-         * user difficulty toggle — gRaceDifficultyTier @ 0x00463210 is only read
-         * AFTER that block (@ 0x00432FFD). [CONFIRMED @ 0x00432F2F / 0x00432FB4 /
-         * 0x00432FFD.] So the user toggle must NOT drive layer-1; previously it did
-         * (= s_game_option_difficulty), which both mis-keyed layer-1 and was the only
-         * thing the toggle touched. Hold layer-1 at the established single-race
-         * baseline (NORMAL) and route the toggle into difficulty_tier instead (above),
-         * which is the path the original actually ties to user difficulty. */
+        /* The AI first-layer template scaling in td5_ai_init_race_actor_runtime
+         * (InitializeRaceActorRuntime @ 0x00432F2F / 0x00432FB4) is now keyed on
+         * the DYNAMICS flag (gDifficultyEasy @0x004AAF84 = the arcade/sim toggle),
+         * matching the original — it no longer reads g_td5.difficulty. The user
+         * difficulty toggle routes into difficulty_tier (above), which is the path
+         * the original actually ties to user difficulty (gRaceDifficultyTier
+         * @0x00463210, read only AFTER the dynamics block @ 0x00432FFD). The
+         * g_td5.difficulty field below is retained only for save/log round-trip
+         * (td5_save.c) and no longer affects AI scaling. */
         g_td5.difficulty = TD5_DIFFICULTY_NORMAL;
         g_td5.traffic_enabled = s_game_option_traffic;
         g_td5.special_encounter_enabled = s_game_option_cops;
@@ -4148,9 +4156,11 @@ static void fe_draw_option_arrows(int btn_idx, float sx, float sy) {
 static void frontend_render_game_options_overlay(float sx, float sy) {
     const char *on_off[] = { "OFF", "ON" };
     const char *difficulty[] = { "EASY", "NORMAL", "HARD" };  /* orig middle label: NORMAL */
-    /* [FIXED 2026-06-01] SNK_DynamicsTxt = {"ARCADE","SIMULATION"} — index 0 = ARCADE
-     * (matches td5_physics dynamics flag 0=arcade). The array was INVERTED, so the
-     * screen showed "SIMULATION" when the setting was arcade and vice-versa. */
+    /* [CONFIRMED @ Language.dll SNK_DynamicsTxt, indexed directly by
+     * gDynamicsConfigShadow @0x00466014 at ScreenGameOptions 0x0041FECF]:
+     * value 0 -> "ARCADE", value 1 -> "SIMULATION". The previous order was
+     * inverted. Physics: 0=ARCADE (gravity 1900 + car-stat boosts),
+     * 1=SIMULATION (gravity 1500 + stock stats). */
     const char *dynamics[] = { "ARCADE", "SIMULATION" };
     char laps[16];
     if (!s_buttons[0].active) return;
@@ -8893,6 +8903,15 @@ static void Screen_ControllerBinding(void) {
              * port uses separate module statics that must be bridged at exit. */
             memcpy(td5_save_get_controller_bindings_mutable(),
                    s_ctrl_binding_table, sizeof(s_ctrl_binding_table));
+            /* Push the configured row to the live poll so the rebind takes
+             * effect immediately (otherwise it would only apply after the next
+             * td5_input_apply_device_selection at race start). */
+            {
+                int32_t row[9];
+                for (int i = 0; i < 9; i++)
+                    row[i] = (int32_t)s_ctrl_binding_table[s_ctrl_player][i];
+                td5_input_set_joystick_bindings(s_ctrl_player, row, 9);
+            }
             TD5_LOG_I(LOG_TAG, "CtrlBind: joystick OK — saved bindings for player %d",
                       s_ctrl_player);
             td5_save_write_config("Config.td5");

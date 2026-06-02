@@ -19,7 +19,9 @@ struct StripSpanRecord {  // 24 bytes, indexed: DAT_004c3d9c + span_index * 0x18
                                                 // High nibble = reserved/unused
     /* +0x04 */ uint16_t left_vertex_start;     // Index into coordinate table (DAT_004c3d98) for left edge
     /* +0x06 */ uint16_t right_vertex_start;    // Index into coordinate table for right edge
-    /* +0x08 */ int16_t  unknown_08;            // Not directly accessed in decompiled span consumers
+    /* +0x08 */ int16_t  link_next;             // Forward junction link (next span index); read by
+                                                // UpdateActorTrackPosition @0x004440F0 in the type-8/type-10
+                                                // forward-junction branches as *(short*)(record+8) [P6 2026-06-01]
     /* +0x0A */ int16_t  link_span;             // Forward/backward link (set to span_count-1 at first, 0 at last)
     /* +0x0C */ int32_t  origin_x;              // World-space X origin of span
     /* +0x10 */ int32_t  origin_y;              // World-space Y origin (height/elevation)
@@ -49,7 +51,7 @@ Written by `ApplyTrackStripAttributeOverrides` (0x42fb6d) at `+1` of each span r
 
 **+0x04/+0x06 vertex indices**: Core coordinate references. Every function that accesses spans reads these to get left/right edge vertex positions from `DAT_004c3d98 + index * 6` (3 shorts per vertex: x, y, z).
 
-**+0x08/+0x0A**: Offset +0x0A is written by `BindTrackStripRuntimePointers` for first/last spans (link patching). Offset +0x08 is not directly accessed in any decompiled function -- may be padding or used only by the STRIP.DAT file generator.
+**+0x08 (link_next) / +0x0A (link_span)**: Offset +0x0A is written by `BindTrackStripRuntimePointers` for first/last spans (link patching). Offset +0x08 is the **forward junction link** (`link_next`): `UpdateActorTrackPosition` @0x004440F0 reads `*(short*)(record+8)` as the new span index in the type-8 / type-10 forward-junction branches. The earlier "not directly accessed / may be padding" note is **superseded** — the port consumes it as `link_next` (`td5_types.h:388`). [P6 2026-06-01]
 
 **+0x0C/+0x10/+0x14 origin**: Read as `int32_t` by `RenderTrackSegmentNearActor`, `BlendTrackLightEntryFromStart`, `ApplyTrackLightingForVehicleSegment`, and track contact functions. World-space 3D origin of the span center.
 
@@ -272,7 +274,9 @@ After exhaustive search of all 6 READ xrefs to `gTrackEnvironmentConfig` (0x4AEE
 
 ## 8. static.hed File Format
 
-Loaded from `static.zip` by `LoadStaticTrackTextureHeader` (0x442520) and `LoadTrackTextureSet` (0x4426c5).
+Loaded from `static.zip` by `LoadStaticTrackTextureHeader` (0x442560 — *was misdocumented as
+0x442520, which is inside `RunMainGameLoop`; corrected [P6 2026-06-01]*) and `LoadTrackTextureSet`
+(0x4426c5).
 
 ### File Layout
 
@@ -299,6 +303,15 @@ struct StaticHedEntry {        // 64 bytes
     /* +0x3C */ int32_t  page_index;  // Base page index (adjusted +0x400 at runtime by LoadTrackTextureSet)
 };
 ```
+
+> **[P6 2026-06-01 correction]** The `+0x20` "width_a" / `+0x24` "height_a" / `+0x28` "width_b" /
+> `+0x2C` "height_b" fields of this **named entry** are NOT read by `LoadStaticTrackTextureHeader`.
+> Re-decompilation of the real function (0x442560) shows it skips the named-entry block entirely
+> (`gStaticHedTextureData = _Memory + entryCount*16 + 2`) and reads the **TexturePageMeta** records
+> that follow (width/height at page-record +0x08/+0x0C, via `puVar4[-1]`/`*puVar4`, with a min/equalize
+> step gated on `g_textureUsesTallPageFormat_PROVISIONAL`). No runtime reader has been identified for
+> the named-entry width/height — treat them as file-generator metadata `[UNVERIFIED]`. Only the name
+> field (`+0x00`, matched by `stricmp_game` in `LoadRaceTexturePages`) is confirmed read.
 
 ### Texture Page Metadata (0x10 bytes / 16 bytes)
 
@@ -414,3 +427,41 @@ struct SpanTypeEdgeIndexOffset {
 | 9 | -2 | 0 |
 | 10 | 0 | 0 |
 | 11 | 0 | 0 |
+
+---
+
+## Session P6 reconciliation (2026-06-01)
+
+RE-doc + Ghidra-naming hygiene pass; **no port code change, no build**. Ghidra xrefs
+re-verified read-only against the master `TD5` project. Confirmations for the data-format
+items flagged in the P6 audit:
+
+- **STRIP.DAT +0x08 — superseded above.** Now documented as `link_next` (forward junction
+  link), read by `UpdateActorTrackPosition` @0x004440F0. The old "not accessed / padding"
+  note is withdrawn.
+
+- **MODELS.DAT dword-1 — confirmed UNREAD.** `ParseModelsDat` @0x00431190 only relocates
+  dword-0 of each 8-byte entry (`*piVar1 += data`); dword-1 (+4) is never read. Stays
+  documented as unused.
+
+- **LEVELINF.DAT +0x54 (`sky_animation_index`) — VESTIGIAL, no change.** Already documented
+  in section 7 (PlayStation-only sky index; no PC reader). Reaffirmed.
+
+- **`DAT_004c3d8c` — write-only, VESTIGIAL, no change.** Carried as a write-only global with
+  no reader; left as-is per the P6 register.
+
+- **`static.hed` named-entry +0x20 — corrected in section 8.** The "width_a" field is NOT read
+  by `LoadStaticTrackTextureHeader` (which reads the TexturePageMeta block instead). See the
+  inline `[P6 2026-06-01 correction]` blockquote — this *refutes* the brief's "+0x20 decoded as
+  width_a, read by LoadStaticTrackTextureHeader" framing; the named-entry width/height have no
+  identified runtime reader.
+
+### Drag-race lane buffer — `g_dragRaceLaneStripPtr` @0x004ad288 (Task 5, document-only)
+
+Xref check (read-only): **15 references, ALL READ, 0 WRITE** — every read is inside
+`InitializeRaceActorRuntime` (0x00432E60–0x0043367B, reads at 0x00433558–0x0043360E). There is
+**no static writer**; the buffer is populated only dynamically (the P6 prediction is an alias of
+the two drag-lane blocks at 0x004ad2a0). A live HW write-breakpoint capture was **not** performed
+(document-only task; no game launch). **Nothing to change**: the port deliberately loads the real
+`STRIP.DAT` for the drag strip (level030, 301 spans), so this buffer is unused. Do NOT implement
+it — adding a writer would be invention, not fidelity.

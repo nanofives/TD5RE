@@ -163,8 +163,14 @@ const char *td5_plat_input_device_name(int index);
 /** Get device type by index. Returns 0=keyboard, 1=gamepad, 2=joystick/wheel. */
 int td5_plat_input_device_type(int index);
 
-/** Set the active device for a player slot. */
+/** Set the active device for a player slot. device_index 0 = keyboard,
+ *  >=1 = enumerated joystick index (creates/acquires that joystick for the slot). */
 void td5_plat_input_set_device(int slot, int device_index);
+
+/** Apply the per-player 9-slot joystick binding table (control-config /
+ *  Config.td5) to the live poll. Layout: [0]=active, [1]/[2]=axes (4/5),
+ *  [3..8]=6 button actions (value 2..10 → physical button = value-2). */
+void td5_plat_input_set_joystick_bindings(int slot, const int32_t *bindings, int count);
 
 /* ========================================================================
  * Force Feedback
@@ -235,6 +241,10 @@ int td5_plat_audio_is_playing(TD5_AudioChannel ch);
 
 /** Set master volume (0-100). */
 void td5_plat_audio_set_master_volume(int volume);
+
+/** Force all SFX play/modify to silence (1) or restore (0). Used to mute race
+ *  audio while the in-race pause menu is up. Does not affect CD/music. */
+void td5_plat_audio_set_muted(int muted);
 
 /** Start streaming a WAV file through a double-buffered DirectSound buffer. */
 int td5_plat_audio_stream_play(const char *wav_path, int loop);

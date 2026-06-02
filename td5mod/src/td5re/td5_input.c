@@ -24,6 +24,8 @@
 #include "td5_game.h"
 #include "td5_camera.h"
 #include "td5_ai.h"
+#include "td5_save.h"
+#include "td5_sound.h"   /* td5_sound_toggle_siren — cop-chase siren toggle */
 
 /* Defined in td5_game.c */
 extern int    g_actorSlotForView[2];
@@ -122,6 +124,11 @@ static int32_t s_gear_debounce[TD5_MAX_RACER_SLOTS];
 
 /** NOS latch accumulator per-player (mirrors 0x483014). */
 static uint8_t s_nos_latch[TD5_MAX_RACER_SLOTS];
+
+/** Cop-chase siren-toggle horn-edge latch per-player (PORT ENHANCEMENT).
+ * Tracks the horn bit so we fire the siren on/off toggle once per press
+ * rather than every frame the horn is held. */
+static uint8_t s_siren_horn_latch[TD5_MAX_RACER_SLOTS];
 
 /** NOS cooldown per actor (actor+0x37C). */
 static uint8_t s_nos_cooldown[TD5_MAX_RACER_SLOTS];
@@ -222,6 +229,7 @@ int td5_input_init(void)
     memset(s_gear, 0, sizeof(s_gear));
     memset(s_gear_debounce, 0, sizeof(s_gear_debounce));
     memset(s_nos_latch, 0, sizeof(s_nos_latch));
+    memset(s_siren_horn_latch, 0, sizeof(s_siren_horn_latch));
     memset(s_nos_cooldown, 0, sizeof(s_nos_cooldown));
     memset(s_camera_cooldown, 0, sizeof(s_camera_cooldown));
     memset(s_rear_view, 0, sizeof(s_rear_view));
@@ -263,8 +271,54 @@ void td5_input_tick(void)
  * ======================================================================== */
 
 void td5_input_set_active_players(int n)       { s_active_players = clamp_i(n, 1, 2); }
-void td5_input_set_input_source(int p, int s)   { if (p >= 0 && p < 2) s_input_source[p] = s; }
+void td5_input_set_input_source(int p, int s)
+{
+    if (p < 0 || p >= 2) return;
+    s_input_source[p] = s;
+    /* Activate the device so the poll path actually reads it: source 0 releases
+     * this slot's joystick (keyboard), source >=1 creates joystick (1-based
+     * device index). Without this the chosen source was a dead flag. */
+    td5_plat_input_set_device(p, s);
+}
 int  td5_input_get_input_source(int p)          { return (p >= 0 && p < 2) ? s_input_source[p] : 0; }
+void td5_input_set_joystick_bindings(int player, const int32_t *bindings, int count)
+{
+    if (player < 0 || player >= 2) return;
+    td5_plat_input_set_joystick_bindings(player, bindings, count);
+}
+
+/* Resolve and apply each player's input device + bindings at race start.
+ * Source precedence: INI override (Player1Joystick/Player2Joystick, >0 = a
+ * 1-based enumerated joystick index) wins; otherwise the device index persisted
+ * in Config.td5 (p1/p2_device_index). 0 = keyboard. For a joystick player the
+ * saved 9-slot binding row is pushed to the live poll. Called from
+ * InitializeRaceSession (Step 15) BEFORE FF init so slot 0's device exists. */
+void td5_input_apply_device_selection(void)
+{
+    /* Device count (idempotent re-enumeration) so a stale/placeholder persisted
+     * index can't try to open a device that doesn't exist. */
+    int dev_count = td5_plat_input_enumerate_devices();
+    int src[2];
+    src[0] = (g_td5.ini.player1_joystick > 0) ? g_td5.ini.player1_joystick
+                                              : (int)td5_save_get_p1_device_index();
+    src[1] = (g_td5.ini.player2_joystick > 0) ? g_td5.ini.player2_joystick
+                                              : (int)td5_save_get_p2_device_index();
+    /* Clamp out-of-range indices to keyboard (the shipped default Config.td5
+     * carries a non-zero placeholder at +0x20/+0x21). */
+    for (int p = 0; p < 2; p++)
+        if (src[p] < 0 || src[p] >= dev_count) src[p] = 0;
+    const uint32_t *bind = td5_save_get_controller_bindings_mutable();
+    for (int p = 0; p < 2; p++) {
+        td5_input_set_input_source(p, src[p]);   /* creates/releases the device */
+        if (src[p] > 0 && bind) {
+            int32_t row[9];
+            for (int i = 0; i < 9; i++) row[i] = (int32_t)bind[p * 9 + i];
+            td5_input_set_joystick_bindings(p, row, 9);
+        }
+        TD5_LOG_I(LOG_TAG, "Device selection: player=%d source=%d (%s)",
+                  p, src[p], (src[p] == 0) ? "keyboard" : "joystick");
+    }
+}
 void td5_input_set_playback_active(int v)       { s_playback_active = v; }
 int  td5_input_is_playback_active(void)         { return s_playback_active; }
 void td5_input_set_replay_mode(int v)           { s_replay_mode_flag = v; }
@@ -437,7 +491,9 @@ post_poll:
 
     /* F12 — toggle the collision-wireframe overlay (DIK_F12 = 0x58). Rising
      * edge only so a held key doesn't strobe the flag. Mirrors the
-     * --DebugCollisions CLI / [Debug] Collisions INI setting. */
+     * --DebugCollisions CLI / [Debug] Collisions INI setting.
+     * Dev-only affordance — compiled out of the release build. */
+#ifndef TD5RE_RELEASE
     {
         static int s_prev_f12 = 0;
         int f12_now = td5_plat_input_key_pressed(0x58);
@@ -448,6 +504,7 @@ post_poll:
         }
         s_prev_f12 = f12_now;
     }
+#endif
 
     /* Escape handling: trigger race exit fade */
     if ((s_control_bits[0] & 0x40000000u) != 0 &&
@@ -857,6 +914,24 @@ void td5_input_update_player_control(int slot)
             s_nos_cooldown[slot] = TD5_INPUT_NOS_COOLDOWN;
             s_nos_latch[slot] = 1;
         }
+    }
+
+    /* ---- Cop-chase siren toggle (PORT ENHANCEMENT, user-requested 2026-05-30) ----
+     * In wanted mode the player drives the cop car (slot == cop actor index, =0).
+     * The original keeps the siren on while the horn key (0x200000) is held; the
+     * user prefers a press-to-toggle. Edge-detect the horn key here and flip the
+     * siren on/off via td5_sound_toggle_siren(). The toggle couples siren audio
+     * + the flashing-light marker (both live in the same horn-gated branch in
+     * the original). Only the cop slot toggles; AI suspects never press horn. */
+    if (td5_game_is_wanted_mode() && slot == td5_game_get_cop_actor_index()) {
+        if ((bits & 0x200000u) == 0) {
+            s_siren_horn_latch[slot] = 0;
+        } else if (s_siren_horn_latch[slot] == 0) {
+            s_siren_horn_latch[slot] = 1;
+            td5_sound_toggle_siren();
+        }
+    } else {
+        s_siren_horn_latch[slot] = 0;
     }
 
     /* Cop mode: horn zeroes other actors' velocities.

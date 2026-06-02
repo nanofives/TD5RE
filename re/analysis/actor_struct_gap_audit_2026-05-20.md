@@ -46,6 +46,33 @@
 2. **actor_aux_ptr_1B4 writer** — needs live pyghidra-mcp xref against the orig DB; was not accessible to the audit agent. Until identified, port code will simply not write the field (matches current behavior).
 3. **gap_362 (9B)** — two prior subsystem docs (`ai-routing-and-track-geometry.md:533`, `remaining-systems.md:244`) speculated meanings for 0x366/0x367 but neither was corroborated. If those docs are revisited, this region may yield 1-2 more named fields.
 
+## Session P6 reconciliation (2026-06-01)
+
+RE-doc + Ghidra-naming hygiene pass; **no port code change**. Ghidra xrefs re-verified
+read-only against the master `TD5` project. Three of this audit's open items are now closed:
+
+- **`wheel_contact_normals` (+0x230) — RESOLVED.** Writer identified:
+  `ConvertFloatVec3ToShortAngles` @ 0x0042E2E0, called in the 4-wheel loop of
+  `IntegrateVehiclePoseAndContacts` @ 0x00405E80 (`LEA [ESI+0x230]` @ 0x0040621D feeds its
+  vec arg; all 3 shorts written via `__ftol`, pointer advances +8/iter). The port already
+  writes all 3 components at `td5_physics.c:6964-6967`, consumed by suspension response.
+  Header field demoted from `[INFERRED]` → `[CONFIRMED 2026-06-01]`.
+
+- **`actor_aux_ptr_1B4` (+0x1B4) — DEAD-VESTIGIAL (closes Follow-up #2).** A binary-wide
+  scan for `[reg+0x1b4]` yields ONLY `[ESP+0x1b4]` stack hits (plus an unrelated immediate
+  `0x1b4e81b5` @ 0x004059FB) — there is NO actor-relative reader or writer. The field is
+  only ever touched by `InitializeRaceActor` @ 0x0042F140's block-zero on init. It is
+  confirmed unwritten/unread and kept as a zeroed pad/placeholder. The "writer not yet
+  identified — possible LOD/hi-detail-model alt" note is withdrawn: there is no writer to
+  find. **Do NOT implement this field** — adding a writer would be invention, not fidelity.
+
+- **`_pad_362` (+0x362, 9B) — DEAD-VESTIGIAL (closes Follow-up #3).** A binary-wide scan
+  finds ZERO `+0x362` displacement accesses. Confirmed unwritten/unread, kept as a zeroed
+  pad. The +0x366/+0x367 subsystem speculation remains uncorroborated and is dropped.
+
+Header comments in `re/include/td5_actor_struct.h` updated to match (comment-only; fields,
+offsets, and all `_Static_assert`s unchanged).
+
 ## Key file references
 
 - `re/include/td5_actor_struct.h` — header (now zero gap_* fields)

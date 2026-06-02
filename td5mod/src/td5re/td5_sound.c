@@ -86,11 +86,24 @@ static const char *s_ambient_wav_names[TD5_SOUND_AMBIENT_COUNT] = {
     "Gear1.wav"     /* slot 36 */
 };
 
-/** Traffic engine variant WAV filenames (matches table at 0x474A4C). */
+/** Traffic engine variant WAV filenames.
+ *
+ * The original table @0x474A4C maps variant 0/1/2 -> {Engine0.wav, car.wav,
+ * diesel.wav}, indexed by GetTrafficVehicleVariantType @0x443240. BUT car.wav
+ * and diesel.wav exist in NO original archive -- SOUND.ZIP ships only
+ * engine0.wav..engine5.wav (and only engine0 is referenced by the table). So
+ * the ORIGINAL game itself loads no engine sound for traffic variants 1/2
+ * (which covers most traffic), leaving them silent -- evidently a dev filename
+ * bug (6 engine variants shipped, 5 unused).
+ *
+ * DEVIATION (user-approved 2026-05-31): point the two missing names at the
+ * shipped engine1.wav / engine2.wav so traffic cars are actually audible,
+ * restoring the apparent dev intent. To restore byte-faithful (silent)
+ * behavior, change these back to "car.wav" / "diesel.wav". */
 static const char *s_traffic_engine_wavs[3] = {
-    "Engine0.wav",  /* variant 0: generic */
-    "car.wav",      /* variant 1: car */
-    "diesel.wav"    /* variant 2: diesel/truck */
+    "Engine0.wav",  /* variant 0: generic (faithful; exists) */
+    "engine1.wav",  /* variant 1: was "car.wav"    (missing in all archives) */
+    "engine2.wav"   /* variant 2: was "diesel.wav" (missing in all archives) */
 };
 
 /** Frontend SFX WAV paths (10 entries, slots 1-10). Original at 0x414640. */
@@ -216,6 +229,23 @@ static int s_tracked_veh_actor;        /* Original: DAT_004c380c */
 static int s_siren_active_flag;        /* Original: DAT_004c3880 */
 static int s_siren_refreshed;          /* Original: DAT_004c3844 */
 
+/* Cop-chase siren on/off toggle (PORT ENHANCEMENT, user-requested 2026-05-30).
+ *
+ * In the original, the siren is gated on the horn control bit (0x200000):
+ * UpdateVehicleLoopingAudioState @ 0x00440A30 is only *called* while the horn
+ * is HELD (gate @ 0x0042C260), so releasing the horn lets the mixer timeout
+ * fade the siren out. The port instead calls the looping-state update for
+ * every slot every frame (td5_game.c), so the cop's siren was re-activated
+ * unconditionally and could never be silenced ("can't deactivate sirens").
+ *
+ * The user prefers a press-to-toggle instead of hold-to-keep-on. This flag is
+ * flipped by a horn-key edge in td5_input.c (td5_sound_toggle_siren); the
+ * wanted-mode siren activation below is gated on it. Default 0 (off) — the
+ * siren and its coupled flashing-light marker (AdvanceGlobalSkyRotation, in
+ * the same branch) start silent and the player presses the horn to turn the
+ * cop lights+siren on, matching the original's "press horn → siren on". */
+static int s_siren_user_enabled;
+
 /** Per-viewport skid playing state. Original: DAT_004c3768. */
 static int s_skid_playing[2];
 
@@ -309,6 +339,7 @@ int td5_sound_init_race_resources(void)
     s_tracked_veh_actor     = 0;
     s_siren_active_flag     = 0;
     s_siren_refreshed       = 0;
+    s_siren_user_enabled    = 0;   /* siren starts off; press horn to enable */
     s_skid_playing[0]       = 0;
     s_skid_playing[1]       = 0;
     s_rain_playing[0]       = 0;
@@ -443,6 +474,7 @@ int td5_sound_load_vehicle_bank(const char *car_dir, int vehicle_index,
     s_rain_playing[1]   = 0;
     s_siren_refreshed   = 0;
     s_siren_active_flag = 0;
+    s_siren_user_enabled = 0;   /* siren off until the player presses the horn */
 
     return 1;
 }
@@ -598,16 +630,27 @@ void td5_sound_update_vehicle_looping_state(int actor_index)
 
     /* Check if wanted mode is active and this is the cop */
     if (td5_game_is_wanted_mode() && actor_index == td5_game_get_cop_actor_index()) {
-        if (s_siren_active_flag == 0) {
-            /* Activate tracked vehicle audio (siren) */
-            s_tracked_veh_active_p2 = 1;
-            s_tracked_veh_active    = 1;
-            s_tracked_veh_actor     = actor_index;
-            s_tracked_veh_fade_target = TD5_SOUND_SIREN_FADE_FULL;
+        /* PORT ENHANCEMENT: gate on the press-to-toggle flag (s_siren_user_enabled,
+         * flipped by the horn key in td5_input.c) instead of the original's
+         * hold-the-horn gating. When the toggle is OFF we simply DON'T refresh
+         * the siren this frame; the mixer's post-loop timeout (s_siren_active_flag
+         * set but s_siren_refreshed clear) then fades it out and clears the flag.
+         * AdvanceGlobalSkyRotation (the flashing-light marker intensity boost)
+         * lives in this same branch in the original, so toggling off also lets
+         * the cop-light pulse decay — siren and lights stay coupled, as in the
+         * original where both are driven by this horn-gated call. */
+        if (s_siren_user_enabled) {
+            if (s_siren_active_flag == 0) {
+                /* Activate tracked vehicle audio (siren) */
+                s_tracked_veh_active_p2 = 1;
+                s_tracked_veh_active    = 1;
+                s_tracked_veh_actor     = actor_index;
+                s_tracked_veh_fade_target = TD5_SOUND_SIREN_FADE_FULL;
+            }
+            td5_game_advance_sky_rotation();
+            s_siren_refreshed   = 1;
+            s_siren_active_flag = 1;
         }
-        td5_game_advance_sky_rotation();
-        s_siren_refreshed   = 1;
-        s_siren_active_flag = 1;
         return;
     }
 
@@ -644,6 +687,33 @@ void td5_sound_stop_tracked_vehicle_audio(void)
     if (s_tracked_veh_active != 0) {
         s_tracked_veh_fade_target = 0;
     }
+}
+
+/**
+ * td5_sound_toggle_siren (PORT ENHANCEMENT, user-requested 2026-05-30).
+ *
+ * Flip the cop-chase siren on/off. Called on a horn-key press edge from
+ * td5_input.c. The actual fade-in/out is handled by the looping-state update
+ * (which refreshes the siren only while s_siren_user_enabled is set) and the
+ * mixer timeout (which fades it out when not refreshed). Returns the new
+ * state so the caller can log it.
+ */
+int td5_sound_toggle_siren(void)
+{
+    s_siren_user_enabled = !s_siren_user_enabled;
+    if (!s_siren_user_enabled) {
+        /* Begin fade-out immediately so the toggle feels responsive rather
+         * than waiting a frame for the looping-state/mixer timeout. */
+        td5_sound_stop_tracked_vehicle_audio();
+    }
+    TD5_LOG_I(LOG_TAG, "siren toggle -> %s", s_siren_user_enabled ? "ON" : "OFF");
+    return s_siren_user_enabled;
+}
+
+/** Query the current cop-chase siren toggle state (1 = on). */
+int td5_sound_siren_is_enabled(void)
+{
+    return s_siren_user_enabled;
 }
 
 /* ========================================================================
@@ -782,15 +852,24 @@ void td5_sound_update_audio_mix(void)
              * Viewer vehicle horn/siren tracked audio (per-vehicle)
              * ---------------------------------------------------------- */
             if ((int)veh == td5_game_get_player_slot(pass)) {
-                /* Check if this is a "dead" vehicle (all -1 bytes at identity check) */
-                /* Simplified: check if vehicle is active */
+                /* Horn/siren tracked-audio mix for the viewer vehicle. The
+                 * "dead vehicle" identity check is applied at the play/modify
+                 * decision below (see comment there). */
 
                 /* Get lateral slip for skid/horn volume */
                 int slip_front = actor->front_axle_slip_excess;
                 int slip_rear  = actor->rear_axle_slip_excess;
                 int slip_max   = (slip_front > slip_rear) ? slip_front : slip_rear;
 
-                /* Check stunned state — all-wheels-airborne mask (NEW @ +0x37C). */
+                /* [FAITHFUL @ 0x00440B00 D1]: when the surface-contact/slip flag
+                 * scf (+0x376) is set (tyre laying marks / wheelspin), the screech
+                 * input is forced to max (0x7fff) BEFORE the /3 scale -- so the
+                 * screech is loudest exactly when the tyre marks appear. Order
+                 * matters: scf-override first, then the tumble-zero below. */
+                if (*((const uint8_t *)actor + 0x376) != 0) {
+                    slip_max = 0x7fff;
+                }
+                /* Tumbling (all wheels airborne, +0x37C == 0x0F) silences it. */
                 if (actor->wheel_contact_bitmask == 0x0F) {
                     slip_max = 0;
                 }
@@ -803,11 +882,12 @@ void td5_sound_update_audio_mix(void)
                 else if (horn_vol_raw > 0x1000) tracked_vol = 0x1000;
                 else                       tracked_vol = horn_vol_raw;
 
-                /* Clamp pitch base for tracked audio */
-                int tracked_pitch;
-                if (horn_vol_raw < 0x800)      tracked_pitch = 0x800;
-                else if (horn_vol_raw > 0x1000) tracked_pitch = 0x1000;
-                else                           tracked_pitch = horn_vol_raw;
+                /* Play SkidBit at its native 22050Hz so the screech sounds like
+                 * a sharp tyre screech. The decomp's slip-derived 0x800-0x1000
+                 * (2048-4096Hz) frequency plays the 22050Hz sample at ~0.1x speed
+                 * -- a deep groan, not a screech. Volume still tracks slip
+                 * (tracked_vol above): loud on a slide, silent when gripping. */
+                int tracked_pitch = TD5_SOUND_FREQ_22050;
 
                 /* Spatial audio for tracked sound (non-viewer only in original,
                  * but for the viewer vehicle this path computes direct) */
@@ -841,12 +921,32 @@ void td5_sound_update_audio_mix(void)
                     final_pitch = sound_apply_doppler_pitch(tracked_pitch, doppler);
                 }
 
-                /* Play or modify tracked audio */
-                if (s_tracked_audio_state[state_idx] == ENGINE_STATE_STOPPED) {
+                /* Dead-vehicle identity check [CONFIRMED @ 0x00440cf3..0x00440d0e
+                 * in UpdateVehicleAudioMix 0x00440B00]: an empty/dead actor slot
+                 * has a contiguous 4-byte identity tag at +0x371..+0x374 set to
+                 * all 0xFF (-1) by UpdateRaceActors 0x00436a70 /
+                 * InitializeRaceVehicleRuntime 0x0042f140. When dead, the original
+                 * stops the tracked siren channel (DXSound::Stop on the +0x14 slot)
+                 * if it is playing and skips the play/modify. Active slots run the
+                 * normal play-or-modify path. */
+                const uint8_t *id_tag = (const uint8_t *)actor + 0x371;
+                int veh_dead = (id_tag[0] == 0xFF && id_tag[1] == 0xFF &&
+                                id_tag[2] == 0xFF && id_tag[3] == 0xFF);
+                /* Original plays slot 0x13 then Modify/Stops 0x14 — in its M2DX
+                 * slot system 0x14 is the *active handle* of the 0x13 sound. The
+                 * port's flat slot map has the played SkidBit on 0x13, so we
+                 * Modify/Stop 0x13 (the slot actually playing) to keep the screech
+                 * volume tracking slip; targeting 0x14 here is a silent no-op. */
+                if (veh_dead) {
+                    if (s_tracked_audio_state[state_idx] != ENGINE_STATE_STOPPED) {
+                        slot_stop(slot_offset + 0x13);
+                        s_tracked_audio_state[state_idx] = ENGINE_STATE_STOPPED;
+                    }
+                } else if (s_tracked_audio_state[state_idx] == ENGINE_STATE_STOPPED) {
                     slot_play(slot_offset + 0x13, 1, vol_atten, pan, final_pitch);
                     s_tracked_audio_state[state_idx] = 1;
                 } else {
-                    slot_modify(slot_offset + 0x14, vol_atten, pan, final_pitch);
+                    slot_modify(slot_offset + 0x13, vol_atten, pan, final_pitch);
                 }
             }
 
@@ -858,8 +958,21 @@ void td5_sound_update_audio_mix(void)
             int engine_vol;
             int engine_pitch;
 
-            if (raw_speed < 1000 && s_reverb_flag[veh]) {
-                /* Diesel/reverb mode: fixed low-frequency idle */
+            /* Stationary idle branch. [CONFIRMED @ 0x00440fe4:
+             *   MOV ECX,[ESI*4 + 0x4c382c]; TEST ECX,ECX; JNZ <moving>]
+             * The original takes the fixed-pitch idle (REV state, 22050Hz) only
+             * when the per-actor reverb-mode flag == 0, i.e. for NON-reverb cars.
+             * The player (slot 0) is loaded with the reverb flag SET
+             * (td5_game.c: is_reverb = (i == 0)), so the player takes the moving
+             * DRIVE branch even when stationary (low engine rumble + small rand
+             * jitter), while AI cars get the fixed idle. The port had this
+             * inverted -- testing s_reverb_flag[veh] (true) instead of
+             * !s_reverb_flag[veh] -- so the player's stationary "rev sound" was
+             * a wrong fixed 22050Hz whine instead of the idle rumble. */
+            /* [FAITHFUL @ 0x00440B00]: idle is gated purely on RPM<1000 (+0x310)
+             * and reverbMode==0. No road-speed gate in the original. */
+            if (raw_speed < 1000 && !s_reverb_flag[veh]) {
+                /* Non-reverb (AI) car idle: fixed low-frequency rev loop */
                 engine_target_state = ENGINE_STATE_REV;
                 engine_vol   = 0x50; /* ~63% of max */
                 engine_pitch = TD5_SOUND_FREQ_22050;
@@ -937,31 +1050,13 @@ void td5_sound_update_audio_mix(void)
                 /* Modify the horn/main engine channel */
                 slot_modify(modify_slot, engine_vol, steer_pan, engine_pitch);
 
-                /* ---- Skid sound management ---- */
-                int skid_val = s_skid_intensity[pass];
-                if (skid_val > 0 && s_skid_playing[pass] == 0 && s_race_end_flag == 0) {
-                    /* Original @ 0x440B00: Play(0x12, vol=0) on skid start — silences
-                     * Rain.wav at the moment screech begins. Skid screech itself is
-                     * SkidBit.wav at slot 0x13 (Modify below). */
-                    slot_play(slot_offset + 0x12, 1, 0, pan, TD5_SOUND_FREQ_22050);
-                    /* Start SkidBit.wav loop — slot 0x13 [CONFIRMED @ 0x4413D1] */
-                    if (!slot_is_playing(slot_offset + 0x13)) {
-                        slot_play(slot_offset + 0x13, 1, 0, pan, TD5_SOUND_FREQ_22050);
-                        TD5_LOG_I(LOG_TAG, "Skid start: pass=%d slot=%d skid_val=%d",
-                                  pass, slot_offset + 0x13, skid_val);
-                    }
-                    s_skid_playing[pass] = 1;
-                }
-                if (skid_val != 0 && s_race_end_flag == 0) {
-                    int skid_vol = skid_val;
-                    if (skid_vol > 0x7F) skid_vol = 0x7F;
-                    slot_modify(slot_offset + 0x13, skid_vol, pan,
-                                          TD5_SOUND_FREQ_22050);
-                }
-                if (skid_val == 0 && s_skid_playing[pass] != 0) {
-                    slot_stop(slot_offset + 0x13);
-                    s_skid_playing[pass] = 0;
-                }
+                /* The viewer's tyre screech (SkidBit, slot 0x13/0x14) is produced
+                 * faithfully by the D1 slip-modulated block above: its volume and
+                 * frequency track max(+0x31C,+0x320) slip-excess (forced to max on
+                 * scf, zeroed when tumbling), distance-attenuated. The original
+                 * 0x440B00 has NO separate intensity-gated skid loop here -- the
+                 * port's old start/stop-on-intensity block was a divergence and is
+                 * removed. */
             } else {
                 /* ----------------------------------------------------------
                  * Non-viewer vehicle: spatial audio with distance + Doppler
@@ -994,8 +1089,18 @@ void td5_sound_update_audio_mix(void)
                     final_pitch = sound_apply_doppler_pitch(engine_pitch, doppler);
                 }
 
-                int modify_slot = engine_target_state + veh * 3 + slot_offset;
-                slot_modify(modify_slot, vol_atten, spatial_pan, final_pitch);
+                /* The original Modifies base+state, but in M2DX that resolves to
+                 * the instance started by Play(base+state-1) -- the same play/
+                 * active off-by-one as the D1 screech. In the port's flat slot map
+                 * the engine loop lives on the PLAYED slot base+(state-1):
+                 * DRIVE(1)->base+0=Drive.wav, REV(2)->base+1=Rev.wav. Modify that
+                 * slot so a DRIVING opponent plays Drive.wav, not Rev.wav. Silence
+                 * the other engine sample so a leaked prior-state loop (the stop is
+                 * off-by-one too) doesn't drone under it. */
+                int eng_slot   = (engine_target_state - 1) + veh * 3 + slot_offset;
+                int other_slot = ((engine_target_state - 1) ^ 1) + veh * 3 + slot_offset;
+                slot_modify(eng_slot, vol_atten, spatial_pan, final_pitch);
+                slot_modify(other_slot, 0, spatial_pan, final_pitch);
             }
 
             /* ----------------------------------------------------------
@@ -1593,4 +1698,13 @@ void td5_sound_set_gear_state(int vehicle, int gear)
 void td5_sound_set_race_end(int ended)
 {
     s_race_end_flag = ended;
+}
+
+/* Mute (1) / unmute (0) all race SFX. Wired to the in-race pause menu so the
+ * car/engine/skid loops go silent while paused (issue: "car sound keeps playing
+ * on the pause menu"). The pause SOUND-volume row lifts the mute so its slider
+ * previews the SFX volume. Music (CD) is on a separate path and keeps playing. */
+void td5_sound_set_sfx_muted(int muted)
+{
+    td5_plat_audio_set_muted(muted);
 }

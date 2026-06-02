@@ -103,10 +103,24 @@ void BuildRotationMatrixFromAngles(float *out, short *angles);
  * particularly first-person cockpit views or close-up overlays. To revert,
  * change 32.0f back to 1.0f. The fix is isolated to this constant. */
 #define DEFAULT_NEAR_CLIP    32.0f     /* orig DAT_00473bbc, was 1.0f */
-#define DEFAULT_FAR_CLIP     65536.0f
+/* [FIX 2026-06-01 distant-depth / pop-in] DEFAULT_FAR_CLIP + DEPTH_NORMALIZE_INV
+ * extended from the original's 65536 / (1/65479) to 195000 / (1/195000) so the
+ * depth range MATCHES the 195000 frustum far-cull. The original co-designed its
+ * +/-128-span draw window with a 65479 depth range so geometry never exceeded it;
+ * the port draws geometry out to view_z ~176000-199000 (far_cull=195000), which
+ * with the old 65479 normalization clamped everything past 65479 to the far
+ * plane -> distant buildings/trees all at depth 1.0, z-fighting by draw order
+ * (the user's "rendered in front of the previous one at a later stage" /
+ * "distance looks weird"). Extending the range gives every drawn mesh a real
+ * depth value across the whole visible distance. Paired with the D16->D32_FLOAT
+ * depth buffer (ddraw_wrapper/src/d3d11_backend.c) so near-camera precision is
+ * not sacrificed by the wider linear range. DELIBERATE DIVERGENCE from the
+ * CONFIRMED orig 1/65479; justified because the port's draw distance is no
+ * longer window-limited to ~65479 view_z. */
+#define DEFAULT_FAR_CLIP     195000.0f            /* was 65536; matches far-cull */
 #define DEFAULT_FAR_CULL     195000.0f
 #define NEAR_DEPTH_OFFSET    64.0f                /* orig 0x0045d6c0 */
-#define DEPTH_NORMALIZE_INV  (1.0f / 65479.0f)    /* orig DAT_00473bcc */
+#define DEPTH_NORMALIZE_INV  (1.0f / 195000.0f)   /* was orig 1/65479; extended to far-cull */
 
 /** Billboard depth sort stride sizes (bytes) */
 #define BILLBOARD_TRI_STRIDE  0x84
@@ -404,7 +418,9 @@ static void render_vehicle_shadow_quad(const TD5_Actor *actor);
 static void render_vehicle_wheel_billboards(TD5_Actor *actor, int slot);
 static void render_vehicle_brake_lights(const TD5_Actor *actor, int slot);
 static void render_vehicle_reflection_overlay(TD5_MeshHeader *mesh, int slot);
-static void render_tracked_actor_marker(const TD5_Actor *actor);
+static void render_tracked_actor_marker(const TD5_Actor *actor,
+                                        const TD5_Mat3x3 *body_rot,
+                                        const TD5_Vec3f *body_pos);
 
 /** 7-entry dispatch table matching original at 0x473b9c */
 typedef void (*PrimDispatchFn)(TD5_PrimitiveCmd *cmd, TD5_MeshVertex *base_verts);
@@ -2463,6 +2479,22 @@ void td5_render_actors_for_view(int view_index)
             td5_render_apply_track_lighting(slot, actor);
             td5_render_compute_vertex_lighting(mesh);
 
+            /* Vehicle shadow drawn BEFORE the opaque car body. [FIX 2026-06-01
+             * shadow-over-car] The shadow is a ground decal (TD5_PRESET_SHADOW:
+             * z_test=LEQUAL, z_write=0); drawing it first lets the opaque body —
+             * rendered next with z_write=1 — paint over any shadow pixels that
+             * fall on the car. In effect this reproduces the original's deferred
+             * translucent pass result: every car body occludes the shadows.
+             *
+             * This fixes the player-ONLY over-car symptom that no depth bias
+             * could: through the port's separate shadow projection, the close
+             * player car's 1.25-scaled shadow corners project NEARER to the
+             * camera than its own lower body, so an after-body z-test let the
+             * shadow win. Drawing before the body makes the opaque body cover it
+             * regardless of depth. Shadows still show on open ground and are
+             * still occluded by walls / earlier-drawn cars via the z-test. */
+            render_vehicle_shadow_quad(actor);
+
             td5_render_prepared_mesh(mesh);
 
             /* Chrome/envmap reflection overlay (0x40C120 second pass).
@@ -2486,17 +2518,8 @@ void td5_render_actors_for_view(int view_index)
             /* Render brake light billboards (0x4011C0) */
             render_vehicle_brake_lights(actor, slot);
 
-            /* Vehicle shadow AFTER car mesh + wheels + brake lights, matching
-             * orig deferred translucent pass [CONFIRMED @ 0x40C120: shadow
-             * is queued into the translucent sort list AFTER the opaque body
-             * mesh draw at 0x40C2E4]. Uses TD5_PRESET_SHADOW (z_test=LEQUAL,
-             * z_write=0) plus a small view-space depth bias inside the helper
-             * so the shadow PASSES depth test against the track surface (no
-             * z-fight) but is OCCLUDED by closer opaque geometry (other cars,
-             * walls). Drawing before the car with z_test=0 made shadows render
-             * on top of opponents and walls when viewed from the player's
-             * camera angle — this restores correct occlusion behaviour. */
-            render_vehicle_shadow_quad(actor);
+            /* (Vehicle shadow now drawn BEFORE the car body mesh above so the
+             * body occludes it — see that call site for rationale.) */
 
             /* Tracked-actor marker (cop chase strobes) — orig
              * RenderRaceActorForView @ 0x0040c79c gates:
@@ -2508,7 +2531,9 @@ void td5_render_actors_for_view(int view_index)
             if (g_td5.wanted_mode_enabled &&
                 td5_game_get_wanted_target_tracker() > 0 &&
                 slot == td5_game_get_wanted_target_slot()) {
-                render_tracked_actor_marker(actor);
+                /* Pass the SAME body transform the mesh used (view_rot +
+                 * render_pos) so the strobe is welded to the car body. */
+                render_tracked_actor_marker(actor, &view_rot, &render_pos);
             }
 
             /* Wanted-mode damage indicator overlay — orig
@@ -2655,22 +2680,43 @@ void td5_render_configure_projection(int width, int height)
     s_focal_length = (float)width * 0.5625f;
     s_inv_focal    = 1.0f / s_focal_length;
 
-    /* Near/far clip. far_cull is driven by the pause-menu VIEW slider so
-     * the player can dial back render distance for performance. The slider
-     * MUST be applied here (inside configure_projection) — track + scenery
-     * render before td5_render_actors_for_view in the per-viewport flow,
-     * so applying the slider only inside actors_for_view (as an earlier
-     * iteration did) leaves the track horizon stuck at DEFAULT_FAR_CULL
-     * regardless of slider position. far_clip stays at the constant max
-     * to keep z-buffer depth distribution stable across slider moves. */
+    /* Near/far clip.
+     *
+     * [FIX 2026-05-31 distant-building-popin] far_cull is a FIXED constant in
+     * the original — round(3.0f * 65000.0f) = 195000, stored at 0x00467360,
+     * computed @ 0x0042D47C-0x0042D48E [CONFIRMED]. It is NOT scaled by the
+     * pause-menu VIEW slider. The slider instead reduces render distance by
+     * lowering the number of MODELS.DAT span ENTRIES walked per frame
+     * (effectiveSpans / frac_scaled path @ :1996 and :2110, matching orig
+     * RunRaceFrame 0x42BB2E-0x42BC3C [CONFIRMED]).
+     *
+     * The prior port made far_cull itself slider-driven (5000..65536) — ~3x to
+     * ~39x nearer than the original 195000. A span's MODELS.DAT building could
+     * be IN the entry window (submitted) yet frustum-REJECTED by the per-mesh
+     * bounding-sphere test (td5_render_is_sphere_visible @ :1567 /
+     * td5_render_test_mesh_frustum @ :1627) until the camera advanced close
+     * enough — so distant buildings "popped" into view and could draw in front
+     * of nearer geometry that crossed the threshold on a different frame.
+     * Pinning far_cull to the fixed 195000 lets the whole visible scene resolve
+     * in a single pass, as the original does ("everything at once").
+     *
+     * [UPDATED 2026-06-01] far_clip (depth normalization) is now ALSO extended
+     * to 195000 (see DEFAULT_FAR_CLIP / DEPTH_NORMALIZE_INV) and the depth
+     * buffer upgraded D16->D32_FLOAT, so geometry drawn out to the 195000
+     * far-cull gets a real depth value instead of clamping to the far plane and
+     * z-fighting. Range and far-cull now intentionally match. */
     s_near_clip = DEFAULT_NEAR_CLIP;
     s_far_clip  = DEFAULT_FAR_CLIP;
+    s_far_cull  = DEFAULT_FAR_CULL;   /* orig 0x0042D48E = 195000, slider-independent */
     {
-        const float MIN_FAR_CULL = 5000.0f;
-        const float MAX_FAR_CULL = (float)DEFAULT_FAR_CULL;
-        float frac = td5_save_get_view_distance();
-        if (frac < 0.0f) frac = 0.0f; else if (frac > 1.0f) frac = 1.0f;
-        s_far_cull = MIN_FAR_CULL + (MAX_FAR_CULL - MIN_FAR_CULL) * frac;
+        static int s_farcull_logged = 0;
+        if (!s_farcull_logged) {
+            TD5_LOG_I(LOG_TAG,
+                "far_cull pinned to fixed %.0f (orig 0x42D48E); VIEW slider drives "
+                "MODELS.DAT span entry count only, not the frustum far plane",
+                s_far_cull);
+            s_farcull_logged = 1;
+        }
     }
 
     /* Horizontal frustum half-plane normals */
@@ -4287,23 +4333,31 @@ void td5_render_crossfade_surfaces(uint32_t *dst, const uint32_t *src_a,
  * The original draws shadows via a deferred translucent sort list rendered
  * AFTER all opaque geometry (car bodies, wheels, brake lights). Depth-test
  * is enabled (LESSEQUAL) so closer opaque pixels — other cars, walls,
- * environment props — correctly occlude the shadow. The -22.0f offset is a
- * pure screen-space (view-Y) nudge that places the shadow below the wheel
- * contact point; an additional view-space depth bias is applied here to
- * prevent z-fighting with the track surface (which sits at the same world
- * Y as the shadow corners).
+ * environment props — correctly occlude the shadow. The original separates the
+ * shadow from the road via the shared track projection (coplanar depths tie) and
+ * applies NO depth bias [CONFIRMED @ 0x0040C120: no D3DRENDERSTATE_ZBIAS, no sz
+ * offset]; the port can't share that projection, so it uses a tiny 2 view-z
+ * toward-camera nudge instead (see SHADOW_DEPTH_Z_BIAS).
  *
  * Source port approach:
  *   - TD5_PRESET_SHADOW (z_test=LEQUAL, z_write=0, alpha_ref=1, SRCALPHA/
  *     INVSRCALPHA). Depth test on so opponent cars and walls correctly
  *     occlude the shadow; depth write off so the shadow doesn't write to
- *     the depth buffer and break subsequent translucent passes.
- *   - The call site draws the shadow AFTER the car mesh, wheels, and
- *     brake lights, matching the orig deferred translucent sort list
- *     order. The depth bias (SHADOW_VIEW_DEPTH_BIAS) is subtracted from
- *     view-Z to bias the shadow toward the camera so it always passes the
- *     depth test against the track surface beneath, while still being
- *     occluded by closer opaque geometry (other cars, walls).
+ *     the depth buffer and break subsequent translucent passes. (Orig flushes
+ *     shadows with z_write ON; kept OFF here because the preset is shared with
+ *     tire tracks — known faithful-divergence, does not affect occlusion.)
+ *   - [FIX 2026-06-01] The call site draws the shadow BEFORE the car body mesh
+ *     (then wheels/brake lights/reflection follow the body). The opaque body,
+ *     drawn next with z_write=1, paints over any shadow pixels that fall on the
+ *     car — reproducing the original deferred pass's net result (every body
+ *     occludes the shadows) and curing the player-only over-car symptom that an
+ *     after-body z-test could not (the close player's 1.25-scaled shadow corners
+ *     project nearer than its own lower body through the separate projection).
+ *   - SHADOW_VERTICAL_OFFSET = 0: the shadow sits at the wheel-contact (ground)
+ *     plane. The orig's -22 world-Y lift causes the shadow to out-depth the
+ *     close player car in the port's separate projection (see that macro), so
+ *     the port keeps it flat on the ground and separates via the tiny depth
+ *     nudge below.
  *   - Scale corners outward from the XZ centroid by 1.25 to match the
  *     original's _g_wheelSuspensionRenderScale @ 0x00463B64 (1.25f) so
  *     the shadow has the same footprint as the original render (a 1.85f
@@ -4312,54 +4366,60 @@ void td5_render_crossfade_surfaces(uint32_t *dst, const uint32_t *src_a,
  *     original. The previous port mapping (U along left-right) rotated the
  *     texture 90° and made the shadow appear too narrow across the car —
  *     the 1.85f scale was partially compensating for that.
- *   - Corners stay at wheel-contact Y; no vertical lift is needed
- *     because the shadow is painted at ground level and then occluded
- *     by the car body via draw order, not depth test.
  *   - Subtick-interpolate corners with linear_velocity * g_subTickFraction
  *     so the shadow doesn't sawtooth-lag behind the car at speed (the
  *     car mesh is interpolated the same way at line ~1547).
  */
+/* [FIX 2026-06-01 shadow-over-car] World-space Y nudge added to all 4 shadow
+ * corners. Kept at 0 in the port — the shadow sits exactly at the wheel-contact
+ * (ground) plane, which is where a car shadow visually belongs.
+ *
+ * The ORIGINAL applies _g_shadowVerticalOffset = 0xC1B00000 = -22.0f here
+ * [CONFIRMED @ 0x0040BB70] (Y-down world, so -22 lifts the shadow 22 units UP,
+ * toward the camera). In the original that is harmless: the shadow shares the
+ * track's SINGLE projection (WritePointToCurrentRenderTransform @ 0x42E4F0 ->
+ * ClipAndSubmitProjectedPolygon @ 0x4317F0), so the lift never makes the shadow
+ * out-depth the car body.
+ *
+ * The PORT projects the shadow through a SEPARATE hand-rolled transform, so a
+ * world-Y lift turns into a real toward-camera depth offset. At the chase
+ * camera's close range that offset beats the small gap between the PLAYER car's
+ * lower-rear bumper and the ground -> shadow drew OVER the player car (opponents,
+ * far away, were unaffected -> the player-only symptom). So the port leaves this
+ * at 0 and instead uses the tiny SHADOW_DEPTH_Z_BIAS below for road separation —
+ * the same approach that shipped correctly before the D16->D32 depth change. */
 #define SHADOW_VERTICAL_OFFSET  (0.0f)
 /* [CONFIRMED 2026-05-17] g_wheelSuspensionRenderScale @ 0x00463B64 = 1.25f.
  * Previous port value 1.85f was an unverified guess (see commented-out
  * reference to "the unread _g_wheelSuspensionRenderScale") and produced
  * shadows ~1.48x linear (~2.2x area) larger than the original. */
 #define SHADOW_CORNER_SCALE     (1.25f)
-/* [CORRECTED 2026-05-26 r3] _DAT_0048DC48 (g_shadowVerticalOffset) IS 0.0f
- * in the orig binary AND _DAT_0048F070 (Y lift) is also unused, so the orig
- * relies on byte-identical projection between shadow and track polygons:
- * both go through WritePointToCurrentRenderTransform @ 0x42E4F0 followed by
- * ClipAndSubmitProjectedPolygon @ 0x4317F0. Their view-Z values literally
- * tie at the same XZ, and LEQUAL ties pass.
+/* [FIX 2026-06-01 shadow-over-car] Road-separation for the port: a TINY
+ * toward-camera depth nudge (NOT the broken 500 view-z pull, NOT a world-Y lift).
  *
- * The PORT can't get byte-identical depth this way because render_vehicle_
- * shadow_quad does its own hand-rolled projection (camera_basis · (world -
- * cam_pos)) rather than routing through clip_and_submit_polygon. Even with
- * the correct (vz - 64) / 65479 formula, floating-point ordering between
- * the two code paths can produce sub-LSB depth differences and the wheel
- * probe Y from td5_track_compute_contact_height_with_normal can land a
- * sliver below the rendered polygon's interpolated Y at a given XZ.
+ * Because the port's shadow uses a separate projection from the track, at the
+ * exact ground plane the shadow and road depths tie only to within sub-LSB
+ * jitter — some pixels lose the LEQUAL tie and the shadow drops out ("tail
+ * visible depending on angle"). A 2 view-z pull toward the camera clears that
+ * jitter so the shadow reliably wins against the coplanar road, while staying
+ * FAR below the car-body gap (tens of view-z) so it can never reach the car —
+ * including the close player car's lower-rear bumper. This is the value the port
+ * shipped successfully before the D16->D32 depth upgrade (commit 49ae1e4); the
+ * D32 regression came from ballooning it to 500 view-z, which over-shot onto the
+ * car. Expressed via DEPTH_NORMALIZE_INV so it tracks the depth normalization.
  *
- * The bias compensates by pushing the shadow slightly toward the camera in
- * view-Z so LEQUAL always passes against the track surface. 2 view-units
- * ≈ 3.05e-5 in depth space — well below the gap created by opponent cars
- * (50-100 view-units deep) or walls, so opaque geometry still occludes the
- * shadow correctly. Without this bias the user observes "shadow tail
- * visible depending on angle" because perspective only bends some corners
- * forward of the track depth — others lose the LEQUAL tie and disappear.
- *
- * Reinstates the value first shipped in 055d9b3 (zeroed in a6e5072 on the
- * mistaken assumption that the depth-formula fix alone was sufficient). */
+ * The original needs no such bias (its shadow shares the track transform, so
+ * coplanar depths tie deterministically) and has NO D3DRENDERSTATE_ZBIAS / sz
+ * offset [CONFIRMED @ 0x0040C120]. The shared TD5_PRESET_SHADOW also selects the
+ * wrapper's shadow-decal rasterizer (DepthBias=-500), which on D32_FLOAT near
+ * geometry is ~1e-7 (negligible) — left in place, harmless. Byte-faithful state
+ * would be z_write=ON (orig flushes shadows under the OPAQUE pass, ZWRITEENABLE=1
+ * @ 0x0040B070); the port keeps z_write=OFF because TD5_PRESET_SHADOW is shared
+ * with tire tracks and z-write does not affect occlusion here — known divergence. */
 #define SHADOW_VIEW_Y_OFFSET    (0.0f)
-/* Polygon offset now handled by the shadow-decal rasterizer state in the
- * D3D11 wrapper (DepthBias + SlopeScaledDepthBias). Vertex-side biasing is
- * left at zero: the projection is byte-identical to a track polygon at the
- * same world position, and the GPU adapts the depth offset per pixel based
- * on surface slope. Constant biases here couldn't satisfy both "win
- * against co-planar ground" AND "lose against the car body 50 units up"
- * simultaneously — the slope-scaled bias resolves that automatically. */
 #define SHADOW_VIEW_DEPTH_BIAS  (0.0f)
-#define SHADOW_DEPTH_Z_BIAS     (0.0f)
+#define SHADOW_PULL_VIEWZ       (2.0f)   /* small toward-camera pull: clears road z-fight, far below the car gap */
+#define SHADOW_DEPTH_Z_BIAS     (SHADOW_PULL_VIEWZ * DEPTH_NORMALIZE_INV)
 
 static int   s_shadow_lookup_done = 0;
 static int   s_shadow_page        = -1;
@@ -4528,10 +4588,11 @@ static void render_vehicle_shadow_quad(const TD5_Actor *actor)
         float inv_z = 1.0f / vz;
         verts[i].screen_x = -vx * s_focal_length * inv_z + s_center_x;
         verts[i].screen_y = -vy * s_focal_length * inv_z + s_center_y;
-        /* Depth_z uses orig formula (matches track polys at line ~799),
-         * then a direct depth-space bias is subtracted to push the shadow
-         * toward the camera. Bias is applied here so it ONLY affects depth
-         * compare, not projection. */
+        /* Depth_z uses the orig track-poly formula (line ~824), minus a TINY
+         * 2 view-z toward-camera nudge (SHADOW_DEPTH_Z_BIAS) so the coplanar
+         * road can't z-fight the shadow. The nudge is far below the car-body
+         * gap, so it never reaches the car (no over-car). Bias affects depth
+         * compare only, NOT screen projection (computed from raw vz above). */
         verts[i].depth_z  = (vz - NEAR_DEPTH_OFFSET) * DEPTH_NORMALIZE_INV
                             - SHADOW_DEPTH_Z_BIAS;
         verts[i].rhw      = inv_z;
@@ -4764,7 +4825,7 @@ static const int s_tracked_marker_yaw_offset[TD5_VFX_TRACKED_MARKER_COUNT] = {
 #define TRACKED_MARKER_BASE_FVAR8        512.0f            /* DAT_0045d768 */
 #define TRACKED_MARKER_BASE_FVAR10       64.0f             /* DAT_0045d6c0 */
 #define TRACKED_MARKER_BASE_FVAR9        6.0f              /* DAT_0045d764 */
-#define TRACKED_MARKER_BASE_HALF_XY      32.0f             /* DAT_0045d5dc — layer-2 half-extent */
+#define TRACKED_MARKER_BASE_HALF_XY      96.0f             /* [USER DIVERGENCE 2026-06-01: 3x the orig DAT_0045d5dc=32.0 — bigger over-car glow per user] */
 #define TRACKED_MARKER_BASE_Z_OFFSET     4.0f              /* _g_simTickBudgetCap — layer-2 Z lift */
 #define TRACKED_MARKER_ALPHA_SCALE       255.0f            /* DAT_0045d684 — sin alpha scale */
 
@@ -4831,7 +4892,25 @@ static void tracked_marker_emit_quad_world(const float corners_world_xy[4][2],
 
     uint16_t idx[6] = { 0, 1, 2, 1, 3, 2 };
     flush_immediate_internal();
-    td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_POINT);
+    /* [FIX 2026-05-30 cop-chase] The tracked-actor marker (the pulsing red/blue
+     * cop-light strobe) is an ADDITIVE sprite in the original — BindRaceTexturePage
+     * @ 0x0040B660 selects ONE/ONE for the police-light page (transparency-type 3),
+     * and the per-vertex diffuse is a GRAY modulator (a,a,a | 0xFF000000) whose
+     * pulse scales the texture brightness. Rendering it ALPHA-blended (the old
+     * TRANSLUCENT_POINT) drew the large semi-transparent quads' DARK texels (e.g.
+     * (24,0,0,128)) at 50% over the scene, stacking 6 quads into a grey haze that
+     * also appeared to "move" as the quads rotate — the user's reported gray
+     * background. Additive makes dark texels add ~0 (invisible) so only the bright
+     * light centers glow; faithful AND removes the haze.
+     *
+     * [FIX 2026-06-01] Use TD5_PRESET_ADDITIVE_GLOW (additive, but NO alpha test)
+     * rather than TD5_PRESET_ADDITIVE (which alpha-tests at ref=1). The original
+     * marker submit path sets no alpha test; with LINEAR filtering the near-binary
+     * police-light texels then blend into a SOFT, DIFFUSED glow instead of being
+     * hard-clipped into clear rectangles (the user's "squared lights should be
+     * diffused" report). Additive keeps the zero-RGB background invisible, so
+     * dropping the alpha test does not bring back any box. */
+    td5_plat_render_set_preset(TD5_PRESET_ADDITIVE_GLOW);
     td5_plat_render_bind_texture(tex_page);
     td5_plat_render_draw_tris(v, 4, idx, 6);
 }
@@ -4854,7 +4933,9 @@ static int s_tracked_marker_phase[TD5_VFX_TRACKED_MARKER_COUNT];
  * BuildSpriteQuadTemplate diffuse (texture-only modulate in D3D3);
  * port writes 0xFFFFFFFF and lets the alpha-keyed sprite passthrough
  * carry the visible color. */
-static void render_tracked_actor_marker(const TD5_Actor *actor)
+static void render_tracked_actor_marker(const TD5_Actor *actor,
+                                        const TD5_Mat3x3 *body_rot,
+                                        const TD5_Vec3f *body_pos)
 {
     if (!actor) return;
     if (!td5_vfx_tracked_marker_initialized()) return;
@@ -4879,18 +4960,15 @@ static void render_tracked_actor_marker(const TD5_Actor *actor)
     float fVar9  = fIntensity * TRACKED_MARKER_BASE_FVAR9
                               * TRACKED_MARKER_INTENSITY_SCALE;
 
-    /* Load actor rotation matrix + render position into render transform
-     * (orig 0x0043ce17-0x0043ce28: LoadRenderRotationMatrix +
-     *  LoadRenderTranslation from g_raceParticlePoolBase[0x1f1]._0_4_
-     *  which is a pointer to the tracked actor's runtime slot). */
-    td5_render_load_rotation((const TD5_Mat3x3 *)actor->rotation_matrix.m);
-    td5_render_load_translation((const TD5_Vec3f *)&actor->render_pos);
+    /* Lock the marker to the car BODY transform: use the SAME view_rot +
+     * render_pos the car mesh used this frame (passed in as body_rot/body_pos),
+     * so the strobe is welded to the body at all speeds. [v8 — user confirmed
+     * this position is correct; the v9 camera-basis experiment was reverted.] */
+    td5_render_load_rotation(body_rot);
+    td5_render_load_translation(body_pos);
 
     const float *m = s_render_transform.m;
 
-    /* Compute marker yaw from world-forward heading.
-     * Orig at 0x0043cee0-0x0043cf2c: AngleFromVector12(forward.x*256+ftol,
-     *  forward.z*256+ftol) -> wraps to signed 12-bit space then >>4 + ±0x100. */
     /* Refresh local phase mirror from vfx (single point of truth). */
     for (int i = 0; i < TD5_VFX_TRACKED_MARKER_COUNT; i++) {
         s_tracked_marker_phase[i] = td5_vfx_tracked_marker_get_phase(i);
@@ -4899,8 +4977,6 @@ static void render_tracked_actor_marker(const TD5_Actor *actor)
     int forward_dx = (int)(m[6] * 256.0f);   /* m[6..8] = forward (row 2) */
     int forward_dz = (int)(m[8] * 256.0f);
     int base_yaw   = AngleFromVector12(forward_dx, forward_dz);
-    /* Wrap to [-0x800, +0x800) before signed >>4 + offset application
-     * (orig: `(iVar11 - 0x800U & 0xfff) - 0x800`). */
     int wrapped    = ((base_yaw - 0x800) & 0xFFF) - 0x800;
     int yaw_div16  = (wrapped + ((wrapped >> 31) & 0xF)) >> 4;
 
@@ -4918,14 +4994,7 @@ static void render_tracked_actor_marker(const TD5_Actor *actor)
         float fVar7 = px*m[6] + py*m[7] + pz*m[8] + m[11];
         if (fVar7 <= s_near_clip) continue;
 
-        /* [FIX 2026-05-24 strobe-17call; orig 0x0043cde0]
-         * The orig at 0x0043cf68-0x0043cf7c also derives a yaw from the
-         * transformed anchor (ftol fVar5, ftol fVar6, AngleFromVector12)
-         * BEFORE the ±0x100 split. We mirror that pre-transform AngleFromVector
-         * computation using forward_dx/forward_dz set above; the anchor-yaw
-         * is equivalent up to its sign-conventions for the chase-camera
-         * orientation used by the wanted-target render path. */
-        /* Per-marker yaw with ±0x100 split (orig at 0x0043cfa2/0x0043cfb4). */
+        /* Per-marker yaw with ±0x100 split (orig 0x0043cfa2/0x0043cfb4). */
         unsigned uVar14 = (unsigned)(yaw_div16 + s_tracked_marker_yaw_offset[marker]) & 0xFFF;
 
         /* [FIX 2026-05-24 strobe-17call; orig 0x0043ce5f]
@@ -6548,20 +6617,25 @@ void td5_render_submit_additive_hud(uint16_t *quad_data) {
     td5_plat_render_draw_tris(verts, 4, indices, 6);
 }
 
-/* Submit a pre-built translucent quad with WORLD-space depth test enabled
- * (z_enable=1, z_write=0, alpha_ref=1). Mirrors orig
- * SetRaceRenderStatePreset(TD5_RACE_PASS_ALPHA) @ 0x0040b070: ZENABLE on,
- * ZWRITEENABLE off, ZFUNC LESSEQUAL — so world-space particles (smoke,
- * weather streaks) get occluded by opaque geometry but don't write to the
- * depth buffer.
+/* Submit a pre-built translucent quad for world-space VFX (smoke, weather
+ * streaks) so it is OCCLUDED by opaque geometry (walls, cars), matching the
+ * original. Uses TD5_PRESET_ADDITIVE_WORLD: ONE/ONE additive blend with the
+ * depth test ON (LEQUAL) and z-write off.
  *
- * KNOWN ISSUE 2026-05-24: smoke's `sz = vz / far_clip` (linear depth) does
- * NOT match the opaque mesh path's depth-buffer values (perspective NDC z),
- * so depth-test ON makes smoke fail every compare against car bodies → fully
- * invisible. Until smoke depth is reprojected into the opaque-pass z space,
- * we fall through to TRANSLUCENT_LINEAR_HUD (z_enable=0 + alpha_ref=1) which
- * matches HUD parity: smoke draws on top with soft edges but loses world
- * occlusion. Reinstating TRANSLUCENT_ANISO is one-line revert. */
+ * Why depth-tested: RE of the original (Ghidra, 2026-06-01) shows queued
+ * translucent primitives — including wheel smoke — are drawn by
+ * FlushQueuedTranslucentPrimitives @0x00431340, which RunRaceFrame @0x0042b580
+ * calls while the OPAQUE pass preset is still active (ZFUNC=LESSEQUAL, z-buffer
+ * enabled). SetRaceRenderStatePreset @0x0040b070 never touches ZENABLE, which
+ * stays TRUE scene-wide (proven by the SKY pass dodging occlusion via
+ * ZFUNC=ALWAYS rather than disabling ZENABLE), so orig smoke is depth-tested.
+ *
+ * DEPTH SPACE: the renderer is uniformly LINEAR depth (no NDC stage). Smoke's
+ * `sz` from project_vertex (line 498) is vz*(1/195000); opaque geometry writes
+ * (vz-64)*(1/195000) (clip_and_submit_polygon, line 824). They differ ONLY by
+ * the constant 64 NEAR_DEPTH_OFFSET, folded in below so the LEQUAL compare
+ * against coplanar geometry is exact. td5_render_submit_tire_mark (below) is
+ * the analogous depth-tested decal path (via TD5_PRESET_SHADOW). */
 void td5_render_submit_translucent_world(uint16_t *quad_data) {
     float *fdata;
     TD5_D3DVertex verts[4];
@@ -6576,7 +6650,10 @@ void td5_render_submit_translucent_world(uint16_t *quad_data) {
         int base = 2 + i * 7;
         verts[i].screen_x = fdata[base + 0];
         verts[i].screen_y = fdata[base + 1];
-        verts[i].depth_z  = fdata[base + 2];
+        /* Fold in the -64 NEAR_DEPTH_OFFSET that the opaque pass applies
+         * (line 824) but the shared project_vertex (line 498) omits, so smoke
+         * ties exactly with coplanar opaque geometry under the LEQUAL test. */
+        verts[i].depth_z  = fdata[base + 2] - NEAR_DEPTH_OFFSET * DEPTH_NORMALIZE_INV;
         verts[i].rhw      = fdata[base + 3];
         verts[i].diffuse  = *(uint32_t *)&fdata[base + 4];
         verts[i].specular = 0;
@@ -6585,7 +6662,7 @@ void td5_render_submit_translucent_world(uint16_t *quad_data) {
     }
 
     tex_page = (int)(*(float *)((uint8_t *)quad_data + 0x90));
-    td5_plat_render_set_preset(TD5_PRESET_ADDITIVE_OVERLAY);
+    td5_plat_render_set_preset(TD5_PRESET_ADDITIVE_WORLD);
     td5_plat_render_bind_texture(tex_page);
     td5_plat_render_draw_tris(verts, 4, indices, 6);
 }
@@ -6688,6 +6765,11 @@ void td5_render_recompute_frustum_for_trackside(void) {
  *   0x4300199a = 128.1f    (quad Z) */
 static float s_radial_pulse_anim;  /* orig [0x004B08C0] _g_hudRadialPulseAnimState */
 
+/* Mirror of td5_hud.c HUD_WHITE_TEX_PAGE — the 1x1 white texture page uploaded
+ * during HUD init, used to render flat-color (untextured-equivalent) HUD quads
+ * through the texture-modulating translucent path. */
+#define TD5_HUD_WHITE_TEX_PAGE 899
+
 void td5_render_radial_pulse(float dt)
 {
     float phase = td5_hud_radial_pulse_get();
@@ -6707,13 +6789,24 @@ void td5_render_radial_pulse(float dt)
     /* Anim accumulator advances every frame (independent of phase). */
     s_radial_pulse_anim += dt * 3328.0f;
 
-    /* Alpha = clamp(phase * 0.31875f, 0, 255). Saturates at phase≈800. */
-    int alpha = (int)(phase * 0.31875f);
+    /* Star opacity ramp. Orig used phase*0.31875 (alpha for its gray-RGB petals),
+     * which only reaches full at phase~800 = radius ~800px (far off-screen), so on
+     * the visible window (phase ~0..330 over the victory hold) it stays a faint
+     * ~12-40% wash. For a clearly-WHITE victory star [user 2026-05-30] we ramp the
+     * alpha faster (0.62) so it builds to ~75% white by the end of the hold while
+     * still fading in from invisible at phase 0. Tunable: 0.31875 = faithful
+     * (faint), ~0.62 = near white-out by hold end. 0.55 builds to ~72% white at
+     * the end of the 2.5s victory hold — clearly white, scene still dimly visible. */
+    int alpha = (int)(phase * 0.55f);
     if (alpha < 0)        alpha = 0;
     else if (alpha > 255) alpha = 255;
 
-    /* Per-frame radius. viewport_width * phase * (1/160). */
-    float radius = (float)s_viewport_width * phase * 0.00625f;
+    /* Per-frame radius. viewport_width * phase * (1/640).
+     * [CONFIRMED @ 0x439e60 RenderHudRadialPulseOverlay: _DAT_0045d64c =
+     *  0.0015625f = 1/640]. The port previously used 0.00625f (1/160) — 4x
+     *  too large, which ballooned the star across the screen ~4x too fast
+     *  (user 2026-05-30 "animation too fast"). Restored to the faithful 1/640. */
+    float radius = (float)s_viewport_width * phase * 0.0015625f;
 
     /* 10 ring vertices: even k = inner (radius*0.5), odd k = outer (radius).
      * Inner angle steps by -0x33332 (~72°) per pair; outer angle is inner - 0x19999. */
@@ -6729,8 +6822,19 @@ void td5_render_radial_pulse(float dt)
         a -= 0x33332;
     }
 
-    /* Grayscale ARGB: alpha=0xFF, RGB = alpha * 0x10101. */
-    uint32_t color = 0xFF000000u | (uint32_t)(alpha * 0x10101);
+    /* White victory star with alpha fade-in: RGB pinned WHITE (0xFFFFFF),
+     * alpha = the phase ramp. Drawn via the translucent (SRCALPHA) HUD path
+     * below, so alpha 0 = invisible -> alpha 255 = bright opaque white.
+     *
+     * [user 2026-05-30: "star is black, should be white".] Two port bugs made
+     * it read black: (1) the previous pass put the ramp in the RGB bytes (so
+     * the star was near-black gray at low phase) and (2) submitted ADDITIVE,
+     * where dark RGB adds ~nothing to the scene -> a faint/black flash.
+     * Deliberate deviation from orig's gray-RGB-ramp/opaque-alpha at 0x439e60:
+     * orig's gray ramp only reaches white at phase ~800 (off-screen radius),
+     * so on-screen it always looks dark — constant-white + alpha-ramp delivers
+     * the white glow the user expects while keeping the faithful translucent blend. */
+    uint32_t color = ((uint32_t)alpha << 24) | 0x00FFFFFFu;
 
     /* Center the ring on the viewport. */
     float cx = (float)s_viewport_width * 0.5f;
@@ -6766,13 +6870,20 @@ void td5_render_radial_pulse(float dt)
             p.tex_u[v]   = 0.0f;
             p.tex_v[v]   = 0.0f;
         }
-        p.texture_page = 0;
+        /* Orig petals are UNTEXTURED flat color (tex_u=tex_v=0). The port's
+         * translucent-HUD path always modulates by a bound texture, so bind the
+         * 1x1 WHITE page (== td5_hud.c HUD_WHITE_TEX_PAGE 899, uploaded at HUD
+         * init) — page 0 is an arbitrary atlas whose texel darkened the flat
+         * white, contributing to the "black star". white*white = white. */
+        p.texture_page = TD5_HUD_WHITE_TEX_PAGE;
         p.reserved     = 0;
 
         td5_render_build_sprite_quad((int *)&p);
-        /* Additive so the petals are a semi-transparent white glow that brightens
-         * with phase (not opaque gray quads). [user feedback 2026-05-30] */
-        td5_render_submit_additive_hud((uint16_t *)&s_pulse_quads[q]);
+        /* Translucent (SRCALPHA/INVSRCALPHA) so the white petals fade in by
+         * vertex alpha — faithful to orig SubmitImmediateTranslucentPrimitive
+         * @ 0x4315b0 (NOT additive). The previous additive path made the dark
+         * low-phase color invisible/black. [user feedback 2026-05-30] */
+        td5_render_submit_translucent_hud((uint16_t *)&s_pulse_quads[q]);
     }
 }
 
@@ -6915,19 +7026,103 @@ int     g_render_height         = 480;
 float   g_renderBasisMatrix[12] = { 1,0,0, 0,1,0, 0,0,1, 0,0,0 };
 
 /* ========================================================================
- * Debug line overlay — placeholder stubs.
- * Wired up by td5_track collision-wireframe overlay (F12). Real renderer
- * not yet ported; calls are no-ops so the build links cleanly.
+ * Debug line overlay — world-space colored line batch (F12 collision wireframe).
+ *
+ * Accumulates the world-space segments emitted by
+ * td5_track_debug_emit_collision_lines() and flushes them as a single D3D11
+ * LINELIST via td5_plat_render_draw_lines(). Each endpoint is projected through
+ * the SAME camera-relative transform + depth formula the opaque track polygons
+ * use (see the track pass at ~line 800: depth = (vz-NEAR_DEPTH_OFFSET)*
+ * DEPTH_NORMALIZE_INV), so the wireframe registers exactly on the rails.
+ * draw_lines hard-codes z-test LESS_EQUAL / z-write OFF / opaque, so lines are
+ * occluded by nearer terrain but coincident rail edges still draw on top, and
+ * the overlay never poisons depth for later passes.
+ *
+ * Coordinate space: x/y/z arrive in raw 24.8 world fixed-point (origin+vertex
+ * sums from emit_strip_line) — the SAME space as s_camera_pos, so a plain
+ * camera-relative subtract + basis rotate matches the world geometry.
+ * [Implements the former no-op stub; renderer pipeline confirmed against
+ * project_vertex / the shadow path 2026-05-30.]
  * ======================================================================== */
+#define TD5_DEBUG_LINE_MAX_VERTS 2048   /* 1024 segments/flush; VB holds ~4096 */
+#define TD5_DEBUG_LINE_HALF_PX   1      /* line half-thickness in px → (2*HP+1) px wide.
+                                         * D3D11 LINELIST is always 1px, so thicken by
+                                         * emitting parallel copies offset perpendicular
+                                         * in screen space. */
+
+static TD5_D3DVertex s_debug_line_verts[TD5_DEBUG_LINE_MAX_VERTS];
+static int           s_debug_line_count = 0;
+
+void td5_render_debug_lines_reset(void) {
+    s_debug_line_count = 0;
+}
+
+void td5_render_debug_lines_flush(void) {
+    if (s_debug_line_count >= 2) {
+        static int s_logged = 0;
+        if (!s_logged) {
+            TD5_LOG_I(LOG_TAG, "debug wireframe: first flush %d verts (%d segments)",
+                      s_debug_line_count, s_debug_line_count / 2);
+            s_logged = 1;
+        }
+        td5_plat_render_draw_lines(s_debug_line_verts, s_debug_line_count);
+    }
+    s_debug_line_count = 0;
+}
+
+/* Project one world point (raw 24.8 fixed-point, same space as s_camera_pos)
+ * into a pretransformed screen-space vertex. Returns 0 if behind near clip. */
+static int debug_line_project(float wx, float wy, float wz, uint32_t argb,
+                              TD5_D3DVertex *out) {
+    float dx = wx - s_camera_pos[0];
+    float dy = wy - s_camera_pos[1];
+    float dz = wz - s_camera_pos[2];
+    /* camera_basis is row-major { right, up, forward } (same as track/shadow). */
+    float vx = dx * s_camera_basis[0] + dy * s_camera_basis[1] + dz * s_camera_basis[2];
+    float vy = dx * s_camera_basis[3] + dy * s_camera_basis[4] + dz * s_camera_basis[5];
+    float vz = dx * s_camera_basis[6] + dy * s_camera_basis[7] + dz * s_camera_basis[8];
+    if (vz <= s_near_clip) return 0;
+    float inv_z = 1.0f / vz;
+    out->screen_x = -vx * s_focal_length * inv_z + s_center_x;
+    out->screen_y = -vy * s_focal_length * inv_z + s_center_y;
+    out->depth_z  = (vz - NEAR_DEPTH_OFFSET) * DEPTH_NORMALIZE_INV; /* matches track polys */
+    out->rhw      = inv_z;
+    out->diffuse  = argb;   /* 0xAARRGGBB → B8G8R8A8_UNORM diffuse (white SRV modulate) */
+    out->specular = 0;
+    out->tex_u    = 0.0f;
+    out->tex_v    = 0.0f;
+    return 1;
+}
+
 void td5_render_debug_line_world(float x0, float y0, float z0,
                                  float x1, float y1, float z1,
                                  uint32_t argb) {
-    (void)x0; (void)y0; (void)z0;
-    (void)x1; (void)y1; (void)z1;
-    (void)argb;
+    TD5_D3DVertex a, b;
+    /* The line path has no near-plane clipper, so drop the whole segment if
+     * either endpoint is behind the camera. Acceptable for a debug overlay. */
+    if (!debug_line_project(x0, y0, z0, argb, &a)) return;
+    if (!debug_line_project(x1, y1, z1, argb, &b)) return;
+
+    /* Thicken: D3D11 lines are 1px, so emit (2*HALF_PX+1) parallel copies
+     * offset perpendicular to the segment in SCREEN space (pixels). Depth/rhw
+     * are preserved so occlusion is unchanged. */
+    float sdx = b.screen_x - a.screen_x;
+    float sdy = b.screen_y - a.screen_y;
+    float slen = sqrtf(sdx * sdx + sdy * sdy);
+    float px = 0.0f, py = 0.0f;
+    if (slen > 0.001f) { px = -sdy / slen; py = sdx / slen; }
+
+    for (int o = -TD5_DEBUG_LINE_HALF_PX; o <= TD5_DEBUG_LINE_HALF_PX; o++) {
+        TD5_D3DVertex va = a, vb = b;
+        va.screen_x += px * (float)o; va.screen_y += py * (float)o;
+        vb.screen_x += px * (float)o; vb.screen_y += py * (float)o;
+        if (s_debug_line_count + 2 > TD5_DEBUG_LINE_MAX_VERTS) {
+            td5_render_debug_lines_flush();   /* emit full batch, keep accumulating */
+        }
+        s_debug_line_verts[s_debug_line_count++] = va;
+        s_debug_line_verts[s_debug_line_count++] = vb;
+    }
 }
-void td5_render_debug_lines_flush(void) {}
-void td5_render_debug_lines_reset(void) {}
 
 /* ============================================================
  * [CITATION-SWEEP 2026-05-21] Phase 1 audit-header refresh

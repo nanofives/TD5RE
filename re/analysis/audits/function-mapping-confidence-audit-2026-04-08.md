@@ -173,3 +173,21 @@ Entries:
 1. Refresh the `exe_func_*.json` snapshots from the live `TD5` project.
 2. Investigate the remaining `14` low-confidence FMV helper names as the next evidence pass.
 3. Ignore `caseD_...` fragments unless the parent screen handlers need restructuring.
+
+## Session P6 reconciliation (2026-06-01)
+
+RE-doc hygiene pass; no port code change, no build.
+
+- **The 14 low-confidence FMV/TGQ helper names are RE-doc cosmetic, NOT a fidelity risk.**
+  All 14 (`PackYCbCrTableEntry`, `LookupQuantTable`, `DecodeJPEGMCU`, the `YCbCrToRGB_Row_*`
+  variants, `IDCT_1D_8pt_Float_C`, `BitstreamRefillBits`, `DecodeVQ_Block`, `SetVGAPalette`,
+  `DecompressLZData`, `UnpackBitplaneToPixels`, `DecodeBitmapRLERun`, etc.) belong to the EA
+  TGQ multimedia engine, which the source port does **not** reimplement — FMV is stubbed in
+  `td5_fmv.c`. Whether their Ghidra names are perfectly semantic has **zero runtime impact** on
+  `td5re.exe`. Downgraded from "fidelity risk / next evidence pass" to cosmetic backlog: refine
+  only if/when a real FMV codec is ever ported.
+
+- See also `re/analysis/followup_sessions/wave1_f_overview.md` (P6 addendum): the 126 `weak`
+  signature annotations are likewise cosmetic (the port compiles against its own correct C
+  types), and the 6 game-type init handlers @0x00410F60–0x004110A0 are now fully named and
+  mirrored at `td5_frontend.c:2980-3011`.

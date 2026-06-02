@@ -73,6 +73,17 @@ typedef struct {
     int32_t  final_bx, final_bz;
 } TD5_PilotV2VToiSnap;
 
+#ifdef TD5RE_RELEASE
+/* Release build: the pool15 V2V-contact trace module is not linked. The call
+ * sites in td5_physics.c (obb_corner_test / collision_detect_full) are ungated,
+ * so neutralize the emitters to no-ops. The struct typedefs above stay defined
+ * so the (dead, optimizer-removed) snapshot fills still type-check. */
+#define td5_pilot_v2v_contact_emit_enter(...) ((void)0)
+#define td5_pilot_v2v_contact_emit_leave(...) ((void)0)
+#define td5_pilot_v2v_toi_emit(...)           ((void)0)
+#define td5_pilot_v2v_reset_call_idx(...)     ((void)0)
+#define td5_pilot_v2v_next_call_idx()         (0)
+#else
 void td5_pilot_v2v_contact_emit_enter(const TD5_PilotV2VContactSnap *inputs,
                                       int slot_a, int slot_b,
                                       int call_idx);
@@ -87,5 +98,6 @@ void td5_pilot_v2v_toi_emit(const TD5_PilotV2VToiSnap *snap,
 /* Reset call_idx counter at start of each collision_detect_full. */
 void td5_pilot_v2v_reset_call_idx(int slot_a, int slot_b);
 int  td5_pilot_v2v_next_call_idx(void);
+#endif
 
 #endif /* TD5_PILOT_TRACE_V2V_CONTACT_H */

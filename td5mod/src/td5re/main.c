@@ -142,6 +142,15 @@ static LONG WINAPI td5_crash_handler(EXCEPTION_POINTERS *ep)
 
 static char s_ini_path[MAX_PATH];
 
+/* The release build reads its own INI so the two executables can sit side by
+ * side in the same folder without the dev build's test-harness td5re.ini
+ * leaking into the shipping binary. */
+#ifdef TD5RE_RELEASE
+#  define TD5RE_INI_FILENAME "td5re_release.ini"
+#else
+#  define TD5RE_INI_FILENAME "td5re.ini"
+#endif
+
 static void td5_load_ini(void)
 {
     DWORD n = GetModuleFileNameA(NULL, s_ini_path, MAX_PATH);
@@ -149,9 +158,9 @@ static void td5_load_ini(void)
         char *sl = s_ini_path + n;
         while (sl > s_ini_path && *sl != '\\' && *sl != '/') sl--;
         if (sl > s_ini_path) sl[1] = '\0';
-        strcat(s_ini_path, "td5re.ini");
+        strcat(s_ini_path, TD5RE_INI_FILENAME);
     } else {
-        strcpy(s_ini_path, "td5re.ini");
+        strcpy(s_ini_path, TD5RE_INI_FILENAME);
     }
 }
 
@@ -223,6 +232,8 @@ static int td5_apply_cli_overrides(const char *cmdline,
         { "Dynamics",             &g_td5.ini.dynamics },
         { "Collisions",           &g_td5.ini.collisions },
         { "AutoGearbox",          &g_td5.ini.auto_gearbox },
+        { "Player1Joystick",      &g_td5.ini.player1_joystick },
+        { "Player2Joystick",      &g_td5.ini.player2_joystick },
         { "PlayerIsAI",           &g_td5.ini.player_is_ai },
         { "SoloAISlot",           &g_td5.ini.solo_ai_slot },
         { "SoloRace",             &g_td5.ini.solo_race },
@@ -441,6 +452,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     g_td5.ini.dynamics           = td5_ini_int("GameOptions", "Dynamics", 0);
     g_td5.ini.collisions         = td5_ini_int("GameOptions", "Collisions", 1);
     g_td5.ini.auto_gearbox       = td5_ini_int("GameOptions", "AutoGearbox", 1);
+    g_td5.ini.player1_joystick   = td5_ini_int("GameOptions", "Player1Joystick", 0);
+    g_td5.ini.player2_joystick   = td5_ini_int("GameOptions", "Player2Joystick", 0);
 
     /* Game defaults */
     g_td5.ini.default_car       = td5_ini_int("Game", "DefaultCar", 0);
@@ -562,6 +575,28 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
         if (n_cli > 0)
             dbglog("=== %d CLI override(s) applied ===", n_cli);
     }
+
+#ifdef TD5RE_RELEASE
+    /* Release build: hard-disable every developer/test/trace affordance after
+     * BOTH the INI and the CLI have been applied, so none of them can be
+     * re-enabled in a shipping binary regardless of td5re_release.ini contents
+     * or command-line flags. Gameplay/display/audio options are left untouched;
+     * only the dev knobs are clamped. The matching instrumentation code is
+     * additionally compiled out (see TD5RE_RELEASE guards + build_standalone.bat
+     * release variant) — this is the runtime belt to that compile-time braces. */
+    g_td5.ini.auto_race              = 0;   /* always boot the normal menu flow */
+    g_td5.ini.start_screen           = -1;  /* no jump-to-screen test harness   */
+    g_td5.ini.player_is_ai           = 0;   /* the human drives                 */
+    g_td5.ini.debug_overlay          = 0;   /* no HUD debug text overlay        */
+    g_td5.ini.debug_collisions       = 0;   /* no collision wireframe overlay   */
+    g_td5.ini.race_trace_enabled     = 0;   /* no per-tick CSV race trace       */
+    g_td5.ini.whole_state_enabled    = 0;   /* no whole-state snapshot dump     */
+    g_td5.ini.state_replay_mode      = 0;   /* snapshot-replay harness off      */
+    g_td5.ini.auto_throttle          = 0;   /* no scripted throttle             */
+    g_td5.ini.trace_traffic_edge_pen = 0;   /* no traffic edge-pen probe CSV    */
+    g_td5.ini.trace_terrain_cam_probe = 0;  /* no terrain camera probe CSV      */
+    g_td5.ini.test_cup_roundtrip     = 0;   /* no CupData self-test path         */
+#endif
 
     /* TD5RE divergent CupData self-test. Runs before any backend or
      * window bringup — and BEFORE the log filter override below — so

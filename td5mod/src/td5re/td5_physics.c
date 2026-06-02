@@ -58,9 +58,13 @@
 #include "td5_pilot_trace_0042EBF0.h" /* precise-port pilot CSV emit for 0x0042EBF0 */
 #ifdef TD5_PILOT_TRACE_TRAFFIC
 #include "td5_pilot_trace_traffic.h" /* precise-port pilot CSV emit for 0x004437C0 + 0x004438F0 */
+#endif
+/* V2V trace headers are included unconditionally: their obb_corner_test /
+ * collision_detect_full call sites below are ungated, so the snapshot types
+ * must always be declared. The emitters self-stub to no-ops under
+ * TD5RE_RELEASE (release build does not link the v2v trace modules). */
 #include "td5_pilot_trace_v2v_contact.h" /* pool15 V2V pilot trace */
 #include "td5_pilot_trace_v2v.h"  /* pool14_v2v precise-port pilot */
-#endif
 #include "td5re.h"
 
 /* Include the full actor struct for field-level access.
@@ -303,39 +307,54 @@ static inline void write_i32(uint8_t *base, size_t offset, int32_t value)
 /* ========================================================================
  * Fixed-point trig (12-bit angle, returns 12-bit result)
  *
- * Compact lookup-free integer cos/sin using a quadratic approximation.
- * Input: 12-bit angle (0-4095 = 0-360 degrees).
- * Output: signed 12-bit result (-4096 .. +4096).
+ * Thin wrappers over the byte-faithful integer LUT shared with the rest of
+ * the port. The original physics path NEVER calls libm: it indexes the
+ * fixed-point sin/cos LUT g_sinCosLut_fixed12 @ 0x00483984 via CosFixed12bit
+ * @ 0x0040A6E0 / SinFixed12bit @ 0x0040A700, and the angle LUT DAT_00463214
+ * via AngleFromVector12 @ 0x0040A720.
+ *
+ * [CONFIRMED @ 0x0040A6E0/0x0040A700] CosFixed12bit/SinFixed12bit are the
+ *   INTEGER LUT cos/sin (not the float family 0x0040A6A0/0x0040A6C0). The
+ *   player/AI/wall/collision physics functions (0x00404030, 0x00404EC0,
+ *   0x00406980, 0x004079C0, 0x00409520, 0x00443CF0) all call this integer
+ *   family; no physics path uses the float LUT.
+ * [CONFIRMED @ 0x0040A720] AngleFromVector12(dx, dz): first arg = param_1 =
+ *   dx (horizontal), second = param_2 = dz; angle 0 ⇄ +dz, increasing toward
+ *   +dx. The three atan2_fixed12 call sites map 1:1 to the original's
+ *   AngleFromVector12 args (0x00406CC0 wall-edge B.z-A.z/B.x-A.x; 0x00443CF0
+ *   roll -rotated_z/-normal_y; 0x00443CF0 pitch rotated_x/mag_xz).
+ *
+ * Input: 12-bit angle (0-4095 = 0-360 degrees), masked internally by the LUT.
+ * Output: signed 12-bit result (-4096 .. +4096) for cos/sin; 0-4095 for atan2.
+ *
+ * Routing these to the LUT (was libm cos/sin/atan2 *4096) removes the
+ * per-angle truncation drift the host-trig path leaked into wall response,
+ * steering, heading, and collision normals.
  * ======================================================================== */
 
 static int32_t cos_fixed12(int32_t angle)
 {
-    /* Use standard math for exact results matching the original game's
-     * lookup table.  The previous quadratic approximation was catastrophically
-     * wrong at quadrant boundaries (e.g., sin(0) returned -4096 instead of 0). */
-    double rad = (double)(angle & 0xFFF) * (2.0 * 3.14159265358979323846 / 4096.0);
-    return (int32_t)(cos(rad) * 4096.0);
+    return (int32_t)CosFixed12bit((unsigned int)angle);
 }
 
 static int32_t sin_fixed12(int32_t angle)
 {
-    double rad = (double)(angle & 0xFFF) * (2.0 * 3.14159265358979323846 / 4096.0);
-    return (int32_t)(sin(rad) * 4096.0);
+    return (int32_t)SinFixed12bit(angle);
 }
 
 /* ========================================================================
  * Fixed-point atan2 (12-bit result: 0-4095 = 0-360°)
  *
- * Used for wall collision angle computation. Matches FUN_0040a720 in
- * the original binary (angle LUT). Input: (dx, dz) in world coords.
- * Returns: 12-bit angle where 0 = +Z direction, CW positive.
+ * Byte-faithful port of AngleFromVector12 @ 0x0040A720 (atan LUT
+ * DAT_00463214). Input: (dx, dz) in world coords (dx=param_1, dz=param_2).
+ * Returns: 12-bit angle where 0 = +Z direction, CW positive. The & 0xFFF
+ * folds the degenerate octant-7 (0x1000) result back into range, preserving
+ * the prior call-site masking.
  * ======================================================================== */
 
 static int32_t atan2_fixed12(int32_t dx, int32_t dz)
 {
-    double rad = atan2((double)dx, (double)dz);
-    int32_t angle = (int32_t)(rad * (4096.0 / (2.0 * 3.14159265358979323846)));
-    return angle & 0xFFF;
+    return AngleFromVector12(dx, dz) & 0xFFF;
 }
 
 /* ========================================================================
@@ -2438,15 +2457,29 @@ void td5_physics_update_player(TD5_Actor *actor)
      * This placeholder is preserved for code-archaeology traceability.
      * todo: todo_scf_wheelspin_ordering.md */
 
-    /* --- 14b. Velocity magnitude safety clamp ---
-     * Without working wall collisions, cars leave the road immediately.
-     * Clamp total velocity magnitude to the car's speed_limit (1x, not 2x)
-     * so the car stays at a controllable speed. The original game relies on
-     * track walls to contain speed through corners; until walls are
-     * implemented, this hard cap prevents runaway velocity. */
+    /* --- 14b. Velocity magnitude safety backstop (2x speed_limit) ---
+     * NON-ORIGINAL. The original UpdatePlayerVehicleDynamics @ 0x00404030 has
+     * NO total-velocity-magnitude clamp here: it limits speed via the drive-
+     * torque cutoff at the `abs_speed <= speed_limit` guards (preserved above,
+     * CONFIRMED @ 0x00404030) plus track-wall containment through corners. This
+     * block sits between the confirmed-orig force writeback (14a) and the yaw
+     * damping 14c (CONFIRMED @ 0x404DB6) — there is no original instruction
+     * here.
+     *
+     * It was added as a 1x hard cap "until track walls are implemented". Lateral
+     * rail containment is now ported (0x00406CC0, the Tokyo wall work), so the
+     * 1x cap is obsolete: it clipped corner-exit speed and could mask upstream
+     * force divergence by clamping the symptom. Raised to 2x speed_limit — the
+     * walls now do the real containment; this remains only as a runaway-velocity
+     * backstop and lets the car carry momentum (gravity / corner exit) above
+     * speed_limit the way the original does.
+     *
+     * Drive-test gate: car must stay contained on Tokyo + Moscow AND reach
+     * higher corner-exit speed than the 1x cap allowed. If a tested track lets
+     * the car leave the road, KEEP the 2x cap (do not remove it). */
     {
         int32_t speed_lim = (int32_t)PHYS_S(actor, 0x74) << 8;
-        int32_t vel_cap = speed_lim;  /* 1x speed limit until walls exist */
+        int32_t vel_cap = speed_lim * 2;  /* 2x backstop (was 1x); walls do real containment */
         int32_t vxh = actor->linear_velocity_x >> 8;
         int32_t vzh = actor->linear_velocity_z >> 8;
         int32_t mag_sq = vxh * vxh + vzh * vzh;
@@ -2456,6 +2489,12 @@ void td5_physics_update_player(TD5_Actor *actor)
             int32_t cap_h = vel_cap >> 8;
             actor->linear_velocity_x = (int32_t)((int64_t)actor->linear_velocity_x * cap_h / mag);
             actor->linear_velocity_z = (int32_t)((int64_t)actor->linear_velocity_z * cap_h / mag);
+            /* Throttled diagnostic (slot 0, every 120 frames) so a drive-test
+             * can tell whether the 2x backstop is engaging — same pattern as 14c. */
+            if (actor->slot_index == 0 && (actor->frame_counter % 120u) == 0u) {
+                TD5_LOG_I(LOG_TAG, "vel_backstop_2x: fired mag=%d cap_h=%d speed_lim_h=%d",
+                          mag, cap_h, speed_lim >> 8);
+            }
         }
     }
 
@@ -4010,6 +4049,23 @@ static void apply_collision_response(TD5_Actor *penetrator, TD5_Actor *target,
               is_side_branch, A->slot_index, B->slot_index, mass_A, mass_B,
               cx_A, cz_A, cx_B, cz_B, impulse, impact_mag, impactForce);
 
+    /* [orig ApplyVehicleCollisionImpulse 0x004079c0, pre-LAB_00408289]: car/
+     * traffic collision SFX. A racer-involved impact (at least one slot < 6)
+     * above 0x3201 plays a positional one-shot: LHit1-5 (light) below 0xc801,
+     * HHit1-4 (hard) at/above it. Volume 0x1000; pitch per tier (0xd02 / 0x2198).
+     * Reached only on an APPROACHING impact (the separating early-out above
+     * returns before this), so it fires once per real hit, not while resting. */
+    if ((A->slot_index < 6 || B->slot_index < 6) && impact_mag >= 0x3201) {
+        int hit_slot, hit_pitch, hit_variants;
+        if (impact_mag < 0xc801) {
+            hit_slot = 0x1F; hit_pitch = 0xd02;  hit_variants = 5; /* LHit1-5 */
+        } else {
+            hit_slot = 0x1B; hit_pitch = 0x2198; hit_variants = 4; /* HHit1-4 */
+        }
+        int32_t hit_pos[3] = { A->world_pos.x, A->world_pos.y, A->world_pos.z };
+        td5_sound_play_at_position(hit_slot, 0x1000, hit_pitch, hit_pos, hit_variants);
+    }
+
     /* Wanted mode (cop chase): player<->cop collision awards damage score.
      * Mirrors ApplyVehicleCollisionImpulse @ 0x40817A/0x4081BE → AwardWantedDamageScore.
      * [CONFIRMED]: both A-is-player and B-is-player paths call AwardWantedDamageScore
@@ -5314,8 +5370,25 @@ void td5_physics_update_suspension_response(TD5_Actor *actor)
         bounce   /= cnt_grounded;
     }
 
-    /* PlayVehicleSoundAtPosition(0x17, bounce*50, ...) call from the
-     * original is omitted — sound side is stubbed elsewhere. */
+    /* [FIX 2026-05-31 falling-car-ground-impact-sound] Faithful port of the
+     * normal-mode wheel-LANDING thud from UpdateVehicleSuspensionResponse
+     * @0x004057F0. Orig: after averaging the per-just-landed-wheel impact into
+     * `bounce` (iVar8), if bounce > 0x14 it plays sound 0x17 (Bottom*.wav,
+     * 4 variants) at volume bounce*0x32, freq 0x5622, positioned at the actor
+     * world_pos (+0x1FC). This is the "car falls off a slope and hits the
+     * ground" thud the user reported missing — a SEPARATE emitter from the
+     * collision/scripted-recovery thud at 0x004096B0 (which only runs in
+     * vehicle_mode==1). RE basis: Ghidra agent (ab81bbcf) confirmed
+     * iVar8>0x14 → PlayVehicleSoundAtPosition(0x17, iVar8*0x32, 0x5622,
+     * actor+0x1FC, 4); the *0x32 multiplier is also corroborated by this
+     * function's own line-by-line audit (the prior `bounce*50` stub comment).
+     * Previously omitted ("sound side stubbed") → no landing thud on falls. */
+    if (bounce > 0x14) {
+        int32_t world_pos[3] = { actor->world_pos.x,
+                                 actor->world_pos.y,
+                                 actor->world_pos.z };
+        td5_sound_play_at_position(0x17, bounce * 0x32, 0x5622, world_pos, 4);
+    }
 
     /* Apply roll/pitch corrective torque + Y velocity restore.
      *
@@ -6111,16 +6184,25 @@ static void process_traffic_forward_checkpoint_pass(TD5_Actor *actor, int slot)
     /* Vertex ordering: NOT reversed (psVar2=left_base, psVar3=left_base+lane_count)
      * [CONFIRMED @ 0x407708-0x40771C in 0x4076C0]:
      *   uVar6 = left_vertex_index
-     *   psVar2 = vertex[uVar6]                 (left base)
+     *   psVar2 = vertex[uVar6]                 (left base, NO sub_lane offset)
      *   psVar3 = vertex[uVar6 + lane_count]    (right end)
-     * Compare ProcessActorRouteAdvance which swaps: psVar2=right, psVar3=left. */
+     * Compare ProcessActorRouteAdvance which swaps: psVar2=right, psVar3=left.
+     *
+     * [FIX 2026-06-01] li_idx previously added `+ sub` (the actor's sub_lane) to
+     * the NEAR vertex — a divergence the original lacks. Independently re-confirmed
+     * via Ghidra (0x407776-0x40777B): the near vertex is vertex[left_vertex_index],
+     * and the actor sub_lane is NEVER read in 0x4076C0 (the only addend anywhere is
+     * the lane-count nibble on the FAR vertex). The inner/outer
+     * ProcessActorSegmentTransition path was already corrected 2026-05-26 (sub_lane
+     * is only the edge-gate there); this forward-checkpoint path was the last site
+     * still adding sub. Dropped — `sub` is retained only for the trace arg below. */
     int sub = (int)(int8_t)actor->track_sub_lane_index;
     if (sub < 0) sub = 0;
     int lane_count = (int)(sp->surface_attribute & 0xF);
     if (sub >= lane_count) sub = lane_count - 1;
 
-    int li_idx = (int)sp->left_vertex_index + sub;
-    int ri_idx = (int)sp->left_vertex_index + lane_count;  /* end vertex (NOT right_vertex_index) */
+    int li_idx = (int)sp->left_vertex_index;               /* psVar2 = left base (orig: NO sub) */
+    int ri_idx = (int)sp->left_vertex_index + lane_count;  /* psVar3 = end vertex (NOT right_vertex_index) */
 
     TD5_StripVertex *vl = td5_track_get_vertex(li_idx);
     TD5_StripVertex *vr = td5_track_get_vertex(ri_idx);
@@ -7807,12 +7889,13 @@ void td5_physics_refresh_wheel_contacts(TD5_Actor *actor)
          * earlier chassis-clamp that only halved the split and risked
          * flattening pitch. Processed in wheel order 0,1,2,3 so the left
          * partner (i-1) is already walked. */
-        if (i == 1 || i == 3) {
-            int left_span = (int)actor->wheel_probes[i - 1].span_index;
-            int diff = (int)actor->wheel_probes[i].span_index - left_span;
-            if (diff != 0 && diff >= -2 && diff <= 2)
-                actor->wheel_probes[i].span_index = (int16_t)left_span;
-        }
+        /* [FIX 2026-05-31 sub-lane-shift bounce] Axle right-wheel span-snap
+         * DISABLED. It papered over the slope-roll by forcing FR/RR onto the
+         * left partner's span, but at sub-lane-count transitions it toggles the
+         * right wheel's reference span on/off, producing the user-reported
+         * vertical bounce. The faithful 0x00403720 path walks each wheel
+         * independently and reads height from the walker's carried
+         * span+sub_lane (see the contact-height call below). */
 
         /* Mirror the original's ComputeActorTrackContactNormalExtended
          * prefix: write contact_vertex_A/B to the probe based on its
@@ -7860,10 +7943,18 @@ void td5_physics_refresh_wheel_contacts(TD5_Actor *actor)
          *
          * Also retrieves the span surface normal (orig FUN_00445A70 → actor+
          * 0x250+i*8, the "wcv" consumed by UpdateVehicleSuspensionResponse). */
+        /* [FIX 2026-05-31] The BEST-FIT-lane rationale in the comment above is
+         * SUPERSEDED. Per-tick lane re-selection (bestlane) made best_lane jump
+         * discontinuously across sub-lane-count transitions, popping ground_y
+         * (the user-reported bounce). We now use the walker's carried sub_lane,
+         * faithful to 0x00403720 -> 0x00445450. If the slope-roll (2026-05-27)
+         * returns, the real bug is the walker's sub_lane carry in
+         * resolve_neighbor / update_position_recursive, not the height call. */
         int16_t span_normal[3] = {0, 4096, 0};  /* default: flat upward normal (magnitude 4096) */
         {
-            ground_y = td5_track_compute_contact_height_bestlane(
+            ground_y = td5_track_compute_contact_height_bounded(
                 probe_span,
+                (int)actor->wheel_probes[i].sub_lane_index,
                 actor->wheel_contact_pos[i].x,
                 actor->wheel_contact_pos[i].z,
                 span_normal);
@@ -8380,7 +8471,9 @@ void td5_physics_reset_actor_state(TD5_Actor *actor)
      * history to persist across the call). */
 
     /* Capture PRE-state for the pilot probe BEFORE any mutation. */
+#ifndef TD5RE_RELEASE
     td5_pilot_trace_00405D70_enter(actor);
+#endif
 
     /* 0x405D78 / 0x405D7E — clear flag bytes */
     actor->surface_contact_flags = 0;       /* +0x376 */
@@ -8459,7 +8552,9 @@ void td5_physics_reset_actor_state(TD5_Actor *actor)
     /* === pilot trace hook ===
      * Fires once per reset (rare event — spawn/respawn/recycle); negligible
      * cost. Schema in tools/diff_func_trace.py reads addr=0x00405D70. */
+#ifndef TD5RE_RELEASE
     td5_pilot_trace_00405D70_leave(actor);
+#endif
 }
 
 /* ========================================================================
@@ -10457,8 +10552,19 @@ void td5_physics_rebuild_pose(TD5_Actor *actor)
 void td5_physics_set_dynamics(int mode)
 {
     s_dynamics_mode = (mode != 0) ? 1 : 0;
-    TD5_LOG_I(LOG_TAG, "Dynamics mode set to %s (%d)",
-              s_dynamics_mode ? "simulation" : "arcade", s_dynamics_mode);
+    /* Commit to the race-init flag consumed by td5_physics_init_vehicle_runtime
+     * (0x42F140) for gravity + per-car stat scaling. This is the faithful analog
+     * of the original's `gDifficultyEasy = gDynamicsConfigShadow` at the frontend
+     * transitions (0x004155F2 / 0x0041DC82). The dynamics shadow @0x00466014 is
+     * copied verbatim into gDifficultyEasy @0x004AAF84. Mapping (CONFIRMED):
+     *   mode 0 = ARCADE     -> Easy=0 -> gravity 1900 (0x76C) + car-stat boosts
+     *   mode 1 = SIMULATION -> Easy=1 -> gravity 1500 (0x5DC) + stock stats
+     * gDifficultyHard @0x004AAF80 has NO writers in the original, so the port's
+     * g_difficulty_hard stays 0 (its HARD branch is dead, matching the orig). */
+    g_difficulty_easy = s_dynamics_mode;
+    TD5_LOG_I(LOG_TAG, "Dynamics mode set to %s (%d) -> g_difficulty_easy=%d",
+              s_dynamics_mode ? "simulation" : "arcade", s_dynamics_mode,
+              g_difficulty_easy);
 }
 
 int td5_physics_get_dynamics(void)

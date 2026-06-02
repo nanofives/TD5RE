@@ -476,6 +476,15 @@ static ViewportRect s_viewports[2];
 
 /* Replay / benchmark timing */
 static uint32_t s_race_end_timer_start;
+
+/* Victory-overlay window. When the 1st-place star fires, hold the race (and
+ * thus the fade-to-results exit) for this long so the white star animation and
+ * the centered finishing number are readable instead of a ~0.5s flash.
+ * [user 2026-05-30: "animation too fast" / "number sometimes not present".] */
+#define TD5_VICTORY_HOLD_MS 2500u
+static uint32_t s_victory_hold_start;   /* ms timestamp the star armed (0 = none) */
+static int      s_finish_position_display; /* 1-based place captured at finish (0 = none) */
+
 static int      s_replay_mode;
 static int      s_race_countdown_ticks;
 static int      s_race_countdown_state;
@@ -1127,6 +1136,35 @@ int td5_game_get_wanted_kills(int slot)
     return v;
 }
 
+/* Cop-chase scoring (port wiring for fields the HUD/results read).
+ *
+ * [FIX 2026-05-30 cop-chase] td5_ai_wanted_cop_hit previously accumulated
+ * private write-only counters that nothing displayed, so the cop-chase score
+ * and bust count never appeared. The original AwardWantedDamageScore @
+ * 0x0043D690 awards ram points to the player/cop at gap_01f8+0xD0 (=actor
+ * +0x2C8, the same field the speed bonus uses, mirrored here by
+ * accumulated_score) and counts busts in the field BuildResultsTable reads
+ * back (actor+0x384, special_encounter_state). Wire both. Awarded to the
+ * player/cop (slot 0 = the wanted-scoring actor). */
+void td5_game_add_wanted_score(int slot, int points)
+{
+    if (slot < 0 || slot >= TD5_MAX_RACER_SLOTS) return;
+    s_metrics[slot].accumulated_score += points;
+    TD5_Actor *a = td5_game_get_actor(slot);
+    if (a) a->clean_driving_score += points;   /* mirror orig +0x2C8 */
+}
+
+void td5_game_add_wanted_kill(int slot)
+{
+    if (slot < 0 || slot >= TD5_MAX_RACER_SLOTS) return;
+    s_metrics[slot].wanted_kills++;
+    /* Mirror into actor+0x384 (the low byte is the bust count read by
+     * BuildResultsTable @ 0x0040AA0F). Safe in cop chase: the special-
+     * encounter system is disabled (gSpecialEncounterEnabled=0). */
+    TD5_Actor *a = td5_game_get_actor(slot);
+    if (a) a->special_encounter_state++;
+}
+
 /* Returns the race order slot index at position 'pos' (0=1st, ...).
  * [CONFIRMED: g_raceOrderTable = s_race_order at 0x004ae279] */
 int td5_game_get_race_order(int pos)
@@ -1535,6 +1573,31 @@ int td5_game_init_race_session(void) {
 
     /* ---- Step 4b: Initialize race sound resources ---- */
     td5_sound_init_race_resources();
+
+    /* ---- Cop Chase: force the player into a POLICE car ----
+     * [FIX 2026-05-30 cop-chase] Faithful to the original car-select clamp for
+     * game_type 8: CarSelectionScreenStateMachine @ 0x0040E0B3 restricts the
+     * player's EXT car id to 0x21..0x24 = the 4 police cars (cop/sp5/sp6/sp7.zip
+     * = port s_car_zip_paths indices 33..36 = Police Cerbera/Mustang/Charger/
+     * Camaro). The port's frontend never clamped, so the player kept their menu
+     * car (a non-police model — the user saw a regular Cerbera). Clamp here, the
+     * single point before the model/cardef/sound load below picks up
+     * g_td5.car_index. Respect an already-police choice (33..36); otherwise
+     * default to the Police Cerbera (33 = cars/cop.zip). Suspects (slots 1..5)
+     * stay varied via the normal opponent roster — only the player is police
+     * (CONFIRMED: orig opponent loop @ 0x0040DD5B uses the difficulty roster,
+     * not the police set). */
+    if (g_td5.wanted_mode_enabled) {
+        if (g_td5.car_index < 33 || g_td5.car_index > 36) {
+            TD5_LOG_I(LOG_TAG,
+                      "Cop Chase: forcing player car %d -> 33 (Police Cerbera, cop.zip)",
+                      g_td5.car_index);
+            g_td5.car_index = 33;
+        } else {
+            TD5_LOG_I(LOG_TAG, "Cop Chase: player car %d already a police car",
+                      g_td5.car_index);
+        }
+    }
 
     /* ---- Step 5: Load vehicle assets and sound banks for all active slots ---- */
     for (int i = 0; i < TD5_MAX_RACER_SLOTS; i++) {
@@ -2107,6 +2170,10 @@ int td5_game_init_race_session(void) {
 
     /* ---- Step 15: Configure force feedback + input mapping ---- */
     td5_input_set_active_players(g_td5.split_screen_mode > 0 ? 2 : 1);
+    /* Resolve each player's input device (keyboard / joystick 1 / joystick 2)
+     * from the INI override or Config.td5 and create the DirectInput devices +
+     * push joystick bindings, BEFORE FF init (which binds slot 0's device). */
+    td5_input_apply_device_selection();
     td5_input_ff_init();
     td5_input_reset_accumulators();
     td5_input_reset_buffers();
@@ -2327,6 +2394,8 @@ int td5_game_init_race_session(void) {
     s_fade_accumulator = 0.0f;
     s_post_finish_cooldown = 0;
     s_race_end_timer_start = 0;
+    s_victory_hold_start = 0;
+    s_finish_position_display = 0;
 
     /* Reset results table */
     reset_results_table();
@@ -2669,6 +2738,15 @@ int td5_game_run_race_frame(void) {
         if (completion) {
             g_td5.race_end_fade_state = 1;
 
+            /* Capture the finishing place ONCE for the centered victory digit.
+             * Reading actor->race_position every frame in the draw path was racy
+             * (update_race_order can re-sort mid-window), which blanked/changed
+             * the number — [user 2026-05-30: "number sometimes is not present"]. */
+            {
+                TD5_Actor *pl = td5_game_get_actor(0);
+                s_finish_position_display = pl ? (int)pl->race_position + 1 : 1;
+            }
+
             /* Select fade direction based on viewport layout */
             td5_game_begin_fade_out(g_td5.split_screen_mode);
         }
@@ -2684,32 +2762,46 @@ int td5_game_run_race_frame(void) {
             }
         }
 
-        /* Accumulate fade — ~1s wipe at 60fps.
-         * Clamp dt to 1/30 to prevent instant fade after pause frames
-         * (pause menu exit produces a huge dt spike on the next frame). */
-        float fade_dt_seconds = td5_game_normalized_dt_to_seconds(g_td5.normalized_frame_dt);
-        /* Per-frame cap guards against the huge dt spike on pause-menu exit. Scale
-         * the cap with the game-speed (fast-forward) multiplier so the black wipe
-         * stays in sync with the sim at higher speeds instead of crawling at
-         * real-time while everything else races (user 2026-05-30: black transition
-         * didn't scale with game speed). At 1x the cap is unchanged (~1s wipe). */
-        float fade_cap = 0.034f;
-        if (g_td5.ini.trace_fast_forward > 1.0f) fade_cap *= g_td5.ini.trace_fast_forward;
-        if (fade_dt_seconds > fade_cap) fade_dt_seconds = fade_cap;
-        s_fade_accumulator += fade_dt_seconds * 255.0f;
-        if (s_fade_accumulator >= 255.0f) {
-            s_fade_accumulator = 255.0f;
+        /* Victory hold: while the 1st-place star is playing, freeze the fade so
+         * the race view (with the white star + centered finishing number) stays
+         * up for TD5_VICTORY_HOLD_MS, THEN fade to results. Without this the
+         * race exited in ~0.5s and the (now faithfully-slow 1/640) star never
+         * got room to expand — it read as a fast dark flash and the number
+         * blinked by. The directional wipe is already suppressed for the star
+         * case (mutual-exclusion gate below), so the hold just delays the cut to
+         * results. [user 2026-05-30: animation too fast / number missing.] */
+        int victory_holding =
+            (s_race_end_radial_pulse_enabled && s_victory_hold_start != 0 &&
+             (td5_plat_time_ms() - s_victory_hold_start) < TD5_VICTORY_HOLD_MS);
 
-            /* Fade complete: release all race resources and exit */
-            td5_game_release_race_resources();
+        if (!victory_holding) {
+            /* Accumulate fade — ~1s wipe at 60fps.
+             * Clamp dt to 1/30 to prevent instant fade after pause frames
+             * (pause menu exit produces a huge dt spike on the next frame). */
+            float fade_dt_seconds = td5_game_normalized_dt_to_seconds(g_td5.normalized_frame_dt);
+            /* Per-frame cap guards against the huge dt spike on pause-menu exit. Scale
+             * the cap with the game-speed (fast-forward) multiplier so the black wipe
+             * stays in sync with the sim at higher speeds instead of crawling at
+             * real-time while everything else races (user 2026-05-30: black transition
+             * didn't scale with game speed). At 1x the cap is unchanged (~1s wipe). */
+            float fade_cap = 0.034f;
+            if (g_td5.ini.trace_fast_forward > 1.0f) fade_cap *= g_td5.ini.trace_fast_forward;
+            if (fade_dt_seconds > fade_cap) fade_dt_seconds = fade_cap;
+            s_fade_accumulator += fade_dt_seconds * 255.0f;
+            if (s_fade_accumulator >= 255.0f) {
+                s_fade_accumulator = 255.0f;
 
-            if (s_pause_exit_pending) {
-                TD5_LOG_I(LOG_TAG, "Fade complete (ESC exit) -> main menu");
-                s_pause_exit_pending = 0;
-                return 2;  /* 2 = ESC quit (-> main menu) */
+                /* Fade complete: release all race resources and exit */
+                td5_game_release_race_resources();
+
+                if (s_pause_exit_pending) {
+                    TD5_LOG_I(LOG_TAG, "Fade complete (ESC exit) -> main menu");
+                    s_pause_exit_pending = 0;
+                    return 2;  /* 2 = ESC quit (-> main menu) */
+                }
+                TD5_LOG_I(LOG_TAG, "Fade complete (race finish) -> results");
+                return 1;  /* 1 = normal race finish (-> results screen) */
             }
-            TD5_LOG_I(LOG_TAG, "Fade complete (race finish) -> results");
-            return 1;  /* 1 = normal race finish (-> results screen) */
         }
     }
 
@@ -3433,6 +3525,20 @@ int td5_game_run_race_frame(void) {
         /* Render race actors for this view */
         td5_render_actors_for_view(vp);
 
+        /* Debug: collision-wireframe overlay (F12 / [Debug] Collisions /
+         * --DebugCollisions). Drawn after opaque terrain + actors so the depth
+         * buffer occludes hidden rails, and before translucent VFX. Centered on
+         * the raw current span (+0x80) of the actor this viewport follows. */
+        if (g_td5.ini.debug_collisions) {
+            TD5_Actor *wire_actor = td5_game_get_actor(g_actorSlotForView[vp]);
+            if (wire_actor) {
+                int wire_span = *(int16_t *)((uint8_t *)wire_actor + 0x80);
+                td5_render_debug_lines_reset();
+                td5_track_debug_emit_collision_lines(wire_span, 40);
+                td5_render_debug_lines_flush();
+            }
+        }
+
         /* VFX: tire tracks, particles */
         td5_vfx_render_tire_tracks();
         td5_vfx_render_tire_marks();
@@ -3492,16 +3598,10 @@ int td5_game_run_race_frame(void) {
         td5_hud_draw_race_fade(s_fade_accumulator, g_td5.fade_direction);
     }
 
-    /* Finishing position: big centered digit during the race-end victory
-     * window (port enhancement, user 2026-05-30). Drawn last so it stays
-     * readable over the star glow / directional fade. race_position is 0-based
-     * (0 = 1st); display 1-based. */
-    if (g_td5.race_end_fade_state > 0) {
-        TD5_Actor *fp_player = td5_game_get_actor(0);
-        if (fp_player) {
-            td5_hud_draw_finish_position((int)fp_player->race_position + 1);
-        }
-    }
+    /* Finishing-position digit is now drawn INSIDE td5_hud_render_overlays (in the
+     * centered render state, alongside the star pulse). Drawing it here picked up
+     * a leftover viewport/clip offset and landed it off-centre. The captured place
+     * is exposed via td5_game_get_finish_position() below. */
 
     td5_hud_flush_text();
 
@@ -3517,27 +3617,17 @@ int td5_game_run_race_frame(void) {
             g_camWorldPos[vp][2]);
     }
 
-    /* Feed per-vehicle skid intensity and gear state into the sound system */
+    /* Feed per-vehicle gear state into the sound system (engine/horn vol LUT).
+     * The tyre screech is NOT plumbed from here: the original 0x440B00 D1 block
+     * reads the slip-excess (+0x31C/+0x320) directly off the actor, so the port's
+     * mixer reads it directly too -- no skid-intensity feed. */
     for (i = 0; i < TD5_MAX_RACER_SLOTS; i++) {
         if (s_slot_state[i].state == 3) continue;
         TD5_Actor *actor_snd = td5_game_get_actor(i);
         if (!actor_snd) continue;
         uint8_t *a = (uint8_t *)actor_snd;
 
-        /* Skid intensity: max of front/rear axle slip excess (offset 0x31C, 0x320) */
-        int slip_front = *(int32_t *)(a + 0x31C);
-        int slip_rear  = *(int32_t *)(a + 0x320);
-        int slip_max   = (slip_front > slip_rear) ? slip_front : slip_rear;
-        if (slip_max < 0) slip_max = 0;
-
-        /* Feed skid intensity for the viewport that is watching this vehicle */
-        for (int vp = 0; vp < (g_td5.split_screen_mode ? 2 : 1); vp++) {
-            if (g_actorSlotForView[vp] == i) {
-                td5_sound_set_skid_intensity(vp, slip_max);
-            }
-        }
-
-        /* Gear state (offset 0x224) -- used for horn volume table lookup */
+        /* Gear state (offset 0x224) -- used for engine/horn volume table lookup */
         int gear = *(int32_t *)(a + 0x224);
         td5_sound_set_gear_state(i, gear);
     }
@@ -4307,6 +4397,15 @@ static void accumulate_speed_bonus(int slot) {
     ActorRaceMetric *m = &s_metrics[slot];
 
     if (!actor) return;
+    /* [FIX 2026-05-31 cop-chase] No passive speed/clean-driving bonus in cop
+     * chase. In the original the clean-driving score is gated on the actor-9
+     * special encounter, which is DISABLED in wanted mode (gSpecialEncounter
+     * Enabled=0), so cop-chase POINTS = the RAM/BUST score ONLY — you do NOT
+     * earn points just for driving. User-confirmed against the original; the
+     * port previously accumulated this every tick into accumulated_score (the
+     * field the cop-chase POINTS HUD reads), making POINTS tick up while
+     * merely driving. Ram points (td5_game_add_wanted_score) still accrue. */
+    if (g_td5.wanted_mode_enabled) return;
     if (s_slot_state[slot].companion_1 != 0) return;       /* finished */
     if (actor->finish_time != 0) return;                    /* finished (mirrors orig actor+0x328 gate) */
     if (actor->surface_contact_flags != 0) return;          /* in contact / airborne flag set */
@@ -4723,6 +4822,11 @@ void td5_game_begin_fade_out(int param) {
              * right after ResetHudRadialPulseOverlay -> suppresses the
              * directional fade for this race (star wipe ONLY). */
             s_race_end_radial_pulse_enabled = 1;
+            /* Arm the victory hold so the star animation + finishing number get
+             * TD5_VICTORY_HOLD_MS of screen time before the cut to results. */
+            s_victory_hold_start = td5_plat_time_ms();
+            TD5_LOG_I(LOG_TAG, "Victory hold armed: pos=%d hold=%ums",
+                      s_finish_position_display, TD5_VICTORY_HOLD_MS);
         }
     } else {
         TD5_LOG_I(LOG_TAG,
@@ -4871,6 +4975,14 @@ float td5_game_get_fps(void) {
 
 float td5_game_get_frame_dt(void) {
     return g_td5.normalized_frame_dt;
+}
+
+/* 1-based finishing place captured at the finish line, for the centered victory
+ * digit drawn by td5_hud_render_overlays. 0 = no finish this race yet.
+ * (Distinct from td5_game_get_finish_position(slot), which reads the results
+ * table's 0-based final_position and is only valid after results are built.) */
+int td5_game_get_victory_position(void) {
+    return s_finish_position_display;
 }
 
 /* ========================================================================

@@ -312,10 +312,6 @@ static const int16_t s_taillight_offsets[4][3] = {
     { -80,  80, 0 },   /* 0x463048: bottom-right */
 };
 
-/* --- Billboard animation --- */
-static int32_t *s_billboard_phase_table;
-static int      s_billboard_count;
-
 static const char *vfx_weather_type_name(TD5_WeatherType type)
 {
     switch (type) {
@@ -446,10 +442,6 @@ int td5_vfx_init(void) {
     /* Clear smoke pool */
     s_smoke_pool = NULL;
 
-    /* Billboard init */
-    s_billboard_phase_table = NULL;
-    s_billboard_count = 0;
-
     s_current_view_index = 0;
     s_vfx_debug_frame = 0;
 
@@ -494,7 +486,9 @@ void td5_vfx_shutdown(void) {
 void td5_vfx_tick(void) {
     s_vfx_debug_frame++;
     td5_vfx_update_tire_tracks();
-    td5_vfx_advance_billboard_anims();
+    /* Billboard (cop-marker) phase advance is driven once per rendered
+     * viewport by td5_vfx_advance_tracked_marker_phases() — the single live
+     * port of AdvanceWorldBillboardAnimations 0x43CDC0. */
 
     /* UpdateRaceParticleEffects @ 0x429790 runs once per view per sim tick;
      * decrements slot lifetimes and drives update callbacks. Without this
@@ -2735,11 +2729,17 @@ void td5_vfx_spawn_smoke(TD5_Actor *actor) {
 
     uint8_t *ap = (uint8_t *)actor;
 
-    /* Read actor speed -- only spawn if moving */
+    /* [FIX 2026-05-31 cop-chase] The original SpawnVehicleSmokeSprite @ 0x429CF0
+     * has NO speed gate — only the rand()%10 probability above (CONFIRMED). The
+     * port's `if (abs_speed < 4000) return;` was a port-only addition that
+     * suppressed this effect at low speed. The sole caller is the cop-chase
+     * "wanted" smoke (td5_render.c, gated on g_wanted_damage_state[slot]==0 =
+     * a BUSTED suspect), and busted cars coast to a STOP — so the speed gate
+     * killed the smoke exactly when it should appear (over a disabled suspect),
+     * making the effect "completely missing" vs the original. Gate removed. */
     int32_t speed;
     memcpy(&speed, ap + 0x314, 4);
     int abs_speed = (speed < 0) ? -speed : speed;
-    if (abs_speed < 4000) return;
 
     /* Read world position — orig 0x00429CF0 receives `actor+0x1FC` as param_2
      * and reads x/y/z directly into the particle pos with no offset or rotation.
@@ -3124,31 +3124,18 @@ void td5_vfx_render_taillights(int actor_index) {
 /* ========================================================================
  * 6. Billboard Animations
  *    Original: AdvanceWorldBillboardAnimations (0x43CDC0)
+ *
+ * 0x43CDC0 walks the tracked-actor marker pool at 0x4BEDC0 (stride 0x22C,
+ * limit < 0x4BF218 = exactly 2 entries) and adds 0x10 to each entry's phase
+ * head at +0x00 — i.e. it animates the 2 cop-chase strobe markers. That pool
+ * is the SAME one initialised by 0x43C9E0 and drawn by 0x43CDE0 (confirmed by
+ * shared base/stride). The faithful port is td5_vfx_advance_tracked_marker_phases()
+ * below, which advances the 2 s_tracked_marker_phase[] counters by 0x10.
+ *
+ * The former td5_vfx_advance_billboard_anims() stub was a no-op duplicate: it
+ * iterated a never-allocated s_billboard_phase_table with a wrong +0x20 step.
+ * It has been removed in favour of the single live implementation.
  * ======================================================================== */
-
-/**
- * AdvanceWorldBillboardAnimations (0x43CDC0)
- *
- * Simple phase counter advance for world billboard animations.
- * Iterates the billboard table at DAT_004BEDC0 with stride 0x22C (556 bytes),
- * incrementing the phase counter at offset +0x00 by 0x10 per tick.
- *
- * The table runs from 0x4BEDC0 to 0x4BF218 (range of ~0x458 = 1112 bytes).
- * At stride 0x22C, this is 2 entries (1112 / 556 = 2).
- */
-void td5_vfx_advance_billboard_anims(void) {
-    /* Original iterates int* from DAT_004bedc0 stepping by 0x8B dwords
-     * (0x8B * 4 = 0x22C bytes) until address reaches 0x4BF218.
-     * Each iteration: *phase_ptr += 0x10 */
-
-    /* In the source port, this would iterate the billboard table
-     * if we had it loaded. For now, iterate the count we know. */
-    if (!s_billboard_phase_table) return;
-
-    for (int i = 0; i < s_billboard_count; i++) {
-        s_billboard_phase_table[i] += TD5_VFX_BILLBOARD_PHASE_INC;
-    }
-}
 
 /* --- Wheel Billboards (0x446F00) --- */
 
@@ -3234,8 +3221,8 @@ static VfxTrackedMarkerLayer s_tracked_marker_layers[TD5_VFX_TRACKED_MARKER_COUN
                                                     [TD5_VFX_TRACKED_LAYERS_PER_MARK];
 
 /* Per-marker animation phase counter — advanced by
- * td5_vfx_advance_billboard_anims (orig AdvanceWorldBillboardAnimations
- * stride 0x22c × 2 entries = first 2 sub-blocks of the pool). Stored as
+ * td5_vfx_advance_tracked_marker_phases (orig AdvanceWorldBillboardAnimations
+ * 0x43CDC0, stride 0x22c × 2 entries = the 2 sub-blocks of the pool). Stored as
  * int matching orig u8 wrap-around indexing in RenderTrackedActorMarker
  * (`(byte)(&pool)[iVar13] * -4`). */
 static int     s_tracked_marker_phase[TD5_VFX_TRACKED_MARKER_COUNT];
@@ -3300,19 +3287,36 @@ static void tracked_marker_lookup_layer(VfxTrackedMarkerLayer *out, const char *
  *       in the render path from g_wantedTargetTrackerActive. */
 void td5_vfx_init_tracked_actor_marker_billboards(void)
 {
-    /* Layer order per marker:
-     *   layer 0 = POLICELT_RED  (red strobe — slot 0 in orig 6-quad block)
-     *   layer 1 = POLICELT_BLUE (blue strobe — slot 1)
-     *   layer 2 = POLICE_RED for marker 0 / POLICE_BLUE for marker 1
-     *            (slot 2/3 in orig — orig has 4 unique atlas lookups and
-     *             only the "base" layer differs per marker iteration). */
-    tracked_marker_lookup_layer(&s_tracked_marker_layers[0][0], "POLICELT_RED");
-    tracked_marker_lookup_layer(&s_tracked_marker_layers[0][1], "POLICELT_BLUE");
-    tracked_marker_lookup_layer(&s_tracked_marker_layers[0][2], "POLICE_RED");
+    /* [FIX 2026-06-01 cop-chase] Per-marker color separation — the original
+     * draws TWO distinct lights: marker 0 = a fully-RED light, marker 1 = a
+     * fully-BLUE light. Each marker's three layers are all the SAME color:
+     *   marker 0: PoliceLt_red (strobe beam) + Police_red + Police_red
+     *   marker 1: PoliceLt_blue (strobe beam) + Police_blue + Police_blue
+     * [CONFIRMED by full RE of InitializeTrackedActorMarkerBillboards @ 0x0043c9e0
+     *  — every BuildSpriteQuadTemplate destination traced.]
+     *
+     * The previous port wrongly put POLICELT_RED + POLICELT_BLUE on BOTH markers
+     * (a red AND a blue strobe beam on each), only swapping the base — so the
+     * two distinct red/blue lights were never formed and POLICELT_BLUE was never
+     * rendered as marker 1's own beam. That muddled the colors and is the "light
+     * effect that isn't loaded right" the original shows cleanly. */
+    /* [FIX 2026-06-01 cop-chase] TEXTURE SHAPES (verified from the atlas):
+     *   POLICELT_RED/BLUE = SOFT radial glow blobs (diffused).
+     *   POLICE_RED/BLUE   = HARD solid rectangles (alpha 128 everywhere).
+     * The over-car "base" layer (L2, the small ±32 square) must use the SOFT
+     * glow (POLICELT) so it reads as a diffused light, NOT the hard POLICE
+     * rectangle (which rendered as the clear squares the user reported). The
+     * two sweeping beam layers (L0/L1) keep the glow + bar. Per-marker color is
+     * still separated (marker 0 red, marker 1 blue). */
+    /* marker 0 = RED light */
+    tracked_marker_lookup_layer(&s_tracked_marker_layers[0][0], "POLICELT_RED"); /* glow beam */
+    tracked_marker_lookup_layer(&s_tracked_marker_layers[0][1], "POLICE_RED");   /* bar beam  */
+    tracked_marker_lookup_layer(&s_tracked_marker_layers[0][2], "POLICELT_RED"); /* soft over-car glow (was POLICE_RED hard rect) */
 
-    tracked_marker_lookup_layer(&s_tracked_marker_layers[1][0], "POLICELT_RED");
-    tracked_marker_lookup_layer(&s_tracked_marker_layers[1][1], "POLICELT_BLUE");
-    tracked_marker_lookup_layer(&s_tracked_marker_layers[1][2], "POLICE_BLUE");
+    /* marker 1 = BLUE light */
+    tracked_marker_lookup_layer(&s_tracked_marker_layers[1][0], "POLICELT_BLUE");
+    tracked_marker_lookup_layer(&s_tracked_marker_layers[1][1], "POLICE_BLUE");
+    tracked_marker_lookup_layer(&s_tracked_marker_layers[1][2], "POLICELT_BLUE");
 
     /* Phase counters start at 0 (orig: _g_trackedActorMarkerBillboardPool=0,
      * advanced by 0x10/tick via AdvanceWorldBillboardAnimations). */
@@ -3329,10 +3333,10 @@ void td5_vfx_init_tracked_actor_marker_billboards(void)
               s_tracked_marker_layers[1][2].page);
 }
 
-/* Phase advance — runs per tick alongside td5_vfx_advance_billboard_anims.
- * Orig AdvanceWorldBillboardAnimations @ 0x0043cdc0 walks pool entries 0..2
- * (stride 0x22c, limit < 0x4bf218 = 2 entries) and adds 0x10 to each phase
- * head. Port mirrors with explicit per-marker increment. */
+/* Phase advance — the single live port of AdvanceWorldBillboardAnimations
+ * @ 0x0043cdc0, which walks pool entries 0..2 (stride 0x22c, limit < 0x4bf218
+ * = 2 entries) and adds 0x10 to each phase head. Port mirrors with explicit
+ * per-marker increment. */
 void td5_vfx_advance_tracked_marker_phases(void) {
     if (!s_tracked_marker_initialized) return;
     for (int i = 0; i < TD5_VFX_TRACKED_MARKER_COUNT; i++) {

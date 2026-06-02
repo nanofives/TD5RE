@@ -22,10 +22,18 @@
 
 typedef struct OBB_CornerData OBB_CornerData;
 
+#ifdef TD5RE_RELEASE
+/* Release build: the pool14 V2V trace module is not linked. These call sites in
+ * td5_physics.c are ungated, so neutralize them to no-ops here (the args are
+ * still evaluated for real collision math elsewhere). */
+#define td5_pilot_v2v_enter(...) ((void)0)
+#define td5_pilot_v2v_leave(...) ((void)0)
+#else
 void td5_pilot_v2v_enter(const TD5_Actor *A, const TD5_Actor *B,
                          const OBB_CornerData *corner,
                          int32_t angle, int32_t impactForce);
 void td5_pilot_v2v_leave(const TD5_Actor *A, const TD5_Actor *B,
                          int32_t retval);
+#endif
 
 #endif

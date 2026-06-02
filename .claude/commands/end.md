@@ -116,14 +116,23 @@ else
 fi
 ```
 
-### 2d. Build verification (confirm rebase didn't break compile)
+### 2d. Build verification (confirm rebase didn't break EITHER variant)
+
+Build BOTH source-port executables — the dev binary (`td5re.exe`, full RE
+instrumentation) and the release binary (`td5re_release.exe`, instrumentation
+stripped). Building both here catches release-only regressions: a new ungated
+pilot-trace call site that needs a `#ifndef TD5RE_RELEASE` guard, a broken
+`TD5RE_RELEASE` `#ifdef`, or a failed instrumentation-strip check.
 
 ```bash
 cd "${WORKTREE_DIR}/td5mod/src/td5re"
-./build_standalone.bat $$ 2>&1 | tail -30
+./build_all.bat 2>&1 | tail -50
 ```
 
-If the build fails after the rebase, fix compile errors (up to 2 attempts) before surfacing the recheck report.
+If either build fails after the rebase, fix the compile/link errors (up to 2
+attempts) before surfacing the recheck report. A release-link `undefined
+reference to td5_pilot_trace_*` almost always means a newly-added ungated trace
+call site needs a `#ifndef TD5RE_RELEASE` guard (the dev build won't catch it).
 
 ### 2e. Recheck gate — STOP if findings exist
 
@@ -570,11 +579,13 @@ cd C:/Users/maria/Desktop/Proyectos/TD5RE
 # Stage by explicit path. NEVER `git add -A` / `git add .` here — that is exactly
 # how a runtime save (_cleanup_*/Config.td5) got committed on 2026-05-29.
 git add td5mod/src/td5re/*.c td5mod/src/td5re/*.h 2>/dev/null || true
+git add td5mod/src/td5re/*.bat 2>/dev/null || true        # build scripts (dev + release)
 git add td5mod/src/*.c td5mod/src/*.h 2>/dev/null || true
 git add td5mod/ddraw_wrapper/src/*.c td5mod/ddraw_wrapper/src/*.h 2>/dev/null || true
 git add .claude/commands/*.md 2>/dev/null || true        # skill edits
 git add re/analysis/ re/sessions/ 2>/dev/null || true     # RE notes
 git add scripts/ 2>/dev/null || true                      # tooling
+git add td5re_release.ini 2>/dev/null || true             # release config (NOT td5re.ini — that's test scaffolding)
 git add .gitignore CLAUDE.md AGENTS.md 2>/dev/null || true
 
 # Forbidden-path guard (same as Step 5): never original/ or re/ outside the
@@ -636,6 +647,38 @@ echo "origin/master in sync — session fully published."
 
 ---
 
+## Step 7.7: Rebuild both binaries into the project root
+
+After the merge lands on master, rebuild BOTH source-port executables from the
+**main tree** so the project-root binaries reflect the merged result. Step 2d
+built inside the worktree (now torn down), and its binaries deployed to the
+*worktree* root — not main. This step refreshes the real deliverables in the
+project root.
+
+Runs only on the merge-confirmed **second** `/end` invocation and on a
+main-tree-only `/end`. (The first invocation stops at Step 5, so it never reaches
+here — no half-built binaries from an unconfirmed merge.)
+
+```bash
+cd C:/Users/maria/Desktop/Proyectos/TD5RE/td5mod/src/td5re
+./build_all.bat 2>&1 | tail -50
+```
+
+This deploys `td5re.exe` (dev) and `td5re_release.exe` (release) to the project
+root. Both `.exe`s and the `build/` + `build_release/` object dirs are gitignored
+(`*.exe`, `build_*/`) — never commit them.
+
+**Rules for this step:**
+- **Post-merge artifact refresh, not a merge gate.** The merge already landed and
+  pushed in Step 5; if a build fails here, surface it in the Step 8 report but do
+  NOT attempt to revert the merge — the source is fine, the local binary is just
+  stale.
+- **Always builds BOTH variants** via `build_all.bat`. A green dev build with a
+  broken release build (or vice-versa) is still a failure to report.
+- **Idempotent** — re-running rebuilds both binaries from the same merged master.
+
+---
+
 ## Step 8: Session close report
 
 Print a final summary to close the session cleanly:
@@ -645,6 +688,7 @@ SESSION CLOSED — ${SESSION_TAG}
 ================================
 Merged: yes / skipped (reason)
 Push:   origin/master in sync / pending (reason)
+Binaries: td5re.exe + td5re_release.exe rebuilt into project root / build FAILED (reason)
 
 Resolved this session:
   <list from Step 3b or 'none'>
@@ -682,3 +726,4 @@ Next recommended action:
 - **If `git worktree list` shows no active `fix-*` worktrees and we're in the main tree**: Steps 5–7 reduce to just a push + memory update. Skip teardown entirely. **Steps 7.5 and 7.6 still run** — 7.5 sweeps stray branch refs (`worktree-agent-*`, orphaned `fix-*`) and 7.6 commits any safe main-tree work + pushes, even when there are no worktrees left.
 - **Step 7.5 never force-merges and never uses `git branch -D`.** It deletes only branches/worktrees fully contained in master; everything with unmerged work is reported for the user, never destroyed. This is the rule that prevents `/end` from silently swallowing an unfinished candidate fix.
 - **`/end` always ends with `origin/master` in sync (Step 7.6).** It commits remaining *safe* main-tree work (explicit allowlist — never `git add -A`, never `td5re.ini`/saves/unknowns) and pushes as its final action. The session is not "done" until `origin/master..master` is empty. This is why you should never have to manually commit/push after a clean `/end`.
+- **`/end` always builds BOTH binaries (Step 2d in-worktree as the recheck gate, Step 7.7 in main tree as the deliverable).** `build_all.bat` produces `td5re.exe` (dev, instrumented) and `td5re_release.exe` (release, stripped) side by side in the project root. A release-link `undefined reference to td5_pilot_trace_*` means a new ungated trace call site needs a `#ifndef TD5RE_RELEASE` guard — the dev build alone will not catch it. Never commit the `.exe`s or `build*/` dirs (gitignored); `td5re_release.ini` IS tracked (release config), `td5re.ini` is NOT (test scaffolding).
