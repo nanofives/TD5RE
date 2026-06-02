@@ -57,6 +57,9 @@ int     g_racer_count           = 0;
 int     g_game_type             = 0;
 int     g_split_screen_mode     = 0;
 int     g_replay_mode           = 0;
+/* Attract-demo flag (orig g_replayModeFlag @ 0x4AAF64). Distinct from
+ * g_replay_mode (orig g_inputPlaybackActive @ 0x466E9C). See td5_game.h. */
+int     g_demo_mode             = 0;
 /* [FIX 2026-05-24 OVERSIGHT: wanted-mode-init; orig 0x004aaf68]
  * Removed orphan g_wanted_mode_enabled (was never written; shadowed
  * the live flag g_td5.wanted_mode_enabled). Consumers re-routed to the
@@ -485,7 +488,14 @@ static uint32_t s_race_end_timer_start;
 static uint32_t s_victory_hold_start;   /* ms timestamp the star armed (0 = none) */
 static int      s_finish_position_display; /* 1-based place captured at finish (0 = none) */
 
-static int      s_replay_mode;
+static int      s_replay_mode;       /* 1 = input-playback "View Replay" race */
+static int      s_demo_mode;         /* 1 = attract-mode demo race */
+/* Per-race RNG seed captured at the start of a recorded (non-replay) race and
+ * restored when that race is replayed, so the AI/traffic RNG reproduces the
+ * recorded run. Mirrors the original's g_savedRngSeed (@0x4AAD64) save/restore
+ * in InitializeRaceSession @0x42AA22-0x42AA4B. */
+static uint32_t s_saved_race_seed;
+static int      s_replay_abort_pending; /* 1 = ESC pressed during replay → exit to results */
 static int      s_race_countdown_ticks;
 static int      s_race_countdown_state;
 static int      s_pause_menu_active;
@@ -669,6 +679,8 @@ int td5_game_init(void) {
     s_benchmark_image_load_pending = 1;
     s_benchmark_image_data = NULL;
     s_replay_mode = 0;
+    s_demo_mode = 0;
+    s_replay_abort_pending = 0;
     s_race_end_timer_start = 0;
     s_race_countdown_ticks = 0;
     s_race_countdown_state = 0;
@@ -1245,6 +1257,20 @@ int td5_game_init_race_session(void) {
     CK("ck0_start");
     TD5_LOG_I(LOG_TAG, "InitializeRaceSession: begin");
 
+#ifndef TD5RE_RELEASE
+    /* Dev smoke-test: TD5RE_FORCE_REPLAY=1 boots straight into View-Replay mode
+     * (the in-memory record buffer is empty on a fresh boot, so the played-back
+     * car stays idle) — lets the REPLAY banner, cinematic trackside camera, and
+     * ESC-to-exit be observed without first driving and finishing a real race.
+     * Compiled out of the release build. */
+    if (!s_replay_mode && getenv("TD5RE_FORCE_REPLAY") != NULL) {
+        td5_game_set_replay_mode(1);
+        td5_input_set_replay_mode(1);
+        td5_input_set_playback_active(1);
+        TD5_LOG_W(LOG_TAG, "TD5RE_FORCE_REPLAY: forcing replay mode for this race");
+    }
+#endif
+
     /* ---- Mode overrides from InitializeRaceSession @ 0x42AA10 ----
      *
      * Network session @ 0x42ABD5 [RE basis: research agent pass]:
@@ -1327,10 +1353,24 @@ int td5_game_init_race_session(void) {
          * crt_seed=0x1A2B3C4D). Without this, port's CRT diverges each run
          * and any rand()-fed init field (route_table_selector etc.)
          * randomises into sub_tick=0. */
-        uint32_t session_seed =
-            (g_td5.ini.race_trace_enabled || td5_trace_replay_active())
-                ? (uint32_t)0x1A2B3C4D
-                : (uint32_t)GetTickCount();
+        /* Determinism: a recorded race captures its seed; replaying that race
+         * RESTORES the captured seed so AI/traffic RNG reproduce the recorded
+         * run. Mirrors InitializeRaceSession @0x42AA22-0x42AA4B (non-replay =
+         * save g_savedRngSeed; replay = restore it). Without this the port
+         * reseeded from GetTickCount() each race → replay = "not my race".
+         * Trace/snapshot modes keep their fixed seed and are never replays. */
+        uint32_t session_seed;
+        if (s_replay_mode) {
+            session_seed = s_saved_race_seed;
+            TD5_LOG_I(LOG_TAG, "InitRace step 0/19: REPLAY restoring saved seed=0x%08X",
+                      session_seed);
+        } else {
+            session_seed =
+                (g_td5.ini.race_trace_enabled || td5_trace_replay_active())
+                    ? (uint32_t)0x1A2B3C4D
+                    : (uint32_t)GetTickCount();
+            s_saved_race_seed = session_seed;   /* capture for a later View Replay */
+        }
         srand(session_seed);
         /* Drain 12 entries to advance CRT state (port doesn't have the
          * DAT_004aadbc global table but must step _holdrand the same way) */
@@ -1480,6 +1520,8 @@ int td5_game_init_race_session(void) {
     g_game_type = g_td5.game_type;
     g_split_screen_mode = g_td5.split_screen_mode;
     g_replay_mode = s_replay_mode;
+    g_demo_mode   = s_demo_mode;
+    s_replay_abort_pending = 0;   /* fresh per race */
     /* Racer count:
      *   Time trial: 1 (or 2 in split-screen)
      *   Cop Chase (wanted) / any non-zero game_type: 2
@@ -1682,6 +1724,33 @@ int td5_game_init_race_session(void) {
     /* ---- Step 6: Bind track strip runtime pointers ---- */
     /* (Internal to td5_asset_load_level -- strip data is patched in place) */
     TD5_LOG_I(LOG_TAG, "InitRace step 6/19: track strip runtime pointers bound");
+
+    /* ---- Step 6b: Trackside (cinematic) replay-camera profiles ----
+     * A View-Replay race runs the original's cinematic trackside cameras. Bind
+     * this track's authored profile table (selected by world_x = the same pool
+     * record the traffic/track loaders use, direction-aware) and count the valid
+     * profiles. Mirrors orig InitializeRaceSession @0x42aa10: after
+     * LoadTrackRuntimeData binds gTracksideCameraProfiles, it calls
+     * InitializeTracksideCameraProfiles when g_inputPlaybackActive. Runs after
+     * step 6 so the strip-span/vertex tables the profiles index are already
+     * bound. No-op for a normal race. If the track/direction has no profile
+     * table (e.g. reverse unavailable, or an unused pool slot), the count stays
+     * 0 and the per-frame replay camera falls back to chase so the played-back
+     * car is still visible (see td5_camera_update_transition_state). Benchmark
+     * trackside cameras (orig also inits them) are left on chase — deferred. */
+    if (s_replay_mode) {
+        extern int g_trackType;   /* camera circuit-orbit-override flag */
+        int world_x = td5_asset_track_pool_index(g_td5.track_index,
+                                                  g_td5.reverse_direction);
+        g_trackType = g_track_is_circuit;   /* faithful: circuit forces orbit mode */
+        td5_camera_bind_trackside_profiles(world_x);
+        InitializeTracksideCameraProfiles();   /* self-guards NULL -> count 0 */
+        TD5_LOG_I(LOG_TAG,
+                  "InitRace step 6b: replay trackside cameras track=%d reverse=%d "
+                  "world_x=%d circuit=%d ready=%d",
+                  g_td5.track_index, g_td5.reverse_direction, world_x,
+                  g_track_is_circuit, td5_camera_replay_trackside_ready());
+    }
 
     /* ---- Step 7: Parse MODELS.DAT from level ZIP ---- */
     /* (Loaded as part of td5_asset_load_level) */
@@ -2206,7 +2275,14 @@ int td5_game_init_race_session(void) {
     /* ---- Step 19: Initialize HUD, pause menu overlay ---- */
     #define DBG_WRITE(msg) TD5_LOG_I(LOG_TAG, "Step19: %s", msg)
     DBG_WRITE("19a_before_overlay");
-    td5_hud_init_overlay_resources(1, 0);
+    /* race_mode arg mirrors orig InitializeRaceOverlayResources param_1:
+     * 0 = replay/benchmark (suppressed HUD; the replay sub-path lights the
+     * 0x80000000 REPLAY banner), 1 = normal race AND attract demo (full HUD).
+     * [CONFIRMED orig caller @0x42B4xx: (g_inputPlaybackActive==0 && !benchmark)?1:0]
+     * Demo is param_1=1 because the original clears g_inputPlaybackActive for
+     * demo; the "DEMO MODE" text comes from DrawRaceStatusText, not this bitmask. */
+    td5_hud_init_overlay_resources(
+        (s_replay_mode || g_td5.benchmark_active) ? 0 : 1, 0);
     DBG_WRITE("19b_before_layout");
     td5_hud_init_layout(g_td5.split_screen_mode);
     DBG_WRITE("19c_before_minimap");
@@ -2857,7 +2933,27 @@ int td5_game_run_race_frame(void) {
         int esc_edge = (esc_now && !s_prev_esc_state);
         int pause_menu_was_active = s_pause_menu_active;
         s_prev_esc_state = esc_now;
-        if (esc_edge && !s_pause_menu_active) {
+
+        /* Replay/demo abort: ESC during a cinematic (View Replay / attract demo)
+         * race does NOT open the pause menu — it ends the race immediately and
+         * returns to where it was launched (results for replay, menu for demo).
+         * [CONFIRMED orig PollRaceSessionInput @0x42C470: when g_inputPlaybackActive
+         *  the pause/MuteAll block is skipped and the abort block ORs bit 30 →
+         *  fade-out. The original used a simple ESC-to-exit, NOT a pause menu.] */
+        if (esc_edge && td5_game_is_cinematic_race() && !s_replay_abort_pending &&
+            g_td5.race_end_fade_state == 0) {
+            s_replay_abort_pending = 1;
+            /* View Replay was launched from the results screen → return there
+             * (s_pause_exit_pending left 0 → run-race-frame returns 1 = results).
+             * Attract demo was launched from the main menu → return there
+             * (s_pause_exit_pending = 1 → returns 2 = main menu). */
+            if (s_demo_mode) s_pause_exit_pending = 1;
+            TD5_LOG_I(LOG_TAG, "%s: ESC abort -> fade out (-> %s)",
+                      s_demo_mode ? "Demo" : "Replay",
+                      s_demo_mode ? "menu" : "results");
+            td5_game_begin_fade_out(0);
+        }
+        if (esc_edge && !s_pause_menu_active && !td5_game_is_cinematic_race()) {
             s_pause_menu_active = 1;
             s_pause_menu_cursor = 0;  /* default to VIEW so LEFT/RIGHT
                                        * immediately moves the view-distance
@@ -4845,7 +4941,12 @@ void td5_game_begin_fade_out(int param) {
         !g_td5.drag_race_enabled) {
         TD5_Actor *player = td5_game_get_actor(0);
         int rp = player ? (int)player->race_position : -1;
-        int star_fired = (player && player->race_position == 0 && !s_pause_exit_pending);
+        /* Never fire the victory star during a cinematic (View Replay / attract
+         * demo) race — the original suppresses all normal HUD elements there
+         * (replay bitmask = 0x80000000 only). This also keeps the ESC-abort path
+         * from triggering a star when the played-back car happens to lead. */
+        int star_fired = (player && player->race_position == 0 &&
+                          !s_pause_exit_pending && !td5_game_is_cinematic_race());
         /* DIAG (race-finish-transition /fix): make the star-gate decision observable. */
         TD5_LOG_I(LOG_TAG,
                   "STAR-GATE: param=%d net=%d gt=%d drag=%d race_position=%d pause_exit=%d -> star=%s",
@@ -5219,6 +5320,20 @@ int td5_game_is_replay_active(void) {
  * todo-view-replay-restarts-race-2026-05-19. */
 void td5_game_set_replay_mode(int v) {
     s_replay_mode = v ? 1 : 0;
+}
+
+/* Attract-demo flag (orig g_replayModeFlag). Independent of replay; drives the
+ * "DEMO MODE" status text. Sets both the static (synced at race init) and the
+ * live global the HUD reads. */
+void td5_game_set_demo_mode(int v) {
+    s_demo_mode = v ? 1 : 0;
+    g_demo_mode = s_demo_mode;
+}
+
+/* True when EITHER View Replay (input playback) OR attract demo is active.
+ * Benchmark is handled separately by its own flag. */
+int td5_game_is_cinematic_race(void) {
+    return td5_input_is_playback_active() || s_replay_mode || s_demo_mode;
 }
 /* [CONFIRMED @ 0x00443240 GetTrafficVehicleVariantType]: two-table lookup;
  * returns 2 if model==0xe(14), 1 otherwise, 0 if gate fails or index==4. */
