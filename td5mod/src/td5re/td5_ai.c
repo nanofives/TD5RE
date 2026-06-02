@@ -4238,8 +4238,9 @@ int td5_ai_find_nearest_route_peer(int *route_state_ptr) {
  *  10.  LAB_0043588d post-call zero block.
  *
  * ARCHITECTURAL DIVERGENCES (documented in code below):
- *   - RS_DIRECTION_POLARITY macro discrepancy: port writes BOTH 0x3F
- *     (orig) and 0x25 (port's macro). FIXME flagged in code.
+ *   - RS_DIRECTION_POLARITY: the port writes ONLY 0x3F (dword index 0x3F =
+ *     gActorRouteDirectionPolarity), matching the original. The earlier
+ *     defensive dual-write to 0x25 was removed (0x25 has no readers in orig).
  *   - Recycle heading dispatch collapsed into td5_track_compute_heading
  *     (see memory/reference_arch_recycle_heading_collapse.md).
  *
@@ -4294,11 +4295,11 @@ int td5_ai_find_nearest_route_peer(int *route_state_ptr) {
  *
  * NOTE on RS_DIRECTION_POLARITY: the disassembly writes to
  * gActorRouteDirectionPolarity (0x004afc5c), which is at route_state
- * base+0xFC = dword index 0x3F. The port's RS_DIRECTION_POLARITY macro
- * is currently defined as 0x25 (byte 0x94), which is a different field.
- * For byte-faithful behavior this port writes BOTH offsets (the original
- * 0x3F and the port's 0x25) so downstream code that reads either path
- * sees the correct polarity. FIXME: resolve the macro discrepancy globally.
+ * base+0xFC = dword index 0x3F. The port writes ONLY this field, via
+ * rs[RS_ROUTE_DIRECTION_POLARITY] (see the live write below), matching the
+ * original. An earlier port also wrote dword 0x25, but that field has no
+ * readers in the original listing, so the defensive dual-write was removed —
+ * no discrepancy remains.
  *
  * NOTE on ResolveActorSegmentBoundary: 0x00443FF0 is ported in unmerged
  * branch precise-00443FF0 (SHA b99e36a) as td5_track_resolve_actor_segment_boundary.
