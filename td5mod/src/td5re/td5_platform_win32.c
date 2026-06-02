@@ -494,14 +494,27 @@ void td5_plat_present(int vsync)
      * the top of present = the last presented frame; for a static frontend
      * screen this equals the current frame. Cheap no-op when unset. */
     {
-        static int s_fd_init = 0, s_fd_on = 0, s_fd_count = 0;
+        static int s_fd_init = 0, s_fd_on = 0, s_fd_count = 0, s_fd_seq = 0, s_fd_isseq = 0;
         static char s_fd_path[300];
         if (!s_fd_init) {
             const char *e = getenv("TD5RE_FRAMEDUMP");
             s_fd_init = 1;
-            if (e && e[0]) { s_fd_on = 1; strncpy(s_fd_path, e, sizeof(s_fd_path)-1); s_fd_path[sizeof(s_fd_path)-1]='\0'; }
+            if (e && e[0]) {
+                s_fd_on = 1; strncpy(s_fd_path, e, sizeof(s_fd_path)-1); s_fd_path[sizeof(s_fd_path)-1]='\0';
+                /* If the path contains a '%', treat it as a printf format and write a
+                 * numbered sequence (one PNG per dump tick) instead of overwriting. */
+                s_fd_isseq = (strchr(s_fd_path, '%') != NULL);
+            }
         }
-        if (s_fd_on && (s_fd_count++ % 30) == 0) td5_plat_dump_frame_png(s_fd_path);
+        if (s_fd_on && (s_fd_count++ % 30) == 0) {
+            if (s_fd_isseq) {
+                char buf[320];
+                snprintf(buf, sizeof(buf), s_fd_path, s_fd_seq++);
+                td5_plat_dump_frame_png(buf);
+            } else {
+                td5_plat_dump_frame_png(s_fd_path);
+            }
+        }
     }
 
     if (s_present_log_count < 120 && g_backend.scene_rendered) {

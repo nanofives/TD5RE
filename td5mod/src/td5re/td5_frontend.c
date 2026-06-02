@@ -21,6 +21,7 @@
 #include "td5_sound.h"
 #include "td5re.h"
 #include "td5_snk_strings.h"   /* byte-exact SNK_ labels baked from Language.dll */
+#include "td5_credits.h"       /* SNK_CreditsText array + dev mugshot map (Extras scroll) */
 #include "../../ddraw_wrapper/src/wrapper.h"
 
 #define WIN32_LEAN_AND_MEAN
@@ -404,6 +405,8 @@ static uint32_t s_fade_color;        /* packed 0x00RRGGBB from caller */
 static int  s_gallery_pic_index;
 static int  s_gallery_pic_surface;
 static int  s_gallery_visited_mask;
+static int  s_credit_mugshot_surf[K_CREDIT_MUGSHOT_COUNT]; /* dev photos, lazy-loaded (0=none) */
+static uint32_t s_credits_start_ms;  /* scroll-reel start timestamp */
 static int  s_language_bg_surface = 0;   /* LanguageScreen.tga 640x480 bg (ScreenLanguageSelect) */
 static int  s_language_flag_surface = 0; /* Language.tga 176x512 = 4 stacked 176x128 flag tiles */
 
@@ -538,6 +541,42 @@ static int  s_car_spec_car = -1; /* which car index is currently cached */
 static int s_track_preview_surface = 0;
 static int s_track_switch_tick = 16; /* 0-15 = animating in, 16 = settled */
 static int s_font_page = -1;
+/* When set, fe_draw_text preserves the input case instead of forcing upper-case.
+ * BodyText.tga DOES contain lowercase glyphs (rows 6-9, ascii 0x61+), so mixed-case
+ * strings (e.g. high-score player names "Frank"/"Jeffrey") render correctly. Scoped:
+ * callers set it just around a draw and clear it after. */
+static int s_fe_preserve_case = 0;
+
+/* ---- Small font (smalltext.tga) — the original's high-score / results table font ----
+ * 12x12 cells, 21 columns; proportional advance + per-char vertical offset (descenders).
+ * [CONFIRMED @ DrawFrontendSmallFontStringToSurface 0x00424660: col=(c-0x20)%21,
+ *  row=(c-0x20)/21, 12px cells; dest_y += g_smallFontYOffset[c]; advance g_smallFontAdvance[c]].
+ * Tables baked byte-exact from the original (0x004662d0 advance / 0x004663e4 yoffset).
+ * Unlike the button font (BodyText), this has true lowercase incl. a normal 'y'. */
+static int s_smallfont_page = -1;
+#define SMALLFONT_PAGE   893
+#define SMALLFONT_CELL   12
+#define SMALLFONT_COLS   21
+#define SMALLFONT_TEX_W  252.0f   /* 21 * 12 */
+#define SMALLFONT_TEX_H  132.0f   /* 11 * 12 */
+/* indexed by (char-0x20), char 0x20..0x7F */
+static const uint8_t k_smallfont_advance[96] = {
+    5, 5, 7, 8, 8, 13, 11, 5, 4, 5, 6, 8, 6, 6, 4, 8,
+    10, 6, 9, 9, 9, 9, 10, 10, 10, 9, 4, 6, 6, 8, 6, 8,
+    10, 10, 9, 8, 10, 7, 7, 11, 9, 5, 6, 9, 7, 13, 10, 11,
+    9, 11, 9, 8, 8, 9, 11, 13, 10, 10, 9, 5, 4, 5, 7, 7,
+    6, 9, 9, 6, 8, 8, 6, 9, 8, 4, 4, 8, 4, 11, 9, 9,
+    8, 8, 7, 6, 5, 8, 9, 13, 9, 8, 7, 5, 4, 6, 10, 12
+};
+static const int8_t k_smallfont_yoffset[96] = {
+    0, 0, 0, 0, 2, 0, 0, 0, 2, 2, -2, 0, 3, -3, 1, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, -1, 2, 0, -1, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 3, 0, 0, 3, 0, 0, 0, 0, 0,
+    3, 3, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0, -3, 0
+};
+
 static int s_cursor_tex_page = -1;  /* page 896: snkmouse.tga cursor */
 static int s_cursor_w = 0, s_cursor_h = 0;
 static int s_buttonbits_tex_page = -1; /* page 897: ButtonBits.tga gradient */
@@ -744,10 +783,21 @@ static const char *frontend_get_title_tga_for_screen(TD5_ScreenIndex screen) {
     case TD5_SCREEN_MAIN_MENU: return "MainMenuText.TGA";
     case TD5_SCREEN_RACE_TYPE_MENU: return "RaceMenuText.TGA";
     case TD5_SCREEN_QUICK_RACE: return "QuickRaceText.tga";
-    case TD5_SCREEN_OPTIONS_HUB: return "OptionsText.tga";
+    /* All six options screens share the "OptionsText.tga" menu-header (CreateMenuStringLabelSurface(6)).
+     * [FIXED 2026-06-01: Game/Control/Sound/Display/TwoPlayer Options were missing their title entirely
+     * — the port returned NULL here, so no header drew, while the original draws one on all of them.] */
+    case TD5_SCREEN_OPTIONS_HUB:
+    case TD5_SCREEN_GAME_OPTIONS:
+    case TD5_SCREEN_CONTROL_OPTIONS:
+    case TD5_SCREEN_SOUND_OPTIONS:
+    case TD5_SCREEN_DISPLAY_OPTIONS:
+    case TD5_SCREEN_TWO_PLAYER_OPTIONS: return "OptionsText.tga";
     case TD5_SCREEN_CAR_SELECTION: return "SelectCarText.tga";
     case TD5_SCREEN_TRACK_SELECTION: return "TrackSelectText.TGA";
-    case TD5_SCREEN_HIGH_SCORE: return "HighScoresText.TGA";
+    /* Name Entry shares the High Scores header (CreateMenuStringLabelSurface(7)) — it's the
+     * qualifying-high-score entry screen. [FIXED 2026-06-02: was NULL → no title drawn.] */
+    case TD5_SCREEN_HIGH_SCORE:
+    case TD5_SCREEN_NAME_ENTRY: return "HighScoresText.TGA";
     case TD5_SCREEN_RACE_RESULTS: return "ResultsText.tga";
     case TD5_SCREEN_CONNECTION_BROWSER:
     case TD5_SCREEN_SESSION_PICKER:
@@ -763,10 +813,16 @@ static int frontend_get_title_page_for_screen(TD5_ScreenIndex screen) {
     case TD5_SCREEN_MAIN_MENU: return FE_TITLE_PAGE_BASE + 0;
     case TD5_SCREEN_RACE_TYPE_MENU: return FE_TITLE_PAGE_BASE + 1;
     case TD5_SCREEN_QUICK_RACE: return FE_TITLE_PAGE_BASE + 2;
-    case TD5_SCREEN_OPTIONS_HUB: return FE_TITLE_PAGE_BASE + 3;
+    case TD5_SCREEN_OPTIONS_HUB:
+    case TD5_SCREEN_GAME_OPTIONS:
+    case TD5_SCREEN_CONTROL_OPTIONS:
+    case TD5_SCREEN_SOUND_OPTIONS:
+    case TD5_SCREEN_DISPLAY_OPTIONS:
+    case TD5_SCREEN_TWO_PLAYER_OPTIONS: return FE_TITLE_PAGE_BASE + 3; /* shared OptionsText page */
     case TD5_SCREEN_CAR_SELECTION: return FE_TITLE_PAGE_BASE + 4;
     case TD5_SCREEN_TRACK_SELECTION: return FE_TITLE_PAGE_BASE + 5;
-    case TD5_SCREEN_HIGH_SCORE: return FE_TITLE_PAGE_BASE + 6;
+    case TD5_SCREEN_HIGH_SCORE:
+    case TD5_SCREEN_NAME_ENTRY: return FE_TITLE_PAGE_BASE + 6; /* shared HighScoresText page */
     case TD5_SCREEN_RACE_RESULTS: return FE_TITLE_PAGE_BASE + 7;
     case TD5_SCREEN_CONNECTION_BROWSER:
     case TD5_SCREEN_SESSION_PICKER:
@@ -952,8 +1008,10 @@ static int frontend_load_tga_colorkey(const char *name, const char *archive,
     if (td5_asset_resolve_png_path(bare_name, real_archive, png_path, sizeof(png_path))) {
         if (td5_asset_load_png_to_buffer(png_path, colorkey, &pixels, &w, &h)) {
             from_png = 1;
-            /* Font page also needs black keying */
-            if (dest_page == SHARED_PAGE_FONT) {
+            /* Font pages also need explicit near-black alpha keying: the white-on-black
+             * glyph atlases (BodyText + smalltext) must have their black cell backgrounds
+             * made transparent, else every glyph renders inside an opaque black box. */
+            if (dest_page == SHARED_PAGE_FONT || dest_page == SMALLFONT_PAGE) {
                 uint8_t *p = (uint8_t *)pixels;
                 for (int ci = 0; ci < w * h; ci++, p += 4) {
                     if (p[0] < 8 && p[1] < 8 && p[2] < 8)
@@ -1143,6 +1201,41 @@ static const char *frontend_get_car_display_name(int car_index) {
     }
     s_car_display_names_loaded[car_index] = 1;
     return s_car_display_names[car_index][0] ? s_car_display_names[car_index] : fallback;
+}
+
+/* SHORT car name (config.nfo line 1, e.g. "'97 CAMARO") — used by the High Scores
+ * table. The original draws the localized short car name (g_localizationCarManufScratch
+ * indexed by car type @0x413010), NOT the long line-0 name ("1997 CHEVROLET CAMARO...")
+ * that frontend_get_car_display_name returns and that overflows the narrow 108px column.
+ * Falls back to the long display name if line 1 is absent. */
+static char s_car_short_names[37][24];
+static int  s_car_short_loaded[37];
+static const char *frontend_get_car_short_name(int car_index) {
+    if (car_index < 0 || car_index >= 37)
+        return frontend_get_car_display_name(car_index);
+    if (s_car_short_loaded[car_index]) return s_car_short_names[car_index];
+    s_car_short_loaded[car_index] = 1;
+    s_car_short_names[car_index][0] = '\0';
+    {
+        int sz = 0;
+        char *data = (char *)td5_asset_open_and_read("config.nfo", s_car_zip_paths[car_index], &sz);
+        if (data && sz > 0) {
+            int i = 0;
+            while (i < sz && data[i] != '\n' && data[i] != '\r') i++;       /* skip line 0 */
+            while (i < sz && (data[i] == '\r' || data[i] == '\n')) i++;
+            char line[24]; int j = 0;
+            while (i < sz && j + 1 < (int)sizeof(line) &&
+                   data[i] != '\r' && data[i] != '\n' && data[i] != '\0')
+                line[j++] = data[i++];
+            line[j] = '\0';
+            frontend_copy_pretty_text(s_car_short_names[car_index],
+                                      sizeof(s_car_short_names[car_index]), line);
+        }
+        if (data) free(data);
+    }
+    if (!s_car_short_names[car_index][0])
+        return frontend_get_car_display_name(car_index);
+    return s_car_short_names[car_index];
 }
 
 static int frontend_current_car_index(void) {
@@ -2414,6 +2507,10 @@ static void fe_draw_text(float x, float y, const char *text, uint32_t color, flo
 static void fe_draw_text_centered(float center_x, float y, const char *text,
                                   uint32_t color, float sx, float sy);
 static void frontend_fill_rect(int layer, int x, int y, int w, int h, uint32_t color);
+static void fe_draw_button_9slice(float bx, float by, float bw, float bh,
+                                  int state, float sx, float sy);
+static void fe_draw_small_text(float x, float y, const char *text, uint32_t color, float sx, float sy);
+static float fe_measure_small_text(const char *text);
 static void fe_draw_option_arrows(int btn_idx, float sx, float sy);
 static void frontend_load_bg_gallery(void);
 /* Forward declarations for dialog text overlay renderers */
@@ -2515,68 +2612,71 @@ static void frontend_handle_text_input_key(void) {
     }
 }
 
+/* DRAW ONLY. Input key handling lives in the screen handler (NAME_ENTRY case 2)
+ * via frontend_handle_text_input_key(); this is called from the RENDER path
+ * (td5_frontend_render_ui_rects) so the widget actually composites into the
+ * presented frame — drawing it from the handler gets cleared before present. */
 static void frontend_render_text_input(void) {
     if (!s_text_input_ctx.buffer) return;
-    frontend_handle_text_input_key();
 
-    /* All previous coords were raw 640x480 pixels; at higher resolutions
-     * everything mispositioned because frontend_fill_rect/fe_draw_text
-     * here did NOT receive the sx/sy scale that the rest of the frontend
-     * gets in td5_frontend_render_ui_rects. Compute scale locally so the
-     * input panel sits in the same canvas-relative location regardless of
-     * window size. [orig blits a baked 0x1C0×0x40 surface at (20, 104) via
-     * FUN_0041a530; port renders live with scaled rects + text.] */
+    /* Compute scale locally so the widget sits in the same canvas-relative
+     * location regardless of window size. */
     int screen_w = 0, screen_h = 0;
     td5_plat_get_window_size(&screen_w, &screen_h);
     if (screen_w <= 0 || screen_h <= 0) return;
     float sx = (float)screen_w / 640.0f;
     float sy = (float)screen_h / 480.0f;
 
-    /* Canvas-relative panel (448×64 at 20,104) — matches orig surface dims. */
-    int panel_x = (int)(96.0f * sx);
-    int panel_y = (int)(280.0f * sy);
-    int panel_w = (int)(448.0f * sx);
-    int panel_h = (int)(80.0f * sy);
+    /* [FIXED 2026-06-01] Faithful name-entry input widget. The original
+     * RenderFrontendCreateSessionNameInput @0x0041A530 renders the typed name plus a
+     * blinking GREEN caret INSIDE the standard gold "ENTER PLAYER NAME" frontend button
+     * (created by CreateFrontendDisplayModeButton(SNK_EnterPlayerNameButTxt,-0x1c0,0,
+     * 0x1c0,0x40) → 448×64, auto-laid-out centered), NOT a separate opaque grey box.
+     * The button prompt sits at the top; the typed name (left-aligned at button-local
+     * x=0x14=20, clipped to 0x198) + caret in the field row below. The prior port's grey
+     * box at (96,280) was a port invention; replaced with the gold 9-slice frame so this
+     * matches the rest of the frontend (and netplay session-name input, which the original
+     * draws with the SAME function). Caret = GREEN: orig fills it with BltColorFillToSurface
+     * (0xff00,...) which byte-repacks to RGB565 0x07c0 = pure green (same packing as the
+     * hover highlight, NOT raw 565). [pipeline 0x41A530 → gold button surface, keyed black]. */
+    /* [FIXED 2026-06-02] name-input button rests at (120,193) for both Name Entry (25, decomp
+     * @0x413BC0 slide settles iVar14-0x18*0x20+0x30a=120, iVar9-4*0x20+0xf0=193) and Create
+     * Session (10) — was (110,192). w=0x1c0(448) h=0x40(64). */
+    const float BTN_X = 120.0f, BTN_W = 448.0f, BTN_H = 64.0f, BTN_Y = 193.0f;
+    float bx = BTN_X * sx, by = BTN_Y * sy, bw = BTN_W * sx, bh = BTN_H * sy;
 
-    /* Panel background — solid opaque (orig surface had baked title + box). */
-    frontend_fill_rect(0, panel_x, panel_y, panel_w, panel_h, 0xFF202028);
-    frontend_fill_rect(0, panel_x + (int)(2.0f * sx), panel_y + (int)(2.0f * sy),
-                       panel_w - (int)(4.0f * sx), panel_h - (int)(4.0f * sy),
-                       0xFF8C8C8C);
+    /* Gold focused 9-slice button frame (transparent interior — color-keyed black in the
+     * original, like every other frontend button). */
+    td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
+    fe_draw_button_9slice(bx, by, bw, bh, 0 /*focused*/, sx, sy);
+    td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
 
-    /* Title "ENTER PLAYER NAME" centered above the input box.
-     * Orig SNK_EnterPlayerNameButTxt was baked into the surface; port
-     * renders live via the standard font. */
-    float ts_title = 0.7f;
-    fe_draw_text_centered((float)panel_x + (float)panel_w * 0.5f,
-                          (float)panel_y + 6.0f * sy,
-                          "ENTER PLAYER NAME",
-                          0xFFFFFFFF, sx * ts_title, sy * ts_title);
+    /* Prompt "ENTER PLAYER NAME" centered near the top of the button. */
+    fe_draw_text_centered(bx + bw * 0.5f, by + 8.0f * sy,
+                          "ENTER PLAYER NAME", 0xFFFFFFFF, sx, sy);
 
-    /* Input field — slightly inset, dark fill so light text reads cleanly. */
-    int field_x = panel_x + (int)(24.0f * sx);
-    int field_y = panel_y + (int)(36.0f * sy);
-    int field_w = panel_w - (int)(48.0f * sx);
-    int field_h = (int)(36.0f * sy);
-    frontend_fill_rect(0, field_x - (int)(1.0f * sx), field_y - (int)(1.0f * sy),
-                       field_w + (int)(2.0f * sx), field_h + (int)(2.0f * sy),
-                       0xFFFFFFFF);
-    frontend_fill_rect(0, field_x, field_y, field_w, field_h, 0xFF101018);
+    /* Typed name in the SMALL font, left-aligned at button-local x=0x14=20 [CONFIRMED
+     * @0x41A530: DrawFrontendClippedStringToSurface(name,0x14,iVar3+0xc,surf) draws into the
+     * button via g_smallFontSurface = g_smallTextSurface — the SMALL font, not BodyText].
+     * Case preserved (true lowercase). */
+    float field_x = bx + 20.0f * sx;
+    float field_y = by + 38.0f * sy;
+    fe_draw_small_text(field_x, field_y, s_text_input_ctx.buffer, 0xFFFFFFFF, sx, sy);
 
-    /* Typed text. Scale 0.8 matches prior port look but now relative to sx/sy. */
-    float text_x = (float)field_x + 8.0f * sx;
-    float text_y = (float)field_y + 5.0f * sy;
-    float ts_text = 0.85f;
-    fe_draw_text(text_x, text_y, s_text_input_ctx.buffer,
-                 0xFFFFFFFF, sx * ts_text, sy * ts_text);
-
-    /* Blinking caret — visible only while accepting input (state==1). */
+    /* Blinking GREEN caret right after the typed text (state 1 = accepting input).
+     * Orig: BltColorFillToSurface(0xff00=green,...) 2px wide, blinks on animFrame&0x20;
+     * port uses the 350ms blink clock.
+     * [FIXED 2026-06-02] Draw via the IMMEDIATE fe_draw_quad path (same as the button
+     * frame + typed text above) — the prior frontend_fill_rect() queued the caret into
+     * the DEFERRED s_draw_queue, which re-applies the canvas scale at flush time, so the
+     * already-scaled (caret_x, field_y) got scaled a SECOND time and the green bar landed
+     * near the bottom of the window instead of beside the text. */
     if (s_text_input_state == 1 &&
         (((td5_plat_time_ms() - s_text_input_ctx.blink_tick) / 350U) & 1U) == 0U) {
-        float caret_x = text_x + (float)s_text_input_ctx.caret * 11.2f * sx * ts_text;
-        frontend_fill_rect(0, (int)caret_x, field_y + (int)(4.0f * sy),
-                           (int)(2.0f * sx), field_h - (int)(8.0f * sy),
-                           0xFFFFFFFF);
+        float name_w = fe_measure_small_text(s_text_input_ctx.buffer);
+        float caret_x = field_x + name_w * sx + 1.0f * sx;
+        td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
+        fe_draw_quad(caret_x, field_y, 2.0f * sx, 12.0f * sy, 0xFF00FF00, -1, 0, 0, 0, 0);
     }
 }
 
@@ -3453,6 +3553,23 @@ int td5_frontend_init_resources(void) {
         }
     }
 
+    /* ---- Small font (smalltext) — high-score / results table font ----
+     * 252x132, 12x12 cells. NOTE: the extracted "smalltext.png" is BLACK-on-WHITE
+     * (inverted), which would render opaque boxes; the "_white_on_black" variant is the
+     * correctly-oriented atlas (black bg → keyed transparent, white glyphs → tintable).
+     * Used by frontend_render_high_score_overlay (true lowercase + descenders). */
+    if (s_smallfont_page < 0) {
+        int sfw = 0, sfh = 0;
+        if (frontend_load_tga_colorkey("smalltext_white_on_black.tga", "Front End/frontend.zip",
+                                        SMALLFONT_PAGE, &sfw, &sfh, TD5_COLORKEY_BLACK)) {
+            s_smallfont_page = SMALLFONT_PAGE;
+            TD5_LOG_I(LOG_TAG, "Small font loaded: smalltext.tga page=%d %dx%d",
+                      s_smallfont_page, sfw, sfh);
+        } else {
+            TD5_LOG_W(LOG_TAG, "smalltext.tga not found — high-score table will fall back to BodyText");
+        }
+    }
+
     /* ---- ButtonBits (gradient source for button backgrounds) ----
      * 56x100 paletted texture (DAT_00496268 in original).
      * Layout: 3 sections of 32px each (style * 0x20 offset).
@@ -3992,10 +4109,14 @@ static void frontend_render_quick_race_overlay(float sx, float sy) {
     track_locked = (!s_cheat_unlock_all && !s_network_active &&
                     s_selected_track >= 0 && s_selected_track < 26 &&
                     s_track_lock_table[s_selected_track] != 0);
+    /* Car/track names sit ABOVE their CHANGE CAR / CHANGE TRACK buttons. The audit's
+     * panel-local "name Y = 135/255" is only correct if the buttons also move down to match
+     * the original (orig = name-above-button); with the port's current button rests at ~135/255
+     * a name at 135/255 OVERLAPS the button. Keeping the names at 106/226 (above the port's
+     * buttons) until the Quick Race button rests are runtime-read and corrected together. */
     frontend_draw_value_text(sx, sy, 140, 106, car_name, 0xFFFFFFFF);
     frontend_draw_value_text(sx, sy, 140, 226, track_name, 0xFFFFFFFF);
-    /* [FIXED 2026-06-01] SNK_LockedTxt renders WHITE in the original (consistent with the
-     * CarSelect/TrackSelect LOCKED fixes); was red 0xFFFF4444 only here. */
+    /* SNK_LockedTxt renders WHITE in the original (consistent with CarSelect/TrackSelect). */
     if (car_locked)   frontend_draw_value_text(sx, sy, 398, 126, "LOCKED", 0xFFFFFFFF);
     if (track_locked) frontend_draw_value_text(sx, sy, 398, 246, "LOCKED", 0xFFFFFFFF);
 }
@@ -4290,7 +4411,9 @@ static void frontend_render_language_select_overlay(float sx, float sy) {
     if (s_language_flag_surface > 0) {
         int slot = s_language_flag_surface - 1;
         if (slot >= 0 && slot < FE_MAX_SURFACES && s_surfaces[slot].in_use) {
-            static const int dx[4] = { 40, 424, 40, 424 };
+            /* [FIXED 2026-06-01, audit+verify] orig left col x = uVar2 = 72, right col =
+             * (canvasW-uVar2)-0xb0 = 640-72-176 = 392 (not 40/424). Y 128/320 already faithful. */
+            static const int dx[4] = { 72, 392, 72, 392 };
             static const int dy[4] = { 128, 128, 320, 320 };
             int fi;
             td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
@@ -4302,8 +4425,9 @@ static void frontend_render_language_select_overlay(float sx, float sy) {
             }
         }
     }
-    /* Header "LANGUAGE SELECT" (in-EXE literal @0x4667c0), 24px font, at (xpad, ~34). */
-    fe_draw_text(40.0f * sx, 34.0f * sy, "LANGUAGE SELECT", 0xFFFFFFFF, sx, sy);
+    /* Header "LANGUAGE SELECT" (in-EXE literal @0x4667c0), 24px font, at (uVar2=72, 34).
+     * [FIXED 2026-06-01: header X was 40, orig draws at uVar2=72 — same left margin as the flags.] */
+    fe_draw_text(72.0f * sx, 34.0f * sy, "LANGUAGE SELECT", 0xFFFFFFFF, sx, sy);
 }
 
 static void frontend_render_race_type_description(float sx, float sy) {
@@ -4359,13 +4483,17 @@ static void frontend_render_race_type_description(float sx, float sy) {
     /* Line 0: race-type NAME, big font, centered at Y=0. */
     fe_draw_text(panel_x + (panel_w - fe_measure_text(k_race_desc[idx][0], sx)) * 0.5f,
                  panel_y + 2.0f * sy, k_race_desc[idx][0], 0xFFFFFFFF, sx, sy);
-    /* Lines 1..: 12px small font (0.5 scale), centered, Y=32 step +12, stop at Y>=176. */
+    /* Lines 1..: the description body, drawn in the SMALL font (smalltext) — the original
+     * RaceTypeCategoryMenuStateMachine@0x4168b0 word-wraps the description and draws it with
+     * DrawFrontendSmallFontStringToSurface@0x424660 (loop @0x416ea1, panel y 0x20→0xb0,
+     * width 0x110). The port previously approximated it with 0.5×-scaled BodyText (wrong
+     * font face). [FIXED 2026-06-01] Centered via fe_measure_small_text; Y=32 step +12. */
     for (line = 1; line < 13 && k_race_desc[idx][line]; line++) {
         float ly = 32.0f + (float)(line - 1) * 12.0f;
         if (ly >= 176.0f) break;
         const char *s = k_race_desc[idx][line];
-        fe_draw_text(panel_x + (panel_w - fe_measure_text(s, sx * 0.5f)) * 0.5f,
-                     panel_y + ly * sy, s, 0xFFFFFFFF, sx * 0.5f, sy * 0.5f);
+        fe_draw_small_text(panel_x + (panel_w - fe_measure_small_text(s) * sx) * 0.5f,
+                           panel_y + ly * sy, s, 0xFFFFFFFF, sx, sy);
     }
 }
 
@@ -4435,8 +4563,8 @@ static void frontend_render_car_stats_overlay(float sx, float sy) {
         { "PRICE:",        4,  0, 148.0f, NULL   },
         { "TIRES:",        5,  3, 160.0f, NULL   },
         { "TOP SPEED:",    7,  0, 196.0f, " MPH" },
-        { "0 TO 60 MPH:",  8,  0, 208.0f, " sec" },
-        { "60 TO 0 MPH:",  9,  0, 220.0f, " ft"  },
+        { "0 to 60 MPH:",  8,  0, 208.0f, " sec" },  /* [FIXED] lowercase "to" — SNK_Config_Hdrs */
+        { "60 to 0 MPH:",  9,  0, 220.0f, " ft"  },  /* [FIXED] lowercase "to" — SNK_Config_Hdrs */
         { "1/4 MILE:",    10,  0, 232.0f, " sec" },
         { "ENGINE:",      11,  2, 256.0f, NULL   },
         { "COMPRESSION:", 12,  0, 280.0f, NULL   },
@@ -4447,10 +4575,12 @@ static void frontend_render_car_stats_overlay(float sx, float sy) {
     };
     int n_layout = (int)(sizeof(k_stat_layout_types)/sizeof(k_stat_layout_types[0]));
     int n_engine = (int)(sizeof(k_stat_engine_types)/sizeof(k_stat_engine_types[0]));
-    float tsc = 0.5f;
     float hx = 232.0f * sx;   /* label column x = canvasW - 0x198 */
-    /* Value column: label_x + max_label_width + 16px gap (matches original dynamic measure) */
-    float vx = hx + fe_measure_text("COMPRESSION:", tsc * sx) + 16.0f * sx;
+    /* Value column: label_x + max_label_width + 16px gap. [FIXED 2026-06-01] These spec
+     * rows are drawn in the SMALL font in the original (CarSelectionScreenStateMachine
+     * @0x40dfc0, 10+ DrawFrontendSmallFontStringToSurface calls @0x40ee82..0x40f11b), not
+     * the scaled button font — measure with the small font. */
+    float vx = hx + fe_measure_small_text("COMPRESSION:") * sx + 16.0f * sx;
     char val[64];
     int i;
 
@@ -4461,20 +4591,20 @@ static void frontend_render_car_stats_overlay(float sx, float sy) {
         const char *raw = (k_rows[i].fi < 17) ? s_car_spec[k_rows[i].fi] : "";
         int idx;
 
-        fe_draw_text(hx, y, k_rows[i].hdr, 0xFFBBBBBB, tsc * sx, tsc * sy);
+        fe_draw_small_text(hx, y, k_rows[i].hdr, 0xFFBBBBBB, sx, sy);
 
         switch (k_rows[i].exp) {
         case 1: /* layout type: char - 'A' */
             idx = (raw[0] >= 'A' && raw[0] <= 'Z') ? raw[0] - 'A' : -1;
-            fe_draw_text(vx, y,
+            fe_draw_small_text(vx, y,
                          (idx >= 0 && idx < n_layout) ? k_stat_layout_types[idx] : raw,
-                         0xFFFFFFFF, tsc * sx, tsc * sy);
+                         0xFFFFFFFF, sx, sy);
             break;
         case 2: /* engine type: char - 'A' */
             idx = (raw[0] >= 'A' && raw[0] <= 'Z') ? raw[0] - 'A' : -1;
-            fe_draw_text(vx, y,
+            fe_draw_small_text(vx, y,
                          (idx >= 0 && idx < n_engine) ? k_stat_engine_types[idx] : raw,
-                         0xFFFFFFFF, tsc * sx, tsc * sy);
+                         0xFFFFFFFF, sx, sy);
             break;
         case 3: /* front/rear tire combined */
         {
@@ -4482,7 +4612,7 @@ static void frontend_render_car_stats_overlay(float sx, float sy) {
             frontend_fmt_spec(f, sizeof(f), raw);
             frontend_fmt_spec(r, sizeof(r), (k_rows[i].fi+1 < 17) ? s_car_spec[k_rows[i].fi+1] : "");
             snprintf(val, sizeof(val), "%s/%s", f, r);
-            fe_draw_text(vx, y, val, 0xFFFFFFFF, tsc * sx, tsc * sy);
+            fe_draw_small_text(vx, y, val, 0xFFFFFFFF, sx, sy);
             break;
         }
         default:
@@ -4492,7 +4622,7 @@ static void frontend_render_car_stats_overlay(float sx, float sy) {
                 if (vl + sl + 1 < sizeof(val))
                     memcpy(val + vl, k_rows[i].sfx, sl + 1);
             }
-            fe_draw_text(vx, y, val, 0xFFFFFFFF, tsc * sx, tsc * sy);
+            fe_draw_small_text(vx, y, val, 0xFFFFFFFF, sx, sy);
             break;
         }
     }
@@ -4694,7 +4824,10 @@ static void frontend_render_control_options_overlay(float sx, float sy) {
     int p2_type = td5_input_get_device_type(1);
     float p1_v0 = (float)p1_type * v_row, p1_v1 = p1_v0 + v_row;
     float p2_v0 = (float)p2_type * v_row, p2_v1 = p2_v0 + v_row;
-    float p1_y = 145.0f, p2_y = 217.0f;  /* [FIXED] was 97/217 — P1 is 145, not 97 */
+    /* [FIXED 2026-06-02] device icons align with the PLAYER 1 / PLAYER 2 button ROWS:
+     * P1 row y=97, P2 row y=217 (orig panel y = halfH-0x8f = 97 for P1). The prior p1_y=145
+     * was set when the buttons themselves were mis-positioned (they're now runtime-correct). */
+    float p1_y = 97.0f, p2_y = 217.0f;
 
     td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
     fe_draw_quad(394.0f * sx, p1_y * sy, icon_w, icon_h,
@@ -4892,108 +5025,104 @@ static void frontend_render_high_score_overlay(float sx, float sy) {
      * it COLOR-KEYED on black (QueueFrontendOverlayRect trailing-0), so ONLY THE TEXT shows
      * over the MainMenu backdrop — there is NO visible framed box. The prior opaque
      * white-border + dark-fill quads were a port invention; removed. */
-    float panel_x = 115.0f * sx;
-    float panel_y = 177.0f * sy;
-
-    /* Columns are CENTERED within surface-local [left,right] bounds via MeasureOrCenter in
-     * the original [CONFIRMED @0x00413010]: NAME[16,112] SCORE[128,212] CAR[228,336]
-     * AVERAGE[352,428] TOP[444,520]. Helper centers a string in [l,r] (panel-local px). */
-    float ts = 0.55f;  /* text scale relative to screen scale */
-    #define HS_CTR(L,R,S) (panel_x + ((float)(L) + (((float)((R)-(L)) - fe_measure_text((S), sx*ts)/sx) * 0.5f)) * sx)
+    /* The original draws this whole table in the SMALL font (smalltext.tga, 12px, true
+     * lowercase incl. a normal 'y') at panel-local coords [CONFIRMED @0x00413010]; the port
+     * now matches it with fe_draw_small_text instead of the scaled button font (which lacked
+     * proper lowercase metrics — the 'y' rendered tall). Columns CENTERED in panel-local
+     * [left,right]: NAME[16,112] SCORE[128,212] CAR[228,336] AVERAGE[352,428] TOP[444,520]. */
+    #define HS_SF_X(LX)      ((115.0f + (float)(LX)) * sx)
+    #define HS_SF_Y(LY)      ((177.0f + (float)(LY)) * sy)
+    #define HS_SF_CTR(L,R,S) ((115.0f + (float)(L) + ((float)((R)-(L)) - fe_measure_small_text(S)) * 0.5f) * sx)
 
     if (!grp) {
-        float tw = fe_measure_text("NO SCORES YET", sx * ts);
-        fe_draw_text((320.0f * sx) - tw * 0.5f, panel_y + 60.0f * sy,
-                     "NO SCORES YET", 0xFFCCCCCC, sx * ts, sy * ts);
+        const char *msg = "NO SCORES YET";
+        fe_draw_small_text((320.0f * sx) - (fe_measure_small_text(msg) * 0.5f) * sx,
+                           HS_SF_Y(60), msg, 0xFFCCCCCC, sx, sy);
         return;
     }
 
     int score_type = grp->header & 0xFF;
     uint32_t hdr_color = 0xFFFFFFFF;
-    /* [FIXED 2026-06-01] Header layout byte-faithful to DrawPostRaceHighScoreEntry @0x413010:
-     * NAME/CAR and the TIME|LAP|POINTS type label sit at surface-local y=7; AVERAGE/TOP first
-     * line at y=0; the second "SPEED" line and BEST at y=14. (Prior port had BEST at y=0 and
-     * the type label at y=14 — INVERTED.) All centered in their column bounds. */
-    float y7  = panel_y + 7.0f  * sy;
-    float y0  = panel_y + 0.0f  * sy;
-    float y14 = panel_y + 14.0f * sy;
-    fe_draw_text(HS_CTR(0x10,0x70,"NAME"), y7, "NAME", hdr_color, sx * ts, sy * ts);
+    /* Two-row header [CONFIRMED @0x413010]: NAME/CAR + the TIME|LAP|POINTS label at y=7;
+     * BEST / AVERAGE / TOP at y=0; the second "SPEED" line + TIME/LAP at y=14. */
+    float y0  = HS_SF_Y(0);
+    float y7  = HS_SF_Y(7);
+    float y14 = HS_SF_Y(14);
+    fe_draw_small_text(HS_SF_CTR(0x10,0x70,"NAME"), y7, "NAME", hdr_color, sx, sy);
     if (score_type == 2) {
-        fe_draw_text(HS_CTR(0x80,0xd4,"POINTS"), y7, "POINTS", hdr_color, sx * ts, sy * ts);
+        fe_draw_small_text(HS_SF_CTR(0x80,0xd4,"POINTS"), y7, "POINTS", hdr_color, sx, sy);
     } else {
         const char *tlabel = (score_type == 1) ? "LAP" : "TIME";
-        fe_draw_text(HS_CTR(0x80,0xd4,tlabel), y7,  tlabel, hdr_color, sx * ts, sy * ts);
-        fe_draw_text(HS_CTR(0x80,0xd4,"BEST"),  y14, "BEST", hdr_color, sx * ts, sy * ts);
+        fe_draw_small_text(HS_SF_CTR(0x80,0xd4,"BEST"), y0,  "BEST", hdr_color, sx, sy);
+        fe_draw_small_text(HS_SF_CTR(0x80,0xd4,tlabel), y14, tlabel, hdr_color, sx, sy);
     }
-    fe_draw_text(HS_CTR(0xe4,0x150,"CAR"),     y7,  "CAR",     hdr_color, sx * ts, sy * ts);
-    fe_draw_text(HS_CTR(0x160,0x1ac,"AVERAGE"),y0,  "AVERAGE", hdr_color, sx * ts, sy * ts);
-    fe_draw_text(HS_CTR(0x160,0x1ac,"SPEED"),  y14, "SPEED",   hdr_color, sx * ts, sy * ts);
-    fe_draw_text(HS_CTR(0x1bc,0x208,"TOP"),    y0,  "TOP",     hdr_color, sx * ts, sy * ts);
-    fe_draw_text(HS_CTR(0x1bc,0x208,"SPEED"),  y14, "SPEED",   hdr_color, sx * ts, sy * ts);
+    fe_draw_small_text(HS_SF_CTR(0xe4,0x150,"CAR"),      y7,  "CAR",     hdr_color, sx, sy);
+    fe_draw_small_text(HS_SF_CTR(0x160,0x1ac,"AVERAGE"), y0,  "AVERAGE", hdr_color, sx, sy);
+    fe_draw_small_text(HS_SF_CTR(0x160,0x1ac,"SPEED"),   y14, "SPEED",   hdr_color, sx, sy);
+    fe_draw_small_text(HS_SF_CTR(0x1bc,0x208,"TOP"),     y0,  "TOP",     hdr_color, sx, sy);
+    fe_draw_small_text(HS_SF_CTR(0x1bc,0x208,"SPEED"),   y14, "SPEED",   hdr_color, sx, sy);
 
-    /* 5 entry rows */
-    float row_y = panel_y + 48.0f * sy;
-    float row_h = 16.0f * sy;
+    /* 5 entry rows at panel-local y = 48,64,80,96,112 (step 16). */
     for (int i = 0; i < 5; i++) {
         const TD5_NpcEntry *e = &grp->entries[i];
-        float y = row_y + (float)i * row_h;
-        /* [FIXED 2026-06-01] Highlight the INSERTED rank, not always row 0.
-         * Orig (DrawPostRaceHighScoreEntry 0x413010) bolds the row where
-         * row_index == g_postRaceQualifyingScore (the just-inserted rank) via the
-         * SmallTextb bold atlas. Port has no bold atlas, so use the gold highlight
-         * color on the correct row. s_score_insert_pos holds that rank (set at
-         * NAME_ENTRY insert :10208); it is reset to -1 on pure Records browsing so
-         * no row is highlighted there. Previously hardcoded (i==0) → always row 0. */
-        uint32_t row_color = (i == s_score_insert_pos) ? 0xFFFFCC44 : 0xFFE0E0E0;
+        float y = HS_SF_Y(48 + i * 16);
+        /* Highlight row = g_postRaceQualifyingScore (orig bolds it via SmallTextb). Browse
+         * mode defaults to 0 → #1 row; post-insert it's the inserted rank. Port has no bold
+         * atlas, so the highlight is rendered YELLOW (user-confirmed). */
+        int hl_row = (s_score_insert_pos >= 0) ? s_score_insert_pos : 0;
+        /* [FIXED 2026-06-01] #1/insert row = the GOLD accent (sampled from the rendered
+         * original High Scores: #1 row ≈ (208,203,23), title ≈ (217,197,12) — a muted gold,
+         * NOT the bright yellow 0xFFFFE000 I'd guessed). */
+        uint32_t row_color = (i == hl_row) ? 0xFFD9C50C : 0xFFE0E0E0;
         char buf[64];
 
-        /* Check if entry is empty (no name) — rank flush at x=0, "---" in name column. */
         if (e->name[0] == '\0') {
-            fe_draw_text(panel_x, y, "---", 0xFF888888, sx * ts, sy * ts);
+            fe_draw_small_text(HS_SF_X(0), y, "---", 0xFF888888, sx, sy);
             continue;
         }
 
-        /* Rank: flush at panel x=0 [CONFIRMED @0x413010 DrawFrontendSmallFontStringToSurface(buf,0,...)] */
+        /* Rank flush at panel x=0; name at x=0x10 — names render MIXED-CASE (seed names
+         * are stored "Frank"/"Jeffrey"; the small font has true lowercase). */
         snprintf(buf, sizeof(buf), "%d", i + 1);
-        fe_draw_text(panel_x, y, buf, row_color, sx * ts, sy * ts);
-
-        /* Name: clipped to width 0x60 starting at x=0x10 [CONFIRMED @0x413010]. */
+        fe_draw_small_text(HS_SF_X(0), y, buf, row_color, sx, sy);
         {
             char name_buf[14];
             memcpy(name_buf, e->name, 13);
             name_buf[13] = '\0';
-            fe_draw_text(panel_x + 16.0f * sx, y, name_buf, row_color, sx * ts, sy * ts);
+            fe_draw_small_text(HS_SF_X(16), y, name_buf, row_color, sx, sy);
         }
 
-        /* Score / Time: centered in [0x80,0xd4] */
+        /* Score / Time centered in [0x80,0xd4]. */
         frontend_format_score_time(buf, sizeof(buf), e->score, score_type);
-        fe_draw_text(HS_CTR(0x80,0xd4,buf), y, buf, row_color, sx * ts, sy * ts);
+        fe_draw_small_text(HS_SF_CTR(0x80,0xd4,buf), y, buf, row_color, sx, sy);
 
-        /* Car name: clipped to 108px column [0xe4,0x150], centered */
+        /* Car SHORT name (e.g. "'97 CAMARO") centered in [0xe4,0x150], clipped to 108px. */
         {
             int cid = e->car_id & 0xFF;
-            const char *cname = frontend_get_car_display_name(cid);
+            const char *cname = frontend_get_car_short_name(cid);
             char cname_buf[20];
             strncpy(cname_buf, cname, sizeof(cname_buf) - 1);
             cname_buf[sizeof(cname_buf) - 1] = '\0';
             {
                 int clen = (int)strlen(cname_buf);
-                while (clen > 0 && fe_measure_text(cname_buf, sx * ts) > 108.0f * sx) {
+                while (clen > 0 && fe_measure_small_text(cname_buf) > 108.0f)
                     cname_buf[--clen] = '\0';
-                }
             }
-            fe_draw_text(HS_CTR(0xe4,0x150,cname_buf), y, cname_buf, row_color, sx * ts, sy * ts);
+            fe_draw_small_text(HS_SF_CTR(0xe4,0x150,cname_buf), y, cname_buf, row_color, sx, sy);
         }
 
-        /* Average speed: centered in [0x160,0x1ac] */
-        snprintf(buf, sizeof(buf), "%d", frontend_convert_speed(e->avg_speed, speed_kph));
-        fe_draw_text(HS_CTR(0x160,0x1ac,buf), y, buf, row_color, sx * ts, sy * ts);
-
-        /* Top speed: centered in [0x1bc,0x208] */
-        snprintf(buf, sizeof(buf), "%d", frontend_convert_speed(e->top_speed, speed_kph));
-        fe_draw_text(HS_CTR(0x1bc,0x208,buf), y, buf, row_color, sx * ts, sy * ts);
+        /* Average / Top speed WITH unit (orig "%dMPH"/"%dKPH"), centered. */
+        {
+            const char *unit = speed_kph ? "KPH" : "MPH";
+            snprintf(buf, sizeof(buf), "%d%s", frontend_convert_speed(e->avg_speed, speed_kph), unit);
+            fe_draw_small_text(HS_SF_CTR(0x160,0x1ac,buf), y, buf, row_color, sx, sy);
+            snprintf(buf, sizeof(buf), "%d%s", frontend_convert_speed(e->top_speed, speed_kph), unit);
+            fe_draw_small_text(HS_SF_CTR(0x1bc,0x208,buf), y, buf, row_color, sx, sy);
+        }
     }
-    #undef HS_CTR
+    #undef HS_SF_X
+    #undef HS_SF_Y
+    #undef HS_SF_CTR
 }
 
 /* ============================================================================
@@ -5147,8 +5276,11 @@ static void frontend_render_race_results_overlay(float sx, float sy) {
     static const int k_rows_cop[]      = { LBL_ARRESTS, LBL_AVG_SPEED, LBL_TOP_SPEED, LBL_POINTS, -1 };
     /* Drag race (gt==9) skips Y=0x90 (FINISH_POSITION) and Y=0xA8
      * (HIGHEST_POSITION) per the case-9 conditional in 0x00422480. */
-    static const int k_rows_drag_race[] = { LBL_AVG_SPEED, LBL_TOP_SPEED, LBL_TOTAL_TIME,
-                                            LBL_CHECKPOINT_TIMERS, -1 };
+    /* [FIXED 2026-06-01] Drag-race (gt 9) labels = SNK_DRResultsTxt, byte-extracted from
+     * Language.dll: TOTAL TIME, TOP SPEED, FINISH POSITION. The prior set (AVG SPEED /
+     * TOP SPEED / TOTAL TIME / CHECKPOINT TIMERS) was the generic single-race set — wrong
+     * for drag (drag has no average-speed or checkpoint-timer rows). */
+    static const int k_rows_drag_race[] = { LBL_TOTAL_TIME, LBL_TOP_SPEED, LBL_FINISH_POSITION, -1 };
 
     const int *rows;
     if (gt == 7)               rows = k_rows_drag;
@@ -5187,7 +5319,10 @@ static void frontend_render_race_results_overlay(float sx, float sy) {
     else                          row_start_y_px = (float)0x60;  /* 96 */
     float row_block_y = panel_y + row_start_y_px * sy;
     float row_step    = 24.0f * sy;
-    uint32_t lbl_color = 0xFFCCCCCC;
+    /* Row labels are drawn in the same bright menu-font white as the values — the orig
+     * DrawFrontendLocalizedStringToSurface uses the BodyText atlas at full intensity
+     * (NOT a dimmed/gray label). [FIXED 2026-06-02 — was 0xFFCCCCCC gray.] */
+    uint32_t lbl_color = 0xFFFFFFFF;
     uint32_t val_color = 0xFFFFFFFF;
 
     int row_idx = 0;
@@ -5297,6 +5432,65 @@ static void frontend_render_race_results_overlay(float sx, float sy) {
     }
 }
 
+/* Extras = the scrolling CREDITS reel [FAITHFUL 2026-06-02, was a photo slideshow].
+ * Original ScreenExtrasGallery (0x417d50) composites SNK_CreditsText rows into a vertical
+ * reel (screen x=0xcc=204, w=0x140=320): text lines are 32px rows; "#X" entries are dev
+ * mugshots (320x224 = 7 rows). The reel scrolls up ~1px/frame (a new row every 32 frames). */
+#define FE_CREDITS_REEL_X   204.0f  /* 0xcc */
+#define FE_CREDITS_REEL_W   320.0f  /* 0x140 */
+#define FE_CREDITS_ROW_H    32.0f   /* 0x20 per text row */
+#define FE_CREDITS_PHOTO_H  224.0f  /* mugshot height (= 7 rows) */
+#define FE_CREDITS_SPEED    0.060f  /* px/ms = 60px/s = orig 1px/frame @60fps. ScreenExtrasGallery
+                                     * @0x417d50: g_frontendAnimFrameCounter +1/frame drives the reel
+                                     * srcY; a 32px row composites every (counter&0x1f)==0 = 32 frames,
+                                     * synced to the row scrolling past in 32 frames. */
+
+/* total scroll-column height of all credit rows (used by the handler to know when done) */
+static float frontend_credits_total_height(void) {
+    float cy = 0.0f;
+    for (int i = 0; i < K_CREDITS_COUNT; i++)
+        cy += (k_credits[i][0] == '#') ? FE_CREDITS_PHOTO_H : FE_CREDITS_ROW_H;
+    return cy;
+}
+
+/* [1] Positioner dev tool overlay — faithful to ScreenPositionerDebugTool @0x00415030 +
+ * RenderPositionerGlyphStrip @0x00414F40. The original clears to BLACK, draws two white
+ * guide scanlines (FillPrimaryFrontendScanline at y=0x10c=268 and y=0x114=276), then a
+ * horizontal strip of the menu-font glyphs centred on the selected glyph (it walks
+ * selected-8..selected+8 over the glyph set @0x465960 = ASCII 0x20..0x67) with the
+ * selected glyph also shown enlarged below. It is a developer font-metrics editor: the
+ * arrow keys move the selection / nudge metrics and ESC writes positioner.txt. There are
+ * NO on-screen buttons in the original. [reimplemented faithful 2026-06-02] */
+static const char k_positioner_glyphs[] =
+    " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_";
+
+static void frontend_render_positioner_overlay(float sx, float sy) {
+    const float W = 640.0f, H = 480.0f;
+    td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
+    /* black background (orig ClearBackbufferWithColor(0)) */
+    fe_draw_quad(0.0f, 0.0f, W * sx, H * sy, 0xFF000000, -1, 0, 0, 0, 0);
+    /* two white guide scanlines */
+    fe_draw_quad(0.0f, 268.0f * sy, W * sx, 2.0f * sy, 0xFFFFFFFF, -1, 0, 0, 0, 0);
+    fe_draw_quad(0.0f, 276.0f * sy, W * sx, 2.0f * sy, 0xFFFFFFFF, -1, 0, 0, 0, 0);
+
+    int n = (int)sizeof(k_positioner_glyphs) - 1;
+    int sel = s_anim_tick % n;
+    if (sel < 0) sel += n;
+    /* glyph strip: selected-8 .. selected+8, centred on screen, selected highlighted */
+    const float step = 30.0f;          /* horizontal pitch between strip glyphs */
+    for (int k = -8; k <= 8; k++) {
+        int gi = sel + k;
+        if (gi < 0 || gi >= n) continue;
+        char ch[2] = { k_positioner_glyphs[gi], 0 };
+        float gx = (320.0f + (float)k * step) * sx;
+        uint32_t col = (k == 0) ? 0xFFFFFF00u : 0xFFFFFFFFu;
+        fe_draw_text_centered(gx, 232.0f * sy, ch, col, 1.0f * sx, 1.0f * sy);
+    }
+    /* selected glyph shown enlarged below (orig zoomed reference glyph) */
+    char selch[2] = { k_positioner_glyphs[sel], 0 };
+    fe_draw_text_centered(320.0f * sx, 300.0f * sy, selch, 0xFFFFFF00u, 2.2f * sx, 2.2f * sy);
+}
+
 static void frontend_render_extras_gallery_overlay(float sx, float sy) {
     /* Black background fills entire viewport */
     if (s_white_tex_page >= 0) {
@@ -5304,27 +5498,33 @@ static void frontend_render_extras_gallery_overlay(float sx, float sy) {
         fe_draw_quad(0.0f, 0.0f, 640.0f * sx, 480.0f * sy, 0xFF000000,
                      s_white_tex_page, 0.0f, 0.0f, 1.0f, 1.0f);
     }
+    if (s_inner_state < 2) return;  /* still in the entry delay */
 
-    if (s_gallery_pic_surface <= 0) return;
-    int slot = s_gallery_pic_surface - 1;
-    if (slot < 0 || slot >= FE_MAX_SURFACES || !s_surfaces[slot].in_use) return;
-
-    int img_w = s_surfaces[slot].width;
-    int img_h = s_surfaces[slot].height;
-    if (img_w <= 0 || img_h <= 0) return;
-
-    /* Scale to fit 640x480, maintaining aspect ratio, centered */
-    float scale_x = 640.0f / (float)img_w;
-    float scale_y = 480.0f / (float)img_h;
-    float scale = scale_x < scale_y ? scale_x : scale_y;
-    float virt_w = (float)img_w * scale;
-    float virt_h = (float)img_h * scale;
-    float virt_x = (640.0f - virt_w) * 0.5f;
-    float virt_y = (480.0f - virt_h) * 0.5f;
-
-    td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
-    fe_draw_quad(virt_x * sx, virt_y * sy, virt_w * sx, virt_h * sy,
-                 0xFFFFFFFF, s_surfaces[slot].tex_page, 0.0f, 0.0f, 1.0f, 1.0f);
+    const float text_cx = FE_CREDITS_REEL_X + FE_CREDITS_REEL_W * 0.5f; /* 364 */
+    float scroll = (float)(td5_plat_time_ms() - s_credits_start_ms) * FE_CREDITS_SPEED;
+    float cy = 0.0f;
+    for (int i = 0; i < K_CREDITS_COUNT; i++) {
+        const char *e = k_credits[i];
+        float screen_y = (480.0f - scroll) + cy;  /* content starts at the bottom, scrolls up */
+        if (e[0] == '#') {
+            int slot = (e[1] >= 'A' && e[1] <= 'Z') ? (e[1] - 'A') : -1;
+            if (slot >= 0 && slot < K_CREDIT_MUGSHOT_COUNT && s_credit_mugshot_surf[slot] > 0 &&
+                screen_y > -FE_CREDITS_PHOTO_H && screen_y < 480.0f) {
+                int ms = s_credit_mugshot_surf[slot] - 1;
+                if (ms >= 0 && ms < FE_MAX_SURFACES && s_surfaces[ms].in_use) {
+                    td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
+                    fe_draw_quad(FE_CREDITS_REEL_X * sx, screen_y * sy,
+                                 FE_CREDITS_REEL_W * sx, FE_CREDITS_PHOTO_H * sy,
+                                 0xFFFFFFFF, s_surfaces[ms].tex_page, 0.0f, 0.0f, 1.0f, 1.0f);
+                }
+            }
+            cy += FE_CREDITS_PHOTO_H;
+        } else {
+            if (e[0] && e[0] != ' ' && screen_y > -FE_CREDITS_ROW_H && screen_y < 480.0f)
+                fe_draw_text_centered(text_cx * sx, screen_y * sy, e, 0xFFFFFFFF, sx, sy);
+            cy += FE_CREDITS_ROW_H;
+        }
+    }
 }
 
 static float fe_measure_text_width(const char *text, float sx) {
@@ -5354,7 +5554,7 @@ static void fe_draw_text(float x, float y, const char *text, uint32_t color, flo
     float cell_h = (float)FONT_CELL * sy;
     td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
     for (int i = 0; text[i]; i++) {
-        int c = toupper((unsigned char)text[i]);
+        int c = s_fe_preserve_case ? (unsigned char)text[i] : toupper((unsigned char)text[i]);
         int glyph_index;
         float glyph_advance_px;
         float glyph_advance;
@@ -5373,6 +5573,49 @@ static void fe_draw_text(float x, float y, const char *text, uint32_t color, flo
         glyph_w = glyph_advance_px * sx;
         fe_draw_quad(cx, y, glyph_w, cell_h, color, s_font_page, u0, v0, u1, v1);
         cx += glyph_advance;
+    }
+    td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
+}
+
+/* Sum of small-font advances (unscaled font px) — for centering. Preserves case. */
+static float fe_measure_small_text(const char *text) {
+    float w = 0.0f;
+    if (!text) return 0.0f;
+    for (int i = 0; text[i]; i++) {
+        int c = (unsigned char)text[i];
+        if (c < 0x20 || c > 0x7f) { w += 8.0f; continue; }
+        w += (float)k_smallfont_advance[c - 0x20];
+    }
+    return w;
+}
+
+/* Draw a string in the small font (smalltext.tga). Mirrors the original
+ * DrawFrontendSmallFontStringToSurface @0x00424660: 12x12 cells, 21 cols, per-char
+ * vertical offset (so descenders like y/g/p/q sit right), proportional advance, and a
+ * black color key (the texture is loaded with TD5_COLORKEY_BLACK). Case is preserved
+ * (true lowercase glyphs). x/y are screen px; sx/sy are the canvas scale. */
+static void fe_draw_small_text(float x, float y, const char *text, uint32_t color, float sx, float sy) {
+    if (s_smallfont_page < 0 || !text) return;
+    float cx = x;
+    float cell_w = (float)SMALLFONT_CELL * sx;
+    float cell_h = (float)SMALLFONT_CELL * sy;
+    td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
+    for (int i = 0; text[i]; i++) {
+        int c = (unsigned char)text[i];
+        if (c < 0x20 || c > 0x7f) { cx += 8.0f * sx; continue; }
+        int gi = c - 0x20;
+        int col = gi % SMALLFONT_COLS;
+        int row = gi / SMALLFONT_COLS;
+        float adv = (float)k_smallfont_advance[gi];
+        if (c != ' ') {
+            float u0 = (float)(col * SMALLFONT_CELL) / SMALLFONT_TEX_W;
+            float v0 = (float)(row * SMALLFONT_CELL) / SMALLFONT_TEX_H;
+            float u1 = (float)((col + 1) * SMALLFONT_CELL) / SMALLFONT_TEX_W;
+            float v1 = (float)((row + 1) * SMALLFONT_CELL) / SMALLFONT_TEX_H;
+            float gy = y + (float)k_smallfont_yoffset[gi] * sy;
+            fe_draw_quad(cx, gy, cell_w, cell_h, color, s_smallfont_page, u0, v0, u1, v1);
+        }
+        cx += adv * sx;
     }
     td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
 }
@@ -5533,8 +5776,10 @@ static void frontend_render_legal_copyright_overlay(float sx, float sy) {
     float draw_x = (640.0f / 10.0f) * sx;  /* = 64 * sx [CONFIRMED] */
     float row_h  = 32.0f * sy;              /* 0x20 pixel row height [CONFIRMED] */
     float start_y = 32.0f * sy;             /* y starts at 0x20 = 32 [CONFIRMED] */
-    /* Number of rows: (canvasH - 0x20) >> 5 = (480 - 32) / 32 = 14 [CONFIRMED] */
-    int rows = (int)((480.0f - 32.0f) / 32.0f);
+    /* Row count [FIXED 2026-06-01 — re-RE'd @0x004274A0]: the orig do-while inits counter=1 and
+     * loops while counter < ((canvasH-0x20)>>5)=14, i.e. counter=1..13 => 13 rows at y=32..416.
+     * The port previously drew 14 (an extra row at y=448). Faithful count = ((480-32)/32) - 1 = 13. */
+    int rows = (int)((480.0f - 32.0f) / 32.0f) - 1;
     for (int r = 0; r < rows; r++) {
         float y = start_y + (float)r * row_h;
         fe_draw_text(draw_x, y, k_copyright, 0xFFFFFFFF, sx, sy);
@@ -5586,10 +5831,16 @@ static void frontend_render_cup_failed_overlay(float sx, float sy) {
     float dlg_w = 408.0f * sx;
     float dlg_h = 112.0f * sy;
     float dlg_cx = dlg_x + dlg_w * 0.5f;  /* center x of dialog for text centering */
+    (void)dlg_h;
 
-    /* Dialog background — original BltColorFillToSurface fills to black [CONFIRMED] */
-    td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
-    fe_draw_quad(dlg_x, dlg_y, dlg_w, dlg_h, 0xCC000000u, -1, 0,0,1,1);
+    /* [FIXED 2026-06-01] NO dialog background box. The original fills the panel surface
+     * black (BltColorFillToSurface(0,...)) then blits it COLOR-KEYED on black: the flag-0
+     * trailing arg of QueueFrontendOverlayRect is packed into the source color key (=black)
+     * by QueueFrontendSpriteBlit @0x425730, and FlushFrontendSpriteBlits blits via
+     * Copy16BitSurfaceRect mode 0x11 (keyed) — so the black fill is TRANSPARENT and only the
+     * text shows over the MainMenu backdrop. The prior 0xCC000000 translucent quad was a port
+     * invention (same mistake the High Scores/Results overlays correctly avoid). Pipeline
+     * traced 0x425660→0x425a30→0x425730→0x425540/0x4251a0. */
 
     /* Text lines [CONFIRMED string values from Language/English/Language.dll] */
     /* Line 0: "SORRY" at dialog-relative y=0x00 (0px) */
@@ -5641,10 +5892,11 @@ static void frontend_render_cup_won_overlay(float sx, float sy) {
     float dlg_w = 408.0f * sx;
     float dlg_h = 196.0f * sy;  /* 0xC4 [CONFIRMED @ 0x00423AEB] */
     float dlg_cx = dlg_x + dlg_w * 0.5f;
+    (void)dlg_h;
 
-    /* Dialog background — BltColorFillToSurface fills to black [CONFIRMED @ 0x00423B10] */
-    td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
-    fe_draw_quad(dlg_x, dlg_y, dlg_w, dlg_h, 0xCC000000u, -1, 0,0,1,1);
+    /* [FIXED 2026-06-01] NO dialog background box — color-keyed-black transparent panel, text
+     * only (see frontend_render_cup_failed_overlay for the full pipeline trace). The prior
+     * 0xCC000000 translucent quad was a port invention. */
 
     /* [FIXED 2026-06-01] byte-exact SNK_ strings: SNK_CongratsTxt="CONGRATULATIONS!",
      * SNK_YouHaveWonTxt="YOU HAVE WON THE" (the cup-type name follows on the next line,
@@ -5684,11 +5936,10 @@ static void frontend_render_session_locked_overlay(float sx, float sy) {
     float dlg_x = (320.0f - 168.0f) * sx;
     float dlg_y = (240.0f - 143.0f) * sy;
     float dlg_w = 408.0f * sx;
-    float dlg_h = 112.0f * sy;
     float dlg_cx = dlg_x + dlg_w * 0.5f;
 
-    td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
-    fe_draw_quad(dlg_x, dlg_y, dlg_w, dlg_h, 0xCC000000u, -1, 0,0,1,1);
+    /* [FIXED 2026-06-01] NO box — color-keyed-black transparent panel, text only (same
+     * pipeline as the cup dialogs). The prior 0xCC000000 translucent quad was a port invention. */
 
     /* "SORRY" at y=0x00 [CONFIRMED Language.dll: SorryTxt = "SORRY"] */
     fe_draw_text_centered(dlg_cx, dlg_y + 0.0f  * sy, "SORRY",          0xFFFFFFFF, sx, sy);
@@ -5797,12 +6048,18 @@ void td5_frontend_render_ui_rects(void) {
         frontend_render_high_score_overlay(sx, sy);
         break;
     case TD5_SCREEN_NAME_ENTRY:
-        /* During NAME_ENTRY cases 6-12 we render the same score table the
-         * Records screen uses, pointed at the just-inserted group via
-         * s_score_category_index set in Screen_PostRaceNameEntry case 4.
-         * Without this dispatch the post-submit screen would stay blank
-         * between insert and slide-out (orig blits a baked surface here). */
-        frontend_render_high_score_overlay(sx, sy);
+        if (s_inner_state >= 1 && s_inner_state <= 3) {
+            /* Input phase (slide-in / typing / slide-out): draw the faithful gold
+             * "ENTER PLAYER NAME" widget (name + green caret). Drawn HERE in the render
+             * path so it composites into the presented frame — the handler (case 2) only
+             * processes keys. [FIXED 2026-06-01]. */
+            frontend_render_text_input();
+        } else {
+            /* Table phase (cases 5/6-12): the inserted high-score table, same overlay
+             * the Records screen uses, pointed at the just-inserted group via
+             * s_score_category_index set in Screen_PostRaceNameEntry case 4. */
+            frontend_render_high_score_overlay(sx, sy);
+        }
         break;
     case TD5_SCREEN_EXTRAS_GALLERY:
         frontend_render_extras_gallery_overlay(sx, sy);
@@ -5826,6 +6083,10 @@ void td5_frontend_render_ui_rects(void) {
     case TD5_SCREEN_SESSION_LOCKED:
         /* "Sorry / Session Locked" dialog [CONFIRMED @ 0x0041D630] */
         frontend_render_session_locked_overlay(sx, sy);
+        break;
+    case TD5_SCREEN_POSITIONER_DEBUG:
+        /* Dev font-metrics editor [CONFIRMED @ 0x00415030] */
+        frontend_render_positioner_overlay(sx, sy);
         break;
     default:
         break;
@@ -6018,10 +6279,36 @@ void td5_frontend_render_ui_rects(void) {
         frontend_get_track_display_name(s_score_category_index, 0, track_name, sizeof(track_name));
         float nav_bx, nav_by, nav_bw, nav_bh;
         frontend_get_button_render_rect(0, sx, sy, &nav_bx, &nav_by, &nav_bw, &nav_bh);
+        /* [FIXED 2026-06-01 v3] Track-name text: button-centered horizontally (faithful —
+         * RebuildFrontendButtonSurface(0,0,track) MeasureOrCenter's the label across the 520px
+         * button width); vertically at button-local y=0. The original draws the label via
+         * DrawFrontendLocalizedStringToSurface(text, x, y=0, surface) into the button surface,
+         * so the BodyText cell top sits at the button top and the glyph caps land centered in
+         * the 32px bar (de-stretched orig caps native [103..118] in button [97..129]). The
+         * prior +6 pushed the 24px cell's caps into the lower half → text bottom-aligned,
+         * below the (correctly centered) ◄► arrows. Drop the +6 to match the original. */
         float tnw = fe_measure_text(track_name, sx);
         float tx = nav_bx + (nav_bw - tnw) * 0.5f;
-        float ty = nav_by + (nav_bh - sy * 24.0f) * 0.5f;  /* font cells are 24px tall */
+        float ty = nav_by;
         fe_draw_text(tx, ty, track_name, 0xFFFFFFFF, sx, sy);
+        fe_draw_option_arrows(0, sx, sy);
+    }
+
+    /* Race Results selector nav bar (button 0): the FOCUS racer's car name centered on
+     * the bar plus ◄► arrows to browse racers — same widget as the High Scores nav bar.
+     * The bar tracks the same slot as the stat values (s_score_category_index, raw actor
+     * slot: 0 = player → s_selected_car, 1..5 = opponents → g_td5.ai_car_indices[slot]).
+     * Only during the results stat screen (states 3..0xB); the menu (0xD+) reuses btn0. */
+    if (s_current_screen == TD5_SCREEN_RACE_RESULTS && s_anim_complete &&
+        s_inner_state >= 3 && s_inner_state <= 0x0B) {
+        int fslot = s_score_category_index;
+        if (fslot < 0 || fslot >= TD5_MAX_RACER_SLOTS) fslot = 0;
+        int car = (fslot <= 0) ? s_selected_car : g_td5.ai_car_indices[fslot];
+        const char *car_name = frontend_get_car_display_name(car);
+        float nav_bx, nav_by, nav_bw, nav_bh;
+        frontend_get_button_render_rect(0, sx, sy, &nav_bx, &nav_by, &nav_bw, &nav_bh);
+        float cnw = fe_measure_text(car_name, sx);
+        fe_draw_text(nav_bx + (nav_bw - cnw) * 0.5f, nav_by, car_name, 0xFFFFFFFF, sx, sy);
         fe_draw_option_arrows(0, sx, sy);
     }
 
@@ -6045,8 +6332,36 @@ void td5_frontend_render_ui_rects(void) {
         if (page > 0 && title_w > 0 && title_h > 0) {
             float title_x = 120.0f * sx; /* original: uVar4-200 = screenW/2-200 = 120 [0x4213D0, 0x41D890, others] */
             float title_y = frontend_get_title_render_y(sy);
+            float draw_w = (float)title_w * sx;
+            float draw_h = (float)title_h * sy;
+            /* [FIXED 2026-06-01 v2/v3] FAITHFUL menu-header title geometry.
+             * The title is the menu-header label surface (CreateMenuStringLabelSurface) drawn
+             * native-size (NO scaling): for English it's the TGA at its native W/H. The prior
+             * High Scores hack (379x24 @154,29) was measured from the widescreen-PATCHED
+             * TD5_d3d.exe, which stretches the whole 640x480 frontend ~1.23x H / ~1.275x V at
+             * present — that stretch must NOT be baked into native coords. The faithful draw is
+             * QueueFrontendOverlayRect(halfW-200=120, (halfH-0x9f)-YOffset-0x40, nativeW, nativeH).
+             * RESTING Y = (240-0x9f-0)-0x40 = 17 for EVERY menu-header screen (audited across
+             * screens 6,7,8,9,10,11,13,18,19,21,23 — all share this exact CreateMenuStringLabelSurface
+             * formula; runtime-confirmed for 23: globals @0x4962c4 = 308/20/0). Only the MAIN MENU
+             * uses a separate 248x20 strip resting at 21 (frontend_get_title_render_y base). So
+             * shift every non-main-menu title up 4px; the slide-in shape is preserved (the orig
+             * slide also ends at 17: anim*4 - 0xdc + (halfH-0x9f) lands on 17). */
+            /* ALL menu-header titles — INCLUDING the main menu — rest at native 17 =
+             * (halfH-0x9f)-YOffset-0x40. Confirmed by decomp of every screen fn (main menu
+             * @0x415490 case 4 draws the title at (iVar5-YOffset)-0x40, iVar5=halfH-0x9f=81 => 17;
+             * same formula on screens 6,7,8,9,10,11,12,13,14,21,23...). The shared resting base of
+             * 21 came from a widescreen-PATCHED Frida capture (stretched ~1.275x V, untrusted per
+             * the stretch trap). Shift every title up 4px; the slide shape is preserved (orig slide
+             * anim*4-0xdc+(halfH-0x9f) lands on 17, == render_y(-135..21) - 4 = -139..17). */
+            title_y -= 4.0f * sy; /* resting 21 -> 17 */
+            /* Car Selection's menu-header title is left-aligned at native x = halfW-0x110 = 48
+             * (ScreenCarSelection @0x40dfc0 uses uVar10-0x110, not the usual halfW-200=120). */
+            if (s_current_screen == TD5_SCREEN_CAR_SELECTION) {
+                title_x = 48.0f * sx;
+            }
             td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
-            fe_draw_quad(title_x, title_y, (float)title_w * sx, (float)title_h * sy,
+            fe_draw_quad(title_x, title_y, draw_w, draw_h,
                          0xFFFFFFFF, page, 0.0f, 0.0f, 1.0f, 1.0f);
             td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
         }
@@ -6309,55 +6624,33 @@ static void Screen_LocalizationInit(void) {
 
 static void Screen_PositionerDebugTool(void) {
     switch (s_inner_state) {
-    case 0: /* Load Positioner.tga */
+    case 0: /* Load the menu font + clear (orig loads Positioner.tga as the cursor-bar
+             * colour source, clears the backbuffer black and draws two guide scanlines).
+             * The original creates NO on-screen buttons — the whole tool is keyboard-
+             * driven (arrows move/edit, ESC saves), so the port draws none either. */
         frontend_init_return_screen(TD5_SCREEN_POSITIONER_DEBUG);
         frontend_load_tga("Front_End/Positioner.tga", "Front_End/FrontEnd.zip");
-        /* [NOTE 2026-06-01] The ORIGINAL ScreenPositionerDebugTool @0x00415030 creates
-         * NO on-screen buttons — it saves to positioner.txt purely via a keyboard edge
-         * bit (g_frontendInputEdgeBits & 0x40000). These "Save"/"Back" buttons are a
-         * PORT-ONLY dev affordance on an unreachable debug screen; kept (not faithful,
-         * but dev-only, never shown to users). [register: EXTRA, dev-screen] */
-        frontend_create_button("Save", 120, 400, 96, 32);
-        frontend_create_button(SNK_BackButTxt, 232, 400, 112, 32);
         s_anim_tick = 0;
         s_inner_state = 1;
         break;
-    case 1: /* Present grid */
+    case 1: /* present (orig case 1) */
         frontend_present_buffer();
         s_inner_state = 2;
         break;
-    case 2: /* Init grid */
+    case 2: /* init glyph selection (orig g_positionerSelectedGlyphIndex = 0) */
         s_anim_tick = 0;
+        s_anim_complete = 1;   /* enable the shared ESC handler (-> return screen = main menu) */
         s_inner_state = 3;
         break;
-    case 3: /* Navigate grid with arrow keys */
-        if (s_input_ready && s_arrow_input != 0) {
-            s_anim_tick += frontend_option_delta();
-            if (s_anim_tick < 0) s_anim_tick = 0;
+    case 3: /* navigate the glyph strip (orig case 3: arrow bits LEFT=1/RIGHT=2/UP=4/DOWN=8;
+             * ←/→ = ±1, ↓/↑ = ±8). ESC is handled by the shared escape path -> main menu. */
+        if (s_input_ready && s_arrow_input) {
+            if (s_arrow_input & 1) s_anim_tick -= 1;   /* LEFT  */
+            if (s_arrow_input & 2) s_anim_tick += 1;   /* RIGHT */
+            if (s_arrow_input & 8) s_anim_tick += 8;   /* DOWN  */
+            if (s_arrow_input & 4) s_anim_tick -= 8;   /* UP    */
             frontend_play_sfx(1);
         }
-        if (s_input_ready && s_button_index == 0) {
-            s_inner_state = 5;
-        } else if (s_input_ready && s_button_index == 1) {
-            td5_frontend_set_screen(TD5_SCREEN_MAIN_MENU);
-        } else if (s_input_ready) {
-            s_inner_state = 4;
-        }
-        break;
-    case 4: /* Edit cell values */
-        if (s_input_ready && s_arrow_input != 0) {
-            s_anim_tick += frontend_option_delta();
-            frontend_play_sfx(2);
-        }
-        if (s_input_ready && s_button_index >= 0) {
-            s_inner_state = (s_button_index == 0) ? 5 : 3;
-        } else if (!s_input_ready) {
-            s_inner_state = 3;
-        }
-        break;
-    case 5: /* Write positioner.txt */
-        TD5_LOG_I(LOG_TAG, "ScreenPositionerDebugTool: writing positioner.txt");
-        td5_frontend_set_screen(TD5_SCREEN_MAIN_MENU);
         break;
     default:
         td5_frontend_set_screen(TD5_SCREEN_MAIN_MENU);
@@ -6829,18 +7122,21 @@ static void Screen_RaceTypeCategory(void) {
          * directly per-frame via `frontend_render_race_type_description`
          * (td5_frontend.c:4021, dispatched at :5362), so no intermediate
          * surface is needed and the old state-4 update step is unreachable. */
-        /* Create 7 buttons for race types */
-        frontend_create_button(SNK_SingleRaceButTxt, -0xE0, 0, 0xE0, 0x20);
-        frontend_create_button(SNK_CupRaceButTxt,    -0xE0, 0, 0xE0, 0x20);
+        /* Create 7 buttons for race types.
+         * [FIXED 2026-06-01, runtime @0x499c78] rows 0-5 at x=120, y=97 step40 (224-wide);
+         * BACK bottom-center (176,377), half-width 0x70 (112). Port auto-layout gave 110/93 +
+         * BACK stacked in-column at full width. Slide-in still animates X to rest. */
+        frontend_create_button(SNK_SingleRaceButTxt, 120,  97, 0xE0, 0x20);
+        frontend_create_button(SNK_CupRaceButTxt,    120, 137, 0xE0, 0x20);
         /* Continue Cup: greyed if no valid CupData.td5 */
         if (frontend_validate_cup_checksum())
-            frontend_create_button(SNK_ContCupButTxt, -0xE0, 0, 0xE0, 0x20);
+            frontend_create_button(SNK_ContCupButTxt, 120, 177, 0xE0, 0x20);
         else
-            frontend_create_preview_button(SNK_ContCupButTxt, -0xE0, 0, 0xE0, 0x20);
-        frontend_create_button(SNK_TimeTrialsButTxt, -0xE0, 0, 0xE0, 0x20);
-        frontend_create_button(SNK_DragRaceButTxt,   -0xE0, 0, 0xE0, 0x20);
-        frontend_create_button(SNK_CopChaseButTxt,   -0xE0, 0, 0xE0, 0x20);
-        frontend_create_button(SNK_BackButTxt,        -0xE0, 0, 0xE0, 0x20);
+            frontend_create_preview_button(SNK_ContCupButTxt, 120, 177, 0xE0, 0x20);
+        frontend_create_button(SNK_TimeTrialsButTxt, 120, 217, 0xE0, 0x20);
+        frontend_create_button(SNK_DragRaceButTxt,   120, 257, 0xE0, 0x20);
+        frontend_create_button(SNK_CopChaseButTxt,   120, 297, 0xE0, 0x20);
+        frontend_create_button(SNK_BackButTxt,       176, 377, 0x70, 0x20);
 
         s_selected_game_type = -1;
         frontend_begin_timed_animation();
@@ -7177,9 +7473,10 @@ static void Screen_ConnectionBrowser(void) {
         frontend_net_enumerate();
         frontend_load_tga("Front_End/MainMenu.tga", "Front_End/FrontEnd.zip");
         /* Create buttons: connection list, OK, Back */
-        frontend_create_button(SNK_ChooseConnectionButTxt, 120, 160, 256, 32);
-        frontend_create_button(SNK_OkButTxt,   -100, 0, 100, 0x20);
-        frontend_create_button(SNK_BackButTxt, -100, 0, 100, 0x20);
+        /* [FIXED 2026-06-02, runtime @0x499c78] list (120,193) 496x128; OK (120,377) 96x32; BACK (232,377) 112x32. */
+        frontend_create_button(SNK_ChooseConnectionButTxt, 120, 193, 496, 128);
+        frontend_create_button(SNK_OkButTxt,   120, 377,  96, 0x20);
+        frontend_create_button(SNK_BackButTxt, 232, 377, 112, 0x20);
         s_anim_tick = 0;
         s_inner_state = 1;
         break;
@@ -7260,9 +7557,10 @@ static void Screen_SessionPicker(void) {
          * Create button shifted OK/Back indices and ESC. Removed; OK is now slot 1, Back
          * slot 2. (DXPTYPE session enumeration/join is stubbed ARCH-DIV, but the button
          * set + dispatch are now faithful.) */
-        frontend_create_button(SNK_ChooseSessionButTxt, 120, 160, 256, 32);  /* slot 0: session-list selector */
-        frontend_create_button(SNK_OkButTxt,     -100, 0, 100, 0x20);   /* slot 1 */
-        frontend_create_button(SNK_BackButTxt,   -100, 0, 100, 0x20);   /* slot 2 */
+        /* [FIXED 2026-06-02, runtime @0x499c78] list (120,193) 496x128; OK (120,377) 96; BACK (232,377) 112. */
+        frontend_create_button(SNK_ChooseSessionButTxt, 120, 193, 496, 128);  /* slot 0: session-list selector */
+        frontend_create_button(SNK_OkButTxt,     120, 377,  96, 0x20);   /* slot 1 */
+        frontend_create_button(SNK_BackButTxt,   232, 377, 112, 0x20);   /* slot 2 */
         s_anim_tick = 0;
         s_inner_state = 1;
         break;
@@ -7330,8 +7628,9 @@ static void Screen_CreateSession(void) {
         frontend_init_return_screen(TD5_SCREEN_CREATE_SESSION);
         TD5_LOG_D(LOG_TAG, "CreateSession: init");
         frontend_load_tga("Front_End/MainMenu.tga", "Front_End/FrontEnd.zip");
-        frontend_create_button(SNK_EnterNewSessionNameButTxt, -300, 0, 300, 0x20);
-        frontend_create_button(SNK_BackButTxt,       -100, 0, 100, 0x20);
+        /* [FIXED 2026-06-02, runtime @0x499c78] name-input (120,193) 448x64; BACK (278,289) 112x32. */
+        frontend_create_button(SNK_EnterNewSessionNameButTxt, 120, 193, 448, 0x40);
+        frontend_create_button(SNK_BackButTxt,       278, 289, 112, 0x20);
         memset(s_create_session_name, 0, sizeof(s_create_session_name));
         strcpy(s_create_session_name, "New Session");
         frontend_begin_text_input(s_create_session_name, (int)sizeof(s_create_session_name));
@@ -7418,14 +7717,18 @@ static void Screen_NetworkLobby(void) {
         frontend_play_sfx(5);
         frontend_load_tga("Front_End/MainMenu.tga", "Front_End/FrontEnd.zip");
 
-        /* Create UI elements: text input bar, message window, status panel,
-         * "Change Car", "Start", "Exit" buttons */
-        frontend_create_button("",           -0x1D0, 0, 0x1D0, 0x18);  /* text input bar */
-        frontend_create_button(SNK_MessageWindowButTxt,   -0x200, 0, 0x200, 0x80);  /* message window */
-        frontend_create_button(SNK_StatusButTxt,     -0xE0,  0, 0xE0,  0x86);  /* status panel */
-        frontend_create_button(SNK_ChangeCarButTxt, -200,   0, 200,   0x20);
-        frontend_create_button(SNK_StartButTxt,      -0x78,  0, 0x78,  0x20);
-        frontend_create_button(SNK_ExitButTxt,       -0x78,  0, 0x78,  0x20);
+        /* Create UI elements at their faithful resting positions. The original
+         * RunFrontendNetworkLobby @0x0041C330 slides these in (case 1) and they
+         * rest at counter==0x14 in a TWO-COLUMN layout (halfW=320, halfH=240,
+         * iVar9=halfH-0x9f=81): a tall MESSAGE WINDOW + STATUS panel on the left,
+         * the CHANGE CAR/START/EXIT action buttons in the right column at x=360.
+         * [verified via decomp 2026-06-02] */
+        frontend_create_button("",                  144, 261, 0x1D0, 0x18);  /* decoration/input strip */
+        frontend_create_button(SNK_MessageWindowButTxt, 120, 129, 0x200, 0x80);  /* message window panel */
+        frontend_create_button(SNK_StatusButTxt,    120, 291, 0xE0,  0x86);  /* status/roster panel */
+        frontend_create_button(SNK_ChangeCarButTxt, 360, 291, 200,   0x20);
+        frontend_create_button(SNK_StartButTxt,     360, 339, 0x78,  0x20);
+        frontend_create_button(SNK_ExitButTxt,      360, 387, 0x78,  0x20);
 
         /* Allocate chat input surface */
         memset(s_chat_input_buffer, 0, sizeof(s_chat_input_buffer));
@@ -7754,12 +8057,13 @@ static void Screen_OptionsHub(void) {
         frontend_load_tga("Front_End/MainMenu.tga", "Front_End/FrontEnd.zip");
         s_anim_complete = 0;
 
-        frontend_create_button(SNK_GameOptionsButTxt,      -0x130, 0, 0x130, 0x20);
-        frontend_create_button(SNK_ControlOptionsButTxt,   -0x130, 0, 0x130, 0x20);
-        frontend_create_button(SNK_SoundOptionsButTxt,     -0x130, 0, 0x130, 0x20);
-        frontend_create_button(SNK_GraphicsOptionsButTxt,  -0x130, 0, 0x130, 0x20);
-        frontend_create_button(SNK_TwoPlayerOptionsButTxt,-0x130, 0, 0x130, 0x20);
-        frontend_create_button(SNK_OkButTxt,                -0x130, 0, 0x130, 0x20);
+        /* [FIXED 2026-06-01, runtime @0x499c78] rows x=120 y=97 step40 (304-wide); OK (216,377) 96-wide. */
+        frontend_create_button(SNK_GameOptionsButTxt,      120,  97, 0x130, 0x20);
+        frontend_create_button(SNK_ControlOptionsButTxt,   120, 137, 0x130, 0x20);
+        frontend_create_button(SNK_SoundOptionsButTxt,     120, 177, 0x130, 0x20);
+        frontend_create_button(SNK_GraphicsOptionsButTxt,  120, 217, 0x130, 0x20);
+        frontend_create_button(SNK_TwoPlayerOptionsButTxt, 120, 257, 0x130, 0x20);
+        frontend_create_button(SNK_OkButTxt,               216, 377, 0x60,  0x20);
 
         frontend_begin_timed_animation();
         s_inner_state = 1;
@@ -7844,14 +8148,17 @@ static void Screen_GameOptions(void) {
         /* 7 option rows with left/right arrows:
          * Circuit Laps, Checkpoint Timers, Traffic, Cops,
          * Difficulty, Dynamics, 3D Collisions */
-        frontend_create_button(SNK_CircuitLapsTxt,      -0x128, 0, 0x128, 0x20); /* 0x41fa1d: width=0x128 */
-        frontend_create_button(SNK_CheckpointTimersButTxt, -0x128, 0, 0x128, 0x20);
-        frontend_create_button(SNK_TrafficButTxt,           -0x128, 0, 0x128, 0x20);
-        frontend_create_button(SNK_CopsButTxt,            -0x128, 0, 0x128, 0x20); /* orig label: POLICE */
-        frontend_create_button(SNK_DifficultyButTxt,        -0x128, 0, 0x128, 0x20);
-        frontend_create_button(SNK_DynamicsButTxt,          -0x128, 0, 0x128, 0x20);
-        frontend_create_button(SNK_3dCollisionsButTxt,     -0x128, 0, 0x128, 0x20);
-        frontend_create_button(SNK_OkButTxt,                -0x60,  0, 0x60,  0x20); /* 0x41fae3: width=0x60 */
+        /* [FIXED 2026-06-01, runtime button-table @0x499c78] explicit rests: rows at x=120,
+         * y=97 step 40; OK bottom-center (216,377). (Port auto-layout gave 110/93 + OK stacked
+         * in-column — 10px left / 4px high / OK mis-placed.) Slide-in still animates X to rest. */
+        frontend_create_button(SNK_CircuitLapsTxt,         120,  97, 0x128, 0x20);
+        frontend_create_button(SNK_CheckpointTimersButTxt, 120, 137, 0x128, 0x20);
+        frontend_create_button(SNK_TrafficButTxt,          120, 177, 0x128, 0x20);
+        frontend_create_button(SNK_CopsButTxt,             120, 217, 0x128, 0x20); /* orig label: POLICE */
+        frontend_create_button(SNK_DifficultyButTxt,       120, 257, 0x128, 0x20);
+        frontend_create_button(SNK_DynamicsButTxt,         120, 297, 0x128, 0x20);
+        frontend_create_button(SNK_3dCollisionsButTxt,     120, 337, 0x128, 0x20);
+        frontend_create_button(SNK_OkButTxt,               216, 377, 0x60,  0x20);
         s_anim_tick = 0;
         s_inner_state = 1;
         break;
@@ -7952,11 +8259,13 @@ static void Screen_ControlOptions(void) {
          * sets DDCKEY_SRCBLT @0x412030); loading without it left an opaque black box. */
         s_control_options_surface = frontend_load_tga_ck("Controllers.TGA", "Front End/frontend.zip", TD5_COLORKEY_BLACK);
         /* Original layout: Player 1 label, Configure P1, Player 2 label, Configure P2, OK */
-        frontend_create_preview_button(SNK_Player1ButTxt,  -0x100, 0, 0x100, 0x20); /* 0x41e07d: width=0x100 */
-        frontend_create_button(SNK_ConfigureButTxt,         -0x100, 0, 0x100, 0x20);
-        frontend_create_preview_button(SNK_Player2ButTxt,  -0x100, 0, 0x100, 0x20);
-        frontend_create_button(SNK_ConfigureButTxt,         -0x100, 0, 0x100, 0x20);
-        frontend_create_button(SNK_OkButTxt,                -0x60,  0, 0x60,  0x20); /* 0x41e0f1: width=0x60 */
+        /* [FIXED 2026-06-01, runtime @0x499c78] P1 group y=97/137, P2 group y=217/257 (80px gap),
+         * OK (200,377). 256-wide rows, OK 96. */
+        frontend_create_preview_button(SNK_Player1ButTxt,  120,  97, 0x100, 0x20);
+        frontend_create_button(SNK_ConfigureButTxt,        120, 137, 0x100, 0x20);
+        frontend_create_preview_button(SNK_Player2ButTxt,  120, 217, 0x100, 0x20);
+        frontend_create_button(SNK_ConfigureButTxt,        120, 257, 0x100, 0x20);
+        frontend_create_button(SNK_OkButTxt,               200, 377, 0x60,  0x20);
         s_anim_complete = 0;
         frontend_begin_timed_animation();
         s_inner_state = 1;
@@ -8061,11 +8370,12 @@ static void Screen_SoundOptions(void) {
         s_sound_icon_surface       = frontend_load_tga_ck("Controllers.TGA", "Front End/frontend.zip", TD5_COLORKEY_BLACK);
         s_sound_volumebox_surface  = frontend_load_tga("VolumeBox.tga", "Front End/frontend.zip");
         s_sound_volumefill_surface = frontend_load_tga("VolumeFill.tga","Front End/frontend.zip");
-        frontend_create_button(SNK_SfxModeButTxt,     -0x100, 0, 0x100, 0x20); /* 0x41eb5e: width=0x100 */
-        frontend_create_button(SNK_SfxVolumeButTxt,   -0x100, 0, 0x100, 0x20);
-        frontend_create_button(SNK_MusicVolumeButTxt, -0x100, 0, 0x100, 0x20);
-        frontend_create_button(SNK_MusicTestButTxt,   -0x100, 0, 0x100, 0x20);
-        frontend_create_button(SNK_OkButTxt,           -0x60,  0, 0x60,  0x20); /* 0x41ebd0: width=0x60 */
+        /* [FIXED 2026-06-01, runtime @0x499c78] rows y=97 / 177,217 / 297 (256-wide), OK (200,377). */
+        frontend_create_button(SNK_SfxModeButTxt,     120,  97, 0x100, 0x20);
+        frontend_create_button(SNK_SfxVolumeButTxt,   120, 177, 0x100, 0x20);
+        frontend_create_button(SNK_MusicVolumeButTxt, 120, 217, 0x100, 0x20);
+        frontend_create_button(SNK_MusicTestButTxt,   120, 297, 0x100, 0x20);
+        frontend_create_button(SNK_OkButTxt,          200, 377, 0x60,  0x20);
         s_anim_tick = 0;
         s_inner_state = 1;
         break;
@@ -8156,17 +8466,18 @@ static void Screen_DisplayOptions(void) {
          * boot by ScreenLocalizationInit. Re-deriving the index from the
          * current window dimensions every entry would clobber the user's
          * last selection (which is restored from config.td5 at boot). */
-        frontend_create_button(SNK_ResolutionButTxt,    -0x120, 0, 0x120, 0x20); /* 0x420484: width=0x120 */
+        /* [FIXED 2026-06-01, runtime @0x499c78] rows y=97,137 / 217,257 (gap), OK (200,377). 288-wide. */
+        frontend_create_button(SNK_ResolutionButTxt,    120,  97, 0x120, 0x20);
         /* PARITY NOTE (audit 2026-05-30): orig 0x00420484 makes Fogging a DISABLED
          * preview button when DXD3D::CanFog() != 1 (M2DX ordinal 0x6f), else a live
          * cycler with arrows. The port's D3D11 backend always supports fog (same as the
          * SFX 3-mode reasoning in Screen_SoundOptions), so CanFog()==1 holds and the
          * faithful result is an always-live Fogging row — which is what this is. No
          * gating needed unless a future backend can lack fog. */
-        frontend_create_button(SNK_FoggingButTxt,       -0x120, 0, 0x120, 0x20);
-        frontend_create_button(SNK_SpeedReadoutButTxt, -0x120, 0, 0x120, 0x20);
-        frontend_create_button(SNK_CameraDampingButTxt,-0x120, 0, 0x120, 0x20);
-        frontend_create_button(SNK_OkButTxt,            -0x60,  0, 0x60,  0x20); /* 0x420522: width=0x60 */
+        frontend_create_button(SNK_FoggingButTxt,       120, 137, 0x120, 0x20);
+        frontend_create_button(SNK_SpeedReadoutButTxt,  120, 217, 0x120, 0x20);
+        frontend_create_button(SNK_CameraDampingButTxt, 120, 257, 0x120, 0x20);
+        frontend_create_button(SNK_OkButTxt,            200, 377, 0x60,  0x20);
         frontend_refresh_display_option_labels();
         s_anim_tick = 0;
         s_inner_state = 1;
@@ -8259,11 +8570,11 @@ static void Screen_TwoPlayerOptions(void) {
          * test), so the key is inert. Port's plain load (no colorkey) is correct. */
         s_split_screen_surface = frontend_load_tga("SplitScreen.tga", "Front End/frontend.zip");
         /* [CONFIRMED @ 0x420d22]: SNK_SplitScreenButTxt at x=-0x100, width=0x100 */
-        frontend_create_button(SNK_SplitScreenButTxt, -0x100, 0, 0x100, 0x20);
-        /* [CONFIRMED @ 0x420d33]: SNK_CatchupTxt at x=-0x100, width=0x100 */
-        frontend_create_button(SNK_CatchupTxt,     -0x100, 0, 0x100, 0x20); /* orig label: CATCHUP (no hyphen) */
-        /* [CONFIRMED @ 0x420d43]: SNK_OkButTxt at x=-0x100, width=0x60 */
-        frontend_create_button(SNK_OkButTxt,          -0x100, 0, 0x60,  0x20);
+        /* [FIXED 2026-06-01, runtime @0x499c78] SplitScreen y=97, Catchup y=177 (80px gap),
+         * OK (200,377). 256-wide rows, OK 96. */
+        frontend_create_button(SNK_SplitScreenButTxt, 120,  97, 0x100, 0x20);
+        frontend_create_button(SNK_CatchupTxt,        120, 177, 0x100, 0x20); /* orig label: CATCHUP (no hyphen) */
+        frontend_create_button(SNK_OkButTxt,          200, 377, 0x60,  0x20);
         s_anim_tick = 0;
         s_inner_state = 1;
         break;
@@ -9059,6 +9370,20 @@ static void Screen_CarSelection(void) {
         break;
 
     case 7: /* Main interaction loop: car preview + input */
+        {
+            /* DEV harness: TD5RE_DEMO_CARSTATS=1 jumps straight to the STATS spec sheet so it
+             * can be frame-dumped (frontend nav uses DirectInput polling, which SendKeys can't
+             * drive). Inert unless the env var is set. */
+            static int s_demo_cs_init = 0, s_demo_cs = 0;
+            if (!s_demo_cs_init) { s_demo_cs_init = 1;
+                const char *e = getenv("TD5RE_DEMO_CARSTATS"); s_demo_cs = (e && e[0] && e[0] != '0'); }
+            if (s_demo_cs) {
+                frontend_load_car_spec_fields(frontend_current_car_index());
+                s_car_preview_overlay = 1;
+                s_inner_state = 15;
+                return;
+            }
+        }
         /* Render car preview overlay */
         if (s_input_ready) {
             int delta = frontend_option_delta();
@@ -9668,61 +9993,34 @@ static const char * const s_gallery_names[GALLERY_PIC_COUNT] = {
 
 static void Screen_ExtrasGallery(void) {
     switch (s_inner_state) {
-    case 0: /* Init: load first image (Legals5 first, then mugshots in order) */
+    case 0: /* Init: load the dev mugshots, start the scroll reel */
         frontend_init_return_screen(TD5_SCREEN_EXTRAS_GALLERY);
-        s_gallery_pic_index = 0;
-        s_gallery_visited_mask = 1;
-        if (s_gallery_pic_surface > 0) {
-            frontend_release_surface(s_gallery_pic_surface);
-            s_gallery_pic_surface = 0;
+        for (int i = 0; i < K_CREDIT_MUGSHOT_COUNT; i++) {
+            if (s_credit_mugshot_surf[i] <= 0)
+                s_credit_mugshot_surf[i] = frontend_load_tga(k_credit_mugshots[i], GALLERY_ZIP);
         }
-        s_gallery_pic_surface = frontend_load_tga(s_gallery_names[0], GALLERY_ZIP);
-        s_anim_start_ms = 0;
         s_anim_tick = 0;
-        TD5_LOG_I(LOG_TAG, "ExtrasGallery: init, %d images total", GALLERY_PIC_COUNT);
+        TD5_LOG_I(LOG_TAG, "ExtrasGallery: credits scroll init (%d rows, %d photos)",
+                  K_CREDITS_COUNT, K_CREDIT_MUGSHOT_COUNT);
         s_inner_state = 1;
         break;
 
     case 1: /* Brief delay to prevent input bleed from menu (~39 ticks) */
         s_anim_tick += 2;
         if (s_anim_tick >= 0x27) {
-            s_anim_start_ms = td5_plat_time_ms();
+            s_credits_start_ms = td5_plat_time_ms();
             s_inner_state = 2;
         }
         break;
 
-    case 2: /* Auto-advance through all images; ESC handled by global handler -> quit */
+    case 2: /* Scroll the credit reel; quit once it fully passes (orig exits after credits).
+             * ESC/click also exits via the global escape handler. [FAITHFUL 2026-06-02 — replaces
+             * the prior photo slideshow with the original's vertical scroll of SNK_CreditsText.] */
         {
-            uint32_t now = td5_plat_time_ms();
-            /* [RESOLVED 2026-06-01 @0x00417d50] The original is a VERTICAL SCROLL REEL, not a
-             * paged slideshow: counter inits 0x27F (639), +1/frame, wraps -0x280 → 640-frame
-             * cycle; a new 32px-tall content row appears every (counter & 0x1f)==0 = 32 frames
-             * (~1.07s @30fps), quitting after 11 sections ('*' terminators). The port's paged
-             * 4000ms slideshow is an accepted ARCH-DIV reskin (no scroll-surface pool); 4000ms
-             * ≈ several scroll rows. Kept as ARCH-DIV; real cadence recorded for the record. */
-            if (now - s_anim_start_ms >= 4000) {
-                s_gallery_pic_index++;
-                if (s_gallery_pic_index >= GALLERY_PIC_COUNT) {
-                    /* All images shown -- original exits game here */
-                    TD5_LOG_I(LOG_TAG, "ExtrasGallery: all %d images shown, quitting", GALLERY_PIC_COUNT);
-                    if (s_gallery_pic_surface > 0) {
-                        frontend_release_surface(s_gallery_pic_surface);
-                        s_gallery_pic_surface = 0;
-                    }
-                    frontend_post_quit();
-                    break;
-                }
-                if (s_gallery_pic_surface > 0) {
-                    frontend_release_surface(s_gallery_pic_surface);
-                    s_gallery_pic_surface = 0;
-                }
-                s_gallery_pic_surface = frontend_load_tga(
-                    s_gallery_names[s_gallery_pic_index], GALLERY_ZIP);
-                s_gallery_visited_mask |= (1 << s_gallery_pic_index);
-                s_anim_start_ms = now;
-                TD5_LOG_I(LOG_TAG, "ExtrasGallery: image %d/%d: %s",
-                          s_gallery_pic_index + 1, GALLERY_PIC_COUNT,
-                          s_gallery_names[s_gallery_pic_index]);
+            float scroll = (float)(td5_plat_time_ms() - s_credits_start_ms) * FE_CREDITS_SPEED;
+            if (scroll > 480.0f + frontend_credits_total_height()) {
+                TD5_LOG_I(LOG_TAG, "ExtrasGallery: credits complete, quitting");
+                frontend_post_quit();
             }
         }
         break;
@@ -9743,8 +10041,21 @@ static void Screen_PostRaceHighScore(void) {
         s_anim_complete = 0;
         /* Create 0x208 x 0x90 score panel surface (black fill) */
         /* Create nav button + OK button */
-        frontend_create_button(NULL, 115,  93, 520, 32);  /* nav bar: x=115, y=93 */
-        frontend_create_button(SNK_OkButTxt, 120, 416,  96, 32);  /* OK button at bottom */
+        /* [FIXED 2026-06-01 v2] Nav-bar selector + OK button — FAITHFUL native positions,
+         * read from the original's RESOLVED auto-layout in runtime memory (button table
+         * @0x499c78, the -0x208/-0x130 auto-layout sentinels resolve to these):
+         *   button 0 (nav bar): origin (0x73,0x61)=(115,97), 0x208x0x20 = 520x32
+         *   button 1 (OK)     : origin (115,377),            0x60 x0x20 = 96x32
+         * The prior y128 was derived from the widescreen-PATCHED exe, whose ~1.275x vertical
+         * frontend stretch renders the nav text at screen-y ~140-158 (= native ~103-118); the
+         * previous fix wrongly treated those stretched screen pixels as native coords. With the
+         * faithful button y=97, the centered track name (drawn at ty=nav_by+6, see ~line 6175)
+         * lands at native top 103 — matching the de-stretched original. OK was likewise off
+         * (port 120,416 vs faithful 115,377). The track name itself is button-centered, which
+         * mirrors the original: RebuildFrontendButtonSurface(0,0,SNK_TrackNames[pool]) draws
+         * the label MeasureOrCenter'd across the 520px button width. */
+        frontend_create_button(NULL, 115, 97, 520, 32);    /* nav bar selector */
+        frontend_create_button(SNK_OkButTxt, 115, 377, 96, 32);  /* OK button */
         frontend_set_cursor_visible(0);
         frontend_play_sfx(5);
         s_score_category_index = 0;
@@ -9908,8 +10219,15 @@ static void Screen_RaceResults(void) {
         s_results_cup_complete = 0;
         s_results_skip_display = 0;
         s_anim_tick = 0;
-        frontend_create_button(NULL, FE_CENTER_X - 0x104, 400, 0x208, 0x20);
-        frontend_create_button(SNK_OkButTxt, FE_CENTER_X -   0x30, 400, 0x60,  0x20);
+        /* [FIXED 2026-06-02] Faithful rest positions (orig RunRaceResultsScreen case 3
+         * MoveFrontendSpriteRect at counter==0x27, halfW=320/halfH=240):
+         *   btn0 selector nav bar (520x32) slides to (115,97) — shows the car name +
+         *        ◄► arrows (browse racers); orig creates it NULL-labelled at -0x208.
+         *   btn1 OK (96x32) slides to (115,377) — bottom-LEFT.
+         * The prior placeholder planted BOTH at y=400, which read as a double OK. */
+        { int bi = frontend_create_button(NULL, 115, 97, 0x208, 0x20);
+          if (bi >= 0) s_buttons[bi].is_selector = 1; }
+        frontend_create_button(SNK_OkButTxt, 115, 377, 0x60, 0x20);
         s_inner_state = 1;
         break;
 
@@ -9959,6 +10277,10 @@ static void Screen_RaceResults(void) {
              * !finished is still true; the flag must survive across the
              * entire state-3 anim window. */
             s_results_view_data_request = 0;
+            /* Mark the intro slide complete (mirrors High Scores case 3). This both
+             * enables the shared ESC handler and gates the selector nav-bar car-name +
+             * ◄► render — without it the top selector bar drew empty. [FIXED 2026-06-02] */
+            s_anim_complete = 1;
             s_inner_state = 4;
         }
         break;
@@ -10144,7 +10466,9 @@ static void Screen_RaceResults(void) {
         }
 
         {
-            const int RR_BX = FE_CENTER_X - 0x90;     /* 0x120 / 2 = 0x90 */
+            /* [FIXED 2026-06-02, runtime @0x499c78] menu buttons LEFT-align at x=120 (halfW-200),
+             * NOT centered (port had FE_CENTER_X-0x90=176). Y0=97 step 48 + 288-wide confirmed. */
+            const int RR_BX = FE_CENTER_X - 200;      /* 120 */
             const int RR_BW = 0x120;                  /* 288 */
             const int RR_BH = 0x20;                   /* 32 */
             const int RR_Y0 = FE_CENTER_Y - 0x8F;     /* 97 */
@@ -10468,6 +10792,16 @@ static void Screen_PostRaceNameEntry(void) {
             TD5_LOG_I(LOG_TAG, "PostRaceNameEntry: group=%d type=%d score=%d qualifies=%d",
                       group_idx, group_type, (int)s_post_race_score, qualifies);
 
+            /* DEV harness: TD5RE_DEMO_NAMEENTRY=1 forces the name-prompt phase so the
+             * name-input widget can be frame-dumped without finishing a qualifying race.
+             * Inert unless the env var is set. */
+            {
+                static int s_demo_ne_init = 0, s_demo_ne = 0;
+                if (!s_demo_ne_init) { s_demo_ne_init = 1;
+                    const char *e = getenv("TD5RE_DEMO_NAMEENTRY"); s_demo_ne = (e && e[0] && e[0] != '0'); }
+                if (s_demo_ne) { qualifies = 1; if (s_post_race_score == 0) s_post_race_score = 1; }
+            }
+
             if (!qualifies) {
                 /* Skip name entry — go straight to table insert (no name prompt) */
                 s_post_race_score = 0;
@@ -10492,8 +10826,9 @@ static void Screen_PostRaceNameEntry(void) {
         }
         break;
 
-    case 2: /* Text input active */
-        frontend_render_text_input();
+    case 2: /* Text input active — process keys here; widget DRAWN in render path
+             * (td5_frontend_render_ui_rects NAME_ENTRY dispatch). */
+        frontend_handle_text_input_key();
         if (frontend_text_input_confirmed()) {
             /* Copy entered name, or fallback to default */
             frontend_play_sfx(5);
@@ -10673,8 +11008,9 @@ static void Screen_CupFailed(void) {
          *   SNK_ToWinTxt     y=0x38 ("TO WIN")           [CONFIRMED Language.dll]
          *   SNK_RaceTypeText y=0x54 ([cup type name])    [CONFIRMED @ 0x4237F0]
          * [CONFIRMED @ ScreenCupFailedDialog 0x004237F0] */
-        /* [CONFIRMED @ 0x4237F0]: SNK_OkButTxt at x=-0x120 */
-        frontend_create_button(SNK_OkButTxt, -0x120, 0, 0x60, 0x20);
+        /* [FIXED 2026-06-02, decomp @0x4237F0] OK rests at (296,289) — slides via
+         * MoveFrontendSpriteRect(0,(halfW-0x318)+0x20*0x18, halfH+0x31) = (296, 289). 408x112 panel @(152,97). */
+        frontend_create_button(SNK_OkButTxt, 296, 289, 0x60, 0x20);
         s_anim_tick = 0;
         s_inner_state = 1;
         break;
@@ -10768,8 +11104,10 @@ static void Screen_CupWon(void) {
         frontend_load_tga("Front_End/MainMenu.tga", "Front_End/FrontEnd.zip");
         /* Dialog 0x198×0xC4 (408×196) rendered live in frontend_render_cup_won_overlay.
          * [CONFIRMED @ 0x00423AEB/AF0]: CreateTrackedFrontendSurface(0x198, 0xC4) */
-        /* [CONFIRMED @ 0x00423C61]: SNK_OkButTxt at x=-0x120 (was -100, wrong) */
-        frontend_create_button(SNK_OkButTxt, -0x120, 0, 0x60, 0x20);
+        /* [FIXED 2026-06-02, decomp @0x423A80] OK rests at (296,337) — it slides via
+         * MoveFrontendSpriteRect(0,(halfW-0x318)+0x20*0x18, halfH+0x61) = (296, 337); the taller
+         * 408x196 panel pushes it below the 408x112 dialogs' (296,289). Port auto-layout didn't match. */
+        frontend_create_button(SNK_OkButTxt, 296, 337, 0x60, 0x20);
         s_anim_tick = 0;
         s_inner_state = 1;
         break;
@@ -10847,8 +11185,9 @@ static void Screen_SessionLocked(void) {
          *   SNK_SorryTxt     y=0x00 ("SORRY")          [CONFIRMED Language.dll]
          *   SNK_SeshLockedTxt y=0x38 ("SESSION LOCKED") [CONFIRMED Language.dll]
          * [CONFIRMED @ ScreenSessionLockedDialog 0x0041D630] */
-        /* [CONFIRMED @ 0x41D630]: SNK_OkButTxt at x=-0x120 */
-        frontend_create_button(SNK_OkButTxt, -0x120, 0, 0x60, 0x20);
+        /* [FIXED 2026-06-02, decomp @0x41D630] OK rests at (296,289) — slides via
+         * MoveFrontendSpriteRect(0,(halfW-0x318)+0x20*0x18, halfH+0x31) = (296, 289), same as CupFailed. */
+        frontend_create_button(SNK_OkButTxt, 296, 289, 0x60, 0x20);
         s_anim_tick = 0;
         s_inner_state = 1;
         break;
