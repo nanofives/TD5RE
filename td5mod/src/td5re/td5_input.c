@@ -893,11 +893,23 @@ void td5_input_update_player_control(int slot)
      * original (no deceleration, no brake lights). This restores the faithful
      * behavior. */
     if (bits & 0x100000u) {
-        s_throttle[slot]  = (int16_t)0xFF00;  /* -256: full brake throttle */
-        s_brake[slot]     = 1;                 /* lights brake lights + brake path */
-        s_handbrake[slot] = 1;                 /* rear-grip cut + slip-z gate */
-        TD5_LOG_I(LOG_TAG,
-                  "handbrake ON slot=%d: throttle=-256 brake=1 hb=1", slot);
+        s_handbrake[slot] = 1;                 /* rear-grip cut + slip-z gate — always */
+        if (bits & TD5_INPUT_THROTTLE) {
+            /* [FIX 2026-06-02 power-slide/donut] On throttle + handbrake: keep the
+             * forward drive (do NOT override to the -256 brake throttle, do NOT set
+             * brake_flag) so the rear breaks loose UNDER POWER -> the car power-
+             * slides / donuts instead of braking to a stop. The literal original
+             * always forces throttle=-256+brake (@0x004033fb), which precludes a
+             * handbrake donut; this is a deliberate port deviation for that gameplay.
+             * s_throttle/s_brake keep their decoded forward values (throttle=0x100,
+             * brake=0 from the accelerate branch above). */
+        } else {
+            /* Handbrake-only (off throttle): brake the car to a stop (faithful). */
+            s_throttle[slot]  = (int16_t)0xFF00;  /* -256: full brake throttle */
+            s_brake[slot]     = 1;                 /* brake lights + brake path */
+        }
+        TD5_LOG_I(LOG_TAG, "handbrake ON slot=%d: throttle=%d brake=%d hb=1",
+                  slot, (int)s_throttle[slot], (int)s_brake[slot]);
     } else {
         s_handbrake[slot] = 0;
     }

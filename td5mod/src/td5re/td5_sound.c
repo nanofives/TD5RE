@@ -874,6 +874,15 @@ void td5_sound_update_audio_mix(void)
                     slip_max = 0;
                 }
 
+                /* [FIX 2026-06-02 pre-race screech] Silence the tyre screech before
+                 * the race starts. g_td5.paused == 1 during the start countdown
+                 * (set in td5_game.c, cleared at GO) and during the in-race pause.
+                 * Revving a held car on the grid spins the wheels (scf set), which
+                 * forced slip_max to max above and screeched before the flag drop;
+                 * the user does not want a pre-race screech. Trivially revertible
+                 * if the original's pre-race burnout SFX is later wanted. */
+                if (g_td5.paused) slip_max = 0;
+
                 int horn_vol_raw = slip_max / 3;
 
                 /* Clamp tracked audio volume to [0, 0x1000] */

@@ -120,6 +120,7 @@ void BuildRotationMatrixFromAngles(float *out, short *angles);
 #define DEFAULT_FAR_CLIP     195000.0f            /* was 65536; matches far-cull */
 #define DEFAULT_FAR_CULL     195000.0f
 #define NEAR_DEPTH_OFFSET    64.0f                /* orig 0x0045d6c0 */
+#define TIRE_DECAL_BIAS      40.0f                /* tire-mark decal pull toward camera (view units); 40 clears z-fight speckle on bumpy cobblestone while the car (far closer) still occludes */
 #define DEPTH_NORMALIZE_INV  (1.0f / 195000.0f)   /* was orig 1/65479; extended to far-cull */
 
 /** Billboard depth sort stride sizes (bytes) */
@@ -4781,9 +4782,13 @@ static void render_vehicle_brake_lights(const TD5_Actor *actor, int slot)
     if (s_braked_page < 0) return;
     if (slot < 0 || slot >= 12) return;
 
-    /* Read brake_flag at actor+0x36D */
+    /* Read brake_flag at actor+0x36D; also light on the HANDBRAKE (+0x36E). */
     const uint8_t *ap = (const uint8_t *)actor;
-    int braking = (*(ap + 0x36D) != 0);
+    /* [FIX 2026-06-02] Brake lights illuminate for the handbrake too, not just the
+     * foot brake. The throttle+handbrake power-slide deviation clears brake_flag so
+     * the drive path runs for the donut, which left the lights dark; the original
+     * handbrake sets brake_flag=1 (lights on), so include handbrake_flag here. */
+    int braking = (*(ap + 0x36D) != 0 || *(ap + 0x36E) != 0);
 
     /* Brightness ramp / decay */
     uint8_t bright = s_brake_brightness[slot];
@@ -6791,7 +6796,15 @@ void td5_render_submit_tire_mark(uint16_t *quad_data) {
         int base = 2 + i * 7;
         verts[i].screen_x = fdata[base + 0];
         verts[i].screen_y = fdata[base + 1];
-        verts[i].depth_z  = fdata[base + 2];
+        /* [FIX 2026-06-02 tire-through-car] Put the decal in the SAME depth space
+         * as the opaque road/car (which write (vz-NEAR_DEPTH_OFFSET)*INV) and add a
+         * small extra bias toward the camera so the mark wins the coplanar road
+         * without z-fighting, while the car body (genuinely much closer) still
+         * occludes it. The raw projected sz (fdata[base+2]) omitted the -64 the
+         * opaque pass applies, so marks were depth-inconsistent and showed through
+         * the car. */
+        verts[i].depth_z  = fdata[base + 2]
+                            - (NEAR_DEPTH_OFFSET + TIRE_DECAL_BIAS) * DEPTH_NORMALIZE_INV;
         verts[i].rhw      = fdata[base + 3];
         verts[i].diffuse  = *(uint32_t *)&fdata[base + 4];
         verts[i].specular = 0;
@@ -6800,7 +6813,14 @@ void td5_render_submit_tire_mark(uint16_t *quad_data) {
     }
 
     tex_page = (int)(*(float *)((uint8_t *)quad_data + 0x90));
-    td5_plat_render_set_preset(TD5_PRESET_SHADOW);
+    /* [FIX 2026-06-02 tire-through-car] Use a depth-tested translucent preset WITHOUT
+     * the SHADOW preset's polygon_offset. That rasterizer DepthBias pulls decals
+     * toward the camera (needed for the car's OWN shadow, coplanar under the car) and
+     * was shoving the tire marks IN FRONT of the car body -> see-through. The marks
+     * trail behind the car, so they only need to (a) win the coplanar road, handled by
+     * the small vertex bias above, and (b) lose to the car, handled by the normal
+     * LEQUAL test now that no rasterizer pull over-biases them. */
+    td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_ANISO);
     td5_plat_render_bind_texture(tex_page);
     td5_plat_render_draw_tris(verts, 4, indices, 6);
 }
@@ -6877,23 +6897,6 @@ void td5_render_radial_pulse(float dt)
 {
     float phase = td5_hud_radial_pulse_get();
 
-    /* [TEMP DIAG — remove before commit] Force the victory star visible during
-     * a normal race so its color can be frame-dumped over the (neutral) road,
-     * isolating an inherent tint (texture/channel) from scene-bleed. Set
-     * TD5RE_DIAG_STAR=<phase> in the environment. */
-    {
-        const char *ds = getenv("TD5RE_DIAG_STAR");
-        if (ds) { phase = (float)atof(ds); td5_hud_radial_pulse_set(phase); }
-    }
-
-    {
-        static uint32_t s_diag_n = 0;
-        if ((s_diag_n++ % 60u) == 0u) {
-            TD5_LOG_I("render", "radial_pulse: phase=%.1f vp=%dx%d", phase,
-                      (int)s_viewport_width, (int)s_viewport_height);
-        }
-    }
-
     /* Gate: orig FCOMP [0x0045d624] (= 0.0f). Skip when phase < 0. */
     if (phase < 0.0f) return;
 
@@ -6909,24 +6912,21 @@ void td5_render_radial_pulse(float dt)
     /* Anim accumulator advances every frame (independent of phase). */
     s_radial_pulse_anim += dt * 3328.0f;
 
-    /* Star opacity ramp. [user 2026-06-02: star looked "a little pinkish".]
-     * ROOT CAUSE: the petals are white-RGB drawn translucent (SRCALPHA), and the
-     * previous coefficient 0.55 only reached ~72% opacity at the end of the 2.5s
-     * victory hold (phase ~0..330 -> alpha max ~181). The remaining ~28% let the
-     * WARM finish-line scene bleed THROUGH the white star, tinting it toward the
-     * scene colour -> the perceived "pinkish" wash. Both the star's diffuse
-     * (0x00FFFFFF) and its modulate texture (page 899 = 0xFFFFFFFF) are provably
-     * pure white through PS_MODULATE_ALPHA (tex*diffuse), and every other white
-     * HUD element renders neutral in a frame-dump — so the tint is ONLY
-     * scene-bleed, not a colour/channel bug. [RE: RenderHudRadialPulseOverlay
-     * @0x00439E60 — orig petals ramp grayscale RGB at alpha 0xFF, i.e. OPAQUE, so
-     * the original never bleeds the scene through.] FIX: ramp the alpha faster
-     * (1.6) so the star reaches full opacity (255) by phase ~160 — roughly the
-     * mid-point of the hold. The prominent second half (largest radius, most
-     * visible) is then fully OPAQUE neutral white with NO scene-bleed, while the
-     * first half still fades in from invisible. This also moves the port closer
-     * to the original's opaque petals. Tunable: 0.31875 = orig-faint, 0.55 = old
-     * (pink-prone), 1.6 = opaque-by-mid-hold (neutral white). */
+    /* Star opacity ramp. [user 2026-06-02: victory star looked "a little
+     * pinkish"; should be white/neutral.] The DOMINANT cause was the missing
+     * TD5_BSQT_TEXPAGE flag above (the petals modulated PAGE 0, a brown scene
+     * atlas) — fixed there; with page 899 bound the petals are now pure white
+     * (frame-dump verified 255,255,255). This ramp is a SECONDARY measure: the
+     * petals are still drawn translucent (SRCALPHA), so at the old coefficient
+     * 0.55 they only reached ~72% opacity (phase ~0..330 -> alpha max ~181),
+     * letting the WARM finish-line scene bleed ~28% through the white star and
+     * leaving a faint residual warm tint. [RE: RenderHudRadialPulseOverlay
+     * @0x00439E60 — orig petals are OPAQUE (alpha 0xFF), so the original never
+     * bleeds the scene.] Ramp the alpha faster (1.6) so the star reaches full
+     * opacity (255) by phase ~160 (mid-hold): the prominent second half is then
+     * fully OPAQUE neutral white, the first half still fades in, and the result
+     * is closer to the original opaque petals. Tunable: 0.31875 = orig-faint,
+     * 0.55 = old (translucent fade-in), 1.6 = opaque-by-mid-hold (neutral). */
     int alpha = (int)(phase * 1.6f);
     if (alpha < 0)        alpha = 0;
     else if (alpha > 255) alpha = 255;
@@ -6983,7 +6983,14 @@ void td5_render_radial_pulse(float dt)
 
         TD5_RenderSpriteQuadParams p;
         p.dest = &s_pulse_quads[q];
-        p.mode_flags = TD5_BSQT_RAW_FLAGS | TD5_BSQT_GEOMETRY | TD5_BSQT_COLOR;
+        /* [FIX 2026-06-02 star-pinkish] TD5_BSQT_TEXPAGE was MISSING here, so
+         * build_sprite_quad silently dropped p.texture_page (899=white) and the
+         * quad kept texture_page=0 -> the petals modulated PAGE 0 (an arbitrary
+         * brown scene atlas), rendering the victory star muddy brown/pink instead
+         * of white. A prior pass set p.texture_page=899 but forgot the flag that
+         * makes build_sprite_quad honour it. Adding TD5_BSQT_TEXPAGE binds the
+         * real 1x1 white page 899 -> white star (matches orig untextured petals). */
+        p.mode_flags = TD5_BSQT_RAW_FLAGS | TD5_BSQT_GEOMETRY | TD5_BSQT_COLOR | TD5_BSQT_TEXPAGE;
 
         /* Slot mapping per td5_render_build_sprite_quad:
          *   src[0] → V0   src[3] → V1   src[2] → V2   src[1] → V3

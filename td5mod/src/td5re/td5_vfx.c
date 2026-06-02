@@ -1713,7 +1713,7 @@ void td5_vfx_update_tire_tracks(void) {
          *    set bit1, leave trail at spawn (already there).
          *  - Anchor (lead position) always tracks the live wheel pos. */
         if ((slot->control & 2u) == 0u) {
-            int32_t w = (int32_t)desc->width;
+            int32_t w = (int32_t)desc->width * 2; /* [2026-06-02 user: wider] orig half-width 0x1A=26 was thin; ×2 */
             int32_t len = td5_isqrt(dx8 * dx8 + dz8 * dz8);
             if (len > 0 && w > 0) {
                 slot->perp_x = (-dz * w) / len;
@@ -1728,6 +1728,20 @@ void td5_vfx_update_tire_tracks(void) {
                 }
                 slot->direction_hash = angle12;
                 slot->control |= 2u;
+            }
+        } else {
+            /* [FIX 2026-06-02 dented / not-rotating-with-drift] Re-aim the LEAD
+             * half-width perpendicular at the CURRENT travel direction every tick.
+             * The orig froze perp at spawn, so within a segment the strip kept its
+             * start angle while the wheel curved -> faceted "dents" that don't follow
+             * a drift. The trail edge keeps perp0 (segment start) so the quad twists
+             * smoothly start->current; realloc copies this updated perp into the next
+             * segment's perp0 for a continuous join. Port-only visual polish. */
+            int32_t w = (int32_t)desc->width * 2;
+            int32_t len = td5_isqrt(dx8 * dx8 + dz8 * dz8);
+            if (len > 0 && w > 0) {
+                slot->perp_x = (-dz * w) / len;
+                slot->perp_z = ( dx * w) / len;
             }
         }
         /* Anchor follows the wheel each tick on the active slot only. Once
@@ -1896,7 +1910,11 @@ void td5_vfx_render_tire_tracks(void) {
          * pixel z-fight that reads as a speckled / "dented" line. The orig
          * lifts marks above the ground for exactly this reason (DAT_0045d6ac).
          * +Y is up (same axis the smoke lifts on). */
-        const float TM_LIFT = 24.0f;
+        const float TM_LIFT = 0.0f; /* [FIX 2026-06-02] was 24: a world-space lift
+         * toward the camera made marks float off the road (dented look) AND project
+         * in front of the car body (see-through). Sit them flush; the decal wins the
+         * road via a DEPTH bias in submit_tire_mark, and the car (genuinely closer)
+         * now occludes them. */
         float tly = trail_ws_y + TM_LIFT;
         float lly = lead_ws_y  + TM_LIFT;
 
@@ -1955,10 +1973,22 @@ void td5_vfx_render_tire_tracks(void) {
          * SRCALPHA blend DARKENS the road like a real skid (the original
          * multiplies the road down), instead of the old opaque medium-gray
          * (0x37) patch that read as a faint LIGHT smudge on dark asphalt.
-         * Alpha is boosted (×3) so a fresh mark is clearly dark, and fades out
-         * naturally as the intensity counter decays toward 0. */
+         * Alpha is boosted so a fresh mark is clearly dark, and fades out
+         * naturally as the intensity counter decays toward 0.
+         *
+         * [FIX 2026-06-02 marks-more-visible — user request] Boost raised ×3 -> ×6.
+         * RE basis: the original (RenderTireTrackPool @0x0043F210, pack @0x43F23B)
+         * draws marks as a GRAYSCALE strip (intensity,intensity,intensity) at
+         * alpha 0xFF — effectively an OPAQUE dark-gray strip on the road (initial
+         * intensity 0x1A-0x37). The port's black SRCALPHA darkening at ×3 only
+         * reached ~30% on a fresh moderate-slip mark, far fainter than the
+         * original's opaque strip. ×6 lifts a fresh mark's darkening to a
+         * comparable perceived contrast (hard-slip marks still clamp at 255, so
+         * this only strengthens the faint moderate-slip marks the user couldn't
+         * see). Not "arbitrarily darker" — it targets the original's actual
+         * on-road visibility. Tunable via this single multiplier. */
         uint8_t val = slot->intensity;
-        uint32_t a = (uint32_t)val * 3u; if (a > 255u) a = 255u;
+        uint32_t a = (uint32_t)val * 6u; if (a > 255u) a = 255u;
         uint32_t color = (a << 24); /* RGB=0 (black), A=boosted intensity */
 
         /* Normalize texel UVs to [0,1] for the D3D11 sampler (same as HUD). */
@@ -1986,10 +2016,17 @@ void td5_vfx_render_tire_tracks(void) {
         tquad.v1_x = sx[1]; tquad.v1_y = sy[1]; tquad.v1_z = sz[1]; tquad.v1_rhw = srhw[1];
         tquad.v1_color = color; tquad.v1_u = tm_u1; tquad.v1_v = tm_v0;
 
-        tquad.v2_x = sx[3]; tquad.v2_y = sy[3]; tquad.v2_z = sz[3]; tquad.v2_rhw = srhw[3];
+        /* [FIX 2026-06-02 sawtooth/"dented"] v2 must be LEADING-RIGHT (index 2) and
+         * v3 LEADING-LEFT (index 3) so the perimeter order is TL,TR,BR,BL and the two
+         * triangles (0,1,2)+(0,2,3) tile the trapezoid. The old code used sx[3] for v2
+         * and sx[2] for v3 -> perimeter TL,TR,BL,BR = a self-intersecting BOWTIE quad,
+         * which left a triangular notch in every segment -> a sawtooth/zigzag trail.
+         * UVs are unchanged (v2 keeps u1=right, v3 keeps u0=left), now matching the
+         * geometry sides. */
+        tquad.v2_x = sx[2]; tquad.v2_y = sy[2]; tquad.v2_z = sz[2]; tquad.v2_rhw = srhw[2];
         tquad.v2_color = color; tquad.v2_u = tm_u1; tquad.v2_v = tm_v1;
 
-        tquad.v3_x = sx[2]; tquad.v3_y = sy[2]; tquad.v3_z = sz[2]; tquad.v3_rhw = srhw[2];
+        tquad.v3_x = sx[3]; tquad.v3_y = sy[3]; tquad.v3_z = sz[3]; tquad.v3_rhw = srhw[3];
         tquad.v3_color = color; tquad.v3_u = tm_u0; tquad.v3_v = tm_v1;
 
         tquad.tex_u0 = s_tiremark_u0; tquad.tex_v0 = s_tiremark_v0;
@@ -3097,7 +3134,7 @@ void td5_vfx_render_taillights(int actor_index) {
     uint8_t *ap = g_actor_table_base + actor_index * TD5_ACTOR_STRIDE;
 
     /* Read brake_flag at +0x36D — nonzero = braking */
-    brake_active = (*(ap + 0x36D) != 0) ? 1 : 0;
+    brake_active = (*(ap + 0x36D) != 0 || *(ap + 0x36E) != 0) ? 1 : 0; /* [2026-06-02] handbrake lights brakes too */
 
     if (brake_active) {
         if (brightness < 0x80) {  /* cap at 128 [CONFIRMED @ 0x401204] */
