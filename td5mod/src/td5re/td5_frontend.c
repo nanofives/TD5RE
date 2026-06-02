@@ -1790,6 +1790,16 @@ static void frontend_init_race_schedule(void) {
     int slot_variant[TD5_MAX_RACER_SLOTS] = {0};
     int start_slot = 1;
 
+    /* A normal race entry (new race / Race Again / AutoRace) always RECORDS
+     * fresh input. Clear any replay/playback/demo state left over from a prior
+     * View Replay or attract demo. View Replay bypasses this function entirely
+     * (it re-enters the same race without rebuilding the schedule), so its flags
+     * survive; the attract-demo path re-sets the demo flag after this returns. */
+    td5_input_set_replay_mode(0);
+    td5_input_set_playback_active(0);
+    td5_game_set_replay_mode(0);
+    td5_game_set_demo_mode(0);
+
     g_td5.race_requested = 1;
     g_td5.car_index   = frontend_current_car_index();
     g_td5.track_index = (s_current_screen == TD5_SCREEN_ATTRACT_MODE)
@@ -6719,8 +6729,13 @@ static void Screen_AttractModeDemo(void) {
 
     case 5: /* Execute fade, then launch demo race */
         if (frontend_render_fade()) {
-            /* Fade complete -- launch demo race with input playback */
+            /* Fade complete -- launch attract-demo race. The original demo is
+             * AI-driven (no input playback) and shows the "DEMO MODE" status
+             * text; set the demo flag AFTER frontend_init_race_schedule (which
+             * clears it). Distinct from View Replay, which plays back input and
+             * shows the REPLAY banner. [orig g_attractModeDemoActive path.] */
             frontend_init_race_schedule();
+            td5_game_set_demo_mode(1);
             frontend_init_display_mode_state();
         }
         break;
@@ -8231,6 +8246,20 @@ static void Screen_GameOptions(void) {
                 }
             }
             if (s_button_index == 7) { /* OK */
+                /* Sync the committed game options into g_td5.ini (the global the
+                 * boot-override at frontend init reads) and write them back to
+                 * td5re.ini so the selection survives a relaunch. The original
+                 * persisted these to Config.td5 only, but the port's td5re.ini
+                 * boot-override masks Config.td5, so the ini is the live config
+                 * layer that must be kept in sync. [PART B 2026-06-02] */
+                g_td5.ini.laps              = s_game_option_laps;
+                g_td5.ini.checkpoint_timers = s_game_option_checkpoint_timers;
+                g_td5.ini.traffic           = s_game_option_traffic;
+                g_td5.ini.cops              = s_game_option_cops;
+                g_td5.ini.difficulty        = s_game_option_difficulty;
+                g_td5.ini.dynamics          = s_game_option_dynamics;
+                g_td5.ini.collisions        = s_game_option_collisions;
+                td5_ini_persist_options();
                 s_return_screen = TD5_SCREEN_OPTIONS_HUB;
                 s_inner_state = 7;
             }
@@ -8439,6 +8468,14 @@ static void Screen_SoundOptions(void) {
                 s_return_screen = TD5_SCREEN_MUSIC_TEST;
                 s_inner_state = 7;
             } else if (s_button_index == 4) { /* OK */
+                /* Persist sound options to td5re.ini so they survive a relaunch
+                 * (see PART B note in Screen_GameOptions). Volume changes already
+                 * applied live via td5_save_set_*; sync the committed values into
+                 * g_td5.ini and write them back. [PART B 2026-06-02] */
+                g_td5.ini.sfx_mode     = s_sound_option_sfx_mode;
+                g_td5.ini.sfx_volume   = s_sound_option_sfx_volume;
+                g_td5.ini.music_volume = s_sound_option_music_volume;
+                td5_ini_persist_options();
                 s_return_screen = TD5_SCREEN_OPTIONS_HUB;
                 s_inner_state = 7;
             }
@@ -8541,6 +8578,15 @@ static void Screen_DisplayOptions(void) {
                 if (s_display_camera_damping > 9) s_display_camera_damping = 9;
                 changed = 1;
             } else if (s_button_index == 4) {
+                /* Persist display options (fog / speed units / camera damping)
+                 * to td5re.ini so they survive a relaunch (see PART B note in
+                 * Screen_GameOptions). Resolution is NOT written here — it
+                 * applies live and persists its display-mode ordinal to
+                 * Config.td5 separately. [PART B 2026-06-02] */
+                g_td5.ini.fog_enabled    = s_display_fog_enabled;
+                g_td5.ini.speed_units    = s_display_speed_units;
+                g_td5.ini.camera_damping = s_display_camera_damping;
+                td5_ini_persist_options();
                 s_inner_state = 7;
                 break;
             }
@@ -10589,11 +10635,29 @@ static void Screen_RaceResults(void) {
                  * at td5_game.c:1902 hits the WriteOpen branch (memsets recording buffer)
                  * → playback reads zero input forever → race appears to restart blank.
                  * Closes todo-view-replay-restarts-race-2026-05-19. */
-                TD5_LOG_I(LOG_TAG, "RaceResults: View Replay selected");
+                TD5_LOG_I(LOG_TAG, "RaceResults: View Replay selected "
+                          "(reuse schedule + restore seed; track=%d reverse=%d "
+                          "ai=[%d,%d,%d,%d,%d])",
+                          g_td5.track_index, g_td5.reverse_direction,
+                          g_td5.ai_car_indices[1], g_td5.ai_car_indices[2],
+                          g_td5.ai_car_indices[3], g_td5.ai_car_indices[4],
+                          g_td5.ai_car_indices[5]);
+                td5_game_set_demo_mode(0);            /* a replay, not a demo */
                 td5_input_set_replay_mode(1);
                 td5_input_set_playback_active(1);
                 td5_game_set_replay_mode(1);
-                frontend_init_race_schedule();
+                /* Determinism: re-enter the SAME race WITHOUT rebuilding the AI
+                 * schedule. Keep the recorded race's track/direction/opponents
+                 * (g_td5.track_index, reverse_direction, ai_car_indices[]) and let
+                 * td5_game_init_race_session restore the saved RNG seed (step 0).
+                 * Mirrors the original, which re-enters via the unchanged
+                 * g_selectedScheduleIndex and does NOT call
+                 * InitializeRaceSeriesSchedule for View Replay [CONFIRMED
+                 * @0x422F2C]. Calling frontend_init_race_schedule() here (as the
+                 * port previously did) re-picks AI cars from a fresh time-seed →
+                 * different opponents → "not the race I just drove". Just request
+                 * the race; the state machine fires init on the next tick. */
+                g_td5.race_requested = 1;
                 break;
 
             case 2: /* View Race Data — re-enter screen 24 from state 0.

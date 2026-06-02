@@ -191,4 +191,15 @@ void td5_camera_get_basis(float *right, float *up, float *forward);
 void td5_camera_bind_track_geometry(const void *span_base,
                                     const void *vertex_base);
 
+/* Bind the active per-track trackside-camera profile table (orig
+ * LoadTrackRuntimeData @0x42fd4b: gTracksideCameraProfiles =
+ * g_perTrackTracksideCameraProfilePtrs[track_pool_index - 1]). pool_index is the
+ * 1-based track-pool index (see td5_asset_track_pool_index); 0 or out-of-range
+ * clears the pointer (→ replay falls back to chase). Call at race init before
+ * InitializeTracksideCameraProfiles. */
+void td5_camera_bind_trackside_profiles(int pool_index_1based);
+
+/* True when the replay trackside camera has usable profile data for this race. */
+int  td5_camera_replay_trackside_ready(void);
+
 #endif /* TD5_CAMERA_H */

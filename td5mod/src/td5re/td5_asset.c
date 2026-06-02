@@ -2983,6 +2983,100 @@ int td5_asset_resolve_traffic_model_index(int track_index, int reverse, int slot
     return s_traffic_model_table[row][slot_in_pool];
 }
 
+/* Returns the 1-based track-pool record number ("world_x" =
+ * gTrackPoolSpanCountTable[gScheduleToPoolIndex[track]] forward, or the reverse
+ * table when reverse) — the same value InitializeRaceSession feeds to
+ * LoadTrackRuntimeData @0x42fb90 to select the trackside-camera profile table
+ * (profile index = return - 1, via td5_camera_bind_trackside_profiles). Returns
+ * 0 when the track/direction is invalid or reverse is unavailable (-1 sentinel),
+ * so the caller binds no profiles and the replay camera falls back to chase. */
+int td5_asset_track_pool_index(int track_index, int reverse)
+{
+    if (track_index < 0 ||
+        track_index >= (int)(sizeof(s_schedule_to_pool_index) /
+                             sizeof(s_schedule_to_pool_index[0]))) {
+        return 0;
+    }
+    int pool_row = (int)s_schedule_to_pool_index[track_index];
+    int world_x;
+    if (reverse) {
+        if (pool_row < 0 ||
+            pool_row >= (int)(sizeof(s_track_pool_reverse_span_count_table) /
+                              sizeof(int32_t))) {
+            return 0;
+        }
+        world_x = s_track_pool_reverse_span_count_table[pool_row];
+        if (world_x < 0) {
+            return 0;   /* reverse unavailable for this track */
+        }
+    } else {
+        if (pool_row < 0 ||
+            pool_row >= (int)(sizeof(s_track_pool_span_count_table) /
+                              sizeof(int32_t))) {
+            return 0;
+        }
+        world_x = s_track_pool_span_count_table[pool_row];
+    }
+    return world_x;
+}
+
+/* ========================================================================
+ * Checkpoint record index resolution (direction-aware).
+ *
+ * The original derives the per-track checkpoint-timing record via the SAME
+ * two-stage pool lookup the traffic resolver uses, then `record = pool_idx - 1`
+ * (see k_schedule_to_checkpoint_index comment in td5_game.c). Crucially the
+ * REVERSE direction selects the pool index from gTrackPoolReverseSpanCountTable
+ * (0x00466E3C) instead of the forward gTrackPoolSpanCountTable (0x00466D50),
+ * so reverse tracks get a DIFFERENT checkpoint record — different span
+ * thresholds, initial_time, and time bonuses.
+ *
+ * [CONFIRMED via runtime dump of g_raceCheckpointTablePtr @0x4AED88 on the
+ *  original TD5_d3d.exe: reverse Sydney (track 2, pool_row 7) yields
+ *  record_idx = reverse_table[7]-1 = 19-1 = 18 = {665,1081,1679,2250,2635}
+ *  init=15419, matching k_checkpoint_table[18] exactly. Forward Sydney =
+ *  reverse_table-free path = forward_table[7]-1 = 14-1 = 13.]
+ *
+ * Returns the checkpoint record index, or -1 when:
+ *   - track_index is out of the schedule range, or
+ *   - reverse was requested but this track ships no reverse data (-1 sentinel
+ *     in the reverse pool table). Callers fall back to the forward record.
+ * ======================================================================== */
+int td5_asset_resolve_checkpoint_record_index(int track_index, int reverse)
+{
+    if (track_index < 0 ||
+        track_index >= (int)(sizeof(s_schedule_to_pool_index) / sizeof(s_schedule_to_pool_index[0]))) {
+        return -1;
+    }
+
+    int pool_row = (int)s_schedule_to_pool_index[track_index];
+    int pool_idx;
+
+    if (reverse) {
+        if (pool_row < 0 ||
+            pool_row >= (int)(sizeof(s_track_pool_reverse_span_count_table) / sizeof(int32_t))) {
+            return -1;
+        }
+        pool_idx = s_track_pool_reverse_span_count_table[pool_row];
+        if (pool_idx < 0) {
+            /* -1 sentinel: reverse unavailable for this track. */
+            return -1;
+        }
+    } else {
+        if (pool_row < 0 ||
+            pool_row >= (int)(sizeof(s_track_pool_span_count_table) / sizeof(int32_t))) {
+            return -1;
+        }
+        pool_idx = s_track_pool_span_count_table[pool_row];
+    }
+
+    /* record_idx = pool_idx - 1 (the original's per-track checkpoint record). */
+    int record_idx = pool_idx - 1;
+    if (record_idx < 0)
+        return -1;
+    return record_idx;
+}
+
 /* ========================================================================
  * Mipmap Builder -- ParseAndDecodeCompressedTrackData (0x430D30)
  *
