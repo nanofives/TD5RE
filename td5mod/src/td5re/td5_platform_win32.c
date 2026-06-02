@@ -143,6 +143,12 @@ static unsigned int s_log_cat_mask  = TD5_LOG_CAT_BIT_FRONTEND |
 
 static LPDIRECTSOUND8          s_dsound      = NULL;
 static LPDIRECTSOUNDBUFFER     s_ds_primary  = NULL;
+/* Continuously-looping silent buffer that keeps the audio device/stream awake.
+ * Without it the device idles when no sound is playing (as in the menus, where
+ * SFX are sparse); the next sound then loses its first ~0.1-0.2s to wake-up
+ * ramp, which entirely swallows short one-shot UI sounds (ping/whoosh). Kept
+ * playing for the whole session so menu one-shots fire instantly. */
+static LPDIRECTSOUNDBUFFER     s_ds_keepalive = NULL;
 static LPDIRECTSOUNDBUFFER     s_ds_buffers[MAX_AUDIO_BUFFERS];
 static LPDIRECTSOUNDBUFFER     s_ds_channels[MAX_AUDIO_CHANNELS];
 static int                     s_ds_channel_buf[MAX_AUDIO_CHANNELS]; /* buffer index per channel */
@@ -1924,6 +1930,72 @@ int td5_plat_audio_init(void)
         wfx.nBlockAlign       = wfx.nChannels * wfx.wBitsPerSample / 8;
         wfx.nAvgBytesPerSec   = wfx.nSamplesPerSec * wfx.nBlockAlign;
         IDirectSoundBuffer_SetFormat(s_ds_primary, &wfx);
+
+        /* Keep the primary buffer — and therefore the DirectSound mixer —
+         * running continuously. Without this the mixer goes idle whenever no
+         * secondary buffer is playing; the next sound then incurs a wake-up
+         * latency that swallows the start of short one-shots. In the frontend,
+         * where only brief (~0.1s) selection/transition one-shots play with
+         * gaps between them, that latency ate the whole sound, so menu SFX were
+         * inaudible even though they were played at full volume. In a race the
+         * continuous engine loops keep the mixer alive, so race SFX were never
+         * affected — which is why the symptom was frontend-only. Playing the
+         * primary looping (it outputs silence; it is the mix target) keeps the
+         * pipeline hot and does not change any race behavior. */
+        IDirectSoundBuffer_Play(s_ds_primary, 0, 0, DSBPLAY_LOOPING);
+    }
+
+    /* Silent keepalive: a continuously-looping SECONDARY buffer of pure silence.
+     * This is what actually keeps the audio stream from idling between sounds —
+     * playing the primary buffer alone proved insufficient on WDM/WASAPI, where
+     * the render stream still ramps down when no secondary buffer is active. A
+     * looping silent secondary keeps a live stream at all times, so short menu
+     * one-shots (ping/whoosh) play instantly instead of being swallowed by the
+     * device wake-up ramp. It is silence at minimum volume — inaudible, and it
+     * changes nothing else (the race already stayed hot via its engine loops). */
+    {
+        DSBUFFERDESC kd;
+        WAVEFORMATEX kwfx;
+        const DWORD ka_bytes = 22050; /* ~0.5 s of 22050 Hz 16-bit mono silence */
+        ZeroMemory(&kwfx, sizeof(kwfx));
+        kwfx.wFormatTag      = WAVE_FORMAT_PCM;
+        kwfx.nChannels       = 1;
+        kwfx.nSamplesPerSec  = 22050;
+        kwfx.wBitsPerSample  = 16;
+        kwfx.nBlockAlign     = kwfx.nChannels * kwfx.wBitsPerSample / 8;
+        kwfx.nAvgBytesPerSec = kwfx.nSamplesPerSec * kwfx.nBlockAlign;
+        ZeroMemory(&kd, sizeof(kd));
+        kd.dwSize        = sizeof(DSBUFFERDESC);
+        kd.dwFlags       = DSBCAPS_GLOBALFOCUS | DSBCAPS_CTRLVOLUME;
+        kd.dwBufferBytes = ka_bytes;
+        kd.lpwfxFormat   = &kwfx;
+        if (SUCCEEDED(IDirectSound8_CreateSoundBuffer(s_dsound, &kd, &s_ds_keepalive, NULL))
+            && s_ds_keepalive) {
+            void *p1 = NULL, *p2 = NULL; DWORD b1 = 0, b2 = 0;
+            if (SUCCEEDED(IDirectSoundBuffer_Lock(s_ds_keepalive, 0, ka_bytes,
+                                                  &p1, &b1, &p2, &b2, 0))) {
+                /* Fill with a tiny alternating ±1 signal, NOT zeros: a pure-zero
+                 * or minimum-volume buffer is detected as silent by the WASAPI
+                 * audio engine, which then idles the device anyway (defeating
+                 * the keepalive). ±1 at 16-bit is ~-90 dB — inaudible — but a
+                 * genuine non-zero stream the engine must keep rendering. */
+                int16_t *s1 = (int16_t *)p1;
+                int16_t *s2 = (int16_t *)p2;
+                DWORD n;
+                for (n = 0; n < b1 / 2; n++) s1[n] = (n & 1) ? 1 : -1;
+                if (s2) for (n = 0; n < b2 / 2; n++) s2[n] = (n & 1) ? 1 : -1;
+                IDirectSoundBuffer_Unlock(s_ds_keepalive, p1, b1, p2, b2);
+            }
+            /* Play at full volume (DSBVOLUME_MAX = 0). Setting it to MIN makes
+             * the engine treat the stream as silent and idle the device — the
+             * original cause of menu transition sounds being dropped after a
+             * pause. The ±1 data is inaudible, so full volume is safe. */
+            IDirectSoundBuffer_SetVolume(s_ds_keepalive, DSBVOLUME_MAX);
+            IDirectSoundBuffer_Play(s_ds_keepalive, 0, 0, DSBPLAY_LOOPING);
+            TD5_LOG_I(LOG_TAG, "audio keepalive buffer started (silent loop)");
+        } else {
+            TD5_LOG_W(LOG_TAG, "audio keepalive buffer creation failed");
+        }
     }
 
     s_audio_buf_count = 0;
@@ -1936,6 +2008,12 @@ void td5_plat_audio_shutdown(void)
     int i;
 
     td5_plat_audio_stream_stop();
+
+    if (s_ds_keepalive) {
+        IDirectSoundBuffer_Stop(s_ds_keepalive);
+        IDirectSoundBuffer_Release(s_ds_keepalive);
+        s_ds_keepalive = NULL;
+    }
 
     for (i = 0; i < MAX_AUDIO_CHANNELS; i++) {
         if (s_ds_channels[i]) {
@@ -2042,11 +2120,18 @@ int td5_plat_audio_load_wav(const void *data, size_t size)
     wfx.nBlockAlign       = *(const uint16_t *)(fmt_chunk + 12);
     wfx.wBitsPerSample   = *(const uint16_t *)(fmt_chunk + 14);
 
-    /* Create sound buffer */
+    /* Create sound buffer.
+     * DSBCAPS_GLOBALFOCUS: keep SFX audible when the game window is not the
+     * strict foreground window. Without it, DirectSound mutes these buffers
+     * (and their DuplicateSoundBuffer copies) on focus loss — which silenced
+     * the frontend selection/transition one-shots while the player was tabbing
+     * between the (windowed) game and other windows, even though the buffers
+     * were played at full volume. The streaming music buffer already sets this
+     * flag; SFX must match it so menu and in-race SFX behave consistently. */
     ZeroMemory(&desc, sizeof(desc));
     desc.dwSize          = sizeof(DSBUFFERDESC);
     desc.dwFlags         = DSBCAPS_CTRLVOLUME | DSBCAPS_CTRLPAN | DSBCAPS_CTRLFREQUENCY
-                         | DSBCAPS_STATIC;
+                         | DSBCAPS_GLOBALFOCUS | DSBCAPS_STATIC;
     desc.dwBufferBytes   = data_size;
     desc.lpwfxFormat     = &wfx;
 
