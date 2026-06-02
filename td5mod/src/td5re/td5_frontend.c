@@ -1998,6 +1998,14 @@ static void frontend_init_race_schedule(void) {
         }
     }
 
+    /* Commit the PLAYER's selected paint (slot 0). The AI loop above starts at
+     * slot 1, so without this the player's chosen colour is dropped and the car
+     * always loads carskin0 (the default). The per-slot variant table mirrors
+     * the original's gSlotCarIdSelectionTable[0] = g_player1SelectedPaintScheme
+     * [CONFIRMED @ 0x0040DADC → built into "CARSKIN%d.TGA" @ 0x00442949]. */
+    g_td5.ai_car_variants[0] = (slot_variant[0] >= 0 && slot_variant[0] <= 3)
+                               ? slot_variant[0] : 0;
+
     TD5_LOG_I(LOG_TAG, "InitializeRaceSeriesSchedule: car=%d (resolved=%d) track=%d level=%d screen=%d type=%d ai=[%d,%d,%d,%d,%d]",
               s_selected_car, g_td5.car_index, g_td5.track_index,
               td5_asset_level_number(g_td5.track_index),
@@ -6261,11 +6269,16 @@ void td5_frontend_render_ui_rects(void) {
             for (int i = 0; i <= 1; i++) fe_draw_option_arrows(i, sx, sy);
             break;
         case TD5_SCREEN_CAR_SELECTION:
-            /* orig 0x40DFC0: arrows on Car(0), Paint(1), AND Stats(2) — Stats is a
-             * wheel/config-scheme ◄► cycler too. [FIXED 2026-06-01: added slot 2.] */
+            /* orig CarSelectionScreenStateMachine @0x0040DFC0 case 4 calls
+             * InitializeFrontendDisplayModeArrows only for Car(0) and Paint(1)
+             * — those two get button.flags|=2 (the ◄► sprites). The Stats/Config
+             * button (slot 2) gets NO arrow call, so it must NOT draw ◄►.
+             * [CONFIRMED @ 0x00426260 + 0x0040DFC0 case-4 call sites — 2026-06-02
+             * RE corrected the 2026-06-01 assumption that slot 2 also carried
+             * arrows; the original cycles slot 2's wheel/config scheme on key
+             * press but never paints arrow glyphs over the stat panel.] */
             fe_draw_option_arrows(0, sx, sy);
             fe_draw_option_arrows(1, sx, sy);
-            fe_draw_option_arrows(2, sx, sy);
             break;
         case TD5_SCREEN_TRACK_SELECTION:
             /* The track overlay draws arrows BEFORE the button fill, so the

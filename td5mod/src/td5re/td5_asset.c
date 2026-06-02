@@ -2612,9 +2612,17 @@ static const char *s_car_zip_paths[37] = {
     "cars/sp7.zip",  /* 36 - POLICE CAMARO    */
 };
 
-int td5_asset_load_vehicle(int car_index, int slot)
+int td5_asset_load_vehicle(int car_index, int slot, int paint)
 {
     char zip_path[256];
+    char skin_tga[32];
+    char hub_tga[32];
+    /* 4 paint schemes per car (carskin0..3 / carhub0..3); clamp out-of-range to
+     * the default. Cop/police indices keep paint 0 because the car-select screen
+     * gates their paint cycle to 0, so a 0 arrives here for them. */
+    if (paint < 0 || paint > 3) paint = 0;
+    snprintf(skin_tga, sizeof(skin_tga), "carskin%d.tga", paint);
+    snprintf(hub_tga,  sizeof(hub_tga),  "carhub%d.tga",  paint);
     if (car_index >= 0 && car_index < 37) {
         snprintf(zip_path, sizeof(zip_path), "%s", s_car_zip_paths[car_index]);
     } else {
@@ -2674,10 +2682,10 @@ int td5_asset_load_vehicle(int car_index, int slot)
         {
             char png_skin[256];
             int skin_ok = 0;
-            if (td5_asset_resolve_png_path("carskin0.tga", zip_path, png_skin, sizeof(png_skin)))
+            if (td5_asset_resolve_png_path(skin_tga, zip_path, png_skin, sizeof(png_skin)))
                 skin_ok = td5_asset_load_png_texture(skin_page, png_skin, TD5_COLORKEY_NONE);
             if (!skin_ok)
-                TD5_LOG_W(LOG_TAG, "vehicle slot=%d: carskin0 PNG not found in %s", slot, zip_path);
+                TD5_LOG_W(LOG_TAG, "vehicle slot=%d: %s PNG not found in %s", slot, skin_tga, zip_path);
         }
 
         /* Hub-cap: Pitbull's carhubN.png is ALREADY a 4-frame motion-blur
@@ -2693,16 +2701,20 @@ int td5_asset_load_vehicle(int car_index, int slot)
         {
             char png_hub[256];
             int hub_ok = 0;
-            if (td5_asset_resolve_png_path("carhub0.tga", zip_path,
+            /* carhub0..3 are byte-identical per car (md5-verified) — the hub is
+             * paint-independent — so carhub%d resolves to the same pixels as
+             * carhub0; building %d here matches the original's "CARHUB%d.TGA"
+             * [CONFIRMED @ 0x00442B12] without changing the rendered result. */
+            if (td5_asset_resolve_png_path(hub_tga, zip_path,
                                            png_hub, sizeof(png_hub))) {
                 hub_ok = td5_asset_load_png_texture(hub_page, png_hub, TD5_COLORKEY_NONE);
             }
             if (!hub_ok)
-                TD5_LOG_W(LOG_TAG, "vehicle slot=%d: carhub0 load failed for %s",
-                          slot, zip_path);
+                TD5_LOG_W(LOG_TAG, "vehicle slot=%d: %s load failed for %s",
+                          slot, hub_tga, zip_path);
             else
-                TD5_LOG_I(LOG_TAG, "vehicle slot=%d: carhub0 page=%d (64x64, 2x2 sub-frames)",
-                          slot, hub_page);
+                TD5_LOG_I(LOG_TAG, "vehicle slot=%d: %s page=%d (64x64, 2x2 sub-frames)",
+                          slot, hub_tga, hub_page);
         }
 
         /* Patch PrimitiveCmd page IDs: cmd[0]→skin, cmd[1]→chassis underside.
