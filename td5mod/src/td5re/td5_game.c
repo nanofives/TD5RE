@@ -520,6 +520,7 @@ static void tick_wanted_target_tracker(void) {
 static int      s_pause_input_done;    /* reset per-frame, set after first tick processes input */
 static int      s_prev_esc_state;      /* edge detector for ESC key */
 static int      s_pause_exit_pending;  /* 1 = ESC exit fade in progress, return 2 when fade done */
+static int      s_pause_options_dirty; /* 1 = a pause volume slider changed; flush to td5re.ini on close [PART B] */
 
 /* ========================================================================
  * Forward declarations (internal helpers)
@@ -2915,11 +2916,13 @@ int td5_game_run_race_frame(void) {
                             int v = td5_save_get_music_volume() + delta * 2;
                             td5_save_set_music_volume(v);
                             td5_sound_set_music_volume(td5_save_get_music_volume());
+                            s_pause_options_dirty = 1;  /* persist to td5re.ini on close [PART B] */
                             TD5_LOG_I(LOG_TAG, "Pause slider MUSIC: %d", td5_save_get_music_volume());
                         } else {
                             int v = td5_save_get_sfx_volume() + delta * 2;
                             td5_save_set_sfx_volume(v);
                             td5_sound_set_sfx_volume(td5_save_get_sfx_volume());
+                            s_pause_options_dirty = 1;  /* persist to td5re.ini on close [PART B] */
                             TD5_LOG_I(LOG_TAG, "Pause slider SOUND: %d", td5_save_get_sfx_volume());
                         }
                     }
@@ -2932,7 +2935,30 @@ int td5_game_run_race_frame(void) {
                     } else if (s_pause_menu_cursor == 4) {
                         s_pause_menu_active = 0;
                         s_pause_exit_pending = 1;
-                        TD5_LOG_I(LOG_TAG, "Pause menu: Exit selected, starting fade-out");
+                        /* PART A (user 2026-06-02): capture the player's CURRENT
+                         * race position so the centered finishing-position digit
+                         * (td5_hud_draw_finish_position, drawn during the fade
+                         * whenever td5_game_get_victory_position() > 0) shows
+                         * "where I was before exiting". The finish path captures
+                         * this at completion (see check_race_completion above), but
+                         * the pause-Exit path began the fade without it, so the
+                         * digit was 0 and nothing drew — "there's no number, just
+                         * the transition". Mirror the finish capture here. */
+                        {
+                            TD5_Actor *pl = td5_game_get_actor(0);
+                            s_finish_position_display = pl ? (int)pl->race_position + 1 : 1;
+                        }
+                        /* Flush any pending pause-slider volume change before the
+                         * fade tears down the race (close-path persist below only
+                         * runs on the continue path). [PART B 2026-06-02] */
+                        if (s_pause_options_dirty) {
+                            g_td5.ini.sfx_volume   = td5_save_get_sfx_volume();
+                            g_td5.ini.music_volume = td5_save_get_music_volume();
+                            td5_ini_persist_options();
+                            s_pause_options_dirty = 0;
+                        }
+                        TD5_LOG_I(LOG_TAG, "Pause menu: Exit selected, starting fade-out (pos=%d)",
+                                  s_finish_position_display);
                         /* Trigger fade-out; resources released when fade completes.
                          * Original (0x43C317): calls BeginRaceFadeOutTransition(0). */
                         td5_game_begin_fade_out(0);
@@ -2956,6 +2982,16 @@ int td5_game_run_race_frame(void) {
             float music_frac = (float)td5_save_get_music_volume() / 100.0f;
             float sfx_frac   = (float)td5_save_get_sfx_volume()   / 100.0f;
             td5_hud_update_pause_overlay(s_pause_menu_cursor, view_frac, music_frac, sfx_frac);
+
+            /* If the pause menu just closed (Continue / ESC) and a volume slider
+             * changed, flush it to td5re.ini. The Exit path persists inline
+             * above before its fade. [PART B 2026-06-02] */
+            if (pause_menu_was_active && !s_pause_menu_active && s_pause_options_dirty) {
+                g_td5.ini.sfx_volume   = td5_save_get_sfx_volume();
+                g_td5.ini.music_volume = td5_save_get_music_volume();
+                td5_ini_persist_options();
+                s_pause_options_dirty = 0;
+            }
 
             g_td5.sim_time_accumulator -= TD5_TICK_ACCUMULATOR_ONE;
             ticks_this_frame++;

@@ -376,6 +376,14 @@ typedef struct TD5_GlobalState {
 /** The single global state instance. */
 extern TD5_GlobalState g_td5;
 
+/* Persist the in-game-configurable option keys (Display/Audio/GameOptions)
+ * from g_td5.ini.* back to td5re.ini (the file s_ini_path resolved at boot).
+ * Defined in main.c. Called by the option screens / pause sliders when the
+ * user commits a change so it survives a relaunch (the boot-override in
+ * td5_frontend.c re-applies g_td5.ini.* over Config.td5 every launch, so
+ * without this write-back in-game changes were masked). [PART B, 2026-06-02] */
+void td5_ini_persist_options(void);
+
 /* ========================================================================
  * Master Entry Points
  * ======================================================================== */
