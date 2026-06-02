@@ -191,6 +191,66 @@ static int td5_ini_str(const char *section, const char *key,
 }
 
 /* ------------------------------------------------------------------------
+ * INI write-back (PART B, user 2026-06-02)
+ *
+ * Persists the in-game-configurable option keys from g_td5.ini.* back to
+ * td5re.ini (s_ini_path). The original game had no INI and persisted options
+ * only to Config.td5; the port adds td5re.ini as a launch-config layer that
+ * OVERRIDES Config.td5 at frontend init (td5_frontend.c ~6503-6528), so
+ * in-game option changes were masked on the next launch. Writing them back
+ * here keeps td5re.ini in sync so the boot-override re-applies the user's
+ * last in-game selection.
+ *
+ * Only the keys the in-game option screens (and pause volume sliders) can
+ * change are written — section/key names match the reader in
+ * td5re_load_config() EXACTLY for a clean round trip. Other keys
+ * (Trace, Debug, Default-prefixed, Resolution) are left untouched.
+ * WritePrivateProfileString edits each key in place and preserves the rest
+ * of the file entries.
+ * ------------------------------------------------------------------------ */
+static void td5_ini_write_int(const char *section, const char *key, int value)
+{
+    char buf[16];
+    snprintf(buf, sizeof(buf), "%d", value);
+    WritePrivateProfileStringA(section, key, buf, s_ini_path);
+}
+
+void td5_ini_persist_options(void)
+{
+    if (!s_ini_path[0]) return;
+
+    /* Display */
+    td5_ini_write_int("Display", "Fogging",       g_td5.ini.fog_enabled);
+    td5_ini_write_int("Display", "SpeedUnits",    g_td5.ini.speed_units);
+    td5_ini_write_int("Display", "CameraDamping", g_td5.ini.camera_damping);
+
+    /* Audio */
+    td5_ini_write_int("Audio", "SFXVolume",   g_td5.ini.sfx_volume);
+    td5_ini_write_int("Audio", "MusicVolume", g_td5.ini.music_volume);
+    td5_ini_write_int("Audio", "SFXMode",     g_td5.ini.sfx_mode);
+
+    /* Game options */
+    td5_ini_write_int("GameOptions", "Laps",             g_td5.ini.laps);
+    td5_ini_write_int("GameOptions", "CheckpointTimers", g_td5.ini.checkpoint_timers);
+    td5_ini_write_int("GameOptions", "Traffic",          g_td5.ini.traffic);
+    td5_ini_write_int("GameOptions", "Cops",             g_td5.ini.cops);
+    td5_ini_write_int("GameOptions", "Difficulty",       g_td5.ini.difficulty);
+    td5_ini_write_int("GameOptions", "Dynamics",         g_td5.ini.dynamics);
+    td5_ini_write_int("GameOptions", "Collisions",       g_td5.ini.collisions);
+    td5_ini_write_int("GameOptions", "AutoGearbox",      g_td5.ini.auto_gearbox);
+
+    td5_plat_log(TD5_LOG_INFO, "main",
+                 "td5re.ini options persisted (in-game change write-back): "
+                 "fog=%d units=%d cam=%d sfx=%d mus=%d sfxmode=%d laps=%d "
+                 "chk=%d traf=%d cops=%d diff=%d dyn=%d coll=%d gearbox=%d",
+                 g_td5.ini.fog_enabled, g_td5.ini.speed_units, g_td5.ini.camera_damping,
+                 g_td5.ini.sfx_volume, g_td5.ini.music_volume, g_td5.ini.sfx_mode,
+                 g_td5.ini.laps, g_td5.ini.checkpoint_timers, g_td5.ini.traffic,
+                 g_td5.ini.cops, g_td5.ini.difficulty, g_td5.ini.dynamics,
+                 g_td5.ini.collisions, g_td5.ini.auto_gearbox);
+}
+
+/* ------------------------------------------------------------------------
  * Command-line override parser
  *
  * Accepts `--Key=N` tokens on the command line to override any key read

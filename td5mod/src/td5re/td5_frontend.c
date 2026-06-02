@@ -8231,6 +8231,20 @@ static void Screen_GameOptions(void) {
                 }
             }
             if (s_button_index == 7) { /* OK */
+                /* Sync the committed game options into g_td5.ini (the global the
+                 * boot-override at frontend init reads) and write them back to
+                 * td5re.ini so the selection survives a relaunch. The original
+                 * persisted these to Config.td5 only, but the port's td5re.ini
+                 * boot-override masks Config.td5, so the ini is the live config
+                 * layer that must be kept in sync. [PART B 2026-06-02] */
+                g_td5.ini.laps              = s_game_option_laps;
+                g_td5.ini.checkpoint_timers = s_game_option_checkpoint_timers;
+                g_td5.ini.traffic           = s_game_option_traffic;
+                g_td5.ini.cops              = s_game_option_cops;
+                g_td5.ini.difficulty        = s_game_option_difficulty;
+                g_td5.ini.dynamics          = s_game_option_dynamics;
+                g_td5.ini.collisions        = s_game_option_collisions;
+                td5_ini_persist_options();
                 s_return_screen = TD5_SCREEN_OPTIONS_HUB;
                 s_inner_state = 7;
             }
@@ -8439,6 +8453,14 @@ static void Screen_SoundOptions(void) {
                 s_return_screen = TD5_SCREEN_MUSIC_TEST;
                 s_inner_state = 7;
             } else if (s_button_index == 4) { /* OK */
+                /* Persist sound options to td5re.ini so they survive a relaunch
+                 * (see PART B note in Screen_GameOptions). Volume changes already
+                 * applied live via td5_save_set_*; sync the committed values into
+                 * g_td5.ini and write them back. [PART B 2026-06-02] */
+                g_td5.ini.sfx_mode     = s_sound_option_sfx_mode;
+                g_td5.ini.sfx_volume   = s_sound_option_sfx_volume;
+                g_td5.ini.music_volume = s_sound_option_music_volume;
+                td5_ini_persist_options();
                 s_return_screen = TD5_SCREEN_OPTIONS_HUB;
                 s_inner_state = 7;
             }
@@ -8541,6 +8563,15 @@ static void Screen_DisplayOptions(void) {
                 if (s_display_camera_damping > 9) s_display_camera_damping = 9;
                 changed = 1;
             } else if (s_button_index == 4) {
+                /* Persist display options (fog / speed units / camera damping)
+                 * to td5re.ini so they survive a relaunch (see PART B note in
+                 * Screen_GameOptions). Resolution is NOT written here — it
+                 * applies live and persists its display-mode ordinal to
+                 * Config.td5 separately. [PART B 2026-06-02] */
+                g_td5.ini.fog_enabled    = s_display_fog_enabled;
+                g_td5.ini.speed_units    = s_display_speed_units;
+                g_td5.ini.camera_damping = s_display_camera_damping;
+                td5_ini_persist_options();
                 s_inner_state = 7;
                 break;
             }
