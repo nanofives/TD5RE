@@ -1157,6 +1157,14 @@ void td5_physics_update_vehicle_actor(TD5_Actor *actor)
          *
          * [DEFERRED 2026-05-25 traffic-scripted-recovery-latch; orig 0x00443ED0
          *  + 0x00408082-840A heavy-impact branch in ApplyVehicleCollisionImpulse]
+         *  [SUPERSEDED 2026-06-02 v2v-heavy-scatter-faithfulness] The traffic
+         *  heavy-impact writer side IS now ported: td5_physics_apply_traffic_
+         *  crash_spin() (called from the ApplyVehicleCollisionImpulse heavy
+         *  branch for slot>=6) sets vehicle_mode=1 + frame_counter=0 and latches
+         *  the spin/orientation matrices, so traffic DOES enter the
+         *  vehicle_mode==1 dispatch below and visibly tumbles. The historical
+         *  "traffic slots are skipped entirely" / "Future work" text that
+         *  follows is kept for context but no longer describes the live code.
          *  This dispatch is slot-agnostic and would handle traffic (slot>=6)
          *  too IF the writer side were ported. It currently is NOT:
          *    - Orig 0x4079C0 heavy-impact branch (impact_mag > 90000) writes a
@@ -4087,54 +4095,68 @@ static void apply_collision_response(TD5_Actor *penetrator, TD5_Actor *target,
         B->damage_lockout++;
     }
 
-    /* Heavy impact (> 90000) with collisions enabled: scatter kick.
-     * [CONFIRMED @ 0x4082F2, 0x4082FC, 0x40844A, 0x408455]: original
-     * ApplyVehicleCollisionImpulse high-impact branch writes
-     *   actor->angular_velocity_{roll,pitch,yaw} += RNG % angle - angle/2
-     * (RNG via GetDamageRulesStub modulo angle). Port previously wrote
-     * (scatter>>2 - scatter>>3) into euler_accum.{roll,pitch}, which
-     * jumps the angle accumulator directly — bypassing the per-pattern
-     * ±4000 clamp at the next suspension_response tail and integrating
-     * uncontrollably across consecutive impacts. Switch to writing
-     * angular_velocity instead, so the integrator's clamps apply.
+    /* Heavy impact (> 90000) with collisions enabled: per-actor angular scatter
+     * + vertical lift, byte-faithful to the original high-impact branch.
+     *
+     * [CONFIRMED @ 0x408289-0x40855D, ApplyVehicleCollisionImpulse]: the branch
+     * runs an INDEPENDENT pass over each actor of the pair -- actor A (base EBX,
+     * 0x4082CB-0x408362) then actor B (base EBP, 0x40842B-0x408497). For a racer
+     * slot (<6) each pass writes, via a fresh GetDamageRulesStub() call:
+     *     angular_velocity_roll  (+0x1C0) += stub %  scatter    - scatter/2
+     *     angular_velocity_yaw   (+0x1C4) += stub %  scatter    - scatter/2
+     *     angular_velocity_pitch (+0x1C8) += stub % (2*scatter) - scatter
+     *     linear_velocity_y      (+0x1D0)  = impact_mag / 6
+     * scatter = (impact_mag >> 2) FLOORED to a MINIMUM of 0x7FFF
+     * [CONFIRMED @ 0x4082A2-0x4082C9]. GetDamageRulesStub @0x0042C8D0 literally
+     * `return 0` [CONFIRMED], so every `stub % N` term is 0 and the writes fold
+     * to a DETERMINISTIC result with the SAME sign on BOTH actors:
+     *     roll -= scatter/2;  yaw -= scatter/2;  pitch -= scatter;
+     *     linear_velocity_y = impact_mag / 6;
+     *
+     * [FIX 2026-06-02 v2v-heavy-scatter-faithfulness] The prior port diverged on
+     * three counts, all corrected here: (a) it clamped scatter with a CEILING
+     * (`if > 0x7FFF`) -- inverted vs the original's FLOOR; (b) it used ad-hoc
+     * kick magnitudes (scatter/8, -scatter/2, scatter/4 on roll/pitch/yaw) that
+     * matched neither the original's axis mapping nor its magnitude; and (c) it
+     * applied OPPOSITE signs to A (+kick) and B (-kick), whereas the original
+     * writes the SAME sign to both. The vertical lift keeps the port-only 200000
+     * clamp (the original has none) -- that clamp is a #bounce concern deferred
+     * to a manual A/B; it only touches linear_velocity_y, not the spin.
      *
      * Gate semantics [VERIFIED 2026-05-17]: original at 0x00408289 reads
-     * `if (90000 < iVar10 && g_cameraMode == 0)`. The port's
-     * `g_collisions_enabled` global lives at the SAME address (DAT_00463188)
-     * as the original's `g_cameraMode` — the names differ but the dword and
-     * its semantics match. `0 = normal play / collisions ON / no-clip OFF`
-     * in both. So `g_collisions_enabled == 0` is byte-faithful to the
-     * original's gate; "inverted" was a misreading earlier on. */
+     * `if (90000 < iVar10 && g_cameraMode == 0)`. The port's `g_collisions_enabled`
+     * lives at the SAME address (DAT_00463188) as the original's `g_cameraMode`;
+     * `td5_physics_set_collisions(1)` writes 0, so `== 0` means collisions ON --
+     * byte-faithful to the original's gate. */
     if (impact_mag > 90000 && g_collisions_enabled == 0) {
         int32_t scatter = impact_mag / 4;
-        if (scatter > 0x7FFF) scatter = 0x7FFF;
-        int32_t kick_r = (scatter >> 2) - (scatter >> 3);
-        int32_t kick_p = (scatter >> 1) - scatter;
-        int32_t kick_y = (scatter >> 1) - (scatter >> 2);
+        if (scatter < 0x7FFF) scatter = 0x7FFF;   /* FLOOR (orig 0x4082A2-C9) */
+        int32_t kick_ry = scatter / 2;            /* roll & yaw delta magnitude */
+        int32_t kick_p  = scatter;                /* pitch delta magnitude      */
         if (A->slot_index < 6) {
-            A->angular_velocity_roll  += kick_r;
-            A->angular_velocity_pitch += kick_p;
-            A->angular_velocity_yaw   += kick_y;
+            A->angular_velocity_roll  -= kick_ry;
+            A->angular_velocity_yaw   -= kick_ry;
+            A->angular_velocity_pitch -= kick_p;
             int32_t lift_a = impact_mag / 6;
-            if (lift_a > 200000) lift_a = 200000;
+            if (lift_a > 200000) lift_a = 200000; /* port-only clamp (orig: none) */
             A->linear_velocity_y  = lift_a;
         } else {
             /* Traffic (slot >= 6): scripted crash-spin recovery, orig 0x00408289+. */
             td5_physics_apply_traffic_crash_spin(A, impact_mag);
         }
         if (B->slot_index < 6) {
-            B->angular_velocity_roll  -= kick_r;
+            B->angular_velocity_roll  -= kick_ry;
+            B->angular_velocity_yaw   -= kick_ry;
             B->angular_velocity_pitch -= kick_p;
-            B->angular_velocity_yaw   -= kick_y;
             int32_t lift_b = impact_mag / 6;
-            if (lift_b > 200000) lift_b = 200000;
+            if (lift_b > 200000) lift_b = 200000; /* port-only clamp (orig: none) */
             B->linear_velocity_y  = lift_b;
         } else {
             /* Traffic (slot >= 6): scripted crash-spin recovery, orig 0x00408289+. */
             td5_physics_apply_traffic_crash_spin(B, impact_mag);
         }
-        TD5_LOG_I(LOG_TAG, "v2v_heavy_scatter: A=%d B=%d mag=%d kick_r=%d kick_p=%d kick_y=%d",
-                  A->slot_index, B->slot_index, impact_mag, kick_r, kick_p, kick_y);
+        TD5_LOG_I(LOG_TAG, "v2v_heavy_scatter: A=%d B=%d mag=%d scatter=%d kick_ry=%d kick_p=%d",
+                  A->slot_index, B->slot_index, impact_mag, scatter, kick_ry, kick_p);
     }
 
     /* pool14_v2v pilot trace: capture post-state at function exit.
