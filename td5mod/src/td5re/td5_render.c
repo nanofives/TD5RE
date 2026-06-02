@@ -6897,23 +6897,6 @@ void td5_render_radial_pulse(float dt)
 {
     float phase = td5_hud_radial_pulse_get();
 
-    /* [TEMP DIAG — remove before commit] Force the victory star visible during
-     * a normal race so its color can be frame-dumped over the (neutral) road,
-     * isolating an inherent tint (texture/channel) from scene-bleed. Set
-     * TD5RE_DIAG_STAR=<phase> in the environment. */
-    {
-        const char *ds = getenv("TD5RE_DIAG_STAR");
-        if (ds) { phase = (float)atof(ds); td5_hud_radial_pulse_set(phase); }
-    }
-
-    {
-        static uint32_t s_diag_n = 0;
-        if ((s_diag_n++ % 60u) == 0u) {
-            TD5_LOG_I("render", "radial_pulse: phase=%.1f vp=%dx%d", phase,
-                      (int)s_viewport_width, (int)s_viewport_height);
-        }
-    }
-
     /* Gate: orig FCOMP [0x0045d624] (= 0.0f). Skip when phase < 0. */
     if (phase < 0.0f) return;
 
