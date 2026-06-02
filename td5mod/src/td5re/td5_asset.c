@@ -2612,6 +2612,183 @@ static const char *s_car_zip_paths[37] = {
     "cars/sp7.zip",  /* 36 - POLICE CAMARO    */
 };
 
+/* ========================================================================
+ * Test Drive 6 car support
+ *
+ * TD6 (same Pitbull engine, one revision up) ships car meshes as
+ * render_type 0x104 INDEXED triangle lists: 32-byte vertices
+ * (pos.xyz f32 + normal.xyz f32 + uv f32), a single draw command, and an
+ * unused normals_offset (0xCDCDCDCD). TD5's renderer instead consumes an
+ * EXPANDED per-corner layout: 44-byte TD5_MeshVertex + a parallel 16-byte
+ * TD5_VertexNormal stream, with total_vertex_count = sum(tri*3 + quad*4).
+ *
+ * render_type itself is read by NOTHING in the load/render path
+ * [CONFIRMED @ 0x0040AC00 PrepareMeshResource, 0x004314B0 render dispatch],
+ * so rather than branch the engine we transcode the geometry at load time:
+ * de-index each triangle into 3 expanded corner-vertices, copying pos + uv
+ * and the per-vertex normal (which drives td5_render_compute_vertex_lighting
+ * @ td5_render.c). The result is a byte-standard TD5 mesh the existing
+ * pipeline handles unchanged (prepare_mesh_resource, texture patch, draw).
+ * ======================================================================== */
+#define TD6_MESH_RENDER_TYPE   0x104
+#define TD6_VERTEX_STRIDE      32      /* pos(12) + normal(12) + uv(8) */
+#define TD6_CMD_STRIDE         24
+
+static int32_t td6_rd_i32(const uint8_t *p, int off)
+{
+    int32_t v; memcpy(&v, p + off, 4); return v;
+}
+static float td6_rd_f32(const uint8_t *p, int off)
+{
+    float v; memcpy(&v, p + off, 4); return v;
+}
+
+/* Returns a newly-malloc'd TD5-format mesh (file-relative offsets, ready for
+ * td5_track_prepare_mesh_resource) transcoded from a TD6 render_type 0x104
+ * himodel, or NULL if src is not TD6 format / is malformed. *out_size is set
+ * on success. Caller owns the returned buffer. */
+static void *td5_asset_transcode_td6_mesh(const void *src_data, int src_size,
+                                          int *out_size)
+{
+    const uint8_t *src = (const uint8_t *)src_data;
+    if (!src || src_size < 0x40) return NULL;
+
+    int16_t render_type;
+    memcpy(&render_type, src + 0, 2);
+    if (render_type != TD6_MESH_RENDER_TYPE) return NULL;   /* not a TD6 mesh */
+
+    int32_t  cmd_count  = td6_rd_i32(src, 0x04);
+    int32_t  vsrc_count = td6_rd_i32(src, 0x08);
+    float    radius     = td6_rd_f32(src, 0x0C);
+    float    cx = td6_rd_f32(src, 0x10), cy = td6_rd_f32(src, 0x14), cz = td6_rd_f32(src, 0x18);
+    float    ox = td6_rd_f32(src, 0x1C), oy = td6_rd_f32(src, 0x20), oz = td6_rd_f32(src, 0x24);
+    uint32_t cmds_off  = (uint32_t)td6_rd_i32(src, 0x2C);
+    uint32_t verts_off = (uint32_t)td6_rd_i32(src, 0x30);
+
+    if (cmd_count < 1 || cmd_count > 64) return NULL;
+    if (vsrc_count <= 0 || vsrc_count > 65535) return NULL;
+    if ((uint64_t)verts_off + (uint64_t)vsrc_count * TD6_VERTEX_STRIDE > (uint64_t)src_size)
+        return NULL;
+    if ((uint64_t)cmds_off + (uint64_t)cmd_count * TD6_CMD_STRIDE > (uint64_t)src_size)
+        return NULL;
+
+    /* Pass 1: total expanded vertex (== total index) count across all commands. */
+    int total_idx = 0;
+    for (int c = 0; c < cmd_count; c++) {
+        const uint8_t *cmd = src + cmds_off + (size_t)c * TD6_CMD_STRIDE;
+        int32_t idx_count = td6_rd_i32(cmd, 0x0C);
+        int32_t idx_off   = td6_rd_i32(cmd, 0x14);
+        if (idx_count < 0 || idx_count % 3 != 0) return NULL;
+        if (idx_off < 0 ||
+            (uint64_t)idx_off + (uint64_t)idx_count * 2 > (uint64_t)src_size) return NULL;
+        total_idx += idx_count;
+    }
+    if (total_idx <= 0 || total_idx > 200000) return NULL;
+
+    /* TD5 layout: header + ONE command + expanded verts(44 each) + a parallel
+     * normal stream(16 each). Use sizeof() for the header (0x38) and command
+     * (0x10) — the header runs through normals_offset at +0x34, so placing the
+     * command any earlier would clobber the offset fields. All TD6 cars use a
+     * single body texture, so merging every command's triangles into one
+     * output command is exact. */
+    size_t header_sz = sizeof(TD5_MeshHeader), cmd_sz = sizeof(TD5_PrimitiveCmd);
+    size_t verts_sz  = (size_t)total_idx * sizeof(TD5_MeshVertex);
+    size_t norms_sz  = (size_t)total_idx * sizeof(TD5_VertexNormal);
+    size_t total_sz  = header_sz + cmd_sz + verts_sz + norms_sz;
+
+    uint8_t *out = (uint8_t *)calloc(1, total_sz);
+    if (!out) return NULL;
+
+    uint32_t out_cmds_off  = (uint32_t)header_sz;
+    uint32_t out_verts_off = (uint32_t)(header_sz + cmd_sz);
+    uint32_t out_norms_off = (uint32_t)(header_sz + cmd_sz + verts_sz);
+
+    TD5_MeshHeader *h = (TD5_MeshHeader *)out;
+    h->render_type        = 0x103;       /* present as a native TD5 mesh */
+    h->texture_page_id    = 0;           /* patched to skin_page by the caller */
+    h->command_count      = 1;
+    h->total_vertex_count = total_idx;
+    h->bounding_radius    = radius;
+    h->bounding_center_x  = cx;
+    h->bounding_center_y  = cy;
+    h->bounding_center_z  = cz;
+    h->origin_x           = ox;
+    h->origin_y           = oy;
+    h->origin_z           = oz;
+    h->reserved_28        = 0;
+    h->commands_offset    = out_cmds_off;
+    h->vertices_offset    = out_verts_off;
+    h->normals_offset     = out_norms_off;
+
+    TD5_PrimitiveCmd *ocmd = (TD5_PrimitiveCmd *)(out + out_cmds_off);
+    ocmd->dispatch_type   = 0;
+    ocmd->texture_page_id = 7;           /* body id -> caller patches to skin_page */
+    ocmd->reserved_04     = 0;
+    ocmd->triangle_count  = (uint16_t)(total_idx / 3);
+    ocmd->quad_count      = 0;
+    ocmd->vertex_data_ptr = 0;
+
+    TD5_MeshVertex   *overts = (TD5_MeshVertex   *)(out + out_verts_off);
+    TD5_VertexNormal *onorms = (TD5_VertexNormal *)(out + out_norms_off);
+
+    int w = 0;   /* expanded write cursor */
+    for (int c = 0; c < cmd_count; c++) {
+        const uint8_t *cmd = src + cmds_off + (size_t)c * TD6_CMD_STRIDE;
+        int32_t idx_count = td6_rd_i32(cmd, 0x0C);
+        int32_t idx_off   = td6_rd_i32(cmd, 0x14);
+        const uint8_t *idx = src + idx_off;
+        for (int k = 0; k < idx_count; k++) {
+            uint16_t vi;
+            memcpy(&vi, idx + (size_t)k * 2, 2);
+            if (vi >= vsrc_count) { free(out); return NULL; }
+            const uint8_t *sv = src + verts_off + (size_t)vi * TD6_VERTEX_STRIDE;
+            overts[w].pos_x  = td6_rd_f32(sv, 0x00);
+            overts[w].pos_y  = td6_rd_f32(sv, 0x04);
+            overts[w].pos_z  = td6_rd_f32(sv, 0x08);
+            overts[w].view_x = overts[w].view_y = overts[w].view_z = 0.0f;
+            overts[w].lighting = 0xFF;   /* overwritten by compute_vertex_lighting */
+            overts[w].tex_u  = td6_rd_f32(sv, 0x18);
+            overts[w].tex_v  = td6_rd_f32(sv, 0x1C);
+            overts[w].proj_u = overts[w].proj_v = 0.0f;
+            onorms[w].nx = td6_rd_f32(sv, 0x0C);
+            onorms[w].ny = td6_rd_f32(sv, 0x10);
+            onorms[w].nz = td6_rd_f32(sv, 0x14);
+            onorms[w].visible_flag = 1;
+            w++;
+        }
+    }
+
+    if (out_size) *out_size = (int)total_sz;
+    return out;
+}
+
+/* Player-slot car override (TD6-car test hook). When set to a 3-letter archive
+ * code, the player (slot 0) loads cars/<code>.zip -> re/assets/cars/<code>/
+ * regardless of the menu / DefaultCar selection. AI slots are unaffected, so
+ * the frontend's 37-car roster is untouched (no menu regression). */
+static char s_player_car_override[16] = {0};
+
+void td5_asset_set_player_car_override(const char *code)
+{
+    if (code && code[0])
+        snprintf(s_player_car_override, sizeof(s_player_car_override), "%s", code);
+    else
+        s_player_car_override[0] = '\0';
+}
+
+int td5_asset_player_override_active(void)
+{
+    return s_player_car_override[0] != '\0';
+}
+
+const char *td5_asset_get_player_override_zip(void)
+{
+    static char buf[32];
+    if (!s_player_car_override[0]) return NULL;
+    snprintf(buf, sizeof(buf), "cars/%s.zip", s_player_car_override);
+    return buf;
+}
+
 int td5_asset_load_vehicle(int car_index, int slot, int paint)
 {
     char zip_path[256];
@@ -2623,7 +2800,11 @@ int td5_asset_load_vehicle(int car_index, int slot, int paint)
     if (paint < 0 || paint > 3) paint = 0;
     snprintf(skin_tga, sizeof(skin_tga), "carskin%d.tga", paint);
     snprintf(hub_tga,  sizeof(hub_tga),  "carhub%d.tga",  paint);
-    if (car_index >= 0 && car_index < 37) {
+    if (slot == 0 && s_player_car_override[0]) {
+        /* TD6-car test hook: force the player into a ported TD6 archive. */
+        snprintf(zip_path, sizeof(zip_path), "cars/%s.zip", s_player_car_override);
+        TD5_LOG_I(LOG_TAG, "vehicle slot=0: TD6 player override -> %s", zip_path);
+    } else if (car_index >= 0 && car_index < 37) {
         snprintf(zip_path, sizeof(zip_path), "%s", s_car_zip_paths[car_index]);
     } else {
         snprintf(zip_path, sizeof(zip_path), "cars/car%02d.zip", car_index);
@@ -2643,6 +2824,22 @@ int td5_asset_load_vehicle(int car_index, int slot, int paint)
                   slot, car_index, mesh_size);
         free(mesh_data);
         return 0;
+    }
+
+    /* TD6 cars ship a render_type 0x104 indexed mesh — transcode it to the
+     * TD5 expanded-vertex format the renderer consumes. A non-TD6 mesh
+     * (render_type 0x103) returns NULL here and is used as-is. */
+    {
+        int td6_size = 0;
+        void *td6_mesh = td5_asset_transcode_td6_mesh(mesh_data, mesh_size, &td6_size);
+        if (td6_mesh) {
+            free(mesh_data);
+            mesh_data = td6_mesh;
+            mesh_size = td6_size;
+            TD5_LOG_I(LOG_TAG,
+                      "vehicle slot=%d car=%d: transcoded TD6 mesh (%d expanded verts)",
+                      slot, car_index, ((TD5_MeshHeader *)mesh_data)->total_vertex_count);
+        }
     }
 
     /* The buffer is kept alive -- the render system holds a pointer to it. */

@@ -1653,8 +1653,13 @@ int td5_game_init_race_session(void) {
             td5_asset_load_vehicle(car_for_slot, i, paint_for_slot);
 
             /* Load per-vehicle sound bank (Drive.wav, Rev.wav/Reverb.wav, Horn.wav).
-             * Slot 0 is the local player and uses Reverb.wav (is_reverb=1). */
-            const char *car_zip = td5_asset_get_car_zip_path(car_for_slot);
+             * Slot 0 is the local player and uses Reverb.wav (is_reverb=1).
+             * When a TD6 player-car override is active, source the bank from the
+             * TD6 archive (donor wavs in re/assets/cars/<code>/) instead of the
+             * menu car's TD5 zip. */
+            const char *car_zip = (i == 0 && td5_asset_player_override_active())
+                                      ? td5_asset_get_player_override_zip()
+                                      : td5_asset_get_car_zip_path(car_for_slot);
             if (car_zip) {
                 td5_sound_load_vehicle_bank(car_zip, i, (i == 0) ? 1 : 0);
             }

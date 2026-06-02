@@ -33,6 +33,7 @@
 #include "td5_platform.h"
 #include "td5_save.h"
 #include "td5_trace.h"
+#include "td5_asset.h"
 
 /* Wrapper backend types and functions */
 #include "../../ddraw_wrapper/src/wrapper.h"
@@ -549,6 +550,20 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     g_td5.ini.start_span_offset     = td5_ini_int("Game", "StartSpanOffset", 0);
     g_td5.ini.default_reverse       = td5_ini_int("Game", "DefaultReverse", 0);
 
+    /* TD6-car player override: [Game] PlayerCarArchive = <3-letter code> forces
+     * the player (slot 0) into a ported Test Drive 6 car (re/assets/cars/<code>/)
+     * regardless of DefaultCar/menu. Empty = off. CLI --PlayerCarArchive= wins. */
+    {
+        char pca[16] = {0};
+        td5_ini_str("Game", "PlayerCarArchive", "", pca, sizeof(pca));
+        /* GetPrivateProfileString keeps inline "; comment" text and trailing
+         * spaces — cut the value at the first whitespace/comment character. */
+        for (char *q = pca; *q; ++q) {
+            if (*q == ' ' || *q == '\t' || *q == ';' || *q == '#') { *q = '\0'; break; }
+        }
+        td5_asset_set_player_car_override(pca[0] ? pca : NULL);
+    }
+
     /* Trace */
     g_td5.ini.race_trace_enabled    = td5_ini_int("Trace", "RaceTrace", 0);
     g_td5.ini.race_trace_slot       = td5_ini_int("Trace", "RaceTraceSlot", -1);
@@ -634,6 +649,26 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
         int n_cli = td5_apply_cli_overrides(lpCmdLine, &width, &height, &windowed);
         if (n_cli > 0)
             dbglog("=== %d CLI override(s) applied ===", n_cli);
+    }
+
+    /* String CLI knob (the int-only override table above can't carry it):
+     * --PlayerCarArchive=<code> overrides [Game] PlayerCarArchive so parallel
+     * test runs can each drive a different TD6 car without editing the INI. */
+    if (lpCmdLine && *lpCmdLine) {
+        const char *m = strstr(lpCmdLine, "--PlayerCarArchive=");
+        if (!m) m = strstr(lpCmdLine, "--playercararchive=");
+        if (m) {
+            m += 19;   /* strlen("--PlayerCarArchive=") */
+            char code[16];
+            int n = 0;
+            while (m[n] && m[n] != ' ' && m[n] != '\t' && n < (int)sizeof(code) - 1) {
+                code[n] = m[n];
+                n++;
+            }
+            code[n] = '\0';
+            td5_asset_set_player_car_override(n > 0 ? code : NULL);
+            dbglog("CLI: PlayerCarArchive = '%s'", code);
+        }
     }
 
 #ifdef TD5RE_RELEASE
