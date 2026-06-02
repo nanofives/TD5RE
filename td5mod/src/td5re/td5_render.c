@@ -2574,14 +2574,29 @@ void td5_render_actors_for_view(int view_index)
                 render_vehicle_reflection_overlay(mesh, slot);
             }
 
-            /* Render wheel ring billboards (0x446F00) */
-            render_vehicle_wheel_billboards(actor, slot);
-
-            /* Render brake light billboards (0x4011C0). Depth-tested (LEQUAL)
-             * against the bodies drawn so far, so a nearer car body occludes a
-             * farther car's brake light ("traffic brake lights render over my
-             * car" fix 2026-06-02). See render_vehicle_brake_lights. */
-            render_vehicle_brake_lights(actor, slot);
+            /* Render wheel ring + brake-light billboards — RACER SLOTS ONLY.
+             * [FIX 2026-06-02 traffic-wheel/brake faithfulness] The original
+             * renders these ONLY for racers (slots 0..5) via RenderRaceActorForView
+             * @0x0040c120 -> RenderVehicleWheelBillboards @0x00446f00 /
+             * RenderVehicleTaillightQuads @0x004011c0. Traffic (slots 6..11) goes
+             * through the SEPARATE inline branch in RenderRaceActorsForView
+             * @0x0040bd20, which draws body + shadow + overlay/smoke only — NO
+             * wheel billboards and NO tail-lights [CONFIRMED @ 0x0040bd20 callee
+             * list; 0x00446f00 has a single caller = 0x0040c120].
+             *
+             * The port previously called both for ALL slots, so traffic got
+             * wheel billboards built from slot-0's wheel geometry + tire/hubcap
+             * textures (the user's "traffic wheels have the wrong texture") and
+             * tail-lights the original never draws. Traffic wheels are meant to
+             * come solely from the baked body mesh. Gating to racer slots matches
+             * the original exactly. (AI racers 1..5 keep their brakes, drawn
+             * depth-tested per the 2026-06-02 inter-actor overlay fix; shadows
+             * stay in the pre-pass for ALL actors since the traffic branch DOES
+             * queue shadow quads.) */
+            if (slot < TD5_MAX_RACER_SLOTS) {
+                render_vehicle_wheel_billboards(actor, slot);
+                render_vehicle_brake_lights(actor, slot);
+            }
 
             /* (Vehicle shadow drawn in the per-view shadow pre-pass above.) */
 
