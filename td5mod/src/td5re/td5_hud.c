@@ -3678,7 +3678,10 @@ void td5_hud_render_minimap(int actor_slot)
              * Pixel data: player(64,200)=red, AI(72,200)=blue, other(80,200)=teal. */
             int dot_tex = s_minimap_scandots_tex_page ? s_minimap_scandots_tex_page : HUD_WHITE_TEX_PAGE;
             float dot_u0;
-            if (r == g_actor_slot_map[0]) {
+            if (r == actor_slot) {
+                /* [PORT: N-way] THIS pane's own car is red — actor_slot is the
+                 * view's player (was hardcoded to g_actor_slot_map[0], so panes
+                 * 1..N drew their own car blue). */
                 dot_u0 = s_minimap_dot_atlas_u;          /* col 0: player (red) */
             } else if (r < 6) {
                 dot_u0 = s_minimap_dot_atlas_u + 8.5f;  /* col 1: AI (blue) [@ 0x45D724] */

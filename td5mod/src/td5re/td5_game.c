@@ -1704,10 +1704,14 @@ int td5_game_init_race_session(void) {
             td5_asset_load_vehicle(car_for_slot, i, paint_for_slot);
 
             /* Load per-vehicle sound bank (Drive.wav, Rev.wav/Reverb.wav, Horn.wav).
-             * Slot 0 is the local player and uses Reverb.wav (is_reverb=1). */
+             * [PORT: N-way] Every LOCAL human player's car uses the reverb engine
+             * audio (is_reverb=1) so it gets the proper drive/rumble sound rather
+             * than the AI fixed-idle whine (gated on !s_reverb_flag in
+             * td5_sound). AI opponents (i >= num_human_players) stay non-reverb. */
             const char *car_zip = td5_asset_get_car_zip_path(car_for_slot);
             if (car_zip) {
-                td5_sound_load_vehicle_bank(car_zip, i, (i == 0) ? 1 : 0);
+                int is_human = (i < g_td5.num_human_players);
+                td5_sound_load_vehicle_bank(car_zip, i, is_human ? 1 : 0);
             }
 
             TD5_LOG_I(LOG_TAG, "InitRace step 5/19: vehicle asset loaded slot=%d car_index=%d",
@@ -5499,7 +5503,11 @@ void td5_game_store_rounded_vec3(const float *in, int32_t *out) {
  * ======================================================================== */
 
 int td5_game_get_player_slot(int viewport) {
-    if (viewport < 0 || viewport > 1) return 0;
+    /* [PORT: N-way] was capped at viewports 0/1, so views 2..N used slot 0's
+     * span as their actor-cull-window centre + camera-target — their own car
+     * was culled (invisible) whenever it drifted >±64 spans from slot 0 (e.g.
+     * after a recovery). Honour every viewport now. */
+    if (viewport < 0 || viewport >= TD5_MAX_VIEWPORTS) return 0;
     return g_actorSlotForView[viewport];
 }
 int td5_game_is_split_screen(void) {
