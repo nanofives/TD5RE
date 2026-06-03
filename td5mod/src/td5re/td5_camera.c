@@ -1239,9 +1239,60 @@ void td5_camera_finalize_chase_pos(TD5_Actor *actor_p, int view)
     int vel_y_interp = (int)((float)*(int *)(actor + 0x1D0) * g_subTickFraction + 0.5f);
     int vel_z_interp = (int)((float)*(int *)(actor + 0x1D4) * g_subTickFraction + 0.5f);
 
+    /* [PORT ENHANCEMENT — high-FPS vertical smoothing]
+     * The base camera/target Y normally follows world_pos.y (+0x200) plus a
+     * velocity extrapolation (vel_y_interp). world_pos.y only changes per
+     * 30 Hz sim tick, and the chassis-settle SNAP (0x00406300) updates it
+     * WITHOUT a matching vertical velocity (see td5_physics.c:798-810), so
+     * vel_y_interp cannot smooth it. At render rates >> 30 Hz the camera Y
+     * then staircases once per tick, which reads as the whole background
+     * (trees / horizon) bobbing up and down — most visible while the car
+     * settles onto its suspension during the countdown.
+     *
+     * Fix: sub-tick INTERPOLATE the base Y between the previous and current
+     * sim-tick world_pos.y instead of extrapolating by velocity. At 30 Hz
+     * (subtick 0/1) this is identical to the faithful value; above 30 Hz it
+     * smooths the staircase at the cost of <=1 tick (33 ms) of purely-
+     * vertical camera latency. Render-only: the camera never feeds the sim,
+     * so this cannot change physics / AI / replay determinism. Toggle off
+     * with TD5RE_SMOOTH_CAM=0 to A/B against the faithful behavior. */
+    static int      s_camY_init[2]     = {0, 0};
+    static uint32_t s_camY_lastTick[2] = {0, 0};
+    static int      s_camY_prev[2]     = {0, 0};
+    static int      s_camY_cur[2]      = {0, 0};
+    static int      s_smoothCam        = -1;
+    if (s_smoothCam < 0) {
+        const char *e = getenv("TD5RE_SMOOTH_CAM");
+        s_smoothCam = (e && e[0] == '0') ? 0 : 1;   /* default ON */
+    }
+    if (!s_camY_init[v]) {
+        s_camY_init[v]     = 1;
+        s_camY_prev[v]     = pos_y;
+        s_camY_cur[v]      = pos_y;
+        s_camY_lastTick[v] = (uint32_t)g_td5.simulation_tick_counter;
+    } else if ((uint32_t)g_td5.simulation_tick_counter != s_camY_lastTick[v]) {
+        s_camY_lastTick[v] = (uint32_t)g_td5.simulation_tick_counter;
+        s_camY_prev[v]     = s_camY_cur[v];
+        s_camY_cur[v]      = pos_y;
+    }
+    /* Teleport / respawn / large correction → snap, do not glide across it. */
+    {
+        int dyj = pos_y - s_camY_prev[v];
+        if (dyj > 0x40000 || dyj < -0x40000) {
+            s_camY_prev[v] = pos_y;
+            s_camY_cur[v]  = pos_y;
+        }
+    }
+    int base_y;
+    if (s_smoothCam)
+        base_y = (int)((float)s_camY_prev[v]
+                       + (float)(pos_y - s_camY_prev[v]) * g_subTickFraction + 0.5f);
+    else
+        base_y = pos_y + vel_y_interp;
+
     /* Desired (unclipped) camera position from existing chase logic. */
     int cam_x_desired = pos_x + g_camOrbitOffset[v][0] + vel_x_interp;
-    int cam_y_desired = pos_y + g_camOrbitOffset[v][1] + vel_y_interp;
+    int cam_y_desired = base_y + g_camOrbitOffset[v][1];
     int cam_z_desired = pos_z + g_camOrbitOffset[v][2] + vel_z_interp;
 
     /* Wall-clip raycast (port enhancement, see comment block above).
@@ -1293,7 +1344,7 @@ void td5_camera_finalize_chase_pos(TD5_Actor *actor_p, int view)
      * with a flaky downstream floor. */
 
     target[0] = pos_x + vel_x_interp;
-    target[1] = pos_y + smoothed_h + vel_y_interp;
+    target[1] = base_y + smoothed_h;   /* smoothed base (see high-FPS note above) */
     target[2] = pos_z + vel_z_interp;
 
     SetCameraWorldPosition(g_camWorldPos[v]);

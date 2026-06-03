@@ -102,6 +102,12 @@ __pycache__/
 # Active /fix worktrees (per-session scratch, not project state)
 .claude/worktrees/
 
+# Per-session test scratch written at a worktree root by the /fix launch harness.
+# .claude/worktrees/ above does NOT cover these when git is run from INSIDE the
+# worktree (its own root is the repo root there), so list them explicitly.
+.td5re_test_pid
+manual_drive.exe
+
 # verify/ runtime output (snap.ps1 is the tool; PNGs/logs are stale per-run)
 verify/td5re_*.png
 verify/td5re_*.log

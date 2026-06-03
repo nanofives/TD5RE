@@ -699,10 +699,154 @@ static void flush_immediate_internal(void)
     s_current_texture_page = s_previous_texture_page;
 }
 
+#ifndef TD5RE_RELEASE
+/* ------------------------------------------------------------------------
+ * Debug INSPECTION CAMERA (dev builds only) — reusable testing override.
+ *
+ * Replaces the gameplay chase/trackside view with a fixed-angle orbit that
+ * always frames a chosen actor (default: the player car), so wheels / body /
+ * shadow can be inspected from a clean side or top-down angle no matter how
+ * the normal camera would frame them. Updated every frame so the view tracks
+ * the car while it drives; works while stationary too (e.g. on the grid).
+ *
+ * Enable + tune entirely via environment variables — no rebuild to retune:
+ *   TD5RE_INSPECT_CAM  = 1        enable the override
+ *   TD5RE_INSPECT_AZ   = <deg>    azimuth around the car, WORLD-relative
+ *                                 (rotates which side faces you)   [def 90]
+ *   TD5RE_INSPECT_EL   = <deg>    elevation: 0 = level side view,
+ *                                 90 = straight-down top view       [def 30]
+ *   TD5RE_INSPECT_DIST = <units>  camera distance in render units   [def 1600]
+ *   TD5RE_INSPECT_SLOT = <0..5>   which actor to frame              [def 0]
+ *
+ * Render units == world_pos/256 (the same space as s_camera_pos). The player
+ * car body is ~300-500 units long; wheel rim radius is ~115.
+ *
+ * Handedness: the projection is screen = -(basis·delta)*focal/vz, so building
+ * right = up_ref x forward and up = forward x right yields a correct,
+ * non-mirrored, right-side-up image (verified by capture).
+ * ------------------------------------------------------------------------ */
+static int   s_inspect_loaded  = 0;
+static int   s_inspect_enabled  = 0;
+static float s_inspect_az_deg   = 90.0f;
+static float s_inspect_el_deg   = 30.0f;
+static float s_inspect_dist     = 1600.0f;
+static int   s_inspect_slot     = 0;
+
+static void inspect_cam_load_env(void)
+{
+    s_inspect_loaded = 1;
+    const char *e = getenv("TD5RE_INSPECT_CAM");
+    s_inspect_enabled = (e && e[0] && e[0] != '0');
+    if (!s_inspect_enabled)
+        return;
+    const char *az = getenv("TD5RE_INSPECT_AZ");
+    const char *el = getenv("TD5RE_INSPECT_EL");
+    const char *ds = getenv("TD5RE_INSPECT_DIST");
+    const char *sl = getenv("TD5RE_INSPECT_SLOT");
+    if (az && az[0]) s_inspect_az_deg = (float)atof(az);
+    if (el && el[0]) s_inspect_el_deg = (float)atof(el);
+    if (ds && ds[0]) s_inspect_dist  = (float)atof(ds);
+    if (sl && sl[0]) s_inspect_slot  = atoi(sl);
+    if (s_inspect_slot < 0 || s_inspect_slot > 5)
+        s_inspect_slot = 0;
+    TD5_LOG_W(LOG_TAG, "InspectCam ON: slot=%d az=%.1f el=%.1f dist=%.1f",
+              s_inspect_slot, s_inspect_az_deg, s_inspect_el_deg, s_inspect_dist);
+}
+
+static void apply_inspection_camera(void)
+{
+    TD5_Actor *a = td5_game_get_actor(s_inspect_slot);
+    if (!a)
+        return;
+
+    /* Target the SAME sub-tick-extrapolated position the body mesh is drawn at
+     * (td5_render.c:2479, faithful to orig 0x40C164):
+     *   render = (world_pos + linear_velocity * g_subTickFraction) / 256
+     * Using raw world_pos here would snap the camera to the 30 Hz sim tick
+     * while the car body slides forward each render frame, producing the
+     * speed-dependent "sawtooth" shake the faithful chase camera avoids the
+     * same way (td5_camera.c:1236-1295, td5_game.c:3587-3596). */
+    extern float g_subTickFraction;
+    float frac = g_subTickFraction;
+    /* X/Z: velocity-extrapolate to match the body mesh (keeps the car centred
+     * horizontally, lag-free). Y: sub-tick INTERPOLATE between sim ticks rather
+     * than velocity-extrapolate, so the suspension-settle snap + per-tick velY
+     * jitter don't bob the inspection view at high FPS — same rationale as the
+     * chase-cam fix in td5_camera.c finalize_chase_pos. */
+    float tx = ((float)a->world_pos.x + (float)a->linear_velocity_x * frac) * (1.0f / 256.0f);
+    float tz = ((float)a->world_pos.z + (float)a->linear_velocity_z * frac) * (1.0f / 256.0f);
+    static int      s_iy_init     = 0;
+    static int      s_iy_prev     = 0;
+    static int      s_iy_cur      = 0;
+    static uint32_t s_iy_lastTick = 0;
+    int wy = a->world_pos.y;
+    if (!s_iy_init) {
+        s_iy_init = 1; s_iy_prev = wy; s_iy_cur = wy;
+        s_iy_lastTick = (uint32_t)g_td5.simulation_tick_counter;
+    } else if ((uint32_t)g_td5.simulation_tick_counter != s_iy_lastTick) {
+        s_iy_lastTick = (uint32_t)g_td5.simulation_tick_counter;
+        s_iy_prev = s_iy_cur; s_iy_cur = wy;
+    }
+    { int dyj = wy - s_iy_prev; if (dyj > 0x40000 || dyj < -0x40000) { s_iy_prev = wy; s_iy_cur = wy; } }
+    float ty = ((float)s_iy_prev + (float)(wy - s_iy_prev) * frac) * (1.0f / 256.0f);
+
+    float az = s_inspect_az_deg * ((float)M_PI / 180.0f);
+    float el = s_inspect_el_deg * ((float)M_PI / 180.0f);
+    float ce = cosf(el), se = sinf(el);
+
+    /* Unit offset from the target to the camera (world space, +Y up). */
+    float ox = ce * sinf(az);
+    float oy = se;
+    float oz = ce * cosf(az);
+
+    s_camera_pos[0] = tx + ox * s_inspect_dist;
+    s_camera_pos[1] = ty + oy * s_inspect_dist;
+    s_camera_pos[2] = tz + oz * s_inspect_dist;
+
+    /* forward = camera -> target (points into the screen, +vz). */
+    float fx = -ox, fy = -oy, fz = -oz;
+    float fl = sqrtf(fx * fx + fy * fy + fz * fz);
+    if (fl < 1e-6f)
+        return;
+    fx /= fl; fy /= fl; fz /= fl;
+
+    /* Up reference; swap to world +Z when looking near-vertical (top-down)
+     * so the cross product stays well-conditioned. */
+    float ux = 0.0f, uy = 1.0f, uz = 0.0f;
+    if (fy > 0.99f || fy < -0.99f) { ux = 0.0f; uy = 0.0f; uz = 1.0f; }
+
+    /* right = up_ref x forward */
+    float rx = uy * fz - uz * fy;
+    float ry = uz * fx - ux * fz;
+    float rz = ux * fy - uy * fx;
+    float rl = sqrtf(rx * rx + ry * ry + rz * rz);
+    if (rl < 1e-6f)
+        return;
+    rx /= rl; ry /= rl; rz /= rl;
+
+    /* up = forward x right (already unit length) */
+    float upx = fy * rz - fz * ry;
+    float upy = fz * rx - fx * rz;
+    float upz = fx * ry - fy * rx;
+
+    s_camera_basis[0] = rx;  s_camera_basis[1] = ry;  s_camera_basis[2] = rz;
+    s_camera_basis[3] = upx; s_camera_basis[4] = upy; s_camera_basis[5] = upz;
+    s_camera_basis[6] = fx;  s_camera_basis[7] = fy;  s_camera_basis[8] = fz;
+}
+#endif /* TD5RE_RELEASE */
+
 static void update_render_camera_from_game(void)
 {
     td5_camera_get_basis(&s_camera_basis[0], &s_camera_basis[3], &s_camera_basis[6]);
     td5_camera_get_position(&s_camera_pos[0], &s_camera_pos[1], &s_camera_pos[2]);
+
+#ifndef TD5RE_RELEASE
+    /* Optional debug inspection-camera override (env-gated, dev only). */
+    if (!s_inspect_loaded)
+        inspect_cam_load_env();
+    if (s_inspect_enabled)
+        apply_inspection_camera();
+#endif
 }
 
 /**

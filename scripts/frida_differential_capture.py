@@ -368,10 +368,15 @@ def capture_port(target: Target, duration_s: float, out_csv: Path,
         try:
             if session: session.detach()
         except Exception: pass
-        # Always taskkill the game (Popen.terminate() doesn't always reach
-        # the actual TD5 process spawned via cmd /c start).
-        subprocess.run(["taskkill", "/F", "/IM", "td5re.exe"],
-                       capture_output=True, text=True)
+        # Kill the EXACT td5re.exe we spawned (Popen.terminate() doesn't reach
+        # a game launched via `cmd /c start`). NEVER taskkill /IM td5re.exe —
+        # that would nuke every concurrent session's port. new_pid came from the
+        # spawn-detection snapshot above (cur - existing).
+        if new_pid:
+            subprocess.run(["taskkill", "/F", "/PID", str(new_pid)],
+                           capture_output=True, text=True)
+        else:
+            print("[port] WARN: spawned pid unknown; not killing by name")
         restore_port_ini(original_ini)
 
     ok = out_csv.exists() and out_csv.stat().st_size > 64
@@ -423,6 +428,16 @@ def capture_orig(target: Target, duration_s: float, out_csv: Path,
     with tempfile.NamedTemporaryFile(mode="w", suffix=".js", delete=False,
                                       encoding="utf-8") as f:
         f.write(hook_src); tmp_path = f.name
+    # Snapshot existing TD5_d3d.exe pids so the focus loop + cleanup only ever
+    # touch the instance THIS run spawns — never a parallel session's. Defined
+    # before the try so the finally can always see them.
+    try:
+        import frida
+        _pre_orig = {p.pid for p in frida.get_local_device().enumerate_processes()
+                     if p.name.lower() == "td5_d3d.exe"}
+    except Exception:
+        _pre_orig = set()
+    _our_orig = {"pid": None}
     try:
         cmd = [
             sys.executable, str(QUICKRACE_PY),
@@ -460,11 +475,14 @@ def capture_orig(target: Target, duration_s: float, out_csv: Path,
                 if dev is not None:
                     try:
                         for p in dev.enumerate_processes():
-                            if p.name.lower() == "td5_d3d.exe":
+                            # Only OUR spawn — exclude any TD5_d3d a parallel
+                            # session already had running.
+                            if p.name.lower() == "td5_d3d.exe" and p.pid not in _pre_orig:
                                 pid = p.pid; break
                     except Exception:
                         pid = None
                 if pid:
+                    _our_orig["pid"] = pid
                     focus_pid_window(pid, timeout_s=0.5)
                 _t.sleep(1.0)
         _focus_thread = threading.Thread(target=_focus_loop, daemon=True)
@@ -476,8 +494,9 @@ def capture_orig(target: Target, duration_s: float, out_csv: Path,
         except subprocess.TimeoutExpired:
             print("[orig] quickrace ran past timeout; killing")
             proc.kill()
-            subprocess.run(["taskkill", "/F", "/IM", "TD5_d3d.exe"],
-                           capture_output=True, text=True)
+            if _our_orig["pid"]:
+                subprocess.run(["taskkill", "/F", "/PID", str(_our_orig["pid"])],
+                               capture_output=True, text=True)
             stdout = ""
         if stdout:
             # Echo orig output verbatim (helpful for debugging).
@@ -488,9 +507,12 @@ def capture_orig(target: Target, duration_s: float, out_csv: Path,
         except Exception: pass
         try: os.unlink(tmp_path)
         except: pass
-        # Belt-and-braces: kill any straggling original processes.
-        subprocess.run(["taskkill", "/F", "/IM", "TD5_d3d.exe"],
-                       capture_output=True, text=True)
+        # Belt-and-braces: kill ONLY the original WE spawned (quickrace's
+        # --max-runtime normally handles it). Never taskkill /IM — that would
+        # kill other concurrent sessions' TD5_d3d.exe.
+        if _our_orig["pid"]:
+            subprocess.run(["taskkill", "/F", "/PID", str(_our_orig["pid"])],
+                           capture_output=True, text=True)
 
     ok = out_csv.exists() and out_csv.stat().st_size > 64
     if ok:

@@ -308,6 +308,7 @@ static int td5_apply_cli_overrides(const char *cmdline,
         { "DefaultCar",           &g_td5.ini.default_car },
         { "DefaultTrack",         &g_td5.ini.default_track },
         { "DefaultGameType",      &g_td5.ini.default_game_type },
+        { "DefaultOpponents",     &g_td5.ini.default_opponents },
         { "SkipIntro",            &g_td5.ini.skip_intro },
         { "DebugOverlay",         &g_td5.ini.debug_overlay },
         { "DebugCollisions",      &g_td5.ini.debug_collisions },
@@ -524,6 +525,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     g_td5.ini.default_car       = td5_ini_int("Game", "DefaultCar", 0);
     g_td5.ini.default_track     = td5_ini_int("Game", "DefaultTrack", 0);
     g_td5.ini.default_game_type = td5_ini_int("Game", "DefaultGameType", 0);
+    g_td5.ini.default_opponents = td5_ini_int("Game", "DefaultOpponents", -1); /* -1 = full grid */
     g_td5.ini.skip_intro        = td5_ini_int("Game", "SkipIntro", 1);
     g_td5.ini.debug_overlay     = td5_ini_int("Game", "DebugOverlay", 0);
     g_td5.ini.debug_collisions  = td5_ini_int("Debug", "Collisions", 0);
@@ -727,6 +729,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
      * release variant) — this is the runtime belt to that compile-time braces. */
     g_td5.ini.auto_race              = 0;   /* always boot the normal menu flow */
     g_td5.ini.start_screen           = -1;  /* no jump-to-screen test harness   */
+    g_td5.ini.default_opponents      = -1;  /* full grid (no AutoRace override)  */
     g_td5.ini.player_is_ai           = 0;   /* the human drives                 */
     g_td5.ini.debug_overlay          = 0;   /* no HUD debug text overlay        */
     g_td5.ini.debug_collisions       = 0;   /* no collision wireframe overlay   */

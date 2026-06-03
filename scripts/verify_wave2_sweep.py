@@ -114,13 +114,21 @@ def run_capture_diff(scenario_name, track, car, player_is_ai, unfiltered=False):
     si.wShowWindow = 7  # SW_SHOWMINNOACTIVE
 
     t0 = time.monotonic()
+    p = None
     try:
+        # Popen (not subprocess.call) so a timeout kills THIS specific pid,
+        # mirroring run_parallel_sweep. Never taskkill /IM td5re.exe — that
+        # would kill other concurrent sessions' instances.
+        p = subprocess.Popen([str(TD5RE_EXE)], cwd=str(PROJECT_ROOT), env=env,
+                             startupinfo=si)
         try:
-            subprocess.call([str(TD5RE_EXE)], cwd=str(PROJECT_ROOT), env=env,
-                            timeout=90, startupinfo=si)
+            p.wait(timeout=90)
         except subprocess.TimeoutExpired:
-            subprocess.run(["taskkill", "/F", "/IM", "td5re.exe"],
-                           capture_output=True)
+            p.kill()
+            try:
+                p.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                pass
     finally:
         ini_restore(TD5RE_INI, originals)
     elapsed = time.monotonic() - t0

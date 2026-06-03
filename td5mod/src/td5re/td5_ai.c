@@ -1691,6 +1691,25 @@ void td5_ai_init_race_actor_runtime(void) {
         TD5_LOG_I(LOG_TAG, "solo_mode_synth: g_slot_state[1..5] = 3 (inactive)");
     }
 
+    /* Single race / Quick Race reduced field [PORT ENHANCEMENT]: disable racer
+     * slots beyond the configured total (humans + AI opponents) so the AI does
+     * NOT drive the dropped opponents. MUST mirror the same override in
+     * td5_game.c InitRace — the AI's g_slot_state[] is a SEPARATE table from
+     * the game's s_slot_state[], and without this the dropped slots stay
+     * g_slot_state==0 (AI) and get driven (they were seen spawning + circling).
+     * Guarded on num_human_players>=1 so an un-configured launch keeps the grid. */
+    if (!is_time_trial && !g_td5.drag_race_enabled && !g_td5.wanted_mode_enabled &&
+        !(g_td5.solo_mode_synth && g_td5.split_screen_mode == 0) &&
+        g_td5.num_human_players >= 1) {
+        int total = g_td5.num_human_players + g_td5.num_ai_opponents;
+        if (total < 1) total = 1;
+        if (total > TD5_MAX_RACER_SLOTS) total = TD5_MAX_RACER_SLOTS;
+        for (int k = total; k < TD5_MAX_RACER_SLOTS; k++)
+            g_slot_state[k] = 3;
+        TD5_LOG_I(LOG_TAG, "single-race: g_slot_state[%d..5] = 3 (humans=%d opponents=%d)",
+                  total, g_td5.num_human_players, g_td5.num_ai_opponents);
+    }
+
     /* --- First layer: DYNAMICS (arcade/sim) scaling on AI physics template ---
      * Mirrors InitializeRaceActorRuntime [@ 0x00432F2F..0x00432FEC]. The original
      * gates this block on the dynamics globals gDifficultyHard @0x004AAF80 /

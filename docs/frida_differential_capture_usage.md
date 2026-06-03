@@ -143,9 +143,13 @@ sub_tick instead of guessing where to start.
 
 ## Troubleshooting
 
-* **"failed to detect spawned td5re.exe pid"** -- another td5re.exe was
-  already running (or you ran the script twice in quick succession).
-  Close all instances via `taskkill /F /IM td5re.exe` and retry.
+* **"failed to detect spawned td5re.exe pid"** -- the port didn't appear
+  within the detection window (slow boot, or it crashed on launch). The
+  script snapshots pre-existing td5re.exe pids and only claims the NEW one,
+  so a parallel session's instance won't trip it. If you need to clear a
+  stray instance from a PREVIOUS run of THIS script, close only that pid
+  (`taskkill /F /PID <pid>`) -- never `taskkill /F /IM td5re.exe`, which
+  would kill other sessions' games mid-capture.
 * **`ERROR: cannot resolve td5_ai_find_offset_peer in td5re.exe`** --
   the port build did not export internal symbols. Rebuild with
   `-Wl,--export-all-symbols` or add a `.def` file listing the two hook

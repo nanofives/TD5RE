@@ -173,7 +173,9 @@ def main():
         session = frida.attach(new_pid)
     except Exception as e:
         print(f"ERROR: Frida attach failed: {e}", file=sys.stderr)
-        subprocess.run(["taskkill", "/F", "/IM", "TD5_d3d.exe"], capture_output=True)
+        # Kill only the instance WE spawned (new_pid, from the set-diff above) —
+        # never taskkill /IM, which would kill other sessions' TD5_d3d.exe.
+        subprocess.run(["taskkill", "/F", "/PID", str(new_pid)], capture_output=True)
         return 4
 
     # Inject quickrace hook
