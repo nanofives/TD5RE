@@ -31,6 +31,7 @@
 #include "td5_physics.h"
 #include "td5_ai.h"
 #include "td5re.h"
+#include "td5_vectorui.h"   /* resolution-independent VectorUI primitives (SDF gauge, text) */
 
 #include <stdlib.h>
 #include <string.h>
@@ -255,6 +256,12 @@ static float s_pause_selbox_x1;                /* right edge of selbox, relative
 static float s_pause_selbox_base_y;            /* y-center of row 0 (= -52.0f) */
 static float s_pause_bar_x0 = 10.0f;
 static float s_pause_bar_x1;  /* = s_pause_half_width - 4.0f, set during init */
+
+/* VectorUI: pause-menu text lines recorded at init (instead of baking PAUSETXT
+ * glyph quads) and rendered crisply via the pause-font SDF at draw time. */
+typedef struct { float y; int alignment; char s[48]; } PauseTextLine;
+static PauseTextLine s_pause_vui_lines[16];
+static int s_pause_vui_line_count;
 
 /* Pause overlay dimmer state.
  * Must NOT be 898 (TD5_SHARED_FONT_PAGE) — that would clobber BodyText.tga
@@ -1024,6 +1031,44 @@ void td5_hud_draw_pause_overlay(void)
     for (i = 0; i < s_pause_quad_count && i < TD5_HUD_PAUSE_MAX_QUADS; i++) {
         hud_submit_quad(s_pause_quad_buf + i * 0xB8);
     }
+
+    /* VectorUI: render the menu text crisply via the pause-font SDF (the glyph
+     * quads were NOT baked above). Mirrors the original PAUSETXT layout exactly
+     * (alignment, glyph_w = width*2/3, +2 spacing, char-code -> 16x16 cell UV). */
+    if (g_td5.ini.vector_ui && td5_vui_pausefont_page() >= 0 && s_pause_vui_line_count > 0) {
+        int page = td5_vui_pausefont_page();
+        float cx = g_render_width_f  * 0.5f;
+        float cy = g_render_height_f * 0.5f;
+        const float INV = 1.0f / 256.0f;          /* pause SDF page is 256x256 */
+        for (int li = 0; li < s_pause_vui_line_count; li++) {
+            PauseTextLine *L = &s_pause_vui_lines[li];
+            int len = (int)strlen(L->s);
+            float start_x;
+            if (L->alignment == 2) {
+                float total_w = 0.0f;
+                for (int c = 0; c < len; c++) {
+                    uint8_t ch = (uint8_t)L->s[c];
+                    total_w += (float)(((g_pause_glyph_widths[ch] * 2) / 3) + 2);
+                }
+                start_x = -(total_w * 0.5f);
+            } else {
+                start_x = 4.0f - s_pause_half_width;
+            }
+            float curx = start_x;
+            for (int c = 0; c < len; c++) {
+                uint8_t ch = (uint8_t)L->s[c];
+                int glyph_w = (g_pause_glyph_widths[ch] * 2) / 3;
+                float gu = (float)(ch & 0x0F) * 16.0f;
+                float gv = (float)(ch >> 4)   * 16.0f;
+                float u0 = (gu + 0.5f) * INV,                 v0 = (gv + 0.5f)  * INV;
+                float u1 = (gu + 0.5f + (float)(glyph_w - 1)) * INV, v1 = (gv + 16.5f) * INV;
+                td5_vui_msdf_quad(cx + curx + 0.5f, cy + L->y + 0.5f,
+                                  (float)(glyph_w - 1), 15.5f,
+                                  0xFFFFFFFFu, page, u0, v0, u1, v1);
+                curx += (float)(glyph_w + 2);
+            }
+        }
+    }
 }
 
 /* Called each frame while paused to update SELBOX position and slider thumb positions.
@@ -1081,6 +1126,17 @@ void td5_hud_update_pause_overlay(int cursor, float view_dist_frac, float music_
     }
 }
 
+/* ---- VectorUI HUD text (MSDF) ------------------------------------------
+ * When [Frontend] VectorUI is on, td5_hud_queue_text records the formatted
+ * ASCII string + position instead of building bitmap glyph quads, and
+ * td5_hud_flush_text renders them crisply via the shared MSDF text renderer
+ * (td5_vui_text). Recorded (not drawn immediately) so they layer on top of the
+ * gauge/scene exactly like the bitmap flush did. Falls back to the bitmap glyph
+ * atlas when VectorUI is off or the MSDF font is unavailable. */
+typedef struct { float x, y; int centered; char s[64]; } HudVuiText;
+static HudVuiText s_hud_vui_text[96];
+static int        s_hud_vui_text_count;
+
 /* ========================================================================
  * QueueRaceHudFormattedText (0x428320)
  *
@@ -1098,6 +1154,21 @@ void td5_hud_queue_text(int font_index, int x, int y, int centered,
     va_end(ap);
 
     int len = (int)strlen(buf);
+
+    /* VectorUI: record the raw ASCII string for crisp SDF rendering at flush
+     * (the original glyph table + char remap are applied there, against the
+     * HUD-font SDF atlas -- same typeface, sharp at any resolution). */
+    if (g_td5.ini.vector_ui && td5_vui_hudfont_page() >= 0) {
+        int n = (int)(sizeof(s_hud_vui_text) / sizeof(s_hud_vui_text[0]));
+        if (s_hud_vui_text_count < n) {
+            HudVuiText *e = &s_hud_vui_text[s_hud_vui_text_count++];
+            e->x = (float)x;  e->y = (float)y;  e->centered = centered;
+            strncpy(e->s, buf, sizeof(e->s) - 1);
+            e->s[sizeof(e->s) - 1] = '\0';
+        }
+        return;
+    }
+
     if (s_queued_glyph_count + len > TD5_HUD_MAX_TEXT_GLYPHS) {
         return; /* overflow guard */
     }
@@ -1168,6 +1239,35 @@ void td5_hud_queue_text(int font_index, int x, int y, int centered,
 
 void td5_hud_flush_text(void)
 {
+    /* VectorUI: render the recorded strings via the HUD-font SDF atlas, reusing
+     * the ORIGINAL glyph table (typeface, per-glyph widths, char remap, centered
+     * math, +1 spacing) -- identical layout to the bitmap path, just crisp. */
+    if (g_td5.ini.vector_ui && td5_vui_hudfont_page() >= 0 && s_hud_vui_text_count > 0) {
+        int page = td5_vui_hudfont_page();
+        TD5_GlyphRecord *glyphs = s_glyph_table;   /* font 0 */
+        const float INV = 1.0f / 256.0f;           /* SDF page is 256x256, texel UVs */
+        for (int i = 0; i < s_hud_vui_text_count; i++) {
+            HudVuiText *e = &s_hud_vui_text[i];
+            int len = (int)strlen(e->s);
+            float total_w = 0.0f;
+            for (int k = 0; k < len; k++) {
+                uint8_t gi = s_char_remap[(uint8_t)e->s[k] & 0x7F];
+                total_w += glyphs[gi].width;
+            }
+            float cx = e->x;
+            if (e->centered) cx -= ((float)(len - 1) + total_w) * 0.5f;
+            for (int k = 0; k < len; k++) {
+                uint8_t gi = s_char_remap[(uint8_t)e->s[k] & 0x7F];
+                TD5_GlyphRecord *g = &glyphs[gi];
+                float u0 = g->atlas_u * INV,                v0 = g->atlas_v * INV;
+                float u1 = (g->atlas_u + g->width)  * INV,  v1 = (g->atlas_v + g->height) * INV;
+                td5_vui_msdf_quad(cx, e->y, g->width, g->height, 0xFFFFFFFFu, page, u0, v0, u1, v1);
+                cx += g->width + 1.0f;
+            }
+        }
+        s_hud_vui_text_count = 0;
+    }
+
     uint8_t *ptr = s_text_quad_buf;
     int count = s_queued_glyph_count;
 
@@ -2219,6 +2319,75 @@ static void hud_draw_split_dividers(void)
     }
 }
 
+/* ------------------------------------------------------------------------
+ * Vectorized speedometer / tachometer arc (VectorUI)
+ *
+ * Replaces the baked SPEEDO texture (tpage4 / GDI fallback) with a crisp
+ * analytic SDF reproduction that stays sharp at any resolution. Faithful to
+ * the original art (extracted from tpage4.dat): an ARC of tick marks (NOT a
+ * filled dial, no full ring -- the centre is transparent), with a static red
+ * "bar" baked at the top end. Only the needle (drawn separately) animates.
+ *
+ * Geometry from the real texture (dial centred, 96px, radius ~47):
+ *   - tick arc sweeps 90deg (the "0" at 6 o'clock, just left of the speed
+ *     digits) clockwise up the left + over the top to ~282deg;
+ *   - 8 major ticks (longer) with fine minor ticks between -- "8 subdivisions";
+ *   - a solid RED bar from ~282deg to 322.9deg (the redline, above the gear).
+ * Angles are screen degrees (angle*360/4096; screen Y-down, CW). The full
+ * 90..322.9 span is exactly the needle's RPM range (0x400 .. 0x400+0xA5A), so
+ * the needle sweeps the whole arc and points into the red bar at redline.
+ *
+ * cx/cy is the centre in render px; drawn as a true circle (radius from sy)
+ * so it stays circular at any aspect ratio. ------------------------------*/
+static void hud_vector_speedo_tach(float cx, float cy, float sy)
+{
+    const float A0 = (float)0x400 * 360.0f / 4096.0f;           /* 90.0  (idle)   */
+    const float A1 = (float)(0x400 + 0xA5A) * 360.0f / 4096.0f; /* 322.9 (redline)*/
+    const float RL_FRAC = 0.80f;                  /* red zone = top 20% of the arc */
+    float rl = A0 + RL_FRAC * (A1 - A0);          /* red zone start angle (~276)   */
+
+    TD5_VuiGauge g;
+    memset(&g, 0, sizeof(g));
+    g.cx = cx;  g.cy = cy;
+    g.radius       = 50.0f * sy;      /* outer semi-transparent disc (no border)         */
+    g.inner_radius = 15.0f * sy;      /* concentric inner circle -> 3D recessed look     */
+    g.tick_out     = 46.0f * sy;      /* tooth outer radius (near the rim)               */
+    g.sweep_start_deg = A0;           /* "0" tooth at 6 o'clock (left of the digits)     */
+    g.sweep_end_deg   = A1;           /* subdivisions span the FULL arc incl. the red    */
+    g.tick_count   = 33;              /* 9 majors (every 4th) => 8 subdivisions + minors */
+    g.major_every  = 4;
+    g.major_len_px = 9.0f * sy;       /* long major teeth                                */
+    g.minor_len_px = 5.0f * sy;       /* short minor teeth                               */
+    g.pivot_px     = 3.0f * sy;       /* small needle-pivot hub                          */
+    /* Red zone: teeth here render RED and a red arc runs along the rim. The
+     * last subdivision falls inside it (top 20% of the sweep). */
+    g.redline_start_deg = rl;
+    g.redline_end_deg   = A1;
+    g.rim_red_px   = 4.0f * sy;
+    g.face_color   = 0x80181820u;     /* semi-transparent dark disc (no border line)     */
+    g.inner_color  = 0xC00A0A10u;     /* darker inner disc -> recessed 3D centre         */
+    g.tick_color   = 0xFFECECECu;     /* white teeth                                     */
+    g.redline_color= 0xFFE0202Au;     /* red teeth + red rim                             */
+    g.pivot_color  = 0xFF8A8A8Au;     /* grey hub                                        */
+    td5_vui_gauge(&g);
+}
+
+/* Draw one speed digit (0-9) from the Technology-font SDF (a 7-segment LCD
+ * digital typeface baked into the HUD-font SDF page at a 5x2 grid of 30x48
+ * cells, top-left). SPEEDOFONT is empty in the asset; this gives a real digital
+ * speedometer font, crisp at any resolution and tinted via `color`. */
+static void hud_vector_speed_digit(int d, float x, float y, float w, float h, uint32_t color)
+{
+    int page = td5_vui_hudfont_page();
+    if (page < 0 || d < 0 || d > 9) return;
+    int col = d % 5, row = d / 5;
+    float gx = (float)(col * 30), gy = (float)(row * 48);
+    const float INV = 1.0f / 256.0f;
+    td5_vui_msdf_quad(x, y, w, h, color, page,
+                      (gx + 0.5f) * INV, (gy + 0.5f) * INV,
+                      (gx + 29.5f) * INV, (gy + 47.5f) * INV);
+}
+
 void td5_hud_render_overlays(float dt)
 {
     /* dt is normalized 30 Hz frame time from td5_game.c. */
@@ -2368,15 +2537,27 @@ void td5_hud_render_overlays(float dt)
             float cx = vl->vp_int_right - sx * 64.0f;
             float cy = vl->vp_int_bottom - sy * 56.0f;
 
+            /* When the vectorized dial is active it is drawn as a true CIRCLE
+             * (radius from sy), so the needle uses a uniform sy scale on both
+             * axes to stay inside the circular face. Without it (baked-dial
+             * fallback) the needle keeps the original elliptical sx/sy scale to
+             * match the stretched 96x96 texture. */
+            int   use_vec = td5_vui_gauge_available();
+            /* Vector dial: circular needle (uniform sy scale) so it stays inside
+             * the circular SDF dial. Baked-dial fallback keeps the faithful
+             * elliptical sx/sy needle. */
+            float nsx = use_vec ? sy : sx;
+            float nsy = sy;
+
             /* V0: near end (9 units into dial), V2: far tip (45 units out) */
-            float near_x = cx - cos_a * sx * 9.0f;
-            float near_y = cy - sin_a * sy * 9.0f;
+            float near_x = cx - cos_a * nsx * 9.0f;
+            float near_y = cy - sin_a * nsy * 9.0f;
 
-            float base_offset_x = sin_a * sx * 2.0f;
-            float base_offset_y = cos_a * sy * 2.0f;
+            float base_offset_x = sin_a * nsx * 2.0f;
+            float base_offset_y = cos_a * nsy * 2.0f;
 
-            float tip_x = cx + cos_a * sx * 45.0f;
-            float tip_y = cy + sin_a * sy * 45.0f;
+            float tip_x = cx + cos_a * nsx * 45.0f;
+            float tip_y = cy + sin_a * nsy * 45.0f;
 
             TD5_LOG_I(LOG_TAG, "speedo: rpm=%d max=%d angle=0x%03X cos=%.3f sin=%.3f cx=%.1f cy=%.1f tip=(%.1f,%.1f) near=(%.1f,%.1f)",
                 engine_speed, max_rpm, needle_angle, cos_a, sin_a, cx, cy, tip_x, tip_y, near_x, near_y);
@@ -2461,11 +2642,14 @@ void td5_hud_render_overlays(float dt)
              * Original renders right-to-left: ones at anchor, each additional
              * digit subtracts (glyph_w + 2.0) moving LEFT (0x438E90).
              * Inter-digit gap is 2.0 [CONFIRMED @ 0x45d6d8]. */
-            float sf_gw = sx * 15.0f;
+            /* Bigger digits, kept at the same spot (left anchor + original
+             * bottom edge, growing upward). */
+            float sf_gw = sx * 19.0f;
+            float dh    = sy * 32.0f;
             float sf_step = sf_gw + 2.0f;
             float sf_x0 = vl->vp_int_right - sx * 60.0f;
-            float sf_y0 = vl->vp_int_bottom - sy * 23.0f - sy * 8.0f;
-            float sf_y1 = sf_y0 + sy * 24.0f;
+            float sf_y1 = vl->vp_int_bottom - sy * 7.0f;   /* original bottom edge */
+            float sf_y0 = sf_y1 - dh;
             float digit_u_base = (float)s_speedofont_atlas->atlas_x;
             float digit_v_base = (float)s_speedofont_atlas->atlas_y;
             int   sf_pg = s_speedofont_atlas->texture_page;
@@ -2483,54 +2667,66 @@ void td5_hud_render_overlays(float dt)
             /* Ones anchor: rightmost position = sf_x0 + (num_digits-1) * step */
             float ones_x = sf_x0 + (float)(num_digits - 1) * sf_step;
 
-            /* Submit speedo dial */
-            hud_submit_quad(view_base + SPEEDO_QUAD_OFF);
+            /* Submit speedo dial: crisp SDF dial + RPM tach arc when VectorUI
+             * is available, otherwise the baked 96x96 GDI dial texture. Drawn
+             * BEFORE the needle (immediate-mode call order = z-order) so the
+             * needle/digits paint on top of the dial face. */
+            if (use_vec) {
+                hud_vector_speedo_tach(cx, cy, sy);
+            } else {
+                hud_submit_quad(view_base + SPEEDO_QUAD_OFF);
+            }
             /* Submit needle */
             hud_submit_quad(view_base + 0x39C);
 
-            /* Ones digit (always shown) */
+            /* Speed digits: VectorUI draws crisp GREEN digits from the NUMBERS
+             * SDF (SPEEDOFONT is empty in the asset); otherwise the baked
+             * SPEEDOFONT quads. Right-to-left: ones at anchor, then tens/hundreds. */
+            const uint32_t SPEED_GREEN = 0xFF3CDC3Cu;
             float dx = ones_x;
-            float u_ones = digit_u_base + (float)ones * 16.0f + 0.5f;
-            hud_build_quad(
-                view_base + SPEEDFONT_BASE_OFF,
-                0, sf_pg,
-                dx, sf_y0, dx + sf_gw, sf_y1,
-                u_ones, digit_v_base + 0.5f,
-                u_ones + 15.5f, digit_v_base + 23.5f,
-                0xFFFFFFFF, HUD_DEPTH
-            );
-            hud_submit_quad(view_base + SPEEDFONT_BASE_OFF);
+            if (use_vec) {
+                hud_vector_speed_digit(ones, dx, sf_y0, sf_gw, dh, SPEED_GREEN);
+            } else {
+                float u_ones = digit_u_base + (float)ones * 16.0f + 0.5f;
+                hud_build_quad(view_base + SPEEDFONT_BASE_OFF, 0, sf_pg,
+                    dx, sf_y0, dx + sf_gw, sf_y1,
+                    u_ones, digit_v_base + 0.5f, u_ones + 15.5f, digit_v_base + 23.5f,
+                    0xFFFFFFFF, HUD_DEPTH);
+                hud_submit_quad(view_base + SPEEDFONT_BASE_OFF);
+            }
 
             /* Tens digit if speed >= 10 (one step LEFT of ones) */
             if (speed_display >= 10) {
-                float u_tens = digit_u_base + (float)tens_val * 16.0f + 0.5f;
                 dx = ones_x - sf_step;
-                hud_build_quad(
-                    view_base + SPEEDFONT_BASE_OFF + TD5_HUD_GLYPH_QUAD_SIZE,
-                    0, sf_pg,
-                    dx, sf_y0, dx + sf_gw, sf_y1,
-                    u_tens, digit_v_base + 0.5f,
-                    u_tens + 15.5f, digit_v_base + 23.5f,
-                    0xFFFFFFFF, HUD_DEPTH
-                );
-                hud_submit_quad(view_base + SPEEDFONT_BASE_OFF + TD5_HUD_GLYPH_QUAD_SIZE);
+                if (use_vec) {
+                    hud_vector_speed_digit(tens_val, dx, sf_y0, sf_gw, dh, SPEED_GREEN);
+                } else {
+                    float u_tens = digit_u_base + (float)tens_val * 16.0f + 0.5f;
+                    hud_build_quad(view_base + SPEEDFONT_BASE_OFF + TD5_HUD_GLYPH_QUAD_SIZE, 0, sf_pg,
+                        dx, sf_y0, dx + sf_gw, sf_y1,
+                        u_tens, digit_v_base + 0.5f, u_tens + 15.5f, digit_v_base + 23.5f,
+                        0xFFFFFFFF, HUD_DEPTH);
+                    hud_submit_quad(view_base + SPEEDFONT_BASE_OFF + TD5_HUD_GLYPH_QUAD_SIZE);
+                }
 
                 /* Hundreds digit if speed >= 100 (two steps LEFT of ones) */
                 if (speed_display >= 100) {
-                    float u_hund = digit_u_base + (float)hundreds_val * 16.0f + 0.5f;
                     dx = ones_x - 2.0f * sf_step;
-                    hud_build_quad(
-                        view_base + SPEEDFONT_BASE_OFF + 2 * TD5_HUD_GLYPH_QUAD_SIZE,
-                        0, sf_pg,
-                        dx, sf_y0, dx + sf_gw, sf_y1,
-                        u_hund, digit_v_base + 0.5f,
-                        u_hund + 15.5f, digit_v_base + 23.5f,
-                        0xFFFFFFFF, HUD_DEPTH
-                    );
-                    hud_submit_quad(view_base + SPEEDFONT_BASE_OFF + 2 * TD5_HUD_GLYPH_QUAD_SIZE);
+                    if (use_vec) {
+                        hud_vector_speed_digit(hundreds_val, dx, sf_y0, sf_gw, dh, SPEED_GREEN);
+                    } else {
+                        float u_hund = digit_u_base + (float)hundreds_val * 16.0f + 0.5f;
+                        hud_build_quad(view_base + SPEEDFONT_BASE_OFF + 2 * TD5_HUD_GLYPH_QUAD_SIZE, 0, sf_pg,
+                            dx, sf_y0, dx + sf_gw, sf_y1,
+                            u_hund, digit_v_base + 0.5f, u_hund + 15.5f, digit_v_base + 23.5f,
+                            0xFFFFFFFF, HUD_DEPTH);
+                        hud_submit_quad(view_base + SPEEDFONT_BASE_OFF + 2 * TD5_HUD_GLYPH_QUAD_SIZE);
+                    }
                 }
             }
 
+            /* Gear indicator: VectorUI draws a gold gear character from the FONT
+             * SDF (GEARNUMBERS is empty in the asset); otherwise the baked quad. */
             /* Submit gear indicator */
             hud_submit_quad(view_base + GEAR_QUAD_OFF);
         }
@@ -3056,6 +3252,33 @@ static int minimap_emit_road_quad(uint8_t *span_base, uint8_t *vert_base,
     return 1;
 }
 
+/* Vectorized minimap "grid" (VectorUI). The original tiles a small rose "+"
+ * SCANBACK sprite 4x4; this replaces it with a clean radar-style grid: a darker
+ * semi-transparent GREEN background panel + continuous lighter-green grid lines
+ * (graph-paper). Solid axis-aligned quads -> crisp + resolution-independent.
+ * Screen-space (the grid does not rotate; the route rotates within it). Drawn
+ * before the route + dots so they read on top. */
+static void hud_vector_minimap_grid(float mm_cx, float mm_cy)
+{
+    float x0 = s_minimap_x, y0 = s_minimap_y;
+    float w  = s_minimap_width, h = s_minimap_height;
+
+    /* darker semi-transparent green background panel */
+    td5_vui_quad(x0, y0, w, h, 0x620E2614u, -1, 0.0f, 0.0f, 0.0f, 0.0f);
+
+    /* continuous lighter-green grid lines at the original 4-cell spacing
+     * (lines run through the former crosshair positions, edge to edge) */
+    uint32_t gcol = 0x7034A052u;                 /* lighter green, semi-transparent */
+    float lw = w * 0.012f;  if (lw < 1.0f) lw = 1.0f;   /* ~1px, scales with res */
+    const float f[4] = { -0.375f, -0.125f, 0.125f, 0.375f };
+    for (int i = 0; i < 4; i++) {
+        float vx = mm_cx + f[i] * s_minimap_tile_width;   /* vertical line   */
+        td5_vui_quad(vx - lw * 0.5f, y0, lw, h, gcol, -1, 0.0f, 0.0f, 0.0f, 0.0f);
+        float hy = mm_cy + f[i] * s_minimap_tile_height;  /* horizontal line */
+        td5_vui_quad(x0, hy - lw * 0.5f, w, lw, gcol, -1, 0.0f, 0.0f, 0.0f, 0.0f);
+    }
+}
+
 void td5_hud_render_minimap(int actor_slot)
 {
     /* Faithful: the original disabled the whole minimap on circuit tracks via an
@@ -3068,6 +3291,11 @@ void td5_hud_render_minimap(int actor_slot)
      * dot loops already handle the circuit modulo-wrap span window. */
     int circuit = (g_track_is_circuit != 0);
     if (circuit && !g_td5.ini.circuit_minimap) return;
+
+    /* Guard against the span-wrap modulo dividing by zero before the track
+     * strip is loaded (g_strip_span_count == 0) -- crashed on early race frames
+     * (0xC0000094 integer divide-by-zero in the ring-walk). No spans => no map. */
+    if (g_strip_span_count <= 0) return;
 
     /* Set minimap clip rect */
     td5_render_set_clip_rect(
@@ -3097,14 +3325,18 @@ void td5_hud_render_minimap(int actor_slot)
     float offset_x = -(float)actor_world_x(actor_slot) * kFP;
     float offset_z = -(float)actor_world_z(actor_slot) * kFP;
 
-    /* Submit 16 background tiles (binary: offset 0x4500..0x507F, stride 0xB8).
-     * Use the low-alpha-ref translucent path (TRANSLUCENT_POINT preset,
-     * alpha_ref=1) so the per-tile vertex alpha can drop below 0x80 and
-     * produce a more see-through grid. */
-    for (int i = 0; i < 16; i++) {
-        int buf_off = 0x4500 + i * TD5_HUD_GLYPH_QUAD_SIZE;
-        td5_render_submit_translucent_low_ref(
-            (uint16_t *)(s_minimap_quad_buf + buf_off));
+    /* Background "grid" of 16 SCANBACK crosshairs. VectorUI: draw them as crisp
+     * procedural bars (resolution-independent); otherwise submit the 16 baked
+     * texture tiles (binary: offset 0x4500..0x507F, stride 0xB8) via the
+     * low-alpha-ref translucent path (TRANSLUCENT_POINT, alpha_ref=1). */
+    if (g_td5.ini.vector_ui) {
+        hud_vector_minimap_grid(mm_cx, mm_cy);
+    } else {
+        for (int i = 0; i < 16; i++) {
+            int buf_off = 0x4500 + i * TD5_HUD_GLYPH_QUAD_SIZE;
+            td5_render_submit_translucent_low_ref(
+                (uint16_t *)(s_minimap_quad_buf + buf_off));
+        }
     }
 
     /* Walk track spans and render road segments using the pre-built segment table.
@@ -4134,12 +4366,30 @@ void td5_hud_init_pause_menu(int page_index)
     float text_y = -52.0f;
     int string_offset = 0;
 
+    /* VectorUI: record lines for crisp SDF rendering at draw time instead of
+     * baking the bitmap PAUSETXT glyph quads. */
+    int pause_vec = (g_td5.ini.vector_ui && td5_vui_pausefont_page() >= 0);
+    s_pause_vui_line_count = 0;
+
     while (pausetxt && s_pause_menu_strings && string_offset < 0x30) {
         const char *str = s_pause_menu_strings[string_offset / 4];
         if (str == NULL) break;
 
         int alignment = *(int *)((uint8_t *)s_pause_menu_strings + string_offset + 4);
         int len = (int)strlen(str);
+
+        if (pause_vec) {
+            if (s_pause_vui_line_count < 16) {
+                PauseTextLine *L = &s_pause_vui_lines[s_pause_vui_line_count++];
+                L->y = text_y;  L->alignment = alignment;
+                strncpy(L->s, str, sizeof(L->s) - 1);
+                L->s[sizeof(L->s) - 1] = '\0';
+            }
+            text_y += 16.0f;
+            string_offset += 8;
+            if (string_offset > 0x2F) break;
+            continue;
+        }
 
         float start_x;
         if (alignment == 2) {
