@@ -2660,6 +2660,24 @@ void td5_plat_render_end_scene(void)
     g_backend.scene_rendered = 1;
 }
 
+/* Optional frontend pixel-shader override (VectorUI / MSDF text). When set, the
+ * indexed draw path binds this PS + sampler instead of the texblend-derived
+ * pair it normally forces. The frontend sets it around a text batch and clears
+ * it after. Typed void* so td5_platform.h stays free of D3D11 types. */
+static void *s_render_ps_override = NULL;
+static int   s_render_ps_override_samp = SAMP_LINEAR_CLAMP;
+
+void td5_plat_render_set_ps_override(void *ps, int sampler_idx)
+{
+    s_render_ps_override = ps;
+    s_render_ps_override_samp = sampler_idx;
+}
+
+void td5_plat_render_clear_ps_override(void)
+{
+    s_render_ps_override = NULL;
+}
+
 void td5_plat_render_draw_tris(const TD5_D3DVertex *verts, int vertex_count,
                                 const uint16_t *indices, int index_count)
 {
@@ -2706,12 +2724,19 @@ void td5_plat_render_draw_tris(const TD5_D3DVertex *verts, int vertex_count,
                                               DXGI_FORMAT_R16_UINT, 0);
         ID3D11DeviceContext_IASetPrimitiveTopology(ctx,
             D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-        /* Force correct PS and sampler before every draw */
-        ID3D11DeviceContext_PSSetShader(ctx,
-            g_backend.ps_shaders[g_backend.state.texblend_mode == 5 ? 1 : 0], NULL, 0);
-        {
-            int si = (g_backend.state.mag_filter >= 2) ? SAMP_LINEAR_WRAP : SAMP_POINT_WRAP;
-            ID3D11DeviceContext_PSSetSamplers(ctx, 0, 1, &g_backend.sampler_states[si]);
+        /* Force correct PS and sampler before every draw (honor MSDF override) */
+        if (s_render_ps_override) {
+            ID3D11DeviceContext_PSSetShader(ctx,
+                (ID3D11PixelShader *)s_render_ps_override, NULL, 0);
+            ID3D11DeviceContext_PSSetSamplers(ctx, 0, 1,
+                &g_backend.sampler_states[s_render_ps_override_samp]);
+        } else {
+            ID3D11DeviceContext_PSSetShader(ctx,
+                g_backend.ps_shaders[g_backend.state.texblend_mode == 5 ? 1 : 0], NULL, 0);
+            {
+                int si = (g_backend.state.mag_filter >= 2) ? SAMP_LINEAR_WRAP : SAMP_POINT_WRAP;
+                ID3D11DeviceContext_PSSetSamplers(ctx, 0, 1, &g_backend.sampler_states[si]);
+            }
         }
         ID3D11DeviceContext_DrawIndexed(ctx, (UINT)index_count, 0, 0);
     } else {

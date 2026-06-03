@@ -358,6 +358,11 @@ typedef struct TD5_GlobalState {
          * log/frontend_draw_port.csv (screen, page, x, y, w, h, color, uvs).
          * Disabled by default — enable with FrontendDraw=1 in [Logging]. */
         int  log_frontend_draw;
+        /* VectorUI: when 1, render frontend BodyText via the resolution-
+         * independent MSDF path (crisp at any resolution) instead of the
+         * bitmap glyph atlas. Falls back to bitmap if the MSDF atlas/shader
+         * fail to load. [Frontend] VectorUI, default 1. */
+        int  vector_ui;
         /* Logging — gates for the platform multi-file logger and the D3D
          * ddraw_wrapper log. Defaults preserve current behavior. Flip to
          * compare A/B perf without touching the build. */

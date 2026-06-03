@@ -348,6 +348,13 @@ void td5_plat_render_end_scene(void);
 void td5_plat_render_draw_tris(const TD5_D3DVertex *verts, int vertex_count,
                                 const uint16_t *indices, int index_count);
 
+/** Override the pixel shader + sampler used by the indexed draw path until
+ *  cleared. Used by the resolution-independent frontend (MSDF text). `ps` is an
+ *  ID3D11PixelShader* (void* to keep this header D3D11-free); `sampler_idx` is
+ *  a SAMP_* index. Set around a draw batch, then call clear. */
+void td5_plat_render_set_ps_override(void *ps, int sampler_idx);
+void td5_plat_render_clear_ps_override(void);
+
 /** Draw pre-transformed lines (LINELIST, no texture, vertex color only).
  *  vert_count must be even — each consecutive pair forms one line segment.
  *  Used by the debug-collision overlay; depth test on, depth write off,
