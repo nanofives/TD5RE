@@ -1444,6 +1444,23 @@ int td5_game_init_race_session(void) {
     /* Mark unused racer slots as disabled based on the current mode */
     {
         int racer_slot_count = g_td5.time_trial_enabled ? 2 : TD5_MAX_RACER_SLOTS;
+        /* Single race / Quick Race (no special mode): honor the configured
+         * humans+opponents count [PORT ENHANCEMENT — Quick Race player setup].
+         * Slots 0..effective-humans-1 are already human (slot 0 always, slot 1
+         * when split>0); the remaining active slots up to total are AI; slots
+         * beyond total are disabled here. Guarded on num_human_players>=1 so an
+         * un-configured launch (counts still 0) keeps the full 6-car grid.
+         * Default (1 human + 5 AI = 6) disables nothing — legacy behavior. */
+        if (!g_td5.time_trial_enabled && !g_td5.drag_race_enabled &&
+            !g_td5.wanted_mode_enabled && g_td5.num_human_players >= 1) {
+            int total = g_td5.num_human_players + g_td5.num_ai_opponents;
+            if (total < 1) total = 1;
+            if (total > TD5_MAX_RACER_SLOTS) total = TD5_MAX_RACER_SLOTS;
+            racer_slot_count = total;
+            TD5_LOG_I(LOG_TAG,
+                      "InitRace: single-race racer count=%d (humans=%d opponents=%d)",
+                      total, g_td5.num_human_players, g_td5.num_ai_opponents);
+        }
         for (int i = racer_slot_count; i < TD5_MAX_RACER_SLOTS; i++) {
             s_slot_state[i].state = 3;  /* disabled */
         }
@@ -1532,6 +1549,13 @@ int td5_game_init_race_session(void) {
         g_racer_count = (g_td5.split_screen_mode > 0) ? 2 : 1;
     } else if (g_td5.wanted_mode_enabled) {
         g_racer_count = 2;  /* slot 0 = player, slot 1 = cop AI */
+    } else if (g_td5.num_human_players >= 1) {
+        /* Single race / Quick Race: humans + opponents (<=6) [PORT ENHANCEMENT].
+         * Default (1+5) yields 6 — legacy behavior. */
+        int total = g_td5.num_human_players + g_td5.num_ai_opponents;
+        if (total < 1) total = 1;
+        if (total > TD5_MAX_RACER_SLOTS) total = TD5_MAX_RACER_SLOTS;
+        g_racer_count = total;
     } else {
         g_racer_count = TD5_MAX_RACER_SLOTS;
     }

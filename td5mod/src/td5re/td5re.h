@@ -155,6 +155,16 @@ typedef struct TD5_GlobalState {
     int  reverse_direction;
     int  dynamics_mode;  /* 0=arcade, 1=simulation */
 
+    /* Quick Race player setup (infra to later replace the Two-Player menu).
+     * num_human_players + num_ai_opponents <= TD5_MAX_RACER_SLOTS (6).
+     * NOTE: live split-screen rendering/input supports only 2 viewports
+     * (gSplitScreenMode+1, masked &1 @ orig 0x42C2B0). Until N-way split
+     * lands, the launch path caps EFFECTIVE human-driven slots at 2; the
+     * remaining requested-human slots run as AI so no car sits dead.
+     * Defaults (1 human + 5 AI = 6) reproduce the legacy single-race grid. */
+    int  num_human_players;   /* 1..6 */
+    int  num_ai_opponents;    /* 0..5 */
+
     /* Viewport */
     int  render_width;
     int  render_height;
