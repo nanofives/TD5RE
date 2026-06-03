@@ -202,14 +202,14 @@ static int s_reverb_actor_index;
 
 /** Per-viewport listener world position (2 viewports x 3 components).
  *  Original: DAT_004c3810 (P1), DAT_004c381c (P2). */
-static int32_t s_listener_pos[2][3];
+static int32_t s_listener_pos[TD5_MAX_VIEWPORTS][3];
 
 /** Previous frame listener position for velocity delta.
  *  Original: DAT_004c38c0. */
-static int32_t s_listener_prev_pos[2][3];
+static int32_t s_listener_prev_pos[TD5_MAX_VIEWPORTS][3];
 
 /** Listener velocity delta. Original: DAT_004c3888, DAT_004c388c, DAT_004c3890. */
-static int32_t s_listener_vel[2][3];
+static int32_t s_listener_vel[TD5_MAX_VIEWPORTS][3];
 
 /** Active listener position pointer (for current viewport pass). */
 static int32_t *s_active_listener_pos;
@@ -507,8 +507,8 @@ int td5_sound_load_ambient(void)
 
     /* Load traffic engine loops for actors 6+ */
     int total_actors = td5_game_get_total_actor_count();
-    if (total_actors > 6) {
-        for (int i = 0; i < total_actors - 6; i++) {
+    if (total_actors > g_traffic_slot_base) {
+        for (int i = 0; i < total_actors - g_traffic_slot_base; i++) {
             int variant = td5_game_get_traffic_variant(i);
             if (variant < 0 || variant > 2) variant = 0;
             int slot = TD5_SOUND_TRAFFIC_SLOT_BASE + i;
@@ -545,7 +545,9 @@ void td5_sound_update_ambient(void)
      *   DAT_004c3768 (per-viewport) → s_rain_playing[vp]
      * ---------------------------------------------------------------- */
 
-    int num_passes  = (g_td5.split_screen_mode != 0) ? 2 : 1;
+    /* [PORT] audio mixes at most 2 listener passes (P1 base + P2 @slot+44);
+     * N-way split renders >2 panes but audio stays a 2-listener mix. */
+    int num_passes  = (g_td5.viewport_count > 1) ? 2 : 1;
     int slot_offset = 0;
 
     for (int vp = 0; vp < num_passes; vp++) {
@@ -813,12 +815,12 @@ void td5_sound_update_audio_mix(void)
     int viewer_vehicle;  /* which vehicle index is the "viewer" for this pass */
     int pan;
 
-    if (g_td5.split_screen_mode == 0) {
+    if (g_td5.viewport_count <= 1) {
         num_passes     = 1;
         viewer_vehicle = s_reverb_actor_index;
         pan            = 0;
     } else {
-        num_passes     = 2;
+        num_passes     = 2;  /* [PORT] audio capped at 2 listener passes */
         viewer_vehicle = 0; /* first pass: vehicle 0, will increment */
         pan            = -10000;
     }
@@ -1308,11 +1310,11 @@ void td5_sound_play_at_position(int base_slot, int volume, int pitch,
     /* Determine number of viewport passes */
     int num_passes;
     int start_pan;
-    if (g_td5.split_screen_mode == 0) {
+    if (g_td5.viewport_count <= 1) {
         num_passes = 1;
         start_pan  = 0;
     } else {
-        num_passes = 2;
+        num_passes = 2;  /* [PORT] audio capped at 2 listener passes */
         start_pan  = -10000;
     }
 

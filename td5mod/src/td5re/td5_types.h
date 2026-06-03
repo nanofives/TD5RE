@@ -75,9 +75,31 @@
  * ======================================================================== */
 
 #define TD5_ACTOR_STRIDE            0x388   /* 904 bytes per actor */
-#define TD5_MAX_RACER_SLOTS         6
+
+/* ------------------------------------------------------------------------
+ * TD5RE multi-player extension (PORT-ONLY — deliberately NON-faithful).
+ * The original binary is hard-capped at 6 racers and 2 viewports
+ * (RunRaceFrame @0x42B580 has two hand-written passes; IsLocalRaceParticipantSlot
+ * @0x42CBE0 returns slot<2; the mode->count table @0x42C2B0 maxes at 2). None of
+ * this is parameterised in the original, so the port deviates freely: up to 9
+ * local human players in split-screen and up to 16 total racer slots (humans+AI).
+ * Traffic actors follow the racers, so the racer/traffic boundary is now
+ * TD5_TRAFFIC_SLOT_BASE (== TD5_MAX_RACER_SLOTS), NOT a hardcoded 6.
+ * ------------------------------------------------------------------------ */
+#define TD5_MAX_HUMAN_PLAYERS       9       /* up to 9 local split-screen humans */
+#define TD5_MAX_RACER_SLOTS         16      /* humans + AI = total racers */
+#define TD5_MAX_AI_OPPONENTS        (TD5_MAX_RACER_SLOTS - 1)  /* 15 */
 #define TD5_MAX_TRAFFIC_SLOTS       6
-#define TD5_MAX_TOTAL_ACTORS        12      /* 6 racers + 6 traffic */
+#define TD5_MAX_TOTAL_ACTORS        (TD5_MAX_RACER_SLOTS + TD5_MAX_TRAFFIC_SLOTS)  /* 22 */
+#define TD5_TRAFFIC_SLOT_BASE       TD5_MAX_RACER_SLOTS  /* first traffic slot (was hardcoded 6) */
+#define TD5_MAX_VIEWPORTS           9       /* up to 9 split-screen viewports (3x3 grid) */
+#define TD5_LEGACY_RACE_SLOTS       6       /* original max racers; legacy/faithful modes keep this grid */
+
+/* Runtime racer/traffic boundary (port-only). == TD5_LEGACY_RACE_SLOTS (6) for
+ * legacy <=6-racer races so traffic + the slot-9 cop encounter stay byte-faithful;
+ * == TD5_TRAFFIC_SLOT_BASE for >6-racer split-screen fields (traffic/cops forced
+ * off there). Set in InitRace once g_racer_count is known. */
+extern int g_traffic_slot_base;
 
 #define TD5_GEAR_REVERSE            0
 #define TD5_GEAR_NEUTRAL            1

@@ -169,7 +169,7 @@ static int32_t s_dynamics_mode = 0;          /* 0=arcade, 1=simulation (0x42F7B0
 static int32_t g_difficulty_easy = 0;
 static int32_t g_difficulty_hard = 0;
 static int32_t g_total_actor_count = 6;
-static int32_t g_race_slot_state[6];         /* 1=human, 0=AI per slot */
+static int32_t g_race_slot_state[TD5_MAX_RACER_SLOTS]; /* 1=human, 0=AI per slot */
 
 /* ---- Per-slot NPC handicap (rubber-banding by prior championship position) ----
  * Mirrors the original's gSlotRaceResult/Bonus/Points tables at
@@ -190,10 +190,10 @@ static const int32_t s_race_result_points_table[4][3] = {
     /* pos 2           */ {  -40,  307,  -40 },
     /* pos 3 (trailer) */ { -102,  114,    0 },
 };
-static int32_t g_slot_series_position[6] = {0, 0, 0, 0, 0, 0};
-static int32_t g_slot_race_result[6];
-static int32_t g_slot_race_bonus [6];
-static int32_t g_slot_race_points[6];
+static int32_t g_slot_series_position[TD5_MAX_RACER_SLOTS] = {0};
+static int32_t g_slot_race_result[TD5_MAX_RACER_SLOTS];
+static int32_t g_slot_race_bonus [TD5_MAX_RACER_SLOTS];
+static int32_t g_slot_race_points[TD5_MAX_RACER_SLOTS];
 static uint8_t s_prev_grounded_mask[16];     /* per-slot previous-frame grounded bitmask (1=grounded) */
 static void integrate_traffic_pose(TD5_Actor *actor);  /* forward decl */
 static inline void td5_transform_short_vec3_by_render_matrix_rounded(
@@ -918,7 +918,7 @@ void td5_physics_run_paused_engine_step(void)
         /* D5b — AI engine pin: gate on g_selectedGameType != 0 (championship/
          * cup modes only). [RE basis: 0x004068B3-0x004068CB] */
         if (g_game_type != 0 &&
-            actor->slot_index < 6 &&
+            actor->slot_index < g_traffic_slot_base &&
             g_race_slot_state[actor->slot_index] != 1) {
             int32_t redline = (int32_t)PHYS_S(actor, 0x72);
             actor->engine_speed_accum = (redline << 1) / 3;
@@ -929,7 +929,7 @@ void td5_physics_run_paused_engine_step(void)
 
         /* D5d — player path: set scf from cardef[0x76] when engine > 3/4 redline.
          * Listing 0x004068D8-690B (round-toward-zero divide by 4). */
-        if (actor->slot_index < 6 && g_race_slot_state[actor->slot_index] == 1) {
+        if (actor->slot_index < g_traffic_slot_base && g_race_slot_state[actor->slot_index] == 1) {
             int16_t *phys = get_phys(actor);
             if (phys) {
                 int32_t redline = (int32_t)PHYS_S(actor, 0x72);
@@ -962,10 +962,10 @@ void td5_physics_run_paused_traffic_step(void)
     if (!g_actor_table_base) return;
 
     int total = td5_game_get_total_actor_count();
-    if (total <= 6) return;                 /* no traffic active */
+    if (total <= g_traffic_slot_base) return;   /* no traffic active */
     if (total > TD5_MAX_TOTAL_ACTORS) total = TD5_MAX_TOTAL_ACTORS;
 
-    for (int slot = 6; slot < total; ++slot) {
+    for (int slot = g_traffic_slot_base; slot < total; ++slot) {
         TD5_Actor *actor = (TD5_Actor *)(g_actor_table_base + (size_t)slot * TD5_ACTOR_STRIDE);
         if (!actor) continue;
         /* td5_physics_update_vehicle_actor runs traffic friction + pose
@@ -1139,7 +1139,7 @@ void td5_physics_update_vehicle_actor(TD5_Actor *actor)
                       actor->slot_index, actor->airborne_frame_counter,
                       actor->angular_velocity_roll, actor->angular_velocity_pitch);
             td5_physics_state0f_damping(actor);
-        } else if (actor->slot_index < 6 && g_race_slot_state[actor->slot_index] == 1) {
+        } else if (actor->slot_index < g_traffic_slot_base && g_race_slot_state[actor->slot_index] == 1) {
             /* Human player — listing 0x0040685C tests `state == 1` strictly,
              * not `state != 0`. [Audit D13 — tightened 2026-05-14.] */
             td5_physics_update_player(actor);
@@ -1267,7 +1267,7 @@ void td5_physics_update_vehicle_actor(TD5_Actor *actor)
         /* D5b — AI engine pin: gate on g_selectedGameType != 0 (championship/
          * cup modes only). [RE basis: 0x004068B3-0x004068CB] */
         if (g_game_type != 0 &&
-            actor->slot_index < 6 &&
+            actor->slot_index < g_traffic_slot_base &&
             g_race_slot_state[actor->slot_index] != 1) {
             int32_t redline = (int32_t)PHYS_S(actor, 0x72);
             actor->engine_speed_accum = (redline << 1) / 3;
@@ -1285,7 +1285,7 @@ void td5_physics_update_vehicle_actor(TD5_Actor *actor)
          *       cdq; and edx, 3; add eax, edx; sar eax, 2  ; round-toward-zero /4
          *       if (engine_speed_accum > eax) [+0x376] = phys[0x76]
          *   } */
-        if (actor->slot_index < 6 && g_race_slot_state[actor->slot_index] == 1) {
+        if (actor->slot_index < g_traffic_slot_base && g_race_slot_state[actor->slot_index] == 1) {
             int16_t *phys = get_phys(actor);
             if (phys) {
                 int32_t redline = (int32_t)PHYS_S(actor, 0x72);
@@ -10331,7 +10331,7 @@ static void bind_default_vehicle_tuning(TD5_Actor *actor, int slot)
      * should produce Viper-carparam values matching the original.] */
     int is_player_is_ai_slot0 = (slot == 0 && g_td5.ini.player_is_ai);
 
-    if (slot < TD5_MAX_RACER_SLOTS && g_race_slot_state[slot] == 0 &&
+    if (slot < g_traffic_slot_base && g_race_slot_state[slot] == 0 &&
         !is_player_is_ai_slot0 &&
         !(g_td5.drag_race_enabled && slot == 1 && s_carparam_loaded[slot])) {
         uint8_t *ai_tmpl = td5_ai_get_physics_template();
@@ -10642,7 +10642,7 @@ void td5_physics_set_xz_freeze(int freeze)
 
 void td5_physics_set_race_slot_state(int slot, int is_human)
 {
-    if (slot >= 0 && slot < 6) {
+    if (slot >= 0 && slot < TD5_MAX_RACER_SLOTS) {
         g_race_slot_state[slot] = is_human;
         TD5_LOG_I(LOG_TAG, "Slot %d physics mode: %s", slot,
                   is_human ? "player" : "AI");
@@ -10651,7 +10651,7 @@ void td5_physics_set_race_slot_state(int slot, int is_human)
 
 void td5_physics_set_slot_series_position(int slot, int position)
 {
-    if (slot < 0 || slot >= 6) return;
+    if (slot < 0 || slot >= TD5_MAX_RACER_SLOTS) return;
     if (position < 0) position = 0;
     if (position > 3) position = 3;
     g_slot_series_position[slot] = position;
@@ -10659,7 +10659,7 @@ void td5_physics_set_slot_series_position(int slot, int position)
 
 void td5_physics_seed_traffic_cardef_from_player(int traffic_slot)
 {
-    if (traffic_slot < TD5_MAX_RACER_SLOTS || traffic_slot >= TD5_MAX_TOTAL_ACTORS)
+    if (traffic_slot < g_traffic_slot_base || traffic_slot >= TD5_MAX_TOTAL_ACTORS)
         return;
     if (!s_carparam_loaded[0]) {
         TD5_LOG_W(LOG_TAG,
