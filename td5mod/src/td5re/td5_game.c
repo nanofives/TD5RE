@@ -2265,6 +2265,29 @@ int td5_game_init_race_session(void) {
     td5_vfx_init_tracked_actor_marker_billboards();
     TD5_LOG_I(LOG_TAG, "InitRace step 14/19: VFX systems initialized");
 
+    /* ---- Step 14a: Initialize weather overlay particles ----
+     * Orig InitializeWeatherOverlayParticles @ 0x00446240, called from
+     * InitializeRaceSession @ 0x0042b2ec — after the particle/tire/marker init
+     * and immediately before the 2nd traffic fill @ 0x42b2f4 (this position).
+     * The weather type is the int32 at LEVELINF.DAT +0x28: 0=rain, 1=snow,
+     * 2(or >=2)=none [CONFIRMED @ 0x00446245 MOV EAX,[EAX+0x28] + branch logic
+     * @ 0x00446240]. The raw on-disk encoding matches TD5_WeatherType exactly,
+     * so it passes straight through. Snow is a cut feature (init seeds positions
+     * but the render path is gated off — faithful). NULL config (e.g. TD6 ported
+     * tracks with no LEVELINF) -> clear, no weather. */
+    {
+        TD5_WeatherType weather = TD5_WEATHER_CLEAR;
+        if (g_track_environment_config) {
+            int32_t wt;
+            memcpy(&wt, g_track_environment_config + 0x28, sizeof(int32_t));
+            weather = (TD5_WeatherType)wt;
+        }
+        g_td5.weather = weather;
+        td5_vfx_init_weather(weather);
+        TD5_LOG_I(LOG_TAG, "InitRace step 14a: weather init type=%d (0=rain,1=snow,2=none)",
+                  (int)weather);
+    }
+
     /* ---- Step 14b: SECOND traffic fill ----
      * The orig calls InitializeTrafficActorsFromQueue @ 0x00435940 TWICE
      * during race setup [CONFIRMED @ 0x0042aa10 InitializeRaceSession +
@@ -3520,6 +3543,24 @@ int td5_game_run_race_frame(void) {
         /* --- VFX tick (tire tracks, particle lifetimes) --- */
         td5_vfx_tick();
 
+        /* --- Weather density zoning (per active view) ---
+         * Orig UpdateAmbientParticleDensityForSegment @ 0x004464B0, called in
+         * RunRaceFrame's sim phase right after the general particle update
+         * (UpdateRaceParticleEffects), once per view, unrolled @ 0x0042ba3c /
+         * 0x0042ba5e. Walks the LEVELINF density-pair table keyed on the actor's
+         * current span (+0x80) and ramps the active raindrop count +/-1 per
+         * sub-tick toward the per-span target, so rain fades in/out as the
+         * player drives through rain zones. Inside the per-sub-tick loop to
+         * match the original's cadence. */
+        {
+            int wview = g_td5.viewport_count > 0 ? g_td5.viewport_count : 1;
+            if (wview > 2) wview = 2;
+            for (int wv = 0; wv < wview; wv++) {
+                TD5_Actor *wa = td5_game_get_actor(g_actorSlotForView[wv]);
+                if (wa) td5_vfx_update_ambient_density(wa, wv);
+            }
+        }
+
         /* --- Per-actor tire-track emitter dispatch moved to render path ---
          * Original: UpdateTireTrackEmitterDispatch @ 0x43FAE0 has a SINGLE
          * caller — RenderRaceActorForView @ 0x0040C120 (LAB_0040c7ba). Sim
@@ -3760,6 +3801,17 @@ int td5_game_run_race_frame(void) {
         /* VFX: tire tracks, particles */
         td5_vfx_render_tire_tracks();
         td5_vfx_render_tire_marks();
+        /* Weather rain streaks — orig RenderAmbientParticleStreaks @ 0x00446560,
+         * called per view in RunRaceFrame's draw phase AFTER the actors + tire
+         * tracks and BEFORE the general particle draw (order @ 0x0042be9a:
+         * RenderRaceActorsForView -> RenderTireTrackPool -> RenderAmbient-
+         * ParticleStreaks -> DrawRaceParticleEffects). Only rain renders (snow
+         * gated off, faithful). sim_budget = port's normalized per-frame sim
+         * budget (frame_dt*30), the analog of orig (int)g_simTickBudget. */
+        {
+            TD5_Actor *wa = td5_game_get_actor(g_actorSlotForView[vp]);
+            if (wa) td5_vfx_render_ambient_streaks(wa, g_td5.sim_tick_budget, vp);
+        }
         td5_vfx_draw_particles(vp);
         td5_render_flush_translucent();
         td5_render_flush_projected_buckets();
