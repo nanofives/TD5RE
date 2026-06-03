@@ -2533,9 +2533,12 @@ void td5_hud_render_overlays(float dt)
         s_cur_view++;
     }
 
-    /* --- Minimap (single-player only, non-circuit tracks) --- */
+    /* --- Minimap (single-player) ---
+     * Faithful: P2P only (g_track_type_mode == 0). Port enhancement: also call
+     * for circuit tracks when [Game] CircuitMinimap is on (default). The
+     * renderer itself re-checks the knob and picks the circuit ring-walk path. */
     if (g_split_screen_mode == 0 && (*s_hud_flags[0] & TD5_HUD_UTURN_WARNING) &&
-        g_track_type_mode == 0) {
+        (g_track_type_mode == 0 || g_td5.ini.circuit_minimap)) {
         int actor_slot = g_actor_slot_map[0];
         td5_hud_render_minimap(actor_slot);
     }
@@ -2853,10 +2856,102 @@ static int minimap_emit_connector(uint8_t *span_base, uint8_t *vert_base, int sp
     return 1;
 }
 
+/* Emit one minimap PRIMARY road quad spanning [near_idx .. far_idx].
+ * The near edge uses the span record's +0x04 front-vertex (col0 delta) and the
+ * far edge uses +0x06 (col1 delta) — identical geometry to the inline primary
+ * quad built in the P2P road-walk loop below. Factored out so the circuit
+ * ring-walk can reuse the exact same per-span quad build. Returns 1 if a quad
+ * was submitted, 0 if skipped (bad index / degenerate / fully offscreen).
+ * [mirrors the inline build @ td5_hud.c P2P loop; orig 0x0043a220 primary quad]. */
+static int minimap_emit_road_quad(uint8_t *span_base, uint8_t *vert_base,
+                                  int near_idx, int far_idx,
+                                  float offset_x, float offset_z,
+                                  float cos_h, float sin_h,
+                                  float mm_cx, float mm_cy)
+{
+    if (!span_base || !vert_base) return 0;
+    if (near_idx < 0 || far_idx < 0 ||
+        near_idx >= g_strip_span_count || far_idx >= g_strip_span_count) return 0;
+
+    uint8_t *sn = span_base + near_idx * 24;
+    uint8_t *sf = span_base + far_idx  * 24;
+
+    int32_t ox_n = *(int32_t *)(sn + 0x0C);
+    int32_t oz_n = *(int32_t *)(sn + 0x14);
+    int32_t ox_f = *(int32_t *)(sf + 0x0C);
+    int32_t oz_f = *(int32_t *)(sf + 0x14);
+
+    /* NEAR span: base vertex from +0x04, column-0 delta for the right edge. */
+    uint16_t vi_n_l  = *(uint16_t *)(sn + 0x04);
+    uint8_t  type_n  = sn[0];
+    uint8_t  nib_n   = sn[3] & 0x0F;
+    int32_t  col0    = s_minimap_vtx_delta_col0[type_n & 0x07];
+    int32_t  vi_n_r  = (int32_t)vi_n_l + (int32_t)nib_n + col0;
+
+    /* FAR span: base vertex from +0x06, column-1 delta for the right edge. */
+    uint16_t vi_f_l  = *(uint16_t *)(sf + 0x06);
+    uint8_t  type_f  = sf[0];
+    uint8_t  nib_f   = sf[3] & 0x0F;
+    int32_t  col1    = s_minimap_vtx_delta_col1[type_f & 0x07];
+    int32_t  vi_f_r  = (int32_t)vi_f_l + (int32_t)nib_f + col1;
+
+    if (vi_n_r < 0 || vi_f_r < 0) return 0;
+
+    int16_t *vn_l = (int16_t *)(vert_base + (uint32_t)vi_n_l * 6);
+    int16_t *vn_r = (int16_t *)(vert_base + (uint32_t)vi_n_r * 6);
+    int16_t *vf_l = (int16_t *)(vert_base + (uint32_t)vi_f_l * 6);
+    int16_t *vf_r = (int16_t *)(vert_base + (uint32_t)vi_f_r * 6);
+
+    float wx_fl = (float)((int)vn_l[0] + ox_n) + offset_x;
+    float wz_fl = (float)((int)vn_l[2] + oz_n) + offset_z;
+    float wx_fr = (float)((int)vn_r[0] + ox_n) + offset_x;
+    float wz_fr = (float)((int)vn_r[2] + oz_n) + offset_z;
+    float wx_bl = (float)((int)vf_l[0] + ox_f) + offset_x;
+    float wz_bl = (float)((int)vf_l[2] + oz_f) + offset_z;
+    float wx_br = (float)((int)vf_r[0] + ox_f) + offset_x;
+    float wz_br = (float)((int)vf_r[2] + oz_f) + offset_z;
+
+    float fl_x = mm_cx + (wx_fl * cos_h + wz_fl * sin_h) * s_minimap_world_scale_x;
+    float fl_y = mm_cy + (wz_fl * cos_h - wx_fl * sin_h) * s_minimap_world_scale_y;
+    float fr_x = mm_cx + (wx_fr * cos_h + wz_fr * sin_h) * s_minimap_world_scale_x;
+    float fr_y = mm_cy + (wz_fr * cos_h - wx_fr * sin_h) * s_minimap_world_scale_y;
+    float bl_x = mm_cx + (wx_bl * cos_h + wz_bl * sin_h) * s_minimap_world_scale_x;
+    float bl_y = mm_cy + (wz_bl * cos_h - wx_bl * sin_h) * s_minimap_world_scale_y;
+    float br_x = mm_cx + (wx_br * cos_h + wz_br * sin_h) * s_minimap_world_scale_x;
+    float br_y = mm_cy + (wz_br * cos_h - wx_br * sin_h) * s_minimap_world_scale_y;
+
+    float mm_l = s_minimap_x, mm_t = s_minimap_y;
+    float mm_r = s_minimap_x + s_minimap_width, mm_b = s_minimap_y + s_minimap_height;
+    float min_x = fl_x, max_x = fl_x, min_y = fl_y, max_y = fl_y;
+    if (fr_x < min_x) min_x = fr_x; if (fr_x > max_x) max_x = fr_x;
+    if (bl_x < min_x) min_x = bl_x; if (bl_x > max_x) max_x = bl_x;
+    if (br_x < min_x) min_x = br_x; if (br_x > max_x) max_x = br_x;
+    if (fr_y < min_y) min_y = fr_y; if (fr_y > max_y) max_y = fr_y;
+    if (bl_y < min_y) min_y = bl_y; if (bl_y > max_y) max_y = bl_y;
+    if (br_y < min_y) min_y = br_y; if (br_y > max_y) max_y = br_y;
+    if (max_x < mm_l || min_x > mm_r || max_y < mm_t || min_y > mm_b) return 0;
+
+    /* TL=front-left, BL=back-left, BR=back-right, TR=front-right */
+    TD5_SpriteQuad q;
+    hud_build_quad_warped(&q, HUD_WHITE_TEX_PAGE,
+        fl_x, fl_y, bl_x, bl_y, br_x, br_y, fr_x, fr_y,
+        0.0f, 0.0f, 0.0f, 0.0f, 0xFF9A9A9A, HUD_DEPTH);
+    hud_submit_quad(&q);
+    return 1;
+}
+
 void td5_hud_render_minimap(int actor_slot)
 {
-    /* Only for point-to-point tracks */
-    if (g_track_is_circuit != 0) return;
+    /* Faithful: the original disabled the whole minimap on circuit tracks via an
+     * early-return on gTrackIsCircuit @ 0x0043A231 (the dead circuit-aware code
+     * inside RenderTrackMinimapOverlay shows the wrap behaviour the devs intended
+     * but never shipped). Port enhancement: re-enable it behind the [Game]
+     * CircuitMinimap knob (default on). Knob off → restore the faithful "no
+     * minimap on circuits" behaviour. The road-walk below branches on `circuit`;
+     * everything else (background tiles, racer/traffic dots) is shared and the
+     * dot loops already handle the circuit modulo-wrap span window. */
+    int circuit = (g_track_is_circuit != 0);
+    if (circuit && !g_td5.ini.circuit_minimap) return;
 
     /* Set minimap clip rect */
     td5_render_set_clip_rect(
@@ -2910,8 +3005,16 @@ void td5_hud_render_minimap(int actor_slot)
      * behind when the car moves many spans per frame, leaving player_span
      * pointing at a stale region.  If the span origin is too far from the
      * actor, do a brute-force nearest-span search so the minimap stays
-     * centred on the car. */
-    {
+     * centred on the car.
+     *
+     * P2P only: the test compares the actor position to the span ORIGIN
+     * (+0x0C/+0x14), which on some circuit tracks (e.g. Maui) sits far from the
+     * road centerline, so it misfires every frame — the search returns the same
+     * span (a no-op that spams the log + rescans the whole strip, and could even
+     * mis-recenter to a coincidentally-close origin). The circuit ring-walk
+     * below centres via `player_span % ring`, which tolerates a slightly-stale
+     * tracker, so skip this P2P-tuned heuristic on circuits. */
+    if (!circuit) {
         int32_t px = actor_world_x(actor_slot) >> 8; /* 24.8 FP → world units */
         int32_t pz = actor_world_z(actor_slot) >> 8;
         uint8_t *sb = (uint8_t *)g_strip_span_base;
@@ -3009,7 +3112,10 @@ void td5_hud_render_minimap(int actor_slot)
         if (cur_seg < 0) cur_seg = 0;
     }
 
-    for (int i = 0; span_base && vert_base && i < 0x30; i++) {
+    /* `!circuit`: the P2P segment-walk is skipped entirely on circuit tracks —
+     * the circuit ring-walk below replaces it. The branch-remap / start_span /
+     * cur_seg setup above is computed but unused when circuit (harmless). */
+    for (int i = 0; !circuit && span_base && vert_base && i < 0x30; i++) {
         /* Pre-iter segment advance [CONFIRMED @ 0x43A426]:
          * while (seg_end[cur_seg] < local_a4) cur_seg++ */
         while (cur_seg + 1 < s_minimap_seg_branch_start &&
@@ -3310,6 +3416,80 @@ void td5_hud_render_minimap(int actor_slot)
                       (int)s_minimap_seg_branch_start,
                       (int)s_minimap_seg_primary_end - (int)s_minimap_seg_branch_start,
                       g_strip_span_count);
+        }
+    }
+
+    /* --- Circuit road walk (port enhancement; orig early-returned) ---
+     * Re-enables the minimap road geometry for circuit tracks. The MAIN LOOP is
+     * drawn by a player-centred ring walk modelled on the main track render's
+     * circuit entry walk (td5_render.c circuit branch; td5_track_get_ring_length)
+     * — "the same logic as the tracks, in the minimap's format". Same 48-quad /
+     * ±144-span window and the same per-span quad geometry as the P2P path
+     * (minimap_emit_road_quad), but the span index wraps modulo the ring so the
+     * road stays continuous across the start/finish seam — fixing the limitation
+     * the original avoided by simply not drawing the minimap on circuits (whose
+     * dead code reset the index to 0 at the seam instead of true-wrapping).
+     * BRANCH / FORK roads are then drawn from the appended branch-mirror rows of
+     * the segment table (built by the init for every track; branch spans live in
+     * [ring, total_spans)), so forks show up the same as on P2P tracks. */
+    if (circuit) {
+        int ring = g_td5.track_span_ring_length;
+        if (ring <= 0) ring = g_strip_span_count;
+        int circuit_rendered = 0;
+        int circuit_branches  = 0;
+        if (ring > 0 && span_base && vert_base) {
+            int center = (int)player_span % ring;
+            if (center < 0) center += ring;
+            /* start_span = ((player_span/24) - 6) * 24 — 144 spans behind the
+             * player, same formula as the P2P path [orig @ 0x43A372-0x43A3B7]. */
+            int start = (center / 24 - 6) * 24;
+            for (int i = 0; i < 0x30; i++) {            /* 48 quads (orig while < 0x30) */
+                int near_raw = start + i * 6;           /* advance ~6 spans / quad */
+                if (near_raw - start >= ring) break;    /* covered a full lap; stop */
+                int far_raw  = near_raw + 5;
+                /* True modulo wrap into [0, ring). The ring closes (span ring-1
+                 * ≈ span 0) so a quad bridging the seam is geometrically valid. */
+                int near_idx = ((near_raw % ring) + ring) % ring;
+                int far_idx  = ((far_raw  % ring) + ring) % ring;
+                if (minimap_emit_road_quad(span_base, vert_base, near_idx, far_idx,
+                                           offset_x, offset_z, cos_h, sin_h,
+                                           mm_cx, mm_cy))
+                    circuit_rendered++;
+            }
+
+            /* Branch / fork roads. The init appends one segment row per branch
+             * link [s_minimap_seg_branch_start .. s_minimap_seg_primary_end):
+             * seg_start = branch's first span, seg_end = branch's last span (both
+             * in the [ring, total_spans) branch region). Walk each range and draw
+             * it at its OWN world position (each branch span carries its origin +
+             * vertices). The window AABB cull inside minimap_emit_road_quad keeps
+             * only the branch quads near the player, matching the windowed view.
+             * No overlap with the ring walk above (which stays in [0, ring)). */
+            for (int bi = s_minimap_seg_branch_start;
+                 bi < s_minimap_seg_primary_end; bi++) {
+                int bstart = (int)s_minimap_seg_start[bi];
+                int bend   = (int)s_minimap_seg_end[bi];
+                if (bend <= bstart) continue;
+                for (int bs = bstart; bs <= bend; bs += 6) {
+                    int bf = bs + 5;
+                    if (bf > bend) bf = bend;
+                    if (minimap_emit_road_quad(span_base, vert_base, bs, bf,
+                                               offset_x, offset_z, cos_h, sin_h,
+                                               mm_cx, mm_cy)) {
+                        circuit_rendered++;
+                        circuit_branches++;
+                    }
+                }
+            }
+        }
+        {
+            static int s_mm_circuit_log = 0;
+            if ((s_mm_circuit_log++ % 60) == 0) {
+                TD5_LOG_I(LOG_TAG, "minimap circuit: span=%d ring=%d rendered=%d (branch=%d) branch_rows=%d span_count=%d",
+                          (int)player_span, ring, circuit_rendered, circuit_branches,
+                          (int)s_minimap_seg_primary_end - (int)s_minimap_seg_branch_start,
+                          g_strip_span_count);
+            }
         }
     }
 

@@ -240,6 +240,7 @@ typedef struct TD5_GlobalState {
         int  default_track;
         int  default_game_type;
         int  default_opponents;   /* AutoRace AI-opponent count override; -1 = full grid (5) */
+        int  circuit_minimap;     /* 1 = draw the in-race minimap on circuit tracks too (port enhancement; orig disabled it). 0 = faithful (no minimap on circuits) */
         int  skip_intro;
         int  debug_overlay;
         int  debug_collisions;   /* 1 = draw wireframe of track wall/span geometry */
