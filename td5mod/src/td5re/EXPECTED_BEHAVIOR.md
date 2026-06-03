@@ -21,7 +21,7 @@ Use this to validate each subsystem during testing.
 | Startup Init [28] | One-shot: load config, enumerate devices, set defaults | Same | frontend: "StartupInit" |
 | Localization [0] | Detect language from regional INI | Same, default English | frontend: "LocalizationInit" |
 | Main Menu [5] | 7 items, highlight cycling, background image | Same | frontend: screen=5 |
-| Quick Race [7] | Car/track selection launchers | Same | frontend: screen=7 |
+| Quick Race [7] | Car/track selection launchers | **Port-enhanced**: Car/Track/Direction/Players/Opponents selectors, no Drag Strip (see QUICKRACE_PLAYER_SETUP.md) | frontend: screen=7 |
 | Car Selection [20] | 3D preview, spin animation, lock/unlock, stats | Same | frontend: screen=20 |
 | Track Selection [21] | Preview images, lock status | Same | frontend: screen=21 |
 | Options Hub [12] | 5 sub-categories | Same | frontend: screen=12 |
@@ -36,7 +36,7 @@ Use this to validate each subsystem during testing.
 | 3. Config apply | Apply selected display mode | Same | td5_game: "Step 3" |
 | 4-6. Asset loading | Level ZIP, strip data, routes, textures | Same | asset: "Loading..." |
 | 7-8. Vehicle loading | himodel.dat + carparam.dat per slot | Same | asset: "Vehicle loaded" |
-| 9. Actor spawn | 6 racers on grid + 6 traffic | 6 racers (staggered spans) + 6 traffic | td5_game: "Spawning actor" |
+| 9. Actor spawn | 6 racers on grid + 6 traffic | `humans+opponents` racers (default 6; Quick Race configurable, see QUICKRACE_PLAYER_SETUP.md) + 6 traffic | td5_game: "spawning N racers" |
 | 10. Physics init | Per-actor physics state, gravity, tuning | Same | physics: "init_vehicle_runtime" |
 | 11. AI init | Route data, rubber band params, tier config | Same | ai: "init_race_actor" |
 | 12. Input recording | Open replay.td5 for write | Same | input: "write_open" |
@@ -160,3 +160,21 @@ the port rule, and the acceptance criteria.
 - **Related memory**: `reference_wall_response_asym_damping.md` (note: the
   earlier "no clamp on v_para<=0" reading was incorrect; the original does
   hard-zero on pos-flip — see Ghidra re-verify 2026-05-02).
+
+### Quick Race configurable Players + Opponents (and `DefaultOpponents` debug knob)
+
+- **Files**: `td5_frontend.c` (`Screen_QuickRaceMenu`, `frontend_init_race_schedule`),
+  `td5_game.c` (`InitRace`), `td5_ai.c` (`td5_ai_init_race_actor_runtime`).
+- **Original**: Quick Race `0x4213D0` is Car / Track / OK / Back only and always
+  runs a fixed 6-car field (slot 0 + 5 AI).
+- **Port rule**: the Quick Race screen adds **Players (1–6)** and **Opponents
+  (0–5)** selectors (sum ≤ 6); a Forwards/Backwards direction toggle; and drops
+  the Drag Strip from the track cycler. Dropped opponents are not spawned, not
+  AI-driven, and not rendered. Effective human-driven slots are capped at 2 (the
+  engine has only single + 2 split-screen layouts); >2 humans run as AI until
+  N-way split lands. Default `1+5=6` is byte-identical to the original grid.
+- **Debug knob**: `[Game] DefaultOpponents=N` / `--DefaultOpponents=N` (`-1` =
+  full grid) forces the AI-opponent count for AutoRace without the menu — a dev
+  tool for isolating one AI or building minimal repros. Release builds force `-1`.
+- **Full reference + the two-slot-state-table gotcha**: see
+  `QUICKRACE_PLAYER_SETUP.md` (same dir).
