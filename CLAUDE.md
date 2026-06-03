@@ -72,7 +72,7 @@ ZLIB_LIB="../../deps/mingw/mingw32/i686-w64-mingw32/lib"
 | `td5_frontend_button_cache.c` | CPU-baked 224×64 main-menu button surfaces (Phase 6 parity) |
 | `td5_hud.c` | Speedometer, minimap, timers, text overlay |
 | `td5_asset.c` | ZIP archive, TGA decode, mesh prepare |
-| `td5_save.c` | Config.td5, CupData.td5, XOR encryption |
+| `td5_save.c` | Organized INI config (td5re_input/progress/cup.ini); one-time import of legacy Config.td5/CupData.td5 |
 | `td5_sound.c` | DXSound wrapper, vehicle audio, ambient, CD |
 | `td5_input.c` | Polling, controller config, force feedback |
 | `td5_net.c` | DirectPlay lockstep, DXPTYPE protocol |

@@ -958,6 +958,86 @@ int td5_plat_file_delete(const char *path)
     return DeleteFileA(path) ? 0 : -1;
 }
 
+int td5_plat_file_rename(const char *from, const char *to)
+{
+    if (!from || !to) return -1;
+    /* MOVEFILE_REPLACE_EXISTING so a stale .migrated backup doesn't block it. */
+    return MoveFileExA(from, to, MOVEFILE_REPLACE_EXISTING) ? 0 : -1;
+}
+
+/* ========================================================================
+ * Human-readable INI config (Config.td5/CupData.td5 retirement)
+ * ======================================================================== */
+
+void td5_plat_ini_resolve_path(const char *filename, char *out, size_t out_n)
+{
+    if (!out || out_n == 0) return;
+    out[0] = '\0';
+    if (!filename) return;
+
+    DWORD n = GetModuleFileNameA(NULL, out, (DWORD)out_n);
+    if (n > 0 && n < out_n) {
+        char *sl = out + n;
+        while (sl > out && *sl != '\\' && *sl != '/') sl--;
+        if (sl > out) {
+            sl[1] = '\0';
+        } else {
+            out[0] = '\0';
+        }
+        /* Append filename if it still fits. */
+        if (strlen(out) + strlen(filename) + 1 <= out_n) {
+            strcat(out, filename);
+            return;
+        }
+    }
+    /* Fallback: bare filename (cwd-relative). */
+    strncpy(out, filename, out_n - 1);
+    out[out_n - 1] = '\0';
+}
+
+int td5_plat_ini_get_int(const char *file, const char *section,
+                         const char *key, int fallback)
+{
+    if (!file || !section || !key) return fallback;
+    return (int)GetPrivateProfileIntA(section, key, fallback, file);
+}
+
+int td5_plat_ini_get_str(const char *file, const char *section,
+                         const char *key, const char *fallback,
+                         char *out, size_t out_n)
+{
+    if (!out || out_n == 0) return 0;
+    if (!file || !section || !key) { out[0] = '\0'; return 0; }
+    DWORD n = GetPrivateProfileStringA(section, key,
+                                       fallback ? fallback : "",
+                                       out, (DWORD)out_n, file);
+    return (int)n;
+}
+
+void td5_plat_ini_set_int(const char *file, const char *section,
+                          const char *key, int value)
+{
+    char buf[16];
+    if (!file || !section || !key) return;
+    snprintf(buf, sizeof(buf), "%d", value);
+    WritePrivateProfileStringA(section, key, buf, file);
+}
+
+void td5_plat_ini_set_str(const char *file, const char *section,
+                          const char *key, const char *value)
+{
+    if (!file || !section || !key) return;
+    WritePrivateProfileStringA(section, key, value ? value : "", file);
+}
+
+void td5_plat_ini_flush(const char *file)
+{
+    /* Passing NULL section/key/value flushes the cached profile so the next
+     * Get* call re-reads the on-disk file we just rewrote via raw I/O. */
+    if (!file) return;
+    WritePrivateProfileStringA(NULL, NULL, NULL, file);
+}
+
 /* ========================================================================
  * Memory
  * ======================================================================== */

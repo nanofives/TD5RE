@@ -17,6 +17,8 @@
 #include "td5_game.h"
 #include <string.h>
 #include <stdio.h>  /* remove() in td5_save_test_cup_roundtrip */
+#include <stdarg.h> /* vsnprintf in the INI text builder */
+#include <stdlib.h> /* strtol when parsing comma-separated INI lists */
 
 #define LOG_TAG "save"
 
@@ -39,6 +41,40 @@
 
 /** CupData.td5 file name used by the original binary. */
 #define TD5_CUPDATA_FILENAME        "CupData.td5"
+
+/* ------------------------------------------------------------------------
+ * Organized human-readable INI files that REPLACE the binary Config.td5 /
+ * CupData.td5 (user request 2026-06-03). Settings live in td5re.ini; the
+ * three files below hold the data that does not belong in the launch-config
+ * INI:
+ *   td5re_input.ini     -- controller + keyboard bindings, device/FF config
+ *   td5re_progress.ini  -- high-score table, unlock/cheat/progression state
+ *   td5re_cup.ini       -- "Continue Cup" resume state (no actor snapshot)
+ * On first launch any existing legacy Config.td5 / CupData.td5 is imported
+ * once, then renamed to *.migrated so it is never read again.
+ * ------------------------------------------------------------------------ */
+#define TD5RE_INPUT_INI             "td5re_input.ini"
+#define TD5RE_PROGRESS_INI          "td5re_progress.ini"
+#define TD5RE_CUP_INI               "td5re_cup.ini"
+#define TD5_CONFIG_MIGRATED         "Config.td5.migrated"
+#define TD5_CUPDATA_MIGRATED        "CupData.td5.migrated"
+
+/** Max resolved-path length for the exe-relative INI files. */
+#define TD5_CFGINI_PATH_MAX         600
+
+/* Forward declarations for the INI persistence layer (defined after the
+ * module statics, since they read/write them directly). */
+static const char *cfgini_input_path(void);
+static const char *cfgini_progress_path(void);
+static const char *cfgini_cup_path(void);
+static int  cfgini_write_input(void);
+static int  cfgini_read_input(void);
+static int  cfgini_write_progress(void);
+static int  cfgini_read_progress(void);
+static int  cfgini_write_cup(const char *path);
+static int  cfgini_read_cup(const char *path);
+static int  cup_load_binary_file(const char *path);   /* legacy CupData.td5 reader */
+static int  cup_is_binary_valid(const char *path);    /* legacy CRC self-check */
 
 /* ========================================================================
  * Config.td5 buffer layout (5351 bytes)
@@ -574,11 +610,42 @@ int td5_save_init(void)
     for (i = 20; i < TD5_CONFIG_NUM_TRACKS; i++)
         s_track_locks[i] = 0;  /* 0 = locked (cup tracks) */
 
-    /* Try to load Config.td5 from the working directory (original/).
-     * If the file doesn't exist or has a bad CRC the defaults above stay. */
-    td5_save_load_config(NULL);
+    /* Persistent settings/bindings/progress used to live in the binary
+     * Config.td5. They now live in organized human-readable INI files.
+     *   - If td5re_input.ini + td5re_progress.ini exist: read them.
+     *   - Else if a legacy Config.td5 exists: import it once (XOR/CRC decode),
+     *     write the new INIs, and rename the binary to Config.td5.migrated.
+     *   - Else (fresh install): write the new INIs from the defaults above so
+     *     the user immediately has editable files. */
+    {
+        int have_input    = td5_plat_file_exists(cfgini_input_path());
+        int have_progress = td5_plat_file_exists(cfgini_progress_path());
 
-    /* Force-unlock all cars and race tracks regardless of Config.td5 contents.
+        if (have_input && have_progress) {
+            cfgini_read_input();
+            cfgini_read_progress();
+        } else if (td5_plat_file_exists(TD5_CONFIG_FILENAME)
+                   && td5_save_load_config(NULL)) {
+            /* Legacy binary decoded into the statics -> emit the new files. */
+            cfgini_write_input();
+            cfgini_write_progress();
+            td5_plat_file_rename(TD5_CONFIG_FILENAME, TD5_CONFIG_MIGRATED);
+            TD5_LOG_I(LOG_TAG,
+                      "migrated Config.td5 -> %s + %s (renamed legacy to %s)",
+                      TD5RE_INPUT_INI, TD5RE_PROGRESS_INI, TD5_CONFIG_MIGRATED);
+        } else {
+            /* Fresh install: seed the INI files from defaults. If only one of
+             * the two existed, read the present one first so we don't lose it. */
+            if (have_input)    cfgini_read_input();
+            if (have_progress) cfgini_read_progress();
+            cfgini_write_input();
+            cfgini_write_progress();
+            TD5_LOG_I(LOG_TAG, "seeded %s + %s from defaults",
+                      TD5RE_INPUT_INI, TD5RE_PROGRESS_INI);
+        }
+    }
+
+    /* Force-unlock all cars and race tracks regardless of saved contents.
      * Cup tracks (20-25) remain locked -- they require cup wins. */
     s_max_unlocked_car = TD5_CONFIG_NUM_CARS;
     s_all_cars_unlocked = 1;
@@ -671,6 +738,10 @@ static inline void write_le16(uint8_t *p, uint16_t v)
  * Returns 1 on success, 0 on failure.
  * ======================================================================== */
 
+/* Retained for reference / potential debug export. The live write path now
+ * targets the organized INI files (see td5_save_write_config), so this is no
+ * longer reached at runtime -- hence the unused attribute to keep -Wextra quiet. */
+static void config_serialize_to_buffer(void) __attribute__((unused));
 static void config_serialize_to_buffer(void)
 {
     TD5_ConfigBuffer *buf = (TD5_ConfigBuffer *)s_config_buf;
@@ -740,35 +811,17 @@ static void config_serialize_to_buffer(void)
 
 int td5_save_write_config(const char *path)
 {
-    const char *filepath = path ? path : TD5_CONFIG_FILENAME;
-    TD5_ConfigBuffer *buf = (TD5_ConfigBuffer *)s_config_buf;
-    int ok;
-
-    /* Step 1: Serialize all fields into the buffer. */
-    config_serialize_to_buffer();
-
-    /* Step 2: Set CRC placeholder, compute CRC-32 over entire buffer. */
-    buf->crc32 = TD5_CRC_PLACEHOLDER;
-    uint32_t crc = td5_save_crc32(s_config_buf, TD5_CONFIG_FILE_SIZE);
-    buf->crc32 = crc;
-
-    /* Step 3: XOR-encrypt the entire buffer in-place. */
-    td5_save_xor_encrypt(s_config_buf, TD5_CONFIG_FILE_SIZE, TD5_CONFIG_XOR_KEY);
-
-    /* Step 4: Write to file. */
-    TD5_File *f = td5_plat_file_open(filepath, "wb");
-    if (!f) {
-        TD5_LOG_W(LOG_TAG, "Write config failed: path=%s crc=0x%08X size=%u",
-                  filepath, (unsigned int)crc, (unsigned int)TD5_CONFIG_FILE_SIZE);
-        return 0;
-    }
-    size_t written = td5_plat_file_write(f, s_config_buf, TD5_CONFIG_FILE_SIZE);
-    td5_plat_file_close(f);
-
-    ok = (written == TD5_CONFIG_FILE_SIZE) ? 1 : 0;
-    TD5_LOG_I(LOG_TAG, "Write config %s: path=%s crc=0x%08X size=%u",
-              ok ? "ok" : "failed", filepath, (unsigned int)crc, (unsigned int)written);
-    return ok;
+    /* Config.td5 retired (2026-06-03): persist the live bindings + high-score /
+     * unlock / cheat state to the organized human-readable INI files instead.
+     * The `path` argument (historically a Config.td5 filename) is ignored;
+     * every existing caller just means "persist the current save state". */
+    (void)path;
+    int ok_in = cfgini_write_input();
+    int ok_pr = cfgini_write_progress();
+    TD5_LOG_I(LOG_TAG, "Write config -> %s(%s) + %s(%s)",
+              TD5RE_INPUT_INI,    ok_in ? "ok" : "fail",
+              TD5RE_PROGRESS_INI, ok_pr ? "ok" : "fail");
+    return (ok_in && ok_pr) ? 1 : 0;
 }
 
 /* ========================================================================
@@ -916,6 +969,10 @@ int td5_save_load_config(const char *path)
  *   placeholder dance). Legacy files (size == 0x32A6) still load via
  *   the symmetric reader path. */
 
+/* Retained for reference; the live cup write path now targets td5re_cup.ini
+ * (see td5_save_write_cup_data -> cfgini_write_cup), so this binary serializer
+ * is no longer reached at runtime. */
+static void cup_serialize_to_buffer(void) __attribute__((unused));
 static void cup_serialize_to_buffer(void)
 {
     uint8_t *buf = s_cup_buf;
@@ -1228,53 +1285,31 @@ static int cup_deserialize_from_buffer(void)
 
 int td5_save_write_cup_data(const char *path)
 {
-    const char *filepath = path ? path : TD5_CUPDATA_FILENAME;
-    int ok;
-
-    /* Step 1: Serialize the cup state into the snapshot buffer. */
-    cup_serialize_to_buffer();
-
-    if (s_cup_buf_size == 0) {
-        TD5_LOG_W(LOG_TAG, "Write cup data failed: path=%s reason=empty", filepath);
-        return 0;
-    }
-
-    /* Step 2: Make an encrypted copy (original uses stack alloca).
-     * Sized for the TD5RE extended format (12998 B); covers original
-     * 12966-byte legacy too. */
-    uint8_t enc_buf[TD5_CUPDATA_EXT_FILE_SIZE];
-    memcpy(enc_buf, s_cup_buf, s_cup_buf_size);
-    td5_save_xor_encrypt(enc_buf, s_cup_buf_size, TD5_CUPDATA_XOR_KEY);
-
-    /* Step 3: Write to file. */
-    TD5_File *f = td5_plat_file_open(filepath, "wb");
-    if (!f) {
-        TD5_LOG_W(LOG_TAG, "Write cup data failed: path=%s reason=open", filepath);
-        return 0;
-    }
-    size_t written = td5_plat_file_write(f, enc_buf, s_cup_buf_size);
-    td5_plat_file_close(f);
-
-    ok = (written == s_cup_buf_size) ? 1 : 0;
-    TD5_LOG_I(LOG_TAG, "Write cup data %s: path=%s size=%u",
-              ok ? "ok" : "failed", filepath, (unsigned int)written);
+    /* CupData.td5 retired (2026-06-03): write the human-readable cup resume
+     * state to td5re_cup.ini (no per-actor physics snapshot). The caller has
+     * already run td5_save_sync_cup_from_game() to populate the cup statics.
+     * A non-NULL path is honoured as an alternate INI target (used by the
+     * dev-only roundtrip self-test). */
+    int ok = cfgini_write_cup(path ? path : cfgini_cup_path());
+    TD5_LOG_I(LOG_TAG, "Write cup data %s -> %s",
+              ok ? "ok" : "failed", path ? path : TD5RE_CUP_INI);
     return ok;
 }
 
 /* ========================================================================
  * LoadContinueCupData  (original VA 0x411590)
  *
- * Reads CupData.td5, XOR-decrypts into the snapshot buffer, then calls
- * RestoreRaceStatusSnapshot to validate CRC and restore globals.
- * Returns 1 on success, 0 on failure.
+ * Legacy binary reader, retained ONLY for one-time migration of an existing
+ * CupData.td5: read + XOR-decrypt into the snapshot buffer + CRC-validate +
+ * restore the cup statics (does NOT touch g_td5 / the actor table -- that is
+ * td5_save_sync_cup_to_game's job).
  * ======================================================================== */
 
-int td5_save_load_cup_data(const char *path)
+static int cup_load_binary_file(const char *path)
 {
     const char *filepath = path ? path : TD5_CUPDATA_FILENAME;
     int ok;
 
-    /* Step 1: Open and read the file into a temporary stack buffer. */
     TD5_File *f = td5_plat_file_open(filepath, "rb");
     if (!f) {
         TD5_LOG_W(LOG_TAG, "Load cup data failed: path=%s reason=open", filepath);
@@ -1290,19 +1325,39 @@ int td5_save_load_cup_data(const char *path)
         return 0;
     }
 
-    /* Step 2: XOR-decrypt into the snapshot buffer. */
     for (size_t i = 0; i < bytes_read; i++) {
         s_cup_buf[i] = read_buf[i];
     }
     td5_save_xor_decrypt(s_cup_buf, bytes_read, TD5_CUPDATA_XOR_KEY);
-
-    /* Step 3: Store byte count. */
     s_cup_buf_size = (uint32_t)bytes_read;
 
-    /* Step 4: Validate CRC and restore globals. */
     ok = cup_deserialize_from_buffer();
-    TD5_LOG_I(LOG_TAG, "Load cup data %s: path=%s size=%u",
+    TD5_LOG_I(LOG_TAG, "Load legacy cup data %s: path=%s size=%u",
               ok ? "ok" : "failed", filepath, (unsigned int)bytes_read);
+    return ok;
+}
+
+int td5_save_load_cup_data(const char *path)
+{
+    /* New path: read td5re_cup.ini into the cup statics. If it's absent but a
+     * legacy CupData.td5 exists, import it once (binary decode -> cup INI ->
+     * rename binary to .migrated), then read the new INI. A non-NULL path is
+     * treated as an explicit INI target (dev-only roundtrip self-test). */
+    const char *cup_ini = path ? path : cfgini_cup_path();
+
+    if (!path && !td5_plat_file_exists(cup_ini)
+        && td5_plat_file_exists(TD5_CUPDATA_FILENAME)) {
+        if (cup_load_binary_file(NULL)) {
+            cfgini_write_cup(cup_ini);
+            td5_plat_file_rename(TD5_CUPDATA_FILENAME, TD5_CUPDATA_MIGRATED);
+            TD5_LOG_I(LOG_TAG, "migrated CupData.td5 -> %s (renamed legacy to %s)",
+                      TD5RE_CUP_INI, TD5_CUPDATA_MIGRATED);
+        }
+    }
+
+    int ok = cfgini_read_cup(cup_ini);
+    TD5_LOG_I(LOG_TAG, "Load cup data %s -> %s",
+              ok ? "ok" : "failed", cup_ini);
     return ok;
 }
 
@@ -1455,7 +1510,9 @@ int td5_save_sync_cup_to_game(int *out_race_within_series)
     return (int)s_selected_game_type;
 }
 
-int td5_save_is_cup_valid(const char *path)
+/* Legacy CupData.td5 integrity self-check (open -> decrypt -> CRC at +0x0C).
+ * Used only to decide whether a not-yet-migrated binary cup save is offerable. */
+static int cup_is_binary_valid(const char *path)
 {
     const char *filepath = path ? path : TD5_CUPDATA_FILENAME;
 
@@ -1480,10 +1537,441 @@ int td5_save_is_cup_valid(const char *path)
     write_le32(read_buf + 0x0C, TD5_CRC_PLACEHOLDER);
     uint32_t computed_crc = td5_save_crc32(read_buf, bytes_read);
 
-    TD5_LOG_I(LOG_TAG, "is_cup_valid: path=%s stored=0x%08X computed=0x%08X match=%d",
-              filepath, stored_crc, computed_crc, stored_crc == computed_crc);
-
     return (stored_crc == computed_crc) ? 1 : 0;
+}
+
+int td5_save_is_cup_valid(const char *path)
+{
+    /* A continuable cup exists if either the new td5re_cup.ini parses with a
+     * valid game type, or a (not-yet-migrated) legacy CupData.td5 is intact. */
+    const char *cup_ini = path ? path : cfgini_cup_path();
+
+    if (td5_plat_file_exists(cup_ini)) {
+        int gt = td5_plat_ini_get_int(cup_ini, "Cup", "GameType", 0);
+        if (gt > 0) {
+            TD5_LOG_I(LOG_TAG, "is_cup_valid: %s game_type=%d -> valid", cup_ini, gt);
+            return 1;
+        }
+    }
+    if (!path && cup_is_binary_valid(NULL)) {
+        TD5_LOG_I(LOG_TAG, "is_cup_valid: legacy CupData.td5 intact -> valid (will migrate)");
+        return 1;
+    }
+    return 0;
+}
+
+/* ========================================================================
+ * Organized human-readable INI persistence (Config.td5 / CupData.td5 retired)
+ *
+ * Settings continue to live in td5re.ini (read by main.c). The data that
+ * used to be locked inside the encrypted binaries is written here as plain,
+ * editable INI:
+ *   td5re_input.ini     -- bindings + device/FF config
+ *   td5re_progress.ini  -- high-score table + unlock/cheat/progression state
+ *   td5re_cup.ini       -- "Continue Cup" resume state (no actor snapshot)
+ * Files are written in one shot via raw I/O (so we control formatting and
+ * comments) and read back through the Win32 profile API.
+ * ======================================================================== */
+
+/* --- exe-relative path caches --- */
+static const char *cfgini_input_path(void)
+{
+    static char p[TD5_CFGINI_PATH_MAX]; static int done = 0;
+    if (!done) { td5_plat_ini_resolve_path(TD5RE_INPUT_INI, p, sizeof p); done = 1; }
+    return p;
+}
+static const char *cfgini_progress_path(void)
+{
+    static char p[TD5_CFGINI_PATH_MAX]; static int done = 0;
+    if (!done) { td5_plat_ini_resolve_path(TD5RE_PROGRESS_INI, p, sizeof p); done = 1; }
+    return p;
+}
+static const char *cfgini_cup_path(void)
+{
+    static char p[TD5_CFGINI_PATH_MAX]; static int done = 0;
+    if (!done) { td5_plat_ini_resolve_path(TD5RE_CUP_INI, p, sizeof p); done = 1; }
+    return p;
+}
+
+/* Canonical 10-action keyboard order (mirrors s_kb_bindings in
+ * td5_platform_win32.c: LEFT RIGHT ACCEL BRAKE HBRK HORN GUP GDN VIEW REAR). */
+static const char *const k_cfgini_kb_names[10] = {
+    "Left", "Right", "Accelerate", "Brake", "Handbrake",
+    "Horn", "GearUp", "GearDown", "ChangeView", "LookBack"
+};
+
+/* --- tiny one-shot INI text builder --- */
+typedef struct { char *buf; size_t cap; size_t len; int ok; } CfgIniBuf;
+
+static void cfgini_add(CfgIniBuf *w, const char *fmt, ...)
+    __attribute__((format(printf, 2, 3)));
+static void cfgini_add(CfgIniBuf *w, const char *fmt, ...)
+{
+    if (!w->ok || w->len >= w->cap) { w->ok = 0; return; }
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(w->buf + w->len, w->cap - w->len, fmt, ap);
+    va_end(ap);
+    if (n < 0 || (size_t)n >= w->cap - w->len) { w->ok = 0; w->len = w->cap; return; }
+    w->len += (size_t)n;
+}
+
+static int cfgini_flush(CfgIniBuf *w, const char *path)
+{
+    if (!w->ok) {
+        TD5_LOG_W(LOG_TAG, "cfgini_flush: text buffer overflow for %s", path);
+        return 0;
+    }
+    TD5_File *f = td5_plat_file_open(path, "wb");
+    if (!f) {
+        TD5_LOG_W(LOG_TAG, "cfgini_flush: cannot open %s for write", path);
+        return 0;
+    }
+    size_t wr = td5_plat_file_write(f, w->buf, w->len);
+    td5_plat_file_close(f);
+    /* Invalidate the profile cache so a later read sees these bytes. */
+    td5_plat_ini_flush(path);
+    return (wr == w->len) ? 1 : 0;
+}
+
+/* --- signed / unsigned readers that tolerate negatives + full uint32 ---
+ * (GetPrivateProfileInt clamps negative values to 0, so anything that can be
+ *  negative or exceed INT_MAX is parsed from the raw string instead.) */
+static int cfgini_get_i32(const char *file, const char *sec,
+                          const char *key, int fallback)
+{
+    char tmp[32];
+    if (td5_plat_ini_get_str(file, sec, key, "", tmp, sizeof tmp) <= 0) return fallback;
+    char *end = NULL;
+    long v = strtol(tmp, &end, 0);
+    return (end == tmp) ? fallback : (int)v;
+}
+static uint32_t cfgini_get_u32(const char *file, const char *sec,
+                               const char *key, uint32_t fallback)
+{
+    char tmp[32];
+    if (td5_plat_ini_get_str(file, sec, key, "", tmp, sizeof tmp) <= 0) return fallback;
+    char *end = NULL;
+    unsigned long v = strtoul(tmp, &end, 0);
+    return (end == tmp) ? fallback : (uint32_t)v;
+}
+
+/* Parse a comma/space separated list of small ints into a uint8_t array.
+ * Entries past the end of the text are left untouched (caller pre-fills). */
+static void cfgini_parse_u8_list(const char *s, uint8_t *out, int n)
+{
+    int i = 0;
+    const char *p = s;
+    while (i < n && p && *p) {
+        while (*p == ' ' || *p == ',' || *p == '\t') p++;
+        if (!*p) break;
+        char *end = NULL;
+        long v = strtol(p, &end, 0);
+        if (end == p) break;
+        out[i++] = (uint8_t)v;
+        p = end;
+    }
+}
+
+/* ----------------------------- input bindings ----------------------------- */
+
+static int cfgini_write_input(void)
+{
+    static char buf[8192];
+    CfgIniBuf w = { buf, sizeof buf, 0, 1 };
+    const uint8_t *p1kb = (const uint8_t *)s_p1_custom_bindings;
+    const uint8_t *p2kb = (const uint8_t *)s_p2_custom_bindings;
+
+    cfgini_add(&w, "; td5re_input.ini -- TD5RE controller + keyboard bindings.\r\n");
+    cfgini_add(&w, "; Replaces the binding data formerly locked inside Config.td5.\r\n");
+    cfgini_add(&w, "; Scancodes are DirectInput DIK_* codes (decimal or 0x hex).\r\n\r\n");
+
+    cfgini_add(&w, "[Devices]\r\n");
+    cfgini_add(&w, "; 0 = keyboard, >=1 = 1-based enumerated joystick index\r\n");
+    cfgini_add(&w, "Player1 = %u\r\n", (unsigned)s_p1_device_index);
+    cfgini_add(&w, "Player2 = %u\r\n\r\n", (unsigned)s_p2_device_index);
+
+    cfgini_add(&w, "[ForceFeedback]\r\n");
+    cfgini_add(&w, "; Raw force-feedback config dwords (Config.td5 +0x22..0x2D)\r\n");
+    cfgini_add(&w, "A = %d\r\nB = %d\r\nC = %d\r\nD = %d\r\n\r\n",
+               s_ff_config[0], s_ff_config[1], s_ff_config[2], s_ff_config[3]);
+
+    cfgini_add(&w, "[ControllerButtons]\r\n");
+    cfgini_add(&w, "; 18 raw joystick binding dwords [player*9 + slot]:\r\n");
+    cfgini_add(&w, ";   slot0 = active flag, slot1/2 = axis assignment, slot3..8 = button actions.\r\n");
+    for (int pl = 0; pl < 2; pl++)
+        for (int sl = 0; sl < 9; sl++)
+            cfgini_add(&w, "P%d_%d = %u\r\n", pl + 1, sl,
+                       (unsigned)s_controller_bindings[pl * 9 + sl]);
+    cfgini_add(&w, "\r\n");
+
+    cfgini_add(&w, "[KeyboardPlayer1]\r\n; DirectInput scancodes. 0 = unbound (keeps the built-in default).\r\n");
+    for (int i = 0; i < 10; i++)
+        cfgini_add(&w, "%s = %u\r\n", k_cfgini_kb_names[i], (unsigned)p1kb[i]);
+    cfgini_add(&w, "\r\n[KeyboardPlayer2]\r\n");
+    for (int i = 0; i < 10; i++)
+        cfgini_add(&w, "%s = %u\r\n", k_cfgini_kb_names[i], (unsigned)p2kb[i]);
+
+    return cfgini_flush(&w, cfgini_input_path());
+}
+
+static int cfgini_read_input(void)
+{
+    const char *f = cfgini_input_path();
+    if (!td5_plat_file_exists(f)) return 0;
+    uint8_t *p1kb = (uint8_t *)s_p1_custom_bindings;
+    uint8_t *p2kb = (uint8_t *)s_p2_custom_bindings;
+    char key[8];
+
+    s_p1_device_index = (uint32_t)td5_plat_ini_get_int(f, "Devices", "Player1", (int)s_p1_device_index);
+    s_p2_device_index = (uint32_t)td5_plat_ini_get_int(f, "Devices", "Player2", (int)s_p2_device_index);
+
+    s_ff_config[0] = cfgini_get_i32(f, "ForceFeedback", "A", s_ff_config[0]);
+    s_ff_config[1] = cfgini_get_i32(f, "ForceFeedback", "B", s_ff_config[1]);
+    s_ff_config[2] = cfgini_get_i32(f, "ForceFeedback", "C", s_ff_config[2]);
+    s_ff_config[3] = cfgini_get_i32(f, "ForceFeedback", "D", s_ff_config[3]);
+
+    for (int pl = 0; pl < 2; pl++)
+        for (int sl = 0; sl < 9; sl++) {
+            snprintf(key, sizeof key, "P%d_%d", pl + 1, sl);
+            s_controller_bindings[pl * 9 + sl] =
+                cfgini_get_u32(f, "ControllerButtons", key, s_controller_bindings[pl * 9 + sl]);
+        }
+
+    for (int i = 0; i < 10; i++) {
+        p1kb[i] = (uint8_t)td5_plat_ini_get_int(f, "KeyboardPlayer1", k_cfgini_kb_names[i], p1kb[i]);
+        p2kb[i] = (uint8_t)td5_plat_ini_get_int(f, "KeyboardPlayer2", k_cfgini_kb_names[i], p2kb[i]);
+    }
+
+    /* Mirror config_deserialize_from_buffer: push the loaded scancodes down to
+     * the live input layer so saved rebinds take effect in-race. */
+    td5_plat_input_set_keyboard_bindings(0, p1kb, 10);
+    td5_plat_input_set_keyboard_bindings(1, p2kb, 10);
+    return 1;
+}
+
+/* --------------------- high scores + unlock/progression -------------------- */
+
+static int cfgini_write_progress(void)
+{
+    static char buf[96 * 1024];
+    CfgIniBuf w = { buf, sizeof buf, 0, 1 };
+    const TD5_NpcGroup *groups = (const TD5_NpcGroup *)s_npc_group_table;
+
+    cfgini_add(&w, "; td5re_progress.ini -- TD5RE high scores + unlock/progression state.\r\n");
+    cfgini_add(&w, "; Replaces the Config.td5 high-score table, lock tables and cheat flags.\r\n\r\n");
+
+    cfgini_add(&w, "[Unlocks]\r\n");
+    cfgini_add(&w, "MaxUnlockedCar = %u\r\n", (unsigned)s_max_unlocked_car);
+    cfgini_add(&w, "AllCarsUnlocked = %u\r\n", (unsigned)s_all_cars_unlocked);
+    cfgini_add(&w, "CupTier = %u\r\n", (unsigned)(s_cup_tier & 0x07));
+    cfgini_add(&w, "; CarLocks: %d entries, 0 = unlocked, 1 = locked\r\n", TD5_CONFIG_NUM_CARS);
+    cfgini_add(&w, "CarLocks =");
+    for (int i = 0; i < TD5_CONFIG_NUM_CARS; i++)
+        cfgini_add(&w, "%s%u", i ? "," : " ", (unsigned)s_car_locks[i]);
+    cfgini_add(&w, "\r\n");
+    cfgini_add(&w, "; TrackLocks: %d entries, 1 = unlocked, 0 = locked (internal sense)\r\n", TD5_CONFIG_NUM_TRACKS);
+    cfgini_add(&w, "TrackLocks =");
+    for (int i = 0; i < TD5_CONFIG_NUM_TRACKS; i++)
+        cfgini_add(&w, "%s%u", i ? "," : " ", (unsigned)s_track_locks[i]);
+    cfgini_add(&w, "\r\n\r\n");
+
+    cfgini_add(&w, "[Cheats]\r\n; %d flags, 0/1 (only bit 0 is persisted)\r\nFlags =", TD5_CONFIG_NUM_CHEATS);
+    for (int i = 0; i < TD5_CONFIG_NUM_CHEATS; i++)
+        cfgini_add(&w, "%s%u", i ? "," : " ", (unsigned)(s_cheat_flags[i] & 1));
+    cfgini_add(&w, "\r\n\r\n");
+
+    cfgini_add(&w, "[Audio]\r\nMusicTrack = %u\r\n\r\n", (unsigned)s_music_track);
+
+    cfgini_add(&w, "; High scores: 26 tracks x 5 entries. Header selects the score column:\r\n");
+    cfgini_add(&w, ";   0=TIME(MM:SS.cc) 1=LAP 2=PTS(points) 4=TIME(MM:SS.mmm)\r\n");
+    cfgini_add(&w, "; Score = raw stored value (ticks @30fps for time types, points for PTS).\r\n\r\n");
+    for (int g = 0; g < TD5_CONFIG_NPC_GROUPS; g++) {
+        const TD5_NpcGroup *grp = &groups[g];
+        cfgini_add(&w, "[HighScores.Track%02d]\r\n", g);
+        cfgini_add(&w, "Header = %d\r\n", grp->header);
+        for (int e = 0; e < 5; e++) {
+            const TD5_NpcEntry *en = &grp->entries[e];
+            char nm[17];
+            memcpy(nm, en->name, 16);
+            nm[16] = '\0';
+            /* Defensively strip any control byte so it cannot break the INI. */
+            for (int c = 0; c < 16; c++) {
+                if ((unsigned char)nm[c] < 0x20) { nm[c] = '\0'; break; }
+            }
+            cfgini_add(&w, "Entry%d.Name = %s\r\n", e, nm);
+            cfgini_add(&w, "Entry%d.Score = %d\r\n", e, en->score);
+            cfgini_add(&w, "Entry%d.Car = %d\r\n", e, en->car_id);
+            cfgini_add(&w, "Entry%d.AvgSpeed = %d\r\n", e, en->avg_speed);
+            cfgini_add(&w, "Entry%d.TopSpeed = %d\r\n", e, en->top_speed);
+        }
+        cfgini_add(&w, "\r\n");
+    }
+
+    return cfgini_flush(&w, cfgini_progress_path());
+}
+
+static int cfgini_read_progress(void)
+{
+    const char *f = cfgini_progress_path();
+    if (!td5_plat_file_exists(f)) return 0;
+    char val[512];
+    char key[24];
+
+    s_max_unlocked_car  = (uint32_t)td5_plat_ini_get_int(f, "Unlocks", "MaxUnlockedCar", (int)s_max_unlocked_car);
+    s_all_cars_unlocked = (uint8_t)td5_plat_ini_get_int(f, "Unlocks", "AllCarsUnlocked", s_all_cars_unlocked);
+    s_cup_tier          = (uint32_t)(td5_plat_ini_get_int(f, "Unlocks", "CupTier", (int)s_cup_tier) & 0x07);
+
+    if (td5_plat_ini_get_str(f, "Unlocks", "CarLocks", "", val, sizeof val) > 0)
+        cfgini_parse_u8_list(val, s_car_locks, TD5_CONFIG_NUM_CARS);
+    if (td5_plat_ini_get_str(f, "Unlocks", "TrackLocks", "", val, sizeof val) > 0)
+        cfgini_parse_u8_list(val, s_track_locks, TD5_CONFIG_NUM_TRACKS);
+    if (td5_plat_ini_get_str(f, "Cheats", "Flags", "", val, sizeof val) > 0)
+        cfgini_parse_u8_list(val, s_cheat_flags, TD5_CONFIG_NUM_CHEATS);
+
+    s_music_track = (uint32_t)td5_plat_ini_get_int(f, "Audio", "MusicTrack", (int)s_music_track);
+
+    TD5_NpcGroup *groups = (TD5_NpcGroup *)s_npc_group_table;
+    for (int g = 0; g < TD5_CONFIG_NPC_GROUPS; g++) {
+        char sec[24];
+        snprintf(sec, sizeof sec, "HighScores.Track%02d", g);
+        TD5_NpcGroup *grp = &groups[g];
+        grp->header = cfgini_get_i32(f, sec, "Header", grp->header);
+        for (int e = 0; e < 5; e++) {
+            TD5_NpcEntry *en = &grp->entries[e];
+            snprintf(key, sizeof key, "Entry%d.Name", e);
+            if (td5_plat_ini_get_str(f, sec, key, "", val, sizeof val) > 0) {
+                size_t nlen = strlen(val);
+                if (nlen > 15) nlen = 15;       /* name field is 16B incl NUL */
+                memset(en->name, 0, 16);
+                memcpy(en->name, val, nlen);
+            }
+            snprintf(key, sizeof key, "Entry%d.Score", e);    en->score     = cfgini_get_i32(f, sec, key, en->score);
+            snprintf(key, sizeof key, "Entry%d.Car", e);      en->car_id    = cfgini_get_i32(f, sec, key, en->car_id);
+            snprintf(key, sizeof key, "Entry%d.AvgSpeed", e); en->avg_speed = cfgini_get_i32(f, sec, key, en->avg_speed);
+            snprintf(key, sizeof key, "Entry%d.TopSpeed", e); en->top_speed = cfgini_get_i32(f, sec, key, en->top_speed);
+        }
+    }
+    return 1;
+}
+
+/* ------------------------------- cup resume -------------------------------- */
+
+static int cfgini_write_cup(const char *path)
+{
+    static char buf[16384];
+    CfgIniBuf w = { buf, sizeof buf, 0, 1 };
+
+    cfgini_add(&w, "; td5re_cup.ini -- TD5RE \"Continue Cup\" resume state (replaces CupData.td5).\r\n");
+    cfgini_add(&w, "; The per-actor physics snapshot from the original CupData.td5 is intentionally\r\n");
+    cfgini_add(&w, "; NOT stored -- the next race re-initialises actors at its own grid.\r\n");
+    cfgini_add(&w, "; Delete this file (or set GameType = 0) to discard the saved cup.\r\n\r\n");
+
+    cfgini_add(&w, "[Cup]\r\n");
+    cfgini_add(&w, "GameType = %u\r\n", (unsigned)s_selected_game_type);
+    cfgini_add(&w, "RaceIndex = %u\r\n", (unsigned)s_race_within_series);
+    cfgini_add(&w, "NpcGroupIndex = %u\r\n", (unsigned)s_npc_group_index);
+    cfgini_add(&w, "TrackOpponentState = %u\r\n", (unsigned)s_track_opponent_state);
+    cfgini_add(&w, "RaceRuleVariant = %u\r\n", (unsigned)s_race_rule_variant);
+    cfgini_add(&w, "TimeTrial = %u\r\n", (unsigned)s_time_trial_enabled);
+    cfgini_add(&w, "Wanted = %u\r\n", (unsigned)s_wanted_enabled);
+    cfgini_add(&w, "Difficulty = %u\r\n", (unsigned)s_difficulty_tier);
+    cfgini_add(&w, "CheckpointMode = %u\r\n", (unsigned)s_checkpoint_mode);
+    cfgini_add(&w, "Traffic = %u\r\n", (unsigned)s_traffic_enabled);
+    cfgini_add(&w, "SpecialEncounter = %u\r\n", (unsigned)s_special_encounter);
+    cfgini_add(&w, "CircuitLaps = %u\r\n", (unsigned)s_circuit_lap_count);
+    cfgini_add(&w, "MastersScheduleBase = %u\r\n", (unsigned)s_masters_schedule_base);
+    cfgini_add(&w, "P1ScheduleIndex = %u\r\n", (unsigned)s_p1_cup_schedule_index);
+    cfgini_add(&w, "P2ScheduleIndex = %u\r\n", (unsigned)s_p2_cup_schedule_index);
+    cfgini_add(&w, "P1CupCompletion = %u\r\n", (unsigned)s_p1_cup_completion_bitmask);
+    cfgini_add(&w, "P2CupCompletion = %u\r\n", (unsigned)s_p2_cup_completion_bitmask);
+    cfgini_add(&w, "P1SelectedCup = %u\r\n", (unsigned)s_p1_selected_cup_id);
+    cfgini_add(&w, "MastersEncounterFlags = %u\r\n", (unsigned)s_masters_encounter_flags);
+    cfgini_add(&w, "P1MastersUnlock = %u\r\n", (unsigned)s_p1_masters_unlock_bitmask);
+    cfgini_add(&w, "P2MastersUnlock = %u\r\n", (unsigned)s_p2_masters_unlock_bitmask);
+    cfgini_add(&w, "P2CupLock = %u\r\n\r\n", (unsigned)s_p2_cup_lock_flag);
+
+    cfgini_add(&w, "[Cars]\r\n; Player + 5 AI car indices for the in-progress cup.\r\n");
+    cfgini_add(&w, "Player = %d\r\n", g_td5.car_index);
+    for (int i = 1; i <= 5; i++)
+        cfgini_add(&w, "AI%d = %d\r\n", i, g_td5.ai_car_indices[i]);
+    cfgini_add(&w, "\r\n");
+
+    cfgini_add(&w, "[Schedule]\r\n");
+    for (int i = 0; i < 0x1E; i++)
+        cfgini_add(&w, "S%02d = %u\r\n", i, (unsigned)s_race_schedule[i]);
+    cfgini_add(&w, "\r\n[Results]\r\n");
+    for (int i = 0; i < 0x1E; i++)
+        cfgini_add(&w, "R%02d = %u\r\n", i, (unsigned)s_race_results[i]);
+    cfgini_add(&w, "\r\n[SlotState]\r\n");
+    for (int i = 0; i < 6; i++)
+        cfgini_add(&w, "Slot%d = %u\r\n", i, (unsigned)s_slot_state[i]);
+
+    return cfgini_flush(&w, path);
+}
+
+static int cfgini_read_cup(const char *path)
+{
+    if (!td5_plat_file_exists(path)) return 0;
+    int gt = td5_plat_ini_get_int(path, "Cup", "GameType", 0);
+    if (gt <= 0) return 0;  /* no valid cup saved */
+
+    char key[8];
+    s_selected_game_type   = (uint32_t)gt;
+    s_race_within_series   = cfgini_get_u32(path, "Cup", "RaceIndex", 0);
+    s_npc_group_index      = cfgini_get_u32(path, "Cup", "NpcGroupIndex", 0);
+    s_track_opponent_state = cfgini_get_u32(path, "Cup", "TrackOpponentState", 0);
+    s_race_rule_variant    = cfgini_get_u32(path, "Cup", "RaceRuleVariant", 0);
+    s_time_trial_enabled   = cfgini_get_u32(path, "Cup", "TimeTrial", 0);
+    s_wanted_enabled       = cfgini_get_u32(path, "Cup", "Wanted", 0);
+    s_difficulty_tier      = cfgini_get_u32(path, "Cup", "Difficulty", 0);
+    s_checkpoint_mode      = cfgini_get_u32(path, "Cup", "CheckpointMode", 0);
+    s_traffic_enabled      = cfgini_get_u32(path, "Cup", "Traffic", 0);
+    s_special_encounter    = cfgini_get_u32(path, "Cup", "SpecialEncounter", 0);
+    s_circuit_lap_count    = cfgini_get_u32(path, "Cup", "CircuitLaps", 0);
+    s_masters_schedule_base       = cfgini_get_u32(path, "Cup", "MastersScheduleBase", 0);
+    s_p1_cup_schedule_index       = cfgini_get_u32(path, "Cup", "P1ScheduleIndex", 0);
+    s_p2_cup_schedule_index       = cfgini_get_u32(path, "Cup", "P2ScheduleIndex", 0);
+    s_p1_cup_completion_bitmask   = (uint16_t)cfgini_get_u32(path, "Cup", "P1CupCompletion", 0);
+    s_p2_cup_completion_bitmask   = (uint16_t)cfgini_get_u32(path, "Cup", "P2CupCompletion", 0);
+    s_p1_selected_cup_id          = (uint8_t)cfgini_get_u32(path, "Cup", "P1SelectedCup", 0);
+    s_masters_encounter_flags     = cfgini_get_u32(path, "Cup", "MastersEncounterFlags", 0);
+    s_p1_masters_unlock_bitmask   = cfgini_get_u32(path, "Cup", "P1MastersUnlock", 0);
+    s_p2_masters_unlock_bitmask   = cfgini_get_u32(path, "Cup", "P2MastersUnlock", 0);
+    s_p2_cup_lock_flag            = (uint8_t)cfgini_get_u32(path, "Cup", "P2CupLock", 0);
+
+    /* Car selections -> overlay so td5_save_sync_cup_to_game pushes them
+     * into g_td5 (matching the legacy CupData overlay behaviour). */
+    s_overlay_car_indices[0] = cfgini_get_i32(path, "Cars", "Player", g_td5.car_index);
+    for (int i = 1; i <= 5; i++) {
+        snprintf(key, sizeof key, "AI%d", i);
+        s_overlay_car_indices[i] = cfgini_get_i32(path, "Cars", key, g_td5.ai_car_indices[i]);
+    }
+    s_overlay_present = 1;
+
+    for (int i = 0; i < 0x1E; i++) {
+        snprintf(key, sizeof key, "S%02d", i);
+        s_race_schedule[i] = cfgini_get_u32(path, "Schedule", key, 0);
+        snprintf(key, sizeof key, "R%02d", i);
+        s_race_results[i] = cfgini_get_u32(path, "Results", key, 0);
+    }
+    for (int i = 0; i < 6; i++) {
+        snprintf(key, sizeof key, "Slot%d", i);
+        s_slot_state[i] = cfgini_get_u32(path, "SlotState", key, 0);
+    }
+
+    /* The actor snapshot is intentionally not persisted -- clear any stale
+     * in-memory copy so the next race starts from a clean grid. */
+    memset(s_actor_table, 0, sizeof s_actor_table);
+    return 1;
+}
+
+void td5_save_delete_cup_data(void)
+{
+    td5_plat_file_delete(cfgini_cup_path());
+    /* Also drop a not-yet-migrated legacy binary so it cannot resurrect. */
+    if (td5_plat_file_exists(TD5_CUPDATA_FILENAME))
+        td5_plat_file_delete(TD5_CUPDATA_FILENAME);
 }
 
 /* ========================================================================
@@ -1797,19 +2285,26 @@ int td5_save_apply_cup_unlocks(int game_type)
 
 int td5_save_test_cup_roundtrip(void)
 {
-    const char *test_path = "test_cup_roundtrip.td5";
+    /* Absolute path: the Win32 profile API resolves a *relative* INI name
+     * against C:\Windows, so cfgini_read_cup would never find a cwd-relative
+     * test file. Resolve next to the exe like the real cup INI. */
+    char test_path[TD5_CFGINI_PATH_MAX];
+    td5_plat_ini_resolve_path("test_cup_roundtrip.ini", test_path, sizeof test_path);
     int pass = 1;
 
     /* Seed g_td5 with a deterministic mix and pre-populate the actor
      * table's pointer slots with sentinel "dangling" addresses so we can
      * verify the post-load NULL scrub. */
-    const int saved_car      = g_td5.car_index;
+    const int      saved_car        = g_td5.car_index;
+    const uint32_t saved_game_type  = s_selected_game_type;
     const int saved_ai[6]    = {
         g_td5.ai_car_indices[0], g_td5.ai_car_indices[1],
         g_td5.ai_car_indices[2], g_td5.ai_car_indices[3],
         g_td5.ai_car_indices[4], g_td5.ai_car_indices[5],
     };
 
+    /* cfgini_write_cup only emits a continuable cup when GameType > 0. */
+    s_selected_game_type        = 1;   /* Championship */
     g_td5.car_index             = 5;
     g_td5.ai_car_indices[0]     = 0;   /* slot 0 mirror, not persisted */
     g_td5.ai_car_indices[1]     = 11;
@@ -1851,12 +2346,6 @@ int td5_save_test_cup_roundtrip(void)
         TD5_LOG_E(LOG_TAG, "test_cup_roundtrip: overlay not detected after load");
         pass = 0;
     }
-    if (s_cup_buf_size != TD5_CUPDATA_EXT_FILE_SIZE) {
-        TD5_LOG_E(LOG_TAG, "test_cup_roundtrip: size mismatch got=%u want=%u",
-                  (unsigned)s_cup_buf_size,
-                  (unsigned)TD5_CUPDATA_EXT_FILE_SIZE);
-        pass = 0;
-    }
 
     /* Push overlay -> g_td5 (sync_cup_to_game would also do this). */
     (void)td5_save_sync_cup_to_game(NULL);
@@ -1896,83 +2385,10 @@ int td5_save_test_cup_roundtrip(void)
         }
     }
 
-    /* Subtest 2: legacy-format compatibility. Synthesize a 12966-byte
-     * (no-overlay) CupData.td5 via direct file I/O — bypassing
-     * td5_save_write_cup_data because that always re-serializes the
-     * extended format. We re-seed cup_serialize_to_buffer, truncate
-     * the byte count + recompute CRC over the original payload only,
-     * encrypt, and write 12966 bytes directly. Then reload via the
-     * public path and verify s_overlay_present is cleared. */
-    {
-        const char *legacy_path = "test_cup_legacy.td5";
-
-        /* Re-seed g_td5 so a successful overlay-bearing write would be
-         * obviously different from a legacy load (which must NOT push
-         * overlay values). */
-        g_td5.car_index             = 9;
-        g_td5.ai_car_indices[1]     = 9;
-        g_td5.ai_car_indices[2]     = 9;
-        g_td5.ai_car_indices[3]     = 9;
-        g_td5.ai_car_indices[4]     = 9;
-        g_td5.ai_car_indices[5]     = 9;
-
-        cup_serialize_to_buffer();  /* writes 12998 with overlay + CRC */
-
-        /* Truncate to legacy size + recompute CRC over the original
-         * 12966-byte region only (mirrors what an original TD5_d3d.exe
-         * binary would have written). */
-        write_le32(s_cup_buf + 0x0C, TD5_CRC_PLACEHOLDER);
-        uint32_t legacy_crc = td5_save_crc32(s_cup_buf, TD5_CUPDATA_FILE_SIZE);
-        write_le32(s_cup_buf + 0x0C, legacy_crc);
-
-        /* Direct encrypted write of just the first 12966 bytes. */
-        uint8_t legacy_buf[TD5_CUPDATA_FILE_SIZE];
-        memcpy(legacy_buf, s_cup_buf, TD5_CUPDATA_FILE_SIZE);
-        td5_save_xor_encrypt(legacy_buf, TD5_CUPDATA_FILE_SIZE,
-                             TD5_CUPDATA_XOR_KEY);
-        TD5_File *lf = td5_plat_file_open(legacy_path, "wb");
-        size_t lwritten = lf
-            ? td5_plat_file_write(lf, legacy_buf, TD5_CUPDATA_FILE_SIZE)
-            : 0;
-        if (lf) td5_plat_file_close(lf);
-
-        if (lwritten != TD5_CUPDATA_FILE_SIZE) {
-            TD5_LOG_E(LOG_TAG,
-                      "test_cup_roundtrip[legacy]: direct write failed got=%u",
-                      (unsigned)lwritten);
-            pass = 0;
-        } else {
-            /* Wipe runtime, then load via the public path. We expect:
-             * load==1, size==12966, overlay==0. */
-            g_td5.car_index = -1;
-            for (int i = 0; i < 6; i++) g_td5.ai_car_indices[i] = -1;
-            memset(s_actor_table, 0, sizeof(s_actor_table));
-            s_overlay_present = 0;
-
-            if (!td5_save_load_cup_data(legacy_path)) {
-                TD5_LOG_E(LOG_TAG,
-                          "test_cup_roundtrip[legacy]: load failed (CRC?)");
-                pass = 0;
-            }
-            if (s_cup_buf_size != TD5_CUPDATA_FILE_SIZE) {
-                TD5_LOG_E(LOG_TAG,
-                          "test_cup_roundtrip[legacy]: size got=%u want=%u",
-                          (unsigned)s_cup_buf_size,
-                          (unsigned)TD5_CUPDATA_FILE_SIZE);
-                pass = 0;
-            }
-            if (s_overlay_present) {
-                TD5_LOG_E(LOG_TAG,
-                          "test_cup_roundtrip[legacy]: overlay falsely detected");
-                pass = 0;
-            }
-            TD5_LOG_I(LOG_TAG,
-                      "test_cup_roundtrip[legacy]: ok size=%u overlay=%d",
-                      (unsigned)s_cup_buf_size, s_overlay_present);
-        }
-
-        if (pass) remove(legacy_path);
-    }
+    /* (Subtest 2, the legacy 12966-byte binary CupData.td5 compatibility
+     * check, was removed when the binary cup format was retired in favour of
+     * td5re_cup.ini. Legacy import is exercised by the migration path in
+     * td5_save_load_cup_data instead.) */
 
     TD5_LOG_I(LOG_TAG, "test_cup_roundtrip: %s", pass ? "PASS" : "FAIL");
 
@@ -1984,6 +2400,7 @@ int td5_save_test_cup_roundtrip(void)
 
 restore:
     g_td5.car_index = saved_car;
+    s_selected_game_type = saved_game_type;
     for (int i = 0; i < 6; i++) g_td5.ai_car_indices[i] = saved_ai[i];
     memset(s_actor_table, 0, sizeof(s_actor_table));
 

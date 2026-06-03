@@ -2967,8 +2967,8 @@ static int frontend_validate_cup_checksum(void) {
  * ScreenCupWonDialog case 0. Port delegates to td5_plat_file_delete which
  * wraps DeleteFileA — semantically identical. */
 static void frontend_delete_cup_data(void) {
-    TD5_LOG_I(LOG_TAG, "frontend_delete_cup_data: removing CupData.td5");
-    td5_plat_file_delete("CupData.td5");
+    TD5_LOG_I(LOG_TAG, "frontend_delete_cup_data: removing td5re_cup.ini");
+    td5_save_delete_cup_data();
 }
 
 /**
@@ -6797,6 +6797,7 @@ int td5_frontend_init(void) {
         td5_save_set_speed_units(g_td5.ini.speed_units);
         s_display_camera_damping    = g_td5.ini.camera_damping;
         td5_save_set_camera_damping(g_td5.ini.camera_damping);
+        td5_save_set_display_mode(g_td5.ini.display_mode);
         s_sound_option_sfx_volume   = g_td5.ini.sfx_volume;
         s_sound_option_music_volume = g_td5.ini.music_volume;
         s_sound_option_sfx_mode     = g_td5.ini.sfx_mode;
@@ -9331,7 +9332,7 @@ static void Screen_ControllerBinding(void) {
             }
             TD5_LOG_I(LOG_TAG, "CtrlBind: joystick OK — saved bindings for player %d",
                       s_ctrl_player);
-            td5_save_write_config("Config.td5");
+            td5_save_write_config(NULL);  /* -> td5re_input.ini + td5re_progress.ini */
             s_anim_tick = 0;
             s_inner_state = 11;
         }
@@ -9461,7 +9462,7 @@ static void Screen_ControllerBinding(void) {
             }
             TD5_LOG_I(LOG_TAG, "CtrlBind: all 10 actions bound for player %d — saved",
                       s_ctrl_player);
-            td5_save_write_config("Config.td5");
+            td5_save_write_config(NULL);  /* -> td5re_input.ini + td5re_progress.ini */
             s_anim_tick = 0;
             s_inner_state = 27;  /* → slide-out */
         } else {

@@ -100,6 +100,43 @@ int td5_plat_file_exists(const char *path);
 /** Delete a file. Returns 0 on success. */
 int td5_plat_file_delete(const char *path);
 
+/** Rename/move a file (overwrites the destination). Returns 0 on success. */
+int td5_plat_file_rename(const char *from, const char *to);
+
+/* ------------------------------------------------------------------------
+ * Human-readable INI config (used by td5_save.c after Config.td5/CupData.td5
+ * were retired in favour of organized INI files: td5re_input.ini,
+ * td5re_progress.ini, td5re_cup.ini). Thin wrappers over the Win32
+ * GetPrivateProfile* / WritePrivateProfile* APIs so the rest of the port
+ * stays free of <windows.h>.
+ * ------------------------------------------------------------------------ */
+
+/** Resolve a bare filename to an absolute path next to the running exe
+ *  (same directory td5re.ini lives in). Falls back to the bare name. */
+void td5_plat_ini_resolve_path(const char *filename, char *out, size_t out_n);
+
+/** Read an integer key. Returns fallback if the key is absent. */
+int  td5_plat_ini_get_int(const char *file, const char *section,
+                          const char *key, int fallback);
+
+/** Read a string key into out (zero-terminated). Returns the length read. */
+int  td5_plat_ini_get_str(const char *file, const char *section,
+                          const char *key, const char *fallback,
+                          char *out, size_t out_n);
+
+/** Write an integer key (creates the file/section/key as needed). */
+void td5_plat_ini_set_int(const char *file, const char *section,
+                          const char *key, int value);
+
+/** Write a string key (creates the file/section/key as needed). */
+void td5_plat_ini_set_str(const char *file, const char *section,
+                          const char *key, const char *value);
+
+/** Flush the Win32 private-profile cache for a file. Call after rewriting an
+ *  INI through raw file I/O so a subsequent td5_plat_ini_get_* re-reads from
+ *  disk instead of returning a stale cached value. */
+void td5_plat_ini_flush(const char *file);
+
 /* ========================================================================
  * Memory
  * ======================================================================== */

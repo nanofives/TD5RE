@@ -208,6 +208,10 @@ typedef struct TD5_GlobalState {
         int  fog_enabled;
         int  speed_units;
         int  camera_damping;
+        /* Enumerated display-mode ordinal (DisplayOptions resolution row).
+         * Formerly persisted in Config.td5 (+0xBD); now a [Display] DisplayMode
+         * key in td5re.ini. The applied resolution still comes from Width/Height. */
+        int  display_mode;
         /* Audio */
         int  sfx_volume;
         int  music_volume;

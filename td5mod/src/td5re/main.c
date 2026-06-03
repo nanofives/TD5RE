@@ -223,6 +223,7 @@ void td5_ini_persist_options(void)
     td5_ini_write_int("Display", "Fogging",       g_td5.ini.fog_enabled);
     td5_ini_write_int("Display", "SpeedUnits",    g_td5.ini.speed_units);
     td5_ini_write_int("Display", "CameraDamping", g_td5.ini.camera_damping);
+    td5_ini_write_int("Display", "DisplayMode",   td5_save_get_display_mode());
 
     /* Audio */
     td5_ini_write_int("Audio", "SFXVolume",   g_td5.ini.sfx_volume);
@@ -279,6 +280,7 @@ static int td5_apply_cli_overrides(const char *cmdline,
         { "Fogging",              &g_td5.ini.fog_enabled },
         { "SpeedUnits",           &g_td5.ini.speed_units },
         { "CameraDamping",        &g_td5.ini.camera_damping },
+        { "DisplayMode",          &g_td5.ini.display_mode },
         /* Audio */
         { "SFXVolume",            &g_td5.ini.sfx_volume },
         { "MusicVolume",          &g_td5.ini.music_volume },
@@ -498,6 +500,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     g_td5.ini.fog_enabled    = td5_ini_int("Display", "Fogging", 1);
     g_td5.ini.speed_units    = td5_ini_int("Display", "SpeedUnits", 0);
     g_td5.ini.camera_damping = td5_ini_int("Display", "CameraDamping", 5);
+    g_td5.ini.display_mode   = td5_ini_int("Display", "DisplayMode", 0);
 
     /* Audio */
     g_td5.ini.sfx_volume    = td5_ini_int("Audio", "SFXVolume", 80);
