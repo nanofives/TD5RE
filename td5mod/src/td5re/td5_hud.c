@@ -3683,10 +3683,12 @@ void td5_hud_render_minimap(int actor_slot)
                  * view's player (was hardcoded to g_actor_slot_map[0], so panes
                  * 1..N drew their own car blue). */
                 dot_u0 = s_minimap_dot_atlas_u;          /* col 0: player (red) */
-            } else if (r < 6) {
-                dot_u0 = s_minimap_dot_atlas_u + 8.5f;  /* col 1: AI (blue) [@ 0x45D724] */
             } else {
-                dot_u0 = s_minimap_dot_atlas_u + 16.5f; /* col 2: other (teal) [@ 0x45D720] */
+                /* [PORT: N-way] every OTHER racer is blue. This loop only draws
+                 * racers (r < g_racer_count), so the legacy `r < 6 ? blue : teal`
+                 * split wrongly painted racer slots 6..15 teal in a big field.
+                 * Teal (col 2) is reserved for the traffic-dot loop below. */
+                dot_u0 = s_minimap_dot_atlas_u + 8.5f;  /* col 1: other racer (blue) [@ 0x45D724] */
             }
             hud_build_quad(
                 &map_quad,
