@@ -693,9 +693,9 @@ static void terrain_probe_trace_emit(int view, int actor_addr,
         norm_a_y, norm_b_y, norm_c_y,
         pitch_input, roll_input,
         /* diag: does terrain pitch reach orient[1] / stored pitch / cam-Y offset? */
-        (int)g_camOrientShort[view & 1][1],
-        g_camStoredPitch[view & 1],
-        g_camOrbitOffset[view & 1][1]);
+        (int)g_camOrientShort[view][1],
+        g_camStoredPitch[view],
+        g_camOrbitOffset[view][1]);
     fflush(s_terrain_probe_trace_fp);
 }
 
@@ -952,8 +952,8 @@ after_flyin:
          * Reset to the current sample on the first ticks of a race so a previous
          * race's residual (e.g. a stale spike from an OOB event) can't bleed
          * into the next race's camera. */
-        static int s_pin_prev[2] = {0,0}, s_rin_prev[2] = {0,0};
-        int vidx = view & 1;
+        static int s_pin_prev[TD5_MAX_VIEWPORTS] = {0}, s_rin_prev[TD5_MAX_VIEWPORTS] = {0};
+        int vidx = view;  /* [PORT: N-way] per-view camera state (was view & 1) */
         if ((unsigned)g_td5.simulation_tick_counter < 30u) {
             s_pin_prev[vidx] = pin;
             s_rin_prev[vidx] = rin;
@@ -1079,7 +1079,8 @@ after_flyin:
  * ======================================================================== */
 
 /* Per-view damping state. 1.0 = no clip. */
-static float g_camWallClipRatio[2] = { 1.0f, 1.0f };
+static float g_camWallClipRatio[TD5_MAX_VIEWPORTS] =
+    { 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f };
 
 /* Spans to check on each side of the chassis span. The chase camera sits
  * roughly 1500-2100 world units behind the car; 4 spans @ ~500-1000 units
@@ -1222,7 +1223,7 @@ static float td5_camera_raycast_to_wall(int32_t car_x, int32_t car_z,
 void td5_camera_finalize_chase_pos(TD5_Actor *actor_p, int view)
 {
     if (!actor_p) return;
-    int v = view & 1;
+    int v = view;  /* [PORT: N-way] per-view camera state (was view & 1) */
     uintptr_t actor = (uintptr_t)actor_p;
 
     int smoothed_h = (int)(g_camSmoothedHeight[v] + 0.5f);
@@ -1255,10 +1256,10 @@ void td5_camera_finalize_chase_pos(TD5_Actor *actor_p, int view)
      * vertical camera latency. Render-only: the camera never feeds the sim,
      * so this cannot change physics / AI / replay determinism. Toggle off
      * with TD5RE_SMOOTH_CAM=0 to A/B against the faithful behavior. */
-    static int      s_camY_init[2]     = {0, 0};
-    static uint32_t s_camY_lastTick[2] = {0, 0};
-    static int      s_camY_prev[2]     = {0, 0};
-    static int      s_camY_cur[2]      = {0, 0};
+    static int      s_camY_init[TD5_MAX_VIEWPORTS]     = {0};
+    static uint32_t s_camY_lastTick[TD5_MAX_VIEWPORTS] = {0};
+    static int      s_camY_prev[TD5_MAX_VIEWPORTS]     = {0};
+    static int      s_camY_cur[TD5_MAX_VIEWPORTS]      = {0};
     static int      s_smoothCam        = -1;
     if (s_smoothCam < 0) {
         const char *e = getenv("TD5RE_SMOOTH_CAM");
@@ -2453,7 +2454,7 @@ static const char *camera_mode_name_for_view(int view, int has_actor)
     if (!has_actor) return "debug";
     if (g_replay_mode) return "trackside";
 
-    switch (g_raceCameraPresetMode[view & 1]) {
+    switch (g_raceCameraPresetMode[view]) {
     case 5:
     case 6:
         return "bumper";
@@ -2565,7 +2566,7 @@ static void update_debug_track_camera(void)
     SetCameraWorldPosition(cam);
     OrientCameraTowardTarget(look, 0x400);
 }
-static unsigned int s_debug_camera_frame[2];
+static unsigned int s_debug_camera_frame[TD5_MAX_VIEWPORTS];
 
 static int resolve_view_actor_ptr(int view, int *out_actor)
 {
@@ -2592,7 +2593,7 @@ static int resolve_view_actor_ptr(int view, int *out_actor)
 
 static void update_debug_race_camera(int view)
 {
-    int v = (view & 1);
+    int v = view;  /* [PORT: N-way] per-view camera state (was view & 1) */
 
     update_debug_track_camera();
 
@@ -2700,21 +2701,21 @@ void td5_camera_set_preset(int pi)
 {
     s_active_preset = pi;
     memset(s_debug_camera_frame, 0, sizeof(s_debug_camera_frame));
-    s_flyin_preset_reloaded[0] = 0;
-    s_flyin_preset_reloaded[1] = 0;
-
-    /* Reset preset selection state for both views */
-    g_raceCameraPresetId[0]   = 0;
-    g_raceCameraPresetId[1]   = 0;
-    g_raceCameraPresetMode[0] = 0;
-    g_raceCameraPresetMode[1] = 0;
+    /* [PORT: N-way] reset preset / fly-in state for EVERY viewport (was 0/1). */
+    for (int rv = 0; rv < TD5_MAX_VIEWPORTS; rv++) {
+        s_flyin_preset_reloaded[rv] = 0;
+        g_raceCameraPresetId[rv]    = 0;
+        g_raceCameraPresetMode[rv]  = 0;
+    }
 
     /* Seed per-view chase-camera state from the spawned actors so the first
        UpdateChaseCamera frame starts with correct radius/height/orbit values
        rather than stale or zero-initialized garbage.  actor+0x208 is the
        display_angles base used by LoadCameraPresetForView (+2 = yaw). */
     if (g_actor_table_base) {
-        for (int v = 0; v < 2; v++) {
+        int views = (g_td5.viewport_count > 0) ? g_td5.viewport_count : 1;
+        if (views > TD5_MAX_VIEWPORTS) views = TD5_MAX_VIEWPORTS;
+        for (int v = 0; v < views; v++) {
             TD5_Actor *actor = td5_game_get_actor(g_actorSlotForView[v]);
 
             if (!actor) {
@@ -2737,8 +2738,8 @@ void td5_camera_set_rear_view(int view, int active)
     /* Rear view = 180° yaw offset (0x800 in 4096-unit circle).
      * Only applied in chase mode (presetMode 0); bumper/trackside
      * paths set their own g_camYawOffset. */
-    if (g_raceCameraPresetMode[view & 1] == 0) {
-        g_camYawOffset[view & 1] = active ? 0x800 : 0;
+    if (g_raceCameraPresetMode[view] == 0) {
+        g_camYawOffset[view] = active ? 0x800 : 0;
     }
 }
 
@@ -2750,7 +2751,7 @@ void td5_camera_update_trackside(TD5_Actor *a, int vi)
 void td5_camera_update_transition_state(int p, int vi)
 {
     TD5_Actor *actor = td5_game_get_actor(g_actorSlotForView[vi]);
-    int v = vi & 1;
+    int v = vi;  /* [PORT: N-way] per-view camera state (was vi & 1) */
 
     if (!actor && g_actor_table_base) {
         int slot = g_actorSlotForView[vi];
@@ -2814,6 +2815,13 @@ void td5_camera_update_transition_state(int p, int vi)
      * camera-state concern. */
     if (g_cameraTransitionActive > 0 && !s_flyin_preset_reloaded[v]) {
         UpdateRaceCameraTransitionState((int)actor, vi);
+        /* [PORT: N-way split] Re-pin THIS view's fly-in camera too. Like the
+         * chase path below, td5_camera_update_chase_all() leaves only the LAST
+         * view's camera in the active g_cameraPos/g_cameraBasis, so during the
+         * race-start countdown every pane would otherwise render from the last
+         * view's player. (UpdateRaceCameraTransitionState only advances the
+         * per-view fly-in state; it does not apply the camera.) */
+        td5_camera_finalize_chase_pos(actor, vi);
         return;
     }
 
@@ -2870,9 +2878,17 @@ void td5_camera_update_transition_state(int p, int vi)
             TD5_LOG_I(LOG_TAG, "transition view %d: path=bumper actor_slot=%d mode=%d",
                       vi, g_actorSlotForView[vi], mode);
             UpdateVehicleRelativeCamera((int)actor, vi);
+        } else {
+            /* [PORT: N-way split] Re-pin THIS view's chase camera into the
+             * active g_cameraPos/g_cameraBasis before the viewport renders.
+             * td5_camera_update_chase_all() runs once per sim-tick and leaves
+             * only the LAST view's camera active, so without this every
+             * split-screen pane would render from the last view's player.
+             * finalize_chase_pos only re-applies the already-computed per-view
+             * position + look-at (no orbit integration), so it is safe to call
+             * once per viewport each render frame. */
+            td5_camera_finalize_chase_pos(actor, vi);
         }
-        /* Chase camera (mode 0): updated per-sim-tick in
-         * td5_camera_update_chase_all() via UpdateChaseCamera. */
     }
 
     TD5_LOG_D(LOG_TAG,

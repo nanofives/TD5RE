@@ -2154,6 +2154,67 @@ void td5_hud_draw_status_text(int player_slot, int view_index)
  * mode and for the per-view layout table representation.
  * ======================================================================== */
 
+/* [PORT: N-way] Recompute the (global) minimap layout for one split-screen
+ * pane so the minimap can be drawn inside each viewport instead of once at a
+ * fixed full-screen position. Mirrors td5_hud_init_minimap_layout but uses the
+ * per-view scale + pane bounds. For a single full-screen view this reproduces
+ * the init values exactly. */
+static void hud_set_minimap_for_view(int v)
+{
+    TD5_HudViewLayout *vl = &s_view_layout[v];
+    float sx = vl->scale_x, sy = vl->scale_y;
+    s_minimap_width   = sx * 100.0f;
+    s_minimap_height  = sy * 100.0f;
+    s_minimap_dot_size = sx * 7.0f;
+    s_minimap_x = vl->vp_int_left + sx * 8.0f;
+    s_minimap_y = vl->vp_int_bottom - s_minimap_height - sy * 8.0f;
+    s_minimap_world_scale_x = sx * (1.0f / 1024.0f);
+    s_minimap_world_scale_y = sy * (1.0f / 1024.0f);
+    s_minimap_tile_width  = s_minimap_width;
+    s_minimap_tile_height = s_minimap_height;
+}
+
+/* [PORT: N-way] Draw thin divider lines between split-screen panes matching the
+ * viewport ladder grid. Replaces the legacy single-quad divider (which only
+ * handled the 2-view case and used degenerate coords). */
+static void hud_draw_split_dividers(void)
+{
+    if (g_td5.viewport_count <= 1) return;
+    int views = g_td5.viewport_count;
+    int cols, rows;
+    if (views == 2) {
+        if (g_split_screen_mode == 2) { cols = 2; rows = 1; }  /* left|right */
+        else                          { cols = 1; rows = 2; }  /* top/bottom */
+    } else if (views == 3) {
+        cols = 1; rows = 3;                                    /* 3 strips */
+    } else {
+        cols = (views <= 4) ? 2 : 3;
+        rows = (views + cols - 1) / cols;
+    }
+
+    TD5_AtlasEntry *colours = td5_asset_find_atlas_entry(NULL, "COLOURS");
+    if (!colours) return;
+    float cu = (float)colours->atlas_x + 0.5f;
+    float cv = (float)colours->atlas_y + 0.5f;
+    int   ctex = colours->texture_page;
+    float W = g_render_width_f, H = g_render_height_f;
+    const float t = 1.0f;   /* half-thickness (~2px) */
+    TD5_SpriteQuad q;
+
+    for (int c = 1; c < cols; c++) {
+        float x = (float)c * (W / (float)cols);
+        hud_build_quad(&q, 0, ctex, x - t, 0.0f, x + t, H,
+                       cu, cv, cu, cv, 0xFF000000, HUD_DEPTH2);
+        hud_submit_quad(&q);
+    }
+    for (int r = 1; r < rows; r++) {
+        float y = (float)r * (H / (float)rows);
+        hud_build_quad(&q, 0, ctex, 0.0f, y - t, W, y + t,
+                       cu, cv, cu, cv, 0xFF000000, HUD_DEPTH2);
+        hud_submit_quad(&q);
+    }
+}
+
 void td5_hud_render_overlays(float dt)
 {
     /* dt is normalized 30 Hz frame time from td5_game.c. */
@@ -2575,14 +2636,19 @@ void td5_hud_render_overlays(float dt)
         s_cur_view++;
     }
 
-    /* --- Minimap (single-player) ---
-     * Faithful: P2P only (g_track_type_mode == 0). Port enhancement: also call
-     * for circuit tracks when [Game] CircuitMinimap is on (default). The
-     * renderer itself re-checks the knob and picks the circuit ring-walk path. */
-    if (g_split_screen_mode == 0 && (*s_hud_flags[0] & TD5_HUD_UTURN_WARNING) &&
-        (g_track_type_mode == 0 || g_td5.ini.circuit_minimap)) {
-        int actor_slot = g_actor_slot_map[0];
-        td5_hud_render_minimap(actor_slot);
+    /* --- Minimap (per-view) [PORT: N-way + circuit enhancement] ---
+     * Drawn inside each pane via the per-view minimap layout. For a single view
+     * this is identical to the legacy full-screen minimap.
+     * Faithful: P2P only (g_track_type_mode == 0). Port enhancement: also draw
+     * on circuit tracks when [Game] CircuitMinimap is on (default) — the
+     * renderer re-checks the knob and picks the circuit ring-walk path.
+     * [REBASE MERGE: master's circuit-minimap knob + branch's per-view loop.] */
+    if (g_track_type_mode == 0 || g_td5.ini.circuit_minimap) {
+        for (int v = 0; v < s_view_count; v++) {
+            if (!(*s_hud_flags[v] & TD5_HUD_UTURN_WARNING)) continue;
+            hud_set_minimap_for_view(v);
+            td5_hud_render_minimap(g_actor_slot_map[v]);
+        }
     }
 
     /* Restore full-screen viewport and projection center.
@@ -2780,10 +2846,8 @@ void td5_hud_render_overlays(float dt)
         td5_render_radial_pulse(dt);
     }
 
-    /* Split-screen divider bars */
-    if (g_split_screen_mode != 0) {
-        hud_submit_quad(&s_divider_quad_h + (g_split_screen_mode - 1));
-    }
+    /* Split-screen divider bars [PORT: N-way grid] */
+    hud_draw_split_dividers();
 }
 
 /* ========================================================================
