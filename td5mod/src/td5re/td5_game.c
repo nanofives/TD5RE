@@ -1288,9 +1288,20 @@ int td5_game_init_race_session(void) {
         g_td5.circuit_lap_count = 4;
     }
     if (g_td5.split_screen_mode > 0) {
-        TD5_LOG_I(LOG_TAG, "InitRace: 2-player split-screen — disabling traffic/encounters");
-        g_td5.traffic_enabled = 0;
+        /* The original disables traffic + special encounters in split-screen.
+         * [PORT: N-way] Keep that faithful for legacy (<=6-racer) splits, but
+         * ALLOW traffic in a >6-racer field — it spawns at slot 16+ and behaves
+         * exactly as the original (position-relative). The special-encounter cop
+         * stays off either way (it's hardwired to the legacy slot-9 layout). */
+        int field = g_td5.num_human_players + g_td5.num_ai_opponents;
         g_td5.special_encounter_enabled = 0;
+        if (field <= TD5_LEGACY_RACE_SLOTS) {
+            g_td5.traffic_enabled = 0;
+            TD5_LOG_I(LOG_TAG, "InitRace: split-screen (<=6) — disabling traffic/encounters");
+        } else {
+            TD5_LOG_I(LOG_TAG,
+                      "InitRace: >6-racer split-screen — keeping traffic (encounters off)");
+        }
     }
 
     /* Resolve g_special_encounter (port mirror of g_specialEncounterType
@@ -1585,11 +1596,16 @@ int td5_game_init_race_session(void) {
      * subsystem is hardwired to the 6+6 layout — out of scope for big fields). */
     g_traffic_slot_base = (g_racer_count > TD5_LEGACY_RACE_SLOTS)
                           ? TD5_TRAFFIC_SLOT_BASE : TD5_LEGACY_RACE_SLOTS;
-    if (g_racer_count > TD5_LEGACY_RACE_SLOTS && g_td5.traffic_enabled) {
+    if (g_racer_count > TD5_LEGACY_RACE_SLOTS && g_td5.special_encounter_enabled) {
+        /* [PORT: N-way] The slot-9 special-encounter COP is hardwired to the
+         * legacy 6+6 layout; in a >6-racer field slot 9 is a normal racer, so
+         * disable just the special encounter. REGULAR traffic is kept and stays
+         * faithful — it spawns at g_traffic_slot_base (16) and behaves exactly
+         * as the original (position-relative). */
         TD5_LOG_I(LOG_TAG,
-                  "InitRace: >6-racer field (%d) -> forcing traffic OFF "
-                  "(traffic/cops unsupported with >6 racers)", g_racer_count);
-        g_td5.traffic_enabled = 0;
+                  "InitRace: >6-racer field (%d) -> special-encounter cop disabled "
+                  "(slot-9 layout); regular traffic kept faithful", g_racer_count);
+        g_td5.special_encounter_enabled = 0;
     }
 
     /* ---- Step 4: Load track runtime data ---- */
@@ -1870,12 +1886,17 @@ int td5_game_init_race_session(void) {
             }
         }
         int spawn_count;
-        if (g_td5.time_trial_enabled || g_racer_count > TD5_LEGACY_RACE_SLOTS) {
-            spawn_count = racer_count;              /* TT / big race: no traffic */
+        if (g_td5.time_trial_enabled) {
+            spawn_count = racer_count;                  /* time trial: no traffic */
+        } else if (g_td5.traffic_enabled) {
+            /* Traffic spawns at g_traffic_slot_base..+6 (6 legacy / 16 big field).
+             * In a big field the racer slots between racer_count and the base are
+             * inert decoration (disabled like dropped opponents). */
+            spawn_count = g_traffic_slot_base + TD5_MAX_TRAFFIC_SLOTS;
+        } else if (g_racer_count > TD5_LEGACY_RACE_SLOTS) {
+            spawn_count = racer_count;                  /* big field, no traffic */
         } else {
-            spawn_count = g_td5.traffic_enabled
-                          ? (TD5_LEGACY_RACE_SLOTS + TD5_MAX_TRAFFIC_SLOTS)  /* 12 */
-                          : TD5_LEGACY_RACE_SLOTS;                            /* 6  */
+            spawn_count = TD5_LEGACY_RACE_SLOTS;        /* legacy 6-slot grid */
         }
         TD5_LOG_I(LOG_TAG,
                   "InitRace: %d racers / %d actors (traffic_base=%d humans=%d opp=%d)",

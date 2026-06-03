@@ -1544,12 +1544,17 @@ void td5_ai_init_race_actor_runtime(void) {
     if (is_time_trial) {
         g_active_actor_count = (g_td5.split_screen_mode > 0) ? 2 : 1;
     } else if (g_traffic_slot_base > TD5_LEGACY_RACE_SLOTS) {
-        /* [PORT ENHANCEMENT] big split-screen field: racers only (humans+AI);
-         * traffic was forced off in InitRace, so no traffic actors exist. */
-        int total = g_td5.num_human_players + g_td5.num_ai_opponents;
-        if (total < 1) total = 1;
-        if (total > TD5_MAX_RACER_SLOTS) total = TD5_MAX_RACER_SLOTS;
-        g_active_actor_count = total;
+        /* [PORT ENHANCEMENT] big split-screen field. Traffic (if enabled) spawns
+         * at g_traffic_slot_base..+TD5_MAX_TRAFFIC_SLOTS, so the active-actor
+         * count must reach those slots; otherwise it's just the racers. */
+        if (has_traffic) {
+            g_active_actor_count = g_traffic_slot_base + TD5_MAX_TRAFFIC_SLOTS;
+        } else {
+            int total = g_td5.num_human_players + g_td5.num_ai_opponents;
+            if (total < 1) total = 1;
+            if (total > TD5_MAX_RACER_SLOTS) total = TD5_MAX_RACER_SLOTS;
+            g_active_actor_count = total;
+        }
     } else if (has_traffic) {
         g_active_actor_count = TD5_LEGACY_RACE_SLOTS + TD5_MAX_TRAFFIC_SLOTS;  /* 12 */
     } else {
