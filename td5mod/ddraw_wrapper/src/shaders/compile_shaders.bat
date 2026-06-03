@@ -50,4 +50,8 @@ echo   ps_arrow OK
 if errorlevel 1 (echo FAILED: ps_cursor && exit /b 1)
 echo   ps_cursor OK
 
+%FXC% %OPTS% /T ps_4_0 /E main /Fh ps_gauge_bytes.h /Vn g_ps_gauge ps_gauge.hlsl
+if errorlevel 1 (echo FAILED: ps_gauge && exit /b 1)
+echo   ps_gauge OK
+
 echo All shaders compiled successfully.

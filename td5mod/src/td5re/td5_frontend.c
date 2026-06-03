@@ -22,11 +22,13 @@
 #include "td5re.h"
 #include "td5_snk_strings.h"   /* byte-exact SNK_ labels baked from Language.dll */
 #include "td5_credits.h"       /* SNK_CreditsText array + dev mugshot map (Extras scroll) */
+#include "td5_vectorui.h"      /* public VectorUI surface (HUD reuses these primitives) */
 #include "../../ddraw_wrapper/src/wrapper.h"
 #include "../../ddraw_wrapper/src/shaders/ps_msdf_bytes.h"       /* g_ps_msdf bytecode */
 #include "../../ddraw_wrapper/src/shaders/ps_roundrect_bytes.h"  /* g_ps_roundrect bytecode */
 #include "../../ddraw_wrapper/src/shaders/ps_arrow_bytes.h"       /* g_ps_arrow bytecode */
 #include "../../ddraw_wrapper/src/shaders/ps_cursor_bytes.h"      /* g_ps_cursor bytecode */
+#include "../../ddraw_wrapper/src/shaders/ps_gauge_bytes.h"       /* g_ps_gauge bytecode */
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -607,6 +609,18 @@ static int s_msdf_font_page = -1;
 static ID3D11PixelShader *s_ps_msdf = NULL;
 #define SHARED_PAGE_FONT_MSDF 970   /* free page (frontend uses 888-955) */
 
+/* In-race HUD font SDF (VectorUI): a distance-field version of the original
+ * tpage5 FONT glyphs at the SAME 256x256 layout, so the HUD keeps its original
+ * typeface but renders crisp at any resolution via ps_msdf. Generated offline
+ * by re/tools/build_hud_font_sdf.py. -1 => HUD falls back to the bitmap font. */
+static int s_hudfont_sdf_page = -1;
+#define SHARED_PAGE_HUDFONT_SDF 982   /* free page (cursor MSDF is 981) */
+
+/* Pause-menu font SDF (VectorUI): distance-field version of the tpage12
+ * PAUSETXT glyphs at the same 256x256 layout. -1 => bitmap PAUSETXT fallback. */
+static int s_pausefont_sdf_page = -1;
+#define SHARED_PAGE_PAUSEFONT_SDF 983
+
 /* Procedural neon rounded-rect (frontend buttons/frames) — VectorUI only.
  * ps_roundrect evaluates an analytic rounded-rect SDF per pixel (crisp glow at
  * any resolution); s_rr_cb feeds it per-button geometry/colour via constant
@@ -626,6 +640,38 @@ typedef struct {
     float outer[4];     /* border gradient: outer-edge colour (darkest) */
     float fill[4];      /* interior rgb, a = interior alpha (0 = transparent) */
 } FE_RoundRectParams;   /* 96 bytes, matches cbuffer RoundRectParams */
+
+/* Procedural analog gauge dial (in-race HUD speedo + tach) — VectorUI only.
+ * ps_gauge evaluates an analytic dial SDF (face disc + outer ring + radial
+ * ticks + optional redline arc + pivot) per pixel; s_gauge_cb feeds geometry
+ * + colours via constant-buffer register b1. Owned here (with the other
+ * VectorUI shaders) and exposed to the HUD via td5_vui_gauge (td5_vectorui.h).
+ * Must match cbuffer GaugeParams in ps_gauge.hlsl. */
+static ID3D11PixelShader *s_ps_gauge = NULL;
+static ID3D11Buffer      *s_gauge_cb = NULL;
+typedef struct {
+    float quad_px[2];   /* quad size px (uv -> local px) */
+    float center[2];    /* dial center in local px */
+    float radius;       /* outer disc radius px */
+    float inner_r;      /* inner 3D circle radius px (0 => none) */
+    float sweep_start;  /* first tick angle (radians, screen CW) */
+    float sweep_end;    /* last tick angle (radians) */
+    float tick_count;   /* ticks along the sweep (>=2) */
+    float major_every;  /* every Nth tick is major */
+    float major_len;    /* major tick length px */
+    float minor_len;    /* minor tick length px */
+    float tick_out;     /* tick outer radius px */
+    float red_start;    /* red zone start (radians); ticks >= this are red */
+    float red_end;      /* red zone end (radians); <= start => none */
+    float pivot_px;     /* pivot dot radius px (0 => none) */
+    float rim_red_px;   /* red rim arc thickness px */
+    float pad0, pad1, pad2;
+    float face[4];      /* outer disc rgba (semi-transparent) */
+    float inner[4];     /* inner 3D disc rgba */
+    float tick[4];      /* white tick rgba */
+    float red[4];       /* red teeth + red rim rgba */
+    float pivot[4];     /* pivot hub rgba (a<=0 => none) */
+} FE_GaugeParams;       /* 160 bytes, matches cbuffer GaugeParams */
 /* When set, fe_draw_text preserves the input case instead of forcing upper-case.
  * BodyText.tga DOES contain lowercase glyphs (rows 6-9, ascii 0x61+), so mixed-case
  * strings (e.g. high-score player names "Frank"/"Jeffrey") render correctly. Scoped:
@@ -3818,6 +3864,70 @@ int td5_frontend_init_resources(void) {
                 TD5_LOG_W(LOG_TAG, "snkmouse_msdf.png not found -- cursor falls back to bitmap");
             }
         }
+
+        /* ---- Procedural analog gauge dial shader + constant buffer (VectorUI) ----
+         * Drives the in-race HUD speedometer dial + the added RPM tachometer via
+         * td5_vui_gauge. On failure both stay NULL and the HUD falls back to the
+         * baked GDI dial texture. */
+        if (!s_ps_gauge) {
+            HRESULT hr = ID3D11Device_CreatePixelShader(g_backend.device,
+                g_ps_gauge, sizeof(g_ps_gauge), NULL, &s_ps_gauge);
+            if (FAILED(hr)) {
+                s_ps_gauge = NULL;
+                TD5_LOG_W(LOG_TAG, "gauge shader create failed hr=0x%08lX", (unsigned long)hr);
+            }
+        }
+        if (s_ps_gauge && !s_gauge_cb) {
+            D3D11_BUFFER_DESC bd;
+            ZeroMemory(&bd, sizeof(bd));
+            bd.ByteWidth = sizeof(FE_GaugeParams);   /* 144, 16-aligned */
+            bd.Usage = D3D11_USAGE_DEFAULT;
+            bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+            HRESULT hr = ID3D11Device_CreateBuffer(g_backend.device, &bd, NULL, &s_gauge_cb);
+            if (FAILED(hr)) {
+                s_gauge_cb = NULL;
+                TD5_LOG_W(LOG_TAG, "gauge cbuffer create failed hr=0x%08lX", (unsigned long)hr);
+            } else {
+                TD5_LOG_I(LOG_TAG, "Procedural gauge dial shader ready (VectorUI)");
+            }
+        }
+
+        /* ---- In-race HUD font SDF (VectorUI) ----
+         * Distance-field version of the original tpage5 HUD font; rendered via
+         * ps_msdf so the HUD text keeps its typeface but stays crisp. On any
+         * failure s_hudfont_sdf_page stays -1 and the HUD uses the bitmap font. */
+        if (s_ps_msdf && s_hudfont_sdf_page < 0) {
+            void *pixels = NULL;
+            int mw = 0, mh = 0;
+            if (td5_asset_load_png_to_buffer("re/assets/static/hudfont_sdf.png",
+                                              TD5_COLORKEY_NONE, &pixels, &mw, &mh)) {
+                if (td5_plat_render_upload_texture(SHARED_PAGE_HUDFONT_SDF, pixels, mw, mh, 2)) {
+                    s_hudfont_sdf_page = SHARED_PAGE_HUDFONT_SDF;
+                    TD5_LOG_I(LOG_TAG, "HUD font SDF atlas loaded: page=%d %dx%d (VectorUI on)",
+                              s_hudfont_sdf_page, mw, mh);
+                }
+                free(pixels);
+            } else {
+                TD5_LOG_W(LOG_TAG, "hudfont_sdf.png not found -- HUD text falls back to bitmap font");
+            }
+        }
+
+        /* ---- Pause-menu font SDF (VectorUI) ---- */
+        if (s_ps_msdf && s_pausefont_sdf_page < 0) {
+            void *pixels = NULL;
+            int mw = 0, mh = 0;
+            if (td5_asset_load_png_to_buffer("re/assets/static/pausefont_sdf.png",
+                                              TD5_COLORKEY_NONE, &pixels, &mw, &mh)) {
+                if (td5_plat_render_upload_texture(SHARED_PAGE_PAUSEFONT_SDF, pixels, mw, mh, 2)) {
+                    s_pausefont_sdf_page = SHARED_PAGE_PAUSEFONT_SDF;
+                    TD5_LOG_I(LOG_TAG, "Pause font SDF atlas loaded: page=%d %dx%d (VectorUI on)",
+                              s_pausefont_sdf_page, mw, mh);
+                }
+                free(pixels);
+            } else {
+                TD5_LOG_W(LOG_TAG, "pausefont_sdf.png not found -- pause menu falls back to bitmap font");
+            }
+        }
     }
 
     /* ---- Font atlas (BodyText.tga) ----
@@ -6363,6 +6473,137 @@ static void fe_draw_quad(float x, float y, float w, float h,
         ID3D11DeviceContext_PSSetSamplers(g_backend.context, 0, 1, &g_backend.sampler_states[si]);
     }
     td5_plat_render_draw_tris(verts, 4, indices, 6);
+}
+
+/* ========================================================================
+ * Public VectorUI surface (td5_vectorui.h)
+ *
+ * Thin non-static wrappers so the in-race HUD (td5_hud.c) can reuse the exact
+ * same resolution-independent primitives the frontend menus use. All the GPU
+ * resources (shaders, atlases, constant buffers) are owned by this TU and live
+ * for the whole session, so these are safe to call during a race. Each is a
+ * no-op / returns 0 when the relevant shader/atlas is unavailable.
+ * ======================================================================== */
+
+int td5_vui_text_available(void) {
+    return (g_td5.ini.vector_ui && s_msdf_font_page >= 0 && s_ps_msdf != NULL);
+}
+int td5_vui_shapes_available(void) {
+    return (s_ps_roundrect != NULL && s_rr_cb != NULL && s_ps_arrow != NULL);
+}
+int td5_vui_gauge_available(void) {
+    return (s_ps_gauge != NULL && s_gauge_cb != NULL);
+}
+
+void td5_vui_text(float x, float y, const char *s, uint32_t color, float sx, float sy) {
+    fe_draw_text(x, y, s, color, sx, sy);
+}
+void td5_vui_text_centered(float cx, float y, const char *s, uint32_t color, float sx, float sy) {
+    fe_draw_text_centered(cx, y, s, color, sx, sy);
+}
+float td5_vui_text_width(const char *s, float sx) {
+    return fe_measure_text_width(s, sx);
+}
+
+void td5_vui_quad(float x, float y, float w, float h, uint32_t color, int tex_page,
+                  float u0, float v0, float u1, float v1) {
+    /* HUD callers expect alpha to blend. fe_draw_quad does NOT set a blend
+     * state, so without this the quad inherits whatever preset was last active
+     * (often OPAQUE_LINEAR after a gauge draw) and renders fully opaque. Use the
+     * HUD translucent preset (alpha_ref=1) so low-alpha fills (the minimap green
+     * panel, LED off-segments) blend instead of going solid. */
+    td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR_HUD);
+    fe_draw_quad(x, y, w, h, color, tex_page, u0, v0, u1, v1);
+    td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
+}
+
+/* HUD-font / pause-font SDF pages (-1 if unavailable). */
+int td5_vui_hudfont_page(void)   { return s_hudfont_sdf_page; }
+int td5_vui_pausefont_page(void) { return s_pausefont_sdf_page; }
+
+/* Draw a quad through the MSDF/SDF pixel shader (crisp distance-field glyph).
+ * u0..v1 are NORMALISED UVs into `page`. Falls back to a plain textured quad
+ * when the MSDF shader is unavailable. */
+void td5_vui_msdf_quad(float x, float y, float w, float h, uint32_t color, int page,
+                       float u0, float v0, float u1, float v1) {
+    if (page < 0 || !s_ps_msdf) {
+        fe_draw_quad(x, y, w, h, color, page, u0, v0, u1, v1);
+        return;
+    }
+    td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
+    td5_plat_render_set_ps_override((void *)s_ps_msdf, SAMP_LINEAR_CLAMP);
+    fe_draw_quad(x, y, w, h, color, page, u0, v0, u1, v1);
+    td5_plat_render_clear_ps_override();
+    td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
+}
+
+int td5_vui_roundrect(float x, float y, float w, float h,
+                      float r_large, float r_small, float border_side, float border_topbot,
+                      uint32_t mid, uint32_t inner, uint32_t outer,
+                      uint32_t fill, float fill_alpha) {
+    return fe_draw_roundrect(x, y, w, h, r_large, r_small, border_side, border_topbot,
+                             mid, inner, outer, fill, fill_alpha);
+}
+
+int td5_vui_arrow(float x, float y, float w, float h, int dir_right, uint32_t color) {
+    return fe_draw_arrow_proc(x, y, w, h, dir_right, color);
+}
+
+void td5_vui_gauge(const TD5_VuiGauge *g) {
+    if (!g || !s_ps_gauge || !s_gauge_cb || !g_backend.context) return;
+
+    const float DEG2RAD = 3.14159265358979323846f / 180.0f;
+    const float m   = g->radius * 0.06f + 2.0f; /* AA margin + rim headroom (px) */
+    float box = (g->radius + m) * 2.0f;
+    float x0  = g->cx - g->radius - m;
+    float y0  = g->cy - g->radius - m;
+
+#define VUI_ARGB4(dst, argb) do {                                   \
+        (dst)[0] = (((argb) >> 16) & 0xFF) / 255.0f;                \
+        (dst)[1] = (((argb) >>  8) & 0xFF) / 255.0f;                \
+        (dst)[2] = ( (argb)        & 0xFF) / 255.0f;                \
+        (dst)[3] = (((argb) >> 24) & 0xFF) / 255.0f;                \
+    } while (0)
+
+    FE_GaugeParams gp;
+    memset(&gp, 0, sizeof(gp));
+    gp.quad_px[0] = box;  gp.quad_px[1] = box;
+    gp.center[0]  = g->radius + m;  gp.center[1] = g->radius + m;
+    gp.radius      = g->radius;
+    gp.inner_r     = g->inner_radius;
+    gp.sweep_start = g->sweep_start_deg * DEG2RAD;
+    gp.sweep_end   = g->sweep_end_deg   * DEG2RAD;
+    gp.tick_count  = (float)g->tick_count;
+    gp.major_every = (float)g->major_every;
+    gp.major_len   = g->major_len_px;
+    gp.minor_len   = g->minor_len_px;
+    gp.tick_out    = g->tick_out;
+    if (g->redline_end_deg > g->redline_start_deg) {
+        gp.red_start = g->redline_start_deg * DEG2RAD;
+        gp.red_end   = g->redline_end_deg   * DEG2RAD;
+    } else {
+        gp.red_start = 0.0f;  gp.red_end = 0.0f;   /* no red zone */
+    }
+    gp.pivot_px   = g->pivot_px;
+    gp.rim_red_px = g->rim_red_px;
+    VUI_ARGB4(gp.face,  g->face_color);
+    VUI_ARGB4(gp.inner, g->inner_color);
+    VUI_ARGB4(gp.tick,  g->tick_color);
+    VUI_ARGB4(gp.red,   g->redline_color);
+    VUI_ARGB4(gp.pivot, g->pivot_color);
+#undef VUI_ARGB4
+
+    ID3D11DeviceContext_UpdateSubresource(g_backend.context,
+        (ID3D11Resource *)s_gauge_cb, 0, NULL, &gp, 0, 0);
+    ID3D11DeviceContext_PSSetConstantBuffers(g_backend.context, 1, 1, &s_gauge_cb);
+    /* HUD translucent preset (alpha_ref=1) so the semi-transparent dial face and
+     * the anti-aliased ring/tick/redline edges all blend (the 0x80 cutoff of the
+     * plain TRANSLUCENT preset would punch out low-alpha pixels). */
+    td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR_HUD);
+    td5_plat_render_set_ps_override((void *)s_ps_gauge, SAMP_LINEAR_CLAMP);
+    fe_draw_quad(x0, y0, box, box, 0xFFFFFFFF, s_white_tex_page, 0.0f, 0.0f, 1.0f, 1.0f);
+    td5_plat_render_clear_ps_override();
+    td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
 }
 
 /* ========================================================================
